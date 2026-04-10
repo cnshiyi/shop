@@ -5,6 +5,7 @@ import time
 from collections import OrderedDict
 from datetime import datetime
 from decimal import Decimal
+from html import escape
 
 import httpx
 from aiogram import Bot
@@ -179,13 +180,18 @@ def _get_product(product_id: int):
 
 # ── 通知 ──────────────────────────────────────────────────────────────────
 
-async def _notify_user(user_id: int, text: str, reply_markup=None):
+async def _notify_user(user_id: int, text: str, reply_markup=None, parse_mode: str | None = None):
     if _bot is None:
         return
     try:
         user = await _get_user(user_id)
         if user:
-            await _bot.send_message(chat_id=user.tg_user_id, text=text, reply_markup=reply_markup)
+            await _bot.send_message(
+                chat_id=user.tg_user_id,
+                text=text,
+                reply_markup=reply_markup,
+                parse_mode=parse_mode,
+            )
     except Exception as e:
         logger.error('通知用户失败 user_id=%s: %s', user_id, e)
 
@@ -247,6 +253,32 @@ async def _process_payment(transfer: dict) -> bool:
     return False
 
 
+async def _get_fee_text(tx_hash: str) -> str:
+    try:
+        headers = {'accept': 'application/json', 'content-type': 'application/json'}
+        api_key = await get_config('trongrid_api_key', '')
+        if api_key:
+            headers['TRON-PRO-API-KEY'] = api_key
+        async with httpx.AsyncClient(timeout=10) as client:
+            resp = await client.post(
+                f'{TRONGRID_BASE_URL}/wallet/gettransactioninfobyid',
+                json={'value': tx_hash},
+                headers=headers,
+            )
+            resp.raise_for_status()
+            info = resp.json() or {}
+        receipt = info.get('receipt', {}) or {}
+        fee_sun = int(info.get('fee', 0) or 0)
+        net_fee_sun = int(receipt.get('net_fee', 0) or 0)
+        energy_fee_sun = int(receipt.get('energy_fee', 0) or 0)
+        net_usage = int(receipt.get('net_usage', 0) or 0)
+        energy_usage = int(receipt.get('energy_usage_total', 0) or 0)
+        fee_trx = (Decimal(fee_sun) / Decimal('1000000')).normalize() if fee_sun else Decimal('0')
+        return f'{fee_trx} TRX; {net_usage} 带宽; {energy_usage} 能量'
+    except Exception:
+        return '0 TRX; 0 带宽; 0 能量'
+
+
 # ── 监控通知 ──────────────────────────────────────────────────────────────
 
 async def _process_monitor_notification(transfer: dict, monitors: list[dict]):
@@ -268,7 +300,7 @@ async def _process_monitor_notification(transfer: dict, monitors: list[dict]):
             continue
 
         remark = mon.get('remark') or '(无备注)'
-        fee_text = transfer.get('fee_text', '未知')
+        fee_text = transfer.get('fee_text') or await _get_fee_text(tx_hash)
 
         # 控制台日志：仅命中有格式化的详情
         logger.info(
@@ -290,18 +322,18 @@ async def _process_monitor_notification(transfer: dict, monitors: list[dict]):
 
         # Telegram 通知卡片
         text = (
-            f'🟢 收入{currency} 提醒  +{fmt_amount(amount)} {currency}\n\n'
-            f'🏷️ 地址备注: {remark}\n\n'
-            f'💸 付款地址: {from_addr}\n'
-            f'📥 收款地址: {to_addr}\n'
-            f'🕒 交易时间: {tx_time}\n'
-            f'💰 交易金额: +{fmt_amount(amount)} {currency}\n'
-            f'👛 USDT余额: {fmt_amount(user.balance)} USDT\n'
-            f'🪙 TRX余额: {fmt_amount(user.balance_trx)} TRX\n'
-            f'⛽ 转账消耗: {fee_text}\n\n'
-            f'📈 今日收入: {fmt_amount(amount)} {currency}\n'
+            f'🟢 收入{currency} 提醒  +<code>{escape(fmt_amount(amount))} {escape(currency)}</code>\n\n'
+            f'🏷️ 地址备注: {escape(remark)}\n\n'
+            f'💸 付款地址: <code>{escape(from_addr)}</code>\n'
+            f'📥 收款地址: <code>{escape(to_addr)}</code>\n'
+            f'🕒 交易时间: <code>{escape(tx_time)}</code>\n'
+            f'💰 交易金额: <code>+{escape(fmt_amount(amount))} {escape(currency)}</code>\n'
+            f'👛 USDT余额: {escape(fmt_amount(user.balance))} USDT\n'
+            f'🪙 TRX余额: {escape(fmt_amount(user.balance_trx))} TRX\n'
+            f'⛽ 转账消耗: <code>{escape(fee_text)}</code>\n\n'
+            f'📈 今日收入: {escape(fmt_amount(amount))} {escape(currency)}\n'
             f'📉 今日支出: 0 USDT\n'
-            f'💹 今日利润: {fmt_amount(amount)} {currency}'
+            f'💹 今日利润: {escape(fmt_amount(amount))} {escape(currency)}'
         )
 
         _cache_tx_detail(tx_hash, {
@@ -310,7 +342,7 @@ async def _process_monitor_notification(transfer: dict, monitors: list[dict]):
             'currency': currency, 'tx_hash': tx_hash,
             'raw': transfer.get('raw_tx', ''), 'fee_text': fee_text,
         })
-        await _notify_user(mon['user_id'], text, reply_markup=_build_tx_detail_keyboard(tx_hash))
+        await _notify_user(mon['user_id'], text, reply_markup=_build_tx_detail_keyboard(tx_hash), parse_mode='HTML')
 
 
 # ── 摘要日志 ──────────────────────────────────────────────────────────────
