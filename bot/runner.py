@@ -1,29 +1,24 @@
 import asyncio
 import logging
+import os
 
-from aiogram import Bot, Dispatcher
-from aiogram.filters import CommandStart
-from aiogram.types import Message
+os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'shop.settings')
 
-from .config import BOT_TOKEN
+import django
+django.setup()
+
+from bot.config import BOT_TOKEN
+from bot.handlers import create_dispatcher_and_register
 
 logger = logging.getLogger(__name__)
-
-
-async def cmd_start(message: Message):
-    await message.answer('Django Bot 已启动。')
 
 
 async def run_bot():
     if not BOT_TOKEN:
         logger.warning('未配置 BOT_TOKEN，跳过机器人启动')
         return
-
-    bot = Bot(token=BOT_TOKEN)
-    dp = Dispatcher()
-    dp.message.register(cmd_start, CommandStart())
-
-    logger.info('Telegram Bot 已启动')
+    bot, dp = create_dispatcher_and_register()
+    logger.info('Telegram Bot 已启动 (aiogram)')
     await bot.delete_webhook(drop_pending_updates=True)
     await dp.start_polling(bot)
 
