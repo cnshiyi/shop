@@ -12,11 +12,12 @@ def main_menu():
 
 def profile_menu():
     kb = InlineKeyboardBuilder()
-    kb.row(InlineKeyboardButton(text='📋 我的订单', callback_data='profile:orders'))
-    kb.row(InlineKeyboardButton(text='💰 充值余额', callback_data='profile:recharge'))
-    kb.row(InlineKeyboardButton(text='📜 充值记录', callback_data='profile:recharges'))
-    kb.row(InlineKeyboardButton(text='🔍 地址监控', callback_data='profile:monitors'))
-    kb.row(InlineKeyboardButton(text='🔙 返回主菜单', callback_data='profile:back'))
+    kb.button(text='📋 我的订单', callback_data='profile:orders')
+    kb.button(text='💰 充值余额', callback_data='profile:recharge')
+    kb.button(text='📜 充值记录', callback_data='profile:recharges')
+    kb.button(text='🔍 地址监控', callback_data='profile:monitors')
+    kb.button(text='🔙 返回主菜单', callback_data='profile:back')
+    kb.adjust(2, 2, 1)
     return kb.as_markup()
 
 
