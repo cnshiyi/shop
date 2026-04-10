@@ -7,8 +7,10 @@ os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'shop.settings')
 import django
 django.setup()
 
+from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from bot.config import BOT_TOKEN
 from bot.handlers import create_dispatcher_and_register
+from tron.scanner import scan_block, set_bot
 
 logger = logging.getLogger(__name__)
 
@@ -17,7 +19,16 @@ async def run_bot():
     if not BOT_TOKEN:
         logger.warning('未配置 BOT_TOKEN，跳过机器人启动')
         return
+
     bot, dp = create_dispatcher_and_register()
+    set_bot(bot)
+
+    # TRON 扫块器
+    scheduler = AsyncIOScheduler()
+    scheduler.add_job(scan_block, 'interval', seconds=2, id='tron_scanner', max_instances=1)
+    scheduler.start()
+    logger.info('TRON 扫块器已启动 (每2秒)')
+
     logger.info('Telegram Bot 已启动 (aiogram)')
     await bot.delete_webhook(drop_pending_updates=True)
     await dp.start_polling(bot)

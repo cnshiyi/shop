@@ -402,6 +402,31 @@ def register_handlers(dp: Dispatcher):
         await callback.message.edit_text('🔍 地址监控', reply_markup=monitor_menu())
         await callback.answer()
 
+    # --- tx detail ---
+    @dp.callback_query(F.data.startswith('mon:txdetail:'))
+    async def cb_tx_detail(callback: CallbackQuery):
+        from tron.scanner import get_tx_detail
+        tx_hash = callback.data.split(':')[2]
+        detail = get_tx_detail(tx_hash)
+        if not detail:
+            await callback.answer('交易详情已过期', show_alert=True)
+            return
+        text = (
+            f'🔍 交易详情\n\n'
+            f'交易哈希: {detail["tx_hash"]}\n'
+            f'币种: {detail["currency"]}\n'
+            f'金额: {detail["amount"]} {detail["currency"]}\n'
+            f'付款地址: {detail["from"]}\n'
+            f'收款地址: {detail["to"]}\n'
+            f'时间: {detail["time"]}\n'
+        )
+        if detail.get("remark"):
+            text += f'备注: {detail["remark"]}\n'
+        if detail.get("fee_text"):
+            text += f'手续费: {detail["fee_text"]}\n'
+        await callback.message.edit_text(text)
+        await callback.answer()
+
     # --- noop ---
     @dp.callback_query(F.data == 'noop')
     async def cb_noop(callback: CallbackQuery):
