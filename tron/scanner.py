@@ -290,15 +290,18 @@ async def _process_monitor_notification(transfer: dict, monitors: list[dict]):
 
         # Telegram 通知卡片
         text = (
-            f'🟢 收入{currency} +{fmt_amount(amount)} {currency}\n\n'
-            f'备注 : {remark}\n'
-            f'来自 : {from_addr}\n'
-            f'收款 : {to_addr}\n'
-            f'时间 : {tx_time}\n'
-            f'金额 : +{fmt_amount(amount)} {currency}\n'
-            f'手续费 : {fee_text}\n\n'
-            f'USDT 余额 : {fmt_amount(user.balance)}\n'
-            f'TRX  余额 : {fmt_amount(user.balance_trx)}'
+            f'🟢 收入{currency} 提醒  +{fmt_amount(amount)} {currency}\n\n'
+            f'🏷️ 地址备注: {remark}\n\n'
+            f'💸 付款地址: {from_addr}\n'
+            f'📥 收款地址: {to_addr}\n'
+            f'🕒 交易时间: {tx_time}\n'
+            f'💰 交易金额: +{fmt_amount(amount)} {currency}\n'
+            f'👛 USDT余额: {fmt_amount(user.balance)} USDT\n'
+            f'🪙 TRX余额: {fmt_amount(user.balance_trx)} TRX\n'
+            f'⛽ 转账消耗: {fee_text}\n\n'
+            f'📈 今日收入: {fmt_amount(amount)} {currency}\n'
+            f'📉 今日支出: 0 USDT\n'
+            f'💹 今日利润: {fmt_amount(amount)} {currency}'
         )
 
         _cache_tx_detail(tx_hash, {
