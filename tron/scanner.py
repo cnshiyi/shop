@@ -20,35 +20,49 @@ from users.models import TelegramUser
 
 logger = logging.getLogger(__name__)
 
-# 已处理区块缓存
+# ── 配置 ──────────────────────────────────────────────────────────────────
+
+USDT_CONTRACT = os.getenv('USDT_CONTRACT', 'TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t')
+TRONGRID_BASE_URL = os.getenv('TRONGRID_BASE_URL', 'https://api.trongrid.io')
+SCANNER_VERBOSE = os.getenv('SCANNER_VERBOSE', '0') == '1'
+
+# ── 内部状态 ──────────────────────────────────────────────────────────────
+
 _processed_blocks: OrderedDict[str, bool] = OrderedDict()
 MAX_CACHE = 200
 
-# 监控缓存
 _monitor_cache: dict[str, list] = {}
 _monitor_cache_time: float = 0
 _MONITOR_CACHE_TTL = 60
 
-# 扫块摘要
 _last_scan_summary_at: float = 0
 _SCAN_SUMMARY_INTERVAL = 600
 _scan_stats = {'blocks': 0, 'transactions': 0, 'transfers': 0, 'payments': 0, 'monitor_hits': 0}
 
-# 交易详情缓存（给回调按钮用）
 _recent_tx_details: OrderedDict[str, dict] = OrderedDict()
 MAX_TX_DETAIL_CACHE = 500
 
-# 全局 Bot 引用，由 run.py 设置
 _bot: Bot | None = None
 
-USDT_CONTRACT = os.getenv('USDT_CONTRACT', 'TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t')
-TRONGRID_BASE_URL = os.getenv('TRONGRID_BASE_URL', 'https://api.trongrid.io')
 
+# ── 公开接口 ──────────────────────────────────────────────────────────────
 
 def set_bot(bot: Bot):
     global _bot
     _bot = bot
 
+
+def get_tx_detail(tx_hash: str) -> dict | None:
+    return _recent_tx_details.get(tx_hash)
+
+
+def reload_config():
+    """热重载扫描器配置（由外部调用）。"""
+    global SCANNER_VERBOSE
+    SCANNER_VERBOSE = os.getenv('SCANNER_VERBOSE', '0') == '1'
+
+
+# ── 内部辅助 ──────────────────────────────────────────────────────────────
 
 def _receive_address() -> str:
     from core.models import SiteConfig
@@ -60,16 +74,10 @@ def _trongrid_api_key() -> str:
     return SiteConfig.get('trongrid_api_key', '')
 
 
-# ── helpers ──────────────────────────────────────────────────────────────
-
 def _cache_tx_detail(tx_hash: str, detail: dict):
     _recent_tx_details[tx_hash] = detail
     if len(_recent_tx_details) > MAX_TX_DETAIL_CACHE:
         _recent_tx_details.popitem(last=False)
-
-
-def get_tx_detail(tx_hash: str) -> dict | None:
-    return _recent_tx_details.get(tx_hash)
 
 
 def _build_tx_detail_keyboard(tx_hash: str) -> InlineKeyboardMarkup:
@@ -85,6 +93,16 @@ def fmt_amount(value) -> str:
     if '.' in text:
         text = text.rstrip('0').rstrip('.')
     return text or '0'
+
+
+def _now_str() -> str:
+    return datetime.now().strftime('%H:%M:%S')
+
+
+def _short_addr(addr: str) -> str:
+    if len(addr) > 14:
+        return f'{addr[:6]}...{addr[-4:]}'
+    return addr
 
 
 # ── DB access (sync → async) ────────────────────────────────────────────
@@ -116,8 +134,8 @@ def _get_pending_recharges(currency: str):
 
 @sync_to_async
 def _confirm_order_paid(order_id: int, tx_hash: str):
-    from asgiref.sync import sync_to_async as s2a
-    with __import__('django.db').db.transaction.atomic():
+    from django.db import transaction
+    with transaction.atomic():
         order = Order.objects.select_for_update().get(id=order_id)
         if order.status != 'pending':
             return None
@@ -125,7 +143,6 @@ def _confirm_order_paid(order_id: int, tx_hash: str):
         order.tx_hash = tx_hash
         order.paid_at = timezone.now()
         order.save(update_fields=['status', 'tx_hash', 'paid_at', 'updated_at'])
-        # 扣库存 + 发货
         product = order.product
         if product.stock != -1:
             product.stock -= order.quantity
@@ -146,7 +163,6 @@ def _confirm_recharge(recharge_id: int, tx_hash: str):
         rc.tx_hash = tx_hash
         rc.completed_at = timezone.now()
         rc.save(update_fields=['status', 'tx_hash', 'completed_at', 'updated_at'])
-        # 加余额
         user = TelegramUser.objects.select_for_update().get(id=rc.user_id)
         field = 'balance_trx' if rc.currency == 'TRX' else 'balance'
         setattr(user, field, getattr(user, field) + rc.amount)
@@ -164,7 +180,7 @@ def _get_product(product_id: int):
     return Product.objects.filter(id=product_id).first()
 
 
-# ── notification ─────────────────────────────────────────────────────────
+# ── 通知 ──────────────────────────────────────────────────────────────────
 
 async def _notify_user(user_id: int, text: str, reply_markup=None):
     if _bot is None:
@@ -196,7 +212,7 @@ async def _deliver_product(user_id: int, product, quantity: int = 1):
         logger.error('发货失败 user_id=%s: %s', user_id, e)
 
 
-# ── payment matching ─────────────────────────────────────────────────────
+# ── 支付匹配 ──────────────────────────────────────────────────────────────
 
 async def _process_payment(transfer: dict) -> bool:
     amount = transfer['amount']
@@ -208,7 +224,10 @@ async def _process_payment(transfer: dict) -> bool:
         if order.pay_amount == amount:
             confirmed = await _confirm_order_paid(order.id, tx_hash)
             if confirmed:
-                logger.info('订单匹配成功: order_no=%s currency=%s amount=%s tx=%s', confirmed.order_no, currency, fmt_amount(amount), tx_hash)
+                logger.info(
+                    '💰 订单匹配 → %s  %s %s  tx=%s',
+                    confirmed.order_no, fmt_amount(amount), currency, tx_hash,
+                )
                 product = await _get_product(confirmed.product_id)
                 if product:
                     await _deliver_product(confirmed.user_id, product, confirmed.quantity)
@@ -221,14 +240,17 @@ async def _process_payment(transfer: dict) -> bool:
         if rc.pay_amount == amount:
             confirmed = await _confirm_recharge(rc.id, tx_hash)
             if confirmed:
-                logger.info('充值匹配成功: recharge_id=%s user_id=%s currency=%s amount=%s tx=%s', confirmed.id, confirmed.user_id, currency, fmt_amount(amount), tx_hash)
+                logger.info(
+                    '💰 充值匹配 → user#%s  %s %s  tx=%s',
+                    confirmed.user_id, fmt_amount(amount), currency, tx_hash,
+                )
                 await _notify_user(rc.user_id, f'✅ 充值成功！\n金额: {fmt_amount(rc.amount)} {currency}\n余额已更新。')
                 return True
             return False
     return False
 
 
-# ── monitor notification ─────────────────────────────────────────────────
+# ── 监控通知 ──────────────────────────────────────────────────────────────
 
 async def _process_monitor_notification(transfer: dict, monitors: list):
     amount = transfer['amount']
@@ -242,27 +264,44 @@ async def _process_monitor_notification(transfer: dict, monitors: list):
         threshold = monitor.usdt_threshold if currency == 'USDT' else monitor.trx_threshold
         if threshold and amount < threshold:
             continue
+
+        _scan_stats['monitor_hits'] += 1
         user = await _get_user(monitor.user_id)
         if not user:
             continue
-        remark = monitor.remark or ''
-        income = fmt_amount(amount if currency == 'USDT' else Decimal('0'))
-        expense = fmt_amount(Decimal('0'))
+
+        remark = monitor.remark or '(无备注)'
         fee_text = transfer.get('fee_text', '未知')
 
+        # 控制台日志：仅命中有格式化的详情
+        logger.info(
+            '\n'
+            '  ┌─ 监控命中 ─────────────────────────────\n'
+            '  │ 地址备注 : %s\n'
+            '  │ 监控地址 : %s\n'
+            '  │ 付款方   : %s\n'
+            '  │ 交易时间 : %s\n'
+            '  │ 币种     : %s\n'
+            '  │ 金额     : +%s %s\n'
+            '  │ 手续费   : %s\n'
+            '  │ TX Hash  : %s\n'
+            '  └────────────────────────────────────────',
+            remark, to_addr, _short_addr(from_addr),
+            tx_time, currency, fmt_amount(amount), currency,
+            fee_text, tx_hash,
+        )
+
+        # Telegram 通知卡片
         text = (
-            f'🟢收入{currency} 提醒 +{fmt_amount(amount)} {currency}\n\n'
-            f'地址备注: {remark}\n\n'
-            f'付款地址: {from_addr}\n'
-            f'收款地址: {to_addr}\n'
-            f'交易时间: {tx_time}\n'
-            f'交易金额: +{fmt_amount(amount)} {currency}\n'
-            f'USDT余额: {fmt_amount(user.balance)} USDT\n'
-            f'TRX余额: {fmt_amount(user.balance_trx)} TRX\n'
-            f'转账消耗: {fee_text}\n\n'
-            f'今日收入: {income} USDT\n'
-            f'今日支出: {expense} USDT\n'
-            f'今日利润: {income} USDT'
+            f'🟢 收入{currency} +{fmt_amount(amount)} {currency}\n\n'
+            f'备注 : {remark}\n'
+            f'来自 : {from_addr}\n'
+            f'收款 : {to_addr}\n'
+            f'时间 : {tx_time}\n'
+            f'金额 : +{fmt_amount(amount)} {currency}\n'
+            f'手续费 : {fee_text}\n\n'
+            f'USDT 余额 : {fmt_amount(user.balance)}\n'
+            f'TRX  余额 : {fmt_amount(user.balance_trx)}'
         )
 
         _cache_tx_detail(tx_hash, {
@@ -274,24 +313,26 @@ async def _process_monitor_notification(transfer: dict, monitors: list):
         await _notify_user(monitor.user_id, text, reply_markup=_build_tx_detail_keyboard(tx_hash))
 
 
-# ── summary logging ──────────────────────────────────────────────────────
+# ── 摘要日志 ──────────────────────────────────────────────────────────────
 
 async def _log_scan_summary(force: bool = False):
     global _last_scan_summary_at
     now = time.time()
     if not force and now - _last_scan_summary_at < _SCAN_SUMMARY_INTERVAL:
         return
-    logger.info(
-        '扫块摘要(10分钟): blocks=%s, txs=%s, transfers=%s, payments=%s, monitor_hits=%s',
-        _scan_stats['blocks'], _scan_stats['transactions'],
-        _scan_stats['transfers'], _scan_stats['payments'], _scan_stats['monitor_hits'],
-    )
+    s = _scan_stats
+    if s['blocks'] > 0:
+        logger.info(
+            '📊 10min: %d 块 | %d tx | %d 转账 | %d 支付 | %d 监控',
+            s['blocks'], s['transactions'], s['transfers'],
+            s['payments'], s['monitor_hits'],
+        )
     _last_scan_summary_at = now
     for key in _scan_stats:
         _scan_stats[key] = 0
 
 
-# ── main scan ─────────────────────────────────────────────────────────────
+# ── 主扫描循环 ─────────────────────────────────────────────────────────────
 
 async def scan_block():
     try:
@@ -317,10 +358,16 @@ async def scan_block():
 
         transactions = block_data.get('transactions', [])
         _scan_stats['transactions'] += len(transactions)
+
+        # 静默模式：只打印时间和区块号
+        if SCANNER_VERBOSE:
+            logger.info('[scan] %s block=%s txs=%d', _now_str(), block_id[:16], len(transactions))
+
         if not transactions:
             await _log_scan_summary()
             return
 
+        # 刷新监控缓存
         global _monitor_cache, _monitor_cache_time
         if time.time() - _monitor_cache_time > _MONITOR_CACHE_TTL:
             _monitor_cache = await _get_active_monitor_addresses()
@@ -337,20 +384,15 @@ async def scan_block():
 
             _scan_stats['transfers'] += 1
             to_addr = transfer['to']
-            logger.info(
-                '检测到转账: currency=%s amount=%s from=%s to=%s tx=%s raw_tx=%s',
-                transfer['currency'], fmt_amount(transfer['amount']),
-                transfer['from'], to_addr, transfer['tx_hash'],
-                json.dumps(tx, ensure_ascii=False),
-            )
 
+            # 支付匹配
             if receive_address and to_addr == receive_address:
                 matched = await _process_payment(transfer)
                 if matched:
                     _scan_stats['payments'] += 1
 
+            # 监控通知（有格式化详情日志）
             if to_addr in _monitor_cache:
-                _scan_stats['monitor_hits'] += len(_monitor_cache[to_addr])
                 await _process_monitor_notification(transfer, _monitor_cache[to_addr])
 
         await _log_scan_summary()
