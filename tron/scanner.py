@@ -37,6 +37,7 @@ _SCAN_SUMMARY_INTERVAL = 600
 _scan_stats = {'blocks': 0, 'transactions': 0, 'transfers': 0, 'payments': 0, 'monitor_hits': 0}
 
 _recent_tx_details: OrderedDict[str, dict] = OrderedDict()
+_recent_tx_keys: OrderedDict[str, str] = OrderedDict()
 MAX_TX_DETAIL_CACHE = 500
 
 _bot: Bot | None = None
@@ -49,7 +50,8 @@ def set_bot(bot: Bot):
     _bot = bot
 
 
-def get_tx_detail(tx_hash: str) -> dict | None:
+def get_tx_detail(detail_key: str) -> dict | None:
+    tx_hash = _recent_tx_keys.get(detail_key, detail_key)
     return _recent_tx_details.get(tx_hash)
 
 
@@ -73,14 +75,20 @@ def _trongrid_api_key() -> str:
 
 
 def _cache_tx_detail(tx_hash: str, detail: dict):
+    detail_key = tx_hash[:16]
     _recent_tx_details[tx_hash] = detail
+    _recent_tx_keys[detail_key] = tx_hash
     if len(_recent_tx_details) > MAX_TX_DETAIL_CACHE:
-        _recent_tx_details.popitem(last=False)
+        old_tx_hash, _ = _recent_tx_details.popitem(last=False)
+        old_keys = [key for key, value in _recent_tx_keys.items() if value == old_tx_hash]
+        for key in old_keys:
+            _recent_tx_keys.pop(key, None)
 
 
 def _build_tx_detail_keyboard(tx_hash: str) -> InlineKeyboardMarkup:
+    detail_key = tx_hash[:16]
     return InlineKeyboardMarkup(
-        inline_keyboard=[[InlineKeyboardButton(text='查看交易详情', callback_data=f'mon:txdetail:{tx_hash}')]]
+        inline_keyboard=[[InlineKeyboardButton(text='查看交易详情', callback_data=f'mon:txd:{detail_key}')]]
     )
 
 

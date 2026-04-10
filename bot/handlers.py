@@ -464,11 +464,11 @@ def register_handlers(dp: Dispatcher):
         await callback.message.edit_text('🔍 地址监控', reply_markup=monitor_menu())
         await callback.answer()
 
-    @dp.callback_query(F.data.startswith('mon:txdetail:'))
+    @dp.callback_query(F.data.startswith('mon:txd:'))
     async def cb_tx_detail(callback: CallbackQuery):
         from tron.scanner import get_tx_detail
-        tx_hash = callback.data.split(':')[2]
-        detail = get_tx_detail(tx_hash)
+        detail_key = callback.data.split(':')[2]
+        detail = get_tx_detail(detail_key)
         if not detail:
             await callback.answer('交易详情已过期', show_alert=True)
             return
