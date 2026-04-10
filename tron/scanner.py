@@ -32,7 +32,7 @@ SCANNER_VERBOSE = os.getenv('SCANNER_VERBOSE', '0') == '1'
 _processed_blocks: OrderedDict[str, bool] = OrderedDict()
 MAX_CACHE = 200
 
-_last_scan_summary_at: float = 0
+_last_scan_summary_at: float = time.time()
 _SCAN_SUMMARY_INTERVAL = 600
 _scan_stats = {'blocks': 0, 'transactions': 0, 'transfers': 0, 'payments': 0, 'monitor_hits': 0}
 
