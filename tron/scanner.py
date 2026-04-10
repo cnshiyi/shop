@@ -15,7 +15,7 @@ from django.utils import timezone
 from monitors.models import AddressMonitor
 from payments.models import Recharge
 from shopbiz.models import Order, Product
-from tron.monitor_cache import get_monitor_addresses, maybe_sync, init_monitor_cache
+from tron.cache import get_monitor_addresses, get_config, maybe_sync_monitors, init_monitor_cache
 from tron.parser import parse_usdt_transfer, parse_trx_transfer
 from users.models import TelegramUser
 
@@ -62,6 +62,7 @@ def reload_config():
 # ── 内部辅助 ──────────────────────────────────────────────────────────────
 
 def _receive_address() -> str:
+    # 同步降级：直接查数据库（scanner 热路径中，配置缓存在 Redis 层处理）
     from core.models import SiteConfig
     return SiteConfig.get('receive_address', '')
 
@@ -325,7 +326,7 @@ async def _log_scan_summary(force: bool = False):
 async def scan_block():
     try:
         headers = {'accept': 'application/json', 'content-type': 'application/json'}
-        api_key = _trongrid_api_key()
+        api_key = await get_config('trongrid_api_key', '')
         if api_key:
             headers['TRON-PRO-API-KEY'] = api_key
 
@@ -356,10 +357,10 @@ async def scan_block():
             return
 
         # 定时同步 Redis 缓存
-        await maybe_sync()
+        await maybe_sync_monitors()
         monitor_cache = await get_monitor_addresses()
 
-        receive_address = _receive_address()
+        receive_address = await get_config('receive_address', '')
 
         for tx in transactions:
             transfer = parse_usdt_transfer(tx, USDT_CONTRACT)
