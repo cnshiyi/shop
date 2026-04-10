@@ -18,7 +18,7 @@ from bot.keyboards import (
     monitor_detail as kb_monitor_detail, monitor_threshold_currency,
     recharge_currency_menu, product_list, quantity_keyboard,
     pay_method_keyboard, order_list as kb_order_list,
-    recharge_list as kb_recharge_list,
+    recharge_list as kb_recharge_list, profile_menu,
 )
 from bot.services import (
     add_monitor, create_address_order, buy_with_balance, create_recharge,
@@ -77,7 +77,7 @@ class _NotInState:
         return True  # 由 aiogram 内部的 StateFilter 机制处理
 
 
-MENU_BUTTONS = {'🛒 购买商品', '📋 我的订单', '💰 充值余额', '📜 充值记录', '🔍 地址监控', '👤 个人中心'}
+MENU_BUTTONS = {'🛒 购买商品', '👤 个人中心'}
 
 
 def register_handlers(dp: Dispatcher):
@@ -196,35 +196,47 @@ def register_handlers(dp: Dispatcher):
             text_out, kb = _products_page(products, 1, total)
             await message.answer(text_out, reply_markup=kb)
 
-        elif text == '📋 我的订单':
-            orders, total = await list_orders(user.id)
-            text_out, kb = _orders_page(orders, 1, total)
-            await message.answer(text_out, reply_markup=kb)
-
-        elif text == '💰 充值余额':
-            await state.clear()
-            await message.answer('💰 请选择充值币种：', reply_markup=recharge_currency_menu())
-
-        elif text == '📜 充值记录':
-            recharges, total = await list_recharges(user.id)
-            text_out, kb = _recharges_page(recharges, 1, total)
-            await message.answer(text_out, reply_markup=kb)
-
-        elif text == '🔍 地址监控':
-            await message.answer('🔍 地址监控', reply_markup=monitor_menu())
-
         elif text == '👤 个人中心':
             await message.answer(
                 f'👤 个人中心\n用户ID: {user.tg_user_id}\n用户名: @{user.username or "无"}\n'
-                f'💵 USDT 余额: {fmt_amount(user.balance)}\n🪙 TRX 余额: {fmt_amount(user.balance_trx)}',
-                reply_markup=main_menu(),
+                f'💵 USDT 余额: {fmt_amount(user.balance)}\n🪙 TRX 余额: {fmt_amount(user.balance_trx)}\n\n'
+                f'请选择要进入的功能：',
+                reply_markup=profile_menu(),
             )
 
-    # ══════════════════════════════════════════════════════════════════════
-    # 商品回调
-    # ══════════════════════════════════════════════════════════════════════
+    @dp.callback_query(F.data == 'profile:orders')
+    async def cb_profile_orders(callback: CallbackQuery):
+        user = await get_or_create_user(callback.from_user.id, callback.from_user.username, callback.from_user.first_name)
+        orders, total = await list_orders(user.id)
+        text_out, kb = _orders_page(orders, 1, total)
+        await callback.message.edit_text(text_out, reply_markup=kb)
+        await callback.answer()
 
-    @dp.callback_query(F.data.startswith('product:'))
+    @dp.callback_query(F.data == 'profile:recharge')
+    async def cb_profile_recharge(callback: CallbackQuery, state: FSMContext):
+        await state.clear()
+        await callback.message.edit_text('💰 请选择充值币种：', reply_markup=recharge_currency_menu())
+        await callback.answer()
+
+    @dp.callback_query(F.data == 'profile:recharges')
+    async def cb_profile_recharges(callback: CallbackQuery):
+        user = await get_or_create_user(callback.from_user.id, callback.from_user.username, callback.from_user.first_name)
+        recharges, total = await list_recharges(user.id)
+        text_out, kb = _recharges_page(recharges, 1, total)
+        await callback.message.edit_text(text_out, reply_markup=kb)
+        await callback.answer()
+
+    @dp.callback_query(F.data == 'profile:monitors')
+    async def cb_profile_monitors(callback: CallbackQuery, state: FSMContext):
+        await state.clear()
+        await callback.message.edit_text('🔍 地址监控', reply_markup=monitor_menu())
+        await callback.answer()
+
+    @dp.callback_query(F.data == 'profile:back')
+    async def cb_profile_back(callback: CallbackQuery):
+        await callback.message.edit_text('已返回主菜单，请使用底部按钮继续操作。')
+        await callback.answer()
+
     async def cb_product_detail(callback: CallbackQuery):
         product = await get_product(int(callback.data.split(':')[1]))
         if not product:

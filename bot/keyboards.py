@@ -1,18 +1,23 @@
-from aiogram.types import InlineKeyboardButton, Message
+from aiogram.types import InlineKeyboardButton
 from aiogram.utils.keyboard import InlineKeyboardBuilder, ReplyKeyboardBuilder
-from aiogram.utils.keyboard import InlineKeyboardBuilder
 
 
 def main_menu():
     kb = ReplyKeyboardBuilder()
     kb.button(text='🛒 购买商品')
-    kb.button(text='📋 我的订单')
-    kb.button(text='💰 充值余额')
-    kb.button(text='📜 充值记录')
-    kb.button(text='🔍 地址监控')
     kb.button(text='👤 个人中心')
-    kb.adjust(2, 2, 2)
+    kb.adjust(2)
     return kb.as_markup(resize_keyboard=True)
+
+
+def profile_menu():
+    kb = InlineKeyboardBuilder()
+    kb.row(InlineKeyboardButton(text='📋 我的订单', callback_data='profile:orders'))
+    kb.row(InlineKeyboardButton(text='💰 充值余额', callback_data='profile:recharge'))
+    kb.row(InlineKeyboardButton(text='📜 充值记录', callback_data='profile:recharges'))
+    kb.row(InlineKeyboardButton(text='🔍 地址监控', callback_data='profile:monitors'))
+    kb.row(InlineKeyboardButton(text='🔙 返回主菜单', callback_data='profile:back'))
+    return kb.as_markup()
 
 
 def monitor_menu():
