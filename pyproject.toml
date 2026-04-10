@@ -10,4 +10,5 @@ dependencies = [
     "httpx>=0.27",
     "base58>=2.1",
     "apscheduler>=3.10",
+    "redis>=5.0",
 ]

@@ -15,6 +15,7 @@ from django.utils import timezone
 from monitors.models import AddressMonitor
 from payments.models import Recharge
 from shopbiz.models import Order, Product
+from tron.monitor_cache import get_monitor_addresses, maybe_sync, init_monitor_cache
 from tron.parser import parse_usdt_transfer, parse_trx_transfer
 from users.models import TelegramUser
 
@@ -30,10 +31,6 @@ SCANNER_VERBOSE = os.getenv('SCANNER_VERBOSE', '0') == '1'
 
 _processed_blocks: OrderedDict[str, bool] = OrderedDict()
 MAX_CACHE = 200
-
-_monitor_cache: dict[str, list] = {}
-_monitor_cache_time: float = 0
-_MONITOR_CACHE_TTL = 60
 
 _last_scan_summary_at: float = 0
 _SCAN_SUMMARY_INTERVAL = 600
@@ -106,15 +103,6 @@ def _short_addr(addr: str) -> str:
 
 
 # ── DB access (sync → async) ────────────────────────────────────────────
-
-@sync_to_async
-def _get_active_monitor_addresses():
-    qs = AddressMonitor.objects.filter(is_active=True).select_related('user')
-    result: dict[str, list] = {}
-    for mon in qs:
-        result.setdefault(mon.address, []).append(mon)
-    return result
-
 
 @sync_to_async
 def _get_pending_address_orders(currency: str):
@@ -252,7 +240,7 @@ async def _process_payment(transfer: dict) -> bool:
 
 # ── 监控通知 ──────────────────────────────────────────────────────────────
 
-async def _process_monitor_notification(transfer: dict, monitors: list):
+async def _process_monitor_notification(transfer: dict, monitors: list[dict]):
     amount = transfer['amount']
     currency = transfer['currency']
     from_addr = transfer['from']
@@ -260,17 +248,17 @@ async def _process_monitor_notification(transfer: dict, monitors: list):
     tx_hash = transfer['tx_hash']
     tx_time = transfer.get('timestamp') or datetime.now().strftime('%Y-%m-%d %H:%M:%S')
 
-    for monitor in monitors:
-        threshold = monitor.usdt_threshold if currency == 'USDT' else monitor.trx_threshold
+    for mon in monitors:
+        threshold = Decimal(mon.get('usdt_threshold', '1') if currency == 'USDT' else mon.get('trx_threshold', '1'))
         if threshold and amount < threshold:
             continue
 
         _scan_stats['monitor_hits'] += 1
-        user = await _get_user(monitor.user_id)
+        user = await _get_user(mon['user_id'])
         if not user:
             continue
 
-        remark = monitor.remark or '(无备注)'
+        remark = mon.get('remark') or '(无备注)'
         fee_text = transfer.get('fee_text', '未知')
 
         # 控制台日志：仅命中有格式化的详情
@@ -310,7 +298,7 @@ async def _process_monitor_notification(transfer: dict, monitors: list):
             'currency': currency, 'tx_hash': tx_hash,
             'raw': transfer.get('raw_tx', ''), 'fee_text': fee_text,
         })
-        await _notify_user(monitor.user_id, text, reply_markup=_build_tx_detail_keyboard(tx_hash))
+        await _notify_user(mon['user_id'], text, reply_markup=_build_tx_detail_keyboard(tx_hash))
 
 
 # ── 摘要日志 ──────────────────────────────────────────────────────────────
@@ -367,11 +355,9 @@ async def scan_block():
             await _log_scan_summary()
             return
 
-        # 刷新监控缓存
-        global _monitor_cache, _monitor_cache_time
-        if time.time() - _monitor_cache_time > _MONITOR_CACHE_TTL:
-            _monitor_cache = await _get_active_monitor_addresses()
-            _monitor_cache_time = time.time()
+        # 定时同步 Redis 缓存
+        await maybe_sync()
+        monitor_cache = await get_monitor_addresses()
 
         receive_address = _receive_address()
 
@@ -392,8 +378,8 @@ async def scan_block():
                     _scan_stats['payments'] += 1
 
             # 监控通知（有格式化详情日志）
-            if to_addr in _monitor_cache:
-                await _process_monitor_notification(transfer, _monitor_cache[to_addr])
+            if to_addr in monitor_cache:
+                await _process_monitor_notification(transfer, monitor_cache[to_addr])
 
         await _log_scan_summary()
     except Exception as e:

@@ -65,54 +65,162 @@ def _receive_address() -> str:
     return SiteConfig.get('receive_address', '')
 
 
+# ── 辅助：检查是否在 FSM 状态中，如果是则不处理 ──
+class _NotInState:
+    """仅当用户不在任何 FSM 状态时匹配。"""
+    __slots__ = ()
+
+    def __call__(self, obj):
+        return True  # 由 aiogram 内部的 StateFilter 机制处理
+
+
+MENU_BUTTONS = {'🛒 购买商品', '📋 我的订单', '💰 充值余额', '📜 充值记录', '🔍 地址监控', '👤 个人中心'}
+
+
 def register_handlers(dp: Dispatcher):
-    # --- /start ---
-    @dp.message(CommandStart())
-    async def cmd_start(message: Message):
-        await get_or_create_user(message.from_user.id, message.from_user.username, message.from_user.first_name)
-        await message.answer('欢迎使用商城机器人！请选择操作：', reply_markup=main_menu())
+    # ══════════════════════════════════════════════════════════════════════
+    # FSM 状态处理器（必须先注册，优先级高于菜单按钮）
+    # ══════════════════════════════════════════════════════════════════════
 
-    # --- 主菜单按钮 ---
-    @dp.message(F.text == '🛒 购买商品')
-    async def menu_buy(message: Message):
-        products, total = await list_products()
-        text, kb = _products_page(products, 1, total)
-        await message.answer(text, reply_markup=kb)
+    @dp.message(MonitorStates.waiting_address)
+    async def mon_address_input(message: Message, state: FSMContext):
+        address = message.text.strip()
+        if not address.startswith('T') or len(address) < 30:
+            await message.answer('❌ 无效 TRON 地址，请重新输入：')
+            return
+        await state.update_data(monitor_address=address)
+        await state.set_state(MonitorStates.waiting_remark)
+        await message.answer('请输入备注（可选，输入 - 跳过）：')
 
-    @dp.message(F.text == '📋 我的订单')
-    async def menu_orders(message: Message):
+    @dp.message(MonitorStates.waiting_remark)
+    async def mon_remark_input(message: Message, state: FSMContext):
+        remark = message.text.strip()
+        if remark == '-':
+            remark = ''
+        data = await state.get_data()
         user = await get_or_create_user(message.from_user.id, message.from_user.username, message.from_user.first_name)
-        orders, total = await list_orders(user.id)
-        text, kb = _orders_page(orders, 1, total)
-        await message.answer(text, reply_markup=kb)
-
-    @dp.message(F.text == '💰 充值余额')
-    async def menu_recharge(message: Message, state: FSMContext):
+        mon = await add_monitor(user.id, data['monitor_address'], remark)
+        # 写入 Redis 缓存
+        from tron.monitor_cache import add_monitor_to_cache
+        await add_monitor_to_cache(mon.id, user.id, mon.address, remark, mon.usdt_threshold, mon.trx_threshold)
         await state.clear()
-        await message.answer('💰 请选择充值币种：', reply_markup=recharge_currency_menu())
+        short = f'{data["monitor_address"][:6]}...{data["monitor_address"][-4:]}'
+        await message.answer(f'✅ 监控已添加: {short}', reply_markup=main_menu())
 
-    @dp.message(F.text == '📜 充值记录')
-    async def menu_recharge_history(message: Message):
+    @dp.message(MonitorStates.waiting_usdt_threshold)
+    async def mon_usdt_threshold_input(message: Message, state: FSMContext):
+        try:
+            val = Decimal(message.text.strip())
+            if val <= 0:
+                raise InvalidOperation
+        except (InvalidOperation, ValueError):
+            await message.answer('❌ 请输入有效金额。')
+            return
+        data = await state.get_data()
         user = await get_or_create_user(message.from_user.id, message.from_user.username, message.from_user.first_name)
-        recharges, total = await list_recharges(user.id)
-        text, kb = _recharges_page(recharges, 1, total)
-        await message.answer(text, reply_markup=kb)
-
-    @dp.message(F.text == '🔍 地址监控')
-    async def menu_monitor(message: Message, state: FSMContext):
+        mid = data['threshold_monitor_id']
+        await set_monitor_threshold(mid, user.id, 'USDT', val)
+        from tron.monitor_cache import update_monitor_threshold_in_cache
+        mon = await get_monitor(mid, user.id)
+        if mon:
+            await update_monitor_threshold_in_cache(mon.address, 'USDT', val)
         await state.clear()
-        await message.answer('🔍 地址监控', reply_markup=monitor_menu())
+        await message.answer(f'✅ USDT 阈值已更新为 {fmt_amount(val)}', reply_markup=main_menu())
 
-    @dp.message(F.text == '👤 个人中心')
-    async def menu_profile(message: Message):
+    @dp.message(MonitorStates.waiting_trx_threshold)
+    async def mon_trx_threshold_input(message: Message, state: FSMContext):
+        try:
+            val = Decimal(message.text.strip())
+            if val <= 0:
+                raise InvalidOperation
+        except (InvalidOperation, ValueError):
+            await message.answer('❌ 请输入有效金额。')
+            return
+        data = await state.get_data()
         user = await get_or_create_user(message.from_user.id, message.from_user.username, message.from_user.first_name)
+        mid = data['threshold_monitor_id']
+        await set_monitor_threshold(mid, user.id, 'TRX', val)
+        from tron.monitor_cache import update_monitor_threshold_in_cache
+        mon = await get_monitor(mid, user.id)
+        if mon:
+            await update_monitor_threshold_in_cache(mon.address, 'TRX', val)
+        await state.clear()
+        await message.answer(f'✅ TRX 阈值已更新为 {fmt_amount(val)}', reply_markup=main_menu())
+
+    @dp.message(RechargeStates.waiting_amount)
+    async def recharge_amount_input(message: Message, state: FSMContext):
+        try:
+            amount = Decimal(message.text.strip())
+            if amount <= 0:
+                raise InvalidOperation
+        except (InvalidOperation, ValueError):
+            await message.answer('❌ 请输入有效的正数金额。')
+            return
+        data = await state.get_data()
+        currency = data['recharge_currency']
+        addr = _receive_address()
+        user = await get_or_create_user(message.from_user.id, message.from_user.username, message.from_user.first_name)
+        rc = await create_recharge(user.id, amount, currency, addr)
+        await state.clear()
         await message.answer(
-            f'👤 个人中心\n用户ID: {user.tg_user_id}\n用户名: @{user.username or "无"}\n'
-            f'💵 USDT 余额: {fmt_amount(user.balance)}\n🪙 TRX 余额: {fmt_amount(user.balance_trx)}',
+            f'💰 充值订单已创建\n充值金额: {fmt_amount(amount)} {currency}\n'
+            f'支付金额: {fmt_pay_amount(rc.pay_amount)} {currency}\n'
+            f'收款地址: {addr}\n\n⏰ 请在 30 分钟内转账精确金额到上述地址。',
             reply_markup=main_menu(),
         )
 
-    # --- 商品详情 ---
+    # ══════════════════════════════════════════════════════════════════════
+    # 普通消息（菜单按钮 + /start）
+    # ══════════════════════════════════════════════════════════════════════
+
+    @dp.message(CommandStart())
+    async def cmd_start(message: Message, state: FSMContext):
+        await state.clear()
+        await get_or_create_user(message.from_user.id, message.from_user.username, message.from_user.first_name)
+        await message.answer('欢迎使用商城机器人！请选择操作：', reply_markup=main_menu())
+
+    @dp.message(F.text.in_(MENU_BUTTONS))
+    async def menu_handler(message: Message, state: FSMContext):
+        current = await state.get_state()
+        if current:
+            return  # 用户在 FSM 输入中，忽略菜单按钮
+
+        text = message.text
+        user = await get_or_create_user(message.from_user.id, message.from_user.username, message.from_user.first_name)
+
+        if text == '🛒 购买商品':
+            products, total = await list_products()
+            text_out, kb = _products_page(products, 1, total)
+            await message.answer(text_out, reply_markup=kb)
+
+        elif text == '📋 我的订单':
+            orders, total = await list_orders(user.id)
+            text_out, kb = _orders_page(orders, 1, total)
+            await message.answer(text_out, reply_markup=kb)
+
+        elif text == '💰 充值余额':
+            await state.clear()
+            await message.answer('💰 请选择充值币种：', reply_markup=recharge_currency_menu())
+
+        elif text == '📜 充值记录':
+            recharges, total = await list_recharges(user.id)
+            text_out, kb = _recharges_page(recharges, 1, total)
+            await message.answer(text_out, reply_markup=kb)
+
+        elif text == '🔍 地址监控':
+            await message.answer('🔍 地址监控', reply_markup=monitor_menu())
+
+        elif text == '👤 个人中心':
+            await message.answer(
+                f'👤 个人中心\n用户ID: {user.tg_user_id}\n用户名: @{user.username or "无"}\n'
+                f'💵 USDT 余额: {fmt_amount(user.balance)}\n🪙 TRX 余额: {fmt_amount(user.balance_trx)}',
+                reply_markup=main_menu(),
+            )
+
+    # ══════════════════════════════════════════════════════════════════════
+    # 商品回调
+    # ══════════════════════════════════════════════════════════════════════
+
     @dp.callback_query(F.data.startswith('product:'))
     async def cb_product_detail(callback: CallbackQuery):
         product = await get_product(int(callback.data.split(':')[1]))
@@ -135,19 +243,19 @@ def register_handlers(dp: Dispatcher):
 
     @dp.callback_query(F.data.startswith('ppage:'))
     async def cb_product_page(callback: CallbackQuery):
-        products, total = await list_products(page=int(callback.data.split(':')[1]))
-        text, kb = _products_page(products, int(callback.data.split(':')[1]), total)
-        await callback.message.edit_text(text, reply_markup=kb)
+        page = int(callback.data.split(':')[1])
+        products, total = await list_products(page=page)
+        text_out, kb = _products_page(products, page, total)
+        await callback.message.edit_text(text_out, reply_markup=kb)
         await callback.answer()
 
     @dp.callback_query(F.data == 'back_to_products')
     async def cb_back_products(callback: CallbackQuery):
         products, total = await list_products()
-        text, kb = _products_page(products, 1, total)
-        await callback.message.edit_text(text, reply_markup=kb)
+        text_out, kb = _products_page(products, 1, total)
+        await callback.message.edit_text(text_out, reply_markup=kb)
         await callback.answer()
 
-    # --- 数量选择 ---
     @dp.callback_query(F.data.startswith('qty:'))
     async def cb_quantity(callback: CallbackQuery):
         _, product_id, quantity = callback.data.split(':')
@@ -176,7 +284,6 @@ def register_handlers(dp: Dispatcher):
         )
         await callback.answer()
 
-    # --- 支付 ---
     @dp.callback_query(F.data.startswith('pay:'))
     async def cb_pay(callback: CallbackQuery, bot: Bot):
         _, pay_method, product_id, currency, quantity = callback.data.split(':')
@@ -220,14 +327,17 @@ def register_handlers(dp: Dispatcher):
             )
         await callback.answer()
 
-    # --- 订单 ---
+    # ══════════════════════════════════════════════════════════════════════
+    # 订单回调
+    # ══════════════════════════════════════════════════════════════════════
+
     @dp.callback_query(F.data.startswith('opage:'))
     async def cb_order_page(callback: CallbackQuery):
         user = await get_or_create_user(callback.from_user.id, callback.from_user.username, callback.from_user.first_name)
         page = int(callback.data.split(':')[1])
         orders, total = await list_orders(user.id, page=page)
-        text, kb = _orders_page(orders, page, total)
-        await callback.message.edit_text(text, reply_markup=kb)
+        text_out, kb = _orders_page(orders, page, total)
+        await callback.message.edit_text(text_out, reply_markup=kb)
         await callback.answer()
 
     @dp.callback_query(F.data.startswith('order_detail:'))
@@ -250,7 +360,10 @@ def register_handlers(dp: Dispatcher):
         await callback.message.edit_text(text)
         await callback.answer()
 
-    # --- 充值 ---
+    # ══════════════════════════════════════════════════════════════════════
+    # 充值回调
+    # ══════════════════════════════════════════════════════════════════════
+
     @dp.callback_query(F.data.startswith('rcur:'))
     async def cb_recharge_currency(callback: CallbackQuery, state: FSMContext):
         currency = callback.data.split(':')[1]
@@ -259,65 +372,24 @@ def register_handlers(dp: Dispatcher):
         await callback.message.edit_text(f'💰 请输入需要充值的 {currency} 金额：')
         await callback.answer()
 
-    @dp.message(RechargeStates.waiting_amount)
-    async def recharge_amount_input(message: Message, state: FSMContext):
-        try:
-            amount = Decimal(message.text.strip())
-            if amount <= 0:
-                raise InvalidOperation
-        except (InvalidOperation, ValueError):
-            await message.answer('❌ 请输入有效的正数金额。')
-            return
-        data = await state.get_data()
-        currency = data['recharge_currency']
-        addr = _receive_address()
-        user = await get_or_create_user(message.from_user.id, message.from_user.username, message.from_user.first_name)
-        rc = await create_recharge(user.id, amount, currency, addr)
-        await state.clear()
-        await message.answer(
-            f'💰 充值订单已创建\n充值金额: {fmt_amount(amount)} {currency}\n'
-            f'支付金额: {fmt_pay_amount(rc.pay_amount)} {currency}\n'
-            f'收款地址: {addr}\n\n⏰ 请在 30 分钟内转账精确金额到上述地址。',
-            reply_markup=main_menu(),
-        )
-
     @dp.callback_query(F.data.startswith('rpage:'))
     async def cb_recharge_page(callback: CallbackQuery):
         user = await get_or_create_user(callback.from_user.id, callback.from_user.username, callback.from_user.first_name)
         page = int(callback.data.split(':')[1])
         recharges, total = await list_recharges(user.id, page=page)
-        text, kb = _recharges_page(recharges, page, total)
-        await callback.message.edit_text(text, reply_markup=kb)
+        text_out, kb = _recharges_page(recharges, page, total)
+        await callback.message.edit_text(text_out, reply_markup=kb)
         await callback.answer()
 
-    # --- 监控 ---
+    # ══════════════════════════════════════════════════════════════════════
+    # 监控回调
+    # ══════════════════════════════════════════════════════════════════════
+
     @dp.callback_query(F.data == 'mon:add')
     async def cb_mon_add(callback: CallbackQuery, state: FSMContext):
         await state.set_state(MonitorStates.waiting_address)
         await callback.message.edit_text('请输入要监控的 TRON 地址：')
         await callback.answer()
-
-    @dp.message(MonitorStates.waiting_address)
-    async def mon_address_input(message: Message, state: FSMContext):
-        address = message.text.strip()
-        if not address.startswith('T') or len(address) < 30:
-            await message.answer('❌ 无效 TRON 地址，请重新输入：')
-            return
-        await state.update_data(monitor_address=address)
-        await state.set_state(MonitorStates.waiting_remark)
-        await message.answer('请输入备注（可选，输入 - 跳过）：')
-
-    @dp.message(MonitorStates.waiting_remark)
-    async def mon_remark_input(message: Message, state: FSMContext):
-        remark = message.text.strip()
-        if remark == '-':
-            remark = ''
-        data = await state.get_data()
-        user = await get_or_create_user(message.from_user.id, message.from_user.username, message.from_user.first_name)
-        await add_monitor(user.id, data['monitor_address'], remark)
-        await state.clear()
-        short = f'{data["monitor_address"][:6]}...{data["monitor_address"][-4:]}'
-        await message.answer(f'✅ 监控已添加: {short}', reply_markup=main_menu())
 
     @dp.callback_query(F.data == 'mon:list')
     async def cb_mon_list(callback: CallbackQuery):
@@ -360,40 +432,15 @@ def register_handlers(dp: Dispatcher):
         await callback.message.edit_text(f'请输入新的 {currency} 阈值金额：')
         await callback.answer()
 
-    @dp.message(MonitorStates.waiting_usdt_threshold)
-    async def mon_usdt_threshold_input(message: Message, state: FSMContext):
-        try:
-            val = Decimal(message.text.strip())
-            if val <= 0:
-                raise InvalidOperation
-        except (InvalidOperation, ValueError):
-            await message.answer('❌ 请输入有效金额。')
-            return
-        data = await state.get_data()
-        user = await get_or_create_user(message.from_user.id, message.from_user.username, message.from_user.first_name)
-        await set_monitor_threshold(data['threshold_monitor_id'], user.id, 'USDT', val)
-        await state.clear()
-        await message.answer(f'✅ USDT 阈值已更新为 {fmt_amount(val)}', reply_markup=main_menu())
-
-    @dp.message(MonitorStates.waiting_trx_threshold)
-    async def mon_trx_threshold_input(message: Message, state: FSMContext):
-        try:
-            val = Decimal(message.text.strip())
-            if val <= 0:
-                raise InvalidOperation
-        except (InvalidOperation, ValueError):
-            await message.answer('❌ 请输入有效金额。')
-            return
-        data = await state.get_data()
-        user = await get_or_create_user(message.from_user.id, message.from_user.username, message.from_user.first_name)
-        await set_monitor_threshold(data['threshold_monitor_id'], user.id, 'TRX', val)
-        await state.clear()
-        await message.answer(f'✅ TRX 阈值已更新为 {fmt_amount(val)}', reply_markup=main_menu())
-
     @dp.callback_query(F.data.startswith('mon:delete:'))
     async def cb_mon_delete(callback: CallbackQuery):
         user = await get_or_create_user(callback.from_user.id, callback.from_user.username, callback.from_user.first_name)
-        await delete_monitor(int(callback.data.split(':')[2]), user.id)
+        mid = int(callback.data.split(':')[2])
+        mon = await get_monitor(mid, user.id)
+        if mon:
+            from tron.monitor_cache import remove_monitor_from_cache
+            await remove_monitor_from_cache(mon.address)
+        await delete_monitor(mid, user.id)
         await callback.message.edit_text('🗑 监控已删除。', reply_markup=monitor_menu())
         await callback.answer()
 
@@ -402,7 +449,6 @@ def register_handlers(dp: Dispatcher):
         await callback.message.edit_text('🔍 地址监控', reply_markup=monitor_menu())
         await callback.answer()
 
-    # --- tx detail ---
     @dp.callback_query(F.data.startswith('mon:txdetail:'))
     async def cb_tx_detail(callback: CallbackQuery):
         from tron.scanner import get_tx_detail
@@ -427,7 +473,6 @@ def register_handlers(dp: Dispatcher):
         await callback.message.edit_text(text)
         await callback.answer()
 
-    # --- noop ---
     @dp.callback_query(F.data == 'noop')
     async def cb_noop(callback: CallbackQuery):
         await callback.answer()

@@ -10,6 +10,7 @@ django.setup()
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from bot.config import BOT_TOKEN
 from bot.handlers import create_dispatcher_and_register
+from tron.monitor_cache import init_monitor_cache
 from tron.scanner import scan_block, set_bot
 
 logger = logging.getLogger(__name__)
@@ -19,6 +20,12 @@ async def run_bot():
     if not BOT_TOKEN:
         logger.warning('未配置 BOT_TOKEN，跳过机器人启动')
         return
+
+    # 初始化 Redis 监控缓存
+    try:
+        await init_monitor_cache()
+    except Exception as e:
+        logger.error('Redis 监控缓存初始化失败: %s', e)
 
     bot, dp = create_dispatcher_and_register()
     set_bot(bot)
