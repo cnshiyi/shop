@@ -117,7 +117,10 @@ async def init_monitor_cache():
     await r.delete(MONITORS_KEY)
     monitors = await sync_to_async(list)(
         AddressMonitor.objects.filter(is_active=True)
-        .values('id', 'user_id', 'address', 'remark', 'monitor_transfers', 'monitor_resources', 'usdt_threshold', 'trx_threshold')
+        .values(
+            'id', 'user_id', 'address', 'remark', 'monitor_transfers', 'monitor_resources',
+            'last_energy', 'last_bandwidth', 'usdt_threshold', 'trx_threshold'
+        )
     )
     pipe = r.pipeline()
     for mon in monitors:
@@ -128,6 +131,8 @@ async def init_monitor_cache():
             'remark': mon['remark'] or '',
             'monitor_transfers': bool(mon.get('monitor_transfers', True)),
             'monitor_resources': bool(mon.get('monitor_resources', False)),
+            'last_energy': int(mon.get('last_energy', 0) or 0),
+            'last_bandwidth': int(mon.get('last_bandwidth', 0) or 0),
             'usdt_threshold': str(mon['usdt_threshold']),
             'trx_threshold': str(mon['trx_threshold']),
         }
@@ -150,6 +155,8 @@ async def add_monitor_to_cache(monitor_id: int, user_id: int, address: str,
         'remark': remark or '',
         'monitor_transfers': monitor_transfers,
         'monitor_resources': monitor_resources,
+        'last_energy': 0,
+        'last_bandwidth': 0,
         'usdt_threshold': str(usdt_threshold),
         'trx_threshold': str(trx_threshold),
     }
@@ -214,6 +221,8 @@ def _db_fallback_get_monitors():
             'remark': mon.remark or '',
             'monitor_transfers': mon.monitor_transfers,
             'monitor_resources': mon.monitor_resources,
+            'last_energy': mon.last_energy,
+            'last_bandwidth': mon.last_bandwidth,
             'usdt_threshold': str(mon.usdt_threshold),
             'trx_threshold': str(mon.trx_threshold),
         }

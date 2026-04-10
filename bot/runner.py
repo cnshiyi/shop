@@ -11,6 +11,7 @@ from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from bot.config import BOT_TOKEN
 from bot.handlers import create_dispatcher_and_register
 from tron.cache import init_all, close as cache_close
+from tron.resource_checker import check_resources, set_bot as set_resource_bot
 from tron.scanner import scan_block, set_bot
 
 logger = logging.getLogger(__name__)
@@ -29,12 +30,15 @@ async def run_bot():
 
     bot, dp = create_dispatcher_and_register()
     set_bot(bot)
+    set_resource_bot(bot)
 
-    # TRON 扫块器
+    # TRON 扫块器 / 资源巡检
     scheduler = AsyncIOScheduler()
     scheduler.add_job(scan_block, 'interval', seconds=2, id='tron_scanner', max_instances=1)
+    scheduler.add_job(check_resources, 'interval', minutes=3, id='tron_resource_checker', max_instances=1)
     scheduler.start()
     logger.info('TRON 扫块器已启动 (每2秒)')
+    logger.info('资源巡检已启动 (每3分钟)')
 
     logger.info('Telegram Bot 已启动 (aiogram)')
     await bot.delete_webhook(drop_pending_updates=True)

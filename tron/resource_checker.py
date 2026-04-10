@@ -1,0 +1,106 @@
+import logging
+from datetime import datetime
+from html import escape
+
+import httpx
+from aiogram import Bot
+from asgiref.sync import sync_to_async
+from django.utils import timezone
+
+from tron.cache import get_config, get_monitor_addresses
+from users.models import TelegramUser
+from monitors.models import AddressMonitor
+
+logger = logging.getLogger(__name__)
+
+TRONGRID_BASE_URL = 'https://api.trongrid.io'
+_bot: Bot | None = None
+
+
+def set_bot(bot: Bot):
+    global _bot
+    _bot = bot
+
+
+@sync_to_async
+def _get_user(user_id: int):
+    return TelegramUser.objects.filter(id=user_id).first()
+
+
+@sync_to_async
+def _update_resource_snapshot(monitor_id: int, energy: int, bandwidth: int):
+    AddressMonitor.objects.filter(id=monitor_id).update(
+        last_energy=energy,
+        last_bandwidth=bandwidth,
+        resource_checked_at=timezone.now(),
+    )
+
+
+async def _notify(user_id: int, text: str):
+    if _bot is None:
+        return
+    user = await _get_user(user_id)
+    if not user:
+        return
+    await _bot.send_message(chat_id=user.tg_user_id, text=text, parse_mode='HTML')
+
+
+async def _fetch_account_resource(address: str) -> tuple[int, int]:
+    headers = {'accept': 'application/json', 'content-type': 'application/json'}
+    api_key = await get_config('trongrid_api_key', '')
+    if api_key:
+        headers['TRON-PRO-API-KEY'] = api_key
+    async with httpx.AsyncClient(timeout=10) as client:
+        resp = await client.post(f'{TRONGRID_BASE_URL}/wallet/getaccountresource', json={'address': address, 'visible': True}, headers=headers)
+        resp.raise_for_status()
+        data = resp.json() or {}
+    free_net_limit = int(data.get('freeNetLimit', 0) or 0)
+    free_net_used = int(data.get('freeNetUsed', 0) or 0)
+    net_limit = int(data.get('NetLimit', 0) or 0)
+    net_used = int(data.get('NetUsed', 0) or 0)
+    energy_limit = int(data.get('EnergyLimit', 0) or 0)
+    energy_used = int(data.get('EnergyUsed', 0) or 0)
+    available_bandwidth = max((free_net_limit - free_net_used) + (net_limit - net_used), 0)
+    available_energy = max(energy_limit - energy_used, 0)
+    return available_energy, available_bandwidth
+
+
+async def check_resources():
+    try:
+        monitor_cache = await get_monitor_addresses()
+        for address, monitors in monitor_cache.items():
+            resource_watchers = [mon for mon in monitors if mon.get('monitor_resources')]
+            if not resource_watchers:
+                continue
+            energy, bandwidth = await _fetch_account_resource(address)
+            for mon in resource_watchers:
+                old_energy = int(mon.get('last_energy', 0) or 0)
+                old_bandwidth = int(mon.get('last_bandwidth', 0) or 0)
+                energy_increase = energy - old_energy
+                bandwidth_increase = bandwidth - old_bandwidth
+                await _update_resource_snapshot(mon['id'], energy, bandwidth)
+                if energy_increase <= 0 and bandwidth_increase <= 0:
+                    continue
+                remark = mon.get('remark') or '(无备注)'
+                now_text = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+                lines = [
+                    '⚡ 资源变动提醒',
+                    '',
+                    f'🏷️ 地址备注: {escape(remark)}',
+                    f'📍 监控地址: <code>{escape(address)}</code>',
+                    f'🕒 检测时间: <code>{escape(now_text)}</code>',
+                ]
+                if energy_increase > 0:
+                    lines.append(f'⚡ 可用能量增加: <code>+{energy_increase}</code>')
+                if bandwidth_increase > 0:
+                    lines.append(f'📶 可用带宽增加: <code>+{bandwidth_increase}</code>')
+                lines.extend([
+                    '',
+                    f'当前可用能量: <code>{energy}</code>',
+                    f'当前可用带宽: <code>{bandwidth}</code>',
+                    '',
+                    '📘 说明: 仅在资源增加时通知，正常转账消耗不通知。',
+                ])
+                await _notify(mon['user_id'], '\n'.join(lines))
+    except Exception as exc:
+        logger.error('资源巡检异常: %s', exc)
