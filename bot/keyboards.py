@@ -39,8 +39,18 @@ def monitor_list(monitors):
     return kb.as_markup()
 
 
-def monitor_detail(monitor_id: int):
+def monitor_detail(monitor_id: int, monitor_transfers: bool = True, monitor_resources: bool = False):
     kb = InlineKeyboardBuilder()
+    kb.row(
+        InlineKeyboardButton(
+            text=f'💸 监控转账: {"开" if monitor_transfers else "关"}',
+            callback_data=f'mon:toggle:{monitor_id}:transfers'
+        ),
+        InlineKeyboardButton(
+            text=f'⚡ 监控资源: {"开" if monitor_resources else "关"}',
+            callback_data=f'mon:toggle:{monitor_id}:resources'
+        ),
+    )
     kb.row(InlineKeyboardButton(text='⚙️ 设置阈值', callback_data=f'mon:threshold:{monitor_id}'))
     kb.row(InlineKeyboardButton(text='🗑 删除监控', callback_data=f'mon:delete:{monitor_id}'))
     kb.row(InlineKeyboardButton(text='🔙 返回列表', callback_data='mon:list'))

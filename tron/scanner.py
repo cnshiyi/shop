@@ -290,6 +290,8 @@ async def _process_monitor_notification(transfer: dict, monitors: list[dict]):
     tx_time = transfer.get('timestamp') or datetime.now().strftime('%Y-%m-%d %H:%M:%S')
 
     for mon in monitors:
+        if not mon.get('monitor_transfers', True):
+            continue
         threshold = Decimal(mon.get('usdt_threshold', '1') if currency == 'USDT' else mon.get('trx_threshold', '1'))
         if threshold and amount < threshold:
             continue

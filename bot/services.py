@@ -94,6 +94,17 @@ def set_monitor_threshold(monitor_id: int, user_id: int, currency: str, amount: 
 
 
 @sync_to_async
+def toggle_monitor_flag(monitor_id: int, user_id: int, field: str):
+    monitor = AddressMonitor.objects.filter(id=monitor_id, user_id=user_id).first()
+    if not monitor or field not in {'monitor_transfers', 'monitor_resources'}:
+        return None
+    current = getattr(monitor, field)
+    setattr(monitor, field, not current)
+    monitor.save(update_fields=[field])
+    return monitor
+
+
+@sync_to_async
 def create_recharge(user_id: int, amount: Decimal, currency: str, receive_address: str):
     pay_amount = _generate_unique_pay_amount(amount, currency)
     return Recharge.objects.create(user_id=user_id, amount=amount, pay_amount=pay_amount, currency=currency, status='pending')

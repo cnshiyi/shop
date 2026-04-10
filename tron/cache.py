@@ -117,7 +117,7 @@ async def init_monitor_cache():
     await r.delete(MONITORS_KEY)
     monitors = await sync_to_async(list)(
         AddressMonitor.objects.filter(is_active=True)
-        .values('id', 'user_id', 'address', 'remark', 'usdt_threshold', 'trx_threshold')
+        .values('id', 'user_id', 'address', 'remark', 'monitor_transfers', 'monitor_resources', 'usdt_threshold', 'trx_threshold')
     )
     pipe = r.pipeline()
     for mon in monitors:
@@ -126,6 +126,8 @@ async def init_monitor_cache():
             'user_id': mon['user_id'],
             'address': mon['address'],
             'remark': mon['remark'] or '',
+            'monitor_transfers': bool(mon.get('monitor_transfers', True)),
+            'monitor_resources': bool(mon.get('monitor_resources', False)),
             'usdt_threshold': str(mon['usdt_threshold']),
             'trx_threshold': str(mon['trx_threshold']),
         }
@@ -136,7 +138,8 @@ async def init_monitor_cache():
 
 async def add_monitor_to_cache(monitor_id: int, user_id: int, address: str,
                                remark: str | None, usdt_threshold: Decimal,
-                               trx_threshold: Decimal):
+                               trx_threshold: Decimal, monitor_transfers: bool = True,
+                               monitor_resources: bool = False):
     r = await _get_redis()
     if r is None:
         return
@@ -145,6 +148,8 @@ async def add_monitor_to_cache(monitor_id: int, user_id: int, address: str,
         'user_id': user_id,
         'address': address,
         'remark': remark or '',
+        'monitor_transfers': monitor_transfers,
+        'monitor_resources': monitor_resources,
         'usdt_threshold': str(usdt_threshold),
         'trx_threshold': str(trx_threshold),
     }
@@ -168,6 +173,18 @@ async def update_monitor_threshold_in_cache(address: str, currency: str, amount:
         key = 'usdt_threshold' if currency == 'USDT' else 'trx_threshold'
         entry[key] = str(amount)
         await r.hset(MONITORS_KEY, address, json.dumps(entry, ensure_ascii=False))
+
+
+async def update_monitor_flag_in_cache(address: str, field: str, value: bool):
+    r = await _get_redis()
+    if r is None:
+        return
+    raw = await r.hget(MONITORS_KEY, address)
+    if raw:
+        entry = json.loads(raw)
+        if field in {'monitor_transfers', 'monitor_resources'}:
+            entry[field] = value
+            await r.hset(MONITORS_KEY, address, json.dumps(entry, ensure_ascii=False))
 
 
 async def get_monitor_addresses() -> dict[str, list[dict]]:
@@ -195,6 +212,8 @@ def _db_fallback_get_monitors():
         entry = {
             'id': mon.id, 'user_id': mon.user_id, 'address': mon.address,
             'remark': mon.remark or '',
+            'monitor_transfers': mon.monitor_transfers,
+            'monitor_resources': mon.monitor_resources,
             'usdt_threshold': str(mon.usdt_threshold),
             'trx_threshold': str(mon.trx_threshold),
         }

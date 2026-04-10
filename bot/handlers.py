@@ -24,7 +24,7 @@ from bot.services import (
     add_monitor, create_address_order, buy_with_balance, create_recharge,
     delete_monitor, get_or_create_user, get_product, get_monitor,
     list_monitors, list_orders, list_products, list_recharges,
-    set_monitor_threshold,
+    set_monitor_threshold, toggle_monitor_flag,
 )
 from bot.utils import fmt_amount, fmt_pay_amount
 from core.models import SiteConfig
@@ -105,7 +105,11 @@ def register_handlers(dp: Dispatcher):
         mon = await add_monitor(user.id, data['monitor_address'], remark)
         # 写入 Redis 缓存
         from tron.cache import add_monitor_to_cache
-        await add_monitor_to_cache(mon.id, user.id, mon.address, remark, mon.usdt_threshold, mon.trx_threshold)
+        await add_monitor_to_cache(
+            mon.id, user.id, mon.address, remark,
+            mon.usdt_threshold, mon.trx_threshold,
+            mon.monitor_transfers, mon.monitor_resources,
+        )
         await state.clear()
         short = f'{data["monitor_address"][:6]}...{data["monitor_address"][-4:]}'
         await message.answer(f'✅ 监控已添加: {short}', reply_markup=main_menu())
@@ -426,11 +430,41 @@ def register_handlers(dp: Dispatcher):
             return
         icon = '🟢' if mon.is_active else '🔴'
         await callback.message.edit_text(
-            f'{icon} 监控详情\n地址: {mon.address}\n备注: {mon.remark or "无"}\n'
-            f'USDT 阈值: {fmt_amount(mon.usdt_threshold)}\nTRX 阈值: {fmt_amount(mon.trx_threshold)}',
-            reply_markup=kb_monitor_detail(mon.id),
+            f'{icon} 监控详情\n地址: <code>{mon.address}</code>\n备注: {mon.remark or "无"}\n'
+            f'💸 监控转账: {"开启" if mon.monitor_transfers else "关闭"}\n'
+            f'⚡ 监控资源: {"开启" if mon.monitor_resources else "关闭"}\n'
+            f'USDT 阈值: {fmt_amount(mon.usdt_threshold)}\nTRX 阈值: {fmt_amount(mon.trx_threshold)}\n\n'
+            f'📘 使用说明:\n'
+            f'1. 监控转账：地址收到 USDT/TRX 转账时通知。\n'
+            f'2. 监控资源：地址可用能量/带宽增加时通知；正常转账消耗不通知。',
+            reply_markup=kb_monitor_detail(mon.id, mon.monitor_transfers, mon.monitor_resources),
+            parse_mode='HTML',
         )
         await callback.answer()
+
+    @dp.callback_query(F.data.startswith('mon:toggle:'))
+    async def cb_mon_toggle(callback: CallbackQuery):
+        user = await get_or_create_user(callback.from_user.id, callback.from_user.username, callback.from_user.first_name)
+        _, _, monitor_id, mode = callback.data.split(':')
+        field = 'monitor_transfers' if mode == 'transfers' else 'monitor_resources'
+        monitor = await toggle_monitor_flag(int(monitor_id), user.id, field)
+        if not monitor:
+            await callback.answer('监控不存在', show_alert=True)
+            return
+        from tron.cache import update_monitor_flag_in_cache
+        await update_monitor_flag_in_cache(monitor.address, field, getattr(monitor, field))
+        await callback.message.edit_text(
+            f'{"🟢" if monitor.is_active else "🔴"} 监控详情\n地址: <code>{monitor.address}</code>\n备注: {monitor.remark or "无"}\n'
+            f'💸 监控转账: {"开启" if monitor.monitor_transfers else "关闭"}\n'
+            f'⚡ 监控资源: {"开启" if monitor.monitor_resources else "关闭"}\n'
+            f'USDT 阈值: {fmt_amount(monitor.usdt_threshold)}\nTRX 阈值: {fmt_amount(monitor.trx_threshold)}\n\n'
+            f'📘 使用说明:\n'
+            f'1. 监控转账：地址收到 USDT/TRX 转账时通知。\n'
+            f'2. 监控资源：地址可用能量/带宽增加时通知；正常转账消耗不通知。',
+            reply_markup=kb_monitor_detail(monitor.id, monitor.monitor_transfers, monitor.monitor_resources),
+            parse_mode='HTML',
+        )
+        await callback.answer('已更新')
 
     @dp.callback_query(F.data.startswith('mon:threshold:'))
     async def cb_mon_threshold(callback: CallbackQuery):
