@@ -1,6 +1,7 @@
 from asgiref.sync import sync_to_async
 
 from biz.models import CloudServerOrder
+from biz.services import build_cloud_server_name
 from cloud.aliyun_simple import create_instance as create_aliyun_instance
 from cloud.aws_lightsail import create_instance as create_aws_instance
 from cloud.bootstrap import install_bbr, install_mtproxy
@@ -10,11 +11,12 @@ async def provision_cloud_server(order_id: int):
     order = await _get_order(order_id)
     if not order:
         return None
+    server_name = build_cloud_server_name(order.user_id, order.pay_amount)
     if order.provider == 'aws_lightsail':
-        result = await create_aws_instance(order)
+        result = await create_aws_instance(order, server_name)
         login_user = 'admin'
     else:
-        result = await create_aliyun_instance(order)
+        result = await create_aliyun_instance(order, server_name)
         login_user = 'root'
     if result.ok:
         _, bbr_note = await install_bbr(result.public_ip, result.login_user or login_user, result.login_password)

@@ -42,6 +42,16 @@ DEFAULT_PLAN_SEEDS = [
 ]
 
 
+def _format_amount_tag(amount: Decimal) -> str:
+    normalized = amount.normalize() if isinstance(amount, Decimal) else Decimal(str(amount)).normalize()
+    text = format(normalized, 'f')
+    return text.replace('.', '_')
+
+
+def build_cloud_server_name(user_id: int, amount: Decimal) -> str:
+    return f"{int(time.time())}-{user_id}-{_format_amount_tag(amount)}"
+
+
 def _generate_order_no() -> str:
     return f'SRV{int(time.time() * 1000)}{random.randint(1000, 9999)}'
 

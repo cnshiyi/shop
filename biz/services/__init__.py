@@ -6,7 +6,7 @@ from .commerce import (
     list_orders,
     list_products,
 )
-from .custom import create_cloud_server_order, get_cloud_plan, list_custom_regions, list_region_plans, set_cloud_server_port
+from .custom import create_cloud_server_order, get_cloud_plan, list_custom_regions, list_region_plans, set_cloud_server_port, build_cloud_server_name
 from .monitoring import (
     add_monitor,
     delete_monitor,
@@ -22,6 +22,7 @@ from .users import get_or_create_user
 __all__ = [
     'add_monitor',
     'buy_with_balance',
+    'build_cloud_server_name',
     'create_address_order',
     'create_cloud_server_order',
     'create_recharge',
