@@ -1,5 +1,5 @@
-from users.models import TelegramUser
-from shopbiz.models import Product, Order
+from biz.models import TelegramUser
+from mall.models import Product, Order
 from payments.models import Recharge
 from monitors.models import AddressMonitor
 

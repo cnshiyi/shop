@@ -20,6 +20,7 @@
 ## 目录结构
 - `run.py`：PyCharm 一键启动入口
 - `shop/settings.py`：Django 配置
+- `mall/`：商城业务命名层（逐步替代 `shopbiz/` 的对外命名）
 - `biz/`：统一业务模型聚合层（用户、商品、订单、充值、监控）
 - `ARCHITECTURE.md`：目录分层与后续迁移规划
 - `bot/`：机器人菜单、回调、业务逻辑
@@ -28,7 +29,7 @@
 - `tron/cache.py`：Redis 缓存、监控地址缓存、每日统计
 - `core/`：站点配置
 - `users/`：用户模型
-- `shopbiz/`：商品与订单
+- `shopbiz/`：商品与订单（旧命名，后续逐步淡出）
 - `payments/`：充值记录
 - `monitors/`：地址监控模型
 
