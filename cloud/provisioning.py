@@ -7,6 +7,22 @@ from cloud.aws_lightsail import create_instance as create_aws_instance
 from cloud.bootstrap import install_bbr, install_mtproxy
 
 
+def _extract_mtproxy_fields(note: str) -> tuple[str, str, str]:
+    link = ''
+    secret = ''
+    host = ''
+    for line in (note or '').splitlines():
+        if line.startswith('TG链接: '):
+            link = line.split(': ', 1)[1].strip()
+        elif 'secret=' in line and not link:
+            link = line.strip()
+    if 'server=' in link:
+        host = link.split('server=', 1)[1].split('&', 1)[0]
+    if 'secret=' in link:
+        secret = link.split('secret=', 1)[1].split('&', 1)[0]
+    return link, secret, host
+
+
 async def provision_cloud_server(order_id: int):
     order = await _get_order(order_id)
     if not order:
@@ -22,7 +38,15 @@ async def provision_cloud_server(order_id: int):
         _, bbr_note = await install_bbr(result.public_ip, result.login_user or login_user, result.login_password)
         _, mtproxy_note = await install_mtproxy(result.public_ip, result.login_user or login_user, result.login_password, order.mtproxy_port)
         note = '\n'.join(part for part in [result.note, bbr_note, mtproxy_note] if part)
-        return await _mark_success(order_id, result.instance_id, result.public_ip, result.login_user or login_user, result.login_password, note)
+        return await _mark_success(
+            order_id,
+            server_name,
+            result.instance_id,
+            result.public_ip,
+            result.login_user or login_user,
+            result.login_password,
+            note,
+        )
     return await _mark_failed(order_id, result.note)
 
 
@@ -32,17 +56,24 @@ def _get_order(order_id: int):
 
 
 @sync_to_async
-def _mark_success(order_id: int, instance_id: str, public_ip: str, login_user: str, login_password: str, note: str):
+def _mark_success(order_id: int, server_name: str, instance_id: str, public_ip: str, login_user: str, login_password: str, note: str):
     order = CloudServerOrder.objects.get(id=order_id)
+    mtproxy_link, mtproxy_secret, mtproxy_host = _extract_mtproxy_fields(note)
     order.status = 'completed'
+    order.server_name = server_name
     order.instance_id = instance_id
+    order.provider_resource_id = instance_id
     order.public_ip = public_ip
+    order.mtproxy_host = mtproxy_host or public_ip
+    order.mtproxy_link = mtproxy_link
+    order.mtproxy_secret = mtproxy_secret
     order.login_user = login_user
     order.login_password = login_password
     order.provision_note = note
     from django.utils import timezone
     order.completed_at = timezone.now()
-    order.save(update_fields=['status', 'instance_id', 'public_ip', 'login_user', 'login_password', 'provision_note', 'completed_at', 'updated_at'])
+    order.last_user_id = order.user.tg_user_id
+    order.save(update_fields=['status', 'server_name', 'instance_id', 'provider_resource_id', 'public_ip', 'mtproxy_host', 'mtproxy_link', 'mtproxy_secret', 'login_user', 'login_password', 'provision_note', 'completed_at', 'last_user_id', 'updated_at'])
     return order
 
 

@@ -21,9 +21,9 @@ class CloudServerPlanAdmin(admin.ModelAdmin):
 
 @admin.register(CloudServerOrder)
 class CloudServerOrderAdmin(admin.ModelAdmin):
-    list_display = ('order_no', 'user', 'provider', 'region_name', 'plan_name', 'currency', 'total_amount', 'pay_amount', 'status', 'created_at')
+    list_display = ('order_no', 'user', 'provider', 'region_name', 'plan_name', 'server_name', 'public_ip', 'service_expires_at', 'ip_recycle_at', 'status', 'created_at')
     list_filter = ('provider', 'region_name', 'status', 'currency', 'pay_method', 'created_at')
-    search_fields = ('order_no', 'plan_name', 'region_name', 'tx_hash', 'user__tg_user_id', 'user__username')
+    search_fields = ('order_no', 'server_name', 'public_ip', 'plan_name', 'region_name', 'tx_hash', 'user__tg_user_id', 'user__username')
     readonly_fields = ('created_at', 'paid_at', 'completed_at', 'updated_at')
 
 

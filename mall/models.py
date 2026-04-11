@@ -1,4 +1,5 @@
 from django.db import models
+from django.utils import timezone
 
 
 class Product(models.Model):
@@ -74,6 +75,11 @@ class CloudServerOrder(models.Model):
         ('paid', '已支付'),
         ('provisioning', '创建中'),
         ('completed', '已创建'),
+        ('renew_pending', '待续费'),
+        ('expiring', '即将到期'),
+        ('suspended', '已关机'),
+        ('deleting', '删除中'),
+        ('deleted', '已删除'),
         ('failed', '创建失败'),
         ('cancelled', '已取消'),
         ('expired', '已过期'),
@@ -101,9 +107,25 @@ class CloudServerOrder(models.Model):
     status = models.CharField('状态', max_length=32, choices=STATUS_CHOICES, default='pending', db_index=True)
     tx_hash = models.CharField('交易哈希', max_length=191, unique=True, blank=True, null=True)
     image_name = models.CharField('镜像', max_length=128, default='debian')
+    server_name = models.CharField('服务器名', max_length=191, blank=True, null=True, db_index=True)
+    lifecycle_days = models.IntegerField('有效期天数', default=31)
+    service_started_at = models.DateTimeField('服务开始时间', blank=True, null=True)
+    service_expires_at = models.DateTimeField('服务到期时间', blank=True, null=True, db_index=True)
+    renew_grace_expires_at = models.DateTimeField('续费宽限到期时间', blank=True, null=True)
+    suspend_at = models.DateTimeField('计划关机时间', blank=True, null=True)
+    delete_at = models.DateTimeField('计划删机时间', blank=True, null=True)
+    ip_recycle_at = models.DateTimeField('IP保留到期时间', blank=True, null=True)
+    last_renewed_at = models.DateTimeField('最后续费时间', blank=True, null=True)
+    last_user_id = models.BigIntegerField('最近绑定TG用户ID', blank=True, null=True, db_index=True)
     mtproxy_port = models.IntegerField('MTProxy端口', default=9528)
+    mtproxy_link = models.TextField('MTProxy链接', blank=True, null=True)
+    mtproxy_secret = models.CharField('MTProxy密钥', max_length=64, blank=True, null=True)
+    mtproxy_host = models.CharField('MTProxy主机', max_length=191, blank=True, null=True)
     instance_id = models.CharField('实例ID', max_length=191, blank=True, null=True)
-    public_ip = models.CharField('公网IP', max_length=128, blank=True, null=True)
+    provider_resource_id = models.CharField('云资源ID', max_length=191, blank=True, null=True)
+    static_ip_name = models.CharField('固定IP名称', max_length=191, blank=True, null=True)
+    public_ip = models.CharField('公网IP', max_length=128, blank=True, null=True, db_index=True)
+    previous_public_ip = models.CharField('历史公网IP', max_length=128, blank=True, null=True)
     login_user = models.CharField('登录账号', max_length=64, blank=True, null=True)
     login_password = models.CharField('登录密码', max_length=191, blank=True, null=True)
     provision_note = models.TextField('创建说明', blank=True, null=True)
@@ -118,6 +140,18 @@ class CloudServerOrder(models.Model):
         verbose_name = '云服务器订单'
         verbose_name_plural = '云服务器订单'
         ordering = ['-created_at']
+
+    def save(self, *args, **kwargs):
+        if self.completed_at and not self.service_started_at:
+            self.service_started_at = self.completed_at
+        if self.service_started_at and not self.service_expires_at:
+            self.service_expires_at = self.service_started_at + timezone.timedelta(days=self.lifecycle_days)
+        if self.service_expires_at:
+            self.renew_grace_expires_at = self.service_expires_at + timezone.timedelta(days=3)
+            self.suspend_at = self.service_expires_at + timezone.timedelta(days=3)
+            self.delete_at = self.suspend_at + timezone.timedelta(days=3)
+            self.ip_recycle_at = self.delete_at + timezone.timedelta(days=10)
+        super().save(*args, **kwargs)
 
     def __str__(self):
         return self.order_no
