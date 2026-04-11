@@ -75,7 +75,7 @@ python run.py
 - 再查看该地区可选套餐价格表
 - 选择套餐后生成云服务器订单
 - 用户按指定金额付款后，系统自动监控到账并进入创建流程
-- AWS Lightsail 已接入最小可用真实创建链路：Debian、`admin` 密码登录、Static IP 绑定
+- 已实测 AWS 测试实例可完成 BBR 初始化与 MTProxy 自动安装，并成功生成代理链接
 - MTProxy 安装完成后会尝试提取 secret，并向用户发送 `tg://proxy` 与 `https://t.me/proxy` 链接
 - AWS Lightsail 真实接入时必须申请并绑定固定公网 IP
 - 当前已拆分为 `monitor.py`、`recharge.py`、`custom.py`

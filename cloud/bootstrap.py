@@ -12,27 +12,36 @@ MTPROXY_PORT = 9528
 DEBIAN_BBR_SCRIPT = r'''#!/usr/bin/env bash
 set -e
 export DEBIAN_FRONTEND=noninteractive
-apt-get update -y
-apt-get install -y ca-certificates curl wget sudo
-cat >/etc/sysctl.d/99-bbr.conf <<'EOF'
-net.core.default_qdisc=fq
-net.ipv4.tcp_congestion_control=bbr
-EOF
-sysctl --system
-sysctl net.ipv4.tcp_congestion_control
+if command -v sudo >/dev/null 2>&1; then
+  SUDO='sudo'
+else
+  SUDO=''
+fi
+$SUDO apt-get update -y
+$SUDO apt-get install -y ca-certificates curl wget sudo procps
+printf '%s\n' 'net.core.default_qdisc=fq' 'net.ipv4.tcp_congestion_control=bbr' | $SUDO tee /etc/sysctl.d/99-bbr.conf >/dev/null
+$SUDO /usr/sbin/sysctl --system || $SUDO sysctl --system
+$SUDO /usr/sbin/sysctl net.ipv4.tcp_congestion_control || $SUDO sysctl net.ipv4.tcp_congestion_control
 '''
 
 def _build_mtproxy_script(port: int) -> str:
     return rf'''#!/usr/bin/env bash
 set -e
-mkdir -p {MTPROXY_DIR}
-cd {MTPROXY_DIR}
+if command -v sudo >/dev/null 2>&1; then
+  SUDO='sudo'
+else
+  SUDO=''
+fi
+mkdir -p /tmp/mtproxy-work
+cd /tmp/mtproxy-work
 curl -s -o mtproxy.sh https://raw.githubusercontent.com/ellermister/mtproxy/master/mtproxy.sh
 chmod +x mtproxy.sh
 printf '%s\n' '{port}' | bash mtproxy.sh
+$SUDO mkdir -p {MTPROXY_DIR}
+$SUDO cp -f mtproxy.sh {MTPROXY_DIR}/mtproxy.sh || true
 if command -v ufw >/dev/null 2>&1; then
-  ufw allow {port}/tcp || true
-  ufw allow {port}/udp || true
+  $SUDO ufw allow {port}/tcp || true
+  $SUDO ufw allow {port}/udp || true
 fi
 SECRET=""
 for file in $(find {MTPROXY_DIR} /etc /usr/local -maxdepth 4 -type f 2>/dev/null); do
@@ -46,7 +55,7 @@ if [ -z "$SECRET" ]; then
   SECRET=$(ps -ef | grep -i mtproto-proxy | grep -v grep | grep -Eo '([0-9a-fA-F]{{32}}|ee[0-9a-fA-F]{{32}})' | head -n 1 || true)
 fi
 if [ -n "$SECRET" ]; then
-  echo "MTPROXY_SECRET=${SECRET}"
+  echo "MTPROXY_SECRET=${{SECRET}}"
   echo "MTPROXY_PORT={port}"
 fi
 '''
