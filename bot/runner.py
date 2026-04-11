@@ -9,6 +9,7 @@ django.setup()
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from bot.config import BOT_TOKEN
+from bot.fsm import close_fsm_storage
 from bot.handlers import create_dispatcher_and_register
 from core.cache import refresh_config, close as cache_close
 from monitoring.cache import init_monitor_cache
@@ -30,7 +31,7 @@ async def run_bot():
     except Exception as e:
         logger.error('Redis 缓存初始化失败: %s', e)
 
-    bot, dp = create_dispatcher_and_register()
+    bot, dp = await create_dispatcher_and_register()
     set_bot(bot)
     set_resource_bot(bot)
 
@@ -44,7 +45,12 @@ async def run_bot():
 
     logger.info('Telegram Bot 已启动 (aiogram)')
     await bot.delete_webhook(drop_pending_updates=True)
-    await dp.start_polling(bot)
+    try:
+        await dp.start_polling(bot)
+    finally:
+        scheduler.shutdown(wait=False)
+        await cache_close()
+        await close_fsm_storage()
 
 
 def main():

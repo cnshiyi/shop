@@ -75,7 +75,8 @@ python run.py
 - 再查看该地区可选套餐价格表
 - 选择套餐后生成云服务器订单
 - 用户按指定金额付款后，系统自动监控到账并进入创建流程
-- 创建成功后，结构上继续进入 Debian 初始化与 BBR 加速步骤
+- Bot 的 FSM 存储初始化已从 `bot/handlers.py` 抽离到 `bot/fsm.py`
+- `bot/fsm.py` 统一管理 Redis FSM、Memory 回退、TTL、连接复用与关闭清理
 - BBR 完成后继续安装 MTProxy
 - MTProxy 使用默认目录 `/home/mtproxy`
 - 付款后支持选择 `使用默认端口 9528` 或 `输入自定义端口`

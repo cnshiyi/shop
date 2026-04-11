@@ -6,12 +6,10 @@ from aiogram import Bot, Dispatcher, F
 from aiogram.filters import CommandStart
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
-from aiogram.fsm.storage.memory import MemoryStorage
-from aiogram.fsm.storage.redis import RedisStorage
 from aiogram.types import CallbackQuery, Message
-import redis.asyncio as redis
 
-from bot.config import BOT_TOKEN, REDIS_URL, FSM_STATE_TTL, FSM_DATA_TTL
+from bot.config import BOT_TOKEN
+from bot.fsm import create_fsm_storage
 from biz.services import get_exchange_rate_display, usdt_to_trx
 from bot.keyboards import (
     main_menu, monitor_menu, monitor_list as kb_monitor_list,
@@ -683,19 +681,9 @@ def register_handlers(dp: Dispatcher):
         await callback.answer()
 
 
-def create_dispatcher_and_register() -> tuple[Bot, Dispatcher]:
+async def create_dispatcher_and_register() -> tuple[Bot, Dispatcher]:
     bot = Bot(token=BOT_TOKEN)
-    try:
-        redis_client = redis.from_url(REDIS_URL, decode_responses=True)
-        storage = RedisStorage(
-            redis=redis_client,
-            state_ttl=FSM_STATE_TTL,
-            data_ttl=FSM_DATA_TTL,
-        )
-        logger.info('FSM 已切换为 RedisStorage')
-    except Exception as exc:
-        logger.warning('RedisStorage 初始化失败，回退 MemoryStorage: %s', exc)
-        storage = MemoryStorage()
+    storage = await create_fsm_storage()
     dp = Dispatcher(storage=storage)
     register_handlers(dp)
     return bot, dp
