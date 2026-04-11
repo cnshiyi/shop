@@ -61,14 +61,20 @@ def _custom_plan_text(region_name: str, plans) -> str:
     if not plans:
         return f'🛠 {region_name}\n\n当前地区暂无可用套餐。'
     labels = ['套餐一', '套餐二', '套餐三', '套餐四', '套餐五', '套餐六']
+    tier_names = ['基础型', '标准型', '增强型', '高配型', '旗舰型', '至尊型']
     lines = [f'🛠 {region_name} 可用套餐', '']
     for idx, plan in enumerate(plans, start=1):
         label = labels[idx - 1] if idx - 1 < len(labels) else f'套餐{idx}'
+        tier_name = tier_names[idx - 1] if idx - 1 < len(tier_names) else f'第{idx}档'
+        cpu_text = plan.cpu or '-'
+        if isinstance(cpu_text, str):
+            cpu_text = cpu_text.replace('micro_3_0', '微型').replace('small_3_0', '小型').replace('medium_3_0', '中型').replace('large_3_0', '大型').replace('xlarge_3_0', '超大型').replace('2xlarge_3_0', '双倍超大型')
         lines.append(
-            f'{label}\n'
-            f'规格: {plan.plan_name}\n'
-            f'配置: {plan.cpu or "-"} / {plan.memory or "-"} / {plan.storage or "-"}\n'
-            f'带宽: {plan.bandwidth or "-"}\n'
+            f'{label}｜{tier_name}\n'
+            f'算力档位: {cpu_text}\n'
+            f'内存: {plan.memory or "-"}\n'
+            f'硬盘: {plan.storage or "-"}\n'
+            f'流量: {plan.bandwidth or "-"}\n'
             f'价格: {fmt_amount(plan.price)} {plan.currency}\n'
         )
     lines.append('请选择下面的套餐按钮：')
