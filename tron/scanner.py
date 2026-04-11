@@ -159,7 +159,7 @@ def _get_pending_recharges(currency: str):
 @sync_to_async
 def _get_pending_cloud_server_orders(currency: str):
     return list(
-        CloudServerOrder.objects.filter(pay_method='address', status='pending', currency=currency)
+        CloudServerOrder.objects.filter(pay_method='address', status__in=['pending', 'renew_pending'], currency=currency)
         .order_by('created_at')
     )
 
@@ -207,11 +207,21 @@ def _confirm_cloud_server_order(order_id: int, tx_hash: str):
     from django.db import transaction
     with transaction.atomic():
         order = CloudServerOrder.objects.select_for_update().get(id=order_id)
-        if order.status != 'pending':
+        if order.status not in {'pending', 'renew_pending'}:
             return None
-        order.status = 'paid'
         order.tx_hash = tx_hash
         order.paid_at = timezone.now()
+        if order.status == 'renew_pending':
+            base = order.service_expires_at or timezone.now()
+            if base < timezone.now():
+                base = timezone.now()
+            order.service_expires_at = base + timezone.timedelta(days=order.lifecycle_days or 31)
+            order.last_renewed_at = timezone.now()
+            order.status = 'completed'
+            order.provision_note = '续费成功，服务有效期已顺延。'
+            order.save(update_fields=['tx_hash', 'paid_at', 'service_expires_at', 'last_renewed_at', 'status', 'provision_note', 'updated_at'])
+            return order
+        order.status = 'paid'
         order.provision_note = '已收款，等待用户确认 MTProxy 端口后进入创建流程。默认端口为 9528。'
         order.save(update_fields=['status', 'tx_hash', 'paid_at', 'provision_note', 'updated_at'])
     return order
@@ -309,6 +319,12 @@ async def _process_payment(transfer: dict) -> bool:
                     '💰 云服务器订单匹配 → %s  %s %s  tx=%s',
                     confirmed.order_no, fmt_amount(amount), currency, tx_hash,
                 )
+                if confirmed.status == 'completed':
+                    await _notify_user(
+                        confirmed.user_id,
+                        f'✅ 云服务器订单 {confirmed.order_no} 续费成功！\n新的到期时间: {confirmed.service_expires_at}',
+                    )
+                    return True
                 await _notify_user(
                     confirmed.user_id,
                     f'✅ 云服务器订单 {confirmed.order_no} 支付成功！\n'

@@ -13,6 +13,7 @@ from .cloud_servers import (
     mark_cloud_server_ip_change_requested,
     rebind_cloud_server_user,
 )
+from .cloud_queries import get_user_cloud_server, list_user_cloud_servers
 from .monitoring import (
     add_monitor,
     delete_monitor,
@@ -41,6 +42,7 @@ __all__ = [
     'get_order',
     'get_product',
     'get_trx_price',
+    'get_user_cloud_server',
     'mark_cloud_server_ip_change_requested',
     'rebind_cloud_server_user',
     'list_custom_regions',
@@ -49,6 +51,7 @@ __all__ = [
     'list_products',
     'list_region_plans',
     'list_recharges',
+    'list_user_cloud_servers',
     'set_cloud_server_port',
     'set_monitor_threshold',
     'toggle_monitor_flag',

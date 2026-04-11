@@ -104,6 +104,27 @@ def custom_pay_keyboard(order_id: int):
     return kb.as_markup()
 
 
+def cloud_server_list(orders):
+    kb = InlineKeyboardBuilder()
+    for order in orders:
+        status = order.get_status_display() if hasattr(order, 'get_status_display') else order.status
+        kb.button(text=f'{order.region_name} | {order.public_ip or order.previous_public_ip or "未分配IP"} | {status}', callback_data=f'cloud:detail:{order.id}')
+    kb.adjust(1)
+    kb.row(InlineKeyboardButton(text='🔙 返回主菜单', callback_data='custom:back'))
+    return kb.as_markup()
+
+
+def cloud_server_detail(order_id: int, can_renew: bool, can_change_ip: bool):
+    kb = InlineKeyboardBuilder()
+    if can_renew:
+        kb.button(text='🔄 续费31天', callback_data=f'cloud:renew:{order_id}')
+    if can_change_ip:
+        kb.button(text='🌐 更换IP', callback_data=f'cloud:ip:{order_id}')
+    kb.button(text='🔙 返回列表', callback_data='cloud:list')
+    kb.adjust(2, 1)
+    return kb.as_markup()
+
+
 def recharge_currency_menu():
     kb = InlineKeyboardBuilder()
     kb.row(InlineKeyboardButton(text='💵 USDT', callback_data='rcur:USDT'))

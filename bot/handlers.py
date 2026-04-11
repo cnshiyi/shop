@@ -18,6 +18,7 @@ from bot.keyboards import (
     pay_method_keyboard, order_list as kb_order_list,
     recharge_list as kb_recharge_list, profile_menu,
     custom_region_menu, custom_plan_menu, custom_pay_keyboard,
+    cloud_server_list, cloud_server_detail,
 )
 from biz.services import (
     add_monitor, create_address_order, buy_with_balance, create_recharge,
@@ -25,7 +26,8 @@ from biz.services import (
     list_monitors, list_orders, list_products, list_recharges,
     set_monitor_threshold, toggle_monitor_flag,
     list_custom_regions, list_region_plans, create_cloud_server_order, get_cloud_plan,
-    set_cloud_server_port,
+    set_cloud_server_port, create_cloud_server_renewal, list_user_cloud_servers,
+    get_user_cloud_server, mark_cloud_server_ip_change_requested,
 )
 from core.formatters import fmt_amount, fmt_pay_amount
 from core.models import SiteConfig
@@ -243,7 +245,11 @@ def register_handlers(dp: Dispatcher):
             await message.answer('🛠 定制服务\n\n请联系管理员提交你的定制需求，后续这里可以接入定制下单流程。', reply_markup=main_menu())
 
         elif text == '🔎 查询':
-            await message.answer('🔎 查询中心\n\n目前可通过个人中心查看订单、充值记录与地址监控。后续这里可以扩展独立查询功能。', reply_markup=main_menu())
+            servers = await list_user_cloud_servers(user.id)
+            if not servers:
+                await message.answer('🔎 查询中心\n\n你还没有云服务器记录。', reply_markup=main_menu())
+            else:
+                await message.answer('🔎 我的云服务器\n\n请选择要查看的服务器：', reply_markup=cloud_server_list(servers))
 
         elif text == '👤 个人中心':
             await message.answer(
@@ -358,8 +364,73 @@ def register_handlers(dp: Dispatcher):
         await callback.message.reply('✍️ 请输入自定义端口（1025-65535）：')
         await callback.answer()
 
-    @dp.callback_query(F.data.startswith('product:'))
-    async def cb_product_detail(callback: CallbackQuery):
+    @dp.callback_query(F.data == 'cloud:list')
+    async def cb_cloud_list(callback: CallbackQuery):
+        user = await get_or_create_user(callback.from_user.id, callback.from_user.username, callback.from_user.first_name)
+        servers = await list_user_cloud_servers(user.id)
+        if not servers:
+            await callback.message.edit_text('你还没有云服务器记录。')
+        else:
+            await callback.message.edit_text('🔎 我的云服务器\n\n请选择要查看的服务器：', reply_markup=cloud_server_list(servers))
+        await callback.answer()
+
+    @dp.callback_query(F.data.startswith('cloud:detail:'))
+    async def cb_cloud_detail(callback: CallbackQuery):
+        user = await get_or_create_user(callback.from_user.id, callback.from_user.username, callback.from_user.first_name)
+        order_id = int(callback.data.split(':')[2])
+        order = await get_user_cloud_server(order_id, user.id)
+        if not order:
+            await callback.answer('服务器记录不存在', show_alert=True)
+            return
+        can_renew = bool(order.public_ip or order.previous_public_ip)
+        can_change_ip = order.status in {'completed', 'expiring', 'suspended'}
+        text = (
+            '☁️ 云服务器详情\n\n'
+            f'订单号: {order.order_no}\n'
+            f'地区: {order.region_name}\n'
+            f'套餐: {order.plan_name}\n'
+            f'状态: {order.get_status_display()}\n'
+            f'MTProxy 链接: {order.mtproxy_link or "尚未生成"}\n'
+            f'当前IP: {order.public_ip or "无"}\n'
+            f'历史IP: {order.previous_public_ip or "无"}\n'
+            f'到期时间: {order.service_expires_at or "未设置"}\n'
+            f'IP保留到期: {order.ip_recycle_at or "未设置"}'
+        )
+        await callback.message.edit_text(text, reply_markup=cloud_server_detail(order.id, can_renew, can_change_ip))
+        await callback.answer()
+
+    @dp.callback_query(F.data.startswith('cloud:renew:'))
+    async def cb_cloud_renew(callback: CallbackQuery):
+        user = await get_or_create_user(callback.from_user.id, callback.from_user.username, callback.from_user.first_name)
+        order_id = int(callback.data.split(':')[2])
+        order = await create_cloud_server_renewal(order_id, user.id, 31)
+        if not order:
+            await callback.answer('续费订单创建失败', show_alert=True)
+            return
+        receive_address = _receive_address()
+        await callback.message.edit_text(
+            '🔄 云服务器续费订单已创建\n\n'
+            f'订单号: {order.order_no}\n'
+            '续费时长: 31天\n'
+            f'支付金额: {fmt_pay_amount(order.pay_amount)} {order.currency}\n'
+            f'收款地址: `{receive_address}`\n\n'
+            '只要 IP 仍在保留期内，到账后即可恢复服务。',
+            parse_mode='Markdown',
+        )
+        await callback.answer()
+
+    @dp.callback_query(F.data.startswith('cloud:ip:'))
+    async def cb_cloud_change_ip(callback: CallbackQuery):
+        user = await get_or_create_user(callback.from_user.id, callback.from_user.username, callback.from_user.first_name)
+        order_id = int(callback.data.split(':')[2])
+        order = await get_user_cloud_server(order_id, user.id)
+        if not order:
+            await callback.answer('服务器记录不存在', show_alert=True)
+            return
+        await mark_cloud_server_ip_change_requested(order.id)
+        await callback.answer('已记录更换 IP 请求')
+        await callback.message.reply('🌐 已提交更换 IP 请求，后台处理后会同步给你新的 MTProxy 链接。')
+
         product = await get_product(int(callback.data.split(':')[1]))
         if not product:
             await callback.message.edit_text('商品不存在。')
