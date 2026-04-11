@@ -6,6 +6,9 @@ from asgiref.sync import sync_to_async
 
 logger = logging.getLogger(__name__)
 
+MTPROXY_DIR = '/home/mtproxy1'
+MTPROXY_PORT = 8443
+
 DEBIAN_BBR_SCRIPT = r'''#!/usr/bin/env bash
 set -e
 export DEBIAN_FRONTEND=noninteractive
@@ -19,13 +22,13 @@ sysctl --system
 sysctl net.ipv4.tcp_congestion_control
 '''
 
-DEBIAN_MTPROXY_SCRIPT = r'''#!/usr/bin/env bash
+DEBIAN_MTPROXY_SCRIPT = rf'''#!/usr/bin/env bash
 set -e
-mkdir -p /home/mtproxy
-cd /home/mtproxy
+mkdir -p {MTPROXY_DIR}
+cd {MTPROXY_DIR}
 curl -s -o mtproxy.sh https://raw.githubusercontent.com/ellermister/mtproxy/master/mtproxy.sh
 chmod +x mtproxy.sh
-bash mtproxy.sh
+printf '%s\n' '{MTPROXY_PORT}' | bash mtproxy.sh
 '''
 
 
