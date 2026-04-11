@@ -20,6 +20,7 @@
 ## 目录结构
 - `run.py`：PyCharm 一键启动入口
 - `shop/settings.py`：Django 配置
+- `biz/`：统一业务模型聚合层（用户、商品、订单、充值、监控）
 - `bot/`：机器人菜单、回调、业务逻辑
 - `tron/scanner.py`：TRON 转账扫描与支付匹配
 - `tron/resource_checker.py`：TRON 资源巡检（能量 / 带宽）

@@ -109,7 +109,7 @@ async def refresh_config(keys: list[str]):
 
 async def init_monitor_cache():
     """启动时从数据库全量加载监控地址到 Redis。"""
-    from monitors.models import AddressMonitor
+    from biz.models import AddressMonitor
     r = await _get_redis()
     if r is None:
         logger.info('跳过 Redis 监控缓存初始化（Redis 不可用）')
@@ -213,7 +213,7 @@ async def get_monitor_addresses() -> dict[str, list[dict]]:
 
 @sync_to_async
 def _db_fallback_get_monitors():
-    from monitors.models import AddressMonitor
+    from biz.models import AddressMonitor
     qs = AddressMonitor.objects.filter(is_active=True)
     result: dict[str, list[dict]] = {}
     for mon in qs:

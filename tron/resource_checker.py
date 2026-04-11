@@ -9,9 +9,7 @@ from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 from asgiref.sync import sync_to_async
 from django.utils import timezone
 
-from tron.cache import get_config, get_monitor_addresses
-from users.models import TelegramUser
-from monitors.models import AddressMonitor
+from biz.models import TelegramUser, AddressMonitor
 
 logger = logging.getLogger(__name__)
 

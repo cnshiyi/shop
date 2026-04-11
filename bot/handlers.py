@@ -361,7 +361,7 @@ def register_handlers(dp: Dispatcher):
 
     @dp.callback_query(F.data.startswith('order_detail:'))
     async def cb_order_detail(callback: CallbackQuery):
-        from shopbiz.models import Order
+        from biz.models import Order
         order = await Order.objects.filter(id=int(callback.data.split(':')[1])).afirst()
         if not order:
             await callback.message.edit_text('订单不存在。')

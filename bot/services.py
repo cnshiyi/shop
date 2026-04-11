@@ -6,10 +6,7 @@ from asgiref.sync import sync_to_async
 from django.db import transaction
 from django.utils import timezone
 
-from monitors.models import AddressMonitor
-from payments.models import Recharge
-from shopbiz.models import Order, Product
-from users.models import TelegramUser
+from biz.models import AddressMonitor, Recharge, Order, Product, TelegramUser
 
 
 def _generate_order_no() -> str:
