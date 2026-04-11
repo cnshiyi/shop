@@ -10,6 +10,8 @@ from asgiref.sync import sync_to_async
 from django.utils import timezone
 
 from biz.models import TelegramUser, AddressMonitor
+from core.cache import get_config
+from monitoring.cache import get_monitor_addresses
 
 logger = logging.getLogger(__name__)
 

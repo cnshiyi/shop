@@ -15,6 +15,8 @@ from asgiref.sync import sync_to_async
 from django.utils import timezone
 
 from biz.models import AddressMonitor, Recharge, Order, Product, TelegramUser
+from core.cache import get_config, bump_daily_stats
+from monitoring.cache import get_monitor_addresses, maybe_sync_monitors, init_monitor_cache
 
 logger = logging.getLogger(__name__)
 

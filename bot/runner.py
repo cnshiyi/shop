@@ -10,7 +10,8 @@ django.setup()
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from bot.config import BOT_TOKEN
 from bot.handlers import create_dispatcher_and_register
-from tron.cache import init_all, close as cache_close
+from core.cache import refresh_config, close as cache_close
+from monitoring.cache import init_monitor_cache
 from tron.resource_checker import check_resources, set_bot as set_resource_bot
 from tron.scanner import scan_block, set_bot
 
@@ -24,7 +25,8 @@ async def run_bot():
 
     # 初始化 Redis 缓存
     try:
-        await init_all()
+        await refresh_config(['receive_address', 'trongrid_api_key'])
+        await init_monitor_cache()
     except Exception as e:
         logger.error('Redis 缓存初始化失败: %s', e)
 

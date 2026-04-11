@@ -27,6 +27,8 @@
 - `biz/`：统一业务模型聚合层（用户、商品、订单、充值、监控）
 - `ARCHITECTURE.md`：目录分层与后续迁移规划
 - `bot/`：机器人菜单、回调、业务逻辑
+- `core/cache.py`：Redis 连接、配置缓存、每日统计等公共缓存能力
+- `monitoring/cache.py`：地址监控缓存
 - `tron/scanner.py`：TRON 转账扫描与支付匹配
 - `tron/resource_checker.py`：TRON 资源巡检（能量 / 带宽）
 - `tron/cache.py`：Redis 缓存、监控地址缓存、每日统计

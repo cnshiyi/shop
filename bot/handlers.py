@@ -104,7 +104,7 @@ def register_handlers(dp: Dispatcher):
         user = await get_or_create_user(message.from_user.id, message.from_user.username, message.from_user.first_name)
         mon = await add_monitor(user.id, data['monitor_address'], remark)
         # 写入 Redis 缓存
-        from tron.cache import add_monitor_to_cache
+        from monitoring.cache import add_monitor_to_cache
         await add_monitor_to_cache(
             mon.id, user.id, mon.address, remark,
             mon.usdt_threshold, mon.trx_threshold,
@@ -127,7 +127,7 @@ def register_handlers(dp: Dispatcher):
         user = await get_or_create_user(message.from_user.id, message.from_user.username, message.from_user.first_name)
         mid = data['threshold_monitor_id']
         await set_monitor_threshold(mid, user.id, 'USDT', val)
-        from tron.cache import update_monitor_threshold_in_cache
+        from monitoring.cache import update_monitor_threshold_in_cache
         mon = await get_monitor(mid, user.id)
         if mon:
             await update_monitor_threshold_in_cache(mon.address, 'USDT', val)
@@ -147,7 +147,7 @@ def register_handlers(dp: Dispatcher):
         user = await get_or_create_user(message.from_user.id, message.from_user.username, message.from_user.first_name)
         mid = data['threshold_monitor_id']
         await set_monitor_threshold(mid, user.id, 'TRX', val)
-        from tron.cache import update_monitor_threshold_in_cache
+        from monitoring.cache import update_monitor_threshold_in_cache
         mon = await get_monitor(mid, user.id)
         if mon:
             await update_monitor_threshold_in_cache(mon.address, 'TRX', val)
@@ -451,7 +451,7 @@ def register_handlers(dp: Dispatcher):
         if not monitor:
             await callback.answer('监控不存在', show_alert=True)
             return
-        from tron.cache import update_monitor_flag_in_cache
+        from monitoring.cache import update_monitor_flag_in_cache
         await update_monitor_flag_in_cache(monitor.address, field, getattr(monitor, field))
         await callback.message.edit_text(
             f'{"🟢" if monitor.is_active else "🔴"} 监控详情\n地址: <code>{monitor.address}</code>\n备注: {monitor.remark or "无"}\n'
@@ -487,7 +487,7 @@ def register_handlers(dp: Dispatcher):
         mid = int(callback.data.split(':')[2])
         mon = await get_monitor(mid, user.id)
         if mon:
-            from tron.cache import remove_monitor_from_cache
+            from monitoring.cache import remove_monitor_from_cache
             await remove_monitor_from_cache(mon.address)
         await delete_monitor(mid, user.id)
         await callback.message.edit_text('🗑 监控已删除。', reply_markup=monitor_menu())
