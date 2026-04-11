@@ -1,6 +1,25 @@
-from django.contrib import admin
+from django.contrib import admin, messages
+from django.utils.html import format_html
 
+from bot.config import BOT_TOKEN
+from cloud.bootstrap import build_mtproxy_links
 from .models import Product, Order, CloudServerPlan, CloudServerOrder
+
+
+def _send_telegram_message(chat_id: int, text: str):
+    import json
+    from urllib import request
+
+    if not BOT_TOKEN or not chat_id:
+        return False, '缺少 BOT_TOKEN 或 chat_id'
+    url = f'https://api.telegram.org/bot{BOT_TOKEN}/sendMessage'
+    payload = json.dumps({'chat_id': chat_id, 'text': text}).encode('utf-8')
+    req = request.Request(url, data=payload, headers={'Content-Type': 'application/json'})
+    try:
+        with request.urlopen(req, timeout=20) as resp:
+            return 200 <= resp.status < 300, f'HTTP {resp.status}'
+    except Exception as exc:
+        return False, str(exc)
 
 
 @admin.register(Product)
@@ -21,10 +40,47 @@ class CloudServerPlanAdmin(admin.ModelAdmin):
 
 @admin.register(CloudServerOrder)
 class CloudServerOrderAdmin(admin.ModelAdmin):
-    list_display = ('order_no', 'user', 'provider', 'region_name', 'plan_name', 'server_name', 'public_ip', 'service_expires_at', 'ip_recycle_at', 'status', 'created_at')
+    list_display = ('order_no', 'user', 'provider', 'region_name', 'plan_name', 'server_name', 'public_ip', 'service_expires_at', 'ip_recycle_at', 'status', 'mtproxy_link_preview', 'created_at')
     list_filter = ('provider', 'region_name', 'status', 'currency', 'pay_method', 'created_at')
     search_fields = ('order_no', 'server_name', 'public_ip', 'plan_name', 'region_name', 'tx_hash', 'user__tg_user_id', 'user__username')
     readonly_fields = ('created_at', 'paid_at', 'completed_at', 'updated_at')
+    actions = ('resend_mtproxy_links',)
+
+    def mtproxy_link_preview(self, obj):
+        if not obj.mtproxy_link:
+            return '-'
+        return format_html('<a href="{}" target="_blank">代理链接</a>', obj.mtproxy_link)
+    mtproxy_link_preview.short_description = '代理链接'
+
+    def save_model(self, request, obj, form, change):
+        if change:
+            old = CloudServerOrder.objects.filter(pk=obj.pk).first()
+            if old and (old.public_ip != obj.public_ip or old.mtproxy_port != obj.mtproxy_port) and obj.mtproxy_secret and obj.public_ip:
+                tg_link, _ = build_mtproxy_links(obj.public_ip, obj.mtproxy_port, obj.mtproxy_secret)
+                obj.mtproxy_host = obj.public_ip
+                obj.mtproxy_link = tg_link
+                obj.previous_public_ip = old.public_ip if old.public_ip != obj.public_ip else old.previous_public_ip
+                note = '后台更新了 IP/端口，已重新生成 MTProxy 链接。'
+                obj.provision_note = '\n'.join(filter(None, [obj.provision_note, note]))
+        super().save_model(request, obj, form, change)
+
+    @admin.action(description='重发 MTProxy 链接给用户')
+    def resend_mtproxy_links(self, request, queryset):
+        success = 0
+        failed = 0
+        for order in queryset:
+            if not order.mtproxy_link or not order.user_id or not getattr(order.user, 'tg_user_id', None):
+                failed += 1
+                continue
+            ok, _ = _send_telegram_message(order.user.tg_user_id, f'🔁 MTProxy 链接已重新发送\n\n{order.mtproxy_link}')
+            if ok:
+                success += 1
+            else:
+                failed += 1
+        if success:
+            self.message_user(request, f'成功重发 {success} 条代理链接。', level=messages.SUCCESS)
+        if failed:
+            self.message_user(request, f'有 {failed} 条代理链接重发失败。', level=messages.WARNING)
 
 
 @admin.register(Order)

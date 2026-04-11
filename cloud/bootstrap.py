@@ -70,6 +70,12 @@ async def install_bbr(ip: str, username: str, password: str) -> tuple[bool, str]
     return await _run_ssh_script(ip, username, password, DEBIAN_BBR_SCRIPT)
 
 
+def build_mtproxy_links(ip: str, port: int | str, secret: str) -> tuple[str, str]:
+    tg_link = f'tg://proxy?server={ip}&port={port}&secret={secret}'
+    tme_link = f'https://t.me/proxy?server={ip}&port={port}&secret={secret}'
+    return tg_link, tme_link
+
+
 async def install_mtproxy(ip: str, username: str, password: str, port: int = MTPROXY_PORT) -> tuple[bool, str]:
     if not ip or not username or not password:
         return False, '缺少 SSH 连接参数，无法执行 MTProxy 安装。'
@@ -83,8 +89,7 @@ async def install_mtproxy(ip: str, username: str, password: str, port: int = MTP
         elif line.startswith('MTPROXY_PORT='):
             actual_port = line.split('=', 1)[1].strip()
     if secret:
-        tg_link = f'tg://proxy?server={ip}&port={actual_port}&secret={secret}'
-        tme_link = f'https://t.me/proxy?server={ip}&port={actual_port}&secret={secret}'
+        tg_link, tme_link = build_mtproxy_links(ip, actual_port, secret)
         return ok, f'MTProxy 安装完成\n端口: {actual_port}\nTG链接: {tg_link}\n分享链接: {tme_link}'
     return ok, output.replace('BBR 初始化', 'MTProxy 安装')
 
