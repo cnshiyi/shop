@@ -307,13 +307,21 @@ async def _get_fee_text(tx_hash: str) -> str:
 
 # ── 监控通知 ──────────────────────────────────────────────────────────────
 
-async def _process_monitor_notification(transfer: dict, monitors: list[dict], daily_stats: dict[str, str]):
+async def _process_monitor_notification(transfer: dict, monitors: list[dict], daily_stats: dict[str, str], direction: str):
     amount = transfer['amount']
     currency = transfer['currency']
     from_addr = transfer['from']
     to_addr = transfer['to']
     tx_hash = transfer['tx_hash']
     tx_time = transfer.get('timestamp') or datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+    is_income = direction == 'income'
+    title_icon = '🟢' if is_income else '🔴'
+    title_word = '收入' if is_income else '支出'
+    amount_prefix = '+' if is_income else '-'
+    main_addr = to_addr if is_income else from_addr
+    peer_addr = from_addr if is_income else to_addr
+    peer_label = '💸 付款地址' if is_income else '📤 收款地址'
+    main_label = '📥 收款地址' if is_income else '💳 支出地址'
 
     for mon in monitors:
         if not mon.get('monitor_transfers', True):
@@ -330,21 +338,21 @@ async def _process_monitor_notification(transfer: dict, monitors: list[dict], da
         remark = mon.get('remark') or '(无备注)'
         fee_text = transfer.get('fee_text') or await _get_fee_text(tx_hash)
 
-        # 控制台日志：仅命中有格式化的详情
         logger.info(
             '\n'
             '  ┌─ 监控命中 ─────────────────────────────\n'
+            '  │ 类型     : %s\n'
             '  │ 地址备注 : %s\n'
             '  │ 监控地址 : %s\n'
-            '  │ 付款方   : %s\n'
+            '  │ 对手方   : %s\n'
             '  │ 交易时间 : %s\n'
             '  │ 币种     : %s\n'
-            '  │ 金额     : +%s %s\n'
+            '  │ 金额     : %s%s %s\n'
             '  │ 手续费   : %s\n'
             '  │ TX Hash  : %s\n'
             '  └────────────────────────────────────────',
-            remark, to_addr, _short_addr(from_addr),
-            tx_time, currency, fmt_amount(amount), currency,
+            title_word, remark, main_addr, _short_addr(peer_addr),
+            tx_time, currency, amount_prefix, fmt_amount(amount), currency,
             fee_text, tx_hash,
         )
 
@@ -353,12 +361,12 @@ async def _process_monitor_notification(transfer: dict, monitors: list[dict], da
         profit = income - expense
 
         text = (
-            f'🟢 收入{currency} 提醒  +<code>{escape(fmt_amount(amount))} {escape(currency)}</code>\n\n'
+            f'{title_icon} {title_word}{currency} 提醒  <code>{amount_prefix}{escape(fmt_amount(amount))} {escape(currency)}</code>\n\n'
             f'🏷️ 地址备注: {escape(remark)}\n\n'
-            f'💸 付款地址: <code>{escape(from_addr)}</code>\n'
-            f'📥 收款地址: <code>{escape(to_addr)}</code>\n'
+            f'{peer_label}: <code>{escape(peer_addr)}</code>\n'
+            f'{main_label}: <code>{escape(main_addr)}</code>\n'
             f'🕒 交易时间: <code>{escape(tx_time)}</code>\n'
-            f'💰 交易金额: <code>+{escape(fmt_amount(amount))} {escape(currency)}</code>\n'
+            f'💰 交易金额: <code>{amount_prefix}{escape(fmt_amount(amount))} {escape(currency)}</code>\n'
             f'👛 USDT余额: {escape(fmt_amount(user.balance))} USDT\n'
             f'🪙 TRX余额: {escape(fmt_amount(user.balance_trx))} TRX\n'
             f'⛽ 转账消耗: <code>{escape(fee_text)}</code>\n\n'
@@ -369,9 +377,10 @@ async def _process_monitor_notification(transfer: dict, monitors: list[dict], da
 
         _cache_tx_detail(tx_hash, {
             'remark': remark, 'from': from_addr, 'to': to_addr,
-            'time': tx_time, 'amount': fmt_amount(amount),
+            'time': tx_time, 'amount': f'{amount_prefix}{fmt_amount(amount)}',
             'currency': currency, 'tx_hash': tx_hash,
             'raw': transfer.get('raw_tx', ''), 'fee_text': fee_text,
+            'direction': direction,
         })
         await _notify_user(mon['user_id'], text, reply_markup=_build_tx_detail_keyboard(tx_hash), parse_mode='HTML')
 
@@ -455,9 +464,10 @@ async def scan_block():
             # 监控通知（有格式化详情日志）
             if to_addr in monitor_cache:
                 stats = await bump_daily_stats(to_addr, transfer['currency'], 'income', transfer['amount'])
-                await _process_monitor_notification(transfer, monitor_cache[to_addr], stats)
+                await _process_monitor_notification(transfer, monitor_cache[to_addr], stats, 'income')
             if from_addr in monitor_cache and from_addr != to_addr:
-                await bump_daily_stats(from_addr, transfer['currency'], 'expense', transfer['amount'])
+                stats = await bump_daily_stats(from_addr, transfer['currency'], 'expense', transfer['amount'])
+                await _process_monitor_notification(transfer, monitor_cache[from_addr], stats, 'expense')
 
         await _log_scan_summary()
     except Exception as e:

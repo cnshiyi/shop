@@ -508,6 +508,7 @@ def register_handlers(dp: Dispatcher):
             return
         text = (
             f'🔍 交易详情\n\n'
+            f'类型: {"收入" if detail.get("direction") == "income" else "支出"}\n'
             f'交易哈希: {detail["tx_hash"]}\n'
             f'币种: {detail["currency"]}\n'
             f'金额: {detail["amount"]} {detail["currency"]}\n'
