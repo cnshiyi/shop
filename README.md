@@ -75,7 +75,8 @@ python run.py
 - 再查看该地区可选套餐价格表
 - 选择套餐后生成云服务器订单
 - 用户按指定金额付款后，系统自动监控到账并进入创建流程
-- Bot 的 FSM 存储初始化已从 `bot/handlers.py` 抽离到 `bot/fsm.py`
+- Bot 状态类已拆到 `bot/states/`，并通过 `bot/states/__init__.py` 统一导出调度
+- 当前已拆分为 `monitor.py`、`recharge.py`、`custom.py`
 - `bot/fsm.py` 统一管理 Redis FSM、Memory 回退、TTL、连接复用与关闭清理
 - BBR 完成后继续安装 MTProxy
 - MTProxy 使用默认目录 `/home/mtproxy`

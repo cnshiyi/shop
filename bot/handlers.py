@@ -5,11 +5,11 @@ from decimal import Decimal, InvalidOperation
 from aiogram import Bot, Dispatcher, F
 from aiogram.filters import CommandStart
 from aiogram.fsm.context import FSMContext
-from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import CallbackQuery, Message
 
 from bot.config import BOT_TOKEN
 from bot.fsm import create_fsm_storage
+from bot.states import CustomServerStates, MonitorStates, RechargeStates
 from biz.services import get_exchange_rate_display, usdt_to_trx
 from bot.keyboards import (
     main_menu, monitor_menu, monitor_list as kb_monitor_list,
@@ -32,21 +32,6 @@ from core.models import SiteConfig
 from cloud.provisioning import provision_cloud_server
 
 logger = logging.getLogger(__name__)
-
-
-class MonitorStates(StatesGroup):
-    waiting_address = State()
-    waiting_remark = State()
-    waiting_usdt_threshold = State()
-    waiting_trx_threshold = State()
-
-
-class RechargeStates(StatesGroup):
-    waiting_amount = State()
-
-
-class CustomServerStates(StatesGroup):
-    waiting_port = State()
 
 
 def _products_page(products, page: int, total: int):

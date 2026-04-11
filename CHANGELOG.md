@@ -340,6 +340,15 @@
 ### 修复
 - 让 `handlers.py` 只保留交互注册职责，降低后续状态扩展复杂度
 
+## v0.4.8 - 2026-04-12
+
+### 调整
+- 将 `MonitorStates`、`RechargeStates`、`CustomServerStates` 拆分到 `bot/states/` 目录
+- 新增 `bot/states/__init__.py` 作为统一状态调度出口
+
+### 修复
+- 让状态定义与处理器逻辑解耦，便于后续继续扩展更多流程状态
+
 ## 当前通知逻辑
 - 转入：`🟢 收入提醒`
 - 转出：`🔴 支出提醒`
