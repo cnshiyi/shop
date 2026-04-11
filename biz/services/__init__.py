@@ -7,6 +7,12 @@ from .commerce import (
     list_products,
 )
 from .custom import create_cloud_server_order, get_cloud_plan, list_custom_regions, list_region_plans, set_cloud_server_port, build_cloud_server_name
+from .cloud_servers import (
+    apply_cloud_server_renewal,
+    create_cloud_server_renewal,
+    mark_cloud_server_ip_change_requested,
+    rebind_cloud_server_user,
+)
 from .monitoring import (
     add_monitor,
     delete_monitor,
@@ -25,6 +31,7 @@ __all__ = [
     'build_cloud_server_name',
     'create_address_order',
     'create_cloud_server_order',
+    'create_cloud_server_renewal',
     'create_recharge',
     'delete_monitor',
     'get_exchange_rate_display',
@@ -34,6 +41,8 @@ __all__ = [
     'get_order',
     'get_product',
     'get_trx_price',
+    'mark_cloud_server_ip_change_requested',
+    'rebind_cloud_server_user',
     'list_custom_regions',
     'list_monitors',
     'list_orders',
@@ -44,4 +53,5 @@ __all__ = [
     'set_monitor_threshold',
     'toggle_monitor_flag',
     'usdt_to_trx',
+    'apply_cloud_server_renewal',
 ]
