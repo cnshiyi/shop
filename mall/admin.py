@@ -1,4 +1,5 @@
 from django.contrib import admin, messages
+from django.utils import timezone
 from django.utils.html import format_html
 
 from bot.config import BOT_TOKEN
@@ -44,7 +45,7 @@ class CloudServerOrderAdmin(admin.ModelAdmin):
     list_filter = ('provider', 'region_name', 'status', 'currency', 'pay_method', 'created_at')
     search_fields = ('order_no', 'server_name', 'public_ip', 'plan_name', 'region_name', 'tx_hash', 'user__tg_user_id', 'user__username')
     readonly_fields = ('created_at', 'paid_at', 'completed_at', 'updated_at')
-    actions = ('resend_mtproxy_links',)
+    actions = ('renew_31_days', 'restore_service', 'resend_mtproxy_links')
 
     def mtproxy_link_preview(self, obj):
         if not obj.mtproxy_link:
@@ -55,14 +56,40 @@ class CloudServerOrderAdmin(admin.ModelAdmin):
     def save_model(self, request, obj, form, change):
         if change:
             old = CloudServerOrder.objects.filter(pk=obj.pk).first()
+            notes = []
+            if old and old.user_id != obj.user_id:
+                obj.last_user_id = old.user.tg_user_id if hasattr(old.user, 'tg_user_id') else old.last_user_id
+                notes.append(f'后台改绑用户: {old.user_id} -> {obj.user_id}')
             if old and (old.public_ip != obj.public_ip or old.mtproxy_port != obj.mtproxy_port) and obj.mtproxy_secret and obj.public_ip:
                 tg_link, _ = build_mtproxy_links(obj.public_ip, obj.mtproxy_port, obj.mtproxy_secret)
                 obj.mtproxy_host = obj.public_ip
                 obj.mtproxy_link = tg_link
                 obj.previous_public_ip = old.public_ip if old.public_ip != obj.public_ip else old.previous_public_ip
-                note = '后台更新了 IP/端口，已重新生成 MTProxy 链接。'
-                obj.provision_note = '\n'.join(filter(None, [obj.provision_note, note]))
+                notes.append('后台更新了 IP/端口，旧 MTProxy 链接已失效，已重新生成新链接。')
+            if notes:
+                obj.provision_note = '\n'.join(filter(None, [obj.provision_note, *notes]))
         super().save_model(request, obj, form, change)
+
+    @admin.action(description='手动续费/恢复31天')
+    def renew_31_days(self, request, queryset):
+        now = timezone.now()
+        count = 0
+        for order in queryset:
+            base = order.service_expires_at or now
+            if base < now:
+                base = now
+            order.service_expires_at = base + timezone.timedelta(days=31)
+            order.last_renewed_at = now
+            order.status = 'completed'
+            order.provision_note = '\n'.join(filter(None, [order.provision_note, '后台手动续费/恢复 31 天。']))
+            order.save(update_fields=['service_expires_at', 'last_renewed_at', 'status', 'provision_note', 'updated_at'])
+            count += 1
+        self.message_user(request, f'已手动续费/恢复 {count} 条云服务器订单。', level=messages.SUCCESS)
+
+    @admin.action(description='手动恢复为已创建')
+    def restore_service(self, request, queryset):
+        count = queryset.update(status='completed', updated_at=timezone.now())
+        self.message_user(request, f'已恢复 {count} 条云服务器订单为已创建状态。', level=messages.SUCCESS)
 
     @admin.action(description='重发 MTProxy 链接给用户')
     def resend_mtproxy_links(self, request, queryset):
