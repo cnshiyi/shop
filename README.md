@@ -46,6 +46,11 @@
 - `MYSQL_PASSWORD`
 - `MYSQL_DATABASE`
 - `SCANNER_VERBOSE`
+- `AWS_ACCESS_KEY_ID`
+- `AWS_SECRET_ACCESS_KEY`
+- `ALIBABA_CLOUD_ACCESS_KEY_ID`
+- `ALIBABA_CLOUD_ACCESS_KEY_SECRET`
+- `DEFAULT_SERVER_IMAGE`
 
 ### 3. 执行迁移
 ```bash
@@ -70,6 +75,8 @@ python run.py
 - 再查看该地区可选套餐价格表
 - 选择套餐后生成云服务器订单
 - 用户按指定金额付款后，系统自动监控到账并进入创建流程
+- 已预留 `AWS 光帆服务器 / 阿里云轻量云` 创建接口与 AK/SK 配置项
+- 默认镜像按 `debian` 处理，AWS 登录方式按密码登录设计
 
 ### 个人中心
 - `📋 我的订单`

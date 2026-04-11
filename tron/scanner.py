@@ -15,6 +15,7 @@ from asgiref.sync import sync_to_async
 from django.utils import timezone
 
 from biz.models import AddressMonitor, Recharge, Order, Product, TelegramUser, CloudServerOrder
+from cloud.provisioning import provision_cloud_server
 from core.cache import get_config, bump_daily_stats
 from monitoring.cache import get_monitor_addresses, maybe_sync_monitors, init_monitor_cache
 from tron.parser import parse_trx_transfer, parse_usdt_transfer
@@ -309,12 +310,27 @@ async def _process_payment(transfer: dict) -> bool:
                     '💰 云服务器订单匹配 → %s  %s %s  tx=%s',
                     confirmed.order_no, fmt_amount(amount), currency, tx_hash,
                 )
-                await _notify_user(
-                    confirmed.user_id,
-                    f'✅ 云服务器订单 {confirmed.order_no} 支付成功！\n'
-                    f'地区: {confirmed.region_name}\n套餐: {confirmed.plan_name}\n'
-                    '已进入创建流程，请等待管理员或自动化任务完成交付。',
-                )
+                provisioned = await provision_cloud_server(confirmed.id)
+                if provisioned and provisioned.status == 'completed':
+                    await _notify_user(
+                        confirmed.user_id,
+                        f'✅ 云服务器创建成功！\n'
+                        f'订单号: {provisioned.order_no}\n'
+                        f'公网IP: {provisioned.public_ip}\n'
+                        f'登录账号: {provisioned.login_user}\n'
+                        f'登录密码: {provisioned.login_password}\n'
+                        f'说明: {provisioned.provision_note or "无"}',
+                    )
+                elif provisioned:
+                    await _notify_user(
+                        confirmed.user_id,
+                        f'⚠️ 云服务器订单 {confirmed.order_no} 已到账，但创建失败。\n原因: {provisioned.provision_note or "未知错误"}',
+                    )
+                else:
+                    await _notify_user(
+                        confirmed.user_id,
+                        f'⚠️ 云服务器订单 {confirmed.order_no} 已到账，但未找到创建结果。',
+                    )
                 return True
             return False
     return False
