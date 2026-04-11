@@ -1,7 +1,7 @@
-from biz.models import TelegramUser
+from accounts.models import TelegramUser
 from mall.models import Product, Order
-from payments.models import Recharge
-from monitors.models import AddressMonitor
+from finance.models import Recharge
+from monitoring.models import AddressMonitor
 
 __all__ = [
     'TelegramUser',
