@@ -1,6 +1,8 @@
 from aiogram.types import InlineKeyboardButton
 from aiogram.utils.keyboard import InlineKeyboardBuilder, ReplyKeyboardBuilder
 
+from core.formatters import fmt_amount
+
 
 def main_menu():
     kb = ReplyKeyboardBuilder()
@@ -23,8 +25,9 @@ def profile_menu():
 
 def monitor_menu():
     kb = InlineKeyboardBuilder()
-    kb.row(InlineKeyboardButton(text='➕ 添加监控地址', callback_data='mon:add'))
-    kb.row(InlineKeyboardButton(text='📋 我的监控列表', callback_data='mon:list'))
+    kb.button(text='➕ 添加监控地址', callback_data='mon:add')
+    kb.button(text='📋 我的监控列表', callback_data='mon:list')
+    kb.adjust(2)
     return kb.as_markup()
 
 
@@ -34,8 +37,9 @@ def monitor_list(monitors):
         remark = f' ({m.remark})' if m.remark else ''
         short = f'{m.address[:6]}...{m.address[-4:]}'
         icon = '🟢' if m.is_active else '🔴'
-        kb.row(InlineKeyboardButton(text=f'{icon} {short}{remark}', callback_data=f'mon:detail:{m.id}'))
-    kb.row(InlineKeyboardButton(text='🔙 返回', callback_data='mon:back'))
+        kb.button(text=f'{icon} {short}{remark}', callback_data=f'mon:detail:{m.id}')
+    kb.button(text='🔙 返回', callback_data='mon:back')
+    kb.adjust(2, *([2] * (len(monitors) // 2)), 1)
     return kb.as_markup()
 
 
@@ -51,16 +55,20 @@ def monitor_detail(monitor_id: int, monitor_transfers: bool = True, monitor_reso
             callback_data=f'mon:toggle:{monitor_id}:resources'
         ),
     )
-    kb.row(InlineKeyboardButton(text='⚙️ 设置阈值', callback_data=f'mon:threshold:{monitor_id}'))
-    kb.row(InlineKeyboardButton(text='🗑 删除监控', callback_data=f'mon:delete:{monitor_id}'))
+    kb.row(
+        InlineKeyboardButton(text='⚙️ 设置阈值', callback_data=f'mon:threshold:{monitor_id}'),
+        InlineKeyboardButton(text='🗑 删除监控', callback_data=f'mon:delete:{monitor_id}'),
+    )
     kb.row(InlineKeyboardButton(text='🔙 返回列表', callback_data='mon:list'))
     return kb.as_markup()
 
 
 def monitor_threshold_currency(monitor_id: int):
     kb = InlineKeyboardBuilder()
-    kb.row(InlineKeyboardButton(text='💵 USDT', callback_data=f'mon:setthr:{monitor_id}:USDT'))
-    kb.row(InlineKeyboardButton(text='🪙 TRX', callback_data=f'mon:setthr:{monitor_id}:TRX'))
+    kb.row(
+        InlineKeyboardButton(text='💵 USDT', callback_data=f'mon:setthr:{monitor_id}:USDT'),
+        InlineKeyboardButton(text='🪙 TRX', callback_data=f'mon:setthr:{monitor_id}:TRX'),
+    )
     kb.row(InlineKeyboardButton(text='🔙 返回', callback_data=f'mon:detail:{monitor_id}'))
     return kb.as_markup()
 
@@ -106,7 +114,6 @@ def quantity_keyboard(product_id: int):
 
 
 def pay_method_keyboard(product_id: int, quantity: int, usdt_total, trx_total):
-from core.formatters import fmt_amount
     kb = InlineKeyboardBuilder()
     kb.row(InlineKeyboardButton(text=f'💳 余额 USDT ({fmt_amount(usdt_total)} U)', callback_data=f'pay:balance:{product_id}:USDT:{quantity}'))
     kb.row(InlineKeyboardButton(text=f'💳 余额 TRX ({fmt_amount(trx_total)} TRX)', callback_data=f'pay:balance:{product_id}:TRX:{quantity}'))
