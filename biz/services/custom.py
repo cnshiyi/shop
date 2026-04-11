@@ -13,10 +13,12 @@ AWS_REGION_NAMES = {
     'ap-south-1': '孟买',
     'ap-southeast-1': '新加坡',
     'ap-southeast-2': '悉尼',
+    'ap-southeast-3': '雅加达',
     'ap-northeast-1': '东京',
     'ap-northeast-2': '首尔',
     'ca-central-1': '加拿大',
     'eu-central-1': '法兰克福',
+    'eu-north-1': '斯德哥尔摩',
     'eu-west-1': '爱尔兰',
     'eu-west-2': '伦敦',
     'eu-west-3': '巴黎',
@@ -37,9 +39,12 @@ ALIYUN_REGION_NAMES = {
 }
 
 DEFAULT_AWS_PLAN_TEMPLATES = [
-    ('nano_3_0', 'Nano 512M 20G 1TB', '512MB', '20GB SSD', '1TB'),
     ('micro_3_0', 'Micro 1G 40G 2TB', '1GB', '40GB SSD', '2TB'),
     ('small_3_0', 'Small 2G 60G 3TB', '2GB', '60GB SSD', '3TB'),
+    ('medium_3_0', 'Medium 2G 60G 4TB', '2GB', '60GB SSD', '4TB'),
+    ('large_3_0', 'Large 4G 80G 5TB', '4GB', '80GB SSD', '5TB'),
+    ('xlarge_3_0', 'Xlarge 8G 160G 6TB', '8GB', '160GB SSD', '6TB'),
+    ('2xlarge_3_0', '2Xlarge 16G 320G 7TB', '16GB', '320GB SSD', '7TB'),
 ]
 DEFAULT_ALIYUN_PLAN_TEMPLATES = [
     ('1C1G 40G 1TB', '1 vCPU', '1GB', '40GB SSD', '1TB', Decimal('8.50')),
@@ -76,7 +81,7 @@ def _fetch_aws_bundle_templates():
         )
         response = client.get_bundles(includeInactive=False)
         templates = []
-        allowed = {'nano_3_0', 'micro_3_0', 'small_3_0'}
+        allowed = {'micro_3_0', 'small_3_0', 'medium_3_0', 'large_3_0', 'xlarge_3_0', '2xlarge_3_0'}
         for item in response.get('bundles', []):
             bundle_id = item.get('bundleId')
             if bundle_id not in allowed:
@@ -95,15 +100,21 @@ def _fetch_aws_bundle_templates():
                 sell_price.quantize(Decimal('0.01')),
             ))
         return templates or [
-            ('nano_3_0', 'Nano 512M 20G 1TB', '512MB', '20GB SSD', '1TB', Decimal('12.00')),
-            ('micro_3_0', 'Micro 1G 40G 2TB', '1GB', '40GB SSD', '2TB', Decimal('15.00')),
-            ('small_3_0', 'Small 2G 60G 3TB', '2GB', '60GB SSD', '3TB', Decimal('19.00')),
+            ('micro_3_0', 'Micro 1G 40G 2TB', '1GB', '40GB SSD', '2TB', Decimal('19.00')),
+            ('small_3_0', 'Small 2G 60G 3TB', '2GB', '60GB SSD', '3TB', Decimal('29.00')),
+            ('medium_3_0', 'Medium 2G 60G 4TB', '2GB', '60GB SSD', '4TB', Decimal('41.00')),
+            ('large_3_0', 'Large 4G 80G 5TB', '4GB', '80GB SSD', '5TB', Decimal('53.00')),
+            ('xlarge_3_0', 'Xlarge 8G 160G 6TB', '8GB', '160GB SSD', '6TB', Decimal('77.00')),
+            ('2xlarge_3_0', '2Xlarge 16G 320G 7TB', '16GB', '320GB SSD', '7TB', Decimal('125.00')),
         ]
     except Exception:
         return [
-            ('nano_3_0', 'Nano 512M 20G 1TB', '512MB', '20GB SSD', '1TB', Decimal('12.00')),
-            ('micro_3_0', 'Micro 1G 40G 2TB', '1GB', '40GB SSD', '2TB', Decimal('15.00')),
-            ('small_3_0', 'Small 2G 60G 3TB', '2GB', '60GB SSD', '3TB', Decimal('19.00')),
+            ('micro_3_0', 'Micro 1G 40G 2TB', '1GB', '40GB SSD', '2TB', Decimal('19.00')),
+            ('small_3_0', 'Small 2G 60G 3TB', '2GB', '60GB SSD', '3TB', Decimal('29.00')),
+            ('medium_3_0', 'Medium 2G 60G 4TB', '2GB', '60GB SSD', '4TB', Decimal('41.00')),
+            ('large_3_0', 'Large 4G 80G 5TB', '4GB', '80GB SSD', '5TB', Decimal('53.00')),
+            ('xlarge_3_0', 'Xlarge 8G 160G 6TB', '8GB', '160GB SSD', '6TB', Decimal('77.00')),
+            ('2xlarge_3_0', '2Xlarge 16G 320G 7TB', '16GB', '320GB SSD', '7TB', Decimal('125.00')),
         ]
 
 
