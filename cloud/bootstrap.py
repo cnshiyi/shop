@@ -19,12 +19,28 @@ sysctl --system
 sysctl net.ipv4.tcp_congestion_control
 '''
 
+DEBIAN_MTPROXY_SCRIPT = r'''#!/usr/bin/env bash
+set -e
+mkdir -p /home/mtproxy
+cd /home/mtproxy
+curl -s -o mtproxy.sh https://raw.githubusercontent.com/ellermister/mtproxy/master/mtproxy.sh
+chmod +x mtproxy.sh
+bash mtproxy.sh
+'''
+
 
 async def install_bbr(ip: str, username: str, password: str) -> tuple[bool, str]:
     if not ip or not username or not password:
         return False, '缺少 SSH 连接参数，无法执行 BBR 初始化。'
     logger.info('开始执行 BBR 初始化 ip=%s user=%s', ip, username)
     return await _run_ssh_script(ip, username, password, DEBIAN_BBR_SCRIPT)
+
+
+async def install_mtproxy(ip: str, username: str, password: str) -> tuple[bool, str]:
+    if not ip or not username or not password:
+        return False, '缺少 SSH 连接参数，无法执行 MTProxy 安装。'
+    logger.info('开始执行 MTProxy 安装 ip=%s user=%s', ip, username)
+    return await _run_ssh_script(ip, username, password, DEBIAN_MTPROXY_SCRIPT)
 
 
 @sync_to_async
