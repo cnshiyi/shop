@@ -14,7 +14,7 @@ from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 from asgiref.sync import sync_to_async
 from django.utils import timezone
 
-from biz.models import AddressMonitor, Recharge, Order, Product, TelegramUser
+from biz.models import AddressMonitor, Recharge, Order, Product, TelegramUser, CloudServerOrder
 from core.cache import get_config, bump_daily_stats
 from monitoring.cache import get_monitor_addresses, maybe_sync_monitors, init_monitor_cache
 from tron.parser import parse_trx_transfer, parse_usdt_transfer
@@ -155,6 +155,14 @@ def _get_pending_recharges(currency: str):
 
 
 @sync_to_async
+def _get_pending_cloud_server_orders(currency: str):
+    return list(
+        CloudServerOrder.objects.filter(pay_method='address', status='pending', currency=currency)
+        .order_by('created_at')
+    )
+
+
+@sync_to_async
 def _confirm_order_paid(order_id: int, tx_hash: str):
     from django.db import transaction
     with transaction.atomic():
@@ -190,6 +198,23 @@ def _confirm_recharge(recharge_id: int, tx_hash: str):
         setattr(user, field, getattr(user, field) + rc.amount)
         user.save(update_fields=[field, 'updated_at'])
     return rc
+
+
+@sync_to_async
+def _confirm_cloud_server_order(order_id: int, tx_hash: str):
+    from django.db import transaction
+    with transaction.atomic():
+        order = CloudServerOrder.objects.select_for_update().get(id=order_id)
+        if order.status != 'pending':
+            return None
+        order.status = 'paid'
+        order.tx_hash = tx_hash
+        order.paid_at = timezone.now()
+        order.save(update_fields=['status', 'tx_hash', 'paid_at', 'updated_at'])
+        order.status = 'provisioning'
+        order.provision_note = '已收款，正在进入云服务器创建流程。'
+        order.save(update_fields=['status', 'provision_note', 'updated_at'])
+    return order
 
 
 @sync_to_async
@@ -272,6 +297,24 @@ async def _process_payment(transfer: dict) -> bool:
                     confirmed.user_id, fmt_amount(amount), currency, tx_hash,
                 )
                 await _notify_user(rc.user_id, f'✅ 充值成功！\n金额: {fmt_amount(rc.amount)} {currency}\n余额已更新。')
+                return True
+            return False
+
+    pending_cloud_orders = await _get_pending_cloud_server_orders(currency)
+    for order in pending_cloud_orders:
+        if order.pay_amount == amount:
+            confirmed = await _confirm_cloud_server_order(order.id, tx_hash)
+            if confirmed:
+                logger.info(
+                    '💰 云服务器订单匹配 → %s  %s %s  tx=%s',
+                    confirmed.order_no, fmt_amount(amount), currency, tx_hash,
+                )
+                await _notify_user(
+                    confirmed.user_id,
+                    f'✅ 云服务器订单 {confirmed.order_no} 支付成功！\n'
+                    f'地区: {confirmed.region_name}\n套餐: {confirmed.plan_name}\n'
+                    '已进入创建流程，请等待管理员或自动化任务完成交付。',
+                )
                 return True
             return False
     return False

@@ -19,12 +19,14 @@ from bot.keyboards import (
     recharge_currency_menu, product_list, quantity_keyboard,
     pay_method_keyboard, order_list as kb_order_list,
     recharge_list as kb_recharge_list, profile_menu,
+    custom_region_menu, custom_plan_menu, custom_pay_keyboard,
 )
 from biz.services import (
     add_monitor, create_address_order, buy_with_balance, create_recharge,
     delete_monitor, get_or_create_user, get_product, get_monitor,
     list_monitors, list_orders, list_products, list_recharges,
     set_monitor_threshold, toggle_monitor_flag,
+    list_custom_regions, list_region_plans, create_cloud_server_order, get_cloud_plan,
 )
 from core.formatters import fmt_amount, fmt_pay_amount
 from core.models import SiteConfig
@@ -62,6 +64,23 @@ def _recharges_page(recharges, page: int, total: int):
     if not recharges:
         return '暂无充值记录。', None
     return '📜 充值记录：', kb_recharge_list(recharges, page, total_pages)
+
+
+def _custom_plan_text(region_name: str, plans) -> str:
+    if not plans:
+        return f'🛠 {region_name}\n\n当前地区暂无可用套餐。'
+    lines = [f'🛠 {region_name} 可用套餐', '']
+    for idx, plan in enumerate(plans, start=1):
+        provider_name = 'AWS 光帆服务器' if plan.provider == 'aws_lightsail' else '阿里云轻量云'
+        lines.append(
+            f'{idx}. {provider_name}\n'
+            f'套餐: {plan.plan_name}\n'
+            f'配置: {plan.cpu or "-"} / {plan.memory or "-"} / {plan.storage or "-"}\n'
+            f'带宽: {plan.bandwidth or "-"}\n'
+            f'价格: {fmt_amount(plan.price)} {plan.currency}\n'
+        )
+    lines.append('请选择要购买的套餐：')
+    return '\n'.join(lines)
 
 
 def _receive_address() -> str:
@@ -247,6 +266,49 @@ def register_handlers(dp: Dispatcher):
         await callback.message.edit_text('已返回主菜单，请使用底部按钮继续操作。')
         await callback.answer()
 
+    @dp.callback_query(F.data == 'custom:back')
+    async def cb_custom_back(callback: CallbackQuery):
+        await callback.message.edit_text('已返回主菜单，请使用底部按钮继续操作。')
+        await callback.answer()
+
+    @dp.callback_query(F.data == 'custom:regions')
+    async def cb_custom_regions(callback: CallbackQuery):
+        regions = await list_custom_regions()
+        await callback.message.edit_text('🛠 云服务器定制\n\n请选择地区：', reply_markup=custom_region_menu(regions))
+        await callback.answer()
+
+    @dp.callback_query(F.data.startswith('custom:region:'))
+    async def cb_custom_region(callback: CallbackQuery):
+        region_code = callback.data.split(':', 2)[2]
+        plans = await list_region_plans(region_code)
+        region_name = plans[0].region_name if plans else region_code
+        await callback.message.edit_text(_custom_plan_text(region_name, plans), reply_markup=custom_plan_menu(region_code, plans))
+        await callback.answer()
+
+    @dp.callback_query(F.data.startswith('custom:plan:'))
+    async def cb_custom_plan(callback: CallbackQuery):
+        plan = await get_cloud_plan(plan_id)
+        if not plan:
+            await callback.answer('套餐不存在或已下架', show_alert=True)
+            return
+        order = await create_cloud_server_order(user.id, plan.id, 'USDT')
+        receive_address = _receive_address()
+        provider_name = 'AWS 光帆服务器' if plan.provider == 'aws_lightsail' else '阿里云轻量云'
+        text = (
+            '🧾 云服务器订单已创建\n\n'
+            f'订单号: {order.order_no}\n'
+            f'类型: {provider_name}\n'
+            f'地区: {plan.region_name}\n'
+            f'套餐: {plan.plan_name}\n'
+            f'价格: {fmt_amount(order.total_amount)} {order.currency}\n'
+            f'支付金额: {fmt_pay_amount(order.pay_amount)} {order.currency}\n'
+            f'收款地址: `{receive_address}`\n\n'
+            '请按上方金额付款，系统监控到账后会自动进入创建流程。'
+        )
+        await callback.message.edit_text(text, reply_markup=custom_pay_keyboard(order.id), parse_mode='Markdown')
+        await callback.answer()
+
+    @dp.callback_query(F.data.startswith('product:'))
     async def cb_product_detail(callback: CallbackQuery):
         product = await get_product(int(callback.data.split(':')[1]))
         if not product:

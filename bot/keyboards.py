@@ -75,6 +75,31 @@ def monitor_threshold_currency(monitor_id: int):
     return kb.as_markup()
 
 
+def custom_region_menu(regions):
+    kb = InlineKeyboardBuilder()
+    for region_code, region_name in regions:
+        kb.button(text=region_name, callback_data=f'custom:region:{region_code}')
+    kb.button(text='🔙 返回主菜单', callback_data='custom:back')
+    kb.adjust(2, *([2] * (max(len(regions) - 2, 0) // 2)), 1)
+    return kb.as_markup()
+
+
+def custom_plan_menu(region_code: str, plans):
+    kb = InlineKeyboardBuilder()
+    for plan in plans:
+        provider_name = '光帆服务器' if plan.provider == 'aws_lightsail' else '轻量云'
+        kb.button(text=f'{provider_name} | {plan.plan_name} | {fmt_amount(plan.price)} USDT', callback_data=f'custom:plan:{plan.id}')
+    kb.button(text='🔙 返回地区', callback_data='custom:regions')
+    kb.adjust(1)
+    return kb.as_markup()
+
+
+def custom_pay_keyboard(order_id: int):
+    kb = InlineKeyboardBuilder()
+    kb.row(InlineKeyboardButton(text='🔙 返回主菜单', callback_data='custom:back'))
+    return kb.as_markup()
+
+
 def recharge_currency_menu():
     kb = InlineKeyboardBuilder()
     kb.row(InlineKeyboardButton(text='💵 USDT', callback_data='rcur:USDT'))
