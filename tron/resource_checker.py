@@ -22,6 +22,11 @@ _recent_resource_keys: OrderedDict[str, str] = OrderedDict()
 MAX_RESOURCE_DETAIL_CACHE = 300
 
 
+def set_bot(bot: Bot):
+    global _bot
+    _bot = bot
+
+
 def get_resource_detail(detail_key: str) -> dict | None:
     real_key = _recent_resource_keys.get(detail_key, detail_key)
     return _recent_resource_details.get(real_key)
@@ -37,6 +42,9 @@ def _cache_resource_detail(detail_id: str, detail: dict):
         for key in old_keys:
             _recent_resource_keys.pop(key, None)
 
+
+@sync_to_async
+def _get_user(user_id: int):
     return TelegramUser.objects.filter(id=user_id).first()
 
 
