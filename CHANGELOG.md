@@ -185,6 +185,18 @@
 ### 修复
 - 修复 `tron/scanner.py` 缺失 `parse_usdt_transfer` / `parse_trx_transfer` 导入导致的扫块异常
 
+## v0.3.4 - 2026-04-11
+
+### 新增
+- 新增 `biz/services/` 二级目录，承载统一业务编排与查询入口
+- 按职责拆分为 `users.py`、`commerce.py`、`payments.py`、`monitoring.py`
+
+### 调整
+- `bot/services.py` 改为兼容导出层，实际业务逻辑迁入 `biz/services/`
+
+### 修复
+- 减少机器人层直接承载业务逻辑，进一步稳定目录职责边界
+
 ## 当前通知逻辑
 - 转入：`🟢 收入提醒`
 - 转出：`🔴 支出提醒`

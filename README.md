@@ -24,9 +24,10 @@
 - `mall/`：商城业务命名层（逐步替代 `shopbiz/` 的对外命名）
 - `finance/`：充值与财务命名层（逐步替代 `payments/` 的对外命名）
 - `monitoring/`：监控命名层（逐步替代 `monitors/` 的对外命名）
-- `biz/`：统一业务模型聚合层（用户、商品、订单、充值、监控）
+- `biz/`：统一业务模型与业务服务聚合层
 - `ARCHITECTURE.md`：目录分层与后续迁移规划
 - `bot/`：机器人菜单、回调、业务逻辑
+- `biz/services/`：统一业务服务层，按 `users / commerce / payments / monitoring` 分目录管理
 - `core/cache.py`：Redis 连接、配置缓存、每日统计等公共缓存能力
 - `monitoring/cache.py`：地址监控缓存
 - `tron/scanner.py`：TRON 转账扫描与支付匹配
