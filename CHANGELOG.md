@@ -206,6 +206,20 @@
 ### 修复
 - 完成机器人层业务兼容壳清理，减少重复入口
 
+## v0.3.6 - 2026-04-11
+
+### 新增
+- 新增 `core/formatters.py` 作为公共格式化工具入口
+- 新增 `biz/services/rates.py` 承载汇率与换算逻辑
+
+### 调整
+- `bot/handlers.py` 改为直接依赖 `biz.services` 与 `core.formatters`
+- `bot/handlers.py` 中订单详情查询改为走 `get_order(...)`，移除直接 ORM 查询
+- 删除 `bot/utils.py` 与 `bot/exchange.py` 兼容层文件
+
+### 修复
+- 继续收缩机器人层中的业务与工具逻辑，减少职责混杂
+
 ## 当前通知逻辑
 - 转入：`🟢 收入提醒`
 - 转出：`🔴 支出提醒`

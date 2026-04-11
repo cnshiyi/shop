@@ -12,7 +12,7 @@ from aiogram.types import CallbackQuery, Message
 import redis.asyncio as redis
 
 from bot.config import BOT_TOKEN, REDIS_URL, FSM_STATE_TTL, FSM_DATA_TTL
-from bot.exchange import get_exchange_rate_display, usdt_to_trx
+from biz.services import get_exchange_rate_display, usdt_to_trx
 from bot.keyboards import (
     main_menu, monitor_menu, monitor_list as kb_monitor_list,
     monitor_detail as kb_monitor_detail, monitor_threshold_currency,
@@ -26,7 +26,7 @@ from biz.services import (
     list_monitors, list_orders, list_products, list_recharges,
     set_monitor_threshold, toggle_monitor_flag,
 )
-from bot.utils import fmt_amount, fmt_pay_amount
+from core.formatters import fmt_amount, fmt_pay_amount
 from core.models import SiteConfig
 
 logger = logging.getLogger(__name__)
@@ -361,8 +361,7 @@ def register_handlers(dp: Dispatcher):
 
     @dp.callback_query(F.data.startswith('order_detail:'))
     async def cb_order_detail(callback: CallbackQuery):
-        from biz.models import Order
-        order = await Order.objects.filter(id=int(callback.data.split(':')[1])).afirst()
+        order = await get_order(int(callback.data.split(':')[1]))
         if not order:
             await callback.message.edit_text('订单不存在。')
             await callback.answer()

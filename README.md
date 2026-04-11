@@ -26,18 +26,11 @@
 - `monitoring/`：监控命名层（逐步替代 `monitors/` 的对外命名）
 - `biz/`：统一业务模型与业务服务聚合层
 - `ARCHITECTURE.md`：目录分层与后续迁移规划
-- `bot/`：机器人菜单、回调、业务逻辑
-- `bot/handlers.py` 当前直接调用 `biz.services`
-- `bot/services.py` 兼容层已删除
+- `bot/handlers.py`：机器人交互入口，当前直接调用 `biz.services`
 - `monitoring/cache.py`：地址监控缓存
 - `tron/scanner.py`：TRON 转账扫描与支付匹配
 - `tron/resource_checker.py`：TRON 资源巡检（能量 / 带宽）
-- `tron/cache.py`：Redis 缓存、监控地址缓存、每日统计
-- `core/`：站点配置
-- `users/`：用户模型（旧命名，后续逐步淡出）
-- `shopbiz/`：商品与订单（旧命名，后续逐步淡出）
-- `payments/`：充值记录（旧命名，后续逐步淡出）
-- `monitors/`：地址监控模型（旧命名，后续逐步淡出）
+- `core/`：站点配置、公共缓存、公共格式化工具
 
 ## 启动方式
 ### 1. 安装依赖

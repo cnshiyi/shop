@@ -106,7 +106,7 @@ def quantity_keyboard(product_id: int):
 
 
 def pay_method_keyboard(product_id: int, quantity: int, usdt_total, trx_total):
-    from bot.utils import fmt_amount
+from core.formatters import fmt_amount
     kb = InlineKeyboardBuilder()
     kb.row(InlineKeyboardButton(text=f'💳 余额 USDT ({fmt_amount(usdt_total)} U)', callback_data=f'pay:balance:{product_id}:USDT:{quantity}'))
     kb.row(InlineKeyboardButton(text=f'💳 余额 TRX ({fmt_amount(trx_total)} TRX)', callback_data=f'pay:balance:{product_id}:TRX:{quantity}'))
