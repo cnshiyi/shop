@@ -242,7 +242,8 @@ def register_handlers(dp: Dispatcher):
             await message.answer('✨ 订阅服务\n\n请选择要购买的订阅商品：', reply_markup=kb)
 
         elif text == '🛠 定制':
-            await message.answer('🛠 定制服务\n\n请联系管理员提交你的定制需求，后续这里可以接入定制下单流程。', reply_markup=main_menu())
+            regions = await list_custom_regions()
+            await message.answer('🛠 云服务器定制\n\n请选择地区：', reply_markup=custom_region_menu(regions))
 
         elif text == '🔎 查询':
             servers = await list_user_cloud_servers(user.id)
@@ -431,6 +432,8 @@ def register_handlers(dp: Dispatcher):
         await callback.answer('已记录更换 IP 请求')
         await callback.message.reply('🌐 已提交更换 IP 请求，后台处理后会同步给你新的 MTProxy 链接。')
 
+    @dp.callback_query(F.data.startswith('product:'))
+    async def cb_product_detail(callback: CallbackQuery):
         product = await get_product(int(callback.data.split(':')[1]))
         if not product:
             await callback.message.edit_text('商品不存在。')
