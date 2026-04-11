@@ -522,6 +522,27 @@ def register_handlers(dp: Dispatcher):
         await callback.message.edit_text(text)
         await callback.answer()
 
+    @dp.callback_query(F.data.startswith('mon:resd:'))
+    async def cb_resource_detail(callback: CallbackQuery):
+        from tron.resource_checker import get_resource_detail
+        detail_key = callback.data.split(':')[2]
+        detail = get_resource_detail(detail_key)
+        if not detail:
+            await callback.answer('资源详情已过期', show_alert=True)
+            return
+        text = (
+            f'⚡ 资源详情\n\n'
+            f'地址备注: {detail["remark"]}\n'
+            f'监控地址: <code>{detail["address"]}</code>\n'
+            f'检测时间: <code>{detail["time"]}</code>\n'
+            f'可用能量增加: <code>+{detail["energy_increase"]}</code>\n'
+            f'可用带宽增加: <code>+{detail["bandwidth_increase"]}</code>\n'
+            f'当前可用能量: <code>{detail["energy"]}</code>\n'
+            f'当前可用带宽: <code>{detail["bandwidth"]}</code>'
+        )
+        await callback.message.edit_text(text, parse_mode='HTML')
+        await callback.answer()
+
     @dp.callback_query(F.data == 'noop')
     async def cb_noop(callback: CallbackQuery):
         await callback.answer()

@@ -1,9 +1,11 @@
 import logging
 from datetime import datetime
 from html import escape
+from collections import OrderedDict
 
 import httpx
 from aiogram import Bot
+from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 from asgiref.sync import sync_to_async
 from django.utils import timezone
 
@@ -15,15 +17,26 @@ logger = logging.getLogger(__name__)
 
 TRONGRID_BASE_URL = 'https://api.trongrid.io'
 _bot: Bot | None = None
+_recent_resource_details: OrderedDict[str, dict] = OrderedDict()
+_recent_resource_keys: OrderedDict[str, str] = OrderedDict()
+MAX_RESOURCE_DETAIL_CACHE = 300
 
 
-def set_bot(bot: Bot):
-    global _bot
-    _bot = bot
+def get_resource_detail(detail_key: str) -> dict | None:
+    real_key = _recent_resource_keys.get(detail_key, detail_key)
+    return _recent_resource_details.get(real_key)
 
 
-@sync_to_async
-def _get_user(user_id: int):
+def _cache_resource_detail(detail_id: str, detail: dict):
+    short_key = detail_id[:16]
+    _recent_resource_details[detail_id] = detail
+    _recent_resource_keys[short_key] = detail_id
+    if len(_recent_resource_details) > MAX_RESOURCE_DETAIL_CACHE:
+        old_id, _ = _recent_resource_details.popitem(last=False)
+        old_keys = [key for key, value in _recent_resource_keys.items() if value == old_id]
+        for key in old_keys:
+            _recent_resource_keys.pop(key, None)
+
     return TelegramUser.objects.filter(id=user_id).first()
 
 
@@ -36,13 +49,13 @@ def _update_resource_snapshot(monitor_id: int, energy: int, bandwidth: int):
     )
 
 
-async def _notify(user_id: int, text: str):
+async def _notify(user_id: int, text: str, reply_markup=None):
     if _bot is None:
         return
     user = await _get_user(user_id)
     if not user:
         return
-    await _bot.send_message(chat_id=user.tg_user_id, text=text, parse_mode='HTML')
+    await _bot.send_message(chat_id=user.tg_user_id, text=text, parse_mode='HTML', reply_markup=reply_markup)
 
 
 async def _fetch_account_resource(address: str) -> tuple[int, int]:
@@ -101,6 +114,22 @@ async def check_resources():
                     '',
                     '📘 说明: 仅在资源增加时通知，正常转账消耗不通知。',
                 ])
-                await _notify(mon['user_id'], '\n'.join(lines))
+                detail_id = f"{address}:{now_text}"
+                _cache_resource_detail(detail_id, {
+                    'address': address,
+                    'remark': remark,
+                    'time': now_text,
+                    'energy_increase': energy_increase,
+                    'bandwidth_increase': bandwidth_increase,
+                    'energy': energy,
+                    'bandwidth': bandwidth,
+                })
+                await _notify(
+                    mon['user_id'],
+                    '\n'.join(lines),
+                    reply_markup=InlineKeyboardMarkup(
+                        inline_keyboard=[[InlineKeyboardButton(text='查看资源详情', callback_data=f'mon:resd:{detail_id[:16]}')]]
+                    ),
+                )
     except Exception as exc:
         logger.error('资源巡检异常: %s', exc)

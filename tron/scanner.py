@@ -7,6 +7,7 @@ from datetime import datetime
 from decimal import Decimal
 from html import escape
 
+
 import httpx
 from aiogram import Bot
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
@@ -16,7 +17,7 @@ from django.utils import timezone
 from monitors.models import AddressMonitor
 from payments.models import Recharge
 from shopbiz.models import Order, Product
-from tron.cache import get_monitor_addresses, get_config, maybe_sync_monitors, init_monitor_cache
+from tron.cache import get_monitor_addresses, get_config, maybe_sync_monitors, init_monitor_cache, bump_daily_stats
 from tron.parser import parse_usdt_transfer, parse_trx_transfer
 from users.models import TelegramUser
 
@@ -39,6 +40,8 @@ _scan_stats = {'blocks': 0, 'transactions': 0, 'transfers': 0, 'payments': 0, 'm
 
 _recent_tx_details: OrderedDict[str, dict] = OrderedDict()
 _recent_tx_keys: OrderedDict[str, str] = OrderedDict()
+_recent_resource_details: OrderedDict[str, dict] = OrderedDict()
+_recent_resource_keys: OrderedDict[str, str] = OrderedDict()
 MAX_TX_DETAIL_CACHE = 500
 
 _bot: Bot | None = None
@@ -54,6 +57,11 @@ def set_bot(bot: Bot):
 def get_tx_detail(detail_key: str) -> dict | None:
     tx_hash = _recent_tx_keys.get(detail_key, detail_key)
     return _recent_tx_details.get(tx_hash)
+
+
+def get_resource_detail(detail_key: str) -> dict | None:
+    resource_key = _recent_resource_keys.get(detail_key, detail_key)
+    return _recent_resource_details.get(resource_key)
 
 
 def reload_config():
@@ -90,6 +98,24 @@ def _build_tx_detail_keyboard(tx_hash: str) -> InlineKeyboardMarkup:
     detail_key = tx_hash[:16]
     return InlineKeyboardMarkup(
         inline_keyboard=[[InlineKeyboardButton(text='查看交易详情', callback_data=f'mon:txd:{detail_key}')]]
+    )
+
+
+def _cache_resource_detail(detail_id: str, detail: dict):
+    detail_key = detail_id[:16]
+    _recent_resource_details[detail_id] = detail
+    _recent_resource_keys[detail_key] = detail_id
+    if len(_recent_resource_details) > MAX_TX_DETAIL_CACHE:
+        old_id, _ = _recent_resource_details.popitem(last=False)
+        old_keys = [key for key, value in _recent_resource_keys.items() if value == old_id]
+        for key in old_keys:
+            _recent_resource_keys.pop(key, None)
+
+
+def _build_resource_detail_keyboard(detail_id: str) -> InlineKeyboardMarkup:
+    detail_key = detail_id[:16]
+    return InlineKeyboardMarkup(
+        inline_keyboard=[[InlineKeyboardButton(text='查看资源详情', callback_data=f'mon:resd:{detail_key}')]]
     )
 
 
@@ -281,7 +307,7 @@ async def _get_fee_text(tx_hash: str) -> str:
 
 # ── 监控通知 ──────────────────────────────────────────────────────────────
 
-async def _process_monitor_notification(transfer: dict, monitors: list[dict]):
+async def _process_monitor_notification(transfer: dict, monitors: list[dict], daily_stats: dict[str, str]):
     amount = transfer['amount']
     currency = transfer['currency']
     from_addr = transfer['from']
@@ -322,7 +348,10 @@ async def _process_monitor_notification(transfer: dict, monitors: list[dict]):
             fee_text, tx_hash,
         )
 
-        # Telegram 通知卡片
+        income = Decimal(str(daily_stats.get('income', '0')))
+        expense = Decimal(str(daily_stats.get('expense', '0')))
+        profit = income - expense
+
         text = (
             f'🟢 收入{currency} 提醒  +<code>{escape(fmt_amount(amount))} {escape(currency)}</code>\n\n'
             f'🏷️ 地址备注: {escape(remark)}\n\n'
@@ -333,9 +362,9 @@ async def _process_monitor_notification(transfer: dict, monitors: list[dict]):
             f'👛 USDT余额: {escape(fmt_amount(user.balance))} USDT\n'
             f'🪙 TRX余额: {escape(fmt_amount(user.balance_trx))} TRX\n'
             f'⛽ 转账消耗: <code>{escape(fee_text)}</code>\n\n'
-            f'📈 今日收入: {escape(fmt_amount(amount))} {escape(currency)}\n'
-            f'📉 今日支出: 0 USDT\n'
-            f'💹 今日利润: {escape(fmt_amount(amount))} {escape(currency)}'
+            f'📈 今日收入: {escape(fmt_amount(income))} {escape(currency)}\n'
+            f'📉 今日支出: {escape(fmt_amount(expense))} {escape(currency)}\n'
+            f'💹 今日利润: {escape(fmt_amount(profit))} {escape(currency)}'
         )
 
         _cache_tx_detail(tx_hash, {
@@ -425,7 +454,10 @@ async def scan_block():
 
             # 监控通知（有格式化详情日志）
             if to_addr in monitor_cache:
-                await _process_monitor_notification(transfer, monitor_cache[to_addr])
+                stats = await bump_daily_stats(to_addr, transfer['currency'], 'income', transfer['amount'])
+                await _process_monitor_notification(transfer, monitor_cache[to_addr], stats)
+            if from_addr in monitor_cache and from_addr != to_addr:
+                await bump_daily_stats(from_addr, transfer['currency'], 'expense', transfer['amount'])
 
         await _log_scan_summary()
     except Exception as e:

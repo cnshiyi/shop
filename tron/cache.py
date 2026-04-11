@@ -23,6 +23,7 @@ REDIS_URL = os.getenv('REDIS_URL', 'redis://127.0.0.1:6379/0')
 # ── key 前缀 ──────────────────────────────────────────────────────────────
 MONITORS_KEY = 'tron:monitors'
 CFG_PREFIX = 'tron:cfg:'
+DAILY_PREFIX = 'tron:daily:'
 CFG_TTL = 120  # 配置缓存 2 分钟
 
 # ── 内部状态 ──────────────────────────────────────────────────────────────
@@ -241,6 +242,37 @@ async def maybe_sync_monitors():
         await init_monitor_cache()
     except Exception as e:
         logger.error('Redis 监控同步失败: %s', e)
+
+
+async def get_daily_stats(address: str, currency: str, date_key: str | None = None) -> dict[str, str]:
+    from datetime import datetime
+
+    date_key = date_key or datetime.now().strftime('%Y-%m-%d')
+    redis_key = f'{DAILY_PREFIX}{date_key}:{address}:{currency}'
+    r = await _get_redis()
+    if r is None:
+        return {'income': '0', 'expense': '0'}
+    raw = await r.hgetall(redis_key)
+    if not raw:
+        return {'income': '0', 'expense': '0'}
+    return {'income': raw.get('income', '0'), 'expense': raw.get('expense', '0')}
+
+
+async def bump_daily_stats(address: str, currency: str, direction: str, amount: Decimal) -> dict[str, str]:
+    from datetime import datetime, timedelta
+
+    date_key = datetime.now().strftime('%Y-%m-%d')
+    redis_key = f'{DAILY_PREFIX}{date_key}:{address}:{currency}'
+    r = await _get_redis()
+    if r is None:
+        return {'income': '0', 'expense': '0'}
+    expire_at = datetime.combine(datetime.now().date() + timedelta(days=1), datetime.min.time())
+    pipe = r.pipeline()
+    pipe.hincrbyfloat(redis_key, direction, float(amount))
+    pipe.expireat(redis_key, expire_at)
+    pipe.hgetall(redis_key)
+    _, _, raw = await pipe.execute()
+    return {'income': raw.get('income', '0'), 'expense': raw.get('expense', '0')}
 
 
 # ══════════════════════════════════════════════════════════════════════════
