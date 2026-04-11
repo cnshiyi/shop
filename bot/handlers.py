@@ -60,17 +60,18 @@ def _recharges_page(recharges, page: int, total: int):
 def _custom_plan_text(region_name: str, plans) -> str:
     if not plans:
         return f'🛠 {region_name}\n\n当前地区暂无可用套餐。'
+    labels = ['套餐一', '套餐二', '套餐三', '套餐四', '套餐五', '套餐六']
     lines = [f'🛠 {region_name} 可用套餐', '']
     for idx, plan in enumerate(plans, start=1):
-        provider_name = 'AWS 光帆服务器' if plan.provider == 'aws_lightsail' else '阿里云轻量云'
+        label = labels[idx - 1] if idx - 1 < len(labels) else f'套餐{idx}'
         lines.append(
-            f'{idx}. {provider_name}\n'
-            f'套餐: {plan.plan_name}\n'
+            f'{label}\n'
+            f'规格: {plan.plan_name}\n'
             f'配置: {plan.cpu or "-"} / {plan.memory or "-"} / {plan.storage or "-"}\n'
             f'带宽: {plan.bandwidth or "-"}\n'
             f'价格: {fmt_amount(plan.price)} {plan.currency}\n'
         )
-    lines.append('请选择要购买的套餐：')
+    lines.append('请选择下面的套餐按钮：')
     return '\n'.join(lines)
 
 

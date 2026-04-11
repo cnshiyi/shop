@@ -204,10 +204,9 @@ def list_custom_regions():
 @sync_to_async
 def list_region_plans(region_code: str):
     ensure_cloud_server_plans.__wrapped__()
-    return list(
-        CloudServerPlan.objects.filter(region_code=region_code, is_active=True)
-        .order_by('provider', '-sort_order', 'id')
-    )
+    queryset = CloudServerPlan.objects.filter(region_code=region_code, is_active=True)
+    queryset = queryset.exclude(provider='aws_lightsail', plan_name__iexact='Nano')
+    return list(queryset.order_by('provider', '-sort_order', 'id')[:6])
 
 
 @sync_to_async
