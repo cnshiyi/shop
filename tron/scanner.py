@@ -453,6 +453,7 @@ async def scan_block():
                 continue
 
             _scan_stats['transfers'] += 1
+            from_addr = transfer['from']
             to_addr = transfer['to']
 
             # 支付匹配
