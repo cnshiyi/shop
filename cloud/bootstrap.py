@@ -7,7 +7,7 @@ from asgiref.sync import sync_to_async
 logger = logging.getLogger(__name__)
 
 MTPROXY_DIR = '/home/mtproxy1'
-MTPROXY_PORT = 8443
+MTPROXY_PORT = 9528
 
 DEBIAN_BBR_SCRIPT = r'''#!/usr/bin/env bash
 set -e
@@ -29,6 +29,10 @@ cd {MTPROXY_DIR}
 curl -s -o mtproxy.sh https://raw.githubusercontent.com/ellermister/mtproxy/master/mtproxy.sh
 chmod +x mtproxy.sh
 printf '%s\n' '{MTPROXY_PORT}' | bash mtproxy.sh
+if command -v ufw >/dev/null 2>&1; then
+  ufw allow {MTPROXY_PORT}/tcp || true
+  ufw allow {MTPROXY_PORT}/udp || true
+fi
 '''
 
 

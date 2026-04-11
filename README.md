@@ -78,7 +78,8 @@ python run.py
 - 创建成功后，结构上继续进入 Debian 初始化与 BBR 加速步骤
 - BBR 完成后继续安装 MTProxy
 - MTProxy 默认目录改为 `/home/mtproxy1`
-- MTProxy 默认使用非默认端口 `8443`
+- MTProxy 默认使用非默认端口 `9528`
+- 初始化阶段会尝试自动放行 `9528/tcp` 与 `9528/udp`
 - 当前 BBR 初始化支持 SSH 密码登录执行
 - 已预留 `AWS 光帆服务器 / 阿里云轻量云` 创建接口与 AK/SK 配置项
 - 默认镜像按 `debian` 处理，AWS 登录方式按密码登录设计
