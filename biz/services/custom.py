@@ -37,8 +37,9 @@ ALIYUN_REGION_NAMES = {
 }
 
 DEFAULT_AWS_PLAN_TEMPLATES = [
-    ('1C1G 40G 1TB', '1 vCPU', '1GB', '40GB SSD', '1TB', Decimal('7.00')),
-    ('2C2G 60G 2TB', '2 vCPU', '2GB', '60GB SSD', '2TB', Decimal('12.00')),
+    ('nano_3_0', 'Nano 512M 20G 1TB', '512MB', '20GB SSD', '1TB'),
+    ('micro_3_0', 'Micro 1G 40G 2TB', '1GB', '40GB SSD', '2TB'),
+    ('small_3_0', 'Small 2G 60G 3TB', '2GB', '60GB SSD', '3TB'),
 ]
 DEFAULT_ALIYUN_PLAN_TEMPLATES = [
     ('1C1G 40G 1TB', '1 vCPU', '1GB', '40GB SSD', '1TB', Decimal('8.50')),
@@ -58,6 +59,52 @@ def build_cloud_server_name(user_id: int, amount: Decimal) -> str:
 
 def _generate_order_no() -> str:
     return f'SRV{int(time.time() * 1000)}{random.randint(1000, 9999)}'
+
+
+def _fetch_aws_bundle_templates():
+    key = os.getenv('AWS_ACCESS_KEY_ID', '')
+    secret = os.getenv('AWS_SECRET_ACCESS_KEY', '')
+    if not key or not secret:
+        return []
+    try:
+        import boto3
+        client = boto3.client(
+            'lightsail',
+            region_name='ap-southeast-1',
+            aws_access_key_id=key,
+            aws_secret_access_key=secret,
+        )
+        response = client.get_bundles(includeInactive=False)
+        templates = []
+        allowed = {'nano_3_0', 'micro_3_0', 'small_3_0'}
+        for item in response.get('bundles', []):
+            bundle_id = item.get('bundleId')
+            if bundle_id not in allowed:
+                continue
+            ram = item.get('ramSizeInGb')
+            disk = item.get('diskSizeInGb')
+            transfer = item.get('transferPerMonthInGb')
+            base_price = Decimal(str(item.get('price') or '0'))
+            sell_price = (base_price * Decimal('2')) + Decimal('5')
+            templates.append((
+                bundle_id,
+                item.get('name') or bundle_id,
+                f'{ram}GB' if ram is not None else '',
+                f'{disk}GB SSD' if disk is not None else '',
+                f'{transfer}GB' if transfer is not None else '',
+                sell_price.quantize(Decimal('0.01')),
+            ))
+        return templates or [
+            ('nano_3_0', 'Nano 512M 20G 1TB', '512MB', '20GB SSD', '1TB', Decimal('12.00')),
+            ('micro_3_0', 'Micro 1G 40G 2TB', '1GB', '40GB SSD', '2TB', Decimal('15.00')),
+            ('small_3_0', 'Small 2G 60G 3TB', '2GB', '60GB SSD', '3TB', Decimal('19.00')),
+        ]
+    except Exception:
+        return [
+            ('nano_3_0', 'Nano 512M 20G 1TB', '512MB', '20GB SSD', '1TB', Decimal('12.00')),
+            ('micro_3_0', 'Micro 1G 40G 2TB', '1GB', '40GB SSD', '2TB', Decimal('15.00')),
+            ('small_3_0', 'Small 2G 60G 3TB', '2GB', '60GB SSD', '3TB', Decimal('19.00')),
+        ]
 
 
 def _fetch_aws_regions():
@@ -93,11 +140,18 @@ def _fetch_aliyun_regions():
     return [(code, name) for code, name in ALIYUN_REGION_NAMES.items() if code == 'cn-hongkong' or not code.startswith('cn-')]
 
 
-def _sync_provider_plans(provider: str, regions: list[tuple[str, str]], templates: list[tuple[str, str, str, str, str, Decimal]]):
+def _sync_provider_plans(provider: str, regions: list[tuple[str, str]], templates):
     region_codes = {code for code, _ in regions}
+    active_plan_names = {template[1] if provider == 'aws_lightsail' else template[0] for template in templates}
     CloudServerPlan.objects.filter(provider=provider).exclude(region_code__in=region_codes).update(is_active=False)
+    CloudServerPlan.objects.filter(provider=provider, region_code__in=region_codes).exclude(plan_name__in=active_plan_names).update(is_active=False)
     for region_code, region_name in regions:
-        for plan_name, cpu, memory, storage, bandwidth, price in templates:
+        for template in templates:
+            if provider == 'aws_lightsail':
+                bundle_id, plan_name, memory, storage, bandwidth, price = template
+                cpu = bundle_id
+            else:
+                plan_name, cpu, memory, storage, bandwidth, price = template
             plan, created = CloudServerPlan.objects.get_or_create(
                 provider=provider,
                 region_code=region_code,
@@ -115,12 +169,13 @@ def _sync_provider_plans(provider: str, regions: list[tuple[str, str]], template
             )
             if not created:
                 plan.region_name = region_name
-                plan.cpu = plan.cpu or cpu
-                plan.memory = plan.memory or memory
-                plan.storage = plan.storage or storage
-                plan.bandwidth = plan.bandwidth or bandwidth
+                plan.cpu = cpu
+                plan.memory = memory
+                plan.storage = storage
+                plan.bandwidth = bandwidth
+                plan.price = price
                 plan.is_active = True
-                plan.save(update_fields=['region_name', 'cpu', 'memory', 'storage', 'bandwidth', 'is_active', 'updated_at'])
+                plan.save(update_fields=['region_name', 'cpu', 'memory', 'storage', 'bandwidth', 'price', 'is_active', 'updated_at'])
 
 
 @sync_to_async
@@ -128,11 +183,11 @@ def ensure_cloud_server_plans():
     aws_regions = _fetch_aws_regions()
     aliyun_regions = _fetch_aliyun_regions()
     if aws_regions:
-        _sync_provider_plans('aws_lightsail', aws_regions, DEFAULT_AWS_PLAN_TEMPLATES)
+        _sync_provider_plans('aws_lightsail', aws_regions, _fetch_aws_bundle_templates())
     if aliyun_regions:
         _sync_provider_plans('aliyun_simple', aliyun_regions, DEFAULT_ALIYUN_PLAN_TEMPLATES)
     if not CloudServerPlan.objects.exists():
-        _sync_provider_plans('aws_lightsail', [('ap-southeast-1', '新加坡')], DEFAULT_AWS_PLAN_TEMPLATES)
+        _sync_provider_plans('aws_lightsail', [('ap-southeast-1', '新加坡')], _fetch_aws_bundle_templates())
 
 
 @sync_to_async
