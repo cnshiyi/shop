@@ -23,10 +23,6 @@ INSTALLED_APPS = [
     'mall',
     'finance',
     'monitoring',
-    'users',
-    'shopbiz',
-    'payments',
-    'monitors',
     'bot',
 ]
 

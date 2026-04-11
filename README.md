@@ -107,8 +107,8 @@ Redis 中维护按天隔离的临时统计：
 ## 开发说明
 - 监控地址、站点配置、每日统计均优先走 Redis
 - Redis 不可用时，部分功能会自动降级到数据库
-- 当前 Admin 主入口已迁入：`accounts / mall / finance / monitoring`
-- 旧目录的 `admin.py` 仅保留兼容壳，避免重复注册
+- `INSTALLED_APPS` 当前已切换到新结构主入口：`accounts / mall / finance / monitoring`
+- 旧目录不再作为 Django 主 app 入口加载，后续可继续朝删除旧目录推进
 
 ## 常见维护项
 - 修改机器人 Token：更新 `.env` 或站点配置
