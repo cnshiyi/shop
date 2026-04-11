@@ -94,27 +94,28 @@ def _fetch_aws_bundle_templates():
             templates.append((
                 bundle_id,
                 item.get('name') or bundle_id,
+                f"{item.get('cpuCount') or '-'}核",
                 f'{ram}GB' if ram is not None else '',
                 f'{disk}GB SSD' if disk is not None else '',
                 f'{transfer}GB' if transfer is not None else '',
                 sell_price.quantize(Decimal('0.01')),
             ))
         return templates or [
-            ('micro_3_0', 'Micro 1G 40G 2TB', '1GB', '40GB SSD', '2TB', Decimal('19.00')),
-            ('small_3_0', 'Small 2G 60G 3TB', '2GB', '60GB SSD', '3TB', Decimal('29.00')),
-            ('medium_3_0', 'Medium 2G 60G 4TB', '2GB', '60GB SSD', '4TB', Decimal('41.00')),
-            ('large_3_0', 'Large 4G 80G 5TB', '4GB', '80GB SSD', '5TB', Decimal('53.00')),
-            ('xlarge_3_0', 'Xlarge 8G 160G 6TB', '8GB', '160GB SSD', '6TB', Decimal('77.00')),
-            ('2xlarge_3_0', '2Xlarge 16G 320G 7TB', '16GB', '320GB SSD', '7TB', Decimal('125.00')),
+            ('micro_3_0', 'Micro 1G 40G 2TB', '2核', '1GB', '40GB SSD', '2TB', Decimal('19.00')),
+            ('small_3_0', 'Small 2G 60G 3TB', '2核', '2GB', '60GB SSD', '3TB', Decimal('29.00')),
+            ('medium_3_0', 'Medium 2G 60G 4TB', '2核', '2GB', '60GB SSD', '4TB', Decimal('41.00')),
+            ('large_3_0', 'Large 4G 80G 5TB', '2核', '4GB', '80GB SSD', '5TB', Decimal('53.00')),
+            ('xlarge_3_0', 'Xlarge 8G 160G 6TB', '4核', '8GB', '160GB SSD', '6TB', Decimal('77.00')),
+            ('2xlarge_3_0', '2Xlarge 16G 320G 7TB', '8核', '16GB', '320GB SSD', '7TB', Decimal('125.00')),
         ]
     except Exception:
         return [
-            ('micro_3_0', 'Micro 1G 40G 2TB', '1GB', '40GB SSD', '2TB', Decimal('19.00')),
-            ('small_3_0', 'Small 2G 60G 3TB', '2GB', '60GB SSD', '3TB', Decimal('29.00')),
-            ('medium_3_0', 'Medium 2G 60G 4TB', '2GB', '60GB SSD', '4TB', Decimal('41.00')),
-            ('large_3_0', 'Large 4G 80G 5TB', '4GB', '80GB SSD', '5TB', Decimal('53.00')),
-            ('xlarge_3_0', 'Xlarge 8G 160G 6TB', '8GB', '160GB SSD', '6TB', Decimal('77.00')),
-            ('2xlarge_3_0', '2Xlarge 16G 320G 7TB', '16GB', '320GB SSD', '7TB', Decimal('125.00')),
+            ('micro_3_0', 'Micro 1G 40G 2TB', '2核', '1GB', '40GB SSD', '2TB', Decimal('19.00')),
+            ('small_3_0', 'Small 2G 60G 3TB', '2核', '2GB', '60GB SSD', '3TB', Decimal('29.00')),
+            ('medium_3_0', 'Medium 2G 60G 4TB', '2核', '2GB', '60GB SSD', '4TB', Decimal('41.00')),
+            ('large_3_0', 'Large 4G 80G 5TB', '2核', '4GB', '80GB SSD', '5TB', Decimal('53.00')),
+            ('xlarge_3_0', 'Xlarge 8G 160G 6TB', '4核', '8GB', '160GB SSD', '6TB', Decimal('77.00')),
+            ('2xlarge_3_0', '2Xlarge 16G 320G 7TB', '8核', '16GB', '320GB SSD', '7TB', Decimal('125.00')),
         ]
 
 
@@ -159,8 +160,7 @@ def _sync_provider_plans(provider: str, regions: list[tuple[str, str]], template
     for region_code, region_name in regions:
         for template in templates:
             if provider == 'aws_lightsail':
-                bundle_id, plan_name, memory, storage, bandwidth, price = template
-                cpu = bundle_id
+                bundle_id, plan_name, cpu, memory, storage, bandwidth, price = template
             else:
                 plan_name, cpu, memory, storage, bandwidth, price = template
             plan, created = CloudServerPlan.objects.get_or_create(

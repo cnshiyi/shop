@@ -71,10 +71,9 @@ def _custom_plan_text(region_name: str, plans) -> str:
             cpu_text = cpu_text.replace('micro_3_0', '微型').replace('small_3_0', '小型').replace('medium_3_0', '中型').replace('large_3_0', '大型').replace('xlarge_3_0', '超大型').replace('2xlarge_3_0', '双倍超大型')
         lines.append(
             f'{label}｜{tier_name}\n'
-            f'算力档位: {cpu_text}\n'
+            f'CPU: {cpu_text}\n'
             f'内存: {plan.memory or "-"}\n'
             f'硬盘: {plan.storage or "-"}\n'
-            f'流量: {plan.bandwidth or "-"}\n'
             f'价格: {fmt_amount(plan.price)} {plan.currency}\n'
         )
     lines.append('请选择下面的套餐按钮：')
