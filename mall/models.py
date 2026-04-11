@@ -101,6 +101,7 @@ class CloudServerOrder(models.Model):
     status = models.CharField('状态', max_length=32, choices=STATUS_CHOICES, default='pending', db_index=True)
     tx_hash = models.CharField('交易哈希', max_length=191, unique=True, blank=True, null=True)
     image_name = models.CharField('镜像', max_length=128, default='debian')
+    mtproxy_port = models.IntegerField('MTProxy端口', default=9528)
     instance_id = models.CharField('实例ID', max_length=191, blank=True, null=True)
     public_ip = models.CharField('公网IP', max_length=128, blank=True, null=True)
     login_user = models.CharField('登录账号', max_length=64, blank=True, null=True)

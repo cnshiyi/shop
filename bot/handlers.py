@@ -27,9 +27,11 @@ from biz.services import (
     list_monitors, list_orders, list_products, list_recharges,
     set_monitor_threshold, toggle_monitor_flag,
     list_custom_regions, list_region_plans, create_cloud_server_order, get_cloud_plan,
+    set_cloud_server_port,
 )
 from core.formatters import fmt_amount, fmt_pay_amount
 from core.models import SiteConfig
+from cloud.provisioning import provision_cloud_server
 
 logger = logging.getLogger(__name__)
 
@@ -43,6 +45,10 @@ class MonitorStates(StatesGroup):
 
 class RechargeStates(StatesGroup):
     waiting_amount = State()
+
+
+class CustomServerStates(StatesGroup):
+    waiting_port = State()
 
 
 def _products_page(products, page: int, total: int):
@@ -195,6 +201,37 @@ def register_handlers(dp: Dispatcher):
             reply_markup=main_menu(),
         )
 
+    @dp.message(CustomServerStates.waiting_port)
+    async def input_custom_server_port(message: Message, state: FSMContext):
+        try:
+            port = int(message.text.strip())
+        except Exception:
+            await message.answer('端口格式不正确，请输入 1025-65535 之间的数字。')
+            return
+        if port < 1025 or port > 65535:
+            await message.answer('端口格式不正确，请输入 1025-65535 之间的数字。')
+            return
+        data = await state.get_data()
+        order_id = data.get('custom_order_id')
+        if not order_id:
+            await state.clear()
+            await message.answer('订单上下文已失效，请重新下单。', reply_markup=main_menu())
+            return
+        user = await get_or_create_user(message.from_user.id, message.from_user.username, message.from_user.first_name)
+        order = await set_cloud_server_port(order_id, user.id, port)
+        await state.clear()
+        if not order:
+            await message.answer('订单不存在，无法设置端口。', reply_markup=main_menu())
+            return
+        provisioned = await provision_cloud_server(order.id)
+        if provisioned and provisioned.status == 'completed':
+            await message.answer(
+                f'✅ 已设置自定义端口：{port}\n公网IP: {provisioned.public_ip}\n登录账号: {provisioned.login_user}\n登录密码: {provisioned.login_password}',
+                reply_markup=main_menu(),
+            )
+            return
+        await message.answer(f'✅ 已设置自定义端口：{port}\n已进入创建流程。', reply_markup=main_menu())
+
     # ══════════════════════════════════════════════════════════════════════
     # 普通消息（菜单按钮 + /start）
     # ══════════════════════════════════════════════════════════════════════
@@ -286,7 +323,9 @@ def register_handlers(dp: Dispatcher):
         await callback.answer()
 
     @dp.callback_query(F.data.startswith('custom:plan:'))
-    async def cb_custom_plan(callback: CallbackQuery):
+    async def cb_custom_plan(callback: CallbackQuery, state: FSMContext):
+        user = await get_or_create_user(callback.from_user.id, callback.from_user.username, callback.from_user.first_name)
+        plan_id = int(callback.data.split(':')[2])
         plan = await get_cloud_plan(plan_id)
         if not plan:
             await callback.answer('套餐不存在或已下架', show_alert=True)
@@ -302,10 +341,38 @@ def register_handlers(dp: Dispatcher):
             f'套餐: {plan.plan_name}\n'
             f'价格: {fmt_amount(order.total_amount)} {order.currency}\n'
             f'支付金额: {fmt_pay_amount(order.pay_amount)} {order.currency}\n'
+            'MTProxy 端口说明：默认端口是 9528，你也可以选择输入自定义端口。\n'
+            f'当前端口: {order.mtproxy_port}\n'
             f'收款地址: `{receive_address}`\n\n'
-            '请按上方金额付款，系统监控到账后会自动进入创建流程。'
+            '请先选择端口方案，再按上方金额付款。'
         )
+        await state.clear()
         await callback.message.edit_text(text, reply_markup=custom_pay_keyboard(order.id), parse_mode='Markdown')
+        await callback.answer()
+
+    @dp.callback_query(F.data.startswith('custom:port:default:'))
+    async def cb_custom_port_default(callback: CallbackQuery):
+        order_id = int(callback.data.split(':')[3])
+        user = await get_or_create_user(callback.from_user.id, callback.from_user.username, callback.from_user.first_name)
+        order = await set_cloud_server_port(order_id, user.id, 9528)
+        if not order:
+            await callback.answer('订单不存在', show_alert=True)
+            return
+        provisioned = await provision_cloud_server(order.id)
+        if provisioned and provisioned.status == 'completed':
+            await callback.message.reply(
+                f'✅ 已使用默认端口 9528，并已完成创建。\n公网IP: {provisioned.public_ip}\n登录账号: {provisioned.login_user}\n登录密码: {provisioned.login_password}'
+            )
+        else:
+            await callback.message.reply(f'✅ 已使用默认端口 9528，已进入创建流程。\n当前状态: {getattr(provisioned, "status", "unknown")}')
+        await callback.answer('已使用默认端口 9528')
+
+    @dp.callback_query(F.data.startswith('custom:port:custom:'))
+    async def cb_custom_port_custom(callback: CallbackQuery, state: FSMContext):
+        order_id = int(callback.data.split(':')[3])
+        await state.update_data(custom_order_id=order_id)
+        await state.set_state(CustomServerStates.waiting_port)
+        await callback.message.reply('✍️ 请输入自定义端口（1025-65535）：')
         await callback.answer()
 
     @dp.callback_query(F.data.startswith('product:'))

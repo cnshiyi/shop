@@ -15,6 +15,7 @@ from asgiref.sync import sync_to_async
 from django.utils import timezone
 
 from biz.models import AddressMonitor, Recharge, Order, Product, TelegramUser, CloudServerOrder
+from bot.keyboards import custom_pay_keyboard
 from cloud.provisioning import provision_cloud_server
 from core.cache import get_config, bump_daily_stats
 from monitoring.cache import get_monitor_addresses, maybe_sync_monitors, init_monitor_cache
@@ -211,10 +212,8 @@ def _confirm_cloud_server_order(order_id: int, tx_hash: str):
         order.status = 'paid'
         order.tx_hash = tx_hash
         order.paid_at = timezone.now()
-        order.save(update_fields=['status', 'tx_hash', 'paid_at', 'updated_at'])
-        order.status = 'provisioning'
-        order.provision_note = '已收款，正在进入云服务器创建流程。'
-        order.save(update_fields=['status', 'provision_note', 'updated_at'])
+        order.provision_note = '已收款，等待用户确认 MTProxy 端口后进入创建流程。默认端口为 9528。'
+        order.save(update_fields=['status', 'tx_hash', 'paid_at', 'provision_note', 'updated_at'])
     return order
 
 
@@ -310,27 +309,13 @@ async def _process_payment(transfer: dict) -> bool:
                     '💰 云服务器订单匹配 → %s  %s %s  tx=%s',
                     confirmed.order_no, fmt_amount(amount), currency, tx_hash,
                 )
-                provisioned = await provision_cloud_server(confirmed.id)
-                if provisioned and provisioned.status == 'completed':
-                    await _notify_user(
-                        confirmed.user_id,
-                        f'✅ 云服务器创建成功！\n'
-                        f'订单号: {provisioned.order_no}\n'
-                        f'公网IP: {provisioned.public_ip}\n'
-                        f'登录账号: {provisioned.login_user}\n'
-                        f'登录密码: {provisioned.login_password}\n'
-                        f'说明: {provisioned.provision_note or "无"}',
-                    )
-                elif provisioned:
-                    await _notify_user(
-                        confirmed.user_id,
-                        f'⚠️ 云服务器订单 {confirmed.order_no} 已到账，但创建失败。\n原因: {provisioned.provision_note or "未知错误"}',
-                    )
-                else:
-                    await _notify_user(
-                        confirmed.user_id,
-                        f'⚠️ 云服务器订单 {confirmed.order_no} 已到账，但未找到创建结果。',
-                    )
+                await _notify_user(
+                    confirmed.user_id,
+                    f'✅ 云服务器订单 {confirmed.order_no} 支付成功！\n'
+                    f'地区: {confirmed.region_name}\n套餐: {confirmed.plan_name}\n'
+                    '请选择 MTProxy 端口：默认端口是 9528，你也可以输入自定义端口。',
+                    reply_markup=custom_pay_keyboard(confirmed.id),
+                )
                 return True
             return False
     return False

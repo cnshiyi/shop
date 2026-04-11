@@ -96,6 +96,10 @@ def custom_plan_menu(region_code: str, plans):
 
 def custom_pay_keyboard(order_id: int):
     kb = InlineKeyboardBuilder()
+    kb.row(
+        InlineKeyboardButton(text='✅ 使用默认端口 9528', callback_data=f'custom:port:default:{order_id}'),
+        InlineKeyboardButton(text='✍️ 输入自定义端口', callback_data=f'custom:port:custom:{order_id}'),
+    )
     kb.row(InlineKeyboardButton(text='🔙 返回主菜单', callback_data='custom:back'))
     return kb.as_markup()
 

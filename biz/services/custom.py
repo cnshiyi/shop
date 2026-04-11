@@ -113,5 +113,14 @@ def create_cloud_server_order(user_id: int, plan_id: int, currency: str = 'USDT'
         pay_amount=pay_amount,
         pay_method='address',
         status='pending',
+        mtproxy_port=9528,
         expired_at=expired_at,
     )
+
+
+@sync_to_async
+def set_cloud_server_port(order_id: int, user_id: int, port: int):
+    updated = CloudServerOrder.objects.filter(id=order_id, user_id=user_id).update(mtproxy_port=port)
+    if not updated:
+        return None
+    return CloudServerOrder.objects.filter(id=order_id, user_id=user_id).first()

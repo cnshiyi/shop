@@ -6,7 +6,7 @@ from .commerce import (
     list_orders,
     list_products,
 )
-from .custom import create_cloud_server_order, get_cloud_plan, list_custom_regions, list_region_plans
+from .custom import create_cloud_server_order, get_cloud_plan, list_custom_regions, list_region_plans, set_cloud_server_port
 from .monitoring import (
     add_monitor,
     delete_monitor,
@@ -39,6 +39,7 @@ __all__ = [
     'list_products',
     'list_region_plans',
     'list_recharges',
+    'set_cloud_server_port',
     'set_monitor_threshold',
     'toggle_monitor_flag',
     'usdt_to_trx',

@@ -6,7 +6,7 @@ from asgiref.sync import sync_to_async
 
 logger = logging.getLogger(__name__)
 
-MTPROXY_DIR = '/home/mtproxy1'
+MTPROXY_DIR = '/home/mtproxy'
 MTPROXY_PORT = 9528
 
 DEBIAN_BBR_SCRIPT = r'''#!/usr/bin/env bash
@@ -22,18 +22,21 @@ sysctl --system
 sysctl net.ipv4.tcp_congestion_control
 '''
 
-DEBIAN_MTPROXY_SCRIPT = rf'''#!/usr/bin/env bash
+def _build_mtproxy_script(port: int) -> str:
+    return rf'''#!/usr/bin/env bash
 set -e
 mkdir -p {MTPROXY_DIR}
 cd {MTPROXY_DIR}
 curl -s -o mtproxy.sh https://raw.githubusercontent.com/ellermister/mtproxy/master/mtproxy.sh
 chmod +x mtproxy.sh
-printf '%s\n' '{MTPROXY_PORT}' | bash mtproxy.sh
+printf '%s\n' '{port}' | bash mtproxy.sh
 if command -v ufw >/dev/null 2>&1; then
-  ufw allow {MTPROXY_PORT}/tcp || true
-  ufw allow {MTPROXY_PORT}/udp || true
+  ufw allow {port}/tcp || true
+  ufw allow {port}/udp || true
 fi
 '''
+
+
 
 
 async def install_bbr(ip: str, username: str, password: str) -> tuple[bool, str]:
@@ -43,11 +46,11 @@ async def install_bbr(ip: str, username: str, password: str) -> tuple[bool, str]
     return await _run_ssh_script(ip, username, password, DEBIAN_BBR_SCRIPT)
 
 
-async def install_mtproxy(ip: str, username: str, password: str) -> tuple[bool, str]:
+async def install_mtproxy(ip: str, username: str, password: str, port: int = MTPROXY_PORT) -> tuple[bool, str]:
     if not ip or not username or not password:
         return False, '缺少 SSH 连接参数，无法执行 MTProxy 安装。'
-    logger.info('开始执行 MTProxy 安装 ip=%s user=%s', ip, username)
-    return await _run_ssh_script(ip, username, password, DEBIAN_MTPROXY_SCRIPT)
+    logger.info('开始执行 MTProxy 安装 ip=%s user=%s port=%s', ip, username, port)
+    return await _run_ssh_script(ip, username, password, _build_mtproxy_script(port))
 
 
 @sync_to_async
