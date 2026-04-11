@@ -75,7 +75,7 @@ python run.py
 - 再查看该地区可选套餐价格表
 - 选择套餐后生成云服务器订单
 - 用户按指定金额付款后，系统自动监控到账并进入创建流程
-- 云服务器下单、到账、创建成功通知都会展示服务器名
+- 用户侧云服务器成功通知只发送 MTProxy 链接，不再暴露服务器名、公网 IP、账号或密码
 - MTProxy 安装完成后会尝试提取 secret，并向用户发送 `tg://proxy` 与 `https://t.me/proxy` 链接
 - AWS Lightsail 真实接入时必须申请并绑定固定公网 IP
 - 当前已拆分为 `monitor.py`、`recharge.py`、`custom.py`
