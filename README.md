@@ -75,7 +75,9 @@ python run.py
 - 再查看该地区可选套餐价格表
 - 选择套餐后生成云服务器订单
 - 用户按指定金额付款后，系统自动监控到账并进入创建流程
-- 云服务器实例名规则统一为 `时间戳-用户ID-金额`
+- 云服务器下单、到账、创建成功通知都会展示服务器名
+- MTProxy 安装完成后会尝试提取 secret，并向用户发送 `tg://proxy` 与 `https://t.me/proxy` 链接
+- AWS Lightsail 真实接入时必须申请并绑定固定公网 IP
 - 当前已拆分为 `monitor.py`、`recharge.py`、`custom.py`
 - `bot/fsm.py` 统一管理 Redis FSM、Memory 回退、TTL、连接复用与关闭清理
 - BBR 完成后继续安装 MTProxy

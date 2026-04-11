@@ -34,6 +34,21 @@ if command -v ufw >/dev/null 2>&1; then
   ufw allow {port}/tcp || true
   ufw allow {port}/udp || true
 fi
+SECRET=""
+for file in $(find {MTPROXY_DIR} /etc /usr/local -maxdepth 4 -type f 2>/dev/null); do
+  secret=$(grep -Eo '([0-9a-fA-F]{{32}}|ee[0-9a-fA-F]{{32}})' "$file" 2>/dev/null | head -n 1 || true)
+  if [ -n "$secret" ]; then
+    SECRET="$secret"
+    break
+  fi
+done
+if [ -z "$SECRET" ]; then
+  SECRET=$(ps -ef | grep -i mtproto-proxy | grep -v grep | grep -Eo '([0-9a-fA-F]{{32}}|ee[0-9a-fA-F]{{32}})' | head -n 1 || true)
+fi
+if [ -n "$SECRET" ]; then
+  echo "MTPROXY_SECRET=${SECRET}"
+  echo "MTPROXY_PORT={port}"
+fi
 '''
 
 
@@ -50,7 +65,19 @@ async def install_mtproxy(ip: str, username: str, password: str, port: int = MTP
     if not ip or not username or not password:
         return False, '缺少 SSH 连接参数，无法执行 MTProxy 安装。'
     logger.info('开始执行 MTProxy 安装 ip=%s user=%s port=%s', ip, username, port)
-    return await _run_ssh_script(ip, username, password, _build_mtproxy_script(port))
+    ok, output = await _run_ssh_script(ip, username, password, _build_mtproxy_script(port))
+    secret = ''
+    actual_port = str(port)
+    for line in output.splitlines():
+        if line.startswith('MTPROXY_SECRET='):
+            secret = line.split('=', 1)[1].strip()
+        elif line.startswith('MTPROXY_PORT='):
+            actual_port = line.split('=', 1)[1].strip()
+    if secret:
+        tg_link = f'tg://proxy?server={ip}&port={actual_port}&secret={secret}'
+        tme_link = f'https://t.me/proxy?server={ip}&port={actual_port}&secret={secret}'
+        return ok, f'MTProxy 安装完成\n端口: {actual_port}\nTG链接: {tg_link}\n分享链接: {tme_link}'
+    return ok, output.replace('BBR 初始化', 'MTProxy 安装')
 
 
 @sync_to_async

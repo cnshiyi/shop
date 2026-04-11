@@ -25,7 +25,7 @@ from biz.services import (
     list_monitors, list_orders, list_products, list_recharges,
     set_monitor_threshold, toggle_monitor_flag,
     list_custom_regions, list_region_plans, create_cloud_server_order, get_cloud_plan,
-    set_cloud_server_port,
+    set_cloud_server_port, build_cloud_server_name,
 )
 from core.formatters import fmt_amount, fmt_pay_amount
 from core.models import SiteConfig
@@ -209,7 +209,7 @@ def register_handlers(dp: Dispatcher):
         provisioned = await provision_cloud_server(order.id)
         if provisioned and provisioned.status == 'completed':
             await message.answer(
-                f'✅ 已设置自定义端口：{port}\n公网IP: {provisioned.public_ip}\n登录账号: {provisioned.login_user}\n登录密码: {provisioned.login_password}',
+                f'✅ 已设置自定义端口：{port}\n服务器名: {build_cloud_server_name(user.id, order.pay_amount)}\n公网IP: {provisioned.public_ip}\n登录账号: {provisioned.login_user}\n登录密码: {provisioned.login_password}\n{provisioned.provision_note or ""}',
                 reply_markup=main_menu(),
             )
             return
@@ -319,6 +319,7 @@ def register_handlers(dp: Dispatcher):
         text = (
             '🧾 云服务器订单已创建\n\n'
             f'订单号: {order.order_no}\n'
+            f'服务器名: {build_cloud_server_name(user.id, order.pay_amount)}\n'
             f'类型: {provider_name}\n'
             f'地区: {plan.region_name}\n'
             f'套餐: {plan.plan_name}\n'
@@ -344,7 +345,7 @@ def register_handlers(dp: Dispatcher):
         provisioned = await provision_cloud_server(order.id)
         if provisioned and provisioned.status == 'completed':
             await callback.message.reply(
-                f'✅ 已使用默认端口 9528，并已完成创建。\n公网IP: {provisioned.public_ip}\n登录账号: {provisioned.login_user}\n登录密码: {provisioned.login_password}'
+                f'✅ 已使用默认端口 9528，并已完成创建。\n服务器名: {build_cloud_server_name(user.id, order.pay_amount)}\n公网IP: {provisioned.public_ip}\n登录账号: {provisioned.login_user}\n登录密码: {provisioned.login_password}\n{provisioned.provision_note or ""}'
             )
         else:
             await callback.message.reply(f'✅ 已使用默认端口 9528，已进入创建流程。\n当前状态: {getattr(provisioned, "status", "unknown")}')
