@@ -107,8 +107,8 @@ Redis 中维护按天隔离的临时统计：
 ## 开发说明
 - 监控地址、站点配置、每日统计均优先走 Redis
 - Redis 不可用时，部分功能会自动降级到数据库
-- 旧目录目前保留为兼容层，用于维持现有迁移链与历史模型依赖
-- 新功能优先使用：`accounts / mall / finance / monitoring / biz`
+- 当前模型主定义已迁入：`accounts / mall / finance / monitoring`
+- 旧目录 `users / shopbiz / payments / monitors` 当前仅作为兼容导出层保留
 
 ## 常见维护项
 - 修改机器人 Token：更新 `.env` 或站点配置
