@@ -20,7 +20,7 @@ from bot.keyboards import (
     pay_method_keyboard, order_list as kb_order_list,
     recharge_list as kb_recharge_list, profile_menu,
 )
-from bot.services import (
+from biz.services import (
     add_monitor, create_address_order, buy_with_balance, create_recharge,
     delete_monitor, get_or_create_user, get_product, get_monitor,
     list_monitors, list_orders, list_products, list_recharges,
