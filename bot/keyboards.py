@@ -6,9 +6,11 @@ from core.formatters import fmt_amount
 
 def main_menu():
     kb = ReplyKeyboardBuilder()
-    kb.button(text='🛒 购买商品')
+    kb.button(text='✨ 订阅')
+    kb.button(text='🛠 定制')
+    kb.button(text='🔎 查询')
     kb.button(text='👤 个人中心')
-    kb.adjust(2)
+    kb.adjust(2, 2)
     return kb.as_markup(resize_keyboard=True)
 
 

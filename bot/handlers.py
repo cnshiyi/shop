@@ -77,7 +77,7 @@ class _NotInState:
         return True  # 由 aiogram 内部的 StateFilter 机制处理
 
 
-MENU_BUTTONS = {'🛒 购买商品', '👤 个人中心'}
+MENU_BUTTONS = {'✨ 订阅', '🛠 定制', '🔎 查询', '👤 个人中心'}
 
 
 def register_handlers(dp: Dispatcher):
@@ -195,10 +195,16 @@ def register_handlers(dp: Dispatcher):
         text = message.text
         user = await get_or_create_user(message.from_user.id, message.from_user.username, message.from_user.first_name)
 
-        if text == '🛒 购买商品':
+        if text == '✨ 订阅':
             products, total = await list_products()
             text_out, kb = _products_page(products, 1, total)
-            await message.answer(text_out, reply_markup=kb)
+            await message.answer('✨ 订阅服务\n\n请选择要购买的订阅商品：', reply_markup=kb)
+
+        elif text == '🛠 定制':
+            await message.answer('🛠 定制服务\n\n请联系管理员提交你的定制需求，后续这里可以接入定制下单流程。', reply_markup=main_menu())
+
+        elif text == '🔎 查询':
+            await message.answer('🔎 查询中心\n\n目前可通过个人中心查看订单、充值记录与地址监控。后续这里可以扩展独立查询功能。', reply_markup=main_menu())
 
         elif text == '👤 个人中心':
             await message.answer(
