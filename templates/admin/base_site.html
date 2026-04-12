@@ -12,48 +12,145 @@
 {% block extrastyle %}
 {{ block.super }}
 <style>
+  :root {
+    --oc-bg: #f5f7fb;
+    --oc-card: #ffffff;
+    --oc-line: #e8edf5;
+    --oc-text: #1f2329;
+    --oc-sub: #6b7280;
+    --oc-primary: #1677ff;
+    --oc-primary-soft: #e6f4ff;
+    --oc-shadow: 0 8px 24px rgba(15, 23, 42, 0.06);
+    --oc-radius: 14px;
+  }
+  body, #container { background: var(--oc-bg); }
+  #header {
+    background: linear-gradient(135deg, #1677ff, #4096ff);
+    color: #fff;
+    box-shadow: var(--oc-shadow);
+  }
+  #site-name a, #user-tools, #user-tools a { color: #fff !important; }
+  #content { padding: 24px; }
+  .breadcrumbs {
+    background: #fff;
+    border: 1px solid var(--oc-line);
+    border-radius: 12px;
+    padding: 10px 14px;
+    margin: 0 0 18px 0;
+    box-shadow: var(--oc-shadow);
+  }
   .oc-admin-layout { display: flex; gap: 20px; align-items: flex-start; }
   .oc-admin-sidebar {
-    min-width: 180px;
-    max-width: 180px;
-    background: #f7f7f7;
-    border: 1px solid #e5e5e5;
-    border-radius: 8px;
-    padding: 12px;
+    min-width: 210px;
+    max-width: 210px;
+    background: var(--oc-card);
+    border: 1px solid var(--oc-line);
+    border-radius: var(--oc-radius);
+    padding: 14px;
     position: sticky;
     top: 16px;
+    box-shadow: var(--oc-shadow);
   }
-  .oc-admin-sidebar h3 { margin: 0 0 10px 0; font-size: 14px; color: #666; }
+  .oc-admin-sidebar h3 {
+    margin: 0 0 12px 0;
+    font-size: 14px;
+    color: var(--oc-sub);
+    font-weight: 700;
+  }
   .oc-admin-sidebar a {
     display: block;
-    padding: 8px 10px;
+    padding: 10px 12px;
     margin-bottom: 8px;
-    border-radius: 6px;
+    border-radius: 10px;
     text-decoration: none;
-    color: #222;
+    color: var(--oc-text);
     background: #fff;
-    border: 1px solid #ececec;
+    border: 1px solid transparent;
+    transition: all .18s ease;
+    font-weight: 500;
   }
-  .oc-admin-sidebar a:hover { background: #e6f4ff; color: #1677ff; }
+  .oc-admin-sidebar a:hover {
+    background: var(--oc-primary-soft);
+    color: var(--oc-primary);
+    border-color: #b7d7ff;
+  }
+  .oc-admin-sidebar a.active {
+    background: var(--oc-primary);
+    color: #fff;
+    box-shadow: 0 8px 18px rgba(22, 119, 255, 0.22);
+  }
   .oc-admin-main { flex: 1; min-width: 0; }
+  #content-main, .module, .inline-group, .submit-row, .selector, .paginator, .object-tools a {
+    border-radius: 12px !important;
+  }
+  #content-main .module, .module.aligned, .submit-row, .inline-group {
+    background: var(--oc-card);
+    border: 1px solid var(--oc-line);
+    box-shadow: var(--oc-shadow);
+    overflow: hidden;
+  }
+  .module h2, .module caption, .inline-group h2 {
+    background: #fff !important;
+    color: var(--oc-text) !important;
+    border-bottom: 1px solid var(--oc-line);
+    font-weight: 700;
+    padding: 14px 16px !important;
+  }
+  div.help, p.help, .help {
+    color: var(--oc-sub);
+    font-size: 12px;
+  }
+  input, textarea, select {
+    border-radius: 10px !important;
+    border: 1px solid #d7deea !important;
+    padding: 8px 10px !important;
+  }
+  input:focus, textarea:focus, select:focus {
+    border-color: var(--oc-primary) !important;
+    box-shadow: 0 0 0 3px rgba(22,119,255,.12);
+    outline: none;
+  }
+  .button, input[type=submit], input[type=button], .submit-row input, a.button {
+    border-radius: 10px !important;
+    background: var(--oc-primary) !important;
+    border: none !important;
+    color: #fff !important;
+    font-weight: 600;
+    padding: 10px 14px !important;
+  }
+  .button.default, input[type=submit].default { background: var(--oc-primary) !important; }
+  #changelist table thead th {
+    background: #f8fafc;
+  }
+  #changelist table tbody tr:hover { background: #f9fbff; }
+  @media (max-width: 1100px) {
+    .oc-admin-layout { flex-direction: column; }
+    .oc-admin-sidebar {
+      position: static;
+      min-width: 100%;
+      max-width: 100%;
+    }
+  }
 </style>
 {% endblock %}
 
 {% block content %}
+{% with current=request.path %}
 <div class="oc-admin-layout">
   <aside class="oc-admin-sidebar">
     <h3>快捷导航</h3>
-    <a href="/admin/">后台首页</a>
-    <a href="/admin/accounts/telegramuser/">用户管理</a>
-    <a href="/admin/mall/cloudserverorder/">云服务器订单</a>
-    <a href="/admin/finance/recharge/">充值记录</a>
-    <a href="/admin/monitoring/addressmonitor/">地址监控</a>
-    <a href="/admin/mall/product/">商品管理</a>
-    <a href="/admin/mall/cloudserverplan/">云套餐</a>
-    <a href="/admin/core/siteconfig/">系统配置</a>
+    <a href="/admin/" class="{% if current == '/admin/' %}active{% endif %}">后台首页</a>
+    <a href="/admin/accounts/telegramuser/" class="{% if '/admin/accounts/telegramuser/' in current %}active{% endif %}">用户管理</a>
+    <a href="/admin/mall/cloudserverorder/" class="{% if '/admin/mall/cloudserverorder/' in current %}active{% endif %}">云服务器订单</a>
+    <a href="/admin/finance/recharge/" class="{% if '/admin/finance/recharge/' in current %}active{% endif %}">充值记录</a>
+    <a href="/admin/monitoring/addressmonitor/" class="{% if '/admin/monitoring/addressmonitor/' in current %}active{% endif %}">地址监控</a>
+    <a href="/admin/mall/product/" class="{% if '/admin/mall/product/' in current %}active{% endif %}">商品管理</a>
+    <a href="/admin/mall/cloudserverplan/" class="{% if '/admin/mall/cloudserverplan/' in current %}active{% endif %}">云套餐</a>
+    <a href="/admin/core/siteconfig/" class="{% if '/admin/core/siteconfig/' in current %}active{% endif %}">系统配置</a>
   </aside>
   <main class="oc-admin-main">
     {{ block.super }}
   </main>
 </div>
+{% endwith %}
 {% endblock %}
