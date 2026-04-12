@@ -2,70 +2,154 @@
 {% load admin_metrics %}
 
 {% block content %}
-<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:16px;margin-bottom:20px;">
+<div style="display:grid;grid-template-columns:2fr 1fr;gap:18px;margin-bottom:20px;">
+  <div style="background:linear-gradient(135deg,#1677ff 0%,#4096ff 55%,#69b1ff 100%);border-radius:20px;padding:26px 28px;box-shadow:0 18px 36px rgba(22,119,255,.22);color:#fff;min-height:170px;display:flex;flex-direction:column;justify-content:space-between;">
+    <div>
+      <div style="font-size:14px;opacity:.85;letter-spacing:.3px;">运营总览</div>
+      <div style="font-size:30px;font-weight:800;margin-top:10px;line-height:1.25;">云商城后台工作台</div>
+      <div style="font-size:14px;opacity:.92;margin-top:10px;max-width:620px;line-height:1.8;">统一查看用户、云订单、充值与监控业务，快速进入日常运营入口，整体视觉改为更贴近参考图的深侧栏 + 白色卡片大盘风格。</div>
+    </div>
+    <div style="display:flex;flex-wrap:wrap;gap:10px;margin-top:16px;">
+      <a href="/admin/mall/cloudserverorder/" class="button" style="background:#fff !important;color:#1677ff !important;box-shadow:none !important;">处理云订单</a>
+      <a href="/admin/finance/recharge/" class="button" style="background:rgba(255,255,255,.16) !important;color:#fff !important;box-shadow:none !important;">查看充值记录</a>
+      <a href="/admin/core/siteconfig/" class="button" style="background:rgba(15,23,42,.18) !important;color:#fff !important;box-shadow:none !important;">系统配置</a>
+    </div>
+  </div>
+
+  <div style="background:#fff;border:1px solid #e6ebf2;border-radius:20px;padding:22px;box-shadow:0 12px 28px rgba(15,23,42,.06);display:flex;flex-direction:column;justify-content:space-between;">
+    <div>
+      <div style="font-size:15px;font-weight:700;color:#1e293b;">待处理提醒</div>
+      <div style="font-size:13px;color:#8a94a6;margin-top:6px;">优先关注需要人工介入的业务数据</div>
+    </div>
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-top:18px;">
+      <a href="/admin/mall/cloudserverorder/" style="text-decoration:none;">
+        <div style="background:#f8fbff;border:1px solid #e7f0ff;border-radius:16px;padding:16px;">
+          <div style="font-size:12px;color:#8a94a6;">待开通云订单</div>
+          <div style="font-size:24px;font-weight:800;color:#1677ff;margin-top:8px;">{% admin_metric 'cloud_pending' %}</div>
+        </div>
+      </a>
+      <a href="/admin/finance/recharge/" style="text-decoration:none;">
+        <div style="background:#fffaf3;border:1px solid #ffe6bf;border-radius:16px;padding:16px;">
+          <div style="font-size:12px;color:#8a94a6;">待确认充值</div>
+          <div style="font-size:24px;font-weight:800;color:#fa8c16;margin-top:8px;">{% admin_metric 'recharge_pending' %}</div>
+        </div>
+      </a>
+    </div>
+  </div>
+</div>
+
+<div style="display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:16px;margin-bottom:20px;">
   <a href="/admin/accounts/telegramuser/" style="text-decoration:none;">
-    <div style="background:#fff;border:1px solid #e8edf5;border-radius:16px;padding:18px;box-shadow:0 10px 30px rgba(15,23,42,.06);">
-      <div style="font-size:13px;color:#7b8794;">用户中心</div>
-      <div style="font-size:28px;font-weight:700;color:#1f2329;margin-top:8px;">{% admin_metric 'users_total' %}</div>
-      <div style="font-size:12px;color:#7b8794;margin-top:8px;">今日新增 {% admin_metric 'users_today' %} 人</div>
+    <div style="background:#fff;border:1px solid #e6ebf2;border-radius:18px;padding:20px;box-shadow:0 10px 24px rgba(15,23,42,.05);">
+      <div style="display:flex;align-items:center;justify-content:space-between;">
+        <div style="font-size:13px;color:#8a94a6;">用户中心</div>
+        <div style="width:38px;height:38px;border-radius:12px;background:rgba(22,119,255,.12);display:flex;align-items:center;justify-content:center;color:#1677ff;font-weight:700;">U</div>
+      </div>
+      <div style="font-size:30px;font-weight:800;color:#1e293b;margin-top:14px;line-height:1;">{% admin_metric 'users_total' %}</div>
+      <div style="font-size:12px;color:#8a94a6;margin-top:12px;">今日新增 {% admin_metric 'users_today' %} 人</div>
     </div>
   </a>
+
   <a href="/admin/mall/cloudserverorder/" style="text-decoration:none;">
-    <div style="background:#fff;border:1px solid #e8edf5;border-radius:16px;padding:18px;box-shadow:0 10px 30px rgba(15,23,42,.06);">
-      <div style="font-size:13px;color:#7b8794;">云业务</div>
-      <div style="font-size:28px;font-weight:700;color:#1f2329;margin-top:8px;">{% admin_metric 'cloud_total' %}</div>
-      <div style="font-size:12px;color:#7b8794;margin-top:8px;">待处理 {% admin_metric 'cloud_pending' %} 单</div>
+    <div style="background:#fff;border:1px solid #e6ebf2;border-radius:18px;padding:20px;box-shadow:0 10px 24px rgba(15,23,42,.05);">
+      <div style="display:flex;align-items:center;justify-content:space-between;">
+        <div style="font-size:13px;color:#8a94a6;">云业务</div>
+        <div style="width:38px;height:38px;border-radius:12px;background:rgba(22,119,255,.12);display:flex;align-items:center;justify-content:center;color:#1677ff;font-weight:700;">C</div>
+      </div>
+      <div style="font-size:30px;font-weight:800;color:#1e293b;margin-top:14px;line-height:1;">{% admin_metric 'cloud_total' %}</div>
+      <div style="font-size:12px;color:#8a94a6;margin-top:12px;">当前待处理 {% admin_metric 'cloud_pending' %} 单</div>
     </div>
   </a>
+
   <a href="/admin/finance/recharge/" style="text-decoration:none;">
-    <div style="background:#fff;border:1px solid #e8edf5;border-radius:16px;padding:18px;box-shadow:0 10px 30px rgba(15,23,42,.06);">
-      <div style="font-size:13px;color:#7b8794;">资金中心</div>
-      <div style="font-size:28px;font-weight:700;color:#1f2329;margin-top:8px;">{% admin_metric 'recharge_total' %}</div>
-      <div style="font-size:12px;color:#7b8794;margin-top:8px;">待确认 {% admin_metric 'recharge_pending' %} 笔</div>
+    <div style="background:#fff;border:1px solid #e6ebf2;border-radius:18px;padding:20px;box-shadow:0 10px 24px rgba(15,23,42,.05);">
+      <div style="display:flex;align-items:center;justify-content:space-between;">
+        <div style="font-size:13px;color:#8a94a6;">资金中心</div>
+        <div style="width:38px;height:38px;border-radius:12px;background:rgba(22,119,255,.12);display:flex;align-items:center;justify-content:center;color:#1677ff;font-weight:700;">¥</div>
+      </div>
+      <div style="font-size:30px;font-weight:800;color:#1e293b;margin-top:14px;line-height:1;">{% admin_metric 'recharge_total' %}</div>
+      <div style="font-size:12px;color:#8a94a6;margin-top:12px;">待确认 {% admin_metric 'recharge_pending' %} 笔</div>
     </div>
   </a>
+
   <a href="/admin/monitoring/addressmonitor/" style="text-decoration:none;">
-    <div style="background:#fff;border:1px solid #e8edf5;border-radius:16px;padding:18px;box-shadow:0 10px 30px rgba(15,23,42,.06);">
-      <div style="font-size:13px;color:#7b8794;">监控中心</div>
-      <div style="font-size:28px;font-weight:700;color:#1f2329;margin-top:8px;">{% admin_metric 'monitor_total' %}</div>
-      <div style="font-size:12px;color:#7b8794;margin-top:8px;">启用中 {% admin_metric 'monitor_active' %} 个</div>
+    <div style="background:#fff;border:1px solid #e6ebf2;border-radius:18px;padding:20px;box-shadow:0 10px 24px rgba(15,23,42,.05);">
+      <div style="display:flex;align-items:center;justify-content:space-between;">
+        <div style="font-size:13px;color:#8a94a6;">监控中心</div>
+        <div style="width:38px;height:38px;border-radius:12px;background:rgba(22,119,255,.12);display:flex;align-items:center;justify-content:center;color:#1677ff;font-weight:700;">M</div>
+      </div>
+      <div style="font-size:30px;font-weight:800;color:#1e293b;margin-top:14px;line-height:1;">{% admin_metric 'monitor_total' %}</div>
+      <div style="font-size:12px;color:#8a94a6;margin-top:12px;">启用中 {% admin_metric 'monitor_active' %} 个</div>
     </div>
   </a>
 </div>
 
-<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:16px;margin-bottom:20px;">
-  <div style="background:#fff;border:1px solid #e8edf5;border-radius:16px;padding:18px;box-shadow:0 10px 30px rgba(15,23,42,.06);">
-    <div style="font-size:13px;color:#7b8794;">今日收入</div>
-    <div style="font-size:28px;font-weight:700;color:#16a34a;margin-top:8px;">{% admin_metric 'income_today' %} USDT</div>
-    <div style="font-size:12px;color:#7b8794;margin-top:8px;">按今日已完成充值统计</div>
+<div style="display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:16px;margin-bottom:20px;">
+  <div style="background:#fff;border:1px solid #e6ebf2;border-radius:18px;padding:20px;box-shadow:0 10px 24px rgba(15,23,42,.05);">
+    <div style="font-size:13px;color:#8a94a6;">今日收入</div>
+    <div style="font-size:30px;font-weight:800;color:#16a34a;margin-top:14px;line-height:1;">{% admin_metric 'income_today' %} <span style="font-size:15px;font-weight:700;">USDT</span></div>
+    <div style="font-size:12px;color:#8a94a6;margin-top:12px;">按今日已完成充值统计</div>
   </div>
-  <div style="background:#fff;border:1px solid #e8edf5;border-radius:16px;padding:18px;box-shadow:0 10px 30px rgba(15,23,42,.06);">
-    <div style="font-size:13px;color:#7b8794;">今日支出</div>
-    <div style="font-size:28px;font-weight:700;color:#ef4444;margin-top:8px;">{% admin_metric 'expense_today' %} USDT</div>
-    <div style="font-size:12px;color:#7b8794;margin-top:8px;">按今日已支付订单统计</div>
+
+  <div style="background:#fff;border:1px solid #e6ebf2;border-radius:18px;padding:20px;box-shadow:0 10px 24px rgba(15,23,42,.05);">
+    <div style="font-size:13px;color:#8a94a6;">今日支出</div>
+    <div style="font-size:30px;font-weight:800;color:#ef4444;margin-top:14px;line-height:1;">{% admin_metric 'expense_today' %} <span style="font-size:15px;font-weight:700;">USDT</span></div>
+    <div style="font-size:12px;color:#8a94a6;margin-top:12px;">按今日订单金额统计</div>
   </div>
-  <div style="background:#fff;border:1px solid #e8edf5;border-radius:16px;padding:18px;box-shadow:0 10px 30px rgba(15,23,42,.06);">
-    <div style="font-size:13px;color:#7b8794;">今日利润</div>
-    <div style="font-size:28px;font-weight:700;color:#1677ff;margin-top:8px;">{% admin_metric 'profit_today' %} USDT</div>
-    <div style="font-size:12px;color:#7b8794;margin-top:8px;">收入减去今日订单金额</div>
+
+  <div style="background:#fff;border:1px solid #e6ebf2;border-radius:18px;padding:20px;box-shadow:0 10px 24px rgba(15,23,42,.05);">
+    <div style="font-size:13px;color:#8a94a6;">今日利润</div>
+    <div style="font-size:30px;font-weight:800;color:#1677ff;margin-top:14px;line-height:1;">{% admin_metric 'profit_today' %} <span style="font-size:15px;font-weight:700;">USDT</span></div>
+    <div style="font-size:12px;color:#8a94a6;margin-top:12px;">收入减去今日订单金额</div>
   </div>
-  <a href="/admin/mall/cloudserverorder/" style="text-decoration:none;">
-    <div style="background:#fff;border:1px solid #e8edf5;border-radius:16px;padding:18px;box-shadow:0 10px 30px rgba(15,23,42,.06);">
-      <div style="font-size:13px;color:#7b8794;">待开通云订单</div>
-      <div style="font-size:28px;font-weight:700;color:#fa8c16;margin-top:8px;">{% admin_metric 'cloud_pending' %}</div>
-      <div style="font-size:12px;color:#7b8794;margin-top:8px;">待支付 / 创建中 / 待续费</div>
+
+  <a href="/admin/mall/order/" style="text-decoration:none;">
+    <div style="background:#fff;border:1px solid #e6ebf2;border-radius:18px;padding:20px;box-shadow:0 10px 24px rgba(15,23,42,.05);">
+      <div style="font-size:13px;color:#8a94a6;">订阅订单</div>
+      <div style="font-size:30px;font-weight:800;color:#1e293b;margin-top:14px;line-height:1;">{% admin_metric 'order_total' %}</div>
+      <div style="font-size:12px;color:#8a94a6;margin-top:12px;">查看全部订阅业务订单</div>
     </div>
   </a>
 </div>
 
-<div style="background:#fff;border:1px solid #e8edf5;border-radius:16px;padding:18px;box-shadow:0 10px 30px rgba(15,23,42,.06);margin-bottom:20px;">
-  <div style="font-size:18px;font-weight:700;color:#1f2329;margin-bottom:6px;">运营快捷入口</div>
-  <div style="font-size:13px;color:#7b8794;margin-bottom:14px;">常用后台操作入口，方便快速处理日常业务。</div>
-  <div style="display:flex;flex-wrap:wrap;gap:10px;">
-    <a href="/admin/mall/product/" class="button">商品管理</a>
-    <a href="/admin/mall/cloudserverplan/" class="button">云套餐</a>
-    <a href="/admin/core/siteconfig/" class="button">系统配置</a>
-    <a href="/admin/mall/order/" class="button">订阅订单（{% admin_metric 'order_total' %}）</a>
+<div style="display:grid;grid-template-columns:1.2fr .8fr;gap:18px;margin-bottom:20px;">
+  <div style="background:#fff;border:1px solid #e6ebf2;border-radius:20px;padding:20px 20px 18px;box-shadow:0 10px 24px rgba(15,23,42,.05);">
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:14px;">
+      <div>
+        <div style="font-size:18px;font-weight:800;color:#1e293b;">运营快捷入口</div>
+        <div style="font-size:13px;color:#8a94a6;margin-top:4px;">常用后台入口聚合，保持接近参考图的工作台模块感。</div>
+      </div>
+    </div>
+    <div style="display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px;">
+      <a href="/admin/mall/product/" style="text-decoration:none;background:#f8fafc;border:1px solid #e6ebf2;border-radius:16px;padding:16px 18px;color:#1e293b;display:block;">
+        <div style="font-weight:700;">商品管理</div>
+        <div style="font-size:12px;color:#8a94a6;margin-top:6px;">管理订阅商品与销售展示</div>
+      </a>
+      <a href="/admin/mall/cloudserverplan/" style="text-decoration:none;background:#f8fafc;border:1px solid #e6ebf2;border-radius:16px;padding:16px 18px;color:#1e293b;display:block;">
+        <div style="font-weight:700;">云套餐</div>
+        <div style="font-size:12px;color:#8a94a6;margin-top:6px;">同步并维护云服务器销售套餐</div>
+      </a>
+      <a href="/admin/core/siteconfig/" style="text-decoration:none;background:#f8fafc;border:1px solid #e6ebf2;border-radius:16px;padding:16px 18px;color:#1e293b;display:block;">
+        <div style="font-weight:700;">系统配置</div>
+        <div style="font-size:12px;color:#8a94a6;margin-top:6px;">统一维护收款地址与系统参数</div>
+      </a>
+      <a href="/admin/mall/cloudserverorder/" style="text-decoration:none;background:#f8fafc;border:1px solid #e6ebf2;border-radius:16px;padding:16px 18px;color:#1e293b;display:block;">
+        <div style="font-weight:700;">云订单处理</div>
+        <div style="font-size:12px;color:#8a94a6;margin-top:6px;">快速进入待支付 / 待开通订单列表</div>
+      </a>
+    </div>
+  </div>
+
+  <div style="background:#fff;border:1px solid #e6ebf2;border-radius:20px;padding:20px 20px 18px;box-shadow:0 10px 24px rgba(15,23,42,.05);">
+    <div style="font-size:18px;font-weight:800;color:#1e293b;">运营说明</div>
+    <div style="font-size:13px;color:#8a94a6;margin-top:6px;line-height:1.9;">
+      当前后台样式已切换为更接近参考图的仪表盘风格：深色左侧导航、浅色顶栏、白色浮层卡片、圆角与轻阴影统一、首页改为大盘式工作台布局。
+    </div>
+    <div style="margin-top:16px;display:flex;flex-direction:column;gap:10px;">
+      <div style="background:#f8fbff;border:1px solid #e7f0ff;border-radius:14px;padding:12px 14px;font-size:13px;color:#334155;">顶部采用浅色条带，弱化传统 Django Admin 顶部压迫感。</div>
+      <div style="background:#f8fbff;border:1px solid #e7f0ff;border-radius:14px;padding:12px 14px;font-size:13px;color:#334155;">左侧导航改成深色卡片侧栏，激活项突出显示。</div>
+      <div style="background:#f8fbff;border:1px solid #e7f0ff;border-radius:14px;padding:12px 14px;font-size:13px;color:#334155;">首页卡片按“总览、待办、指标、快捷入口”分区。</div>
+    </div>
   </div>
 </div>
 
