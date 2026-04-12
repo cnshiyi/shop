@@ -47,8 +47,12 @@ DEFAULT_AWS_PLAN_TEMPLATES = [
     ('2xlarge_3_0', '2Xlarge 16G 320G 7TB', '16GB', '320GB SSD', '7TB'),
 ]
 DEFAULT_ALIYUN_PLAN_TEMPLATES = [
-    ('1C1G 40G 1TB', '1 vCPU', '1GB', '40GB SSD', '1TB', Decimal('8.50')),
-    ('2C2G 60G 2TB', '2 vCPU', '2GB', '60GB SSD', '2TB', Decimal('12.50')),
+    ('基础型', '1核', '1GB', '40GB SSD', '1TB', Decimal('8.50')),
+    ('标准型', '2核', '2GB', '60GB SSD', '2TB', Decimal('12.50')),
+    ('增强型', '2核', '4GB', '80GB SSD', '3TB', Decimal('18.50')),
+    ('高配型', '4核', '8GB', '120GB SSD', '4TB', Decimal('28.50')),
+    ('旗舰型', '8核', '16GB', '200GB SSD', '5TB', Decimal('48.50')),
+    ('至尊型', '16核', '32GB', '400GB SSD', '6TB', Decimal('88.50')),
 ]
 
 
@@ -197,6 +201,14 @@ def ensure_cloud_server_plans():
         _sync_provider_plans('aws_lightsail', aws_regions, _fetch_aws_bundle_templates())
     if aliyun_regions:
         _sync_provider_plans('aliyun_simple', aliyun_regions, DEFAULT_ALIYUN_PLAN_TEMPLATES)
+    else:
+        existing_aliyun_regions = list(
+            CloudServerPlan.objects.filter(provider='aliyun_simple', is_active=True)
+            .values_list('region_code', 'region_name')
+            .distinct()
+        )
+        if existing_aliyun_regions:
+            _sync_provider_plans('aliyun_simple', existing_aliyun_regions, DEFAULT_ALIYUN_PLAN_TEMPLATES)
     if not CloudServerPlan.objects.exists():
         _sync_provider_plans('aws_lightsail', [('ap-southeast-1', '新加坡')], _fetch_aws_bundle_templates())
 
