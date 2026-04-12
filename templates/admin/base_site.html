@@ -1,0 +1,15 @@
+{% extends "admin/base_site.html" %}
+{% load i18n %}
+
+{% block nav-global %}
+<div style="padding:10px 0 0 0; display:flex; gap:8px; flex-wrap:wrap; align-items:center;">
+  <a href="/admin/" style="background:#1677ff;color:#fff;padding:6px 12px;border-radius:6px;text-decoration:none;">后台首页</a>
+  <a href="/admin/accounts/telegramuser/" style="background:#f5f5f5;color:#222;padding:6px 12px;border-radius:6px;text-decoration:none;">用户管理</a>
+  <a href="/admin/mall/cloudserverorder/" style="background:#f5f5f5;color:#222;padding:6px 12px;border-radius:6px;text-decoration:none;">云服务器订单</a>
+  <a href="/admin/finance/recharge/" style="background:#f5f5f5;color:#222;padding:6px 12px;border-radius:6px;text-decoration:none;">充值记录</a>
+  <a href="/admin/monitoring/addressmonitor/" style="background:#f5f5f5;color:#222;padding:6px 12px;border-radius:6px;text-decoration:none;">地址监控</a>
+  <a href="/admin/mall/product/" style="background:#f5f5f5;color:#222;padding:6px 12px;border-radius:6px;text-decoration:none;">商品管理</a>
+  <a href="/admin/mall/cloudserverplan/" style="background:#f5f5f5;color:#222;padding:6px 12px;border-radius:6px;text-decoration:none;">云套餐</a>
+  <a href="/admin/core/siteconfig/" style="background:#f5f5f5;color:#222;padding:6px 12px;border-radius:6px;text-decoration:none;">系统配置</a>
+</div>
+{% endblock %}
