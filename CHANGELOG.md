@@ -632,6 +632,13 @@
 - Redis 连接增加 `socket_keepalive`、`health_check_interval` 和超时重试，降低 Windows 环境下偶发断链影响
 - 这可缓解 `redis.exceptions.ConnectionError: Error 22 while writing to socket` 导致的 bot 状态读取失败
 
+## v0.4.47 - 2026-04-12
+
+### 修复
+- 修复 Redis FSM 容错包装里 `super(): no arguments` 的调用错误
+- 现在 Redis 存储会正确调用 `RedisStorage` 基类方法，再按需回退内存态
+- 避免 bot 每次取状态都刷出误报警告
+
 ## 当前通知逻辑
 - 转入：`🟢 收入提醒`
 - 转出：`🔴 支出提醒`

@@ -32,19 +32,19 @@ class ResilientRedisStorage(RedisStorage):
 
     async def get_state(self, key: StorageKey):
         default = await _fallback_memory.get_state(key)
-        return await self._with_reconnect('get_state', lambda: super().get_state(key), default)
+        return await self._with_reconnect('get_state', lambda: RedisStorage.get_state(self, key), default)
 
     async def set_state(self, key: StorageKey, state=None):
-        result = await self._with_reconnect('set_state', lambda: super().set_state(key, state), None)
+        result = await self._with_reconnect('set_state', lambda: RedisStorage.set_state(self, key, state), None)
         await _fallback_memory.set_state(key, state)
         return result
 
     async def get_data(self, key: StorageKey):
         default = await _fallback_memory.get_data(key)
-        return await self._with_reconnect('get_data', lambda: super().get_data(key), default)
+        return await self._with_reconnect('get_data', lambda: RedisStorage.get_data(self, key), default)
 
     async def set_data(self, key: StorageKey, data):
-        result = await self._with_reconnect('set_data', lambda: super().set_data(key, data), None)
+        result = await self._with_reconnect('set_data', lambda: RedisStorage.set_data(self, key, data), None)
         await _fallback_memory.set_data(key, data)
         return result
 
