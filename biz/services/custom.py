@@ -292,11 +292,11 @@ def _sort_region_pairs(regions: list[tuple[str, str]]) -> list[tuple[str, str]]:
 def list_custom_regions():
     ensure_cloud_server_plans.__wrapped__()
     plans = list(CloudServerPlan.objects.filter(is_active=True).values_list('provider', 'region_code', 'region_name').distinct())
-    aws_regions = {code: name for provider, code, name in plans if provider == 'aws_lightsail'}
+    aws_regions = {code: name for provider, code, name in plans if provider == 'aws_lightsail' and code != 'cn-hongkong'}
     aliyun_hk = [(code, name) for provider, code, name in plans if provider == 'aliyun_simple' and code == 'cn-hongkong']
     regions = list(aws_regions.items())
-    if aliyun_hk and 'cn-hongkong' not in aws_regions:
-        regions.extend(aliyun_hk)
+    if aliyun_hk:
+        regions.extend(aliyun_hk[:1])
     return _sort_region_pairs(regions)
 
 

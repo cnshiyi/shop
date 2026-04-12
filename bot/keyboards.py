@@ -107,7 +107,7 @@ def custom_region_menu(regions, expanded: bool = False):
     for region_code, region_name in display_regions:
         kb.button(text=region_name, callback_data=f'custom:region:{region_code}')
     if not expanded and remaining_regions:
-        kb.button(text='📍 更多地区', callback_data='custom:regions:more')
+        kb.button(text='更多', callback_data='custom:regions:more')
         kb.adjust(3, 3)
         kb.button(text='🔙 返回主菜单', callback_data='custom:back')
         kb.adjust(3, 3, 1)
