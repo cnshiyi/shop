@@ -249,7 +249,7 @@ def register_handlers(dp: Dispatcher):
 
         elif text == '🛠 定制':
             regions = await list_custom_regions()
-            await message.answer('🛠 云服务器定制\n\n请选择地区：', reply_markup=custom_region_menu(regions))
+            await message.answer('🛠 云服务器定制\n\n请选择热门地区：', reply_markup=custom_region_menu(regions, expanded=False))
 
         elif text == '🔎 查询':
             servers = await list_user_cloud_servers(user.id)
@@ -307,7 +307,13 @@ def register_handlers(dp: Dispatcher):
     @dp.callback_query(F.data == 'custom:regions')
     async def cb_custom_regions(callback: CallbackQuery):
         regions = await list_custom_regions()
-        await callback.message.edit_text('🛠 云服务器定制\n\n请选择地区：', reply_markup=custom_region_menu(regions))
+        await callback.message.edit_text('🛠 云服务器定制\n\n请选择热门地区：', reply_markup=custom_region_menu(regions, expanded=False))
+        await callback.answer()
+
+    @dp.callback_query(F.data == 'custom:regions:more')
+    async def cb_custom_regions_more(callback: CallbackQuery):
+        regions = await list_custom_regions()
+        await callback.message.edit_text('🛠 云服务器定制\n\n请选择地区：', reply_markup=custom_region_menu(regions, expanded=True))
         await callback.answer()
 
     @dp.callback_query(F.data.startswith('custom:region:'))
