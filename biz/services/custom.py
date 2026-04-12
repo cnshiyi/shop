@@ -70,6 +70,58 @@ def _generate_order_no() -> str:
     return f'SRV{int(time.time() * 1000)}{random.randint(1000, 9999)}'
 
 
+def _build_aliyun_client(endpoint: str = 'swas.cn-hangzhou.aliyuncs.com'):
+    key = os.getenv('ALIBABA_CLOUD_ACCESS_KEY_ID', '')
+    secret = os.getenv('ALIBABA_CLOUD_ACCESS_KEY_SECRET', '')
+    if not key or not secret:
+        return None
+    from alibabacloud_tea_openapi import models as open_api_models
+    from alibabacloud_swas_open20200601.client import Client
+
+    config = open_api_models.Config(
+        access_key_id=key,
+        access_key_secret=secret,
+        endpoint=endpoint,
+    )
+    return Client(config)
+
+
+def _parse_aliyun_price(value) -> Decimal:
+    text = str(value or '').strip().replace('$', '')
+    if not text:
+        return Decimal('0')
+    return Decimal(text)
+
+
+def _fetch_aliyun_plan_templates(region_code: str):
+    client = _build_aliyun_client()
+    if not client:
+        return DEFAULT_ALIYUN_PLAN_TEMPLATES
+    try:
+        from alibabacloud_swas_open20200601 import models as swas_models
+
+        response = client.list_plans(swas_models.ListPlansRequest(region_id=region_code))
+        plans = response.body.to_map().get('Plans', [])
+        linux_plans = [item for item in plans if 'Linux' in str(item.get('SupportPlatform', ''))]
+        linux_plans.sort(key=lambda item: (_parse_aliyun_price(item.get('OriginPrice')), item.get('Core') or 0, item.get('Memory') or 0))
+        labels = ['基础型', '标准型', '增强型', '高配型', '旗舰型', '至尊型']
+        templates = []
+        for idx, item in enumerate(linux_plans[:6]):
+            base_price = _parse_aliyun_price(item.get('OriginPrice'))
+            sell_price = (base_price * Decimal('2')) + Decimal('5')
+            templates.append((
+                labels[idx],
+                f"{item.get('Core') or '-'}核",
+                f"{item.get('Memory') or '-'}GB",
+                f"{item.get('DiskSize') or '-'}GB {item.get('DiskType') or 'SSD'}",
+                f"{item.get('Bandwidth') or '-'}Mbps",
+                sell_price.quantize(Decimal('0.01')),
+            ))
+        return templates or DEFAULT_ALIYUN_PLAN_TEMPLATES
+    except Exception:
+        return DEFAULT_ALIYUN_PLAN_TEMPLATES
+
+
 def _fetch_aws_bundle_templates():
     key = os.getenv('AWS_ACCESS_KEY_ID', '')
     secret = os.getenv('AWS_SECRET_ACCESS_KEY', '')
@@ -149,11 +201,26 @@ def _fetch_aws_regions():
 
 
 def _fetch_aliyun_regions():
-    key = os.getenv('ALIBABA_CLOUD_ACCESS_KEY_ID', '')
-    secret = os.getenv('ALIBABA_CLOUD_ACCESS_KEY_SECRET', '')
-    if not key or not secret:
+    client = _build_aliyun_client()
+    if not client:
         return []
-    return [(code, name) for code, name in ALIYUN_REGION_NAMES.items() if code == 'cn-hongkong' or not code.startswith('cn-')]
+    try:
+        from alibabacloud_swas_open20200601 import models as swas_models
+
+        response = client.list_regions(swas_models.ListRegionsRequest())
+        regions = response.body.to_map().get('Regions', [])
+        result = []
+        for item in regions:
+            code = item.get('RegionId')
+            name = ALIYUN_REGION_NAMES.get(code) or item.get('LocalName') or code
+            if not code:
+                continue
+            if code != 'cn-hongkong' and (code.startswith('cn-') or code in {'ap-southeast-3', 'ap-southeast-5'}):
+                continue
+            result.append((code, name))
+        return result
+    except Exception:
+        return []
 
 
 def _sync_provider_plans(provider: str, regions: list[tuple[str, str]], templates):
@@ -200,7 +267,8 @@ def ensure_cloud_server_plans():
     if aws_regions:
         _sync_provider_plans('aws_lightsail', aws_regions, _fetch_aws_bundle_templates())
     if aliyun_regions:
-        _sync_provider_plans('aliyun_simple', aliyun_regions, DEFAULT_ALIYUN_PLAN_TEMPLATES)
+        for region_code, region_name in aliyun_regions:
+            _sync_provider_plans('aliyun_simple', [(region_code, region_name)], _fetch_aliyun_plan_templates(region_code))
     else:
         existing_aliyun_regions = list(
             CloudServerPlan.objects.filter(provider='aliyun_simple', is_active=True)
@@ -208,7 +276,8 @@ def ensure_cloud_server_plans():
             .distinct()
         )
         if existing_aliyun_regions:
-            _sync_provider_plans('aliyun_simple', existing_aliyun_regions, DEFAULT_ALIYUN_PLAN_TEMPLATES)
+            for region_code, region_name in existing_aliyun_regions:
+                _sync_provider_plans('aliyun_simple', [(region_code, region_name)], _fetch_aliyun_plan_templates(region_code))
     if not CloudServerPlan.objects.exists():
         _sync_provider_plans('aws_lightsail', [('ap-southeast-1', '新加坡')], _fetch_aws_bundle_templates())
 
