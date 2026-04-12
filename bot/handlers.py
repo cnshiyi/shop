@@ -205,12 +205,19 @@ def register_handlers(dp: Dispatcher):
         if not plan:
             await message.answer('套餐不存在或已下架，请重新选择。', reply_markup=main_menu())
             return
-        quantity = int(text)
-        usdt_amount = plan.price * quantity
-        trx_amount = await usdt_to_trx(usdt_amount)
+        order = await create_cloud_server_order(user.id, plan.id, 'USDT', quantity)
+        receive_address = _receive_address()
         await message.answer(
-            '请选择支付方式：',
-            reply_markup=custom_currency_keyboard(plan.id, usdt_amount, trx_amount, quantity=quantity),
+            '🧾 订单详情\n\n'
+            f'地区: {plan.region_name}\n'
+            f'套餐: {plan.plan_name}\n'
+            f'数量: {order.quantity}\n'
+            f'支付金额: {fmt_pay_amount(order.total_amount)} USDT / {fmt_pay_amount(await usdt_to_trx(order.total_amount))} TRX\n'
+            f'支付地址: `{receive_address}`\n'
+            '订单 5 分钟有效，请在有效期内完成支付。\n\n'
+            '系统已开始自动监控 USDT 和 TRX 到账，检测到支付成功后会自动进入后续流程。',
+            reply_markup=custom_currency_keyboard(None, None, None, order.id),
+            parse_mode='Markdown',
         )
 
     @dp.message(CustomServerStates.waiting_port)
@@ -377,12 +384,21 @@ def register_handlers(dp: Dispatcher):
             await callback.answer()
             return
         quantity = int(qty_text)
-        usdt_amount = plan.price * quantity
-        trx_amount = await usdt_to_trx(usdt_amount)
         await state.clear()
+        user = await get_or_create_user(callback.from_user.id, callback.from_user.username, callback.from_user.first_name)
+        order = await create_cloud_server_order(user.id, plan.id, 'USDT', quantity)
+        receive_address = _receive_address()
         await callback.message.edit_text(
-            '请选择支付方式：',
-            reply_markup=custom_currency_keyboard(plan.id, usdt_amount, trx_amount, quantity=quantity),
+            '🧾 订单详情\n\n'
+            f'地区: {plan.region_name}\n'
+            f'套餐: {plan.plan_name}\n'
+            f'数量: {order.quantity}\n'
+            f'支付金额: {fmt_pay_amount(order.total_amount)} USDT / {fmt_pay_amount(await usdt_to_trx(order.total_amount))} TRX\n'
+            f'支付地址: `{receive_address}`\n'
+            '订单 5 分钟有效，请在有效期内完成支付。\n\n'
+            '系统已开始自动监控 USDT 和 TRX 到账，检测到支付成功后会自动进入后续流程。',
+            reply_markup=custom_currency_keyboard(None, None, None, order.id),
+            parse_mode='Markdown',
         )
         await callback.answer()
 

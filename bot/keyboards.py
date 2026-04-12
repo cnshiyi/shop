@@ -146,10 +146,6 @@ def custom_quantity_keyboard(plan_id: int):
 def custom_currency_keyboard(plan_id: int | None, usdt_amount=None, trx_amount=None, order_id: int | None = None, quantity: int = 1):
     kb = InlineKeyboardBuilder()
     if plan_id is not None:
-        kb.row(
-            InlineKeyboardButton(text=f'🔗 地址 USDT ({fmt_amount(usdt_amount)} U)', callback_data=f'custom:currency:{plan_id}:{quantity}:USDT'),
-            InlineKeyboardButton(text=f'🔗 地址 TRX ({fmt_amount(trx_amount)} TRX)', callback_data=f'custom:currency:{plan_id}:{quantity}:TRX'),
-        )
         kb.row(InlineKeyboardButton(text='💳 钱包支付', callback_data=f'custom:wallet:{plan_id}:{quantity}'))
         kb.row(InlineKeyboardButton(text='🔙 返回地区', callback_data='custom:regions'))
     else:

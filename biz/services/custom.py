@@ -347,9 +347,11 @@ def _list_custom_regions_db():
 async def list_custom_regions():
     cached = await _cache_get_json(CUSTOM_REGIONS_CACHE_KEY)
     if cached:
+        logger.info('定制缓存命中: 地区列表 %s 项', len(cached))
         return [tuple(item) for item in cached]
     regions = await _list_custom_regions_db()
     await _cache_set_json(CUSTOM_REGIONS_CACHE_KEY, regions)
+    logger.info('定制缓存回源: 地区列表 %s 项', len(regions))
     return regions
 
 
@@ -370,18 +372,23 @@ async def list_region_plans(region_code: str):
         plan_map = {plan.id: plan for plan in plans}
         ordered = [plan_map[plan_id] for plan_id in ids if plan_id in plan_map]
         if ordered:
+            logger.info('定制缓存命中: %s 套餐 %s 个', region_code, len(ordered))
             return ordered
     plans = await _list_region_plans_db(region_code)
     await _cache_set_json(CUSTOM_PLANS_CACHE_PREFIX + region_code, [{'id': plan.id} for plan in plans])
+    logger.info('定制缓存回源: %s 套餐 %s 个', region_code, len(plans))
     return plans
 
 
 async def refresh_custom_plan_cache():
     regions = await _list_custom_regions_db()
     await _cache_set_json(CUSTOM_REGIONS_CACHE_KEY, regions)
+    total_plans = 0
     for region_code, _ in regions:
         plans = await _list_region_plans_db(region_code)
+        total_plans += len(plans)
         await _cache_set_json(CUSTOM_PLANS_CACHE_PREFIX + region_code, [{'id': plan.id} for plan in plans])
+    logger.info('定制缓存刷新完成: 地区 %s 个, 套餐 %s 个', len(regions), total_plans)
     return len(regions)
 
 
