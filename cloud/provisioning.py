@@ -35,9 +35,11 @@ async def provision_cloud_server(order_id: int):
         result = await create_aliyun_instance(order, server_name)
         login_user = 'root'
     if result.ok:
-        _, bbr_note = await install_bbr(result.public_ip, result.login_user or login_user, result.login_password)
-        _, mtproxy_note = await install_mtproxy(result.public_ip, result.login_user or login_user, result.login_password, order.mtproxy_port)
+        bbr_ok, bbr_note = await install_bbr(result.public_ip, result.login_user or login_user, result.login_password)
+        mtproxy_ok, mtproxy_note = await install_mtproxy(result.public_ip, result.login_user or login_user, result.login_password, order.mtproxy_port)
         note = '\n'.join(part for part in [result.note, bbr_note, mtproxy_note] if part)
+        if not bbr_ok or not mtproxy_ok:
+            return await _mark_failed(order_id, note)
         return await _mark_success(
             order_id,
             server_name,
