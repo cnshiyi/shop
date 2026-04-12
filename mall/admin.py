@@ -57,7 +57,7 @@ class CloudServerPlanAdmin(admin.ModelAdmin):
 
 @admin.register(CloudServerOrder)
 class CloudServerOrderAdmin(admin.ModelAdmin):
-    list_display = ('order_no', 'user', 'provider', 'region_name', 'plan_name', 'quantity', 'server_name', 'public_ip', 'service_expires_at', 'ip_recycle_at', 'status', 'mtproxy_port', 'mtproxy_link_preview', 'created_at')
+    list_display = ('order_no', 'user', 'provider', 'region_name', 'plan_name', 'quantity', 'status_badge', 'service_status', 'public_ip', 'service_expires_at', 'ip_recycle_at', 'mtproxy_port', 'mtproxy_link_preview', 'created_at')
     list_filter = ('provider', 'region_name', 'status', 'currency', 'pay_method', 'created_at')
     search_fields = ('order_no', 'server_name', 'public_ip', 'plan_name', 'region_name', 'tx_hash', 'user__tg_user_id', 'user__username')
     readonly_fields = ('order_no', 'created_at', 'paid_at', 'completed_at', 'updated_at', 'tx_hash', 'mtproxy_link', 'mtproxy_secret', 'provider_resource_id', 'instance_id', 'last_user_id', 'pay_amount', 'total_amount')
@@ -72,6 +72,30 @@ class CloudServerOrderAdmin(admin.ModelAdmin):
         ('生命周期', {'fields': ('lifecycle_days', 'service_started_at', 'service_expires_at', 'renew_grace_expires_at', 'suspend_at', 'delete_at', 'ip_recycle_at', 'last_renewed_at')}),
         ('运维备注', {'fields': ('last_user_id', 'login_user', 'login_password', 'provision_note', 'created_at', 'completed_at', 'updated_at')}),
     )
+
+    def status_badge(self, obj):
+        color_map = {
+            'pending': '#999999', 'paid': '#1677ff', 'provisioning': '#1677ff', 'completed': '#52c41a',
+            'renew_pending': '#faad14', 'expiring': '#fa8c16', 'suspended': '#722ed1', 'deleting': '#ff4d4f',
+            'deleted': '#595959', 'failed': '#ff4d4f', 'cancelled': '#8c8c8c', 'expired': '#8c8c8c',
+        }
+        label = dict(CloudServerOrder.STATUS_CHOICES).get(obj.status, obj.status)
+        color = color_map.get(obj.status, '#999999')
+        return format_html('<span style="color:#fff;background:{};padding:2px 8px;border-radius:10px;">{}</span>', color, label)
+    status_badge.short_description = '状态'
+
+    def service_status(self, obj):
+        if obj.status == 'completed' and obj.service_expires_at:
+            if obj.service_expires_at < timezone.now():
+                return '已到期'
+            remaining = obj.service_expires_at - timezone.now()
+            return f'剩余 {remaining.days} 天'
+        if obj.status == 'failed':
+            return '创建失败'
+        if obj.status == 'pending':
+            return '待支付'
+        return '-'
+    service_status.short_description = '服务状态'
 
     def mtproxy_link_preview(self, obj):
         if not obj.mtproxy_link:
