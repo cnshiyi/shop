@@ -82,6 +82,7 @@ def main():
     logging.getLogger('httpx').setLevel(logging.WARNING)
     logging.getLogger('httpcore').setLevel(logging.WARNING)
     logging.getLogger('apscheduler').setLevel(logging.ERROR)
+    logging.getLogger('aiogram.event').setLevel(logging.WARNING)
     logging.getLogger('apscheduler.executors.default').setLevel(logging.ERROR)
     logging.getLogger('apscheduler.scheduler').setLevel(logging.ERROR)
     asyncio.run(run_bot())
