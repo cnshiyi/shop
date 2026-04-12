@@ -155,7 +155,7 @@ async def create_instance(order, server_name: str):
         for _ in range(60):
             instance = _find_instance(client, region_code, instance_id)
             status = str(instance.get('Status') or '').lower()
-            if status in {'running', 'starting', 'pending'}:
+            if status in {'running', 'starting', 'pending', 'stopped'}:
                 break
             time.sleep(5)
 
@@ -164,24 +164,58 @@ async def create_instance(order, server_name: str):
                 region_id=region_code,
                 instance_id=instance_id,
                 instance_name=server_name,
-                password=password,
-                client_token=f'{server_name}-pwd',
+                client_token=f'{server_name}-name',
             )
         )
 
+        client.stop_instance(
+            swas_models.StopInstanceRequest(
+                region_id=region_code,
+                instance_id=instance_id,
+                client_token=f'{server_name}-stop',
+            )
+        )
+        for _ in range(60):
+            instance = _find_instance(client, region_code, instance_id)
+            status = str(instance.get('Status') or '').lower()
+            if status == 'stopped':
+                break
+            time.sleep(5)
+
+        client.reset_system(
+            swas_models.ResetSystemRequest(
+                region_id=region_code,
+                instance_id=instance_id,
+                image_id=image_id,
+                client_token=f'{server_name}-reset',
+                login_credentials=swas_models.ResetSystemRequestLoginCredentials(password=password),
+            )
+        )
+        time.sleep(5)
+        try:
+            client.start_instance(
+                swas_models.StartInstanceRequest(
+                    region_id=region_code,
+                    instance_id=instance_id,
+                    client_token=f'{server_name}-start',
+                )
+            )
+        except Exception:
+            pass
+
         public_ip = ''
         login_user = 'root'
-        for _ in range(60):
+        for _ in range(90):
             instance = _find_instance(client, region_code, instance_id)
             public_ip = instance.get('PublicIpAddress') or ''
             status = str(instance.get('Status') or '').lower()
-            if public_ip and status == 'running':
+            if public_ip and status in {'running', 'starting'}:
                 break
             time.sleep(5)
 
         note = (
             f'阿里云轻量云创建成功。实例名: {server_name}，'
-            f'套餐: {selected_plan_id} ({selected_plan_type})，镜像: {image_id}。'
+            f'套餐: {selected_plan_id} ({selected_plan_type})，镜像: {image_id}，已按阿里云流程执行重装系统并下发密码。'
         )
         return ProvisionResult(
             ok=True,
