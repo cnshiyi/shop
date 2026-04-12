@@ -201,6 +201,12 @@ def ensure_cloud_server_plans():
         _sync_provider_plans('aws_lightsail', [('ap-southeast-1', '新加坡')], _fetch_aws_bundle_templates())
 
 
+def _sort_region_pairs(regions: list[tuple[str, str]]) -> list[tuple[str, str]]:
+    preferred = ['新加坡', '香港']
+    preferred_index = {name: idx for idx, name in enumerate(preferred)}
+    return sorted(regions, key=lambda item: (preferred_index.get(item[1], 999), item[1], item[0]))
+
+
 @sync_to_async
 def list_custom_regions():
     ensure_cloud_server_plans.__wrapped__()
@@ -209,7 +215,7 @@ def list_custom_regions():
     aliyun_regions = {code: name for provider, code, name in plans if provider == 'aliyun_simple'}
     aws_only = [(code, name) for code, name in aws_regions.items() if code not in aliyun_regions]
     aliyun_only = [(code, name) for code, name in aliyun_regions.items() if code == 'cn-hongkong' or code not in aws_regions]
-    return aws_only + aliyun_only
+    return _sort_region_pairs(aws_only + aliyun_only)
 
 
 @sync_to_async
