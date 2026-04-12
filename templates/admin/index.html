@@ -1,0 +1,47 @@
+{% extends "admin/index.html" %}
+
+{% block content %}
+<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:16px;margin-bottom:20px;">
+  <a href="/admin/accounts/telegramuser/" style="text-decoration:none;">
+    <div style="background:#fff;border:1px solid #e8edf5;border-radius:16px;padding:18px;box-shadow:0 10px 30px rgba(15,23,42,.06);">
+      <div style="font-size:13px;color:#7b8794;">用户中心</div>
+      <div style="font-size:24px;font-weight:700;color:#1f2329;margin-top:8px;">用户管理</div>
+      <div style="font-size:12px;color:#1677ff;margin-top:10px;">查看用户、余额、订单统计</div>
+    </div>
+  </a>
+  <a href="/admin/mall/cloudserverorder/" style="text-decoration:none;">
+    <div style="background:#fff;border:1px solid #e8edf5;border-radius:16px;padding:18px;box-shadow:0 10px 30px rgba(15,23,42,.06);">
+      <div style="font-size:13px;color:#7b8794;">云业务</div>
+      <div style="font-size:24px;font-weight:700;color:#1f2329;margin-top:8px;">云服务器订单</div>
+      <div style="font-size:12px;color:#1677ff;margin-top:10px;">查看支付、创建、到期、代理链接</div>
+    </div>
+  </a>
+  <a href="/admin/finance/recharge/" style="text-decoration:none;">
+    <div style="background:#fff;border:1px solid #e8edf5;border-radius:16px;padding:18px;box-shadow:0 10px 30px rgba(15,23,42,.06);">
+      <div style="font-size:13px;color:#7b8794;">资金中心</div>
+      <div style="font-size:24px;font-weight:700;color:#1f2329;margin-top:8px;">充值记录</div>
+      <div style="font-size:12px;color:#1677ff;margin-top:10px;">处理充值、手动入账</div>
+    </div>
+  </a>
+  <a href="/admin/monitoring/addressmonitor/" style="text-decoration:none;">
+    <div style="background:#fff;border:1px solid #e8edf5;border-radius:16px;padding:18px;box-shadow:0 10px 30px rgba(15,23,42,.06);">
+      <div style="font-size:13px;color:#7b8794;">监控中心</div>
+      <div style="font-size:24px;font-weight:700;color:#1f2329;margin-top:8px;">地址监控</div>
+      <div style="font-size:12px;color:#1677ff;margin-top:10px;">查看监控地址、资源与阈值</div>
+    </div>
+  </a>
+</div>
+
+<div style="background:#fff;border:1px solid #e8edf5;border-radius:16px;padding:18px;box-shadow:0 10px 30px rgba(15,23,42,.06);margin-bottom:20px;">
+  <div style="font-size:18px;font-weight:700;color:#1f2329;margin-bottom:6px;">运营快捷入口</div>
+  <div style="font-size:13px;color:#7b8794;margin-bottom:14px;">常用后台操作入口，方便快速处理日常业务。</div>
+  <div style="display:flex;flex-wrap:wrap;gap:10px;">
+    <a href="/admin/mall/product/" class="button">商品管理</a>
+    <a href="/admin/mall/cloudserverplan/" class="button">云套餐</a>
+    <a href="/admin/core/siteconfig/" class="button">系统配置</a>
+    <a href="/admin/mall/order/" class="button">订阅订单</a>
+  </div>
+</div>
+
+{{ block.super }}
+{% endblock %}
