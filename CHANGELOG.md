@@ -541,6 +541,13 @@
 - 阿里云地区列表改为从真实 API 拉取
 - 阿里云套餐档位改为从真实 `ListPlans` 接口同步，并自动换算销售价与带宽/CPU/硬盘配置
 
+## v0.4.34 - 2026-04-12
+
+### 调整
+- 阿里云轻量云创建流程改为真实 `CreateInstances / ListImages / ListPlans / UpdateInstanceAttribute` 接口实现
+- 实测创建时返回阿里云账号侧校验错误 `NO_REAL_REGISTER_AUTHENTICATION`
+- 当前阻塞点已确认不是代码参数错误，而是账号未完成阿里云要求的实名认证校验
+
 ## 当前通知逻辑
 - 转入：`🟢 收入提醒`
 - 转出：`🔴 支出提醒`
