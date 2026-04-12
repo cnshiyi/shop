@@ -1,15 +1,59 @@
-{% extends "admin/base_site.html" %}
+{% extends "admin/base.html" %}
 {% load i18n %}
 
-{% block nav-global %}
-<div style="padding:10px 0 0 0; display:flex; gap:8px; flex-wrap:wrap; align-items:center;">
-  <a href="/admin/" style="background:#1677ff;color:#fff;padding:6px 12px;border-radius:6px;text-decoration:none;">后台首页</a>
-  <a href="/admin/accounts/telegramuser/" style="background:#f5f5f5;color:#222;padding:6px 12px;border-radius:6px;text-decoration:none;">用户管理</a>
-  <a href="/admin/mall/cloudserverorder/" style="background:#f5f5f5;color:#222;padding:6px 12px;border-radius:6px;text-decoration:none;">云服务器订单</a>
-  <a href="/admin/finance/recharge/" style="background:#f5f5f5;color:#222;padding:6px 12px;border-radius:6px;text-decoration:none;">充值记录</a>
-  <a href="/admin/monitoring/addressmonitor/" style="background:#f5f5f5;color:#222;padding:6px 12px;border-radius:6px;text-decoration:none;">地址监控</a>
-  <a href="/admin/mall/product/" style="background:#f5f5f5;color:#222;padding:6px 12px;border-radius:6px;text-decoration:none;">商品管理</a>
-  <a href="/admin/mall/cloudserverplan/" style="background:#f5f5f5;color:#222;padding:6px 12px;border-radius:6px;text-decoration:none;">云套餐</a>
-  <a href="/admin/core/siteconfig/" style="background:#f5f5f5;color:#222;padding:6px 12px;border-radius:6px;text-decoration:none;">系统配置</a>
+{% block title %}{{ title }} | 云商城后台{% endblock %}
+
+{% block branding %}
+<div id="site-name"><a href="{% url 'admin:index' %}">云商城后台管理</a></div>
+{% endblock %}
+
+{% block nav-global %}{% endblock %}
+
+{% block extrastyle %}
+{{ block.super }}
+<style>
+  .oc-admin-layout { display: flex; gap: 20px; align-items: flex-start; }
+  .oc-admin-sidebar {
+    min-width: 180px;
+    max-width: 180px;
+    background: #f7f7f7;
+    border: 1px solid #e5e5e5;
+    border-radius: 8px;
+    padding: 12px;
+    position: sticky;
+    top: 16px;
+  }
+  .oc-admin-sidebar h3 { margin: 0 0 10px 0; font-size: 14px; color: #666; }
+  .oc-admin-sidebar a {
+    display: block;
+    padding: 8px 10px;
+    margin-bottom: 8px;
+    border-radius: 6px;
+    text-decoration: none;
+    color: #222;
+    background: #fff;
+    border: 1px solid #ececec;
+  }
+  .oc-admin-sidebar a:hover { background: #e6f4ff; color: #1677ff; }
+  .oc-admin-main { flex: 1; min-width: 0; }
+</style>
+{% endblock %}
+
+{% block content %}
+<div class="oc-admin-layout">
+  <aside class="oc-admin-sidebar">
+    <h3>快捷导航</h3>
+    <a href="/admin/">后台首页</a>
+    <a href="/admin/accounts/telegramuser/">用户管理</a>
+    <a href="/admin/mall/cloudserverorder/">云服务器订单</a>
+    <a href="/admin/finance/recharge/">充值记录</a>
+    <a href="/admin/monitoring/addressmonitor/">地址监控</a>
+    <a href="/admin/mall/product/">商品管理</a>
+    <a href="/admin/mall/cloudserverplan/">云套餐</a>
+    <a href="/admin/core/siteconfig/">系统配置</a>
+  </aside>
+  <main class="oc-admin-main">
+    {{ block.super }}
+  </main>
 </div>
 {% endblock %}
