@@ -6,7 +6,7 @@ from .commerce import (
     list_orders,
     list_products,
 )
-from .custom import create_cloud_server_order, buy_cloud_server_with_balance, get_cloud_plan, list_custom_regions, list_region_plans, set_cloud_server_port, build_cloud_server_name
+from .custom import create_cloud_server_order, buy_cloud_server_with_balance, pay_cloud_server_order_with_balance, get_cloud_plan, list_custom_regions, list_region_plans, set_cloud_server_port, build_cloud_server_name
 from .cloud_servers import (
     apply_cloud_server_renewal,
     create_cloud_server_renewal,
@@ -33,6 +33,7 @@ __all__ = [
     'create_address_order',
     'create_cloud_server_order',
     'buy_cloud_server_with_balance',
+    'pay_cloud_server_order_with_balance',
     'create_cloud_server_renewal',
     'create_recharge',
     'delete_monitor',

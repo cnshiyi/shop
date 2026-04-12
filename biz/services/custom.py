@@ -332,12 +332,13 @@ def get_cloud_plan(plan_id: int):
 
 
 @sync_to_async
-def create_cloud_server_order(user_id: int, plan_id: int, currency: str = 'USDT'):
+def create_cloud_server_order(user_id: int, plan_id: int, currency: str = 'USDT', quantity: int = 1):
     ensure_cloud_server_plans.__wrapped__()
     plan = CloudServerPlan.objects.get(id=plan_id, is_active=True)
-    total = plan.price
+    quantity = max(1, int(quantity or 1))
+    total = Decimal(plan.price) * quantity
     pay_amount = _generate_unique_pay_amount(total, currency)
-    expired_at = timezone.now() + timezone.timedelta(minutes=15)
+    expired_at = timezone.now() + timezone.timedelta(minutes=5)
     return CloudServerOrder.objects.create(
         order_no=_generate_order_no(),
         user_id=user_id,
@@ -346,6 +347,7 @@ def create_cloud_server_order(user_id: int, plan_id: int, currency: str = 'USDT'
         region_code=plan.region_code,
         region_name=plan.region_name,
         plan_name=plan.plan_name,
+        quantity=quantity,
         currency=currency,
         total_amount=total,
         pay_amount=pay_amount,
@@ -357,10 +359,12 @@ def create_cloud_server_order(user_id: int, plan_id: int, currency: str = 'USDT'
 
 
 @sync_to_async
-def buy_cloud_server_with_balance(user_id: int, plan_id: int, currency: str = 'USDT'):
+def buy_cloud_server_with_balance(user_id: int, plan_id: int, currency: str = 'USDT', quantity: int = 1):
     ensure_cloud_server_plans.__wrapped__()
     plan = CloudServerPlan.objects.get(id=plan_id, is_active=True)
-    total = usdt_to_trx.__wrapped__(plan.price) if currency == 'TRX' else Decimal(plan.price)
+    quantity = max(1, int(quantity or 1))
+    total_usdt = Decimal(plan.price) * quantity
+    total = usdt_to_trx.__wrapped__(total_usdt) if currency == 'TRX' else total_usdt
     with transaction.atomic():
         user = TelegramUser.objects.select_for_update().get(id=user_id)
         balance_field = 'balance_trx' if currency == 'TRX' else 'balance'
@@ -377,14 +381,38 @@ def buy_cloud_server_with_balance(user_id: int, plan_id: int, currency: str = 'U
             region_code=plan.region_code,
             region_name=plan.region_name,
             plan_name=plan.plan_name,
+            quantity=quantity,
             currency=currency,
-            total_amount=plan.price,
+            total_amount=total_usdt,
             pay_amount=total,
             pay_method='balance',
             status='paid',
             mtproxy_port=9528,
             paid_at=timezone.now(),
         )
+    return order, None
+
+
+@sync_to_async
+def pay_cloud_server_order_with_balance(order_id: int, user_id: int, currency: str = 'USDT'):
+    order = CloudServerOrder.objects.select_related('plan').filter(id=order_id, user_id=user_id, status='pending').first()
+    if not order:
+        return None, '订单不存在或状态不可支付'
+    total = usdt_to_trx.__wrapped__(order.total_amount) if currency == 'TRX' else Decimal(order.total_amount)
+    with transaction.atomic():
+        user = TelegramUser.objects.select_for_update().get(id=user_id)
+        balance_field = 'balance_trx' if currency == 'TRX' else 'balance'
+        current_balance = Decimal(str(getattr(user, balance_field, 0) or 0))
+        if current_balance < total:
+            return None, f'{currency} 余额不足'
+        setattr(user, balance_field, current_balance - total)
+        user.save(update_fields=[balance_field, 'updated_at'])
+        order.currency = currency
+        order.pay_amount = total
+        order.pay_method = 'balance'
+        order.status = 'paid'
+        order.paid_at = timezone.now()
+        order.save(update_fields=['currency', 'pay_amount', 'pay_method', 'status', 'paid_at', 'updated_at'])
     return order, None
 
 

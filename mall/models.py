@@ -100,6 +100,7 @@ class CloudServerOrder(models.Model):
     region_code = models.CharField('地区代码', max_length=64, db_index=True)
     region_name = models.CharField('地区名称', max_length=128)
     plan_name = models.CharField('套餐名称', max_length=191)
+    quantity = models.IntegerField('购买数量', default=1)
     currency = models.CharField('币种', max_length=32, choices=CURRENCY_CHOICES, default='USDT', db_index=True)
     total_amount = models.DecimalField('总金额', max_digits=18, decimal_places=6)
     pay_amount = models.DecimalField('应付金额', max_digits=18, decimal_places=9, blank=True, null=True)

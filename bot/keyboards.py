@@ -133,20 +133,48 @@ def custom_plan_menu(region_code: str, plans):
     return kb.as_markup()
 
 
-def custom_currency_keyboard(plan_id: int | None, usdt_amount=None, trx_amount=None, order_id: int | None = None):
+def custom_quantity_keyboard(plan_id: int):
+    kb = InlineKeyboardBuilder()
+    for qty in [1, 2, 3, 4, 5]:
+        kb.button(text=str(qty), callback_data=f'custom:qty:{plan_id}:{qty}')
+    kb.button(text='✍️ 自定义', callback_data=f'custom:qty:{plan_id}:custom')
+    kb.button(text='🔙 返回地区', callback_data='custom:regions')
+    kb.adjust(5, 1, 1)
+    return kb.as_markup()
+
+
+def custom_currency_keyboard(plan_id: int | None, usdt_amount=None, trx_amount=None, order_id: int | None = None, quantity: int = 1):
     kb = InlineKeyboardBuilder()
     if plan_id is not None:
         kb.row(
-            InlineKeyboardButton(text=f'🔗 地址 USDT ({fmt_amount(usdt_amount)} U)', callback_data=f'custom:currency:{plan_id}:USDT'),
-            InlineKeyboardButton(text=f'🔗 地址 TRX ({fmt_amount(trx_amount)} TRX)', callback_data=f'custom:currency:{plan_id}:TRX'),
+            InlineKeyboardButton(text=f'🔗 地址 USDT ({fmt_amount(usdt_amount)} U)', callback_data=f'custom:currency:{plan_id}:{quantity}:USDT'),
+            InlineKeyboardButton(text=f'🔗 地址 TRX ({fmt_amount(trx_amount)} TRX)', callback_data=f'custom:currency:{plan_id}:{quantity}:TRX'),
         )
-        kb.row(
-            InlineKeyboardButton(text=f'💳 钱包 USDT ({fmt_amount(usdt_amount)} U)', callback_data=f'custom:balance:{plan_id}:USDT'),
-            InlineKeyboardButton(text=f'💳 钱包 TRX ({fmt_amount(trx_amount)} TRX)', callback_data=f'custom:balance:{plan_id}:TRX'),
-        )
+        kb.row(InlineKeyboardButton(text='💳 钱包支付', callback_data=f'custom:wallet:{plan_id}:{quantity}'))
         kb.row(InlineKeyboardButton(text='🔙 返回地区', callback_data='custom:regions'))
     else:
+        kb.row(InlineKeyboardButton(text='💳 钱包支付', callback_data=f'custom:walletpay:{order_id}'))
         kb.row(InlineKeyboardButton(text='🔙 返回', callback_data='custom:regions'))
+    return kb.as_markup()
+
+
+def custom_wallet_keyboard(plan_id: int, quantity: int, usdt_amount=None, trx_amount=None):
+    kb = InlineKeyboardBuilder()
+    kb.row(
+        InlineKeyboardButton(text=f'💳 钱包 USDT ({fmt_amount(usdt_amount)} U)', callback_data=f'custom:balance:{plan_id}:{quantity}:USDT'),
+        InlineKeyboardButton(text=f'💳 钱包 TRX ({fmt_amount(trx_amount)} TRX)', callback_data=f'custom:balance:{plan_id}:{quantity}:TRX'),
+    )
+    kb.row(InlineKeyboardButton(text='🔙 返回地区', callback_data='custom:regions'))
+    return kb.as_markup()
+
+
+def custom_order_wallet_keyboard(order_id: int, usdt_amount, trx_amount):
+    kb = InlineKeyboardBuilder()
+    kb.row(
+        InlineKeyboardButton(text=f'💳 钱包 USDT ({fmt_amount(usdt_amount)} U)', callback_data=f'custom:walletpay:{order_id}:USDT'),
+        InlineKeyboardButton(text=f'💳 钱包 TRX ({fmt_amount(trx_amount)} TRX)', callback_data=f'custom:walletpay:{order_id}:TRX'),
+    )
+    kb.row(InlineKeyboardButton(text='🔙 返回', callback_data='custom:regions'))
     return kb.as_markup()
 
 

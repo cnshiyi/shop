@@ -17,7 +17,7 @@ from bot.keyboards import (
     recharge_currency_menu, product_list, quantity_keyboard,
     pay_method_keyboard, order_list as kb_order_list,
     recharge_list as kb_recharge_list, profile_menu,
-    custom_region_menu, custom_plan_menu, custom_currency_keyboard, custom_port_keyboard,
+    custom_region_menu, custom_plan_menu, custom_quantity_keyboard, custom_currency_keyboard, custom_wallet_keyboard, custom_order_wallet_keyboard, custom_port_keyboard,
     cloud_server_list, cloud_server_detail,
 )
 from biz.services import (
@@ -25,7 +25,7 @@ from biz.services import (
     delete_monitor, get_or_create_user, get_product, get_monitor,
     list_monitors, list_orders, list_products, list_recharges,
     set_monitor_threshold, toggle_monitor_flag,
-    list_custom_regions, list_region_plans, create_cloud_server_order, buy_cloud_server_with_balance, get_cloud_plan,
+    list_custom_regions, list_region_plans, create_cloud_server_order, buy_cloud_server_with_balance, pay_cloud_server_order_with_balance, get_cloud_plan,
     set_cloud_server_port, create_cloud_server_renewal, list_user_cloud_servers,
     get_user_cloud_server, mark_cloud_server_ip_change_requested,
 )
@@ -192,6 +192,27 @@ def register_handlers(dp: Dispatcher):
             reply_markup=main_menu(),
         )
 
+    @dp.message(CustomServerStates.waiting_quantity)
+    async def custom_quantity_input(message: Message, state: FSMContext):
+        text = message.text.strip()
+        if not text.isdigit() or int(text) <= 0 or int(text) > 99:
+            await message.answer('请输入 1-99 的购买数量：')
+            return
+        data = await state.get_data()
+        plan_id = int(data['custom_plan_id'])
+        await state.clear()
+        plan = await get_cloud_plan(plan_id)
+        if not plan:
+            await message.answer('套餐不存在或已下架，请重新选择。', reply_markup=main_menu())
+            return
+        quantity = int(text)
+        usdt_amount = plan.price * quantity
+        trx_amount = await usdt_to_trx(usdt_amount)
+        await message.answer(
+            '请选择支付方式：',
+            reply_markup=custom_currency_keyboard(plan.id, usdt_amount, trx_amount, quantity=quantity),
+        )
+
     @dp.message(CustomServerStates.waiting_port)
     async def input_custom_server_port(message: Message, state: FSMContext):
         try:
@@ -331,34 +352,76 @@ def register_handlers(dp: Dispatcher):
         if not plan:
             await callback.answer('套餐不存在或已下架', show_alert=True)
             return
-        trx_amount = await usdt_to_trx(plan.price)
         text = (
-            '🧾 请选择支付币种\n\n'
+            '🧾 请选择购买数量\n\n'
             f'地区: {plan.region_name}\n'
             f'套餐: {plan.plan_name}\n'
-            f'💵 USDT: {fmt_amount(plan.price)} USDT\n'
-            f'🪙 TRX: ≈ {fmt_amount(trx_amount)} TRX\n\n'
-            '请选择你要使用的支付币种。'
+            f'单价: {fmt_amount(plan.price)} USDT\n\n'
+            '请选择数量，或输入自定义数量。'
         )
-        await callback.message.edit_text(text, reply_markup=custom_currency_keyboard(plan.id, plan.price, trx_amount))
+        await callback.message.edit_text(text, reply_markup=custom_quantity_keyboard(plan.id))
         await callback.answer()
 
-    @dp.callback_query(F.data.startswith('custom:currency:'))
-    async def cb_custom_currency(callback: CallbackQuery, state: FSMContext):
-        user = await get_or_create_user(callback.from_user.id, callback.from_user.username, callback.from_user.first_name)
-        _, _, plan_id_text, currency = callback.data.split(':')
+    @dp.callback_query(F.data.startswith('custom:qty:'))
+    async def cb_custom_quantity(callback: CallbackQuery, state: FSMContext):
+        _, _, plan_id_text, qty_text = callback.data.split(':')
         plan_id = int(plan_id_text)
         plan = await get_cloud_plan(plan_id)
         if not plan:
             await callback.answer('套餐不存在或已下架', show_alert=True)
             return
-        order = await create_cloud_server_order(user.id, plan.id, currency)
+        if qty_text == 'custom':
+            await state.update_data(custom_plan_id=plan_id)
+            await state.set_state(CustomServerStates.waiting_quantity)
+            await callback.message.edit_text('请输入购买数量（1-99）：')
+            await callback.answer()
+            return
+        quantity = int(qty_text)
+        usdt_amount = plan.price * quantity
+        trx_amount = await usdt_to_trx(usdt_amount)
+        await state.clear()
+        await callback.message.edit_text(
+            '请选择支付方式：',
+            reply_markup=custom_currency_keyboard(plan.id, usdt_amount, trx_amount, quantity=quantity),
+        )
+        await callback.answer()
+
+    @dp.callback_query(F.data.startswith('custom:wallet:'))
+    async def cb_custom_wallet(callback: CallbackQuery, state: FSMContext):
+        _, _, plan_id_text, quantity_text = callback.data.split(':')
+        plan_id = int(plan_id_text)
+        quantity = int(quantity_text)
+        plan = await get_cloud_plan(plan_id)
+        if not plan:
+            await callback.answer('套餐不存在或已下架', show_alert=True)
+            return
+        usdt_amount = plan.price * quantity
+        trx_amount = await usdt_to_trx(usdt_amount)
+        await state.clear()
+        await callback.message.edit_text(
+            '请选择钱包支付币种：',
+            reply_markup=custom_wallet_keyboard(plan.id, quantity, usdt_amount, trx_amount),
+        )
+        await callback.answer()
+
+    @dp.callback_query(F.data.startswith('custom:currency:'))
+    async def cb_custom_currency(callback: CallbackQuery, state: FSMContext):
+        user = await get_or_create_user(callback.from_user.id, callback.from_user.username, callback.from_user.first_name)
+        _, _, plan_id_text, quantity_text, currency = callback.data.split(':')
+        plan_id = int(plan_id_text)
+        quantity = int(quantity_text)
+        plan = await get_cloud_plan(plan_id)
+        if not plan:
+            await callback.answer('套餐不存在或已下架', show_alert=True)
+            return
+        order = await create_cloud_server_order(user.id, plan.id, currency, quantity)
         receive_address = _receive_address()
         text = (
             '🧾 云服务器订单已创建\n\n'
             f'支付金额: {fmt_pay_amount(order.pay_amount)} {order.currency}\n'
-            f'支付地址: `{receive_address}`\n\n'
-            '请向以上地址转入精确金额，系统自动到账后会继续下一步。'
+            f'支付地址: `{receive_address}`\n'
+            '订单 5 分钟有效，请在有效期内完成支付。\n\n'
+            '系统已开始自动监控该订单地址到账。'
         )
         await state.clear()
         await callback.message.edit_text(text, reply_markup=custom_currency_keyboard(None, None, None, order.id), parse_mode='Markdown')
@@ -367,9 +430,10 @@ def register_handlers(dp: Dispatcher):
     @dp.callback_query(F.data.startswith('custom:balance:'))
     async def cb_custom_balance(callback: CallbackQuery, state: FSMContext):
         user = await get_or_create_user(callback.from_user.id, callback.from_user.username, callback.from_user.first_name)
-        _, _, plan_id_text, currency = callback.data.split(':')
+        _, _, plan_id_text, quantity_text, currency = callback.data.split(':')
         plan_id = int(plan_id_text)
-        order, err = await buy_cloud_server_with_balance(user.id, plan_id, currency)
+        quantity = int(quantity_text)
+        order, err = await buy_cloud_server_with_balance(user.id, plan_id, currency, quantity)
         if err:
             await callback.answer(err, show_alert=True)
             return
@@ -380,6 +444,36 @@ def register_handlers(dp: Dispatcher):
         )
         await state.clear()
         await callback.message.edit_text(text, reply_markup=custom_port_keyboard(order.id))
+        await callback.answer()
+
+    @dp.callback_query(F.data.startswith('custom:walletpay:'))
+    async def cb_custom_walletpay(callback: CallbackQuery, state: FSMContext):
+        parts = callback.data.split(':')
+        user = await get_or_create_user(callback.from_user.id, callback.from_user.username, callback.from_user.first_name)
+        order_id = int(parts[2])
+        if len(parts) == 3:
+            from biz.models import CloudServerOrder
+            order = await asyncio.to_thread(lambda: CloudServerOrder.objects.filter(id=order_id, user_id=user.id).first())
+            if not order:
+                await callback.answer('订单不存在', show_alert=True)
+                return
+            trx_amount = await usdt_to_trx(order.total_amount)
+            await callback.message.edit_text(
+                '请选择钱包支付币种：',
+                reply_markup=custom_order_wallet_keyboard(order.id, order.total_amount, trx_amount),
+            )
+            await callback.answer()
+            return
+        currency = parts[3]
+        order, err = await pay_cloud_server_order_with_balance(order_id, user.id, currency)
+        if err:
+            await callback.answer(err, show_alert=True)
+            return
+        await state.clear()
+        await callback.message.edit_text(
+            '✅ 钱包支付成功\n\n请选择 MTProxy 端口：默认端口是 9528，你也可以输入自定义端口。',
+            reply_markup=custom_port_keyboard(order.id),
+        )
         await callback.answer()
 
     @dp.callback_query(F.data.startswith('custom:port:default:'))
