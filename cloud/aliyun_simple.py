@@ -27,6 +27,10 @@ def _build_client(endpoint: str = 'swas.cn-hangzhou.aliyuncs.com'):
     return Client(config)
 
 
+def _region_endpoint(region_code: str) -> str:
+    return f'swas.{region_code}.aliyuncs.com'
+
+
 def _label_index(plan_name: str) -> int:
     labels = ['基础型', '标准型', '增强型', '高配型', '旗舰型', '至尊型']
     try:
@@ -69,14 +73,14 @@ def _find_instance(client, region_code: str, instance_id: str):
 
 
 async def create_instance(order, server_name: str):
-    client = _build_client()
+    region_code = order.region_code or 'cn-hongkong'
+    client = _build_client(_region_endpoint(region_code))
     if not client:
         return ProvisionResult(ok=False, note='未配置 ALIBABA_CLOUD_ACCESS_KEY_ID / ALIBABA_CLOUD_ACCESS_KEY_SECRET。')
 
     try:
         from alibabacloud_swas_open20200601 import models as swas_models
 
-        region_code = order.region_code or 'cn-hongkong'
         password = _rand_password()
         plan_id = _pick_plan_id(client, region_code, order.plan_name)
         image_id = _pick_image_id(client, region_code)
