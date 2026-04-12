@@ -1,6 +1,7 @@
 import asyncio
 import logging
 import socket
+import time
 
 from asgiref.sync import sync_to_async
 
@@ -67,6 +68,9 @@ async def install_bbr(ip: str, username: str, password: str) -> tuple[bool, str]
     if not ip or not username or not password:
         return False, '缺少 SSH 连接参数，无法执行 BBR 初始化。'
     logger.info('开始执行 BBR 初始化 ip=%s user=%s', ip, username)
+    ready, message = await _wait_ssh_port(ip)
+    if not ready:
+        return False, message
     return await _run_ssh_script(ip, username, password, DEBIAN_BBR_SCRIPT)
 
 
@@ -80,6 +84,9 @@ async def install_mtproxy(ip: str, username: str, password: str, port: int = MTP
     if not ip or not username or not password:
         return False, '缺少 SSH 连接参数，无法执行 MTProxy 安装。'
     logger.info('开始执行 MTProxy 安装 ip=%s user=%s port=%s', ip, username, port)
+    ready, message = await _wait_ssh_port(ip)
+    if not ready:
+        return False, message.replace('BBR 初始化', 'MTProxy 安装')
     ok, output = await _run_ssh_script(ip, username, password, _build_mtproxy_script(port))
     secret = ''
     actual_port = str(port)
@@ -92,6 +99,29 @@ async def install_mtproxy(ip: str, username: str, password: str, port: int = MTP
         tg_link, tme_link = build_mtproxy_links(ip, actual_port, secret)
         return ok, f'MTProxy 安装完成\n端口: {actual_port}\nTG链接: {tg_link}\n分享链接: {tme_link}'
     return ok, output.replace('BBR 初始化', 'MTProxy 安装')
+
+
+@sync_to_async
+def _wait_ssh_port(ip: str, timeout: int = 600, interval: int = 5) -> tuple[bool, str]:
+    started = asyncio.get_event_loop_policy()
+    _ = started
+    end_time = time.time() + timeout
+    last_error = ''
+    while time.time() < end_time:
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        sock.settimeout(5)
+        try:
+            sock.connect((ip, 22))
+            return True, 'SSH 22 端口已就绪。'
+        except Exception as exc:
+            last_error = str(exc)
+            time.sleep(interval)
+        finally:
+            try:
+                sock.close()
+            except Exception:
+                pass
+    return False, f'SSH 22 端口长时间未就绪，可能实例防火墙未放通或系统仍在初始化: {last_error}'
 
 
 @sync_to_async
