@@ -1,4 +1,5 @@
 from asgiref.sync import sync_to_async
+import logging
 from django.db import close_old_connections
 
 from biz.models import CloudServerOrder
@@ -6,6 +7,8 @@ from biz.services import build_cloud_server_name
 from cloud.aliyun_simple import create_instance as create_aliyun_instance
 from cloud.aws_lightsail import create_instance as create_aws_instance
 from cloud.bootstrap import install_bbr, install_mtproxy
+
+logger = logging.getLogger(__name__)
 
 
 def _extract_mtproxy_fields(note: str) -> tuple[str, str, str]:
@@ -29,6 +32,7 @@ async def provision_cloud_server(order_id: int):
     if not order:
         return None
     server_name = build_cloud_server_name(order.user_id, order.pay_amount)
+    logger.info('云服务器开通开始: order=%s provider=%s region=%s qty=%s port=%s', order.order_no, order.provider, order.region_code, order.quantity, order.mtproxy_port)
     if order.provider == 'aws_lightsail':
         result = await create_aws_instance(order, server_name)
         login_user = 'admin'
@@ -40,8 +44,9 @@ async def provision_cloud_server(order_id: int):
         mtproxy_ok, mtproxy_note = await install_mtproxy(result.public_ip, result.login_user or login_user, result.login_password, order.mtproxy_port)
         note = '\n'.join(part for part in [result.note, bbr_note, mtproxy_note] if part)
         if not bbr_ok or not mtproxy_ok:
+            logger.warning('云服务器开通失败: order=%s provider=%s reason=bootstrap_failed', order.order_no, order.provider)
             return await _mark_failed(order_id, note)
-        return await _mark_success(
+        saved = await _mark_success(
             order_id,
             server_name,
             result.instance_id,
@@ -50,6 +55,9 @@ async def provision_cloud_server(order_id: int):
             result.login_password,
             note,
         )
+        logger.info('云服务器开通完成: order=%s provider=%s region=%s port=%s', saved.order_no, saved.provider, saved.region_code, saved.mtproxy_port)
+        return saved
+    logger.warning('云服务器开通失败: order=%s provider=%s reason=create_failed', order.order_no, order.provider)
     return await _mark_failed(order_id, result.note)
 
 

@@ -409,7 +409,7 @@ def create_cloud_server_order(user_id: int, plan_id: int, currency: str = 'USDT'
     total = Decimal(plan.price) * quantity
     pay_amount = _generate_unique_pay_amount(total, currency)
     expired_at = timezone.now() + timezone.timedelta(minutes=5)
-    return CloudServerOrder.objects.create(
+    order = CloudServerOrder.objects.create(
         order_no=_generate_order_no(),
         user_id=user_id,
         plan=plan,
@@ -426,6 +426,8 @@ def create_cloud_server_order(user_id: int, plan_id: int, currency: str = 'USDT'
         mtproxy_port=9528,
         expired_at=expired_at,
     )
+    logger.info('云服务器订单创建: order=%s user=%s region=%s plan=%s qty=%s pay=address amount=%s', order.order_no, user_id, plan.region_code, plan.plan_name, quantity, pay_amount)
+    return order
 
 
 @sync_to_async
@@ -460,6 +462,7 @@ def buy_cloud_server_with_balance(user_id: int, plan_id: int, currency: str = 'U
             mtproxy_port=9528,
             paid_at=timezone.now(),
         )
+    logger.info('云服务器钱包下单: order=%s user=%s region=%s plan=%s qty=%s currency=%s amount=%s', order.order_no, user_id, plan.region_code, plan.plan_name, quantity, currency, total)
     return order, None
 
 
@@ -483,12 +486,17 @@ def pay_cloud_server_order_with_balance(order_id: int, user_id: int, currency: s
         order.status = 'paid'
         order.paid_at = timezone.now()
         order.save(update_fields=['currency', 'pay_amount', 'pay_method', 'status', 'paid_at', 'updated_at'])
+    logger.info('云服务器钱包补付: order=%s user=%s currency=%s amount=%s', order.order_no, user_id, currency, total)
     return order, None
 
 
 @sync_to_async
 def set_cloud_server_port(order_id: int, user_id: int, port: int):
-    updated = CloudServerOrder.objects.filter(id=order_id, user_id=user_id).update(mtproxy_port=port)
-    if not updated:
+    order = CloudServerOrder.objects.filter(id=order_id, user_id=user_id).first()
+    if not order:
         return None
-    return CloudServerOrder.objects.filter(id=order_id, user_id=user_id).first()
+    order.mtproxy_port = port
+    order.provision_note = f'用户已确认端口 {port}，开始创建服务器。'
+    order.save(update_fields=['mtproxy_port', 'provision_note', 'updated_at'])
+    logger.info('云服务器端口确认: order=%s user=%s port=%s', order.order_no, user_id, port)
+    return order

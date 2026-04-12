@@ -205,7 +205,10 @@ def register_handlers(dp: Dispatcher):
         if not plan:
             await message.answer('套餐不存在或已下架，请重新选择。', reply_markup=main_menu())
             return
+        quantity = int(text)
+        user = await get_or_create_user(message.from_user.id, message.from_user.username, message.from_user.first_name)
         order = await create_cloud_server_order(user.id, plan.id, 'USDT', quantity)
+        logger.info('云服务器下单进入详情: user=%s order=%s qty=%s region=%s', user.id, order.order_no, order.quantity, order.region_code)
         receive_address = _receive_address()
         await message.answer(
             '🧾 订单详情\n\n'
@@ -238,6 +241,7 @@ def register_handlers(dp: Dispatcher):
             return
         user = await get_or_create_user(message.from_user.id, message.from_user.username, message.from_user.first_name)
         order = await set_cloud_server_port(order_id, user.id, port)
+        logger.info('云服务器提交自定义端口: user=%s order_id=%s port=%s', user.id, order_id, port)
         await state.clear()
         if not order:
             await message.answer('订单不存在，无法设置端口。', reply_markup=main_menu())
@@ -386,7 +390,9 @@ def register_handlers(dp: Dispatcher):
         quantity = int(qty_text)
         await state.clear()
         user = await get_or_create_user(callback.from_user.id, callback.from_user.username, callback.from_user.first_name)
+        user = await get_or_create_user(callback.from_user.id, callback.from_user.username, callback.from_user.first_name)
         order = await create_cloud_server_order(user.id, plan.id, 'USDT', quantity)
+        logger.info('云服务器下单进入详情: user=%s order=%s qty=%s region=%s', user.id, order.order_no, order.quantity, order.region_code)
         receive_address = _receive_address()
         await callback.message.edit_text(
             '🧾 订单详情\n\n'
@@ -453,6 +459,8 @@ def register_handlers(dp: Dispatcher):
         plan_id = int(plan_id_text)
         quantity = int(quantity_text)
         order, err = await buy_cloud_server_with_balance(user.id, plan_id, currency, quantity)
+        if not err and order:
+            logger.info('云服务器钱包支付成功: user=%s order=%s currency=%s qty=%s', user.id, order.order_no, currency, order.quantity)
         if err:
             await callback.answer(err, show_alert=True)
             return
@@ -488,6 +496,8 @@ def register_handlers(dp: Dispatcher):
             return
         currency = parts[3]
         order, err = await pay_cloud_server_order_with_balance(order_id, user.id, currency)
+        if not err and order:
+            logger.info('云服务器订单钱包补付成功: user=%s order=%s currency=%s qty=%s', user.id, order.order_no, currency, order.quantity)
         if err:
             await callback.answer(err, show_alert=True)
             return
@@ -508,6 +518,7 @@ def register_handlers(dp: Dispatcher):
         order_id = int(callback.data.split(':')[3])
         user = await get_or_create_user(callback.from_user.id, callback.from_user.username, callback.from_user.first_name)
         order = await set_cloud_server_port(order_id, user.id, 9528)
+        logger.info('云服务器使用默认端口: user=%s order_id=%s port=9528', user.id, order_id)
         if not order:
             await callback.answer('订单不存在', show_alert=True)
             return
