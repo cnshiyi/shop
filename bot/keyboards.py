@@ -76,30 +76,27 @@ def monitor_threshold_currency(monitor_id: int):
 
 
 def _split_custom_regions(regions):
-    preferred_names = ['新加坡', '香港']
-    apac_keywords = ('香港', '新加坡', '东京', '首尔', '雅加达', '曼谷', '悉尼', '孟买', '大阪', '台北')
-    preferred = []
-    apac = []
-    others = []
-    for region in regions:
-        name = region[1]
-        if name in preferred_names:
-            preferred.append(region)
-        elif any(keyword in name for keyword in apac_keywords):
-            apac.append(region)
-        else:
-            others.append(region)
-    preferred.sort(key=lambda item: preferred_names.index(item[1]) if item[1] in preferred_names else 999)
+    preferred_codes = ['ap-southeast-1', 'cn-hongkong', 'ap-northeast-1', 'ap-northeast-2', 'us-east-1']
+    name_overrides = {'us-east-1': '美国'}
+    region_map = {code: (code, name_overrides.get(code, name)) for code, name in regions}
     popular = []
     seen = set()
-    for item in preferred + apac:
-        if item[0] in seen:
+    for code in preferred_codes:
+        if code not in region_map:
             continue
-        popular.append(item)
-        seen.add(item[0])
+        popular.append(region_map[code])
+        seen.add(code)
         if len(popular) >= 5:
             break
-    remaining = [item for item in regions if item[0] not in seen]
+    if len(popular) < 5:
+        for code, name in regions:
+            if code in seen:
+                continue
+            popular.append((code, name_overrides.get(code, name)))
+            seen.add(code)
+            if len(popular) >= 5:
+                break
+    remaining = [(code, name) for code, name in regions if code not in seen]
     return popular, remaining
 
 
