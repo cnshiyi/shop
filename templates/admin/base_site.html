@@ -13,23 +13,29 @@
 {{ block.super }}
 <style>
   :root {
-    --oc-bg: #f5f7fb;
+    --oc-body: #f3f6fb;
+    --oc-header: #ffffff;
+    --oc-sidebar: #001529;
+    --oc-sidebar-soft: #0a2742;
     --oc-card: #ffffff;
     --oc-line: #e8edf5;
     --oc-text: #1f2329;
-    --oc-sub: #6b7280;
+    --oc-sub: #7b8794;
     --oc-primary: #1677ff;
-    --oc-primary-soft: #e6f4ff;
-    --oc-shadow: 0 8px 24px rgba(15, 23, 42, 0.06);
+    --oc-primary-soft: rgba(22, 119, 255, 0.14);
+    --oc-shadow: 0 10px 30px rgba(15, 23, 42, 0.08);
     --oc-radius: 14px;
   }
-  body, #container { background: var(--oc-bg); }
+  html, body, #container { background: var(--oc-body); }
+  body { color: var(--oc-text); }
   #header {
-    background: linear-gradient(135deg, #1677ff, #4096ff);
-    color: #fff;
-    box-shadow: var(--oc-shadow);
+    background: var(--oc-header);
+    color: var(--oc-text);
+    border-bottom: 1px solid var(--oc-line);
+    box-shadow: 0 2px 12px rgba(15,23,42,.04);
   }
-  #site-name a, #user-tools, #user-tools a { color: #fff !important; }
+  #site-name a { color: var(--oc-text) !important; font-weight: 700; }
+  #user-tools, #user-tools a { color: var(--oc-sub) !important; }
   #content { padding: 24px; }
   .breadcrumbs {
     background: #fff;
@@ -39,54 +45,50 @@
     margin: 0 0 18px 0;
     box-shadow: var(--oc-shadow);
   }
-  .oc-admin-layout { display: flex; gap: 20px; align-items: flex-start; }
+  .oc-admin-layout { display: flex; gap: 22px; align-items: flex-start; }
   .oc-admin-sidebar {
-    min-width: 210px;
-    max-width: 210px;
-    background: var(--oc-card);
-    border: 1px solid var(--oc-line);
-    border-radius: var(--oc-radius);
-    padding: 14px;
+    min-width: 220px;
+    max-width: 220px;
+    background: linear-gradient(180deg, var(--oc-sidebar), var(--oc-sidebar-soft));
+    border-radius: 18px;
+    padding: 18px 14px;
     position: sticky;
     top: 16px;
-    box-shadow: var(--oc-shadow);
+    box-shadow: 0 16px 40px rgba(0, 21, 41, 0.24);
   }
   .oc-admin-sidebar h3 {
-    margin: 0 0 12px 0;
-    font-size: 14px;
-    color: var(--oc-sub);
+    margin: 0 0 14px 0;
+    font-size: 13px;
+    color: rgba(255,255,255,.55);
     font-weight: 700;
+    letter-spacing: .5px;
   }
   .oc-admin-sidebar a {
     display: block;
-    padding: 10px 12px;
+    padding: 11px 12px;
     margin-bottom: 8px;
     border-radius: 10px;
     text-decoration: none;
-    color: var(--oc-text);
-    background: #fff;
-    border: 1px solid transparent;
+    color: rgba(255,255,255,.82);
+    background: transparent;
     transition: all .18s ease;
     font-weight: 500;
   }
   .oc-admin-sidebar a:hover {
-    background: var(--oc-primary-soft);
-    color: var(--oc-primary);
-    border-color: #b7d7ff;
+    background: rgba(255,255,255,.08);
+    color: #fff;
   }
   .oc-admin-sidebar a.active {
     background: var(--oc-primary);
     color: #fff;
-    box-shadow: 0 8px 18px rgba(22, 119, 255, 0.22);
+    box-shadow: 0 10px 20px rgba(22, 119, 255, 0.3);
   }
   .oc-admin-main { flex: 1; min-width: 0; }
-  #content-main, .module, .inline-group, .submit-row, .selector, .paginator, .object-tools a {
-    border-radius: 12px !important;
-  }
-  #content-main .module, .module.aligned, .submit-row, .inline-group {
+  #content-main .module, .module.aligned, .submit-row, .inline-group, div#changelist .actions {
     background: var(--oc-card);
     border: 1px solid var(--oc-line);
     box-shadow: var(--oc-shadow);
+    border-radius: var(--oc-radius) !important;
     overflow: hidden;
   }
   .module h2, .module caption, .inline-group h2 {
@@ -96,33 +98,42 @@
     font-weight: 700;
     padding: 14px 16px !important;
   }
-  div.help, p.help, .help {
-    color: var(--oc-sub);
-    font-size: 12px;
+  #changelist table {
+    border-radius: 12px;
+    overflow: hidden;
   }
+  #changelist table thead th {
+    background: #f8fafc;
+    color: #445166;
+  }
+  #changelist table tbody tr:hover { background: #f7fbff; }
+  #toolbar, .paginator, .object-tools a, .actions, .messagelist li {
+    border-radius: 12px !important;
+  }
+  div.help, p.help, .help { color: var(--oc-sub); font-size: 12px; }
   input, textarea, select {
     border-radius: 10px !important;
     border: 1px solid #d7deea !important;
     padding: 8px 10px !important;
+    background: #fff;
   }
   input:focus, textarea:focus, select:focus {
     border-color: var(--oc-primary) !important;
     box-shadow: 0 0 0 3px rgba(22,119,255,.12);
     outline: none;
   }
-  .button, input[type=submit], input[type=button], .submit-row input, a.button {
+  .button, input[type=submit], input[type=button], .submit-row input, a.button, .object-tools a {
     border-radius: 10px !important;
     background: var(--oc-primary) !important;
     border: none !important;
     color: #fff !important;
     font-weight: 600;
     padding: 10px 14px !important;
+    box-shadow: 0 8px 18px rgba(22, 119, 255, 0.16);
   }
   .button.default, input[type=submit].default { background: var(--oc-primary) !important; }
-  #changelist table thead th {
-    background: #f8fafc;
-  }
-  #changelist table tbody tr:hover { background: #f9fbff; }
+  .dashboard .module table th a, .dashboard .module table td a { color: var(--oc-text); }
+  .dashboard .module table tr:hover { background: #f7fbff; }
   @media (max-width: 1100px) {
     .oc-admin-layout { flex-direction: column; }
     .oc-admin-sidebar {
@@ -138,7 +149,7 @@
 {% with current=request.path %}
 <div class="oc-admin-layout">
   <aside class="oc-admin-sidebar">
-    <h3>快捷导航</h3>
+    <h3>工作台导航</h3>
     <a href="/admin/" class="{% if current == '/admin/' %}active{% endif %}">后台首页</a>
     <a href="/admin/accounts/telegramuser/" class="{% if '/admin/accounts/telegramuser/' in current %}active{% endif %}">用户管理</a>
     <a href="/admin/mall/cloudserverorder/" class="{% if '/admin/mall/cloudserverorder/' in current %}active{% endif %}">云服务器订单</a>
