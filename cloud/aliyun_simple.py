@@ -39,15 +39,38 @@ def _label_index(plan_name: str) -> int:
         return 0
 
 
-def _pick_plan_id(client, region_code: str, plan_name: str) -> str:
+def _list_linux_plans(client, region_code: str):
     from alibabacloud_swas_open20200601 import models as swas_models
 
     response = client.list_plans(swas_models.ListPlansRequest(region_id=region_code))
     plans = response.body.to_map().get('Plans', [])
     linux_plans = [item for item in plans if 'Linux' in str(item.get('SupportPlatform', ''))]
     linux_plans.sort(key=lambda item: (float(str(item.get('OriginPrice') or '0').replace('$', '')), item.get('Core') or 0, item.get('Memory') or 0))
+    return linux_plans
+
+
+def _pick_plan_id(client, region_code: str, plan_name: str) -> str:
+    linux_plans = _list_linux_plans(client, region_code)
     index = min(_label_index(plan_name), max(len(linux_plans) - 1, 0))
     return (linux_plans[index] or {}).get('PlanId', '') if linux_plans else ''
+
+
+def _candidate_plan_ids(client, region_code: str, plan_name: str) -> list[dict]:
+    linux_plans = _list_linux_plans(client, region_code)
+    if not linux_plans:
+        return []
+    start = min(_label_index(plan_name), len(linux_plans) - 1)
+    preferred_type_order = {'NORMAL': 0, 'INTERNATIONAL': 1, 'MULTI_IP': 2, 'PREVIOUS': 3}
+    ordered = linux_plans[start:] + linux_plans[:start]
+    ordered.sort(key=lambda item: (preferred_type_order.get(str(item.get('PlanType') or ''), 99), float(str(item.get('OriginPrice') or '0').replace('$', ''))))
+    result = []
+    seen = set()
+    for item in ordered:
+        plan_id = item.get('PlanId') or ''
+        if plan_id and plan_id not in seen:
+            result.append(item)
+            seen.add(plan_id)
+    return result
 
 
 def _pick_image_id(client, region_code: str) -> str:
@@ -82,28 +105,52 @@ async def create_instance(order, server_name: str):
         from alibabacloud_swas_open20200601 import models as swas_models
 
         password = _rand_password()
-        plan_id = _pick_plan_id(client, region_code, order.plan_name)
+        candidate_plans = _candidate_plan_ids(client, region_code, order.plan_name)
+        plan_id = (candidate_plans[0] or {}).get('PlanId', '') if candidate_plans else ''
         image_id = _pick_image_id(client, region_code)
         if not plan_id:
             return ProvisionResult(ok=False, note=f'阿里云轻量云创建失败：未找到可用套餐 plan_id，地区 {region_code}。')
         if not image_id:
             return ProvisionResult(ok=False, note=f'阿里云轻量云创建失败：未找到 Debian/Linux 系统镜像，地区 {region_code}。')
 
-        create_resp = client.create_instances(
-            swas_models.CreateInstancesRequest(
-                amount=1,
-                charge_type='PrePaid',
-                period=1,
-                plan_id=plan_id,
-                image_id=image_id,
-                region_id=region_code,
-                client_token=server_name,
-            )
-        )
-        instance_ids = create_resp.body.to_map().get('InstanceIds', [])
-        if not instance_ids:
-            return ProvisionResult(ok=False, note='阿里云轻量云创建失败：接口未返回实例 ID。')
-        instance_id = instance_ids[0]
+        instance_id = ''
+        selected_plan_id = ''
+        selected_plan_type = ''
+        diagnostics = []
+        last_error = ''
+        for item in candidate_plans[:6]:
+            current_plan_id = item.get('PlanId') or ''
+            current_plan_type = str(item.get('PlanType') or '')
+            current_plan_price = str(item.get('OriginPrice') or '')
+            try:
+                create_resp = client.create_instances(
+                    swas_models.CreateInstancesRequest(
+                        amount=1,
+                        charge_type='PrePaid',
+                        period=1,
+                        plan_id=current_plan_id,
+                        image_id=image_id,
+                        region_id=region_code,
+                        client_token=f'{server_name}-{current_plan_id}'[:64],
+                    )
+                )
+                instance_ids = create_resp.body.to_map().get('InstanceIds', [])
+                if instance_ids:
+                    instance_id = instance_ids[0]
+                    selected_plan_id = current_plan_id
+                    selected_plan_type = current_plan_type
+                    diagnostics.append(f'创建成功: {current_plan_id} ({current_plan_type}, {current_plan_price})')
+                    break
+                diagnostics.append(f'创建无实例ID: {current_plan_id} ({current_plan_type}, {current_plan_price})')
+            except Exception as exc:
+                last_error = str(exc)
+                diagnostics.append(f'创建失败: {current_plan_id} ({current_plan_type}, {current_plan_price}) -> {last_error}')
+                if 'NotEnoughStock' in last_error or 'InternalError' in last_error:
+                    continue
+                raise
+
+        if not instance_id:
+            return ProvisionResult(ok=False, note='阿里云轻量云创建失败:\n' + '\n'.join(diagnostics[-6:]))
 
         for _ in range(60):
             instance = _find_instance(client, region_code, instance_id)
@@ -134,7 +181,7 @@ async def create_instance(order, server_name: str):
 
         note = (
             f'阿里云轻量云创建成功。实例名: {server_name}，'
-            f'套餐: {plan_id}，镜像: {image_id}。'
+            f'套餐: {selected_plan_id} ({selected_plan_type})，镜像: {image_id}。'
         )
         return ProvisionResult(
             ok=True,
