@@ -33,6 +33,31 @@
   </a>
 </div>
 
+<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:16px;margin-bottom:20px;">
+  <div style="background:#fff;border:1px solid #e8edf5;border-radius:16px;padding:18px;box-shadow:0 10px 30px rgba(15,23,42,.06);">
+    <div style="font-size:13px;color:#7b8794;">今日收入</div>
+    <div style="font-size:28px;font-weight:700;color:#16a34a;margin-top:8px;">{% admin_metric 'income_today' %} USDT</div>
+    <div style="font-size:12px;color:#7b8794;margin-top:8px;">按今日已完成充值统计</div>
+  </div>
+  <div style="background:#fff;border:1px solid #e8edf5;border-radius:16px;padding:18px;box-shadow:0 10px 30px rgba(15,23,42,.06);">
+    <div style="font-size:13px;color:#7b8794;">今日支出</div>
+    <div style="font-size:28px;font-weight:700;color:#ef4444;margin-top:8px;">{% admin_metric 'expense_today' %} USDT</div>
+    <div style="font-size:12px;color:#7b8794;margin-top:8px;">按今日已支付订单统计</div>
+  </div>
+  <div style="background:#fff;border:1px solid #e8edf5;border-radius:16px;padding:18px;box-shadow:0 10px 30px rgba(15,23,42,.06);">
+    <div style="font-size:13px;color:#7b8794;">今日利润</div>
+    <div style="font-size:28px;font-weight:700;color:#1677ff;margin-top:8px;">{% admin_metric 'profit_today' %} USDT</div>
+    <div style="font-size:12px;color:#7b8794;margin-top:8px;">收入减去今日订单金额</div>
+  </div>
+  <a href="/admin/mall/cloudserverorder/" style="text-decoration:none;">
+    <div style="background:#fff;border:1px solid #e8edf5;border-radius:16px;padding:18px;box-shadow:0 10px 30px rgba(15,23,42,.06);">
+      <div style="font-size:13px;color:#7b8794;">待开通云订单</div>
+      <div style="font-size:28px;font-weight:700;color:#fa8c16;margin-top:8px;">{% admin_metric 'cloud_pending' %}</div>
+      <div style="font-size:12px;color:#7b8794;margin-top:8px;">待支付 / 创建中 / 待续费</div>
+    </div>
+  </a>
+</div>
+
 <div style="background:#fff;border:1px solid #e8edf5;border-radius:16px;padding:18px;box-shadow:0 10px 30px rgba(15,23,42,.06);margin-bottom:20px;">
   <div style="font-size:18px;font-weight:700;color:#1f2329;margin-bottom:6px;">运营快捷入口</div>
   <div style="font-size:13px;color:#7b8794;margin-bottom:14px;">常用后台操作入口，方便快速处理日常业务。</div>
