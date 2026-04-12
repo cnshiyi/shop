@@ -223,10 +223,11 @@ def _fetch_aliyun_regions():
         return []
 
 
-def _sync_provider_plans(provider: str, regions: list[tuple[str, str]], templates):
+def _sync_provider_plans(provider: str, regions: list[tuple[str, str]], templates, deactivate_missing_regions: bool = True):
     region_codes = {code for code, _ in regions}
     active_plan_names = {template[1] if provider == 'aws_lightsail' else template[0] for template in templates}
-    CloudServerPlan.objects.filter(provider=provider).exclude(region_code__in=region_codes).update(is_active=False)
+    if deactivate_missing_regions:
+        CloudServerPlan.objects.filter(provider=provider).exclude(region_code__in=region_codes).update(is_active=False)
     CloudServerPlan.objects.filter(provider=provider, region_code__in=region_codes).exclude(plan_name__in=active_plan_names).update(is_active=False)
     for region_code, region_name in regions:
         for template in templates:
@@ -267,17 +268,30 @@ def ensure_cloud_server_plans():
     if aws_regions:
         _sync_provider_plans('aws_lightsail', aws_regions, _fetch_aws_bundle_templates())
     if aliyun_regions:
+        CloudServerPlan.objects.filter(provider='aliyun_simple').exclude(
+            region_code__in=[code for code, _ in aliyun_regions]
+        ).update(is_active=False)
         for region_code, region_name in aliyun_regions:
-            _sync_provider_plans('aliyun_simple', [(region_code, region_name)], _fetch_aliyun_plan_templates(region_code))
+            _sync_provider_plans(
+                'aliyun_simple',
+                [(region_code, region_name)],
+                _fetch_aliyun_plan_templates(region_code),
+                deactivate_missing_regions=False,
+            )
     else:
         existing_aliyun_regions = list(
-            CloudServerPlan.objects.filter(provider='aliyun_simple', is_active=True)
+            CloudServerPlan.objects.filter(provider='aliyun_simple')
             .values_list('region_code', 'region_name')
             .distinct()
         )
         if existing_aliyun_regions:
             for region_code, region_name in existing_aliyun_regions:
-                _sync_provider_plans('aliyun_simple', [(region_code, region_name)], _fetch_aliyun_plan_templates(region_code))
+                _sync_provider_plans(
+                    'aliyun_simple',
+                    [(region_code, region_name)],
+                    _fetch_aliyun_plan_templates(region_code),
+                    deactivate_missing_regions=False,
+                )
     if not CloudServerPlan.objects.exists():
         _sync_provider_plans('aws_lightsail', [('ap-southeast-1', '新加坡')], _fetch_aws_bundle_templates())
 
