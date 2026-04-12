@@ -108,14 +108,17 @@ def custom_region_menu(regions, expanded: bool = False):
         kb.button(text=region_name, callback_data=f'custom:region:{region_code}')
     if not expanded and remaining_regions:
         kb.button(text='📍 更多地区', callback_data='custom:regions:more')
+        kb.adjust(3, 3)
+        kb.button(text='🔙 返回主菜单', callback_data='custom:back')
+        kb.adjust(3, 3, 1)
     elif expanded:
-        kb.button(text='🔼 收起地区', callback_data='custom:regions')
-    kb.button(text='🔙 返回主菜单', callback_data='custom:back')
-    rows = [3, 2] if not expanded else [3] * ((len(display_regions) + 2) // 3)
-    if not expanded and remaining_regions:
-        kb.adjust(*rows, 1, 1)
+        kb.button(text='🔙 返回', callback_data='custom:regions')
+        rows = [3] * ((len(display_regions) + 2) // 3)
+        kb.adjust(*rows, 1)
     else:
-        kb.adjust(*rows, 1, 1)
+        kb.button(text='🔙 返回主菜单', callback_data='custom:back')
+        rows = [3] * ((len(display_regions) + 2) // 3)
+        kb.adjust(*rows, 1)
     return kb.as_markup()
 
 
