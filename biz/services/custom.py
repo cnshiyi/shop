@@ -293,16 +293,18 @@ def list_custom_regions():
     ensure_cloud_server_plans.__wrapped__()
     plans = list(CloudServerPlan.objects.filter(is_active=True).values_list('provider', 'region_code', 'region_name').distinct())
     aws_regions = {code: name for provider, code, name in plans if provider == 'aws_lightsail'}
-    aliyun_regions = {code: name for provider, code, name in plans if provider == 'aliyun_simple'}
-    aws_only = [(code, name) for code, name in aws_regions.items() if code not in aliyun_regions]
-    aliyun_only = [(code, name) for code, name in aliyun_regions.items() if code == 'cn-hongkong' or code not in aws_regions]
-    return _sort_region_pairs(aws_only + aliyun_only)
+    aliyun_hk = [(code, name) for provider, code, name in plans if provider == 'aliyun_simple' and code == 'cn-hongkong']
+    regions = list(aws_regions.items())
+    if aliyun_hk and 'cn-hongkong' not in aws_regions:
+        regions.extend(aliyun_hk)
+    return _sort_region_pairs(regions)
 
 
 @sync_to_async
 def list_region_plans(region_code: str):
     ensure_cloud_server_plans.__wrapped__()
-    queryset = CloudServerPlan.objects.filter(region_code=region_code, is_active=True)
+    provider = 'aliyun_simple' if region_code == 'cn-hongkong' else 'aws_lightsail'
+    queryset = CloudServerPlan.objects.filter(region_code=region_code, provider=provider, is_active=True)
     queryset = queryset.exclude(provider='aws_lightsail', plan_name__iexact='Nano')
     return list(queryset.order_by('provider', '-sort_order', 'id')[:6])
 
