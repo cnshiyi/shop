@@ -17,7 +17,7 @@ from bot.keyboards import (
     recharge_currency_menu, product_list, quantity_keyboard,
     pay_method_keyboard, order_list as kb_order_list,
     recharge_list as kb_recharge_list, profile_menu,
-    custom_region_menu, custom_plan_menu, custom_pay_keyboard,
+    custom_region_menu, custom_plan_menu, custom_currency_keyboard, custom_port_keyboard,
     cloud_server_list, cloud_server_detail,
 )
 from biz.services import (
@@ -325,31 +325,43 @@ def register_handlers(dp: Dispatcher):
         await callback.answer()
 
     @dp.callback_query(F.data.startswith('custom:plan:'))
-    async def cb_custom_plan(callback: CallbackQuery, state: FSMContext):
-        user = await get_or_create_user(callback.from_user.id, callback.from_user.username, callback.from_user.first_name)
+    async def cb_custom_plan(callback: CallbackQuery):
         plan_id = int(callback.data.split(':')[2])
         plan = await get_cloud_plan(plan_id)
         if not plan:
             await callback.answer('套餐不存在或已下架', show_alert=True)
             return
-        order = await create_cloud_server_order(user.id, plan.id, 'USDT')
-        receive_address = _receive_address()
-        provider_name = 'AWS 光帆服务器' if plan.provider == 'aws_lightsail' else '阿里云轻量云'
+        trx_amount = await usdt_to_trx(plan.price)
         text = (
-            '🧾 云服务器订单已创建\n\n'
-            f'订单号: {order.order_no}\n'
-            f'类型: {provider_name}\n'
+            '🧾 请选择支付币种\n\n'
             f'地区: {plan.region_name}\n'
             f'套餐: {plan.plan_name}\n'
-            f'价格: {fmt_amount(order.total_amount)} {order.currency}\n'
+            f'💵 USDT: {fmt_amount(plan.price)} USDT\n'
+            f'🪙 TRX: ≈ {fmt_amount(trx_amount)} TRX\n\n'
+            '请选择你要使用的支付币种。'
+        )
+        await callback.message.edit_text(text, reply_markup=custom_currency_keyboard(plan.id, plan.price, trx_amount))
+        await callback.answer()
+
+    @dp.callback_query(F.data.startswith('custom:currency:'))
+    async def cb_custom_currency(callback: CallbackQuery, state: FSMContext):
+        user = await get_or_create_user(callback.from_user.id, callback.from_user.username, callback.from_user.first_name)
+        _, _, plan_id_text, currency = callback.data.split(':')
+        plan_id = int(plan_id_text)
+        plan = await get_cloud_plan(plan_id)
+        if not plan:
+            await callback.answer('套餐不存在或已下架', show_alert=True)
+            return
+        order = await create_cloud_server_order(user.id, plan.id, currency)
+        receive_address = _receive_address()
+        text = (
+            '🧾 云服务器订单已创建\n\n'
             f'支付金额: {fmt_pay_amount(order.pay_amount)} {order.currency}\n'
-            'MTProxy 端口说明：默认端口是 9528，你也可以选择输入自定义端口。\n'
-            f'当前端口: {order.mtproxy_port}\n'
-            f'收款地址: `{receive_address}`\n\n'
-            '请先选择端口方案，再按上方金额付款。'
+            f'支付地址: `{receive_address}`\n\n'
+            '请向以上地址转入精确金额，系统自动到账后会继续下一步。'
         )
         await state.clear()
-        await callback.message.edit_text(text, reply_markup=custom_pay_keyboard(order.id), parse_mode='Markdown')
+        await callback.message.edit_text(text, reply_markup=custom_currency_keyboard(None, None, None, order.id), parse_mode='Markdown')
         await callback.answer()
 
     @dp.callback_query(F.data.startswith('custom:port:default:'))

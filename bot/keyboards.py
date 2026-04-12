@@ -133,7 +133,20 @@ def custom_plan_menu(region_code: str, plans):
     return kb.as_markup()
 
 
-def custom_pay_keyboard(order_id: int):
+def custom_currency_keyboard(plan_id: int | None, usdt_amount=None, trx_amount=None, order_id: int | None = None):
+    kb = InlineKeyboardBuilder()
+    if plan_id is not None:
+        kb.row(
+            InlineKeyboardButton(text=f'💵 USDT ({fmt_amount(usdt_amount)} U)', callback_data=f'custom:currency:{plan_id}:USDT'),
+            InlineKeyboardButton(text=f'🪙 TRX ({fmt_amount(trx_amount)} TRX)', callback_data=f'custom:currency:{plan_id}:TRX'),
+        )
+        kb.row(InlineKeyboardButton(text='🔙 返回地区', callback_data='custom:regions'))
+    else:
+        kb.row(InlineKeyboardButton(text='🔙 返回', callback_data='custom:regions'))
+    return kb.as_markup()
+
+
+def custom_port_keyboard(order_id: int):
     kb = InlineKeyboardBuilder()
     kb.row(
         InlineKeyboardButton(text='✅ 使用默认端口 9528', callback_data=f'custom:port:default:{order_id}'),
