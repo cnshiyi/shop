@@ -68,7 +68,7 @@ async def install_bbr(ip: str, username: str, password: str) -> tuple[bool, str]
     if not ip or not username or not password:
         return False, '缺少 SSH 连接参数，无法执行 BBR 初始化。'
     logger.info('开始执行 BBR 初始化 ip=%s user=%s', ip, username)
-    ready, message = await _wait_ssh_port(ip)
+    ready, message = await _wait_ssh_password_ready(ip, username, password)
     if not ready:
         return False, message
     return await _run_ssh_script(ip, username, password, DEBIAN_BBR_SCRIPT)
@@ -84,7 +84,7 @@ async def install_mtproxy(ip: str, username: str, password: str, port: int = MTP
     if not ip or not username or not password:
         return False, '缺少 SSH 连接参数，无法执行 MTProxy 安装。'
     logger.info('开始执行 MTProxy 安装 ip=%s user=%s port=%s', ip, username, port)
-    ready, message = await _wait_ssh_port(ip)
+    ready, message = await _wait_ssh_password_ready(ip, username, password)
     if not ready:
         return False, message.replace('BBR 初始化', 'MTProxy 安装')
     ok, output = await _run_ssh_script(ip, username, password, _build_mtproxy_script(port))
@@ -103,8 +103,6 @@ async def install_mtproxy(ip: str, username: str, password: str, port: int = MTP
 
 @sync_to_async
 def _wait_ssh_port(ip: str, timeout: int = 600, interval: int = 5) -> tuple[bool, str]:
-    started = asyncio.get_event_loop_policy()
-    _ = started
     end_time = time.time() + timeout
     last_error = ''
     while time.time() < end_time:
@@ -122,6 +120,45 @@ def _wait_ssh_port(ip: str, timeout: int = 600, interval: int = 5) -> tuple[bool
             except Exception:
                 pass
     return False, f'SSH 22 端口长时间未就绪，可能实例防火墙未放通或系统仍在初始化: {last_error}'
+
+
+@sync_to_async
+def _wait_ssh_password_ready(ip: str, username: str, password: str, timeout: int = 900, interval: int = 10) -> tuple[bool, str]:
+    port_ready, message = _wait_ssh_port.__wrapped__(ip, 600, 5)
+    if not port_ready:
+        return False, message
+    try:
+        import paramiko
+    except ImportError:
+        return False, '未安装 paramiko，无法探测 SSH 密码登录是否就绪。'
+
+    end_time = time.time() + timeout
+    last_error = ''
+    while time.time() < end_time:
+        client = paramiko.SSHClient()
+        client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+        try:
+            client.connect(
+                hostname=ip,
+                port=22,
+                username=username,
+                password=password,
+                timeout=20,
+                banner_timeout=20,
+                auth_timeout=20,
+                look_for_keys=False,
+                allow_agent=False,
+            )
+            return True, 'SSH 密码登录已就绪。'
+        except Exception as exc:
+            last_error = str(exc)
+            time.sleep(interval)
+        finally:
+            try:
+                client.close()
+            except Exception:
+                pass
+    return False, f'SSH 密码登录长时间未就绪，系统可能仍在重装或密码尚未生效: {last_error}'
 
 
 @sync_to_async
