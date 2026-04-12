@@ -590,6 +590,13 @@
 - 现在使用 `create_instances_with_options`、`list_instances_with_options`、`update_instance_attribute_with_options` 和统一 `RuntimeOptions`
 - 创建阶段改为仅负责建机、等待实例可见/运行、设置实例名；密码初始化留给后续 SSH/重装链路处理
 
+## v0.4.41 - 2026-04-12
+
+### 调整
+- 阿里云建机链路继续对齐 `mtproxy-py`，新增 keypair 预备与 `ResetSystem` 下发 root 密码步骤
+- 创建成功后会等待实例重新可见并再次进入 `Running`，以便后续 SSH/BBR/MTProxy 安装直接复用
+- 这一步专门用于解决香港实例默认仅允许 `publickey`、密码 SSH 不可用的问题
+
 ## 当前通知逻辑
 - 转入：`🟢 收入提醒`
 - 转出：`🔴 支出提醒`

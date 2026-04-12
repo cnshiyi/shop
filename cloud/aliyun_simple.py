@@ -3,6 +3,7 @@ import secrets
 import string
 import time
 import uuid
+from pathlib import Path
 
 from cloud.schemas import ProvisionResult
 
@@ -13,6 +14,7 @@ TIMEOUTS = {
     'instance_visible_seconds': 600,
     'instance_running_seconds': 900,
 }
+KEYPAIR_DIR = Path(__file__).resolve().parents[1] / 'tmp' / 'aliyun-keypairs'
 
 
 def _rand_password(length: int = 18) -> str:
@@ -147,6 +149,77 @@ def _wait_running(client, region_code: str, instance_id: str):
     return _wait_until(_check, timeout=TIMEOUTS['instance_running_seconds'], interval=10)
 
 
+def _maybe_secure_private_key(path: Path) -> None:
+    if os.name == 'nt':
+        return
+    path.chmod(0o600)
+
+
+def _list_mtproxy_keypairs(client, region_code: str) -> list[dict]:
+    from alibabacloud_swas_open20200601 import models as swas_models
+
+    response = client.list_key_pairs_with_options(
+        swas_models.ListKeyPairsRequest(region_id=region_code, page_size=100),
+        _runtime_options(),
+    )
+    key_pairs = response.body.to_map().get('KeyPairs', [])
+    return [item for item in key_pairs if str(item.get('KeyPairName', '')).startswith('openclaw-mtproxy-')]
+
+
+def _find_reusable_keypair() -> tuple[str, Path] | None:
+    if not KEYPAIR_DIR.exists():
+        return None
+    candidates = []
+    for key_path in KEYPAIR_DIR.glob('*.pem'):
+        key_name = key_path.stem
+        try:
+            created_ts = int(key_path.stat().st_mtime)
+        except Exception:
+            created_ts = 0
+        candidates.append((created_ts, key_name, key_path))
+    if not candidates:
+        return None
+    candidates.sort(key=lambda item: item[0], reverse=True)
+    _, key_name, key_path = candidates[0]
+    return key_name, key_path
+
+
+def _ensure_keypair(client, region_code: str) -> tuple[str, str]:
+    from alibabacloud_swas_open20200601 import models as swas_models
+
+    reusable = _find_reusable_keypair()
+    if reusable:
+        return reusable[0], str(reusable[1])
+
+    KEYPAIR_DIR.mkdir(parents=True, exist_ok=True)
+    key_name = f'openclaw-mtproxy-{uuid.uuid4().hex[:8]}'
+    key_path = KEYPAIR_DIR / f'{key_name}.pem'
+    response = client.create_key_pair_with_options(
+        swas_models.CreateKeyPairRequest(region_id=region_code, key_pair_name=key_name),
+        _runtime_options(),
+    )
+    private_key = getattr(response.body, 'private_key', '') or ''
+    if private_key:
+        key_path.write_text(private_key, encoding='utf-8')
+        _maybe_secure_private_key(key_path)
+    return key_name, str(key_path)
+
+
+def _reset_system_with_password(client, region_code: str, instance_id: str, image_id: str, root_password: str) -> None:
+    from alibabacloud_swas_open20200601 import models as swas_models
+
+    client.reset_system_with_options(
+        swas_models.ResetSystemRequest(
+            instance_id=instance_id,
+            region_id=region_code,
+            image_id=image_id,
+            client_token='reset-' + uuid.uuid4().hex,
+            login_credentials=swas_models.ResetSystemRequestLoginCredentials(password=root_password),
+        ),
+        _runtime_options(),
+    )
+
+
 async def create_instance(order, server_name: str):
     region_code = order.region_code or 'cn-hongkong'
     client = _build_client(_region_endpoint(region_code))
@@ -209,6 +282,14 @@ async def create_instance(order, server_name: str):
         if not visible_instance:
             return ProvisionResult(ok=False, note=f'阿里云轻量云创建失败：实例创建后长时间未出现在列表中，instance_id={instance_id}')
 
+        key_name = ''
+        key_path = ''
+        try:
+            key_name, key_path = _ensure_keypair(client, region_code)
+            diagnostics.append(f'密钥准备完成: {key_name}')
+        except Exception as exc:
+            diagnostics.append(f'密钥准备失败（忽略）: {exc}')
+
         try:
             client.update_instance_attribute_with_options(
                 swas_models.UpdateInstanceAttributeRequest(
@@ -221,13 +302,24 @@ async def create_instance(order, server_name: str):
         except Exception as exc:
             diagnostics.append(f'实例命名失败（忽略）: {exc}')
 
+        running_instance = _wait_running(client, region_code, instance_id)
+        if not running_instance:
+            return ProvisionResult(ok=False, note=f'阿里云轻量云创建失败：实例未进入 Running，instance_id={instance_id}')
+
+        _reset_system_with_password(client, region_code, instance_id, image_id, password)
+        diagnostics.append('已触发 ResetSystem 下发 root 密码')
+
+        visible_instance = _wait_instance_visible(client, region_code, instance_id)
+        if not visible_instance:
+            return ProvisionResult(ok=False, note=f'阿里云轻量云重装失败：ResetSystem 后实例未重新出现，instance_id={instance_id}')
+
         running_instance = _wait_running(client, region_code, instance_id) or _list_instance(client, region_code, instance_id)
         public_ip = (running_instance or {}).get('PublicIpAddress') or ''
 
         note = (
             f'阿里云轻量云创建成功。实例名: {server_name}，'
             f'套餐: {selected_plan_id} ({selected_plan_type})，镜像: {image.get("ImageName", image_id)}。'
-            f'创建链路已对齐 mtproxy-py 的阿里云建机方式；密码后续由 SSH/重装流程处理。'
+            f'创建链路已对齐 mtproxy-py 的 SWAS 建机 + ResetSystem 方式。'
         )
         return ProvisionResult(
             ok=True,
@@ -235,7 +327,7 @@ async def create_instance(order, server_name: str):
             public_ip=public_ip,
             login_user='root',
             login_password=password,
-            note=note,
+            note=note + (f' 密钥: {key_name}。' if key_name else ''),
         )
     except Exception as exc:
         return ProvisionResult(ok=False, note=f'阿里云轻量云创建异常: {exc}')
