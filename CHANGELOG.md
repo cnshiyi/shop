@@ -625,6 +625,13 @@
 - 修复 `建机 + BBR + MTProxy` 已完成但 MySQL 连接超时，导致最终订单无法写回的问题
 - 这可避免长链路云开通任务因数据库空闲连接断开而误报失败
 
+## v0.4.46 - 2026-04-12
+
+### 修复
+- Redis FSM 存储新增断线容错，遇到 Redis 写 socket 失败时会回退到内存态而不是直接把 bot 更新处理打崩
+- Redis 连接增加 `socket_keepalive`、`health_check_interval` 和超时重试，降低 Windows 环境下偶发断链影响
+- 这可缓解 `redis.exceptions.ConnectionError: Error 22 while writing to socket` 导致的 bot 状态读取失败
+
 ## 当前通知逻辑
 - 转入：`🟢 收入提醒`
 - 转出：`🔴 支出提醒`
