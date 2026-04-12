@@ -15,6 +15,7 @@ from asgiref.sync import sync_to_async
 from django.utils import timezone
 
 from biz.models import AddressMonitor, Recharge, Order, Product, TelegramUser, CloudServerOrder
+from biz.services import usdt_to_trx
 from bot.keyboards import custom_port_keyboard
 from cloud.provisioning import provision_cloud_server
 from core.cache import get_config, bump_daily_stats
@@ -157,9 +158,9 @@ def _get_pending_recharges(currency: str):
 
 
 @sync_to_async
-def _get_pending_cloud_server_orders(currency: str):
+def _get_pending_cloud_server_orders():
     return list(
-        CloudServerOrder.objects.filter(pay_method='address', status__in=['pending', 'renew_pending'], currency=currency)
+        CloudServerOrder.objects.filter(pay_method='address', status__in=['pending', 'renew_pending'])
         .order_by('created_at')
     )
 
@@ -310,9 +311,12 @@ async def _process_payment(transfer: dict) -> bool:
                 return True
             return False
 
-    pending_cloud_orders = await _get_pending_cloud_server_orders(currency)
+    pending_cloud_orders = await _get_pending_cloud_server_orders()
     for order in pending_cloud_orders:
-        if order.pay_amount == amount:
+        expected_amount = order.pay_amount
+        if order.pay_method == 'address' and order.status == 'pending':
+            expected_amount = usdt_to_trx.__wrapped__(order.total_amount) if currency == 'TRX' else Decimal(order.total_amount)
+        if expected_amount == amount:
             confirmed = await _confirm_cloud_server_order(order.id, tx_hash)
             if confirmed:
                 logger.info(

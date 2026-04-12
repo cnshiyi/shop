@@ -417,11 +417,14 @@ def register_handlers(dp: Dispatcher):
         order = await create_cloud_server_order(user.id, plan.id, currency, quantity)
         receive_address = _receive_address()
         text = (
-            '🧾 云服务器订单已创建\n\n'
-            f'支付金额: {fmt_pay_amount(order.pay_amount)} {order.currency}\n'
+            '🧾 订单详情\n\n'
+            f'地区: {plan.region_name}\n'
+            f'套餐: {plan.plan_name}\n'
+            f'数量: {order.quantity}\n'
+            f'支付金额: {fmt_pay_amount(order.total_amount)} USDT / {fmt_pay_amount(await usdt_to_trx(order.total_amount))} TRX\n'
             f'支付地址: `{receive_address}`\n'
             '订单 5 分钟有效，请在有效期内完成支付。\n\n'
-            '系统已开始自动监控该订单地址到账。'
+            '系统已开始自动监控 USDT 和 TRX 到账，检测到支付成功后会自动进入后续流程。'
         )
         await state.clear()
         await callback.message.edit_text(text, reply_markup=custom_currency_keyboard(None, None, None, order.id), parse_mode='Markdown')
@@ -439,7 +442,10 @@ def register_handlers(dp: Dispatcher):
             return
         text = (
             '✅ 钱包支付成功\n\n'
-            f'支付金额: {fmt_pay_amount(order.pay_amount)} {order.currency}\n'
+            f'地区: {order.region_name}\n'
+            f'套餐: {order.plan_name}\n'
+            f'数量: {order.quantity}\n'
+            f'支付金额: {fmt_pay_amount(order.pay_amount)} {order.currency}\n\n'
             '请选择 MTProxy 端口：默认端口是 9528，你也可以输入自定义端口。'
         )
         await state.clear()
@@ -471,7 +477,12 @@ def register_handlers(dp: Dispatcher):
             return
         await state.clear()
         await callback.message.edit_text(
-            '✅ 钱包支付成功\n\n请选择 MTProxy 端口：默认端口是 9528，你也可以输入自定义端口。',
+            '✅ 钱包支付成功\n\n'
+            f'地区: {order.region_name}\n'
+            f'套餐: {order.plan_name}\n'
+            f'数量: {order.quantity}\n'
+            f'支付金额: {fmt_pay_amount(order.pay_amount)} {order.currency}\n\n'
+            '请选择 MTProxy 端口：默认端口是 9528，你也可以输入自定义端口。',
             reply_markup=custom_port_keyboard(order.id),
         )
         await callback.answer()
