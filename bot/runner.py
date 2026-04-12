@@ -18,6 +18,14 @@ from tron.resource_checker import check_resources, set_bot as set_resource_bot
 from tron.scanner import scan_block, set_bot
 
 logger = logging.getLogger(__name__)
+_scan_lock = asyncio.Lock()
+
+
+async def _scan_block_job():
+    if _scan_lock.locked():
+        return
+    async with _scan_lock:
+        await scan_block()
 
 
 async def run_bot():
@@ -47,7 +55,7 @@ async def run_bot():
 
     # TRON 扫块器 / 资源巡检 / 生命周期调度
     scheduler = AsyncIOScheduler()
-    scheduler.add_job(scan_block, 'interval', seconds=2, id='tron_scanner', max_instances=1)
+    scheduler.add_job(_scan_block_job, 'interval', seconds=2, id='tron_scanner', coalesce=True)
     scheduler.add_job(check_resources, 'interval', minutes=3, id='tron_resource_checker', max_instances=1)
     scheduler.add_job(lifecycle_tick, 'interval', minutes=10, id='cloud_lifecycle', max_instances=1, kwargs={'notify': _notify})
     scheduler.start()
@@ -69,7 +77,9 @@ def main():
     logging.basicConfig(level=logging.INFO, format='%(asctime)s [%(levelname)s] %(name)s: %(message)s')
     logging.getLogger('httpx').setLevel(logging.WARNING)
     logging.getLogger('httpcore').setLevel(logging.WARNING)
-    logging.getLogger('apscheduler').setLevel(logging.WARNING)
+    logging.getLogger('apscheduler').setLevel(logging.ERROR)
+    logging.getLogger('apscheduler.executors.default').setLevel(logging.ERROR)
+    logging.getLogger('apscheduler.scheduler').setLevel(logging.ERROR)
     asyncio.run(run_bot())
 
 
