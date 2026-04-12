@@ -137,8 +137,12 @@ def custom_currency_keyboard(plan_id: int | None, usdt_amount=None, trx_amount=N
     kb = InlineKeyboardBuilder()
     if plan_id is not None:
         kb.row(
-            InlineKeyboardButton(text=f'💵 USDT ({fmt_amount(usdt_amount)} U)', callback_data=f'custom:currency:{plan_id}:USDT'),
-            InlineKeyboardButton(text=f'🪙 TRX ({fmt_amount(trx_amount)} TRX)', callback_data=f'custom:currency:{plan_id}:TRX'),
+            InlineKeyboardButton(text=f'🔗 地址 USDT ({fmt_amount(usdt_amount)} U)', callback_data=f'custom:currency:{plan_id}:USDT'),
+            InlineKeyboardButton(text=f'🔗 地址 TRX ({fmt_amount(trx_amount)} TRX)', callback_data=f'custom:currency:{plan_id}:TRX'),
+        )
+        kb.row(
+            InlineKeyboardButton(text=f'💳 钱包 USDT ({fmt_amount(usdt_amount)} U)', callback_data=f'custom:balance:{plan_id}:USDT'),
+            InlineKeyboardButton(text=f'💳 钱包 TRX ({fmt_amount(trx_amount)} TRX)', callback_data=f'custom:balance:{plan_id}:TRX'),
         )
         kb.row(InlineKeyboardButton(text='🔙 返回地区', callback_data='custom:regions'))
     else:

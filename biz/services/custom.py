@@ -4,10 +4,12 @@ import random
 import time
 
 from asgiref.sync import sync_to_async
+from django.db import transaction
 from django.utils import timezone
 
-from biz.models import CloudServerOrder, CloudServerPlan
+from biz.models import CloudServerOrder, CloudServerPlan, TelegramUser
 from .commerce import _generate_unique_pay_amount
+from .rates import usdt_to_trx
 
 AWS_REGION_NAMES = {
     'ap-south-1': '孟买',
@@ -352,6 +354,38 @@ def create_cloud_server_order(user_id: int, plan_id: int, currency: str = 'USDT'
         mtproxy_port=9528,
         expired_at=expired_at,
     )
+
+
+@sync_to_async
+def buy_cloud_server_with_balance(user_id: int, plan_id: int, currency: str = 'USDT'):
+    ensure_cloud_server_plans.__wrapped__()
+    plan = CloudServerPlan.objects.get(id=plan_id, is_active=True)
+    total = usdt_to_trx.__wrapped__(plan.price) if currency == 'TRX' else Decimal(plan.price)
+    with transaction.atomic():
+        user = TelegramUser.objects.select_for_update().get(id=user_id)
+        balance_field = 'balance_trx' if currency == 'TRX' else 'balance'
+        current_balance = Decimal(str(getattr(user, balance_field, 0) or 0))
+        if current_balance < total:
+            return None, f'{currency} 余额不足'
+        setattr(user, balance_field, current_balance - total)
+        user.save(update_fields=[balance_field, 'updated_at'])
+        order = CloudServerOrder.objects.create(
+            order_no=_generate_order_no(),
+            user_id=user_id,
+            plan=plan,
+            provider=plan.provider,
+            region_code=plan.region_code,
+            region_name=plan.region_name,
+            plan_name=plan.plan_name,
+            currency=currency,
+            total_amount=plan.price,
+            pay_amount=total,
+            pay_method='balance',
+            status='paid',
+            mtproxy_port=9528,
+            paid_at=timezone.now(),
+        )
+    return order, None
 
 
 @sync_to_async

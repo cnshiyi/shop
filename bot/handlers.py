@@ -25,7 +25,7 @@ from biz.services import (
     delete_monitor, get_or_create_user, get_product, get_monitor,
     list_monitors, list_orders, list_products, list_recharges,
     set_monitor_threshold, toggle_monitor_flag,
-    list_custom_regions, list_region_plans, create_cloud_server_order, get_cloud_plan,
+    list_custom_regions, list_region_plans, create_cloud_server_order, buy_cloud_server_with_balance, get_cloud_plan,
     set_cloud_server_port, create_cloud_server_renewal, list_user_cloud_servers,
     get_user_cloud_server, mark_cloud_server_ip_change_requested,
 )
@@ -362,6 +362,24 @@ def register_handlers(dp: Dispatcher):
         )
         await state.clear()
         await callback.message.edit_text(text, reply_markup=custom_currency_keyboard(None, None, None, order.id), parse_mode='Markdown')
+        await callback.answer()
+
+    @dp.callback_query(F.data.startswith('custom:balance:'))
+    async def cb_custom_balance(callback: CallbackQuery, state: FSMContext):
+        user = await get_or_create_user(callback.from_user.id, callback.from_user.username, callback.from_user.first_name)
+        _, _, plan_id_text, currency = callback.data.split(':')
+        plan_id = int(plan_id_text)
+        order, err = await buy_cloud_server_with_balance(user.id, plan_id, currency)
+        if err:
+            await callback.answer(err, show_alert=True)
+            return
+        text = (
+            '✅ 钱包支付成功\n\n'
+            f'支付金额: {fmt_pay_amount(order.pay_amount)} {order.currency}\n'
+            '请选择 MTProxy 端口：默认端口是 9528，你也可以输入自定义端口。'
+        )
+        await state.clear()
+        await callback.message.edit_text(text, reply_markup=custom_port_keyboard(order.id))
         await callback.answer()
 
     @dp.callback_query(F.data.startswith('custom:port:default:'))
