@@ -37,7 +37,7 @@ async def run_bot():
     # 初始化 Redis 缓存
     try:
         await refresh_config(['receive_address', 'trongrid_api_key'])
-        await init_monitor_cache()
+        await init_monitor_cache(force_log=True)
         await refresh_custom_plan_cache()
     except Exception as e:
         logger.error('Redis 缓存初始化失败: %s', e)

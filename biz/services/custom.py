@@ -1,5 +1,6 @@
 from decimal import Decimal
 import json
+import logging
 import os
 import random
 import time
@@ -12,6 +13,8 @@ from biz.models import CloudServerOrder, CloudServerPlan, TelegramUser
 from core.cache import get_redis
 from .commerce import _generate_unique_pay_amount
 from .rates import usdt_to_trx
+
+logger = logging.getLogger(__name__)
 
 AWS_REGION_NAMES = {
     'ap-south-1': '孟买',

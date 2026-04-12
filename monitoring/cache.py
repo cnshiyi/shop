@@ -11,11 +11,15 @@ logger = logging.getLogger(__name__)
 
 MONITORS_KEY = 'monitoring:monitors'
 _last_monitor_sync: float = 0
+_last_init_log_at: float = 0
+_last_redis_warn_at: float = 0
 _MONITOR_SYNC_INTERVAL = 60
+_REDIS_WARN_INTERVAL = 600
 
 
-async def init_monitor_cache():
+async def init_monitor_cache(force_log: bool = False):
     from biz.models import AddressMonitor
+    global _last_init_log_at
     r = await get_redis()
     if r is None:
         logger.info('跳过 Redis 监控缓存初始化（Redis 不可用）')
@@ -33,7 +37,10 @@ async def init_monitor_cache():
     for mon in monitors:
         pipe.hset(MONITORS_KEY, mon['address'], json.dumps(_monitor_entry(mon), ensure_ascii=False))
     await pipe.execute()
-    logger.info('Redis 监控缓存已初始化: %d 个地址', len(monitors))
+    now = time.time()
+    if force_log or now - _last_init_log_at >= 600:
+        logger.info('监控缓存已同步: %d 个地址', len(monitors))
+        _last_init_log_at = now
 
 
 def _monitor_entry(mon: dict) -> dict:
@@ -105,6 +112,7 @@ async def update_monitor_flag_in_cache(address: str, field: str, value: bool):
 
 
 async def get_monitor_addresses() -> dict[str, list[dict]]:
+    global _last_redis_warn_at
     r = await get_redis()
     if r is not None:
         try:
@@ -115,7 +123,10 @@ async def get_monitor_addresses() -> dict[str, list[dict]]:
                     result.setdefault(addr, []).append(json.loads(raw))
                 return result
         except Exception as exc:
-            logger.warning('Redis 读取监控失败，降级数据库: %s', exc)
+            now = time.time()
+            if now - _last_redis_warn_at >= _REDIS_WARN_INTERVAL:
+                logger.warning('监控缓存读取异常，已降级数据库: %s', exc)
+                _last_redis_warn_at = now
     return await _db_fallback_get_monitors()
 
 
@@ -146,6 +157,6 @@ async def maybe_sync_monitors():
         return
     _last_monitor_sync = now
     try:
-        await init_monitor_cache()
+        await init_monitor_cache(force_log=False)
     except Exception as exc:
         logger.error('Redis 监控同步失败: %s', exc)
