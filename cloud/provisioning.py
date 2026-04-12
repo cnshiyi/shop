@@ -1,4 +1,5 @@
 from asgiref.sync import sync_to_async
+from django.db import close_old_connections
 
 from biz.models import CloudServerOrder
 from biz.services import build_cloud_server_name
@@ -54,11 +55,13 @@ async def provision_cloud_server(order_id: int):
 
 @sync_to_async
 def _get_order(order_id: int):
+    close_old_connections()
     return CloudServerOrder.objects.filter(id=order_id).first()
 
 
 @sync_to_async
 def _mark_success(order_id: int, server_name: str, instance_id: str, public_ip: str, login_user: str, login_password: str, note: str):
+    close_old_connections()
     order = CloudServerOrder.objects.get(id=order_id)
     mtproxy_link, mtproxy_secret, mtproxy_host = _extract_mtproxy_fields(note)
     order.status = 'completed'
@@ -81,6 +84,7 @@ def _mark_success(order_id: int, server_name: str, instance_id: str, public_ip: 
 
 @sync_to_async
 def _mark_failed(order_id: int, note: str):
+    close_old_connections()
     order = CloudServerOrder.objects.get(id=order_id)
     order.status = 'failed'
     order.provision_note = note
