@@ -1,5 +1,4 @@
 from django.contrib import admin, messages
-from django.db.models import Sum
 
 from .models import TelegramUser
 
@@ -21,14 +20,14 @@ class TelegramUserAdmin(admin.ModelAdmin):
 
     def get_queryset(self, request):
         qs = super().get_queryset(request)
-        return qs.prefetch_related('orders', 'cloud_server_orders')
+        return qs.prefetch_related('order_set', 'cloudserverorder_set')
 
     def order_count(self, obj):
-        return obj.orders.count()
+        return obj.order_set.count()
     order_count.short_description = '订阅单数'
 
     def cloud_order_count(self, obj):
-        return obj.cloud_server_orders.count()
+        return obj.cloudserverorder_set.count()
     cloud_order_count.short_description = '云服务器单数'
 
     @admin.action(description='充值 1 USDT')
