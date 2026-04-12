@@ -12,7 +12,12 @@ class TelegramUserAdmin(admin.ModelAdmin):
     readonly_fields = ('created_at', 'updated_at', 'tg_user_id')
     ordering = ('-id',)
     list_per_page = 50
-    actions = ('add_1_usdt', 'add_10_usdt', 'add_100_trx')
+    actions = ('add_1_usdt', 'add_10_usdt', 'add_100_trx', 'deduct_1_usdt', 'deduct_10_trx')
+    fieldsets = (
+        ('基础信息', {'fields': ('tg_user_id', 'username', 'first_name')}),
+        ('余额信息', {'fields': ('balance', 'balance_trx')}),
+        ('时间信息', {'fields': ('created_at', 'updated_at')}),
+    )
 
     def get_queryset(self, request):
         qs = super().get_queryset(request)
@@ -44,11 +49,22 @@ class TelegramUserAdmin(admin.ModelAdmin):
             count += 1
         self.message_user(request, f'已为 {count} 个用户充值 10 USDT。', level=messages.SUCCESS)
 
-    @admin.action(description='充值 100 TRX')
-    def add_100_trx(self, request, queryset):
+    @admin.action(description='扣减 1 USDT')
+    def deduct_1_usdt(self, request, queryset):
         count = 0
         for user in queryset:
-            user.balance_trx = (user.balance_trx or 0) + 100
+            current = user.balance or 0
+            user.balance = max(0, current - 1)
+            user.save(update_fields=['balance', 'updated_at'])
+            count += 1
+        self.message_user(request, f'已为 {count} 个用户扣减 1 USDT。', level=messages.SUCCESS)
+
+    @admin.action(description='扣减 10 TRX')
+    def deduct_10_trx(self, request, queryset):
+        count = 0
+        for user in queryset:
+            current = user.balance_trx or 0
+            user.balance_trx = max(0, current - 10)
             user.save(update_fields=['balance_trx', 'updated_at'])
             count += 1
-        self.message_user(request, f'已为 {count} 个用户充值 100 TRX。', level=messages.SUCCESS)
+        self.message_user(request, f'已为 {count} 个用户扣减 10 TRX。', level=messages.SUCCESS)

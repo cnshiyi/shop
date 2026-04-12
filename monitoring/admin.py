@@ -15,6 +15,14 @@ class AddressMonitorAdmin(admin.ModelAdmin):
     ordering = ('-id',)
     list_per_page = 50
     actions = ('activate_monitors', 'deactivate_monitors')
+    fieldsets = (
+        ('基础信息', {'fields': ('user', 'address', 'remark', 'is_active')}),
+        ('监控开关', {'fields': ('monitor_transfers', 'monitor_resources')}),
+        ('阈值设置', {'fields': ('usdt_threshold', 'trx_threshold')}),
+        ('资源快照', {'fields': ('last_energy', 'last_bandwidth', 'resource_checked_at')}),
+        ('统计信息', {'fields': ('daily_income', 'daily_expense', 'stats_date')}),
+        ('时间信息', {'fields': ('created_at',)}),
+    )
 
     @admin.action(description='启用监控')
     def activate_monitors(self, request, queryset):

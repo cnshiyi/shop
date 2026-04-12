@@ -31,6 +31,12 @@ class ProductAdmin(admin.ModelAdmin):
     readonly_fields = ('created_at', 'updated_at')
     ordering = ('-sort_order', '-id')
     list_per_page = 50
+    fieldsets = (
+        ('商品信息', {'fields': ('name', 'description', 'price', 'content_type')}),
+        ('商品内容', {'fields': ('content_text', 'content_image', 'content_video')}),
+        ('库存与展示', {'fields': ('stock', 'is_active', 'sort_order')}),
+        ('时间信息', {'fields': ('created_at', 'updated_at')}),
+    )
 
 
 @admin.register(CloudServerPlan)
@@ -41,6 +47,12 @@ class CloudServerPlanAdmin(admin.ModelAdmin):
     ordering = ('provider', 'region_name', '-sort_order', 'id')
     list_editable = ('price', 'is_active', 'sort_order')
     list_per_page = 50
+    fieldsets = (
+        ('基础信息', {'fields': ('provider', 'region_code', 'region_name', 'plan_name', 'currency')}),
+        ('规格信息', {'fields': ('cpu', 'memory', 'storage', 'bandwidth')}),
+        ('销售信息', {'fields': ('price', 'is_active', 'sort_order')}),
+        ('时间信息', {'fields': ('created_at', 'updated_at')}),
+    )
 
 
 @admin.register(CloudServerOrder)
@@ -52,6 +64,14 @@ class CloudServerOrderAdmin(admin.ModelAdmin):
     ordering = ('-id',)
     list_per_page = 50
     actions = ('renew_31_days', 'restore_service', 'resend_mtproxy_links')
+    fieldsets = (
+        ('订单信息', {'fields': ('order_no', 'user', 'plan', 'provider', 'region_code', 'region_name', 'plan_name', 'quantity', 'status')}),
+        ('支付信息', {'fields': ('currency', 'total_amount', 'pay_amount', 'pay_method', 'tx_hash', 'paid_at', 'expired_at')}),
+        ('服务器信息', {'fields': ('server_name', 'image_name', 'instance_id', 'provider_resource_id', 'public_ip', 'previous_public_ip', 'static_ip_name')}),
+        ('代理信息', {'fields': ('mtproxy_port', 'mtproxy_host', 'mtproxy_link', 'mtproxy_secret')}),
+        ('生命周期', {'fields': ('lifecycle_days', 'service_started_at', 'service_expires_at', 'renew_grace_expires_at', 'suspend_at', 'delete_at', 'ip_recycle_at', 'last_renewed_at')}),
+        ('运维备注', {'fields': ('last_user_id', 'login_user', 'login_password', 'provision_note', 'created_at', 'completed_at', 'updated_at')}),
+    )
 
     def mtproxy_link_preview(self, obj):
         if not obj.mtproxy_link:
@@ -124,3 +144,8 @@ class OrderAdmin(admin.ModelAdmin):
     readonly_fields = ('order_no', 'created_at', 'tx_hash', 'pay_amount', 'total_amount')
     ordering = ('-id',)
     list_per_page = 50
+    fieldsets = (
+        ('订单信息', {'fields': ('order_no', 'user', 'product', 'product_name', 'quantity', 'status')}),
+        ('支付信息', {'fields': ('currency', 'total_amount', 'pay_amount', 'pay_method', 'tx_hash', 'paid_at', 'expired_at')}),
+        ('时间信息', {'fields': ('created_at',)}),
+    )

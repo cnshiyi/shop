@@ -13,6 +13,11 @@ class RechargeAdmin(admin.ModelAdmin):
     ordering = ('-id',)
     list_per_page = 50
     actions = ('mark_completed',)
+    fieldsets = (
+        ('充值信息', {'fields': ('user', 'currency', 'amount', 'pay_amount', 'status')}),
+        ('链上信息', {'fields': ('tx_hash',)}),
+        ('时间信息', {'fields': ('created_at', 'completed_at', 'expired_at')}),
+    )
 
     @admin.action(description='标记为已完成并入账')
     def mark_completed(self, request, queryset):
