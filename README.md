@@ -75,7 +75,7 @@ python run.py
 - 再查看该地区可选套餐价格表
 - 选择套餐后生成云服务器订单
 - 用户按指定金额付款后，系统自动监控到账并进入创建流程
-- 修复钱包支付页 asyncio 异常，并压低 aiogram 正常 update 日志
+- Django Admin 后台页已补充更完整的筛选、搜索、只读字段和批量动作
 - 默认有效期 31 天；到期未续费保留 3 天，再关机 3 天后删机，删机后 IP 继续保留 10 天
 - MTProxy 安装完成后会尝试提取 secret，并向用户发送 `tg://proxy` 与 `https://t.me/proxy` 链接
 - AWS Lightsail 真实接入时必须申请并绑定固定公网 IP

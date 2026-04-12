@@ -28,7 +28,9 @@ class ProductAdmin(admin.ModelAdmin):
     list_display = ('id', 'name', 'price', 'content_type', 'stock', 'is_active', 'sort_order', 'created_at')
     list_filter = ('is_active', 'content_type', 'created_at')
     search_fields = ('name', 'description')
+    readonly_fields = ('created_at', 'updated_at')
     ordering = ('-sort_order', '-id')
+    list_per_page = 50
 
 
 @admin.register(CloudServerPlan)
@@ -37,14 +39,18 @@ class CloudServerPlanAdmin(admin.ModelAdmin):
     list_filter = ('provider', 'region_name', 'currency', 'is_active')
     search_fields = ('region_name', 'plan_name', 'cpu', 'memory', 'storage', 'bandwidth')
     ordering = ('provider', 'region_name', '-sort_order', 'id')
+    list_editable = ('price', 'is_active', 'sort_order')
+    list_per_page = 50
 
 
 @admin.register(CloudServerOrder)
 class CloudServerOrderAdmin(admin.ModelAdmin):
-    list_display = ('order_no', 'user', 'provider', 'region_name', 'plan_name', 'server_name', 'public_ip', 'service_expires_at', 'ip_recycle_at', 'status', 'mtproxy_link_preview', 'created_at')
+    list_display = ('order_no', 'user', 'provider', 'region_name', 'plan_name', 'quantity', 'server_name', 'public_ip', 'service_expires_at', 'ip_recycle_at', 'status', 'mtproxy_port', 'mtproxy_link_preview', 'created_at')
     list_filter = ('provider', 'region_name', 'status', 'currency', 'pay_method', 'created_at')
     search_fields = ('order_no', 'server_name', 'public_ip', 'plan_name', 'region_name', 'tx_hash', 'user__tg_user_id', 'user__username')
-    readonly_fields = ('created_at', 'paid_at', 'completed_at', 'updated_at')
+    readonly_fields = ('order_no', 'created_at', 'paid_at', 'completed_at', 'updated_at', 'tx_hash', 'mtproxy_link', 'mtproxy_secret', 'provider_resource_id', 'instance_id', 'last_user_id', 'pay_amount', 'total_amount')
+    ordering = ('-id',)
+    list_per_page = 50
     actions = ('renew_31_days', 'restore_service', 'resend_mtproxy_links')
 
     def mtproxy_link_preview(self, obj):
@@ -115,4 +121,6 @@ class OrderAdmin(admin.ModelAdmin):
     list_display = ('order_no', 'user', 'product_name', 'quantity', 'currency', 'total_amount', 'pay_amount', 'pay_method', 'status', 'created_at')
     list_filter = ('status', 'currency', 'pay_method', 'created_at')
     search_fields = ('order_no', 'product_name', 'tx_hash', 'user__tg_user_id', 'user__username')
-    readonly_fields = ('created_at',)
+    readonly_fields = ('order_no', 'created_at', 'tx_hash', 'pay_amount', 'total_amount')
+    ordering = ('-id',)
+    list_per_page = 50
