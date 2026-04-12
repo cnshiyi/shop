@@ -2,8 +2,17 @@ import os
 import secrets
 import string
 import time
+import uuid
 
 from cloud.schemas import ProvisionResult
+
+
+TIMEOUTS = {
+    'connect_ms': 10000,
+    'read_ms': 30000,
+    'instance_visible_seconds': 600,
+    'instance_running_seconds': 900,
+}
 
 
 def _rand_password(length: int = 18) -> str:
@@ -27,6 +36,15 @@ def _build_client(endpoint: str = 'swas.cn-hangzhou.aliyuncs.com'):
     return Client(config)
 
 
+def _runtime_options():
+    from alibabacloud_tea_util import models as util_models
+
+    return util_models.RuntimeOptions(
+        connect_timeout=TIMEOUTS['connect_ms'],
+        read_timeout=TIMEOUTS['read_ms'],
+    )
+
+
 def _region_endpoint(region_code: str) -> str:
     return f'swas.{region_code}.aliyuncs.com'
 
@@ -39,23 +57,30 @@ def _label_index(plan_name: str) -> int:
         return 0
 
 
+def _wait_until(predicate, timeout: int, interval: int = 5):
+    started = time.time()
+    while time.time() - started < timeout:
+        value = predicate()
+        if value:
+            return value
+        time.sleep(interval)
+    return None
+
+
 def _list_linux_plans(client, region_code: str):
     from alibabacloud_swas_open20200601 import models as swas_models
 
-    response = client.list_plans(swas_models.ListPlansRequest(region_id=region_code))
+    response = client.list_plans_with_options(
+        swas_models.ListPlansRequest(region_id=region_code),
+        _runtime_options(),
+    )
     plans = response.body.to_map().get('Plans', [])
     linux_plans = [item for item in plans if 'Linux' in str(item.get('SupportPlatform', ''))]
     linux_plans.sort(key=lambda item: (float(str(item.get('OriginPrice') or '0').replace('$', '')), item.get('Core') or 0, item.get('Memory') or 0))
     return linux_plans
 
 
-def _pick_plan_id(client, region_code: str, plan_name: str) -> str:
-    linux_plans = _list_linux_plans(client, region_code)
-    index = min(_label_index(plan_name), max(len(linux_plans) - 1, 0))
-    return (linux_plans[index] or {}).get('PlanId', '') if linux_plans else ''
-
-
-def _candidate_plan_ids(client, region_code: str, plan_name: str) -> list[dict]:
+def _candidate_plans(client, region_code: str, plan_name: str) -> list[dict]:
     linux_plans = _list_linux_plans(client, region_code)
     if not linux_plans:
         return []
@@ -73,26 +98,53 @@ def _candidate_plan_ids(client, region_code: str, plan_name: str) -> list[dict]:
     return result
 
 
-def _pick_image_id(client, region_code: str) -> str:
+def _pick_image(client, region_code: str) -> dict:
     from alibabacloud_swas_open20200601 import models as swas_models
 
-    response = client.list_images(swas_models.ListImagesRequest(region_id=region_code, image_type='system'))
+    response = client.list_images_with_options(
+        swas_models.ListImagesRequest(region_id=region_code),
+        _runtime_options(),
+    )
     images = response.body.to_map().get('Images', [])
+    for item in images:
+        if item.get('Platform') == 'Linux' and str(item.get('ImageName', '')).startswith('Debian-12'):
+            return item
     debian_images = [item for item in images if 'debian' in str(item.get('ImageName', '')).lower() and str(item.get('Platform', '')).lower() == 'linux']
     if debian_images:
         debian_images.sort(key=lambda item: item.get('ImageName', ''))
-        return debian_images[-1].get('ImageId', '')
+        return debian_images[-1]
     linux_images = [item for item in images if str(item.get('Platform', '')).lower() == 'linux']
     linux_images.sort(key=lambda item: item.get('ImageName', ''))
-    return linux_images[-1].get('ImageId', '') if linux_images else ''
+    return linux_images[-1] if linux_images else {}
 
 
-def _find_instance(client, region_code: str, instance_id: str):
+def _list_instance(client, region_code: str, instance_id: str):
     from alibabacloud_swas_open20200601 import models as swas_models
 
-    response = client.list_instances(swas_models.ListInstancesRequest(region_id=region_code, instance_ids=f'["{instance_id}"]'))
+    response = client.list_instances_with_options(
+        swas_models.ListInstancesRequest(region_id=region_code, page_size=100),
+        _runtime_options(),
+    )
     instances = response.body.to_map().get('Instances', [])
-    return instances[0] if instances else {}
+    return next((item for item in instances if item.get('InstanceId') == instance_id), {})
+
+
+def _wait_instance_visible(client, region_code: str, instance_id: str):
+    return _wait_until(
+        lambda: _list_instance(client, region_code, instance_id),
+        timeout=TIMEOUTS['instance_visible_seconds'],
+        interval=10,
+    )
+
+
+def _wait_running(client, region_code: str, instance_id: str):
+    def _check():
+        instance = _list_instance(client, region_code, instance_id)
+        if instance and str(instance.get('Status') or '') == 'Running':
+            return instance
+        return None
+
+    return _wait_until(_check, timeout=TIMEOUTS['instance_running_seconds'], interval=10)
 
 
 async def create_instance(order, server_name: str):
@@ -105,11 +157,11 @@ async def create_instance(order, server_name: str):
         from alibabacloud_swas_open20200601 import models as swas_models
 
         password = _rand_password()
-        candidate_plans = _candidate_plan_ids(client, region_code, order.plan_name)
-        plan_id = (candidate_plans[0] or {}).get('PlanId', '') if candidate_plans else ''
-        image_id = _pick_image_id(client, region_code)
-        if not plan_id:
-            return ProvisionResult(ok=False, note=f'阿里云轻量云创建失败：未找到可用套餐 plan_id，地区 {region_code}。')
+        candidate_plans = _candidate_plans(client, region_code, order.plan_name)
+        image = _pick_image(client, region_code)
+        image_id = image.get('ImageId', '')
+        if not candidate_plans:
+            return ProvisionResult(ok=False, note=f'阿里云轻量云创建失败：未找到可用 Linux 套餐，地区 {region_code}。')
         if not image_id:
             return ProvisionResult(ok=False, note=f'阿里云轻量云创建失败：未找到 Debian/Linux 系统镜像，地区 {region_code}。')
 
@@ -117,13 +169,13 @@ async def create_instance(order, server_name: str):
         selected_plan_id = ''
         selected_plan_type = ''
         diagnostics = []
-        last_error = ''
+
         for item in candidate_plans[:6]:
             current_plan_id = item.get('PlanId') or ''
             current_plan_type = str(item.get('PlanType') or '')
             current_plan_price = str(item.get('OriginPrice') or '')
             try:
-                create_resp = client.create_instances(
+                create_resp = client.create_instances_with_options(
                     swas_models.CreateInstancesRequest(
                         amount=1,
                         charge_type='PrePaid',
@@ -131,8 +183,9 @@ async def create_instance(order, server_name: str):
                         plan_id=current_plan_id,
                         image_id=image_id,
                         region_id=region_code,
-                        client_token=f'{server_name}-{current_plan_id}'[:64],
-                    )
+                        client_token='openclaw-' + uuid.uuid4().hex,
+                    ),
+                    _runtime_options(),
                 )
                 instance_ids = create_resp.body.to_map().get('InstanceIds', [])
                 if instance_ids:
@@ -143,51 +196,44 @@ async def create_instance(order, server_name: str):
                     break
                 diagnostics.append(f'创建无实例ID: {current_plan_id} ({current_plan_type}, {current_plan_price})')
             except Exception as exc:
-                last_error = str(exc)
-                diagnostics.append(f'创建失败: {current_plan_id} ({current_plan_type}, {current_plan_price}) -> {last_error}')
-                if 'NotEnoughStock' in last_error or 'InternalError' in last_error:
+                message = str(exc)
+                diagnostics.append(f'创建失败: {current_plan_id} ({current_plan_type}, {current_plan_price}) -> {message}')
+                if 'NotEnoughStock' in message or 'InternalError' in message:
                     continue
                 raise
 
         if not instance_id:
             return ProvisionResult(ok=False, note='阿里云轻量云创建失败:\n' + '\n'.join(diagnostics[-6:]))
 
-        for _ in range(60):
-            instance = _find_instance(client, region_code, instance_id)
-            status = str(instance.get('Status') or '').lower()
-            if status in {'running', 'starting', 'pending', 'stopped'}:
-                break
-            time.sleep(5)
+        visible_instance = _wait_instance_visible(client, region_code, instance_id)
+        if not visible_instance:
+            return ProvisionResult(ok=False, note=f'阿里云轻量云创建失败：实例创建后长时间未出现在列表中，instance_id={instance_id}')
 
-        client.update_instance_attribute(
-            swas_models.UpdateInstanceAttributeRequest(
-                region_id=region_code,
-                instance_id=instance_id,
-                instance_name=server_name,
-                password=password,
-                client_token=f'{server_name}-attr',
+        try:
+            client.update_instance_attribute_with_options(
+                swas_models.UpdateInstanceAttributeRequest(
+                    instance_id=instance_id,
+                    region_id=region_code,
+                    instance_name=server_name,
+                ),
+                _runtime_options(),
             )
-        )
+        except Exception as exc:
+            diagnostics.append(f'实例命名失败（忽略）: {exc}')
 
-        public_ip = ''
-        login_user = 'root'
-        for _ in range(90):
-            instance = _find_instance(client, region_code, instance_id)
-            public_ip = instance.get('PublicIpAddress') or ''
-            status = str(instance.get('Status') or '').lower()
-            if public_ip and status in {'running', 'starting'}:
-                break
-            time.sleep(5)
+        running_instance = _wait_running(client, region_code, instance_id) or _list_instance(client, region_code, instance_id)
+        public_ip = (running_instance or {}).get('PublicIpAddress') or ''
 
         note = (
             f'阿里云轻量云创建成功。实例名: {server_name}，'
-            f'套餐: {selected_plan_id} ({selected_plan_type})，镜像: {image_id}，已按阿里云在线创建流程设置实例名和密码。'
+            f'套餐: {selected_plan_id} ({selected_plan_type})，镜像: {image.get("ImageName", image_id)}。'
+            f'创建链路已对齐 mtproxy-py 的阿里云建机方式；密码后续由 SSH/重装流程处理。'
         )
         return ProvisionResult(
             ok=True,
             instance_id=instance_id,
             public_ip=public_ip,
-            login_user=login_user,
+            login_user='root',
             login_password=password,
             note=note,
         )

@@ -583,6 +583,13 @@
 - 改回在线创建后直接设置实例名与密码，更符合当前阿里云轻量云使用方式
 - 阿里云实例的到期控制继续使用云厂商自带到期时间，不引入额外停机步骤
 
+## v0.4.40 - 2026-04-12
+
+### 调整
+- `shop` 的阿里云建机逻辑已对齐 `mtproxy-py` 的原生 SWAS 创建方式
+- 现在使用 `create_instances_with_options`、`list_instances_with_options`、`update_instance_attribute_with_options` 和统一 `RuntimeOptions`
+- 创建阶段改为仅负责建机、等待实例可见/运行、设置实例名；密码初始化留给后续 SSH/重装链路处理
+
 ## 当前通知逻辑
 - 转入：`🟢 收入提醒`
 - 转出：`🔴 支出提醒`
