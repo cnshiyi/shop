@@ -1,4 +1,5 @@
 from decimal import Decimal
+import json
 import os
 import random
 import time
@@ -8,6 +9,7 @@ from django.db import transaction
 from django.utils import timezone
 
 from biz.models import CloudServerOrder, CloudServerPlan, TelegramUser
+from core.cache import get_redis
 from .commerce import _generate_unique_pay_amount
 from .rates import usdt_to_trx
 
@@ -304,8 +306,34 @@ def _sort_region_pairs(regions: list[tuple[str, str]]) -> list[tuple[str, str]]:
     return sorted(regions, key=lambda item: (preferred_index.get(item[1], 999), item[1], item[0]))
 
 
+CUSTOM_CACHE_TTL = 600
+CUSTOM_REGIONS_CACHE_KEY = 'custom:regions:v1'
+CUSTOM_PLANS_CACHE_PREFIX = 'custom:plans:v1:'
+
+
+async def _cache_get_json(key: str):
+    r = await get_redis()
+    if r is None:
+        return None
+    try:
+        raw = await r.get(key)
+        return json.loads(raw) if raw else None
+    except Exception:
+        return None
+
+
+async def _cache_set_json(key: str, value, ttl: int = CUSTOM_CACHE_TTL):
+    r = await get_redis()
+    if r is None:
+        return
+    try:
+        await r.set(key, json.dumps(value, ensure_ascii=False), ex=ttl)
+    except Exception:
+        pass
+
+
 @sync_to_async
-def list_custom_regions():
+def _list_custom_regions_db():
     ensure_cloud_server_plans.__wrapped__()
     plans = list(CloudServerPlan.objects.filter(is_active=True).values_list('provider', 'region_code', 'region_name').distinct())
     aws_regions = {code: name for provider, code, name in plans if provider == 'aws_lightsail' and code != 'cn-hongkong'}
@@ -316,13 +344,45 @@ def list_custom_regions():
     return _sort_region_pairs(regions)
 
 
+async def list_custom_regions():
+    cached = await _cache_get_json(CUSTOM_REGIONS_CACHE_KEY)
+    if cached:
+        return [tuple(item) for item in cached]
+    regions = await _list_custom_regions_db()
+    await _cache_set_json(CUSTOM_REGIONS_CACHE_KEY, regions)
+    return regions
+
+
 @sync_to_async
-def list_region_plans(region_code: str):
+def _list_region_plans_db(region_code: str):
     ensure_cloud_server_plans.__wrapped__()
     provider = 'aliyun_simple' if region_code == 'cn-hongkong' else 'aws_lightsail'
     queryset = CloudServerPlan.objects.filter(region_code=region_code, provider=provider, is_active=True)
     queryset = queryset.exclude(provider='aws_lightsail', plan_name__iexact='Nano')
     return list(queryset.order_by('provider', '-sort_order', 'id')[:6])
+
+
+async def list_region_plans(region_code: str):
+    cached = await _cache_get_json(CUSTOM_PLANS_CACHE_PREFIX + region_code)
+    if cached:
+        ids = [int(item['id']) for item in cached]
+        plans = await sync_to_async(lambda: list(CloudServerPlan.objects.filter(id__in=ids)))()
+        plan_map = {plan.id: plan for plan in plans}
+        ordered = [plan_map[plan_id] for plan_id in ids if plan_id in plan_map]
+        if ordered:
+            return ordered
+    plans = await _list_region_plans_db(region_code)
+    await _cache_set_json(CUSTOM_PLANS_CACHE_PREFIX + region_code, [{'id': plan.id} for plan in plans])
+    return plans
+
+
+async def refresh_custom_plan_cache():
+    regions = await _list_custom_regions_db()
+    await _cache_set_json(CUSTOM_REGIONS_CACHE_KEY, regions)
+    for region_code, _ in regions:
+        plans = await _list_region_plans_db(region_code)
+        await _cache_set_json(CUSTOM_PLANS_CACHE_PREFIX + region_code, [{'id': plan.id} for plan in plans])
+    return len(regions)
 
 
 @sync_to_async

@@ -11,6 +11,7 @@ from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from bot.config import BOT_TOKEN
 from bot.fsm import close_fsm_storage
 from bot.handlers import create_dispatcher_and_register
+from biz.services import refresh_custom_plan_cache
 from cloud.lifecycle import lifecycle_tick
 from core.cache import refresh_config, close as cache_close
 from monitoring.cache import init_monitor_cache
@@ -37,6 +38,7 @@ async def run_bot():
     try:
         await refresh_config(['receive_address', 'trongrid_api_key'])
         await init_monitor_cache()
+        await refresh_custom_plan_cache()
     except Exception as e:
         logger.error('Redis 缓存初始化失败: %s', e)
 
@@ -57,10 +59,12 @@ async def run_bot():
     scheduler = AsyncIOScheduler()
     scheduler.add_job(_scan_block_job, 'interval', seconds=2, id='tron_scanner', coalesce=True)
     scheduler.add_job(check_resources, 'interval', minutes=3, id='tron_resource_checker', max_instances=1)
+    scheduler.add_job(refresh_custom_plan_cache, 'interval', minutes=10, id='custom_plan_cache_refresh', max_instances=1, coalesce=True)
     scheduler.add_job(lifecycle_tick, 'interval', minutes=10, id='cloud_lifecycle', max_instances=1, kwargs={'notify': _notify})
     scheduler.start()
     logger.info('TRON 扫块器已启动 (每2秒)')
     logger.info('资源巡检已启动 (每3分钟)')
+    logger.info('定制套餐缓存刷新已启动 (每10分钟)')
     logger.info('云服务器生命周期调度已启动 (每10分钟)')
 
     logger.info('Telegram Bot 已启动 (aiogram)')
