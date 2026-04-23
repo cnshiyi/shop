@@ -23,7 +23,7 @@ class Recharge(models.Model):
     expired_at = models.DateTimeField('过期时间', blank=True, null=True)
 
     class Meta:
-        db_table = 'recharges'
+        db_table = 'order_recharge'
         verbose_name = '充值记录'
         verbose_name_plural = '充值记录'
         ordering = ['-created_at']

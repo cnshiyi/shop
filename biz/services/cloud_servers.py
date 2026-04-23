@@ -5,8 +5,7 @@ from django.db import transaction
 from django.utils import timezone
 from accounts.services import record_balance_ledger
 from bot.models import TelegramUser
-from biz.models import CloudAsset, CloudServerOrder, Server
-from cloud.models import CloudServerPlan
+from cloud.models import CloudAsset, CloudServerOrder, CloudServerPlan, Server
 from .commerce import _generate_unique_pay_amount
 
 

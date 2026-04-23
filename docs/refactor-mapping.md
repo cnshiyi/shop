@@ -71,12 +71,12 @@
 - [x] `bot/models.py` 建立 bot 域过渡入口
 - [x] `orders/models.py` 建立订单域过渡入口
 - [x] `cloud/models.py` 建立云资源域过渡入口
-- [ ] 增加 `bot/api.py`、`orders/api.py`、`cloud/api.py` 过渡入口
+- [x] 增加 `bot/api.py`、`orders/api.py`、`cloud/api.py` 过渡入口
 
 ### 第二阶段：清理重复真相
-- [ ] 下线 `TelegramUsername`
-- [ ] 清理 `prefetch_related('telegramusernames')`
-- [ ] 改为只读写 `bot_user.username`
+- [x] 下线 `TelegramUsername`（Django 状态已移除，数据库表暂保留）
+- [x] 清理 `prefetch_related('telegramusernames')`
+- [x] 改为只读写 `bot_user.username`
 
 ### 第三阶段：迁移 imports
 - [ ] 核心模块改从 `bot/orders/cloud` 导入
@@ -86,6 +86,11 @@
 - [ ] 为目标模型统一补 `Meta.db_table`
 - [ ] 生成改表名迁移
 - [ ] 执行迁移并验证数据
+
+#### 批次 A 进行中
+- [x] `users` → `bot_user`
+- [x] `balance_ledgers` → `order_balance_ledger`
+- [x] `recharges` → `order_recharge`
 
 ### 第五阶段：删除旧目录
 - [ ] 删除 `accounts/finance/monitoring/tron/biz/dashboard_api` 的业务实现

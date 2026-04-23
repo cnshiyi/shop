@@ -2,7 +2,7 @@ from decimal import Decimal
 
 from asgiref.sync import sync_to_async
 
-from biz.models import Recharge
+from orders.models import Recharge
 from .commerce import _generate_unique_pay_amount
 
 

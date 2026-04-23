@@ -1,5 +1,19 @@
 # 版本记录
 
+## v0.5.08 - 2026-04-24
+- `TelegramUsername` 已从 Django 状态中安全下线：删除运行时代码模型定义，新增 `accounts.0009_deprecate_telegramusername_state`，仅移除状态、不直接删除数据库表，避免历史链路受影响。
+- 完成表名迁移批次 A：`users` → `bot_user`、`balance_ledgers` → `order_balance_ledger`、`recharges` → `order_recharge`。
+- 现网数据库已完成改表名并通过接口 smoke test；`dashboard_api` 登录信息接口仍正常。
+- 识别出一个测试环境限制：`DJANGO_TEST_REUSE_DB=1` 复用现库时，会在改表名后于测试启动阶段重复执行迁移；当前改用 SQLite 测试 + 现网库检查作为本阶段验证手段，后续单独收敛测试策略。
+
+### 验证
+- `./.venv/bin/python manage.py migrate`
+- `./.venv/bin/python manage.py makemigrations --check --dry-run`
+- `./.venv/bin/python manage.py check`
+- `DJANGO_TEST_SQLITE=1 ./.venv/bin/python manage.py test biz.tests --verbosity 1`
+- `curl -s http://127.0.0.1:8000/api/user/info -H 'Authorization: Bearer session-1'`
+- 数据库表核验：`bot_user` / `order_balance_ledger` / `order_recharge` 存在，旧表名不存在
+
 ## v0.5.07 - 2026-04-24
 - 继续推进后端域重构：新增 `bot.services`、`orders.services`、`orders.runtime`、`cloud.cache` 作为过渡入口，把机器人主链逐步从 `biz`、`tron`、`monitoring` 旧路径剥离。
 - `bot/runner.py`、`bot/handlers.py`、`tron/scanner.py`、`tron/resource_checker.py` 已开始改走 `bot / orders / cloud` 域入口，降低后续目录收敛时的联动改动面。

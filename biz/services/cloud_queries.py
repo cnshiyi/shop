@@ -1,7 +1,7 @@
 from asgiref.sync import sync_to_async
 from django.db.models import Q
 
-from biz.models import CloudServerOrder, CloudAsset, Server
+from cloud.models import CloudAsset, CloudServerOrder, Server
 
 
 _ACTIVE_ORDER_STATUSES = {'completed', 'expiring', 'suspended', 'renew_pending', 'paid', 'provisioning'}

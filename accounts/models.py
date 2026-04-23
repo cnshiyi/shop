@@ -37,7 +37,7 @@ class BalanceLedger(models.Model):
     created_at = models.DateTimeField('创建时间', auto_now_add=True)
 
     class Meta:
-        db_table = 'balance_ledgers'
+        db_table = 'order_balance_ledger'
         verbose_name = '余额流水'
         verbose_name_plural = '余额流水'
         ordering = ['-created_at', '-id']
@@ -58,7 +58,7 @@ class TelegramUser(models.Model):
     updated_at = models.DateTimeField('更新时间', auto_now=True)
 
     class Meta:
-        db_table = 'users'
+        db_table = 'bot_user'
         verbose_name = 'Telegram用户'
         verbose_name_plural = 'Telegram用户'
 
@@ -101,27 +101,3 @@ class TelegramUser(models.Model):
         names = self.usernames
         return names[0] if names else ''
 
-
-class TelegramUsername(models.Model):
-    user = models.ForeignKey(
-        'accounts.TelegramUser',
-        verbose_name='Telegram 用户',
-        related_name='telegramusernames',
-        on_delete=models.CASCADE,
-    )
-    username = models.CharField('用户名', max_length=191, db_index=True)
-    is_primary = models.BooleanField('主用户名', default=False, db_index=True)
-    created_at = models.DateTimeField('创建时间', auto_now_add=True)
-    updated_at = models.DateTimeField('更新时间', auto_now=True)
-
-    class Meta:
-        db_table = 'telegram_usernames'
-        verbose_name = 'Telegram用户名'
-        verbose_name_plural = 'Telegram用户名'
-        ordering = ['-is_primary', 'username']
-        constraints = [
-            models.UniqueConstraint(fields=['user', 'username'], name='uniq_telegram_username_per_user'),
-        ]
-
-    def __str__(self):
-        return f'@{self.username}'
