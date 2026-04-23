@@ -1,0 +1,19 @@
+[project]
+name = "shop"
+version = "0.1.0"
+requires-python = ">=3.13"
+dependencies = [
+    "django>=5.2,<5.3",
+    "python-dotenv>=1.0.1",
+    "pymysql>=1.1.1",
+    "aiogram>=3.13.1",
+    "httpx>=0.27",
+    "base58>=2.1",
+    "apscheduler>=3.10",
+    "redis>=5.0",
+    "paramiko>=3.4",
+    "boto3>=1.35",
+    "alibabacloud_swas_open20200601>=4.0.0",
+    "alibabacloud_tea_openapi>=0.4.4",
+    "alibabacloud_tea_util>=0.3.14",
+]
