@@ -11,6 +11,7 @@ from django.utils import timezone
 
 from biz.models import TelegramUser, AddressMonitor
 from core.cache import get_config
+from core.persistence import record_external_sync_log, save_resource_snapshot
 from monitoring.cache import get_monitor_addresses
 
 logger = logging.getLogger(__name__)
@@ -49,11 +50,21 @@ def _get_user(user_id: int):
 
 
 @sync_to_async
-def _update_resource_snapshot(monitor_id: int, energy: int, bandwidth: int):
+def _update_resource_snapshot(monitor_id: int, address: str, energy: int, bandwidth: int, delta_energy: int, delta_bandwidth: int):
     AddressMonitor.objects.filter(id=monitor_id).update(
         last_energy=energy,
         last_bandwidth=bandwidth,
         resource_checked_at=timezone.now(),
+    )
+    save_resource_snapshot(
+        monitor_id=monitor_id,
+        address=address,
+        energy=energy,
+        bandwidth=bandwidth,
+        delta_energy=delta_energy,
+        delta_bandwidth=delta_bandwidth,
+        account_scope='platform',
+        account_key='default',
     )
 
 
@@ -74,7 +85,14 @@ async def _fetch_account_resource(address: str) -> tuple[int, int]:
     async with httpx.AsyncClient(timeout=10) as client:
         resp = await client.post(f'{TRONGRID_BASE_URL}/wallet/getaccountresource', json={'address': address, 'visible': True}, headers=headers)
         resp.raise_for_status()
-        data = resp.json() or {}
+        record_external_sync_log(
+            source='trongrid',
+            action='get_account_resource',
+            target=address,
+            request_payload={'address': address},
+            response_payload=data,
+            is_success=True,
+        )
     free_net_limit = int(data.get('freeNetLimit', 0) or 0)
     free_net_used = int(data.get('freeNetUsed', 0) or 0)
     net_limit = int(data.get('NetLimit', 0) or 0)
@@ -99,7 +117,7 @@ async def check_resources():
                 old_bandwidth = int(mon.get('last_bandwidth', 0) or 0)
                 energy_increase = energy - old_energy
                 bandwidth_increase = bandwidth - old_bandwidth
-                await _update_resource_snapshot(mon['id'], energy, bandwidth)
+                await _update_resource_snapshot(mon['id'], address, energy, bandwidth, energy_increase, bandwidth_increase)
                 if energy_increase <= 0 and bandwidth_increase <= 0:
                     continue
                 remark = mon.get('remark') or '(无备注)'

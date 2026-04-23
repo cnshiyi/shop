@@ -14,11 +14,13 @@ from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 from asgiref.sync import sync_to_async
 from django.utils import timezone
 
+from accounts.services import record_balance_ledger
 from biz.models import AddressMonitor, Recharge, Order, Product, TelegramUser, CloudServerOrder
 from biz.services import usdt_to_trx
 from bot.keyboards import custom_port_keyboard
 from cloud.provisioning import provision_cloud_server
 from core.cache import get_config, bump_daily_stats
+from core.persistence import bump_daily_address_stat, record_external_sync_log
 from monitoring.cache import get_monitor_addresses, maybe_sync_monitors, init_monitor_cache
 from tron.parser import parse_trx_transfer, parse_usdt_transfer
 
@@ -38,6 +40,7 @@ MAX_CACHE = 200
 _last_scan_summary_at: float = time.time()
 _SCAN_SUMMARY_INTERVAL = 600
 _scan_stats = {'blocks': 0, 'transactions': 0, 'transfers': 0, 'payments': 0, 'monitor_hits': 0}
+_last_rate_limit_log_at: float = 0.0
 
 _recent_tx_details: OrderedDict[str, dict] = OrderedDict()
 _recent_tx_keys: OrderedDict[str, str] = OrderedDict()
@@ -139,6 +142,21 @@ def _short_addr(addr: str) -> str:
     return addr
 
 
+async def _record_daily_stats(address: str, currency: str, direction: str, amount: Decimal, user_id: int, monitor_id: int | None = None):
+    stats = await bump_daily_stats(address, currency, direction, amount)
+    await sync_to_async(bump_daily_address_stat)(
+        user_id=user_id,
+        address=address,
+        currency=currency,
+        direction=direction,
+        amount=amount,
+        monitor_id=monitor_id,
+        account_scope='platform',
+        account_key='default',
+    )
+    return stats
+
+
 # ── DB access (sync → async) ────────────────────────────────────────────
 
 @sync_to_async
@@ -198,8 +216,19 @@ def _confirm_recharge(recharge_id: int, tx_hash: str):
         rc.save(update_fields=['status', 'tx_hash', 'completed_at', 'updated_at'])
         user = TelegramUser.objects.select_for_update().get(id=rc.user_id)
         field = 'balance_trx' if rc.currency == 'TRX' else 'balance'
-        setattr(user, field, getattr(user, field) + rc.amount)
+        old_balance = getattr(user, field)
+        setattr(user, field, old_balance + rc.amount)
         user.save(update_fields=[field, 'updated_at'])
+        record_balance_ledger(
+            user,
+            ledger_type='recharge',
+            currency=rc.currency,
+            old_balance=old_balance,
+            new_balance=getattr(user, field),
+            related_type='recharge',
+            related_id=rc.id,
+            description=f'充值订单 #{rc.id} 完成入账',
+        )
     return rc
 
 
@@ -469,6 +498,7 @@ async def _log_scan_summary(force: bool = False):
 # ── 主扫描循环 ─────────────────────────────────────────────────────────────
 
 async def scan_block():
+    global _last_rate_limit_log_at
     try:
         headers = {'accept': 'application/json', 'content-type': 'application/json'}
         api_key = await get_config('trongrid_api_key', '')
@@ -477,6 +507,12 @@ async def scan_block():
 
         async with httpx.AsyncClient(timeout=10) as client:
             resp = await client.post(f'{TRONGRID_BASE_URL}/wallet/getnowblock', json={'detail': True}, headers=headers)
+            if resp.status_code == 429:
+                now = time.time()
+                if now - _last_rate_limit_log_at >= 60:
+                    logger.warning('TRON 扫块触发 429 限流，已跳过本轮并等待下次调度')
+                    _last_rate_limit_log_at = now
+                return
             resp.raise_for_status()
             block_data = resp.json()
 
@@ -526,10 +562,10 @@ async def scan_block():
 
             # 监控通知（有格式化详情日志）
             if to_addr in monitor_cache:
-                stats = await bump_daily_stats(to_addr, transfer['currency'], 'income', transfer['amount'])
+                stats = await _record_daily_stats(to_addr, transfer['currency'], 'income', transfer['amount'], monitor_cache[to_addr][0]['user_id'], monitor_cache[to_addr][0].get('id'))
                 await _process_monitor_notification(transfer, monitor_cache[to_addr], stats, 'income')
             if from_addr in monitor_cache and from_addr != to_addr:
-                stats = await bump_daily_stats(from_addr, transfer['currency'], 'expense', transfer['amount'])
+                stats = await _record_daily_stats(from_addr, transfer['currency'], 'expense', transfer['amount'], monitor_cache[from_addr][0]['user_id'], monitor_cache[from_addr][0].get('id'))
                 await _process_monitor_notification(transfer, monitor_cache[from_addr], stats, 'expense')
 
         await _log_scan_summary()

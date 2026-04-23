@@ -1,3 +1,5 @@
+from decimal import Decimal
+
 from django.db import models
 
 
@@ -28,3 +30,66 @@ class AddressMonitor(models.Model):
 
     def __str__(self):
         return self.address
+
+
+class DailyAddressStat(models.Model):
+    ACCOUNT_SCOPE_PLATFORM = 'platform'
+    ACCOUNT_SCOPE_USER = 'user'
+    ACCOUNT_SCOPE_CLOUD = 'cloud'
+    ACCOUNT_SCOPE_CHOICES = (
+        (ACCOUNT_SCOPE_PLATFORM, '平台账户'),
+        (ACCOUNT_SCOPE_USER, '用户账户'),
+        (ACCOUNT_SCOPE_CLOUD, '云账户'),
+    )
+
+    user = models.ForeignKey('accounts.TelegramUser', verbose_name='用户', on_delete=models.CASCADE, related_name='daily_address_stats')
+    monitor = models.ForeignKey('monitoring.AddressMonitor', verbose_name='监控地址', on_delete=models.SET_NULL, blank=True, null=True, related_name='daily_stats')
+    account_scope = models.CharField('账户归属类型', max_length=32, choices=ACCOUNT_SCOPE_CHOICES, default=ACCOUNT_SCOPE_PLATFORM, db_index=True)
+    account_key = models.CharField('账户标识', max_length=191, blank=True, null=True, db_index=True)
+    address = models.CharField('地址', max_length=191, db_index=True)
+    currency = models.CharField('币种', max_length=32, db_index=True)
+    stats_date = models.DateField('统计日期', db_index=True)
+    income = models.DecimalField('收入', max_digits=18, decimal_places=6, default=Decimal('0'))
+    expense = models.DecimalField('支出', max_digits=18, decimal_places=6, default=Decimal('0'))
+    created_at = models.DateTimeField('创建时间', auto_now_add=True)
+    updated_at = models.DateTimeField('更新时间', auto_now=True)
+
+    class Meta:
+        db_table = 'daily_address_stats'
+        verbose_name = '每日地址统计'
+        verbose_name_plural = '每日地址统计'
+        ordering = ['-stats_date', '-updated_at', '-id']
+        constraints = [
+            models.UniqueConstraint(
+                fields=['user', 'address', 'currency', 'stats_date', 'account_scope'],
+                name='uniq_daily_address_stat_scope',
+            ),
+        ]
+
+    @property
+    def profit(self):
+        return (self.income or Decimal('0')) - (self.expense or Decimal('0'))
+
+    def __str__(self):
+        return f'{self.address} {self.currency} {self.stats_date}'
+
+
+class ResourceSnapshot(models.Model):
+    monitor = models.ForeignKey('monitoring.AddressMonitor', verbose_name='监控地址', on_delete=models.CASCADE, related_name='resource_snapshots')
+    account_scope = models.CharField('账户归属类型', max_length=32, choices=DailyAddressStat.ACCOUNT_SCOPE_CHOICES, default=DailyAddressStat.ACCOUNT_SCOPE_PLATFORM, db_index=True)
+    account_key = models.CharField('账户标识', max_length=191, blank=True, null=True, db_index=True)
+    address = models.CharField('地址', max_length=191, db_index=True)
+    energy = models.BigIntegerField('可用能量', default=0)
+    bandwidth = models.BigIntegerField('可用带宽', default=0)
+    delta_energy = models.BigIntegerField('能量变化', default=0)
+    delta_bandwidth = models.BigIntegerField('带宽变化', default=0)
+    captured_at = models.DateTimeField('采集时间', auto_now_add=True, db_index=True)
+
+    class Meta:
+        db_table = 'resource_snapshots'
+        verbose_name = '资源快照'
+        verbose_name_plural = '资源快照'
+        ordering = ['-captured_at', '-id']
+
+    def __str__(self):
+        return f'{self.address} {self.captured_at}'

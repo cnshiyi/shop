@@ -7,21 +7,31 @@ from core.formatters import fmt_amount
 def main_menu():
     kb = ReplyKeyboardBuilder()
     kb.button(text='✨ 订阅')
-    kb.button(text='🛠 定制')
-    kb.button(text='🔎 查询')
+    kb.button(text='🛠 定制节点')
+    kb.button(text='🔎 到期时间查询')
     kb.button(text='👤 个人中心')
     kb.adjust(2, 2)
     return kb.as_markup(resize_keyboard=True)
 
 
+def cloud_query_menu():
+    kb = InlineKeyboardBuilder()
+    kb.row(InlineKeyboardButton(text='🖥 我的云服务器', callback_data='cloud:list'))
+    kb.row(InlineKeyboardButton(text='🔎 IP查询到期', callback_data='cloud:queryip'))
+    kb.row(InlineKeyboardButton(text='🔙 返回主菜单', callback_data='profile:back'))
+    return kb.as_markup()
+
+
 def profile_menu():
     kb = InlineKeyboardBuilder()
     kb.button(text='📋 我的订单', callback_data='profile:orders')
+    kb.button(text='🛒 购物车', callback_data='profile:cart')
     kb.button(text='💰 充值余额', callback_data='profile:recharge')
     kb.button(text='📜 充值记录', callback_data='profile:recharges')
+    kb.button(text='💳 余额明细', callback_data='profile:balance_details')
     kb.button(text='🔍 地址监控', callback_data='profile:monitors')
     kb.button(text='🔙 返回主菜单', callback_data='profile:back')
-    kb.adjust(2, 2, 1)
+    kb.adjust(2, 2, 2, 1)
     return kb.as_markup()
 
 
@@ -124,22 +134,38 @@ def custom_region_menu(regions, expanded: bool = False):
 
 def custom_plan_menu(region_code: str, plans):
     kb = InlineKeyboardBuilder()
-    labels = ['套餐一', '套餐二', '套餐三', '套餐四', '套餐五', '套餐六']
+    labels = ['套餐一', '套餐二', '套餐三', '套餐四', '套餐五', '套餐六', '套餐七', '套餐八', '套餐九']
     for idx, plan in enumerate(plans):
         label = labels[idx] if idx < len(labels) else f'套餐{idx + 1}'
         kb.button(text=label, callback_data=f'custom:plan:{plan.id}')
     kb.button(text='🔙 返回地区', callback_data='custom:regions')
-    kb.adjust(3, 3, 1)
+    rows = [3] * ((len(plans) + 2) // 3)
+    kb.adjust(*rows, 1)
     return kb.as_markup()
 
 
-def custom_quantity_keyboard(plan_id: int):
+def custom_quantity_keyboard(plan_id: int, quantity: int | None = None):
     kb = InlineKeyboardBuilder()
+    selected_quantity = quantity if isinstance(quantity, int) and quantity > 0 else 1
     for qty in [1, 2, 3, 4, 5]:
-        kb.button(text=str(qty), callback_data=f'custom:qty:{plan_id}:{qty}')
+        text = f'✅ {qty}' if qty == selected_quantity else str(qty)
+        kb.button(text=text, callback_data=f'custom:qty:{plan_id}:{qty}')
     kb.button(text='✍️ 自定义', callback_data=f'custom:qty:{plan_id}:custom')
     kb.button(text='🔙 返回地区', callback_data='custom:regions')
     kb.adjust(5, 1, 1)
+    return kb.as_markup()
+
+
+def custom_payment_keyboard(plan_id: int, quantity: int):
+    kb = InlineKeyboardBuilder()
+    kb.row(
+        InlineKeyboardButton(text='💳 钱包支付', callback_data=f'custom:wallet:{plan_id}:{quantity}'),
+        InlineKeyboardButton(text='🛒 加入购物车', callback_data=f'custom:qtycart:{plan_id}:{quantity}'),
+    )
+    kb.row(
+        InlineKeyboardButton(text='💳 去购物车支付', callback_data='profile:cart'),
+        InlineKeyboardButton(text='🔙 返回数量', callback_data=f'custom:plan:{plan_id}'),
+    )
     return kb.as_markup()
 
 
@@ -184,24 +210,108 @@ def custom_port_keyboard(order_id: int):
     return kb.as_markup()
 
 
-def cloud_server_list(orders):
+def cart_menu(items, total_amount):
     kb = InlineKeyboardBuilder()
-    for order in orders:
-        status = order.get_status_display() if hasattr(order, 'get_status_display') else order.status
-        kb.button(text=f'{order.region_name} | {order.public_ip or order.previous_public_ip or "未分配IP"} | {status}', callback_data=f'cloud:detail:{order.id}')
-    kb.adjust(1)
-    kb.row(InlineKeyboardButton(text='🔙 返回主菜单', callback_data='custom:back'))
+    for item in items:
+        title = item.cloud_plan.plan_name if getattr(item, 'cloud_plan', None) else item.product.name
+        target_id = item.cloud_plan_id if getattr(item, 'cloud_plan_id', None) else item.product_id
+        kb.row(InlineKeyboardButton(text=f'❌ 删除 {title} x{item.quantity}', callback_data=f'cart:remove:{target_id}'))
+    if items:
+        kb.row(
+            InlineKeyboardButton(text='💳 余额结算 USDT', callback_data='cart:checkout:balance:USDT'),
+            InlineKeyboardButton(text='🔗 地址结算 USDT', callback_data='cart:checkout:address:USDT'),
+        )
+        kb.row(InlineKeyboardButton(text='🗑 清空购物车', callback_data='cart:clear'))
+    kb.row(InlineKeyboardButton(text='🔙 返回个人中心', callback_data='profile:back_to_menu'))
     return kb.as_markup()
 
 
-def cloud_server_detail(order_id: int, can_renew: bool, can_change_ip: bool):
+def cloud_server_change_ip_region_menu(order_id: int, regions, expanded: bool = False):
+    kb = InlineKeyboardBuilder()
+    popular_regions, remaining_regions = _split_custom_regions(regions)
+    display_regions = remaining_regions if expanded else popular_regions
+    for region_code, region_name in display_regions:
+        kb.button(text=region_name, callback_data=f'cloud:ipregion:{order_id}:{region_code}')
+    if not expanded and remaining_regions:
+        kb.button(text='更多', callback_data=f'cloud:ipregions:more:{order_id}')
+        kb.adjust(3, 3)
+        kb.button(text='🔙 返回详情', callback_data=f'cloud:detail:{order_id}')
+        kb.adjust(3, 3, 1)
+    elif expanded:
+        kb.button(text='🔙 返回', callback_data=f'cloud:ip:{order_id}')
+        rows = [3] * ((len(display_regions) + 2) // 3)
+        kb.adjust(*rows, 1)
+    else:
+        kb.button(text='🔙 返回详情', callback_data=f'cloud:detail:{order_id}')
+        rows = [3] * ((len(display_regions) + 2) // 3)
+        kb.adjust(*rows, 1)
+    return kb.as_markup()
+
+
+def cloud_server_change_ip_port_keyboard(order_id: int, region_code: str, region_name: str):
+    kb = InlineKeyboardBuilder()
+    kb.row(
+        InlineKeyboardButton(text='✅ 使用默认端口 9528', callback_data=f'cloud:ipport:default:{order_id}:{region_code}'),
+        InlineKeyboardButton(text='✍️ 输入自定义端口', callback_data=f'cloud:ipport:custom:{order_id}:{region_code}'),
+    )
+    kb.row(InlineKeyboardButton(text='🔙 返回地区', callback_data=f'cloud:ip:{order_id}'))
+    return kb.as_markup()
+
+
+def cloud_server_list(orders, page: int = 1, total_pages: int = 1, prefix: str = 'cloud:list'):
+    kb = InlineKeyboardBuilder()
+    for order in orders:
+        ip = order.public_ip or order.previous_public_ip or '未分配IP'
+        expires = order.service_expires_at.strftime('%Y-%m-%d') if getattr(order, 'service_expires_at', None) else '未设置'
+        kb.button(text=f'{ip} | {expires}', callback_data=f'cloud:detail:{order.id}:{prefix}:{page}')
+    kb.adjust(1)
+    nav = []
+    if page > 1:
+        nav.append(InlineKeyboardButton(text='⬅️ 上一页', callback_data=f'{prefix}:{page - 1}'))
+    if page < total_pages:
+        nav.append(InlineKeyboardButton(text='➡️ 下一页', callback_data=f'{prefix}:{page + 1}'))
+    if nav:
+        kb.row(*nav)
+    back_callback = 'profile:orders' if prefix.startswith('profile:orders:cloud') else 'profile:orders'
+    kb.row(InlineKeyboardButton(text='🔙 返回订单查询', callback_data=back_callback))
+    return kb.as_markup()
+
+
+def cloud_expiry_actions(order_id: int):
+    kb = InlineKeyboardBuilder()
+    kb.row(
+        InlineKeyboardButton(text='🔕 关闭提醒3天', callback_data=f'cloud:mute:{order_id}:3'),
+        InlineKeyboardButton(text='🕒 延期10天', callback_data=f'cloud:delay:{order_id}:10'),
+    )
+    return kb.as_markup()
+
+
+def cloud_server_renew_payment(order_id: int, amount, trx_amount, auto_renew_enabled: bool = False):
+    kb = InlineKeyboardBuilder()
+    kb.row(
+        InlineKeyboardButton(text=f'💳 USDT钱包支付 ({fmt_amount(amount)} U)', callback_data=f'cloud:renewpay:{order_id}:USDT'),
+        InlineKeyboardButton(text=f'💳 TRX钱包支付 ({fmt_amount(trx_amount)} TRX)', callback_data=f'cloud:renewpay:{order_id}:TRX'),
+    )
+    if auto_renew_enabled:
+        kb.row(InlineKeyboardButton(text='⛔ 关闭钱包自动续费', callback_data=f'cloud:autorenew:off:{order_id}'))
+    else:
+        kb.row(InlineKeyboardButton(text='⚡ 打开钱包自动续费', callback_data=f'cloud:autorenew:on:{order_id}'))
+    kb.row(InlineKeyboardButton(text='🔙 返回详情', callback_data=f'cloud:detail:{order_id}'))
+    return kb.as_markup()
+
+
+def cloud_server_detail(order_id: int, can_renew: bool, can_change_ip: bool, can_reinit: bool = False, can_delay: bool = False, back_callback: str = 'cloud:list'):
     kb = InlineKeyboardBuilder()
     if can_renew:
-        kb.button(text='🔄 续费31天', callback_data=f'cloud:renew:{order_id}')
+        kb.button(text='🔄 续费', callback_data=f'cloud:renew:{order_id}')
+    if can_delay:
+        kb.button(text='🕒 延期', callback_data=f'cloud:delay:{order_id}:10')
     if can_change_ip:
         kb.button(text='🌐 更换IP', callback_data=f'cloud:ip:{order_id}')
-    kb.button(text='🔙 返回列表', callback_data='cloud:list')
-    kb.adjust(2, 1)
+    if can_reinit:
+        kb.button(text='🛠 重新安装', callback_data=f'cloud:reinit:{order_id}')
+    kb.button(text='🔙 返回列表', callback_data=back_callback)
+    kb.adjust(2, 2, 1)
     return kb.as_markup()
 
 
@@ -227,6 +337,15 @@ def product_list(products, page: int, total_pages: int):
         nav.append(InlineKeyboardButton(text='➡️ 下一页', callback_data=f'ppage:{page + 1}'))
     if nav:
         kb.row(*nav)
+    return kb.as_markup()
+
+
+def wallet_recharge_prompt_menu():
+    kb = InlineKeyboardBuilder()
+    kb.row(
+        InlineKeyboardButton(text='💰 去钱包充值', callback_data='profile:recharge'),
+        InlineKeyboardButton(text='🔙 返回个人中心', callback_data='profile:back_to_menu'),
+    )
     return kb.as_markup()
 
 
@@ -270,6 +389,53 @@ def order_list(orders, page: int, total_pages: int):
         nav.append(InlineKeyboardButton(text='➡️ 下一页', callback_data=f'opage:{page + 1}'))
     if nav:
         kb.row(*nav)
+    kb.row(InlineKeyboardButton(text='🔙 返回个人中心', callback_data='profile:back_to_menu'))
+    return kb.as_markup()
+
+
+def balance_details_list(items, page: int, total_pages: int):
+    kb = InlineKeyboardBuilder()
+    for item in items:
+        icon = '🟢' if item['direction'] == 'in' else '🔴'
+        kb.row(InlineKeyboardButton(
+            text=f"{icon} {item['title'][:24]} | {item['amount']} {item['currency']}",
+            callback_data=f"balance:detail:{item['id']}",
+        ))
+    nav = []
+    if page > 1:
+        nav.append(InlineKeyboardButton(text='⬅️ 上一页', callback_data=f'bdpage:{page - 1}'))
+    if page < total_pages:
+        nav.append(InlineKeyboardButton(text='➡️ 下一页', callback_data=f'bdpage:{page + 1}'))
+    if nav:
+        kb.row(*nav)
+    kb.row(InlineKeyboardButton(text='🔙 返回个人中心', callback_data='profile:back_to_menu'))
+    return kb.as_markup()
+
+
+def order_query_menu():
+    kb = InlineKeyboardBuilder()
+    kb.row(InlineKeyboardButton(text='📦 商品订单', callback_data='profile:orders:product'))
+    kb.row(InlineKeyboardButton(text='☁️ 云服务器订单', callback_data='profile:orders:cloud'))
+    kb.row(InlineKeyboardButton(text='🔎 IP查询到期', callback_data='cloud:queryip'))
+    kb.row(InlineKeyboardButton(text='🔙 返回个人中心', callback_data='profile:back_to_menu'))
+    return kb.as_markup()
+
+
+def cloud_ip_query_result(result_items, renewable_items, page: int = 1, total_pages: int = 1):
+    kb = InlineKeyboardBuilder()
+    for item in renewable_items:
+        ip = item.get('ip') or '未知IP'
+        order_id = int(item.get('order_id') or 0)
+        if order_id > 0:
+            kb.row(InlineKeyboardButton(text=f'🔄 续费IP {ip}', callback_data=f'cloud:renew:{order_id}'))
+    nav = []
+    if page > 1:
+        nav.append(InlineKeyboardButton(text='⬅️ 上一页', callback_data=f'cloud:queryip:page:{page - 1}'))
+    if page < total_pages:
+        nav.append(InlineKeyboardButton(text='➡️ 下一页', callback_data=f'cloud:queryip:page:{page + 1}'))
+    if nav:
+        kb.row(*nav)
+    kb.row(InlineKeyboardButton(text='🔙 返回个人中心', callback_data='profile:back_to_menu'))
     return kb.as_markup()
 
 
@@ -288,4 +454,5 @@ def recharge_list(recharges, page: int, total_pages: int):
         nav.append(InlineKeyboardButton(text='➡️ 下一页', callback_data=f'rpage:{page + 1}'))
     if nav:
         kb.row(*nav)
+    kb.row(InlineKeyboardButton(text='🔙 返回个人中心', callback_data='profile:back_to_menu'))
     return kb.as_markup()

@@ -6,6 +6,7 @@ import uuid
 from pathlib import Path
 
 from cloud.schemas import ProvisionResult
+from core.cloud_accounts import get_active_cloud_account
 
 
 TIMEOUTS = {
@@ -23,8 +24,9 @@ def _rand_password(length: int = 18) -> str:
 
 
 def _build_client(endpoint: str = 'swas.cn-hangzhou.aliyuncs.com'):
-    access_key = os.getenv('ALIBABA_CLOUD_ACCESS_KEY_ID', '')
-    secret_key = os.getenv('ALIBABA_CLOUD_ACCESS_KEY_SECRET', '')
+    account = get_active_cloud_account('aliyun')
+    access_key = account.access_key_plain if account else os.getenv('ALIBABA_CLOUD_ACCESS_KEY_ID', '')
+    secret_key = account.secret_key_plain if account else os.getenv('ALIBABA_CLOUD_ACCESS_KEY_SECRET', '')
     if not access_key or not secret_key:
         return None
     from alibabacloud_tea_openapi import models as open_api_models
@@ -220,6 +222,30 @@ def _reset_system_with_password(client, region_code: str, instance_id: str, imag
     )
 
 
+def _open_instance_port(client, region_code: str, instance_id: str, port: int) -> None:
+    from alibabacloud_swas_open20200601 import models as swas_models
+
+    for protocol in ('TCP', 'UDP'):
+        try:
+            client.create_firewall_rule_with_options(
+                swas_models.CreateFirewallRuleRequest(
+                    region_id=region_code,
+                    instance_id=instance_id,
+                    firewall_rules=[
+                        swas_models.CreateFirewallRuleRequestFirewallRules(
+                            port=str(port),
+                            protocol=protocol,
+                            cidr_ip='0.0.0.0/0',
+                            remark=f'openclaw mtproxy {port}',
+                        ),
+                    ],
+                ),
+                _runtime_options(),
+            )
+        except Exception:
+            pass
+
+
 async def create_instance(order, server_name: str):
     region_code = order.region_code or 'cn-hongkong'
     client = _build_client(_region_endpoint(region_code))
@@ -305,6 +331,9 @@ async def create_instance(order, server_name: str):
         running_instance = _wait_running(client, region_code, instance_id)
         if not running_instance:
             return ProvisionResult(ok=False, note=f'阿里云轻量云创建失败：实例未进入 Running，instance_id={instance_id}')
+
+        _open_instance_port(client, region_code, instance_id, 22)
+        _open_instance_port(client, region_code, instance_id, int(getattr(order, 'mtproxy_port', 9528) or 9528))
 
         _reset_system_with_password(client, region_code, instance_id, image_id, password)
         diagnostics.append('已触发 ResetSystem 下发 root 密码')

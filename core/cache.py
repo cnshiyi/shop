@@ -5,15 +5,30 @@ from decimal import Decimal
 
 import redis.asyncio as redis
 
+from core.runtime_config import get_runtime_config
+
 logger = logging.getLogger(__name__)
 
-REDIS_URL = os.getenv('REDIS_URL', 'redis://127.0.0.1:6379/0')
+REDIS_URL = get_runtime_config('redis_url', os.getenv('REDIS_URL', 'redis://127.0.0.1:6379/0'))
 CFG_PREFIX = 'core:cfg:'
 DAILY_PREFIX = 'daily:'
 CFG_TTL = 120
 
 _redis: redis.Redis | None = None
 _redis_ok: bool = True
+
+
+async def reset_redis(reason: Exception | None = None):
+    global _redis, _redis_ok
+    if reason is not None:
+        logger.warning('Redis 连接已重置，等待自动重连: %s', reason)
+    if _redis is not None:
+        try:
+            await _redis.aclose()
+        except Exception:
+            pass
+    _redis = None
+    _redis_ok = True
 
 
 async def get_redis() -> redis.Redis | None:
@@ -28,6 +43,20 @@ async def get_redis() -> redis.Redis | None:
             logger.warning('Redis 不可用，降级到数据库: %s', exc)
             _redis_ok = False
             _redis = None
+            return None
+    else:
+        try:
+            await _redis.ping()
+        except Exception as exc:
+            await reset_redis(exc)
+            try:
+                _redis = redis.from_url(REDIS_URL, decode_responses=True)
+                await _redis.ping()
+            except Exception as reconnect_exc:
+                logger.warning('Redis 重连失败，降级到数据库: %s', reconnect_exc)
+                _redis_ok = False
+                _redis = None
+                return None
     return _redis
 
 
@@ -104,10 +133,4 @@ async def bump_daily_stats(address: str, currency: str, direction: str, amount: 
 
 
 async def close():
-    global _redis
-    if _redis:
-        try:
-            await _redis.aclose()
-        except Exception:
-            pass
-        _redis = None
+    await reset_redis()

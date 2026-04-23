@@ -35,6 +35,33 @@ class Product(models.Model):
         return self.name
 
 
+class CartItem(models.Model):
+    ITEM_PRODUCT = 'product'
+    ITEM_CLOUD_PLAN = 'cloud_plan'
+    ITEM_TYPE_CHOICES = (
+        (ITEM_PRODUCT, '商品'),
+        (ITEM_CLOUD_PLAN, '云套餐'),
+    )
+
+    user = models.ForeignKey('accounts.TelegramUser', verbose_name='用户', on_delete=models.CASCADE, related_name='cart_items')
+    item_type = models.CharField('项目类型', max_length=32, choices=ITEM_TYPE_CHOICES, default=ITEM_PRODUCT)
+    product = models.ForeignKey('mall.Product', verbose_name='商品', on_delete=models.CASCADE, related_name='cart_items', blank=True, null=True)
+    cloud_plan = models.ForeignKey('mall.CloudServerPlan', verbose_name='云套餐', on_delete=models.CASCADE, related_name='cart_items', blank=True, null=True)
+    quantity = models.IntegerField('数量', default=1)
+    created_at = models.DateTimeField('创建时间', auto_now_add=True)
+    updated_at = models.DateTimeField('更新时间', auto_now=True)
+
+    class Meta:
+        db_table = 'cart_items'
+        verbose_name = '购物车项'
+        verbose_name_plural = '购物车项'
+        ordering = ['-updated_at', '-id']
+
+    def __str__(self):
+        target_id = self.product_id or self.cloud_plan_id
+        return f'{self.user_id}:{self.item_type}:{target_id} x {self.quantity}'
+
+
 class CloudServerPlan(models.Model):
     PROVIDER_AWS_LIGHTSAIL = 'aws_lightsail'
     PROVIDER_ALIYUN_ECS = 'aliyun_simple'
@@ -47,11 +74,13 @@ class CloudServerPlan(models.Model):
     region_code = models.CharField('地区代码', max_length=64, db_index=True)
     region_name = models.CharField('地区名称', max_length=128)
     plan_name = models.CharField('套餐名称', max_length=191)
+    plan_description = models.TextField('套餐描述', blank=True, null=True)
     cpu = models.CharField('CPU', max_length=64, blank=True, null=True)
     memory = models.CharField('内存', max_length=64, blank=True, null=True)
     storage = models.CharField('存储', max_length=64, blank=True, null=True)
     bandwidth = models.CharField('带宽', max_length=64, blank=True, null=True)
-    price = models.DecimalField('价格', max_digits=18, decimal_places=6)
+    cost_price = models.DecimalField('进货价', max_digits=18, decimal_places=6, default=0)
+    price = models.DecimalField('出售价', max_digits=18, decimal_places=6)
     currency = models.CharField('币种', max_length=32, default='USDT')
     is_active = models.BooleanField('启用', default=True)
     sort_order = models.IntegerField('排序', default=0)
@@ -67,6 +96,36 @@ class CloudServerPlan(models.Model):
 
     def __str__(self):
         return f'{self.region_name} {self.plan_name}'
+
+
+class ServerPrice(models.Model):
+    provider = models.CharField('云厂商', max_length=32, choices=CloudServerPlan.PROVIDER_CHOICES, db_index=True)
+    region_code = models.CharField('地区代码', max_length=64, db_index=True)
+    region_name = models.CharField('地区名称', max_length=128)
+    bundle_code = models.CharField('规格代码', max_length=128, db_index=True)
+    server_name = models.CharField('服务器价格名', max_length=191)
+    server_description = models.TextField('服务器价格描述', blank=True, null=True)
+    cpu = models.CharField('CPU', max_length=64, blank=True, null=True)
+    memory = models.CharField('内存', max_length=64, blank=True, null=True)
+    storage = models.CharField('存储', max_length=64, blank=True, null=True)
+    bandwidth = models.CharField('带宽', max_length=64, blank=True, null=True)
+    cost_price = models.DecimalField('进货价', max_digits=18, decimal_places=6, default=0)
+    price = models.DecimalField('销售价格', max_digits=18, decimal_places=6)
+    currency = models.CharField('币种', max_length=32, default='USDT')
+    is_active = models.BooleanField('启用', default=True)
+    sort_order = models.IntegerField('排序', default=0)
+    created_at = models.DateTimeField('创建时间', auto_now_add=True)
+    updated_at = models.DateTimeField('更新时间', auto_now=True)
+
+    class Meta:
+        db_table = 'server_prices'
+        verbose_name = '服务器价格'
+        verbose_name_plural = '服务器价格'
+        ordering = ['provider', 'region_name', '-sort_order', 'id']
+        unique_together = ('provider', 'region_code', 'bundle_code')
+
+    def __str__(self):
+        return f'{self.region_name} {self.server_name} ({self.bundle_code})'
 
 
 class CloudServerOrder(models.Model):
@@ -117,6 +176,14 @@ class CloudServerOrder(models.Model):
     delete_at = models.DateTimeField('计划删机时间', blank=True, null=True)
     ip_recycle_at = models.DateTimeField('IP保留到期时间', blank=True, null=True)
     last_renewed_at = models.DateTimeField('最后续费时间', blank=True, null=True)
+    renew_notice_sent_at = models.DateTimeField('续费提醒发送时间', blank=True, null=True)
+    delete_notice_sent_at = models.DateTimeField('删机提醒发送时间', blank=True, null=True)
+    recycle_notice_sent_at = models.DateTimeField('删IP提醒发送时间', blank=True, null=True)
+    migration_due_at = models.DateTimeField('迁移截止时间', blank=True, null=True)
+    replacement_for = models.ForeignKey('self', verbose_name='替换来源订单', on_delete=models.SET_NULL, blank=True, null=True, related_name='replacement_orders')
+    renew_extension_days = models.IntegerField('临时延期天数', default=0)
+    delay_quota = models.IntegerField('延期次数', default=0)
+    auto_renew_enabled = models.BooleanField('自动续费', default=False, db_index=True)
     last_user_id = models.BigIntegerField('最近绑定TG用户ID', blank=True, null=True, db_index=True)
     mtproxy_port = models.IntegerField('MTProxy端口', default=9528)
     mtproxy_link = models.TextField('MTProxy链接', blank=True, null=True)
@@ -148,14 +215,162 @@ class CloudServerOrder(models.Model):
         if self.service_started_at and not self.service_expires_at:
             self.service_expires_at = self.service_started_at + timezone.timedelta(days=self.lifecycle_days)
         if self.service_expires_at:
-            self.renew_grace_expires_at = self.service_expires_at + timezone.timedelta(days=3)
-            self.suspend_at = self.service_expires_at + timezone.timedelta(days=3)
+            grace_days = 5 + max(int(self.renew_extension_days or 0), 0)
+            self.renew_grace_expires_at = self.service_expires_at + timezone.timedelta(days=grace_days)
+            self.suspend_at = self.service_expires_at + timezone.timedelta(days=grace_days)
             self.delete_at = self.suspend_at + timezone.timedelta(days=3)
-            self.ip_recycle_at = self.delete_at + timezone.timedelta(days=10)
+            self.ip_recycle_at = self.delete_at + timezone.timedelta(days=15)
         super().save(*args, **kwargs)
 
     def __str__(self):
         return self.order_no
+
+
+class CloudAsset(models.Model):
+    STATUS_RUNNING = 'running'
+    STATUS_PENDING = 'pending'
+    STATUS_STARTING = 'starting'
+    STATUS_STOPPING = 'stopping'
+    STATUS_STOPPED = 'stopped'
+    STATUS_SUSPENDED = 'suspended'
+    STATUS_TERMINATING = 'terminating'
+    STATUS_TERMINATED = 'terminated'
+    STATUS_DELETING = 'deleting'
+    STATUS_DELETED = 'deleted'
+    STATUS_EXPIRED = 'expired'
+    STATUS_EXPIRED_GRACE = 'expired_grace'
+    STATUS_UNKNOWN = 'unknown'
+    STATUS_CHOICES = (
+        (STATUS_RUNNING, '运行中'),
+        (STATUS_PENDING, '等待中'),
+        (STATUS_STARTING, '启动中'),
+        (STATUS_STOPPING, '停止中'),
+        (STATUS_STOPPED, '已关机'),
+        (STATUS_SUSPENDED, '已停机'),
+        (STATUS_TERMINATING, '终止中'),
+        (STATUS_TERMINATED, '已终止'),
+        (STATUS_DELETING, '删除中'),
+        (STATUS_DELETED, '已删除'),
+        (STATUS_EXPIRED, '已过期'),
+        (STATUS_EXPIRED_GRACE, '到期延停'),
+        (STATUS_UNKNOWN, '未知状态'),
+    )
+    ACTIVE_STATUSES = {STATUS_RUNNING, STATUS_PENDING, STATUS_STARTING}
+
+    KIND_SERVER = 'server'
+    KIND_MTPROXY = 'mtproxy'
+    KIND_CHOICES = (
+        (KIND_SERVER, '云服务器'),
+        (KIND_MTPROXY, 'MTProxy代理'),
+    )
+
+    SOURCE_ALIYUN = 'aliyun'
+    SOURCE_AWS_MANUAL = 'aws_manual'
+    SOURCE_AWS_SYNC = 'aws_sync'
+    SOURCE_ORDER = 'order'
+    SOURCE_CHOICES = (
+        (SOURCE_ALIYUN, '阿里云自动同步'),
+        (SOURCE_AWS_MANUAL, 'AWS手工录入'),
+        (SOURCE_AWS_SYNC, 'AWS脚本同步'),
+        (SOURCE_ORDER, '订单创建'),
+    )
+
+    kind = models.CharField('资产类型', max_length=32, choices=KIND_CHOICES, db_index=True)
+    source = models.CharField('来源', max_length=32, choices=SOURCE_CHOICES, default=SOURCE_ORDER, db_index=True)
+    provider = models.CharField('云厂商', max_length=32, blank=True, null=True, db_index=True)
+    region_code = models.CharField('地区代码', max_length=64, blank=True, null=True, db_index=True)
+    region_name = models.CharField('地区名称', max_length=128, blank=True, null=True)
+    asset_name = models.CharField('资产名称', max_length=191, blank=True, null=True, db_index=True)
+    instance_id = models.CharField('实例ID', max_length=191, blank=True, null=True, db_index=True)
+    provider_resource_id = models.CharField('云资源ID', max_length=191, blank=True, null=True, db_index=True)
+    public_ip = models.CharField('公网IP', max_length=128, blank=True, null=True, db_index=True)
+    previous_public_ip = models.CharField('历史公网IP', max_length=128, blank=True, null=True)
+    login_user = models.CharField('登录账号', max_length=64, blank=True, null=True)
+    login_password = models.CharField('登录密码', max_length=191, blank=True, null=True)
+    mtproxy_port = models.IntegerField('MTProxy端口', blank=True, null=True)
+    mtproxy_link = models.TextField('MTProxy链接', blank=True, null=True)
+    mtproxy_secret = models.CharField('MTProxy密钥', max_length=64, blank=True, null=True)
+    mtproxy_host = models.CharField('MTProxy主机', max_length=191, blank=True, null=True)
+    actual_expires_at = models.DateTimeField('实际到期时间', blank=True, null=True, db_index=True)
+    price = models.DecimalField('价格', max_digits=18, decimal_places=6, blank=True, null=True)
+    currency = models.CharField('币种', max_length=32, default='USDT')
+    order = models.ForeignKey('mall.CloudServerOrder', verbose_name='关联订单', on_delete=models.SET_NULL, blank=True, null=True)
+    user = models.ForeignKey('accounts.TelegramUser', verbose_name='绑定用户', on_delete=models.SET_NULL, blank=True, null=True)
+    note = models.TextField('备注', blank=True, null=True)
+    status = models.CharField('状态', max_length=32, choices=STATUS_CHOICES, default=STATUS_RUNNING, db_index=True)
+    provider_status = models.CharField('云厂商原始状态', max_length=64, blank=True, null=True, db_index=True)
+    is_active = models.BooleanField('有效', default=True, db_index=True)
+    created_at = models.DateTimeField('创建时间', auto_now_add=True)
+    updated_at = models.DateTimeField('更新时间', auto_now=True)
+
+    class Meta:
+        db_table = 'cloud_assets'
+        verbose_name = '云资产'
+        verbose_name_plural = '云资产'
+        ordering = ['-updated_at', '-id']
+
+    def __str__(self):
+        return self.asset_name or self.instance_id or self.public_ip or f'asset-{self.pk}'
+
+
+class Server(models.Model):
+    STATUS_RUNNING = CloudAsset.STATUS_RUNNING
+    STATUS_PENDING = CloudAsset.STATUS_PENDING
+    STATUS_STARTING = CloudAsset.STATUS_STARTING
+    STATUS_STOPPING = CloudAsset.STATUS_STOPPING
+    STATUS_STOPPED = CloudAsset.STATUS_STOPPED
+    STATUS_SUSPENDED = CloudAsset.STATUS_SUSPENDED
+    STATUS_TERMINATING = CloudAsset.STATUS_TERMINATING
+    STATUS_TERMINATED = CloudAsset.STATUS_TERMINATED
+    STATUS_DELETING = CloudAsset.STATUS_DELETING
+    STATUS_DELETED = CloudAsset.STATUS_DELETED
+    STATUS_EXPIRED = CloudAsset.STATUS_EXPIRED
+    STATUS_EXPIRED_GRACE = CloudAsset.STATUS_EXPIRED_GRACE
+    STATUS_UNKNOWN = CloudAsset.STATUS_UNKNOWN
+    STATUS_CHOICES = CloudAsset.STATUS_CHOICES
+    ACTIVE_STATUSES = CloudAsset.ACTIVE_STATUSES
+
+    SOURCE_ALIYUN = 'aliyun'
+    SOURCE_AWS_MANUAL = 'aws_manual'
+    SOURCE_AWS_SYNC = 'aws_sync'
+    SOURCE_ORDER = 'order'
+    SOURCE_CHOICES = (
+        (SOURCE_ALIYUN, '阿里云自动同步'),
+        (SOURCE_AWS_MANUAL, 'AWS手工录入'),
+        (SOURCE_AWS_SYNC, 'AWS脚本同步'),
+        (SOURCE_ORDER, '订单创建'),
+    )
+
+    source = models.CharField('来源', max_length=32, choices=SOURCE_CHOICES, default=SOURCE_ORDER, db_index=True)
+    provider = models.CharField('云厂商', max_length=32, blank=True, null=True, db_index=True)
+    account_label = models.CharField('账户/来源标识', max_length=191, blank=True, null=True, db_index=True)
+    region_code = models.CharField('地区代码', max_length=64, blank=True, null=True, db_index=True)
+    region_name = models.CharField('地区名称', max_length=128, blank=True, null=True)
+    server_name = models.CharField('服务器名称', max_length=191, blank=True, null=True, db_index=True)
+    instance_id = models.CharField('实例ID', max_length=191, blank=True, null=True, db_index=True)
+    provider_resource_id = models.CharField('云资源ID', max_length=191, blank=True, null=True, db_index=True)
+    public_ip = models.CharField('公网IP', max_length=128, blank=True, null=True, db_index=True)
+    previous_public_ip = models.CharField('历史公网IP', max_length=128, blank=True, null=True)
+    login_user = models.CharField('登录账号', max_length=64, blank=True, null=True)
+    login_password = models.CharField('登录密码', max_length=191, blank=True, null=True)
+    expires_at = models.DateTimeField('到期时间', blank=True, null=True, db_index=True)
+    order = models.ForeignKey('mall.CloudServerOrder', verbose_name='关联订单', on_delete=models.SET_NULL, blank=True, null=True)
+    user = models.ForeignKey('accounts.TelegramUser', verbose_name='绑定用户', on_delete=models.SET_NULL, blank=True, null=True)
+    note = models.TextField('备注', blank=True, null=True)
+    status = models.CharField('状态', max_length=32, choices=STATUS_CHOICES, default=CloudAsset.STATUS_RUNNING, db_index=True)
+    provider_status = models.CharField('云厂商原始状态', max_length=64, blank=True, null=True, db_index=True)
+    is_active = models.BooleanField('有效', default=True, db_index=True)
+    created_at = models.DateTimeField('创建时间', auto_now_add=True)
+    updated_at = models.DateTimeField('更新时间', auto_now=True)
+
+    class Meta:
+        db_table = 'servers'
+        verbose_name = '服务器'
+        verbose_name_plural = '服务器'
+        ordering = ['expires_at', '-updated_at', '-id']
+
+    def __str__(self):
+        return self.server_name or self.instance_id or self.public_ip or f'server-{self.pk}'
 
 
 class Order(models.Model):

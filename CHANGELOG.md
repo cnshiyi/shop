@@ -1,5 +1,295 @@
 # 版本记录
 
+## v0.5.06 - 2026-04-24
+- 明确前后端仓库边界：当前 `shop` 仓库仅维护 Django 后端与接口，不再把 `dashboard_web/` 视为真实前端工程。
+- 真实前端位置已确认并固定为 `C:\Users\Administrator\Desktop\vue-vben-admin`，当前实际使用页面位于 `C:\Users\Administrator\Desktop\vue-vben-admin\apps\web-antd`。
+- 删除后端中直接托管前端产物的代码：移除 `core.views.admin_spa` 与 `shop.urls` 中 `/admin` 的 SPA 路由，避免继续把前端部署/访问逻辑耦合在当前后端仓库。
+- 更新说明文档，避免后续继续在后端仓库误判前端位置。
+
+### 验证
+- 通过目录复查确认 `shop\dashboard_web` 仅有说明文件，真实前端页面位于 `vue-vben-admin\apps\web-antd`
+
+## v0.5.05 - 2026-04-22
+- 按需求把“同步服务器价格表”拆成独立链路：新增 `mall.ServerPrice` 独立表（`server_prices`），不再与套餐价格共用同一张业务表。
+- `biz.services.custom.ensure_cloud_server_plans` 现会先同步 `ServerPrice`，再刷新套餐模板；地区缓存与套餐缓存的回源逻辑改为优先读取独立服务器价格表。
+- `GET /api/dashboard/cloud-pricing/` 与 `POST /api/dashboard/cloud-plans/sync/` 的价格统计已切到 `ServerPrice`，返回字段保持兼容，前端无需改字段名即可继续使用。
+
+### 验证
+- 待执行 `C:\Users\Administrator\Desktop\shop\.venv\Scripts\python.exe manage.py migrate`
+- 待执行 `C:\Users\Administrator\Desktop\shop\.venv\Scripts\python.exe manage.py check`
+
+## v0.5.04 - 2026-04-21
+- 新增数据库持久化补全：`DailyAddressStat`、`ResourceSnapshot`、`ExternalSyncLog`，并将监控每日统计、资源快照、部分外部采集日志接入数据库。
+- 新增 `docs/DB_NAMING_CONVENTIONS.md`，统一数据库对象命名规范：新表/新字段严格采用小写蛇形命名，保留历史表兼容，不为纯命名整理强改旧表名。
+- 多账户扩展预留继续收口到 `account_scope` / `account_key` 与 `CloudAccountConfig` 关联方案。
+
+### 验证
+- `uv run python manage.py check`
+
+## v0.5.03 - 2026-04-19
+- 机器人云服务器支付链路相关文案改为从 `SiteConfig` 读取，后台“系统设置”可直接维护数量页标题/提示、支付页标题/提示、钱包币种页、后台处理中提示、余额不足提示、支付说明、端口提示等文案。
+- 保持原有回调协议与异步建单/异步钱包支付逻辑不变，仅将支付页展示文案配置化，便于运营后台即时调整。
+
+### 验证
+- `C:\Users\Administrator\Desktop\shop\.venv\Scripts\python.exe -m py_compile C:\Users\Administrator\Desktop\shop\bot\handlers.py C:\Users\Administrator\Desktop\shop\bot\keyboards.py`
+
+## v0.5.02 - 2026-04-19
+- 套餐设置补齐后台编辑能力：`CloudServerPlan` / `ServerPrice` 新增 `cost_price`（进货价），dashboard 套餐页支持编辑套餐名、套餐描述、进货价、出售价、排序与启用状态。
+- 修复 `POST /api/dashboard/servers/sync/` 中阿里云区域变量未定义导致同步按钮不可用的问题，并让前端同步请求显式携带 `region`。
+- dashboard 新增“系统设置”页，补齐 `SiteConfig` / `CloudAccountConfig` 的可视化查看能力，敏感配置展示真实值输入与脱敏预览。
+- 套餐列表按需求收敛阿里云地区：dashboard 套餐/价格接口在 `provider=aliyun_simple` 且未指定 `region_code` 时，仅返回 `中国香港` 与 `新加坡`。
+- 机器人套餐选择页改为一行 3 个，移除套餐卡片内“加入购物车”；在数量选择页增加“加入购物车”“去购物车支付”；购物车支付按钮调整为一行两个。
+- 钱包余额不足提示统一为“余额不足，请先充值”，并增加“去钱包充值”按钮直达充值入口。
+
+### 验证
+- 前端已跑到构建阶段并定位缺失导出/接口问题，当前继续收尾验证。
+- Django 本地命令依赖当前 shell 未激活虚拟环境，需在 `.venv` 环境下执行 `manage.py check` / 迁移检查。
+
+## v0.5.01 - 2026-04-19
+- 补齐后台默认管理员初始化：新增 `ensure_dashboard_admin` 管理命令，支持通过 `DASHBOARD_ADMIN_USERNAME` / `DASHBOARD_ADMIN_PASSWORD` 自动创建或修复 dashboard 登录账号，避免数据库为空时前端登录一直返回 `401`。
+- 开发环境默认提供后台初始账号：`admin / Admin@123456`。
+
+### 验证
+- `python manage.py ensure_dashboard_admin`
+- 后台用户表存在可登录 `staff/superuser`
+
+## v0.5.00 - 2026-04-19
+- 修复 `dashboard_api` 兼容登录态接口仍误用 Django 原生 `@login_required` 的问题，避免 `/api/dashboard/user/info`、`/auth/logout`、`/auth/refresh`、`/auth/codes` 在前后端分离场景下返回 `302` 跳转而不是 JSON `401` / 正常响应。
+
+### 验证
+- `manage.py check` 通过
+- 前端 `vue-tsc --noEmit` 通过
+- `/api/dashboard/user/info` 改为走 `dashboard_login_required`
+
+## v0.4.99 - 2026-04-19
+- 调整 `biz.tests.CloudServerServicesTestCase` 的换 IP 场景数据，显式补齐旧订单服务开始/到期时间，确保测试真实覆盖“新服务器到期时间继承旧服务器”的业务要求。
+
+### 验证
+- 通过 `DJANGO_TEST_REUSE_DB=1` 模式执行 `manage.py test biz.tests.CloudServerServicesTestCase --keepdb`
+
+## v0.4.98 - 2026-04-19
+- 为 Django 测试补充数据库兜底配置：支持通过 `MYSQL_TEST_DATABASE` 指定测试库，或通过 `DJANGO_TEST_REUSE_DB=1` 在本地无建库权限时复用当前库执行回归测试。
+
+### 验证
+- 通过 `DJANGO_TEST_REUSE_DB=1 C:\Users\Administrator\Desktop\shop\.venv\Scripts\python.exe manage.py test biz.tests.CloudServerServicesTestCase --keepdb`
+
+## v0.4.97 - 2026-04-19
+- 为 `biz.services.cloud_servers` 补充正式 Django 单测，覆盖“已删除/IP 已清空订单禁止续费”与“历史订单缺少 `plan_id` 时换 IP 自动回填套餐”两条关键回归场景。
+
+### 验证
+- 通过 `C:\Users\Administrator\Desktop\shop\.venv\Scripts\python.exe manage.py test biz.tests.CloudServerServicesTestCase`
+
+## v0.4.96 - 2026-04-19
+- 修复更换 IP 的兼容兜底：当历史云订单缺少 `plan_id` 时，会按 `provider + region_code + plan_name` 自动回填匹配可用套餐后再创建新服务器订单，避免换 IP 流程因 `CloudServerOrder.plan` 非空约束失败。
+
+### 验证
+- 通过 `C:\Users\Administrator\Desktop\shop\.venv\Scripts\python.exe manage.py shell -c "...mark_cloud_server_ip_change_requested(...)..."` 复现并修复历史订单缺 `plan_id` 的换 IP 创建失败问题
+
+## v0.4.96 - 2026-04-18
+- 收口 AWS Lightsail 新机全流程验收：在全新测试机上真实跑通 `创建实例 -> 默认 key 登录 ubuntu -> 设置 root/ubuntu 密码 -> password + keyboard-interactive 复登 root -> 在密码登录后的 root 会话继续安装 -> BBR 生效 -> MTProxy 安装成功`
+- 修复 `cloud/bootstrap.py` 中 MTProxy 启动命令提取逻辑，避免 `run-command.sh` 被错误截成 `/mtg` 导致 `No such file or directory`
+- 调整 mtg stats 管理端口为 `18888`，规避 `127.0.0.1:8888` 被遗留进程占用时造成的 `cannot initialize stats server` 启动失败
+- 增加 MTProxy 安装前的遗留进程清理逻辑，避免旧的 `mtg/mtproto-proxy` 进程与新 systemd 服务互相抢占端口
+- 为 `run-command.sh` 与 Secret 解析补充多级兜底：当 `ps` 无法稳定提取运行命令时，回退读取 `/home/mtproxy/config` 构造启动命令，并从 `config` / `run-command.sh` / 进程参数中解析 Secret
+- 真实复验通过的新机样本包括 `flowtest-124444`（`13.250.133.199`）与 `flowtest-131325`（`13.250.251.177`）；最终复验确认 `mtproxy.service` 为 `active`、端口 `9528` 正常监听、分享链接成功产出
+
+### 验证
+- 通过 `tmp/create_flow_test_instance.py` 真实创建 AWS Lightsail 测试机并获取默认登录信息
+- 通过 `tmp/run_full_flow_new_machine.py` 在 `13.250.133.199` 复验 `设密码 -> 密码复登 root -> 密码登录后安装`
+- 通过 `tmp/run_full_flow_new_machine_2.py` 在 `13.250.251.177` 复验完整链路，确认 `systemctl is-active mtproxy.service` 返回 `active`
+- 通过远端复验确认 `ss -lntup | grep 9528` 可见 `mtg` 监听，且 `ps -ef | grep -iE "/mtg | mtg run |mtproto-proxy"` 能看到稳定运行进程
+
+## v0.4.95 - 2026-04-16
+- 增强 `POST /api/dashboard/servers/sync/`：同步阿里云与 AWS 后，会对账当前区域内已存在的 `servers` 记录；若云平台已不存在，则自动将 `servers.is_active` 置为 `False`，并写入“云平台同步未发现该服务器，已标记为不存在”备注
+- 调整云厂商状态同步规则：`sync_aliyun_assets` / `sync_aws_assets` 现在按真实云状态更新 `is_active`，仅 `running` / `starting` / `pending` 视为正常状态，关机、停机、删除、过期、终止等状态会自动标记为非正常
+- 调整 `GET /api/dashboard/servers/` 排序：按服务器真实状态排序，正常状态优先，再按 `expires_at`、`updated_at` 排序，非正常状态服务器自动排到后面
+- 服务器同步进一步收口“云平台不存在”状态：`Server.provider_status` 不再写 `missing/deleted` 英文，统一直接写中文 `已删除`；并在 `sync_servers` 链路中自动修正同地域历史旧数据里残留的 `provider_status='missing'` 记录，避免前端继续看到英文旧值
+
+### 验证
+- 通过 `C:\Users\Administrator\Desktop\shop\.venv\Scripts\python.exe manage.py check`
+
+## v0.4.94 - 2026-04-15
+- 跑通当前关键验证链路：Django `check`、迁移状态检查、Vben `typecheck`
+- 确认 `accounts` 与 `mall` 的新迁移已处于已应用状态，覆盖多用户名、服务器表、云资产价格/币种等改动
+- 新增机器人云套餐购物车真实结算链路：购物车中的云套餐现在可直接创建云订单并进入支付/端口选择流程。
+- 新增 `mall.CartItem` 正式迁移，并补齐购物车模型落库。
+- 调整云服务器生命周期基线：到期前 5 天开始提醒，默认提醒静默 3 天，宽限改为 5 天，删机后 IP 保留改为 15 天。
+- 新增云服务器提醒按钮：支持在提醒消息中“关闭提醒 3 天”和“延期 5 天”。
+- 新增敏感配置加密层：`core.SiteConfig` 支持敏感项加密存库，后台显示脱敏值。
+- 生命周期调度补充迁移到期处理：更换 IP 后旧服务器达到 5 天迁移截止时，会自动删除旧实例并通知用户。
+- 后台列表继续调整：服务器列表 API 去掉历史 IP 字段并前置状态字段；代理列表增加同步接口并补充剩余天数倒计时字段。
+- 修复更换 IP 新订单创建缺少 `plan_id` 的真实错误，避免因 `CloudServerOrder.plan` 非空约束导致换 IP 流程失败。
+- 新增 dashboard 云套餐/价格接口：`GET /api/dashboard/cloud-plans/`、`GET /api/dashboard/cloud-pricing/`、`POST /api/dashboard/cloud-plans/sync/`，用于后台查看套餐列表、价格模板和触发刷新。
+- 云套餐列表读取上限从每地区 `6` 个提升到 `9` 个，机器人套餐按钮与文案同步扩展为 `套餐一` 到 `套餐九`。
+- 默认套餐模板统一补齐为 `9` 档：AWS 与阿里云在上游未返回足够套餐时，会回退到本地 `9` 套模板并同步入库。
+- 新增 dashboard 套餐设置页，接入 `/cloud-plans/`、`/cloud-pricing/`、`/cloud-plans/sync/` 接口，支持查看套餐列表、价格列表和手动同步。
+- 调整 dashboard 服务器列表：删除历史 IP 列影响后的表头顺序，状态列前移，并在状态下展示倒计时/云厂商原始状态。
+- 调整 dashboard 代理列表：保留同步按钮，原始状态统一改为倒计时优先展示，不足时回退显示云厂商状态。
+- 复核云服务器生命周期链路：到期前 5 天提醒、关闭提醒 3 天、延期 5 天、删机前 1 天提醒、IP 删除前 1 天提醒、换 IP 后 5 天迁移截止删除旧机。
+- 完善敏感配置后台管理：补齐机器人 Token、M 账号 Token、MySQL/Redis/数据库连接、收款地址等配置项说明与后台分组，沿用数据库加密存储。
+
+### 验证
+- 通过 `./.venv/Scripts/python.exe manage.py check`
+- 通过 `./.venv/Scripts/python.exe manage.py showmigrations accounts mall`
+- 通过 `pnpm -C C:\Users\Administrator\Desktop\vue-vben-admin --filter @vben/web-antd typecheck`
+
+## v0.4.93 - 2026-04-15
+- 重构 Telegram 多用户名存储：主数据改为真实写入 `users.username`，使用逗号保存全部用户名，并保留 `telegram_usernames` 兼容索引
+- 新增 `backfill_usernames_to_users` 回填命令，修复历史多用户名未真实写入 `user` 表的问题
+- 收紧后台编辑接口权限：余额修改、云资产编辑要求登录且具备 `staff/superuser`
+- 补齐服务器同步链路：阿里云同步同时写入 `cloud_assets` 与 `servers`，并直接写入实际到期时间
+- 验证要求更新：迁移、回填、Django check、云资产/API 编辑、前端 typecheck
+
+
+### 新增
+- 增强 `GET /api/dashboard/cloud-assets/`，默认返回精简字段，并支持 `grouped=1` 按用户分组展示云资产
+- 新增 `POST /api/dashboard/cloud-assets/<id>/`，支持更新资产用户绑定、到期时间、代理链接、备注、启用状态，并同步关联订单价格/到期时间/用户
+- 增强 Vben `云资产列表` 页面，支持按用户分组展示服务器与 `MTProxy`，并提供资产编辑弹窗
+
+### 调整
+- 更新机器人用户同步逻辑，保留 Telegram 历史用户名，仅切换当前主用户名标记
+- 增强 Django Admin 云资产管理，列表与搜索更偏向用户、价格、代理链接和到期时间，并支持资产页回写订单价格
+- 增强阿里云同步命令，解析 `ExpiredTime` / `ExpireTime` / `ExpirationTime` / `EndTime` 并写入实际到期时间
+- 增强手工资产录入命令，新增 `--user` 参数，支持按后台用户 ID、Telegram 用户 ID 或用户名绑定用户
+
+### 验证
+- 通过 `python manage.py check`
+- 通过 `python manage.py showmigrations accounts mall`
+- 通过 `pnpm --filter @vben/web-antd typecheck`
+
+## v0.4.91 - 2026-04-15
+
+### 新增
+- 新增 `accounts.TelegramUsername` 模型，用于持久化 Telegram 多个当前用户名，并在后台提供 inline 编辑入口
+- 新增统一云资产模型 `mall.CloudAsset`，用于同时记录云服务器与 `MTProxy` 资产，支持绑定用户/订单留空、记录实际到期时间
+- 新增 Django API：`POST /api/dashboard/users/<id>/balance/` 与 `GET /api/dashboard/cloud-assets/`
+- 新增管理命令：`python manage.py sync_aliyun_assets --region <region>` 与 `python manage.py upsert_cloud_asset ...`
+
+### 调整
+- 更新用户同步逻辑，创建/更新 `TelegramUser` 时同步保存全部用户名到独立关联表
+- 更新云服务器开通流程，创建成功后自动把服务器资产与 `MTProxy` 资产写入统一资产表
+- 更新 Vben `用户列表` 页面，支持直接弹窗修改 `USDT/TRX` 余额
+- 新增 Vben `云资产列表` 页面，用于查看统一资产表中的服务器与 `MTProxy` 记录
+- 补充统一云资产后台管理入口，为 AWS 手工录入与后续绑定用户/订单提供可视化编辑面板
+
+## v0.4.90 - 2026-04-15
+
+### 调整
+- 按联调需要执行本地 OpenClaw gateway 重启，恢复控制面与网关联通状态
+
+## v0.4.89 - 2026-04-15
+
+### 调整
+- 将 Telegram 多用户名语义正式改为当前用户名集合，接口字段统一为 `usernames` / `primary_username` / `username_label`
+- 更新 Vben 用户列表，展示名、多个用户名标签、主用户名与余额信息分开展示
+
+## v0.4.88 - 2026-04-15
+
+### 调整
+- 因联调卡顿，重启本地 Django 8000 与 Vben 5666 开发服务，恢复前后端联调状态
+
+## v0.4.87 - 2026-04-15
+
+### 调整
+- 增强 `/api/dashboard/users/` 返回结构，新增 `display_name`、`primary_username`、`username_history`、`username_label`
+- 兼容 Telegram 用户名变更或手工存储多个用户名的展示场景，优先用昵称，其次用首个用户名
+
+## v0.4.86 - 2026-04-15
+
+### 调整
+- 移除 Vben 侧栏中的 `Django Admin` 入口，继续收敛为纯业务菜单
+- 清理顶部默认通知、文档、GitHub、问答等示例项，仅保留精简后的用户下拉与退出能力
+
+## v0.4.85 - 2026-04-15
+
+### 调整
+- 将 Vben 默认首页从分析页切换为工作台
+- 新增 `Django Admin` 一级菜单入口，并提供打开原生 Django 后台的跳转页
+- 后端登录返回的 `homePath` 同步切换为 `/workspace`
+
+## v0.4.84 - 2026-04-15
+
+### 调整
+- 移除 `vue-vben-admin` 中原有的项目示例与演示菜单，仅保留当前业务后台相关路由
+- 限制 `apps/web-antd` 只加载 `dashboard.ts` 业务路由模块，进一步收敛侧栏结构
+
+## v0.4.83 - 2026-04-15
+
+### 调整
+- 移除原有 `dashboard` 分组导航，将数据概览、工作台、用户列表、云订单列表、充值列表改为一级菜单
+- 保留页面访问路径不变，仅调整左侧导航结构，便于直接进入核心业务页
+
+## v0.4.82 - 2026-04-15
+
+### 调整
+- 将 Vben `analytics` 分析页改为读取 `shop` 后端真实概览数据
+- 分析页现展示真实业务指标、处理进度、最近云订单、最近充值与待处理数量
+
+## v0.4.81 - 2026-04-14
+
+### 调整
+- 为方案 B 联调阶段放宽 `dashboard_api` 的登录/登出/刷新接口 CSRF 校验，避免 Vben 登录被 Django 默认 CSRF 拦截
+- 保持 Django Session 鉴权方案不变，优先确保本地前后端联调可用
+
+## v0.4.80 - 2026-04-14
+
+### 新增
+- 新增 Django 列表接口：`/api/dashboard/users/`、`/api/dashboard/cloud-orders/`、`/api/dashboard/recharges/`
+- 为 Vben 新增三个真实业务页：用户列表、云订单列表、充值列表
+
+### 调整
+- 扩展 Vben `dashboard` 路由，挂载真实业务列表页面
+- 继续以 Django 真实数据替换默认示例内容，推进方案 B 联调
+
+## v0.4.79 - 2026-04-14
+
+### 新增
+- 为 `vue-vben-admin/apps/web-antd` 新增 `src/api/dashboard.ts`，用于请求 Django 工作台总览接口
+
+### 调整
+- 将 Vben `workspace` 工作台页面改为读取 `shop` 后端的真实概览数据
+- 工作台页面现展示真实指标卡、最近云订单、最近充值、待处理事项与快捷导航
+
+## v0.4.78 - 2026-04-14
+
+### 新增
+- 为 Vben Admin 前端对接新增兼容接口：`/api/dashboard/auth/login`、`/api/dashboard/auth/logout`、`/api/dashboard/auth/refresh`、`/api/dashboard/auth/codes`、`/api/dashboard/user/info`
+- 保留已有 `/api/dashboard/dashboard/me/` 与 `/api/dashboard/dashboard/overview/` 作为业务工作台数据接口
+
+### 调整
+- 将 `vue-vben-admin/apps/web-antd` 开发代理改为转发到本地 Django：`http://127.0.0.1:8000/api/dashboard`
+- 关闭 `web-antd` 开发环境的 Nitro Mock，改为直接请求真实 Django 后端
+
+## v0.4.77 - 2026-04-14
+
+### 新增
+- 新增 `dashboard_api/`，作为方案 B（前后端分离后台）的 Django API 起步骨架
+- 新增 `/api/dashboard/me/` 与 `/api/dashboard/overview/` 两个基础接口
+- 新增 `dashboard_web/README.md`，用于承接后续 Vue / Vben Admin 前端接入说明
+
+### 调整
+- 将 `dashboard_api` 注册到 `INSTALLED_APPS`
+- 在 `shop/urls.py` 中挂载 `/api/dashboard/` 路由，为独立后台前端做准备
+
+## v0.4.76 - 2026-04-14
+
+### 调整
+- 后台补齐可见导航栏，并在窄屏下改为顶部按钮触发的抽屉式侧栏
+- 首页工作台改为真正响应式布局，卡片区会随屏幕宽度自动折叠为两列或单列
+- 继续美化后台整体层级，统一卡片、按钮、阴影和信息区块样式
+
+### 修复
+- 修复此前后台在移动端下导航与首页卡片不够友好的问题
+
+## v0.4.75 - 2026-04-14
+
+### 调整
+- 继续细化后台参考图风格，增强列表页、筛选器、分页、表单行与删除按钮的卡片化视觉
+- 后台内容区进一步统一白色卡片、圆角边框、浅阴影与蓝色主操作按钮层级
+
+### 修复
+- 修复部分 Django Admin 表单页仍保留原生边框与视觉密度不统一的问题
+
 ## v0.4.74 - 2026-04-13
 
 ### 调整
