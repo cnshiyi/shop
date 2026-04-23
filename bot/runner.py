@@ -12,12 +12,11 @@ from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from bot.config import BOT_TOKEN
 from bot.fsm import close_fsm_storage
 from bot.handlers import create_dispatcher_and_register
-from biz.services import refresh_custom_plan_cache
+from cloud.services import refresh_custom_plan_cache
 from cloud.lifecycle import lifecycle_tick, sync_server_status_tick, sync_cloud_accounts_tick
 from core.cache import refresh_config, close as cache_close
-from monitoring.cache import init_monitor_cache
-from tron.resource_checker import check_resources, set_bot as set_resource_bot
-from tron.scanner import scan_block, set_bot
+from cloud.cache import init_monitor_cache
+from orders.runtime import check_resources, scan_block, set_bot, set_resource_bot
 
 logger = logging.getLogger(__name__)
 _scan_lock = asyncio.Lock()
@@ -49,7 +48,7 @@ async def run_bot():
 
     async def _notify(user_id: int, text: str, reply_markup=None):
         try:
-            from accounts.models import TelegramUser
+            from bot.models import TelegramUser
             user = await asyncio.to_thread(lambda: TelegramUser.objects.filter(id=user_id).first())
             if user:
                 await bot.send_message(user.tg_user_id, text, reply_markup=reply_markup)

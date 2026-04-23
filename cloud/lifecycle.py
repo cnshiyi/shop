@@ -8,8 +8,8 @@ from django.utils import timezone
 
 from core.models import CloudAccountConfig
 
-from accounts.models import TelegramUser
-from biz.models import CloudAsset, CloudServerOrder, Server
+from bot.models import TelegramUser
+from cloud.models import CloudAsset, CloudServerOrder, Server
 from bot.keyboards import cloud_expiry_actions
 
 logger = logging.getLogger(__name__)

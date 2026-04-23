@@ -2,7 +2,7 @@ from django.core.management.base import BaseCommand, CommandError
 from django.utils import timezone
 from django.utils.dateparse import parse_datetime
 
-from mall.models import CloudAsset, Server
+from cloud.models import CloudAsset, Server
 from cloud.aliyun_simple import _build_client, _region_endpoint, _runtime_options
 
 

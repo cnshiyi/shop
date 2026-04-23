@@ -2,12 +2,12 @@ from asgiref.sync import sync_to_async
 import logging
 from django.utils import timezone
 
-from biz.models import CloudAsset, Server
-from biz.services import build_cloud_server_name, ensure_unique_cloud_server_name
+from cloud.models import CloudAsset, Server
+from cloud.services import build_cloud_server_name, ensure_unique_cloud_server_name
 from cloud.aliyun_simple import create_instance as create_aliyun_instance
 from cloud.aws_lightsail import create_instance as create_aws_instance
 from cloud.bootstrap import install_bbr, install_mtproxy
-from mall.models import CloudServerOrder
+from cloud.models import CloudServerOrder
 
 logger = logging.getLogger(__name__)
 

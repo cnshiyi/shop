@@ -4,9 +4,9 @@ from asgiref.sync import async_to_sync
 from django.test import TestCase
 from django.utils import timezone
 
-from accounts.models import TelegramUser
-from biz.services.cloud_servers import create_cloud_server_renewal, mark_cloud_server_ip_change_requested
-from mall.models import CloudServerOrder, CloudServerPlan
+from bot.models import TelegramUser
+from cloud.models import CloudServerOrder, CloudServerPlan
+from cloud.services import create_cloud_server_renewal, mark_cloud_server_ip_change_requested
 
 
 class CloudServerServicesTestCase(TestCase):

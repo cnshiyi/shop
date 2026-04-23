@@ -6,7 +6,7 @@ from django.db import transaction
 from django.db.models import F
 
 from core.models import ExternalSyncLog
-from monitoring.models import DailyAddressStat, ResourceSnapshot, AddressMonitor
+from cloud.models import AddressMonitor, DailyAddressStat, ResourceSnapshot
 
 
 def record_external_sync_log(*, source: str, action: str, target: str = '', request_payload=None, response_payload=None, is_success: bool = True, error_message: str = '', account=None):

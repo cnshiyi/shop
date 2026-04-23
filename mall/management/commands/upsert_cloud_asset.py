@@ -3,8 +3,8 @@ from decimal import Decimal, InvalidOperation
 from django.core.management.base import BaseCommand, CommandError
 from django.utils.dateparse import parse_datetime
 
-from accounts.models import TelegramUser
-from mall.models import CloudAsset, Server
+from bot.models import TelegramUser
+from cloud.models import CloudAsset, Server
 
 
 def _resolve_user(value):
@@ -13,10 +13,7 @@ def _resolve_user(value):
         return None
     if raw.isdigit():
         return TelegramUser.objects.filter(tg_user_id=int(raw)).first() or TelegramUser.objects.filter(id=int(raw)).first()
-    return (
-        TelegramUser.objects.filter(username__icontains=raw).first()
-        or TelegramUser.objects.filter(telegramusernames__username__iexact=raw).first()
-    )
+    return TelegramUser.objects.filter(username__icontains=raw).first()
 
 
 def parse_decimal(value):

@@ -2,10 +2,9 @@ from django import template
 from django.db.models import Sum
 from django.utils import timezone
 
-from accounts.models import TelegramUser
-from finance.models import Recharge
-from mall.models import CloudServerOrder, Order
-from monitoring.models import AddressMonitor
+from bot.models import TelegramUser
+from cloud.models import AddressMonitor, CloudServerOrder
+from orders.models import Order, Recharge
 
 register = template.Library()
 

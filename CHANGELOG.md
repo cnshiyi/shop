@@ -1,5 +1,18 @@
 # 版本记录
 
+## v0.5.07 - 2026-04-24
+- 继续推进后端域重构：新增 `bot.services`、`orders.services`、`orders.runtime`、`cloud.cache` 作为过渡入口，把机器人主链逐步从 `biz`、`tron`、`monitoring` 旧路径剥离。
+- `bot/runner.py`、`bot/handlers.py`、`tron/scanner.py`、`tron/resource_checker.py` 已开始改走 `bot / orders / cloud` 域入口，降低后续目录收敛时的联动改动面。
+- 清理后台和运行时对 `telegramusernames` 的依赖：`dashboard_api` 已移除相关 `prefetch_related`，兼容壳不再继续导出 `TelegramUsername`。
+- 管理命令和测试入口已开始切到新域模型：多处 `mall.models` / `accounts.models` 直接导入已替换为 `cloud.models` / `bot.models`。
+- 修复更换 IP 场景中新旧订单到期时间不一致的问题，统一使用迁移截止时间，相关测试重新跑通。
+
+### 验证
+- `./.venv/bin/python -m py_compile bot/services.py orders/services.py bot/handlers.py cloud/provisioning.py tron/scanner.py`
+- `DJANGO_TEST_REUSE_DB=1 ./.venv/bin/python manage.py test biz.tests --keepdb --noinput --verbosity 1`
+- `DJANGO_TEST_SQLITE=1 ./.venv/bin/python manage.py test biz.tests --verbosity 1`
+- `curl -s http://127.0.0.1:8000/api/user/info -H 'Authorization: Bearer session-1'`
+
 ## v0.5.06 - 2026-04-24
 - 明确前后端仓库边界：当前 `shop` 仓库仅维护 Django 后端与接口，不再把 `dashboard_web/` 视为真实前端工程。
 - 真实前端位置已确认并固定为 `C:\Users\Administrator\Desktop\vue-vben-admin`，当前实际使用页面位于 `C:\Users\Administrator\Desktop\vue-vben-admin\apps\web-antd`。

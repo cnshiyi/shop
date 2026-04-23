@@ -2,7 +2,7 @@ from django.core.management.base import BaseCommand, CommandError
 from django.utils import timezone
 
 from core.persistence import record_external_sync_log
-from mall.models import CloudAsset, CloudServerOrder, Server
+from cloud.models import CloudAsset, CloudServerOrder, Server
 
 
 NORMAL_AWS_STATES = {'running', 'pending', 'starting'}

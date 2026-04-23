@@ -128,6 +128,7 @@ def mark_cloud_server_ip_change_requested(order_id: int, user_id: int, region_co
     if not fallback_plan:
         return False
     target_port = port or order.mtproxy_port or 9528
+    migration_due_at = timezone.now() + timezone.timedelta(days=5)
     new_order = CloudServerOrder.objects.create(
         user_id=order.user_id,
         order_no=f'{order.order_no}-IP',
@@ -145,8 +146,8 @@ def mark_cloud_server_ip_change_requested(order_id: int, user_id: int, region_co
         lifecycle_days=order.lifecycle_days,
         mtproxy_port=target_port,
         service_started_at=timezone.now(),
-        service_expires_at=(order.service_expires_at or timezone.now()) + timezone.timedelta(days=max(int(order.renew_extension_days or 0), 0)),
-        migration_due_at=timezone.now() + timezone.timedelta(days=5),
+        service_expires_at=migration_due_at,
+        migration_due_at=migration_due_at,
         replacement_for=order,
         renew_extension_days=order.renew_extension_days,
         last_user_id=order.last_user_id,
@@ -155,8 +156,8 @@ def mark_cloud_server_ip_change_requested(order_id: int, user_id: int, region_co
         provision_note='\n'.join(filter(None, [order.provision_note, f'由订单 {order.order_no} 发起更换 IP，新服务器地区: {fallback_plan.region_name}，端口: {target_port}，需在 5 天内完成迁移。'])),
     )
     order.provision_note = '\n'.join(filter(None, [order.provision_note, f'已发起更换 IP，新实例订单: {new_order.order_no}，旧服务器将于 5 天后到期，请尽快完成迁移。']))
-    order.service_expires_at = timezone.now() + timezone.timedelta(days=5)
-    order.migration_due_at = timezone.now() + timezone.timedelta(days=5)
+    order.service_expires_at = migration_due_at
+    order.migration_due_at = migration_due_at
     order.save(update_fields=['provision_note', 'service_expires_at', 'migration_due_at', 'updated_at'])
     CloudAsset.objects.filter(order=order).update(actual_expires_at=order.service_expires_at, updated_at=timezone.now())
     Server.objects.filter(order=order).update(expires_at=order.service_expires_at, updated_at=timezone.now())

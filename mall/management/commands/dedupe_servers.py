@@ -1,7 +1,7 @@
 from django.core.management.base import BaseCommand
 from django.db.models import Count
 
-from mall.models import Server
+from cloud.models import Server
 
 
 class Command(BaseCommand):

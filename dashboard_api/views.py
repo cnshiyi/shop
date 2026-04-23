@@ -16,12 +16,11 @@ from django.views.decorators.http import require_GET, require_http_methods, requ
 
 from core.runtime_config import CONFIG_HELP, SENSITIVE_CONFIG_KEYS
 from core.models import CloudAccountConfig, SiteConfig
-from accounts.models import BalanceLedger, TelegramUser, TelegramUsername
-from finance.models import Recharge
-from mall.models import CloudAsset, CloudServerOrder, Order, Product, Server, CloudServerPlan, ServerPrice
-from monitoring.models import AddressMonitor
+from bot.models import TelegramUser
+from cloud.models import AddressMonitor, CloudAsset, CloudServerOrder, CloudServerPlan, Server, ServerPrice
 from cloud.provisioning import provision_cloud_server
-from biz.services.custom import ensure_cloud_server_plans, refresh_custom_plan_cache
+from cloud.services import ensure_cloud_server_plans, refresh_custom_plan_cache
+from orders.models import BalanceLedger, Order, Product, Recharge
 
 
 def _site_config_payload(item):
@@ -753,7 +752,7 @@ def overview(request):
 def users_list(request):
     keyword = _get_keyword(request)
     try:
-        queryset = TelegramUser.objects.prefetch_related('telegramusernames').order_by('-id')
+        queryset = TelegramUser.objects.order_by('-id')
         if keyword and keyword.isdigit():
             queryset = queryset.annotate(tg_user_id_text=Cast('tg_user_id', output_field=CharField()))
             queryset = queryset.filter(
@@ -762,13 +761,12 @@ def users_list(request):
                 | Q(tg_user_id_text__icontains=keyword)
                 | Q(username__icontains=keyword)
                 | Q(first_name__icontains=keyword)
-                | Q(telegramusernames__username__icontains=keyword)
             )
         else:
             queryset = _apply_keyword_filter(
                 queryset,
                 keyword,
-                ['username', 'first_name', 'telegramusernames__username'],
+                ['username', 'first_name'],
             )
         users = list(queryset.distinct()[:50])
     except ProgrammingError:
@@ -877,7 +875,7 @@ def update_user_discount(request, user_id):
 @login_required
 @require_GET
 def user_balance_details(request, user_id):
-    user = TelegramUser.objects.prefetch_related('telegramusernames').filter(pk=user_id).first()
+    user = TelegramUser.objects.filter(pk=user_id).first()
     if not user:
         return _error('用户不存在', status=404)
 
@@ -1101,7 +1099,7 @@ def tasks_overview(request):
 @require_GET
 def orders_list(request):
     keyword = _get_keyword(request)
-    queryset = Order.objects.select_related('user', 'product').prefetch_related('user__telegramusernames').order_by('-created_at')
+    queryset = Order.objects.select_related('user', 'product').order_by('-created_at')
     queryset = _apply_keyword_filter(
         queryset,
         keyword,
@@ -1115,7 +1113,7 @@ def orders_list(request):
 @require_GET
 def cloud_orders_list(request):
     keyword = _get_keyword(request)
-    queryset = CloudServerOrder.objects.select_related('user', 'plan').prefetch_related('user__telegramusernames').order_by('-created_at')
+    queryset = CloudServerOrder.objects.select_related('user', 'plan').order_by('-created_at')
     queryset = _apply_keyword_filter(
         queryset,
         keyword,
@@ -1224,10 +1222,10 @@ def _resolve_telegram_user(value):
     raw = str(value or '').strip().lstrip('@')
     if not raw:
         return None
-    queryset = TelegramUser.objects.prefetch_related('telegramusernames')
+    queryset = TelegramUser.objects.all()
     if raw.isdigit():
         return queryset.filter(Q(id=int(raw)) | Q(tg_user_id=int(raw))).first()
-    return queryset.filter(Q(username__icontains=raw) | Q(telegramusernames__username__iexact=raw)).distinct().first()
+    return queryset.filter(username__icontains=raw).first()
 
 
 def _parse_iso_datetime(value, field_label='时间'):
@@ -1251,31 +1249,6 @@ def _sync_telegram_username(user, username=None):
     user.username = ','.join(merged)
     user.save(update_fields=['username', 'updated_at'])
 
-    current_names = {item.username.lower(): item for item in user.telegramusernames.all() if item.username}
-    primary_key = incoming[0].lower() if incoming else None
-    for raw in merged:
-        key = raw.lower()
-        existing = current_names.pop(key, None)
-        should_be_primary = key == primary_key
-        if existing:
-            changed_fields = []
-            if existing.username != raw:
-                existing.username = raw
-                changed_fields.append('username')
-            if existing.is_primary != should_be_primary:
-                existing.is_primary = should_be_primary
-                changed_fields.append('is_primary')
-            if changed_fields:
-                changed_fields.append('updated_at')
-                existing.save(update_fields=changed_fields)
-        else:
-            TelegramUsername.objects.create(user=user, username=raw, is_primary=should_be_primary)
-
-    for item in current_names.values():
-        if item.is_primary and primary_key:
-            item.is_primary = False
-            item.save(update_fields=['is_primary', 'updated_at'])
-
 
 @login_required
 @require_GET
@@ -1283,13 +1256,13 @@ def cloud_assets_list(request):
     keyword = _get_keyword(request)
     grouped = (request.GET.get('grouped') or '').lower() in {'1', 'true', 'yes'}
     try:
-        queryset = CloudAsset.objects.select_related('user', 'order').prefetch_related('user__telegramusernames')
+        queryset = CloudAsset.objects.select_related('user', 'order')
         queryset = _apply_keyword_filter(
             queryset,
             keyword,
             [
                 'asset_name', 'public_ip', 'mtproxy_link', 'user__tg_user_id',
-                'user__username', 'user__telegramusernames__username', 'order__order_no',
+                'user__username', 'order__order_no',
             ],
         ).distinct().order_by('actual_expires_at', '-updated_at', '-id')
         items = [_asset_payload(asset) for asset in queryset[:200]]
@@ -1326,7 +1299,7 @@ def update_cloud_asset(request, asset_id):
     payload = _read_payload(request)
     try:
         with transaction.atomic():
-            asset = CloudAsset.objects.select_for_update().select_related('order', 'user').prefetch_related('user__telegramusernames').get(pk=asset_id)
+            asset = CloudAsset.objects.select_for_update().select_related('order', 'user').get(pk=asset_id)
 
             server = None
             server_lookup = Q()
@@ -1477,7 +1450,7 @@ def update_cloud_asset(request, asset_id):
     except CloudAsset.DoesNotExist:
         return _error('云资产不存在', status=404)
 
-    asset = CloudAsset.objects.select_related('user', 'order').prefetch_related('user__telegramusernames').get(pk=asset_id)
+    asset = CloudAsset.objects.select_related('user', 'order').get(pk=asset_id)
     return _ok(_asset_payload(asset))
 
 
@@ -1818,7 +1791,7 @@ def _apply_cloud_order_status(order, new_status):
 @dashboard_login_required
 @require_GET
 def cloud_order_detail(request, order_id):
-    order = CloudServerOrder.objects.select_related('user', 'plan').prefetch_related('user__telegramusernames').filter(pk=order_id).first()
+    order = CloudServerOrder.objects.select_related('user', 'plan').filter(pk=order_id).first()
     if not order:
         return _error('订单不存在', status=404)
     return _ok(_cloud_order_detail_payload(order))
@@ -1847,7 +1820,7 @@ def update_cloud_order_status(request, order_id):
 @dashboard_login_required
 @require_GET
 def recharge_detail(request, recharge_id):
-    recharge = Recharge.objects.select_related('user').prefetch_related('user__telegramusernames').filter(pk=recharge_id).first()
+    recharge = Recharge.objects.select_related('user').filter(pk=recharge_id).first()
     if not recharge:
         return _error('充值订单不存在', status=404)
     return _ok(_recharge_detail_payload(recharge))
@@ -1857,7 +1830,7 @@ def recharge_detail(request, recharge_id):
 @dashboard_login_required
 @require_POST
 def update_recharge_status(request, recharge_id):
-    recharge = Recharge.objects.select_related('user').prefetch_related('user__telegramusernames').filter(pk=recharge_id).first()
+    recharge = Recharge.objects.select_related('user').filter(pk=recharge_id).first()
     if not recharge:
         return _error('充值订单不存在', status=404)
     payload = _read_payload(request)
@@ -1985,7 +1958,7 @@ def servers_list(request):
     keyword = _get_keyword(request)
     dedup_raw = (request.GET.get('dedup') or '').lower()
     dedup = dedup_raw not in {'0', 'false', 'no', 'off'}
-    queryset = Server.objects.select_related('user', 'order').prefetch_related('user__telegramusernames').order_by('expires_at', '-updated_at', '-id')
+    queryset = Server.objects.select_related('user', 'order').order_by('expires_at', '-updated_at', '-id')
     queryset = _apply_keyword_filter(
         queryset,
         keyword,
@@ -2301,7 +2274,7 @@ def update_cloud_plan(request, plan_id: int):
 @require_GET
 def recharges_list(request):
     keyword = _get_keyword(request)
-    queryset = Recharge.objects.select_related('user').prefetch_related('user__telegramusernames').order_by('-created_at')
+    queryset = Recharge.objects.select_related('user').order_by('-created_at')
     queryset = _apply_keyword_filter(queryset, keyword, ['id', 'currency', 'status', 'tx_hash', 'user__tg_user_id', 'user__username'])
     items = [
         _recharge_detail_payload(item)

@@ -65,15 +65,36 @@ class TelegramUser(models.Model):
     def __str__(self):
         return f'{self.tg_user_id} {self.primary_username or ""}'
 
+    @staticmethod
+    def normalize_usernames(value):
+        if not value:
+            return []
+        if isinstance(value, (list, tuple)):
+            merged = []
+            for item in value:
+                merged.extend(TelegramUser.normalize_usernames(item))
+            value = ','.join(merged)
+        raw = str(value).replace('，', ',').replace(' / ', ',').replace('/', ',')
+        result = []
+        seen = set()
+        for item in raw.split(','):
+            username = item.strip().lstrip('@')
+            key = username.lower()
+            if username and key not in seen:
+                result.append(username)
+                seen.add(key)
+        return result
+
+    @staticmethod
+    def serialize_usernames(usernames):
+        return ','.join(TelegramUser.normalize_usernames(usernames))
+
+    def set_usernames(self, usernames):
+        self.username = self.serialize_usernames(usernames)
+
     @property
     def usernames(self):
-        raw = str(self.username or '').replace('，', ',').replace(' / ', ',').replace('/', ',')
-        result = []
-        for item in raw.split(','):
-            value = item.strip().lstrip('@')
-            if value and value not in result:
-                result.append(value)
-        return result
+        return self.normalize_usernames(self.username)
 
     @property
     def primary_username(self):

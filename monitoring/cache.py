@@ -18,7 +18,7 @@ _REDIS_WARN_INTERVAL = 600
 
 
 async def init_monitor_cache(force_log: bool = False):
-    from biz.models import AddressMonitor
+    from cloud.models import AddressMonitor
     global _last_init_log_at
     r = await get_redis()
     if r is None:
@@ -132,7 +132,7 @@ async def get_monitor_addresses() -> dict[str, list[dict]]:
 
 @sync_to_async
 def _db_fallback_get_monitors():
-    from biz.models import AddressMonitor
+    from cloud.models import AddressMonitor
     qs = AddressMonitor.objects.filter(is_active=True)
     result: dict[str, list[dict]] = {}
     for mon in qs:
