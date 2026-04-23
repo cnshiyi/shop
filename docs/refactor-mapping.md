@@ -87,10 +87,15 @@
 - [ ] 生成改表名迁移
 - [ ] 执行迁移并验证数据
 
-#### 批次 A 进行中
+#### 批次 A 已完成
 - [x] `users` → `bot_user`
 - [x] `balance_ledgers` → `order_balance_ledger`
 - [x] `recharges` → `order_recharge`
+
+#### 批次 B 进行中
+- [x] `products` → `order_product`
+- [x] `cart_items` → `order_cart_item`
+- [x] `orders` → `order_order`
 
 ### 第五阶段：删除旧目录
 - [ ] 删除 `accounts/finance/monitoring/tron/biz/dashboard_api` 的业务实现

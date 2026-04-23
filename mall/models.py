@@ -26,7 +26,7 @@ class Product(models.Model):
     updated_at = models.DateTimeField('更新时间', auto_now=True)
 
     class Meta:
-        db_table = 'products'
+        db_table = 'order_product'
         verbose_name = '商品'
         verbose_name_plural = '商品'
         ordering = ['-sort_order', '-id']
@@ -52,7 +52,7 @@ class CartItem(models.Model):
     updated_at = models.DateTimeField('更新时间', auto_now=True)
 
     class Meta:
-        db_table = 'cart_items'
+        db_table = 'order_cart_item'
         verbose_name = '购物车项'
         verbose_name_plural = '购物车项'
         ordering = ['-updated_at', '-id']
@@ -406,7 +406,7 @@ class Order(models.Model):
     expired_at = models.DateTimeField('过期时间', blank=True, null=True)
 
     class Meta:
-        db_table = 'orders'
+        db_table = 'order_order'
         verbose_name = '订单'
         verbose_name_plural = '订单'
         ordering = ['-created_at']

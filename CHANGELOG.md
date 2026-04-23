@@ -1,5 +1,16 @@
 # 版本记录
 
+## v0.5.09 - 2026-04-24
+- 完成表名迁移批次 B：`products` → `order_product`、`cart_items` → `order_cart_item`、`orders` → `order_order`。
+- `mall.0025_alter_cartitem_table_alter_order_table_and_more` 已应用到当前数据库 `a`，并确认新表名存在、旧表名不存在。
+- 商品/订单主链维持可用：Django 迁移完成后，后台登录信息接口正常，SQLite 测试回归通过。
+
+### 验证
+- `./.venv/bin/python manage.py migrate`
+- `DJANGO_TEST_SQLITE=1 ./.venv/bin/python manage.py test biz.tests --verbosity 1`
+- `curl -s http://127.0.0.1:8000/api/user/info -H 'Authorization: Bearer session-1'`
+- 数据库表核验：`order_product` / `order_cart_item` / `order_order` 存在
+
 ## v0.5.08 - 2026-04-24
 - `TelegramUsername` 已从 Django 状态中安全下线：删除运行时代码模型定义，新增 `accounts.0009_deprecate_telegramusername_state`，仅移除状态、不直接删除数据库表，避免历史链路受影响。
 - 完成表名迁移批次 A：`users` → `bot_user`、`balance_ledgers` → `order_balance_ledger`、`recharges` → `order_recharge`。
