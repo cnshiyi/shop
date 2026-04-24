@@ -20,19 +20,24 @@
 ## 目录结构
 - `run.py`：PyCharm 一键启动入口
 - `shop/settings.py`：Django 配置
-- `accounts/`：用户账户命名层（逐步替代 `users/` 的对外命名）
-- `mall/`：商城业务命名层（逐步替代 `shopbiz/` 的对外命名）
-- `finance/`：充值与财务命名层（逐步替代 `payments/` 的对外命名）
-- `monitoring/`：监控命名层（逐步替代 `monitors/` 的对外命名）
-- `biz/`：统一业务模型与业务服务聚合层
-- `ARCHITECTURE.md`：目录分层与后续迁移规划
-- `docs/DATA_FLOW_AND_PERSISTENCE.md`：数据产生/获取入口盘点与数据库落库规范
-- `docs/DB_NAMING_CONVENTIONS.md`：数据库对象命名统一规范
-- `bot/handlers.py`：机器人交互入口，当前直接调用 `biz.services`
-- `monitoring/cache.py`：地址监控缓存
+- `core/`：站点配置、公共缓存、公共格式化工具
+- `bot/`：Telegram 用户模型、认证/用户/配置 API、机器人交互
+- `orders/`：充值、余额流水、商品、购物车、订单与交易服务
+- `cloud/`：云套餐、价格模板、云订单、云资产、服务器、监控模型与缓存/服务
 - `tron/scanner.py`：TRON 转账扫描与支付匹配
 - `tron/resource_checker.py`：TRON 资源巡检（能量 / 带宽）
-- `core/`：站点配置、公共缓存、公共格式化工具
+- `ARCHITECTURE.md`：当前收口架构与后续拆旧计划
+- `docs/DATA_FLOW_AND_PERSISTENCE.md`：数据产生/获取入口盘点与数据库落库规范
+- `docs/DB_NAMING_CONVENTIONS.md`：数据库对象命名统一规范
+
+### 旧目录说明
+以下目录仍在仓库中，但当前目标已经降级为兼容/迁移壳，不再作为真实业务归属：
+- `accounts/`
+- `finance/`
+- `mall/`
+- `monitoring/`
+- `biz/services/`
+- `dashboard_api/`
 
 ## 启动方式
 
@@ -50,7 +55,7 @@
 - 已新增 `docs/DATA_FLOW_AND_PERSISTENCE.md`，用于盘点项目中所有主要数据来源、读取入口、写入入口与统一落库规范
 - 当前原则明确为：业务主数据以 MySQL/Django ORM 为准；Redis 仅用于缓存、FSM 和临时统计；前端 `localStorage/sessionStorage` 仅用于界面偏好与会话态
 - 后续新增功能时，所有订单、资产、监控规则、配置变更都应先写数据库，再同步缓存
-- 已补充数据库持久化基础：`monitoring.DailyAddressStat`、`monitoring.ResourceSnapshot`、`core.ExternalSyncLog`
+- 已补充数据库持久化基础：`cloud.DailyAddressStat`、`cloud.ResourceSnapshot`、`core.ExternalSyncLog`
 - 新表已按“多账户预留”设计，支持通过 `account_scope` / `account_key` 和 `CloudAccountConfig` 关联扩展到平台账户、用户账户、云账户、第三方接口账户
 
 ## 数据库命名规范
@@ -72,7 +77,7 @@
 - 如需修改后台页面、菜单、文案、代理与交互，请直接在前端仓库修改
 
 ## 统一云资产
-- 新增 `mall.CloudAsset`，用于统一记录云服务器与 `MTProxy` 资产
+- 当前由 `cloud.CloudAsset` 统一记录云服务器与 `MTProxy` 资产
 - 同一张表支持：资产类型、来源、实例 ID、IP、`MTProxy` 链接、真实到期时间、绑定用户、绑定订单，且允许留空
 - 云服务器开通成功后，会自动把服务器和 `MTProxy` 信息写入统一资产表
 - 后台已提供 `CloudAsset` 管理入口，可手工维护 AWS 资产和代理信息
@@ -185,7 +190,7 @@ Redis 中维护按天隔离的临时统计：
 - 监控地址、站点配置、每日统计均优先走 Redis
 - Redis 不可用时，部分功能会自动降级到数据库
 - `tron/cache.py` 兼容壳已删除
-- 缓存职责现固定为：`core/cache.py` + `monitoring/cache.py`
+- 缓存职责现固定为：`core/cache.py` + `cloud/cache.py`
 
 ## 配置与敏感信息管理
 - 支持在 Django Admin 的 `系统配置` 中维护：`bot_token`、`m_account_token`、`receive_address`、`trongrid_api_key`、`redis_url`、`database_url`、`mysql_host`、`mysql_port`、`mysql_user`、`mysql_password`、`mysql_database`、`admin_password_notice`

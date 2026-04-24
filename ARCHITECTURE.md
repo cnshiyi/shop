@@ -1,45 +1,52 @@
 # 架构规划
 
 ## 当前目标
-项目后续功能会继续增加，因此目录结构采用“配置层 / 业务层 / 机器人层 / 链上层”分离的方式，避免继续发散。
+后端正在从历史分散 app 收口到更清晰的五层结构，目标是把运行时真实实现稳定压到：`shop / core / bot / orders / cloud`。
 
-## 推荐结构
+## 当前事实结构
 - `shop/`：Django 项目配置层
-- `core/`：公共配置与公共能力
-- `biz/`：统一业务聚合层
-- `bot/`：Telegram 机器人交互层
-- `tron/`：TRON 链扫描、资源监控、缓存层
+- `core/`：公共配置、公共模型与基础设施
+- `bot/`：Telegram 用户模型、后台认证/用户/配置 API、机器人交互
+- `orders/`：充值、余额流水、商品、购物车、订单与交易相关服务
+- `cloud/`：云套餐、价格模板、云订单、云资产、服务器、监控模型与相关服务/缓存
+- `tron/`：链上扫描与资源巡检，运行时已优先依赖 `cloud/`、`orders/`、`bot/`
 
-## 当前阶段
-当前已经完成第一阶段：
-- 新增 `biz/` 聚合层
-- `bot/` 与 `tron/` 开始优先依赖 `biz.models`
-- `shop/` 保持为纯配置目录
+## 旧层现状
+以下目录仍保留，但目标已经降级为“兼容/迁移壳”，不再承载新的真实业务实现：
+- `accounts/`
+- `finance/`
+- `mall/`
+- `monitoring/`
+- `biz/services/`
+- `dashboard_api/`
 
-## 后续迁移顺序
-### 阶段 2
-- 继续减少业务代码对 `users / shopbiz / payments / monitors` 的直接依赖
-- 优先从 `biz.models` 读取模型
-- 统一业务导入路径
+其中：
+- `bot.models`、`orders.models`、`cloud.models` 已是当前真实模型归属。
+- `mall.models` 已清空，避免双注册。
+- `accounts.models`、`finance.models`、`monitoring.models` 只保留兼容导出。
+- `dashboard_api` 已基本退化为路由壳。
 
-### 阶段 3
-- 视稳定情况，将旧业务 app 逐步降级为兼容层
-- 保留数据库表名 `db_table` 不变，避免影响已有数据
-- 保留旧 migration 历史，避免迁移链断裂
+## 迁移策略
+- 保持 `db_table` 稳定，避免为代码收口额外改线上数据结构。
+- 保留历史 migration 链，通过 `SeparateDatabaseAndState` 前移 Django state。
+- 某段新实现一旦迁移并验证通过，就立即删除旧实现、旧 helper、旧转发层和无用导入。
 
-### 阶段 4
-- 根据后续功能规模，决定是否把旧 app 彻底收编到单一业务 app
-- 只有在迁移链、后台、导入路径都稳定后，才考虑删除旧目录
+## 当前剩余重点
+### 阶段 A：继续压缩旧入口
+- 继续减少 `biz/services` 兼容聚合层存在感
+- 继续减少 `dashboard_api` 作为独立 app 的必要性
+- 清理 README / 架构文档中的旧结构叙述
 
-## 为什么不直接暴力合并
-直接把 `users / shopbiz / payments / monitors` 立即删除并塞进一个 app，会同时影响：
-- Django app label
-- migration 依赖
-- ForeignKey 字符串引用
-- admin 注册
-- 旧表兼容性
+### 阶段 B：评估 `INSTALLED_APPS` 收口
+- 评估 `accounts` / `finance` / `mall` / `monitoring` 是否可仅保留 migration 历史
+- 评估 `dashboard_api` / `biz` 是否能从运行时 app 进一步降级
+- 在确认 migration 依赖和 app label 不会破坏测试库初始化后，再做 app 注册裁剪
 
-因此当前策略是：
-- 先收口引用
-- 再收目录
-- 最后再清理遗留目录
+## 为什么还没直接删旧 app
+因为剩余风险点已经不在业务实现，而在 Django 机制本身：
+- app label 与 migration 依赖
+- 历史 migration 对旧 app 的引用
+- fresh test DB 的初始化顺序
+- `INSTALLED_APPS` 变化对 admin / URL / migration loader 的连锁影响
+
+所以当前策略已经从“先收口引用”进入“边验证边拆旧壳”的最后阶段。

@@ -1,4 +1,4 @@
-"""过渡层：统一暴露 cloud 域服务，后续逐步从 biz/services 迁入这里。"""
+"""cloud 域服务主入口：当前真实云业务实现已收口到这里，旧 `biz.services.*` 仅保留兼容壳。"""
 
 import json
 import logging

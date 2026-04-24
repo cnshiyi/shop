@@ -1,5 +1,23 @@
 # 版本记录
 
+## v0.5.73 - 2026-04-24
+- 同步清理过时文档口径：`README.md`、`ARCHITECTURE.md` 现已明确 `bot / orders / cloud` 是真实运行时模型与服务归属，`accounts / finance / mall / monitoring / biz/services / dashboard_api` 仅剩兼容/迁移壳定位。
+- `cloud/services.py` 顶部模块说明也已改为主入口表述，避免继续误导为“过渡层”。
+
+### 验证
+- `./.venv/bin/python -m py_compile cloud/services.py`
+- `git diff -- README.md ARCHITECTURE.md cloud/services.py`
+
+## v0.5.72 - 2026-04-24
+- 继续减少旧层双栈：`cloud.cache` 已成为真实监控缓存实现来源，`monitoring.cache` 退为兼容壳。
+- `tron/scanner.py`、`tron/resource_checker.py`、`bot/runner.py`、`bot/handlers.py` 这条监控缓存运行链现在不再依赖旧 `monitoring.cache` 真逻辑。
+
+### 验证
+- `./.venv/bin/python -m py_compile cloud/cache.py monitoring/cache.py tron/scanner.py tron/resource_checker.py bot/runner.py bot/handlers.py`
+- `./.venv/bin/python manage.py check`
+- `DJANGO_TEST_SQLITE=1 ./.venv/bin/python manage.py test biz.tests --verbosity 1`
+- `wc -l monitoring/cache.py cloud/cache.py`
+
 ## v0.5.71 - 2026-04-24
 - 继续压缩旧兼容层：`biz/services/__init__.py` 从多段条件分发改成单一惰性映射表，兼容入口更薄、更直，也更不容易再引入循环导入。
 - 这一刀后旧层总体体积继续下降，`biz/services/*.py + dashboard_api/*.py` 约为 `405` 行；其中 `biz/services/__init__.py` 已缩到 `63` 行。
