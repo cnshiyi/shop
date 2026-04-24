@@ -1,5 +1,23 @@
 # 版本记录
 
+## v0.5.16 - 2026-04-24
+- `bot.api` 继续承接真实实现：`user_info`、`me` 已从 `dashboard_api.views` 挪入 `bot` 域。
+- 关键登录态接口烟测继续正常，说明 `dashboard_api` 缩壳过程中主入口还稳。
+
+### 验证
+- `./.venv/bin/python -m py_compile bot/api.py`
+- `./.venv/bin/python manage.py check`
+- `curl -s http://127.0.0.1:8000/api/user/info -H 'Authorization: Bearer session-1'`
+
+## v0.5.15 - 2026-04-24
+- `cloud.api` 已开始承接真实实现：`monitors_list` 不再只是从 `dashboard_api.views` 转发。
+- 迁移过程中抓到并修复了一个真实回归：缺少 `dashboard_login_required` 会导致接口退回 Django 默认 `302` 登录跳转；现已恢复为 Bearer 会话下的 `200 JSON` 响应。
+
+### 验证
+- `./.venv/bin/python -m py_compile cloud/api.py`
+- `./.venv/bin/python manage.py check`
+- `curl -i -s http://127.0.0.1:8000/api/dashboard/monitors/ -H 'Authorization: Bearer session-1'`
+
 ## v0.5.14 - 2026-04-24
 - `orders.api` 已开始承接真实实现：`recharges_list`、`recharge_detail`、`update_recharge_status` 不再只是从 `dashboard_api.views` 转发。
 - 对应后台充值接口烟测返回正常，`dashboard_api` 继续向兼容壳收缩。

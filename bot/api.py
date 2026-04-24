@@ -1,5 +1,6 @@
 """bot 域后台 API。"""
 
+from django.contrib.auth.decorators import login_required
 from django.views.decorators.csrf import csrf_exempt
 from django.views.decorators.http import require_GET, require_POST
 
@@ -15,17 +16,41 @@ from dashboard_api.views import (
     create_product,
     csrf,
     dashboard_login_required,
-    me,
     products_list,
     site_config_groups,
     update_product,
     update_user_balance,
     update_user_discount,
     user_balance_details,
-    user_info,
     users_list,
     verify_cloud_account,
 )
+
+
+@dashboard_login_required
+@require_GET
+def user_info(request):
+    username = request.user.get_username() or 'admin'
+    return _ok({
+        'userId': str(request.user.pk),
+        'username': username,
+        'realName': request.user.get_full_name() or username,
+        'avatar': '',
+        'desc': 'Shop 管理后台管理员',
+        'homePath': '/admin/workspace',
+        'token': f'session-{request.user.pk}',
+    })
+
+
+@login_required
+@require_GET
+def me(request):
+    return _ok({
+        'id': request.user.id,
+        'username': request.user.get_username(),
+        'is_superuser': request.user.is_superuser,
+        'is_staff': request.user.is_staff,
+    })
 
 
 @dashboard_login_required
