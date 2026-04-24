@@ -36,6 +36,8 @@ INSTALLED_APPS = [
     'finance',
     'monitoring',
     'bot',
+    'orders',
+    'cloud',
     'dashboard_api',
 ]
 
