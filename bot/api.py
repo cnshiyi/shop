@@ -1,5 +1,7 @@
 """bot 域后台 API。"""
 
+import os
+
 from django.contrib.auth.decorators import login_required
 from django.views.decorators.csrf import csrf_exempt
 from django.views.decorators.http import require_GET, require_POST
@@ -28,7 +30,6 @@ from dashboard_api.views import (
     update_user_discount,
     user_balance_details,
     users_list,
-    verify_cloud_account,
 )
 from orders.models import Order, Product, Recharge
 
@@ -262,6 +263,63 @@ def delete_cloud_account(request, account_id: int):
         return _error('云账号不存在', status=404)
     item.delete()
     return _ok(True)
+
+
+@csrf_exempt
+@dashboard_login_required
+@require_POST
+def verify_cloud_account(request, account_id: int):
+    item = CloudAccountConfig.objects.filter(id=account_id).first()
+    if not item:
+        return _error('云账号不存在', status=404)
+    region = (request.POST.get('region') or request.GET.get('region') or item.region_hint or '').strip()
+    try:
+        if item.provider == CloudAccountConfig.PROVIDER_AWS:
+            import boto3
+            client = boto3.client(
+                'lightsail',
+                region_name=region or 'ap-southeast-1',
+                aws_access_key_id=item.access_key_plain,
+                aws_secret_access_key=item.secret_key_plain,
+            )
+            response = client.get_instances()
+            count = len(response.get('instances') or [])
+            item.mark_status(CloudAccountConfig.STATUS_OK, f'验证成功，实例数 {count}，地区 {region or "ap-southeast-1"}')
+            return _ok({'valid': True, 'provider': item.provider, 'region': region or 'ap-southeast-1', 'instance_count': count, 'account': _cloud_account_payload(item)})
+        if item.provider == CloudAccountConfig.PROVIDER_ALIYUN:
+            from alibabacloud_swas_open20200601 import models as swas_models
+            from cloud.aliyun_simple import _build_client as _default_build_client
+            from cloud.aliyun_simple import _region_endpoint, _runtime_options
+
+            old_key = os.environ.get('ALIBABA_CLOUD_ACCESS_KEY_ID')
+            old_secret = os.environ.get('ALIBABA_CLOUD_ACCESS_KEY_SECRET')
+            try:
+                os.environ['ALIBABA_CLOUD_ACCESS_KEY_ID'] = item.access_key_plain
+                os.environ['ALIBABA_CLOUD_ACCESS_KEY_SECRET'] = item.secret_key_plain
+                client = _default_build_client(_region_endpoint(region or 'cn-hongkong'))
+                if not client:
+                    raise ValueError('无法创建阿里云客户端')
+                response = client.list_instances_with_options(
+                    swas_models.ListInstancesRequest(region_id=region or 'cn-hongkong', page_size=10),
+                    _runtime_options(),
+                )
+                count = len(response.body.to_map().get('Instances', []) or [])
+                item.mark_status(CloudAccountConfig.STATUS_OK, f'验证成功，实例数 {count}，地区 {region or "cn-hongkong"}')
+                return _ok({'valid': True, 'provider': item.provider, 'region': region or 'cn-hongkong', 'instance_count': count, 'account': _cloud_account_payload(item)})
+            finally:
+                if old_key is None:
+                    os.environ.pop('ALIBABA_CLOUD_ACCESS_KEY_ID', None)
+                else:
+                    os.environ['ALIBABA_CLOUD_ACCESS_KEY_ID'] = old_key
+                if old_secret is None:
+                    os.environ.pop('ALIBABA_CLOUD_ACCESS_KEY_SECRET', None)
+                else:
+                    os.environ['ALIBABA_CLOUD_ACCESS_KEY_SECRET'] = old_secret
+        item.mark_status(CloudAccountConfig.STATUS_UNSUPPORTED, '暂不支持该云平台验证')
+        return _error('暂不支持该云平台', status=400)
+    except Exception as exc:
+        item.mark_status(CloudAccountConfig.STATUS_ERROR, str(exc))
+        return _error(f'验证失败: {exc}', status=400)
 
 
 __all__ = [
