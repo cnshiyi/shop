@@ -18,11 +18,11 @@
 
 - `accounts`
 - `finance`
-- `mall`
 
 已经完成脱钩、可退出运行时配置的旧 app：
 
 - `monitoring`
+- `mall`
 
 原因不是运行时代码，而是 Django migration graph：
 
@@ -137,11 +137,13 @@
 - `orders.0001_initial` 依赖 `finance.0002_alter_recharge_table`
 
 ### `mall`
-它仍是关键桥：
+这条桥也已完成第一轮脱钩实验：
 
-- `accounts.0011_move_telegramuser_state_to_bot` 依赖 `mall.0028_switch_user_fk_to_bot`
-- `orders.0003_move_product_cart_order_from_mall` 依赖 `mall.0028_switch_user_fk_to_bot`
-- 已实测：直接移除 `mall` 会报 `NodeNotFoundError`
+- `orders.0003_move_product_cart_order_from_mall` 已不再依赖 `mall.0028`，改由 `cloud.0001` 承接依赖
+- `orders.0003` 已补足 fresh DB 所需的 `order_product` / `order_cart_item` / `order_order` 建表 `database_operations`
+- `cloud.0001` 已补足 fresh DB 所需的云模型建表 `database_operations`
+- `accounts.0011` 已不再依赖 `mall`，并通过拆分 `TelegramUser` 删除时机消除了与 `orders.0002/0003/0004` 的循环依赖
+- 当前 `mall` 已可从 `INSTALLED_APPS` 中移除，并通过 `check` / `makemigrations --check --dry-run` / fresh SQLite test DB 验证
 
 ### `monitoring`
 这条桥已经完成第一轮脱钩实验：
