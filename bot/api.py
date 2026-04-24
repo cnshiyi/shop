@@ -1,9 +1,13 @@
 """bot 域后台 API。"""
 
 import os
+from decimal import Decimal, InvalidOperation
 
 from django.contrib.auth import authenticate, login, logout
 from django.contrib.auth.decorators import login_required
+from django.db import ProgrammingError, transaction
+from django.db.models import Q, CharField
+from django.db.models.functions import Cast
 from django.views.decorators.csrf import csrf_exempt, ensure_csrf_cookie
 from django.views.decorators.http import require_GET, require_POST
 
@@ -18,26 +22,127 @@ from dashboard_api.views import (
     _error,
     _iso,
     _ok,
-    _read_payload,
     _region_label,
     _site_config_payload,
     _status_label,
-    create_product,
     dashboard_login_required,
-    products_list,
-    update_product,
-    update_user_balance,
-    update_user_discount,
-    user_balance_details,
-    users_list,
 )
-from orders.models import Order, Product, Recharge
+from orders.models import BalanceLedger, Order, Product, Recharge
 
 
 @ensure_csrf_cookie
 @require_GET
 def csrf(request):
     return _ok({'csrf': True})
+
+
+def _split_usernames(username):
+    if not username:
+        return []
+    normalized = str(username).replace('，', ',').replace(' / ', ',').replace('/', ',')
+    parts = [item.strip().lstrip('@') for item in normalized.split(',')]
+    result = []
+    seen = set()
+    for item in parts:
+        key = item.lower()
+        if item and key not in seen:
+            result.append(item)
+            seen.add(key)
+    return result
+
+
+def _user_payload(item):
+    usernames = item.get('usernames') or _split_usernames(item.get('username'))
+    first_name = (item.get('first_name') or '').strip()
+    primary_username = item.get('primary_username') or (usernames[0] if usernames else '')
+    display_name = first_name or (f'@{primary_username}' if primary_username else str(item.get('tg_user_id') or ''))
+    return {
+        **item,
+        'display_name': display_name,
+        'primary_username': primary_username,
+        'usernames': usernames,
+        'username_label': ' / '.join(f'@{name}' for name in usernames) if usernames else '-',
+    }
+
+
+def _parse_decimal(value, field_label):
+    raw = str(value or '').strip()
+    if raw == '':
+        raise ValueError(f'{field_label}不能为空')
+    try:
+        return Decimal(raw)
+    except (InvalidOperation, TypeError, ValueError):
+        raise ValueError(f'{field_label}格式不正确')
+
+
+def _read_payload(request):
+    try:
+        import json
+        payload = json.loads(request.body.decode('utf-8') or '{}') if request.body else {}
+    except Exception:
+        payload = {}
+    if payload:
+        return payload
+    return request.POST.dict() if hasattr(request.POST, 'dict') else request.POST
+
+
+def _get_keyword(request):
+    return (request.GET.get('keyword') or request.GET.get('q') or request.GET.get('search') or '').strip()
+
+
+def _apply_keyword_filter(queryset, keyword, fields):
+    if not keyword:
+        return queryset
+    condition = Q()
+    for field in fields:
+        condition |= Q(**{f'{field}__icontains': keyword})
+    return queryset.filter(condition)
+
+
+def _record_balance_ledger(user, *, currency, old_balance, new_balance, ledger_type='manual_adjust', related_type=None, related_id=None, description='', operator=None):
+    old_balance = Decimal(str(old_balance or 0))
+    new_balance = Decimal(str(new_balance or 0))
+    delta = new_balance - old_balance
+    if delta == 0:
+        return None
+    return BalanceLedger.objects.create(
+        user=user,
+        type=ledger_type,
+        direction=BalanceLedger.DIRECTION_IN if delta > 0 else BalanceLedger.DIRECTION_OUT,
+        currency=currency,
+        amount=abs(delta),
+        before_balance=old_balance,
+        after_balance=new_balance,
+        related_type=related_type,
+        related_id=related_id,
+        description=description,
+        operator=operator,
+    )
+
+
+def _ledger_payload(ledger):
+    related_path = None
+    if ledger.related_type == 'recharge' and ledger.related_id:
+        related_path = f'/admin/recharges/{ledger.related_id}'
+    elif ledger.related_type == 'cloud_order' and ledger.related_id:
+        related_path = f'/admin/cloud-orders/{ledger.related_id}'
+    return {
+        'id': f'ledger-{ledger.id}',
+        'type': ledger.type,
+        'type_label': _status_label(ledger.type, BalanceLedger.TYPE_CHOICES),
+        'currency': ledger.currency,
+        'direction': ledger.direction,
+        'direction_label': _status_label(ledger.direction, BalanceLedger.DIRECTION_CHOICES),
+        'amount': _decimal_to_str(ledger.amount),
+        'before_balance': _decimal_to_str(ledger.before_balance),
+        'after_balance': _decimal_to_str(ledger.after_balance),
+        'balance_field': 'balance_trx' if ledger.currency == 'TRX' else 'balance',
+        'title': _status_label(ledger.type, BalanceLedger.TYPE_CHOICES),
+        'description': ledger.description or _status_label(ledger.type, BalanceLedger.TYPE_CHOICES),
+        'related_id': ledger.related_id,
+        'related_path': related_path,
+        'created_at': _iso(ledger.created_at),
+    }
 
 
 @dashboard_login_required
@@ -372,6 +477,323 @@ def verify_cloud_account(request, account_id: int):
     except Exception as exc:
         item.mark_status(CloudAccountConfig.STATUS_ERROR, str(exc))
         return _error(f'验证失败: {exc}', status=400)
+
+
+@dashboard_login_required
+@require_GET
+def users_list(request):
+    keyword = _get_keyword(request)
+    try:
+        queryset = TelegramUser.objects.order_by('-id')
+        if keyword and keyword.isdigit():
+            queryset = queryset.annotate(tg_user_id_text=Cast('tg_user_id', output_field=CharField()))
+            queryset = queryset.filter(
+                Q(id=int(keyword))
+                | Q(tg_user_id=int(keyword))
+                | Q(tg_user_id_text__icontains=keyword)
+                | Q(username__icontains=keyword)
+                | Q(first_name__icontains=keyword)
+            )
+        else:
+            queryset = _apply_keyword_filter(queryset, keyword, ['username', 'first_name'])
+        users = list(queryset.distinct()[:50])
+    except ProgrammingError:
+        queryset = TelegramUser.objects.order_by('-id')
+        if keyword and keyword.isdigit():
+            queryset = queryset.annotate(tg_user_id_text=Cast('tg_user_id', output_field=CharField()))
+            queryset = queryset.filter(
+                Q(id=int(keyword)) | Q(tg_user_id=int(keyword)) | Q(tg_user_id_text__icontains=keyword)
+            )
+        else:
+            queryset = _apply_keyword_filter(queryset, keyword, ['username', 'first_name'])
+        users = list(queryset.distinct()[:50])
+    return _ok([
+        {
+            **_user_payload({
+                'id': user.id,
+                'tg_user_id': user.tg_user_id,
+                'username': user.username,
+                'first_name': user.first_name,
+                'balance': user.balance,
+                'balance_trx': user.balance_trx,
+                'cloud_discount_rate': user.cloud_discount_rate,
+                'created_at': user.created_at,
+                'usernames': user.usernames,
+                'primary_username': user.usernames[0] if user.usernames else '',
+            }),
+            'balance': _decimal_to_str(user.balance),
+            'balance_trx': _decimal_to_str(user.balance_trx),
+            'cloud_discount_rate': _decimal_to_str(user.cloud_discount_rate),
+            'created_at': _iso(user.created_at),
+        }
+        for user in users
+    ])
+
+
+@csrf_exempt
+@dashboard_login_required
+@require_POST
+def update_user_balance(request, user_id):
+    payload = _read_payload(request)
+    try:
+        balance = _parse_decimal(payload.get('balance'), 'USDT余额')
+        balance_trx = _parse_decimal(payload.get('balance_trx'), 'TRX余额')
+    except ValueError as exc:
+        return _error(str(exc), status=400)
+    if balance < 0 or balance_trx < 0:
+        return _error('余额不能为负数', status=400)
+
+    try:
+        with transaction.atomic():
+            user = TelegramUser.objects.select_for_update().get(pk=user_id)
+            old_balance = user.balance
+            old_balance_trx = user.balance_trx
+            user.balance = balance
+            user.balance_trx = balance_trx
+            user.save(update_fields=['balance', 'balance_trx', 'updated_at'])
+            operator = getattr(request.user, 'username', '') or str(getattr(request.user, 'id', '') or '')
+            _record_balance_ledger(
+                user,
+                currency='USDT',
+                old_balance=old_balance,
+                new_balance=balance,
+                description='Dashboard 手动编辑 USDT 余额',
+                operator=operator,
+            )
+            _record_balance_ledger(
+                user,
+                currency='TRX',
+                old_balance=old_balance_trx,
+                new_balance=balance_trx,
+                description='Dashboard 手动编辑 TRX 余额',
+                operator=operator,
+            )
+    except TelegramUser.DoesNotExist:
+        return _error('用户不存在', status=404)
+
+    return _ok({
+        'id': user.id,
+        'balance': _decimal_to_str(user.balance),
+        'balance_trx': _decimal_to_str(user.balance_trx),
+    })
+
+
+@csrf_exempt
+@dashboard_login_required
+@require_POST
+def update_user_discount(request, user_id):
+    payload = _read_payload(request)
+    try:
+        discount = _parse_decimal(payload.get('cloud_discount_rate'), '云服务器折扣')
+    except ValueError as exc:
+        return _error(str(exc), status=400)
+    if discount <= 0 or discount > 100:
+        return _error('云服务器折扣必须大于 0 且小于等于 100', status=400)
+    user = TelegramUser.objects.filter(pk=user_id).first()
+    if not user:
+        return _error('用户不存在', status=404)
+    user.cloud_discount_rate = discount
+    user.save(update_fields=['cloud_discount_rate', 'updated_at'])
+    return _ok({
+        'id': user.id,
+        'cloud_discount_rate': _decimal_to_str(user.cloud_discount_rate),
+    })
+
+
+@dashboard_login_required
+@require_GET
+def user_balance_details(request, user_id):
+    user = TelegramUser.objects.filter(pk=user_id).first()
+    if not user:
+        return _error('用户不存在', status=404)
+
+    items = []
+
+    recharges = Recharge.objects.filter(user_id=user_id, status='completed').order_by('-completed_at', '-created_at')[:200]
+    for recharge in recharges:
+        items.append({
+            'id': f'recharge-{recharge.id}',
+            'type': 'recharge',
+            'type_label': '充值入账',
+            'currency': recharge.currency,
+            'direction': 'in',
+            'direction_label': '收入',
+            'amount': _decimal_to_str(recharge.amount),
+            'balance_field': 'balance_trx' if recharge.currency == 'TRX' else 'balance',
+            'title': f'充值 #{recharge.id}',
+            'description': f'充值订单已完成，余额增加 {_decimal_to_str(recharge.amount)} {recharge.currency}',
+            'related_id': recharge.id,
+            'related_path': f'/admin/recharges/{recharge.id}',
+            'created_at': _iso(recharge.completed_at or recharge.created_at),
+        })
+
+    orders = Order.objects.filter(user_id=user_id, pay_method='balance').exclude(status='pending').order_by('-paid_at', '-created_at')[:200]
+    for order in orders:
+        amount = order.pay_amount if order.pay_amount is not None else order.total_amount
+        items.append({
+            'id': f'order-{order.id}',
+            'type': 'order_balance_pay',
+            'type_label': '商品余额支付',
+            'currency': order.currency,
+            'direction': 'out',
+            'direction_label': '支出',
+            'amount': _decimal_to_str(amount),
+            'balance_field': 'balance_trx' if order.currency == 'TRX' else 'balance',
+            'title': f'商品订单 #{order.order_no}',
+            'description': f'余额支付商品：{order.product_name}',
+            'related_id': order.id,
+            'related_path': None,
+            'created_at': _iso(order.paid_at or order.created_at),
+        })
+
+    cloud_orders = CloudServerOrder.objects.filter(user_id=user_id, pay_method='balance').exclude(status='pending').order_by('-paid_at', '-created_at')[:200]
+    for order in cloud_orders:
+        amount = order.pay_amount if order.pay_amount is not None else order.total_amount
+        items.append({
+            'id': f'cloud-order-{order.id}',
+            'type': 'cloud_order_balance_pay',
+            'type_label': '云服务器余额支付',
+            'currency': order.currency,
+            'direction': 'out',
+            'direction_label': '支出',
+            'amount': _decimal_to_str(amount),
+            'balance_field': 'balance_trx' if order.currency == 'TRX' else 'balance',
+            'title': f'云订单 #{order.order_no}',
+            'description': f'余额支付云服务器：{order.plan_name}',
+            'related_id': order.id,
+            'related_path': f'/admin/cloud-orders/{order.id}',
+            'created_at': _iso(order.paid_at or order.created_at),
+        })
+
+    ledger_items = [_ledger_payload(ledger) for ledger in BalanceLedger.objects.filter(user_id=user_id).order_by('-created_at', '-id')[:300]]
+
+    items.sort(key=lambda item: item['created_at'] or '', reverse=True)
+    combined_items = [*ledger_items, *items]
+    combined_items.sort(key=lambda item: item['created_at'] or '', reverse=True)
+
+    return _ok({
+        'user': {
+            **_user_payload({
+                'id': user.id,
+                'tg_user_id': user.tg_user_id,
+                'username': user.username,
+                'first_name': user.first_name,
+                'balance': user.balance,
+                'balance_trx': user.balance_trx,
+                'created_at': user.created_at,
+                'usernames': user.usernames,
+                'primary_username': user.usernames[0] if user.usernames else '',
+            }),
+            'balance': _decimal_to_str(user.balance),
+            'balance_trx': _decimal_to_str(user.balance_trx),
+            'created_at': _iso(user.created_at),
+        },
+        'items': combined_items[:300],
+    })
+
+
+@dashboard_login_required
+@require_GET
+def products_list(request):
+    keyword = _get_keyword(request)
+    queryset = Product.objects.order_by('-sort_order', '-id')
+    queryset = _apply_keyword_filter(queryset, keyword, ['name', 'description', 'content_text'])
+    items = list(queryset[:200])
+    return _ok([
+        {
+            'id': item.id,
+            'name': item.name,
+            'description': item.description,
+            'price': _decimal_to_str(item.price),
+            'content_type': item.content_type,
+            'content_text': item.content_text,
+            'content_image': item.content_image,
+            'content_video': item.content_video,
+            'stock': item.stock,
+            'is_active': item.is_active,
+            'sort_order': item.sort_order,
+            'created_at': _iso(item.created_at),
+            'updated_at': _iso(item.updated_at),
+        }
+        for item in items
+    ])
+
+
+@csrf_exempt
+@dashboard_login_required
+@require_POST
+def create_product(request):
+    payload = _read_payload(request)
+    name = (payload.get('name') or '').strip()
+    if not name:
+        return _error('商品名称不能为空', status=400)
+    try:
+        price = _parse_decimal(payload.get('price'), '商品价格')
+        stock = int(payload.get('stock', -1))
+        sort_order = int(payload.get('sort_order', 0))
+    except (ValueError, TypeError):
+        return _error('商品价格或库存格式不正确', status=400)
+    content_type = (payload.get('content_type') or Product.CONTENT_TEXT).strip()
+    if content_type not in {choice[0] for choice in Product.CONTENT_CHOICES}:
+        return _error('商品内容类型不正确', status=400)
+    item = Product.objects.create(
+        name=name,
+        description=(payload.get('description') or '').strip() or None,
+        price=price,
+        content_type=content_type,
+        content_text=payload.get('content_text') or None,
+        content_image=payload.get('content_image') or None,
+        content_video=payload.get('content_video') or None,
+        stock=stock,
+        is_active=str(payload.get('is_active', 'true')).lower() in {'1', 'true', 'yes', 'on'},
+        sort_order=sort_order,
+    )
+    return _ok({'id': item.id})
+
+
+@csrf_exempt
+@dashboard_login_required
+@require_POST
+def update_product(request, product_id: int):
+    item = Product.objects.filter(id=product_id).first()
+    if not item:
+        return _error('商品不存在', status=404)
+    payload = _read_payload(request)
+    if 'name' in payload:
+        name = (payload.get('name') or '').strip()
+        if not name:
+            return _error('商品名称不能为空', status=400)
+        item.name = name
+    if 'description' in payload:
+        item.description = (payload.get('description') or '').strip() or None
+    if 'price' in payload:
+        try:
+            item.price = _parse_decimal(payload.get('price'), '商品价格')
+        except ValueError as exc:
+            return _error(str(exc), status=400)
+    if 'content_type' in payload:
+        content_type = (payload.get('content_type') or '').strip()
+        if content_type not in {choice[0] for choice in Product.CONTENT_CHOICES}:
+            return _error('商品内容类型不正确', status=400)
+        item.content_type = content_type
+    for field in ('content_text', 'content_image', 'content_video'):
+        if field in payload:
+            value = payload.get(field)
+            setattr(item, field, value or None)
+    if 'stock' in payload:
+        try:
+            item.stock = int(payload.get('stock'))
+        except (ValueError, TypeError):
+            return _error('库存格式不正确', status=400)
+    if 'sort_order' in payload:
+        try:
+            item.sort_order = int(payload.get('sort_order'))
+        except (ValueError, TypeError):
+            return _error('排序值格式不正确', status=400)
+    if 'is_active' in payload:
+        item.is_active = str(payload.get('is_active')).lower() in {'1', 'true', 'yes', 'on'}
+    item.save()
+    return _ok({'id': item.id})
 
 
 __all__ = [
