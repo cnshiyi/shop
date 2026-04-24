@@ -19,7 +19,6 @@ from cloud.provisioning import provision_cloud_server
 from dashboard_api.views import (
     _apply_keyword_filter,
     _asset_payload,
-    _cloud_order_detail_payload,
     _days_left,
     _decimal_to_str,
     _get_keyword,
@@ -105,6 +104,69 @@ def tasks_overview(request):
             'related_path': f'/admin/cloud-orders/{order.id}',
         })
     return _ok(items)
+
+
+def _cloud_order_detail_payload(order):
+    user = order.user
+    usernames = user.usernames if user else []
+    user_payload = _user_payload({
+        'id': user.id,
+        'tg_user_id': user.tg_user_id,
+        'username': user.username,
+        'first_name': user.first_name,
+        'usernames': usernames,
+        'primary_username': usernames[0] if usernames else '',
+    }) if user else None
+    return {
+        'id': order.id,
+        'order_no': order.order_no,
+        'provider': order.provider,
+        'region_code': order.region_code,
+        'region_label': _region_label(order.region_code, order.region_name),
+        'region_name': order.region_name,
+        'plan_name': order.plan_name,
+        'quantity': order.quantity,
+        'currency': order.currency,
+        'total_amount': _decimal_to_str(order.total_amount),
+        'pay_amount': _decimal_to_str(order.pay_amount) if order.pay_amount is not None else None,
+        'pay_method': order.pay_method,
+        'status': order.status,
+        'status_label': _status_label(order.status, CloudServerOrder.STATUS_CHOICES),
+        'tx_hash': order.tx_hash,
+        'image_name': order.image_name,
+        'server_name': order.server_name,
+        'lifecycle_days': order.lifecycle_days,
+        'service_started_at': _iso(order.service_started_at),
+        'service_expires_at': _iso(order.service_expires_at),
+        'renew_grace_expires_at': _iso(order.renew_grace_expires_at),
+        'suspend_at': _iso(order.suspend_at),
+        'delete_at': _iso(order.delete_at),
+        'ip_recycle_at': _iso(order.ip_recycle_at),
+        'last_renewed_at': _iso(order.last_renewed_at),
+        'last_user_id': order.last_user_id,
+        'mtproxy_port': order.mtproxy_port,
+        'mtproxy_link': order.mtproxy_link,
+        'mtproxy_secret': order.mtproxy_secret,
+        'mtproxy_host': order.mtproxy_host,
+        'instance_id': order.instance_id,
+        'provider_resource_id': order.provider_resource_id,
+        'static_ip_name': order.static_ip_name,
+        'public_ip': order.public_ip,
+        'previous_public_ip': order.previous_public_ip,
+        'login_user': order.login_user,
+        'login_password': order.login_password,
+        'provision_note': order.provision_note,
+        'created_at': _iso(order.created_at),
+        'paid_at': _iso(order.paid_at),
+        'expired_at': _iso(order.expired_at),
+        'completed_at': _iso(order.completed_at),
+        'updated_at': _iso(order.updated_at),
+        'user_id': user.id if user else None,
+        'tg_user_id': user.tg_user_id if user else None,
+        'user_display_name': user_payload['display_name'] if user_payload else '未绑定用户',
+        'username_label': user_payload['username_label'] if user_payload else '-',
+        'plan_id': order.plan_id,
+    }
 
 
 @dashboard_login_required

@@ -1,5 +1,17 @@
 # 版本记录
 
+## v0.5.36 - 2026-04-24
+- `cloud.api` 继续承接真实实现：`_server_price_payload` 已不再转发到 `dashboard_api.views`。
+- 修正一次迁移回归：保持 `ServerPrice` 继续使用 `server_name/server_description` 序列化，避免误读不存在的 `plan_name` 字段。
+- 已验证 `/api/dashboard/cloud-pricing/` 在修复后继续返回 `200 JSON`。
+
+### 验证
+- `./.venv/bin/python -m py_compile cloud/api.py`
+- `./.venv/bin/python manage.py check`
+- `./.venv/bin/python manage.py shell -c "from django.test import Client; ... /api/dashboard/cloud-pricing/ ..."`
+- `./.venv/bin/python run.py web`
+- `curl -i -s http://127.0.0.1:8000/api/dashboard/cloud-pricing/ -H 'Authorization: Bearer session-1'`
+
 ## v0.5.35 - 2026-04-24
 - `cloud.api` 继续承接真实实现：`_cloud_plan_payload` 已不再转发到 `dashboard_api.views`。
 - 已验证 `/api/dashboard/cloud-plans/` 在迁移后继续返回 `200 JSON`。
