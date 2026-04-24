@@ -1,14 +1,17 @@
 """cloud 域后台 API。"""
 
+from decimal import Decimal, InvalidOperation
+
 from asgiref.sync import async_to_sync
-from django.db import transaction
+from django.db import IntegrityError, transaction
 from django.db.models import Count, Q
 from django.db.utils import ProgrammingError
 from django.utils import timezone
 from django.utils.dateparse import parse_datetime
 from django.views.decorators.csrf import csrf_exempt
-from django.views.decorators.http import require_GET, require_POST
+from django.views.decorators.http import require_GET, require_POST, require_http_methods
 
+from cloud.services import refresh_custom_plan_cache
 from cloud.models import AddressMonitor, CloudAsset, CloudServerOrder, CloudServerPlan, Server, ServerPrice
 from cloud.provisioning import provision_cloud_server
 from dashboard_api.views import (
@@ -22,6 +25,7 @@ from dashboard_api.views import (
     _iso,
     _error,
     _ok,
+    _parse_decimal,
     _provider_label,
     _read_payload,
     _region_label,
@@ -30,14 +34,10 @@ from dashboard_api.views import (
     _status_label,
     _user_payload,
     dashboard_login_required,
-    create_cloud_plan,
-    delete_cloud_plan,
     sync_cloud_assets,
     sync_cloud_plans,
     sync_servers,
     update_cloud_asset,
-    update_cloud_order_status,
-    update_cloud_plan,
 )
 
 
@@ -496,6 +496,107 @@ def servers_statistics(request):
         'items': items,
         'summary': total_row,
     })
+
+
+@csrf_exempt
+@dashboard_login_required
+@require_http_methods(['POST'])
+def create_cloud_plan(request):
+    data = _read_payload(request)
+    provider = (data.get('provider') or '').strip()
+    region_code = (data.get('region_code') or '').strip()
+    region_name = (data.get('region_name') or '').strip()
+    plan_name = (data.get('plan_name') or '').strip()
+    if not provider or not region_code or not region_name or not plan_name:
+        return _error('云厂商、地区代码、地区名称、套餐名不能为空')
+    try:
+        plan = CloudServerPlan.objects.create(
+            provider=provider,
+            region_code=region_code,
+            region_name=region_name,
+            plan_name=plan_name,
+            plan_description=(data.get('plan_description') or '').strip(),
+            cpu=(data.get('cpu') or '').strip(),
+            memory=(data.get('memory') or '').strip(),
+            storage=(data.get('storage') or '').strip(),
+            bandwidth=(data.get('bandwidth') or '').strip(),
+            cost_price=_parse_decimal(data.get('cost_price') or 0, '进货价').quantize(Decimal('0.01')),
+            price=_parse_decimal(data.get('price') or 0, '出售价').quantize(Decimal('0.01')),
+            currency=(data.get('currency') or 'USDT').strip() or 'USDT',
+            sort_order=int(data.get('sort_order') or 0),
+            is_active=str(data.get('is_active', True)).lower() in {'1', 'true', 'yes', 'on'},
+        )
+    except IntegrityError:
+        return _error('同地区下已存在同名套餐', status=400)
+    except (InvalidOperation, TypeError, ValueError):
+        return _error('提交的套餐数据格式不正确', status=400)
+    async_to_sync(refresh_custom_plan_cache)()
+    return _ok(_cloud_plan_payload(plan))
+
+
+@csrf_exempt
+@dashboard_login_required
+@require_http_methods(['POST'])
+def delete_cloud_plan(request, plan_id: int):
+    plan = CloudServerPlan.objects.filter(id=plan_id).first()
+    if not plan:
+        return _error('套餐不存在', status=404)
+    if CloudServerOrder.objects.filter(plan_id=plan_id).exists():
+        return _error('该套餐已有订单引用，无法删除，请改为停用', status=400)
+    plan.delete()
+    async_to_sync(refresh_custom_plan_cache)()
+    return _ok({'id': plan_id, 'deleted': True})
+
+
+@csrf_exempt
+@dashboard_login_required
+@require_http_methods(['POST'])
+def update_cloud_plan(request, plan_id: int):
+    plan = CloudServerPlan.objects.filter(id=plan_id).first()
+    if not plan:
+        return _error('套餐不存在', status=404)
+    data = request.POST or request.GET
+    plan_name = (data.get('plan_name') or '').strip()
+    plan_description = (data.get('plan_description') or '').strip()
+    price = data.get('price')
+    cost_price = data.get('cost_price')
+    sort_order = data.get('sort_order')
+    is_active = data.get('is_active')
+    try:
+        if plan_name:
+            plan.plan_name = plan_name
+        if 'provider' in data:
+            plan.provider = (data.get('provider') or '').strip() or plan.provider
+        if 'region_code' in data:
+            plan.region_code = (data.get('region_code') or '').strip() or plan.region_code
+        if 'region_name' in data:
+            plan.region_name = (data.get('region_name') or '').strip() or plan.region_name
+        if 'cpu' in data:
+            plan.cpu = (data.get('cpu') or '').strip()
+        if 'memory' in data:
+            plan.memory = (data.get('memory') or '').strip()
+        if 'storage' in data:
+            plan.storage = (data.get('storage') or '').strip()
+        if 'bandwidth' in data:
+            plan.bandwidth = (data.get('bandwidth') or '').strip()
+        if 'currency' in data:
+            plan.currency = (data.get('currency') or 'USDT').strip() or 'USDT'
+        plan.plan_description = plan_description
+        if price not in (None, ''):
+            plan.price = Decimal(str(price))
+        if cost_price not in (None, ''):
+            plan.cost_price = Decimal(str(cost_price))
+        if sort_order not in (None, ''):
+            plan.sort_order = int(sort_order)
+        if is_active not in (None, ''):
+            plan.is_active = str(is_active).lower() in {'1', 'true', 'yes', 'on'}
+        plan.save()
+    except IntegrityError:
+        return _error('同地区下已存在同名套餐', status=400)
+    except (InvalidOperation, ValueError):
+        return _error('提交的套餐数据格式不正确')
+    async_to_sync(refresh_custom_plan_cache)()
+    return _ok(_cloud_plan_payload(plan))
 
 
 @dashboard_login_required
