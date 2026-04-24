@@ -73,7 +73,7 @@ class CloudServerServicesTestCase(TestCase):
                 source_order.plan_id = None
                 return source_order
 
-        with patch('biz.services.cloud_servers.CloudServerOrder.objects.filter', return_value=FakeQuerySet()):
+        with patch('cloud.services.CloudServerOrder.objects.filter', return_value=FakeQuerySet()):
             new_order = async_to_sync(mark_cloud_server_ip_change_requested)(source_order.id, self.user.id)
 
         self.assertTrue(new_order)
