@@ -131,8 +131,8 @@
 - `account_key`
 
 当前已按此规范处理：
-- `monitoring.DailyAddressStat`
-- `monitoring.ResourceSnapshot`
+- `cloud.DailyAddressStat`
+- `cloud.ResourceSnapshot`
 - `core.ExternalSyncLog`
 
 ## 8. 迁移策略

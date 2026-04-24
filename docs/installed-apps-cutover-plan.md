@@ -55,7 +55,7 @@
 
 - [x] 目标表名已全部迁移完成
 - [x] `TelegramUsername` 已从 Django 状态下线
-- [x] `dashboard_api.views` 已清空
+- [x] `dashboard_api/views.py` 已删除
 - [x] `dashboard_api/urls.py` 已完全路由到 `bot/orders/cloud` API 入口
 - [x] `dashboard_api` 已从 `INSTALLED_APPS` 移除
 - [x] `orders/ledger.py` 已接管余额流水记账入口
@@ -68,7 +68,7 @@
 ## 当前主要阻塞点
 
 - [x] 运行时代码已基本不再直连旧模型 app
-- [x] 运行时 API 已不再依赖 `dashboard_api.views`
+- [x] 运行时 API 已不再依赖旧 `dashboard_api` 视图模块
 - [x] `dashboard_api` 已从 `INSTALLED_APPS` 移除
 - [x] `biz` 已从 `INSTALLED_APPS` 移除
 - [x] `mall` 已不再承载真实模型

@@ -1,5 +1,13 @@
 # 版本记录
 
+## v0.5.82 - 2026-04-24
+- 继续收尾文档旧口径：`docs/installed-apps-cutover-plan.md`、`docs/DATA_FLOW_AND_PERSISTENCE.md`、`docs/DB_NAMING_CONVENTIONS.md` 现已统一写成当前事实，不再把 `dashboard_api.views` 写成“已清空”或把监控统计模型写在 `monitoring.*` 旧归属下。
+- 这一步主要用于防止后续 cutover 判断继续被过时文档误导。
+
+### 验证
+- `./.venv/bin/python manage.py check`
+- `git diff -- docs/installed-apps-cutover-plan.md docs/DATA_FLOW_AND_PERSISTENCE.md docs/DB_NAMING_CONVENTIONS.md`
+
 ## v0.5.81 - 2026-04-24
 - 继续清理旧口径文档：`docs/DATA_FLOW_AND_PERSISTENCE.md` 与 `docs/refactor-mapping.md` 已同步到当前真实结构，模型归属改为 `bot/orders/cloud`，并明确 `dashboard_api/views.py` 已删除、`biz/dashboard_api` 已退出运行时 app 集。
 - 这一步主要是避免后续 cutover 判断继续被历史描述误导。
