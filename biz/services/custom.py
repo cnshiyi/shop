@@ -183,6 +183,20 @@ def _fetch_aliyun_plan_templates(region_code: str):
         return DEFAULT_ALIYUN_PLAN_TEMPLATES
 
 
+def _is_primary_aws_bundle(bundle_id: str, bundle_name: str) -> bool:
+    normalized_id = str(bundle_id or '').strip().lower()
+    normalized_name = str(bundle_name or '').strip().lower()
+    if not normalized_id:
+        return False
+    if 'win' in normalized_id or 'windows' in normalized_name:
+        return False
+    if 'ipv6' in normalized_id:
+        return False
+    if normalized_id.startswith(('c_', 'm_', 'g_')):
+        return False
+    return True
+
+
 def _fetch_aws_bundle_templates():
     account = get_active_cloud_account('aws')
     key = account.access_key_plain if account else os.getenv('AWS_ACCESS_KEY_ID', '')
@@ -198,27 +212,37 @@ def _fetch_aws_bundle_templates():
             aws_secret_access_key=secret,
         )
         response = client.get_bundles(includeInactive=False)
-        templates = []
+        bundle_candidates = []
         for item in response.get('bundles', []):
             if not item.get('isActive', True):
                 continue
             bundle_id = item.get('bundleId')
-            if not bundle_id:
+            bundle_name = item.get('name') or bundle_id
+            if not bundle_id or not _is_primary_aws_bundle(bundle_id, bundle_name):
                 continue
             ram = item.get('ramSizeInGb')
             disk = item.get('diskSizeInGb')
             transfer = item.get('transferPerMonthInGb')
-            base_price = Decimal(str(item.get('price') or '0'))
-            templates.append((
+            base_price = Decimal(str(item.get('price') or '0')).quantize(Decimal('0.01'))
+            bundle_candidates.append((
                 bundle_id,
-                item.get('name') or bundle_id,
+                bundle_name,
                 f"{item.get('cpuCount') or '-'}核",
                 f'{ram}GB' if ram is not None else '',
                 f'{disk}GB SSD' if disk is not None else '',
                 f'{transfer}GB' if transfer is not None else '',
-                base_price.quantize(Decimal('0.01')),
+                base_price,
             ))
-        return sorted(templates, key=lambda item: (item[6], item[1], item[0]))
+        bundle_candidates.sort(key=lambda item: (item[6], item[1], item[0]))
+        deduped_templates = []
+        seen_names = set()
+        for template in bundle_candidates:
+            name_key = str(template[1] or '').strip().lower()
+            if not name_key or name_key in seen_names:
+                continue
+            deduped_templates.append(template)
+            seen_names.add(name_key)
+        return deduped_templates
     except Exception:
         return []
 

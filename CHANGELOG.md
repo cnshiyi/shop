@@ -1,5 +1,16 @@
 # 版本记录
 
+## v0.5.44 - 2026-04-24
+- 按最新业务语义恢复“配置同步”：`cloud-plans/sync` 继续保留，但现在只同步 AWS / 阿里云在售规格与价格模板，不再生成或修改人工维护的 `CloudServerPlan`。
+- AWS 价格同步已取消单地区限制；本轮实测同步后，人工套餐保持 `0`，价格模板回填到 `1609` 条。
+- 前端已恢复“配置同步”页面与路由，用于查看/触发云厂商在售规格同步；“套餐列表”仍保持人工维护。
+
+### 验证
+- `./.venv/bin/python -m py_compile biz/services/custom.py cloud/services.py cloud/api.py dashboard_api/views.py`
+- `./.venv/bin/python manage.py check`
+- `./.venv/bin/python manage.py shell -c "from django.test import Client; ... /api/dashboard/cloud-plans/sync/ ..."`
+- `pnpm -C apps/web-antd build`
+
 ## v0.5.43 - 2026-04-24
 - `orders.api` 不再直接从 `dashboard_api.views` 导入公共 helper，先改为复用 `bot.api` 的过渡 helper，进一步收缩旧 API 兼容层。
 - 已确认 `/api/dashboard/orders/` 与 `/api/dashboard/recharges/` 继续返回 `200 JSON`。
