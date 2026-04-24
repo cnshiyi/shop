@@ -1,5 +1,14 @@
 # 版本记录
 
+## v0.5.83 - 2026-04-24
+- 继续执行“迁移即删除”：`dashboard_api/urls.py` 已并回 `shop/dashboard_urls.py`，`dashboard_api` 目录本身已删除。
+- `shop/urls.py` 现直接包含 `shop.dashboard_urls`，旧 `dashboard_api` 只剩历史提交，不再存在于当前工作树。
+
+### 验证
+- `./.venv/bin/python manage.py check`
+- `./.venv/bin/python manage.py makemigrations --check --dry-run`
+- `DJANGO_TEST_SQLITE=1 ./.venv/bin/python manage.py test --verbosity 1`
+
 ## v0.5.82 - 2026-04-24
 - 继续收尾文档旧口径：`docs/installed-apps-cutover-plan.md`、`docs/DATA_FLOW_AND_PERSISTENCE.md`、`docs/DB_NAMING_CONVENTIONS.md` 现已统一写成当前事实，不再把 `dashboard_api.views` 写成“已清空”或把监控统计模型写在 `monitoring.*` 旧归属下。
 - 这一步主要用于防止后续 cutover 判断继续被过时文档误导。

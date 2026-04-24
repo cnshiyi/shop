@@ -18,7 +18,7 @@
 - `mall/`
 - `monitoring/`
 - `biz/services/`
-- `dashboard_api/`
+- `shop/dashboard_urls.py`
 
 其中：
 - `bot.models`、`orders.models`、`cloud.models` 已是当前真实模型归属。

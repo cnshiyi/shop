@@ -37,7 +37,7 @@
 - `mall/`
 - `monitoring/`
 - `biz/services/`
-- `dashboard_api/`
+- `shop/dashboard_urls.py`
 
 ## 启动方式
 
