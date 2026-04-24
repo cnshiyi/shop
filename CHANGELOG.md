@@ -1,5 +1,25 @@
 # 版本记录
 
+## v0.5.64 - 2026-04-24
+- 全面体检后继续清理 `biz/services/custom.py`：`create_cloud_server_order`、`buy_cloud_server_with_balance`、`pay_cloud_server_order_with_balance` 已迁入 `cloud/services.py`。
+- `biz/services/custom.py` 中这三段旧真实实现已删除并改成兼容转发。
+- 同时补齐了 `cloud/services.py` 缺失的云查询函数，并将 `biz/services/cloud_queries.py` 压成兼容壳，顺手修复了由 `biz/services/__init__.py` 顶层导入触发的循环依赖。
+
+### 验证
+- `./.venv/bin/python -m py_compile cloud/services.py biz/services/custom.py biz/services/cloud_queries.py bot/handlers.py cloud/api.py biz/services/__init__.py`
+- `./.venv/bin/python manage.py check`
+- `DJANGO_TEST_SQLITE=1 ./.venv/bin/python manage.py test biz.tests.CloudServerServicesTestCase.test_create_cloud_server_renewal_rejects_deleted_or_ipless_order biz.tests.CloudServerServicesTestCase.test_mark_cloud_server_ip_change_requested_falls_back_when_plan_missing --verbosity 1`
+- `./.venv/bin/python manage.py shell -c "from cloud.services import create_cloud_server_order, buy_cloud_server_with_balance, pay_cloud_server_order_with_balance, get_user_cloud_server, list_user_cloud_servers, get_cloud_server_by_ip; print(bool(create_cloud_server_order), bool(buy_cloud_server_with_balance), bool(pay_cloud_server_order_with_balance), bool(get_user_cloud_server), bool(list_user_cloud_servers), bool(get_cloud_server_by_ip))"`
+
+## v0.5.63 - 2026-04-24
+- `list_custom_regions`、`list_region_plans`、`refresh_custom_plan_cache`、`get_cloud_plan`、`set_cloud_server_port` 已迁入 `cloud/services.py` 成为真实实现来源。
+- `biz/services/custom.py` 中这批旧实现已删除并缩成兼容转发，`cloud` 域继续摆脱对旧 custom 层的运行时依赖。
+
+### 验证
+- `./.venv/bin/python -m py_compile cloud/services.py biz/services/custom.py bot/handlers.py bot/runner.py cloud/api.py`
+- `./.venv/bin/python manage.py check`
+- `./.venv/bin/python manage.py shell -c "from cloud.services import list_custom_regions, get_cloud_plan, set_cloud_server_port; from biz.services.custom import list_custom_regions as compat_regions; import asyncio; print(bool(list_custom_regions), bool(get_cloud_plan), bool(set_cloud_server_port), bool(compat_regions))"`
+
 ## v0.5.62 - 2026-04-24
 - `build_cloud_server_name` 与 `ensure_unique_cloud_server_name` 已迁入 `cloud/services.py` 成为真实实现来源。
 - `biz/services/custom.py` 中对应旧实现已删除并缩成兼容转发，继续执行“迁移即删除”。

@@ -1,8 +1,5 @@
 """兼容聚合层：按需惰性转发到新领域服务，避免旧包聚合导致循环导入。"""
 
-from .cloud_queries import get_cloud_server_by_ip, get_user_cloud_server, list_user_cloud_servers
-from .users import get_or_create_user
-
 __all__ = [
     'add_monitor',
     'add_to_cart',

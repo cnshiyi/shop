@@ -507,115 +507,21 @@ def _apply_cloud_discount(plan_price: Decimal, discount_rate) -> Decimal:
 
 
 @sync_to_async
-def create_cloud_server_order(user_id: int, plan_id: int, currency: str = 'USDT', quantity: int = 1):
-    plan = CloudServerPlan.objects.get(id=plan_id, is_active=True)
-    user = TelegramUser.objects.get(id=user_id)
-    quantity = max(1, int(quantity or 1))
-    unit_price = _apply_cloud_discount(Decimal(plan.price), user.cloud_discount_rate)
-    total = unit_price * quantity
-    pay_amount = _generate_unique_pay_amount(total, currency)
-    expired_at = timezone.now() + timezone.timedelta(minutes=5)
-    order = CloudServerOrder.objects.create(
-        order_no=_generate_order_no(),
-        user_id=user_id,
-        plan=plan,
-        provider=plan.provider,
-        region_code=plan.region_code,
-        region_name=plan.region_name,
-        plan_name=plan.plan_name,
-        quantity=quantity,
-        currency=currency,
-        total_amount=total,
-        pay_amount=pay_amount,
-        pay_method='address',
-        status='pending',
-        mtproxy_port=9528,
-        expired_at=expired_at,
-    )
-    logger.info('云服务器订单创建: order=%s user=%s region=%s plan=%s qty=%s pay=address amount=%s', order.order_no, user_id, plan.region_code, plan.plan_name, quantity, pay_amount)
-    return order
+def create_cloud_server_order(*args, **kwargs):
+    from cloud.services import create_cloud_server_order as impl
+    return impl.__wrapped__(*args, **kwargs)
 
 
 @sync_to_async
-def buy_cloud_server_with_balance(user_id: int, plan_id: int, currency: str = 'USDT', quantity: int = 1):
-    plan = CloudServerPlan.objects.get(id=plan_id, is_active=True)
-    quantity = max(1, int(quantity or 1))
-    with transaction.atomic():
-        user = TelegramUser.objects.select_for_update().get(id=user_id)
-        total_usdt = _apply_cloud_discount(Decimal(plan.price), user.cloud_discount_rate) * quantity
-        total = usdt_to_trx.__wrapped__(total_usdt) if currency == 'TRX' else total_usdt
-        balance_field = 'balance_trx' if currency == 'TRX' else 'balance'
-        current_balance = Decimal(str(getattr(user, balance_field, 0) or 0))
-        if current_balance < total:
-            return None, f'{currency} 余额不足'
-        old_balance = current_balance
-        setattr(user, balance_field, current_balance - total)
-        user.save(update_fields=[balance_field, 'updated_at'])
-        order = CloudServerOrder.objects.create(
-            order_no=_generate_order_no(),
-            user_id=user_id,
-            plan=plan,
-            provider=plan.provider,
-            region_code=plan.region_code,
-            region_name=plan.region_name,
-            plan_name=plan.plan_name,
-            quantity=quantity,
-            currency=currency,
-            total_amount=total_usdt,
-            pay_amount=total,
-            pay_method='balance',
-            status='paid',
-            mtproxy_port=9528,
-            paid_at=timezone.now(),
-        )
-        record_balance_ledger(
-            user,
-            ledger_type='cloud_order_balance_pay',
-            currency=currency,
-            old_balance=old_balance,
-            new_balance=getattr(user, balance_field),
-            related_type='cloud_order',
-            related_id=order.id,
-            description=f'云服务器订单 #{order.order_no} 余额支付',
-        )
-    logger.info('云服务器钱包下单: order=%s user=%s region=%s plan=%s qty=%s currency=%s amount=%s', order.order_no, user_id, plan.region_code, plan.plan_name, quantity, currency, total)
-    return order, None
+def buy_cloud_server_with_balance(*args, **kwargs):
+    from cloud.services import buy_cloud_server_with_balance as impl
+    return impl.__wrapped__(*args, **kwargs)
 
 
 @sync_to_async
-def pay_cloud_server_order_with_balance(order_id: int, user_id: int, currency: str = 'USDT'):
-    order = CloudServerOrder.objects.select_related('plan').filter(id=order_id, user_id=user_id, status='pending').first()
-    if not order:
-        return None, '订单不存在或状态不可支付'
-    total = usdt_to_trx.__wrapped__(order.total_amount) if currency == 'TRX' else Decimal(order.total_amount)
-    with transaction.atomic():
-        user = TelegramUser.objects.select_for_update().get(id=user_id)
-        balance_field = 'balance_trx' if currency == 'TRX' else 'balance'
-        current_balance = Decimal(str(getattr(user, balance_field, 0) or 0))
-        if current_balance < total:
-            unit = 'TRX' if currency == 'TRX' else 'USDT'
-            return None, f'钱包余额不足，请先充值 {unit}'
-        old_balance = current_balance
-        setattr(user, balance_field, current_balance - total)
-        user.save(update_fields=[balance_field, 'updated_at'])
-        order.currency = currency
-        order.pay_amount = total
-        order.pay_method = 'balance'
-        order.status = 'paid'
-        order.paid_at = timezone.now()
-        order.save(update_fields=['currency', 'pay_amount', 'pay_method', 'status', 'paid_at', 'updated_at'])
-        record_balance_ledger(
-            user,
-            ledger_type='cloud_order_balance_pay',
-            currency=currency,
-            old_balance=old_balance,
-            new_balance=getattr(user, balance_field),
-            related_type='cloud_order',
-            related_id=order.id,
-            description=f'云服务器订单 #{order.order_no} 余额补付',
-        )
-    logger.info('云服务器钱包补付: order=%s user=%s currency=%s amount=%s', order.order_no, user_id, currency, total)
-    return order, None
+def pay_cloud_server_order_with_balance(*args, **kwargs):
+    from cloud.services import pay_cloud_server_order_with_balance as impl
+    return impl.__wrapped__(*args, **kwargs)
 
 
 @sync_to_async
