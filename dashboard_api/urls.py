@@ -3,7 +3,6 @@ from django.urls import path
 from bot import api as bot_api
 from cloud import api as cloud_api
 from orders import api as orders_api
-from . import views
 
 app_name = 'dashboard_api'
 

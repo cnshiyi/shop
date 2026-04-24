@@ -1,5 +1,13 @@
 # 版本记录
 
+## v0.5.55 - 2026-04-24
+- 继续按“迁移即删除”清理 `biz/services/commerce.py`：已迁入 `orders/services.py` 的购物车、商品列表、订单查询等逻辑不再在旧层保留真实实现，改为惰性兼容转发。
+- `commerce.py` 仅保留尚未迁完的余额支付、地址下单、余额明细及唯一支付金额 helper，避免与 `orders.services` 产生循环导入。
+
+### 验证
+- `./.venv/bin/python -m py_compile biz/services/commerce.py orders/services.py cloud/services.py bot/handlers.py biz/services/__init__.py`
+- `./.venv/bin/python manage.py shell -c "from biz.services.commerce import add_to_cart, list_products, buy_with_balance; from orders.services import list_orders, create_cart_address_orders; print('commerce compat ok')"`
+
 ## v0.5.54 - 2026-04-24
 - 按“迁移即删除”规则，`biz/services/payments.py`、`biz/services/monitoring.py`、`biz/services/rates.py` 已删除旧真实实现并改成兼容壳，统一转发到 `orders.services`。
 - 至此，这三类旧服务层不再保留双份业务代码，只保留最薄兼容入口。
