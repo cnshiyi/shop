@@ -1,5 +1,23 @@
 # 版本记录
 
+## v0.5.67 - 2026-04-24
+- 第一批真实模型迁移已打通：`bot.TelegramUser` 与 `orders.Recharge` 已成为真实模型定义来源，`accounts.models` / `finance.models` 分别退成兼容出口。
+- 运行时模型字符串外键已切到新域：`accounts` / `finance` / `mall` / `monitoring` 中所有当前模型的 `user -> bot.TelegramUser` 已收口。
+- 新增 state-only 迁移链，不碰表：
+  - `bot/migrations/0001_initial.py`
+  - `orders/migrations/0001_initial.py`
+  - `accounts/migrations/0011_move_telegramuser_state_to_bot.py`
+  - `finance/migrations/0003_move_recharge_state_to_orders.py`
+  - `mall/migrations/0028_switch_user_fk_to_bot.py`
+  - `monitoring/migrations/0003_switch_user_fk_to_bot.py`
+- 已在本地真实执行 `manage.py migrate`，并修正 fresh test DB 顺序问题：把 `accounts.TelegramUser` 的 state 删除延后到所有旧引用切换完成之后。
+
+### 验证
+- `./.venv/bin/python manage.py migrate`
+- `./.venv/bin/python manage.py check`
+- `./.venv/bin/python manage.py makemigrations --check --dry-run`
+- `DJANGO_TEST_SQLITE=1 ./.venv/bin/python manage.py test biz.tests --verbosity 1`
+
 ## v0.5.66 - 2026-04-24
 - 把云价格同步主链从 `biz/services/custom.py` 迁入 `cloud/services.py`：包括地区/模板常量、厂商区域拉取、AWS/Aliyun 规格模板拉取、`sync_server_prices`、`ensure_cloud_server_pricing`、`ensure_cloud_server_plans`。
 - `biz/services/custom.py` 已压成纯兼容层，只保留极薄转发，不再承载任何真实价格同步逻辑。
