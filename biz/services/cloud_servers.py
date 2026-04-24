@@ -3,7 +3,7 @@ from decimal import Decimal
 from asgiref.sync import sync_to_async
 from django.db import transaction
 from django.utils import timezone
-from accounts.services import record_balance_ledger
+from orders.ledger import record_balance_ledger
 from bot.models import TelegramUser
 from cloud.models import CloudAsset, CloudServerOrder, CloudServerPlan, Server
 from .commerce import _generate_unique_pay_amount

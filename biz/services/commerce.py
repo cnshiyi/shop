@@ -7,7 +7,7 @@ from django.core.paginator import Paginator
 from django.db import transaction
 from django.utils import timezone
 
-from accounts.services import record_balance_ledger
+from orders.ledger import record_balance_ledger
 from bot.models import TelegramUser
 from cloud.models import CloudServerOrder, CloudServerPlan
 from orders.models import BalanceLedger, CartItem, Order, Product, Recharge

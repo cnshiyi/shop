@@ -10,7 +10,7 @@ class SiteConfig(models.Model):
     is_sensitive = models.BooleanField('敏感配置', default=False)
 
     class Meta:
-        db_table = 'configs'
+        db_table = 'core_site_config'
         verbose_name = '系统配置'
         verbose_name_plural = '系统配置'
 
@@ -86,7 +86,7 @@ class CloudAccountConfig(models.Model):
     updated_at = models.DateTimeField('更新时间', auto_now=True)
 
     class Meta:
-        db_table = 'cloud_account_configs'
+        db_table = 'core_cloud_account'
         verbose_name = '云账户配置'
         verbose_name_plural = '云账户配置'
         ordering = ['provider', 'name', 'id']
@@ -143,7 +143,7 @@ class ExternalSyncLog(models.Model):
     created_at = models.DateTimeField('创建时间', auto_now_add=True, db_index=True)
 
     class Meta:
-        db_table = 'external_sync_logs'
+        db_table = 'core_sync_log'
         verbose_name = '外部同步日志'
         verbose_name_plural = '外部同步日志'
         ordering = ['-created_at', '-id']

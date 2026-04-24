@@ -23,7 +23,7 @@ class AddressMonitor(models.Model):
     created_at = models.DateTimeField('创建时间', auto_now_add=True)
 
     class Meta:
-        db_table = 'address_monitors'
+        db_table = 'cloud_address_monitor'
         verbose_name = '地址监控'
         verbose_name_plural = '地址监控'
         ordering = ['-created_at']
@@ -55,7 +55,7 @@ class DailyAddressStat(models.Model):
     updated_at = models.DateTimeField('更新时间', auto_now=True)
 
     class Meta:
-        db_table = 'daily_address_stats'
+        db_table = 'cloud_address_stat_daily'
         verbose_name = '每日地址统计'
         verbose_name_plural = '每日地址统计'
         ordering = ['-stats_date', '-updated_at', '-id']
@@ -86,7 +86,7 @@ class ResourceSnapshot(models.Model):
     captured_at = models.DateTimeField('采集时间', auto_now_add=True, db_index=True)
 
     class Meta:
-        db_table = 'resource_snapshots'
+        db_table = 'cloud_resource_snapshot'
         verbose_name = '资源快照'
         verbose_name_plural = '资源快照'
         ordering = ['-captured_at', '-id']

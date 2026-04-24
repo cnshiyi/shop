@@ -97,12 +97,20 @@
 - [x] `cart_items` → `order_cart_item`
 - [x] `orders` → `order_order`
 
-#### 批次 C 进行中
+#### 批次 C 已完成
 - [x] `cloud_server_plans` → `cloud_plan`
 - [x] `server_prices` → `cloud_price`
 - [x] `cloud_server_orders` → `cloud_order`
 - [x] `cloud_assets` → `cloud_asset`
 - [x] `servers` → `cloud_server`
+
+#### 批次 D/E 进行中
+- [x] `address_monitors` → `cloud_address_monitor`
+- [x] `daily_address_stats` → `cloud_address_stat_daily`
+- [x] `resource_snapshots` → `cloud_resource_snapshot`
+- [x] `configs` → `core_site_config`
+- [x] `cloud_account_configs` → `core_cloud_account`
+- [x] `external_sync_logs` → `core_sync_log`
 
 ### 第五阶段：删除旧目录
 - [ ] 删除 `accounts/finance/monitoring/tron/biz/dashboard_api` 的业务实现

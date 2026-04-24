@@ -14,7 +14,7 @@ from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 from asgiref.sync import sync_to_async
 from django.utils import timezone
 
-from accounts.services import record_balance_ledger
+from orders.ledger import record_balance_ledger
 from bot.models import TelegramUser
 from cloud.models import AddressMonitor, CloudServerOrder
 from orders.models import Order, Product, Recharge

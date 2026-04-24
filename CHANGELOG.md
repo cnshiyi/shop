@@ -1,5 +1,17 @@
 # 版本记录
 
+## v0.5.11 - 2026-04-24
+- 完成表名迁移批次 D/E：`address_monitors` → `cloud_address_monitor`、`daily_address_stats` → `cloud_address_stat_daily`、`resource_snapshots` → `cloud_resource_snapshot`、`configs` → `core_site_config`、`cloud_account_configs` → `core_cloud_account`、`external_sync_logs` → `core_sync_log`。
+- 现网库已完成整套目标表名收口：`bot / orders / cloud / core` 目标表名均已存在，并通过 `information_schema.tables` 核验。
+- 余额流水记账链进一步从旧目录抽离：新增 `orders/ledger.py`，`biz.services.*` 与 `tron/scanner.py` 改为通过 `orders` 域记账；`accounts/services.py` 降级为兼容壳。
+
+### 验证
+- `./.venv/bin/python manage.py migrate`
+- `./.venv/bin/python manage.py check`
+- `./.venv/bin/python manage.py makemigrations --check --dry-run`
+- `DJANGO_TEST_SQLITE=1 ./.venv/bin/python manage.py test biz.tests --verbosity 1`
+- `information_schema.tables` 核验目标表名全集存在
+
 ## v0.5.10 - 2026-04-24
 - 完成表名迁移批次 C：`cloud_server_plans` → `cloud_plan`、`server_prices` → `cloud_price`、`cloud_server_orders` → `cloud_order`、`cloud_assets` → `cloud_asset`、`servers` → `cloud_server`。
 - `mall.0026_alter_cloudasset_table_alter_cloudserverorder_table_and_more` 已应用到当前数据库 `a`，并通过 `information_schema.tables` 核验确认新表名生效。

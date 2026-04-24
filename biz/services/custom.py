@@ -9,7 +9,7 @@ from asgiref.sync import sync_to_async
 from django.db import transaction
 from django.utils import timezone
 
-from accounts.services import record_balance_ledger
+from orders.ledger import record_balance_ledger
 from bot.models import TelegramUser
 from cloud.models import CloudServerOrder, CloudServerPlan, Server, ServerPrice
 from core.cache import get_redis
