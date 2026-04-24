@@ -1,1 +1,0 @@
-# Django admin removed intentionally.

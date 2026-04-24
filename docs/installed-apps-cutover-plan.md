@@ -40,8 +40,10 @@
 - `monitoring.models`：已删除
 - `accounts/services.py`：已删除
 - `mall/management/commands/*`：已迁入 `cloud/management/commands/*`
+- `accounts/finance/mall/monitoring` 的 `admin.py`：已删除
+- `mall/management/` 空包：已删除
 
-这说明旧 app 当前主要只为历史 migration app label 服务，运行时模型/服务/管理命令兼容出口也已基本退场。
+这说明旧 app 当前主要只为历史 migration app label 服务，运行时模型/服务/管理命令/admin 兼容出口也已基本退场。
 
 ### 3. `biz` 仍有测试与旧导入兼容压力
 

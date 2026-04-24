@@ -1,5 +1,14 @@
 # 版本记录
 
+## v0.5.87 - 2026-04-24
+- 继续把旧 app 压成最小桥接层：已删除 `accounts/admin.py`、`finance/admin.py`、`mall/admin.py`、`monitoring/admin.py`，并移除 `mall/management/` 空包。
+- 现在这四个旧 app 的工作树基本只剩 `__init__.py`、`apps.py`、`migrations/`，已经非常接近纯 migration bridge。
+
+### 验证
+- `./.venv/bin/python manage.py check`
+- `./.venv/bin/python manage.py makemigrations --check --dry-run`
+- `DJANGO_TEST_SQLITE=1 ./.venv/bin/python manage.py test --verbosity 1`
+
 ## v0.5.86 - 2026-04-24
 - 继续执行“迁移即删除”：`mall/management/commands/` 下的运行时命令实现已迁入 `cloud/management/commands/`，并删除旧 `mall` 侧实现文件。
 - 已确认 `sync_aws_assets`、`sync_aliyun_assets`、`upsert_cloud_asset`、`dedupe_servers` 当前都由 `cloud` app 提供。
