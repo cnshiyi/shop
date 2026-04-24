@@ -12,13 +12,49 @@ from dashboard_api.views import (
     _get_keyword,
     _iso,
     _ok,
-    _order_payload,
     _read_payload,
     _status_label,
     _user_payload,
     dashboard_login_required,
 )
 from orders.models import Order, Recharge
+
+
+def _order_payload(order):
+    user = order.user
+    usernames = user.usernames if user else []
+    user_payload = _user_payload({
+        'id': user.id,
+        'tg_user_id': user.tg_user_id,
+        'username': user.username,
+        'first_name': user.first_name,
+        'usernames': usernames,
+        'primary_username': usernames[0] if usernames else '',
+    }) if user else None
+    product = getattr(order, 'product', None)
+    return {
+        'id': order.id,
+        'order_no': order.order_no,
+        'product_id': order.product_id,
+        'product_name': order.product_name,
+        'product_label': product.name if product else order.product_name,
+        'product_description': product.description if product else None,
+        'quantity': order.quantity,
+        'currency': order.currency,
+        'total_amount': _decimal_to_str(order.total_amount),
+        'pay_amount': _decimal_to_str(order.pay_amount) if order.pay_amount is not None else None,
+        'pay_method': order.pay_method,
+        'status': order.status,
+        'status_label': _status_label(order.status, Order.STATUS_CHOICES),
+        'tx_hash': order.tx_hash,
+        'created_at': _iso(order.created_at),
+        'paid_at': _iso(order.paid_at),
+        'expired_at': _iso(order.expired_at),
+        'user_id': user.id if user else None,
+        'tg_user_id': user.tg_user_id if user else None,
+        'user_display_name': user_payload['display_name'] if user_payload else '未绑定用户',
+        'username_label': user_payload['username_label'] if user_payload else '-',
+    }
 
 
 @dashboard_login_required
