@@ -3,7 +3,7 @@ import logging
 from django.utils import timezone
 
 from cloud.models import CloudAsset, Server
-from cloud.services import build_cloud_server_name, ensure_unique_cloud_server_name
+from cloud.services import build_cloud_server_name, ensure_unique_cloud_server_name, record_cloud_ip_log
 from cloud.aliyun_simple import create_instance as create_aliyun_instance
 from cloud.aws_lightsail import create_instance as create_aws_instance
 from cloud.bootstrap import install_bbr, install_mtproxy
@@ -299,6 +299,14 @@ def _mark_success(order_id: int, server_name: str, instance_id: str, public_ip: 
             },
         )
         server_record = _upsert_server_record(order, note)
+        record_cloud_ip_log(
+            event_type='created',
+            order=order,
+            asset=server_asset,
+            server=server_record,
+            public_ip=public_ip,
+            note=f'服务器创建并分配IP：{public_ip or "未分配"}',
+        )
         logger.info('[PROVISION] server_asset_saved order=%s asset_id=%s server_record_id=%s expires_at=%s', order.order_no, server_asset.id, getattr(server_record, 'id', None), order.service_expires_at)
         if mtproxy_link:
             mtproxy_asset, _ = CloudAsset.objects.update_or_create(

@@ -1,5 +1,24 @@
 # 版本记录
 
+## v0.5.48 - 2026-04-24
+- 新增 `CloudIpLog` 与 `cloud_ip_log` 表，用于记录云服务器 IP 从创建分配、手动变更、到期、延停、删除到回收的生命周期日志。
+- 后端已在 `cloud/provisioning.py`、`cloud/lifecycle.py`、`cloud/api.py` 的关键入口补齐 IP 日志埋点，并新增 `/api/dashboard/cloud-assets/ip-logs/` 查询接口，支持关键字搜索。
+- 前端已新增“IP日志”页面与菜单，支持按订单号、用户、IP、实例ID、说明搜索。
+
+### 验证
+- `./.venv/bin/python -m py_compile mall/models.py cloud/models.py cloud/services.py cloud/provisioning.py cloud/lifecycle.py cloud/api.py dashboard_api/urls.py`
+- `./.venv/bin/python manage.py migrate`
+- `./.venv/bin/python manage.py check`
+- `./.venv/bin/python manage.py shell -c "from django.test import Client; ... /api/dashboard/cloud-assets/ip-logs/ ..."`
+
+## v0.5.47 - 2026-04-24
+- 将 `update_cloud_asset` 及其依赖 helper 正式迁入 `cloud/api.py`，并补上 `/api/dashboard/cloud-assets/<asset_id>/` 路由，`cloud/api.py` 已不再从 `dashboard_api.views` 反向导入。
+- 现在 `cloud/api.py` / `bot/api.py` / `orders/api.py` 都不再直接 `import dashboard_api.views`，`dashboard_api` 进一步收缩为兼容层。
+
+### 验证
+- `./.venv/bin/python -m py_compile cloud/api.py dashboard_api/urls.py dashboard_api/views.py bot/api.py`
+- `./.venv/bin/python manage.py shell -c "from django.test import Client; ... /api/dashboard/cloud-assets/ ... /api/dashboard/cloud-assets/<id>/ ..."`
+
 ## v0.5.46 - 2026-04-24
 - 将 `cloud/api.py` 对 `dashboard_api.views` 的通用 helper 依赖切到 `bot.api`，把登录校验、响应封装、区域/状态/用户等公共 helper 向新域兼容层集中。
 - 当前 `cloud/api.py` 仅暂留对 `update_cloud_asset` 的旧视图依赖，后续可继续把这段真实逻辑迁出，进一步瘦身 `dashboard_api.views`。

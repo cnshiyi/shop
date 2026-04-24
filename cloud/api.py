@@ -32,8 +32,8 @@ from bot.api import (
     dashboard_login_required,
 )
 from bot.models import TelegramUser
-from cloud.services import ensure_cloud_server_pricing, refresh_custom_plan_cache
-from cloud.models import AddressMonitor, CloudAsset, CloudServerOrder, CloudServerPlan, Server, ServerPrice
+from cloud.services import ensure_cloud_server_pricing, record_cloud_ip_log, refresh_custom_plan_cache
+from cloud.models import AddressMonitor, CloudAsset, CloudIpLog, CloudServerOrder, CloudServerPlan, Server, ServerPrice
 from cloud.provisioning import provision_cloud_server
 
 
@@ -212,9 +212,9 @@ def update_cloud_asset(request, asset_id):
                 asset.order.public_ip = payload.get('public_ip') or None
                 asset.order.save(update_fields=['public_ip', 'updated_at'])
 
+            old_public_ip = asset.public_ip
+            new_public_ip = payload.get('public_ip') or None if 'public_ip' in payload else asset.public_ip
             if 'public_ip' in payload:
-                old_public_ip = asset.public_ip
-                new_public_ip = payload.get('public_ip') or None
                 if old_public_ip and old_public_ip != new_public_ip:
                     asset.previous_public_ip = old_public_ip
 
@@ -281,6 +281,16 @@ def update_cloud_asset(request, asset_id):
                 server.save()
 
             asset.save()
+            if 'public_ip' in payload and str(old_public_ip or '') != str(new_public_ip or ''):
+                record_cloud_ip_log(
+                    event_type='changed',
+                    order=asset.order,
+                    asset=asset,
+                    server=server,
+                    previous_public_ip=old_public_ip,
+                    public_ip=new_public_ip,
+                    note=f'后台手动更新IP：{old_public_ip or "未分配"} → {new_public_ip or "未分配"}',
+                )
     except CloudAsset.DoesNotExist:
         return _error('云资产不存在', status=404)
 
@@ -722,6 +732,7 @@ def delete_server(request, server_id: int):
         order.provider_resource_id = ''
         order.provision_note = '\n'.join(filter(None, [order.provision_note, note]))
         order.save(update_fields=['status', 'previous_public_ip', 'public_ip', 'instance_id', 'provider_resource_id', 'provision_note', 'updated_at'])
+    record_cloud_ip_log(event_type='deleted', order=order, server=server, previous_public_ip=previous_public_ip, public_ip=None, note=note)
     return _ok(True)
 
 
@@ -1160,6 +1171,57 @@ def cloud_plans_list(request):
     return _ok([_cloud_plan_payload(item) for item in queryset])
 
 
+def _cloud_ip_log_payload(item):
+    user = item.user
+    usernames = user.usernames if user else []
+    user_payload = _user_payload({
+        'id': user.id,
+        'tg_user_id': user.tg_user_id,
+        'username': user.username,
+        'first_name': user.first_name,
+        'usernames': usernames,
+        'primary_username': usernames[0] if usernames else '',
+    }) if user else None
+    return {
+        'id': item.id,
+        'event_type': item.event_type,
+        'event_label': _status_label(item.event_type, CloudIpLog.EVENT_CHOICES),
+        'provider': item.provider,
+        'provider_label': _provider_label(item.provider),
+        'region_code': item.region_code,
+        'region_name': item.region_name,
+        'region_label': _region_label(item.region_code, item.region_name),
+        'order_id': item.order_id,
+        'order_no': item.order_no,
+        'asset_id': item.asset_id,
+        'server_id': item.server_id,
+        'asset_name': item.asset_name,
+        'instance_id': item.instance_id,
+        'provider_resource_id': item.provider_resource_id,
+        'public_ip': item.public_ip,
+        'previous_public_ip': item.previous_public_ip,
+        'note': item.note,
+        'created_at': _iso(item.created_at),
+        'user_id': user.id if user else None,
+        'tg_user_id': user.tg_user_id if user else None,
+        'user_display_name': user_payload['display_name'] if user_payload else '未绑定用户',
+        'username_label': user_payload['username_label'] if user_payload else '-',
+    }
+
+
+@dashboard_login_required
+@require_GET
+def cloud_ip_logs_list(request):
+    keyword = _get_keyword(request)
+    queryset = CloudIpLog.objects.select_related('user', 'order', 'asset', 'server').order_by('-created_at', '-id')
+    queryset = _apply_keyword_filter(
+        queryset,
+        keyword,
+        ['order_no', 'asset_name', 'instance_id', 'provider_resource_id', 'public_ip', 'previous_public_ip', 'note', 'user__tg_user_id', 'user__username'],
+    )
+    return _ok([_cloud_ip_log_payload(item) for item in queryset[:200]])
+
+
 @dashboard_login_required
 @require_GET
 def monitors_list(request):
@@ -1193,6 +1255,7 @@ def monitors_list(request):
 
 __all__ = [
     'cloud_assets_list',
+    'cloud_ip_logs_list',
     'cloud_order_detail',
     'cloud_orders_list',
     'tasks_overview',

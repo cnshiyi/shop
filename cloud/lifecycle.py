@@ -10,6 +10,7 @@ from core.models import CloudAccountConfig
 
 from bot.models import TelegramUser
 from cloud.models import CloudAsset, CloudServerOrder, Server
+from cloud.services import record_cloud_ip_log
 from bot.keyboards import cloud_expiry_actions
 
 logger = logging.getLogger(__name__)
@@ -48,8 +49,11 @@ def _mark_expiring(order_id: int):
     if order.status == 'completed':
         order.status = 'expiring'
         order.save(update_fields=['status', 'updated_at'])
+        asset = CloudAsset.objects.filter(order=order).order_by('-updated_at', '-id').first()
+        server = Server.objects.filter(order=order).order_by('-updated_at', '-id').first()
         CloudAsset.objects.filter(order=order).update(updated_at=timezone.now())
         Server.objects.filter(order=order).update(updated_at=timezone.now())
+        record_cloud_ip_log(event_type='expired', order=order, asset=asset, server=server, note='服务器到期，进入到期处理阶段')
     return order
 
 
@@ -60,8 +64,11 @@ def _mark_suspended(order_id: int, note: str):
     order.status = 'suspended'
     order.provision_note = '\n'.join(filter(None, [order.provision_note, note]))
     order.save(update_fields=['status', 'provision_note', 'updated_at'])
+    asset = CloudAsset.objects.filter(order=order).order_by('-updated_at', '-id').first()
+    server = Server.objects.filter(order=order).order_by('-updated_at', '-id').first()
     CloudAsset.objects.filter(order=order).update(is_active=False, note=order.provision_note, updated_at=now)
     Server.objects.filter(order=order).update(is_active=False, note=order.provision_note, updated_at=now)
+    record_cloud_ip_log(event_type='suspended', order=order, asset=asset, server=server, note=note or '服务器进入延停状态')
     return order
 
 
@@ -69,6 +76,8 @@ def _mark_suspended(order_id: int, note: str):
 def _mark_deleted(order_id: int, note: str):
     now = timezone.now()
     order = CloudServerOrder.objects.get(id=order_id)
+    asset = CloudAsset.objects.filter(order=order).order_by('-updated_at', '-id').first()
+    server = Server.objects.filter(order=order).order_by('-updated_at', '-id').first()
     previous_public_ip = order.public_ip
     order.status = 'deleted'
     order.previous_public_ip = previous_public_ip
@@ -92,6 +101,7 @@ def _mark_deleted(order_id: int, note: str):
         note=order.provision_note,
         updated_at=now,
     )
+    record_cloud_ip_log(event_type='deleted', order=order, asset=asset, server=server, previous_public_ip=previous_public_ip, public_ip=None, note=note or '服务器删除，IP待回收')
     return order
 
 
@@ -99,6 +109,8 @@ def _mark_deleted(order_id: int, note: str):
 def _mark_recycled(order_id: int, note: str):
     now = timezone.now()
     order = CloudServerOrder.objects.get(id=order_id)
+    asset = CloudAsset.objects.filter(order=order).order_by('-updated_at', '-id').first()
+    server = Server.objects.filter(order=order).order_by('-updated_at', '-id').first()
     previous_public_ip = order.public_ip or order.previous_public_ip
     order.previous_public_ip = previous_public_ip
     order.public_ip = ''
@@ -119,6 +131,7 @@ def _mark_recycled(order_id: int, note: str):
         note=order.provision_note,
         updated_at=now,
     )
+    record_cloud_ip_log(event_type='recycled', order=order, asset=asset, server=server, previous_public_ip=previous_public_ip, public_ip=None, note=note or '公网IP已回收')
     return order
 
 
@@ -186,6 +199,8 @@ async def _delete_replaced_server(order: CloudServerOrder) -> str:
 def _mark_replaced_order_deleted(order_id: int, note: str):
     now = timezone.now()
     order = CloudServerOrder.objects.get(id=order_id)
+    asset = CloudAsset.objects.filter(order=order).order_by('-updated_at', '-id').first()
+    server = Server.objects.filter(order=order).order_by('-updated_at', '-id').first()
     previous_public_ip = order.public_ip or order.previous_public_ip
     order.status = 'deleted'
     order.previous_public_ip = previous_public_ip
@@ -196,6 +211,7 @@ def _mark_replaced_order_deleted(order_id: int, note: str):
     order.save(update_fields=['status', 'previous_public_ip', 'instance_id', 'provider_resource_id', 'public_ip', 'provision_note', 'updated_at'])
     CloudAsset.objects.filter(order=order).update(is_active=False, public_ip=None, previous_public_ip=previous_public_ip, note=order.provision_note, updated_at=now)
     Server.objects.filter(order=order).update(is_active=False, public_ip=None, previous_public_ip=previous_public_ip, note=order.provision_note, updated_at=now)
+    record_cloud_ip_log(event_type='deleted', order=order, asset=asset, server=server, previous_public_ip=previous_public_ip, public_ip=None, note=note or '迁移结束，旧实例删除')
     return order
 
 

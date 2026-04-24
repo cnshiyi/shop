@@ -373,6 +373,50 @@ class Server(models.Model):
         return self.server_name or self.instance_id or self.public_ip or f'server-{self.pk}'
 
 
+class CloudIpLog(models.Model):
+    EVENT_CREATED = 'created'
+    EVENT_CHANGED = 'changed'
+    EVENT_EXPIRED = 'expired'
+    EVENT_SUSPENDED = 'suspended'
+    EVENT_DELETED = 'deleted'
+    EVENT_RECYCLED = 'recycled'
+    EVENT_CHOICES = (
+        (EVENT_CREATED, '创建分配'),
+        (EVENT_CHANGED, 'IP变更'),
+        (EVENT_EXPIRED, '到期'),
+        (EVENT_SUSPENDED, '延停'),
+        (EVENT_DELETED, '删除'),
+        (EVENT_RECYCLED, '回收'),
+    )
+
+    order = models.ForeignKey('mall.CloudServerOrder', verbose_name='关联订单', on_delete=models.SET_NULL, blank=True, null=True, related_name='ip_logs')
+    asset = models.ForeignKey('mall.CloudAsset', verbose_name='关联资产', on_delete=models.SET_NULL, blank=True, null=True, related_name='ip_logs')
+    server = models.ForeignKey('mall.Server', verbose_name='关联服务器', on_delete=models.SET_NULL, blank=True, null=True, related_name='ip_logs')
+    user = models.ForeignKey('accounts.TelegramUser', verbose_name='关联用户', on_delete=models.SET_NULL, blank=True, null=True, related_name='cloud_ip_logs')
+    provider = models.CharField('云厂商', max_length=32, blank=True, null=True, db_index=True)
+    region_code = models.CharField('地区代码', max_length=64, blank=True, null=True, db_index=True)
+    region_name = models.CharField('地区名称', max_length=128, blank=True, null=True)
+    order_no = models.CharField('订单号', max_length=191, blank=True, null=True, db_index=True)
+    asset_name = models.CharField('资产名称', max_length=191, blank=True, null=True, db_index=True)
+    instance_id = models.CharField('实例ID', max_length=191, blank=True, null=True, db_index=True)
+    provider_resource_id = models.CharField('云资源ID', max_length=191, blank=True, null=True, db_index=True)
+    public_ip = models.CharField('当前IP', max_length=128, blank=True, null=True, db_index=True)
+    previous_public_ip = models.CharField('上一个IP', max_length=128, blank=True, null=True, db_index=True)
+    event_type = models.CharField('事件类型', max_length=32, choices=EVENT_CHOICES, db_index=True)
+    note = models.TextField('说明', blank=True, null=True)
+    created_at = models.DateTimeField('记录时间', auto_now_add=True, db_index=True)
+
+    class Meta:
+        db_table = 'cloud_ip_log'
+        verbose_name = '云IP日志'
+        verbose_name_plural = '云IP日志'
+        ordering = ['-created_at', '-id']
+
+    def __str__(self):
+        ip = self.public_ip or self.previous_public_ip or '-'
+        return f'{self.order_no or self.asset_name or self.instance_id or "ip-log"} {self.event_type} {ip}'
+
+
 class Order(models.Model):
     STATUS_CHOICES = (
         ('pending', '待支付'),
