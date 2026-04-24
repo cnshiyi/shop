@@ -1,5 +1,13 @@
 # 版本记录
 
+## v0.5.54 - 2026-04-24
+- 按“迁移即删除”规则，`biz/services/payments.py`、`biz/services/monitoring.py`、`biz/services/rates.py` 已删除旧真实实现并改成兼容壳，统一转发到 `orders.services`。
+- 至此，这三类旧服务层不再保留双份业务代码，只保留最薄兼容入口。
+
+### 验证
+- `./.venv/bin/python -m py_compile biz/services/payments.py biz/services/monitoring.py biz/services/rates.py orders/services.py bot/handlers.py biz/services/__init__.py`
+- `./.venv/bin/python manage.py shell -c "from biz.services.payments import create_recharge; from biz.services.monitoring import list_monitors; from biz.services.rates import get_trx_price; print('compat ok')"`
+
 ## v0.5.53 - 2026-04-24
 - 按“迁移即删除”规则，`biz/services/cloud_servers.py` 已从旧真实实现改成兼容壳，云续费/换 IP/重绑/延期等旧实现代码已删除，统一转到 `cloud.services`。
 - 兼容壳保留了老测试会 patch 的模型符号，避免清理旧代码后把现有测试夹断。
