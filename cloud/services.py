@@ -1,17 +1,17 @@
 """过渡层：统一暴露 cloud 域服务，后续逐步从 biz/services 迁入这里。"""
 
 from cloud.models import CloudIpLog
+from asgiref.sync import sync_to_async
+from django.utils import timezone
+
+from bot.models import TelegramUser
+from cloud.models import CloudAsset, CloudIpLog, CloudServerOrder, CloudServerPlan, Server
+from orders.ledger import record_balance_ledger
 from biz.services.cloud_servers import (
     apply_cloud_server_renewal,
     create_cloud_server_renewal,
-    delay_cloud_server_expiry,
-    get_cloud_server_auto_renew,
     mark_cloud_server_ip_change_requested,
-    mark_cloud_server_reinit_requested,
-    mute_cloud_reminders,
     pay_cloud_server_renewal_with_balance,
-    rebind_cloud_server_user,
-    set_cloud_server_auto_renew,
 )
 from biz.services.custom import (
     build_cloud_server_name,
@@ -97,6 +97,77 @@ def record_cloud_ip_log(*, event_type, order=None, asset=None, server=None, publ
         event_type=event_type,
         note=note or '',
     )
+
+
+@sync_to_async
+def rebind_cloud_server_user(order_id: int, new_user_id: int):
+    order = CloudServerOrder.objects.select_related('user').get(id=order_id)
+    order.user_id = new_user_id
+    order.last_user_id = order.user.tg_user_id if hasattr(order.user, 'tg_user_id') else order.last_user_id
+    order.save(update_fields=['user', 'last_user_id', 'updated_at'])
+    return order
+
+
+@sync_to_async
+def mark_cloud_server_reinit_requested(order_id: int, user_id: int):
+    order = CloudServerOrder.objects.filter(id=order_id, user_id=user_id).first()
+    if not order:
+        return None
+    if not order.public_ip or not order.login_password:
+        return False
+    order.provision_note = '\n'.join(filter(None, [order.provision_note, '用户发起重试初始化请求。']))
+    order.save(update_fields=['provision_note', 'updated_at'])
+    return order
+
+
+@sync_to_async
+def mute_cloud_reminders(user_id: int, days: int = 3):
+    user = TelegramUser.objects.filter(id=user_id).first()
+    if not user:
+        return None
+    user.cloud_reminder_muted_until = timezone.now() + timezone.timedelta(days=days)
+    user.save(update_fields=['cloud_reminder_muted_until', 'updated_at'])
+    return user
+
+
+@sync_to_async
+def set_cloud_server_auto_renew(order_id: int, user_id: int, enabled: bool):
+    order = CloudServerOrder.objects.filter(id=order_id, user_id=user_id).first()
+    if not order:
+        return None
+    order.auto_renew_enabled = enabled
+    order.save(update_fields=['auto_renew_enabled', 'updated_at'])
+    return order
+
+
+@sync_to_async
+def get_cloud_server_auto_renew(order_id: int, user_id: int):
+    order = CloudServerOrder.objects.filter(id=order_id, user_id=user_id).first()
+    if not order:
+        return None
+    return bool(order.auto_renew_enabled)
+
+
+@sync_to_async
+def delay_cloud_server_expiry(order_id: int, user_id: int, days: int = 5):
+    order = CloudServerOrder.objects.filter(id=order_id, user_id=user_id).first()
+    if not order:
+        return None
+    expires_at = order.service_expires_at
+    if not expires_at:
+        return False, '当前订单未设置到期时间'
+    now = timezone.now()
+    if expires_at < now:
+        return False, '服务器已到期，不能延期'
+    if expires_at > now + timezone.timedelta(days=5):
+        return False, '仅允许在到期前5天内使用延期'
+    delay_quota = max(int(order.delay_quota or 0), 0)
+    if delay_quota <= 0:
+        return False, '暂无可用延期次数'
+    order.renew_extension_days = max(int(order.renew_extension_days or 0), days)
+    order.delay_quota = delay_quota - 1
+    order.save(update_fields=['renew_extension_days', 'delay_quota', 'updated_at'])
+    return order, None
 
 
 __all__ = [

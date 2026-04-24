@@ -1,5 +1,13 @@
 # 版本记录
 
+## v0.5.49 - 2026-04-24
+- 将一批低风险云服务实现从 `biz.services.cloud_servers` 收回到 `cloud/services.py`：用户重绑、重试初始化、提醒静默、自动续费开关、自动续费读取、到期延期。
+- `cloud/services.py` 继续从纯转发层往真实域服务推进，后续可继续迁移续费/换 IP 相关逻辑。
+
+### 验证
+- `./.venv/bin/python -m py_compile cloud/services.py`
+- `./.venv/bin/python manage.py shell -c "from cloud.services import ...; print('imports ok')"`
+
 ## v0.5.48 - 2026-04-24
 - 新增 `CloudIpLog` 与 `cloud_ip_log` 表，用于记录云服务器 IP 从创建分配、手动变更、到期、延停、删除到回收的生命周期日志。
 - 后端已在 `cloud/provisioning.py`、`cloud/lifecycle.py`、`cloud/api.py` 的关键入口补齐 IP 日志埋点，并新增 `/api/dashboard/cloud-assets/ip-logs/` 查询接口，支持关键字搜索。
