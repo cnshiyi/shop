@@ -1,5 +1,23 @@
 # 版本记录
 
+## v0.5.96 - 2026-04-24
+- 文档口径继续统一到最终状态：`README.md`、`ARCHITECTURE.md`、`docs/installed-apps-cutover-plan.md`、`docs/legacy-app-bridge-plan.md`、`docs/refactor-mapping.md`、`docs/DATA_FLOW_AND_PERSISTENCE.md` 已明确写成“旧目录已删除 / 已并入新域”。
+- 同时把已从工作树删除的旧目录 `accounts/`、`finance/`、`mall/`、`monitoring/` 正式纳入版本记录，避免工作区悬空。
+
+### 验证
+- `./.venv/bin/python manage.py check`
+- `./.venv/bin/python manage.py makemigrations --check --dry-run`
+- `DJANGO_TEST_SQLITE=1 ./.venv/bin/python manage.py test --verbosity 1`
+
+## v0.5.95 - 2026-04-24
+- 继续清后端尾巴：已删除 `biz/services/`、`biz/models.py`、`tmp/` 历史调试目录，并把 `biz.tests` patch 入口切到 `cloud.services`。
+- 同步补齐 `bot/management/commands/backfill_usernames_to_users.py` 的新归属，以及 `docs/refactor-mapping.md` 的最后一批旧口径。
+
+### 验证
+- `DJANGO_TEST_SQLITE=1 ./.venv/bin/python manage.py test biz.tests --verbosity 2`
+- `./.venv/bin/python manage.py check`
+- `./.venv/bin/python manage.py makemigrations --check --dry-run`
+
 ## v0.5.94 - 2026-04-24
 - 做了一轮交付前审计并修正旧口径：`docs/installed-apps-cutover-plan.md`、`docs/table-rename-plan.md`、`docs/DATA_FLOW_AND_PERSISTENCE.md`、`docs/refactor-mapping.md`、`docs/model-migration-batch1-plan.md` 与 `tools/fix_backend.py` 已同步到当前事实。
 - 审计结论：运行时旧 app 已全部退出；剩余旧引用主要存在于 `biz` 兼容测试层、`tmp/` 历史脚本与迁移历史说明中，不属于当前运行时阻塞。
