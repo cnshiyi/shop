@@ -37,6 +37,7 @@
 - `biz/`：服务按业务归位后删除
 - `dashboard_api/`：接口按业务拆到 `bot/api.py`、`orders/api.py`、`cloud/api.py`
 - `accounts_telegramusername` 相关逻辑：下线
+- 新规则：迁移完成并验证通过后，立即删除旧实现，不长期保留双实现
 
 ## 三、表名迁移
 
@@ -114,7 +115,8 @@
 
 ### 第五阶段：删除旧目录
 - [ ] 删除 `accounts/finance/monitoring/tron/biz/dashboard_api` 的业务实现
-- [ ] 保留必要兼容壳或一次性切换
+- [ ] 删除所有“已迁移但未清理”的旧函数、旧 helper、旧转发层
+- [ ] 兼容壳仅保留最薄入口；若新实现已稳定，优先直接删除旧层
 - [x] `dashboard_api/urls.py` 已开始改走 `bot/orders/cloud` API 入口
 
 ### 第六阶段：收尾
@@ -122,3 +124,8 @@
 - [ ] 写版本记录 / 更新变更说明
 - [ ] 提交 Git
 - [ ] 停止巡检任务
+
+## 六、清理原则
+- 每完成一段迁移，都必须检查并删除对应旧实现
+- 删除顺序：旧函数实现 → 旧 helper → 旧转发层 → 无用 import / 路由 / 文档
+- `dashboard_api`、`biz.services.*`、旧模型壳是全面清理旧代码的重点区域

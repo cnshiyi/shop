@@ -1,5 +1,21 @@
 # 版本记录
 
+## v0.5.53 - 2026-04-24
+- 按“迁移即删除”规则，`biz/services/cloud_servers.py` 已从旧真实实现改成兼容壳，云续费/换 IP/重绑/延期等旧实现代码已删除，统一转到 `cloud.services`。
+- 兼容壳保留了老测试会 patch 的模型符号，避免清理旧代码后把现有测试夹断。
+
+### 验证
+- `./.venv/bin/python -m py_compile biz/services/cloud_servers.py`
+- `DJANGO_TEST_SQLITE=1 ./.venv/bin/python manage.py test biz.tests.CloudServerServicesTestCase.test_mark_cloud_server_ip_change_requested_falls_back_when_plan_missing biz.tests.CloudServerServicesTestCase.test_create_cloud_server_renewal_rejects_deleted_or_ipless_order --verbosity 1`
+
+## v0.5.52 - 2026-04-24
+- 将 `orders/services.py` 中一批低风险薄服务从 `biz` 转发层收回：充值列表/创建、TRX 汇率与换算展示、地址监控增删改查与阈值/开关操作。
+- `orders/services.py` 开始从纯导出壳向真实 orders 域服务过渡，为后续继续收回电商主链做准备。
+
+### 验证
+- `./.venv/bin/python -m py_compile orders/services.py`
+- `./.venv/bin/python manage.py shell -c "from orders.services import ...; print('imports ok')"`
+
 ## v0.5.51 - 2026-04-24
 - 将续费主链中的 `create_cloud_server_renewal`、`apply_cloud_server_renewal`、`pay_cloud_server_renewal_with_balance` 从 `biz.services.cloud_servers` 收回到 `cloud/services.py`。
 - 现在云域服务已覆盖续费申请、续费生效、钱包续费支付三段核心流程，`cloud/services.py` 进一步摆脱旧 `biz` 转发层。
