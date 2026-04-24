@@ -18,7 +18,6 @@ from cloud.models import AddressMonitor, CloudAsset, CloudServerOrder, CloudServ
 from cloud.provisioning import provision_cloud_server
 from dashboard_api.views import (
     _apply_keyword_filter,
-    _asset_payload,
     _days_left,
     _decimal_to_str,
     _get_keyword,
@@ -35,6 +34,58 @@ from dashboard_api.views import (
     dashboard_login_required,
     update_cloud_asset,
 )
+
+
+def _asset_payload(asset):
+    user = asset.user
+    order = asset.order
+    user_payload = None
+    if user:
+        usernames = user.usernames
+        user_payload = _user_payload({
+            'id': user.id,
+            'tg_user_id': user.tg_user_id,
+            'username': user.username,
+            'first_name': user.first_name,
+            'usernames': usernames,
+            'primary_username': usernames[0] if usernames else '',
+        })
+    expires_at = asset.actual_expires_at or getattr(order, 'service_expires_at', None)
+    return {
+        'id': asset.id,
+        'kind': asset.kind,
+        'source': asset.source,
+        'source_label': _server_source_label(asset.source),
+        'provider': asset.provider,
+        'provider_label': _provider_label(asset.provider),
+        'region_label': _region_label(getattr(asset, 'region_code', None), asset.region_name),
+        'region_name': asset.region_name,
+        'asset_name': asset.asset_name,
+        'instance_id': asset.instance_id,
+        'provider_resource_id': asset.provider_resource_id,
+        'public_ip': asset.public_ip,
+        'mtproxy_link': asset.mtproxy_link,
+        'mtproxy_port': asset.mtproxy_port,
+        'mtproxy_secret': asset.mtproxy_secret,
+        'mtproxy_host': asset.mtproxy_host,
+        'note': asset.note,
+        'actual_expires_at': _iso(expires_at),
+        'days_left': _days_left(expires_at),
+        'status_countdown': f"剩余 {_days_left(expires_at)} 天" if _days_left(expires_at) is not None else '-',
+        'price': _decimal_to_str(asset.price if asset.price is not None else (order.total_amount if order and order.total_amount is not None else None), 2),
+        'currency': asset.currency or (order.currency if order else ''),
+        'user_id': user.id if user else None,
+        'tg_user_id': user.tg_user_id if user else None,
+        'user_display_name': user_payload['display_name'] if user_payload else '未绑定用户',
+        'username_label': user_payload['username_label'] if user_payload else '-',
+        'order_id': order.id if order else None,
+        'order_no': order.order_no if order else '',
+        'status': asset.status,
+        'status_label': _status_label(asset.status, CloudAsset.STATUS_CHOICES),
+        'provider_status': '已删除' if asset.status == CloudAsset.STATUS_DELETED else asset.provider_status,
+        'is_active': asset.is_active,
+        'updated_at': _iso(asset.updated_at),
+    }
 
 
 @dashboard_login_required
