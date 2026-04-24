@@ -1,12 +1,16 @@
 """cloud 域后台 API。"""
 
+from asgiref.sync import async_to_sync
+from django.db import transaction
 from django.db.models import Count, Q
 from django.db.utils import ProgrammingError
 from django.utils import timezone
 from django.utils.dateparse import parse_datetime
+from django.views.decorators.csrf import csrf_exempt
 from django.views.decorators.http import require_GET, require_POST
 
 from cloud.models import AddressMonitor, CloudAsset, CloudServerOrder, CloudServerPlan, Server, ServerPrice
+from cloud.provisioning import provision_cloud_server
 from dashboard_api.views import (
     _apply_keyword_filter,
     _asset_payload,
@@ -19,10 +23,10 @@ from dashboard_api.views import (
     _error,
     _ok,
     _provider_label,
+    _read_payload,
     _region_label,
     _server_price_payload,
     dashboard_login_required,
-    cloud_order_detail,
     create_cloud_plan,
     delete_cloud_plan,
     servers_list,
@@ -158,6 +162,127 @@ def cloud_orders_list(request):
         item['expires_in_days'] = _days_left(service_expires_dt) if service_expires_dt else None
         item['grace_expires_in_days'] = _days_left(renew_grace_dt) if renew_grace_dt else None
     return _ok(items)
+
+
+def _append_provision_note(order, note):
+    if not note:
+        return order.provision_note
+    return '\n'.join(filter(None, [order.provision_note, note]))
+
+
+@transaction.atomic
+def _apply_cloud_order_status(order, new_status):
+    now = timezone.now()
+    old_status = order.status
+    allowed_statuses = {choice[0] for choice in CloudServerOrder.STATUS_CHOICES}
+    if new_status not in allowed_statuses:
+        raise ValueError('订单状态不正确')
+    if new_status == old_status:
+        return order
+
+    note = None
+    trigger_provision = False
+    active_statuses = {'completed', 'renew_pending', 'expiring'}
+    inactive_statuses = {'failed', 'cancelled', 'expired', 'deleted', 'suspended', 'deleting', 'pending'}
+
+    if new_status in {'paid', 'provisioning', 'completed'} and not order.paid_at:
+        order.paid_at = now
+
+    if new_status == 'completed':
+        if not order.completed_at:
+            order.completed_at = now
+        if not order.last_renewed_at:
+            order.last_renewed_at = now
+        note = '后台手动改状态为已完成。'
+    elif new_status == 'paid':
+        order.completed_at = None
+        note = '后台手动改状态为已支付。'
+        if not (order.instance_id or order.provider_resource_id or order.public_ip):
+            trigger_provision = True
+    elif new_status == 'provisioning':
+        order.completed_at = None
+        note = '后台手动改状态为创建中。'
+        if not (order.instance_id or order.provider_resource_id or order.public_ip):
+            trigger_provision = True
+    elif new_status == 'renew_pending':
+        order.completed_at = None
+        if order.service_expires_at and order.service_expires_at > now:
+            order.last_renewed_at = order.last_renewed_at or now
+        note = '后台手动改状态为待续费。'
+    elif new_status == 'expiring':
+        order.completed_at = None
+        note = '后台手动改状态为即将到期。'
+    elif new_status in inactive_statuses:
+        if new_status == 'pending':
+            order.paid_at = None
+        order.completed_at = None
+        note = f"后台手动改状态为{dict(CloudServerOrder.STATUS_CHOICES).get(new_status, new_status)}。"
+
+    order.status = new_status
+    order.provision_note = _append_provision_note(order, note)
+    order.save()
+
+    if new_status in active_statuses:
+        CloudAsset.objects.filter(order=order).update(
+            actual_expires_at=order.service_expires_at,
+            is_active=True,
+            note=order.provision_note,
+            updated_at=now,
+        )
+        Server.objects.filter(order=order).update(
+            expires_at=order.service_expires_at,
+            is_active=True,
+            status=Server.STATUS_RUNNING if new_status == 'completed' else Server.STATUS_PENDING,
+            note=order.provision_note,
+            updated_at=now,
+        )
+    elif new_status in inactive_statuses:
+        CloudAsset.objects.filter(order=order).update(
+            is_active=False,
+            note=order.provision_note,
+            updated_at=now,
+        )
+        Server.objects.filter(order=order).update(
+            is_active=False,
+            status=Server.STATUS_DELETED if new_status == 'deleted' else Server.STATUS_STOPPED,
+            note=order.provision_note,
+            updated_at=now,
+        )
+
+    if trigger_provision:
+        async_to_sync(provision_cloud_server)(order.id)
+        order.refresh_from_db()
+
+    return order
+
+
+@dashboard_login_required
+@require_GET
+def cloud_order_detail(request, order_id):
+    order = CloudServerOrder.objects.select_related('user', 'plan').filter(pk=order_id).first()
+    if not order:
+        return _error('订单不存在', status=404)
+    return _ok(_cloud_order_detail_payload(order))
+
+
+@csrf_exempt
+@dashboard_login_required
+@require_POST
+def update_cloud_order_status(request, order_id):
+    order = CloudServerOrder.objects.select_related('user', 'plan').filter(pk=order_id).first()
+    if not order:
+        return _error('订单不存在', status=404)
+    payload = _read_payload(request)
+    new_status = str(payload.get('status') or '').strip()
+    if not new_status:
+        return _error('订单状态不能为空')
+    try:
+        order = _apply_cloud_order_status(order, new_status)
+    except ValueError as exc:
+        return _error(str(exc))
+    except Exception as exc:
+        return _error(f'更新订单状态失败: {exc}', status=500)
+    return _ok(_cloud_order_detail_payload(order))
 
 
 @dashboard_login_required

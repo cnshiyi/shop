@@ -1,5 +1,15 @@
 # 版本记录
 
+## v0.5.26 - 2026-04-24
+- `bot.api` 继续承接真实实现：`verify_cloud_account` 已不再转发到 `dashboard_api.views`。
+- 已验证 `/api/dashboard/settings/cloud-accounts/<id>/verify/` 在不存在账号时稳定返回 `404 JSON`，与旧行为一致。
+
+### 验证
+- `./.venv/bin/python -m py_compile bot/api.py`
+- `./.venv/bin/python manage.py check`
+- `./.venv/bin/python manage.py shell -c "from django.test import Client; ... /api/dashboard/settings/cloud-accounts/999999/verify/ ..."`
+- `curl -i -s -X POST http://127.0.0.1:8000/api/dashboard/settings/cloud-accounts/999999/verify/ -H 'Authorization: Bearer session-1'`
+
 ## v0.5.25 - 2026-04-24
 - `bot.api` 继续承接真实实现：`overview` 已从 `dashboard_api.views` 迁入 `bot` 域。
 - `dashboard_api/urls.py` 中 `dashboard/overview/` 已改为走 `bot_api.overview`，并通过 Django 测试客户端与本地 HTTP 双重验证返回 `200 JSON`。
