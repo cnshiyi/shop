@@ -15,7 +15,7 @@ TIMEOUTS = {
     'instance_visible_seconds': 600,
     'instance_running_seconds': 900,
 }
-KEYPAIR_DIR = Path(__file__).resolve().parents[1] / 'tmp' / 'aliyun-keypairs'
+KEYPAIR_DIR = Path.home() / '.shop-secrets' / 'aliyun-keypairs'
 
 
 def _rand_password(length: int = 18) -> str:

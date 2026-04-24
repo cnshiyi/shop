@@ -14,7 +14,7 @@ MTPROXY_DIR = '/home/mtproxy'
 MTPROXY_PORT = 9528
 MTPROXY_FAKE_TLS_DOMAIN = 'azure.microsoft.com'
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
-DEFAULT_LIGHTSAIL_KEY_DIR = PROJECT_ROOT / 'secrets' / 'lightsail'
+DEFAULT_LIGHTSAIL_KEY_DIR = Path.home() / '.shop-secrets' / 'lightsail'
 
 
 def _load_aws_public_key() -> str:
