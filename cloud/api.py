@@ -1,11 +1,12 @@
 """cloud 域后台 API。"""
 
+from django.db.models import Count
 from django.db.utils import ProgrammingError
 from django.utils import timezone
 from django.utils.dateparse import parse_datetime
 from django.views.decorators.http import require_GET
 
-from cloud.models import AddressMonitor, CloudAsset, CloudServerOrder, CloudServerPlan, ServerPrice
+from cloud.models import AddressMonitor, CloudAsset, CloudServerOrder, CloudServerPlan, Server, ServerPrice
 from dashboard_api.views import (
     _apply_keyword_filter,
     _asset_payload,
@@ -16,13 +17,14 @@ from dashboard_api.views import (
     _get_keyword,
     _iso,
     _ok,
+    _provider_label,
+    _region_label,
     _server_price_payload,
     dashboard_login_required,
     cloud_order_detail,
     create_cloud_plan,
     delete_cloud_plan,
     servers_list,
-    servers_statistics,
     sync_cloud_assets,
     sync_cloud_plans,
     sync_servers,
@@ -128,6 +130,89 @@ def cloud_orders_list(request):
         item['expires_in_days'] = _days_left(service_expires_dt) if service_expires_dt else None
         item['grace_expires_in_days'] = _days_left(renew_grace_dt) if renew_grace_dt else None
     return _ok(items)
+
+
+@dashboard_login_required
+@require_GET
+def servers_statistics(request):
+    keyword = _get_keyword(request)
+    queryset = Server.objects.all()
+    queryset = _apply_keyword_filter(
+        queryset,
+        keyword,
+        ['region_code', 'region_name', 'provider', 'account_label', 'server_name', 'instance_id', 'public_ip'],
+    )
+    rows = list(
+        queryset
+        .values('provider', 'region_code', 'region_name', 'account_label')
+        .annotate(total_count=Count('id'))
+        .order_by('account_label', 'provider', 'region_name')
+    )
+
+    region_pairs = []
+    region_seen = set()
+    for row in rows:
+        region_code = row['region_code'] or ''
+        region_label = _region_label(region_code, row['region_name'])
+        key = (region_code, region_label)
+        if key not in region_seen:
+            region_seen.add(key)
+            region_pairs.append({'region_code': region_code, 'region_label': region_label})
+    region_pairs.sort(key=lambda item: (item['region_label'], item['region_code']))
+
+    account_map = {}
+    for row in rows:
+        account_id = row['account_label'] or '-'
+        entry = account_map.setdefault(
+            account_id,
+            {
+                'account_id': account_id,
+                'account_label': account_id,
+                'provider_label': _provider_label(row['provider']),
+                'regions': {},
+                'total_count': 0,
+            },
+        )
+        region_code = row['region_code'] or ''
+        region_label = _region_label(region_code, row['region_name'])
+        region_key = region_code or region_label
+        count = row['total_count']
+        entry['regions'][region_key] = entry['regions'].get(region_key, 0) + count
+        entry['total_count'] += count
+
+    items = []
+    totals = {'account_id': '合计', 'account_label': '合计', 'provider_label': '-', 'regions': {}, 'total_count': 0}
+    for account_id in sorted(account_map.keys()):
+        entry = account_map[account_id]
+        row_payload = {
+            'account_id': entry['account_id'],
+            'account_label': entry['account_label'],
+            'provider_label': entry['provider_label'],
+            'total_count': entry['total_count'],
+        }
+        for region in region_pairs:
+            region_key = region['region_code'] or region['region_label']
+            value = entry['regions'].get(region_key, 0)
+            row_payload[region_key] = value
+            totals['regions'][region_key] = totals['regions'].get(region_key, 0) + value
+        totals['total_count'] += entry['total_count']
+        items.append(row_payload)
+
+    total_row = {
+        'account_id': totals['account_id'],
+        'account_label': totals['account_label'],
+        'provider_label': totals['provider_label'],
+        'total_count': totals['total_count'],
+    }
+    for region in region_pairs:
+        region_key = region['region_code'] or region['region_label']
+        total_row[region_key] = totals['regions'].get(region_key, 0)
+
+    return _ok({
+        'regions': region_pairs,
+        'items': items,
+        'summary': total_row,
+    })
 
 
 @dashboard_login_required
