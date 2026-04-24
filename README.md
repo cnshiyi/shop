@@ -190,7 +190,7 @@ Redis 中维护按天隔离的临时统计：
 ## 开发说明
 - 监控地址、站点配置、每日统计均优先走 Redis
 - Redis 不可用时，部分功能会自动降级到数据库
-- `tron/cache.py` 兼容壳已删除
+- 旧 `tron/cache.py` 兼容壳已删除，TRON 运行时已并入 `orders/` 与 `cloud/`
 - 缓存职责现固定为：`core/cache.py` + `cloud/cache.py`
 
 ## 配置与敏感信息管理

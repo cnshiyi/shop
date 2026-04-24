@@ -13,6 +13,6 @@
 3. 默认目录 `~/.shop-secrets/lightsail/`
 
 ## 说明
-- 如果需要迁移旧环境中的项目内私钥，请把 `secrets/lightsail/*.pem` 挪到 `~/.shop-secrets/lightsail/`
+- 如果需要迁移旧环境中的项目内私钥，请把旧私钥文件挪到 `~/.shop-secrets/lightsail/`
 - 临时生成的阿里云 keypair 也会默认写入 `~/.shop-secrets/aliyun-keypairs/`
 - 建议目录权限保持为当前用户私有，私钥文件权限为 `600`

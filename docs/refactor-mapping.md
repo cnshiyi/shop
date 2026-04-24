@@ -34,7 +34,7 @@
 - `biz/services/monitoring.py` → `orders/services.py` / `cloud/cache.py`
 
 ### 删除或下线
-- `biz/`：已退出 `INSTALLED_APPS`，当前仅保留兼容导入目录与测试命名空间
+- `biz/`：已退出 `INSTALLED_APPS`，目录本体已删除，测试已迁入 `cloud/tests.py`
 - `dashboard_api/`：已退出 `INSTALLED_APPS`，目录本身也已删除，路由已并回 `shop/dashboard_urls.py`
 - `dashboard_api/views.py`：已删除
 - `accounts_telegramusername` 相关逻辑：下线
@@ -82,7 +82,7 @@
 
 ### 第三阶段：迁移 imports
 - [x] 核心运行时模块已基本改从 `bot/orders/cloud` 导入
-- [x] `biz` 已降为最薄兼容壳并退出 `INSTALLED_APPS`
+- [x] `biz` 已删除并退出 `INSTALLED_APPS`
 
 ### 第四阶段：迁移表名
 - [ ] 为目标模型统一补 `Meta.db_table`
@@ -121,10 +121,10 @@
 - [x] `shop/dashboard_urls.py` 已完全改走 `bot/orders/cloud` API 入口
 
 ### 第六阶段：收尾
-- [ ] 执行测试并确认通过
-- [ ] 写版本记录 / 更新变更说明
-- [ ] 提交 Git
-- [ ] 停止巡检任务
+- [x] 执行测试并确认通过
+- [x] 写版本记录 / 更新变更说明
+- [x] 提交 Git
+- [x] 停止巡检任务
 
 ## 六、清理原则
 - 每完成一段迁移，都必须检查并删除对应旧实现
