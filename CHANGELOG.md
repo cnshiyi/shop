@@ -1,5 +1,16 @@
 # 版本记录
 
+## v0.5.13 - 2026-04-24
+- `bot.api` 不再只是纯转发：已实际接管站点配置列表/初始化/更新，以及云账号列表/新增/更新/删除接口实现。
+- `dashboard_api/urls.py` 对应路由已切到 `bot.api` 的真实实现，后台相关接口烟测返回正常。
+- 这让 `dashboard_api.views` 进一步退化为兼容层，后续可继续把订单与云资源接口按同样方式搬离。
+
+### 验证
+- `./.venv/bin/python -m py_compile bot/api.py dashboard_api/urls.py`
+- `./.venv/bin/python manage.py check`
+- `curl -s http://127.0.0.1:8000/api/dashboard/settings/site-configs/ -H 'Authorization: Bearer session-1'`
+- `curl -s http://127.0.0.1:8000/api/dashboard/settings/cloud-accounts/ -H 'Authorization: Bearer session-1'`
+
 ## v0.5.12 - 2026-04-24
 - `dashboard_api/urls.py` 已开始真正按领域路由：用户/商品/配置入口改走 `bot.api`，订单/充值入口改走 `orders.api`，云资源/监控/套餐入口改走 `cloud.api`。
 - 补充 `docs/installed-apps-cutover-plan.md`，明确了当前不能直接删旧 app 的原因，以及后续 `INSTALLED_APPS` 收口顺序。
