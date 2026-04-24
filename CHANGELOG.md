@@ -1,5 +1,19 @@
 # 版本记录
 
+## v0.5.91 - 2026-04-24
+- 第二轮 migration graph 脱钩实验已打通：`mall` 已从 `INSTALLED_APPS` 移除。
+- 具体做法：
+  - `orders.0003_move_product_cart_order_from_mall` 不再依赖 `mall.0028`，并补上 `order_product` / `order_cart_item` / `order_order` 的 fresh DB 建表 `database_operations`
+  - `cloud.0001_initial` 补上云模型 fresh DB 建表 `database_operations`，承接原先由 `mall` 历史链提供的建表职责
+  - `accounts.0011_move_telegramuser_state_to_bot` 从删除 `TelegramUser` 中拆出时机控制，新建 `accounts.0013_delete_telegramuser_after_domain_cutover`，消除与 `orders.0002/0003/0004` 的循环依赖
+- 结果：`mall` 不再需要留在运行时 app 集；`check`、`makemigrations --check --dry-run`、`DJANGO_TEST_SQLITE=1 manage.py test` 继续通过。
+
+### 验证
+- `./.venv/bin/python -m py_compile cloud/migrations/0001_initial.py orders/migrations/0003_move_product_cart_order_from_mall.py accounts/migrations/0011_move_telegramuser_state_to_bot.py accounts/migrations/0013_delete_telegramuser_after_domain_cutover.py shop/settings.py`
+- `./.venv/bin/python manage.py check`
+- `./.venv/bin/python manage.py makemigrations --check --dry-run`
+- `DJANGO_TEST_SQLITE=1 ./.venv/bin/python manage.py test --verbosity 1`
+
 ## v0.5.90 - 2026-04-24
 - 第一轮 migration graph 脱钩实验已打通：`monitoring` 已从 `INSTALLED_APPS` 移除。
 - 具体做法：

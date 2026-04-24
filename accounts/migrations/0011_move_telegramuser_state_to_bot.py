@@ -7,7 +7,6 @@ class Migration(migrations.Migration):
     dependencies = [
         ('accounts', '0010_alter_balanceledger_table_alter_telegramuser_table'),
         ('finance', '0003_move_recharge_state_to_orders'),
-        ('mall', '0028_switch_user_fk_to_bot'),
         ('cloud', '0002_addressmonitor_resourcesnapshot_dailyaddressstat'),
     ]
 
@@ -19,9 +18,6 @@ class Migration(migrations.Migration):
                     model_name='balanceledger',
                     name='user',
                     field=models.ForeignKey(on_delete=django.db.models.deletion.CASCADE, related_name='balance_ledgers', to='bot.telegramuser', verbose_name='用户'),
-                ),
-                migrations.DeleteModel(
-                    name='TelegramUser',
                 ),
             ],
         ),
