@@ -27,6 +27,7 @@ urlpatterns = [
     path('products/create/', bot_api.create_product, name='product-create'),
     path('products/<int:product_id>/', bot_api.update_product, name='product-update'),
     path('cloud-assets/', cloud_api.cloud_assets_list, name='cloud-assets-list'),
+    path('cloud-assets/<int:asset_id>/', cloud_api.update_cloud_asset, name='cloud-asset-update'),
     path('cloud-assets/sync/', cloud_api.sync_cloud_assets, name='cloud-assets-sync'),
     path('cloud-orders/', cloud_api.cloud_orders_list, name='cloud-orders-list'),
     path('cloud-orders/<int:order_id>/', cloud_api.cloud_order_detail, name='cloud-order-detail'),

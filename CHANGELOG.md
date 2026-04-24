@@ -1,5 +1,14 @@
 # 版本记录
 
+## v0.5.46 - 2026-04-24
+- 将 `cloud/api.py` 对 `dashboard_api.views` 的通用 helper 依赖切到 `bot.api`，把登录校验、响应封装、区域/状态/用户等公共 helper 向新域兼容层集中。
+- 当前 `cloud/api.py` 仅暂留对 `update_cloud_asset` 的旧视图依赖，后续可继续把这段真实逻辑迁出，进一步瘦身 `dashboard_api.views`。
+
+### 验证
+- `./.venv/bin/python -m py_compile bot/api.py cloud/api.py dashboard_api/views.py`
+- `./.venv/bin/python manage.py check`
+- `./.venv/bin/python manage.py shell -c "from django.test import Client; ... /api/dashboard/cloud-assets/ ... /api/dashboard/overview/ ..."`
+
 ## v0.5.45 - 2026-04-24
 - 修正 AWS Lightsail 配置同步口径：不再把 `win`、`ipv6`、`c_/m_/g_` 等变体一并算作常规在售规格，并按套餐名去重，仅保留主套餐档位。
 - 修正后 AWS 每地区从 `100` 条压到 `11` 条，避免“配置同步”页把底层 bundle 变体误当成可售规格总数。

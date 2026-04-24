@@ -26,14 +26,52 @@ from bot.api import (
     _read_payload,
     _region_label,
     _server_source_label,
+    _split_usernames,
     _status_label,
     _user_payload,
     dashboard_login_required,
 )
+from bot.models import TelegramUser
 from cloud.services import ensure_cloud_server_pricing, refresh_custom_plan_cache
 from cloud.models import AddressMonitor, CloudAsset, CloudServerOrder, CloudServerPlan, Server, ServerPrice
 from cloud.provisioning import provision_cloud_server
-from dashboard_api.views import update_cloud_asset
+
+
+def _resolve_telegram_user(value):
+    raw = str(value or '').strip().lstrip('@')
+    if not raw:
+        return None
+    queryset = TelegramUser.objects.all()
+    if raw.isdigit():
+        return queryset.filter(Q(id=int(raw)) | Q(tg_user_id=int(raw))).first()
+    return queryset.filter(username__icontains=raw).first()
+
+
+def _parse_iso_datetime(value, field_label='时间'):
+    raw = str(value or '').strip()
+    if not raw:
+        return None
+    parsed = parse_datetime(raw)
+    if parsed is None:
+        raise ValueError(f'{field_label}格式不正确，请使用 ISO 时间')
+    if timezone.is_naive(parsed):
+        parsed = timezone.make_aware(parsed, timezone.get_current_timezone())
+    return parsed
+
+
+def _sync_telegram_username(user, username=None):
+    incoming = _split_usernames(username)
+    if not incoming:
+        return
+    merged = []
+    seen = set()
+    for item in [*user.usernames, *incoming]:
+        key = str(item).lower()
+        if item and key not in seen:
+            merged.append(item)
+            seen.add(key)
+    user.username = ','.join(merged)
+    user.save(update_fields=['username', 'updated_at'])
 
 
 def _asset_payload(asset):
@@ -86,6 +124,168 @@ def _asset_payload(asset):
         'is_active': asset.is_active,
         'updated_at': _iso(asset.updated_at),
     }
+
+
+@csrf_exempt
+@dashboard_login_required
+@require_http_methods(['POST', 'PUT', 'PATCH'])
+def update_cloud_asset(request, asset_id):
+    payload = _read_payload(request)
+    try:
+        with transaction.atomic():
+            asset = CloudAsset.objects.select_for_update().select_related('order', 'user').get(pk=asset_id)
+
+            server = None
+            server_lookup = Q()
+            if asset.instance_id:
+                server_lookup |= Q(instance_id=asset.instance_id)
+            if asset.provider_resource_id:
+                server_lookup |= Q(provider_resource_id=asset.provider_resource_id)
+            if asset.order_id:
+                server_lookup |= Q(order_id=asset.order_id)
+            if server_lookup:
+                server = Server.objects.select_for_update().filter(server_lookup).first()
+
+            user_lookup = payload.get('user_query') or payload.get('user_id') or payload.get('tg_user_id') or payload.get('username')
+            username_raw = payload.get('user_query') or payload.get('username')
+            clear_user = str(payload.get('clear_user') or '').lower() in {'1', 'true', 'yes', 'on'}
+            if clear_user:
+                asset.user = None
+                if server:
+                    server.user = None
+                if asset.order_id:
+                    asset.order.user = None
+                    asset.order.last_user_id = None
+                    asset.order.save(update_fields=['user', 'last_user_id', 'updated_at'])
+            elif user_lookup not in (None, ''):
+                user = _resolve_telegram_user(user_lookup)
+                if not user:
+                    return _error('未找到匹配的 Telegram 用户', status=404)
+                asset.user = user
+                _sync_telegram_username(user, username_raw)
+                if server:
+                    server.user = user
+                if asset.order_id:
+                    asset.order.user = user
+                    asset.order.last_user_id = user.tg_user_id
+                    asset.order.save(update_fields=['user', 'last_user_id', 'updated_at'])
+
+            if 'price' in payload:
+                try:
+                    price = _parse_decimal(payload.get('price'), '价格').quantize(Decimal('0.01'))
+                except ValueError as exc:
+                    return _error(str(exc), status=400)
+                asset.price = price
+                if asset.order_id:
+                    asset.order.total_amount = price
+                    asset.order.save(update_fields=['total_amount', 'updated_at'])
+
+            if 'currency' in payload:
+                asset.currency = (payload.get('currency') or 'USDT').strip() or 'USDT'
+                if asset.order_id and asset.order.currency != asset.currency:
+                    asset.order.currency = asset.currency
+                    asset.order.save(update_fields=['currency', 'updated_at'])
+
+            if server and 'account_label' in payload:
+                server.account_label = payload.get('account_label') or None
+
+            if 'actual_expires_at' in payload:
+                try:
+                    asset.actual_expires_at = _parse_iso_datetime(payload.get('actual_expires_at'), '到期时间')
+                except ValueError as exc:
+                    return _error(str(exc), status=400)
+                if asset.order_id:
+                    asset.order.service_expires_at = asset.actual_expires_at
+                    asset.order.save(update_fields=['service_expires_at', 'updated_at'])
+                if server:
+                    server.expires_at = asset.actual_expires_at
+
+            if 'mtproxy_link' in payload and asset.order_id:
+                asset.order.mtproxy_link = payload.get('mtproxy_link') or None
+                asset.order.save(update_fields=['mtproxy_link', 'updated_at'])
+
+            if 'provider_resource_id' in payload and asset.order_id:
+                asset.order.provider_resource_id = payload.get('provider_resource_id') or None
+                asset.order.save(update_fields=['provider_resource_id', 'updated_at'])
+
+            if 'public_ip' in payload and asset.order_id:
+                asset.order.public_ip = payload.get('public_ip') or None
+                asset.order.save(update_fields=['public_ip', 'updated_at'])
+
+            if 'public_ip' in payload:
+                old_public_ip = asset.public_ip
+                new_public_ip = payload.get('public_ip') or None
+                if old_public_ip and old_public_ip != new_public_ip:
+                    asset.previous_public_ip = old_public_ip
+
+            for field in ('asset_name', 'public_ip', 'provider_resource_id', 'mtproxy_link', 'mtproxy_secret', 'mtproxy_host', 'note'):
+                if field in payload:
+                    setattr(asset, field, payload.get(field) or None)
+            if 'mtproxy_port' in payload:
+                mtproxy_port = payload.get('mtproxy_port')
+                asset.mtproxy_port = int(mtproxy_port) if mtproxy_port not in (None, '') else None
+            for field in ('provider', 'region_name', 'region_code'):
+                if field in payload:
+                    setattr(asset, field, payload.get(field) or None)
+            if server:
+                if 'asset_name' in payload:
+                    server.server_name = payload.get('asset_name') or None
+                if 'public_ip' in payload:
+                    old_public_ip = server.public_ip
+                    server.public_ip = payload.get('public_ip') or None
+                    if old_public_ip and old_public_ip != server.public_ip:
+                        server.previous_public_ip = old_public_ip
+                if 'provider_resource_id' in payload:
+                    server.provider_resource_id = payload.get('provider_resource_id') or None
+                if 'provider' in payload:
+                    server.provider = payload.get('provider') or None
+                if 'region_name' in payload:
+                    server.region_name = payload.get('region_name') or None
+                if 'region_code' in payload:
+                    server.region_code = payload.get('region_code') or None
+                if 'note' in payload:
+                    server.note = payload.get('note') or None
+            if 'is_active' in payload:
+                asset.is_active = str(payload.get('is_active')).lower() in {'1', 'true', 'yes', 'on'}
+                if server:
+                    server.is_active = asset.is_active
+
+            if user_lookup not in (None, '') and server:
+                server.user = asset.user
+            if asset.kind == CloudAsset.KIND_SERVER and not server:
+                server = Server(
+                    source=(asset.source or Server.SOURCE_ORDER) if asset.source in {choice[0] for choice in Server.SOURCE_CHOICES} else Server.SOURCE_ORDER,
+                    instance_id=asset.instance_id or asset.provider_resource_id or asset.public_ip,
+                )
+            if server:
+                if asset.order_id:
+                    server.order = asset.order
+                if asset.instance_id:
+                    server.instance_id = asset.instance_id
+                elif not server.instance_id:
+                    server.instance_id = asset.provider_resource_id or asset.public_ip
+                server.user = asset.user
+                server.source = server.source or Server.SOURCE_ORDER
+                server.provider = asset.provider
+                server.region_name = asset.region_name
+                server.region_code = asset.region_code
+                server.provider_resource_id = asset.provider_resource_id
+                server.public_ip = asset.public_ip
+                server.note = asset.note
+                server.expires_at = asset.actual_expires_at
+                server.is_active = asset.is_active
+                if asset.asset_name:
+                    server.server_name = asset.asset_name
+                if server.account_label in (None, ''):
+                    server.account_label = asset.provider
+                server.save()
+
+            asset.save()
+    except CloudAsset.DoesNotExist:
+        return _error('云资产不存在', status=404)
+
+    asset = CloudAsset.objects.select_related('user', 'order').get(pk=asset_id)
+    return _ok(_asset_payload(asset))
 
 
 @dashboard_login_required
