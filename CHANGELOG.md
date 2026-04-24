@@ -1,5 +1,15 @@
 # 版本记录
 
+## v0.5.57 - 2026-04-24
+- `orders/services.py` 已收回余额明细、地址下单、购物车余额支付、单商品余额支付等剩余电商链路。
+- `biz/services/commerce.py` 已删除最后一批旧真实实现，缩成纯兼容壳，统一转发到 `orders.services`。
+- 至此 `biz/services/commerce.py` 不再承载运行时业务逻辑，只保留兼容出口与支付金额 helper 的新来源。
+
+### 验证
+- `./.venv/bin/python -m py_compile orders/services.py biz/services/commerce.py bot/handlers.py cloud/services.py biz/services/__init__.py`
+- `./.venv/bin/python manage.py check`
+- `DJANGO_TEST_SQLITE=1 ./.venv/bin/python manage.py test biz.tests --verbosity 1`
+
 ## v0.5.56 - 2026-04-24
 - `dashboard_api/views.py` 已清空为兼容模块，旧后台 API 真逻辑不再保留在该文件中。
 - `dashboard_api/urls.py` 去掉了对旧 `views` 的无用引用。
