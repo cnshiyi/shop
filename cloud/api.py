@@ -20,7 +20,6 @@ from dashboard_api.views import (
     _apply_keyword_filter,
     _asset_payload,
     _cloud_order_detail_payload,
-    _cloud_plan_payload,
     _days_left,
     _decimal_to_str,
     _get_keyword,
@@ -768,6 +767,29 @@ def sync_cloud_plans(request):
         'before_regions': before_regions,
         'provider_region_summary': provider_region_summary,
     })
+
+
+def _cloud_plan_payload(plan):
+    return {
+        'id': plan.id,
+        'provider': plan.provider,
+        'provider_label': _provider_label(plan.provider),
+        'region_code': plan.region_code,
+        'region_name': plan.region_name,
+        'region_label': _region_label(plan.region_code, plan.region_name),
+        'plan_name': plan.plan_name,
+        'plan_description': plan.plan_description,
+        'cpu': plan.cpu,
+        'memory': plan.memory,
+        'storage': plan.storage,
+        'bandwidth': plan.bandwidth,
+        'cost_price': _decimal_to_str(getattr(plan, 'cost_price', 0)),
+        'price': _decimal_to_str(plan.price),
+        'currency': plan.currency,
+        'sort_order': plan.sort_order,
+        'is_active': plan.is_active,
+        'updated_at': _iso(plan.updated_at),
+    }
 
 
 @dashboard_login_required
