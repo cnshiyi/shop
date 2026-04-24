@@ -40,87 +40,31 @@
   - 已从 `INSTALLED_APPS` 移除
   - 当前只剩兼容导入层与测试 patch 路径
 
-## 最小桥接层形态
+## 桥接结论
 
-对 `accounts` / `finance` / `mall` / `monitoring`，当前建议的**最小可行桥接层**为：
+这份方案对应的桥接实验已经完成：
 
-- `__init__.py`
-- `apps.py`
-- `migrations/`
+- `accounts`
+- `finance`
+- `mall`
+- `monitoring`
 
-除此之外，其余运行时代码都应删除。
+都已从 `INSTALLED_APPS` 脱钩成功。
 
-## 为什么现在还不能继续删
+因此，“最小桥接层”现在只作为历史设计复盘存在；这些旧目录已经不再需要继续保留在当前工作树中。
 
-### 1. `apps.py` 还不能删
-
-只要旧 app label 还在 `INSTALLED_APPS` 中，Django 就仍需要能够导入并识别该 app。
-
-因此在当前阶段：
-
-- `apps.py` 是最小必要件
-- 继续删除 `apps.py` 会直接让 app 无法被 Django 正常识别
-
-### 2. `migrations/` 还不能删
-
-这些旧 app 当前真正的核心职责，已经不是业务实现，而是：
-
-- 提供历史 migration graph 节点
-- 支持 fresh test DB 从零构建数据库状态
-- 承接 app label 级别的依赖关系
-
-如果删掉 `migrations/`，会直接导致：
-
-- `NodeNotFoundError`
-- fresh DB 无法重建历史表/状态链
-- 当前 state-only cutover 链条断裂
+仍然保留的只有历史 migration 文件中的旧 app label 记录，这属于迁移历史的一部分，不等于运行时目录仍然存在。
 
 ## 当前已完成的压缩
 
-### `accounts`
-已删除：
-- `models.py`
-- `services.py`
-- `admin.py`
+以下旧目录都已从当前工作树删除：
 
-当前保留：
-- `__init__.py`
-- `apps.py`
-- `management/commands/`（已继续清理为最小残留）
-- `migrations/`
+- `accounts/`
+- `finance/`
+- `mall/`
+- `monitoring/`
 
-### `finance`
-已删除：
-- `models.py`
-- `admin.py`
-
-当前保留：
-- `__init__.py`
-- `apps.py`
-- `migrations/`
-
-### `mall`
-已删除：
-- `models.py`
-- `admin.py`
-- `management/commands/*`（已迁入 `cloud/management/commands/*`）
-- `management/` 空包
-
-当前保留：
-- `__init__.py`
-- `apps.py`
-- `migrations/`
-
-### `monitoring`
-已删除：
-- `models.py`
-- `admin.py`
-- `cache.py`
-
-当前保留：
-- `__init__.py`
-- `apps.py`
-- `migrations/`
+相关模型、服务、admin、命令与运行时 app 注册职责都已迁入 `bot/`、`orders/`、`cloud/` 与 `shop/`。
 
 ## 哪些阻塞是“图问题”，不是“代码问题”
 

@@ -22,12 +22,13 @@
 - `tron/parser.py` → `orders/tron_parser.py`
 - `tron/scanner.py` → `orders/payment_scanner.py`
 - `biz/services/commerce.py` → `orders/services.py`
-- `biz/services/payments.py` → `orders/payment_services.py`
+- `biz/services/payments.py` → `orders/services.py`
 
 ### 迁入 `cloud/`
 - `mall` 中云套餐/云订单/云资产/服务器模型 → `cloud/models.py`
 - `monitoring/models.py` → `cloud/models.py`
 - `monitoring/cache.py` → `cloud/cache.py`
+- `mall/management/commands/*` → `cloud/management/commands/*`
 - `biz/services/cloud_servers.py` → `cloud/services.py`
 - `biz/services/custom.py` → `cloud/services.py`
 - `biz/services/monitoring.py` → `orders/services.py` / `cloud/cache.py`
@@ -114,9 +115,9 @@
 - [x] `external_sync_logs` → `core_sync_log`
 
 ### 第五阶段：删除旧目录
-- [x] 删除 `accounts/finance/mall/monitoring` 中运行时模型/服务/admin/命令兼容壳；当前只剩历史迁移目录与最小包骨架
+- [x] 删除 `accounts/finance/mall/monitoring` 旧目录本体；相关运行时职责已迁入新域
 - [x] 删除 `biz/dashboard_api` 中已无运行时必要的业务实现与 app 注册残留
-- [x] 兼容壳已大幅压薄；新实现稳定后优先直接删除旧层
+- [x] 兼容壳已基本清空；剩余历史痕迹仅存在于迁移链、测试命名空间与复盘文档
 - [x] `shop/dashboard_urls.py` 已完全改走 `bot/orders/cloud` API 入口
 
 ### 第六阶段：收尾

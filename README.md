@@ -30,15 +30,15 @@
 - `docs/DATA_FLOW_AND_PERSISTENCE.md`：数据产生/获取入口盘点与数据库落库规范
 - `docs/DB_NAMING_CONVENTIONS.md`：数据库对象命名统一规范
 
-### 旧目录说明
-以下目录仍在仓库中，但当前目标已经降级为兼容/迁移壳，不再作为真实业务归属：
-- `accounts/`
-- `finance/`
-- `mall/`
-- `monitoring/`
-- `biz/`（当前仅保留测试命名空间与最小包骨架）
+### 旧目录收口说明
+以下旧目录的运行时职责已经全部迁入新域，并已从当前工作树删除：
+- `accounts/` → 已并入 `bot/` 与 `orders/`
+- `finance/` → 已并入 `orders/`
+- `mall/` → 已并入 `orders/` 与 `cloud/`
+- `monitoring/` → 已并入 `cloud/`
+- `dashboard_api/` → 已并回 `shop/dashboard_urls.py`
 
-补充说明：后台聚合路由已并回 `shop/dashboard_urls.py`。
+补充说明：`biz/` 当前仅保留测试命名空间最小骨架，不再承载运行时实现。
 
 ## 启动方式
 

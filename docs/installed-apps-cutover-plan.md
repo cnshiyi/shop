@@ -21,51 +21,16 @@
 - `orders/models.py` / `orders/services.py` / `orders/api.py` / `orders/ledger.py`
 - `cloud/models.py` / `cloud/services.py` / `cloud/api.py` / `cloud/cache.py`
 
-## 为什么现在还不能直接删剩余旧 app
+## 当前状态说明
 
-### 1. 历史 migration 仍绑定旧 app label
+运行时层面的旧 app 收口已经完成：
 
-当前最大的硬钉子已经不再是运行时代码，而是 Django 迁移机制本身：
+- `accounts` / `finance` / `mall` / `monitoring` 已全部退出 `INSTALLED_APPS`
+- 上述旧目录也已从当前工作树删除
+- `dashboard_api` 已并回 `shop/dashboard_urls.py`
+- `biz` 已退出运行时，仅保留测试命名空间骨架
 
-- 历史 migration 依赖 `accounts` / `finance` / `mall` / `monitoring`
-- fresh test DB 初始化时仍需要这些 app label 存在
-- 不能为了删目录直接改整条历史迁移链
-
-### 2. 旧 app 仍承载“兼容 state 壳”职责
-
-当前真实模型已经迁入新域，旧 app 现在已进一步压成近似 migration-only 壳：
-
-- `accounts.models`：已删除
-- `finance.models`：已删除
-- `mall.models`：已删除
-- `monitoring.models`：已删除
-- `accounts/services.py`：已删除
-- `mall/management/commands/*`：已迁入 `cloud/management/commands/*`
-- `accounts/finance/mall/monitoring` 的 `admin.py`：已删除
-- `mall/management/` 空包：已删除
-
-这说明旧 app 当前主要只为历史 migration app label 服务，运行时模型/服务/管理命令/admin 兼容出口也已基本退场。
-
-## 最小桥接层目标形态
-
-对 `accounts` / `finance` / `mall` / `monitoring`，当前建议的最小可行桥接层是：
-
-- `__init__.py`
-- `apps.py`
-- `migrations/`
-
-其余内容原则上都不再保留。
-
-### 为什么 `apps.py` 还不能删
-
-因为只要这些 app label 还在 `INSTALLED_APPS` 中，Django 就仍需要能导入并识别这些 app。
-当前阶段，`apps.py` 是最小必要件；真正阻塞继续删除的，不是业务代码，而是 migration graph 对这些 label 的依赖。
-
-### 哪些可以被更小桥替代
-
-- `dashboard_api`：已完成，路由已并回 `shop/dashboard_urls.py`
-- `biz`：已完成，已退出 `INSTALLED_APPS`
-- `accounts` / `finance` / `mall` / `monitoring`：短期内不能再小于 `apps.py + migrations/`，除非先解决 migration graph 脱钩
+仍需保留的“旧 app 痕迹”只存在于历史 migration 链与相关复盘文档中，而不再属于运行时目录结构。
 
 ### 3. `biz` 仅剩测试命名空间压力
 
