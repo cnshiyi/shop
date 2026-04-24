@@ -1,10 +1,10 @@
 """cloud 域后台 API。"""
 
-from django.db.models import Count
+from django.db.models import Count, Q
 from django.db.utils import ProgrammingError
 from django.utils import timezone
 from django.utils.dateparse import parse_datetime
-from django.views.decorators.http import require_GET
+from django.views.decorators.http import require_GET, require_POST
 
 from cloud.models import AddressMonitor, CloudAsset, CloudServerOrder, CloudServerPlan, Server, ServerPrice
 from dashboard_api.views import (
@@ -16,6 +16,7 @@ from dashboard_api.views import (
     _decimal_to_str,
     _get_keyword,
     _iso,
+    _error,
     _ok,
     _provider_label,
     _region_label,
@@ -157,6 +158,57 @@ def cloud_orders_list(request):
         item['expires_in_days'] = _days_left(service_expires_dt) if service_expires_dt else None
         item['grace_expires_in_days'] = _days_left(renew_grace_dt) if renew_grace_dt else None
     return _ok(items)
+
+
+@dashboard_login_required
+@require_POST
+def delete_server(request, server_id: int):
+    server = Server.objects.select_related('order').filter(id=server_id).first()
+    if not server:
+        return _error('服务器不存在', status=404)
+    now = timezone.now()
+    note = f'后台手动删除服务器记录；时间: {now.isoformat()}'
+    previous_public_ip = server.public_ip or server.previous_public_ip
+    order = server.order
+    current_instance_id = server.instance_id
+    current_provider_resource_id = server.provider_resource_id
+    server.status = Server.STATUS_DELETED
+    server.provider_status = '已删除'
+    server.is_active = False
+    server.previous_public_ip = previous_public_ip
+    server.public_ip = None
+    server.instance_id = None
+    server.provider_resource_id = None
+    server.note = '\n'.join(filter(None, [server.note, note]))
+    server.save(update_fields=['status', 'provider_status', 'is_active', 'previous_public_ip', 'public_ip', 'instance_id', 'provider_resource_id', 'note', 'updated_at'])
+    asset_filter = Q()
+    if order:
+        asset_filter |= Q(order=order)
+    if current_instance_id:
+        asset_filter |= Q(instance_id=current_instance_id)
+    if current_provider_resource_id:
+        asset_filter |= Q(provider_resource_id=current_provider_resource_id)
+    if asset_filter:
+        CloudAsset.objects.filter(asset_filter).update(
+            status=CloudAsset.STATUS_DELETED,
+            provider_status='已删除',
+            is_active=False,
+            previous_public_ip=previous_public_ip,
+            public_ip=None,
+            instance_id=None,
+            provider_resource_id=None,
+            note=note,
+            updated_at=now,
+        )
+    if order:
+        order.status = 'deleted'
+        order.previous_public_ip = previous_public_ip
+        order.public_ip = ''
+        order.instance_id = ''
+        order.provider_resource_id = ''
+        order.provision_note = '\n'.join(filter(None, [order.provision_note, note]))
+        order.save(update_fields=['status', 'previous_public_ip', 'public_ip', 'instance_id', 'provider_resource_id', 'provision_note', 'updated_at'])
+    return _ok(True)
 
 
 @dashboard_login_required
@@ -320,6 +372,7 @@ __all__ = [
     'cloud_pricing_list',
     'create_cloud_plan',
     'delete_cloud_plan',
+    'delete_server',
     'monitors_list',
     'servers_list',
     'servers_statistics',
