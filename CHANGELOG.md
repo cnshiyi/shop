@@ -1,5 +1,21 @@
 # 版本记录
 
+## v0.5.70 - 2026-04-24
+- 按“大胆推进”继续整批收口：`monitoring` 真实模型已迁入 `cloud.models`，包括：
+  - `AddressMonitor`
+  - `DailyAddressStat`
+  - `ResourceSnapshot`
+- `monitoring.models` 已降为兼容出口，不再承载真实模型定义。
+- 新增 state-only 迁移，不碰表：
+  - `cloud/migrations/0002_addressmonitor_resourcesnapshot_dailyaddressstat.py`
+  - `monitoring/migrations/0004_remove_dailyaddressstat_monitor_and_more.py`
+
+### 验证
+- `./.venv/bin/python manage.py check`
+- `./.venv/bin/python manage.py makemigrations --check --dry-run`
+- `./.venv/bin/python manage.py migrate`
+- `DJANGO_TEST_SQLITE=1 ./.venv/bin/python manage.py test biz.tests --verbosity 1`
+
 ## v0.5.69 - 2026-04-24
 - 继续大胆推进，已把 `cloud` 真实模型整批迁入 `cloud.models`：
   - `CloudServerPlan`
