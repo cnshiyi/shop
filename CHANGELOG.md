@@ -1,5 +1,17 @@
 # 版本记录
 
+## v0.5.10 - 2026-04-24
+- 完成表名迁移批次 C：`cloud_server_plans` → `cloud_plan`、`server_prices` → `cloud_price`、`cloud_server_orders` → `cloud_order`、`cloud_assets` → `cloud_asset`、`servers` → `cloud_server`。
+- `mall.0026_alter_cloudasset_table_alter_cloudserverorder_table_and_more` 已应用到当前数据库 `a`，并通过 `information_schema.tables` 核验确认新表名生效。
+- 云资源主链保持可用：Django `check` 正常、SQLite 单测通过、后台登录信息接口正常。
+
+### 验证
+- `./.venv/bin/python manage.py migrate`
+- `./.venv/bin/python manage.py check`
+- `DJANGO_TEST_SQLITE=1 ./.venv/bin/python manage.py test biz.tests --verbosity 1`
+- `curl -s http://127.0.0.1:8000/api/user/info -H 'Authorization: Bearer session-1'`
+- `information_schema.tables` 核验：`cloud_plan` / `cloud_price` / `cloud_order` / `cloud_asset` / `cloud_server` 存在
+
 ## v0.5.09 - 2026-04-24
 - 完成表名迁移批次 B：`products` → `order_product`、`cart_items` → `order_cart_item`、`orders` → `order_order`。
 - `mall.0025_alter_cartitem_table_alter_order_table_and_more` 已应用到当前数据库 `a`，并确认新表名存在、旧表名不存在。

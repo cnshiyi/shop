@@ -88,7 +88,7 @@ class CloudServerPlan(models.Model):
     updated_at = models.DateTimeField('更新时间', auto_now=True)
 
     class Meta:
-        db_table = 'cloud_server_plans'
+        db_table = 'cloud_plan'
         verbose_name = '云服务器套餐'
         verbose_name_plural = '云服务器套餐'
         ordering = ['provider', 'region_name', '-sort_order', 'id']
@@ -118,7 +118,7 @@ class ServerPrice(models.Model):
     updated_at = models.DateTimeField('更新时间', auto_now=True)
 
     class Meta:
-        db_table = 'server_prices'
+        db_table = 'cloud_price'
         verbose_name = '服务器价格'
         verbose_name_plural = '服务器价格'
         ordering = ['provider', 'region_name', '-sort_order', 'id']
@@ -204,7 +204,7 @@ class CloudServerOrder(models.Model):
     updated_at = models.DateTimeField('更新时间', auto_now=True)
 
     class Meta:
-        db_table = 'cloud_server_orders'
+        db_table = 'cloud_order'
         verbose_name = '云服务器订单'
         verbose_name_plural = '云服务器订单'
         ordering = ['-created_at']
@@ -304,7 +304,7 @@ class CloudAsset(models.Model):
     updated_at = models.DateTimeField('更新时间', auto_now=True)
 
     class Meta:
-        db_table = 'cloud_assets'
+        db_table = 'cloud_asset'
         verbose_name = '云资产'
         verbose_name_plural = '云资产'
         ordering = ['-updated_at', '-id']
@@ -364,7 +364,7 @@ class Server(models.Model):
     updated_at = models.DateTimeField('更新时间', auto_now=True)
 
     class Meta:
-        db_table = 'servers'
+        db_table = 'cloud_server'
         verbose_name = '服务器'
         verbose_name_plural = '服务器'
         ordering = ['expires_at', '-updated_at', '-id']

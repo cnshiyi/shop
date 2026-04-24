@@ -92,10 +92,17 @@
 - [x] `balance_ledgers` → `order_balance_ledger`
 - [x] `recharges` → `order_recharge`
 
-#### 批次 B 进行中
+#### 批次 B 已完成
 - [x] `products` → `order_product`
 - [x] `cart_items` → `order_cart_item`
 - [x] `orders` → `order_order`
+
+#### 批次 C 进行中
+- [x] `cloud_server_plans` → `cloud_plan`
+- [x] `server_prices` → `cloud_price`
+- [x] `cloud_server_orders` → `cloud_order`
+- [x] `cloud_assets` → `cloud_asset`
+- [x] `servers` → `cloud_server`
 
 ### 第五阶段：删除旧目录
 - [ ] 删除 `accounts/finance/monitoring/tron/biz/dashboard_api` 的业务实现
