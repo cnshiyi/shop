@@ -1,5 +1,15 @@
 # 版本记录
 
+## v0.5.71 - 2026-04-24
+- 继续压缩旧兼容层：`biz/services/__init__.py` 从多段条件分发改成单一惰性映射表，兼容入口更薄、更直，也更不容易再引入循环导入。
+- 这一刀后旧层总体体积继续下降，`biz/services/*.py + dashboard_api/*.py` 约为 `405` 行；其中 `biz/services/__init__.py` 已缩到 `63` 行。
+
+### 验证
+- `./.venv/bin/python -m py_compile biz/services/__init__.py`
+- `./.venv/bin/python manage.py check`
+- `DJANGO_TEST_SQLITE=1 ./.venv/bin/python manage.py test biz.tests --verbosity 1`
+- `wc -l biz/services/__init__.py biz/services/*.py dashboard_api/*.py`
+
 ## v0.5.70 - 2026-04-24
 - 按“大胆推进”继续整批收口：`monitoring` 真实模型已迁入 `cloud.models`，包括：
   - `AddressMonitor`
