@@ -1,5 +1,13 @@
 # 版本记录
 
+## v0.5.51 - 2026-04-24
+- 将续费主链中的 `create_cloud_server_renewal`、`apply_cloud_server_renewal`、`pay_cloud_server_renewal_with_balance` 从 `biz.services.cloud_servers` 收回到 `cloud/services.py`。
+- 现在云域服务已覆盖续费申请、续费生效、钱包续费支付三段核心流程，`cloud/services.py` 进一步摆脱旧 `biz` 转发层。
+
+### 验证
+- `./.venv/bin/python -m py_compile cloud/services.py`
+- `DJANGO_TEST_SQLITE=1 ./.venv/bin/python manage.py test biz.tests.CloudServerServicesTestCase.test_create_cloud_server_renewal_rejects_deleted_or_ipless_order --verbosity 1`
+
 ## v0.5.50 - 2026-04-24
 - 将 `mark_cloud_server_ip_change_requested` 从 `biz.services.cloud_servers` 收回到 `cloud/services.py`，换 IP 流程继续向真实 cloud 域服务归位。
 - 该迁移保留了“当原订单缺失可用套餐关联时，按地区回退匹配可用套餐”的既有容错行为。
