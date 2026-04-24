@@ -1,5 +1,24 @@
 # 版本记录
 
+## v0.5.86 - 2026-04-24
+- 继续执行“迁移即删除”：`mall/management/commands/` 下的运行时命令实现已迁入 `cloud/management/commands/`，并删除旧 `mall` 侧实现文件。
+- 已确认 `sync_aws_assets`、`sync_aliyun_assets`、`upsert_cloud_asset`、`dedupe_servers` 当前都由 `cloud` app 提供。
+
+### 验证
+- `./.venv/bin/python manage.py shell -c "from django.core.management import get_commands; print(get_commands().get('sync_aws_assets')) ..."`
+- `./.venv/bin/python manage.py check`
+- `./.venv/bin/python manage.py makemigrations --check --dry-run`
+- `DJANGO_TEST_SQLITE=1 ./.venv/bin/python manage.py test --verbosity 1`
+
+## v0.5.85 - 2026-04-24
+- 继续执行“迁移即删除”：`accounts/models.py`、`finance/models.py`、`mall/models.py`、`monitoring/models.py` 与 `accounts/services.py` 已删除。
+- 这意味着剩余旧 app 现在更接近纯 migration-only 壳：保留 `apps.py` + `migrations/` 主要只是为了历史迁移图与 app label。
+
+### 验证
+- `./.venv/bin/python manage.py check`
+- `./.venv/bin/python manage.py makemigrations --check --dry-run`
+- `DJANGO_TEST_SQLITE=1 ./.venv/bin/python manage.py test --verbosity 1`
+
 ## v0.5.84 - 2026-04-24
 - 继续清理 `dashboard_api` 退场后的尾巴：`README.md`、`ARCHITECTURE.md`、`docs/installed-apps-cutover-plan.md`、`docs/table-rename-plan.md` 已统一改成“路由并回 `shop/dashboard_urls.py`”的现状描述。
 - 这一步用于避免明天继续把 `dashboard_api` 当作仍存在的目录或独立路由包来判断。

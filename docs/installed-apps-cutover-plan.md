@@ -32,14 +32,16 @@
 
 ### 2. 旧 app 仍承载“兼容 state 壳”职责
 
-当前真实模型已经迁入新域，但旧 app 还保留最低限度兼容入口：
+当前真实模型已经迁入新域，旧 app 现在已进一步压成近似 migration-only 壳：
 
-- `accounts.models`：仅导出 `bot.TelegramUser`、`orders.BalanceLedger`
-- `finance.models`：仅导出 `orders.Recharge`
-- `mall.models`：已清空
-- `monitoring.models`：仅导出 `cloud.AddressMonitor`、`cloud.DailyAddressStat`、`cloud.ResourceSnapshot`
+- `accounts.models`：已删除
+- `finance.models`：已删除
+- `mall.models`：已删除
+- `monitoring.models`：已删除
+- `accounts/services.py`：已删除
+- `mall/management/commands/*`：已迁入 `cloud/management/commands/*`
 
-这说明运行时真实业务已收口，但旧 app 仍承担迁移/兼容层职责。
+这说明旧 app 当前主要只为历史 migration app label 服务，运行时模型/服务/管理命令兼容出口也已基本退场。
 
 ### 3. `biz` 仍有测试与旧导入兼容压力
 
