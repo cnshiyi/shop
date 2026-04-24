@@ -1,5 +1,14 @@
 # 版本记录
 
+## v0.5.79 - 2026-04-24
+- 继续执行“迁移即删除”：既然 `dashboard_api` 和 `biz` 已不再注册为 Django app，就直接删除对应 `dashboard_api/apps.py` 与 `biz/apps.py` 残留文件。
+- 删除后再次确认运行时与迁移闸门都不受影响，说明这两层 app 注册残留已彻底收干净。
+
+### 验证
+- `./.venv/bin/python manage.py check`
+- `./.venv/bin/python manage.py makemigrations --check --dry-run`
+- `DJANGO_TEST_SQLITE=1 ./.venv/bin/python manage.py test --verbosity 1`
+
 ## v0.5.78 - 2026-04-24
 - 已梳理剩余旧 app 的迁移依赖图，确认当前真正阻塞 `INSTALLED_APPS` 继续收口的，不是运行时代码，而是历史 migration 图。
 - 当前阻塞结论：
