@@ -12,11 +12,9 @@ from cloud.models import CloudAsset, CloudIpLog, CloudServerOrder, CloudServerPl
 from orders.ledger import record_balance_ledger
 from orders.services import _generate_unique_pay_amount
 from biz.services.custom import (
-    build_cloud_server_name,
     buy_cloud_server_with_balance,
     create_cloud_server_order,
     ensure_cloud_server_pricing,
-    ensure_unique_cloud_server_name,
     get_cloud_plan,
     list_custom_regions,
     list_region_plans,
@@ -24,6 +22,28 @@ from biz.services.custom import (
     refresh_custom_plan_cache,
     set_cloud_server_port,
 )
+
+
+def _format_amount_tag(amount: Decimal) -> str:
+    normalized = amount.normalize() if isinstance(amount, Decimal) else Decimal(str(amount)).normalize()
+    text = format(normalized, 'f')
+    return text.replace('.', '_')
+
+
+def build_cloud_server_name(tg_user_id: int | None, amount: Decimal, unique_tag: str | None = None) -> str:
+    timestamp = timezone.now().strftime('%Y%m%d')
+    user_tag = str(tg_user_id or 0)
+    return f"{timestamp}-{user_tag}-{_format_amount_tag(amount)}"[:255]
+
+
+def ensure_unique_cloud_server_name(base_name: str) -> str:
+    candidate = (base_name or '')[:255]
+    index = 0
+    while Server.objects.filter(instance_id=candidate).exists() or CloudServerOrder.objects.filter(server_name=candidate).exists():
+        index += 1
+        suffix = f'-{index}'
+        candidate = f'{base_name[: max(0, 255 - len(suffix))]}{suffix}'
+    return candidate
 
 def _can_order_be_renewed(order: CloudServerOrder) -> bool:
     if order.status in {'deleted', 'deleting'}:

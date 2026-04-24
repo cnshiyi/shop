@@ -1,5 +1,13 @@
 # 版本记录
 
+## v0.5.61 - 2026-04-24
+- `cloud/services.py` 已不再通过 `biz.services.commerce` 获取 `_generate_unique_pay_amount`，改为直接依赖 `orders.services`。
+- 这进一步削弱了 `cloud` 域对旧 `biz` 兼容层的运行时依赖，为后续清 `biz/services/custom.py` 做准备。
+
+### 验证
+- `./.venv/bin/python -m py_compile cloud/services.py orders/services.py biz/services/commerce.py`
+- `DJANGO_TEST_SQLITE=1 ./.venv/bin/python manage.py test biz.tests.CloudServerServicesTestCase.test_create_cloud_server_renewal_rejects_deleted_or_ipless_order biz.tests.CloudServerServicesTestCase.test_mark_cloud_server_ip_change_requested_falls_back_when_plan_missing --verbosity 1`
+
 ## v0.5.60 - 2026-04-24
 - 新增 `orders/apps.py` 与 `cloud/apps.py`，并把 `orders`、`cloud` 正式加入 `shop/settings.py` 的 `INSTALLED_APPS`。
 - 这一步确认了新域 app 可以先安全注册进 Django，再继续推进真实模型迁移，不会立刻引发额外 migrations。

@@ -104,26 +104,14 @@ DEFAULT_ALIYUN_PLAN_TEMPLATES = [
 ]
 
 
-def _format_amount_tag(amount: Decimal) -> str:
-    normalized = amount.normalize() if isinstance(amount, Decimal) else Decimal(str(amount)).normalize()
-    text = format(normalized, 'f')
-    return text.replace('.', '_')
+def build_cloud_server_name(*args, **kwargs):
+    from cloud.services import build_cloud_server_name as impl
+    return impl(*args, **kwargs)
 
 
-def build_cloud_server_name(tg_user_id: int | None, amount: Decimal, unique_tag: str | None = None) -> str:
-    timestamp = timezone.now().strftime('%Y%m%d')
-    user_tag = str(tg_user_id or 0)
-    return f"{timestamp}-{user_tag}-{_format_amount_tag(amount)}"[:255]
-
-
-def ensure_unique_cloud_server_name(base_name: str) -> str:
-    candidate = (base_name or '')[:255]
-    index = 0
-    while Server.objects.filter(instance_id=candidate).exists() or CloudServerOrder.objects.filter(server_name=candidate).exists():
-        index += 1
-        suffix = f'-{index}'
-        candidate = f'{base_name[: max(0, 255 - len(suffix))]}{suffix}'
-    return candidate
+def ensure_unique_cloud_server_name(*args, **kwargs):
+    from cloud.services import ensure_unique_cloud_server_name as impl
+    return impl(*args, **kwargs)
 
 
 def _generate_order_no() -> str:
