@@ -10,7 +10,7 @@ from django.utils import timezone
 from bot.models import TelegramUser
 from cloud.models import CloudAsset, CloudIpLog, CloudServerOrder, CloudServerPlan, Server
 from orders.ledger import record_balance_ledger
-from biz.services.commerce import _generate_unique_pay_amount
+from orders.services import _generate_unique_pay_amount
 from biz.services.custom import (
     build_cloud_server_name,
     buy_cloud_server_with_balance,

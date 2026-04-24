@@ -1,5 +1,13 @@
 # 版本记录
 
+## v0.5.60 - 2026-04-24
+- 新增 `orders/apps.py` 与 `cloud/apps.py`，并把 `orders`、`cloud` 正式加入 `shop/settings.py` 的 `INSTALLED_APPS`。
+- 这一步确认了新域 app 可以先安全注册进 Django，再继续推进真实模型迁移，不会立刻引发额外 migrations。
+
+### 验证
+- `./.venv/bin/python manage.py check`
+- `./.venv/bin/python manage.py makemigrations --check --dry-run`
+
 ## v0.5.59 - 2026-04-24
 - 补充了第一批模型迁移施工图：`docs/model-migration-batch1-plan.md`，明确首批目标为 `bot.TelegramUser` 与 `orders.Recharge`。
 - 把当前真正阻塞 `INSTALLED_APPS` 切换的核心问题收敛为：真实模型定义、外键字符串引用、以及 `SeparateDatabaseAndState` 级别的 state 迁移。
