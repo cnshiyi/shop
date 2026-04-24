@@ -1,5 +1,15 @@
 # 版本记录
 
+## v0.5.88 - 2026-04-24
+- 把“最小桥接层”方案正式写入 `docs/installed-apps-cutover-plan.md`：
+  - `accounts / finance / mall / monitoring` 的当前目标形态就是 `__init__.py + apps.py + migrations/`
+  - `biz` 与 `dashboard_api` 已归类为已完成的更小桥替代案例
+- 顺手修正文档现状：`biz` 已从“当前仍保留的旧应用”列表中移除。
+
+### 验证
+- `./.venv/bin/python manage.py check`
+- `git diff -- docs/installed-apps-cutover-plan.md`
+
 ## v0.5.87 - 2026-04-24
 - 继续把旧 app 压成最小桥接层：已删除 `accounts/admin.py`、`finance/admin.py`、`mall/admin.py`、`monitoring/admin.py`，并移除 `mall/management/` 空包。
 - 现在这四个旧 app 的工作树基本只剩 `__init__.py`、`apps.py`、`migrations/`，已经非常接近纯 migration bridge。

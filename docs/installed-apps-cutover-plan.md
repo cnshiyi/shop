@@ -4,7 +4,6 @@
 
 当前运行配置仍保留旧应用：
 
-- `biz`
 - `accounts`
 - `mall`
 - `finance`
@@ -12,6 +11,7 @@
 
 已经不再保留：
 
+- `biz`（已从 `INSTALLED_APPS` 移除）
 - `dashboard_api`（已从 `INSTALLED_APPS` 移除，路由已并回 `shop/dashboard_urls.py`）
 
 同时新域已经成为真实运行时归属：
@@ -44,6 +44,27 @@
 - `mall/management/` 空包：已删除
 
 这说明旧 app 当前主要只为历史 migration app label 服务，运行时模型/服务/管理命令/admin 兼容出口也已基本退场。
+
+## 最小桥接层目标形态
+
+对 `accounts` / `finance` / `mall` / `monitoring`，当前建议的最小可行桥接层是：
+
+- `__init__.py`
+- `apps.py`
+- `migrations/`
+
+其余内容原则上都不再保留。
+
+### 为什么 `apps.py` 还不能删
+
+因为只要这些 app label 还在 `INSTALLED_APPS` 中，Django 就仍需要能导入并识别这些 app。
+当前阶段，`apps.py` 是最小必要件；真正阻塞继续删除的，不是业务代码，而是 migration graph 对这些 label 的依赖。
+
+### 哪些可以被更小桥替代
+
+- `dashboard_api`：已完成，路由已并回 `shop/dashboard_urls.py`
+- `biz`：已完成，已退出 `INSTALLED_APPS`
+- `accounts` / `finance` / `mall` / `monitoring`：短期内不能再小于 `apps.py + migrations/`，除非先解决 migration graph 脱钩
 
 ### 3. `biz` 仍有测试与旧导入兼容压力
 
