@@ -1,5 +1,15 @@
 # 版本记录
 
+## v0.5.21 - 2026-04-24
+- `cloud.api` 继续承接真实实现：`servers_statistics` 已从 `dashboard_api.views` 迁入 `cloud` 域。
+- 已通过 Django 测试客户端与本地 HTTP 验证 `/api/dashboard/servers/statistics/` 返回 `200 JSON`，统计聚合结果正确输出区域、明细与汇总。
+
+### 验证
+- `./.venv/bin/python -m py_compile cloud/api.py`
+- `./.venv/bin/python manage.py check`
+- `./.venv/bin/python manage.py shell -c "from django.test import Client; ... /api/dashboard/servers/statistics/ ..."`
+- `curl -i -s http://127.0.0.1:8000/api/dashboard/servers/statistics/ -H 'Authorization: Bearer session-1'`
+
 ## v0.5.20 - 2026-04-24
 - `cloud.api` 继续承接真实实现：`cloud_assets_list` 已从 `dashboard_api.views` 迁入 `cloud` 域。
 - 已验证云资产列表两条主路径：普通列表与 `grouped=1` 分组列表均返回 `200 JSON`。

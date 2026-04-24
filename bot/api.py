@@ -17,7 +17,6 @@ from dashboard_api.views import (
     csrf,
     dashboard_login_required,
     products_list,
-    site_config_groups,
     update_product,
     update_user_balance,
     update_user_discount,
@@ -58,6 +57,40 @@ def me(request):
 def site_configs_list(request):
     queryset = SiteConfig.objects.order_by('key')
     return _ok([_site_config_payload(item) for item in queryset])
+
+
+@dashboard_login_required
+@require_GET
+def site_config_groups(request):
+    groups = {
+        'database': ['database_url', 'db_host', 'db_port', 'db_name', 'db_user', 'db_password'],
+        'tron': ['receive_address', 'trongrid_api_key'],
+        'aws': ['aws_access_key_id', 'aws_secret_access_key', 'aws_region'],
+        'aliyun': ['alibaba_cloud_account_id', 'aliyun_account_id', 'aliyun_region'],
+        'bot': ['bot_token', 'telegram_webhook_url'],
+        'runtime': ['redis_url', 'm_account_token', 'admin_password_notice'],
+        'custom_text': [
+            'bot_custom_quantity_title', 'bot_custom_quantity_hint', 'bot_custom_payment_title',
+            'bot_custom_payment_hint', 'bot_custom_wallet_title', 'bot_custom_pending_order',
+            'bot_custom_pending_wallet', 'bot_custom_order_notice', 'bot_custom_port_hint',
+            'bot_custom_balance_insufficient',
+        ],
+    }
+    existing = {item.key: item for item in SiteConfig.objects.all()}
+    payload = []
+    for group_key, keys in groups.items():
+        items = []
+        for key in keys:
+            obj = existing.get(key)
+            items.append({
+                'key': key,
+                'id': obj.id if obj else None,
+                'value': SiteConfig.get(key, ''),
+                'is_sensitive': bool(getattr(obj, 'is_sensitive', key in SENSITIVE_CONFIG_KEYS)),
+                'description': CONFIG_HELP.get(key, ''),
+            })
+        payload.append({'group': group_key, 'items': items})
+    return _ok(payload)
 
 
 @csrf_exempt
