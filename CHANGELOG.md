@@ -1,5 +1,13 @@
 # 版本记录
 
+## v0.5.75 - 2026-04-24
+- 同步刷新 cutover 文档：`docs/installed-apps-cutover-plan.md` 和 `docs/model-migration-batch1-plan.md` 已改成当前真实状态，不再把已完成的模型迁移写成待办。
+- 同时把 `cloud/migrations/__init__.py` 纳入版本控制，避免新迁移包状态在不同环境下漂移。
+
+### 验证
+- `git diff -- docs/installed-apps-cutover-plan.md docs/model-migration-batch1-plan.md`
+- `git status --short`
+
 ## v0.5.74 - 2026-04-24
 - `dashboard_api` 已从 `INSTALLED_APPS` 移除；它现在只作为 URL 包存在，不再作为运行时 Django app 注册。
 - 顺手清掉 `dashboard_api/__init__.py` 里的 `default_app_config` 旧式残留，避免继续暗示它仍是活跃 app。
