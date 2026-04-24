@@ -1,5 +1,18 @@
 # 版本记录
 
+## v0.5.78 - 2026-04-24
+- 已梳理剩余旧 app 的迁移依赖图，确认当前真正阻塞 `INSTALLED_APPS` 继续收口的，不是运行时代码，而是历史 migration 图。
+- 当前阻塞结论：
+  - `accounts` 是上游根节点，`finance` / `mall` / `monitoring` 早期迁移都依赖它
+  - `finance` 仍是 `orders` / `accounts` 状态迁移桥接节点
+  - `mall` 仍是 `accounts.0011` 与 `orders.0003` 的依赖节点
+  - `monitoring` 仍是 `accounts.0011` 的依赖节点
+- 这意味着下一阶段若还想继续摘旧 app，必须先处理迁移图桥接方案，而不是再做运行时代码搬家。
+
+### 验证
+- 逐条核对 `accounts/finance/mall/monitoring/bot/orders/cloud` 迁移依赖定义
+- 已结合前序实测确认 `mall` 直接移除会触发 `NodeNotFoundError`
+
 ## v0.5.77 - 2026-04-24
 - 试探进一步移除旧兼容 app：直接摘掉 `mall` 会触发真实 migration 图阻塞。
 - 已确认报错链：`accounts.0011_move_telegramuser_state_to_bot` 依赖 `('mall', '0028_switch_user_fk_to_bot')`，因此 `mall` 目前仍必须保留在 `INSTALLED_APPS` 中。

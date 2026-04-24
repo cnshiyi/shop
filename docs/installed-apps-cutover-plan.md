@@ -69,10 +69,35 @@
 
 - [x] 运行时代码已基本不再直连旧模型 app
 - [x] 运行时 API 已不再依赖 `dashboard_api.views`
+- [x] `dashboard_api` 已从 `INSTALLED_APPS` 移除
+- [x] `biz` 已从 `INSTALLED_APPS` 移除
 - [x] `mall` 已不再承载真实模型
-- [ ] `accounts` / `finance` / `monitoring` 仍需保留在 `INSTALLED_APPS` 中，以承接历史 migration app label
-- [ ] `biz` 仍需保留，直到测试和少量旧导入路径彻底收口
+- [ ] `accounts` / `finance` / `mall` / `monitoring` 仍需保留在 `INSTALLED_APPS` 中，以承接历史 migration app label
 - [ ] 历史 migrations 仍全面依赖旧 app label，不能粗暴替换
+
+## 已确认的剩余 app 依赖图阻塞
+
+### `accounts`
+- `finance.0001_initial` 依赖 `accounts.0008_telegramuser_cloud_reminder_muted_until`
+- `mall` 早期多条迁移依赖 `accounts` 旧节点
+- `monitoring.0001_initial` 依赖 `accounts.0008_telegramuser_cloud_reminder_muted_until`
+- 结论：`accounts` 目前是整张历史迁移图的上游根节点，暂时不能移除
+
+### `finance`
+- `accounts.0011_move_telegramuser_state_to_bot` 依赖 `finance.0003_move_recharge_state_to_orders`
+- `orders.0001_initial` 依赖 `finance.0002_alter_recharge_table`
+- 结论：`finance` 仍是 `accounts` 与 `orders` 的状态迁移桥接节点，暂时不能移除
+
+### `mall`
+- `accounts.0011_move_telegramuser_state_to_bot` 依赖 `mall.0028_switch_user_fk_to_bot`
+- `orders.0003_move_product_cart_order_from_mall` 依赖 `mall.0028_switch_user_fk_to_bot`
+- 已实测：直接移除 `mall` 会在 `makemigrations` 阶段触发 `NodeNotFoundError`
+- 结论：`mall` 虽已无真实模型，但仍是关键迁移桥接 app，暂时不能移除
+
+### `monitoring`
+- `accounts.0011_move_telegramuser_state_to_bot` 依赖 `monitoring.0003_switch_user_fk_to_bot`
+- `monitoring.0004_remove_dailyaddressstat_monitor_and_more` 仍挂在其自身迁移链下
+- 结论：`monitoring` 虽已无真实模型，但仍是关键迁移桥接 app，暂时不能移除
 
 ## 建议切换顺序
 
