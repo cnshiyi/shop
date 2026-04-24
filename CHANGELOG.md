@@ -1,5 +1,15 @@
 # 版本记录
 
+## v0.5.30 - 2026-04-24
+- `cloud.api` 继续承接真实实现：`sync_servers` 与内部 `_apply_server_missing_state` 已不再转发到 `dashboard_api.views`。
+- 已通过真实同步验证 `/api/dashboard/servers/sync/` 返回 `200 JSON`，并正确回报 `synced`、`missing` 与地区信息。
+
+### 验证
+- `./.venv/bin/python -m py_compile cloud/api.py`
+- `./.venv/bin/python manage.py check`
+- `./.venv/bin/python manage.py shell -c "from django.test import Client; ... /api/dashboard/servers/sync/ ..."`
+- `curl -i -s -X POST http://127.0.0.1:8000/api/dashboard/servers/sync/ -H 'Authorization: Bearer session-1'`
+
 ## v0.5.29 - 2026-04-24
 - `cloud.api` 继续承接真实实现：`create_cloud_plan`、`update_cloud_plan`、`delete_cloud_plan` 已不再转发到 `dashboard_api.views`。
 - 修正迁移中的一次错误导入：`refresh_custom_plan_cache` 改为从 `cloud.services` 引入。

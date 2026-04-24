@@ -681,6 +681,29 @@ def sync_servers(request):
     return _ok({'synced': synced, 'missing': missing, 'aliyun_region': aliyun_region, 'aws_region': aws_region, 'errors': errors})
 
 
+@csrf_exempt
+@dashboard_login_required
+@require_POST
+def sync_cloud_assets(request):
+    aliyun_region = (request.POST.get('region') or request.GET.get('region') or 'cn-hongkong').strip() or 'cn-hongkong'
+    aws_region = (request.POST.get('aws_region') or request.GET.get('aws_region') or 'ap-southeast-1').strip() or 'ap-southeast-1'
+    errors = []
+    synced = {'aliyun': False, 'aws': False}
+    try:
+        call_command('sync_aliyun_assets', region=aliyun_region)
+        synced['aliyun'] = True
+    except Exception as exc:
+        errors.append(f'阿里云代理同步失败: {exc}')
+    try:
+        call_command('sync_aws_assets', region=aws_region)
+        synced['aws'] = True
+    except Exception as exc:
+        errors.append(f'AWS 代理同步失败: {exc}')
+    if errors and not any(synced.values()):
+        return _error('；'.join(errors), status=500)
+    return _ok({'synced': synced, 'aliyun_region': aliyun_region, 'aws_region': aws_region, 'errors': errors})
+
+
 @dashboard_login_required
 @require_GET
 def cloud_pricing_list(request):
