@@ -12,19 +12,18 @@
 - `tron/`：链上扫描与资源巡检，运行时已优先依赖 `cloud/`、`orders/`、`bot/`
 
 ## 旧层现状
-以下目录仍保留，但目标已经降级为“兼容/迁移壳”，不再承载新的真实业务实现：
+以下旧目录的运行时职责已经全部迁入新域，并已从当前工作树删除：
 - `accounts/`
 - `finance/`
 - `mall/`
 - `monitoring/`
-- `biz/`（当前仅保留测试命名空间与最小包骨架）
+- `dashboard_api/`
 
-补充说明：后台聚合路由已并回 `shop/dashboard_urls.py`。
+补充说明：后台聚合路由已并回 `shop/dashboard_urls.py`；`biz/` 当前仅保留测试命名空间最小骨架。
 
 其中：
 - `bot.models`、`orders.models`、`cloud.models` 已是当前真实模型归属。
-- `accounts/models.py`、`finance/models.py`、`mall/models.py`、`monitoring/models.py` 都已删除，旧 app 进一步压成 migration-only 壳。
-- `accounts/services.py` 也已删除，旧余额记账兼容入口不再保留在旧 app。
+- 旧 `accounts/finance/mall/monitoring` 目录本体已删除，相关模型/服务/admin/命令职责都已并入新域。
 - 旧 `dashboard_api` 已退出运行时并并回 `shop/dashboard_urls.py`。
 
 ## 迁移策略
@@ -38,16 +37,15 @@
 - 继续清理 `dashboard_api` 已退场后的旧文档口径
 - 清理 README / 架构文档中的旧结构叙述
 
-### 阶段 B：评估 `INSTALLED_APPS` 收口
-- 评估 `accounts` / `finance` / `mall` / `monitoring` 是否可仅保留 migration 历史
-- 评估剩余旧兼容 app 是否还能继续从运行时配置中退出
-- 在确认 migration 依赖和 app label 不会破坏测试库初始化后，再做 app 注册裁剪
+### 阶段 B：完成 `INSTALLED_APPS` 收口
+- `accounts` / `finance` / `mall` / `monitoring` 已全部退出运行时配置
+- `dashboard_api` / `biz` 也已退出运行时 app 集
+- 当前重点转为清理测试命名空间与历史文档口径
 
-## 为什么还没直接删旧 app
-因为剩余风险点已经不在业务实现，而在 Django 机制本身：
-- app label 与 migration 依赖
-- 历史 migration 对旧 app 的引用
-- fresh test DB 的初始化顺序
-- `INSTALLED_APPS` 变化对 admin / URL / migration loader 的连锁影响
+## 当前判断
+运行时层面的旧 app 收口已经完成。
 
-所以当前策略已经从“先收口引用”进入“边验证边拆旧壳”的最后阶段。
+剩余需要注意的风险点不再是运行时代码，而是历史迁移文档与测试命名空间：
+- 历史 migration 文件仍会保留旧 app label 作为历史链记录
+- `biz.tests` 仍保留旧测试命名空间名字
+- 文档仍需持续避免把已删除目录写成“仍保留”
