@@ -2,19 +2,19 @@
 
 from django.views.decorators.http import require_GET
 
-from cloud.models import AddressMonitor
+from cloud.models import AddressMonitor, CloudServerPlan, ServerPrice
 from dashboard_api.views import (
     _apply_keyword_filter,
+    _cloud_plan_payload,
     _decimal_to_str,
     _get_keyword,
     _iso,
     _ok,
+    _server_price_payload,
     dashboard_login_required,
     cloud_assets_list,
     cloud_order_detail,
     cloud_orders_list,
-    cloud_plans_list,
-    cloud_pricing_list,
     create_cloud_plan,
     delete_cloud_plan,
     servers_list,
@@ -26,6 +26,44 @@ from dashboard_api.views import (
     update_cloud_order_status,
     update_cloud_plan,
 )
+
+
+@dashboard_login_required
+@require_GET
+def cloud_pricing_list(request):
+    keyword = _get_keyword(request)
+    queryset = ServerPrice.objects.filter(is_active=True).order_by('provider', 'region_code', '-sort_order', 'id')
+    queryset = _apply_keyword_filter(
+        queryset,
+        keyword,
+        ['provider', 'region_code', 'region_name', 'bundle_code', 'server_name', 'server_description', 'cpu', 'memory', 'storage', 'bandwidth'],
+    )
+    provider = (request.GET.get('provider') or '').strip()
+    region_code = (request.GET.get('region_code') or '').strip()
+    if provider:
+        queryset = queryset.filter(provider=provider)
+    if region_code:
+        queryset = queryset.filter(region_code=region_code)
+    return _ok([_server_price_payload(item) for item in queryset])
+
+
+@dashboard_login_required
+@require_GET
+def cloud_plans_list(request):
+    keyword = _get_keyword(request)
+    queryset = CloudServerPlan.objects.filter(is_active=True).order_by('provider', 'region_code', '-sort_order', 'id')
+    queryset = _apply_keyword_filter(
+        queryset,
+        keyword,
+        ['provider', 'region_code', 'region_name', 'plan_name', 'plan_description', 'cpu', 'memory', 'storage', 'bandwidth'],
+    )
+    provider = (request.GET.get('provider') or '').strip()
+    region_code = (request.GET.get('region_code') or '').strip()
+    if provider:
+        queryset = queryset.filter(provider=provider)
+    if region_code:
+        queryset = queryset.filter(region_code=region_code)
+    return _ok([_cloud_plan_payload(item) for item in queryset])
 
 
 @dashboard_login_required
