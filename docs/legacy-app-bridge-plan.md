@@ -16,13 +16,14 @@
 
 当前仍必须保留在 `INSTALLED_APPS` 中的旧 app：
 
-- `accounts`
-- `finance`
+- 无
 
 已经完成脱钩、可退出运行时配置的旧 app：
 
 - `monitoring`
 - `mall`
+- `finance`
+- `accounts`
 
 原因不是运行时代码，而是 Django migration graph：
 
@@ -124,17 +125,18 @@
 ## 哪些阻塞是“图问题”，不是“代码问题”
 
 ### `accounts`
-它是上游根节点：
+这条最后的根桥也已完成脱钩实验：
 
-- `finance.0001_initial` 依赖 `accounts.0008_telegramuser_cloud_reminder_muted_until`
-- `mall` 多条早期迁移依赖 `accounts` 旧节点
-- `monitoring.0001_initial` 依赖 `accounts.0008_telegramuser_cloud_reminder_muted_until`
+- `bot.0001_initial` 已不再依赖 `accounts.0010`，并补上 `bot_user` 的 fresh DB 建表 `database_operations`
+- `orders.0002_move_balanceledger_state_from_accounts` 已不再依赖 `accounts.0011`，并补上 `order_balance_ledger` 的 fresh DB 建表 `database_operations`
+- 当前 `accounts` 已可从 `INSTALLED_APPS` 中移除，并通过 `check` / `makemigrations --check --dry-run` / fresh SQLite test DB 验证
 
 ### `finance`
-它是 `accounts` 与 `orders` 的桥：
+这条桥也已完成第一轮脱钩实验：
 
-- `accounts.0011_move_telegramuser_state_to_bot` 依赖 `finance.0003_move_recharge_state_to_orders`
-- `orders.0001_initial` 依赖 `finance.0002_alter_recharge_table`
+- `orders.0001_initial` 已不再依赖 `finance.0002`，并补上 `order_recharge` 的 fresh DB 建表 `database_operations`
+- `accounts.0011_move_telegramuser_state_to_bot` 已不再依赖 `finance.0003`，改为直接依赖 `orders.0001`
+- 当前 `finance` 已可从 `INSTALLED_APPS` 中移除，并通过 `check` / `makemigrations --check --dry-run` / fresh SQLite test DB 验证
 
 ### `mall`
 这条桥也已完成第一轮脱钩实验：

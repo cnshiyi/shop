@@ -1,5 +1,31 @@
 # 版本记录
 
+## v0.5.93 - 2026-04-24
+- 第四轮 migration graph 脱钩实验已打通：`accounts` 已从 `INSTALLED_APPS` 移除。
+- 具体做法：
+  - `bot.0001_initial` 不再依赖 `accounts.0010`，并补上 `bot_user` 的 fresh DB 建表 `database_operations`
+  - `orders.0002_move_balanceledger_state_from_accounts` 不再依赖 `accounts.0011`，并补上 `order_balance_ledger` 的 fresh DB 建表 `database_operations`
+- 结果：所有旧 app（`dashboard_api`、`biz`、`monitoring`、`mall`、`finance`、`accounts`）均已退出运行时 app 集；`check`、`makemigrations --check --dry-run`、`DJANGO_TEST_SQLITE=1 manage.py test` 继续通过。
+
+### 验证
+- `./.venv/bin/python -m py_compile bot/migrations/0001_initial.py orders/migrations/0002_move_balanceledger_state_from_accounts.py shop/settings.py`
+- `./.venv/bin/python manage.py check`
+- `./.venv/bin/python manage.py makemigrations --check --dry-run`
+- `DJANGO_TEST_SQLITE=1 ./.venv/bin/python manage.py test --verbosity 1`
+
+## v0.5.92 - 2026-04-24
+- 第三轮 migration graph 脱钩实验已打通：`finance` 已从 `INSTALLED_APPS` 移除。
+- 具体做法：
+  - `orders.0001_initial` 不再依赖 `finance.0002`，并补上 `order_recharge` 的 fresh DB 建表 `database_operations`
+  - `accounts.0011_move_telegramuser_state_to_bot` 不再依赖 `finance.0003`，改为直接依赖 `orders.0001`
+- 结果：`finance` 不再需要留在运行时 app 集；`check`、`makemigrations --check --dry-run`、`DJANGO_TEST_SQLITE=1 manage.py test` 继续通过。
+
+### 验证
+- `./.venv/bin/python -m py_compile orders/migrations/0001_initial.py accounts/migrations/0011_move_telegramuser_state_to_bot.py shop/settings.py`
+- `./.venv/bin/python manage.py check`
+- `./.venv/bin/python manage.py makemigrations --check --dry-run`
+- `DJANGO_TEST_SQLITE=1 ./.venv/bin/python manage.py test --verbosity 1`
+
 ## v0.5.91 - 2026-04-24
 - 第二轮 migration graph 脱钩实验已打通：`mall` 已从 `INSTALLED_APPS` 移除。
 - 具体做法：

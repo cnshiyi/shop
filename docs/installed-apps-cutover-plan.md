@@ -4,8 +4,7 @@
 
 当前运行配置仍保留旧应用：
 
-- `accounts`
-- `finance`
+- 无
 
 已经不再保留：
 
@@ -13,6 +12,8 @@
 - `dashboard_api`（已从 `INSTALLED_APPS` 移除，路由已并回 `shop/dashboard_urls.py`）
 - `monitoring`（已从 `INSTALLED_APPS` 移除，监控模型 fresh DB 建表与状态归属已改由 `cloud` 承接）
 - `mall`（已从 `INSTALLED_APPS` 移除，商品/购物车/订单与云模型 fresh DB 建表已改由 `orders/cloud` 承接）
+- `finance`（已从 `INSTALLED_APPS` 移除，充值模型 fresh DB 建表与状态归属已改由 `orders` 承接）
+- `accounts`（已从 `INSTALLED_APPS` 移除，`bot_user` 与 `order_balance_ledger` 的 fresh DB 建表已改由 `bot/orders` 承接）
 
 同时新域已经成为真实运行时归属：
 
