@@ -6,7 +6,7 @@ class Migration(migrations.Migration):
 
     dependencies = [
         ('accounts', '0010_alter_balanceledger_table_alter_telegramuser_table'),
-        ('finance', '0003_move_recharge_state_to_orders'),
+        ('orders', '0001_initial'),
         ('cloud', '0002_addressmonitor_resourcesnapshot_dailyaddressstat'),
     ]
 
