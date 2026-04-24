@@ -67,15 +67,15 @@
 - `biz`：已完成，已退出 `INSTALLED_APPS`
 - `accounts` / `finance` / `mall` / `monitoring`：短期内不能再小于 `apps.py + migrations/`，除非先解决 migration graph 脱钩
 
-### 3. `biz` 仍有测试与旧导入兼容压力
+### 3. `biz` 仅剩测试命名空间压力
 
 当前情况：
 
-- `biz/services/cloud_servers.py`、`payments.py`、`monitoring.py`、`rates.py`、`commerce.py`、`users.py`、`cloud_queries.py`、`custom.py` 都已经是兼容壳
-- `biz/services/__init__.py` 已缩成最薄惰性映射表
-- 但 `biz.tests` 仍直接 patch 旧兼容路径，如 `biz.services.cloud_servers.CloudServerOrder`
+- `biz/services/*` 与 `biz/models.py` 已删除
+- `biz.tests` 仍保留为测试命名空间
+- 旧 patch 路径已切到新域，例如 `cloud.services.CloudServerOrder`
 
-结论：`biz` 已不是主实现承载层，但在删除前还需要先处理测试入口和旧导入兼容策略。
+结论：`biz` 已不再承担服务兼容职责，剩余是否继续清理，主要取决于是否还要保留 `biz.tests` 这个测试入口名。
 
 ## 已完成的关键前置条件
 
@@ -126,7 +126,7 @@
 
 ### 阶段 1：继续缩旧入口
 
-- 继续减少 `biz/services` 兼容壳暴露面
+- 继续减少 `biz` 剩余测试命名空间的历史包袱
 - 逐步把测试从 `biz.services.*` patch 改到新域入口
 - 清理 README / 架构 / cutover 计划中的旧口径
 

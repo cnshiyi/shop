@@ -36,7 +36,7 @@
 - `finance/`
 - `mall/`
 - `monitoring/`
-- `biz/services/`
+- `biz/`（当前仅保留测试命名空间与最小包骨架）
 
 补充说明：后台聚合路由已并回 `shop/dashboard_urls.py`。
 

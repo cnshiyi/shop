@@ -17,14 +17,14 @@
 - `finance/`
 - `mall/`
 - `monitoring/`
-- `biz/services/`
+- `biz/`（当前仅保留测试命名空间与最小包骨架）
 
 补充说明：后台聚合路由已并回 `shop/dashboard_urls.py`。
 
 其中：
 - `bot.models`、`orders.models`、`cloud.models` 已是当前真实模型归属。
-- `mall.models` 已清空，避免双注册。
-- `accounts.models`、`finance.models`、`monitoring.models` 只保留兼容导出。
+- `accounts/models.py`、`finance/models.py`、`mall/models.py`、`monitoring/models.py` 都已删除，旧 app 进一步压成 migration-only 壳。
+- `accounts/services.py` 也已删除，旧余额记账兼容入口不再保留在旧 app。
 - 旧 `dashboard_api` 已退出运行时并并回 `shop/dashboard_urls.py`。
 
 ## 迁移策略
@@ -34,7 +34,7 @@
 
 ## 当前剩余重点
 ### 阶段 A：继续压缩旧入口
-- 继续减少 `biz/services` 兼容聚合层存在感
+- 继续清理 `biz` 仅剩的测试命名空间与历史兼容口径
 - 继续清理 `dashboard_api` 已退场后的旧文档口径
 - 清理 README / 架构文档中的旧结构叙述
 
