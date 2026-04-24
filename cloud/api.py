@@ -78,6 +78,33 @@ def cloud_assets_list(request):
 
 @dashboard_login_required
 @require_GET
+def tasks_overview(request):
+    orders = CloudServerOrder.objects.order_by('-updated_at')[:50]
+    items = []
+    for order in orders:
+        if order.status not in {'paid', 'provisioning', 'renew_pending', 'expiring', 'suspended', 'deleting', 'failed'}:
+            continue
+        items.append({
+            'id': order.id,
+            'order_no': order.order_no,
+            'task_type': 'cloud_order',
+            'task_label': '云服务器任务',
+            'status': order.status,
+            'status_label': dict(CloudServerOrder.STATUS_CHOICES).get(order.status, order.status),
+            'provider': order.provider,
+            'provider_label': _provider_label(order.provider),
+            'plan_name': order.plan_name,
+            'public_ip': order.public_ip,
+            'note': order.provision_note,
+            'created_at': _iso(order.created_at),
+            'updated_at': _iso(order.updated_at),
+            'related_path': f'/admin/cloud-orders/{order.id}',
+        })
+    return _ok(items)
+
+
+@dashboard_login_required
+@require_GET
 def cloud_orders_list(request):
     keyword = _get_keyword(request)
     queryset = CloudServerOrder.objects.select_related('user', 'plan').order_by('-created_at')
@@ -288,6 +315,7 @@ __all__ = [
     'cloud_assets_list',
     'cloud_order_detail',
     'cloud_orders_list',
+    'tasks_overview',
     'cloud_plans_list',
     'cloud_pricing_list',
     'create_cloud_plan',

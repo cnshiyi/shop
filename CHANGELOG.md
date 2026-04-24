@@ -1,5 +1,14 @@
 # 版本记录
 
+## v0.5.22 - 2026-04-24
+- `bot.api` 继续承接真实实现：`site_config_groups` 已从 `dashboard_api.views` 迁入 `bot` 域。
+- 已验证 `/api/dashboard/settings/site-configs/groups/` 返回 `200 JSON`，配置分组、敏感标记与描述数据保持一致。
+
+### 验证
+- `./.venv/bin/python -m py_compile bot/api.py`
+- `./.venv/bin/python manage.py check`
+- `./.venv/bin/python manage.py shell -c "from django.test import Client; ... /api/dashboard/settings/site-configs/groups/ ..."`
+
 ## v0.5.21 - 2026-04-24
 - `cloud.api` 继续承接真实实现：`servers_statistics` 已从 `dashboard_api.views` 迁入 `cloud` 域。
 - 已通过 Django 测试客户端与本地 HTTP 验证 `/api/dashboard/servers/statistics/` 返回 `200 JSON`，统计聚合结果正确输出区域、明细与汇总。
