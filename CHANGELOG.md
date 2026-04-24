@@ -1,5 +1,15 @@
 # 版本记录
 
+## v0.5.43 - 2026-04-24
+- `orders.api` 不再直接从 `dashboard_api.views` 导入公共 helper，先改为复用 `bot.api` 的过渡 helper，进一步收缩旧 API 兼容层。
+- 已确认 `/api/dashboard/orders/` 与 `/api/dashboard/recharges/` 继续返回 `200 JSON`。
+
+### 验证
+- `./.venv/bin/python -m py_compile orders/api.py`
+- `./.venv/bin/python manage.py check`
+- `curl -s http://127.0.0.1:8000/api/dashboard/orders/ -H 'Authorization: Bearer session-1'`
+- `curl -s http://127.0.0.1:8000/api/dashboard/recharges/ -H 'Authorization: Bearer session-1'`
+
 ## v0.5.42 - 2026-04-24
 - 云套餐改为人工维护：停用自动套餐同步接口，`cloud-plans/sync` 现在直接返回“已停用自动同步”。
 - 删除现有脏套餐数据：已清空 `CloudServerPlan` 22 条、`ServerPrice` 109 条；确认当前无订单和购物车外键引用。

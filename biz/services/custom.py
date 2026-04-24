@@ -50,7 +50,7 @@ ALIYUN_REGION_NAMES = {
 
 SERVER_PRICE_REGION_RULES = {
     'aws_lightsail': {
-        'allowed_regions': {'ap-southeast-1'},
+        'allowed_regions': set(),
         'fallback_regions': [('ap-southeast-1', '新加坡')],
     },
     'aliyun_simple': {
@@ -380,23 +380,18 @@ def _sync_provider_plans(provider: str, regions: list[tuple[str, str]], template
 
 
 @sync_to_async
-def ensure_cloud_server_plans():
+def ensure_cloud_server_pricing():
     aws_regions = _normalize_server_price_regions('aws_lightsail', _fetch_aws_regions())
     aliyun_regions = _normalize_server_price_regions('aliyun_simple', _fetch_aliyun_regions())
     if aws_regions:
         aws_templates = _fetch_aws_bundle_templates()
         if aws_templates:
             sync_server_prices('aws_lightsail', aws_regions, aws_templates)
-            _sync_provider_plans('aws_lightsail', aws_regions, aws_templates)
         elif not ServerPrice.objects.filter(provider='aws_lightsail').exists():
             sync_server_prices('aws_lightsail', aws_regions, DEFAULT_AWS_PRICING_TEMPLATES)
-            _sync_provider_plans('aws_lightsail', aws_regions, DEFAULT_AWS_PRICING_TEMPLATES)
     elif not ServerPrice.objects.filter(provider='aws_lightsail').exists():
         sync_server_prices('aws_lightsail', [('ap-southeast-1', '新加坡')], DEFAULT_AWS_PRICING_TEMPLATES)
     if aliyun_regions:
-        CloudServerPlan.objects.filter(provider='aliyun_simple').exclude(
-            region_code__in=[code for code, _ in aliyun_regions]
-        ).update(is_active=False)
         for region_code, region_name in aliyun_regions:
             region_templates = _fetch_aliyun_plan_templates(region_code)
             region_templates = _merge_templates(region_templates, DEFAULT_ALIYUN_PLAN_TEMPLATES)
@@ -405,14 +400,13 @@ def ensure_cloud_server_plans():
                 for idx, (plan_name, cpu, memory, storage, bandwidth, price) in enumerate(region_templates, start=1)
             ]
             sync_server_prices('aliyun_simple', [(region_code, region_name)], pricing_templates, deactivate_missing_regions=False)
-            _sync_provider_plans(
-                'aliyun_simple',
-                [(region_code, region_name)],
-                region_templates,
-                deactivate_missing_regions=False,
-            )
     elif not ServerPrice.objects.filter(provider='aliyun_simple').exists():
         sync_server_prices('aliyun_simple', [('cn-hongkong', '香港')], DEFAULT_ALIYUN_PRICING_TEMPLATES)
+
+
+@sync_to_async
+def ensure_cloud_server_plans():
+    ensure_cloud_server_pricing.__wrapped__()
     if not CloudServerPlan.objects.exists():
         _sync_provider_plans('aws_lightsail', [('ap-southeast-1', '新加坡')], _fetch_aws_bundle_templates())
 
