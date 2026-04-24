@@ -115,6 +115,7 @@
 ### 第五阶段：删除旧目录
 - [ ] 删除 `accounts/finance/monitoring/tron/biz/dashboard_api` 的业务实现
 - [ ] 保留必要兼容壳或一次性切换
+- [x] `dashboard_api/urls.py` 已开始改走 `bot/orders/cloud` API 入口
 
 ### 第六阶段：收尾
 - [ ] 执行测试并确认通过

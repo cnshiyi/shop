@@ -1,6 +1,6 @@
 from django.core.management.base import BaseCommand
 
-from accounts.models import TelegramUser
+from bot.models import TelegramUser
 
 
 class Command(BaseCommand):
