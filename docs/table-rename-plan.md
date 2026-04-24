@@ -69,7 +69,7 @@
 
 原因：
 - 已新增 `cloud.cache` 过渡层
-- `tron/scanner.py` 与 `tron/resource_checker.py` 已开始改走新域入口
+- 链上支付扫描与资源巡检已分别并入 `orders/payment_scanner.py` 与 `cloud/resource_monitor.py`
 
 注意：
 - 监控缓存与定时任务容易受影响，迁移后要主动初始化缓存并做 smoke test
