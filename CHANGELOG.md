@@ -1,5 +1,14 @@
 # 版本记录
 
+## v0.5.76 - 2026-04-24
+- `biz` 已从 `INSTALLED_APPS` 移除；当前仅作为兼容导入目录和测试命名空间存在，不再作为运行时 Django app 注册。
+- 这意味着运行时 app 集再次收口，当前只剩 `accounts / finance / mall / monitoring` 作为历史迁移兼容 app 仍在注册。
+
+### 验证
+- `./.venv/bin/python manage.py check`
+- `./.venv/bin/python manage.py makemigrations --check --dry-run`
+- `DJANGO_TEST_SQLITE=1 ./.venv/bin/python manage.py test biz.tests --verbosity 1`
+
 ## v0.5.75 - 2026-04-24
 - 同步刷新 cutover 文档：`docs/installed-apps-cutover-plan.md` 和 `docs/model-migration-batch1-plan.md` 已改成当前真实状态，不再把已完成的模型迁移写成待办。
 - 同时把 `cloud/migrations/__init__.py` 纳入版本控制，避免新迁移包状态在不同环境下漂移。
