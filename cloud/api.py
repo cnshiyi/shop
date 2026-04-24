@@ -1,12 +1,14 @@
 """cloud 域后台 API。"""
 
+from django.db.utils import ProgrammingError
 from django.utils import timezone
 from django.utils.dateparse import parse_datetime
 from django.views.decorators.http import require_GET
 
-from cloud.models import AddressMonitor, CloudServerOrder, CloudServerPlan, ServerPrice
+from cloud.models import AddressMonitor, CloudAsset, CloudServerOrder, CloudServerPlan, ServerPrice
 from dashboard_api.views import (
     _apply_keyword_filter,
+    _asset_payload,
     _cloud_order_detail_payload,
     _cloud_plan_payload,
     _days_left,
@@ -16,7 +18,6 @@ from dashboard_api.views import (
     _ok,
     _server_price_payload,
     dashboard_login_required,
-    cloud_assets_list,
     cloud_order_detail,
     create_cloud_plan,
     delete_cloud_plan,
@@ -29,6 +30,48 @@ from dashboard_api.views import (
     update_cloud_order_status,
     update_cloud_plan,
 )
+
+
+@dashboard_login_required
+@require_GET
+def cloud_assets_list(request):
+    keyword = _get_keyword(request)
+    grouped = (request.GET.get('grouped') or '').lower() in {'1', 'true', 'yes'}
+    try:
+        queryset = CloudAsset.objects.select_related('user', 'order')
+        queryset = _apply_keyword_filter(
+            queryset,
+            keyword,
+            [
+                'asset_name', 'public_ip', 'mtproxy_link', 'user__tg_user_id',
+                'user__username', 'order__order_no',
+            ],
+        ).distinct().order_by('actual_expires_at', '-updated_at', '-id')
+        items = [_asset_payload(asset) for asset in queryset[:200]]
+    except ProgrammingError:
+        return _ok({'groups': [], 'items': []} if grouped else [])
+
+    if not grouped:
+        return _ok(items)
+
+    groups = {}
+    for item in items:
+        key = str(item['tg_user_id'] or 'unbound')
+        group = groups.setdefault(key, {
+            'user_key': key,
+            'tg_user_id': item['tg_user_id'],
+            'user_display_name': item['user_display_name'],
+            'username_label': item['username_label'],
+            'default_expanded': True,
+            'items': [],
+        })
+        group['items'].append(item)
+    ordered_groups = list(groups.values())
+    ordered_groups.sort(key=lambda group: (
+        min((row['actual_expires_at'] or '9999-12-31T23:59:59') for row in group['items']),
+        str(group['tg_user_id'] or 'zzzz'),
+    ))
+    return _ok({'groups': ordered_groups, 'items': items})
 
 
 @dashboard_login_required

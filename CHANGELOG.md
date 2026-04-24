@@ -1,5 +1,15 @@
 # 版本记录
 
+## v0.5.19 - 2026-04-24
+- `cloud.api` 继续承接真实实现：`cloud_orders_list` 已从 `dashboard_api.views` 迁入 `cloud` 域。
+- 通过 Django 测试客户端与本地 HTTP 双重验证：`/api/dashboard/cloud-orders/` 返回 `200 JSON`，说明云订单列表入口已在新域稳定工作。
+
+### 验证
+- `./.venv/bin/python -m py_compile cloud/api.py`
+- `./.venv/bin/python manage.py check`
+- `./.venv/bin/python manage.py shell -c "from django.test import Client; ..."`
+- `curl -i -s http://127.0.0.1:8000/api/dashboard/cloud-orders/ -H 'Authorization: Bearer session-1'`
+
 ## v0.5.18 - 2026-04-24
 - `orders.api` 继续承接真实实现：`orders_list` 已从 `dashboard_api.views` 迁入 `orders` 域。
 - 用 Django 测试客户端与本地重启后的后台接口双重确认：`/api/dashboard/orders/` 与 `/api/dashboard/recharges/` 均返回 `200 JSON`，排除了运行进程热更新滞后的假阴性。
