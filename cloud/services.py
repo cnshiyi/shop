@@ -10,7 +10,6 @@ from orders.ledger import record_balance_ledger
 from biz.services.cloud_servers import (
     apply_cloud_server_renewal,
     create_cloud_server_renewal,
-    mark_cloud_server_ip_change_requested,
     pay_cloud_server_renewal_with_balance,
 )
 from biz.services.custom import (
@@ -106,6 +105,66 @@ def rebind_cloud_server_user(order_id: int, new_user_id: int):
     order.last_user_id = order.user.tg_user_id if hasattr(order.user, 'tg_user_id') else order.last_user_id
     order.save(update_fields=['user', 'last_user_id', 'updated_at'])
     return order
+
+
+@sync_to_async
+def mark_cloud_server_ip_change_requested(order_id: int, user_id: int, region_code: str | None = None, port: int | None = None):
+    order = CloudServerOrder.objects.filter(id=order_id, user_id=user_id).first()
+    if not order:
+        return None
+    if order.status not in {'completed', 'expiring', 'suspended'}:
+        return False
+    target_region_code = region_code or order.region_code
+    provider = 'aliyun_simple' if target_region_code == 'cn-hongkong' else 'aws_lightsail'
+    fallback_plan = CloudServerPlan.objects.filter(
+        provider=provider,
+        region_code=target_region_code,
+        is_active=True,
+    ).order_by('-sort_order', 'id').first()
+    if not fallback_plan:
+        fallback_plan = CloudServerPlan.objects.filter(
+            provider=provider,
+            region_code=target_region_code,
+            plan_name=order.plan_name,
+            is_active=True,
+        ).order_by('-sort_order', 'id').first()
+    if not fallback_plan:
+        return False
+    target_port = port or order.mtproxy_port or 9528
+    migration_due_at = timezone.now() + timezone.timedelta(days=5)
+    new_order = CloudServerOrder.objects.create(
+        user_id=order.user_id,
+        order_no=f'{order.order_no}-IP',
+        plan_id=fallback_plan.id,
+        provider=fallback_plan.provider,
+        region_code=fallback_plan.region_code,
+        region_name=fallback_plan.region_name,
+        plan_name=fallback_plan.plan_name,
+        quantity=1,
+        currency=order.currency,
+        total_amount=order.total_amount,
+        pay_amount=order.pay_amount,
+        pay_method=order.pay_method,
+        status='paid',
+        lifecycle_days=order.lifecycle_days,
+        mtproxy_port=target_port,
+        service_started_at=timezone.now(),
+        service_expires_at=migration_due_at,
+        migration_due_at=migration_due_at,
+        replacement_for=order,
+        renew_extension_days=order.renew_extension_days,
+        last_user_id=order.last_user_id,
+        server_name=order.server_name,
+        image_name=order.image_name,
+        provision_note='\n'.join(filter(None, [order.provision_note, f'由订单 {order.order_no} 发起更换 IP，新服务器地区: {fallback_plan.region_name}，端口: {target_port}，需在 5 天内完成迁移。'])),
+    )
+    order.provision_note = '\n'.join(filter(None, [order.provision_note, f'已发起更换 IP，新实例订单: {new_order.order_no}，旧服务器将于 5 天后到期，请尽快完成迁移。']))
+    order.service_expires_at = migration_due_at
+    order.migration_due_at = migration_due_at
+    order.save(update_fields=['provision_note', 'service_expires_at', 'migration_due_at', 'updated_at'])
+    CloudAsset.objects.filter(order=order).update(actual_expires_at=order.service_expires_at, updated_at=timezone.now())
+    Server.objects.filter(order=order).update(expires_at=order.service_expires_at, updated_at=timezone.now())
+    return new_order
 
 
 @sync_to_async
