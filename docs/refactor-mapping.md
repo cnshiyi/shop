@@ -14,7 +14,7 @@
 - `accounts/models.py` → `bot/models.py`
 - `accounts/services.py` → `bot/services.py`
 - `accounts/admin.py` → `bot/admin.py`
-- 用户与余额相关逻辑从 `dashboard_api/views.py` 拆回 `bot/api.py`
+- 用户与余额相关逻辑已迁入 `bot/api.py`
 
 ### 迁入 `orders/`
 - `finance/models.py` → `orders/models.py`
@@ -28,14 +28,14 @@
 - `mall` 中云套餐/云订单/云资产/服务器模型 → `cloud/models.py`
 - `monitoring/models.py` → `cloud/models.py`
 - `monitoring/cache.py` → `cloud/cache.py`
-- `tron/resource_checker.py` → `cloud/resource_checker.py`
 - `biz/services/cloud_servers.py` → `cloud/services.py`
-- `biz/services/custom.py` → `cloud/custom_services.py`
-- `biz/services/monitoring.py` → `cloud/monitoring_services.py`
+- `biz/services/custom.py` → `cloud/services.py`
+- `biz/services/monitoring.py` → `orders/services.py` / `cloud/cache.py`
 
 ### 删除或下线
-- `biz/`：服务按业务归位后删除
-- `dashboard_api/`：接口按业务拆到 `bot/api.py`、`orders/api.py`、`cloud/api.py`
+- `biz/`：已退出 `INSTALLED_APPS`，当前仅保留兼容导入目录与测试命名空间
+- `dashboard_api/`：已退出 `INSTALLED_APPS`，当前仅保留 `urls.py` 路由包
+- `dashboard_api/views.py`：已删除
 - `accounts_telegramusername` 相关逻辑：下线
 - 新规则：迁移完成并验证通过后，立即删除旧实现，不长期保留双实现
 
@@ -80,8 +80,8 @@
 - [x] 改为只读写 `bot_user.username`
 
 ### 第三阶段：迁移 imports
-- [ ] 核心模块改从 `bot/orders/cloud` 导入
-- [ ] `biz` 只保留临时兼容壳，最终删除
+- [x] 核心运行时模块已基本改从 `bot/orders/cloud` 导入
+- [x] `biz` 已降为最薄兼容壳并退出 `INSTALLED_APPS`
 
 ### 第四阶段：迁移表名
 - [ ] 为目标模型统一补 `Meta.db_table`
@@ -114,10 +114,10 @@
 - [x] `external_sync_logs` → `core_sync_log`
 
 ### 第五阶段：删除旧目录
-- [ ] 删除 `accounts/finance/monitoring/tron/biz/dashboard_api` 的业务实现
-- [ ] 删除所有“已迁移但未清理”的旧函数、旧 helper、旧转发层
-- [ ] 兼容壳仅保留最薄入口；若新实现已稳定，优先直接删除旧层
-- [x] `dashboard_api/urls.py` 已开始改走 `bot/orders/cloud` API 入口
+- [ ] 删除 `accounts/finance/mall/monitoring` 中剩余仅为迁移图服务的兼容壳
+- [x] 删除 `biz/dashboard_api` 中已无运行时必要的业务实现与 app 注册残留
+- [x] 兼容壳已大幅压薄；新实现稳定后优先直接删除旧层
+- [x] `dashboard_api/urls.py` 已完全改走 `bot/orders/cloud` API 入口
 
 ### 第六阶段：收尾
 - [ ] 执行测试并确认通过

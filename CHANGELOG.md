@@ -1,5 +1,13 @@
 # 版本记录
 
+## v0.5.81 - 2026-04-24
+- 继续清理旧口径文档：`docs/DATA_FLOW_AND_PERSISTENCE.md` 与 `docs/refactor-mapping.md` 已同步到当前真实结构，模型归属改为 `bot/orders/cloud`，并明确 `dashboard_api/views.py` 已删除、`biz/dashboard_api` 已退出运行时 app 集。
+- 这一步主要是避免后续 cutover 判断继续被历史描述误导。
+
+### 验证
+- `./.venv/bin/python manage.py check`
+- `git diff -- docs/DATA_FLOW_AND_PERSISTENCE.md docs/refactor-mapping.md`
+
 ## v0.5.80 - 2026-04-24
 - 继续执行“迁移即删除”：`dashboard_api/views.py` 空壳已删除，相关数据流文档同步改为指向 `bot/api.py`、`orders/api.py`、`cloud/api.py` 的真实入口。
 - 这意味着 `dashboard_api` 目录现在只剩 URL 包职责，不再保留任何旧视图实现占位文件。
