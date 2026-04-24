@@ -1,5 +1,15 @@
 # 版本记录
 
+## v0.5.12 - 2026-04-24
+- `dashboard_api/urls.py` 已开始真正按领域路由：用户/商品/配置入口改走 `bot.api`，订单/充值入口改走 `orders.api`，云资源/监控/套餐入口改走 `cloud.api`。
+- 补充 `docs/installed-apps-cutover-plan.md`，明确了当前不能直接删旧 app 的原因，以及后续 `INSTALLED_APPS` 收口顺序。
+- `accounts/management/commands/backfill_usernames_to_users.py` 已切到 `bot.models.TelegramUser`，继续减少旧目录直接暴露。
+
+### 验证
+- `./.venv/bin/python -m py_compile dashboard_api/urls.py bot/api.py accounts/management/commands/backfill_usernames_to_users.py`
+- `./.venv/bin/python manage.py check`
+- `curl -s http://127.0.0.1:8000/api/user/info -H 'Authorization: Bearer session-1'`
+
 ## v0.5.11 - 2026-04-24
 - 完成表名迁移批次 D/E：`address_monitors` → `cloud_address_monitor`、`daily_address_stats` → `cloud_address_stat_daily`、`resource_snapshots` → `cloud_resource_snapshot`、`configs` → `core_site_config`、`cloud_account_configs` → `core_cloud_account`、`external_sync_logs` → `core_sync_log`。
 - 现网库已完成整套目标表名收口：`bot / orders / cloud / core` 目标表名均已存在，并通过 `information_schema.tables` 核验。
