@@ -1,5 +1,15 @@
 # 版本记录
 
+## v0.5.41 - 2026-04-24
+- `bot.api` 继续承接真实实现：用户列表、余额修改、折扣修改、余额明细、商品列表、商品创建、商品更新已不再从 `dashboard_api.views` 直接导入实现。
+- 保留 `dashboard_api.views` 中的公共 helper 导入，`dashboard_api` 进一步收缩为兼容/工具层。
+
+### 验证
+- `./.venv/bin/python -m py_compile bot/api.py`
+- `./.venv/bin/python manage.py check`
+- `curl -s http://127.0.0.1:8000/api/dashboard/users/ -H 'Authorization: Bearer session-1'`
+- `curl -s http://127.0.0.1:8000/api/dashboard/products/ -H 'Authorization: Bearer session-1'`
+
 ## v0.5.40 - 2026-04-24
 - `bot.api` 继续承接真实实现：`csrf` 已不再由 `dashboard_api.views` 提供。
 - 已验证 `/api/csrf/` 返回 `200 JSON`，并带 `csrftoken` Cookie。

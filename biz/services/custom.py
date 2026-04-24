@@ -451,19 +451,11 @@ async def _cache_set_json(key: str, value, ttl: int = CUSTOM_CACHE_TTL):
 
 @sync_to_async
 def _list_custom_regions_db():
-    pricing_regions = list(
-        ServerPrice.objects.filter(is_active=True)
+    plans = list(
+        CloudServerPlan.objects.filter(is_active=True)
         .values_list('provider', 'region_code', 'region_name')
         .distinct()
     )
-    if pricing_regions:
-        aws_regions = {code: name for provider, code, name in pricing_regions if provider == 'aws_lightsail'}
-        aliyun_hk = [(code, name) for provider, code, name in pricing_regions if provider == 'aliyun_simple']
-        regions = list(aws_regions.items())
-        if aliyun_hk:
-            regions.extend(aliyun_hk[:1])
-        return _sort_region_pairs(regions)
-    plans = list(CloudServerPlan.objects.filter(is_active=True).values_list('provider', 'region_code', 'region_name').distinct())
     aws_regions = {code: name for provider, code, name in plans if provider == 'aws_lightsail'}
     aliyun_hk = [(code, name) for provider, code, name in plans if provider == 'aliyun_simple']
     regions = list(aws_regions.items())
@@ -486,29 +478,6 @@ async def list_custom_regions():
 @sync_to_async
 def _list_region_plans_db(region_code: str):
     provider = 'aliyun_simple' if region_code == 'cn-hongkong' else 'aws_lightsail'
-    pricing_queryset = ServerPrice.objects.filter(region_code=region_code, provider=provider, is_active=True)
-    if pricing_queryset.exists():
-        plan_ids = []
-        for pricing in pricing_queryset.order_by('provider', '-sort_order', 'id'):
-            plan, _ = CloudServerPlan.objects.update_or_create(
-                provider=pricing.provider,
-                region_code=pricing.region_code,
-                plan_name=pricing.server_name,
-                defaults={
-                    'region_name': pricing.region_name,
-                    'plan_description': pricing.server_description,
-                    'cpu': pricing.cpu,
-                    'memory': pricing.memory,
-                    'storage': pricing.storage,
-                    'bandwidth': pricing.bandwidth,
-                    'price': pricing.price,
-                    'currency': pricing.currency,
-                    'is_active': pricing.is_active,
-                    'sort_order': pricing.sort_order,
-                },
-            )
-            plan_ids.append(plan.id)
-        return list(CloudServerPlan.objects.filter(id__in=plan_ids).order_by('provider', '-sort_order', 'id'))
     queryset = CloudServerPlan.objects.filter(region_code=region_code, provider=provider, is_active=True)
     queryset = queryset.exclude(provider='aws_lightsail', plan_name__iexact='Nano')
     return list(queryset.order_by('provider', '-sort_order', 'id'))

@@ -19,7 +19,7 @@ from core.models import CloudAccountConfig, SiteConfig
 from bot.models import TelegramUser
 from cloud.models import AddressMonitor, CloudAsset, CloudServerOrder, CloudServerPlan, Server, ServerPrice
 from cloud.provisioning import provision_cloud_server
-from cloud.services import ensure_cloud_server_plans, refresh_custom_plan_cache
+from cloud.services import refresh_custom_plan_cache
 from orders.models import BalanceLedger, Order, Product, Recharge
 
 
@@ -2130,45 +2130,7 @@ def sync_servers(request):
 @dashboard_login_required
 @require_POST
 def sync_cloud_plans(request):
-    before_pricing_count = ServerPrice.objects.filter(is_active=True).count()
-    before_regions = list(
-        ServerPrice.objects.filter(is_active=True)
-        .values('provider', 'region_code', 'region_name')
-        .distinct()
-        .order_by('provider', 'region_code')
-    )
-    try:
-        async_to_sync(ensure_cloud_server_plans)()
-    except Exception as exc:
-        return _error(f'同步价格配置失败: {exc}', status=500)
-    active_pricing_queryset = ServerPrice.objects.filter(is_active=True)
-    after_pricing_count = active_pricing_queryset.count()
-    after_regions = list(
-        active_pricing_queryset
-        .values('provider', 'region_code', 'region_name')
-        .distinct()
-        .order_by('provider', 'region_code')
-    )
-    provider_region_summary = list(
-        active_pricing_queryset
-        .values('provider', 'region_code', 'region_name')
-        .annotate(pricing_count=Count('id'))
-        .order_by('provider', 'region_code')
-    )
-    return _ok({
-        'synced': True,
-        'refreshed_regions': len(after_regions),
-        'summary': {
-            'before_plan_count': 0,
-            'after_plan_count': 0,
-            'before_pricing_count': before_pricing_count,
-            'after_pricing_count': after_pricing_count,
-            'region_count': len(after_regions),
-        },
-        'regions': after_regions,
-        'before_regions': before_regions,
-        'provider_region_summary': provider_region_summary,
-    })
+    return _error('套餐改为人工维护，已停用自动同步', status=400)
 
 
 @csrf_exempt
