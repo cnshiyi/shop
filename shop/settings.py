@@ -38,7 +38,6 @@ INSTALLED_APPS = [
     'bot',
     'orders',
     'cloud',
-    'dashboard_api',
 ]
 
 MIDDLEWARE = [

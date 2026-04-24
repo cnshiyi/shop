@@ -1,5 +1,14 @@
 # 版本记录
 
+## v0.5.74 - 2026-04-24
+- `dashboard_api` 已从 `INSTALLED_APPS` 移除；它现在只作为 URL 包存在，不再作为运行时 Django app 注册。
+- 顺手清掉 `dashboard_api/__init__.py` 里的 `default_app_config` 旧式残留，避免继续暗示它仍是活跃 app。
+
+### 验证
+- `./.venv/bin/python manage.py check`
+- `./.venv/bin/python manage.py makemigrations --check --dry-run`
+- `DJANGO_TEST_SQLITE=1 ./.venv/bin/python manage.py test biz.tests --verbosity 1`
+
 ## v0.5.73 - 2026-04-24
 - 同步清理过时文档口径：`README.md`、`ARCHITECTURE.md` 现已明确 `bot / orders / cloud` 是真实运行时模型与服务归属，`accounts / finance / mall / monitoring / biz/services / dashboard_api` 仅剩兼容/迁移壳定位。
 - `cloud/services.py` 顶部模块说明也已改为主入口表述，避免继续误导为“过渡层”。
