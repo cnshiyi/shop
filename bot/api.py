@@ -4,7 +4,7 @@ import os
 
 from django.contrib.auth import authenticate, login, logout
 from django.contrib.auth.decorators import login_required
-from django.views.decorators.csrf import csrf_exempt
+from django.views.decorators.csrf import csrf_exempt, ensure_csrf_cookie
 from django.views.decorators.http import require_GET, require_POST
 
 from bot.models import TelegramUser
@@ -23,7 +23,6 @@ from dashboard_api.views import (
     _site_config_payload,
     _status_label,
     create_product,
-    csrf,
     dashboard_login_required,
     products_list,
     update_product,
@@ -33,6 +32,12 @@ from dashboard_api.views import (
     users_list,
 )
 from orders.models import Order, Product, Recharge
+
+
+@ensure_csrf_cookie
+@require_GET
+def csrf(request):
+    return _ok({'csrf': True})
 
 
 @dashboard_login_required

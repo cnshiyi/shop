@@ -1,5 +1,24 @@
 # 版本记录
 
+## v0.5.40 - 2026-04-24
+- `bot.api` 继续承接真实实现：`csrf` 已不再由 `dashboard_api.views` 提供。
+- 已验证 `/api/csrf/` 返回 `200 JSON`，并带 `csrftoken` Cookie。
+
+### 验证
+- `./.venv/bin/python -m py_compile bot/api.py`
+- `./.venv/bin/python manage.py check`
+- `curl -i -s http://127.0.0.1:8000/api/csrf/`
+
+## v0.5.39 - 2026-04-24
+- `cloud.api` 继续承接真实实现：`_asset_payload` 已不再转发到 `dashboard_api.views`。
+- 已验证 `/api/dashboard/cloud-assets/` 在迁移后继续返回 `200 JSON`。
+
+### 验证
+- `./.venv/bin/python -m py_compile cloud/api.py`
+- `./.venv/bin/python manage.py check`
+- `./.venv/bin/python manage.py shell -c "from django.test import Client; ... /api/dashboard/cloud-assets/ ..."`
+- `curl -i -s http://127.0.0.1:8000/api/dashboard/cloud-assets/ -H 'Authorization: Bearer session-1'`
+
 ## v0.5.38 - 2026-04-24
 - `bot.api` 继续承接真实实现：`auth_login`、`auth_logout`、`auth_refresh`、`auth_codes` 已不再由 `dashboard_api.views` 提供。
 - `dashboard_api/urls.py` 已把 `auth/*` 全部切到 `bot.api`。
