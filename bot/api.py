@@ -4,15 +4,21 @@ from django.contrib.auth.decorators import login_required
 from django.views.decorators.csrf import csrf_exempt
 from django.views.decorators.http import require_GET, require_POST
 
+from bot.models import TelegramUser
+from cloud.models import AddressMonitor, CloudServerOrder
 from core.models import CloudAccountConfig, SiteConfig
 from dashboard_api.views import (
     CONFIG_HELP,
     SENSITIVE_CONFIG_KEYS,
     _cloud_account_payload,
+    _decimal_to_str,
     _error,
+    _iso,
     _ok,
     _read_payload,
+    _region_label,
     _site_config_payload,
+    _status_label,
     create_product,
     csrf,
     dashboard_login_required,
@@ -24,6 +30,64 @@ from dashboard_api.views import (
     users_list,
     verify_cloud_account,
 )
+from orders.models import Order, Product, Recharge
+
+
+@dashboard_login_required
+@require_GET
+def overview(request):
+    users_total = TelegramUser.objects.count()
+    products_total = Product.objects.count()
+    cloud_orders_total = CloudServerOrder.objects.count()
+    recharges_total = Recharge.objects.count()
+    monitors_total = AddressMonitor.objects.count()
+    orders_total = Order.objects.count()
+
+    cloud_pending = CloudServerOrder.objects.filter(status='pending').count()
+    recharge_pending = Recharge.objects.filter(status='pending').count()
+
+    latest_cloud_orders = list(
+        CloudServerOrder.objects.select_related('user', 'plan')
+        .order_by('-created_at')[:8]
+        .values('id', 'order_no', 'status', 'region_name', 'plan_name', 'total_amount', 'created_at')
+    )
+    latest_recharges = list(
+        Recharge.objects.select_related('user')
+        .order_by('-created_at')[:8]
+        .values('id', 'amount', 'status', 'tx_hash', 'created_at')
+    )
+
+    return _ok({
+        'summary': {
+            'users_total': users_total,
+            'products_total': products_total,
+            'cloud_orders_total': cloud_orders_total,
+            'recharges_total': recharges_total,
+            'monitors_total': monitors_total,
+            'orders_total': orders_total,
+            'cloud_pending': cloud_pending,
+            'recharge_pending': recharge_pending,
+        },
+        'latest_cloud_orders': [
+            {
+                **item,
+                'region_label': _region_label(item.get('region_name'), item.get('region_name')),
+                'status_label': _status_label(item['status'], CloudServerOrder.STATUS_CHOICES),
+                'total_amount': _decimal_to_str(item['total_amount']),
+                'created_at': _iso(item['created_at']),
+            }
+            for item in latest_cloud_orders
+        ],
+        'latest_recharges': [
+            {
+                **item,
+                'status_label': _status_label(item['status'], Recharge.STATUS_CHOICES),
+                'amount': _decimal_to_str(item['amount']),
+                'created_at': _iso(item['created_at']),
+            }
+            for item in latest_recharges
+        ],
+    })
 
 
 @dashboard_login_required
@@ -208,6 +272,7 @@ __all__ = [
     'delete_cloud_account',
     'init_site_configs',
     'me',
+    'overview',
     'products_list',
     'site_config_groups',
     'site_configs_list',

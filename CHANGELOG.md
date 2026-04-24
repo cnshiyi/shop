@@ -1,5 +1,15 @@
 # 版本记录
 
+## v0.5.24 - 2026-04-24
+- `cloud.api` 继续承接真实实现：`delete_server` 已从 `dashboard_api.views` 迁入 `cloud` 域。
+- `dashboard_api/urls.py` 中 `servers/<id>/delete/` 已改为走 `cloud_api.delete_server`，并验证不存在服务器时稳定返回 `404 JSON`，与旧行为一致。
+
+### 验证
+- `./.venv/bin/python -m py_compile cloud/api.py dashboard_api/urls.py`
+- `./.venv/bin/python manage.py check`
+- `./.venv/bin/python manage.py shell -c "from django.test import Client; ... /api/dashboard/servers/999999/delete/ ..."`
+- `curl -i -s -X POST http://127.0.0.1:8000/api/dashboard/servers/999999/delete/ -H 'Authorization: Bearer session-1'`
+
 ## v0.5.23 - 2026-04-24
 - `cloud.api` 继续承接真实实现：`tasks_overview` 已从 `dashboard_api.views` 迁入 `cloud` 域。
 - `dashboard_api/urls.py` 中 `tasks/` 与 `task-list/` 已改为走 `cloud_api.tasks_overview`，并通过 Django 测试客户端与本地 HTTP 双重验证返回 `200 JSON`。
