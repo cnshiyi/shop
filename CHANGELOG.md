@@ -1,5 +1,16 @@
 # 版本记录
 
+## v0.5.65 - 2026-04-24
+- 继续猛砍 `biz/services/custom.py`：云下单三件套 `create_cloud_server_order`、`buy_cloud_server_with_balance`、`pay_cloud_server_order_with_balance` 已迁入 `cloud/services.py` 成为真实实现来源。
+- `biz/services/custom.py` 中对应旧真实实现已删除并缩成兼容转发。
+- 本轮还补上了 `cloud/services.py` 侧的云查询导出，并修复一处由兼容聚合层触发的循环导入。
+
+### 验证
+- `./.venv/bin/python -m py_compile cloud/services.py biz/services/custom.py biz/services/cloud_queries.py bot/handlers.py cloud/api.py biz/services/__init__.py`
+- `./.venv/bin/python manage.py check`
+- `DJANGO_TEST_SQLITE=1 ./.venv/bin/python manage.py test biz.tests.CloudServerServicesTestCase.test_create_cloud_server_renewal_rejects_deleted_or_ipless_order biz.tests.CloudServerServicesTestCase.test_mark_cloud_server_ip_change_requested_falls_back_when_plan_missing --verbosity 1`
+- `./.venv/bin/python manage.py shell -c "from cloud.services import create_cloud_server_order, buy_cloud_server_with_balance, pay_cloud_server_order_with_balance, get_user_cloud_server, list_user_cloud_servers, get_cloud_server_by_ip; print(bool(create_cloud_server_order), bool(buy_cloud_server_with_balance), bool(pay_cloud_server_order_with_balance), bool(get_user_cloud_server), bool(list_user_cloud_servers), bool(get_cloud_server_by_ip))"`
+
 ## v0.5.64 - 2026-04-24
 - 全面体检后继续清理 `biz/services/custom.py`：`create_cloud_server_order`、`buy_cloud_server_with_balance`、`pay_cloud_server_order_with_balance` 已迁入 `cloud/services.py`。
 - `biz/services/custom.py` 中这三段旧真实实现已删除并改成兼容转发。
