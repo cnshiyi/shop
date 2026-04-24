@@ -1,5 +1,13 @@
 # 版本记录
 
+## v0.5.45 - 2026-04-24
+- 修正 AWS Lightsail 配置同步口径：不再把 `win`、`ipv6`、`c_/m_/g_` 等变体一并算作常规在售规格，并按套餐名去重，仅保留主套餐档位。
+- 修正后 AWS 每地区从 `100` 条压到 `11` 条，避免“配置同步”页把底层 bundle 变体误当成可售规格总数。
+
+### 验证
+- `./.venv/bin/python manage.py shell -c "from biz.services.custom import _fetch_aws_bundle_templates; ..."`
+- `./.venv/bin/python manage.py shell -c "from django.test import Client; ... /api/dashboard/cloud-plans/sync/ ..."`
+
 ## v0.5.44 - 2026-04-24
 - 按最新业务语义恢复“配置同步”：`cloud-plans/sync` 继续保留，但现在只同步 AWS / 阿里云在售规格与价格模板，不再生成或修改人工维护的 `CloudServerPlan`。
 - AWS 价格同步已取消单地区限制；本轮实测同步后，人工套餐保持 `0`，价格模板回填到 `1609` 条。
