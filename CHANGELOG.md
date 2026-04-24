@@ -1,5 +1,27 @@
 # 版本记录
 
+## v0.5.69 - 2026-04-24
+- 继续大胆推进，已把 `cloud` 真实模型整批迁入 `cloud.models`：
+  - `CloudServerPlan`
+  - `ServerPrice`
+  - `CloudServerOrder`
+  - `CloudAsset`
+  - `Server`
+  - `CloudIpLog`
+- `mall.models` 已清空，不再承载任何真实 Django 模型定义，彻底避免双注册。
+- 同步补齐 state-only 迁移，不碰表：
+  - `cloud/migrations/0001_initial.py`
+  - `orders/migrations/0004_alter_cartitem_cloud_plan.py`
+  - `mall/migrations/0030_remove_cloudasset_order_remove_cloudasset_user_and_more.py`
+- `orders.CartItem.cloud_plan` 也已切到 `cloud.CloudServerPlan`。
+- 已在本地真实执行迁移并通过 fresh test DB。
+
+### 验证
+- `./.venv/bin/python manage.py migrate`
+- `DJANGO_TEST_SQLITE=1 ./.venv/bin/python manage.py test biz.tests --verbosity 1`
+- `./.venv/bin/python manage.py check`
+- `./.venv/bin/python manage.py makemigrations --check --dry-run`
+
 ## v0.5.68 - 2026-04-24
 - 第二批模型迁移先拿 `BalanceLedger` 开刀：`orders.BalanceLedger` 已成为真实模型定义来源，`accounts.models` 已进一步缩成纯兼容出口。
 - 新增 state-only 迁移，不碰表：
