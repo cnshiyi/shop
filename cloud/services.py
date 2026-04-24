@@ -1,5 +1,7 @@
 """过渡层：统一暴露 cloud 域服务，后续逐步从 biz/services 迁入这里。"""
 
+import json
+import logging
 from decimal import Decimal
 
 from cloud.models import CloudIpLog
@@ -9,19 +11,20 @@ from django.utils import timezone
 
 from bot.models import TelegramUser
 from cloud.models import CloudAsset, CloudIpLog, CloudServerOrder, CloudServerPlan, Server
+from core.cache import get_redis
 from orders.ledger import record_balance_ledger
 from orders.services import _generate_unique_pay_amount
 from biz.services.custom import (
     buy_cloud_server_with_balance,
     create_cloud_server_order,
     ensure_cloud_server_pricing,
-    get_cloud_plan,
-    list_custom_regions,
-    list_region_plans,
     pay_cloud_server_order_with_balance,
-    refresh_custom_plan_cache,
-    set_cloud_server_port,
 )
+
+logger = logging.getLogger(__name__)
+CUSTOM_CACHE_TTL = 600
+CUSTOM_REGIONS_CACHE_KEY = 'custom:regions:v1'
+CUSTOM_PLANS_CACHE_PREFIX = 'custom:plans:v1:'
 
 
 def _format_amount_tag(amount: Decimal) -> str:
@@ -44,6 +47,106 @@ def ensure_unique_cloud_server_name(base_name: str) -> str:
         suffix = f'-{index}'
         candidate = f'{base_name[: max(0, 255 - len(suffix))]}{suffix}'
     return candidate
+
+async def _cache_get_json(key: str):
+    r = await get_redis()
+    if r is None:
+        return None
+    try:
+        raw = await r.get(key)
+        return json.loads(raw) if raw else None
+    except Exception:
+        return None
+
+
+async def _cache_set_json(key: str, value, ttl: int = CUSTOM_CACHE_TTL):
+    r = await get_redis()
+    if r is None:
+        return
+    try:
+        await r.set(key, json.dumps(value, ensure_ascii=False), ex=ttl)
+    except Exception:
+        pass
+
+
+@sync_to_async
+def _list_custom_regions_db():
+    plans = list(
+        CloudServerPlan.objects.filter(is_active=True)
+        .values_list('provider', 'region_code', 'region_name')
+        .distinct()
+    )
+    aws_regions = {code: name for provider, code, name in plans if provider == 'aws_lightsail'}
+    aliyun_hk = [(code, name) for provider, code, name in plans if provider == 'aliyun_simple']
+    regions = list(aws_regions.items())
+    if aliyun_hk:
+        regions.extend(aliyun_hk[:1])
+    return sorted(regions, key=lambda item: (item[0] != 'cn-hongkong', item[1], item[0]))
+
+
+async def list_custom_regions():
+    cached = await _cache_get_json(CUSTOM_REGIONS_CACHE_KEY)
+    if cached:
+        logger.info('定制缓存命中: 地区列表 %s 项', len(cached))
+        return [tuple(item) for item in cached]
+    regions = await _list_custom_regions_db()
+    await _cache_set_json(CUSTOM_REGIONS_CACHE_KEY, regions)
+    logger.info('定制缓存回源: 地区列表 %s 项', len(regions))
+    return regions
+
+
+@sync_to_async
+def _list_region_plans_db(region_code: str):
+    provider = 'aliyun_simple' if region_code == 'cn-hongkong' else 'aws_lightsail'
+    queryset = CloudServerPlan.objects.filter(region_code=region_code, provider=provider, is_active=True)
+    queryset = queryset.exclude(provider='aws_lightsail', plan_name__iexact='Nano')
+    return list(queryset.order_by('provider', '-sort_order', 'id'))
+
+
+async def list_region_plans(region_code: str):
+    cached = await _cache_get_json(CUSTOM_PLANS_CACHE_PREFIX + region_code)
+    if cached:
+        ids = [int(item['id']) for item in cached]
+        plans = await sync_to_async(lambda: list(CloudServerPlan.objects.filter(id__in=ids)))()
+        plan_map = {plan.id: plan for plan in plans}
+        ordered = [plan_map[plan_id] for plan_id in ids if plan_id in plan_map]
+        if ordered:
+            logger.info('定制缓存命中: %s 套餐 %s 个', region_code, len(ordered))
+            return ordered
+    plans = await _list_region_plans_db(region_code)
+    await _cache_set_json(CUSTOM_PLANS_CACHE_PREFIX + region_code, [{'id': plan.id} for plan in plans])
+    logger.info('定制缓存回源: %s 套餐 %s 个', region_code, len(plans))
+    return plans
+
+
+async def refresh_custom_plan_cache():
+    regions = await _list_custom_regions_db()
+    await _cache_set_json(CUSTOM_REGIONS_CACHE_KEY, regions)
+    total_plans = 0
+    for region_code, _ in regions:
+        plans = await _list_region_plans_db(region_code)
+        total_plans += len(plans)
+        await _cache_set_json(CUSTOM_PLANS_CACHE_PREFIX + region_code, [{'id': plan.id} for plan in plans])
+    logger.info('定制缓存刷新完成: 地区 %s 个, 套餐 %s 个', len(regions), total_plans)
+    return len(regions)
+
+
+@sync_to_async
+def get_cloud_plan(plan_id: int):
+    return CloudServerPlan.objects.filter(id=plan_id, is_active=True).first()
+
+
+@sync_to_async
+def set_cloud_server_port(order_id: int, user_id: int, port: int):
+    order = CloudServerOrder.objects.filter(id=order_id, user_id=user_id).first()
+    if not order:
+        return None
+    order.mtproxy_port = port
+    order.provision_note = f'用户已确认端口 {port}，开始创建服务器。'
+    order.save(update_fields=['mtproxy_port', 'provision_note', 'updated_at'])
+    logger.info('云服务器端口确认: order=%s user=%s port=%s', order.order_no, user_id, port)
+    return order
+
 
 def _can_order_be_renewed(order: CloudServerOrder) -> bool:
     if order.status in {'deleted', 'deleting'}:

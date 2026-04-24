@@ -1,5 +1,13 @@
 # 版本记录
 
+## v0.5.62 - 2026-04-24
+- `build_cloud_server_name` 与 `ensure_unique_cloud_server_name` 已迁入 `cloud/services.py` 成为真实实现来源。
+- `biz/services/custom.py` 中对应旧实现已删除并缩成兼容转发，继续执行“迁移即删除”。
+
+### 验证
+- `./.venv/bin/python -m py_compile cloud/services.py biz/services/custom.py cloud/provisioning.py biz/services/__init__.py`
+- `./.venv/bin/python manage.py shell -c "from cloud.services import build_cloud_server_name, ensure_unique_cloud_server_name; from biz.services.custom import build_cloud_server_name as compat_name; print(build_cloud_server_name(1, '12.3')); print(bool(ensure_unique_cloud_server_name('abc'))); print(bool(compat_name(1, '12.3')))"`
+
 ## v0.5.61 - 2026-04-24
 - `cloud/services.py` 已不再通过 `biz.services.commerce` 获取 `_generate_unique_pay_amount`，改为直接依赖 `orders.services`。
 - 这进一步削弱了 `cloud` 域对旧 `biz` 兼容层的运行时依赖，为后续清 `biz/services/custom.py` 做准备。

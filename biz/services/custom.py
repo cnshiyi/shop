@@ -470,15 +470,9 @@ def _list_custom_regions_db():
     return _sort_region_pairs(regions)
 
 
-async def list_custom_regions():
-    cached = await _cache_get_json(CUSTOM_REGIONS_CACHE_KEY)
-    if cached:
-        logger.info('定制缓存命中: 地区列表 %s 项', len(cached))
-        return [tuple(item) for item in cached]
-    regions = await _list_custom_regions_db()
-    await _cache_set_json(CUSTOM_REGIONS_CACHE_KEY, regions)
-    logger.info('定制缓存回源: 地区列表 %s 项', len(regions))
-    return regions
+async def list_custom_regions(*args, **kwargs):
+    from cloud.services import list_custom_regions as impl
+    return await impl(*args, **kwargs)
 
 
 @sync_to_async
@@ -489,37 +483,20 @@ def _list_region_plans_db(region_code: str):
     return list(queryset.order_by('provider', '-sort_order', 'id'))
 
 
-async def list_region_plans(region_code: str):
-    cached = await _cache_get_json(CUSTOM_PLANS_CACHE_PREFIX + region_code)
-    if cached:
-        ids = [int(item['id']) for item in cached]
-        plans = await sync_to_async(lambda: list(CloudServerPlan.objects.filter(id__in=ids)))()
-        plan_map = {plan.id: plan for plan in plans}
-        ordered = [plan_map[plan_id] for plan_id in ids if plan_id in plan_map]
-        if ordered:
-            logger.info('定制缓存命中: %s 套餐 %s 个', region_code, len(ordered))
-            return ordered
-    plans = await _list_region_plans_db(region_code)
-    await _cache_set_json(CUSTOM_PLANS_CACHE_PREFIX + region_code, [{'id': plan.id} for plan in plans])
-    logger.info('定制缓存回源: %s 套餐 %s 个', region_code, len(plans))
-    return plans
+async def list_region_plans(*args, **kwargs):
+    from cloud.services import list_region_plans as impl
+    return await impl(*args, **kwargs)
 
 
-async def refresh_custom_plan_cache():
-    regions = await _list_custom_regions_db()
-    await _cache_set_json(CUSTOM_REGIONS_CACHE_KEY, regions)
-    total_plans = 0
-    for region_code, _ in regions:
-        plans = await _list_region_plans_db(region_code)
-        total_plans += len(plans)
-        await _cache_set_json(CUSTOM_PLANS_CACHE_PREFIX + region_code, [{'id': plan.id} for plan in plans])
-    logger.info('定制缓存刷新完成: 地区 %s 个, 套餐 %s 个', len(regions), total_plans)
-    return len(regions)
+async def refresh_custom_plan_cache(*args, **kwargs):
+    from cloud.services import refresh_custom_plan_cache as impl
+    return await impl(*args, **kwargs)
 
 
 @sync_to_async
-def get_cloud_plan(plan_id: int):
-    return CloudServerPlan.objects.filter(id=plan_id, is_active=True).first()
+def get_cloud_plan(*args, **kwargs):
+    from cloud.services import get_cloud_plan as impl
+    return impl.__wrapped__(*args, **kwargs)
 
 
 def _apply_cloud_discount(plan_price: Decimal, discount_rate) -> Decimal:
@@ -642,12 +619,6 @@ def pay_cloud_server_order_with_balance(order_id: int, user_id: int, currency: s
 
 
 @sync_to_async
-def set_cloud_server_port(order_id: int, user_id: int, port: int):
-    order = CloudServerOrder.objects.filter(id=order_id, user_id=user_id).first()
-    if not order:
-        return None
-    order.mtproxy_port = port
-    order.provision_note = f'用户已确认端口 {port}，开始创建服务器。'
-    order.save(update_fields=['mtproxy_port', 'provision_note', 'updated_at'])
-    logger.info('云服务器端口确认: order=%s user=%s port=%s', order.order_no, user_id, port)
-    return order
+def set_cloud_server_port(*args, **kwargs):
+    from cloud.services import set_cloud_server_port as impl
+    return impl.__wrapped__(*args, **kwargs)
