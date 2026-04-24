@@ -1,17 +1,16 @@
 """过渡层：统一暴露 cloud 域服务，后续逐步从 biz/services 迁入这里。"""
 
+from decimal import Decimal
+
 from cloud.models import CloudIpLog
 from asgiref.sync import sync_to_async
+from django.db import transaction
 from django.utils import timezone
 
 from bot.models import TelegramUser
 from cloud.models import CloudAsset, CloudIpLog, CloudServerOrder, CloudServerPlan, Server
 from orders.ledger import record_balance_ledger
-from biz.services.cloud_servers import (
-    apply_cloud_server_renewal,
-    create_cloud_server_renewal,
-    pay_cloud_server_renewal_with_balance,
-)
+from biz.services.commerce import _generate_unique_pay_amount
 from biz.services.custom import (
     build_cloud_server_name,
     buy_cloud_server_with_balance,
@@ -25,6 +24,22 @@ from biz.services.custom import (
     refresh_custom_plan_cache,
     set_cloud_server_port,
 )
+
+def _can_order_be_renewed(order: CloudServerOrder) -> bool:
+    if order.status in {'deleted', 'deleting'}:
+        return False
+    if not order.public_ip:
+        return False
+    return True
+
+
+def _renewal_price(order: CloudServerOrder, user: TelegramUser | None = None) -> Decimal:
+    discount_rate = Decimal(str(getattr(user, 'cloud_discount_rate', 100) or 100)) if user else Decimal('100')
+    total_amount = Decimal(str(order.total_amount or 0))
+    if discount_rate <= 0:
+        discount_rate = Decimal('100')
+    return (total_amount * discount_rate / Decimal('100')).quantize(Decimal('0.01'))
+
 
 def record_cloud_ip_log(*, event_type, order=None, asset=None, server=None, public_ip=None, previous_public_ip=None, note=''):
     asset_obj = asset
@@ -96,6 +111,75 @@ def record_cloud_ip_log(*, event_type, order=None, asset=None, server=None, publ
         event_type=event_type,
         note=note or '',
     )
+
+
+@sync_to_async
+def create_cloud_server_renewal(order_id: int, user_id: int, days: int = 31):
+    order = CloudServerOrder.objects.select_related('user').filter(id=order_id).first()
+    if not order:
+        return None
+    if not _can_order_be_renewed(order):
+        return False
+    order.status = 'renew_pending'
+    order.lifecycle_days = days
+    renewal_user = TelegramUser.objects.filter(id=user_id).first()
+    order.pay_amount = _generate_unique_pay_amount(_renewal_price(order, renewal_user), order.currency)
+    order.expired_at = timezone.now() + timezone.timedelta(minutes=30)
+    order.save(update_fields=['status', 'lifecycle_days', 'pay_amount', 'expired_at', 'updated_at'])
+    return order
+
+
+@sync_to_async
+def apply_cloud_server_renewal(order_id: int, days: int = 31):
+    order = CloudServerOrder.objects.get(id=order_id)
+    base = order.service_expires_at or timezone.now()
+    if base < timezone.now():
+        base = timezone.now()
+    order.service_expires_at = base + timezone.timedelta(days=days)
+    order.last_renewed_at = timezone.now()
+    order.delay_quota = max(int(order.delay_quota or 0), 0) + 1
+    order.status = 'completed'
+    order.save(update_fields=['service_expires_at', 'last_renewed_at', 'delay_quota', 'status', 'updated_at'])
+    CloudAsset.objects.filter(order=order).update(actual_expires_at=order.service_expires_at, updated_at=timezone.now())
+    Server.objects.filter(order=order).update(expires_at=order.service_expires_at, updated_at=timezone.now())
+    return order
+
+
+@sync_to_async
+def pay_cloud_server_renewal_with_balance(order_id: int, user_id: int, currency: str = 'USDT', days: int = 31):
+    with transaction.atomic():
+        order = CloudServerOrder.objects.select_related('user').select_for_update().filter(id=order_id, user_id=user_id).first()
+        if not order:
+            return None, '订单不存在'
+        if order.status not in {'renew_pending', 'pending'}:
+            return None, '当前订单状态不可钱包支付'
+        balance_field = 'balance_trx' if currency == 'TRX' else 'balance'
+        user = TelegramUser.objects.select_for_update().get(id=user_id)
+        total = Decimal(str(order.pay_amount or order.total_amount or 0))
+        current_balance = Decimal(str(getattr(user, balance_field, 0) or 0))
+        if current_balance < total:
+            return None, f'{currency} 余额不足'
+        old_balance = current_balance
+        setattr(user, balance_field, current_balance - total)
+        user.save(update_fields=[balance_field, 'updated_at'])
+        order.currency = currency
+        order.pay_method = 'balance'
+        order.pay_amount = total
+        order.paid_at = timezone.now()
+        order.expired_at = None
+        order.save(update_fields=['currency', 'pay_method', 'pay_amount', 'paid_at', 'expired_at', 'updated_at'])
+        order = apply_cloud_server_renewal.__wrapped__(order.id, days)
+        record_balance_ledger(
+            user,
+            ledger_type='cloud_order_balance_pay',
+            currency=currency,
+            old_balance=old_balance,
+            new_balance=getattr(user, balance_field),
+            related_type='cloud_order',
+            related_id=order.id,
+            description=f'云服务器续费订单 #{order.order_no} 钱包支付',
+        )
+        return order, None
 
 
 @sync_to_async

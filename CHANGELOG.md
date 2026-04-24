@@ -1,5 +1,13 @@
 # 版本记录
 
+## v0.5.50 - 2026-04-24
+- 将 `mark_cloud_server_ip_change_requested` 从 `biz.services.cloud_servers` 收回到 `cloud/services.py`，换 IP 流程继续向真实 cloud 域服务归位。
+- 该迁移保留了“当原订单缺失可用套餐关联时，按地区回退匹配可用套餐”的既有容错行为。
+
+### 验证
+- `./.venv/bin/python -m py_compile cloud/services.py`
+- `DJANGO_TEST_SQLITE=1 ./.venv/bin/python manage.py test biz.tests.CloudServerServicesTestCase.test_mark_cloud_server_ip_change_requested_falls_back_when_plan_missing --verbosity 1`
+
 ## v0.5.49 - 2026-04-24
 - 将一批低风险云服务实现从 `biz.services.cloud_servers` 收回到 `cloud/services.py`：用户重绑、重试初始化、提醒静默、自动续费开关、自动续费读取、到期延期。
 - `cloud/services.py` 继续从纯转发层往真实域服务推进，后续可继续迁移续费/换 IP 相关逻辑。
