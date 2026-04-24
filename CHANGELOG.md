@@ -1,5 +1,14 @@
 # 版本记录
 
+## v0.5.14 - 2026-04-24
+- `orders.api` 已开始承接真实实现：`recharges_list`、`recharge_detail`、`update_recharge_status` 不再只是从 `dashboard_api.views` 转发。
+- 对应后台充值接口烟测返回正常，`dashboard_api` 继续向兼容壳收缩。
+
+### 验证
+- `./.venv/bin/python -m py_compile orders/api.py`
+- `./.venv/bin/python manage.py check`
+- `curl -i -s http://127.0.0.1:8000/api/dashboard/recharges/ -H 'Authorization: Bearer session-1'`
+
 ## v0.5.13 - 2026-04-24
 - `bot.api` 不再只是纯转发：已实际接管站点配置列表/初始化/更新，以及云账号列表/新增/更新/删除接口实现。
 - `dashboard_api/urls.py` 对应路由已切到 `bot.api` 的真实实现，后台相关接口烟测返回正常。
