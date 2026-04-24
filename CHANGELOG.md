@@ -1,5 +1,15 @@
 # 版本记录
 
+## v0.5.56 - 2026-04-24
+- `dashboard_api/views.py` 已清空为兼容模块，旧后台 API 真逻辑不再保留在该文件中。
+- `dashboard_api/urls.py` 去掉了对旧 `views` 的无用引用。
+- `biz/services/__init__.py` 改为惰性导出，消除了 `cloud.services -> biz.services.commerce -> biz.services.__init__ -> biz.services.cloud_servers -> cloud.services` 的循环导入链。
+
+### 验证
+- `./.venv/bin/python -m py_compile biz/services/__init__.py dashboard_api/views.py dashboard_api/urls.py bot/api.py orders/api.py cloud/api.py cloud/services.py`
+- `./.venv/bin/python manage.py check`
+- `./.venv/bin/python manage.py shell -c "import dashboard_api.views; import dashboard_api.urls; from biz.services import create_recharge, mark_cloud_server_ip_change_requested; print('dashboard compat ok')"`
+
 ## v0.5.55 - 2026-04-24
 - 继续按“迁移即删除”清理 `biz/services/commerce.py`：已迁入 `orders/services.py` 的购物车、商品列表、订单查询等逻辑不再在旧层保留真实实现，改为惰性兼容转发。
 - `commerce.py` 仅保留尚未迁完的余额支付、地址下单、余额明细及唯一支付金额 helper，避免与 `orders.services` 产生循环导入。
