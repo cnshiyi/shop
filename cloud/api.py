@@ -13,7 +13,7 @@ from django.utils.dateparse import parse_datetime
 from django.views.decorators.csrf import csrf_exempt
 from django.views.decorators.http import require_GET, require_POST, require_http_methods
 
-from cloud.services import refresh_custom_plan_cache
+from cloud.services import ensure_cloud_server_plans, refresh_custom_plan_cache
 from cloud.models import AddressMonitor, CloudAsset, CloudServerOrder, CloudServerPlan, Server, ServerPrice
 from cloud.provisioning import provision_cloud_server
 from dashboard_api.views import (
@@ -36,8 +36,6 @@ from dashboard_api.views import (
     _status_label,
     _user_payload,
     dashboard_login_required,
-    sync_cloud_assets,
-    sync_cloud_plans,
     update_cloud_asset,
 )
 
@@ -702,6 +700,74 @@ def sync_cloud_assets(request):
     if errors and not any(synced.values()):
         return _error('；'.join(errors), status=500)
     return _ok({'synced': synced, 'aliyun_region': aliyun_region, 'aws_region': aws_region, 'errors': errors})
+
+
+@csrf_exempt
+@dashboard_login_required
+@require_POST
+def sync_cloud_assets(request):
+    aliyun_region = (request.POST.get('region') or request.GET.get('region') or 'cn-hongkong').strip() or 'cn-hongkong'
+    aws_region = (request.POST.get('aws_region') or request.GET.get('aws_region') or 'ap-southeast-1').strip() or 'ap-southeast-1'
+    errors = []
+    synced = {'aliyun': False, 'aws': False}
+    try:
+        call_command('sync_aliyun_assets', region=aliyun_region)
+        synced['aliyun'] = True
+    except Exception as exc:
+        errors.append(f'阿里云代理同步失败: {exc}')
+    try:
+        call_command('sync_aws_assets', region=aws_region)
+        synced['aws'] = True
+    except Exception as exc:
+        errors.append(f'AWS 代理同步失败: {exc}')
+    if errors and not any(synced.values()):
+        return _error('；'.join(errors), status=500)
+    return _ok({'synced': synced, 'aliyun_region': aliyun_region, 'aws_region': aws_region, 'errors': errors})
+
+
+@csrf_exempt
+@dashboard_login_required
+@require_POST
+def sync_cloud_plans(request):
+    before_pricing_count = ServerPrice.objects.filter(is_active=True).count()
+    before_regions = list(
+        ServerPrice.objects.filter(is_active=True)
+        .values('provider', 'region_code', 'region_name')
+        .distinct()
+        .order_by('provider', 'region_code')
+    )
+    try:
+        async_to_sync(ensure_cloud_server_plans)()
+    except Exception as exc:
+        return _error(f'同步价格配置失败: {exc}', status=500)
+    active_pricing_queryset = ServerPrice.objects.filter(is_active=True)
+    after_pricing_count = active_pricing_queryset.count()
+    after_regions = list(
+        active_pricing_queryset
+        .values('provider', 'region_code', 'region_name')
+        .distinct()
+        .order_by('provider', 'region_code')
+    )
+    provider_region_summary = list(
+        active_pricing_queryset
+        .values('provider', 'region_code', 'region_name')
+        .annotate(pricing_count=Count('id'))
+        .order_by('provider', 'region_code')
+    )
+    return _ok({
+        'synced': True,
+        'refreshed_regions': len(after_regions),
+        'summary': {
+            'before_plan_count': 0,
+            'after_plan_count': 0,
+            'before_pricing_count': before_pricing_count,
+            'after_pricing_count': after_pricing_count,
+            'region_count': len(after_regions),
+        },
+        'regions': after_regions,
+        'before_regions': before_regions,
+        'provider_region_summary': provider_region_summary,
+    })
 
 
 @dashboard_login_required

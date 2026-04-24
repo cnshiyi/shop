@@ -1,5 +1,15 @@
 # 版本记录
 
+## v0.5.33 - 2026-04-24
+- `orders.api` 继续承接真实实现：`_order_payload` 已不再转发到 `dashboard_api.views`。
+- 已验证 `/api/dashboard/orders/` 在迁移后继续返回 `200 JSON`。
+
+### 验证
+- `./.venv/bin/python -m py_compile orders/api.py`
+- `./.venv/bin/python manage.py check`
+- `./.venv/bin/python manage.py shell -c "from django.test import Client; ... /api/dashboard/orders/ ..."`
+- `curl -i -s http://127.0.0.1:8000/api/dashboard/orders/ -H 'Authorization: Bearer session-1'`
+
 ## v0.5.32 - 2026-04-24
 - `orders.api` 继续承接真实实现：`_recharge_detail_payload`、`_apply_recharge_status` 已不再转发到 `dashboard_api.views`。
 - 已验证充值详情与状态更新两条路径在不存在订单时稳定返回 `404 JSON`，与旧行为一致。
