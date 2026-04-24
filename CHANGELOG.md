@@ -1,5 +1,15 @@
 # 版本记录
 
+## v0.5.17 - 2026-04-24
+- `cloud.api` 继续承接真实实现：`cloud_pricing_list`、`cloud_plans_list` 已从 `dashboard_api.views` 迁入 `cloud` 域。
+- 云价格与套餐查询接口烟测返回正常，说明 `cloud` 域后台 API 已不再只是空转发壳。
+
+### 验证
+- `./.venv/bin/python -m py_compile cloud/api.py`
+- `./.venv/bin/python manage.py check`
+- `curl -i -s 'http://127.0.0.1:8000/api/dashboard/cloud-pricing/?provider=aws_lightsail' -H 'Authorization: Bearer session-1'`
+- `curl -i -s 'http://127.0.0.1:8000/api/dashboard/cloud-plans/?provider=aws_lightsail' -H 'Authorization: Bearer session-1'`
+
 ## v0.5.16 - 2026-04-24
 - `bot.api` 继续承接真实实现：`user_info`、`me` 已从 `dashboard_api.views` 挪入 `bot` 域。
 - 关键登录态接口烟测继续正常，说明 `dashboard_api` 缩壳过程中主入口还稳。

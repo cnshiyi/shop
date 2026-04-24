@@ -9,12 +9,27 @@ from dashboard_api.views import (
     _error,
     _get_keyword,
     _ok,
+    _order_payload,
     _read_payload,
     _recharge_detail_payload,
     dashboard_login_required,
-    orders_list,
 )
-from orders.models import Recharge
+from orders.models import Order, Recharge
+
+
+@dashboard_login_required
+@require_GET
+def orders_list(request):
+    keyword = _get_keyword(request)
+    queryset = Order.objects.select_related('user', 'product').order_by('-created_at')
+    queryset = _apply_keyword_filter(
+        queryset,
+        keyword,
+        ['order_no', 'product_name', 'status', 'tx_hash', 'user__tg_user_id', 'user__username', 'product__name'],
+    )
+    items = [_order_payload(item) for item in queryset[:100]]
+    return _ok(items)
+
 
 @dashboard_login_required
 @require_GET
