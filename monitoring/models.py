@@ -4,7 +4,7 @@ from django.db import models
 
 
 class AddressMonitor(models.Model):
-    user = models.ForeignKey('accounts.TelegramUser', verbose_name='用户', on_delete=models.CASCADE)
+    user = models.ForeignKey('bot.TelegramUser', verbose_name='用户', on_delete=models.CASCADE)
     address = models.CharField('监控地址', max_length=191, db_index=True)
     remark = models.TextField('备注', blank=True, null=True)
     monitor_transfers = models.BooleanField('监控转账', default=True)
@@ -42,7 +42,7 @@ class DailyAddressStat(models.Model):
         (ACCOUNT_SCOPE_CLOUD, '云账户'),
     )
 
-    user = models.ForeignKey('accounts.TelegramUser', verbose_name='用户', on_delete=models.CASCADE, related_name='daily_address_stats')
+    user = models.ForeignKey('bot.TelegramUser', verbose_name='用户', on_delete=models.CASCADE, related_name='daily_address_stats')
     monitor = models.ForeignKey('monitoring.AddressMonitor', verbose_name='监控地址', on_delete=models.SET_NULL, blank=True, null=True, related_name='daily_stats')
     account_scope = models.CharField('账户归属类型', max_length=32, choices=ACCOUNT_SCOPE_CHOICES, default=ACCOUNT_SCOPE_PLATFORM, db_index=True)
     account_key = models.CharField('账户标识', max_length=191, blank=True, null=True, db_index=True)

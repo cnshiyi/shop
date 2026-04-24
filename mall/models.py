@@ -43,7 +43,7 @@ class CartItem(models.Model):
         (ITEM_CLOUD_PLAN, '云套餐'),
     )
 
-    user = models.ForeignKey('accounts.TelegramUser', verbose_name='用户', on_delete=models.CASCADE, related_name='cart_items')
+    user = models.ForeignKey('bot.TelegramUser', verbose_name='用户', on_delete=models.CASCADE, related_name='cart_items')
     item_type = models.CharField('项目类型', max_length=32, choices=ITEM_TYPE_CHOICES, default=ITEM_PRODUCT)
     product = models.ForeignKey('mall.Product', verbose_name='商品', on_delete=models.CASCADE, related_name='cart_items', blank=True, null=True)
     cloud_plan = models.ForeignKey('mall.CloudServerPlan', verbose_name='云套餐', on_delete=models.CASCADE, related_name='cart_items', blank=True, null=True)
@@ -153,7 +153,7 @@ class CloudServerOrder(models.Model):
     )
 
     order_no = models.CharField('订单号', max_length=191, unique=True, db_index=True)
-    user = models.ForeignKey('accounts.TelegramUser', verbose_name='用户', on_delete=models.CASCADE)
+    user = models.ForeignKey('bot.TelegramUser', verbose_name='用户', on_delete=models.CASCADE)
     plan = models.ForeignKey('mall.CloudServerPlan', verbose_name='套餐', on_delete=models.PROTECT)
     provider = models.CharField('云厂商', max_length=32, db_index=True)
     region_code = models.CharField('地区代码', max_length=64, db_index=True)
@@ -295,7 +295,7 @@ class CloudAsset(models.Model):
     price = models.DecimalField('价格', max_digits=18, decimal_places=6, blank=True, null=True)
     currency = models.CharField('币种', max_length=32, default='USDT')
     order = models.ForeignKey('mall.CloudServerOrder', verbose_name='关联订单', on_delete=models.SET_NULL, blank=True, null=True)
-    user = models.ForeignKey('accounts.TelegramUser', verbose_name='绑定用户', on_delete=models.SET_NULL, blank=True, null=True)
+    user = models.ForeignKey('bot.TelegramUser', verbose_name='绑定用户', on_delete=models.SET_NULL, blank=True, null=True)
     note = models.TextField('备注', blank=True, null=True)
     status = models.CharField('状态', max_length=32, choices=STATUS_CHOICES, default=STATUS_RUNNING, db_index=True)
     provider_status = models.CharField('云厂商原始状态', max_length=64, blank=True, null=True, db_index=True)
@@ -355,7 +355,7 @@ class Server(models.Model):
     login_password = models.CharField('登录密码', max_length=191, blank=True, null=True)
     expires_at = models.DateTimeField('到期时间', blank=True, null=True, db_index=True)
     order = models.ForeignKey('mall.CloudServerOrder', verbose_name='关联订单', on_delete=models.SET_NULL, blank=True, null=True)
-    user = models.ForeignKey('accounts.TelegramUser', verbose_name='绑定用户', on_delete=models.SET_NULL, blank=True, null=True)
+    user = models.ForeignKey('bot.TelegramUser', verbose_name='绑定用户', on_delete=models.SET_NULL, blank=True, null=True)
     note = models.TextField('备注', blank=True, null=True)
     status = models.CharField('状态', max_length=32, choices=STATUS_CHOICES, default=CloudAsset.STATUS_RUNNING, db_index=True)
     provider_status = models.CharField('云厂商原始状态', max_length=64, blank=True, null=True, db_index=True)
@@ -392,7 +392,7 @@ class CloudIpLog(models.Model):
     order = models.ForeignKey('mall.CloudServerOrder', verbose_name='关联订单', on_delete=models.SET_NULL, blank=True, null=True, related_name='ip_logs')
     asset = models.ForeignKey('mall.CloudAsset', verbose_name='关联资产', on_delete=models.SET_NULL, blank=True, null=True, related_name='ip_logs')
     server = models.ForeignKey('mall.Server', verbose_name='关联服务器', on_delete=models.SET_NULL, blank=True, null=True, related_name='ip_logs')
-    user = models.ForeignKey('accounts.TelegramUser', verbose_name='关联用户', on_delete=models.SET_NULL, blank=True, null=True, related_name='cloud_ip_logs')
+    user = models.ForeignKey('bot.TelegramUser', verbose_name='关联用户', on_delete=models.SET_NULL, blank=True, null=True, related_name='cloud_ip_logs')
     provider = models.CharField('云厂商', max_length=32, blank=True, null=True, db_index=True)
     region_code = models.CharField('地区代码', max_length=64, blank=True, null=True, db_index=True)
     region_name = models.CharField('地区名称', max_length=128, blank=True, null=True)
@@ -435,7 +435,7 @@ class Order(models.Model):
     )
 
     order_no = models.CharField('订单号', max_length=191, unique=True, db_index=True)
-    user = models.ForeignKey('accounts.TelegramUser', verbose_name='用户', on_delete=models.CASCADE)
+    user = models.ForeignKey('bot.TelegramUser', verbose_name='用户', on_delete=models.CASCADE)
     product = models.ForeignKey(Product, verbose_name='商品', on_delete=models.PROTECT)
     product_name = models.TextField('商品名称')
     quantity = models.IntegerField('数量', default=1)

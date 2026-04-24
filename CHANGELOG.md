@@ -1,5 +1,16 @@
 # 版本记录
 
+## v0.5.66 - 2026-04-24
+- 把云价格同步主链从 `biz/services/custom.py` 迁入 `cloud/services.py`：包括地区/模板常量、厂商区域拉取、AWS/Aliyun 规格模板拉取、`sync_server_prices`、`ensure_cloud_server_pricing`、`ensure_cloud_server_plans`。
+- `biz/services/custom.py` 已压成纯兼容层，只保留极薄转发，不再承载任何真实价格同步逻辑。
+- 继续严格执行“迁移即删除”：旧常量、旧 helper、旧同步实现已从 `custom.py` 删除。
+
+### 验证
+- `./.venv/bin/python -m py_compile cloud/services.py biz/services/custom.py cloud/api.py bot/handlers.py biz/services/__init__.py`
+- `./.venv/bin/python manage.py check`
+- `./.venv/bin/python manage.py shell -c "from cloud.services import ensure_cloud_server_pricing, ensure_cloud_server_plans; from biz.services.custom import ensure_cloud_server_pricing as compat_pricing; from biz.services.custom import ensure_cloud_server_plans as compat_plans; print(bool(ensure_cloud_server_pricing), bool(ensure_cloud_server_plans), bool(compat_pricing), bool(compat_plans))"`
+- `wc -l biz/services/custom.py cloud/services.py` → `biz/services/custom.py` 已缩到 `84` 行
+
 ## v0.5.65 - 2026-04-24
 - 继续猛砍 `biz/services/custom.py`：云下单三件套 `create_cloud_server_order`、`buy_cloud_server_with_balance`、`pay_cloud_server_order_with_balance` 已迁入 `cloud/services.py` 成为真实实现来源。
 - `biz/services/custom.py` 中对应旧真实实现已删除并缩成兼容转发。
