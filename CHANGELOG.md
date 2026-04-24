@@ -1,5 +1,18 @@
 # 版本记录
 
+## v0.5.68 - 2026-04-24
+- 第二批模型迁移先拿 `BalanceLedger` 开刀：`orders.BalanceLedger` 已成为真实模型定义来源，`accounts.models` 已进一步缩成纯兼容出口。
+- 新增 state-only 迁移，不碰表：
+  - `orders/migrations/0002_move_balanceledger_state_from_accounts.py`
+  - `accounts/migrations/0012_move_balanceledger_state_to_orders.py`
+- 已在本地真实执行迁移并通过 SQLite 回归测试，说明 `bot.TelegramUser` / `orders.Recharge` / `orders.BalanceLedger` 这一串新归属在 fresh test DB 下也成立。
+
+### 验证
+- `./.venv/bin/python manage.py check`
+- `./.venv/bin/python manage.py makemigrations --check --dry-run`
+- `./.venv/bin/python manage.py migrate`
+- `DJANGO_TEST_SQLITE=1 ./.venv/bin/python manage.py test biz.tests --verbosity 1`
+
 ## v0.5.67 - 2026-04-24
 - 第一批真实模型迁移已打通：`bot.TelegramUser` 与 `orders.Recharge` 已成为真实模型定义来源，`accounts.models` / `finance.models` 分别退成兼容出口。
 - 运行时模型字符串外键已切到新域：`accounts` / `finance` / `mall` / `monitoring` 中所有当前模型的 `user -> bot.TelegramUser` 已收口。

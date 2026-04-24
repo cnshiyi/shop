@@ -110,14 +110,12 @@
 ## 当前主要阻塞点
 
 - [x] `bot.api` / `orders.api` / `cloud.api` 已脱离 `dashboard_api.views` 主实现
-- [ ] 新域 `models.py` 仍不是实体模型定义
-- [ ] 旧模型中的外键字符串仍大量指向旧 app：
-  - `accounts.TelegramUser`
-  - `mall.Product`
-  - `mall.CloudServerPlan`
-  - `mall.CloudServerOrder`
-  - `monitoring.AddressMonitor`
-- [ ] `shop/settings.py` 的 `INSTALLED_APPS` 仍未纳入 `orders` / `cloud`
+- [x] 第一批真实模型已落地：`bot.TelegramUser`、`orders.Recharge`
+- [x] 第二批最小块已落地：`orders.BalanceLedger`
+- [x] 当前 models 中所有 `user -> accounts.TelegramUser` 已切到 `bot.TelegramUser`
+- [ ] `mall.Product` / `mall.Order` / `mall.CartItem` 仍未迁入 `orders.models`
+- [ ] `mall.CloudServerPlan` / `mall.CloudServerOrder` / `mall.CloudAsset` / `mall.Server` / `mall.CloudIpLog` 仍未迁入 `cloud.models`
+- [ ] `monitoring.*` 真实模型仍在旧 app
 - [ ] 历史 migrations 仍全面依赖旧 app label，不能粗暴替换
 
 ## 已确认的模型切换阻塞清单

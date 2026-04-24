@@ -47,7 +47,7 @@ class CartItem(models.Model):
     user = models.ForeignKey('bot.TelegramUser', verbose_name='用户', on_delete=models.CASCADE, related_name='cart_items')
     item_type = models.CharField('项目类型', max_length=32, choices=ITEM_TYPE_CHOICES, default=ITEM_PRODUCT)
     product = models.ForeignKey('orders.Product', verbose_name='商品', on_delete=models.CASCADE, related_name='cart_items', blank=True, null=True)
-    cloud_plan = models.ForeignKey('mall.CloudServerPlan', verbose_name='云套餐', on_delete=models.CASCADE, related_name='cart_items', blank=True, null=True)
+    cloud_plan = models.ForeignKey('cloud.CloudServerPlan', verbose_name='云套餐', on_delete=models.CASCADE, related_name='cart_items', blank=True, null=True)
     quantity = models.IntegerField('数量', default=1)
     created_at = models.DateTimeField('创建时间', auto_now_add=True)
     updated_at = models.DateTimeField('更新时间', auto_now=True)
