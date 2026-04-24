@@ -1,5 +1,17 @@
 # 版本记录
 
+## v0.5.77 - 2026-04-24
+- 试探进一步移除旧兼容 app：直接摘掉 `mall` 会触发真实 migration 图阻塞。
+- 已确认报错链：`accounts.0011_move_telegramuser_state_to_bot` 依赖 `('mall', '0028_switch_user_fk_to_bot')`，因此 `mall` 目前仍必须保留在 `INSTALLED_APPS` 中。
+- 已回滚该尝试，并把阻塞写入 cutover 计划，后续要解决的是迁移依赖图，而不是运行时代码。
+
+### 验证
+- 移除 `mall` 后 `makemigrations --check --dry-run` 真实报错 `NodeNotFoundError`
+- 回滚后再次通过：
+- `./.venv/bin/python manage.py check`
+- `./.venv/bin/python manage.py makemigrations --check --dry-run`
+- `DJANGO_TEST_SQLITE=1 ./.venv/bin/python manage.py test biz.tests --verbosity 1`
+
 ## v0.5.76 - 2026-04-24
 - `biz` 已从 `INSTALLED_APPS` 移除；当前仅作为兼容导入目录和测试命名空间存在，不再作为运行时 Django app 注册。
 - 这意味着运行时 app 集再次收口，当前只剩 `accounts / finance / mall / monitoring` 作为历史迁移兼容 app 仍在注册。

@@ -98,6 +98,12 @@
 - fresh test DB 从零迁移完整通过
 - admin / contenttypes / auth 权限数据不会因 app label 缺失而异常
 
+已确认的真实阻塞示例：
+
+- 当前若直接移除 `mall`，`makemigrations` 会报 `NodeNotFoundError`
+- 具体依赖链为：`accounts.0011_move_telegramuser_state_to_bot` 仍依赖 `('mall', '0028_switch_user_fk_to_bot')`
+- 这说明剩余旧 app 的主要阻塞点已经不是运行时代码，而是跨 app 的历史迁移依赖图
+
 ## 当前结论
 
 `INSTALLED_APPS` 收口已经进入最后阶段，但剩余问题主要是 Django 机制与历史迁移，而不是业务实现本身。
