@@ -26,10 +26,12 @@ from dashboard_api.views import (
     _read_payload,
     _region_label,
     _server_price_payload,
+    _server_source_label,
+    _status_label,
+    _user_payload,
     dashboard_login_required,
     create_cloud_plan,
     delete_cloud_plan,
-    servers_list,
     sync_cloud_assets,
     sync_cloud_plans,
     sync_servers,
@@ -161,6 +163,83 @@ def cloud_orders_list(request):
         item['is_expired'] = status in {'deleted', 'expired'} or item['grace_expired']
         item['expires_in_days'] = _days_left(service_expires_dt) if service_expires_dt else None
         item['grace_expires_in_days'] = _days_left(renew_grace_dt) if renew_grace_dt else None
+    return _ok(items)
+
+
+def _server_payload(server):
+    user = server.user
+    user_payload = None
+    if user:
+        usernames = user.usernames
+        user_payload = _user_payload({
+            'id': user.id,
+            'tg_user_id': user.tg_user_id,
+            'username': user.username,
+            'first_name': user.first_name,
+            'usernames': usernames,
+            'primary_username': usernames[0] if usernames else '',
+        })
+    order = server.order
+    return {
+        'id': server.id,
+        'status': server.status,
+        'status_label': _status_label(server.status, Server.STATUS_CHOICES),
+        'source': server.source,
+        'source_label': _server_source_label(server.source),
+        'provider': server.provider,
+        'provider_label': _provider_label(server.provider),
+        'account_label': server.account_label,
+        'region_label': _region_label(server.region_code, server.region_name),
+        'region_name': server.region_name,
+        'server_name': server.server_name,
+        'instance_id': server.instance_id,
+        'provider_resource_id': server.provider_resource_id,
+        'public_ip': server.public_ip,
+        'login_user': server.login_user,
+        'expires_at': _iso(server.expires_at),
+        'days_left': _days_left(server.expires_at),
+        'user_id': user.id if user else None,
+        'tg_user_id': user.tg_user_id if user else None,
+        'user_display_name': user_payload['display_name'] if user_payload else '未绑定用户',
+        'username_label': user_payload['username_label'] if user_payload else '-',
+        'order_id': order.id if order else None,
+        'order_no': order.order_no if order else '',
+        'order_detail_path': f'/admin/cloud-orders/{order.id}' if order else '',
+        'provider_status': '已删除' if server.status == Server.STATUS_DELETED else server.provider_status,
+        'is_active': server.is_active,
+        'updated_at': _iso(server.updated_at),
+    }
+
+
+@dashboard_login_required
+@require_GET
+def servers_list(request):
+    keyword = _get_keyword(request)
+    dedup_raw = (request.GET.get('dedup') or '').lower()
+    dedup = dedup_raw not in {'0', 'false', 'no', 'off'}
+    queryset = Server.objects.select_related('user', 'order').order_by('expires_at', '-updated_at', '-id')
+    queryset = _apply_keyword_filter(
+        queryset,
+        keyword,
+        ['server_name', 'instance_id', 'public_ip', 'account_label', 'provider', 'region_name', 'user__tg_user_id', 'user__username', 'order__order_no'],
+    )
+    provider = (request.GET.get('provider') or '').strip()
+    region_code = (request.GET.get('region_code') or '').strip()
+    if provider:
+        queryset = queryset.filter(provider=provider)
+    if region_code:
+        queryset = queryset.filter(region_code=region_code)
+    items = [_server_payload(server) for server in queryset[:500]]
+    if dedup:
+        seen = set()
+        deduped = []
+        for item in items:
+            dedup_key = (item.get('provider') or '', item.get('instance_id') or '', item.get('public_ip') or '', item.get('server_name') or '')
+            if dedup_key in seen:
+                continue
+            seen.add(dedup_key)
+            deduped.append(item)
+        items = deduped
     return _ok(items)
 
 

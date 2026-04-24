@@ -1,5 +1,16 @@
 # 版本记录
 
+## v0.5.27 - 2026-04-24
+- `cloud.api` 继续承接真实实现：`cloud_order_detail`、`update_cloud_order_status` 与内部 `_apply_cloud_order_status` 已不再转发到 `dashboard_api.views`。
+- 已验证云订单详情与状态更新两条路径在不存在订单时稳定返回 `404 JSON`，与旧行为一致。
+
+### 验证
+- `./.venv/bin/python -m py_compile cloud/api.py`
+- `./.venv/bin/python manage.py check`
+- `./.venv/bin/python manage.py shell -c "from django.test import Client; ... /api/dashboard/cloud-orders/999999/ ..."`
+- `curl -i -s http://127.0.0.1:8000/api/dashboard/cloud-orders/999999/ -H 'Authorization: Bearer session-1'`
+- `curl -i -s -X POST http://127.0.0.1:8000/api/dashboard/cloud-orders/999999/status/ -H 'Authorization: Bearer session-1' -H 'Content-Type: application/json' -d '{"status":"completed"}'`
+
 ## v0.5.26 - 2026-04-24
 - `bot.api` 继续承接真实实现：`verify_cloud_account` 已不再转发到 `dashboard_api.views`。
 - 已验证 `/api/dashboard/settings/cloud-accounts/<id>/verify/` 在不存在账号时稳定返回 `404 JSON`，与旧行为一致。
