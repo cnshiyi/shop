@@ -3,8 +3,10 @@
 from decimal import Decimal, InvalidOperation
 
 from asgiref.sync import async_to_sync
+from django.core.management import call_command
 from django.db import IntegrityError, transaction
-from django.db.models import Count, Q
+from django.db.models import Case, CharField, Count, Q, Value, When
+from django.db.models.functions import Cast
 from django.db.utils import ProgrammingError
 from django.utils import timezone
 from django.utils.dateparse import parse_datetime
@@ -36,7 +38,6 @@ from dashboard_api.views import (
     dashboard_login_required,
     sync_cloud_assets,
     sync_cloud_plans,
-    sync_servers,
     update_cloud_asset,
 )
 
@@ -597,6 +598,87 @@ def update_cloud_plan(request, plan_id: int):
         return _error('提交的套餐数据格式不正确')
     async_to_sync(refresh_custom_plan_cache)()
     return _ok(_cloud_plan_payload(plan))
+
+
+def _apply_server_missing_state(provider, region, existing_instance_ids):
+    now = timezone.now()
+    existing_instance_ids = {str(item) for item in existing_instance_ids if item}
+    queryset = Server.objects.filter(provider=provider, region_code=region).exclude(instance_id__isnull=True).exclude(instance_id='')
+    legacy_queryset = queryset.filter(provider_status='missing')
+    legacy_updated = legacy_queryset.update(
+        status=Server.STATUS_DELETED,
+        provider_status='已删除',
+        is_active=False,
+        note=Case(
+            When(note__isnull=True, then=Value(f'历史状态修正：服务器不存在，已统一标记为已删除；检查时间: {now.isoformat()}')),
+            When(note='', then=Value(f'历史状态修正：服务器不存在，已统一标记为已删除；检查时间: {now.isoformat()}')),
+            default=Cast('note', output_field=CharField()),
+            output_field=CharField(),
+        ),
+        updated_at=now,
+    )
+    queryset = queryset.filter(is_active=True)
+    if existing_instance_ids:
+        queryset = queryset.exclude(instance_id__in=existing_instance_ids)
+    missing_servers = list(queryset.select_related('order'))
+    missing_note = f'云平台同步未发现该服务器，已标记为已删除；检查时间: {now.isoformat()}'
+    updated = queryset.update(
+        status=Server.STATUS_DELETED,
+        provider_status='已删除',
+        is_active=False,
+        note=missing_note,
+        updated_at=now,
+    )
+    order_ids = [item.order_id for item in missing_servers if item.order_id]
+    instance_ids = [item.instance_id for item in missing_servers if item.instance_id]
+    if order_ids:
+        CloudServerOrder.objects.filter(id__in=order_ids).exclude(status='deleted').update(
+            status='deleted',
+            provision_note=missing_note,
+            updated_at=now,
+        )
+        CloudAsset.objects.filter(order_id__in=order_ids).update(
+            status=CloudAsset.STATUS_DELETED,
+            provider_status='已删除',
+            is_active=False,
+            note=missing_note,
+            updated_at=now,
+        )
+    if instance_ids:
+        CloudAsset.objects.filter(instance_id__in=instance_ids).update(
+            status=CloudAsset.STATUS_DELETED,
+            provider_status='已删除',
+            is_active=False,
+            note=missing_note,
+            updated_at=now,
+        )
+    return legacy_updated + updated
+
+
+@csrf_exempt
+@dashboard_login_required
+@require_POST
+def sync_servers(request):
+    aliyun_region = (request.POST.get('region') or request.GET.get('region') or 'cn-hongkong').strip() or 'cn-hongkong'
+    aws_region = (request.POST.get('aws_region') or request.GET.get('region') or 'ap-southeast-1').strip() or 'ap-southeast-1'
+    errors = []
+    synced = {'aliyun': False, 'aws': False}
+    missing = {'aliyun': 0, 'aws': 0}
+    try:
+        aliyun_command = call_command('sync_aliyun_assets', region=aliyun_region)
+        synced['aliyun'] = True
+        missing['aliyun'] = _apply_server_missing_state('aliyun_simple', aliyun_region, getattr(aliyun_command, 'synced_instance_ids', None) or [])
+    except Exception as exc:
+        errors.append(f'阿里云同步失败: {exc}')
+    try:
+        aws_command = call_command('sync_aws_assets', region=aws_region)
+        synced['aws'] = True
+        missing['aws'] = _apply_server_missing_state('aws_lightsail', aws_region, getattr(aws_command, 'synced_instance_ids', None) or [])
+    except Exception as exc:
+        errors.append(f'AWS 同步失败: {exc}')
+    if errors and not any(synced.values()):
+        return _error('；'.join(errors), status=500)
+    return _ok({'synced': synced, 'missing': missing, 'aliyun_region': aliyun_region, 'aws_region': aws_region, 'errors': errors})
 
 
 @dashboard_login_required

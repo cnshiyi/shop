@@ -1,5 +1,17 @@
 # 版本记录
 
+## v0.5.29 - 2026-04-24
+- `cloud.api` 继续承接真实实现：`create_cloud_plan`、`update_cloud_plan`、`delete_cloud_plan` 已不再转发到 `dashboard_api.views`。
+- 修正迁移中的一次错误导入：`refresh_custom_plan_cache` 改为从 `cloud.services` 引入。
+- 已验证云套餐创建空参数返回 `400 JSON`，删除不存在套餐返回 `404 JSON`。
+
+### 验证
+- `./.venv/bin/python -m py_compile cloud/api.py`
+- `./.venv/bin/python manage.py check`
+- `./.venv/bin/python manage.py shell -c "from django.test import Client; ... /api/dashboard/cloud-plans/create/ ..."`
+- `curl -i -s -X POST http://127.0.0.1:8000/api/dashboard/cloud-plans/create/ -H 'Authorization: Bearer session-1' -H 'Content-Type: application/json' -d '{}'`
+- `curl -i -s -X POST http://127.0.0.1:8000/api/dashboard/cloud-plans/999999/delete/ -H 'Authorization: Bearer session-1'`
+
 ## v0.5.28 - 2026-04-24
 - `cloud.api` 继续承接真实实现：`servers_list` 与 `_server_payload` 已不再转发到 `dashboard_api.views`。
 - 已验证服务器列表接口在默认去重与 `dedup=0` 两种模式下均返回 `200 JSON`。
