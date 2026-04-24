@@ -2,6 +2,7 @@
 
 import os
 
+from django.contrib.auth import authenticate, login, logout
 from django.contrib.auth.decorators import login_required
 from django.views.decorators.csrf import csrf_exempt
 from django.views.decorators.http import require_GET, require_POST
@@ -89,6 +90,52 @@ def overview(request):
             for item in latest_recharges
         ],
     })
+
+
+@csrf_exempt
+@require_POST
+def auth_login(request):
+    username = request.POST.get('username') or request.headers.get('x-username')
+    password = request.POST.get('password') or request.headers.get('x-password')
+
+    if not username or not password:
+        try:
+            import json
+            payload = json.loads(request.body.decode('utf-8') or '{}')
+            username = username or payload.get('username')
+            password = password or payload.get('password')
+        except Exception:
+            pass
+
+    user = authenticate(request, username=username, password=password)
+    if not user:
+        return _error('用户名或密码错误', status=401)
+    if not user.is_active:
+        return _error('用户已禁用', status=403)
+
+    login(request, user)
+    return _ok({'accessToken': f'session-{user.pk}'})
+
+
+@csrf_exempt
+@dashboard_login_required
+@require_POST
+def auth_logout(request):
+    logout(request)
+    return _ok(True)
+
+
+@csrf_exempt
+@dashboard_login_required
+@require_POST
+def auth_refresh(request):
+    return _ok(f'session-{request.user.pk}')
+
+
+@dashboard_login_required
+@require_GET
+def auth_codes(request):
+    return _ok(['dashboard', 'users', 'cloud', 'finance', 'monitoring', 'settings'])
 
 
 @dashboard_login_required
@@ -323,6 +370,10 @@ def verify_cloud_account(request, account_id: int):
 
 
 __all__ = [
+    'auth_codes',
+    'auth_login',
+    'auth_logout',
+    'auth_refresh',
     'cloud_accounts_list',
     'create_cloud_account',
     'create_product',

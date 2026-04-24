@@ -9,10 +9,10 @@ app_name = 'dashboard_api'
 
 urlpatterns = [
     path('csrf/', bot_api.csrf, name='csrf'),
-    path('auth/login', views.auth_login, name='auth-login'),
-    path('auth/logout', views.auth_logout, name='auth-logout'),
-    path('auth/refresh', views.auth_refresh, name='auth-refresh'),
-    path('auth/codes', views.auth_codes, name='auth-codes'),
+    path('auth/login', bot_api.auth_login, name='auth-login'),
+    path('auth/logout', bot_api.auth_logout, name='auth-logout'),
+    path('auth/refresh', bot_api.auth_refresh, name='auth-refresh'),
+    path('auth/codes', bot_api.auth_codes, name='auth-codes'),
     path('user/info', bot_api.user_info, name='user-info'),
     path('dashboard/me/', bot_api.me, name='me'),
     path('dashboard/overview/', bot_api.overview, name='overview'),

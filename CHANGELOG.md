@@ -1,5 +1,28 @@
 # 版本记录
 
+## v0.5.38 - 2026-04-24
+- `bot.api` 继续承接真实实现：`auth_login`、`auth_logout`、`auth_refresh`、`auth_codes` 已不再由 `dashboard_api.views` 提供。
+- `dashboard_api/urls.py` 已把 `auth/*` 全部切到 `bot.api`。
+- 已验证空凭据登录继续返回 `401 JSON`，`auth/codes` 与 `auth/refresh` 继续返回 `200 JSON`。
+
+### 验证
+- `./.venv/bin/python -m py_compile bot/api.py dashboard_api/urls.py`
+- `./.venv/bin/python manage.py check`
+- `./.venv/bin/python manage.py shell -c "from django.test import Client; ... /api/auth/login ... /api/auth/codes ... /api/auth/refresh ..."`
+- `curl -i -s -X POST http://127.0.0.1:8000/api/auth/login -H 'Content-Type: application/json' -d '{}'`
+- `curl -i -s http://127.0.0.1:8000/api/auth/codes -H 'Authorization: Bearer session-1'`
+- `curl -i -s -X POST http://127.0.0.1:8000/api/auth/refresh -H 'Authorization: Bearer session-1'`
+
+## v0.5.37 - 2026-04-24
+- `cloud.api` 继续承接真实实现：`_cloud_order_detail_payload` 已不再转发到 `dashboard_api.views`。
+- 已验证 `/api/dashboard/cloud-orders/` 在迁移后继续返回 `200 JSON`。
+
+### 验证
+- `./.venv/bin/python -m py_compile cloud/api.py`
+- `./.venv/bin/python manage.py check`
+- `./.venv/bin/python manage.py shell -c "from django.test import Client; ... /api/dashboard/cloud-orders/ ..."`
+- `curl -i -s http://127.0.0.1:8000/api/dashboard/cloud-orders/ -H 'Authorization: Bearer session-1'`
+
 ## v0.5.36 - 2026-04-24
 - `cloud.api` 继续承接真实实现：`_server_price_payload` 已不再转发到 `dashboard_api.views`。
 - 修正一次迁移回归：保持 `ServerPrice` 继续使用 `server_name/server_description` 序列化，避免误读不存在的 `plan_name` 字段。
