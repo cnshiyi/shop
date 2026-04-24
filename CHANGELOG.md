@@ -1,5 +1,18 @@
 # 版本记录
 
+## v0.5.90 - 2026-04-24
+- 第一轮 migration graph 脱钩实验已打通：`monitoring` 已从 `INSTALLED_APPS` 移除。
+- 具体做法：
+  - 把 `accounts.0011_move_telegramuser_state_to_bot` 对 `monitoring.0003` 的依赖改为 `cloud.0002`
+  - 给 `cloud.0002_addressmonitor_resourcesnapshot_dailyaddressstat` 补上 fresh DB 需要的监控表建表 `database_operations`
+- 结果：不再需要依赖 `monitoring` app 才能完成 fresh DB 初始化；`check`、`makemigrations --check --dry-run`、`DJANGO_TEST_SQLITE=1 manage.py test` 继续通过。
+
+### 验证
+- `./.venv/bin/python -m py_compile cloud/migrations/0002_addressmonitor_resourcesnapshot_dailyaddressstat.py accounts/migrations/0011_move_telegramuser_state_to_bot.py shop/settings.py`
+- `./.venv/bin/python manage.py check`
+- `./.venv/bin/python manage.py makemigrations --check --dry-run`
+- `DJANGO_TEST_SQLITE=1 ./.venv/bin/python manage.py test --verbosity 1`
+
 ## v0.5.89 - 2026-04-24
 - 新增 `docs/legacy-app-bridge-plan.md`，把旧 app 的桥接方案单独落成文档：
   - 哪些 label 必须保留

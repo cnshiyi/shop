@@ -7,12 +7,12 @@
 - `accounts`
 - `mall`
 - `finance`
-- `monitoring`
 
 已经不再保留：
 
 - `biz`（已从 `INSTALLED_APPS` 移除）
 - `dashboard_api`（已从 `INSTALLED_APPS` 移除，路由已并回 `shop/dashboard_urls.py`）
+- `monitoring`（已从 `INSTALLED_APPS` 移除，监控模型 fresh DB 建表与状态归属已改由 `cloud` 承接）
 
 同时新域已经成为真实运行时归属：
 

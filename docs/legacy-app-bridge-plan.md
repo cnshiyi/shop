@@ -19,6 +19,9 @@
 - `accounts`
 - `finance`
 - `mall`
+
+已经完成脱钩、可退出运行时配置的旧 app：
+
 - `monitoring`
 
 原因不是运行时代码，而是 Django migration graph：
@@ -141,12 +144,13 @@
 - 已实测：直接移除 `mall` 会报 `NodeNotFoundError`
 
 ### `monitoring`
-它仍是关键桥：
+这条桥已经完成第一轮脱钩实验：
 
-- `accounts.0011_move_telegramuser_state_to_bot` 依赖 `monitoring.0003_switch_user_fk_to_bot`
-- `monitoring.0004_remove_dailyaddressstat_monitor_and_more` 仍在旧迁移链中承担 state 清理职责
+- `accounts.0011_move_telegramuser_state_to_bot` 对 `monitoring.0003` 的依赖已改为依赖 `cloud.0002`
+- `cloud.0002` 已补足 fresh DB 所需的监控表建表 `database_operations`
+- 当前 `monitoring` 已可从 `INSTALLED_APPS` 中移除，并通过 `check` / `makemigrations --check --dry-run` / fresh SQLite test DB 验证
 
-更重要的是：`monitoring` 的历史迁移还承担了相关监控表的**数据库创建与改表链**。如果直接移除 app，不只是依赖节点丢失，fresh DB 的建表流程也会断。
+这说明：`monitoring` 已不再是必须保留的运行时 app label，后续只剩历史提交意义上的旧目录存在价值。
 
 ## 未来若还想继续缩，有两条路线
 

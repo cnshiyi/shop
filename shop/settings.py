@@ -33,7 +33,6 @@ INSTALLED_APPS = [
     'accounts',
     'mall',
     'finance',
-    'monitoring',
     'bot',
     'orders',
     'cloud',
