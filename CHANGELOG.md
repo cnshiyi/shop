@@ -1,5 +1,15 @@
 # 版本记录
 
+## v0.5.35 - 2026-04-24
+- `cloud.api` 继续承接真实实现：`_cloud_plan_payload` 已不再转发到 `dashboard_api.views`。
+- 已验证 `/api/dashboard/cloud-plans/` 在迁移后继续返回 `200 JSON`。
+
+### 验证
+- `./.venv/bin/python -m py_compile cloud/api.py`
+- `./.venv/bin/python manage.py check`
+- `./.venv/bin/python manage.py shell -c "from django.test import Client; ... /api/dashboard/cloud-plans/ ..."`
+- `curl -i -s http://127.0.0.1:8000/api/dashboard/cloud-plans/ -H 'Authorization: Bearer session-1'`
+
 ## v0.5.34 - 2026-04-24
 - `cloud.api` 继续承接真实实现：`sync_cloud_plans` 已不再转发到 `dashboard_api.views`。
 - 已验证 `/api/dashboard/cloud-plans/sync/` 在迁移后继续返回 `200 JSON`，并正确回报区域与价格汇总。

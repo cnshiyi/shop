@@ -30,7 +30,6 @@ from dashboard_api.views import (
     _provider_label,
     _read_payload,
     _region_label,
-    _server_price_payload,
     _server_source_label,
     _status_label,
     _user_payload,
@@ -789,6 +788,30 @@ def _cloud_plan_payload(plan):
         'sort_order': plan.sort_order,
         'is_active': plan.is_active,
         'updated_at': _iso(plan.updated_at),
+    }
+
+
+def _server_price_payload(price):
+    return {
+        'id': price.id,
+        'provider': price.provider,
+        'region_code': price.region_code,
+        'region_name': price.region_name,
+        'bundle_code': price.bundle_code,
+        'plan_name': price.server_name,
+        'server_name': price.server_name,
+        'plan_description': price.server_description or '',
+        'server_description': price.server_description or '',
+        'cpu': price.cpu,
+        'memory': price.memory,
+        'storage': price.storage,
+        'bandwidth': price.bandwidth,
+        'cost_price': _decimal_to_str(getattr(price, 'cost_price', 0)),
+        'price': _decimal_to_str(price.price),
+        'currency': price.currency,
+        'sort_order': price.sort_order,
+        'is_active': price.is_active,
+        'updated_at': _iso(price.updated_at),
     }
 
 
