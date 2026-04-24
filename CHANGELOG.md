@@ -1,5 +1,14 @@
 # 版本记录
 
+## v0.5.80 - 2026-04-24
+- 继续执行“迁移即删除”：`dashboard_api/views.py` 空壳已删除，相关数据流文档同步改为指向 `bot/api.py`、`orders/api.py`、`cloud/api.py` 的真实入口。
+- 这意味着 `dashboard_api` 目录现在只剩 URL 包职责，不再保留任何旧视图实现占位文件。
+
+### 验证
+- `./.venv/bin/python manage.py check`
+- `./.venv/bin/python manage.py makemigrations --check --dry-run`
+- `DJANGO_TEST_SQLITE=1 ./.venv/bin/python manage.py test --verbosity 1`
+
 ## v0.5.79 - 2026-04-24
 - 继续执行“迁移即删除”：既然 `dashboard_api` 和 `biz` 已不再注册为 Django app，就直接删除对应 `dashboard_api/apps.py` 与 `biz/apps.py` 残留文件。
 - 删除后再次确认运行时与迁移闸门都不受影响，说明这两层 app 注册残留已彻底收干净。
