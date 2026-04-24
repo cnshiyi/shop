@@ -34,25 +34,28 @@
 - 迁移历史仍挂在旧 app 下
 - 管理命令、外键字符串、历史 migration 仍依赖旧 app 名称
 
-### 2. API 实现仍主要在 `dashboard_api.views`
+### 2. `dashboard_api` 已基本退为兼容层
 
-虽然 URL 入口已经开始切到：
+当前情况已经明显前进：
 
-- `bot.api`
-- `orders.api`
-- `cloud.api`
+- `dashboard_api/views.py` 已清空为兼容模块
+- `dashboard_api/urls.py` 已直接路由到 `bot.api` / `orders.api` / `cloud.api`
 
-但这些模块目前仍主要转发到 `dashboard_api.views` 里的实现。
+结论：`dashboard_api` 现在已不是主要阻塞点，后续更多是目录/应用级别收尾，而不是继续搬运行时逻辑。
 
-### 3. 服务实现仍有兼容壳
+### 3. `biz.services` 已大幅退为兼容壳
 
-当前：
+当前情况：
 
-- `orders.services` 仍大量转发 `biz.services.*`
-- `cloud.services` 仍大量转发 `biz.services.*`
-- `bot.services` 仍转发 `biz.services.users`
+- `biz/services/cloud_servers.py` 已是兼容壳
+- `biz/services/payments.py` 已是兼容壳
+- `biz/services/monitoring.py` 已是兼容壳
+- `biz/services/rates.py` 已是兼容壳
+- `biz/services/commerce.py` 已是兼容壳
+- `biz/services/users.py` 已是兼容壳
+- `biz/services/__init__.py` 已改成惰性导出，避免循环导入
 
-所以 `biz` 还不能下线。
+结论：`biz` 仍未到可删除阶段，但它也已经不是“主实现承载层”，主要剩余压力集中在模型定义与 app label。
 
 ## 建议切换顺序
 
@@ -106,10 +109,74 @@
 
 ## 当前主要阻塞点
 
-- [ ] `bot.api` / `orders.api` / `cloud.api` 仍转发 `dashboard_api.views`
+- [x] `bot.api` / `orders.api` / `cloud.api` 已脱离 `dashboard_api.views` 主实现
 - [ ] 新域 `models.py` 仍不是实体模型定义
-- [ ] `biz.services.*` 仍是主实现承载层
+- [ ] 旧模型中的外键字符串仍大量指向旧 app：
+  - `accounts.TelegramUser`
+  - `mall.Product`
+  - `mall.CloudServerPlan`
+  - `mall.CloudServerOrder`
+  - `monitoring.AddressMonitor`
+- [ ] `shop/settings.py` 的 `INSTALLED_APPS` 仍未纳入 `orders` / `cloud`
+- [ ] 历史 migrations 仍全面依赖旧 app label，不能粗暴替换
+
+## 已确认的模型切换阻塞清单
+
+### 旧 app 仍在 `INSTALLED_APPS`
+
+当前仍保留：
+
+- `biz`
+- `accounts`
+- `mall`
+- `finance`
+- `monitoring`
+- `dashboard_api`
+
+当前仅新增但未接管模型 app 的是：
+
+- `bot`
+
+### 真实模型仍定义在旧 app
+
+- `accounts/models.py`
+  - `TelegramUser`
+  - `BalanceLedger`
+- `finance/models.py`
+  - `Recharge`
+- `mall/models.py`
+  - `Product`
+  - `CartItem`
+  - `CloudServerPlan`
+  - `ServerPrice`
+  - `CloudServerOrder`
+  - `CloudAsset`
+  - `Server`
+  - `CloudIpLog`
+- `monitoring/models.py`
+  - `AddressMonitor`
+  - `DailyAddressStat`
+  - `ResourceSnapshot`
+
+### 代码级外键字符串热点
+
+当前代码里仍可见的旧引用主要是：
+
+- `accounts.TelegramUser`
+- `mall.Product`
+- `mall.CloudServerPlan`
+- `mall.CloudServerOrder`
+- `monitoring.AddressMonitor`
+
+这些旧字符串如果不先迁完，直接切 app 会导致 state / relation / contenttypes 一起炸。
 
 ## 建议下一步
 
-优先把 `dashboard_api.views` 按领域继续拆薄，直到它只剩少量共享辅助函数或直接退为兼容层。
+优先开始“模型定义迁移草案”而不是继续清 API：
+
+1. 先选最小闭环模型组，例如 `bot.TelegramUser` + `orders.Recharge`
+2. 在新域建立真实模型类，保持 `db_table` 不变
+3. 先把代码中的外键字符串改成新域引用或直接类引用
+4. 再设计 `SeparateDatabaseAndState` 级别的 app-label 迁移
+
+换句话说：下一阶段不是继续搬接口，而是正式进入模型迁移施工。 

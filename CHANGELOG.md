@@ -1,5 +1,20 @@
 # 版本记录
 
+## v0.5.59 - 2026-04-24
+- 补充了第一批模型迁移施工图：`docs/model-migration-batch1-plan.md`，明确首批目标为 `bot.TelegramUser` 与 `orders.Recharge`。
+- 把当前真正阻塞 `INSTALLED_APPS` 切换的核心问题收敛为：真实模型定义、外键字符串引用、以及 `SeparateDatabaseAndState` 级别的 state 迁移。
+
+### 验证
+- `./.venv/bin/python manage.py check`
+
+## v0.5.58 - 2026-04-24
+- `bot/services.py` 已接管 `get_or_create_user` 的真实实现，不再依赖 `biz.services.users` 作为运行时来源。
+- `biz/services/users.py` 已缩成兼容壳，`bot` 域服务层继续去 `biz` 化。
+
+### 验证
+- `./.venv/bin/python -m py_compile bot/services.py biz/services/users.py bot/handlers.py biz/services/__init__.py`
+- `./.venv/bin/python manage.py shell -c "from bot.services import get_or_create_user; from biz.services.users import get_or_create_user as compat; print('bot services ok', bool(get_or_create_user), bool(compat))"`
+
 ## v0.5.57 - 2026-04-24
 - `orders/services.py` 已收回余额明细、地址下单、购物车余额支付、单商品余额支付等剩余电商链路。
 - `biz/services/commerce.py` 已删除最后一批旧真实实现，缩成纯兼容壳，统一转发到 `orders.services`。
