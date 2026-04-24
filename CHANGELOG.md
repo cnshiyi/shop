@@ -1,5 +1,15 @@
 # 版本记录
 
+## v0.5.89 - 2026-04-24
+- 新增 `docs/legacy-app-bridge-plan.md`，把旧 app 的桥接方案单独落成文档：
+  - 哪些 label 必须保留
+  - 最小桥接层为什么只能是 `__init__.py + apps.py + migrations/`
+  - 后续若继续缩，只能走 migration graph 脱钩路线
+- 这份文档的目的就是把“代码已经迁完，但 app label 还不能删”的原因讲透，避免后续重复试错。
+
+### 验证
+- 文档直接基于当前 `INSTALLED_APPS`、迁移依赖图与已完成收口结果编写
+
 ## v0.5.88 - 2026-04-24
 - 把“最小桥接层”方案正式写入 `docs/installed-apps-cutover-plan.md`：
   - `accounts / finance / mall / monitoring` 的当前目标形态就是 `__init__.py + apps.py + migrations/`
