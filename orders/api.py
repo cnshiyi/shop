@@ -1,17 +1,21 @@
 """orders 域后台 API。"""
 
+from django.db import transaction
+from django.utils import timezone
 from django.views.decorators.csrf import csrf_exempt
 from django.views.decorators.http import require_GET, require_POST
 
 from dashboard_api.views import (
     _apply_keyword_filter,
-    _apply_recharge_status,
+    _decimal_to_str,
     _error,
     _get_keyword,
+    _iso,
     _ok,
     _order_payload,
     _read_payload,
-    _recharge_detail_payload,
+    _status_label,
+    _user_payload,
     dashboard_login_required,
 )
 from orders.models import Order, Recharge
@@ -29,6 +33,69 @@ def orders_list(request):
     )
     items = [_order_payload(item) for item in queryset[:100]]
     return _ok(items)
+
+
+def _recharge_detail_payload(recharge):
+    user = recharge.user
+    usernames = user.usernames if user else []
+    user_payload = _user_payload({
+        'id': user.id,
+        'tg_user_id': user.tg_user_id,
+        'username': user.username,
+        'first_name': user.first_name,
+        'usernames': usernames,
+        'primary_username': usernames[0] if usernames else '',
+    }) if user else None
+    return {
+        'id': recharge.id,
+        'amount': _decimal_to_str(recharge.amount),
+        'currency': recharge.currency,
+        'status': recharge.status,
+        'status_label': _status_label(recharge.status, Recharge.STATUS_CHOICES),
+        'tx_hash': recharge.tx_hash,
+        'pay_amount': _decimal_to_str(recharge.pay_amount) if getattr(recharge, 'pay_amount', None) is not None else None,
+        'receive_address': getattr(recharge, 'receive_address', None),
+        'created_at': _iso(recharge.created_at),
+        'completed_at': _iso(recharge.completed_at),
+        'updated_at': _iso(getattr(recharge, 'updated_at', None)),
+        'user_id': user.id if user else None,
+        'tg_user_id': user.tg_user_id if user else None,
+        'user_display_name': user_payload['display_name'] if user_payload else '未绑定用户',
+        'username_label': user_payload['username_label'] if user_payload else '-',
+    }
+
+
+@transaction.atomic
+def _apply_recharge_status(recharge, new_status):
+    now = timezone.now()
+    old_status = recharge.status
+    allowed_statuses = {choice[0] for choice in Recharge.STATUS_CHOICES}
+    if new_status not in allowed_statuses:
+        raise ValueError('充值订单状态不正确')
+    if new_status == old_status:
+        return recharge
+
+    user = recharge.user
+    balance_field = 'balance_trx' if recharge.currency == 'TRX' else 'balance'
+
+    if old_status == 'completed' and new_status != 'completed':
+        current_balance = getattr(user, balance_field)
+        if current_balance < recharge.amount:
+            raise ValueError('用户余额不足，无法从已完成回退状态')
+        setattr(user, balance_field, current_balance - recharge.amount)
+        user.save(update_fields=[balance_field, 'updated_at'])
+        recharge.completed_at = None
+
+    if new_status == 'completed' and old_status != 'completed':
+        setattr(user, balance_field, getattr(user, balance_field) + recharge.amount)
+        user.save(update_fields=[balance_field, 'updated_at'])
+        recharge.completed_at = recharge.completed_at or now
+    elif new_status in {'pending', 'expired'}:
+        recharge.completed_at = None
+
+    recharge.status = new_status
+    recharge.save(update_fields=['status', 'completed_at'])
+    return recharge
 
 
 @dashboard_login_required
