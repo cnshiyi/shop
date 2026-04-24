@@ -1,159 +1,81 @@
-# 第一批模型迁移方案：`bot.TelegramUser` + `orders.Recharge`
+# 第一批模型迁移方案复盘：`bot.TelegramUser` + `orders.Recharge`
 
-## 目标
+## 结果
 
-先拿最小闭环开刀，验证“真实模型定义迁入新域 + 状态迁移不动表”的可行路径。
+这一批已经完成，并且验证了当前整套“模型迁入新域 + state-only 迁移不动表”的方法论是可行的。
 
-本批只处理：
+本批实际完成：
 
 - `accounts.TelegramUser` → `bot.TelegramUser`
 - `finance.Recharge` → `orders.Recharge`
 
-暂不在这一批处理：
+并且在后续连续扩批中，已经进一步完成：
 
-- `accounts.BalanceLedger`
-- `mall.*`
-- `monitoring.*`
-- `INSTALLED_APPS` 删除旧 app
+- `accounts.BalanceLedger` → `orders.BalanceLedger`
+- `mall.Product` / `mall.CartItem` / `mall.Order` → `orders.*`
+- `mall.CloudServerPlan` / `mall.ServerPrice` / `mall.CloudServerOrder` / `mall.CloudAsset` / `mall.Server` / `mall.CloudIpLog` → `cloud.*`
+- `monitoring.AddressMonitor` / `monitoring.DailyAddressStat` / `monitoring.ResourceSnapshot` → `cloud.*`
 
-## 为什么先做这组
+## 这批验证了什么
 
-### 1. 依赖面相对最小
+### 1. 真实模型可以迁入新域而不改表
 
-- `TelegramUser` 是 bot 域根模型
-- `Recharge` 是 orders 域里最独立的一张表
-- 两者都已经使用目标表名：
-  - `bot_user`
-  - `order_recharge`
+验证结论：
 
-### 2. 业务路径清晰
-
-- `bot/services.py` 已接管用户同步逻辑
-- `orders/services.py` 已接管充值逻辑
-- API / handler 已基本不依赖旧 `dashboard_api.views`
-
-### 3. 可以先验证“app label 迁移”方法论
-
-这批成功后，后面再迁：
-
-- `BalanceLedger`
-- `Product` / `CartItem` / `Order`
-- `CloudServerPlan` / `CloudServerOrder` / `CloudAsset`
-- `AddressMonitor` 等监控模型
-
-## 当前阻塞点
-
-### 代码层外键/字符串引用
-
-当前仍有这些旧引用：
-
-- `accounts.TelegramUser`
-  - `accounts/models.py`
-  - `finance/models.py`
-  - `mall/models.py`
-  - `monitoring/models.py`
-- migration 历史中也大量写死 `accounts.telegramuser`
-
-### 应用配置
-
-当前 `shop/settings.py` 中：
-
-- 已有 `bot`
-- 还没有 `orders`
-- 还没有 `cloud`
-- 旧 app 仍在：`accounts` / `finance` / `mall` / `monitoring`
-
-## 建议施工顺序
-
-### 步骤 1：在新域建立真实模型定义
-
-目标文件：
-
-- `bot/models.py`
-- `orders/models.py`
-
-要求：
-
-- 复制当前真实字段定义
 - 保持 `Meta.db_table` 不变
-- 先不删除旧模型文件中的类定义
-- 新旧模型短期不能同时以同名实体完整注册，避免 Django 冲突
+- 通过 `SeparateDatabaseAndState` 前移 Django state
+- 不做额外 rename table
 
-### 步骤 2：先处理运行时代码中的引用
+这条路径已经在多批模型上被反复验证通过。
 
-先把代码中的运行时引用逐步改成：
+### 2. 旧模型文件不能保留“导入别名”式双注册
 
-- `bot.TelegramUser`
-- `orders.Recharge`
+迁移 `mall.Product` / `CartItem` / `Order` 时已经踩过坑：
 
-优先改：
+- 只要旧 `models.py` 还导入这些类
+- Django 仍可能把它们注册成旧 app 模型
+- 最终表现为双注册与 state 异常
 
-- 新域服务层
-- API 层
-- handlers / commands
-- 旧模型里的字符串外键（只改当前 models，不动历史 migrations）
+结论：旧 app 里不能靠“import alias”伪装兼容；要么清空，要么只保留极薄兼容出口且确保不触发模型注册。
 
-### 步骤 3：设计 `SeparateDatabaseAndState` 迁移
+### 3. fresh test DB 是最关键闸门
 
-目标不是改表，而是改 Django state：
+后续实践已经证明，单看运行时库不够，必须同时过：
 
-- 把 `TelegramUser` 的 state 从 `accounts` 切到 `bot`
-- 把 `Recharge` 的 state 从 `finance` 切到 `orders`
+- `manage.py migrate`
+- `manage.py check`
+- `manage.py makemigrations --check --dry-run`
+- `DJANGO_TEST_SQLITE=1 manage.py test biz.tests`
 
-原则：
+只有 fresh test DB 也能完整跑通，才能说明 state-only 迁移链顺序正确。
 
-- 数据库表名不变
-- 不做 rename table
-- 只迁 Django state / app label
+## 当前落地状态
 
-### 步骤 4：验证 `makemigrations --check --dry-run`
+已完成：
 
-这一步必须确认：
+- `bot.TelegramUser` 已成为真实模型定义来源
+- `orders.Recharge` 已成为真实模型定义来源
+- `accounts.models` / `finance.models` 已降为兼容出口
+- 当前 models 中所有 `user -> accounts.TelegramUser` 已切到 `bot.TelegramUser`
+- 已手写并验证 state-only 迁移链，不做表级变更
+- 这一批的方法论后来已扩展应用到 `orders` 与 `cloud` 后续所有主模型批次
 
-- Django 不再把它们识别成“新增一张表 + 删除旧表”
-- state 迁移不会引发整串联动模型误判
+## 仍然留下的真正问题
 
-### 步骤 5：再评估是否收掉旧模型壳
+第一批本身已经结束，现在剩下的问题不是这批模型怎么迁，而是：
 
-只有当下面都成立，才考虑把旧文件进一步清空：
+- 剩余旧 app label 如何安全退出 `INSTALLED_APPS`
+- `biz` 兼容层何时可以进一步缩减或移除
+- 历史 migration 对旧 app 的依赖如何在不破坏 fresh test DB 的前提下处理
 
-- 运行时引用已切到新域
-- state 迁移已稳定
-- `manage.py check` 通过
-- `makemigrations --check --dry-run` 无新增
+## 结论
 
-## 暂不做的事
+这份文档现在更适合作为“第一批模型迁移方法论复盘”，而不是待办施工单。
 
-本批不做：
+后续如需继续 cutover，重点不再是 `TelegramUser` / `Recharge` 本身，而是围绕：
 
-- 删除 `accounts` / `finance` app
-- 修改历史 migration 文件
-- 迁 `BalanceLedger`
-- 迁 `mall.*` 云资源模型
-- 迁 `monitoring.*`
-- 修改 contenttypes / auth permission 数据
+- `INSTALLED_APPS` 收口
+- 旧兼容层删除
+- 历史 migration / app label 风险验证
 
-## 风险提示
-
-### 1. 同名模型双注册
-
-如果直接把真实类复制到新 app，又保留旧 app 注册，Django 会出现模型冲突或 state 异常。
-
-### 2. 外键字符串联动
-
-哪怕只迁 `TelegramUser`，`mall` / `monitoring` / `accounts.BalanceLedger` / `finance.Recharge` 都会被牵动。
-
-### 3. `INSTALLED_APPS` 时机不能抢跑
-
-在 `orders` / `cloud` 还没真正接管模型前，不要先删旧 app。
-
-## 本批完成标志
-
-满足以下条件才算第一批模型迁移完成：
-
-- `bot.TelegramUser` 成为真实模型定义来源
-- `orders.Recharge` 成为真实模型定义来源
-- 旧引用已切到新域或兼容壳
-- `manage.py check` 通过
-- `manage.py makemigrations --check --dry-run` 无新增
-- 未发生表级 destructive change
+展开。
