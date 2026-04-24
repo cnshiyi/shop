@@ -1,5 +1,15 @@
 # 版本记录
 
+## v0.5.94 - 2026-04-24
+- 做了一轮交付前审计并修正旧口径：`docs/installed-apps-cutover-plan.md`、`docs/table-rename-plan.md`、`docs/DATA_FLOW_AND_PERSISTENCE.md`、`docs/refactor-mapping.md`、`docs/model-migration-batch1-plan.md` 与 `tools/fix_backend.py` 已同步到当前事实。
+- 审计结论：运行时旧 app 已全部退出；剩余旧引用主要存在于 `biz` 兼容测试层、`tmp/` 历史脚本与迁移历史说明中，不属于当前运行时阻塞。
+
+### 验证
+- `./.venv/bin/python manage.py check`
+- `./.venv/bin/python manage.py makemigrations --check --dry-run`
+- `DJANGO_TEST_SQLITE=1 ./.venv/bin/python manage.py test --verbosity 2`
+- `grep` 扫描运行时代码与文档旧口径
+
 ## v0.5.93 - 2026-04-24
 - 第四轮 migration graph 脱钩实验已打通：`accounts` 已从 `INSTALLED_APPS` 移除。
 - 具体做法：

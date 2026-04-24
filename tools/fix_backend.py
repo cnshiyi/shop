@@ -1,12 +1,17 @@
 """
-后端一键修复脚本
+后端一键修复脚本（历史兜底工具）
 
 用法: uv run python tools/fix_backend.py
 
+说明:
+  - 该脚本服务于早期重构/迁移阶段的本地修复场景
+  - 当前主工程已经完成 `accounts/finance/mall/monitoring/dashboard_api/biz` 的运行时收口
+  - 脚本里涉及旧 app 迁移目录/约束的步骤仅保留为历史兼容兜底，不代表当前推荐结构
+
 覆盖范围:
   1. 自动创建 .env 中配置的 MySQL 数据库（如不存在）
-  2. 补全 monitoring / finance 迁移目录与初始迁移
-  3. 修正唯一约束字段长度（避免 MySQL key 超长）
+  2. 兼容性检查旧迁移目录是否存在
+  3. 修正历史唯一约束字段长度（避免 MySQL key 超长）
   4. 自动执行 makemigrations + migrate（表已存在时自动 --fake-initial）
   5. 确保 dashboard 管理员存在
   6. 最终跑 manage.py check 验证

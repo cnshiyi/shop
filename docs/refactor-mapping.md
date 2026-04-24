@@ -114,7 +114,7 @@
 - [x] `external_sync_logs` → `core_sync_log`
 
 ### 第五阶段：删除旧目录
-- [ ] 删除 `accounts/finance/mall/monitoring` 中剩余仅为迁移图服务的兼容壳
+- [x] 删除 `accounts/finance/mall/monitoring` 中运行时模型/服务/admin/命令兼容壳；当前只剩历史迁移目录与最小包骨架
 - [x] 删除 `biz/dashboard_api` 中已无运行时必要的业务实现与 app 注册残留
 - [x] 兼容壳已大幅压薄；新实现稳定后优先直接删除旧层
 - [x] `shop/dashboard_urls.py` 已完全改走 `bot/orders/cloud` API 入口

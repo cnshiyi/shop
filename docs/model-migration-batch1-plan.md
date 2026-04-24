@@ -55,7 +55,7 @@
 
 - `bot.TelegramUser` 已成为真实模型定义来源
 - `orders.Recharge` 已成为真实模型定义来源
-- `accounts.models` / `finance.models` 已降为兼容出口
+- `accounts.models` / `finance.models` 已删除
 - 当前 models 中所有 `user -> accounts.TelegramUser` 已切到 `bot.TelegramUser`
 - 已手写并验证 state-only 迁移链，不做表级变更
 - 这一批的方法论后来已扩展应用到 `orders` 与 `cloud` 后续所有主模型批次

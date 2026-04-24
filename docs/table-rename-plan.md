@@ -28,7 +28,7 @@
 
 注意：
 - `TelegramUsername` 仍未下线前，不要同时动 `telegram_usernames`
-- `ForeignKey('accounts.TelegramUser')` 这类引用先保持不变，只改表名
+- 这份表改名计划对应的是早期阶段；当前运行时引用与 app label 收口已经完成，旧 `accounts.*` FK 说明仅保留为历史背景
 
 ### 批次 B：商品与订单表
 
