@@ -37,7 +37,8 @@
 - `mall/`
 - `monitoring/`
 - `biz/services/`
-- `shop/dashboard_urls.py`
+
+补充说明：后台聚合路由已并回 `shop/dashboard_urls.py`。
 
 ## 启动方式
 

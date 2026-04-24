@@ -1,5 +1,13 @@
 # 版本记录
 
+## v0.5.84 - 2026-04-24
+- 继续清理 `dashboard_api` 退场后的尾巴：`README.md`、`ARCHITECTURE.md`、`docs/installed-apps-cutover-plan.md`、`docs/table-rename-plan.md` 已统一改成“路由并回 `shop/dashboard_urls.py`”的现状描述。
+- 这一步用于避免明天继续把 `dashboard_api` 当作仍存在的目录或独立路由包来判断。
+
+### 验证
+- `./.venv/bin/python manage.py check`
+- `git diff -- README.md ARCHITECTURE.md docs/installed-apps-cutover-plan.md docs/table-rename-plan.md`
+
 ## v0.5.83 - 2026-04-24
 - 继续执行“迁移即删除”：`dashboard_api/urls.py` 已并回 `shop/dashboard_urls.py`，`dashboard_api` 目录本身已删除。
 - `shop/urls.py` 现直接包含 `shop.dashboard_urls`，旧 `dashboard_api` 只剩历史提交，不再存在于当前工作树。

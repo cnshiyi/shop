@@ -114,7 +114,7 @@
 - [x] 新域服务出口：`bot/services.py`、`orders/services.py`、`cloud/services.py`
 - [x] 新域 API 出口：`bot/api.py`、`orders/api.py`、`cloud/api.py`
 - [x] `TelegramUsername` 运行时依赖清零
-- [ ] `dashboard_api` 继续拆分到各域 API
+- [x] `dashboard_api` 已拆分并并回 `bot/api.py`、`orders/api.py`、`cloud/api.py` + `shop/dashboard_urls.py`
 - [ ] `INSTALLED_APPS` 调整方案单独设计
 
 ## 建议下一步

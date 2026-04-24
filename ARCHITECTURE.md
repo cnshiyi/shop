@@ -18,13 +18,14 @@
 - `mall/`
 - `monitoring/`
 - `biz/services/`
-- `shop/dashboard_urls.py`
+
+补充说明：后台聚合路由已并回 `shop/dashboard_urls.py`。
 
 其中：
 - `bot.models`、`orders.models`、`cloud.models` 已是当前真实模型归属。
 - `mall.models` 已清空，避免双注册。
 - `accounts.models`、`finance.models`、`monitoring.models` 只保留兼容导出。
-- `dashboard_api` 已基本退化为路由壳。
+- 旧 `dashboard_api` 已退出运行时并并回 `shop/dashboard_urls.py`。
 
 ## 迁移策略
 - 保持 `db_table` 稳定，避免为代码收口额外改线上数据结构。
@@ -34,12 +35,12 @@
 ## 当前剩余重点
 ### 阶段 A：继续压缩旧入口
 - 继续减少 `biz/services` 兼容聚合层存在感
-- 继续减少 `dashboard_api` 作为独立 app 的必要性
+- 继续清理 `dashboard_api` 已退场后的旧文档口径
 - 清理 README / 架构文档中的旧结构叙述
 
 ### 阶段 B：评估 `INSTALLED_APPS` 收口
 - 评估 `accounts` / `finance` / `mall` / `monitoring` 是否可仅保留 migration 历史
-- 评估 `dashboard_api` / `biz` 是否能从运行时 app 进一步降级
+- 评估剩余旧兼容 app 是否还能继续从运行时配置中退出
 - 在确认 migration 依赖和 app label 不会破坏测试库初始化后，再做 app 注册裁剪
 
 ## 为什么还没直接删旧 app

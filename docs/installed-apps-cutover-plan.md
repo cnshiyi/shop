@@ -12,7 +12,7 @@
 
 已经不再保留：
 
-- `dashboard_api`（已从 `INSTALLED_APPS` 移除，仅保留 URL 包）
+- `dashboard_api`（已从 `INSTALLED_APPS` 移除，路由已并回 `shop/dashboard_urls.py`）
 
 同时新域已经成为真实运行时归属：
 
