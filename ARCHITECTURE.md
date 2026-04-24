@@ -19,7 +19,7 @@
 - `monitoring/`
 - `dashboard_api/`
 
-补充说明：后台聚合路由已并回 `shop/dashboard_urls.py`；`biz/` 当前仅保留测试命名空间最小骨架。
+补充说明：后台聚合路由已并回 `shop/dashboard_urls.py`；`biz/` 已删除，相关测试已迁入 `cloud/tests.py`。
 
 其中：
 - `bot.models`、`orders.models`、`cloud.models` 已是当前真实模型归属。
@@ -47,5 +47,5 @@
 
 剩余需要注意的风险点不再是运行时代码，而是历史迁移文档与测试命名空间：
 - 历史 migration 文件仍会保留旧 app label 作为历史链记录
-- `biz.tests` 仍保留旧测试命名空间名字
+- 测试已迁入新域，例如 `cloud/tests.py`
 - 文档仍需持续避免把已删除目录写成“仍保留”

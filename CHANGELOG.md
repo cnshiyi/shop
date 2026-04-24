@@ -1,5 +1,14 @@
 # 版本记录
 
+## v0.5.97 - 2026-04-25
+- 继续清理辅助目录：已删除 `biz/`、`dashboard_web/`、`tools/monitoring/`，并把原 `biz/tests.py` 迁入 `cloud/tests.py`。
+- `secrets/` 未动，继续保留为本地敏感材料目录，避免误删密钥。
+
+### 验证
+- `DJANGO_TEST_SQLITE=1 ./.venv/bin/python manage.py test cloud.tests --verbosity 2`
+- `./.venv/bin/python manage.py check`
+- `./.venv/bin/python manage.py makemigrations --check --dry-run`
+
 ## v0.5.96 - 2026-04-24
 - 文档口径继续统一到最终状态：`README.md`、`ARCHITECTURE.md`、`docs/installed-apps-cutover-plan.md`、`docs/legacy-app-bridge-plan.md`、`docs/refactor-mapping.md`、`docs/DATA_FLOW_AND_PERSISTENCE.md` 已明确写成“旧目录已删除 / 已并入新域”。
 - 同时把已从工作树删除的旧目录 `accounts/`、`finance/`、`mall/`、`monitoring/` 正式纳入版本记录，避免工作区悬空。

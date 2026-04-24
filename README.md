@@ -38,7 +38,7 @@
 - `monitoring/` → 已并入 `cloud/`
 - `dashboard_api/` → 已并回 `shop/dashboard_urls.py`
 
-补充说明：`biz/` 当前仅保留测试命名空间最小骨架，不再承载运行时实现。
+补充说明：`biz/` 已删除；相关云服务测试已迁入 `cloud/tests.py`。
 
 ## 启动方式
 
@@ -74,7 +74,7 @@
 - 后端接口仍由当前仓库提供：`/api/admin/` 与 `/api/dashboard/`
 - 真实前端仓库位于 `C:\Users\Administrator\Desktop\vue-vben-admin`
 - 当前实际使用前端位于 `C:\Users\Administrator\Desktop\vue-vben-admin\apps\web-antd`
-- 当前仓库内的 `dashboard_web/` 仅保留说明文档，不承载真实前端源码
+- 当前仓库内已不再保留 `dashboard_web/` 目录；前端说明统一迁移到主文档与独立前端仓库
 - 如需修改后台页面、菜单、文案、代理与交互，请直接在前端仓库修改
 
 ## 统一云资产

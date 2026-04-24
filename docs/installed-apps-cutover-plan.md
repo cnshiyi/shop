@@ -32,15 +32,15 @@
 
 仍需保留的“旧 app 痕迹”只存在于历史 migration 链与相关复盘文档中，而不再属于运行时目录结构。
 
-### 3. `biz` 仅剩测试命名空间压力
+### 3. `biz` 已完成退场
 
 当前情况：
 
 - `biz/services/*` 与 `biz/models.py` 已删除
-- `biz.tests` 仍保留为测试命名空间
+- `biz/tests.py` 已迁入 `cloud/tests.py`
 - 旧 patch 路径已切到新域，例如 `cloud.services.CloudServerOrder`
 
-结论：`biz` 已不再承担服务兼容职责，剩余是否继续清理，主要取决于是否还要保留 `biz.tests` 这个测试入口名。
+结论：`biz` 已不再承担服务兼容职责，也不再保留测试入口名。
 
 ## 已完成的关键前置条件
 
@@ -91,7 +91,7 @@
 
 ### 阶段 1：继续缩旧入口
 
-- 继续减少 `biz` 剩余测试命名空间的历史包袱
+- 继续减少历史文档与工具中对 `biz` 的旧口径
 - 逐步把测试从 `biz.services.*` patch 改到新域入口
 - 清理 README / 架构 / cutover 计划中的旧口径
 
@@ -99,7 +99,7 @@
 
 只有在下面条件满足后才建议动：
 
-- `biz.tests` 不再依赖旧兼容路径
+- `cloud.tests` 已接管原 `biz.tests` 的云服务测试职责
 - 运行时代码不再从 `biz` 导入
 - `biz.models` 不再承担任何必需兼容职责
 
