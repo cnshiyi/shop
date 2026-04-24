@@ -5,7 +5,7 @@ from django.utils import timezone
 from django.views.decorators.csrf import csrf_exempt
 from django.views.decorators.http import require_GET, require_POST
 
-from dashboard_api.views import (
+from bot.api import (
     _apply_keyword_filter,
     _decimal_to_str,
     _error,

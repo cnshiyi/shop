@@ -1,5 +1,18 @@
 # 版本记录
 
+## v0.5.42 - 2026-04-24
+- 云套餐改为人工维护：停用自动套餐同步接口，`cloud-plans/sync` 现在直接返回“已停用自动同步”。
+- 删除现有脏套餐数据：已清空 `CloudServerPlan` 22 条、`ServerPrice` 109 条；确认当前无订单和购物车外键引用。
+- AWS 资产同步改为默认不限制单一区域；未显式传 `aws_region` 时将按全部可用 Lightsail 地区同步。
+- 套餐缓存回源逻辑改为仅依赖人工维护的 `CloudServerPlan`，不再从 `ServerPrice` 反向生成套餐。
+
+### 验证
+- `./.venv/bin/python -m py_compile cloud/api.py cloud/services.py mall/management/commands/sync_aws_assets.py biz/services/custom.py dashboard_api/views.py`
+- `./.venv/bin/python manage.py check`
+- `./.venv/bin/python manage.py shell -c "from django.test import Client; ... /api/dashboard/cloud-plans/ ..."`
+- `./.venv/bin/python manage.py shell -c "from django.test import Client; ... /api/dashboard/cloud-plans/sync/ ..."`
+- `./.venv/bin/python manage.py shell -c "from cloud.models import CloudServerPlan, ServerPrice; ..."`
+
 ## v0.5.41 - 2026-04-24
 - `bot.api` 继续承接真实实现：用户列表、余额修改、折扣修改、余额明细、商品列表、商品创建、商品更新已不再从 `dashboard_api.views` 直接导入实现。
 - 保留 `dashboard_api.views` 中的公共 helper 导入，`dashboard_api` 进一步收缩为兼容/工具层。
