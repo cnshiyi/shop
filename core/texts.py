@@ -46,6 +46,19 @@ BOT_TEXTS = {
     'bot_cloud_unassigned_pending': ('未分配IP说明: 订单未付款', '云服务器未分配 IP 提示-待支付'),
     'bot_cloud_unassigned_paid': ('未分配IP说明: 已支付但尚未完成，请联系人工处理', '云服务器未分配 IP 提示-处理中'),
     'bot_cloud_unassigned_failed': ('未分配IP说明: 创建失败，请联系人工处理', '云服务器未分配 IP 提示-失败'),
+    'bot_media_received': ('已收到你的媒体消息。', '收到媒体消息默认回复'),
+    'bot_monitor_detail_instruction': ('📘 使用说明：\n1. 监控转账：地址收到 USDT/TRX 转账时通知。\n2. 监控资源：地址可用能量/带宽增加时通知；正常转账消耗不通知。', '监控使用说明'),
+    'bot_monitor_updated': ('已更新', '监控更新成功提示'),
+    'bot_monitor_threshold_prompt_usdt': ('请输入新的 USDT 阈值金额：\n\n可随时点击底部菜单打断当前输入。', 'USDT 阈值输入提示'),
+    'bot_monitor_threshold_prompt_trx': ('请输入新的 TRX 阈值金额：\n\n可随时点击底部菜单打断当前输入。', 'TRX 阈值输入提示'),
+    'bot_recharge_amount_prompt_usdt': ('💰 请输入需要充值的 USDT 金额：\n\n可随时点击底部菜单打断当前输入。', 'USDT 充值金额输入提示'),
+    'bot_recharge_amount_prompt_trx': ('💰 请输入需要充值的 TRX 金额：\n\n可随时点击底部菜单打断当前输入。', 'TRX 充值金额输入提示'),
+    'bot_tx_detail_expired': ('交易详情已过期', '交易详情过期提示'),
+    'bot_resource_detail_expired': ('资源详情已过期', '资源详情过期提示'),
+    'bot_cloud_create_success': ('✅ 云服务器创建完成', '云服务器创建成功标题'),
+    'bot_cloud_retry_success': ('✅ 云服务器重试初始化完成', '云服务器重试初始化成功标题'),
+    'bot_cloud_order_payment_note': ('订单 5 分钟有效，请在有效期内完成支付。\n\n系统已开始自动监控 USDT 和 TRX 到账，检测到支付成功后会自动进入后续流程。', '云服务器下单支付说明'),
+    'bot_balance_detail_title': ('💳 余额明细', '余额明细标题'),
 }
 
 TEXT_GROUPS = {

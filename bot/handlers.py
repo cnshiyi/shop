@@ -82,7 +82,7 @@ from orders.services import (
 )
 from core.formatters import fmt_amount, fmt_pay_amount
 from core.models import SiteConfig
-from core.texts import text_default
+from core.texts import site_text
 from cloud.provisioning import provision_cloud_server, reprovision_cloud_server_bootstrap
 
 logger = logging.getLogger(__name__)
@@ -419,7 +419,7 @@ async def _reply_cloud_query_results(message: Message, raw_text: str, state: FSM
         await state.update_data(cloud_query_results=results)
         await state.set_state(CloudQueryStates.waiting_ip)
     if not results:
-        await message.answer('🔎 IP查询到期\n\n未查询到可续费的有效 IP 记录。', reply_markup=order_query_menu())
+        await message.answer(_bot_text('bot_query_ip_empty', '🔎 IP查询到期\n\n未查询到可续费的有效 IP 记录。'), reply_markup=order_query_menu())
         return
     page = 1
     per_page = 5
@@ -678,7 +678,7 @@ def _cloud_server_created_text(order, port: int | None = None) -> str:
         display_secret = mtproxy_link.split('secret=', 1)[1].split('&', 1)[0].strip()
     else:
         display_secret = raw_secret
-    lines = ['✅ 云服务器创建完成']
+    lines = [_bot_text('bot_cloud_create_success', '✅ 云服务器创建完成')]
     lines.append(f'端口: <code>{escape(str(actual_port or "-"))}</code>')
     lines.append(f'IP: <code>{escape(public_ip or "-")}</code>')
     lines.append(f'密钥: <code>{escape(display_secret or "-")}</code>')
@@ -800,7 +800,7 @@ def _balance_details_page(items, page: int, total: int):
     total_pages = max(1, math.ceil(total / 8))
     if not items:
         return _bot_text('bot_balance_details_empty', '💳 余额明细\n\n暂无余额流水。'), balance_details_list([], 1, 1)
-    lines = ['💳 余额明细', '']
+    lines = [_bot_text('bot_balance_detail_title', '💳 余额明细'), '']
     for item in items:
         icon = '🟢' if item['direction'] == 'in' else '🔴'
         created_at = item['created_at'].strftime('%m-%d %H:%M') if item.get('created_at') else '-'
@@ -907,7 +907,7 @@ def _receive_address() -> str:
 
 
 def _bot_text(key: str, default: str) -> str:
-    return text_default(key, default)
+    return site_text(key, default)
 
 
 # ── 辅助：检查是否在 FSM 状态中，如果是则不处理 ──
@@ -1921,7 +1921,7 @@ def register_handlers(dp: Dispatcher):
         field = 'monitor_transfers' if mode == 'transfers' else 'monitor_resources'
         monitor = await toggle_monitor_flag(int(monitor_id), user.id, field)
         if not monitor:
-            await _safe_callback_answer(callback, '监控不存在', show_alert=True)
+            await _safe_callback_answer(callback, _bot_text('bot_monitor_missing', '监控不存在'), show_alert=True)
             return
         from cloud.cache import update_monitor_flag_in_cache
         await update_monitor_flag_in_cache(monitor.address, field, getattr(monitor, field))
@@ -1936,7 +1936,7 @@ def register_handlers(dp: Dispatcher):
             reply_markup=kb_monitor_detail(monitor.id, monitor.monitor_transfers, monitor.monitor_resources),
             parse_mode='HTML',
         )
-        await _safe_callback_answer(callback, '已更新')
+        await _safe_callback_answer(callback, _bot_text('bot_monitor_updated', '已更新'))
 
     @dp.callback_query(F.data.startswith('mon:threshold:'))
     async def cb_mon_threshold(callback: CallbackQuery):
@@ -1976,7 +1976,7 @@ def register_handlers(dp: Dispatcher):
         detail_key = callback.data.split(':')[2]
         detail = get_tx_detail(detail_key)
         if not detail:
-            await _safe_callback_answer(callback, '交易详情已过期', show_alert=True)
+            await _safe_callback_answer(callback, _bot_text('bot_tx_detail_expired', '交易详情已过期'), show_alert=True)
             return
         text = (
             f'🔍 交易详情\n\n'
@@ -2001,7 +2001,7 @@ def register_handlers(dp: Dispatcher):
         detail_key = callback.data.split(':')[2]
         detail = get_resource_detail(detail_key)
         if not detail:
-            await _safe_callback_answer(callback, '资源详情已过期', show_alert=True)
+            await _safe_callback_answer(callback, _bot_text('bot_resource_detail_expired', '资源详情已过期'), show_alert=True)
             return
         text = (
             f'⚡ 资源详情\n\n'
@@ -2049,7 +2049,7 @@ def register_handlers(dp: Dispatcher):
             return
         await _forward_plain_text_to_admin(bot, message)
         if _is_admin_forward_media_type(content_type):
-            await message.answer('已收到你的媒体消息。', reply_markup=main_menu())
+            await message.answer(_bot_text('bot_media_received', '已收到你的媒体消息。'), reply_markup=main_menu())
             return
         await message.answer(_bot_text('bot_plain_text_received', '已收到你的消息。若是地址请直接发送地址，若是代理链接请直接发送链接。'), reply_markup=main_menu())
 
