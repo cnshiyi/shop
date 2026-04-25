@@ -1,14 +1,15 @@
 import os
 
 from dotenv import load_dotenv
-from pathlib import Path
 
 from core.runtime_config import get_runtime_config
+from core.cache import build_redis_url
 
-BASE_DIR = Path(__file__).resolve().parent.parent
-load_dotenv(BASE_DIR / '.env', override=True)
+load_dotenv()
 
 BOT_TOKEN = get_runtime_config('bot_token', os.getenv('BOT_TOKEN', ''))
-REDIS_URL = get_runtime_config('redis_url', os.getenv('REDIS_URL', 'redis://127.0.0.1:6379/0'))
-FSM_STATE_TTL = int(os.getenv('FSM_STATE_TTL', '1800'))
-FSM_DATA_TTL = int(os.getenv('FSM_DATA_TTL', '1800'))
+RECEIVE_ADDRESS = get_runtime_config('receive_address', os.getenv('RECEIVE_ADDRESS', ''))
+TRONGRID_API_KEY = get_runtime_config('trongrid_api_key', os.getenv('TRONGRID_API_KEY', ''))
+REDIS_URL = build_redis_url()
+FSM_STATE_TTL = int(os.getenv('FSM_STATE_TTL', '3600'))
+FSM_DATA_TTL = int(os.getenv('FSM_DATA_TTL', '3600'))

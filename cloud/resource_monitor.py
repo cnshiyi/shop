@@ -7,10 +7,9 @@ import httpx
 from aiogram import Bot
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 from asgiref.sync import sync_to_async
+from django.apps import apps
 from django.utils import timezone
 
-from bot.models import TelegramUser
-from cloud.models import AddressMonitor
 from core.cache import get_config
 from core.persistence import record_external_sync_log, save_resource_snapshot
 from cloud.cache import get_monitor_addresses
@@ -47,11 +46,13 @@ def _cache_resource_detail(detail_id: str, detail: dict):
 
 @sync_to_async
 def _get_user(user_id: int):
+    TelegramUser = apps.get_model('bot', 'TelegramUser')
     return TelegramUser.objects.filter(id=user_id).first()
 
 
 @sync_to_async
 def _update_resource_snapshot(monitor_id: int, address: str, energy: int, bandwidth: int, delta_energy: int, delta_bandwidth: int):
+    AddressMonitor = apps.get_model('cloud', 'AddressMonitor')
     AddressMonitor.objects.filter(id=monitor_id).update(
         last_energy=energy,
         last_bandwidth=bandwidth,

@@ -9,3 +9,4 @@ class ProvisionResult:
     login_user: str = ''
     login_password: str = ''
     note: str = ''
+    static_ip_name: str = ''

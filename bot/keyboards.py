@@ -6,11 +6,10 @@ from core.formatters import fmt_amount
 
 def main_menu():
     kb = ReplyKeyboardBuilder()
-    kb.button(text='✨ 订阅')
     kb.button(text='🛠 定制节点')
     kb.button(text='🔎 到期时间查询')
     kb.button(text='👤 个人中心')
-    kb.adjust(2, 2)
+    kb.adjust(2, 1)
     return kb.as_markup(resize_keyboard=True)
 
 
@@ -25,13 +24,12 @@ def cloud_query_menu():
 def profile_menu():
     kb = InlineKeyboardBuilder()
     kb.button(text='📋 我的订单', callback_data='profile:orders')
-    kb.button(text='🛒 购物车', callback_data='profile:cart')
     kb.button(text='💰 充值余额', callback_data='profile:recharge')
     kb.button(text='📜 充值记录', callback_data='profile:recharges')
     kb.button(text='💳 余额明细', callback_data='profile:balance_details')
     kb.button(text='🔍 地址监控', callback_data='profile:monitors')
     kb.button(text='🔙 返回主菜单', callback_data='profile:back')
-    kb.adjust(2, 2, 2, 1)
+    kb.adjust(2, 2, 1, 1)
     return kb.as_markup()
 
 
@@ -414,7 +412,6 @@ def balance_details_list(items, page: int, total_pages: int):
 
 def order_query_menu():
     kb = InlineKeyboardBuilder()
-    kb.row(InlineKeyboardButton(text='📦 商品订单', callback_data='profile:orders:product'))
     kb.row(InlineKeyboardButton(text='☁️ 云服务器订单', callback_data='profile:orders:cloud'))
     kb.row(InlineKeyboardButton(text='🔎 IP查询到期', callback_data='cloud:queryip'))
     kb.row(InlineKeyboardButton(text='🔙 返回个人中心', callback_data='profile:back_to_menu'))

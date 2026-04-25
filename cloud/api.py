@@ -1,11 +1,14 @@
 """cloud 域后台 API。"""
 
+import logging
+import threading
+import time
 from decimal import Decimal, InvalidOperation
 
 from asgiref.sync import async_to_sync
 from django.core.management import call_command
 from django.db import IntegrityError, transaction
-from django.db.models import Case, CharField, Count, Q, Value, When
+from django.db.models import Case, CharField, Count, IntegerField, Q, Value, When
 from django.db.models.functions import Cast
 from django.db.utils import ProgrammingError
 from django.utils import timezone
@@ -15,6 +18,7 @@ from django.views.decorators.http import require_GET, require_POST, require_http
 
 from bot.api import (
     _apply_keyword_filter,
+    _countdown_label,
     _days_left,
     _decimal_to_str,
     _error,
@@ -23,6 +27,7 @@ from bot.api import (
     _ok,
     _parse_decimal,
     _provider_label,
+    _provider_status_label,
     _read_payload,
     _region_label,
     _server_source_label,
@@ -32,9 +37,13 @@ from bot.api import (
     dashboard_login_required,
 )
 from bot.models import TelegramUser
-from cloud.services import ensure_cloud_server_pricing, record_cloud_ip_log, refresh_custom_plan_cache
+from cloud.lifecycle import _delete_instance, _mark_replaced_order_deleted
+from cloud.services import create_cloud_server_rebuild_order, ensure_cloud_server_pricing, record_cloud_ip_log, refresh_custom_plan_cache
 from cloud.models import AddressMonitor, CloudAsset, CloudIpLog, CloudServerOrder, CloudServerPlan, Server, ServerPrice
+from core.models import ExternalSyncLog
 from cloud.provisioning import provision_cloud_server
+
+logger = logging.getLogger(__name__)
 
 
 def _resolve_telegram_user(value):
@@ -74,6 +83,17 @@ def _sync_telegram_username(user, username=None):
     user.save(update_fields=['username', 'updated_at'])
 
 
+def _preserve_link_status_label(*notes):
+    text = '\n'.join(str(item or '') for item in notes if item)
+    if '继续保留旧机服务' in text:
+        return '重装失败，仍使用旧机'
+    if '已发起重装迁移' in text:
+        return '重装迁移中'
+    if '重装迁移完成' in text:
+        return '已切换到新机'
+    return ''
+
+
 def _asset_payload(asset):
     user = asset.user
     order = asset.order
@@ -101,15 +121,17 @@ def _asset_payload(asset):
         'asset_name': asset.asset_name,
         'instance_id': asset.instance_id,
         'provider_resource_id': asset.provider_resource_id,
-        'public_ip': asset.public_ip,
-        'mtproxy_link': asset.mtproxy_link,
-        'mtproxy_port': asset.mtproxy_port,
-        'mtproxy_secret': asset.mtproxy_secret,
-        'mtproxy_host': asset.mtproxy_host,
+        'public_ip': asset.public_ip or getattr(order, 'public_ip', None),
+        'mtproxy_link': asset.mtproxy_link or getattr(order, 'mtproxy_link', None),
+        'mtproxy_port': asset.mtproxy_port or getattr(order, 'mtproxy_port', None),
+        'mtproxy_secret': asset.mtproxy_secret or getattr(order, 'mtproxy_secret', None),
+        'mtproxy_host': asset.mtproxy_host or getattr(order, 'mtproxy_host', None),
         'note': asset.note,
+        'sort_order': asset.sort_order,
         'actual_expires_at': _iso(expires_at),
         'days_left': _days_left(expires_at),
-        'status_countdown': f"剩余 {_days_left(expires_at)} 天" if _days_left(expires_at) is not None else '-',
+        'status_countdown': _countdown_label(expires_at),
+        'preserve_link_status': _preserve_link_status_label(asset.note, getattr(order, 'provision_note', None)),
         'price': _decimal_to_str(asset.price if asset.price is not None else (order.total_amount if order and order.total_amount is not None else None), 2),
         'currency': asset.currency or (order.currency if order else ''),
         'user_id': user.id if user else None,
@@ -120,7 +142,7 @@ def _asset_payload(asset):
         'order_no': order.order_no if order else '',
         'status': asset.status,
         'status_label': _status_label(asset.status, CloudAsset.STATUS_CHOICES),
-        'provider_status': '已删除' if asset.status == CloudAsset.STATUS_DELETED else asset.provider_status,
+        'provider_status': '已删除' if asset.status == CloudAsset.STATUS_DELETED else _provider_status_label(asset.provider_status),
         'is_active': asset.is_active,
         'updated_at': _iso(asset.updated_at),
     }
@@ -200,17 +222,32 @@ def update_cloud_asset(request, asset_id):
                 if server:
                     server.expires_at = asset.actual_expires_at
 
-            if 'mtproxy_link' in payload and asset.order_id:
-                asset.order.mtproxy_link = payload.get('mtproxy_link') or None
-                asset.order.save(update_fields=['mtproxy_link', 'updated_at'])
-
-            if 'provider_resource_id' in payload and asset.order_id:
-                asset.order.provider_resource_id = payload.get('provider_resource_id') or None
-                asset.order.save(update_fields=['provider_resource_id', 'updated_at'])
-
-            if 'public_ip' in payload and asset.order_id:
-                asset.order.public_ip = payload.get('public_ip') or None
-                asset.order.save(update_fields=['public_ip', 'updated_at'])
+            if asset.order_id:
+                order_changed_fields = []
+                if 'mtproxy_link' in payload:
+                    asset.order.mtproxy_link = payload.get('mtproxy_link') or None
+                    order_changed_fields.append('mtproxy_link')
+                if 'mtproxy_secret' in payload:
+                    asset.order.mtproxy_secret = payload.get('mtproxy_secret') or None
+                    order_changed_fields.append('mtproxy_secret')
+                if 'mtproxy_host' in payload:
+                    asset.order.mtproxy_host = payload.get('mtproxy_host') or None
+                    order_changed_fields.append('mtproxy_host')
+                if 'mtproxy_port' in payload:
+                    mtproxy_port = payload.get('mtproxy_port')
+                    asset.order.mtproxy_port = int(mtproxy_port) if mtproxy_port not in (None, '') else None
+                    order_changed_fields.append('mtproxy_port')
+                if 'provider_resource_id' in payload:
+                    asset.order.provider_resource_id = payload.get('provider_resource_id') or None
+                    order_changed_fields.append('provider_resource_id')
+                if 'public_ip' in payload:
+                    asset.order.public_ip = payload.get('public_ip') or None
+                    order_changed_fields.append('public_ip')
+                if 'asset_name' in payload:
+                    asset.order.server_name = payload.get('asset_name') or None
+                    order_changed_fields.append('server_name')
+                if order_changed_fields:
+                    asset.order.save(update_fields=[*order_changed_fields, 'updated_at'])
 
             old_public_ip = asset.public_ip
             new_public_ip = payload.get('public_ip') or None if 'public_ip' in payload else asset.public_ip
@@ -250,6 +287,15 @@ def update_cloud_asset(request, asset_id):
                 if server:
                     server.is_active = asset.is_active
 
+            if 'sort_order' in payload:
+                sort_order = payload.get('sort_order')
+                try:
+                    asset.sort_order = int(sort_order) if sort_order not in (None, '') else 99
+                except (TypeError, ValueError):
+                    return _error('排序必须是数字', status=400)
+                if server:
+                    server.sort_order = asset.sort_order
+
             if user_lookup not in (None, '') and server:
                 server.user = asset.user
             if asset.kind == CloudAsset.KIND_SERVER and not server:
@@ -272,6 +318,7 @@ def update_cloud_asset(request, asset_id):
                 server.provider_resource_id = asset.provider_resource_id
                 server.public_ip = asset.public_ip
                 server.note = asset.note
+                server.sort_order = asset.sort_order
                 server.expires_at = asset.actual_expires_at
                 server.is_active = asset.is_active
                 if asset.asset_name:
@@ -304,7 +351,7 @@ def cloud_assets_list(request):
     keyword = _get_keyword(request)
     grouped = (request.GET.get('grouped') or '').lower() in {'1', 'true', 'yes'}
     try:
-        queryset = CloudAsset.objects.select_related('user', 'order')
+        queryset = CloudAsset.objects.select_related('user', 'order').filter(kind=CloudAsset.KIND_SERVER)
         queryset = _apply_keyword_filter(
             queryset,
             keyword,
@@ -312,7 +359,13 @@ def cloud_assets_list(request):
                 'asset_name', 'public_ip', 'mtproxy_link', 'user__tg_user_id',
                 'user__username', 'order__order_no',
             ],
-        ).distinct().order_by('actual_expires_at', '-updated_at', '-id')
+        ).distinct().annotate(
+            deleted_rank=Case(
+                When(status=CloudAsset.STATUS_DELETED, then=Value(1)),
+                default=Value(0),
+                output_field=IntegerField(),
+            )
+        ).order_by('deleted_rank', '-sort_order', 'actual_expires_at', '-updated_at', '-id')
         items = [_asset_payload(asset) for asset in queryset[:200]]
     except ProgrammingError:
         return _ok({'groups': [], 'items': []} if grouped else [])
@@ -518,6 +571,7 @@ def _server_payload(server):
         'login_user': server.login_user,
         'expires_at': _iso(server.expires_at),
         'days_left': _days_left(server.expires_at),
+        'status_countdown': _countdown_label(server.expires_at),
         'user_id': user.id if user else None,
         'tg_user_id': user.tg_user_id if user else None,
         'user_display_name': user_payload['display_name'] if user_payload else '未绑定用户',
@@ -525,7 +579,8 @@ def _server_payload(server):
         'order_id': order.id if order else None,
         'order_no': order.order_no if order else '',
         'order_detail_path': f'/admin/cloud-orders/{order.id}' if order else '',
-        'provider_status': '已删除' if server.status == Server.STATUS_DELETED else server.provider_status,
+        'provider_status': '已删除' if server.status == Server.STATUS_DELETED else _provider_status_label(server.provider_status),
+        'preserve_link_status': _preserve_link_status_label(server.note, getattr(order, 'provision_note', None)),
         'is_active': server.is_active,
         'updated_at': _iso(server.updated_at),
     }
@@ -537,7 +592,7 @@ def servers_list(request):
     keyword = _get_keyword(request)
     dedup_raw = (request.GET.get('dedup') or '').lower()
     dedup = dedup_raw not in {'0', 'false', 'no', 'off'}
-    queryset = Server.objects.select_related('user', 'order').order_by('expires_at', '-updated_at', '-id')
+    queryset = Server.objects.select_related('user', 'order').exclude(status=Server.STATUS_DELETED).exclude(public_ip__isnull=True).exclude(public_ip='').order_by('expires_at', '-updated_at', '-id')
     queryset = _apply_keyword_filter(
         queryset,
         keyword,
@@ -682,6 +737,60 @@ def update_cloud_order_status(request, order_id):
     except Exception as exc:
         return _error(f'更新订单状态失败: {exc}', status=500)
     return _ok(_cloud_order_detail_payload(order))
+
+
+def _run_rebuild_job(new_order_id: int):
+    max_attempts = 3
+    retry_delays = [0, 20, 60]
+    for attempt in range(1, max_attempts + 1):
+        if attempt > 1:
+            time.sleep(retry_delays[attempt - 1])
+        try:
+            saved = async_to_sync(provision_cloud_server)(new_order_id)
+            if saved and getattr(saved, 'status', '') == 'completed' and getattr(saved, 'replacement_for_id', None):
+                source_order = CloudServerOrder.objects.filter(id=saved.replacement_for_id).first()
+                if not source_order:
+                    return
+                delete_note = async_to_sync(_delete_instance)(source_order)
+                async_to_sync(_mark_replaced_order_deleted)(source_order.id, f'重装迁移完成，新实例订单: {saved.order_no}；{delete_note}')
+                return
+            logger.warning('AWS 重装迁移后台任务未完成，准备重试: new_order_id=%s attempt=%s/%s status=%s', new_order_id, attempt, max_attempts, getattr(saved, 'status', None) if saved else None)
+        except Exception:
+            logger.exception('AWS 重装迁移后台任务异常，准备重试: new_order_id=%s attempt=%s/%s', new_order_id, attempt, max_attempts)
+
+    order = CloudServerOrder.objects.filter(id=new_order_id).first()
+    if not order:
+        return
+    failure_note = f'重装迁移自动重试失败：已重试 {max_attempts} 次，继续保留旧机服务，请人工检查后再试。'
+    order.provision_note = '\n'.join(filter(None, [order.provision_note, failure_note]))
+    order.save(update_fields=['provision_note', 'updated_at'])
+    source_order = CloudServerOrder.objects.filter(id=order.replacement_for_id).first()
+    if source_order:
+        source_order.provision_note = '\n'.join(filter(None, [source_order.provision_note, failure_note]))
+        source_order.save(update_fields=['provision_note', 'updated_at'])
+        CloudAsset.objects.filter(order=source_order).update(note=failure_note, updated_at=timezone.now())
+        Server.objects.filter(order=source_order).update(note=failure_note, updated_at=timezone.now())
+
+
+@csrf_exempt
+@dashboard_login_required
+@require_POST
+def rebuild_server_preserve_link(request, server_id: int):
+    server = Server.objects.select_related('order').filter(id=server_id).first()
+    if not server or not server.order_id:
+        return _error('服务器不存在或未关联订单', status=404)
+    order, error = create_cloud_server_rebuild_order(server.order_id)
+    if error:
+        return _error(error, status=400)
+    thread = threading.Thread(target=_run_rebuild_job, args=(order.id,), daemon=True)
+    thread.start()
+    return _ok({
+        'accepted': True,
+        'message': '已发起 AWS 重装迁移，后台失败会自动重试（最多 3 次），成功后将删除旧实例。',
+        'order_id': order.id,
+        'order_no': order.order_no,
+        'replacement_for_id': order.replacement_for_id,
+    })
 
 
 @dashboard_login_required
@@ -1017,9 +1126,9 @@ def sync_servers(request):
 @require_POST
 def sync_cloud_assets(request):
     aliyun_region = (request.POST.get('region') or request.GET.get('region') or 'cn-hongkong').strip() or 'cn-hongkong'
-    aws_region = (request.POST.get('aws_region') or request.GET.get('aws_region') or '').strip()
+    aws_region = (request.POST.get('aws_region') or request.GET.get('aws_region') or 'ap-southeast-1').strip() or 'ap-southeast-1'
     errors = []
-    synced = {'aliyun': False, 'aws': False}
+    synced = {'aliyun': False, 'aws': False, 'reconcile': False}
     aws_regions = []
     try:
         call_command('sync_aliyun_assets', region=aliyun_region)
@@ -1027,18 +1136,19 @@ def sync_cloud_assets(request):
     except Exception as exc:
         errors.append(f'阿里云代理同步失败: {exc}')
     try:
-        if aws_region:
-            call_command('sync_aws_assets', region=aws_region)
-            aws_regions = [aws_region]
-        else:
-            aws_command = call_command('sync_aws_assets')
-            aws_regions = getattr(aws_command, 'synced_regions', None) or []
+        call_command('sync_aws_assets', region=aws_region)
+        aws_regions = [aws_region]
         synced['aws'] = True
     except Exception as exc:
         errors.append(f'AWS 代理同步失败: {exc}')
+    try:
+        call_command('reconcile_cloud_assets_from_servers')
+        synced['reconcile'] = True
+    except Exception as exc:
+        errors.append(f'代理列表补齐失败: {exc}')
     if errors and not any(synced.values()):
         return _error('；'.join(errors), status=500)
-    return _ok({'synced': synced, 'aliyun_region': aliyun_region, 'aws_region': aws_region or 'all', 'aws_regions': aws_regions, 'errors': errors})
+    return _ok({'synced': synced, 'aliyun_region': aliyun_region, 'aws_region': aws_region, 'aws_regions': aws_regions, 'errors': errors})
 
 
 @csrf_exempt
@@ -1211,14 +1321,54 @@ def _cloud_ip_log_payload(item):
 
 @dashboard_login_required
 @require_GET
+def cloud_assets_sync_status(request):
+    latest_log = ExternalSyncLog.objects.filter(
+        source__in=[ExternalSyncLog.SOURCE_AWS, ExternalSyncLog.SOURCE_ALIYUN],
+        is_success=True,
+    ).order_by('-created_at', '-id').first()
+    latest_asset = CloudAsset.objects.filter(
+        source__in=[CloudAsset.SOURCE_AWS_SYNC, CloudAsset.SOURCE_ALIYUN],
+    ).order_by('-updated_at', '-id').first()
+    last_synced_at = None
+    if latest_log and latest_asset:
+        last_synced_at = max(latest_log.created_at, latest_asset.updated_at)
+    elif latest_log:
+        last_synced_at = latest_log.created_at
+    elif latest_asset:
+        last_synced_at = latest_asset.updated_at
+
+    since = last_synced_at
+    aws_existing_count = CloudAsset.objects.filter(
+        kind=CloudAsset.KIND_SERVER,
+        provider='aws_lightsail',
+    ).exclude(status=CloudAsset.STATUS_DELETED).count()
+    aliyun_existing_count = CloudAsset.objects.filter(
+        kind=CloudAsset.KIND_SERVER,
+        provider='aliyun_simple',
+    ).exclude(status=CloudAsset.STATUS_DELETED).count()
+    return _ok({
+        'auto_sync_every_seconds': 600,
+        'last_synced_at': _iso(last_synced_at),
+        'aws_existing_count': aws_existing_count,
+        'aliyun_existing_count': aliyun_existing_count,
+    })
+
+
+@dashboard_login_required
+@require_GET
 def cloud_ip_logs_list(request):
     keyword = _get_keyword(request)
+    log_type = (request.GET.get('log_type') or 'ip').strip()
     queryset = CloudIpLog.objects.select_related('user', 'order', 'asset', 'server').order_by('-created_at', '-id')
     queryset = _apply_keyword_filter(
         queryset,
         keyword,
         ['order_no', 'asset_name', 'instance_id', 'provider_resource_id', 'public_ip', 'previous_public_ip', 'note', 'user__tg_user_id', 'user__username'],
     )
+    if log_type == 'server':
+        queryset = queryset.filter(Q(note__icontains='服务器') | Q(note__icontains='续费') | Q(note__icontains='删除') | Q(event_type__in=['created', 'deleted']))
+    elif log_type == 'operation':
+        queryset = queryset.filter(note__isnull=False).exclude(note='')
     return _ok([_cloud_ip_log_payload(item) for item in queryset[:200]])
 
 
@@ -1255,6 +1405,7 @@ def monitors_list(request):
 
 __all__ = [
     'cloud_assets_list',
+    'cloud_assets_sync_status',
     'cloud_ip_logs_list',
     'cloud_order_detail',
     'cloud_orders_list',

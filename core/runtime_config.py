@@ -1,33 +1,39 @@
+import asyncio
 import os
 
 
 CONFIG_HELP = {
     'bot_token': 'Telegram 机器人 Token',
-    'm_account_token': 'M 账号 Token',
     'receive_address': '收款地址（USDT/TRX 共用）',
     'trongrid_api_key': 'TRON API Key',
-    'redis_url': 'Redis 连接地址',
-    'database_url': '数据库连接串（优先）',
+    'bot_admin_chat_id': '机器人管理员 Telegram Chat ID（支持逗号分隔多个转发目标）',
+    'redis_host': 'Redis 主机',
+    'redis_port': 'Redis 端口',
+    'redis_password': 'Redis 密码',
+    'redis_db': 'Redis 数据库编号',
     'mysql_database': 'MySQL 数据库名',
     'mysql_user': 'MySQL 用户名',
     'mysql_password': 'MySQL 密码',
     'mysql_host': 'MySQL 主机',
     'mysql_port': 'MySQL 端口',
+    'text_init_enabled': '是否允许后台初始化文案（1=允许，0=禁用）',
+    'text_init_mode': '文案初始化模式：missing_only 或 reset_defaults',
 }
 
 SENSITIVE_CONFIG_KEYS = {
     'bot_token',
-    'm_account_token',
     'trongrid_api_key',
     'mysql_password',
-    'database_url',
+    'redis_password',
 }
 
 
 CONFIG_ENV_MAP = {
     'bot_token': 'BOT_TOKEN',
-    'redis_url': 'REDIS_URL',
-    'database_url': 'DATABASE_URL',
+    'redis_host': 'REDIS_HOST',
+    'redis_port': 'REDIS_PORT',
+    'redis_password': 'REDIS_PASSWORD',
+    'redis_db': 'REDIS_DB',
     'mysql_database': 'MYSQL_DATABASE',
     'mysql_user': 'MYSQL_USER',
     'mysql_password': 'MYSQL_PASSWORD',
@@ -35,11 +41,19 @@ CONFIG_ENV_MAP = {
     'mysql_port': 'MYSQL_PORT',
     'receive_address': 'RECEIVE_ADDRESS',
     'trongrid_api_key': 'TRONGRID_API_KEY',
+    'bot_admin_chat_id': 'BOT_ADMIN_CHAT_ID',
+    'text_init_enabled': 'TEXT_INIT_ENABLED',
+    'text_init_mode': 'TEXT_INIT_MODE',
 }
 
 
 def _read_site_config(key: str, default: str = '') -> str:
     try:
+        try:
+            asyncio.get_running_loop()
+            return default
+        except RuntimeError:
+            pass
         from django.apps import apps
 
         if not apps.ready:

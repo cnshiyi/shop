@@ -8,6 +8,7 @@ os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'shop.settings')
 import django
 django.setup()
 
+from django.core.management import call_command
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from bot.config import BOT_TOKEN
 from bot.fsm import close_fsm_storage

@@ -241,6 +241,7 @@ class CloudAsset(models.Model):
     order = models.ForeignKey('cloud.CloudServerOrder', verbose_name='关联订单', on_delete=models.SET_NULL, blank=True, null=True)
     user = models.ForeignKey('bot.TelegramUser', verbose_name='绑定用户', on_delete=models.SET_NULL, blank=True, null=True)
     note = models.TextField('备注', blank=True, null=True)
+    sort_order = models.IntegerField('排序', default=99, db_index=True)
     status = models.CharField('状态', max_length=32, choices=STATUS_CHOICES, default=STATUS_RUNNING, db_index=True)
     provider_status = models.CharField('云厂商原始状态', max_length=64, blank=True, null=True, db_index=True)
     is_active = models.BooleanField('有效', default=True, db_index=True)
@@ -301,6 +302,7 @@ class Server(models.Model):
     order = models.ForeignKey('cloud.CloudServerOrder', verbose_name='关联订单', on_delete=models.SET_NULL, blank=True, null=True)
     user = models.ForeignKey('bot.TelegramUser', verbose_name='绑定用户', on_delete=models.SET_NULL, blank=True, null=True)
     note = models.TextField('备注', blank=True, null=True)
+    sort_order = models.IntegerField('排序', default=99, db_index=True)
     status = models.CharField('状态', max_length=32, choices=STATUS_CHOICES, default=CloudAsset.STATUS_RUNNING, db_index=True)
     provider_status = models.CharField('云厂商原始状态', max_length=64, blank=True, null=True, db_index=True)
     is_active = models.BooleanField('有效', default=True, db_index=True)
@@ -320,6 +322,7 @@ class Server(models.Model):
 class CloudIpLog(models.Model):
     EVENT_CREATED = 'created'
     EVENT_CHANGED = 'changed'
+    EVENT_RENEWED = 'renewed'
     EVENT_EXPIRED = 'expired'
     EVENT_SUSPENDED = 'suspended'
     EVENT_DELETED = 'deleted'
@@ -327,6 +330,7 @@ class CloudIpLog(models.Model):
     EVENT_CHOICES = (
         (EVENT_CREATED, '创建分配'),
         (EVENT_CHANGED, 'IP变更'),
+        (EVENT_RENEWED, '续费'),
         (EVENT_EXPIRED, '到期'),
         (EVENT_SUSPENDED, '延停'),
         (EVENT_DELETED, '删除'),

@@ -203,7 +203,8 @@ $SUDO /usr/sbin/sysctl --system || $SUDO sysctl --system
 $SUDO /usr/sbin/sysctl net.ipv4.tcp_congestion_control || $SUDO sysctl net.ipv4.tcp_congestion_control
 '''
 
-def _build_mtproxy_script(port: int) -> str:
+def _build_mtproxy_script(port: int, desired_secret: str = '') -> str:
+    desired_secret = (desired_secret or '').strip()
     return rf'''#!/usr/bin/env bash
 set -euo pipefail
 export DEBIAN_FRONTEND=noninteractive
@@ -226,6 +227,7 @@ chmod +x mtproxy.sh
 INSTALL_OUTPUT="$(printf '%s\n%s\n%s\n%s\n%s\n' '2' '{port}' '18888' '{MTPROXY_FAKE_TLS_DOMAIN}' '' | bash mtproxy.sh 2>&1 || true)"
 printf '%s\n' "$INSTALL_OUTPUT"
 STATUS_OUTPUT=''
+DESIRED_SECRET='{desired_secret}'
 SECRET=$(sed -n 's/^secret="\([^"]*\)"$/\1/p' "$WORKDIR/config" | head -n 1 || true)
 if [ -z "$SECRET" ]; then
   SECRET=$(printf '%s\n' "$INSTALL_OUTPUT" | grep -Eo 'secret=[0-9a-fA-F]+' | head -n 1 | cut -d= -f2 || true)
@@ -251,6 +253,16 @@ if [ -z "$RUN_COMMAND" ]; then
 fi
 if [ -n "$RUN_COMMAND" ]; then
   RUN_COMMAND=$(printf '%s\n' "$RUN_COMMAND" | sed -E 's/^[^/]*//' | sed -E 's/[[:space:]]+$//')
+fi
+if [ -n "$DESIRED_SECRET" ]; then
+  SECRET="$DESIRED_SECRET"
+  if [ -f "$WORKDIR/config" ]; then
+    if grep -q '^secret=' "$WORKDIR/config"; then
+      sed -i.bak -E "s/^secret=.*/secret=\"$SECRET\"/" "$WORKDIR/config"
+    else
+      printf '\nsecret="%s"\n' "$SECRET" >> "$WORKDIR/config"
+    fi
+  fi
 fi
 if [ -z "$RUN_COMMAND" ]; then
   echo 'MTProxy 安装失败'
@@ -583,7 +595,7 @@ EOF"""
         client.close()
 
 
-async def install_mtproxy(ip: str, username: str, password: str, port: int = MTPROXY_PORT) -> tuple[bool, str]:
+async def install_mtproxy(ip: str, username: str, password: str, port: int = MTPROXY_PORT, desired_secret: str = '') -> tuple[bool, str]:
     if not ip or not password:
         return False, '缺少 SSH 连接参数，无法执行 MTProxy 安装。'
     bootstrap_username = (username or 'root').strip() or 'root'
@@ -591,7 +603,7 @@ async def install_mtproxy(ip: str, username: str, password: str, port: int = MTP
     ready, message = await _wait_ssh_password_ready(ip, bootstrap_username, password)
     if not ready:
         return False, message.replace('BBR 初始化', 'MTProxy 安装')
-    ok, output = await _run_ssh_script(ip, bootstrap_username, password, _build_mtproxy_script(port), label='MTPROXY')
+    ok, output = await _run_ssh_script(ip, bootstrap_username, password, _build_mtproxy_script(port, desired_secret), label='MTPROXY')
     secret = ''
     actual_port = str(port)
     mtproxy_status = ''
@@ -617,6 +629,8 @@ async def install_mtproxy(ip: str, username: str, password: str, port: int = MTP
         secret = probe.get('MTPROXY_PROBE_SECRET', '')
     if not mtproxy_daemon and probe.get('MTPROXY_PROBE_DAEMON'):
         mtproxy_daemon = probe.get('MTPROXY_PROBE_DAEMON', '')
+    if desired_secret:
+        secret = desired_secret
     if secret and (mtproxy_status == 'OK' or probe_ok):
         tg_link, tme_link = build_mtproxy_links(ip, actual_port, secret)
         verified_output = (

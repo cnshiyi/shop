@@ -180,7 +180,13 @@ def _get_pending_recharges(currency: str):
 @sync_to_async
 def _get_pending_cloud_server_orders():
     return list(
-        CloudServerOrder.objects.filter(pay_method='address', status__in=['pending', 'renew_pending'])
+        CloudServerOrder.objects.filter(pay_method='address', status='pending')
+        .union(
+            CloudServerOrder.objects.filter(
+                pay_method='address',
+                status='renew_pending',
+            ).exclude(public_ip__isnull=True).exclude(public_ip='').exclude(status__in=['deleted', 'deleting', 'expired'])
+        )
         .order_by('created_at')
     )
 
@@ -244,6 +250,8 @@ def _confirm_cloud_server_order(order_id: int, tx_hash: str):
         order.tx_hash = tx_hash
         order.paid_at = timezone.now()
         if order.status == 'renew_pending':
+            if not str(order.public_ip or '').strip() or order.status in {'deleted', 'deleting', 'expired'}:
+                return None
             base = order.service_expires_at or timezone.now()
             if base < timezone.now():
                 base = timezone.now()

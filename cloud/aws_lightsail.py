@@ -138,10 +138,19 @@ def _create_instance_sync(order_data: dict, server_name: str):
     region = order_data.get('region_code') or 'ap-southeast-1'
     plan_name = order_data.get('plan_name')
     mtproxy_port = int(order_data.get('mtproxy_port') or 9528)
+    static_ip_name = str(order_data.get('static_ip_name') or '').strip()
 
     account = get_active_cloud_account('aws')
-    access_key = account.access_key_plain if account else os.getenv('AWS_ACCESS_KEY_ID', '')
-    secret_key = account.secret_key_plain if account else os.getenv('AWS_SECRET_ACCESS_KEY', '')
+    access_key = ''
+    secret_key = ''
+    if account:
+        ak = (account.access_key_plain or '').strip()
+        sk = (account.secret_key_plain or '').strip()
+        if ak and sk and len(ak) >= 16 and len(sk) >= 36:
+            access_key, secret_key = ak, sk
+    if not access_key or not secret_key:
+        access_key = os.getenv('AWS_ACCESS_KEY_ID', '')
+        secret_key = os.getenv('AWS_SECRET_ACCESS_KEY', '')
     logger.info('AWS Lightsail 创建开始: order=%s provider=%s region=%s plan=%s server_name=%s', order_no, provider, region, plan_name, server_name)
     if not access_key or not secret_key:
         logger.warning('AWS Lightsail 创建失败: 缺少凭据 order=%s', order_no)
@@ -158,7 +167,7 @@ def _create_instance_sync(order_data: dict, server_name: str):
     public_key = _load_public_key()
     bundle_id = _bundle_id_from_plan(plan_name)
     blueprint_id = 'debian_12'
-    static_ip_name = f'{server_name}-ip'[:255]
+    static_ip_name = static_ip_name or f'{server_name}-ip'[:255]
 
     try:
         client = boto3.client(
@@ -170,7 +179,6 @@ def _create_instance_sync(order_data: dict, server_name: str):
         logger.info('AWS 客户端已就绪: order=%s region=%s bundle=%s blueprint=%s static_ip_name=%s', order_no, region, bundle_id, blueprint_id, static_ip_name)
 
         server_name = _next_available_instance_name(client, server_name)
-        static_ip_name = f'{server_name}-ip'[:255]
         logger.info('AWS 实例命名完成: order=%s server_name=%s static_ip_name=%s', order_no, server_name, static_ip_name)
 
         client.create_instances(
@@ -247,6 +255,7 @@ def _create_instance_sync(order_data: dict, server_name: str):
             login_user=_default_login_user_for_blueprint(blueprint_id),
             login_password=password,
             note=note,
+            static_ip_name=static_ip_name,
         )
     except (BotoCoreError, ClientError) as exc:
         logger.exception('AWS Lightsail 创建失败: client_error order=%s server_name=%s error=%s', order_no, server_name, exc)

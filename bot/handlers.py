@@ -4,13 +4,17 @@ import math
 import re
 import time
 from decimal import Decimal, InvalidOperation
+from html import escape
 from urllib.parse import parse_qs, urlparse
 
+import httpx
+
+from asgiref.sync import sync_to_async
 from aiogram import Bot, Dispatcher, F
 from aiogram.exceptions import TelegramBadRequest
 from aiogram.filters import CommandStart
 from aiogram.fsm.context import FSMContext
-from aiogram.types import CallbackQuery, Message, TelegramObject
+from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message, TelegramObject
 from django.utils import timezone
 
 from bot.config import BOT_TOKEN
@@ -37,6 +41,7 @@ from cloud.services import (
     delay_cloud_server_expiry,
     get_cloud_plan,
     get_cloud_server_auto_renew,
+    get_cloud_server_by_ip,
     get_user_cloud_server,
     list_custom_regions,
     list_region_plans,
@@ -77,6 +82,7 @@ from orders.services import (
 )
 from core.formatters import fmt_amount, fmt_pay_amount
 from core.models import SiteConfig
+from core.texts import text_default
 from cloud.provisioning import provision_cloud_server, reprovision_cloud_server_bootstrap
 
 logger = logging.getLogger(__name__)
@@ -89,6 +95,8 @@ _CUSTOM_REGIONS_CACHE_TTL = 60
 _REGION_PLANS_CACHE_TTL = 60
 _TG_CHAT_CACHE_TTL = 120
 _USER_SYNC_CACHE_TTL = 15
+TRONGRID_BASE_URL = 'https://api.trongrid.io'
+USDT_CONTRACT = 'TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t'
 
 
 def _extract_query_ip(raw_text: str) -> str:
@@ -137,6 +145,396 @@ def _extract_query_ips(raw_text: str) -> list[str]:
         seen.add(normalized)
         unique_ips.append(normalized)
     return unique_ips
+
+
+def _extract_tron_addresses(raw_text: str) -> list[str]:
+    text = (raw_text or '').strip()
+    if not text:
+        return []
+    seen = set()
+    result: list[str] = []
+    for match in re.finditer(r'(?<![A-Za-z0-9])T[1-9A-HJ-NP-Za-km-z]{33}(?![A-Za-z0-9])', text):
+        address = match.group(0).strip()
+        if address in seen:
+            continue
+        seen.add(address)
+        result.append(address)
+    return result
+
+
+def _detect_message_kind(raw_text: str) -> str:
+    text = (raw_text or '').strip()
+    if not text:
+        return 'empty'
+    if text.startswith('/'):
+        return 'command'
+    if _extract_query_ips(text):
+        return 'link'
+    if _extract_tron_addresses(text):
+        return 'address'
+    return 'text'
+
+
+def _format_ts_ms(value) -> str:
+    try:
+        timestamp_ms = int(value or 0)
+    except Exception:
+        return '-'
+    if timestamp_ms <= 0:
+        return '-'
+    return timezone.localtime(timezone.datetime.fromtimestamp(timestamp_ms / 1000, tz=timezone.get_current_timezone())).strftime('%Y-%m-%d %H:%M:%S')
+
+
+def _tron_account_type_label(raw_type: str) -> str:
+    mapping = {
+        'Normal': '普通账户',
+        'Contract': '合约账户',
+        'AssetIssue': '资产发行账户',
+    }
+    return mapping.get((raw_type or '').strip(), raw_type or '普通账户')
+
+
+def _format_permission_block(title: str, permission: dict | None) -> list[str]:
+    if not permission:
+        return [f'{title} 权限：无']
+    lines = [f'{title} 权限']
+    lines.append(f'权限名称：{permission.get("permission_name") or permission.get("type") or "-"}(阈值 {permission.get("threshold", "-")})')
+    for key in permission.get('keys') or []:
+        address = key.get('address') or '-'
+        weight = key.get('weight', '-')
+        lines.append(f'{address}(权重: {weight})')
+    return lines
+
+
+def _tronscan_address_url(address: str) -> str:
+    return f'https://tronscan.org/#/address/{address}'
+
+
+def _tronscan_transfers_url(address: str) -> str:
+    return f'https://tronscan.org/#/address/{address}/transfers'
+
+
+def _tronscan_tx_url(tx_hash: str) -> str:
+    return f'https://tronscan.org/#/transaction/{tx_hash}'
+
+
+def _tron_address_action_keyboard(address: str) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[[
+            InlineKeyboardButton(text='🔎 链上详情查询', url=_tronscan_address_url(address)),
+            InlineKeyboardButton(text='📜 查询转账记录', url=_tronscan_transfers_url(address)),
+        ]]
+    )
+
+
+async def _fetch_tron_address_summary(address: str) -> dict:
+    headers = {'accept': 'application/json'}
+    api_key = SiteConfig.get('trongrid_api_key', '')
+    if api_key:
+        headers['TRON-PRO-API-KEY'] = api_key
+    async with httpx.AsyncClient(timeout=15) as client:
+        account_resp = await client.post(
+            f'{TRONGRID_BASE_URL}/wallet/getaccount',
+            json={'address': address, 'visible': True},
+            headers={**headers, 'content-type': 'application/json'},
+        )
+        account_resp.raise_for_status()
+        account_data = account_resp.json() or {}
+        resource_resp = await client.post(
+            f'{TRONGRID_BASE_URL}/wallet/getaccountresource',
+            json={'address': address, 'visible': True},
+            headers={**headers, 'content-type': 'application/json'},
+        )
+        resource_resp.raise_for_status()
+        resource_data = resource_resp.json() or {}
+        account_v1_resp = await client.get(f'{TRONGRID_BASE_URL}/v1/accounts/{address}', headers=headers)
+        account_v1_resp.raise_for_status()
+        account_v1_data = account_v1_resp.json() or {}
+        trc20_resp = await client.get(
+            f'{TRONGRID_BASE_URL}/v1/accounts/{address}/transactions/trc20?limit=20&only_confirmed=true&order_by=block_timestamp,desc',
+            headers=headers,
+        )
+        trc20_resp.raise_for_status()
+        trc20_data = trc20_resp.json() or {}
+        trx_resp = await client.get(
+            f'{TRONGRID_BASE_URL}/v1/accounts/{address}/transactions?limit=20&only_confirmed=true&order_by=block_timestamp,desc',
+            headers=headers,
+        )
+        trx_resp.raise_for_status()
+        trx_data = trx_resp.json() or {}
+    trx_balance = Decimal(str(account_data.get('balance', 0) or 0)) / Decimal('1000000')
+    frozen_v2 = account_data.get('frozenV2') or []
+    frozen_total = Decimal('0')
+    for item in frozen_v2:
+        try:
+            frozen_total += Decimal(str(item.get('amount', 0) or 0)) / Decimal('1000000')
+        except Exception:
+            continue
+    free_net_limit = int(resource_data.get('freeNetLimit', 0) or 0)
+    free_net_used = int(resource_data.get('freeNetUsed', 0) or 0)
+    net_limit = int(resource_data.get('NetLimit', 0) or 0)
+    net_used = int(resource_data.get('NetUsed', 0) or 0)
+    energy_limit = int(resource_data.get('EnergyLimit', 0) or 0)
+    energy_used = int(resource_data.get('EnergyUsed', 0) or 0)
+    usdt_balance = Decimal('0')
+    account_items = account_v1_data.get('data') or []
+    if account_items:
+        trc20_balances = account_items[0].get('trc20') or []
+        for item in trc20_balances:
+            value = item.get(USDT_CONTRACT)
+            if value is None:
+                continue
+            try:
+                usdt_balance = Decimal(str(value or '0')) / Decimal('1000000')
+            except Exception:
+                usdt_balance = Decimal('0')
+            break
+    usdt_in_count = 0
+    usdt_out_count = 0
+    recent_items: list[dict] = []
+    for item in trc20_data.get('data') or []:
+        token_info = item.get('token_info') or {}
+        if (token_info.get('address') or '') != USDT_CONTRACT:
+            continue
+        from_addr = item.get('from') or ''
+        to_addr = item.get('to') or ''
+        direction = '转入' if to_addr == address else '转出'
+        if direction == '转入':
+            usdt_in_count += 1
+        else:
+            usdt_out_count += 1
+        try:
+            decimals = int(token_info.get('decimals', 6) or 6)
+        except Exception:
+            decimals = 6
+        try:
+            amount = Decimal(str(item.get('value') or '0')) / (Decimal(10) ** decimals)
+        except Exception:
+            amount = Decimal('0')
+        recent_items.append({
+            'timestamp': int(item.get('block_timestamp') or 0),
+            'text': f'{_format_ts_ms(item.get("block_timestamp"))} {direction} {fmt_amount(amount)} USDT',
+            'tx_hash': item.get('transaction_id') or item.get('tx_id') or '',
+        })
+    for item in trx_data.get('data') or []:
+        raw_data = item.get('raw_data') or {}
+        contracts = raw_data.get('contract') or []
+        if not contracts:
+            continue
+        contract = contracts[0]
+        parameter = ((contract.get('parameter') or {}).get('value') or {})
+        amount_sun = parameter.get('amount')
+        owner_address = parameter.get('owner_address') or ''
+        to_address = parameter.get('to_address') or ''
+        contract_type = contract.get('type') or ''
+        if contract_type != 'TransferContract' or amount_sun is None:
+            continue
+        direction = '转入' if to_address == address else '转出' if owner_address == address else ''
+        if not direction:
+            continue
+        try:
+            amount = Decimal(str(amount_sun or 0)) / Decimal('1000000')
+        except Exception:
+            amount = Decimal('0')
+        recent_items.append({
+            'timestamp': int(raw_data.get('timestamp') or 0),
+            'text': f'{_format_ts_ms(raw_data.get("timestamp"))} {direction} {fmt_amount(amount)} TRX',
+            'tx_hash': item.get('txID') or item.get('tx_id') or '',
+        })
+    recent_items.sort(key=lambda item: item['timestamp'], reverse=True)
+    return {
+        'address': address,
+        'account_type': _tron_account_type_label(account_data.get('account_type') or 'Normal'),
+        'created_at': _format_ts_ms(account_data.get('create_time')),
+        'last_active_at': _format_ts_ms(account_data.get('latest_opration_time')),
+        'trx_balance': trx_balance,
+        'trx_frozen': frozen_total,
+        'usdt_balance': usdt_balance,
+        'energy_used': energy_used,
+        'energy_limit': energy_limit,
+        'net_used': net_used,
+        'net_limit': net_limit,
+        'free_net_used': free_net_used,
+        'free_net_limit': free_net_limit,
+        'owner_permission': account_data.get('owner_permission') or {},
+        'active_permission': (account_data.get('active_permission') or [{}])[0] if (account_data.get('active_permission') or []) else {},
+        'usdt_in_count': usdt_in_count,
+        'usdt_out_count': usdt_out_count,
+        'recent_transactions': recent_items[:5],
+    }
+
+
+async def _reply_tron_address_summary(message: Message, address: str):
+    summary = await _fetch_tron_address_summary(address)
+    lines = [
+        f'👤账户类型: {escape(summary["account_type"])}',
+        f'🔍查询地址: <code>{escape(summary["address"])}</code>',
+        f'⏰创建时间: {escape(summary["created_at"])}',
+        f'🌟最后活跃: {escape(summary["last_active_at"])}',
+        '➖➖➖➖资源➖➖➖➖',
+        f'💰 TRX 余额： {fmt_amount(summary["trx_balance"])} TRX',
+        f'💰 TRX 质押： {fmt_amount(summary["trx_frozen"])} TRX',
+        f'💰USDT余额： {fmt_amount(summary["usdt_balance"])} USDT',
+        f'🔋能量： {summary["energy_used"]} / {summary["energy_limit"]}',
+        f'📡质押带宽： {summary["net_used"]} / {summary["net_limit"]}',
+        f'📡免费带宽： {summary["free_net_used"]} / {summary["free_net_limit"]}',
+        '➖➖➖➖权限➖➖➖➖',
+        *_format_permission_block('拥有者 (Owner)', summary['owner_permission']),
+        *_format_permission_block('活跃 (Active)', summary['active_permission']),
+        '➖➖➖➖最近交易➖➖➖➖',
+        f'⤴️USDT支出笔数：{summary["usdt_out_count"]} ⤵️USDT收入笔数：{summary["usdt_in_count"]}',
+    ]
+    for item in summary['recent_transactions']:
+        tx_hash = (item.get('tx_hash') or '').strip()
+        text = escape(item.get('text') or '-')
+        if tx_hash:
+            lines.append(f'<a href="{_tronscan_tx_url(tx_hash)}">{text}</a>')
+        else:
+            lines.append(text)
+    await message.answer(
+        '\n'.join(lines),
+        parse_mode='HTML',
+        reply_markup=_tron_address_action_keyboard(summary['address']),
+        disable_web_page_preview=True,
+    )
+
+
+async def _reply_cloud_query_results(message: Message, raw_text: str, state: FSMContext | None = None):
+    query_ips = _extract_query_ips(raw_text)
+    results = []
+    for ip in query_ips:
+        order = await get_cloud_server_by_ip(ip)
+        if not order:
+            continue
+        is_deleted = order.status in {'deleted', 'deleting', 'expired'} or not str(order.public_ip or '').strip()
+        if is_deleted:
+            continue
+        results.append({
+            'ip': ip,
+            'text': f'IP: <code>{escape(ip)}</code>\n到期时间: {order.service_expires_at or "未设置"}\n状态: 可续费',
+            'renewable': True,
+            'order_id': order.id,
+        })
+    if state is not None:
+        await state.update_data(cloud_query_results=results)
+        await state.set_state(CloudQueryStates.waiting_ip)
+    if not results:
+        await message.answer('🔎 IP查询到期\n\n未查询到可续费的有效 IP 记录。', reply_markup=order_query_menu())
+        return
+    page = 1
+    per_page = 5
+    total_pages = max(1, math.ceil(len(results) / per_page))
+    page_items = results[(page - 1) * per_page: page * per_page]
+    text = '🔎 IP批量查询结果\n\n' + '\n\n'.join(item['text'] for item in page_items)
+    renewable_items = [{'ip': item['ip'], 'order_id': item['order_id']} for item in page_items if item['renewable'] and item['order_id']]
+    await message.answer(text, reply_markup=cloud_ip_query_result(page_items, renewable_items, page, total_pages), parse_mode='HTML')
+
+
+@sync_to_async
+def _get_site_config_value(key: str, default: str = '') -> str:
+    from core.models import SiteConfig
+    return SiteConfig.get(key, default)
+
+
+def _message_text_for_router(message: Message) -> str:
+    return str(message.text or message.caption or '').strip()
+
+
+def _message_content_type(message: Message) -> str:
+    raw = getattr(message, 'content_type', None)
+    value = getattr(raw, 'value', None) or str(raw or 'text')
+    value = value.split('.')[-1].strip().lower()
+    return value or 'text'
+
+
+def _safe_preview_text(text: str, limit: int = 80) -> str:
+    value = str(text or '').replace('\n', ' ').strip()
+    if len(value) <= limit:
+        return value
+    return value[:limit] + '...'
+
+
+def _parse_admin_chat_ids(raw_value: str) -> list[int]:
+    raw_text = (
+        str(raw_value or '')
+        .replace('，', ',')
+        .replace('；', ',')
+        .replace(';', ',')
+        .replace('\n', ',')
+        .strip()
+    )
+    if not raw_text:
+        return []
+    result: list[int] = []
+    seen: set[int] = set()
+    for part in raw_text.split(','):
+        item = part.strip()
+        if not item:
+            continue
+        try:
+            chat_id = int(item)
+        except Exception:
+            logger.warning('bot_admin_chat_id 存在无法解析的 chat id: %s', item)
+            continue
+        if chat_id in seen:
+            continue
+        seen.add(chat_id)
+        result.append(chat_id)
+    return result
+
+
+def _is_admin_forward_media_type(content_type: str) -> bool:
+    return content_type in {'photo', 'video', 'animation', 'sticker', 'document'}
+
+
+async def _forward_plain_text_to_admin(bot: Bot, message: Message):
+    raw_admin_value = await _get_site_config_value('bot_admin_chat_id', '')
+    admin_chat_ids = _parse_admin_chat_ids(raw_admin_value)
+    text = _message_text_for_router(message)
+    sender = getattr(message.from_user, 'id', None)
+    content_type = _message_content_type(message)
+    logger.info(
+        '管理员转发开始 sender=%s type=%s raw_admin_value=%r parsed_admin_ids=%s text_preview=%r',
+        sender,
+        content_type,
+        raw_admin_value,
+        admin_chat_ids,
+        _safe_preview_text(text),
+    )
+    if not admin_chat_ids:
+        logger.warning('管理员转发跳过：未配置有效 chat id raw_admin_value=%r', raw_admin_value)
+        return
+    if not text and not _is_admin_forward_media_type(content_type):
+        logger.warning('管理员转发跳过：消息无可转发文本/媒体 sender=%s type=%s', sender, content_type)
+        return
+    sender_name = getattr(message.from_user, 'first_name', None) or ''
+    sender_username = getattr(message.from_user, 'username', None) or ''
+    forward_text = (
+        '📨 用户消息转发\n\n'
+        f'用户TG ID: {sender or "-"}\n'
+        f'用户名: {"@" + sender_username if sender_username else "-"}\n'
+        f'昵称: {sender_name or "-"}\n'
+        f'消息类型: {content_type}\n\n'
+        f'内容:\n{text or "[无文本内容]"}'
+    )
+    success_count = 0
+    for admin_chat_id in admin_chat_ids:
+        try:
+            await bot.send_message(chat_id=admin_chat_id, text=forward_text)
+            if _is_admin_forward_media_type(content_type):
+                await bot.copy_message(
+                    chat_id=admin_chat_id,
+                    from_chat_id=message.chat.id,
+                    message_id=message.message_id,
+                )
+            success_count += 1
+            logger.info('管理员转发成功 sender=%s chat_id=%s type=%s', sender, admin_chat_id, content_type)
+        except Exception as exc:
+            logger.warning('管理员转发失败 sender=%s chat_id=%s type=%s error=%s', sender, admin_chat_id, content_type, exc)
+            continue
+    logger.info('管理员转发结束 sender=%s success=%s total=%s', sender, success_count, len(admin_chat_ids))
+    if success_count == 0:
+        logger.warning('管理员转发全部失败，配置值=%r', raw_admin_value)
 
 
 async def _get_cached_custom_regions():
@@ -281,10 +679,10 @@ def _cloud_server_created_text(order, port: int | None = None) -> str:
     else:
         display_secret = raw_secret
     lines = ['✅ 云服务器创建完成']
-    lines.append(f'端口: {actual_port or "-"}')
-    lines.append(f'IP: {public_ip or "-"}')
-    lines.append(f'密钥: {display_secret or "-"}')
-    lines.append(f'一键链接: {one_click_link}')
+    lines.append(f'端口: <code>{escape(str(actual_port or "-"))}</code>')
+    lines.append(f'IP: <code>{escape(public_ip or "-")}</code>')
+    lines.append(f'密钥: <code>{escape(display_secret or "-")}</code>')
+    lines.append(f'一键链接: {escape(one_click_link)}')
     return '\n'.join(lines)
 
 
@@ -296,7 +694,7 @@ async def _provision_cloud_server_and_notify(bot: Bot, chat_id: int, order_id: i
             success_text = _cloud_server_created_text(provisioned, port)
             if retry_only:
                 success_text = '✅ 云服务器重试初始化完成\n\n' + success_text.removeprefix('✅ 云服务器创建完成\n')
-            await bot.send_message(chat_id=chat_id, text=success_text, reply_markup=main_menu())
+            await bot.send_message(chat_id=chat_id, text=success_text, reply_markup=main_menu(), parse_mode='HTML', disable_web_page_preview=True)
             logger.info('云服务器后台创建任务完成: chat_id=%s order_id=%s status=%s retry_only=%s', chat_id, order_id, provisioned.status, retry_only)
             return
         current_status = provisioned.get_status_display() if hasattr(provisioned, 'get_status_display') else getattr(provisioned, 'status', '未知')
@@ -320,11 +718,11 @@ async def _create_cloud_order_and_notify(bot: Bot, chat_id: int, user_id: int, p
             f'套餐: {plan_name}\n'
             f'数量: {order.quantity}\n'
             f'支付金额: {fmt_pay_amount(order.total_amount)} USDT / {fmt_pay_amount(await usdt_to_trx(order.total_amount))} TRX\n'
-            f'支付地址: `{receive_address}`\n'
+            f'支付地址: <code>{escape(receive_address)}</code>\n'
             '订单 5 分钟有效，请在有效期内完成支付。\n\n'
             '系统已开始自动监控 USDT 和 TRX 到账，检测到支付成功后会自动进入后续流程。'
         )
-        await bot.send_message(chat_id=chat_id, text=text, reply_markup=custom_currency_keyboard(None, None, None, order.id), parse_mode='Markdown')
+        await bot.send_message(chat_id=chat_id, text=text, reply_markup=custom_currency_keyboard(None, None, None, order.id), parse_mode='HTML', disable_web_page_preview=True)
         logger.info('云服务器后台建单任务完成: chat_id=%s user_id=%s order_id=%s order=%s currency=%s total=%s pay_amount=%s', chat_id, user_id, order.id, order.order_no, order.currency, order.total_amount, order.pay_amount)
     except Exception as exc:
         logger.exception('云服务器后台建单任务异常: chat_id=%s user_id=%s plan_id=%s quantity=%s currency=%s error=%s', chat_id, user_id, plan_id, quantity, currency, exc)
@@ -391,24 +789,17 @@ async def _pay_cloud_server_order_with_balance_and_notify(bot: Bot, chat_id: int
         await bot.send_message(chat_id=chat_id, text=f'❌ 钱包支付失败，请稍后重试。\n错误: {exc}', reply_markup=main_menu())
 
 
-def _products_page(products, page: int, total: int):
-    total_pages = max(1, math.ceil(total / 5))
-    if not products:
-        return '暂无商品上架。', None
-    return '📦 请选择商品：', product_list(products, page, total_pages)
-
-
 def _orders_page(orders, page: int, total: int):
     total_pages = max(1, math.ceil(total / 5))
     if not orders:
-        return '暂无订单记录。', None
-    return '📋 我的订单：', kb_order_list(orders, page, total_pages)
+        return _bot_text('bot_no_orders', '暂无订单记录。'), None
+    return _bot_text('bot_orders_list_title', '📋 我的订单：'), kb_order_list(orders, page, total_pages)
 
 
 def _balance_details_page(items, page: int, total: int):
     total_pages = max(1, math.ceil(total / 8))
     if not items:
-        return '💳 余额明细\n\n暂无余额流水。', balance_details_list([], 1, 1)
+        return _bot_text('bot_balance_details_empty', '💳 余额明细\n\n暂无余额流水。'), balance_details_list([], 1, 1)
     lines = ['💳 余额明细', '']
     for item in items:
         icon = '🟢' if item['direction'] == 'in' else '🔴'
@@ -417,29 +808,16 @@ def _balance_details_page(items, page: int, total: int):
     return '\n'.join(lines), balance_details_list(items, page, total_pages)
 
 
-def _order_detail_text(order) -> str:
-    sm = {'pending': '待支付', 'paid': '已支付', 'delivered': '已发货', 'cancelled': '已取消', 'expired': '已过期'}
-    text = (
-        f'📋 订单详情\n订单号: {order.order_no}\n商品: {order.product_name}\n数量: {order.quantity}\n'
-        f'总额: {fmt_amount(order.total_amount)} {order.currency}\n'
-        f'支付方式: {"余额" if order.pay_method == "balance" else "地址"}\n'
-        f'状态: {sm.get(order.status, order.status)}\n创建时间: {order.created_at:%Y-%m-%d %H:%M}'
-    )
-    if order.tx_hash:
-        text += f'\n交易哈希: {order.tx_hash}'
-    return text
-
-
 def _cloud_order_status_hint(order) -> str:
     has_ip = bool(order.public_ip or order.previous_public_ip)
     if has_ip:
         return ''
     if order.status == 'pending':
-        return '未分配IP说明: 订单未付款'
+        return _bot_text('bot_cloud_unassigned_pending', '未分配IP说明: 订单未付款')
     if order.status in {'paid', 'provisioning'}:
-        return '未分配IP说明: 已支付但尚未完成，请联系人工处理'
+        return _bot_text('bot_cloud_unassigned_paid', '未分配IP说明: 已支付但尚未完成，请联系人工处理')
     if order.status == 'failed':
-        return '未分配IP说明: 创建失败，请联系人工处理'
+        return _bot_text('bot_cloud_unassigned_failed', '未分配IP说明: 创建失败，请联系人工处理')
     return f'未分配IP说明: 当前状态为 {order.get_status_display()}'
 
 
@@ -456,10 +834,10 @@ def _cloud_server_detail_text(order) -> str:
         f'状态: {order.get_status_display()}\n'
         f'支付方式: {"余额" if order.pay_method == "balance" else "地址"}\n'
         f'金额: {fmt_pay_amount(order.pay_amount or order.total_amount)} {order.currency}\n'
-        f'IP: {order.public_ip or order.previous_public_ip or "未分配"}\n'
-        f'端口: {order.mtproxy_port or "未设置"}\n'
-        f'密钥: {order.mtproxy_secret or "尚未生成"}\n'
-        f'代理链接: {order.mtproxy_link or "尚未生成"}\n'
+        f'IP: <code>{escape(order.public_ip or order.previous_public_ip or "未分配")}</code>\n'
+        f'端口: <code>{escape(str(order.mtproxy_port or "未设置"))}</code>\n'
+        f'密钥: <code>{escape(str(order.mtproxy_secret or "尚未生成"))}</code>\n'
+        f'代理链接: {escape(str(order.mtproxy_link or "尚未生成"))}\n'
         f'到期时间: {order.service_expires_at or "未设置"}\n'
         f'续费价格: {fmt_pay_amount(renew_price)} {order.currency}\n'
         f'自动续费: {auto_renew_status}\n'
@@ -495,8 +873,8 @@ def _balance_detail_text(item) -> str:
 def _recharges_page(recharges, page: int, total: int):
     total_pages = max(1, math.ceil(total / 5))
     if not recharges:
-        return '暂无充值记录。', None
-    return '📜 充值记录：', kb_recharge_list(recharges, page, total_pages)
+        return _bot_text('bot_recharges_empty', '暂无充值记录。'), None
+    return _bot_text('bot_recharges_title', '📜 充值记录：'), kb_recharge_list(recharges, page, total_pages)
 
 
 def _custom_plan_text(region_name: str, plans) -> str:
@@ -529,8 +907,7 @@ def _receive_address() -> str:
 
 
 def _bot_text(key: str, default: str) -> str:
-    value = SiteConfig.get(key, default)
-    return value if value else default
+    return text_default(key, default)
 
 
 # ── 辅助：检查是否在 FSM 状态中，如果是则不处理 ──
@@ -542,7 +919,7 @@ class _NotInState:
         return True  # 由 aiogram 内部的 StateFilter 机制处理
 
 
-MENU_BUTTONS = {'✨ 订阅', '🛠 定制节点', '🔎 到期时间查询', '👤 个人中心'}
+MENU_BUTTONS = {'🛠 定制节点', '🔎 到期时间查询', '👤 个人中心'}
 
 
 def register_handlers(dp: Dispatcher):
@@ -558,7 +935,7 @@ def register_handlers(dp: Dispatcher):
             return
         await state.update_data(monitor_address=address)
         await state.set_state(MonitorStates.waiting_remark)
-        await message.answer('请输入备注（可选，输入 - 跳过）：')
+        await message.answer('请输入备注（可选，输入 - 跳过）：\n\n可随时点击底部菜单打断当前输入。')
 
     @dp.message(MonitorStates.waiting_remark)
     async def mon_remark_input(message: Message, state: FSMContext):
@@ -637,8 +1014,9 @@ def register_handlers(dp: Dispatcher):
         await message.answer(
             f'💰 充值订单已创建\n充值金额: {fmt_amount(amount)} {currency}\n'
             f'支付金额: {fmt_pay_amount(rc.pay_amount)} {currency}\n'
-            f'收款地址: {addr}\n\n⏰ 请在 30 分钟内转账精确金额到上述地址。',
+            f'收款地址: <code>{escape(addr)}</code>\n\n⏰ 请在 30 分钟内转账精确金额到上述地址。',
             reply_markup=main_menu(),
+            parse_mode='HTML',
         )
 
     @dp.message(CustomServerStates.waiting_quantity)
@@ -646,7 +1024,7 @@ def register_handlers(dp: Dispatcher):
         text = message.text.strip()
         logger.info('云服务器自定义数量输入: tg_user_id=%s raw_text=%s', getattr(message.from_user, 'id', None), text)
         if not text.isdigit() or int(text) <= 0 or int(text) > 99:
-            await message.answer('请输入 1-99 的购买数量：')
+            await message.answer('请输入 1-99 的购买数量：\n\n可随时点击底部菜单打断当前输入。')
             return
         data = await state.get_data()
         plan_id = int(data['custom_plan_id'])
@@ -667,11 +1045,12 @@ def register_handlers(dp: Dispatcher):
             f'套餐: {plan.plan_name}\n'
             f'数量: {order.quantity}\n'
             f'支付金额: {fmt_pay_amount(order.total_amount)} USDT / {fmt_pay_amount(await usdt_to_trx(order.total_amount))} TRX\n'
-            f'支付地址: `{receive_address}`\n'
+            f'支付地址: <code>{escape(receive_address)}</code>\n'
             '订单 5 分钟有效，请在有效期内完成支付。\n\n'
             + _bot_text('bot_custom_order_notice', '系统已开始自动监控 USDT 和 TRX 到账，检测到支付成功后会自动进入后续流程。'),
             reply_markup=custom_currency_keyboard(None, None, None, order.id),
-            parse_mode='Markdown',
+            parse_mode='HTML',
+            disable_web_page_preview=True,
         )
 
     @dp.message(CustomServerStates.waiting_port)
@@ -680,10 +1059,10 @@ def register_handlers(dp: Dispatcher):
         try:
             port = int(message.text.strip())
         except Exception:
-            await message.answer('端口格式不正确，请输入 1025-65535 之间的数字。')
+            await message.answer('端口格式不正确，请输入 1025-65535 之间的数字。\n\n可随时点击底部菜单打断当前输入。')
             return
         if port < 1025 or port > 65535:
-            await message.answer('端口格式不正确，请输入 1025-65535 之间的数字。')
+            await message.answer('端口格式不正确，请输入 1025-65535 之间的数字。\n\n可随时点击底部菜单打断当前输入。')
             return
         data = await state.get_data()
         order_id = data.get('cloud_ip_change_order_id') or data.get('custom_order_id')
@@ -724,28 +1103,26 @@ def register_handlers(dp: Dispatcher):
     async def cmd_start(message: Message, state: FSMContext):
         await state.clear()
         await get_or_create_user(message.from_user.id, message.from_user.username, message.from_user.first_name)
-        await message.answer('欢迎使用商城机器人！请选择操作：', reply_markup=main_menu())
+        await message.answer(_bot_text('bot_welcome', '欢迎使用商城机器人！请选择操作：'), reply_markup=main_menu())
 
     @dp.message(F.text.in_(MENU_BUTTONS))
     async def menu_handler(message: Message, state: FSMContext):
         current = await state.get_state()
         if current:
-            return  # 用户在 FSM 输入中，忽略菜单按钮
+            await state.clear()
 
         text = message.text
         user = await get_or_create_user(message.from_user.id, message.from_user.username, message.from_user.first_name)
 
         if text == '✨ 订阅':
-            products, total = await list_products()
-            text_out, kb = _products_page(products, 1, total)
-            await message.answer('✨ 订阅服务\n\n请选择要购买的订阅商品：', reply_markup=kb)
+            await message.answer(_bot_text('bot_removed_products_entry', '商品购买入口已移除，请使用“🛠 定制节点”或“🔎 到期时间查询”。'), reply_markup=main_menu())
 
         elif text == '🛠 定制节点':
             regions = await list_custom_regions()
-            await message.answer('🛠 云服务器定制\n\n请选择热门地区：', reply_markup=custom_region_menu(regions, expanded=False))
+            await message.answer(_bot_text('bot_custom_region_entry', '🛠 云服务器定制\n\n请选择热门地区：'), reply_markup=custom_region_menu(regions, expanded=False))
 
         elif text == '🔎 到期时间查询':
-            await message.answer('🔎 查询中心\n\n请选择查询方式：', reply_markup=cloud_query_menu())
+            await message.answer(_bot_text('bot_query_center_entry', '🔎 查询中心\n\n请选择查询方式：'), reply_markup=cloud_query_menu())
 
         elif text == '👤 个人中心':
             await message.answer(
@@ -759,39 +1136,19 @@ def register_handlers(dp: Dispatcher):
 
     @dp.callback_query(F.data == 'cloud:queryip')
     async def cb_cloud_query_ip(callback: CallbackQuery, state: FSMContext):
+        await state.clear()
         await _safe_callback_answer(callback)
         await state.set_state(CloudQueryStates.waiting_ip)
-        await callback.message.edit_text('🔎 IP查询到期\n\n请输入要查询的 IP 地址：')
+        await callback.message.edit_text(_bot_text('bot_query_ip_prompt', '🔎 IP查询到期\n\n请输入要查询的 IP 地址：\n\n可随时点击底部菜单打断当前输入。'))
 
     @dp.message(CloudQueryStates.waiting_ip)
     async def input_cloud_query_ip(message: Message, state: FSMContext):
         raw_text = (message.text or '').strip()
         query_ips = _extract_query_ips(raw_text)
         if not query_ips:
-            await message.answer('请输入包含 IP 或代理链接的文本内容。')
+            await message.answer(_bot_text('bot_query_ip_invalid', '请输入包含 IP 或代理链接的文本内容。'))
             return
-        results = []
-        for ip in query_ips:
-            order = await get_cloud_server_by_ip(ip)
-            if not order:
-                continue
-            can_renew = bool(order.public_ip and order.status not in {'deleted', 'deleting', 'expired'})
-            renew_text = '可续费' if can_renew else '不可续费'
-            results.append({
-                'ip': ip,
-                'text': f'IP: {ip}\n到期时间: {order.service_expires_at or "未设置"}\n状态: {renew_text}',
-                'renewable': can_renew,
-                'order_id': order.id,
-            })
-        await state.update_data(cloud_query_results=results)
-        await state.set_state(CloudQueryStates.waiting_ip)
-        page = 1
-        per_page = 5
-        total_pages = max(1, math.ceil(len(results) / per_page))
-        page_items = results[(page - 1) * per_page: page * per_page]
-        text = '🔎 IP批量查询结果\n\n' + '\n\n'.join(item['text'] for item in page_items)
-        renewable_items = [{'ip': item['ip'], 'order_id': item['order_id']} for item in page_items if item['renewable'] and item['order_id']]
-        await message.answer(text, reply_markup=cloud_ip_query_result(page_items, renewable_items, page, total_pages))
+        await _reply_cloud_query_results(message, raw_text, state)
 
     @dp.callback_query(F.data.startswith('cloud:queryip:page:'))
     async def cb_cloud_query_ip_page(callback: CallbackQuery, state: FSMContext):
@@ -799,7 +1156,7 @@ def register_handlers(dp: Dispatcher):
         data = await state.get_data()
         results = data.get('cloud_query_results') or []
         if not results:
-            await callback.message.edit_text('🔎 IP查询到期\n\n查询结果已失效，请重新输入 IP。', reply_markup=order_query_menu())
+            await callback.message.edit_text(_bot_text('bot_query_ip_expired', '🔎 IP查询到期\n\n查询结果已失效，请重新输入 IP。'), reply_markup=order_query_menu())
             return
         page = max(1, int(callback.data.split(':')[3]))
         per_page = 5
@@ -808,22 +1165,12 @@ def register_handlers(dp: Dispatcher):
         page_items = results[(page - 1) * per_page: page * per_page]
         text = '🔎 IP批量查询结果\n\n' + '\n\n'.join(item['text'] for item in page_items)
         renewable_items = [{'ip': item['ip'], 'order_id': item['order_id']} for item in page_items if item['renewable'] and item['order_id']]
-        await callback.message.edit_text(text, reply_markup=cloud_ip_query_result(page_items, renewable_items, page, total_pages))
+        await callback.message.edit_text(text, reply_markup=cloud_ip_query_result(page_items, renewable_items, page, total_pages), parse_mode='HTML')
 
     @dp.callback_query(F.data == 'profile:orders')
-    async def cb_profile_orders(callback: CallbackQuery):
-        await callback.message.edit_text('📋 订单查询\n\n请选择要查看的订单类型：', reply_markup=order_query_menu())
-        await _safe_callback_answer(callback)
-
-    @dp.callback_query(F.data == 'profile:orders:product')
-    async def cb_profile_product_orders(callback: CallbackQuery):
-        user = await get_or_create_user(callback.from_user.id, callback.from_user.username, callback.from_user.first_name)
-        orders, total = await list_orders(user.id)
-        text_out, kb = _orders_page(orders, 1, total)
-        if not orders:
-            await callback.message.edit_text('📦 商品订单\n\n暂无商品订单。', reply_markup=order_query_menu())
-        else:
-            await callback.message.edit_text(text_out, reply_markup=kb)
+    async def cb_profile_orders(callback: CallbackQuery, state: FSMContext):
+        await state.clear()
+        await callback.message.edit_text(_bot_text('bot_orders_entry', '📋 订单查询\n\n请选择要查看的订单类型：'), reply_markup=order_query_menu())
         await _safe_callback_answer(callback)
 
     @dp.callback_query(F.data == 'profile:orders:cloud')
@@ -833,117 +1180,15 @@ def register_handlers(dp: Dispatcher):
         orders, total = await list_cloud_orders(user.id, page=page)
         total_pages = max(1, math.ceil(total / 5))
         if not orders:
-            await callback.message.edit_text('☁️ 云服务器订单\n\n暂无云服务器订单。', reply_markup=order_query_menu())
+            await callback.message.edit_text(_bot_text('bot_cloud_orders_empty', '☁️ 云服务器订单\n\n暂无云服务器订单。'), reply_markup=order_query_menu())
         else:
-            await callback.message.edit_text('☁️ 云服务器订单\n\n请选择要查看的订单：', reply_markup=cloud_server_list(orders, page, total_pages, 'profile:orders:cloud:page'))
+            await callback.message.edit_text(_bot_text('bot_cloud_orders_entry', '☁️ 云服务器订单\n\n请选择要查看的订单：'), reply_markup=cloud_server_list(orders, page, total_pages, 'profile:orders:cloud:page'))
         await _safe_callback_answer(callback)
 
     @dp.callback_query(F.data == 'profile:cart')
     async def cb_profile_cart(callback: CallbackQuery):
-        user = await get_or_create_user(callback.from_user.id, callback.from_user.username, callback.from_user.first_name)
-        items, total_amount = await list_cart_items(user.id)
-        cloud_items = [item for item in items if item.item_type == 'cloud_plan' and item.cloud_plan]
-        if not cloud_items:
-            await callback.message.edit_text('🛒 购物车\n\n购物车还是空的。', reply_markup=cart_menu([], 0))
-        else:
-            lines = ['🛒 购物车', '']
-            for idx, item in enumerate(cloud_items, start=1):
-                lines.append(f'{idx}. {item.cloud_plan.region_name} / {item.cloud_plan.plan_name} x {item.quantity} = {fmt_amount(item.cloud_plan.price * item.quantity)} USDT')
-            lines.append('')
-            lines.append(f'合计: {fmt_amount(sum(item.cloud_plan.price * item.quantity for item in cloud_items))} USDT')
-            await callback.message.edit_text('\n'.join(lines), reply_markup=cart_menu(cloud_items, total_amount))
         await _safe_callback_answer(callback)
-
-    @dp.callback_query(F.data.startswith('cart:add:'))
-    async def cb_cart_add(callback: CallbackQuery):
-        user = await get_or_create_user(callback.from_user.id, callback.from_user.username, callback.from_user.first_name)
-        product_id = int(callback.data.split(':')[2])
-        item = await add_to_cart(user.id, product_id, 1, item_type='cloud_plan')
-        if not item:
-            await _safe_callback_answer(callback, '套餐不存在或已下架', show_alert=True)
-            return
-        await _safe_callback_answer(callback, '已加入购物车')
-
-    @dp.callback_query(F.data.startswith('cart:remove:'))
-    async def cb_cart_remove(callback: CallbackQuery):
-        user = await get_or_create_user(callback.from_user.id, callback.from_user.username, callback.from_user.first_name)
-        product_id = int(callback.data.split(':')[2])
-        await remove_cart_item(user.id, product_id, item_type='cloud_plan')
-        items, total_amount = await list_cart_items(user.id)
-        cloud_items = [item for item in items if item.item_type == 'cloud_plan' and item.cloud_plan]
-        if not cloud_items:
-            await callback.message.edit_text('🛒 购物车\n\n购物车还是空的。', reply_markup=cart_menu([], 0))
-        else:
-            lines = ['🛒 购物车', '']
-            for idx, item in enumerate(cloud_items, start=1):
-                lines.append(f'{idx}. {item.cloud_plan.region_name} / {item.cloud_plan.plan_name} x {item.quantity} = {fmt_amount(item.cloud_plan.price * item.quantity)} USDT')
-            lines.append('')
-            lines.append(f'合计: {fmt_amount(sum(item.cloud_plan.price * item.quantity for item in cloud_items))} USDT')
-            await callback.message.edit_text('\n'.join(lines), reply_markup=cart_menu(cloud_items, total_amount))
-        await _safe_callback_answer(callback, '已删除')
-
-    @dp.callback_query(F.data == 'cart:clear')
-    async def cb_cart_clear(callback: CallbackQuery):
-        user = await get_or_create_user(callback.from_user.id, callback.from_user.username, callback.from_user.first_name)
-        await clear_cart(user.id, item_type='cloud_plan')
-        await callback.message.edit_text('🛒 购物车\n\n已清空购物车。', reply_markup=cart_menu([], 0))
-        await _safe_callback_answer(callback)
-
-    @dp.callback_query(F.data.startswith('cart:checkout:'))
-    async def cb_cart_checkout(callback: CallbackQuery, state: FSMContext):
-        await _safe_callback_answer(callback)
-        user = await get_or_create_user(callback.from_user.id, callback.from_user.username, callback.from_user.first_name)
-        _, _, pay_method, currency = callback.data.split(':')
-        items, _ = await list_cart_items(user.id)
-        cloud_items = [item for item in items if item.item_type == 'cloud_plan' and item.cloud_plan]
-        if not cloud_items:
-            await _safe_callback_answer(callback, '购物车为空', show_alert=True)
-            return
-        if len(cloud_items) != 1:
-            await _safe_callback_answer(callback, '当前仅支持单个云套餐直接结算，请先保留一个套餐', show_alert=True)
-            return
-        cart_item = cloud_items[0]
-        plan = cart_item.cloud_plan
-        quantity = cart_item.quantity
-        if pay_method == 'balance':
-            order, err = await buy_cloud_server_with_balance(user.id, plan.id, currency, quantity)
-            if err:
-                await callback.message.edit_text(
-                    f'❌ 余额不足，请先充值\n\n当前支付币种: {currency}',
-                    reply_markup=profile_menu(),
-                )
-                await _safe_callback_answer(callback, '余额不足，请先充值', show_alert=True)
-                return
-            await clear_cart(user.id, item_type='cloud_plan')
-            await state.update_data(custom_order_id=order.id, custom_currency=currency)
-            await callback.message.edit_text(
-                '✅ 钱包支付成功\n\n'
-                f'订单号: {order.order_no}\n'
-                f'地区: {order.region_name}\n'
-                f'套餐: {order.plan_name}\n'
-                f'数量: {order.quantity}\n'
-                f'支付金额: {fmt_pay_amount(order.pay_amount)} {order.currency}\n\n'
-                '请选择 MTProxy 端口：默认端口是 9528，你也可以输入自定义端口。',
-                reply_markup=custom_port_keyboard(order.id),
-            )
-            return
-        order = await create_cloud_server_order(user.id, plan.id, currency, quantity)
-        await clear_cart(user.id, item_type='cloud_plan')
-        await state.update_data(custom_order_id=order.id, custom_quantity=quantity, custom_currency=currency)
-        receive_address = _receive_address()
-        await callback.message.edit_text(
-            '🧾 购物车订单详情\n\n'
-            f'订单号: {order.order_no}\n'
-            f'地区: {plan.region_name}\n'
-            f'套餐: {plan.plan_name}\n'
-            f'数量: {order.quantity}\n'
-            f'支付金额: {fmt_pay_amount(order.total_amount)} USDT / {fmt_pay_amount(await usdt_to_trx(order.total_amount))} TRX\n'
-            f'支付地址: `{receive_address}`\n'
-            '订单 5 分钟有效，请在有效期内完成支付。\n\n'
-            '系统已开始自动监控 USDT 和 TRX 到账，检测到支付成功后会自动进入后续流程。',
-            reply_markup=custom_currency_keyboard(None, None, None, order.id),
-            parse_mode='Markdown',
-        )
+        await callback.message.edit_text(_bot_text('bot_cart_removed', '商品/购物车入口已移除，请使用云服务器相关功能。'), reply_markup=profile_menu())
 
     @dp.callback_query(F.data == 'profile:balance_details')
     async def cb_profile_balance_details(callback: CallbackQuery):
@@ -954,7 +1199,8 @@ def register_handlers(dp: Dispatcher):
         await _safe_callback_answer(callback)
 
     @dp.callback_query(F.data == 'profile:back_to_menu')
-    async def cb_profile_back_to_menu(callback: CallbackQuery):
+    async def cb_profile_back_to_menu(callback: CallbackQuery, state: FSMContext):
+        await state.clear()
         user = await get_or_create_user(callback.from_user.id, callback.from_user.username, callback.from_user.first_name)
         await callback.message.edit_text(
             f'👤 个人中心\n用户ID: {user.tg_user_id}\n用户名: @{user.username or "无"}\n'
@@ -969,11 +1215,12 @@ def register_handlers(dp: Dispatcher):
     @dp.callback_query(F.data == 'profile:recharge')
     async def cb_profile_recharge(callback: CallbackQuery, state: FSMContext):
         await state.clear()
-        await callback.message.edit_text('💰 请选择充值币种：', reply_markup=recharge_currency_menu())
+        await callback.message.edit_text(_bot_text('bot_recharge_currency_prompt', '💰 请选择充值币种：\n\n可随时点击底部菜单打断当前输入。'), reply_markup=recharge_currency_menu())
         await _safe_callback_answer(callback)
 
     @dp.callback_query(F.data == 'profile:recharges')
-    async def cb_profile_recharges(callback: CallbackQuery):
+    async def cb_profile_recharges(callback: CallbackQuery, state: FSMContext):
+        await state.clear()
         user = await get_or_create_user(callback.from_user.id, callback.from_user.username, callback.from_user.first_name)
         recharges, total = await list_recharges(user.id)
         text_out, kb = _recharges_page(recharges, 1, total)
@@ -983,27 +1230,31 @@ def register_handlers(dp: Dispatcher):
     @dp.callback_query(F.data == 'profile:monitors')
     async def cb_profile_monitors(callback: CallbackQuery, state: FSMContext):
         await state.clear()
-        await callback.message.edit_text('🔍 地址监控', reply_markup=monitor_menu())
+        await callback.message.edit_text(_bot_text('bot_monitor_entry', '🔍 地址监控'), reply_markup=monitor_menu())
         await _safe_callback_answer(callback)
 
     @dp.callback_query(F.data == 'profile:back')
-    async def cb_profile_back(callback: CallbackQuery):
-        await callback.message.edit_text('已返回主菜单，请使用底部按钮继续操作。')
+    async def cb_profile_back(callback: CallbackQuery, state: FSMContext):
+        await state.clear()
+        await callback.message.edit_text(_bot_text('bot_back_to_menu', '已返回主菜单，请使用底部按钮继续操作。'))
         await _safe_callback_answer(callback)
 
     @dp.callback_query(F.data == 'custom:back')
-    async def cb_custom_back(callback: CallbackQuery):
-        await callback.message.edit_text('已返回主菜单，请使用底部按钮继续操作。')
+    async def cb_custom_back(callback: CallbackQuery, state: FSMContext):
+        await state.clear()
+        await callback.message.edit_text(_bot_text('bot_back_to_menu', '已返回主菜单，请使用底部按钮继续操作。'))
         await _safe_callback_answer(callback)
 
     @dp.callback_query(F.data == 'custom:regions')
-    async def cb_custom_regions(callback: CallbackQuery):
+    async def cb_custom_regions(callback: CallbackQuery, state: FSMContext):
+        await state.clear()
         await _safe_callback_answer(callback)
         regions = await _get_cached_custom_regions()
         await _safe_edit_text(callback.message, '🛠 云服务器定制\n\n请选择热门地区：', reply_markup=custom_region_menu(regions, expanded=False))
 
     @dp.callback_query(F.data == 'custom:regions:more')
-    async def cb_custom_regions_more(callback: CallbackQuery):
+    async def cb_custom_regions_more(callback: CallbackQuery, state: FSMContext):
+        await state.clear()
         await _safe_callback_answer(callback)
         regions = await _get_cached_custom_regions()
         await _safe_edit_text(callback.message, '🛠 云服务器定制\n\n请选择地区：', reply_markup=custom_region_menu(regions, expanded=True))
@@ -1072,11 +1323,11 @@ def register_handlers(dp: Dispatcher):
             f'数量: {quantity}\n'
             f'USDT金额: {fmt_pay_amount(usdt_amount)} USDT\n'
             f'TRX金额: {fmt_pay_amount(trx_amount)} TRX\n'
-            f'支付地址: `{receive_address}`\n\n'
+            f'支付地址: <code>{escape(receive_address)}</code>\n\n'
             + _bot_text('bot_custom_order_notice', '系统已开始自动监控 USDT 和 TRX 到账，检测到支付成功后会自动进入后续流程。')
         )
         await _safe_callback_answer(callback)
-        await _safe_edit_text(callback.message, text, reply_markup=custom_payment_keyboard(plan.id, quantity), parse_mode='Markdown')
+        await _safe_edit_text(callback.message, text, reply_markup=custom_payment_keyboard(plan.id, quantity), parse_mode='HTML', disable_web_page_preview=True)
 
 
     @dp.callback_query(F.data.startswith('custom:paypage:'))
@@ -1100,10 +1351,10 @@ def register_handlers(dp: Dispatcher):
             f'数量: {quantity}\n'
             f'USDT金额: {fmt_pay_amount(usdt_amount)} USDT\n'
             f'TRX金额: {fmt_pay_amount(trx_amount)} TRX\n'
-            f'支付地址: `{receive_address}`\n\n'
+            f'支付地址: <code>{escape(receive_address)}</code>\n\n'
             + _bot_text('bot_custom_order_notice', '系统已开始自动监控 USDT 和 TRX 到账，检测到支付成功后会自动进入后续流程。')
         )
-        await _safe_edit_text(callback.message, text, reply_markup=custom_payment_keyboard(plan.id, quantity), parse_mode='Markdown')
+        await _safe_edit_text(callback.message, text, reply_markup=custom_payment_keyboard(plan.id, quantity), parse_mode='HTML', disable_web_page_preview=True)
 
 
     @dp.callback_query(F.data.startswith('custom:qtycart:'))
@@ -1261,11 +1512,12 @@ def register_handlers(dp: Dispatcher):
         )
 
     @dp.callback_query(F.data == 'cloud:list')
-    async def cb_cloud_list(callback: CallbackQuery):
+    async def cb_cloud_list(callback: CallbackQuery, state: FSMContext):
+        await state.clear()
         await _safe_callback_answer(callback)
         user = await get_or_create_user(callback.from_user.id, callback.from_user.username, callback.from_user.first_name)
         servers = await list_user_cloud_servers(user.id)
-        visible_servers = [item for item in servers if (item.public_ip or item.previous_public_ip)]
+        visible_servers = [item for item in servers if item.public_ip and item.status not in {'deleted', 'deleting', 'expired'}]
         page = 1
         per_page = 5
         total_visible = len(visible_servers)
@@ -1278,12 +1530,13 @@ def register_handlers(dp: Dispatcher):
             await _safe_edit_text(callback.message, '🔎 我的云服务器\n\n请选择要查看的服务器：', reply_markup=cloud_server_list(page_items, page, total_pages, 'cloud:list:page'))
 
     @dp.callback_query(F.data.startswith('cloud:list:page:'))
-    async def cb_cloud_list_page(callback: CallbackQuery):
+    async def cb_cloud_list_page(callback: CallbackQuery, state: FSMContext):
+        await state.clear()
         await _safe_callback_answer(callback)
         user = await get_or_create_user(callback.from_user.id, callback.from_user.username, callback.from_user.first_name)
         page = max(1, int(callback.data.split(':')[3]))
         servers = await list_user_cloud_servers(user.id)
-        visible_servers = [item for item in servers if (item.public_ip or item.previous_public_ip)]
+        visible_servers = [item for item in servers if item.public_ip and item.status not in {'deleted', 'deleting', 'expired'}]
         per_page = 5
         total_visible = len(visible_servers)
         total_pages = max(1, math.ceil(total_visible / per_page))
@@ -1329,6 +1582,9 @@ def register_handlers(dp: Dispatcher):
         if not order:
             await _safe_callback_answer(callback, '服务器记录不存在', show_alert=True)
             return
+        if order.status in {'deleted', 'deleting', 'expired'} or not str(order.public_ip or '').strip():
+            await _safe_callback_answer(callback, '该服务器已删除，禁止续费', show_alert=True)
+            return
         can_renew = bool(order.public_ip and order.status not in {'deleted', 'deleting', 'expired'})
         can_change_ip = order.status in {'completed', 'expiring', 'suspended'}
         can_reinit = bool(order.public_ip and order.login_password and order.status in {'completed', 'failed'})
@@ -1346,6 +1602,7 @@ def register_handlers(dp: Dispatcher):
             callback.message,
             _cloud_server_detail_text(order),
             reply_markup=cloud_server_detail(order.id, can_renew, can_change_ip, can_reinit, can_delay, back_callback),
+            parse_mode='HTML',
         )
 
     @dp.callback_query(F.data.startswith('cloud:mute:'))
@@ -1393,9 +1650,10 @@ def register_handlers(dp: Dispatcher):
             '续费时长: 31天\n'
             f'续费价格: {fmt_pay_amount(order.pay_amount)} {order.currency}\n'
             f'自动续费: {"已开启" if auto_renew_enabled else "已关闭"}\n'
-            f'收款地址: `{receive_address}`\n\n'
+            f'收款地址: <code>{escape(receive_address)}</code>\n\n'
             '可直接地址支付，或使用下方钱包续费与自动续费开关。',
-            parse_mode='Markdown',
+            parse_mode='HTML',
+            disable_web_page_preview=True,
             reply_markup=cloud_server_renew_payment(order.id, order.pay_amount, trx_amount, bool(auto_renew_enabled)),
         )
 
@@ -1407,6 +1665,9 @@ def register_handlers(dp: Dispatcher):
         order_id = int(order_id_text)
         enabled = action == 'on'
         order = await set_cloud_server_auto_renew(order_id, user.id, enabled)
+        if order is False:
+            await _safe_callback_answer(callback, '该服务器IP已删除，禁止续费', show_alert=True)
+            return
         if not order:
             await _safe_callback_answer(callback, '服务器记录不存在', show_alert=True)
             return
@@ -1418,9 +1679,10 @@ def register_handlers(dp: Dispatcher):
             '续费时长: 31天\n'
             f'续费价格: {fmt_pay_amount(order.pay_amount or order.total_amount)} {order.currency}\n'
             f'自动续费: {"已开启" if enabled else "已关闭"}\n'
-            f'收款地址: `{receive_address}`\n\n'
+            f'收款地址: <code>{escape(receive_address)}</code>\n\n'
             '可直接地址支付，或使用下方钱包续费与自动续费开关。',
-            parse_mode='Markdown',
+            parse_mode='HTML',
+            disable_web_page_preview=True,
             reply_markup=cloud_server_renew_payment(order.id, order.pay_amount or order.total_amount, trx_amount, enabled),
         )
 
@@ -1578,14 +1840,6 @@ def register_handlers(dp: Dispatcher):
         await callback.message.reply('🛠 已提交重试初始化任务，后台会重新执行 BBR/MTProxy 安装，完成后会自动通知你。')
         asyncio.create_task(_provision_cloud_server_and_notify(bot, callback.from_user.id, order.id, order.mtproxy_port or 9528, retry_only=True))
 
-    @dp.callback_query(F.data.startswith('ppage:'))
-    async def cb_product_page(callback: CallbackQuery):
-        await _safe_callback_answer(callback)
-        page = int(callback.data.split(':')[1])
-        products, total = await list_products(page=page)
-        text_out, kb = _products_page(products, page, total)
-        await callback.message.edit_text(text_out, reply_markup=kb)
-
     @dp.callback_query(F.data.startswith('balance:detail:'))
     async def cb_balance_detail(callback: CallbackQuery):
         await _safe_callback_answer(callback)
@@ -1597,103 +1851,6 @@ def register_handlers(dp: Dispatcher):
             return
         await callback.message.edit_text(_balance_detail_text(item), reply_markup=profile_menu())
 
-    @dp.callback_query(F.data == 'back_to_products')
-    async def cb_back_products(callback: CallbackQuery):
-        await _safe_callback_answer(callback)
-        products, total = await list_products()
-        text_out, kb = _products_page(products, 1, total)
-        await callback.message.edit_text(text_out, reply_markup=kb)
-
-    @dp.callback_query(F.data.startswith('qty:'))
-    async def cb_quantity(callback: CallbackQuery):
-        await _safe_callback_answer(callback)
-        _, product_id, quantity = callback.data.split(':')
-        product = await get_product(int(product_id))
-        if not product:
-            await callback.message.edit_text('商品不存在。')
-            return
-        quantity = int(quantity)
-        if product.stock != -1 and product.stock < quantity:
-            await _safe_callback_answer(callback, '库存不足！', show_alert=True)
-            return
-        usdt_total = product.price * quantity
-        try:
-            trx_total = await usdt_to_trx(usdt_total)
-            rate_info = await get_exchange_rate_display()
-        except Exception:
-            await callback.message.edit_text('汇率获取失败，请稍后重试。')
-            return
-        await callback.message.edit_text(
-            f'🛒 订单确认\n商品: {product.name}\n数量: {quantity}\n'
-            f'💵 {fmt_amount(usdt_total)} USDT  |  🪙 ≈ {fmt_amount(trx_total)} TRX\n'
-            f'📊 {rate_info}\n\n请选择支付方式：',
-            reply_markup=pay_method_keyboard(product.id, quantity, usdt_total, trx_total),
-        )
-
-    @dp.callback_query(F.data.startswith('pay:'))
-    async def cb_pay(callback: CallbackQuery, bot: Bot):
-        await _safe_callback_answer(callback)
-        _, pay_method, product_id, currency, quantity = callback.data.split(':')
-        product_id = int(product_id)
-        quantity = int(quantity)
-        product = await get_product(product_id)
-        if not product:
-            await callback.message.edit_text('商品不存在。')
-            return
-        user = await get_or_create_user(callback.from_user.id, callback.from_user.username, callback.from_user.first_name)
-        usdt_total = product.price * quantity
-        try:
-            total = await usdt_to_trx(usdt_total) if currency == 'TRX' else usdt_total
-        except Exception:
-            await callback.message.edit_text('汇率获取失败，请稍后重试。')
-            return
-
-        if pay_method == 'balance':
-            order, err = await buy_with_balance(user.id, product.id, quantity, total, currency)
-            if err:
-                await callback.message.edit_text(f'❌ {err}！\n请先充值 {currency} 余额。')
-                return
-            await callback.message.edit_text(f'✅ 购买成功！\n订单号: {order.order_no}\n商品正在发送...')
-            for _ in range(quantity):
-                if product.content_type == 'text':
-                    await bot.send_message(chat_id=callback.from_user.id, text=product.content_text or '')
-                elif product.content_type == 'image' and product.content_image:
-                    await bot.send_photo(chat_id=callback.from_user.id, photo=product.content_image, caption=product.content_text or '')
-                elif product.content_type == 'video' and product.content_video:
-                    await bot.send_video(chat_id=callback.from_user.id, video=product.content_video, caption=product.content_text or '')
-        else:
-            order = await create_address_order(user.id, product.id, quantity, total, currency)
-            addr = _receive_address()
-            await callback.message.edit_text(
-                f'📋 订单已创建\n订单号: {order.order_no}\n支付币种: {currency}\n'
-                f'支付金额: {fmt_pay_amount(order.pay_amount)} {currency}\n'
-                f'收款地址: {addr}\n\n⏰ 请在 15 分钟内转账精确金额到上述地址。\n系统将自动确认并发货。'
-            )
-
-    # ══════════════════════════════════════════════════════════════════════
-    # 订单回调
-    # ══════════════════════════════════════════════════════════════════════
-
-    @dp.callback_query(F.data.startswith('opage:'))
-    async def cb_order_page(callback: CallbackQuery):
-        user = await get_or_create_user(callback.from_user.id, callback.from_user.username, callback.from_user.first_name)
-        page = int(callback.data.split(':')[1])
-        orders, total = await list_orders(user.id, page=page)
-        text_out, kb = _orders_page(orders, page, total)
-        await callback.message.edit_text(text_out, reply_markup=kb)
-        await _safe_callback_answer(callback)
-
-    @dp.callback_query(F.data.startswith('order_detail:'))
-    async def cb_order_detail(callback: CallbackQuery):
-        user = await get_or_create_user(callback.from_user.id, callback.from_user.username, callback.from_user.first_name)
-        order = await get_order(int(callback.data.split(':')[1]))
-        if not order or order.user_id != user.id:
-            await callback.message.edit_text('订单不存在。')
-            await _safe_callback_answer(callback)
-            return
-        await callback.message.edit_text(_order_detail_text(order), reply_markup=order_query_menu())
-        await _safe_callback_answer(callback)
-
     # ══════════════════════════════════════════════════════════════════════
     # 充值回调
     # ══════════════════════════════════════════════════════════════════════
@@ -1703,7 +1860,7 @@ def register_handlers(dp: Dispatcher):
         currency = callback.data.split(':')[1]
         await state.update_data(recharge_currency=currency)
         await state.set_state(RechargeStates.waiting_amount)
-        await callback.message.edit_text(f'💰 请输入需要充值的 {currency} 金额：')
+        await callback.message.edit_text(f'💰 请输入需要充值的 {currency} 金额：\n\n可随时点击底部菜单打断当前输入。')
         await _safe_callback_answer(callback)
 
     @dp.callback_query(F.data.startswith('rpage:'))
@@ -1722,7 +1879,7 @@ def register_handlers(dp: Dispatcher):
     @dp.callback_query(F.data == 'mon:add')
     async def cb_mon_add(callback: CallbackQuery, state: FSMContext):
         await state.set_state(MonitorStates.waiting_address)
-        await callback.message.edit_text('请输入要监控的 TRON 地址：')
+        await callback.message.edit_text(_bot_text('bot_monitor_address_prompt', '请输入要监控的 TRON 地址：\n\n示例：<code>TD7cnQFUwDxPMSxruGELK6hs8YQm83Avco</code>\n\n可随时点击底部菜单打断当前输入。'), parse_mode='HTML')
         await _safe_callback_answer(callback)
 
     @dp.callback_query(F.data == 'mon:list')
@@ -1730,9 +1887,9 @@ def register_handlers(dp: Dispatcher):
         user = await get_or_create_user(callback.from_user.id, callback.from_user.username, callback.from_user.first_name)
         monitors = await list_monitors(user.id)
         if not monitors:
-            await callback.message.edit_text('暂无监控地址。', reply_markup=monitor_menu())
+            await callback.message.edit_text(_bot_text('bot_monitors_empty', '暂无监控地址。'), reply_markup=monitor_menu())
         else:
-            await callback.message.edit_text('📋 监控列表：', reply_markup=kb_monitor_list(monitors))
+            await callback.message.edit_text(_bot_text('bot_monitors_list', '📋 监控列表：'), reply_markup=kb_monitor_list(monitors))
         await _safe_callback_answer(callback)
 
     @dp.callback_query(F.data.startswith('mon:detail:'))
@@ -1740,12 +1897,12 @@ def register_handlers(dp: Dispatcher):
         user = await get_or_create_user(callback.from_user.id, callback.from_user.username, callback.from_user.first_name)
         mon = await get_monitor(int(callback.data.split(':')[2]), user.id)
         if not mon:
-            await callback.message.edit_text('监控不存在。')
+            await callback.message.edit_text(_bot_text('bot_monitor_missing', '监控不存在。'))
             await _safe_callback_answer(callback)
             return
         icon = '🟢' if mon.is_active else '🔴'
         await callback.message.edit_text(
-            f'{icon} 监控详情\n地址: <code>{mon.address}</code>\n备注: {mon.remark or "无"}\n'
+            f'{icon} 监控详情\n监控地址: <code>{mon.address}</code>\n备注: {mon.remark or "无"}\n'
             f'💸 监控转账: {"开启" if mon.monitor_transfers else "关闭"}\n'
             f'⚡ 监控资源: {"开启" if mon.monitor_resources else "关闭"}\n'
             f'USDT 阈值: {fmt_amount(mon.usdt_threshold)}\nTRX 阈值: {fmt_amount(mon.trx_threshold)}\n\n'
@@ -1769,7 +1926,7 @@ def register_handlers(dp: Dispatcher):
         from cloud.cache import update_monitor_flag_in_cache
         await update_monitor_flag_in_cache(monitor.address, field, getattr(monitor, field))
         await callback.message.edit_text(
-            f'{"🟢" if monitor.is_active else "🔴"} 监控详情\n地址: <code>{monitor.address}</code>\n备注: {monitor.remark or "无"}\n'
+            f'{"🟢" if monitor.is_active else "🔴"} 监控详情\n监控地址: <code>{monitor.address}</code>\n备注: {monitor.remark or "无"}\n'
             f'💸 监控转账: {"开启" if monitor.monitor_transfers else "关闭"}\n'
             f'⚡ 监控资源: {"开启" if monitor.monitor_resources else "关闭"}\n'
             f'USDT 阈值: {fmt_amount(monitor.usdt_threshold)}\nTRX 阈值: {fmt_amount(monitor.trx_threshold)}\n\n'
@@ -1784,7 +1941,7 @@ def register_handlers(dp: Dispatcher):
     @dp.callback_query(F.data.startswith('mon:threshold:'))
     async def cb_mon_threshold(callback: CallbackQuery):
         mid = int(callback.data.split(':')[2])
-        await callback.message.edit_text('请选择要修改的阈值币种：', reply_markup=monitor_threshold_currency(mid))
+        await callback.message.edit_text(_bot_text('bot_monitor_threshold_currency_prompt', '请选择要修改的阈值币种：'), reply_markup=monitor_threshold_currency(mid))
         await _safe_callback_answer(callback)
 
     @dp.callback_query(F.data.startswith('mon:setthr:'))
@@ -1793,7 +1950,7 @@ def register_handlers(dp: Dispatcher):
         await state.update_data(threshold_monitor_id=int(mid), threshold_currency=currency)
         state_obj = MonitorStates.waiting_usdt_threshold if currency == 'USDT' else MonitorStates.waiting_trx_threshold
         await state.set_state(state_obj)
-        await callback.message.edit_text(f'请输入新的 {currency} 阈值金额：')
+        await callback.message.edit_text(f'请输入新的 {currency} 阈值金额：\n\n可随时点击底部菜单打断当前输入。')
         await _safe_callback_answer(callback)
 
     @dp.callback_query(F.data.startswith('mon:delete:'))
@@ -1805,12 +1962,12 @@ def register_handlers(dp: Dispatcher):
             from cloud.cache import remove_monitor_from_cache
             await remove_monitor_from_cache(mon.address)
         await delete_monitor(mid, user.id)
-        await callback.message.edit_text('🗑 监控已删除。', reply_markup=monitor_menu())
+        await callback.message.edit_text(_bot_text('bot_monitor_deleted', '🗑 监控已删除。'), reply_markup=monitor_menu())
         await _safe_callback_answer(callback)
 
     @dp.callback_query(F.data == 'mon:back')
     async def cb_mon_back(callback: CallbackQuery):
-        await callback.message.edit_text('🔍 地址监控', reply_markup=monitor_menu())
+        await callback.message.edit_text(_bot_text('bot_monitor_entry', '🔍 地址监控'), reply_markup=monitor_menu())
         await _safe_callback_answer(callback)
 
     @dp.callback_query(F.data.startswith('mon:txd:'))
@@ -1824,18 +1981,18 @@ def register_handlers(dp: Dispatcher):
         text = (
             f'🔍 交易详情\n\n'
             f'类型: {"收入" if detail.get("direction") == "income" else "支出"}\n'
-            f'交易哈希: {detail["tx_hash"]}\n'
+            f'交易哈希: <code>{detail["tx_hash"]}</code>\n'
             f'币种: {detail["currency"]}\n'
             f'金额: {detail["amount"]} {detail["currency"]}\n'
-            f'付款地址: {detail["from"]}\n'
-            f'收款地址: {detail["to"]}\n'
+            f'付款地址: <code>{detail["from"]}</code>\n'
+            f'收款地址: <code>{detail["to"]}</code>\n'
             f'时间: {detail["time"]}\n'
         )
         if detail.get("remark"):
             text += f'备注: {detail["remark"]}\n'
         if detail.get("fee_text"):
             text += f'手续费: {detail["fee_text"]}\n'
-        await callback.message.edit_text(text)
+        await callback.message.edit_text(text, parse_mode='HTML', disable_web_page_preview=True)
         await _safe_callback_answer(callback)
 
     @dp.callback_query(F.data.startswith('mon:resd:'))
@@ -1858,6 +2015,43 @@ def register_handlers(dp: Dispatcher):
         )
         await callback.message.edit_text(text, parse_mode='HTML')
         await _safe_callback_answer(callback)
+
+    @dp.message()
+    async def fallback_message_router(message: Message, state: FSMContext, bot: Bot):
+        raw_text = _message_text_for_router(message)
+        content_type = _message_content_type(message)
+        kind = _detect_message_kind(raw_text)
+        logger.info(
+            '消息分流 sender=%s type=%s kind=%s text_preview=%r',
+            getattr(message.from_user, 'id', None),
+            content_type,
+            kind,
+            _safe_preview_text(raw_text),
+        )
+        if kind in {'empty'} and not _is_admin_forward_media_type(content_type):
+            return
+        if kind == 'command':
+            await message.answer(_bot_text('bot_unknown_command', '暂不支持这个命令，请使用菜单按钮操作。'), reply_markup=main_menu())
+            return
+        if kind == 'link':
+            await state.clear()
+            await _reply_cloud_query_results(message, raw_text)
+            return
+        if kind == 'address':
+            await state.clear()
+            addresses = _extract_tron_addresses(raw_text)
+            if not addresses:
+                return
+            try:
+                await _reply_tron_address_summary(message, addresses[0])
+            except Exception:
+                await message.answer(_bot_text('bot_address_query_failed', '地址查询失败，请稍后再试。'), reply_markup=main_menu())
+            return
+        await _forward_plain_text_to_admin(bot, message)
+        if _is_admin_forward_media_type(content_type):
+            await message.answer('已收到你的媒体消息。', reply_markup=main_menu())
+            return
+        await message.answer(_bot_text('bot_plain_text_received', '已收到你的消息。若是地址请直接发送地址，若是代理链接请直接发送链接。'), reply_markup=main_menu())
 
     @dp.callback_query(F.data == 'noop')
     async def cb_noop(callback: CallbackQuery):

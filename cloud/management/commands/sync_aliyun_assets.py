@@ -1,9 +1,25 @@
 from django.core.management.base import BaseCommand, CommandError
+from django.db.models import Q
 from django.utils import timezone
 from django.utils.dateparse import parse_datetime
 
-from cloud.models import CloudAsset, Server
+from bot.api import _provider_status_label
+from cloud.models import CloudAsset, CloudServerOrder, Server
 from cloud.aliyun_simple import _build_client, _region_endpoint, _runtime_options
+from cloud.services import record_cloud_ip_log
+
+
+_ACTIVE_ORDER_STATUSES = {'pending', 'provisioning', 'completed', 'expiring', 'renew_pending', 'suspended'}
+
+
+def _resolve_order_for_ip(public_ip):
+    normalized_ip = str(public_ip or '').strip()
+    if not normalized_ip:
+        return None
+    return CloudServerOrder.objects.filter(
+        Q(public_ip=normalized_ip) | Q(previous_public_ip=normalized_ip),
+        status__in=_ACTIVE_ORDER_STATUSES,
+    ).order_by('-created_at', '-id').first()
 
 
 NORMAL_ALIYUN_STATES = {'running', 'starting', 'pending'}
@@ -73,6 +89,87 @@ def _resolve_aliyun_status(item, expires_at=None):
     return CloudAsset.STATUS_UNKNOWN, raw_status, business_status, disable_reason
 
 
+def _status_label(status):
+    return dict(CloudAsset.STATUS_CHOICES).get(status, status or '-')
+
+
+def _elevate_deleted_when_ip_missing(status, public_ip):
+    if str(public_ip or '').strip():
+        return status
+    return CloudAsset.STATUS_DELETED
+
+
+def _resolve_asset(instance_id, public_ip):
+    lookup = Q(kind=CloudAsset.KIND_SERVER)
+    candidates = Q(instance_id=instance_id) | Q(provider_resource_id=instance_id)
+    if public_ip:
+        candidates |= Q(public_ip=public_ip)
+    return CloudAsset.objects.filter(lookup & candidates).order_by('-updated_at', '-id').first()
+
+
+def _resolve_server(instance_id, public_ip):
+    candidates = Q(instance_id=instance_id) | Q(provider_resource_id=instance_id)
+    if public_ip:
+        candidates |= Q(public_ip=public_ip)
+    return Server.objects.filter(candidates).order_by('-updated_at', '-id').first()
+
+
+def _mark_deleted_when_missing_in_aliyun(region, existing_instance_ids, stdout):
+    verification_deleted_items = []
+    queryset = CloudAsset.objects.filter(
+        kind=CloudAsset.KIND_SERVER,
+        provider='aliyun_simple',
+    ).filter(
+        Q(region_code=region) | Q(region_code='') | Q(region_code__isnull=True)
+    ).order_by('-updated_at', '-id')
+    now_iso = timezone.now().isoformat()
+    for asset in queryset:
+        instance_id = str(asset.instance_id or '').strip()
+        public_ip = str(asset.public_ip or '').strip()
+        if instance_id and instance_id in existing_instance_ids:
+            continue
+        if asset.status == CloudAsset.STATUS_DELETED and asset.provider_status == '云上未找到实例':
+            continue
+        old_public_ip = public_ip or str(asset.previous_public_ip or '').strip()
+        asset.status = CloudAsset.STATUS_DELETED
+        asset.is_active = False
+        asset.previous_public_ip = old_public_ip or asset.previous_public_ip
+        asset.public_ip = None
+        asset.provider_status = '云上未找到实例'
+        asset.note = f'状态: 云上未找到实例；公网IP: {old_public_ip or "缺失"}；最近同步: {now_iso}'
+        asset.save(update_fields=['status', 'is_active', 'previous_public_ip', 'public_ip', 'provider_status', 'note', 'updated_at'])
+        server = Server.objects.filter(
+            Q(instance_id=instance_id) | Q(provider_resource_id=asset.provider_resource_id) | Q(public_ip=public_ip) | Q(previous_public_ip=old_public_ip)
+        ).order_by('-updated_at', '-id').first()
+        if server:
+            server.status = Server.STATUS_DELETED
+            server.is_active = False
+            server.previous_public_ip = old_public_ip or server.previous_public_ip
+            server.public_ip = None
+            server.provider_status = '云上未找到实例'
+            server.note = f'状态: 云上未找到实例；公网IP: {old_public_ip or "缺失"}；最近同步: {now_iso}'
+            server.save(update_fields=['status', 'is_active', 'previous_public_ip', 'public_ip', 'provider_status', 'note', 'updated_at'])
+        order = getattr(asset, 'order', None) or _resolve_order_for_ip(old_public_ip)
+        if order:
+            order.previous_public_ip = old_public_ip or order.previous_public_ip
+            order.public_ip = None
+            order.save(update_fields=['previous_public_ip', 'public_ip', 'updated_at'])
+        record_cloud_ip_log(
+            event_type='deleted',
+            order=order,
+            asset=asset,
+            server=server,
+            previous_public_ip=old_public_ip or None,
+            public_ip=None,
+            note='IP校验发现云上不存在，已标记删除',
+        )
+        verification_deleted_items.append(f'{asset.id}:{old_public_ip or "缺失"}:{instance_id or asset.asset_name or "-"}')
+        stdout.stdout.write(stdout.style.WARNING(
+            f'IP校验 已删除 资产#{asset.id} IP={old_public_ip or "缺失"} 云上不存在'
+        ))
+    return verification_deleted_items
+
+
 class Command(BaseCommand):
     help = '同步阿里云轻量应用服务器到统一云资产表'
 
@@ -81,6 +178,7 @@ class Command(BaseCommand):
 
     def handle(self, *args, **options):
         region = options['region']
+        before_asset_total = CloudAsset.objects.filter(kind=CloudAsset.KIND_SERVER).count()
         client = _build_client(_region_endpoint(region))
         if not client:
             raise CommandError('未配置阿里云 AccessKey，无法同步。')
@@ -93,54 +191,147 @@ class Command(BaseCommand):
         )
         instances = response.body.to_map().get('Instances', [])
         count = 0
+        created_count = 0
+        updated_count = 0
+        deleted_by_missing_ip_count = 0
+        created_asset_ids = []
+        updated_asset_ids = []
+        status_changed_items = []
+        deleted_by_missing_ip_items = []
+        conflict_skipped_items = []
+        claimed_assets = {}
         synced_instance_ids = []
+        verification_deleted_items = []
         for item in instances:
             instance_id = item.get('InstanceId') or ''
             public_ip = item.get('PublicIpAddress') or item.get('PublicIp') or ''
             expires_at = _parse_expire_time(item)
             account_id = _resolve_account_id(item)
             normalized_status, raw_status, business_status, disable_reason = _resolve_aliyun_status(item, expires_at)
-            provider_status = ' / '.join([part for part in [raw_status or None, business_status or None, disable_reason or None] if part]) or None
-            asset, _ = CloudAsset.objects.update_or_create(
-                kind=CloudAsset.KIND_SERVER,
-                instance_id=instance_id,
-                defaults={
-                    'source': CloudAsset.SOURCE_ALIYUN,
-                    'provider': 'aliyun_simple',
-                    'region_code': region,
-                    'region_name': item.get('RegionId') or region,
-                    'asset_name': item.get('InstanceName') or instance_id,
-                    'provider_resource_id': instance_id,
-                    'public_ip': public_ip,
-                    'actual_expires_at': expires_at,
-                    'currency': 'USDT',
-                    'note': f"状态: {item.get('Status') or '-'}；业务状态: {item.get('BusinessStatus') or '-'}；禁用原因: {item.get('DisableReason') or '-'}；套餐: {item.get('PlanId') or '-'}；到期: {expires_at or '-'}；最近同步: {timezone.now().isoformat()}",
-                    'status': normalized_status,
-                    'provider_status': provider_status,
-                    'is_active': normalized_status in CloudAsset.ACTIVE_STATUSES,
-                },
+            normalized_status = _elevate_deleted_when_ip_missing(normalized_status, public_ip)
+            provider_status = _provider_status_label(' / '.join([part for part in [raw_status or None, business_status or None, disable_reason or None] if part]) or None)
+            note = (
+                f"状态: {_provider_status_label(item.get('Status') or '-')}；"
+                f"业务状态: {_provider_status_label(item.get('BusinessStatus') or '-')}；"
+                f"禁用原因: {_provider_status_label(item.get('DisableReason') or '-')}；"
+                f"公网IP: {public_ip or '缺失'}；"
+                f"套餐: {item.get('PlanId') or '-'}；到期: {expires_at or '-'}；最近同步: {timezone.now().isoformat()}"
             )
-            Server.objects.update_or_create(
-                instance_id=instance_id,
-                defaults={
-                    'source': Server.SOURCE_ALIYUN,
-                    'provider': 'aliyun_simple',
-                    'account_label': account_id,
-                    'region_code': region,
-                    'region_name': item.get('RegionId') or region,
-                    'server_name': item.get('InstanceName') or instance_id,
-                    'provider_resource_id': instance_id,
-                    'public_ip': public_ip,
-                    'expires_at': expires_at,
-                    'note': f"状态: {item.get('Status') or '-'}；业务状态: {item.get('BusinessStatus') or '-'}；禁用原因: {item.get('DisableReason') or '-'}；套餐: {item.get('PlanId') or '-'}；到期: {expires_at or '-'}；最近同步: {timezone.now().isoformat()}",
-                    'status': normalized_status,
-                    'provider_status': provider_status,
-                    'is_active': normalized_status in Server.ACTIVE_STATUSES,
-                },
-            )
+            asset_name = item.get('InstanceName') or instance_id
+            asset_defaults = {
+                'kind': CloudAsset.KIND_SERVER,
+                'source': CloudAsset.SOURCE_ALIYUN,
+                'provider': 'aliyun_simple',
+                'region_code': region,
+                'region_name': item.get('RegionId') or region,
+                'asset_name': asset_name,
+                'instance_id': instance_id,
+                'provider_resource_id': instance_id,
+                'public_ip': public_ip,
+                'actual_expires_at': expires_at,
+                'currency': 'USDT',
+                'note': note,
+                'status': normalized_status,
+                'provider_status': provider_status,
+                'is_active': normalized_status in CloudAsset.ACTIVE_STATUSES,
+            }
+            asset = _resolve_asset(instance_id, public_ip)
+            asset_signature = f'{instance_id or "-"}|{public_ip or "缺失"}'
+            old_status = asset.status if asset else None
+            old_public_ip = asset.public_ip if asset else None
+            ip_changed = bool(asset and old_public_ip and old_public_ip != public_ip)
+            if asset:
+                claimed_signature = claimed_assets.get(asset.id)
+                if claimed_signature and claimed_signature != asset_signature:
+                    occupied_ip = claimed_signature.split('|')[-1]
+                    current_ip = asset_signature.split('|')[-1]
+                    conflict_skipped_items.append(f'{asset.id}:{occupied_ip}->{current_ip}')
+                    self.stdout.write(
+                        self.style.WARNING(
+                            f'冲突已跳过 资产#{asset.id} 已占IP={occupied_ip} 当前IP={current_ip}'
+                        )
+                    )
+                else:
+                    claimed_assets[asset.id] = asset_signature
+                    if ip_changed:
+                        asset.previous_public_ip = old_public_ip
+                    for key, value in asset_defaults.items():
+                        setattr(asset, key, value)
+                    asset.save()
+                    updated_count += 1
+                    updated_asset_ids.append(f'{asset.id}:{public_ip or "缺失"}:{instance_id or asset_name}')
+            else:
+                asset = CloudAsset.objects.create(**asset_defaults)
+                claimed_assets[asset.id] = asset_signature
+                created_count += 1
+                created_asset_ids.append(f'{asset.id}:{public_ip or "缺失"}:{instance_id or asset_name}')
+            if old_status is not None and old_status != normalized_status:
+                status_changed_items.append(f'{asset.id}:{public_ip or "缺失"}:{old_status}->{normalized_status}')
+            if normalized_status == CloudAsset.STATUS_DELETED and not str(public_ip or '').strip():
+                deleted_by_missing_ip_count += 1
+                deleted_by_missing_ip_items.append(f'{asset.id}:{public_ip or "缺失"}:{asset_name or instance_id}')
+
+            server_defaults = {
+                'source': Server.SOURCE_ALIYUN,
+                'provider': 'aliyun_simple',
+                'account_label': account_id,
+                'region_code': region,
+                'region_name': item.get('RegionId') or region,
+                'server_name': asset_name,
+                'instance_id': instance_id,
+                'provider_resource_id': instance_id,
+                'public_ip': public_ip,
+                'expires_at': expires_at,
+                'note': note,
+                'status': normalized_status,
+                'provider_status': provider_status,
+                'is_active': normalized_status in Server.ACTIVE_STATUSES,
+            }
+            server = _resolve_server(instance_id, public_ip)
+            old_server_public_ip = server.public_ip if server else None
+            if server:
+                if old_server_public_ip and old_server_public_ip != public_ip:
+                    server.previous_public_ip = old_server_public_ip
+                for key, value in server_defaults.items():
+                    setattr(server, key, value)
+                server.save()
+            else:
+                Server.objects.create(**server_defaults)
+
+            if ip_changed:
+                refreshed_server = _resolve_server(instance_id, public_ip)
+                record_cloud_ip_log(
+                    event_type='changed',
+                    asset=asset,
+                    server=refreshed_server,
+                    public_ip=public_ip,
+                    previous_public_ip=old_public_ip,
+                    note=f'自动同步发现 IP 变化：{old_public_ip} -> {public_ip}',
+                )
             synced_instance_ids.append(instance_id)
             count += 1
-            self.stdout.write(self.style.SUCCESS(f'已同步 {asset.instance_id or asset.asset_name}'))
-        self.stdout.write(self.style.SUCCESS(f'完成，共同步 {count} 台阿里云服务器。'))
+            expires_text = timezone.localtime(expires_at).strftime('%Y-%m-%d %H:%M') if expires_at else '-'
+            self.stdout.write(
+                self.style.SUCCESS(
+                    f'已同步 IP={public_ip or "缺失"} 实例={instance_id or "-"} 名称={asset_name or "-"} '
+                    f'状态={_status_label(normalized_status)} '
+                    f'厂商状态={provider_status or _provider_status_label(raw_status or "-")} '
+                    f'到期={expires_text}'
+                )
+            )
+        verification_deleted_items.extend(
+            _mark_deleted_when_missing_in_aliyun(
+                region=region,
+                existing_instance_ids=set(synced_instance_ids),
+                stdout=self,
+            )
+        )
+        after_asset_total = CloudAsset.objects.filter(kind=CloudAsset.KIND_SERVER).count()
+        self.stdout.write(self.style.SUCCESS(
+            f'阿里云同步汇总：代理列表原有 {before_asset_total} 条；扫描服务器 {count} 条；新增 {created_count} 条，更新 {updated_count} 条；因公网IP缺失抬为已删除 {deleted_by_missing_ip_count} 条；同步后代理列表共 {after_asset_total} 条。'
+        ))
+        self.stdout.write(
+            f'阿里云同步详情：新增ID={created_asset_ids[:20] or []}；更新ID={updated_asset_ids[:20] or []}；状态变更={status_changed_items[:20] or []}；缺IP删状态={deleted_by_missing_ip_items[:20] or []}；冲突跳过={conflict_skipped_items[:20] or []}；IP校验删除={verification_deleted_items[:20] or []}'
+        )
         self.synced_instance_ids = synced_instance_ids
         return None

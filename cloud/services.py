@@ -323,6 +323,7 @@ def sync_server_prices(provider: str, regions: list[tuple[str, str]], templates,
                     'memory': memory,
                     'storage': storage,
                     'bandwidth': bandwidth,
+                    'cost_price': price,
                     'price': price,
                     'currency': 'USDT',
                     'is_active': True,
@@ -651,16 +652,36 @@ _INACTIVE_ASSET_STATUSES = {'deleted', 'deleting', 'terminated', 'terminating', 
 
 @sync_to_async
 def list_user_cloud_servers(user_id: int):
-    return list(
+    orders = list(
         CloudServerOrder.objects.filter(user_id=user_id)
         .exclude(status__in=['deleted', 'deleting', 'expired'])
         .order_by('-created_at')
     )
+    if not orders:
+        return []
+    order_ids = [item.id for item in orders]
+    hidden_order_ids = set(
+        CloudAsset.objects.filter(
+            kind=CloudAsset.KIND_SERVER,
+            order_id__in=order_ids,
+            status__in=_INACTIVE_ASSET_STATUSES,
+        ).values_list('order_id', flat=True)
+    )
+    hidden_order_ids.update(
+        Server.objects.filter(
+            order_id__in=order_ids,
+            status__in=_INACTIVE_ASSET_STATUSES,
+        ).values_list('order_id', flat=True)
+    )
+    return [
+        item for item in orders
+        if item.id not in hidden_order_ids and str(item.public_ip or '').strip()
+    ]
 
 
 @sync_to_async
 def get_user_cloud_server(order_id: int, user_id: int):
-    return CloudServerOrder.objects.filter(id=order_id, user_id=user_id).exclude(status__in=['deleted', 'deleting', 'expired']).first()
+    return CloudServerOrder.objects.filter(id=order_id, user_id=user_id).first()
 
 
 @sync_to_async
@@ -678,16 +699,31 @@ def get_cloud_server_by_ip(ip: str):
     ).exclude(status__in=_INACTIVE_ASSET_STATUSES).select_related('order').order_by('-updated_at', '-id').first()
     if server and server.order_id and server.order and server.order.status in _ACTIVE_ORDER_STATUSES:
         return server.order
-    return CloudServerOrder.objects.filter(
+    order = CloudServerOrder.objects.filter(
         Q(public_ip=normalized_ip) | Q(previous_public_ip=normalized_ip),
         status__in=_ACTIVE_ORDER_STATUSES,
     ).order_by('-created_at').first()
+    if order:
+        return order
+    asset_any = CloudAsset.objects.filter(
+        Q(public_ip=normalized_ip) | Q(previous_public_ip=normalized_ip)
+    ).select_related('order').order_by('-updated_at', '-id').first()
+    if asset_any and asset_any.order_id and asset_any.order:
+        return asset_any.order
+    server_any = Server.objects.filter(
+        Q(public_ip=normalized_ip) | Q(previous_public_ip=normalized_ip)
+    ).select_related('order').order_by('-updated_at', '-id').first()
+    if server_any and server_any.order_id and server_any.order:
+        return server_any.order
+    return CloudServerOrder.objects.filter(
+        Q(public_ip=normalized_ip) | Q(previous_public_ip=normalized_ip)
+    ).order_by('-created_at', '-id').first()
 
 
 def _can_order_be_renewed(order: CloudServerOrder) -> bool:
-    if order.status in {'deleted', 'deleting'}:
+    if order.status in {'deleted', 'deleting', 'expired'}:
         return False
-    if not order.public_ip:
+    if not str(order.public_ip or '').strip():
         return False
     return True
 
@@ -801,6 +837,13 @@ def apply_cloud_server_renewal(order_id: int, days: int = 31):
     order.save(update_fields=['service_expires_at', 'last_renewed_at', 'delay_quota', 'status', 'updated_at'])
     CloudAsset.objects.filter(order=order).update(actual_expires_at=order.service_expires_at, updated_at=timezone.now())
     Server.objects.filter(order=order).update(expires_at=order.service_expires_at, updated_at=timezone.now())
+    record_cloud_ip_log(
+        event_type=CloudIpLog.EVENT_RENEWED,
+        order=order,
+        public_ip=order.public_ip,
+        previous_public_ip=order.previous_public_ip,
+        note=f'服务器续费 {days} 天，新的服务到期时间：{order.service_expires_at:%Y-%m-%d %H:%M}',
+    )
     return order
 
 
@@ -812,6 +855,8 @@ def pay_cloud_server_renewal_with_balance(order_id: int, user_id: int, currency:
             return None, '订单不存在'
         if order.status not in {'renew_pending', 'pending'}:
             return None, '当前订单状态不可钱包支付'
+        if not _can_order_be_renewed(order):
+            return None, '该服务器IP已删除，禁止续费'
         balance_field = 'balance_trx' if currency == 'TRX' else 'balance'
         user = TelegramUser.objects.select_for_update().get(id=user_id)
         total = Decimal(str(order.pay_amount or order.total_amount or 0))
@@ -874,7 +919,10 @@ def mark_cloud_server_ip_change_requested(order_id: int, user_id: int, region_co
     if not fallback_plan:
         return False
     target_port = port or order.mtproxy_port or 9528
-    migration_due_at = timezone.now() + timezone.timedelta(days=5)
+    original_service_expires_at = order.service_expires_at
+    now = timezone.now()
+    migration_due_at = now + timezone.timedelta(days=5)
+    ip_recycle_at = migration_due_at + timezone.timedelta(days=15)
     new_order = CloudServerOrder.objects.create(
         user_id=order.user_id,
         order_no=f'{order.order_no}-IP',
@@ -891,8 +939,8 @@ def mark_cloud_server_ip_change_requested(order_id: int, user_id: int, region_co
         status='paid',
         lifecycle_days=order.lifecycle_days,
         mtproxy_port=target_port,
-        service_started_at=timezone.now(),
-        service_expires_at=migration_due_at,
+        service_started_at=order.service_started_at or now,
+        service_expires_at=original_service_expires_at,
         migration_due_at=migration_due_at,
         replacement_for=order,
         renew_extension_days=order.renew_extension_days,
@@ -901,13 +949,80 @@ def mark_cloud_server_ip_change_requested(order_id: int, user_id: int, region_co
         image_name=order.image_name,
         provision_note='\n'.join(filter(None, [order.provision_note, f'由订单 {order.order_no} 发起更换 IP，新服务器地区: {fallback_plan.region_name}，端口: {target_port}，需在 5 天内完成迁移。'])),
     )
-    order.provision_note = '\n'.join(filter(None, [order.provision_note, f'已发起更换 IP，新实例订单: {new_order.order_no}，旧服务器将于 5 天后到期，请尽快完成迁移。']))
-    order.service_expires_at = migration_due_at
+    order.provision_note = '\n'.join(filter(None, [order.provision_note, f'已发起更换 IP，新实例订单: {new_order.order_no}。新服务器继承旧服务器原到期时间；旧服务器将于 {migration_due_at:%Y-%m-%d %H:%M} 到期并关机删除，删除后 IP 继续保留至 {ip_recycle_at:%Y-%m-%d %H:%M}。']))
     order.migration_due_at = migration_due_at
-    order.save(update_fields=['provision_note', 'service_expires_at', 'migration_due_at', 'updated_at'])
-    CloudAsset.objects.filter(order=order).update(actual_expires_at=order.service_expires_at, updated_at=timezone.now())
-    Server.objects.filter(order=order).update(expires_at=order.service_expires_at, updated_at=timezone.now())
+    order.service_expires_at = migration_due_at
+    order.suspend_at = migration_due_at
+    order.delete_at = migration_due_at
+    order.renew_grace_expires_at = migration_due_at
+    order.ip_recycle_at = ip_recycle_at
+    CloudServerOrder.objects.filter(id=order.id).update(
+        provision_note=order.provision_note,
+        migration_due_at=migration_due_at,
+        service_expires_at=migration_due_at,
+        suspend_at=migration_due_at,
+        delete_at=migration_due_at,
+        renew_grace_expires_at=migration_due_at,
+        ip_recycle_at=ip_recycle_at,
+        updated_at=timezone.now(),
+    )
+    CloudAsset.objects.filter(order=order).update(actual_expires_at=migration_due_at, updated_at=timezone.now())
+    Server.objects.filter(order=order).update(expires_at=migration_due_at, updated_at=timezone.now())
     return new_order
+
+
+def create_cloud_server_rebuild_order(order_id: int):
+    order = CloudServerOrder.objects.filter(id=order_id).first()
+    if not order:
+        return None, '服务器记录不存在'
+    if order.provider != 'aws_lightsail':
+        return None, '当前仅支持 AWS Lightsail 重装迁移'
+    if order.status not in {'completed', 'expiring', 'suspended', 'failed'}:
+        return None, '当前状态不允许发起重装'
+    if not order.static_ip_name:
+        return None, '当前服务器没有固定 IP，无法保证链接不变'
+    if not order.mtproxy_secret:
+        return None, '当前服务器缺少 MTProxy 密钥，无法保证链接不变'
+    fallback_plan = CloudServerPlan.objects.filter(
+        provider=order.provider,
+        region_code=order.region_code,
+        is_active=True,
+        plan_name=order.plan_name,
+    ).order_by('-sort_order', 'id').first() or order.plan
+    if not fallback_plan:
+        return None, '未找到可用同配置套餐'
+    suffix = timezone.now().strftime('%m%d%H%M%S')
+    new_order = CloudServerOrder.objects.create(
+        user_id=order.user_id,
+        order_no=f'{order.order_no}-REBUILD-{suffix}',
+        plan_id=fallback_plan.id,
+        provider=fallback_plan.provider,
+        region_code=fallback_plan.region_code,
+        region_name=fallback_plan.region_name,
+        plan_name=fallback_plan.plan_name,
+        quantity=1,
+        currency=order.currency,
+        total_amount=order.total_amount,
+        pay_amount=order.pay_amount,
+        pay_method=order.pay_method,
+        status='paid',
+        lifecycle_days=order.lifecycle_days,
+        mtproxy_port=order.mtproxy_port or 9528,
+        mtproxy_secret=order.mtproxy_secret,
+        mtproxy_link=order.mtproxy_link,
+        static_ip_name=order.static_ip_name,
+        replacement_for=order,
+        renew_extension_days=order.renew_extension_days,
+        last_user_id=order.last_user_id,
+        service_started_at=order.service_started_at,
+        service_expires_at=order.service_expires_at,
+        server_name=order.server_name,
+        image_name=order.image_name,
+        provision_note='\n'.join(filter(None, [order.provision_note, f'后台发起重装迁移，目标要求：保留固定 IP {order.static_ip_name}，保持 MTProxy 链接不变。'])),
+    )
+    order.provision_note = '\n'.join(filter(None, [order.provision_note, f'已发起重装迁移，新实例订单: {new_order.order_no}，固定 IP 将切换到新实例。']))
+    order.save(update_fields=['provision_note', 'updated_at'])
+    return new_order, None
 
 
 @sync_to_async
@@ -937,6 +1052,8 @@ def set_cloud_server_auto_renew(order_id: int, user_id: int, enabled: bool):
     order = CloudServerOrder.objects.filter(id=order_id, user_id=user_id).first()
     if not order:
         return None
+    if enabled and not _can_order_be_renewed(order):
+        return False
     order.auto_renew_enabled = enabled
     order.save(update_fields=['auto_renew_enabled', 'updated_at'])
     return order
@@ -989,6 +1106,7 @@ __all__ = [
     'list_custom_regions',
     'list_region_plans',
     'list_user_cloud_servers',
+    'create_cloud_server_rebuild_order',
     'mark_cloud_server_ip_change_requested',
     'mark_cloud_server_reinit_requested',
     'mute_cloud_reminders',

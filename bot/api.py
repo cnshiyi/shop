@@ -3,12 +3,13 @@
 import os
 from decimal import Decimal, InvalidOperation
 
-from django.contrib.auth import authenticate, login, logout
+from django.contrib.auth import authenticate, get_user_model, login, logout
 from django.contrib.auth.decorators import login_required
 from django.db import ProgrammingError, transaction
 from django.db.models import Q, CharField
 from django.db.models.functions import Cast
 from django.http import JsonResponse
+from django.contrib.auth.password_validation import validate_password
 from django.utils import timezone
 from django.views.decorators.csrf import csrf_exempt, ensure_csrf_cookie
 from django.views.decorators.http import require_GET, require_POST
@@ -16,7 +17,8 @@ from django.views.decorators.http import require_GET, require_POST
 from bot.models import TelegramUser
 from cloud.models import AddressMonitor, CloudAsset, CloudServerOrder
 from core.models import CloudAccountConfig, SiteConfig
-from core.runtime_config import CONFIG_HELP, SENSITIVE_CONFIG_KEYS
+from core.runtime_config import CONFIG_HELP, SENSITIVE_CONFIG_KEYS, get_runtime_config
+from core.texts import TEXT_GROUPS, all_text_keys, init_texts, text_default, text_description
 from orders.models import BalanceLedger, Order, Product, Recharge
 
 
@@ -201,14 +203,29 @@ def _parse_decimal(value, field_label):
 
 
 def _site_config_payload(item):
+    is_sensitive = item.key in SENSITIVE_CONFIG_KEYS
     return {
         'id': item.id,
         'key': item.key,
         'value': SiteConfig.get(item.key, ''),
-        'value_preview': item.masked_value() if item.is_sensitive else (item.value or ''),
-        'is_sensitive': item.is_sensitive,
-        'description': CONFIG_HELP.get(item.key, ''),
+        'value_preview': item.masked_value() if is_sensitive else (item.value or ''),
+        'is_sensitive': is_sensitive,
+        'description': CONFIG_HELP.get(item.key, '') or text_description(item.key, ''),
     }
+
+
+def _default_cloud_account_region(provider: str) -> str:
+    normalized = str(provider or '').strip()
+    if normalized == CloudAccountConfig.PROVIDER_AWS:
+        return 'ap-southeast-1'
+    if normalized == CloudAccountConfig.PROVIDER_ALIYUN:
+        return 'cn-hongkong'
+    return ''
+
+
+def _normalize_cloud_account_region(provider: str, region_hint) -> str | None:
+    region = str(region_hint or '').strip()
+    return region or (_default_cloud_account_region(provider) or None)
 
 
 def _cloud_account_payload(item):
@@ -220,11 +237,25 @@ def _cloud_account_payload(item):
         'access_key': item.access_key_plain,
         'secret_key': item.secret_key_plain,
         'region_hint': item.region_hint,
+        'effective_region': item.region_hint or _default_cloud_account_region(item.provider),
         'is_active': item.is_active,
         'status': item.status,
         'status_label': item.status_label,
         'status_note': item.status_note,
         'last_checked_at': _iso(item.last_checked_at),
+    }
+
+
+def _admin_user_payload(user):
+    return {
+        'id': user.id,
+        'username': user.username,
+        'email': user.email or '',
+        'is_active': bool(user.is_active),
+        'is_staff': bool(user.is_staff),
+        'is_superuser': bool(user.is_superuser),
+        'date_joined': _iso(getattr(user, 'date_joined', None)),
+        'last_login': _iso(getattr(user, 'last_login', None)),
     }
 
 
@@ -256,7 +287,23 @@ def _days_left(value):
     if not value:
         return None
     delta = value - timezone.now()
-    return delta.days if delta.days >= 0 else 0
+    if delta.total_seconds() <= 0:
+        return 0
+    return delta.days + (1 if delta.seconds > 0 or delta.microseconds > 0 else 0)
+
+
+def _countdown_label(value):
+    if not value:
+        return '-'
+    delta = value - timezone.now()
+    total_seconds = int(delta.total_seconds())
+    if total_seconds <= 0:
+        return '已过期'
+    total_hours = (total_seconds + 3599) // 3600
+    if total_hours < 24:
+        return f'剩余 {total_hours} 小时'
+    total_days = (total_seconds + 86399) // 86400
+    return f'剩余 {total_days} 天'
 
 
 def _provider_label(provider):
@@ -265,6 +312,33 @@ def _provider_label(provider):
         'aws_lightsail': 'AWS Lightsail',
     }
     return mapping.get(provider, provider or '-')
+
+
+def _provider_status_label(value):
+    if not value:
+        return '-'
+    mapping = {
+        'running': '运行中',
+        'normal': '正常',
+        'starting': '启动中',
+        'pending': '等待中',
+        'stopping': '停止中',
+        'stopped': '已关机',
+        'disabled': '已禁用',
+        'expired': '已过期',
+        'deleting': '删除中',
+        'deleted': '已删除',
+        'terminated': '已终止',
+        'terminating': '终止中',
+        'shutting-down': '关机中',
+        'missing': '未发现',
+    }
+    parts = [part.strip() for part in str(value).split('/')]
+    translated = []
+    for part in parts:
+        key = part.strip().lower()
+        translated.append(mapping.get(key, part.strip() or '-'))
+    return ' / '.join([part for part in translated if part]) or '-'
 
 
 def _server_source_label(source):
@@ -492,18 +566,9 @@ def site_configs_list(request):
 @require_GET
 def site_config_groups(request):
     groups = {
-        'database': ['database_url', 'db_host', 'db_port', 'db_name', 'db_user', 'db_password'],
-        'tron': ['receive_address', 'trongrid_api_key'],
-        'aws': ['aws_access_key_id', 'aws_secret_access_key', 'aws_region'],
-        'aliyun': ['alibaba_cloud_account_id', 'aliyun_account_id', 'aliyun_region'],
-        'bot': ['bot_token', 'telegram_webhook_url'],
-        'runtime': ['redis_url', 'm_account_token', 'admin_password_notice'],
-        'custom_text': [
-            'bot_custom_quantity_title', 'bot_custom_quantity_hint', 'bot_custom_payment_title',
-            'bot_custom_payment_hint', 'bot_custom_wallet_title', 'bot_custom_pending_order',
-            'bot_custom_pending_wallet', 'bot_custom_order_notice', 'bot_custom_port_hint',
-            'bot_custom_balance_insufficient',
-        ],
+        'database': ['mysql_host', 'mysql_port', 'mysql_database', 'mysql_user', 'mysql_password', 'redis_host', 'redis_port', 'redis_password', 'redis_db'],
+        'system': ['receive_address', 'bot_token', 'trongrid_api_key', 'bot_admin_chat_id'],
+        **TEXT_GROUPS,
     }
     existing = {item.key: item for item in SiteConfig.objects.all()}
     payload = []
@@ -511,12 +576,24 @@ def site_config_groups(request):
         items = []
         for key in keys:
             obj = existing.get(key)
+            is_sensitive = key in SENSITIVE_CONFIG_KEYS
+            stored_value = SiteConfig.get(key, '') if obj else ''
+            effective_value = stored_value or get_runtime_config(key, '')
+            value_preview = effective_value
+            if is_sensitive and effective_value:
+                plain = effective_value
+                if len(plain) <= 6:
+                    value_preview = '*' * len(plain)
+                else:
+                    value_preview = f'{plain[:3]}***{plain[-3:]}'
             items.append({
                 'key': key,
                 'id': obj.id if obj else None,
-                'value': SiteConfig.get(key, ''),
-                'is_sensitive': bool(getattr(obj, 'is_sensitive', key in SENSITIVE_CONFIG_KEYS)),
-                'description': CONFIG_HELP.get(key, ''),
+                'value': effective_value,
+                'value_preview': value_preview,
+                'default_value': text_default(key, ''),
+                'is_sensitive': is_sensitive,
+                'description': CONFIG_HELP.get(key, '') or text_description(key, ''),
             })
         payload.append({'group': group_key, 'items': items})
     return _ok(payload)
@@ -526,14 +603,38 @@ def site_config_groups(request):
 @dashboard_login_required
 @require_POST
 def init_site_configs(request):
+    payload = _read_payload(request)
+    scope = (payload.get('scope') or 'all').strip() or 'all'
     created = 0
-    for key in CONFIG_HELP:
-        _, was_created = SiteConfig.objects.get_or_create(
+    for key in CONFIG_HELP.keys():
+        item, was_created = SiteConfig.objects.get_or_create(
             key=key,
-            defaults={'value': '', 'is_sensitive': key in SENSITIVE_CONFIG_KEYS},
+            defaults={'value': get_runtime_config(key, ''), 'is_sensitive': key in SENSITIVE_CONFIG_KEYS},
         )
+        if not was_created and not SiteConfig.get(key, ''):
+            runtime_value = get_runtime_config(key, '')
+            if runtime_value:
+                SiteConfig.set(key, runtime_value, sensitive=key in SENSITIVE_CONFIG_KEYS)
         created += int(was_created)
-    return _ok({'created': created})
+    if scope == 'all':
+        text_result = init_texts(get_runtime_config('text_init_mode', 'missing_only'))
+        return _ok({'created': created + text_result['created'], 'updated': text_result['updated'], 'scope': scope})
+    return _ok({'created': created, 'updated': 0, 'scope': scope})
+
+
+@csrf_exempt
+@dashboard_login_required
+@require_POST
+def init_text_site_configs(request):
+    enabled = str(get_runtime_config('text_init_enabled', '1')).lower() not in {'0', 'false', 'no', 'off'}
+    if not enabled:
+        return _error('文案初始化当前已禁用', status=400)
+    payload = _read_payload(request)
+    mode = (payload.get('mode') or get_runtime_config('text_init_mode', 'missing_only')).strip() or 'missing_only'
+    if mode not in {'missing_only', 'reset_defaults'}:
+        return _error('初始化模式不正确', status=400)
+    result = init_texts(mode)
+    return _ok({'mode': mode, **result})
 
 
 @csrf_exempt
@@ -543,10 +644,37 @@ def update_site_config(request, config_id: int):
     item = SiteConfig.objects.filter(id=config_id).first()
     if not item:
         return _error('配置不存在', status=404)
-    data = request.POST or request.GET
-    item.is_sensitive = str(data.get('is_sensitive', item.is_sensitive)).lower() in {'1', 'true', 'yes', 'on'}
+    data = _read_payload(request)
+    is_sensitive = item.key in SENSITIVE_CONFIG_KEYS
+    preserve_existing = str(data.get('preserve_existing', '')).lower() in {'1', 'true', 'yes', 'on'}
     value = data.get('value')
-    SiteConfig.set(item.key, '' if value is None else str(value), sensitive=item.is_sensitive)
+    if preserve_existing:
+        plain_value = SiteConfig.get(item.key, '')
+    else:
+        plain_value = '' if value is None else str(value).strip()
+    if item.key == 'bot_admin_chat_id':
+        if not plain_value:
+            return _error('管理员转发 Chat ID 不能为空', status=400)
+        normalized = (
+            plain_value
+            .replace('，', ',')
+            .replace('；', ',')
+            .replace(';', ',')
+            .replace('\n', ',')
+        )
+        parsed_ids = []
+        for part in normalized.split(','):
+            candidate = part.strip()
+            if not candidate:
+                continue
+            try:
+                parsed_ids.append(str(int(candidate)))
+            except Exception:
+                return _error(f'管理员转发 Chat ID 格式不正确：{candidate}', status=400)
+        if not parsed_ids:
+            return _error('管理员转发 Chat ID 至少要有一个有效值', status=400)
+        plain_value = ','.join(dict.fromkeys(parsed_ids))
+    SiteConfig.set(item.key, plain_value, sensitive=is_sensitive)
     item = SiteConfig.objects.get(id=item.id)
     return _ok(_site_config_payload(item))
 
@@ -567,7 +695,7 @@ def create_cloud_account(request):
     name = (payload.get('name') or '').strip()
     access_key = (payload.get('access_key') or '').strip()
     secret_key = (payload.get('secret_key') or '').strip()
-    region_hint = (payload.get('region_hint') or '').strip()
+    region_hint = _normalize_cloud_account_region(provider, payload.get('region_hint'))
     is_active = str(payload.get('is_active', 'true')).lower() in {'1', 'true', 'yes', 'on'}
     if provider not in {CloudAccountConfig.PROVIDER_AWS, CloudAccountConfig.PROVIDER_ALIYUN}:
         return _error('云平台类型不正确', status=400)
@@ -580,7 +708,7 @@ def create_cloud_account(request):
         name=name,
         access_key=access_key,
         secret_key=secret_key,
-        region_hint=region_hint or None,
+        region_hint=region_hint,
         is_active=is_active,
     )
     return _ok(_cloud_account_payload(item))
@@ -610,8 +738,7 @@ def update_cloud_account(request, account_id: int):
         item.access_key = str(access_key).strip()
     if secret_key not in (None, ''):
         item.secret_key = str(secret_key).strip()
-    if region_hint is not None:
-        item.region_hint = str(region_hint).strip() or None
+    item.region_hint = _normalize_cloud_account_region(provider, region_hint)
     if is_active is not None:
         item.is_active = str(is_active).lower() in {'1', 'true', 'yes', 'on'}
     item.save()
@@ -636,7 +763,11 @@ def verify_cloud_account(request, account_id: int):
     item = CloudAccountConfig.objects.filter(id=account_id).first()
     if not item:
         return _error('云账号不存在', status=404)
-    region = (request.POST.get('region') or request.GET.get('region') or item.region_hint or '').strip()
+    payload = _read_payload(request)
+    region = _normalize_cloud_account_region(
+        item.provider,
+        payload.get('region') or request.POST.get('region') or request.GET.get('region') or item.region_hint,
+    ) or ''
     try:
         if item.provider == CloudAccountConfig.PROVIDER_AWS:
             import boto3
@@ -684,6 +815,123 @@ def verify_cloud_account(request, account_id: int):
     except Exception as exc:
         item.mark_status(CloudAccountConfig.STATUS_ERROR, str(exc))
         return _error(f'验证失败: {exc}', status=400)
+
+
+@dashboard_login_required
+@require_GET
+def admin_users_list(request):
+    User = get_user_model()
+    queryset = User.objects.filter(is_staff=True).order_by('id')
+    return _ok([_admin_user_payload(item) for item in queryset])
+
+
+@csrf_exempt
+@dashboard_login_required
+@require_POST
+def create_admin_user(request):
+    User = get_user_model()
+    payload = _read_payload(request)
+    username = (payload.get('username') or '').strip()
+    email = (payload.get('email') or '').strip()
+    password = str(payload.get('password') or '').strip()
+    is_active = str(payload.get('is_active', 'true')).lower() in {'1', 'true', 'yes', 'on'}
+    is_superuser = str(payload.get('is_superuser', 'false')).lower() in {'1', 'true', 'yes', 'on'}
+    if not username:
+        return _error('管理员用户名不能为空', status=400)
+    if not password:
+        return _error('管理员密码不能为空', status=400)
+    if User.objects.filter(username=username).exists():
+        return _error('管理员用户名已存在', status=400)
+    user = User(username=username, email=email, is_active=is_active, is_staff=True, is_superuser=is_superuser)
+    try:
+        validate_password(password, user)
+    except Exception as exc:
+        return _error('; '.join(exc.messages) if hasattr(exc, 'messages') else str(exc), status=400)
+    user.set_password(password)
+    user.save()
+    return _ok(_admin_user_payload(user))
+
+
+@csrf_exempt
+@dashboard_login_required
+@require_POST
+def update_admin_user(request, user_id: int):
+    User = get_user_model()
+    user = User.objects.filter(id=user_id, is_staff=True).first()
+    if not user:
+        return _error('管理员不存在', status=404)
+    payload = _read_payload(request)
+    username = payload.get('username')
+    email = payload.get('email')
+    password = payload.get('password')
+    is_active = payload.get('is_active')
+    is_superuser = payload.get('is_superuser')
+    if username is not None:
+        username = str(username).strip()
+        if not username:
+            return _error('管理员用户名不能为空', status=400)
+        exists = User.objects.filter(username=username).exclude(id=user.id).exists()
+        if exists:
+            return _error('管理员用户名已存在', status=400)
+        user.username = username
+    if email is not None:
+        user.email = str(email).strip()
+    if is_active is not None:
+        user.is_active = str(is_active).lower() in {'1', 'true', 'yes', 'on'}
+    user.is_staff = True
+    if is_superuser is not None:
+        user.is_superuser = str(is_superuser).lower() in {'1', 'true', 'yes', 'on'}
+    if password not in (None, ''):
+        password = str(password).strip()
+        try:
+            validate_password(password, user)
+        except Exception as exc:
+            return _error('; '.join(exc.messages) if hasattr(exc, 'messages') else str(exc), status=400)
+        user.set_password(password)
+    if request.user.id == user.id and not user.is_active:
+        return _error('不能停用当前登录管理员', status=400)
+    user.save()
+    return _ok(_admin_user_payload(user))
+
+
+@csrf_exempt
+@dashboard_login_required
+@require_POST
+def delete_admin_user(request, user_id: int):
+    User = get_user_model()
+    user = User.objects.filter(id=user_id, is_staff=True).first()
+    if not user:
+        return _error('管理员不存在', status=404)
+    if request.user.id == user.id:
+        return _error('不能删除当前登录管理员', status=400)
+    remaining = User.objects.filter(is_staff=True).exclude(id=user.id).count()
+    if remaining <= 0:
+        return _error('至少保留一个管理员', status=400)
+    user.delete()
+    return _ok(True)
+
+
+@csrf_exempt
+@dashboard_login_required
+@require_POST
+def change_my_password(request):
+    payload = _read_payload(request)
+    old_password = str(payload.get('old_password') or '')
+    new_password = str(payload.get('new_password') or '')
+    confirm_password = str(payload.get('confirm_password') or '')
+    if not old_password or not new_password:
+        return _error('旧密码和新密码不能为空', status=400)
+    if new_password != confirm_password:
+        return _error('两次输入的新密码不一致', status=400)
+    if not request.user.check_password(old_password):
+        return _error('旧密码不正确', status=400)
+    try:
+        validate_password(new_password, request.user)
+    except Exception as exc:
+        return _error('; '.join(exc.messages) if hasattr(exc, 'messages') else str(exc), status=400)
+    request.user.set_password(new_password)
+    request.user.save(update_fields=['password'])
+    return _ok(True)
 
 
 @dashboard_login_required

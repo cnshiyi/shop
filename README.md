@@ -91,7 +91,10 @@
 ### 2. 配置环境变量
 主要配置位于 `.env`：
 - `BOT_TOKEN`
-- `REDIS_URL`
+- `REDIS_HOST`
+- `REDIS_PORT`
+- `REDIS_PASSWORD`
+- `REDIS_DB`
 - `MYSQL_HOST`
 - `MYSQL_PORT`
 - `MYSQL_USER`
@@ -194,7 +197,7 @@ Redis 中维护按天隔离的临时统计：
 - 缓存职责现固定为：`core/cache.py` + `cloud/cache.py`
 
 ## 配置与敏感信息管理
-- 支持在 Django Admin 的 `系统配置` 中维护：`bot_token`、`m_account_token`、`receive_address`、`trongrid_api_key`、`redis_url`、`database_url`、`mysql_host`、`mysql_port`、`mysql_user`、`mysql_password`、`mysql_database`、`admin_password_notice`
+- 支持在 Django Admin 的 `系统配置` 中维护：`bot_token`、`receive_address`、`trongrid_api_key`、`bot_admin_chat_id`（支持逗号分隔多个 Telegram Chat ID）、`redis_host`、`redis_port`、`redis_password`、`redis_db`、`mysql_host`、`mysql_port`、`mysql_user`、`mysql_password`、`mysql_database`、`admin_password_notice`
 - 敏感配置会通过 `core.crypto` 加密后写入数据库，后台列表页显示脱敏值
 - 支持在 Django Admin 的 `云账户配置` 中维护多个 `AWS / 阿里云` 账户，`access_key / secret_key` 同样加密存库
 - 如本地 MySQL 账号无建库权限，可设置 `DJANGO_TEST_REUSE_DB=1` 让 Django 测试复用当前库；也可通过 `MYSQL_TEST_DATABASE` 指定已有可用测试库名

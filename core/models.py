@@ -1,7 +1,12 @@
+import logging
+
 from django.db import models
+from django.db import close_old_connections
 from django.utils import timezone
 
 from .crypto import decrypt_text, encrypt_text
+
+logger = logging.getLogger(__name__)
 
 
 class SiteConfig(models.Model):
@@ -17,12 +22,14 @@ class SiteConfig(models.Model):
     @classmethod
     def get(cls, key: str, default: str = '') -> str:
         try:
+            close_old_connections()
             obj = cls.objects.filter(key=key).first()
             if not obj:
                 return default
             value = obj.value or ''
             return decrypt_text(value) if obj.is_sensitive else (value or default)
         except Exception:
+            logger.exception('SiteConfig.get 读取失败 key=%s', key)
             return default
 
     @classmethod
