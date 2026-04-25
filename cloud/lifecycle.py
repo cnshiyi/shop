@@ -18,11 +18,23 @@ logger = logging.getLogger(__name__)
 
 def _aws_client(region: str):
     import boto3
+    from core.cloud_accounts import get_active_cloud_account
+    account = get_active_cloud_account('aws')
+    access_key = ''
+    secret_key = ''
+    if account:
+        ak = (account.access_key_plain or '').strip()
+        sk = (account.secret_key_plain or '').strip()
+        if ak and sk and len(ak) >= 16 and len(sk) >= 36:
+            access_key, secret_key = ak, sk
+    if not access_key or not secret_key:
+        access_key = os.getenv('AWS_ACCESS_KEY_ID', '')
+        secret_key = os.getenv('AWS_SECRET_ACCESS_KEY', '')
     return boto3.client(
         'lightsail',
         region_name=region,
-        aws_access_key_id=os.getenv('AWS_ACCESS_KEY_ID', ''),
-        aws_secret_access_key=os.getenv('AWS_SECRET_ACCESS_KEY', ''),
+        aws_access_key_id=access_key,
+        aws_secret_access_key=secret_key,
     )
 
 

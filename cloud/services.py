@@ -204,8 +204,16 @@ def _is_primary_aws_bundle(bundle_id: str, bundle_name: str) -> bool:
 
 def _fetch_aws_bundle_templates():
     account = get_active_cloud_account('aws')
-    key = account.access_key_plain if account else os.getenv('AWS_ACCESS_KEY_ID', '')
-    secret = account.secret_key_plain if account else os.getenv('AWS_SECRET_ACCESS_KEY', '')
+    key = ''
+    secret = ''
+    if account:
+        ak = (account.access_key_plain or '').strip()
+        sk = (account.secret_key_plain or '').strip()
+        if ak and sk and len(ak) >= 16 and len(sk) >= 36:
+            key, secret = ak, sk
+    if not key or not secret:
+        key = os.getenv('AWS_ACCESS_KEY_ID', '')
+        secret = os.getenv('AWS_SECRET_ACCESS_KEY', '')
     if not key or not secret:
         return []
     try:
@@ -254,8 +262,16 @@ def _fetch_aws_bundle_templates():
 
 def _fetch_aws_regions():
     account = get_active_cloud_account('aws')
-    key = account.access_key_plain if account else os.getenv('AWS_ACCESS_KEY_ID', '')
-    secret = account.secret_key_plain if account else os.getenv('AWS_SECRET_ACCESS_KEY', '')
+    key = ''
+    secret = ''
+    if account:
+        ak = (account.access_key_plain or '').strip()
+        sk = (account.secret_key_plain or '').strip()
+        if ak and sk and len(ak) >= 16 and len(sk) >= 36:
+            key, secret = ak, sk
+    if not key or not secret:
+        key = os.getenv('AWS_ACCESS_KEY_ID', '')
+        secret = os.getenv('AWS_SECRET_ACCESS_KEY', '')
     if not key or not secret:
         return []
     try:
