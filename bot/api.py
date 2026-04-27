@@ -462,8 +462,10 @@ def _days_left(value):
     if not value:
         return None
     delta = value - timezone.now()
-    if delta.total_seconds() <= 0:
-        return 0
+    total_seconds = int(delta.total_seconds())
+    if total_seconds <= 0:
+        overdue_days = ((-total_seconds) + 86399) // 86400
+        return -max(overdue_days, 1)
     return delta.days + (1 if delta.seconds > 0 or delta.microseconds > 0 else 0)
 
 
@@ -473,7 +475,8 @@ def _countdown_label(value):
     delta = value - timezone.now()
     total_seconds = int(delta.total_seconds())
     if total_seconds <= 0:
-        return '已过期'
+        overdue_days = ((-total_seconds) + 86399) // 86400
+        return f'已过期 {max(overdue_days, 1)} 天'
     total_hours = (total_seconds + 3599) // 3600
     if total_hours < 24:
         return f'剩余 {total_hours} 小时'
