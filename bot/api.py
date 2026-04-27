@@ -734,7 +734,8 @@ def auth_login(request):
         return _error('没有后台权限', status=403)
 
     login(request, user)
-    return _ok({'accessToken': _session_token_for_request(request)})
+    request.session.set_expiry(2 * 60 * 60)
+    return _ok({'accessToken': _session_token_for_request(request), 'expiresIn': 2 * 60 * 60})
 
 
 @csrf_exempt
@@ -749,7 +750,7 @@ def auth_logout(request):
 @dashboard_login_required
 @require_POST
 def auth_refresh(request):
-    return _ok(_session_token_for_request(request))
+    return _ok({'accessToken': _session_token_for_request(request), 'expiresIn': max(0, request.session.get_expiry_age())})
 
 
 @dashboard_login_required

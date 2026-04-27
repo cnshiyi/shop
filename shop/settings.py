@@ -89,4 +89,8 @@ USE_TZ = True
 MEDIA_URL = '/media/'
 MEDIA_ROOT = BASE_DIR / 'media'
 
+SESSION_COOKIE_AGE = 2 * 60 * 60
+SESSION_EXPIRE_AT_BROWSER_CLOSE = True
+SESSION_SAVE_EVERY_REQUEST = False
+
 DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'
