@@ -4,6 +4,8 @@ import json
 import logging
 import os
 import re
+import secrets
+import string
 from decimal import Decimal, ROUND_CEILING
 from types import SimpleNamespace
 
@@ -896,6 +898,11 @@ def _extract_asset_mtproxy_fields(note: str) -> tuple[str, str, str]:
     return '', '', ''
 
 
+def _generate_asset_login_password(length: int = 18) -> str:
+    alphabet = string.ascii_letters + string.digits + '@#%_-'
+    return ''.join(secrets.choice(alphabet) for _ in range(length))
+
+
 async def initialize_proxy_asset(asset_id: int, user_id: int):
     asset = await sync_to_async(
         lambda: CloudAsset.objects.filter(id=asset_id, user_id=user_id).first()
@@ -905,9 +912,7 @@ async def initialize_proxy_asset(asset_id: int, user_id: int):
     public_ip = str(asset.public_ip or '').strip()
     if not public_ip:
         return None, '当前资产缺少公网 IP，无法初始化代理'
-    password = str(asset.login_password or '').strip()
-    if not password:
-        return None, '当前同步资产缺少 SSH 登录密码，请先在后台补齐登录密码后再初始化'
+    password = str(asset.login_password or '').strip() or _generate_asset_login_password()
     username = str(asset.login_user or '').strip() or ('admin' if asset.provider == 'aws_lightsail' else 'root')
     port = int(asset.mtproxy_port or 9528)
     bbr_ok, bbr_note = await install_bbr(public_ip, username, password, use_key_setup=asset.provider == 'aws_lightsail')
@@ -925,13 +930,15 @@ async def initialize_proxy_asset(asset_id: int, user_id: int):
         if mtproxy_link and link == mtproxy_link:
             continue
         links.append({'label': f'备用链路 {index}', 'url': link})
+    asset.login_user = username
+    asset.login_password = password
     asset.mtproxy_port = port
     asset.mtproxy_link = mtproxy_link or asset.mtproxy_link
     asset.mtproxy_secret = mtproxy_secret or asset.mtproxy_secret
     asset.mtproxy_host = mtproxy_host or public_ip
     asset.proxy_links = links or asset.proxy_links
     asset.note = note
-    await sync_to_async(asset.save)(update_fields=['mtproxy_port', 'mtproxy_link', 'mtproxy_secret', 'mtproxy_host', 'proxy_links', 'note', 'updated_at'])
+    await sync_to_async(asset.save)(update_fields=['login_user', 'login_password', 'mtproxy_port', 'mtproxy_link', 'mtproxy_secret', 'mtproxy_host', 'proxy_links', 'note', 'updated_at'])
     return asset, None
 
 

@@ -1093,15 +1093,15 @@ def _normalize_proxy_secret(secret: str) -> str:
     return (build_mtproxy_links('0.0.0.0', 0, secret)[0].split('secret=', 1)[1] if secret else '').strip()
 
 
-async def _validate_reinstall_proxy_link(order, link_data: dict[str, str]) -> tuple[bool, str]:
+async def _validate_reinstall_proxy_link(order, link_data: dict[str, str], probe_when_possible: bool = True) -> tuple[bool, str]:
     order_ip = str(order.public_ip or order.previous_public_ip or '').strip()
     if link_data['server'] != order_ip:
         return False, f'链接 IP 不匹配。当前服务器 IP 是 {order_ip}，你发的是 {link_data["server"]}'
-    order_port = str(order.mtproxy_port or 9528)
+    order_port = str(order.mtproxy_port or link_data['port'] or 9528)
     if link_data['port'] != order_port:
         return False, f'链接端口不匹配。当前主代理端口是 {order_port}，你发的是 {link_data["port"]}'
-    if not order.login_password:
-        return False, '当前服务器缺少登录密码，无法登录检查密钥'
+    if not probe_when_possible or not getattr(order, 'login_password', None):
+        return True, '主链接格式和 IP 校验通过'
     ok, probe = await _probe_mtproxy_state(order_ip, order.login_user or 'root', order.login_password, int(order_port))
     if not ok:
         return False, '无法登录服务器确认代理状态，请稍后再试或联系后台检查 SSH/代理服务'
@@ -1109,6 +1109,23 @@ async def _validate_reinstall_proxy_link(order, link_data: dict[str, str]) -> tu
     if _normalize_proxy_secret(remote_secret) != _normalize_proxy_secret(link_data['secret']):
         return False, '链接密钥和服务器实际运行密钥不一致，请检查后重新发送主链接'
     return True, '主链接校验通过'
+
+
+@sync_to_async
+def _save_asset_main_proxy_link(asset_id: int, user_id: int, link_data: dict[str, str]):
+    from cloud.models import CloudAsset
+    asset = CloudAsset.objects.get(id=asset_id, user_id=user_id)
+    asset.mtproxy_link = link_data['url']
+    asset.mtproxy_secret = link_data['secret']
+    asset.mtproxy_host = link_data['server']
+    asset.mtproxy_port = int(link_data['port'])
+    links = list(asset.proxy_links or [])
+    links = [item for item in links if not (isinstance(item, dict) and str(item.get('port') or '') == str(asset.mtproxy_port))]
+    links.insert(0, {'name': '主代理 mtg', 'server': link_data['server'], 'port': link_data['port'], 'secret': link_data['secret'], 'url': link_data['url']})
+    asset.proxy_links = links
+    asset.note = '\n'.join(filter(None, [asset.note, '用户补充主代理链接，准备重新安装。']))
+    asset.save(update_fields=['mtproxy_link', 'mtproxy_secret', 'mtproxy_host', 'mtproxy_port', 'proxy_links', 'note', 'updated_at'])
+    return asset
 
 
 @sync_to_async
@@ -1133,6 +1150,13 @@ def _reinstall_confirm_keyboard(order_id: int):
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text='确认重新安装', callback_data=f'cloud:reinitconfirm:{order_id}')],
         [InlineKeyboardButton(text='取消', callback_data=f'cloud:detail:{order_id}')],
+    ])
+
+
+def _asset_reinstall_confirm_keyboard(asset_id: int):
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text='确认重新安装', callback_data=f'cloud:assetreinitconfirm:{asset_id}')],
+        [InlineKeyboardButton(text='取消', callback_data=f'cloud:assetdetail:asset:{asset_id}:cloud:list:page:1')],
     ])
 
 
@@ -2216,13 +2240,13 @@ def register_handlers(dp: Dispatcher):
         logger.info('CLOUD_ASSET_DETAIL_RENDER user_id=%s item_id=%s kind=%s ip=%s back=%s can_init=%s has_link=%s', user.id, item_id, getattr(item, '_proxy_item_kind', None), item.public_ip, back_callback, can_init, has_link)
         rows = []
         if can_init:
-            rows.append([InlineKeyboardButton(text='🛠 初始化代理', callback_data=f'cloud:assetinit:{item_id}:{back_callback}')])
+            rows.append([InlineKeyboardButton(text='🛠 重新安装', callback_data=f'cloud:assetinit:{item_id}:{back_callback}')])
         rows.append([InlineKeyboardButton(text='👩‍💻 联系客服', callback_data=f'support:contact:cloud_asset:{item_id}')])
         rows.append([InlineKeyboardButton(text='🔙 返回代理列表', callback_data=back_callback)])
         await _safe_edit_text(callback.message, _cloud_asset_detail_text(item), reply_markup=InlineKeyboardMarkup(inline_keyboard=rows), parse_mode='HTML')
 
     @dp.callback_query(F.data.startswith('cloud:assetinit:'))
-    async def cb_cloud_asset_init(callback: CallbackQuery, bot: Bot):
+    async def cb_cloud_asset_init(callback: CallbackQuery, state: FSMContext):
         await _safe_callback_answer(callback)
         user = await get_or_create_user(callback.from_user.id, callback.from_user.username, callback.from_user.first_name)
         parts = callback.data.split(':')
@@ -2231,11 +2255,22 @@ def register_handlers(dp: Dispatcher):
         if not item:
             await _safe_callback_answer(callback, '代理记录不存在', show_alert=True)
             return
-        if not getattr(item, 'login_password', None):
-            await _safe_callback_answer(callback, '这台同步资产还没有 SSH 登录密码，请先在后台补齐后再初始化', show_alert=True)
+        await state.update_data(reinstall_asset_id=asset_id, reinstall_order_id=0)
+        await state.set_state(CustomServerStates.waiting_reinstall_link)
+        logger.info('CLOUD_ASSET_REINSTALL_LINK_WAIT user_id=%s asset_id=%s ip=%s', user.id, asset_id, getattr(item, 'public_ip', None))
+        await callback.message.reply(_bot_text('bot_reinstall_need_main_link', '当前服务器缺少主代理链接。请直接发送这台服务器的主代理链接，我会先校验 IP、端口和服务器实际密钥，再让你确认是否重新安装。'))
+
+    @dp.callback_query(F.data.startswith('cloud:assetreinitconfirm:'))
+    async def cb_cloud_asset_reinit_confirm(callback: CallbackQuery, bot: Bot):
+        await _safe_callback_answer(callback)
+        user = await get_or_create_user(callback.from_user.id, callback.from_user.username, callback.from_user.first_name)
+        asset_id = int(callback.data.split(':')[2])
+        item = await get_user_proxy_asset_detail(asset_id, user.id, 'asset')
+        if not item:
+            await _safe_callback_answer(callback, '代理记录不存在', show_alert=True)
             return
-        logger.info('CLOUD_ASSET_INIT_SUBMIT user_id=%s asset_id=%s ip=%s', user.id, asset_id, getattr(item, 'public_ip', None))
-        await callback.message.reply('🛠 已提交初始化代理任务。后台会安装 BBR/MTProxy，完成后自动发你代理链接。')
+        logger.info('CLOUD_ASSET_REINIT_SUBMIT user_id=%s asset_id=%s ip=%s', user.id, asset_id, getattr(item, 'public_ip', None))
+        await callback.message.reply('🛠 已确认重新安装，后台会按你提供的主链接密钥重新安装 BBR/MTProxy。预计约 5 分钟，完成后会自动通知你。')
         asyncio.create_task(_initialize_proxy_asset_and_notify(bot, callback.from_user.id, user.id, asset_id))
 
     @dp.callback_query(F.data.startswith('cloud:detail:'))
@@ -2629,9 +2664,10 @@ def register_handlers(dp: Dispatcher):
             return
         data = await state.get_data()
         order_id = int(data.get('reinstall_order_id') or 0)
+        asset_id = int(data.get('reinstall_asset_id') or 0)
         user = await get_or_create_user(message.from_user.id, message.from_user.username, message.from_user.first_name)
-        order = await get_user_cloud_server(order_id, user.id)
-        if not order:
+        item = await get_user_proxy_asset_detail(asset_id, user.id, 'asset') if asset_id else await get_user_cloud_server(order_id, user.id)
+        if not item:
             await state.clear()
             await message.reply(_bot_text('bot_reinstall_missing_order', '服务器记录不存在，请重新进入云服务器详情。'))
             return
@@ -2639,11 +2675,16 @@ def register_handlers(dp: Dispatcher):
         if not link_data:
             await message.reply(_bot_text('bot_reinstall_invalid_link', '链接格式不对，请发送 tg://proxy?... 或 https://t.me/proxy?... 主代理链接。'))
             return
-        ok, reason = await _validate_reinstall_proxy_link(order, link_data)
+        ok, reason = await _validate_reinstall_proxy_link(item, link_data, probe_when_possible=not asset_id)
         if not ok:
             await message.reply(_bot_text_format('bot_reinstall_validate_failed', '校验失败：{reason}', reason=reason))
             return
-        saved = await _save_user_main_proxy_link(order.id, link_data)
+        if asset_id:
+            saved = await _save_asset_main_proxy_link(asset_id, user.id, link_data)
+            await state.clear()
+            await message.reply(_bot_text('bot_reinstall_validate_ok', '主代理链接校验通过。\n\n⚠️ 确认重新安装？重新安装大约需要 5 分钟，期间代理可能会断连。'), reply_markup=_asset_reinstall_confirm_keyboard(saved.id))
+            return
+        saved = await _save_user_main_proxy_link(item.id, link_data)
         await state.clear()
         await message.reply(_bot_text('bot_reinstall_validate_ok', '主代理链接校验通过。\n\n⚠️ 确认重新安装？重新安装大约需要 5 分钟，期间代理可能会断连。'), reply_markup=_reinstall_confirm_keyboard(saved.id))
 
