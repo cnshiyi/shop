@@ -2236,16 +2236,46 @@ def register_handlers(dp: Dispatcher):
             await _safe_callback_answer(callback, '代理记录不存在', show_alert=True)
             return
         has_link = bool(getattr(item, 'mtproxy_link', None) or getattr(item, 'proxy_links', None))
-        can_init = item_kind == 'asset' and bool(getattr(item, 'public_ip', None)) and not has_link
-        logger.info('CLOUD_ASSET_DETAIL_RENDER user_id=%s item_id=%s kind=%s ip=%s back=%s can_init=%s has_link=%s', user.id, item_id, getattr(item, '_proxy_item_kind', None), item.public_ip, back_callback, can_init, has_link)
-        rows = []
-        if can_init:
-            rows.append([InlineKeyboardButton(text='🛠 重新安装', callback_data=f'cloud:assetinit:{item_id}:{back_callback}')])
-        if getattr(item, 'order_id', None) and getattr(item, 'order_user_id', None) == user.id:
-            rows.append([InlineKeyboardButton(text='⚙️ 订单操作', callback_data=f'cloud:detail:{item.order_id}:{back_callback}')])
+        order_id = getattr(item, 'order_id', None) if getattr(item, 'order_user_id', None) == user.id else None
+        logger.info('CLOUD_ASSET_DETAIL_RENDER user_id=%s item_id=%s kind=%s ip=%s back=%s order_id=%s has_link=%s', user.id, item_id, getattr(item, '_proxy_item_kind', None), item.public_ip, back_callback, order_id, has_link)
+        if order_id:
+            rows = [
+                [InlineKeyboardButton(text='🔄 续费', callback_data=f'cloud:renew:{order_id}'), InlineKeyboardButton(text='🌐 更换IP', callback_data=f'cloud:ip:{order_id}')],
+                [InlineKeyboardButton(text='🛠 重新安装', callback_data=f'cloud:reinit:{order_id}'), InlineKeyboardButton(text='⬆️ 升级配置', callback_data=f'cloud:upgrade:{order_id}')],
+                [InlineKeyboardButton(text='💸 退款', callback_data=f'cloud:refund:{order_id}')],
+            ]
+        else:
+            rows = [
+                [InlineKeyboardButton(text='🔄 续费', callback_data=f'cloud:assetaction:renew:{item_id}'), InlineKeyboardButton(text='🌐 更换IP', callback_data=f'cloud:assetaction:changeip:{item_id}')],
+                [InlineKeyboardButton(text='🛠 重新安装', callback_data=f'cloud:assetinit:{item_id}:{back_callback}'), InlineKeyboardButton(text='⬆️ 升级配置', callback_data=f'cloud:assetaction:upgrade:{item_id}')],
+                [InlineKeyboardButton(text='💸 退款', callback_data=f'cloud:assetaction:refund:{item_id}')],
+            ]
         rows.append([InlineKeyboardButton(text='👩‍💻 联系客服', callback_data=f'support:contact:cloud_asset:{item_id}')])
         rows.append([InlineKeyboardButton(text='🔙 返回代理列表', callback_data=back_callback)])
         await _safe_edit_text(callback.message, _cloud_asset_detail_text(item), reply_markup=InlineKeyboardMarkup(inline_keyboard=rows), parse_mode='HTML')
+
+    @dp.callback_query(F.data.startswith('cloud:assetaction:'))
+    async def cb_cloud_asset_action(callback: CallbackQuery):
+        await _safe_callback_answer(callback)
+        user = await get_or_create_user(callback.from_user.id, callback.from_user.username, callback.from_user.first_name)
+        parts = callback.data.split(':')
+        action = parts[2]
+        asset_id = int(parts[3])
+        item = await get_user_proxy_asset_detail(asset_id, user.id, 'asset')
+        if not item:
+            await _safe_callback_answer(callback, '代理记录不存在', show_alert=True)
+            return
+        action_label = {
+            'renew': '续费',
+            'changeip': '更换 IP',
+            'upgrade': '升级配置',
+            'refund': '退款',
+        }.get(action, '处理')
+        logger.info('CLOUD_ASSET_ACTION_NEED_SUPPORT user_id=%s asset_id=%s action=%s ip=%s', user.id, asset_id, action, getattr(item, 'public_ip', None))
+        await callback.message.reply(f'这台代理没有绑定可自助操作的订单，{action_label}请联系客服处理。', reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text='👩‍💻 联系客服', callback_data=f'support:contact:cloud_asset_{action}:{asset_id}')],
+            [InlineKeyboardButton(text='🔙 返回代理详情', callback_data=f'cloud:assetdetail:asset:{asset_id}:cloud:list:page:1')],
+        ]))
 
     @dp.callback_query(F.data.startswith('cloud:assetinit:'))
     async def cb_cloud_asset_init(callback: CallbackQuery, state: FSMContext):
