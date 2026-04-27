@@ -148,13 +148,12 @@ def _iter_private_key_candidates() -> list[Path]:
     return unique
 
 
-def _load_private_key_file(private_key_path: str):
+def _load_private_key_path(path: Path):
     try:
         import paramiko
     except ImportError:
         return None, '未安装 paramiko，无法加载 SSH 私钥。'
 
-    path = Path(str(private_key_path or '')).expanduser()
     if not path.is_file():
         return None, f'私钥文件不存在: {path}'
     try:
@@ -162,34 +161,39 @@ def _load_private_key_file(private_key_path: str):
             key = paramiko.Ed25519Key.from_private_key_file(str(path))
         except Exception:
             key = paramiko.RSAKey.from_private_key_file(str(path))
-        logger.info('已加载指定 SSH 私钥: source=%s', path)
         return key, str(path)
     except Exception as exc:
         return None, str(exc)
 
 
-def _load_aws_private_key():
-    try:
-        import paramiko
-    except ImportError:
-        return None, '未安装 paramiko，无法加载 SSH 私钥。'
+def _load_private_key_file(private_key_path: str):
+    path = Path(str(private_key_path or '')).expanduser()
+    key, source = _load_private_key_path(path)
+    if key:
+        logger.info('已加载指定 SSH 私钥: source=%s', source)
+    return key, source
 
+
+def _load_aws_private_keys() -> tuple[list[tuple[object, str]], str]:
     last_error = ''
+    loaded: list[tuple[object, str]] = []
     candidates = _iter_private_key_candidates()
     logger.info('开始扫描 AWS SSH 私钥候选: count=%s key_dir=%s', len(candidates), DEFAULT_LIGHTSAIL_KEY_DIR)
     for candidate in candidates:
-        if not candidate.is_file():
+        key, source = _load_private_key_path(candidate)
+        if key:
+            logger.info('已加载 AWS SSH 私钥: source=%s', source)
+            loaded.append((key, source))
             continue
-        try:
-            try:
-                key = paramiko.Ed25519Key.from_private_key_file(str(candidate))
-            except Exception:
-                key = paramiko.RSAKey.from_private_key_file(str(candidate))
-            logger.info('已加载 AWS SSH 私钥: source=%s', candidate)
-            return key, str(candidate)
-        except Exception as exc:
-            last_error = str(exc)
-            logger.warning('SSH 私钥加载失败: source=%s error=%s', candidate, last_error)
+        last_error = source
+        logger.warning('SSH 私钥加载失败: source=%s error=%s', candidate, last_error)
+    return loaded, last_error
+
+
+def _load_aws_private_key():
+    loaded, last_error = _load_aws_private_keys()
+    if loaded:
+        return loaded[0]
     return None, last_error
 
 
@@ -844,62 +848,66 @@ def _run_ssh_script_with_key(ip: str, usernames: str | list[str], script: str, l
 
     if private_key_path:
         pkey, key_source = _load_private_key_file(private_key_path)
+        key_candidates = [(pkey, key_source)] if pkey else []
+        load_error = key_source
     else:
-        pkey, key_source = _load_aws_private_key()
-    if not pkey:
+        key_candidates, load_error = _load_aws_private_keys()
+    if not key_candidates:
         env_private_key_path = (os.getenv('AWS_LIGHTSAIL_PRIVATE_KEY_PATH') or '').strip()
-        return False, f'未找到可用私钥，无法通过 key 登录执行初始化。private_key_path={bool(private_key_path)} env_private_key_path={bool(env_private_key_path)} detail={key_source}'
+        return False, f'未找到可用私钥，无法通过 key 登录执行初始化。private_key_path={bool(private_key_path)} env_private_key_path={bool(env_private_key_path)} detail={load_error}'
 
-    candidates = [usernames] if isinstance(usernames, str) else list(usernames or [])
+    user_candidates = [usernames] if isinstance(usernames, str) else list(usernames or [])
+    logger.info('开始 SSH 公钥双层轮询: stage=%s ip=%s key_count=%s user_count=%s users=%s', label, ip, len(key_candidates), len(user_candidates), ','.join(user_candidates))
     last_error = ''
     remote_script_path = f'/tmp/openclaw_{label.lower()}_key.sh'
-    for username in candidates:
-        client = paramiko.SSHClient()
-        client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
-        try:
-            logger.info('开始建立 SSH 公钥连接: stage=%s ip=%s user=%s key_source=%s', label, ip, username, key_source)
-            previous_levels = _set_paramiko_quiet(True)
+    for pkey, key_source in key_candidates:
+        for username in user_candidates:
+            client = paramiko.SSHClient()
+            client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
             try:
-                client.connect(
-                    hostname=ip,
-                    port=22,
-                    username=username,
-                    pkey=pkey,
-                    timeout=30,
-                    banner_timeout=30,
-                    auth_timeout=30,
-                    look_for_keys=False,
-                    allow_agent=False,
-                )
+                logger.info('开始建立 SSH 公钥连接: stage=%s ip=%s user=%s key_source=%s', label, ip, username, key_source)
+                previous_levels = _set_paramiko_quiet(True)
+                try:
+                    client.connect(
+                        hostname=ip,
+                        port=22,
+                        username=username,
+                        pkey=pkey,
+                        timeout=30,
+                        banner_timeout=30,
+                        auth_timeout=30,
+                        look_for_keys=False,
+                        allow_agent=False,
+                    )
+                finally:
+                    time.sleep(0.5)
+                    _restore_paramiko_levels(previous_levels)
+                logger.info('SSH 公钥连接成功: stage=%s ip=%s user=%s key_source=%s', label, ip, username, key_source)
+                logger.info('开始执行公钥阶段远端脚本: stage=%s ip=%s user=%s key_source=%s', label, ip, username, key_source)
+                sftp = client.open_sftp()
+                try:
+                    with sftp.file(remote_script_path, 'w') as remote_file:
+                        remote_file.write(script)
+                    sftp.chmod(remote_script_path, 0o700)
+                finally:
+                    sftp.close()
+                stdin, stdout, stderr = client.exec_command(f'bash {remote_script_path}', timeout=300)
+                exit_code = stdout.channel.recv_exit_status()
+                output = stdout.read().decode('utf-8', errors='ignore').strip()
+                error = stderr.read().decode('utf-8', errors='ignore').strip()
+                merged = '\n'.join(part for part in [output, error] if part)
+                logger.info('公钥阶段远端脚本执行结束: stage=%s key_source=%s exit_code=%s stdout_len=%s stderr_len=%s', label, key_source, exit_code, len(output), len(error))
+                client.exec_command(f'rm -f {remote_script_path}', timeout=30)
+                if exit_code == 0:
+                    logger.info('公钥阶段远端脚本执行成功: stage=%s ip=%s user=%s key_source=%s', label, ip, username, key_source)
+                    return True, f'{label} 私钥={key_source} 用户={username} 执行完成\n{merged}'.strip()
+                logger.warning('公钥阶段远端脚本执行失败: stage=%s ip=%s user=%s key_source=%s exit_code=%s', label, ip, username, key_source, exit_code)
+                last_error = f'key={key_source} user={username} exit={exit_code} output={merged}'
+            except Exception as exc:
+                last_error = f'key={key_source} user={username} error={exc}'
+                logger.warning('SSH 公钥连接失败，尝试下一组 key/user: stage=%s ip=%s user=%s key_source=%s error=%s', label, ip, username, key_source, exc)
             finally:
-                time.sleep(0.5)
-                _restore_paramiko_levels(previous_levels)
-            logger.info('SSH 公钥连接成功: stage=%s ip=%s user=%s key_source=%s', label, ip, username, key_source)
-            logger.info('开始执行公钥阶段远端脚本: stage=%s ip=%s user=%s', label, ip, username)
-            sftp = client.open_sftp()
-            try:
-                with sftp.file(remote_script_path, 'w') as remote_file:
-                    remote_file.write(script)
-                sftp.chmod(remote_script_path, 0o700)
-            finally:
-                sftp.close()
-            stdin, stdout, stderr = client.exec_command(f'bash {remote_script_path}', timeout=300)
-            exit_code = stdout.channel.recv_exit_status()
-            output = stdout.read().decode('utf-8', errors='ignore').strip()
-            error = stderr.read().decode('utf-8', errors='ignore').strip()
-            merged = '\n'.join(part for part in [output, error] if part)
-            logger.info('公钥阶段远端脚本执行结束: stage=%s exit_code=%s stdout_len=%s stderr_len=%s', label, exit_code, len(output), len(error))
-            client.exec_command(f'rm -f {remote_script_path}', timeout=30)
-            if exit_code == 0:
-                logger.info('公钥阶段远端脚本执行成功: stage=%s ip=%s user=%s', label, ip, username)
-                return True, f'{label} 用户={username} 执行完成\n{merged}'.strip()
-            logger.warning('公钥阶段远端脚本执行失败: stage=%s ip=%s user=%s exit_code=%s', label, ip, username, exit_code)
-            last_error = f'user={username} exit={exit_code} output={merged}'
-        except Exception as exc:
-            last_error = f'user={username} error={exc}'
-            logger.warning('SSH 公钥连接失败，尝试下一个用户: stage=%s ip=%s user=%s key_source=%s error=%s', label, ip, username, key_source, exc)
-        finally:
-            client.close()
+                client.close()
     return False, f'SSH 公钥执行 {label} 失败: {last_error}'
 
 
