@@ -75,11 +75,8 @@ class Command(BaseCommand):
                 'is_active': server.is_active,
             }
             if asset:
-                if not order:
-                    if asset.user_id:
-                        defaults['user'] = asset.user
-                    if asset.actual_expires_at:
-                        defaults['actual_expires_at'] = asset.actual_expires_at
+                defaults['user'] = asset.user
+                defaults['actual_expires_at'] = asset.actual_expires_at
                 asset_signature = f'{server.instance_id or "-"}|{server.provider_resource_id or "-"}|{server.public_ip or "缺失"}'
                 claimed_signature = claimed_assets.get(asset.id)
                 if claimed_signature and claimed_signature != asset_signature:

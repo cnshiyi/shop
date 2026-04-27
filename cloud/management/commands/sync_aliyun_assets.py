@@ -252,13 +252,12 @@ class Command(BaseCommand):
                 linked_order = (getattr(asset, 'order', None) if asset else None) or _resolve_order_for_ip(public_ip)
                 if linked_order:
                     asset_defaults['order'] = linked_order
-                    asset_defaults['user'] = linked_order.user
-                    asset_defaults['actual_expires_at'] = linked_order.service_expires_at or expires_at
-                elif asset and not asset.order_id:
-                    if asset.user_id:
-                        asset_defaults['user'] = asset.user
-                    if asset.actual_expires_at:
-                        asset_defaults['actual_expires_at'] = asset.actual_expires_at
+                    if not asset:
+                        asset_defaults['user'] = linked_order.user
+                        asset_defaults['actual_expires_at'] = linked_order.service_expires_at or expires_at
+                if asset:
+                    asset_defaults['user'] = asset.user
+                    asset_defaults['actual_expires_at'] = asset.actual_expires_at
                 asset_signature = f'{instance_id or "-"}|{public_ip or "缺失"}'
                 old_status = asset.status if asset else None
                 old_public_ip = asset.public_ip if asset else None
@@ -294,6 +293,7 @@ class Command(BaseCommand):
                     deleted_by_missing_ip_count += 1
                     deleted_by_missing_ip_items.append(f'{asset.id}:{public_ip or "缺失"}:{asset_name or instance_id}')
 
+                server = _resolve_server(instance_id, public_ip, account)
                 server_defaults = {
                     'source': Server.SOURCE_ALIYUN,
                     'provider': 'aliyun_simple',
@@ -312,19 +312,15 @@ class Command(BaseCommand):
                 }
                 if linked_order:
                     server_defaults['order'] = linked_order
-                    server_defaults['user'] = linked_order.user
-                    server_defaults['expires_at'] = linked_order.service_expires_at or expires_at
-                elif asset and not asset.order_id:
-                    if asset.user_id:
-                        server_defaults['user'] = asset.user
-                    if asset.actual_expires_at:
-                        server_defaults['expires_at'] = asset.actual_expires_at
-                server = _resolve_server(instance_id, public_ip, account)
-                if server and not server.order_id:
-                    if server.user_id:
-                        server_defaults['user'] = server.user
-                    if server.expires_at:
-                        server_defaults['expires_at'] = server.expires_at
+                    if not server:
+                        server_defaults['user'] = linked_order.user
+                        server_defaults['expires_at'] = linked_order.service_expires_at or expires_at
+                if asset:
+                    server_defaults['user'] = asset.user
+                    server_defaults['expires_at'] = asset.actual_expires_at
+                if server:
+                    server_defaults['user'] = server.user
+                    server_defaults['expires_at'] = server.expires_at
                 old_server_public_ip = server.public_ip if server else None
                 if server:
                     if old_server_public_ip and old_server_public_ip != public_ip:
@@ -334,10 +330,6 @@ class Command(BaseCommand):
                     server.save()
                 else:
                     Server.objects.create(**server_defaults)
-
-                if linked_order and expires_at and not linked_order.service_expires_at:
-                    linked_order.service_expires_at = expires_at
-                    linked_order.save(update_fields=['service_expires_at', 'renew_grace_expires_at', 'suspend_at', 'delete_at', 'ip_recycle_at', 'updated_at'])
 
                 if ip_changed:
                     refreshed_server = _resolve_server(instance_id, public_ip, account)

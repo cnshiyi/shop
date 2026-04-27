@@ -132,7 +132,7 @@ def _asset_payload(asset):
             'primary_username': usernames[0] if usernames else '',
         })
     _ensure_unattached_ip_expiry(asset)
-    expires_at = asset.actual_expires_at or getattr(order, 'service_expires_at', None)
+    expires_at = asset.actual_expires_at
     account_label = asset.account_label or cloud_account_label(getattr(asset, 'cloud_account', None)) or getattr(order, 'account_label', '')
     cloud_account_id = asset.cloud_account_id or getattr(order, 'cloud_account_id', None)
     return {
@@ -239,10 +239,6 @@ def update_cloud_asset(request, asset_id):
                 asset.user = None
                 if server:
                     server.user = None
-                if asset.order_id:
-                    asset.order.user = None
-                    asset.order.last_user_id = None
-                    asset.order.save(update_fields=['user', 'last_user_id', 'updated_at'])
             elif user_lookup not in (None, ''):
                 user = _resolve_telegram_user(user_lookup)
                 if not user:
@@ -251,10 +247,6 @@ def update_cloud_asset(request, asset_id):
                 _sync_telegram_username(user, username_raw)
                 if server:
                     server.user = user
-                if asset.order_id:
-                    asset.order.user = user
-                    asset.order.last_user_id = user.tg_user_id
-                    asset.order.save(update_fields=['user', 'last_user_id', 'updated_at'])
 
             if 'price' in payload:
                 try:
@@ -280,16 +272,6 @@ def update_cloud_asset(request, asset_id):
                     asset.actual_expires_at = _parse_iso_datetime(payload.get('actual_expires_at'), '到期时间')
                 except ValueError as exc:
                     return _error(str(exc), status=400)
-                if asset.order_id:
-                    asset.order.service_expires_at = asset.actual_expires_at
-                    if asset.actual_expires_at:
-                        asset.order.save(update_fields=['service_expires_at', 'renew_grace_expires_at', 'suspend_at', 'delete_at', 'ip_recycle_at', 'updated_at'])
-                    else:
-                        asset.order.renew_grace_expires_at = None
-                        asset.order.suspend_at = None
-                        asset.order.delete_at = None
-                        asset.order.ip_recycle_at = None
-                        asset.order.save(update_fields=['service_expires_at', 'renew_grace_expires_at', 'suspend_at', 'delete_at', 'ip_recycle_at', 'updated_at'])
                 if server:
                     server.expires_at = asset.actual_expires_at
 
@@ -776,13 +758,11 @@ def _apply_cloud_order_status(order, new_status):
 
     if new_status in active_statuses:
         CloudAsset.objects.filter(order=order).update(
-            actual_expires_at=order.service_expires_at,
             is_active=True,
             note=order.provision_note,
             updated_at=now,
         )
         Server.objects.filter(order=order).update(
-            expires_at=order.service_expires_at,
             is_active=True,
             status=Server.STATUS_RUNNING if new_status == 'completed' else Server.STATUS_PENDING,
             note=order.provision_note,
