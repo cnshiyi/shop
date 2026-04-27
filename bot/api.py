@@ -1,7 +1,11 @@
 """bot 域后台 API。"""
 
+import json
 import os
+import secrets
 from decimal import Decimal, InvalidOperation, ROUND_DOWN
+from urllib.parse import urlencode
+from urllib.request import Request, urlopen
 
 from asgiref.sync import async_to_sync
 
@@ -71,6 +75,108 @@ def _session_token_for_request(request) -> str:
     if not request.session.session_key:
         request.session.save()
     return f'session-{request.session.session_key}'
+
+
+def _dashboard_session_payload(request):
+    return {
+        'accessToken': _session_token_for_request(request),
+        'expiresIn': max(0, request.session.get_expiry_age()),
+    }
+
+
+def _json_payload(request):
+    try:
+        return json.loads(request.body.decode('utf-8') or '{}')
+    except Exception:
+        return {}
+
+
+def _truthy(value: str) -> bool:
+    return str(value or '').strip().lower() in {'1', 'true', 'yes', 'on'}
+
+
+def _password_login_enabled():
+    return _truthy(get_runtime_config('dashboard_password_login_enabled', '0'))
+
+
+def _github_oauth_config():
+    return {
+        'client_id': get_runtime_config('github_oauth_client_id', '').strip(),
+        'client_secret': get_runtime_config('github_oauth_client_secret', '').strip(),
+        'allowed_users': get_runtime_config('github_oauth_allowed_users', '').strip(),
+    }
+
+
+def _github_api_json(url: str, *, token: str | None = None, data: dict | None = None):
+    body = None
+    headers = {
+        'Accept': 'application/vnd.github+json',
+        'User-Agent': 'shop-dashboard-oauth',
+        'X-GitHub-Api-Version': '2022-11-28',
+    }
+    if token:
+        headers['Authorization'] = f'Bearer {token}'
+    if data is not None:
+        body = urlencode(data).encode('utf-8')
+        headers['Content-Type'] = 'application/x-www-form-urlencoded'
+        headers['Accept'] = 'application/json'
+    request = Request(url, data=body, headers=headers, method='POST' if data is not None else 'GET')
+    with urlopen(request, timeout=10) as response:
+        return json.loads(response.read().decode('utf-8') or '{}')
+
+
+def _github_allowed(identity: dict, emails: list[dict], allowed_config: str) -> bool:
+    allowed = {item.strip().lower() for item in (allowed_config or '').split(',') if item.strip()}
+    if not allowed:
+        return False
+    candidates = {str(identity.get('login') or '').lower()}
+    if identity.get('email'):
+        candidates.add(str(identity.get('email')).lower())
+    for item in emails:
+        email = str(item.get('email') or '').lower()
+        if email:
+            candidates.add(email)
+    return bool(candidates & allowed)
+
+
+def _login_github_dashboard_user(request, identity: dict, emails: list[dict]):
+    github_id = identity.get('id')
+    github_login = identity.get('login') or f'user-{github_id}'
+    primary_email = identity.get('email') or ''
+    for item in emails:
+        if item.get('primary') and item.get('email'):
+            primary_email = item['email']
+            break
+    User = get_user_model()
+    user, _ = User.objects.get_or_create(
+        username=f'github_{github_id}',
+        defaults={
+            'email': primary_email,
+            'first_name': github_login,
+            'is_staff': True,
+            'is_superuser': True,
+        },
+    )
+    update_fields = []
+    for field, value in {
+        'email': primary_email,
+        'first_name': github_login,
+        'is_staff': True,
+        'is_superuser': True,
+        'is_active': True,
+    }.items():
+        if getattr(user, field) != value:
+            setattr(user, field, value)
+            update_fields.append(field)
+    if user.has_usable_password():
+        user.set_unusable_password()
+        update_fields.append('password')
+    if update_fields:
+        user.save(update_fields=update_fields)
+    login(request, user)
+    request.session.set_expiry(2 * 60 * 60)
+    request.session['github_login'] = github_login
+    return user
 
 
 def _user_from_bearer_session(token: str):
@@ -713,17 +819,16 @@ def overview(request):
 @csrf_exempt
 @require_POST
 def auth_login(request):
+    if not _password_login_enabled():
+        return _error('账号密码登录已关闭，请使用 GitHub 登录', status=403)
+
     username = request.POST.get('username') or request.headers.get('x-username')
     password = request.POST.get('password') or request.headers.get('x-password')
 
     if not username or not password:
-        try:
-            import json
-            payload = json.loads(request.body.decode('utf-8') or '{}')
-            username = username or payload.get('username')
-            password = password or payload.get('password')
-        except Exception:
-            pass
+        payload = _json_payload(request)
+        username = username or payload.get('username')
+        password = password or payload.get('password')
 
     user = authenticate(request, username=username, password=password)
     if not user:
@@ -735,7 +840,79 @@ def auth_login(request):
 
     login(request, user)
     request.session.set_expiry(2 * 60 * 60)
-    return _ok({'accessToken': _session_token_for_request(request), 'expiresIn': 2 * 60 * 60})
+    return _ok(_dashboard_session_payload(request))
+
+
+@csrf_exempt
+@require_POST
+def auth_github_start(request):
+    config = _github_oauth_config()
+    if not config['client_id'] or not config['client_secret']:
+        return _error('GitHub OAuth 未配置 client_id/client_secret', status=400)
+    if not config['allowed_users']:
+        return _error('GitHub OAuth 未配置允许登录的用户', status=400)
+
+    payload = _json_payload(request)
+    redirect_uri = str(payload.get('redirectUri') or '').strip()
+    if not redirect_uri:
+        return _error('缺少 GitHub 回调地址', status=400)
+
+    state = secrets.token_urlsafe(32)
+    request.session['github_oauth_state'] = state
+    request.session['github_oauth_redirect_uri'] = redirect_uri
+    request.session.set_expiry(10 * 60)
+    params = {
+        'client_id': config['client_id'],
+        'redirect_uri': redirect_uri,
+        'scope': 'read:user user:email',
+        'state': state,
+        'allow_signup': 'false',
+    }
+    return _ok({'authorizeUrl': f'https://github.com/login/oauth/authorize?{urlencode(params)}'})
+
+
+@csrf_exempt
+@require_POST
+def auth_github_callback(request):
+    config = _github_oauth_config()
+    payload = _json_payload(request)
+    code = str(payload.get('code') or '').strip()
+    state = str(payload.get('state') or '').strip()
+    redirect_uri = str(payload.get('redirectUri') or '').strip()
+    expected_state = request.session.get('github_oauth_state')
+    expected_redirect_uri = request.session.get('github_oauth_redirect_uri')
+    if not code or not state or not redirect_uri:
+        return _error('GitHub 回调参数不完整', status=400)
+    if not expected_state or not secrets.compare_digest(state, expected_state):
+        return _error('GitHub 登录状态已失效，请重新登录', status=401)
+    if redirect_uri != expected_redirect_uri:
+        return _error('GitHub 回调地址不匹配', status=400)
+
+    try:
+        token_payload = _github_api_json(
+            'https://github.com/login/oauth/access_token',
+            data={
+                'client_id': config['client_id'],
+                'client_secret': config['client_secret'],
+                'code': code,
+                'redirect_uri': redirect_uri,
+            },
+        )
+        access_token = token_payload.get('access_token')
+        if not access_token:
+            return _error(token_payload.get('error_description') or 'GitHub 授权失败', status=401)
+        identity = _github_api_json('https://api.github.com/user', token=access_token)
+        emails = _github_api_json('https://api.github.com/user/emails', token=access_token)
+    except Exception:
+        return _error('GitHub 登录请求失败，请稍后重试', status=502)
+
+    if not _github_allowed(identity, emails if isinstance(emails, list) else [], config['allowed_users']):
+        return _error('该 GitHub 账号未被允许登录后台', status=403)
+
+    request.session.pop('github_oauth_state', None)
+    request.session.pop('github_oauth_redirect_uri', None)
+    _login_github_dashboard_user(request, identity, emails if isinstance(emails, list) else [])
+    return _ok(_dashboard_session_payload(request))
 
 
 @csrf_exempt
@@ -750,7 +927,7 @@ def auth_logout(request):
 @dashboard_login_required
 @require_POST
 def auth_refresh(request):
-    return _ok({'accessToken': _session_token_for_request(request), 'expiresIn': max(0, request.session.get_expiry_age())})
+    return _ok(_dashboard_session_payload(request))
 
 
 @dashboard_login_required
@@ -816,7 +993,18 @@ def init_button_config_view(request):
 def site_config_groups(request):
     groups = {
         'database': ['mysql_host', 'mysql_port', 'mysql_database', 'mysql_user', 'mysql_password', 'redis_host', 'redis_port', 'redis_password', 'redis_db'],
-        'system': ['receive_address', 'bot_token', 'telegram_api_id', 'telegram_api_hash', 'trongrid_api_key', 'bot_admin_chat_id'],
+        'system': [
+            'receive_address',
+            'bot_token',
+            'telegram_api_id',
+            'telegram_api_hash',
+            'trongrid_api_key',
+            'bot_admin_chat_id',
+            'github_oauth_client_id',
+            'github_oauth_client_secret',
+            'github_oauth_allowed_users',
+            'dashboard_password_login_enabled',
+        ],
         **TEXT_GROUPS,
     }
     existing = {item.key: item for item in SiteConfig.objects.all()}
@@ -1121,6 +1309,8 @@ def admin_users_list(request):
 @dashboard_login_required
 @require_POST
 def create_admin_user(request):
+    if not _password_login_enabled():
+        return _error('账号密码登录已关闭，请使用 GitHub 登录', status=403)
     User = get_user_model()
     payload = _read_payload(request)
     username = (payload.get('username') or '').strip()
@@ -1148,6 +1338,8 @@ def create_admin_user(request):
 @dashboard_login_required
 @require_POST
 def update_admin_user(request, user_id: int):
+    if not _password_login_enabled():
+        return _error('账号密码登录已关闭，请使用 GitHub 登录', status=403)
     User = get_user_model()
     user = User.objects.filter(id=user_id, is_staff=True).first()
     if not user:
@@ -1207,6 +1399,8 @@ def delete_admin_user(request, user_id: int):
 @dashboard_login_required
 @require_POST
 def change_my_password(request):
+    if not _password_login_enabled():
+        return _error('账号密码登录已关闭，请使用 GitHub 登录', status=403)
     payload = _read_payload(request)
     old_password = str(payload.get('old_password') or '')
     new_password = str(payload.get('new_password') or '')
@@ -1917,6 +2111,8 @@ def update_product(request, product_id: int):
 
 __all__ = [
     'auth_codes',
+    'auth_github_callback',
+    'auth_github_start',
     'auth_login',
     'auth_logout',
     'auth_refresh',
