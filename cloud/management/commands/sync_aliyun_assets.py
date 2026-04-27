@@ -4,7 +4,7 @@ from django.utils import timezone
 from django.utils.dateparse import parse_datetime
 
 from bot.api import _provider_status_label
-from cloud.models import CloudAsset, CloudServerOrder, Server
+from cloud.models import CloudAsset, CloudIpLog, CloudServerOrder, Server
 from cloud.aliyun_simple import _build_client, _region_endpoint, _runtime_options
 from core.cloud_accounts import cloud_account_label, list_active_cloud_accounts
 from cloud.services import record_cloud_ip_log
@@ -116,6 +116,20 @@ def _resolve_server(instance_id, public_ip, account=None):
     if public_ip:
         candidates |= Q(public_ip=public_ip)
     return Server.objects.filter(base & candidates).order_by('-updated_at', '-id').first()
+
+
+def _has_local_delete_tombstone(instance_id, public_ip, region):
+    lookup = Q(event_type=CloudIpLog.EVENT_DELETED, provider='aliyun_simple')
+    if region:
+        lookup &= Q(region_code=region)
+    identifiers = Q()
+    if instance_id:
+        identifiers |= Q(instance_id=instance_id) | Q(provider_resource_id=instance_id)
+    if public_ip:
+        identifiers |= Q(public_ip=public_ip) | Q(previous_public_ip=public_ip)
+    if not identifiers:
+        return False
+    return CloudIpLog.objects.filter(lookup & identifiers).exists()
 
 
 def _mark_deleted_when_missing_in_aliyun(region, existing_instance_ids, stdout, account=None):
@@ -253,6 +267,14 @@ class Command(BaseCommand):
                 old_status = asset.status if asset else None
                 old_public_ip = asset.public_ip if asset else None
                 ip_changed = bool(asset and old_public_ip and old_public_ip != public_ip)
+                if _has_local_delete_tombstone(instance_id, public_ip, region) and (not asset or not asset.order_id):
+                    tombstone_target = asset.id if asset else '缺失'
+                    if asset:
+                        asset.delete()
+                    deleted_preserved_items.append(f'墓碑:{tombstone_target}:{public_ip or "缺失"}:{instance_id or asset_name}')
+                    synced_instance_ids.append(instance_id)
+                    count += 1
+                    continue
                 if asset and asset.status == CloudAsset.STATUS_DELETED:
                     claimed_assets[asset.id] = asset_signature
                     server = _resolve_server(instance_id, public_ip, account)
