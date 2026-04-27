@@ -36,8 +36,9 @@ def _telegram_api_credentials() -> tuple[int, str]:
 @sync_to_async
 def _logged_in_accounts() -> list[LoginAccountSnapshot]:
     return [
-        LoginAccountSnapshot(item.id, item.label, item.session_string or '')
+        LoginAccountSnapshot(item.id, item.label, item.session_string_plain)
         for item in TelegramLoginAccount.objects.filter(status='logged_in').exclude(session_string__isnull=True).exclude(session_string='')
+        if item.session_string_plain
     ]
 
 

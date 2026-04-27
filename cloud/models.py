@@ -151,7 +151,7 @@ class CloudServerOrder(models.Model):
     replacement_for = models.ForeignKey('self', verbose_name='替换来源订单', on_delete=models.SET_NULL, blank=True, null=True, related_name='replacement_orders')
     renew_extension_days = models.IntegerField('临时延期天数', default=0)
     delay_quota = models.IntegerField('延期次数', default=0)
-    ip_change_quota = models.IntegerField('剩余更换IP次数', default=0)
+    ip_change_quota = models.IntegerField('剩余更换IP次数', default=1)
     cloud_reminder_enabled = models.BooleanField('到期提醒', default=True, db_index=True)
     auto_renew_enabled = models.BooleanField('自动续费', default=False, db_index=True)
     last_user_id = models.BigIntegerField('最近绑定TG用户ID', blank=True, null=True, db_index=True)

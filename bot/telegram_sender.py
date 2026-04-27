@@ -20,16 +20,11 @@ def _telegram_api_credentials() -> tuple[int, str]:
 
 @sync_to_async
 def _notification_accounts() -> list[tuple[int, str, str]]:
-    return list(
-        TelegramLoginAccount.objects.filter(
-            status='logged_in',
-            notify_enabled=True,
-        )
-        .exclude(session_string__isnull=True)
-        .exclude(session_string='')
-        .order_by('-updated_at', '-id')
-        .values_list('id', 'label', 'session_string')
-    )
+    accounts = TelegramLoginAccount.objects.filter(
+        status='logged_in',
+        notify_enabled=True,
+    ).exclude(session_string__isnull=True).exclude(session_string='').order_by('-updated_at', '-id')
+    return [(item.id, item.label, item.session_string_plain) for item in accounts if item.session_string_plain]
 
 
 async def send_with_notification_account(chat_id: int, text: str) -> bool:
