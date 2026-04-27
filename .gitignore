@@ -16,6 +16,7 @@ staticfiles/
 
 # Env
 .env
+.shop-secrets/
 
 # IDE
 .idea/

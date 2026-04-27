@@ -1,4 +1,4 @@
 #!/bin/zsh
 set -e
-cd /Users/aaaa/Desktop/shop
+cd "$(dirname "$0")"
 ./.venv/bin/python run.py web

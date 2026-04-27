@@ -31,7 +31,9 @@ MTPROXY_DIR = '/home/mtproxy'
 MTPROXY_PORT = 9528
 MTPROXY_FAKE_TLS_DOMAIN = 'azure.microsoft.com'
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
-DEFAULT_LIGHTSAIL_KEY_DIR = Path.home() / '.shop-secrets' / 'lightsail'
+PROJECT_SECRETS_DIR = PROJECT_ROOT / '.shop-secrets'
+DEFAULT_LIGHTSAIL_KEY_DIR = PROJECT_SECRETS_DIR / 'lightsail'
+DEFAULT_SSH_KEY_DIR = PROJECT_SECRETS_DIR / 'ssh'
 
 
 def _load_aws_public_key() -> str:
@@ -49,12 +51,8 @@ def _load_aws_public_key() -> str:
     if key_dir.is_dir():
         for pattern in ('*.pub',):
             candidates.extend(str(path) for path in sorted(key_dir.glob(pattern)))
-    candidates.extend([
-        os.path.expanduser('~/.ssh/id_ed25519.pub'),
-        os.path.expanduser('~/.ssh/id_rsa.pub'),
-        os.path.expanduser('~/Documents/WindowsPowerShell/id_ed25519.pub'),
-        os.path.expanduser('~/Documents/WindowsPowerShell/id_rsa.pub'),
-    ])
+    if DEFAULT_SSH_KEY_DIR.is_dir():
+        candidates.extend(str(path) for path in sorted(DEFAULT_SSH_KEY_DIR.glob('*.pub')))
     for candidate in candidates:
         if not candidate:
             continue
@@ -84,14 +82,11 @@ def _iter_private_key_candidates() -> list[Path]:
                 if path.is_file() and not path.name.endswith('.pub'):
                     candidates.append(path)
 
-    for fallback in [
-        Path(os.path.expanduser('~/.ssh/id_ed25519')),
-        Path(os.path.expanduser('~/.ssh/id_rsa')),
-        Path(os.path.expanduser('~/Documents/WindowsPowerShell/id_ed25519')),
-        Path(os.path.expanduser('~/Documents/WindowsPowerShell/id_rsa')),
-    ]:
-        if fallback.is_file():
-            candidates.append(fallback)
+    if DEFAULT_SSH_KEY_DIR.is_dir():
+        for pattern in ('*.pem', '*.key', 'id_*'):
+            for path in sorted(DEFAULT_SSH_KEY_DIR.glob(pattern)):
+                if path.is_file() and not path.name.endswith('.pub'):
+                    candidates.append(path)
 
     unique: list[Path] = []
     seen: set[str] = set()

@@ -118,10 +118,9 @@ def _load_public_key() -> str:
 
     public_key_path = (os.getenv('AWS_LIGHTSAIL_PUBLIC_KEY_PATH') or '').strip()
     candidates = [public_key_path] if public_key_path else []
-    candidates.extend([
-        str(Path.home() / '.ssh' / 'id_ed25519.pub'),
-        str(Path.home() / '.ssh' / 'id_rsa.pub'),
-    ])
+    project_public_key_dir = Path(__file__).resolve().parent.parent / '.shop-secrets' / 'ssh'
+    if project_public_key_dir.is_dir():
+        candidates.extend(str(path) for path in sorted(project_public_key_dir.glob('*.pub')))
     for candidate in candidates:
         if not candidate:
             continue
