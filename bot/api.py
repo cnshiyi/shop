@@ -9,6 +9,7 @@ import os
 import struct
 import time
 from decimal import Decimal, InvalidOperation, ROUND_DOWN
+from urllib.parse import quote
 
 from asgiref.sync import async_to_sync
 
@@ -96,6 +97,19 @@ def _json_payload(request):
 
 def _totp_secret():
     return get_runtime_config('dashboard_totp_secret', '').replace(' ', '').strip()
+
+
+def _generate_totp_secret():
+    return base64.b32encode(os.urandom(20)).decode('ascii').rstrip('=')
+
+
+def _totp_otpauth_url(secret: str, username: str = 'admin'):
+    issuer = 'Shop Admin'
+    label = f'{issuer}:{username or "admin"}'
+    return (
+        'otpauth://totp/'
+        f'{quote(label)}?secret={quote(secret)}&issuer={quote(issuer)}&algorithm=SHA1&digits=6&period=30'
+    )
 
 
 def _totp_code(secret: str, counter: int) -> str:
@@ -802,6 +816,38 @@ def auth_refresh(request):
 @require_GET
 def auth_codes(request):
     return _ok(['dashboard', 'users', 'cloud', 'finance', 'monitoring', 'settings'])
+
+
+@csrf_exempt
+@dashboard_login_required
+@require_POST
+def auth_totp_start(request):
+    secret = _generate_totp_secret()
+    request.session['dashboard_totp_pending_secret'] = secret
+    request.session.set_expiry(10 * 60)
+    username = request.user.get_username() or 'admin'
+    return _ok({
+        'enabled': bool(_totp_secret()),
+        'otpauthUrl': _totp_otpauth_url(secret, username),
+        'secret': secret,
+    })
+
+
+@csrf_exempt
+@dashboard_login_required
+@require_POST
+def auth_totp_bind(request):
+    payload = _json_payload(request)
+    token = payload.get('otp_token') or payload.get('otpToken')
+    secret = request.session.get('dashboard_totp_pending_secret')
+    if not secret:
+        return _error('请先生成 Google 验证器二维码', status=400)
+    if not _verify_totp_token(token, secret):
+        return _error('Google 验证码错误或已过期', status=400)
+    SiteConfig.set('dashboard_totp_secret', secret, sensitive=True)
+    request.session.pop('dashboard_totp_pending_secret', None)
+    request.session.set_expiry(2 * 60 * 60)
+    return _ok({'enabled': True})
 
 
 @dashboard_login_required
@@ -1971,6 +2017,8 @@ def update_product(request, product_id: int):
 __all__ = [
     'auth_codes',
     'auth_login',
+    'auth_totp_bind',
+    'auth_totp_start',
     'auth_logout',
     'auth_refresh',
     'bot_operation_logs',
