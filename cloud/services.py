@@ -3,6 +3,7 @@
 import json
 import logging
 import os
+import re
 from decimal import Decimal, ROUND_CEILING
 from types import SimpleNamespace
 
@@ -13,6 +14,7 @@ from django.utils import timezone
 
 from bot.models import TelegramUser
 from cloud.models import CloudAsset, CloudIpLog, CloudServerOrder, CloudServerPlan, Server, ServerPrice
+from cloud.bootstrap import install_bbr, install_mtproxy
 from core.cache import get_redis
 from core.cloud_accounts import choose_cloud_account_for_order, cloud_account_label, get_active_cloud_account
 from orders.ledger import record_balance_ledger
@@ -883,6 +885,56 @@ def get_user_proxy_asset_detail(item_id: int, user_id: int, kind: str):
     return _proxy_asset_view(asset) if asset else None
 
 
+def _extract_asset_mtproxy_fields(note: str) -> tuple[str, str, str]:
+    for raw_link in re.findall(r'tg://proxy\?[^"\'\s<>]+', note or ''):
+        link = raw_link.rstrip(',.，。')
+        if not link:
+            continue
+        secret = link.split('secret=', 1)[1].split('&', 1)[0].strip() if 'secret=' in link else ''
+        host = link.split('server=', 1)[1].split('&', 1)[0].strip() if 'server=' in link else ''
+        return link, secret, host
+    return '', '', ''
+
+
+async def initialize_proxy_asset(asset_id: int, user_id: int):
+    asset = await sync_to_async(
+        lambda: CloudAsset.objects.filter(id=asset_id, user_id=user_id).first()
+    )()
+    if not asset:
+        return None, '代理记录不存在'
+    public_ip = str(asset.public_ip or '').strip()
+    if not public_ip:
+        return None, '当前资产缺少公网 IP，无法初始化代理'
+    password = str(asset.login_password or '').strip()
+    if not password:
+        return None, '当前同步资产缺少 SSH 登录密码，请先在后台补齐登录密码后再初始化'
+    username = str(asset.login_user or '').strip() or ('admin' if asset.provider == 'aws_lightsail' else 'root')
+    port = int(asset.mtproxy_port or 9528)
+    bbr_ok, bbr_note = await install_bbr(public_ip, username, password, use_key_setup=asset.provider == 'aws_lightsail')
+    mtproxy_ok, mtproxy_note = await install_mtproxy(public_ip, username, password, port, asset.mtproxy_secret or '')
+    note = '\n'.join(part for part in [asset.note, '已执行同步资产代理初始化。', '' if bbr_ok else 'BBR 初始化失败，但继续检查 MTProxy 安装结果。', bbr_note, mtproxy_note] if part)
+    if not mtproxy_ok:
+        asset.note = note
+        await sync_to_async(asset.save)(update_fields=['note', 'updated_at'])
+        return asset, 'MTProxy 安装失败，请查看后台日志'
+    mtproxy_link, mtproxy_secret, mtproxy_host = _extract_asset_mtproxy_fields(mtproxy_note)
+    links = []
+    if mtproxy_link:
+        links.append({'label': '主链路', 'url': mtproxy_link, 'port': port, 'secret': mtproxy_secret})
+    for index, link in enumerate(re.findall(r'tg://proxy\?[^"\'\s<>]+', mtproxy_note or ''), start=1):
+        if mtproxy_link and link == mtproxy_link:
+            continue
+        links.append({'label': f'备用链路 {index}', 'url': link})
+    asset.mtproxy_port = port
+    asset.mtproxy_link = mtproxy_link or asset.mtproxy_link
+    asset.mtproxy_secret = mtproxy_secret or asset.mtproxy_secret
+    asset.mtproxy_host = mtproxy_host or public_ip
+    asset.proxy_links = links or asset.proxy_links
+    asset.note = note
+    await sync_to_async(asset.save)(update_fields=['mtproxy_port', 'mtproxy_link', 'mtproxy_secret', 'mtproxy_host', 'proxy_links', 'note', 'updated_at'])
+    return asset, None
+
+
 @sync_to_async
 def get_cloud_server_by_ip(ip: str):
     normalized_ip = (ip or '').strip()
@@ -1581,6 +1633,7 @@ __all__ = [
     'get_cloud_server_by_ip',
     'get_user_cloud_server',
     'get_user_proxy_asset_detail',
+    'initialize_proxy_asset',
     'list_custom_regions',
     'list_region_plans',
     'list_user_cloud_servers',

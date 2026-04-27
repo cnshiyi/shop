@@ -46,6 +46,7 @@ from cloud.services import (
     get_cloud_server_by_ip,
     get_user_cloud_server,
     get_user_proxy_asset_detail,
+    initialize_proxy_asset,
     list_custom_regions,
     list_region_plans,
     list_user_cloud_servers,
@@ -923,6 +924,21 @@ def _cloud_server_created_text(order, port: int | None = None) -> str:
         for index, link in enumerate(additional_links[:8], start=1):
             lines.append(f'{index}. {escape(link)}')
     return '\n'.join(lines)
+
+
+async def _initialize_proxy_asset_and_notify(bot: Bot, chat_id: int, user_id: int, asset_id: int):
+    try:
+        logger.info('同步资产代理初始化任务开始: chat_id=%s user_id=%s asset_id=%s', chat_id, user_id, asset_id)
+        asset, err = await initialize_proxy_asset(asset_id, user_id)
+        if err:
+            await bot.send_message(chat_id=chat_id, text=f'❌ 同步资产代理初始化失败\n资产ID: {asset_id}\n原因: {err}', reply_markup=main_menu())
+            logger.warning('同步资产代理初始化失败: chat_id=%s user_id=%s asset_id=%s error=%s', chat_id, user_id, asset_id, err)
+            return
+        await bot.send_message(chat_id=chat_id, text='✅ 同步资产代理初始化完成\n\n' + _cloud_server_created_text(asset, getattr(asset, 'mtproxy_port', None)), reply_markup=main_menu(), parse_mode='HTML', disable_web_page_preview=True)
+        logger.info('同步资产代理初始化完成: chat_id=%s user_id=%s asset_id=%s ip=%s', chat_id, user_id, asset_id, getattr(asset, 'public_ip', None))
+    except Exception as exc:
+        logger.exception('同步资产代理初始化异常: chat_id=%s user_id=%s asset_id=%s error=%s', chat_id, user_id, asset_id, exc)
+        await bot.send_message(chat_id=chat_id, text=f'❌ 同步资产代理初始化任务异常\n资产ID: {asset_id}\n错误: {exc}', reply_markup=main_menu())
 
 
 async def _provision_cloud_server_and_notify(bot: Bot, chat_id: int, order_id: int, port: int, retry_only: bool = False):
@@ -2195,12 +2211,32 @@ def register_handlers(dp: Dispatcher):
             logger.warning('CLOUD_ASSET_DETAIL_DENIED user_id=%s item_id=%s callback_data=%s', user.id, item_id, callback.data)
             await _safe_callback_answer(callback, '代理记录不存在', show_alert=True)
             return
-        logger.info('CLOUD_ASSET_DETAIL_RENDER user_id=%s item_id=%s kind=%s ip=%s back=%s', user.id, item_id, getattr(item, '_proxy_item_kind', None), item.public_ip, back_callback)
-        kb = InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text='👩‍💻 联系客服', callback_data=f'support:contact:cloud_asset:{item_id}')],
-            [InlineKeyboardButton(text='🔙 返回代理列表', callback_data=back_callback)],
-        ])
-        await _safe_edit_text(callback.message, _cloud_asset_detail_text(item), reply_markup=kb, parse_mode='HTML')
+        has_link = bool(getattr(item, 'mtproxy_link', None) or getattr(item, 'proxy_links', None))
+        can_init = item_kind == 'asset' and bool(getattr(item, 'public_ip', None)) and not has_link
+        logger.info('CLOUD_ASSET_DETAIL_RENDER user_id=%s item_id=%s kind=%s ip=%s back=%s can_init=%s has_link=%s', user.id, item_id, getattr(item, '_proxy_item_kind', None), item.public_ip, back_callback, can_init, has_link)
+        rows = []
+        if can_init:
+            rows.append([InlineKeyboardButton(text='🛠 初始化代理', callback_data=f'cloud:assetinit:{item_id}:{back_callback}')])
+        rows.append([InlineKeyboardButton(text='👩‍💻 联系客服', callback_data=f'support:contact:cloud_asset:{item_id}')])
+        rows.append([InlineKeyboardButton(text='🔙 返回代理列表', callback_data=back_callback)])
+        await _safe_edit_text(callback.message, _cloud_asset_detail_text(item), reply_markup=InlineKeyboardMarkup(inline_keyboard=rows), parse_mode='HTML')
+
+    @dp.callback_query(F.data.startswith('cloud:assetinit:'))
+    async def cb_cloud_asset_init(callback: CallbackQuery, bot: Bot):
+        await _safe_callback_answer(callback)
+        user = await get_or_create_user(callback.from_user.id, callback.from_user.username, callback.from_user.first_name)
+        parts = callback.data.split(':')
+        asset_id = int(parts[2])
+        item = await get_user_proxy_asset_detail(asset_id, user.id, 'asset')
+        if not item:
+            await _safe_callback_answer(callback, '代理记录不存在', show_alert=True)
+            return
+        if not getattr(item, 'login_password', None):
+            await _safe_callback_answer(callback, '这台同步资产还没有 SSH 登录密码，请先在后台补齐后再初始化', show_alert=True)
+            return
+        logger.info('CLOUD_ASSET_INIT_SUBMIT user_id=%s asset_id=%s ip=%s', user.id, asset_id, getattr(item, 'public_ip', None))
+        await callback.message.reply('🛠 已提交初始化代理任务。后台会安装 BBR/MTProxy，完成后自动发你代理链接。')
+        asyncio.create_task(_initialize_proxy_asset_and_notify(bot, callback.from_user.id, user.id, asset_id))
 
     @dp.callback_query(F.data.startswith('cloud:detail:'))
     async def cb_cloud_detail(callback: CallbackQuery):

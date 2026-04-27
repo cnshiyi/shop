@@ -420,6 +420,8 @@ class Command(BaseCommand):
                             'is_active': is_active,
                         }
                         asset = _resolve_asset(instance_name, instance_arn, public_ip, order, account)
+                        if not order and asset and asset.user_id:
+                            asset_defaults['user'] = asset.user
                         asset_signature = f'{instance_name or "-"}|{instance_arn or "-"}|{public_ip or "缺失"}'
                         old_status = asset.status if asset else None
                         old_public_ip = asset.public_ip if asset else None
