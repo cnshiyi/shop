@@ -1091,7 +1091,13 @@ def _parse_proxy_link(text: str) -> dict[str, str] | None:
 
 
 def _normalize_proxy_secret(secret: str) -> str:
-    return (build_mtproxy_links('0.0.0.0', 0, secret)[0].split('secret=', 1)[1] if secret else '').strip()
+    value = unquote(str(secret or '')).strip().strip('"\'')
+    value = re.sub(r'[^0-9a-fA-F]', '', value).lower()
+    if not value:
+        return ''
+    if value.startswith(('ee', 'dd')) and len(value) >= 34:
+        return value[2:34]
+    return value[:32]
 
 
 async def _validate_reinstall_proxy_link(order, link_data: dict[str, str], probe_when_possible: bool = True) -> tuple[bool, str]:
