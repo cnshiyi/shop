@@ -1100,21 +1100,62 @@ def _normalize_proxy_secret(secret: str) -> str:
     return value[:32]
 
 
+def _secret_log_hint(secret: str) -> str:
+    value = _normalize_proxy_secret(secret)
+    if not value:
+        return '-'
+    if len(value) <= 10:
+        return f'{value[:2]}***{value[-2:]}({len(value)})'
+    return f'{value[:6]}***{value[-6:]}({len(value)})'
+
+
 async def _validate_reinstall_proxy_link(order, link_data: dict[str, str], probe_when_possible: bool = True) -> tuple[bool, str]:
     order_ip = str(order.public_ip or order.previous_public_ip or '').strip()
-    if link_data['server'] != order_ip:
-        return False, f'链接 IP 不匹配。当前服务器 IP 是 {order_ip}，你发的是 {link_data["server"]}'
     order_port = str(order.mtproxy_port or link_data['port'] or 9528)
+    parsed_secret = _normalize_proxy_secret(link_data.get('secret', ''))
+    logger.info(
+        'CLOUD_REINSTALL_LINK_PARSED item_id=%s ip_expected=%s port_expected=%s parsed_server=%s parsed_port=%s parsed_secret=%s probe_when_possible=%s has_login_password=%s',
+        getattr(order, 'id', None),
+        order_ip,
+        order_port,
+        link_data.get('server'),
+        link_data.get('port'),
+        _secret_log_hint(link_data.get('secret', '')),
+        probe_when_possible,
+        bool(getattr(order, 'login_password', None)),
+    )
+    if link_data['server'] != order_ip:
+        logger.warning('CLOUD_REINSTALL_LINK_COMPARE_FAIL reason=ip item_id=%s expected_ip=%s parsed_ip=%s', getattr(order, 'id', None), order_ip, link_data['server'])
+        return False, f'链接 IP 不匹配。当前服务器 IP 是 {order_ip}，你发的是 {link_data["server"]}'
     if link_data['port'] != order_port:
+        logger.warning('CLOUD_REINSTALL_LINK_COMPARE_FAIL reason=port item_id=%s expected_port=%s parsed_port=%s', getattr(order, 'id', None), order_port, link_data['port'])
         return False, f'链接端口不匹配。当前主代理端口是 {order_port}，你发的是 {link_data["port"]}'
     if not probe_when_possible or not getattr(order, 'login_password', None):
+        logger.info('CLOUD_REINSTALL_LINK_COMPARE_SKIP_PROBE item_id=%s parsed_secret=%s reason=%s', getattr(order, 'id', None), _secret_log_hint(parsed_secret), 'disabled' if not probe_when_possible else 'missing_login_password')
         return True, '主链接格式和 IP 校验通过'
     ok, probe = await _probe_mtproxy_state(order_ip, order.login_user or 'root', order.login_password, int(order_port))
+    remote_secret = probe.get('MTPROXY_PROBE_SECRET', '')
+    remote_secret_normalized = _normalize_proxy_secret(remote_secret)
+    logger.info(
+        'CLOUD_REINSTALL_SERVER_PROBE item_id=%s ip=%s user=%s port=%s ok=%s proc_ok=%s port_ok=%s daemon=%s remote_secret=%s parsed_secret=%s secret_match=%s',
+        getattr(order, 'id', None),
+        order_ip,
+        order.login_user or 'root',
+        order_port,
+        ok,
+        probe.get('MTPROXY_PROBE_PROC_OK'),
+        probe.get('MTPROXY_PROBE_PORT_OK'),
+        probe.get('MTPROXY_PROBE_DAEMON'),
+        _secret_log_hint(remote_secret_normalized),
+        _secret_log_hint(parsed_secret),
+        bool(remote_secret_normalized and remote_secret_normalized == parsed_secret),
+    )
     if not ok:
         return False, '无法登录服务器确认代理状态，请稍后再试或联系后台检查 SSH/代理服务'
-    remote_secret = probe.get('MTPROXY_PROBE_SECRET', '')
-    if _normalize_proxy_secret(remote_secret) != _normalize_proxy_secret(link_data['secret']):
+    if remote_secret_normalized != parsed_secret:
+        logger.warning('CLOUD_REINSTALL_LINK_COMPARE_FAIL reason=secret item_id=%s remote_secret=%s parsed_secret=%s', getattr(order, 'id', None), _secret_log_hint(remote_secret_normalized), _secret_log_hint(parsed_secret))
         return False, '链接密钥和服务器实际运行密钥不一致，请检查后重新发送主链接'
+    logger.info('CLOUD_REINSTALL_LINK_COMPARE_OK item_id=%s ip=%s port=%s secret=%s', getattr(order, 'id', None), order_ip, order_port, _secret_log_hint(parsed_secret))
     return True, '主链接校验通过'
 
 
