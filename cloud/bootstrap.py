@@ -1139,6 +1139,10 @@ def _wait_ssh_password_ready(ip: str, username: str, password: str, timeout: int
         except Exception as exc:
             last_error = str(exc)
             logger.info('SSH 密码登录尚未就绪: ip=%s user=%s attempt=%s error=%s', ip, username, attempt, last_error)
+            lowered_error = last_error.lower()
+            if 'bad authentication type' in lowered_error and 'publickey' in lowered_error:
+                logger.warning('SSH 服务端禁用密码登录，停止等待: ip=%s user=%s error=%s', ip, username, last_error)
+                return False, '服务器 SSH 已禁用密码登录，仅允许公钥登录；无法继续自动重装，请先在后台补正确私钥/登录用户，或开启密码登录。'
             time.sleep(interval)
         finally:
             try:
