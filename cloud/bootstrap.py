@@ -53,6 +53,15 @@ def _load_aws_public_key() -> str:
             candidates.extend(str(path) for path in sorted(key_dir.glob(pattern)))
     if DEFAULT_SSH_KEY_DIR.is_dir():
         candidates.extend(str(path) for path in sorted(DEFAULT_SSH_KEY_DIR.glob('*.pub')))
+    candidates = [candidate for candidate in candidates if candidate]
+    logger.info(
+        '开始扫描 AWS SSH 公钥候选: count=%s env_public_key=%s env_public_key_path=%s key_dir=%s ssh_key_dir=%s',
+        len(candidates),
+        bool(env_value),
+        bool(public_key_path),
+        key_dir,
+        DEFAULT_SSH_KEY_DIR,
+    )
     for candidate in candidates:
         if not candidate:
             continue
@@ -60,7 +69,7 @@ def _load_aws_public_key() -> str:
             with open(candidate, 'r', encoding='utf-8') as handle:
                 content = handle.read().strip()
             if content:
-                logger.info('已加载 AWS SSH 公钥: source=%s', candidate)
+                logger.info('已加载 AWS SSH 公钥: source=%s fingerprint_hint=%s', candidate, content.split()[1][-12:] if len(content.split()) > 1 else '')
                 return content
         except OSError:
             continue

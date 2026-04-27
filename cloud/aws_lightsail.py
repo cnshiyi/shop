@@ -118,18 +118,35 @@ def _load_public_key() -> str:
 
     public_key_path = (os.getenv('AWS_LIGHTSAIL_PUBLIC_KEY_PATH') or '').strip()
     candidates = [public_key_path] if public_key_path else []
-    project_public_key_dir = Path(__file__).resolve().parent.parent / '.shop-secrets' / 'ssh'
-    if project_public_key_dir.is_dir():
-        candidates.extend(str(path) for path in sorted(project_public_key_dir.glob('*.pub')))
+    project_root = Path(__file__).resolve().parent.parent
+    project_public_key_dirs = [
+        project_root / '.shop-secrets' / 'lightsail',
+        project_root / '.shop-secrets' / 'ssh',
+    ]
+    for project_public_key_dir in project_public_key_dirs:
+        if project_public_key_dir.is_dir():
+            candidates.extend(str(path) for path in sorted(project_public_key_dir.glob('*.pub')))
+    candidates = [candidate for candidate in candidates if candidate]
+    logger.info(
+        '开始扫描 AWS 创建实例公钥候选: count=%s env_public_key=%s env_public_key_path=%s dirs=%s',
+        len(candidates),
+        bool(env_value),
+        bool(public_key_path),
+        ','.join(str(item) for item in project_public_key_dirs),
+    )
     for candidate in candidates:
         if not candidate:
             continue
         path = Path(candidate)
         if path.is_file():
             try:
-                return path.read_text(encoding='utf-8').strip()
+                content = path.read_text(encoding='utf-8').strip()
+                if content:
+                    logger.info('已加载 AWS 创建实例公钥: source=%s fingerprint_hint=%s', path, content.split()[1][-12:] if len(content.split()) > 1 else '')
+                    return content
             except OSError:
                 continue
+    logger.warning('未找到 AWS 创建实例公钥: env_public_key=%s env_public_key_path=%s candidate_count=%s', bool(env_value), bool(public_key_path), len(candidates))
     return ''
 
 
