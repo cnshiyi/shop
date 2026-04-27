@@ -2242,13 +2242,11 @@ def register_handlers(dp: Dispatcher):
             rows = [
                 [InlineKeyboardButton(text='🔄 续费', callback_data=f'cloud:renew:{order_id}'), InlineKeyboardButton(text='🌐 更换IP', callback_data=f'cloud:ip:{order_id}')],
                 [InlineKeyboardButton(text='🛠 重新安装', callback_data=f'cloud:reinit:{order_id}'), InlineKeyboardButton(text='⬆️ 升级配置', callback_data=f'cloud:upgrade:{order_id}')],
-                [InlineKeyboardButton(text='💸 退款', callback_data=f'cloud:refund:{order_id}')],
             ]
         else:
             rows = [
                 [InlineKeyboardButton(text='🔄 续费', callback_data=f'cloud:assetaction:renew:{item_id}'), InlineKeyboardButton(text='🌐 更换IP', callback_data=f'cloud:assetaction:changeip:{item_id}')],
                 [InlineKeyboardButton(text='🛠 重新安装', callback_data=f'cloud:assetinit:{item_id}:{back_callback}'), InlineKeyboardButton(text='⬆️ 升级配置', callback_data=f'cloud:assetaction:upgrade:{item_id}')],
-                [InlineKeyboardButton(text='💸 退款', callback_data=f'cloud:assetaction:refund:{item_id}')],
             ]
         rows.append([InlineKeyboardButton(text='👩‍💻 联系客服', callback_data=f'support:contact:cloud_asset:{item_id}')])
         rows.append([InlineKeyboardButton(text='🔙 返回代理列表', callback_data=back_callback)])
@@ -2269,7 +2267,6 @@ def register_handlers(dp: Dispatcher):
             'renew': '续费',
             'changeip': '更换 IP',
             'upgrade': '升级配置',
-            'refund': '退款',
         }.get(action, '处理')
         logger.info('CLOUD_ASSET_ACTION_NEED_SUPPORT user_id=%s asset_id=%s action=%s ip=%s', user.id, asset_id, action, getattr(item, 'public_ip', None))
         await callback.message.reply(f'这台代理没有绑定可自助操作的订单，{action_label}请联系客服处理。', reply_markup=InlineKeyboardMarkup(inline_keyboard=[
