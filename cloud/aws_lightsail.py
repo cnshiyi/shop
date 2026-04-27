@@ -6,6 +6,7 @@ import string
 import time
 from pathlib import Path
 
+from cloud.bootstrap import _derive_public_keys_from_private_keys
 from cloud.schemas import ProvisionResult
 from django.apps import apps
 
@@ -123,13 +124,15 @@ def _load_public_key() -> str:
         project_root / '.shop-secrets' / 'lightsail',
         project_root / '.shop-secrets' / 'ssh',
     ]
+    derived_count = _derive_public_keys_from_private_keys(*project_public_key_dirs)
     for project_public_key_dir in project_public_key_dirs:
         if project_public_key_dir.is_dir():
             candidates.extend(str(path) for path in sorted(project_public_key_dir.glob('*.pub')))
     candidates = [candidate for candidate in candidates if candidate]
     logger.info(
-        '开始扫描 AWS 创建实例公钥候选: count=%s env_public_key=%s env_public_key_path=%s dirs=%s',
+        '开始扫描 AWS 创建实例公钥候选: count=%s derived=%s env_public_key=%s env_public_key_path=%s dirs=%s',
         len(candidates),
+        derived_count,
         bool(env_value),
         bool(public_key_path),
         ','.join(str(item) for item in project_public_key_dirs),

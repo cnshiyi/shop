@@ -4,6 +4,7 @@ import logging
 import re
 import os
 import socket
+import subprocess
 import time
 from pathlib import Path
 
@@ -36,6 +37,43 @@ DEFAULT_LIGHTSAIL_KEY_DIR = PROJECT_SECRETS_DIR / 'lightsail'
 DEFAULT_SSH_KEY_DIR = PROJECT_SECRETS_DIR / 'ssh'
 
 
+def _derive_public_keys_from_private_keys(*directories: Path) -> int:
+    created = 0
+    for directory in directories:
+        if not directory.is_dir():
+            continue
+        for pattern in ('*.pem', '*.key', 'id_*'):
+            for private_key in sorted(directory.glob(pattern)):
+                if not private_key.is_file() or private_key.name.endswith('.pub'):
+                    continue
+                public_key = private_key.with_name(f'{private_key.name}.pub')
+                if public_key.exists():
+                    continue
+                try:
+                    result = subprocess.run(
+                        ['ssh-keygen', '-y', '-f', str(private_key)],
+                        capture_output=True,
+                        text=True,
+                        check=False,
+                        timeout=10,
+                    )
+                except Exception as exc:
+                    logger.warning('AWS SSH 私钥推导公钥失败: source=%s error=%s', private_key, exc)
+                    continue
+                content = (result.stdout or '').strip()
+                if result.returncode != 0 or not content:
+                    logger.warning('AWS SSH 私钥推导公钥失败: source=%s stderr=%s', private_key, (result.stderr or '').strip())
+                    continue
+                public_key.write_text(f'{content}\n', encoding='utf-8')
+                try:
+                    public_key.chmod(0o600)
+                except OSError:
+                    pass
+                created += 1
+                logger.info('已从 AWS SSH 私钥推导公钥: private=%s public=%s fingerprint_hint=%s', private_key, public_key, content.split()[1][-12:] if len(content.split()) > 1 else '')
+    return created
+
+
 def _load_aws_public_key() -> str:
     env_value = (os.getenv('AWS_LIGHTSAIL_PUBLIC_KEY') or '').strip()
     if env_value:
@@ -48,6 +86,7 @@ def _load_aws_public_key() -> str:
         key_dir = Path(private_key_dir)
     else:
         key_dir = DEFAULT_LIGHTSAIL_KEY_DIR
+    derived_count = _derive_public_keys_from_private_keys(key_dir, DEFAULT_SSH_KEY_DIR)
     if key_dir.is_dir():
         for pattern in ('*.pub',):
             candidates.extend(str(path) for path in sorted(key_dir.glob(pattern)))
@@ -55,8 +94,9 @@ def _load_aws_public_key() -> str:
         candidates.extend(str(path) for path in sorted(DEFAULT_SSH_KEY_DIR.glob('*.pub')))
     candidates = [candidate for candidate in candidates if candidate]
     logger.info(
-        '开始扫描 AWS SSH 公钥候选: count=%s env_public_key=%s env_public_key_path=%s key_dir=%s ssh_key_dir=%s',
+        '开始扫描 AWS SSH 公钥候选: count=%s derived=%s env_public_key=%s env_public_key_path=%s key_dir=%s ssh_key_dir=%s',
         len(candidates),
+        derived_count,
         bool(env_value),
         bool(public_key_path),
         key_dir,
