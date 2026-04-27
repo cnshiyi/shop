@@ -46,6 +46,7 @@ from cloud.services import (
     get_cloud_server_by_ip,
     get_user_cloud_server,
     get_user_proxy_asset_detail,
+    ensure_cloud_asset_operation_order,
     initialize_proxy_asset,
     list_custom_regions,
     list_region_plans,
@@ -2238,16 +2239,10 @@ def register_handlers(dp: Dispatcher):
         has_link = bool(getattr(item, 'mtproxy_link', None) or getattr(item, 'proxy_links', None))
         order_id = getattr(item, 'order_id', None) if getattr(item, 'order_user_id', None) == user.id else None
         logger.info('CLOUD_ASSET_DETAIL_RENDER user_id=%s item_id=%s kind=%s ip=%s back=%s order_id=%s has_link=%s', user.id, item_id, getattr(item, '_proxy_item_kind', None), item.public_ip, back_callback, order_id, has_link)
-        if order_id:
-            rows = [
-                [InlineKeyboardButton(text='🔄 续费', callback_data=f'cloud:renew:{order_id}'), InlineKeyboardButton(text='🌐 更换IP', callback_data=f'cloud:ip:{order_id}')],
-                [InlineKeyboardButton(text='🛠 重新安装', callback_data=f'cloud:reinit:{order_id}'), InlineKeyboardButton(text='⬆️ 升级配置', callback_data=f'cloud:upgrade:{order_id}')],
-            ]
-        else:
-            rows = [
-                [InlineKeyboardButton(text='🔄 续费', callback_data=f'cloud:assetaction:renew:{item_id}'), InlineKeyboardButton(text='🌐 更换IP', callback_data=f'cloud:assetaction:changeip:{item_id}')],
-                [InlineKeyboardButton(text='🛠 重新安装', callback_data=f'cloud:assetinit:{item_id}:{back_callback}'), InlineKeyboardButton(text='⬆️ 升级配置', callback_data=f'cloud:assetaction:upgrade:{item_id}')],
-            ]
+        rows = [
+            [InlineKeyboardButton(text='🔄 续费', callback_data=f'cloud:assetaction:renew:{item_id}'), InlineKeyboardButton(text='🌐 更换IP', callback_data=f'cloud:assetaction:changeip:{item_id}')],
+            [InlineKeyboardButton(text='🛠 重新安装', callback_data=f'cloud:assetinit:{item_id}:{back_callback}'), InlineKeyboardButton(text='⬆️ 升级配置', callback_data=f'cloud:assetaction:upgrade:{item_id}')],
+        ]
         rows.append([InlineKeyboardButton(text='👩‍💻 联系客服', callback_data=f'support:contact:cloud_asset:{item_id}')])
         rows.append([InlineKeyboardButton(text='🔙 返回代理列表', callback_data=back_callback)])
         await _safe_edit_text(callback.message, _cloud_asset_detail_text(item), reply_markup=InlineKeyboardMarkup(inline_keyboard=rows), parse_mode='HTML')
@@ -2263,16 +2258,65 @@ def register_handlers(dp: Dispatcher):
         if not item:
             await _safe_callback_answer(callback, '代理记录不存在', show_alert=True)
             return
-        action_label = {
-            'renew': '续费',
-            'changeip': '更换 IP',
-            'upgrade': '升级配置',
-        }.get(action, '处理')
-        logger.info('CLOUD_ASSET_ACTION_NEED_SUPPORT user_id=%s asset_id=%s action=%s ip=%s', user.id, asset_id, action, getattr(item, 'public_ip', None))
-        await callback.message.reply(f'这台代理没有绑定可自助操作的订单，{action_label}请联系客服处理。', reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text='👩‍💻 联系客服', callback_data=f'support:contact:cloud_asset_{action}:{asset_id}')],
-            [InlineKeyboardButton(text='🔙 返回代理详情', callback_data=f'cloud:assetdetail:asset:{asset_id}:cloud:list:page:1')],
-        ]))
+        order, err = await ensure_cloud_asset_operation_order(asset_id, user.id)
+        if err:
+            await _safe_callback_answer(callback, err, show_alert=True)
+            return
+        logger.info('CLOUD_ASSET_ACTION_START user_id=%s asset_id=%s order_id=%s action=%s ip=%s', user.id, asset_id, order.id, action, getattr(item, 'public_ip', None))
+        if action == 'renew':
+            renewal = await create_cloud_server_renewal(order.id, user.id, 31)
+            if renewal is False:
+                await _safe_callback_answer(callback, '该服务器IP已删除，禁止续费', show_alert=True)
+                return
+            if not renewal:
+                await _safe_callback_answer(callback, '续费订单创建失败', show_alert=True)
+                return
+            trx_amount = await usdt_to_trx(renewal.pay_amount)
+            receive_address = _receive_address()
+            auto_renew_enabled = await get_cloud_server_auto_renew(renewal.id, user.id)
+            await _safe_edit_text(callback.message,
+                '🔄 云服务器续费\n\n'
+                f'订单号: {renewal.order_no}\n'
+                '续费时长: 31天\n'
+                f'续费价格: {fmt_pay_amount(renewal.pay_amount)} {renewal.currency}\n'
+                f'自动续费: {"已开启" if auto_renew_enabled else "已关闭"}\n'
+                f'收款地址: <code>{escape(receive_address)}</code>\n\n'
+                '可直接地址支付，或使用下方钱包续费与自动续费开关。',
+                parse_mode='HTML',
+                disable_web_page_preview=True,
+                reply_markup=cloud_server_renew_payment(renewal.id, renewal.pay_amount, trx_amount, bool(auto_renew_enabled)),
+            )
+            return
+        if action == 'changeip':
+            if order.provider != 'aws_lightsail':
+                await _safe_callback_answer(callback, '阿里云服务器暂不支持更换 IP', show_alert=True)
+                return
+            if max(int(getattr(order, 'ip_change_quota', 0) or 0), 0) <= 0:
+                await _safe_callback_answer(callback, '剩余更换 IP 次数不足，请续费后再试', show_alert=True)
+                return
+            regions = [(code, name) for code, name in await _get_cached_custom_regions() if code != 'cn-hongkong']
+            await _safe_edit_text(callback.message,
+                '🌐 更换IP\n\n请选择新的地区：',
+                reply_markup=cloud_server_change_ip_region_menu(order.id, regions, expanded=False),
+            )
+            return
+        if action == 'upgrade':
+            plans, err = await list_cloud_server_upgrade_plans(order.id, user.id)
+            if err:
+                await _safe_callback_answer(callback, err, show_alert=True)
+                return
+            if not plans:
+                await _safe_callback_answer(callback, '暂无可升级配置', show_alert=True)
+                return
+            rows = []
+            text_lines = ['⬆️ 升级配置', '', '请选择目标配置，系统会从 USDT 余额扣除差价，并创建更高规格服务器；主/备用代理链接保持不变。']
+            for plan in plans[:10]:
+                text_lines.append(f"- {plan['name']}：补 {plan['diff']} U，到期补足 {plan['target_days']} 天")
+                rows.append([InlineKeyboardButton(text=f"{plan['name']} +{plan['diff']}U", callback_data=f"cloud:upgradepay:{order.id}:{plan['id']}")])
+            rows.append([InlineKeyboardButton(text='🔙 返回详情', callback_data=f'cloud:assetdetail:asset:{asset_id}:cloud:list:page:1')])
+            await _safe_edit_text(callback.message, '\n'.join(text_lines), reply_markup=InlineKeyboardMarkup(inline_keyboard=rows))
+            return
+        await _safe_callback_answer(callback, '未知操作', show_alert=True)
 
     @dp.callback_query(F.data.startswith('cloud:assetinit:'))
     async def cb_cloud_asset_init(callback: CallbackQuery, state: FSMContext):

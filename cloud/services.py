@@ -1040,6 +1040,115 @@ def record_cloud_ip_log(*, event_type, order=None, asset=None, server=None, publ
     )
 
 
+def _create_asset_operation_order(asset: CloudAsset, user_id: int) -> CloudServerOrder | None:
+    provider = asset.provider or CloudServerPlan.PROVIDER_AWS_LIGHTSAIL
+    region_code = asset.region_code or ''
+    plan = CloudServerPlan.objects.filter(
+        provider=provider,
+        region_code=region_code,
+        is_active=True,
+    ).order_by('-sort_order', 'id').first()
+    if not plan:
+        plan = CloudServerPlan.objects.filter(provider=provider, is_active=True).order_by('-sort_order', 'id').first()
+    if not plan:
+        return None
+    now = timezone.now()
+    total_amount = Decimal(str(asset.price if asset.price is not None else plan.price))
+    order = CloudServerOrder.objects.create(
+        order_no=f'ASSET-{asset.id}-{now:%Y%m%d%H%M%S}',
+        user_id=user_id,
+        plan=plan,
+        provider=provider,
+        cloud_account=asset.cloud_account,
+        account_label=asset.account_label,
+        region_code=asset.region_code or plan.region_code,
+        region_name=asset.region_name or plan.region_name,
+        plan_name=asset.asset_name or plan.plan_name,
+        quantity=1,
+        currency=asset.currency or plan.currency,
+        total_amount=total_amount,
+        pay_amount=total_amount,
+        pay_method='address',
+        status='completed',
+        lifecycle_days=31,
+        service_started_at=asset.created_at or now,
+        service_expires_at=asset.actual_expires_at,
+        server_name=asset.asset_name,
+        mtproxy_port=asset.mtproxy_port or 9528,
+        mtproxy_link=asset.mtproxy_link,
+        proxy_links=asset.proxy_links or [],
+        mtproxy_secret=asset.mtproxy_secret,
+        mtproxy_host=asset.mtproxy_host,
+        instance_id=asset.instance_id,
+        provider_resource_id=asset.provider_resource_id,
+        public_ip=asset.public_ip,
+        previous_public_ip=asset.previous_public_ip,
+        login_user=asset.login_user,
+        login_password=asset.login_password,
+        ip_change_quota=1,
+        last_user_id=getattr(asset.user, 'tg_user_id', None),
+        completed_at=now,
+        provision_note=f'由绑定代理资产 #{asset.id} 自动生成的操作订单。',
+    )
+    asset.order = order
+    asset.save(update_fields=['order', 'updated_at'])
+    record_cloud_ip_log(
+        event_type=CloudIpLog.EVENT_CREATED,
+        order=order,
+        asset=asset,
+        public_ip=asset.public_ip,
+        previous_public_ip=asset.previous_public_ip,
+        note=f'代理资产 #{asset.id} 生成操作订单 {order.order_no}',
+    )
+    return order
+
+
+@sync_to_async
+def ensure_cloud_asset_operation_order(asset_id: int, user_id: int):
+    asset = CloudAsset.objects.select_related('order', 'user', 'cloud_account').filter(
+        id=asset_id,
+        user_id=user_id,
+        kind=CloudAsset.KIND_SERVER,
+    ).exclude(status__in=_INACTIVE_ASSET_STATUSES).first()
+    if not asset:
+        return None, '代理记录不存在'
+    if not str(asset.public_ip or '').strip():
+        return None, '代理缺少公网 IP，暂时无法操作'
+    order = asset.order if asset.order_id and getattr(asset.order, 'user_id', None) == user_id else None
+    if not order:
+        order = _create_asset_operation_order(asset, user_id)
+        if not order:
+            return None, '该地区没有可用套餐，无法创建操作订单'
+    order = _hydrate_order_from_proxy_asset(order, asset=asset)
+    order.user_id = user_id
+    if order.status not in {'completed', 'expiring', 'suspended', 'renew_pending', 'paid', 'provisioning'}:
+        order.status = 'completed'
+    order.provider = order.provider or asset.provider or CloudServerPlan.PROVIDER_AWS_LIGHTSAIL
+    order.region_code = order.region_code or asset.region_code or ''
+    order.region_name = order.region_name or asset.region_name or ''
+    order.public_ip = order.public_ip or asset.public_ip
+    order.previous_public_ip = order.previous_public_ip or asset.previous_public_ip
+    order.instance_id = order.instance_id or asset.instance_id
+    order.provider_resource_id = order.provider_resource_id or asset.provider_resource_id
+    order.mtproxy_port = order.mtproxy_port or asset.mtproxy_port or 9528
+    order.mtproxy_link = order.mtproxy_link or asset.mtproxy_link
+    order.proxy_links = order.proxy_links or asset.proxy_links or []
+    order.mtproxy_secret = order.mtproxy_secret or asset.mtproxy_secret
+    order.mtproxy_host = order.mtproxy_host or asset.mtproxy_host
+    order.login_user = order.login_user or asset.login_user
+    order.login_password = order.login_password or asset.login_password
+    order.service_expires_at = order.service_expires_at or asset.actual_expires_at
+    order.cloud_account = order.cloud_account or asset.cloud_account
+    order.account_label = order.account_label or asset.account_label
+    order.save(update_fields=[
+        'user', 'status', 'provider', 'region_code', 'region_name', 'public_ip', 'previous_public_ip',
+        'instance_id', 'provider_resource_id', 'mtproxy_port', 'mtproxy_link', 'proxy_links',
+        'mtproxy_secret', 'mtproxy_host', 'login_user', 'login_password', 'service_expires_at',
+        'cloud_account', 'account_label', 'updated_at',
+    ])
+    return order, None
+
+
 @sync_to_async
 def create_cloud_server_renewal(order_id: int, user_id: int, days: int = 31):
     order = CloudServerOrder.objects.select_related('user').filter(id=order_id, user_id=user_id).first()
@@ -1607,6 +1716,7 @@ __all__ = [
     'get_cloud_server_by_ip',
     'get_user_cloud_server',
     'get_user_proxy_asset_detail',
+    'ensure_cloud_asset_operation_order',
     'initialize_proxy_asset',
     'list_custom_regions',
     'list_region_plans',
