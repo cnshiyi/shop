@@ -27,6 +27,7 @@
 - `orders/payment_scanner.py`：TRON 转账扫描与支付匹配
 - `cloud/resource_monitor.py`：TRON 资源巡检（能量 / 带宽）
 - `ARCHITECTURE.md`：当前收口架构与后续拆旧计划
+- `DEVELOPMENT.md`：当前开发说明、核心业务规则与后续开发方向
 - `docs/DATA_FLOW_AND_PERSISTENCE.md`：数据产生/获取入口盘点与数据库落库规范
 - `docs/DB_NAMING_CONVENTIONS.md`：数据库对象命名统一规范
 
@@ -38,7 +39,7 @@
 - `monitoring/` → 已并入 `cloud/`
 - `dashboard_api/` → 已并回 `shop/dashboard_urls.py`
 
-补充说明：`biz/` 已删除；相关云服务测试已迁入 `cloud/tests.py`。本地密钥与临时 keypair 已外置，见 `SECRETS.md`。
+补充说明：`biz/` 已删除；相关云服务测试已迁入 `cloud/tests.py`。本地密钥与临时 keypair 默认放在项目内 `.shop-secrets/`，见 `SECRETS.md`。
 
 ## 启动方式
 
