@@ -1,11 +1,13 @@
 from asgiref.sync import sync_to_async
 import logging
+import re
 from django.utils import timezone
 
 from django.db.models import Q
 
 from cloud.models import CloudAsset, Server
 from cloud.services import build_cloud_server_name, ensure_unique_cloud_server_name, record_cloud_ip_log
+from core.cloud_accounts import choose_cloud_account_for_order, cloud_account_label, list_cloud_accounts_by_server_load
 from cloud.aliyun_simple import create_instance as create_aliyun_instance
 from cloud.aws_lightsail import create_instance as create_aws_instance
 from cloud.bootstrap import install_bbr, install_mtproxy
@@ -14,19 +16,47 @@ from cloud.models import CloudServerOrder
 logger = logging.getLogger(__name__)
 
 
+def _extract_proxy_links(note: str) -> list[dict[str, str]]:
+    links = []
+    seen = set()
+    for raw_link in re.findall(r'tg://proxy\?[^"\'\s<>]+', note or ''):
+        link = raw_link.rstrip(',.，。')
+        if not link or link in seen:
+            continue
+        seen.add(link)
+        port = ''
+        secret = ''
+        server = ''
+        if 'port=' in link:
+            port = link.split('port=', 1)[1].split('&', 1)[0].strip()
+        if 'secret=' in link:
+            secret = link.split('secret=', 1)[1].split('&', 1)[0].strip()
+        if 'server=' in link:
+            server = link.split('server=', 1)[1].split('&', 1)[0].strip()
+        mode = 'MTProxy'
+        if port:
+            mode = {
+                '9528': '主代理 mtg',
+                '9529': '备用 mtprotoproxy',
+                '9530': 'Telemt A 三模式',
+                '9531': 'Telemt B classic',
+                '9532': 'Telemt B dd secure',
+                '9533': 'Telemt B ee tls',
+            }.get(port, f'端口 {port}')
+        links.append({'name': mode, 'server': server, 'port': port, 'secret': secret, 'url': link})
+    return links
+
+
 def _extract_mtproxy_fields(note: str) -> tuple[str, str, str]:
     link = ''
     secret = ''
     host = ''
-    for raw_line in (note or '').splitlines():
-        line = raw_line.strip()
-        if line.startswith('TG链接: '):
-            link = line.split(': ', 1)[1].strip()
+    for item in _extract_proxy_links(note):
+        link = item.get('url', '')
+        secret = item.get('secret', '')
+        host = item.get('server', '')
+        if link:
             break
-    if 'server=' in link:
-        host = link.split('server=', 1)[1].split('&', 1)[0].strip()
-    if 'secret=' in link:
-        secret = link.split('secret=', 1)[1].split('&', 1)[0].strip()
     return link, secret, host
 
 
@@ -51,7 +81,7 @@ def _upsert_server_record(order: CloudServerOrder, note: str):
     defaults = {
             'source': Server.SOURCE_ORDER,
             'provider': order.provider,
-            'account_label': order.provider,
+            'account_label': order.account_label or order.provider,
             'region_code': order.region_code,
             'region_name': order.region_name,
             'server_name': order.server_name,
@@ -98,7 +128,57 @@ def _get_aws_order_payload(order: CloudServerOrder):
         'plan_name': order.plan_name,
         'mtproxy_port': order.mtproxy_port,
         'static_ip_name': order.static_ip_name,
+        'cloud_account_id': order.cloud_account_id,
+        'account_label': order.account_label,
     }
+
+
+@sync_to_async
+def _mark_instance_created(order_id: int, server_name: str, instance_id: str, public_ip: str, login_user: str, login_password: str, note: str):
+    order = CloudServerOrder.objects.get(id=order_id)
+    order.status = 'provisioning'
+    order.server_name = server_name or order.server_name
+    order.instance_id = instance_id or order.instance_id
+    order.provider_resource_id = instance_id or order.provider_resource_id
+    order.public_ip = public_ip or order.public_ip
+    order.login_user = login_user or order.login_user
+    order.login_password = login_password or order.login_password
+    order.provision_note = '\n'.join(filter(None, [order.provision_note, note]))
+    order.save(update_fields=['status', 'server_name', 'instance_id', 'provider_resource_id', 'public_ip', 'login_user', 'login_password', 'provision_note', 'updated_at'])
+    try:
+        order_user = order.user
+    except Exception:
+        order_user = None
+    server_asset, _ = CloudAsset.objects.update_or_create(
+        order=order,
+        kind=CloudAsset.KIND_SERVER,
+        defaults={
+            'source': CloudAsset.SOURCE_ORDER,
+            'provider': order.provider,
+            'cloud_account': order.cloud_account,
+            'account_label': order.account_label or order.provider,
+            'region_code': order.region_code,
+            'region_name': order.region_name,
+            'asset_name': order.server_name,
+            'instance_id': order.instance_id,
+            'provider_resource_id': order.provider_resource_id or order.instance_id,
+            'public_ip': order.public_ip,
+            'login_user': order.login_user,
+            'login_password': order.login_password,
+            'mtproxy_port': order.mtproxy_port,
+            'actual_expires_at': order.service_expires_at,
+            'price': order.total_amount,
+            'currency': order.currency,
+            'order': order,
+            'user': order_user,
+            'note': order.provision_note,
+            'status': CloudAsset.STATUS_PENDING,
+            'is_active': True,
+        },
+    )
+    server_record = _upsert_server_record(order, order.provision_note)
+    record_cloud_ip_log(event_type='created', order=order, asset=server_asset, server=server_record, public_ip=order.public_ip, note=f'云端实例已创建：{order.server_name}')
+    return order
 
 
 @sync_to_async
@@ -118,6 +198,8 @@ def _mark_provisioning_start(order_id: int, server_name: str):
         defaults={
             'source': CloudAsset.SOURCE_ORDER,
             'provider': order.provider,
+            'cloud_account': order.cloud_account,
+            'account_label': order.account_label or order.provider,
             'region_code': order.region_code,
             'region_name': order.region_name,
             'asset_name': server_name,
@@ -126,6 +208,7 @@ def _mark_provisioning_start(order_id: int, server_name: str):
             'public_ip': order.public_ip,
             'mtproxy_port': order.mtproxy_port,
             'mtproxy_link': order.mtproxy_link,
+            'proxy_links': order.proxy_links or [],
             'mtproxy_secret': order.mtproxy_secret,
             'mtproxy_host': order.mtproxy_host,
             'actual_expires_at': order.service_expires_at,
@@ -143,11 +226,26 @@ def _mark_provisioning_start(order_id: int, server_name: str):
     return order
 
 
+def _is_transient_create_failure(note: str) -> bool:
+    text = str(note or '').lower()
+    transient_markers = [
+        'read timed out',
+        'connect timeout',
+        'connection timeout',
+        'timeout',
+        'temporarily unavailable',
+        'internalerror',
+        'service unavailable',
+        'too many requests',
+    ]
+    return any(marker in text for marker in transient_markers)
+
+
 async def provision_cloud_server(order_id: int):
     started_at = timezone.now()
     logger.info('云服务器开通开始: order_id=%s', order_id)
     try:
-        order = await _get_order(order_id)
+        order = await _ensure_order_cloud_account(order_id)
         if not order:
             logger.warning('云服务器开通失败: 订单不存在 order_id=%s', order_id)
             return None
@@ -174,39 +272,76 @@ async def provision_cloud_server(order_id: int):
 
         await _mark_provisioning_start(order.id, server_name)
 
-        if order.provider == 'aws_lightsail':
-            logger.info('云服务器创建开始: order=%s provider=AWS Lightsail server_name=%s', order.order_no, server_name)
-            result = await create_aws_instance(await _get_aws_order_payload(order), server_name)
-            login_user = 'admin'
-        else:
-            logger.info('云服务器创建开始: order=%s provider=%s server_name=%s', order.order_no, order.provider, server_name)
-            result = await create_aliyun_instance(order, server_name)
-            login_user = 'root'
+        account_ids = await _candidate_cloud_account_ids(order.id)
+        if not account_ids:
+            account_ids = [None]
+        result = None
+        login_user = 'root'
+        attempted_notes = []
+        for attempt_index, account_id in enumerate(account_ids, start=1):
+            order = await _set_order_cloud_account(order.id, account_id)
+            await _mark_provisioning_start(order.id, server_name)
+            account_label = order.account_label or order.provider
+            create_attempts = 2
+            for create_attempt in range(1, create_attempts + 1):
+                if order.provider == 'aws_lightsail':
+                    logger.info('云服务器创建开始: order=%s provider=AWS Lightsail account=%s account_attempt=%s/%s create_attempt=%s/%s server_name=%s', order.order_no, account_label, attempt_index, len(account_ids), create_attempt, create_attempts, server_name)
+                    result = await create_aws_instance(await _get_aws_order_payload(order), server_name)
+                    login_user = 'admin'
+                else:
+                    logger.info('云服务器创建开始: order=%s provider=%s account=%s account_attempt=%s/%s create_attempt=%s/%s server_name=%s', order.order_no, order.provider, account_label, attempt_index, len(account_ids), create_attempt, create_attempts, server_name)
+                    result = await create_aliyun_instance(order, server_name)
+                    login_user = 'root'
+                logger.info(
+                    '云服务器创建结果: order=%s account=%s ok=%s instance_id=%s public_ip=%s login_user=%s note=%s',
+                    order.order_no,
+                    account_label,
+                    result.ok,
+                    result.instance_id,
+                    result.public_ip,
+                    result.login_user or login_user,
+                    (result.note or '')[:1000],
+                )
+                if result.ok:
+                    break
+                if create_attempt < create_attempts and _is_transient_create_failure(result.note):
+                    logger.warning('云服务器创建遇到临时错误，先重试当前账号: order=%s account=%s note=%s', order.order_no, account_label, (result.note or '')[:1000])
+                    continue
+                break
+            if result.ok:
+                break
+            attempted_notes.append(f'{account_label}: {result.note}')
+            if attempt_index < len(account_ids):
+                logger.warning('云服务器创建失败，切换下一个账号重试: order=%s account=%s note=%s', order.order_no, account_label, (result.note or '')[:1000])
 
-        logger.info(
-            '云服务器创建结果: order=%s ok=%s instance_id=%s public_ip=%s login_user=%s note=%s',
-            order.order_no,
-            result.ok,
-            result.instance_id,
-            result.public_ip,
-            result.login_user or login_user,
-            (result.note or '')[:1000],
-        )
+        if result and not result.ok and attempted_notes:
+            result.note = '多账号创建均失败：\n' + '\n'.join(attempted_notes)
 
         if result.ok:
             bootstrap_user = result.login_user or login_user
+            order = await _mark_instance_created(
+                order.id,
+                server_name,
+                result.instance_id,
+                result.public_ip,
+                bootstrap_user,
+                result.login_password,
+                result.note,
+            )
             logger.info('开始执行 BBR 初始化: order=%s public_ip=%s user=%s requested_user=%s', order.order_no, result.public_ip, bootstrap_user, bootstrap_user)
-            bbr_ok, bbr_note = await install_bbr(result.public_ip, bootstrap_user, result.login_password)
+            private_key_path = getattr(result, 'private_key_path', '') or ''
+            bbr_ok, bbr_note = await install_bbr(result.public_ip, bootstrap_user, result.login_password, private_key_path, use_key_setup=bool(private_key_path) or order.provider == 'aws_lightsail')
             logger.info('BBR 初始化结果: order=%s ok=%s note=%s', order.order_no, bbr_ok, (bbr_note or '')[:1000])
 
             logger.info('开始执行 MTProxy 安装: order=%s public_ip=%s user=%s port=%s requested_user=%s', order.order_no, result.public_ip, bootstrap_user, order.mtproxy_port, bootstrap_user)
             mtproxy_ok, mtproxy_note = await install_mtproxy(result.public_ip, bootstrap_user, result.login_password, order.mtproxy_port, order.mtproxy_secret or '')
             logger.info('MTProxy 安装结果: order=%s ok=%s note=%s', order.order_no, mtproxy_ok, (mtproxy_note or '')[:1000])
 
-            note = '\n'.join(part for part in [result.note, bbr_note, mtproxy_note] if part)
-            if not bbr_ok or not mtproxy_ok:
+            bbr_warning = '' if bbr_ok else 'BBR 初始化失败，但 MTProxy 已安装成功，订单按代理可用处理。'
+            note = '\n'.join(part for part in [result.note, bbr_warning, bbr_note, mtproxy_note] if part)
+            if not mtproxy_ok:
                 logger.warning(
-                    '云服务器开通失败: order=%s reason=bootstrap_failed bbr_ok=%s mtproxy_ok=%s elapsed_seconds=%s',
+                    '云服务器开通失败: order=%s reason=mtproxy_failed bbr_ok=%s mtproxy_ok=%s elapsed_seconds=%s',
                     order.order_no,
                     bbr_ok,
                     mtproxy_ok,
@@ -290,14 +425,60 @@ async def reprovision_cloud_server_bootstrap(order_id: int):
         return await _mark_failed(order_id, '重试初始化失败：缺少公网 IP 或登录密码。')
     bootstrap_user = order.login_user or 'root'
     logger.info('[PROVISION][RETRY] start order=%s public_ip=%s user=%s port=%s', order.order_no, order.public_ip, bootstrap_user, order.mtproxy_port)
-    bbr_ok, bbr_note = await install_bbr(order.public_ip, bootstrap_user, order.login_password)
+    bbr_ok, bbr_note = await install_bbr(order.public_ip, bootstrap_user, order.login_password, use_key_setup=order.provider == 'aws_lightsail')
     logger.info('[PROVISION][RETRY] bbr_result order=%s ok=%s note=%s', order.order_no, bbr_ok, (bbr_note or '')[:1000])
-    mtproxy_ok, mtproxy_note = await install_mtproxy(order.public_ip, bootstrap_user, order.login_password, order.mtproxy_port)
+    mtproxy_ok, mtproxy_note = await install_mtproxy(order.public_ip, bootstrap_user, order.login_password, order.mtproxy_port, order.mtproxy_secret or '')
     logger.info('[PROVISION][RETRY] mtproxy_result order=%s ok=%s note=%s', order.order_no, mtproxy_ok, (mtproxy_note or '')[:1000])
-    note = '\n'.join(part for part in [order.provision_note, '已执行重试初始化。', bbr_note, mtproxy_note] if part)
-    if not bbr_ok or not mtproxy_ok:
+    bbr_warning = '' if bbr_ok else 'BBR 初始化失败，但 MTProxy 已安装成功，订单按代理可用处理。'
+    note = '\n'.join(part for part in [order.provision_note, '已执行重试初始化。', bbr_warning, bbr_note, mtproxy_note] if part)
+    if not mtproxy_ok:
         return await _mark_failed(order_id, note)
     return await _mark_success(order_id, order.server_name or order.instance_id or '', order.instance_id or order.provider_resource_id or '', order.public_ip, order.login_user or 'root', order.login_password, note, order.static_ip_name or '')
+
+
+@sync_to_async
+def _candidate_cloud_account_ids(order_id: int):
+    order = CloudServerOrder.objects.filter(id=order_id).first()
+    if not order:
+        return []
+    accounts = list_cloud_accounts_by_server_load(order.provider, order.region_code)
+    ids = [account.id for account in accounts]
+    if order.cloud_account_id and order.cloud_account_id not in ids:
+        ids.insert(0, order.cloud_account_id)
+    return ids
+
+
+@sync_to_async
+def _set_order_cloud_account(order_id: int, account_id: int | None):
+    order = CloudServerOrder.objects.filter(id=order_id).first()
+    if not order:
+        return None
+    if account_id:
+        from core.models import CloudAccountConfig
+        account = CloudAccountConfig.objects.filter(id=account_id, is_active=True).first()
+    else:
+        account = None
+    order.cloud_account = account
+    order.account_label = cloud_account_label(account) or order.provider
+    order.save(update_fields=['cloud_account', 'account_label', 'updated_at'])
+    return order
+
+
+@sync_to_async
+def _ensure_order_cloud_account(order_id: int):
+    order = CloudServerOrder.objects.filter(id=order_id).first()
+    if not order:
+        return None
+    if not order.cloud_account_id:
+        account = choose_cloud_account_for_order(order.provider, order.region_code)
+        if account:
+            order.cloud_account = account
+            order.account_label = cloud_account_label(account) or order.provider
+            order.save(update_fields=['cloud_account', 'account_label', 'updated_at'])
+    elif not order.account_label:
+        order.account_label = cloud_account_label(order.cloud_account) or order.provider
+        order.save(update_fields=['account_label', 'updated_at'])
+    return order
 
 
 @sync_to_async
@@ -310,6 +491,7 @@ def _mark_success(order_id: int, server_name: str, instance_id: str, public_ip: 
     logger.info('[PROVISION] mark_success_start order_id=%s server_name=%s instance_id=%s public_ip=%s', order_id, server_name, instance_id, public_ip)
     order = CloudServerOrder.objects.get(id=order_id)
     mtproxy_link, mtproxy_secret, mtproxy_host = _extract_mtproxy_fields(note)
+    proxy_links = _extract_proxy_links(note)
     order.status = 'completed'
     order.server_name = server_name
     order.instance_id = instance_id
@@ -317,6 +499,7 @@ def _mark_success(order_id: int, server_name: str, instance_id: str, public_ip: 
     order.public_ip = public_ip
     order.mtproxy_host = mtproxy_host or public_ip
     order.mtproxy_link = mtproxy_link
+    order.proxy_links = proxy_links
     order.mtproxy_secret = mtproxy_secret
     order.login_user = login_user
     order.login_password = login_password
@@ -331,7 +514,7 @@ def _mark_success(order_id: int, server_name: str, instance_id: str, public_ip: 
         order.last_user_id = order.user.tg_user_id
     except Exception:
         order.last_user_id = order.user_id or 0
-    order.save(update_fields=['status', 'server_name', 'instance_id', 'provider_resource_id', 'public_ip', 'mtproxy_host', 'mtproxy_link', 'mtproxy_secret', 'static_ip_name', 'login_user', 'login_password', 'provision_note', 'completed_at', 'service_started_at', 'service_expires_at', 'last_user_id', 'updated_at'])
+    order.save(update_fields=['status', 'server_name', 'instance_id', 'provider_resource_id', 'public_ip', 'mtproxy_host', 'mtproxy_link', 'proxy_links', 'mtproxy_secret', 'static_ip_name', 'login_user', 'login_password', 'provision_note', 'completed_at', 'service_started_at', 'service_expires_at', 'last_user_id', 'updated_at'])
     logger.info('[PROVISION] order_saved order=%s status=%s service_started_at=%s service_expires_at=%s mtproxy_host=%s mtproxy_link=%s', order.order_no, order.status, order.service_started_at, order.service_expires_at, order.mtproxy_host, order.mtproxy_link)
 
     try:
@@ -345,6 +528,8 @@ def _mark_success(order_id: int, server_name: str, instance_id: str, public_ip: 
             defaults={
                 'source': CloudAsset.SOURCE_ORDER,
                 'provider': order.provider,
+                'cloud_account': order.cloud_account,
+                'account_label': order.account_label or order.provider,
                 'region_code': order.region_code,
                 'region_name': order.region_name,
                 'asset_name': server_name,
@@ -355,6 +540,7 @@ def _mark_success(order_id: int, server_name: str, instance_id: str, public_ip: 
                 'login_password': login_password,
                 'mtproxy_port': order.mtproxy_port,
                 'mtproxy_link': mtproxy_link,
+                'proxy_links': proxy_links,
                 'mtproxy_secret': mtproxy_secret,
                 'mtproxy_host': mtproxy_host or public_ip,
                 'actual_expires_at': order.service_expires_at,

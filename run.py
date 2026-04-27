@@ -105,6 +105,7 @@ def cleanup_bot_runner() -> None:
 def run_web() -> int:
     cleanup_port(8000)
     run_manage('migrate')
+    run_manage('ensure_dashboard_admin')
     return subprocess.call([PYTHON, 'manage.py', 'runserver', '127.0.0.1:8000'], cwd=BASE_DIR, env=build_env())
 
 
@@ -117,6 +118,7 @@ def run_all() -> int:
     cleanup_port(8000)
     cleanup_bot_runner()
     run_manage('migrate')
+    run_manage('ensure_dashboard_admin')
     web_process = start_process('manage.py', 'runserver', '127.0.0.1:8000')
     bot_process = start_process('-m', 'bot.runner')
     try:

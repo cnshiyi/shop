@@ -9,11 +9,12 @@ import httpx
 from asgiref.sync import sync_to_async
 from django.core.paginator import Paginator
 from django.db import transaction
+from django.db.models import Q
 from django.utils import timezone
 
 from orders.ledger import record_balance_ledger
 from bot.models import TelegramUser
-from cloud.models import AddressMonitor, CloudServerOrder, CloudServerPlan
+from cloud.models import AddressMonitor, CloudAsset, CloudServerOrder, CloudServerPlan
 from orders.models import BalanceLedger, CartItem, Order, Product, Recharge
 
 logger = logging.getLogger(__name__)
@@ -26,13 +27,26 @@ def _generate_order_no() -> str:
     return f'ORD{int(time.time() * 1000)}{random.randint(1000, 9999)}'
 
 
+def _fmt_decimal(value) -> str:
+    amount = Decimal(str(value or 0)).quantize(Decimal('0.001'), rounding=ROUND_DOWN)
+    text = format(amount, 'f')
+    if '.' in text:
+        text = text.rstrip('0').rstrip('.')
+    return text or '0'
+
+
 def _generate_unique_pay_amount(base_amount: Decimal, currency: str) -> Decimal:
     base = base_amount.quantize(Decimal('0.001'), rounding=ROUND_DOWN)
     for _ in range(100):
         pay_amount = (base + Decimal(random.randint(1, 999)) / Decimal('1000')).quantize(Decimal('0.001'), rounding=ROUND_DOWN)
         order_exists = Order.objects.filter(pay_amount=pay_amount, status='pending', currency=currency).exists()
         recharge_exists = Recharge.objects.filter(pay_amount=pay_amount, status='pending', currency=currency).exists()
-        if not order_exists and not recharge_exists:
+        cloud_order_exists = CloudServerOrder.objects.filter(
+            pay_amount=pay_amount,
+            status__in=['pending', 'renew_pending'],
+            currency=currency,
+        ).exists()
+        if not order_exists and not recharge_exists and not cloud_order_exists:
             return pay_amount
     return (base + Decimal(random.randint(1, 999)) / Decimal('1000')).quantize(Decimal('0.001'), rounding=ROUND_DOWN)
 
@@ -46,8 +60,14 @@ def list_recharges(user_id: int, page: int = 1, per_page: int = 5):
 
 @sync_to_async
 def create_recharge(user_id: int, amount: Decimal, currency: str, receive_address: str):
+    amount = Decimal(str(amount)).quantize(Decimal('0.001'), rounding=ROUND_DOWN)
     pay_amount = _generate_unique_pay_amount(amount, currency)
     return Recharge.objects.create(user_id=user_id, amount=amount, pay_amount=pay_amount, currency=currency, status='pending')
+
+
+@sync_to_async
+def get_recharge(user_id: int, recharge_id: int):
+    return Recharge.objects.filter(user_id=user_id, id=recharge_id).first()
 
 
 async def get_trx_price() -> Decimal:
@@ -178,11 +198,29 @@ def get_order(order_id: int):
     return Order.objects.filter(id=order_id).first()
 
 
+_INACTIVE_CLOUD_RESOURCE_STATUSES = {'deleted', 'deleting', 'terminated', 'terminating', 'expired'}
+
+
+def _first_nonblank(*values) -> str:
+    for value in values:
+        text = str(value or '').strip()
+        if text:
+            return text
+    return ''
+
+
 @sync_to_async
 def list_cloud_orders(user_id: int, page: int = 1, per_page: int = 5):
-    qs = CloudServerOrder.objects.filter(user_id=user_id).order_by('-created_at')
-    total = qs.count()
-    return list(qs[(page - 1) * per_page: page * per_page]), total
+    """个人中心订单查询：只按订单表展示，不复用代理列表逻辑。"""
+    queryset = (
+        CloudServerOrder.objects
+        .filter(user_id=user_id)
+        .exclude(status__in={'deleted'})
+        .order_by('-created_at', '-id')
+    )
+    total = queryset.count()
+    start = max(0, (page - 1) * per_page)
+    return list(queryset[start:start + per_page]), total
 
 
 @sync_to_async
@@ -202,10 +240,10 @@ def list_balance_details(user_id: int, page: int = 1, per_page: int = 8):
         {
             'id': f'recharge-{recharge.id}',
             'title': f'充值 #{recharge.id}',
-            'description': f'充值订单已完成，余额增加 {recharge.amount} {recharge.currency}',
+            'description': f'充值订单已完成，余额增加 {_fmt_decimal(recharge.amount)} {recharge.currency}',
             'currency': recharge.currency,
             'direction': 'in',
-            'amount': str(recharge.amount),
+            'amount': _fmt_decimal(recharge.amount),
             'before_balance': None,
             'after_balance': None,
             'created_at': recharge.completed_at or recharge.created_at,
@@ -219,9 +257,9 @@ def list_balance_details(user_id: int, page: int = 1, per_page: int = 8):
             'description': ledger.description or ledger.get_type_display(),
             'currency': ledger.currency,
             'direction': ledger.direction,
-            'amount': str(ledger.amount),
-            'before_balance': str(ledger.before_balance),
-            'after_balance': str(ledger.after_balance),
+            'amount': _fmt_decimal(ledger.amount),
+            'before_balance': _fmt_decimal(ledger.before_balance),
+            'after_balance': _fmt_decimal(ledger.after_balance),
             'created_at': ledger.created_at,
         }
         for ledger in BalanceLedger.objects.filter(user_id=user_id).order_by('-created_at', '-id')[:300]
@@ -248,9 +286,9 @@ def get_balance_detail(user_id: int, raw_item_id: str):
             'description': ledger.description or ledger.get_type_display(),
             'currency': ledger.currency,
             'direction': ledger.direction,
-            'amount': str(ledger.amount),
-            'before_balance': str(ledger.before_balance),
-            'after_balance': str(ledger.after_balance),
+            'amount': _fmt_decimal(ledger.amount),
+            'before_balance': _fmt_decimal(ledger.before_balance),
+            'after_balance': _fmt_decimal(ledger.after_balance),
             'created_at': ledger.created_at,
         }
     if raw_item_id.startswith('recharge-'):
@@ -264,10 +302,10 @@ def get_balance_detail(user_id: int, raw_item_id: str):
         return {
             'id': raw_item_id,
             'title': f'充值 #{recharge.id}',
-            'description': f'充值订单已完成，余额增加 {recharge.amount} {recharge.currency}',
+            'description': f'充值订单已完成，余额增加 {_fmt_decimal(recharge.amount)} {recharge.currency}',
             'currency': recharge.currency,
             'direction': 'in',
-            'amount': str(recharge.amount),
+            'amount': _fmt_decimal(recharge.amount),
             'before_balance': None,
             'after_balance': None,
             'created_at': recharge.completed_at or recharge.created_at,
@@ -419,6 +457,7 @@ __all__ = [
     'get_cloud_order',
     'get_exchange_rate_display',
     'get_monitor',
+    'get_recharge',
     'get_order',
     'get_product',
     'get_trx_price',

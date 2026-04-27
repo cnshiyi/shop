@@ -3,7 +3,8 @@
 import json
 import logging
 import os
-from decimal import Decimal
+from decimal import Decimal, ROUND_CEILING
+from types import SimpleNamespace
 
 from asgiref.sync import async_to_sync, sync_to_async
 from django.db import transaction
@@ -13,12 +14,45 @@ from django.utils import timezone
 from bot.models import TelegramUser
 from cloud.models import CloudAsset, CloudIpLog, CloudServerOrder, CloudServerPlan, Server, ServerPrice
 from core.cache import get_redis
-from core.cloud_accounts import get_active_cloud_account
+from core.cloud_accounts import choose_cloud_account_for_order, cloud_account_label, get_active_cloud_account
 from orders.ledger import record_balance_ledger
+from orders.models import BalanceLedger, CartItem
 from orders.services import _generate_unique_pay_amount, usdt_to_trx
 
 logger = logging.getLogger(__name__)
 CUSTOM_CACHE_TTL = 600
+
+
+def _renew_aliyun_instance(order: CloudServerOrder, days: int = 31):
+    if order.provider != 'aliyun_simple':
+        return True, ''
+    if not str(order.instance_id or '').strip():
+        return False, '阿里云实例ID缺失，无法执行真实续费'
+    account = getattr(order, 'cloud_account', None) or get_active_cloud_account('aliyun', order.region_code)
+    if not account:
+        return False, '未配置阿里云账号，无法执行真实续费'
+    try:
+        from alibabacloud_swas_open20200601 import models as swas_models
+        from cloud.aliyun_simple import _build_client, _region_endpoint, _runtime_options
+
+        region_code = (order.region_code or account.region_hint or 'cn-hongkong').strip() or 'cn-hongkong'
+        client = _build_client(_region_endpoint(region_code), account=account)
+        if not client:
+            return False, '无法创建阿里云客户端'
+        period = max(1, int(round((int(days or 31)) / 31)))
+        request = swas_models.RenewInstanceRequest(
+            instance_id=order.instance_id,
+            region_id=region_code,
+            period=period,
+            client_token=f'renew-{order.id}-{int(timezone.now().timestamp())}',
+        )
+        response = client.renew_instance_with_options(request, _runtime_options())
+        logger.info('阿里云真实续费成功 order=%s instance=%s region=%s period=%s response=%s', order.id, order.instance_id, region_code, period, response.body.to_map() if getattr(response, 'body', None) else {})
+        return True, f'阿里云实例已真实续费 {period} 个月。'
+    except Exception as exc:
+        logger.warning('阿里云真实续费失败 order=%s instance=%s err=%s', order.id, order.instance_id, exc)
+        return False, f'阿里云真实续费失败: {exc}'
+
 CUSTOM_REGIONS_CACHE_KEY = 'custom:regions:v1'
 CUSTOM_PLANS_CACHE_PREFIX = 'custom:plans:v1:'
 
@@ -97,7 +131,7 @@ DEFAULT_ALIYUN_PLAN_TEMPLATES = [
 ]
 
 
-def _build_aliyun_client(endpoint: str = 'swas.cn-hangzhou.aliyuncs.com'):
+def _build_aliyun_client(endpoint: str | None = None):
     account = get_active_cloud_account('aliyun')
     key = account.access_key_plain if account else os.getenv('ALIBABA_CLOUD_ACCESS_KEY_ID', '')
     secret = account.secret_key_plain if account else os.getenv('ALIBABA_CLOUD_ACCESS_KEY_SECRET', '')
@@ -106,6 +140,7 @@ def _build_aliyun_client(endpoint: str = 'swas.cn-hangzhou.aliyuncs.com'):
     from alibabacloud_tea_openapi import models as open_api_models
     from alibabacloud_swas_open20200601.client import Client
 
+    endpoint = (endpoint or 'swas.cn-hongkong.aliyuncs.com').strip() or 'swas.cn-hongkong.aliyuncs.com'
     config = open_api_models.Config(
         access_key_id=key,
         access_key_secret=secret,
@@ -160,32 +195,43 @@ def _normalize_server_price_regions(provider: str, regions: list[tuple[str, str]
 
 
 def _fetch_aliyun_plan_templates(region_code: str):
-    client = _build_aliyun_client()
+    client = _build_aliyun_client(f'swas.{region_code}.aliyuncs.com')
     if not client:
-        return DEFAULT_ALIYUN_PLAN_TEMPLATES
+        return [
+            (f'{region_code}-{idx}', plan_name, cpu, memory, storage, bandwidth, price)
+            for idx, (plan_name, cpu, memory, storage, bandwidth, price) in enumerate(DEFAULT_ALIYUN_PLAN_TEMPLATES, start=1)
+        ]
     try:
         from alibabacloud_swas_open20200601 import models as swas_models
 
         response = client.list_plans(swas_models.ListPlansRequest(region_id=region_code))
         plans = response.body.to_map().get('Plans', [])
-        linux_plans = [item for item in plans if 'Linux' in str(item.get('SupportPlatform', ''))]
-        linux_plans.sort(key=lambda item: (_parse_aliyun_price(item.get('OriginPrice')), item.get('Core') or 0, item.get('Memory') or 0))
-        labels = ['基础型', '标准型', '增强型', '高配型', '旗舰型', '至尊型', '迁移专用', '稳定型', '加速型']
+        linux_plans = [
+            item for item in plans
+            if 'Linux' in str(item.get('SupportPlatform', ''))
+            and str(item.get('PlanType') or '').upper() == 'NORMAL'
+        ]
+        linux_plans.sort(key=lambda item: (_parse_aliyun_price(item.get('OriginPrice')), item.get('Core') or 0, item.get('Memory') or 0, str(item.get('PlanId') or '')))
         templates = []
-        for idx, item in enumerate(linux_plans[:9]):
-            base_price = _parse_aliyun_price(item.get('OriginPrice'))
-            sell_price = (base_price * Decimal('2')) + Decimal('5')
-            templates.append((
-                labels[idx],
-                f"{item.get('Core') or '-'}核",
-                f"{item.get('Memory') or '-'}GB",
-                f"{item.get('DiskSize') or '-'}GB {item.get('DiskType') or 'SSD'}",
-                f"{item.get('Bandwidth') or '-'}Mbps",
-                sell_price.quantize(Decimal('0.01')),
-            ))
-        return _merge_templates(templates, DEFAULT_ALIYUN_PLAN_TEMPLATES)
+        for item in linux_plans:
+            plan_id = str(item.get('PlanId') or '').strip()
+            if not plan_id:
+                continue
+            cpu = f"{item.get('Core') or '-'}核"
+            memory = f"{item.get('Memory') or '-'}GB"
+            storage = f"{item.get('DiskSize') or '-'}GB {item.get('DiskType') or 'SSD'}"
+            bandwidth = f"{item.get('Bandwidth') or '-'}Mbps"
+            plan_name = f"{cpu} {memory} {storage}"
+            base_price = _parse_aliyun_price(item.get('OriginPrice')).quantize(Decimal('0.01'))
+            templates.append((plan_id, plan_name, cpu, memory, storage, bandwidth, base_price))
+        if templates:
+            return templates
     except Exception:
-        return DEFAULT_ALIYUN_PLAN_TEMPLATES
+        pass
+    return [
+        (f'{region_code}-{idx}', plan_name, cpu, memory, storage, bandwidth, price)
+        for idx, (plan_name, cpu, memory, storage, bandwidth, price) in enumerate(DEFAULT_ALIYUN_PLAN_TEMPLATES, start=1)
+    ]
 
 
 def _is_primary_aws_bundle(bundle_id: str, bundle_name: str) -> bool:
@@ -236,7 +282,7 @@ def _fetch_aws_bundle_templates():
             ram = item.get('ramSizeInGb')
             disk = item.get('diskSizeInGb')
             transfer = item.get('transferPerMonthInGb')
-            base_price = Decimal(str(item.get('price') or '0')).quantize(Decimal('0.01'))
+            base_price = Decimal(str(item.get('price') or '0')).quantize(Decimal('0.001'))
             bundle_candidates.append((
                 bundle_id,
                 bundle_name,
@@ -317,6 +363,12 @@ def _fetch_aliyun_regions():
         return []
 
 
+def _build_server_price_config_id(provider: str, region_code: str, sequence: int) -> str:
+    provider_key = str(provider or '').strip().replace('_', '-')
+    region_key = str(region_code or '').strip().replace('_', '-')
+    return f'{provider_key}-{region_key}-{int(sequence)}'[:64]
+
+
 def sync_server_prices(provider: str, regions: list[tuple[str, str]], templates, deactivate_missing_regions: bool = True):
     regions = _normalize_server_price_regions(provider, regions)
     region_codes = {code for code, _ in regions}
@@ -325,7 +377,15 @@ def sync_server_prices(provider: str, regions: list[tuple[str, str]], templates,
         ServerPrice.objects.filter(provider=provider).exclude(region_code__in=region_codes).update(is_active=False)
     ServerPrice.objects.filter(provider=provider, region_code__in=region_codes).exclude(bundle_code__in=bundle_codes).update(is_active=False)
     for region_code, region_name in regions:
-        for index, template in enumerate(templates, start=1):
+        ordered_templates = sorted(
+            templates,
+            key=lambda item: (
+                Decimal(str(item[6] or '0')),
+                str(item[1] or ''),
+                str(item[0] or ''),
+            ),
+        )
+        for index, template in enumerate(ordered_templates, start=1):
             bundle_code, server_name, cpu, memory, storage, bandwidth, price = template
             ServerPrice.objects.update_or_create(
                 provider=provider,
@@ -333,6 +393,7 @@ def sync_server_prices(provider: str, regions: list[tuple[str, str]], templates,
                 bundle_code=bundle_code,
                 defaults={
                     'region_name': region_name,
+                    'config_id': _build_server_price_config_id(provider, region_code, index),
                     'server_name': server_name,
                     'server_description': f'{cpu} / {memory} / {storage} / {bandwidth}',
                     'cpu': cpu,
@@ -350,22 +411,29 @@ def sync_server_prices(provider: str, regions: list[tuple[str, str]], templates,
 
 def _sync_provider_plans(provider: str, regions: list[tuple[str, str]], templates, deactivate_missing_regions: bool = True):
     region_codes = {code for code, _ in regions}
-    active_plan_names = {template[1] if provider == 'aws_lightsail' else template[0] for template in templates}
+    if provider == 'aws_lightsail':
+        active_plan_ids = {template[0] for template in templates}
+    else:
+        active_plan_ids = {template[0] for template in templates}
     if deactivate_missing_regions:
         CloudServerPlan.objects.filter(provider=provider).exclude(region_code__in=region_codes).update(is_active=False)
-    CloudServerPlan.objects.filter(provider=provider, region_code__in=region_codes).exclude(plan_name__in=active_plan_names).update(is_active=False)
+    CloudServerPlan.objects.filter(provider=provider, region_code__in=region_codes).exclude(provider_plan_id__in=active_plan_ids).update(is_active=False)
     for region_code, region_name in regions:
         for template in templates:
             if provider == 'aws_lightsail':
-                _, plan_name, cpu, memory, storage, bandwidth, price = template
+                bundle_code, plan_name, cpu, memory, storage, bandwidth, price = template
+                plan_description = ''
             else:
-                plan_name, cpu, memory, storage, bandwidth, price = template
+                bundle_code, plan_name, cpu, memory, storage, bandwidth, price = template
+                plan_description = f'PlanId: {bundle_code}'
             plan, created = CloudServerPlan.objects.get_or_create(
                 provider=provider,
                 region_code=region_code,
-                plan_name=plan_name,
+                provider_plan_id=bundle_code,
                 defaults={
                     'region_name': region_name,
+                    'plan_name': plan_name,
+                    'plan_description': plan_description,
                     'cpu': cpu,
                     'memory': memory,
                     'storage': storage,
@@ -377,13 +445,15 @@ def _sync_provider_plans(provider: str, regions: list[tuple[str, str]], template
             )
             if not created:
                 plan.region_name = region_name
+                plan.plan_name = plan_name
+                plan.plan_description = plan_description
                 plan.cpu = cpu
                 plan.memory = memory
                 plan.storage = storage
                 plan.bandwidth = bandwidth
                 plan.price = price
                 plan.is_active = True
-                plan.save(update_fields=['region_name', 'cpu', 'memory', 'storage', 'bandwidth', 'price', 'is_active', 'updated_at'])
+                plan.save(update_fields=['region_name', 'plan_name', 'plan_description', 'cpu', 'memory', 'storage', 'bandwidth', 'price', 'is_active', 'updated_at'])
 
 
 @sync_to_async
@@ -400,12 +470,7 @@ def ensure_cloud_server_pricing():
         sync_server_prices('aws_lightsail', [('ap-southeast-1', '新加坡')], DEFAULT_AWS_PRICING_TEMPLATES)
     if aliyun_regions:
         for region_code, region_name in aliyun_regions:
-            region_templates = _fetch_aliyun_plan_templates(region_code)
-            region_templates = _merge_templates(region_templates, DEFAULT_ALIYUN_PLAN_TEMPLATES)
-            pricing_templates = [
-                (f'{region_code}-{idx}', plan_name, cpu, memory, storage, bandwidth, price)
-                for idx, (plan_name, cpu, memory, storage, bandwidth, price) in enumerate(region_templates, start=1)
-            ]
+            pricing_templates = _fetch_aliyun_plan_templates(region_code)
             sync_server_prices('aliyun_simple', [(region_code, region_name)], pricing_templates, deactivate_missing_regions=False)
     elif not ServerPrice.objects.filter(provider='aliyun_simple').exists():
         sync_server_prices('aliyun_simple', [('cn-hongkong', '香港')], DEFAULT_ALIYUN_PRICING_TEMPLATES)
@@ -414,8 +479,6 @@ def ensure_cloud_server_pricing():
 @sync_to_async
 def ensure_cloud_server_plans():
     ensure_cloud_server_pricing.__wrapped__()
-    if not CloudServerPlan.objects.exists():
-        _sync_provider_plans('aws_lightsail', [('ap-southeast-1', '新加坡')], _fetch_aws_bundle_templates())
 
 
 def _format_amount_tag(amount: Decimal) -> str:
@@ -490,7 +553,6 @@ async def list_custom_regions():
 def _list_region_plans_db(region_code: str):
     provider = 'aliyun_simple' if region_code == 'cn-hongkong' else 'aws_lightsail'
     queryset = CloudServerPlan.objects.filter(region_code=region_code, provider=provider, is_active=True)
-    queryset = queryset.exclude(provider='aws_lightsail', plan_name__iexact='Nano')
     return list(queryset.order_by('provider', '-sort_order', 'id'))
 
 
@@ -555,27 +617,33 @@ def create_cloud_server_order(user_id: int, plan_id: int, currency: str = 'USDT'
     plan = CloudServerPlan.objects.get(id=plan_id, is_active=True)
     user = TelegramUser.objects.get(id=user_id)
     quantity = max(1, int(quantity or 1))
-    unit_price = _apply_cloud_discount(Decimal(plan.price), user.cloud_discount_rate)
-    total = unit_price * quantity
-    pay_amount = _generate_unique_pay_amount(total, currency)
+    original_total_usdt = (Decimal(plan.price) * quantity).quantize(Decimal('0.01'))
+    discounted_total_usdt = (_apply_cloud_discount(Decimal(plan.price), user.cloud_discount_rate) * quantity).quantize(Decimal('0.01'))
+    payable_base = async_to_sync(usdt_to_trx)(discounted_total_usdt) if currency == 'TRX' else discounted_total_usdt
+    pay_amount = _generate_unique_pay_amount(payable_base, currency)
     expired_at = timezone.now() + timezone.timedelta(minutes=5)
+    account = choose_cloud_account_for_order(plan.provider, plan.region_code)
     order = CloudServerOrder.objects.create(
         order_no=_generate_cloud_order_no(),
         user_id=user_id,
         plan=plan,
         provider=plan.provider,
+        cloud_account=account,
+        account_label=cloud_account_label(account) or plan.provider,
         region_code=plan.region_code,
         region_name=plan.region_name,
         plan_name=plan.plan_name,
+        provider_resource_id=(plan.provider_plan_id or None),
         quantity=quantity,
         currency=currency,
-        total_amount=total,
+        total_amount=original_total_usdt,
         pay_amount=pay_amount,
         pay_method='address',
         status='pending',
         mtproxy_port=9528,
         expired_at=expired_at,
     )
+    CartItem.objects.filter(user_id=user_id, item_type='cloud_plan', cloud_plan_id=plan_id).delete()
     logger.info('云服务器订单创建: order=%s user=%s region=%s plan=%s qty=%s pay=address amount=%s', order.order_no, user_id, plan.region_code, plan.plan_name, quantity, pay_amount)
     return order
 
@@ -586,8 +654,9 @@ def buy_cloud_server_with_balance(user_id: int, plan_id: int, currency: str = 'U
     quantity = max(1, int(quantity or 1))
     with transaction.atomic():
         user = TelegramUser.objects.select_for_update().get(id=user_id)
-        total_usdt = _apply_cloud_discount(Decimal(plan.price), user.cloud_discount_rate) * quantity
-        total = async_to_sync(usdt_to_trx)(total_usdt) if currency == 'TRX' else total_usdt
+        original_total_usdt = (Decimal(plan.price) * quantity).quantize(Decimal('0.01'))
+        discounted_total_usdt = (_apply_cloud_discount(Decimal(plan.price), user.cloud_discount_rate) * quantity).quantize(Decimal('0.01'))
+        total = async_to_sync(usdt_to_trx)(discounted_total_usdt) if currency == 'TRX' else discounted_total_usdt
         balance_field = 'balance_trx' if currency == 'TRX' else 'balance'
         current_balance = Decimal(str(getattr(user, balance_field, 0) or 0))
         if current_balance < total:
@@ -595,17 +664,21 @@ def buy_cloud_server_with_balance(user_id: int, plan_id: int, currency: str = 'U
         old_balance = current_balance
         setattr(user, balance_field, current_balance - total)
         user.save(update_fields=[balance_field, 'updated_at'])
+        account = choose_cloud_account_for_order(plan.provider, plan.region_code)
         order = CloudServerOrder.objects.create(
             order_no=_generate_cloud_order_no(),
             user_id=user_id,
             plan=plan,
             provider=plan.provider,
+            cloud_account=account,
+            account_label=cloud_account_label(account) or plan.provider,
             region_code=plan.region_code,
             region_name=plan.region_name,
             plan_name=plan.plan_name,
+            provider_resource_id=(plan.provider_plan_id or None),
             quantity=quantity,
             currency=currency,
-            total_amount=total_usdt,
+            total_amount=original_total_usdt,
             pay_amount=total,
             pay_method='balance',
             status='paid',
@@ -622,6 +695,7 @@ def buy_cloud_server_with_balance(user_id: int, plan_id: int, currency: str = 'U
             related_id=order.id,
             description=f'云服务器订单 #{order.order_no} 余额支付',
         )
+    CartItem.objects.filter(user_id=user_id, item_type='cloud_plan', cloud_plan_id=plan_id).delete()
     logger.info('云服务器钱包下单: order=%s user=%s region=%s plan=%s qty=%s currency=%s amount=%s', order.order_no, user_id, plan.region_code, plan.plan_name, quantity, currency, total)
     return order, None
 
@@ -631,7 +705,8 @@ def pay_cloud_server_order_with_balance(order_id: int, user_id: int, currency: s
     order = CloudServerOrder.objects.select_related('plan').filter(id=order_id, user_id=user_id, status='pending').first()
     if not order:
         return None, '订单不存在或状态不可支付'
-    total = async_to_sync(usdt_to_trx)(order.total_amount) if currency == 'TRX' else Decimal(order.total_amount)
+    payable_usdt = Decimal(str(order.pay_amount or order.total_amount or 0))
+    total = async_to_sync(usdt_to_trx)(payable_usdt) if currency == 'TRX' else payable_usdt
     with transaction.atomic():
         user = TelegramUser.objects.select_for_update().get(id=user_id)
         balance_field = 'balance_trx' if currency == 'TRX' else 'balance'
@@ -658,46 +733,206 @@ def pay_cloud_server_order_with_balance(order_id: int, user_id: int, currency: s
             related_id=order.id,
             description=f'云服务器订单 #{order.order_no} 余额补付',
         )
+    if order.plan_id:
+        CartItem.objects.filter(user_id=user_id, item_type='cloud_plan', cloud_plan_id=order.plan_id).delete()
     logger.info('云服务器钱包补付: order=%s user=%s currency=%s amount=%s', order.order_no, user_id, currency, total)
     return order, None
 
 
 _ACTIVE_ORDER_STATUSES = {'completed', 'expiring', 'suspended', 'renew_pending', 'paid', 'provisioning'}
+_VISIBLE_USER_SERVER_STATUSES = {'completed', 'expiring', 'suspended', 'renew_pending', 'provisioning', 'paid', 'failed'}
 _INACTIVE_ASSET_STATUSES = {'deleted', 'deleting', 'terminated', 'terminating', 'expired'}
+
+
+def _first_nonblank(*values) -> str:
+    for value in values:
+        text = str(value or '').strip()
+        if text:
+            return text
+    return ''
+
+
+def _hydrate_order_from_proxy_asset(order: CloudServerOrder | None, asset: CloudAsset | None = None, server: Server | None = None):
+    if not order:
+        return order
+    if asset is None:
+        asset = (
+            CloudAsset.objects.filter(order=order, kind=CloudAsset.KIND_SERVER)
+            .exclude(status__in=_INACTIVE_ASSET_STATUSES)
+            .order_by('-updated_at', '-id')
+            .first()
+        )
+    if server is None:
+        server = (
+            Server.objects.filter(order=order)
+            .exclude(status__in=_INACTIVE_ASSET_STATUSES)
+            .order_by('-updated_at', '-id')
+            .first()
+        )
+    public_ip = _first_nonblank(getattr(asset, 'public_ip', None), getattr(server, 'public_ip', None), order.public_ip)
+    previous_ip = _first_nonblank(getattr(asset, 'previous_public_ip', None), getattr(server, 'previous_public_ip', None), order.previous_public_ip)
+    expiry_candidates = [
+        item for item in (
+            getattr(asset, 'actual_expires_at', None),
+            getattr(server, 'expires_at', None),
+            order.service_expires_at,
+        ) if item
+    ]
+    expires_at = max(expiry_candidates) if expiry_candidates else None
+    if public_ip:
+        order.public_ip = public_ip
+    if previous_ip:
+        order.previous_public_ip = previous_ip
+    if expires_at:
+        order.service_expires_at = expires_at
+    if asset:
+        order.mtproxy_link = getattr(asset, 'mtproxy_link', None) or order.mtproxy_link
+        order.proxy_links = getattr(asset, 'proxy_links', None) or order.proxy_links
+        order.mtproxy_secret = getattr(asset, 'mtproxy_secret', None) or order.mtproxy_secret
+        order.mtproxy_host = getattr(asset, 'mtproxy_host', None) or order.mtproxy_host
+        order.mtproxy_port = getattr(asset, 'mtproxy_port', None) or order.mtproxy_port
+        order.login_password = getattr(asset, 'login_password', None) or order.login_password
+        order.instance_id = getattr(asset, 'instance_id', None) or order.instance_id
+    if server:
+        order.login_password = getattr(server, 'login_password', None) or order.login_password
+        order.instance_id = getattr(server, 'instance_id', None) or order.instance_id
+    return order
+
+
+def _proxy_asset_view(asset: CloudAsset):
+    return SimpleNamespace(
+        id=asset.id,
+        _proxy_item_kind='asset',
+        asset_id=asset.id,
+        order_no=asset.asset_name or f'ASSET-{asset.id}',
+        public_ip=asset.public_ip,
+        previous_public_ip=asset.previous_public_ip,
+        service_expires_at=asset.actual_expires_at,
+        region_name=asset.region_name or '-',
+        region_code=asset.region_code or '',
+        plan_name=asset.asset_name or '人工代理',
+        quantity=1,
+        status=asset.status,
+        provider=asset.provider,
+        pay_method='manual',
+        pay_amount=asset.price,
+        total_amount=asset.price,
+        currency=asset.currency,
+        mtproxy_port=asset.mtproxy_port,
+        mtproxy_link=asset.mtproxy_link,
+        proxy_links=asset.proxy_links,
+        mtproxy_secret=asset.mtproxy_secret,
+        mtproxy_host=asset.mtproxy_host,
+        login_user=asset.login_user,
+        login_password=asset.login_password,
+        instance_id=asset.instance_id,
+        ip_recycle_at=None,
+        auto_renew_enabled=False,
+        cloud_reminder_enabled=True,
+        created_at=asset.created_at,
+        note=asset.note,
+        get_status_display=lambda: asset.get_status_display(),
+    )
+
+
+def _proxy_server_view(server: Server):
+    return SimpleNamespace(
+        id=server.id,
+        _proxy_item_kind='server',
+        server_id=server.id,
+        order_no=server.server_name or f'SERVER-{server.id}',
+        public_ip=server.public_ip,
+        previous_public_ip=server.previous_public_ip,
+        service_expires_at=server.expires_at,
+        region_name=server.region_name or '-',
+        region_code=server.region_code or '',
+        plan_name=server.server_name or '人工代理',
+        quantity=1,
+        status=server.status,
+        provider=server.provider,
+        pay_method='manual',
+        pay_amount=None,
+        total_amount=None,
+        currency='USDT',
+        mtproxy_port=None,
+        mtproxy_link=None,
+        proxy_links=[],
+        mtproxy_secret=None,
+        mtproxy_host=None,
+        login_user=server.login_user,
+        login_password=server.login_password,
+        instance_id=server.instance_id,
+        ip_recycle_at=None,
+        auto_renew_enabled=False,
+        cloud_reminder_enabled=True,
+        created_at=server.created_at,
+        note=server.note,
+        get_status_display=lambda: server.get_status_display(),
+    )
 
 
 @sync_to_async
 def list_user_cloud_servers(user_id: int):
-    orders = list(
-        CloudServerOrder.objects.filter(user_id=user_id)
-        .exclude(status__in=['deleted', 'deleting', 'expired'])
-        .order_by('-created_at')
+    ip_filter = Q(public_ip__isnull=False) & ~Q(public_ip='')
+    assets = list(
+        CloudAsset.objects.select_related('order')
+        .filter(user_id=user_id)
+        .filter(ip_filter)
+        .order_by('-sort_order', 'actual_expires_at', '-updated_at', '-id')
     )
-    if not orders:
-        return []
-    order_ids = [item.id for item in orders]
-    hidden_order_ids = set(
-        CloudAsset.objects.filter(
-            kind=CloudAsset.KIND_SERVER,
-            order_id__in=order_ids,
-            status__in=_INACTIVE_ASSET_STATUSES,
-        ).values_list('order_id', flat=True)
+    items = []
+    seen_order_ids = set()
+    seen_ips = set()
+    for asset in assets:
+        ip_key = str(asset.public_ip or '').strip()
+        if ip_key:
+            seen_ips.add(ip_key)
+        order = asset.order
+        if order:
+            if order.id in seen_order_ids:
+                continue
+            hydrated = _hydrate_order_from_proxy_asset(order, asset=asset)
+            seen_order_ids.add(hydrated.id)
+            items.append(hydrated)
+            continue
+        items.append(_proxy_asset_view(asset))
+
+    servers = list(
+        Server.objects.select_related('order')
+        .filter(user_id=user_id)
+        .filter(Q(public_ip__isnull=False) & ~Q(public_ip=''))
+        .order_by('-sort_order', 'expires_at', '-updated_at', '-id')
     )
-    hidden_order_ids.update(
-        Server.objects.filter(
-            order_id__in=order_ids,
-            status__in=_INACTIVE_ASSET_STATUSES,
-        ).values_list('order_id', flat=True)
-    )
-    return [
-        item for item in orders
-        if item.id not in hidden_order_ids and str(item.public_ip or '').strip()
-    ]
+    for server in servers:
+        ip_key = str(server.public_ip or '').strip()
+        if ip_key and ip_key in seen_ips:
+            continue
+        if server.order_id and server.order_id in seen_order_ids:
+            continue
+        if server.order:
+            hydrated = _hydrate_order_from_proxy_asset(server.order, server=server)
+            seen_order_ids.add(hydrated.id)
+            items.append(hydrated)
+        else:
+            items.append(_proxy_server_view(server))
+        if ip_key:
+            seen_ips.add(ip_key)
+    return items
 
 
 @sync_to_async
 def get_user_cloud_server(order_id: int, user_id: int):
-    return CloudServerOrder.objects.filter(id=order_id, user_id=user_id).first()
+    order = CloudServerOrder.objects.filter(id=order_id, user_id=user_id).first()
+    return _hydrate_order_from_proxy_asset(order)
+
+
+@sync_to_async
+def get_user_proxy_asset_detail(item_id: int, user_id: int, kind: str):
+    if kind == 'server':
+        server = Server.objects.filter(id=item_id, user_id=user_id).first()
+        return _proxy_server_view(server) if server else None
+    asset = CloudAsset.objects.filter(id=item_id, user_id=user_id).first()
+    return _proxy_asset_view(asset) if asset else None
 
 
 @sync_to_async
@@ -705,40 +940,33 @@ def get_cloud_server_by_ip(ip: str):
     normalized_ip = (ip or '').strip()
     if not normalized_ip:
         return None
-    asset = CloudAsset.objects.filter(
-        Q(public_ip=normalized_ip) | Q(previous_public_ip=normalized_ip)
-    ).exclude(status__in=_INACTIVE_ASSET_STATUSES).select_related('order').order_by('-updated_at', '-id').first()
-    if asset and asset.order_id and asset.order and asset.order.status in _ACTIVE_ORDER_STATUSES:
-        return asset.order
-    server = Server.objects.filter(
-        Q(public_ip=normalized_ip) | Q(previous_public_ip=normalized_ip)
-    ).exclude(status__in=_INACTIVE_ASSET_STATUSES).select_related('order').order_by('-updated_at', '-id').first()
-    if server and server.order_id and server.order and server.order.status in _ACTIVE_ORDER_STATUSES:
-        return server.order
-    order = CloudServerOrder.objects.filter(
-        Q(public_ip=normalized_ip) | Q(previous_public_ip=normalized_ip),
-        status__in=_ACTIVE_ORDER_STATUSES,
-    ).order_by('-created_at').first()
-    if order:
-        return order
-    asset_any = CloudAsset.objects.filter(
-        Q(public_ip=normalized_ip) | Q(previous_public_ip=normalized_ip)
-    ).select_related('order').order_by('-updated_at', '-id').first()
-    if asset_any and asset_any.order_id and asset_any.order:
-        return asset_any.order
-    server_any = Server.objects.filter(
-        Q(public_ip=normalized_ip) | Q(previous_public_ip=normalized_ip)
-    ).select_related('order').order_by('-updated_at', '-id').first()
-    if server_any and server_any.order_id and server_any.order:
-        return server_any.order
-    return CloudServerOrder.objects.filter(
-        Q(public_ip=normalized_ip) | Q(previous_public_ip=normalized_ip)
-    ).order_by('-created_at', '-id').first()
+    ip_q = Q(public_ip=normalized_ip) | Q(previous_public_ip=normalized_ip)
+    asset = (
+        CloudAsset.objects.filter(ip_q)
+        .exclude(status__in=_INACTIVE_ASSET_STATUSES)
+        .select_related('order')
+        .order_by('-updated_at', '-id')
+        .first()
+    )
+    if asset and asset.order_id and asset.order and asset.order.status not in {'deleted', 'deleting', 'expired', 'cancelled'}:
+        return _hydrate_order_from_proxy_asset(asset.order, asset=asset)
+    server = (
+        Server.objects.filter(ip_q)
+        .exclude(status__in=_INACTIVE_ASSET_STATUSES)
+        .select_related('order')
+        .order_by('-updated_at', '-id')
+        .first()
+    )
+    if server and server.order_id and server.order and server.order.status not in {'deleted', 'deleting', 'expired', 'cancelled'}:
+        return _hydrate_order_from_proxy_asset(server.order, server=server)
+    order = CloudServerOrder.objects.filter(ip_q, status__in=_ACTIVE_ORDER_STATUSES).order_by('-created_at').first()
+    return _hydrate_order_from_proxy_asset(order)
 
 
 def _can_order_be_renewed(order: CloudServerOrder) -> bool:
-    if order.status in {'deleted', 'deleting', 'expired'}:
+    if order.status not in {'completed', 'expiring', 'suspended', 'renew_pending', 'paid', 'provisioning'}:
         return False
+    order = _hydrate_order_from_proxy_asset(order)
     if not str(order.public_ip or '').strip():
         return False
     return True
@@ -805,6 +1033,20 @@ def record_cloud_ip_log(*, event_type, order=None, asset=None, server=None, publ
             or getattr(server_obj, 'previous_public_ip', None)
             or getattr(order_obj, 'previous_public_ip', None)
         )
+    if event_type == CloudIpLog.EVENT_DELETED:
+        lookup = CloudIpLog.objects.filter(event_type=event_type)
+        if asset_obj:
+            lookup = lookup.filter(asset=asset_obj)
+        elif server_obj:
+            lookup = lookup.filter(server=server_obj)
+        elif order_obj:
+            lookup = lookup.filter(order=order_obj)
+        if previous_ip:
+            lookup = lookup.filter(previous_public_ip=previous_ip)
+        existing = lookup.order_by('-created_at', '-id').first()
+        if existing:
+            return existing
+
     return CloudIpLog.objects.create(
         order=order_obj,
         asset=asset_obj,
@@ -826,9 +1068,10 @@ def record_cloud_ip_log(*, event_type, order=None, asset=None, server=None, publ
 
 @sync_to_async
 def create_cloud_server_renewal(order_id: int, user_id: int, days: int = 31):
-    order = CloudServerOrder.objects.select_related('user').filter(id=order_id).first()
+    order = CloudServerOrder.objects.select_related('user').filter(id=order_id, user_id=user_id).first()
     if not order:
         return None
+    order = _hydrate_order_from_proxy_asset(order)
     if not _can_order_be_renewed(order):
         return False
     order.status = 'renew_pending'
@@ -842,15 +1085,22 @@ def create_cloud_server_renewal(order_id: int, user_id: int, days: int = 31):
 
 @sync_to_async
 def apply_cloud_server_renewal(order_id: int, days: int = 31):
-    order = CloudServerOrder.objects.get(id=order_id)
+    order = _hydrate_order_from_proxy_asset(CloudServerOrder.objects.get(id=order_id))
+    ok, renew_note = _renew_aliyun_instance(order, days)
+    if not ok:
+        order.provision_note = renew_note
+        order.save(update_fields=['provision_note', 'updated_at'])
+        raise ValueError(renew_note)
     base = order.service_expires_at or timezone.now()
     if base < timezone.now():
         base = timezone.now()
     order.service_expires_at = base + timezone.timedelta(days=days)
     order.last_renewed_at = timezone.now()
     order.delay_quota = max(int(order.delay_quota or 0), 0) + 1
+    order.ip_change_quota = max(int(getattr(order, 'ip_change_quota', 0) or 0), 0) + 1
     order.status = 'completed'
-    order.save(update_fields=['service_expires_at', 'last_renewed_at', 'delay_quota', 'status', 'updated_at'])
+    order.provision_note = renew_note or f'续费成功，服务有效期已顺延 {days} 天。'
+    order.save(update_fields=['service_expires_at', 'renew_grace_expires_at', 'suspend_at', 'delete_at', 'ip_recycle_at', 'last_renewed_at', 'delay_quota', 'ip_change_quota', 'status', 'provision_note', 'updated_at'])
     CloudAsset.objects.filter(order=order).update(actual_expires_at=order.service_expires_at, updated_at=timezone.now())
     Server.objects.filter(order=order).update(expires_at=order.service_expires_at, updated_at=timezone.now())
     record_cloud_ip_log(
@@ -858,7 +1108,7 @@ def apply_cloud_server_renewal(order_id: int, days: int = 31):
         order=order,
         public_ip=order.public_ip,
         previous_public_ip=order.previous_public_ip,
-        note=f'服务器续费 {days} 天，新的服务到期时间：{order.service_expires_at:%Y-%m-%d %H:%M}',
+        note=f'服务器续费 {days} 天，新的服务到期时间：{order.service_expires_at:%Y-%m-%d %H:%M}；{renew_note}',
     )
     return order
 
@@ -869,6 +1119,7 @@ def pay_cloud_server_renewal_with_balance(order_id: int, user_id: int, currency:
         order = CloudServerOrder.objects.select_related('user').select_for_update().filter(id=order_id, user_id=user_id).first()
         if not order:
             return None, '订单不存在'
+        order = _hydrate_order_from_proxy_asset(order)
         if order.status not in {'renew_pending', 'pending'}:
             return None, '当前订单状态不可钱包支付'
         if not _can_order_be_renewed(order):
@@ -888,7 +1139,10 @@ def pay_cloud_server_renewal_with_balance(order_id: int, user_id: int, currency:
         order.paid_at = timezone.now()
         order.expired_at = None
         order.save(update_fields=['currency', 'pay_method', 'pay_amount', 'paid_at', 'expired_at', 'updated_at'])
-        order = apply_cloud_server_renewal.__wrapped__(order.id, days)
+        try:
+            order = apply_cloud_server_renewal.__wrapped__(order.id, days)
+        except Exception as exc:
+            return None, str(exc)
         record_balance_ledger(
             user,
             ledger_type='cloud_order_balance_pay',
@@ -918,8 +1172,15 @@ def mark_cloud_server_ip_change_requested(order_id: int, user_id: int, region_co
         return None
     if order.status not in {'completed', 'expiring', 'suspended'}:
         return False
+    if order.provider != 'aws_lightsail':
+        return False
+    remaining_ip_changes = max(int(getattr(order, 'ip_change_quota', 0) or 0), 0)
+    if remaining_ip_changes <= 0:
+        return False
     target_region_code = region_code or order.region_code
-    provider = 'aliyun_simple' if target_region_code == 'cn-hongkong' else 'aws_lightsail'
+    if target_region_code == 'cn-hongkong':
+        return False
+    provider = 'aws_lightsail'
     fallback_plan = CloudServerPlan.objects.filter(
         provider=provider,
         region_code=target_region_code,
@@ -936,6 +1197,7 @@ def mark_cloud_server_ip_change_requested(order_id: int, user_id: int, region_co
         return False
     target_port = port or order.mtproxy_port or 9528
     original_service_expires_at = order.service_expires_at
+    remaining_ip_changes -= 1
     now = timezone.now()
     migration_due_at = now + timezone.timedelta(days=5)
     ip_recycle_at = migration_due_at + timezone.timedelta(days=15)
@@ -960,6 +1222,7 @@ def mark_cloud_server_ip_change_requested(order_id: int, user_id: int, region_co
         migration_due_at=migration_due_at,
         replacement_for=order,
         renew_extension_days=order.renew_extension_days,
+        ip_change_quota=remaining_ip_changes,
         last_user_id=order.last_user_id,
         server_name=order.server_name,
         image_name=order.image_name,
@@ -972,6 +1235,7 @@ def mark_cloud_server_ip_change_requested(order_id: int, user_id: int, region_co
     order.delete_at = migration_due_at
     order.renew_grace_expires_at = migration_due_at
     order.ip_recycle_at = ip_recycle_at
+    order.ip_change_quota = remaining_ip_changes
     CloudServerOrder.objects.filter(id=order.id).update(
         provision_note=order.provision_note,
         migration_due_at=migration_due_at,
@@ -980,6 +1244,7 @@ def mark_cloud_server_ip_change_requested(order_id: int, user_id: int, region_co
         delete_at=migration_due_at,
         renew_grace_expires_at=migration_due_at,
         ip_recycle_at=ip_recycle_at,
+        ip_change_quota=remaining_ip_changes,
         updated_at=timezone.now(),
     )
     CloudAsset.objects.filter(order=order).update(actual_expires_at=migration_due_at, updated_at=timezone.now())
@@ -1026,6 +1291,7 @@ def create_cloud_server_rebuild_order(order_id: int):
         mtproxy_port=order.mtproxy_port or 9528,
         mtproxy_secret=order.mtproxy_secret,
         mtproxy_link=order.mtproxy_link,
+        proxy_links=order.proxy_links or [],
         static_ip_name=order.static_ip_name,
         replacement_for=order,
         renew_extension_days=order.renew_extension_days,
@@ -1046,11 +1312,180 @@ def mark_cloud_server_reinit_requested(order_id: int, user_id: int):
     order = CloudServerOrder.objects.filter(id=order_id, user_id=user_id).first()
     if not order:
         return None
-    if not order.public_ip or not order.login_password:
+    is_unfinished = order.status in {'paid', 'provisioning', 'failed'}
+    if not is_unfinished and (not order.public_ip or not order.login_password):
         return False
-    order.provision_note = '\n'.join(filter(None, [order.provision_note, '用户发起重试初始化请求。']))
+    if not is_unfinished and not _has_main_proxy_link(order):
+        return 'missing_main_link'
+    note = '用户发起继续初始化请求，允许重新生成代理链接。' if is_unfinished else '用户发起重试初始化请求，要求主/备用代理链接保持不变。'
+    order.provision_note = '\n'.join(filter(None, [order.provision_note, note]))
     order.save(update_fields=['provision_note', 'updated_at'])
     return order
+
+
+def _has_main_proxy_link(order: CloudServerOrder) -> bool:
+    if getattr(order, 'mtproxy_link', None):
+        return True
+    for item in getattr(order, 'proxy_links', None) or []:
+        if isinstance(item, dict) and item.get('url') and str(item.get('port') or '') == str(order.mtproxy_port or 9528):
+            return True
+    return False
+
+
+def _upgrade_blocks_and_expiry(expires_at):
+    now = timezone.now()
+    if not expires_at or expires_at <= now:
+        remaining_days = Decimal('0')
+    else:
+        seconds = Decimal(str((expires_at - now).total_seconds()))
+        remaining_days = seconds / Decimal('86400')
+    blocks = max(1, int((remaining_days / Decimal('31')).to_integral_value(rounding=ROUND_CEILING)))
+    target_days = blocks * 31
+    return blocks, now + timezone.timedelta(days=target_days), remaining_days
+
+
+@sync_to_async
+def list_cloud_server_upgrade_plans(order_id: int, user_id: int):
+    order = _hydrate_order_from_proxy_asset(CloudServerOrder.objects.select_related('plan', 'user').filter(id=order_id, user_id=user_id).first())
+    if not order:
+        return [], '服务器记录不存在'
+    if order.provider != 'aws_lightsail':
+        return [], '当前服务器不支持升级配置'
+    if order.status not in {'completed', 'expiring', 'suspended'}:
+        return [], '当前状态不允许升级'
+    if not _has_main_proxy_link(order):
+        return [], '当前服务器没有主代理链接，请先在后台添加主链接后再升级'
+    current_price = Decimal(getattr(order.plan, 'price', None) or order.total_amount or 0)
+    blocks, target_expiry, _ = _upgrade_blocks_and_expiry(order.service_expires_at)
+    plans = list(CloudServerPlan.objects.filter(provider=order.provider, region_code=order.region_code, is_active=True, price__gt=current_price).order_by('price', 'sort_order', 'id'))
+    result = []
+    for plan in plans:
+        diff = ((Decimal(plan.price) - current_price) * Decimal(blocks)).quantize(Decimal('0.01'))
+        result.append({'id': plan.id, 'name': plan.plan_name, 'price': str(plan.price.quantize(Decimal('0.001'))), 'diff': str(diff.quantize(Decimal('0.001'))), 'target_days': blocks * 31, 'target_expiry': target_expiry})
+    return result, None
+
+
+@sync_to_async
+def create_cloud_server_upgrade_order(order_id: int, user_id: int, target_plan_id: int):
+    order = _hydrate_order_from_proxy_asset(CloudServerOrder.objects.select_related('plan', 'user').filter(id=order_id, user_id=user_id).first())
+    if not order:
+        return None, '服务器记录不存在'
+    if order.provider != 'aws_lightsail':
+        return None, '当前仅支持 AWS Lightsail 升级迁移'
+    if order.status not in {'completed', 'expiring', 'suspended'}:
+        return None, '当前状态不允许升级'
+    if not order.static_ip_name:
+        return None, '当前服务器没有固定 IP，无法保证链接不变'
+    if not _has_main_proxy_link(order):
+        return None, '当前服务器没有主代理链接，请先在后台添加主链接后再升级'
+    if not order.mtproxy_secret:
+        return None, '当前服务器缺少 MTProxy 密钥，无法保证链接不变'
+    target_plan = CloudServerPlan.objects.filter(id=target_plan_id, provider=order.provider, region_code=order.region_code, is_active=True).first()
+    if not target_plan:
+        return None, '目标套餐不存在'
+    current_price = Decimal(getattr(order.plan, 'price', None) or order.total_amount or 0)
+    if Decimal(target_plan.price) <= current_price:
+        return None, '只能升级到更高价格的配置'
+    blocks, target_expiry, _ = _upgrade_blocks_and_expiry(order.service_expires_at)
+    diff = ((Decimal(target_plan.price) - current_price) * Decimal(blocks)).quantize(Decimal('0.01'))
+    with transaction.atomic():
+        user = TelegramUser.objects.select_for_update().get(id=user_id)
+        current_balance = Decimal(str(user.balance or 0))
+        if current_balance < diff:
+            return None, f'USDT 余额不足，需要补差价 {diff} U'
+        old_balance = current_balance
+        user.balance = current_balance - diff
+        user.save(update_fields=['balance', 'updated_at'])
+        suffix = timezone.now().strftime('%m%d%H%M%S')
+        new_order = CloudServerOrder.objects.create(
+            user_id=order.user_id,
+            order_no=f'{order.order_no}-UPGRADE-{suffix}',
+            plan=target_plan,
+            provider=target_plan.provider,
+            cloud_account=order.cloud_account,
+            account_label=order.account_label or order.provider,
+            region_code=target_plan.region_code,
+            region_name=target_plan.region_name,
+            plan_name=target_plan.plan_name,
+            provider_resource_id=(target_plan.provider_plan_id or None),
+            quantity=1,
+            currency='USDT',
+            total_amount=diff,
+            pay_amount=diff,
+            pay_method='balance',
+            status='paid',
+            lifecycle_days=blocks * 31,
+            mtproxy_port=order.mtproxy_port or 9528,
+            mtproxy_secret=order.mtproxy_secret,
+            mtproxy_link=order.mtproxy_link,
+            proxy_links=order.proxy_links or [],
+            static_ip_name=order.static_ip_name,
+            replacement_for=order,
+            last_user_id=order.last_user_id,
+            service_started_at=order.service_started_at or timezone.now(),
+            service_expires_at=target_expiry,
+            server_name=order.server_name,
+            image_name=order.image_name,
+            paid_at=timezone.now(),
+            provision_note='\n'.join(filter(None, [order.provision_note, f'用户发起升级配置：{order.plan_name} -> {target_plan.plan_name}，补差价 {diff} USDT，目标到期 {target_expiry:%Y-%m-%d %H:%M}，保持主/备用代理链路不变。'])),
+        )
+        record_balance_ledger(user, ledger_type='cloud_order_balance_pay', currency='USDT', old_balance=old_balance, new_balance=user.balance, related_type='cloud_order', related_id=new_order.id, description=f'云服务器升级补差价 #{new_order.order_no}')
+        order.provision_note = '\n'.join(filter(None, [order.provision_note, f'已发起升级配置，新实例订单: {new_order.order_no}，补差价 {diff} USDT。']))
+        order.save(update_fields=['provision_note', 'updated_at'])
+    return new_order, None
+
+
+@sync_to_async
+def refund_cloud_server_to_balance(order_id: int, user_id: int):
+    order = _hydrate_order_from_proxy_asset(CloudServerOrder.objects.select_related('plan', 'user').filter(id=order_id, user_id=user_id).first())
+    if not order:
+        logger.warning('云服务器退款拒绝: order_id=%s user_id=%s reason=not_found', order_id, user_id)
+        return None, '服务器记录不存在'
+    logger.info('云服务器退款检查: order=%s user_id=%s status=%s public_ip=%s expires_at=%s pay_amount=%s total_amount=%s currency=%s', order.order_no, user_id, order.status, order.public_ip, order.service_expires_at, order.pay_amount, order.total_amount, order.currency)
+    if order.status not in {'paid', 'provisioning', 'failed', 'completed', 'expiring', 'suspended'}:
+        logger.warning('云服务器退款拒绝: order=%s user_id=%s status=%s reason=status_not_allowed', order.order_no, user_id, order.status)
+        return None, '当前状态不允许退款'
+    if BalanceLedger.objects.filter(type='manual_adjust', direction='in', related_type='cloud_order', related_id=order.id, description__startswith='云服务器剩余价值退款 #').exists():
+        logger.warning('云服务器退款拒绝: order=%s user_id=%s reason=already_refunded', order.order_no, user_id)
+        return None, '该订单已退款，不能重复退款'
+    now = timezone.now()
+    min_refund_expires_at = now + timezone.timedelta(days=10)
+    if order.service_expires_at and order.service_expires_at < min_refund_expires_at:
+        logger.warning('云服务器退款拒绝: order=%s user_id=%s expires_at=%s reason=less_than_10_days', order.order_no, user_id, order.service_expires_at)
+        return None, '到期时间少于 10 天，禁止退款'
+    currency = order.currency or 'USDT'
+    monthly = Decimal(str(order.pay_amount or order.total_amount or 0))
+    is_delivered = order.status in {'completed', 'expiring', 'suspended'}
+    if is_delivered:
+        if not str(order.public_ip or '').strip():
+            logger.warning('云服务器退款拒绝: order=%s user_id=%s reason=missing_public_ip', order.order_no, user_id)
+            return None, '当前服务器缺少有效 IP，不允许退款'
+        if not order.service_expires_at or order.service_expires_at <= now:
+            logger.warning('云服务器退款拒绝: order=%s user_id=%s expires_at=%s reason=no_remaining_time', order.order_no, user_id, order.service_expires_at)
+            return None, '当前服务器没有剩余有效期可退款'
+        seconds_left = Decimal(str((order.service_expires_at - now).total_seconds()))
+        refund = (monthly * seconds_left / Decimal(str(31 * 86400))).quantize(Decimal('0.001'))
+    else:
+        refund = monthly.quantize(Decimal('0.001'))
+    if refund <= 0:
+        logger.warning('云服务器退款拒绝: order=%s user_id=%s refund=%s reason=zero_amount', order.order_no, user_id, refund)
+        return None, '退款金额为 0'
+    logger.info('云服务器退款准备入账: order=%s user_id=%s refund=%s currency=%s delivered=%s', order.order_no, user_id, refund, currency, is_delivered)
+    with transaction.atomic():
+        user = TelegramUser.objects.select_for_update().get(id=user_id)
+        balance_field = 'balance_trx' if currency == 'TRX' else 'balance'
+        old_balance = Decimal(str(getattr(user, balance_field, 0) or 0))
+        setattr(user, balance_field, old_balance + refund)
+        user.save(update_fields=[balance_field, 'updated_at'])
+        record_balance_ledger(user, ledger_type='manual_adjust', currency=currency, old_balance=old_balance, new_balance=getattr(user, balance_field), related_type='cloud_order', related_id=order.id, description=f'云服务器剩余价值退款 #{order.order_no}')
+        refund_expires_at = now + timezone.timedelta(days=3)
+        order.service_expires_at = refund_expires_at
+        order.provision_note = '\n'.join(filter(None, [order.provision_note, f'用户申请退款：退回 {refund} {currency} 至余额，服务将在 3 天后到期，订单状态保持为 {order.status}。']))
+        order.save(update_fields=['service_expires_at', 'renew_grace_expires_at', 'suspend_at', 'delete_at', 'ip_recycle_at', 'provision_note', 'updated_at'])
+        asset_count = CloudAsset.objects.filter(order=order).update(actual_expires_at=refund_expires_at, updated_at=now)
+        server_count = Server.objects.filter(order=order).update(expires_at=refund_expires_at, updated_at=now)
+        logger.info('云服务器退款完成: order=%s user_id=%s refund=%s currency=%s new_balance=%s refund_expires_at=%s asset_updated=%s server_updated=%s', order.order_no, user_id, refund, currency, getattr(user, balance_field), refund_expires_at, asset_count, server_count)
+    return {'amount': refund, 'currency': currency, 'order': order}, None
 
 
 @sync_to_async
@@ -1061,6 +1496,84 @@ def mute_cloud_reminders(user_id: int, days: int = 3):
     user.cloud_reminder_muted_until = timezone.now() + timezone.timedelta(days=days)
     user.save(update_fields=['cloud_reminder_muted_until', 'updated_at'])
     return user
+
+
+@sync_to_async
+def unmute_cloud_reminders(user_id: int):
+    user = TelegramUser.objects.filter(id=user_id).first()
+    if not user:
+        return None
+    user.cloud_reminder_muted_until = None
+    user.save(update_fields=['cloud_reminder_muted_until', 'updated_at'])
+    return user
+
+
+@sync_to_async
+def get_user_reminder_summary(user_id: int):
+    user = TelegramUser.objects.filter(id=user_id).first()
+    if not user:
+        return None
+    muted_until = user.cloud_reminder_muted_until
+    cloud_orders = list(
+        CloudServerOrder.objects.filter(user_id=user_id, service_expires_at__isnull=False)
+        .exclude(status__in=['cancelled', 'refunded', 'deleted'])
+        .order_by('service_expires_at', '-id')
+    )
+    auto_renew_count = sum(1 for order in cloud_orders if order.auto_renew_enabled)
+    cloud_reminder_count = sum(1 for order in cloud_orders if getattr(order, 'cloud_reminder_enabled', True))
+    cloud_reminder_enabled = any(getattr(order, 'cloud_reminder_enabled', True) for order in cloud_orders)
+    return {
+        'user': user,
+        'cloud_orders': cloud_orders,
+        'cloud_reminder_enabled': cloud_reminder_enabled,
+        'muted_until': muted_until,
+        'auto_renew_count': auto_renew_count,
+        'cloud_reminder_count': cloud_reminder_count,
+    }
+
+
+@sync_to_async
+def mute_all_user_reminders(user_id: int, days: int = 3650):
+    user = TelegramUser.objects.filter(id=user_id).first()
+    if not user:
+        return None
+    user.cloud_reminder_muted_until = None
+    user.save(update_fields=['cloud_reminder_muted_until', 'updated_at'])
+    cloud_updated = CloudServerOrder.objects.filter(user_id=user_id).update(cloud_reminder_enabled=False, auto_renew_enabled=False, updated_at=timezone.now())
+    return {'user': user, 'cloud_reminders_closed': cloud_updated}
+
+
+@sync_to_async
+def unmute_all_user_reminders(user_id: int):
+    user = TelegramUser.objects.filter(id=user_id).first()
+    if not user:
+        return None
+    user.cloud_reminder_muted_until = None
+    user.save(update_fields=['cloud_reminder_muted_until', 'updated_at'])
+    cloud_orders = CloudServerOrder.objects.filter(user_id=user_id).exclude(status__in=['cancelled', 'refunded', 'deleted'])
+    cloud_reminder_updated = cloud_orders.update(cloud_reminder_enabled=True, updated_at=timezone.now())
+    auto_renew_updated = 0
+    for order in cloud_orders:
+        if _can_order_be_renewed(order) and not order.auto_renew_enabled:
+            order.auto_renew_enabled = True
+            order.save(update_fields=['auto_renew_enabled', 'updated_at'])
+            auto_renew_updated += 1
+    return {'user': user, 'cloud_reminders_opened': cloud_reminder_updated, 'cloud_auto_renew_opened': auto_renew_updated}
+
+
+@sync_to_async
+def set_cloud_order_reminder(order_id: int, user_id: int, enabled: bool):
+    order = CloudServerOrder.objects.filter(id=order_id, user_id=user_id).first()
+    if not order:
+        return None
+    if enabled:
+        user = TelegramUser.objects.filter(id=user_id).first()
+        if user and user.cloud_reminder_muted_until:
+            user.cloud_reminder_muted_until = None
+            user.save(update_fields=['cloud_reminder_muted_until', 'updated_at'])
+    order.cloud_reminder_enabled = enabled
+    order.save(update_fields=['cloud_reminder_enabled', 'updated_at'])
+    return order
 
 
 @sync_to_async
@@ -1117,20 +1630,29 @@ __all__ = [
     'ensure_unique_cloud_server_name',
     'get_cloud_plan',
     'get_cloud_server_auto_renew',
+    'get_user_reminder_summary',
     'get_cloud_server_by_ip',
     'get_user_cloud_server',
+    'get_user_proxy_asset_detail',
     'list_custom_regions',
     'list_region_plans',
     'list_user_cloud_servers',
     'create_cloud_server_rebuild_order',
     'mark_cloud_server_ip_change_requested',
     'mark_cloud_server_reinit_requested',
+    'mute_all_user_reminders',
     'mute_cloud_reminders',
     'pay_cloud_server_order_with_balance',
     'pay_cloud_server_renewal_with_balance',
+    'refund_cloud_server_to_balance',
+    'create_cloud_server_upgrade_order',
+    'list_cloud_server_upgrade_plans',
     'rebind_cloud_server_user',
     'refresh_custom_plan_cache',
     'record_cloud_ip_log',
+    'set_cloud_order_reminder',
     'set_cloud_server_auto_renew',
     'set_cloud_server_port',
+    'unmute_all_user_reminders',
+    'unmute_cloud_reminders',
 ]

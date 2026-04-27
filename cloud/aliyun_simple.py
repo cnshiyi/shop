@@ -1,3 +1,4 @@
+import asyncio
 import os
 import secrets
 import string
@@ -11,7 +12,7 @@ from core.cloud_accounts import get_active_cloud_account
 
 TIMEOUTS = {
     'connect_ms': 10000,
-    'read_ms': 30000,
+    'read_ms': 60000,
     'instance_visible_seconds': 600,
     'instance_running_seconds': 900,
 }
@@ -23,8 +24,8 @@ def _rand_password(length: int = 18) -> str:
     return ''.join(secrets.choice(alphabet) for _ in range(length))
 
 
-def _build_client(endpoint: str = 'swas.cn-hangzhou.aliyuncs.com'):
-    account = get_active_cloud_account('aliyun')
+def _build_client(endpoint: str = 'swas.cn-hangzhou.aliyuncs.com', account=None):
+    account = account or get_active_cloud_account('aliyun')
     access_key = account.access_key_plain if account else os.getenv('ALIBABA_CLOUD_ACCESS_KEY_ID', '')
     secret_key = account.secret_key_plain if account else os.getenv('ALIBABA_CLOUD_ACCESS_KEY_SECRET', '')
     if not access_key or not secret_key:
@@ -186,6 +187,27 @@ def _find_reusable_keypair() -> tuple[str, Path] | None:
     return key_name, key_path
 
 
+def _find_private_key_value(value) -> str:
+    if isinstance(value, str) and 'PRIVATE KEY' in value:
+        return value
+    if isinstance(value, dict):
+        preferred_keys = ('PrivateKey', 'PrivateKeyBody', 'private_key', 'privateKey', 'KeyPairFingerPrint')
+        for key in preferred_keys:
+            private_key = _find_private_key_value(value.get(key))
+            if private_key:
+                return private_key
+        for item in value.values():
+            private_key = _find_private_key_value(item)
+            if private_key:
+                return private_key
+    if isinstance(value, list):
+        for item in value:
+            private_key = _find_private_key_value(item)
+            if private_key:
+                return private_key
+    return ''
+
+
 def _ensure_keypair(client, region_code: str) -> tuple[str, str]:
     from alibabacloud_swas_open20200601 import models as swas_models
 
@@ -200,14 +222,21 @@ def _ensure_keypair(client, region_code: str) -> tuple[str, str]:
         swas_models.CreateKeyPairRequest(region_id=region_code, key_pair_name=key_name),
         _runtime_options(),
     )
-    private_key = getattr(response.body, 'private_key', '') or ''
-    if private_key:
-        key_path.write_text(private_key, encoding='utf-8')
-        _maybe_secure_private_key(key_path)
+    body_map = response.body.to_map() if hasattr(response.body, 'to_map') else {}
+    private_key = (
+        getattr(response.body, 'private_key_body', '')
+        or getattr(response.body, 'private_key', '')
+        or _find_private_key_value(body_map)
+        or _find_private_key_value(response.body)
+    )
+    if not private_key:
+        return '', ''
+    key_path.write_text(private_key, encoding='utf-8')
+    _maybe_secure_private_key(key_path)
     return key_name, str(key_path)
 
 
-def _reset_system_with_password(client, region_code: str, instance_id: str, image_id: str, root_password: str) -> None:
+def _reset_system_with_password(client, region_code: str, instance_id: str, image_id: str, root_password: str, key_pair_name: str = '') -> None:
     from alibabacloud_swas_open20200601 import models as swas_models
 
     client.reset_system_with_options(
@@ -216,7 +245,10 @@ def _reset_system_with_password(client, region_code: str, instance_id: str, imag
             region_id=region_code,
             image_id=image_id,
             client_token='reset-' + uuid.uuid4().hex,
-            login_credentials=swas_models.ResetSystemRequestLoginCredentials(password=root_password),
+            login_credentials=swas_models.ResetSystemRequestLoginCredentials(
+                key_pair_name=key_pair_name or None,
+                password=root_password,
+            ),
         ),
         _runtime_options(),
     )
@@ -246,9 +278,10 @@ def _open_instance_port(client, region_code: str, instance_id: str, port: int) -
             pass
 
 
-async def create_instance(order, server_name: str):
+def _create_instance_sync(order, server_name: str):
     region_code = order.region_code or 'cn-hongkong'
-    client = _build_client(_region_endpoint(region_code))
+    account = getattr(order, 'cloud_account', None) or get_active_cloud_account('aliyun', region_code)
+    client = _build_client(_region_endpoint(region_code), account=account)
     if not client:
         return ProvisionResult(ok=False, note='未配置 ALIBABA_CLOUD_ACCESS_KEY_ID / ALIBABA_CLOUD_ACCESS_KEY_SECRET。')
 
@@ -268,6 +301,10 @@ async def create_instance(order, server_name: str):
         selected_plan_id = ''
         selected_plan_type = ''
         diagnostics = []
+        desired_plan_id = str(getattr(order, 'provider_resource_id', '') or '').strip()
+        if desired_plan_id:
+            candidate_plans = [item for item in candidate_plans if str(item.get('PlanId') or '').strip() == desired_plan_id] or candidate_plans
+            diagnostics.append(f'指定真实 PlanId: {desired_plan_id}')
 
         for item in candidate_plans[:6]:
             current_plan_id = item.get('PlanId') or ''
@@ -310,11 +347,7 @@ async def create_instance(order, server_name: str):
 
         key_name = ''
         key_path = ''
-        try:
-            key_name, key_path = _ensure_keypair(client, region_code)
-            diagnostics.append(f'密钥准备完成: {key_name}')
-        except Exception as exc:
-            diagnostics.append(f'密钥准备失败（忽略）: {exc}')
+        diagnostics.append('密钥准备跳过：统一使用密码初始化')
 
         try:
             client.update_instance_attribute_with_options(
@@ -332,11 +365,13 @@ async def create_instance(order, server_name: str):
         if not running_instance:
             return ProvisionResult(ok=False, note=f'阿里云轻量云创建失败：实例未进入 Running，instance_id={instance_id}')
 
+        mtproxy_port = int(getattr(order, 'mtproxy_port', 9528) or 9528)
         _open_instance_port(client, region_code, instance_id, 22)
-        _open_instance_port(client, region_code, instance_id, int(getattr(order, 'mtproxy_port', 9528) or 9528))
+        for offset in range(0, 6):
+            _open_instance_port(client, region_code, instance_id, mtproxy_port + offset)
 
-        _reset_system_with_password(client, region_code, instance_id, image_id, password)
-        diagnostics.append('已触发 ResetSystem 下发 root 密码')
+        _reset_system_with_password(client, region_code, instance_id, image_id, password, key_name)
+        diagnostics.append('已触发 ResetSystem 下发 root 密码' + (f' / 密钥 {key_name}' if key_name else ''))
 
         visible_instance = _wait_instance_visible(client, region_code, instance_id)
         if not visible_instance:
@@ -356,7 +391,12 @@ async def create_instance(order, server_name: str):
             public_ip=public_ip,
             login_user='root',
             login_password=password,
-            note=note + (f' 密钥: {key_name}。' if key_name else ''),
+            note=note,
+            private_key_path='',
         )
     except Exception as exc:
         return ProvisionResult(ok=False, note=f'阿里云轻量云创建异常: {exc}')
+
+
+async def create_instance(order, server_name: str):
+    return await asyncio.to_thread(_create_instance_sync, order, server_name)

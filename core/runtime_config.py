@@ -7,22 +7,23 @@ CONFIG_HELP = {
     'receive_address': '收款地址（USDT/TRX 共用）',
     'trongrid_api_key': 'TRON API Key',
     'bot_admin_chat_id': '机器人管理员 Telegram Chat ID（支持逗号分隔多个转发目标）',
-    'redis_host': 'Redis 主机',
-    'redis_port': 'Redis 端口',
-    'redis_password': 'Redis 密码',
-    'redis_db': 'Redis 数据库编号',
-    'mysql_database': 'MySQL 数据库名',
-    'mysql_user': 'MySQL 用户名',
-    'mysql_password': 'MySQL 密码',
-    'mysql_host': 'MySQL 主机',
-    'mysql_port': 'MySQL 端口',
+    'telegram_api_id': 'Telegram API ID（用于登录 Telegram 账号）',
+    'telegram_api_hash': 'Telegram API Hash（用于登录 Telegram 账号）',
+    'fsm_state_ttl': '机器人 FSM 状态缓存 TTL（秒）',
+    'fsm_data_ttl': '机器人 FSM 数据缓存 TTL（秒）',
+    'usdt_contract': 'TRON USDT 合约地址',
+    'trongrid_base_url': 'TRON 节点基础地址',
+    'scanner_verbose': 'TRON 扫描器详细日志开关（1=开启，0=关闭）',
     'text_init_enabled': '是否允许后台初始化文案（1=允许，0=禁用）',
     'text_init_mode': '文案初始化模式：missing_only 或 reset_defaults',
+    'cloud_renew_notice_days': 'IP到期提醒提前天数，默认5天',
+    'cloud_renew_notice_debug_repeat': 'IP到期提醒调试重复开关（1=忽略已提醒记录，启动/定时检查都会重复提醒；0=只提醒一次）',
 }
 
 SENSITIVE_CONFIG_KEYS = {
     'bot_token',
     'trongrid_api_key',
+    'telegram_api_hash',
     'mysql_password',
     'redis_password',
 }
@@ -30,6 +31,16 @@ SENSITIVE_CONFIG_KEYS = {
 
 CONFIG_ENV_MAP = {
     'bot_token': 'BOT_TOKEN',
+    'receive_address': 'RECEIVE_ADDRESS',
+    'trongrid_api_key': 'TRONGRID_API_KEY',
+    'bot_admin_chat_id': 'BOT_ADMIN_CHAT_ID',
+    'telegram_api_id': 'TELEGRAM_API_ID',
+    'telegram_api_hash': 'TELEGRAM_API_HASH',
+    'fsm_state_ttl': 'FSM_STATE_TTL',
+    'fsm_data_ttl': 'FSM_DATA_TTL',
+    'usdt_contract': 'USDT_CONTRACT',
+    'trongrid_base_url': 'TRONGRID_BASE_URL',
+    'scanner_verbose': 'SCANNER_VERBOSE',
     'redis_host': 'REDIS_HOST',
     'redis_port': 'REDIS_PORT',
     'redis_password': 'REDIS_PASSWORD',
@@ -39,11 +50,10 @@ CONFIG_ENV_MAP = {
     'mysql_password': 'MYSQL_PASSWORD',
     'mysql_host': 'MYSQL_HOST',
     'mysql_port': 'MYSQL_PORT',
-    'receive_address': 'RECEIVE_ADDRESS',
-    'trongrid_api_key': 'TRONGRID_API_KEY',
-    'bot_admin_chat_id': 'BOT_ADMIN_CHAT_ID',
     'text_init_enabled': 'TEXT_INIT_ENABLED',
     'text_init_mode': 'TEXT_INIT_MODE',
+    'cloud_renew_notice_days': 'CLOUD_RENEW_NOTICE_DAYS',
+    'cloud_renew_notice_debug_repeat': 'CLOUD_RENEW_NOTICE_DEBUG_REPEAT',
 }
 
 

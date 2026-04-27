@@ -33,8 +33,7 @@ def _merge_usernames(current: str | None, incoming: list[str]) -> list[str]:
     return merged
 
 
-@sync_to_async
-def get_or_create_user(
+def _get_or_create_user_sync(
     tg_user_id: int,
     username: str | None,
     first_name: str | None,
@@ -70,3 +69,90 @@ def get_or_create_user(
         changed.append('updated_at')
         user.save(update_fields=changed)
     return user
+
+
+@sync_to_async
+def get_or_create_user(
+    tg_user_id: int,
+    username: str | None,
+    first_name: str | None,
+    active_usernames: list[str] | tuple[str, ...] | None = None,
+):
+    return _get_or_create_user_sync(tg_user_id, username, first_name, active_usernames)
+
+
+@sync_to_async
+def record_bot_operation_log(
+    tg_user_id: int,
+    action_type: str,
+    payload: str | None,
+    username: str | None,
+    first_name: str | None,
+    chat_id: int | None = None,
+    message_id: int | None = None,
+    action_label: str | None = None,
+):
+    BotOperationLog = apps.get_model('bot', 'BotOperationLog')
+    user = _get_or_create_user_sync(tg_user_id, username, first_name)
+    username_snapshot = (_normalize_usernames(username) or [''])[0] or None
+    return BotOperationLog.objects.create(
+        user=user,
+        tg_user_id=tg_user_id,
+        chat_id=chat_id,
+        message_id=message_id,
+        action_type=(action_type or 'message')[:32],
+        action_label=(action_label or '')[:191] or None,
+        payload=(payload or '')[:4000] or None,
+        username_snapshot=username_snapshot,
+        first_name_snapshot=(first_name or '')[:191] or None,
+    )
+
+
+@sync_to_async
+def record_telegram_message(
+    tg_user_id: int,
+    chat_id: int,
+    message_id: int | None,
+    direction: str,
+    content_type: str,
+    text: str | None,
+    username: str | None,
+    first_name: str | None,
+    login_account_id: int | None = None,
+    chat_title: str | None = None,
+    source: str = 'bot',
+):
+    TelegramChatMessage = apps.get_model('bot', 'TelegramChatMessage')
+    user = _get_or_create_user_sync(tg_user_id, username, first_name)
+    username_snapshot = (_normalize_usernames(username) or [''])[0] or None
+    existing = None
+    if message_id:
+        existing = TelegramChatMessage.objects.filter(chat_id=chat_id, message_id=message_id, direction=direction).first()
+    if existing:
+        changed = []
+        if not existing.user_id and user:
+            existing.user = user
+            changed.append('user')
+        if username_snapshot and existing.username_snapshot != username_snapshot:
+            existing.username_snapshot = username_snapshot
+            changed.append('username_snapshot')
+        if first_name and existing.first_name_snapshot != first_name[:191]:
+            existing.first_name_snapshot = first_name[:191]
+            changed.append('first_name_snapshot')
+        if changed:
+            existing.save(update_fields=changed)
+        return existing
+    return TelegramChatMessage.objects.create(
+        user=user,
+        login_account_id=login_account_id,
+        tg_user_id=tg_user_id,
+        chat_id=chat_id,
+        message_id=message_id,
+        direction=direction,
+        content_type=(content_type or 'text')[:32],
+        text=(text or '')[:4000],
+        username_snapshot=username_snapshot,
+        first_name_snapshot=(first_name or '')[:191] or None,
+        chat_title=(chat_title or '')[:191] or None,
+        source=(source or 'bot')[:32],
+    )

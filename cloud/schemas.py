@@ -10,3 +10,4 @@ class ProvisionResult:
     login_password: str = ''
     note: str = ''
     static_ip_name: str = ''
+    private_key_path: str = ''

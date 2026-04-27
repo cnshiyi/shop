@@ -7,6 +7,8 @@ import time
 from pathlib import Path
 
 from cloud.schemas import ProvisionResult
+from django.apps import apps
+
 from core.cloud_accounts import get_active_cloud_account
 
 logger = logging.getLogger(__name__)
@@ -140,7 +142,12 @@ def _create_instance_sync(order_data: dict, server_name: str):
     mtproxy_port = int(order_data.get('mtproxy_port') or 9528)
     static_ip_name = str(order_data.get('static_ip_name') or '').strip()
 
-    account = get_active_cloud_account('aws')
+    account_id = order_data.get('cloud_account_id')
+    account = None
+    if account_id:
+        CloudAccountConfig = apps.get_model('core', 'CloudAccountConfig')
+        account = CloudAccountConfig.objects.filter(id=account_id, provider='aws', is_active=True).first()
+    account = account or get_active_cloud_account('aws', region)
     access_key = ''
     secret_key = ''
     if account:
@@ -204,8 +211,9 @@ def _create_instance_sync(order_data: dict, server_name: str):
 
         try:
             _ensure_instance_port_open(client, server_name, 22)
-            _ensure_instance_port_open(client, server_name, mtproxy_port)
-            logger.info('AWS 端口放行完成: order=%s server_name=%s ssh=22 mtproxy_port=%s', order_no, server_name, mtproxy_port)
+            for offset in range(0, 6):
+                _ensure_instance_port_open(client, server_name, mtproxy_port + offset)
+            logger.info('AWS 端口放行完成: order=%s server_name=%s ssh=22 mtproxy_port_range=%s-%s', order_no, server_name, mtproxy_port, mtproxy_port + 5)
         except Exception as exc:
             logger.warning('AWS 端口放行失败: order=%s server_name=%s error=%s', order_no, server_name, exc)
 

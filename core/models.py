@@ -13,6 +13,7 @@ class SiteConfig(models.Model):
     key = models.CharField('键', max_length=191, unique=True, db_index=True)
     value = models.TextField('值', blank=True, null=True)
     is_sensitive = models.BooleanField('敏感配置', default=False)
+    sort_order = models.IntegerField('排序', default=0, db_index=True)
 
     class Meta:
         db_table = 'core_site_config'
@@ -82,6 +83,7 @@ class CloudAccountConfig(models.Model):
 
     provider = models.CharField('云厂商', max_length=32, choices=PROVIDER_CHOICES, db_index=True)
     name = models.CharField('账户名称', max_length=128)
+    external_account_id = models.CharField('云厂商账号ID', max_length=128, blank=True, null=True, db_index=True)
     access_key = models.TextField('Access Key')
     secret_key = models.TextField('Secret Key')
     region_hint = models.CharField('默认地区', max_length=128, blank=True, null=True)

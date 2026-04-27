@@ -1,6 +1,7 @@
 import asyncio
 import binascii
 import logging
+import re
 import os
 import socket
 import time
@@ -9,6 +10,22 @@ from pathlib import Path
 from asgiref.sync import sync_to_async
 
 logger = logging.getLogger(__name__)
+
+
+def _set_paramiko_quiet(enabled: bool) -> dict[str, int]:
+    previous_levels = {}
+    for logger_name in ('paramiko', 'paramiko.transport'):
+        target_logger = logging.getLogger(logger_name)
+        previous_levels[logger_name] = target_logger.level
+        if enabled:
+            target_logger.setLevel(logging.CRITICAL)
+    return previous_levels
+
+
+def _restore_paramiko_levels(levels: dict[str, int]) -> None:
+    for logger_name, level in levels.items():
+        logging.getLogger(logger_name).setLevel(level)
+
 
 MTPROXY_DIR = '/home/mtproxy'
 MTPROXY_PORT = 9528
@@ -85,6 +102,26 @@ def _iter_private_key_candidates() -> list[Path]:
         seen.add(normalized)
         unique.append(path)
     return unique
+
+
+def _load_private_key_file(private_key_path: str):
+    try:
+        import paramiko
+    except ImportError:
+        return None, '未安装 paramiko，无法加载 SSH 私钥。'
+
+    path = Path(str(private_key_path or '')).expanduser()
+    if not path.is_file():
+        return None, f'私钥文件不存在: {path}'
+    try:
+        try:
+            key = paramiko.Ed25519Key.from_private_key_file(str(path))
+        except Exception:
+            key = paramiko.RSAKey.from_private_key_file(str(path))
+        logger.info('已加载指定 SSH 私钥: source=%s', path)
+        return key, str(path)
+    except Exception as exc:
+        return None, str(exc)
 
 
 def _load_aws_private_key():
@@ -242,8 +279,26 @@ if [ -z "$SECRET" ]; then
   SECRET=$(ps -ef | grep -iE 'mtproto-proxy|/mtg | mtg run ' | grep -v grep | grep -Eo 'ee[0-9a-fA-F]{{32,}}|[0-9a-fA-F]{{32}}' | head -n 1 || true)
 fi
 RUN_COMMAND=''
+if [ -n "$DESIRED_SECRET" ]; then
+  SECRET="$DESIRED_SECRET"
+  if [ -f "$WORKDIR/config" ]; then
+    if grep -q '^secret=' "$WORKDIR/config"; then
+      sed -i.bak -E "s/^secret=.*/secret="$SECRET"/" "$WORKDIR/config"
+    else
+      printf '
+secret="%s"
+' "$SECRET" >> "$WORKDIR/config"
+    fi
+  fi
+fi
 if [ -x "$WORKDIR/bin/mtg" ] && [ -n "$SECRET" ]; then
-  RUN_COMMAND="$WORKDIR/bin/mtg run $SECRET -b 0.0.0.0:{port} --multiplex-per-connection 500 --prefer-ip=ipv4 -t 127.0.0.1:18888 -4 $(curl -4 -fsS ifconfig.me || echo 127.0.0.1):{port}"
+  DOMAIN_HEX=$(printf '%s' '{MTPROXY_FAKE_TLS_DOMAIN}' | od -An -tx1 | tr -d ' \n')
+  if printf '%s' "$SECRET" | grep -Eq '^ee[0-9a-fA-F]{{32,}}$'; then
+    RUN_SECRET="$SECRET"
+  else
+    RUN_SECRET="ee$(printf '%s' "$SECRET" | cut -c1-32)$DOMAIN_HEX"
+  fi
+  RUN_COMMAND="$WORKDIR/bin/mtg run $RUN_SECRET -b 0.0.0.0:{port} --multiplex-per-connection 500 --prefer-ip=ipv4 -t 127.0.0.1:18888 -4 $(curl -4 -fsS ifconfig.me || echo 127.0.0.1):{port}"
 fi
 if [ -z "$RUN_COMMAND" ] && [ -f "$WORKDIR/run-command.sh" ]; then
   RUN_COMMAND=$(grep -v '^#!' "$WORKDIR/run-command.sh" | tail -n 1 || true)
@@ -252,17 +307,8 @@ if [ -z "$RUN_COMMAND" ]; then
   RUN_COMMAND=$(ps -ef | grep -iE '/mtg | mtg run |mtproto-proxy' | grep -v grep | head -n 1 || true)
 fi
 if [ -n "$RUN_COMMAND" ]; then
-  RUN_COMMAND=$(printf '%s\n' "$RUN_COMMAND" | sed -E 's/^[^/]*//' | sed -E 's/[[:space:]]+$//')
-fi
-if [ -n "$DESIRED_SECRET" ]; then
-  SECRET="$DESIRED_SECRET"
-  if [ -f "$WORKDIR/config" ]; then
-    if grep -q '^secret=' "$WORKDIR/config"; then
-      sed -i.bak -E "s/^secret=.*/secret=\"$SECRET\"/" "$WORKDIR/config"
-    else
-      printf '\nsecret="%s"\n' "$SECRET" >> "$WORKDIR/config"
-    fi
-  fi
+  RUN_COMMAND=$(printf '%s
+' "$RUN_COMMAND" | sed -E 's/^[^/]*//' | sed -E 's/[[:space:]]+$//')
 fi
 if [ -z "$RUN_COMMAND" ]; then
   echo 'MTProxy 安装失败'
@@ -301,12 +347,326 @@ printf '%s\n' \
 chmod 644 "$SERVICE_FILE"
 systemctl daemon-reload
 systemctl enable mtproxy.service >/dev/null 2>&1
+systemctl stop mtproxy.service >/dev/null 2>&1 || true
+if command -v fuser >/dev/null 2>&1; then
+  fuser -k {port}/tcp >/dev/null 2>&1 || true
+fi
+pkill -f "$WORKDIR/bin/mtg run .*:{port}" >/dev/null 2>&1 || true
+sleep 1
 systemctl restart mtproxy.service
+sleep 3
+BACKUP_PORT=$(({port} + 1))
+BACKUP_MANAGE_PORT=18889
+BACKUP_WORKDIR='/home/mtproxy-python'
+mkdir -p "$BACKUP_WORKDIR"
+cd "$BACKUP_WORKDIR"
+rm -f mtproxy.sh
+BACKUP_OUTPUT="$(curl -fsSL -o mtproxy.sh https://raw.githubusercontent.com/ellermister/mtproxy/master/mtproxy.sh && chmod +x mtproxy.sh && printf '%s\n%s\n%s\n%s\n%s\n' '3' "$BACKUP_PORT" "$BACKUP_MANAGE_PORT" '{MTPROXY_FAKE_TLS_DOMAIN}' '' | bash mtproxy.sh 2>&1 || true)"
+printf '%s\n' "$BACKUP_OUTPUT"
+BACKUP_SECRET=$(sed -n 's/^secret="\([^"]*\)"$/\1/p' "$BACKUP_WORKDIR/config" | head -n 1 || true)
+if [ -z "$BACKUP_SECRET" ]; then
+  BACKUP_SECRET=$(printf '%s\n' "$BACKUP_OUTPUT" | grep -Eo 'MTProxy Secret:[[:space:]]*ee[0-9a-fA-F]+' | head -n 1 | grep -Eo 'ee[0-9a-fA-F]+' | tail -n 1 || true)
+fi
+if [ ! -f "$BACKUP_WORKDIR/bin/mtprotoproxy.py" ] || [ ! -f "$BACKUP_WORKDIR/bin/config.py" ]; then
+  echo 'MTProxy 安装失败'
+  echo 'Python 备用 MTProxy 安装失败'
+  echo 'MTPROXY_STATUS=FAILED'
+  echo 'MTPROXY_ERROR=Python 备用 MTProxy 安装失败'
+  exit 1
+fi
+printf '%s\n' '#!/usr/bin/env bash' 'set -e' "cd $BACKUP_WORKDIR" "/usr/bin/python3 $BACKUP_WORKDIR/bin/mtprotoproxy.py $BACKUP_WORKDIR/bin/config.py" | tee "$BACKUP_WORKDIR/run-command.sh" >/dev/null
+chmod +x "$BACKUP_WORKDIR/run-command.sh"
+BACKUP_SERVICE_FILE=/etc/systemd/system/mtproxy-python.service
+printf '%s\n' \
+  '[Unit]' \
+  'Description=MTProxy Python Backup Service' \
+  'After=network-online.target' \
+  'Wants=network-online.target' \
+  '' \
+  '[Service]' \
+  'Type=simple' \
+  'User=root' \
+  "WorkingDirectory=$BACKUP_WORKDIR" \
+  "ExecStart=/bin/bash $BACKUP_WORKDIR/run-command.sh" \
+  'Restart=always' \
+  'RestartSec=3' \
+  'LimitNOFILE=655350' \
+  '' \
+  '[Install]' \
+  'WantedBy=multi-user.target' | tee "$BACKUP_SERVICE_FILE" >/dev/null
+chmod 644 "$BACKUP_SERVICE_FILE"
+systemctl daemon-reload
+systemctl enable mtproxy-python.service >/dev/null 2>&1
+systemctl stop mtproxy-python.service >/dev/null 2>&1 || true
+if [ -f "$BACKUP_WORKDIR/pid/pid_mtproxy" ]; then
+  kill "$(cat "$BACKUP_WORKDIR/pid/pid_mtproxy")" >/dev/null 2>&1 || true
+fi
+if command -v fuser >/dev/null 2>&1; then
+  fuser -k "$BACKUP_PORT"/tcp >/dev/null 2>&1 || true
+fi
+pkill -f "$BACKUP_WORKDIR/bin/mtprotoproxy.py" >/dev/null 2>&1 || true
+sleep 1
+systemctl restart mtproxy-python.service
 sleep 3
 if command -v ufw >/dev/null 2>&1; then
   ufw allow {port}/tcp || true
   ufw allow {port}/udp || true
+  ufw allow "$BACKUP_PORT"/tcp || true
+  ufw allow "$BACKUP_PORT"/udp || true
 fi
+BACKUP_PORT_OK=0
+if command -v ss >/dev/null 2>&1; then
+  if ss -lntup 2>/dev/null | grep -E "[:.]($BACKUP_PORT)\b" >/dev/null 2>&1; then
+    BACKUP_PORT_OK=1
+  fi
+elif command -v netstat >/dev/null 2>&1; then
+  if netstat -lntup 2>/dev/null | grep -E "[:.]($BACKUP_PORT)\b" >/dev/null 2>&1; then
+    BACKUP_PORT_OK=1
+  fi
+fi
+if ! systemctl is-active --quiet mtproxy-python.service || [ "$BACKUP_PORT_OK" != "1" ]; then
+  systemctl status mtproxy-python.service --no-pager || true
+  journalctl -u mtproxy-python.service -n 80 --no-pager || true
+  echo 'MTProxy 安装失败'
+  echo "Python 备用 MTProxy 端口 $BACKUP_PORT 未运行"
+  echo 'MTPROXY_STATUS=FAILED'
+  echo "MTPROXY_ERROR=Python 备用 MTProxy 端口 $BACKUP_PORT 未运行"
+  exit 1
+fi
+TELEMT_BIN=/usr/local/bin/telemt
+TELEMT_ALL_PORT=$(({port} + 2))
+TELEMT_CLASSIC_PORT=$(({port} + 3))
+TELEMT_SECURE_PORT=$(({port} + 4))
+TELEMT_TLS_PORT=$(({port} + 5))
+TELEMT_API_ALL=19091
+TELEMT_API_CLASSIC=19092
+TELEMT_API_SECURE=19093
+TELEMT_API_TLS=19094
+PUBLIC_IP=$(curl -4 -fsS ifconfig.me || hostname -I | awk '{{print $1}}' || echo 127.0.0.1)
+TELEMT_BASE_SECRET=$(printf '%s' "$SECRET" | sed -E 's/^ee//' | cut -c1-32)
+if ! printf '%s' "$TELEMT_BASE_SECRET" | grep -Eq '^[0-9a-fA-F]{{32}}$'; then
+  TELEMT_BASE_SECRET=$(openssl rand -hex 16 2>/dev/null || head -c 16 /dev/urandom | od -An -tx1 | tr -d ' \n')
+fi
+TELEMT_CLASSIC_SECRET=$(printf '1%s' "$TELEMT_BASE_SECRET" | cut -c1-32)
+TELEMT_SECURE_SECRET=$(printf '2%s' "$TELEMT_BASE_SECRET" | cut -c1-32)
+TELEMT_TLS_SECRET=$(printf '3%s' "$TELEMT_BASE_SECRET" | cut -c1-32)
+ARCH=$(uname -m)
+LIBC=$(ldd --version 2>&1 | grep -iq musl && echo musl || echo gnu)
+TELEMT_URL="https://github.com/telemt/telemt/releases/latest/download/telemt-$ARCH-linux-$LIBC.tar.gz"
+TELEMT_TMP=$(mktemp -d)
+(curl -fsSL "$TELEMT_URL" -o "$TELEMT_TMP/telemt.tar.gz" || curl -k -fsSL "$TELEMT_URL" -o "$TELEMT_TMP/telemt.tar.gz")
+tar -xzf "$TELEMT_TMP/telemt.tar.gz" -C "$TELEMT_TMP"
+install -m 0755 "$TELEMT_TMP/telemt" "$TELEMT_BIN"
+rm -rf "$TELEMT_TMP"
+mkdir -p /opt/telemt-classic /opt/telemt-secure /opt/telemt-tls /etc/telemt-classic /etc/telemt-secure /etc/telemt-tls
+cat > /etc/telemt-classic/telemt.toml <<EOF
+[general]
+use_middle_proxy = true
+log_level = "normal"
+[general.modes]
+classic = true
+secure = false
+tls = false
+[general.links]
+show = "*"
+public_host = "$PUBLIC_IP"
+public_port = $TELEMT_CLASSIC_PORT
+[server]
+port = $TELEMT_CLASSIC_PORT
+[server.api]
+enabled = true
+listen = "127.0.0.1:$TELEMT_API_CLASSIC"
+whitelist = ["127.0.0.1/32", "::1/128"]
+[[server.listeners]]
+ip = "0.0.0.0"
+[censorship]
+tls_domain = "{MTPROXY_FAKE_TLS_DOMAIN}"
+mask = true
+tls_emulation = true
+tls_front_dir = "tlsfront"
+[access.users]
+hello = "$TELEMT_CLASSIC_SECRET"
+EOF
+cat > /etc/telemt-secure/telemt.toml <<EOF
+[general]
+use_middle_proxy = true
+log_level = "normal"
+[general.modes]
+classic = false
+secure = true
+tls = false
+[general.links]
+show = "*"
+public_host = "$PUBLIC_IP"
+public_port = $TELEMT_SECURE_PORT
+[server]
+port = $TELEMT_SECURE_PORT
+[server.api]
+enabled = true
+listen = "127.0.0.1:$TELEMT_API_SECURE"
+whitelist = ["127.0.0.1/32", "::1/128"]
+[[server.listeners]]
+ip = "0.0.0.0"
+[censorship]
+tls_domain = "{MTPROXY_FAKE_TLS_DOMAIN}"
+mask = true
+tls_emulation = true
+tls_front_dir = "tlsfront"
+[access.users]
+hello = "$TELEMT_SECURE_SECRET"
+EOF
+cat > /etc/telemt-tls/telemt.toml <<EOF
+[general]
+use_middle_proxy = true
+log_level = "normal"
+[general.modes]
+classic = false
+secure = false
+tls = true
+[general.links]
+show = "*"
+public_host = "$PUBLIC_IP"
+public_port = $TELEMT_TLS_PORT
+[server]
+port = $TELEMT_TLS_PORT
+[server.api]
+enabled = true
+listen = "127.0.0.1:$TELEMT_API_TLS"
+whitelist = ["127.0.0.1/32", "::1/128"]
+[[server.listeners]]
+ip = "0.0.0.0"
+[censorship]
+tls_domain = "{MTPROXY_FAKE_TLS_DOMAIN}"
+mask = true
+tls_emulation = true
+tls_front_dir = "tlsfront"
+[access.users]
+hello = "$TELEMT_TLS_SECRET"
+EOF
+for name in classic secure tls; do
+  port_var=TELEMT_$(printf '%s' "$name" | tr '[:lower:]' '[:upper:]')_PORT
+  cat > /etc/systemd/system/telemt-$name.service <<EOF
+[Unit]
+Description=Telemt $name Service
+After=network-online.target
+Wants=network-online.target
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/opt/telemt-$name
+ExecStart=$TELEMT_BIN /etc/telemt-$name/telemt.toml
+Restart=on-failure
+LimitNOFILE=65536
+AmbientCapabilities=CAP_NET_ADMIN CAP_NET_BIND_SERVICE
+CapabilityBoundingSet=CAP_NET_ADMIN CAP_NET_BIND_SERVICE
+NoNewPrivileges=true
+[Install]
+WantedBy=multi-user.target
+EOF
+done
+systemctl daemon-reload
+for name in classic secure tls; do
+  systemctl enable telemt-$name.service >/dev/null 2>&1
+  systemctl restart telemt-$name.service
+done
+sleep 6
+for name in classic secure tls; do
+  if ! systemctl is-active --quiet telemt-$name.service; then
+    systemctl status telemt-$name.service --no-pager || true
+    journalctl -u telemt-$name.service -n 80 --no-pager || true
+    echo 'MTProxy 安装失败'
+    echo "Telemt systemd $name 未运行"
+    echo 'MTPROXY_STATUS=FAILED'
+    echo "MTPROXY_ERROR=Telemt systemd $name 未运行"
+    exit 1
+  fi
+done
+if ! command -v docker >/dev/null 2>&1; then
+  apt-get update -y
+  apt-get install -y docker.io
+  systemctl enable docker >/dev/null 2>&1 || true
+  systemctl start docker || true
+fi
+if ! command -v docker >/dev/null 2>&1; then
+  echo 'MTProxy 安装失败'
+  echo 'Telemt Docker 依赖安装失败'
+  echo 'MTPROXY_STATUS=FAILED'
+  echo 'MTPROXY_ERROR=Telemt Docker 依赖安装失败'
+  exit 1
+fi
+mkdir -p /opt/telemt-docker-all
+cat > /opt/telemt-docker-all/telemt.toml <<EOF
+[general]
+use_middle_proxy = true
+log_level = "normal"
+[general.modes]
+classic = true
+secure = true
+tls = true
+[general.links]
+show = "*"
+public_host = "$PUBLIC_IP"
+public_port = $TELEMT_ALL_PORT
+[server]
+port = 443
+[server.api]
+enabled = true
+listen = "0.0.0.0:9091"
+whitelist = ["0.0.0.0/0", "::/0"]
+[[server.listeners]]
+ip = "0.0.0.0"
+[censorship]
+tls_domain = "{MTPROXY_FAKE_TLS_DOMAIN}"
+mask = true
+tls_emulation = true
+tls_front_dir = "tlsfront"
+[access.users]
+hello = "$TELEMT_BASE_SECRET"
+EOF
+docker rm -f telemt-all >/dev/null 2>&1 || true
+docker pull ghcr.io/telemt/telemt:latest
+docker run -d \
+  --name telemt-all \
+  --restart unless-stopped \
+  -p "$TELEMT_ALL_PORT:443" \
+  -p "127.0.0.1:$TELEMT_API_ALL:9091" \
+  -w /etc/telemt \
+  -v /opt/telemt-docker-all/telemt.toml:/etc/telemt/config.toml:ro \
+  --tmpfs /etc/telemt:rw,mode=1777,size=4m \
+  -e RUST_LOG=info \
+  --cap-drop ALL \
+  --cap-add NET_BIND_SERVICE \
+  --read-only \
+  --security-opt no-new-privileges:true \
+  --ulimit nofile=65536:262144 \
+  ghcr.io/telemt/telemt:latest
+sleep 8
+if ! docker ps --filter name=telemt-all --filter status=running --format '{{{{.Names}}}}' | grep -q '^telemt-all$'; then
+  docker logs telemt-all || true
+  echo 'MTProxy 安装失败'
+  echo 'Telemt Docker A 未运行'
+  echo 'MTPROXY_STATUS=FAILED'
+  echo 'MTPROXY_ERROR=Telemt Docker A 未运行'
+  exit 1
+fi
+if command -v ufw >/dev/null 2>&1; then
+  for telemt_port in "$TELEMT_ALL_PORT" "$TELEMT_CLASSIC_PORT" "$TELEMT_SECURE_PORT" "$TELEMT_TLS_PORT"; do
+    ufw allow "$telemt_port"/tcp || true
+    ufw allow "$telemt_port"/udp || true
+  done
+fi
+TELEMT_ALL_LINKS=$(curl -fsS "http://127.0.0.1:$TELEMT_API_ALL/v1/users" || true)
+TELEMT_CLASSIC_LINKS=$(curl -fsS "http://127.0.0.1:$TELEMT_API_CLASSIC/v1/users" || true)
+TELEMT_SECURE_LINKS=$(curl -fsS "http://127.0.0.1:$TELEMT_API_SECURE/v1/users" || true)
+TELEMT_TLS_LINKS=$(curl -fsS "http://127.0.0.1:$TELEMT_API_TLS/v1/users" || true)
+echo "MTPROXY_TELEMT_A_STATUS=OK"
+echo "MTPROXY_TELEMT_A_PORT=$TELEMT_ALL_PORT"
+echo "MTPROXY_TELEMT_B_STATUS=OK"
+echo "MTPROXY_TELEMT_B_PORTS=$TELEMT_CLASSIC_PORT,$TELEMT_SECURE_PORT,$TELEMT_TLS_PORT"
+echo "MTPROXY_TELEMT_A_LINKS=$TELEMT_ALL_LINKS"
+echo "MTPROXY_TELEMT_B_CLASSIC_LINKS=$TELEMT_CLASSIC_LINKS"
+echo "MTPROXY_TELEMT_B_SECURE_LINKS=$TELEMT_SECURE_LINKS"
+echo "MTPROXY_TELEMT_B_TLS_LINKS=$TELEMT_TLS_LINKS"
 PROC_OK=0
 if ps -ef | grep -i 'mtproto-proxy' | grep -v grep >/dev/null 2>&1; then
   PROC_OK=1
@@ -360,6 +720,10 @@ fi
 echo "MTPROXY_STATUS=OK"
 echo "MTPROXY_SECRET=${{SECRET}}"
 echo "MTPROXY_PORT={port}"
+echo "MTPROXY_BACKUP_STATUS=OK"
+echo "MTPROXY_BACKUP_PROVIDER=mtprotoproxy"
+echo "MTPROXY_BACKUP_PORT=${{BACKUP_PORT}}"
+echo "MTPROXY_BACKUP_SECRET=${{BACKUP_SECRET}}"
 '''
 
 
@@ -428,16 +792,19 @@ def _sanitize_mtproxy_output(text: str) -> str:
 
 
 @sync_to_async
-def _run_ssh_script_with_key(ip: str, usernames: str | list[str], script: str, label: str = 'SSH_KEY') -> tuple[bool, str]:
+def _run_ssh_script_with_key(ip: str, usernames: str | list[str], script: str, label: str = 'SSH_KEY', private_key_path: str = '') -> tuple[bool, str]:
     try:
         import paramiko
     except ImportError:
         return False, f'未安装 paramiko，无法通过 SSH 公钥执行 {label}。'
 
-    pkey, key_source = _load_aws_private_key()
+    if private_key_path:
+        pkey, key_source = _load_private_key_file(private_key_path)
+    else:
+        pkey, key_source = _load_aws_private_key()
     if not pkey:
         env_private_key_path = (os.getenv('AWS_LIGHTSAIL_PRIVATE_KEY_PATH') or '').strip()
-        return False, f'未找到可用私钥，无法通过 key 登录执行初始化。env_private_key_path={bool(env_private_key_path)} detail={key_source}'
+        return False, f'未找到可用私钥，无法通过 key 登录执行初始化。private_key_path={bool(private_key_path)} env_private_key_path={bool(env_private_key_path)} detail={key_source}'
 
     candidates = [usernames] if isinstance(usernames, str) else list(usernames or [])
     last_error = ''
@@ -447,17 +814,22 @@ def _run_ssh_script_with_key(ip: str, usernames: str | list[str], script: str, l
         client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
         try:
             logger.info('开始建立 SSH 公钥连接: stage=%s ip=%s user=%s key_source=%s', label, ip, username, key_source)
-            client.connect(
-                hostname=ip,
-                port=22,
-                username=username,
-                pkey=pkey,
-                timeout=30,
-                banner_timeout=30,
-                auth_timeout=30,
-                look_for_keys=False,
-                allow_agent=False,
-            )
+            previous_levels = _set_paramiko_quiet(True)
+            try:
+                client.connect(
+                    hostname=ip,
+                    port=22,
+                    username=username,
+                    pkey=pkey,
+                    timeout=30,
+                    banner_timeout=30,
+                    auth_timeout=30,
+                    look_for_keys=False,
+                    allow_agent=False,
+                )
+            finally:
+                time.sleep(0.5)
+                _restore_paramiko_levels(previous_levels)
             logger.info('SSH 公钥连接成功: stage=%s ip=%s user=%s key_source=%s', label, ip, username, key_source)
             logger.info('开始执行公钥阶段远端脚本: stage=%s ip=%s user=%s', label, ip, username)
             sftp = client.open_sftp()
@@ -487,20 +859,40 @@ def _run_ssh_script_with_key(ip: str, usernames: str | list[str], script: str, l
     return False, f'SSH 公钥执行 {label} 失败: {last_error}'
 
 
-async def install_bbr(ip: str, username: str, password: str) -> tuple[bool, str]:
+async def install_bbr(ip: str, username: str, password: str, private_key_path: str = '', use_key_setup: bool = True) -> tuple[bool, str]:
     if not ip or not password:
         return False, '缺少 SSH 连接参数，无法执行 BBR 初始化。'
     bootstrap_username = (username or 'root').strip() or 'root'
     logger.info('开始执行 BBR 初始化 ip=%s user=%s', ip, bootstrap_username)
 
-    key_login_users = ['admin', 'debian', 'ubuntu', 'root']
-    logger.info('开始执行公钥阶段密码设置: ip=%s key_users=%s target_user=%s', ip, ','.join(key_login_users), bootstrap_username)
-    key_ok, key_output = await _run_ssh_script_with_key(ip, key_login_users, _build_set_password_script(password), label='SET_PASSWORD')
-    _log_multiline_output('[BOOTSTRAP][SET_PASSWORD]', key_output)
-    if not key_ok:
-        return False, f'公钥登录设置密码失败\n{key_output}'.strip()
+    key_login_users = ['root', 'admin', 'debian', 'ubuntu'] if private_key_path else ['admin', 'debian', 'ubuntu', 'root']
+    key_ok = False
+    key_output = ''
+    if not use_key_setup:
+        logger.info('跳过公钥阶段，直接等待 SSH 密码登录: ip=%s user=%s', ip, bootstrap_username)
+    elif private_key_path:
+        logger.info('开始执行公钥阶段密码设置: ip=%s key_users=%s target_user=%s', ip, ','.join(key_login_users), bootstrap_username)
+        deadline = time.time() + 900
+        attempt = 0
+        while time.time() < deadline:
+            attempt += 1
+            logger.info('探测 SSH 公钥登录并设置密码: ip=%s key=%s attempt=%s', ip, private_key_path, attempt)
+            key_ok, key_output = await _run_ssh_script_with_key(ip, key_login_users, _build_set_password_script(password), label='SET_PASSWORD', private_key_path=private_key_path)
+            _log_multiline_output('[BOOTSTRAP][SET_PASSWORD]', key_output)
+            if key_ok:
+                break
+            await asyncio.sleep(10)
+    else:
+        logger.info('开始执行公钥阶段密码设置: ip=%s key_users=%s target_user=%s', ip, ','.join(key_login_users), bootstrap_username)
+        key_ok, key_output = await _run_ssh_script_with_key(ip, key_login_users, _build_set_password_script(password), label='SET_PASSWORD')
+        _log_multiline_output('[BOOTSTRAP][SET_PASSWORD]', key_output)
+    if key_ok:
+        logger.info('公钥阶段密码设置完成，开始等待密码复登: ip=%s user=%s', ip, bootstrap_username)
+    elif private_key_path and use_key_setup:
+        return False, f'公钥登录设置密码失败，未切换密码 fallback（实例已绑定 keypair）\n{key_output}'.strip()
+    elif use_key_setup:
+        logger.warning('公钥阶段密码设置失败，将直接尝试云厂商已下发的密码登录: ip=%s user=%s note=%s', ip, bootstrap_username, key_output)
 
-    logger.info('公钥阶段密码设置完成，开始等待密码复登: ip=%s user=%s', ip, bootstrap_username)
     ready, message = await _wait_ssh_password_ready(ip, bootstrap_username, password)
     if not ready:
         return False, message
@@ -508,6 +900,18 @@ async def install_bbr(ip: str, username: str, password: str) -> tuple[bool, str]
     _log_multiline_output('[BOOTSTRAP][BBR]', output)
     logger.info('%s', _build_bootstrap_full_log('BBR', ip, bootstrap_username, ok, output))
     return ok, output
+
+
+
+def _extract_tg_links(text: str) -> list[str]:
+    links: list[str] = []
+    seen: set[str] = set()
+    for match in re.findall(r'tg://proxy\?[^"\'\s<>]+', text or ''):
+        link = match.rstrip(',.，。')
+        if link and link not in seen:
+            links.append(link)
+            seen.add(link)
+    return links
 
 
 def build_mtproxy_links(ip: str, port: int | str, secret: str) -> tuple[str, str]:
@@ -550,7 +954,7 @@ WORKDIR='{MTPROXY_DIR}'
 CONFIG_FILE="$WORKDIR/config"
 SECRET=''
 if [ -f "$CONFIG_FILE" ]; then
-  SECRET=$(sed -n 's/^secret="\([^"]*\)"$/\1/p' "$CONFIG_FILE" | head -n 1)
+  SECRET=$(sed -n -E 's/^secret="?([^"[:space:]]+)"?$/\1/p' "$CONFIG_FILE" | head -n 1)
 fi
 PROC_OK=0
 if ps -ef | grep -iE '/mtg | mtg run |mtproto-proxy' | grep -v grep >/dev/null 2>&1; then
@@ -609,6 +1013,11 @@ async def install_mtproxy(ip: str, username: str, password: str, port: int = MTP
     mtproxy_status = ''
     mtproxy_error = ''
     mtproxy_daemon = ''
+    mtproxy_backup_status = ''
+    mtproxy_backup_provider = ''
+    mtproxy_backup_port = ''
+    telemt_a_port = ''
+    telemt_b_ports = ''
     sanitized_output = _sanitize_mtproxy_output(output)
     for line in output.splitlines():
         if line.startswith('MTPROXY_SECRET='):
@@ -621,6 +1030,16 @@ async def install_mtproxy(ip: str, username: str, password: str, port: int = MTP
             mtproxy_error = line.split('=', 1)[1].strip()
         elif line.startswith('MTPROXY_DAEMON='):
             mtproxy_daemon = line.split('=', 1)[1].strip()
+        elif line.startswith('MTPROXY_BACKUP_STATUS='):
+            mtproxy_backup_status = line.split('=', 1)[1].strip()
+        elif line.startswith('MTPROXY_BACKUP_PROVIDER='):
+            mtproxy_backup_provider = line.split('=', 1)[1].strip()
+        elif line.startswith('MTPROXY_BACKUP_PORT='):
+            mtproxy_backup_port = line.split('=', 1)[1].strip()
+        elif line.startswith('MTPROXY_TELEMT_A_PORT='):
+            telemt_a_port = line.split('=', 1)[1].strip()
+        elif line.startswith('MTPROXY_TELEMT_B_PORTS='):
+            telemt_b_ports = line.split('=', 1)[1].strip()
     if sanitized_output:
         _log_multiline_output('[BOOTSTRAP][MTPROXY]', sanitized_output)
     logger.info('%s', _build_bootstrap_full_log('MTPROXY', ip, bootstrap_username, ok, sanitized_output))
@@ -633,13 +1052,19 @@ async def install_mtproxy(ip: str, username: str, password: str, port: int = MTP
         secret = desired_secret
     if secret and (mtproxy_status == 'OK' or probe_ok):
         tg_link, tme_link = build_mtproxy_links(ip, actual_port, secret)
+        extra_links = [link for link in _extract_tg_links(output) if link != tg_link]
+        link_lines = '\n'.join(f'扩展链接: {link}' for link in extra_links)
         verified_output = (
             'MTProxy 安装完成\n'
             f'状态: 运行正常\n'
             f'端口: {actual_port}\n'
             f'进程守护: {mtproxy_daemon or "已启用"}\n'
+            f'备用代理: {mtproxy_backup_provider or "mtprotoproxy"} {mtproxy_backup_status or "OK"} 端口 {mtproxy_backup_port or int(actual_port) + 1}\n'
+            f'Telemt A(Docker三模式): 端口 {telemt_a_port or int(actual_port) + 2}\n'
+            f'Telemt B(systemd单模式): 端口 {telemt_b_ports or f"{int(actual_port) + 3},{int(actual_port) + 4},{int(actual_port) + 5}"}\n'
             f'TG链接: {tg_link}\n'
             f'分享链接: {tme_link}'
+            + (f'\n{link_lines}' if link_lines else '')
         )
         _log_multiline_output('[BOOTSTRAP][MTPROXY_LINK]', verified_output)
         return True, verified_output
@@ -676,7 +1101,9 @@ def _wait_ssh_password_ready(ip: str, username: str, password: str, timeout: int
     if not port_ready:
         logger.warning('SSH 22 端口未就绪: ip=%s user=%s note=%s', ip, username, message)
         return False, message
-    logger.info('SSH 22 端口已就绪，开始探测密码登录: ip=%s user=%s', ip, username)
+    initial_delay = 30
+    logger.info('SSH 22 端口已就绪，等待系统初始化后探测密码登录: ip=%s user=%s delay=%ss', ip, username, initial_delay)
+    time.sleep(initial_delay)
     try:
         import paramiko
     except ImportError:
@@ -691,17 +1118,22 @@ def _wait_ssh_password_ready(ip: str, username: str, password: str, timeout: int
         client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
         try:
             logger.info('探测 SSH 密码登录: ip=%s user=%s attempt=%s', ip, username, attempt)
-            client.connect(
-                hostname=ip,
-                port=22,
-                username=username,
-                password=password,
-                timeout=20,
-                banner_timeout=20,
-                auth_timeout=20,
-                look_for_keys=False,
-                allow_agent=False,
-            )
+            previous_levels = _set_paramiko_quiet(True)
+            try:
+                client.connect(
+                    hostname=ip,
+                    port=22,
+                    username=username,
+                    password=password,
+                    timeout=20,
+                    banner_timeout=20,
+                    auth_timeout=20,
+                    look_for_keys=False,
+                    allow_agent=False,
+                )
+            finally:
+                time.sleep(0.5)
+                _restore_paramiko_levels(previous_levels)
             logger.info('SSH 密码登录已就绪: ip=%s user=%s attempt=%s', ip, username, attempt)
             return True, 'SSH 密码登录已就绪。'
         except Exception as exc:

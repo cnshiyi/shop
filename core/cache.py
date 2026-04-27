@@ -32,7 +32,7 @@ def build_redis_url() -> str:
     return f'redis://{auth}{host}:{port}/{db}'
 
 
-REDIS_URL = build_redis_url()
+REDIS_URL = os.getenv('REDIS_URL') or f"redis://{os.getenv('REDIS_HOST', '127.0.0.1')}:{os.getenv('REDIS_PORT', '6379')}/{os.getenv('REDIS_DB', '0')}"
 CONFIG_KEY_PREFIX = 'site_config:'
 
 _redis: redis.Redis | None = None

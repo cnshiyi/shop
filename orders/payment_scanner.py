@@ -4,7 +4,7 @@ import os
 import time
 from collections import OrderedDict
 from datetime import datetime
-from decimal import Decimal
+from decimal import Decimal, ROUND_DOWN
 from html import escape
 
 
@@ -21,7 +21,9 @@ from orders.models import Order, Product, Recharge
 from orders.services import usdt_to_trx
 from bot.keyboards import custom_port_keyboard
 from cloud.provisioning import provision_cloud_server
+from cloud.services import apply_cloud_server_renewal
 from core.cache import get_config, bump_daily_stats
+from core.runtime_config import get_runtime_config
 from core.persistence import bump_daily_address_stat, record_external_sync_log
 from cloud.cache import get_monitor_addresses, maybe_sync_monitors, init_monitor_cache
 from orders.tron_parser import parse_trx_transfer, parse_usdt_transfer
@@ -30,9 +32,9 @@ logger = logging.getLogger(__name__)
 
 # ── 配置 ──────────────────────────────────────────────────────────────────
 
-USDT_CONTRACT = os.getenv('USDT_CONTRACT', 'TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t')
-TRONGRID_BASE_URL = os.getenv('TRONGRID_BASE_URL', 'https://api.trongrid.io')
-SCANNER_VERBOSE = os.getenv('SCANNER_VERBOSE', '0') == '1'
+USDT_CONTRACT = get_runtime_config('usdt_contract', os.getenv('USDT_CONTRACT', 'TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t'))
+TRONGRID_BASE_URL = get_runtime_config('trongrid_base_url', os.getenv('TRONGRID_BASE_URL', 'https://api.trongrid.io'))
+SCANNER_VERBOSE = get_runtime_config('scanner_verbose', os.getenv('SCANNER_VERBOSE', '0')) == '1'
 
 # ── 内部状态 ──────────────────────────────────────────────────────────────
 
@@ -72,22 +74,13 @@ def get_resource_detail(detail_key: str) -> dict | None:
 
 def reload_config():
     """热重载扫描器配置（由外部调用）。"""
-    global SCANNER_VERBOSE
-    SCANNER_VERBOSE = os.getenv('SCANNER_VERBOSE', '0') == '1'
+    global SCANNER_VERBOSE, USDT_CONTRACT, TRONGRID_BASE_URL
+    SCANNER_VERBOSE = get_runtime_config('scanner_verbose', os.getenv('SCANNER_VERBOSE', '0')) == '1'
+    USDT_CONTRACT = get_runtime_config('usdt_contract', os.getenv('USDT_CONTRACT', 'TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t'))
+    TRONGRID_BASE_URL = get_runtime_config('trongrid_base_url', os.getenv('TRONGRID_BASE_URL', 'https://api.trongrid.io'))
 
 
 # ── 内部辅助 ──────────────────────────────────────────────────────────────
-
-def _receive_address() -> str:
-    # 同步降级：直接查数据库（scanner 热路径中，配置缓存在 Redis 层处理）
-    from core.models import SiteConfig
-    return SiteConfig.get('receive_address', '')
-
-
-def _trongrid_api_key() -> str:
-    from core.models import SiteConfig
-    return SiteConfig.get('trongrid_api_key', '')
-
 
 def _cache_tx_detail(tx_hash: str, detail: dict):
     detail_key = tx_hash[:16]
@@ -128,7 +121,8 @@ def _build_resource_detail_keyboard(detail_id: str) -> InlineKeyboardMarkup:
 def fmt_amount(value) -> str:
     if value is None:
         return ''
-    text = str(Decimal(value))
+    amount = Decimal(str(value)).quantize(Decimal('0.001'), rounding=ROUND_DOWN)
+    text = format(amount, 'f')
     if '.' in text:
         text = text.rstrip('0').rstrip('.')
     return text or '0'
@@ -252,15 +246,12 @@ def _confirm_cloud_server_order(order_id: int, tx_hash: str):
         if order.status == 'renew_pending':
             if not str(order.public_ip or '').strip() or order.status in {'deleted', 'deleting', 'expired'}:
                 return None
-            base = order.service_expires_at or timezone.now()
-            if base < timezone.now():
-                base = timezone.now()
-            order.service_expires_at = base + timezone.timedelta(days=order.lifecycle_days or 31)
-            order.last_renewed_at = timezone.now()
-            order.status = 'completed'
-            order.provision_note = '续费成功，服务有效期已顺延。'
-            order.save(update_fields=['tx_hash', 'paid_at', 'service_expires_at', 'last_renewed_at', 'status', 'provision_note', 'updated_at'])
-            return order
+            order.save(update_fields=['tx_hash', 'paid_at', 'updated_at'])
+            try:
+                return apply_cloud_server_renewal.__wrapped__(order.id, order.lifecycle_days or 31)
+            except Exception as exc:
+                logger.warning('云服务器真实续费失败 order=%s err=%s', order.id, exc)
+                return None
         order.status = 'paid'
         order.provision_note = '已收款，等待用户确认 MTProxy 端口后进入创建流程。默认端口为 9528。'
         order.save(update_fields=['status', 'tx_hash', 'paid_at', 'provision_note', 'updated_at'])
@@ -352,9 +343,8 @@ async def _process_payment(transfer: dict) -> bool:
 
     pending_cloud_orders = await _get_pending_cloud_server_orders()
     for order in pending_cloud_orders:
-        expected_amount = order.pay_amount
-        if order.pay_method == 'address' and order.status == 'pending':
-            expected_amount = usdt_to_trx.__wrapped__(order.total_amount) if currency == 'TRX' else Decimal(order.total_amount)
+        payable = Decimal(str(order.pay_amount or order.total_amount or 0))
+        expected_amount = usdt_to_trx.__wrapped__(payable) if currency == 'TRX' else payable
         if expected_amount == amount:
             confirmed = await _confirm_cloud_server_order(order.id, tx_hash)
             if confirmed:

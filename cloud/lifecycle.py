@@ -1,5 +1,6 @@
 import logging
 import os
+from html import escape
 
 from aiogram.types import InlineKeyboardMarkup
 from asgiref.sync import sync_to_async
@@ -7,19 +8,30 @@ from django.core.management import call_command
 from django.utils import timezone
 
 from core.models import CloudAccountConfig
+from core.runtime_config import get_runtime_config
+from core.texts import site_text
 
+from orders.models import BalanceLedger
 from bot.models import TelegramUser
 from cloud.models import CloudAsset, CloudServerOrder, Server
-from cloud.services import record_cloud_ip_log
-from bot.keyboards import cloud_expiry_actions
+from cloud.services import create_cloud_server_renewal, pay_cloud_server_renewal_with_balance, record_cloud_ip_log
+from bot.keyboards import cloud_auto_renew_notice_actions, cloud_expiry_actions
 
 logger = logging.getLogger(__name__)
 
 
-def _aws_client(region: str):
+def _cloud_text_format(key: str, default: str, **kwargs) -> str:
+    template = site_text(key, default)
+    try:
+        return template.format(**kwargs)
+    except Exception:
+        return default.format(**kwargs)
+
+
+def _aws_client(region: str, account=None):
     import boto3
     from core.cloud_accounts import get_active_cloud_account
-    account = get_active_cloud_account('aws')
+    account = account or get_active_cloud_account('aws', region)
     access_key = ''
     secret_key = ''
     if account:
@@ -38,20 +50,41 @@ def _aws_client(region: str):
     )
 
 
+def _config_bool(key: str, default: str = '0') -> bool:
+    return str(get_runtime_config(key, default)).strip().lower() in {'1', 'true', 'yes', 'on'}
+
+
+def _config_int(key: str, default: int) -> int:
+    try:
+        return int(str(get_runtime_config(key, str(default))).strip() or default)
+    except (TypeError, ValueError):
+        return default
+
+
 @sync_to_async
 def _get_due_orders():
     now = timezone.now()
-    renew_notice_at = now + timezone.timedelta(days=5)
+    renew_notice_days = max(1, _config_int('cloud_renew_notice_days', 5))
+    renew_notice_debug_repeat = _config_bool('cloud_renew_notice_debug_repeat', '0')
+    renew_notice_at = now + timezone.timedelta(days=renew_notice_days)
+    auto_renew_notice_at = now + timezone.timedelta(days=3, hours=2)
+    auto_renew_at = now + timezone.timedelta(days=3)
     delete_notice_at = now + timezone.timedelta(days=1)
     recycle_notice_at = now + timezone.timedelta(days=1)
+    renew_notice_qs = CloudServerOrder.objects.filter(status__in=['completed', 'expiring', 'renew_pending'], cloud_reminder_enabled=True, service_expires_at__lte=renew_notice_at, service_expires_at__gt=now)
+    if not renew_notice_debug_repeat:
+        renew_notice_qs = renew_notice_qs.filter(renew_notice_sent_at__isnull=True)
     return {
-        'renew_notice': list(CloudServerOrder.objects.filter(status__in=['completed', 'expiring', 'renew_pending'], service_expires_at__lte=renew_notice_at, service_expires_at__gt=now, renew_notice_sent_at__isnull=True)),
+        'renew_notice': list(renew_notice_qs),
+        'auto_renew_notice': list(CloudServerOrder.objects.filter(status__in=['completed', 'expiring', 'renew_pending'], auto_renew_enabled=True, service_expires_at__lte=auto_renew_notice_at, service_expires_at__gt=auto_renew_at)),
+        'auto_renew': list(CloudServerOrder.objects.filter(status__in=['completed', 'expiring', 'renew_pending'], auto_renew_enabled=True, service_expires_at__lte=auto_renew_at, service_expires_at__gt=now)),
         'delete_notice': list(CloudServerOrder.objects.filter(status__in=['suspended', 'deleting'], delete_at__lte=delete_notice_at, delete_at__gt=now, delete_notice_sent_at__isnull=True)),
         'recycle_notice': list(CloudServerOrder.objects.filter(status='deleted', ip_recycle_at__lte=recycle_notice_at, ip_recycle_at__gt=now, recycle_notice_sent_at__isnull=True)),
         'expire': list(CloudServerOrder.objects.filter(status='completed', service_expires_at__lte=now)),
         'suspend': list(CloudServerOrder.objects.filter(status__in=['completed', 'expiring', 'renew_pending'], suspend_at__lte=now)),
         'delete': list(CloudServerOrder.objects.filter(status__in=['suspended', 'deleting'], delete_at__lte=now)),
         'recycle': list(CloudServerOrder.objects.filter(status='deleted', ip_recycle_at__lte=now)),
+        'config': {'renew_notice_days': renew_notice_days, 'renew_notice_debug_repeat': renew_notice_debug_repeat},
     }
 
 
@@ -163,6 +196,106 @@ def _user_can_receive_cloud_notice(user_id: int) -> bool:
     return not muted_until or muted_until <= timezone.now()
 
 
+def _format_notice_dt(value) -> str:
+    if not value:
+        return '未设置'
+    try:
+        return timezone.localtime(value).strftime('%Y-%m-%d %H:%M')
+    except Exception:
+        return str(value)
+
+
+def _fmt_money3(value) -> str:
+    if value is None:
+        return '-'
+    try:
+        return f'{value:.3f}'
+    except Exception:
+        return str(value)
+
+
+def _proxy_links_notice_text(order) -> str:
+    links = []
+    seen = set()
+    main_link = str(getattr(order, 'mtproxy_link', '') or '').strip()
+    if main_link:
+        links.append(('主代理', main_link))
+        seen.add(main_link)
+    for item in getattr(order, 'proxy_links', None) or []:
+        if not isinstance(item, dict):
+            continue
+        link = str(item.get('url') or '').strip()
+        if not link or link in seen:
+            continue
+        links.append((str(item.get('name') or f"端口 {item.get('port') or '-'}"), link))
+        seen.add(link)
+    if not links:
+        return '\n\n代理链接: 尚未生成'
+    lines = ['\n\n代理链接:']
+    for label, link in links:
+        lines.append(f'{escape(label)}: {escape(link)}')
+    return '\n'.join(lines)
+
+
+def _is_cloud_delete_safe_time(now=None) -> bool:
+    local_now = timezone.localtime(now or timezone.now())
+    return 9 <= local_now.hour < 22
+
+
+@sync_to_async
+def _cloud_expiry_notice_payload(order_id: int) -> dict:
+    order = CloudServerOrder.objects.filter(id=order_id).first()
+    if not order:
+        return {'ip': '未分配', 'expires_at': None, 'suspend_at': None}
+    asset = CloudAsset.objects.filter(order=order).order_by('-updated_at', '-id').first()
+    server = Server.objects.filter(order=order).order_by('-updated_at', '-id').first()
+    ip = (
+        getattr(asset, 'public_ip', None)
+        or getattr(server, 'public_ip', None)
+        or order.public_ip
+        or getattr(asset, 'previous_public_ip', None)
+        or getattr(server, 'previous_public_ip', None)
+        or order.previous_public_ip
+        or '未分配'
+    )
+    expires_at = getattr(asset, 'actual_expires_at', None) or getattr(server, 'expires_at', None) or order.service_expires_at
+    computed_suspend_at = expires_at + timezone.timedelta(days=5 + max(int(order.renew_extension_days or 0), 0)) if expires_at else None
+    suspend_at = order.suspend_at
+    if computed_suspend_at and (not suspend_at or suspend_at < expires_at):
+        suspend_at = computed_suspend_at
+    return {'ip': ip, 'expires_at': expires_at, 'suspend_at': suspend_at, 'auto_renew_enabled': bool(order.auto_renew_enabled)}
+
+
+@sync_to_async
+def _run_auto_renew(order_id: int) -> tuple[CloudServerOrder | None, str | None, dict]:
+    order = CloudServerOrder.objects.filter(id=order_id).first()
+    if not order:
+        return None, '订单不存在', {}
+    if not order.auto_renew_enabled:
+        return None, '自动续费已关闭', {}
+    if order.status != 'renew_pending':
+        renewal = create_cloud_server_renewal.__wrapped__(order.id, order.user_id, 31)
+        if not renewal:
+            return None, '订单当前不可续费', {}
+    renewed, err = pay_cloud_server_renewal_with_balance.__wrapped__(order.id, order.user_id, 'USDT', 31)
+    ledger = None
+    if renewed and not err:
+        ledger = BalanceLedger.objects.filter(
+            user_id=order.user_id,
+            related_type='cloud_order',
+            related_id=order.id,
+            type='cloud_order_balance_pay',
+            currency='USDT',
+        ).order_by('-created_at', '-id').first()
+    balance_change = {
+        'currency': getattr(ledger, 'currency', 'USDT') if ledger else 'USDT',
+        'amount': getattr(ledger, 'amount', None) if ledger else None,
+        'before': getattr(ledger, 'before_balance', None) if ledger else None,
+        'after': getattr(ledger, 'after_balance', None) if ledger else None,
+    }
+    return renewed, err, balance_change
+
+
 @sync_to_async
 def _get_migration_due_orders():
     now = timezone.now()
@@ -174,37 +307,37 @@ def _get_migration_due_orders():
     )
 
 
-async def _stop_instance(order: CloudServerOrder) -> str:
+async def _stop_instance(order: CloudServerOrder) -> tuple[bool, str]:
     if order.provider != 'aws_lightsail' or not order.server_name:
-        return '非 AWS 资源，暂未执行真实关机。'
+        return False, '非 AWS 资源，暂未执行真实关机。'
     try:
-        client = _aws_client(order.region_code)
+        client = _aws_client(order.region_code, getattr(order, 'cloud_account', None))
         client.stop_instance(instanceName=order.server_name, force=True)
-        return 'AWS 实例已执行关机。'
+        return True, 'AWS 实例已执行关机。'
     except Exception as exc:
-        return f'AWS 实例关机失败: {exc}'
+        return False, f'AWS 实例关机失败: {exc}'
 
 
-async def _delete_instance(order: CloudServerOrder) -> str:
+async def _delete_instance(order: CloudServerOrder) -> tuple[bool, str]:
     if order.provider != 'aws_lightsail' or not order.server_name:
-        return '非 AWS 资源，暂未执行真实删机。'
+        return False, '非 AWS 资源，暂未执行真实删机。'
     try:
-        client = _aws_client(order.region_code)
+        client = _aws_client(order.region_code, getattr(order, 'cloud_account', None))
         client.delete_instance(instanceName=order.server_name)
-        return 'AWS 实例已执行删除，固定 IP 继续保留。'
+        return True, 'AWS 实例已执行删除，固定 IP 继续保留。'
     except Exception as exc:
-        return f'AWS 实例删除失败: {exc}'
+        return False, f'AWS 实例删除失败: {exc}'
 
 
-async def _delete_replaced_server(order: CloudServerOrder) -> str:
+async def _delete_replaced_server(order: CloudServerOrder) -> tuple[bool, str]:
     if order.provider != 'aws_lightsail' or not order.server_name:
-        return '迁移期结束，旧服务器已标记删除。'
+        return False, '迁移期结束，但旧服务器不满足真实删机条件。'
     try:
-        client = _aws_client(order.region_code)
+        client = _aws_client(order.region_code, getattr(order, 'cloud_account', None))
         client.delete_instance(instanceName=order.server_name)
-        return '迁移期结束，旧 AWS 实例已删除。'
+        return True, '迁移期结束，旧 AWS 实例已删除。'
     except Exception as exc:
-        return f'迁移期结束，旧实例删除失败: {exc}'
+        return False, f'迁移期结束，旧实例删除失败: {exc}'
 
 
 @sync_to_async
@@ -253,9 +386,7 @@ def check_cloud_accounts_status(queryset=None):
                 old_key = os.environ.get('ALIBABA_CLOUD_ACCESS_KEY_ID')
                 old_secret = os.environ.get('ALIBABA_CLOUD_ACCESS_KEY_SECRET')
                 try:
-                    os.environ['ALIBABA_CLOUD_ACCESS_KEY_ID'] = item.access_key_plain
-                    os.environ['ALIBABA_CLOUD_ACCESS_KEY_SECRET'] = item.secret_key_plain
-                    client = _default_build_client(_region_endpoint(item.region_hint or 'cn-hongkong'))
+                    client = _default_build_client(_region_endpoint(item.region_hint or 'cn-hongkong'), account=item)
                     if not client:
                         raise ValueError('无法创建阿里云客户端')
                     response = client.list_instances_with_options(
@@ -311,50 +442,103 @@ async def sync_cloud_accounts_tick():
 async def lifecycle_tick(notify=None):
     due = await _get_due_orders()
     migration_due_orders = await _get_migration_due_orders()
+    logger.info(
+        'CLOUD_LIFECYCLE_DUE renew_notice=%s auto_renew_notice=%s auto_renew=%s delete_notice=%s recycle_notice=%s expire=%s suspend=%s delete=%s recycle=%s migration_due=%s renew_notice_days=%s renew_notice_debug_repeat=%s',
+        len(due['renew_notice']),
+        len(due['auto_renew_notice']),
+        len(due['auto_renew']),
+        len(due['delete_notice']),
+        len(due['recycle_notice']),
+        len(due['expire']),
+        len(due['suspend']),
+        len(due['delete']),
+        len(due['recycle']),
+        len(migration_due_orders),
+        due.get('config', {}).get('renew_notice_days'),
+        due.get('config', {}).get('renew_notice_debug_repeat'),
+    )
 
     for order in due['renew_notice']:
         if notify and await _user_can_receive_cloud_notice(order.user_id):
+            notice = await _cloud_expiry_notice_payload(order.id)
+            auto_renew_text = '<b>本单已开启自动续费，将在到期前 3 天自动续费；自动续费前 2 小时会再次通知。</b>' if notice['auto_renew_enabled'] else '<b>本单未开启自动续费。</b>'
+            logger.info('CLOUD_RENEW_NOTICE_SEND user_id=%s order_id=%s order_no=%s ip=%s expires_at=%s auto_renew=%s', order.user_id, order.id, order.order_no, notice['ip'], notice['expires_at'], notice['auto_renew_enabled'])
             await notify(
                 order.user_id,
-                f'⏰ 云服务器到期提醒\n订单号: {order.order_no}\n到期时间: {order.service_expires_at}\n将在到期后进入宽限与删机流程，请及时处理。',
+                f'⏰ IP到期提醒\n\nIP: {notice["ip"]}\n\n到期时间: {_format_notice_dt(notice["expires_at"] or order.service_expires_at)}\n\n提醒关机时间: {_format_notice_dt(notice["suspend_at"])}\n\n{auto_renew_text}\n\n如需续费或处理，请联系人工客服。',
                 cloud_expiry_actions(order.id),
             )
         await _mark_notice_sent(order.id, 'renew_notice_sent_at')
 
+    for order in due['auto_renew_notice']:
+        if notify and await _user_can_receive_cloud_notice(order.user_id):
+            notice = await _cloud_expiry_notice_payload(order.id)
+            logger.info('CLOUD_AUTO_RENEW_PRENOTICE user_id=%s order_id=%s order_no=%s ip=%s expires_at=%s', order.user_id, order.id, order.order_no, notice['ip'], notice['expires_at'])
+            await notify(
+                order.user_id,
+                f'⚡ 自动续费提醒\n\nIP: {notice["ip"]}\n\n到期时间: {_format_notice_dt(notice["expires_at"] or order.service_expires_at)}\n\n将在约 2 小时后使用钱包余额自动续费 31 天。\n\n如不需要，请点击下方按钮关闭自动续费。',
+                cloud_auto_renew_notice_actions(order.id),
+            )
+
+    for order in due['auto_renew']:
+        renewed, err, balance_change = await _run_auto_renew(order.id)
+        notice = await _cloud_expiry_notice_payload(order.id)
+        logger.info('CLOUD_AUTO_RENEW_EXEC user_id=%s order_id=%s order_no=%s ip=%s ok=%s error=%s', order.user_id, order.id, order.order_no, notice['ip'], not bool(err), err)
+        if notify:
+            if err:
+                await notify(order.user_id, _cloud_text_format('cloud_auto_renew_failed', '❌ 自动续费失败\n\nIP: {ip}\n\n到期时间: {expires_at}\n\n失败原因: {error}\n\n请联系人工客服处理。', ip=notice['ip'], expires_at=_format_notice_dt(notice['expires_at'] or order.service_expires_at), error=err), cloud_expiry_actions(order.id))
+            else:
+                balance_text = ''
+                if balance_change.get('before') is not None and balance_change.get('after') is not None:
+                    currency = balance_change.get('currency')
+                    balance_text = f'\n\n续费金额: {_fmt_money3(balance_change.get("amount"))} {currency}\n\n续费前余额: {_fmt_money3(balance_change.get("before"))} {currency}\n\n续费后余额: {_fmt_money3(balance_change.get("after"))} {currency}'
+                links_text = _proxy_links_notice_text(renewed)
+                await notify(
+                    order.user_id,
+                    f'✅ 自动续费成功\n\nIP: {notice["ip"]}\n\n新的到期时间: {_format_notice_dt(getattr(renewed, "service_expires_at", None))}{balance_text}{links_text}',
+                    cloud_auto_renew_notice_actions(order.id),
+                )
+
     for order in due['delete_notice']:
         if notify and await _user_can_receive_cloud_notice(order.user_id):
-            await notify(order.user_id, f'⚠️ 云服务器删机提醒\n订单号: {order.order_no}\n计划删机时间: {order.delete_at}\n如需保留，请尽快处理。')
+            await notify(order.user_id, _cloud_text_format('cloud_delete_notice', '⚠️ 云服务器删机提醒\n订单号: {order_no}\n计划删机时间: {delete_at}\n如需保留，请尽快处理。', order_no=order.order_no, delete_at=order.delete_at))
         await _mark_notice_sent(order.id, 'delete_notice_sent_at')
 
     for order in due['recycle_notice']:
         if notify and await _user_can_receive_cloud_notice(order.user_id):
-            await notify(order.user_id, f'📦 固定IP删除提醒\n订单号: {order.order_no}\n计划删除IP时间: {order.ip_recycle_at}\n如需保留，请尽快处理。')
+            await notify(order.user_id, _cloud_text_format('cloud_ip_recycle_notice', '📦 固定IP删除提醒\n订单号: {order_no}\n计划删除IP时间: {ip_recycle_at}\n如需保留，请尽快处理。', order_no=order.order_no, ip_recycle_at=order.ip_recycle_at))
         await _mark_notice_sent(order.id, 'recycle_notice_sent_at')
 
     for order in due['expire']:
         updated = await _mark_expiring(order.id)
         if notify:
-            await notify(updated.user_id, f'⏰ 云服务器即将到期\n订单号: {updated.order_no}\n请尽快续费，未续费将按规则关机/删机。')
+            await notify(updated.user_id, _cloud_text_format('cloud_expiring_notice', '⏰ 云服务器即将到期\n订单号: {order_no}\n请尽快续费，未续费将按规则关机/删机。', order_no=updated.order_no))
 
     for order in due['suspend']:
         note = await _stop_instance(order)
         updated = await _mark_suspended(order.id, note)
         if notify:
-            await notify(updated.user_id, f'⚠️ 云服务器已关机\n订单号: {updated.order_no}\n如需继续使用，请尽快续费。')
+            await notify(updated.user_id, _cloud_text_format('cloud_suspended_notice', '⚠️ 云服务器已关机\n订单号: {order_no}\n如需继续使用，请尽快续费。', order_no=updated.order_no))
 
     for order in due['delete']:
+        if not _is_cloud_delete_safe_time():
+            logger.warning('CLOUD_DELETE_SKIP_UNSAFE_TIME order_id=%s order_no=%s delete_at=%s now=%s', order.id, order.order_no, order.delete_at, timezone.now())
+            continue
         note = await _delete_instance(order)
         updated = await _mark_deleted(order.id, note)
         if notify:
-            await notify(updated.user_id, f'🗑 云服务器实例已删除\n订单号: {updated.order_no}\n固定 IP 仍保留，可在保留期内续费恢复。')
+            await notify(updated.user_id, _cloud_text_format('cloud_instance_deleted_notice', '🗑 云服务器实例已删除\n订单号: {order_no}\n固定 IP 仍保留，可在保留期内续费恢复。', order_no=updated.order_no))
 
     for order in due['recycle']:
         updated = await _mark_recycled(order.id, '固定 IP 保留期结束，已释放数据库占位。')
         if notify:
-            await notify(updated.user_id, f'📦 云服务器固定 IP 保留期已结束\n订单号: {updated.order_no}')
+            await notify(updated.user_id, _cloud_text_format('cloud_ip_retention_ended_notice', '📦 云服务器固定 IP 保留期已结束\n订单号: {order_no}', order_no=updated.order_no))
 
     for order in migration_due_orders:
+        if not _is_cloud_delete_safe_time():
+            logger.warning('CLOUD_MIGRATION_DELETE_SKIP_UNSAFE_TIME order_id=%s order_no=%s migration_due_at=%s now=%s', order.id, order.order_no, order.migration_due_at, timezone.now())
+            continue
         note = await _delete_replaced_server(order)
         updated = await _mark_replaced_order_deleted(order.id, note)
         if notify:
-            await notify(updated.user_id, f'🧹 迁移期已结束，旧服务器已删除\n订单号: {updated.order_no}')
+            await notify(updated.user_id, _cloud_text_format('cloud_migration_old_deleted_notice', '🧹 迁移期已结束，旧服务器已删除\n订单号: {order_no}', order_no=updated.order_no))

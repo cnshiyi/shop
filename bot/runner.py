@@ -13,6 +13,8 @@ from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from bot.config import BOT_TOKEN
 from bot.fsm import close_fsm_storage
 from bot.handlers import create_dispatcher_and_register
+from bot.telegram_listener import run_telegram_account_listeners
+from bot.telegram_sender import send_with_notification_account
 from cloud.services import refresh_custom_plan_cache
 from cloud.lifecycle import lifecycle_tick, sync_server_status_tick, sync_cloud_accounts_tick
 from core.cache import refresh_config, close as cache_close
@@ -48,13 +50,21 @@ async def run_bot():
     set_resource_bot(bot)
 
     async def _notify(user_id: int, text: str, reply_markup=None):
+        from bot.models import TelegramUser
+
+        user = await asyncio.to_thread(lambda: TelegramUser.objects.filter(id=user_id).first())
+        if not user:
+            return
         try:
-            from bot.models import TelegramUser
-            user = await asyncio.to_thread(lambda: TelegramUser.objects.filter(id=user_id).first())
-            if user:
-                await bot.send_message(user.tg_user_id, text, reply_markup=reply_markup)
+            await bot.send_message(user.tg_user_id, text, reply_markup=reply_markup, parse_mode='HTML')
         except Exception as exc:
-            logger.warning('生命周期通知发送失败 user=%s err=%s', user_id, exc)
+            logger.warning('机器人生命周期通知发送失败 user=%s err=%s，尝试个人号通知', user_id, exc)
+            try:
+                sent = await send_with_notification_account(user.tg_user_id, text)
+                if not sent:
+                    logger.warning('个人号生命周期通知无可用账号 user=%s', user_id)
+            except Exception as fallback_exc:
+                logger.warning('个人号生命周期通知发送失败 user=%s err=%s', user_id, fallback_exc)
 
     # TRON 扫块器 / 资源巡检 / 生命周期调度
     scheduler = AsyncIOScheduler()
@@ -66,6 +76,8 @@ async def run_bot():
     scheduler.add_job(sync_cloud_accounts_tick, 'interval', minutes=15, id='cloud_account_check', max_instances=1, coalesce=True)
     scheduler.add_job(lambda: asyncio.to_thread(call_command, 'dedupe_servers'), 'interval', minutes=20, id='server_dedupe', max_instances=1, coalesce=True)
     scheduler.start()
+    telegram_listener_stop = asyncio.Event()
+    telegram_listener_task = asyncio.create_task(run_telegram_account_listeners(telegram_listener_stop))
     logger.info('TRON 扫块器已启动 (每6秒)')
     logger.info('资源巡检已启动 (每3分钟)')
     logger.info('定制套餐缓存刷新已启动 (每10分钟)')
@@ -74,11 +86,21 @@ async def run_bot():
     logger.info('云账号状态巡检已启动 (每15分钟)')
     logger.info('服务器去重任务已启动 (每20分钟)')
 
+    logger.info('Telegram个人号消息监听调度已启动')
+    logger.info('启动时执行云服务器生命周期检查')
+    try:
+        await lifecycle_tick(notify=_notify)
+        logger.info('启动时云服务器生命周期检查完成')
+    except Exception as exc:
+        logger.exception('启动时云服务器生命周期检查失败: %s', exc)
     logger.info('Telegram Bot 已启动 (aiogram)')
     await bot.delete_webhook(drop_pending_updates=True)
     try:
         await dp.start_polling(bot)
     finally:
+        telegram_listener_stop.set()
+        telegram_listener_task.cancel()
+        await asyncio.gather(telegram_listener_task, return_exceptions=True)
         scheduler.shutdown(wait=False)
         await cache_close()
         await close_fsm_storage()
