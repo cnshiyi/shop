@@ -860,7 +860,7 @@ def user_info(request):
         'realName': request.user.get_full_name() or username,
         'avatar': '',
         'desc': 'Shop 管理后台管理员',
-        'homePath': '/admin/workspace',
+        'homePath': '/admin/analytics',
         'token': _session_token_for_request(request),
     })
 
