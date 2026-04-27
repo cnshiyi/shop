@@ -317,7 +317,7 @@ def _get_migration_due_orders():
 def _get_orphan_asset_delete_due():
     now = timezone.now()
     return list(
-        CloudAsset.objects.filter(
+        CloudAsset.objects.select_related('cloud_account').filter(
             kind=CloudAsset.KIND_SERVER,
             order__isnull=True,
             actual_expires_at__lte=now,

@@ -321,6 +321,8 @@ class Command(BaseCommand):
         deleted_by_missing_ip_items = []
         unattached_ip_items = []
         conflict_skipped_items = []
+        deleted_preserved_items = []
+        manual_expiry_preserved_items = []
         claimed_assets = {}
         synced_instance_ids = []
         synced_instance_ids_by_region = {}
@@ -423,6 +425,20 @@ class Command(BaseCommand):
                         old_status = asset.status if asset else None
                         old_public_ip = asset.public_ip if asset else None
                         ip_changed = bool(asset and old_public_ip and old_public_ip != public_ip)
+                        if asset and asset.status == CloudAsset.STATUS_DELETED:
+                            claimed_assets[asset.id] = asset_signature
+                            server = _resolve_server(instance_name, instance_arn, public_ip, order, account)
+                            if server and server.status != Server.STATUS_DELETED:
+                                server.status = Server.STATUS_DELETED
+                                server.is_active = False
+                                server.provider_status = server.provider_status or '本地已删除'
+                                server.note = server.note or '本地已删除，跳过云同步复活。'
+                                server.save(update_fields=['status', 'is_active', 'provider_status', 'note', 'updated_at'])
+                            deleted_preserved_items.append(f'{asset.id}:{public_ip or "缺失"}:{instance_name or instance_arn}')
+                            region_instance_ids.append(instance_name)
+                            synced_instance_ids.append(instance_name)
+                            count += 1
+                            continue
                         if asset:
                             claimed_signature = claimed_assets.get(asset.id)
                             if claimed_signature and claimed_signature != asset_signature:
@@ -438,8 +454,12 @@ class Command(BaseCommand):
                                 claimed_assets[asset.id] = asset_signature
                                 if ip_changed:
                                     asset.previous_public_ip = old_public_ip
+                                original_due_at = asset.actual_expires_at
                                 for key, value in asset_defaults.items():
                                     setattr(asset, key, value)
+                                if not order and original_due_at and expires_at is None:
+                                    asset.actual_expires_at = original_due_at
+                                    manual_expiry_preserved_items.append(f'{asset.id}:{public_ip or "缺失"}:{instance_name or instance_arn}:{original_due_at}')
                                 asset.save()
                                 updated_count += 1
                                 updated_asset_ids.append(f'{asset.id}:{public_ip or "缺失"}:{instance_name or asset.asset_name}')
@@ -629,6 +649,10 @@ class Command(BaseCommand):
             detail_parts.append(f'未附加IP={unattached_ip_items[:20]}')
         if conflict_skipped_items:
             detail_parts.append(f'冲突跳过={conflict_skipped_items[:20]}')
+        if deleted_preserved_items:
+            detail_parts.append(f'保留本地删除={deleted_preserved_items[:20]}')
+        if manual_expiry_preserved_items:
+            detail_parts.append(f'保留手动到期={manual_expiry_preserved_items[:20]}')
         if verification_deleted_items:
             detail_parts.append(f'IP校验删除={verification_deleted_items[:20]}')
         if detail_parts:
