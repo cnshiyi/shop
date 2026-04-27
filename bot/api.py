@@ -6,6 +6,7 @@ import hashlib
 import hmac
 import json
 import os
+import secrets
 import struct
 import time
 from decimal import Decimal, InvalidOperation, ROUND_DOWN
@@ -95,24 +96,32 @@ def _json_payload(request):
         return {}
 
 
+def _normalize_totp_secret(secret: str) -> str:
+    return ''.join(ch for ch in str(secret or '').upper() if ch.isalnum()).rstrip('=')
+
+
 def _totp_secret():
-    return get_runtime_config('dashboard_totp_secret', '').replace(' ', '').strip()
+    return _normalize_totp_secret(get_runtime_config('dashboard_totp_secret', ''))
 
 
 def _generate_totp_secret():
-    return base64.b32encode(os.urandom(20)).decode('ascii').rstrip('=')
+    alphabet = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ234567'
+    return ''.join(secrets.choice(alphabet) for _ in range(32))
 
 
 def _totp_otpauth_url(secret: str, username: str = 'admin'):
     issuer = 'Shop Admin'
-    label = f'{issuer}:{username or "admin"}'
+    account = username or 'admin'
+    label = f'{quote(issuer, safe="")}:{quote(account, safe="")}'
+    normalized_secret = _normalize_totp_secret(secret)
     return (
         'otpauth://totp/'
-        f'{quote(label)}?secret={quote(secret)}&issuer={quote(issuer)}&algorithm=SHA1&digits=6&period=30'
+        f'{label}?secret={quote(normalized_secret, safe="")}&issuer={quote(issuer, safe="")}&algorithm=SHA1&digits=6&period=30'
     )
 
 
 def _totp_code(secret: str, counter: int) -> str:
+    secret = _normalize_totp_secret(secret)
     padding = '=' * ((8 - len(secret) % 8) % 8)
     key = base64.b32decode((secret + padding).upper(), casefold=True)
     digest = hmac.new(key, struct.pack('>Q', counter), hashlib.sha1).digest()
@@ -123,6 +132,7 @@ def _totp_code(secret: str, counter: int) -> str:
 
 def _verify_totp_token(token: str, secret: str) -> bool:
     token = ''.join(ch for ch in str(token or '') if ch.isdigit())
+    secret = _normalize_totp_secret(secret)
     if len(token) != 6 or not secret:
         return False
     try:
@@ -822,7 +832,7 @@ def auth_codes(request):
 @dashboard_login_required
 @require_POST
 def auth_totp_start(request):
-    secret = _generate_totp_secret()
+    secret = _normalize_totp_secret(_generate_totp_secret())
     request.session['dashboard_totp_pending_secret'] = secret
     request.session.set_expiry(10 * 60)
     username = request.user.get_username() or 'admin'
