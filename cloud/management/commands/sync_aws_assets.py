@@ -420,8 +420,11 @@ class Command(BaseCommand):
                             'is_active': is_active,
                         }
                         asset = _resolve_asset(instance_name, instance_arn, public_ip, order, account)
-                        if not order and asset and asset.user_id:
-                            asset_defaults['user'] = asset.user
+                        if not order and asset:
+                            if asset.user_id:
+                                asset_defaults['user'] = asset.user
+                            if asset.actual_expires_at:
+                                asset_defaults['actual_expires_at'] = asset.actual_expires_at
                         asset_signature = f'{instance_name or "-"}|{instance_arn or "-"}|{public_ip or "缺失"}'
                         old_status = asset.status if asset else None
                         old_public_ip = asset.public_ip if asset else None
@@ -444,8 +447,7 @@ class Command(BaseCommand):
                                 original_due_at = asset.actual_expires_at
                                 for key, value in asset_defaults.items():
                                     setattr(asset, key, value)
-                                if not order and original_due_at and expires_at is None:
-                                    asset.actual_expires_at = original_due_at
+                                if not order and original_due_at:
                                     manual_expiry_preserved_items.append(f'{asset.id}:{public_ip or "缺失"}:{instance_name or instance_arn}:{original_due_at}')
                                 asset.save()
                                 updated_count += 1
@@ -479,7 +481,17 @@ class Command(BaseCommand):
                             'provider_status': provider_status,
                             'is_active': is_active,
                         }
+                        if not order and asset:
+                            if asset.user_id:
+                                server_defaults['user'] = asset.user
+                            if asset.actual_expires_at:
+                                server_defaults['expires_at'] = asset.actual_expires_at
                         server = _resolve_server(instance_name, instance_arn, public_ip, order, account)
+                        if not order and server:
+                            if server.user_id:
+                                server_defaults['user'] = server.user
+                            if server.expires_at:
+                                server_defaults['expires_at'] = server.expires_at
                         old_server_public_ip = server.public_ip if server else None
                         if server:
                             if old_server_public_ip and old_server_public_ip != public_ip:
@@ -550,6 +562,11 @@ class Command(BaseCommand):
                             'is_active': False,
                         }
                         asset = _resolve_asset_for_static_ip(static_ip_name, static_ip_arn, public_ip, account)
+                        if asset:
+                            if asset.user_id:
+                                asset_defaults['user'] = asset.user
+                            if asset.actual_expires_at:
+                                asset_defaults['actual_expires_at'] = asset.actual_expires_at
                         asset_signature = f'{static_ip_name or "-"}|{static_ip_arn or "-"}|{public_ip or "缺失"}'
                         old_status = asset.status if asset else None
                         if asset:
