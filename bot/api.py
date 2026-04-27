@@ -572,35 +572,6 @@ def _ledger_payload(ledger):
     }
 
 
-def _normalize_server_status(provider, raw_status):
-    value = str(raw_status or '').strip().lower()
-    if provider == 'aws_lightsail':
-        mapping = {
-            'running': CloudAsset.STATUS_RUNNING,
-            'pending': CloudAsset.STATUS_PENDING,
-            'starting': CloudAsset.STATUS_STARTING,
-            'stopping': CloudAsset.STATUS_STOPPING,
-            'stopped': CloudAsset.STATUS_STOPPED,
-            'shutting-down': CloudAsset.STATUS_TERMINATING,
-            'terminated': CloudAsset.STATUS_TERMINATED,
-            'terminating': CloudAsset.STATUS_TERMINATING,
-        }
-        return mapping.get(value, CloudAsset.STATUS_UNKNOWN)
-    if provider == 'aliyun_simple':
-        mapping = {
-            'running': CloudAsset.STATUS_RUNNING,
-            'starting': CloudAsset.STATUS_STARTING,
-            'pending': CloudAsset.STATUS_PENDING,
-            'stopping': CloudAsset.STATUS_STOPPING,
-            'stopped': CloudAsset.STATUS_STOPPED,
-            'expired': CloudAsset.STATUS_EXPIRED,
-            'deleting': CloudAsset.STATUS_DELETING,
-            'deleted': CloudAsset.STATUS_DELETED,
-        }
-        return mapping.get(value, CloudAsset.STATUS_UNKNOWN)
-    return CloudAsset.STATUS_UNKNOWN
-
-
 @dashboard_login_required
 @require_GET
 def overview(request):

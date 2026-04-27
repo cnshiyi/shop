@@ -409,53 +409,6 @@ def sync_server_prices(provider: str, regions: list[tuple[str, str]], templates,
             )
 
 
-def _sync_provider_plans(provider: str, regions: list[tuple[str, str]], templates, deactivate_missing_regions: bool = True):
-    region_codes = {code for code, _ in regions}
-    if provider == 'aws_lightsail':
-        active_plan_ids = {template[0] for template in templates}
-    else:
-        active_plan_ids = {template[0] for template in templates}
-    if deactivate_missing_regions:
-        CloudServerPlan.objects.filter(provider=provider).exclude(region_code__in=region_codes).update(is_active=False)
-    CloudServerPlan.objects.filter(provider=provider, region_code__in=region_codes).exclude(provider_plan_id__in=active_plan_ids).update(is_active=False)
-    for region_code, region_name in regions:
-        for template in templates:
-            if provider == 'aws_lightsail':
-                bundle_code, plan_name, cpu, memory, storage, bandwidth, price = template
-                plan_description = ''
-            else:
-                bundle_code, plan_name, cpu, memory, storage, bandwidth, price = template
-                plan_description = f'PlanId: {bundle_code}'
-            plan, created = CloudServerPlan.objects.get_or_create(
-                provider=provider,
-                region_code=region_code,
-                provider_plan_id=bundle_code,
-                defaults={
-                    'region_name': region_name,
-                    'plan_name': plan_name,
-                    'plan_description': plan_description,
-                    'cpu': cpu,
-                    'memory': memory,
-                    'storage': storage,
-                    'bandwidth': bandwidth,
-                    'price': price,
-                    'currency': 'USDT',
-                    'is_active': True,
-                },
-            )
-            if not created:
-                plan.region_name = region_name
-                plan.plan_name = plan_name
-                plan.plan_description = plan_description
-                plan.cpu = cpu
-                plan.memory = memory
-                plan.storage = storage
-                plan.bandwidth = bandwidth
-                plan.price = price
-                plan.is_active = True
-                plan.save(update_fields=['region_name', 'plan_name', 'plan_description', 'cpu', 'memory', 'storage', 'bandwidth', 'price', 'is_active', 'updated_at'])
-
-
 @sync_to_async
 def ensure_cloud_server_pricing():
     aws_regions = _normalize_server_price_regions('aws_lightsail', _fetch_aws_regions())
@@ -474,11 +427,6 @@ def ensure_cloud_server_pricing():
             sync_server_prices('aliyun_simple', [(region_code, region_name)], pricing_templates, deactivate_missing_regions=False)
     elif not ServerPrice.objects.filter(provider='aliyun_simple').exists():
         sync_server_prices('aliyun_simple', [('cn-hongkong', '香港')], DEFAULT_ALIYUN_PRICING_TEMPLATES)
-
-
-@sync_to_async
-def ensure_cloud_server_plans():
-    ensure_cloud_server_pricing.__wrapped__()
 
 
 def _format_amount_tag(amount: Decimal) -> str:
@@ -1625,7 +1573,6 @@ __all__ = [
     'create_cloud_server_order',
     'create_cloud_server_renewal',
     'delay_cloud_server_expiry',
-    'ensure_cloud_server_plans',
     'ensure_cloud_server_pricing',
     'ensure_unique_cloud_server_name',
     'get_cloud_plan',

@@ -1,3 +1,0 @@
-from django.contrib import admin
-
-# Bot 相关模型后续迁移时再补充
