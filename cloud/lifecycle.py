@@ -242,6 +242,12 @@ def _is_cloud_delete_safe_time(now=None) -> bool:
     return 9 <= local_now.hour < 22
 
 
+def _action_note(result) -> str:
+    if isinstance(result, tuple):
+        return str(result[1] if len(result) > 1 else result[0])
+    return str(result or '')
+
+
 @sync_to_async
 def _cloud_expiry_notice_payload(order_id: int) -> dict:
     order = CloudServerOrder.objects.filter(id=order_id).first()
@@ -307,6 +313,18 @@ def _get_migration_due_orders():
     )
 
 
+@sync_to_async
+def _get_orphan_asset_delete_due():
+    now = timezone.now()
+    return list(
+        CloudAsset.objects.filter(
+            kind=CloudAsset.KIND_SERVER,
+            order__isnull=True,
+            actual_expires_at__lte=now,
+        ).exclude(status__in=[CloudAsset.STATUS_DELETED, CloudAsset.STATUS_DELETING, CloudAsset.STATUS_TERMINATED])
+    )
+
+
 async def _stop_instance(order: CloudServerOrder) -> tuple[bool, str]:
     if order.provider != 'aws_lightsail' or not order.server_name:
         return False, '非 AWS 资源，暂未执行真实关机。'
@@ -338,6 +356,44 @@ async def _delete_replaced_server(order: CloudServerOrder) -> tuple[bool, str]:
         return True, '迁移期结束，旧 AWS 实例已删除。'
     except Exception as exc:
         return False, f'迁移期结束，旧实例删除失败: {exc}'
+
+
+async def _delete_orphan_asset_instance(asset: CloudAsset) -> tuple[bool, str]:
+    if asset.provider != 'aws_lightsail' or not asset.asset_name:
+        return False, '无订单资产到期，非 AWS 或缺少实例名，已执行本地删除标记。'
+    try:
+        client = _aws_client(asset.region_code, getattr(asset, 'cloud_account', None))
+        client.delete_instance(instanceName=asset.asset_name)
+        return True, '无订单 AWS 资产到期，已执行真实删机。'
+    except Exception as exc:
+        return False, f'无订单 AWS 资产到期，真实删机失败: {exc}'
+
+
+@sync_to_async
+def _mark_orphan_asset_deleted(asset_id: int, note: str):
+    now = timezone.now()
+    asset = CloudAsset.objects.get(id=asset_id)
+    previous_public_ip = asset.public_ip or asset.previous_public_ip
+    asset.previous_public_ip = previous_public_ip
+    asset.status = CloudAsset.STATUS_DELETED
+    asset.provider_status = 'expired-deleted'
+    asset.is_active = False
+    asset.note = '\n'.join(filter(None, [asset.note, note]))
+    asset.save(update_fields=['previous_public_ip', 'status', 'provider_status', 'is_active', 'note', 'updated_at'])
+    Server.objects.filter(order__isnull=True).filter(
+        provider=asset.provider,
+        region_code=asset.region_code,
+    ).filter(
+        instance_id__in=[value for value in [asset.instance_id, asset.provider_resource_id] if value]
+    ).update(
+        previous_public_ip=previous_public_ip,
+        status=CloudAsset.STATUS_DELETED,
+        is_active=False,
+        note=asset.note,
+        updated_at=now,
+    )
+    record_cloud_ip_log(event_type='deleted', asset=asset, previous_public_ip=previous_public_ip, public_ip=None, note=note or '无订单资产到期删除')
+    return asset
 
 
 @sync_to_async
@@ -442,8 +498,9 @@ async def sync_cloud_accounts_tick():
 async def lifecycle_tick(notify=None):
     due = await _get_due_orders()
     migration_due_orders = await _get_migration_due_orders()
+    orphan_asset_delete_due = await _get_orphan_asset_delete_due()
     logger.info(
-        'CLOUD_LIFECYCLE_DUE renew_notice=%s auto_renew_notice=%s auto_renew=%s delete_notice=%s recycle_notice=%s expire=%s suspend=%s delete=%s recycle=%s migration_due=%s renew_notice_days=%s renew_notice_debug_repeat=%s',
+        'CLOUD_LIFECYCLE_DUE renew_notice=%s auto_renew_notice=%s auto_renew=%s delete_notice=%s recycle_notice=%s expire=%s suspend=%s delete=%s recycle=%s migration_due=%s orphan_asset_delete=%s renew_notice_days=%s renew_notice_debug_repeat=%s',
         len(due['renew_notice']),
         len(due['auto_renew_notice']),
         len(due['auto_renew']),
@@ -454,6 +511,7 @@ async def lifecycle_tick(notify=None):
         len(due['delete']),
         len(due['recycle']),
         len(migration_due_orders),
+        len(orphan_asset_delete_due),
         due.get('config', {}).get('renew_notice_days'),
         due.get('config', {}).get('renew_notice_debug_repeat'),
     )
@@ -515,7 +573,7 @@ async def lifecycle_tick(notify=None):
             await notify(updated.user_id, _cloud_text_format('cloud_expiring_notice', '⏰ 云服务器即将到期\n订单号: {order_no}\n请尽快续费，未续费将按规则关机/删机。', order_no=updated.order_no))
 
     for order in due['suspend']:
-        note = await _stop_instance(order)
+        note = _action_note(await _stop_instance(order))
         updated = await _mark_suspended(order.id, note)
         if notify:
             await notify(updated.user_id, _cloud_text_format('cloud_suspended_notice', '⚠️ 云服务器已关机\n订单号: {order_no}\n如需继续使用，请尽快续费。', order_no=updated.order_no))
@@ -524,7 +582,7 @@ async def lifecycle_tick(notify=None):
         if not _is_cloud_delete_safe_time():
             logger.warning('CLOUD_DELETE_SKIP_UNSAFE_TIME order_id=%s order_no=%s delete_at=%s now=%s', order.id, order.order_no, order.delete_at, timezone.now())
             continue
-        note = await _delete_instance(order)
+        note = _action_note(await _delete_instance(order))
         updated = await _mark_deleted(order.id, note)
         if notify:
             await notify(updated.user_id, _cloud_text_format('cloud_instance_deleted_notice', '🗑 云服务器实例已删除\n订单号: {order_no}\n固定 IP 仍保留，可在保留期内续费恢复。', order_no=updated.order_no))
@@ -538,7 +596,15 @@ async def lifecycle_tick(notify=None):
         if not _is_cloud_delete_safe_time():
             logger.warning('CLOUD_MIGRATION_DELETE_SKIP_UNSAFE_TIME order_id=%s order_no=%s migration_due_at=%s now=%s', order.id, order.order_no, order.migration_due_at, timezone.now())
             continue
-        note = await _delete_replaced_server(order)
+        note = _action_note(await _delete_replaced_server(order))
         updated = await _mark_replaced_order_deleted(order.id, note)
         if notify:
             await notify(updated.user_id, _cloud_text_format('cloud_migration_old_deleted_notice', '🧹 迁移期已结束，旧服务器已删除\n订单号: {order_no}', order_no=updated.order_no))
+
+    for asset in orphan_asset_delete_due:
+        if not _is_cloud_delete_safe_time():
+            logger.warning('CLOUD_ORPHAN_ASSET_DELETE_SKIP_UNSAFE_TIME asset_id=%s ip=%s actual_expires_at=%s now=%s', asset.id, asset.public_ip, asset.actual_expires_at, timezone.now())
+            continue
+        note = _action_note(await _delete_orphan_asset_instance(asset))
+        updated = await _mark_orphan_asset_deleted(asset.id, note)
+        logger.info('CLOUD_ORPHAN_ASSET_DELETE asset_id=%s ip=%s provider=%s region=%s note=%s', updated.id, updated.previous_public_ip, updated.provider, updated.region_code, note)

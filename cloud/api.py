@@ -282,7 +282,14 @@ def update_cloud_asset(request, asset_id):
                     return _error(str(exc), status=400)
                 if asset.order_id:
                     asset.order.service_expires_at = asset.actual_expires_at
-                    asset.order.save(update_fields=['service_expires_at', 'updated_at'])
+                    if asset.actual_expires_at:
+                        asset.order.save(update_fields=['service_expires_at', 'renew_grace_expires_at', 'suspend_at', 'delete_at', 'ip_recycle_at', 'updated_at'])
+                    else:
+                        asset.order.renew_grace_expires_at = None
+                        asset.order.suspend_at = None
+                        asset.order.delete_at = None
+                        asset.order.ip_recycle_at = None
+                        asset.order.save(update_fields=['service_expires_at', 'renew_grace_expires_at', 'suspend_at', 'delete_at', 'ip_recycle_at', 'updated_at'])
                 if server:
                     server.expires_at = asset.actual_expires_at
 
