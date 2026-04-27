@@ -198,6 +198,7 @@ class Command(BaseCommand):
         status_changed_items = []
         deleted_by_missing_ip_items = []
         conflict_skipped_items = []
+        deleted_preserved_items = []
         claimed_assets = {}
         synced_instance_ids = []
         verification_deleted_items = []
@@ -252,6 +253,19 @@ class Command(BaseCommand):
                 old_status = asset.status if asset else None
                 old_public_ip = asset.public_ip if asset else None
                 ip_changed = bool(asset and old_public_ip and old_public_ip != public_ip)
+                if asset and asset.status == CloudAsset.STATUS_DELETED:
+                    claimed_assets[asset.id] = asset_signature
+                    server = _resolve_server(instance_id, public_ip, account)
+                    if server and server.status != Server.STATUS_DELETED:
+                        server.status = Server.STATUS_DELETED
+                        server.is_active = False
+                        server.provider_status = server.provider_status or '本地已删除'
+                        server.note = server.note or '本地已删除，跳过云同步复活。'
+                        server.save(update_fields=['status', 'is_active', 'provider_status', 'note', 'updated_at'])
+                    deleted_preserved_items.append(f'{asset.id}:{public_ip or "缺失"}:{instance_id or asset_name}')
+                    synced_instance_ids.append(instance_id)
+                    count += 1
+                    continue
                 if asset:
                     claimed_signature = claimed_assets.get(asset.id)
                     if claimed_signature and claimed_signature != asset_signature:
@@ -348,6 +362,8 @@ class Command(BaseCommand):
             detail_parts.append(f'缺IP删状态={deleted_by_missing_ip_items[:20]}')
         if conflict_skipped_items:
             detail_parts.append(f'冲突跳过={conflict_skipped_items[:20]}')
+        if deleted_preserved_items:
+            detail_parts.append(f'保留本地删除={deleted_preserved_items[:20]}')
         if verification_deleted_items:
             detail_parts.append(f'IP校验删除={verification_deleted_items[:20]}')
         if detail_parts:
