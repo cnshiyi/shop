@@ -422,7 +422,9 @@ def cloud_assets_list(request):
     keyword = _get_keyword(request)
     grouped = (request.GET.get('grouped') or '').lower() in {'1', 'true', 'yes'}
     try:
-        queryset = CloudAsset.objects.select_related('user', 'order', 'cloud_account').filter(kind=CloudAsset.KIND_SERVER)
+        queryset = CloudAsset.objects.select_related('user', 'order', 'cloud_account').filter(kind=CloudAsset.KIND_SERVER).exclude(
+            status__in=[CloudAsset.STATUS_DELETED, CloudAsset.STATUS_TERMINATED],
+        )
         queryset = _apply_keyword_filter(
             queryset,
             keyword,
