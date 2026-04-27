@@ -2241,6 +2241,8 @@ def register_handlers(dp: Dispatcher):
         rows = []
         if can_init:
             rows.append([InlineKeyboardButton(text='🛠 重新安装', callback_data=f'cloud:assetinit:{item_id}:{back_callback}')])
+        if getattr(item, 'order_id', None) and getattr(item, 'order_user_id', None) == user.id:
+            rows.append([InlineKeyboardButton(text='⚙️ 订单操作', callback_data=f'cloud:detail:{item.order_id}:{back_callback}')])
         rows.append([InlineKeyboardButton(text='👩‍💻 联系客服', callback_data=f'support:contact:cloud_asset:{item_id}')])
         rows.append([InlineKeyboardButton(text='🔙 返回代理列表', callback_data=back_callback)])
         await _safe_edit_text(callback.message, _cloud_asset_detail_text(item), reply_markup=InlineKeyboardMarkup(inline_keyboard=rows), parse_mode='HTML')

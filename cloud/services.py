@@ -752,24 +752,27 @@ def _hydrate_order_from_proxy_asset(order: CloudServerOrder | None, asset: Cloud
 
 
 def _proxy_asset_view(asset: CloudAsset):
+    order = asset.order
     return SimpleNamespace(
         id=asset.id,
         _proxy_item_kind='asset',
         asset_id=asset.id,
-        order_no=asset.asset_name or f'ASSET-{asset.id}',
+        order_id=asset.order_id,
+        order_user_id=getattr(order, 'user_id', None),
+        order_no=asset.asset_name or getattr(order, 'server_name', None) or getattr(order, 'order_no', None) or f'ASSET-{asset.id}',
         public_ip=asset.public_ip,
         previous_public_ip=asset.previous_public_ip,
         service_expires_at=asset.actual_expires_at,
-        region_name=asset.region_name or '-',
-        region_code=asset.region_code or '',
-        plan_name=asset.asset_name or '人工代理',
+        region_name=asset.region_name or getattr(order, 'region_name', None) or '-',
+        region_code=asset.region_code or getattr(order, 'region_code', None) or '',
+        plan_name=asset.asset_name or getattr(order, 'plan_name', None) or '人工代理',
         quantity=1,
         status=asset.status,
-        provider=asset.provider,
+        provider=asset.provider or getattr(order, 'provider', None),
         pay_method='manual',
-        pay_amount=asset.price,
-        total_amount=asset.price,
-        currency=asset.currency,
+        pay_amount=asset.price if asset.price is not None else getattr(order, 'pay_amount', None),
+        total_amount=asset.price if asset.price is not None else getattr(order, 'total_amount', None),
+        currency=asset.currency or (getattr(order, 'currency', None) if order else 'USDT'),
         mtproxy_port=asset.mtproxy_port,
         mtproxy_link=asset.mtproxy_link,
         proxy_links=asset.proxy_links,
@@ -778,9 +781,9 @@ def _proxy_asset_view(asset: CloudAsset):
         login_user=asset.login_user,
         login_password=asset.login_password,
         instance_id=asset.instance_id,
-        ip_recycle_at=None,
-        auto_renew_enabled=False,
-        cloud_reminder_enabled=True,
+        ip_recycle_at=getattr(order, 'ip_recycle_at', None),
+        auto_renew_enabled=bool(getattr(order, 'auto_renew_enabled', False)),
+        cloud_reminder_enabled=bool(getattr(order, 'cloud_reminder_enabled', True)),
         created_at=asset.created_at,
         note=asset.note,
         get_status_display=lambda: asset.get_status_display(),
@@ -826,50 +829,14 @@ def _proxy_server_view(server: Server):
 @sync_to_async
 def list_user_cloud_servers(user_id: int):
     ip_filter = Q(public_ip__isnull=False) & ~Q(public_ip='')
-    assets = list(
+    assets = (
         CloudAsset.objects.select_related('order')
-        .filter(user_id=user_id)
+        .filter(kind=CloudAsset.KIND_SERVER, user_id=user_id)
         .filter(ip_filter)
+        .exclude(status__in=_INACTIVE_ASSET_STATUSES)
         .order_by('-sort_order', 'actual_expires_at', '-updated_at', '-id')
     )
-    items = []
-    seen_order_ids = set()
-    seen_ips = set()
-    for asset in assets:
-        ip_key = str(asset.public_ip or '').strip()
-        if ip_key:
-            seen_ips.add(ip_key)
-        order = asset.order
-        if order:
-            if order.id in seen_order_ids:
-                continue
-            hydrated = _hydrate_order_from_proxy_asset(order, asset=asset)
-            seen_order_ids.add(hydrated.id)
-            items.append(hydrated)
-            continue
-        items.append(_proxy_asset_view(asset))
-
-    servers = list(
-        Server.objects.select_related('order')
-        .filter(user_id=user_id)
-        .filter(Q(public_ip__isnull=False) & ~Q(public_ip=''))
-        .order_by('-sort_order', 'expires_at', '-updated_at', '-id')
-    )
-    for server in servers:
-        ip_key = str(server.public_ip or '').strip()
-        if ip_key and ip_key in seen_ips:
-            continue
-        if server.order_id and server.order_id in seen_order_ids:
-            continue
-        if server.order:
-            hydrated = _hydrate_order_from_proxy_asset(server.order, server=server)
-            seen_order_ids.add(hydrated.id)
-            items.append(hydrated)
-        else:
-            items.append(_proxy_server_view(server))
-        if ip_key:
-            seen_ips.add(ip_key)
-    return items
+    return [_proxy_asset_view(asset) for asset in assets]
 
 
 @sync_to_async

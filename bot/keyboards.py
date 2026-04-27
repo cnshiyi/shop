@@ -308,7 +308,7 @@ def cloud_server_list(orders, page: int = 1, total_pages: int = 1, prefix: str =
         ip = order.public_ip or order.previous_public_ip
         label = ip or getattr(order, 'order_no', None) or f'订单 {order.id}'
         expires_at = getattr(order, 'service_expires_at', None)
-        expires = expires_at.strftime('%Y-%m-%d') if expires_at else '今天到期'
+        expires = expires_at.strftime('%Y-%m-%d') if expires_at else '未设置'
         item_kind = getattr(order, '_proxy_item_kind', '')
         if item_kind in {'asset', 'server'}:
             callback_data = f'cloud:assetdetail:{item_kind}:{order.id}:{prefix}:{page}'
