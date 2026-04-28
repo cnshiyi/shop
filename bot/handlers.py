@@ -1,7 +1,9 @@
 import asyncio
+import contextlib
 import logging
 import math
 import re
+import secrets
 import time
 from decimal import Decimal, InvalidOperation
 from html import escape
@@ -16,25 +18,26 @@ from aiogram.filters import CommandStart
 from aiogram.fsm.context import FSMContext
 from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message, TelegramObject
 from aiogram.utils.keyboard import InlineKeyboardBuilder
+from django.db.models import Q
 from django.utils import timezone
 
 from bot.config import BOT_TOKEN
 from bot.fsm import create_fsm_storage
-from bot.states import CustomServerStates, MonitorStates, RechargeStates, CloudQueryStates
+from bot.states import AdminReplyStates, CustomServerStates, MonitorStates, RechargeStates, CloudQueryStates
 from orders.services import get_exchange_rate_display, usdt_to_trx
 from bot.keyboards import (
     main_menu, monitor_menu, monitor_list as kb_monitor_list,
     monitor_detail as kb_monitor_detail, monitor_threshold_currency,
     recharge_currency_menu, product_list, quantity_keyboard,
     pay_method_keyboard, order_list as kb_order_list,
-    recharge_list as kb_recharge_list, profile_menu, reminder_list_menu,
+    recharge_list as kb_recharge_list, profile_menu, reminder_list_menu, reminder_ip_detail_menu,
     custom_region_menu, custom_plan_menu, custom_quantity_keyboard, custom_payment_keyboard, custom_currency_keyboard, custom_wallet_keyboard, custom_order_wallet_keyboard, custom_port_keyboard,
-    cloud_server_list, cloud_server_detail, cloud_order_list, cloud_order_readonly_detail, cloud_expiry_actions, cloud_server_renew_payment, order_query_menu, balance_details_list,
+    cloud_server_list, cloud_server_detail, cloud_order_list, cloud_order_readonly_detail, cloud_expiry_actions, cloud_server_renew_payment, order_query_menu, balance_details_list, support_contact_button, cloud_lifecycle_notice_actions,
     cloud_server_change_ip_region_menu, cloud_server_change_ip_port_keyboard,
     cart_menu, wallet_recharge_prompt_menu, cloud_ip_query_result,
-    cloud_query_menu,
+    cloud_query_menu, configured_link_for_label, configured_link_menu,
 )
-from bot.services import get_or_create_user, record_bot_operation_log, record_telegram_message
+from bot.services import create_admin_reply_link, get_admin_reply_link, get_admin_reply_link_by_id, get_or_create_user, record_bot_operation_log, record_telegram_message
 from cloud.services import (
     buy_cloud_server_with_balance,
     create_cloud_server_order,
@@ -57,9 +60,11 @@ from cloud.services import (
     mark_cloud_server_ip_change_requested,
     mark_cloud_server_reinit_requested,
     mute_all_user_reminders,
+    mute_cloud_order_reminders,
     mute_cloud_reminders,
     pay_cloud_server_order_with_balance,
     pay_cloud_server_renewal_with_balance,
+    run_cloud_server_renewal_postcheck,
     set_cloud_order_reminder,
     set_cloud_server_auto_renew,
     set_cloud_server_port,
@@ -96,9 +101,9 @@ from orders.services import (
 from core.formatters import fmt_amount, fmt_pay_amount
 from core.models import SiteConfig
 from core.texts import site_text
-from cloud.provisioning import provision_cloud_server, reprovision_cloud_server_bootstrap
+from cloud.provisioning import get_provision_progress, provision_cloud_server, reprovision_cloud_server_bootstrap
 from cloud.bootstrap import _probe_mtproxy_state, build_mtproxy_links
-from cloud.lifecycle import _delete_instance, _mark_replaced_order_deleted
+from cloud.ports import is_valid_mtproxy_main_port, mtproxy_port_validation_hint
 
 logger = logging.getLogger(__name__)
 
@@ -106,6 +111,8 @@ _CUSTOM_REGIONS_CACHE: dict[str, object] = {'expires_at': 0.0, 'items': None}
 _REGION_PLANS_CACHE: dict[str, tuple[float, object]] = {}
 _TG_CHAT_CACHE: dict[int, tuple[float, dict[str, object]]] = {}
 _USER_SYNC_CACHE: dict[int, tuple[float, tuple[str | None, str | None, tuple[str, ...]]]] = {}
+_ASSET_REINIT_INFLIGHT: set[int] = set()
+_REINSTALL_CONFIRM_TTL = 600
 _CUSTOM_REGIONS_CACHE_TTL = 60
 _REGION_PLANS_CACHE_TTL = 60
 _TG_CHAT_CACHE_TTL = 120
@@ -426,7 +433,7 @@ async def _reply_cloud_query_results(message: Message, raw_text: str, state: FSM
         if is_deleted:
             continue
         expires_at = getattr(order, 'service_expires_at', None)
-        expires_text = expires_at.strftime('%Y-%m-%d') if expires_at else '今天到期'
+        expires_text = _format_local_dt(expires_at).split(' ', 1)[0] if expires_at else '今天到期'
         results.append({
             'ip': display_ip,
             'text': f'IP: <code>{escape(display_ip)}</code>\n到期时间: {expires_text}\n状态: 可续费',
@@ -502,7 +509,104 @@ def _parse_admin_chat_ids(raw_value: str) -> list[int]:
 
 
 def _is_admin_forward_media_type(content_type: str) -> bool:
-    return content_type in {'photo', 'video', 'animation', 'sticker', 'document'}
+    return content_type in {'photo', 'video', 'animation', 'sticker', 'document', 'voice', 'video_note', 'audio'}
+
+
+def _admin_reply_keyboard(user_tg_id: int) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[[
+            InlineKeyboardButton(text='↩️ 直接回复这条消息即可回复用户', callback_data=f'adminreply:hint:{user_tg_id}')
+        ]]
+    )
+
+
+async def _is_admin_chat(message: Message) -> bool:
+    raw_admin_value = await _get_site_config_value('bot_admin_chat_id', '')
+    return int(getattr(message.chat, 'id', 0) or 0) in set(_parse_admin_chat_ids(raw_admin_value))
+
+
+async def _send_admin_reply_to_link(bot: Bot, message: Message, link) -> bool:
+    text = _message_text_for_router(message)
+    content_type = _message_content_type(message)
+    try:
+        if _is_admin_forward_media_type(content_type):
+            if text:
+                await bot.send_message(chat_id=link.user_chat_id, text='👩‍💻 客服回复')
+            sent = await bot.copy_message(
+                chat_id=link.user_chat_id,
+                from_chat_id=message.chat.id,
+                message_id=message.message_id,
+            )
+        elif text:
+            sent = await bot.send_message(chat_id=link.user_chat_id, text=f'👩‍💻 客服回复\n\n{text}')
+        else:
+            await message.reply('当前消息类型暂不支持转发给用户，请发送文字、图片、视频、文件或语音。')
+            return True
+        await record_telegram_message(
+            tg_user_id=link.user.tg_user_id,
+            chat_id=link.user_chat_id,
+            message_id=getattr(sent, 'message_id', None),
+            direction='out',
+            content_type=content_type,
+            text=text,
+            username=link.user.primary_username,
+            first_name=link.user.first_name or '客服',
+        )
+        await message.reply('✅ 已发送给用户')
+        logger.info('ADMIN_REPLY_SENT admin_chat_id=%s admin_message_id=%s user_id=%s user_chat_id=%s sent_message_id=%s type=%s', message.chat.id, message.message_id, link.user_id, link.user_chat_id, getattr(sent, 'message_id', None), content_type)
+        return True
+    except Exception as exc:
+        logger.warning('ADMIN_REPLY_FAILED admin_chat_id=%s admin_message_id=%s user_chat_id=%s error=%s', message.chat.id, message.message_id, getattr(link, 'user_chat_id', None), exc)
+        await message.reply(f'❌ 发送失败：{exc}')
+        return True
+
+
+async def _handle_admin_reply_message(bot: Bot, message: Message, state: FSMContext | None = None) -> bool:
+    if not await _is_admin_chat(message):
+        return False
+    text = _message_text_for_router(message)
+    reply_to = getattr(message, 'reply_to_message', None)
+    link = None
+    if state is not None and await state.get_state() == AdminReplyStates.waiting_reply:
+        data = await state.get_data()
+        link_id = data.get('admin_reply_link_id')
+        if link_id:
+            link = await get_admin_reply_link_by_id(int(link_id))
+            if link:
+                handled = await _send_admin_reply_to_link(bot, message, link)
+                if handled:
+                    await state.clear()
+                return handled
+        await state.clear()
+    if reply_to and getattr(reply_to, 'message_id', None):
+        link = await get_admin_reply_link(message.chat.id, reply_to.message_id)
+    command_match = re.match(r'^/reply(?:@\w+)?\s+(-?\d+)\s+([\s\S]+)$', text)
+    if not link and command_match:
+        target_chat_id = int(command_match.group(1))
+        reply_text = command_match.group(2).strip()
+        if reply_text:
+            sent = await bot.send_message(chat_id=target_chat_id, text=f'👩‍💻 客服回复\n\n{reply_text}')
+            await record_telegram_message(
+                tg_user_id=target_chat_id,
+                chat_id=target_chat_id,
+                message_id=getattr(sent, 'message_id', None),
+                direction='out',
+                content_type='text',
+                text=reply_text,
+                username=None,
+                first_name='客服',
+            )
+            await message.reply('✅ 已发送给用户')
+            logger.info('ADMIN_REPLY_COMMAND_SENT admin_chat_id=%s admin_message_id=%s user_chat_id=%s sent_message_id=%s', message.chat.id, message.message_id, target_chat_id, getattr(sent, 'message_id', None))
+            return True
+        await message.reply('用法：/reply 用户TGID 回复内容；或直接回复我转发给你的用户消息。')
+        return True
+    if not link:
+        if reply_to:
+            await message.reply('这条消息没有找到回复通道。请回复机器人转发的“用户消息转发”那条消息，或使用 /reply 用户TGID 回复内容。')
+            return True
+        return False
+    return await _send_admin_reply_to_link(bot, message, link)
 
 
 async def _forward_plain_text_to_admin(bot: Bot, message: Message):
@@ -522,6 +626,9 @@ async def _forward_plain_text_to_admin(bot: Bot, message: Message):
     if not admin_chat_ids:
         logger.warning('管理员转发跳过：未配置有效 chat id raw_admin_value=%r', raw_admin_value)
         return
+    if not sender:
+        logger.warning('管理员转发跳过：缺少发送者 sender=%s type=%s', sender, content_type)
+        return
     if not text and not _is_admin_forward_media_type(content_type):
         logger.warning('管理员转发跳过：消息无可转发文本/媒体 sender=%s type=%s', sender, content_type)
         return
@@ -538,15 +645,31 @@ async def _forward_plain_text_to_admin(bot: Bot, message: Message):
     success_count = 0
     for admin_chat_id in admin_chat_ids:
         try:
-            await bot.send_message(chat_id=admin_chat_id, text=forward_text)
+            sent_header = await bot.send_message(chat_id=admin_chat_id, text=forward_text, reply_markup=_admin_reply_keyboard(sender or 0))
+            await create_admin_reply_link(
+                admin_chat_id=admin_chat_id,
+                admin_message_id=sent_header.message_id,
+                user_tg_id=sender or 0,
+                user_chat_id=message.chat.id,
+                user_message_id=message.message_id,
+                source_content_type=content_type,
+            )
             if _is_admin_forward_media_type(content_type):
-                await bot.copy_message(
+                sent_copy = await bot.copy_message(
                     chat_id=admin_chat_id,
                     from_chat_id=message.chat.id,
                     message_id=message.message_id,
                 )
+                await create_admin_reply_link(
+                    admin_chat_id=admin_chat_id,
+                    admin_message_id=sent_copy.message_id,
+                    user_tg_id=sender or 0,
+                    user_chat_id=message.chat.id,
+                    user_message_id=message.message_id,
+                    source_content_type=content_type,
+                )
             success_count += 1
-            logger.info('管理员转发成功 sender=%s chat_id=%s type=%s', sender, admin_chat_id, content_type)
+            logger.info('管理员转发成功 sender=%s chat_id=%s header_message_id=%s type=%s', sender, admin_chat_id, getattr(sent_header, 'message_id', None), content_type)
         except Exception as exc:
             logger.warning('管理员转发失败 sender=%s chat_id=%s type=%s error=%s', sender, admin_chat_id, content_type, exc)
             continue
@@ -646,6 +769,9 @@ def _callback_route_label(callback_data: str | None) -> str:
         return exact[data]
     prefixes = [
         ('cloud:orderdetail:', 'cloud.orderdetail 云订单详情'),
+        ('cloud:assetreinitconfirm:', 'cloud.assetreinitconfirm 确认资产重建'),
+        ('cloud:assetinit:', 'cloud.assetinit 资产重新安装'),
+        ('cloud:assetaction:', 'cloud.assetaction 资产操作'),
         ('cloud:assetdetail:', 'cloud.assetdetail 人工代理详情'),
         ('cloud:detail:', 'cloud.detail 代理详情'),
         ('cloud:list:page:', 'cloud.list.page 代理列表分页'),
@@ -668,7 +794,9 @@ def _callback_route_label(callback_data: str | None) -> str:
         ('cloud:reinitconfirm:', 'cloud.reinitconfirm 确认重新初始化'),
         ('cloud:reinit:', 'cloud.reinit 重新安装/继续初始化'),
         ('profile:orders:cloud:page:', 'profile.orders.cloud.page 云服务器订单分页'),
-        ('profile:reminders:order:', 'profile.reminders.order 单订单提醒开关'),
+        ('profile:reminders:ip:', 'profile.reminders.ip IP提醒详情'),
+        ('profile:reminders:order:', 'profile.reminders.order 单IP生命周期提醒开关'),
+        ('profile:reminders:auto:', 'profile.reminders.auto 单IP自动续费开关'),
         ('profile:reminders:page:', 'profile.reminders.page 提醒列表分页'),
         ('custom:region:', 'custom.region 选择地区'),
         ('custom:plan:', 'custom.plan 选择套餐'),
@@ -823,6 +951,20 @@ class RawUserLoggingMiddleware:
                     )
                 except Exception as exc:
                     logger.warning('机器人操作日志保存失败: user_id=%s err=%s', user.id, exc)
+        bot = data.get('bot')
+        if bot and isinstance(event, Message):
+            try:
+                if await _handle_admin_reply_message(bot, event, data.get('state')):
+                    logger.info(
+                        'ADMIN_REPLY_MIDDLEWARE_HANDLED user_id=%s chat_id=%s message_id=%s route=%s',
+                        getattr(user, 'id', None),
+                        chat_id,
+                        message_id,
+                        route_label,
+                    )
+                    return None
+            except Exception as exc:
+                logger.warning('ADMIN_REPLY_MIDDLEWARE_ERROR user_id=%s chat_id=%s message_id=%s error=%s', getattr(user, 'id', None), chat_id, message_id, exc)
         try:
             result = await handler(event, data)
             logger.info(
@@ -854,11 +996,19 @@ class RawUserLoggingMiddleware:
 
 
 async def _safe_edit_text(message: Message, text: str, **kwargs):
+    reply_markup = kwargs.get('reply_markup')
+    if reply_markup is not None and not isinstance(reply_markup, (InlineKeyboardMarkup, dict)):
+        logger.warning('BOT_MESSAGE_EDIT_DROP_INVALID_MARKUP chat_id=%s message_id=%s markup_type=%s text_preview=%s', getattr(getattr(message, 'chat', None), 'id', None), getattr(message, 'message_id', None), type(reply_markup).__name__, str(text or '').replace('\n', ' ')[:180])
+        kwargs.pop('reply_markup', None)
     try:
-        return await message.edit_text(text, **kwargs)
+        sent = await message.edit_text(text, **kwargs)
+        logger.info('BOT_MESSAGE_EDIT chat_id=%s message_id=%s text_preview=%s', getattr(getattr(message, 'chat', None), 'id', None), getattr(message, 'message_id', None), str(text or '').replace('\n', ' ')[:180])
+        return sent
     except TelegramBadRequest as exc:
         if 'message is not modified' in str(exc).lower():
+            logger.info('BOT_MESSAGE_EDIT_NOT_MODIFIED chat_id=%s message_id=%s text_preview=%s', getattr(getattr(message, 'chat', None), 'id', None), getattr(message, 'message_id', None), str(text or '').replace('\n', ' ')[:180])
             return None
+        logger.warning('BOT_MESSAGE_EDIT_FAILED chat_id=%s message_id=%s error=%s text_preview=%s', getattr(getattr(message, 'chat', None), 'id', None), getattr(message, 'message_id', None), exc, str(text or '').replace('\n', ' ')[:180])
         raise
 
 
@@ -875,7 +1025,50 @@ async def _safe_callback_answer(callback: CallbackQuery, *args, **kwargs):
         return None
 
 
-def _cloud_server_created_text(order, port: int | None = None) -> str:
+def _public_cloud_error_text(error) -> str:
+    raw = str(error or '')
+    if not raw:
+        return '任务暂未完成，请稍后在查询中心查看，或联系人工客服。'
+    sensitive_markers = ('account', '账号', 'instance', '实例', 'server_name', 'instance_id', 'arn:', 'aws+', 'aliyun+', 'CloudAccount')
+    if any(marker.lower() in raw.lower() for marker in sensitive_markers):
+        return '云服务器任务执行失败，内部诊断信息已记录；请联系人工客服处理。'
+    text = re.sub(r'aws\+[^\s，；,。)）]+', '云账号', raw)
+    text = re.sub(r'aliyun\+[^\s，；,。)）]+', '云账号', text)
+    text = re.sub(r'\b\d{12,}\b', '***', text)
+    return text[:180]
+
+
+def _public_cloud_stage_text(stage: str) -> str:
+    text = str(stage or '').strip()
+    if not text:
+        return '正在执行云服务器初始化'
+    text = re.sub(r'（账号[^）]*）', '', text)
+    text = re.sub(r'\(账号[^)]*\)', '', text)
+    text = re.sub(r'账号\s*[^，。；,\s]+', '云账号', text)
+    text = re.sub(r'aws\+[^\s，；,。)）]+', '云账号', text)
+    text = re.sub(r'aliyun\+[^\s，；,。)）]+', '云账号', text)
+    text = re.sub(r'\b\d{12,}\b', '***', text)
+    if '实例名' in text or 'instance_id' in text or 'server_name' in text:
+        return '正在处理云服务器资源'
+    return text or '正在执行云服务器初始化'
+
+
+async def _safe_remove_inline_keyboard(message: Message | None):
+    if not message:
+        return None
+    try:
+        return await message.edit_reply_markup(reply_markup=None)
+    except TelegramBadRequest as exc:
+        if 'message is not modified' in str(exc).lower():
+            return None
+        logger.warning('TELEGRAM_REMOVE_INLINE_KEYBOARD_FAILED message_id=%s error=%s', getattr(message, 'message_id', None), exc)
+        return None
+    except TelegramNetworkError as exc:
+        logger.warning('TELEGRAM_REMOVE_INLINE_KEYBOARD_NETWORK_ERROR message_id=%s error=%s', getattr(message, 'message_id', None), exc)
+        return None
+
+
+def _cloud_server_created_text(order, port: int | None = None, title: str | None = None) -> str:
     mtproxy_link = getattr(order, 'mtproxy_link', '') or ''
     share_link = ''
     extra_links = []
@@ -913,7 +1106,7 @@ def _cloud_server_created_text(order, port: int | None = None) -> str:
         display_secret = mtproxy_link.split('secret=', 1)[1].split('&', 1)[0].strip()
     else:
         display_secret = raw_secret
-    lines = [_bot_text('bot_cloud_create_success', '✅ 云服务器创建完成')]
+    lines = [title or _bot_text('bot_cloud_create_success', '✅ 云服务器创建完成')]
     lines.append(f'端口: <code>{escape(str(actual_port or "-"))}</code>')
     lines.append(f'IP: <code>{escape(public_ip or "-")}</code>')
     lines.append(f'密钥: <code>{escape(display_secret or "-")}</code>')
@@ -932,39 +1125,131 @@ async def _initialize_proxy_asset_and_notify(bot: Bot, chat_id: int, user_id: in
         logger.info('同步资产代理初始化任务开始: chat_id=%s user_id=%s asset_id=%s', chat_id, user_id, asset_id)
         asset, err = await initialize_proxy_asset(asset_id, user_id)
         if err:
-            await bot.send_message(chat_id=chat_id, text=f'❌ 同步资产代理初始化失败\n资产ID: {asset_id}\n原因: {err}', reply_markup=main_menu())
+            error_text = f'❌ 同步资产代理初始化失败\n\nIP: {getattr(asset, "public_ip", None) or getattr(asset, "previous_public_ip", None) or "未分配"}\n原因: {_public_cloud_error_text(err)}\n\n不需要提醒可点击下方关闭提醒；如需处理请联系人工客服。'
+            _log_bot_cloud_notice('asset_init_failed', chat_id=chat_id, order=asset or type('AssetNotice', (), {'id': asset_id, 'order_no': None, 'public_ip': None, 'previous_public_ip': None, 'status': 'failed'})(), text=error_text, keyboard='cloud_lifecycle_notice_actions')
+            await bot.send_message(chat_id=chat_id, text=error_text, reply_markup=_cloud_notice_keyboard_for_order(getattr(asset, 'order_id', None) or asset_id, 'cloud_asset_init_failed'))
             logger.warning('同步资产代理初始化失败: chat_id=%s user_id=%s asset_id=%s error=%s', chat_id, user_id, asset_id, err)
             return
-        await bot.send_message(chat_id=chat_id, text='✅ 同步资产代理初始化完成\n\n' + _cloud_server_created_text(asset, getattr(asset, 'mtproxy_port', None)), reply_markup=main_menu(), parse_mode='HTML', disable_web_page_preview=True)
+        success_text = '✅ 同步资产代理初始化完成\n\n' + _cloud_server_created_text(asset, getattr(asset, 'mtproxy_port', None))
+        _log_bot_cloud_notice('asset_init_completed', chat_id=chat_id, order=asset, text=success_text, keyboard='cloud_lifecycle_notice_actions')
+        await bot.send_message(chat_id=chat_id, text=success_text, reply_markup=_cloud_notice_keyboard_for_order(getattr(asset, 'order_id', None) or asset_id, 'cloud_asset_init_completed'), parse_mode='HTML', disable_web_page_preview=True)
         logger.info('同步资产代理初始化完成: chat_id=%s user_id=%s asset_id=%s ip=%s', chat_id, user_id, asset_id, getattr(asset, 'public_ip', None))
     except Exception as exc:
         logger.exception('同步资产代理初始化异常: chat_id=%s user_id=%s asset_id=%s error=%s', chat_id, user_id, asset_id, exc)
-        await bot.send_message(chat_id=chat_id, text=f'❌ 同步资产代理初始化任务异常\n资产ID: {asset_id}\n错误: {exc}', reply_markup=main_menu())
+        await bot.send_message(chat_id=chat_id, text=f'❌ 同步资产代理初始化任务异常\n错误: {_public_cloud_error_text(exc)}', reply_markup=main_menu())
+
+
+async def _cloud_task_progress_reporter(bot: Bot, chat_id: int, order_id: int, action_label: str, interval_seconds: int = 1):
+    started_at = timezone.now()
+    status_message = None
+    while True:
+        await asyncio.sleep(interval_seconds)
+        try:
+            order = await get_cloud_order(order_id)
+            if not order or order.status in {'completed', 'failed', 'deleted', 'cancelled', 'expired'}:
+                return
+            elapsed_seconds = max(1, int((timezone.now() - started_at).total_seconds()))
+            progress = get_provision_progress(order_id)
+            stage = _public_cloud_stage_text(progress.get('stage') or '') or '正在执行 BBR/MTProxy 安装或云资源同步'
+            stage_started_at = progress.get('stage_started_at')
+            stage_elapsed_text = ''
+            if stage_started_at:
+                stage_elapsed = max(0, int((timezone.now() - stage_started_at).total_seconds()))
+                stage_elapsed_text = f'\n本阶段已运行: 约 {stage_elapsed} 秒'
+            if not progress:
+                if not getattr(order, 'public_ip', None):
+                    stage = '正在创建云服务器并等待公网 IP'
+                elif order.status == 'provisioning':
+                    stage = '服务器已创建，正在执行初始化脚本'
+            text = (
+                f'⏳ 云服务器{action_label}仍在执行中\n'
+                f'订单号: {getattr(order, "order_no", "-") or "-"}\n'
+                f'当前阶段: {stage}{stage_elapsed_text}\n'
+                f'总计已等待: 约 {elapsed_seconds} 秒\n'
+                '请不要重复点击按钮，完成后我会自动发送结果。'
+            )
+            if status_message is None:
+                status_message = await bot.send_message(chat_id=chat_id, text=text)
+            else:
+                await _safe_edit_text(status_message, text)
+            logger.info('云服务器后台任务活跃提示: chat_id=%s order_id=%s action=%s elapsed_seconds=%s status=%s stage=%s', chat_id, order_id, action_label, elapsed_seconds, getattr(order, 'status', None), stage)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            logger.warning('云服务器后台任务活跃提示失败: chat_id=%s order_id=%s error=%s', chat_id, order_id, exc)
+
+
+def _cloud_notice_keyboard_for_order(order_id: int, context: str):
+    return cloud_lifecycle_notice_actions(order_id, context)
+
+
+def _log_bot_cloud_notice(event: str, *, chat_id: int, order, text: str, keyboard: str):
+    ip = str(getattr(order, 'public_ip', None) or getattr(order, 'previous_public_ip', None) or '').strip()
+    logger.info(
+        'BOT_CLOUD_NOTICE_SEND event=%s chat_id=%s order_id=%s order_no=%s ip=%s status=%s keyboard=%s has_ip=%s has_mute_button=%s has_support_button=%s text_preview=%s',
+        event,
+        chat_id,
+        getattr(order, 'id', None),
+        getattr(order, 'order_no', None),
+        ip or '-',
+        getattr(order, 'status', None),
+        keyboard,
+        bool(ip),
+        True,
+        True,
+        str(text or '').replace('\n', ' ')[:240],
+    )
 
 
 async def _provision_cloud_server_and_notify(bot: Bot, chat_id: int, order_id: int, port: int, retry_only: bool = False):
+    action_label = '重试初始化' if retry_only else '创建/重建'
+    progress_task = None
     try:
         logger.info('云服务器后台创建任务开始: chat_id=%s order_id=%s port=%s retry_only=%s', chat_id, order_id, port, retry_only)
+        progress_task = asyncio.create_task(_cloud_task_progress_reporter(bot, chat_id, order_id, action_label))
         provisioned = await (reprovision_cloud_server_bootstrap(order_id) if retry_only else provision_cloud_server(order_id))
         if provisioned and provisioned.status == 'completed':
             if getattr(provisioned, 'replacement_for_id', None):
-                source_order = await sync_to_async(lambda: provisioned.replacement_for)()
-                delete_ok, delete_note = await _delete_instance(source_order)
-                await _mark_replaced_order_deleted(source_order.id, f'迁移完成，新实例订单: {provisioned.order_no}；{delete_note}')
-            success_text = _cloud_server_created_text(provisioned, port)
+                success_text = _cloud_server_created_text(provisioned, port, title='✅ 服务器重建完成，固定 IP 已迁移\n\n下面是新的代理链接，请直接复制使用。')
+            else:
+                success_text = _cloud_server_created_text(provisioned, port)
             if retry_only:
                 success_text = '✅ 云服务器重试初始化完成\n\n' + success_text.removeprefix('✅ 云服务器创建完成\n')
-            await bot.send_message(chat_id=chat_id, text=success_text, reply_markup=main_menu(), parse_mode='HTML', disable_web_page_preview=True)
-            logger.info('云服务器后台创建任务完成: chat_id=%s order_id=%s status=%s retry_only=%s', chat_id, order_id, provisioned.status, retry_only)
+            _log_bot_cloud_notice('provision_completed', chat_id=chat_id, order=provisioned, text=success_text, keyboard='cloud_lifecycle_notice_actions')
+            await bot.send_message(chat_id=chat_id, text=success_text, reply_markup=_cloud_notice_keyboard_for_order(provisioned.id, 'cloud_provision_completed'), parse_mode='HTML', disable_web_page_preview=True)
+            logger.info('云服务器后台创建任务完成: chat_id=%s order_id=%s status=%s retry_only=%s ip=%s', chat_id, order_id, provisioned.status, retry_only, getattr(provisioned, 'public_ip', None) or getattr(provisioned, 'previous_public_ip', None))
             return
         current_status = provisioned.get_status_display() if hasattr(provisioned, 'get_status_display') else getattr(provisioned, 'status', '未知')
         action_label = '重试初始化' if retry_only else '创建'
-        await bot.send_message(chat_id=chat_id, text=_bot_text_format('bot_async_task_incomplete', '⚠️ 云服务器{action_label}暂未完成\n订单ID: {order_id}\n当前状态: {current_status}\n请稍后在查询中心查看。', action_label=action_label, order_id=order_id, current_status=current_status), reply_markup=main_menu())
+        current_ip = getattr(provisioned, 'public_ip', None) or getattr(provisioned, 'previous_public_ip', None) or '未分配'
+        incomplete_text = _bot_text_format('bot_async_task_incomplete', '⚠️ 云服务器{action_label}暂未完成\n\nIP: {ip}\n订单号: {order_no}\n当前状态: {current_status}\n\n请稍后在查询中心查看；不需要提醒可点击下方关闭提醒。', action_label=action_label, ip=current_ip, order_no=getattr(provisioned, 'order_no', '-') or '-', current_status=current_status)
+        _log_bot_cloud_notice('provision_incomplete', chat_id=chat_id, order=provisioned, text=incomplete_text, keyboard='cloud_lifecycle_notice_actions')
+        await bot.send_message(chat_id=chat_id, text=incomplete_text, reply_markup=_cloud_notice_keyboard_for_order(order_id, 'cloud_provision_incomplete'))
         logger.warning('云服务器后台创建任务未完成: chat_id=%s order_id=%s status=%s retry_only=%s', chat_id, order_id, current_status, retry_only)
     except Exception as exc:
         logger.exception('云服务器后台创建任务异常: chat_id=%s order_id=%s retry_only=%s error=%s', chat_id, order_id, retry_only, exc)
         action_label = '重试初始化' if retry_only else '创建'
-        await bot.send_message(chat_id=chat_id, text=_bot_text_format('bot_async_task_error', '❌ 云服务器{action_label}任务异常\n订单ID: {order_id}\n错误: {error}', action_label=action_label, order_id=order_id, error=exc), reply_markup=main_menu())
+        error_text = _bot_text_format('bot_async_task_error', '❌ 云服务器{action_label}任务异常\n\nIP: {ip}\n错误: {error}\n\n不需要提醒可点击下方关闭提醒；如需处理请联系人工客服。', action_label=action_label, ip='未分配', error=_public_cloud_error_text(exc))
+        _log_bot_cloud_notice('provision_error', chat_id=chat_id, order=type('OrderNotice', (), {'id': order_id, 'order_no': None, 'public_ip': None, 'previous_public_ip': None, 'status': 'error'})(), text=error_text, keyboard='cloud_lifecycle_notice_actions')
+        await bot.send_message(chat_id=chat_id, text=error_text, reply_markup=_cloud_notice_keyboard_for_order(order_id, 'cloud_provision_error'))
+    finally:
+        if progress_task:
+            progress_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await progress_task
+
+
+async def _cloud_renewal_postcheck_and_notify(bot: Bot, chat_id: int, order_id: int):
+    await bot.send_message(chat_id=chat_id, text='🔎 续费已完成，正在检查服务器运行状态和 MTProxy 链路。')
+    checked, err = await run_cloud_server_renewal_postcheck(order_id)
+    if getattr(checked, 'replacement_for_id', None) and checked.status in {'paid', 'provisioning', 'failed'}:
+        await bot.send_message(chat_id=chat_id, text='🛠 固定 IP 保留期续费已进入自动恢复流程。\n系统会保持旧 IP / 旧端口 / 旧密钥不变，完成后自动发送代理链接。')
+        asyncio.create_task(_provision_cloud_server_and_notify(bot, chat_id, checked.id, checked.mtproxy_port or 9528))
+        return
+    if err:
+        await bot.send_message(chat_id=chat_id, text=f'⚠️ 续费后巡检发现异常，已记录并尝试修复。\n订单号: {getattr(checked, "order_no", "-") or "-"}\n请稍后再查看代理状态，或联系人工客服。')
+        return
+    await bot.send_message(chat_id=chat_id, text=f'✅ 续费后巡检完成。\n订单号: {getattr(checked, "order_no", "-") or "-"}\n服务器运行正常，MTProxy 主/备用端口正常。')
 
 
 async def _create_cloud_order_and_notify(bot: Bot, chat_id: int, user_id: int, plan_id: int, quantity: int, currency: str, plan_name: str, region_name: str):
@@ -986,7 +1271,7 @@ async def _create_cloud_order_and_notify(bot: Bot, chat_id: int, user_id: int, p
         logger.info('云服务器后台建单任务完成: chat_id=%s user_id=%s order_id=%s order=%s currency=%s total=%s pay_amount=%s', chat_id, user_id, order.id, order.order_no, order.currency, order.total_amount, order.pay_amount)
     except Exception as exc:
         logger.exception('云服务器后台建单任务异常: chat_id=%s user_id=%s plan_id=%s quantity=%s currency=%s error=%s', chat_id, user_id, plan_id, quantity, currency, exc)
-        await bot.send_message(chat_id=chat_id, text=_bot_text_format('bot_create_order_failed', '❌ 创建订单失败，请稍后重试。\n错误: {error}', error=exc), reply_markup=main_menu())
+        await bot.send_message(chat_id=chat_id, text=_bot_text_format('bot_create_order_failed', '❌ 创建订单失败，请稍后重试。\n错误: {error}', error=_public_cloud_error_text(exc)), reply_markup=main_menu())
 
 
 async def _buy_cloud_server_with_balance_and_notify(bot: Bot, chat_id: int, user_id: int, plan_id: int, quantity: int, currency: str):
@@ -1016,7 +1301,7 @@ async def _buy_cloud_server_with_balance_and_notify(bot: Bot, chat_id: int, user
         logger.info('云服务器后台钱包直付任务完成: chat_id=%s user_id=%s order_id=%s order=%s currency=%s qty=%s pay_amount=%s', chat_id, user_id, order.id, order.order_no, currency, order.quantity, order.pay_amount)
     except Exception as exc:
         logger.exception('云服务器后台钱包直付任务异常: chat_id=%s user_id=%s plan_id=%s quantity=%s currency=%s error=%s', chat_id, user_id, plan_id, quantity, currency, exc)
-        await bot.send_message(chat_id=chat_id, text=_bot_text_format('bot_wallet_pay_failed', '❌ 钱包支付失败，请稍后重试。\n错误: {error}', error=exc), reply_markup=main_menu())
+        await bot.send_message(chat_id=chat_id, text=_bot_text_format('bot_wallet_pay_failed', '❌ 钱包支付失败，请稍后重试。\n错误: {error}', error=_public_cloud_error_text(exc)), reply_markup=main_menu())
 
 
 async def _pay_cloud_server_order_with_balance_and_notify(bot: Bot, chat_id: int, user_id: int, order_id: int, currency: str):
@@ -1046,7 +1331,7 @@ async def _pay_cloud_server_order_with_balance_and_notify(bot: Bot, chat_id: int
         logger.info('云服务器后台钱包补付任务完成: chat_id=%s user_id=%s order_id=%s order=%s currency=%s qty=%s pay_amount=%s', chat_id, user_id, order.id, order.order_no, currency, order.quantity, order.pay_amount)
     except Exception as exc:
         logger.exception('云服务器后台钱包补付任务异常: chat_id=%s user_id=%s order_id=%s currency=%s error=%s', chat_id, user_id, order_id, currency, exc)
-        await bot.send_message(chat_id=chat_id, text=_bot_text_format('bot_wallet_pay_failed', '❌ 钱包支付失败，请稍后重试。\n错误: {error}', error=exc), reply_markup=main_menu())
+        await bot.send_message(chat_id=chat_id, text=_bot_text_format('bot_wallet_pay_failed', '❌ 钱包支付失败，请稍后重试。\n错误: {error}', error=_public_cloud_error_text(exc)), reply_markup=main_menu())
 
 
 def _orders_page(orders, page: int, total: int):
@@ -1133,14 +1418,26 @@ async def _validate_reinstall_proxy_link(order, link_data: dict[str, str], probe
     if not probe_when_possible or not getattr(order, 'login_password', None):
         logger.info('CLOUD_REINSTALL_LINK_COMPARE_SKIP_PROBE item_id=%s parsed_secret=%s reason=%s', getattr(order, 'id', None), _secret_log_hint(parsed_secret), 'disabled' if not probe_when_possible else 'missing_login_password')
         return True, '主链接格式和 IP 校验通过'
-    ok, probe = await _probe_mtproxy_state(order_ip, order.login_user or 'root', order.login_password, int(order_port))
+    probe = {}
+    ok = False
+    probe_user = order.login_user or 'root'
+    probe_users = []
+    for candidate in (probe_user, 'admin', 'root'):
+        candidate = (candidate or '').strip()
+        if candidate and candidate not in probe_users:
+            probe_users.append(candidate)
+    for candidate in probe_users:
+        ok, probe = await _probe_mtproxy_state(order_ip, candidate, order.login_password, int(order_port))
+        if ok:
+            probe_user = candidate
+            break
     remote_secret = probe.get('MTPROXY_PROBE_SECRET', '')
     remote_secret_normalized = _normalize_proxy_secret(remote_secret)
     logger.info(
         'CLOUD_REINSTALL_SERVER_PROBE item_id=%s ip=%s user=%s port=%s ok=%s proc_ok=%s port_ok=%s daemon=%s remote_secret=%s parsed_secret=%s secret_match=%s',
         getattr(order, 'id', None),
         order_ip,
-        order.login_user or 'root',
+        probe_user,
         order_port,
         ok,
         probe.get('MTPROXY_PROBE_PROC_OK'),
@@ -1151,6 +1448,10 @@ async def _validate_reinstall_proxy_link(order, link_data: dict[str, str], probe
         bool(remote_secret_normalized and remote_secret_normalized == parsed_secret),
     )
     if not ok:
+        stored_secret = _normalize_proxy_secret(getattr(order, 'mtproxy_secret', '') or '')
+        if stored_secret and stored_secret == parsed_secret:
+            logger.warning('CLOUD_REINSTALL_LINK_COMPARE_PROBE_FAILED_BUT_STORED_SECRET_MATCH item_id=%s ip=%s port=%s users=%s', getattr(order, 'id', None), order_ip, order_port, ','.join(probe_users))
+            return True, '主链接格式、IP 和已记录密钥校验通过'
         return False, '无法登录服务器确认代理状态，请稍后再试或联系后台检查 SSH/代理服务'
     if remote_secret_normalized != parsed_secret:
         logger.warning('CLOUD_REINSTALL_LINK_COMPARE_FAIL reason=secret item_id=%s remote_secret=%s parsed_secret=%s', getattr(order, 'id', None), _secret_log_hint(remote_secret_normalized), _secret_log_hint(parsed_secret))
@@ -1194,18 +1495,53 @@ def _save_user_main_proxy_link(order_id: int, link_data: dict[str, str]):
     return order
 
 
-def _reinstall_confirm_keyboard(order_id: int):
+def _reinstall_confirm_keyboard(order_id: int, token: str):
     return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text='确认重新安装', callback_data=f'cloud:reinitconfirm:{order_id}')],
+        [InlineKeyboardButton(text='确认重新安装', callback_data=f'cloud:reinitconfirm:{order_id}:{token}')],
         [InlineKeyboardButton(text='取消', callback_data=f'cloud:detail:{order_id}')],
     ])
 
 
-def _asset_reinstall_confirm_keyboard(asset_id: int):
+def _asset_reinstall_confirm_keyboard(asset_id: int, token: str):
     return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text='确认重新安装', callback_data=f'cloud:assetreinitconfirm:{asset_id}')],
+        [InlineKeyboardButton(text='确认重新安装', callback_data=f'cloud:assetreinitconfirm:{asset_id}:{token}')],
         [InlineKeyboardButton(text='取消', callback_data=f'cloud:assetdetail:asset:{asset_id}:cloud:list:page:1')],
     ])
+
+
+async def _issue_reinstall_confirm_token(state: FSMContext, *, kind: str, item_id: int) -> str:
+    token = secrets.token_urlsafe(6)
+    await state.set_state(None)
+    await state.update_data(
+        reinstall_confirm_token=token,
+        reinstall_confirm_kind=kind,
+        reinstall_confirm_id=int(item_id),
+        reinstall_confirm_created_at=time.time(),
+    )
+    return token
+
+
+async def _consume_reinstall_confirm_token(state: FSMContext, *, kind: str, item_id: int, token: str) -> bool:
+    data = await state.get_data()
+    expected_token = str(data.get('reinstall_confirm_token') or '')
+    expected_kind = str(data.get('reinstall_confirm_kind') or '')
+    expected_id = int(data.get('reinstall_confirm_id') or 0)
+    created_at = float(data.get('reinstall_confirm_created_at') or 0)
+    is_valid = bool(
+        expected_token
+        and secrets.compare_digest(expected_token, str(token or ''))
+        and expected_kind == kind
+        and expected_id == int(item_id)
+        and time.time() - created_at <= _REINSTALL_CONFIRM_TTL
+    )
+    if is_valid:
+        await state.update_data(
+            reinstall_confirm_token='',
+            reinstall_confirm_kind='',
+            reinstall_confirm_id=0,
+            reinstall_confirm_created_at=0,
+        )
+    return is_valid
 
 
 def _cloud_can_refund(order, now=None) -> bool:
@@ -1244,6 +1580,7 @@ def _proxy_links_text(order) -> str:
     links = []
     seen = set()
     main_link = str(getattr(order, 'mtproxy_link', '') or '')
+    main_port = str(getattr(order, 'mtproxy_port', '') or '')
     if main_link:
         links.append(('主代理', main_link))
         seen.add(main_link)
@@ -1252,6 +1589,8 @@ def _proxy_links_text(order) -> str:
             continue
         link = item.get('url') or ''
         if not link or link in seen:
+            continue
+        if main_link and main_port and str(item.get('port') or '') == main_port:
             continue
         label = item.get('name') or f"端口 {item.get('port') or '-'}"
         links.append((label, link))
@@ -1290,9 +1629,9 @@ def _reminder_list_text(summary: dict, page: int = 1, per_page: int = 5) -> str:
     if page_orders:
         for order in page_orders:
             ip = order.public_ip or order.previous_public_ip or order.order_no
-            reminder = '提醒开' if getattr(order, 'cloud_reminder_enabled', True) else '提醒关'
+            reminder_count = sum(1 for field in ('cloud_reminder_enabled', 'suspend_reminder_enabled', 'delete_reminder_enabled', 'ip_recycle_reminder_enabled') if getattr(order, field, True))
             auto = '自动续费开' if order.auto_renew_enabled else '自动续费关'
-            lines.append(f'- {escape(str(ip))} | 到期 {_format_local_dt(order.service_expires_at)} | {reminder} | {auto}')
+            lines.append(f'- {escape(str(ip))} | 到期 {_format_local_dt(order.service_expires_at)} | 提醒 {reminder_count}/4 | {auto}')
     else:
         lines.append('- 暂无云服务器提醒')
     lines.extend(['', '这里只管理 IP 到期提醒和自动续费提醒。'])
@@ -1304,6 +1643,36 @@ def _reminder_page_items(summary: dict, page: int = 1, per_page: int = 5):
     total_pages = max(1, math.ceil(len(cloud_orders) / per_page))
     page = min(max(1, page), total_pages)
     return cloud_orders[(page - 1) * per_page: page * per_page], page, total_pages
+
+
+def _find_reminder_order(summary: dict, order_id: int):
+    for order in (summary or {}).get('cloud_orders') or []:
+        if int(getattr(order, 'id', 0) or 0) == int(order_id):
+            return order
+    return None
+
+
+def _reminder_ip_detail_text(order, page: int = 1) -> str:
+    ip = order.public_ip or order.previous_public_ip or order.order_no
+    expiry = '已开启' if getattr(order, 'cloud_reminder_enabled', True) else '已关闭'
+    suspend = '已开启' if getattr(order, 'suspend_reminder_enabled', True) else '已关闭'
+    delete = '已开启' if getattr(order, 'delete_reminder_enabled', True) else '已关闭'
+    ip_recycle = '已开启' if getattr(order, 'ip_recycle_reminder_enabled', True) else '已关闭'
+    auto = '已开启' if getattr(order, 'auto_renew_enabled', False) else '已关闭'
+    return '\n'.join([
+        '🌐 IP 提醒设置',
+        '',
+        f'IP: <code>{escape(str(ip))}</code>',
+        f'订单号: {escape(str(order.order_no))}',
+        f'到期时间: {_format_local_dt(order.service_expires_at)}',
+        f'到期提醒: {expiry}',
+        f'停机提醒: {suspend}',
+        f'删机提醒: {delete}',
+        f'IP保留期提醒: {ip_recycle}',
+        f'自动续费提醒/续费: {auto}',
+        '',
+        '可以分别开启或关闭这台 IP 的各类生命周期提醒。',
+    ])
 
 
 def _cloud_asset_detail_text(item) -> str:
@@ -1325,7 +1694,7 @@ def _cloud_asset_detail_text(item) -> str:
 
 def _cloud_server_detail_text(order) -> str:
     status_hint = _cloud_order_status_hint(order)
-    service_expires_at = order.service_expires_at or '今天到期'
+    service_expires_at = _format_local_dt(order.service_expires_at) if order.service_expires_at else '今天到期'
     renew_price = order.pay_amount or order.total_amount
     auto_renew_status = '已开启' if getattr(order, 'auto_renew_enabled', False) else '已关闭'
     proxy_links_text = _proxy_links_text(order)
@@ -1353,11 +1722,78 @@ def _cloud_server_detail_text(order) -> str:
     return text
 
 
+@sync_to_async
+def _hydrate_order_proxy_links(order):
+    if not order:
+        return order
+    current_links = list(getattr(order, 'proxy_links', None) or [])
+    if len(current_links) > 1:
+        return order
+    try:
+        from cloud.models import CloudAsset, CloudServerOrder
+        candidates = []
+        asset = CloudAsset.objects.filter(order_id=order.id).order_by('-updated_at', '-id').first()
+        if asset:
+            candidates.append(asset)
+        lookup_values = [value for value in [order.instance_id, order.provider_resource_id, order.server_name, order.public_ip, order.previous_public_ip] if value]
+        try:
+            link_server = parse_qs(urlparse(str(getattr(order, 'mtproxy_link', '') or '')).query).get('server', [''])[0]
+            if link_server:
+                lookup_values.append(link_server)
+        except Exception:
+            pass
+        if lookup_values:
+            candidates.extend(CloudAsset.objects.filter(
+                Q(instance_id__in=lookup_values) | Q(provider_resource_id__in=lookup_values) | Q(asset_name__in=lookup_values) | Q(public_ip__in=lookup_values) | Q(previous_public_ip__in=lookup_values)
+            ).order_by('-updated_at', '-id')[:5])
+        for source in candidates:
+            links = list(getattr(source, 'proxy_links', None) or [])
+            if len(links) > len(current_links):
+                order.proxy_links = links
+                current_links = links
+            if not getattr(order, 'mtproxy_link', None) and getattr(source, 'mtproxy_link', None):
+                order.mtproxy_link = source.mtproxy_link
+            if not getattr(order, 'mtproxy_secret', None) and getattr(source, 'mtproxy_secret', None):
+                order.mtproxy_secret = source.mtproxy_secret
+            if not getattr(order, 'mtproxy_port', None) and getattr(source, 'mtproxy_port', None):
+                order.mtproxy_port = source.mtproxy_port
+        if len(current_links) <= 1 and getattr(order, 'mtproxy_link', None):
+            richer_order = CloudServerOrder.objects.filter(user_id=order.user_id, mtproxy_link=order.mtproxy_link).exclude(id=order.id).order_by('-updated_at', '-id').first()
+            richer_links = list(getattr(richer_order, 'proxy_links', None) or []) if richer_order else []
+            if len(richer_links) > len(current_links):
+                order.proxy_links = richer_links
+                current_links = richer_links
+        if len(current_links) <= 1 and getattr(order, 'replacement_for_id', None):
+            source_order = CloudServerOrder.objects.filter(id=order.replacement_for_id).first()
+            source_links = list(getattr(source_order, 'proxy_links', None) or []) if source_order else []
+            if len(source_links) > len(current_links):
+                order.proxy_links = source_links
+    except Exception as exc:
+        logger.warning('CLOUD_ORDER_PROXY_LINK_HYDRATE_FAILED order_id=%s error=%s', getattr(order, 'id', None), exc)
+    return order
+
+
+def _chain_trace_text(item) -> str:
+    payer = str(getattr(item, 'payer_address', '') or '').strip()
+    receiver = str(getattr(item, 'receive_address', '') or '').strip()
+    tx_hash = str(getattr(item, 'tx_hash', '') or '').strip()
+    lines = []
+    if payer:
+        lines.append(f'付款地址: <a href="{_tronscan_address_url(payer)}">{escape(payer)}</a>')
+    if receiver:
+        lines.append(f'收款地址: <a href="{_tronscan_address_url(receiver)}">{escape(receiver)}</a>')
+    if tx_hash:
+        lines.append(f'链上交易: <a href="{_tronscan_tx_url(tx_hash)}">{escape(tx_hash)}</a>')
+    return '\n'.join(lines)
+
+
 def _cloud_order_readonly_text(order) -> str:
     status_hint = _cloud_order_status_hint(order)
-    service_expires_at = order.service_expires_at or '未设置'
+    service_expires_at = _format_local_dt(order.service_expires_at) if order.service_expires_at else '未设置'
     paid_at = getattr(order, 'paid_at', None) or getattr(order, 'completed_at', None)
     paid_at_text = f'{paid_at:%Y-%m-%d %H:%M:%S}' if paid_at else '未支付'
+    proxy_links_text = _proxy_links_text(order)
+    chain_trace = _chain_trace_text(order)
     text = (
         '☁️ 云服务器订单详情\n\n'
         f'订单号: {escape(str(order.order_no or "-"))}\n'
@@ -1368,9 +1804,14 @@ def _cloud_order_readonly_text(order) -> str:
         f'支付方式: {"余额" if order.pay_method == "balance" else "地址"}\n'
         f'金额: {fmt_pay_amount(order.pay_amount or order.total_amount)} {escape(str(order.currency or ""))}\n'
         f'IP: <code>{escape(order.public_ip or order.previous_public_ip or "未分配")}</code>\n'
+        f'端口: <code>{escape(str(order.mtproxy_port or "未设置"))}</code>\n'
+        f'密钥: <code>{escape(str(order.mtproxy_secret or "尚未生成"))}</code>\n'
+        f'{proxy_links_text}\n'
         f'到期时间: {service_expires_at}\n'
         f'支付时间: {paid_at_text}'
     )
+    if chain_trace:
+        text += f'\n{chain_trace}'
     text += f'\n创建时间: {order.created_at:%Y-%m-%d %H:%M:%S}'
     if status_hint:
         text += f'\n{status_hint}'
@@ -1455,12 +1896,20 @@ class _NotInState:
         return True  # 由 aiogram 内部的 StateFilter 机制处理
 
 
+def _current_menu_labels() -> set[str]:
+    try:
+        from core.button_config import load_button_config
+        return {str(item.get('label') or '').strip() for item in load_button_config().get('items', []) if item.get('enabled', True)}
+    except Exception:
+        return {'🛠 定制节点', '🔎 到期时间查询', '👤 个人中心'}
+
+
 MENU_BUTTONS = {'🛠 定制节点', '🔎 到期时间查询', '👤 个人中心'}
 
 
 def register_handlers(dp: Dispatcher):
     async def _handle_menu_interrupt(message: Message, state: FSMContext) -> bool:
-        if (message.text or '').strip() not in MENU_BUTTONS:
+        if (message.text or '').strip() not in (MENU_BUTTONS | _current_menu_labels()):
             return False
         await menu_handler(message, state)
         return True
@@ -1497,6 +1946,7 @@ def register_handlers(dp: Dispatcher):
             mon.id, user.id, mon.address, remark,
             mon.usdt_threshold, mon.trx_threshold,
             mon.monitor_transfers, mon.monitor_resources,
+            mon.energy_threshold, mon.bandwidth_threshold,
         )
         await state.clear()
         short = f'{data["monitor_address"][:6]}...{data["monitor_address"][-4:]}'
@@ -1545,6 +1995,50 @@ def register_handlers(dp: Dispatcher):
             await update_monitor_threshold_in_cache(mon.address, 'TRX', val)
         await state.clear()
         await message.answer(_bot_text_format('bot_monitor_trx_threshold_updated', '✅ TRX 阈值已更新为 {amount}', amount=fmt_amount(val)), reply_markup=main_menu())
+
+    @dp.message(MonitorStates.waiting_energy_threshold)
+    async def mon_energy_threshold_input(message: Message, state: FSMContext):
+        if await _handle_menu_interrupt(message, state):
+            return
+        try:
+            val = int(message.text.strip())
+            if val < 0:
+                raise ValueError
+        except (TypeError, ValueError):
+            await message.answer(_bot_text('bot_monitor_invalid_resource_threshold', '❌ 请输入有效整数，0 表示只要增加就通知。'))
+            return
+        data = await state.get_data()
+        user = await get_or_create_user(message.from_user.id, message.from_user.username, message.from_user.first_name)
+        mid = data['threshold_monitor_id']
+        await set_monitor_threshold(mid, user.id, 'ENERGY', val)
+        from cloud.cache import update_monitor_threshold_in_cache
+        mon = await get_monitor(mid, user.id)
+        if mon:
+            await update_monitor_threshold_in_cache(mon.address, 'ENERGY', val)
+        await state.clear()
+        await message.answer(_bot_text_format('bot_monitor_energy_threshold_updated', '✅ 能量增加阈值已更新为 {amount}', amount=val), reply_markup=main_menu())
+
+    @dp.message(MonitorStates.waiting_bandwidth_threshold)
+    async def mon_bandwidth_threshold_input(message: Message, state: FSMContext):
+        if await _handle_menu_interrupt(message, state):
+            return
+        try:
+            val = int(message.text.strip())
+            if val < 0:
+                raise ValueError
+        except (TypeError, ValueError):
+            await message.answer(_bot_text('bot_monitor_invalid_resource_threshold', '❌ 请输入有效整数，0 表示只要增加就通知。'))
+            return
+        data = await state.get_data()
+        user = await get_or_create_user(message.from_user.id, message.from_user.username, message.from_user.first_name)
+        mid = data['threshold_monitor_id']
+        await set_monitor_threshold(mid, user.id, 'BANDWIDTH', val)
+        from cloud.cache import update_monitor_threshold_in_cache
+        mon = await get_monitor(mid, user.id)
+        if mon:
+            await update_monitor_threshold_in_cache(mon.address, 'BANDWIDTH', val)
+        await state.clear()
+        await message.answer(_bot_text_format('bot_monitor_bandwidth_threshold_updated', '✅ 带宽增加阈值已更新为 {amount}', amount=val), reply_markup=main_menu())
 
     @dp.message(RechargeStates.waiting_amount)
     async def recharge_amount_input(message: Message, state: FSMContext):
@@ -1620,10 +2114,10 @@ def register_handlers(dp: Dispatcher):
         try:
             port = int(message.text.strip())
         except Exception:
-            await message.answer(_bot_text('bot_custom_port_invalid', '端口格式不正确，请输入 1025-65535 之间的数字。\n\n可随时点击底部菜单打断当前输入。'))
+            await message.answer(_bot_text('bot_custom_port_invalid', mtproxy_port_validation_hint() + '\n\n可随时点击底部菜单打断当前输入。'))
             return
-        if port < 1025 or port > 65535:
-            await message.answer(_bot_text('bot_custom_port_invalid', '端口格式不正确，请输入 1025-65535 之间的数字。\n\n可随时点击底部菜单打断当前输入。'))
+        if not is_valid_mtproxy_main_port(port):
+            await message.answer(_bot_text('bot_custom_port_invalid', mtproxy_port_validation_hint() + '\n\n可随时点击底部菜单打断当前输入。'))
             return
         data = await state.get_data()
         order_id = data.get('cloud_ip_change_order_id') or data.get('custom_order_id')
@@ -1644,7 +2138,7 @@ def register_handlers(dp: Dispatcher):
             await message.answer(
                 _bot_text_format(
                     'bot_ip_change_order_created',
-                    '✅ 更换IP迁移单已创建\n新订单号: {order_no}\n新地区: {region_name}\n新端口: {port}\n旧服务器将于 5 天后到期，请尽快完成迁移。',
+                    '✅ 更换IP新服务器已创建\n新订单号: {order_no}\n新地区: {region_name}\n新端口: {port}\n系统会新建同配置服务器并绑定新的固定 IP，请在 5 天内切换使用。',
                     order_no=order.order_no,
                     region_name=region_name or order.region_name,
                     port=port,
@@ -1670,34 +2164,47 @@ def register_handlers(dp: Dispatcher):
     async def cmd_start(message: Message, state: FSMContext):
         await state.clear()
         await get_or_create_user(message.from_user.id, message.from_user.username, message.from_user.first_name)
-        await message.answer(_bot_text('bot_welcome', '欢迎使用商城机器人！请选择操作：'), reply_markup=main_menu())
+        sent = await message.answer(_bot_text('bot_welcome', '欢迎使用商城机器人！请选择操作：'), reply_markup=main_menu())
+        logger.info('BOT_MESSAGE_SEND route=start user_id=%s chat_id=%s reply_to=%s sent_message_id=%s', getattr(message.from_user, 'id', None), message.chat.id, message.message_id, getattr(sent, 'message_id', None))
 
-    @dp.message(F.text.in_(MENU_BUTTONS))
+    @dp.message(lambda message: (message.text or '').strip() in (MENU_BUTTONS | _current_menu_labels()))
     async def menu_handler(message: Message, state: FSMContext):
         current = await state.get_state()
         if current:
             await state.clear()
 
-        text = message.text
+        text = (message.text or '').strip()
         user = await get_or_create_user(message.from_user.id, message.from_user.username, message.from_user.first_name)
+        link_item = configured_link_for_label(text)
+        if link_item:
+            sent = await message.answer(
+                str(link_item.get('message') or '请点击下方按钮打开链接。'),
+                reply_markup=configured_link_menu(text) or main_menu(),
+            )
+            logger.info('BOT_MESSAGE_SEND route=menu_link label=%s user_id=%s chat_id=%s reply_to=%s sent_message_id=%s', text, getattr(message.from_user, 'id', None), message.chat.id, message.message_id, getattr(sent, 'message_id', None))
+            return
 
         if text == '✨ 订阅':
-            await message.answer(_bot_text('bot_removed_products_entry', '商品购买入口已移除，请使用“🛠 定制节点”或“🔎 到期时间查询”。'), reply_markup=main_menu())
+            sent = await message.answer(_bot_text('bot_removed_products_entry', '商品购买入口已移除，请使用“🛠 定制节点”或“🔎 到期时间查询”。'), reply_markup=main_menu())
+            logger.info('BOT_MESSAGE_SEND route=menu_removed label=%s user_id=%s chat_id=%s reply_to=%s sent_message_id=%s', text, getattr(message.from_user, 'id', None), message.chat.id, message.message_id, getattr(sent, 'message_id', None))
 
         elif text == '🛠 定制节点':
             regions = await list_custom_regions()
-            await message.answer(_bot_text('bot_custom_region_entry', '🛠 云服务器定制\n\n请选择热门地区：'), reply_markup=custom_region_menu(regions, expanded=False))
+            sent = await message.answer(_bot_text('bot_custom_region_entry', '🛠 云服务器定制\n\n请选择热门地区：'), reply_markup=custom_region_menu(regions, expanded=False))
+            logger.info('BOT_MESSAGE_SEND route=menu_custom user_id=%s chat_id=%s reply_to=%s sent_message_id=%s', getattr(message.from_user, 'id', None), message.chat.id, message.message_id, getattr(sent, 'message_id', None))
 
         elif text == '🔎 到期时间查询':
-            await message.answer(_bot_text('bot_query_center_entry', '🔎 查询中心\n\n请选择查询方式：'), reply_markup=cloud_query_menu())
+            sent = await message.answer(_bot_text('bot_query_center_entry', '🔎 查询中心\n\n请选择查询方式：'), reply_markup=cloud_query_menu())
+            logger.info('BOT_MESSAGE_SEND route=menu_query user_id=%s chat_id=%s reply_to=%s sent_message_id=%s', getattr(message.from_user, 'id', None), message.chat.id, message.message_id, getattr(sent, 'message_id', None))
 
         elif text == '👤 个人中心':
-            await message.answer(
+            sent = await message.answer(
                 f'👤 个人中心\n用户ID: {user.tg_user_id}\n用户名: {_display_username(user)}\n'
                 f'💵 USDT 余额: {fmt_amount(user.balance)}\n🪙 TRX 余额: {fmt_amount(user.balance_trx)}\n\n'
                 f'请选择要进入的功能：',
                 reply_markup=profile_menu(),
             )
+            logger.info('BOT_MESSAGE_SEND route=menu_profile user_id=%s chat_id=%s reply_to=%s sent_message_id=%s', getattr(message.from_user, 'id', None), message.chat.id, message.message_id, getattr(sent, 'message_id', None))
 
     @dp.callback_query(F.data == 'cloud:queryip')
     async def cb_cloud_query_ip(callback: CallbackQuery, state: FSMContext):
@@ -1793,6 +2300,30 @@ def register_handlers(dp: Dispatcher):
         await _render_profile_reminders(callback, page=page)
         await _safe_callback_answer(callback)
 
+    async def _render_profile_reminder_ip(callback: CallbackQuery, order_id: int, page: int = 1):
+        user = await get_or_create_user(callback.from_user.id, callback.from_user.username, callback.from_user.first_name)
+        summary = await get_user_reminder_summary(user.id)
+        order = _find_reminder_order(summary, order_id)
+        if not order:
+            await _safe_callback_answer(callback, '订单不存在', show_alert=True)
+            return None
+        await _safe_edit_text(
+            callback.message,
+            _reminder_ip_detail_text(order, page),
+            reply_markup=reminder_ip_detail_menu(order, page),
+            parse_mode='HTML',
+        )
+        return order
+
+    @dp.callback_query(F.data.startswith('profile:reminders:ip:'))
+    async def cb_profile_reminders_ip(callback: CallbackQuery):
+        parts = callback.data.split(':')
+        order_id = int(parts[3])
+        page = int(parts[4]) if len(parts) > 4 else 1
+        order = await _render_profile_reminder_ip(callback, order_id, page)
+        if order:
+            await _safe_callback_answer(callback)
+
     @dp.callback_query(F.data == 'profile:reminders:muteall')
     async def cb_profile_reminders_mute_all(callback: CallbackQuery):
         user = await get_or_create_user(callback.from_user.id, callback.from_user.username, callback.from_user.first_name)
@@ -1813,18 +2344,46 @@ def register_handlers(dp: Dispatcher):
     async def cb_profile_reminders_order_toggle(callback: CallbackQuery):
         user = await get_or_create_user(callback.from_user.id, callback.from_user.username, callback.from_user.first_name)
         parts = callback.data.split(':')
+        if len(parts) >= 7:
+            reminder_type = parts[3]
+            action = parts[4]
+            raw_order_id = parts[5]
+            page = int(parts[6]) if len(parts) > 6 else 1
+        else:
+            reminder_type = 'expiry'
+            action = parts[3]
+            raw_order_id = parts[4]
+            page = int(parts[5]) if len(parts) > 5 else 1
+        enabled = action == 'on'
+        order = await set_cloud_order_reminder(int(raw_order_id), user.id, enabled, reminder_type)
+        if not order:
+            await _safe_callback_answer(callback, '订单不存在', show_alert=True)
+            return
+        type_label = {'expiry': '到期提醒', 'suspend': '停机提醒', 'delete': '删机提醒', 'ip_recycle': 'IP保留期提醒'}.get(reminder_type, '提醒')
+        logger.info('PROFILE_REMINDERS_ORDER_TOGGLE user_id=%s order_id=%s reminder_type=%s enabled=%s page=%s', user.id, order.id, reminder_type, enabled, page)
+        await _render_profile_reminder_ip(callback, order.id, page)
+        label = order.public_ip or order.previous_public_ip or order.order_no
+        await _safe_callback_answer(callback, f'{"已开启" if enabled else "已关闭"} {label} {type_label}')
+
+    @dp.callback_query(F.data.startswith('profile:reminders:auto:'))
+    async def cb_profile_reminders_auto_toggle(callback: CallbackQuery):
+        user = await get_or_create_user(callback.from_user.id, callback.from_user.username, callback.from_user.first_name)
+        parts = callback.data.split(':')
         action = parts[3]
         raw_order_id = parts[4]
         page = int(parts[5]) if len(parts) > 5 else 1
         enabled = action == 'on'
-        order = await set_cloud_order_reminder(int(raw_order_id), user.id, enabled)
+        order = await set_cloud_server_auto_renew(int(raw_order_id), user.id, enabled)
+        if order is False:
+            await _safe_callback_answer(callback, '当前状态不可开启自动续费', show_alert=True)
+            return
         if not order:
             await _safe_callback_answer(callback, '订单不存在', show_alert=True)
             return
-        logger.info('PROFILE_REMINDERS_ORDER_TOGGLE user_id=%s order_id=%s enabled=%s page=%s', user.id, order.id, enabled, page)
-        await _render_profile_reminders(callback, page=page)
+        logger.info('PROFILE_REMINDERS_AUTO_TOGGLE user_id=%s order_id=%s enabled=%s page=%s', user.id, order.id, enabled, page)
+        await _render_profile_reminder_ip(callback, order.id, page)
         label = order.public_ip or order.previous_public_ip or order.order_no
-        await _safe_callback_answer(callback, f'{"已开启" if enabled else "已关闭"} {label} 提醒')
+        await _safe_callback_answer(callback, f'{"已开启" if enabled else "已关闭"} {label} 自动续费')
 
     @dp.callback_query(F.data == 'profile:back_to_menu')
     async def cb_profile_back_to_menu(callback: CallbackQuery, state: FSMContext):
@@ -1841,7 +2400,12 @@ def register_handlers(dp: Dispatcher):
     @dp.callback_query(F.data == 'profile:recharge')
     async def cb_profile_recharge(callback: CallbackQuery, state: FSMContext):
         await state.clear()
-        await _safe_edit_text(callback.message, _bot_text('bot_recharge_currency_prompt', '💰 请选择充值币种：\n\n可随时点击底部菜单打断当前输入。'), reply_markup=recharge_currency_menu())
+        text = _bot_text('bot_recharge_currency_prompt', '💰 请选择充值币种：\n\n可随时点击底部菜单打断当前输入。')
+        markup = recharge_currency_menu()
+        edited = await _safe_edit_text(callback.message, text, reply_markup=markup)
+        if edited is None:
+            sent = await callback.message.reply(text, reply_markup=markup)
+            logger.info('BOT_MESSAGE_SEND route=profile_recharge_fallback user_id=%s chat_id=%s reply_to=%s sent_message_id=%s', getattr(callback.from_user, 'id', None), callback.message.chat.id, callback.message.message_id, getattr(sent, 'message_id', None))
         await _safe_callback_answer(callback)
 
     @dp.callback_query(F.data == 'profile:recharges')
@@ -2154,7 +2718,6 @@ def register_handlers(dp: Dispatcher):
         order_id = int(callback.data.split(':')[3])
         logger.info('云服务器选择默认端口: tg_user_id=%s order_id=%s port=9528 callback=%s', getattr(callback.from_user, 'id', None), order_id, callback.data)
         await state.clear()
-        await state.update_data(custom_order_id=order_id, custom_port=9528)
         user = await get_or_create_user(callback.from_user.id, callback.from_user.username, callback.from_user.first_name)
         order = await set_cloud_server_port(order_id, user.id, 9528)
         logger.info('云服务器使用默认端口: tg_user_id=%s user=%s order_id=%s port=9528 result=%s', getattr(callback.from_user, 'id', None), user.id, order_id, getattr(order, 'order_no', None))
@@ -2177,7 +2740,7 @@ def register_handlers(dp: Dispatcher):
         await state.set_state(CustomServerStates.waiting_port)
         await bot.send_message(
             chat_id=callback.from_user.id,
-            text='✍️ 已选择自定义端口。\n请发送 1025-65535 之间的端口号，发送后我会立即提交服务器创建任务。',
+            text='✍️ 已选择自定义端口。\n请发送 443 或 1025-65530 之间的端口号，发送后我会立即提交服务器创建任务。',
         )
 
     @dp.callback_query(F.data == 'cloud:list')
@@ -2249,13 +2812,27 @@ def register_handlers(dp: Dispatcher):
         if not order:
             await _safe_callback_answer(callback, '订单不存在', show_alert=True)
             return
-        logger.info('CLOUD_ORDER_READONLY_RENDER user_id=%s order_id=%s order_no=%s status=%s back=%s', user.id, order.id, order.order_no, order.status, back_callback)
+        order = await _hydrate_order_proxy_links(order)
+        logger.info('CLOUD_ORDER_READONLY_RENDER user_id=%s order_id=%s order_no=%s status=%s back=%s proxy_links=%s', user.id, order.id, order.order_no, order.status, back_callback, len(getattr(order, 'proxy_links', None) or []))
         await _safe_edit_text(
             callback.message,
             _cloud_order_readonly_text(order),
             reply_markup=cloud_order_readonly_detail(order.id, back_callback),
             parse_mode='HTML',
         )
+
+    @dp.callback_query(F.data.startswith('adminreply:hint:'))
+    async def cb_admin_reply_hint(callback: CallbackQuery, state: FSMContext):
+        if not await _is_admin_chat(callback.message):
+            await _safe_callback_answer(callback, '仅管理员可使用', show_alert=True)
+            return
+        link = await get_admin_reply_link(callback.message.chat.id, callback.message.message_id)
+        if not link:
+            await _safe_callback_answer(callback, '没有找到回复通道，请回复转发消息或使用 /reply 用户TGID 内容', show_alert=True)
+            return
+        await state.set_state(AdminReplyStates.waiting_reply)
+        await state.update_data(admin_reply_link_id=link.id)
+        await _safe_callback_answer(callback, '已进入回复模式：请直接发送下一条文字/图片/文件，我会转发给用户。', show_alert=True)
 
     @dp.callback_query(F.data.startswith('support:contact:'))
     async def cb_support_contact(callback: CallbackQuery):
@@ -2290,7 +2867,7 @@ def register_handlers(dp: Dispatcher):
             [InlineKeyboardButton(text='🔄 续费', callback_data=f'cloud:assetaction:renew:{item_id}'), InlineKeyboardButton(text='🌐 更换IP', callback_data=f'cloud:assetaction:changeip:{item_id}')],
             [InlineKeyboardButton(text='🛠 重新安装', callback_data=f'cloud:assetinit:{item_id}:{back_callback}'), InlineKeyboardButton(text='⬆️ 升级配置', callback_data=f'cloud:assetaction:upgrade:{item_id}')],
         ]
-        rows.append([InlineKeyboardButton(text='👩‍💻 联系客服', callback_data=f'support:contact:cloud_asset:{item_id}')])
+        rows.append([support_contact_button('cloud_asset', item_id)])
         rows.append([InlineKeyboardButton(text='🔙 返回代理列表', callback_data=back_callback)])
         await _safe_edit_text(callback.message, _cloud_asset_detail_text(item), reply_markup=InlineKeyboardMarkup(inline_keyboard=rows), parse_mode='HTML')
 
@@ -2336,16 +2913,39 @@ def register_handlers(dp: Dispatcher):
             return
         if action == 'changeip':
             if order.provider != 'aws_lightsail':
+                logger.info('CLOUD_ASSET_ACTION_DENIED user_id=%s asset_id=%s order_id=%s action=%s reason=unsupported_provider provider=%s', user.id, asset_id, order.id, action, order.provider)
                 await _safe_callback_answer(callback, '阿里云服务器暂不支持更换 IP', show_alert=True)
+                await _safe_edit_text(
+                    callback.message,
+                    '🌐 更换IP\n\n当前代理不是 AWS Lightsail 服务器，暂不支持自助更换 IP。',
+                    reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                        [support_contact_button('cloud_asset_changeip_provider', asset_id)],
+                        [InlineKeyboardButton(text='🔙 返回代理详情', callback_data=f'cloud:assetdetail:asset:{asset_id}:cloud:list:page:1')],
+                    ]),
+                )
                 return
             if max(int(getattr(order, 'ip_change_quota', 0) or 0), 0) <= 0:
+                logger.info('CLOUD_ASSET_ACTION_DENIED user_id=%s asset_id=%s order_id=%s action=%s reason=no_ip_change_quota quota=%s', user.id, asset_id, order.id, action, getattr(order, 'ip_change_quota', None))
                 await _safe_callback_answer(callback, '剩余更换 IP 次数不足，请续费后再试', show_alert=True)
+                await _safe_edit_text(
+                    callback.message,
+                    '🌐 更换IP\n\n这台代理当前剩余更换 IP 次数为 0。\n\n请先续费获取新的更换 IP 次数，或联系客服人工处理。',
+                    reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                        [InlineKeyboardButton(text='🔄 去续费', callback_data=f'cloud:assetaction:renew:{asset_id}')],
+                        [support_contact_button('cloud_asset_changeip_quota', asset_id)],
+                        [InlineKeyboardButton(text='🔙 返回代理详情', callback_data=f'cloud:assetdetail:asset:{asset_id}:cloud:list:page:1')],
+                    ]),
+                )
                 return
             regions = [(code, name) for code, name in await _get_cached_custom_regions() if code != 'cn-hongkong']
-            await _safe_edit_text(callback.message,
-                '🌐 更换IP\n\n请选择新的地区：',
-                reply_markup=cloud_server_change_ip_region_menu(order.id, regions, expanded=False),
-            )
+            text = '🌐 更换IP\n\n请选择新的地区：'
+            markup = cloud_server_change_ip_region_menu(order.id, regions, expanded=False)
+            edited = await _safe_edit_text(callback.message, text, reply_markup=markup)
+            if edited is None:
+                sent = await callback.message.reply(text, reply_markup=markup)
+                logger.info('BOT_MESSAGE_SEND route=asset_change_ip_regions_fallback user_id=%s asset_id=%s order_id=%s chat_id=%s reply_to=%s sent_message_id=%s regions=%s', user.id, asset_id, order.id, callback.message.chat.id, callback.message.message_id, getattr(sent, 'message_id', None), regions)
+            else:
+                logger.info('BOT_MESSAGE_EDIT route=asset_change_ip_regions user_id=%s asset_id=%s order_id=%s chat_id=%s message_id=%s regions=%s', user.id, asset_id, order.id, callback.message.chat.id, callback.message.message_id, regions)
             return
         if action == 'upgrade':
             plans, err = await list_cloud_server_upgrade_plans(order.id, user.id)
@@ -2381,17 +2981,43 @@ def register_handlers(dp: Dispatcher):
         await callback.message.reply(_bot_text('bot_reinstall_need_main_link', '当前服务器缺少主代理链接。请直接发送这台服务器的主代理链接，我会先校验 IP、端口和服务器实际密钥，再让你确认是否重新安装。'))
 
     @dp.callback_query(F.data.startswith('cloud:assetreinitconfirm:'))
-    async def cb_cloud_asset_reinit_confirm(callback: CallbackQuery, bot: Bot):
-        await _safe_callback_answer(callback)
+    async def cb_cloud_asset_reinit_confirm(callback: CallbackQuery, bot: Bot, state: FSMContext):
+        parts = callback.data.split(':')
+        asset_id = int(parts[2])
+        token = parts[3] if len(parts) > 3 else ''
+        if not await _consume_reinstall_confirm_token(state, kind='asset', item_id=asset_id, token=token):
+            await _safe_callback_answer(callback, '这个确认按钮已过期或已使用，请重新进入详情并重新生成按钮。', show_alert=True)
+            return
+        await _safe_callback_answer(callback, '已确认，后台处理中')
+        await _safe_remove_inline_keyboard(callback.message)
         user = await get_or_create_user(callback.from_user.id, callback.from_user.username, callback.from_user.first_name)
-        asset_id = int(callback.data.split(':')[2])
         item = await get_user_proxy_asset_detail(asset_id, user.id, 'asset')
         if not item:
-            await _safe_callback_answer(callback, '代理记录不存在', show_alert=True)
+            await callback.message.reply('代理记录不存在，请重新进入详情并重新生成按钮。')
             return
-        logger.info('CLOUD_ASSET_REINIT_SUBMIT user_id=%s asset_id=%s ip=%s', user.id, asset_id, getattr(item, 'public_ip', None))
-        await callback.message.reply('🛠 已确认重新安装，后台会按你提供的主链接密钥重新安装 BBR/MTProxy。预计约 5 分钟，完成后会自动通知你。')
-        asyncio.create_task(_initialize_proxy_asset_and_notify(bot, callback.from_user.id, user.id, asset_id))
+        if asset_id in _ASSET_REINIT_INFLIGHT:
+            logger.info('CLOUD_ASSET_REINIT_DUPLICATE user_id=%s asset_id=%s ip=%s', user.id, asset_id, getattr(item, 'public_ip', None))
+            await callback.message.reply('这台代理正在重新安装，请勿重复点击；如需再次操作，请等待当前任务结束后重新生成按钮。')
+            return
+        order, err = await ensure_cloud_asset_operation_order(asset_id, user.id)
+        if err or not order:
+            logger.warning('CLOUD_ASSET_REINIT_DENIED user_id=%s asset_id=%s reason=%s', user.id, asset_id, err or '无法创建代理操作订单')
+            await callback.message.reply(err or '无法创建代理操作订单，请重新进入详情并重新生成按钮。')
+            return
+        rebuild_order = await mark_cloud_server_reinit_requested(order.id, user.id)
+        if not rebuild_order:
+            logger.warning('CLOUD_ASSET_REINIT_DENIED user_id=%s asset_id=%s order_id=%s reason=missing_order', user.id, asset_id, order.id)
+            await callback.message.reply('服务器记录不存在，请重新进入详情并重新生成按钮。')
+            return
+        if isinstance(rebuild_order, str):
+            logger.warning('CLOUD_ASSET_REINIT_DENIED user_id=%s asset_id=%s order_id=%s reason=%s', user.id, asset_id, order.id, rebuild_order)
+            await callback.message.reply(f'{rebuild_order}\n请重新进入详情并重新生成按钮。')
+            return
+        _ASSET_REINIT_INFLIGHT.add(asset_id)
+        logger.info('CLOUD_ASSET_REINIT_SUBMIT user_id=%s asset_id=%s order_id=%s rebuild_order_id=%s ip=%s', user.id, asset_id, order.id, rebuild_order.id, getattr(item, 'public_ip', None))
+        await callback.message.reply('🛠 已确认重建服务器：后台会新建干净服务器并安装代理，成功后迁移固定 IP，旧机保留 3 天。预计约 5 分钟，完成后会自动通知你。\n\n后台处理期间，底部菜单和其它按钮可正常使用。', reply_markup=main_menu())
+        task = asyncio.create_task(_provision_cloud_server_and_notify(bot, callback.from_user.id, rebuild_order.id, rebuild_order.mtproxy_port or 9528, retry_only=False))
+        task.add_done_callback(lambda _task, _asset_id=asset_id: _ASSET_REINIT_INFLIGHT.discard(_asset_id))
 
     @dp.callback_query(F.data.startswith('cloud:detail:'))
     async def cb_cloud_detail(callback: CallbackQuery):
@@ -2464,13 +3090,21 @@ def register_handlers(dp: Dispatcher):
 
     @dp.callback_query(F.data.startswith('cloud:mute:'))
     async def cb_cloud_mute(callback: CallbackQuery):
-        await _safe_callback_answer(callback)
         user = await get_or_create_user(callback.from_user.id, callback.from_user.username, callback.from_user.first_name)
-        _, _, raw_order_id, raw_days = callback.data.split(':')
-        updated = await mute_cloud_reminders(user.id, int(raw_days))
+        parts = callback.data.split(':')
+        raw_order_id = parts[2] if len(parts) >= 3 else ''
+        updated = await mute_cloud_order_reminders(int(raw_order_id), user.id) if str(raw_order_id).isdigit() else None
         if not updated:
+            if len(parts) >= 4 and str(parts[3]).isdigit():
+                legacy = await mute_cloud_reminders(user.id, int(parts[3]))
+                if legacy:
+                    await _safe_callback_answer(callback, '已关闭提醒')
+                    return
             await _safe_callback_answer(callback, '关闭提醒失败', show_alert=True)
             return
+        logger.info('CLOUD_NOTICE_MUTE_ORDER user_id=%s order_id=%s order_no=%s callback_data=%s', user.id, updated.id, updated.order_no, callback.data)
+        await _safe_callback_answer(callback, '已关闭该订单提醒')
+        await _safe_remove_inline_keyboard(callback.message)
 
     @dp.callback_query(F.data.startswith('cloud:delay:'))
     async def cb_cloud_delay(callback: CallbackQuery):
@@ -2550,18 +3184,28 @@ def register_handlers(dp: Dispatcher):
         order_id = int(callback.data.split(':')[2])
         order, err = await pay_cloud_server_renewal_with_balance(order_id, user.id, 'USDT', 31)
         if err:
+            existing = await get_cloud_order(order_id, user.id)
+            if existing and existing.status == 'completed' and existing.paid_at:
+                asyncio.create_task(_cloud_renewal_postcheck_and_notify(callback.bot, callback.from_user.id, existing.id))
+                await _safe_edit_text(callback.message, f'✅ 这笔续费已完成。\n\n订单号: {existing.order_no}\n新的到期时间: {_format_local_dt(existing.service_expires_at)}\n\n我会继续执行续费后巡检。')
+                return
             await _safe_edit_text(callback.message, 
-                f'❌ 钱包自动续费失败：{err}。\n请先充值余额后再试，或使用下方地址支付。',
+                f'❌ 钱包自动续费失败：{_public_cloud_error_text(err)}。\n请先充值余额后再试，或使用下方地址支付。',
                 reply_markup=wallet_recharge_prompt_menu(),
             )
             return
+        if getattr(order, 'replacement_for_id', None) and order.status in {'paid', 'provisioning', 'failed'}:
+            await _safe_edit_text(callback.message, '✅ 云服务器钱包续费成功，正在自动恢复固定 IP 服务器。\n\n系统会保持旧 IP / 旧端口 / 旧密钥不变，完成后自动发送代理链接。')
+            asyncio.create_task(_provision_cloud_server_and_notify(callback.bot, callback.from_user.id, order.id, order.mtproxy_port or 9528))
+            return
+        asyncio.create_task(_cloud_renewal_postcheck_and_notify(callback.bot, callback.from_user.id, order.id))
         await _safe_edit_text(callback.message, 
             '✅ 云服务器钱包自动续费成功\n\n'
             f'订单号: {order.order_no}\n'
             '续费时长: 31天\n'
             '支付方式: 钱包自动续费\n'
             '支付币种: USDT\n'
-            f'新的到期时间: {order.service_expires_at or "未设置"}',
+            f'新的到期时间: {_format_local_dt(order.service_expires_at)}',
             reply_markup=cloud_server_detail(
                 order.id,
                 can_renew=True,
@@ -2589,14 +3233,24 @@ def register_handlers(dp: Dispatcher):
         order_id = int(order_id_text)
         order, err = await pay_cloud_server_renewal_with_balance(order_id, user.id, currency, 31)
         if err:
-            await _safe_edit_text(callback.message, f'❌ {err}。', reply_markup=wallet_recharge_prompt_menu())
+            existing = await get_cloud_order(order_id, user.id)
+            if existing and existing.status == 'completed' and existing.paid_at:
+                asyncio.create_task(_cloud_renewal_postcheck_and_notify(callback.bot, callback.from_user.id, existing.id))
+                await _safe_edit_text(callback.message, f'✅ 这笔续费已完成。\n\n订单号: {existing.order_no}\n新的到期时间: {_format_local_dt(existing.service_expires_at)}\n\n我会继续执行续费后巡检。')
+                return
+            await _safe_edit_text(callback.message, f'❌ {_public_cloud_error_text(err)}。', reply_markup=wallet_recharge_prompt_menu())
             return
+        if getattr(order, 'replacement_for_id', None) and order.status in {'paid', 'provisioning', 'failed'}:
+            await _safe_edit_text(callback.message, '✅ 云服务器续费成功，正在自动恢复固定 IP 服务器。\n\n系统会保持旧 IP / 旧端口 / 旧密钥不变，完成后自动发送代理链接。')
+            asyncio.create_task(_provision_cloud_server_and_notify(callback.bot, callback.from_user.id, order.id, order.mtproxy_port or 9528))
+            return
+        asyncio.create_task(_cloud_renewal_postcheck_and_notify(callback.bot, callback.from_user.id, order.id))
         await _safe_edit_text(callback.message, 
             '✅ 云服务器续费成功\n\n'
             f'订单号: {order.order_no}\n'
             '续费时长: 31天\n'
             f'支付币种: {currency}\n'
-            f'新的到期时间: {order.service_expires_at or "未设置"}',
+            f'新的到期时间: {_format_local_dt(order.service_expires_at)}',
             reply_markup=cloud_server_detail(
                 order.id,
                 can_renew=True,
@@ -2665,7 +3319,7 @@ def register_handlers(dp: Dispatcher):
 
     @dp.callback_query(F.data.startswith('cloud:ipport:default:'))
     async def cb_cloud_change_ip_port_default(callback: CallbackQuery, state: FSMContext, bot: Bot):
-        await _safe_callback_answer(callback, '已选择默认端口 9528，正在创建迁移服务器')
+        await _safe_callback_answer(callback, '已选择默认端口 9528，正在创建同配置新服务器')
         _, _, _, raw_order_id, region_code = callback.data.split(':')
         order_id = int(raw_order_id)
         user = await get_or_create_user(callback.from_user.id, callback.from_user.username, callback.from_user.first_name)
@@ -2675,10 +3329,11 @@ def register_handlers(dp: Dispatcher):
             await _safe_callback_answer(callback, '当前状态不可更换 IP', show_alert=True)
             return
         if not new_order:
-            await _safe_callback_answer(callback, '创建迁移单失败', show_alert=True)
+            await _safe_callback_answer(callback, '创建更换 IP 新服务器失败', show_alert=True)
             return
         await callback.message.reply(
-            f'🌐 已为你创建新的换 IP 服务器\n新订单号: {new_order.order_no}\n新地区: {new_order.region_name}\n新端口: {new_order.mtproxy_port or 9528}\n旧服务器将于 5 天后到期，请尽快完成迁移。'
+            f'🌐 已为你创建同配置换 IP 新服务器\n新订单号: {new_order.order_no}\n新地区: {new_order.region_name}\n新端口: {new_order.mtproxy_port or 9528}\n系统会绑定新的固定 IP，请在 5 天内切换使用。\n\n后台创建期间，底部菜单和其它按钮可正常使用。',
+            reply_markup=main_menu(),
         )
         asyncio.create_task(_provision_cloud_server_and_notify(bot, callback.from_user.id, new_order.id, new_order.mtproxy_port or 9528))
 
@@ -2695,7 +3350,7 @@ def register_handlers(dp: Dispatcher):
         await state.update_data(cloud_ip_change_order_id=order_id, cloud_ip_change_region_code=region_code, cloud_ip_change_region_name=region_name)
         await state.set_state(CustomServerStates.waiting_port)
         await callback.message.reply(
-            f'✍️ 已选择更换IP自定义端口。\n地区：{region_name}\n请发送 1025-65535 之间的端口号。'
+            f'✍️ 已选择更换IP自定义端口。\n地区：{region_name}\n请发送 443 或 1025-65530 之间的端口号。'
         )
 
 
@@ -2720,15 +3375,16 @@ def register_handlers(dp: Dispatcher):
         await _safe_edit_text(callback.message, '\n'.join(text_lines), reply_markup=InlineKeyboardMarkup(inline_keyboard=rows))
 
     @dp.callback_query(F.data.startswith('cloud:upgradepay:'))
-    async def cb_cloud_upgrade_pay(callback: CallbackQuery, bot: Bot):
+    async def cb_cloud_upgrade_pay(callback: CallbackQuery, bot: Bot, state: FSMContext):
         await _safe_callback_answer(callback)
+        await state.clear()
         user = await get_or_create_user(callback.from_user.id, callback.from_user.username, callback.from_user.first_name)
         _, _, raw_order_id, raw_plan_id = callback.data.split(':')
         new_order, err = await create_cloud_server_upgrade_order(int(raw_order_id), user.id, int(raw_plan_id))
         if err:
             await _safe_callback_answer(callback, err, show_alert=True)
             return
-        await callback.message.reply(_bot_text_format('bot_cloud_upgrade_submitted', '⬆️ 已扣除升级差价并提交升级任务。\n新订单: {order_no}\n升级完成后会自动发送新的服务器信息，代理链接保持不变。', order_no=new_order.order_no))
+        await callback.message.reply(_bot_text_format('bot_cloud_upgrade_submitted', '⬆️ 已扣除升级差价并提交升级任务。\n新订单: {order_no}\n升级完成后会自动发送新的服务器信息，代理链接保持不变。\n\n后台升级期间，底部菜单和其它按钮可正常使用。', order_no=new_order.order_no), reply_markup=main_menu())
         asyncio.create_task(_provision_cloud_server_and_notify(bot, callback.from_user.id, new_order.id, new_order.mtproxy_port or 9528))
 
     @dp.callback_query(F.data.startswith('cloud:refund:'))
@@ -2774,9 +3430,11 @@ def register_handlers(dp: Dispatcher):
             await callback.message.reply(_bot_text('bot_reinstall_need_main_link', '当前服务器缺少主代理链接。请直接发送这台服务器的主代理链接，我会先校验 IP、端口和服务器实际密钥，再让你确认是否重新安装。'))
             return
         if is_unfinished:
-            await callback.message.reply(_bot_text('bot_resume_init_confirm', '⚠️ 确认继续初始化？\n\n系统会重新执行 BBR/MTProxy 安装并生成代理链接。'), reply_markup=_reinstall_confirm_keyboard(order.id))
+            token = await _issue_reinstall_confirm_token(state, kind='order', item_id=order.id)
+            await callback.message.reply(_bot_text('bot_resume_init_confirm', '⚠️ 确认继续初始化？\n\n系统会重新执行 BBR/MTProxy 安装并生成代理链接。'), reply_markup=_reinstall_confirm_keyboard(order.id, token))
             return
-        await callback.message.reply(_bot_text('bot_reinstall_confirm', '⚠️ 确认重新安装？\n\n重新安装大约需要 5 分钟，期间代理可能会断连。系统会保持主/备用链接不变。'), reply_markup=_reinstall_confirm_keyboard(order.id))
+        token = await _issue_reinstall_confirm_token(state, kind='order', item_id=order.id)
+        await callback.message.reply(_bot_text('bot_reinstall_confirm', '⚠️ 确认重新安装？\n\n重新安装大约需要 5 分钟，期间代理可能会断连。系统会保持主/备用链接不变。'), reply_markup=_reinstall_confirm_keyboard(order.id, token))
 
     @dp.message(CustomServerStates.waiting_reinstall_link)
     async def msg_cloud_reinstall_link(message: Message, state: FSMContext):
@@ -2795,38 +3453,48 @@ def register_handlers(dp: Dispatcher):
         if not link_data:
             await message.reply(_bot_text('bot_reinstall_invalid_link', '链接格式不对，请发送 tg://proxy?... 或 https://t.me/proxy?... 主代理链接。'))
             return
-        ok, reason = await _validate_reinstall_proxy_link(item, link_data, probe_when_possible=not asset_id)
+        ok, reason = await _validate_reinstall_proxy_link(item, link_data, probe_when_possible=bool(getattr(item, 'login_password', None)))
         if not ok:
             await message.reply(_bot_text_format('bot_reinstall_validate_failed', '校验失败：{reason}', reason=reason))
             return
         if asset_id:
             saved = await _save_asset_main_proxy_link(asset_id, user.id, link_data)
-            await state.clear()
-            await message.reply(_bot_text('bot_reinstall_validate_ok', '主代理链接校验通过。\n\n⚠️ 确认重新安装？重新安装大约需要 5 分钟，期间代理可能会断连。'), reply_markup=_asset_reinstall_confirm_keyboard(saved.id))
+            token = await _issue_reinstall_confirm_token(state, kind='asset', item_id=saved.id)
+            await message.reply(_bot_text('bot_reinstall_validate_ok', '主代理链接校验通过。\n\n⚠️ 确认重新安装？重新安装大约需要 5 分钟，期间代理可能会断连。'), reply_markup=_asset_reinstall_confirm_keyboard(saved.id, token))
             return
         saved = await _save_user_main_proxy_link(item.id, link_data)
-        await state.clear()
-        await message.reply(_bot_text('bot_reinstall_validate_ok', '主代理链接校验通过。\n\n⚠️ 确认重新安装？重新安装大约需要 5 分钟，期间代理可能会断连。'), reply_markup=_reinstall_confirm_keyboard(saved.id))
+        token = await _issue_reinstall_confirm_token(state, kind='order', item_id=saved.id)
+        await message.reply(_bot_text('bot_reinstall_validate_ok', '主代理链接校验通过。\n\n⚠️ 确认重新安装？重新安装大约需要 5 分钟，期间代理可能会断连。'), reply_markup=_reinstall_confirm_keyboard(saved.id, token))
 
     @dp.callback_query(F.data.startswith('cloud:reinitconfirm:'))
-    async def cb_cloud_reinit_confirm(callback: CallbackQuery, bot: Bot):
-        await _safe_callback_answer(callback)
+    async def cb_cloud_reinit_confirm(callback: CallbackQuery, bot: Bot, state: FSMContext):
+        parts = callback.data.split(':')
+        order_id = int(parts[2])
+        token = parts[3] if len(parts) > 3 else ''
+        if not await _consume_reinstall_confirm_token(state, kind='order', item_id=order_id, token=token):
+            await _safe_callback_answer(callback, '这个确认按钮已过期或已使用，请重新进入详情并重新生成按钮。', show_alert=True)
+            return
+        await _safe_callback_answer(callback, '已确认，后台处理中')
+        await _safe_remove_inline_keyboard(callback.message)
         user = await get_or_create_user(callback.from_user.id, callback.from_user.username, callback.from_user.first_name)
-        order_id = int(callback.data.split(':')[2])
         order = await mark_cloud_server_reinit_requested(order_id, user.id)
         if not order:
-            await _safe_callback_answer(callback, '服务器记录不存在', show_alert=True)
+            await callback.message.reply('服务器记录不存在，请重新进入详情并重新生成按钮。')
             return
         if order is False:
-            await _safe_callback_answer(callback, '当前服务器缺少公网 IP 或登录密码，暂时无法继续初始化', show_alert=True)
+            await callback.message.reply('当前服务器缺少公网 IP 或登录密码，暂时无法继续初始化；请补齐后重新生成按钮。')
             return
         if order == 'missing_main_link':
-            await _safe_callback_answer(callback, '当前服务器缺少主代理链接，请先发送主链接完成校验', show_alert=True)
+            await callback.message.reply('当前服务器缺少主代理链接，请先发送主链接完成校验并重新生成按钮。')
             return
-        action_text = '继续初始化' if order.status in {'paid', 'provisioning', 'failed'} else '重新安装'
-        retry_only = bool(order.public_ip and order.login_password)
-        work_text = '重新执行 BBR/MTProxy 安装' if retry_only else '继续创建服务器并完成初始化'
-        await callback.message.reply(_bot_text_format('bot_reinstall_submitted', '🛠 已确认{action_text}，后台会{work_text}。预计约 5 分钟，完成后会自动通知你。', action_text=action_text, work_text=work_text))
+        if isinstance(order, str):
+            await callback.message.reply(f'{order}\n请重新进入详情并重新生成按钮。')
+            return
+        is_rebuild = bool(getattr(order, 'replacement_for_id', None))
+        action_text = '重建服务器' if is_rebuild else ('继续初始化' if order.status in {'paid', 'provisioning', 'failed'} else '重新安装')
+        retry_only = bool(not is_rebuild and order.public_ip and order.login_password)
+        work_text = '新建服务器并安装代理，成功后迁移固定 IP，旧机保留 3 天' if is_rebuild else ('重新执行 BBR/MTProxy 安装' if retry_only else '继续创建服务器并完成初始化')
+        await callback.message.reply(_bot_text_format('bot_reinstall_submitted', '🛠 已确认{action_text}，后台会{work_text}。预计约 5 分钟，完成后会自动通知你。\n\n后台处理期间，底部菜单和其它按钮可正常使用。', action_text=action_text, work_text=work_text), reply_markup=main_menu())
         asyncio.create_task(_provision_cloud_server_and_notify(bot, callback.from_user.id, order.id, order.mtproxy_port or 9528, retry_only=retry_only))
 
     @dp.callback_query(F.data.startswith('balance:detail:'))
@@ -2847,10 +3515,18 @@ def register_handlers(dp: Dispatcher):
     @dp.callback_query(F.data.startswith('rcur:'))
     async def cb_recharge_currency(callback: CallbackQuery, state: FSMContext):
         currency = callback.data.split(':')[1]
+        if currency not in {'USDT', 'TRX'}:
+            await _safe_callback_answer(callback, '不支持的充值币种', show_alert=True)
+            return
+        await state.clear()
         await state.update_data(recharge_currency=currency)
         await state.set_state(RechargeStates.waiting_amount)
-        await _safe_edit_text(callback.message, f'💰 请输入需要充值的 {currency} 金额：\n\n可随时点击底部菜单打断当前输入。')
-        await _safe_callback_answer(callback)
+        text = f'💰 请输入需要充值的 {currency} 金额：\n\n可随时点击底部菜单打断当前输入。'
+        edited = await _safe_edit_text(callback.message, text)
+        if edited is None:
+            sent = await callback.message.reply(text, reply_markup=main_menu())
+            logger.info('BOT_MESSAGE_SEND route=recharge_currency_fallback user_id=%s currency=%s chat_id=%s reply_to=%s sent_message_id=%s', getattr(callback.from_user, 'id', None), currency, callback.message.chat.id, callback.message.message_id, getattr(sent, 'message_id', None))
+        await _safe_callback_answer(callback, f'已选择 {currency}')
 
     @dp.callback_query(F.data.startswith('rpage:'))
     async def cb_recharge_page(callback: CallbackQuery):
@@ -2870,6 +3546,7 @@ def register_handlers(dp: Dispatcher):
             await _safe_callback_answer(callback, '充值记录不存在', show_alert=True)
             return
         status_map = {'pending': '待支付', 'completed': '已完成', 'expired': '已过期'}
+        chain_trace = _chain_trace_text(recharge)
         text = (
             f'📜 充值详情\n\n'
             f'记录ID: <code>#{recharge.id}</code>\n'
@@ -2877,6 +3554,7 @@ def register_handlers(dp: Dispatcher):
             f'支付金额: <code>{fmt_pay_amount(recharge.pay_amount)} {recharge.currency}</code>\n'
             f'状态: {status_map.get(recharge.status, recharge.status)}\n'
             f'交易哈希: <code>{escape(recharge.tx_hash or "-")}</code>\n'
+            f'{chain_trace + chr(10) if chain_trace else ""}'
             f'创建时间: <code>{timezone.localtime(recharge.created_at):%Y-%m-%d %H:%M}</code>'
         )
         kb = InlineKeyboardMarkup(inline_keyboard=[[
@@ -2918,7 +3596,8 @@ def register_handlers(dp: Dispatcher):
             f'{icon} 监控详情\n监控地址: <code>{mon.address}</code>\n备注: {mon.remark or "无"}\n'
             f'💸 监控转账: {"开启" if mon.monitor_transfers else "关闭"}\n'
             f'⚡ 监控资源: {"开启" if mon.monitor_resources else "关闭"}\n'
-            f'USDT 阈值: {fmt_amount(mon.usdt_threshold)}\nTRX 阈值: {fmt_amount(mon.trx_threshold)}\n\n'
+            f'USDT 阈值: {fmt_amount(mon.usdt_threshold)}\nTRX 阈值: {fmt_amount(mon.trx_threshold)}\n'
+            f'能量增加阈值: {int(mon.energy_threshold or 0)}\n带宽增加阈值: {int(mon.bandwidth_threshold or 0)}\n\n'
             f'📘 使用说明:\n'
             f'1. 监控转账：地址收到 USDT/TRX 转账时通知。\n'
             f'2. 监控资源：地址可用能量/带宽增加时通知；正常转账消耗不通知。',
@@ -2942,7 +3621,8 @@ def register_handlers(dp: Dispatcher):
             f'{"🟢" if monitor.is_active else "🔴"} 监控详情\n监控地址: <code>{monitor.address}</code>\n备注: {monitor.remark or "无"}\n'
             f'💸 监控转账: {"开启" if monitor.monitor_transfers else "关闭"}\n'
             f'⚡ 监控资源: {"开启" if monitor.monitor_resources else "关闭"}\n'
-            f'USDT 阈值: {fmt_amount(monitor.usdt_threshold)}\nTRX 阈值: {fmt_amount(monitor.trx_threshold)}\n\n'
+            f'USDT 阈值: {fmt_amount(monitor.usdt_threshold)}\nTRX 阈值: {fmt_amount(monitor.trx_threshold)}\n'
+            f'能量增加阈值: {int(monitor.energy_threshold or 0)}\n带宽增加阈值: {int(monitor.bandwidth_threshold or 0)}\n\n'
             f'📘 使用说明:\n'
             f'1. 监控转账：地址收到 USDT/TRX 转账时通知。\n'
             f'2. 监控资源：地址可用能量/带宽增加时通知；正常转账消耗不通知。',
@@ -2961,9 +3641,20 @@ def register_handlers(dp: Dispatcher):
     async def cb_mon_setthr(callback: CallbackQuery, state: FSMContext):
         _, _, mid, currency = callback.data.split(':')
         await state.update_data(threshold_monitor_id=int(mid), threshold_currency=currency)
-        state_obj = MonitorStates.waiting_usdt_threshold if currency == 'USDT' else MonitorStates.waiting_trx_threshold
-        await state.set_state(state_obj)
-        await _safe_edit_text(callback.message, f'请输入新的 {currency} 阈值金额：\n\n可随时点击底部菜单打断当前输入。')
+        state_map = {
+            'USDT': MonitorStates.waiting_usdt_threshold,
+            'TRX': MonitorStates.waiting_trx_threshold,
+            'ENERGY': MonitorStates.waiting_energy_threshold,
+            'BANDWIDTH': MonitorStates.waiting_bandwidth_threshold,
+        }
+        prompt_map = {
+            'USDT': _bot_text('bot_monitor_threshold_prompt_usdt', '请输入新的 USDT 阈值金额：\n\n可随时点击底部菜单打断当前输入。'),
+            'TRX': _bot_text('bot_monitor_threshold_prompt_trx', '请输入新的 TRX 阈值金额：\n\n可随时点击底部菜单打断当前输入。'),
+            'ENERGY': _bot_text('bot_monitor_threshold_prompt_energy', '请输入新的能量增加阈值（整数）：\n例如 10000；输入 0 表示只要增加就通知。\n\n可随时点击底部菜单打断当前输入。'),
+            'BANDWIDTH': _bot_text('bot_monitor_threshold_prompt_bandwidth', '请输入新的带宽增加阈值（整数）：\n例如 500；输入 0 表示只要增加就通知。\n\n可随时点击底部菜单打断当前输入。'),
+        }
+        await state.set_state(state_map.get(currency, MonitorStates.waiting_trx_threshold))
+        await _safe_edit_text(callback.message, prompt_map.get(currency, prompt_map['TRX']))
         await _safe_callback_answer(callback)
 
     @dp.callback_query(F.data.startswith('mon:delete:'))
@@ -3021,8 +3712,8 @@ def register_handlers(dp: Dispatcher):
             f'地址备注: {detail["remark"]}\n'
             f'监控地址: <code>{detail["address"]}</code>\n'
             f'检测时间: <code>{detail["time"]}</code>\n'
-            f'可用能量增加: <code>+{detail["energy_increase"]}</code>\n'
-            f'可用带宽增加: <code>+{detail["bandwidth_increase"]}</code>\n'
+            f'可用能量增加: <code>+{detail["energy_increase"]}</code>（阈值 {detail.get("energy_threshold", 1)}）\n'
+            f'可用带宽增加: <code>+{detail["bandwidth_increase"]}</code>（阈值 {detail.get("bandwidth_threshold", 1)}）\n'
             f'当前可用能量: <code>{detail["energy"]}</code>\n'
             f'当前可用带宽: <code>{detail["bandwidth"]}</code>'
         )
@@ -3031,6 +3722,10 @@ def register_handlers(dp: Dispatcher):
 
     @dp.message()
     async def fallback_message_router(message: Message, state: FSMContext, bot: Bot):
+        if await _handle_admin_reply_message(bot, message):
+            return
+        if await _is_admin_chat(message):
+            return
         raw_text = _message_text_for_router(message)
         content_type = _message_content_type(message)
         kind = _detect_message_kind(raw_text)

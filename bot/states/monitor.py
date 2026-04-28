@@ -6,3 +6,5 @@ class MonitorStates(StatesGroup):
     waiting_remark = State()
     waiting_usdt_threshold = State()
     waiting_trx_threshold = State()
+    waiting_energy_threshold = State()
+    waiting_bandwidth_threshold = State()

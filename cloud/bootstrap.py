@@ -7,8 +7,11 @@ import socket
 import subprocess
 import time
 from pathlib import Path
+from urllib.parse import parse_qs, urlparse
 
 from asgiref.sync import sync_to_async
+
+from cloud.ports import get_mtproxy_port_plan
 
 logger = logging.getLogger(__name__)
 
@@ -200,7 +203,7 @@ def _load_aws_private_key():
 def _build_set_password_script(password: str) -> str:
     escaped = password.replace("'", "'\"'\"'")
     return rf'''#!/usr/bin/env bash
-set -euxo pipefail
+set -euo pipefail
 PASS='{escaped}'
 if [ "$(id -u)" -ne 0 ]; then
   if command -v sudo >/dev/null 2>&1; then
@@ -288,8 +291,25 @@ $SUDO /usr/sbin/sysctl --system || $SUDO sysctl --system
 $SUDO /usr/sbin/sysctl net.ipv4.tcp_congestion_control || $SUDO sysctl net.ipv4.tcp_congestion_control
 '''
 
-def _build_mtproxy_script(port: int, desired_secret: str = '') -> str:
-    desired_secret = (desired_secret or '').strip()
+
+def _normalize_mtproxy_core_secret(secret: str) -> str:
+    value = re.sub(r'\s+', '', str(secret or '').strip().strip('"\'')).lower()
+    if value.startswith(('ee', 'dd')):
+        value = value[2:]
+    match = re.match(r'^[0-9a-f]{32}', value)
+    return match.group(0) if match else ''
+
+
+def _build_mtproxy_script(port: int, desired_secret: str = '', desired_backup_secret: str = '') -> str:
+    desired_secret = _normalize_mtproxy_core_secret(desired_secret)
+    desired_backup_secret = _normalize_mtproxy_core_secret(desired_backup_secret) or desired_secret
+    port_plan = get_mtproxy_port_plan(port)
+    fake_tls_domain_hex = binascii.hexlify(MTPROXY_FAKE_TLS_DOMAIN.encode('utf-8')).decode('ascii')
+    backup_port = port_plan['backup']
+    telemt_all_port = port_plan['telemt_all']
+    telemt_classic_port = port_plan['telemt_classic']
+    telemt_secure_port = port_plan['telemt_secure']
+    telemt_tls_port = port_plan['telemt_tls']
     return rf'''#!/usr/bin/env bash
 set -euo pipefail
 export DEBIAN_FRONTEND=noninteractive
@@ -313,25 +333,38 @@ INSTALL_OUTPUT="$(printf '%s\n%s\n%s\n%s\n%s\n' '2' '{port}' '18888' '{MTPROXY_F
 printf '%s\n' "$INSTALL_OUTPUT"
 STATUS_OUTPUT=''
 DESIRED_SECRET='{desired_secret}'
+DESIRED_BACKUP_SECRET='{desired_backup_secret}'
+normalize_secret() {{
+  local raw
+  raw="$(printf '%s' "$1" | tr -d '[:space:]' | tr '[:upper:]' '[:lower:]')"
+  raw="${{raw#ee}}"
+  raw="${{raw#dd}}"
+  printf '%s' "$raw" | cut -c1-32
+}}
 SECRET=$(sed -n 's/^secret="\([^"]*\)"$/\1/p' "$WORKDIR/config" | head -n 1 || true)
+SECRET=$(normalize_secret "$SECRET")
 if [ -z "$SECRET" ]; then
   SECRET=$(printf '%s\n' "$INSTALL_OUTPUT" | grep -Eo 'secret=[0-9a-fA-F]+' | head -n 1 | cut -d= -f2 || true)
+  SECRET=$(normalize_secret "$SECRET")
 fi
 if [ -z "$SECRET" ]; then
   SECRET=$(printf '%s\n' "$INSTALL_OUTPUT" | grep -Eo 'MTProxy Secret:[[:space:]]*[0-9a-fA-F]+' | head -n 1 | grep -Eo '[0-9a-fA-F]+' | tail -n 1 || true)
+  SECRET=$(normalize_secret "$SECRET")
 fi
 if [ -z "$SECRET" ] && [ -f "$WORKDIR/run-command.sh" ]; then
   SECRET=$(grep -Eo 'ee[0-9a-fA-F]{{32,}}|[0-9a-fA-F]{{32}}' "$WORKDIR/run-command.sh" | head -n 1 || true)
+  SECRET=$(normalize_secret "$SECRET")
 fi
 if [ -z "$SECRET" ]; then
   SECRET=$(ps -ef | grep -iE 'mtproto-proxy|/mtg | mtg run ' | grep -v grep | grep -Eo 'ee[0-9a-fA-F]{{32,}}|[0-9a-fA-F]{{32}}' | head -n 1 || true)
+  SECRET=$(normalize_secret "$SECRET")
 fi
 RUN_COMMAND=''
 if [ -n "$DESIRED_SECRET" ]; then
   SECRET="$DESIRED_SECRET"
   if [ -f "$WORKDIR/config" ]; then
     if grep -q '^secret=' "$WORKDIR/config"; then
-      sed -i.bak -E "s/^secret=.*/secret="$SECRET"/" "$WORKDIR/config"
+      sed -i.bak -E "s/^secret=.*/secret=\"$SECRET\"/" "$WORKDIR/config"
     else
       printf '
 secret="%s"
@@ -340,12 +373,8 @@ secret="%s"
   fi
 fi
 if [ -x "$WORKDIR/bin/mtg" ] && [ -n "$SECRET" ]; then
-  DOMAIN_HEX=$(printf '%s' '{MTPROXY_FAKE_TLS_DOMAIN}' | od -An -tx1 | tr -d ' \n')
-  if printf '%s' "$SECRET" | grep -Eq '^ee[0-9a-fA-F]{{32,}}$'; then
-    RUN_SECRET="$SECRET"
-  else
-    RUN_SECRET="ee$(printf '%s' "$SECRET" | cut -c1-32)$DOMAIN_HEX"
-  fi
+  RUN_SECRET=$(normalize_secret "$SECRET")
+  RUN_SECRET="ee${{RUN_SECRET}}{fake_tls_domain_hex}"
   RUN_COMMAND="$WORKDIR/bin/mtg run $RUN_SECRET -b 0.0.0.0:{port} --multiplex-per-connection 500 --prefer-ip=ipv4 -t 127.0.0.1:18888 -4 $(curl -4 -fsS ifconfig.me || echo 127.0.0.1):{port}"
 fi
 if [ -z "$RUN_COMMAND" ] && [ -f "$WORKDIR/run-command.sh" ]; then
@@ -398,12 +427,13 @@ systemctl enable mtproxy.service >/dev/null 2>&1
 systemctl stop mtproxy.service >/dev/null 2>&1 || true
 if command -v fuser >/dev/null 2>&1; then
   fuser -k {port}/tcp >/dev/null 2>&1 || true
+  fuser -k 18888/tcp >/dev/null 2>&1 || true
 fi
-pkill -f "$WORKDIR/bin/mtg run .*:{port}" >/dev/null 2>&1 || true
+pkill -f "$WORKDIR/bin/mtg run " >/dev/null 2>&1 || true
 sleep 1
 systemctl restart mtproxy.service
 sleep 3
-BACKUP_PORT=$(({port} + 1))
+BACKUP_PORT={backup_port}
 BACKUP_MANAGE_PORT=18889
 BACKUP_WORKDIR='/home/mtproxy-python'
 mkdir -p "$BACKUP_WORKDIR"
@@ -415,11 +445,66 @@ BACKUP_SECRET=$(sed -n 's/^secret="\([^"]*\)"$/\1/p' "$BACKUP_WORKDIR/config" | 
 if [ -z "$BACKUP_SECRET" ]; then
   BACKUP_SECRET=$(printf '%s\n' "$BACKUP_OUTPUT" | grep -Eo 'MTProxy Secret:[[:space:]]*ee[0-9a-fA-F]+' | head -n 1 | grep -Eo 'ee[0-9a-fA-F]+' | tail -n 1 || true)
 fi
+BACKUP_SECRET=$(normalize_secret "$BACKUP_SECRET")
+if [ -n "$DESIRED_BACKUP_SECRET" ]; then
+  BACKUP_SECRET="$DESIRED_BACKUP_SECRET"
+elif [ -n "$DESIRED_SECRET" ]; then
+  BACKUP_SECRET="$DESIRED_SECRET"
+fi
 if [ ! -f "$BACKUP_WORKDIR/bin/mtprotoproxy.py" ] || [ ! -f "$BACKUP_WORKDIR/bin/config.py" ]; then
+  echo '[WARNING] Python 备用 MTProxy 脚本安装不完整，启用手动兜底安装...'
+  rm -rf "$BACKUP_WORKDIR/src" "$BACKUP_WORKDIR/bin"
+  mkdir -p "$BACKUP_WORKDIR/src" "$BACKUP_WORKDIR/bin"
+  curl -fsSL -o "$BACKUP_WORKDIR/src/mtprotoproxy-master.zip" https://github.com/alexbers/mtprotoproxy/archive/refs/heads/master.zip
+  unzip -qo "$BACKUP_WORKDIR/src/mtprotoproxy-master.zip" -d "$BACKUP_WORKDIR/src"
+  MTPROTO_SRC=$(find "$BACKUP_WORKDIR/src" -maxdepth 2 -type f -name mtprotoproxy.py -print -quit | xargs dirname)
+  if [ -z "$MTPROTO_SRC" ] || [ ! -f "$MTPROTO_SRC/mtprotoproxy.py" ]; then
+    echo 'MTProxy 安装失败'
+    echo 'Python 备用 MTProxy 手动兜底下载失败'
+    echo 'MTPROXY_STATUS=FAILED'
+    echo 'MTPROXY_ERROR=Python 备用 MTProxy 手动兜底下载失败'
+    exit 1
+  fi
+  cp "$MTPROTO_SRC/mtprotoproxy.py" "$BACKUP_WORKDIR/bin/mtprotoproxy.py"
+  cp -r "$MTPROTO_SRC/pyaes" "$BACKUP_WORKDIR/bin/pyaes"
+  if [ -z "$BACKUP_SECRET" ]; then
+    BACKUP_SECRET=$(openssl rand -hex 16 2>/dev/null || python3 - <<'PY'
+import secrets
+print(secrets.token_hex(16))
+PY
+)
+  fi
+  cat > "$BACKUP_WORKDIR/bin/config.py" <<EOF
+PORT = $BACKUP_PORT
+USERS = {{
+    "tg": "$BACKUP_SECRET",
+}}
+MODES = {{
+    "classic": False,
+    "secure": False,
+    "tls": True
+}}
+TLS_DOMAIN = "{MTPROXY_FAKE_TLS_DOMAIN}"
+AD_TAG = ""
+EOF
+fi
+if [ -n "$BACKUP_SECRET" ] && [ -f "$BACKUP_WORKDIR/bin/config.py" ]; then
+  python3 - "$BACKUP_WORKDIR/bin/config.py" "$BACKUP_SECRET" <<'PY'
+import pathlib
+import re
+import sys
+path = pathlib.Path(sys.argv[1])
+secret = sys.argv[2]
+text = path.read_text()
+text = re.sub(r'"tg"\s*:\s*"[^"]*"', f'"tg": "{{secret}}"', text)
+path.write_text(text)
+PY
+fi
+if [ -n "$DESIRED_BACKUP_SECRET" ] && [ "$(normalize_secret "$BACKUP_SECRET")" != "$(normalize_secret "$DESIRED_BACKUP_SECRET")" ]; then
   echo 'MTProxy 安装失败'
-  echo 'Python 备用 MTProxy 安装失败'
+  echo 'Python 备用 MTProxy 未能锁定指定密钥'
   echo 'MTPROXY_STATUS=FAILED'
-  echo 'MTPROXY_ERROR=Python 备用 MTProxy 安装失败'
+  echo 'MTPROXY_ERROR=Python 备用 MTProxy 未能锁定指定密钥'
   exit 1
 fi
 printf '%s\n' '#!/usr/bin/env bash' 'set -e' "cd $BACKUP_WORKDIR" "/usr/bin/python3 $BACKUP_WORKDIR/bin/mtprotoproxy.py $BACKUP_WORKDIR/bin/config.py" | tee "$BACKUP_WORKDIR/run-command.sh" >/dev/null
@@ -456,6 +541,13 @@ pkill -f "$BACKUP_WORKDIR/bin/mtprotoproxy.py" >/dev/null 2>&1 || true
 sleep 1
 systemctl restart mtproxy-python.service
 sleep 3
+echo '[INFO] 主/备用 MTProxy 安装完成，开始二次重启服务...'
+systemctl daemon-reload
+systemctl restart mtproxy.service
+systemctl restart mtproxy-python.service
+sleep 3
+systemctl is-active mtproxy.service >/dev/null 2>&1 && echo '[INFO] mtproxy.service 二次重启完成'
+systemctl is-active mtproxy-python.service >/dev/null 2>&1 && echo '[INFO] mtproxy-python.service 二次重启完成'
 if command -v ufw >/dev/null 2>&1; then
   ufw allow {port}/tcp || true
   ufw allow {port}/udp || true
@@ -481,11 +573,39 @@ if ! systemctl is-active --quiet mtproxy-python.service || [ "$BACKUP_PORT_OK" !
   echo "MTPROXY_ERROR=Python 备用 MTProxy 端口 $BACKUP_PORT 未运行"
   exit 1
 fi
+POST_RESTART_BACKUP_SECRET=$(python3 - "$BACKUP_WORKDIR/bin/config.py" <<'PY'
+import pathlib
+import re
+import sys
+path = pathlib.Path(sys.argv[1])
+text = path.read_text() if path.exists() else ''
+match = re.search(r'"tg"\s*:\s*"([^"]+)"', text)
+print(match.group(1).strip() if match else '')
+PY
+)
+POST_RESTART_BACKUP_SECRET=$(normalize_secret "$POST_RESTART_BACKUP_SECRET")
+if [ -n "$DESIRED_BACKUP_SECRET" ] && [ "$POST_RESTART_BACKUP_SECRET" != "$(normalize_secret "$DESIRED_BACKUP_SECRET")" ]; then
+  systemctl status mtproxy-python.service --no-pager || true
+  journalctl -u mtproxy-python.service -n 80 --no-pager || true
+  echo 'MTProxy 安装失败'
+  echo 'Python 备用 MTProxy 重启后密钥与指定密钥不一致'
+  echo 'MTPROXY_STATUS=FAILED'
+  echo 'MTPROXY_ERROR=Python 备用 MTProxy 重启后密钥与指定密钥不一致'
+  exit 1
+fi
+if [ -n "$POST_RESTART_BACKUP_SECRET" ]; then
+  BACKUP_SECRET="$POST_RESTART_BACKUP_SECRET"
+fi
+BACKUP_PUBLIC_IP=$(curl -4 -fsS ifconfig.me || hostname -I | awk '{{print $1}}' || echo 127.0.0.1)
+BACKUP_FAKE_TLS_SECRET="ee${{BACKUP_SECRET}}{fake_tls_domain_hex}"
+BACKUP_RESTART_LINK="tg://proxy?server=$BACKUP_PUBLIC_IP&port=$BACKUP_PORT&secret=$BACKUP_FAKE_TLS_SECRET"
+echo "MTPROXY_BACKUP_RESTART_SECRET=${{BACKUP_SECRET}}"
+echo "MTPROXY_BACKUP_RESTART_LINK=${{BACKUP_RESTART_LINK}}"
 TELEMT_BIN=/usr/local/bin/telemt
-TELEMT_ALL_PORT=$(({port} + 2))
-TELEMT_CLASSIC_PORT=$(({port} + 3))
-TELEMT_SECURE_PORT=$(({port} + 4))
-TELEMT_TLS_PORT=$(({port} + 5))
+TELEMT_ALL_PORT={telemt_all_port}
+TELEMT_CLASSIC_PORT={telemt_classic_port}
+TELEMT_SECURE_PORT={telemt_secure_port}
+TELEMT_TLS_PORT={telemt_tls_port}
 TELEMT_API_ALL=19091
 TELEMT_API_CLASSIC=19092
 TELEMT_API_SECURE=19093
@@ -777,8 +897,24 @@ echo "MTPROXY_BACKUP_SECRET=${{BACKUP_SECRET}}"
 
 
 
+def _sanitize_bootstrap_output(text: str) -> str:
+    sanitized_lines = []
+    secret_pattern = re.compile(r'(secret(?:=|:|\s+)[\s\"\']*)(ee|dd)?[0-9a-fA-F]{32,}(\b|$)', re.IGNORECASE)
+    link_secret_pattern = re.compile(r'(secret=)(ee|dd)?[0-9a-fA-F]{32,}', re.IGNORECASE)
+    pass_assignment_pattern = re.compile(r'(PASS=)[^\s]+')
+    chpasswd_pattern = re.compile(r'((?:root|admin):)[^\s]+')
+    for raw_line in (text or '').splitlines():
+        line = raw_line
+        line = pass_assignment_pattern.sub(r'\1***', line)
+        line = chpasswd_pattern.sub(r'\1***', line)
+        line = link_secret_pattern.sub(r'\1***', line)
+        line = secret_pattern.sub(r'\1***', line)
+        sanitized_lines.append(line)
+    return '\n'.join(sanitized_lines)
+
+
 def _log_multiline_output(prefix: str, text: str):
-    for line in (text or '').splitlines():
+    for line in _sanitize_bootstrap_output(text).splitlines():
         logger.info('%s %s', prefix, line)
 
 
@@ -787,7 +923,7 @@ def _build_bootstrap_full_log(label: str, ip: str, username: str, ok: bool, outp
     lines = [
         f'[{label}] ip={ip} user={username} status={status}',
         '----- BEGIN OUTPUT -----',
-        (output or '').rstrip(),
+        _sanitize_bootstrap_output(output).rstrip(),
         '----- END OUTPUT -----',
     ]
     return '\n'.join(lines)
@@ -955,11 +1091,15 @@ async def install_bbr(ip: str, username: str, password: str, private_key_path: s
 
 
 
-def _extract_tg_links(text: str) -> list[str]:
+def _extract_tg_links(text: str, exclude_port: int | str | None = None) -> list[str]:
     links: list[str] = []
     seen: set[str] = set()
+    excluded_port = str(exclude_port or '').strip()
     for match in re.findall(r'tg://proxy\?[^"\'\s<>]+', text or ''):
         link = match.rstrip(',.，。')
+        link_port = link.split('port=', 1)[1].split('&', 1)[0].strip() if 'port=' in link else ''
+        if excluded_port and link_port == excluded_port:
+            continue
         if link and link not in seen:
             links.append(link)
             seen.add(link)
@@ -1051,15 +1191,15 @@ EOF"""
         client.close()
 
 
-async def install_mtproxy(ip: str, username: str, password: str, port: int = MTPROXY_PORT, desired_secret: str = '') -> tuple[bool, str]:
+async def install_mtproxy(ip: str, username: str, password: str, port: int = MTPROXY_PORT, desired_secret: str = '', desired_backup_secret: str = '') -> tuple[bool, str]:
     if not ip or not password:
         return False, '缺少 SSH 连接参数，无法执行 MTProxy 安装。'
     bootstrap_username = (username or 'root').strip() or 'root'
-    logger.info('开始执行 MTProxy 安装 ip=%s user=%s port=%s', ip, bootstrap_username, port)
+    logger.info('开始执行 MTProxy 安装 ip=%s user=%s port=%s desired_backup=%s', ip, bootstrap_username, port, bool(desired_backup_secret))
     ready, message = await _wait_ssh_password_ready(ip, bootstrap_username, password)
     if not ready:
         return False, message.replace('BBR 初始化', 'MTProxy 安装')
-    ok, output = await _run_ssh_script(ip, bootstrap_username, password, _build_mtproxy_script(port, desired_secret), label='MTPROXY')
+    ok, output = await _run_ssh_script(ip, bootstrap_username, password, _build_mtproxy_script(port, desired_secret, desired_backup_secret), label='MTPROXY')
     secret = ''
     actual_port = str(port)
     mtproxy_status = ''
@@ -1068,6 +1208,8 @@ async def install_mtproxy(ip: str, username: str, password: str, port: int = MTP
     mtproxy_backup_status = ''
     mtproxy_backup_provider = ''
     mtproxy_backup_port = ''
+    mtproxy_backup_secret = ''
+    mtproxy_backup_restart_link = ''
     telemt_a_port = ''
     telemt_b_ports = ''
     sanitized_output = _sanitize_mtproxy_output(output)
@@ -1088,6 +1230,12 @@ async def install_mtproxy(ip: str, username: str, password: str, port: int = MTP
             mtproxy_backup_provider = line.split('=', 1)[1].strip()
         elif line.startswith('MTPROXY_BACKUP_PORT='):
             mtproxy_backup_port = line.split('=', 1)[1].strip()
+        elif line.startswith('MTPROXY_BACKUP_SECRET='):
+            mtproxy_backup_secret = line.split('=', 1)[1].strip()
+        elif line.startswith('MTPROXY_BACKUP_RESTART_SECRET='):
+            mtproxy_backup_secret = line.split('=', 1)[1].strip()
+        elif line.startswith('MTPROXY_BACKUP_RESTART_LINK='):
+            mtproxy_backup_restart_link = line.split('=', 1)[1].strip()
         elif line.startswith('MTPROXY_TELEMT_A_PORT='):
             telemt_a_port = line.split('=', 1)[1].strip()
         elif line.startswith('MTPROXY_TELEMT_B_PORTS='):
@@ -1102,18 +1250,60 @@ async def install_mtproxy(ip: str, username: str, password: str, port: int = MTP
         mtproxy_daemon = probe.get('MTPROXY_PROBE_DAEMON', '')
     if desired_secret:
         secret = desired_secret
+    if mtproxy_status == 'FAILED' and mtproxy_error:
+        return False, f'MTProxy 安装失败\n{mtproxy_error}\n{sanitized_output}'.strip()
     if secret and (mtproxy_status == 'OK' or probe_ok):
         tg_link, tme_link = build_mtproxy_links(ip, actual_port, secret)
-        extra_links = [link for link in _extract_tg_links(output) if link != tg_link]
+        actual_port_plan = get_mtproxy_port_plan(actual_port)
+        telemt_b_ports_default = ','.join(str(actual_port_plan[key]) for key in ('telemt_classic', 'telemt_secure', 'telemt_tls'))
+        actual_port_plan = get_mtproxy_port_plan(actual_port)
+        backup_port_value = str(mtproxy_backup_port or actual_port_plan['backup'])
+        def _link_port(link: str) -> str:
+            try:
+                return parse_qs(urlparse(link).query).get('port', [''])[0]
+            except Exception:
+                return ''
+        extra_links = [
+            link for link in _extract_tg_links(output, exclude_port=actual_port)
+            if link != tg_link and _link_port(link) != backup_port_value
+        ]
+        seen_extra_links = set(extra_links)
+        def add_extra_link(link: str):
+            if link and link != tg_link and link not in seen_extra_links:
+                extra_links.append(link)
+                seen_extra_links.add(link)
+        domain_hex = binascii.hexlify(MTPROXY_FAKE_TLS_DOMAIN.encode('utf-8')).decode('ascii')
+        core_secret = _normalize_mtproxy_core_secret(secret)
+        backup_core_secret = core_secret
+        if mtproxy_backup_restart_link:
+            add_extra_link(mtproxy_backup_restart_link)
+        elif backup_core_secret:
+            add_extra_link(build_mtproxy_links(ip, backup_port_value, backup_core_secret)[0])
+        if core_secret:
+            telemt_all_port_value = str(telemt_a_port or actual_port_plan['telemt_all'])
+            telemt_classic_secret = core_secret
+            telemt_secure_secret = f'dd{core_secret}'
+            telemt_tls_secret = f'ee{core_secret}{domain_hex}'
+            add_extra_link(f'tg://proxy?server={ip}&port={telemt_all_port_value}&secret={telemt_classic_secret}')
+            add_extra_link(f'tg://proxy?server={ip}&port={telemt_all_port_value}&secret={telemt_secure_secret}')
+            add_extra_link(f'tg://proxy?server={ip}&port={telemt_all_port_value}&secret={telemt_tls_secret}')
+            telemt_b_port_values = str(telemt_b_ports or telemt_b_ports_default).split(',')
+            if len(telemt_b_port_values) >= 3:
+                telemt_b_classic_secret = core_secret
+                telemt_b_secure_secret = f'dd{core_secret}'
+                telemt_b_tls_secret = f'ee{core_secret}{domain_hex}'
+                add_extra_link(f'tg://proxy?server={ip}&port={telemt_b_port_values[0].strip()}&secret={telemt_b_classic_secret}')
+                add_extra_link(f'tg://proxy?server={ip}&port={telemt_b_port_values[1].strip()}&secret={telemt_b_secure_secret}')
+                add_extra_link(f'tg://proxy?server={ip}&port={telemt_b_port_values[2].strip()}&secret={telemt_b_tls_secret}')
         link_lines = '\n'.join(f'扩展链接: {link}' for link in extra_links)
         verified_output = (
             'MTProxy 安装完成\n'
             f'状态: 运行正常\n'
             f'端口: {actual_port}\n'
             f'进程守护: {mtproxy_daemon or "已启用"}\n'
-            f'备用代理: {mtproxy_backup_provider or "mtprotoproxy"} {mtproxy_backup_status or "OK"} 端口 {mtproxy_backup_port or int(actual_port) + 1}\n'
-            f'Telemt A(Docker三模式): 端口 {telemt_a_port or int(actual_port) + 2}\n'
-            f'Telemt B(systemd单模式): 端口 {telemt_b_ports or f"{int(actual_port) + 3},{int(actual_port) + 4},{int(actual_port) + 5}"}\n'
+            f'备用代理: {mtproxy_backup_provider or "mtprotoproxy"} {mtproxy_backup_status or "OK"} 端口 {mtproxy_backup_port or actual_port_plan["backup"]}\n'
+            f'Telemt A(Docker三模式): 端口 {telemt_a_port or actual_port_plan["telemt_all"]}\n'
+            f'Telemt B(systemd单模式): 端口 {telemt_b_ports or telemt_b_ports_default}\n'
             f'TG链接: {tg_link}\n'
             f'分享链接: {tme_link}'
             + (f'\n{link_lines}' if link_lines else '')

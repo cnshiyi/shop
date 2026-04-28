@@ -32,6 +32,7 @@ from cloud.models import AddressMonitor, CloudAsset, CloudServerOrder
 from core.models import CloudAccountConfig, SiteConfig
 from core.button_config import init_button_config, load_button_config, save_button_config
 from core.runtime_config import CONFIG_HELP, SENSITIVE_CONFIG_KEYS, get_runtime_config
+from core.trongrid import parse_trongrid_api_keys
 from core.texts import TEXT_GROUPS, all_text_keys, init_texts, text_default, text_description
 from orders.models import BalanceLedger, Order, Product, Recharge
 
@@ -1018,6 +1019,10 @@ def update_site_config(request, config_id: int):
         plain_value = SiteConfig.get(item.key, '')
     else:
         plain_value = '' if value is None else str(value).strip()
+    if item.key == 'trongrid_api_key' and plain_value:
+        plain_value = '\n'.join(parse_trongrid_api_keys(plain_value))
+        if not plain_value:
+            return _error('TRON API Key 至少要有一个有效值', status=400)
     if item.key == 'bot_admin_chat_id':
         if not plain_value:
             return _error('管理员转发 Chat ID 不能为空', status=400)

@@ -10,8 +10,8 @@ from asgiref.sync import sync_to_async
 from django.apps import apps
 from django.utils import timezone
 
-from core.cache import get_config
 from core.persistence import record_external_sync_log, save_resource_snapshot
+from core.trongrid import build_trongrid_headers
 from cloud.cache import get_monitor_addresses
 
 logger = logging.getLogger(__name__)
@@ -80,14 +80,12 @@ async def _notify(user_id: int, text: str, reply_markup=None):
 
 
 async def _fetch_account_resource(address: str) -> tuple[int, int]:
-    headers = {'accept': 'application/json', 'content-type': 'application/json'}
-    api_key = await get_config('trongrid_api_key', '')
-    if api_key:
-        headers['TRON-PRO-API-KEY'] = api_key
+    headers = await build_trongrid_headers()
     async with httpx.AsyncClient(timeout=10) as client:
         resp = await client.post(f'{TRONGRID_BASE_URL}/wallet/getaccountresource', json={'address': address, 'visible': True}, headers=headers)
         resp.raise_for_status()
-        record_external_sync_log(
+        data = resp.json() or {}
+        await sync_to_async(record_external_sync_log)(
             source='trongrid',
             action='get_account_resource',
             target=address,
@@ -120,7 +118,15 @@ async def check_resources():
                 energy_increase = energy - old_energy
                 bandwidth_increase = bandwidth - old_bandwidth
                 await _update_resource_snapshot(mon['id'], address, energy, bandwidth, energy_increase, bandwidth_increase)
-                if energy_increase <= 0 and bandwidth_increase <= 0:
+                energy_threshold = max(int(mon.get('energy_threshold', 1) or 0), 0)
+                bandwidth_threshold = max(int(mon.get('bandwidth_threshold', 1) or 0), 0)
+                energy_hit = energy_increase > 0 and energy_increase >= energy_threshold
+                bandwidth_hit = bandwidth_increase > 0 and bandwidth_increase >= bandwidth_threshold
+                if not energy_hit and not bandwidth_hit:
+                    logger.info(
+                        'RESOURCE_MONITOR_THRESHOLD_SKIP monitor_id=%s address=%s energy_delta=%s energy_threshold=%s bandwidth_delta=%s bandwidth_threshold=%s',
+                        mon.get('id'), address, energy_increase, energy_threshold, bandwidth_increase, bandwidth_threshold,
+                    )
                     continue
                 remark = mon.get('remark') or '(无备注)'
                 now_text = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
@@ -131,10 +137,10 @@ async def check_resources():
                     f'📍 监控地址: <code>{escape(address)}</code>',
                     f'🕒 检测时间: <code>{escape(now_text)}</code>',
                 ]
-                if energy_increase > 0:
-                    lines.append(f'⚡ 可用能量增加: <code>+{energy_increase}</code>')
-                if bandwidth_increase > 0:
-                    lines.append(f'📶 可用带宽增加: <code>+{bandwidth_increase}</code>')
+                if energy_hit:
+                    lines.append(f'⚡ 可用能量增加: <code>+{energy_increase}</code>（阈值 {energy_threshold}）')
+                if bandwidth_hit:
+                    lines.append(f'📶 可用带宽增加: <code>+{bandwidth_increase}</code>（阈值 {bandwidth_threshold}）')
                 lines.extend([
                     '',
                     f'当前可用能量: <code>{energy}</code>',
@@ -151,6 +157,8 @@ async def check_resources():
                     'bandwidth_increase': bandwidth_increase,
                     'energy': energy,
                     'bandwidth': bandwidth,
+                    'energy_threshold': energy_threshold,
+                    'bandwidth_threshold': bandwidth_threshold,
                 })
                 await _notify(
                     mon['user_id'],

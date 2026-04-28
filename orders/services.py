@@ -62,7 +62,7 @@ def list_recharges(user_id: int, page: int = 1, per_page: int = 5):
 def create_recharge(user_id: int, amount: Decimal, currency: str, receive_address: str):
     amount = Decimal(str(amount)).quantize(Decimal('0.001'), rounding=ROUND_DOWN)
     pay_amount = _generate_unique_pay_amount(amount, currency)
-    return Recharge.objects.create(user_id=user_id, amount=amount, pay_amount=pay_amount, currency=currency, status='pending')
+    return Recharge.objects.create(user_id=user_id, amount=amount, pay_amount=pay_amount, currency=currency, status='pending', receive_address=receive_address, expired_at=timezone.now() + timezone.timedelta(minutes=30))
 
 
 @sync_to_async
@@ -428,8 +428,14 @@ def delete_monitor(monitor_id: int, user_id: int) -> bool:
 
 
 @sync_to_async
-def set_monitor_threshold(monitor_id: int, user_id: int, currency: str, amount: Decimal) -> bool:
-    field = 'usdt_threshold' if currency == 'USDT' else 'trx_threshold'
+def set_monitor_threshold(monitor_id: int, user_id: int, currency: str, amount: Decimal | int) -> bool:
+    field_map = {
+        'USDT': 'usdt_threshold',
+        'TRX': 'trx_threshold',
+        'ENERGY': 'energy_threshold',
+        'BANDWIDTH': 'bandwidth_threshold',
+    }
+    field = field_map.get(str(currency or '').upper(), 'trx_threshold')
     return AddressMonitor.objects.filter(id=monitor_id, user_id=user_id).update(**{field: amount}) > 0
 
 

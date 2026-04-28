@@ -149,6 +149,31 @@ class TelegramChatArchive(models.Model):
         return self.title or str(self.chat_id)
 
 
+class AdminReplyLink(models.Model):
+    admin_chat_id = models.BigIntegerField('管理员会话ID', db_index=True)
+    admin_message_id = models.BigIntegerField('管理员消息ID', db_index=True)
+    user = models.ForeignKey(TelegramUser, verbose_name='Telegram用户', on_delete=models.CASCADE, related_name='admin_reply_links')
+    user_chat_id = models.BigIntegerField('用户会话ID', db_index=True)
+    user_message_id = models.BigIntegerField('用户消息ID', blank=True, null=True)
+    source_content_type = models.CharField('原消息类型', max_length=32, default='text')
+    is_active = models.BooleanField('启用', default=True, db_index=True)
+    created_at = models.DateTimeField('创建时间', auto_now_add=True, db_index=True)
+
+    class Meta:
+        db_table = 'bot_admin_reply_link'
+        verbose_name = '管理员回复通道'
+        verbose_name_plural = '管理员回复通道'
+        unique_together = [('admin_chat_id', 'admin_message_id')]
+        ordering = ['-created_at', '-id']
+        indexes = [
+            models.Index(fields=['admin_chat_id', 'admin_message_id'], name='idx_admin_reply_msg'),
+            models.Index(fields=['user_chat_id', '-created_at'], name='idx_admin_reply_user_time'),
+        ]
+
+    def __str__(self):
+        return f'{self.admin_chat_id}:{self.admin_message_id} -> {self.user_chat_id}'
+
+
 class TelegramChatMessage(models.Model):
     DIRECTION_IN = 'in'
     DIRECTION_OUT = 'out'
@@ -188,6 +213,7 @@ class TelegramChatMessage(models.Model):
 BotUser = TelegramUser
 
 __all__ = [
+    'AdminReplyLink',
     'BotOperationLog',
     'BotUser',
     'TelegramChatArchive',

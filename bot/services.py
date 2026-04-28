@@ -12,6 +12,10 @@ def _telegram_user_model():
     return apps.get_model('bot', 'TelegramUser')
 
 
+def _admin_reply_link_model():
+    return apps.get_model('bot', 'AdminReplyLink')
+
+
 def _normalize_usernames(username: str | list[str] | tuple[str, ...] | None) -> list[str]:
     TelegramUser = _telegram_user_model()
     return TelegramUser.normalize_usernames(username)
@@ -105,6 +109,48 @@ def record_bot_operation_log(
         payload=(payload or '')[:4000] or None,
         username_snapshot=username_snapshot,
         first_name_snapshot=(first_name or '')[:191] or None,
+    )
+
+
+@sync_to_async
+def create_admin_reply_link(
+    *,
+    admin_chat_id: int,
+    admin_message_id: int,
+    user_tg_id: int,
+    user_chat_id: int,
+    user_message_id: int | None = None,
+    source_content_type: str = 'text',
+):
+    AdminReplyLink = _admin_reply_link_model()
+    user = _get_or_create_user_sync(user_tg_id, None, None)
+    link, _ = AdminReplyLink.objects.update_or_create(
+        admin_chat_id=admin_chat_id,
+        admin_message_id=admin_message_id,
+        defaults={
+            'user': user,
+            'user_chat_id': user_chat_id,
+            'user_message_id': user_message_id,
+            'source_content_type': (source_content_type or 'text')[:32],
+            'is_active': True,
+        },
+    )
+    return link
+
+
+@sync_to_async
+def get_admin_reply_link_by_id(link_id: int):
+    AdminReplyLink = _admin_reply_link_model()
+    return AdminReplyLink.objects.select_related('user').filter(id=link_id, is_active=True).first()
+
+
+@sync_to_async
+def get_admin_reply_link(admin_chat_id: int, admin_message_id: int):
+    AdminReplyLink = _admin_reply_link_model()
+    return (
+        AdminReplyLink.objects.select_related('user')
+        .filter(admin_chat_id=admin_chat_id, admin_message_id=admin_message_id, is_active=True)
+        .first()
     )
 
 

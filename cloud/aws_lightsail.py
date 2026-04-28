@@ -7,6 +7,7 @@ import time
 from pathlib import Path
 
 from cloud.bootstrap import _derive_public_keys_from_private_keys
+from cloud.ports import get_mtproxy_public_ports
 from cloud.schemas import ProvisionResult
 from django.apps import apps
 
@@ -153,14 +154,8 @@ def _load_public_key() -> str:
     return ''
 
 
-def _create_instance_sync(order_data: dict, server_name: str):
-    order_no = order_data.get('order_no')
-    provider = order_data.get('provider')
+def _aws_client_from_order_data(order_data: dict):
     region = order_data.get('region_code') or 'ap-southeast-1'
-    plan_name = order_data.get('plan_name')
-    mtproxy_port = int(order_data.get('mtproxy_port') or 9528)
-    static_ip_name = str(order_data.get('static_ip_name') or '').strip()
-
     account_id = order_data.get('cloud_account_id')
     account = None
     if account_id:
@@ -177,13 +172,36 @@ def _create_instance_sync(order_data: dict, server_name: str):
     if not access_key or not secret_key:
         access_key = os.getenv('AWS_ACCESS_KEY_ID', '')
         secret_key = os.getenv('AWS_SECRET_ACCESS_KEY', '')
-    logger.info('AWS Lightsail 创建开始: order=%s provider=%s region=%s plan=%s server_name=%s', order_no, provider, region, plan_name, server_name)
     if not access_key or not secret_key:
-        logger.warning('AWS Lightsail 创建失败: 缺少凭据 order=%s', order_no)
-        return ProvisionResult(ok=False, note='未配置 AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY。')
-
+        return None, '未配置 AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY。'
     try:
         import boto3
+    except ImportError:
+        return None, '未安装 boto3，无法调用 AWS Lightsail。'
+    return boto3.client(
+        'lightsail',
+        region_name=region,
+        aws_access_key_id=access_key,
+        aws_secret_access_key=secret_key,
+    ), ''
+
+
+def _create_instance_sync(order_data: dict, server_name: str):
+    order_no = order_data.get('order_no')
+    provider = order_data.get('provider')
+    region = order_data.get('region_code') or 'ap-southeast-1'
+    plan_name = order_data.get('plan_name')
+    mtproxy_port = int(order_data.get('mtproxy_port') or 9528)
+    static_ip_name = str(order_data.get('static_ip_name') or '').strip()
+    skip_static_ip = bool(order_data.get('skip_static_ip'))
+
+    logger.info('AWS Lightsail 创建开始: order=%s provider=%s region=%s plan=%s server_name=%s skip_static_ip=%s', order_no, provider, region, plan_name, server_name, skip_static_ip)
+    client, client_error = _aws_client_from_order_data(order_data)
+    if not client:
+        logger.warning('AWS Lightsail 创建失败: order=%s error=%s', order_no, client_error)
+        return ProvisionResult(ok=False, note=client_error)
+
+    try:
         from botocore.exceptions import BotoCoreError, ClientError
     except ImportError:
         logger.warning('AWS Lightsail 创建失败: 未安装 boto3 order=%s', order_no)
@@ -193,16 +211,10 @@ def _create_instance_sync(order_data: dict, server_name: str):
     public_key = _load_public_key()
     bundle_id = _bundle_id_from_plan(plan_name)
     blueprint_id = 'debian_12'
-    static_ip_name = static_ip_name or f'{server_name}-ip'[:255]
+    static_ip_name = static_ip_name or ('' if skip_static_ip else f'{server_name}-ip'[:255])
 
     try:
-        client = boto3.client(
-            'lightsail',
-            region_name=region,
-            aws_access_key_id=access_key,
-            aws_secret_access_key=secret_key,
-        )
-        logger.info('AWS 客户端已就绪: order=%s region=%s bundle=%s blueprint=%s static_ip_name=%s', order_no, region, bundle_id, blueprint_id, static_ip_name)
+        logger.info('AWS 客户端已就绪: order=%s region=%s bundle=%s blueprint=%s static_ip_name=%s skip_static_ip=%s', order_no, region, bundle_id, blueprint_id, static_ip_name, skip_static_ip)
 
         server_name = _next_available_instance_name(client, server_name)
         logger.info('AWS 实例命名完成: order=%s server_name=%s static_ip_name=%s', order_no, server_name, static_ip_name)
@@ -230,39 +242,49 @@ def _create_instance_sync(order_data: dict, server_name: str):
 
         try:
             _ensure_instance_port_open(client, server_name, 22)
-            for offset in range(0, 6):
-                _ensure_instance_port_open(client, server_name, mtproxy_port + offset)
-            logger.info('AWS 端口放行完成: order=%s server_name=%s ssh=22 mtproxy_port_range=%s-%s', order_no, server_name, mtproxy_port, mtproxy_port + 5)
+            public_ports = get_mtproxy_public_ports(mtproxy_port)
+            for public_port in public_ports:
+                _ensure_instance_port_open(client, server_name, public_port)
+            logger.info('AWS 端口放行完成: order=%s server_name=%s ssh=22 mtproxy_ports=%s', order_no, server_name, ','.join(str(item) for item in public_ports))
         except Exception as exc:
             logger.warning('AWS 端口放行失败: order=%s server_name=%s error=%s', order_no, server_name, exc)
 
-        try:
-            client.allocate_static_ip(staticIpName=static_ip_name)
-            logger.info('AWS 固定 IP 已分配: order=%s static_ip_name=%s', order_no, static_ip_name)
-        except ClientError as exc:
-            if 'already exists' not in str(exc).lower():
-                logger.warning('AWS 固定 IP 分配失败: order=%s static_ip_name=%s error=%s', order_no, static_ip_name, exc)
-                return ProvisionResult(ok=False, note='创建失败，请联系人工客服')
-            logger.info('AWS 固定 IP 已存在: order=%s static_ip_name=%s', order_no, static_ip_name)
-        client.attach_static_ip(staticIpName=static_ip_name, instanceName=server_name)
-        logger.info('AWS 固定 IP 绑定完成: order=%s static_ip_name=%s server_name=%s', order_no, static_ip_name, server_name)
-
         public_ip = ''
-        for idx in range(30):
-            ip_resp = client.get_static_ip(staticIpName=static_ip_name)
-            public_ip = ((ip_resp.get('staticIp') or {}).get('ipAddress')) or ''
-            logger.info('等待 AWS 固定公网 IP 生效: order=%s attempt=%s public_ip=%s', order_no, idx + 1, public_ip)
-            if public_ip:
-                break
-            time.sleep(3)
+        if skip_static_ip:
+            for idx in range(30):
+                resp = client.get_instance(instanceName=server_name)
+                public_ip = ((resp.get('instance') or {}).get('publicIpAddress')) or ''
+                logger.info('等待 AWS 临时公网 IP 生效: order=%s attempt=%s public_ip=%s', order_no, idx + 1, public_ip)
+                if public_ip:
+                    break
+                time.sleep(3)
+        else:
+            try:
+                client.allocate_static_ip(staticIpName=static_ip_name)
+                logger.info('AWS 固定 IP 已分配: order=%s static_ip_name=%s', order_no, static_ip_name)
+            except ClientError as exc:
+                if 'already exists' not in str(exc).lower():
+                    logger.warning('AWS 固定 IP 分配失败: order=%s static_ip_name=%s error=%s', order_no, static_ip_name, exc)
+                    return ProvisionResult(ok=False, note='创建失败，请联系人工客服')
+                logger.info('AWS 固定 IP 已存在: order=%s static_ip_name=%s', order_no, static_ip_name)
+            client.attach_static_ip(staticIpName=static_ip_name, instanceName=server_name)
+            logger.info('AWS 固定 IP 绑定完成: order=%s static_ip_name=%s server_name=%s', order_no, static_ip_name, server_name)
+            for idx in range(30):
+                ip_resp = client.get_static_ip(staticIpName=static_ip_name)
+                public_ip = ((ip_resp.get('staticIp') or {}).get('ipAddress')) or ''
+                logger.info('等待 AWS 固定公网 IP 生效: order=%s attempt=%s public_ip=%s', order_no, idx + 1, public_ip)
+                if public_ip:
+                    break
+                time.sleep(3)
 
         if not public_ip:
-            logger.warning('AWS 固定公网 IP 获取失败: order=%s server_name=%s static_ip_name=%s', order_no, server_name, static_ip_name)
+            logger.warning('AWS 公网 IP 获取失败: order=%s server_name=%s static_ip_name=%s skip_static_ip=%s', order_no, server_name, static_ip_name, skip_static_ip)
             return ProvisionResult(ok=False, note='创建失败，请联系人工客服')
 
         login_mode = 'SSH 公钥登录已启用，后续自动设置 root 密码' if public_key else 'root 密码'
+        ip_note = '未绑定固定 IP，等待迁移原固定 IP' if skip_static_ip else '已绑定固定公网 IP'
         note = (
-            f'AWS Lightsail 创建成功，已绑定固定公网 IP。实例名: {server_name}，'
+            f'AWS Lightsail 创建成功，{ip_note}。实例名: {server_name}，'
             f'套餐: {bundle_id}，镜像: {blueprint_id}，{login_mode}登录已启用。'
         )
         logger.info('AWS Lightsail 创建成功: order=%s server_name=%s public_ip=%s bundle=%s blueprint=%s', order_no, server_name, public_ip, bundle_id, blueprint_id)
@@ -292,6 +314,86 @@ def _create_instance_sync(order_data: dict, server_name: str):
         return ProvisionResult(ok=False, note=f'AWS Lightsail 创建异常: {exc}')
 
 
+def _move_static_ip_sync(order_data: dict, instance_name: str, static_ip_name: str, temp_static_ip_name: str = '') -> tuple[bool, str, str]:
+    order_no = order_data.get('order_no')
+    if not instance_name or not static_ip_name:
+        return False, '', '缺少实例名或固定 IP 名称，无法迁移固定 IP。'
+    client, client_error = _aws_client_from_order_data(order_data)
+    if not client:
+        return False, '', client_error
+    try:
+        from botocore.exceptions import ClientError
+    except ImportError:
+        return False, '', '未安装 boto3/botocore，无法迁移 AWS 固定 IP。'
+    try:
+        logger.info('AWS 固定 IP 迁移开始: order=%s static_ip_name=%s target_instance=%s temp_static_ip_name=%s', order_no, static_ip_name, instance_name, temp_static_ip_name)
+        try:
+            client.attach_static_ip(staticIpName=static_ip_name, instanceName=instance_name)
+        except ClientError as exc:
+            error_text = str(exc)
+            error_text_lower = error_text.lower()
+            already_on_target = 'already attached to the instance' in error_text_lower and instance_name in error_text
+            if already_on_target:
+                logger.info('AWS 固定 IP 已在目标实例上: order=%s static_ip_name=%s target_instance=%s', order_no, static_ip_name, instance_name)
+            else:
+                if 'already attached' not in error_text_lower and 'attached' not in error_text_lower:
+                    raise
+                logger.warning('AWS 固定 IP 迁移需先解绑: order=%s static_ip_name=%s error=%s', order_no, static_ip_name, exc)
+                client.detach_static_ip(staticIpName=static_ip_name)
+                time.sleep(5)
+                client.attach_static_ip(staticIpName=static_ip_name, instanceName=instance_name)
+        public_ip = ''
+        attached_to = ''
+        for idx in range(30):
+            ip_resp = client.get_static_ip(staticIpName=static_ip_name)
+            static_ip = ip_resp.get('staticIp') or {}
+            public_ip = static_ip.get('ipAddress') or ''
+            attached_to = static_ip.get('attachedTo') or ''
+            logger.info('等待 AWS 固定 IP 迁移生效: order=%s attempt=%s public_ip=%s attached_to=%s', order_no, idx + 1, public_ip, attached_to)
+            if public_ip and attached_to == instance_name:
+                break
+            time.sleep(3)
+        if not public_ip:
+            return False, '', '固定 IP 已尝试迁移，但未能读取公网 IP。'
+        if attached_to != instance_name:
+            return False, '', f'固定 IP 尚未迁移到目标实例，当前附加到: {attached_to or "未附加"}。'
+        if temp_static_ip_name and temp_static_ip_name != static_ip_name:
+            try:
+                client.release_static_ip(staticIpName=temp_static_ip_name)
+                logger.info('AWS 临时固定 IP 已释放: order=%s temp_static_ip_name=%s', order_no, temp_static_ip_name)
+            except Exception as exc:
+                logger.warning('AWS 临时固定 IP 释放失败: order=%s temp_static_ip_name=%s error=%s', order_no, temp_static_ip_name, exc)
+        return True, public_ip, f'固定 IP {static_ip_name} 已迁移到新实例 {instance_name}。'
+    except Exception as exc:
+        logger.exception('AWS 固定 IP 迁移失败: order=%s static_ip_name=%s target_instance=%s error=%s', order_no, static_ip_name, instance_name, exc)
+        return False, '', f'AWS 固定 IP 迁移失败: {exc}'
+
+
 @sync_to_async
 def create_instance(order_data: dict, server_name: str):
     return _create_instance_sync(order_data, server_name)
+
+
+def _get_instance_public_ip_sync(order_data: dict, instance_name: str) -> str:
+    if not instance_name:
+        return ''
+    client, client_error = _aws_client_from_order_data(order_data)
+    if not client:
+        logger.warning('AWS 实例公网 IP 查询失败: instance=%s error=%s', instance_name, client_error)
+        return ''
+    try:
+        response = client.get_instance(instanceName=instance_name)
+        return ((response.get('instance') or {}).get('publicIpAddress')) or ''
+    except Exception as exc:
+        logger.warning('AWS 实例公网 IP 查询异常: instance=%s error=%s', instance_name, exc)
+        return ''
+
+
+@sync_to_async
+def move_static_ip_to_instance(order_data: dict, instance_name: str, static_ip_name: str, temp_static_ip_name: str = ''):
+    return _move_static_ip_sync(order_data, instance_name, static_ip_name, temp_static_ip_name)
+
+
+@sync_to_async
+def get_instance_public_ip(order_data: dict, instance_name: str):
+    return _get_instance_public_ip_sync(order_data, instance_name)

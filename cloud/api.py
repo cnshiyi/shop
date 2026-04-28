@@ -39,7 +39,7 @@ from bot.api import (
 )
 from bot.models import TelegramUser
 from cloud.lifecycle import _delete_instance, _mark_replaced_order_deleted
-from cloud.services import AWS_REGION_NAMES, create_cloud_server_rebuild_order, ensure_cloud_server_pricing, record_cloud_ip_log, refresh_custom_plan_cache
+from cloud.services import AWS_REGION_NAMES, create_cloud_server_rebuild_order, ensure_cloud_server_pricing, ensure_manual_expiry_operation_order, ensure_manual_owner_operation_order, record_cloud_ip_log, refresh_custom_plan_cache
 from cloud.models import AddressMonitor, CloudAsset, CloudIpLog, CloudServerOrder, CloudServerPlan, Server, ServerPrice
 from core.cloud_accounts import cloud_account_label
 from core.models import CloudAccountConfig, ExternalSyncLog
@@ -235,18 +235,21 @@ def update_cloud_asset(request, asset_id):
             user_lookup = payload.get('user_query') or payload.get('user_id') or payload.get('tg_user_id') or payload.get('username')
             username_raw = payload.get('user_query') or payload.get('username')
             clear_user = str(payload.get('clear_user') or '').lower() in {'1', 'true', 'yes', 'on'}
+            owner_changed = clear_user or user_lookup not in (None, '')
+            owner_target = asset.user
             if clear_user:
+                owner_target = None
                 asset.user = None
                 if server:
                     server.user = None
             elif user_lookup not in (None, ''):
-                user = _resolve_telegram_user(user_lookup)
-                if not user:
+                owner_target = _resolve_telegram_user(user_lookup)
+                if not owner_target:
                     return _error('未找到匹配的 Telegram 用户', status=404)
-                asset.user = user
-                _sync_telegram_username(user, username_raw)
+                asset.user = owner_target
+                _sync_telegram_username(owner_target, username_raw)
                 if server:
-                    server.user = user
+                    server.user = owner_target
 
             if 'price' in payload:
                 try:
@@ -267,9 +270,11 @@ def update_cloud_asset(request, asset_id):
             if server and 'account_label' in payload:
                 server.account_label = payload.get('account_label') or None
 
+            manual_expires_at = None
             if 'actual_expires_at' in payload:
                 try:
-                    asset.actual_expires_at = _parse_iso_datetime(payload.get('actual_expires_at'), '到期时间')
+                    manual_expires_at = _parse_iso_datetime(payload.get('actual_expires_at'), '到期时间')
+                    asset.actual_expires_at = manual_expires_at
                 except ValueError as exc:
                     return _error(str(exc), status=400)
                 if server:
@@ -381,6 +386,22 @@ def update_cloud_asset(request, asset_id):
                 server.save()
 
             asset.save()
+            if owner_changed:
+                order, err = ensure_manual_owner_operation_order(asset, owner_target)
+                if err:
+                    return _error(err, status=400)
+                if server:
+                    server.order = order
+                    server.user = owner_target
+                    server.save(update_fields=['order', 'user', 'updated_at'])
+            if manual_expires_at is not None:
+                order, err = ensure_manual_expiry_operation_order(asset, manual_expires_at)
+                if err:
+                    return _error(err, status=400)
+                if server:
+                    server.order = order
+                    server.expires_at = manual_expires_at
+                    server.save(update_fields=['order', 'expires_at', 'updated_at'])
             if 'public_ip' in payload and str(old_public_ip or '') != str(new_public_ip or ''):
                 record_cloud_ip_log(
                     event_type='changed',
@@ -522,6 +543,9 @@ def _cloud_order_detail_payload(order):
         'status': order.status,
         'status_label': _status_label(order.status, CloudServerOrder.STATUS_CHOICES),
         'tx_hash': order.tx_hash,
+        'payer_address': order.payer_address,
+        'receive_address': order.receive_address,
+        'tronscan_url': f'https://tronscan.org/#/transaction/{order.tx_hash}' if order.tx_hash else '',
         'image_name': order.image_name,
         'server_name': order.server_name,
         'lifecycle_days': order.lifecycle_days,
@@ -984,7 +1008,15 @@ def servers_statistics(request):
     region_pairs = [*aws_regions, {'region_code': 'cn-hongkong', 'region_label': '香港'}]
     region_codes = [item['region_code'] for item in region_pairs]
 
-    queryset = Server.objects.all()
+    active_statuses = [
+        Server.STATUS_RUNNING,
+        Server.STATUS_PENDING,
+        Server.STATUS_STARTING,
+        Server.STATUS_STOPPED,
+        Server.STATUS_SUSPENDED,
+        Server.STATUS_EXPIRED_GRACE,
+    ]
+    queryset = Server.objects.filter(status__in=active_statuses)
     if keyword:
         queryset = _apply_keyword_filter(
             queryset,
@@ -1284,8 +1316,9 @@ def _apply_server_missing_state(provider, region, existing_instance_ids):
 @dashboard_login_required
 @require_POST
 def sync_servers(request):
-    aliyun_region = (request.POST.get('region') or request.GET.get('region') or 'cn-hongkong').strip() or 'cn-hongkong'
-    aws_region = (request.POST.get('aws_region') or request.GET.get('aws_region') or '').strip()
+    payload = _read_payload(request)
+    aliyun_region = (payload.get('region') or request.POST.get('region') or request.GET.get('region') or 'cn-hongkong').strip() or 'cn-hongkong'
+    aws_region = (payload.get('aws_region') or request.POST.get('aws_region') or request.GET.get('aws_region') or '').strip()
     errors = []
     synced = {'aliyun': False, 'aws': False}
     missing = {'aliyun': 0, 'aws': 0}
@@ -1321,8 +1354,9 @@ def sync_servers(request):
 @dashboard_login_required
 @require_POST
 def sync_cloud_assets(request):
-    aliyun_region = (request.POST.get('region') or request.GET.get('region') or 'cn-hongkong').strip() or 'cn-hongkong'
-    aws_region = (request.POST.get('aws_region') or request.GET.get('aws_region') or '').strip()
+    payload = _read_payload(request)
+    aliyun_region = (payload.get('region') or request.POST.get('region') or request.GET.get('region') or 'cn-hongkong').strip() or 'cn-hongkong'
+    aws_region = (payload.get('aws_region') or request.POST.get('aws_region') or request.GET.get('aws_region') or '').strip()
     errors = []
     synced = {'aliyun': False, 'aws': False, 'reconcile': False}
     aws_regions = []
@@ -1607,6 +1641,7 @@ def monitors_list(request):
     items = list(
         queryset[:100].values(
             'id', 'address', 'remark', 'monitor_transfers', 'monitor_resources',
+            'usdt_threshold', 'trx_threshold', 'energy_threshold', 'bandwidth_threshold',
             'daily_income', 'daily_expense', 'daily_income_currency', 'daily_expense_currency',
             'stats_date', 'is_active', 'created_at', 'resource_checked_at', 'user__tg_user_id', 'user__username'
         )
@@ -1614,6 +1649,8 @@ def monitors_list(request):
     return _ok([
         {
             **item,
+            'usdt_threshold': _decimal_to_str(item['usdt_threshold']),
+            'trx_threshold': _decimal_to_str(item['trx_threshold']),
             'daily_income': _decimal_to_str(item['daily_income']),
             'daily_expense': _decimal_to_str(item['daily_expense']),
             'created_at': _iso(item['created_at']),

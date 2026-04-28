@@ -98,23 +98,43 @@ def _elevate_deleted_when_ip_missing(status, public_ip):
     return CloudAsset.STATUS_DELETED
 
 
+def _order_status_from_cloud_status(status):
+    if status in {CloudAsset.STATUS_PENDING, CloudAsset.STATUS_STARTING}:
+        return 'provisioning'
+    if status in {CloudAsset.STATUS_STOPPED, CloudAsset.STATUS_STOPPING, CloudAsset.STATUS_SUSPENDED}:
+        return 'suspended'
+    if status in {CloudAsset.STATUS_TERMINATING, CloudAsset.STATUS_TERMINATED, CloudAsset.STATUS_DELETING, CloudAsset.STATUS_DELETED}:
+        return 'deleted'
+    if status == CloudAsset.STATUS_EXPIRED:
+        return 'expired'
+    return 'completed'
+
+
 def _resolve_asset(instance_id, public_ip, account=None):
     lookup = Q(kind=CloudAsset.KIND_SERVER)
     if account:
         lookup &= Q(cloud_account=account)
-    candidates = Q(instance_id=instance_id) | Q(provider_resource_id=instance_id)
+    candidates = Q()
+    if instance_id:
+        candidates |= Q(instance_id=instance_id) | Q(provider_resource_id=instance_id) | Q(asset_name=instance_id)
     if public_ip:
-        candidates |= Q(public_ip=public_ip)
+        candidates |= Q(public_ip=public_ip) | Q(previous_public_ip=public_ip)
+    if not candidates:
+        return None
     return CloudAsset.objects.filter(lookup & candidates).order_by('-updated_at', '-id').first()
 
 
 def _resolve_server(instance_id, public_ip, account=None):
-    candidates = Q(instance_id=instance_id) | Q(provider_resource_id=instance_id)
+    candidates = Q()
+    if instance_id:
+        candidates |= Q(instance_id=instance_id) | Q(provider_resource_id=instance_id) | Q(server_name=instance_id)
     base = Q()
     if account:
         base &= Q(account_label=cloud_account_label(account))
     if public_ip:
-        candidates |= Q(public_ip=public_ip)
+        candidates |= Q(public_ip=public_ip) | Q(previous_public_ip=public_ip)
+    if not candidates:
+        return None
     return Server.objects.filter(base & candidates).order_by('-updated_at', '-id').first()
 
 
@@ -135,8 +155,6 @@ def _mark_deleted_when_missing_in_aliyun(region, existing_instance_ids, stdout, 
         instance_id = str(asset.instance_id or '').strip()
         public_ip = str(asset.public_ip or '').strip()
         if instance_id and instance_id in existing_instance_ids:
-            continue
-        if asset.status == CloudAsset.STATUS_DELETED and asset.provider_status == '云上未找到实例':
             continue
         old_public_ip = public_ip or str(asset.previous_public_ip or '').strip()
         asset.status = CloudAsset.STATUS_DELETED
@@ -159,9 +177,10 @@ def _mark_deleted_when_missing_in_aliyun(region, existing_instance_ids, stdout, 
             server.save(update_fields=['status', 'is_active', 'previous_public_ip', 'public_ip', 'provider_status', 'note', 'updated_at'])
         order = getattr(asset, 'order', None) or _resolve_order_for_ip(old_public_ip)
         if order:
+            order.status = 'deleted'
             order.previous_public_ip = old_public_ip or order.previous_public_ip
             order.public_ip = None
-            order.save(update_fields=['previous_public_ip', 'public_ip', 'updated_at'])
+            order.save(update_fields=['status', 'previous_public_ip', 'public_ip', 'updated_at'])
         record_cloud_ip_log(
             event_type='deleted',
             order=order,
@@ -202,8 +221,18 @@ class Command(BaseCommand):
         claimed_assets = {}
         synced_instance_ids = []
         verification_deleted_items = []
+        account_summary_lines = []
         for account in accounts:
             account_label = cloud_account_label(account) or 'aliyun'
+            account_stats = {
+                'label': account_label,
+                'region': region,
+                'count': 0,
+                'created': 0,
+                'updated': 0,
+                'deleted_by_missing_ip': 0,
+                'ips': [],
+            }
             client = _build_client(_region_endpoint(region), account=account)
             if not client:
                 self.stdout.write(self.style.WARNING(f'跳过阿里云账号 {account_label}：无法创建客户端'))
@@ -281,16 +310,19 @@ class Command(BaseCommand):
                             setattr(asset, key, value)
                         asset.save()
                         updated_count += 1
+                        account_stats['updated'] += 1
                         updated_asset_ids.append(f'{asset.id}:{public_ip or "缺失"}:{instance_id or asset_name}')
                 else:
                     asset = CloudAsset.objects.create(**asset_defaults)
                     claimed_assets[asset.id] = asset_signature
                     created_count += 1
+                    account_stats['created'] += 1
                     created_asset_ids.append(f'{asset.id}:{public_ip or "缺失"}:{instance_id or asset_name}')
                 if old_status is not None and old_status != normalized_status:
                     status_changed_items.append(f'{asset.id}:{public_ip or "缺失"}:{old_status}->{normalized_status}')
                 if normalized_status == CloudAsset.STATUS_DELETED and not str(public_ip or '').strip():
                     deleted_by_missing_ip_count += 1
+                    account_stats['deleted_by_missing_ip'] += 1
                     deleted_by_missing_ip_items.append(f'{asset.id}:{public_ip or "缺失"}:{asset_name or instance_id}')
 
                 server = _resolve_server(instance_id, public_ip, account)
@@ -331,6 +363,24 @@ class Command(BaseCommand):
                 else:
                     Server.objects.create(**server_defaults)
 
+                if linked_order:
+                    linked_order.status = _order_status_from_cloud_status(normalized_status)
+                    linked_order.cloud_account = account
+                    linked_order.account_label = account_label
+                    linked_order.region_code = region
+                    linked_order.region_name = item.get('RegionId') or region
+                    linked_order.server_name = asset_name
+                    linked_order.instance_id = instance_id
+                    linked_order.provider_resource_id = instance_id
+                    if public_ip and linked_order.public_ip != public_ip:
+                        linked_order.previous_public_ip = linked_order.public_ip or linked_order.previous_public_ip
+                    linked_order.public_ip = public_ip or None
+                    linked_order.save(update_fields=[
+                        'status', 'cloud_account', 'account_label', 'region_code', 'region_name',
+                        'server_name', 'instance_id', 'provider_resource_id',
+                        'previous_public_ip', 'public_ip', 'updated_at',
+                    ])
+
                 if ip_changed:
                     refreshed_server = _resolve_server(instance_id, public_ip, account)
                     record_cloud_ip_log(
@@ -342,7 +392,9 @@ class Command(BaseCommand):
                         note=f'自动同步发现 IP 变化：{old_public_ip} -> {public_ip}',
                     )
                 synced_instance_ids.append(instance_id)
+                account_stats['ips'].append(f'{public_ip or "缺失"}:{asset_name or instance_id}')
                 count += 1
+                account_stats['count'] += 1
             verification_deleted_items.extend(
                 _mark_deleted_when_missing_in_aliyun(
                     region=region,
@@ -351,10 +403,15 @@ class Command(BaseCommand):
                     account=account,
                 )
             )
+            account_summary_lines.append(
+                f"账号={account_stats['label']}；地区={account_stats['region']}；扫描={account_stats['count']}；新增={account_stats['created']}；更新={account_stats['updated']}；缺IP删除={account_stats['deleted_by_missing_ip']}；IP={account_stats['ips'] or ['无']}"
+            )
         after_asset_total = CloudAsset.objects.filter(kind=CloudAsset.KIND_SERVER).count()
         self.stdout.write(self.style.SUCCESS(
             f'阿里云同步汇总：代理列表原有 {before_asset_total} 条；扫描服务器 {count} 条；覆盖 {len(accounts)} 个账号；新增 {created_count} 条，更新 {updated_count} 条；因公网IP缺失抬为已删除 {deleted_by_missing_ip_count} 条；同步后代理列表共 {after_asset_total} 条。'
         ))
+        if account_summary_lines:
+            self.stdout.write(f'阿里云按账号同步详情：{" || ".join(account_summary_lines)}')
         detail_parts = []
         if created_asset_ids:
             detail_parts.append(f'新增ID={created_asset_ids[:20]}')

@@ -134,6 +134,8 @@ class CloudServerOrder(models.Model):
     pay_method = models.CharField('支付方式', max_length=32, choices=PAY_METHOD_CHOICES, default='address')
     status = models.CharField('状态', max_length=32, choices=STATUS_CHOICES, default='pending', db_index=True)
     tx_hash = models.CharField('交易哈希', max_length=191, unique=True, blank=True, null=True)
+    payer_address = models.CharField('链上付款地址', max_length=191, blank=True, null=True, db_index=True)
+    receive_address = models.CharField('链上收款地址', max_length=191, blank=True, null=True, db_index=True)
     image_name = models.CharField('镜像', max_length=128, default='debian')
     server_name = models.CharField('服务器名', max_length=191, blank=True, null=True, db_index=True)
     lifecycle_days = models.IntegerField('有效期天数', default=31)
@@ -153,6 +155,9 @@ class CloudServerOrder(models.Model):
     delay_quota = models.IntegerField('延期次数', default=0)
     ip_change_quota = models.IntegerField('剩余更换IP次数', default=1)
     cloud_reminder_enabled = models.BooleanField('到期提醒', default=True, db_index=True)
+    suspend_reminder_enabled = models.BooleanField('停机提醒', default=True, db_index=True)
+    delete_reminder_enabled = models.BooleanField('删机提醒', default=True, db_index=True)
+    ip_recycle_reminder_enabled = models.BooleanField('IP保留期提醒', default=True, db_index=True)
     auto_renew_enabled = models.BooleanField('自动续费', default=False, db_index=True)
     last_user_id = models.BigIntegerField('最近绑定TG用户ID', blank=True, null=True, db_index=True)
     mtproxy_port = models.IntegerField('MTProxy端口', default=9528)
@@ -197,10 +202,10 @@ class CloudServerOrder(models.Model):
             self.service_expires_at = self.service_started_at + timezone.timedelta(days=self.lifecycle_days)
         self.service_expires_at = self.normalize_expiry_time(self.service_expires_at)
         if self.service_expires_at:
-            grace_days = 5 + max(int(self.renew_extension_days or 0), 0)
+            grace_days = 3 + max(int(self.renew_extension_days or 0), 0)
             self.renew_grace_expires_at = self.service_expires_at + timezone.timedelta(days=grace_days)
-            self.suspend_at = self.service_expires_at + timezone.timedelta(days=grace_days)
-            self.delete_at = self.suspend_at + timezone.timedelta(days=3)
+            self.suspend_at = self.renew_grace_expires_at
+            self.delete_at = self.renew_grace_expires_at
             self.ip_recycle_at = self.delete_at + timezone.timedelta(days=15)
         super().save(*args, **kwargs)
 
@@ -417,6 +422,8 @@ class AddressMonitor(models.Model):
     resource_checked_at = models.DateTimeField('资源检查时间', blank=True, null=True)
     usdt_threshold = models.DecimalField('USDT阈值', max_digits=18, decimal_places=6, default=1)
     trx_threshold = models.DecimalField('TRX阈值', max_digits=18, decimal_places=6, default=1)
+    energy_threshold = models.BigIntegerField('能量增加阈值', default=1)
+    bandwidth_threshold = models.BigIntegerField('带宽增加阈值', default=1)
     daily_income = models.DecimalField('今日收入', max_digits=18, decimal_places=6, default=0)
     daily_expense = models.DecimalField('今日支出', max_digits=18, decimal_places=6, default=0)
     daily_income_currency = models.CharField('收入币种', max_length=32, default='USDT')

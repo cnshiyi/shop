@@ -6,6 +6,7 @@ import time
 import uuid
 from pathlib import Path
 
+from cloud.ports import get_mtproxy_public_ports
 from cloud.schemas import ProvisionResult
 from core.cloud_accounts import get_active_cloud_account
 
@@ -368,8 +369,8 @@ def _create_instance_sync(order, server_name: str):
 
         mtproxy_port = int(getattr(order, 'mtproxy_port', 9528) or 9528)
         _open_instance_port(client, region_code, instance_id, 22)
-        for offset in range(0, 6):
-            _open_instance_port(client, region_code, instance_id, mtproxy_port + offset)
+        for public_port in get_mtproxy_public_ports(mtproxy_port):
+            _open_instance_port(client, region_code, instance_id, public_port)
 
         _reset_system_with_password(client, region_code, instance_id, image_id, password, key_name)
         diagnostics.append('已触发 ResetSystem 下发 root 密码' + (f' / 密钥 {key_name}' if key_name else ''))

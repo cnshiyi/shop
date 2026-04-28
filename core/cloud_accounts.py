@@ -21,6 +21,34 @@ def cloud_account_label(account) -> str:
     return f'{account.provider}+{account_id}+{account.name}'[:191]
 
 
+def get_cloud_account_from_label(label: str, provider: str | None = None):
+    text = str(label or '').strip()
+    if not text:
+        return None
+    CloudAccountConfig = apps.get_model('core', 'CloudAccountConfig')
+    normalized_provider = normalize_cloud_account_provider(provider or '')
+    parts = text.replace(':', '+').split('+')
+    label_provider = normalize_cloud_account_provider(parts[0]) if parts else ''
+    account_id = parts[1].strip() if len(parts) >= 2 else ''
+    queryset = CloudAccountConfig.objects.filter(is_active=True)
+    if normalized_provider:
+        queryset = queryset.filter(provider=normalized_provider)
+    elif label_provider:
+        queryset = queryset.filter(provider=label_provider)
+    if account_id:
+        account = queryset.filter(external_account_id=account_id).first()
+        if account:
+            return account
+        if account_id.isdigit():
+            account = queryset.filter(id=int(account_id)).first()
+            if account:
+                return account
+    for account in queryset.order_by('id'):
+        if cloud_account_label(account) == text:
+            return account
+    return None
+
+
 def list_active_cloud_accounts(provider: str, region_code: str | None = None):
     """返回某云厂商可用账号列表。优先 ok，其次 unknown，最后 error。"""
     CloudAccountConfig = apps.get_model('core', 'CloudAccountConfig')

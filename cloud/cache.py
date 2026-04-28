@@ -30,7 +30,8 @@ async def init_monitor_cache(force_log: bool = False):
         AddressMonitor.objects.filter(is_active=True)
         .values(
             'id', 'user_id', 'address', 'remark', 'monitor_transfers', 'monitor_resources',
-            'last_energy', 'last_bandwidth', 'usdt_threshold', 'trx_threshold'
+            'last_energy', 'last_bandwidth', 'usdt_threshold', 'trx_threshold',
+            'energy_threshold', 'bandwidth_threshold'
         )
     )
     pipe = r.pipeline()
@@ -55,13 +56,16 @@ def _monitor_entry(mon: dict) -> dict:
         'last_bandwidth': int(mon.get('last_bandwidth', 0) or 0),
         'usdt_threshold': str(mon['usdt_threshold']),
         'trx_threshold': str(mon['trx_threshold']),
+        'energy_threshold': int(mon.get('energy_threshold', 1) or 0),
+        'bandwidth_threshold': int(mon.get('bandwidth_threshold', 1) or 0),
     }
 
 
 async def add_monitor_to_cache(monitor_id: int, user_id: int, address: str,
                                remark: str | None, usdt_threshold: Decimal,
                                trx_threshold: Decimal, monitor_transfers: bool = True,
-                               monitor_resources: bool = False):
+                               monitor_resources: bool = False, energy_threshold: int = 1,
+                               bandwidth_threshold: int = 1):
     r = await get_redis()
     if r is None:
         return
@@ -76,6 +80,8 @@ async def add_monitor_to_cache(monitor_id: int, user_id: int, address: str,
         'last_bandwidth': 0,
         'usdt_threshold': str(usdt_threshold),
         'trx_threshold': str(trx_threshold),
+        'energy_threshold': int(energy_threshold or 0),
+        'bandwidth_threshold': int(bandwidth_threshold or 0),
     }
     await r.hset(MONITORS_KEY, address, json.dumps(entry, ensure_ascii=False))
 
@@ -87,15 +93,21 @@ async def remove_monitor_from_cache(address: str):
     await r.hdel(MONITORS_KEY, address)
 
 
-async def update_monitor_threshold_in_cache(address: str, currency: str, amount: Decimal):
+async def update_monitor_threshold_in_cache(address: str, currency: str, amount):
     r = await get_redis()
     if r is None:
         return
     raw = await r.hget(MONITORS_KEY, address)
     if raw:
         entry = json.loads(raw)
-        key = 'usdt_threshold' if currency == 'USDT' else 'trx_threshold'
-        entry[key] = str(amount)
+        key_map = {
+            'USDT': 'usdt_threshold',
+            'TRX': 'trx_threshold',
+            'ENERGY': 'energy_threshold',
+            'BANDWIDTH': 'bandwidth_threshold',
+        }
+        key = key_map.get(str(currency or '').upper(), 'trx_threshold')
+        entry[key] = int(amount) if key in {'energy_threshold', 'bandwidth_threshold'} else str(amount)
         await r.hset(MONITORS_KEY, address, json.dumps(entry, ensure_ascii=False))
 
 
@@ -145,6 +157,8 @@ def _db_fallback_get_monitors():
             'last_bandwidth': mon.last_bandwidth,
             'usdt_threshold': str(mon.usdt_threshold),
             'trx_threshold': str(mon.trx_threshold),
+            'energy_threshold': int(getattr(mon, 'energy_threshold', 1) or 0),
+            'bandwidth_threshold': int(getattr(mon, 'bandwidth_threshold', 1) or 0),
         }
         result.setdefault(mon.address, []).append(entry)
     return result

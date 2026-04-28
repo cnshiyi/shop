@@ -6,6 +6,7 @@ import os
 import re
 import secrets
 import string
+import time
 from decimal import Decimal, ROUND_CEILING
 from types import SimpleNamespace
 
@@ -17,8 +18,9 @@ from django.utils import timezone
 from bot.models import TelegramUser
 from cloud.models import CloudAsset, CloudIpLog, CloudServerOrder, CloudServerPlan, Server, ServerPrice
 from cloud.bootstrap import install_bbr, install_mtproxy
+from cloud.ports import get_mtproxy_public_ports
 from core.cache import get_redis
-from core.cloud_accounts import choose_cloud_account_for_order, cloud_account_label, get_active_cloud_account
+from core.cloud_accounts import choose_cloud_account_for_order, cloud_account_label, get_active_cloud_account, get_cloud_account_from_label
 from orders.ledger import record_balance_ledger
 from orders.models import BalanceLedger, CartItem
 from orders.services import _generate_unique_pay_amount, usdt_to_trx
@@ -56,6 +58,116 @@ def _renew_aliyun_instance(order: CloudServerOrder, days: int = 31):
     except Exception as exc:
         logger.warning('阿里云真实续费失败 order=%s instance=%s err=%s', order.id, order.instance_id, exc)
         return False, f'阿里云真实续费失败: {exc}'
+
+
+def _aws_lightsail_client_for_order(order: CloudServerOrder):
+    import boto3
+
+    account = getattr(order, 'cloud_account', None) or get_active_cloud_account('aws', order.region_code)
+    access_key = (getattr(account, 'access_key_plain', '') or '').strip() if account else ''
+    secret_key = (getattr(account, 'secret_key_plain', '') or '').strip() if account else ''
+    if not access_key or not secret_key:
+        access_key = os.getenv('AWS_ACCESS_KEY_ID', '')
+        secret_key = os.getenv('AWS_SECRET_ACCESS_KEY', '')
+    return boto3.client(
+        'lightsail',
+        region_name=order.region_code or getattr(account, 'region_hint', None) or 'ap-southeast-1',
+        aws_access_key_id=access_key,
+        aws_secret_access_key=secret_key,
+    )
+
+
+def _ensure_aws_instance_running(order: CloudServerOrder) -> tuple[bool, str]:
+    if order.provider != 'aws_lightsail' or not order.server_name:
+        return True, ''
+    try:
+        client = _aws_lightsail_client_for_order(order)
+        instance = client.get_instance(instanceName=order.server_name).get('instance') or {}
+        state = ((instance.get('state') or {}).get('name') or '').lower()
+        if state == 'running':
+            return True, 'AWS 实例续费后检查：运行中。'
+        if state in {'stopped', 'stopping'}:
+            client.start_instance(instanceName=order.server_name)
+            logger.info('CLOUD_RENEW_START_INSTANCE order=%s server_name=%s previous_state=%s', order.order_no, order.server_name, state)
+            return True, f'AWS 实例续费后检查：原状态 {state or "未知"}，已发起启动。'
+        return True, f'AWS 实例续费后检查：当前状态 {state or "未知"}。'
+    except Exception as exc:
+        logger.warning('CLOUD_RENEW_START_INSTANCE_FAILED order=%s server_name=%s error=%s', order.order_no, order.server_name, exc)
+        return False, f'AWS 实例启动检查失败: {exc}'
+
+
+def _probe_mtproxy_ports(ip: str, username: str, password: str, main_port: int) -> tuple[bool, str]:
+    if not ip or not password:
+        return False, '缺少 SSH 参数，无法检查 MTProxy。'
+    try:
+        import paramiko
+    except ImportError:
+        return False, '缺少 paramiko，无法检查 MTProxy。'
+    ports = [str(port) for port in get_mtproxy_public_ports(main_port or 9528)]
+    client = paramiko.SSHClient()
+    client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+    try:
+        client.connect(
+            hostname=ip,
+            port=22,
+            username=(username or 'root').strip() or 'root',
+            password=password,
+            timeout=30,
+            banner_timeout=30,
+            auth_timeout=30,
+            look_for_keys=False,
+            allow_agent=False,
+        )
+        ports_text = ' '.join(ports)
+        script = f"""bash -s <<'EOF'
+PORTS='{ports_text}'
+LISTENING="$(ss -lntup 2>/dev/null || netstat -lntup 2>/dev/null || true)"
+missing=''
+for port in $PORTS; do
+  if ! printf '%s\n' "$LISTENING" | grep -E "[:.]${{port}}\\b" >/dev/null 2>&1; then
+    missing="$missing $port"
+  fi
+done
+if [ -n "$missing" ]; then
+  echo "MISSING=$missing"
+  exit 2
+fi
+echo 'OK=1'
+EOF"""
+        stdin, stdout, stderr = client.exec_command(script, timeout=120)
+        exit_code = stdout.channel.recv_exit_status()
+        output = stdout.read().decode('utf-8', errors='ignore').strip()
+        if exit_code == 0:
+            return True, f'MTProxy 端口检查正常: {", ".join(ports)}。'
+        return False, f'MTProxy 端口检查异常: {output or stderr.read().decode("utf-8", errors="ignore")[:200]}'
+    except Exception as exc:
+        return False, f'MTProxy 端口检查异常: {exc}'
+    finally:
+        client.close()
+
+
+def _ensure_mtproxy_after_renewal(order: CloudServerOrder) -> tuple[bool, str]:
+    if not order.public_ip or not order.login_password:
+        return True, '缺少登录信息，跳过 MTProxy 运行检查。'
+    probe_notes = []
+    ok = False
+    note = ''
+    for attempt in range(1, 7):
+        ok, note = _probe_mtproxy_ports(order.public_ip, order.login_user or 'root', order.login_password, order.mtproxy_port or 9528)
+        probe_notes.append(f'第 {attempt} 次检查: {note}')
+        if ok:
+            return True, '\n'.join(probe_notes)
+        time.sleep(10)
+    logger.warning('CLOUD_RENEW_MTPROXY_REINSTALL order=%s ip=%s reason=%s', order.order_no, order.public_ip, note)
+    install_ok, install_note = async_to_sync(install_mtproxy)(
+        order.public_ip,
+        order.login_user or 'root',
+        order.login_password,
+        order.mtproxy_port or 9528,
+        order.mtproxy_secret or '',
+        order.mtproxy_secret or '',
+    )
+    return install_ok, '\n'.join(filter(None, [note, '续费后 MTProxy 异常，已重新安装。' if install_ok else '续费后 MTProxy 异常，重新安装失败。', install_note]))
 
 CUSTOM_REGIONS_CACHE_KEY = 'custom:regions:v1'
 CUSTOM_PLANS_CACHE_PREFIX = 'custom:plans:v1:'
@@ -745,9 +857,15 @@ def _hydrate_order_from_proxy_asset(order: CloudServerOrder | None, asset: Cloud
         order.mtproxy_port = getattr(asset, 'mtproxy_port', None) or order.mtproxy_port
         order.login_password = getattr(asset, 'login_password', None) or order.login_password
         order.instance_id = getattr(asset, 'instance_id', None) or order.instance_id
+        if not order.cloud_account_id:
+            order.cloud_account = getattr(asset, 'cloud_account', None) or get_cloud_account_from_label(getattr(asset, 'account_label', ''), order.provider)
+        order.account_label = order.account_label or getattr(asset, 'account_label', None) or cloud_account_label(getattr(order, 'cloud_account', None))
     if server:
         order.login_password = getattr(server, 'login_password', None) or order.login_password
         order.instance_id = getattr(server, 'instance_id', None) or order.instance_id
+        if not order.cloud_account_id:
+            order.cloud_account = get_cloud_account_from_label(getattr(server, 'account_label', ''), order.provider)
+        order.account_label = order.account_label or getattr(server, 'account_label', None) or cloud_account_label(getattr(order, 'cloud_account', None))
     return order
 
 
@@ -879,11 +997,11 @@ async def initialize_proxy_asset(asset_id: int, user_id: int):
     public_ip = str(asset.public_ip or '').strip()
     if not public_ip:
         return None, '当前资产缺少公网 IP，无法初始化代理'
-    password = str(asset.login_password or '').strip() or _generate_asset_login_password()
     username = str(asset.login_user or '').strip() or ('admin' if asset.provider == 'aws_lightsail' else 'root')
+    password = _generate_asset_login_password() if asset.provider == 'aws_lightsail' else (str(asset.login_password or '').strip() or _generate_asset_login_password())
     port = int(asset.mtproxy_port or 9528)
     bbr_ok, bbr_note = await install_bbr(public_ip, username, password, use_key_setup=asset.provider == 'aws_lightsail')
-    mtproxy_ok, mtproxy_note = await install_mtproxy(public_ip, username, password, port, asset.mtproxy_secret or '')
+    mtproxy_ok, mtproxy_note = await install_mtproxy(public_ip, username, password, port, asset.mtproxy_secret or '', asset.mtproxy_secret or '')
     note = '\n'.join(part for part in [asset.note, '已执行同步资产代理初始化。', '' if bbr_ok else 'BBR 初始化失败，但继续检查 MTProxy 安装结果。', bbr_note, mtproxy_note] if part)
     if not mtproxy_ok:
         asset.note = note
@@ -938,12 +1056,15 @@ def get_cloud_server_by_ip(ip: str):
 
 
 def _can_order_be_renewed(order: CloudServerOrder) -> bool:
-    if order.status not in {'completed', 'expiring', 'suspended', 'renew_pending', 'paid', 'provisioning'}:
-        return False
     order = _hydrate_order_from_proxy_asset(order)
-    if not str(order.public_ip or '').strip():
+    has_ip = bool(str(order.public_ip or order.previous_public_ip or '').strip())
+    if not has_ip:
         return False
-    return True
+    if order.status in {'completed', 'expiring', 'suspended', 'renew_pending', 'paid', 'provisioning'}:
+        return True
+    if order.status == 'deleted' and order.ip_recycle_at and order.ip_recycle_at > timezone.now():
+        return True
+    return False
 
 
 def _renewal_price(order: CloudServerOrder, user: TelegramUser | None = None) -> Decimal:
@@ -1040,6 +1161,233 @@ def record_cloud_ip_log(*, event_type, order=None, asset=None, server=None, publ
     )
 
 
+def _fmt_dt(value):
+    return value.isoformat() if value else '-'
+
+
+def _trim_operation_order_no(source_order: CloudServerOrder | None, operation: str, suffix: str | None = None) -> str:
+    now = timezone.now()
+    suffix = suffix or now.strftime('%m%d%H%M%S')
+    raw_order_no = str(getattr(source_order, 'order_no', '') or '').strip()
+    source_id = getattr(source_order, 'id', None) or 0
+    user_id = getattr(source_order, 'user_id', None) or 0
+    fallback_prefix = f'ORD{source_id}' if source_id else f'USER{user_id}'
+    operation_pattern = re.compile(r'-(REBUILD|UPGRADE|IP)-[^-]+')
+    matches = list(operation_pattern.finditer(raw_order_no))
+    if matches:
+        root = raw_order_no[:matches[0].start()].strip('-') or fallback_prefix
+        previous = raw_order_no[matches[-1].start():].strip('-')
+        candidate = f'{root}-{previous}-{operation}-{suffix}'
+    else:
+        candidate = f'{raw_order_no or fallback_prefix}-{operation}-{suffix}'
+    if len(candidate) > 180:
+        previous = matches and raw_order_no[matches[-1].start():].strip('-') or ''
+        root = fallback_prefix
+        candidate = f'{root}-{previous}-{operation}-{suffix}' if previous else f'{root}-{operation}-{suffix}'
+    base = candidate[:180]
+    order_no = base
+    counter = 1
+    while CloudServerOrder.objects.filter(order_no=order_no).exists():
+        tail = f'-{counter}'
+        order_no = f'{base[:191 - len(tail)]}{tail}'
+        counter += 1
+    return order_no
+
+
+def _set_source_migration_expiry(order: CloudServerOrder, migration_due_at, reason: str, note: str = ''):
+    before = {
+        'service_expires_at': order.service_expires_at,
+        'renew_grace_expires_at': order.renew_grace_expires_at,
+        'suspend_at': order.suspend_at,
+        'delete_at': order.delete_at,
+        'ip_recycle_at': order.ip_recycle_at,
+        'migration_due_at': order.migration_due_at,
+    }
+    order.migration_due_at = migration_due_at
+    order.service_expires_at = migration_due_at
+    order.provision_note = '\n'.join(filter(None, [order.provision_note, note]))
+    order.save()
+    asset_count = CloudAsset.objects.filter(order=order).update(actual_expires_at=migration_due_at, updated_at=timezone.now())
+    server_count = Server.objects.filter(order=order).update(expires_at=migration_due_at, updated_at=timezone.now())
+    after = {
+        'service_expires_at': order.service_expires_at,
+        'renew_grace_expires_at': order.renew_grace_expires_at,
+        'suspend_at': order.suspend_at,
+        'delete_at': order.delete_at,
+        'ip_recycle_at': order.ip_recycle_at,
+        'migration_due_at': order.migration_due_at,
+    }
+    logger.info(
+        'CLOUD_SOURCE_MIGRATION_EXPIRY_CHANGE reason=%s order_id=%s order_no=%s status=%s public_ip=%s previous_public_ip=%s service_expires_at=%s->%s renew_grace_expires_at=%s->%s suspend_at=%s->%s delete_at=%s->%s ip_recycle_at=%s->%s migration_due_at=%s->%s asset_count=%s server_count=%s',
+        reason,
+        order.id,
+        order.order_no,
+        order.status,
+        order.public_ip,
+        order.previous_public_ip,
+        _fmt_dt(before['service_expires_at']),
+        _fmt_dt(after['service_expires_at']),
+        _fmt_dt(before['renew_grace_expires_at']),
+        _fmt_dt(after['renew_grace_expires_at']),
+        _fmt_dt(before['suspend_at']),
+        _fmt_dt(after['suspend_at']),
+        _fmt_dt(before['delete_at']),
+        _fmt_dt(after['delete_at']),
+        _fmt_dt(before['ip_recycle_at']),
+        _fmt_dt(after['ip_recycle_at']),
+        _fmt_dt(before['migration_due_at']),
+        _fmt_dt(after['migration_due_at']),
+        asset_count,
+        server_count,
+    )
+    record_cloud_ip_log(
+        event_type='changed',
+        order=order,
+        public_ip=order.public_ip or None,
+        previous_public_ip=order.previous_public_ip or None,
+        note=(
+            f'{reason}: 旧机日期已调整；'
+            f'服务到期 {_fmt_dt(before["service_expires_at"])} -> {_fmt_dt(after["service_expires_at"])}；'
+            f'宽限到期 {_fmt_dt(before["renew_grace_expires_at"])} -> {_fmt_dt(after["renew_grace_expires_at"])}；'
+            f'删机时间 {_fmt_dt(before["delete_at"])} -> {_fmt_dt(after["delete_at"])}；'
+            f'IP保留到期 {_fmt_dt(before["ip_recycle_at"])} -> {_fmt_dt(after["ip_recycle_at"])}；'
+            f'同步资产 {asset_count} 条、Server {server_count} 条。'
+        ),
+    )
+    return order
+
+
+def _create_manual_asset_operation_order(asset: CloudAsset, user: TelegramUser, operation: str, service_expires_at=None) -> CloudServerOrder | None:
+    provider = asset.provider or CloudServerPlan.PROVIDER_AWS_LIGHTSAIL
+    plan = CloudServerPlan.objects.filter(
+        provider=provider,
+        region_code=asset.region_code or '',
+        is_active=True,
+    ).order_by('-sort_order', 'id').first() or CloudServerPlan.objects.filter(provider=provider, is_active=True).order_by('-sort_order', 'id').first()
+    if not plan:
+        return None
+    now = timezone.now()
+    base_order = asset.order
+    base_order_id = getattr(base_order, 'id', None)
+    account = asset.cloud_account or get_cloud_account_from_label(asset.account_label, provider)
+    order = CloudServerOrder.objects.create(
+        order_no=f'MANUAL-{operation}-ASSET-{asset.id}-{now:%Y%m%d%H%M%S}',
+        user=user,
+        plan=plan,
+        provider=provider,
+        cloud_account=account,
+        account_label=asset.account_label or cloud_account_label(account),
+        region_code=asset.region_code or plan.region_code,
+        region_name=asset.region_name or plan.region_name,
+        plan_name=asset.asset_name or plan.plan_name,
+        quantity=1,
+        currency=asset.currency or plan.currency,
+        total_amount=Decimal('0'),
+        pay_amount=Decimal('0'),
+        pay_method='balance',
+        status='completed',
+        lifecycle_days=getattr(base_order, 'lifecycle_days', 31) or 31,
+        service_started_at=getattr(base_order, 'service_started_at', None) or asset.created_at or now,
+        service_expires_at=service_expires_at or asset.actual_expires_at,
+        server_name=asset.asset_name,
+        mtproxy_port=asset.mtproxy_port or getattr(base_order, 'mtproxy_port', None) or 9528,
+        mtproxy_link=asset.mtproxy_link or getattr(base_order, 'mtproxy_link', None),
+        proxy_links=asset.proxy_links or getattr(base_order, 'proxy_links', None) or [],
+        mtproxy_secret=asset.mtproxy_secret or getattr(base_order, 'mtproxy_secret', None),
+        mtproxy_host=asset.mtproxy_host or getattr(base_order, 'mtproxy_host', None),
+        instance_id=asset.instance_id,
+        provider_resource_id=asset.provider_resource_id,
+        public_ip=asset.public_ip,
+        previous_public_ip=asset.previous_public_ip,
+        login_user=asset.login_user or getattr(base_order, 'login_user', None),
+        login_password=asset.login_password or getattr(base_order, 'login_password', None),
+        ip_change_quota=getattr(base_order, 'ip_change_quota', 1) or 1,
+        last_user_id=getattr(user, 'tg_user_id', None),
+        completed_at=now,
+        replacement_for=base_order if base_order_id else None,
+        provision_note=f'{operation}: 后台人工编辑生成的操作订单；来源资产 #{asset.id}；来源订单 #{base_order_id or "-"}。',
+    )
+    return order
+
+
+def ensure_manual_owner_operation_order(asset: CloudAsset, new_user: TelegramUser | None, actor: str = '后台人工编辑') -> tuple[CloudServerOrder | None, str | None]:
+    old_user = asset.user
+    if not new_user:
+        old_label = getattr(old_user, 'tg_user_id', None) or getattr(old_user, 'username', None) or '-'
+        asset.user = None
+        asset.order = None
+        asset.save(update_fields=['user', 'order', 'updated_at'])
+        server_count = Server.objects.filter(
+            Q(instance_id=asset.instance_id) | Q(provider_resource_id=asset.provider_resource_id)
+        ).update(user=None, updated_at=timezone.now())
+        logger.info('CLOUD_MANUAL_OWNER_UNBIND asset_id=%s public_ip=%s old_user=%s server_count=%s actor=%s', asset.id, asset.public_ip, old_label, server_count, actor)
+        record_cloud_ip_log(event_type='changed', asset=asset, public_ip=asset.public_ip, previous_public_ip=asset.previous_public_ip, note=f'{actor}: 人工清空所属人；原所属人 {old_label}；同步 Server {server_count} 条。')
+        return None, None
+    old_label = getattr(old_user, 'tg_user_id', None) or getattr(old_user, 'username', None) or '-'
+    new_label = getattr(new_user, 'tg_user_id', None) or getattr(new_user, 'username', None) or new_user.id
+    asset.user = new_user
+    asset.save(update_fields=['user', 'updated_at'])
+    order = _create_manual_asset_operation_order(asset, new_user, 'OWNER', asset.actual_expires_at)
+    if not order:
+        return None, '该地区没有可用套餐，无法创建操作订单'
+    order.provision_note = '\n'.join(filter(None, [order.provision_note, f'{actor}: 人工编辑所属人 {old_label} -> {new_label}，生成独立操作订单支撑同步识别。']))
+    order.save(update_fields=['provision_note', 'updated_at'])
+    asset.order = order
+    asset.save(update_fields=['order', 'updated_at'])
+    server_match = Q(order=order)
+    if asset.instance_id:
+        server_match |= Q(instance_id=asset.instance_id)
+    if asset.provider_resource_id:
+        server_match |= Q(provider_resource_id=asset.provider_resource_id)
+    server_count = Server.objects.filter(server_match).update(order=order, user=new_user, updated_at=timezone.now())
+    logger.info('CLOUD_MANUAL_OWNER_ORDER order_id=%s order_no=%s asset_id=%s public_ip=%s old_user=%s new_user=%s server_count=%s actor=%s', order.id, order.order_no, asset.id, asset.public_ip, old_label, new_label, server_count, actor)
+    record_cloud_ip_log(event_type='changed', order=order, asset=asset, public_ip=asset.public_ip, previous_public_ip=asset.previous_public_ip, note=f'{actor}: 人工编辑所属人 {old_label} -> {new_label}；操作订单 {order.order_no}；同步 Server {server_count} 条。')
+    return order, None
+
+
+def ensure_manual_expiry_operation_order(asset: CloudAsset, new_expires_at, actor: str = '后台人工编辑') -> tuple[CloudServerOrder | None, str | None]:
+    if not asset.user_id:
+        return None, '资产未绑定用户，无法生成订单支撑人工到期时间'
+    old_expires_at = asset.actual_expires_at
+    order = _create_manual_asset_operation_order(asset, asset.user, 'EXPIRY', new_expires_at)
+    if not order:
+        return None, '该地区没有可用套餐，无法创建操作订单'
+    order.provision_note = '\n'.join(filter(None, [
+        order.provision_note,
+        f'{actor}: 人工编辑到期时间 {_fmt_dt(old_expires_at)} -> {_fmt_dt(new_expires_at)}，生成独立操作订单支撑同步识别。',
+    ]))
+    order.save(update_fields=['provision_note', 'updated_at'])
+    asset.order = order
+    asset.actual_expires_at = new_expires_at
+    asset.save(update_fields=['order', 'actual_expires_at', 'updated_at'])
+    server_match = Q(order=order)
+    if asset.instance_id:
+        server_match |= Q(instance_id=asset.instance_id)
+    if asset.provider_resource_id:
+        server_match |= Q(provider_resource_id=asset.provider_resource_id)
+    server_count = Server.objects.filter(server_match).update(order=order, expires_at=new_expires_at, updated_at=timezone.now())
+    logger.info(
+        'CLOUD_MANUAL_EXPIRY_ORDER order_id=%s order_no=%s asset_id=%s public_ip=%s old_expires_at=%s new_expires_at=%s server_count=%s actor=%s',
+        order.id,
+        order.order_no,
+        asset.id,
+        asset.public_ip,
+        _fmt_dt(old_expires_at),
+        _fmt_dt(new_expires_at),
+        server_count,
+        actor,
+    )
+    record_cloud_ip_log(
+        event_type='changed',
+        order=order,
+        asset=asset,
+        public_ip=asset.public_ip,
+        previous_public_ip=asset.previous_public_ip,
+        note=f'{actor}: 人工编辑到期时间 {_fmt_dt(old_expires_at)} -> {_fmt_dt(new_expires_at)}；操作订单 {order.order_no}；同步 Server {server_count} 条。',
+    )
+    return order, None
+
+
 def _create_asset_operation_order(asset: CloudAsset, user_id: int) -> CloudServerOrder | None:
     provider = asset.provider or CloudServerPlan.PROVIDER_AWS_LIGHTSAIL
     region_code = asset.region_code or ''
@@ -1054,13 +1402,15 @@ def _create_asset_operation_order(asset: CloudAsset, user_id: int) -> CloudServe
         return None
     now = timezone.now()
     total_amount = Decimal(str(asset.price if asset.price is not None else plan.price))
+    account = asset.cloud_account or get_cloud_account_from_label(asset.account_label, provider)
+    account_label = asset.account_label or cloud_account_label(account)
     order = CloudServerOrder.objects.create(
         order_no=f'ASSET-{asset.id}-{now:%Y%m%d%H%M%S}',
         user_id=user_id,
         plan=plan,
         provider=provider,
-        cloud_account=asset.cloud_account,
-        account_label=asset.account_label,
+        cloud_account=account,
+        account_label=account_label,
         region_code=asset.region_code or plan.region_code,
         region_name=asset.region_name or plan.region_name,
         plan_name=asset.asset_name or plan.plan_name,
@@ -1138,8 +1488,9 @@ def ensure_cloud_asset_operation_order(asset_id: int, user_id: int):
     order.login_user = order.login_user or asset.login_user
     order.login_password = order.login_password or asset.login_password
     order.service_expires_at = order.service_expires_at or asset.actual_expires_at
-    order.cloud_account = order.cloud_account or asset.cloud_account
-    order.account_label = order.account_label or asset.account_label
+    account = asset.cloud_account or get_cloud_account_from_label(asset.account_label, order.provider)
+    order.cloud_account = order.cloud_account or account
+    order.account_label = order.account_label or asset.account_label or cloud_account_label(account)
     order.save(update_fields=[
         'user', 'status', 'provider', 'region_code', 'region_name', 'public_ip', 'previous_public_ip',
         'instance_id', 'provider_resource_id', 'mtproxy_port', 'mtproxy_link', 'proxy_links',
@@ -1147,6 +1498,73 @@ def ensure_cloud_asset_operation_order(asset_id: int, user_id: int):
         'cloud_account', 'account_label', 'updated_at',
     ])
     return order, None
+
+
+def _create_retained_ip_recovery_order(order: CloudServerOrder, days: int = 31):
+    if not (order.provider == 'aws_lightsail' and order.ip_recycle_at and (order.public_ip or order.previous_public_ip) and not order.instance_id):
+        return None, ''
+    if not order.static_ip_name:
+        static_ip_name = _resolve_aws_static_ip_name_for_order(order)
+        if static_ip_name:
+            order.static_ip_name = static_ip_name
+            order.save(update_fields=['static_ip_name', 'updated_at'])
+        else:
+            return None, '固定 IP 保留中，但缺少固定 IP 名称，无法自动恢复。'
+    if not order.mtproxy_secret:
+        return None, '固定 IP 保留中，但缺少旧 MTProxy 密钥，无法保持旧链接不变。'
+    existing = CloudServerOrder.objects.filter(replacement_for=order, status__in={'paid', 'provisioning', 'failed'}).order_by('-created_at', '-id').first()
+    if existing:
+        return existing, ''
+    fallback_plan = CloudServerPlan.objects.filter(
+        provider=order.provider,
+        region_code=order.region_code,
+        is_active=True,
+        plan_name=order.plan_name,
+    ).order_by('-sort_order', 'id').first() or order.plan
+    if not fallback_plan:
+        return None, '未找到可用同配置套餐，无法自动恢复服务器。'
+    now = timezone.now()
+    old_public_ip = order.public_ip or order.previous_public_ip or ''
+    suffix = now.strftime('%m%d%H%M%S')
+    new_order = CloudServerOrder.objects.create(
+        user_id=order.user_id,
+        order_no=_trim_operation_order_no(order, 'RECOVER', suffix),
+        plan_id=fallback_plan.id,
+        provider=fallback_plan.provider,
+        cloud_account=order.cloud_account,
+        account_label=order.account_label,
+        region_code=fallback_plan.region_code,
+        region_name=fallback_plan.region_name,
+        plan_name=fallback_plan.plan_name,
+        quantity=1,
+        currency=order.currency,
+        total_amount=order.total_amount,
+        pay_amount=order.pay_amount,
+        pay_method=order.pay_method,
+        status='paid',
+        lifecycle_days=days,
+        mtproxy_port=order.mtproxy_port or 9528,
+        mtproxy_secret=order.mtproxy_secret,
+        mtproxy_link=order.mtproxy_link,
+        proxy_links=order.proxy_links or [],
+        static_ip_name=order.static_ip_name,
+        replacement_for=order,
+        renew_extension_days=order.renew_extension_days,
+        last_user_id=order.last_user_id,
+        previous_public_ip=old_public_ip,
+        service_started_at=now,
+        service_expires_at=order.service_expires_at,
+        image_name=order.image_name,
+        provision_note='\n'.join(filter(None, [
+            f'固定 IP 保留期续费后自动恢复：来源订单 {order.order_no}；旧IP={old_public_ip or "-"}；旧端口={order.mtproxy_port or "-"}；旧secret={order.mtproxy_secret or "-"}；固定IP={order.static_ip_name or "-"}；新实例必须继承旧链接/旧 secret。',
+        ])),
+    )
+    order.provision_note = '\n'.join(filter(None, [
+        order.provision_note,
+        f'固定 IP 保留期续费成功，已创建自动恢复订单 {new_order.order_no}；新实例会绑定原固定 IP 并保持旧链接/旧 secret。',
+    ]))
+    order.save(update_fields=['provision_note', 'updated_at'])
+    return new_order, ''
 
 
 @sync_to_async
@@ -1157,35 +1575,69 @@ def create_cloud_server_renewal(order_id: int, user_id: int, days: int = 31):
     order = _hydrate_order_from_proxy_asset(order)
     if not _can_order_be_renewed(order):
         return False
+    retained_ip = bool(order.status == 'deleted' and order.ip_recycle_at and order.ip_recycle_at > timezone.now())
     order.status = 'renew_pending'
     order.lifecycle_days = days
     renewal_user = TelegramUser.objects.filter(id=user_id).first()
     order.pay_amount = _generate_unique_pay_amount(_renewal_price(order, renewal_user), order.currency)
     order.expired_at = timezone.now() + timezone.timedelta(minutes=30)
-    order.save(update_fields=['status', 'lifecycle_days', 'pay_amount', 'expired_at', 'updated_at'])
+    if retained_ip:
+        order.provision_note = '\n'.join(filter(None, [
+            order.provision_note,
+            f'未附加固定 IP 保留期内发起续费；IP={order.public_ip or order.previous_public_ip or "-"}；端口={order.mtproxy_port or "-"}；旧secret={order.mtproxy_secret or "-"}；IP回收时间={order.ip_recycle_at.isoformat()}。',
+        ]))
+        order.save(update_fields=['status', 'lifecycle_days', 'pay_amount', 'expired_at', 'provision_note', 'updated_at'])
+    else:
+        order.save(update_fields=['status', 'lifecycle_days', 'pay_amount', 'expired_at', 'updated_at'])
     return order
 
 
 @sync_to_async
-def apply_cloud_server_renewal(order_id: int, days: int = 31):
+def apply_cloud_server_renewal(order_id: int, days: int = 31, run_post_checks: bool = True):
     order = _hydrate_order_from_proxy_asset(CloudServerOrder.objects.get(id=order_id))
     ok, renew_note = _renew_aliyun_instance(order, days)
     if not ok:
         order.provision_note = renew_note
         order.save(update_fields=['provision_note', 'updated_at'])
         raise ValueError(renew_note)
-    base = order.service_expires_at or timezone.now()
-    if base < timezone.now():
-        base = timezone.now()
-    order.service_expires_at = base + timezone.timedelta(days=days)
-    order.last_renewed_at = timezone.now()
+    now = timezone.now()
+    order.service_started_at = now
+    order.service_expires_at = now + timezone.timedelta(days=days)
+    order.last_renewed_at = now
     order.delay_quota = max(int(order.delay_quota or 0), 0) + 1
     order.ip_change_quota = max(int(getattr(order, 'ip_change_quota', 0) or 0), 0) + 1
+    retained_ip = bool(order.status in {'deleted', 'renew_pending'} and order.ip_recycle_at and (order.public_ip or order.previous_public_ip) and not order.instance_id)
     order.status = 'completed'
-    order.provision_note = renew_note or f'续费成功，服务有效期已顺延 {days} 天。'
-    order.save(update_fields=['service_expires_at', 'renew_grace_expires_at', 'suspend_at', 'delete_at', 'ip_recycle_at', 'last_renewed_at', 'delay_quota', 'ip_change_quota', 'status', 'provision_note', 'updated_at'])
-    CloudAsset.objects.filter(order=order).update(actual_expires_at=order.service_expires_at, updated_at=timezone.now())
-    Server.objects.filter(order=order).update(expires_at=order.service_expires_at, updated_at=timezone.now())
+    retention_note = ''
+    post_notes = []
+    recovery_order = None
+    if retained_ip:
+        retention_note = f'未附加固定 IP 续费成功；保留IP={order.public_ip or order.previous_public_ip or "-"}；端口={order.mtproxy_port or "-"}；旧secret={order.mtproxy_secret or "-"}；系统将自动新建同配置服务器、绑定原固定 IP 并保持旧链接不变。'
+    elif run_post_checks:
+        start_ok, start_note = _ensure_aws_instance_running(order)
+        post_notes.append(start_note)
+        if start_ok:
+            mtproxy_ok, mtproxy_note = _ensure_mtproxy_after_renewal(order)
+            post_notes.append(mtproxy_note)
+        else:
+            post_notes.append('实例未确认运行，暂未执行 MTProxy 检查。')
+    else:
+        post_notes.append('续费后运行状态与 MTProxy 巡检已提交后台执行。')
+    order.provision_note = '\n'.join(filter(None, [renew_note or f'续费成功，服务有效期已从当前时间重新计算 {days} 天。', retention_note, *post_notes]))
+    order.save(update_fields=['service_started_at', 'service_expires_at', 'renew_grace_expires_at', 'suspend_at', 'delete_at', 'ip_recycle_at', 'last_renewed_at', 'delay_quota', 'ip_change_quota', 'status', 'provision_note', 'updated_at'])
+    if retained_ip:
+        recovery_order, recovery_err = _create_retained_ip_recovery_order(order, days)
+        if recovery_err:
+            order.provision_note = '\n'.join(filter(None, [order.provision_note, recovery_err]))
+            order.save(update_fields=['provision_note', 'updated_at'])
+            raise ValueError(recovery_err)
+    asset_update = {'actual_expires_at': order.service_expires_at, 'updated_at': timezone.now()}
+    server_update = {'expires_at': order.service_expires_at, 'updated_at': timezone.now()}
+    if retained_ip:
+        asset_update.update({'public_ip': order.public_ip or order.previous_public_ip, 'previous_public_ip': order.public_ip or order.previous_public_ip, 'provider_status': '未附加固定IP-续费保留中', 'is_active': False, 'note': order.provision_note})
+        server_update.update({'public_ip': order.public_ip or order.previous_public_ip, 'previous_public_ip': order.public_ip or order.previous_public_ip, 'provider_status': '未附加固定IP-续费保留中', 'is_active': False, 'note': order.provision_note})
+    CloudAsset.objects.filter(order=order).update(**asset_update)
+    Server.objects.filter(order=order).update(**server_update)
     record_cloud_ip_log(
         event_type=CloudIpLog.EVENT_RENEWED,
         order=order,
@@ -1193,7 +1645,7 @@ def apply_cloud_server_renewal(order_id: int, days: int = 31):
         previous_public_ip=order.previous_public_ip,
         note=f'服务器续费 {days} 天，新的服务到期时间：{order.service_expires_at:%Y-%m-%d %H:%M}；{renew_note}',
     )
-    return order
+    return recovery_order or order
 
 
 @sync_to_async
@@ -1223,7 +1675,7 @@ def pay_cloud_server_renewal_with_balance(order_id: int, user_id: int, currency:
         order.expired_at = None
         order.save(update_fields=['currency', 'pay_method', 'pay_amount', 'paid_at', 'expired_at', 'updated_at'])
         try:
-            order = apply_cloud_server_renewal.__wrapped__(order.id, days)
+            order = apply_cloud_server_renewal.__wrapped__(order.id, days, False)
         except Exception as exc:
             return None, str(exc)
         record_balance_ledger(
@@ -1237,6 +1689,33 @@ def pay_cloud_server_renewal_with_balance(order_id: int, user_id: int, currency:
             description=f'云服务器续费订单 #{order.order_no} 钱包支付',
         )
         return order, None
+
+
+@sync_to_async
+def run_cloud_server_renewal_postcheck(order_id: int):
+    order = CloudServerOrder.objects.filter(id=order_id).first()
+    if not order:
+        return None, '订单不存在'
+    order = _hydrate_order_from_proxy_asset(order)
+    if order.status not in {'completed', 'expiring', 'renew_pending'}:
+        return order, '订单当前状态不需要续费后巡检'
+    if order.ip_recycle_at and (order.public_ip or order.previous_public_ip) and not order.instance_id:
+        recovery_order, recovery_err = _create_retained_ip_recovery_order(order, int(order.lifecycle_days or 31))
+        if recovery_err:
+            return order, recovery_err
+        return recovery_order or order, '固定 IP 保留期续费，已进入自动恢复流程。'
+    notes = []
+    start_ok, start_note = _ensure_aws_instance_running(order)
+    notes.append(start_note)
+    if start_ok:
+        mtproxy_ok, mtproxy_note = _ensure_mtproxy_after_renewal(order)
+        notes.append(mtproxy_note)
+    else:
+        mtproxy_ok = False
+        notes.append('实例未确认运行，暂未执行 MTProxy 检查。')
+    order.provision_note = '\n'.join(filter(None, [order.provision_note, '续费后自动巡检：', *notes]))
+    order.save(update_fields=['provision_note', 'updated_at'])
+    return order, None if start_ok and mtproxy_ok else '\n'.join(filter(None, notes))
 
 
 @sync_to_async
@@ -1278,15 +1757,24 @@ def mark_cloud_server_ip_change_requested(order_id: int, user_id: int, region_co
         ).order_by('-sort_order', 'id').first()
     if not fallback_plan:
         return False
+    if not order.mtproxy_secret:
+        return False
     target_port = port or order.mtproxy_port or 9528
     original_service_expires_at = order.service_expires_at
     remaining_ip_changes -= 1
     now = timezone.now()
     migration_due_at = now + timezone.timedelta(days=5)
     ip_recycle_at = migration_due_at + timezone.timedelta(days=15)
+    old_public_ip = order.public_ip or order.previous_public_ip or ''
+    old_port = order.mtproxy_port or target_port
+    old_secret = order.mtproxy_secret or ''
+    old_trace_note = (
+        f'更换 IP 追溯：来源订单 {order.order_no}；旧IP={old_public_ip or "-"}；旧端口={old_port or "-"}；'
+        f'旧secret={old_secret or "-"}；新订单为同配置服务器，会申请并绑定新的固定 IP；新订单必须继承旧 secret，用户提供链接时必须逐项对照 IP/端口/secret。'
+    )
     new_order = CloudServerOrder.objects.create(
         user_id=order.user_id,
-        order_no=f'{order.order_no}-IP',
+        order_no=_trim_operation_order_no(order, 'IP'),
         plan_id=fallback_plan.id,
         provider=fallback_plan.provider,
         region_code=fallback_plan.region_code,
@@ -1300,6 +1788,10 @@ def mark_cloud_server_ip_change_requested(order_id: int, user_id: int, region_co
         status='paid',
         lifecycle_days=order.lifecycle_days,
         mtproxy_port=target_port,
+        mtproxy_secret=order.mtproxy_secret,
+        mtproxy_link=order.mtproxy_link,
+        proxy_links=order.proxy_links or [],
+        static_ip_name='',
         service_started_at=order.service_started_at or now,
         service_expires_at=original_service_expires_at,
         migration_due_at=migration_due_at,
@@ -1307,46 +1799,87 @@ def mark_cloud_server_ip_change_requested(order_id: int, user_id: int, region_co
         renew_extension_days=order.renew_extension_days,
         ip_change_quota=remaining_ip_changes,
         last_user_id=order.last_user_id,
+        previous_public_ip=old_public_ip,
         server_name=order.server_name,
         image_name=order.image_name,
-        provision_note='\n'.join(filter(None, [order.provision_note, f'由订单 {order.order_no} 发起更换 IP，新服务器地区: {fallback_plan.region_name}，端口: {target_port}，需在 5 天内完成迁移。'])),
+        provision_note='\n'.join(filter(None, [order.provision_note, f'由订单 {order.order_no} 发起更换 IP，新建同配置服务器，地区: {fallback_plan.region_name}，端口: {target_port}，会申请并绑定新的固定 IP，需在 5 天内切换使用。', old_trace_note])),
     )
-    order.provision_note = '\n'.join(filter(None, [order.provision_note, f'已发起更换 IP，新实例订单: {new_order.order_no}。新服务器继承旧服务器原到期时间；旧服务器将于 {migration_due_at:%Y-%m-%d %H:%M} 到期并关机删除，删除后 IP 继续保留至 {ip_recycle_at:%Y-%m-%d %H:%M}。']))
-    order.migration_due_at = migration_due_at
-    order.service_expires_at = migration_due_at
-    order.suspend_at = migration_due_at
-    order.delete_at = migration_due_at
-    order.renew_grace_expires_at = migration_due_at
-    order.ip_recycle_at = ip_recycle_at
     order.ip_change_quota = remaining_ip_changes
-    CloudServerOrder.objects.filter(id=order.id).update(
-        provision_note=order.provision_note,
-        migration_due_at=migration_due_at,
-        service_expires_at=migration_due_at,
-        suspend_at=migration_due_at,
-        delete_at=migration_due_at,
-        renew_grace_expires_at=migration_due_at,
-        ip_recycle_at=ip_recycle_at,
-        ip_change_quota=remaining_ip_changes,
-        updated_at=timezone.now(),
+    order.save(update_fields=['ip_change_quota', 'updated_at'])
+    _set_source_migration_expiry(
+        order,
+        migration_due_at,
+        '更换 IP 新建同配置服务器，旧机到期时间调整',
+        f'已发起更换 IP，新实例订单: {new_order.order_no}。旧机追溯：旧IP={old_public_ip or "-"}；旧端口={old_port or "-"}；旧secret={old_secret or "-"}。新服务器为同配置服务器，会申请并绑定新的固定 IP，同时继承旧服务器原到期时间和旧 secret；旧服务器服务到期时间调整为 {migration_due_at:%Y-%m-%d %H:%M}，宽限 3 天后删除，删除后旧 IP 继续保留至 {ip_recycle_at:%Y-%m-%d %H:%M}。'
     )
-    CloudAsset.objects.filter(order=order).update(actual_expires_at=migration_due_at, updated_at=timezone.now())
-    Server.objects.filter(order=order).update(expires_at=migration_due_at, updated_at=timezone.now())
     return new_order
 
 
+def _resolve_aws_static_ip_name_for_order(order: CloudServerOrder) -> str:
+    public_ip = str(order.public_ip or '').strip()
+    if order.provider != 'aws_lightsail' or not public_ip:
+        return ''
+    account = getattr(order, 'cloud_account', None) or get_active_cloud_account('aws', order.region_code)
+    access_key = ''
+    secret_key = ''
+    if account:
+        ak = (account.access_key_plain or '').strip()
+        sk = (account.secret_key_plain or '').strip()
+        if ak and sk and len(ak) >= 16 and len(sk) >= 36:
+            access_key, secret_key = ak, sk
+    if not access_key or not secret_key:
+        access_key = os.getenv('AWS_ACCESS_KEY_ID', '')
+        secret_key = os.getenv('AWS_SECRET_ACCESS_KEY', '')
+    if not access_key or not secret_key:
+        logger.warning('AWS 固定 IP 名称反查失败: order=%s ip=%s reason=missing_credentials', order.order_no, public_ip)
+        return ''
+    try:
+        import boto3
+        client = boto3.client('lightsail', region_name=order.region_code or 'ap-southeast-1', aws_access_key_id=access_key, aws_secret_access_key=secret_key)
+        token = None
+        while True:
+            kwargs = {'pageToken': token} if token else {}
+            response = client.get_static_ips(**kwargs)
+            for item in response.get('staticIps') or []:
+                if str(item.get('ipAddress') or '').strip() == public_ip:
+                    name = str(item.get('name') or '').strip()
+                    logger.info('AWS 固定 IP 名称反查成功: order=%s ip=%s static_ip_name=%s attached_to=%s', order.order_no, public_ip, name, item.get('attachedTo') or '')
+                    return name
+            token = response.get('nextPageToken')
+            if not token:
+                break
+    except Exception as exc:
+        logger.warning('AWS 固定 IP 名称反查失败: order=%s ip=%s error=%s', order.order_no, public_ip, exc)
+    return ''
+
+
 def create_cloud_server_rebuild_order(order_id: int):
-    order = CloudServerOrder.objects.filter(id=order_id).first()
+    order = CloudServerOrder.objects.select_related('cloud_account').filter(id=order_id).first()
     if not order:
         return None, '服务器记录不存在'
     if order.provider != 'aws_lightsail':
         return None, '当前仅支持 AWS Lightsail 重装迁移'
-    if order.status not in {'completed', 'expiring', 'suspended', 'failed'}:
+    if order.status not in {'completed', 'expiring', 'renew_pending', 'suspended', 'failed'}:
         return None, '当前状态不允许发起重装'
     if not order.static_ip_name:
-        return None, '当前服务器没有固定 IP，无法保证链接不变'
+        static_ip_name = _resolve_aws_static_ip_name_for_order(order)
+        if static_ip_name:
+            order.static_ip_name = static_ip_name
+            order.save(update_fields=['static_ip_name', 'updated_at'])
+        else:
+            return None, '当前服务器没有固定 IP 名称，无法保证链接不变'
     if not order.mtproxy_secret:
         return None, '当前服务器缺少 MTProxy 密钥，无法保证链接不变'
+    existing_rebuild = CloudServerOrder.objects.filter(
+        replacement_for=order,
+        status__in={'paid', 'provisioning', 'failed'},
+    ).order_by('-created_at', '-id').first()
+    if existing_rebuild:
+        if existing_rebuild.cloud_account_id != order.cloud_account_id or existing_rebuild.account_label != order.account_label:
+            existing_rebuild.cloud_account = order.cloud_account
+            existing_rebuild.account_label = order.account_label
+            existing_rebuild.save(update_fields=['cloud_account', 'account_label', 'updated_at'])
+        return existing_rebuild, None
     fallback_plan = CloudServerPlan.objects.filter(
         provider=order.provider,
         region_code=order.region_code,
@@ -1355,12 +1888,23 @@ def create_cloud_server_rebuild_order(order_id: int):
     ).order_by('-sort_order', 'id').first() or order.plan
     if not fallback_plan:
         return None, '未找到可用同配置套餐'
-    suffix = timezone.now().strftime('%m%d%H%M%S')
+    now = timezone.now()
+    suffix = now.strftime('%m%d%H%M%S')
+    migration_due_at = now + timezone.timedelta(days=3)
+    old_public_ip = order.public_ip or order.previous_public_ip or ''
+    old_port = order.mtproxy_port or 9528
+    old_secret = order.mtproxy_secret or ''
+    old_trace_note = (
+        f'重装迁移追溯：来源订单 {order.order_no}；旧IP={old_public_ip or "-"}；旧端口={old_port or "-"}；'
+        f'旧secret={old_secret or "-"}；固定IP={order.static_ip_name or "-"}；新订单必须继承旧 secret，用户提供链接时必须逐项对照 IP/端口/secret。'
+    )
     new_order = CloudServerOrder.objects.create(
         user_id=order.user_id,
-        order_no=f'{order.order_no}-REBUILD-{suffix}',
+        order_no=_trim_operation_order_no(order, 'REBUILD', suffix),
         plan_id=fallback_plan.id,
         provider=fallback_plan.provider,
+        cloud_account=order.cloud_account,
+        account_label=order.account_label,
         region_code=fallback_plan.region_code,
         region_name=fallback_plan.region_name,
         plan_name=fallback_plan.plan_name,
@@ -1379,14 +1923,19 @@ def create_cloud_server_rebuild_order(order_id: int):
         replacement_for=order,
         renew_extension_days=order.renew_extension_days,
         last_user_id=order.last_user_id,
+        previous_public_ip=old_public_ip,
         service_started_at=order.service_started_at,
         service_expires_at=order.service_expires_at,
         server_name=order.server_name,
         image_name=order.image_name,
-        provision_note='\n'.join(filter(None, [order.provision_note, f'后台发起重装迁移，目标要求：保留固定 IP {order.static_ip_name}，保持 MTProxy 链接不变。'])),
+        provision_note='\n'.join(filter(None, [order.provision_note, f'后台发起重装迁移：新实例创建时不申请临时固定 IP，创建成功后直接迁移原固定 IP {order.static_ip_name}，再安装代理。', old_trace_note])),
     )
-    order.provision_note = '\n'.join(filter(None, [order.provision_note, f'已发起重装迁移，新实例订单: {new_order.order_no}，固定 IP 将切换到新实例。']))
-    order.save(update_fields=['provision_note', 'updated_at'])
+    _set_source_migration_expiry(
+        order,
+        migration_due_at,
+        '重装/重建迁移旧机到期时间调整',
+        f'已发起重装迁移，新实例订单: {new_order.order_no}。旧机追溯：旧IP={old_public_ip or "-"}；旧端口={old_port or "-"}；旧secret={old_secret or "-"}；固定IP={order.static_ip_name or "-"}。旧实例服务到期时间调整为 {migration_due_at:%Y-%m-%d %H:%M}，宽限 3 天后删除，删除后固定 IP 保留 15 天；新机创建后会先迁移固定 IP {order.static_ip_name}，并强制沿用旧 secret 安装代理。'
+    )
     return new_order, None
 
 
@@ -1395,15 +1944,18 @@ def mark_cloud_server_reinit_requested(order_id: int, user_id: int):
     order = CloudServerOrder.objects.filter(id=order_id, user_id=user_id).first()
     if not order:
         return None
-    is_unfinished = order.status in {'paid', 'provisioning', 'failed'}
-    if not is_unfinished and (not order.public_ip or not order.login_password):
-        return False
-    if not is_unfinished and not _has_main_proxy_link(order):
+    is_unfinished = order.status in {'paid', 'provisioning', 'failed'} and not order.replacement_for_id
+    if is_unfinished:
+        note = '用户发起继续初始化请求，允许重新生成代理链接。'
+        order.provision_note = '\n'.join(filter(None, [order.provision_note, note]))
+        order.save(update_fields=['provision_note', 'updated_at'])
+        return order
+    if not _has_main_proxy_link(order):
         return 'missing_main_link'
-    note = '用户发起继续初始化请求，允许重新生成代理链接。' if is_unfinished else '用户发起重试初始化请求，要求主/备用代理链接保持不变。'
-    order.provision_note = '\n'.join(filter(None, [order.provision_note, note]))
-    order.save(update_fields=['provision_note', 'updated_at'])
-    return order
+    rebuild_order, err = create_cloud_server_rebuild_order(order.id)
+    if err:
+        return err
+    return rebuild_order
 
 
 def _has_main_proxy_link(order: CloudServerOrder) -> bool:
@@ -1480,9 +2032,17 @@ def create_cloud_server_upgrade_order(order_id: int, user_id: int, target_plan_i
         user.balance = current_balance - diff
         user.save(update_fields=['balance', 'updated_at'])
         suffix = timezone.now().strftime('%m%d%H%M%S')
+        old_public_ip = order.public_ip or order.previous_public_ip or ''
+        old_port = order.mtproxy_port or 9528
+        old_secret = order.mtproxy_secret or ''
+        old_trace_note = (
+            f'升级配置追溯：来源订单 {order.order_no}；旧IP={old_public_ip or "-"}；旧端口={old_port or "-"}；'
+            f'旧secret={old_secret or "-"}；固定IP={order.static_ip_name or "-"}；'
+            f'配置 {order.plan_name} -> {target_plan.plan_name}；补差价 {diff} USDT；新订单必须继承旧 secret，用户提供链接时必须逐项对照 IP/端口/secret。'
+        )
         new_order = CloudServerOrder.objects.create(
             user_id=order.user_id,
-            order_no=f'{order.order_no}-UPGRADE-{suffix}',
+            order_no=_trim_operation_order_no(order, 'UPGRADE', suffix),
             plan=target_plan,
             provider=target_plan.provider,
             cloud_account=order.cloud_account,
@@ -1505,15 +2065,16 @@ def create_cloud_server_upgrade_order(order_id: int, user_id: int, target_plan_i
             static_ip_name=order.static_ip_name,
             replacement_for=order,
             last_user_id=order.last_user_id,
+            previous_public_ip=old_public_ip,
             service_started_at=order.service_started_at or timezone.now(),
             service_expires_at=target_expiry,
             server_name=order.server_name,
             image_name=order.image_name,
             paid_at=timezone.now(),
-            provision_note='\n'.join(filter(None, [order.provision_note, f'用户发起升级配置：{order.plan_name} -> {target_plan.plan_name}，补差价 {diff} USDT，目标到期 {target_expiry:%Y-%m-%d %H:%M}，保持主/备用代理链路不变。'])),
+            provision_note='\n'.join(filter(None, [order.provision_note, f'用户发起升级配置：{order.plan_name} -> {target_plan.plan_name}，补差价 {diff} USDT，目标到期 {target_expiry:%Y-%m-%d %H:%M}，保持主/备用代理链路不变。', old_trace_note])),
         )
         record_balance_ledger(user, ledger_type='cloud_order_balance_pay', currency='USDT', old_balance=old_balance, new_balance=user.balance, related_type='cloud_order', related_id=new_order.id, description=f'云服务器升级补差价 #{new_order.order_no}')
-        order.provision_note = '\n'.join(filter(None, [order.provision_note, f'已发起升级配置，新实例订单: {new_order.order_no}，补差价 {diff} USDT。']))
+        order.provision_note = '\n'.join(filter(None, [order.provision_note, f'已发起升级配置，新实例订单: {new_order.order_no}，补差价 {diff} USDT。旧机追溯：旧IP={old_public_ip or "-"}；旧端口={old_port or "-"}；旧secret={old_secret or "-"}；固定IP={order.static_ip_name or "-"}；新配置={target_plan.plan_name}；新服务器必须继承旧 secret。']))
         order.save(update_fields=['provision_note', 'updated_at'])
     return new_order, None
 
@@ -1582,6 +2143,19 @@ def mute_cloud_reminders(user_id: int, days: int = 3):
 
 
 @sync_to_async
+def mute_cloud_order_reminders(order_id: int, user_id: int):
+    order = CloudServerOrder.objects.filter(id=order_id, user_id=user_id).first()
+    if not order:
+        return None
+    order.cloud_reminder_enabled = False
+    order.suspend_reminder_enabled = False
+    order.delete_reminder_enabled = False
+    order.ip_recycle_reminder_enabled = False
+    order.save(update_fields=['cloud_reminder_enabled', 'suspend_reminder_enabled', 'delete_reminder_enabled', 'ip_recycle_reminder_enabled', 'updated_at'])
+    return order
+
+
+@sync_to_async
 def unmute_cloud_reminders(user_id: int):
     user = TelegramUser.objects.filter(id=user_id).first()
     if not user:
@@ -1604,7 +2178,17 @@ def get_user_reminder_summary(user_id: int):
     )
     auto_renew_count = sum(1 for order in cloud_orders if order.auto_renew_enabled)
     cloud_reminder_count = sum(1 for order in cloud_orders if getattr(order, 'cloud_reminder_enabled', True))
-    cloud_reminder_enabled = any(getattr(order, 'cloud_reminder_enabled', True) for order in cloud_orders)
+    suspend_reminder_count = sum(1 for order in cloud_orders if getattr(order, 'suspend_reminder_enabled', True))
+    delete_reminder_count = sum(1 for order in cloud_orders if getattr(order, 'delete_reminder_enabled', True))
+    ip_recycle_reminder_count = sum(1 for order in cloud_orders if getattr(order, 'ip_recycle_reminder_enabled', True))
+    cloud_reminder_enabled = any(
+        getattr(order, 'cloud_reminder_enabled', True)
+        or getattr(order, 'suspend_reminder_enabled', True)
+        or getattr(order, 'delete_reminder_enabled', True)
+        or getattr(order, 'ip_recycle_reminder_enabled', True)
+        or getattr(order, 'auto_renew_enabled', False)
+        for order in cloud_orders
+    )
     return {
         'user': user,
         'cloud_orders': cloud_orders,
@@ -1612,6 +2196,9 @@ def get_user_reminder_summary(user_id: int):
         'muted_until': muted_until,
         'auto_renew_count': auto_renew_count,
         'cloud_reminder_count': cloud_reminder_count,
+        'suspend_reminder_count': suspend_reminder_count,
+        'delete_reminder_count': delete_reminder_count,
+        'ip_recycle_reminder_count': ip_recycle_reminder_count,
     }
 
 
@@ -1622,8 +2209,15 @@ def mute_all_user_reminders(user_id: int, days: int = 3650):
         return None
     user.cloud_reminder_muted_until = None
     user.save(update_fields=['cloud_reminder_muted_until', 'updated_at'])
-    cloud_updated = CloudServerOrder.objects.filter(user_id=user_id).update(cloud_reminder_enabled=False, auto_renew_enabled=False, updated_at=timezone.now())
-    return {'user': user, 'cloud_reminders_closed': cloud_updated}
+    cloud_updated = CloudServerOrder.objects.filter(user_id=user_id).update(
+        cloud_reminder_enabled=False,
+        suspend_reminder_enabled=False,
+        delete_reminder_enabled=False,
+        ip_recycle_reminder_enabled=False,
+        auto_renew_enabled=False,
+        updated_at=timezone.now(),
+    )
+    return {'user': user, 'cloud_reminders_closed': cloud_updated, 'cloud_auto_renew_closed': cloud_updated}
 
 
 @sync_to_async
@@ -1634,28 +2228,39 @@ def unmute_all_user_reminders(user_id: int):
     user.cloud_reminder_muted_until = None
     user.save(update_fields=['cloud_reminder_muted_until', 'updated_at'])
     cloud_orders = CloudServerOrder.objects.filter(user_id=user_id).exclude(status__in=['cancelled', 'refunded', 'deleted'])
-    cloud_reminder_updated = cloud_orders.update(cloud_reminder_enabled=True, updated_at=timezone.now())
-    auto_renew_updated = 0
-    for order in cloud_orders:
-        if _can_order_be_renewed(order) and not order.auto_renew_enabled:
-            order.auto_renew_enabled = True
-            order.save(update_fields=['auto_renew_enabled', 'updated_at'])
-            auto_renew_updated += 1
+    cloud_reminder_updated = cloud_orders.update(
+        cloud_reminder_enabled=True,
+        suspend_reminder_enabled=True,
+        delete_reminder_enabled=True,
+        ip_recycle_reminder_enabled=True,
+        updated_at=timezone.now(),
+    )
+    renewable_ids = [order.id for order in cloud_orders if _can_order_be_renewed(order)]
+    auto_renew_updated = CloudServerOrder.objects.filter(id__in=renewable_ids).update(auto_renew_enabled=True, updated_at=timezone.now()) if renewable_ids else 0
     return {'user': user, 'cloud_reminders_opened': cloud_reminder_updated, 'cloud_auto_renew_opened': auto_renew_updated}
 
 
 @sync_to_async
-def set_cloud_order_reminder(order_id: int, user_id: int, enabled: bool):
+def set_cloud_order_reminder(order_id: int, user_id: int, enabled: bool, reminder_type: str = 'expiry'):
     order = CloudServerOrder.objects.filter(id=order_id, user_id=user_id).first()
     if not order:
+        return None
+    field_map = {
+        'expiry': 'cloud_reminder_enabled',
+        'suspend': 'suspend_reminder_enabled',
+        'delete': 'delete_reminder_enabled',
+        'ip_recycle': 'ip_recycle_reminder_enabled',
+    }
+    field_name = field_map.get(reminder_type or 'expiry')
+    if not field_name:
         return None
     if enabled:
         user = TelegramUser.objects.filter(id=user_id).first()
         if user and user.cloud_reminder_muted_until:
             user.cloud_reminder_muted_until = None
             user.save(update_fields=['cloud_reminder_muted_until', 'updated_at'])
-    order.cloud_reminder_enabled = enabled
-    order.save(update_fields=['cloud_reminder_enabled', 'updated_at'])
+    setattr(order, field_name, enabled)
+    order.save(update_fields=[field_name, 'updated_at'])
     return order
 
 
@@ -1725,6 +2330,7 @@ __all__ = [
     'mark_cloud_server_ip_change_requested',
     'mark_cloud_server_reinit_requested',
     'mute_all_user_reminders',
+    'mute_cloud_order_reminders',
     'mute_cloud_reminders',
     'pay_cloud_server_order_with_balance',
     'pay_cloud_server_renewal_with_balance',

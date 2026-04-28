@@ -1,6 +1,7 @@
 import logging
 
-from aiogram.types import InlineKeyboardButton
+from django.utils import timezone
+from aiogram.types import InlineKeyboardButton, KeyboardButton
 from aiogram.utils.keyboard import InlineKeyboardBuilder, ReplyKeyboardBuilder
 
 from core.formatters import fmt_amount
@@ -23,17 +24,61 @@ def _log_inline_keyboard(name: str, markup, **context):
     return markup
 
 
+def _format_local_date(value):
+    if not value:
+        return '未设置'
+    try:
+        return timezone.localtime(value).strftime('%Y-%m-%d')
+    except Exception:
+        return str(value)
+
+
 def main_menu():
     from core.button_config import load_button_config
 
     config = load_button_config()
     row_size = config.get('row_size') or 2
     kb = ReplyKeyboardBuilder()
-    labels = [item['label'] for item in config.get('items', []) if item.get('enabled', True)]
-    for label in labels:
-        kb.button(text=label)
-    kb.adjust(*([row_size] * max(1, len(labels))))
+    items = [item for item in config.get('items', []) if item.get('enabled', True)]
+    for item in items:
+        label = str(item.get('label') or '').strip()
+        if not label:
+            continue
+        url = str(item.get('url') or '').strip() if item.get('type') == 'link' else ''
+        if url:
+            try:
+                kb.add(KeyboardButton(text=label, web_app=None))
+            except TypeError:
+                kb.button(text=label)
+        else:
+            kb.button(text=label)
+    kb.adjust(*([row_size] * max(1, len(items))))
     return kb.as_markup(resize_keyboard=True)
+
+
+def configured_link_for_label(label: str) -> dict | None:
+    from core.button_config import load_button_config
+
+    target = str(label or '').strip()
+    for item in load_button_config().get('items', []):
+        if not item.get('enabled', True) or item.get('type') != 'link':
+            continue
+        if str(item.get('label') or '').strip() == target:
+            return item
+    return None
+
+
+def configured_link_menu(label: str):
+    item = configured_link_for_label(label)
+    if not item:
+        return None
+    url = str(item.get('url') or '').strip()
+    if not url:
+        return None
+    kb = InlineKeyboardBuilder()
+    kb.row(InlineKeyboardButton(text=str(item.get('button_label') or item.get('label') or '打开链接'), url=url))
+    kb.row(InlineKeyboardButton(text='🔙 返回主菜单', callback_data='profile:back'))
+    return _log_inline_keyboard('configured_link_menu', kb.as_markup(), label=label, url=url)
 
 
 
@@ -65,16 +110,15 @@ def reminder_list_menu(orders=None, is_muted: bool = False, page: int = 1, total
     kb = InlineKeyboardBuilder()
     kb.row(
         InlineKeyboardButton(text='🔔 一键开启全部提醒', callback_data='profile:reminders:unmuteall'),
-        InlineKeyboardButton(text='🔕 一键关闭所有提醒', callback_data='profile:reminders:muteall'),
+        InlineKeyboardButton(text='🔕 一键关闭全部提醒', callback_data='profile:reminders:muteall'),
     )
     for order in orders or []:
         label = order.public_ip or order.previous_public_ip or order.order_no
-        if len(str(label)) > 18:
-            label = f'{str(label)[:15]}...'
-        if getattr(order, 'cloud_reminder_enabled', True):
-            kb.row(InlineKeyboardButton(text=f'🔕 关闭 {label} 提醒', callback_data=f'profile:reminders:order:off:{order.id}:{page}'))
-        else:
-            kb.row(InlineKeyboardButton(text=f'🔔 开启 {label} 提醒', callback_data=f'profile:reminders:order:on:{order.id}:{page}'))
+        if len(str(label)) > 22:
+            label = f'{str(label)[:19]}...'
+        enabled_count = sum(1 for field in ('cloud_reminder_enabled', 'suspend_reminder_enabled', 'delete_reminder_enabled', 'ip_recycle_reminder_enabled') if getattr(order, field, True))
+        auto = '⚡' if getattr(order, 'auto_renew_enabled', False) else '⏸'
+        kb.row(InlineKeyboardButton(text=f'🌐 {label}  提醒{enabled_count}/4 {auto}', callback_data=f'profile:reminders:ip:{order.id}:{page}'))
     nav = []
     if page > 1:
         nav.append(InlineKeyboardButton(text='⬅️ 上一页', callback_data=f'profile:reminders:page:{page - 1}'))
@@ -83,6 +127,31 @@ def reminder_list_menu(orders=None, is_muted: bool = False, page: int = 1, total
     nav.append(InlineKeyboardButton(text='🔙 返回个人中心', callback_data='profile:back_to_menu'))
     kb.row(*nav)
     return _log_inline_keyboard('reminder_list_menu', kb.as_markup(), is_muted=is_muted, order_count=len(orders or []), page=page, total_pages=total_pages)
+
+
+def reminder_ip_detail_menu(order, page: int = 1):
+    kb = InlineKeyboardBuilder()
+    reminder_enabled = bool(getattr(order, 'cloud_reminder_enabled', True))
+    suspend_enabled = bool(getattr(order, 'suspend_reminder_enabled', True))
+    delete_enabled = bool(getattr(order, 'delete_reminder_enabled', True))
+    ip_recycle_enabled = bool(getattr(order, 'ip_recycle_reminder_enabled', True))
+    auto_enabled = bool(getattr(order, 'auto_renew_enabled', False))
+    for reminder_type, label, enabled in (
+        ('expiry', '到期提醒', reminder_enabled),
+        ('suspend', '停机提醒', suspend_enabled),
+        ('delete', '删机提醒', delete_enabled),
+        ('ip_recycle', 'IP保留期提醒', ip_recycle_enabled),
+    ):
+        kb.row(InlineKeyboardButton(
+            text=f'{"🔕 关闭" if enabled else "🔔 开启"}{label}',
+            callback_data=f'profile:reminders:order:{reminder_type}:{"off" if enabled else "on"}:{order.id}:{page}',
+        ))
+    kb.row(InlineKeyboardButton(
+        text='⏸ 关闭自动续费提醒/续费' if auto_enabled else '⚡ 开启自动续费提醒/续费',
+        callback_data=f'profile:reminders:auto:{"off" if auto_enabled else "on"}:{order.id}:{page}',
+    ))
+    kb.row(InlineKeyboardButton(text='🔙 返回提醒列表', callback_data=f'profile:reminders:page:{page}'))
+    return _log_inline_keyboard('reminder_ip_detail_menu', kb.as_markup(), order_id=getattr(order, 'id', None), page=page, reminder_enabled=reminder_enabled, suspend_enabled=suspend_enabled, delete_enabled=delete_enabled, ip_recycle_enabled=ip_recycle_enabled, auto_enabled=auto_enabled)
 
 
 def monitor_menu():
@@ -128,8 +197,12 @@ def monitor_detail(monitor_id: int, monitor_transfers: bool = True, monitor_reso
 def monitor_threshold_currency(monitor_id: int):
     kb = InlineKeyboardBuilder()
     kb.row(
-        InlineKeyboardButton(text='💵 USDT', callback_data=f'mon:setthr:{monitor_id}:USDT'),
-        InlineKeyboardButton(text='🪙 TRX', callback_data=f'mon:setthr:{monitor_id}:TRX'),
+        InlineKeyboardButton(text='💵 USDT转账', callback_data=f'mon:setthr:{monitor_id}:USDT'),
+        InlineKeyboardButton(text='🪙 TRX转账', callback_data=f'mon:setthr:{monitor_id}:TRX'),
+    )
+    kb.row(
+        InlineKeyboardButton(text='⚡ 能量增加', callback_data=f'mon:setthr:{monitor_id}:ENERGY'),
+        InlineKeyboardButton(text='📶 带宽增加', callback_data=f'mon:setthr:{monitor_id}:BANDWIDTH'),
     )
     kb.row(InlineKeyboardButton(text='🔙 返回', callback_data=f'mon:detail:{monitor_id}'))
     return kb.as_markup()
@@ -307,8 +380,8 @@ def cloud_server_list(orders, page: int = 1, total_pages: int = 1, prefix: str =
     for order in orders:
         ip = order.public_ip or order.previous_public_ip
         label = ip or getattr(order, 'order_no', None) or f'订单 {order.id}'
-        expires_at = getattr(order, 'service_expires_at', None)
-        expires = expires_at.strftime('%Y-%m-%d') if expires_at else '未设置'
+        expires_at = getattr(order, 'service_expires_at', None) or getattr(order, 'actual_expires_at', None) or getattr(order, 'expires_at', None)
+        expires = _format_local_date(expires_at)
         item_kind = getattr(order, '_proxy_item_kind', '')
         if item_kind in {'asset', 'server'}:
             callback_data = f'cloud:assetdetail:{item_kind}:{order.id}:{prefix}:{page}'
@@ -335,6 +408,40 @@ def cloud_server_list(orders, page: int = 1, total_pages: int = 1, prefix: str =
     )
 
 
+def _support_contact_url() -> str:
+    try:
+        from core.button_config import load_button_config
+        items = load_button_config().get('items', [])
+    except Exception:
+        return ''
+    preferred_keys = {'contact_support', 'support_contact', 'customer_service', 'support'}
+    for item in items:
+        if not item.get('enabled', True) or item.get('type') != 'link':
+            continue
+        key = str(item.get('key') or '').strip()
+        label = str(item.get('label') or item.get('button_label') or '').strip()
+        if key in preferred_keys or '客服' in label or '联系人工' in label or '联系' in label and '人工' in label:
+            return str(item.get('url') or '').strip()
+    return ''
+
+
+def support_contact_button(context: str, target_id: int | str | None = None, text: str = '👩‍💻 联系客服') -> InlineKeyboardButton:
+    url = _support_contact_url()
+    if url:
+        return InlineKeyboardButton(text=text, url=url)
+    suffix = f':{target_id}' if target_id not in (None, '') else ''
+    return InlineKeyboardButton(text=text, callback_data=f'support:contact:{context}{suffix}')
+
+
+def cloud_lifecycle_notice_actions(order_id: int, context: str = 'cloud_lifecycle'):
+    kb = InlineKeyboardBuilder()
+    kb.row(
+        InlineKeyboardButton(text='🔕 关闭提醒', callback_data=f'cloud:mute:{order_id}'),
+        support_contact_button(context, order_id),
+    )
+    return _log_inline_keyboard('cloud_lifecycle_notice_actions', kb.as_markup(), order_id=order_id, context=context)
+
+
 def cloud_expiry_actions(order_id: int):
     kb = InlineKeyboardBuilder()
     kb.row(
@@ -342,8 +449,8 @@ def cloud_expiry_actions(order_id: int):
         InlineKeyboardButton(text='⛔ 关闭自动续费', callback_data=f'cloud:autorenew:off:{order_id}'),
     )
     kb.row(
-        InlineKeyboardButton(text='🔕 关闭提醒3天', callback_data=f'cloud:mute:{order_id}:3'),
-        InlineKeyboardButton(text='👩‍💻 联系客服', callback_data=f'support:contact:cloud_expiry:{order_id}'),
+        InlineKeyboardButton(text='🔕 关闭提醒', callback_data=f'cloud:mute:{order_id}'),
+        support_contact_button('cloud_expiry', order_id),
     )
     return _log_inline_keyboard('cloud_expiry_actions', kb.as_markup(), order_id=order_id)
 
@@ -351,7 +458,10 @@ def cloud_expiry_actions(order_id: int):
 def cloud_auto_renew_notice_actions(order_id: int):
     kb = InlineKeyboardBuilder()
     kb.row(InlineKeyboardButton(text='⛔ 关闭自动续费', callback_data=f'cloud:autorenew:off:{order_id}'))
-    kb.row(InlineKeyboardButton(text='👩‍💻 联系客服', callback_data=f'support:contact:cloud_autorenew:{order_id}'))
+    kb.row(
+        InlineKeyboardButton(text='🔕 关闭提醒', callback_data=f'cloud:mute:{order_id}'),
+        support_contact_button('cloud_autorenew', order_id),
+    )
     return _log_inline_keyboard('cloud_auto_renew_notice_actions', kb.as_markup(), order_id=order_id)
 
 
@@ -449,7 +559,7 @@ def cloud_order_list(orders, page: int = 1, total_pages: int = 1, prefix: str = 
 
 def cloud_order_readonly_detail(order_id: int, back_callback: str = 'profile:orders:cloud:page:1'):
     kb = InlineKeyboardBuilder()
-    kb.row(InlineKeyboardButton(text='👩‍💻 联系客服', callback_data=f'support:contact:cloud_order:{order_id}'))
+    kb.row(support_contact_button('cloud_order', order_id))
     kb.row(InlineKeyboardButton(text='🔙 返回订单列表', callback_data=back_callback))
     return _log_inline_keyboard('cloud_order_readonly_detail', kb.as_markup(), order_id=order_id, back_callback=back_callback)
 
