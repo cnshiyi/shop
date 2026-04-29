@@ -1,5 +1,6 @@
-from django.http import HttpResponse
+from django.conf import settings
+from django.shortcuts import redirect
 
 
 def index(request):
-    return HttpResponse('shop django 已启动')
+    return redirect(settings.ADMIN_FRONTEND_URL)

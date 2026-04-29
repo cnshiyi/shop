@@ -1,6 +1,7 @@
 from asgiref.sync import sync_to_async
 import logging
 import os
+import re
 import secrets
 import string
 import time
@@ -58,9 +59,26 @@ def _rand_password(length: int = 18) -> str:
 
 def _bundle_id_from_plan(plan_name: str) -> str:
     text = (plan_name or '').lower()
+    if '2c4g' in text or '2h4g' in text or '4gb' in text or '4g' in text:
+        return 'medium_3_0'
     if '2c2g' in text or '2gb' in text:
         return 'medium_2_0'
     return 'nano_3_0'
+
+
+def _looks_like_lightsail_bundle_id(value: str) -> bool:
+    text = (value or '').strip()
+    if not text:
+        return False
+    return bool(re.fullmatch(r'(nano|micro|small|medium|large|xlarge|2xlarge)(_[0-9]+){1,2}', text))
+
+
+def _resolve_bundle_id(order_data: dict) -> tuple[str, str]:
+    for field in ('provider_plan_id', 'bundle_code', 'config_id'):
+        value = str(order_data.get(field) or '').strip()
+        if _looks_like_lightsail_bundle_id(value):
+            return value, field
+    return _bundle_id_from_plan(order_data.get('plan_name') or ''), 'plan_name_fallback'
 
 
 def _default_login_user_for_blueprint(blueprint_id: str) -> str:
@@ -209,12 +227,12 @@ def _create_instance_sync(order_data: dict, server_name: str):
 
     password = _rand_password()
     public_key = _load_public_key()
-    bundle_id = _bundle_id_from_plan(plan_name)
+    bundle_id, bundle_source = _resolve_bundle_id(order_data)
     blueprint_id = 'debian_12'
     static_ip_name = static_ip_name or ('' if skip_static_ip else f'{server_name}-ip'[:255])
 
     try:
-        logger.info('AWS 客户端已就绪: order=%s region=%s bundle=%s blueprint=%s static_ip_name=%s skip_static_ip=%s', order_no, region, bundle_id, blueprint_id, static_ip_name, skip_static_ip)
+        logger.info('AWS 客户端已就绪: order=%s region=%s bundle=%s bundle_source=%s blueprint=%s static_ip_name=%s skip_static_ip=%s', order_no, region, bundle_id, bundle_source, blueprint_id, static_ip_name, skip_static_ip)
 
         server_name = _next_available_instance_name(client, server_name)
         logger.info('AWS 实例命名完成: order=%s server_name=%s static_ip_name=%s', order_no, server_name, static_ip_name)
@@ -369,7 +387,7 @@ def _move_static_ip_sync(order_data: dict, instance_name: str, static_ip_name: s
         return False, '', f'AWS 固定 IP 迁移失败: {exc}'
 
 
-@sync_to_async
+@sync_to_async(thread_sensitive=False)
 def create_instance(order_data: dict, server_name: str):
     return _create_instance_sync(order_data, server_name)
 
@@ -389,11 +407,11 @@ def _get_instance_public_ip_sync(order_data: dict, instance_name: str) -> str:
         return ''
 
 
-@sync_to_async
+@sync_to_async(thread_sensitive=False)
 def move_static_ip_to_instance(order_data: dict, instance_name: str, static_ip_name: str, temp_static_ip_name: str = ''):
     return _move_static_ip_sync(order_data, instance_name, static_ip_name, temp_static_ip_name)
 
 
-@sync_to_async
+@sync_to_async(thread_sensitive=False)
 def get_instance_public_ip(order_data: dict, instance_name: str):
     return _get_instance_public_ip_sync(order_data, instance_name)

@@ -975,7 +975,7 @@ def _sanitize_mtproxy_output(text: str) -> str:
     return '\n'.join(lines).strip()
 
 
-@sync_to_async
+@sync_to_async(thread_sensitive=False)
 def _run_ssh_script_with_key(ip: str, usernames: str | list[str], script: str, label: str = 'SSH_KEY', private_key_path: str = '') -> tuple[bool, str]:
     try:
         import paramiko
@@ -1118,7 +1118,7 @@ def build_mtproxy_links(ip: str, port: int | str, secret: str) -> tuple[str, str
     return tg_link, tme_link
 
 
-@sync_to_async
+@sync_to_async(thread_sensitive=False)
 def _probe_mtproxy_state(ip: str, username: str, password: str, port: int) -> tuple[bool, dict[str, str]]:
     try:
         import paramiko
@@ -1289,9 +1289,12 @@ async def install_mtproxy(ip: str, username: str, password: str, port: int = MTP
             add_extra_link(f'tg://proxy?server={ip}&port={telemt_all_port_value}&secret={telemt_tls_secret}')
             telemt_b_port_values = str(telemt_b_ports or telemt_b_ports_default).split(',')
             if len(telemt_b_port_values) >= 3:
-                telemt_b_classic_secret = core_secret
-                telemt_b_secure_secret = f'dd{core_secret}'
-                telemt_b_tls_secret = f'ee{core_secret}{domain_hex}'
+                telemt_b_classic_core = f'1{core_secret}'[:32]
+                telemt_b_secure_core = f'2{core_secret}'[:32]
+                telemt_b_tls_core = f'3{core_secret}'[:32]
+                telemt_b_classic_secret = telemt_b_classic_core
+                telemt_b_secure_secret = f'dd{telemt_b_secure_core}'
+                telemt_b_tls_secret = f'ee{telemt_b_tls_core}{domain_hex}'
                 add_extra_link(f'tg://proxy?server={ip}&port={telemt_b_port_values[0].strip()}&secret={telemt_b_classic_secret}')
                 add_extra_link(f'tg://proxy?server={ip}&port={telemt_b_port_values[1].strip()}&secret={telemt_b_secure_secret}')
                 add_extra_link(f'tg://proxy?server={ip}&port={telemt_b_port_values[2].strip()}&secret={telemt_b_tls_secret}')
@@ -1315,7 +1318,7 @@ async def install_mtproxy(ip: str, username: str, password: str, port: int = MTP
     return ok, output.replace('BBR 初始化', 'MTProxy 安装')
 
 
-@sync_to_async
+@sync_to_async(thread_sensitive=False)
 def _wait_ssh_port(ip: str, timeout: int = 600, interval: int = 5) -> tuple[bool, str]:
     end_time = time.time() + timeout
     last_error = ''
@@ -1336,7 +1339,7 @@ def _wait_ssh_port(ip: str, timeout: int = 600, interval: int = 5) -> tuple[bool
     return False, f'SSH 22 端口长时间未就绪，可能实例防火墙未放通或系统仍在初始化: {last_error}'
 
 
-@sync_to_async
+@sync_to_async(thread_sensitive=False)
 def _wait_ssh_password_ready(ip: str, username: str, password: str, timeout: int = 900, interval: int = 10) -> tuple[bool, str]:
     logger.info('开始等待 SSH 密码登录就绪: ip=%s user=%s timeout=%ss interval=%ss', ip, username, timeout, interval)
     port_ready, message = _wait_ssh_port.__wrapped__(ip, 600, 5)
@@ -1395,7 +1398,7 @@ def _wait_ssh_password_ready(ip: str, username: str, password: str, timeout: int
     return False, f'SSH 密码登录长时间未就绪，系统可能仍在重装或密码尚未生效: {last_error}'
 
 
-@sync_to_async
+@sync_to_async(thread_sensitive=False)
 def _run_ssh_script(ip: str, username: str, password: str, script: str, label: str = 'SSH') -> tuple[bool, str]:
     try:
         import paramiko

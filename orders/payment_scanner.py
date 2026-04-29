@@ -48,6 +48,7 @@ _last_scan_summary_at: float = time.time()
 _SCAN_SUMMARY_INTERVAL = 600
 _scan_stats = {'blocks': 0, 'transactions': 0, 'transfers': 0, 'payments': 0, 'monitor_hits': 0}
 _last_rate_limit_log_at: float = 0.0
+_last_trongrid_unauthorized_log_at: float = 0.0
 _last_scanned_block_number: int | None = None
 _SCANNER_LAST_BLOCK_KEY = 'tron_scanner_last_block_number'
 _SCANNER_POLL_INTERVAL = 0.8
@@ -640,30 +641,32 @@ async def _handle_block_data(block_data: dict) -> bool:
     return True
 
 
-async def _fetch_current_block(client: httpx.AsyncClient, headers: dict) -> dict | None:
-    global _last_rate_limit_log_at
-    resp = await client.post(f'{TRONGRID_BASE_URL}/wallet/getnowblock', json={'detail': True}, headers=headers)
+async def _post_trongrid(client: httpx.AsyncClient, endpoint: str, payload: dict, headers: dict, *, context: str) -> dict | None:
+    global _last_rate_limit_log_at, _last_trongrid_unauthorized_log_at
+    resp = await client.post(f'{TRONGRID_BASE_URL}{endpoint}', json=payload, headers=headers)
+    if resp.status_code == 401 and headers.get('TRON-PRO-API-KEY'):
+        now = time.time()
+        if now - _last_trongrid_unauthorized_log_at >= 60:
+            logger.warning('TRONGrid API Key 未授权或已失效，%s 已降级为无 Key 请求；请在后台更新有效 TRON API Key', context)
+            _last_trongrid_unauthorized_log_at = now
+        fallback_headers = {key: value for key, value in headers.items() if key.lower() != 'tron-pro-api-key'}
+        resp = await client.post(f'{TRONGRID_BASE_URL}{endpoint}', json=payload, headers=fallback_headers)
     if resp.status_code == 429:
         now = time.time()
         if now - _last_rate_limit_log_at >= 60:
-            logger.warning('TRON 扫块触发 429 限流，已跳过本轮并等待下次调度')
+            logger.warning('TRON 扫块触发 429 限流，%s 已跳过本轮并等待下次调度', context)
             _last_rate_limit_log_at = now
         return None
     resp.raise_for_status()
     return resp.json() or {}
+
+
+async def _fetch_current_block(client: httpx.AsyncClient, headers: dict) -> dict | None:
+    return await _post_trongrid(client, '/wallet/getnowblock', {'detail': True}, headers, context='获取当前块')
 
 
 async def _fetch_block_by_number(client: httpx.AsyncClient, headers: dict, block_number: int) -> dict | None:
-    global _last_rate_limit_log_at
-    resp = await client.post(f'{TRONGRID_BASE_URL}/wallet/getblockbynum', json={'num': int(block_number)}, headers=headers)
-    if resp.status_code == 429:
-        now = time.time()
-        if now - _last_rate_limit_log_at >= 60:
-            logger.warning('TRON 顺序扫块触发 429 限流，停在 block=%s，下轮继续', block_number)
-            _last_rate_limit_log_at = now
-        return None
-    resp.raise_for_status()
-    return resp.json() or {}
+    return await _post_trongrid(client, '/wallet/getblockbynum', {'num': int(block_number)}, headers, context=f'获取块 {block_number}')
 
 
 async def scan_block():

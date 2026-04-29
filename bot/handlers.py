@@ -101,6 +101,7 @@ from orders.services import (
 from core.formatters import fmt_amount, fmt_pay_amount
 from core.models import SiteConfig
 from core.texts import site_text
+from core.trongrid import build_trongrid_headers
 from cloud.provisioning import get_provision_progress, provision_cloud_server, reprovision_cloud_server_bootstrap
 from cloud.bootstrap import _probe_mtproxy_state, build_mtproxy_links
 from cloud.ports import is_valid_mtproxy_main_port, mtproxy_port_validation_hint
@@ -250,26 +251,22 @@ def _tron_address_action_keyboard(address: str) -> InlineKeyboardMarkup:
 
 
 async def _fetch_tron_address_summary(address: str) -> dict:
-    headers = {'accept': 'application/json'}
-    api_key = await _get_site_config_value('trongrid_api_key', '')
-    if api_key:
-        headers['TRON-PRO-API-KEY'] = api_key
     async with httpx.AsyncClient(timeout=15) as client:
         account_resp = await client.post(
             f'{TRONGRID_BASE_URL}/wallet/getaccount',
             json={'address': address, 'visible': True},
-            headers={**headers, 'content-type': 'application/json'},
+            headers=await build_trongrid_headers(),
         )
         account_resp.raise_for_status()
         account_data = account_resp.json() or {}
         resource_resp = await client.post(
             f'{TRONGRID_BASE_URL}/wallet/getaccountresource',
             json={'address': address, 'visible': True},
-            headers={**headers, 'content-type': 'application/json'},
+            headers=await build_trongrid_headers(),
         )
         resource_resp.raise_for_status()
         resource_data = resource_resp.json() or {}
-        account_v1_resp = await client.get(f'{TRONGRID_BASE_URL}/v1/accounts/{address}', headers=headers)
+        account_v1_resp = await client.get(f'{TRONGRID_BASE_URL}/v1/accounts/{address}', headers=await build_trongrid_headers())
         account_v1_resp.raise_for_status()
         account_v1_data = account_v1_resp.json() or {}
         trc20_resp = await client.get(

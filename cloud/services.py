@@ -1067,9 +1067,22 @@ def _can_order_be_renewed(order: CloudServerOrder) -> bool:
     return False
 
 
+def _manual_proxy_price(order: CloudServerOrder) -> Decimal | None:
+    asset = (
+        CloudAsset.objects.filter(order=order, price__isnull=False)
+        .exclude(status__in=_INACTIVE_ASSET_STATUSES)
+        .order_by('-updated_at', '-id')
+        .first()
+    )
+    if asset and asset.price is not None:
+        return Decimal(str(asset.price))
+    return None
+
+
 def _renewal_price(order: CloudServerOrder, user: TelegramUser | None = None) -> Decimal:
     discount_rate = Decimal(str(getattr(user, 'cloud_discount_rate', 100) or 100)) if user else Decimal('100')
-    total_amount = Decimal(str(order.total_amount or 0))
+    manual_price = _manual_proxy_price(order)
+    total_amount = manual_price if manual_price is not None else Decimal(str(order.total_amount or 0))
     if discount_rate <= 0:
         discount_rate = Decimal('100')
     return (total_amount * discount_rate / Decimal('100')).quantize(Decimal('0.01'))

@@ -175,11 +175,16 @@ def _get_order_tg_user_id(order: CloudServerOrder):
 
 
 def _aws_order_payload(order: CloudServerOrder, *, static_ip_name: str | None = None, skip_static_ip: bool = False):
+    plan = getattr(order, 'plan', None)
     return {
         'order_no': order.order_no,
         'provider': order.provider,
         'region_code': order.region_code,
         'plan_name': order.plan_name,
+        'plan_id': order.plan_id,
+        'config_id': getattr(plan, 'config_id', '') or '',
+        'provider_plan_id': getattr(plan, 'provider_plan_id', '') or '',
+        'bundle_code': getattr(plan, 'provider_plan_id', '') or '',
         'mtproxy_port': order.mtproxy_port,
         'static_ip_name': order.static_ip_name if static_ip_name is None else static_ip_name,
         'skip_static_ip': skip_static_ip,

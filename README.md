@@ -73,9 +73,9 @@
 
 ## 方案 B：独立后台前端
 - 后端接口仍由当前仓库提供：`/api/admin/` 与 `/api/dashboard/`
-- 真实前端仓库位于 `C:\Users\Administrator\Desktop\vue-vben-admin`
-- 当前实际使用前端位于 `C:\Users\Administrator\Desktop\vue-vben-admin\apps\web-antd`
-- 当前仓库内已不再保留 `dashboard_web/` 目录；前端说明统一迁移到主文档与独立前端仓库
+- 当前实际使用前端仓库位于 `/Users/aaaa/Desktop/vue-shop-admin`
+- 当前实际使用前端应用位于 `/Users/aaaa/Desktop/vue-shop-admin/apps/web-antd`
+- 当前仓库内已不再保留 `dashboard_web/` 目录；前端初始化、启动、build、部署说明已写入 `/Users/aaaa/Desktop/vue-shop-admin/README.md`
 - 如需修改后台页面、菜单、文案、代理与交互，请直接在前端仓库修改
 
 ## 统一云资产
@@ -208,3 +208,52 @@ Redis 中维护按天隔离的临时统计：
 - 资源提醒频率改为后台可配置
 - 资源详情保留更长历史
 - 每日统计增加后台报表视图
+
+## 从 GitHub 自动更新后端和前端
+
+脚本位置：`scripts/auto-update-from-github.sh`。
+
+用途：在服务器上从 GitHub 拉取最新后端与前端代码，更新后端依赖、执行迁移和静态收集，然后构建前端并发布到静态目录。该脚本不启动机器人，只会按配置重启 Web 后端服务。
+
+默认配置：
+
+- 后端仓库：`https://github.com/cnshiyi/shop.git`
+- 前端仓库：`https://github.com/cnshiyi/vue-shop-admin.git`
+- 后端目录：`/www/wwwroot/shop`
+- 前端源码目录：`/www/wwwroot/vue-shop-admin`
+- 前端应用目录：`/www/wwwroot/vue-shop-admin/apps/web-antd`
+- 前端构建产物目录：`/www/wwwroot/vue-shop-admin/apps/web-antd/dist`
+- 前端最终发布目录：`/www/wwwroot/shop-admin`
+- 后端服务：`shop-web.service`
+
+服务器执行：
+
+```bash
+cd /www/wwwroot/shop
+bash scripts/auto-update-from-github.sh
+```
+
+如果服务器目录不同，可用环境变量覆盖：
+
+```bash
+BACKEND_DIR=/www/wwwroot/shop \
+FRONTEND_DIR=/www/wwwroot/vue-shop-admin \
+FRONTEND_DIST_DIR=/www/wwwroot/shop-admin \
+BACKEND_SERVICE=shop-web.service \
+bash scripts/auto-update-from-github.sh
+```
+
+常用开关：
+
+- `RESTART_BACKEND=0`：只更新代码和构建前端，不重启后端服务
+- `RUN_MIGRATE=0`：跳过 Django migration
+- `RUN_COLLECTSTATIC=0`：跳过 Django collectstatic
+- `BACKEND_BRANCH=main` / `FRONTEND_BRANCH=main`：指定拉取分支
+
+注意：
+
+- 首次运行前，后端目录需要有 `.env`，脚本不会生成或覆盖真实密钥。
+- 如果运行脚本前已激活虚拟环境，脚本优先使用当前 `$VIRTUAL_ENV/bin/python`；否则使用 `BACKEND_DIR/.venv/bin/python`，不存在时才新建 `.venv`。
+- 脚本启动和结束都会打印后端源码目录、前端源码目录、前端构建产物目录、前端最终发布目录。
+- 前端发布会对 `FRONTEND_DIST_DIR` 执行 `rsync --delete`，确保目录只保留最新构建产物。
+- 脚本使用锁文件 `/tmp/shop-auto-update.lock`，避免两个更新任务同时执行。

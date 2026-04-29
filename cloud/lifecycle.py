@@ -506,9 +506,12 @@ def _mark_replaced_order_deleted(order_id: int, note: str):
 
 @sync_to_async
 def check_cloud_accounts_status(queryset=None):
-    items = list(queryset if queryset is not None else CloudAccountConfig.objects.order_by('provider', 'name', 'id'))
+    items = list(queryset if queryset is not None else CloudAccountConfig.objects.filter(is_active=True).order_by('provider', 'name', 'id'))
     results = []
     for item in items:
+        if not item.is_active:
+            results.append({'id': item.id, 'provider': item.provider, 'name': item.name, 'status': item.status, 'note': '账号已停用，跳过巡检'})
+            continue
         status = CloudAccountConfig.STATUS_OK
         note = '验证成功'
         try:

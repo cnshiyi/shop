@@ -309,11 +309,13 @@ def _parse_decimal(value, field_label):
 
 def _site_config_payload(item):
     is_sensitive = item.key in SENSITIVE_CONFIG_KEYS
+    value = SiteConfig.get(item.key, '')
+    value_preview = value if item.key == 'trongrid_api_key' else (item.masked_value() if is_sensitive else (item.value or ''))
     return {
         'id': item.id,
         'key': item.key,
-        'value': SiteConfig.get(item.key, ''),
-        'value_preview': item.masked_value() if is_sensitive else (item.value or ''),
+        'value': value,
+        'value_preview': value_preview,
         'is_sensitive': is_sensitive,
         'description': CONFIG_HELP.get(item.key, '') or text_description(item.key, ''),
         'sort_order': item.sort_order,
@@ -833,12 +835,20 @@ def auth_codes(request):
 @dashboard_login_required
 @require_POST
 def auth_totp_start(request):
+    payload = _json_payload(request)
+    current_secret = _totp_secret()
+    replacing_existing = bool(current_secret)
+    if replacing_existing:
+        old_token = payload.get('old_otp_token') or payload.get('oldOtpToken')
+        if not _verify_totp_token(old_token, current_secret):
+            return _error('更换 TOTP 密钥前，请先输入当前 Google Authenticator 的 6 位动态码', status=400)
     secret = _normalize_totp_secret(_generate_totp_secret())
     request.session['dashboard_totp_pending_secret'] = secret
+    request.session['dashboard_totp_replacing_existing'] = replacing_existing
     request.session.set_expiry(10 * 60)
     username = request.user.get_username() or 'admin'
     return _ok({
-        'enabled': bool(_totp_secret()),
+        'enabled': replacing_existing,
         'otpauthUrl': _totp_otpauth_url(secret, username),
         'secret': secret,
     })
@@ -853,10 +863,13 @@ def auth_totp_bind(request):
     secret = request.session.get('dashboard_totp_pending_secret')
     if not secret:
         return _error('请先生成 Google 验证器二维码', status=400)
+    if _totp_secret() and not request.session.get('dashboard_totp_replacing_existing'):
+        return _error('更换 TOTP 密钥前，请先验证当前 Google Authenticator 动态码并重新生成二维码', status=400)
     if not _verify_totp_token(token, secret):
-        return _error('Google 验证码错误或已过期', status=400)
+        return _error('新 Google 验证码错误或已过期', status=400)
     SiteConfig.set('dashboard_totp_secret', secret, sensitive=True)
     request.session.pop('dashboard_totp_pending_secret', None)
+    request.session.pop('dashboard_totp_replacing_existing', None)
     request.session.set_expiry(2 * 60 * 60)
     return _ok({'enabled': True})
 
@@ -946,7 +959,7 @@ def site_config_groups(request):
             stored_value = SiteConfig.get(key, '') if obj else ''
             effective_value = stored_value or get_runtime_config(key, '')
             value_preview = effective_value
-            if is_sensitive and effective_value:
+            if is_sensitive and effective_value and key != 'trongrid_api_key':
                 plain = effective_value
                 if len(plain) <= 6:
                     value_preview = '*' * len(plain)

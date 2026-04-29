@@ -19,7 +19,7 @@ CONFIG_HELP = {
     'text_init_mode': '文案初始化模式：missing_only 或 reset_defaults',
     'cloud_renew_notice_days': 'IP到期提醒提前天数，默认5天',
     'cloud_renew_notice_debug_repeat': 'IP到期提醒调试重复开关（1=忽略已提醒记录，启动/定时检查都会重复提醒；0=只提醒一次）',
-    'dashboard_totp_secret': '后台 Google Authenticator TOTP 密钥（Base32）',
+    'dashboard_totp_secret': '后台 Google Authenticator TOTP 密钥（Base32，更换后旧绑定失效）',
     'cleanup_retention_days': '自动清理保留天数，默认100天；订单和聊天记录超过该天数会被定时清理',
 }
 

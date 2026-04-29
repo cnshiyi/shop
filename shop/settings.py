@@ -15,6 +15,7 @@ def _split_csv_env(value: str):
 
 
 ALLOWED_HOSTS = _split_csv_env(os.getenv('ALLOWED_HOSTS', '127.0.0.1,localhost,[::1]'))
+ADMIN_FRONTEND_URL = os.getenv('ADMIN_FRONTEND_URL', '/')
 CSRF_TRUSTED_ORIGINS = _split_csv_env(
     os.getenv(
         'CSRF_TRUSTED_ORIGINS',
