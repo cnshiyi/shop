@@ -1371,8 +1371,8 @@ def _create_manual_asset_operation_order(asset: CloudAsset, user: TelegramUser, 
     return order
 
 
-def ensure_manual_owner_operation_order(asset: CloudAsset, new_user: TelegramUser | None, actor: str = '后台人工编辑') -> tuple[CloudServerOrder | None, str | None]:
-    old_user = asset.user
+def ensure_manual_owner_operation_order(asset: CloudAsset, new_user: TelegramUser | None, actor: str = '后台人工编辑', previous_user: TelegramUser | None = None) -> tuple[CloudServerOrder | None, str | None]:
+    old_user = previous_user if previous_user is not None else asset.user
     if not new_user:
         old_label = getattr(old_user, 'tg_user_id', None) or getattr(old_user, 'username', None) or '-'
         asset.user = None
@@ -1390,7 +1390,9 @@ def ensure_manual_owner_operation_order(asset: CloudAsset, new_user: TelegramUse
     asset.save(update_fields=['user', 'updated_at'])
     order = _create_manual_asset_operation_order(asset, new_user, 'OWNER', asset.actual_expires_at)
     if not order:
-        return None, '该地区没有可用套餐，无法创建操作订单'
+        logger.warning('CLOUD_MANUAL_OWNER_ORDER_SKIPPED asset_id=%s public_ip=%s reason=no_available_plan actor=%s', asset.id, asset.public_ip, actor)
+        record_cloud_ip_log(event_type='changed', asset=asset, public_ip=asset.public_ip, previous_public_ip=asset.previous_public_ip, note=f'{actor}: 人工编辑所属人 {old_label} -> {new_label}；未生成操作订单：该地区没有可用套餐。')
+        return None, None
     order.provision_note = '\n'.join(filter(None, [order.provision_note, f'{actor}: 人工编辑所属人 {old_label} -> {new_label}，生成独立操作订单支撑同步识别。']))
     order.save(update_fields=['provision_note', 'updated_at'])
     asset.order = order
@@ -1406,13 +1408,17 @@ def ensure_manual_owner_operation_order(asset: CloudAsset, new_user: TelegramUse
     return order, None
 
 
-def ensure_manual_expiry_operation_order(asset: CloudAsset, new_expires_at, actor: str = '后台人工编辑') -> tuple[CloudServerOrder | None, str | None]:
+def ensure_manual_expiry_operation_order(asset: CloudAsset, new_expires_at, actor: str = '后台人工编辑', previous_expires_at=None) -> tuple[CloudServerOrder | None, str | None]:
     if not asset.user_id:
-        return None, '资产未绑定用户，无法生成订单支撑人工到期时间'
-    old_expires_at = asset.actual_expires_at
+        logger.info('CLOUD_MANUAL_EXPIRY_ORDER_SKIPPED asset_id=%s public_ip=%s reason=unbound_user actor=%s', asset.id, asset.public_ip, actor)
+        record_cloud_ip_log(event_type='changed', asset=asset, public_ip=asset.public_ip, previous_public_ip=asset.previous_public_ip, note=f'{actor}: 人工编辑未绑定资产到期时间为 {_fmt_dt(new_expires_at)}；未生成操作订单。')
+        return None, None
+    old_expires_at = previous_expires_at if previous_expires_at is not None else asset.actual_expires_at
     order = _create_manual_asset_operation_order(asset, asset.user, 'EXPIRY', new_expires_at)
     if not order:
-        return None, '该地区没有可用套餐，无法创建操作订单'
+        logger.warning('CLOUD_MANUAL_EXPIRY_ORDER_SKIPPED asset_id=%s public_ip=%s reason=no_available_plan actor=%s', asset.id, asset.public_ip, actor)
+        record_cloud_ip_log(event_type='changed', asset=asset, public_ip=asset.public_ip, previous_public_ip=asset.previous_public_ip, note=f'{actor}: 人工编辑到期时间 {_fmt_dt(old_expires_at)} -> {_fmt_dt(new_expires_at)}；未生成操作订单：该地区没有可用套餐。')
+        return None, None
     order.provision_note = '\n'.join(filter(None, [
         order.provision_note,
         f'{actor}: 人工编辑到期时间 {_fmt_dt(old_expires_at)} -> {_fmt_dt(new_expires_at)}，生成独立操作订单支撑同步识别。',

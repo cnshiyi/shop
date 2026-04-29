@@ -256,10 +256,24 @@ def update_cloud_asset(request, asset_id):
         })
         return _ok(payload)
     payload = _read_payload(request)
+    owner_change_requested = False
+    expiry_change_requested = False
+    owner_target_after_commit = None
+    previous_owner = None
+    previous_expires_at = None
+    public_ip_changed = False
+    changed_public_ip_before = None
+    changed_public_ip_after = None
+    is_unattached_ip = False
+    linked_order_id = None
+    pending_order_updates = {}
     try:
         with transaction.atomic():
             asset = CloudAsset.objects.select_for_update().select_related('order', 'user', 'cloud_account').get(pk=asset_id)
             is_unattached_ip = _is_unattached_ip_asset(asset)
+            previous_owner = asset.user
+            previous_expires_at = asset.actual_expires_at
+            linked_order_id = asset.order_id
 
             server = None
             server_lookup = Q()
@@ -276,6 +290,7 @@ def update_cloud_asset(request, asset_id):
             username_raw = payload.get('user_query') or payload.get('username')
             clear_user = str(payload.get('clear_user') or '').lower() in {'1', 'true', 'yes', 'on'}
             owner_changed = clear_user or user_lookup not in (None, '')
+            owner_change_requested = owner_changed and not is_unattached_ip
             owner_target = asset.user
             if clear_user:
                 owner_target = None
@@ -298,14 +313,12 @@ def update_cloud_asset(request, asset_id):
                     return _error(str(exc), status=400)
                 asset.price = price
                 if asset.order_id:
-                    asset.order.total_amount = price
-                    asset.order.save(update_fields=['total_amount', 'updated_at'])
+                    pending_order_updates['total_amount'] = price
 
             if 'currency' in payload:
                 asset.currency = (payload.get('currency') or 'USDT').strip() or 'USDT'
                 if asset.order_id and asset.order.currency != asset.currency:
-                    asset.order.currency = asset.currency
-                    asset.order.save(update_fields=['currency', 'updated_at'])
+                    pending_order_updates['currency'] = asset.currency
 
             if server and 'account_label' in payload:
                 server.account_label = payload.get('account_label') or None
@@ -321,31 +334,21 @@ def update_cloud_asset(request, asset_id):
                     server.expires_at = asset.actual_expires_at
 
             if asset.order_id:
-                order_changed_fields = []
                 if 'mtproxy_link' in payload:
-                    asset.order.mtproxy_link = payload.get('mtproxy_link') or None
-                    order_changed_fields.append('mtproxy_link')
+                    pending_order_updates['mtproxy_link'] = payload.get('mtproxy_link') or None
                 if 'mtproxy_secret' in payload:
-                    asset.order.mtproxy_secret = payload.get('mtproxy_secret') or None
-                    order_changed_fields.append('mtproxy_secret')
+                    pending_order_updates['mtproxy_secret'] = payload.get('mtproxy_secret') or None
                 if 'mtproxy_host' in payload:
-                    asset.order.mtproxy_host = payload.get('mtproxy_host') or None
-                    order_changed_fields.append('mtproxy_host')
+                    pending_order_updates['mtproxy_host'] = payload.get('mtproxy_host') or None
                 if 'mtproxy_port' in payload:
                     mtproxy_port = payload.get('mtproxy_port')
-                    asset.order.mtproxy_port = int(mtproxy_port) if mtproxy_port not in (None, '') else None
-                    order_changed_fields.append('mtproxy_port')
+                    pending_order_updates['mtproxy_port'] = int(mtproxy_port) if mtproxy_port not in (None, '') else None
                 if 'provider_resource_id' in payload:
-                    asset.order.provider_resource_id = payload.get('provider_resource_id') or None
-                    order_changed_fields.append('provider_resource_id')
+                    pending_order_updates['provider_resource_id'] = payload.get('provider_resource_id') or None
                 if 'public_ip' in payload:
-                    asset.order.public_ip = payload.get('public_ip') or None
-                    order_changed_fields.append('public_ip')
+                    pending_order_updates['public_ip'] = payload.get('public_ip') or None
                 if 'asset_name' in payload:
-                    asset.order.server_name = payload.get('asset_name') or None
-                    order_changed_fields.append('server_name')
-                if order_changed_fields:
-                    asset.order.save(update_fields=[*order_changed_fields, 'updated_at'])
+                    pending_order_updates['server_name'] = payload.get('asset_name') or None
 
             old_public_ip = asset.public_ip
             new_public_ip = payload.get('public_ip') or None if 'public_ip' in payload else asset.public_ip
@@ -426,35 +429,55 @@ def update_cloud_asset(request, asset_id):
                 server.save()
 
             asset.save()
-            if owner_changed and not is_unattached_ip:
-                order, err = ensure_manual_owner_operation_order(asset, owner_target)
-                if err:
-                    return _error(err, status=400)
-                if server:
-                    server.order = order
-                    server.user = owner_target
-                    server.save(update_fields=['order', 'user', 'updated_at'])
-            if manual_expires_at is not None and not is_unattached_ip:
-                order, err = ensure_manual_expiry_operation_order(asset, manual_expires_at)
-                if err:
-                    return _error(err, status=400)
-                if server:
-                    server.order = order
-                    server.expires_at = manual_expires_at
-                    server.save(update_fields=['order', 'expires_at', 'updated_at'])
-            if 'public_ip' in payload and str(old_public_ip or '') != str(new_public_ip or ''):
-                record_cloud_ip_log(
-                    event_type='changed',
-                    order=asset.order,
-                    asset=asset,
-                    server=server,
-                    previous_public_ip=old_public_ip,
-                    public_ip=new_public_ip,
-                    note=f'后台手动更新IP：{old_public_ip or "未分配"} → {new_public_ip or "未分配"}',
-                )
+            owner_target_after_commit = owner_target
+            expiry_change_requested = manual_expires_at is not None and not is_unattached_ip
+            public_ip_changed = 'public_ip' in payload and str(old_public_ip or '') != str(new_public_ip or '')
+            changed_public_ip_before = old_public_ip
+            changed_public_ip_after = new_public_ip
     except CloudAsset.DoesNotExist:
         return _error('云资产不存在', status=404)
 
+    if linked_order_id and pending_order_updates:
+        try:
+            CloudServerOrder.objects.filter(pk=linked_order_id).update(**pending_order_updates, updated_at=timezone.now())
+        except Exception as exc:
+            logger.warning('CLOUD_ASSET_MANUAL_ORDER_SYNC_SKIPPED asset_id=%s order_id=%s fields=%s error=%s', asset_id, linked_order_id, sorted(pending_order_updates), exc)
+
+    asset = CloudAsset.objects.select_related('user', 'order', 'cloud_account').get(pk=asset_id)
+    if owner_change_requested:
+        try:
+            order, err = ensure_manual_owner_operation_order(asset, owner_target_after_commit, previous_user=previous_owner)
+            if err:
+                logger.warning('CLOUD_ASSET_MANUAL_OWNER_ORDER_SKIPPED asset_id=%s error=%s', asset_id, err)
+        except Exception as exc:
+            logger.exception('CLOUD_ASSET_MANUAL_OWNER_ORDER_FAILED asset_id=%s error=%s', asset_id, exc)
+    if expiry_change_requested:
+        try:
+            order, err = ensure_manual_expiry_operation_order(asset, asset.actual_expires_at, previous_expires_at=previous_expires_at)
+            if err:
+                logger.warning('CLOUD_ASSET_MANUAL_EXPIRY_ORDER_SKIPPED asset_id=%s error=%s', asset_id, err)
+        except Exception as exc:
+            logger.exception('CLOUD_ASSET_MANUAL_EXPIRY_ORDER_FAILED asset_id=%s error=%s', asset_id, exc)
+    if public_ip_changed:
+        server = None
+        server_lookup = Q()
+        if asset.instance_id:
+            server_lookup |= Q(instance_id=asset.instance_id)
+        if asset.provider_resource_id:
+            server_lookup |= Q(provider_resource_id=asset.provider_resource_id)
+        if asset.order_id:
+            server_lookup |= Q(order_id=asset.order_id)
+        if server_lookup:
+            server = Server.objects.filter(server_lookup).first()
+        record_cloud_ip_log(
+            event_type='changed',
+            order=asset.order,
+            asset=asset,
+            server=server,
+            previous_public_ip=changed_public_ip_before,
+            public_ip=changed_public_ip_after,
+            note=f'后台手动更新IP：{changed_public_ip_before or "未分配"} → {changed_public_ip_after or "未分配"}',
+        )
     asset = CloudAsset.objects.select_related('user', 'order', 'cloud_account').get(pk=asset_id)
     return _ok(_asset_payload(asset))
 
