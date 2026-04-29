@@ -17,7 +17,7 @@ LOCK_FILE="${LOCK_FILE:-/tmp/shop-auto-update.lock}"
 RESTART_BACKEND="${RESTART_BACKEND:-1}"
 RUN_MIGRATE="${RUN_MIGRATE:-1}"
 RUN_COLLECTSTATIC="${RUN_COLLECTSTATIC:-1}"
-PRESERVE_BACKEND_PATHS="${PRESERVE_BACKEND_PATHS:-.env .venv media staticfiles logs}"
+PRESERVE_BACKEND_PATHS="${PRESERVE_BACKEND_PATHS:-.env .venv .shop-secrets media staticfiles logs}"
 
 log() {
   printf '[%s] %s\n' "$(date '+%F %T')" "$*"
@@ -93,7 +93,7 @@ repo_update() {
     run git fetch --prune origin "$branch"
     run git reset --hard "origin/$branch"
     # 让重复执行结果保持一致：删除 GitHub 中已不存在的未跟踪源码文件。
-    # 后端保留 .env/.venv/media/staticfiles/logs；前端源码目录不保留额外文件。
+    # 后端保留 .env/.venv/.shop-secrets/media/staticfiles/logs；前端源码目录不保留额外文件。
     # shellcheck disable=SC2086
     clean_untracked_repo_files "$label" $preserve_list
   else
