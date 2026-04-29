@@ -250,6 +250,13 @@ bash scripts/auto-update-from-github.sh
 - `RUN_COLLECTSTATIC=0`：跳过 Django collectstatic
 - `BACKEND_BRANCH=main` / `FRONTEND_BRANCH=main`：指定拉取分支
 - `PRESERVE_BACKEND_PATHS='.env .venv media staticfiles logs'`：后端执行 `git clean` 时保留的运行时目录/文件
+- `SKIP_REPO_ACCESS_CHECK=1`：跳过私有仓库访问验证，一般不建议开启
+
+私有仓库验证：
+
+- 脚本正式更新前会执行 `git ls-remote` 验证后端和前端仓库访问权限，私有仓库没配置凭据会直接报错并停止。
+- 推荐在服务器配置 GitHub SSH deploy key，并把 `BACKEND_REPO` / `FRONTEND_REPO` 改成 `git@github.com:cnshiyi/shop.git` 和 `git@github.com:cnshiyi/vue-shop-admin.git`。
+- 也可以在服务器执行 `gh auth login` 或配置 `git credential helper`，确保 `git ls-remote https://github.com/cnshiyi/shop.git refs/heads/main` 能免交互成功。
 
 注意：
 

@@ -18,6 +18,7 @@ RESTART_BACKEND="${RESTART_BACKEND:-1}"
 RUN_MIGRATE="${RUN_MIGRATE:-1}"
 RUN_COLLECTSTATIC="${RUN_COLLECTSTATIC:-1}"
 PRESERVE_BACKEND_PATHS="${PRESERVE_BACKEND_PATHS:-.env .venv media staticfiles logs}"
+SKIP_REPO_ACCESS_CHECK="${SKIP_REPO_ACCESS_CHECK:-0}"
 
 log() {
   printf '[%s] %s\n' "$(date '+%F %T')" "$*"
@@ -49,13 +50,47 @@ print_config() {
   log "前端应用目录: $FRONTEND_DIR/apps/web-antd"
   log "前端构建产物目录: $FRONTEND_DIR/apps/web-antd/dist"
   log "前端发布目录: $FRONTEND_DIST_DIR"
+  log "私有仓库访问验证: $([ "$SKIP_REPO_ACCESS_CHECK" = "1" ] && printf '跳过' || printf '启用')"
 }
 
 with_lock() {
-  exec 9>"$LOCK_FILE"
-  if ! flock -n 9; then
-    fail "已有自动更新任务在执行: $LOCK_FILE"
+  if command -v flock >/dev/null 2>&1; then
+    exec 9>"$LOCK_FILE"
+    if ! flock -n 9; then
+      fail "已有自动更新任务在执行: $LOCK_FILE"
+    fi
+    return
   fi
+
+  local lock_dir="${LOCK_FILE}.d"
+  if ! mkdir "$lock_dir" 2>/dev/null; then
+    fail "已有自动更新任务在执行: $lock_dir"
+  fi
+  trap 'rm -rf "${LOCK_FILE}.d"' EXIT
+}
+
+validate_repo_access() {
+  local repo="$1"
+  local branch="$2"
+  local label="$3"
+
+  if [ "$SKIP_REPO_ACCESS_CHECK" = "1" ]; then
+    log "跳过 $label 仓库访问验证"
+    return
+  fi
+
+  log "验证 $label 私有仓库访问权限: $repo#$branch"
+  if GIT_TERMINAL_PROMPT=0 git ls-remote --exit-code "$repo" "refs/heads/$branch" >/dev/null 2>&1; then
+    log "$label 仓库访问验证通过"
+    return
+  fi
+
+  fail "$label 仓库访问验证失败。该仓库可能是私有仓库，服务器需要先配置 GitHub 访问凭据：建议使用 SSH deploy key，或在服务器执行 gh auth login / 配置 git credential helper；也请确认分支存在: $branch"
+}
+
+validate_repositories() {
+  validate_repo_access "$BACKEND_REPO" "$BACKEND_BRANCH" "后端"
+  validate_repo_access "$FRONTEND_REPO" "$FRONTEND_BRANCH" "前端"
 }
 
 clean_untracked_repo_files() {
@@ -191,6 +226,7 @@ main() {
   print_config
   need_cmd git
   need_cmd rsync
+  validate_repositories
   update_backend
   publish_frontend
   log "自动更新完成"
