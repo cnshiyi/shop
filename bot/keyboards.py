@@ -444,6 +444,7 @@ def cloud_lifecycle_notice_actions(order_id: int, context: str = 'cloud_lifecycl
 
 def cloud_expiry_actions(order_id: int):
     kb = InlineKeyboardBuilder()
+    kb.row(InlineKeyboardButton(text='🔄 立即续费', callback_data=f'cloud:renew:{order_id}'))
     kb.row(
         InlineKeyboardButton(text='⚡ 开启自动续费', callback_data=f'cloud:autorenew:on:{order_id}'),
         InlineKeyboardButton(text='⛔ 关闭自动续费', callback_data=f'cloud:autorenew:off:{order_id}'),

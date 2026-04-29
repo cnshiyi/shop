@@ -611,7 +611,7 @@ async def lifecycle_tick(notify=None):
         if notify and await _user_can_receive_cloud_notice(order.user_id):
             notice = await _cloud_expiry_notice_payload(order.id)
             auto_renew_text = '<b>本单已开启自动续费，将在到期前 3 天自动续费；自动续费前 2 小时会再次通知。</b>' if notice['auto_renew_enabled'] else '<b>本单未开启自动续费。</b>'
-            text = f'⏰ IP到期提醒\n\nIP: {notice["ip"]}\n\n到期时间: {_format_notice_dt(notice["expires_at"] or order.service_expires_at)}\n\n提醒关机时间: {_format_notice_dt(notice["suspend_at"])}\n\n{auto_renew_text}\n\n如需续费或处理，请联系人工客服。'
+            text = f'⏰ IP到期提醒\n\nIP: {notice["ip"]}\n\n到期时间: {_format_notice_dt(notice["expires_at"] or order.service_expires_at)}\n\n提醒关机时间: {_format_notice_dt(notice["suspend_at"])}\n\n{auto_renew_text}\n\n如需续费，请点击下方“立即续费”。'
             _log_cloud_notice('renew_notice', order, notice, text, 'cloud_expiry_actions')
             await notify(order.user_id, text, cloud_expiry_actions(order.id))
         await _mark_notice_sent(order.id, 'renew_notice_sent_at')
