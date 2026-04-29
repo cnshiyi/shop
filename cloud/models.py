@@ -8,6 +8,35 @@ from django.db import models
 from django.utils import timezone
 
 
+def _runtime_int_config(key: str, default: int) -> int:
+    try:
+        from core.runtime_config import get_runtime_config
+        value = int(str(get_runtime_config(key, str(default)) or default).strip())
+        return max(value, 0)
+    except Exception:
+        return default
+
+
+def _runtime_time_config(key: str, default: str = '15:00') -> tuple[int, int]:
+    try:
+        from core.runtime_config import get_runtime_config
+        raw = str(get_runtime_config(key, default) or default).strip()
+        hour_text, minute_text = raw.split(':', 1)
+        hour = min(max(int(hour_text), 0), 23)
+        minute = min(max(int(minute_text), 0), 59)
+        return hour, minute
+    except Exception:
+        hour_text, minute_text = default.split(':', 1)
+        return int(hour_text), int(minute_text)
+
+
+def _with_runtime_time(value, key: str, default: str = '15:00'):
+    hour, minute = _runtime_time_config(key, default)
+    local_value = timezone.localtime(value) if timezone.is_aware(value) else value
+    local_value = local_value.replace(hour=hour, minute=minute, second=0, microsecond=0)
+    return local_value.astimezone(dt_timezone.utc) if timezone.is_aware(local_value) else local_value
+
+
 class CloudServerPlan(models.Model):
     PROVIDER_AWS_LIGHTSAIL = 'aws_lightsail'
     PROVIDER_ALIYUN_ECS = 'aliyun_simple'
@@ -202,11 +231,15 @@ class CloudServerOrder(models.Model):
             self.service_expires_at = self.service_started_at + timezone.timedelta(days=self.lifecycle_days)
         self.service_expires_at = self.normalize_expiry_time(self.service_expires_at)
         if self.service_expires_at:
-            grace_days = 3 + max(int(self.renew_extension_days or 0), 0)
-            self.renew_grace_expires_at = self.service_expires_at + timezone.timedelta(days=grace_days)
-            self.suspend_at = self.renew_grace_expires_at
-            self.delete_at = self.renew_grace_expires_at
-            self.ip_recycle_at = self.delete_at + timezone.timedelta(days=15)
+            extension_days = max(int(self.renew_extension_days or 0), 0)
+            suspend_days = _runtime_int_config('cloud_suspend_after_days', 3) + extension_days
+            delete_days = _runtime_int_config('cloud_delete_after_days', 0)
+            self.suspend_at = _with_runtime_time(self.service_expires_at + timezone.timedelta(days=suspend_days), 'cloud_suspend_time')
+            self.renew_grace_expires_at = self.suspend_at
+            self.delete_at = _with_runtime_time(self.suspend_at + timezone.timedelta(days=delete_days), 'cloud_delete_time')
+            if self.delete_at < self.suspend_at:
+                self.delete_at = self.suspend_at
+            self.ip_recycle_at = self.delete_at + timezone.timedelta(days=_runtime_int_config('cloud_unattached_ip_delete_after_days', 15))
         super().save(*args, **kwargs)
 
     def __str__(self):

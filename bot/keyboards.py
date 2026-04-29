@@ -85,11 +85,11 @@ def configured_link_menu(label: str):
 
 def cloud_query_menu():
     kb = InlineKeyboardBuilder()
-    kb.row(
-        InlineKeyboardButton(text='🖥 代理列表', callback_data='cloud:list'),
-        InlineKeyboardButton(text='🔎 IP查询到期', callback_data='cloud:queryip'),
-    )
-    kb.row(InlineKeyboardButton(text='🔙 返回主菜单', callback_data='profile:back'))
+    kb.button(text='🖥 代理列表', callback_data='cloud:list')
+    kb.button(text='⚡ 自动续费查询', callback_data='cloud:autorenewlist')
+    kb.button(text='🔎 IP查询到期', callback_data='cloud:queryip')
+    kb.button(text='🔙 返回主菜单', callback_data='profile:back')
+    kb.adjust(2, 2)
     return kb.as_markup()
 
 
@@ -210,7 +210,13 @@ def monitor_threshold_currency(monitor_id: int):
 
 def _split_custom_regions(regions):
     preferred_codes = ['ap-southeast-1', 'cn-hongkong', 'ap-northeast-1', 'ap-northeast-2', 'us-east-1']
-    name_overrides = {'us-east-1': '美国'}
+    name_overrides = {
+        'ap-southeast-1': '新加坡',
+        'cn-hongkong': '香港',
+        'ap-northeast-1': '日本',
+        'ap-northeast-2': '韩国',
+        'us-east-1': '美国',
+    }
     region_map = {code: (code, name_overrides.get(code, name)) for code, name in regions}
     popular = []
     seen = set()
@@ -394,8 +400,15 @@ def cloud_server_list(orders, page: int = 1, total_pages: int = 1, prefix: str =
         nav.append(InlineKeyboardButton(text='⬅️ 上一页', callback_data=f'{prefix}:{page - 1}'))
     if page < total_pages:
         nav.append(InlineKeyboardButton(text='➡️ 下一页', callback_data=f'{prefix}:{page + 1}'))
-    back_callback = 'profile:orders' if prefix.startswith('profile:orders:cloud') else 'profile:back_to_menu'
-    back_text = '🔙 返回订单查询' if prefix.startswith('profile:orders:cloud') else '🔙 返回个人中心'
+    if prefix.startswith('profile:orders:cloud'):
+        back_callback = 'profile:orders'
+        back_text = '🔙 返回订单查询'
+    elif prefix.startswith('cloud:'):
+        back_callback = 'cloud:querymenu'
+        back_text = '🔙 返回到期时间查询'
+    else:
+        back_callback = 'profile:back_to_menu'
+        back_text = '🔙 返回个人中心'
     nav.append(InlineKeyboardButton(text=back_text, callback_data=back_callback))
     kb.row(*nav)
     return _log_inline_keyboard(
@@ -405,6 +418,37 @@ def cloud_server_list(orders, page: int = 1, total_pages: int = 1, prefix: str =
         total_pages=total_pages,
         prefix=prefix,
         order_ids=[getattr(order, 'id', None) for order in orders],
+    )
+
+
+def cloud_auto_renew_server_list(orders, page: int = 1, total_pages: int = 1):
+    kb = InlineKeyboardBuilder()
+    button_count = 0
+    for order in orders:
+        order_id = getattr(order, 'order_id', None) or getattr(order, 'id', None)
+        if not order_id:
+            continue
+        ip = order.public_ip or order.previous_public_ip
+        label = ip or getattr(order, 'order_no', None) or f'订单 {order_id}'
+        expires_at = getattr(order, 'service_expires_at', None) or getattr(order, 'actual_expires_at', None) or getattr(order, 'expires_at', None)
+        expires = _format_local_date(expires_at)
+        kb.button(text=f'⛔ 关闭 {label} 自动续费 | {expires}', callback_data=f'cloud:autorenewlist:off:{order_id}:{page}')
+        button_count += 1
+    if button_count:
+        kb.adjust(2)
+    nav = []
+    if page > 1:
+        nav.append(InlineKeyboardButton(text='⬅️ 上一页', callback_data=f'cloud:autorenewlist:page:{page - 1}'))
+    if page < total_pages:
+        nav.append(InlineKeyboardButton(text='➡️ 下一页', callback_data=f'cloud:autorenewlist:page:{page + 1}'))
+    nav.append(InlineKeyboardButton(text='🔙 返回到期时间查询', callback_data='cloud:querymenu'))
+    kb.row(*nav)
+    return _log_inline_keyboard(
+        'cloud_auto_renew_server_list',
+        kb.as_markup(),
+        page=page,
+        total_pages=total_pages,
+        order_ids=[getattr(order, 'order_id', None) or getattr(order, 'id', None) for order in orders],
     )
 
 

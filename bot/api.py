@@ -28,7 +28,7 @@ from django.views.decorators.http import require_GET, require_POST
 
 from bot.models import BotOperationLog, TelegramChatArchive, TelegramChatMessage, TelegramLoginAccount, TelegramUser
 from bot.services import _get_or_create_user_sync
-from cloud.models import AddressMonitor, CloudAsset, CloudServerOrder
+from cloud.models import AddressMonitor, CloudAsset, CloudIpLog, CloudServerOrder
 from core.models import CloudAccountConfig, SiteConfig
 from core.button_config import init_button_config, load_button_config, save_button_config
 from core.runtime_config import CONFIG_HELP, SENSITIVE_CONFIG_KEYS, get_runtime_config
@@ -208,6 +208,194 @@ def _status_label(status, choices=()):
     return hardcoded.get(status) or mapping.get(status, status or '-')
 
 
+def _runtime_int(key: str, default: int) -> int:
+    try:
+        return max(int(str(get_runtime_config(key, str(default)) or default).strip()), 0)
+    except (TypeError, ValueError):
+        return default
+
+
+def _runtime_time(key: str, default: str = '15:00') -> tuple[int, int]:
+    try:
+        raw = str(get_runtime_config(key, default) or default).strip()
+        hour_text, minute_text = raw.split(':', 1)
+        return min(max(int(hour_text), 0), 23), min(max(int(minute_text), 0), 59)
+    except Exception:
+        hour_text, minute_text = default.split(':', 1)
+        return int(hour_text), int(minute_text)
+
+
+def _with_runtime_time(value, key: str, default: str = '15:00'):
+    if not value:
+        return None
+    hour, minute = _runtime_time(key, default)
+    local_value = timezone.localtime(value) if timezone.is_aware(value) else value
+    local_value = local_value.replace(hour=hour, minute=minute, second=0, microsecond=0)
+    return local_value if timezone.is_aware(local_value) else timezone.make_aware(local_value, timezone.get_current_timezone())
+
+
+def _cloud_account_labels(item):
+    account = getattr(item, 'cloud_account', None)
+    account_name = getattr(account, 'name', '') or ''
+    external_account_id = getattr(account, 'external_account_id', '') or getattr(item, 'account_label', '') or ''
+    return account_name, external_account_id
+
+
+def _shutdown_log_items(limit=100):
+    cutoff = timezone.now() - timezone.timedelta(days=7)
+    suspend_days = _runtime_int('cloud_suspend_after_days', 3)
+    delete_days = _runtime_int('cloud_delete_after_days', 0)
+
+    orders = list(
+        CloudServerOrder.objects.select_related('user', 'cloud_account').filter(suspend_at__isnull=False)
+        .exclude(status__in=['cancelled', 'deleted'])
+        .order_by('suspend_at', '-updated_at')[:300]
+    )
+    order_ids = [item.id for item in orders]
+    logs = {}
+    for item in CloudIpLog.objects.filter(order_id__in=order_ids, event_type__in=['suspended', 'suspend_failed']).order_by('order_id', '-created_at', '-id'):
+        logs.setdefault(item.order_id, item)
+
+    items = []
+    included_order_ids = set()
+    for order in orders:
+        included_order_ids.add(order.id)
+        log = logs.get(order.id)
+        user_display_name, username_label = _telegram_user_labels(order.user)
+        account_name, external_account_id = _cloud_account_labels(order)
+        is_aliyun = order.provider == 'aliyun_simple'
+        items.append({
+            'id': f'order-{order.id}',
+            'order_id': order.id,
+            'asset_id': None,
+            'order_no': order.order_no,
+            'user_display_name': user_display_name,
+            'username_label': username_label,
+            'public_ip': order.public_ip or order.previous_public_ip or '',
+            'provider': order.provider or '',
+            'provider_label': _provider_label(order.provider),
+            'cloud_account_id': order.cloud_account_id,
+            'cloud_account_name': account_name,
+            'external_account_id': external_account_id,
+            'account_label': order.account_label or '',
+            'status': order.status,
+            'status_label': _status_label(order.status, CloudServerOrder.STATUS_CHOICES),
+            'service_expires_at': order.service_expires_at,
+            'suspend_at': None if is_aliyun else order.suspend_at,
+            'delete_at': None if is_aliyun else order.delete_at,
+            'note': (log.note if log else '') or '',
+            'logged_at': log.created_at if log else None,
+        })
+
+    active_statuses = [
+        CloudAsset.STATUS_RUNNING,
+        CloudAsset.STATUS_PENDING,
+        CloudAsset.STATUS_STARTING,
+        CloudAsset.STATUS_STOPPED,
+        CloudAsset.STATUS_SUSPENDED,
+        CloudAsset.STATUS_EXPIRED_GRACE,
+        CloudAsset.STATUS_UNKNOWN,
+    ]
+    aliyun_statuses = active_statuses + [
+        CloudAsset.STATUS_EXPIRED,
+        CloudAsset.STATUS_DELETING,
+        CloudAsset.STATUS_DELETED,
+    ]
+    assets = list(
+        CloudAsset.objects.select_related('order', 'user', 'cloud_account', 'order__cloud_account')
+        .filter(kind=CloudAsset.KIND_SERVER, actual_expires_at__isnull=False)
+        .filter(Q(is_active=True, status__in=active_statuses) | Q(provider='aliyun_simple', status__in=aliyun_statuses))
+        .exclude(order_id__in=included_order_ids)
+        .order_by('actual_expires_at', '-updated_at')[:500]
+    )
+    for asset in assets:
+        expires_at = asset.actual_expires_at
+        user_display_name, username_label = _telegram_user_labels(asset.user or (asset.order.user if asset.order_id and asset.order else None))
+        account_name, external_account_id = _cloud_account_labels(asset)
+        if not external_account_id and asset.order_id and asset.order:
+            order_account_name, order_external_account_id = _cloud_account_labels(asset.order)
+            account_name = account_name or order_account_name
+            external_account_id = order_external_account_id
+        if asset.provider == 'aliyun_simple':
+            suspend_at = None
+            delete_at = None
+        else:
+            suspend_at = _with_runtime_time(expires_at + timezone.timedelta(days=suspend_days), 'cloud_suspend_time')
+            delete_at = _with_runtime_time(suspend_at + timezone.timedelta(days=delete_days), 'cloud_delete_time')
+            if delete_at and suspend_at and delete_at < suspend_at:
+                delete_at = suspend_at
+        items.append({
+            'id': f'asset-{asset.id}',
+            'order_id': asset.order_id,
+            'asset_id': asset.id,
+            'order_no': asset.order.order_no if asset.order_id and asset.order else asset.asset_name or asset.instance_id or f'asset-{asset.id}',
+            'user_display_name': user_display_name,
+            'username_label': username_label,
+            'public_ip': asset.public_ip or asset.previous_public_ip or '',
+            'provider': asset.provider or '',
+            'provider_label': _provider_label(asset.provider),
+            'cloud_account_id': asset.cloud_account_id or (asset.order.cloud_account_id if asset.order_id and asset.order else None),
+            'cloud_account_name': account_name,
+            'external_account_id': external_account_id,
+            'account_label': asset.account_label or (asset.order.account_label if asset.order_id and asset.order else '') or '',
+            'status': asset.status,
+            'status_label': _status_label(asset.status, CloudAsset.STATUS_CHOICES),
+            'service_expires_at': expires_at,
+            'suspend_at': suspend_at,
+            'delete_at': delete_at,
+            'note': asset.note or '',
+            'logged_at': None,
+        })
+
+    def sort_key(item):
+        suspend_at = item['suspend_at']
+        sort_at = suspend_at or item['service_expires_at']
+        is_old_shutdown = bool(suspend_at and suspend_at < cutoff)
+        timestamp = sort_at.timestamp() if sort_at else float('inf')
+        return (1 if is_old_shutdown else 0, -timestamp if is_old_shutdown else timestamp, str(item['id']))
+
+    sorted_items = sorted(items, key=sort_key)[:limit]
+    return [
+        {
+            **item,
+            'service_expires_at': _iso(item['service_expires_at']),
+            'suspend_at': _iso(item['suspend_at']),
+            'delete_at': _iso(item['delete_at']),
+            'is_old_shutdown': bool(item['suspend_at'] and item['suspend_at'] < cutoff),
+            'logged_at': _iso(item['logged_at']),
+        }
+        for item in sorted_items
+    ]
+
+
+def _unattached_ip_delete_items(limit=50):
+    now = timezone.now()
+    delete_days = _runtime_int('cloud_unattached_ip_delete_after_days', 15)
+    assets = list(
+        CloudAsset.objects.select_related('user').filter(kind=CloudAsset.KIND_SERVER)
+        .filter(Q(provider_status__icontains='未附加') | Q(note__icontains='未附加IP') | Q(note__icontains='未附加固定IP'))
+        .exclude(status__in=[CloudAsset.STATUS_DELETED, CloudAsset.STATUS_DELETING, CloudAsset.STATUS_TERMINATED, CloudAsset.STATUS_TERMINATING])
+        .order_by('actual_expires_at', 'created_at', '-updated_at')[:300]
+    )
+    items = []
+    for asset in assets:
+        base_at = asset.actual_expires_at or asset.created_at or asset.updated_at or now
+        user_display_name, username_label = _telegram_user_labels(asset.user)
+        delete_at = _with_runtime_time(base_at + timezone.timedelta(days=delete_days), 'cloud_unattached_ip_delete_time')
+        items.append({
+            'id': asset.id,
+            'asset_name': asset.asset_name or asset.instance_id or f'asset-{asset.id}',
+            'user_display_name': user_display_name,
+            'username_label': username_label,
+            'public_ip': asset.public_ip or asset.previous_public_ip or '',
+            'provider_status': asset.provider_status or '',
+            'delete_at': _iso(delete_at),
+            'note': asset.note or '',
+            'is_overdue': bool(delete_at and delete_at <= now),
+        })
+    return sorted(items, key=lambda item: (0 if item['is_overdue'] else 1, item['delete_at'] or '', item['id']))[:limit]
+
+
 def _region_label(region_code, region_name=None):
     mapping = {
         'cn-qingdao': '华北1（青岛）',
@@ -295,6 +483,17 @@ def _user_payload(item):
         'usernames': usernames,
         'username_label': ' / '.join(f'@{name}' for name in usernames) if usernames else '-',
     }
+
+
+def _telegram_user_labels(user):
+    if not user:
+        return '未绑定用户', '-'
+    usernames = _split_usernames(getattr(user, 'username', '') or getattr(user, 'primary_username', ''))
+    first_name = (getattr(user, 'first_name', '') or '').strip()
+    primary_username = getattr(user, 'primary_username', '') or (usernames[0] if usernames else '')
+    display_name = first_name or (f'@{primary_username}' if primary_username else str(getattr(user, 'tg_user_id', '') or getattr(user, 'id', '')))
+    username_label = ' / '.join(f'@{name}' for name in usernames) if usernames else '-'
+    return display_name, username_label
 
 
 def _parse_decimal(value, field_label):
@@ -699,6 +898,8 @@ def overview(request):
         .order_by('-created_at')[:8]
         .values('id', 'amount', 'status', 'tx_hash', 'created_at')
     )
+    shutdown_logs = _shutdown_log_items(limit=80)
+    unattached_ip_delete_plans = _unattached_ip_delete_items(limit=30)
 
     month_start = today.replace(day=1)
     next_month = (month_start.replace(day=28) + timezone.timedelta(days=4)).replace(day=1)
@@ -782,7 +983,20 @@ def overview(request):
             }
             for item in latest_recharges
         ],
+        'shutdown_logs': shutdown_logs,
+        'unattached_ip_delete_plans': unattached_ip_delete_plans,
     })
+
+
+@dashboard_login_required
+@require_GET
+def shutdown_logs(request):
+    try:
+        limit = int(request.GET.get('limit') or 100)
+    except (TypeError, ValueError):
+        limit = 100
+    limit = max(1, min(limit, 300))
+    return _ok(_shutdown_log_items(limit=limit))
 
 
 @csrf_exempt
@@ -937,6 +1151,14 @@ def site_config_groups(request):
             'telegram_api_id',
             'telegram_api_hash',
             'trongrid_api_key',
+            'scanner_block_log_enabled',
+            'scanner_verbose',
+            'cloud_suspend_after_days',
+            'cloud_suspend_time',
+            'cloud_delete_after_days',
+            'cloud_delete_time',
+            'cloud_unattached_ip_delete_after_days',
+            'cloud_unattached_ip_delete_time',
             'bot_admin_chat_id',
             'dashboard_totp_secret',
         ],

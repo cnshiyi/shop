@@ -554,7 +554,8 @@ def _format_amount_tag(amount: Decimal) -> str:
 def build_cloud_server_name(tg_user_id: int | None, amount: Decimal, unique_tag: str | None = None) -> str:
     timestamp = timezone.now().strftime('%Y%m%d')
     user_tag = str(tg_user_id or 0)
-    return f"{timestamp}-{user_tag}-{_format_amount_tag(amount)}"[:255]
+    tag = f'-{unique_tag}' if unique_tag else ''
+    return f"{timestamp}-{user_tag}-{_format_amount_tag(amount)}{tag}"[:255]
 
 
 def ensure_unique_cloud_server_name(base_name: str) -> str:
@@ -663,6 +664,62 @@ def set_cloud_server_port(order_id: int, user_id: int, port: int):
     order.save(update_fields=['mtproxy_port', 'provision_note', 'updated_at'])
     logger.info('云服务器端口确认: order=%s user=%s port=%s', order.order_no, user_id, port)
     return order
+
+
+@sync_to_async
+def prepare_cloud_server_order_instances(order_id: int, user_id: int, port: int):
+    with transaction.atomic():
+        order = CloudServerOrder.objects.select_for_update().filter(id=order_id, user_id=user_id).first()
+        if not order:
+            return []
+        quantity = max(1, int(order.quantity or 1))
+        order.mtproxy_port = port
+        if quantity <= 1:
+            order.provision_note = f'用户已确认端口 {port}，开始创建服务器。'
+            order.save(update_fields=['mtproxy_port', 'provision_note', 'updated_at'])
+            logger.info('云服务器端口确认: order=%s user=%s port=%s quantity=1', order.order_no, user_id, port)
+            return [order]
+
+        per_total = (Decimal(order.total_amount or 0) / Decimal(quantity)).quantize(Decimal('0.000001'))
+        per_pay = (Decimal(order.pay_amount or 0) / Decimal(quantity)).quantize(Decimal('0.000000001')) if order.pay_amount is not None else None
+        original_order_no = order.order_no
+        created_orders = [order]
+        order.quantity = 1
+        order.total_amount = per_total
+        order.pay_amount = per_pay
+        order.provision_note = f'批量订单 {original_order_no} 已拆分：第 1/{quantity} 台，端口 {port}，开始创建服务器。'
+        order.save(update_fields=['quantity', 'total_amount', 'pay_amount', 'mtproxy_port', 'provision_note', 'updated_at'])
+        for index in range(2, quantity + 1):
+            clone = CloudServerOrder.objects.create(
+                order_no=_generate_cloud_order_no(),
+                user=order.user,
+                plan=order.plan,
+                provider=order.provider,
+                cloud_account=order.cloud_account,
+                account_label=order.account_label,
+                region_code=order.region_code,
+                region_name=order.region_name,
+                plan_name=order.plan_name,
+                provider_resource_id=order.provider_resource_id,
+                quantity=1,
+                currency=order.currency,
+                total_amount=per_total,
+                pay_amount=per_pay,
+                pay_method=order.pay_method,
+                status=order.status,
+                payer_address=order.payer_address,
+                receive_address=order.receive_address,
+                image_name=order.image_name,
+                lifecycle_days=order.lifecycle_days,
+                paid_at=order.paid_at,
+                expired_at=order.expired_at,
+                mtproxy_port=port,
+                last_user_id=order.last_user_id,
+                provision_note=f'批量订单 {original_order_no} 已拆分：第 {index}/{quantity} 台，端口 {port}，开始创建服务器。',
+            )
+            created_orders.append(clone)
+        logger.info('云服务器批量订单拆分完成: original_order=%s user=%s quantity=%s port=%s child_orders=%s', original_order_no, user_id, quantity, port, [item.order_no for item in created_orders])
+        return created_orders
 
 
 def _generate_cloud_order_no() -> str:
@@ -950,6 +1007,19 @@ def list_user_cloud_servers(user_id: int):
     assets = (
         CloudAsset.objects.select_related('order')
         .filter(kind=CloudAsset.KIND_SERVER, user_id=user_id)
+        .filter(ip_filter)
+        .exclude(status__in=_INACTIVE_ASSET_STATUSES)
+        .order_by('-sort_order', 'actual_expires_at', '-updated_at', '-id')
+    )
+    return [_proxy_asset_view(asset) for asset in assets]
+
+
+@sync_to_async
+def list_user_auto_renew_cloud_servers(user_id: int):
+    ip_filter = Q(public_ip__isnull=False) & ~Q(public_ip='')
+    assets = (
+        CloudAsset.objects.select_related('order')
+        .filter(kind=CloudAsset.KIND_SERVER, user_id=user_id, order__auto_renew_enabled=True)
         .filter(ip_filter)
         .exclude(status__in=_INACTIVE_ASSET_STATUSES)
         .order_by('-sort_order', 'actual_expires_at', '-updated_at', '-id')
@@ -2338,6 +2408,7 @@ __all__ = [
     'initialize_proxy_asset',
     'list_custom_regions',
     'list_region_plans',
+    'list_user_auto_renew_cloud_servers',
     'list_user_cloud_servers',
     'create_cloud_server_rebuild_order',
     'mark_cloud_server_ip_change_requested',
@@ -2348,6 +2419,7 @@ __all__ = [
     'pay_cloud_server_order_with_balance',
     'pay_cloud_server_renewal_with_balance',
     'refund_cloud_server_to_balance',
+    'prepare_cloud_server_order_instances',
     'create_cloud_server_upgrade_order',
     'list_cloud_server_upgrade_plans',
     'rebind_cloud_server_user',

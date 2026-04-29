@@ -18,10 +18,31 @@ CONFIG_HELP = {
     'text_init_enabled': '是否允许后台初始化文案（1=允许，0=禁用）',
     'text_init_mode': '文案初始化模式：missing_only 或 reset_defaults',
     'cloud_renew_notice_days': 'IP到期提醒提前天数，默认5天',
+    'cloud_suspend_after_days': 'IP到期后多少天关机，默认3天',
+    'cloud_suspend_time': '到期后关机执行时间，格式HH:mm，默认15:00',
+    'cloud_delete_after_days': '关机后多少天删机，默认0天',
+    'cloud_delete_time': '到期后删机执行时间，格式HH:mm，默认15:00',
+    'cloud_unattached_ip_delete_after_days': '未附加IP发现/到期后多少天删除，默认15天',
+    'cloud_unattached_ip_delete_time': '未附加IP删除执行时间，格式HH:mm，默认15:00',
     'cloud_renew_notice_debug_repeat': 'IP到期提醒调试重复开关（1=忽略已提醒记录，启动/定时检查都会重复提醒；0=只提醒一次）',
     'dashboard_totp_secret': '后台 Google Authenticator TOTP 密钥（Base32，更换后旧绑定失效）',
     'cleanup_retention_days': '自动清理保留天数，默认100天；订单和聊天记录超过该天数会被定时清理',
 }
+
+CONFIG_DEFAULTS = {
+    'scanner_verbose': '0',
+    'scanner_block_log_enabled': '0',
+    'cloud_renew_notice_days': '5',
+    'cloud_suspend_after_days': '3',
+    'cloud_suspend_time': '15:00',
+    'cloud_delete_after_days': '0',
+    'cloud_delete_time': '15:00',
+    'cloud_unattached_ip_delete_after_days': '15',
+    'cloud_unattached_ip_delete_time': '15:00',
+    'cloud_renew_notice_debug_repeat': '0',
+    'cleanup_retention_days': '100',
+}
+
 
 SENSITIVE_CONFIG_KEYS = {
     'bot_token',
@@ -58,6 +79,12 @@ CONFIG_ENV_MAP = {
     'text_init_enabled': 'TEXT_INIT_ENABLED',
     'text_init_mode': 'TEXT_INIT_MODE',
     'cloud_renew_notice_days': 'CLOUD_RENEW_NOTICE_DAYS',
+    'cloud_suspend_after_days': 'CLOUD_SUSPEND_AFTER_DAYS',
+    'cloud_suspend_time': 'CLOUD_SUSPEND_TIME',
+    'cloud_delete_after_days': 'CLOUD_DELETE_AFTER_DAYS',
+    'cloud_delete_time': 'CLOUD_DELETE_TIME',
+    'cloud_unattached_ip_delete_after_days': 'CLOUD_UNATTACHED_IP_DELETE_AFTER_DAYS',
+    'cloud_unattached_ip_delete_time': 'CLOUD_UNATTACHED_IP_DELETE_TIME',
     'cloud_renew_notice_debug_repeat': 'CLOUD_RENEW_NOTICE_DEBUG_REPEAT',
     'dashboard_totp_secret': 'DASHBOARD_TOTP_SECRET',
     'cleanup_retention_days': 'CLEANUP_RETENTION_DAYS',
@@ -88,4 +115,5 @@ def get_runtime_config(key: str, default: str = '') -> str:
     if value:
         return value
     env_key = CONFIG_ENV_MAP.get(key, key.upper())
-    return os.getenv(env_key, default)
+    fallback = default if default != '' else CONFIG_DEFAULTS.get(key, '')
+    return os.getenv(env_key, fallback)

@@ -65,10 +65,8 @@ def _resolve_aliyun_status(item, expires_at=None):
     raw_status = str(item.get('Status') or '').strip().lower()
     business_status = str(item.get('BusinessStatus') or '').strip().lower()
     disable_reason = str(item.get('DisableReason') or '').strip().lower()
-    now = timezone.now()
-
-    if expires_at and now >= expires_at and now < expires_at + timezone.timedelta(days=15):
-        return CloudAsset.STATUS_EXPIRED_GRACE, raw_status, business_status, disable_reason
+    if business_status == 'expired' or disable_reason == 'expired':
+        return CloudAsset.STATUS_EXPIRED, raw_status, business_status, disable_reason
     if raw_status == 'running' and business_status in {'', 'normal'}:
         return CloudAsset.STATUS_RUNNING, raw_status, business_status, disable_reason
     if raw_status == 'starting':
@@ -79,8 +77,8 @@ def _resolve_aliyun_status(item, expires_at=None):
         return CloudAsset.STATUS_STOPPING, raw_status, business_status, disable_reason
     if raw_status == 'stopped':
         return CloudAsset.STATUS_STOPPED, raw_status, business_status, disable_reason
-    if raw_status == 'disabled' and (business_status == 'expired' or disable_reason == 'expired'):
-        return CloudAsset.STATUS_EXPIRED, raw_status, business_status, disable_reason
+    if raw_status == 'disabled':
+        return CloudAsset.STATUS_SUSPENDED, raw_status, business_status, disable_reason
     if raw_status == 'deleting':
         return CloudAsset.STATUS_DELETING, raw_status, business_status, disable_reason
     if raw_status == 'deleted':
@@ -245,7 +243,7 @@ class Command(BaseCommand):
             for item in instances:
                 instance_id = item.get('InstanceId') or ''
                 public_ip = item.get('PublicIpAddress') or item.get('PublicIp') or ''
-                expires_at = CloudServerOrder.normalize_expiry_time(_parse_expire_time(item))
+                expires_at = _parse_expire_time(item)
                 account_id = _resolve_account_id(item)
                 normalized_status, raw_status, business_status, disable_reason = _resolve_aliyun_status(item, expires_at)
                 normalized_status = _elevate_deleted_when_ip_missing(normalized_status, public_ip)
@@ -283,10 +281,11 @@ class Command(BaseCommand):
                     asset_defaults['order'] = linked_order
                     if not asset:
                         asset_defaults['user'] = linked_order.user
-                        asset_defaults['actual_expires_at'] = linked_order.service_expires_at or expires_at
+                        asset_defaults['actual_expires_at'] = expires_at or linked_order.service_expires_at
                 if asset:
                     asset_defaults['user'] = asset.user
-                    asset_defaults['actual_expires_at'] = asset.actual_expires_at
+                    if not expires_at:
+                        asset_defaults['actual_expires_at'] = asset.actual_expires_at
                 asset_signature = f'{instance_id or "-"}|{public_ip or "缺失"}'
                 old_status = asset.status if asset else None
                 old_public_ip = asset.public_ip if asset else None
@@ -346,13 +345,15 @@ class Command(BaseCommand):
                     server_defaults['order'] = linked_order
                     if not server:
                         server_defaults['user'] = linked_order.user
-                        server_defaults['expires_at'] = linked_order.service_expires_at or expires_at
+                        server_defaults['expires_at'] = expires_at or linked_order.service_expires_at
                 if asset:
                     server_defaults['user'] = asset.user
-                    server_defaults['expires_at'] = asset.actual_expires_at
+                    if not expires_at:
+                        server_defaults['expires_at'] = asset.actual_expires_at
                 if server:
                     server_defaults['user'] = server.user
-                    server_defaults['expires_at'] = server.expires_at
+                    if not expires_at:
+                        server_defaults['expires_at'] = server.expires_at
                 old_server_public_ip = server.public_ip if server else None
                 if server:
                     if old_server_public_ip and old_server_public_ip != public_ip:
@@ -364,22 +365,30 @@ class Command(BaseCommand):
                     Server.objects.create(**server_defaults)
 
                 if linked_order:
-                    linked_order.status = _order_status_from_cloud_status(normalized_status)
-                    linked_order.cloud_account = account
-                    linked_order.account_label = account_label
-                    linked_order.region_code = region
-                    linked_order.region_name = item.get('RegionId') or region
-                    linked_order.server_name = asset_name
-                    linked_order.instance_id = instance_id
-                    linked_order.provider_resource_id = instance_id
+                    previous_public_ip = linked_order.previous_public_ip
                     if public_ip and linked_order.public_ip != public_ip:
-                        linked_order.previous_public_ip = linked_order.public_ip or linked_order.previous_public_ip
-                    linked_order.public_ip = public_ip or None
-                    linked_order.save(update_fields=[
-                        'status', 'cloud_account', 'account_label', 'region_code', 'region_name',
-                        'server_name', 'instance_id', 'provider_resource_id',
-                        'previous_public_ip', 'public_ip', 'updated_at',
-                    ])
+                        previous_public_ip = linked_order.public_ip or linked_order.previous_public_ip
+                    order_updates = {
+                        'status': _order_status_from_cloud_status(normalized_status),
+                        'provider': 'aliyun_simple',
+                        'cloud_account': account,
+                        'account_label': account_label,
+                        'region_code': region,
+                        'region_name': item.get('RegionId') or region,
+                        'server_name': asset_name,
+                        'instance_id': instance_id,
+                        'provider_resource_id': instance_id,
+                        'previous_public_ip': previous_public_ip,
+                        'public_ip': public_ip or None,
+                        'renew_grace_expires_at': None,
+                        'suspend_at': None,
+                        'delete_at': None,
+                        'ip_recycle_at': None,
+                        'updated_at': timezone.now(),
+                    }
+                    if expires_at:
+                        order_updates['service_expires_at'] = expires_at
+                    CloudServerOrder.objects.filter(pk=linked_order.pk).update(**order_updates)
 
                 if ip_changed:
                     refreshed_server = _resolve_server(instance_id, public_ip, account)

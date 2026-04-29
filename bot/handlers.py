@@ -32,7 +32,7 @@ from bot.keyboards import (
     pay_method_keyboard, order_list as kb_order_list,
     recharge_list as kb_recharge_list, profile_menu, reminder_list_menu, reminder_ip_detail_menu,
     custom_region_menu, custom_plan_menu, custom_quantity_keyboard, custom_payment_keyboard, custom_currency_keyboard, custom_wallet_keyboard, custom_order_wallet_keyboard, custom_port_keyboard,
-    cloud_server_list, cloud_server_detail, cloud_order_list, cloud_order_readonly_detail, cloud_expiry_actions, cloud_server_renew_payment, order_query_menu, balance_details_list, support_contact_button, cloud_lifecycle_notice_actions,
+    cloud_server_list, cloud_auto_renew_server_list, cloud_server_detail, cloud_order_list, cloud_order_readonly_detail, cloud_expiry_actions, cloud_server_renew_payment, order_query_menu, balance_details_list, support_contact_button, cloud_lifecycle_notice_actions,
     cloud_server_change_ip_region_menu, cloud_server_change_ip_port_keyboard,
     cart_menu, wallet_recharge_prompt_menu, cloud_ip_query_result,
     cloud_query_menu, configured_link_for_label, configured_link_menu,
@@ -53,6 +53,7 @@ from cloud.services import (
     initialize_proxy_asset,
     list_custom_regions,
     list_region_plans,
+    list_user_auto_renew_cloud_servers,
     list_user_cloud_servers,
     list_cloud_server_upgrade_plans,
     create_cloud_server_upgrade_order,
@@ -64,10 +65,10 @@ from cloud.services import (
     mute_cloud_reminders,
     pay_cloud_server_order_with_balance,
     pay_cloud_server_renewal_with_balance,
+    prepare_cloud_server_order_instances,
     run_cloud_server_renewal_postcheck,
     set_cloud_order_reminder,
     set_cloud_server_auto_renew,
-    set_cloud_server_port,
     unmute_all_user_reminders,
     unmute_cloud_reminders,
 )
@@ -750,7 +751,9 @@ def _should_sync_user(user_id: int, username: str | None, first_name: str | None
 def _callback_route_label(callback_data: str | None) -> str:
     data = callback_data or ''
     exact = {
+        'cloud:querymenu': 'cloud.querymenu 到期时间查询菜单',
         'cloud:list': 'cloud.list 代理列表',
+        'cloud:autorenewlist': 'cloud.autorenewlist 自动续费列表',
         'cloud:queryip': 'cloud.queryip IP查询到期',
         'profile:orders': 'profile.orders 订单查询入口',
         'profile:orders:cloud': 'profile.orders.cloud 云服务器订单',
@@ -783,6 +786,7 @@ def _callback_route_label(callback_data: str | None) -> str:
         ('cloud:assetdetail:', 'cloud.assetdetail 人工代理详情'),
         ('cloud:detail:', 'cloud.detail 代理详情'),
         ('cloud:list:page:', 'cloud.list.page 代理列表分页'),
+        ('cloud:autorenewlist:page:', 'cloud.autorenewlist.page 自动续费列表分页'),
         ('cloud:queryip:page:', 'cloud.queryip.page IP查询分页'),
         ('cloud:renewpay:', 'cloud.renewpay 续费钱包支付'),
         ('cloud:renewwallet:', 'cloud.renewwallet 自动续费钱包支付'),
@@ -1037,8 +1041,8 @@ def _public_cloud_error_text(error) -> str:
     raw = str(error or '')
     if not raw:
         return '任务暂未完成，请稍后在查询中心查看，或联系人工客服。'
-    sensitive_markers = ('account', '账号', 'instance', '实例', 'server_name', 'instance_id', 'arn:', 'aws+', 'aliyun+', 'CloudAccount')
-    if any(marker.lower() in raw.lower() for marker in sensitive_markers):
+    sensitive_markers = ('account', '账号', 'instance', '实例', 'server_name', 'instance_id', 'arn:', 'aws+', 'aliyun+', 'CloudAccount', 'lightsail', 'aliyun', '阿里云', 'region', 'ap-', 'cn-', 'eu-', 'us-')
+    if any(marker.lower() in raw.lower() for marker in sensitive_markers) or re.search(r'\b(?:aws|ali)\b', raw, flags=re.IGNORECASE):
         return '云服务器任务执行失败，内部诊断信息已记录；请联系人工客服处理。'
     text = re.sub(r'aws\+[^\s，；,。)）]+', '云账号', raw)
     text = re.sub(r'aliyun\+[^\s，；,。)）]+', '云账号', text)
@@ -1055,10 +1059,40 @@ def _public_cloud_stage_text(stage: str) -> str:
     text = re.sub(r'账号\s*[^，。；,\s]+', '云账号', text)
     text = re.sub(r'aws\+[^\s，；,。)）]+', '云账号', text)
     text = re.sub(r'aliyun\+[^\s，；,。)）]+', '云账号', text)
+    text = re.sub(r'\baws\s*lightsail\b|\blightsail\b|\baws\b', '云服务器', text, flags=re.IGNORECASE)
+    text = re.sub(r'\b(?:aliyun|ali)\b|阿里云', '云服务器', text, flags=re.IGNORECASE)
+    text = re.sub(r'\b[a-z]{2}-[a-z]+-[a-z]+-\d\b', '节点', text)
+    text = re.sub(r'\b(?:cn|ap|eu|us)-[a-z0-9-]+\b', '节点', text)
     text = re.sub(r'\b\d{12,}\b', '***', text)
-    if '实例名' in text or 'instance_id' in text or 'server_name' in text:
+    if any(marker in text for marker in ['实例名', 'instance_id', 'server_name', 'provider', 'region']):
         return '正在处理云服务器资源'
+    if '创建 云服务器 实例' in text or '创建云服务器实例' in text:
+        return '正在创建云服务器'
     return text or '正在执行云服务器初始化'
+
+
+def _public_region_text(value) -> str:
+    text = str(value or '').strip()
+    if not text:
+        return ''
+    code_names = {
+        'ap-southeast-1': '新加坡',
+        'cn-hongkong': '香港',
+        'ap-northeast-1': '日本',
+        'ap-northeast-2': '韩国',
+        'us-east-1': '美国',
+    }
+    if text in code_names:
+        return code_names[text]
+    if re.fullmatch(r'[a-z]{2}-[a-z]+-[a-z]+-\d', text) or re.fullmatch(r'(?:cn|ap|eu|us)-[a-z0-9-]+', text):
+        return ''
+    text = re.sub(r'\b(?:aws|lightsail|aliyun|ali)\b|AWS|Lightsail|阿里云', '', text, flags=re.IGNORECASE)
+    return re.sub(r'\s+', ' ', text).strip(' -_/')
+
+
+def _public_region_line(value) -> str:
+    text = _public_region_text(value)
+    return f'地区: {escape(text)}\n' if text else ''
 
 
 async def _safe_remove_inline_keyboard(message: Message | None):
@@ -1267,7 +1301,7 @@ async def _create_cloud_order_and_notify(bot: Bot, chat_id: int, user_id: int, p
         receive_address = _receive_address()
         text = (
             '🧾 订单详情\n\n'
-            f'地区: {region_name}\n'
+            f'{_public_region_line(region_name)}'
             f'套餐: {plan_name}\n'
             f'数量: {order.quantity}\n'
             f'支付金额: {fmt_pay_amount(order.pay_amount or order.total_amount)} USDT / {fmt_pay_amount(await usdt_to_trx(order.pay_amount or order.total_amount))} TRX\n'
@@ -1298,7 +1332,7 @@ async def _buy_cloud_server_with_balance_and_notify(bot: Bot, chat_id: int, user
             chat_id=chat_id,
             text=(
                 '✅ 钱包支付成功\n\n'
-                f'地区: {order.region_name}\n'
+                f'{_public_region_line(order.region_name)}'
                 f'套餐: {order.plan_name}\n'
                 f'数量: {order.quantity}\n'
                 f'支付金额: {fmt_pay_amount(order.pay_amount)} {order.currency}\n\n'
@@ -1328,7 +1362,7 @@ async def _pay_cloud_server_order_with_balance_and_notify(bot: Bot, chat_id: int
             chat_id=chat_id,
             text=(
                 '✅ 钱包支付成功\n\n'
-                f'地区: {order.region_name}\n'
+                f'{_public_region_line(order.region_name)}'
                 f'套餐: {order.plan_name}\n'
                 f'数量: {order.quantity}\n'
                 f'支付金额: {fmt_pay_amount(order.pay_amount)} {order.currency}\n\n'
@@ -1687,9 +1721,8 @@ def _cloud_asset_detail_text(item) -> str:
     proxy_links_text = _proxy_links_text(item)
     return (
         '☁️ 代理详情\n\n'
-        f'来源: 人工/同步资产\n'
         f'名称: {escape(str(getattr(item, "order_no", "-") or "-"))}\n'
-        f'地区: {escape(str(getattr(item, "region_name", "-") or "-"))}\n'
+        f'{_public_region_line(getattr(item, "region_name", ""))}'
         f'状态: {escape(str(item.get_status_display() if hasattr(item, "get_status_display") else getattr(item, "status", "-")))}\n'
         f'IP: <code>{escape(str(getattr(item, "public_ip", "") or getattr(item, "previous_public_ip", "") or "未分配"))}</code>\n'
         f'端口: <code>{escape(str(getattr(item, "mtproxy_port", None) or "未设置"))}</code>\n'
@@ -1709,7 +1742,7 @@ def _cloud_server_detail_text(order) -> str:
     text = (
         '☁️ 云服务器详情\n\n'
         f'订单号: {order.order_no}\n'
-        f'地区: {order.region_name}\n'
+        f'{_public_region_line(order.region_name)}'
         f'套餐: {order.plan_name}\n'
         f'数量: {order.quantity}\n'
         f'状态: {order.get_status_display()}\n'
@@ -1805,7 +1838,7 @@ def _cloud_order_readonly_text(order) -> str:
     text = (
         '☁️ 云服务器订单详情\n\n'
         f'订单号: {escape(str(order.order_no or "-"))}\n'
-        f'地区: {escape(str(order.region_name or "-"))}\n'
+        f'{_public_region_line(order.region_name)}'
         f'套餐: {escape(str(order.plan_name or "-"))}\n'
         f'数量: {order.quantity}\n'
         f'状态: {escape(str(order.get_status_display()))}\n'
@@ -2102,7 +2135,7 @@ def register_handlers(dp: Dispatcher):
         receive_address = _receive_address()
         await message.answer(
             '🧾 订单详情\n\n'
-            f'地区: {plan.region_name}\n'
+            f'{_public_region_line(plan.region_name)}'
             f'套餐: {display_name}\n'
             f'数量: {order.quantity}\n'
             f'支付金额: {fmt_pay_amount(order.pay_amount or order.total_amount)} USDT / {fmt_pay_amount(await usdt_to_trx(order.pay_amount or order.total_amount))} TRX\n'
@@ -2146,23 +2179,25 @@ def register_handlers(dp: Dispatcher):
             await message.answer(
                 _bot_text_format(
                     'bot_ip_change_order_created',
-                    '✅ 更换IP新服务器已创建\n新订单号: {order_no}\n新地区: {region_name}\n新端口: {port}\n系统会新建同配置服务器并绑定新的固定 IP，请在 5 天内切换使用。',
+                    '✅ 更换IP新服务器已创建\n新订单号: {order_no}\n新节点: {region_name}\n新端口: {port}\n系统会新建同配置服务器并绑定新的固定 IP，请在 5 天内切换使用。',
                     order_no=order.order_no,
-                    region_name=region_name or order.region_name,
+                    region_name=_public_region_text(region_name or order.region_name) or '默认节点',
                     port=port,
                 ),
                 reply_markup=main_menu(),
             )
             asyncio.create_task(_provision_cloud_server_and_notify(bot, message.chat.id, order.id, port))
             return
-        order = await set_cloud_server_port(order_id, user.id, port)
-        logger.info('云服务器提交自定义端口: tg_user_id=%s user=%s order_id=%s port=%s result=%s', getattr(message.from_user, 'id', None), user.id, order_id, port, getattr(order, 'order_no', None))
+        orders = await prepare_cloud_server_order_instances(order_id, user.id, port)
+        logger.info('云服务器提交自定义端口: tg_user_id=%s user=%s order_id=%s port=%s orders=%s', getattr(message.from_user, 'id', None), user.id, order_id, port, [getattr(item, 'order_no', None) for item in orders])
         await state.clear()
-        if not order:
+        if not orders:
             await message.answer(_bot_text('bot_set_port_failed', '订单不存在，无法设置端口。'), reply_markup=main_menu())
             return
-        await message.answer(_bot_text_format('bot_custom_port_success', '✅ 端口设置成功：{port}\n已开始后台创建服务器，我会在完成后主动通知你。', port=port), reply_markup=main_menu())
-        asyncio.create_task(_provision_cloud_server_and_notify(bot, message.chat.id, order.id, port))
+        task_count = len(orders)
+        await message.answer(_bot_text_format('bot_custom_port_success', '✅ 端口设置成功：{port}\n已开始后台创建 {count} 台服务器，我会在完成后主动通知你。', port=port, count=task_count), reply_markup=main_menu())
+        for order in orders:
+            asyncio.create_task(_provision_cloud_server_and_notify(bot, message.chat.id, order.id, port))
 
     # ══════════════════════════════════════════════════════════════════════
     # 普通消息（菜单按钮 + /start）
@@ -2213,6 +2248,16 @@ def register_handlers(dp: Dispatcher):
                 reply_markup=profile_menu(),
             )
             logger.info('BOT_MESSAGE_SEND route=menu_profile user_id=%s chat_id=%s reply_to=%s sent_message_id=%s', getattr(message.from_user, 'id', None), message.chat.id, message.message_id, getattr(sent, 'message_id', None))
+
+    @dp.callback_query(F.data == 'cloud:querymenu')
+    async def cb_cloud_query_menu(callback: CallbackQuery, state: FSMContext):
+        await state.clear()
+        await _safe_callback_answer(callback)
+        await _safe_edit_text(
+            callback.message,
+            _bot_text('bot_query_center_entry', '🔎 查询中心\n\n请选择查询方式：'),
+            reply_markup=cloud_query_menu(),
+        )
 
     @dp.callback_query(F.data == 'cloud:queryip')
     async def cb_cloud_query_ip(callback: CallbackQuery, state: FSMContext):
@@ -2486,7 +2531,7 @@ def register_handlers(dp: Dispatcher):
         logger.info('云服务器套餐已记录: tg_user_id=%s plan_id=%s plan_name=%s region=%s price=%s', getattr(callback.from_user, 'id', None), plan.id, plan.plan_name, plan.region_code, display_price)
         text = (
             _bot_text('bot_custom_quantity_title', '请选择购买数量') + '\n\n'
-            f'地区: {plan.region_name}\n'
+            f'{_public_region_line(plan.region_name)}'
             f'套餐: {display_name}\n'
             f'套餐说明: {getattr(plan, "plan_description", None) or "无"}\n'
             f'单价: {fmt_amount(display_price)} USDT\n'
@@ -2523,7 +2568,7 @@ def register_handlers(dp: Dispatcher):
         text = (
             _bot_text('bot_custom_payment_title', '🧾 支付页面') + '\n\n'
             f'订单号: {pending_order.order_no}\n'
-            f'地区: {plan.region_name}\n'
+            f'{_public_region_line(plan.region_name)}'
             f'套餐: {display_name}\n'
             f'数量: {quantity}\n'
             f'USDT金额: {fmt_pay_amount(usdt_amount)} USDT\n'
@@ -2555,7 +2600,7 @@ def register_handlers(dp: Dispatcher):
         text = (
             _bot_text('bot_custom_payment_title', '🧾 支付页面') + '\n\n'
             f'订单号: {pending_order.order_no}\n'
-            f'地区: {plan.region_name}\n'
+            f'{_public_region_line(plan.region_name)}'
             f'套餐: {display_name}\n'
             f'数量: {quantity}\n'
             f'USDT金额: {fmt_pay_amount(usdt_amount)} USDT\n'
@@ -2728,17 +2773,19 @@ def register_handlers(dp: Dispatcher):
         logger.info('云服务器选择默认端口: tg_user_id=%s order_id=%s port=9528 callback=%s', getattr(callback.from_user, 'id', None), order_id, callback.data)
         await state.clear()
         user = await get_or_create_user(callback.from_user.id, callback.from_user.username, callback.from_user.first_name)
-        order = await set_cloud_server_port(order_id, user.id, 9528)
-        logger.info('云服务器使用默认端口: tg_user_id=%s user=%s order_id=%s port=9528 result=%s', getattr(callback.from_user, 'id', None), user.id, order_id, getattr(order, 'order_no', None))
-        if not order:
+        orders = await prepare_cloud_server_order_instances(order_id, user.id, 9528)
+        logger.info('云服务器使用默认端口: tg_user_id=%s user=%s order_id=%s port=9528 orders=%s', getattr(callback.from_user, 'id', None), user.id, order_id, [getattr(item, 'order_no', None) for item in orders])
+        if not orders:
             await _safe_callback_answer(callback, '订单不存在', show_alert=True)
             return
+        task_count = len(orders)
         await bot.send_message(
             chat_id=callback.from_user.id,
-            text='✅ 已选择默认端口 9528。\n服务器创建任务已提交，正在后台处理，完成后会自动发送创建结果。',
+            text=f'✅ 已选择默认端口 9528。\n{task_count} 台服务器创建任务已提交，正在后台处理，完成后会自动发送创建结果。',
             reply_markup=main_menu(),
         )
-        asyncio.create_task(_provision_cloud_server_and_notify(bot, callback.from_user.id, order.id, 9528))
+        for order in orders:
+            asyncio.create_task(_provision_cloud_server_and_notify(bot, callback.from_user.id, order.id, 9528))
 
     @dp.callback_query(F.data.startswith('custom:port:custom:'))
     async def cb_custom_port_custom(callback: CallbackQuery, state: FSMContext, bot: Bot):
@@ -2788,6 +2835,76 @@ def register_handlers(dp: Dispatcher):
             callback.message,
             '🔎 代理列表\n\n请选择要查看的代理：',
             reply_markup=cloud_server_list(page_items, page, total_pages, 'cloud:list:page'),
+        )
+
+    @dp.callback_query(F.data == 'cloud:autorenewlist')
+    async def cb_cloud_auto_renew_list(callback: CallbackQuery, state: FSMContext):
+        await state.clear()
+        await _safe_callback_answer(callback)
+        user = await get_or_create_user(callback.from_user.id, callback.from_user.username, callback.from_user.first_name)
+        visible_servers = await list_user_auto_renew_cloud_servers(user.id)
+        page = 1
+        per_page = 8
+        total_visible = len(visible_servers)
+        total_pages = max(1, math.ceil(total_visible / per_page))
+        page_items = visible_servers[(page - 1) * per_page: page * per_page]
+        if not page_items:
+            await _safe_edit_text(callback.message, '⚡ 自动续费列表\n\n暂无已开启自动续费的代理。', reply_markup=cloud_query_menu())
+            return
+        await _safe_edit_text(
+            callback.message,
+            '⚡ 自动续费列表\n\n以下代理已开启自动续费：',
+            reply_markup=cloud_auto_renew_server_list(page_items, page, total_pages),
+        )
+
+    @dp.callback_query(F.data.startswith('cloud:autorenewlist:off:'))
+    async def cb_cloud_auto_renew_list_off(callback: CallbackQuery, state: FSMContext):
+        await state.clear()
+        user = await get_or_create_user(callback.from_user.id, callback.from_user.username, callback.from_user.first_name)
+        _, _, _, raw_order_id, raw_page = callback.data.split(':')
+        page = max(1, int(raw_page or 1))
+        order = await set_cloud_server_auto_renew(int(raw_order_id), user.id, False)
+        if order is False:
+            await _safe_callback_answer(callback, '当前状态不可关闭自动续费', show_alert=True)
+            return
+        if not order:
+            await _safe_callback_answer(callback, '代理记录不存在', show_alert=True)
+            return
+        await _safe_callback_answer(callback, '已关闭自动续费')
+        visible_servers = await list_user_auto_renew_cloud_servers(user.id)
+        per_page = 8
+        total_visible = len(visible_servers)
+        total_pages = max(1, math.ceil(total_visible / per_page))
+        page = min(page, total_pages)
+        page_items = visible_servers[(page - 1) * per_page: page * per_page]
+        if not page_items:
+            await _safe_edit_text(callback.message, '⚡ 自动续费列表\n\n暂无已开启自动续费的代理。', reply_markup=cloud_query_menu())
+            return
+        await _safe_edit_text(
+            callback.message,
+            '⚡ 自动续费列表\n\n以下代理已开启自动续费，点击 IP 可关闭：',
+            reply_markup=cloud_auto_renew_server_list(page_items, page, total_pages),
+        )
+
+    @dp.callback_query(F.data.startswith('cloud:autorenewlist:page:'))
+    async def cb_cloud_auto_renew_list_page(callback: CallbackQuery, state: FSMContext):
+        await state.clear()
+        await _safe_callback_answer(callback)
+        user = await get_or_create_user(callback.from_user.id, callback.from_user.username, callback.from_user.first_name)
+        page = max(1, int(callback.data.split(':')[3]))
+        visible_servers = await list_user_auto_renew_cloud_servers(user.id)
+        per_page = 8
+        total_visible = len(visible_servers)
+        total_pages = max(1, math.ceil(total_visible / per_page))
+        page = min(page, total_pages)
+        page_items = visible_servers[(page - 1) * per_page: page * per_page]
+        if not page_items:
+            await _safe_edit_text(callback.message, '⚡ 自动续费列表\n\n暂无已开启自动续费的代理。', reply_markup=cloud_query_menu())
+            return
+        await _safe_edit_text(
+            callback.message,
+            '⚡ 自动续费列表\n\n以下代理已开启自动续费：',
+            reply_markup=cloud_auto_renew_server_list(page_items, page, total_pages),
         )
 
     @dp.callback_query(F.data.startswith('profile:orders:cloud:page:'))
@@ -2924,10 +3041,10 @@ def register_handlers(dp: Dispatcher):
         if action == 'changeip':
             if order.provider != 'aws_lightsail':
                 logger.info('CLOUD_ASSET_ACTION_DENIED user_id=%s asset_id=%s order_id=%s action=%s reason=unsupported_provider provider=%s', user.id, asset_id, order.id, action, order.provider)
-                await _safe_callback_answer(callback, '阿里云服务器暂不支持更换 IP', show_alert=True)
+                await _safe_callback_answer(callback, '当前代理暂不支持更换 IP', show_alert=True)
                 await _safe_edit_text(
                     callback.message,
-                    '🌐 更换IP\n\n当前代理不是 AWS Lightsail 服务器，暂不支持自助更换 IP。',
+                    '🌐 更换IP\n\n当前代理暂不支持自助更换 IP。',
                     reply_markup=InlineKeyboardMarkup(inline_keyboard=[
                         [support_contact_button('cloud_asset_changeip_provider', asset_id)],
                         [InlineKeyboardButton(text='🔙 返回代理详情', callback_data=f'cloud:assetdetail:asset:{asset_id}:cloud:list:page:1')],
@@ -3290,7 +3407,7 @@ def register_handlers(dp: Dispatcher):
             await _safe_callback_answer(callback, '服务器记录不存在', show_alert=True)
             return
         if order.provider != 'aws_lightsail':
-            await _safe_callback_answer(callback, '阿里云服务器暂不支持更换 IP', show_alert=True)
+            await _safe_callback_answer(callback, '当前代理暂不支持更换 IP', show_alert=True)
             return
         if max(int(getattr(order, 'ip_change_quota', 0) or 0), 0) <= 0:
             await _safe_callback_answer(callback, '剩余更换 IP 次数不足，请续费后再试', show_alert=True)
@@ -3317,13 +3434,13 @@ def register_handlers(dp: Dispatcher):
         _, _, raw_order_id, region_code = callback.data.split(':')
         order_id = int(raw_order_id)
         if region_code == 'cn-hongkong':
-            await _safe_callback_answer(callback, '更换 IP 不支持阿里云地区', show_alert=True)
+            await _safe_callback_answer(callback, '当前节点暂不支持更换 IP', show_alert=True)
             return
         regions = [(code, name) for code, name in await _get_cached_custom_regions() if code != 'cn-hongkong']
         region_name = next((name for code, name in regions if code == region_code), region_code)
         await state.update_data(cloud_ip_change_order_id=order_id, cloud_ip_change_region_code=region_code, cloud_ip_change_region_name=region_name)
         await _safe_edit_text(callback.message, 
-            f'🌐 更换IP\n\n已选择地区：{region_name}\n请选择端口：',
+            f'🌐 更换IP\n\n已选择节点：{_public_region_text(region_name) or "默认节点"}\n请选择端口：',
             reply_markup=cloud_server_change_ip_port_keyboard(order_id, region_code, region_name),
         )
 
@@ -3342,7 +3459,7 @@ def register_handlers(dp: Dispatcher):
             await _safe_callback_answer(callback, '创建更换 IP 新服务器失败', show_alert=True)
             return
         await callback.message.reply(
-            f'🌐 已为你创建同配置换 IP 新服务器\n新订单号: {new_order.order_no}\n新地区: {new_order.region_name}\n新端口: {new_order.mtproxy_port or 9528}\n系统会绑定新的固定 IP，请在 5 天内切换使用。\n\n后台创建期间，底部菜单和其它按钮可正常使用。',
+            f'🌐 已为你创建同配置换 IP 新服务器\n新订单号: {new_order.order_no}\n新节点: {_public_region_text(new_order.region_name) or "默认节点"}\n新端口: {new_order.mtproxy_port or 9528}\n系统会绑定新的固定 IP，请在 5 天内切换使用。\n\n后台创建期间，底部菜单和其它按钮可正常使用。',
             reply_markup=main_menu(),
         )
         asyncio.create_task(_provision_cloud_server_and_notify(bot, callback.from_user.id, new_order.id, new_order.mtproxy_port or 9528))
@@ -3353,14 +3470,14 @@ def register_handlers(dp: Dispatcher):
         _, _, _, raw_order_id, region_code = callback.data.split(':')
         order_id = int(raw_order_id)
         if region_code == 'cn-hongkong':
-            await _safe_callback_answer(callback, '更换 IP 不支持阿里云地区', show_alert=True)
+            await _safe_callback_answer(callback, '当前节点暂不支持更换 IP', show_alert=True)
             return
         regions = [(code, name) for code, name in await _get_cached_custom_regions() if code != 'cn-hongkong']
         region_name = next((name for code, name in regions if code == region_code), region_code)
         await state.update_data(cloud_ip_change_order_id=order_id, cloud_ip_change_region_code=region_code, cloud_ip_change_region_name=region_name)
         await state.set_state(CustomServerStates.waiting_port)
         await callback.message.reply(
-            f'✍️ 已选择更换IP自定义端口。\n地区：{region_name}\n请发送 443 或 1025-65530 之间的端口号。'
+            f'✍️ 已选择更换IP自定义端口。\n节点：{_public_region_text(region_name) or "默认节点"}\n请发送 443 或 1025-65530 之间的端口号。'
         )
 
 

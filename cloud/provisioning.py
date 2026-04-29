@@ -162,8 +162,9 @@ def _upsert_server_record(order: CloudServerOrder, note: str):
 
 
 @sync_to_async
-def _build_unique_server_name(tg_user_id: int | None, pay_amount):
-    return ensure_unique_cloud_server_name(build_cloud_server_name(tg_user_id, pay_amount))
+def _build_unique_server_name(tg_user_id: int | None, pay_amount, order_id: int | None = None):
+    unique_tag = f'o{order_id}' if order_id else None
+    return ensure_unique_cloud_server_name(build_cloud_server_name(tg_user_id, pay_amount, unique_tag))
 
 
 @sync_to_async
@@ -456,7 +457,7 @@ async def provision_cloud_server(order_id: int):
 
         order_tg_user_id = await _get_order_tg_user_id(order)
 
-        server_name = await _build_unique_server_name(order_tg_user_id, order.pay_amount)
+        server_name = await _build_unique_server_name(order_tg_user_id, order.pay_amount, order.id)
         logger.info(
             '云服务器开通准备完成: order_id=%s order_no=%s status=%s provider=%s region=%s plan=%s qty=%s currency=%s pay_amount=%s mtproxy_port=%s server_name=%s user_id=%s tg_user_id=%s',
             order.id,

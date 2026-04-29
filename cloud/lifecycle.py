@@ -81,10 +81,10 @@ def _get_due_orders():
         'auto_renew': list(CloudServerOrder.objects.filter(status__in=['completed', 'expiring', 'renew_pending'], auto_renew_enabled=True, service_expires_at__lte=auto_renew_at, service_expires_at__gt=now)),
         'delete_notice': list(CloudServerOrder.objects.filter(status__in=['suspended', 'deleting'], delete_reminder_enabled=True, delete_at__lte=delete_notice_at, delete_at__gt=now, delete_notice_sent_at__isnull=True)),
         'recycle_notice': list(CloudServerOrder.objects.filter(status='deleted', ip_recycle_reminder_enabled=True, ip_recycle_at__lte=recycle_notice_at, ip_recycle_at__gt=now, recycle_notice_sent_at__isnull=True)),
-        'expire': list(CloudServerOrder.objects.filter(status='completed', service_expires_at__lte=now)),
-        'suspend': list(CloudServerOrder.objects.filter(status__in=['completed', 'expiring', 'renew_pending'], suspend_at__lte=now)),
-        'delete': list(CloudServerOrder.objects.filter(status__in=['suspended', 'deleting'], delete_at__lte=now)),
-        'recycle': list(CloudServerOrder.objects.filter(status='deleted', ip_recycle_at__lte=now)),
+        'expire': list(CloudServerOrder.objects.filter(status='completed', service_expires_at__lte=now).exclude(provider='aliyun_simple')),
+        'suspend': list(CloudServerOrder.objects.filter(status__in=['completed', 'expiring', 'renew_pending'], suspend_at__lte=now).exclude(provider='aliyun_simple')),
+        'delete': list(CloudServerOrder.objects.filter(status__in=['suspended', 'deleting'], delete_at__lte=now).exclude(provider='aliyun_simple')),
+        'recycle': list(CloudServerOrder.objects.filter(status='deleted', ip_recycle_at__lte=now).exclude(provider='aliyun_simple')),
         'config': {'renew_notice_days': renew_notice_days, 'renew_notice_debug_repeat': renew_notice_debug_repeat},
     }
 
@@ -294,9 +294,21 @@ def _proxy_links_notice_text(order) -> str:
     return '\n'.join(lines)
 
 
+def _config_time(key: str, default: str = '15:00') -> tuple[int, int]:
+    try:
+        raw = str(get_runtime_config(key, default) or default).strip()
+        hour_text, minute_text = raw.split(':', 1)
+        return min(max(int(hour_text), 0), 23), min(max(int(minute_text), 0), 59)
+    except Exception:
+        hour_text, minute_text = default.split(':', 1)
+        return int(hour_text), int(minute_text)
+
+
 def _is_cloud_delete_safe_time(now=None) -> bool:
     local_now = timezone.localtime(now or timezone.now())
-    return 17 <= local_now.hour < 18
+    hour, minute = _config_time('cloud_delete_time', '15:00')
+    scheduled = local_now.replace(hour=hour, minute=minute, second=0, microsecond=0)
+    return scheduled <= local_now < scheduled + timezone.timedelta(hours=1)
 
 
 def _action_note(result) -> str:
@@ -337,7 +349,7 @@ def _cloud_expiry_notice_payload(order_id: int) -> dict:
         or '未分配'
     )
     expires_at = getattr(asset, 'actual_expires_at', None) or getattr(server, 'expires_at', None) or order.service_expires_at
-    computed_suspend_at = expires_at + timezone.timedelta(days=3 + max(int(order.renew_extension_days or 0), 0)) if expires_at else None
+    computed_suspend_at = order.suspend_at or (expires_at + timezone.timedelta(days=3 + max(int(order.renew_extension_days or 0), 0)) if expires_at else None)
     suspend_at = order.suspend_at
     if computed_suspend_at and (not suspend_at or suspend_at < expires_at):
         suspend_at = computed_suspend_at

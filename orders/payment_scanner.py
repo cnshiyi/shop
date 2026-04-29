@@ -37,7 +37,7 @@ logger = logging.getLogger(__name__)
 USDT_CONTRACT = get_runtime_config('usdt_contract', os.getenv('USDT_CONTRACT', 'TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t'))
 TRONGRID_BASE_URL = get_runtime_config('trongrid_base_url', os.getenv('TRONGRID_BASE_URL', 'https://api.trongrid.io'))
 SCANNER_VERBOSE = get_runtime_config('scanner_verbose', os.getenv('SCANNER_VERBOSE', '0')) == '1'
-SCANNER_BLOCK_LOG_ENABLED = get_runtime_config('scanner_block_log_enabled', os.getenv('SCANNER_BLOCK_LOG_ENABLED', '1')) == '1'
+SCANNER_BLOCK_LOG_ENABLED = get_runtime_config('scanner_block_log_enabled', os.getenv('SCANNER_BLOCK_LOG_ENABLED', '0')) == '1'
 
 # ── 内部状态 ──────────────────────────────────────────────────────────────
 
@@ -49,6 +49,8 @@ _SCAN_SUMMARY_INTERVAL = 600
 _scan_stats = {'blocks': 0, 'transactions': 0, 'transfers': 0, 'payments': 0, 'monitor_hits': 0}
 _last_rate_limit_log_at: float = 0.0
 _last_trongrid_unauthorized_log_at: float = 0.0
+_last_runtime_config_refresh_at: float = 0.0
+_last_pending_expire_check_at: float = 0.0
 _last_scanned_block_number: int | None = None
 _SCANNER_LAST_BLOCK_KEY = 'tron_scanner_last_block_number'
 _SCANNER_POLL_INTERVAL = 0.8
@@ -83,9 +85,23 @@ def reload_config():
     """热重载扫描器配置（由外部调用）。"""
     global SCANNER_VERBOSE, SCANNER_BLOCK_LOG_ENABLED, USDT_CONTRACT, TRONGRID_BASE_URL
     SCANNER_VERBOSE = get_runtime_config('scanner_verbose', os.getenv('SCANNER_VERBOSE', '0')) == '1'
-    SCANNER_BLOCK_LOG_ENABLED = get_runtime_config('scanner_block_log_enabled', os.getenv('SCANNER_BLOCK_LOG_ENABLED', '1')) == '1'
+    SCANNER_BLOCK_LOG_ENABLED = get_runtime_config('scanner_block_log_enabled', os.getenv('SCANNER_BLOCK_LOG_ENABLED', '0')) == '1'
     USDT_CONTRACT = get_runtime_config('usdt_contract', os.getenv('USDT_CONTRACT', 'TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t'))
     TRONGRID_BASE_URL = get_runtime_config('trongrid_base_url', os.getenv('TRONGRID_BASE_URL', 'https://api.trongrid.io'))
+
+
+async def _refresh_runtime_flags(force: bool = False):
+    global SCANNER_VERBOSE, SCANNER_BLOCK_LOG_ENABLED, USDT_CONTRACT, TRONGRID_BASE_URL, _last_runtime_config_refresh_at
+    now = time.time()
+    if not force and now - _last_runtime_config_refresh_at < 5:
+        return
+    from core.cache import refresh_config
+    await refresh_config(['scanner_verbose', 'scanner_block_log_enabled', 'usdt_contract', 'trongrid_base_url'])
+    SCANNER_VERBOSE = (await get_config('scanner_verbose', os.getenv('SCANNER_VERBOSE', '0'))) == '1'
+    SCANNER_BLOCK_LOG_ENABLED = (await get_config('scanner_block_log_enabled', os.getenv('SCANNER_BLOCK_LOG_ENABLED', '0'))) == '1'
+    USDT_CONTRACT = await get_config('usdt_contract', os.getenv('USDT_CONTRACT', 'TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t'))
+    TRONGRID_BASE_URL = await get_config('trongrid_base_url', os.getenv('TRONGRID_BASE_URL', 'https://api.trongrid.io'))
+    _last_runtime_config_refresh_at = now
 
 
 # ── 内部辅助 ──────────────────────────────────────────────────────────────
@@ -168,6 +184,40 @@ async def _record_daily_stats(address: str, currency: str, direction: str, amoun
 
 
 # ── DB access (sync → async) ────────────────────────────────────────────
+
+@sync_to_async
+def _expire_timed_out_payment_orders():
+    now = timezone.now()
+    product_count = Order.objects.filter(
+        pay_method='address',
+        status='pending',
+        expired_at__isnull=False,
+        expired_at__lte=now,
+    ).update(status='expired')
+    recharge_count = Recharge.objects.filter(
+        status='pending',
+        expired_at__isnull=False,
+        expired_at__lte=now,
+    ).update(status='expired')
+    cloud_count = CloudServerOrder.objects.filter(
+        pay_method='address',
+        status='pending',
+        expired_at__isnull=False,
+        expired_at__lte=now,
+    ).update(status='expired')
+    if product_count or recharge_count or cloud_count:
+        logger.info('支付订单超时自动关闭: product=%s recharge=%s cloud=%s', product_count, recharge_count, cloud_count)
+    return product_count, recharge_count, cloud_count
+
+
+async def _expire_timed_out_payment_orders_periodically(force: bool = False):
+    global _last_pending_expire_check_at
+    now = time.time()
+    if not force and now - _last_pending_expire_check_at < 60:
+        return (0, 0, 0)
+    _last_pending_expire_check_at = now
+    return await _expire_timed_out_payment_orders()
+
 
 @sync_to_async
 def _get_pending_address_orders(currency: str):
@@ -672,6 +722,7 @@ async def _fetch_block_by_number(client: httpx.AsyncClient, headers: dict, block
 async def scan_block():
     global _last_scanned_block_number
     try:
+        await _refresh_runtime_flags()
         headers = await build_trongrid_headers()
 
         if _last_scanned_block_number is None:
@@ -723,6 +774,7 @@ async def scan_forever(stop_event: asyncio.Event | None = None):
     logger.info('TRON 顺序扫块器已启动 poll_interval=%ss mode=sequential_no_skip', _SCANNER_POLL_INTERVAL)
     while stop_event is None or not stop_event.is_set():
         started = time.time()
+        await _expire_timed_out_payment_orders_periodically()
         await scan_block()
         elapsed = time.time() - started
         delay = max(_SCANNER_POLL_INTERVAL - elapsed, 0.05)

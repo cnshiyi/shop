@@ -1,10 +1,12 @@
 """cloud 域后台 API。"""
 
 import logging
+import re
 import threading
 import time
 import uuid
 from decimal import Decimal, InvalidOperation
+from urllib.parse import urlparse
 
 from asgiref.sync import async_to_sync
 from django.core.management import call_command
@@ -53,11 +55,16 @@ def _is_unattached_ip_asset(asset: CloudAsset) -> bool:
 
 
 def _ensure_unattached_ip_expiry(asset: CloudAsset, *, now=None) -> bool:
-    """未附加固定 IP 必须有回收/到期时间；缺失时默认 15 天后到期。"""
+    """未附加固定 IP 必须有回收/到期时间；缺失时按系统配置补齐。"""
     if not _is_unattached_ip_asset(asset) or asset.actual_expires_at:
         return False
+    from core.runtime_config import get_runtime_config
+    try:
+        delete_days = max(int(str(get_runtime_config('cloud_unattached_ip_delete_after_days', '15') or '15').strip()), 0)
+    except (TypeError, ValueError):
+        delete_days = 15
     now = now or timezone.now()
-    asset.actual_expires_at = now + timezone.timedelta(days=15)
+    asset.actual_expires_at = now + timezone.timedelta(days=delete_days)
     note = asset.note or ''
     addition = f'自动补齐未附加IP到期时间: {asset.actual_expires_at.isoformat()}'
     asset.note = f'{note}\n{addition}'.strip() if note else addition
@@ -69,14 +76,46 @@ def _generate_cloud_plan_config_id():
     return f'cfg-{uuid.uuid4().hex[:12]}'
 
 
-def _resolve_telegram_user(value):
-    raw = str(value or '').strip().lstrip('@')
+def _telegram_user_lookup_terms(value):
+    raw = str(value or '').strip()
     if not raw:
+        return []
+
+    terms = []
+
+    def add(term):
+        normalized = str(term or '').strip().strip('`"\'<>，,。；;：:').lstrip('@')
+        if normalized and normalized not in terms:
+            terms.append(normalized)
+
+    add(raw)
+    parsed = urlparse(raw if '://' in raw else f'https://{raw}')
+    if parsed.netloc.lower() in {'t.me', 'telegram.me', 'www.t.me', 'www.telegram.me'}:
+        path_parts = [part for part in parsed.path.split('/') if part]
+        if path_parts:
+            add(path_parts[0])
+    for match in re.findall(r'@([A-Za-z0-9_]{3,64})', raw):
+        add(match)
+    for match in re.findall(r'(?:t\.me|telegram\.me)/([A-Za-z0-9_]{3,64})', raw, flags=re.I):
+        add(match)
+    for match in re.findall(r'\b\d{5,20}\b', raw):
+        add(match)
+    return terms
+
+
+def _resolve_telegram_user(value):
+    terms = _telegram_user_lookup_terms(value)
+    if not terms:
         return None
     queryset = TelegramUser.objects.all()
-    if raw.isdigit():
-        return queryset.filter(Q(id=int(raw)) | Q(tg_user_id=int(raw))).first()
-    return queryset.filter(username__icontains=raw).first()
+    for raw in terms:
+        if raw.isdigit():
+            found = queryset.filter(Q(id=int(raw)) | Q(tg_user_id=int(raw))).first()
+        else:
+            found = queryset.filter(username__icontains=raw).first()
+        if found:
+            return found
+    return None
 
 
 def _parse_iso_datetime(value, field_label='时间'):
@@ -220,6 +259,7 @@ def update_cloud_asset(request, asset_id):
     try:
         with transaction.atomic():
             asset = CloudAsset.objects.select_for_update().select_related('order', 'user', 'cloud_account').get(pk=asset_id)
+            is_unattached_ip = _is_unattached_ip_asset(asset)
 
             server = None
             server_lookup = Q()
@@ -356,7 +396,7 @@ def update_cloud_asset(request, asset_id):
 
             if user_lookup not in (None, '') and server:
                 server.user = asset.user
-            if asset.kind == CloudAsset.KIND_SERVER and not server:
+            if asset.kind == CloudAsset.KIND_SERVER and not server and not is_unattached_ip:
                 server = Server(
                     source=(asset.source or Server.SOURCE_ORDER) if asset.source in {choice[0] for choice in Server.SOURCE_CHOICES} else Server.SOURCE_ORDER,
                     instance_id=asset.instance_id or asset.provider_resource_id or asset.public_ip,
@@ -386,7 +426,7 @@ def update_cloud_asset(request, asset_id):
                 server.save()
 
             asset.save()
-            if owner_changed:
+            if owner_changed and not is_unattached_ip:
                 order, err = ensure_manual_owner_operation_order(asset, owner_target)
                 if err:
                     return _error(err, status=400)
@@ -394,7 +434,7 @@ def update_cloud_asset(request, asset_id):
                     server.order = order
                     server.user = owner_target
                     server.save(update_fields=['order', 'user', 'updated_at'])
-            if manual_expires_at is not None:
+            if manual_expires_at is not None and not is_unattached_ip:
                 order, err = ensure_manual_expiry_operation_order(asset, manual_expires_at)
                 if err:
                     return _error(err, status=400)
@@ -514,6 +554,15 @@ def _mask_secret(value, keep=4):
     return f'{text[:keep]}***{text[-keep:]}'
 
 
+def _cloud_order_source_label(order):
+    note = str(order.provision_note or '')
+    if order.replacement_for_id:
+        return 'renewal_rebuild', '续费恢复'
+    if order.last_renewed_at or order.status == 'renew_pending' or '续费' in note:
+        return 'renewal', '续费'
+    return 'new', '新购'
+
+
 def _cloud_order_detail_payload(order):
     user = order.user
     usernames = user.usernames if user else []
@@ -525,6 +574,7 @@ def _cloud_order_detail_payload(order):
         'usernames': usernames,
         'primary_username': usernames[0] if usernames else '',
     }) if user else None
+    order_source, order_source_label = _cloud_order_source_label(order)
     return {
         'id': order.id,
         'order_no': order.order_no,
@@ -540,6 +590,8 @@ def _cloud_order_detail_payload(order):
         'total_amount': _decimal_to_str(order.total_amount),
         'pay_amount': _decimal_to_str(order.pay_amount) if order.pay_amount is not None else None,
         'pay_method': order.pay_method,
+        'order_source': order_source,
+        'order_source_label': order_source_label,
         'status': order.status,
         'status_label': _status_label(order.status, CloudServerOrder.STATUS_CHOICES),
         'tx_hash': order.tx_hash,
@@ -591,7 +643,7 @@ def _cloud_order_detail_payload(order):
 @require_GET
 def cloud_orders_list(request):
     keyword = _get_keyword(request)
-    queryset = CloudServerOrder.objects.select_related('user', 'plan').order_by('-created_at')
+    queryset = CloudServerOrder.objects.select_related('user', 'plan').exclude(status='deleted').order_by('-created_at')
     queryset = _apply_keyword_filter(
         queryset,
         keyword,
@@ -641,6 +693,19 @@ def cloud_orders_list(request):
         item['expires_in_days'] = _days_left(service_expires_dt) if service_expires_dt else None
         item['grace_expires_in_days'] = _days_left(renew_grace_dt) if renew_grace_dt else None
     return _ok(items)
+
+
+@csrf_exempt
+@dashboard_login_required
+@require_POST
+def delete_cloud_order(request, order_id):
+    order = CloudServerOrder.objects.filter(id=order_id).first()
+    if not order:
+        return _error('订单不存在', status=404)
+    order_no = order.order_no
+    order.delete()
+    logger.info('DASHBOARD_CLOUD_ORDER_DELETE order_id=%s order_no=%s user=%s', order_id, order_no, getattr(request.user, 'id', None))
+    return _ok(True)
 
 
 def _server_payload(server):
@@ -812,12 +877,93 @@ def _apply_cloud_order_status(order, new_status):
     return order
 
 
+@csrf_exempt
 @dashboard_login_required
-@require_GET
+@require_http_methods(['GET', 'POST', 'PUT', 'PATCH'])
 def cloud_order_detail(request, order_id):
     order = CloudServerOrder.objects.select_related('user', 'plan').filter(pk=order_id).first()
     if not order:
         return _error('订单不存在', status=404)
+    if request.method == 'GET':
+        return _ok(_cloud_order_detail_payload(order))
+
+    payload = _read_payload(request)
+    try:
+        with transaction.atomic():
+            order = CloudServerOrder.objects.select_for_update().select_related('user', 'plan').get(pk=order_id)
+            changed_fields = set()
+            user_lookup = payload.get('user_query') or payload.get('user_id') or payload.get('tg_user_id') or payload.get('username')
+            clear_user = str(payload.get('clear_user') or '').lower() in {'1', 'true', 'yes', 'on'}
+            if clear_user:
+                return _error('订单必须绑定用户，不能清空所属用户', status=400)
+            elif user_lookup not in (None, ''):
+                user = _resolve_telegram_user(user_lookup)
+                if not user:
+                    return _error('未找到匹配的 Telegram 用户', status=404)
+                order.user = user
+                order.last_user_id = user.tg_user_id
+                changed_fields.update({'user', 'last_user_id'})
+                _sync_telegram_username(user, user_lookup)
+
+            for field in ('server_name', 'public_ip', 'previous_public_ip', 'instance_id', 'provider_resource_id', 'static_ip_name', 'mtproxy_host', 'mtproxy_link', 'provision_note'):
+                if field in payload:
+                    setattr(order, field, payload.get(field) or None)
+                    changed_fields.add(field)
+            if 'mtproxy_port' in payload:
+                mtproxy_port = payload.get('mtproxy_port')
+                order.mtproxy_port = int(mtproxy_port) if mtproxy_port not in (None, '') else None
+                changed_fields.add('mtproxy_port')
+            if 'total_amount' in payload:
+                order.total_amount = _parse_decimal(payload.get('total_amount'), '总金额')
+                changed_fields.add('total_amount')
+            if 'pay_amount' in payload:
+                pay_amount = payload.get('pay_amount')
+                order.pay_amount = _parse_decimal(pay_amount, '应付金额') if pay_amount not in (None, '') else None
+                changed_fields.add('pay_amount')
+            if 'status' in payload:
+                status = str(payload.get('status') or '').strip()
+                if status and status not in {choice[0] for choice in CloudServerOrder.STATUS_CHOICES}:
+                    return _error('订单状态不正确', status=400)
+                if status:
+                    order.status = status
+                    changed_fields.add('status')
+            for field, label in (
+                ('service_started_at', '服务开始时间'),
+                ('service_expires_at', '服务到期时间'),
+                ('renew_grace_expires_at', '续费宽限到期'),
+                ('suspend_at', '计划关机时间'),
+                ('delete_at', '计划删机时间'),
+                ('ip_recycle_at', 'IP保留到期'),
+            ):
+                if field in payload:
+                    setattr(order, field, _parse_iso_datetime(payload.get(field), label) if payload.get(field) else None)
+                    changed_fields.add(field)
+            if changed_fields:
+                update_values = {field: getattr(order, field) for field in changed_fields}
+                update_values['updated_at'] = timezone.now()
+                CloudServerOrder.objects.filter(pk=order.pk).update(**update_values)
+                order.refresh_from_db()
+                asset_updates = {}
+                server_updates = {}
+                if 'user' in changed_fields:
+                    asset_updates['user'] = order.user
+                    server_updates['user'] = order.user
+                if 'public_ip' in changed_fields:
+                    asset_updates['public_ip'] = order.public_ip
+                    server_updates['public_ip'] = order.public_ip
+                if 'server_name' in changed_fields:
+                    asset_updates['asset_name'] = order.server_name
+                    server_updates['server_name'] = order.server_name
+                if 'service_expires_at' in changed_fields:
+                    asset_updates['actual_expires_at'] = order.service_expires_at
+                    server_updates['expires_at'] = order.service_expires_at
+                if asset_updates:
+                    CloudAsset.objects.filter(order=order).update(**asset_updates, updated_at=timezone.now())
+                if server_updates:
+                    Server.objects.filter(order=order).update(**server_updates, updated_at=timezone.now())
+    except ValueError as exc:
+        return _error(str(exc), status=400)
+    order.refresh_from_db()
     return _ok(_cloud_order_detail_payload(order))
 
 
@@ -1602,11 +1748,22 @@ def cloud_assets_sync_status(request):
         kind=CloudAsset.KIND_SERVER,
         provider='aliyun_simple',
     ).exclude(status=CloudAsset.STATUS_DELETED).count()
+    unattached_ip_count = CloudAsset.objects.filter(
+        kind=CloudAsset.KIND_SERVER,
+    ).filter(
+        Q(provider_status__icontains='未附加') | Q(note__icontains='未附加IP') | Q(note__icontains='未附加固定IP')
+    ).exclude(status__in=[
+        CloudAsset.STATUS_DELETED,
+        CloudAsset.STATUS_DELETING,
+        CloudAsset.STATUS_TERMINATED,
+        CloudAsset.STATUS_TERMINATING,
+    ]).count()
     return _ok({
         'auto_sync_every_seconds': 600,
         'last_synced_at': _iso(last_synced_at),
         'aws_existing_count': aws_existing_count,
         'aliyun_existing_count': aliyun_existing_count,
+        'unattached_ip_count': unattached_ip_count,
     })
 
 
@@ -1668,6 +1825,7 @@ __all__ = [
     'cloud_ip_logs_list',
     'cloud_order_detail',
     'cloud_orders_list',
+    'delete_cloud_order',
     'tasks_overview',
     'cloud_plans_list',
     'cloud_pricing_list',
