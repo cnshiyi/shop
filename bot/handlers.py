@@ -455,7 +455,7 @@ async def _reply_cloud_query_results(message: Message, raw_text: str, state: FSM
         await message.answer(_bot_text('bot_query_ip_empty', '🔎 IP查询到期\n\n未查询到可续费的有效 IP 记录。'), reply_markup=order_query_menu())
         return
     page = 1
-    per_page = 5
+    per_page = 8
     total_pages = max(1, math.ceil(len(results) / per_page))
     page_items = results[(page - 1) * per_page: page * per_page]
     text = '🔎 IP批量查询结果\n\n' + '\n\n'.join(item['text'] for item in page_items)
@@ -2241,7 +2241,7 @@ def register_handlers(dp: Dispatcher):
             await _safe_edit_text(callback.message, _bot_text('bot_query_ip_expired', '🔎 IP查询到期\n\n查询结果已失效，请重新输入 IP。'), reply_markup=order_query_menu())
             return
         page = max(1, int(callback.data.split(':')[3]))
-        per_page = 5
+        per_page = 8
         total_pages = max(1, math.ceil(len(results) / per_page))
         page = min(page, total_pages)
         page_items = results[(page - 1) * per_page: page * per_page]
@@ -2251,8 +2251,9 @@ def register_handlers(dp: Dispatcher):
 
     async def _render_profile_cloud_orders(callback: CallbackQuery, page: int = 1):
         user = await get_or_create_user(callback.from_user.id, callback.from_user.username, callback.from_user.first_name)
-        orders, total = await list_cloud_orders(user.id, page=page)
-        total_pages = max(1, math.ceil(total / 5))
+        per_page = 8
+        orders, total = await list_cloud_orders(user.id, page=page, per_page=per_page)
+        total_pages = max(1, math.ceil(total / per_page))
         if not orders:
             await _safe_edit_text(callback.message, _bot_text('bot_cloud_orders_empty', '☁️ 云服务器订单\n\n暂无云服务器订单。'), reply_markup=profile_menu())
             return
@@ -2758,7 +2759,7 @@ def register_handlers(dp: Dispatcher):
         user = await get_or_create_user(callback.from_user.id, callback.from_user.username, callback.from_user.first_name)
         visible_servers = await list_user_cloud_servers(user.id)
         page = 1
-        per_page = 5
+        per_page = 8
         total_visible = len(visible_servers)
         total_pages = max(1, math.ceil(total_visible / per_page))
         page_items = visible_servers[(page - 1) * per_page: page * per_page]
@@ -2775,7 +2776,7 @@ def register_handlers(dp: Dispatcher):
         user = await get_or_create_user(callback.from_user.id, callback.from_user.username, callback.from_user.first_name)
         page = max(1, int(callback.data.split(':')[3]))
         visible_servers = await list_user_cloud_servers(user.id)
-        per_page = 5
+        per_page = 8
         total_visible = len(visible_servers)
         total_pages = max(1, math.ceil(total_visible / per_page))
         page = min(page, total_pages)
@@ -2794,8 +2795,9 @@ def register_handlers(dp: Dispatcher):
         await _safe_callback_answer(callback)
         user = await get_or_create_user(callback.from_user.id, callback.from_user.username, callback.from_user.first_name)
         page = max(1, int(callback.data.split(':')[4]))
-        orders, total = await list_cloud_orders(user.id, page=page)
-        total_pages = max(1, math.ceil(total / 5))
+        per_page = 8
+        orders, total = await list_cloud_orders(user.id, page=page, per_page=per_page)
+        total_pages = max(1, math.ceil(total / per_page))
         if not orders:
             await _safe_edit_text(callback.message, '☁️ 云服务器订单\n\n暂无云服务器订单。', reply_markup=profile_menu())
             return

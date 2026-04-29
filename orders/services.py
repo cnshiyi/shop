@@ -210,7 +210,7 @@ def _first_nonblank(*values) -> str:
 
 
 @sync_to_async
-def list_cloud_orders(user_id: int, page: int = 1, per_page: int = 5):
+def list_cloud_orders(user_id: int, page: int = 1, per_page: int = 8):
     """个人中心订单查询：只按订单表展示，不复用代理列表逻辑。"""
     queryset = (
         CloudServerOrder.objects
