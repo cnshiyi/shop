@@ -12,6 +12,7 @@ from django.db import transaction
 from django.db.models import Q
 from django.utils import timezone
 
+from core.order_numbers import unique_timestamp_order_no
 from orders.ledger import record_balance_ledger
 from bot.models import TelegramUser
 from cloud.models import AddressMonitor, CloudAsset, CloudServerOrder, CloudServerPlan
@@ -24,7 +25,7 @@ _CACHE_TTL = 60
 
 
 def _generate_order_no() -> str:
-    return f'ORD{int(time.time() * 1000)}{random.randint(1000, 9999)}'
+    return unique_timestamp_order_no('ORD', lambda value: Order.objects.filter(order_no=value).exists())
 
 
 def _fmt_decimal(value) -> str:

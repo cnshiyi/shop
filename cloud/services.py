@@ -21,6 +21,7 @@ from cloud.bootstrap import install_bbr, install_mtproxy
 from cloud.ports import get_mtproxy_public_ports
 from core.cache import get_redis
 from core.cloud_accounts import choose_cloud_account_for_order, cloud_account_label, get_active_cloud_account, get_cloud_account_from_label
+from core.order_numbers import unique_timestamp_order_no
 from orders.ledger import record_balance_ledger
 from orders.models import BalanceLedger, CartItem
 from orders.services import _generate_unique_pay_amount, usdt_to_trx
@@ -722,8 +723,8 @@ def prepare_cloud_server_order_instances(order_id: int, user_id: int, port: int)
         return created_orders
 
 
-def _generate_cloud_order_no() -> str:
-    return f'SRV{int(timezone.now().timestamp() * 1000)}{int(timezone.now().microsecond % 9000) + 1000}'
+def _generate_cloud_order_no(prefix: str = 'SRV', tag: str | None = None) -> str:
+    return unique_timestamp_order_no(prefix, lambda value: CloudServerOrder.objects.filter(order_no=value).exists(), tag=tag)
 
 
 def _apply_cloud_discount(plan_price: Decimal, discount_rate) -> Decimal:
@@ -1249,32 +1250,9 @@ def _fmt_dt(value):
 
 
 def _trim_operation_order_no(source_order: CloudServerOrder | None, operation: str, suffix: str | None = None) -> str:
-    now = timezone.now()
-    suffix = suffix or now.strftime('%m%d%H%M%S')
-    raw_order_no = str(getattr(source_order, 'order_no', '') or '').strip()
     source_id = getattr(source_order, 'id', None) or 0
-    user_id = getattr(source_order, 'user_id', None) or 0
-    fallback_prefix = f'ORD{source_id}' if source_id else f'USER{user_id}'
-    operation_pattern = re.compile(r'-(REBUILD|UPGRADE|IP)-[^-]+')
-    matches = list(operation_pattern.finditer(raw_order_no))
-    if matches:
-        root = raw_order_no[:matches[0].start()].strip('-') or fallback_prefix
-        previous = raw_order_no[matches[-1].start():].strip('-')
-        candidate = f'{root}-{previous}-{operation}-{suffix}'
-    else:
-        candidate = f'{raw_order_no or fallback_prefix}-{operation}-{suffix}'
-    if len(candidate) > 180:
-        previous = matches and raw_order_no[matches[-1].start():].strip('-') or ''
-        root = fallback_prefix
-        candidate = f'{root}-{previous}-{operation}-{suffix}' if previous else f'{root}-{operation}-{suffix}'
-    base = candidate[:180]
-    order_no = base
-    counter = 1
-    while CloudServerOrder.objects.filter(order_no=order_no).exists():
-        tail = f'-{counter}'
-        order_no = f'{base[:191 - len(tail)]}{tail}'
-        counter += 1
-    return order_no
+    tag = suffix or (f'O{source_id}' if source_id else None)
+    return _generate_cloud_order_no(f'SRV{operation}', tag=tag)
 
 
 def _set_source_migration_expiry(order: CloudServerOrder, migration_due_at, reason: str, note: str = ''):
@@ -1354,7 +1332,7 @@ def _create_manual_asset_operation_order(asset: CloudAsset, user: TelegramUser, 
     base_order_id = getattr(base_order, 'id', None)
     account = asset.cloud_account or get_cloud_account_from_label(asset.account_label, provider)
     order = CloudServerOrder.objects.create(
-        order_no=f'MANUAL-{operation}-ASSET-{asset.id}-{now:%Y%m%d%H%M%S}',
+        order_no=_generate_cloud_order_no('SRVMANUAL', f'{operation}{asset.id}'),
         user=user,
         plan=plan,
         provider=provider,
@@ -1488,7 +1466,7 @@ def _create_asset_operation_order(asset: CloudAsset, user_id: int) -> CloudServe
     account = asset.cloud_account or get_cloud_account_from_label(asset.account_label, provider)
     account_label = asset.account_label or cloud_account_label(account)
     order = CloudServerOrder.objects.create(
-        order_no=f'ASSET-{asset.id}-{now:%Y%m%d%H%M%S}',
+        order_no=_generate_cloud_order_no('SRVASSET', str(asset.id)),
         user_id=user_id,
         plan=plan,
         provider=provider,
