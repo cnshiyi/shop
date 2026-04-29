@@ -174,7 +174,11 @@ update_backend() {
   fi
 
   if [ "$RUN_COLLECTSTATIC" = "1" ]; then
-    run "$BACKEND_PYTHON" manage.py collectstatic --noinput
+    if "$BACKEND_PYTHON" manage.py help collectstatic >/dev/null 2>&1; then
+      run "$BACKEND_PYTHON" manage.py collectstatic --noinput
+    else
+      log "WARNING: 当前 Django 项目未启用 collectstatic 命令，跳过静态文件收集"
+    fi
   fi
 
   if [ "$RESTART_BACKEND" = "1" ] && command -v systemctl >/dev/null 2>&1; then
