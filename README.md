@@ -249,11 +249,14 @@ bash scripts/auto-update-from-github.sh
 - `RUN_MIGRATE=0`：跳过 Django migration
 - `RUN_COLLECTSTATIC=0`：跳过 Django collectstatic
 - `BACKEND_BRANCH=main` / `FRONTEND_BRANCH=main`：指定拉取分支
+- `PRESERVE_BACKEND_PATHS='.env .venv media staticfiles logs'`：后端执行 `git clean` 时保留的运行时目录/文件
 
 注意：
 
 - 首次运行前，后端目录需要有 `.env`，脚本不会生成或覆盖真实密钥。
 - 如果运行脚本前已激活虚拟环境，脚本优先使用当前 `$VIRTUAL_ENV/bin/python`；否则使用 `BACKEND_DIR/.venv/bin/python`，不存在时才新建 `.venv`。
+- 脚本可以重复执行：每次都会 `git fetch` + `git reset --hard` 对齐 GitHub 版本，再用 `git clean` 清理未跟踪源码文件。
+- 后端清理时默认保留 `.env`、`.venv`、`media`、`staticfiles`、`logs`，避免删掉运行配置和数据。
+- 前端源码目录每次会清理到仓库干净状态，前端发布会对 `FRONTEND_DIST_DIR` 执行 `rsync --delete`，确保目录只保留最新构建产物。
 - 脚本启动和结束都会打印后端源码目录、前端源码目录、前端构建产物目录、前端最终发布目录。
-- 前端发布会对 `FRONTEND_DIST_DIR` 执行 `rsync --delete`，确保目录只保留最新构建产物。
 - 脚本使用锁文件 `/tmp/shop-auto-update.lock`，避免两个更新任务同时执行。

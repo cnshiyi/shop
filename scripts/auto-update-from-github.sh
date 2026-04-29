@@ -17,6 +17,7 @@ LOCK_FILE="${LOCK_FILE:-/tmp/shop-auto-update.lock}"
 RESTART_BACKEND="${RESTART_BACKEND:-1}"
 RUN_MIGRATE="${RUN_MIGRATE:-1}"
 RUN_COLLECTSTATIC="${RUN_COLLECTSTATIC:-1}"
+PRESERVE_BACKEND_PATHS="${PRESERVE_BACKEND_PATHS:-.env .venv media staticfiles logs}"
 
 log() {
   printf '[%s] %s\n' "$(date '+%F %T')" "$*"
@@ -57,11 +58,24 @@ with_lock() {
   fi
 }
 
+clean_untracked_repo_files() {
+  local label="$1"
+  shift || true
+  local clean_args=(-fd)
+  for preserved_path in "$@"; do
+    [ -n "$preserved_path" ] || continue
+    clean_args+=("-e" "$preserved_path")
+  done
+  log "清理 $label 未跟踪文件，保留: ${*:-无}"
+  run git clean "${clean_args[@]}"
+}
+
 repo_update() {
   local dir="$1"
   local repo="$2"
   local branch="$3"
   local label="$4"
+  local preserve_list="${5:-}"
 
   if [ -d "$dir/.git" ]; then
     log "更新 $label: $dir"
@@ -69,7 +83,14 @@ repo_update() {
     run git remote set-url origin "$repo"
     run git fetch --prune origin "$branch"
     run git reset --hard "origin/$branch"
+    # 让重复执行结果保持一致：删除 GitHub 中已不存在的未跟踪源码文件。
+    # 后端保留 .env/.venv/media/staticfiles/logs；前端源码目录不保留额外文件。
+    # shellcheck disable=SC2086
+    clean_untracked_repo_files "$label" $preserve_list
   else
+    if [ -e "$dir" ] && [ "$(find "$dir" -mindepth 1 -maxdepth 1 -print -quit 2>/dev/null)" ]; then
+      fail "$label 目录已存在但不是 Git 仓库，避免覆盖非脚本管理内容: $dir"
+    fi
     log "克隆 $label: $repo -> $dir"
     mkdir -p "$(dirname "$dir")"
     run git clone --branch "$branch" "$repo" "$dir"
@@ -112,7 +133,7 @@ install_backend_deps() {
 }
 
 update_backend() {
-  repo_update "$BACKEND_DIR" "$BACKEND_REPO" "$BACKEND_BRANCH" "后端"
+  repo_update "$BACKEND_DIR" "$BACKEND_REPO" "$BACKEND_BRANCH" "后端" "$PRESERVE_BACKEND_PATHS"
   install_backend_deps
   cd "$BACKEND_DIR"
 
