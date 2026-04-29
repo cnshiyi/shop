@@ -129,12 +129,35 @@ install_backend_deps() {
   cd "$BACKEND_DIR"
   detect_backend_python
 
+  local requirements_file
+  requirements_file="$(mktemp /tmp/shop-backend-requirements.XXXXXX.txt)"
+  "$BACKEND_PYTHON" - <<'PY' >"$requirements_file"
+import pathlib
+import sys
+try:
+    import tomllib
+except ModuleNotFoundError:
+    import tomli as tomllib
+pyproject = pathlib.Path('pyproject.toml')
+if not pyproject.exists():
+    sys.exit('pyproject.toml 不存在，无法读取后端依赖')
+data = tomllib.loads(pyproject.read_text())
+for dependency in data.get('project', {}).get('dependencies', []):
+    print(dependency)
+PY
+
+  if [ ! -s "$requirements_file" ]; then
+    rm -f "$requirements_file"
+    fail "pyproject.toml 未读取到 project.dependencies，无法安装后端依赖"
+  fi
+
   if command -v uv >/dev/null 2>&1; then
-    run uv pip install --python "$BACKEND_PYTHON" -e .
+    run uv pip install --python "$BACKEND_PYTHON" -r "$requirements_file"
   else
     run "$BACKEND_PYTHON" -m pip install -U pip
-    run "$BACKEND_PYTHON" -m pip install -e .
+    run "$BACKEND_PYTHON" -m pip install -r "$requirements_file"
   fi
+  rm -f "$requirements_file"
 
   if [ ! -f .env ]; then
     log "WARNING: $BACKEND_DIR/.env 不存在；请先补齐数据库、Redis、Bot 等运行配置"
