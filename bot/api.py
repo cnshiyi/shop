@@ -241,52 +241,23 @@ def _cloud_account_labels(item):
     return account_name, external_account_id
 
 
+def _asset_is_unattached_ip(asset):
+    return bool(
+        asset
+        and (
+            ('未附加' in (asset.provider_status or ''))
+            or ('未附加IP' in (asset.note or ''))
+            or ('未附加固定IP' in (asset.note or ''))
+        )
+    )
+
+
 def _shutdown_log_items(limit=100):
     cutoff = timezone.now() - timezone.timedelta(days=7)
     suspend_days = _runtime_int('cloud_suspend_after_days', 3)
     delete_days = _runtime_int('cloud_delete_after_days', 0)
 
-    orders = list(
-        CloudServerOrder.objects.select_related('user', 'cloud_account').filter(suspend_at__isnull=False)
-        .exclude(status__in=['cancelled', 'deleted'])
-        .order_by('suspend_at', '-updated_at')[:300]
-    )
-    order_ids = [item.id for item in orders]
-    logs = {}
-    for item in CloudIpLog.objects.filter(order_id__in=order_ids, event_type__in=['suspended', 'suspend_failed']).order_by('order_id', '-created_at', '-id'):
-        logs.setdefault(item.order_id, item)
-
     items = []
-    included_order_ids = set()
-    for order in orders:
-        included_order_ids.add(order.id)
-        log = logs.get(order.id)
-        user_display_name, username_label = _telegram_user_labels(order.user)
-        account_name, external_account_id = _cloud_account_labels(order)
-        is_aliyun = order.provider == 'aliyun_simple'
-        items.append({
-            'id': f'order-{order.id}',
-            'order_id': order.id,
-            'asset_id': None,
-            'order_no': order.order_no,
-            'user_display_name': user_display_name,
-            'username_label': username_label,
-            'public_ip': order.public_ip or order.previous_public_ip or '',
-            'provider': order.provider or '',
-            'provider_label': _provider_label(order.provider),
-            'cloud_account_id': order.cloud_account_id,
-            'cloud_account_name': account_name,
-            'external_account_id': external_account_id,
-            'account_label': order.account_label or '',
-            'status': order.status,
-            'status_label': _status_label(order.status, CloudServerOrder.STATUS_CHOICES),
-            'service_expires_at': order.service_expires_at,
-            'suspend_at': None if is_aliyun else order.suspend_at,
-            'delete_at': None if is_aliyun else order.delete_at,
-            'note': (log.note if log else '') or '',
-            'logged_at': log.created_at if log else None,
-        })
-
     active_statuses = [
         CloudAsset.STATUS_RUNNING,
         CloudAsset.STATUS_PENDING,
@@ -305,10 +276,11 @@ def _shutdown_log_items(limit=100):
         CloudAsset.objects.select_related('order', 'user', 'cloud_account', 'order__cloud_account')
         .filter(kind=CloudAsset.KIND_SERVER, actual_expires_at__isnull=False)
         .filter(Q(is_active=True, status__in=active_statuses) | Q(provider='aliyun_simple', status__in=aliyun_statuses))
-        .exclude(order_id__in=included_order_ids)
         .order_by('actual_expires_at', '-updated_at')[:500]
     )
     for asset in assets:
+        if _asset_is_unattached_ip(asset) and asset.status in {CloudAsset.STATUS_DELETED, CloudAsset.STATUS_DELETING, CloudAsset.STATUS_TERMINATED, CloudAsset.STATUS_TERMINATING}:
+            continue
         expires_at = asset.actual_expires_at
         user_display_name, username_label = _telegram_user_labels(asset.user or (asset.order.user if asset.order_id and asset.order else None))
         account_name, external_account_id = _cloud_account_labels(asset)
@@ -349,7 +321,7 @@ def _shutdown_log_items(limit=100):
 
     def sort_key(item):
         suspend_at = item['suspend_at']
-        sort_at = suspend_at or item['service_expires_at']
+        sort_at = item['service_expires_at']
         is_old_shutdown = bool(suspend_at and suspend_at < cutoff)
         timestamp = sort_at.timestamp() if sort_at else float('inf')
         return (1 if is_old_shutdown else 0, -timestamp if is_old_shutdown else timestamp, str(item['id']))
