@@ -421,7 +421,7 @@ async def _reply_tron_address_summary(message: Message, address: str):
 async def _reply_cloud_query_results(message: Message, raw_text: str, state: FSMContext | None = None):
     query_ips = _extract_query_ips(raw_text)
     results = []
-    for ip in query_ips:
+    for index, ip in enumerate(query_ips):
         order = await get_cloud_server_by_ip(ip)
         if not order:
             continue
@@ -436,7 +436,18 @@ async def _reply_cloud_query_results(message: Message, raw_text: str, state: FSM
             'text': f'IP: <code>{escape(display_ip)}</code>\n到期时间: {expires_text}\n状态: 可续费',
             'renewable': True,
             'order_id': order.id,
+            '_expires_at': expires_at,
+            '_input_index': index,
         })
+    results.sort(key=lambda item: (
+        0 if item['_expires_at'] is None else 1,
+        item['_expires_at'] or timezone.now(),
+        item['_input_index'],
+    ))
+    results = [
+        {key: value for key, value in item.items() if not key.startswith('_')}
+        for item in results
+    ]
     if state is not None:
         await state.update_data(cloud_query_results=results)
         await state.set_state(CloudQueryStates.waiting_ip)
