@@ -1131,6 +1131,7 @@ def site_config_groups(request):
             'cloud_delete_time',
             'cloud_unattached_ip_delete_after_days',
             'cloud_unattached_ip_delete_time',
+            'cloud_asset_sync_interval_seconds',
             'bot_admin_chat_id',
             'dashboard_totp_secret',
         ],
@@ -1230,6 +1231,14 @@ def update_site_config(request, config_id: int):
         plain_value = '\n'.join(parse_trongrid_api_keys(plain_value))
         if not plain_value:
             return _error('TRON API Key 至少要有一个有效值', status=400)
+    if item.key == 'cloud_asset_sync_interval_seconds':
+        try:
+            interval_seconds = int(plain_value)
+        except (TypeError, ValueError):
+            return _error('代理同步间隔必须是秒数整数', status=400)
+        if interval_seconds < 60:
+            return _error('代理同步间隔不能小于60秒', status=400)
+        plain_value = str(interval_seconds)
     if item.key == 'bot_admin_chat_id':
         if not plain_value:
             return _error('管理员转发 Chat ID 不能为空', status=400)

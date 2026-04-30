@@ -27,7 +27,11 @@ CONFIG_HELP = {
     'cloud_renew_notice_debug_repeat': 'IP到期提醒调试重复开关（1=忽略已提醒记录，启动/定时检查都会重复提醒；0=只提醒一次）',
     'dashboard_totp_secret': '后台 Google Authenticator TOTP 密钥（Base32，更换后旧绑定失效）',
     'cleanup_retention_days': '自动清理保留天数，默认100天；订单和聊天记录超过该天数会被定时清理',
+    'cloud_asset_sync_interval_seconds': '代理云资产自动同步/列表自动刷新间隔（秒），默认18000秒=5小时',
 }
+
+CLOUD_ASSET_SYNC_INTERVAL_DEFAULT_SECONDS = 5 * 60 * 60
+CLOUD_ASSET_SYNC_INTERVAL_MIN_SECONDS = 60
 
 CONFIG_DEFAULTS = {
     'scanner_verbose': '0',
@@ -41,6 +45,7 @@ CONFIG_DEFAULTS = {
     'cloud_unattached_ip_delete_time': '15:00',
     'cloud_renew_notice_debug_repeat': '0',
     'cleanup_retention_days': '100',
+    'cloud_asset_sync_interval_seconds': str(CLOUD_ASSET_SYNC_INTERVAL_DEFAULT_SECONDS),
 }
 
 
@@ -88,6 +93,7 @@ CONFIG_ENV_MAP = {
     'cloud_renew_notice_debug_repeat': 'CLOUD_RENEW_NOTICE_DEBUG_REPEAT',
     'dashboard_totp_secret': 'DASHBOARD_TOTP_SECRET',
     'cleanup_retention_days': 'CLEANUP_RETENTION_DAYS',
+    'cloud_asset_sync_interval_seconds': 'CLOUD_ASSET_SYNC_INTERVAL_SECONDS',
 }
 
 
@@ -117,3 +123,15 @@ def get_runtime_config(key: str, default: str = '') -> str:
     env_key = CONFIG_ENV_MAP.get(key, key.upper())
     fallback = default if default != '' else CONFIG_DEFAULTS.get(key, '')
     return os.getenv(env_key, fallback)
+
+
+def get_cloud_asset_sync_interval_seconds() -> int:
+    raw = get_runtime_config(
+        'cloud_asset_sync_interval_seconds',
+        str(CLOUD_ASSET_SYNC_INTERVAL_DEFAULT_SECONDS),
+    )
+    try:
+        seconds = int(str(raw or '').strip())
+    except (TypeError, ValueError):
+        seconds = CLOUD_ASSET_SYNC_INTERVAL_DEFAULT_SECONDS
+    return max(seconds, CLOUD_ASSET_SYNC_INTERVAL_MIN_SECONDS)

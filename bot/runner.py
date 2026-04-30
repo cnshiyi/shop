@@ -18,6 +18,7 @@ from bot.telegram_sender import send_with_notification_account
 from cloud.services import refresh_custom_plan_cache
 from cloud.lifecycle import lifecycle_tick, sync_server_status_tick, sync_cloud_accounts_tick
 from core.cache import refresh_config, close as cache_close
+from core.runtime_config import get_cloud_asset_sync_interval_seconds
 from cloud.cache import init_monitor_cache
 from orders.runtime import check_resources, scan_forever, set_bot, set_resource_bot
 
@@ -61,12 +62,14 @@ async def run_bot():
                 logger.warning('个人号生命周期通知发送失败 user=%s err=%s', user_id, fallback_exc)
         return False
 
+    cloud_sync_interval_seconds = await asyncio.to_thread(get_cloud_asset_sync_interval_seconds)
+
     # TRON 扫块器 / 资源巡检 / 生命周期调度
     scheduler = AsyncIOScheduler()
     scheduler.add_job(check_resources, 'interval', minutes=3, id='tron_resource_checker', max_instances=1)
     scheduler.add_job(refresh_custom_plan_cache, 'interval', minutes=10, id='custom_plan_cache_refresh', max_instances=1, coalesce=True)
     scheduler.add_job(lifecycle_tick, 'interval', minutes=10, id='cloud_lifecycle', max_instances=1, kwargs={'notify': _notify})
-    scheduler.add_job(sync_server_status_tick, 'interval', minutes=3, id='cloud_server_sync', max_instances=1, coalesce=True)
+    scheduler.add_job(sync_server_status_tick, 'interval', seconds=cloud_sync_interval_seconds, id='cloud_server_sync', max_instances=1, coalesce=True)
     scheduler.add_job(sync_cloud_accounts_tick, 'interval', minutes=15, id='cloud_account_check', max_instances=1, coalesce=True)
     scheduler.add_job(lambda: asyncio.to_thread(call_command, 'dedupe_servers'), 'interval', minutes=20, id='server_dedupe', max_instances=1, coalesce=True)
     scheduler.add_job(lambda: asyncio.to_thread(call_command, 'cleanup_old_records'), 'cron', hour=18, minute=0, id='old_records_cleanup', max_instances=1, coalesce=True)
@@ -79,7 +82,7 @@ async def run_bot():
     logger.info('资源巡检已启动 (每3分钟)')
     logger.info('定制套餐缓存刷新已启动 (每10分钟)')
     logger.info('云服务器生命周期调度已启动 (每10分钟)')
-    logger.info('云服务器状态同步已启动 (每3分钟)')
+    logger.info('云服务器状态同步已启动 (每%s秒)', cloud_sync_interval_seconds)
     logger.info('云账号状态巡检已启动 (每15分钟)')
     logger.info('服务器去重任务已启动 (每20分钟)')
     logger.info('旧订单/聊天记录自动清理任务已启动 (每天18:00)')

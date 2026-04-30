@@ -858,7 +858,7 @@ async def sync_server_status_tick():
                 accounts = await sync_to_async(_active_lifecycle_sync_accounts)(CloudAccountConfig.PROVIDER_AWS)
                 command_name = 'sync_aws_assets'
             for account in accounts:
-                await sync_to_async(call_command)(command_name, region=region, account_id=str(account.id))
+                await sync_to_async(call_command, thread_sensitive=False)(command_name, region=region, account_id=str(account.id))
                 logger.info('云服务器状态同步完成: provider=%s region=%s account_id=%s', provider, region, account.id)
         except Exception as exc:
             logger.warning('云服务器状态同步失败: provider=%s region=%s error=%s', provider, region, exc)

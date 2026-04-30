@@ -47,6 +47,7 @@ from cloud.models import AddressMonitor, CloudAsset, CloudIpLog, CloudServerOrde
 from core.cloud_accounts import cloud_account_label
 from core.models import CloudAccountConfig, ExternalSyncLog
 from core.persistence import record_external_sync_log
+from core.runtime_config import get_cloud_asset_sync_interval_seconds
 from cloud.provisioning import provision_cloud_server
 
 logger = logging.getLogger(__name__)
@@ -1984,7 +1985,7 @@ def cloud_assets_sync_status(request):
         CloudAsset.STATUS_TERMINATING,
     ]).count()
     return _ok({
-        'auto_sync_every_seconds': 600,
+        'auto_sync_every_seconds': get_cloud_asset_sync_interval_seconds(),
         'last_synced_at': _iso(last_synced_at),
         'aws_existing_count': aws_existing_count,
         'aliyun_existing_count': aliyun_existing_count,
