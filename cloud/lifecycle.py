@@ -1,6 +1,8 @@
 import logging
 import os
 import re
+from collections import defaultdict
+from decimal import Decimal
 from html import escape
 
 from aiogram.types import InlineKeyboardMarkup
@@ -15,7 +17,7 @@ from core.texts import site_text
 from orders.models import BalanceLedger
 from bot.models import TelegramUser
 from cloud.models import CloudAsset, CloudServerOrder, Server
-from cloud.services import create_cloud_server_renewal, pay_cloud_server_renewal_with_balance, record_cloud_ip_log
+from cloud.services import _renewal_price, create_cloud_server_renewal, pay_cloud_server_renewal_with_balance, record_cloud_ip_log
 from bot.keyboards import cloud_auto_renew_notice_actions, cloud_expiry_actions, cloud_lifecycle_notice_actions
 
 logger = logging.getLogger(__name__)
@@ -68,8 +70,8 @@ def _get_due_orders():
     renew_notice_days = max(1, _config_int('cloud_renew_notice_days', 5))
     renew_notice_debug_repeat = _config_bool('cloud_renew_notice_debug_repeat', '0')
     renew_notice_at = now + timezone.timedelta(days=renew_notice_days)
-    auto_renew_notice_at = now + timezone.timedelta(days=3, hours=2)
-    auto_renew_at = now + timezone.timedelta(days=3)
+    auto_renew_notice_at = now + timezone.timedelta(days=2)
+    auto_renew_at = now + timezone.timedelta(days=1)
     delete_notice_at = now + timezone.timedelta(days=1)
     recycle_notice_at = now + timezone.timedelta(days=1)
     renew_notice_qs = CloudServerOrder.objects.filter(status__in=['completed', 'expiring', 'renew_pending'], cloud_reminder_enabled=True, service_expires_at__lte=renew_notice_at, service_expires_at__gt=now)
@@ -77,7 +79,7 @@ def _get_due_orders():
         renew_notice_qs = renew_notice_qs.filter(renew_notice_sent_at__isnull=True)
     return {
         'renew_notice': list(renew_notice_qs),
-        'auto_renew_notice': list(CloudServerOrder.objects.filter(status__in=['completed', 'expiring', 'renew_pending'], auto_renew_enabled=True, service_expires_at__lte=auto_renew_notice_at, service_expires_at__gt=auto_renew_at)),
+        'auto_renew_notice': list(CloudServerOrder.objects.filter(status__in=['completed', 'expiring', 'renew_pending'], auto_renew_enabled=True, service_expires_at__lte=auto_renew_notice_at, service_expires_at__gt=auto_renew_at, auto_renew_notice_sent_at__isnull=True).select_related('user')),
         'auto_renew': list(CloudServerOrder.objects.filter(status__in=['completed', 'expiring', 'renew_pending'], auto_renew_enabled=True, service_expires_at__lte=auto_renew_at, service_expires_at__gt=now)),
         'delete_notice': list(CloudServerOrder.objects.filter(status__in=['suspended', 'deleting'], delete_reminder_enabled=True, delete_at__lte=delete_notice_at, delete_at__gt=now, delete_notice_sent_at__isnull=True)),
         'recycle_notice': list(CloudServerOrder.objects.filter(status='deleted', ip_recycle_reminder_enabled=True, ip_recycle_at__lte=recycle_notice_at, ip_recycle_at__gt=now, recycle_notice_sent_at__isnull=True)),
@@ -259,9 +261,15 @@ def _notice_plan_text(order, notice: dict | None = None, *, include_expiry: bool
     suspend_at = notice.get('suspend_at') or getattr(order, 'suspend_at', None)
     delete_at = notice.get('delete_at') or getattr(order, 'delete_at', None)
     ip_recycle_at = notice.get('ip_recycle_at') or getattr(order, 'ip_recycle_at', None)
+    auto_renew_enabled = bool(notice.get('auto_renew_enabled') if 'auto_renew_enabled' in notice else getattr(order, 'auto_renew_enabled', False))
+    auto_renew_at = expires_at - timezone.timedelta(days=1) if expires_at else None
     lines = []
     if include_expiry:
         lines.append(f'到期时间: {_format_notice_dt(expires_at)}')
+    if auto_renew_enabled:
+        lines.append(f'自动续费: 已开启，预计 {_format_notice_dt(auto_renew_at)} 自动续费')
+    else:
+        lines.append('自动续费: 本IP未开启自动续费')
     lines.append(f'关机计划: {_format_notice_dt(suspend_at)}')
     lines.append(f'删除计划: {_format_notice_dt(delete_at)}')
     if ip_recycle_at:
@@ -273,6 +281,95 @@ def _notice_plan_text(order, notice: dict | None = None, *, include_expiry: bool
     if ip_recycle_at:
         lines.append(f'实例删除后仍需保留 IP 的，请务必在 {_format_notice_dt(ip_recycle_at)} 之前续费恢复。')
     return '\n'.join(lines)
+
+
+def _group_orders_by_user(orders):
+    grouped = defaultdict(list)
+    for order in orders:
+        grouped[getattr(order, 'user_id', None)].append(order)
+    return {user_id: items for user_id, items in grouped.items() if user_id}
+
+
+def _order_notice_ip(order, notice: dict | None = None) -> str:
+    notice = notice or {}
+    return str(notice.get('ip') or getattr(order, 'public_ip', None) or getattr(order, 'previous_public_ip', None) or '未分配')
+
+
+@sync_to_async
+def _renew_notice_batch_payload(order_ids: list[int]) -> dict:
+    orders = list(CloudServerOrder.objects.filter(id__in=order_ids).order_by('service_expires_at', 'id'))
+    if not orders:
+        return {'text': '', 'order_ids': [], 'first_order_id': None, 'count': 0}
+    lines = ['⏰ IP到期提醒', '', '以下 IP 即将到期，请按计划及时续费：']
+    for order in orders:
+        notice = {'expires_at': order.service_expires_at, 'suspend_at': order.suspend_at, 'delete_at': order.delete_at, 'ip_recycle_at': order.ip_recycle_at, 'auto_renew_enabled': order.auto_renew_enabled}
+        lines.append('')
+        lines.append(f'IP: {_order_notice_ip(order)}')
+        lines.append(_notice_plan_text(order, notice))
+    lines.append('')
+    lines.append('如需续费，请进入“到期时间查询 → 代理列表”选择对应 IP。')
+    return {'text': '\n'.join(lines), 'order_ids': [order.id for order in orders], 'first_order_id': orders[0].id, 'count': len(orders)}
+
+
+@sync_to_async
+def _auto_renew_notice_batch_payload(order_ids: list[int]) -> dict:
+    orders = list(CloudServerOrder.objects.select_related('user').filter(id__in=order_ids).order_by('service_expires_at', 'id'))
+    if not orders:
+        return {'text': '', 'order_ids': [], 'first_order_id': None, 'count': 0}
+    user = orders[0].user
+    balance = Decimal(str(getattr(user, 'balance', 0) or 0))
+    total = Decimal('0')
+    lines = ['⚡ 自动续费预提醒', '', '以下 IP 已开启自动续费，将在到期前 1 天自动使用钱包 USDT 续费 31 天；本提醒在到期前 2 天发送：']
+    for order in orders:
+        amount = _renewal_price(order, user)
+        total += amount
+        auto_renew_at = order.service_expires_at - timezone.timedelta(days=1) if order.service_expires_at else None
+        lines.append(f'- IP: {_order_notice_ip(order)} | 到期: {_format_notice_dt(order.service_expires_at)} | 自动续费时间: {_format_notice_dt(auto_renew_at)} | 预计扣款: {amount:.2f} USDT')
+    lines.extend(['', f'当前 USDT 余额: {balance:.6f}', f'预计总扣款: {total:.2f} USDT'])
+    if balance >= total:
+        lines.append('余额检查: 充足。')
+    else:
+        lines.append(f'余额检查: 不足，预计还差 {(total - balance):.6f} USDT。请在自动续费时间前充值，避免续费失败。')
+    lines.append('如不需要自动续费，请进入“到期时间查询 → 自动续费查询”关闭对应 IP。')
+    return {'text': '\n'.join(lines), 'order_ids': [order.id for order in orders], 'first_order_id': orders[0].id, 'count': len(orders)}
+
+
+@sync_to_async
+def _lifecycle_notice_batch_text(title: str, order_ids: list[int], closing: str) -> str:
+    orders = list(CloudServerOrder.objects.filter(id__in=order_ids).order_by('service_expires_at', 'delete_at', 'ip_recycle_at', 'id'))
+    if not orders:
+        return ''
+    lines = [title, '']
+    for order in orders:
+        notice = {'expires_at': order.service_expires_at, 'suspend_at': order.suspend_at, 'delete_at': order.delete_at, 'ip_recycle_at': order.ip_recycle_at, 'auto_renew_enabled': order.auto_renew_enabled}
+        lines.append(f'IP: {_order_notice_ip(order)}')
+        lines.append(f'订单号: {order.order_no}')
+        lines.append(_notice_plan_text(order, notice))
+        lines.append('')
+    if closing:
+        lines.append(closing)
+    return '\n'.join(lines).strip()
+
+
+@sync_to_async
+def _auto_renew_result_batch_text(results: list[dict]) -> str:
+    lines = ['⚡ 自动续费执行结果', '']
+    for item in results:
+        order_id = item.get('order_id')
+        order = CloudServerOrder.objects.filter(id=order_id).first()
+        if not order:
+            continue
+        ip = item.get('ip') or _order_notice_ip(order)
+        if item.get('ok'):
+            lines.append(f'✅ IP: {ip} 自动续费成功')
+            lines.append(f'新的到期时间: {_format_notice_dt(order.service_expires_at)}')
+            lines.append(_notice_plan_text(order, {'expires_at': order.service_expires_at, 'suspend_at': order.suspend_at, 'delete_at': order.delete_at, 'ip_recycle_at': order.ip_recycle_at, 'auto_renew_enabled': order.auto_renew_enabled}))
+        else:
+            lines.append(f'❌ IP: {ip} 自动续费失败')
+            lines.append(f'失败原因: {_public_cloud_error_text(item.get("error"))}')
+            lines.append(_notice_plan_text(order, {'expires_at': order.service_expires_at, 'suspend_at': order.suspend_at, 'delete_at': order.delete_at, 'ip_recycle_at': order.ip_recycle_at, 'auto_renew_enabled': order.auto_renew_enabled}))
+        lines.append('')
+    return '\n'.join(lines).strip()
 
 
 def _log_cloud_notice(event: str, order, notice: dict | None, text: str, keyboard: str):
@@ -641,74 +738,102 @@ async def lifecycle_tick(notify=None):
         due.get('config', {}).get('renew_notice_debug_repeat'),
     )
 
-    for order in due['renew_notice']:
-        if notify and await _user_can_receive_cloud_notice(order.user_id):
-            notice = await _cloud_expiry_notice_payload(order.id)
-            auto_renew_text = '<b>本单已开启自动续费，将在到期前 3 天自动续费；自动续费前 2 小时会再次通知。</b>' if notice['auto_renew_enabled'] else '<b>本单未开启自动续费。</b>'
-            text = f'⏰ IP到期提醒\n\nIP: {notice["ip"]}\n\n{_notice_plan_text(order, notice)}\n\n{auto_renew_text}\n\n如需续费，请点击下方“立即续费”。'
-            _log_cloud_notice('renew_notice', order, notice, text, 'cloud_expiry_actions')
-            await notify(order.user_id, text, cloud_expiry_actions(order.id))
-        await _mark_notice_sent(order.id, 'renew_notice_sent_at')
+    for user_id, orders in _group_orders_by_user(due['renew_notice']).items():
+        if len(orders) == 1:
+            order = orders[0]
+            if notify and await _user_can_receive_cloud_notice(order.user_id):
+                notice = await _cloud_expiry_notice_payload(order.id)
+                auto_renew_text = '<b>本单已开启自动续费，将在到期前 1 天自动续费；到期前 2 天会发送自动续费预提醒。</b>' if notice['auto_renew_enabled'] else '<b>本单未开启自动续费。</b>'
+                text = f'⏰ IP到期提醒\n\nIP: {notice["ip"]}\n\n{_notice_plan_text(order, notice)}\n\n{auto_renew_text}\n\n如需续费，请点击下方“立即续费”。'
+                _log_cloud_notice('renew_notice', order, notice, text, 'cloud_expiry_actions')
+                await notify(order.user_id, text, cloud_expiry_actions(order.id))
+            await _mark_notice_sent(order.id, 'renew_notice_sent_at')
+            continue
+        payload = await _renew_notice_batch_payload([order.id for order in orders])
+        if notify and payload['text'] and await _user_can_receive_cloud_notice(user_id):
+            _log_cloud_notice('renew_notice_batch', orders[0], {'ip': f'{payload["count"]} 个IP'}, payload['text'], 'cloud_expiry_actions')
+            await notify(user_id, payload['text'], None)
+        for order_id in payload.get('order_ids') or []:
+            await _mark_notice_sent(order_id, 'renew_notice_sent_at')
 
-    for order in due['auto_renew_notice']:
-        if notify and await _user_can_receive_cloud_notice(order.user_id):
-            notice = await _cloud_expiry_notice_payload(order.id)
-            text = f'⚡ 自动续费提醒\n\nIP: {notice["ip"]}\n\n{_notice_plan_text(order, notice)}\n\n将在约 2 小时后使用钱包余额自动续费 31 天。\n\n如不需要，请点击下方按钮关闭自动续费。'
-            _log_cloud_notice('auto_renew_prenotice', order, notice, text, 'cloud_auto_renew_notice_actions')
-            await notify(order.user_id, text, cloud_auto_renew_notice_actions(order.id))
+    for user_id, orders in _group_orders_by_user(due['auto_renew_notice']).items():
+        payload = await _auto_renew_notice_batch_payload([order.id for order in orders])
+        if notify and payload['text'] and await _user_can_receive_cloud_notice(user_id):
+            first_order = orders[0]
+            _log_cloud_notice('auto_renew_prenotice_batch', first_order, {'ip': f'{payload["count"]} 个IP'}, payload['text'], 'cloud_auto_renew_notice_actions')
+            await notify(user_id, payload['text'], cloud_auto_renew_notice_actions(payload['first_order_id']) if payload['count'] == 1 else None)
+        for order_id in payload.get('order_ids') or []:
+            await _mark_notice_sent(order_id, 'auto_renew_notice_sent_at')
 
+    auto_renew_results_by_user = defaultdict(list)
     for order in due['auto_renew']:
         renewed, err, balance_change = await _run_auto_renew(order.id)
         notice = await _cloud_expiry_notice_payload(order.id)
         logger.info('CLOUD_AUTO_RENEW_EXEC user_id=%s order_id=%s order_no=%s ip=%s ok=%s error=%s', order.user_id, order.id, order.order_no, notice['ip'], not bool(err), err)
-        if notify:
-            if err:
-                text = _cloud_text_format('cloud_auto_renew_failed', '❌ 自动续费失败\n\nIP: {ip}\n\n{plan_text}\n\n失败原因: {error}\n\n请务必在关机/删除计划前完成续费；如余额不足，请先充值或联系人工客服处理。', ip=notice['ip'], plan_text=_notice_plan_text(order, notice), error=_public_cloud_error_text(err))
+        auto_renew_results_by_user[order.user_id].append({
+            'order_id': getattr(renewed, 'id', None) or order.id,
+            'ip': notice['ip'],
+            'ok': not bool(err),
+            'error': err,
+            'balance_change': balance_change,
+        })
+    if notify:
+        for user_id, results in auto_renew_results_by_user.items():
+            if not await _user_can_receive_cloud_notice(user_id):
+                continue
+            text = await _auto_renew_result_batch_text(results)
+            if text:
+                await notify(user_id, text, cloud_expiry_actions(results[0]['order_id']) if len(results) == 1 else None)
+
+    for user_id, orders in _group_orders_by_user(due['delete_notice']).items():
+        if len(orders) == 1:
+            order = orders[0]
+            if notify and await _user_can_receive_cloud_notice(order.user_id):
+                notice = await _cloud_expiry_notice_payload(order.id)
+                text = _cloud_text_format(
+                    'cloud_delete_notice',
+                    '⚠️ 云服务器删机提醒\n\nIP: {ip}\n订单号: {order_no}\n\n{plan_text}\n\n请务必在 {delete_at} 之前完成续费，避免实例删除；不需要提醒可点击下方关闭提醒。',
+                    ip=notice['ip'],
+                    order_no=order.order_no,
+                    plan_text=_notice_plan_text(order, notice),
+                    delete_at=_format_notice_dt(order.delete_at),
+                )
                 text = _ensure_notice_ip(text, notice['ip'])
-                _log_cloud_notice('auto_renew_failed', order, notice, text, 'cloud_expiry_actions')
-                await notify(order.user_id, text, cloud_expiry_actions(order.id))
-            else:
-                balance_text = ''
-                if balance_change.get('before') is not None and balance_change.get('after') is not None:
-                    currency = balance_change.get('currency')
-                    balance_text = f'\n\n续费金额: {_fmt_money3(balance_change.get("amount"))} {currency}\n\n续费前余额: {_fmt_money3(balance_change.get("before"))} {currency}\n\n续费后余额: {_fmt_money3(balance_change.get("after"))} {currency}'
-                links_text = _proxy_links_notice_text(renewed)
-                renewed_notice = await _cloud_expiry_notice_payload(renewed.id)
-                text = f'✅ 自动续费成功\n\nIP: {renewed_notice["ip"]}\n\n{_notice_plan_text(renewed, renewed_notice)}{balance_text}{links_text}'
-                _log_cloud_notice('auto_renew_success', order, renewed_notice, text, 'cloud_auto_renew_notice_actions')
-                await notify(order.user_id, text, cloud_auto_renew_notice_actions(order.id))
+                _log_cloud_notice('delete_notice', order, notice, text, 'cloud_lifecycle_notice_actions')
+                await notify(order.user_id, text, cloud_lifecycle_notice_actions(order.id, 'cloud_delete_notice'))
+            await _mark_notice_sent(order.id, 'delete_notice_sent_at')
+            continue
+        text = await _lifecycle_notice_batch_text('⚠️ 云服务器删机提醒', [order.id for order in orders], '请务必在各自删除计划前完成续费，避免实例删除。')
+        if notify and text and await _user_can_receive_cloud_notice(user_id):
+            _log_cloud_notice('delete_notice_batch', orders[0], {'ip': f'{len(orders)} 个IP'}, text, 'cloud_lifecycle_notice_actions')
+            await notify(user_id, text, None)
+        for order in orders:
+            await _mark_notice_sent(order.id, 'delete_notice_sent_at')
 
-    for order in due['delete_notice']:
-        if notify and await _user_can_receive_cloud_notice(order.user_id):
-            notice = await _cloud_expiry_notice_payload(order.id)
-            text = _cloud_text_format(
-                'cloud_delete_notice',
-                '⚠️ 云服务器删机提醒\n\nIP: {ip}\n订单号: {order_no}\n\n{plan_text}\n\n请务必在 {delete_at} 之前完成续费，避免实例删除；不需要提醒可点击下方关闭提醒。',
-                ip=notice['ip'],
-                order_no=order.order_no,
-                plan_text=_notice_plan_text(order, notice),
-                delete_at=_format_notice_dt(order.delete_at),
-            )
-            text = _ensure_notice_ip(text, notice['ip'])
-            _log_cloud_notice('delete_notice', order, notice, text, 'cloud_lifecycle_notice_actions')
-            await notify(order.user_id, text, cloud_lifecycle_notice_actions(order.id, 'cloud_delete_notice'))
-        await _mark_notice_sent(order.id, 'delete_notice_sent_at')
-
-    for order in due['recycle_notice']:
-        if notify and await _user_can_receive_cloud_notice(order.user_id):
-            notice = await _cloud_expiry_notice_payload(order.id)
-            text = _cloud_text_format(
-                'cloud_ip_recycle_notice',
-                '📦 固定IP删除提醒\n\nIP: {ip}\n订单号: {order_no}\n\n{plan_text}\n\n请务必在 {ip_recycle_at} 之前完成续费恢复，避免固定 IP 删除；不需要提醒可点击下方关闭提醒。',
-                ip=notice['ip'],
-                order_no=order.order_no,
-                plan_text=_notice_plan_text(order, notice),
-                ip_recycle_at=_format_notice_dt(order.ip_recycle_at),
-            )
-            text = _ensure_notice_ip(text, notice['ip'])
-            _log_cloud_notice('ip_recycle_notice', order, notice, text, 'cloud_lifecycle_notice_actions')
-            await notify(order.user_id, text, cloud_lifecycle_notice_actions(order.id, 'cloud_ip_recycle_notice'))
-        await _mark_notice_sent(order.id, 'recycle_notice_sent_at')
+    for user_id, orders in _group_orders_by_user(due['recycle_notice']).items():
+        if len(orders) == 1:
+            order = orders[0]
+            if notify and await _user_can_receive_cloud_notice(order.user_id):
+                notice = await _cloud_expiry_notice_payload(order.id)
+                text = _cloud_text_format(
+                    'cloud_ip_recycle_notice',
+                    '📦 固定IP删除提醒\n\nIP: {ip}\n订单号: {order_no}\n\n{plan_text}\n\n请务必在 {ip_recycle_at} 之前完成续费恢复，避免固定 IP 删除；不需要提醒可点击下方关闭提醒。',
+                    ip=notice['ip'],
+                    order_no=order.order_no,
+                    plan_text=_notice_plan_text(order, notice),
+                    ip_recycle_at=_format_notice_dt(order.ip_recycle_at),
+                )
+                text = _ensure_notice_ip(text, notice['ip'])
+                _log_cloud_notice('ip_recycle_notice', order, notice, text, 'cloud_lifecycle_notice_actions')
+                await notify(order.user_id, text, cloud_lifecycle_notice_actions(order.id, 'cloud_ip_recycle_notice'))
+            await _mark_notice_sent(order.id, 'recycle_notice_sent_at')
+            continue
+        text = await _lifecycle_notice_batch_text('📦 固定IP删除提醒', [order.id for order in orders], '请务必在各自固定IP删除计划前完成续费恢复，避免固定 IP 删除。')
+        if notify and text and await _user_can_receive_cloud_notice(user_id):
+            _log_cloud_notice('ip_recycle_notice_batch', orders[0], {'ip': f'{len(orders)} 个IP'}, text, 'cloud_lifecycle_notice_actions')
+            await notify(user_id, text, None)
+        for order in orders:
+            await _mark_notice_sent(order.id, 'recycle_notice_sent_at')
 
     for order in due['expire']:
         notice = await _cloud_expiry_notice_payload(order.id)

@@ -1661,13 +1661,20 @@ def _format_local_dt(value) -> str:
 
 
 def _cloud_order_plan_text(order) -> str:
+    expires_at = getattr(order, 'service_expires_at', None)
     suspend_at = getattr(order, 'suspend_at', None)
     delete_at = getattr(order, 'delete_at', None)
-    lines = [
-        f'到期时间: {_format_local_dt(getattr(order, "service_expires_at", None))}',
+    auto_renew_enabled = bool(getattr(order, 'auto_renew_enabled', False))
+    auto_renew_at = expires_at - timezone.timedelta(days=1) if expires_at else None
+    lines = [f'到期时间: {_format_local_dt(expires_at)}']
+    if auto_renew_enabled:
+        lines.append(f'自动续费: 已开启，预计 {_format_local_dt(auto_renew_at)} 自动续费')
+    else:
+        lines.append('自动续费: 本IP未开启自动续费')
+    lines.extend([
         f'关机计划: {_format_local_dt(suspend_at)}',
         f'删除计划: {_format_local_dt(delete_at)}',
-    ]
+    ])
     if suspend_at:
         lines.append(f'请务必在 {_format_local_dt(suspend_at)} 之前完成续费，避免关机。')
     if delete_at:

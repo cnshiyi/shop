@@ -1671,6 +1671,8 @@ def apply_cloud_server_renewal(order_id: int, days: int = 31, run_post_checks: b
     order.service_started_at = now
     order.service_expires_at = now + timezone.timedelta(days=days)
     order.last_renewed_at = now
+    if hasattr(order, 'auto_renew_notice_sent_at'):
+        order.auto_renew_notice_sent_at = None
     order.delay_quota = max(int(order.delay_quota or 0), 0) + 1
     order.ip_change_quota = max(int(getattr(order, 'ip_change_quota', 0) or 0), 0) + 1
     retained_ip = bool(order.status in {'deleted', 'renew_pending'} and order.ip_recycle_at and (order.public_ip or order.previous_public_ip) and not order.instance_id)
@@ -1691,7 +1693,7 @@ def apply_cloud_server_renewal(order_id: int, days: int = 31, run_post_checks: b
     else:
         post_notes.append('续费后运行状态与 MTProxy 巡检已提交后台执行。')
     order.provision_note = '\n'.join(filter(None, [renew_note or f'续费成功，服务有效期已从当前时间重新计算 {days} 天。', retention_note, *post_notes]))
-    order.save(update_fields=['service_started_at', 'service_expires_at', 'renew_grace_expires_at', 'suspend_at', 'delete_at', 'ip_recycle_at', 'last_renewed_at', 'delay_quota', 'ip_change_quota', 'status', 'provision_note', 'updated_at'])
+    order.save(update_fields=['service_started_at', 'service_expires_at', 'renew_grace_expires_at', 'suspend_at', 'delete_at', 'ip_recycle_at', 'last_renewed_at', 'auto_renew_notice_sent_at', 'delay_quota', 'ip_change_quota', 'status', 'provision_note', 'updated_at'])
     if retained_ip:
         recovery_order, recovery_err = _create_retained_ip_recovery_order(order, days)
         if recovery_err:
