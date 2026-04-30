@@ -37,7 +37,7 @@ from bot.keyboards import (
     cart_menu, wallet_recharge_prompt_menu, cloud_ip_query_result,
     cloud_query_menu, configured_link_for_label, configured_link_menu,
 )
-from bot.services import create_admin_reply_link, get_admin_reply_link, get_admin_reply_link_by_id, get_or_create_user, record_bot_operation_log, record_telegram_message
+from bot.services import create_admin_reply_link, get_admin_reply_link, get_admin_reply_link_by_id, get_or_create_user, get_admin_forward_mute_status, is_admin_forward_muted, mute_admin_forward_for_days, record_bot_operation_log, record_telegram_message
 from cloud.services import (
     buy_cloud_server_with_balance,
     create_cloud_server_order,
@@ -523,9 +523,10 @@ def _is_admin_forward_media_type(content_type: str) -> bool:
 
 def _admin_reply_keyboard(user_tg_id: int) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
-        inline_keyboard=[[
-            InlineKeyboardButton(text='↩️ 直接回复这条消息即可回复用户', callback_data=f'adminreply:hint:{user_tg_id}')
-        ]]
+        inline_keyboard=[
+            [InlineKeyboardButton(text='↩️ 直接回复这条消息即可回复用户', callback_data=f'adminreply:hint:{user_tg_id}')],
+            [InlineKeyboardButton(text='🔕 关闭该用户3天转发', callback_data=f'adminreply:mute3d:{user_tg_id}')],
+        ]
     )
 
 
@@ -640,6 +641,9 @@ async def _forward_plain_text_to_admin(bot: Bot, message: Message):
         return
     if not text and not _is_admin_forward_media_type(content_type):
         logger.warning('管理员转发跳过：消息无可转发文本/媒体 sender=%s type=%s', sender, content_type)
+        return
+    if await is_admin_forward_muted(int(sender)):
+        logger.info('管理员转发跳过：用户处于3天静默 sender=%s type=%s', sender, content_type)
         return
     sender_name = getattr(message.from_user, 'first_name', None) or ''
     sender_username = getattr(message.from_user, 'username', None) or ''
@@ -1159,6 +1163,8 @@ def _cloud_server_created_text(order, port: int | None = None, title: str | None
         lines.append('备用链路:')
         for index, link in enumerate(additional_links[:8], start=1):
             lines.append(f'{index}. {escape(link)}')
+    lines.append('')
+    lines.append(_cloud_order_plan_text(order))
     return '\n'.join(lines)
 
 
@@ -1652,6 +1658,21 @@ def _format_local_dt(value) -> str:
         return timezone.localtime(value).strftime('%Y-%m-%d %H:%M')
     except Exception:
         return str(value)
+
+
+def _cloud_order_plan_text(order) -> str:
+    suspend_at = getattr(order, 'suspend_at', None)
+    delete_at = getattr(order, 'delete_at', None)
+    lines = [
+        f'到期时间: {_format_local_dt(getattr(order, "service_expires_at", None))}',
+        f'关机计划: {_format_local_dt(suspend_at)}',
+        f'删除计划: {_format_local_dt(delete_at)}',
+    ]
+    if suspend_at:
+        lines.append(f'请务必在 {_format_local_dt(suspend_at)} 之前完成续费，避免关机。')
+    if delete_at:
+        lines.append(f'如已关机，请务必在 {_format_local_dt(delete_at)} 之前完成续费，避免实例删除。')
+    return '\n'.join(lines)
 
 
 def _display_username(user) -> str:
@@ -2961,6 +2982,25 @@ def register_handlers(dp: Dispatcher):
         await state.update_data(admin_reply_link_id=link.id)
         await _safe_callback_answer(callback, '已进入回复模式：请直接发送下一条文字/图片/文件，我会转发给用户。', show_alert=True)
 
+    @dp.callback_query(F.data.startswith('adminreply:mute3d:'))
+    async def cb_admin_forward_mute_3d(callback: CallbackQuery):
+        if not await _is_admin_chat(callback.message):
+            await _safe_callback_answer(callback, '仅管理员可使用', show_alert=True)
+            return
+        raw_user_id = callback.data.rsplit(':', 1)[-1]
+        if not raw_user_id.isdigit():
+            await _safe_callback_answer(callback, '用户ID无效', show_alert=True)
+            return
+        muted_until = await mute_admin_forward_for_days(int(raw_user_id), 3)
+        muted_text = muted_until.astimezone(timezone.get_current_timezone()).strftime('%Y-%m-%d %H:%M')
+        await _safe_callback_answer(callback, f'已关闭该用户转发至 {muted_text}', show_alert=True)
+        if callback.message:
+            try:
+                await callback.message.edit_reply_markup(reply_markup=_admin_reply_keyboard(int(raw_user_id)))
+            except Exception:
+                pass
+        logger.info('ADMIN_FORWARD_MUTED_BY_ADMIN admin_chat_id=%s admin_user_id=%s muted_until=%s', getattr(callback.message.chat, 'id', None), raw_user_id, muted_until)
+
     @dp.callback_query(F.data.startswith('support:contact:'))
     async def cb_support_contact(callback: CallbackQuery):
         await _safe_callback_answer(callback)
@@ -3314,7 +3354,7 @@ def register_handlers(dp: Dispatcher):
             existing = await get_cloud_order(order_id, user.id)
             if existing and existing.status == 'completed' and existing.paid_at:
                 asyncio.create_task(_cloud_renewal_postcheck_and_notify(callback.bot, callback.from_user.id, existing.id))
-                await _safe_edit_text(callback.message, f'✅ 这笔续费已完成。\n\n订单号: {existing.order_no}\n新的到期时间: {_format_local_dt(existing.service_expires_at)}\n\n我会继续执行续费后巡检。')
+                await _safe_edit_text(callback.message, f'✅ 这笔续费已完成。\n\n订单号: {existing.order_no}\n{_cloud_order_plan_text(existing)}\n\n我会继续执行续费后巡检。')
                 return
             await _safe_edit_text(callback.message, 
                 f'❌ 钱包自动续费失败：{_public_cloud_error_text(err)}。\n请先充值余额后再试，或使用下方地址支付。',
@@ -3332,7 +3372,7 @@ def register_handlers(dp: Dispatcher):
             '续费时长: 31天\n'
             '支付方式: 钱包自动续费\n'
             '支付币种: USDT\n'
-            f'新的到期时间: {_format_local_dt(order.service_expires_at)}',
+            + _cloud_order_plan_text(order),
             reply_markup=cloud_server_detail(
                 order.id,
                 can_renew=True,
@@ -3363,7 +3403,7 @@ def register_handlers(dp: Dispatcher):
             existing = await get_cloud_order(order_id, user.id)
             if existing and existing.status == 'completed' and existing.paid_at:
                 asyncio.create_task(_cloud_renewal_postcheck_and_notify(callback.bot, callback.from_user.id, existing.id))
-                await _safe_edit_text(callback.message, f'✅ 这笔续费已完成。\n\n订单号: {existing.order_no}\n新的到期时间: {_format_local_dt(existing.service_expires_at)}\n\n我会继续执行续费后巡检。')
+                await _safe_edit_text(callback.message, f'✅ 这笔续费已完成。\n\n订单号: {existing.order_no}\n{_cloud_order_plan_text(existing)}\n\n我会继续执行续费后巡检。')
                 return
             await _safe_edit_text(callback.message, f'❌ {_public_cloud_error_text(err)}。', reply_markup=wallet_recharge_prompt_menu())
             return
@@ -3377,7 +3417,7 @@ def register_handlers(dp: Dispatcher):
             f'订单号: {order.order_no}\n'
             '续费时长: 31天\n'
             f'支付币种: {currency}\n'
-            f'新的到期时间: {_format_local_dt(order.service_expires_at)}',
+            + _cloud_order_plan_text(order),
             reply_markup=cloud_server_detail(
                 order.id,
                 can_renew=True,

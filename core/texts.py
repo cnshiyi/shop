@@ -97,14 +97,14 @@ BOT_TEXTS = {
     'bot_reinstall_validate_failed': ('校验失败：{reason}', '重装主代理链接校验失败提示'),
     'bot_reinstall_validate_ok': ('主代理链接校验通过。\n\n⚠️ 确认重新安装？重新安装大约需要 5 分钟，期间代理可能会断连。', '重装主代理链接校验成功提示'),
     'bot_reinstall_submitted': ('🛠 已确认{action_text}，后台会{work_text}。预计约 5 分钟，完成后会自动通知你。', '重装/继续初始化已提交提示'),
-    'cloud_auto_renew_failed': ('❌ 自动续费失败\n\nIP: {ip}\n\n到期时间: {expires_at}\n\n失败原因: {error}\n\n请联系人工客服处理。', '自动续费失败通知'),
-    'cloud_delete_notice': ('⚠️ 云服务器删机提醒\n订单号: {order_no}\n计划删机时间: {delete_at}\n如需保留，请尽快处理。', '云服务器删机提醒'),
-    'cloud_ip_recycle_notice': ('📦 固定IP删除提醒\n订单号: {order_no}\n计划删除IP时间: {ip_recycle_at}\n如需保留，请尽快处理。', '固定 IP 删除提醒'),
-    'cloud_expiring_notice': ('⏰ 云服务器即将到期\n订单号: {order_no}\n请尽快续费，未续费将按规则关机/删机。', '云服务器即将到期提醒'),
-    'cloud_suspended_notice': ('⚠️ 云服务器已关机\n\nIP: {ip}\n订单号: {order_no}\n\n如需继续使用，请尽快续费；不需要提醒可点击下方关闭提醒。', '云服务器已关机通知'),
-    'cloud_instance_deleted_notice': ('🗑 云服务器实例已删除\n\nIP: {ip}\n订单号: {order_no}\n\n固定 IP 仍保留，可在保留期内续费恢复；不需要提醒可点击下方关闭提醒。', '云服务器实例已删除通知'),
-    'cloud_ip_retention_ended_notice': ('📦 云服务器固定 IP 保留期已结束\n订单号: {order_no}', '固定 IP 保留期结束通知'),
-    'cloud_migration_old_deleted_notice': ('🧹 迁移期已结束，旧服务器已删除\n订单号: {order_no}', '迁移期旧服务器删除通知'),
+    'cloud_auto_renew_failed': ('❌ 自动续费失败\n\nIP: {ip}\n\n{plan_text}\n\n失败原因: {error}\n\n请务必在关机/删除计划前完成续费；如余额不足，请先充值或联系人工客服处理。', '自动续费失败通知'),
+    'cloud_delete_notice': ('⚠️ 云服务器删机提醒\n\nIP: {ip}\n订单号: {order_no}\n\n{plan_text}\n\n请务必在 {delete_at} 之前完成续费，避免实例删除；不需要提醒可点击下方关闭提醒。', '云服务器删机提醒'),
+    'cloud_ip_recycle_notice': ('📦 固定IP删除提醒\n\nIP: {ip}\n订单号: {order_no}\n\n{plan_text}\n\n请务必在 {ip_recycle_at} 之前完成续费恢复，避免固定 IP 删除；不需要提醒可点击下方关闭提醒。', '固定 IP 删除提醒'),
+    'cloud_expiring_notice': ('⏰ 云服务器即将到期\n\nIP: {ip}\n订单号: {order_no}\n\n{plan_text}\n\n请尽快续费；不需要提醒可点击下方关闭提醒。', '云服务器即将到期提醒'),
+    'cloud_suspended_notice': ('⚠️ 云服务器已关机\n\nIP: {ip}\n订单号: {order_no}\n\n{plan_text}\n\n请务必在 {delete_at} 之前完成续费，避免实例删除；不需要提醒可点击下方关闭提醒。', '云服务器已关机通知'),
+    'cloud_instance_deleted_notice': ('🗑 云服务器实例已删除\n\nIP: {ip}\n订单号: {order_no}\n\n{plan_text}\n\n固定 IP 仍保留，请务必在 {ip_recycle_at} 之前续费恢复；不需要提醒可点击下方关闭提醒。', '云服务器实例已删除通知'),
+    'cloud_ip_retention_ended_notice': ('📦 云服务器固定 IP 保留期已结束\n\nIP: {ip}\n订单号: {order_no}\n\n{plan_text}\n\n固定 IP 已超过删除计划，如有疑问请联系人工客服。', '固定 IP 保留期结束通知'),
+    'cloud_migration_old_deleted_notice': ('🧹 迁移期已结束，旧服务器已删除\n\nIP: {ip}\n订单号: {order_no}\n\n{plan_text}\n\n如仍需使用，请联系人工客服处理；不需要提醒可点击下方关闭提醒。', '迁移期旧服务器删除通知'),
 }
 
 TEXT_GROUPS = {

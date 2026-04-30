@@ -3,6 +3,7 @@
 import logging
 
 from asgiref.sync import sync_to_async
+from django.utils import timezone
 from django.apps import apps
 
 logger = logging.getLogger(__name__)
@@ -152,6 +153,30 @@ def get_admin_reply_link(admin_chat_id: int, admin_message_id: int):
         .filter(admin_chat_id=admin_chat_id, admin_message_id=admin_message_id, is_active=True)
         .first()
     )
+
+
+@sync_to_async
+def is_admin_forward_muted(tg_user_id: int) -> bool:
+    TelegramUser = _telegram_user_model()
+    user = TelegramUser.objects.filter(tg_user_id=tg_user_id).only('admin_forward_muted_until').first()
+    return bool(user and user.admin_forward_muted_until and user.admin_forward_muted_until > timezone.now())
+
+
+@sync_to_async
+def mute_admin_forward_for_days(tg_user_id: int, days: int = 3):
+    TelegramUser = _telegram_user_model()
+    user = _get_or_create_user_sync(tg_user_id, None, None)
+    muted_until = timezone.now() + timezone.timedelta(days=days)
+    user.admin_forward_muted_until = muted_until
+    user.save(update_fields=['admin_forward_muted_until', 'updated_at'])
+    return muted_until
+
+
+@sync_to_async
+def get_admin_forward_mute_status(tg_user_id: int):
+    TelegramUser = _telegram_user_model()
+    user = TelegramUser.objects.filter(tg_user_id=tg_user_id).only('admin_forward_muted_until').first()
+    return user.admin_forward_muted_until if user else None
 
 
 @sync_to_async

@@ -51,6 +51,7 @@ class TelegramUser(models.Model):
     balance_trx = models.DecimalField('TRX余额', max_digits=18, decimal_places=6, default=0)
     cloud_discount_rate = models.DecimalField('云服务器专属折扣', max_digits=5, decimal_places=2, default=100, help_text='百分比，100 表示无折扣，90 表示 9 折')
     cloud_reminder_muted_until = models.DateTimeField('云服务器提醒静默到', blank=True, null=True)
+    admin_forward_muted_until = models.DateTimeField('管理员转发静默到', blank=True, null=True, db_index=True)
     created_at = models.DateTimeField('创建时间', auto_now_add=True)
     updated_at = models.DateTimeField('更新时间', auto_now=True)
 
