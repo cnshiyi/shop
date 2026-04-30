@@ -31,6 +31,17 @@ def _cloud_text_format(key: str, default: str, **kwargs) -> str:
         return default.format(**kwargs)
 
 
+def _ensure_plan_text(text: str, plan_text: str) -> str:
+    text = str(text or '')
+    plan_text = str(plan_text or '').strip()
+    if not plan_text:
+        return text
+    required_labels = ('到期时间:', '关机计划:')
+    if all(label in text for label in required_labels):
+        return text
+    return f'{text.rstrip()}\n\n{plan_text}'
+
+
 def _aws_client(region: str, account=None):
     import boto3
     from core.cloud_accounts import get_active_cloud_account
@@ -74,19 +85,20 @@ def _get_due_orders():
     auto_renew_at = now + timezone.timedelta(days=1)
     delete_notice_at = now + timezone.timedelta(days=1)
     recycle_notice_at = now + timezone.timedelta(days=1)
-    renew_notice_qs = CloudServerOrder.objects.filter(status__in=['completed', 'expiring', 'renew_pending'], cloud_reminder_enabled=True, service_expires_at__lte=renew_notice_at, service_expires_at__gt=now)
+    orders = CloudServerOrder.objects.all()
+    renew_notice_qs = orders.filter(status__in=['completed', 'expiring', 'renew_pending'], cloud_reminder_enabled=True, service_expires_at__lte=renew_notice_at, service_expires_at__gt=now)
     if not renew_notice_debug_repeat:
         renew_notice_qs = renew_notice_qs.filter(renew_notice_sent_at__isnull=True)
     return {
         'renew_notice': list(renew_notice_qs),
-        'auto_renew_notice': list(CloudServerOrder.objects.filter(status__in=['completed', 'expiring', 'renew_pending'], auto_renew_enabled=True, service_expires_at__lte=auto_renew_notice_at, service_expires_at__gt=auto_renew_at, auto_renew_notice_sent_at__isnull=True).select_related('user')),
-        'auto_renew': list(CloudServerOrder.objects.filter(status__in=['completed', 'expiring', 'renew_pending'], auto_renew_enabled=True, service_expires_at__lte=auto_renew_at, service_expires_at__gt=now)),
-        'delete_notice': list(CloudServerOrder.objects.filter(status__in=['suspended', 'deleting'], delete_reminder_enabled=True, delete_at__lte=delete_notice_at, delete_at__gt=now, delete_notice_sent_at__isnull=True)),
-        'recycle_notice': list(CloudServerOrder.objects.filter(status='deleted', ip_recycle_reminder_enabled=True, ip_recycle_at__lte=recycle_notice_at, ip_recycle_at__gt=now, recycle_notice_sent_at__isnull=True)),
-        'expire': list(CloudServerOrder.objects.filter(status='completed', service_expires_at__lte=now).exclude(provider='aliyun_simple')),
-        'suspend': list(CloudServerOrder.objects.filter(status__in=['completed', 'expiring', 'renew_pending'], suspend_at__lte=now).exclude(provider='aliyun_simple')),
-        'delete': list(CloudServerOrder.objects.filter(status__in=['suspended', 'deleting'], delete_at__lte=now).exclude(provider='aliyun_simple')),
-        'recycle': list(CloudServerOrder.objects.filter(status='deleted', ip_recycle_at__lte=now).exclude(provider='aliyun_simple')),
+        'auto_renew_notice': list(orders.filter(status__in=['completed', 'expiring', 'renew_pending'], auto_renew_enabled=True, service_expires_at__lte=auto_renew_notice_at, service_expires_at__gt=auto_renew_at, auto_renew_notice_sent_at__isnull=True).select_related('user')),
+        'auto_renew': list(orders.filter(status__in=['completed', 'expiring', 'renew_pending'], auto_renew_enabled=True, service_expires_at__lte=auto_renew_at, service_expires_at__gt=now)),
+        'delete_notice': list(orders.filter(status__in=['suspended', 'deleting'], delete_reminder_enabled=True, delete_at__lte=delete_notice_at, delete_at__gt=now, delete_notice_sent_at__isnull=True)),
+        'recycle_notice': list(orders.filter(status='deleted', ip_recycle_reminder_enabled=True, ip_recycle_at__lte=recycle_notice_at, ip_recycle_at__gt=now, recycle_notice_sent_at__isnull=True)),
+        'expire': list(orders.filter(status='completed', service_expires_at__lte=now, renew_notice_sent_at__isnull=True).exclude(provider='aliyun_simple')),
+        'suspend': list(orders.filter(status__in=['completed', 'expiring', 'renew_pending'], suspend_at__lte=now).exclude(provider='aliyun_simple')),
+        'delete': list(orders.filter(status__in=['suspended', 'deleting'], delete_at__lte=now).exclude(provider='aliyun_simple')),
+        'recycle': list(orders.filter(status='deleted', ip_recycle_at__lte=now).exclude(provider='aliyun_simple')),
         'config': {'renew_notice_days': renew_notice_days, 'renew_notice_debug_repeat': renew_notice_debug_repeat},
     }
 
@@ -867,16 +879,19 @@ async def lifecycle_tick(notify=None):
         notice = await _cloud_expiry_notice_payload(order.id)
         updated = await _mark_expiring(order.id)
         if notify and getattr(updated, 'cloud_reminder_enabled', True):
+            plan_text = _notice_plan_text(updated, notice)
             text = _cloud_text_format(
                 'cloud_expiring_notice',
                 '⏰ 云服务器即将到期\n\nIP: {ip}\n订单号: {order_no}\n\n{plan_text}\n\n请尽快续费；不需要提醒可点击下方关闭提醒。',
                 ip=notice['ip'],
                 order_no=updated.order_no,
-                plan_text=_notice_plan_text(updated, notice),
+                plan_text=plan_text,
             )
-            text = _ensure_notice_ip(text, notice['ip'])
+            text = _ensure_plan_text(_ensure_notice_ip(text, notice['ip']), plan_text)
             _log_cloud_notice('expiring_notice', updated, notice, text, 'cloud_lifecycle_notice_actions')
-            await _send_cloud_notice(notify, updated.user_id, text, cloud_lifecycle_notice_actions(updated.id, 'cloud_expiring'))
+            sent = await _send_cloud_notice(notify, updated.user_id, text, cloud_lifecycle_notice_actions(updated.id, 'cloud_expiring'))
+            if sent:
+                await _mark_notice_sent(updated.id, 'renew_notice_sent_at')
 
     for order in due['suspend']:
         result = await _stop_instance(order)
