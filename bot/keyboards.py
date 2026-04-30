@@ -423,8 +423,10 @@ def cloud_server_list(orders, page: int = 1, total_pages: int = 1, prefix: str =
 
 def cloud_auto_renew_server_list(orders, page: int = 1, total_pages: int = 1, *, is_admin: bool = False):
     kb = InlineKeyboardBuilder()
-    if is_admin:
-        kb.row(InlineKeyboardButton(text='⚡ 一键开启全部自动续费', callback_data=f'cloud:autorenewlist:all:on:{page}'))
+    kb.row(
+        InlineKeyboardButton(text='✅ 一键开启全部自动续费', callback_data=f'cloud:autorenewlist:all:on:{page}'),
+        InlineKeyboardButton(text='❌ 一键关闭全部自动续费', callback_data=f'cloud:autorenewlist:all:off:{page}'),
+    )
     for order in orders:
         order_id = getattr(order, 'order_id', None) or getattr(order, 'id', None)
         if not order_id:
@@ -441,10 +443,11 @@ def cloud_auto_renew_server_list(orders, page: int = 1, total_pages: int = 1, *,
         expires_at = getattr(order, 'service_expires_at', None) or getattr(order, 'actual_expires_at', None) or getattr(order, 'expires_at', None)
         expires = _format_local_date(expires_at)
         enabled = bool(getattr(order, 'auto_renew_enabled', False))
-        icon = '✅' if enabled else '⏸'
-        action_text = '关闭' if enabled else '开启'
+        bell = '🔔' if enabled else '🔕'
+        icon = '✅' if enabled else '❌'
+        status_text = '已开启自动续费' if enabled else '已关闭自动续费'
         action = 'off' if enabled else 'on'
-        kb.row(InlineKeyboardButton(text=f'{icon} {label}{user_label} | {expires} | 点我{action_text}', callback_data=f'cloud:autorenewlist:{action}:{order_id}:{page}'))
+        kb.row(InlineKeyboardButton(text=f'{bell} {label}{user_label} | 到期 {expires} | {icon} {status_text}', callback_data=f'cloud:autorenewlist:{action}:{order_id}:{page}'))
     nav = []
     if page > 1:
         nav.append(InlineKeyboardButton(text='⬅️ 上一页', callback_data=f'cloud:autorenewlist:page:{page - 1}'))

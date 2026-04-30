@@ -45,6 +45,9 @@ from cloud.services import (
     create_cloud_server_renewal,
     create_cloud_server_renewal_by_public_query,
     delay_cloud_server_expiry,
+    disable_all_cloud_server_auto_renew,
+    disable_all_cloud_server_auto_renew_admin,
+    enable_all_cloud_server_auto_renew,
     enable_all_cloud_server_auto_renew_admin,
     get_cloud_plan,
     get_cloud_server_auto_renew,
@@ -2931,15 +2934,20 @@ def register_handlers(dp: Dispatcher):
         await _safe_callback_answer(callback)
         await _render_cloud_auto_renew_list(callback, page=1)
 
-    @dp.callback_query(F.data.startswith('cloud:autorenewlist:all:on:'))
-    async def cb_cloud_auto_renew_list_all_on(callback: CallbackQuery, state: FSMContext):
+    @dp.callback_query(F.data.startswith('cloud:autorenewlist:all:'))
+    async def cb_cloud_auto_renew_list_all_toggle(callback: CallbackQuery, state: FSMContext):
         await state.clear()
-        if not await _is_admin_chat(callback.message):
-            await _safe_callback_answer(callback, '仅管理员可批量开启全部自动续费', show_alert=True)
-            return
-        page = max(1, int(callback.data.split(':')[4] or 1))
-        result = await enable_all_cloud_server_auto_renew_admin()
-        await _safe_callback_answer(callback, f'已开启 {result.get("updated", 0)} 个，跳过 {result.get("skipped", 0)} 个', show_alert=True)
+        user = await get_or_create_user(callback.from_user.id, callback.from_user.username, callback.from_user.first_name)
+        is_admin = await _is_admin_chat(callback.message)
+        _, _, _, _, action, raw_page = callback.data.split(':')
+        enabled = action == 'on'
+        page = max(1, int(raw_page or 1))
+        if enabled:
+            result = await enable_all_cloud_server_auto_renew_admin() if is_admin else await enable_all_cloud_server_auto_renew(user.id)
+        else:
+            result = await disable_all_cloud_server_auto_renew_admin() if is_admin else await disable_all_cloud_server_auto_renew(user.id)
+        verb = '开启' if enabled else '关闭'
+        await _safe_callback_answer(callback, f'已{verb} {result.get("updated", 0)} 个，跳过 {result.get("skipped", 0)} 个', show_alert=True)
         await _render_cloud_auto_renew_list(callback, page=page)
 
     @dp.callback_query(F.data.startswith('cloud:autorenewlist:on:'))
@@ -2947,7 +2955,7 @@ def register_handlers(dp: Dispatcher):
     async def cb_cloud_auto_renew_list_toggle(callback: CallbackQuery, state: FSMContext):
         await state.clear()
         user = await get_or_create_user(callback.from_user.id, callback.from_user.username, callback.from_user.first_name)
-        _, _, _, action, raw_order_id, raw_page = callback.data.split(':')
+        _, _, action, raw_order_id, raw_page = callback.data.split(':')
         enabled = action == 'on'
         page = max(1, int(raw_page or 1))
         if await _is_admin_chat(callback.message):

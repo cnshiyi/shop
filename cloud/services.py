@@ -2571,11 +2571,12 @@ def set_cloud_server_auto_renew_admin(order_id: int, enabled: bool):
     return _set_cloud_server_auto_renew(order, enabled)
 
 
-@sync_to_async
-def enable_all_cloud_server_auto_renew_admin():
+def _set_all_cloud_server_auto_renew(enabled: bool, user_id: int | None = None):
+    assets = CloudAsset.objects.filter(kind=CloudAsset.KIND_SERVER, order__isnull=False)
+    if user_id is not None:
+        assets = assets.filter(user_id=user_id)
     order_ids = list(
-        CloudAsset.objects.filter(kind=CloudAsset.KIND_SERVER, order__isnull=False)
-        .filter(Q(public_ip__isnull=False) & ~Q(public_ip=''))
+        assets.filter(Q(public_ip__isnull=False) & ~Q(public_ip=''))
         .filter(_active_cloud_account_asset_filter())
         .exclude(status__in=_INACTIVE_ASSET_STATUSES)
         .values_list('order_id', flat=True)
@@ -2584,12 +2585,32 @@ def enable_all_cloud_server_auto_renew_admin():
     updated = 0
     skipped = 0
     for order in CloudServerOrder.objects.filter(id__in=order_ids):
-        result = _set_cloud_server_auto_renew(order, True)
+        result = _set_cloud_server_auto_renew(order, enabled)
         if result:
             updated += 1
         else:
             skipped += 1
     return {'updated': updated, 'skipped': skipped, 'total': len(order_ids)}
+
+
+@sync_to_async
+def enable_all_cloud_server_auto_renew(user_id: int):
+    return _set_all_cloud_server_auto_renew(True, user_id)
+
+
+@sync_to_async
+def disable_all_cloud_server_auto_renew(user_id: int):
+    return _set_all_cloud_server_auto_renew(False, user_id)
+
+
+@sync_to_async
+def enable_all_cloud_server_auto_renew_admin():
+    return _set_all_cloud_server_auto_renew(True, None)
+
+
+@sync_to_async
+def disable_all_cloud_server_auto_renew_admin():
+    return _set_all_cloud_server_auto_renew(False, None)
 
 
 @sync_to_async
@@ -2630,8 +2651,11 @@ __all__ = [
     'create_cloud_server_renewal',
     'create_cloud_server_renewal_by_public_query',
     'delay_cloud_server_expiry',
+    'disable_all_cloud_server_auto_renew',
+    'disable_all_cloud_server_auto_renew_admin',
     'ensure_cloud_server_pricing',
     'ensure_unique_cloud_server_name',
+    'enable_all_cloud_server_auto_renew',
     'enable_all_cloud_server_auto_renew_admin',
     'get_cloud_plan',
     'get_cloud_server_auto_renew',
