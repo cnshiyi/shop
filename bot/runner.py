@@ -87,7 +87,7 @@ async def run_bot():
     logger.info('Telegram个人号消息监听调度已启动')
     logger.info('启动时执行云服务器生命周期检查')
     try:
-        await lifecycle_tick(notify=_notify)
+        await lifecycle_tick(notify=_notify, defer_destructive_seconds=3600)
         logger.info('启动时云服务器生命周期检查完成')
     except Exception as exc:
         logger.exception('启动时云服务器生命周期检查失败: %s', exc)

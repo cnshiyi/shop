@@ -746,7 +746,47 @@ async def sync_cloud_accounts_tick():
         logger.warning('云账号状态巡检失败: %s', exc)
 
 
-async def lifecycle_tick(notify=None):
+def _order_action_ip(order) -> str:
+    return str(
+        getattr(order, 'public_ip', None)
+        or getattr(order, 'previous_public_ip', None)
+        or getattr(order, 'mtproxy_host', None)
+        or getattr(order, 'server_name', None)
+        or '未分配'
+    )
+
+
+@sync_to_async
+def _defer_startup_lifecycle_actions(due, migration_due_orders, orphan_asset_delete_due, delay_seconds: int):
+    run_at = timezone.now() + timezone.timedelta(seconds=delay_seconds)
+    for order in due.get('suspend') or []:
+        CloudServerOrder.objects.filter(id=order.id).update(suspend_at=run_at, updated_at=timezone.now())
+        logger.warning(
+            'CLOUD_STARTUP_DEFER_SUSPEND order_id=%s order_no=%s ip=%s old_suspend_at=%s deferred_until=%s message="启动检查命中到期关机，IP %s 将在 1 小时后执行关机"',
+            order.id, order.order_no, _order_action_ip(order), order.suspend_at, run_at, _order_action_ip(order),
+        )
+    for order in due.get('delete') or []:
+        CloudServerOrder.objects.filter(id=order.id).update(delete_at=run_at, updated_at=timezone.now())
+        logger.warning(
+            'CLOUD_STARTUP_DEFER_DELETE order_id=%s order_no=%s ip=%s old_delete_at=%s deferred_until=%s message="启动检查命中到期删机，IP %s 将在 1 小时后执行删机"',
+            order.id, order.order_no, _order_action_ip(order), order.delete_at, run_at, _order_action_ip(order),
+        )
+    for order in migration_due_orders or []:
+        CloudServerOrder.objects.filter(id=order.id).update(migration_due_at=run_at, updated_at=timezone.now())
+        logger.warning(
+            'CLOUD_STARTUP_DEFER_MIGRATION_DELETE order_id=%s order_no=%s ip=%s old_migration_due_at=%s deferred_until=%s message="启动检查命中迁移旧机删机，IP %s 将在 1 小时后执行删机"',
+            order.id, order.order_no, _order_action_ip(order), order.migration_due_at, run_at, _order_action_ip(order),
+        )
+    for asset in orphan_asset_delete_due or []:
+        CloudAsset.objects.filter(id=asset.id).update(actual_expires_at=run_at, updated_at=timezone.now())
+        logger.warning(
+            'CLOUD_STARTUP_DEFER_ORPHAN_ASSET_DELETE asset_id=%s ip=%s old_actual_expires_at=%s deferred_until=%s message="启动检查命中无订单资产删机，IP %s 将在 1 小时后执行删机"',
+            asset.id, asset.public_ip or asset.previous_public_ip or '未分配', asset.actual_expires_at, run_at, asset.public_ip or asset.previous_public_ip or '未分配',
+        )
+    return run_at
+
+
+async def lifecycle_tick(notify=None, defer_destructive_seconds: int = 0):
     due = await _get_due_orders()
     migration_due_orders = await _get_migration_due_orders()
     orphan_asset_delete_due = await _get_orphan_asset_delete_due()
@@ -766,6 +806,17 @@ async def lifecycle_tick(notify=None):
         due.get('config', {}).get('renew_notice_days'),
         due.get('config', {}).get('renew_notice_debug_repeat'),
     )
+
+    if defer_destructive_seconds and (due['suspend'] or due['delete'] or migration_due_orders or orphan_asset_delete_due):
+        run_at = await _defer_startup_lifecycle_actions(due, migration_due_orders, orphan_asset_delete_due, defer_destructive_seconds)
+        logger.warning(
+            'CLOUD_STARTUP_DEFER_DONE suspend=%s delete=%s migration_delete=%s orphan_asset_delete=%s deferred_until=%s',
+            len(due['suspend']), len(due['delete']), len(migration_due_orders), len(orphan_asset_delete_due), run_at,
+        )
+        due['suspend'] = []
+        due['delete'] = []
+        migration_due_orders = []
+        orphan_asset_delete_due = []
 
     for user_id, orders in _group_orders_by_user(due['renew_notice']).items():
         if len(orders) == 1:
