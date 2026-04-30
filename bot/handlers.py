@@ -2920,7 +2920,7 @@ def register_handlers(dp: Dispatcher):
             return
         enabled_count = sum(1 for item in visible_servers if getattr(item, 'auto_renew_enabled', False))
         title = '⚡ 自动续费列表'
-        scope = '管理员视图：所有用户代理' if is_admin else '我的代理'
+        scope = '我的代理'
         text = f'{title}\n\n{scope}\n已开启 {enabled_count}/{total_visible}。\n✅=已开启，❌=已关闭；点击每行可开启/关闭。'
         await _safe_edit_text(
             callback.message,
@@ -2943,9 +2943,9 @@ def register_handlers(dp: Dispatcher):
         enabled = action == 'on'
         page = max(1, int(raw_page or 1))
         if enabled:
-            result = await enable_all_cloud_server_auto_renew_admin() if is_admin else await enable_all_cloud_server_auto_renew(user.id)
+            result = await enable_all_cloud_server_auto_renew(user.id)
         else:
-            result = await disable_all_cloud_server_auto_renew_admin() if is_admin else await disable_all_cloud_server_auto_renew(user.id)
+            result = await disable_all_cloud_server_auto_renew(user.id)
         verb = '开启' if enabled else '关闭'
         await _safe_callback_answer(callback, f'已{verb} {result.get("updated", 0)} 个，跳过 {result.get("skipped", 0)} 个', show_alert=True)
         await _render_cloud_auto_renew_list(callback, page=page)

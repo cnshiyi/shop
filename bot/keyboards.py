@@ -424,8 +424,8 @@ def cloud_server_list(orders, page: int = 1, total_pages: int = 1, prefix: str =
 def cloud_auto_renew_server_list(orders, page: int = 1, total_pages: int = 1, *, is_admin: bool = False):
     kb = InlineKeyboardBuilder()
     kb.row(
-        InlineKeyboardButton(text='✅ 一键开启全部自动续费', callback_data=f'cloud:autorenewlist:all:on:{page}'),
-        InlineKeyboardButton(text='❌ 一键关闭全部自动续费', callback_data=f'cloud:autorenewlist:all:off:{page}'),
+        InlineKeyboardButton(text='✅ 一键开启', callback_data=f'cloud:autorenewlist:all:on:{page}'),
+        InlineKeyboardButton(text='❌ 一键关闭', callback_data=f'cloud:autorenewlist:all:off:{page}'),
     )
     for order in orders:
         order_id = getattr(order, 'order_id', None) or getattr(order, 'id', None)
@@ -445,7 +445,7 @@ def cloud_auto_renew_server_list(orders, page: int = 1, total_pages: int = 1, *,
         enabled = bool(getattr(order, 'auto_renew_enabled', False))
         bell = '🔔' if enabled else '🔕'
         icon = '✅' if enabled else '❌'
-        status_text = '已开启自动续费' if enabled else '已关闭自动续费'
+        status_text = '已开启' if enabled else '已关闭'
         action = 'off' if enabled else 'on'
         kb.row(InlineKeyboardButton(text=f'{bell} {label}{user_label} | 到期 {expires} | {icon} {status_text}', callback_data=f'cloud:autorenewlist:{action}:{order_id}:{page}'))
     nav = []
