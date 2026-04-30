@@ -16,7 +16,7 @@ from django.db.models import Q
 from django.utils import timezone
 
 from bot.models import TelegramUser
-from cloud.models import CloudAsset, CloudIpLog, CloudServerOrder, CloudServerPlan, Server, ServerPrice
+from cloud.models import CloudAsset, CloudIpLog, CloudServerOrder, CloudServerPlan, Server, ServerPrice, _runtime_int_config, _with_runtime_time
 from cloud.bootstrap import install_bbr, install_mtproxy
 from cloud.ports import get_mtproxy_public_ports
 from core.cache import get_redis
@@ -2078,6 +2078,24 @@ def _upgrade_blocks_and_expiry(expires_at):
     return blocks, now + timezone.timedelta(days=target_days), remaining_days
 
 
+def _cloud_order_lifecycle_fields(expires_at, renew_extension_days: int = 0) -> dict:
+    if not expires_at:
+        return {}
+    extension_days = max(int(renew_extension_days or 0), 0)
+    suspend_days = _runtime_int_config('cloud_suspend_after_days', 3) + extension_days
+    delete_days = _runtime_int_config('cloud_delete_after_days', 0)
+    suspend_at = _with_runtime_time(expires_at + timezone.timedelta(days=suspend_days), 'cloud_suspend_time')
+    delete_at = _with_runtime_time(suspend_at + timezone.timedelta(days=delete_days), 'cloud_delete_time')
+    if delete_at < suspend_at:
+        delete_at = suspend_at
+    return {
+        'renew_grace_expires_at': suspend_at,
+        'suspend_at': suspend_at,
+        'delete_at': delete_at,
+        'ip_recycle_at': delete_at + timezone.timedelta(days=_runtime_int_config('cloud_unattached_ip_delete_after_days', 15)),
+    }
+
+
 @sync_to_async
 def list_cloud_server_upgrade_plans(order_id: int, user_id: int):
     order = _hydrate_order_from_proxy_asset(CloudServerOrder.objects.select_related('plan', 'user').filter(id=order_id, user_id=user_id).first())
@@ -2122,6 +2140,54 @@ def create_cloud_server_upgrade_order(order_id: int, user_id: int, target_plan_i
         return None, '只能升级到更高价格的配置'
     blocks, target_expiry, _ = _upgrade_blocks_and_expiry(order.service_expires_at)
     diff = ((Decimal(target_plan.price) - current_price) * Decimal(blocks)).quantize(Decimal('0.01'))
+    now = timezone.now()
+    suffix = now.strftime('%m%d%H%M%S')
+    old_public_ip = order.public_ip or order.previous_public_ip or ''
+    old_port = order.mtproxy_port or 9528
+    old_secret = order.mtproxy_secret or ''
+    new_order_no = _trim_operation_order_no(order, 'UPGRADE', suffix)
+    lifecycle_fields = _cloud_order_lifecycle_fields(target_expiry, getattr(order, 'renew_extension_days', 0))
+    old_trace_note = (
+        f'升级配置追溯：来源订单 {order.order_no}；旧IP={old_public_ip or "-"}；旧端口={old_port or "-"}；'
+        f'旧secret={old_secret or "-"}；固定IP={order.static_ip_name or "-"}；'
+        f'配置 {order.plan_name} -> {target_plan.plan_name}；补差价 {diff} USDT；新订单必须继承旧 secret，用户提供链接时必须逐项对照 IP/端口/secret。'
+    )
+    new_order = CloudServerOrder(
+        user_id=order.user_id,
+        order_no=new_order_no,
+        plan=target_plan,
+        provider=target_plan.provider,
+        cloud_account=order.cloud_account,
+        account_label=order.account_label or order.provider,
+        region_code=target_plan.region_code,
+        region_name=target_plan.region_name,
+        plan_name=target_plan.plan_name,
+        provider_resource_id=(target_plan.provider_plan_id or None),
+        quantity=1,
+        currency='USDT',
+        total_amount=diff,
+        pay_amount=diff,
+        pay_method='balance',
+        status='paid',
+        lifecycle_days=blocks * 31,
+        mtproxy_port=order.mtproxy_port or 9528,
+        mtproxy_secret=order.mtproxy_secret,
+        mtproxy_link=order.mtproxy_link,
+        proxy_links=order.proxy_links or [],
+        static_ip_name=order.static_ip_name,
+        replacement_for=order,
+        last_user_id=order.last_user_id,
+        previous_public_ip=old_public_ip,
+        service_started_at=order.service_started_at or now,
+        service_expires_at=target_expiry,
+        server_name=order.server_name,
+        image_name=order.image_name,
+        paid_at=now,
+        created_at=now,
+        updated_at=now,
+        provision_note='\n'.join(filter(None, [order.provision_note, f'用户发起升级配置：{order.plan_name} -> {target_plan.plan_name}，补差价 {diff} USDT，目标到期 {target_expiry:%Y-%m-%d %H:%M}，保持主/备用代理链路不变。', old_trace_note])),
+        **lifecycle_fields,
+    )
     with transaction.atomic():
         user = TelegramUser.objects.select_for_update().get(id=user_id)
         current_balance = Decimal(str(user.balance or 0))
@@ -2130,51 +2196,11 @@ def create_cloud_server_upgrade_order(order_id: int, user_id: int, target_plan_i
         old_balance = current_balance
         user.balance = current_balance - diff
         user.save(update_fields=['balance', 'updated_at'])
-        suffix = timezone.now().strftime('%m%d%H%M%S')
-        old_public_ip = order.public_ip or order.previous_public_ip or ''
-        old_port = order.mtproxy_port or 9528
-        old_secret = order.mtproxy_secret or ''
-        old_trace_note = (
-            f'升级配置追溯：来源订单 {order.order_no}；旧IP={old_public_ip or "-"}；旧端口={old_port or "-"}；'
-            f'旧secret={old_secret or "-"}；固定IP={order.static_ip_name or "-"}；'
-            f'配置 {order.plan_name} -> {target_plan.plan_name}；补差价 {diff} USDT；新订单必须继承旧 secret，用户提供链接时必须逐项对照 IP/端口/secret。'
-        )
-        new_order = CloudServerOrder.objects.create(
-            user_id=order.user_id,
-            order_no=_trim_operation_order_no(order, 'UPGRADE', suffix),
-            plan=target_plan,
-            provider=target_plan.provider,
-            cloud_account=order.cloud_account,
-            account_label=order.account_label or order.provider,
-            region_code=target_plan.region_code,
-            region_name=target_plan.region_name,
-            plan_name=target_plan.plan_name,
-            provider_resource_id=(target_plan.provider_plan_id or None),
-            quantity=1,
-            currency='USDT',
-            total_amount=diff,
-            pay_amount=diff,
-            pay_method='balance',
-            status='paid',
-            lifecycle_days=blocks * 31,
-            mtproxy_port=order.mtproxy_port or 9528,
-            mtproxy_secret=order.mtproxy_secret,
-            mtproxy_link=order.mtproxy_link,
-            proxy_links=order.proxy_links or [],
-            static_ip_name=order.static_ip_name,
-            replacement_for=order,
-            last_user_id=order.last_user_id,
-            previous_public_ip=old_public_ip,
-            service_started_at=order.service_started_at or timezone.now(),
-            service_expires_at=target_expiry,
-            server_name=order.server_name,
-            image_name=order.image_name,
-            paid_at=timezone.now(),
-            provision_note='\n'.join(filter(None, [order.provision_note, f'用户发起升级配置：{order.plan_name} -> {target_plan.plan_name}，补差价 {diff} USDT，目标到期 {target_expiry:%Y-%m-%d %H:%M}，保持主/备用代理链路不变。', old_trace_note])),
-        )
+        CloudServerOrder.objects.bulk_create([new_order])
+        new_order = CloudServerOrder.objects.get(order_no=new_order_no)
         record_balance_ledger(user, ledger_type='cloud_order_balance_pay', currency='USDT', old_balance=old_balance, new_balance=user.balance, related_type='cloud_order', related_id=new_order.id, description=f'云服务器升级补差价 #{new_order.order_no}')
-        order.provision_note = '\n'.join(filter(None, [order.provision_note, f'已发起升级配置，新实例订单: {new_order.order_no}，补差价 {diff} USDT。旧机追溯：旧IP={old_public_ip or "-"}；旧端口={old_port or "-"}；旧secret={old_secret or "-"}；固定IP={order.static_ip_name or "-"}；新配置={target_plan.plan_name}；新服务器必须继承旧 secret。']))
-        order.save(update_fields=['provision_note', 'updated_at'])
+        source_note = '\n'.join(filter(None, [order.provision_note, f'已发起升级配置，新实例订单: {new_order.order_no}，补差价 {diff} USDT。旧机追溯：旧IP={old_public_ip or "-"}；旧端口={old_port or "-"}；旧secret={old_secret or "-"}；固定IP={order.static_ip_name or "-"}；新配置={target_plan.plan_name}；新服务器必须继承旧 secret。']))
+        CloudServerOrder.objects.filter(id=order.id).update(provision_note=source_note, updated_at=timezone.now())
     return new_order, None
 
 
