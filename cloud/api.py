@@ -12,7 +12,7 @@ from urllib.parse import urlparse
 from asgiref.sync import async_to_sync
 from django.core.management import get_commands, load_command_class
 from django.db import IntegrityError, transaction
-from django.db.models import Case, CharField, Count, IntegerField, Q, Value, When
+from django.db.models import Case, CharField, Count, F, IntegerField, Q, Value, When
 from django.db.models.functions import Cast
 from django.db.utils import ProgrammingError
 from django.utils import timezone
@@ -46,6 +46,7 @@ from cloud.services import AWS_REGION_NAMES, _cloud_order_lifecycle_fields, crea
 from cloud.models import AddressMonitor, CloudAsset, CloudIpLog, CloudServerOrder, CloudServerPlan, Server, ServerPrice
 from core.cloud_accounts import cloud_account_label
 from core.models import CloudAccountConfig, ExternalSyncLog
+from core.persistence import record_external_sync_log
 from cloud.provisioning import provision_cloud_server
 
 logger = logging.getLogger(__name__)
@@ -69,6 +70,25 @@ def _sync_account_payload(account):
 def _sync_log_tail(output: io.StringIO, limit: int = 80) -> list[str]:
     lines = [line.strip() for line in output.getvalue().splitlines() if line.strip()]
     return lines[-limit:]
+
+
+def _sync_log_text(output: io.StringIO, limit: int = 200) -> str:
+    return '\n'.join(_sync_log_tail(output, limit=limit))
+
+
+def _record_dashboard_sync_log(*, action: str, target: str, request_payload: dict, response_payload: dict, is_success: bool, error_message: str = ''):
+    try:
+        record_external_sync_log(
+            source=ExternalSyncLog.SOURCE_DASHBOARD,
+            action=action,
+            target=target,
+            request_payload=request_payload,
+            response_payload=response_payload,
+            is_success=is_success,
+            error_message=error_message,
+        )
+    except Exception:
+        logger.exception('DASHBOARD_SYNC_LOG_RECORD_FAILED action=%s target=%s', action, target)
 
 
 def _call_command_capture(command_name: str, *args, **options):
@@ -572,7 +592,7 @@ def cloud_assets_list(request):
                 'asset_name', 'public_ip', 'mtproxy_link', 'account_label', 'cloud_account__external_account_id', 'cloud_account__name', 'user__tg_user_id',
                 'user__username', 'order__order_no',
             ],
-        ).distinct().order_by('-sort_order', 'actual_expires_at', '-updated_at', '-id')
+        ).distinct().order_by('-sort_order', F('actual_expires_at').asc(nulls_last=True), '-updated_at', '-id')
         if not grouped and paginated:
             try:
                 page = max(int(request.GET.get('page') or '1'), 1)
@@ -1632,7 +1652,9 @@ def sync_servers(request):
             synced['aliyun'] = True
             missing['aliyun'] += _apply_server_missing_state('aliyun_simple', aliyun_region, getattr(aliyun_command, 'synced_instance_ids', None) or [], aliyun_account)
         except Exception as exc:
-            errors.append(f'阿里云账号#{getattr(aliyun_account, "id", "-")}同步失败: {exc}')
+            message = f'阿里云账号#{getattr(aliyun_account, "id", "-")}同步失败: {exc}'
+            errors.append(message)
+            logger.exception('DASHBOARD_SYNC_SERVERS_ALIYUN_FAILED account_id=%s region=%s', getattr(aliyun_account, 'id', None), aliyun_region)
     for aws_account in aws_accounts:
         try:
             if aws_region:
@@ -1650,9 +1672,20 @@ def sync_servers(request):
                 for region in account_regions
             )
         except Exception as exc:
-            errors.append(f'AWS账号#{getattr(aws_account, "id", "-")}同步失败: {exc}')
+            message = f'AWS账号#{getattr(aws_account, "id", "-")}同步失败: {exc}'
+            errors.append(message)
+            logger.exception('DASHBOARD_SYNC_SERVERS_AWS_FAILED account_id=%s region=%s', getattr(aws_account, 'id', None), aws_region or 'all')
     ok = not errors or any(synced.values())
-    return _ok({'ok': ok, 'synced': synced, 'missing': missing, 'aliyun_region': aliyun_region, 'aws_region': aws_region or 'all', 'aws_regions': aws_regions, 'errors': errors, 'warnings': warnings[:50], 'logs': _sync_log_tail(command_output), 'accounts': {'aliyun': [_sync_account_payload(account) for account in aliyun_accounts], 'aws': [_sync_account_payload(account) for account in aws_accounts]}})
+    response_payload = {'ok': ok, 'synced': synced, 'missing': missing, 'aliyun_region': aliyun_region, 'aws_region': aws_region or 'all', 'aws_regions': aws_regions, 'errors': errors, 'warnings': warnings[:50], 'logs': _sync_log_tail(command_output), 'accounts': {'aliyun': [_sync_account_payload(account) for account in aliyun_accounts], 'aws': [_sync_account_payload(account) for account in aws_accounts]}}
+    _record_dashboard_sync_log(
+        action='sync_servers',
+        target=f'aliyun:{aliyun_region};aws:{aws_region or "all"}',
+        request_payload={'aliyun_region': aliyun_region, 'aws_region': aws_region or 'all'},
+        response_payload={**response_payload, 'log_text': _sync_log_text(command_output)},
+        is_success=ok,
+        error_message='; '.join(errors[:10]),
+    )
+    return _ok(response_payload)
 
 
 @csrf_exempt
@@ -1677,7 +1710,9 @@ def sync_cloud_assets(request):
             _call_command_capture('sync_aliyun_assets', region=aliyun_region, account_id=str(aliyun_account.id), stdout=command_output)
             synced['aliyun'] = True
         except Exception as exc:
-            errors.append(f'阿里云账号#{getattr(aliyun_account, "id", "-")}代理同步失败: {exc}')
+            message = f'阿里云账号#{getattr(aliyun_account, "id", "-")}代理同步失败: {exc}'
+            errors.append(message)
+            logger.exception('DASHBOARD_SYNC_ASSETS_ALIYUN_FAILED account_id=%s region=%s', getattr(aliyun_account, 'id', None), aliyun_region)
     for aws_account in aws_accounts:
         try:
             aws_command, _ = _call_command_capture('sync_aws_assets', region=aws_region, account_id=str(aws_account.id), stdout=command_output)
@@ -1686,14 +1721,27 @@ def sync_cloud_assets(request):
             warnings.extend(getattr(aws_command, 'sync_errors', []) or [])
             synced['aws'] = True
         except Exception as exc:
-            errors.append(f'AWS账号#{getattr(aws_account, "id", "-")}代理同步失败: {exc}')
+            message = f'AWS账号#{getattr(aws_account, "id", "-")}代理同步失败: {exc}'
+            errors.append(message)
+            logger.exception('DASHBOARD_SYNC_ASSETS_AWS_FAILED account_id=%s region=%s', getattr(aws_account, 'id', None), aws_region or 'all')
     try:
         _call_command_capture('reconcile_cloud_assets_from_servers', stdout=command_output)
         synced['reconcile'] = True
     except Exception as exc:
-        errors.append(f'代理列表补齐失败: {exc}')
+        message = f'代理列表补齐失败: {exc}'
+        errors.append(message)
+        logger.exception('DASHBOARD_SYNC_ASSETS_RECONCILE_FAILED')
     ok = not errors or any(synced.values())
-    return _ok({'ok': ok, 'synced': synced, 'aliyun_region': aliyun_region, 'aws_region': aws_region or 'all', 'aws_regions': aws_regions, 'errors': errors, 'warnings': warnings[:50], 'logs': _sync_log_tail(command_output), 'accounts': {'aliyun': [_sync_account_payload(account) for account in aliyun_accounts], 'aws': [_sync_account_payload(account) for account in aws_accounts]}})
+    response_payload = {'ok': ok, 'synced': synced, 'aliyun_region': aliyun_region, 'aws_region': aws_region or 'all', 'aws_regions': aws_regions, 'errors': errors, 'warnings': warnings[:50], 'logs': _sync_log_tail(command_output), 'accounts': {'aliyun': [_sync_account_payload(account) for account in aliyun_accounts], 'aws': [_sync_account_payload(account) for account in aws_accounts]}}
+    _record_dashboard_sync_log(
+        action='sync_cloud_assets',
+        target=f'aliyun:{aliyun_region};aws:{aws_region or "all"}',
+        request_payload={'aliyun_region': aliyun_region, 'aws_region': aws_region or 'all'},
+        response_payload={**response_payload, 'log_text': _sync_log_text(command_output)},
+        is_success=ok,
+        error_message='; '.join(errors[:10]),
+    )
+    return _ok(response_payload)
 
 
 @csrf_exempt
