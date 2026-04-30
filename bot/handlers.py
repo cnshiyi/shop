@@ -523,10 +523,10 @@ def _is_admin_forward_media_type(content_type: str) -> bool:
 
 def _admin_reply_keyboard(user_tg_id: int) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
-        inline_keyboard=[
-            [InlineKeyboardButton(text='↩️ 直接回复这条消息即可回复用户', callback_data=f'adminreply:hint:{user_tg_id}')],
-            [InlineKeyboardButton(text='🔕 关闭该用户3天转发', callback_data=f'adminreply:mute3d:{user_tg_id}')],
-        ]
+        inline_keyboard=[[
+            InlineKeyboardButton(text='↩️ 回复用户', callback_data=f'adminreply:hint:{user_tg_id}'),
+            InlineKeyboardButton(text='🔕 关闭3天转发', callback_data=f'adminreply:mute3d:{user_tg_id}'),
+        ]]
     )
 
 
