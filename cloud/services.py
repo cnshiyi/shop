@@ -1723,18 +1723,13 @@ def _create_retained_ip_recovery_order(order: CloudServerOrder, days: int = 31):
     return new_order, ''
 
 
-@sync_to_async
-def create_cloud_server_renewal(order_id: int, user_id: int, days: int = 31):
-    order = CloudServerOrder.objects.select_related('user').filter(id=order_id, user_id=user_id).first()
-    if not order:
-        return None
+def _prepare_cloud_server_renewal(order: CloudServerOrder, renewal_user: TelegramUser | None, days: int = 31):
     order = _hydrate_order_from_proxy_asset(order)
     if not _can_order_be_renewed(order):
         return False
     retained_ip = bool(order.status == 'deleted' and order.ip_recycle_at and order.ip_recycle_at > timezone.now())
     order.status = 'renew_pending'
     order.lifecycle_days = days
-    renewal_user = TelegramUser.objects.filter(id=user_id).first()
     order.pay_amount = _generate_unique_pay_amount(_renewal_price(order, renewal_user), order.currency)
     order.expired_at = timezone.now() + timezone.timedelta(minutes=30)
     if retained_ip:
@@ -1746,6 +1741,37 @@ def create_cloud_server_renewal(order_id: int, user_id: int, days: int = 31):
     else:
         order.save(update_fields=['status', 'lifecycle_days', 'pay_amount', 'expired_at', 'updated_at'])
     return order
+
+
+@sync_to_async
+def create_cloud_server_renewal(order_id: int, user_id: int, days: int = 31):
+    order = CloudServerOrder.objects.select_related('user').filter(id=order_id, user_id=user_id).first()
+    if not order:
+        return None
+    renewal_user = TelegramUser.objects.filter(id=user_id).first()
+    return _prepare_cloud_server_renewal(order, renewal_user, days)
+
+
+@sync_to_async
+def create_cloud_server_renewal_by_public_query(order_id: int, days: int = 31):
+    order = CloudServerOrder.objects.select_related('user').filter(id=order_id).first()
+    if not order:
+        return None
+    return _prepare_cloud_server_renewal(order, getattr(order, 'user', None), days)
+
+
+@sync_to_async
+def start_cloud_server_from_admin(order_id: int):
+    order = CloudServerOrder.objects.filter(id=order_id).first()
+    if not order:
+        return None, '服务器记录不存在'
+    order = _hydrate_order_from_proxy_asset(order)
+    if order.provider != 'aws_lightsail':
+        return order, '当前云平台暂不支持机器人开机'
+    ok, note = _ensure_aws_instance_running(order)
+    order.provision_note = '\n'.join(filter(None, [order.provision_note, f'管理员手动开机：{note}']))
+    order.save(update_fields=['provision_note', 'updated_at'])
+    return order, None if ok else note
 
 
 @sync_to_async
@@ -2527,6 +2553,7 @@ __all__ = [
     'buy_cloud_server_with_balance',
     'create_cloud_server_order',
     'create_cloud_server_renewal',
+    'create_cloud_server_renewal_by_public_query',
     'delay_cloud_server_expiry',
     'ensure_cloud_server_pricing',
     'ensure_unique_cloud_server_name',
@@ -2560,6 +2587,7 @@ __all__ = [
     'set_cloud_order_reminder',
     'set_cloud_server_auto_renew',
     'set_cloud_server_port',
+    'start_cloud_server_from_admin',
     'unmute_all_user_reminders',
     'unmute_cloud_reminders',
 ]

@@ -718,13 +718,16 @@ def order_query_menu():
     return kb.as_markup()
 
 
-def cloud_ip_query_result(result_items, renewable_items, page: int = 1, total_pages: int = 1):
+def cloud_ip_query_result(result_items, renewable_items, page: int = 1, total_pages: int = 1, include_start: bool = False):
     kb = InlineKeyboardBuilder()
     for item in renewable_items:
         ip = item.get('ip') or '未知IP'
         order_id = int(item.get('order_id') or 0)
         if order_id > 0:
-            kb.row(InlineKeyboardButton(text=f'🔄 续费IP {ip}', callback_data=f'cloud:renew:{order_id}'))
+            row = [InlineKeyboardButton(text=f'🔄 续费IP {ip}', callback_data=f'cloud:renew:{order_id}')]
+            if include_start:
+                row.append(InlineKeyboardButton(text='▶️ 开机', callback_data=f'cloud:start:{order_id}'))
+            kb.row(*row)
     nav = []
     if page > 1:
         nav.append(InlineKeyboardButton(text='⬅️ 上一页', callback_data=f'cloud:queryip:page:{page - 1}'))

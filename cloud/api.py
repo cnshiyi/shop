@@ -639,31 +639,59 @@ def cloud_assets_list(request):
     return _ok({'groups': ordered_groups, 'items': items})
 
 
+def _auto_renew_task_status(order, now):
+    if not getattr(order, 'auto_renew_enabled', False):
+        return None
+    last_renewed_at = getattr(order, 'last_renewed_at', None)
+    if last_renewed_at and last_renewed_at >= now - timezone.timedelta(days=1):
+        return 'auto_renew_success', '自动续费成功'
+    expires_at = getattr(order, 'service_expires_at', None)
+    suspend_at = getattr(order, 'suspend_at', None)
+    in_renew_window = bool(expires_at and expires_at <= now + timezone.timedelta(days=1) and expires_at > now)
+    in_shutdown_fallback = bool(expires_at and expires_at <= now and suspend_at and suspend_at <= now + timezone.timedelta(days=1) and suspend_at > now)
+    if order.status == 'renew_pending' and (in_renew_window or in_shutdown_fallback or expires_at and expires_at <= now):
+        return 'auto_renew_failed', '自动续费失败/待补余额'
+    if order.status in {'completed', 'expiring', 'renew_pending'} and (in_renew_window or in_shutdown_fallback):
+        return 'auto_renew_pending', '自动续费待执行'
+    return None
+
+
 @dashboard_login_required
 @require_GET
 def tasks_overview(request):
-    orders = CloudServerOrder.objects.order_by('-updated_at')[:50]
+    now = timezone.now()
+    orders = CloudServerOrder.objects.order_by('-updated_at')[:100]
     items = []
     for order in orders:
-        if order.status not in {'paid', 'provisioning', 'renew_pending', 'expiring', 'suspended', 'deleting', 'failed'}:
+        auto_renew_status = _auto_renew_task_status(order, now)
+        is_regular_task = order.status in {'paid', 'provisioning', 'renew_pending', 'expiring', 'suspended', 'deleting', 'failed'}
+        if not auto_renew_status and not is_regular_task:
             continue
+        task_type = 'auto_renew' if auto_renew_status else 'cloud_order'
+        task_label = '自动续费任务' if auto_renew_status else '云服务器任务'
+        execution_status, execution_status_label = auto_renew_status or (
+            order.status,
+            dict(CloudServerOrder.STATUS_CHOICES).get(order.status, order.status),
+        )
         items.append({
             'id': order.id,
             'order_no': order.order_no,
-            'task_type': 'cloud_order',
-            'task_label': '云服务器任务',
+            'task_type': task_type,
+            'task_label': task_label,
             'status': order.status,
             'status_label': dict(CloudServerOrder.STATUS_CHOICES).get(order.status, order.status),
+            'execution_status': execution_status,
+            'execution_status_label': execution_status_label,
             'provider': order.provider,
             'provider_label': _provider_label(order.provider),
             'plan_name': order.plan_name,
             'public_ip': order.public_ip,
             'note': order.provision_note,
             'created_at': _iso(order.created_at),
-            'updated_at': _iso(order.updated_at),
+            'updated_at': _iso(order.last_renewed_at if auto_renew_status and execution_status == 'auto_renew_success' else order.updated_at),
             'related_path': f'/admin/cloud-orders/{order.id}',
         })
-    return _ok(items)
+    return _ok(items[:50])
 
 
 def _cloud_execution_status(note: str | None):

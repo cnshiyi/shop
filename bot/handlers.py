@@ -43,6 +43,7 @@ from cloud.services import (
     buy_cloud_server_with_balance,
     create_cloud_server_order,
     create_cloud_server_renewal,
+    create_cloud_server_renewal_by_public_query,
     delay_cloud_server_expiry,
     get_cloud_plan,
     get_cloud_server_auto_renew,
@@ -70,6 +71,7 @@ from cloud.services import (
     run_cloud_server_renewal_postcheck,
     set_cloud_order_reminder,
     set_cloud_server_auto_renew,
+    start_cloud_server_from_admin,
     unmute_all_user_reminders,
     unmute_cloud_reminders,
 )
@@ -420,7 +422,7 @@ async def _reply_tron_address_summary(message: Message, address: str):
     )
 
 
-async def _reply_cloud_query_results(message: Message, raw_text: str, state: FSMContext | None = None):
+async def _reply_cloud_query_results(message: Message, raw_text: str, state: FSMContext | None = None, include_start: bool = False):
     query_ips = _extract_query_ips(raw_text)
     results = []
     for index, ip in enumerate(query_ips):
@@ -462,7 +464,7 @@ async def _reply_cloud_query_results(message: Message, raw_text: str, state: FSM
     page_items = results[(page - 1) * per_page: page * per_page]
     text = '🔎 IP批量查询结果\n\n' + '\n\n'.join(item['text'] for item in page_items)
     renewable_items = [{'ip': item['ip'], 'order_id': item['order_id']} for item in page_items if item['renewable'] and item['order_id']]
-    await message.answer(text, reply_markup=cloud_ip_query_result(page_items, renewable_items, page, total_pages), parse_mode='HTML')
+    await message.answer(text, reply_markup=cloud_ip_query_result(page_items, renewable_items, page, total_pages, include_start=include_start), parse_mode='HTML')
 
 
 @sync_to_async
@@ -2331,7 +2333,7 @@ def register_handlers(dp: Dispatcher):
         if not query_ips:
             await message.answer(_bot_text('bot_query_ip_invalid', '请输入包含 IP 或代理链接的文本内容。'))
             return
-        await _reply_cloud_query_results(message, raw_text, state)
+        await _reply_cloud_query_results(message, raw_text, state, include_start=await _is_admin_chat(message))
 
     @dp.callback_query(F.data.startswith('cloud:queryip:page:'))
     async def cb_cloud_query_ip_page(callback: CallbackQuery, state: FSMContext):
@@ -2348,7 +2350,7 @@ def register_handlers(dp: Dispatcher):
         page_items = results[(page - 1) * per_page: page * per_page]
         text = '🔎 IP批量查询结果\n\n' + '\n\n'.join(item['text'] for item in page_items)
         renewable_items = [{'ip': item['ip'], 'order_id': item['order_id']} for item in page_items if item['renewable'] and item['order_id']]
-        await _safe_edit_text(callback.message, text, reply_markup=cloud_ip_query_result(page_items, renewable_items, page, total_pages), parse_mode='HTML')
+        await _safe_edit_text(callback.message, text, reply_markup=cloud_ip_query_result(page_items, renewable_items, page, total_pages, include_start=await _is_admin_chat(callback.message)), parse_mode='HTML')
 
     async def _render_profile_cloud_orders(callback: CallbackQuery, page: int = 1):
         user = await get_or_create_user(callback.from_user.id, callback.from_user.username, callback.from_user.first_name)
@@ -3333,6 +3335,8 @@ def register_handlers(dp: Dispatcher):
         order_id = int(callback.data.split(':')[2])
         try:
             order = await create_cloud_server_renewal(order_id, user.id, 31)
+            if not order:
+                order = await create_cloud_server_renewal_by_public_query(order_id, 31)
         except RenewalPriceMissingError as exc:
             await _safe_callback_answer(callback, str(exc), show_alert=True)
             return
@@ -3344,7 +3348,7 @@ def register_handlers(dp: Dispatcher):
             return
         trx_amount = await usdt_to_trx(order.pay_amount)
         receive_address = _receive_address()
-        auto_renew_enabled = await get_cloud_server_auto_renew(order.id, user.id)
+        auto_renew_enabled = await get_cloud_server_auto_renew(order.id, getattr(order, 'user_id', user.id))
         await _safe_edit_text(callback.message, 
             '🔄 云服务器续费\n\n'
             f'订单号: {order.order_no}\n'
@@ -3357,6 +3361,19 @@ def register_handlers(dp: Dispatcher):
             disable_web_page_preview=True,
             reply_markup=cloud_server_renew_payment(order.id, order.pay_amount, trx_amount, bool(auto_renew_enabled)),
         )
+
+    @dp.callback_query(F.data.startswith('cloud:start:'))
+    async def cb_cloud_start(callback: CallbackQuery):
+        if not await _is_admin_chat(callback.message):
+            await _safe_callback_answer(callback, '仅管理员可使用开机', show_alert=True)
+            return
+        await _safe_callback_answer(callback, '已提交开机检查')
+        order_id = int(callback.data.split(':')[2])
+        order, err = await start_cloud_server_from_admin(order_id)
+        if err:
+            await callback.message.reply(f'⚠️ 开机结果：{_public_cloud_error_text(err)}')
+            return
+        await callback.message.reply(f'✅ 已提交开机：{getattr(order, "public_ip", "-") or "-"}')
 
     @dp.callback_query(F.data.startswith('cloud:autorenew:'))
     async def cb_cloud_auto_renew_toggle(callback: CallbackQuery):
@@ -3934,8 +3951,7 @@ def register_handlers(dp: Dispatcher):
     async def fallback_message_router(message: Message, state: FSMContext, bot: Bot):
         if await _handle_admin_reply_message(bot, message):
             return
-        if await _is_admin_chat(message):
-            return
+        is_admin_chat = await _is_admin_chat(message)
         raw_text = _message_text_for_router(message)
         content_type = _message_content_type(message)
         kind = _detect_message_kind(raw_text)
@@ -3963,7 +3979,7 @@ def register_handlers(dp: Dispatcher):
             return
         if kind == 'link':
             await state.clear()
-            await _reply_cloud_query_results(message, raw_text)
+            await _reply_cloud_query_results(message, raw_text, include_start=is_admin_chat)
             return
         if kind == 'address':
             await state.clear()
@@ -3974,6 +3990,8 @@ def register_handlers(dp: Dispatcher):
                 await _reply_tron_address_summary(message, addresses[0])
             except Exception:
                 await message.answer(_bot_text('bot_address_query_failed', '地址查询失败，请稍后再试。'), reply_markup=main_menu())
+            return
+        if is_admin_chat:
             return
         await _forward_plain_text_to_admin(bot, message)
         if _is_admin_forward_media_type(content_type):
