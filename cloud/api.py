@@ -1,5 +1,6 @@
 """cloud 域后台 API。"""
 
+import io
 import logging
 import re
 import threading
@@ -9,7 +10,7 @@ from decimal import Decimal, InvalidOperation
 from urllib.parse import urlparse
 
 from asgiref.sync import async_to_sync
-from django.core.management import call_command
+from django.core.management import get_commands, load_command_class
 from django.db import IntegrityError, transaction
 from django.db.models import Case, CharField, Count, IntegerField, Q, Value, When
 from django.db.models.functions import Cast
@@ -48,6 +49,24 @@ from core.models import CloudAccountConfig, ExternalSyncLog
 from cloud.provisioning import provision_cloud_server
 
 logger = logging.getLogger(__name__)
+
+
+def _call_command_capture(command_name: str, *args, **options):
+    output = options.pop('stdout', None) or io.StringIO()
+    command = load_command_class(get_commands()[command_name], command_name)
+    defaults = {
+        'force_color': False,
+        'no_color': False,
+        'pythonpath': None,
+        'settings': None,
+        'skip_checks': True,
+        'stderr': io.StringIO(),
+        'traceback': False,
+        'verbosity': 1,
+    }
+    defaults.update(options)
+    command.execute(*args, stdout=output, **defaults)
+    return command, output.getvalue()
 
 
 def _is_unattached_ip_asset(asset: CloudAsset) -> bool:
@@ -1569,18 +1588,19 @@ def sync_servers(request):
     synced = {'aliyun': False, 'aws': False}
     missing = {'aliyun': 0, 'aws': 0}
     aws_regions = []
+    command_output = io.StringIO()
     try:
-        aliyun_command = call_command('sync_aliyun_assets', region=aliyun_region)
+        aliyun_command, _ = _call_command_capture('sync_aliyun_assets', region=aliyun_region, stdout=command_output)
         synced['aliyun'] = True
         missing['aliyun'] = _apply_server_missing_state('aliyun_simple', aliyun_region, getattr(aliyun_command, 'synced_instance_ids', None) or [])
     except Exception as exc:
         errors.append(f'阿里云同步失败: {exc}')
     try:
         if aws_region:
-            aws_command = call_command('sync_aws_assets', region=aws_region)
+            aws_command, _ = _call_command_capture('sync_aws_assets', region=aws_region, stdout=command_output)
             aws_regions = [aws_region]
         else:
-            aws_command = call_command('sync_aws_assets')
+            aws_command, _ = _call_command_capture('sync_aws_assets', stdout=command_output)
             aws_regions = getattr(aws_command, 'synced_regions', None) or []
         synced['aws'] = True
         synced_map = getattr(aws_command, 'synced_instance_ids_by_region', None) or {}
@@ -1593,7 +1613,8 @@ def sync_servers(request):
         errors.append(f'AWS 同步失败: {exc}')
     if errors and not any(synced.values()):
         return _error('；'.join(errors), status=500)
-    return _ok({'synced': synced, 'missing': missing, 'aliyun_region': aliyun_region, 'aws_region': aws_region or 'all', 'aws_regions': aws_regions, 'errors': errors})
+    warnings = getattr(aws_command, 'sync_errors', []) if synced.get('aws') else []
+    return _ok({'synced': synced, 'missing': missing, 'aliyun_region': aliyun_region, 'aws_region': aws_region or 'all', 'aws_regions': aws_regions, 'errors': errors, 'warnings': warnings[:20]})
 
 
 @csrf_exempt
@@ -1608,25 +1629,27 @@ def sync_cloud_assets(request):
     errors = []
     synced = {'aliyun': False, 'aws': False, 'reconcile': False}
     aws_regions = []
+    command_output = io.StringIO()
     try:
-        call_command('sync_aliyun_assets', region=aliyun_region)
+        _call_command_capture('sync_aliyun_assets', region=aliyun_region, stdout=command_output)
         synced['aliyun'] = True
     except Exception as exc:
         errors.append(f'阿里云代理同步失败: {exc}')
     try:
-        call_command('sync_aws_assets', region=aws_region)
-        aws_regions = [aws_region or 'all']
+        aws_command, _ = _call_command_capture('sync_aws_assets', region=aws_region, stdout=command_output)
+        aws_regions = getattr(aws_command, 'synced_regions', None) or [aws_region or 'all']
         synced['aws'] = True
     except Exception as exc:
         errors.append(f'AWS 代理同步失败: {exc}')
     try:
-        call_command('reconcile_cloud_assets_from_servers')
+        _call_command_capture('reconcile_cloud_assets_from_servers', stdout=command_output)
         synced['reconcile'] = True
     except Exception as exc:
         errors.append(f'代理列表补齐失败: {exc}')
     if errors and not any(synced.values()):
         return _error('；'.join(errors), status=500)
-    return _ok({'synced': synced, 'aliyun_region': aliyun_region, 'aws_region': aws_region, 'aws_regions': aws_regions, 'errors': errors})
+    warnings = getattr(aws_command, 'sync_errors', []) if synced.get('aws') else []
+    return _ok({'synced': synced, 'aliyun_region': aliyun_region, 'aws_region': aws_region or 'all', 'aws_regions': aws_regions, 'errors': errors, 'warnings': warnings[:20]})
 
 
 @csrf_exempt

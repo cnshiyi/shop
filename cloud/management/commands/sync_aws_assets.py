@@ -430,6 +430,7 @@ class Command(BaseCommand):
         synced_public_ips_by_region = {}
         verification_deleted_items = []
         account_summary_lines = []
+        sync_errors = []
 
         synced_regions = []
         for account in accounts:
@@ -471,6 +472,7 @@ class Command(BaseCommand):
                         message = f'AWS 云账号 {account_label} 地区 {region} 获取固定 IP 失败: {exc}'
                         _mark_account_error(account, message)
                         account_stats['errors'].append(message)
+                        sync_errors.append(message)
                         self.stdout.write(self.style.WARNING(message))
                         region_failed = True
                         break
@@ -505,6 +507,7 @@ class Command(BaseCommand):
                         message = f'AWS 云账号 {account_label} 地区 {region} 获取实例失败: {exc}'
                         _mark_account_error(account, message)
                         account_stats['errors'].append(message)
+                        sync_errors.append(message)
                         self.stdout.write(self.style.WARNING(message))
                         region_failed = True
                         break
@@ -850,8 +853,10 @@ class Command(BaseCommand):
                 synced_instance_ids_by_region.setdefault(region, set()).update(region_instance_ids)
                 synced_public_ips_by_region.setdefault(region, set()).update(region_public_ips)
             error_text = f"；错误={account_stats['errors'][:5]}" if account_stats['errors'] else ''
+            ip_preview = account_stats['ips'][:20]
+            ip_text = f"{len(account_stats['ips'])} 个，前20={ip_preview}" if account_stats['ips'] else '无'
             account_summary_lines.append(
-                f"账号={account_stats['label'] or account_stats['aws_account']}；凭据来源={account_stats['source']}；AWS账号ID={account_stats['aws_account'] or '-'}；地区={','.join(account_stats['regions']) or '-'}；扫描={account_stats['count']}；新增={account_stats['created']}；更新={account_stats['updated']}；未附加IP={account_stats['unattached']}；缺IP删除={account_stats['deleted_by_missing_ip']}；IP={account_stats['ips'] or ['无']}{error_text}"
+                f"账号={account_stats['label'] or account_stats['aws_account']}；凭据来源={account_stats['source']}；AWS账号ID={account_stats['aws_account'] or '-'}；地区={','.join(account_stats['regions']) or '-'}；扫描={account_stats['count']}；新增={account_stats['created']}；更新={account_stats['updated']}；未附加IP={account_stats['unattached']}；缺IP删除={account_stats['deleted_by_missing_ip']}；IP={ip_text}{error_text}"
             )
             if account_stats['count'] or account_stats['created'] or account_stats['updated']:
                 account.mark_status(
@@ -903,4 +908,5 @@ class Command(BaseCommand):
         self.synced_regions = synced_regions
         self.synced_instance_ids = synced_instance_ids
         self.synced_instance_ids_by_region = synced_instance_ids_by_region
+        self.sync_errors = sync_errors
         return None
