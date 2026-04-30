@@ -167,9 +167,7 @@ def _status_label(status):
 
 
 def _elevate_deleted_when_ip_missing(status, public_ip):
-    if str(public_ip or '').strip():
-        return status
-    return CloudAsset.STATUS_DELETED
+    return status
 
 
 def _order_status_from_cloud_status(status):
@@ -448,10 +446,11 @@ class Command(BaseCommand):
                 'unattached': 0,
                 'deleted_by_missing_ip': 0,
                 'ips': [],
+                'errors': [],
             }
-            synced_regions.extend(regions)
             for region in regions:
                 client = _lightsail_client(region, account)
+                region_failed = False
                 region_instance_ids = []
                 region_public_ips = set()
                 next_page_token = None
@@ -471,7 +470,10 @@ class Command(BaseCommand):
                     except Exception as exc:
                         message = f'AWS 云账号 {account_label} 地区 {region} 获取固定 IP 失败: {exc}'
                         _mark_account_error(account, message)
-                        raise CommandError(message)
+                        account_stats['errors'].append(message)
+                        self.stdout.write(self.style.WARNING(message))
+                        region_failed = True
+                        break
                     static_ips = static_ip_response.get('staticIps') or []
                     static_ip_cache.extend(static_ips)
                     for static_ip_item in static_ips:
@@ -490,6 +492,8 @@ class Command(BaseCommand):
                     static_ip_next_page_token = static_ip_response.get('nextPageToken')
                     if not static_ip_next_page_token:
                         break
+                if region_failed:
+                    continue
 
                 while True:
                     kwargs = {}
@@ -500,7 +504,10 @@ class Command(BaseCommand):
                     except Exception as exc:
                         message = f'AWS 云账号 {account_label} 地区 {region} 获取实例失败: {exc}'
                         _mark_account_error(account, message)
-                        raise CommandError(message)
+                        account_stats['errors'].append(message)
+                        self.stdout.write(self.style.WARNING(message))
+                        region_failed = True
+                        break
                     record_external_sync_log(
                         source='aws_lightsail',
                         action='get_instances',
@@ -710,6 +717,9 @@ class Command(BaseCommand):
                     next_page_token = response.get('nextPageToken')
                     if not next_page_token:
                         break
+                if region_failed:
+                    continue
+                synced_regions.append(region)
 
                 for item in static_ip_cache:
                     attached_to = item.get('attachedTo') or ''
@@ -839,13 +849,22 @@ class Command(BaseCommand):
                 )
                 synced_instance_ids_by_region.setdefault(region, set()).update(region_instance_ids)
                 synced_public_ips_by_region.setdefault(region, set()).update(region_public_ips)
+            error_text = f"；错误={account_stats['errors'][:5]}" if account_stats['errors'] else ''
             account_summary_lines.append(
-                f"账号={account_stats['label'] or account_stats['aws_account']}；凭据来源={account_stats['source']}；AWS账号ID={account_stats['aws_account'] or '-'}；地区={','.join(account_stats['regions']) or '-'}；扫描={account_stats['count']}；新增={account_stats['created']}；更新={account_stats['updated']}；未附加IP={account_stats['unattached']}；缺IP删除={account_stats['deleted_by_missing_ip']}；IP={account_stats['ips'] or ['无']}"
+                f"账号={account_stats['label'] or account_stats['aws_account']}；凭据来源={account_stats['source']}；AWS账号ID={account_stats['aws_account'] or '-'}；地区={','.join(account_stats['regions']) or '-'}；扫描={account_stats['count']}；新增={account_stats['created']}；更新={account_stats['updated']}；未附加IP={account_stats['unattached']}；缺IP删除={account_stats['deleted_by_missing_ip']}；IP={account_stats['ips'] or ['无']}{error_text}"
             )
-            account.mark_status(
-                account.STATUS_OK,
-                f"AWS 同步成功，账号ID {account_stats['aws_account'] or '-'}，地区 {','.join(account_stats['regions']) or '-'}，扫描 {account_stats['count']} 台。",
-            )
+            if account_stats['count'] or account_stats['created'] or account_stats['updated']:
+                account.mark_status(
+                    account.STATUS_OK,
+                    f"AWS 同步完成，账号ID {account_stats['aws_account'] or '-'}，地区 {','.join(account_stats['regions']) or '-'}，扫描 {account_stats['count']} 台。{error_text}",
+                )
+            elif account_stats['errors']:
+                account.mark_status(account.STATUS_ERROR, '；'.join(account_stats['errors'][:5]))
+            else:
+                account.mark_status(
+                    account.STATUS_OK,
+                    f"AWS 同步完成，账号ID {account_stats['aws_account'] or '-'}，地区 {','.join(account_stats['regions']) or '-'}，扫描 0 台。",
+                )
 
         for region, instance_names in synced_instance_ids_by_region.items():
             verification_deleted_items.extend(

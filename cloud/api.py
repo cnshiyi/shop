@@ -513,8 +513,17 @@ def cloud_assets_list(request):
     grouped = (request.GET.get('grouped') or '').lower() in {'1', 'true', 'yes'}
     paginated = (request.GET.get('paginated') or '').lower() in {'1', 'true', 'yes'}
     try:
+        active_account_labels = _cloud_account_labels_queryset(True)
+        inactive_account_labels = _cloud_account_labels_queryset(False)
         queryset = CloudAsset.objects.select_related('user', 'order', 'cloud_account').filter(kind=CloudAsset.KIND_SERVER).exclude(
-            status__in=[CloudAsset.STATUS_DELETED, CloudAsset.STATUS_TERMINATED],
+            status__in=[CloudAsset.STATUS_DELETED, CloudAsset.STATUS_DELETING, CloudAsset.STATUS_TERMINATED, CloudAsset.STATUS_TERMINATING],
+        ).exclude(
+            Q(cloud_account__is_active=False) | Q(account_label__in=inactive_account_labels),
+        ).filter(
+            Q(cloud_account__is_active=True)
+            | Q(account_label__in=active_account_labels)
+            | Q(account_label__isnull=True)
+            | Q(account_label='')
         )
         queryset = _apply_keyword_filter(
             queryset,

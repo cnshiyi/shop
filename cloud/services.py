@@ -21,6 +21,7 @@ from cloud.bootstrap import install_bbr, install_mtproxy
 from cloud.ports import get_mtproxy_public_ports
 from core.cache import get_redis
 from core.cloud_accounts import choose_cloud_account_for_order, cloud_account_label, get_active_cloud_account, get_cloud_account_from_label
+from core.models import CloudAccountConfig
 from core.order_numbers import unique_timestamp_order_no
 from orders.ledger import record_balance_ledger
 from orders.models import BalanceLedger, CartItem
@@ -28,6 +29,31 @@ from orders.services import _generate_unique_pay_amount, usdt_to_trx
 
 logger = logging.getLogger(__name__)
 CUSTOM_CACHE_TTL = 600
+
+
+def _active_cloud_account_asset_filter():
+    active_labels = []
+    inactive_labels = []
+    for account in CloudAccountConfig.objects.filter(
+        provider__in=[CloudAccountConfig.PROVIDER_AWS, CloudAccountConfig.PROVIDER_ALIYUN],
+    ):
+        label = cloud_account_label(account)
+        if not label:
+            continue
+        if account.is_active:
+            active_labels.append(label)
+        else:
+            inactive_labels.append(label)
+    return (
+        ~Q(cloud_account__is_active=False)
+        & ~Q(account_label__in=inactive_labels)
+        & (
+            Q(cloud_account__is_active=True)
+            | Q(account_label__in=active_labels)
+            | Q(account_label__isnull=True)
+            | Q(account_label='')
+        )
+    )
 
 
 def _renew_aliyun_instance(order: CloudServerOrder, days: int = 31):
@@ -1012,6 +1038,7 @@ def list_user_cloud_servers(user_id: int):
         CloudAsset.objects.select_related('order')
         .filter(kind=CloudAsset.KIND_SERVER, user_id=user_id)
         .filter(ip_filter)
+        .filter(_active_cloud_account_asset_filter())
         .exclude(status__in=_INACTIVE_ASSET_STATUSES)
         .order_by('-sort_order', 'actual_expires_at', '-updated_at', '-id')
     )
@@ -1025,6 +1052,7 @@ def list_user_auto_renew_cloud_servers(user_id: int):
         CloudAsset.objects.select_related('order')
         .filter(kind=CloudAsset.KIND_SERVER, user_id=user_id, order__auto_renew_enabled=True)
         .filter(ip_filter)
+        .filter(_active_cloud_account_asset_filter())
         .exclude(status__in=_INACTIVE_ASSET_STATUSES)
         .order_by('-sort_order', 'actual_expires_at', '-updated_at', '-id')
     )
