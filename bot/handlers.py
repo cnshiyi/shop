@@ -2921,7 +2921,7 @@ def register_handlers(dp: Dispatcher):
         enabled_count = sum(1 for item in visible_servers if getattr(item, 'auto_renew_enabled', False))
         title = '⚡ 自动续费列表'
         scope = '管理员视图：所有用户代理' if is_admin else '我的代理'
-        text = f'{title}\n\n{scope}\n已开启 {enabled_count}/{total_visible}。\n✅=已开启，⏸=未开启；点击每行可开启/关闭。'
+        text = f'{title}\n\n{scope}\n已开启 {enabled_count}/{total_visible}。\n✅=已开启，❌=已关闭；点击每行可开启/关闭。'
         await _safe_edit_text(
             callback.message,
             text,
@@ -2939,7 +2939,7 @@ def register_handlers(dp: Dispatcher):
         await state.clear()
         user = await get_or_create_user(callback.from_user.id, callback.from_user.username, callback.from_user.first_name)
         is_admin = await _is_admin_chat(callback.message)
-        _, _, _, _, action, raw_page = callback.data.split(':')
+        _, _, _, action, raw_page = callback.data.split(':')
         enabled = action == 'on'
         page = max(1, int(raw_page or 1))
         if enabled:
