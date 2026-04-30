@@ -66,6 +66,11 @@ def _sync_account_payload(account):
     }
 
 
+def _sync_log_tail(output: io.StringIO, limit: int = 80) -> list[str]:
+    lines = [line.strip() for line in output.getvalue().splitlines() if line.strip()]
+    return lines[-limit:]
+
+
 def _call_command_capture(command_name: str, *args, **options):
     output = options.pop('stdout', None) or io.StringIO()
     command = load_command_class(get_commands()[command_name], command_name)
@@ -1646,9 +1651,8 @@ def sync_servers(request):
             )
         except Exception as exc:
             errors.append(f'AWS账号#{getattr(aws_account, "id", "-")}同步失败: {exc}')
-    if errors and not any(synced.values()):
-        return _error('；'.join(errors), status=500)
-    return _ok({'synced': synced, 'missing': missing, 'aliyun_region': aliyun_region, 'aws_region': aws_region or 'all', 'aws_regions': aws_regions, 'errors': errors, 'warnings': warnings[:20], 'accounts': {'aliyun': [_sync_account_payload(account) for account in aliyun_accounts], 'aws': [_sync_account_payload(account) for account in aws_accounts]}})
+    ok = not errors or any(synced.values())
+    return _ok({'ok': ok, 'synced': synced, 'missing': missing, 'aliyun_region': aliyun_region, 'aws_region': aws_region or 'all', 'aws_regions': aws_regions, 'errors': errors, 'warnings': warnings[:50], 'logs': _sync_log_tail(command_output), 'accounts': {'aliyun': [_sync_account_payload(account) for account in aliyun_accounts], 'aws': [_sync_account_payload(account) for account in aws_accounts]}})
 
 
 @csrf_exempt
@@ -1688,9 +1692,8 @@ def sync_cloud_assets(request):
         synced['reconcile'] = True
     except Exception as exc:
         errors.append(f'代理列表补齐失败: {exc}')
-    if errors and not any(synced.values()):
-        return _error('；'.join(errors), status=500)
-    return _ok({'synced': synced, 'aliyun_region': aliyun_region, 'aws_region': aws_region or 'all', 'aws_regions': aws_regions, 'errors': errors, 'warnings': warnings[:20], 'accounts': {'aliyun': [_sync_account_payload(account) for account in aliyun_accounts], 'aws': [_sync_account_payload(account) for account in aws_accounts]}})
+    ok = not errors or any(synced.values())
+    return _ok({'ok': ok, 'synced': synced, 'aliyun_region': aliyun_region, 'aws_region': aws_region or 'all', 'aws_regions': aws_regions, 'errors': errors, 'warnings': warnings[:50], 'logs': _sync_log_tail(command_output), 'accounts': {'aliyun': [_sync_account_payload(account) for account in aliyun_accounts], 'aws': [_sync_account_payload(account) for account in aws_accounts]}})
 
 
 @csrf_exempt
