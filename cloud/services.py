@@ -1725,6 +1725,7 @@ def apply_cloud_server_renewal(order_id: int, days: int = 31, run_post_checks: b
 @sync_to_async
 def pay_cloud_server_renewal_with_balance(order_id: int, user_id: int, currency: str = 'USDT', days: int = 31):
     try:
+        already_paid = False
         with transaction.atomic():
             order = CloudServerOrder.objects.select_related('user').select_for_update().filter(id=order_id, user_id=user_id).first()
             if not order:
@@ -1734,41 +1735,46 @@ def pay_cloud_server_renewal_with_balance(order_id: int, user_id: int, currency:
                 return None, '当前订单状态不可钱包支付'
             if not _can_order_be_renewed(order):
                 return None, '该服务器IP已删除，禁止续费'
-            balance_field = 'balance_trx' if currency == 'TRX' else 'balance'
-            user = TelegramUser.objects.select_for_update().get(id=user_id)
             total = Decimal(str(order.pay_amount or order.total_amount or 0))
-            current_balance = Decimal(str(getattr(user, balance_field, 0) or 0))
-            if current_balance < total:
-                return None, f'{currency} 余额不足'
-            old_balance = current_balance
-            setattr(user, balance_field, current_balance - total)
-            user.save(update_fields=[balance_field, 'updated_at'])
-            paid_at = timezone.now()
-            CloudServerOrder.objects.filter(id=order.id).update(
-                currency=currency,
-                pay_method='balance',
-                pay_amount=total,
-                paid_at=paid_at,
-                expired_at=None,
-                updated_at=paid_at,
-            )
-            order.currency = currency
-            order.pay_method = 'balance'
-            order.pay_amount = total
-            order.paid_at = paid_at
-            order.expired_at = None
-            order = apply_cloud_server_renewal.__wrapped__(order.id, days, False)
-            record_balance_ledger(
-                user,
-                ledger_type='cloud_order_balance_pay',
-                currency=currency,
-                old_balance=old_balance,
-                new_balance=getattr(user, balance_field),
-                related_type='cloud_order',
-                related_id=order.id,
-                description=f'云服务器续费订单 #{order.order_no} 钱包支付',
-            )
-            return order, None
+            if order.paid_at and order.pay_method == 'balance':
+                already_paid = True
+            else:
+                balance_field = 'balance_trx' if currency == 'TRX' else 'balance'
+                user = TelegramUser.objects.select_for_update().get(id=user_id)
+                current_balance = Decimal(str(getattr(user, balance_field, 0) or 0))
+                if current_balance < total:
+                    return None, f'{currency} 余额不足'
+                old_balance = current_balance
+                setattr(user, balance_field, current_balance - total)
+                user.save(update_fields=[balance_field, 'updated_at'])
+                paid_at = timezone.now()
+                CloudServerOrder.objects.filter(id=order.id).update(
+                    currency=currency,
+                    pay_method='balance',
+                    pay_amount=total,
+                    paid_at=paid_at,
+                    expired_at=None,
+                    updated_at=paid_at,
+                )
+                order.currency = currency
+                order.pay_method = 'balance'
+                order.pay_amount = total
+                order.paid_at = paid_at
+                order.expired_at = None
+                record_balance_ledger(
+                    user,
+                    ledger_type='cloud_order_balance_pay',
+                    currency=currency,
+                    old_balance=old_balance,
+                    new_balance=getattr(user, balance_field),
+                    related_type='cloud_order',
+                    related_id=order.id,
+                    description=f'云服务器续费订单 #{order.order_no} 钱包支付',
+                )
+        order = apply_cloud_server_renewal.__wrapped__(order_id, days, False)
+        if already_paid:
+            logger.info('云服务器钱包续费订单已支付，跳过重复扣款并继续续期: order_id=%s user_id=%s', order_id, user_id)
+        return order, None
     except Exception as exc:
         logger.exception('云服务器钱包续费失败: order_id=%s user_id=%s currency=%s error=%s', order_id, user_id, currency, exc)
         return None, str(exc)
