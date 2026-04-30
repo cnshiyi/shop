@@ -138,7 +138,14 @@ def _get_due_orders():
                 _append_due(due, 'renew_notice', order)
         if active_order and order.auto_renew_enabled and expires_at <= auto_renew_notice_at and expires_at > auto_renew_at and not order.auto_renew_notice_sent_at:
             _append_due(due, 'auto_renew_notice', order)
-        if active_order and order.auto_renew_enabled and expires_at <= auto_renew_at and expires_at > now:
+        auto_renew_before_expiry = expires_at <= auto_renew_at and expires_at > now
+        auto_renew_shutdown_fallback = (
+            expires_at <= now
+            and suspend_at
+            and suspend_at <= auto_renew_at
+            and suspend_at > now
+        )
+        if active_order and order.auto_renew_enabled and (auto_renew_before_expiry or auto_renew_shutdown_fallback):
             _append_due(due, 'auto_renew', order)
         if order.status in ['suspended', 'deleting'] and order.delete_reminder_enabled and delete_at and delete_at <= delete_notice_at and delete_at > now and not order.delete_notice_sent_at:
             _append_due(due, 'delete_notice', order)
@@ -507,11 +514,34 @@ def _auto_renew_result_batch_text(results: list[dict]) -> str:
             lines.append(f'新的到期时间: {_format_notice_dt(order.service_expires_at)}')
             lines.append(_notice_plan_text(order, {'expires_at': order.service_expires_at, 'suspend_at': order.suspend_at, 'delete_at': order.delete_at, 'ip_recycle_at': order.ip_recycle_at, 'auto_renew_enabled': order.auto_renew_enabled}))
         else:
-            if getattr(order, 'auto_renew_failure_notice_sent_at', None):
+            failure_sent_at = getattr(order, 'auto_renew_failure_notice_sent_at', None)
+            fallback_retry = bool(item.get('fallback_retry'))
+            expires_at = getattr(order, 'service_expires_at', None)
+            failure_sent_before_expiry = bool(failure_sent_at and expires_at and failure_sent_at < expires_at)
+            if failure_sent_at and not (fallback_retry and failure_sent_before_expiry):
                 continue
+            if fallback_retry:
+                lines.append('⚠️ 已进入关机前24小时兜底续费检查')
             lines.append(f'❌ IP: {ip} 自动续费失败')
             lines.append(f'失败原因: {_public_cloud_error_text(item.get("error"))}')
             lines.append(_notice_plan_text(order, {'expires_at': order.service_expires_at, 'suspend_at': order.suspend_at, 'delete_at': order.delete_at, 'ip_recycle_at': order.ip_recycle_at, 'auto_renew_enabled': order.auto_renew_enabled}))
+        lines.append('')
+    return '\n'.join(lines).strip()
+
+
+def _auto_renew_success_batch_text(results: list[dict], title: str = '✅ 自动续费巡检成功') -> str:
+    lines = [title, '']
+    for item in results:
+        if not item.get('ok'):
+            continue
+        order_id = item.get('order_id')
+        order = CloudServerOrder.objects.filter(id=order_id).first()
+        if not order:
+            continue
+        ip = item.get('ip') or _order_notice_ip(order)
+        lines.append(f'IP: {ip}')
+        lines.append(f'新的到期时间: {_format_notice_dt(order.service_expires_at)}')
+        lines.append(_notice_plan_text(order, {'expires_at': order.service_expires_at, 'suspend_at': order.suspend_at, 'delete_at': order.delete_at, 'ip_recycle_at': order.ip_recycle_at, 'auto_renew_enabled': order.auto_renew_enabled}))
         lines.append('')
     return '\n'.join(lines).strip()
 
@@ -912,6 +942,48 @@ def _defer_startup_lifecycle_actions(due, migration_due_orders, orphan_asset_del
     return run_at
 
 
+async def auto_renew_patrol_tick(notify=None):
+    due = await _get_due_orders()
+    results_by_user = defaultdict(list)
+    for order in due['auto_renew']:
+        renewed, err, balance_change = await _run_auto_renew(order.id)
+        notice = await _cloud_expiry_notice_payload(order.id)
+        if not notice.get('valid'):
+            continue
+        ok = not bool(err)
+        logger.info(
+            'CLOUD_AUTO_RENEW_PATROL user_id=%s order_id=%s order_no=%s ip=%s ok=%s error=%s',
+            order.user_id,
+            order.id,
+            order.order_no,
+            notice['ip'],
+            ok,
+            err,
+        )
+        results_by_user[order.user_id].append({
+            'order_id': getattr(renewed, 'id', None) or order.id,
+            'original_order_id': order.id,
+            'ip': notice['ip'],
+            'ok': ok,
+            'error': err,
+            'balance_change': balance_change,
+        })
+    if not notify:
+        return
+    for user_id, results in results_by_user.items():
+        success_results = [item for item in results if item.get('ok')]
+        if not success_results or not await _user_can_receive_cloud_notice(user_id):
+            continue
+        text = await sync_to_async(_auto_renew_success_batch_text)(success_results)
+        if text:
+            await _send_cloud_notice(
+                notify,
+                user_id,
+                text,
+                cloud_expiry_actions(success_results[0]['order_id']) if len(success_results) == 1 else None,
+            )
+
+
 async def lifecycle_tick(notify=None, defer_destructive_seconds: int = 0):
     due = await _get_due_orders()
     migration_due_orders = await _get_migration_due_orders()
@@ -982,7 +1054,15 @@ async def lifecycle_tick(notify=None, defer_destructive_seconds: int = 0):
         notice = await _cloud_expiry_notice_payload(order.id)
         if not notice.get('valid'):
             continue
-        logger.info('CLOUD_AUTO_RENEW_EXEC user_id=%s order_id=%s order_no=%s ip=%s ok=%s error=%s', order.user_id, order.id, order.order_no, notice['ip'], not bool(err), err)
+        now = timezone.now()
+        fallback_retry = bool(
+            notice.get('expires_at')
+            and notice.get('expires_at') <= now
+            and notice.get('suspend_at')
+            and notice.get('suspend_at') <= now + timezone.timedelta(days=1)
+            and notice.get('suspend_at') > now
+        )
+        logger.info('CLOUD_AUTO_RENEW_EXEC user_id=%s order_id=%s order_no=%s ip=%s ok=%s fallback=%s error=%s', order.user_id, order.id, order.order_no, notice['ip'], not bool(err), fallback_retry, err)
         auto_renew_results_by_user[order.user_id].append({
             'order_id': getattr(renewed, 'id', None) or order.id,
             'original_order_id': order.id,
@@ -990,6 +1070,7 @@ async def lifecycle_tick(notify=None, defer_destructive_seconds: int = 0):
             'ok': not bool(err),
             'error': err,
             'balance_change': balance_change,
+            'fallback_retry': fallback_retry,
         })
     if notify:
         for user_id, results in auto_renew_results_by_user.items():

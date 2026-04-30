@@ -16,7 +16,7 @@ from bot.handlers import create_dispatcher_and_register
 from bot.telegram_listener import run_telegram_account_listeners
 from bot.telegram_sender import send_with_notification_account
 from cloud.services import refresh_custom_plan_cache
-from cloud.lifecycle import lifecycle_tick, sync_server_status_tick, sync_cloud_accounts_tick
+from cloud.lifecycle import auto_renew_patrol_tick, lifecycle_tick, sync_server_status_tick, sync_cloud_accounts_tick
 from core.cache import refresh_config, close as cache_close
 from core.runtime_config import get_cloud_asset_sync_interval_seconds
 from cloud.cache import init_monitor_cache
@@ -69,6 +69,7 @@ async def run_bot():
     scheduler.add_job(check_resources, 'interval', minutes=3, id='tron_resource_checker', max_instances=1)
     scheduler.add_job(refresh_custom_plan_cache, 'interval', minutes=10, id='custom_plan_cache_refresh', max_instances=1, coalesce=True)
     scheduler.add_job(lifecycle_tick, 'interval', minutes=10, id='cloud_lifecycle', max_instances=1, kwargs={'notify': _notify})
+    scheduler.add_job(auto_renew_patrol_tick, 'interval', hours=2, id='cloud_auto_renew_patrol', max_instances=1, coalesce=True, kwargs={'notify': _notify})
     scheduler.add_job(sync_server_status_tick, 'interval', seconds=cloud_sync_interval_seconds, id='cloud_server_sync', max_instances=1, coalesce=True)
     scheduler.add_job(sync_cloud_accounts_tick, 'interval', minutes=15, id='cloud_account_check', max_instances=1, coalesce=True)
     scheduler.add_job(lambda: asyncio.to_thread(call_command, 'dedupe_servers'), 'interval', minutes=20, id='server_dedupe', max_instances=1, coalesce=True)
@@ -82,6 +83,7 @@ async def run_bot():
     logger.info('资源巡检已启动 (每3分钟)')
     logger.info('定制套餐缓存刷新已启动 (每10分钟)')
     logger.info('云服务器生命周期调度已启动 (每10分钟)')
+    logger.info('自动续费巡检已启动 (每2小时，仅成功通知)')
     logger.info('云服务器状态同步已启动 (每%s秒)', cloud_sync_interval_seconds)
     logger.info('云账号状态巡检已启动 (每15分钟)')
     logger.info('服务器去重任务已启动 (每20分钟)')
