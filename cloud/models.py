@@ -177,6 +177,7 @@ class CloudServerOrder(models.Model):
     last_renewed_at = models.DateTimeField('最后续费时间', blank=True, null=True)
     renew_notice_sent_at = models.DateTimeField('续费提醒发送时间', blank=True, null=True)
     auto_renew_notice_sent_at = models.DateTimeField('自动续费预提醒发送时间', blank=True, null=True)
+    auto_renew_failure_notice_sent_at = models.DateTimeField('自动续费失败通知发送时间', blank=True, null=True)
     delete_notice_sent_at = models.DateTimeField('删机提醒发送时间', blank=True, null=True)
     recycle_notice_sent_at = models.DateTimeField('删IP提醒发送时间', blank=True, null=True)
     migration_due_at = models.DateTimeField('迁移截止时间', blank=True, null=True)

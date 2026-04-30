@@ -200,6 +200,12 @@ def _mark_notice_sent(order_id: int, field_name: str):
 
 
 @sync_to_async
+def _mark_many_notice_sent(order_ids: list[int], field_name: str):
+    if order_ids:
+        CloudServerOrder.objects.filter(id__in=order_ids).update(**{field_name: timezone.now(), 'updated_at': timezone.now()})
+
+
+@sync_to_async
 def _user_can_receive_cloud_notice(user_id: int) -> bool:
     user = TelegramUser.objects.filter(id=user_id).first()
     if not user:
@@ -365,11 +371,20 @@ def _auto_renew_result_batch_text(results: list[dict]) -> str:
             lines.append(f'新的到期时间: {_format_notice_dt(order.service_expires_at)}')
             lines.append(_notice_plan_text(order, {'expires_at': order.service_expires_at, 'suspend_at': order.suspend_at, 'delete_at': order.delete_at, 'ip_recycle_at': order.ip_recycle_at, 'auto_renew_enabled': order.auto_renew_enabled}))
         else:
+            if getattr(order, 'auto_renew_failure_notice_sent_at', None):
+                continue
             lines.append(f'❌ IP: {ip} 自动续费失败')
             lines.append(f'失败原因: {_public_cloud_error_text(item.get("error"))}')
             lines.append(_notice_plan_text(order, {'expires_at': order.service_expires_at, 'suspend_at': order.suspend_at, 'delete_at': order.delete_at, 'ip_recycle_at': order.ip_recycle_at, 'auto_renew_enabled': order.auto_renew_enabled}))
         lines.append('')
     return '\n'.join(lines).strip()
+
+
+async def _send_cloud_notice(notify, user_id: int, text: str, reply_markup=None) -> bool:
+    if not notify:
+        return False
+    result = await notify(user_id, text, reply_markup)
+    return result is not False
 
 
 def _log_cloud_notice(event: str, order, notice: dict | None, text: str, keyboard: str):
@@ -746,24 +761,27 @@ async def lifecycle_tick(notify=None):
                 auto_renew_text = '<b>本单已开启自动续费，将在到期前 1 天自动续费；到期前 2 天会发送自动续费预提醒。</b>' if notice['auto_renew_enabled'] else '<b>本单未开启自动续费。</b>'
                 text = f'⏰ IP到期提醒\n\nIP: {notice["ip"]}\n\n{_notice_plan_text(order, notice)}\n\n{auto_renew_text}\n\n如需续费，请点击下方“立即续费”。'
                 _log_cloud_notice('renew_notice', order, notice, text, 'cloud_expiry_actions')
-                await notify(order.user_id, text, cloud_expiry_actions(order.id))
-            await _mark_notice_sent(order.id, 'renew_notice_sent_at')
+                sent = await _send_cloud_notice(notify, order.user_id, text, cloud_expiry_actions(order.id))
+                if sent:
+                    await _mark_notice_sent(order.id, 'renew_notice_sent_at')
             continue
         payload = await _renew_notice_batch_payload([order.id for order in orders])
         if notify and payload['text'] and await _user_can_receive_cloud_notice(user_id):
             _log_cloud_notice('renew_notice_batch', orders[0], {'ip': f'{payload["count"]} 个IP'}, payload['text'], 'cloud_expiry_actions')
-            await notify(user_id, payload['text'], None)
-        for order_id in payload.get('order_ids') or []:
-            await _mark_notice_sent(order_id, 'renew_notice_sent_at')
+            sent = await _send_cloud_notice(notify, user_id, payload['text'], None)
+            if sent:
+                for order_id in payload.get('order_ids') or []:
+                    await _mark_notice_sent(order_id, 'renew_notice_sent_at')
 
     for user_id, orders in _group_orders_by_user(due['auto_renew_notice']).items():
         payload = await _auto_renew_notice_batch_payload([order.id for order in orders])
         if notify and payload['text'] and await _user_can_receive_cloud_notice(user_id):
             first_order = orders[0]
             _log_cloud_notice('auto_renew_prenotice_batch', first_order, {'ip': f'{payload["count"]} 个IP'}, payload['text'], 'cloud_auto_renew_notice_actions')
-            await notify(user_id, payload['text'], cloud_auto_renew_notice_actions(payload['first_order_id']) if payload['count'] == 1 else None)
-        for order_id in payload.get('order_ids') or []:
-            await _mark_notice_sent(order_id, 'auto_renew_notice_sent_at')
+            sent = await _send_cloud_notice(notify, user_id, payload['text'], cloud_auto_renew_notice_actions(payload['first_order_id']) if payload['count'] == 1 else None)
+            if sent:
+                for order_id in payload.get('order_ids') or []:
+                    await _mark_notice_sent(order_id, 'auto_renew_notice_sent_at')
 
     auto_renew_results_by_user = defaultdict(list)
     for order in due['auto_renew']:
@@ -772,6 +790,7 @@ async def lifecycle_tick(notify=None):
         logger.info('CLOUD_AUTO_RENEW_EXEC user_id=%s order_id=%s order_no=%s ip=%s ok=%s error=%s', order.user_id, order.id, order.order_no, notice['ip'], not bool(err), err)
         auto_renew_results_by_user[order.user_id].append({
             'order_id': getattr(renewed, 'id', None) or order.id,
+            'original_order_id': order.id,
             'ip': notice['ip'],
             'ok': not bool(err),
             'error': err,
@@ -783,7 +802,10 @@ async def lifecycle_tick(notify=None):
                 continue
             text = await _auto_renew_result_batch_text(results)
             if text:
-                await notify(user_id, text, cloud_expiry_actions(results[0]['order_id']) if len(results) == 1 else None)
+                sent = await _send_cloud_notice(notify, user_id, text, cloud_expiry_actions(results[0]['order_id']) if len(results) == 1 else None)
+                if sent:
+                    failed_order_ids = [item['original_order_id'] for item in results if not item.get('ok')]
+                    await _mark_many_notice_sent(failed_order_ids, 'auto_renew_failure_notice_sent_at')
 
     for user_id, orders in _group_orders_by_user(due['delete_notice']).items():
         if len(orders) == 1:
@@ -800,15 +822,17 @@ async def lifecycle_tick(notify=None):
                 )
                 text = _ensure_notice_ip(text, notice['ip'])
                 _log_cloud_notice('delete_notice', order, notice, text, 'cloud_lifecycle_notice_actions')
-                await notify(order.user_id, text, cloud_lifecycle_notice_actions(order.id, 'cloud_delete_notice'))
-            await _mark_notice_sent(order.id, 'delete_notice_sent_at')
+                sent = await _send_cloud_notice(notify, order.user_id, text, cloud_lifecycle_notice_actions(order.id, 'cloud_delete_notice'))
+                if sent:
+                    await _mark_notice_sent(order.id, 'delete_notice_sent_at')
             continue
         text = await _lifecycle_notice_batch_text('⚠️ 云服务器删机提醒', [order.id for order in orders], '请务必在各自删除计划前完成续费，避免实例删除。')
         if notify and text and await _user_can_receive_cloud_notice(user_id):
             _log_cloud_notice('delete_notice_batch', orders[0], {'ip': f'{len(orders)} 个IP'}, text, 'cloud_lifecycle_notice_actions')
-            await notify(user_id, text, None)
-        for order in orders:
-            await _mark_notice_sent(order.id, 'delete_notice_sent_at')
+            sent = await _send_cloud_notice(notify, user_id, text, None)
+            if sent:
+                for order in orders:
+                    await _mark_notice_sent(order.id, 'delete_notice_sent_at')
 
     for user_id, orders in _group_orders_by_user(due['recycle_notice']).items():
         if len(orders) == 1:
@@ -825,15 +849,17 @@ async def lifecycle_tick(notify=None):
                 )
                 text = _ensure_notice_ip(text, notice['ip'])
                 _log_cloud_notice('ip_recycle_notice', order, notice, text, 'cloud_lifecycle_notice_actions')
-                await notify(order.user_id, text, cloud_lifecycle_notice_actions(order.id, 'cloud_ip_recycle_notice'))
-            await _mark_notice_sent(order.id, 'recycle_notice_sent_at')
+                sent = await _send_cloud_notice(notify, order.user_id, text, cloud_lifecycle_notice_actions(order.id, 'cloud_ip_recycle_notice'))
+                if sent:
+                    await _mark_notice_sent(order.id, 'recycle_notice_sent_at')
             continue
         text = await _lifecycle_notice_batch_text('📦 固定IP删除提醒', [order.id for order in orders], '请务必在各自固定IP删除计划前完成续费恢复，避免固定 IP 删除。')
         if notify and text and await _user_can_receive_cloud_notice(user_id):
             _log_cloud_notice('ip_recycle_notice_batch', orders[0], {'ip': f'{len(orders)} 个IP'}, text, 'cloud_lifecycle_notice_actions')
-            await notify(user_id, text, None)
-        for order in orders:
-            await _mark_notice_sent(order.id, 'recycle_notice_sent_at')
+            sent = await _send_cloud_notice(notify, user_id, text, None)
+            if sent:
+                for order in orders:
+                    await _mark_notice_sent(order.id, 'recycle_notice_sent_at')
 
     for order in due['expire']:
         notice = await _cloud_expiry_notice_payload(order.id)
@@ -848,7 +874,7 @@ async def lifecycle_tick(notify=None):
             )
             text = _ensure_notice_ip(text, notice['ip'])
             _log_cloud_notice('expiring_notice', updated, notice, text, 'cloud_lifecycle_notice_actions')
-            await notify(updated.user_id, text, cloud_lifecycle_notice_actions(updated.id, 'cloud_expiring'))
+            await _send_cloud_notice(notify, updated.user_id, text, cloud_lifecycle_notice_actions(updated.id, 'cloud_expiring'))
 
     for order in due['suspend']:
         result = await _stop_instance(order)
@@ -867,7 +893,7 @@ async def lifecycle_tick(notify=None):
                 )
                 text = _ensure_notice_ip(text, notice['ip'])
                 _log_cloud_notice('suspended_notice', updated, notice, text, 'cloud_lifecycle_notice_actions')
-                await notify(updated.user_id, text, cloud_lifecycle_notice_actions(updated.id, 'cloud_suspended'))
+                await _send_cloud_notice(notify, updated.user_id, text, cloud_lifecycle_notice_actions(updated.id, 'cloud_suspended'))
         else:
             await _record_lifecycle_action_failed(order.id, 'suspend_failed', note)
 
@@ -891,7 +917,7 @@ async def lifecycle_tick(notify=None):
                 )
                 text = _ensure_notice_ip(text, notice['ip'])
                 _log_cloud_notice('deleted_notice', updated, notice, text, 'cloud_lifecycle_notice_actions')
-                await notify(updated.user_id, text, cloud_lifecycle_notice_actions(updated.id, 'cloud_deleted'))
+                await _send_cloud_notice(notify, updated.user_id, text, cloud_lifecycle_notice_actions(updated.id, 'cloud_deleted'))
         else:
             await _record_lifecycle_action_failed(order.id, 'delete_failed', note)
 
@@ -908,7 +934,7 @@ async def lifecycle_tick(notify=None):
             )
             text = _ensure_notice_ip(text, notice['ip'])
             _log_cloud_notice('ip_retention_ended_notice', updated, notice, text, 'cloud_lifecycle_notice_actions')
-            await notify(updated.user_id, text, cloud_lifecycle_notice_actions(updated.id, 'cloud_ip_retention_ended'))
+            await _send_cloud_notice(notify, updated.user_id, text, cloud_lifecycle_notice_actions(updated.id, 'cloud_ip_retention_ended'))
 
     for order in migration_due_orders:
         if not _is_cloud_delete_safe_time():
@@ -929,7 +955,7 @@ async def lifecycle_tick(notify=None):
                 )
                 text = _ensure_notice_ip(text, notice['ip'])
                 _log_cloud_notice('migration_old_deleted_notice', updated, notice, text, 'cloud_lifecycle_notice_actions')
-                await notify(updated.user_id, text, cloud_lifecycle_notice_actions(updated.id, 'cloud_migration_old_deleted'))
+                await _send_cloud_notice(notify, updated.user_id, text, cloud_lifecycle_notice_actions(updated.id, 'cloud_migration_old_deleted'))
         else:
             await _record_lifecycle_action_failed(order.id, 'delete_failed', note)
 

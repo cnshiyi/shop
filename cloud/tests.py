@@ -441,13 +441,14 @@ class CloudServerServicesTestCase(TestCase):
         with self.assertRaisesMessage(CommandError, '未添加启用的 AWS 云账号'):
             call_command('sync_aws_assets', region='ap-southeast-1')
 
-    def test_low_main_port_uses_high_backup_ports(self):
+    def test_backup_ports_are_fixed(self):
         self.assertTrue(is_valid_mtproxy_main_port(443))
         self.assertFalse(is_valid_mtproxy_main_port(444))
+        self.assertFalse(is_valid_mtproxy_main_port(9529))
         self.assertFalse(is_valid_mtproxy_main_port(65531))
-        self.assertEqual(get_mtproxy_public_ports(443), [443, 20444, 20445, 20446, 20447, 20448])
-        self.assertEqual(get_mtproxy_public_ports(9528), [9528, 9529, 9530, 9531, 9532, 9533])
-        self.assertEqual(get_mtproxy_port_label(443, 20444), '备用 mtprotoproxy')
+        self.assertEqual(get_mtproxy_public_ports(443), [443, 9529, 9530, 9531, 9532, 9533])
+        self.assertEqual(get_mtproxy_public_ports(8443), [8443, 9529, 9530, 9531, 9532, 9533])
+        self.assertEqual(get_mtproxy_port_label(443, 9529), '备用 mtprotoproxy')
 
     def test_mtproxy_script_runs_mtg_with_fake_tls_secret(self):
         script = _build_mtproxy_script(443, 'eec3bda48fee649e9ea6e32d33cd5f3dd9617a7572652e6d6963726f736f66742e636f6d')
@@ -458,18 +459,18 @@ class CloudServerServicesTestCase(TestCase):
         links = _extract_tg_links(
             'TG链接: tg://proxy?server=1.2.3.4&port=443&secret=ee11111111111111111111111111111111\n'
             '扩展链接: tg://proxy?server=1.2.3.4&port=443&secret=ee22222222222222222222222222222222\n'
-            '扩展链接: tg://proxy?server=1.2.3.4&port=20444&secret=ee33333333333333333333333333333333',
+            '扩展链接: tg://proxy?server=1.2.3.4&port=9529&secret=ee33333333333333333333333333333333',
             exclude_port=443,
         )
-        self.assertEqual(links, ['tg://proxy?server=1.2.3.4&port=20444&secret=ee33333333333333333333333333333333'])
+        self.assertEqual(links, ['tg://proxy?server=1.2.3.4&port=9529&secret=ee33333333333333333333333333333333'])
 
     def test_extract_proxy_links_labels_custom_low_port_plan(self):
         links = _extract_proxy_links(
             'MTProxy 安装完成\n'
             '端口: 443\n'
             'TG链接: tg://proxy?server=1.2.3.4&port=443&secret=ee1234567890abcdef1234567890abcd\n'
-            '扩展链接: tg://proxy?server=1.2.3.4&port=20444&secret=eeabcdefabcdefabcdefabcdefabcdefab\n'
-            '扩展链接: tg://proxy?server=1.2.3.4&port=20445&secret=eeabcdefabcdefabcdefabcdefabcdefab'
+            '扩展链接: tg://proxy?server=1.2.3.4&port=9529&secret=eeabcdefabcdefabcdefabcdefabcdefab\n'
+            '扩展链接: tg://proxy?server=1.2.3.4&port=9530&secret=eeabcdefabcdefabcdefabcdefabcdefab'
         )
         self.assertEqual([item['name'] for item in links], ['主代理 mtg', '备用 mtprotoproxy', 'Telemt A 三模式'])
 

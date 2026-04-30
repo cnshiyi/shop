@@ -46,17 +46,20 @@ async def run_bot():
 
         user = await asyncio.to_thread(lambda: TelegramUser.objects.filter(id=user_id).first())
         if not user:
-            return
+            return False
         try:
             await bot.send_message(user.tg_user_id, text, reply_markup=reply_markup, parse_mode='HTML')
+            return True
         except Exception as exc:
             logger.warning('机器人生命周期通知发送失败 user=%s err=%s，尝试个人号通知', user_id, exc)
             try:
                 sent = await send_with_notification_account(user.tg_user_id, text)
-                if not sent:
-                    logger.warning('个人号生命周期通知无可用账号 user=%s', user_id)
+                if sent:
+                    return True
+                logger.warning('个人号生命周期通知无可用账号 user=%s', user_id)
             except Exception as fallback_exc:
                 logger.warning('个人号生命周期通知发送失败 user=%s err=%s', user_id, fallback_exc)
+        return False
 
     # TRON 扫块器 / 资源巡检 / 生命周期调度
     scheduler = AsyncIOScheduler()
