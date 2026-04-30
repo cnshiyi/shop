@@ -798,6 +798,7 @@ def _callback_route_label(callback_data: str | None) -> str:
         ('cloud:renewpay:', 'cloud.renewpay 续费钱包支付'),
         ('cloud:renewwallet:', 'cloud.renewwallet 自动续费钱包支付'),
         ('cloud:renew:', 'cloud.renew 续费'),
+        ('cloud:start:', 'cloud.start 管理员开机'),
         ('cloud:autorenew:', 'cloud.autorenew 自动续费开关'),
         ('cloud:delay:', 'cloud.delay 延期'),
         ('cloud:mute:', 'cloud.mute 关闭提醒'),

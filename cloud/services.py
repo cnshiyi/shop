@@ -1842,7 +1842,7 @@ def pay_cloud_server_renewal_with_balance(order_id: int, user_id: int, currency:
     try:
         already_paid = False
         with transaction.atomic():
-            order = CloudServerOrder.objects.select_related('user').select_for_update().filter(id=order_id, user_id=user_id).first()
+            order = CloudServerOrder.objects.select_related('user').select_for_update().filter(id=order_id).first()
             if not order:
                 return None, '订单不存在'
             order = _hydrate_order_from_proxy_asset(order)
