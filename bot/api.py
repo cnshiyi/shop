@@ -614,7 +614,7 @@ def _telegram_chat_payload(chat_id, latest, message_count, archived_ids=None):
         'message_count': message_count,
         'archived': chat_id in (archived_ids or set()),
         'source': latest.source or 'bot',
-        'source_label': '个人号' if latest.source == 'account' else '机器人',
+        'source_label': '个人号' if str(latest.source or '').startswith('account') else '机器人',
     }
 
 
@@ -634,7 +634,7 @@ def _telegram_message_payload(item):
         'first_name_snapshot': item.first_name_snapshot or '',
         'chat_title': item.chat_title or '',
         'source': item.source or 'bot',
-        'source_label': '个人号' if item.source == 'account' else '机器人',
+        'source_label': '个人号' if str(item.source or '').startswith('account') else '机器人',
         'created_at': _iso(item.created_at),
     }
 
@@ -1841,10 +1841,12 @@ def telegram_accounts_overview(request):
     chat_counts = dict(messages.values('chat_id').annotate(total=Count('id')).values_list('chat_id', 'total'))
     latest_by_user = {}
     latest_by_chat = {}
-    for msg in TelegramChatMessage.objects.select_related('login_account').order_by('-created_at', '-id')[:500]:
+    for msg in TelegramChatMessage.objects.select_related('login_account').order_by('-created_at', '-id')[:2000]:
         latest_by_user.setdefault(msg.tg_user_id, msg)
-    for msg in messages.select_related('login_account')[:500]:
+    for msg in messages.select_related('login_account').iterator(chunk_size=500):
         latest_by_chat.setdefault(msg.chat_id, msg)
+        if len(latest_by_chat) >= 100:
+            break
     return _ok({
         'accounts': [_telegram_login_account_payload(item) for item in accounts[:50]],
         'chats': [_telegram_chat_payload(chat_id, latest, chat_counts.get(chat_id, 0), archived_ids) for chat_id, latest in list(latest_by_chat.items())[:100]],

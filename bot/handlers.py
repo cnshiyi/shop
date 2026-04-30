@@ -45,6 +45,7 @@ from cloud.services import (
     create_cloud_server_renewal,
     create_cloud_server_renewal_by_public_query,
     delay_cloud_server_expiry,
+    enable_all_cloud_server_auto_renew_admin,
     get_cloud_plan,
     get_cloud_server_auto_renew,
     get_user_reminder_summary,
@@ -53,6 +54,7 @@ from cloud.services import (
     get_user_proxy_asset_detail,
     ensure_cloud_asset_operation_order,
     initialize_proxy_asset,
+    list_all_auto_renew_cloud_servers,
     list_custom_regions,
     list_region_plans,
     list_user_auto_renew_cloud_servers,
@@ -71,6 +73,7 @@ from cloud.services import (
     run_cloud_server_renewal_postcheck,
     set_cloud_order_reminder,
     set_cloud_server_auto_renew,
+    set_cloud_server_auto_renew_admin,
     start_cloud_server_from_admin,
     unmute_all_user_reminders,
     unmute_cloud_reminders,
@@ -435,9 +438,10 @@ async def _reply_cloud_query_results(message: Message, raw_text: str, state: FSM
             continue
         expires_at = getattr(order, 'service_expires_at', None)
         expires_text = _format_local_dt(expires_at).split(' ', 1)[0] if expires_at else '今天到期'
+        auto_renew_text = '已开启' if getattr(order, 'auto_renew_enabled', False) else '未开启'
         results.append({
             'ip': display_ip,
-            'text': f'IP: <code>{escape(display_ip)}</code>\n到期时间: {expires_text}\n状态: 可续费',
+            'text': f'IP: <code>{escape(display_ip)}</code>\n到期时间: {expires_text}\n自动续费: {auto_renew_text}\n状态: 可续费',
             'renewable': True,
             'order_id': order.id,
             '_expires_at': expires_at,
@@ -793,7 +797,10 @@ def _callback_route_label(callback_data: str | None) -> str:
         ('cloud:assetdetail:', 'cloud.assetdetail 人工代理详情'),
         ('cloud:detail:', 'cloud.detail 代理详情'),
         ('cloud:list:page:', 'cloud.list.page 代理列表分页'),
+        ('cloud:autorenewlist:all:', 'cloud.autorenewlist.all 自动续费批量开关'),
         ('cloud:autorenewlist:page:', 'cloud.autorenewlist.page 自动续费列表分页'),
+        ('cloud:autorenewlist:on:', 'cloud.autorenewlist.on 开启自动续费'),
+        ('cloud:autorenewlist:off:', 'cloud.autorenewlist.off 关闭自动续费'),
         ('cloud:queryip:page:', 'cloud.queryip.page IP查询分页'),
         ('cloud:renewpay:', 'cloud.renewpay 续费钱包支付'),
         ('cloud:renewwallet:', 'cloud.renewwallet 自动续费钱包支付'),
@@ -2896,75 +2903,72 @@ def register_handlers(dp: Dispatcher):
             reply_markup=cloud_server_list(page_items, page, total_pages, 'cloud:list:page'),
         )
 
+    async def _render_cloud_auto_renew_list(callback: CallbackQuery, page: int = 1):
+        user = await get_or_create_user(callback.from_user.id, callback.from_user.username, callback.from_user.first_name)
+        is_admin = await _is_admin_chat(callback.message)
+        visible_servers = await list_all_auto_renew_cloud_servers() if is_admin else await list_user_auto_renew_cloud_servers(user.id)
+        per_page = 8
+        total_visible = len(visible_servers)
+        total_pages = max(1, math.ceil(total_visible / per_page))
+        page = min(max(1, page), total_pages)
+        page_items = visible_servers[(page - 1) * per_page: page * per_page]
+        if not page_items:
+            await _safe_edit_text(callback.message, '⚡ 自动续费列表\n\n暂无可设置自动续费的代理。', reply_markup=cloud_query_menu())
+            return
+        enabled_count = sum(1 for item in visible_servers if getattr(item, 'auto_renew_enabled', False))
+        title = '⚡ 自动续费列表'
+        scope = '管理员视图：所有用户代理' if is_admin else '我的代理'
+        text = f'{title}\n\n{scope}\n已开启 {enabled_count}/{total_visible}。\n✅=已开启，⏸=未开启；点击每行可开启/关闭。'
+        await _safe_edit_text(
+            callback.message,
+            text,
+            reply_markup=cloud_auto_renew_server_list(page_items, page, total_pages, is_admin=is_admin),
+        )
+
     @dp.callback_query(F.data == 'cloud:autorenewlist')
     async def cb_cloud_auto_renew_list(callback: CallbackQuery, state: FSMContext):
         await state.clear()
         await _safe_callback_answer(callback)
-        user = await get_or_create_user(callback.from_user.id, callback.from_user.username, callback.from_user.first_name)
-        visible_servers = await list_user_auto_renew_cloud_servers(user.id)
-        page = 1
-        per_page = 8
-        total_visible = len(visible_servers)
-        total_pages = max(1, math.ceil(total_visible / per_page))
-        page_items = visible_servers[(page - 1) * per_page: page * per_page]
-        if not page_items:
-            await _safe_edit_text(callback.message, '⚡ 自动续费列表\n\n暂无已开启自动续费的代理。', reply_markup=cloud_query_menu())
-            return
-        await _safe_edit_text(
-            callback.message,
-            '⚡ 自动续费列表\n\n以下代理已开启自动续费：',
-            reply_markup=cloud_auto_renew_server_list(page_items, page, total_pages),
-        )
+        await _render_cloud_auto_renew_list(callback, page=1)
 
+    @dp.callback_query(F.data.startswith('cloud:autorenewlist:all:on:'))
+    async def cb_cloud_auto_renew_list_all_on(callback: CallbackQuery, state: FSMContext):
+        await state.clear()
+        if not await _is_admin_chat(callback.message):
+            await _safe_callback_answer(callback, '仅管理员可批量开启全部自动续费', show_alert=True)
+            return
+        page = max(1, int(callback.data.split(':')[4] or 1))
+        result = await enable_all_cloud_server_auto_renew_admin()
+        await _safe_callback_answer(callback, f'已开启 {result.get("updated", 0)} 个，跳过 {result.get("skipped", 0)} 个', show_alert=True)
+        await _render_cloud_auto_renew_list(callback, page=page)
+
+    @dp.callback_query(F.data.startswith('cloud:autorenewlist:on:'))
     @dp.callback_query(F.data.startswith('cloud:autorenewlist:off:'))
-    async def cb_cloud_auto_renew_list_off(callback: CallbackQuery, state: FSMContext):
+    async def cb_cloud_auto_renew_list_toggle(callback: CallbackQuery, state: FSMContext):
         await state.clear()
         user = await get_or_create_user(callback.from_user.id, callback.from_user.username, callback.from_user.first_name)
-        _, _, _, raw_order_id, raw_page = callback.data.split(':')
+        _, _, _, action, raw_order_id, raw_page = callback.data.split(':')
+        enabled = action == 'on'
         page = max(1, int(raw_page or 1))
-        order = await set_cloud_server_auto_renew(int(raw_order_id), user.id, False)
+        if await _is_admin_chat(callback.message):
+            order = await set_cloud_server_auto_renew_admin(int(raw_order_id), enabled)
+        else:
+            order = await set_cloud_server_auto_renew(int(raw_order_id), user.id, enabled)
         if order is False:
-            await _safe_callback_answer(callback, '当前状态不可关闭自动续费', show_alert=True)
+            await _safe_callback_answer(callback, '当前状态不可开启自动续费', show_alert=True)
             return
         if not order:
             await _safe_callback_answer(callback, '代理记录不存在', show_alert=True)
             return
-        await _safe_callback_answer(callback, '已关闭自动续费')
-        visible_servers = await list_user_auto_renew_cloud_servers(user.id)
-        per_page = 8
-        total_visible = len(visible_servers)
-        total_pages = max(1, math.ceil(total_visible / per_page))
-        page = min(page, total_pages)
-        page_items = visible_servers[(page - 1) * per_page: page * per_page]
-        if not page_items:
-            await _safe_edit_text(callback.message, '⚡ 自动续费列表\n\n暂无已开启自动续费的代理。', reply_markup=cloud_query_menu())
-            return
-        await _safe_edit_text(
-            callback.message,
-            '⚡ 自动续费列表\n\n以下代理已开启自动续费，点击 IP 可关闭：',
-            reply_markup=cloud_auto_renew_server_list(page_items, page, total_pages),
-        )
+        await _safe_callback_answer(callback, '已开启自动续费' if enabled else '已关闭自动续费')
+        await _render_cloud_auto_renew_list(callback, page=page)
 
     @dp.callback_query(F.data.startswith('cloud:autorenewlist:page:'))
     async def cb_cloud_auto_renew_list_page(callback: CallbackQuery, state: FSMContext):
         await state.clear()
         await _safe_callback_answer(callback)
-        user = await get_or_create_user(callback.from_user.id, callback.from_user.username, callback.from_user.first_name)
         page = max(1, int(callback.data.split(':')[3]))
-        visible_servers = await list_user_auto_renew_cloud_servers(user.id)
-        per_page = 8
-        total_visible = len(visible_servers)
-        total_pages = max(1, math.ceil(total_visible / per_page))
-        page = min(page, total_pages)
-        page_items = visible_servers[(page - 1) * per_page: page * per_page]
-        if not page_items:
-            await _safe_edit_text(callback.message, '⚡ 自动续费列表\n\n暂无已开启自动续费的代理。', reply_markup=cloud_query_menu())
-            return
-        await _safe_edit_text(
-            callback.message,
-            '⚡ 自动续费列表\n\n以下代理已开启自动续费：',
-            reply_markup=cloud_auto_renew_server_list(page_items, page, total_pages),
-        )
+        await _render_cloud_auto_renew_list(callback, page=page)
 
     @dp.callback_query(F.data.startswith('profile:orders:cloud:page:'))
     async def cb_profile_cloud_orders_page(callback: CallbackQuery):

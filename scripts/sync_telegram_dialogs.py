@@ -143,7 +143,7 @@ def _upsert_dialog_message(
             'username_snapshot': username[:191] or None,
             'first_name_snapshot': first_name[:191] or None,
             'chat_title': chat_title[:191] or None,
-            'source': 'account_dialog',
+            'source': 'account',
         }
         for field, value in updates.items():
             if getattr(existing, field) != value:
@@ -164,7 +164,7 @@ def _upsert_dialog_message(
         username_snapshot=username[:191] or None,
         first_name_snapshot=first_name[:191] or None,
         chat_title=chat_title[:191] or None,
-        source='account_dialog',
+        source='account',
     )
     return True
 

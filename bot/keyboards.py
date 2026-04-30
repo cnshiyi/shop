@@ -421,21 +421,30 @@ def cloud_server_list(orders, page: int = 1, total_pages: int = 1, prefix: str =
     )
 
 
-def cloud_auto_renew_server_list(orders, page: int = 1, total_pages: int = 1):
+def cloud_auto_renew_server_list(orders, page: int = 1, total_pages: int = 1, *, is_admin: bool = False):
     kb = InlineKeyboardBuilder()
-    button_count = 0
+    if is_admin:
+        kb.row(InlineKeyboardButton(text='⚡ 一键开启全部自动续费', callback_data=f'cloud:autorenewlist:all:on:{page}'))
     for order in orders:
         order_id = getattr(order, 'order_id', None) or getattr(order, 'id', None)
         if not order_id:
             continue
         ip = order.public_ip or order.previous_public_ip
         label = ip or getattr(order, 'order_no', None) or f'订单 {order_id}'
+        user_label = ''
+        if is_admin:
+            username = getattr(order, 'username', '') or ''
+            first_name = getattr(order, 'first_name', '') or ''
+            tg_user_id = getattr(order, 'user_tg_id', None)
+            user_label = username and f' @{username}' or first_name or (str(tg_user_id) if tg_user_id else '')
+            user_label = f' | {user_label}' if user_label else ''
         expires_at = getattr(order, 'service_expires_at', None) or getattr(order, 'actual_expires_at', None) or getattr(order, 'expires_at', None)
         expires = _format_local_date(expires_at)
-        kb.button(text=f'⛔ 关闭 {label} 自动续费 | {expires}', callback_data=f'cloud:autorenewlist:off:{order_id}:{page}')
-        button_count += 1
-    if button_count:
-        kb.adjust(2)
+        enabled = bool(getattr(order, 'auto_renew_enabled', False))
+        icon = '✅' if enabled else '⏸'
+        action_text = '关闭' if enabled else '开启'
+        action = 'off' if enabled else 'on'
+        kb.row(InlineKeyboardButton(text=f'{icon} {label}{user_label} | {expires} | 点我{action_text}', callback_data=f'cloud:autorenewlist:{action}:{order_id}:{page}'))
     nav = []
     if page > 1:
         nav.append(InlineKeyboardButton(text='⬅️ 上一页', callback_data=f'cloud:autorenewlist:page:{page - 1}'))
@@ -448,6 +457,7 @@ def cloud_auto_renew_server_list(orders, page: int = 1, total_pages: int = 1):
         kb.as_markup(),
         page=page,
         total_pages=total_pages,
+        is_admin=is_admin,
         order_ids=[getattr(order, 'order_id', None) or getattr(order, 'id', None) for order in orders],
     )
 

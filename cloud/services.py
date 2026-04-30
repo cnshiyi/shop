@@ -993,6 +993,10 @@ def _proxy_asset_view(asset: CloudAsset):
         ip_recycle_at=getattr(order, 'ip_recycle_at', None),
         auto_renew_enabled=bool(getattr(order, 'auto_renew_enabled', False)),
         cloud_reminder_enabled=bool(getattr(order, 'cloud_reminder_enabled', True)),
+        user_id=asset.user_id,
+        user_tg_id=getattr(getattr(asset, 'user', None), 'tg_user_id', None),
+        username=getattr(getattr(asset, 'user', None), 'primary_username', ''),
+        first_name=getattr(getattr(asset, 'user', None), 'first_name', '') or '',
         created_at=asset.created_at,
         note=asset.note,
         get_status_display=lambda: asset.get_status_display(),
@@ -1053,12 +1057,26 @@ def list_user_cloud_servers(user_id: int):
 def list_user_auto_renew_cloud_servers(user_id: int):
     ip_filter = Q(public_ip__isnull=False) & ~Q(public_ip='')
     assets = (
-        CloudAsset.objects.select_related('order')
-        .filter(kind=CloudAsset.KIND_SERVER, user_id=user_id, order__auto_renew_enabled=True)
+        CloudAsset.objects.select_related('order', 'user')
+        .filter(kind=CloudAsset.KIND_SERVER, user_id=user_id)
         .filter(ip_filter)
         .filter(_active_cloud_account_asset_filter())
         .exclude(status__in=_INACTIVE_ASSET_STATUSES)
         .order_by('-sort_order', 'actual_expires_at', '-updated_at', '-id')
+    )
+    return [_proxy_asset_view(asset) for asset in assets]
+
+
+@sync_to_async
+def list_all_auto_renew_cloud_servers():
+    ip_filter = Q(public_ip__isnull=False) & ~Q(public_ip='')
+    assets = (
+        CloudAsset.objects.select_related('order', 'user')
+        .filter(kind=CloudAsset.KIND_SERVER)
+        .filter(ip_filter)
+        .filter(_active_cloud_account_asset_filter())
+        .exclude(status__in=_INACTIVE_ASSET_STATUSES)
+        .order_by('-sort_order', 'user_id', 'actual_expires_at', '-updated_at', '-id')
     )
     return [_proxy_asset_view(asset) for asset in assets]
 
@@ -2531,9 +2549,7 @@ def set_cloud_order_reminder(order_id: int, user_id: int, enabled: bool, reminde
     return order
 
 
-@sync_to_async
-def set_cloud_server_auto_renew(order_id: int, user_id: int, enabled: bool):
-    order = CloudServerOrder.objects.filter(id=order_id, user_id=user_id).first()
+def _set_cloud_server_auto_renew(order: CloudServerOrder | None, enabled: bool):
     if not order:
         return None
     if enabled and not _can_order_be_renewed(order):
@@ -2541,6 +2557,39 @@ def set_cloud_server_auto_renew(order_id: int, user_id: int, enabled: bool):
     order.auto_renew_enabled = enabled
     order.save(update_fields=['auto_renew_enabled', 'updated_at'])
     return order
+
+
+@sync_to_async
+def set_cloud_server_auto_renew(order_id: int, user_id: int, enabled: bool):
+    order = CloudServerOrder.objects.filter(id=order_id, user_id=user_id).first()
+    return _set_cloud_server_auto_renew(order, enabled)
+
+
+@sync_to_async
+def set_cloud_server_auto_renew_admin(order_id: int, enabled: bool):
+    order = CloudServerOrder.objects.filter(id=order_id).first()
+    return _set_cloud_server_auto_renew(order, enabled)
+
+
+@sync_to_async
+def enable_all_cloud_server_auto_renew_admin():
+    order_ids = list(
+        CloudAsset.objects.filter(kind=CloudAsset.KIND_SERVER, order__isnull=False)
+        .filter(Q(public_ip__isnull=False) & ~Q(public_ip=''))
+        .filter(_active_cloud_account_asset_filter())
+        .exclude(status__in=_INACTIVE_ASSET_STATUSES)
+        .values_list('order_id', flat=True)
+        .distinct()
+    )
+    updated = 0
+    skipped = 0
+    for order in CloudServerOrder.objects.filter(id__in=order_ids):
+        result = _set_cloud_server_auto_renew(order, True)
+        if result:
+            updated += 1
+        else:
+            skipped += 1
+    return {'updated': updated, 'skipped': skipped, 'total': len(order_ids)}
 
 
 @sync_to_async
@@ -2583,6 +2632,7 @@ __all__ = [
     'delay_cloud_server_expiry',
     'ensure_cloud_server_pricing',
     'ensure_unique_cloud_server_name',
+    'enable_all_cloud_server_auto_renew_admin',
     'get_cloud_plan',
     'get_cloud_server_auto_renew',
     'get_user_reminder_summary',
@@ -2592,6 +2642,7 @@ __all__ = [
     'ensure_cloud_asset_operation_order',
     'initialize_proxy_asset',
     'list_custom_regions',
+    'list_all_auto_renew_cloud_servers',
     'list_region_plans',
     'list_user_auto_renew_cloud_servers',
     'list_user_cloud_servers',
@@ -2612,6 +2663,7 @@ __all__ = [
     'record_cloud_ip_log',
     'set_cloud_order_reminder',
     'set_cloud_server_auto_renew',
+    'set_cloud_server_auto_renew_admin',
     'set_cloud_server_port',
     'start_cloud_server_from_admin',
     'unmute_all_user_reminders',
