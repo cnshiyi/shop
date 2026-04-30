@@ -1791,7 +1791,7 @@ def _cloud_asset_detail_text(item) -> str:
 def _cloud_server_detail_text(order) -> str:
     status_hint = _cloud_order_status_hint(order)
     service_expires_at = _format_local_dt(order.service_expires_at) if order.service_expires_at else '今天到期'
-    renew_price = order.pay_amount or order.total_amount
+    renew_price = getattr(order, 'renewal_price', None) or order.pay_amount or order.total_amount
     auto_renew_status = '已开启' if getattr(order, 'auto_renew_enabled', False) else '已关闭'
     proxy_links_text = _proxy_links_text(order)
     text = (

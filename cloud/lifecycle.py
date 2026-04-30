@@ -261,7 +261,7 @@ def _ensure_notice_ip(text: str, ip: str) -> str:
     return str(text or '')
 
 
-def _notice_plan_text(order, notice: dict | None = None, *, include_expiry: bool = True) -> str:
+def _notice_plan_text(order, notice: dict | None = None, *, include_expiry: bool = True, include_renewal_amount: bool = True) -> str:
     notice = notice or {}
     expires_at = notice.get('expires_at') or getattr(order, 'service_expires_at', None)
     suspend_at = notice.get('suspend_at') or getattr(order, 'suspend_at', None)
@@ -272,6 +272,8 @@ def _notice_plan_text(order, notice: dict | None = None, *, include_expiry: bool
     lines = []
     if include_expiry:
         lines.append(f'到期时间: {_format_notice_dt(expires_at)}')
+    if include_renewal_amount:
+        lines.append(f'续费金额: {_renewal_price(order, getattr(order, "user", None)):.2f} USDT')
     if auto_renew_enabled:
         lines.append(f'自动续费: 已开启，预计 {_format_notice_dt(auto_renew_at)} 自动续费')
     else:

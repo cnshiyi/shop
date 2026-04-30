@@ -742,7 +742,6 @@ def create_cloud_server_order(user_id: int, plan_id: int, currency: str = 'USDT'
     plan = CloudServerPlan.objects.get(id=plan_id, is_active=True)
     user = TelegramUser.objects.get(id=user_id)
     quantity = max(1, int(quantity or 1))
-    original_total_usdt = (Decimal(plan.price) * quantity).quantize(Decimal('0.01'))
     discounted_total_usdt = (_apply_cloud_discount(Decimal(plan.price), user.cloud_discount_rate) * quantity).quantize(Decimal('0.01'))
     payable_base = async_to_sync(usdt_to_trx)(discounted_total_usdt) if currency == 'TRX' else discounted_total_usdt
     pay_amount = _generate_unique_pay_amount(payable_base, currency)
@@ -761,7 +760,7 @@ def create_cloud_server_order(user_id: int, plan_id: int, currency: str = 'USDT'
         provider_resource_id=(plan.provider_plan_id or None),
         quantity=quantity,
         currency=currency,
-        total_amount=original_total_usdt,
+        total_amount=discounted_total_usdt,
         pay_amount=pay_amount,
         pay_method='address',
         status='pending',
@@ -779,7 +778,6 @@ def buy_cloud_server_with_balance(user_id: int, plan_id: int, currency: str = 'U
     quantity = max(1, int(quantity or 1))
     with transaction.atomic():
         user = TelegramUser.objects.select_for_update().get(id=user_id)
-        original_total_usdt = (Decimal(plan.price) * quantity).quantize(Decimal('0.01'))
         discounted_total_usdt = (_apply_cloud_discount(Decimal(plan.price), user.cloud_discount_rate) * quantity).quantize(Decimal('0.01'))
         total = async_to_sync(usdt_to_trx)(discounted_total_usdt) if currency == 'TRX' else discounted_total_usdt
         balance_field = 'balance_trx' if currency == 'TRX' else 'balance'
@@ -803,7 +801,7 @@ def buy_cloud_server_with_balance(user_id: int, plan_id: int, currency: str = 'U
             provider_resource_id=(plan.provider_plan_id or None),
             quantity=quantity,
             currency=currency,
-            total_amount=original_total_usdt,
+            total_amount=discounted_total_usdt,
             pay_amount=total,
             pay_method='balance',
             status='paid',
@@ -911,6 +909,8 @@ def _hydrate_order_from_proxy_asset(order: CloudServerOrder | None, asset: Cloud
     if expires_at:
         order.service_expires_at = expires_at
     if asset:
+        if getattr(asset, 'price', None) is not None:
+            order.renewal_price = Decimal(str(asset.price)).quantize(Decimal('0.01'))
         order.mtproxy_link = getattr(asset, 'mtproxy_link', None) or order.mtproxy_link
         order.proxy_links = getattr(asset, 'proxy_links', None) or order.proxy_links
         order.mtproxy_secret = getattr(asset, 'mtproxy_secret', None) or order.mtproxy_secret
@@ -1154,12 +1154,10 @@ def _manual_proxy_price(order: CloudServerOrder) -> Decimal | None:
 
 
 def _renewal_price(order: CloudServerOrder, user: TelegramUser | None = None) -> Decimal:
-    discount_rate = Decimal(str(getattr(user, 'cloud_discount_rate', 100) or 100)) if user else Decimal('100')
     manual_price = _manual_proxy_price(order)
-    total_amount = manual_price if manual_price is not None else Decimal(str(order.total_amount or 0))
-    if discount_rate <= 0:
-        discount_rate = Decimal('100')
-    return (total_amount * discount_rate / Decimal('100')).quantize(Decimal('0.01'))
+    if manual_price is not None:
+        return manual_price.quantize(Decimal('0.01'))
+    return Decimal(str(order.total_amount or 0)).quantize(Decimal('0.01'))
 
 
 def record_cloud_ip_log(*, event_type, order=None, asset=None, server=None, public_ip=None, previous_public_ip=None, note=''):
@@ -2113,13 +2111,16 @@ def list_cloud_server_upgrade_plans(order_id: int, user_id: int):
         return [], '当前状态不允许升级'
     if not _has_main_proxy_link(order):
         return [], '当前服务器没有主代理链接，请先在后台添加主链接后再升级'
-    current_price = Decimal(getattr(order.plan, 'price', None) or order.total_amount or 0)
+    current_price = _renewal_price(order, order.user)
     blocks, target_expiry, _ = _upgrade_blocks_and_expiry(order.service_expires_at)
-    plans = list(CloudServerPlan.objects.filter(provider=order.provider, region_code=order.region_code, is_active=True, price__gt=current_price).order_by('price', 'sort_order', 'id'))
+    plans = list(CloudServerPlan.objects.filter(provider=order.provider, region_code=order.region_code, is_active=True).order_by('price', 'sort_order', 'id'))
     result = []
     for plan in plans:
-        diff = ((Decimal(plan.price) - current_price) * Decimal(blocks)).quantize(Decimal('0.01'))
-        result.append({'id': plan.id, 'name': plan.plan_name, 'price': str(plan.price.quantize(Decimal('0.001'))), 'diff': str(diff.quantize(Decimal('0.001'))), 'target_days': blocks * 31, 'target_expiry': target_expiry})
+        target_price = _apply_cloud_discount(Decimal(plan.price), order.user.cloud_discount_rate)
+        if target_price <= current_price:
+            continue
+        diff = ((target_price - current_price) * Decimal(blocks)).quantize(Decimal('0.01'))
+        result.append({'id': plan.id, 'name': plan.plan_name, 'price': str(target_price.quantize(Decimal('0.001'))), 'diff': str(diff.quantize(Decimal('0.001'))), 'target_days': blocks * 31, 'target_expiry': target_expiry})
     return result, None
 
 
@@ -2141,11 +2142,12 @@ def create_cloud_server_upgrade_order(order_id: int, user_id: int, target_plan_i
     target_plan = CloudServerPlan.objects.filter(id=target_plan_id, provider=order.provider, region_code=order.region_code, is_active=True).first()
     if not target_plan:
         return None, '目标套餐不存在'
-    current_price = Decimal(getattr(order.plan, 'price', None) or order.total_amount or 0)
-    if Decimal(target_plan.price) <= current_price:
+    current_price = _renewal_price(order, order.user)
+    target_price = _apply_cloud_discount(Decimal(target_plan.price), order.user.cloud_discount_rate)
+    if target_price <= current_price:
         return None, '只能升级到更高价格的配置'
     blocks, target_expiry, _ = _upgrade_blocks_and_expiry(order.service_expires_at)
-    diff = ((Decimal(target_plan.price) - current_price) * Decimal(blocks)).quantize(Decimal('0.01'))
+    diff = ((target_price - current_price) * Decimal(blocks)).quantize(Decimal('0.01'))
     now = timezone.now()
     suffix = now.strftime('%m%d%H%M%S')
     old_public_ip = order.public_ip or order.previous_public_ip or ''
@@ -2229,8 +2231,8 @@ def refund_cloud_server_to_balance(order_id: int, user_id: int):
         logger.warning('云服务器退款拒绝: order=%s user_id=%s expires_at=%s reason=less_than_10_days', order.order_no, user_id, order.service_expires_at)
         return None, '到期时间少于 10 天，禁止退款'
     currency = order.currency or 'USDT'
-    monthly = Decimal(str(order.pay_amount or order.total_amount or 0))
     is_delivered = order.status in {'completed', 'expiring', 'suspended'}
+    monthly = _renewal_price(order, order.user) if is_delivered else Decimal(str(order.pay_amount or order.total_amount or 0))
     if is_delivered:
         if not str(order.public_ip or '').strip():
             logger.warning('云服务器退款拒绝: order=%s user_id=%s reason=missing_public_ip', order.order_no, user_id)
