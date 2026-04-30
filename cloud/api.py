@@ -15,7 +15,7 @@ from django.db.models import Case, CharField, Count, IntegerField, Q, Value, Whe
 from django.db.models.functions import Cast
 from django.db.utils import ProgrammingError
 from django.utils import timezone
-from django.utils.dateparse import parse_datetime
+from django.utils.dateparse import parse_date, parse_datetime
 from django.views.decorators.csrf import csrf_exempt
 from django.views.decorators.http import require_GET, require_POST, require_http_methods
 
@@ -41,7 +41,7 @@ from bot.api import (
 )
 from bot.models import TelegramUser
 from cloud.lifecycle import _delete_instance, _mark_replaced_order_deleted
-from cloud.services import AWS_REGION_NAMES, create_cloud_server_rebuild_order, ensure_cloud_server_pricing, ensure_manual_expiry_operation_order, ensure_manual_owner_operation_order, record_cloud_ip_log, refresh_custom_plan_cache
+from cloud.services import AWS_REGION_NAMES, _cloud_order_lifecycle_fields, create_cloud_server_rebuild_order, ensure_cloud_server_pricing, ensure_manual_expiry_operation_order, ensure_manual_owner_operation_order, record_cloud_ip_log, refresh_custom_plan_cache
 from cloud.models import AddressMonitor, CloudAsset, CloudIpLog, CloudServerOrder, CloudServerPlan, Server, ServerPrice
 from core.cloud_accounts import cloud_account_label
 from core.models import CloudAccountConfig, ExternalSyncLog
@@ -124,7 +124,11 @@ def _parse_iso_datetime(value, field_label='时间'):
         return None
     parsed = parse_datetime(raw)
     if parsed is None:
-        raise ValueError(f'{field_label}格式不正确，请使用 ISO 时间')
+        parsed_date = parse_date(raw)
+        if parsed_date is not None:
+            parsed = timezone.datetime.combine(parsed_date, timezone.datetime.min.time())
+    if parsed is None:
+        raise ValueError(f'{field_label}格式不正确，请使用 ISO 时间或 YYYY-MM-DD 日期')
     if timezone.is_naive(parsed):
         parsed = timezone.make_aware(parsed, timezone.get_current_timezone())
     return parsed
@@ -332,6 +336,26 @@ def update_cloud_asset(request, asset_id):
                     return _error(str(exc), status=400)
                 if server:
                     server.expires_at = asset.actual_expires_at
+                if asset.order_id and not is_unattached_ip:
+                    same_order_active_assets = CloudAsset.objects.filter(
+                        order_id=asset.order_id,
+                        kind=CloudAsset.KIND_SERVER,
+                    ).exclude(status__in=[
+                        CloudAsset.STATUS_DELETED,
+                        CloudAsset.STATUS_DELETING,
+                        CloudAsset.STATUS_TERMINATED,
+                        CloudAsset.STATUS_TERMINATING,
+                    ]).count()
+                    if same_order_active_assets <= 1:
+                        pending_order_updates.update({
+                            'service_expires_at': manual_expires_at,
+                            'renew_notice_sent_at': None,
+                            'auto_renew_notice_sent_at': None,
+                            'auto_renew_failure_notice_sent_at': None,
+                            'delete_notice_sent_at': None,
+                            'recycle_notice_sent_at': None,
+                            **_cloud_order_lifecycle_fields(manual_expires_at),
+                        })
 
             if asset.order_id:
                 if 'mtproxy_link' in payload:

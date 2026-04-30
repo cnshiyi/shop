@@ -1349,7 +1349,12 @@ def _create_manual_asset_operation_order(asset: CloudAsset, user: TelegramUser, 
         total_amount=Decimal('0'),
         pay_amount=Decimal('0'),
         pay_method='balance',
-        status='completed',
+        status='cancelled',
+        cloud_reminder_enabled=False,
+        suspend_reminder_enabled=False,
+        delete_reminder_enabled=False,
+        ip_recycle_reminder_enabled=False,
+        auto_renew_enabled=False,
         lifecycle_days=getattr(base_order, 'lifecycle_days', 31) or 31,
         service_started_at=getattr(base_order, 'service_started_at', None) or asset.created_at or now,
         service_expires_at=service_expires_at or asset.actual_expires_at,
@@ -1369,7 +1374,7 @@ def _create_manual_asset_operation_order(asset: CloudAsset, user: TelegramUser, 
         last_user_id=getattr(user, 'tg_user_id', None),
         completed_at=now,
         replacement_for=base_order if base_order_id else None,
-        provision_note=f'{operation}: 后台人工编辑生成的操作订单；来源资产 #{asset.id}；来源订单 #{base_order_id or "-"}。',
+        provision_note=f'{operation}: 后台人工编辑生成的审计订单，不参与续费/到期生命周期；来源资产 #{asset.id}；来源订单 #{base_order_id or "-"}。',
     )
     return order
 
@@ -1396,16 +1401,16 @@ def ensure_manual_owner_operation_order(asset: CloudAsset, new_user: TelegramUse
         logger.warning('CLOUD_MANUAL_OWNER_ORDER_SKIPPED asset_id=%s public_ip=%s reason=no_available_plan actor=%s', asset.id, asset.public_ip, actor)
         record_cloud_ip_log(event_type='changed', asset=asset, public_ip=asset.public_ip, previous_public_ip=asset.previous_public_ip, note=f'{actor}: 人工编辑所属人 {old_label} -> {new_label}；未生成操作订单：该地区没有可用套餐。')
         return None, None
-    order.provision_note = '\n'.join(filter(None, [order.provision_note, f'{actor}: 人工编辑所属人 {old_label} -> {new_label}，生成独立操作订单支撑同步识别。']))
+    order.provision_note = '\n'.join(filter(None, [order.provision_note, f'{actor}: 人工编辑所属人 {old_label} -> {new_label}，生成独立操作订单用于审计，不改写资产原订单绑定。']))
     order.save(update_fields=['provision_note', 'updated_at'])
-    asset.order = order
-    asset.save(update_fields=['order', 'updated_at'])
-    server_match = Q(order=order)
+    server_match = Q()
+    if asset.order_id:
+        server_match |= Q(order_id=asset.order_id)
     if asset.instance_id:
         server_match |= Q(instance_id=asset.instance_id)
     if asset.provider_resource_id:
         server_match |= Q(provider_resource_id=asset.provider_resource_id)
-    server_count = Server.objects.filter(server_match).update(order=order, user=new_user, updated_at=timezone.now())
+    server_count = Server.objects.filter(server_match).update(user=new_user, updated_at=timezone.now()) if server_match else 0
     logger.info('CLOUD_MANUAL_OWNER_ORDER order_id=%s order_no=%s asset_id=%s public_ip=%s old_user=%s new_user=%s server_count=%s actor=%s', order.id, order.order_no, asset.id, asset.public_ip, old_label, new_label, server_count, actor)
     record_cloud_ip_log(event_type='changed', order=order, asset=asset, public_ip=asset.public_ip, previous_public_ip=asset.previous_public_ip, note=f'{actor}: 人工编辑所属人 {old_label} -> {new_label}；操作订单 {order.order_no}；同步 Server {server_count} 条。')
     return order, None
@@ -1424,18 +1429,19 @@ def ensure_manual_expiry_operation_order(asset: CloudAsset, new_expires_at, acto
         return None, None
     order.provision_note = '\n'.join(filter(None, [
         order.provision_note,
-        f'{actor}: 人工编辑到期时间 {_fmt_dt(old_expires_at)} -> {_fmt_dt(new_expires_at)}，生成独立操作订单支撑同步识别。',
+        f'{actor}: 人工编辑到期时间 {_fmt_dt(old_expires_at)} -> {_fmt_dt(new_expires_at)}，生成独立操作订单用于审计，不改写资产原订单绑定。',
     ]))
     order.save(update_fields=['provision_note', 'updated_at'])
-    asset.order = order
     asset.actual_expires_at = new_expires_at
-    asset.save(update_fields=['order', 'actual_expires_at', 'updated_at'])
-    server_match = Q(order=order)
+    asset.save(update_fields=['actual_expires_at', 'updated_at'])
+    server_match = Q()
+    if asset.order_id:
+        server_match |= Q(order_id=asset.order_id)
     if asset.instance_id:
         server_match |= Q(instance_id=asset.instance_id)
     if asset.provider_resource_id:
         server_match |= Q(provider_resource_id=asset.provider_resource_id)
-    server_count = Server.objects.filter(server_match).update(order=order, expires_at=new_expires_at, updated_at=timezone.now())
+    server_count = Server.objects.filter(server_match).update(expires_at=new_expires_at, updated_at=timezone.now()) if server_match else 0
     logger.info(
         'CLOUD_MANUAL_EXPIRY_ORDER order_id=%s order_no=%s asset_id=%s public_ip=%s old_expires_at=%s new_expires_at=%s server_count=%s actor=%s',
         order.id,
