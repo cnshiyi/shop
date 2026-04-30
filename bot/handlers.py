@@ -1287,7 +1287,23 @@ async def _provision_cloud_server_and_notify(bot: Bot, chat_id: int, order_id: i
                 await progress_task
 
 
-async def _cloud_renewal_postcheck_and_notify(bot: Bot, chat_id: int, order_id: int):
+def _renew_balance_change_text(balance_change: dict | None) -> str:
+    if not balance_change:
+        return ''
+    currency = balance_change.get('currency') or 'USDT'
+    amount = balance_change.get('amount')
+    before = balance_change.get('before')
+    after = balance_change.get('after')
+    if amount is None or before is None or after is None:
+        return ''
+    return (
+        f'扣款金额: {fmt_pay_amount(amount)} {currency}\n'
+        f'扣款前余额: {fmt_pay_amount(before)} {currency}\n'
+        f'扣款后余额: {fmt_pay_amount(after)} {currency}'
+    )
+
+
+async def _cloud_renewal_postcheck_and_notify(bot: Bot, chat_id: int, order_id: int, balance_change: dict | None = None):
     await bot.send_message(chat_id=chat_id, text='🔎 续费已完成，正在检查服务器运行状态和 MTProxy 链路。')
     checked, err = await run_cloud_server_renewal_postcheck(order_id)
     if getattr(checked, 'replacement_for_id', None) and checked.status in {'paid', 'provisioning', 'failed'}:
@@ -1297,7 +1313,18 @@ async def _cloud_renewal_postcheck_and_notify(bot: Bot, chat_id: int, order_id: 
     if err:
         await bot.send_message(chat_id=chat_id, text=f'⚠️ 续费后巡检发现异常，已记录并尝试修复。\n订单号: {getattr(checked, "order_no", "-") or "-"}\n请稍后再查看代理状态，或联系人工客服。')
         return
-    await bot.send_message(chat_id=chat_id, text=f'✅ 续费后巡检完成。\n订单号: {getattr(checked, "order_no", "-") or "-"}\n服务器运行正常，MTProxy 主/备用端口正常。')
+    balance_text = _renew_balance_change_text(balance_change)
+    plan_text = _cloud_order_plan_text(checked) if checked else ''
+    await bot.send_message(
+        chat_id=chat_id,
+        text='\n'.join(filter(None, [
+            '✅ 续费后巡检完成。',
+            f'订单号: {getattr(checked, "order_no", "-") or "-"}',
+            plan_text,
+            balance_text,
+            '服务器运行正常，MTProxy 主/备用端口正常。',
+        ])),
+    )
 
 
 async def _create_cloud_order_and_notify(bot: Bot, chat_id: int, user_id: int, plan_id: int, quantity: int, currency: str, plan_name: str, region_name: str):
@@ -3372,7 +3399,7 @@ def register_handlers(dp: Dispatcher):
             await _safe_edit_text(callback.message, '✅ 云服务器钱包续费成功，正在自动恢复固定 IP 服务器。\n\n系统会保持旧 IP / 旧端口 / 旧密钥不变，完成后自动发送代理链接。')
             asyncio.create_task(_provision_cloud_server_and_notify(callback.bot, callback.from_user.id, order.id, order.mtproxy_port or 9528))
             return
-        asyncio.create_task(_cloud_renewal_postcheck_and_notify(callback.bot, callback.from_user.id, order.id))
+        asyncio.create_task(_cloud_renewal_postcheck_and_notify(callback.bot, callback.from_user.id, order.id, getattr(order, 'renew_balance_change', None)))
         await _safe_edit_text(callback.message, 
             '✅ 云服务器钱包自动续费成功\n\n'
             f'订单号: {order.order_no}\n'
@@ -3418,7 +3445,7 @@ def register_handlers(dp: Dispatcher):
             await _safe_edit_text(callback.message, '✅ 云服务器续费成功，正在自动恢复固定 IP 服务器。\n\n系统会保持旧 IP / 旧端口 / 旧密钥不变，完成后自动发送代理链接。')
             asyncio.create_task(_provision_cloud_server_and_notify(callback.bot, callback.from_user.id, order.id, order.mtproxy_port or 9528))
             return
-        asyncio.create_task(_cloud_renewal_postcheck_and_notify(callback.bot, callback.from_user.id, order.id))
+        asyncio.create_task(_cloud_renewal_postcheck_and_notify(callback.bot, callback.from_user.id, order.id, getattr(order, 'renew_balance_change', None)))
         await _safe_edit_text(callback.message, 
             '✅ 云服务器续费成功\n\n'
             f'订单号: {order.order_no}\n'

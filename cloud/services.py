@@ -1671,8 +1671,10 @@ def apply_cloud_server_renewal(order_id: int, days: int = 31, run_post_checks: b
         order.save(update_fields=['provision_note', 'updated_at'])
         raise ValueError(renew_note)
     now = timezone.now()
+    current_expires_at = order.service_expires_at
+    renew_base_at = current_expires_at if current_expires_at and current_expires_at > now else now
     order.service_started_at = now
-    order.service_expires_at = now + timezone.timedelta(days=days)
+    order.service_expires_at = renew_base_at + timezone.timedelta(days=days)
     order.last_renewed_at = now
     if hasattr(order, 'auto_renew_notice_sent_at'):
         order.auto_renew_notice_sent_at = None
@@ -1697,7 +1699,8 @@ def apply_cloud_server_renewal(order_id: int, days: int = 31, run_post_checks: b
             post_notes.append('实例未确认运行，暂未执行 MTProxy 检查。')
     else:
         post_notes.append('续费后运行状态与 MTProxy 巡检已提交后台执行。')
-    order.provision_note = '\n'.join(filter(None, [renew_note or f'续费成功，服务有效期已从当前时间重新计算 {days} 天。', retention_note, *post_notes]))
+    base_note = '原到期时间未过期，已在原到期时间基础上顺延' if current_expires_at and current_expires_at > now else '原到期时间已过期或缺失，已从当前时间重新计算'
+    order.provision_note = '\n'.join(filter(None, [renew_note or f'续费成功，{base_note} {days} 天。', retention_note, *post_notes]))
     order.save(update_fields=['service_started_at', 'service_expires_at', 'renew_grace_expires_at', 'suspend_at', 'delete_at', 'ip_recycle_at', 'last_renewed_at', 'auto_renew_notice_sent_at', 'auto_renew_failure_notice_sent_at', 'delay_quota', 'ip_change_quota', 'status', 'provision_note', 'updated_at'])
     if retained_ip:
         recovery_order, recovery_err = _create_retained_ip_recovery_order(order, days)
@@ -1761,7 +1764,7 @@ def pay_cloud_server_renewal_with_balance(order_id: int, user_id: int, currency:
                 order.pay_amount = total
                 order.paid_at = paid_at
                 order.expired_at = None
-                record_balance_ledger(
+                ledger = record_balance_ledger(
                     user,
                     ledger_type='cloud_order_balance_pay',
                     currency=currency,
@@ -1772,6 +1775,13 @@ def pay_cloud_server_renewal_with_balance(order_id: int, user_id: int, currency:
                     description=f'云服务器续费订单 #{order.order_no} 钱包支付',
                 )
         order = apply_cloud_server_renewal.__wrapped__(order_id, days, False)
+        if not already_paid:
+            order.renew_balance_change = {
+                'currency': currency,
+                'amount': getattr(ledger, 'amount', total) if ledger else total,
+                'before': old_balance,
+                'after': getattr(user, balance_field),
+            }
         if already_paid:
             logger.info('云服务器钱包续费订单已支付，跳过重复扣款并继续续期: order_id=%s user_id=%s', order_id, user_id)
         return order, None
