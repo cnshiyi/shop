@@ -140,9 +140,6 @@ def _list_regions(region, account=None):
     normalized = str(region or '').strip().lower()
     if normalized and normalized != 'all':
         return [normalized]
-    if not normalized:
-        account_region = str(getattr(account, 'region_hint', '') or '').strip().lower()
-        return [account_region or 'ap-southeast-1']
     try:
         import boto3
     except Exception as exc:

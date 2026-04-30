@@ -511,6 +511,7 @@ def update_cloud_asset(request, asset_id):
 def cloud_assets_list(request):
     keyword = _get_keyword(request)
     grouped = (request.GET.get('grouped') or '').lower() in {'1', 'true', 'yes'}
+    paginated = (request.GET.get('paginated') or '').lower() in {'1', 'true', 'yes'}
     try:
         queryset = CloudAsset.objects.select_related('user', 'order', 'cloud_account').filter(kind=CloudAsset.KIND_SERVER).exclude(
             status__in=[CloudAsset.STATUS_DELETED, CloudAsset.STATUS_TERMINATED],
@@ -522,10 +523,28 @@ def cloud_assets_list(request):
                 'asset_name', 'public_ip', 'mtproxy_link', 'account_label', 'cloud_account__external_account_id', 'cloud_account__name', 'user__tg_user_id',
                 'user__username', 'order__order_no',
             ],
-        ).distinct()
-        items = [_asset_payload(asset) for asset in queryset[:200]]
+        ).distinct().order_by('-sort_order', 'actual_expires_at', '-updated_at', '-id')
+        if not grouped and paginated:
+            try:
+                page = max(int(request.GET.get('page') or '1'), 1)
+            except (TypeError, ValueError):
+                page = 1
+            try:
+                page_size = int(request.GET.get('page_size') or '50')
+            except (TypeError, ValueError):
+                page_size = 50
+            page_size = min(max(page_size, 10), 200)
+            total = queryset.count()
+            offset = (page - 1) * page_size
+            items = [_asset_payload(asset) for asset in queryset[offset:offset + page_size]]
+            return _ok({'items': items, 'total': total, 'page': page, 'page_size': page_size})
+        items = [_asset_payload(asset) for asset in queryset]
     except ProgrammingError:
-        return _ok({'groups': [], 'items': []} if grouped else [])
+        if grouped:
+            return _ok({'groups': [], 'items': []})
+        if paginated:
+            return _ok({'items': [], 'total': 0, 'page': 1, 'page_size': 50})
+        return _ok([])
 
     if not grouped:
         return _ok(items)
@@ -1193,6 +1212,20 @@ def _statistics_account_label(account) -> str:
     return cloud_account_label(account)
 
 
+def _cloud_account_labels_queryset(is_active: bool | None = None):
+    queryset = CloudAccountConfig.objects.filter(
+        provider__in=[CloudAccountConfig.PROVIDER_AWS, CloudAccountConfig.PROVIDER_ALIYUN],
+    )
+    if is_active is not None:
+        queryset = queryset.filter(is_active=is_active)
+    labels = []
+    for account in queryset:
+        label = cloud_account_label(account)
+        if label:
+            labels.append(label)
+    return labels
+
+
 @dashboard_login_required
 @require_GET
 def servers_statistics(request):
@@ -1209,7 +1242,16 @@ def servers_statistics(request):
         Server.STATUS_SUSPENDED,
         Server.STATUS_EXPIRED_GRACE,
     ]
-    queryset = Server.objects.filter(status__in=active_statuses)
+    active_account_labels = _cloud_account_labels_queryset(True)
+    inactive_account_labels = _cloud_account_labels_queryset(False)
+    queryset = Server.objects.select_related('order', 'order__cloud_account').filter(status__in=active_statuses).exclude(
+        account_label__in=inactive_account_labels,
+    ).filter(
+        Q(account_label__in=active_account_labels)
+        | Q(account_label__isnull=True)
+        | Q(account_label='')
+        | Q(order__cloud_account__is_active=True)
+    )
     if keyword:
         queryset = _apply_keyword_filter(
             queryset,
@@ -1512,6 +1554,8 @@ def sync_servers(request):
     payload = _read_payload(request)
     aliyun_region = (payload.get('region') or request.POST.get('region') or request.GET.get('region') or 'cn-hongkong').strip() or 'cn-hongkong'
     aws_region = (payload.get('aws_region') or request.POST.get('aws_region') or request.GET.get('aws_region') or '').strip()
+    if aws_region.lower() == 'all':
+        aws_region = ''
     errors = []
     synced = {'aliyun': False, 'aws': False}
     missing = {'aliyun': 0, 'aws': 0}
@@ -1550,6 +1594,8 @@ def sync_cloud_assets(request):
     payload = _read_payload(request)
     aliyun_region = (payload.get('region') or request.POST.get('region') or request.GET.get('region') or 'cn-hongkong').strip() or 'cn-hongkong'
     aws_region = (payload.get('aws_region') or request.POST.get('aws_region') or request.GET.get('aws_region') or '').strip()
+    if aws_region.lower() == 'all':
+        aws_region = ''
     errors = []
     synced = {'aliyun': False, 'aws': False, 'reconcile': False}
     aws_regions = []
@@ -1787,15 +1833,23 @@ def cloud_assets_sync_status(request):
         last_synced_at = latest_asset.updated_at
 
     since = last_synced_at
+    active_account_labels = _cloud_account_labels_queryset(True)
+    active_account_filter = (
+        Q(cloud_account__is_active=True)
+        | Q(cloud_account__isnull=True, account_label__in=active_account_labels)
+    )
     aws_existing_count = CloudAsset.objects.filter(
+        active_account_filter,
         kind=CloudAsset.KIND_SERVER,
         provider='aws_lightsail',
     ).exclude(status=CloudAsset.STATUS_DELETED).count()
     aliyun_existing_count = CloudAsset.objects.filter(
+        active_account_filter,
         kind=CloudAsset.KIND_SERVER,
         provider='aliyun_simple',
     ).exclude(status=CloudAsset.STATUS_DELETED).count()
     unattached_ip_count = CloudAsset.objects.filter(
+        active_account_filter,
         kind=CloudAsset.KIND_SERVER,
     ).filter(
         Q(provider_status__icontains='未附加') | Q(note__icontains='未附加IP') | Q(note__icontains='未附加固定IP')
