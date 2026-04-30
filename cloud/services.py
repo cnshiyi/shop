@@ -1768,10 +1768,36 @@ def start_cloud_server_from_admin(order_id: int):
     order = _hydrate_order_from_proxy_asset(order)
     if order.provider != 'aws_lightsail':
         return order, '当前云平台暂不支持机器人开机'
-    ok, note = _ensure_aws_instance_running(order)
-    order.provision_note = '\n'.join(filter(None, [order.provision_note, f'管理员手动开机：{note}']))
-    order.save(update_fields=['provision_note', 'updated_at'])
-    return order, None if ok else note
+    if not order.server_name:
+        return order, '缺少实例名称，无法查询云端状态'
+    try:
+        client = _aws_lightsail_client_for_order(order)
+        instance = client.get_instance(instanceName=order.server_name).get('instance') or {}
+        state = ((instance.get('state') or {}).get('name') or '').lower()
+        public_ip = instance.get('publicIpAddress') or order.public_ip or order.previous_public_ip or '-'
+        if state == 'running':
+            note = f'当前已开机运行，无需重复开机。云端状态: running；IP={public_ip}。'
+            ok = True
+        elif state in {'stopped', 'stopping'}:
+            client.start_instance(instanceName=order.server_name)
+            note = f'检测到云端状态 {state}，已发起开机。IP={public_ip}。'
+            ok = True
+            logger.info('CLOUD_ADMIN_START_INSTANCE order=%s server_name=%s previous_state=%s ip=%s', order.order_no, order.server_name, state, public_ip)
+        elif state in {'pending'}:
+            note = f'实例正在启动中，无需重复开机。云端状态: {state}；IP={public_ip}。'
+            ok = True
+        else:
+            note = f'当前云端状态为 {state or "未知"}，未执行开机。IP={public_ip}。'
+            ok = False
+        order.provision_note = '\n'.join(filter(None, [order.provision_note, f'管理员手动开机：{note}']))
+        order.save(update_fields=['provision_note', 'updated_at'])
+        return order, None if ok else note
+    except Exception as exc:
+        note = f'开机状态查询/执行失败: {exc}'
+        logger.warning('CLOUD_ADMIN_START_INSTANCE_FAILED order=%s server_name=%s error=%s', order.order_no, order.server_name, exc)
+        order.provision_note = '\n'.join(filter(None, [order.provision_note, f'管理员手动开机：{note}']))
+        order.save(update_fields=['provision_note', 'updated_at'])
+        return order, note
 
 
 @sync_to_async

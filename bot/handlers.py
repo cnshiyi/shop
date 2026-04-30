@@ -3368,13 +3368,25 @@ def register_handlers(dp: Dispatcher):
         if not await _is_admin_chat(callback.message):
             await _safe_callback_answer(callback, '仅管理员可使用开机', show_alert=True)
             return
-        await _safe_callback_answer(callback, '已提交开机检查')
         order_id = int(callback.data.split(':')[2])
+        logger.info('CLOUD_ADMIN_START_CLICK admin_id=%s order_id=%s callback_data=%s', getattr(callback.from_user, 'id', None), order_id, callback.data)
+        await _safe_callback_answer(callback, '正在检查开机状态')
         order, err = await start_cloud_server_from_admin(order_id)
+        ip = getattr(order, 'public_ip', None) or getattr(order, 'previous_public_ip', None) or '-'
+        order_no = getattr(order, 'order_no', None) or f'#{order_id}'
         if err:
-            await callback.message.reply(f'⚠️ 开机结果：{_public_cloud_error_text(err)}')
+            logger.warning('CLOUD_ADMIN_START_RESULT admin_id=%s order_id=%s order_no=%s ip=%s ok=false error=%s', getattr(callback.from_user, 'id', None), order_id, order_no, ip, err)
+            await _safe_edit_text(
+                callback.message,
+                f'⚠️ 开机结果\n\n订单: {order_no}\nIP: {ip}\n状态: {_public_cloud_error_text(err)}',
+            )
             return
-        await callback.message.reply(f'✅ 已提交开机：{getattr(order, "public_ip", "-") or "-"}')
+        note = str(getattr(order, 'provision_note', '') or '').split('管理员手动开机：')[-1].strip() or '已提交开机检查。'
+        logger.info('CLOUD_ADMIN_START_RESULT admin_id=%s order_id=%s order_no=%s ip=%s ok=true note=%s', getattr(callback.from_user, 'id', None), order_id, order_no, ip, note)
+        await _safe_edit_text(
+            callback.message,
+            f'✅ 开机检查完成\n\n订单: {order_no}\nIP: {ip}\n状态: {note}',
+        )
 
     @dp.callback_query(F.data.startswith('cloud:autorenew:'))
     async def cb_cloud_auto_renew_toggle(callback: CallbackQuery):
