@@ -45,10 +45,37 @@ from cloud.lifecycle import _delete_instance, _mark_replaced_order_deleted
 from cloud.services import AWS_REGION_NAMES, _cloud_order_lifecycle_fields, create_cloud_server_rebuild_order, ensure_cloud_server_pricing, ensure_manual_expiry_operation_order, ensure_manual_owner_operation_order, record_cloud_ip_log, refresh_custom_plan_cache
 from cloud.models import AddressMonitor, CloudAsset, CloudIpLog, CloudServerOrder, CloudServerPlan, Server, ServerPrice
 from core.cloud_accounts import cloud_account_label
-from core.models import CloudAccountConfig, ExternalSyncLog
+from core.models import CloudAccountConfig, ExternalSyncLog, SiteConfig
 from cloud.provisioning import provision_cloud_server
 
 logger = logging.getLogger(__name__)
+
+
+def _next_sync_account(provider: str):
+    accounts = list(
+        CloudAccountConfig.objects.filter(provider=provider, is_active=True).order_by('id')
+    )
+    if not accounts:
+        return None
+    key = f'cloud_sync_next_account_{provider}'
+    try:
+        last_id = int(SiteConfig.get(key, '0') or 0)
+    except (TypeError, ValueError):
+        last_id = 0
+    selected = next((account for account in accounts if account.id > last_id), None) or accounts[0]
+    SiteConfig.set(key, str(selected.id))
+    return selected
+
+
+def _sync_account_payload(account):
+    if not account:
+        return None
+    return {
+        'id': account.id,
+        'provider': account.provider,
+        'name': account.name,
+        'label': cloud_account_label(account),
+    }
 
 
 def _call_command_capture(command_name: str, *args, **options):
@@ -1520,10 +1547,12 @@ def update_cloud_plan(request, plan_id: int):
     return _ok(_cloud_plan_payload(plan))
 
 
-def _apply_server_missing_state(provider, region, existing_instance_ids):
+def _apply_server_missing_state(provider, region, existing_instance_ids, account=None):
     now = timezone.now()
     existing_instance_ids = {str(item) for item in existing_instance_ids if item}
     queryset = Server.objects.filter(provider=provider, region_code=region).exclude(instance_id__isnull=True).exclude(instance_id='')
+    if account:
+        queryset = queryset.filter(account_label=cloud_account_label(account))
     legacy_queryset = queryset.filter(provider_status='missing')
     legacy_updated = legacy_queryset.update(
         status=Server.STATUS_DELETED,
@@ -1589,32 +1618,37 @@ def sync_servers(request):
     missing = {'aliyun': 0, 'aws': 0}
     aws_regions = []
     command_output = io.StringIO()
+    aliyun_account = _next_sync_account(CloudAccountConfig.PROVIDER_ALIYUN)
+    aws_account = _next_sync_account(CloudAccountConfig.PROVIDER_AWS)
+    aws_command = None
     try:
-        aliyun_command, _ = _call_command_capture('sync_aliyun_assets', region=aliyun_region, stdout=command_output)
-        synced['aliyun'] = True
-        missing['aliyun'] = _apply_server_missing_state('aliyun_simple', aliyun_region, getattr(aliyun_command, 'synced_instance_ids', None) or [])
+        if aliyun_account:
+            aliyun_command, _ = _call_command_capture('sync_aliyun_assets', region=aliyun_region, account_id=str(aliyun_account.id), stdout=command_output)
+            synced['aliyun'] = True
+            missing['aliyun'] = _apply_server_missing_state('aliyun_simple', aliyun_region, getattr(aliyun_command, 'synced_instance_ids', None) or [], aliyun_account)
     except Exception as exc:
-        errors.append(f'阿里云同步失败: {exc}')
+        errors.append(f'阿里云账号#{getattr(aliyun_account, "id", "-")}同步失败: {exc}')
     try:
-        if aws_region:
-            aws_command, _ = _call_command_capture('sync_aws_assets', region=aws_region, stdout=command_output)
-            aws_regions = [aws_region]
-        else:
-            aws_command, _ = _call_command_capture('sync_aws_assets', stdout=command_output)
-            aws_regions = getattr(aws_command, 'synced_regions', None) or []
-        synced['aws'] = True
-        synced_map = getattr(aws_command, 'synced_instance_ids_by_region', None) or {}
-        if aws_regions:
-            missing['aws'] = sum(
-                _apply_server_missing_state('aws_lightsail', region, synced_map.get(region, []))
-                for region in aws_regions
-            )
+        if aws_account:
+            if aws_region:
+                aws_command, _ = _call_command_capture('sync_aws_assets', region=aws_region, account_id=str(aws_account.id), stdout=command_output)
+                aws_regions = [aws_region]
+            else:
+                aws_command, _ = _call_command_capture('sync_aws_assets', account_id=str(aws_account.id), stdout=command_output)
+                aws_regions = getattr(aws_command, 'synced_regions', None) or []
+            synced['aws'] = True
+            synced_map = getattr(aws_command, 'synced_instance_ids_by_region', None) or {}
+            if aws_regions:
+                missing['aws'] = sum(
+                    _apply_server_missing_state('aws_lightsail', region, synced_map.get(region, []), aws_account)
+                    for region in aws_regions
+                )
     except Exception as exc:
-        errors.append(f'AWS 同步失败: {exc}')
+        errors.append(f'AWS账号#{getattr(aws_account, "id", "-")}同步失败: {exc}')
     if errors and not any(synced.values()):
         return _error('；'.join(errors), status=500)
-    warnings = getattr(aws_command, 'sync_errors', []) if synced.get('aws') else []
-    return _ok({'synced': synced, 'missing': missing, 'aliyun_region': aliyun_region, 'aws_region': aws_region or 'all', 'aws_regions': aws_regions, 'errors': errors, 'warnings': warnings[:20]})
+    warnings = getattr(aws_command, 'sync_errors', []) if synced.get('aws') and aws_command else []
+    return _ok({'synced': synced, 'missing': missing, 'aliyun_region': aliyun_region, 'aws_region': aws_region or 'all', 'aws_regions': aws_regions, 'errors': errors, 'warnings': warnings[:20], 'accounts': {'aliyun': _sync_account_payload(aliyun_account), 'aws': _sync_account_payload(aws_account)}})
 
 
 @csrf_exempt
@@ -1630,17 +1664,22 @@ def sync_cloud_assets(request):
     synced = {'aliyun': False, 'aws': False, 'reconcile': False}
     aws_regions = []
     command_output = io.StringIO()
+    aliyun_account = _next_sync_account(CloudAccountConfig.PROVIDER_ALIYUN)
+    aws_account = _next_sync_account(CloudAccountConfig.PROVIDER_AWS)
+    aws_command = None
     try:
-        _call_command_capture('sync_aliyun_assets', region=aliyun_region, stdout=command_output)
-        synced['aliyun'] = True
+        if aliyun_account:
+            _call_command_capture('sync_aliyun_assets', region=aliyun_region, account_id=str(aliyun_account.id), stdout=command_output)
+            synced['aliyun'] = True
     except Exception as exc:
-        errors.append(f'阿里云代理同步失败: {exc}')
+        errors.append(f'阿里云账号#{getattr(aliyun_account, "id", "-")}代理同步失败: {exc}')
     try:
-        aws_command, _ = _call_command_capture('sync_aws_assets', region=aws_region, stdout=command_output)
-        aws_regions = getattr(aws_command, 'synced_regions', None) or [aws_region or 'all']
-        synced['aws'] = True
+        if aws_account:
+            aws_command, _ = _call_command_capture('sync_aws_assets', region=aws_region, account_id=str(aws_account.id), stdout=command_output)
+            aws_regions = getattr(aws_command, 'synced_regions', None) or [aws_region or 'all']
+            synced['aws'] = True
     except Exception as exc:
-        errors.append(f'AWS 代理同步失败: {exc}')
+        errors.append(f'AWS账号#{getattr(aws_account, "id", "-")}代理同步失败: {exc}')
     try:
         _call_command_capture('reconcile_cloud_assets_from_servers', stdout=command_output)
         synced['reconcile'] = True
@@ -1648,8 +1687,8 @@ def sync_cloud_assets(request):
         errors.append(f'代理列表补齐失败: {exc}')
     if errors and not any(synced.values()):
         return _error('；'.join(errors), status=500)
-    warnings = getattr(aws_command, 'sync_errors', []) if synced.get('aws') else []
-    return _ok({'synced': synced, 'aliyun_region': aliyun_region, 'aws_region': aws_region or 'all', 'aws_regions': aws_regions, 'errors': errors, 'warnings': warnings[:20]})
+    warnings = getattr(aws_command, 'sync_errors', []) if synced.get('aws') and aws_command else []
+    return _ok({'synced': synced, 'aliyun_region': aliyun_region, 'aws_region': aws_region or 'all', 'aws_regions': aws_regions, 'errors': errors, 'warnings': warnings[:20], 'accounts': {'aliyun': _sync_account_payload(aliyun_account), 'aws': _sync_account_payload(aws_account)}})
 
 
 @csrf_exempt

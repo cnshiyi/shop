@@ -200,10 +200,16 @@ class Command(BaseCommand):
 
     def add_arguments(self, parser):
         parser.add_argument('--region', default='cn-hongkong', help='阿里云地域代码，默认 cn-hongkong')
+        parser.add_argument('--account-id', default='', help='只同步指定后台云账号 ID')
 
     def handle(self, *args, **options):
         region = options['region']
         accounts = list_active_cloud_accounts('aliyun', region) or [None]
+        account_id = str(options.get('account_id') or '').strip()
+        if account_id:
+            accounts = [account for account in accounts if account and str(account.id) == account_id]
+            if not accounts:
+                raise CommandError(f'未找到启用的阿里云云账号 #{account_id}')
         before_asset_total = CloudAsset.objects.filter(kind=CloudAsset.KIND_SERVER).count()
 
         from alibabacloud_swas_open20200601 import models as swas_models

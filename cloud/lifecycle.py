@@ -10,7 +10,7 @@ from asgiref.sync import sync_to_async
 from django.core.management import call_command
 from django.utils import timezone
 
-from core.models import CloudAccountConfig
+from core.models import CloudAccountConfig, SiteConfig
 from core.runtime_config import get_runtime_config
 from core.texts import site_text
 
@@ -830,6 +830,20 @@ def check_cloud_accounts_status(queryset=None):
     return results
 
 
+def _next_lifecycle_sync_account(provider: str):
+    accounts = list(CloudAccountConfig.objects.filter(provider=provider, is_active=True).order_by('id'))
+    if not accounts:
+        return None
+    key = f'cloud_auto_sync_next_account_{provider}'
+    try:
+        last_id = int(SiteConfig.get(key, '0') or 0)
+    except (TypeError, ValueError):
+        last_id = 0
+    selected = next((account for account in accounts if account.id > last_id), None) or accounts[0]
+    SiteConfig.set(key, str(selected.id))
+    return selected
+
+
 async def sync_server_status_tick():
     regions = [
         ('aliyun_simple', os.getenv('ALIYUN_REGION', 'cn-hongkong') or 'cn-hongkong'),
@@ -838,10 +852,16 @@ async def sync_server_status_tick():
     for provider, region in regions:
         try:
             if provider == 'aliyun_simple':
-                await sync_to_async(call_command)('sync_aliyun_assets', region=region)
+                account = await sync_to_async(_next_lifecycle_sync_account)(CloudAccountConfig.PROVIDER_ALIYUN)
+                if not account:
+                    continue
+                await sync_to_async(call_command)('sync_aliyun_assets', region=region, account_id=str(account.id))
             else:
-                await sync_to_async(call_command)('sync_aws_assets', region=region)
-            logger.info('云服务器状态同步完成: provider=%s region=%s', provider, region)
+                account = await sync_to_async(_next_lifecycle_sync_account)(CloudAccountConfig.PROVIDER_AWS)
+                if not account:
+                    continue
+                await sync_to_async(call_command)('sync_aws_assets', region=region, account_id=str(account.id))
+            logger.info('云服务器状态同步完成: provider=%s region=%s account_id=%s', provider, region, account.id)
         except Exception as exc:
             logger.warning('云服务器状态同步失败: provider=%s region=%s error=%s', provider, region, exc)
 

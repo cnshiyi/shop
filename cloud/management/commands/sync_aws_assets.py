@@ -406,9 +406,15 @@ class Command(BaseCommand):
 
     def add_arguments(self, parser):
         parser.add_argument('--region', default='', help='AWS Lightsail 地域；留空则同步全部可用地区')
+        parser.add_argument('--account-id', default='', help='只同步指定后台云账号 ID')
 
     def handle(self, *args, **options):
         accounts = list_active_cloud_accounts('aws')
+        account_id = str(options.get('account_id') or '').strip()
+        if account_id:
+            accounts = [account for account in accounts if str(account.id) == account_id]
+            if not accounts:
+                raise CommandError(f'未找到启用的 AWS 云账号 #{account_id}')
         if not accounts:
             raise CommandError('未添加启用的 AWS 云账号，拒绝使用环境变量同步。请先在后台「云账号」添加 AWS 账号。')
         before_asset_total = CloudAsset.objects.filter(kind=CloudAsset.KIND_SERVER).count()
