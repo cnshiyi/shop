@@ -530,26 +530,30 @@ def sync_server_prices(provider: str, regions: list[tuple[str, str]], templates,
         )
         for index, template in enumerate(ordered_templates, start=1):
             bundle_code, server_name, cpu, memory, storage, bandwidth, price = template
-            ServerPrice.objects.update_or_create(
+            defaults = {
+                'region_name': region_name,
+                'config_id': _build_server_price_config_id(provider, region_code, index),
+                'server_name': server_name,
+                'server_description': f'{cpu} / {memory} / {storage} / {bandwidth}',
+                'cpu': cpu,
+                'memory': memory,
+                'storage': storage,
+                'bandwidth': bandwidth,
+                'cost_price': price,
+                'currency': 'USDT',
+                'is_active': True,
+                'sort_order': 100 - index,
+            }
+            server_price, created = ServerPrice.objects.get_or_create(
                 provider=provider,
                 region_code=region_code,
                 bundle_code=bundle_code,
-                defaults={
-                    'region_name': region_name,
-                    'config_id': _build_server_price_config_id(provider, region_code, index),
-                    'server_name': server_name,
-                    'server_description': f'{cpu} / {memory} / {storage} / {bandwidth}',
-                    'cpu': cpu,
-                    'memory': memory,
-                    'storage': storage,
-                    'bandwidth': bandwidth,
-                    'cost_price': price,
-                    'price': price,
-                    'currency': 'USDT',
-                    'is_active': True,
-                    'sort_order': 100 - index,
-                },
+                defaults={**defaults, 'price': price},
             )
+            if not created:
+                for field, value in defaults.items():
+                    setattr(server_price, field, value)
+                server_price.save(update_fields=[*defaults.keys(), 'updated_at'])
 
 
 @sync_to_async
@@ -1169,23 +1173,73 @@ def _can_order_be_renewed(order: CloudServerOrder) -> bool:
     return False
 
 
-def _manual_proxy_price(order: CloudServerOrder) -> Decimal | None:
-    asset = (
-        CloudAsset.objects.filter(order=order, price__isnull=False)
+def _operation_order_source_asset(order: CloudServerOrder) -> CloudAsset | None:
+    note = str(getattr(order, 'provision_note', '') or '')
+    match = re.search(r'来源资产\s*#(\d+)', note)
+    if match:
+        asset = CloudAsset.objects.filter(id=int(match.group(1))).first()
+        if asset:
+            return asset
+    return (
+        CloudAsset.objects.filter(
+            Q(public_ip=order.public_ip) | Q(previous_public_ip=order.public_ip) | Q(public_ip=order.previous_public_ip) | Q(previous_public_ip=order.previous_public_ip),
+            user_id=order.user_id,
+            kind=CloudAsset.KIND_SERVER,
+        )
         .exclude(status__in=_INACTIVE_ASSET_STATUSES)
         .order_by('-updated_at', '-id')
         .first()
     )
+
+
+def _source_order_price(order: CloudServerOrder) -> Decimal | None:
+    source = getattr(order, 'replacement_for', None)
+    if not source:
+        note = str(getattr(order, 'provision_note', '') or '')
+        match = re.search(r'来源订单\s*#(\d+)', note)
+        if match:
+            source = CloudServerOrder.objects.filter(id=int(match.group(1))).first()
+    if source and source.total_amount is not None:
+        amount = Decimal(str(source.total_amount or 0))
+        if amount > 0:
+            return amount
+    return None
+
+
+def _manual_proxy_price(order: CloudServerOrder) -> Decimal | None:
+    asset = None
+    if str(getattr(order, 'order_no', '') or '').startswith('SRVMANUAL'):
+        asset = _operation_order_source_asset(order)
+    if not asset:
+        asset = (
+            CloudAsset.objects.filter(order=order, price__isnull=False)
+            .exclude(status__in=_INACTIVE_ASSET_STATUSES)
+            .order_by('-updated_at', '-id')
+            .first()
+        )
     if asset and asset.price is not None:
         return Decimal(str(asset.price))
     return None
 
 
+class RenewalPriceMissingError(ValueError):
+    pass
+
+
 def _renewal_price(order: CloudServerOrder, user: TelegramUser | None = None) -> Decimal:
+    transient_price = getattr(order, 'renewal_price', None)
+    if transient_price is not None:
+        return Decimal(str(transient_price)).quantize(Decimal('0.01'))
     manual_price = _manual_proxy_price(order)
     if manual_price is not None:
         return manual_price.quantize(Decimal('0.01'))
-    return Decimal(str(order.total_amount or 0)).quantize(Decimal('0.01'))
+    source_price = _source_order_price(order)
+    if source_price is not None:
+        return source_price.quantize(Decimal('0.01'))
+    amount = Decimal(str(order.total_amount or 0)).quantize(Decimal('0.01'))
+    if amount <= 0:
+        raise RenewalPriceMissingError('该代理缺少续费价格，请先在后台代理列表填写人工价格。')
+    return amount
 
 
 def record_cloud_ip_log(*, event_type, order=None, asset=None, server=None, public_ip=None, previous_public_ip=None, note=''):

@@ -45,26 +45,14 @@ from cloud.lifecycle import _delete_instance, _mark_replaced_order_deleted
 from cloud.services import AWS_REGION_NAMES, _cloud_order_lifecycle_fields, create_cloud_server_rebuild_order, ensure_cloud_server_pricing, ensure_manual_expiry_operation_order, ensure_manual_owner_operation_order, record_cloud_ip_log, refresh_custom_plan_cache
 from cloud.models import AddressMonitor, CloudAsset, CloudIpLog, CloudServerOrder, CloudServerPlan, Server, ServerPrice
 from core.cloud_accounts import cloud_account_label
-from core.models import CloudAccountConfig, ExternalSyncLog, SiteConfig
+from core.models import CloudAccountConfig, ExternalSyncLog
 from cloud.provisioning import provision_cloud_server
 
 logger = logging.getLogger(__name__)
 
 
-def _next_sync_account(provider: str):
-    accounts = list(
-        CloudAccountConfig.objects.filter(provider=provider, is_active=True).order_by('id')
-    )
-    if not accounts:
-        return None
-    key = f'cloud_sync_next_account_{provider}'
-    try:
-        last_id = int(SiteConfig.get(key, '0') or 0)
-    except (TypeError, ValueError):
-        last_id = 0
-    selected = next((account for account in accounts if account.id > last_id), None) or accounts[0]
-    SiteConfig.set(key, str(selected.id))
-    return selected
+def _active_sync_accounts(provider: str):
+    return list(CloudAccountConfig.objects.filter(provider=provider, is_active=True).order_by('id'))
 
 
 def _sync_account_payload(account):
@@ -362,7 +350,7 @@ def update_cloud_asset(request, asset_id):
                 except ValueError as exc:
                     return _error(str(exc), status=400)
                 asset.price = price
-                if asset.order_id:
+                if asset.order_id and not str(getattr(asset.order, 'order_no', '') or '').startswith('SRVMANUAL'):
                     pending_order_updates['total_amount'] = price
 
             if 'currency' in payload:
@@ -764,7 +752,11 @@ def _cloud_order_detail_payload(order):
 @require_GET
 def cloud_orders_list(request):
     keyword = _get_keyword(request)
-    queryset = CloudServerOrder.objects.select_related('user', 'plan').exclude(status='deleted').order_by('-created_at')
+    queryset = (
+        CloudServerOrder.objects.select_related('user', 'plan')
+        .exclude(Q(status='deleted') | Q(order_no__startswith='SRVMANUAL'))
+        .order_by('-created_at')
+    )
     queryset = _apply_keyword_filter(
         queryset,
         keyword,
@@ -1580,13 +1572,19 @@ def _apply_server_missing_state(provider, region, existing_instance_ids, account
     )
     order_ids = [item.order_id for item in missing_servers if item.order_id]
     instance_ids = [item.instance_id for item in missing_servers if item.instance_id]
+    asset_scope = CloudAsset.objects.filter(kind=CloudAsset.KIND_SERVER, provider=provider)
+    if region:
+        asset_scope = asset_scope.filter(Q(region_code=region) | Q(region_code='') | Q(region_code__isnull=True))
+    if account:
+        label = cloud_account_label(account)
+        asset_scope = asset_scope.filter(Q(cloud_account=account) | Q(account_label=label))
     if order_ids:
         CloudServerOrder.objects.filter(id__in=order_ids).exclude(status='deleted').update(
             status='deleted',
             provision_note=missing_note,
             updated_at=now,
         )
-        CloudAsset.objects.filter(order_id__in=order_ids).update(
+        asset_scope.filter(order_id__in=order_ids).update(
             status=CloudAsset.STATUS_DELETED,
             provider_status='已删除',
             is_active=False,
@@ -1594,7 +1592,7 @@ def _apply_server_missing_state(provider, region, existing_instance_ids, account
             updated_at=now,
         )
     if instance_ids:
-        CloudAsset.objects.filter(instance_id__in=instance_ids).update(
+        asset_scope.filter(instance_id__in=instance_ids).update(
             status=CloudAsset.STATUS_DELETED,
             provider_status='已删除',
             is_active=False,
@@ -1618,37 +1616,38 @@ def sync_servers(request):
     missing = {'aliyun': 0, 'aws': 0}
     aws_regions = []
     command_output = io.StringIO()
-    aliyun_account = _next_sync_account(CloudAccountConfig.PROVIDER_ALIYUN)
-    aws_account = _next_sync_account(CloudAccountConfig.PROVIDER_AWS)
+    aliyun_accounts = _active_sync_accounts(CloudAccountConfig.PROVIDER_ALIYUN)
+    aws_accounts = _active_sync_accounts(CloudAccountConfig.PROVIDER_AWS)
     aws_command = None
-    try:
-        if aliyun_account:
+    warnings = []
+    for aliyun_account in aliyun_accounts:
+        try:
             aliyun_command, _ = _call_command_capture('sync_aliyun_assets', region=aliyun_region, account_id=str(aliyun_account.id), stdout=command_output)
             synced['aliyun'] = True
-            missing['aliyun'] = _apply_server_missing_state('aliyun_simple', aliyun_region, getattr(aliyun_command, 'synced_instance_ids', None) or [], aliyun_account)
-    except Exception as exc:
-        errors.append(f'阿里云账号#{getattr(aliyun_account, "id", "-")}同步失败: {exc}')
-    try:
-        if aws_account:
+            missing['aliyun'] += _apply_server_missing_state('aliyun_simple', aliyun_region, getattr(aliyun_command, 'synced_instance_ids', None) or [], aliyun_account)
+        except Exception as exc:
+            errors.append(f'阿里云账号#{getattr(aliyun_account, "id", "-")}同步失败: {exc}')
+    for aws_account in aws_accounts:
+        try:
             if aws_region:
                 aws_command, _ = _call_command_capture('sync_aws_assets', region=aws_region, account_id=str(aws_account.id), stdout=command_output)
-                aws_regions = [aws_region]
+                account_regions = [aws_region]
             else:
                 aws_command, _ = _call_command_capture('sync_aws_assets', account_id=str(aws_account.id), stdout=command_output)
-                aws_regions = getattr(aws_command, 'synced_regions', None) or []
+                account_regions = getattr(aws_command, 'synced_regions', None) or []
+            aws_regions.extend(region for region in account_regions if region not in aws_regions)
             synced['aws'] = True
+            warnings.extend(getattr(aws_command, 'sync_errors', []) or [])
             synced_map = getattr(aws_command, 'synced_instance_ids_by_region', None) or {}
-            if aws_regions:
-                missing['aws'] = sum(
-                    _apply_server_missing_state('aws_lightsail', region, synced_map.get(region, []), aws_account)
-                    for region in aws_regions
-                )
-    except Exception as exc:
-        errors.append(f'AWS账号#{getattr(aws_account, "id", "-")}同步失败: {exc}')
+            missing['aws'] += sum(
+                _apply_server_missing_state('aws_lightsail', region, synced_map.get(region, []), aws_account)
+                for region in account_regions
+            )
+        except Exception as exc:
+            errors.append(f'AWS账号#{getattr(aws_account, "id", "-")}同步失败: {exc}')
     if errors and not any(synced.values()):
         return _error('；'.join(errors), status=500)
-    warnings = getattr(aws_command, 'sync_errors', []) if synced.get('aws') and aws_command else []
-    return _ok({'synced': synced, 'missing': missing, 'aliyun_region': aliyun_region, 'aws_region': aws_region or 'all', 'aws_regions': aws_regions, 'errors': errors, 'warnings': warnings[:20], 'accounts': {'aliyun': _sync_account_payload(aliyun_account), 'aws': _sync_account_payload(aws_account)}})
+    return _ok({'synced': synced, 'missing': missing, 'aliyun_region': aliyun_region, 'aws_region': aws_region or 'all', 'aws_regions': aws_regions, 'errors': errors, 'warnings': warnings[:20], 'accounts': {'aliyun': [_sync_account_payload(account) for account in aliyun_accounts], 'aws': [_sync_account_payload(account) for account in aws_accounts]}})
 
 
 @csrf_exempt
@@ -1664,22 +1663,25 @@ def sync_cloud_assets(request):
     synced = {'aliyun': False, 'aws': False, 'reconcile': False}
     aws_regions = []
     command_output = io.StringIO()
-    aliyun_account = _next_sync_account(CloudAccountConfig.PROVIDER_ALIYUN)
-    aws_account = _next_sync_account(CloudAccountConfig.PROVIDER_AWS)
+    aliyun_accounts = _active_sync_accounts(CloudAccountConfig.PROVIDER_ALIYUN)
+    aws_accounts = _active_sync_accounts(CloudAccountConfig.PROVIDER_AWS)
     aws_command = None
-    try:
-        if aliyun_account:
+    warnings = []
+    for aliyun_account in aliyun_accounts:
+        try:
             _call_command_capture('sync_aliyun_assets', region=aliyun_region, account_id=str(aliyun_account.id), stdout=command_output)
             synced['aliyun'] = True
-    except Exception as exc:
-        errors.append(f'阿里云账号#{getattr(aliyun_account, "id", "-")}代理同步失败: {exc}')
-    try:
-        if aws_account:
+        except Exception as exc:
+            errors.append(f'阿里云账号#{getattr(aliyun_account, "id", "-")}代理同步失败: {exc}')
+    for aws_account in aws_accounts:
+        try:
             aws_command, _ = _call_command_capture('sync_aws_assets', region=aws_region, account_id=str(aws_account.id), stdout=command_output)
-            aws_regions = getattr(aws_command, 'synced_regions', None) or [aws_region or 'all']
+            account_regions = getattr(aws_command, 'synced_regions', None) or [aws_region or 'all']
+            aws_regions.extend(region for region in account_regions if region not in aws_regions)
+            warnings.extend(getattr(aws_command, 'sync_errors', []) or [])
             synced['aws'] = True
-    except Exception as exc:
-        errors.append(f'AWS账号#{getattr(aws_account, "id", "-")}代理同步失败: {exc}')
+        except Exception as exc:
+            errors.append(f'AWS账号#{getattr(aws_account, "id", "-")}代理同步失败: {exc}')
     try:
         _call_command_capture('reconcile_cloud_assets_from_servers', stdout=command_output)
         synced['reconcile'] = True
@@ -1687,8 +1689,7 @@ def sync_cloud_assets(request):
         errors.append(f'代理列表补齐失败: {exc}')
     if errors and not any(synced.values()):
         return _error('；'.join(errors), status=500)
-    warnings = getattr(aws_command, 'sync_errors', []) if synced.get('aws') and aws_command else []
-    return _ok({'synced': synced, 'aliyun_region': aliyun_region, 'aws_region': aws_region or 'all', 'aws_regions': aws_regions, 'errors': errors, 'warnings': warnings[:20], 'accounts': {'aliyun': _sync_account_payload(aliyun_account), 'aws': _sync_account_payload(aws_account)}})
+    return _ok({'synced': synced, 'aliyun_region': aliyun_region, 'aws_region': aws_region or 'all', 'aws_regions': aws_regions, 'errors': errors, 'warnings': warnings[:20], 'accounts': {'aliyun': [_sync_account_payload(account) for account in aliyun_accounts], 'aws': [_sync_account_payload(account) for account in aws_accounts]}})
 
 
 @csrf_exempt

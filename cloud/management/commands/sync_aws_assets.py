@@ -17,14 +17,18 @@ _ACTIVE_ORDER_STATUSES = {'pending', 'provisioning', 'completed', 'expiring', 'r
 _TRACEABLE_ORDER_STATUSES = _ACTIVE_ORDER_STATUSES | {'deleted'}
 
 
-def _resolve_order_for_ip(public_ip):
+def _resolve_order_for_ip(public_ip, account=None):
     normalized_ip = str(public_ip or '').strip()
     if not normalized_ip:
         return None
-    return CloudServerOrder.objects.filter(
+    queryset = CloudServerOrder.objects.filter(
         Q(public_ip=normalized_ip) | Q(previous_public_ip=normalized_ip),
         status__in=_TRACEABLE_ORDER_STATUSES,
-    ).filter(Q(status__in=_ACTIVE_ORDER_STATUSES) | Q(ip_recycle_at__gt=timezone.now())).order_by('-created_at', '-id').first()
+    )
+    if account:
+        label = cloud_account_label(account)
+        queryset = queryset.filter(Q(cloud_account=account) | Q(account_label=label))
+    return queryset.filter(Q(status__in=_ACTIVE_ORDER_STATUSES) | Q(ip_recycle_at__gt=timezone.now())).order_by('-created_at', '-id').first()
 
 
 NORMAL_AWS_STATES = {'running', 'pending', 'starting'}
@@ -333,9 +337,13 @@ def _mark_deleted_when_missing_in_aws(region, existing_instance_names, existing_
         asset.provider_status = '云上未找到实例/IP'
         asset.note = f'状态: 云上未找到实例/IP；公网IP: {old_public_ip or "缺失"}；最近同步: {now_iso}'
         asset.save(update_fields=['status', 'is_active', 'previous_public_ip', 'public_ip', 'provider_status', 'note', 'updated_at'])
-        server = Server.objects.filter(
-            Q(instance_id=instance_name) | Q(provider_resource_id=asset.provider_resource_id) | Q(public_ip=public_ip) | Q(previous_public_ip=old_public_ip)
-        ).order_by('-updated_at', '-id').first()
+        server_queryset = Server.objects.filter(
+            Q(instance_id=instance_name) | Q(provider_resource_id=asset.provider_resource_id) | Q(public_ip=public_ip) | Q(previous_public_ip=old_public_ip),
+            provider='aws_lightsail',
+        )
+        if account:
+            server_queryset = server_queryset.filter(account_label=cloud_account_label(account))
+        server = server_queryset.order_by('-updated_at', '-id').first()
         if server:
             server.status = Server.STATUS_DELETED
             server.is_active = False
@@ -344,7 +352,7 @@ def _mark_deleted_when_missing_in_aws(region, existing_instance_names, existing_
             server.provider_status = '云上未找到实例/IP'
             server.note = f'状态: 云上未找到实例/IP；公网IP: {old_public_ip or "缺失"}；最近同步: {now_iso}'
             server.save(update_fields=['status', 'is_active', 'previous_public_ip', 'public_ip', 'provider_status', 'note', 'updated_at'])
-        order = getattr(asset, 'order', None) or _resolve_order_for_ip(old_public_ip)
+        order = getattr(asset, 'order', None) or _resolve_order_for_ip(old_public_ip, account)
         if order:
             _sync_order_deleted_from_cloud(order, old_public_ip, source='AWS 同步资产校验删除', asset=asset, server=server)
         record_cloud_ip_log(
@@ -382,7 +390,7 @@ def _mark_deleted_when_missing_in_aws(region, existing_instance_names, existing_
         server.provider_status = '云上未找到实例/IP'
         server.note = f'状态: 云上未找到实例/IP；公网IP: {old_public_ip or "缺失"}；最近同步: {now_iso}'
         server.save(update_fields=['status', 'is_active', 'previous_public_ip', 'public_ip', 'provider_status', 'note', 'updated_at'])
-        order = getattr(server, 'order', None) or _resolve_order_for_ip(old_public_ip)
+        order = getattr(server, 'order', None) or _resolve_order_for_ip(old_public_ip, account)
         if order:
             _sync_order_deleted_from_cloud(order, old_public_ip, source='AWS 同步 Server 校验删除', server=server)
         record_cloud_ip_log(
@@ -745,7 +753,7 @@ class Command(BaseCommand):
                         f"状态: {provider_status}；公网IP: {public_ip or '缺失'}；固定IP名: {static_ip_name}；"
                         f"发现时间: {discovered_at.isoformat()}；计划删除时间: {recycle_due_at.isoformat()}；最近同步: {discovered_at.isoformat()}"
                     )
-                    retained_order = _resolve_order_for_ip(public_ip) if public_ip else None
+                    retained_order = _resolve_order_for_ip(public_ip, account) if public_ip else None
                     asset_defaults = {
                         'kind': CloudAsset.KIND_SERVER,
                         'source': CloudAsset.SOURCE_AWS_SYNC,
@@ -876,17 +884,6 @@ class Command(BaseCommand):
                     account.STATUS_OK,
                     f"AWS 同步完成，账号ID {account_stats['aws_account'] or '-'}，地区 {','.join(account_stats['regions']) or '-'}，扫描 0 台。",
                 )
-
-        for region, instance_names in synced_instance_ids_by_region.items():
-            verification_deleted_items.extend(
-                _mark_deleted_when_missing_in_aws(
-                    region=region,
-                    existing_instance_names=set(instance_names),
-                    existing_public_ips=set(synced_public_ips_by_region.get(region) or set()),
-                    stdout=self,
-                    account=None,
-                )
-            )
 
         after_asset_total = CloudAsset.objects.filter(kind=CloudAsset.KIND_SERVER).count()
         self.stdout.write(self.style.SUCCESS(

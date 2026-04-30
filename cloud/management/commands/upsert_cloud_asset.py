@@ -71,26 +71,63 @@ class Command(BaseCommand):
             if not user:
                 raise CommandError('未找到匹配的绑定用户。')
 
-        asset, created = CloudAsset.objects.update_or_create(
-            **lookup,
-            defaults={
+        create_defaults = {
+            'source': CloudAsset.SOURCE_AWS_MANUAL,
+            'provider': options['provider'],
+            'region_code': options['region_code'] or None,
+            'region_name': options['region_name'] or None,
+            'asset_name': asset_name or instance_id,
+            'public_ip': options['public_ip'] or None,
+            'mtproxy_port': options.get('mtproxy_port'),
+            'mtproxy_link': options['mtproxy_link'] or None,
+            'mtproxy_secret': options['mtproxy_secret'] or None,
+            'actual_expires_at': actual_expires_at,
+            'price': parse_decimal(options.get('price')),
+            'currency': options.get('currency') or 'USDT',
+            'user': user,
+            'note': options['note'] or None,
+            'is_active': not options['inactive'],
+        }
+        asset, created = CloudAsset.objects.get_or_create(**lookup, defaults=create_defaults)
+        if not created:
+            update_fields = []
+            updates = {
                 'source': CloudAsset.SOURCE_AWS_MANUAL,
                 'provider': options['provider'],
-                'region_code': options['region_code'] or None,
-                'region_name': options['region_name'] or None,
                 'asset_name': asset_name or instance_id,
-                'public_ip': options['public_ip'] or None,
-                'mtproxy_port': options.get('mtproxy_port'),
-                'mtproxy_link': options['mtproxy_link'] or None,
-                'mtproxy_secret': options['mtproxy_secret'] or None,
-                'actual_expires_at': actual_expires_at,
-                'price': parse_decimal(options.get('price')),
                 'currency': options.get('currency') or 'USDT',
-                'user': user,
-                'note': options['note'] or None,
-                'is_active': not options['inactive'],
-            },
-        )
+            }
+            for field, value in updates.items():
+                setattr(asset, field, value)
+                update_fields.append(field)
+            optional_updates = {
+                'region_code': ('region_code', options['region_code'] or None),
+                'region_name': ('region_name', options['region_name'] or None),
+                'public_ip': ('public_ip', options['public_ip'] or None),
+                'mtproxy_port': ('mtproxy_port', options.get('mtproxy_port')),
+                'mtproxy_link': ('mtproxy_link', options['mtproxy_link'] or None),
+                'mtproxy_secret': ('mtproxy_secret', options['mtproxy_secret'] or None),
+                'note': ('note', options['note'] or None),
+            }
+            for field, (option_key, value) in optional_updates.items():
+                if options.get(option_key) not in (None, ''):
+                    setattr(asset, field, value)
+                    update_fields.append(field)
+            if options.get('actual_expires_at'):
+                asset.actual_expires_at = actual_expires_at
+                update_fields.append('actual_expires_at')
+            if options.get('price'):
+                asset.price = parse_decimal(options.get('price'))
+                update_fields.append('price')
+            if options.get('user'):
+                asset.user = user
+                update_fields.append('user')
+            if options['inactive']:
+                asset.is_active = False
+                update_fields.append('is_active')
+            if update_fields:
+                update_fields.append('updated_at')
+                asset.save(update_fields=sorted(set(update_fields)))
         if asset.kind == CloudAsset.KIND_SERVER:
             Server.objects.update_or_create(
                 instance_id=asset.instance_id or asset.provider_resource_id or asset.public_ip,

@@ -77,6 +77,10 @@ class Command(BaseCommand):
             if asset:
                 defaults['user'] = asset.user
                 defaults['actual_expires_at'] = asset.actual_expires_at
+                if asset.price is not None:
+                    defaults['price'] = asset.price
+                if asset.note:
+                    defaults['note'] = asset.note
                 asset_signature = f'{server.instance_id or "-"}|{server.provider_resource_id or "-"}|{server.public_ip or "缺失"}'
                 claimed_signature = claimed_assets.get(asset.id)
                 if claimed_signature and claimed_signature != asset_signature:
@@ -106,8 +110,6 @@ class Command(BaseCommand):
                 continue
             created = CloudAsset.objects.create(**defaults)
             claimed_assets[created.id] = f'{server.instance_id or "-"}|{server.provider_resource_id or "-"}|{server.public_ip or "缺失"}'
-            created_count += 1
-            created_asset_ids.append(f'{created.id}:{server.public_ip or "缺失"}:{server.instance_id or server.server_name or "-"}')
             created_count += 1
             created_asset_ids.append(f'{created.id}:{server.public_ip or "缺失"}:{server.instance_id or server.server_name or "-"}')
 

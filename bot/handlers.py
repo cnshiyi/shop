@@ -39,6 +39,7 @@ from bot.keyboards import (
 )
 from bot.services import create_admin_reply_link, get_admin_reply_link, get_admin_reply_link_by_id, get_or_create_user, get_admin_forward_mute_status, is_admin_forward_muted, mute_admin_forward_for_days, record_bot_operation_log, record_telegram_message
 from cloud.services import (
+    RenewalPriceMissingError,
     buy_cloud_server_with_balance,
     create_cloud_server_order,
     create_cloud_server_renewal,
@@ -3089,7 +3090,11 @@ def register_handlers(dp: Dispatcher):
             return
         logger.info('CLOUD_ASSET_ACTION_START user_id=%s asset_id=%s order_id=%s action=%s ip=%s', user.id, asset_id, order.id, action, getattr(item, 'public_ip', None))
         if action == 'renew':
-            renewal = await create_cloud_server_renewal(order.id, user.id, 31)
+            try:
+                renewal = await create_cloud_server_renewal(order.id, user.id, 31)
+            except RenewalPriceMissingError as exc:
+                await _safe_callback_answer(callback, str(exc), show_alert=True)
+                return
             if renewal is False:
                 await _safe_callback_answer(callback, '该服务器IP已删除，禁止续费', show_alert=True)
                 return
@@ -3326,7 +3331,11 @@ def register_handlers(dp: Dispatcher):
         await _safe_callback_answer(callback)
         user = await get_or_create_user(callback.from_user.id, callback.from_user.username, callback.from_user.first_name)
         order_id = int(callback.data.split(':')[2])
-        order = await create_cloud_server_renewal(order_id, user.id, 31)
+        try:
+            order = await create_cloud_server_renewal(order_id, user.id, 31)
+        except RenewalPriceMissingError as exc:
+            await _safe_callback_answer(callback, str(exc), show_alert=True)
+            return
         if order is False:
             await _safe_callback_answer(callback, '该服务器IP已删除，禁止续费', show_alert=True)
             return

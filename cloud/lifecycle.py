@@ -10,14 +10,14 @@ from asgiref.sync import sync_to_async
 from django.core.management import call_command
 from django.utils import timezone
 
-from core.models import CloudAccountConfig, SiteConfig
+from core.models import CloudAccountConfig
 from core.runtime_config import get_runtime_config
 from core.texts import site_text
 
 from orders.models import BalanceLedger
 from bot.models import TelegramUser
 from cloud.models import CloudAsset, CloudServerOrder, Server
-from cloud.services import _cloud_order_lifecycle_fields, _renewal_price, create_cloud_server_renewal, pay_cloud_server_renewal_with_balance, record_cloud_ip_log
+from cloud.services import RenewalPriceMissingError, _cloud_order_lifecycle_fields, _renewal_price, create_cloud_server_renewal, pay_cloud_server_renewal_with_balance, record_cloud_ip_log
 from bot.keyboards import cloud_auto_renew_notice_actions, cloud_expiry_actions, cloud_lifecycle_notice_actions
 
 logger = logging.getLogger(__name__)
@@ -349,7 +349,10 @@ def _notice_plan_text(order, notice: dict | None = None, *, include_expiry: bool
     if include_expiry:
         lines.append(f'到期时间: {_format_notice_dt(expires_at)}')
     if include_renewal_amount:
-        lines.append(f'续费金额: {_renewal_price(order, getattr(order, "user", None)):.2f} USDT')
+        try:
+            lines.append(f'续费金额: {_renewal_price(order, getattr(order, "user", None)):.2f} USDT')
+        except RenewalPriceMissingError:
+            lines.append('续费金额: 未设置，请联系客服确认')
     if auto_renew_enabled:
         lines.append(f'自动续费: 已开启，预计 {_format_notice_dt(auto_renew_at)} 自动续费')
     else:
@@ -446,7 +449,11 @@ def _auto_renew_notice_batch_payload(order_ids: list[int]) -> dict:
             logger.info('CLOUD_NOTICE_SKIP_NO_ACTIVE_ASSET type=auto_renew_notice order_id=%s order_no=%s', order.id, order.order_no)
             continue
         kept_order_ids.append(order.id)
-        amount = _renewal_price(order, user)
+        try:
+            amount = _renewal_price(order, user)
+        except RenewalPriceMissingError:
+            logger.info('CLOUD_AUTO_RENEW_NOTICE_SKIP_NO_PRICE order_id=%s order_no=%s', order.id, order.order_no)
+            continue
         total += amount
         expires_at = notice.get('expires_at')
         auto_renew_at = expires_at - timezone.timedelta(days=1) if expires_at else None
@@ -620,7 +627,10 @@ def _run_auto_renew(order_id: int) -> tuple[CloudServerOrder | None, str | None,
         return None, 'IP已删除或不在代理列表，跳过自动续费', {}
     order = _apply_notice_schedule_to_order(order, notice)
     if order.status != 'renew_pending':
-        renewal = create_cloud_server_renewal.__wrapped__(order.id, order.user_id, 31)
+        try:
+            renewal = create_cloud_server_renewal.__wrapped__(order.id, order.user_id, 31)
+        except RenewalPriceMissingError as exc:
+            return None, str(exc), {}
         if not renewal:
             return None, '订单当前不可续费', {}
     renewed, err = pay_cloud_server_renewal_with_balance.__wrapped__(order.id, order.user_id, 'USDT', 31)
@@ -830,18 +840,8 @@ def check_cloud_accounts_status(queryset=None):
     return results
 
 
-def _next_lifecycle_sync_account(provider: str):
-    accounts = list(CloudAccountConfig.objects.filter(provider=provider, is_active=True).order_by('id'))
-    if not accounts:
-        return None
-    key = f'cloud_auto_sync_next_account_{provider}'
-    try:
-        last_id = int(SiteConfig.get(key, '0') or 0)
-    except (TypeError, ValueError):
-        last_id = 0
-    selected = next((account for account in accounts if account.id > last_id), None) or accounts[0]
-    SiteConfig.set(key, str(selected.id))
-    return selected
+def _active_lifecycle_sync_accounts(provider: str):
+    return list(CloudAccountConfig.objects.filter(provider=provider, is_active=True).order_by('id'))
 
 
 async def sync_server_status_tick():
@@ -852,16 +852,14 @@ async def sync_server_status_tick():
     for provider, region in regions:
         try:
             if provider == 'aliyun_simple':
-                account = await sync_to_async(_next_lifecycle_sync_account)(CloudAccountConfig.PROVIDER_ALIYUN)
-                if not account:
-                    continue
-                await sync_to_async(call_command)('sync_aliyun_assets', region=region, account_id=str(account.id))
+                accounts = await sync_to_async(_active_lifecycle_sync_accounts)(CloudAccountConfig.PROVIDER_ALIYUN)
+                command_name = 'sync_aliyun_assets'
             else:
-                account = await sync_to_async(_next_lifecycle_sync_account)(CloudAccountConfig.PROVIDER_AWS)
-                if not account:
-                    continue
-                await sync_to_async(call_command)('sync_aws_assets', region=region, account_id=str(account.id))
-            logger.info('云服务器状态同步完成: provider=%s region=%s account_id=%s', provider, region, account.id)
+                accounts = await sync_to_async(_active_lifecycle_sync_accounts)(CloudAccountConfig.PROVIDER_AWS)
+                command_name = 'sync_aws_assets'
+            for account in accounts:
+                await sync_to_async(call_command)(command_name, region=region, account_id=str(account.id))
+                logger.info('云服务器状态同步完成: provider=%s region=%s account_id=%s', provider, region, account.id)
         except Exception as exc:
             logger.warning('云服务器状态同步失败: provider=%s region=%s error=%s', provider, region, exc)
 
