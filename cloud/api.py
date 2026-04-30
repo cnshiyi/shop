@@ -221,6 +221,7 @@ def _asset_payload(asset):
         'provider_label': _provider_label(asset.provider),
         'cloud_account_id': cloud_account_id,
         'account_label': account_label,
+        'region_code': asset.region_code,
         'region_label': _region_label(getattr(asset, 'region_code', None), asset.region_name),
         'region_name': asset.region_name,
         'asset_name': asset.asset_name,
