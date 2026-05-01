@@ -383,32 +383,18 @@ def cloud_server_change_ip_port_keyboard(order_id: int, region_code: str, region
 
 def cloud_server_list(orders, page: int = 1, total_pages: int = 1, prefix: str = 'cloud:list'):
     kb = InlineKeyboardBuilder()
-    has_switch_rows = False
     for order in orders:
         ip = order.public_ip or order.previous_public_ip
         label = ip or getattr(order, 'order_no', None) or f'订单 {order.id}'
         expires_at = getattr(order, 'service_expires_at', None) or getattr(order, 'actual_expires_at', None) or getattr(order, 'expires_at', None)
         expires = _format_local_date(expires_at)
-        auto_enabled = bool(getattr(order, 'auto_renew_enabled', False))
-        auto_icon = '✅' if auto_enabled else '❌'
         item_kind = getattr(order, '_proxy_item_kind', '')
-        if prefix.startswith('cloud:list') and item_kind in {'asset', 'server'}:
-            detail_data = f'cloud:assetdetail:{item_kind}:{order.id}:{prefix}:{page}'
-            toggle_action = 'off' if auto_enabled else 'on'
-            toggle_data = f'cloud:list:autorenew:{toggle_action}:{order.id}:{page}'
-            kb.row(
-                InlineKeyboardButton(text=f'{label} | {expires} | {auto_icon}', callback_data=detail_data),
-                InlineKeyboardButton(text='🔔 自动续费' if not auto_enabled else '🔕 自动续费', callback_data=toggle_data),
-            )
-            has_switch_rows = True
-            continue
         if item_kind in {'asset', 'server'}:
             callback_data = f'cloud:assetdetail:{item_kind}:{order.id}:{prefix}:{page}'
         else:
             callback_data = f'cloud:detail:{order.id}:{prefix}:{page}'
         kb.button(text=f'{label} | {expires}', callback_data=callback_data)
-    if not has_switch_rows:
-        kb.adjust(1)
+    kb.adjust(1)
     nav = []
     if page > 1:
         nav.append(InlineKeyboardButton(text='⬅️ 上一页', callback_data=f'{prefix}:{page - 1}'))

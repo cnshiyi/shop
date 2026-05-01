@@ -42,7 +42,7 @@ from bot.api import (
 )
 from bot.models import TelegramUser
 from cloud.lifecycle import _delete_instance, _mark_replaced_order_deleted
-from cloud.services import AWS_REGION_NAMES, _cloud_order_lifecycle_fields, create_cloud_server_rebuild_order, ensure_cloud_server_pricing, ensure_manual_expiry_operation_order, ensure_manual_owner_operation_order, record_cloud_ip_log, refresh_custom_plan_cache
+from cloud.services import AWS_REGION_NAMES, _cloud_order_lifecycle_fields, create_cloud_server_rebuild_order, ensure_cloud_server_pricing, ensure_manual_expiry_operation_order, ensure_manual_owner_operation_order, record_cloud_ip_log, refresh_custom_plan_cache, set_cloud_server_auto_renew_admin
 from cloud.models import AddressMonitor, CloudAsset, CloudIpLog, CloudServerOrder, CloudServerPlan, Server, ServerPrice
 from core.cloud_accounts import cloud_account_label
 from core.models import CloudAccountConfig, ExternalSyncLog
@@ -275,6 +275,7 @@ def _asset_payload(asset):
         'username_label': user_payload['username_label'] if user_payload else '-',
         'order_id': order.id if order else None,
         'order_no': order.order_no if order else '',
+        'auto_renew_enabled': bool(getattr(order, 'auto_renew_enabled', False)),
         'status': asset.status,
         'status_label': _status_label(asset.status, CloudAsset.STATUS_CHOICES),
         'provider_status': '已删除' if asset.status == CloudAsset.STATUS_DELETED else _provider_status_label(asset.provider_status),
@@ -563,6 +564,26 @@ def update_cloud_asset(request, asset_id):
             public_ip=changed_public_ip_after,
             note=f'后台手动更新IP：{changed_public_ip_before or "未分配"} → {changed_public_ip_after or "未分配"}',
         )
+    asset = CloudAsset.objects.select_related('user', 'order', 'cloud_account').get(pk=asset_id)
+    return _ok(_asset_payload(asset))
+
+
+@csrf_exempt
+@dashboard_login_required
+@require_POST
+def toggle_cloud_asset_auto_renew(request, asset_id):
+    asset = CloudAsset.objects.select_related('order', 'user', 'cloud_account').filter(pk=asset_id).first()
+    if not asset:
+        return _error('云资产不存在', status=404)
+    if not asset.order_id:
+        return _error('该代理未绑定订单，无法设置自动续费', status=400)
+    payload = _read_payload(request)
+    enabled = str(payload.get('enabled')).lower() in {'1', 'true', 'yes', 'on'}
+    order = async_to_sync(set_cloud_server_auto_renew_admin)(asset.order_id, enabled)
+    if order is False:
+        return _error('当前状态不可开启自动续费', status=400)
+    if not order:
+        return _error('订单不存在', status=404)
     asset = CloudAsset.objects.select_related('user', 'order', 'cloud_account').get(pk=asset_id)
     return _ok(_asset_payload(asset))
 
