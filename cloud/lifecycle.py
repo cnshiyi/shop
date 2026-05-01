@@ -75,6 +75,40 @@ def _config_int(key: str, default: int) -> int:
         return default
 
 
+def _parse_notify_targets(raw: str) -> list[int | str]:
+    targets = []
+    seen = set()
+    for item in re.split(r'[\n,;，；\s]+', str(raw or '')):
+        value = item.strip()
+        if not value:
+            continue
+        target = int(value) if re.fullmatch(r'-?\d+', value) else value
+        marker = str(target)
+        if marker in seen:
+            continue
+        seen.add(marker)
+        targets.append(target)
+    return targets
+
+
+@sync_to_async
+def _auto_renew_execution_notify_config() -> dict:
+    enabled = _config_bool('cloud_auto_renew_execution_notify_enabled', '0')
+    event_mode = str(get_runtime_config('cloud_auto_renew_execution_notify_events', 'all') or 'all').strip().lower()
+    if event_mode not in {'all', 'success', 'failure'}:
+        event_mode = 'all'
+    targets = _parse_notify_targets(get_runtime_config('cloud_auto_renew_execution_notify_chat_ids', ''))
+    return {'enabled': enabled, 'events': event_mode, 'targets': targets}
+
+
+def _filter_auto_renew_notify_results(results: list[dict], event_mode: str) -> list[dict]:
+    if event_mode == 'success':
+        return [item for item in results if item.get('ok')]
+    if event_mode == 'failure':
+        return [item for item in results if not item.get('ok')]
+    return list(results)
+
+
 _NOTICE_ASSET_EXCLUDED_STATUSES = {
     CloudAsset.STATUS_DELETED,
     CloudAsset.STATUS_DELETING,
@@ -502,30 +536,40 @@ def _lifecycle_notice_batch_text(title: str, order_ids: list[int], closing: str)
 
 @sync_to_async
 def _auto_renew_result_batch_text(results: list[dict]) -> str:
-    lines = ['⚡ 自动续费执行结果', '']
+    executed = []
+    successes = []
+    failures = []
     for item in results:
         order_id = item.get('order_id')
         order = CloudServerOrder.objects.filter(id=order_id).first()
         if not order:
             continue
         ip = item.get('ip') or _order_notice_ip(order)
+        executed.append(ip)
         if item.get('ok'):
-            lines.append(f'✅ IP: {ip} 自动续费成功')
-            lines.append(f'新的到期时间: {_format_notice_dt(order.service_expires_at)}')
-            lines.append(_notice_plan_text(order, {'expires_at': order.service_expires_at, 'suspend_at': order.suspend_at, 'delete_at': order.delete_at, 'ip_recycle_at': order.ip_recycle_at, 'auto_renew_enabled': order.auto_renew_enabled}))
-        else:
-            failure_sent_at = getattr(order, 'auto_renew_failure_notice_sent_at', None)
-            fallback_retry = bool(item.get('fallback_retry'))
-            expires_at = getattr(order, 'service_expires_at', None)
-            failure_sent_before_expiry = bool(failure_sent_at and expires_at and failure_sent_at < expires_at)
-            if failure_sent_at and not (fallback_retry and failure_sent_before_expiry):
-                continue
-            if fallback_retry:
-                lines.append('⚠️ 已进入关机前24小时兜底续费检查')
-            lines.append(f'❌ IP: {ip} 自动续费失败')
-            lines.append(f'失败原因: {_public_cloud_error_text(item.get("error"))}')
-            lines.append(_notice_plan_text(order, {'expires_at': order.service_expires_at, 'suspend_at': order.suspend_at, 'delete_at': order.delete_at, 'ip_recycle_at': order.ip_recycle_at, 'auto_renew_enabled': order.auto_renew_enabled}))
-        lines.append('')
+            successes.append((ip, _format_notice_dt(order.service_expires_at)))
+            continue
+        failure_sent_at = getattr(order, 'auto_renew_failure_notice_sent_at', None)
+        fallback_retry = bool(item.get('fallback_retry'))
+        expires_at = getattr(order, 'service_expires_at', None)
+        failure_sent_before_expiry = bool(failure_sent_at and expires_at and failure_sent_at < expires_at)
+        if failure_sent_at and not (fallback_retry and failure_sent_before_expiry):
+            continue
+        reason = _public_cloud_error_text(item.get('error'))
+        if fallback_retry:
+            reason = f'已进入关机前24小时兜底续费检查；{reason}'
+        failures.append((ip, reason))
+    if not executed:
+        return ''
+    lines = ['⚡ 自动续费执行结果', '']
+    lines.append('本次执行自动续费 IP：')
+    lines.extend(f'- {ip}' for ip in executed)
+    if successes:
+        lines.extend(['', '执行成功：'])
+        lines.extend(f'- IP: {ip} | 新到期时间: {expires_at}' for ip, expires_at in successes)
+    if failures:
+        lines.extend(['', '执行失败：'])
+        lines.extend(f'- IP: {ip} | 失败原因: {reason}' for ip, reason in failures)
     return '\n'.join(lines).strip()
 
 
@@ -551,6 +595,32 @@ async def _send_cloud_notice(notify, user_id: int, text: str, reply_markup=None)
         return False
     result = await notify(user_id, text, reply_markup)
     return result is not False
+
+
+async def _send_auto_renew_execution_target_notices(notify_target, results_by_user: dict) -> int:
+    if not notify_target or not results_by_user:
+        return 0
+    config = await _auto_renew_execution_notify_config()
+    if not config.get('enabled') or not config.get('targets'):
+        return 0
+    event_mode = config.get('events') or 'all'
+    sent_count = 0
+    all_results = []
+    for results in results_by_user.values():
+        all_results.extend(_filter_auto_renew_notify_results(results, event_mode))
+    if not all_results:
+        return 0
+    text = await _auto_renew_result_batch_text(all_results)
+    if not text:
+        return 0
+    for target in config['targets']:
+        try:
+            ok = await notify_target(target, text, None)
+            sent_count += int(ok is not False)
+        except Exception as exc:
+            logger.warning('CLOUD_AUTO_RENEW_EXEC_TARGET_NOTIFY_FAILED target=%s error=%s', target, exc)
+    logger.info('CLOUD_AUTO_RENEW_EXEC_TARGET_NOTIFY_SENT targets=%s results=%s sent=%s events=%s', len(config['targets']), len(all_results), sent_count, event_mode)
+    return sent_count
 
 
 def _log_cloud_notice(event: str, order, notice: dict | None, text: str, keyboard: str):
@@ -942,7 +1012,7 @@ def _defer_startup_lifecycle_actions(due, migration_due_orders, orphan_asset_del
     return run_at
 
 
-async def auto_renew_patrol_tick(notify=None):
+async def auto_renew_patrol_tick(notify=None, notify_target=None):
     due = await _get_due_orders()
     results_by_user = defaultdict(list)
     for order in due['auto_renew']:
@@ -968,6 +1038,7 @@ async def auto_renew_patrol_tick(notify=None):
             'error': err,
             'balance_change': balance_change,
         })
+    await _send_auto_renew_execution_target_notices(notify_target, results_by_user)
     if not notify:
         return
     for user_id, results in results_by_user.items():
@@ -984,7 +1055,7 @@ async def auto_renew_patrol_tick(notify=None):
             )
 
 
-async def lifecycle_tick(notify=None, defer_destructive_seconds: int = 0):
+async def lifecycle_tick(notify=None, notify_target=None, defer_destructive_seconds: int = 0):
     due = await _get_due_orders()
     migration_due_orders = await _get_migration_due_orders()
     orphan_asset_delete_due = await _get_orphan_asset_delete_due()
@@ -1072,6 +1143,7 @@ async def lifecycle_tick(notify=None, defer_destructive_seconds: int = 0):
             'balance_change': balance_change,
             'fallback_retry': fallback_retry,
         })
+    await _send_auto_renew_execution_target_notices(notify_target, auto_renew_results_by_user)
     if notify:
         for user_id, results in auto_renew_results_by_user.items():
             if not await _user_can_receive_cloud_notice(user_id):

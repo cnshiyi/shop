@@ -2628,6 +2628,17 @@ def disable_all_cloud_server_auto_renew_admin():
 def get_cloud_server_auto_renew(order_id: int, user_id: int):
     order = CloudServerOrder.objects.filter(id=order_id, user_id=user_id).first()
     if not order:
+        asset = (
+            CloudAsset.objects.select_related('order')
+            .filter(kind=CloudAsset.KIND_SERVER, user_id=user_id, order_id=order_id)
+            .filter(Q(public_ip__isnull=False) & ~Q(public_ip=''))
+            .filter(_active_cloud_account_asset_filter())
+            .exclude(status__in=_INACTIVE_ASSET_STATUSES)
+            .order_by('-updated_at', '-id')
+            .first()
+        )
+        order = asset.order if asset and asset.order else None
+    if not order:
         return None
     return bool(order.auto_renew_enabled)
 

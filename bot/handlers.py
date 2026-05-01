@@ -2868,43 +2868,52 @@ def register_handlers(dp: Dispatcher):
             text='✍️ 已选择自定义端口。\n请发送 443 或 1025-65530 之间的端口号，发送后我会立即提交服务器创建任务。',
         )
 
-    @dp.callback_query(F.data == 'cloud:list')
-    async def cb_cloud_list(callback: CallbackQuery, state: FSMContext):
-        await state.clear()
-        await _safe_callback_answer(callback)
+    async def _render_cloud_list(callback: CallbackQuery, page: int = 1):
         user = await get_or_create_user(callback.from_user.id, callback.from_user.username, callback.from_user.first_name)
-        visible_servers = await list_user_cloud_servers(user.id)
-        page = 1
-        per_page = 8
-        total_visible = len(visible_servers)
-        total_pages = max(1, math.ceil(total_visible / per_page))
-        page_items = visible_servers[(page - 1) * per_page: page * per_page]
-        if not page_items:
-            await callback.message.delete()
-            await callback.message.answer(_bot_text('bot_query_cloud_empty', '🔎 查询中心\n\n暂无可查询的代理记录。'), reply_markup=main_menu())
-        else:
-            await _safe_edit_text(callback.message, '🔎 代理列表\n\n请选择要查看的代理：', reply_markup=cloud_server_list(page_items, page, total_pages, 'cloud:list:page'))
-
-    @dp.callback_query(F.data.startswith('cloud:list:page:'))
-    async def cb_cloud_list_page(callback: CallbackQuery, state: FSMContext):
-        await state.clear()
-        await _safe_callback_answer(callback)
-        user = await get_or_create_user(callback.from_user.id, callback.from_user.username, callback.from_user.first_name)
-        page = max(1, int(callback.data.split(':')[3]))
         visible_servers = await list_user_cloud_servers(user.id)
         per_page = 8
         total_visible = len(visible_servers)
         total_pages = max(1, math.ceil(total_visible / per_page))
-        page = min(page, total_pages)
+        page = min(max(1, page), total_pages)
         page_items = visible_servers[(page - 1) * per_page: page * per_page]
         if not page_items:
             await _safe_edit_text(callback.message, '🔎 查询中心\n\n暂无可查询的代理记录。', reply_markup=main_menu())
             return
         await _safe_edit_text(
             callback.message,
-            '🔎 代理列表\n\n请选择要查看的代理：',
+            '🔎 代理列表\n\n✅=已开启自动续费，❌=已关闭自动续费。点击右侧按钮可切换。',
             reply_markup=cloud_server_list(page_items, page, total_pages, 'cloud:list:page'),
         )
+
+    @dp.callback_query(F.data == 'cloud:list')
+    async def cb_cloud_list(callback: CallbackQuery, state: FSMContext):
+        await state.clear()
+        await _safe_callback_answer(callback)
+        await _render_cloud_list(callback, page=1)
+
+    @dp.callback_query(F.data.startswith('cloud:list:page:'))
+    async def cb_cloud_list_page(callback: CallbackQuery, state: FSMContext):
+        await state.clear()
+        await _safe_callback_answer(callback)
+        page = max(1, int(callback.data.split(':')[3]))
+        await _render_cloud_list(callback, page=page)
+
+    @dp.callback_query(F.data.startswith('cloud:list:autorenew:'))
+    async def cb_cloud_list_auto_renew_toggle(callback: CallbackQuery, state: FSMContext):
+        await state.clear()
+        user = await get_or_create_user(callback.from_user.id, callback.from_user.username, callback.from_user.first_name)
+        _, _, _, action, raw_order_id, raw_page = callback.data.split(':')
+        enabled = action == 'on'
+        page = max(1, int(raw_page or 1))
+        order = await set_cloud_server_auto_renew(int(raw_order_id), user.id, enabled)
+        if order is False:
+            await _safe_callback_answer(callback, '当前状态不可开启自动续费', show_alert=True)
+            return
+        if not order:
+            await _safe_callback_answer(callback, '代理记录不存在', show_alert=True)
+            return
+        await _safe_callback_answer(callback, '已开启自动续费' if enabled else '已关闭自动续费')
+        await _render_cloud_list(callback, page=page)
 
     async def _render_cloud_auto_renew_list(callback: CallbackQuery, page: int = 1):
         user = await get_or_create_user(callback.from_user.id, callback.from_user.username, callback.from_user.first_name)

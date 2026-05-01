@@ -28,6 +28,9 @@ CONFIG_HELP = {
     'dashboard_totp_secret': '后台 Google Authenticator TOTP 密钥（Base32，更换后旧绑定失效）',
     'cleanup_retention_days': '自动清理保留天数，默认100天；订单和聊天记录超过该天数会被定时清理',
     'cloud_asset_sync_interval_seconds': '代理云资产自动同步/列表自动刷新间隔（秒），默认18000秒=5小时',
+    'cloud_auto_renew_execution_notify_enabled': '自动续费执行结果通知开关（1=开启，0=关闭）',
+    'cloud_auto_renew_execution_notify_chat_ids': '自动续费执行结果通知目标 Chat ID（支持私聊/群/频道；多个用逗号、分号或换行分隔，频道也可填 @channelusername）',
+    'cloud_auto_renew_execution_notify_events': '自动续费执行结果通知类型：all=成功和失败，success=仅成功，failure=仅失败',
 }
 
 CLOUD_ASSET_SYNC_INTERVAL_DEFAULT_SECONDS = 5 * 60 * 60
@@ -46,6 +49,9 @@ CONFIG_DEFAULTS = {
     'cloud_renew_notice_debug_repeat': '0',
     'cleanup_retention_days': '100',
     'cloud_asset_sync_interval_seconds': str(CLOUD_ASSET_SYNC_INTERVAL_DEFAULT_SECONDS),
+    'cloud_auto_renew_execution_notify_enabled': '0',
+    'cloud_auto_renew_execution_notify_chat_ids': '',
+    'cloud_auto_renew_execution_notify_events': 'all',
 }
 
 
@@ -94,6 +100,9 @@ CONFIG_ENV_MAP = {
     'dashboard_totp_secret': 'DASHBOARD_TOTP_SECRET',
     'cleanup_retention_days': 'CLEANUP_RETENTION_DAYS',
     'cloud_asset_sync_interval_seconds': 'CLOUD_ASSET_SYNC_INTERVAL_SECONDS',
+    'cloud_auto_renew_execution_notify_enabled': 'CLOUD_AUTO_RENEW_EXECUTION_NOTIFY_ENABLED',
+    'cloud_auto_renew_execution_notify_chat_ids': 'CLOUD_AUTO_RENEW_EXECUTION_NOTIFY_CHAT_IDS',
+    'cloud_auto_renew_execution_notify_events': 'CLOUD_AUTO_RENEW_EXECUTION_NOTIFY_EVENTS',
 }
 
 

@@ -62,14 +62,22 @@ async def run_bot():
                 logger.warning('个人号生命周期通知发送失败 user=%s err=%s', user_id, fallback_exc)
         return False
 
+    async def _notify_target(chat_id, text: str, reply_markup=None):
+        try:
+            await bot.send_message(chat_id=chat_id, text=text, reply_markup=reply_markup, parse_mode='HTML')
+            return True
+        except Exception as exc:
+            logger.warning('机器人自动续费执行目标通知发送失败 chat_id=%s err=%s', chat_id, exc)
+            return False
+
     cloud_sync_interval_seconds = await asyncio.to_thread(get_cloud_asset_sync_interval_seconds)
 
     # TRON 扫块器 / 资源巡检 / 生命周期调度
     scheduler = AsyncIOScheduler()
     scheduler.add_job(check_resources, 'interval', minutes=3, id='tron_resource_checker', max_instances=1)
     scheduler.add_job(refresh_custom_plan_cache, 'interval', minutes=10, id='custom_plan_cache_refresh', max_instances=1, coalesce=True)
-    scheduler.add_job(lifecycle_tick, 'interval', minutes=10, id='cloud_lifecycle', max_instances=1, kwargs={'notify': _notify})
-    scheduler.add_job(auto_renew_patrol_tick, 'interval', hours=2, id='cloud_auto_renew_patrol', max_instances=1, coalesce=True, kwargs={'notify': _notify})
+    scheduler.add_job(lifecycle_tick, 'interval', minutes=10, id='cloud_lifecycle', max_instances=1, kwargs={'notify': _notify, 'notify_target': _notify_target})
+    scheduler.add_job(auto_renew_patrol_tick, 'interval', hours=2, id='cloud_auto_renew_patrol', max_instances=1, coalesce=True, kwargs={'notify': _notify, 'notify_target': _notify_target})
     scheduler.add_job(sync_server_status_tick, 'interval', seconds=cloud_sync_interval_seconds, id='cloud_server_sync', max_instances=1, coalesce=True)
     scheduler.add_job(sync_cloud_accounts_tick, 'interval', minutes=15, id='cloud_account_check', max_instances=1, coalesce=True)
     scheduler.add_job(lambda: asyncio.to_thread(call_command, 'dedupe_servers'), 'interval', minutes=20, id='server_dedupe', max_instances=1, coalesce=True)
@@ -92,7 +100,7 @@ async def run_bot():
     logger.info('Telegram个人号消息监听调度已启动')
     logger.info('启动时执行云服务器生命周期检查')
     try:
-        await lifecycle_tick(notify=_notify, defer_destructive_seconds=3600)
+        await lifecycle_tick(notify=_notify, notify_target=_notify_target, defer_destructive_seconds=3600)
         logger.info('启动时云服务器生命周期检查完成')
     except Exception as exc:
         logger.exception('启动时云服务器生命周期检查失败: %s', exc)
