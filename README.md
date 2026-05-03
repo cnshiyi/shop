@@ -209,6 +209,52 @@ Redis 中维护按天隔离的临时统计：
 - 资源详情保留更长历史
 - 每日统计增加后台报表视图
 
+## 一键安装并部署前后端
+
+脚本位置：`scripts/bootstrap-and-deploy.sh`。
+
+用途：在一台全新的 Debian / Ubuntu 机器上，一次性安装 `Node.js`、`pnpm`、`uv`、`Python 3.13`、`Nginx`、`MariaDB`、`Redis`，然后拉取前后端代码、生成后端 `.env`、初始化数据库、构建前端、发布静态资源，并写入 `shop-web.service` + `nginx` 配置，把前后端直接打通。
+
+最简单用法：
+
+```bash
+sudo bash scripts/bootstrap-and-deploy.sh
+```
+
+如果要让外部通过 IP 直接访问 `/api/`，首装时建议一并传 `PUBLIC_IP`：
+
+```bash
+sudo PUBLIC_IP=服务器公网IP bash scripts/bootstrap-and-deploy.sh
+```
+
+如果已有域名，建议传 `SERVER_NAME`；如果暂时只有 IP，可同时传 `PUBLIC_IP`：
+
+```bash
+sudo SERVER_NAME=web.1213.cc \
+PUBLIC_IP=1.2.3.4 \
+BACKEND_DIR=/www/wwwroot/shop \
+FRONTEND_DIR=/www/wwwroot/vue-shop-admin \
+FRONTEND_DIST_DIR=/www/wwwroot/shop-admin \
+MYSQL_DATABASE=shop \
+MYSQL_USER=shop \
+MYSQL_PASSWORD='强密码' \
+DASHBOARD_ADMIN_PASSWORD='强密码' \
+BOT_TOKEN='你的机器人 Token' \
+bash scripts/bootstrap-and-deploy.sh
+```
+
+脚本默认行为：
+
+- 后端服务使用 `gunicorn` 监听 `127.0.0.1:8000`
+- `Nginx` 对外提供前端静态页面，并把 `/api/` 反代给 Django
+- 如设置了 `PUBLIC_IP` / `SERVER_NAME`，会自动写入 `ALLOWED_HOSTS` 与 `CSRF_TRUSTED_ORIGINS`
+- 如本机使用 `MYSQL_HOST=127.0.0.1/localhost`，会自动建库、建用户、授权
+- 如 `.env` 不存在，会自动生成一份默认配置；如已存在，则保留现有内容并修正为运行用户组可读
+- 会自动执行 `migrate`、`ensure_dashboard_admin`、前端 build、服务重启与基础健康检查
+- 默认会优先调用当前引导脚本同目录下的 `scripts/auto-update-from-github.sh`，避免本地已修复脚本在首次 `git clone` 时丢失
+
+适合首装；后续日常更新继续用下面这个轻量脚本。
+
 ## 从 GitHub 自动更新后端和前端
 
 脚本位置：`scripts/auto-update-from-github.sh`。
@@ -255,6 +301,7 @@ bash scripts/auto-update-from-github.sh
 
 - 首次运行前，后端目录需要有 `.env`，脚本不会生成或覆盖真实密钥。
 - 如果运行脚本前已激活虚拟环境，脚本优先使用当前 `$VIRTUAL_ENV/bin/python`；否则使用 `BACKEND_DIR/.venv/bin/python`，不存在时才新建 `.venv`。
+- 如果后端虚拟环境错误地链接到了 `/root/.local` 下的 Python，脚本会自动重建为可执行副本；缺少 `gunicorn` 时也会自动补装。
 - 脚本可以重复执行：每次都会 `git fetch` + `git reset --hard` 对齐 GitHub 版本，再用 `git clean` 清理未跟踪源码文件。
 - 后端清理时默认保留 `.env`、`.venv`、`.shop-secrets`、`media`、`staticfiles`、`logs`，避免删掉运行配置、密钥和数据。
 - 前端源码目录每次会清理到仓库干净状态，前端发布会对 `FRONTEND_DIST_DIR` 执行 `rsync --delete`，确保目录只保留最新构建产物。

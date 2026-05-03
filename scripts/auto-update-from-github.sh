@@ -115,13 +115,20 @@ detect_backend_python() {
   fi
 
   if [ -x "$BACKEND_DIR/.venv/bin/python" ]; then
-    BACKEND_PYTHON="$BACKEND_DIR/.venv/bin/python"
-    log "使用项目虚拟环境: $BACKEND_DIR/.venv"
-    return
+    local venv_target
+    venv_target="$(readlink "$BACKEND_DIR/.venv/bin/python" 2>/dev/null || true)"
+    if [ -n "$venv_target" ] && printf '%s' "$venv_target" | grep -q '^/root/.local/'; then
+      log "检测到 .venv 仍链接到 /root/.local 下的 Python，重建为可执行副本"
+      rm -rf "$BACKEND_DIR/.venv"
+    else
+      BACKEND_PYTHON="$BACKEND_DIR/.venv/bin/python"
+      log "使用项目虚拟环境: $BACKEND_DIR/.venv"
+      return
+    fi
   fi
 
   log "创建后端虚拟环境: $BACKEND_DIR/.venv"
-  run "$PYTHON_BIN" -m venv "$BACKEND_DIR/.venv"
+  run "$PYTHON_BIN" -m venv --copies "$BACKEND_DIR/.venv"
   BACKEND_PYTHON="$BACKEND_DIR/.venv/bin/python"
 }
 
@@ -159,6 +166,15 @@ PY
   fi
   rm -f "$requirements_file"
 
+  if [ ! -x "$BACKEND_DIR/.venv/bin/gunicorn" ]; then
+    log "gunicorn 未安装，执行兜底安装"
+    if command -v uv >/dev/null 2>&1; then
+      run uv pip install --python "$BACKEND_PYTHON" gunicorn
+    else
+      run "$BACKEND_PYTHON" -m pip install gunicorn
+    fi
+  fi
+
   if [ ! -f .env ]; then
     log "WARNING: $BACKEND_DIR/.env 不存在；请先补齐数据库、Redis、Bot 等运行配置"
   fi
@@ -171,6 +187,7 @@ update_backend() {
 
   if [ "$RUN_MIGRATE" = "1" ]; then
     run "$BACKEND_PYTHON" manage.py migrate --noinput
+    run "$BACKEND_PYTHON" manage.py ensure_dashboard_admin
   fi
 
   if [ "$RUN_COLLECTSTATIC" = "1" ]; then

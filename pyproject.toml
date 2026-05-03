@@ -17,4 +17,5 @@ dependencies = [
     "alibabacloud_tea_openapi>=0.4.4",
     "alibabacloud_tea_util>=0.3.14",
     "telethon>=1.36",
+    "gunicorn>=23.0.0",
 ]
