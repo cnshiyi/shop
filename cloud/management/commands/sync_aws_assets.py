@@ -43,6 +43,11 @@ def _mark_account_error(account, message: str):
         account.mark_status(account.STATUS_ERROR, message)
 
 
+def _is_region_skippable_auth_error(exc) -> bool:
+    text = str(exc or '')
+    return 'UnrecognizedClientException' in text or 'The security token included in the request is invalid' in text
+
+
 def _aws_credentials(account):
     if not account:
         raise CommandError('未添加启用的 AWS 云账号，拒绝使用环境变量同步。请先在后台「云账号」添加 AWS 账号。')
@@ -483,6 +488,12 @@ class Command(BaseCommand):
                     try:
                         static_ip_response = client.get_static_ips(**static_ip_kwargs)
                     except Exception as exc:
+                        if _is_region_skippable_auth_error(exc):
+                            message = f'AWS 云账号 {account_label} 地区 {region} 暂不可用，已跳过固定 IP 同步: {exc}'
+                            account_stats['errors'].append(message)
+                            self.stdout.write(self.style.WARNING(message))
+                            region_failed = True
+                            break
                         message = f'AWS 云账号 {account_label} 地区 {region} 获取固定 IP 失败: {exc}'
                         _mark_account_error(account, message)
                         account_stats['errors'].append(message)
@@ -518,6 +529,12 @@ class Command(BaseCommand):
                     try:
                         response = client.get_instances(**kwargs)
                     except Exception as exc:
+                        if _is_region_skippable_auth_error(exc):
+                            message = f'AWS 云账号 {account_label} 地区 {region} 暂不可用，已跳过实例同步: {exc}'
+                            account_stats['errors'].append(message)
+                            self.stdout.write(self.style.WARNING(message))
+                            region_failed = True
+                            break
                         message = f'AWS 云账号 {account_label} 地区 {region} 获取实例失败: {exc}'
                         _mark_account_error(account, message)
                         account_stats['errors'].append(message)
