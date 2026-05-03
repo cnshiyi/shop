@@ -17,6 +17,10 @@ def _admin_reply_link_model():
     return apps.get_model('bot', 'AdminReplyLink')
 
 
+def _telegram_group_filter_model():
+    return apps.get_model('bot', 'TelegramGroupFilter')
+
+
 def _normalize_usernames(username: str | list[str] | tuple[str, ...] | None) -> list[str]:
     TelegramUser = _telegram_user_model()
     return TelegramUser.normalize_usernames(username)
@@ -177,6 +181,52 @@ def get_admin_forward_mute_status(tg_user_id: int):
     TelegramUser = _telegram_user_model()
     user = TelegramUser.objects.filter(tg_user_id=tg_user_id).only('admin_forward_muted_until').first()
     return user.admin_forward_muted_until if user else None
+
+
+def _upsert_telegram_group_filter_sync(
+    chat_id: int,
+    title: str | None,
+    username: str | None = None,
+):
+    TelegramGroupFilter = _telegram_group_filter_model()
+    normalized_username = (_normalize_usernames(username) or [''])[0] or None
+    defaults = {
+        'title': (title or '')[:191] or None,
+        'username': normalized_username,
+        'enabled': False,
+    }
+    item, _ = TelegramGroupFilter.objects.get_or_create(chat_id=chat_id, defaults=defaults)
+    changed = []
+    next_title = (title or '')[:191] or None
+    if next_title and item.title != next_title:
+        item.title = next_title
+        changed.append('title')
+    if normalized_username and item.username != normalized_username:
+        item.username = normalized_username
+        changed.append('username')
+    if changed:
+        changed.append('updated_at')
+        item.save(update_fields=changed)
+    return item
+
+
+@sync_to_async
+def upsert_telegram_group_filter(
+    chat_id: int,
+    title: str | None,
+    username: str | None = None,
+):
+    return _upsert_telegram_group_filter_sync(chat_id, title, username)
+
+
+@sync_to_async
+def should_forward_telegram_group(
+    chat_id: int,
+    title: str | None,
+    username: str | None = None,
+) -> bool:
+    item = _upsert_telegram_group_filter_sync(chat_id, title, username)
+    return bool(item.enabled)
 
 
 @sync_to_async

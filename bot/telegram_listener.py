@@ -10,7 +10,7 @@ from asgiref.sync import sync_to_async
 from django.utils import timezone
 
 from bot.models import TelegramChatMessage, TelegramLoginAccount
-from bot.services import record_telegram_message
+from bot.services import record_telegram_message, should_forward_telegram_group
 from core.models import SiteConfig
 from core.runtime_config import get_runtime_config
 
@@ -102,9 +102,20 @@ async def _record_event(account: LoginAccountSnapshot, event):
     if not counterpart or not getattr(counterpart, 'id', None):
         return
     text = getattr(message, 'message', None) or getattr(message, 'raw_text', None) or ''
+    chat_id = int(event.chat_id or counterpart.id)
+    chat_title = _entity_name(chat)
+    if is_group_chat:
+        enabled = await should_forward_telegram_group(
+            chat_id=chat_id,
+            title=chat_title,
+            username=_entity_username(chat),
+        )
+        if not enabled:
+            await _mark_account(account.id, 'logged_in')
+            return
     await record_telegram_message(
         tg_user_id=int(counterpart.id),
-        chat_id=int(event.chat_id or counterpart.id),
+        chat_id=chat_id,
         message_id=int(message.id) if getattr(message, 'id', None) else None,
         direction=TelegramChatMessage.DIRECTION_OUT if is_outgoing else TelegramChatMessage.DIRECTION_IN,
         content_type=_content_type(message),
@@ -112,7 +123,7 @@ async def _record_event(account: LoginAccountSnapshot, event):
         username=None if is_group_chat else _entity_username(counterpart),
         first_name=_entity_name(counterpart),
         login_account_id=account.id,
-        chat_title=_entity_name(chat),
+        chat_title=chat_title,
         source='account',
     )
     await _mark_account(account.id, 'logged_in')

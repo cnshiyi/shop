@@ -905,6 +905,10 @@ def _first_nonblank(*values) -> str:
     return ''
 
 
+def _is_manual_authoritative_provider(provider: str | None) -> bool:
+    return str(provider or '').strip() == CloudServerPlan.PROVIDER_AWS_LIGHTSAIL
+
+
 def _hydrate_order_from_proxy_asset(order: CloudServerOrder | None, asset: CloudAsset | None = None, server: Server | None = None):
     if not order:
         return order
@@ -924,14 +928,17 @@ def _hydrate_order_from_proxy_asset(order: CloudServerOrder | None, asset: Cloud
         )
     public_ip = _first_nonblank(getattr(asset, 'public_ip', None), getattr(server, 'public_ip', None), order.public_ip)
     previous_ip = _first_nonblank(getattr(asset, 'previous_public_ip', None), getattr(server, 'previous_public_ip', None), order.previous_public_ip)
-    expiry_candidates = [
-        item for item in (
-            getattr(asset, 'actual_expires_at', None),
-            getattr(server, 'expires_at', None),
-            order.service_expires_at,
-        ) if item
-    ]
-    expires_at = max(expiry_candidates) if expiry_candidates else None
+    if _is_manual_authoritative_provider(getattr(order, 'provider', None)) and order.service_expires_at:
+        expires_at = order.service_expires_at
+    else:
+        expiry_candidates = [
+            item for item in (
+                getattr(asset, 'actual_expires_at', None),
+                getattr(server, 'expires_at', None),
+                order.service_expires_at,
+            ) if item
+        ]
+        expires_at = max(expiry_candidates) if expiry_candidates else None
     if public_ip:
         order.public_ip = public_ip
     if previous_ip:
@@ -1039,12 +1046,30 @@ def _proxy_server_view(server: Server):
     )
 
 
+def _user_bound_group_ids(user_id: int) -> list[int]:
+    return list(
+        CloudAsset.objects
+        .filter(kind=CloudAsset.KIND_SERVER, user_id=user_id, telegram_group_id__isnull=False)
+        .values_list('telegram_group_id', flat=True)
+        .distinct()
+    )
+
+
+def _user_asset_visibility_filter(user_id: int):
+    group_ids = _user_bound_group_ids(user_id)
+    visibility = Q(user_id=user_id)
+    if group_ids:
+        visibility |= Q(telegram_group_id__in=group_ids)
+    return visibility
+
+
 @sync_to_async
 def list_user_cloud_servers(user_id: int):
     ip_filter = Q(public_ip__isnull=False) & ~Q(public_ip='')
     assets = (
         CloudAsset.objects.select_related('order')
-        .filter(kind=CloudAsset.KIND_SERVER, user_id=user_id)
+        .filter(kind=CloudAsset.KIND_SERVER)
+        .filter(_user_asset_visibility_filter(user_id))
         .filter(ip_filter)
         .filter(_active_cloud_account_asset_filter())
         .exclude(status__in=_INACTIVE_ASSET_STATUSES)
@@ -1058,7 +1083,8 @@ def list_user_auto_renew_cloud_servers(user_id: int):
     ip_filter = Q(public_ip__isnull=False) & ~Q(public_ip='')
     assets = (
         CloudAsset.objects.select_related('order', 'user')
-        .filter(kind=CloudAsset.KIND_SERVER, user_id=user_id)
+        .filter(kind=CloudAsset.KIND_SERVER)
+        .filter(_user_asset_visibility_filter(user_id))
         .filter(ip_filter)
         .filter(_active_cloud_account_asset_filter())
         .exclude(status__in=_INACTIVE_ASSET_STATUSES)
@@ -1350,6 +1376,12 @@ def _fmt_dt(value):
     return value.isoformat() if value else '-'
 
 
+def _fmt_amount(value):
+    if value in (None, ''):
+        return '-'
+    return str(Decimal(str(value)).quantize(Decimal('0.01')))
+
+
 def _trim_operation_order_no(source_order: CloudServerOrder | None, operation: str, suffix: str | None = None) -> str:
     source_id = getattr(source_order, 'id', None) or 0
     tag = suffix or (f'O{source_id}' if source_id else None)
@@ -1365,10 +1397,24 @@ def _set_source_migration_expiry(order: CloudServerOrder, migration_due_at, reas
         'ip_recycle_at': order.ip_recycle_at,
         'migration_due_at': order.migration_due_at,
     }
+    delete_at = migration_due_at + timezone.timedelta(days=3)
     order.migration_due_at = migration_due_at
     order.service_expires_at = migration_due_at
+    order.renew_grace_expires_at = delete_at
+    order.suspend_at = delete_at
+    order.delete_at = delete_at
+    order.ip_recycle_at = delete_at + timezone.timedelta(days=15)
     order.provision_note = '\n'.join(filter(None, [order.provision_note, note]))
-    order.save()
+    CloudServerOrder.objects.filter(id=order.id).update(
+        migration_due_at=order.migration_due_at,
+        service_expires_at=order.service_expires_at,
+        renew_grace_expires_at=order.renew_grace_expires_at,
+        suspend_at=order.suspend_at,
+        delete_at=order.delete_at,
+        ip_recycle_at=order.ip_recycle_at,
+        provision_note=order.provision_note,
+        updated_at=timezone.now(),
+    )
     asset_count = CloudAsset.objects.filter(order=order).update(actual_expires_at=migration_due_at, updated_at=timezone.now())
     server_count = Server.objects.filter(order=order).update(expires_at=migration_due_at, updated_at=timezone.now())
     after = {
@@ -1477,7 +1523,185 @@ def _create_manual_asset_operation_order(asset: CloudAsset, user: TelegramUser, 
     return order
 
 
-def ensure_manual_owner_operation_order(asset: CloudAsset, new_user: TelegramUser | None, actor: str = '后台人工编辑', previous_user: TelegramUser | None = None) -> tuple[CloudServerOrder | None, str | None]:
+def _mark_manual_replaced_order_inactive(order: CloudServerOrder, actor: str, reason: str) -> None:
+    note = '\n'.join(filter(None, [
+        str(getattr(order, 'provision_note', '') or '').strip(),
+        f'{actor}: {reason}；旧订单已失效。',
+    ]))
+    now = timezone.now()
+    CloudServerOrder.objects.filter(id=order.id).update(
+        status='cancelled',
+        auto_renew_enabled=False,
+        cloud_reminder_enabled=False,
+        suspend_reminder_enabled=False,
+        delete_reminder_enabled=False,
+        ip_recycle_reminder_enabled=False,
+        renew_notice_sent_at=None,
+        auto_renew_notice_sent_at=None,
+        auto_renew_failure_notice_sent_at=None,
+        delete_notice_sent_at=None,
+        recycle_notice_sent_at=None,
+        renew_grace_expires_at=None,
+        suspend_at=None,
+        delete_at=None,
+        ip_recycle_at=None,
+        expired_at=now,
+        provision_note=note,
+        updated_at=now,
+    )
+    order.status = 'cancelled'
+    order.auto_renew_enabled = False
+    order.cloud_reminder_enabled = False
+    order.suspend_reminder_enabled = False
+    order.delete_reminder_enabled = False
+    order.ip_recycle_reminder_enabled = False
+    order.renew_grace_expires_at = None
+    order.suspend_at = None
+    order.delete_at = None
+    order.ip_recycle_at = None
+    order.expired_at = now
+    order.provision_note = note
+
+
+def replace_cloud_asset_order_by_admin(
+    asset: CloudAsset,
+    *,
+    actor: str = '后台人工编辑',
+    new_user: TelegramUser | None = None,
+    new_expires_at=None,
+    new_price=None,
+    previous_user: TelegramUser | None = None,
+    previous_expires_at=None,
+    previous_price=None,
+) -> tuple[CloudServerOrder | None, str | None]:
+    provider = str(getattr(asset, 'provider', None) or getattr(getattr(asset, 'order', None), 'provider', None) or '').strip()
+    if not _is_manual_authoritative_provider(provider):
+        return None, None
+    base_order = getattr(asset, 'order', None)
+    if not base_order:
+        return None, '当前资产没有关联订单，无法生成替换订单'
+    target_user = new_user if new_user is not None else asset.user
+    if not target_user:
+        return None, '当前资产缺少归属用户，无法生成替换订单'
+    target_expires_at = new_expires_at or asset.actual_expires_at or getattr(base_order, 'service_expires_at', None)
+    if not target_expires_at:
+        return None, '当前资产缺少到期时间，无法生成替换订单'
+    plan = getattr(base_order, 'plan', None)
+    plan_id = getattr(base_order, 'plan_id', None)
+    if not plan_id:
+        plan = CloudServerPlan.objects.filter(
+            provider=provider,
+            region_code=asset.region_code or getattr(base_order, 'region_code', '') or '',
+            is_active=True,
+        ).order_by('-sort_order', 'id').first() or CloudServerPlan.objects.filter(provider=provider, is_active=True).order_by('-sort_order', 'id').first()
+        plan_id = getattr(plan, 'id', None)
+    if not plan_id:
+        return None, '当前地区没有可用套餐，无法生成替换订单'
+    now = timezone.now()
+    requested_price = new_price if new_price is not None else asset.price
+    old_price = previous_price if previous_price is not None else getattr(base_order, 'total_amount', None)
+    base_amount = requested_price
+    if base_amount in (None, ''):
+        base_amount = getattr(base_order, 'total_amount', None)
+    if base_amount in (None, '') and asset.price is not None:
+        base_amount = asset.price
+    total_amount = Decimal(str(base_amount)).quantize(Decimal('0.01')) if base_amount not in (None, '') else Decimal('0.00')
+    pay_amount = total_amount
+    lifecycle = _cloud_order_lifecycle_fields(target_expires_at)
+    old_user = previous_user if previous_user is not None else getattr(base_order, 'user', None)
+    old_expires = previous_expires_at if previous_expires_at is not None else getattr(base_order, 'service_expires_at', None)
+    old_user_label = getattr(old_user, 'tg_user_id', None) or getattr(old_user, 'username', None) or '-'
+    new_user_label = getattr(target_user, 'tg_user_id', None) or getattr(target_user, 'username', None) or target_user.id
+    change_bits = []
+    if str(old_user_label) != str(new_user_label):
+        change_bits.append(f'所属人 {old_user_label} -> {new_user_label}')
+    if old_expires != target_expires_at:
+        change_bits.append(f'到期时间 {_fmt_dt(old_expires)} -> {_fmt_dt(target_expires_at)}')
+    if old_price != requested_price and requested_price is not None:
+        change_bits.append(f'价格 {_fmt_amount(old_price)} -> {_fmt_amount(requested_price)}')
+    if not change_bits:
+        change_bits.append('人工重建当前有效订单')
+    note = f"{actor}: {'；'.join(change_bits)}；生成新订单并让旧订单失效。"
+    new_order = CloudServerOrder.objects.create(
+        order_no=_generate_cloud_order_no('SRVADMIN', f'REPLACE{asset.id}'),
+        user=target_user,
+        plan_id=plan_id,
+        provider=provider,
+        cloud_account=asset.cloud_account or getattr(base_order, 'cloud_account', None),
+        account_label=asset.account_label or getattr(base_order, 'account_label', None),
+        region_code=asset.region_code or getattr(base_order, 'region_code', None) or getattr(plan, 'region_code', ''),
+        region_name=asset.region_name or getattr(base_order, 'region_name', None) or getattr(plan, 'region_name', ''),
+        plan_name=asset.asset_name or getattr(base_order, 'plan_name', None) or getattr(plan, 'plan_name', '人工代理'),
+        quantity=1,
+        currency=asset.currency or getattr(base_order, 'currency', None) or getattr(plan, 'currency', 'USDT'),
+        total_amount=total_amount,
+        pay_amount=pay_amount,
+        pay_method=getattr(base_order, 'pay_method', None) or 'balance',
+        status='completed',
+        lifecycle_days=getattr(base_order, 'lifecycle_days', 31) or 31,
+        service_started_at=getattr(base_order, 'service_started_at', None) or asset.created_at or now,
+        service_expires_at=target_expires_at,
+        suspend_at=lifecycle.get('suspend_at'),
+        renew_grace_expires_at=lifecycle.get('renew_grace_expires_at'),
+        delete_at=lifecycle.get('delete_at'),
+        ip_recycle_at=lifecycle.get('ip_recycle_at'),
+        cloud_reminder_enabled=getattr(base_order, 'cloud_reminder_enabled', True),
+        suspend_reminder_enabled=getattr(base_order, 'suspend_reminder_enabled', True),
+        delete_reminder_enabled=getattr(base_order, 'delete_reminder_enabled', True),
+        ip_recycle_reminder_enabled=getattr(base_order, 'ip_recycle_reminder_enabled', True),
+        auto_renew_enabled=getattr(base_order, 'auto_renew_enabled', False),
+        last_user_id=getattr(target_user, 'tg_user_id', None),
+        mtproxy_port=asset.mtproxy_port or getattr(base_order, 'mtproxy_port', None) or 9528,
+        mtproxy_link=asset.mtproxy_link or getattr(base_order, 'mtproxy_link', None),
+        proxy_links=asset.proxy_links or getattr(base_order, 'proxy_links', None) or [],
+        mtproxy_secret=asset.mtproxy_secret or getattr(base_order, 'mtproxy_secret', None),
+        mtproxy_host=asset.mtproxy_host or getattr(base_order, 'mtproxy_host', None),
+        instance_id=asset.instance_id or getattr(base_order, 'instance_id', None),
+        provider_resource_id=asset.provider_resource_id or getattr(base_order, 'provider_resource_id', None),
+        public_ip=asset.public_ip or getattr(base_order, 'public_ip', None),
+        previous_public_ip=asset.previous_public_ip or getattr(base_order, 'previous_public_ip', None),
+        server_name=asset.asset_name or getattr(base_order, 'server_name', None),
+        login_user=asset.login_user or getattr(base_order, 'login_user', None),
+        login_password=asset.login_password or getattr(base_order, 'login_password', None),
+        ip_change_quota=getattr(base_order, 'ip_change_quota', 1) or 1,
+        last_renewed_at=getattr(base_order, 'last_renewed_at', None),
+        completed_at=now,
+        replacement_for=base_order,
+        provision_note='\n'.join(filter(None, [
+            str(getattr(base_order, 'provision_note', '') or '').strip(),
+            note,
+            f'来源资产 #{asset.id}；来源订单 #{base_order.id}。',
+        ])),
+    )
+    asset.order = new_order
+    asset.user = target_user
+    asset.actual_expires_at = target_expires_at
+    asset.save(update_fields=['order', 'user', 'actual_expires_at', 'updated_at'])
+    server_match = Q(order_id=base_order.id)
+    if asset.instance_id:
+        server_match |= Q(instance_id=asset.instance_id)
+    if asset.provider_resource_id:
+        server_match |= Q(provider_resource_id=asset.provider_resource_id)
+    Server.objects.filter(server_match).update(
+        order=new_order,
+        user=target_user,
+        expires_at=target_expires_at,
+        updated_at=timezone.now(),
+    )
+    _mark_manual_replaced_order_inactive(base_order, actor, note)
+    logger.info('CLOUD_MANUAL_REPLACE_ORDER old_order_id=%s new_order_id=%s asset_id=%s public_ip=%s actor=%s note=%s', base_order.id, new_order.id, asset.id, asset.public_ip, actor, note)
+    record_cloud_ip_log(
+        event_type='changed',
+        order=new_order,
+        asset=asset,
+        public_ip=asset.public_ip,
+        previous_public_ip=asset.previous_public_ip,
+        note=note,
+    )
+    return new_order, None
+
+
+def ensure_manual_owner_operation_order(asset: CloudAsset, new_user: TelegramUser | None, actor: str = '后台人工编辑', previous_user: TelegramUser | None = None, previous_expires_at=None) -> tuple[CloudServerOrder | None, str | None]:
     old_user = previous_user if previous_user is not None else asset.user
     if not new_user:
         old_label = getattr(old_user, 'tg_user_id', None) or getattr(old_user, 'username', None) or '-'
@@ -1494,7 +1718,10 @@ def ensure_manual_owner_operation_order(asset: CloudAsset, new_user: TelegramUse
     new_label = getattr(new_user, 'tg_user_id', None) or getattr(new_user, 'username', None) or new_user.id
     asset.user = new_user
     asset.save(update_fields=['user', 'updated_at'])
-    order = _create_manual_asset_operation_order(asset, new_user, 'OWNER', asset.actual_expires_at)
+    owner_order_expires_at = previous_expires_at
+    if owner_order_expires_at is None:
+        owner_order_expires_at = getattr(getattr(asset, 'order', None), 'service_expires_at', None) or asset.actual_expires_at
+    order = _create_manual_asset_operation_order(asset, new_user, 'OWNER', owner_order_expires_at)
     if not order:
         logger.warning('CLOUD_MANUAL_OWNER_ORDER_SKIPPED asset_id=%s public_ip=%s reason=no_available_plan actor=%s', asset.id, asset.public_ip, actor)
         record_cloud_ip_log(event_type='changed', asset=asset, public_ip=asset.public_ip, previous_public_ip=asset.previous_public_ip, note=f'{actor}: 人工编辑所属人 {old_label} -> {new_label}；未生成操作订单：该地区没有可用套餐。')
@@ -1511,6 +1738,27 @@ def ensure_manual_owner_operation_order(asset: CloudAsset, new_user: TelegramUse
     server_count = Server.objects.filter(server_match).update(user=new_user, updated_at=timezone.now()) if server_match else 0
     logger.info('CLOUD_MANUAL_OWNER_ORDER order_id=%s order_no=%s asset_id=%s public_ip=%s old_user=%s new_user=%s server_count=%s actor=%s', order.id, order.order_no, asset.id, asset.public_ip, old_label, new_label, server_count, actor)
     record_cloud_ip_log(event_type='changed', order=order, asset=asset, public_ip=asset.public_ip, previous_public_ip=asset.previous_public_ip, note=f'{actor}: 人工编辑所属人 {old_label} -> {new_label}；操作订单 {order.order_no}；同步 Server {server_count} 条。')
+    return order, None
+
+
+def ensure_manual_price_operation_order(asset: CloudAsset, new_price, actor: str = '后台人工编辑', previous_price=None) -> tuple[CloudServerOrder | None, str | None]:
+    if not asset.user_id:
+        logger.info('CLOUD_MANUAL_PRICE_ORDER_SKIPPED asset_id=%s public_ip=%s reason=unbound_user actor=%s', asset.id, asset.public_ip, actor)
+        record_cloud_ip_log(event_type='changed', asset=asset, public_ip=asset.public_ip, previous_public_ip=asset.previous_public_ip, note=f'{actor}: 人工编辑未绑定资产价格为 {new_price}；未生成操作订单。')
+        return None, None
+    old_price = previous_price if previous_price is not None else getattr(getattr(asset, 'order', None), 'total_amount', None)
+    order = _create_manual_asset_operation_order(asset, asset.user, 'PRICE', asset.actual_expires_at)
+    if not order:
+        logger.warning('CLOUD_MANUAL_PRICE_ORDER_SKIPPED asset_id=%s public_ip=%s reason=no_available_plan actor=%s', asset.id, asset.public_ip, actor)
+        record_cloud_ip_log(event_type='changed', asset=asset, public_ip=asset.public_ip, previous_public_ip=asset.previous_public_ip, note=f'{actor}: 人工编辑价格 {old_price} -> {new_price}；未生成操作订单：该地区没有可用套餐。')
+        return None, None
+    order.provision_note = '\n'.join(filter(None, [
+        order.provision_note,
+        f'{actor}: 人工编辑价格 {old_price} -> {new_price}，生成独立操作订单用于审计，不改写资产原订单绑定。',
+    ]))
+    order.save(update_fields=['provision_note', 'updated_at'])
+    logger.info('CLOUD_MANUAL_PRICE_ORDER order_id=%s order_no=%s asset_id=%s public_ip=%s old_price=%s new_price=%s actor=%s', order.id, order.order_no, asset.id, asset.public_ip, old_price, new_price, actor)
+    record_cloud_ip_log(event_type='changed', order=order, asset=asset, public_ip=asset.public_ip, previous_public_ip=asset.previous_public_ip, note=f'{actor}: 人工编辑价格 {old_price} -> {new_price}；操作订单 {order.order_no}。')
     return order, None
 
 
@@ -1779,6 +2027,50 @@ def create_cloud_server_renewal_by_public_query(order_id: int, days: int = 31):
 
 
 @sync_to_async
+def create_cloud_server_renewal_for_user(order_id: int, user_id: int, days: int = 31):
+    order = CloudServerOrder.objects.select_related('user').filter(id=order_id).first()
+    if not order:
+        return None
+    renewal_user = TelegramUser.objects.filter(id=user_id).first()
+    return _prepare_cloud_server_renewal(order, renewal_user, days)
+
+
+@sync_to_async
+def get_cloud_order_group_balance_lines(order_id: int) -> list[str]:
+    asset = CloudAsset.objects.filter(order_id=order_id, telegram_group_id__isnull=False).order_by('-updated_at', '-id').first()
+    if not asset:
+        return []
+    users = []
+    seen = set()
+    order = CloudServerOrder.objects.select_related('user').filter(id=order_id).first()
+    if order and order.user_id:
+        users.append(order.user)
+        seen.add(order.user_id)
+    group_users = (
+        TelegramUser.objects
+        .filter(cloudasset__telegram_group_id=asset.telegram_group_id, cloudasset__kind=CloudAsset.KIND_SERVER)
+        .distinct()
+        .order_by('-balance', 'id')
+    )
+    for user in group_users:
+        if user.id in seen:
+            continue
+        seen.add(user.id)
+        users.append(user)
+    if len(users) <= 1:
+        return []
+    lines = []
+    for user in users:
+        usernames = list(getattr(user, 'usernames', []) or [])
+        username = usernames[0] if usernames else (getattr(user, 'username', '') or '')
+        label = getattr(user, 'display_name', None) or getattr(user, 'first_name', None) or username or str(getattr(user, 'tg_user_id', '') or user.id)
+        if username:
+            label = f'{label} (@{username})'
+        lines.append(f'- {label}: USDT {Decimal(str(user.balance or 0)):.6f} / TRX {Decimal(str(user.balance_trx or 0)):.6f}')
+    return lines
+
+
+@sync_to_async
 def start_cloud_server_from_admin(order_id: int):
     order = CloudServerOrder.objects.filter(id=order_id).first()
     if not order:
@@ -2012,14 +2304,13 @@ def mark_cloud_server_ip_change_requested(order_id: int, user_id: int, region_co
         ).order_by('-sort_order', 'id').first()
     if not fallback_plan:
         return False
-    if not order.mtproxy_secret:
-        return False
     target_port = port or order.mtproxy_port or 9528
     original_service_expires_at = order.service_expires_at
     remaining_ip_changes -= 1
     now = timezone.now()
     migration_due_at = now + timezone.timedelta(days=5)
-    ip_recycle_at = migration_due_at + timezone.timedelta(days=15)
+    delete_at = migration_due_at + timezone.timedelta(days=3)
+    ip_recycle_at = delete_at + timezone.timedelta(days=15)
     old_public_ip = order.public_ip or order.previous_public_ip or ''
     old_port = order.mtproxy_port or target_port
     old_secret = order.mtproxy_secret or ''
@@ -2565,7 +2856,8 @@ def set_cloud_server_auto_renew(order_id: int, user_id: int, enabled: bool):
     if not order:
         asset = (
             CloudAsset.objects.select_related('order')
-            .filter(kind=CloudAsset.KIND_SERVER, user_id=user_id, order_id=order_id)
+            .filter(kind=CloudAsset.KIND_SERVER, order_id=order_id)
+            .filter(_user_asset_visibility_filter(user_id))
             .filter(Q(public_ip__isnull=False) & ~Q(public_ip=''))
             .filter(_active_cloud_account_asset_filter())
             .exclude(status__in=_INACTIVE_ASSET_STATUSES)
@@ -2585,7 +2877,7 @@ def set_cloud_server_auto_renew_admin(order_id: int, enabled: bool):
 def _set_all_cloud_server_auto_renew(enabled: bool, user_id: int | None = None):
     assets = CloudAsset.objects.filter(kind=CloudAsset.KIND_SERVER, order__isnull=False)
     if user_id is not None:
-        assets = assets.filter(user_id=user_id)
+        assets = assets.filter(_user_asset_visibility_filter(user_id))
     order_ids = list(
         assets.filter(Q(public_ip__isnull=False) & ~Q(public_ip=''))
         .filter(_active_cloud_account_asset_filter())
@@ -2630,7 +2922,8 @@ def get_cloud_server_auto_renew(order_id: int, user_id: int):
     if not order:
         asset = (
             CloudAsset.objects.select_related('order')
-            .filter(kind=CloudAsset.KIND_SERVER, user_id=user_id, order_id=order_id)
+            .filter(kind=CloudAsset.KIND_SERVER, order_id=order_id)
+            .filter(_user_asset_visibility_filter(user_id))
             .filter(Q(public_ip__isnull=False) & ~Q(public_ip=''))
             .filter(_active_cloud_account_asset_filter())
             .exclude(status__in=_INACTIVE_ASSET_STATUSES)
@@ -2672,6 +2965,8 @@ __all__ = [
     'create_cloud_server_order',
     'create_cloud_server_renewal',
     'create_cloud_server_renewal_by_public_query',
+    'create_cloud_server_renewal_for_user',
+    'get_cloud_order_group_balance_lines',
     'delay_cloud_server_expiry',
     'disable_all_cloud_server_auto_renew',
     'disable_all_cloud_server_auto_renew_admin',

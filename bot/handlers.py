@@ -37,19 +37,21 @@ from bot.keyboards import (
     cart_menu, wallet_recharge_prompt_menu, cloud_ip_query_result,
     cloud_query_menu, configured_link_for_label, configured_link_menu,
 )
-from bot.services import create_admin_reply_link, get_admin_reply_link, get_admin_reply_link_by_id, get_or_create_user, get_admin_forward_mute_status, is_admin_forward_muted, mute_admin_forward_for_days, record_bot_operation_log, record_telegram_message
+from bot.services import create_admin_reply_link, get_admin_reply_link, get_admin_reply_link_by_id, get_or_create_user, get_admin_forward_mute_status, is_admin_forward_muted, mute_admin_forward_for_days, record_bot_operation_log, record_telegram_message, should_forward_telegram_group
 from cloud.services import (
     RenewalPriceMissingError,
     buy_cloud_server_with_balance,
     create_cloud_server_order,
     create_cloud_server_renewal,
     create_cloud_server_renewal_by_public_query,
+    create_cloud_server_renewal_for_user,
     delay_cloud_server_expiry,
     disable_all_cloud_server_auto_renew,
     disable_all_cloud_server_auto_renew_admin,
     enable_all_cloud_server_auto_renew,
     enable_all_cloud_server_auto_renew_admin,
     get_cloud_plan,
+    get_cloud_order_group_balance_lines,
     get_cloud_server_auto_renew,
     get_user_reminder_summary,
     get_cloud_server_by_ip,
@@ -442,9 +444,13 @@ async def _reply_cloud_query_results(message: Message, raw_text: str, state: FSM
         expires_at = getattr(order, 'service_expires_at', None)
         expires_text = _format_local_dt(expires_at).split(' ', 1)[0] if expires_at else '今天到期'
         auto_renew_text = '已开启' if getattr(order, 'auto_renew_enabled', False) else '未开启'
+        group_balance_lines = await get_cloud_order_group_balance_lines(order.id)
+        balance_block = ''
+        if group_balance_lines:
+            balance_block = '\n多用户余额:\n' + '\n'.join(escape(line) for line in group_balance_lines)
         results.append({
             'ip': display_ip,
-            'text': f'IP: <code>{escape(display_ip)}</code>\n到期时间: {expires_text}\n自动续费: {auto_renew_text}\n状态: 可续费',
+            'text': f'IP: <code>{escape(display_ip)}</code>\n到期时间: {expires_text}\n自动续费: {auto_renew_text}\n状态: 可续费{balance_block}',
             'renewable': True,
             'order_id': order.id,
             '_expires_at': expires_at,
@@ -649,6 +655,17 @@ async def _forward_plain_text_to_admin(bot: Bot, message: Message):
     if not sender:
         logger.warning('管理员转发跳过：缺少发送者 sender=%s type=%s', sender, content_type)
         return
+    chat = getattr(message, 'chat', None)
+    chat_id = int(getattr(chat, 'id', 0) or 0)
+    if chat_id < 0:
+        should_forward_group = await should_forward_telegram_group(
+            chat_id=chat_id,
+            title=getattr(chat, 'title', None),
+            username=getattr(chat, 'username', None),
+        )
+        if not should_forward_group:
+            logger.info('管理员转发跳过：群组通知已关闭 chat_id=%s sender=%s type=%s', chat_id, sender, content_type)
+            return
     if not text and not _is_admin_forward_media_type(content_type):
         logger.warning('管理员转发跳过：消息无可转发文本/媒体 sender=%s type=%s', sender, content_type)
         return
@@ -3106,7 +3123,7 @@ def register_handlers(dp: Dispatcher):
         logger.info('CLOUD_ASSET_ACTION_START user_id=%s asset_id=%s order_id=%s action=%s ip=%s', user.id, asset_id, order.id, action, getattr(item, 'public_ip', None))
         if action == 'renew':
             try:
-                renewal = await create_cloud_server_renewal(order.id, user.id, 31)
+                renewal = await create_cloud_server_renewal_for_user(order.id, user.id, 31)
             except RenewalPriceMissingError as exc:
                 await _safe_callback_answer(callback, str(exc), show_alert=True)
                 return
@@ -3119,13 +3136,16 @@ def register_handlers(dp: Dispatcher):
             trx_amount = await usdt_to_trx(renewal.pay_amount)
             receive_address = _receive_address()
             auto_renew_enabled = await get_cloud_server_auto_renew(renewal.id, user.id)
+            group_balance_lines = await get_cloud_order_group_balance_lines(renewal.id)
+            balance_text = '\n'.join(['多用户余额：', *group_balance_lines]) if group_balance_lines else ''
             await _safe_edit_text(callback.message,
                 '🔄 云服务器续费\n\n'
                 f'订单号: {renewal.order_no}\n'
                 '续费时长: 31天\n'
                 f'续费价格: {fmt_pay_amount(renewal.pay_amount)} {renewal.currency}\n'
                 f'自动续费: {"已开启" if auto_renew_enabled else "已关闭"}\n'
-                f'收款地址: <code>{escape(receive_address)}</code>\n\n'
+                f'收款地址: <code>{escape(receive_address)}</code>'
+                f'{("\n\n" + balance_text) if balance_text else ""}\n\n'
                 '可直接地址支付，或使用下方钱包续费与自动续费开关。',
                 parse_mode='HTML',
                 disable_web_page_preview=True,
@@ -3347,7 +3367,7 @@ def register_handlers(dp: Dispatcher):
         user = await get_or_create_user(callback.from_user.id, callback.from_user.username, callback.from_user.first_name)
         order_id = int(callback.data.split(':')[2])
         try:
-            order = await create_cloud_server_renewal(order_id, user.id, 31)
+            order = await create_cloud_server_renewal_for_user(order_id, user.id, 31)
             if not order:
                 order = await create_cloud_server_renewal_by_public_query(order_id, 31)
         except RenewalPriceMissingError as exc:
@@ -3362,13 +3382,16 @@ def register_handlers(dp: Dispatcher):
         trx_amount = await usdt_to_trx(order.pay_amount)
         receive_address = _receive_address()
         auto_renew_enabled = await get_cloud_server_auto_renew(order.id, getattr(order, 'user_id', user.id))
+        group_balance_lines = await get_cloud_order_group_balance_lines(order.id)
+        balance_text = '\n'.join(['多用户余额：', *group_balance_lines]) if group_balance_lines else ''
         await _safe_edit_text(callback.message, 
             '🔄 云服务器续费\n\n'
             f'订单号: {order.order_no}\n'
             '续费时长: 31天\n'
             f'续费价格: {fmt_pay_amount(order.pay_amount)} {order.currency}\n'
             f'自动续费: {"已开启" if auto_renew_enabled else "已关闭"}\n'
-            f'收款地址: <code>{escape(receive_address)}</code>\n\n'
+            f'收款地址: <code>{escape(receive_address)}</code>'
+            f'{("\n\n" + balance_text) if balance_text else ""}\n\n'
             '可直接地址支付，或使用下方钱包续费与自动续费开关。',
             parse_mode='HTML',
             disable_web_page_preview=True,
@@ -3988,6 +4011,11 @@ def register_handlers(dp: Dispatcher):
             _safe_preview_text(raw_text),
         )
         if kind in {'empty'} and not _is_admin_forward_media_type(content_type):
+            return
+        chat = getattr(message, 'chat', None)
+        is_group_chat = int(getattr(chat, 'id', 0) or 0) < 0
+        if is_group_chat and not is_admin_chat:
+            await _forward_plain_text_to_admin(bot, message)
             return
         link_button = _link_button_for_text(raw_text)
         if link_button:

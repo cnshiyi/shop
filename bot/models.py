@@ -150,6 +150,24 @@ class TelegramChatArchive(models.Model):
         return self.title or str(self.chat_id)
 
 
+class TelegramGroupFilter(models.Model):
+    chat_id = models.BigIntegerField('群组会话ID', unique=True, db_index=True)
+    title = models.CharField('群组名称', max_length=191, blank=True, null=True)
+    username = models.CharField('群组用户名', max_length=191, blank=True, null=True, db_index=True)
+    enabled = models.BooleanField('允许转发', default=False, db_index=True)
+    created_at = models.DateTimeField('创建时间', auto_now_add=True)
+    updated_at = models.DateTimeField('更新时间', auto_now=True)
+
+    class Meta:
+        db_table = 'bot_telegram_group_filter'
+        verbose_name = 'Telegram群组过滤'
+        verbose_name_plural = 'Telegram群组过滤'
+        ordering = ['-updated_at', '-id']
+
+    def __str__(self):
+        return self.title or (self.username and f'@{self.username}') or str(self.chat_id)
+
+
 class AdminReplyLink(models.Model):
     admin_chat_id = models.BigIntegerField('管理员会话ID', db_index=True)
     admin_message_id = models.BigIntegerField('管理员消息ID', db_index=True)
@@ -219,6 +237,7 @@ __all__ = [
     'BotUser',
     'TelegramChatArchive',
     'TelegramChatMessage',
+    'TelegramGroupFilter',
     'TelegramLoginAccount',
     'TelegramUser',
 ]

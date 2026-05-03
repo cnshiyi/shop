@@ -26,7 +26,7 @@ from django.utils import timezone
 from django.views.decorators.csrf import csrf_exempt, ensure_csrf_cookie
 from django.views.decorators.http import require_GET, require_POST
 
-from bot.models import BotOperationLog, TelegramChatArchive, TelegramChatMessage, TelegramLoginAccount, TelegramUser
+from bot.models import BotOperationLog, TelegramChatArchive, TelegramChatMessage, TelegramGroupFilter, TelegramLoginAccount, TelegramUser
 from bot.services import _get_or_create_user_sync
 from cloud.models import AddressMonitor, CloudAsset, CloudIpLog, CloudServerOrder
 from core.models import CloudAccountConfig, SiteConfig
@@ -252,30 +252,50 @@ def _asset_is_unattached_ip(asset):
     )
 
 
+def _active_cloud_asset_queryset():
+    active_account_ids = list(CloudAccountConfig.objects.filter(is_active=True).values_list('id', flat=True))
+    active_account_labels = list(
+        CloudAccountConfig.objects.filter(is_active=True)
+        .exclude(external_account_id__isnull=True)
+        .exclude(external_account_id='')
+        .values_list('external_account_id', flat=True)
+    )
+    inactive_account_labels = list(
+        CloudAccountConfig.objects.filter(is_active=False)
+        .exclude(external_account_id__isnull=True)
+        .exclude(external_account_id='')
+        .values_list('external_account_id', flat=True)
+    )
+    return (
+        CloudAsset.objects.select_related('order', 'user', 'cloud_account', 'order__cloud_account')
+        .filter(kind=CloudAsset.KIND_SERVER, is_active=True)
+        .exclude(status__in=[
+            CloudAsset.STATUS_DELETED,
+            CloudAsset.STATUS_DELETING,
+            CloudAsset.STATUS_TERMINATED,
+            CloudAsset.STATUS_TERMINATING,
+        ])
+        .exclude(Q(cloud_account__is_active=False) | Q(account_label__in=inactive_account_labels))
+        .filter(
+            Q(cloud_account_id__in=active_account_ids)
+            | Q(account_label__in=active_account_labels)
+            | Q(cloud_account__isnull=True, account_label__isnull=True)
+            | Q(cloud_account__isnull=True, account_label='')
+            | Q(cloud_account__isnull=True, account_label__in=active_account_labels)
+            | Q(cloud_account_id__isnull=False, cloud_account__is_active=True)
+        )
+    )
+
+
 def _shutdown_log_items(limit=100):
     cutoff = timezone.now() - timezone.timedelta(days=7)
     suspend_days = _runtime_int('cloud_suspend_after_days', 3)
     delete_days = _runtime_int('cloud_delete_after_days', 0)
 
     items = []
-    active_statuses = [
-        CloudAsset.STATUS_RUNNING,
-        CloudAsset.STATUS_PENDING,
-        CloudAsset.STATUS_STARTING,
-        CloudAsset.STATUS_STOPPED,
-        CloudAsset.STATUS_SUSPENDED,
-        CloudAsset.STATUS_EXPIRED_GRACE,
-        CloudAsset.STATUS_UNKNOWN,
-    ]
-    aliyun_statuses = active_statuses + [
-        CloudAsset.STATUS_EXPIRED,
-        CloudAsset.STATUS_DELETING,
-        CloudAsset.STATUS_DELETED,
-    ]
     assets = list(
-        CloudAsset.objects.select_related('order', 'user', 'cloud_account', 'order__cloud_account')
-        .filter(kind=CloudAsset.KIND_SERVER, actual_expires_at__isnull=False)
-        .filter(Q(is_active=True, status__in=active_statuses) | Q(provider='aliyun_simple', status__in=aliyun_statuses))
+        _active_cloud_asset_queryset()
+        .filter(actual_expires_at__isnull=False)
         .order_by('actual_expires_at', '-updated_at')[:500]
     )
     for asset in assets:
@@ -344,9 +364,8 @@ def _unattached_ip_delete_items(limit=50):
     now = timezone.now()
     delete_days = _runtime_int('cloud_unattached_ip_delete_after_days', 15)
     assets = list(
-        CloudAsset.objects.select_related('user').filter(kind=CloudAsset.KIND_SERVER)
+        _active_cloud_asset_queryset()
         .filter(Q(provider_status__icontains='未附加') | Q(note__icontains='未附加IP') | Q(note__icontains='未附加固定IP'))
-        .exclude(status__in=[CloudAsset.STATUS_DELETED, CloudAsset.STATUS_DELETING, CloudAsset.STATUS_TERMINATED, CloudAsset.STATUS_TERMINATING])
         .order_by('actual_expires_at', 'created_at', '-updated_at')[:300]
     )
     items = []
@@ -639,6 +658,75 @@ def _telegram_message_payload(item):
     }
 
 
+def _telegram_group_filter_payload(item):
+    return {
+        'id': item.id,
+        'chat_id': item.chat_id,
+        'title': item.title or '',
+        'username': item.username or '',
+        'enabled': bool(item.enabled),
+        'updated_at': _iso(item.updated_at),
+        'created_at': _iso(item.created_at),
+    }
+
+
+def _limited_username_string(value):
+    result = []
+    for username in TelegramUser.normalize_usernames(value):
+        candidate = ','.join([*result, username])
+        if len(candidate) > 191:
+            continue
+        result.append(username)
+    return ','.join(result) or None
+
+
+def _merge_login_account_usernames(current, incoming):
+    return _limited_username_string([incoming, current])
+
+
+def _normalize_telegram_group_username(value):
+    return str(value or '').strip().lstrip('@')
+
+
+def _telegram_group_identity_label(chat_id, title='', username=''):
+    normalized_username = _normalize_telegram_group_username(username)
+    if normalized_username:
+        return f'@{normalized_username}'
+    if str(title or '').strip():
+        return str(title).strip()
+    return str(chat_id)
+
+
+def _validate_telegram_group_filter_payload(payload, *, current_id=None):
+    raw_chat_id = payload.get('chat_id')
+    title = str(payload.get('title') or '').strip()
+    username = _normalize_telegram_group_username(payload.get('username'))
+    try:
+        chat_id = int(raw_chat_id)
+    except (TypeError, ValueError):
+        raise ValueError('群组 Chat ID 无效')
+    if chat_id >= 0:
+        raise ValueError('只允许保存群组/频道 Chat ID')
+    if not title:
+        raise ValueError('群组名称不能为空')
+    if username and not username.replace('_', '').isalnum():
+        raise ValueError(f'用户名格式不正确：@{username}')
+    duplicate = TelegramGroupFilter.objects.filter(chat_id=chat_id)
+    if current_id:
+        duplicate = duplicate.exclude(id=current_id)
+    duplicate = duplicate.first()
+    if duplicate:
+        raise ValueError(f'群组已保存：{_telegram_group_identity_label(duplicate.chat_id, duplicate.title, duplicate.username)}')
+    if username:
+        duplicate_username = TelegramGroupFilter.objects.filter(username__iexact=username)
+        if current_id:
+            duplicate_username = duplicate_username.exclude(id=current_id)
+        duplicate_username = duplicate_username.first()
+        if duplicate_username:
+            raise ValueError(f'用户名已保存：@{duplicate_username.username}')
+    return chat_id, title[:191], username[:191] or None
+
+
 def _admin_user_payload(user):
     return {
         'id': user.id,
@@ -661,6 +749,17 @@ def _read_payload(request):
     if payload:
         return payload
     return request.POST.dict() if hasattr(request.POST, 'dict') else request.POST
+
+
+def _payload_bool(payload, key, default=False):
+    if key not in payload:
+        return default
+    value = payload.get(key)
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return bool(value)
+    return str(value).strip().lower() in {'1', 'true', 'yes', 'on'}
 
 
 def _get_keyword(request):
@@ -1901,6 +2000,21 @@ async def _telegram_sign_in_code(session_string: str, phone: str, code: str, pho
         await client.disconnect()
 
 
+async def _telegram_check_session(session_string: str, api_id: int, api_hash: str):
+    from telethon import TelegramClient
+    from telethon.sessions import StringSession
+
+    client = TelegramClient(StringSession(session_string or ''), api_id, api_hash)
+    await client.connect()
+    try:
+        if not await client.is_user_authorized():
+            return {'ok': False, 'user': None, 'note': 'Telegram 会话已失效，请重新登录'}
+        me = await client.get_me()
+        return {'ok': True, 'user': me, 'note': '状态正常'}
+    finally:
+        await client.disconnect()
+
+
 async def _telegram_send_message(session_string: str, chat_id: int, text: str, api_id: int, api_hash: str):
     from telethon import TelegramClient
     from telethon.sessions import StringSession
@@ -1931,7 +2045,7 @@ async def _telegram_sign_in_password(session_string: str, password: str, api_id:
 
 def _update_login_account_from_me(item, me, status='logged_in'):
     item.status = status
-    item.username = getattr(me, 'username', None) or item.username
+    item.username = _merge_login_account_usernames(item.username, getattr(me, 'username', None)) or item.username
     item.label = getattr(me, 'first_name', None) or item.username or item.phone or item.label
     _get_or_create_user_sync(getattr(me, 'id', 0), getattr(me, 'username', None), getattr(me, 'first_name', None))
     item.note = '登录成功'
@@ -1943,12 +2057,41 @@ def _update_login_account_from_me(item, me, status='logged_in'):
 @csrf_exempt
 @dashboard_login_required
 @require_POST
+def check_telegram_login_account_status(request, account_id: int):
+    item = TelegramLoginAccount.objects.filter(id=account_id).first()
+    if not item:
+        return _error('账号不存在', status=404)
+    if not item.session_string_plain:
+        item.status = 'session_expired'
+        item.note = '缺少 Telegram 会话，请重新登录'
+        item.save(update_fields=['status', 'note', 'updated_at'])
+        return _ok(_telegram_login_account_payload(item))
+    try:
+        api_id, api_hash = _telegram_api_credentials()
+        result = async_to_sync(_telegram_check_session)(item.session_string_plain, api_id, api_hash)
+    except Exception as exc:
+        item.status = 'listener_error'
+        item.note = f'状态检查失败：{exc}'[:1000]
+        item.save(update_fields=['status', 'note', 'updated_at'])
+        return _ok(_telegram_login_account_payload(item))
+    if result.get('ok'):
+        _update_login_account_from_me(item, result.get('user'), status='logged_in')
+    else:
+        item.status = 'session_expired'
+        item.note = str(result.get('note') or 'Telegram 会话已失效，请重新登录')[:1000]
+        item.save(update_fields=['status', 'note', 'updated_at'])
+    return _ok(_telegram_login_account_payload(item))
+
+
+@csrf_exempt
+@dashboard_login_required
+@require_POST
 def update_telegram_account_notify(request, account_id: int):
     payload = _read_payload(request)
     item = TelegramLoginAccount.objects.filter(id=account_id).first()
     if not item:
         return _error('账号不存在', status=404)
-    item.notify_enabled = bool(payload.get('notify_enabled'))
+    item.notify_enabled = _payload_bool(payload, 'notify_enabled')
     item.save(update_fields=['notify_enabled', 'updated_at'])
     return _ok(_telegram_login_account_payload(item))
 
@@ -2038,6 +2181,68 @@ def telegram_login_password(request):
     return _ok({'account': _telegram_login_account_payload(item), 'account_id': item.id, 'next_step': 'done'})
 
 
+@dashboard_login_required
+@require_GET
+def telegram_group_filters_list(request):
+    keyword = _get_keyword(request).lstrip('@')
+    queryset = TelegramGroupFilter.objects.order_by('-updated_at', '-id')
+    if keyword:
+        query = Q(title__icontains=keyword) | Q(username__icontains=keyword)
+        try:
+            query |= Q(chat_id=int(keyword))
+        except ValueError:
+            pass
+        queryset = queryset.filter(query)
+    return _ok([_telegram_group_filter_payload(item) for item in queryset[:300]])
+
+
+@csrf_exempt
+@dashboard_login_required
+@require_POST
+def create_telegram_group_filter(request):
+    payload = _read_payload(request)
+    try:
+        chat_id, title, username = _validate_telegram_group_filter_payload(payload)
+    except ValueError as exc:
+        return _error(str(exc), status=400)
+    item = TelegramGroupFilter.objects.create(
+        chat_id=chat_id,
+        title=title,
+        username=username,
+        enabled=_payload_bool(payload, 'enabled'),
+    )
+    return _ok(_telegram_group_filter_payload(item))
+
+
+@csrf_exempt
+@dashboard_login_required
+@require_POST
+def update_telegram_group_filter(request, group_id: int):
+    item = TelegramGroupFilter.objects.filter(id=group_id).first()
+    if not item:
+        return _error('群组不存在', status=404)
+    payload = _read_payload(request)
+    changed = []
+    if any(key in payload for key in ('chat_id', 'title', 'username')):
+        try:
+            chat_id, title, username = _validate_telegram_group_filter_payload(payload, current_id=group_id)
+        except ValueError as exc:
+            return _error(str(exc), status=400)
+        for field, value in {'chat_id': chat_id, 'title': title, 'username': username}.items():
+            if getattr(item, field) != value:
+                setattr(item, field, value)
+                changed.append(field)
+    if 'enabled' in payload:
+        enabled = _payload_bool(payload, 'enabled')
+        if item.enabled != enabled:
+            item.enabled = enabled
+            changed.append('enabled')
+    if changed:
+        changed.append('updated_at')
+        item.save(update_fields=changed)
+    return _ok(_telegram_group_filter_payload(item))
+
+
 @csrf_exempt
 @dashboard_login_required
 @require_POST
@@ -2110,14 +2315,14 @@ def create_telegram_login_account(request):
     payload = _read_payload(request)
     label = str(payload.get('label') or '').strip()
     phone = str(payload.get('phone') or '').strip()
-    username = str(payload.get('username') or '').strip().lstrip('@')
+    username = _limited_username_string(payload.get('username'))
     note = str(payload.get('note') or '').strip()
     if not label:
         return _error('账号备注不能为空', status=400)
     item = TelegramLoginAccount.objects.create(
         label=label,
         phone=phone or None,
-        username=username or None,
+        username=username,
         note=note or '已登记。自动采集仅限 bot 会话内收到的用户资料和聊天记录；不会后台登录个人 Telegram 账号抓取私聊。',
         status='registered',
     )

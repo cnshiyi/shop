@@ -243,7 +243,7 @@ def _mark_rebuild_source_pending_deletion(order_id: int, replacement_order_id: i
     migration_due_at = source.migration_due_at or (now + timezone.timedelta(days=3))
     previous_public_ip = source.public_ip or source.previous_public_ip
     source_temp_public_ip = str(source_temp_public_ip or '').strip()
-    if not str(source.instance_id or source.provider_resource_id or '').strip():
+    if not str(source.instance_id or source.provider_resource_id or '').strip() and ('未附加固定 IP' in (source.provision_note or '') or '固定 IP 保留' in (source.provision_note or '')):
         source.previous_public_ip = previous_public_ip
         source.public_ip = previous_public_ip
         source.mtproxy_host = previous_public_ip or source.mtproxy_host
@@ -261,18 +261,32 @@ def _mark_rebuild_source_pending_deletion(order_id: int, replacement_order_id: i
         'ip_recycle_at': source.ip_recycle_at,
         'migration_due_at': source.migration_due_at,
     }
+    delete_at = migration_due_at + timezone.timedelta(days=3)
     source.status = 'deleting'
     source.previous_public_ip = previous_public_ip
     source.public_ip = source_temp_public_ip
     source.mtproxy_host = ''
     source.migration_due_at = migration_due_at
     source.service_expires_at = migration_due_at
-    source.renew_grace_expires_at = migration_due_at
-    source.suspend_at = migration_due_at
-    source.delete_at = migration_due_at
-    source.ip_recycle_at = migration_due_at + timezone.timedelta(days=15)
+    source.renew_grace_expires_at = delete_at
+    source.suspend_at = delete_at
+    source.delete_at = delete_at
+    source.ip_recycle_at = delete_at + timezone.timedelta(days=15)
     source.provision_note = '\n'.join(filter(None, [source.provision_note, note]))
-    source.save(update_fields=['status', 'previous_public_ip', 'public_ip', 'mtproxy_host', 'migration_due_at', 'service_expires_at', 'renew_grace_expires_at', 'suspend_at', 'delete_at', 'ip_recycle_at', 'provision_note', 'updated_at'])
+    CloudServerOrder.objects.filter(id=source.id).update(
+        status=source.status,
+        previous_public_ip=source.previous_public_ip,
+        public_ip=source.public_ip,
+        mtproxy_host=source.mtproxy_host,
+        migration_due_at=source.migration_due_at,
+        service_expires_at=source.service_expires_at,
+        renew_grace_expires_at=source.renew_grace_expires_at,
+        suspend_at=source.suspend_at,
+        delete_at=source.delete_at,
+        ip_recycle_at=source.ip_recycle_at,
+        provision_note=source.provision_note,
+        updated_at=now,
+    )
     after_dates = {
         'service_expires_at': source.service_expires_at,
         'renew_grace_expires_at': source.renew_grace_expires_at,

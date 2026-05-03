@@ -321,6 +321,7 @@ class CloudAsset(models.Model):
     currency = models.CharField('币种', max_length=32, default='USDT')
     order = models.ForeignKey('cloud.CloudServerOrder', verbose_name='关联订单', on_delete=models.SET_NULL, blank=True, null=True)
     user = models.ForeignKey('bot.TelegramUser', verbose_name='绑定用户', on_delete=models.SET_NULL, blank=True, null=True)
+    telegram_group = models.ForeignKey('bot.TelegramGroupFilter', verbose_name='绑定群组', on_delete=models.SET_NULL, blank=True, null=True)
     note = models.TextField('备注', blank=True, null=True)
     sort_order = models.IntegerField('排序', default=99, db_index=True)
     status = models.CharField('状态', max_length=32, choices=STATUS_CHOICES, default=STATUS_RUNNING, db_index=True)
@@ -446,6 +447,75 @@ class CloudIpLog(models.Model):
         return f'{self.order_no or self.asset_name or self.instance_id or "ip-log"} {self.event_type} {ip}'
 
 
+class CloudAutoRenewPatrolLog(models.Model):
+    order = models.ForeignKey('cloud.CloudServerOrder', verbose_name='云服务器订单', on_delete=models.SET_NULL, blank=True, null=True, related_name='auto_renew_patrol_logs')
+    user = models.ForeignKey('bot.TelegramUser', verbose_name='用户', on_delete=models.SET_NULL, blank=True, null=True, related_name='auto_renew_patrol_logs')
+    batch_id = models.CharField('巡检批次', max_length=64, db_index=True)
+    order_no = models.CharField('订单号', max_length=191, db_index=True)
+    ip = models.CharField('公网IP', max_length=128, db_index=True)
+    provider = models.CharField('云厂商', max_length=32, blank=True, null=True, db_index=True)
+    user_display_name = models.CharField('用户显示名', max_length=191, blank=True, null=True)
+    username_label = models.CharField('用户名', max_length=191, blank=True, null=True)
+    tg_user_id = models.BigIntegerField('Telegram ID', blank=True, null=True, db_index=True)
+    is_success = models.BooleanField('是否成功', default=False, db_index=True)
+    failure_reason = models.TextField('失败原因', blank=True, null=True)
+    currency = models.CharField('币种', max_length=32, default='USDT')
+    balance_before = models.DecimalField('余额变更前', max_digits=18, decimal_places=6, blank=True, null=True)
+    balance_after = models.DecimalField('余额变更后', max_digits=18, decimal_places=6, blank=True, null=True)
+    balance_change = models.DecimalField('余额变化', max_digits=18, decimal_places=6, blank=True, null=True)
+    service_expires_at = models.DateTimeField('续费后到期时间', blank=True, null=True)
+    completed_order_id = models.BigIntegerField('续费后订单ID', blank=True, null=True, db_index=True)
+    completed_order_no = models.CharField('续费后订单号', max_length=191, blank=True, null=True, db_index=True)
+    executed_at = models.DateTimeField('执行时间', auto_now_add=True, db_index=True)
+
+    class Meta:
+        db_table = 'cloud_auto_renew_patrol_log'
+        verbose_name = '自动续费巡检日志'
+        verbose_name_plural = '自动续费巡检日志'
+        ordering = ['-executed_at', '-id']
+        indexes = [
+            models.Index(fields=['batch_id', '-executed_at'], name='idx_auto_renew_batch'),
+            models.Index(fields=['order_no', '-executed_at'], name='idx_auto_renew_order'),
+            models.Index(fields=['tg_user_id', '-executed_at'], name='idx_auto_renew_user'),
+        ]
+
+    def __str__(self):
+        return f'{self.order_no} {self.ip} {self.executed_at}'
+
+
+
+
+class CloudUserNoticeLog(models.Model):
+    user = models.ForeignKey('bot.TelegramUser', verbose_name='用户', on_delete=models.SET_NULL, blank=True, null=True, related_name='cloud_notice_logs')
+    order = models.ForeignKey('cloud.CloudServerOrder', verbose_name='云服务器订单', on_delete=models.SET_NULL, blank=True, null=True, related_name='notice_logs')
+    batch_id = models.CharField('通知批次', max_length=64, blank=True, default='', db_index=True)
+    event_type = models.CharField('通知类型', max_length=64, db_index=True)
+    target_chat_id = models.BigIntegerField('目标聊天ID', blank=True, null=True, db_index=True)
+    order_no = models.CharField('订单号', max_length=191, blank=True, null=True, db_index=True)
+    ip = models.CharField('IP', max_length=128, blank=True, null=True, db_index=True)
+    is_batch = models.BooleanField('是否批量', default=False, db_index=True)
+    delivered = models.BooleanField('是否送达', default=False, db_index=True)
+    text_preview = models.TextField('通知预览', blank=True, null=True)
+    extra = models.JSONField('额外信息', default=dict, blank=True)
+    created_at = models.DateTimeField('记录时间', auto_now_add=True, db_index=True)
+
+    class Meta:
+        db_table = 'cloud_user_notice_log'
+        verbose_name = '云通知日志'
+        verbose_name_plural = '云通知日志'
+        ordering = ['-created_at', '-id']
+        indexes = [
+            models.Index(fields=['user', '-created_at'], name='idx_cloud_notice_user'),
+            models.Index(fields=['event_type', '-created_at'], name='idx_cloud_notice_event'),
+            models.Index(fields=['batch_id', '-created_at'], name='idx_cloud_notice_batch'),
+        ]
+
+    def __str__(self):
+        return f'{self.event_type} {self.order_no or "-"} {self.created_at}'
+
+
+
+
 class AddressMonitor(models.Model):
     user = models.ForeignKey('bot.TelegramUser', verbose_name='用户', on_delete=models.CASCADE)
     address = models.CharField('监控地址', max_length=191, db_index=True)
@@ -544,7 +614,9 @@ __all__ = [
     'AddressMonitor',
     'CloudAsset',
     'CloudIpLog',
+    'CloudUserNoticeLog',
     'CloudServerOrder',
+    'CloudAutoRenewPatrolLog',
     'CloudServerPlan',
     'DailyAddressStat',
     'ResourceSnapshot',

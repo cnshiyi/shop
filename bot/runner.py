@@ -10,6 +10,7 @@ django.setup()
 
 from django.core.management import call_command
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
+from aiogram.exceptions import TelegramNetworkError
 from bot.config import BOT_TOKEN
 from bot.fsm import close_fsm_storage
 from bot.handlers import create_dispatcher_and_register
@@ -23,6 +24,20 @@ from cloud.cache import init_monitor_cache
 from orders.runtime import check_resources, scan_forever, set_bot, set_resource_bot
 
 logger = logging.getLogger(__name__)
+
+
+async def delete_webhook_with_retry(bot, retries: int = 5, base_delay: float = 2.0):
+    for attempt in range(1, retries + 1):
+        try:
+            await bot.delete_webhook(drop_pending_updates=True)
+            return
+        except TelegramNetworkError as exc:
+            if attempt >= retries:
+                logger.exception('Telegram 删除 webhook 失败，已重试 %s 次: %s', retries, exc)
+                raise
+            delay = base_delay * attempt
+            logger.warning('Telegram 删除 webhook 网络失败，将在 %.1f 秒后重试 (%s/%s): %s', delay, attempt, retries, exc)
+            await asyncio.sleep(delay)
 
 
 async def run_bot():
@@ -77,7 +92,7 @@ async def run_bot():
     scheduler.add_job(check_resources, 'interval', minutes=3, id='tron_resource_checker', max_instances=1)
     scheduler.add_job(refresh_custom_plan_cache, 'interval', minutes=10, id='custom_plan_cache_refresh', max_instances=1, coalesce=True)
     scheduler.add_job(lifecycle_tick, 'interval', minutes=10, id='cloud_lifecycle', max_instances=1, kwargs={'notify': _notify, 'notify_target': _notify_target})
-    scheduler.add_job(auto_renew_patrol_tick, 'interval', hours=2, id='cloud_auto_renew_patrol', max_instances=1, coalesce=True, kwargs={'notify': _notify, 'notify_target': _notify_target})
+    scheduler.add_job(auto_renew_patrol_tick, 'interval', minutes=30, id='cloud_auto_renew_patrol', max_instances=1, coalesce=True, kwargs={'notify': _notify, 'notify_target': _notify_target})
     scheduler.add_job(sync_server_status_tick, 'interval', seconds=cloud_sync_interval_seconds, id='cloud_server_sync', max_instances=1, coalesce=True)
     scheduler.add_job(sync_cloud_accounts_tick, 'interval', minutes=15, id='cloud_account_check', max_instances=1, coalesce=True)
     scheduler.add_job(lambda: asyncio.to_thread(call_command, 'dedupe_servers'), 'interval', minutes=20, id='server_dedupe', max_instances=1, coalesce=True)
@@ -91,22 +106,22 @@ async def run_bot():
     logger.info('资源巡检已启动 (每3分钟)')
     logger.info('定制套餐缓存刷新已启动 (每10分钟)')
     logger.info('云服务器生命周期调度已启动 (每10分钟)')
-    logger.info('自动续费巡检已启动 (每2小时，仅成功通知)')
+    logger.info('自动续费巡检已启动 (每30分钟，到期前1天至关机前持续兜底，失败通知冷却1小时)')
     logger.info('云服务器状态同步已启动 (每%s秒)', cloud_sync_interval_seconds)
     logger.info('云账号状态巡检已启动 (每15分钟)')
     logger.info('服务器去重任务已启动 (每20分钟)')
     logger.info('旧订单/聊天记录自动清理任务已启动 (每天18:00)')
 
     logger.info('Telegram个人号消息监听调度已启动')
-    logger.info('启动时执行云服务器生命周期检查')
     try:
-        await lifecycle_tick(notify=_notify, notify_target=_notify_target, defer_destructive_seconds=3600)
-        logger.info('启动时云服务器生命周期检查完成')
-    except Exception as exc:
-        logger.exception('启动时云服务器生命周期检查失败: %s', exc)
-    logger.info('Telegram Bot 已启动 (aiogram)')
-    await bot.delete_webhook(drop_pending_updates=True)
-    try:
+        logger.info('启动时执行云服务器生命周期检查')
+        try:
+            await lifecycle_tick(notify=_notify, notify_target=_notify_target, defer_destructive_seconds=3600)
+            logger.info('启动时云服务器生命周期检查完成')
+        except Exception as exc:
+            logger.exception('启动时云服务器生命周期检查失败: %s', exc)
+        logger.info('Telegram Bot 已启动 (aiogram)')
+        await delete_webhook_with_retry(bot)
         await dp.start_polling(bot)
     finally:
         scanner_stop.set()
@@ -117,6 +132,7 @@ async def run_bot():
         scheduler.shutdown(wait=False)
         await cache_close()
         await close_fsm_storage()
+        await bot.session.close()
 
 
 def main():

@@ -1,4 +1,5 @@
 import asyncio
+import logging
 import os
 import secrets
 import string
@@ -19,6 +20,7 @@ TIMEOUTS = {
 }
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 KEYPAIR_DIR = PROJECT_ROOT / '.shop-secrets' / 'aliyun-keypairs'
+logger = logging.getLogger(__name__)
 
 
 def _rand_password(length: int = 18) -> str:
@@ -261,23 +263,24 @@ def _open_instance_port(client, region_code: str, instance_id: str, port: int) -
 
     for protocol in ('TCP', 'UDP'):
         try:
-            client.create_firewall_rule_with_options(
-                swas_models.CreateFirewallRuleRequest(
+            client.create_firewall_rules_with_options(
+                swas_models.CreateFirewallRulesRequest(
                     region_id=region_code,
                     instance_id=instance_id,
                     firewall_rules=[
-                        swas_models.CreateFirewallRuleRequestFirewallRules(
+                        swas_models.CreateFirewallRulesRequestFirewallRules(
                             port=str(port),
-                            protocol=protocol,
-                            cidr_ip='0.0.0.0/0',
+                            rule_protocol=protocol,
+                            source_cidr_ip='0.0.0.0/0',
                             remark=f'openclaw mtproxy {port}',
                         ),
                     ],
                 ),
                 _runtime_options(),
             )
-        except Exception:
-            pass
+            logger.info('阿里云轻量云端口放行成功: instance_id=%s port=%s protocol=%s source=0.0.0.0/0', instance_id, port, protocol)
+        except Exception as exc:
+            logger.warning('阿里云轻量云端口放行失败: instance_id=%s port=%s protocol=%s error=%s', instance_id, port, protocol, exc)
 
 
 def _create_instance_sync(order, server_name: str):

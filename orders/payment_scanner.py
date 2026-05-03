@@ -23,7 +23,7 @@ from orders.services import usdt_to_trx
 from bot.keyboards import custom_port_keyboard
 from cloud.provisioning import provision_cloud_server
 from cloud.services import apply_cloud_server_renewal, run_cloud_server_renewal_postcheck
-from core.cache import get_config, bump_daily_stats, get_daily_stats
+from core.cache import get_config, get_redis, bump_daily_stats, get_daily_stats
 from core.runtime_config import get_runtime_config
 from core.persistence import bump_daily_address_stat, record_external_sync_log
 from core.trongrid import build_trongrid_headers
@@ -49,6 +49,7 @@ _SCAN_SUMMARY_INTERVAL = 600
 _scan_stats = {'blocks': 0, 'transactions': 0, 'transfers': 0, 'payments': 0, 'monitor_hits': 0}
 _last_rate_limit_log_at: float = 0.0
 _last_trongrid_unauthorized_log_at: float = 0.0
+_last_trongrid_network_error_log_at: float = 0.0
 _last_runtime_config_refresh_at: float = 0.0
 _last_pending_expire_check_at: float = 0.0
 _last_scanned_block_number: int | None = None
@@ -60,6 +61,8 @@ _recent_tx_keys: OrderedDict[str, str] = OrderedDict()
 _recent_resource_details: OrderedDict[str, dict] = OrderedDict()
 _recent_resource_keys: OrderedDict[str, str] = OrderedDict()
 MAX_TX_DETAIL_CACHE = 500
+ADDRESS_BALANCE_CACHE_TTL = 60
+ADDRESS_BALANCE_CACHE_PREFIX = 'address_balance:'
 
 _bot: Bot | None = None
 
@@ -488,6 +491,57 @@ async def _process_payment(transfer: dict) -> bool:
     return False
 
 
+async def _get_address_chain_balances(address: str) -> tuple[Decimal | None, Decimal | None]:
+    cache_key = f'{ADDRESS_BALANCE_CACHE_PREFIX}{address}'
+    redis_client = await get_redis()
+    if redis_client is not None:
+        try:
+            cached = await redis_client.get(cache_key)
+            if cached:
+                payload = json.loads(cached)
+                return Decimal(str(payload.get('usdt', '0'))), Decimal(str(payload.get('trx', '0')))
+        except Exception:
+            pass
+    try:
+        async with httpx.AsyncClient(timeout=10) as client:
+            trx_resp = await client.get(
+                f'{TRONGRID_BASE_URL}/v1/accounts/{address}',
+                headers=build_trongrid_headers(),
+            )
+            trx_resp.raise_for_status()
+            trx_data = trx_resp.json() or {}
+            account_items = trx_data.get('data') or []
+            account = account_items[0] if account_items else {}
+            trx_balance = Decimal(str(account.get('balance', 0) or 0)) / Decimal('1000000')
+            usdt_balance = Decimal('0')
+            for item in account.get('trc20') or []:
+                if not isinstance(item, dict):
+                    continue
+                for contract, value in item.items():
+                    if str(contract).lower() == str(USDT_CONTRACT).lower():
+                        usdt_balance = Decimal(str(value or '0')) / Decimal('1000000')
+                        break
+        if redis_client is not None:
+            try:
+                await redis_client.setex(
+                    cache_key,
+                    ADDRESS_BALANCE_CACHE_TTL,
+                    json.dumps({'usdt': str(usdt_balance), 'trx': str(trx_balance)}),
+                )
+            except Exception:
+                pass
+        return usdt_balance, trx_balance
+    except Exception as exc:
+        logger.warning('监控地址余额查询失败 address=%s error=%s', address, exc)
+        return None, None
+
+
+def _format_chain_balance(value: Decimal | None, currency: str) -> str:
+    if value is None:
+        return f'查询失败 {currency}'
+    return f'{fmt_amount(value)} {currency}'
+
+
 async def _get_fee_text(tx_hash: str) -> str:
     try:
         headers = await build_trongrid_headers()
@@ -565,6 +619,7 @@ async def _process_monitor_notification(transfer: dict, monitors: list[dict], da
         income = Decimal(str(daily_stats.get('income', '0')))
         expense = Decimal(str(daily_stats.get('expense', '0')))
         profit = income - expense
+        address_usdt_balance, address_trx_balance = await _get_address_chain_balances(main_addr)
 
         text = (
             f'{title_icon} {title_word}{currency} 提醒  <code>{amount_prefix}{escape(fmt_amount(amount))} {escape(currency)}</code>\n\n'
@@ -573,8 +628,8 @@ async def _process_monitor_notification(transfer: dict, monitors: list[dict], da
             f'{main_label}: <code>{escape(main_addr)}</code>\n'
             f'🕒 交易时间: <code>{escape(tx_time)}</code>\n'
             f'💰 交易金额: <code>{amount_prefix}{escape(fmt_amount(amount))} {escape(currency)}</code>\n'
-            f'👛 USDT余额: {escape(fmt_amount(user.balance))} USDT\n'
-            f'🪙 TRX余额: {escape(fmt_amount(user.balance_trx))} TRX\n'
+            f'👛 地址USDT余额: {escape(_format_chain_balance(address_usdt_balance, "USDT"))}\n'
+            f'🪙 地址TRX余额: {escape(_format_chain_balance(address_trx_balance, "TRX"))}\n'
             f'⛽ 转账消耗: <code>{escape(fee_text)}</code>\n\n'
             f'📈 今日收入: {escape(fmt_amount(income))} {escape(currency)}\n'
             f'📉 今日支出: {escape(fmt_amount(expense))} {escape(currency)}\n'
@@ -766,6 +821,12 @@ async def scan_block():
                     await _save_scanned_block_number(_last_scanned_block_number)
 
         await _log_scan_summary()
+    except (httpx.TimeoutException, httpx.TransportError) as exc:
+        global _last_trongrid_network_error_log_at
+        now = time.time()
+        if now - _last_trongrid_network_error_log_at >= 60:
+            logger.warning('TRON 扫块网络暂不可用，已跳过本轮并等待下次重试: %s', exc.__class__.__name__)
+            _last_trongrid_network_error_log_at = now
     except Exception as e:
         logger.exception('扫块异常: %s', e)
 

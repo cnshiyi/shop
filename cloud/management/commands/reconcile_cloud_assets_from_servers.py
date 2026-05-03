@@ -11,6 +11,15 @@ SOURCE_MAP = {
     Server.SOURCE_ORDER: CloudAsset.SOURCE_ORDER,
 }
 
+RESIDUAL_SERVER_STATUSES = {
+    Server.STATUS_DELETED,
+    Server.STATUS_DELETING,
+    Server.STATUS_TERMINATED,
+    Server.STATUS_TERMINATING,
+    Server.STATUS_EXPIRED,
+}
+RESIDUAL_ORDER_STATUSES = {'deleted', 'deleting', 'expired', 'cancelled', 'refunded', 'failed'}
+
 
 def _resolve_asset(server: Server):
     lookup = Q(kind=CloudAsset.KIND_SERVER)
@@ -26,6 +35,19 @@ def _resolve_asset(server: Server):
     if not candidates:
         return None
     return CloudAsset.objects.filter(lookup & candidates).order_by('-updated_at', '-id').first()
+
+
+def _should_reconcile_server(server: Server) -> bool:
+    order = getattr(server, 'order', None)
+    provider_status = str(getattr(server, 'provider_status', '') or '')
+    note = str(getattr(server, 'note', '') or '')
+    return not (
+        server.status in RESIDUAL_SERVER_STATUSES
+        or (order and order.status in RESIDUAL_ORDER_STATUSES)
+        or not getattr(server, 'is_active', True)
+        or '云上未找到' in provider_status
+        or '云上未找到' in note
+    )
 
 
 class Command(BaseCommand):
@@ -44,6 +66,10 @@ class Command(BaseCommand):
         claimed_assets = {}
         queryset = Server.objects.select_related('order', 'user').order_by('-updated_at', '-id')
         for server in queryset:
+            if not _should_reconcile_server(server):
+                skipped_count += 1
+                skipped_asset_ids.append(f'server#{server.id}:{server.public_ip or server.previous_public_ip or "缺失"}:{server.instance_id or server.server_name or "-"}:inactive')
+                continue
             asset = _resolve_asset(server)
             order = server.order
             defaults = {
