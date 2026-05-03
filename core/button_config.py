@@ -8,7 +8,7 @@ from core.models import SiteConfig
 BUTTON_CONFIG_KEY = 'bot_button_config'
 
 FIXED_BUTTONS = [
-    {'key': 'custom_node', 'label': '🛠 定制节点', 'type': 'business', 'sort_order': 10, 'enabled': True, 'locked': True},
+    {'key': 'custom_node', 'label': '🛠 购买节点', 'type': 'business', 'sort_order': 10, 'enabled': True, 'locked': True},
     {'key': 'expiry_query', 'label': '🔎 到期时间查询', 'type': 'business', 'sort_order': 20, 'enabled': True, 'locked': True},
     {'key': 'profile', 'label': '👤 个人中心', 'type': 'business', 'sort_order': 30, 'enabled': True, 'locked': True},
 ]

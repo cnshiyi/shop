@@ -617,9 +617,22 @@ class Command(BaseCommand):
                             'is_active': is_active,
                         }
                         asset = _resolve_asset(instance_name, instance_arn, public_ip, order, account)
+                        rebound_unattached_ip = bool(
+                            asset
+                            and '未附加' in str(getattr(asset, 'provider_status', '') or '')
+                            and str(instance_name or '').strip()
+                        )
                         if asset:
                             asset_defaults['user'] = asset.user
-                            asset_defaults['actual_expires_at'] = asset.actual_expires_at
+                            if rebound_unattached_ip:
+                                rebound_at = timezone.now()
+                                rebound_note = f'未附加IP已重新绑定到实例，已初始化时间：{rebound_at.isoformat()}；等待人工添加时间。'
+                                asset_defaults['actual_expires_at'] = rebound_at
+                                asset_defaults['provider_status'] = '已重新绑定实例-待人工添加时间'
+                                asset_defaults['note'] = _append_unique_line(note, rebound_note)
+                                asset_defaults['is_active'] = True
+                            else:
+                                asset_defaults['actual_expires_at'] = asset.actual_expires_at
                         asset_signature = f'{instance_name or "-"}|{instance_arn or "-"}|{public_ip or "缺失"}'
                         old_status = asset.status if asset else None
                         old_public_ip = asset.public_ip if asset else None
@@ -642,7 +655,9 @@ class Command(BaseCommand):
                                 original_due_at = asset.actual_expires_at
                                 for key, value in asset_defaults.items():
                                     setattr(asset, key, value)
-                                if original_due_at:
+                                if rebound_unattached_ip and asset.status == CloudAsset.STATUS_UNKNOWN:
+                                    asset.status = CloudAsset.STATUS_RUNNING
+                                if original_due_at and not rebound_unattached_ip:
                                     manual_expiry_preserved_items.append(f'{asset.id}:{public_ip or "缺失"}:{instance_name or instance_arn}:{original_due_at}')
                                 asset.save()
                                 updated_count += 1
@@ -682,16 +697,23 @@ class Command(BaseCommand):
                         if asset:
                             server_defaults['user'] = asset.user
                             server_defaults['expires_at'] = asset.actual_expires_at
+                            if rebound_unattached_ip:
+                                server_defaults['expires_at'] = asset_defaults['actual_expires_at']
+                                server_defaults['provider_status'] = asset_defaults['provider_status']
+                                server_defaults['note'] = asset_defaults['note']
+                                server_defaults['is_active'] = True
                         server = _resolve_server(instance_name, instance_arn, public_ip, order, account)
                         if server:
                             server_defaults['user'] = server.user
-                            server_defaults['expires_at'] = server.expires_at
+                            server_defaults['expires_at'] = server.expires_at if not rebound_unattached_ip else asset_defaults['actual_expires_at']
                         old_server_public_ip = server.public_ip if server else None
                         if server:
                             if old_server_public_ip and old_server_public_ip != public_ip:
                                 server.previous_public_ip = old_server_public_ip
                             for key, value in server_defaults.items():
                                 setattr(server, key, value)
+                            if rebound_unattached_ip and server.status == Server.STATUS_UNKNOWN:
+                                server.status = Server.STATUS_RUNNING
                             server.save()
                         else:
                             server = Server.objects.create(**server_defaults)

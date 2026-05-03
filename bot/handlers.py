@@ -2028,10 +2028,10 @@ def _current_menu_labels() -> set[str]:
         from core.button_config import load_button_config
         return {str(item.get('label') or '').strip() for item in load_button_config().get('items', []) if item.get('enabled', True)}
     except Exception:
-        return {'🛠 定制节点', '🔎 到期时间查询', '👤 个人中心'}
+        return {'🛠 购买节点', '🔎 到期时间查询', '👤 个人中心'}
 
 
-MENU_BUTTONS = {'🛠 定制节点', '🔎 到期时间查询', '👤 个人中心'}
+MENU_BUTTONS = {'🛠 购买节点', '🔎 到期时间查询', '👤 个人中心'}
 
 
 def register_handlers(dp: Dispatcher):
@@ -2314,12 +2314,12 @@ def register_handlers(dp: Dispatcher):
             return
 
         if text == '✨ 订阅':
-            sent = await message.answer(_bot_text('bot_removed_products_entry', '商品购买入口已移除，请使用“🛠 定制节点”或“🔎 到期时间查询”。'), reply_markup=main_menu())
+            sent = await message.answer(_bot_text('bot_removed_products_entry', '商品购买入口已移除，请使用“🛠 购买节点”或“🔎 到期时间查询”。'), reply_markup=main_menu())
             logger.info('BOT_MESSAGE_SEND route=menu_removed label=%s user_id=%s chat_id=%s reply_to=%s sent_message_id=%s', text, getattr(message.from_user, 'id', None), message.chat.id, message.message_id, getattr(sent, 'message_id', None))
 
-        elif text == '🛠 定制节点':
+        elif text == '🛠 购买节点':
             regions = await list_custom_regions()
-            sent = await message.answer(_bot_text('bot_custom_region_entry', '🛠 云服务器定制\n\n请选择热门地区：'), reply_markup=custom_region_menu(regions, expanded=False))
+            sent = await message.answer(_bot_text('bot_custom_region_entry', '🛠 购买节点\n\n请选择热门地区：'), reply_markup=custom_region_menu(regions, expanded=False))
             logger.info('BOT_MESSAGE_SEND route=menu_custom user_id=%s chat_id=%s reply_to=%s sent_message_id=%s', getattr(message.from_user, 'id', None), message.chat.id, message.message_id, getattr(sent, 'message_id', None))
 
         elif text == '🔎 到期时间查询':

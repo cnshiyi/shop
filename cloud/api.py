@@ -44,7 +44,7 @@ from bot.api import (
     dashboard_login_required,
 )
 from bot.models import TelegramGroupFilter, TelegramUser
-from cloud.lifecycle import _delete_instance, _get_due_orders, _mark_replaced_order_deleted, _notice_payload_for_order
+from cloud.lifecycle import _delete_instance, _get_due_orders, _mark_replaced_order_deleted, _notice_payload_for_order, _record_auto_renew_patrol_log, _run_auto_renew
 from cloud.services import AWS_REGION_NAMES, _cloud_order_lifecycle_fields, create_cloud_server_rebuild_order, ensure_cloud_server_pricing, ensure_manual_expiry_operation_order, ensure_manual_owner_operation_order, ensure_manual_price_operation_order, record_cloud_ip_log, refresh_custom_plan_cache, replace_cloud_asset_order_by_admin, set_cloud_server_auto_renew_admin
 from cloud.models import AddressMonitor, CloudAsset, CloudAutoRenewPatrolLog, CloudIpLog, CloudServerOrder, CloudServerPlan, Server, ServerPrice
 from core.cloud_accounts import cloud_account_label
@@ -526,12 +526,13 @@ def update_cloud_asset(request, asset_id):
                     pending_order_updates['server_name'] = payload.get('asset_name') or None
 
             old_public_ip = asset.public_ip
+            old_provider_status = str(asset.provider_status or '')
             new_public_ip = payload.get('public_ip') or None if 'public_ip' in payload else asset.public_ip
             if 'public_ip' in payload:
                 if old_public_ip and old_public_ip != new_public_ip:
                     asset.previous_public_ip = old_public_ip
 
-            for field in ('asset_name', 'public_ip', 'provider_resource_id', 'mtproxy_link', 'mtproxy_secret', 'mtproxy_host', 'note'):
+            for field in ('asset_name', 'public_ip', 'provider_resource_id', 'instance_id', 'mtproxy_link', 'mtproxy_secret', 'mtproxy_host', 'note'):
                 if field in payload:
                     setattr(asset, field, payload.get(field) or None)
             if 'mtproxy_port' in payload:
@@ -550,6 +551,8 @@ def update_cloud_asset(request, asset_id):
                         server.previous_public_ip = old_public_ip
                 if 'provider_resource_id' in payload:
                     server.provider_resource_id = payload.get('provider_resource_id') or None
+                if 'instance_id' in payload:
+                    server.instance_id = payload.get('instance_id') or None
                 if 'provider' in payload:
                     server.provider = payload.get('provider') or None
                 if 'region_name' in payload:
@@ -579,6 +582,19 @@ def update_cloud_asset(request, asset_id):
                     source=(asset.source or Server.SOURCE_ORDER) if asset.source in {choice[0] for choice in Server.SOURCE_CHOICES} else Server.SOURCE_ORDER,
                     instance_id=asset.instance_id or asset.provider_resource_id or asset.public_ip,
                 )
+            rebound_to_instance = bool(
+                old_provider_status and '未附加' in old_provider_status and str(asset.instance_id or '').strip()
+            )
+            if rebound_to_instance:
+                rebound_now = timezone.now()
+                rebound_note = f'未附加IP已重新绑定到实例，已初始化时间：{rebound_now.isoformat()}；等待人工添加时间。'
+                asset.actual_expires_at = rebound_now
+                asset.provider_status = '已重新绑定实例-待人工添加时间'
+                asset.is_active = True
+                asset.note = '\n'.join(filter(None, [str(asset.note or '').strip(), rebound_note]))
+                if asset.status == CloudAsset.STATUS_UNKNOWN:
+                    asset.status = CloudAsset.STATUS_RUNNING
+
             if server:
                 if asset.order_id:
                     server.order = asset.order
@@ -597,6 +613,10 @@ def update_cloud_asset(request, asset_id):
                 server.sort_order = asset.sort_order
                 server.expires_at = asset.actual_expires_at
                 server.is_active = asset.is_active
+                if rebound_to_instance:
+                    server.provider_status = asset.provider_status
+                    if server.status == Server.STATUS_UNKNOWN:
+                        server.status = Server.STATUS_RUNNING
                 if asset.asset_name:
                     server.server_name = asset.asset_name
                 if server.account_label in (None, ''):
@@ -993,6 +1013,81 @@ def _auto_renew_future_plan_items(now, next_run_at, due_orders: list):
     return plan_items
 
 
+def _collect_auto_renew_due_orders(now):
+    due = async_to_sync(_get_due_orders)()
+    due_orders = list(due.get('auto_renew') or [])
+    due_ids = {order.id for order in due_orders}
+    history_qs = CloudAutoRenewPatrolLog.objects.select_related('order', 'user').order_by('-executed_at', '-id')
+
+    retry_orders = []
+    recent_failed_logs = history_qs.filter(is_success=False, executed_at__gte=now - timezone.timedelta(days=7))
+    for log in recent_failed_logs:
+        order = getattr(log, 'order', None)
+        if not order or not getattr(order, 'auto_renew_enabled', False):
+            continue
+        if order.id in due_ids:
+            continue
+        if order.status not in {'completed', 'expiring', 'renew_pending'}:
+            continue
+        due_ids.add(order.id)
+        retry_orders.append((order, 'retry_failed', '失败待重试', log.failure_reason))
+
+    fallback_orders = []
+    fallback_qs = CloudServerOrder.objects.select_related('user').filter(
+        auto_renew_enabled=True,
+        status__in=['completed', 'expiring', 'renew_pending'],
+        service_expires_at__isnull=False,
+        service_expires_at__lte=now,
+    ).exclude(id__in=list(due_ids)).order_by('service_expires_at', 'id')[:50]
+    for order in fallback_qs:
+        due_ids.add(order.id)
+        fallback_orders.append((order, 'fallback_retry', '过期后兜底重试', None))
+
+    return {
+        'due_orders': due_orders,
+        'retry_orders': retry_orders,
+        'fallback_orders': fallback_orders,
+        'history_qs': history_qs,
+        'due_ids': due_ids,
+    }
+
+
+def _manual_run_auto_renew_queue(orders: list[tuple[CloudServerOrder, str]], *, batch_id: str | None = None):
+    batch_id = batch_id or uuid.uuid4().hex[:16]
+    results = []
+    for order, queue_status in orders:
+        notice = _notice_payload_for_order(order) or {}
+        renewed, err, balance_change = _run_auto_renew(order.id)
+        renewed_order_id = getattr(renewed, 'id', None) or order.id
+        ip = notice.get('ip') or getattr(order, 'public_ip', None) or getattr(order, 'previous_public_ip', None) or '未分配'
+        ok = not bool(err)
+        async_to_sync(_record_auto_renew_patrol_log)(
+            order.id,
+            batch_id=batch_id,
+            ip=ip,
+            ok=ok,
+            error=err,
+            balance_change=balance_change,
+            renewed_order_id=renewed_order_id,
+        )
+        results.append({
+            'order_id': order.id,
+            'renewed_order_id': renewed_order_id,
+            'order_no': order.order_no,
+            'ip': ip,
+            'queue_status': queue_status,
+            'ok': ok,
+            'error': err,
+        })
+    return {
+        'batch_id': batch_id,
+        'items': results,
+        'total': len(results),
+        'success_count': sum(1 for item in results if item['ok']),
+        'failure_count': sum(1 for item in results if not item['ok']),
+    }
+
+
 def _auto_renew_history_item_payload(log):
     order_id = getattr(log, 'completed_order_id', None) or getattr(log, 'order_id', None)
     return {
@@ -1027,9 +1122,9 @@ def _auto_renew_history_item_payload(log):
 @require_GET
 def auto_renew_task_detail(request):
     now = timezone.now()
-    due = async_to_sync(_get_due_orders)()
-    due_orders = list(due.get('auto_renew') or [])
-    history_qs = CloudAutoRenewPatrolLog.objects.select_related('order', 'user').order_by('-executed_at', '-id')
+    queue = _collect_auto_renew_due_orders(now)
+    due_orders = queue['due_orders']
+    history_qs = queue['history_qs']
     history_items = [_auto_renew_history_item_payload(item) for item in history_qs[:200]]
     latest_log = history_qs.first()
     recent_since = now - timezone.timedelta(days=1)
@@ -1042,22 +1137,30 @@ def auto_renew_task_detail(request):
     latest_batch_success_count = latest_batch_qs.filter(is_success=True).count() if latest_batch_id else 0
     latest_batch_failure_count = latest_batch_qs.filter(is_success=False).count() if latest_batch_id else 0
     latest_failed_ips = list(latest_batch_qs.filter(is_success=False).values_list('ip', flat=True)[:20]) if latest_batch_id else []
-    due_items = [_auto_renew_due_item_payload(order, queue_status='due_now', queue_status_label='本轮待执行', next_run_at=next_run_at) for order in due_orders]
-    due_ids = {order.id for order in due_orders}
-    failed_retry_items = []
-    recent_failed_logs = history_qs.filter(is_success=False, executed_at__gte=now - timezone.timedelta(days=7))
-    for log in recent_failed_logs:
-        order = getattr(log, 'order', None)
-        if not order or not getattr(order, 'auto_renew_enabled', False):
-            continue
-        if order.id in due_ids:
-            continue
-        if order.status not in {'completed', 'expiring', 'renew_pending'}:
-            continue
-        due_ids.add(order.id)
-        failed_retry_items.append(_auto_renew_due_item_payload(order, queue_status='retry_failed', queue_status_label='失败待重试', next_run_at=next_run_at, last_failure_reason=log.failure_reason))
-    due_items.extend(failed_retry_items)
-    future_plan_items = _auto_renew_future_plan_items(now, next_run_at, due_orders)
+
+    due_items = [
+        _auto_renew_due_item_payload(order, queue_status='due_now', queue_status_label='本轮待执行', next_run_at=next_run_at)
+        for order in due_orders
+    ]
+    due_items.extend([
+        _auto_renew_due_item_payload(order, queue_status=queue_status, queue_status_label=queue_status_label, next_run_at=next_run_at, last_failure_reason=last_failure_reason)
+        for order, queue_status, queue_status_label, last_failure_reason in queue['retry_orders']
+    ])
+    due_items.extend([
+        _auto_renew_due_item_payload(order, queue_status=queue_status, queue_status_label=queue_status_label, next_run_at=next_run_at)
+        for order, queue_status, queue_status_label, _ in queue['fallback_orders']
+    ])
+
+    future_plan_items = _auto_renew_future_plan_items(
+        now,
+        next_run_at,
+        [
+            *due_orders,
+            *[item[0] for item in queue['retry_orders']],
+            *[item[0] for item in queue['fallback_orders']],
+        ],
+    )
+    future_plan_items = [item for item in future_plan_items if item.get('queue_status') != 'fallback_retry']
     return _ok({
         'task_key': 'auto_renew_patrol',
         'task_label': '自动续费巡检',
@@ -1079,6 +1182,43 @@ def auto_renew_task_detail(request):
     })
 
 
+@csrf_exempt
+@dashboard_login_required
+@require_POST
+def run_auto_renew_tasks(request):
+    now = timezone.now()
+    queue = _collect_auto_renew_due_orders(now)
+    orders = [(order, 'due_now') for order in queue['due_orders']]
+    orders.extend((order, queue_status) for order, queue_status, _, _ in queue['retry_orders'])
+    orders.extend((order, queue_status) for order, queue_status, _, _ in queue['fallback_orders'])
+    if not orders:
+        return _ok({
+            'batch_id': '',
+            'items': [],
+            'total': 0,
+            'success_count': 0,
+            'failure_count': 0,
+            'message': '当前没有可执行的续费任务',
+        })
+    result = _manual_run_auto_renew_queue(orders)
+    result['message'] = f"本次共执行 {result['total']} 条续费任务"
+    return _ok(result)
+
+
+@csrf_exempt
+@dashboard_login_required
+@require_POST
+def run_auto_renew_order(request, order_id):
+    order = CloudServerOrder.objects.select_related('user').filter(pk=order_id).first()
+    if not order:
+        return _error('订单不存在', status=404)
+    if not order.auto_renew_enabled:
+        return _error('该订单未开启自动续费', status=400)
+    if order.status not in {'completed', 'expiring', 'renew_pending'}:
+        return _error('当前订单状态不可执行续费', status=400)
+    result = _manual_run_auto_renew_queue([(order, 'manual_single')])
+    result['message'] = '续费任务已执行'
+    return _ok(result)
 
 
 def _cloud_execution_status(note: str | None):
@@ -2569,6 +2709,9 @@ __all__ = [
     'cloud_order_detail',
     'cloud_orders_list',
     'delete_cloud_order',
+    'auto_renew_task_detail',
+    'run_auto_renew_order',
+    'run_auto_renew_tasks',
     'tasks_overview',
     'cloud_plans_list',
     'cloud_pricing_list',

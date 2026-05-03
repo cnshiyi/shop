@@ -5,8 +5,8 @@ from django.apps import apps
 
 BOT_TEXTS = {
     'bot_welcome': ('欢迎使用商城机器人！请选择操作：', '机器人欢迎语'),
-    'bot_removed_products_entry': ('商品购买入口已移除，请使用“🛠 定制节点”或“🔎 到期时间查询”。', '商品入口已移除提示'),
-    'bot_custom_region_entry': ('🛠 云服务器定制\n\n请选择热门地区：', '定制节点入口文案'),
+    'bot_removed_products_entry': ('商品购买入口已移除，请使用“🛠 购买节点”或“🔎 到期时间查询”。', '商品入口已移除提示'),
+    'bot_custom_region_entry': ('🛠 购买节点\n\n请选择热门地区：', '购买节点入口文案'),
     'bot_query_center_entry': ('🔎 查询中心\n\n请选择查询方式：', '查询中心入口文案'),
     'bot_profile_entry_suffix': ('请选择要进入的功能：', '个人中心尾部提示'),
     'bot_query_ip_prompt': ('🔎 IP查询到期\n\n请输入要查询的 IP 地址：\n\n可随时点击底部菜单打断当前输入。', 'IP 查询输入提示'),
