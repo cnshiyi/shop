@@ -227,6 +227,14 @@ sudo bash scripts/bootstrap-and-deploy.sh
 sudo PUBLIC_IP=服务器公网IP bash scripts/bootstrap-and-deploy.sh
 ```
 
+如果你是部署到宝塔，建议开启宝塔友好模式：
+
+```bash
+sudo BAOTA_FRIENDLY=1 \
+PUBLIC_IP=服务器公网IP \
+bash scripts/bootstrap-and-deploy.sh
+```
+
 如果已有域名，建议传 `SERVER_NAME`；如果暂时只有 IP，可同时传 `PUBLIC_IP`：
 
 ```bash
@@ -246,12 +254,15 @@ bash scripts/bootstrap-and-deploy.sh
 脚本默认行为：
 
 - 后端服务使用 `gunicorn` 监听 `127.0.0.1:8000`
-- `Nginx` 对外提供前端静态页面，并把 `/api/` 反代给 Django
+- 普通模式下，脚本会写系统级 `Nginx` 站点配置，对外提供前端静态页面，并把 `/api/` 反代给 Django
+- `BAOTA_FRIENDLY=1` 时，脚本不会接管宝塔现有站点，只会生成一份可直接粘贴到宝塔站点里的 Nginx 配置片段
 - 如设置了 `PUBLIC_IP` / `SERVER_NAME`，会自动写入 `ALLOWED_HOSTS` 与 `CSRF_TRUSTED_ORIGINS`
 - 如本机使用 `MYSQL_HOST=127.0.0.1/localhost`，会自动建库、建用户、授权
 - 如 `.env` 不存在，会自动生成一份默认配置；如已存在，则保留现有内容并修正为运行用户组可读
 - 会自动执行 `migrate`、`ensure_dashboard_admin`、前端 build、服务重启与基础健康检查
 - 默认会优先调用当前引导脚本同目录下的 `scripts/auto-update-from-github.sh`，避免本地已修复脚本在首次 `git clone` 时丢失
+
+宝塔友好模式下，推荐把宝塔站点根目录指向 `FRONTEND_DIST_DIR`，再把脚本生成的 `baota-nginx-snippet.conf` 内容粘贴到宝塔站点的 Nginx 配置中。
 
 适合首装；后续日常更新继续用下面这个轻量脚本。
 

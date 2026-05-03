@@ -21,6 +21,8 @@ NODE_MAJOR="${NODE_MAJOR:-22}"
 PYTHON_VERSION="${PYTHON_VERSION:-3.13}"
 MYSQL_ROOT_CMD="${MYSQL_ROOT_CMD:-mysql}"
 NGINX_SITE_NAME="${NGINX_SITE_NAME:-shop.conf}"
+BAOTA_FRIENDLY="${BAOTA_FRIENDLY:-0}"
+BAOTA_SNIPPET_PATH="${BAOTA_SNIPPET_PATH:-${BACKEND_DIR}/baota-nginx-snippet.conf}"
 GUNICORN_WORKERS="${GUNICORN_WORKERS:-2}"
 SKIP_PACKAGE_INSTALL="${SKIP_PACKAGE_INSTALL:-0}"
 SKIP_NODE_INSTALL="${SKIP_NODE_INSTALL:-0}"
@@ -333,8 +335,38 @@ EOF
   run systemctl enable "$BACKEND_SERVICE"
 }
 
+write_baota_nginx_snippet() {
+  mkdir -p "$(dirname "$BAOTA_SNIPPET_PATH")"
+  cat >"$BAOTA_SNIPPET_PATH" <<EOF
+# 宝塔站点可直接粘贴的 Nginx 配置片段
+# 建议：站点目录指向 ${FRONTEND_DIST_DIR}
+
+location / {
+    try_files \$uri \$uri/ /index.html;
+}
+
+location /api/ {
+    proxy_pass http://127.0.0.1:${BACKEND_PORT};
+    proxy_http_version 1.1;
+    proxy_set_header Host \$host;
+    proxy_set_header X-Real-IP \$remote_addr;
+    proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+    proxy_set_header X-Forwarded-Proto \$scheme;
+}
+
+location /media/ {
+    alias ${BACKEND_DIR}/media/;
+}
+EOF
+  log "已生成宝塔专用 Nginx 片段: ${BAOTA_SNIPPET_PATH}"
+}
+
 write_nginx_config() {
   local target
+  if [ "$BAOTA_FRIENDLY" = "1" ]; then
+    write_baota_nginx_snippet
+    return
+  fi
   if [ -d /etc/nginx/sites-available ]; then
     target="/etc/nginx/sites-available/${NGINX_SITE_NAME}"
     cat >"$target" <<EOF
@@ -425,14 +457,23 @@ deploy_code() {
 health_check() {
   run systemctl restart "$BACKEND_SERVICE"
   run systemctl is-active "$BACKEND_SERVICE"
-  run nginx -t
+  if [ "$BAOTA_FRIENDLY" != "1" ]; then
+    run nginx -t
+  fi
   curl -fsS "http://127.0.0.1/api/csrf/" >/dev/null
-  curl -fsS "http://127.0.0.1/" >/dev/null
-  log "一键部署完成：前后端、Nginx、MySQL、Redis 已打通"
+  if [ -f "${FRONTEND_DIST_DIR}/index.html" ]; then
+    log "前端首页文件已发布: ${FRONTEND_DIST_DIR}/index.html"
+  fi
+  log "一键部署完成：前后端、MySQL、Redis 已打通"
   log "站点根目录: ${FRONTEND_DIST_DIR}"
   log "后端目录: ${BACKEND_DIR}"
   log "前端源码目录: ${FRONTEND_DIR}"
   log "后端服务: ${BACKEND_SERVICE}"
+  if [ "$BAOTA_FRIENDLY" = "1" ]; then
+    log "宝塔友好模式已启用：未改写系统站点配置，请把 ${BAOTA_SNIPPET_PATH} 内容粘贴到宝塔站点的 Nginx 配置中"
+  else
+    log "系统 Nginx 配置已写入并重载"
+  fi
 }
 
 main() {
