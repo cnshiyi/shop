@@ -21,6 +21,7 @@ from aiogram.utils.keyboard import InlineKeyboardBuilder
 from django.db.models import Q
 from django.utils import timezone
 
+from core.runtime_config import get_runtime_config
 from bot.config import BOT_TOKEN
 from bot.fsm import create_fsm_storage
 from bot.states import AdminReplyStates, CustomServerStates, MonitorStates, RechargeStates, CloudQueryStates
@@ -77,6 +78,7 @@ from cloud.services import (
     prepare_cloud_server_order_instances,
     run_cloud_server_renewal_postcheck,
     set_cloud_order_reminder,
+    _order_primary_asset,
     set_cloud_server_auto_renew,
     set_cloud_server_auto_renew_admin,
     start_cloud_server_from_admin,
@@ -1586,6 +1588,7 @@ def _save_asset_main_proxy_link(asset_id: int, user_id: int, link_data: dict[str
 @sync_to_async
 def _save_user_main_proxy_link(order_id: int, link_data: dict[str, str]):
     from cloud.models import CloudAsset, CloudServerOrder
+    from cloud.services import _update_order_primary_records
     order = CloudServerOrder.objects.get(id=order_id)
     order.mtproxy_link = link_data['url']
     order.mtproxy_secret = link_data['secret']
@@ -1597,7 +1600,17 @@ def _save_user_main_proxy_link(order_id: int, link_data: dict[str, str]):
     order.proxy_links = links
     order.provision_note = '\n'.join(filter(None, [order.provision_note, '用户补充并校验主代理链接，准备重新安装。']))
     order.save(update_fields=['mtproxy_link', 'mtproxy_secret', 'mtproxy_host', 'mtproxy_port', 'proxy_links', 'provision_note', 'updated_at'])
-    CloudAsset.objects.filter(order=order).update(mtproxy_link=order.mtproxy_link, mtproxy_secret=order.mtproxy_secret, mtproxy_host=order.mtproxy_host, mtproxy_port=order.mtproxy_port, proxy_links=links, updated_at=timezone.now())
+    _update_order_primary_records(
+        order,
+        asset_updates={
+            'mtproxy_link': order.mtproxy_link,
+            'mtproxy_secret': order.mtproxy_secret,
+            'mtproxy_host': order.mtproxy_host,
+            'mtproxy_port': order.mtproxy_port,
+            'proxy_links': links,
+        },
+        now=timezone.now(),
+    )
     return order
 
 
@@ -1724,14 +1737,16 @@ def _cloud_order_plan_text(order) -> str:
     delete_at = getattr(order, 'delete_at', None)
     auto_renew_enabled = bool(getattr(order, 'auto_renew_enabled', False))
     auto_renew_at = expires_at - timezone.timedelta(days=1) if expires_at else None
+    suspend_time_text = str(get_runtime_config('cloud_suspend_time', '15:00') or '15:00').strip() or '15:00'
+    delete_time_text = str(get_runtime_config('cloud_delete_time', '15:00') or '15:00').strip() or '15:00'
     lines = [f'到期时间: {_format_local_dt(expires_at)}']
     if auto_renew_enabled:
         lines.append(f'自动续费: 已开启，预计 {_format_local_dt(auto_renew_at)} 自动续费')
     else:
         lines.append('自动续费: 本IP未开启自动续费')
     lines.extend([
-        f'关机计划: {_format_local_dt(suspend_at)}',
-        f'删除计划: {_format_local_dt(delete_at)}',
+        f'关机计划: {_format_local_dt(suspend_at)}（后台执行时间 {suspend_time_text}）',
+        f'删除计划: {_format_local_dt(delete_at)}（后台执行时间 {delete_time_text}）',
     ])
     if suspend_at:
         lines.append(f'请务必在 {_format_local_dt(suspend_at)} 之前完成续费，避免关机。')
@@ -1859,7 +1874,7 @@ def _hydrate_order_proxy_links(order):
     try:
         from cloud.models import CloudAsset, CloudServerOrder
         candidates = []
-        asset = CloudAsset.objects.filter(order_id=order.id).order_by('-updated_at', '-id').first()
+        asset = _order_primary_asset(order)
         if asset:
             candidates.append(asset)
         lookup_values = [value for value in [order.instance_id, order.provider_resource_id, order.server_name, order.public_ip, order.previous_public_ip] if value]

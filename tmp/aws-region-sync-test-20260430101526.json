@@ -1,0 +1,202 @@
+{
+  "created_at": "2026-04-30T10:15:26.635017+00:00",
+  "account_label": "aws+172678727708+11",
+  "prefix": "oc-sync-test-20260430101526",
+  "instances": [
+    {
+      "region": "ap-northeast-1",
+      "name": "oc-sync-test-ap-northeast-1-101526",
+      "availability_zone": "ap-northeast-1a",
+      "blueprint_id": "debian_12",
+      "bundle_id": "nano_ipv6_3_0",
+      "public_ip": null,
+      "state": "running",
+      "arn": "arn:aws:lightsail:ap-northeast-1:172678727708:Instance/79850c24-8d7d-4af5-a0c6-0b5eb1c1f065"
+    },
+    {
+      "region": "ap-northeast-2",
+      "name": "oc-sync-test-ap-northeast-2-101526",
+      "availability_zone": "ap-northeast-2a",
+      "blueprint_id": "debian_12",
+      "bundle_id": "nano_ipv6_3_0",
+      "public_ip": null,
+      "state": "running",
+      "arn": "arn:aws:lightsail:ap-northeast-2:172678727708:Instance/6896d292-0c93-411e-ba09-3d23737b7997"
+    },
+    {
+      "region": "ap-south-1",
+      "name": "oc-sync-test-ap-south-1-101526",
+      "availability_zone": "ap-south-1a",
+      "blueprint_id": "debian_12",
+      "bundle_id": "nano_ipv6_3_1",
+      "public_ip": null,
+      "state": "running",
+      "arn": "arn:aws:lightsail:ap-south-1:172678727708:Instance/e51b3002-e0bf-44d3-9566-54d014af2bf1"
+    },
+    {
+      "region": "ap-southeast-1",
+      "name": "oc-sync-test-ap-southeast-1-101526",
+      "availability_zone": "ap-southeast-1a",
+      "blueprint_id": "debian_12",
+      "bundle_id": "nano_ipv6_3_0",
+      "public_ip": "18.142.53.209",
+      "state": "running",
+      "arn": "arn:aws:lightsail:ap-southeast-1:172678727708:Instance/db9b3c7f-45ad-437e-981a-857aea067093"
+    },
+    {
+      "region": "ap-southeast-2",
+      "name": "oc-sync-test-ap-southeast-2-101526",
+      "availability_zone": "ap-southeast-2a",
+      "blueprint_id": "debian_12",
+      "bundle_id": "nano_ipv6_3_2",
+      "public_ip": null,
+      "state": "running",
+      "arn": "arn:aws:lightsail:ap-southeast-2:172678727708:Instance/0a60e78b-044f-42cc-8cda-cf797939dbf4"
+    },
+    {
+      "region": "ca-central-1",
+      "name": "oc-sync-test-ca-central-1-101526",
+      "availability_zone": "ca-central-1a",
+      "blueprint_id": "debian_12",
+      "bundle_id": "nano_ipv6_3_0",
+      "public_ip": null,
+      "state": "running",
+      "arn": "arn:aws:lightsail:ca-central-1:172678727708:Instance/2f32e377-4236-494b-8291-9e6e21a0d51b"
+    },
+    {
+      "region": "eu-central-1",
+      "name": "oc-sync-test-eu-central-1-101526",
+      "availability_zone": "eu-central-1a",
+      "blueprint_id": "debian_12",
+      "bundle_id": "nano_ipv6_3_0",
+      "public_ip": null,
+      "state": "running",
+      "arn": "arn:aws:lightsail:eu-central-1:172678727708:Instance/a0af9477-1603-4987-b247-034285e493b8"
+    },
+    {
+      "region": "eu-north-1",
+      "name": "oc-sync-test-eu-north-1-101526",
+      "availability_zone": "eu-north-1a",
+      "blueprint_id": "debian_12",
+      "bundle_id": "nano_ipv6_3_0",
+      "public_ip": null,
+      "state": "running",
+      "arn": "arn:aws:lightsail:eu-north-1:172678727708:Instance/fbda7f97-e60a-466c-a8e9-bf2f82a6e36b"
+    },
+    {
+      "region": "eu-west-1",
+      "name": "oc-sync-test-eu-west-1-101526",
+      "availability_zone": "eu-west-1a",
+      "blueprint_id": "debian_12",
+      "bundle_id": "nano_ipv6_3_0",
+      "public_ip": null,
+      "state": "running",
+      "arn": "arn:aws:lightsail:eu-west-1:172678727708:Instance/2edcc0d4-877a-48c5-870c-a31ea1e35080"
+    },
+    {
+      "region": "eu-west-2",
+      "name": "oc-sync-test-eu-west-2-101526",
+      "availability_zone": "eu-west-2a",
+      "blueprint_id": "debian_12",
+      "bundle_id": "nano_ipv6_3_0",
+      "public_ip": null,
+      "state": "running",
+      "arn": "arn:aws:lightsail:eu-west-2:172678727708:Instance/85d7cfa4-3ecd-4eee-ac63-5007d312a2fb"
+    },
+    {
+      "region": "us-east-1",
+      "name": "oc-sync-test-us-east-1-101526",
+      "availability_zone": "us-east-1a",
+      "blueprint_id": "debian_12",
+      "bundle_id": "nano_ipv6_3_0",
+      "public_ip": null,
+      "state": "running",
+      "arn": "arn:aws:lightsail:us-east-1:172678727708:Instance/a7cbe7ae-4d92-44b4-8922-699818180a70"
+    },
+    {
+      "region": "us-east-2",
+      "name": "oc-sync-test-us-east-2-101526",
+      "availability_zone": "us-east-2a",
+      "blueprint_id": "debian_12",
+      "bundle_id": "nano_ipv6_3_0",
+      "public_ip": null,
+      "state": "running",
+      "arn": "arn:aws:lightsail:us-east-2:172678727708:Instance/9794b398-38eb-4930-83da-ee1b222f5d64"
+    },
+    {
+      "region": "us-west-2",
+      "name": "oc-sync-test-us-west-2-101526",
+      "availability_zone": "us-west-2a",
+      "blueprint_id": "debian_12",
+      "bundle_id": "nano_ipv6_3_0",
+      "public_ip": null,
+      "state": "running",
+      "arn": "arn:aws:lightsail:us-west-2:172678727708:Instance/a5aeeafe-e64b-4f20-a6b2-1be3f8a48a13"
+    }
+  ],
+  "errors": [
+    {
+      "region": "ap-southeast-3",
+      "error": "An error occurred (UnrecognizedClientException) when calling the GetBlueprints operation: The security token included in the request is invalid."
+    },
+    {
+      "region": "ap-southeast-5",
+      "error": "An error occurred (UnrecognizedClientException) when calling the GetBlueprints operation: The security token included in the request is invalid."
+    },
+    {
+      "region": "eu-west-3",
+      "error": "An error occurred (ServiceException) when calling the CreateInstances operation (reached max retries: 4): There is not enough capacity to fulfill your request. To resolve, reduce the number of instances in your request, specify a different Availability Zone, or use a different instance plan in your request."
+    }
+  ],
+  "finished_at": "2026-04-30T10:28:41.046952+00:00",
+  "pending": [
+    {
+      "region": "ap-northeast-1",
+      "name": "oc-sync-test-ap-northeast-1-101526"
+    },
+    {
+      "region": "ap-northeast-2",
+      "name": "oc-sync-test-ap-northeast-2-101526"
+    },
+    {
+      "region": "ap-south-1",
+      "name": "oc-sync-test-ap-south-1-101526"
+    },
+    {
+      "region": "ap-southeast-2",
+      "name": "oc-sync-test-ap-southeast-2-101526"
+    },
+    {
+      "region": "ca-central-1",
+      "name": "oc-sync-test-ca-central-1-101526"
+    },
+    {
+      "region": "eu-central-1",
+      "name": "oc-sync-test-eu-central-1-101526"
+    },
+    {
+      "region": "eu-north-1",
+      "name": "oc-sync-test-eu-north-1-101526"
+    },
+    {
+      "region": "eu-west-1",
+      "name": "oc-sync-test-eu-west-1-101526"
+    },
+    {
+      "region": "eu-west-2",
+      "name": "oc-sync-test-eu-west-2-101526"
+    },
+    {
+      "region": "us-east-1",
+      "name": "oc-sync-test-us-east-1-101526"
+    },
+    {
+      "region": "us-east-2",
+      "name": "oc-sync-test-us-east-2-101526"
+    },
+    {
+      "region": "us-west-2",
+      "name": "oc-sync-test-us-west-2-101526"
+    }
+  ]
+}

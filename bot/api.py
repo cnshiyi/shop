@@ -575,10 +575,47 @@ def _cloud_account_payload(item):
         'region_hint': item.region_hint,
         'effective_region': item.region_hint or _default_cloud_account_region(item.provider),
         'is_active': item.is_active,
+        'shutdown_enabled': bool(getattr(item, 'shutdown_enabled', True)),
         'status': item.status,
         'status_label': item.status_label,
         'status_note': item.status_note,
         'last_checked_at': _iso(item.last_checked_at),
+    }
+
+
+def _external_sync_log_payload(item):
+    return {
+        'id': item.id,
+        'source': item.source,
+        'source_label': item.get_source_display(),
+        'action': item.action,
+        'target': item.target or '',
+        'is_success': bool(item.is_success),
+        'error_message': item.error_message or '',
+        'request_payload': item.request_payload or '',
+        'response_payload': item.response_payload or '',
+        'created_at': _iso(item.created_at),
+    }
+
+
+def _cloud_account_detail_payload(item):
+    logs = list(
+        item.sync_logs.order_by('-created_at', '-id')[:50]
+    )
+    latest_success_log = next((log for log in logs if log.is_success), None)
+    latest_failed_log = next((log for log in logs if not log.is_success), None)
+    return {
+        **_cloud_account_payload(item),
+        'created_at': _iso(item.created_at),
+        'updated_at': _iso(item.updated_at),
+        'cloud_asset_count': CloudAsset.objects.filter(cloud_account=item).count(),
+        'active_cloud_asset_count': CloudAsset.objects.filter(cloud_account=item, is_active=True).count(),
+        'cloud_order_count': CloudServerOrder.objects.filter(cloud_account=item).count(),
+        'running_cloud_order_count': CloudServerOrder.objects.filter(cloud_account=item).filter(status__in=['completed', 'expiring', 'renew_pending', 'suspended', 'deleting']).count(),
+        'sync_log_count': item.sync_logs.count(),
+        'latest_success_log_at': _iso(getattr(latest_success_log, 'created_at', None)),
+        'latest_failed_log_at': _iso(getattr(latest_failed_log, 'created_at', None)),
+        'recent_logs': [_external_sync_log_payload(log) for log in logs],
     }
 
 
@@ -665,6 +702,7 @@ def _telegram_group_filter_payload(item):
         'title': item.title or '',
         'username': item.username or '',
         'enabled': bool(item.enabled),
+        'collapsed': bool(item.collapsed),
         'updated_at': _iso(item.updated_at),
         'created_at': _iso(item.created_at),
     }
@@ -1231,6 +1269,7 @@ def site_config_groups(request):
             'cloud_unattached_ip_delete_after_days',
             'cloud_unattached_ip_delete_time',
             'cloud_asset_sync_interval_seconds',
+            'cloud_sync_missing_delete_confirmations',
             'cloud_auto_renew_execution_notify_enabled',
             'cloud_auto_renew_execution_notify_chat_ids',
             'cloud_auto_renew_execution_notify_events',
@@ -1399,6 +1438,7 @@ def create_cloud_account(request):
     external_account_id = (payload.get('external_account_id') or '').strip()
     region_hint = _normalize_cloud_account_region(provider, payload.get('region_hint'))
     is_active = str(payload.get('is_active', 'true')).lower() in {'1', 'true', 'yes', 'on'}
+    shutdown_enabled = str(payload.get('shutdown_enabled', 'true')).lower() in {'1', 'true', 'yes', 'on'}
     if provider not in {CloudAccountConfig.PROVIDER_AWS, CloudAccountConfig.PROVIDER_ALIYUN}:
         return _error('云平台类型不正确', status=400)
     if not name:
@@ -1413,17 +1453,21 @@ def create_cloud_account(request):
         secret_key=secret_key,
         region_hint=region_hint,
         is_active=is_active,
+        shutdown_enabled=shutdown_enabled,
     )
     return _ok(_cloud_account_payload(item))
 
 
 @csrf_exempt
 @dashboard_login_required
-@require_POST
 def update_cloud_account(request, account_id: int):
     item = CloudAccountConfig.objects.filter(id=account_id).first()
     if not item:
         return _error('云账号不存在', status=404)
+    if request.method == 'GET':
+        return _ok(_cloud_account_detail_payload(item))
+    if request.method != 'POST':
+        return _error('请求方法不支持', status=405)
     payload = _read_payload(request)
     provider = (payload.get('provider') or item.provider).strip()
     name = (payload.get('name') or item.name).strip()
@@ -1432,6 +1476,7 @@ def update_cloud_account(request, account_id: int):
     secret_key = payload.get('secret_key')
     region_hint = payload.get('region_hint')
     is_active = payload.get('is_active')
+    shutdown_enabled = payload.get('shutdown_enabled')
     if provider not in {CloudAccountConfig.PROVIDER_AWS, CloudAccountConfig.PROVIDER_ALIYUN}:
         return _error('云平台类型不正确', status=400)
     if not name:
@@ -1447,6 +1492,8 @@ def update_cloud_account(request, account_id: int):
     item.region_hint = _normalize_cloud_account_region(provider, region_hint)
     if is_active is not None:
         item.is_active = str(is_active).lower() in {'1', 'true', 'yes', 'on'}
+    if shutdown_enabled is not None:
+        item.shutdown_enabled = str(shutdown_enabled).lower() in {'1', 'true', 'yes', 'on'}
     item.save()
     return _ok(_cloud_account_payload(item))
 
@@ -2210,6 +2257,7 @@ def create_telegram_group_filter(request):
         title=title,
         username=username,
         enabled=_payload_bool(payload, 'enabled'),
+        collapsed=_payload_bool(payload, 'collapsed'),
     )
     return _ok(_telegram_group_filter_payload(item))
 
@@ -2237,6 +2285,11 @@ def update_telegram_group_filter(request, group_id: int):
         if item.enabled != enabled:
             item.enabled = enabled
             changed.append('enabled')
+    if 'collapsed' in payload:
+        collapsed = _payload_bool(payload, 'collapsed')
+        if item.collapsed != collapsed:
+            item.collapsed = collapsed
+            changed.append('collapsed')
     if changed:
         changed.append('updated_at')
         item.save(update_fields=changed)

@@ -12,8 +12,8 @@ from django.utils import timezone
 from bot.api import _shutdown_log_items, _unattached_ip_delete_items
 from bot.models import TelegramUser
 from cloud.bootstrap import _build_mtproxy_script, _extract_tg_links
-from cloud.models import CloudAsset, CloudIpLog, CloudServerOrder, CloudServerPlan, CloudUserNoticeLog, Server
-from cloud.lifecycle import _apply_notice_schedule_to_order, _send_logged_cloud_notice
+from cloud.models import CloudAsset, CloudAutoRenewPatrolLog, CloudIpLog, CloudServerOrder, CloudServerPlan, CloudUserNoticeLog, Server
+from cloud.lifecycle import _apply_notice_schedule_to_order, _get_due_orders, _get_migration_due_orders, _is_cloud_delete_safe_time, _is_cloud_suspend_time, _mark_suspended, _next_cloud_action_run_at, _notice_plan_text, _send_logged_cloud_notice
 from cloud.ports import get_mtproxy_port_label, get_mtproxy_public_ports, is_valid_mtproxy_main_port
 from cloud.provisioning import (
     _candidate_cloud_account_ids,
@@ -25,7 +25,9 @@ from cloud.provisioning import (
     _mark_success,
 )
 from cloud.services import create_cloud_server_rebuild_order, create_cloud_server_renewal, ensure_cloud_asset_operation_order, mark_cloud_server_ip_change_requested, replace_cloud_asset_order_by_admin
-from cloud.api import _cloud_order_source_tags, delete_cloud_asset, delete_server, tasks_overview, update_cloud_asset
+from cloud.sync_safety import get_missing_confirmation_threshold
+from cloud.api import _cloud_order_source_tags, auto_renew_task_detail, delete_cloud_asset, delete_server, run_auto_renew_order, run_auto_renew_tasks, tasks_overview, update_cloud_asset
+from core.cloud_accounts import cloud_account_label
 from core.models import CloudAccountConfig
 
 
@@ -67,6 +69,328 @@ class CloudServerServicesTestCase(TestCase):
         result = async_to_sync(create_cloud_server_renewal)(order.id, self.user.id, 31)
 
         self.assertFalse(result)
+
+    def test_due_orders_use_order_expiry_for_lightsail_instead_of_stale_asset_expiry(self):
+        order = CloudServerOrder.objects.create(
+            order_no='HB-LIFECYCLE-DUE-1',
+            user=self.user,
+            plan=self.plan,
+            provider=self.plan.provider,
+            region_code=self.plan.region_code,
+            region_name=self.plan.region_name,
+            plan_name=self.plan.plan_name,
+            quantity=1,
+            currency='USDT',
+            total_amount='19.00',
+            pay_amount='19.00',
+            pay_method='balance',
+            status='completed',
+            public_ip='10.0.0.1',
+            service_started_at=timezone.now() - timezone.timedelta(days=1),
+            service_expires_at=timezone.now() + timezone.timedelta(days=10),
+        )
+        CloudAsset.objects.create(
+            kind=CloudAsset.KIND_SERVER,
+            source=CloudAsset.SOURCE_ORDER,
+            order=order,
+            user=self.user,
+            provider=order.provider,
+            region_code=order.region_code,
+            region_name=order.region_name,
+            asset_name='stale-expired-asset',
+            public_ip='10.0.0.9',
+            actual_expires_at=timezone.now() - timezone.timedelta(days=1),
+        )
+
+        due = async_to_sync(_get_due_orders)()
+
+        self.assertFalse(any(item.id == order.id for item in due['expire']))
+        self.assertFalse(any(item.id == order.id for item in due['suspend']))
+        self.assertFalse(any(item.id == order.id for item in due['delete']))
+
+    def test_due_orders_skip_suspend_when_account_shutdown_disabled(self):
+        account = CloudAccountConfig.objects.create(
+            provider=CloudAccountConfig.PROVIDER_AWS,
+            name='shutdown-off',
+            external_account_id='acct-shutdown-off',
+            access_key='ak',
+            secret_key='sk',
+            region_hint='ap-southeast-1',
+            shutdown_enabled=False,
+        )
+        order = CloudServerOrder.objects.create(
+            order_no='HB-LIFECYCLE-SUSPEND-OFF-1',
+            user=self.user,
+            plan=self.plan,
+            provider=self.plan.provider,
+            cloud_account=account,
+            region_code=self.plan.region_code,
+            region_name=self.plan.region_name,
+            plan_name=self.plan.plan_name,
+            quantity=1,
+            currency='USDT',
+            total_amount='19.00',
+            pay_amount='19.00',
+            pay_method='balance',
+            status='completed',
+            public_ip='10.0.0.21',
+            service_started_at=timezone.now() - timezone.timedelta(days=40),
+            service_expires_at=timezone.now() - timezone.timedelta(days=5),
+        )
+        CloudAsset.objects.create(
+            kind=CloudAsset.KIND_SERVER,
+            source=CloudAsset.SOURCE_ORDER,
+            order=order,
+            cloud_account=account,
+            user=self.user,
+            provider=order.provider,
+            region_code=order.region_code,
+            region_name=order.region_name,
+            asset_name='shutdown-off-asset',
+            public_ip='10.0.0.21',
+            actual_expires_at=timezone.now() - timezone.timedelta(days=5),
+            is_active=True,
+        )
+
+        due = async_to_sync(_get_due_orders)()
+
+        self.assertFalse(any(item.id == order.id for item in due['suspend']))
+        self.assertTrue(any(item.id == order.id for item in due['expire']))
+
+    def test_due_orders_restore_suspend_after_account_shutdown_reenabled(self):
+        account = CloudAccountConfig.objects.create(
+            provider=CloudAccountConfig.PROVIDER_AWS,
+            name='shutdown-on',
+            external_account_id='acct-shutdown-on',
+            access_key='ak',
+            secret_key='sk',
+            region_hint='ap-southeast-1',
+            shutdown_enabled=False,
+        )
+        order = CloudServerOrder.objects.create(
+            order_no='HB-LIFECYCLE-SUSPEND-ON-1',
+            user=self.user,
+            plan=self.plan,
+            provider=self.plan.provider,
+            cloud_account=account,
+            region_code=self.plan.region_code,
+            region_name=self.plan.region_name,
+            plan_name=self.plan.plan_name,
+            quantity=1,
+            currency='USDT',
+            total_amount='19.00',
+            pay_amount='19.00',
+            pay_method='balance',
+            status='completed',
+            public_ip='10.0.0.22',
+            service_started_at=timezone.now() - timezone.timedelta(days=40),
+            service_expires_at=timezone.now() - timezone.timedelta(days=5),
+        )
+        CloudAsset.objects.create(
+            kind=CloudAsset.KIND_SERVER,
+            source=CloudAsset.SOURCE_ORDER,
+            order=order,
+            cloud_account=account,
+            user=self.user,
+            provider=order.provider,
+            region_code=order.region_code,
+            region_name=order.region_name,
+            asset_name='shutdown-on-asset',
+            public_ip='10.0.0.22',
+            actual_expires_at=timezone.now() - timezone.timedelta(days=5),
+            is_active=True,
+        )
+
+        self.assertFalse(any(item.id == order.id for item in async_to_sync(_get_due_orders)()['suspend']))
+
+        account.shutdown_enabled = True
+        account.save(update_fields=['shutdown_enabled', 'updated_at'])
+
+        due = async_to_sync(_get_due_orders)()
+
+        self.assertTrue(any(item.id == order.id for item in due['suspend']))
+
+    def test_mark_suspended_only_updates_latest_asset_and_server(self):
+        order = CloudServerOrder.objects.create(
+            order_no='HB-LIFECYCLE-SUSPEND-1',
+            user=self.user,
+            plan=self.plan,
+            provider=self.plan.provider,
+            region_code=self.plan.region_code,
+            region_name=self.plan.region_name,
+            plan_name=self.plan.plan_name,
+            quantity=1,
+            currency='USDT',
+            total_amount='19.00',
+            pay_amount='19.00',
+            pay_method='balance',
+            status='completed',
+            public_ip='10.0.0.2',
+            service_started_at=timezone.now() - timezone.timedelta(days=40),
+            service_expires_at=timezone.now() - timezone.timedelta(days=5),
+        )
+        stale_asset = CloudAsset.objects.create(
+            kind=CloudAsset.KIND_SERVER,
+            source=CloudAsset.SOURCE_ORDER,
+            order=order,
+            user=self.user,
+            provider=order.provider,
+            region_code=order.region_code,
+            region_name=order.region_name,
+            asset_name='stale-asset',
+            public_ip='10.0.0.3',
+            actual_expires_at=timezone.now() - timezone.timedelta(days=6),
+            is_active=True,
+        )
+        active_asset = CloudAsset.objects.create(
+            kind=CloudAsset.KIND_SERVER,
+            source=CloudAsset.SOURCE_ORDER,
+            order=order,
+            user=self.user,
+            provider=order.provider,
+            region_code=order.region_code,
+            region_name=order.region_name,
+            asset_name='active-asset',
+            public_ip='10.0.0.2',
+            actual_expires_at=timezone.now() - timezone.timedelta(days=5),
+            is_active=True,
+        )
+        stale_server = Server.objects.create(
+            source=Server.SOURCE_ORDER,
+            order=order,
+            user=self.user,
+            provider=order.provider,
+            region_code=order.region_code,
+            region_name=order.region_name,
+            server_name='stale-server',
+            public_ip='10.0.0.3',
+            is_active=True,
+        )
+        active_server = Server.objects.create(
+            source=Server.SOURCE_ORDER,
+            order=order,
+            user=self.user,
+            provider=order.provider,
+            region_code=order.region_code,
+            region_name=order.region_name,
+            server_name='active-server',
+            public_ip='10.0.0.2',
+            is_active=True,
+        )
+
+        async_to_sync(_mark_suspended)(order.id, 'unit-test suspend')
+
+        stale_asset.refresh_from_db()
+        active_asset.refresh_from_db()
+        stale_server.refresh_from_db()
+        active_server.refresh_from_db()
+        order.refresh_from_db()
+
+        self.assertEqual(order.status, 'suspended')
+        self.assertTrue(stale_asset.is_active)
+        self.assertFalse(active_asset.is_active)
+        self.assertTrue(stale_server.is_active)
+        self.assertFalse(active_server.is_active)
+        self.assertIn('unit-test suspend', active_asset.note)
+        self.assertIn('unit-test suspend', active_server.note)
+
+    def test_cloud_action_time_only_runs_in_configured_window(self):
+        base = timezone.localtime(timezone.now()).replace(hour=15, minute=5, second=0, microsecond=0)
+        with patch('cloud.lifecycle._config_time', return_value=(15, 0)):
+            self.assertTrue(_is_cloud_suspend_time(now=base))
+            self.assertTrue(_is_cloud_delete_safe_time(now=base))
+            self.assertFalse(_is_cloud_suspend_time(now=base.replace(minute=11)))
+            self.assertFalse(_is_cloud_delete_safe_time(now=base.replace(minute=11)))
+
+    def test_next_cloud_action_run_at_sticks_to_configured_time(self):
+        base = timezone.localtime(timezone.now()).replace(hour=16, minute=20, second=0, microsecond=0)
+        with patch('cloud.lifecycle._config_time', return_value=(15, 0)):
+            run_at = _next_cloud_action_run_at('cloud_suspend_time', '15:00', now=base, min_delay_seconds=3600)
+        self.assertEqual((run_at.hour, run_at.minute), (15, 0))
+        self.assertGreater(run_at, base + timezone.timedelta(seconds=3600))
+
+    def test_notice_plan_text_shows_configured_execution_time(self):
+        order = CloudServerOrder.objects.create(
+            order_no='PLAN-TEXT-1',
+            user=self.user,
+            plan=self.plan,
+            provider=self.plan.provider,
+            region_code=self.plan.region_code,
+            region_name=self.plan.region_name,
+            plan_name=self.plan.plan_name,
+            quantity=1,
+            currency='USDT',
+            total_amount='19.00',
+            pay_amount='19.00',
+            pay_method='balance',
+            status='completed',
+            public_ip='3.3.3.3',
+            service_expires_at=timezone.now() + timezone.timedelta(days=1),
+            suspend_at=timezone.now() + timezone.timedelta(days=4),
+            delete_at=timezone.now() + timezone.timedelta(days=4, hours=1),
+        )
+        with patch('cloud.lifecycle._config_time', side_effect=[(15, 30), (16, 45)]):
+            text = _notice_plan_text(order)
+        self.assertIn('关机计划:', text)
+        self.assertIn('后台执行时间 15:30', text)
+        self.assertIn('后台执行时间 16:45', text)
+
+    def test_get_migration_due_orders_is_distinct(self):
+        old_order = CloudServerOrder.objects.create(
+            order_no='HB-MIGRATION-OLD-1',
+            user=self.user,
+            plan=self.plan,
+            provider=self.plan.provider,
+            region_code=self.plan.region_code,
+            region_name=self.plan.region_name,
+            plan_name=self.plan.plan_name,
+            quantity=1,
+            currency='USDT',
+            total_amount='19.00',
+            pay_amount='19.00',
+            pay_method='balance',
+            status='completed',
+            public_ip='10.0.1.1',
+            migration_due_at=timezone.now() - timezone.timedelta(minutes=1),
+        )
+        CloudServerOrder.objects.create(
+            order_no='HB-MIGRATION-NEW-1',
+            user=self.user,
+            plan=self.plan,
+            provider=self.plan.provider,
+            region_code=self.plan.region_code,
+            region_name=self.plan.region_name,
+            plan_name=self.plan.plan_name,
+            quantity=1,
+            currency='USDT',
+            total_amount='19.00',
+            pay_amount='19.00',
+            pay_method='balance',
+            status='completed',
+            public_ip='10.0.1.2',
+            replacement_for=old_order,
+        )
+        CloudServerOrder.objects.create(
+            order_no='HB-MIGRATION-NEW-2',
+            user=self.user,
+            plan=self.plan,
+            provider=self.plan.provider,
+            region_code=self.plan.region_code,
+            region_name=self.plan.region_name,
+            plan_name=self.plan.plan_name,
+            quantity=1,
+            currency='USDT',
+            total_amount='19.00',
+            pay_amount='19.00',
+            pay_method='balance',
+            status='completed',
+            public_ip='10.0.1.3',
+            replacement_for=old_order,
+        )
+
+        due_orders = async_to_sync(_get_migration_due_orders)()
+
+        self.assertEqual([item.id for item in due_orders], [old_order.id])
 
     def test_create_cloud_server_rebuild_order_reuses_original_static_ip_without_temp(self):
         source_order = CloudServerOrder.objects.create(
@@ -1439,3 +1763,544 @@ class CloudServerServicesTestCase(TestCase):
         self.assertTrue(any(item['id'] == root_order.id for item in history_orders))
         root_item = next(item for item in history_orders if item['id'] == root_order.id)
         self.assertEqual(root_item['order_detail_path'], f'/admin/cloud-orders/{root_order.id}')
+
+    def test_auto_renew_task_detail_includes_due_retry_and_fallback_items(self):
+        due_order = CloudServerOrder.objects.create(
+            order_no='AUTO-RENEW-DUE-1',
+            user=self.user,
+            plan=self.plan,
+            provider=self.plan.provider,
+            region_code=self.plan.region_code,
+            region_name=self.plan.region_name,
+            plan_name=self.plan.plan_name,
+            quantity=1,
+            currency='USDT',
+            total_amount='19.00',
+            pay_amount='19.00',
+            pay_method='balance',
+            status='completed',
+            public_ip='10.0.0.1',
+            service_started_at=timezone.now() - timezone.timedelta(days=30),
+            service_expires_at=timezone.now() + timezone.timedelta(hours=12),
+            auto_renew_enabled=True,
+        )
+        retry_order = CloudServerOrder.objects.create(
+            order_no='AUTO-RENEW-RETRY-1',
+            user=self.user,
+            plan=self.plan,
+            provider=self.plan.provider,
+            region_code=self.plan.region_code,
+            region_name=self.plan.region_name,
+            plan_name=self.plan.plan_name,
+            quantity=1,
+            currency='USDT',
+            total_amount='19.00',
+            pay_amount='19.00',
+            pay_method='balance',
+            status='completed',
+            public_ip='10.0.0.2',
+            service_started_at=timezone.now() - timezone.timedelta(days=30),
+            service_expires_at=timezone.now() + timezone.timedelta(days=2),
+            auto_renew_enabled=True,
+        )
+        fallback_order = CloudServerOrder.objects.create(
+            order_no='AUTO-RENEW-FALLBACK-1',
+            user=self.user,
+            plan=self.plan,
+            provider=self.plan.provider,
+            region_code=self.plan.region_code,
+            region_name=self.plan.region_name,
+            plan_name=self.plan.plan_name,
+            quantity=1,
+            currency='USDT',
+            total_amount='19.00',
+            pay_amount='19.00',
+            pay_method='balance',
+            status='completed',
+            public_ip='10.0.0.3',
+            service_started_at=timezone.now() - timezone.timedelta(days=40),
+            service_expires_at=timezone.now() - timezone.timedelta(hours=1),
+            auto_renew_enabled=True,
+        )
+        CloudAutoRenewPatrolLog.objects.create(
+            order=retry_order,
+            user=self.user,
+            batch_id='failed-batch-1',
+            order_no=retry_order.order_no,
+            ip=retry_order.public_ip,
+            provider=retry_order.provider,
+            user_display_name='svc_test',
+            username_label='@svc_test',
+            tg_user_id=self.user.tg_user_id,
+            is_success=False,
+            failure_reason='余额不足',
+        )
+        staff_user = get_user_model().objects.create_user(username='staff_auto_renew_detail', password='x', is_staff=True)
+        request = RequestFactory().get('/api/dashboard/tasks/auto-renew/')
+        request.user = staff_user
+
+        async def fake_get_due_orders():
+            return {'auto_renew': [due_order]}
+
+        with patch('cloud.api._get_due_orders', side_effect=fake_get_due_orders):
+            response = auto_renew_task_detail(request)
+
+        payload = json.loads(response.content)
+        data = payload.get('data') or payload
+        due_items = data['due_items']
+        queue_status_map = {item['order_no']: item['queue_status'] for item in due_items}
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(queue_status_map[due_order.order_no], 'due_now')
+        self.assertEqual(queue_status_map[retry_order.order_no], 'retry_failed')
+        self.assertEqual(queue_status_map[fallback_order.order_no], 'fallback_retry')
+        retry_item = next(item for item in due_items if item['order_no'] == retry_order.order_no)
+        self.assertEqual(retry_item['last_failure_reason'], '余额不足')
+
+    def test_run_auto_renew_tasks_executes_due_retry_and_fallback_queue(self):
+        due_order = CloudServerOrder.objects.create(
+            order_no='AUTO-RENEW-RUN-DUE-1',
+            user=self.user,
+            plan=self.plan,
+            provider=self.plan.provider,
+            region_code=self.plan.region_code,
+            region_name=self.plan.region_name,
+            plan_name=self.plan.plan_name,
+            quantity=1,
+            currency='USDT',
+            total_amount='19.00',
+            pay_amount='19.00',
+            pay_method='balance',
+            status='completed',
+            public_ip='10.0.1.1',
+            service_started_at=timezone.now() - timezone.timedelta(days=30),
+            service_expires_at=timezone.now() + timezone.timedelta(hours=8),
+            auto_renew_enabled=True,
+        )
+        retry_order = CloudServerOrder.objects.create(
+            order_no='AUTO-RENEW-RUN-RETRY-1',
+            user=self.user,
+            plan=self.plan,
+            provider=self.plan.provider,
+            region_code=self.plan.region_code,
+            region_name=self.plan.region_name,
+            plan_name=self.plan.plan_name,
+            quantity=1,
+            currency='USDT',
+            total_amount='19.00',
+            pay_amount='19.00',
+            pay_method='balance',
+            status='completed',
+            public_ip='10.0.1.2',
+            service_started_at=timezone.now() - timezone.timedelta(days=30),
+            service_expires_at=timezone.now() + timezone.timedelta(days=1),
+            auto_renew_enabled=True,
+        )
+        fallback_order = CloudServerOrder.objects.create(
+            order_no='AUTO-RENEW-RUN-FALLBACK-1',
+            user=self.user,
+            plan=self.plan,
+            provider=self.plan.provider,
+            region_code=self.plan.region_code,
+            region_name=self.plan.region_name,
+            plan_name=self.plan.plan_name,
+            quantity=1,
+            currency='USDT',
+            total_amount='19.00',
+            pay_amount='19.00',
+            pay_method='balance',
+            status='completed',
+            public_ip='10.0.1.3',
+            service_started_at=timezone.now() - timezone.timedelta(days=40),
+            service_expires_at=timezone.now() - timezone.timedelta(hours=2),
+            auto_renew_enabled=True,
+        )
+        CloudAutoRenewPatrolLog.objects.create(
+            order=retry_order,
+            user=self.user,
+            batch_id='failed-batch-2',
+            order_no=retry_order.order_no,
+            ip=retry_order.public_ip,
+            provider=retry_order.provider,
+            user_display_name='svc_test',
+            username_label='@svc_test',
+            tg_user_id=self.user.tg_user_id,
+            is_success=False,
+            failure_reason='上次失败',
+        )
+        staff_user = get_user_model().objects.create_user(username='staff_auto_renew_run', password='x', is_staff=True)
+        request = RequestFactory().post('/api/dashboard/tasks/auto-renew/run/', data='{}', content_type='application/json')
+        request.user = staff_user
+
+        async def fake_get_due_orders():
+            return {'auto_renew': [due_order]}
+
+        def fake_run_auto_renew(order_id):
+            order = CloudServerOrder.objects.get(id=order_id)
+            if order_id == retry_order.id:
+                return None, '余额不足', {'currency': 'USDT', 'amount': None}
+            return order, None, {'currency': 'USDT', 'amount': Decimal('19.00'), 'before': Decimal('100.00'), 'after': Decimal('81.00'), 'payer_user_id': self.user.id}
+
+        with patch('cloud.api._get_due_orders', side_effect=fake_get_due_orders), patch('cloud.api._run_auto_renew', new=fake_run_auto_renew):
+            response = run_auto_renew_tasks(request)
+
+        payload = json.loads(response.content)
+        data = payload.get('data') or payload
+        items = data['items']
+        item_map = {item['order_no']: item for item in items}
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(data['total'], 3)
+        self.assertEqual(data['success_count'], 2)
+        self.assertEqual(data['failure_count'], 1)
+        self.assertTrue(item_map[due_order.order_no]['ok'])
+        self.assertFalse(item_map[retry_order.order_no]['ok'])
+        self.assertEqual(item_map[retry_order.order_no]['error'], '余额不足')
+        self.assertEqual(item_map[fallback_order.order_no]['queue_status'], 'fallback_retry')
+        self.assertEqual(CloudAutoRenewPatrolLog.objects.filter(batch_id=data['batch_id']).count(), 3)
+
+    def test_run_auto_renew_order_executes_single_order(self):
+        order = CloudServerOrder.objects.create(
+            order_no='AUTO-RENEW-SINGLE-1',
+            user=self.user,
+            plan=self.plan,
+            provider=self.plan.provider,
+            region_code=self.plan.region_code,
+            region_name=self.plan.region_name,
+            plan_name=self.plan.plan_name,
+            quantity=1,
+            currency='USDT',
+            total_amount='19.00',
+            pay_amount='19.00',
+            pay_method='balance',
+            status='completed',
+            public_ip='10.0.2.1',
+            service_started_at=timezone.now() - timezone.timedelta(days=30),
+            service_expires_at=timezone.now() + timezone.timedelta(hours=4),
+            auto_renew_enabled=True,
+        )
+        staff_user = get_user_model().objects.create_user(username='staff_auto_renew_single', password='x', is_staff=True)
+        request = RequestFactory().post(f'/api/dashboard/tasks/auto-renew/orders/{order.id}/run/', data='{}', content_type='application/json')
+        request.user = staff_user
+
+        def fake_run_auto_renew(order_id):
+            renewed = CloudServerOrder.objects.get(id=order_id)
+            return renewed, None, {'currency': 'USDT', 'amount': Decimal('19.00'), 'before': Decimal('50.00'), 'after': Decimal('31.00'), 'payer_user_id': self.user.id}
+
+        with patch('cloud.api._run_auto_renew', new=fake_run_auto_renew):
+            response = run_auto_renew_order(request, order.id)
+
+        payload = json.loads(response.content)
+        data = payload.get('data') or payload
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(data['total'], 1)
+        self.assertEqual(data['items'][0]['queue_status'], 'manual_single')
+        self.assertTrue(data['items'][0]['ok'])
+        self.assertTrue(CloudAutoRenewPatrolLog.objects.filter(batch_id=data['batch_id'], order=order).exists())
+
+    def test_update_cloud_asset_rebinds_unattached_ip_to_instance(self):
+        asset = CloudAsset.objects.create(
+            kind=CloudAsset.KIND_SERVER,
+            source=CloudAsset.SOURCE_AWS_SYNC,
+            user=self.user,
+            provider='aws_lightsail',
+            region_code=self.plan.region_code,
+            region_name=self.plan.region_name,
+            asset_name='rebound-ip-asset',
+            provider_resource_id='aws-static-ip-manual-1',
+            public_ip='10.9.0.1',
+            actual_expires_at=timezone.now() + timezone.timedelta(days=10),
+            status=CloudAsset.STATUS_UNKNOWN,
+            provider_status='未附加固定IP',
+            note='未附加固定IP',
+            is_active=False,
+        )
+        server = Server.objects.create(
+            source=Server.SOURCE_AWS_SYNC,
+            user=self.user,
+            provider='aws_lightsail',
+            region_code=self.plan.region_code,
+            region_name=self.plan.region_name,
+            server_name='rebound-ip-server',
+            provider_resource_id='aws-static-ip-manual-1',
+            public_ip='10.9.0.1',
+            expires_at=asset.actual_expires_at,
+            status=Server.STATUS_UNKNOWN,
+            provider_status='未附加固定IP',
+            note='未附加固定IP',
+            is_active=False,
+        )
+        staff_user = get_user_model().objects.create_user(username='staff_rebound_manual', password='x', is_staff=True)
+        request = RequestFactory().patch(
+            f'/api/dashboard/cloud-assets/{asset.id}/',
+            data=json.dumps({'instance_id': 'i-rebound-manual-1'}),
+            content_type='application/json',
+            HTTP_AUTHORIZATION='',
+        )
+        request.user = staff_user
+
+        response = update_cloud_asset(request, asset.id)
+
+        asset.refresh_from_db()
+        server.refresh_from_db()
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(asset.instance_id, 'i-rebound-manual-1')
+        self.assertEqual(asset.provider_status, '已重新绑定实例-待人工添加时间')
+        self.assertTrue(asset.is_active)
+        self.assertEqual(asset.status, CloudAsset.STATUS_RUNNING)
+        self.assertIn('未附加IP已重新绑定到实例', asset.note or '')
+        self.assertEqual(server.instance_id, 'i-rebound-manual-1')
+        self.assertEqual(server.provider_status, '已重新绑定实例-待人工添加时间')
+        self.assertTrue(server.is_active)
+        self.assertEqual(server.status, Server.STATUS_RUNNING)
+
+    def test_sync_missing_delete_threshold_is_configurable(self):
+        with patch('cloud.sync_safety.get_runtime_config', return_value='3'):
+            self.assertEqual(get_missing_confirmation_threshold(), 3)
+        with patch('cloud.sync_safety.get_runtime_config', return_value='0'):
+            self.assertEqual(get_missing_confirmation_threshold(), 1)
+
+    def test_sync_aws_missing_instance_requires_two_passes_before_delete(self):
+        from cloud.management.commands.sync_aws_assets import _mark_deleted_when_missing_in_aws
+
+        class DummyStyle:
+            def WARNING(self, text):
+                return text
+
+        class DummyStdout:
+            def __init__(self):
+                self.stdout = self
+                self.style = DummyStyle()
+            def write(self, text):
+                return text
+
+        order = CloudServerOrder.objects.create(
+            order_no='AWS-MISS-CONFIRM-1',
+            user=self.user,
+            plan=self.plan,
+            provider=self.plan.provider,
+            region_code=self.plan.region_code,
+            region_name=self.plan.region_name,
+            plan_name=self.plan.plan_name,
+            quantity=1,
+            currency='USDT',
+            total_amount='19.00',
+            pay_amount='19.00',
+            pay_method='balance',
+            status='completed',
+            public_ip='9.9.9.9',
+            previous_public_ip='9.9.9.9',
+            instance_id='i-aws-missing-confirm-1',
+            provider_resource_id='res-aws-missing-confirm-1',
+            service_started_at=timezone.now(),
+            service_expires_at=timezone.now() + timezone.timedelta(days=31),
+        )
+        asset = CloudAsset.objects.create(
+            kind=CloudAsset.KIND_SERVER,
+            source=CloudAsset.SOURCE_AWS_SYNC,
+            order=order,
+            user=self.user,
+            provider='aws_lightsail',
+            region_code=self.plan.region_code,
+            region_name=self.plan.region_name,
+            asset_name='aws-missing-confirm-asset',
+            public_ip='9.9.9.9',
+            previous_public_ip='9.9.9.9',
+            instance_id=order.instance_id,
+            provider_resource_id=order.provider_resource_id,
+            actual_expires_at=order.service_expires_at,
+            status=CloudAsset.STATUS_RUNNING,
+            is_active=True,
+        )
+        server = Server.objects.create(
+            source=Server.SOURCE_AWS_SYNC,
+            order=order,
+            user=self.user,
+            provider='aws_lightsail',
+            region_code=self.plan.region_code,
+            region_name=self.plan.region_name,
+            server_name='aws-missing-confirm-server',
+            public_ip='9.9.9.9',
+            previous_public_ip='9.9.9.9',
+            instance_id=order.instance_id,
+            provider_resource_id=order.provider_resource_id,
+            status=Server.STATUS_RUNNING,
+            is_active=True,
+        )
+
+        deleted = _mark_deleted_when_missing_in_aws(self.plan.region_code, set(), set(), DummyStdout())
+        asset.refresh_from_db(); server.refresh_from_db(); order.refresh_from_db()
+        self.assertEqual(deleted, [])
+        self.assertEqual(asset.status, CloudAsset.STATUS_RUNNING)
+        self.assertEqual(asset.provider_status, '云上未找到实例/IP-待确认')
+        self.assertEqual(server.status, Server.STATUS_RUNNING)
+        self.assertEqual(order.status, 'completed')
+
+        deleted = _mark_deleted_when_missing_in_aws(self.plan.region_code, set(), set(), DummyStdout())
+        asset.refresh_from_db(); server.refresh_from_db(); order.refresh_from_db()
+        self.assertTrue(deleted)
+        self.assertEqual(asset.status, CloudAsset.STATUS_DELETED)
+        self.assertEqual(server.status, Server.STATUS_DELETED)
+        self.assertEqual(order.status, 'deleted')
+
+    def test_sync_aliyun_missing_instance_requires_two_passes_before_delete(self):
+        from cloud.management.commands.sync_aliyun_assets import _mark_deleted_when_missing_in_aliyun
+
+        class DummyStyle:
+            def WARNING(self, text):
+                return text
+
+        class DummyStdout:
+            def __init__(self):
+                self.stdout = self
+                self.style = DummyStyle()
+            def write(self, text):
+                return text
+
+        order = CloudServerOrder.objects.create(
+            order_no='ALIYUN-MISS-CONFIRM-1',
+            user=self.user,
+            plan=self.plan,
+            provider='aliyun_simple',
+            region_code='cn-hongkong',
+            region_name='中国香港',
+            plan_name=self.plan.plan_name,
+            quantity=1,
+            currency='USDT',
+            total_amount='19.00',
+            pay_amount='19.00',
+            pay_method='balance',
+            status='completed',
+            public_ip='6.6.6.6',
+            previous_public_ip='6.6.6.6',
+            instance_id='i-aliyun-missing-confirm-1',
+            provider_resource_id='i-aliyun-missing-confirm-1',
+            service_started_at=timezone.now(),
+            service_expires_at=timezone.now() + timezone.timedelta(days=31),
+        )
+        asset = CloudAsset.objects.create(
+            kind=CloudAsset.KIND_SERVER,
+            source=CloudAsset.SOURCE_ALIYUN,
+            order=order,
+            user=self.user,
+            provider='aliyun_simple',
+            region_code='cn-hongkong',
+            region_name='中国香港',
+            asset_name='aliyun-missing-confirm-asset',
+            public_ip='6.6.6.6',
+            previous_public_ip='6.6.6.6',
+            instance_id=order.instance_id,
+            provider_resource_id=order.provider_resource_id,
+            actual_expires_at=order.service_expires_at,
+            status=CloudAsset.STATUS_RUNNING,
+            is_active=True,
+        )
+        server = Server.objects.create(
+            source=Server.SOURCE_ALIYUN,
+            order=order,
+            user=self.user,
+            provider='aliyun_simple',
+            region_code='cn-hongkong',
+            region_name='中国香港',
+            server_name='aliyun-missing-confirm-server',
+            public_ip='6.6.6.6',
+            previous_public_ip='6.6.6.6',
+            instance_id=order.instance_id,
+            provider_resource_id=order.provider_resource_id,
+            status=Server.STATUS_RUNNING,
+            is_active=True,
+        )
+
+        deleted = _mark_deleted_when_missing_in_aliyun('cn-hongkong', set(), DummyStdout())
+        asset.refresh_from_db(); server.refresh_from_db(); order.refresh_from_db()
+        self.assertEqual(deleted, [])
+        self.assertEqual(asset.status, CloudAsset.STATUS_RUNNING)
+        self.assertEqual(asset.provider_status, '云上未找到实例-待确认')
+        self.assertEqual(server.status, Server.STATUS_RUNNING)
+        self.assertEqual(order.status, 'completed')
+
+        deleted = _mark_deleted_when_missing_in_aliyun('cn-hongkong', set(), DummyStdout())
+        asset.refresh_from_db(); server.refresh_from_db(); order.refresh_from_db()
+        self.assertTrue(deleted)
+        self.assertEqual(asset.status, CloudAsset.STATUS_DELETED)
+        self.assertEqual(server.status, Server.STATUS_DELETED)
+        self.assertEqual(order.status, 'deleted')
+
+    def test_sync_aws_assets_rebinds_unattached_ip_when_instance_reappears(self):
+        account = CloudAccountConfig.objects.create(
+            provider=CloudAccountConfig.PROVIDER_AWS,
+            name='aws-rebind',
+            external_account_id='123456789012',
+            access_key='A' * 20,
+            secret_key='B' * 40,
+            region_hint='ap-southeast-1',
+            is_active=True,
+        )
+        account_label = cloud_account_label(account)
+        asset = CloudAsset.objects.create(
+            kind=CloudAsset.KIND_SERVER,
+            source=CloudAsset.SOURCE_AWS_SYNC,
+            user=self.user,
+            provider='aws_lightsail',
+            cloud_account=account,
+            account_label=account_label,
+            region_code=self.plan.region_code,
+            region_name=self.plan.region_name,
+            asset_name='rebind-static-ip',
+            provider_resource_id='arn:aws:lightsail:ap-southeast-1:123456789012:StaticIp/rebind-static-ip',
+            public_ip='10.9.0.2',
+            actual_expires_at=timezone.now() + timezone.timedelta(days=3),
+            status=CloudAsset.STATUS_UNKNOWN,
+            provider_status='未附加固定IP',
+            note='未附加固定IP',
+            is_active=False,
+        )
+        server = Server.objects.create(
+            source=Server.SOURCE_AWS_SYNC,
+            user=self.user,
+            provider='aws_lightsail',
+            account_label=account_label,
+            region_code=self.plan.region_code,
+            region_name=self.plan.region_name,
+            server_name='rebind-static-ip-server',
+            public_ip='10.9.0.2',
+            expires_at=asset.actual_expires_at,
+            status=Server.STATUS_UNKNOWN,
+            provider_status='未附加固定IP',
+            note='未附加固定IP',
+            is_active=False,
+        )
+
+        class FakeLightsailClient:
+            def get_static_ips(self, **kwargs):
+                return {'staticIps': [], 'nextPageToken': None}
+
+            def get_instances(self, **kwargs):
+                return {
+                    'instances': [{
+                        'name': 'i-rebound-sync-1',
+                        'arn': 'arn:aws:lightsail:ap-southeast-1:123456789012:Instance/i-rebound-sync-1',
+                        'state': {'name': 'running'},
+                        'location': {'regionName': '新加坡'},
+                        'publicIpAddress': '10.9.0.2',
+                        'bundleId': 'micro_1_0',
+                        'blueprintId': 'debian_12',
+                    }],
+                    'nextPageToken': None,
+                }
+
+        with patch('cloud.management.commands.sync_aws_assets._list_regions', return_value=['ap-southeast-1']), patch('cloud.management.commands.sync_aws_assets._aws_account_identity', return_value='123456789012'), patch('cloud.management.commands.sync_aws_assets._lightsail_client', return_value=FakeLightsailClient()):
+            call_command('sync_aws_assets', region='ap-southeast-1')
+
+        asset.refresh_from_db()
+        server.refresh_from_db()
+        self.assertEqual(asset.instance_id, 'i-rebound-sync-1')
+        self.assertEqual(asset.provider_status, '已重新绑定实例-待人工添加时间')
+        self.assertTrue(asset.is_active)
+        self.assertEqual(asset.status, CloudAsset.STATUS_RUNNING)
+        self.assertIn('未附加IP已重新绑定到实例', asset.note or '')
+        self.assertEqual(server.instance_id, 'i-rebound-sync-1')
+        self.assertEqual(server.provider_status, '已重新绑定实例-待人工添加时间')
+        self.assertTrue(server.is_active)
+        self.assertEqual(server.status, Server.STATUS_RUNNING)

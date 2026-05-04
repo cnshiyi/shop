@@ -18,7 +18,7 @@ from core.texts import site_text
 from orders.models import BalanceLedger
 from bot.models import TelegramUser
 from cloud.models import CloudAsset, CloudAutoRenewPatrolLog, CloudServerOrder, CloudUserNoticeLog, Server
-from cloud.services import RenewalPriceMissingError, _cloud_order_lifecycle_fields, _renewal_price, create_cloud_server_renewal_for_user, pay_cloud_server_renewal_with_balance, record_cloud_ip_log
+from cloud.services import RenewalPriceMissingError, _cloud_order_lifecycle_fields, _hydrate_order_from_proxy_asset, _order_primary_asset, _order_primary_server, _renewal_price, create_cloud_server_renewal_for_user, pay_cloud_server_renewal_with_balance, record_cloud_ip_log
 from bot.keyboards import cloud_auto_renew_notice_actions, cloud_expiry_actions, cloud_lifecycle_notice_actions
 
 logger = logging.getLogger(__name__)
@@ -123,7 +123,7 @@ _NOTICE_ASSET_EXCLUDED_STATUSES = {
 
 def _notice_asset_queryset():
     return (
-        CloudAsset.objects.select_related('order', 'order__user')
+        CloudAsset.objects.select_related('order', 'order__user', 'cloud_account', 'order__cloud_account')
         .filter(kind=CloudAsset.KIND_SERVER, order__isnull=False, actual_expires_at__isnull=False)
         .exclude(public_ip__isnull=True)
         .exclude(public_ip='')
@@ -133,10 +133,11 @@ def _notice_asset_queryset():
 
 
 def _notice_schedule(order: CloudServerOrder, asset: CloudAsset) -> dict:
-    expires_at = asset.actual_expires_at
+    order = _hydrate_order_from_proxy_asset(order, asset=asset)
+    expires_at = getattr(order, 'service_expires_at', None) or asset.actual_expires_at
     schedule = _cloud_order_lifecycle_fields(expires_at, getattr(order, 'renew_extension_days', 0))
     return {
-        'ip': asset.public_ip,
+        'ip': getattr(order, 'public_ip', None) or asset.public_ip,
         'expires_at': expires_at,
         'suspend_at': schedule.get('suspend_at'),
         'delete_at': schedule.get('delete_at'),
@@ -148,6 +149,13 @@ def _notice_schedule(order: CloudServerOrder, asset: CloudAsset) -> dict:
 
 def _append_due(bucket: dict, key: str, order: CloudServerOrder):
     bucket[key].setdefault(order.id, order)
+
+
+def _shutdown_enabled_for_order(order: CloudServerOrder, asset: CloudAsset | None = None) -> bool:
+    account = asset.cloud_account if asset and getattr(asset, 'cloud_account_id', None) else getattr(order, 'cloud_account', None)
+    if not account:
+        return True
+    return bool(getattr(account, 'shutdown_enabled', True))
 
 
 @sync_to_async
@@ -171,6 +179,7 @@ def _get_due_orders():
         delete_at = schedule['delete_at']
         ip_recycle_at = schedule['ip_recycle_at']
         active_order = order.status in ['completed', 'expiring', 'renew_pending']
+        shutdown_enabled = _shutdown_enabled_for_order(order, asset)
         if active_order and order.cloud_reminder_enabled and expires_at <= renew_notice_at and expires_at > now:
             if renew_notice_debug_repeat or not order.renew_notice_sent_at:
                 _append_due(due, 'renew_notice', order)
@@ -191,7 +200,7 @@ def _get_due_orders():
         if order.provider != 'aliyun_simple':
             if order.status == 'completed' and expires_at <= now and not order.renew_notice_sent_at:
                 _append_due(due, 'expire', order)
-            if active_order and suspend_at and suspend_at <= now:
+            if active_order and shutdown_enabled and suspend_at and suspend_at <= now:
                 _append_due(due, 'suspend', order)
             if order.status in ['suspended', 'deleting'] and delete_at and delete_at <= now:
                 _append_due(due, 'delete', order)
@@ -215,12 +224,17 @@ def _get_due_orders():
 def _mark_expiring(order_id: int):
     order = CloudServerOrder.objects.get(id=order_id)
     if order.status == 'completed':
+        now = timezone.now()
         order.status = 'expiring'
         order.save(update_fields=['status', 'updated_at'])
-        asset = CloudAsset.objects.filter(order=order).order_by('-updated_at', '-id').first()
-        server = Server.objects.filter(order=order).order_by('-updated_at', '-id').first()
-        CloudAsset.objects.filter(order=order).update(updated_at=timezone.now())
-        Server.objects.filter(order=order).update(updated_at=timezone.now())
+        asset = _order_primary_asset(order)
+        server = _order_primary_server(order)
+        if asset:
+            asset.updated_at = now
+            asset.save(update_fields=['updated_at'])
+        if server:
+            server.updated_at = now
+            server.save(update_fields=['updated_at'])
         record_cloud_ip_log(event_type='expired', order=order, asset=asset, server=server, note='服务器到期，进入到期处理阶段')
     return order
 
@@ -232,10 +246,18 @@ def _mark_suspended(order_id: int, note: str):
     order.status = 'suspended'
     order.provision_note = '\n'.join(filter(None, [order.provision_note, note]))
     order.save(update_fields=['status', 'provision_note', 'updated_at'])
-    asset = CloudAsset.objects.filter(order=order).order_by('-updated_at', '-id').first()
-    server = Server.objects.filter(order=order).order_by('-updated_at', '-id').first()
-    CloudAsset.objects.filter(order=order).update(is_active=False, note=order.provision_note, updated_at=now)
-    Server.objects.filter(order=order).update(is_active=False, note=order.provision_note, updated_at=now)
+    asset = _order_primary_asset(order)
+    server = _order_primary_server(order)
+    if asset:
+        asset.is_active = False
+        asset.note = order.provision_note
+        asset.updated_at = now
+        asset.save(update_fields=['is_active', 'note', 'updated_at'])
+    if server:
+        server.is_active = False
+        server.note = order.provision_note
+        server.updated_at = now
+        server.save(update_fields=['is_active', 'note', 'updated_at'])
     record_cloud_ip_log(event_type='suspended', order=order, asset=asset, server=server, note=note or '服务器进入延停状态')
     return order
 
@@ -244,8 +266,8 @@ def _mark_suspended(order_id: int, note: str):
 def _mark_deleted(order_id: int, note: str):
     now = timezone.now()
     order = CloudServerOrder.objects.get(id=order_id)
-    asset = CloudAsset.objects.filter(order=order).order_by('-updated_at', '-id').first()
-    server = Server.objects.filter(order=order).order_by('-updated_at', '-id').first()
+    asset = _order_primary_asset(order)
+    server = _order_primary_server(order)
     previous_public_ip = order.public_ip or order.previous_public_ip
     order.status = 'deleted'
     order.public_ip = previous_public_ip
@@ -255,26 +277,26 @@ def _mark_deleted(order_id: int, note: str):
     order.instance_id = ''
     order.provider_resource_id = ''
     order.save(update_fields=['status', 'public_ip', 'previous_public_ip', 'provision_note', 'instance_id', 'provider_resource_id', 'updated_at'])
-    CloudAsset.objects.filter(order=order).update(
-        public_ip=previous_public_ip,
-        previous_public_ip=previous_public_ip,
-        instance_id=None,
-        provider_resource_id=None,
-        provider_status='固定IP保留中-实例已删除',
-        is_active=False,
-        note=order.provision_note,
-        updated_at=now,
-    )
-    Server.objects.filter(order=order).update(
-        public_ip=previous_public_ip,
-        previous_public_ip=previous_public_ip,
-        instance_id=None,
-        provider_resource_id=None,
-        provider_status='固定IP保留中-实例已删除',
-        is_active=False,
-        note=order.provision_note,
-        updated_at=now,
-    )
+    if asset:
+        asset.public_ip = previous_public_ip
+        asset.previous_public_ip = previous_public_ip
+        asset.instance_id = None
+        asset.provider_resource_id = None
+        asset.provider_status = '固定IP保留中-实例已删除'
+        asset.is_active = False
+        asset.note = order.provision_note
+        asset.updated_at = now
+        asset.save(update_fields=['public_ip', 'previous_public_ip', 'instance_id', 'provider_resource_id', 'provider_status', 'is_active', 'note', 'updated_at'])
+    if server:
+        server.public_ip = previous_public_ip
+        server.previous_public_ip = previous_public_ip
+        server.instance_id = None
+        server.provider_resource_id = None
+        server.provider_status = '固定IP保留中-实例已删除'
+        server.is_active = False
+        server.note = order.provision_note
+        server.updated_at = now
+        server.save(update_fields=['public_ip', 'previous_public_ip', 'instance_id', 'provider_resource_id', 'provider_status', 'is_active', 'note', 'updated_at'])
     record_cloud_ip_log(event_type='deleted', order=order, asset=asset, server=server, previous_public_ip=previous_public_ip, public_ip=previous_public_ip, note=retention_note)
     return order
 
@@ -283,8 +305,8 @@ def _mark_deleted(order_id: int, note: str):
 def _mark_recycled(order_id: int, note: str):
     now = timezone.now()
     order = CloudServerOrder.objects.get(id=order_id)
-    asset = CloudAsset.objects.filter(order=order).order_by('-updated_at', '-id').first()
-    server = Server.objects.filter(order=order).order_by('-updated_at', '-id').first()
+    asset = _order_primary_asset(order)
+    server = _order_primary_server(order)
     previous_public_ip = order.public_ip or order.previous_public_ip
     order.previous_public_ip = previous_public_ip
     order.public_ip = ''
@@ -295,19 +317,19 @@ def _mark_recycled(order_id: int, note: str):
     order.ip_recycle_reminder_enabled = False
     order.provision_note = '\n'.join(filter(None, [order.provision_note, note]))
     order.save(update_fields=['previous_public_ip', 'public_ip', 'static_ip_name', 'mtproxy_host', 'ip_recycle_at', 'recycle_notice_sent_at', 'ip_recycle_reminder_enabled', 'provision_note', 'updated_at'])
-    CloudAsset.objects.filter(order=order).update(
-        previous_public_ip=previous_public_ip,
-        public_ip=None,
-        mtproxy_host=None,
-        note=order.provision_note,
-        updated_at=now,
-    )
-    Server.objects.filter(order=order).update(
-        previous_public_ip=previous_public_ip,
-        public_ip=None,
-        note=order.provision_note,
-        updated_at=now,
-    )
+    if asset:
+        asset.previous_public_ip = previous_public_ip
+        asset.public_ip = None
+        asset.mtproxy_host = None
+        asset.note = order.provision_note
+        asset.updated_at = now
+        asset.save(update_fields=['previous_public_ip', 'public_ip', 'mtproxy_host', 'note', 'updated_at'])
+    if server:
+        server.previous_public_ip = previous_public_ip
+        server.public_ip = None
+        server.note = order.provision_note
+        server.updated_at = now
+        server.save(update_fields=['previous_public_ip', 'public_ip', 'note', 'updated_at'])
     record_cloud_ip_log(event_type='recycled', order=order, asset=asset, server=server, previous_public_ip=previous_public_ip, public_ip=None, note=note or '公网IP已回收')
     return order
 
@@ -401,8 +423,8 @@ def _notice_plan_text(order, notice: dict | None = None, *, include_expiry: bool
         lines.append(f'自动续费: 已开启，预计 {_format_notice_dt(auto_renew_at)} 自动续费')
     else:
         lines.append('自动续费: 本IP未开启自动续费')
-    lines.append(f'关机计划: {_format_notice_dt(suspend_at)}')
-    lines.append(f'删除计划: {_format_notice_dt(delete_at)}')
+    lines.append(f'关机计划: {_format_notice_dt(suspend_at)}（后台执行时间 { _config_time_text("cloud_suspend_time", "15:00") }）')
+    lines.append(f'删除计划: {_format_notice_dt(delete_at)}（后台执行时间 { _config_time_text("cloud_delete_time", "15:00") }）')
     if ip_recycle_at:
         lines.append(f'固定IP删除计划: {_format_notice_dt(ip_recycle_at)}')
     if suspend_at:
@@ -473,7 +495,15 @@ def _group_balance_lines_for_orders(orders: list[CloudServerOrder]) -> list[str]
 
 
 def _active_notice_asset_for_order(order) -> CloudAsset | None:
-    return _notice_asset_queryset().filter(order=order).first()
+    return (
+        CloudAsset.objects.select_related('order', 'order__user')
+        .filter(kind=CloudAsset.KIND_SERVER, order=order, actual_expires_at__isnull=False)
+        .exclude(public_ip__isnull=True)
+        .exclude(public_ip='')
+        .exclude(status__in=_NOTICE_ASSET_EXCLUDED_STATUSES)
+        .order_by('-updated_at', '-id')
+        .first()
+    )
 
 
 def _notice_payload_for_order(order) -> dict | None:
@@ -850,11 +880,33 @@ def _config_time(key: str, default: str = '15:00') -> tuple[int, int]:
         return int(hour_text), int(minute_text)
 
 
-def _is_cloud_delete_safe_time(now=None) -> bool:
+def _is_cloud_action_time(config_key: str, default_time: str, now=None, window_minutes: int = 10) -> bool:
     local_now = timezone.localtime(now or timezone.now())
-    hour, minute = _config_time('cloud_delete_time', '15:00')
+    hour, minute = _config_time(config_key, default_time)
     scheduled = local_now.replace(hour=hour, minute=minute, second=0, microsecond=0)
-    return scheduled <= local_now < scheduled + timezone.timedelta(hours=1)
+    return scheduled <= local_now < scheduled + timezone.timedelta(minutes=max(1, int(window_minutes or 10)))
+
+
+def _next_cloud_action_run_at(config_key: str, default_time: str, *, now=None, min_delay_seconds: int = 0):
+    base = timezone.localtime((now or timezone.now()) + timezone.timedelta(seconds=max(0, int(min_delay_seconds or 0))))
+    hour, minute = _config_time(config_key, default_time)
+    scheduled = base.replace(hour=hour, minute=minute, second=0, microsecond=0)
+    if scheduled < base:
+        scheduled += timezone.timedelta(days=1)
+    return scheduled
+
+
+def _config_time_text(config_key: str, default_time: str) -> str:
+    hour, minute = _config_time(config_key, default_time)
+    return f'{hour:02d}:{minute:02d}'
+
+
+def _is_cloud_suspend_time(now=None) -> bool:
+    return _is_cloud_action_time('cloud_suspend_time', '15:00', now=now)
+
+
+def _is_cloud_delete_safe_time(now=None) -> bool:
+    return _is_cloud_action_time('cloud_delete_time', '15:00', now=now)
 
 
 def _action_note(result) -> str:
@@ -870,8 +922,8 @@ def _action_ok(result) -> bool:
 @sync_to_async
 def _record_lifecycle_action_failed(order_id: int, event_type: str, note: str):
     order = CloudServerOrder.objects.get(id=order_id)
-    asset = CloudAsset.objects.filter(order=order).order_by('-updated_at', '-id').first()
-    server = Server.objects.filter(order=order).order_by('-updated_at', '-id').first()
+    asset = _order_primary_asset(order)
+    server = _order_primary_server(order)
     order.provision_note = '\n'.join(filter(None, [order.provision_note, note]))
     order.save(update_fields=['provision_note', 'updated_at'])
     record_cloud_ip_log(event_type=event_type, order=order, asset=asset, server=server, public_ip=order.public_ip, previous_public_ip=order.previous_public_ip, note=note)
@@ -987,7 +1039,7 @@ def _get_migration_due_orders():
         CloudServerOrder.objects.filter(
             replacement_orders__isnull=False,
             migration_due_at__lte=now,
-        ).exclude(status__in=['deleted'])
+        ).exclude(status__in=['deleted']).distinct()
     )
 
 
@@ -1094,8 +1146,8 @@ def _mark_orphan_asset_deleted(asset_id: int, note: str):
 def _mark_replaced_order_deleted(order_id: int, note: str):
     now = timezone.now()
     order = CloudServerOrder.objects.get(id=order_id)
-    asset = CloudAsset.objects.filter(order=order).order_by('-updated_at', '-id').first()
-    server = Server.objects.filter(order=order).order_by('-updated_at', '-id').first()
+    asset = _order_primary_asset(order)
+    server = _order_primary_server(order)
     previous_public_ip = order.public_ip or order.previous_public_ip
     order.status = 'deleted'
     order.previous_public_ip = previous_public_ip
@@ -1104,8 +1156,20 @@ def _mark_replaced_order_deleted(order_id: int, note: str):
     order.public_ip = ''
     order.provision_note = '\n'.join(filter(None, [order.provision_note, note]))
     order.save(update_fields=['status', 'previous_public_ip', 'instance_id', 'provider_resource_id', 'public_ip', 'provision_note', 'updated_at'])
-    CloudAsset.objects.filter(order=order).update(is_active=False, public_ip=None, previous_public_ip=previous_public_ip, note=order.provision_note, updated_at=now)
-    Server.objects.filter(order=order).update(is_active=False, public_ip=None, previous_public_ip=previous_public_ip, note=order.provision_note, updated_at=now)
+    if asset:
+        asset.is_active = False
+        asset.public_ip = None
+        asset.previous_public_ip = previous_public_ip
+        asset.note = order.provision_note
+        asset.updated_at = now
+        asset.save(update_fields=['is_active', 'public_ip', 'previous_public_ip', 'note', 'updated_at'])
+    if server:
+        server.is_active = False
+        server.public_ip = None
+        server.previous_public_ip = previous_public_ip
+        server.note = order.provision_note
+        server.updated_at = now
+        server.save(update_fields=['is_active', 'public_ip', 'previous_public_ip', 'note', 'updated_at'])
     record_cloud_ip_log(event_type='deleted', order=order, asset=asset, server=server, previous_public_ip=previous_public_ip, public_ip=None, note=note or '迁移结束，旧实例删除')
     return order
 
@@ -1212,32 +1276,33 @@ def _order_action_ip(order) -> str:
 
 @sync_to_async
 def _defer_startup_lifecycle_actions(due, migration_due_orders, orphan_asset_delete_due, delay_seconds: int):
-    run_at = timezone.now() + timezone.timedelta(seconds=delay_seconds)
+    suspend_run_at = _next_cloud_action_run_at('cloud_suspend_time', '15:00', min_delay_seconds=delay_seconds)
+    delete_run_at = _next_cloud_action_run_at('cloud_delete_time', '15:00', min_delay_seconds=delay_seconds)
     for order in due.get('suspend') or []:
-        CloudServerOrder.objects.filter(id=order.id).update(suspend_at=run_at, updated_at=timezone.now())
+        CloudServerOrder.objects.filter(id=order.id).update(suspend_at=suspend_run_at, updated_at=timezone.now())
         logger.warning(
-            'CLOUD_STARTUP_DEFER_SUSPEND order_id=%s order_no=%s ip=%s old_suspend_at=%s deferred_until=%s message="启动检查命中到期关机，IP %s 将在 1 小时后执行关机"',
-            order.id, order.order_no, _order_action_ip(order), order.suspend_at, run_at, _order_action_ip(order),
+            'CLOUD_STARTUP_DEFER_SUSPEND order_id=%s order_no=%s ip=%s old_suspend_at=%s deferred_until=%s message="启动检查命中到期关机，IP %s 将顺延到后台设定关机时间执行"',
+            order.id, order.order_no, _order_action_ip(order), order.suspend_at, suspend_run_at, _order_action_ip(order),
         )
     for order in due.get('delete') or []:
-        CloudServerOrder.objects.filter(id=order.id).update(delete_at=run_at, updated_at=timezone.now())
+        CloudServerOrder.objects.filter(id=order.id).update(delete_at=delete_run_at, updated_at=timezone.now())
         logger.warning(
-            'CLOUD_STARTUP_DEFER_DELETE order_id=%s order_no=%s ip=%s old_delete_at=%s deferred_until=%s message="启动检查命中到期删机，IP %s 将在 1 小时后执行删机"',
-            order.id, order.order_no, _order_action_ip(order), order.delete_at, run_at, _order_action_ip(order),
+            'CLOUD_STARTUP_DEFER_DELETE order_id=%s order_no=%s ip=%s old_delete_at=%s deferred_until=%s message="启动检查命中到期删机，IP %s 将顺延到后台设定删机时间执行"',
+            order.id, order.order_no, _order_action_ip(order), order.delete_at, delete_run_at, _order_action_ip(order),
         )
     for order in migration_due_orders or []:
-        CloudServerOrder.objects.filter(id=order.id).update(migration_due_at=run_at, updated_at=timezone.now())
+        CloudServerOrder.objects.filter(id=order.id).update(migration_due_at=delete_run_at, updated_at=timezone.now())
         logger.warning(
-            'CLOUD_STARTUP_DEFER_MIGRATION_DELETE order_id=%s order_no=%s ip=%s old_migration_due_at=%s deferred_until=%s message="启动检查命中迁移旧机删机，IP %s 将在 1 小时后执行删机"',
-            order.id, order.order_no, _order_action_ip(order), order.migration_due_at, run_at, _order_action_ip(order),
+            'CLOUD_STARTUP_DEFER_MIGRATION_DELETE order_id=%s order_no=%s ip=%s old_migration_due_at=%s deferred_until=%s message="启动检查命中迁移旧机删机，IP %s 将顺延到后台设定删机时间执行"',
+            order.id, order.order_no, _order_action_ip(order), order.migration_due_at, delete_run_at, _order_action_ip(order),
         )
     for asset in orphan_asset_delete_due or []:
-        CloudAsset.objects.filter(id=asset.id).update(actual_expires_at=run_at, updated_at=timezone.now())
+        CloudAsset.objects.filter(id=asset.id).update(actual_expires_at=delete_run_at, updated_at=timezone.now())
         logger.warning(
-            'CLOUD_STARTUP_DEFER_ORPHAN_ASSET_DELETE asset_id=%s ip=%s old_actual_expires_at=%s deferred_until=%s message="启动检查命中无订单资产删机，IP %s 将在 1 小时后执行删机"',
-            asset.id, asset.public_ip or asset.previous_public_ip or '未分配', asset.actual_expires_at, run_at, asset.public_ip or asset.previous_public_ip or '未分配',
+            'CLOUD_STARTUP_DEFER_ORPHAN_ASSET_DELETE asset_id=%s ip=%s old_actual_expires_at=%s deferred_until=%s message="启动检查命中无订单资产删机，IP %s 将顺延到后台设定删机时间执行"',
+            asset.id, asset.public_ip or asset.previous_public_ip or '未分配', asset.actual_expires_at, delete_run_at, asset.public_ip or asset.previous_public_ip or '未分配',
         )
-    return run_at
+    return {'suspend': suspend_run_at, 'delete': delete_run_at}
 
 
 async def auto_renew_patrol_tick(notify=None, notify_target=None):
@@ -1325,10 +1390,10 @@ async def lifecycle_tick(notify=None, notify_target=None, defer_destructive_seco
     )
 
     if defer_destructive_seconds and (due['suspend'] or due['delete'] or migration_due_orders or orphan_asset_delete_due):
-        run_at = await _defer_startup_lifecycle_actions(due, migration_due_orders, orphan_asset_delete_due, defer_destructive_seconds)
+        deferred_at = await _defer_startup_lifecycle_actions(due, migration_due_orders, orphan_asset_delete_due, defer_destructive_seconds)
         logger.warning(
-            'CLOUD_STARTUP_DEFER_DONE suspend=%s delete=%s migration_delete=%s orphan_asset_delete=%s deferred_until=%s',
-            len(due['suspend']), len(due['delete']), len(migration_due_orders), len(orphan_asset_delete_due), run_at,
+            'CLOUD_STARTUP_DEFER_DONE suspend=%s delete=%s migration_delete=%s orphan_asset_delete=%s deferred_suspend_until=%s deferred_delete_until=%s',
+            len(due['suspend']), len(due['delete']), len(migration_due_orders), len(orphan_asset_delete_due), deferred_at['suspend'], deferred_at['delete'],
         )
         due['suspend'] = []
         due['delete'] = []
@@ -1440,6 +1505,9 @@ async def lifecycle_tick(notify=None, notify_target=None, defer_destructive_seco
             expire_ready_by_user[updated.user_id].append((updated, notice))
 
     for order in due['suspend']:
+        if not _is_cloud_suspend_time():
+            logger.warning('CLOUD_SUSPEND_SKIP_OUTSIDE_WINDOW order_id=%s order_no=%s suspend_at=%s now=%s', order.id, order.order_no, order.suspend_at, timezone.now())
+            continue
         result = await _stop_instance(order)
         note = _action_note(result)
         if _action_ok(result):
@@ -1454,7 +1522,7 @@ async def lifecycle_tick(notify=None, notify_target=None, defer_destructive_seco
 
     for order in due['delete']:
         if not _is_cloud_delete_safe_time():
-            logger.warning('CLOUD_DELETE_SKIP_UNSAFE_TIME order_id=%s order_no=%s delete_at=%s now=%s', order.id, order.order_no, order.delete_at, timezone.now())
+            logger.warning('CLOUD_DELETE_SKIP_OUTSIDE_WINDOW order_id=%s order_no=%s delete_at=%s now=%s', order.id, order.order_no, order.delete_at, timezone.now())
             continue
         result = await _delete_instance(order)
         note = _action_note(result)
@@ -1478,7 +1546,7 @@ async def lifecycle_tick(notify=None, notify_target=None, defer_destructive_seco
 
     for order in migration_due_orders:
         if not _is_cloud_delete_safe_time():
-            logger.warning('CLOUD_MIGRATION_DELETE_SKIP_UNSAFE_TIME order_id=%s order_no=%s migration_due_at=%s now=%s', order.id, order.order_no, order.migration_due_at, timezone.now())
+            logger.warning('CLOUD_MIGRATION_DELETE_SKIP_OUTSIDE_WINDOW order_id=%s order_no=%s migration_due_at=%s now=%s', order.id, order.order_no, order.migration_due_at, timezone.now())
             continue
         result = await _delete_replaced_server(order)
         note = _action_note(result)
@@ -1651,12 +1719,15 @@ IP: {ip}
             await _send_logged_cloud_notice('migration_old_deleted_notice_batch', notify, user_id, text, None, order=orders[0], notice={'ip': f'{len(orders)} 个IP'}, batch_id=_notice_batch_id('migration_old_deleted_notice_batch', *order_ids), is_batch=True, extra={'order_ids': order_ids})
     for asset in orphan_asset_delete_due:
         if not _is_cloud_delete_safe_time():
-            logger.warning('CLOUD_ORPHAN_ASSET_DELETE_SKIP_UNSAFE_TIME asset_id=%s ip=%s actual_expires_at=%s now=%s', asset.id, asset.public_ip, asset.actual_expires_at, timezone.now())
+            logger.warning('CLOUD_ORPHAN_ASSET_DELETE_SKIP_OUTSIDE_WINDOW asset_id=%s ip=%s actual_expires_at=%s now=%s', asset.id, asset.public_ip, asset.actual_expires_at, timezone.now())
             continue
         result = await _delete_orphan_asset_instance(asset)
         note = _action_note(result)
         if _action_ok(result):
             updated = await _mark_orphan_asset_deleted(asset.id, note)
             logger.info('CLOUD_ORPHAN_ASSET_DELETE asset_id=%s ip=%s provider=%s region=%s note=%s', updated.id, updated.previous_public_ip, updated.provider, updated.region_code, note)
+        elif asset.provider != 'aws_lightsail':
+            updated = await _mark_orphan_asset_deleted(asset.id, note)
+            logger.info('CLOUD_ORPHAN_ASSET_LOCAL_DELETE asset_id=%s ip=%s provider=%s region=%s note=%s', updated.id, updated.previous_public_ip, updated.provider, updated.region_code, note)
         else:
             logger.warning('CLOUD_ORPHAN_ASSET_DELETE_FAILED asset_id=%s ip=%s provider=%s region=%s note=%s', asset.id, asset.public_ip, asset.provider, asset.region_code, note)

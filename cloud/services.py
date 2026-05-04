@@ -31,6 +31,71 @@ logger = logging.getLogger(__name__)
 CUSTOM_CACHE_TTL = 600
 
 
+def _order_primary_asset(order: CloudServerOrder | None):
+    if not order:
+        return None
+    queryset = CloudAsset.objects.filter(order=order)
+    public_ip = str(getattr(order, 'public_ip', None) or '').strip()
+    previous_public_ip = str(getattr(order, 'previous_public_ip', None) or '').strip()
+    instance_id = str(getattr(order, 'instance_id', None) or '').strip()
+    provider_resource_id = str(getattr(order, 'provider_resource_id', None) or '').strip()
+    server_name = str(getattr(order, 'server_name', None) or '').strip()
+    match = Q()
+    if public_ip:
+        match |= Q(public_ip=public_ip) | Q(previous_public_ip=public_ip)
+    if previous_public_ip:
+        match |= Q(public_ip=previous_public_ip) | Q(previous_public_ip=previous_public_ip)
+    if instance_id:
+        match |= Q(instance_id=instance_id)
+    if provider_resource_id:
+        match |= Q(provider_resource_id=provider_resource_id)
+    if server_name:
+        match |= Q(asset_name=server_name)
+    if match:
+        item = queryset.filter(match).order_by('-updated_at', '-id').first()
+        if item:
+            return item
+    return queryset.order_by('-updated_at', '-id').first()
+
+
+def _order_primary_server(order: CloudServerOrder | None):
+    if not order:
+        return None
+    queryset = Server.objects.filter(order=order)
+    public_ip = str(getattr(order, 'public_ip', None) or '').strip()
+    previous_public_ip = str(getattr(order, 'previous_public_ip', None) or '').strip()
+    instance_id = str(getattr(order, 'instance_id', None) or '').strip()
+    provider_resource_id = str(getattr(order, 'provider_resource_id', None) or '').strip()
+    server_name = str(getattr(order, 'server_name', None) or '').strip()
+    match = Q()
+    if public_ip:
+        match |= Q(public_ip=public_ip) | Q(previous_public_ip=public_ip)
+    if previous_public_ip:
+        match |= Q(public_ip=previous_public_ip) | Q(previous_public_ip=previous_public_ip)
+    if instance_id:
+        match |= Q(instance_id=instance_id)
+    if provider_resource_id:
+        match |= Q(provider_resource_id=provider_resource_id)
+    if server_name:
+        match |= Q(server_name=server_name)
+    if match:
+        item = queryset.filter(match).order_by('-updated_at', '-id').first()
+        if item:
+            return item
+    return queryset.order_by('-updated_at', '-id').first()
+
+
+def _update_order_primary_records(order: CloudServerOrder | None, *, asset_updates: dict | None = None, server_updates: dict | None = None, now=None):
+    now = now or timezone.now()
+    asset = _order_primary_asset(order)
+    server = _order_primary_server(order)
+    if asset and asset_updates:
+        CloudAsset.objects.filter(id=asset.id).update(**asset_updates, updated_at=now)
+    if server and server_updates:
+        Server.objects.filter(id=server.id).update(**server_updates, updated_at=now)
+    return asset, server
+
+
 def _active_cloud_account_asset_filter():
     active_labels = []
     inactive_labels = []
@@ -913,19 +978,29 @@ def _hydrate_order_from_proxy_asset(order: CloudServerOrder | None, asset: Cloud
     if not order:
         return order
     if asset is None:
-        asset = (
-            CloudAsset.objects.filter(order=order, kind=CloudAsset.KIND_SERVER)
-            .exclude(status__in=_INACTIVE_ASSET_STATUSES)
-            .order_by('-updated_at', '-id')
-            .first()
-        )
+        asset = _order_primary_asset(order)
+        if asset and getattr(asset, 'kind', None) != CloudAsset.KIND_SERVER:
+            asset = None
+        if asset and getattr(asset, 'status', None) in _INACTIVE_ASSET_STATUSES:
+            asset = None
+        if asset is None:
+            asset = (
+                CloudAsset.objects.filter(order=order, kind=CloudAsset.KIND_SERVER)
+                .exclude(status__in=_INACTIVE_ASSET_STATUSES)
+                .order_by('-updated_at', '-id')
+                .first()
+            )
     if server is None:
-        server = (
-            Server.objects.filter(order=order)
-            .exclude(status__in=_INACTIVE_ASSET_STATUSES)
-            .order_by('-updated_at', '-id')
-            .first()
-        )
+        server = _order_primary_server(order)
+        if server and getattr(server, 'status', None) in _INACTIVE_ASSET_STATUSES:
+            server = None
+        if server is None:
+            server = (
+                Server.objects.filter(order=order)
+                .exclude(status__in=_INACTIVE_ASSET_STATUSES)
+                .order_by('-updated_at', '-id')
+                .first()
+            )
     public_ip = _first_nonblank(getattr(asset, 'public_ip', None), getattr(server, 'public_ip', None), order.public_ip)
     previous_ip = _first_nonblank(getattr(asset, 'previous_public_ip', None), getattr(server, 'previous_public_ip', None), order.previous_public_ip)
     if _is_manual_authoritative_provider(getattr(order, 'provider', None)) and order.service_expires_at:
@@ -1415,8 +1490,13 @@ def _set_source_migration_expiry(order: CloudServerOrder, migration_due_at, reas
         provision_note=order.provision_note,
         updated_at=timezone.now(),
     )
-    asset_count = CloudAsset.objects.filter(order=order).update(actual_expires_at=migration_due_at, updated_at=timezone.now())
-    server_count = Server.objects.filter(order=order).update(expires_at=migration_due_at, updated_at=timezone.now())
+    asset, server = _update_order_primary_records(
+        order,
+        asset_updates={'actual_expires_at': migration_due_at},
+        server_updates={'expires_at': migration_due_at},
+    )
+    asset_count = 1 if asset else 0
+    server_count = 1 if server else 0
     after = {
         'service_expires_at': order.service_expires_at,
         'renew_grace_expires_at': order.renew_grace_expires_at,
@@ -2161,8 +2241,7 @@ def apply_cloud_server_renewal(order_id: int, days: int = 31, run_post_checks: b
     if retained_ip:
         asset_update.update({'public_ip': order.public_ip or order.previous_public_ip, 'previous_public_ip': order.public_ip or order.previous_public_ip, 'provider_status': '未附加固定IP-续费保留中', 'is_active': False, 'note': order.provision_note})
         server_update.update({'public_ip': order.public_ip or order.previous_public_ip, 'previous_public_ip': order.public_ip or order.previous_public_ip, 'provider_status': '未附加固定IP-续费保留中', 'is_active': False, 'note': order.provision_note})
-    CloudAsset.objects.filter(order=order).update(**asset_update)
-    Server.objects.filter(order=order).update(**server_update)
+    _update_order_primary_records(order, asset_updates=asset_update, server_updates=server_update)
     record_cloud_ip_log(
         event_type=CloudIpLog.EVENT_RENEWED,
         order=order,
@@ -2702,8 +2781,14 @@ def refund_cloud_server_to_balance(order_id: int, user_id: int):
         order.service_expires_at = refund_expires_at
         order.provision_note = '\n'.join(filter(None, [order.provision_note, f'用户申请退款：退回 {refund} {currency} 至余额，服务将在 3 天后到期，订单状态保持为 {order.status}。']))
         order.save(update_fields=['service_expires_at', 'renew_grace_expires_at', 'suspend_at', 'delete_at', 'ip_recycle_at', 'provision_note', 'updated_at'])
-        asset_count = CloudAsset.objects.filter(order=order).update(actual_expires_at=refund_expires_at, updated_at=now)
-        server_count = Server.objects.filter(order=order).update(expires_at=refund_expires_at, updated_at=now)
+        asset, server = _update_order_primary_records(
+            order,
+            asset_updates={'actual_expires_at': refund_expires_at},
+            server_updates={'expires_at': refund_expires_at},
+            now=now,
+        )
+        asset_count = 1 if asset else 0
+        server_count = 1 if server else 0
         logger.info('云服务器退款完成: order=%s user_id=%s refund=%s currency=%s new_balance=%s refund_expires_at=%s asset_updated=%s server_updated=%s', order.order_no, user_id, refund, currency, getattr(user, balance_field), refund_expires_at, asset_count, server_count)
     return {'amount': refund, 'currency': currency, 'order': order}, None
 

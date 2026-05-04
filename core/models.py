@@ -91,6 +91,7 @@ class CloudAccountConfig(models.Model):
     secret_key = models.TextField('Secret Key')
     region_hint = models.CharField('默认地区', max_length=128, blank=True, null=True)
     is_active = models.BooleanField('启用', default=True)
+    shutdown_enabled = models.BooleanField('关机计划启用', default=True, db_index=True)
     status = models.CharField('巡检状态', max_length=32, choices=STATUS_CHOICES, default=STATUS_UNKNOWN, db_index=True)
     status_note = models.TextField('巡检说明', blank=True, null=True)
     last_checked_at = models.DateTimeField('最近巡检时间', blank=True, null=True)

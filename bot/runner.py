@@ -19,7 +19,7 @@ from bot.telegram_sender import send_with_notification_account
 from cloud.services import refresh_custom_plan_cache
 from cloud.lifecycle import auto_renew_patrol_tick, lifecycle_tick, sync_server_status_tick, sync_cloud_accounts_tick
 from core.cache import refresh_config, close as cache_close
-from core.runtime_config import get_cloud_asset_sync_interval_seconds
+from core.runtime_config import get_cloud_asset_sync_interval_seconds, get_runtime_config
 from cloud.cache import init_monitor_cache
 from orders.runtime import check_resources, scan_forever, set_bot, set_resource_bot
 
@@ -116,7 +116,8 @@ async def run_bot():
     try:
         logger.info('启动时执行云服务器生命周期检查')
         try:
-            await lifecycle_tick(notify=_notify, notify_target=_notify_target, defer_destructive_seconds=3600)
+            defer_seconds = int(str(get_runtime_config('cloud_startup_lifecycle_defer_seconds', '0')).strip() or 0)
+            await lifecycle_tick(notify=_notify, notify_target=_notify_target, defer_destructive_seconds=max(defer_seconds, 0))
             logger.info('启动时云服务器生命周期检查完成')
         except Exception as exc:
             logger.exception('启动时云服务器生命周期检查失败: %s', exc)

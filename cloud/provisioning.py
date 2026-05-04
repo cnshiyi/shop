@@ -6,7 +6,7 @@ from django.utils import timezone
 from django.db.models import Q
 
 from cloud.models import CloudAsset, Server
-from cloud.services import build_cloud_server_name, ensure_unique_cloud_server_name, record_cloud_ip_log
+from cloud.services import _update_order_primary_records, build_cloud_server_name, ensure_unique_cloud_server_name, record_cloud_ip_log
 from core.cloud_accounts import choose_cloud_account_for_order, cloud_account_label, list_cloud_accounts_by_server_load
 from cloud.aliyun_simple import create_instance as create_aliyun_instance
 from cloud.aws_lightsail import create_instance as create_aws_instance, get_instance_public_ip, move_static_ip_to_instance
@@ -249,8 +249,12 @@ def _mark_rebuild_source_pending_deletion(order_id: int, replacement_order_id: i
         source.mtproxy_host = previous_public_ip or source.mtproxy_host
         source.provision_note = '\n'.join(filter(None, [source.provision_note, note, f'固定 IP 保留期恢复完成，新实例订单: {replacement.order_no}，原订单保持追溯记录。']))
         source.save(update_fields=['previous_public_ip', 'public_ip', 'mtproxy_host', 'provision_note', 'updated_at'])
-        CloudAsset.objects.filter(order=source).update(previous_public_ip=previous_public_ip, public_ip=previous_public_ip, note=source.provision_note, updated_at=now)
-        Server.objects.filter(order=source).update(previous_public_ip=previous_public_ip, public_ip=previous_public_ip, note=source.provision_note, updated_at=now)
+        _update_order_primary_records(
+            source,
+            asset_updates={'previous_public_ip': previous_public_ip, 'public_ip': previous_public_ip, 'note': source.provision_note},
+            server_updates={'previous_public_ip': previous_public_ip, 'public_ip': previous_public_ip, 'note': source.provision_note},
+            now=now,
+        )
         record_cloud_ip_log(event_type='renewed', order=source, previous_public_ip=previous_public_ip, public_ip=previous_public_ip, note=f'固定 IP 保留期恢复完成，新实例订单: {replacement.order_no}')
         return source
     before_dates = {
@@ -316,28 +320,28 @@ def _mark_rebuild_source_pending_deletion(order_id: int, replacement_order_id: i
         _fmt_dt(before_dates['migration_due_at']),
         _fmt_dt(after_dates['migration_due_at']),
     )
-    asset = CloudAsset.objects.filter(order=source).order_by('-updated_at', '-id').first()
-    server = Server.objects.filter(order=source).order_by('-updated_at', '-id').first()
-    CloudAsset.objects.filter(order=source).update(
-        status=CloudAsset.STATUS_DELETING,
-        provider_status='旧机保留期，等待删除',
-        public_ip=source_temp_public_ip or None,
-        previous_public_ip=previous_public_ip,
-        mtproxy_host=None,
-        actual_expires_at=migration_due_at,
-        is_active=False,
-        note=source.provision_note,
-        updated_at=now,
-    )
-    Server.objects.filter(order=source).update(
-        status=CloudAsset.STATUS_DELETING,
-        public_ip=source_temp_public_ip or None,
-        previous_public_ip=previous_public_ip,
-        provider_status='旧机保留期，等待删除',
-        expires_at=migration_due_at,
-        is_active=False,
-        note=source.provision_note,
-        updated_at=now,
+    asset, server = _update_order_primary_records(
+        source,
+        asset_updates={
+            'status': CloudAsset.STATUS_DELETING,
+            'provider_status': '旧机保留期，等待删除',
+            'public_ip': source_temp_public_ip or None,
+            'previous_public_ip': previous_public_ip,
+            'mtproxy_host': None,
+            'actual_expires_at': migration_due_at,
+            'is_active': False,
+            'note': source.provision_note,
+        },
+        server_updates={
+            'status': CloudAsset.STATUS_DELETING,
+            'public_ip': source_temp_public_ip or None,
+            'previous_public_ip': previous_public_ip,
+            'provider_status': '旧机保留期，等待删除',
+            'expires_at': migration_due_at,
+            'is_active': False,
+            'note': source.provision_note,
+        },
+        now=now,
     )
     date_note = (
         f'{note} 日期调整: '
@@ -868,8 +872,12 @@ def _mark_failed(order_id: int, note: str):
     order.provision_note = note
     order.save(update_fields=['status', 'provision_note', 'updated_at'])
     server_record = _upsert_server_record(order, note)
-    CloudAsset.objects.filter(order=order).update(note=note, status=CloudAsset.STATUS_UNKNOWN, is_active=False, updated_at=timezone.now())
-    Server.objects.filter(order=order).update(note=note, status=Server.STATUS_UNKNOWN, is_active=False, updated_at=timezone.now())
+    _update_order_primary_records(
+        order,
+        asset_updates={'note': note, 'status': CloudAsset.STATUS_UNKNOWN, 'is_active': False},
+        server_updates={'note': note, 'status': Server.STATUS_UNKNOWN, 'is_active': False},
+        now=timezone.now(),
+    )
     logger.info('[PROVISION] failed_server_record_synced order=%s server_record_id=%s', order.order_no, getattr(server_record, 'id', None))
     logger.info('[PROVISION] mark_failed_done order=%s status=%s', order.order_no, order.status)
     return order

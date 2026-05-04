@@ -45,7 +45,7 @@ from bot.api import (
 )
 from bot.models import TelegramGroupFilter, TelegramUser
 from cloud.lifecycle import _delete_instance, _get_due_orders, _mark_replaced_order_deleted, _notice_payload_for_order, _record_auto_renew_patrol_log, _run_auto_renew
-from cloud.services import AWS_REGION_NAMES, _cloud_order_lifecycle_fields, create_cloud_server_rebuild_order, ensure_cloud_server_pricing, ensure_manual_expiry_operation_order, ensure_manual_owner_operation_order, ensure_manual_price_operation_order, record_cloud_ip_log, refresh_custom_plan_cache, replace_cloud_asset_order_by_admin, set_cloud_server_auto_renew_admin
+from cloud.services import AWS_REGION_NAMES, _cloud_order_lifecycle_fields, _update_order_primary_records, create_cloud_server_rebuild_order, ensure_cloud_server_pricing, ensure_manual_expiry_operation_order, ensure_manual_owner_operation_order, ensure_manual_price_operation_order, record_cloud_ip_log, refresh_custom_plan_cache, replace_cloud_asset_order_by_admin, set_cloud_server_auto_renew_admin
 from cloud.models import AddressMonitor, CloudAsset, CloudAutoRenewPatrolLog, CloudIpLog, CloudServerOrder, CloudServerPlan, Server, ServerPrice
 from core.cloud_accounts import cloud_account_label
 from core.models import CloudAccountConfig, ExternalSyncLog
@@ -1385,6 +1385,8 @@ def _cloud_order_detail_payload(order):
         'suspend_at': _iso(order.suspend_at),
         'delete_at': _iso(order.delete_at),
         'ip_recycle_at': _iso(order.ip_recycle_at),
+        'suspend_time_config': str(get_runtime_config('cloud_suspend_time', '15:00') or '15:00').strip() or '15:00',
+        'delete_time_config': str(get_runtime_config('cloud_delete_time', '15:00') or '15:00').strip() or '15:00',
         'last_renewed_at': _iso(order.last_renewed_at),
         'last_user_id': order.last_user_id,
         'mtproxy_port': order.mtproxy_port,
@@ -1636,28 +1638,32 @@ def _apply_cloud_order_status(order, new_status):
     order.save()
 
     if new_status in active_statuses:
-        CloudAsset.objects.filter(order=order).update(
-            is_active=True,
-            note=order.provision_note,
-            updated_at=now,
-        )
-        Server.objects.filter(order=order).update(
-            is_active=True,
-            status=Server.STATUS_RUNNING if new_status == 'completed' else Server.STATUS_PENDING,
-            note=order.provision_note,
-            updated_at=now,
+        _update_order_primary_records(
+            order,
+            asset_updates={
+                'is_active': True,
+                'note': order.provision_note,
+            },
+            server_updates={
+                'is_active': True,
+                'status': Server.STATUS_RUNNING if new_status == 'completed' else Server.STATUS_PENDING,
+                'note': order.provision_note,
+            },
+            now=now,
         )
     elif new_status in inactive_statuses:
-        CloudAsset.objects.filter(order=order).update(
-            is_active=False,
-            note=order.provision_note,
-            updated_at=now,
-        )
-        Server.objects.filter(order=order).update(
-            is_active=False,
-            status=Server.STATUS_DELETED if new_status == 'deleted' else Server.STATUS_STOPPED,
-            note=order.provision_note,
-            updated_at=now,
+        _update_order_primary_records(
+            order,
+            asset_updates={
+                'is_active': False,
+                'note': order.provision_note,
+            },
+            server_updates={
+                'is_active': False,
+                'status': Server.STATUS_DELETED if new_status == 'deleted' else Server.STATUS_STOPPED,
+                'note': order.provision_note,
+            },
+            now=now,
         )
 
     if trigger_provision:
@@ -1747,10 +1753,8 @@ def cloud_order_detail(request, order_id):
                 if 'service_expires_at' in changed_fields:
                     asset_updates['actual_expires_at'] = order.service_expires_at
                     server_updates['expires_at'] = order.service_expires_at
-                if asset_updates:
-                    CloudAsset.objects.filter(order=order).update(**asset_updates, updated_at=timezone.now())
-                if server_updates:
-                    Server.objects.filter(order=order).update(**server_updates, updated_at=timezone.now())
+                if asset_updates or server_updates:
+                    _update_order_primary_records(order, asset_updates=asset_updates, server_updates=server_updates)
     except ValueError as exc:
         return _error(str(exc), status=400)
     order.refresh_from_db()
@@ -1806,8 +1810,11 @@ def _run_rebuild_job(new_order_id: int):
     if source_order:
         source_order.provision_note = '\n'.join(filter(None, [source_order.provision_note, failure_note]))
         source_order.save(update_fields=['provision_note', 'updated_at'])
-        CloudAsset.objects.filter(order=source_order).update(note=failure_note, updated_at=timezone.now())
-        Server.objects.filter(order=source_order).update(note=failure_note, updated_at=timezone.now())
+        _update_order_primary_records(
+            source_order,
+            asset_updates={'note': failure_note},
+            server_updates={'note': failure_note},
+        )
 
 
 @csrf_exempt

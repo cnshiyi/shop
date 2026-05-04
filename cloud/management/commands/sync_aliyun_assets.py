@@ -8,9 +8,11 @@ from cloud.models import CloudAsset, CloudServerOrder, Server
 from cloud.aliyun_simple import _build_client, _region_endpoint, _runtime_options
 from core.cloud_accounts import cloud_account_label, list_active_cloud_accounts
 from cloud.services import record_cloud_ip_log
+from cloud.sync_safety import mark_missing_confirmation_pending, with_missing_confirmation_note
 
 
 _ACTIVE_ORDER_STATUSES = {'pending', 'provisioning', 'completed', 'expiring', 'renew_pending', 'suspended'}
+_MISSING_PENDING_STATUS = '云上未找到实例-待确认'
 
 
 def _resolve_order_for_ip(public_ip, account=None):
@@ -160,12 +162,25 @@ def _mark_deleted_when_missing_in_aliyun(region, existing_instance_ids, stdout, 
         if instance_id and instance_id in existing_instance_ids:
             continue
         old_public_ip = public_ip or str(asset.previous_public_ip or '').strip()
+        pending_count, threshold = mark_missing_confirmation_pending(
+            asset,
+            old_public_ip=old_public_ip,
+            now_iso=now_iso,
+            provider_status='云上未找到实例',
+            pending_status=_MISSING_PENDING_STATUS,
+        )
+        if pending_count < threshold:
+            asset.save(update_fields=['provider_status', 'note', 'updated_at'])
+            stdout.stdout.write(stdout.style.WARNING(
+                f'IP校验 待确认 资产#{asset.id} IP={old_public_ip or "缺失"} 云上不存在 第{pending_count}/{threshold}次'
+            ))
+            continue
         asset.status = CloudAsset.STATUS_DELETED
         asset.is_active = False
         asset.previous_public_ip = old_public_ip or asset.previous_public_ip
         asset.public_ip = None
         asset.provider_status = '云上未找到实例'
-        asset.note = f'状态: 云上未找到实例；公网IP: {old_public_ip or "缺失"}；最近同步: {now_iso}'
+        asset.note = with_missing_confirmation_note(f'状态: 云上未找到实例；公网IP: {old_public_ip or "缺失"}；最近同步: {now_iso}', pending_count)
         asset.save(update_fields=['status', 'is_active', 'previous_public_ip', 'public_ip', 'provider_status', 'note', 'updated_at'])
         server_queryset = Server.objects.filter(
             Q(instance_id=instance_id) | Q(provider_resource_id=asset.provider_resource_id) | Q(public_ip=public_ip) | Q(previous_public_ip=old_public_ip),
@@ -180,7 +195,7 @@ def _mark_deleted_when_missing_in_aliyun(region, existing_instance_ids, stdout, 
             server.previous_public_ip = old_public_ip or server.previous_public_ip
             server.public_ip = None
             server.provider_status = '云上未找到实例'
-            server.note = f'状态: 云上未找到实例；公网IP: {old_public_ip or "缺失"}；最近同步: {now_iso}'
+            server.note = with_missing_confirmation_note(f'状态: 云上未找到实例；公网IP: {old_public_ip or "缺失"}；最近同步: {now_iso}', pending_count)
             server.save(update_fields=['status', 'is_active', 'previous_public_ip', 'public_ip', 'provider_status', 'note', 'updated_at'])
         order = getattr(asset, 'order', None) or _resolve_order_for_ip(old_public_ip, account)
         if order:

@@ -47,22 +47,37 @@ ROOT_URLCONF = 'shop.urls'
 WSGI_APPLICATION = 'shop.wsgi.application'
 ASGI_APPLICATION = 'shop.asgi.application'
 
-DATABASES = {
-    'default': {
-        'ENGINE': 'django.db.backends.mysql',
-        'NAME': get_runtime_config('mysql_database', os.getenv('MYSQL_DATABASE', 'a')),
-        'USER': get_runtime_config('mysql_user', os.getenv('MYSQL_USER', 'a')),
-        'PASSWORD': get_runtime_config('mysql_password', os.getenv('MYSQL_PASSWORD', '123456')),
-        'HOST': get_runtime_config('mysql_host', os.getenv('MYSQL_HOST', '127.0.0.1')),
-        'PORT': int(get_runtime_config('mysql_port', os.getenv('MYSQL_PORT', '3306'))),
-        'OPTIONS': {
-            'charset': 'utf8mb4',
-        },
-        'TEST': {
-            'NAME': os.getenv('MYSQL_TEST_DATABASE') or None,
-        },
+database_engine = os.getenv('DB_ENGINE', 'mysql').strip().lower()
+
+if database_engine == 'sqlite':
+    sqlite_name = os.getenv('SQLITE_NAME', 'db.sqlite3').strip() or 'db.sqlite3'
+    sqlite_path = sqlite_name if sqlite_name == ':memory:' else str(BASE_DIR / sqlite_name)
+    DATABASES = {
+        'default': {
+            'ENGINE': 'django.db.backends.sqlite3',
+            'NAME': sqlite_path,
+            'TEST': {
+                'NAME': ':memory:' if sqlite_name == ':memory:' else sqlite_path,
+            },
+        }
     }
-}
+else:
+    DATABASES = {
+        'default': {
+            'ENGINE': 'django.db.backends.mysql',
+            'NAME': get_runtime_config('mysql_database', os.getenv('MYSQL_DATABASE', 'a')),
+            'USER': get_runtime_config('mysql_user', os.getenv('MYSQL_USER', 'a')),
+            'PASSWORD': get_runtime_config('mysql_password', os.getenv('MYSQL_PASSWORD', '123456')),
+            'HOST': get_runtime_config('mysql_host', os.getenv('MYSQL_HOST', '127.0.0.1')),
+            'PORT': int(get_runtime_config('mysql_port', os.getenv('MYSQL_PORT', '3306'))),
+            'OPTIONS': {
+                'charset': 'utf8mb4',
+            },
+            'TEST': {
+                'NAME': os.getenv('MYSQL_TEST_DATABASE') or None,
+            },
+        }
+    }
 
 if os.getenv('DJANGO_TEST_SQLITE', '0') == '1':
     DATABASES['default'] = {
