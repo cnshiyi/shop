@@ -731,7 +731,7 @@ def order_query_menu():
     return kb.as_markup()
 
 
-def cloud_ip_query_result(result_items, renewable_items, page: int = 1, total_pages: int = 1, include_start: bool = False):
+def cloud_ip_query_result(result_items, renewable_items, page: int = 1, total_pages: int = 1, include_start: bool = False, include_reinit: bool = False):
     kb = InlineKeyboardBuilder()
     for item in renewable_items:
         ip = item.get('ip') or '未知IP'
@@ -741,6 +741,8 @@ def cloud_ip_query_result(result_items, renewable_items, page: int = 1, total_pa
             if include_start:
                 row.append(InlineKeyboardButton(text='▶️ 开机', callback_data=f'cloud:start:{order_id}'))
             kb.row(*row)
+            if include_reinit and item.get('can_reinit'):
+                kb.row(InlineKeyboardButton(text=f'🛠 重装IP {ip}', callback_data=f'cloud:reinit:{order_id}'))
     nav = []
     if page > 1:
         nav.append(InlineKeyboardButton(text='⬅️ 上一页', callback_data=f'cloud:queryip:page:{page - 1}'))

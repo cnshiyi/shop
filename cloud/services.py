@@ -1270,6 +1270,12 @@ def get_user_cloud_server(order_id: int, user_id: int):
 
 
 @sync_to_async
+def get_cloud_server_for_admin(order_id: int):
+    order = CloudServerOrder.objects.filter(id=order_id).first()
+    return _hydrate_order_from_proxy_asset(order)
+
+
+@sync_to_async
 def get_user_proxy_asset_detail(item_id: int, user_id: int, kind: str):
     if kind == 'server':
         server = Server.objects.filter(id=item_id, user_id=user_id).first()
@@ -2781,8 +2787,11 @@ def create_cloud_server_rebuild_order(order_id: int):
 
 
 @sync_to_async
-def mark_cloud_server_reinit_requested(order_id: int, user_id: int):
-    order = CloudServerOrder.objects.filter(id=order_id, user_id=user_id).first()
+def mark_cloud_server_reinit_requested(order_id: int, user_id: int | None):
+    qs = CloudServerOrder.objects.filter(id=order_id)
+    if user_id is not None:
+        qs = qs.filter(user_id=user_id)
+    order = qs.first()
     if not order:
         return None
     is_unfinished = order.status in {'paid', 'provisioning', 'failed'} and not order.replacement_for_id
@@ -3279,6 +3288,7 @@ __all__ = [
     'get_cloud_server_auto_renew',
     'get_user_reminder_summary',
     'get_cloud_server_by_ip',
+    'get_cloud_server_for_admin',
     'get_user_cloud_server',
     'get_user_proxy_asset_detail',
     'ensure_cloud_asset_operation_order',

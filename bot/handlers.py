@@ -56,6 +56,7 @@ from cloud.services import (
     get_cloud_server_auto_renew,
     get_user_reminder_summary,
     get_cloud_server_by_ip,
+    get_cloud_server_for_admin,
     get_user_cloud_server,
     get_user_proxy_asset_detail,
     ensure_cloud_asset_operation_order,
@@ -454,11 +455,13 @@ async def _reply_cloud_query_results(message: Message, raw_text: str, state: FSM
         balance_block = ''
         if group_balance_lines:
             balance_block = '\n多用户余额:\n' + '\n'.join(escape(line) for line in group_balance_lines)
+        can_admin_reinit = bool(include_start and order.provider == 'aws_lightsail' and display_ip and getattr(order, 'login_password', None) and order.status in {'completed', 'expiring', 'renew_pending', 'suspended', 'failed'})
         results.append({
             'ip': display_ip,
             'text': f'IP: <code>{escape(display_ip)}</code>\n到期时间: {expires_text}\n自动续费: {auto_renew_text}\n状态: {status_text}{balance_block}',
             'renewable': True,
             'order_id': order.id,
+            'can_reinit': can_admin_reinit,
             '_expires_at': expires_at,
             '_input_index': index,
         })
@@ -482,8 +485,8 @@ async def _reply_cloud_query_results(message: Message, raw_text: str, state: FSM
     total_pages = max(1, math.ceil(len(results) / per_page))
     page_items = results[(page - 1) * per_page: page * per_page]
     text = '🔎 IP批量查询结果\n\n' + '\n\n'.join(item['text'] for item in page_items)
-    renewable_items = [{'ip': item['ip'], 'order_id': item['order_id']} for item in page_items if item['renewable'] and item['order_id']]
-    await message.answer(text, reply_markup=cloud_ip_query_result(page_items, renewable_items, page, total_pages, include_start=include_start), parse_mode='HTML')
+    renewable_items = [{'ip': item['ip'], 'order_id': item['order_id'], 'can_reinit': item.get('can_reinit')} for item in page_items if item['renewable'] and item['order_id']]
+    await message.answer(text, reply_markup=cloud_ip_query_result(page_items, renewable_items, page, total_pages, include_start=include_start, include_reinit=include_start), parse_mode='HTML')
 
 
 @sync_to_async
@@ -2456,8 +2459,9 @@ def register_handlers(dp: Dispatcher):
         page = min(page, total_pages)
         page_items = results[(page - 1) * per_page: page * per_page]
         text = '🔎 IP批量查询结果\n\n' + '\n\n'.join(item['text'] for item in page_items)
-        renewable_items = [{'ip': item['ip'], 'order_id': item['order_id']} for item in page_items if item['renewable'] and item['order_id']]
-        await _safe_edit_text(callback.message, text, reply_markup=cloud_ip_query_result(page_items, renewable_items, page, total_pages, include_start=await _is_admin_chat(callback.message)), parse_mode='HTML')
+        renewable_items = [{'ip': item['ip'], 'order_id': item['order_id'], 'can_reinit': item.get('can_reinit')} for item in page_items if item['renewable'] and item['order_id']]
+        is_admin = await _is_admin_chat(callback.message)
+        await _safe_edit_text(callback.message, text, reply_markup=cloud_ip_query_result(page_items, renewable_items, page, total_pages, include_start=is_admin, include_reinit=is_admin), parse_mode='HTML')
 
     async def _render_profile_cloud_orders(callback: CallbackQuery, page: int = 1):
         user = await get_or_create_user(callback.from_user.id, callback.from_user.username, callback.from_user.first_name)
@@ -3788,7 +3792,8 @@ def register_handlers(dp: Dispatcher):
         await _safe_callback_answer(callback)
         user = await get_or_create_user(callback.from_user.id, callback.from_user.username, callback.from_user.first_name)
         order_id = int(callback.data.split(':')[2])
-        order = await get_user_cloud_server(order_id, user.id)
+        is_admin = await _is_admin_chat(callback.message)
+        order = await get_cloud_server_for_admin(order_id) if is_admin else await get_user_cloud_server(order_id, user.id)
         if not order:
             await _safe_callback_answer(callback, '服务器记录不存在', show_alert=True)
             return
@@ -3799,7 +3804,7 @@ def register_handlers(dp: Dispatcher):
             return
         has_main_link = bool(getattr(order, 'mtproxy_link', None) or any(isinstance(item, dict) and item.get('url') and str(item.get('port') or '') == str(order.mtproxy_port or 9528) for item in (getattr(order, 'proxy_links', None) or [])))
         if not is_unfinished and not has_main_link:
-            await state.update_data(reinstall_order_id=order.id)
+            await state.update_data(reinstall_order_id=order.id, reinstall_admin=is_admin)
             await state.set_state(CustomServerStates.waiting_reinstall_link)
             await callback.message.reply(_bot_text('bot_reinstall_need_main_link', '当前服务器缺少主代理链接。请直接发送这台服务器的主代理链接，我会先校验 IP、端口和服务器实际密钥，再让你确认是否重新安装。'))
             return
@@ -3845,8 +3850,12 @@ def register_handlers(dp: Dispatcher):
         data = await state.get_data()
         order_id = int(data.get('reinstall_order_id') or 0)
         asset_id = int(data.get('reinstall_asset_id') or 0)
+        is_admin_reinstall = bool(data.get('reinstall_admin')) and await _is_admin_chat(message)
         user = await get_or_create_user(message.from_user.id, message.from_user.username, message.from_user.first_name)
-        item = await get_user_proxy_asset_detail(asset_id, user.id, 'asset') if asset_id else await get_user_cloud_server(order_id, user.id)
+        if asset_id:
+            item = await get_user_proxy_asset_detail(asset_id, user.id, 'asset')
+        else:
+            item = await get_cloud_server_for_admin(order_id) if is_admin_reinstall else await get_user_cloud_server(order_id, user.id)
         if not item:
             await state.clear()
             await message.reply(_bot_text('bot_reinstall_missing_order', '服务器记录不存在，请重新进入云服务器详情。'))
@@ -3879,7 +3888,8 @@ def register_handlers(dp: Dispatcher):
         await _safe_callback_answer(callback, '已确认，后台处理中')
         await _safe_remove_inline_keyboard(callback.message)
         user = await get_or_create_user(callback.from_user.id, callback.from_user.username, callback.from_user.first_name)
-        order = await mark_cloud_server_reinit_requested(order_id, user.id)
+        is_admin = await _is_admin_chat(callback.message)
+        order = await mark_cloud_server_reinit_requested(order_id, None if is_admin else user.id)
         if not order:
             await callback.message.reply('服务器记录不存在，请重新进入详情并重新生成按钮。')
             return
