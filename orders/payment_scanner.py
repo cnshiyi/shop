@@ -205,7 +205,7 @@ def _expire_timed_out_payment_orders():
     ).update(status='expired')
     cloud_count = CloudServerOrder.objects.filter(
         pay_method='address',
-        status__in=['pending', 'renew_pending'],
+        status='pending',
         expired_at__isnull=False,
         expired_at__lte=now,
     ).update(status='expired')

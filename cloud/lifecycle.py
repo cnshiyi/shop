@@ -9,6 +9,7 @@ from html import escape
 from aiogram.types import InlineKeyboardMarkup
 from asgiref.sync import sync_to_async
 from django.core.management import call_command
+from django.db.models import Q
 from django.utils import timezone
 
 from core.models import CloudAccountConfig
@@ -124,7 +125,8 @@ _NOTICE_ASSET_EXCLUDED_STATUSES = {
 def _notice_asset_queryset():
     return (
         CloudAsset.objects.select_related('order', 'order__user', 'cloud_account', 'order__cloud_account')
-        .filter(kind=CloudAsset.KIND_SERVER, order__isnull=False, actual_expires_at__isnull=False)
+        .filter(kind=CloudAsset.KIND_SERVER, order__isnull=False)
+        .filter(Q(actual_expires_at__isnull=False) | Q(order__service_expires_at__isnull=False))
         .exclude(public_ip__isnull=True)
         .exclude(public_ip='')
         .exclude(status__in=_NOTICE_ASSET_EXCLUDED_STATUSES)
@@ -132,16 +134,27 @@ def _notice_asset_queryset():
     )
 
 
+def _deferred_lifecycle_time(stored_at, computed_at, now=None):
+    now = now or timezone.now()
+    if stored_at and stored_at > now and (not computed_at or computed_at <= now):
+        return stored_at
+    return computed_at or stored_at
+
+
 def _notice_schedule(order: CloudServerOrder, asset: CloudAsset) -> dict:
     order = _hydrate_order_from_proxy_asset(order, asset=asset)
     expires_at = getattr(order, 'service_expires_at', None) or asset.actual_expires_at
     schedule = _cloud_order_lifecycle_fields(expires_at, getattr(order, 'renew_extension_days', 0))
+    now = timezone.now()
+    suspend_at = _deferred_lifecycle_time(getattr(order, 'suspend_at', None), schedule.get('suspend_at'), now)
+    delete_at = _deferred_lifecycle_time(getattr(order, 'delete_at', None), schedule.get('delete_at'), now)
+    ip_recycle_at = _deferred_lifecycle_time(getattr(order, 'ip_recycle_at', None), schedule.get('ip_recycle_at'), now)
     return {
         'ip': getattr(order, 'public_ip', None) or asset.public_ip,
         'expires_at': expires_at,
-        'suspend_at': schedule.get('suspend_at'),
-        'delete_at': schedule.get('delete_at'),
-        'ip_recycle_at': schedule.get('ip_recycle_at'),
+        'suspend_at': suspend_at,
+        'delete_at': delete_at,
+        'ip_recycle_at': ip_recycle_at,
         'auto_renew_enabled': bool(getattr(order, 'auto_renew_enabled', False)),
         'asset_id': asset.id,
     }
@@ -497,7 +510,8 @@ def _group_balance_lines_for_orders(orders: list[CloudServerOrder]) -> list[str]
 def _active_notice_asset_for_order(order) -> CloudAsset | None:
     return (
         CloudAsset.objects.select_related('order', 'order__user')
-        .filter(kind=CloudAsset.KIND_SERVER, order=order, actual_expires_at__isnull=False)
+        .filter(kind=CloudAsset.KIND_SERVER, order=order)
+        .filter(Q(actual_expires_at__isnull=False) | Q(order__service_expires_at__isnull=False))
         .exclude(public_ip__isnull=True)
         .exclude(public_ip='')
         .exclude(status__in=_NOTICE_ASSET_EXCLUDED_STATUSES)

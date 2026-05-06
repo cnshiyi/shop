@@ -3311,7 +3311,7 @@ def delay_cloud_server_expiry(order_id: int, user_id: int, days: int = 5):
         return False, '暂无可用延期次数'
     order.renew_extension_days = max(int(order.renew_extension_days or 0), days)
     order.delay_quota = delay_quota - 1
-    order.save(update_fields=['renew_extension_days', 'delay_quota', 'updated_at'])
+    order.save(update_fields=['renew_extension_days', 'delay_quota', 'renew_grace_expires_at', 'suspend_at', 'delete_at', 'ip_recycle_at', 'updated_at'])
     return order, None
 
 

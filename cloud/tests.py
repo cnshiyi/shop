@@ -24,7 +24,7 @@ from cloud.provisioning import (
     _mark_rebuild_source_pending_deletion,
     _mark_success,
 )
-from cloud.services import create_cloud_server_rebuild_order, create_cloud_server_renewal, create_cloud_server_upgrade_order, ensure_cloud_asset_operation_order, mark_cloud_server_ip_change_requested, replace_cloud_asset_order_by_admin
+from cloud.services import create_cloud_server_rebuild_order, create_cloud_server_renewal, create_cloud_server_upgrade_order, delay_cloud_server_expiry, ensure_cloud_asset_operation_order, mark_cloud_server_ip_change_requested, replace_cloud_asset_order_by_admin
 from cloud.sync_safety import get_missing_confirmation_threshold
 from cloud.api import _cloud_order_source_tags, auto_renew_task_detail, delete_cloud_asset, delete_server, run_auto_renew_order, run_auto_renew_tasks, tasks_overview, update_cloud_asset
 from core.cloud_accounts import cloud_account_label
@@ -242,6 +242,117 @@ class CloudServerServicesTestCase(TestCase):
 
         self.assertFalse(any(item.id == order.id for item in due['suspend']))
         self.assertTrue(any(item.id == order.id for item in due['expire']))
+
+    def test_due_orders_include_order_expiry_when_asset_expiry_missing(self):
+        order = CloudServerOrder.objects.create(
+            order_no='HB-LIFECYCLE-ORDER-EXPIRY-FALLBACK',
+            user=self.user,
+            plan=self.plan,
+            provider=self.plan.provider,
+            region_code=self.plan.region_code,
+            region_name=self.plan.region_name,
+            plan_name=self.plan.plan_name,
+            quantity=1,
+            currency='USDT',
+            total_amount='19.00',
+            pay_amount='19.00',
+            pay_method='balance',
+            status='completed',
+            public_ip='10.0.0.23',
+            service_started_at=timezone.now() - timezone.timedelta(days=40),
+            service_expires_at=timezone.now() - timezone.timedelta(hours=1),
+        )
+        CloudAsset.objects.create(
+            kind=CloudAsset.KIND_SERVER,
+            source=CloudAsset.SOURCE_ORDER,
+            order=order,
+            user=self.user,
+            provider=order.provider,
+            region_code=order.region_code,
+            region_name=order.region_name,
+            asset_name='order-expiry-fallback-asset',
+            public_ip='10.0.0.23',
+            actual_expires_at=None,
+            is_active=True,
+        )
+
+        due = async_to_sync(_get_due_orders)()
+
+        self.assertTrue(any(item.id == order.id for item in due['expire']))
+
+    def test_due_orders_respect_deferred_suspend_at(self):
+        order = CloudServerOrder.objects.create(
+            order_no='HB-LIFECYCLE-DEFERRED-SUSPEND',
+            user=self.user,
+            plan=self.plan,
+            provider=self.plan.provider,
+            region_code=self.plan.region_code,
+            region_name=self.plan.region_name,
+            plan_name=self.plan.plan_name,
+            quantity=1,
+            currency='USDT',
+            total_amount='19.00',
+            pay_amount='19.00',
+            pay_method='balance',
+            status='expiring',
+            public_ip='10.0.0.24',
+            service_started_at=timezone.now() - timezone.timedelta(days=40),
+            service_expires_at=timezone.now() - timezone.timedelta(days=5),
+        )
+        deferred_suspend_at = timezone.now() + timezone.timedelta(hours=6)
+        CloudServerOrder.objects.filter(id=order.id).update(suspend_at=deferred_suspend_at)
+        order.refresh_from_db()
+        CloudAsset.objects.create(
+            kind=CloudAsset.KIND_SERVER,
+            source=CloudAsset.SOURCE_ORDER,
+            order=order,
+            user=self.user,
+            provider=order.provider,
+            region_code=order.region_code,
+            region_name=order.region_name,
+            asset_name='deferred-suspend-asset',
+            public_ip='10.0.0.24',
+            actual_expires_at=order.service_expires_at,
+            is_active=True,
+        )
+
+        due = async_to_sync(_get_due_orders)()
+
+        self.assertFalse(any(item.id == order.id for item in due['suspend']))
+
+    def test_delay_cloud_server_expiry_persists_lifecycle_fields(self):
+        order = CloudServerOrder.objects.create(
+            order_no='HB-LIFECYCLE-DELAY-PERSIST',
+            user=self.user,
+            plan=self.plan,
+            provider=self.plan.provider,
+            region_code=self.plan.region_code,
+            region_name=self.plan.region_name,
+            plan_name=self.plan.plan_name,
+            quantity=1,
+            currency='USDT',
+            total_amount='19.00',
+            pay_amount='19.00',
+            pay_method='balance',
+            status='completed',
+            public_ip='10.0.0.25',
+            service_started_at=timezone.now() - timezone.timedelta(days=30),
+            service_expires_at=timezone.now() + timezone.timedelta(days=1),
+            delay_quota=1,
+        )
+        old_suspend_at = order.suspend_at
+
+        result, err = async_to_sync(delay_cloud_server_expiry)(order.id, self.user.id, days=5)
+
+        self.assertIsNone(err)
+        self.assertIsNotNone(result)
+        order.refresh_from_db()
+        self.assertEqual(order.renew_extension_days, 5)
+        self.assertEqual(order.delay_quota, 0)
+        self.assertGreater(order.suspend_at, old_suspend_at + timezone.timedelta(days=4))
+        self.assertEqual(order.renew_grace_expires_at, order.suspend_at)
+        self.assertGreaterEqual(order.delete_at, order.suspend_at)
+        self.assertGreater(order.ip_recycle_at, order.delete_at)
 
     def test_due_orders_restore_suspend_after_account_shutdown_reenabled(self):
         account = CloudAccountConfig.objects.create(
