@@ -1281,7 +1281,20 @@ def get_cloud_server_by_ip(ip: str):
     if server and server.order_id and server.order and server.order.status not in {'deleted', 'deleting', 'expired', 'cancelled'}:
         return _hydrate_order_from_proxy_asset(server.order, server=server)
     order = CloudServerOrder.objects.filter(ip_q, status__in=_ACTIVE_ORDER_STATUSES).order_by('-created_at').first()
-    return _hydrate_order_from_proxy_asset(order)
+    if order:
+        return _hydrate_order_from_proxy_asset(order)
+    retained_order = (
+        CloudServerOrder.objects.filter(
+            ip_q,
+            provider=CloudServerPlan.PROVIDER_AWS_LIGHTSAIL,
+            status='deleted',
+            ip_recycle_at__gt=timezone.now(),
+        )
+        .filter(Q(instance_id__isnull=True) | Q(instance_id=''))
+        .order_by('-ip_recycle_at', '-updated_at', '-id')
+        .first()
+    )
+    return _hydrate_order_from_proxy_asset(retained_order)
 
 
 def _can_order_be_renewed(order: CloudServerOrder) -> bool:

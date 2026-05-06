@@ -442,11 +442,13 @@ async def _reply_cloud_query_results(message: Message, raw_text: str, state: FSM
         if not order:
             continue
         display_ip = str(order.public_ip or order.previous_public_ip or ip).strip()
+        is_retained_ip = bool(order.status == 'deleted' and getattr(order, 'ip_recycle_at', None) and order.ip_recycle_at > timezone.now() and display_ip and not str(getattr(order, 'instance_id', '') or '').strip())
         is_deleted = order.status in {'deleted', 'deleting', 'expired'} or not display_ip
-        if is_deleted:
+        if is_deleted and not is_retained_ip:
             continue
         expires_at = getattr(order, 'service_expires_at', None)
         expires_text = _format_local_dt(expires_at).split(' ', 1)[0] if expires_at else '今天到期'
+        status_text = '固定 IP 保留中，可续费恢复' if is_retained_ip else '可续费'
         auto_renew_text = '已开启' if getattr(order, 'auto_renew_enabled', False) else '未开启'
         group_balance_lines = await get_cloud_order_group_balance_lines(order.id)
         balance_block = ''
@@ -454,7 +456,7 @@ async def _reply_cloud_query_results(message: Message, raw_text: str, state: FSM
             balance_block = '\n多用户余额:\n' + '\n'.join(escape(line) for line in group_balance_lines)
         results.append({
             'ip': display_ip,
-            'text': f'IP: <code>{escape(display_ip)}</code>\n到期时间: {expires_text}\n自动续费: {auto_renew_text}\n状态: 可续费{balance_block}',
+            'text': f'IP: <code>{escape(display_ip)}</code>\n到期时间: {expires_text}\n自动续费: {auto_renew_text}\n状态: {status_text}{balance_block}',
             'renewable': True,
             'order_id': order.id,
             '_expires_at': expires_at,
