@@ -4,17 +4,29 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 from dataclasses import dataclass
 
+import httpx
 from asgiref.sync import sync_to_async
 from django.utils import timezone
 
 from bot.models import TelegramChatMessage, TelegramLoginAccount
-from bot.services import record_telegram_message, should_forward_telegram_group
+from bot.services import record_telegram_message, telegram_group_delivery_flags
 from core.models import SiteConfig
 from core.runtime_config import get_runtime_config
 
 logger = logging.getLogger(__name__)
+_PUSH_CONFIG_TTL_SECONDS = 30.0
+_PUSH_CONFIG_CACHE = {
+    'loaded_at': 0.0,
+    'value': {
+        'enabled': False,
+        'bark_url': '',
+        'private_enabled': True,
+        'chat_ids': set(),
+    },
+}
 
 
 @dataclass(frozen=True)
@@ -22,6 +34,7 @@ class LoginAccountSnapshot:
     id: int
     label: str
     session_string: str
+    listener_push_enabled: bool
 
 
 @sync_to_async
@@ -36,7 +49,7 @@ def _telegram_api_credentials() -> tuple[int, str]:
 @sync_to_async
 def _logged_in_accounts() -> list[LoginAccountSnapshot]:
     return [
-        LoginAccountSnapshot(item.id, item.label, item.session_string_plain)
+        LoginAccountSnapshot(item.id, item.label, item.session_string_plain, bool(getattr(item, 'listener_push_enabled', True)))
         for item in TelegramLoginAccount.objects.filter(status='logged_in').exclude(session_string__isnull=True).exclude(session_string='')
         if item.session_string_plain
     ]
@@ -82,6 +95,55 @@ def _content_type(message) -> str:
     return 'unknown'
 
 
+def _config_bool(value) -> bool:
+    return str(value or '').strip().lower() in {'1', 'true', 'yes', 'on'}
+
+
+def _build_push_payload(*, is_outgoing: bool, is_private_chat: bool, sender_name: str | None, chat_title: str | None, text: str, content_type: str, private_enabled: bool, group_push_enabled: bool = False) -> tuple[str, str] | None:
+    if is_outgoing:
+        return None
+    if is_private_chat:
+        if not private_enabled:
+            return None
+        return '📨 私聊消息', '收到一条新的私聊消息'
+    if group_push_enabled:
+        return '📢 群/频道消息', '收到一条新的群组或频道消息'
+    return None
+
+
+@sync_to_async
+def _telegram_push_config() -> dict:
+    return {
+        'enabled': _config_bool(get_runtime_config('telegram_listener_push_enabled', '0')),
+        'bark_url': str(get_runtime_config('telegram_listener_push_bark_url', '') or '').strip(),
+        'private_enabled': _config_bool(get_runtime_config('telegram_listener_push_private_enabled', '1')),
+    }
+
+
+async def _cached_telegram_push_config() -> dict:
+    now = time.monotonic()
+    if now - float(_PUSH_CONFIG_CACHE['loaded_at']) <= _PUSH_CONFIG_TTL_SECONDS:
+        return _PUSH_CONFIG_CACHE['value']
+    value = await _telegram_push_config()
+    _PUSH_CONFIG_CACHE['loaded_at'] = now
+    _PUSH_CONFIG_CACHE['value'] = value
+    return value
+
+
+async def _send_listener_push(*, title: str, body: str) -> bool:
+    config = await _cached_telegram_push_config()
+    bark_url = str(config.get('bark_url') or '').strip()
+    if not config.get('enabled') or not bark_url:
+        return False
+    try:
+        async with httpx.AsyncClient(timeout=10) as client:
+            response = await client.get(bark_url, params={'title': title, 'body': body})
+        return response.is_success
+    except Exception as exc:
+        logger.warning('Telegram个人号 Bark 推送失败 err=%s', exc)
+        return False
+
+
 async def _record_event(account: LoginAccountSnapshot, event):
     from telethon.tl.types import User
 
@@ -102,15 +164,19 @@ async def _record_event(account: LoginAccountSnapshot, event):
     if not counterpart or not getattr(counterpart, 'id', None):
         return
     text = getattr(message, 'message', None) or getattr(message, 'raw_text', None) or ''
+    content_type = _content_type(message)
     chat_id = int(event.chat_id or counterpart.id)
     chat_title = _entity_name(chat)
+    group_push_enabled = False
     if is_group_chat:
-        enabled = await should_forward_telegram_group(
+        flags = await telegram_group_delivery_flags(
             chat_id=chat_id,
             title=chat_title,
             username=_entity_username(chat),
         )
-        if not enabled:
+        enabled = bool(flags.get('enabled'))
+        group_push_enabled = bool(flags.get('push_enabled'))
+        if not enabled and not group_push_enabled:
             await _mark_account(account.id, 'logged_in')
             return
     await record_telegram_message(
@@ -118,7 +184,7 @@ async def _record_event(account: LoginAccountSnapshot, event):
         chat_id=chat_id,
         message_id=int(message.id) if getattr(message, 'id', None) else None,
         direction=TelegramChatMessage.DIRECTION_OUT if is_outgoing else TelegramChatMessage.DIRECTION_IN,
-        content_type=_content_type(message),
+        content_type=content_type,
         text=text,
         username=None if is_group_chat else _entity_username(counterpart),
         first_name=_entity_name(counterpart),
@@ -126,6 +192,20 @@ async def _record_event(account: LoginAccountSnapshot, event):
         chat_title=chat_title,
         source='account',
     )
+    push_config = await _cached_telegram_push_config()
+    account_push_enabled = bool(account.listener_push_enabled)
+    payload = _build_push_payload(
+        is_outgoing=is_outgoing,
+        is_private_chat=not is_group_chat,
+        sender_name=_entity_name(sender),
+        chat_title=chat_title,
+        text=text,
+        content_type=content_type,
+        private_enabled=bool(push_config.get('private_enabled')),
+        group_push_enabled=group_push_enabled,
+    )
+    if payload and account_push_enabled:
+        await _send_listener_push(title=payload[0], body=payload[1])
     await _mark_account(account.id, 'logged_in')
 
 

@@ -48,6 +48,7 @@ urlpatterns = [
     path('cloud-assets/', cloud_api.cloud_assets_list, name='cloud-assets-list'),
     path('cloud-assets/<int:asset_id>/', cloud_api.update_cloud_asset, name='cloud-asset-update'),
     path('cloud-assets/<int:asset_id>/auto-renew/', cloud_api.toggle_cloud_asset_auto_renew, name='cloud-asset-auto-renew'),
+    path('cloud-assets/<int:asset_id>/sync/', cloud_api.sync_cloud_asset_status, name='cloud-asset-sync'),
     path('cloud-assets/<int:asset_id>/delete/', cloud_api.delete_cloud_asset, name='cloud-asset-delete'),
     path('cloud-assets/ip-logs/', cloud_api.cloud_ip_logs_list, name='cloud-ip-logs-list'),
     path('cloud-assets/sync-status/', cloud_api.cloud_assets_sync_status, name='cloud-assets-sync-status'),

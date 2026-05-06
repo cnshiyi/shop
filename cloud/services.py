@@ -1111,6 +1111,9 @@ def _hydrate_order_from_proxy_asset(order: CloudServerOrder | None, asset: Cloud
         order.mtproxy_port = getattr(asset, 'mtproxy_port', None) or order.mtproxy_port
         order.login_password = getattr(asset, 'login_password', None) or order.login_password
         order.instance_id = getattr(asset, 'instance_id', None) or order.instance_id
+        if _is_unattached_static_ip_asset(asset) and getattr(asset, 'actual_expires_at', None):
+            order.ip_recycle_at = order.ip_recycle_at or asset.actual_expires_at
+            order.static_ip_name = order.static_ip_name or getattr(asset, 'asset_name', '')
         if not order.cloud_account_id:
             order.cloud_account = getattr(asset, 'cloud_account', None) or get_cloud_account_from_label(getattr(asset, 'account_label', ''), order.provider)
         order.account_label = order.account_label or getattr(asset, 'account_label', None) or cloud_account_label(getattr(order, 'cloud_account', None))
@@ -1403,6 +1406,23 @@ def get_cloud_server_by_ip(ip: str):
         .first()
     )
     return _hydrate_order_from_proxy_asset(retained_order)
+
+
+def _is_unattached_static_ip_asset(asset: CloudAsset | None) -> bool:
+    if not asset:
+        return False
+    provider_status = str(getattr(asset, 'provider_status', '') or '')
+    note = str(getattr(asset, 'note', '') or '')
+    provider_resource_id = str(getattr(asset, 'provider_resource_id', '') or '')
+    return bool(
+        getattr(asset, 'provider', None) == CloudServerPlan.PROVIDER_AWS_LIGHTSAIL
+        and not str(getattr(asset, 'instance_id', '') or '').strip()
+        and (
+            '未附加固定IP' in provider_status
+            or '未附加固定IP' in note
+            or 'StaticIp' in provider_resource_id
+        )
+    )
 
 
 def _can_order_be_renewed(order: CloudServerOrder) -> bool:
@@ -2083,6 +2103,9 @@ def _create_asset_operation_order(asset: CloudAsset, user_id: int) -> CloudServe
         completed_at=now,
         provision_note=f'由绑定代理资产 #{asset.id} 自动生成的操作订单。',
     )
+    if _is_unattached_static_ip_asset(asset) and asset.actual_expires_at:
+        CloudServerOrder.objects.filter(id=order.id).update(ip_recycle_at=asset.actual_expires_at, updated_at=timezone.now())
+        order.ip_recycle_at = asset.actual_expires_at
     asset.order = order
     asset.save(update_fields=['order', 'updated_at'])
     record_cloud_ip_log(
@@ -2134,6 +2157,8 @@ def ensure_cloud_asset_operation_order(asset_id: int, user_id: int, admin: bool 
     order.login_user = order.login_user or asset.login_user
     order.login_password = order.login_password or asset.login_password
     order.service_expires_at = order.service_expires_at or asset.actual_expires_at
+    if _is_unattached_static_ip_asset(asset) and asset.actual_expires_at:
+        order.ip_recycle_at = order.ip_recycle_at or asset.actual_expires_at
     if order.provider == CloudServerPlan.PROVIDER_AWS_LIGHTSAIL and not order.static_ip_name and asset.asset_name:
         order.static_ip_name = asset.asset_name
     account = asset.cloud_account or get_cloud_account_from_label(asset.account_label, order.provider)
@@ -2143,8 +2168,11 @@ def ensure_cloud_asset_operation_order(asset_id: int, user_id: int, admin: bool 
         'user', 'status', 'provider', 'region_code', 'region_name', 'public_ip', 'previous_public_ip',
         'instance_id', 'provider_resource_id', 'mtproxy_port', 'mtproxy_link', 'proxy_links',
         'mtproxy_secret', 'mtproxy_host', 'login_user', 'login_password', 'service_expires_at',
-        'static_ip_name', 'cloud_account', 'account_label', 'updated_at',
+        'ip_recycle_at', 'static_ip_name', 'cloud_account', 'account_label', 'updated_at',
     ])
+    if _is_unattached_static_ip_asset(asset) and asset.actual_expires_at and order.ip_recycle_at != asset.actual_expires_at:
+        CloudServerOrder.objects.filter(id=order.id).update(ip_recycle_at=asset.actual_expires_at, updated_at=timezone.now())
+        order.ip_recycle_at = asset.actual_expires_at
     return order, None
 
 

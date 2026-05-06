@@ -230,6 +230,19 @@ def should_forward_telegram_group(
 
 
 @sync_to_async
+def telegram_group_delivery_flags(
+    chat_id: int,
+    title: str | None,
+    username: str | None = None,
+):
+    item = _upsert_telegram_group_filter_sync(chat_id, title, username)
+    return {
+        'enabled': bool(item.enabled),
+        'push_enabled': bool(getattr(item, 'push_enabled', False)),
+    }
+
+
+@sync_to_async
 def record_telegram_message(
     tg_user_id: int,
     chat_id: int,

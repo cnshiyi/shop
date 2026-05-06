@@ -459,9 +459,9 @@ def update_cloud_asset(request, asset_id):
                         group_query |= Q(id=numeric_group_id) | Q(chat_id=numeric_group_id)
                     except (TypeError, ValueError):
                         pass
-                    group = TelegramGroupFilter.objects.filter(group_query).order_by('-updated_at', '-id').first()
+                    group = TelegramGroupFilter.objects.filter(group_query, collapsed=False).order_by('-updated_at', '-id').first()
                     if not group:
-                        return _error('未找到匹配的 Telegram 群组', status=404)
+                        return _error('未找到匹配的 Telegram 群组，或该群组已在绑定页隐藏', status=404)
                     asset.telegram_group = group
 
             if 'price' in payload:
@@ -2392,6 +2392,100 @@ def sync_servers(request):
     return _ok(response_payload)
 
 
+def _sync_provider_for_asset(asset) -> str:
+    provider = str(getattr(asset, 'provider', '') or '').strip().lower()
+    if provider == 'aws_lightsail':
+        return CloudAccountConfig.PROVIDER_AWS
+    if provider == 'aliyun_simple':
+        return CloudAccountConfig.PROVIDER_ALIYUN
+    return ''
+
+
+def _resolve_sync_account_for_asset(asset):
+    provider = _sync_provider_for_asset(asset)
+    if not provider:
+        return None
+    account = getattr(asset, 'cloud_account', None)
+    if account and account.provider == provider and account.is_active:
+        return account
+    account_label = str(
+        getattr(asset, 'account_label', '')
+        or cloud_account_label(account)
+        or getattr(getattr(asset, 'order', None), 'account_label', '')
+        or ''
+    ).strip()
+    queryset = CloudAccountConfig.objects.filter(provider=provider, is_active=True).order_by('id')
+    if getattr(asset, 'cloud_account_id', None):
+        matched = queryset.filter(id=asset.cloud_account_id).first()
+        if matched:
+            return matched
+    if account_label:
+        for candidate in queryset:
+            if cloud_account_label(candidate) == account_label:
+                return candidate
+    return None
+
+
+@csrf_exempt
+@dashboard_login_required
+@require_POST
+def sync_cloud_asset_status(request, asset_id):
+    asset = CloudAsset.objects.select_related('order', 'user', 'cloud_account', 'telegram_group').filter(pk=asset_id).first()
+    if not asset:
+        return _error('云资产不存在', status=404)
+    provider = _sync_provider_for_asset(asset)
+    if not provider:
+        return _error('当前资产暂不支持单条状态更新', status=400)
+    account = _resolve_sync_account_for_asset(asset)
+    if not account:
+        return _error('未找到可用的云账号配置，请先检查该代理绑定的云账号是否启用', status=400)
+
+    region_code = str(getattr(asset, 'region_code', '') or getattr(account, 'region_hint', '') or '').strip()
+    command_output = io.StringIO()
+    errors = []
+    command_name = 'sync_aws_assets' if provider == CloudAccountConfig.PROVIDER_AWS else 'sync_aliyun_assets'
+    request_payload = {
+        'asset_id': asset.id,
+        'provider': provider,
+        'region_code': region_code or 'all',
+        'account_id': account.id,
+    }
+    try:
+        command_kwargs = {'account_id': str(account.id), 'stdout': command_output}
+        if region_code:
+            command_kwargs['region'] = region_code
+        _call_command_capture(command_name, **command_kwargs)
+    except Exception as exc:
+        errors.append(str(exc))
+        logger.exception(
+            'DASHBOARD_SYNC_SINGLE_ASSET_FAILED asset_id=%s provider=%s region=%s account_id=%s',
+            asset.id,
+            provider,
+            region_code or 'all',
+            getattr(account, 'id', None),
+        )
+
+    refreshed = CloudAsset.objects.select_related('order', 'user', 'cloud_account', 'telegram_group').filter(pk=asset_id).first()
+    response_payload = {
+        'ok': not errors,
+        'asset': _asset_payload(refreshed) if refreshed else None,
+        'provider': provider,
+        'region_code': region_code or 'all',
+        'account': _sync_account_payload(account),
+        'errors': errors,
+        'logs': _sync_log_tail(command_output),
+    }
+    _record_dashboard_sync_log(
+        action='sync_cloud_asset_status',
+        target=f'asset:{asset.id}',
+        request_payload=request_payload,
+        response_payload={**response_payload, 'log_text': _sync_log_text(command_output)},
+        is_success=not errors,
+        error_message='; '.join(errors[:10]),
+    )
+    return _ok(response_payload)
+
+
 @csrf_exempt
 @dashboard_login_required
 @require_POST
@@ -2755,6 +2849,7 @@ def monitors_list(request):
 __all__ = [
     'cloud_assets_list',
     'cloud_assets_sync_status',
+    'sync_cloud_asset_status',
     'cloud_ip_logs_list',
     'cloud_order_detail',
     'cloud_orders_list',

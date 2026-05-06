@@ -11,10 +11,10 @@ from django.utils import timezone
 from django.utils.dateparse import parse_datetime
 
 from bot.api import _shutdown_log_items, _unattached_ip_delete_items
-from bot.models import TelegramUser
+from bot.models import TelegramGroupFilter, TelegramUser
 from cloud.bootstrap import _build_mtproxy_script, _extract_tg_links
 from cloud.models import CloudAsset, CloudAutoRenewPatrolLog, CloudIpLog, CloudServerOrder, CloudServerPlan, CloudUserNoticeLog, Server
-from cloud.lifecycle import _apply_notice_schedule_to_order, _get_due_orders, _get_migration_due_orders, _get_orphan_asset_delete_due, _is_cloud_delete_safe_time, _is_cloud_suspend_time, _mark_suspended, _next_cloud_action_run_at, _notice_plan_text, _send_logged_cloud_notice
+from cloud.lifecycle import _apply_notice_schedule_to_order, _get_due_orders, _get_migration_due_orders, _get_orphan_asset_delete_due, _is_cloud_delete_safe_time, _is_cloud_suspend_time, _mark_suspended, _next_cloud_action_run_at, _notice_plan_text, _send_logged_cloud_notice, lifecycle_tick
 from cloud.ports import get_mtproxy_port_label, get_mtproxy_public_ports, is_valid_mtproxy_main_port
 from cloud.provisioning import (
     _candidate_cloud_account_ids,
@@ -25,9 +25,9 @@ from cloud.provisioning import (
     _mark_rebuild_source_pending_deletion,
     _mark_success,
 )
-from cloud.services import apply_cloud_server_renewal, create_cloud_server_rebuild_order, create_cloud_server_renewal, create_cloud_server_upgrade_order, delay_cloud_server_expiry, ensure_cloud_asset_operation_order, mark_cloud_server_ip_change_requested, replace_cloud_asset_order_by_admin
+from cloud.services import apply_cloud_server_renewal, create_cloud_server_rebuild_order, create_cloud_server_renewal, create_cloud_server_upgrade_order, delay_cloud_server_expiry, ensure_cloud_asset_operation_order, list_retained_ip_renewal_plans, mark_cloud_server_ip_change_requested, replace_cloud_asset_order_by_admin
 from cloud.sync_safety import get_missing_confirmation_threshold
-from cloud.api import _cloud_order_source_tags, auto_renew_task_detail, cloud_order_detail, cloud_orders_list, delete_cloud_asset, delete_server, run_auto_renew_order, run_auto_renew_tasks, tasks_overview, update_cloud_asset
+from cloud.api import _cloud_order_source_tags, auto_renew_task_detail, cloud_order_detail, cloud_orders_list, delete_cloud_asset, delete_server, run_auto_renew_order, run_auto_renew_tasks, sync_cloud_asset_status, tasks_overview, update_cloud_asset
 from core.cloud_accounts import cloud_account_label
 from core.models import CloudAccountConfig
 from orders.payment_scanner import _confirm_cloud_server_order
@@ -35,6 +35,7 @@ from orders.payment_scanner import _confirm_cloud_server_order
 
 class CloudServerServicesTestCase(TestCase):
     def setUp(self):
+        self.factory = RequestFactory()
         self.user = TelegramUser.objects.create(tg_user_id=990001, username='svc_test')
         self.plan = CloudServerPlan.objects.create(
             provider='aws_lightsail',
@@ -50,6 +51,56 @@ class CloudServerServicesTestCase(TestCase):
             is_active=True,
             sort_order=100,
         )
+
+    def test_update_cloud_asset_rejects_collapsed_telegram_group_binding(self):
+        admin = get_user_model().objects.create_user(username='admin_bind_group', password='x', is_staff=True)
+        asset = CloudAsset.objects.create(
+            kind=CloudAsset.KIND_SERVER,
+            source=CloudAsset.SOURCE_AWS_SYNC,
+            user=self.user,
+            provider='aws_lightsail',
+            region_code=self.plan.region_code,
+            region_name=self.plan.region_name,
+            asset_name='bind-group-asset',
+            public_ip='11.11.11.11',
+            status=CloudAsset.STATUS_UNKNOWN,
+            provider_status='未附加固定IP',
+        )
+        visible_group = TelegramGroupFilter.objects.create(
+            chat_id=-1001001,
+            title='Visible Group',
+            username='visible_group',
+            enabled=False,
+            collapsed=False,
+        )
+        hidden_group = TelegramGroupFilter.objects.create(
+            chat_id=-1001002,
+            title='Hidden Group',
+            username='hidden_group',
+            enabled=False,
+            collapsed=True,
+        )
+
+        request = self.factory.post(
+            '/api/dashboard/cloud-assets/%s/' % asset.id,
+            data=json.dumps({'telegram_group_query': hidden_group.chat_id}),
+            content_type='application/json',
+        )
+        request.user = admin
+        response = update_cloud_asset(request, asset.id)
+        self.assertEqual(response.status_code, 404)
+        self.assertIn('绑定页隐藏', json.loads(response.content.decode('utf-8'))['message'])
+
+        request2 = self.factory.post(
+            '/api/dashboard/cloud-assets/%s/' % asset.id,
+            data=json.dumps({'telegram_group_query': visible_group.chat_id}),
+            content_type='application/json',
+        )
+        request2.user = admin
+        response2 = update_cloud_asset(request2, asset.id)
+        self.assertEqual(response2.status_code, 200)
+        asset.refresh_from_db()
+        self.assertEqual(asset.telegram_group_id, visible_group.id)
 
     def test_create_cloud_server_renewal_rejects_deleted_or_ipless_order(self):
         order = CloudServerOrder.objects.create(
@@ -1232,6 +1283,41 @@ class CloudServerServicesTestCase(TestCase):
         self.assertEqual(order.cloud_account_id, account.id)
         self.assertEqual(order.account_label, asset.account_label)
 
+    def test_unattached_asset_operation_order_enters_retained_renewal_flow(self):
+        due_at = timezone.now() + timezone.timedelta(days=9)
+        asset = CloudAsset.objects.create(
+            kind=CloudAsset.KIND_SERVER,
+            source=CloudAsset.SOURCE_AWS_SYNC,
+            user=self.user,
+            provider='aws_lightsail',
+            region_code=self.plan.region_code,
+            region_name=self.plan.region_name,
+            asset_name='StaticIp-retained-flow',
+            provider_resource_id='arn:aws:lightsail:ap-southeast-1:123456789012:StaticIp/StaticIp-retained-flow',
+            public_ip='31.31.31.31',
+            previous_public_ip='31.31.31.31',
+            actual_expires_at=due_at,
+            status=CloudAsset.STATUS_UNKNOWN,
+            provider_status='未附加固定IP',
+            note='未附加固定IP',
+            mtproxy_port=9528,
+            mtproxy_link='tg://proxy?server=31.31.31.31&port=9528&secret=dddddddddddddddd',
+            mtproxy_secret='dddddddddddddddd',
+            mtproxy_host='31.31.31.31',
+            is_active=False,
+        )
+
+        order, error = async_to_sync(ensure_cloud_asset_operation_order)(asset.id, self.user.id)
+
+        self.assertIsNone(error)
+        self.assertIsNotNone(order)
+        self.assertEqual(order.ip_recycle_at, due_at)
+        retained_order, plans, retained_err = async_to_sync(list_retained_ip_renewal_plans)(order.id, self.user.id)
+        self.assertIsNone(retained_err)
+        self.assertIsNotNone(retained_order)
+        self.assertTrue(plans)
+        self.assertEqual(retained_order.id, order.id)
+
     def test_mark_cloud_server_ip_change_requested_falls_back_when_plan_missing(self):
         original_expires_at = timezone.now() + timezone.timedelta(days=31)
         source_order = CloudServerOrder.objects.create(
@@ -1745,6 +1831,46 @@ class CloudServerServicesTestCase(TestCase):
 
         self.assertIn(visible_asset.id, asset_ids)
         self.assertNotIn(hidden_asset.id, asset_ids)
+
+    def test_sync_cloud_asset_status_uses_asset_scope(self):
+        account = CloudAccountConfig.objects.create(
+            provider=CloudAccountConfig.PROVIDER_AWS,
+            name='single-asset-sync',
+            external_account_id='acct-single-asset-sync',
+            access_key='ak',
+            secret_key='sk',
+            region_hint='ap-southeast-1',
+            is_active=True,
+        )
+        asset = CloudAsset.objects.create(
+            kind=CloudAsset.KIND_SERVER,
+            source=CloudAsset.SOURCE_AWS_SYNC,
+            user=self.user,
+            provider='aws_lightsail',
+            account_label=cloud_account_label(account),
+            region_code='ap-southeast-1',
+            region_name='新加坡',
+            asset_name='single-asset-sync',
+            public_ip='3.3.3.3',
+            instance_id='i-single-asset-sync',
+            provider_resource_id='res-single-asset-sync',
+            status=CloudAsset.STATUS_RUNNING,
+            provider_status='运行中',
+        )
+        staff_user = get_user_model().objects.create_user(username='staff_asset_sync_one', password='x', is_staff=True)
+        with patch('cloud.api._call_command_capture', return_value=(object(), None)) as mocked:
+            request = RequestFactory().post(f'/api/dashboard/cloud-assets/{asset.id}/sync/', data='{}', content_type='application/json')
+            request.user = staff_user
+            response = sync_cloud_asset_status(request, asset.id)
+
+        self.assertEqual(response.status_code, 200)
+        payload = json.loads(response.content)
+        self.assertTrue(payload['data']['ok'])
+        self.assertEqual(payload['data']['asset']['id'], asset.id)
+        mocked.assert_called_once()
+        self.assertEqual(mocked.call_args.args[0], 'sync_aws_assets')
+        self.assertEqual(mocked.call_args.kwargs['account_id'], str(account.id))
+        self.assertEqual(mocked.call_args.kwargs['region'], 'ap-southeast-1')
 
     def test_delete_cloud_asset_only_removes_asset_record(self):
         order = CloudServerOrder.objects.create(
@@ -2833,3 +2959,120 @@ class CloudServerServicesTestCase(TestCase):
         self.assertEqual(server.provider_status, '已重新绑定实例-待人工添加时间')
         self.assertTrue(server.is_active)
         self.assertEqual(server.status, Server.STATUS_RUNNING)
+
+
+    def test_lifecycle_tick_releases_retained_static_ip_after_recycle_due(self):
+        recycle_due_at = timezone.now() - timezone.timedelta(days=2)
+        order = CloudServerOrder.objects.create(
+            order_no='HB-TEST-RECYCLE-DUE',
+            user=self.user,
+            plan=self.plan,
+            provider=self.plan.provider,
+            region_code=self.plan.region_code,
+            region_name=self.plan.region_name,
+            plan_name=self.plan.plan_name,
+            quantity=1,
+            currency='USDT',
+            total_amount='19.00',
+            pay_amount='19.00',
+            status='deleted',
+            public_ip='20.20.20.20',
+            previous_public_ip='20.20.20.20',
+            static_ip_name='StaticIp-retained-due',
+            service_expires_at=timezone.now() - timezone.timedelta(days=20),
+            delete_at=timezone.now() - timezone.timedelta(days=17),
+            ip_recycle_at=recycle_due_at,
+            instance_id='',
+        )
+        asset = CloudAsset.objects.create(
+            kind=CloudAsset.KIND_SERVER,
+            order=order,
+            user=self.user,
+            provider='aws_lightsail',
+            region_code=self.plan.region_code,
+            region_name=self.plan.region_name,
+            asset_name='StaticIp-retained-due',
+            public_ip='20.20.20.20',
+            previous_public_ip='20.20.20.20',
+            actual_expires_at=recycle_due_at,
+            status=CloudAsset.STATUS_RUNNING,
+            provider_status='固定IP保留中-实例已删除',
+            note='固定IP保留中',
+            is_active=False,
+        )
+
+        released = []
+
+        class FakeLightsailClient:
+            def release_static_ip(self, staticIpName):
+                released.append(staticIpName)
+                return {'operations': [{'id': 'op-retained-release'}]}
+
+        with patch('cloud.lifecycle._aws_client', return_value=FakeLightsailClient()):
+            async_to_sync(lifecycle_tick)()
+
+        order.refresh_from_db()
+        asset.refresh_from_db()
+        self.assertEqual(released, ['StaticIp-retained-due'])
+        self.assertIsNone(order.ip_recycle_at)
+        self.assertEqual(order.public_ip, '')
+        self.assertEqual(order.previous_public_ip, '20.20.20.20')
+        self.assertEqual(order.static_ip_name, '')
+        self.assertIsNone(asset.public_ip)
+        self.assertEqual(asset.previous_public_ip, '20.20.20.20')
+        self.assertIn('AWS 固定 IP 已真实释放', order.provision_note or '')
+
+    def test_lifecycle_tick_releases_overdue_unattached_static_ip(self):
+        due_at = timezone.now() - timezone.timedelta(days=4)
+        asset = CloudAsset.objects.create(
+            kind=CloudAsset.KIND_SERVER,
+            source=CloudAsset.SOURCE_AWS_SYNC,
+            user=self.user,
+            provider='aws_lightsail',
+            region_code=self.plan.region_code,
+            region_name=self.plan.region_name,
+            asset_name='StaticIp-unattached-due',
+            provider_resource_id='arn:aws:lightsail:ap-southeast-1:123456789012:StaticIp/StaticIp-unattached-due',
+            public_ip='21.21.21.21',
+            actual_expires_at=due_at,
+            status=CloudAsset.STATUS_UNKNOWN,
+            provider_status='未附加固定IP',
+            note='未附加固定IP',
+            is_active=False,
+        )
+        server = Server.objects.create(
+            source=Server.SOURCE_AWS_SYNC,
+            user=self.user,
+            provider='aws_lightsail',
+            region_code=self.plan.region_code,
+            region_name=self.plan.region_name,
+            server_name='unattached-static-ip-shadow',
+            public_ip='21.21.21.21',
+            expires_at=due_at,
+            status=Server.STATUS_UNKNOWN,
+            provider_status='未附加固定IP',
+            note='未附加固定IP',
+            is_active=False,
+        )
+
+        released = []
+
+        class FakeLightsailClient:
+            def release_static_ip(self, staticIpName):
+                released.append(staticIpName)
+                return {'operations': [{'id': 'op-unattached-release'}]}
+
+        with patch('cloud.lifecycle._aws_client', return_value=FakeLightsailClient()), patch('cloud.lifecycle._is_cloud_delete_safe_time', return_value=True):
+            async_to_sync(lifecycle_tick)()
+
+        asset.refresh_from_db()
+        server.refresh_from_db()
+        self.assertEqual(released, ['StaticIp-unattached-due'])
+        self.assertEqual(asset.status, CloudAsset.STATUS_DELETED)
+        self.assertEqual(asset.provider_status, '未附加固定IP-已到期删除')
+        self.assertIsNone(asset.public_ip)
+        self.assertEqual(asset.previous_public_ip, '21.21.21.21')
+        self.assertEqual(server.status, Server.STATUS_DELETED)
+        self.assertEqual(server.provider_status, '未附加固定IP-已到期删除')
+        self.assertIsNone(server.public_ip)
+        self.assertEqual(server.previous_public_ip, '21.21.21.21')

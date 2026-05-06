@@ -635,6 +635,7 @@ def _telegram_login_account_payload(item):
         'status': item.status,
         'note': item.note or '',
         'notify_enabled': bool(getattr(item, 'notify_enabled', True)),
+        'listener_push_enabled': bool(getattr(item, 'listener_push_enabled', True)),
         'has_session': bool(getattr(item, 'session_string', None)),
         'last_synced_at': _iso(item.last_synced_at),
         'created_at': _iso(item.created_at),
@@ -709,6 +710,7 @@ def _telegram_group_filter_payload(item):
         'title': item.title or '',
         'username': item.username or '',
         'enabled': bool(item.enabled),
+        'push_enabled': bool(getattr(item, 'push_enabled', False)),
         'collapsed': bool(item.collapsed),
         'updated_at': _iso(item.updated_at),
         'created_at': _iso(item.created_at),
@@ -1268,13 +1270,29 @@ def site_config_groups(request):
     groups = {
         'database': ['mysql_host', 'mysql_port', 'mysql_database', 'mysql_user', 'mysql_password', 'redis_host', 'redis_port', 'redis_password', 'redis_db'],
         'system': [
-            'receive_address',
             'bot_token',
             'telegram_api_id',
             'telegram_api_hash',
+            'dashboard_totp_secret',
+        ],
+        'payment': [
+            'receive_address',
             'trongrid_api_key',
+        ],
+        'logs': [
             'scanner_block_log_enabled',
             'scanner_verbose',
+        ],
+        'notifications': [
+            'telegram_listener_push_enabled',
+            'telegram_listener_push_bark_url',
+            'telegram_listener_push_private_enabled',
+            'bot_admin_chat_id',
+            'cloud_auto_renew_execution_notify_enabled',
+            'cloud_auto_renew_execution_notify_chat_ids',
+            'cloud_auto_renew_execution_notify_events',
+        ],
+        'lifecycle': [
             'cloud_suspend_after_days',
             'cloud_suspend_time',
             'cloud_delete_after_days',
@@ -1283,11 +1301,6 @@ def site_config_groups(request):
             'cloud_unattached_ip_delete_time',
             'cloud_asset_sync_interval_seconds',
             'cloud_sync_missing_delete_confirmations',
-            'cloud_auto_renew_execution_notify_enabled',
-            'cloud_auto_renew_execution_notify_chat_ids',
-            'cloud_auto_renew_execution_notify_events',
-            'bot_admin_chat_id',
-            'dashboard_totp_secret',
         ],
         **TEXT_GROUPS,
     }
@@ -2151,8 +2164,11 @@ def update_telegram_account_notify(request, account_id: int):
     item = TelegramLoginAccount.objects.filter(id=account_id).first()
     if not item:
         return _error('账号不存在', status=404)
-    item.notify_enabled = _payload_bool(payload, 'notify_enabled')
-    item.save(update_fields=['notify_enabled', 'updated_at'])
+    if 'notify_enabled' in payload:
+        item.notify_enabled = _payload_bool(payload, 'notify_enabled')
+    if 'listener_push_enabled' in payload:
+        item.listener_push_enabled = _payload_bool(payload, 'listener_push_enabled')
+    item.save(update_fields=['notify_enabled', 'listener_push_enabled', 'updated_at'])
     return _ok(_telegram_login_account_payload(item))
 
 
@@ -2245,7 +2261,10 @@ def telegram_login_password(request):
 @require_GET
 def telegram_group_filters_list(request):
     keyword = _get_keyword(request).lstrip('@')
+    binding_only = str(request.GET.get('binding_only') or '').lower() in {'1', 'true', 'yes', 'on'}
     queryset = TelegramGroupFilter.objects.order_by('-updated_at', '-id')
+    if binding_only:
+        queryset = queryset.filter(collapsed=False)
     if keyword:
         query = Q(title__icontains=keyword) | Q(username__icontains=keyword)
         try:
@@ -2270,6 +2289,7 @@ def create_telegram_group_filter(request):
         title=title,
         username=username,
         enabled=_payload_bool(payload, 'enabled'),
+        push_enabled=_payload_bool(payload, 'push_enabled'),
         collapsed=_payload_bool(payload, 'collapsed'),
     )
     return _ok(_telegram_group_filter_payload(item))
@@ -2298,6 +2318,11 @@ def update_telegram_group_filter(request, group_id: int):
         if item.enabled != enabled:
             item.enabled = enabled
             changed.append('enabled')
+    if 'push_enabled' in payload:
+        push_enabled = _payload_bool(payload, 'push_enabled')
+        if getattr(item, 'push_enabled', False) != push_enabled:
+            item.push_enabled = push_enabled
+            changed.append('push_enabled')
     if 'collapsed' in payload:
         collapsed = _payload_bool(payload, 'collapsed')
         if item.collapsed != collapsed:

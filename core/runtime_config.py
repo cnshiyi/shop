@@ -32,6 +32,9 @@ CONFIG_HELP = {
     'cloud_auto_renew_execution_notify_enabled': '自动续费执行结果通知开关（1=开启，0=关闭）',
     'cloud_auto_renew_execution_notify_chat_ids': '自动续费执行结果通知目标 Chat ID（支持私聊/群/频道；多个用逗号、分号或换行分隔，频道也可填 @channelusername）',
     'cloud_auto_renew_execution_notify_events': '自动续费执行结果通知类型：all=成功和失败，success=仅成功，failure=仅失败',
+    'telegram_listener_push_enabled': 'Telegram 个人号监听 Bark 推送开关（1=开启，0=关闭）',
+    'telegram_listener_push_bark_url': 'Telegram 个人号监听 Bark 推送地址',
+    'telegram_listener_push_private_enabled': 'Telegram 个人号监听私聊推送开关（1=开启，0=关闭）',
 }
 
 CLOUD_ASSET_SYNC_INTERVAL_DEFAULT_SECONDS = 5 * 60 * 60
@@ -54,6 +57,9 @@ CONFIG_DEFAULTS = {
     'cloud_auto_renew_execution_notify_enabled': '0',
     'cloud_auto_renew_execution_notify_chat_ids': '',
     'cloud_auto_renew_execution_notify_events': 'all',
+    'telegram_listener_push_enabled': '0',
+    'telegram_listener_push_bark_url': '',
+    'telegram_listener_push_private_enabled': '1',
 }
 
 
@@ -64,6 +70,7 @@ SENSITIVE_CONFIG_KEYS = {
     'dashboard_totp_secret',
     'mysql_password',
     'redis_password',
+    'telegram_listener_push_bark_url',
 }
 
 
@@ -106,6 +113,9 @@ CONFIG_ENV_MAP = {
     'cloud_auto_renew_execution_notify_enabled': 'CLOUD_AUTO_RENEW_EXECUTION_NOTIFY_ENABLED',
     'cloud_auto_renew_execution_notify_chat_ids': 'CLOUD_AUTO_RENEW_EXECUTION_NOTIFY_CHAT_IDS',
     'cloud_auto_renew_execution_notify_events': 'CLOUD_AUTO_RENEW_EXECUTION_NOTIFY_EVENTS',
+    'telegram_listener_push_enabled': 'TELEGRAM_LISTENER_PUSH_ENABLED',
+    'telegram_listener_push_bark_url': 'TELEGRAM_LISTENER_PUSH_BARK_URL',
+    'telegram_listener_push_private_enabled': 'TELEGRAM_LISTENER_PUSH_PRIVATE_ENABLED',
 }
 
 

@@ -19,7 +19,7 @@ from core.texts import site_text
 from orders.models import BalanceLedger
 from bot.models import TelegramUser
 from cloud.models import CloudAsset, CloudAutoRenewPatrolLog, CloudServerOrder, CloudUserNoticeLog, Server
-from cloud.services import RenewalPriceMissingError, _cloud_order_lifecycle_fields, _hydrate_order_from_proxy_asset, _order_primary_asset, _order_primary_server, _renewal_price, create_cloud_server_renewal_for_user, pay_cloud_server_renewal_with_balance, record_cloud_ip_log
+from cloud.services import RenewalPriceMissingError, _cloud_order_lifecycle_fields, _hydrate_order_from_proxy_asset, _order_primary_asset, _order_primary_server, _renewal_price, _resolve_aws_static_ip_name_for_order, create_cloud_server_renewal_for_user, pay_cloud_server_renewal_with_balance, record_cloud_ip_log
 from bot.keyboards import cloud_auto_renew_notice_actions, cloud_expiry_actions, cloud_lifecycle_notice_actions
 
 logger = logging.getLogger(__name__)
@@ -329,7 +329,17 @@ def _mark_recycled(order_id: int, note: str):
     order.recycle_notice_sent_at = now
     order.ip_recycle_reminder_enabled = False
     order.provision_note = '\n'.join(filter(None, [order.provision_note, note]))
-    order.save(update_fields=['previous_public_ip', 'public_ip', 'static_ip_name', 'mtproxy_host', 'ip_recycle_at', 'recycle_notice_sent_at', 'ip_recycle_reminder_enabled', 'provision_note', 'updated_at'])
+    CloudServerOrder.objects.filter(id=order.id).update(
+        previous_public_ip=previous_public_ip,
+        public_ip='',
+        static_ip_name='',
+        mtproxy_host='',
+        ip_recycle_at=None,
+        recycle_notice_sent_at=now,
+        ip_recycle_reminder_enabled=False,
+        provision_note=order.provision_note,
+        updated_at=now,
+    )
     if asset:
         asset.previous_public_ip = previous_public_ip
         asset.public_ip = None
@@ -1070,11 +1080,30 @@ def _get_migration_due_orders():
 def _get_orphan_asset_delete_due():
     now = timezone.now()
     waiting_manual_time_q = Q(provider_status__icontains='待人工添加时间') | Q(note__icontains='等待人工添加真实到期时间') | Q(note__icontains='等待人工添加时间')
+    unattached_static_ip_q = Q(provider_status__icontains='未附加固定IP') | Q(note__icontains='未附加固定IP') | Q(provider_resource_id__icontains='StaticIp')
     return list(
         CloudAsset.objects.select_related('cloud_account').filter(
             kind=CloudAsset.KIND_SERVER,
             order__isnull=True,
             actual_expires_at__lte=now,
+        ).exclude(waiting_manual_time_q).exclude(unattached_static_ip_q).exclude(status__in=[CloudAsset.STATUS_DELETED, CloudAsset.STATUS_DELETING, CloudAsset.STATUS_TERMINATED])
+    )
+
+
+@sync_to_async
+def _get_unattached_static_ip_delete_due():
+    now = timezone.now()
+    waiting_manual_time_q = Q(provider_status__icontains='待人工添加时间') | Q(note__icontains='等待人工添加真实到期时间') | Q(note__icontains='等待人工添加时间')
+    return list(
+        CloudAsset.objects.select_related('cloud_account').filter(
+            kind=CloudAsset.KIND_SERVER,
+            order__isnull=True,
+            provider='aws_lightsail',
+            actual_expires_at__lte=now,
+        ).filter(
+            Q(instance_id__isnull=True) | Q(instance_id='')
+        ).filter(
+            Q(provider_status__icontains='未附加固定IP') | Q(note__icontains='未附加固定IP') | Q(provider_resource_id__icontains='StaticIp')
         ).exclude(waiting_manual_time_q).exclude(status__in=[CloudAsset.STATUS_DELETED, CloudAsset.STATUS_DELETING, CloudAsset.STATUS_TERMINATED])
     )
 
@@ -1139,6 +1168,58 @@ async def _delete_orphan_asset_instance(asset: CloudAsset) -> tuple[bool, str]:
     return await sync_to_async(_delete_orphan_asset_instance_sync, thread_sensitive=False)(asset)
 
 
+def _is_aws_not_found_error(exc) -> bool:
+    text = str(exc or '')
+    return 'NotFoundException' in text or 'ResourceNotFoundException' in text or 'does not exist' in text or 'not be found' in text
+
+
+def _release_order_static_ip_sync(order: CloudServerOrder) -> tuple[bool, str]:
+    if order.provider != 'aws_lightsail':
+        return True, '固定 IP 保留期结束，已释放数据库占位。'
+    release_name = str(order.static_ip_name or '').strip()
+    if not release_name:
+        release_name = _resolve_aws_static_ip_name_for_order(order)
+        if release_name:
+            order.static_ip_name = release_name
+            order.save(update_fields=['static_ip_name', 'updated_at'])
+    if not release_name:
+        return False, '固定 IP 保留期结束，但缺少固定 IP 名称，无法执行真实释放。'
+    try:
+        client = _aws_client(order.region_code, getattr(order, 'cloud_account', None))
+        client.release_static_ip(staticIpName=release_name)
+        return True, f'固定 IP 保留期结束，AWS 固定 IP 已真实释放：{release_name}'
+    except Exception as exc:
+        if _is_aws_not_found_error(exc):
+            return True, f'固定 IP 保留期结束，AWS 固定 IP 云端已不存在，按已释放处理：{release_name}'
+        return False, f'固定 IP 保留期结束，AWS 固定 IP 真实释放失败: {exc}'
+
+
+async def _release_order_static_ip(order: CloudServerOrder) -> tuple[bool, str]:
+    return await sync_to_async(_release_order_static_ip_sync, thread_sensitive=False)(order)
+
+
+def _release_unattached_static_ip_sync(asset: CloudAsset) -> tuple[bool, str]:
+    if asset.provider != 'aws_lightsail':
+        return False, '未附加固定IP到期，非 AWS 资源，暂未执行真实释放。'
+    release_name = str(asset.asset_name or '').strip()
+    if not release_name:
+        release_name = str(asset.provider_resource_id or '').rsplit('/', 1)[-1].strip()
+    if not release_name:
+        return False, '未附加固定IP到期，但缺少固定 IP 名称，无法执行真实释放。'
+    try:
+        client = _aws_client(asset.region_code, getattr(asset, 'cloud_account', None))
+        client.release_static_ip(staticIpName=release_name)
+        return True, f'未附加固定IP到期，AWS 固定 IP 已真实释放：{release_name}'
+    except Exception as exc:
+        if _is_aws_not_found_error(exc):
+            return True, f'未附加固定IP到期，AWS 固定 IP 云端已不存在，按已释放处理：{release_name}'
+        return False, f'未附加固定IP到期，AWS 固定 IP 真实释放失败: {exc}'
+
+
+async def _release_unattached_static_ip(asset: CloudAsset) -> tuple[bool, str]:
+    return await sync_to_async(_release_unattached_static_ip_sync, thread_sensitive=False)(asset)
+
+
 @sync_to_async
 def _mark_orphan_asset_deleted(asset_id: int, note: str):
     now = timezone.now()
@@ -1163,6 +1244,35 @@ def _mark_orphan_asset_deleted(asset_id: int, note: str):
         updated_at=now,
     )
     record_cloud_ip_log(event_type='deleted', asset=asset, previous_public_ip=previous_public_ip, public_ip=None, note=note or '无订单资产到期删除')
+    return asset
+
+
+@sync_to_async
+def _mark_unattached_static_ip_deleted(asset_id: int, note: str):
+    now = timezone.now()
+    asset = CloudAsset.objects.get(id=asset_id)
+    previous_public_ip = asset.public_ip or asset.previous_public_ip
+    asset.previous_public_ip = previous_public_ip
+    asset.public_ip = None
+    asset.status = CloudAsset.STATUS_DELETED
+    asset.provider_status = '未附加固定IP-已到期删除'
+    asset.is_active = False
+    asset.note = '\n'.join(filter(None, [asset.note, note]))
+    asset.save(update_fields=['previous_public_ip', 'public_ip', 'status', 'provider_status', 'is_active', 'note', 'updated_at'])
+    Server.objects.filter(order__isnull=True).filter(
+        provider=asset.provider,
+        region_code=asset.region_code,
+        public_ip=previous_public_ip,
+    ).update(
+        previous_public_ip=previous_public_ip,
+        public_ip=None,
+        status=CloudAsset.STATUS_DELETED,
+        provider_status='未附加固定IP-已到期删除',
+        is_active=False,
+        note=asset.note,
+        updated_at=now,
+    )
+    record_cloud_ip_log(event_type='recycled', asset=asset, previous_public_ip=previous_public_ip, public_ip=None, note=note or '未附加固定IP已到期删除')
     return asset
 
 
@@ -1396,6 +1506,7 @@ async def lifecycle_tick(notify=None, notify_target=None, defer_destructive_seco
     due = await _get_due_orders()
     migration_due_orders = await _get_migration_due_orders()
     orphan_asset_delete_due = await _get_orphan_asset_delete_due()
+    unattached_static_ip_delete_due = await _get_unattached_static_ip_delete_due()
     logger.info(
         'CLOUD_LIFECYCLE_DUE renew_notice=%s auto_renew_notice=%s auto_renew=%s delete_notice=%s recycle_notice=%s expire=%s suspend=%s delete=%s recycle=%s migration_due=%s orphan_asset_delete=%s renew_notice_days=%s renew_notice_debug_repeat=%s',
         len(due['renew_notice']),
@@ -1564,9 +1675,14 @@ async def lifecycle_tick(notify=None, notify_target=None, defer_destructive_seco
         notice = await _cloud_expiry_notice_payload(order.id)
         if not notice.get('valid'):
             continue
-        updated = await _mark_recycled(order.id, '固定 IP 保留期结束，已释放数据库占位。')
-        if notify and getattr(updated, 'ip_recycle_reminder_enabled', True):
-            recycled_ready_by_user[updated.user_id].append((updated, notice))
+        result = await _release_order_static_ip(order)
+        note = _action_note(result)
+        if _action_ok(result):
+            updated = await _mark_recycled(order.id, note)
+            if notify and getattr(updated, 'ip_recycle_reminder_enabled', True):
+                recycled_ready_by_user[updated.user_id].append((updated, notice))
+        else:
+            await _record_lifecycle_action_failed(order.id, 'recycle_failed', note)
 
     for order in migration_due_orders:
         if not _is_cloud_delete_safe_time():
@@ -1755,3 +1871,15 @@ IP: {ip}
             logger.info('CLOUD_ORPHAN_ASSET_LOCAL_DELETE asset_id=%s ip=%s provider=%s region=%s note=%s', updated.id, updated.previous_public_ip, updated.provider, updated.region_code, note)
         else:
             logger.warning('CLOUD_ORPHAN_ASSET_DELETE_FAILED asset_id=%s ip=%s provider=%s region=%s note=%s', asset.id, asset.public_ip, asset.provider, asset.region_code, note)
+
+    for asset in unattached_static_ip_delete_due:
+        if not _is_cloud_delete_safe_time():
+            logger.warning('CLOUD_UNATTACHED_STATIC_IP_DELETE_SKIP_OUTSIDE_WINDOW asset_id=%s ip=%s actual_expires_at=%s now=%s', asset.id, asset.public_ip, asset.actual_expires_at, timezone.now())
+            continue
+        result = await _release_unattached_static_ip(asset)
+        note = _action_note(result)
+        if _action_ok(result):
+            updated = await _mark_unattached_static_ip_deleted(asset.id, note)
+            logger.info('CLOUD_UNATTACHED_STATIC_IP_DELETE asset_id=%s ip=%s provider=%s region=%s note=%s', updated.id, updated.previous_public_ip, updated.provider, updated.region_code, note)
+        else:
+            logger.warning('CLOUD_UNATTACHED_STATIC_IP_DELETE_FAILED asset_id=%s ip=%s provider=%s region=%s note=%s', asset.id, asset.public_ip, asset.provider, asset.region_code, note)
