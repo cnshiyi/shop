@@ -173,6 +173,36 @@ def _aws_lightsail_client_for_order(order: CloudServerOrder):
     )
 
 
+def _cloud_status_from_aws_state(state: str) -> str:
+    state = (state or '').lower().strip()
+    mapping = {
+        'running': CloudAsset.STATUS_RUNNING,
+        'pending': CloudAsset.STATUS_STARTING,
+        'starting': CloudAsset.STATUS_STARTING,
+        'stopping': CloudAsset.STATUS_STOPPING,
+        'stopped': CloudAsset.STATUS_STOPPED,
+        'shutting-down': CloudAsset.STATUS_STOPPING,
+        'terminated': CloudAsset.STATUS_TERMINATED,
+    }
+    return mapping.get(state, CloudAsset.STATUS_UNKNOWN)
+
+
+def _sync_order_cloud_runtime_state(order: CloudServerOrder, state: str, public_ip: str = '', note: str = ''):
+    if not order:
+        return
+    status = _cloud_status_from_aws_state(state)
+    updates = {
+        'status': status,
+        'provider_status': state or status,
+        'is_active': status not in {CloudAsset.STATUS_TERMINATED, CloudAsset.STATUS_DELETED},
+    }
+    if public_ip and public_ip != '-':
+        updates['public_ip'] = public_ip
+    if note:
+        updates['note'] = note
+    _update_order_primary_records(order, asset_updates=updates, server_updates=updates)
+
+
 def _ensure_aws_instance_running(order: CloudServerOrder) -> tuple[bool, str]:
     if order.provider != 'aws_lightsail' or not order.server_name:
         return True, ''
@@ -180,13 +210,28 @@ def _ensure_aws_instance_running(order: CloudServerOrder) -> tuple[bool, str]:
         client = _aws_lightsail_client_for_order(order)
         instance = client.get_instance(instanceName=order.server_name).get('instance') or {}
         state = ((instance.get('state') or {}).get('name') or '').lower()
+        public_ip = instance.get('publicIpAddress') or order.public_ip or order.previous_public_ip or '-'
         if state == 'running':
-            return True, 'AWS 实例续费后检查：运行中。'
-        if state in {'stopped', 'stopping'}:
+            note = f'AWS 实例续费后检查：运行中；IP={public_ip}。'
+            _sync_order_cloud_runtime_state(order, state, public_ip, note)
+            return True, note
+        if state == 'stopped':
             client.start_instance(instanceName=order.server_name)
-            logger.info('CLOUD_RENEW_START_INSTANCE order=%s server_name=%s previous_state=%s', order.order_no, order.server_name, state)
-            return True, f'AWS 实例续费后检查：原状态 {state or "未知"}，已发起启动。'
-        return True, f'AWS 实例续费后检查：当前状态 {state or "未知"}。'
+            note = f'AWS 实例续费后检查：检测到关机状态 stopped，已发起开机；IP={public_ip}。'
+            _sync_order_cloud_runtime_state(order, 'starting', public_ip, note)
+            logger.info('CLOUD_RENEW_START_INSTANCE order=%s server_name=%s previous_state=%s ip=%s', order.order_no, order.server_name, state, public_ip)
+            return True, note
+        if state in {'pending', 'starting'}:
+            note = f'AWS 实例续费后检查：实例正在启动中，暂不重复开机；云端状态={state}；IP={public_ip}。'
+            _sync_order_cloud_runtime_state(order, state, public_ip, note)
+            return False, note
+        if state in {'stopping', 'shutting-down'}:
+            note = f'AWS 实例续费后检查：实例正在关机中，暂未执行开机；云端状态={state}；IP={public_ip}。'
+            _sync_order_cloud_runtime_state(order, state, public_ip, note)
+            return False, note
+        note = f'AWS 实例续费后检查：当前状态 {state or "未知"}，未执行开机；IP={public_ip}。'
+        _sync_order_cloud_runtime_state(order, state, public_ip, note)
+        return False, note
     except Exception as exc:
         logger.warning('CLOUD_RENEW_START_INSTANCE_FAILED order=%s server_name=%s error=%s', order.order_no, order.server_name, exc)
         return False, f'AWS 实例启动检查失败: {exc}'
@@ -2299,19 +2344,28 @@ def start_cloud_server_from_admin(order_id: int):
         if state == 'running':
             note = f'当前已开机运行，无需重复开机。云端状态: running；IP={public_ip}。'
             ok = True
-        elif state in {'stopped', 'stopping'}:
+            sync_state = state
+        elif state == 'stopped':
             client.start_instance(instanceName=order.server_name)
-            note = f'检测到云端状态 {state}，已发起开机。IP={public_ip}。'
+            note = f'检测到云端状态 stopped，已发起开机。IP={public_ip}。'
             ok = True
+            sync_state = 'starting'
             logger.info('CLOUD_ADMIN_START_INSTANCE order=%s server_name=%s previous_state=%s ip=%s', order.order_no, order.server_name, state, public_ip)
-        elif state in {'pending'}:
+        elif state in {'pending', 'starting'}:
             note = f'实例正在启动中，无需重复开机。云端状态: {state}；IP={public_ip}。'
             ok = True
+            sync_state = state
+        elif state in {'stopping', 'shutting-down'}:
+            note = f'实例正在关机中，暂未执行开机，请稍后重试。云端状态: {state}；IP={public_ip}。'
+            ok = False
+            sync_state = state
         else:
             note = f'当前云端状态为 {state or "未知"}，未执行开机。IP={public_ip}。'
             ok = False
+            sync_state = state
         order.provision_note = '\n'.join(filter(None, [order.provision_note, f'管理员手动开机：{note}']))
         order.save(update_fields=['provision_note', 'updated_at'])
+        _sync_order_cloud_runtime_state(order, sync_state, public_ip, order.provision_note)
         return order, None if ok else note
     except Exception as exc:
         note = f'开机状态查询/执行失败: {exc}'
