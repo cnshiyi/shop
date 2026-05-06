@@ -38,18 +38,21 @@ def _fmt_decimal(value) -> str:
 
 def _generate_unique_pay_amount(base_amount: Decimal, currency: str) -> Decimal:
     base = base_amount.quantize(Decimal('0.001'), rounding=ROUND_DOWN)
-    for _ in range(100):
+    now = timezone.now()
+    active_payment = Q(expired_at__isnull=True) | Q(expired_at__gt=now)
+    for _ in range(1000):
         pay_amount = (base + Decimal(random.randint(1, 999)) / Decimal('1000')).quantize(Decimal('0.001'), rounding=ROUND_DOWN)
-        order_exists = Order.objects.filter(pay_amount=pay_amount, status='pending', currency=currency).exists()
-        recharge_exists = Recharge.objects.filter(pay_amount=pay_amount, status='pending', currency=currency).exists()
+        order_exists = Order.objects.filter(active_payment, pay_amount=pay_amount, status='pending', currency=currency).exists()
+        recharge_exists = Recharge.objects.filter(active_payment, pay_amount=pay_amount, status='pending', currency=currency).exists()
         cloud_order_exists = CloudServerOrder.objects.filter(
+            active_payment,
             pay_amount=pay_amount,
             status__in=['pending', 'renew_pending'],
             currency=currency,
         ).exists()
         if not order_exists and not recharge_exists and not cloud_order_exists:
             return pay_amount
-    return (base + Decimal(random.randint(1, 999)) / Decimal('1000')).quantize(Decimal('0.001'), rounding=ROUND_DOWN)
+    raise RuntimeError(f'无法生成唯一链上支付金额，请稍后重试：{base} {currency}')
 
 
 @sync_to_async

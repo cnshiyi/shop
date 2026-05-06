@@ -13,6 +13,7 @@ import httpx
 from aiogram import Bot
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 from asgiref.sync import sync_to_async
+from django.db.models import Q
 from django.utils import timezone
 
 from orders.ledger import record_balance_ledger
@@ -204,7 +205,7 @@ def _expire_timed_out_payment_orders():
     ).update(status='expired')
     cloud_count = CloudServerOrder.objects.filter(
         pay_method='address',
-        status='pending',
+        status__in=['pending', 'renew_pending'],
         expired_at__isnull=False,
         expired_at__lte=now,
     ).update(status='expired')
@@ -222,10 +223,15 @@ async def _expire_timed_out_payment_orders_periodically(force: bool = False):
     return await _expire_timed_out_payment_orders()
 
 
+def _active_payment_q(now=None):
+    now = now or timezone.now()
+    return Q(expired_at__isnull=True) | Q(expired_at__gt=now)
+
+
 @sync_to_async
 def _get_pending_address_orders(currency: str):
     return list(
-        Order.objects.filter(pay_method='address', status='pending', currency=currency)
+        Order.objects.filter(_active_payment_q(), pay_method='address', status='pending', currency=currency)
         .order_by('created_at')
     )
 
@@ -233,22 +239,38 @@ def _get_pending_address_orders(currency: str):
 @sync_to_async
 def _get_pending_recharges(currency: str):
     return list(
-        Recharge.objects.filter(status='pending', currency=currency)
+        Recharge.objects.filter(_active_payment_q(), status='pending', currency=currency)
         .order_by('created_at')
     )
 
 
 @sync_to_async
-def _get_pending_cloud_server_orders():
+def _get_pending_cloud_server_orders(currency: str):
+    currency_filter = Q(currency=currency)
+    if currency == 'TRX':
+        currency_filter |= Q(currency='USDT')
     return list(
-        CloudServerOrder.objects.filter(pay_method='address', status='pending')
-        .union(
-            CloudServerOrder.objects.filter(
-                pay_method='address',
-                status='renew_pending',
-            ).exclude(public_ip__isnull=True).exclude(public_ip='').exclude(status__in=['deleted', 'deleting', 'expired'])
+        CloudServerOrder.objects.filter(
+            _active_payment_q(),
+            currency_filter,
+            pay_method='address',
+            status__in=['pending', 'renew_pending'],
+        )
+        .filter(
+            Q(status='pending')
+            | (Q(status='renew_pending') & (Q(public_ip__isnull=False, public_ip__gt='') | Q(previous_public_ip__isnull=False, previous_public_ip__gt='')))
         )
         .order_by('created_at')
+    )
+
+
+def _tx_hash_already_confirmed(tx_hash: str) -> bool:
+    if not str(tx_hash or '').strip():
+        return False
+    return bool(
+        Order.objects.filter(tx_hash=tx_hash).exists()
+        or Recharge.objects.filter(tx_hash=tx_hash).exists()
+        or CloudServerOrder.objects.filter(tx_hash=tx_hash).exists()
     )
 
 
@@ -259,13 +281,16 @@ def _confirm_order_paid(order_id: int, tx_hash: str, payer_address: str = '', re
         order = Order.objects.select_for_update().get(id=order_id)
         if order.status != 'pending':
             return None
+        if _tx_hash_already_confirmed(tx_hash):
+            logger.warning('商品订单链上支付拒绝: order=%s tx=%s reason=duplicate_tx_hash', order_id, tx_hash)
+            return None
         order.status = 'paid'
         order.tx_hash = tx_hash
         order.payer_address = payer_address or ''
         order.receive_address = receive_address or ''
         order.paid_at = timezone.now()
         order.save(update_fields=['status', 'tx_hash', 'payer_address', 'receive_address', 'paid_at', 'updated_at'])
-        product = order.product
+        product = Product.objects.select_for_update().get(id=order.product_id)
         if product.stock != -1:
             product.stock -= order.quantity
             product.save(update_fields=['stock', 'updated_at'])
@@ -281,6 +306,9 @@ def _confirm_recharge(recharge_id: int, tx_hash: str, paid_amount=None, payer_ad
     with transaction.atomic():
         rc = Recharge.objects.select_for_update().get(id=recharge_id)
         if rc.status != 'pending':
+            return None
+        if _tx_hash_already_confirmed(tx_hash):
+            logger.warning('充值链上支付拒绝: recharge=%s tx=%s reason=duplicate_tx_hash', recharge_id, tx_hash)
             return None
         if actual_amount <= 0:
             actual_amount = Decimal(str(rc.pay_amount or rc.amount or 0)).quantize(Decimal('0.000001'), rounding=ROUND_DOWN)
@@ -316,6 +344,9 @@ def _confirm_cloud_server_order(order_id: int, tx_hash: str, payer_address: str 
         with transaction.atomic():
             order = CloudServerOrder.objects.select_for_update().get(id=order_id)
             if order.status not in {'pending', 'renew_pending'}:
+                return None
+            if _tx_hash_already_confirmed(tx_hash):
+                logger.warning('云服务器链上支付拒绝: order=%s tx=%s reason=duplicate_tx_hash', order_id, tx_hash)
                 return None
             order.tx_hash = tx_hash
             order.payer_address = payer_address or ''
@@ -418,76 +449,109 @@ async def _deliver_product(user_id: int, product, quantity: int = 1):
 
 # ── 支付匹配 ──────────────────────────────────────────────────────────────
 
+def _cloud_expected_transfer_amount(order: CloudServerOrder, currency: str) -> Decimal | None:
+    payable = Decimal(str(order.pay_amount or order.total_amount or 0))
+    if order.currency == currency:
+        return payable
+    if currency == 'TRX' and order.currency == 'USDT':
+        return usdt_to_trx.__wrapped__(payable)
+    return None
+
+
 async def _process_payment(transfer: dict) -> bool:
     amount = transfer['amount']
     tx_hash = transfer['tx_hash']
     currency = transfer['currency']
 
+    matches = []
     pending_orders = await _get_pending_address_orders(currency)
     for order in pending_orders:
         if order.pay_amount == amount:
-            confirmed = await _confirm_order_paid(order.id, tx_hash, transfer.get('from', ''), transfer.get('to', ''))
-            if confirmed:
-                logger.info(
-                    '💰 订单匹配 → %s  %s %s  tx=%s',
-                    confirmed.order_no, fmt_amount(amount), currency, tx_hash,
-                )
-                product = await _get_product(confirmed.product_id)
-                if product:
-                    await _deliver_product(confirmed.user_id, product, confirmed.quantity)
-                await _notify_user(confirmed.user_id, f'✅ 订单 {confirmed.order_no} 支付成功！\n商品已发送，请查收。')
-                return True
-            return False
+            matches.append(('product', order))
 
-    now = timezone.now()
     pending_recharges = await _get_pending_recharges(currency)
-    active_recharges = [
-        rc for rc in pending_recharges
-        if (getattr(rc, 'expired_at', None) and rc.expired_at >= now) or (not getattr(rc, 'expired_at', None) and rc.created_at >= now - timezone.timedelta(minutes=30))
-    ]
-    for rc in active_recharges:
+    for rc in pending_recharges:
         if rc.pay_amount == amount:
-            confirmed = await _confirm_recharge(rc.id, tx_hash, amount, transfer.get('from', ''), transfer.get('to', ''))
-            if confirmed:
-                logger.info(
-                    '💰 充值匹配 → user#%s  %s %s  tx=%s',
-                    confirmed.user_id, fmt_amount(amount), currency, tx_hash,
-                )
-                await _notify_user(confirmed.user_id, f'✅ 充值成功！\n到账金额: {fmt_amount(confirmed.amount)} {currency}\n余额已更新。')
-                return True
-            return False
-    logger.info('充值未匹配：currency=%s chain_amount=%s tx=%s active_pending=%s expired_pending=%s', currency, fmt_amount(amount), tx_hash, [(rc.id, rc.user_id, str(rc.amount), str(rc.pay_amount)) for rc in active_recharges[:10]], [(rc.id, rc.user_id, str(rc.amount), str(rc.pay_amount)) for rc in pending_recharges if rc not in active_recharges][:10])
+            matches.append(('recharge', rc))
 
-    pending_cloud_orders = await _get_pending_cloud_server_orders()
+    pending_cloud_orders = await _get_pending_cloud_server_orders(currency)
     for order in pending_cloud_orders:
-        payable = Decimal(str(order.pay_amount or order.total_amount or 0))
-        expected_amount = usdt_to_trx.__wrapped__(payable) if currency == 'TRX' else payable
+        expected_amount = _cloud_expected_transfer_amount(order, currency)
         if expected_amount == amount:
-            confirmed = await _confirm_cloud_server_order(order.id, tx_hash, transfer.get('from', ''), transfer.get('to', ''))
-            if confirmed:
-                logger.info(
-                    '💰 云服务器订单匹配 → %s  %s %s  tx=%s',
-                    confirmed.order_no, fmt_amount(amount), currency, tx_hash,
-                )
-                if confirmed.status == 'completed':
-                    await _notify_user(
-                        confirmed.user_id,
-                        f'✅ 云服务器订单 {confirmed.order_no} 续费成功！\n新的到期时间: {_format_local_dt(confirmed.service_expires_at)}',
-                    )
-                    asyncio.create_task(_cloud_renewal_postcheck_and_notify(confirmed))
-                    return True
-                if getattr(confirmed, 'replacement_for_id', None) and confirmed.status in {'paid', 'provisioning', 'failed'}:
-                    asyncio.create_task(_provision_recovered_cloud_order(confirmed))
-                    return True
-                await _notify_user(
-                    confirmed.user_id,
-                    f'✅ 云服务器订单 {confirmed.order_no} 支付成功！\n'
-                    f'地区: {confirmed.region_name}\n套餐: {confirmed.plan_name}\n'
-                    '请选择 MTProxy 端口：默认端口是 9528，你也可以输入自定义端口。',
-                    reply_markup=custom_port_keyboard(confirmed.id),
-                )
-                return True
-            return False
+            matches.append(('cloud', order))
+
+    if len(matches) > 1:
+        logger.error(
+            '链上支付金额匹配冲突，已拒绝自动入账: currency=%s amount=%s tx=%s matches=%s',
+            currency,
+            fmt_amount(amount),
+            tx_hash,
+            [(kind, getattr(item, 'id', None), getattr(item, 'order_no', None) or getattr(item, 'amount', None), str(getattr(item, 'pay_amount', ''))) for kind, item in matches],
+        )
+        return False
+
+    if not matches:
+        logger.info(
+            '链上支付未匹配：currency=%s chain_amount=%s tx=%s pending_products=%s pending_recharges=%s pending_cloud=%s',
+            currency,
+            fmt_amount(amount),
+            tx_hash,
+            [(order.id, order.user_id, str(order.total_amount), str(order.pay_amount)) for order in pending_orders[:10]],
+            [(rc.id, rc.user_id, str(rc.amount), str(rc.pay_amount)) for rc in pending_recharges[:10]],
+            [(order.id, order.user_id, order.order_no, order.currency, str(order.total_amount), str(order.pay_amount)) for order in pending_cloud_orders[:10]],
+        )
+        return False
+
+    kind, item = matches[0]
+    if kind == 'product':
+        confirmed = await _confirm_order_paid(item.id, tx_hash, transfer.get('from', ''), transfer.get('to', ''))
+        if confirmed:
+            logger.info(
+                '💰 订单匹配 → %s  %s %s  tx=%s',
+                confirmed.order_no, fmt_amount(amount), currency, tx_hash,
+            )
+            product = await _get_product(confirmed.product_id)
+            if product:
+                await _deliver_product(confirmed.user_id, product, confirmed.quantity)
+            await _notify_user(confirmed.user_id, f'✅ 订单 {confirmed.order_no} 支付成功！\n商品已发送，请查收。')
+            return True
+        return False
+
+    if kind == 'recharge':
+        confirmed = await _confirm_recharge(item.id, tx_hash, amount, transfer.get('from', ''), transfer.get('to', ''))
+        if confirmed:
+            logger.info(
+                '💰 充值匹配 → user#%s  %s %s  tx=%s',
+                confirmed.user_id, fmt_amount(amount), currency, tx_hash,
+            )
+            await _notify_user(confirmed.user_id, f'✅ 充值成功！\n到账金额: {fmt_amount(confirmed.amount)} {currency}\n余额已更新。')
+            return True
+        return False
+
+    confirmed = await _confirm_cloud_server_order(item.id, tx_hash, transfer.get('from', ''), transfer.get('to', ''))
+    if confirmed:
+        logger.info(
+            '💰 云服务器订单匹配 → %s  %s %s  tx=%s',
+            confirmed.order_no, fmt_amount(amount), currency, tx_hash,
+        )
+        if confirmed.status == 'completed':
+            await _notify_user(
+                confirmed.user_id,
+                f'✅ 云服务器订单 {confirmed.order_no} 续费成功！\n新的到期时间: {_format_local_dt(confirmed.service_expires_at)}',
+            )
+            asyncio.create_task(_cloud_renewal_postcheck_and_notify(confirmed))
+            return True
+        if getattr(confirmed, 'replacement_for_id', None) and confirmed.status in {'paid', 'provisioning', 'failed'}:
+            asyncio.create_task(_provision_recovered_cloud_order(confirmed))
+            return True
+        await _notify_user(
+            confirmed.user_id,
+            f'✅ 云服务器订单 {confirmed.order_no} 支付成功！\n'
+            f'地区: {confirmed.region_name}\n套餐: {confirmed.plan_name}\n'
+            '请选择 MTProxy 端口：默认端口是 9528，你也可以输入自定义端口。',
+            reply_markup=custom_port_keyboard(confirmed.id),
+        )
+        return True
     return False
 
 
