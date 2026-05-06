@@ -203,6 +203,37 @@ def _sync_order_cloud_runtime_state(order: CloudServerOrder, state: str, public_
     _update_order_primary_records(order, asset_updates=updates, server_updates=updates)
 
 
+AWS_START_WAIT_ATTEMPTS = 10
+AWS_START_WAIT_SECONDS = 10
+
+
+def _aws_lightsail_instance_state(client, server_name: str) -> tuple[str, str]:
+    instance = client.get_instance(instanceName=server_name).get('instance') or {}
+    state = ((instance.get('state') or {}).get('name') or '').lower()
+    public_ip = instance.get('publicIpAddress') or '-'
+    return state, public_ip
+
+
+def _start_aws_instance_after_shutdown(client, order: CloudServerOrder, state: str, public_ip: str, *, log_tag: str) -> tuple[bool, str, str, str]:
+    current_state = (state or '').lower()
+    current_ip = public_ip or order.public_ip or order.previous_public_ip or '-'
+    for attempt in range(1, AWS_START_WAIT_ATTEMPTS + 1):
+        time.sleep(AWS_START_WAIT_SECONDS)
+        current_state, queried_ip = _aws_lightsail_instance_state(client, order.server_name)
+        current_ip = queried_ip if queried_ip != '-' else current_ip
+        if current_state == 'stopped':
+            client.start_instance(instanceName=order.server_name)
+            logger.info('%s order=%s server_name=%s previous_state=%s wait_attempt=%s ip=%s', log_tag, order.order_no, order.server_name, current_state, attempt, current_ip)
+            return True, f'云端正在关机，等待第 {attempt}/{AWS_START_WAIT_ATTEMPTS} 次后变为 stopped，已立即发起开机。IP={current_ip}。', 'starting', current_ip
+        if current_state == 'running':
+            return True, f'云端正在关机，等待第 {attempt}/{AWS_START_WAIT_ATTEMPTS} 次后已恢复 running。IP={current_ip}。', current_state, current_ip
+        if current_state in {'pending', 'starting'}:
+            return True, f'云端正在关机，等待第 {attempt}/{AWS_START_WAIT_ATTEMPTS} 次后已进入启动中状态 {current_state}。IP={current_ip}。', current_state, current_ip
+        if current_state in {'terminated', 'deleted'}:
+            return False, f'云端正在关机，等待第 {attempt}/{AWS_START_WAIT_ATTEMPTS} 次后变为 {current_state}，无法开机。IP={current_ip}。', current_state, current_ip
+    return False, f'云端仍处于 {current_state or "未知"}，已延时检查 {AWS_START_WAIT_ATTEMPTS} 次仍未关机完成，暂无法开机。IP={current_ip}。', current_state, current_ip
+
+
 def _ensure_aws_instance_running(order: CloudServerOrder) -> tuple[bool, str]:
     if order.provider != 'aws_lightsail' or not order.server_name:
         return True, ''
@@ -226,9 +257,10 @@ def _ensure_aws_instance_running(order: CloudServerOrder) -> tuple[bool, str]:
             _sync_order_cloud_runtime_state(order, state, public_ip, note)
             return False, note
         if state in {'stopping', 'shutting-down'}:
-            note = f'AWS 实例续费后检查：实例正在关机中，暂未执行开机；云端状态={state}；IP={public_ip}。'
-            _sync_order_cloud_runtime_state(order, state, public_ip, note)
-            return False, note
+            ok, wait_note, sync_state, public_ip = _start_aws_instance_after_shutdown(client, order, state, public_ip, log_tag='CLOUD_RENEW_WAIT_SHUTDOWN_START_INSTANCE')
+            note = f'AWS 实例续费后检查：初始状态 {state}；{wait_note}'
+            _sync_order_cloud_runtime_state(order, sync_state, public_ip, note)
+            return ok, note
         note = f'AWS 实例续费后检查：当前状态 {state or "未知"}，未执行开机；IP={public_ip}。'
         _sync_order_cloud_runtime_state(order, state, public_ip, note)
         return False, note
@@ -2356,9 +2388,8 @@ def start_cloud_server_from_admin(order_id: int):
             ok = True
             sync_state = state
         elif state in {'stopping', 'shutting-down'}:
-            note = f'实例正在关机中，暂未执行开机，请稍后重试。云端状态: {state}；IP={public_ip}。'
-            ok = False
-            sync_state = state
+            ok, wait_note, sync_state, public_ip = _start_aws_instance_after_shutdown(client, order, state, public_ip, log_tag='CLOUD_ADMIN_WAIT_SHUTDOWN_START_INSTANCE')
+            note = f'初始状态 {state}；{wait_note}'
         else:
             note = f'当前云端状态为 {state or "未知"}，未执行开机。IP={public_ip}。'
             ok = False
