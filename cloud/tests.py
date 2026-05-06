@@ -2960,6 +2960,112 @@ class CloudServerServicesTestCase(TestCase):
         self.assertTrue(server.is_active)
         self.assertEqual(server.status, Server.STATUS_RUNNING)
 
+    def test_sync_aws_assets_keeps_runtime_running_when_order_is_suspended(self):
+        account = CloudAccountConfig.objects.create(
+            provider=CloudAccountConfig.PROVIDER_AWS,
+            name='aws-suspended-runtime',
+            external_account_id='123456789012',
+            access_key='A' * 20,
+            secret_key='B' * 40,
+            region_hint='ap-southeast-1',
+            is_active=True,
+        )
+        account_label = cloud_account_label(account)
+        order = CloudServerOrder.objects.create(
+            order_no='AWS-SYNC-SUSPENDED-RUNTIME-1',
+            user=self.user,
+            plan=self.plan,
+            cloud_account=account,
+            account_label=account_label,
+            provider='aws_lightsail',
+            region_code=self.plan.region_code,
+            region_name=self.plan.region_name,
+            plan_name=self.plan.plan_name,
+            quantity=1,
+            currency='USDT',
+            total_amount='19.00',
+            pay_amount='19.00',
+            pay_method='balance',
+            status='suspended',
+            public_ip='10.9.0.3',
+            previous_public_ip='10.9.0.3',
+            instance_id='i-suspended-runtime-1',
+            provider_resource_id='arn:aws:lightsail:ap-southeast-1:123456789012:Instance/i-suspended-runtime-1',
+            server_name='i-suspended-runtime-1',
+            service_started_at=timezone.now() - timezone.timedelta(days=20),
+            service_expires_at=timezone.now() - timezone.timedelta(days=1),
+        )
+        asset = CloudAsset.objects.create(
+            kind=CloudAsset.KIND_SERVER,
+            source=CloudAsset.SOURCE_AWS_SYNC,
+            order=order,
+            user=self.user,
+            provider='aws_lightsail',
+            cloud_account=account,
+            account_label=account_label,
+            region_code=self.plan.region_code,
+            region_name=self.plan.region_name,
+            asset_name='i-suspended-runtime-1',
+            public_ip='10.9.0.3',
+            previous_public_ip='10.9.0.3',
+            instance_id=order.instance_id,
+            provider_resource_id=order.provider_resource_id,
+            actual_expires_at=order.service_expires_at,
+            status=CloudAsset.STATUS_SUSPENDED,
+            provider_status='已到期关机，等待删除（云端已关机）',
+            is_active=False,
+        )
+        server = Server.objects.create(
+            source=Server.SOURCE_AWS_SYNC,
+            order=order,
+            user=self.user,
+            provider='aws_lightsail',
+            account_label=account_label,
+            region_code=self.plan.region_code,
+            region_name=self.plan.region_name,
+            server_name='i-suspended-runtime-1',
+            public_ip='10.9.0.3',
+            previous_public_ip='10.9.0.3',
+            instance_id=order.instance_id,
+            provider_resource_id=order.provider_resource_id,
+            expires_at=order.service_expires_at,
+            status=Server.STATUS_SUSPENDED,
+            provider_status='已到期关机，等待删除（云端已关机）',
+            is_active=False,
+        )
+
+        class FakeLightsailClient:
+            def get_static_ips(self, **kwargs):
+                return {'staticIps': [], 'nextPageToken': None}
+
+            def get_instances(self, **kwargs):
+                return {
+                    'instances': [{
+                        'name': 'i-suspended-runtime-1',
+                        'arn': 'arn:aws:lightsail:ap-southeast-1:123456789012:Instance/i-suspended-runtime-1',
+                        'state': {'name': 'running'},
+                        'location': {'regionName': '新加坡'},
+                        'publicIpAddress': '10.9.0.3',
+                        'bundleId': 'micro_1_0',
+                        'blueprintId': 'debian_12',
+                    }],
+                    'nextPageToken': None,
+                }
+
+        with patch('cloud.management.commands.sync_aws_assets._list_regions', return_value=['ap-southeast-1']), patch('cloud.management.commands.sync_aws_assets._aws_account_identity', return_value='123456789012'), patch('cloud.management.commands.sync_aws_assets._lightsail_client', return_value=FakeLightsailClient()):
+            call_command('sync_aws_assets', region='ap-southeast-1')
+
+        asset.refresh_from_db()
+        server.refresh_from_db()
+        order.refresh_from_db()
+        self.assertEqual(asset.status, CloudAsset.STATUS_RUNNING)
+        self.assertTrue(asset.is_active)
+        self.assertEqual(server.status, Server.STATUS_RUNNING)
+        self.assertTrue(server.is_active)
+        self.assertEqual(order.status, 'suspended')
+        self.assertIn('云端运行中', asset.provider_status or '')
+        self.assertIn('已到期关机，等待删除', asset.provider_status or '')
+
 
     def test_lifecycle_tick_releases_retained_static_ip_after_recycle_due(self):
         recycle_due_at = timezone.now() - timezone.timedelta(days=2)

@@ -639,15 +639,13 @@ class Command(BaseCommand):
                         provider_status = _provider_status_label(state_name or None)
                         preserve_lifecycle_status = bool(order and order.status in {'suspended', 'deleting'})
                         if order and order.status == 'deleting':
-                            normalized_status = CloudAsset.STATUS_DELETING
                             provider_status = f'旧机保留期，等待删除（云端{provider_status}）'
                         elif order and order.status == 'suspended':
-                            normalized_status = CloudAsset.STATUS_SUSPENDED
                             provider_status = f'已到期关机，等待删除（云端{provider_status}）'
                         static_ip_name = attached_static_ip.get('name') or ''
                         static_ip_note = f"；固定IP名: {static_ip_name}" if static_ip_name else ''
                         note = f"状态: {provider_status}；公网IP: {public_ip or '缺失'}{static_ip_note}；套餐: {bundle_id}；镜像: {blueprint_id}；到期: {expires_at or '-'}；最近同步: {now_iso}"
-                        is_active = normalized_status in Server.ACTIVE_STATUSES and not preserve_lifecycle_status
+                        is_active = normalized_status in Server.ACTIVE_STATUSES
 
                         asset_defaults = {
                             'kind': CloudAsset.KIND_SERVER,
