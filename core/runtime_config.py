@@ -35,6 +35,11 @@ CONFIG_HELP = {
     'telegram_listener_push_enabled': 'Telegram 个人号监听 Bark 推送开关（1=开启，0=关闭）',
     'telegram_listener_push_bark_url': 'Telegram 个人号监听 Bark 推送地址',
     'telegram_listener_push_private_enabled': 'Telegram 个人号监听私聊推送开关（1=开启，0=关闭）',
+    'telegram_listener_push_bark_encryption_key': 'Bark 端到端加密 key（留空则不加密；AES256 需 32 字节）',
+    'telegram_listener_push_bark_encryption_iv': 'Bark 端到端加密 iv（CBC 需 16 字节，GCM 需 12 字节）',
+    'telegram_listener_push_bark_encryption_algorithm': 'Bark 加密算法：AES128/AES192/AES256',
+    'telegram_listener_push_bark_encryption_mode': 'Bark 加密模式：CBC/ECB/GCM',
+    'telegram_listener_push_bark_encryption_padding': 'Bark 加密填充：pkcs7/noPadding',
 }
 
 CLOUD_ASSET_SYNC_INTERVAL_DEFAULT_SECONDS = 5 * 60 * 60
@@ -60,6 +65,11 @@ CONFIG_DEFAULTS = {
     'telegram_listener_push_enabled': '0',
     'telegram_listener_push_bark_url': '',
     'telegram_listener_push_private_enabled': '1',
+    'telegram_listener_push_bark_encryption_key': '',
+    'telegram_listener_push_bark_encryption_iv': '',
+    'telegram_listener_push_bark_encryption_algorithm': 'AES256',
+    'telegram_listener_push_bark_encryption_mode': 'CBC',
+    'telegram_listener_push_bark_encryption_padding': 'pkcs7',
 }
 
 
@@ -70,7 +80,8 @@ SENSITIVE_CONFIG_KEYS = {
     'dashboard_totp_secret',
     'mysql_password',
     'redis_password',
-    'telegram_listener_push_bark_url',
+    'telegram_listener_push_bark_encryption_key',
+    'telegram_listener_push_bark_encryption_iv',
 }
 
 
@@ -116,6 +127,11 @@ CONFIG_ENV_MAP = {
     'telegram_listener_push_enabled': 'TELEGRAM_LISTENER_PUSH_ENABLED',
     'telegram_listener_push_bark_url': 'TELEGRAM_LISTENER_PUSH_BARK_URL',
     'telegram_listener_push_private_enabled': 'TELEGRAM_LISTENER_PUSH_PRIVATE_ENABLED',
+    'telegram_listener_push_bark_encryption_key': 'TELEGRAM_LISTENER_PUSH_BARK_ENCRYPTION_KEY',
+    'telegram_listener_push_bark_encryption_iv': 'TELEGRAM_LISTENER_PUSH_BARK_ENCRYPTION_IV',
+    'telegram_listener_push_bark_encryption_algorithm': 'TELEGRAM_LISTENER_PUSH_BARK_ENCRYPTION_ALGORITHM',
+    'telegram_listener_push_bark_encryption_mode': 'TELEGRAM_LISTENER_PUSH_BARK_ENCRYPTION_MODE',
+    'telegram_listener_push_bark_encryption_padding': 'TELEGRAM_LISTENER_PUSH_BARK_ENCRYPTION_PADDING',
 }
 
 

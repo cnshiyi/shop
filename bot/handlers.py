@@ -450,6 +450,7 @@ async def _reply_cloud_query_results(message: Message, raw_text: str, state: FSM
                 expires_text = _format_local_dt(expires_at).split(' ', 1)[0] if expires_at else '未设置'
                 status_text = asset.get_status_display() if hasattr(asset, 'get_status_display') else str(getattr(asset, 'status', '') or '未知')
                 can_admin_asset_reinit = bool(asset.provider == 'aws_lightsail' and display_ip)
+                can_admin_asset_config = bool(asset.provider == 'aws_lightsail')
                 results.append({
                     'ip': display_ip,
                     'text': f'IP: <code>{escape(display_ip)}</code>\n到期时间: {expires_text}\n自动续费: 未绑定订单\n状态: {escape(status_text)}\n类型: 人工代理资产',
@@ -457,6 +458,7 @@ async def _reply_cloud_query_results(message: Message, raw_text: str, state: FSM
                     'order_id': 0,
                     'asset_id': asset.id,
                     'can_reinit': can_admin_asset_reinit,
+                    'can_config': can_admin_asset_config,
                     '_expires_at': expires_at,
                     '_input_index': index,
                 })
@@ -477,6 +479,7 @@ async def _reply_cloud_query_results(message: Message, raw_text: str, state: FSM
         if group_balance_lines:
             balance_block = '\n多用户余额:\n' + '\n'.join(escape(line) for line in group_balance_lines)
         can_admin_reinit = bool(include_start and order.provider == 'aws_lightsail' and display_ip and getattr(order, 'login_password', None) and order.status in {'completed', 'expiring', 'renew_pending', 'suspended', 'failed'})
+        can_admin_config = bool(include_start and order.provider == 'aws_lightsail' and order.status in {'completed', 'expiring', 'suspended'})
         results.append({
             'ip': display_ip,
             'text': f'IP: <code>{escape(display_ip)}</code>\n到期时间: {expires_text}\n自动续费: {auto_renew_text}\n状态: {status_text}{balance_block}',
@@ -484,6 +487,7 @@ async def _reply_cloud_query_results(message: Message, raw_text: str, state: FSM
             'order_id': order.id,
             'asset_id': 0,
             'can_reinit': can_admin_reinit,
+            'can_config': can_admin_config,
             '_expires_at': expires_at,
             '_input_index': index,
         })
@@ -516,7 +520,7 @@ async def _reply_cloud_query_results(message: Message, raw_text: str, state: FSM
     total_pages = max(1, math.ceil(len(results) / per_page))
     page_items = results[(page - 1) * per_page: page * per_page]
     text = '🔎 IP批量查询结果\n\n' + '\n\n'.join(item['text'] for item in page_items)
-    renewable_items = [{'ip': item['ip'], 'order_id': item.get('order_id') or 0, 'asset_id': item.get('asset_id') or 0, 'can_reinit': item.get('can_reinit')} for item in page_items if item['renewable'] and (item.get('order_id') or item.get('asset_id'))]
+    renewable_items = [{'ip': item['ip'], 'order_id': item.get('order_id') or 0, 'asset_id': item.get('asset_id') or 0, 'can_reinit': item.get('can_reinit'), 'can_config': item.get('can_config')} for item in page_items if item['renewable'] and (item.get('order_id') or item.get('asset_id'))]
     sent = await message.answer(text, reply_markup=cloud_ip_query_result(page_items, renewable_items, page, total_pages, include_start=include_start, include_reinit=include_start), parse_mode='HTML')
     logger.info(
         'BOT_MESSAGE_SEND route=cloud_ip_query_result user_id=%s chat_id=%s reply_to=%s sent_message_id=%s result_count=%s renewable_count=%s page=%s total_pages=%s include_start=%s text_preview=%s',
@@ -1553,27 +1557,32 @@ def _secret_log_hint(secret: str) -> str:
     return f'{value[:6]}***{value[-6:]}({len(value)})'
 
 
-async def _validate_reinstall_proxy_link(order, link_data: dict[str, str], probe_when_possible: bool = True) -> tuple[bool, str]:
+async def _validate_reinstall_proxy_link(order, link_data: dict[str, str], probe_when_possible: bool = True, allow_client_port: bool = False) -> tuple[bool, str]:
     order_ip = str(order.public_ip or order.previous_public_ip or '').strip()
-    order_port = str(order.mtproxy_port or link_data['port'] or 9528)
+    stored_order_port = str(order.mtproxy_port or link_data['port'] or 9528)
+    probe_port = str(link_data['port'] if allow_client_port else stored_order_port)
     parsed_secret = _normalize_proxy_secret(link_data.get('secret', ''))
     logger.info(
-        'CLOUD_REINSTALL_LINK_PARSED item_id=%s ip_expected=%s port_expected=%s parsed_server=%s parsed_port=%s parsed_secret=%s probe_when_possible=%s has_login_password=%s',
+        'CLOUD_REINSTALL_LINK_PARSED item_id=%s ip_expected=%s stored_port=%s probe_port=%s parsed_server=%s parsed_port=%s parsed_secret=%s probe_when_possible=%s has_login_password=%s allow_client_port=%s',
         getattr(order, 'id', None),
         order_ip,
-        order_port,
+        stored_order_port,
+        probe_port,
         link_data.get('server'),
         link_data.get('port'),
         _secret_log_hint(link_data.get('secret', '')),
         probe_when_possible,
         bool(getattr(order, 'login_password', None)),
+        allow_client_port,
     )
     if link_data['server'] != order_ip:
         logger.warning('CLOUD_REINSTALL_LINK_COMPARE_FAIL reason=ip item_id=%s expected_ip=%s parsed_ip=%s', getattr(order, 'id', None), order_ip, link_data['server'])
         return False, f'链接 IP 不匹配。当前服务器 IP 是 {order_ip}，你发的是 {link_data["server"]}'
-    if link_data['port'] != order_port:
-        logger.warning('CLOUD_REINSTALL_LINK_COMPARE_FAIL reason=port item_id=%s expected_port=%s parsed_port=%s', getattr(order, 'id', None), order_port, link_data['port'])
-        return False, f'链接端口不匹配。当前主代理端口是 {order_port}，你发的是 {link_data["port"]}'
+    if not allow_client_port and link_data['port'] != stored_order_port:
+        logger.warning('CLOUD_REINSTALL_LINK_COMPARE_FAIL reason=port item_id=%s expected_port=%s parsed_port=%s', getattr(order, 'id', None), stored_order_port, link_data['port'])
+        return False, f'链接端口不匹配。当前主代理端口是 {stored_order_port}，你发的是 {link_data["port"]}'
+    if allow_client_port and link_data['port'] != stored_order_port:
+        logger.info('CLOUD_REINSTALL_LINK_PORT_OVERRIDE item_id=%s stored_port=%s parsed_port=%s', getattr(order, 'id', None), stored_order_port, link_data['port'])
     if not probe_when_possible or not getattr(order, 'login_password', None):
         logger.info('CLOUD_REINSTALL_LINK_COMPARE_SKIP_PROBE item_id=%s parsed_secret=%s reason=%s', getattr(order, 'id', None), _secret_log_hint(parsed_secret), 'disabled' if not probe_when_possible else 'missing_login_password')
         return True, '主链接格式和 IP 校验通过'
@@ -1586,7 +1595,7 @@ async def _validate_reinstall_proxy_link(order, link_data: dict[str, str], probe
         if candidate and candidate not in probe_users:
             probe_users.append(candidate)
     for candidate in probe_users:
-        ok, probe = await _probe_mtproxy_state(order_ip, candidate, order.login_password, int(order_port))
+        ok, probe = await _probe_mtproxy_state(order_ip, candidate, order.login_password, int(probe_port))
         if ok:
             probe_user = candidate
             break
@@ -1597,7 +1606,7 @@ async def _validate_reinstall_proxy_link(order, link_data: dict[str, str], probe
         getattr(order, 'id', None),
         order_ip,
         probe_user,
-        order_port,
+        probe_port,
         ok,
         probe.get('MTPROXY_PROBE_PROC_OK'),
         probe.get('MTPROXY_PROBE_PORT_OK'),
@@ -1609,13 +1618,13 @@ async def _validate_reinstall_proxy_link(order, link_data: dict[str, str], probe
     if not ok:
         stored_secret = _normalize_proxy_secret(getattr(order, 'mtproxy_secret', '') or '')
         if stored_secret and stored_secret == parsed_secret:
-            logger.warning('CLOUD_REINSTALL_LINK_COMPARE_PROBE_FAILED_BUT_STORED_SECRET_MATCH item_id=%s ip=%s port=%s users=%s', getattr(order, 'id', None), order_ip, order_port, ','.join(probe_users))
+            logger.warning('CLOUD_REINSTALL_LINK_COMPARE_PROBE_FAILED_BUT_STORED_SECRET_MATCH item_id=%s ip=%s port=%s users=%s', getattr(order, 'id', None), order_ip, probe_port, ','.join(probe_users))
             return True, '主链接格式、IP 和已记录密钥校验通过'
         return False, '无法登录服务器确认代理状态，请稍后再试或联系后台检查 SSH/代理服务'
     if remote_secret_normalized != parsed_secret:
         logger.warning('CLOUD_REINSTALL_LINK_COMPARE_FAIL reason=secret item_id=%s remote_secret=%s parsed_secret=%s', getattr(order, 'id', None), _secret_log_hint(remote_secret_normalized), _secret_log_hint(parsed_secret))
         return False, '链接密钥和服务器实际运行密钥不一致，请检查后重新发送主链接'
-    logger.info('CLOUD_REINSTALL_LINK_COMPARE_OK item_id=%s ip=%s port=%s secret=%s', getattr(order, 'id', None), order_ip, order_port, _secret_log_hint(parsed_secret))
+    logger.info('CLOUD_REINSTALL_LINK_COMPARE_OK item_id=%s ip=%s port=%s secret=%s', getattr(order, 'id', None), order_ip, probe_port, _secret_log_hint(parsed_secret))
     return True, '主链接校验通过'
 
 
@@ -2069,13 +2078,14 @@ def _custom_plan_text(region_name: str, plans) -> str:
 def _retained_ip_renewal_plan_text(order, plans, user=None) -> str:
     labels = ['套餐一', '套餐二', '套餐三', '套餐四', '套餐五', '套餐六', '套餐七', '套餐八', '套餐九']
     ip = getattr(order, 'public_ip', None) or getattr(order, 'previous_public_ip', None) or '-'
+    region = _public_region_text(getattr(order, 'region_name', None) or getattr(order, 'region_code', None)) or '-'
     lines = [
-        '🔄 未附加固定 IP 续费',
-        '',
-        f'保留 IP: {ip}',
-        f'地区: {_public_region_text(getattr(order, "region_name", None) or getattr(order, "region_code", None)) or "-"}',
-        '',
-        '请选择要恢复的新服务器套餐。选好后，我会要求你发送旧主代理链接，用来保持原链接/密钥不变。',
+        _bot_text_format(
+            'bot_retained_ip_renewal_plan_intro',
+            '🔄 未附加固定 IP 续费\n\n保留 IP: {ip}\n地区: {region}\n\n请选择要恢复的新服务器套餐。选好后，我会要求你发送旧的主代理链接，用来保持原链接/密钥不变。',
+            ip=ip,
+            region=region,
+        ),
         '',
     ]
     for idx, plan in enumerate(plans[:9], start=1):
@@ -2089,16 +2099,17 @@ def _retained_ip_renewal_plan_text(order, plans, user=None) -> str:
         if display_description:
             lines.append(display_description)
         lines.append('')
-    lines.append('请选择下面的套餐按钮：')
+    lines.append(_bot_text('bot_retained_ip_renewal_plan_footer', '请选择下面的套餐按钮：'))
     return '\n'.join(lines)
 
 
 def _retained_ip_renewal_plan_keyboard(order_id: int, plans):
     labels = ['套餐一', '套餐二', '套餐三', '套餐四', '套餐五', '套餐六', '套餐七', '套餐八', '套餐九']
-    rows = []
+    buttons = []
     for idx, plan in enumerate(plans[:9]):
         label = labels[idx] if idx < len(labels) else f'套餐{idx + 1}'
-        rows.append([InlineKeyboardButton(text=label, callback_data=f'cloud:renewplan:{order_id}:{plan.id}')])
+        buttons.append(InlineKeyboardButton(text=label, callback_data=f'cloud:renewplan:{order_id}:{plan.id}'))
+    rows = [buttons[index:index + 3] for index in range(0, len(buttons), 3)]
     rows.append([InlineKeyboardButton(text='🔙 返回详情', callback_data=f'cloud:detail:{order_id}')])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
@@ -2506,7 +2517,7 @@ def register_handlers(dp: Dispatcher):
         page = min(page, total_pages)
         page_items = results[(page - 1) * per_page: page * per_page]
         text = '🔎 IP批量查询结果\n\n' + '\n\n'.join(item['text'] for item in page_items)
-        renewable_items = [{'ip': item['ip'], 'order_id': item.get('order_id') or 0, 'asset_id': item.get('asset_id') or 0, 'can_reinit': item.get('can_reinit')} for item in page_items if item['renewable'] and (item.get('order_id') or item.get('asset_id'))]
+        renewable_items = [{'ip': item['ip'], 'order_id': item.get('order_id') or 0, 'asset_id': item.get('asset_id') or 0, 'can_reinit': item.get('can_reinit'), 'can_config': item.get('can_config')} for item in page_items if item['renewable'] and (item.get('order_id') or item.get('asset_id'))]
         is_admin = await _is_admin_chat(callback.message)
         await _safe_edit_text(callback.message, text, reply_markup=cloud_ip_query_result(page_items, renewable_items, page, total_pages, include_start=is_admin, include_reinit=is_admin), parse_mode='HTML')
 
@@ -3229,7 +3240,7 @@ def register_handlers(dp: Dispatcher):
         logger.info('CLOUD_ASSET_DETAIL_RENDER user_id=%s item_id=%s kind=%s ip=%s back=%s order_id=%s has_link=%s', user.id, item_id, getattr(item, '_proxy_item_kind', None), item.public_ip, back_callback, order_id, has_link)
         rows = [
             [InlineKeyboardButton(text='🔄 续费', callback_data=f'cloud:assetaction:renew:{item_id}'), InlineKeyboardButton(text='🌐 更换IP', callback_data=f'cloud:assetaction:changeip:{item_id}')],
-            [InlineKeyboardButton(text='🛠 重新安装', callback_data=f'cloud:assetinit:{item_id}:{back_callback}'), InlineKeyboardButton(text='⬆️ 升级配置', callback_data=f'cloud:assetaction:upgrade:{item_id}')],
+            [InlineKeyboardButton(text='🛠 重新安装', callback_data=f'cloud:assetinit:{item_id}:{back_callback}'), InlineKeyboardButton(text='⚙️ 修改配置', callback_data=f'cloud:assetaction:upgrade:{item_id}')],
         ]
         rows.append([support_contact_button('cloud_asset', item_id)])
         rows.append([InlineKeyboardButton(text='🔙 返回代理列表', callback_data=back_callback)])
@@ -3315,18 +3326,20 @@ def register_handlers(dp: Dispatcher):
                 logger.info('BOT_MESSAGE_EDIT route=asset_change_ip_regions user_id=%s asset_id=%s order_id=%s chat_id=%s message_id=%s regions=%s', user.id, asset_id, order.id, callback.message.chat.id, callback.message.message_id, regions)
             return
         if action == 'upgrade':
-            plans, err = await list_cloud_server_upgrade_plans(order.id, user.id)
+            plans, err = await list_cloud_server_upgrade_plans(order.id, user.id, admin=is_admin)
             if err:
                 await _safe_callback_answer(callback, err, show_alert=True)
                 return
             if not plans:
-                await _safe_callback_answer(callback, '暂无可升级配置', show_alert=True)
+                await _safe_callback_answer(callback, '暂无可修改的配置', show_alert=True)
                 return
             rows = []
-            text_lines = ['⬆️ 升级配置', '', '请选择目标配置，系统会从 USDT 余额扣除差价，并创建更高规格服务器；主/备用代理链接保持不变。']
+            text_lines = ['⚙️ 修改配置', '', '请选择目标配置。升级会从 USDT 余额扣除差价；降级不退差价。系统会创建目标规格服务器，主/备用代理链接保持不变。']
             for plan in plans[:10]:
-                text_lines.append(f"- {plan['name']}：补 {plan['diff']} U，到期补足 {plan['target_days']} 天")
-                rows.append([InlineKeyboardButton(text=f"{plan['name']} +{plan['diff']}U", callback_data=f"cloud:upgradepay:{order.id}:{plan['id']}")])
+                action_text = '升级' if plan.get('action') == 'upgrade' else '降级'
+                charge_text = f"补 {plan['diff']} U" if plan.get('action') == 'upgrade' else '无需补差价'
+                text_lines.append(f"- {plan['name']}：{action_text}，{charge_text}，到期补足 {plan['target_days']} 天")
+                rows.append([InlineKeyboardButton(text=f"{action_text}到 {plan['name']} {charge_text}", callback_data=f"cloud:upgradepay:{order.id}:{plan['id']}")])
             rows.append([InlineKeyboardButton(text='🔙 返回详情', callback_data=f'cloud:assetdetail:asset:{asset_id}:cloud:list:page:1')])
             await _safe_edit_text(callback.message, '\n'.join(text_lines), reply_markup=InlineKeyboardMarkup(inline_keyboard=rows))
             return
@@ -3431,7 +3444,7 @@ def register_handlers(dp: Dispatcher):
             and delay_quota > 0
         )
         logger.info(
-            'CLOUD_DETAIL_RENDER user_id=%s order_id=%s order_no=%s status=%s provider=%s public_ip=%s login_password=%s mtproxy_secret=%s mtproxy_link=%s buttons={renew:%s,delay:%s,change_ip:%s,resume_init:%s,reinit:%s,upgrade:%s,refund:%s} back=%s',
+            'CLOUD_DETAIL_RENDER user_id=%s order_id=%s order_no=%s status=%s provider=%s public_ip=%s login_password=%s mtproxy_secret=%s mtproxy_link=%s buttons={renew:%s,delay:%s,change_ip:%s,resume_init:%s,reinit:%s,config:%s,refund:%s} back=%s',
             user.id,
             order.id,
             order.order_no,
@@ -3541,11 +3554,12 @@ def register_handlers(dp: Dispatcher):
         await state.set_state(CustomServerStates.waiting_retained_ip_renewal_link)
         ip = getattr(order, 'public_ip', None) or getattr(order, 'previous_public_ip', None) or '-'
         await callback.message.reply(
-            '🔄 未附加固定 IP 续费\n\n'
-            f'已选择套餐: {_plan_display_name(plan)}\n'
-            f'保留 IP: {ip}\n\n'
-            '请直接发送这台服务器旧的主代理链接（tg://proxy?... 或 https://t.me/proxy?...）。\n'
-            '我会像重建流程一样校验 IP、端口和密钥；校验通过后再生成续费支付订单。'
+            _bot_text_format(
+                'bot_retained_ip_renewal_link_prompt',
+                '🔄 未附加固定 IP 续费\n\n已选择套餐: {plan_name}\n保留 IP: {ip}\n\n请直接发送这台服务器旧的主代理链接（tg://proxy?... 或 https://t.me/proxy?...）。\n我会校验 IP、端口和密钥；如果系统记录的主端口不对，会以你发送的主链接端口为准；校验通过后再生成续费支付订单。',
+                plan_name=_plan_display_name(plan),
+                ip=ip,
+            )
         )
 
     @dp.callback_query(F.data.startswith('cloud:start:'))
@@ -3812,18 +3826,21 @@ def register_handlers(dp: Dispatcher):
         await _safe_callback_answer(callback)
         user = await get_or_create_user(callback.from_user.id, callback.from_user.username, callback.from_user.first_name)
         order_id = int(callback.data.split(':')[2])
-        plans, err = await list_cloud_server_upgrade_plans(order_id, user.id)
+        is_admin = await _is_admin_chat(callback.message)
+        plans, err = await list_cloud_server_upgrade_plans(order_id, user.id, admin=is_admin)
         if err:
             await _safe_callback_answer(callback, err, show_alert=True)
             return
         if not plans:
-            await _safe_callback_answer(callback, '暂无可升级配置', show_alert=True)
+            await _safe_callback_answer(callback, '暂无可修改的配置', show_alert=True)
             return
         rows = []
-        text_lines = ['⬆️ 升级配置', '', '请选择目标配置，系统会从 USDT 余额扣除差价，并创建更高规格服务器；主/备用代理链接保持不变。']
+        text_lines = ['⚙️ 修改配置', '', '请选择目标配置。升级会从 USDT 余额扣除差价；降级不退差价。系统会创建目标规格服务器，主/备用代理链接保持不变。']
         for plan in plans[:10]:
-            text_lines.append(f"- {plan['name']}：补 {plan['diff']} U，到期补足 {plan['target_days']} 天")
-            rows.append([InlineKeyboardButton(text=f"{plan['name']} +{plan['diff']}U", callback_data=f"cloud:upgradepay:{order_id}:{plan['id']}")])
+            action_text = '升级' if plan.get('action') == 'upgrade' else '降级'
+            charge_text = f"补 {plan['diff']} U" if plan.get('action') == 'upgrade' else '无需补差价'
+            text_lines.append(f"- {plan['name']}：{action_text}，{charge_text}，到期补足 {plan['target_days']} 天")
+            rows.append([InlineKeyboardButton(text=f"{action_text}到 {plan['name']} {charge_text}", callback_data=f"cloud:upgradepay:{order_id}:{plan['id']}")])
         rows.append([InlineKeyboardButton(text='🔙 返回详情', callback_data=f'cloud:detail:{order_id}')])
         await _safe_edit_text(callback.message, '\n'.join(text_lines), reply_markup=InlineKeyboardMarkup(inline_keyboard=rows))
 
@@ -3833,11 +3850,12 @@ def register_handlers(dp: Dispatcher):
         await state.clear()
         user = await get_or_create_user(callback.from_user.id, callback.from_user.username, callback.from_user.first_name)
         _, _, raw_order_id, raw_plan_id = callback.data.split(':')
-        new_order, err = await create_cloud_server_upgrade_order(int(raw_order_id), user.id, int(raw_plan_id))
+        is_admin = await _is_admin_chat(callback.message)
+        new_order, err = await create_cloud_server_upgrade_order(int(raw_order_id), user.id, int(raw_plan_id), admin=is_admin)
         if err:
             await _safe_callback_answer(callback, err, show_alert=True)
             return
-        await callback.message.reply(_bot_text_format('bot_cloud_upgrade_submitted', '⬆️ 已扣除升级差价并提交升级任务。\n新订单: {order_no}\n升级完成后会自动发送新的服务器信息，代理链接保持不变。\n\n后台升级期间，底部菜单和其它按钮可正常使用。', order_no=new_order.order_no), reply_markup=main_menu())
+        await callback.message.reply(_bot_text_format('bot_cloud_upgrade_submitted', '⚙️ 已提交配置调整任务。\n新订单: {order_no}\n完成后会自动发送新的服务器信息，代理链接保持不变。\n\n后台处理期间，底部菜单和其它按钮可正常使用。', order_no=new_order.order_no), reply_markup=main_menu())
         asyncio.create_task(_provision_cloud_server_and_notify(bot, callback.from_user.id, new_order.id, new_order.mtproxy_port or 9528))
 
     @dp.callback_query(F.data.startswith('cloud:refund:'))
@@ -3908,7 +3926,12 @@ def register_handlers(dp: Dispatcher):
         if not link_data:
             await message.reply(_bot_text('bot_reinstall_invalid_link', '链接格式不对，请发送 tg://proxy?... 或 https://t.me/proxy?... 主代理链接。'))
             return
-        ok, reason = await _validate_reinstall_proxy_link(item, link_data, probe_when_possible=bool(getattr(item, 'login_password', None)))
+        ok, reason = await _validate_reinstall_proxy_link(
+            item,
+            link_data,
+            probe_when_possible=bool(getattr(item, 'login_password', None)),
+            allow_client_port=True,
+        )
         if not ok:
             await message.reply(_bot_text_format('bot_reinstall_validate_failed', '校验失败：{reason}', reason=reason))
             return
@@ -3940,7 +3963,12 @@ def register_handlers(dp: Dispatcher):
         if not link_data:
             await message.reply(_bot_text('bot_reinstall_invalid_link', '链接格式不对，请发送 tg://proxy?... 或 https://t.me/proxy?... 主代理链接。'))
             return
-        ok, reason = await _validate_reinstall_proxy_link(item, link_data, probe_when_possible=bool(getattr(item, 'login_password', None)))
+        ok, reason = await _validate_reinstall_proxy_link(
+            item,
+            link_data,
+            probe_when_possible=bool(getattr(item, 'login_password', None)),
+            allow_client_port=True,
+        )
         if not ok:
             await message.reply(_bot_text_format('bot_reinstall_validate_failed', '校验失败：{reason}', reason=reason))
             return

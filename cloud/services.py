@@ -2918,42 +2918,52 @@ def _cloud_order_lifecycle_fields(expires_at, renew_extension_days: int = 0) -> 
 
 
 @sync_to_async
-def list_cloud_server_upgrade_plans(order_id: int, user_id: int):
-    order = _hydrate_order_from_proxy_asset(CloudServerOrder.objects.select_related('plan', 'user').filter(id=order_id, user_id=user_id).first())
+def list_cloud_server_upgrade_plans(order_id: int, user_id: int, admin: bool = False):
+    queryset = CloudServerOrder.objects.select_related('plan', 'user').filter(id=order_id)
+    if not admin:
+        queryset = queryset.filter(user_id=user_id)
+    order = _hydrate_order_from_proxy_asset(queryset.first())
     if not order:
         return [], '服务器记录不存在'
     if order.provider != 'aws_lightsail':
-        return [], '当前服务器不支持升级配置'
+        return [], '当前服务器不支持修改配置'
     if order.status not in {'completed', 'expiring', 'suspended'}:
-        return [], '当前状态不允许升级'
+        return [], '当前状态不允许修改配置'
     if not _has_main_proxy_link(order):
-        return [], '当前服务器没有主代理链接，请先在后台添加主链接后再升级'
+        return [], '当前服务器没有主代理链接，请先在后台添加主链接后再修改配置'
     current_price = _renewal_price(order, order.user)
     blocks, target_expiry, _ = _upgrade_blocks_and_expiry(order.service_expires_at)
     plans = list(CloudServerPlan.objects.filter(provider=order.provider, region_code=order.region_code, is_active=True).order_by('price', 'sort_order', 'id'))
     result = []
     for plan in plans:
-        target_price = _apply_cloud_discount(Decimal(plan.price), order.user.cloud_discount_rate)
-        if target_price <= current_price:
+        if plan.id == getattr(order, 'plan_id', None):
             continue
-        diff = ((target_price - current_price) * Decimal(blocks)).quantize(Decimal('0.01'))
-        result.append({'id': plan.id, 'name': plan.plan_name, 'price': str(target_price.quantize(Decimal('0.001'))), 'diff': str(diff.quantize(Decimal('0.001'))), 'target_days': blocks * 31, 'target_expiry': target_expiry})
+        target_price = _apply_cloud_discount(Decimal(plan.price), order.user.cloud_discount_rate)
+        price_delta = target_price - current_price
+        if price_delta == 0:
+            continue
+        diff = (max(price_delta, Decimal('0')) * Decimal(blocks)).quantize(Decimal('0.01'))
+        action = 'upgrade' if price_delta > 0 else 'downgrade'
+        result.append({'id': plan.id, 'name': plan.plan_name, 'price': str(target_price.quantize(Decimal('0.001'))), 'diff': str(diff.quantize(Decimal('0.001'))), 'target_days': blocks * 31, 'target_expiry': target_expiry, 'action': action})
     return result, None
 
 
 @sync_to_async
-def create_cloud_server_upgrade_order(order_id: int, user_id: int, target_plan_id: int):
-    order = _hydrate_order_from_proxy_asset(CloudServerOrder.objects.select_related('plan', 'user').filter(id=order_id, user_id=user_id).first())
+def create_cloud_server_upgrade_order(order_id: int, user_id: int, target_plan_id: int, admin: bool = False):
+    queryset = CloudServerOrder.objects.select_related('plan', 'user').filter(id=order_id)
+    if not admin:
+        queryset = queryset.filter(user_id=user_id)
+    order = _hydrate_order_from_proxy_asset(queryset.first())
     if not order:
         return None, '服务器记录不存在'
     if order.provider != 'aws_lightsail':
-        return None, '当前仅支持 AWS Lightsail 升级迁移'
+        return None, '当前仅支持 AWS Lightsail 修改配置迁移'
     if order.status not in {'completed', 'expiring', 'suspended'}:
-        return None, '当前状态不允许升级'
+        return None, '当前状态不允许修改配置'
     if not order.static_ip_name:
         return None, '当前服务器没有固定 IP，无法保证链接不变'
     if not _has_main_proxy_link(order):
-        return None, '当前服务器没有主代理链接，请先在后台添加主链接后再升级'
+        return None, '当前服务器没有主代理链接，请先在后台添加主链接后再修改配置'
     if not order.mtproxy_secret:
         return None, '当前服务器缺少 MTProxy 密钥，无法保证链接不变'
     target_plan = CloudServerPlan.objects.filter(id=target_plan_id, provider=order.provider, region_code=order.region_code, is_active=True).first()
@@ -2961,19 +2971,24 @@ def create_cloud_server_upgrade_order(order_id: int, user_id: int, target_plan_i
         return None, '目标套餐不存在'
     current_price = _renewal_price(order, order.user)
     target_price = _apply_cloud_discount(Decimal(target_plan.price), order.user.cloud_discount_rate)
-    if target_price <= current_price:
-        return None, '只能升级到更高价格的配置'
+    if target_plan.id == getattr(order, 'plan_id', None) or target_price == current_price:
+        return None, '目标套餐与当前配置相同'
     blocks, target_expiry, _ = _upgrade_blocks_and_expiry(order.service_expires_at)
-    diff = ((target_price - current_price) * Decimal(blocks)).quantize(Decimal('0.01'))
+    price_delta = target_price - current_price
+    diff = (max(price_delta, Decimal('0')) * Decimal(blocks)).quantize(Decimal('0.01'))
+    charged_amount = Decimal('0.00') if admin else diff
+    action_label = '升级配置' if price_delta > 0 else '降级配置'
+    operation_code = 'UPGRADE' if price_delta > 0 else 'DOWNGRADE'
+    initiator_label = '管理员' if admin else '用户'
     now = timezone.now()
     suffix = now.strftime('%m%d%H%M%S')
     old_public_ip = order.public_ip or order.previous_public_ip or ''
     old_port = order.mtproxy_port or 9528
     old_secret = order.mtproxy_secret or ''
-    new_order_no = _trim_operation_order_no(order, 'UPGRADE', suffix)
+    new_order_no = _trim_operation_order_no(order, operation_code, suffix)
     lifecycle_fields = _cloud_order_lifecycle_fields(target_expiry, getattr(order, 'renew_extension_days', 0))
     old_trace_note = (
-        f'升级配置追溯：来源订单 {order.order_no}；旧IP={old_public_ip or "-"}；旧端口={old_port or "-"}；'
+        f'{action_label}追溯：来源订单 {order.order_no}；旧IP={old_public_ip or "-"}；旧端口={old_port or "-"}；'
         f'旧secret={old_secret or "-"}；固定IP={order.static_ip_name or "-"}；'
         f'配置 {order.plan_name} -> {target_plan.plan_name}；补差价 {diff} USDT；新订单必须继承旧 secret，用户提供链接时必须逐项对照 IP/端口/secret。'
     )
@@ -2991,7 +3006,7 @@ def create_cloud_server_upgrade_order(order_id: int, user_id: int, target_plan_i
         quantity=1,
         currency='USDT',
         total_amount=diff,
-        pay_amount=diff,
+        pay_amount=charged_amount,
         pay_method='balance',
         status='paid',
         lifecycle_days=blocks * 31,
@@ -3010,27 +3025,33 @@ def create_cloud_server_upgrade_order(order_id: int, user_id: int, target_plan_i
         paid_at=now,
         created_at=now,
         updated_at=now,
-        provision_note='\n'.join(filter(None, [order.provision_note, f'用户发起升级配置：{order.plan_name} -> {target_plan.plan_name}，补差价 {diff} USDT，目标到期 {target_expiry:%Y-%m-%d %H:%M}，保持主/备用代理链路不变。', old_trace_note])),
+        provision_note='\n'.join(filter(None, [order.provision_note, f'{initiator_label}发起{action_label}：{order.plan_name} -> {target_plan.plan_name}，补差价 {diff} USDT，实扣 {charged_amount} USDT，目标到期 {target_expiry:%Y-%m-%d %H:%M}，保持主/备用代理链路不变。', old_trace_note])),
         **lifecycle_fields,
     )
     with transaction.atomic():
-        locked_order = CloudServerOrder.objects.select_for_update().filter(id=order.id, user_id=user_id).first()
+        locked_queryset = CloudServerOrder.objects.select_for_update().filter(id=order.id)
+        if not admin:
+            locked_queryset = locked_queryset.filter(user_id=user_id)
+        locked_order = locked_queryset.first()
         if not locked_order or locked_order.status not in {'completed', 'expiring', 'suspended'}:
-            return None, '当前状态不允许升级'
+            return None, '当前状态不允许修改配置'
         existing_upgrade = CloudServerOrder.objects.filter(replacement_for=locked_order, status__in={'paid', 'provisioning', 'completed'}).order_by('-created_at', '-id').first()
         if existing_upgrade:
-            return None, f'已有升级任务 {existing_upgrade.order_no}，请勿重复支付'
-        user = TelegramUser.objects.select_for_update().get(id=user_id)
+            return None, f'已有配置调整任务 {existing_upgrade.order_no}，请勿重复提交'
+        billing_user_id = locked_order.user_id
+        user = TelegramUser.objects.select_for_update().get(id=billing_user_id)
         current_balance = Decimal(str(user.balance or 0))
-        if current_balance < diff:
+        if not admin and current_balance < diff:
             return None, f'USDT 余额不足，需要补差价 {diff} U'
         old_balance = current_balance
-        user.balance = current_balance - diff
-        user.save(update_fields=['balance', 'updated_at'])
+        if not admin:
+            user.balance = current_balance - diff
+            user.save(update_fields=['balance', 'updated_at'])
         CloudServerOrder.objects.bulk_create([new_order])
         new_order = CloudServerOrder.objects.get(order_no=new_order_no)
-        record_balance_ledger(user, ledger_type='cloud_order_balance_pay', currency='USDT', old_balance=old_balance, new_balance=user.balance, related_type='cloud_order', related_id=new_order.id, description=f'云服务器升级补差价 #{new_order.order_no}')
-        source_note = '\n'.join(filter(None, [order.provision_note, f'已发起升级配置，新实例订单: {new_order.order_no}，补差价 {diff} USDT。旧机追溯：旧IP={old_public_ip or "-"}；旧端口={old_port or "-"}；旧secret={old_secret or "-"}；固定IP={order.static_ip_name or "-"}；新配置={target_plan.plan_name}；新服务器必须继承旧 secret。']))
+        if not admin and diff > 0:
+            record_balance_ledger(user, ledger_type='cloud_order_balance_pay', currency='USDT', old_balance=old_balance, new_balance=user.balance, related_type='cloud_order', related_id=new_order.id, description=f'云服务器{action_label}补差价 #{new_order.order_no}')
+        source_note = '\n'.join(filter(None, [order.provision_note, f'已由{initiator_label}发起{action_label}，新实例订单: {new_order.order_no}，补差价 {diff} USDT，实扣 {charged_amount} USDT。旧机追溯：旧IP={old_public_ip or "-"}；旧端口={old_port or "-"}；旧secret={old_secret or "-"}；固定IP={order.static_ip_name or "-"}；新配置={target_plan.plan_name}；新服务器必须继承旧 secret。']))
         CloudServerOrder.objects.filter(id=order.id).update(provision_note=source_note, updated_at=timezone.now())
     return new_order, None
 

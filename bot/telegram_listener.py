@@ -3,11 +3,17 @@
 from __future__ import annotations
 
 import asyncio
+import base64
+import json
 import logging
+import re
 import time
 from dataclasses import dataclass
+from urllib.parse import parse_qsl, urlsplit, urlunsplit
 
 import httpx
+from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
+from cryptography.hazmat.primitives.padding import PKCS7
 from asgiref.sync import sync_to_async
 from django.utils import timezone
 
@@ -24,6 +30,11 @@ _PUSH_CONFIG_CACHE = {
         'enabled': False,
         'bark_url': '',
         'private_enabled': True,
+        'encryption_key': '',
+        'encryption_iv': '',
+        'encryption_algorithm': 'AES256',
+        'encryption_mode': 'CBC',
+        'encryption_padding': 'pkcs7',
         'chat_ids': set(),
     },
 }
@@ -117,6 +128,11 @@ def _telegram_push_config() -> dict:
         'enabled': _config_bool(get_runtime_config('telegram_listener_push_enabled', '0')),
         'bark_url': str(get_runtime_config('telegram_listener_push_bark_url', '') or '').strip(),
         'private_enabled': _config_bool(get_runtime_config('telegram_listener_push_private_enabled', '1')),
+        'encryption_key': str(get_runtime_config('telegram_listener_push_bark_encryption_key', '') or '').strip(),
+        'encryption_iv': str(get_runtime_config('telegram_listener_push_bark_encryption_iv', '') or '').strip(),
+        'encryption_algorithm': str(get_runtime_config('telegram_listener_push_bark_encryption_algorithm', 'AES256') or 'AES256').strip().upper(),
+        'encryption_mode': str(get_runtime_config('telegram_listener_push_bark_encryption_mode', 'CBC') or 'CBC').strip().upper(),
+        'encryption_padding': str(get_runtime_config('telegram_listener_push_bark_encryption_padding', 'pkcs7') or 'pkcs7').strip(),
     }
 
 
@@ -130,14 +146,94 @@ async def _cached_telegram_push_config() -> dict:
     return value
 
 
+def _split_bark_url(bark_url: str) -> tuple[str, dict[str, str], str | None]:
+    parsed = urlsplit(bark_url)
+    query = dict(parse_qsl(parsed.query, keep_blank_values=True))
+    path_parts = [part for part in parsed.path.split('/') if part]
+    base_path = f'/{path_parts[0]}' if path_parts else parsed.path
+    base_url = urlunsplit((parsed.scheme, parsed.netloc, base_path, '', ''))
+    path_title = path_parts[1] if len(path_parts) > 1 else None
+    return base_url, query, path_title
+
+
+def _bark_binary_value(value: str, expected_length: int, field_name: str) -> bytes:
+    raw = str(value or '').strip()
+    if len(raw) == expected_length * 2 and re.fullmatch(r'[0-9a-fA-F]+', raw):
+        data = bytes.fromhex(raw)
+    else:
+        data = raw.encode('utf-8')
+    if len(data) != expected_length:
+        raise ValueError(f'Bark 加密 {field_name} 长度必须是 {expected_length} 字节')
+    return data
+
+
+def _bark_key_bytes(value: str, expected_length: int) -> bytes:
+    return _bark_binary_value(value, expected_length, 'key')
+
+
+def _bark_iv_bytes(value: str, expected_length: int) -> bytes:
+    return _bark_binary_value(value, expected_length, 'iv')
+
+
+def _bark_encrypt_payload(payload: dict[str, str], config: dict) -> tuple[str, str]:
+    algorithm = str(config.get('encryption_algorithm') or 'AES256').upper()
+    mode_name = str(config.get('encryption_mode') or 'CBC').upper()
+    padding_name = str(config.get('encryption_padding') or 'pkcs7')
+    key_lengths = {'AES128': 16, 'AES192': 24, 'AES256': 32}
+    if algorithm not in key_lengths:
+        raise ValueError('Bark 加密算法只支持 AES128/AES192/AES256')
+    key = _bark_key_bytes(str(config.get('encryption_key') or ''), key_lengths[algorithm])
+    iv = str(config.get('encryption_iv') or '')
+    data = json.dumps(payload, ensure_ascii=False, separators=(',', ':')).encode('utf-8')
+    if mode_name == 'GCM':
+        iv_bytes = _bark_iv_bytes(iv, 12)
+        encryptor = Cipher(algorithms.AES(key), modes.GCM(iv_bytes)).encryptor()
+        ciphertext = encryptor.update(data) + encryptor.finalize() + encryptor.tag
+    elif mode_name == 'CBC':
+        iv_bytes = _bark_iv_bytes(iv, 16)
+        if padding_name.lower() == 'pkcs7':
+            padder = PKCS7(128).padder()
+            data = padder.update(data) + padder.finalize()
+        elif padding_name != 'noPadding':
+            raise ValueError('Bark 加密 padding 只支持 pkcs7/noPadding')
+        encryptor = Cipher(algorithms.AES(key), modes.CBC(iv_bytes)).encryptor()
+        ciphertext = encryptor.update(data) + encryptor.finalize()
+    elif mode_name == 'ECB':
+        if padding_name.lower() == 'pkcs7':
+            padder = PKCS7(128).padder()
+            data = padder.update(data) + padder.finalize()
+        elif padding_name != 'noPadding':
+            raise ValueError('Bark 加密 padding 只支持 pkcs7/noPadding')
+        encryptor = Cipher(algorithms.AES(key), modes.ECB()).encryptor()
+        ciphertext = encryptor.update(data) + encryptor.finalize()
+    else:
+        raise ValueError('Bark 加密模式只支持 CBC/ECB/GCM')
+    return base64.b64encode(ciphertext).decode('ascii'), iv
+
+
+def _build_bark_request(bark_url: str, *, title: str, body: str, config: dict) -> tuple[str, dict[str, str]]:
+    base_url, params, path_title = _split_bark_url(bark_url)
+    payload = {**params, 'title': title or path_title or '', 'body': body or ''}
+    if str(config.get('encryption_key') or '').strip():
+        ciphertext, iv = _bark_encrypt_payload(payload, config)
+        encrypted_params = {'ciphertext': ciphertext}
+        if iv:
+            encrypted_params['iv'] = iv
+        return base_url, encrypted_params
+    return bark_url, {'title': title, 'body': body}
+
+
 async def _send_listener_push(*, title: str, body: str) -> bool:
     config = await _cached_telegram_push_config()
     bark_url = str(config.get('bark_url') or '').strip()
     if not config.get('enabled') or not bark_url:
         return False
     try:
+        url, params = _build_bark_request(bark_url, title=title, body=body, config=config)
         async with httpx.AsyncClient(timeout=10) as client:
-            response = await client.get(bark_url, params={'title': title, 'body': body})
+            response = await client.get(url, params=params)
+        if not response.is_success:
+            logger.warning('Telegram个人号 Bark 推送失败 status=%s body=%s', response.status_code, response.text[:300])
         return response.is_success
     except Exception as exc:
         logger.warning('Telegram个人号 Bark 推送失败 err=%s', exc)
@@ -174,11 +270,7 @@ async def _record_event(account: LoginAccountSnapshot, event):
             title=chat_title,
             username=_entity_username(chat),
         )
-        enabled = bool(flags.get('enabled'))
         group_push_enabled = bool(flags.get('push_enabled'))
-        if not enabled and not group_push_enabled:
-            await _mark_account(account.id, 'logged_in')
-            return
     await record_telegram_message(
         tg_user_id=int(counterpart.id),
         chat_id=chat_id,
@@ -186,7 +278,7 @@ async def _record_event(account: LoginAccountSnapshot, event):
         direction=TelegramChatMessage.DIRECTION_OUT if is_outgoing else TelegramChatMessage.DIRECTION_IN,
         content_type=content_type,
         text=text,
-        username=None if is_group_chat else _entity_username(counterpart),
+        username=_entity_username(counterpart),
         first_name=_entity_name(counterpart),
         login_account_id=account.id,
         chat_title=chat_title,

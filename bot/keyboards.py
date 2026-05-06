@@ -555,7 +555,7 @@ def cloud_server_detail(order_id: int, can_renew: bool, can_change_ip: bool, can
     elif can_reinit:
         kb.button(text='🛠 重新安装', callback_data=f'cloud:reinit:{order_id}')
     if can_upgrade:
-        kb.button(text='⬆️ 升级配置', callback_data=f'cloud:upgrade:{order_id}')
+        kb.button(text='⚙️ 修改配置', callback_data=f'cloud:upgrade:{order_id}')
     if can_refund:
         kb.button(text='💸 退款', callback_data=f'cloud:refund:{order_id}')
     kb.button(text='🔙 返回列表', callback_data=back_callback)
@@ -742,13 +742,20 @@ def cloud_ip_query_result(result_items, renewable_items, page: int = 1, total_pa
             if include_start:
                 row.append(InlineKeyboardButton(text='▶️ 开机', callback_data=f'cloud:start:{order_id}'))
             kb.row(*row)
+            action_row = []
             if include_reinit and item.get('can_reinit'):
-                kb.row(InlineKeyboardButton(text=f'🛠 重装IP {ip}', callback_data=f'cloud:reinit:{order_id}'))
+                action_row.append(InlineKeyboardButton(text=f'🛠 重装IP {ip}', callback_data=f'cloud:reinit:{order_id}'))
+            if include_reinit and item.get('can_config'):
+                action_row.append(InlineKeyboardButton(text=f'⚙️ 修改配置 {ip}', callback_data=f'cloud:upgrade:{order_id}'))
+            if action_row:
+                kb.row(*action_row)
         elif asset_id > 0:
             row = [InlineKeyboardButton(text=f'🔄 续费IP {ip}', callback_data=f'cloud:assetaction:renew:{asset_id}')]
             if include_reinit and item.get('can_reinit'):
                 row.append(InlineKeyboardButton(text=f'🛠 重装IP {ip}', callback_data=f'cloud:assetinit:{asset_id}:cloud:querymenu'))
             kb.row(*row)
+            if include_reinit and item.get('can_config'):
+                kb.row(InlineKeyboardButton(text=f'⚙️ 修改配置 {ip}', callback_data=f'cloud:assetaction:upgrade:{asset_id}'))
     nav = []
     if page > 1:
         nav.append(InlineKeyboardButton(text='⬅️ 上一页', callback_data=f'cloud:queryip:page:{page - 1}'))

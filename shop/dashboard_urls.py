@@ -32,6 +32,7 @@ urlpatterns = [
     path('telegram/chats/archive/', bot_api.archive_telegram_chat, name='telegram-chat-archive'),
     path('telegram/groups/', bot_api.telegram_group_filters_list, name='telegram-groups-list'),
     path('telegram/groups/create/', bot_api.create_telegram_group_filter, name='telegram-group-create'),
+    path('telegram/groups/<int:group_id>/detail/', bot_api.telegram_group_filter_detail, name='telegram-group-detail'),
     path('telegram/groups/<int:group_id>/', bot_api.update_telegram_group_filter, name='telegram-group-update'),
     path('telegram/messages/send/', bot_api.send_telegram_chat_message, name='telegram-message-send'),
     path('telegram/messages/', bot_api.telegram_chat_messages, name='telegram-chat-messages'),

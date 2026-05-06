@@ -18,7 +18,7 @@ from django.contrib.auth import authenticate, get_user_model, login, logout
 from django.contrib.auth.decorators import login_required
 from django.contrib.sessions.models import Session
 from django.db import ProgrammingError, transaction
-from django.db.models import Q, CharField, Count, Sum
+from django.db.models import Q, CharField, Count, Max, Sum
 from django.db.models.functions import Cast
 from django.http import JsonResponse
 from django.contrib.auth.password_validation import validate_password
@@ -717,6 +717,21 @@ def _telegram_group_filter_payload(item):
     }
 
 
+def _telegram_group_member_payload(item, latest):
+    username = latest.username_snapshot or (latest.user.primary_username if latest.user_id and latest.user else '')
+    first_name = latest.first_name_snapshot or (latest.user.first_name if latest.user_id and latest.user else '')
+    display_name = first_name or (f'@{username}' if username else str(item['tg_user_id']))
+    return {
+        'tg_user_id': item['tg_user_id'],
+        'username': username or '',
+        'first_name': first_name or '',
+        'display_name': display_name,
+        'display_label': f'{display_name} (ID: {item["tg_user_id"]})',
+        'message_count': item['message_count'],
+        'last_seen_at': _iso(item['last_seen_at']),
+    }
+
+
 def _limited_username_string(value):
     result = []
     for username in TelegramUser.normalize_usernames(value):
@@ -1287,6 +1302,11 @@ def site_config_groups(request):
             'telegram_listener_push_enabled',
             'telegram_listener_push_bark_url',
             'telegram_listener_push_private_enabled',
+            'telegram_listener_push_bark_encryption_key',
+            'telegram_listener_push_bark_encryption_iv',
+            'telegram_listener_push_bark_encryption_algorithm',
+            'telegram_listener_push_bark_encryption_mode',
+            'telegram_listener_push_bark_encryption_padding',
             'bot_admin_chat_id',
             'cloud_auto_renew_execution_notify_enabled',
             'cloud_auto_renew_execution_notify_chat_ids',
@@ -2293,6 +2313,43 @@ def create_telegram_group_filter(request):
         collapsed=_payload_bool(payload, 'collapsed'),
     )
     return _ok(_telegram_group_filter_payload(item))
+
+
+@dashboard_login_required
+@require_GET
+def telegram_group_filter_detail(request, group_id: int):
+    item = TelegramGroupFilter.objects.filter(id=group_id).first()
+    if not item:
+        return _error('群组不存在', status=404)
+    messages = list(
+        TelegramChatMessage.objects.filter(chat_id=item.chat_id)
+        .select_related('user', 'login_account')
+        .order_by('-created_at', '-id')[:100]
+    )
+    latest_by_user = {}
+    for message_item in messages:
+        latest_by_user.setdefault(message_item.tg_user_id, message_item)
+    member_rows = list(
+        TelegramChatMessage.objects.filter(chat_id=item.chat_id)
+        .values('tg_user_id')
+        .annotate(message_count=Count('id'), last_seen_at=Max('created_at'))
+        .order_by('-last_seen_at')[:100]
+    )
+    missing_user_ids = [row['tg_user_id'] for row in member_rows if row['tg_user_id'] not in latest_by_user]
+    if missing_user_ids:
+        for message_item in (
+            TelegramChatMessage.objects.filter(chat_id=item.chat_id, tg_user_id__in=missing_user_ids)
+            .select_related('user')
+            .order_by('-created_at', '-id')
+        ):
+            latest_by_user.setdefault(message_item.tg_user_id, message_item)
+            if len(latest_by_user) >= len(member_rows):
+                break
+    return _ok({
+        'group': _telegram_group_filter_payload(item),
+        'members': [_telegram_group_member_payload(row, latest_by_user[row['tg_user_id']]) for row in member_rows if row['tg_user_id'] in latest_by_user],
+        'messages': [_telegram_message_payload(message_item) for message_item in messages],
+    })
 
 
 @csrf_exempt

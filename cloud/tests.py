@@ -25,7 +25,7 @@ from cloud.provisioning import (
     _mark_rebuild_source_pending_deletion,
     _mark_success,
 )
-from cloud.services import apply_cloud_server_renewal, create_cloud_server_rebuild_order, create_cloud_server_renewal, create_cloud_server_upgrade_order, delay_cloud_server_expiry, ensure_cloud_asset_operation_order, list_retained_ip_renewal_plans, mark_cloud_server_ip_change_requested, replace_cloud_asset_order_by_admin
+from cloud.services import apply_cloud_server_renewal, create_cloud_server_rebuild_order, create_cloud_server_renewal, create_cloud_server_upgrade_order, delay_cloud_server_expiry, ensure_cloud_asset_operation_order, list_cloud_server_upgrade_plans, list_retained_ip_renewal_plans, mark_cloud_server_ip_change_requested, replace_cloud_asset_order_by_admin
 from cloud.sync_safety import get_missing_confirmation_threshold
 from cloud.api import _cloud_order_source_tags, auto_renew_task_detail, cloud_order_detail, cloud_orders_list, delete_cloud_asset, delete_server, run_auto_renew_order, run_auto_renew_tasks, sync_cloud_asset_status, tasks_overview, update_cloud_asset
 from core.cloud_accounts import cloud_account_label
@@ -232,9 +232,61 @@ class CloudServerServicesTestCase(TestCase):
         self.assertIsNotNone(first_order)
         self.assertIsNone(first_err)
         self.assertIsNone(second_order)
-        self.assertIn('已有升级任务', second_err)
+        self.assertIn('已有配置调整任务', second_err)
         self.assertEqual(CloudServerOrder.objects.filter(replacement_for=source).count(), 1)
         self.assertEqual(TelegramUser.objects.get(id=self.user.id).balance, balance_after_first)
+
+    def test_cloud_config_change_lists_and_creates_downgrade_order(self):
+        small_plan = CloudServerPlan.objects.create(
+            provider=self.plan.provider,
+            region_code=self.plan.region_code,
+            region_name=self.plan.region_name,
+            plan_name='Nano 512M 20G 1TB',
+            cpu='1核',
+            memory='512MB',
+            storage='20GB SSD',
+            bandwidth='1TB',
+            price='10.00',
+            currency='USDT',
+            is_active=True,
+            sort_order=99,
+        )
+        source = CloudServerOrder.objects.create(
+            order_no='HB-TEST-DOWNGRADE-SOURCE',
+            user=self.user,
+            plan=self.plan,
+            provider=self.plan.provider,
+            region_code=self.plan.region_code,
+            region_name=self.plan.region_name,
+            plan_name=self.plan.plan_name,
+            quantity=1,
+            currency='USDT',
+            total_amount='19.00',
+            pay_amount='19.00',
+            pay_method='balance',
+            status='completed',
+            public_ip='8.8.4.5',
+            previous_public_ip='8.8.4.5',
+            instance_id='downgrade-source-instance',
+            static_ip_name='StaticIp-downgrade-source',
+            mtproxy_port=9528,
+            mtproxy_secret='0123456789abcdef0123456789abcdef',
+            mtproxy_link='tg://proxy?server=8.8.4.5&port=9528&secret=0123456789abcdef0123456789abcdef',
+            proxy_links=[{'label': '主链路', 'url': 'tg://proxy?server=8.8.4.5&port=9528&secret=0123456789abcdef0123456789abcdef'}],
+            service_started_at=timezone.now() - timezone.timedelta(days=1),
+            service_expires_at=timezone.now() + timezone.timedelta(days=1),
+        )
+
+        plans, err = async_to_sync(list_cloud_server_upgrade_plans)(source.id, self.user.id)
+        new_order, create_err = async_to_sync(create_cloud_server_upgrade_order)(source.id, self.user.id, small_plan.id)
+
+        self.assertIsNone(err)
+        self.assertTrue(any(plan['id'] == small_plan.id and plan['action'] == 'downgrade' for plan in plans))
+        self.assertIsNone(create_err)
+        self.assertIsNotNone(new_order)
+        self.assertEqual(new_order.plan_id, small_plan.id)
+        self.assertEqual(new_order.pay_amount, Decimal('0.000000000'))
+        self.assertIn('DOWNGRADE', new_order.order_no)
 
     def test_due_orders_use_order_expiry_for_lightsail_instead_of_stale_asset_expiry(self):
         order = CloudServerOrder.objects.create(
