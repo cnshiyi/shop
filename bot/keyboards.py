@@ -757,7 +757,16 @@ def cloud_ip_query_result(result_items, renewable_items, page: int = 1, total_pa
     if nav:
         kb.row(*nav)
     kb.row(InlineKeyboardButton(text='🔙 返回个人中心', callback_data='profile:back_to_menu'))
-    return kb.as_markup()
+    return _log_inline_keyboard(
+        'cloud_ip_query_result',
+        kb.as_markup(),
+        result_count=len(result_items or []),
+        renewable_count=len(renewable_items or []),
+        page=page,
+        total_pages=total_pages,
+        include_start=include_start,
+        include_reinit=include_reinit,
+    )
 
 
 def recharge_list(recharges, page: int, total_pages: int):

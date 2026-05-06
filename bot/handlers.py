@@ -500,7 +500,16 @@ async def _reply_cloud_query_results(message: Message, raw_text: str, state: FSM
         await state.update_data(cloud_query_results=results)
         await state.set_state(CloudQueryStates.waiting_ip)
     if not results:
-        await message.answer(_bot_text('bot_query_ip_empty', '🔎 IP查询到期\n\n未查询到可续费的有效 IP 记录。'), reply_markup=order_query_menu())
+        text = _bot_text('bot_query_ip_empty', '🔎 IP查询到期\n\n未查询到可续费的有效 IP 记录。')
+        sent = await message.answer(text, reply_markup=order_query_menu())
+        logger.info(
+            'BOT_MESSAGE_SEND route=cloud_ip_query_empty user_id=%s chat_id=%s reply_to=%s sent_message_id=%s text_preview=%s',
+            getattr(message.from_user, 'id', None),
+            message.chat.id,
+            message.message_id,
+            getattr(sent, 'message_id', None),
+            text.replace('\n', ' ')[:180],
+        )
         return
     page = 1
     per_page = 8
@@ -508,7 +517,20 @@ async def _reply_cloud_query_results(message: Message, raw_text: str, state: FSM
     page_items = results[(page - 1) * per_page: page * per_page]
     text = '🔎 IP批量查询结果\n\n' + '\n\n'.join(item['text'] for item in page_items)
     renewable_items = [{'ip': item['ip'], 'order_id': item.get('order_id') or 0, 'asset_id': item.get('asset_id') or 0, 'can_reinit': item.get('can_reinit')} for item in page_items if item['renewable'] and (item.get('order_id') or item.get('asset_id'))]
-    await message.answer(text, reply_markup=cloud_ip_query_result(page_items, renewable_items, page, total_pages, include_start=include_start, include_reinit=include_start), parse_mode='HTML')
+    sent = await message.answer(text, reply_markup=cloud_ip_query_result(page_items, renewable_items, page, total_pages, include_start=include_start, include_reinit=include_start), parse_mode='HTML')
+    logger.info(
+        'BOT_MESSAGE_SEND route=cloud_ip_query_result user_id=%s chat_id=%s reply_to=%s sent_message_id=%s result_count=%s renewable_count=%s page=%s total_pages=%s include_start=%s text_preview=%s',
+        getattr(message.from_user, 'id', None),
+        message.chat.id,
+        message.message_id,
+        getattr(sent, 'message_id', None),
+        len(results),
+        len(renewable_items),
+        page,
+        total_pages,
+        include_start,
+        text.replace('\n', ' ')[:180],
+    )
 
 
 @sync_to_async
