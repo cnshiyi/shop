@@ -57,6 +57,8 @@ from cloud.services import (
     get_user_reminder_summary,
     get_cloud_server_by_ip,
     get_cloud_server_for_admin,
+    get_proxy_asset_by_ip_for_admin,
+    get_proxy_asset_detail_for_admin,
     get_user_cloud_server,
     get_user_proxy_asset_detail,
     ensure_cloud_asset_operation_order,
@@ -440,6 +442,25 @@ async def _reply_cloud_query_results(message: Message, raw_text: str, state: FSM
     results = []
     for index, ip in enumerate(query_ips):
         order = await get_cloud_server_by_ip(ip)
+        if not order and include_start:
+            asset = await get_proxy_asset_by_ip_for_admin(ip)
+            if asset:
+                display_ip = str(asset.public_ip or asset.previous_public_ip or ip).strip()
+                expires_at = getattr(asset, 'service_expires_at', None)
+                expires_text = _format_local_dt(expires_at).split(' ', 1)[0] if expires_at else '未设置'
+                status_text = asset.get_status_display() if hasattr(asset, 'get_status_display') else str(getattr(asset, 'status', '') or '未知')
+                can_admin_asset_reinit = bool(asset.provider == 'aws_lightsail' and display_ip)
+                results.append({
+                    'ip': display_ip,
+                    'text': f'IP: <code>{escape(display_ip)}</code>\n到期时间: {expires_text}\n自动续费: 未绑定订单\n状态: {escape(status_text)}\n类型: 人工代理资产',
+                    'renewable': True,
+                    'order_id': 0,
+                    'asset_id': asset.id,
+                    'can_reinit': can_admin_asset_reinit,
+                    '_expires_at': expires_at,
+                    '_input_index': index,
+                })
+            continue
         if not order:
             continue
         display_ip = str(order.public_ip or order.previous_public_ip or ip).strip()
@@ -461,6 +482,7 @@ async def _reply_cloud_query_results(message: Message, raw_text: str, state: FSM
             'text': f'IP: <code>{escape(display_ip)}</code>\n到期时间: {expires_text}\n自动续费: {auto_renew_text}\n状态: {status_text}{balance_block}',
             'renewable': True,
             'order_id': order.id,
+            'asset_id': 0,
             'can_reinit': can_admin_reinit,
             '_expires_at': expires_at,
             '_input_index': index,
@@ -485,7 +507,7 @@ async def _reply_cloud_query_results(message: Message, raw_text: str, state: FSM
     total_pages = max(1, math.ceil(len(results) / per_page))
     page_items = results[(page - 1) * per_page: page * per_page]
     text = '🔎 IP批量查询结果\n\n' + '\n\n'.join(item['text'] for item in page_items)
-    renewable_items = [{'ip': item['ip'], 'order_id': item['order_id'], 'can_reinit': item.get('can_reinit')} for item in page_items if item['renewable'] and item['order_id']]
+    renewable_items = [{'ip': item['ip'], 'order_id': item.get('order_id') or 0, 'asset_id': item.get('asset_id') or 0, 'can_reinit': item.get('can_reinit')} for item in page_items if item['renewable'] and (item.get('order_id') or item.get('asset_id'))]
     await message.answer(text, reply_markup=cloud_ip_query_result(page_items, renewable_items, page, total_pages, include_start=include_start, include_reinit=include_start), parse_mode='HTML')
 
 
@@ -1576,9 +1598,12 @@ async def _validate_reinstall_proxy_link(order, link_data: dict[str, str], probe
 
 
 @sync_to_async
-def _save_asset_main_proxy_link(asset_id: int, user_id: int, link_data: dict[str, str]):
+def _save_asset_main_proxy_link(asset_id: int, user_id: int | None, link_data: dict[str, str]):
     from cloud.models import CloudAsset
-    asset = CloudAsset.objects.get(id=asset_id, user_id=user_id)
+    qs = CloudAsset.objects.filter(id=asset_id)
+    if user_id is not None:
+        qs = qs.filter(user_id=user_id)
+    asset = qs.get()
     asset.mtproxy_link = link_data['url']
     asset.mtproxy_secret = link_data['secret']
     asset.mtproxy_host = link_data['server']
@@ -2459,7 +2484,7 @@ def register_handlers(dp: Dispatcher):
         page = min(page, total_pages)
         page_items = results[(page - 1) * per_page: page * per_page]
         text = '🔎 IP批量查询结果\n\n' + '\n\n'.join(item['text'] for item in page_items)
-        renewable_items = [{'ip': item['ip'], 'order_id': item['order_id'], 'can_reinit': item.get('can_reinit')} for item in page_items if item['renewable'] and item['order_id']]
+        renewable_items = [{'ip': item['ip'], 'order_id': item.get('order_id') or 0, 'asset_id': item.get('asset_id') or 0, 'can_reinit': item.get('can_reinit')} for item in page_items if item['renewable'] and (item.get('order_id') or item.get('asset_id'))]
         is_admin = await _is_admin_chat(callback.message)
         await _safe_edit_text(callback.message, text, reply_markup=cloud_ip_query_result(page_items, renewable_items, page, total_pages, include_start=is_admin, include_reinit=is_admin), parse_mode='HTML')
 
@@ -3172,7 +3197,7 @@ def register_handlers(dp: Dispatcher):
             prefix = ':'.join(parts[4:-1])
             page = parts[-1]
             back_callback = f'{prefix}:{page}'
-        item = await get_user_proxy_asset_detail(item_id, user.id, item_kind)
+        item = await get_proxy_asset_detail_for_admin(item_id, item_kind) if await _is_admin_chat(callback.message) else await get_user_proxy_asset_detail(item_id, user.id, item_kind)
         if not item:
             logger.warning('CLOUD_ASSET_DETAIL_DENIED user_id=%s item_id=%s callback_data=%s', user.id, item_id, callback.data)
             await _safe_callback_answer(callback, '代理记录不存在', show_alert=True)
@@ -3295,11 +3320,12 @@ def register_handlers(dp: Dispatcher):
         user = await get_or_create_user(callback.from_user.id, callback.from_user.username, callback.from_user.first_name)
         parts = callback.data.split(':')
         asset_id = int(parts[2])
-        item = await get_user_proxy_asset_detail(asset_id, user.id, 'asset')
+        is_admin = await _is_admin_chat(callback.message)
+        item = await get_proxy_asset_detail_for_admin(asset_id, 'asset') if is_admin else await get_user_proxy_asset_detail(asset_id, user.id, 'asset')
         if not item:
             await _safe_callback_answer(callback, '代理记录不存在', show_alert=True)
             return
-        await state.update_data(reinstall_asset_id=asset_id, reinstall_order_id=0)
+        await state.update_data(reinstall_asset_id=asset_id, reinstall_order_id=0, reinstall_admin=is_admin)
         await state.set_state(CustomServerStates.waiting_reinstall_link)
         logger.info('CLOUD_ASSET_REINSTALL_LINK_WAIT user_id=%s asset_id=%s ip=%s', user.id, asset_id, getattr(item, 'public_ip', None))
         await callback.message.reply(_bot_text('bot_reinstall_need_main_link', '当前服务器缺少主代理链接。请直接发送这台服务器的主代理链接，我会先校验 IP、端口和服务器实际密钥，再让你确认是否重新安装。'))
@@ -3315,7 +3341,8 @@ def register_handlers(dp: Dispatcher):
         await _safe_callback_answer(callback, '已确认，后台处理中')
         await _safe_remove_inline_keyboard(callback.message)
         user = await get_or_create_user(callback.from_user.id, callback.from_user.username, callback.from_user.first_name)
-        item = await get_user_proxy_asset_detail(asset_id, user.id, 'asset')
+        is_admin = await _is_admin_chat(callback.message)
+        item = await get_proxy_asset_detail_for_admin(asset_id, 'asset') if is_admin else await get_user_proxy_asset_detail(asset_id, user.id, 'asset')
         if not item:
             await callback.message.reply('代理记录不存在，请重新进入详情并重新生成按钮。')
             return
@@ -3323,12 +3350,12 @@ def register_handlers(dp: Dispatcher):
             logger.info('CLOUD_ASSET_REINIT_DUPLICATE user_id=%s asset_id=%s ip=%s', user.id, asset_id, getattr(item, 'public_ip', None))
             await callback.message.reply('这台代理正在重新安装，请勿重复点击；如需再次操作，请等待当前任务结束后重新生成按钮。')
             return
-        order, err = await ensure_cloud_asset_operation_order(asset_id, user.id)
+        order, err = await ensure_cloud_asset_operation_order(asset_id, user.id, admin=is_admin)
         if err or not order:
             logger.warning('CLOUD_ASSET_REINIT_DENIED user_id=%s asset_id=%s reason=%s', user.id, asset_id, err or '无法创建代理操作订单')
             await callback.message.reply(err or '无法创建代理操作订单，请重新进入详情并重新生成按钮。')
             return
-        rebuild_order = await mark_cloud_server_reinit_requested(order.id, user.id)
+        rebuild_order = await mark_cloud_server_reinit_requested(order.id, None if is_admin else user.id)
         if not rebuild_order:
             logger.warning('CLOUD_ASSET_REINIT_DENIED user_id=%s asset_id=%s order_id=%s reason=missing_order', user.id, asset_id, order.id)
             await callback.message.reply('服务器记录不存在，请重新进入详情并重新生成按钮。')
@@ -3853,7 +3880,7 @@ def register_handlers(dp: Dispatcher):
         is_admin_reinstall = bool(data.get('reinstall_admin')) and await _is_admin_chat(message)
         user = await get_or_create_user(message.from_user.id, message.from_user.username, message.from_user.first_name)
         if asset_id:
-            item = await get_user_proxy_asset_detail(asset_id, user.id, 'asset')
+            item = await get_proxy_asset_detail_for_admin(asset_id, 'asset') if is_admin_reinstall else await get_user_proxy_asset_detail(asset_id, user.id, 'asset')
         else:
             item = await get_cloud_server_for_admin(order_id) if is_admin_reinstall else await get_user_cloud_server(order_id, user.id)
         if not item:
@@ -3869,7 +3896,7 @@ def register_handlers(dp: Dispatcher):
             await message.reply(_bot_text_format('bot_reinstall_validate_failed', '校验失败：{reason}', reason=reason))
             return
         if asset_id:
-            saved = await _save_asset_main_proxy_link(asset_id, user.id, link_data)
+            saved = await _save_asset_main_proxy_link(asset_id, None if is_admin_reinstall else user.id, link_data)
             token = await _issue_reinstall_confirm_token(state, kind='asset', item_id=saved.id)
             await message.reply(_bot_text('bot_reinstall_validate_ok', '主代理链接校验通过。\n\n⚠️ 确认重新安装？重新安装大约需要 5 分钟，期间代理可能会断连。'), reply_markup=_asset_reinstall_confirm_keyboard(saved.id, token))
             return

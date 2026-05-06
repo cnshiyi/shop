@@ -1284,6 +1284,31 @@ def get_user_proxy_asset_detail(item_id: int, user_id: int, kind: str):
     return _proxy_asset_view(asset) if asset else None
 
 
+@sync_to_async
+def get_proxy_asset_detail_for_admin(item_id: int, kind: str = 'asset'):
+    if kind == 'server':
+        server = Server.objects.filter(id=item_id).first()
+        return _proxy_server_view(server) if server else None
+    asset = CloudAsset.objects.filter(id=item_id).first()
+    return _proxy_asset_view(asset) if asset else None
+
+
+@sync_to_async
+def get_proxy_asset_by_ip_for_admin(ip: str):
+    normalized_ip = (ip or '').strip()
+    if not normalized_ip:
+        return None
+    ip_q = Q(public_ip=normalized_ip) | Q(previous_public_ip=normalized_ip)
+    asset = (
+        CloudAsset.objects.filter(ip_q, kind=CloudAsset.KIND_SERVER)
+        .exclude(status__in=_INACTIVE_ASSET_STATUSES)
+        .select_related('order', 'user')
+        .order_by('-updated_at', '-id')
+        .first()
+    )
+    return _proxy_asset_view(asset) if asset else None
+
+
 def _extract_asset_mtproxy_fields(note: str) -> tuple[str, str, str]:
     for raw_link in re.findall(r'tg://proxy\?[^"\'\s<>]+', note or ''):
         link = raw_link.rstrip(',.，。')
@@ -2041,6 +2066,7 @@ def _create_asset_operation_order(asset: CloudAsset, user_id: int) -> CloudServe
         service_started_at=asset.created_at or now,
         service_expires_at=asset.actual_expires_at,
         server_name=asset.asset_name,
+        static_ip_name=asset.asset_name if provider == CloudServerPlan.PROVIDER_AWS_LIGHTSAIL else '',
         mtproxy_port=asset.mtproxy_port or 9528,
         mtproxy_link=asset.mtproxy_link,
         proxy_links=asset.proxy_links or [],
@@ -2071,23 +2097,26 @@ def _create_asset_operation_order(asset: CloudAsset, user_id: int) -> CloudServe
 
 
 @sync_to_async
-def ensure_cloud_asset_operation_order(asset_id: int, user_id: int):
-    asset = CloudAsset.objects.select_related('order', 'user', 'cloud_account').filter(
+def ensure_cloud_asset_operation_order(asset_id: int, user_id: int, admin: bool = False):
+    asset_qs = CloudAsset.objects.select_related('order', 'user', 'cloud_account').filter(
         id=asset_id,
-        user_id=user_id,
         kind=CloudAsset.KIND_SERVER,
-    ).exclude(status__in=_INACTIVE_ASSET_STATUSES).first()
+    )
+    if not admin:
+        asset_qs = asset_qs.filter(user_id=user_id)
+    asset = asset_qs.exclude(status__in=_INACTIVE_ASSET_STATUSES).first()
     if not asset:
         return None, '代理记录不存在'
     if not str(asset.public_ip or '').strip():
         return None, '代理缺少公网 IP，暂时无法操作'
-    order = asset.order if asset.order_id and getattr(asset.order, 'user_id', None) == user_id else None
+    operation_user_id = asset.user_id or user_id
+    order = asset.order if asset.order_id and (admin or getattr(asset.order, 'user_id', None) == operation_user_id) else None
     if not order:
-        order = _create_asset_operation_order(asset, user_id)
+        order = _create_asset_operation_order(asset, operation_user_id)
         if not order:
             return None, '该地区没有可用套餐，无法创建操作订单'
     order = _hydrate_order_from_proxy_asset(order, asset=asset)
-    order.user_id = user_id
+    order.user_id = order.user_id or operation_user_id
     if order.status not in {'completed', 'expiring', 'suspended', 'renew_pending', 'paid', 'provisioning'}:
         order.status = 'completed'
     order.provider = order.provider or asset.provider or CloudServerPlan.PROVIDER_AWS_LIGHTSAIL
@@ -2105,6 +2134,8 @@ def ensure_cloud_asset_operation_order(asset_id: int, user_id: int):
     order.login_user = order.login_user or asset.login_user
     order.login_password = order.login_password or asset.login_password
     order.service_expires_at = order.service_expires_at or asset.actual_expires_at
+    if order.provider == CloudServerPlan.PROVIDER_AWS_LIGHTSAIL and not order.static_ip_name and asset.asset_name:
+        order.static_ip_name = asset.asset_name
     account = asset.cloud_account or get_cloud_account_from_label(asset.account_label, order.provider)
     order.cloud_account = order.cloud_account or account
     order.account_label = order.account_label or asset.account_label or cloud_account_label(account)
@@ -2112,7 +2143,7 @@ def ensure_cloud_asset_operation_order(asset_id: int, user_id: int):
         'user', 'status', 'provider', 'region_code', 'region_name', 'public_ip', 'previous_public_ip',
         'instance_id', 'provider_resource_id', 'mtproxy_port', 'mtproxy_link', 'proxy_links',
         'mtproxy_secret', 'mtproxy_host', 'login_user', 'login_password', 'service_expires_at',
-        'cloud_account', 'account_label', 'updated_at',
+        'static_ip_name', 'cloud_account', 'account_label', 'updated_at',
     ])
     return order, None
 
@@ -3289,6 +3320,8 @@ __all__ = [
     'get_user_reminder_summary',
     'get_cloud_server_by_ip',
     'get_cloud_server_for_admin',
+    'get_proxy_asset_by_ip_for_admin',
+    'get_proxy_asset_detail_for_admin',
     'get_user_cloud_server',
     'get_user_proxy_asset_detail',
     'ensure_cloud_asset_operation_order',

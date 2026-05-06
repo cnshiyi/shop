@@ -736,6 +736,7 @@ def cloud_ip_query_result(result_items, renewable_items, page: int = 1, total_pa
     for item in renewable_items:
         ip = item.get('ip') or '未知IP'
         order_id = int(item.get('order_id') or 0)
+        asset_id = int(item.get('asset_id') or 0)
         if order_id > 0:
             row = [InlineKeyboardButton(text=f'🔄 续费IP {ip}', callback_data=f'cloud:renew:{order_id}')]
             if include_start:
@@ -743,6 +744,8 @@ def cloud_ip_query_result(result_items, renewable_items, page: int = 1, total_pa
             kb.row(*row)
             if include_reinit and item.get('can_reinit'):
                 kb.row(InlineKeyboardButton(text=f'🛠 重装IP {ip}', callback_data=f'cloud:reinit:{order_id}'))
+        elif include_reinit and asset_id > 0 and item.get('can_reinit'):
+            kb.row(InlineKeyboardButton(text=f'🛠 重装IP {ip}', callback_data=f'cloud:assetinit:{asset_id}:cloud:querymenu'))
     nav = []
     if page > 1:
         nav.append(InlineKeyboardButton(text='⬅️ 上一页', callback_data=f'cloud:queryip:page:{page - 1}'))
