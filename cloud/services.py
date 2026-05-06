@@ -1292,6 +1292,21 @@ def _can_order_be_renewed(order: CloudServerOrder) -> bool:
     return False
 
 
+def _is_retained_ip_renewal_candidate(order: CloudServerOrder | None) -> bool:
+    if not order:
+        return False
+    order = _hydrate_order_from_proxy_asset(order)
+    has_ip = bool(str(order.public_ip or order.previous_public_ip or '').strip())
+    return bool(
+        order.provider == CloudServerPlan.PROVIDER_AWS_LIGHTSAIL
+        and order.status in {'deleted', 'renew_pending'}
+        and order.ip_recycle_at
+        and order.ip_recycle_at > timezone.now()
+        and has_ip
+        and not str(order.instance_id or '').strip()
+    )
+
+
 def _operation_order_source_asset(order: CloudServerOrder) -> CloudAsset | None:
     note = str(getattr(order, 'provision_note', '') or '')
     match = re.search(r'来源资产\s*#(\d+)', note)
@@ -2076,16 +2091,22 @@ def _prepare_cloud_server_renewal(order: CloudServerOrder, renewal_user: Telegra
     retained_ip = bool(order.status == 'deleted' and order.ip_recycle_at and order.ip_recycle_at > timezone.now())
     order.status = 'renew_pending'
     order.lifecycle_days = days
+    order.pay_method = 'address'
     order.pay_amount = _generate_unique_pay_amount(_renewal_price(order, renewal_user), order.currency)
+    order.tx_hash = None
+    order.payer_address = ''
+    order.receive_address = ''
+    order.paid_at = None
     order.expired_at = timezone.now() + timezone.timedelta(minutes=30)
+    save_fields = ['status', 'lifecycle_days', 'pay_method', 'pay_amount', 'tx_hash', 'payer_address', 'receive_address', 'paid_at', 'expired_at', 'updated_at']
     if retained_ip:
         order.provision_note = '\n'.join(filter(None, [
             order.provision_note,
             f'未附加固定 IP 保留期内发起续费；IP={order.public_ip or order.previous_public_ip or "-"}；端口={order.mtproxy_port or "-"}；旧secret={order.mtproxy_secret or "-"}；IP回收时间={order.ip_recycle_at.isoformat()}。',
         ]))
-        order.save(update_fields=['status', 'lifecycle_days', 'pay_amount', 'expired_at', 'provision_note', 'updated_at'])
+        order.save(update_fields=[*save_fields, 'provision_note'])
     else:
-        order.save(update_fields=['status', 'lifecycle_days', 'pay_amount', 'expired_at', 'updated_at'])
+        order.save(update_fields=save_fields)
     return order
 
 
@@ -2113,6 +2134,99 @@ def create_cloud_server_renewal_for_user(order_id: int, user_id: int, days: int 
         return None
     renewal_user = TelegramUser.objects.filter(id=user_id).first()
     return _prepare_cloud_server_renewal(order, renewal_user, days)
+
+
+@sync_to_async
+def list_retained_ip_renewal_plans(order_id: int, user_id: int):
+    order = CloudServerOrder.objects.select_related('user', 'plan').filter(id=order_id, user_id=user_id).first()
+    if not order:
+        return None, [], None
+    order = _hydrate_order_from_proxy_asset(order)
+    if not _is_retained_ip_renewal_candidate(order):
+        return order, [], None
+    if not _can_order_be_renewed(order):
+        return order, [], '该服务器IP已删除，禁止续费'
+    plans = list(
+        CloudServerPlan.objects.filter(
+            provider=order.provider,
+            region_code=order.region_code,
+            is_active=True,
+        ).order_by('price', 'sort_order', 'id')
+    )
+    if not plans:
+        return order, [], '当前地区暂无可用套餐，无法恢复未附加固定 IP。'
+    return order, plans, None
+
+
+@sync_to_async
+def prepare_retained_ip_renewal_with_link(order_id: int, user_id: int, plan_id: int, link_data: dict[str, str], days: int = 31):
+    with transaction.atomic():
+        order = CloudServerOrder.objects.select_related('user', 'plan').select_for_update().filter(id=order_id, user_id=user_id).first()
+        if not order:
+            return None, '服务器记录不存在'
+        order = _hydrate_order_from_proxy_asset(order)
+        if not _is_retained_ip_renewal_candidate(order):
+            return None, '当前服务器不是未附加固定 IP 保留期状态'
+        if not _can_order_be_renewed(order):
+            return None, '该服务器IP已删除，禁止续费'
+        target_plan = CloudServerPlan.objects.filter(
+            id=plan_id,
+            provider=order.provider,
+            region_code=order.region_code,
+            is_active=True,
+        ).first()
+        if not target_plan:
+            return None, '目标套餐不存在或不属于当前固定 IP 地区'
+        renewal_user = TelegramUser.objects.select_for_update().get(id=user_id)
+        discounted_total = _apply_cloud_discount(Decimal(target_plan.price), renewal_user.cloud_discount_rate)
+        old_ip = order.public_ip or order.previous_public_ip or ''
+        order.plan = target_plan
+        order.provider = target_plan.provider
+        order.region_code = target_plan.region_code
+        order.region_name = target_plan.region_name
+        order.plan_name = target_plan.plan_name
+        order.currency = target_plan.currency or order.currency
+        order.total_amount = discounted_total
+        order.pay_method = 'address'
+        order.pay_amount = _generate_unique_pay_amount(discounted_total, order.currency)
+        order.status = 'renew_pending'
+        order.lifecycle_days = days
+        order.tx_hash = None
+        order.payer_address = ''
+        order.receive_address = ''
+        order.paid_at = None
+        order.expired_at = timezone.now() + timezone.timedelta(minutes=30)
+        order.mtproxy_link = link_data['url']
+        order.mtproxy_secret = link_data['secret']
+        order.mtproxy_host = link_data['server']
+        order.mtproxy_port = int(link_data['port'])
+        links = list(order.proxy_links or [])
+        links = [item for item in links if not (isinstance(item, dict) and str(item.get('port') or '') == str(order.mtproxy_port))]
+        links.insert(0, {'name': '主代理 mtg', 'server': link_data['server'], 'port': link_data['port'], 'secret': link_data['secret'], 'url': link_data['url']})
+        order.proxy_links = links
+        order.provision_note = '\n'.join(filter(None, [
+            order.provision_note,
+            f'未附加固定 IP 续费已选择套餐 {target_plan.plan_name}，并校验旧主代理链接；IP={old_ip or "-"}；端口={order.mtproxy_port or "-"}；旧secret={order.mtproxy_secret or "-"}。支付完成后会创建恢复服务器并绑定原固定 IP。',
+        ]))
+        order.save(update_fields=[
+            'plan', 'provider', 'region_code', 'region_name', 'plan_name', 'currency', 'total_amount',
+            'pay_method', 'pay_amount', 'status', 'lifecycle_days', 'tx_hash', 'payer_address',
+            'receive_address', 'paid_at', 'expired_at', 'mtproxy_link', 'mtproxy_secret', 'mtproxy_host',
+            'mtproxy_port', 'proxy_links', 'provision_note', 'updated_at',
+        ])
+        _update_order_primary_records(
+            order,
+            asset_updates={
+                'mtproxy_link': order.mtproxy_link,
+                'mtproxy_secret': order.mtproxy_secret,
+                'mtproxy_host': order.mtproxy_host,
+                'mtproxy_port': order.mtproxy_port,
+                'proxy_links': links,
+                'price': discounted_total,
+            },
+            now=timezone.now(),
+        )
+        return order, None
 
 
 @sync_to_async

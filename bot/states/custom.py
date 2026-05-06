@@ -5,3 +5,4 @@ class CustomServerStates(StatesGroup):
     waiting_quantity = State()
     waiting_port = State()
     waiting_reinstall_link = State()
+    waiting_retained_ip_renewal_link = State()

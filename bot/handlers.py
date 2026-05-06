@@ -63,6 +63,7 @@ from cloud.services import (
     list_all_auto_renew_cloud_servers,
     list_custom_regions,
     list_region_plans,
+    list_retained_ip_renewal_plans,
     list_user_auto_renew_cloud_servers,
     list_user_cloud_servers,
     list_cloud_server_upgrade_plans,
@@ -76,6 +77,7 @@ from cloud.services import (
     pay_cloud_server_order_with_balance,
     pay_cloud_server_renewal_with_balance,
     prepare_cloud_server_order_instances,
+    prepare_retained_ip_renewal_with_link,
     run_cloud_server_renewal_postcheck,
     set_cloud_order_reminder,
     _order_primary_asset,
@@ -2012,6 +2014,66 @@ def _custom_plan_text(region_name: str, plans) -> str:
     return '\n'.join(lines)
 
 
+def _retained_ip_renewal_plan_text(order, plans, user=None) -> str:
+    labels = ['套餐一', '套餐二', '套餐三', '套餐四', '套餐五', '套餐六', '套餐七', '套餐八', '套餐九']
+    ip = getattr(order, 'public_ip', None) or getattr(order, 'previous_public_ip', None) or '-'
+    lines = [
+        '🔄 未附加固定 IP 续费',
+        '',
+        f'保留 IP: {ip}',
+        f'地区: {_public_region_text(getattr(order, "region_name", None) or getattr(order, "region_code", None)) or "-"}',
+        '',
+        '请选择要恢复的新服务器套餐。选好后，我会要求你发送旧主代理链接，用来保持原链接/密钥不变。',
+        '',
+    ]
+    for idx, plan in enumerate(plans[:9], start=1):
+        label = labels[idx - 1] if idx - 1 < len(labels) else f'套餐{idx}'
+        display_name = _plan_display_name(plan)
+        display_description = (getattr(plan, 'display_description', None) or getattr(plan, 'plan_description', None) or '').strip()
+        discount_rate = Decimal(str(getattr(user, 'cloud_discount_rate', 100) or 100))
+        display_price = (Decimal(str(getattr(plan, 'price', 0) or 0)) * discount_rate / Decimal('100')).quantize(Decimal('0.001'))
+        currency = getattr(plan, 'currency', None) or 'USDT'
+        lines.append(f'{label}｜{display_name}｜{fmt_amount(display_price)} {currency}')
+        if display_description:
+            lines.append(display_description)
+        lines.append('')
+    lines.append('请选择下面的套餐按钮：')
+    return '\n'.join(lines)
+
+
+def _retained_ip_renewal_plan_keyboard(order_id: int, plans):
+    labels = ['套餐一', '套餐二', '套餐三', '套餐四', '套餐五', '套餐六', '套餐七', '套餐八', '套餐九']
+    rows = []
+    for idx, plan in enumerate(plans[:9]):
+        label = labels[idx] if idx < len(labels) else f'套餐{idx + 1}'
+        rows.append([InlineKeyboardButton(text=label, callback_data=f'cloud:renewplan:{order_id}:{plan.id}')])
+    rows.append([InlineKeyboardButton(text='🔙 返回详情', callback_data=f'cloud:detail:{order_id}')])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+async def _send_cloud_renewal_payment_prompt(message: Message, order, user, *, edit: bool = False):
+    trx_amount = await usdt_to_trx(order.pay_amount)
+    receive_address = _receive_address()
+    auto_renew_enabled = await get_cloud_server_auto_renew(order.id, getattr(order, 'user_id', getattr(user, 'id', None)))
+    group_balance_lines = await get_cloud_order_group_balance_lines(order.id)
+    balance_text = '\n'.join(['多用户余额：', *group_balance_lines]) if group_balance_lines else ''
+    balance_suffix = f'\n\n{balance_text}' if balance_text else ''
+    text = (
+        '🔄 云服务器续费\n\n'
+        f'订单号: {order.order_no}\n'
+        '续费时长: 31天\n'
+        f'续费价格: {fmt_pay_amount(order.pay_amount)} {order.currency}\n'
+        f'自动续费: {"已开启" if auto_renew_enabled else "已关闭"}\n'
+        f'收款地址: <code>{escape(receive_address)}</code>'
+        f'{balance_suffix}\n\n'
+        '可直接地址支付，或使用下方钱包续费与自动续费开关。'
+    )
+    markup = cloud_server_renew_payment(order.id, order.pay_amount, trx_amount, bool(auto_renew_enabled))
+    if edit:
+        return await _safe_edit_text(message, text, parse_mode='HTML', disable_web_page_preview=True, reply_markup=markup)
+    return await message.reply(text, parse_mode='HTML', disable_web_page_preview=True, reply_markup=markup)
+
+
 def _receive_address() -> str:
     from core.cache import _cached_config
     return _cached_config.get('receive_address', '')
@@ -3381,6 +3443,17 @@ def register_handlers(dp: Dispatcher):
         await _safe_callback_answer(callback)
         user = await get_or_create_user(callback.from_user.id, callback.from_user.username, callback.from_user.first_name)
         order_id = int(callback.data.split(':')[2])
+        retained_order, retained_plans, retained_err = await list_retained_ip_renewal_plans(order_id, user.id)
+        if retained_err:
+            await _safe_callback_answer(callback, retained_err, show_alert=True)
+            return
+        if retained_order and retained_plans:
+            await _safe_edit_text(
+                callback.message,
+                _retained_ip_renewal_plan_text(retained_order, retained_plans, user),
+                reply_markup=_retained_ip_renewal_plan_keyboard(retained_order.id, retained_plans),
+            )
+            return
         try:
             order = await create_cloud_server_renewal_for_user(order_id, user.id, 31)
             if not order:
@@ -3394,23 +3467,32 @@ def register_handlers(dp: Dispatcher):
         if not order:
             await _safe_callback_answer(callback, '续费订单创建失败', show_alert=True)
             return
-        trx_amount = await usdt_to_trx(order.pay_amount)
-        receive_address = _receive_address()
-        auto_renew_enabled = await get_cloud_server_auto_renew(order.id, getattr(order, 'user_id', user.id))
-        group_balance_lines = await get_cloud_order_group_balance_lines(order.id)
-        balance_text = '\n'.join(['多用户余额：', *group_balance_lines]) if group_balance_lines else ''
-        await _safe_edit_text(callback.message, 
-            '🔄 云服务器续费\n\n'
-            f'订单号: {order.order_no}\n'
-            '续费时长: 31天\n'
-            f'续费价格: {fmt_pay_amount(order.pay_amount)} {order.currency}\n'
-            f'自动续费: {"已开启" if auto_renew_enabled else "已关闭"}\n'
-            f'收款地址: <code>{escape(receive_address)}</code>'
-            f'{("\n\n" + balance_text) if balance_text else ""}\n\n'
-            '可直接地址支付，或使用下方钱包续费与自动续费开关。',
-            parse_mode='HTML',
-            disable_web_page_preview=True,
-            reply_markup=cloud_server_renew_payment(order.id, order.pay_amount, trx_amount, bool(auto_renew_enabled)),
+        await _send_cloud_renewal_payment_prompt(callback.message, order, user, edit=True)
+
+    @dp.callback_query(F.data.startswith('cloud:renewplan:'))
+    async def cb_cloud_retained_ip_renew_plan(callback: CallbackQuery, state: FSMContext):
+        await _safe_callback_answer(callback)
+        user = await get_or_create_user(callback.from_user.id, callback.from_user.username, callback.from_user.first_name)
+        _, _, raw_order_id, raw_plan_id = callback.data.split(':')
+        order_id = int(raw_order_id)
+        plan_id = int(raw_plan_id)
+        order, plans, err = await list_retained_ip_renewal_plans(order_id, user.id)
+        if err:
+            await _safe_callback_answer(callback, err, show_alert=True)
+            return
+        plan = next((item for item in plans if item.id == plan_id), None)
+        if not order or not plan:
+            await _safe_callback_answer(callback, '套餐不存在或当前状态已变化，请重新进入详情', show_alert=True)
+            return
+        await state.update_data(retained_ip_renewal_order_id=order.id, retained_ip_renewal_plan_id=plan.id)
+        await state.set_state(CustomServerStates.waiting_retained_ip_renewal_link)
+        ip = getattr(order, 'public_ip', None) or getattr(order, 'previous_public_ip', None) or '-'
+        await callback.message.reply(
+            '🔄 未附加固定 IP 续费\n\n'
+            f'已选择套餐: {_plan_display_name(plan)}\n'
+            f'保留 IP: {ip}\n\n'
+            '请直接发送这台服务器旧的主代理链接（tg://proxy?... 或 https://t.me/proxy?...）。\n'
+            '我会像重建流程一样校验 IP、端口和密钥；校验通过后再生成续费支付订单。'
         )
 
     @dp.callback_query(F.data.startswith('cloud:start:'))
@@ -3725,6 +3807,34 @@ def register_handlers(dp: Dispatcher):
             return
         token = await _issue_reinstall_confirm_token(state, kind='order', item_id=order.id)
         await callback.message.reply(_bot_text('bot_reinstall_confirm', '⚠️ 确认重新安装？\n\n重新安装大约需要 5 分钟，期间代理可能会断连。系统会保持主/备用链接不变。'), reply_markup=_reinstall_confirm_keyboard(order.id, token))
+
+    @dp.message(CustomServerStates.waiting_retained_ip_renewal_link)
+    async def msg_cloud_retained_ip_renewal_link(message: Message, state: FSMContext):
+        if await _handle_menu_interrupt(message, state):
+            return
+        data = await state.get_data()
+        order_id = int(data.get('retained_ip_renewal_order_id') or 0)
+        plan_id = int(data.get('retained_ip_renewal_plan_id') or 0)
+        user = await get_or_create_user(message.from_user.id, message.from_user.username, message.from_user.first_name)
+        item = await get_user_cloud_server(order_id, user.id)
+        if not item:
+            await state.clear()
+            await message.reply('服务器记录不存在，请重新进入云服务器详情。')
+            return
+        link_data = _parse_proxy_link(message.text or '')
+        if not link_data:
+            await message.reply(_bot_text('bot_reinstall_invalid_link', '链接格式不对，请发送 tg://proxy?... 或 https://t.me/proxy?... 主代理链接。'))
+            return
+        ok, reason = await _validate_reinstall_proxy_link(item, link_data, probe_when_possible=bool(getattr(item, 'login_password', None)))
+        if not ok:
+            await message.reply(_bot_text_format('bot_reinstall_validate_failed', '校验失败：{reason}', reason=reason))
+            return
+        order, err = await prepare_retained_ip_renewal_with_link(order_id, user.id, plan_id, link_data, 31)
+        if err or not order:
+            await message.reply(err or '续费订单创建失败，请重新进入详情后再试。')
+            return
+        await state.clear()
+        await _send_cloud_renewal_payment_prompt(message, order, user, edit=False)
 
     @dp.message(CustomServerStates.waiting_reinstall_link)
     async def msg_cloud_reinstall_link(message: Message, state: FSMContext):

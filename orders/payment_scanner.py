@@ -321,7 +321,7 @@ def _confirm_cloud_server_order(order_id: int, tx_hash: str, payer_address: str 
         order.receive_address = receive_address or ''
         order.paid_at = timezone.now()
         if order.status == 'renew_pending':
-            if not str(order.public_ip or '').strip() or order.status in {'deleted', 'deleting', 'expired'}:
+            if not str(order.public_ip or order.previous_public_ip or '').strip() or order.status in {'deleted', 'deleting', 'expired'}:
                 return None
             order.save(update_fields=['tx_hash', 'payer_address', 'receive_address', 'paid_at', 'updated_at'])
             try:
