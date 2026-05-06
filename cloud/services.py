@@ -90,9 +90,13 @@ def _update_order_primary_records(order: CloudServerOrder | None, *, asset_updat
     asset = _order_primary_asset(order)
     server = _order_primary_server(order)
     if asset and asset_updates:
-        CloudAsset.objects.filter(id=asset.id).update(**asset_updates, updated_at=now)
+        updates = dict(asset_updates)
+        updates.setdefault('updated_at', now)
+        CloudAsset.objects.filter(id=asset.id).update(**updates)
     if server and server_updates:
-        Server.objects.filter(id=server.id).update(**server_updates, updated_at=now)
+        updates = dict(server_updates)
+        updates.setdefault('updated_at', now)
+        Server.objects.filter(id=server.id).update(**updates)
     return asset, server
 
 
@@ -1299,7 +1303,7 @@ def _is_retained_ip_renewal_candidate(order: CloudServerOrder | None) -> bool:
     has_ip = bool(str(order.public_ip or order.previous_public_ip or '').strip())
     return bool(
         order.provider == CloudServerPlan.PROVIDER_AWS_LIGHTSAIL
-        and order.status in {'deleted', 'renew_pending'}
+        and order.status in {'completed', 'expiring', 'suspended', 'deleted', 'renew_pending'}
         and order.ip_recycle_at
         and order.ip_recycle_at > timezone.now()
         and has_ip
