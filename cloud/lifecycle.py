@@ -369,10 +369,19 @@ def _user_can_receive_cloud_notice(user_id: int) -> bool:
     return not muted_until or muted_until <= timezone.now()
 
 
+def _secret_notice_hint(secret: str | None) -> str:
+    text = str(secret or '').strip()
+    if not text:
+        return '-'
+    if len(text) <= 8:
+        return '***'
+    return f'{text[:4]}…{text[-4:]}'
+
+
 def _retained_static_ip_note(order: CloudServerOrder, ip: str, action_note: str = '') -> str:
     return (
         f'实例已删除，固定 IP 保留中；IP={ip or "缺失"}；端口={order.mtproxy_port or "-"}；'
-        f'secret={order.mtproxy_secret or "-"}；服务到期={_format_notice_dt(order.service_expires_at)}；'
+        f'secret={_secret_notice_hint(order.mtproxy_secret)}；服务到期={_format_notice_dt(order.service_expires_at)}；'
         f'宽限删机={_format_notice_dt(order.delete_at)}；未附加 IP 计划回收={_format_notice_dt(order.ip_recycle_at)}；'
         f'用户续费/重装时必须用旧 IP、旧端口、旧 secret 与用户提供链接逐项对照。{("；" + action_note) if action_note else ""}'
     )
@@ -1060,12 +1069,13 @@ def _get_migration_due_orders():
 @sync_to_async
 def _get_orphan_asset_delete_due():
     now = timezone.now()
+    waiting_manual_time_q = Q(provider_status__icontains='待人工添加时间') | Q(note__icontains='等待人工添加真实到期时间') | Q(note__icontains='等待人工添加时间')
     return list(
         CloudAsset.objects.select_related('cloud_account').filter(
             kind=CloudAsset.KIND_SERVER,
             order__isnull=True,
             actual_expires_at__lte=now,
-        ).exclude(status__in=[CloudAsset.STATUS_DELETED, CloudAsset.STATUS_DELETING, CloudAsset.STATUS_TERMINATED])
+        ).exclude(waiting_manual_time_q).exclude(status__in=[CloudAsset.STATUS_DELETED, CloudAsset.STATUS_DELETING, CloudAsset.STATUS_TERMINATED])
     )
 
 

@@ -2460,7 +2460,8 @@ def apply_cloud_server_renewal(order_id: int, days: int = 31, run_post_checks: b
     now = timezone.now()
     current_expires_at = order.service_expires_at
     renew_base_at = current_expires_at if current_expires_at and current_expires_at > now else now
-    order.service_started_at = now
+    if not order.service_started_at:
+        order.service_started_at = now
     order.service_expires_at = renew_base_at + timezone.timedelta(days=days)
     order.last_renewed_at = now
     if hasattr(order, 'auto_renew_notice_sent_at'):
@@ -3309,7 +3310,7 @@ def delay_cloud_server_expiry(order_id: int, user_id: int, days: int = 5):
     delay_quota = max(int(order.delay_quota or 0), 0)
     if delay_quota <= 0:
         return False, '暂无可用延期次数'
-    order.renew_extension_days = max(int(order.renew_extension_days or 0), days)
+    order.renew_extension_days = max(int(order.renew_extension_days or 0), 0) + max(int(days or 0), 0)
     order.delay_quota = delay_quota - 1
     order.save(update_fields=['renew_extension_days', 'delay_quota', 'renew_grace_expires_at', 'suspend_at', 'delete_at', 'ip_recycle_at', 'updated_at'])
     return order, None

@@ -446,7 +446,7 @@ async def _reply_cloud_query_results(message: Message, raw_text: str, state: FSM
             asset = await get_proxy_asset_by_ip_for_admin(ip)
             if asset:
                 display_ip = str(asset.public_ip or asset.previous_public_ip or ip).strip()
-                expires_at = getattr(asset, 'service_expires_at', None)
+                expires_at = getattr(asset, 'actual_expires_at', None)
                 expires_text = _format_local_dt(expires_at).split(' ', 1)[0] if expires_at else '未设置'
                 status_text = asset.get_status_display() if hasattr(asset, 'get_status_display') else str(getattr(asset, 'status', '') or '未知')
                 can_admin_asset_reinit = bool(asset.provider == 'aws_lightsail' and display_ip)

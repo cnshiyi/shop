@@ -189,6 +189,20 @@ async def _record_daily_stats(address: str, currency: str, direction: str, amoun
 
 # ── DB access (sync → async) ────────────────────────────────────────────
 
+def _cloud_status_after_renewal_payment_expired(order: CloudServerOrder, now=None) -> str:
+    now = now or timezone.now()
+    retained_ip = bool((order.public_ip or order.previous_public_ip) and not str(order.instance_id or '').strip() and order.ip_recycle_at and order.ip_recycle_at > now)
+    if retained_ip:
+        return 'deleted'
+    if order.delete_at and order.delete_at <= now:
+        return 'deleting'
+    if order.suspend_at and order.suspend_at <= now:
+        return 'suspended'
+    if order.service_expires_at and order.service_expires_at <= now:
+        return 'expiring'
+    return 'completed'
+
+
 @sync_to_async
 def _expire_timed_out_payment_orders():
     now = timezone.now()
@@ -209,16 +223,33 @@ def _expire_timed_out_payment_orders():
         expired_at__isnull=False,
         expired_at__lte=now,
     ).update(status='expired')
-    if product_count or recharge_count or cloud_count:
-        logger.info('支付订单超时自动关闭: product=%s recharge=%s cloud=%s', product_count, recharge_count, cloud_count)
-    return product_count, recharge_count, cloud_count
+    renewal_expired_count = 0
+    renewal_orders = list(CloudServerOrder.objects.filter(
+        pay_method='address',
+        status='renew_pending',
+        expired_at__isnull=False,
+        expired_at__lte=now,
+    ).order_by('id'))
+    for order in renewal_orders:
+        order.status = _cloud_status_after_renewal_payment_expired(order, now)
+        order.expired_at = None
+        order.tx_hash = None
+        order.payer_address = None
+        order.receive_address = None
+        order.paid_at = None
+        order.provision_note = '\n'.join(filter(None, [str(order.provision_note or '').strip(), f'续费地址支付窗口已于 {now:%Y-%m-%d %H:%M} 超时关闭，主服务器订单状态已恢复为 {order.status}。']))
+        order.save(update_fields=['status', 'expired_at', 'tx_hash', 'payer_address', 'receive_address', 'paid_at', 'provision_note', 'updated_at'])
+        renewal_expired_count += 1
+    if product_count or recharge_count or cloud_count or renewal_expired_count:
+        logger.info('支付订单超时自动关闭: product=%s recharge=%s cloud=%s cloud_renewal=%s', product_count, recharge_count, cloud_count, renewal_expired_count)
+    return product_count, recharge_count, cloud_count, renewal_expired_count
 
 
 async def _expire_timed_out_payment_orders_periodically(force: bool = False):
     global _last_pending_expire_check_at
     now = time.time()
     if not force and now - _last_pending_expire_check_at < 60:
-        return (0, 0, 0)
+        return (0, 0, 0, 0)
     _last_pending_expire_check_at = now
     return await _expire_timed_out_payment_orders()
 

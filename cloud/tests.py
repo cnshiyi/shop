@@ -8,12 +8,13 @@ from django.core.management import call_command
 from django.core.management.base import CommandError
 from django.test import RequestFactory, TestCase
 from django.utils import timezone
+from django.utils.dateparse import parse_datetime
 
 from bot.api import _shutdown_log_items, _unattached_ip_delete_items
 from bot.models import TelegramUser
 from cloud.bootstrap import _build_mtproxy_script, _extract_tg_links
 from cloud.models import CloudAsset, CloudAutoRenewPatrolLog, CloudIpLog, CloudServerOrder, CloudServerPlan, CloudUserNoticeLog, Server
-from cloud.lifecycle import _apply_notice_schedule_to_order, _get_due_orders, _get_migration_due_orders, _is_cloud_delete_safe_time, _is_cloud_suspend_time, _mark_suspended, _next_cloud_action_run_at, _notice_plan_text, _send_logged_cloud_notice
+from cloud.lifecycle import _apply_notice_schedule_to_order, _get_due_orders, _get_migration_due_orders, _get_orphan_asset_delete_due, _is_cloud_delete_safe_time, _is_cloud_suspend_time, _mark_suspended, _next_cloud_action_run_at, _notice_plan_text, _send_logged_cloud_notice
 from cloud.ports import get_mtproxy_port_label, get_mtproxy_public_ports, is_valid_mtproxy_main_port
 from cloud.provisioning import (
     _candidate_cloud_account_ids,
@@ -24,9 +25,9 @@ from cloud.provisioning import (
     _mark_rebuild_source_pending_deletion,
     _mark_success,
 )
-from cloud.services import create_cloud_server_rebuild_order, create_cloud_server_renewal, create_cloud_server_upgrade_order, delay_cloud_server_expiry, ensure_cloud_asset_operation_order, mark_cloud_server_ip_change_requested, replace_cloud_asset_order_by_admin
+from cloud.services import apply_cloud_server_renewal, create_cloud_server_rebuild_order, create_cloud_server_renewal, create_cloud_server_upgrade_order, delay_cloud_server_expiry, ensure_cloud_asset_operation_order, mark_cloud_server_ip_change_requested, replace_cloud_asset_order_by_admin
 from cloud.sync_safety import get_missing_confirmation_threshold
-from cloud.api import _cloud_order_source_tags, auto_renew_task_detail, delete_cloud_asset, delete_server, run_auto_renew_order, run_auto_renew_tasks, tasks_overview, update_cloud_asset
+from cloud.api import _cloud_order_source_tags, auto_renew_task_detail, cloud_order_detail, cloud_orders_list, delete_cloud_asset, delete_server, run_auto_renew_order, run_auto_renew_tasks, tasks_overview, update_cloud_asset
 from core.cloud_accounts import cloud_account_label
 from core.models import CloudAccountConfig
 from orders.payment_scanner import _confirm_cloud_server_order
@@ -70,6 +71,34 @@ class CloudServerServicesTestCase(TestCase):
         result = async_to_sync(create_cloud_server_renewal)(order.id, self.user.id, 31)
 
         self.assertFalse(result)
+
+    def test_apply_cloud_server_renewal_keeps_original_service_started_at(self):
+        original_started_at = timezone.now() - timezone.timedelta(days=20)
+        original_expiry = timezone.now() + timezone.timedelta(days=10)
+        order = CloudServerOrder.objects.create(
+            order_no='HB-TEST-RENEW-KEEP-STARTED',
+            user=self.user,
+            plan=self.plan,
+            provider=self.plan.provider,
+            region_code=self.plan.region_code,
+            region_name=self.plan.region_name,
+            plan_name=self.plan.plan_name,
+            quantity=1,
+            currency='USDT',
+            total_amount='19.00',
+            pay_amount='19.00',
+            pay_method='balance',
+            status='completed',
+            public_ip='8.8.4.8',
+            service_started_at=original_started_at,
+            service_expires_at=original_expiry,
+        )
+        with patch('cloud.services._renew_aliyun_instance', return_value=(True, 'ok')), patch('cloud.services._ensure_aws_instance_running', return_value=(False, 'skip start')):
+            renewed = async_to_sync(apply_cloud_server_renewal)(order.id, 31, False)
+
+        renewed.refresh_from_db()
+        self.assertEqual(renewed.service_started_at, original_started_at)
+        self.assertGreater(renewed.service_expires_at, original_expiry)
 
     def test_address_renewal_failure_rolls_back_paid_fields(self):
         order = CloudServerOrder.objects.create(
@@ -353,6 +382,58 @@ class CloudServerServicesTestCase(TestCase):
         self.assertEqual(order.renew_grace_expires_at, order.suspend_at)
         self.assertGreaterEqual(order.delete_at, order.suspend_at)
         self.assertGreater(order.ip_recycle_at, order.delete_at)
+
+    def test_orphan_rebound_asset_waiting_manual_time_is_not_delete_due(self):
+        asset = CloudAsset.objects.create(
+            kind=CloudAsset.KIND_SERVER,
+            source=CloudAsset.SOURCE_AWS_SYNC,
+            user=self.user,
+            provider='aws_lightsail',
+            region_code=self.plan.region_code,
+            region_name=self.plan.region_name,
+            asset_name='orphan-rebound-wait-time',
+            public_ip='10.0.0.26',
+            instance_id='i-orphan-rebound-wait-time',
+            actual_expires_at=timezone.now() - timezone.timedelta(days=1),
+            provider_status='已重新绑定实例-待人工添加时间',
+            note='未附加IP已重新绑定到实例，等待人工添加真实到期时间。',
+            status=CloudAsset.STATUS_RUNNING,
+            is_active=True,
+        )
+
+        due = async_to_sync(_get_orphan_asset_delete_due)()
+
+        self.assertFalse(any(item.id == asset.id for item in due))
+
+    def test_delay_cloud_server_expiry_accumulates_days(self):
+        order = CloudServerOrder.objects.create(
+            order_no='HB-LIFECYCLE-DELAY-ACCUMULATE',
+            user=self.user,
+            plan=self.plan,
+            provider=self.plan.provider,
+            region_code=self.plan.region_code,
+            region_name=self.plan.region_name,
+            plan_name=self.plan.plan_name,
+            quantity=1,
+            currency='USDT',
+            total_amount='19.00',
+            pay_amount='19.00',
+            pay_method='balance',
+            status='completed',
+            public_ip='10.0.0.27',
+            service_started_at=timezone.now() - timezone.timedelta(days=30),
+            service_expires_at=timezone.now() + timezone.timedelta(days=1),
+            delay_quota=2,
+            renew_extension_days=2,
+        )
+
+        result, err = async_to_sync(delay_cloud_server_expiry)(order.id, self.user.id, days=3)
+
+        self.assertIsNone(err)
+        self.assertIsNotNone(result)
+        order.refresh_from_db()
+        self.assertEqual(order.renew_extension_days, 5)
+        self.assertEqual(order.delay_quota, 1)
 
     def test_due_orders_restore_suspend_after_account_shutdown_reenabled(self):
         account = CloudAccountConfig.objects.create(
@@ -955,6 +1036,74 @@ class CloudServerServicesTestCase(TestCase):
             0,
         )
 
+    def test_dashboard_order_expiry_update_recomputes_lifecycle_plan(self):
+        old_expiry = timezone.now() + timezone.timedelta(days=1)
+        new_expiry = timezone.now() + timezone.timedelta(days=20)
+        order = CloudServerOrder.objects.create(
+            order_no='DASH-ORDER-EXPIRY-UPDATE-1',
+            user=self.user,
+            plan=self.plan,
+            provider=self.plan.provider,
+            region_code=self.plan.region_code,
+            region_name=self.plan.region_name,
+            plan_name=self.plan.plan_name,
+            quantity=1,
+            currency='USDT',
+            total_amount='19.00',
+            pay_amount='19.00',
+            pay_method='balance',
+            status='completed',
+            public_ip='4.4.4.5',
+            service_started_at=timezone.now(),
+            service_expires_at=old_expiry,
+        )
+        old_suspend_at = order.suspend_at
+        CloudAsset.objects.create(
+            kind=CloudAsset.KIND_SERVER,
+            source=CloudAsset.SOURCE_ORDER,
+            order=order,
+            user=self.user,
+            provider=order.provider,
+            region_code=order.region_code,
+            region_name=order.region_name,
+            asset_name='dash-order-expiry-update-asset',
+            public_ip='4.4.4.5',
+            actual_expires_at=old_expiry,
+        )
+        Server.objects.create(
+            source=Server.SOURCE_ORDER,
+            order=order,
+            user=self.user,
+            provider=order.provider,
+            region_code=order.region_code,
+            region_name=order.region_name,
+            server_name='dash-order-expiry-update-server',
+            public_ip='4.4.4.5',
+            expires_at=old_expiry,
+        )
+        staff_user = get_user_model().objects.create_user(username='staff_order_expiry_update', password='x', is_staff=True)
+        request = RequestFactory().patch(
+            f'/api/dashboard/cloud-orders/{order.id}/',
+            data=json.dumps({'service_expires_at': new_expiry.isoformat()}),
+            content_type='application/json',
+            HTTP_AUTHORIZATION='',
+        )
+        request.user = staff_user
+
+        response = cloud_order_detail(request, order.id)
+
+        self.assertEqual(response.status_code, 200)
+        order.refresh_from_db()
+        asset = CloudAsset.objects.get(order=order)
+        server = Server.objects.get(order=order)
+        self.assertEqual(order.service_expires_at, CloudServerOrder.normalize_expiry_time(new_expiry))
+        self.assertGreater(order.suspend_at, old_suspend_at)
+        self.assertEqual(order.renew_grace_expires_at, order.suspend_at)
+        self.assertGreaterEqual(order.delete_at, order.suspend_at)
+        self.assertGreater(order.ip_recycle_at, order.delete_at)
+        self.assertEqual(asset.actual_expires_at, order.service_expires_at)
+        self.assertEqual(server.expires_at, order.service_expires_at)
+
     def test_aws_notice_schedule_does_not_override_manual_order_expiry(self):
         order = CloudServerOrder.objects.create(
             order_no='MANUAL-NOTICE-OLD-1',
@@ -1437,6 +1586,84 @@ class CloudServerServicesTestCase(TestCase):
 
         self.assertIn(visible_asset.id, asset_ids)
         self.assertNotIn(hidden_asset.id, asset_ids)
+
+    def test_shutdown_log_items_prefer_order_lifecycle_schedule(self):
+        expires_at = timezone.now() + timezone.timedelta(days=1)
+        order = CloudServerOrder.objects.create(
+            order_no='SHUTDOWN-SCHEDULE-ORDER-1',
+            user=self.user,
+            plan=self.plan,
+            provider=self.plan.provider,
+            region_code=self.plan.region_code,
+            region_name=self.plan.region_name,
+            plan_name=self.plan.plan_name,
+            quantity=1,
+            currency='USDT',
+            total_amount='19.00',
+            pay_amount='19.00',
+            pay_method='balance',
+            status='completed',
+            public_ip='6.6.6.8',
+            service_started_at=timezone.now(),
+            service_expires_at=expires_at,
+        )
+        custom_suspend_at = timezone.now() + timezone.timedelta(days=9)
+        custom_delete_at = custom_suspend_at + timezone.timedelta(hours=2)
+        CloudServerOrder.objects.filter(id=order.id).update(suspend_at=custom_suspend_at, delete_at=custom_delete_at)
+        order.refresh_from_db()
+        CloudAsset.objects.create(
+            kind=CloudAsset.KIND_SERVER,
+            source=CloudAsset.SOURCE_ORDER,
+            order=order,
+            user=self.user,
+            provider='aws_lightsail',
+            region_code=self.plan.region_code,
+            region_name=self.plan.region_name,
+            asset_name='shutdown-schedule-asset',
+            public_ip='6.6.6.8',
+            actual_expires_at=expires_at,
+            status=CloudAsset.STATUS_RUNNING,
+            is_active=True,
+        )
+
+        items = _shutdown_log_items(limit=20)
+        row = next(item for item in items if item.get('order_id') == order.id)
+
+        self.assertEqual(parse_datetime(row['suspend_at']), order.suspend_at)
+        self.assertEqual(parse_datetime(row['delete_at']), order.delete_at)
+
+    def test_cloud_orders_list_keeps_renew_pending_visible(self):
+        order = CloudServerOrder.objects.create(
+            order_no='CLOUD-ORDER-LIST-RENEW-PENDING-1',
+            user=self.user,
+            plan=self.plan,
+            provider=self.plan.provider,
+            region_code=self.plan.region_code,
+            region_name=self.plan.region_name,
+            plan_name=self.plan.plan_name,
+            quantity=1,
+            currency='USDT',
+            total_amount='19.00',
+            pay_amount='19.00',
+            pay_method='address',
+            status='renew_pending',
+            public_ip='6.6.6.9',
+            service_started_at=timezone.now() - timezone.timedelta(days=30),
+            service_expires_at=timezone.now() + timezone.timedelta(hours=8),
+            expired_at=timezone.now() + timezone.timedelta(minutes=30),
+        )
+        staff_user = get_user_model().objects.create_user(username='staff_cloud_order_list', password='x', is_staff=True)
+        request = RequestFactory().get('/api/dashboard/cloud-orders/')
+        request.user = staff_user
+
+        response = cloud_orders_list(request)
+        payload = json.loads(response.content)
+        data = payload.get('data') or []
+        row = next(item for item in data if item.get('id') == order.id)
+
+        self.assertEqual(row['renew_status'], 'renew_pending')
+        self.assertEqual(row['renew_status_label'], '续费待支付')
+        self.assertTrue(row['can_renew'])
 
     def test_unattached_ip_delete_items_skip_assets_hidden_from_cloud_asset_list(self):
         inactive_account = CloudAccountConfig.objects.create(
@@ -2244,10 +2471,13 @@ class CloudServerServicesTestCase(TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertEqual(asset.instance_id, 'i-rebound-manual-1')
         self.assertEqual(asset.provider_status, '已重新绑定实例-待人工添加时间')
+        self.assertIsNone(asset.actual_expires_at)
         self.assertTrue(asset.is_active)
         self.assertEqual(asset.status, CloudAsset.STATUS_RUNNING)
         self.assertIn('未附加IP已重新绑定到实例', asset.note or '')
+        self.assertIn('等待人工添加真实到期时间', asset.note or '')
         self.assertEqual(server.instance_id, 'i-rebound-manual-1')
+        self.assertIsNone(server.expires_at)
         self.assertEqual(server.provider_status, '已重新绑定实例-待人工添加时间')
         self.assertTrue(server.is_active)
         self.assertEqual(server.status, Server.STATUS_RUNNING)
@@ -2494,10 +2724,13 @@ class CloudServerServicesTestCase(TestCase):
         server.refresh_from_db()
         self.assertEqual(asset.instance_id, 'i-rebound-sync-1')
         self.assertEqual(asset.provider_status, '已重新绑定实例-待人工添加时间')
+        self.assertIsNone(asset.actual_expires_at)
         self.assertTrue(asset.is_active)
         self.assertEqual(asset.status, CloudAsset.STATUS_RUNNING)
         self.assertIn('未附加IP已重新绑定到实例', asset.note or '')
+        self.assertIn('等待人工添加真实到期时间', asset.note or '')
         self.assertEqual(server.instance_id, 'i-rebound-sync-1')
+        self.assertIsNone(server.expires_at)
         self.assertEqual(server.provider_status, '已重新绑定实例-待人工添加时间')
         self.assertTrue(server.is_active)
         self.assertEqual(server.status, Server.STATUS_RUNNING)

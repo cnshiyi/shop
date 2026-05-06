@@ -295,22 +295,26 @@ def _shutdown_log_items(limit=100):
     items = []
     assets = list(
         _active_cloud_asset_queryset()
-        .filter(actual_expires_at__isnull=False)
+        .filter(Q(actual_expires_at__isnull=False) | Q(order__service_expires_at__isnull=False))
         .order_by('actual_expires_at', '-updated_at')[:500]
     )
     for asset in assets:
         if _asset_is_unattached_ip(asset) and asset.status in {CloudAsset.STATUS_DELETED, CloudAsset.STATUS_DELETING, CloudAsset.STATUS_TERMINATED, CloudAsset.STATUS_TERMINATING}:
             continue
-        expires_at = asset.actual_expires_at
-        user_display_name, username_label = _telegram_user_labels(asset.user or (asset.order.user if asset.order_id and asset.order else None))
+        order = asset.order if asset.order_id and asset.order else None
+        expires_at = getattr(order, 'service_expires_at', None) or asset.actual_expires_at
+        user_display_name, username_label = _telegram_user_labels(asset.user or (order.user if order else None))
         account_name, external_account_id = _cloud_account_labels(asset)
         if not external_account_id and asset.order_id and asset.order:
             order_account_name, order_external_account_id = _cloud_account_labels(asset.order)
             account_name = account_name or order_account_name
             external_account_id = order_external_account_id
-        if asset.provider == 'aliyun_simple':
+        if asset.provider == 'aliyun_simple' or not expires_at:
             suspend_at = None
             delete_at = None
+        elif order and (order.suspend_at or order.delete_at):
+            suspend_at = order.suspend_at
+            delete_at = order.delete_at
         else:
             suspend_at = _with_runtime_time(expires_at + timezone.timedelta(days=suspend_days), 'cloud_suspend_time')
             delete_at = _with_runtime_time(suspend_at + timezone.timedelta(days=delete_days), 'cloud_delete_time')
@@ -320,16 +324,16 @@ def _shutdown_log_items(limit=100):
             'id': f'asset-{asset.id}',
             'order_id': asset.order_id,
             'asset_id': asset.id,
-            'order_no': asset.order.order_no if asset.order_id and asset.order else asset.asset_name or asset.instance_id or f'asset-{asset.id}',
+            'order_no': order.order_no if order else asset.asset_name or asset.instance_id or f'asset-{asset.id}',
             'user_display_name': user_display_name,
             'username_label': username_label,
             'public_ip': asset.public_ip or asset.previous_public_ip or '',
             'provider': asset.provider or '',
             'provider_label': _provider_label(asset.provider),
-            'cloud_account_id': asset.cloud_account_id or (asset.order.cloud_account_id if asset.order_id and asset.order else None),
+            'cloud_account_id': asset.cloud_account_id or (order.cloud_account_id if order else None),
             'cloud_account_name': account_name,
             'external_account_id': external_account_id,
-            'account_label': asset.account_label or (asset.order.account_label if asset.order_id and asset.order else '') or '',
+            'account_label': asset.account_label or (order.account_label if order else '') or '',
             'status': asset.status,
             'status_label': _status_label(asset.status, CloudAsset.STATUS_CHOICES),
             'service_expires_at': expires_at,

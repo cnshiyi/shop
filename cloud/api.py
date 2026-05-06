@@ -587,8 +587,8 @@ def update_cloud_asset(request, asset_id):
             )
             if rebound_to_instance:
                 rebound_now = timezone.now()
-                rebound_note = f'未附加IP已重新绑定到实例，已初始化时间：{rebound_now.isoformat()}；等待人工添加时间。'
-                asset.actual_expires_at = rebound_now
+                rebound_note = f'未附加IP已重新绑定到实例，已清空临时到期时间：{rebound_now.isoformat()}；等待人工添加真实到期时间。'
+                asset.actual_expires_at = None
                 asset.provider_status = '已重新绑定实例-待人工添加时间'
                 asset.is_active = True
                 asset.note = '\n'.join(filter(None, [str(asset.note or '').strip(), rebound_note]))
@@ -1460,23 +1460,41 @@ def cloud_orders_list(request):
         if delete_dt is not None and timezone.is_naive(delete_dt):
             delete_dt = timezone.make_aware(delete_dt, timezone.get_current_timezone())
 
-        if status in {'pending', 'cancelled', 'failed'}:
+        if status == 'renew_pending':
+            item['renew_status'] = 'renew_pending'
+            item['renew_status_label'] = '续费待支付'
+        elif status == 'expiring':
+            item['renew_status'] = 'expiring'
+            item['renew_status_label'] = '已到期待处理'
+        elif status == 'suspended':
+            item['renew_status'] = 'suspended'
+            item['renew_status_label'] = '已关机待续费'
+        elif status == 'deleting':
+            item['renew_status'] = 'deleting'
+            item['renew_status_label'] = '删除中'
+        elif status == 'deleted':
+            item['renew_status'] = 'deleted'
+            item['renew_status_label'] = '实例已删除'
+        elif status == 'expired':
+            item['renew_status'] = 'expired'
+            item['renew_status_label'] = '已过期'
+        elif status in {'pending', 'cancelled', 'failed'}:
             item['renew_status'] = 'unpaid'
             item['renew_status_label'] = '未付款'
         elif status in {'paid', 'provisioning'}:
             item['renew_status'] = 'paid'
             item['renew_status_label'] = '已付款'
-        elif status in {'completed', 'renew_pending', 'expiring', 'suspended', 'deleting', 'deleted', 'expired'}:
-            item['renew_status'] = 'completed'
-            item['renew_status_label'] = '已完成'
-        elif service_expires_dt and service_expires_dt <= now:
+        elif status == 'completed' and service_expires_dt and service_expires_dt <= now:
+            item['renew_status'] = 'expiring'
+            item['renew_status_label'] = '已到期待处理'
+        elif status == 'completed':
             item['renew_status'] = 'completed'
             item['renew_status_label'] = '已完成'
         else:
-            item['renew_status'] = 'unpaid'
-            item['renew_status_label'] = '未付款'
+            item['renew_status'] = 'unknown'
+            item['renew_status_label'] = '状态未知'
 
-        item['can_renew'] = item['renew_status'] != 'unpaid' and status not in {'cancelled', 'failed'}
+        item['can_renew'] = status not in {'pending', 'cancelled', 'failed', 'paid', 'provisioning'}
         item['auto_renew_enabled'] = auto_renew_enabled
         item['expired_by_time'] = bool(service_expires_dt and service_expires_dt <= now)
         item['grace_expired'] = bool(renew_grace_dt and renew_grace_dt <= now)
@@ -1734,6 +1752,17 @@ def cloud_order_detail(request, order_id):
                 if field in payload:
                     setattr(order, field, _parse_iso_datetime(payload.get(field), label) if payload.get(field) else None)
                     changed_fields.add(field)
+            if 'service_expires_at' in changed_fields and 'service_expires_at' in payload:
+                lifecycle_updates = _cloud_order_lifecycle_fields(order.service_expires_at, getattr(order, 'renew_extension_days', 0)) if order.service_expires_at else {
+                    'renew_grace_expires_at': None,
+                    'suspend_at': None,
+                    'delete_at': None,
+                    'ip_recycle_at': None,
+                }
+                for field, value in lifecycle_updates.items():
+                    if field not in payload:
+                        setattr(order, field, value)
+                        changed_fields.add(field)
             if changed_fields:
                 update_values = {field: getattr(order, field) for field in changed_fields}
                 update_values['updated_at'] = timezone.now()

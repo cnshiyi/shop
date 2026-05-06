@@ -103,7 +103,7 @@ class ChainPaymentScannerTestCase(TestCase):
         self.assertIsNone(order.tx_hash)
         self.assertIsNone(recharge.tx_hash)
 
-    def test_expired_address_payments_are_not_candidates_without_expiring_renewal_order(self):
+    def test_expired_address_payments_are_not_candidates_and_renewal_status_restores(self):
         expired_at = timezone.now() - timezone.timedelta(minutes=1)
         Order.objects.create(
             order_no='CHAIN-EXPIRED-ORDER',
@@ -143,7 +143,8 @@ class ChainPaymentScannerTestCase(TestCase):
         self.assertFalse(products)
         self.assertFalse(clouds)
         cloud_order.refresh_from_db()
-        self.assertEqual(cloud_order.status, 'renew_pending')
+        self.assertEqual(cloud_order.status, 'completed')
+        self.assertIsNone(cloud_order.expired_at)
 
     def test_duplicate_tx_hash_is_not_reused_across_payment_types(self):
         Recharge.objects.create(

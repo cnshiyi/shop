@@ -671,8 +671,8 @@ class Command(BaseCommand):
                             asset_defaults['user'] = asset.user
                             if rebound_unattached_ip:
                                 rebound_at = timezone.now()
-                                rebound_note = f'未附加IP已重新绑定到实例，已初始化时间：{rebound_at.isoformat()}；等待人工添加时间。'
-                                asset_defaults['actual_expires_at'] = rebound_at
+                                rebound_note = f'未附加IP已重新绑定到实例，已清空临时到期时间：{rebound_at.isoformat()}；等待人工添加真实到期时间。'
+                                asset_defaults['actual_expires_at'] = None
                                 asset_defaults['provider_status'] = '已重新绑定实例-待人工添加时间'
                                 asset_defaults['note'] = _append_unique_line(note, rebound_note)
                                 asset_defaults['is_active'] = True

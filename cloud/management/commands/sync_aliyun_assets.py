@@ -321,10 +321,10 @@ class Command(BaseCommand):
                     asset_defaults['order'] = linked_order
                     if not asset:
                         asset_defaults['user'] = linked_order.user
-                        asset_defaults['actual_expires_at'] = expires_at or linked_order.service_expires_at
+                    asset_defaults['actual_expires_at'] = expires_at or linked_order.service_expires_at
                 if asset:
                     asset_defaults['user'] = asset.user
-                    asset_defaults['actual_expires_at'] = asset.actual_expires_at
+                    asset_defaults['actual_expires_at'] = expires_at or asset.actual_expires_at
                 asset_signature = f'{instance_id or "-"}|{public_ip or "缺失"}'
                 old_status = asset.status if asset else None
                 old_public_ip = asset.public_ip if asset else None
@@ -384,13 +384,13 @@ class Command(BaseCommand):
                     server_defaults['order'] = linked_order
                     if not server:
                         server_defaults['user'] = linked_order.user
-                        server_defaults['expires_at'] = expires_at or linked_order.service_expires_at
+                    server_defaults['expires_at'] = expires_at or linked_order.service_expires_at
                 if asset:
                     server_defaults['user'] = asset.user
-                    server_defaults['expires_at'] = asset.actual_expires_at
+                    server_defaults['expires_at'] = expires_at or asset.actual_expires_at
                 if server:
                     server_defaults['user'] = server.user
-                    server_defaults['expires_at'] = server.expires_at
+                    server_defaults['expires_at'] = expires_at or server.expires_at
                 old_server_public_ip = server.public_ip if server else None
                 if server:
                     if old_server_public_ip and old_server_public_ip != public_ip:
