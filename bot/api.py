@@ -987,13 +987,15 @@ def overview(request):
     recharge_pending = Recharge.objects.filter(status='pending').count()
     today_end = today_start + timezone.timedelta(days=1)
     new_orders_today = CloudServerOrder.objects.filter(created_at__gte=today_start).count()
-    due_today = CloudAsset.objects.filter(
-        kind=CloudAsset.KIND_SERVER,
-        status__in=[CloudAsset.STATUS_RUNNING, CloudAsset.STATUS_UNKNOWN],
-        actual_expires_at__gte=today_start,
-        actual_expires_at__lt=today_end,
-    ).exclude(actual_expires_at__isnull=True).count()
-    renew_due = CloudAsset.objects.filter(kind=CloudAsset.KIND_SERVER, status__in=[CloudAsset.STATUS_RUNNING, CloudAsset.STATUS_UNKNOWN], actual_expires_at__lte=renew_before).exclude(actual_expires_at__isnull=True).count()
+    active_server_assets = CloudAsset.objects.filter(kind=CloudAsset.KIND_SERVER, status__in=[CloudAsset.STATUS_RUNNING, CloudAsset.STATUS_UNKNOWN])
+    due_today = active_server_assets.filter(
+        (Q(actual_expires_at__gte=today_start, actual_expires_at__lt=today_end))
+        | (Q(actual_expires_at__isnull=True) & Q(order__service_expires_at__gte=today_start, order__service_expires_at__lt=today_end))
+    ).count()
+    renew_due = active_server_assets.filter(
+        Q(actual_expires_at__lte=renew_before)
+        | (Q(actual_expires_at__isnull=True) & Q(order__service_expires_at__lte=renew_before))
+    ).exclude(Q(actual_expires_at__isnull=True) & Q(order__service_expires_at__isnull=True)).count()
     paid_orders = CloudServerOrder.objects.filter(status__in=['paid', 'completed'])
     revenue = paid_orders.aggregate(total=Sum('pay_amount'))['total'] or Decimal('0')
     cost = Decimal('0')
@@ -1034,7 +1036,11 @@ def overview(request):
     for created_at in CloudAsset.objects.filter(kind=CloudAsset.KIND_SERVER, created_at__gte=trend_start, created_at__lt=trend_end).values_list('created_at', flat=True):
         day = timezone.localtime(created_at).day if timezone.is_aware(created_at) else created_at.day
         servers_growth[day - 1] += 1
-    for expires_at in CloudAsset.objects.filter(kind=CloudAsset.KIND_SERVER, actual_expires_at__gte=trend_start, actual_expires_at__lt=trend_end).values_list('actual_expires_at', flat=True):
+    trend_assets = CloudAsset.objects.filter(kind=CloudAsset.KIND_SERVER).select_related('order').only('actual_expires_at', 'order__service_expires_at')
+    for asset in trend_assets:
+        expires_at = asset.actual_expires_at or getattr(asset.order, 'service_expires_at', None)
+        if not expires_at or expires_at < trend_start or expires_at >= trend_end:
+            continue
         day = timezone.localtime(expires_at).day if timezone.is_aware(expires_at) else expires_at.day
         expiry_trend[day - 1] += 1
 

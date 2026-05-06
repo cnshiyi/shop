@@ -19,6 +19,15 @@ _TRACEABLE_ORDER_STATUSES = _ACTIVE_ORDER_STATUSES | {'deleted'}
 _MISSING_PENDING_STATUS = '云上未找到实例/IP-待确认'
 
 
+def _mask_secret(secret):
+    text = str(secret or '').strip()
+    if not text:
+        return '-'
+    if len(text) <= 8:
+        return '***'
+    return f'{text[:4]}…{text[-4:]}'
+
+
 def _resolve_order_for_ip(public_ip, account=None):
     normalized_ip = str(public_ip or '').strip()
     if not normalized_ip:
@@ -884,7 +893,7 @@ class Command(BaseCommand):
                     if retained_order:
                         order_note = (
                             f'AWS 同步确认固定 IP 未附加但仍保留；IP={public_ip or "缺失"}；固定IP名={static_ip_name}；'
-                            f'端口={retained_order.mtproxy_port or "-"}；secret={retained_order.mtproxy_secret or "-"}；'
+                            f'端口={retained_order.mtproxy_port or "-"}；secret={_mask_secret(retained_order.mtproxy_secret)}；'
                             f'服务到期={retained_order.service_expires_at.isoformat() if retained_order.service_expires_at else "-"}；'
                             f'实例删除={retained_order.delete_at.isoformat() if retained_order.delete_at else "-"}；'
                             f'IP计划回收={retained_order.ip_recycle_at.isoformat() if retained_order.ip_recycle_at else recycle_due_at.isoformat()}；'
