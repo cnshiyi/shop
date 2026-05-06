@@ -891,8 +891,8 @@ def _callback_route_label(callback_data: str | None) -> str:
         ('cloud:ipregions:more:', 'cloud.ipregions.more 更换IP更多地区'),
         ('cloud:ipregion:', 'cloud.ipregion 更换IP选地区'),
         ('cloud:ip:', 'cloud.ip 更换IP'),
-        ('cloud:upgradepay:', 'cloud.upgradepay 升级支付'),
-        ('cloud:upgrade:', 'cloud.upgrade 升级配置'),
+        ('cloud:upgradepay:', 'cloud.upgradepay 修改配置支付'),
+        ('cloud:upgrade:', 'cloud.upgrade 修改配置'),
         ('cloud:refundyes:', 'cloud.refundyes 确认退款'),
         ('cloud:refund:', 'cloud.refund 退款确认'),
         ('cloud:reinitconfirm:', 'cloud.reinitconfirm 确认重新初始化'),
@@ -1109,8 +1109,12 @@ async def _safe_edit_text(message: Message, text: str, **kwargs):
         logger.info('BOT_MESSAGE_EDIT chat_id=%s message_id=%s text_preview=%s', getattr(getattr(message, 'chat', None), 'id', None), getattr(message, 'message_id', None), str(text or '').replace('\n', ' ')[:180])
         return sent
     except TelegramBadRequest as exc:
-        if 'message is not modified' in str(exc).lower():
+        error_text = str(exc).lower()
+        if 'message is not modified' in error_text:
             logger.info('BOT_MESSAGE_EDIT_NOT_MODIFIED chat_id=%s message_id=%s text_preview=%s', getattr(getattr(message, 'chat', None), 'id', None), getattr(message, 'message_id', None), str(text or '').replace('\n', ' ')[:180])
+            return None
+        if "message can't be edited" in error_text or 'message to edit not found' in error_text:
+            logger.warning('BOT_MESSAGE_EDIT_UNAVAILABLE chat_id=%s message_id=%s error=%s text_preview=%s', getattr(getattr(message, 'chat', None), 'id', None), getattr(message, 'message_id', None), exc, str(text or '').replace('\n', ' ')[:180])
             return None
         logger.warning('BOT_MESSAGE_EDIT_FAILED chat_id=%s message_id=%s error=%s text_preview=%s', getattr(getattr(message, 'chat', None), 'id', None), getattr(message, 'message_id', None), exc, str(text or '').replace('\n', ' ')[:180])
         raise
@@ -3341,7 +3345,14 @@ def register_handlers(dp: Dispatcher):
                 text_lines.append(f"- {plan['name']}：{action_text}，{charge_text}，到期补足 {plan['target_days']} 天")
                 rows.append([InlineKeyboardButton(text=f"{action_text}到 {plan['name']} {charge_text}", callback_data=f"cloud:upgradepay:{order.id}:{plan['id']}")])
             rows.append([InlineKeyboardButton(text='🔙 返回详情', callback_data=f'cloud:assetdetail:asset:{asset_id}:cloud:list:page:1')])
-            await _safe_edit_text(callback.message, '\n'.join(text_lines), reply_markup=InlineKeyboardMarkup(inline_keyboard=rows))
+            text = '\n'.join(text_lines)
+            markup = InlineKeyboardMarkup(inline_keyboard=rows)
+            edited = await _safe_edit_text(callback.message, text, reply_markup=markup)
+            if edited is None:
+                sent = await callback.message.reply(text, reply_markup=markup)
+                logger.info('BOT_MESSAGE_SEND route=asset_upgrade_plans_fallback user_id=%s asset_id=%s order_id=%s chat_id=%s reply_to=%s sent_message_id=%s plans=%s', user.id, asset_id, order.id, callback.message.chat.id, callback.message.message_id, getattr(sent, 'message_id', None), len(plans))
+            else:
+                logger.info('BOT_MESSAGE_EDIT route=asset_upgrade_plans user_id=%s asset_id=%s order_id=%s chat_id=%s message_id=%s plans=%s', user.id, asset_id, order.id, callback.message.chat.id, callback.message.message_id, len(plans))
             return
         await _safe_callback_answer(callback, '未知操作', show_alert=True)
 
@@ -3823,15 +3834,17 @@ def register_handlers(dp: Dispatcher):
 
     @dp.callback_query(F.data.startswith('cloud:upgrade:'))
     async def cb_cloud_upgrade(callback: CallbackQuery):
-        await _safe_callback_answer(callback)
         user = await get_or_create_user(callback.from_user.id, callback.from_user.username, callback.from_user.first_name)
         order_id = int(callback.data.split(':')[2])
         is_admin = await _is_admin_chat(callback.message)
+        logger.info('CLOUD_UPGRADE_PLAN_START user_id=%s order_id=%s admin=%s callback_data=%s', user.id, order_id, is_admin, callback.data)
         plans, err = await list_cloud_server_upgrade_plans(order_id, user.id, admin=is_admin)
         if err:
+            logger.info('CLOUD_UPGRADE_PLAN_DENIED user_id=%s order_id=%s admin=%s reason=%s', user.id, order_id, is_admin, err)
             await _safe_callback_answer(callback, err, show_alert=True)
             return
         if not plans:
+            logger.info('CLOUD_UPGRADE_PLAN_EMPTY user_id=%s order_id=%s admin=%s', user.id, order_id, is_admin)
             await _safe_callback_answer(callback, '暂无可修改的配置', show_alert=True)
             return
         rows = []
@@ -3842,7 +3855,15 @@ def register_handlers(dp: Dispatcher):
             text_lines.append(f"- {plan['name']}：{action_text}，{charge_text}，到期补足 {plan['target_days']} 天")
             rows.append([InlineKeyboardButton(text=f"{action_text}到 {plan['name']} {charge_text}", callback_data=f"cloud:upgradepay:{order_id}:{plan['id']}")])
         rows.append([InlineKeyboardButton(text='🔙 返回详情', callback_data=f'cloud:detail:{order_id}')])
-        await _safe_edit_text(callback.message, '\n'.join(text_lines), reply_markup=InlineKeyboardMarkup(inline_keyboard=rows))
+        text = '\n'.join(text_lines)
+        markup = InlineKeyboardMarkup(inline_keyboard=rows)
+        edited = await _safe_edit_text(callback.message, text, reply_markup=markup)
+        if edited is None:
+            sent = await callback.message.reply(text, reply_markup=markup)
+            logger.info('BOT_MESSAGE_SEND route=upgrade_plans_fallback user_id=%s order_id=%s chat_id=%s reply_to=%s sent_message_id=%s plans=%s', user.id, order_id, callback.message.chat.id, callback.message.message_id, getattr(sent, 'message_id', None), len(plans))
+        else:
+            logger.info('BOT_MESSAGE_EDIT route=upgrade_plans user_id=%s order_id=%s chat_id=%s message_id=%s plans=%s', user.id, order_id, callback.message.chat.id, callback.message.message_id, len(plans))
+        await _safe_callback_answer(callback)
 
     @dp.callback_query(F.data.startswith('cloud:upgradepay:'))
     async def cb_cloud_upgrade_pay(callback: CallbackQuery, bot: Bot, state: FSMContext):
