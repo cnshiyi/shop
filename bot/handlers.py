@@ -3253,6 +3253,18 @@ def register_handlers(dp: Dispatcher):
             return
         logger.info('CLOUD_ASSET_ACTION_START user_id=%s asset_id=%s order_id=%s action=%s ip=%s admin=%s', user.id, asset_id, order.id, action, getattr(item, 'public_ip', None), is_admin)
         if action == 'renew':
+            retained_order, retained_plans, retained_err = await list_retained_ip_renewal_plans(order.id, user.id, admin=is_admin)
+            if retained_err:
+                await _safe_callback_answer(callback, retained_err, show_alert=True)
+                return
+            if retained_order and retained_plans:
+                display_user = getattr(retained_order, 'user', None) or user
+                await _safe_edit_text(
+                    callback.message,
+                    _retained_ip_renewal_plan_text(retained_order, retained_plans, display_user),
+                    reply_markup=_retained_ip_renewal_plan_keyboard(retained_order.id, retained_plans),
+                )
+                return
             try:
                 renewal = await create_cloud_server_renewal_by_public_query(order.id, 31) if is_admin else await create_cloud_server_renewal_for_user(order.id, user.id, 31)
             except RenewalPriceMissingError as exc:
@@ -3482,14 +3494,15 @@ def register_handlers(dp: Dispatcher):
         await _safe_callback_answer(callback)
         user = await get_or_create_user(callback.from_user.id, callback.from_user.username, callback.from_user.first_name)
         order_id = int(callback.data.split(':')[2])
-        retained_order, retained_plans, retained_err = await list_retained_ip_renewal_plans(order_id, user.id)
+        is_admin = await _is_admin_chat(callback.message)
+        retained_order, retained_plans, retained_err = await list_retained_ip_renewal_plans(order_id, user.id, admin=is_admin)
         if retained_err:
             await _safe_callback_answer(callback, retained_err, show_alert=True)
             return
         if retained_order and retained_plans:
             await _safe_edit_text(
                 callback.message,
-                _retained_ip_renewal_plan_text(retained_order, retained_plans, user),
+                _retained_ip_renewal_plan_text(retained_order, retained_plans, getattr(retained_order, 'user', None) or user),
                 reply_markup=_retained_ip_renewal_plan_keyboard(retained_order.id, retained_plans),
             )
             return
@@ -3515,7 +3528,8 @@ def register_handlers(dp: Dispatcher):
         _, _, raw_order_id, raw_plan_id = callback.data.split(':')
         order_id = int(raw_order_id)
         plan_id = int(raw_plan_id)
-        order, plans, err = await list_retained_ip_renewal_plans(order_id, user.id)
+        is_admin = await _is_admin_chat(callback.message)
+        order, plans, err = await list_retained_ip_renewal_plans(order_id, user.id, admin=is_admin)
         if err:
             await _safe_callback_answer(callback, err, show_alert=True)
             return
@@ -3523,7 +3537,7 @@ def register_handlers(dp: Dispatcher):
         if not order or not plan:
             await _safe_callback_answer(callback, '套餐不存在或当前状态已变化，请重新进入详情', show_alert=True)
             return
-        await state.update_data(retained_ip_renewal_order_id=order.id, retained_ip_renewal_plan_id=plan.id)
+        await state.update_data(retained_ip_renewal_order_id=order.id, retained_ip_renewal_plan_id=plan.id, retained_ip_renewal_admin=is_admin)
         await state.set_state(CustomServerStates.waiting_retained_ip_renewal_link)
         ip = getattr(order, 'public_ip', None) or getattr(order, 'previous_public_ip', None) or '-'
         await callback.message.reply(
@@ -3596,7 +3610,7 @@ def register_handlers(dp: Dispatcher):
         order, err = await pay_cloud_server_renewal_with_balance(order_id, user.id, 'USDT', 31)
         if err:
             existing = await get_cloud_order(order_id, user.id)
-            if existing and existing.status == 'completed' and existing.paid_at:
+            if err == '当前订单状态不可钱包支付' and existing and existing.status == 'completed' and existing.paid_at:
                 asyncio.create_task(_cloud_renewal_postcheck_and_notify(callback.bot, callback.from_user.id, existing.id))
                 await _safe_edit_text(callback.message, f'✅ 这笔续费已完成。\n\n订单号: {existing.order_no}\n{_cloud_order_plan_text(existing)}\n\n我会继续执行续费后巡检。')
                 return
@@ -3645,7 +3659,7 @@ def register_handlers(dp: Dispatcher):
         order, err = await pay_cloud_server_renewal_with_balance(order_id, user.id, currency, 31)
         if err:
             existing = await get_cloud_order(order_id, user.id)
-            if existing and existing.status == 'completed' and existing.paid_at:
+            if err == '当前订单状态不可钱包支付' and existing and existing.status == 'completed' and existing.paid_at:
                 asyncio.create_task(_cloud_renewal_postcheck_and_notify(callback.bot, callback.from_user.id, existing.id))
                 await _safe_edit_text(callback.message, f'✅ 这笔续费已完成。\n\n订单号: {existing.order_no}\n{_cloud_order_plan_text(existing)}\n\n我会继续执行续费后巡检。')
                 return
@@ -3855,8 +3869,9 @@ def register_handlers(dp: Dispatcher):
         data = await state.get_data()
         order_id = int(data.get('retained_ip_renewal_order_id') or 0)
         plan_id = int(data.get('retained_ip_renewal_plan_id') or 0)
+        is_admin_renewal = bool(data.get('retained_ip_renewal_admin')) and await _is_admin_chat(message)
         user = await get_or_create_user(message.from_user.id, message.from_user.username, message.from_user.first_name)
-        item = await get_user_cloud_server(order_id, user.id)
+        item = await get_cloud_server_for_admin(order_id) if is_admin_renewal else await get_user_cloud_server(order_id, user.id)
         if not item:
             await state.clear()
             await message.reply('服务器记录不存在，请重新进入云服务器详情。')
@@ -3869,7 +3884,7 @@ def register_handlers(dp: Dispatcher):
         if not ok:
             await message.reply(_bot_text_format('bot_reinstall_validate_failed', '校验失败：{reason}', reason=reason))
             return
-        order, err = await prepare_retained_ip_renewal_with_link(order_id, user.id, plan_id, link_data, 31)
+        order, err = await prepare_retained_ip_renewal_with_link(order_id, user.id, plan_id, link_data, 31, admin=is_admin_renewal)
         if err or not order:
             await message.reply(err or '续费订单创建失败，请重新进入详情后再试。')
             return

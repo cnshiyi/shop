@@ -2268,8 +2268,11 @@ def create_cloud_server_renewal_for_user(order_id: int, user_id: int, days: int 
 
 
 @sync_to_async
-def list_retained_ip_renewal_plans(order_id: int, user_id: int):
-    order = CloudServerOrder.objects.select_related('user', 'plan').filter(id=order_id, user_id=user_id).first()
+def list_retained_ip_renewal_plans(order_id: int, user_id: int, admin: bool = False):
+    order_qs = CloudServerOrder.objects.select_related('user', 'plan').filter(id=order_id)
+    if not admin:
+        order_qs = order_qs.filter(user_id=user_id)
+    order = order_qs.first()
     if not order:
         return None, [], None
     order = _hydrate_order_from_proxy_asset(order)
@@ -2290,9 +2293,12 @@ def list_retained_ip_renewal_plans(order_id: int, user_id: int):
 
 
 @sync_to_async
-def prepare_retained_ip_renewal_with_link(order_id: int, user_id: int, plan_id: int, link_data: dict[str, str], days: int = 31):
+def prepare_retained_ip_renewal_with_link(order_id: int, user_id: int, plan_id: int, link_data: dict[str, str], days: int = 31, admin: bool = False):
     with transaction.atomic():
-        order = CloudServerOrder.objects.select_related('user', 'plan').select_for_update().filter(id=order_id, user_id=user_id).first()
+        order_qs = CloudServerOrder.objects.select_related('user', 'plan').select_for_update().filter(id=order_id)
+        if not admin:
+            order_qs = order_qs.filter(user_id=user_id)
+        order = order_qs.first()
         if not order:
             return None, '服务器记录不存在'
         order = _hydrate_order_from_proxy_asset(order)
@@ -2308,7 +2314,7 @@ def prepare_retained_ip_renewal_with_link(order_id: int, user_id: int, plan_id: 
         ).first()
         if not target_plan:
             return None, '目标套餐不存在或不属于当前固定 IP 地区'
-        renewal_user = TelegramUser.objects.select_for_update().get(id=user_id)
+        renewal_user = order.user if admin and order.user_id else TelegramUser.objects.select_for_update().get(id=user_id)
         discounted_total = _apply_cloud_discount(Decimal(target_plan.price), renewal_user.cloud_discount_rate)
         old_ip = order.public_ip or order.previous_public_ip or ''
         order.plan = target_plan
@@ -2509,6 +2515,11 @@ def apply_cloud_server_renewal(order_id: int, days: int = 31, run_post_checks: b
 def pay_cloud_server_renewal_with_balance(order_id: int, user_id: int, currency: str = 'USDT', days: int = 31):
     try:
         already_paid = False
+        balance_field = 'balance_trx' if currency == 'TRX' else 'balance'
+        ledger = None
+        old_balance = None
+        user = None
+        total = Decimal('0')
         with transaction.atomic():
             order = CloudServerOrder.objects.select_related('user').select_for_update().filter(id=order_id).first()
             if not order:
@@ -2522,7 +2533,6 @@ def pay_cloud_server_renewal_with_balance(order_id: int, user_id: int, currency:
             if order.paid_at and order.pay_method == 'balance':
                 already_paid = True
             else:
-                balance_field = 'balance_trx' if currency == 'TRX' else 'balance'
                 user = TelegramUser.objects.select_for_update().get(id=user_id)
                 current_balance = Decimal(str(getattr(user, balance_field, 0) or 0))
                 if current_balance < total:
@@ -2554,13 +2564,13 @@ def pay_cloud_server_renewal_with_balance(order_id: int, user_id: int, currency:
                     related_id=order.id,
                     description=f'云服务器续费订单 #{order.order_no} 钱包支付',
                 )
-        order = apply_cloud_server_renewal.__wrapped__(order_id, days, False)
+            order = apply_cloud_server_renewal.__wrapped__(order_id, days, False)
         if not already_paid:
             order.renew_balance_change = {
                 'currency': currency,
                 'amount': getattr(ledger, 'amount', total) if ledger else total,
                 'before': old_balance,
-                'after': getattr(user, balance_field),
+                'after': getattr(user, balance_field) if user else None,
             }
         if already_paid:
             logger.info('云服务器钱包续费订单已支付，跳过重复扣款并继续续期: order_id=%s user_id=%s', order_id, user_id)
