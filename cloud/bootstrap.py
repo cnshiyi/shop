@@ -1274,7 +1274,7 @@ async def install_mtproxy(ip: str, username: str, password: str, port: int = MTP
                 seen_extra_links.add(link)
         domain_hex = binascii.hexlify(MTPROXY_FAKE_TLS_DOMAIN.encode('utf-8')).decode('ascii')
         core_secret = _normalize_mtproxy_core_secret(secret)
-        backup_core_secret = core_secret
+        backup_core_secret = _normalize_mtproxy_core_secret(mtproxy_backup_secret) or core_secret
         if mtproxy_backup_restart_link:
             add_extra_link(mtproxy_backup_restart_link)
         elif backup_core_secret:

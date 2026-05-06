@@ -587,8 +587,9 @@ async def provision_cloud_server(order_id: int):
             logger.info('BBR 初始化结果: order=%s ok=%s note=%s', order.order_no, bbr_ok, (bbr_note or '')[:1000])
 
             set_provision_progress(order.id, '安装 MTProxy 主/备用/Telemt')
-            logger.info('开始执行 MTProxy 安装: order=%s public_ip=%s user=%s port=%s requested_user=%s', order.order_no, final_public_ip, bootstrap_user, order.mtproxy_port, bootstrap_user)
-            mtproxy_ok, mtproxy_note = await install_mtproxy(final_public_ip, bootstrap_user, result.login_password, order.mtproxy_port, order.mtproxy_secret or '', order.mtproxy_secret or '')
+            backup_secret = _extract_backup_secret_from_links(getattr(order, 'proxy_links', None), order.mtproxy_port) or order.mtproxy_secret or ''
+            logger.info('开始执行 MTProxy 安装: order=%s public_ip=%s user=%s port=%s requested_user=%s preserve_backup_secret=%s', order.order_no, final_public_ip, bootstrap_user, order.mtproxy_port, bootstrap_user, bool(backup_secret and backup_secret != (order.mtproxy_secret or '')))
+            mtproxy_ok, mtproxy_note = await install_mtproxy(final_public_ip, bootstrap_user, result.login_password, order.mtproxy_port, order.mtproxy_secret or '', backup_secret)
             logger.info('MTProxy 安装结果: order=%s ok=%s note=%s', order.order_no, mtproxy_ok, (mtproxy_note or '')[:1000])
 
             bbr_warning = '' if bbr_ok else 'BBR 初始化失败，但 MTProxy 已安装成功，订单按代理可用处理。'
