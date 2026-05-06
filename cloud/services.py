@@ -1001,12 +1001,12 @@ def buy_cloud_server_with_balance(user_id: int, plan_id: int, currency: str = 'U
 
 @sync_to_async
 def pay_cloud_server_order_with_balance(order_id: int, user_id: int, currency: str = 'USDT'):
-    order = CloudServerOrder.objects.select_related('plan').filter(id=order_id, user_id=user_id, status='pending').first()
-    if not order:
-        return None, '订单不存在或状态不可支付'
-    payable_usdt = Decimal(str(order.pay_amount or order.total_amount or 0))
-    total = async_to_sync(usdt_to_trx)(payable_usdt) if currency == 'TRX' else payable_usdt
     with transaction.atomic():
+        order = CloudServerOrder.objects.select_for_update().select_related('plan').filter(id=order_id, user_id=user_id).first()
+        if not order or order.status != 'pending':
+            return None, '订单不存在或状态不可支付'
+        payable_usdt = Decimal(str(order.pay_amount or order.total_amount or 0))
+        total = async_to_sync(usdt_to_trx)(payable_usdt) if currency == 'TRX' else payable_usdt
         user = TelegramUser.objects.select_for_update().get(id=user_id)
         balance_field = 'balance_trx' if currency == 'TRX' else 'balance'
         current_balance = Decimal(str(getattr(user, balance_field, 0) or 0))
@@ -2985,6 +2985,12 @@ def create_cloud_server_upgrade_order(order_id: int, user_id: int, target_plan_i
         **lifecycle_fields,
     )
     with transaction.atomic():
+        locked_order = CloudServerOrder.objects.select_for_update().filter(id=order.id, user_id=user_id).first()
+        if not locked_order or locked_order.status not in {'completed', 'expiring', 'suspended'}:
+            return None, '当前状态不允许升级'
+        existing_upgrade = CloudServerOrder.objects.filter(replacement_for=locked_order, status__in={'paid', 'provisioning', 'completed'}).order_by('-created_at', '-id').first()
+        if existing_upgrade:
+            return None, f'已有升级任务 {existing_upgrade.order_no}，请勿重复支付'
         user = TelegramUser.objects.select_for_update().get(id=user_id)
         current_balance = Decimal(str(user.balance or 0))
         if current_balance < diff:

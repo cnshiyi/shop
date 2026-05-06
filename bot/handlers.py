@@ -3602,6 +3602,26 @@ def register_handlers(dp: Dispatcher):
             reply_markup=cloud_server_renew_payment(order.id, order.pay_amount or order.total_amount, trx_amount, enabled),
         )
 
+    def _retained_recovery_missing_payment_text(order) -> str:
+        if not order or order.status != 'completed' or not order.paid_at:
+            return ''
+        has_retained_ip = bool(
+            order.provider == 'aws_lightsail'
+            and getattr(order, 'ip_recycle_at', None)
+            and (order.public_ip or order.previous_public_ip)
+            and not str(getattr(order, 'instance_id', '') or '').strip()
+        )
+        if not has_retained_ip:
+            return ''
+        missing = []
+        if not str(getattr(order, 'static_ip_name', '') or '').strip():
+            missing.append('固定 IP 名称')
+        if not str(getattr(order, 'mtproxy_secret', '') or '').strip():
+            missing.append('旧 MTProxy 密钥')
+        if not missing:
+            return ''
+        return '、'.join(missing)
+
     @dp.callback_query(F.data.startswith('cloud:renewwallet:'))
     async def cb_cloud_renew_wallet(callback: CallbackQuery):
         await _safe_callback_answer(callback, '钱包自动续费处理中')
@@ -3611,6 +3631,10 @@ def register_handlers(dp: Dispatcher):
         if err:
             existing = await get_cloud_order(order_id, user.id)
             if err == '当前订单状态不可钱包支付' and existing and existing.status == 'completed' and existing.paid_at:
+                missing_recovery = _retained_recovery_missing_payment_text(existing)
+                if missing_recovery:
+                    await _safe_edit_text(callback.message, f'⚠️ 这笔续费已记录为已支付，但固定 IP 恢复资料不完整。\n\n订单号: {existing.order_no}\n缺少: {missing_recovery}\n\n我没有再次扣款。请先通过未附加 IP 续费流程补充旧主代理链接，或联系管理员核对这笔订单。')
+                    return
                 asyncio.create_task(_cloud_renewal_postcheck_and_notify(callback.bot, callback.from_user.id, existing.id))
                 await _safe_edit_text(callback.message, f'✅ 这笔续费已完成。\n\n订单号: {existing.order_no}\n{_cloud_order_plan_text(existing)}\n\n我会继续执行续费后巡检。')
                 return
@@ -3660,6 +3684,10 @@ def register_handlers(dp: Dispatcher):
         if err:
             existing = await get_cloud_order(order_id, user.id)
             if err == '当前订单状态不可钱包支付' and existing and existing.status == 'completed' and existing.paid_at:
+                missing_recovery = _retained_recovery_missing_payment_text(existing)
+                if missing_recovery:
+                    await _safe_edit_text(callback.message, f'⚠️ 这笔续费已记录为已支付，但固定 IP 恢复资料不完整。\n\n订单号: {existing.order_no}\n缺少: {missing_recovery}\n\n我没有再次扣款。请先通过未附加 IP 续费流程补充旧主代理链接，或联系管理员核对这笔订单。')
+                    return
                 asyncio.create_task(_cloud_renewal_postcheck_and_notify(callback.bot, callback.from_user.id, existing.id))
                 await _safe_edit_text(callback.message, f'✅ 这笔续费已完成。\n\n订单号: {existing.order_no}\n{_cloud_order_plan_text(existing)}\n\n我会继续执行续费后巡检。')
                 return

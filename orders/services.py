@@ -344,7 +344,7 @@ def create_cart_balance_orders(user_id: int, currency: str = 'USDT'):
         old_balance = current_balance
         setattr(user, balance_field, current_balance - total_cost)
         user.save(update_fields=[balance_field, 'updated_at'])
-        new_balance = getattr(user, balance_field)
+        running_balance = old_balance
         for item in items:
             product = Product.objects.select_for_update().get(id=item.product_id)
             total = Decimal(str(product.price or 0)) * item.quantity
@@ -356,17 +356,18 @@ def create_cart_balance_orders(user_id: int, currency: str = 'USDT'):
                 quantity=item.quantity, currency=currency, total_amount=total, pay_amount=total,
                 pay_method='balance', status='delivered', paid_at=timezone.now(),
             )
+            next_balance = running_balance - total
             record_balance_ledger(
                 user,
                 ledger_type='order_balance_pay',
                 currency=currency,
-                old_balance=old_balance,
-                new_balance=new_balance,
+                old_balance=running_balance,
+                new_balance=next_balance,
                 related_type='order',
                 related_id=order.id,
                 description=f'商品订单 #{order.order_no} 余额支付',
             )
-            old_balance = new_balance
+            running_balance = next_balance
             created_orders.append(order)
         CartItem.objects.filter(user_id=user_id).delete()
     return created_orders, None

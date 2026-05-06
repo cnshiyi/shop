@@ -24,11 +24,12 @@ from cloud.provisioning import (
     _mark_rebuild_source_pending_deletion,
     _mark_success,
 )
-from cloud.services import create_cloud_server_rebuild_order, create_cloud_server_renewal, ensure_cloud_asset_operation_order, mark_cloud_server_ip_change_requested, replace_cloud_asset_order_by_admin
+from cloud.services import create_cloud_server_rebuild_order, create_cloud_server_renewal, create_cloud_server_upgrade_order, ensure_cloud_asset_operation_order, mark_cloud_server_ip_change_requested, replace_cloud_asset_order_by_admin
 from cloud.sync_safety import get_missing_confirmation_threshold
 from cloud.api import _cloud_order_source_tags, auto_renew_task_detail, delete_cloud_asset, delete_server, run_auto_renew_order, run_auto_renew_tasks, tasks_overview, update_cloud_asset
 from core.cloud_accounts import cloud_account_label
 from core.models import CloudAccountConfig
+from orders.payment_scanner import _confirm_cloud_server_order
 
 
 class CloudServerServicesTestCase(TestCase):
@@ -69,6 +70,91 @@ class CloudServerServicesTestCase(TestCase):
         result = async_to_sync(create_cloud_server_renewal)(order.id, self.user.id, 31)
 
         self.assertFalse(result)
+
+    def test_address_renewal_failure_rolls_back_paid_fields(self):
+        order = CloudServerOrder.objects.create(
+            order_no='HB-TEST-ADDR-RENEW-FAIL',
+            user=self.user,
+            plan=self.plan,
+            provider=self.plan.provider,
+            region_code=self.plan.region_code,
+            region_name=self.plan.region_name,
+            plan_name=self.plan.plan_name,
+            quantity=1,
+            currency='USDT',
+            total_amount='19.00',
+            pay_amount='19.00',
+            pay_method='address',
+            status='renew_pending',
+            public_ip='8.8.8.8',
+            instance_id='',
+            ip_recycle_at=timezone.now() + timezone.timedelta(days=3),
+            lifecycle_days=31,
+        )
+
+        confirmed = async_to_sync(_confirm_cloud_server_order)(order.id, 'tx-renew-fail', 'payer', 'receiver')
+
+        self.assertIsNone(confirmed)
+        order.refresh_from_db()
+        self.assertEqual(order.status, 'renew_pending')
+        self.assertIsNone(order.paid_at)
+        self.assertIsNone(order.tx_hash)
+        self.assertEqual(order.payer_address or '', '')
+        self.assertEqual(order.receive_address or '', '')
+
+    def test_cloud_upgrade_wallet_payment_is_idempotent(self):
+        self.user.balance = Decimal('100.000000')
+        self.user.save(update_fields=['balance', 'updated_at'])
+        target_plan = CloudServerPlan.objects.create(
+            provider=self.plan.provider,
+            region_code=self.plan.region_code,
+            region_name=self.plan.region_name,
+            plan_name='Large 2G 60G 3TB',
+            cpu='2核',
+            memory='2GB',
+            storage='60GB SSD',
+            bandwidth='3TB',
+            price='29.00',
+            currency='USDT',
+            is_active=True,
+            sort_order=101,
+        )
+        source = CloudServerOrder.objects.create(
+            order_no='HB-TEST-UPGRADE-SOURCE',
+            user=self.user,
+            plan=self.plan,
+            provider=self.plan.provider,
+            region_code=self.plan.region_code,
+            region_name=self.plan.region_name,
+            plan_name=self.plan.plan_name,
+            quantity=1,
+            currency='USDT',
+            total_amount='19.00',
+            pay_amount='19.00',
+            pay_method='balance',
+            status='completed',
+            public_ip='8.8.4.4',
+            previous_public_ip='8.8.4.4',
+            instance_id='upgrade-source-instance',
+            static_ip_name='StaticIp-upgrade-source',
+            mtproxy_port=9528,
+            mtproxy_secret='0123456789abcdef0123456789abcdef',
+            mtproxy_link='tg://proxy?server=8.8.4.4&port=9528&secret=0123456789abcdef0123456789abcdef',
+            proxy_links=[{'label': '主链路', 'url': 'tg://proxy?server=8.8.4.4&port=9528&secret=0123456789abcdef0123456789abcdef'}],
+            service_started_at=timezone.now() - timezone.timedelta(days=1),
+            service_expires_at=timezone.now() + timezone.timedelta(days=1),
+        )
+
+        first_order, first_err = async_to_sync(create_cloud_server_upgrade_order)(source.id, self.user.id, target_plan.id)
+        balance_after_first = TelegramUser.objects.get(id=self.user.id).balance
+        second_order, second_err = async_to_sync(create_cloud_server_upgrade_order)(source.id, self.user.id, target_plan.id)
+
+        self.assertIsNotNone(first_order)
+        self.assertIsNone(first_err)
+        self.assertIsNone(second_order)
+        self.assertIn('已有升级任务', second_err)
+        self.assertEqual(CloudServerOrder.objects.filter(replacement_for=source).count(), 1)
+        self.assertEqual(TelegramUser.objects.get(id=self.user.id).balance, balance_after_first)
 
     def test_due_orders_use_order_expiry_for_lightsail_instead_of_stale_asset_expiry(self):
         order = CloudServerOrder.objects.create(

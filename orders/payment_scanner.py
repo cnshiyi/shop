@@ -312,27 +312,27 @@ def _confirm_recharge(recharge_id: int, tx_hash: str, paid_amount=None, payer_ad
 @sync_to_async
 def _confirm_cloud_server_order(order_id: int, tx_hash: str, payer_address: str = '', receive_address: str = ''):
     from django.db import transaction
-    with transaction.atomic():
-        order = CloudServerOrder.objects.select_for_update().get(id=order_id)
-        if order.status not in {'pending', 'renew_pending'}:
-            return None
-        order.tx_hash = tx_hash
-        order.payer_address = payer_address or ''
-        order.receive_address = receive_address or ''
-        order.paid_at = timezone.now()
-        if order.status == 'renew_pending':
-            if not str(order.public_ip or order.previous_public_ip or '').strip() or order.status in {'deleted', 'deleting', 'expired'}:
+    try:
+        with transaction.atomic():
+            order = CloudServerOrder.objects.select_for_update().get(id=order_id)
+            if order.status not in {'pending', 'renew_pending'}:
                 return None
-            order.save(update_fields=['tx_hash', 'payer_address', 'receive_address', 'paid_at', 'updated_at'])
-            try:
+            order.tx_hash = tx_hash
+            order.payer_address = payer_address or ''
+            order.receive_address = receive_address or ''
+            order.paid_at = timezone.now()
+            if order.status == 'renew_pending':
+                if not str(order.public_ip or order.previous_public_ip or '').strip() or order.status in {'deleted', 'deleting', 'expired'}:
+                    return None
+                order.save(update_fields=['tx_hash', 'payer_address', 'receive_address', 'paid_at', 'updated_at'])
                 return apply_cloud_server_renewal.__wrapped__(order.id, order.lifecycle_days or 31, False)
-            except Exception as exc:
-                logger.warning('云服务器真实续费失败 order=%s err=%s', order.id, exc)
-                return None
-        order.status = 'paid'
-        order.provision_note = '已收款，等待用户确认 MTProxy 端口后进入创建流程。默认端口为 9528。'
-        order.save(update_fields=['status', 'tx_hash', 'payer_address', 'receive_address', 'paid_at', 'provision_note', 'updated_at'])
-    return order
+            order.status = 'paid'
+            order.provision_note = '已收款，等待用户确认 MTProxy 端口后进入创建流程。默认端口为 9528。'
+            order.save(update_fields=['status', 'tx_hash', 'payer_address', 'receive_address', 'paid_at', 'provision_note', 'updated_at'])
+        return order
+    except Exception as exc:
+        logger.warning('云服务器真实支付确认失败 order=%s err=%s', order_id, exc)
+        return None
 
 
 @sync_to_async
