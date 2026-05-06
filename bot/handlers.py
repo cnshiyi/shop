@@ -3220,18 +3220,19 @@ def register_handlers(dp: Dispatcher):
         parts = callback.data.split(':')
         action = parts[2]
         asset_id = int(parts[3])
-        item = await get_user_proxy_asset_detail(asset_id, user.id, 'asset')
+        is_admin = await _is_admin_chat(callback.message)
+        item = await get_proxy_asset_detail_for_admin(asset_id, 'asset') if is_admin else await get_user_proxy_asset_detail(asset_id, user.id, 'asset')
         if not item:
             await _safe_callback_answer(callback, '代理记录不存在', show_alert=True)
             return
-        order, err = await ensure_cloud_asset_operation_order(asset_id, user.id)
+        order, err = await ensure_cloud_asset_operation_order(asset_id, user.id, admin=is_admin)
         if err:
             await _safe_callback_answer(callback, err, show_alert=True)
             return
-        logger.info('CLOUD_ASSET_ACTION_START user_id=%s asset_id=%s order_id=%s action=%s ip=%s', user.id, asset_id, order.id, action, getattr(item, 'public_ip', None))
+        logger.info('CLOUD_ASSET_ACTION_START user_id=%s asset_id=%s order_id=%s action=%s ip=%s admin=%s', user.id, asset_id, order.id, action, getattr(item, 'public_ip', None), is_admin)
         if action == 'renew':
             try:
-                renewal = await create_cloud_server_renewal_for_user(order.id, user.id, 31)
+                renewal = await create_cloud_server_renewal_by_public_query(order.id, 31) if is_admin else await create_cloud_server_renewal_for_user(order.id, user.id, 31)
             except RenewalPriceMissingError as exc:
                 await _safe_callback_answer(callback, str(exc), show_alert=True)
                 return
@@ -3241,24 +3242,7 @@ def register_handlers(dp: Dispatcher):
             if not renewal:
                 await _safe_callback_answer(callback, '续费订单创建失败', show_alert=True)
                 return
-            trx_amount = await usdt_to_trx(renewal.pay_amount)
-            receive_address = _receive_address()
-            auto_renew_enabled = await get_cloud_server_auto_renew(renewal.id, user.id)
-            group_balance_lines = await get_cloud_order_group_balance_lines(renewal.id)
-            balance_text = '\n'.join(['多用户余额：', *group_balance_lines]) if group_balance_lines else ''
-            await _safe_edit_text(callback.message,
-                '🔄 云服务器续费\n\n'
-                f'订单号: {renewal.order_no}\n'
-                '续费时长: 31天\n'
-                f'续费价格: {fmt_pay_amount(renewal.pay_amount)} {renewal.currency}\n'
-                f'自动续费: {"已开启" if auto_renew_enabled else "已关闭"}\n'
-                f'收款地址: <code>{escape(receive_address)}</code>'
-                f'{("\n\n" + balance_text) if balance_text else ""}\n\n'
-                '可直接地址支付，或使用下方钱包续费与自动续费开关。',
-                parse_mode='HTML',
-                disable_web_page_preview=True,
-                reply_markup=cloud_server_renew_payment(renewal.id, renewal.pay_amount, trx_amount, bool(auto_renew_enabled)),
-            )
+            await _send_cloud_renewal_payment_prompt(callback.message, renewal, user, edit=True)
             return
         if action == 'changeip':
             if order.provider != 'aws_lightsail':
