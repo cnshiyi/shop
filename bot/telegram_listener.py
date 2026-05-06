@@ -167,8 +167,15 @@ def _bark_binary_value(value: str, expected_length: int, field_name: str) -> byt
     return data
 
 
-def _bark_key_bytes(value: str, expected_length: int) -> bytes:
-    return _bark_binary_value(value, expected_length, 'key')
+def _bark_key_bytes(value: str) -> bytes:
+    raw = str(value or '').strip()
+    if len(raw) in {32, 48, 64} and re.fullmatch(r'[0-9a-fA-F]+', raw):
+        data = bytes.fromhex(raw)
+    else:
+        data = raw.encode('utf-8')
+    if len(data) not in {16, 24, 32}:
+        raise ValueError('Bark 加密 key 长度必须是 16/24/32 字节')
+    return data
 
 
 def _bark_iv_bytes(value: str, expected_length: int) -> bytes:
@@ -176,13 +183,9 @@ def _bark_iv_bytes(value: str, expected_length: int) -> bytes:
 
 
 def _bark_encrypt_payload(payload: dict[str, str], config: dict) -> tuple[str, str]:
-    algorithm = str(config.get('encryption_algorithm') or 'AES256').upper()
     mode_name = str(config.get('encryption_mode') or 'CBC').upper()
     padding_name = str(config.get('encryption_padding') or 'pkcs7')
-    key_lengths = {'AES128': 16, 'AES192': 24, 'AES256': 32}
-    if algorithm not in key_lengths:
-        raise ValueError('Bark 加密算法只支持 AES128/AES192/AES256')
-    key = _bark_key_bytes(str(config.get('encryption_key') or ''), key_lengths[algorithm])
+    key = _bark_key_bytes(str(config.get('encryption_key') or ''))
     iv = str(config.get('encryption_iv') or '')
     data = json.dumps(payload, ensure_ascii=False, separators=(',', ':')).encode('utf-8')
     if mode_name == 'GCM':

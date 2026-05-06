@@ -102,14 +102,26 @@ class TelegramListenerPushTestCase(SimpleTestCase):
             config={
                 'encryption_key': '00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff',
                 'encryption_iv': '1234567890123456',
-                'encryption_algorithm': 'AES256',
-                'encryption_mode': 'CBC',
-                'encryption_padding': 'pkcs7',
             },
         )
 
         self.assertEqual(url, 'https://api.day.app/key')
         self.assertEqual(params['iv'], '1234567890123456')
+        self.assertIn('ciphertext', params)
+
+    def test_build_bark_request_infers_aes128_from_key_length(self):
+        url, params = _build_bark_request(
+            'https://api.day.app/key/重要警告',
+            title='重要警告',
+            body='Bark 加密测试',
+            config={
+                'encryption_key': 'A7mK9qX2vR4pL8zN',
+                'encryption_iv': 'Q8nT4xLp2Vb7Ks1M',
+            },
+        )
+
+        self.assertEqual(url, 'https://api.day.app/key')
+        self.assertEqual(params['iv'], 'Q8nT4xLp2Vb7Ks1M')
         self.assertIn('ciphertext', params)
 
 
