@@ -46,16 +46,33 @@ class TelegramListenerPushTestCase(SimpleTestCase):
         )
         self.assertIsNone(payload)
 
-    def test_build_bark_request_keeps_existing_url_parameters(self):
+    def test_build_bark_request_defaults_to_critical_notification(self):
         url, params = _build_bark_request(
-            'https://api.day.app/key/重要警告?level=critical&volume=5&sound=paymentsuccess',
+            'https://api.day.app/key/重要警告',
             title='📨 私聊消息',
             body='收到一条新的私聊消息',
             config={},
         )
 
-        self.assertEqual(url, 'https://api.day.app/key/重要警告?level=critical&volume=5&sound=paymentsuccess')
-        self.assertEqual(params, {'title': '📨 私聊消息', 'body': '收到一条新的私聊消息'})
+        self.assertEqual(url, 'https://api.day.app/key/重要警告')
+        self.assertEqual(params['title'], '📨 私聊消息')
+        self.assertEqual(params['body'], '收到一条新的私聊消息')
+        self.assertEqual(params['level'], 'critical')
+        self.assertEqual(params['volume'], '5')
+        self.assertEqual(params['sound'], 'paymentsuccess')
+
+    def test_build_bark_request_keeps_existing_url_parameters(self):
+        url, params = _build_bark_request(
+            'https://api.day.app/key/重要警告?level=timeSensitive&volume=3&sound=alarm',
+            title='📨 私聊消息',
+            body='收到一条新的私聊消息',
+            config={},
+        )
+
+        self.assertEqual(url, 'https://api.day.app/key/重要警告?level=timeSensitive&volume=3&sound=alarm')
+        self.assertEqual(params['level'], 'timeSensitive')
+        self.assertEqual(params['volume'], '3')
+        self.assertEqual(params['sound'], 'alarm')
 
     def test_build_bark_request_adds_ciphertext_and_iv_when_encrypted(self):
         url, params = _build_bark_request(

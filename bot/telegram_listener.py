@@ -213,14 +213,20 @@ def _bark_encrypt_payload(payload: dict[str, str], config: dict) -> tuple[str, s
 
 def _build_bark_request(bark_url: str, *, title: str, body: str, config: dict) -> tuple[str, dict[str, str]]:
     base_url, params, path_title = _split_bark_url(bark_url)
-    payload = {**params, 'title': title or path_title or '', 'body': body or ''}
+    notification_params = {
+        'level': 'critical',
+        'volume': '5',
+        'sound': 'paymentsuccess',
+        **params,
+    }
+    payload = {**notification_params, 'title': title or path_title or '', 'body': body or ''}
     if str(config.get('encryption_key') or '').strip():
         ciphertext, iv = _bark_encrypt_payload(payload, config)
         encrypted_params = {'ciphertext': ciphertext}
         if iv:
             encrypted_params['iv'] = iv
         return base_url, encrypted_params
-    return bark_url, {'title': title, 'body': body}
+    return bark_url, {'title': title, 'body': body, **notification_params}
 
 
 async def _send_listener_push(*, title: str, body: str) -> bool:
