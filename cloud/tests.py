@@ -1665,6 +1665,29 @@ class CloudServerServicesTestCase(TestCase):
         self.assertEqual(row['renew_status_label'], '续费待支付')
         self.assertTrue(row['can_renew'])
 
+    def test_unattached_ip_delete_items_use_actual_expiry_as_delete_plan(self):
+        delete_due_at = timezone.now() + timezone.timedelta(days=3)
+        asset = CloudAsset.objects.create(
+            kind=CloudAsset.KIND_SERVER,
+            source=CloudAsset.SOURCE_AWS_SYNC,
+            user=self.user,
+            provider='aws_lightsail',
+            region_code=self.plan.region_code,
+            region_name=self.plan.region_name,
+            asset_name='visible-unattached-direct-delete-plan',
+            public_ip='5.5.5.7',
+            actual_expires_at=delete_due_at,
+            status=CloudAsset.STATUS_RUNNING,
+            is_active=True,
+            provider_status='未附加固定IP',
+            note='未附加固定IP',
+        )
+
+        items = _unattached_ip_delete_items(limit=20)
+        row = next(item for item in items if item.get('id') == asset.id)
+
+        self.assertEqual(parse_datetime(row['delete_at']), delete_due_at)
+
     def test_unattached_ip_delete_items_skip_assets_hidden_from_cloud_asset_list(self):
         inactive_account = CloudAccountConfig.objects.create(
             provider=CloudAccountConfig.PROVIDER_AWS,
@@ -2422,6 +2445,82 @@ class CloudServerServicesTestCase(TestCase):
         self.assertEqual(data['items'][0]['queue_status'], 'manual_single')
         self.assertTrue(data['items'][0]['ok'])
         self.assertTrue(CloudAutoRenewPatrolLog.objects.filter(batch_id=data['batch_id'], order=order).exists())
+
+    def test_update_cloud_asset_refreshes_unattached_ip_delete_plan(self):
+        old_due_at = timezone.now() + timezone.timedelta(days=2)
+        old_ip_recycle_at = timezone.now() + timezone.timedelta(days=2)
+        order = CloudServerOrder.objects.create(
+            order_no='UNATTACHED-REFRESH-PLAN-1',
+            user=self.user,
+            plan=self.plan,
+            provider=self.plan.provider,
+            region_code=self.plan.region_code,
+            region_name=self.plan.region_name,
+            plan_name=self.plan.plan_name,
+            quantity=1,
+            currency='USDT',
+            total_amount='19.00',
+            pay_amount='19.00',
+            pay_method='balance',
+            status='deleted',
+            public_ip='10.9.0.9',
+            previous_public_ip='10.9.0.9',
+            service_started_at=timezone.now() - timezone.timedelta(days=40),
+            service_expires_at=timezone.now() - timezone.timedelta(days=10),
+            delete_at=timezone.now() - timezone.timedelta(days=7),
+            ip_recycle_at=old_ip_recycle_at,
+        )
+        asset = CloudAsset.objects.create(
+            kind=CloudAsset.KIND_SERVER,
+            source=CloudAsset.SOURCE_AWS_SYNC,
+            user=self.user,
+            order=order,
+            provider='aws_lightsail',
+            region_code=self.plan.region_code,
+            region_name=self.plan.region_name,
+            asset_name='refresh-unattached-ip-asset',
+            provider_resource_id='aws-static-ip-refresh-1',
+            public_ip='10.9.0.9',
+            actual_expires_at=old_due_at,
+            status=CloudAsset.STATUS_UNKNOWN,
+            provider_status='未附加固定IP',
+            note='未附加固定IP',
+            is_active=False,
+        )
+        server = Server.objects.create(
+            source=Server.SOURCE_AWS_SYNC,
+            user=self.user,
+            order=order,
+            provider='aws_lightsail',
+            region_code=self.plan.region_code,
+            region_name=self.plan.region_name,
+            server_name='refresh-unattached-ip-server',
+            provider_resource_id='aws-static-ip-refresh-1',
+            public_ip='10.9.0.9',
+            expires_at=old_due_at,
+            status=Server.STATUS_UNKNOWN,
+            provider_status='未附加固定IP',
+            note='未附加固定IP',
+            is_active=False,
+        )
+        staff_user = get_user_model().objects.create_user(username='staff_refresh_unattached_plan', password='x', is_staff=True)
+        request = RequestFactory().patch(
+            f'/api/dashboard/cloud-assets/{asset.id}/',
+            data=json.dumps({'note': '未附加固定IP\n人工刷新删除计划'}),
+            content_type='application/json',
+            HTTP_AUTHORIZATION='',
+        )
+        request.user = staff_user
+
+        response = update_cloud_asset(request, asset.id)
+
+        asset.refresh_from_db()
+        server.refresh_from_db()
+        order.refresh_from_db()
+        self.assertEqual(response.status_code, 200)
+        self.assertGreater(asset.actual_expires_at, old_due_at)
+        self.assertEqual(server.expires_at, asset.actual_expires_at)
+        self.assertEqual(order.ip_recycle_at, asset.actual_expires_at)
 
     def test_update_cloud_asset_rebinds_unattached_ip_to_instance(self):
         asset = CloudAsset.objects.create(

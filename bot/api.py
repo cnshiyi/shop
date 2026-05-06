@@ -374,9 +374,12 @@ def _unattached_ip_delete_items(limit=50):
     )
     items = []
     for asset in assets:
-        base_at = asset.actual_expires_at or asset.created_at or asset.updated_at or now
         user_display_name, username_label = _telegram_user_labels(asset.user)
-        delete_at = _with_runtime_time(base_at + timezone.timedelta(days=delete_days), 'cloud_unattached_ip_delete_time')
+        if asset.actual_expires_at:
+            delete_at = asset.actual_expires_at
+        else:
+            base_at = asset.updated_at or asset.created_at or now
+            delete_at = _with_runtime_time(base_at + timezone.timedelta(days=delete_days), 'cloud_unattached_ip_delete_time')
         items.append({
             'id': asset.id,
             'asset_name': asset.asset_name or asset.instance_id or f'asset-{asset.id}',

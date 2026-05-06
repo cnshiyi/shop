@@ -166,19 +166,23 @@ def _is_unattached_ip_asset(asset: CloudAsset) -> bool:
     return '未附加' in str(asset.provider_status or '')
 
 
-def _ensure_unattached_ip_expiry(asset: CloudAsset, *, now=None) -> bool:
-    """未附加固定 IP 必须有回收/到期时间；缺失时按系统配置补齐。"""
-    if not _is_unattached_ip_asset(asset) or asset.actual_expires_at:
-        return False
+def _unattached_ip_delete_due_at(*, now=None):
     from core.runtime_config import get_runtime_config
     try:
         delete_days = max(int(str(get_runtime_config('cloud_unattached_ip_delete_after_days', '15') or '15').strip()), 0)
     except (TypeError, ValueError):
         delete_days = 15
     now = now or timezone.now()
-    asset.actual_expires_at = now + timezone.timedelta(days=delete_days)
+    return now + timezone.timedelta(days=delete_days)
+
+
+def _ensure_unattached_ip_expiry(asset: CloudAsset, *, now=None) -> bool:
+    """未附加固定 IP 必须有计划删除时间；缺失时按系统配置补齐。"""
+    if not _is_unattached_ip_asset(asset) or asset.actual_expires_at:
+        return False
+    asset.actual_expires_at = _unattached_ip_delete_due_at(now=now)
     note = asset.note or ''
-    addition = f'自动补齐未附加IP到期时间: {asset.actual_expires_at.isoformat()}'
+    addition = f'自动补齐未附加IP删除计划: {asset.actual_expires_at.isoformat()}'
     asset.note = f'{note}\n{addition}'.strip() if note else addition
     asset.save(update_fields=['actual_expires_at', 'note', 'updated_at'])
     return True
@@ -585,6 +589,7 @@ def update_cloud_asset(request, asset_id):
             rebound_to_instance = bool(
                 old_provider_status and '未附加' in old_provider_status and str(asset.instance_id or '').strip()
             )
+            refresh_unattached_delete_due = bool(is_unattached_ip and payload and 'actual_expires_at' not in payload and not rebound_to_instance)
             if rebound_to_instance:
                 rebound_now = timezone.now()
                 rebound_note = f'未附加IP已重新绑定到实例，已清空临时到期时间：{rebound_now.isoformat()}；等待人工添加真实到期时间。'
@@ -594,6 +599,15 @@ def update_cloud_asset(request, asset_id):
                 asset.note = '\n'.join(filter(None, [str(asset.note or '').strip(), rebound_note]))
                 if asset.status == CloudAsset.STATUS_UNKNOWN:
                     asset.status = CloudAsset.STATUS_RUNNING
+
+            if refresh_unattached_delete_due:
+                refreshed_due_at = _unattached_ip_delete_due_at()
+                asset.actual_expires_at = refreshed_due_at
+                if server:
+                    server.expires_at = refreshed_due_at
+                if linked_order_id:
+                    pending_order_updates['ip_recycle_at'] = refreshed_due_at
+                    pending_order_updates['recycle_notice_sent_at'] = None
 
             if server:
                 if asset.order_id:
