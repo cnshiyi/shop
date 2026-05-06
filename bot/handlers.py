@@ -189,6 +189,15 @@ def _extract_query_ips(raw_text: str) -> list[str]:
     return unique_ips
 
 
+def _extract_proxy_links_by_ip(raw_text: str) -> dict[str, dict[str, str]]:
+    links: dict[str, dict[str, str]] = {}
+    for url_match in re.finditer(r'(?:tg://proxy\?[^\s]+|https://t\.me/proxy\?[^\s]+)', raw_text or ''):
+        link_data = _parse_proxy_link(url_match.group(0))
+        if link_data and link_data.get('server') and link_data['server'] not in links:
+            links[link_data['server']] = link_data
+    return links
+
+
 def _extract_tron_addresses(raw_text: str) -> list[str]:
     text = (raw_text or '').strip()
     if not text:
@@ -439,8 +448,10 @@ async def _reply_tron_address_summary(message: Message, address: str):
 
 async def _reply_cloud_query_results(message: Message, raw_text: str, state: FSMContext | None = None, include_start: bool = False):
     query_ips = _extract_query_ips(raw_text)
+    proxy_links_by_ip = _extract_proxy_links_by_ip(raw_text)
     results = []
     for index, ip in enumerate(query_ips):
+        input_link = proxy_links_by_ip.get(ip)
         order = await get_cloud_server_by_ip(ip)
         if not order and include_start:
             asset = await get_proxy_asset_by_ip_for_admin(ip)
@@ -449,6 +460,12 @@ async def _reply_cloud_query_results(message: Message, raw_text: str, state: FSM
                 expires_at = getattr(asset, 'actual_expires_at', None)
                 expires_text = _format_local_dt(expires_at).split(' ', 1)[0] if expires_at else '未设置'
                 status_text = asset.get_status_display() if hasattr(asset, 'get_status_display') else str(getattr(asset, 'status', '') or '未知')
+                if input_link and asset.provider == 'aws_lightsail' and not getattr(asset, 'mtproxy_link', None):
+                    try:
+                        asset = await _save_asset_main_proxy_link(asset.id, None, input_link)
+                        logger.info('CLOUD_QUERY_PROXY_LINK_SAVED target=asset asset_id=%s ip=%s port=%s', asset.id, display_ip, input_link.get('port'))
+                    except Exception as exc:
+                        logger.warning('CLOUD_QUERY_PROXY_LINK_SAVE_FAILED target=asset asset_id=%s ip=%s error=%s', getattr(asset, 'id', None), display_ip, exc)
                 can_admin_asset_reinit = bool(asset.provider == 'aws_lightsail' and display_ip)
                 can_admin_asset_config = bool(asset.provider == 'aws_lightsail')
                 results.append({
@@ -466,6 +483,12 @@ async def _reply_cloud_query_results(message: Message, raw_text: str, state: FSM
         if not order:
             continue
         display_ip = str(order.public_ip or order.previous_public_ip or ip).strip()
+        if input_link and order.provider == 'aws_lightsail' and not getattr(order, 'mtproxy_link', None):
+            try:
+                order = await _save_user_main_proxy_link(order.id, input_link)
+                logger.info('CLOUD_QUERY_PROXY_LINK_SAVED target=order order_id=%s ip=%s port=%s', order.id, display_ip, input_link.get('port'))
+            except Exception as exc:
+                logger.warning('CLOUD_QUERY_PROXY_LINK_SAVE_FAILED target=order order_id=%s ip=%s error=%s', getattr(order, 'id', None), display_ip, exc)
         is_retained_ip = bool(order.status == 'deleted' and getattr(order, 'ip_recycle_at', None) and order.ip_recycle_at > timezone.now() and display_ip and not str(getattr(order, 'instance_id', '') or '').strip())
         is_deleted = order.status in {'deleted', 'deleting', 'expired'} or not display_ip
         if is_deleted and not is_retained_ip:
@@ -3252,7 +3275,6 @@ def register_handlers(dp: Dispatcher):
 
     @dp.callback_query(F.data.startswith('cloud:assetaction:'))
     async def cb_cloud_asset_action(callback: CallbackQuery):
-        await _safe_callback_answer(callback)
         user = await get_or_create_user(callback.from_user.id, callback.from_user.username, callback.from_user.first_name)
         parts = callback.data.split(':')
         action = parts[2]
@@ -3332,9 +3354,11 @@ def register_handlers(dp: Dispatcher):
         if action == 'upgrade':
             plans, err = await list_cloud_server_upgrade_plans(order.id, user.id, admin=is_admin)
             if err:
+                logger.info('CLOUD_ASSET_UPGRADE_PLAN_DENIED user_id=%s asset_id=%s order_id=%s admin=%s reason=%s', user.id, asset_id, order.id, is_admin, err)
                 await _safe_callback_answer(callback, err, show_alert=True)
                 return
             if not plans:
+                logger.info('CLOUD_ASSET_UPGRADE_PLAN_EMPTY user_id=%s asset_id=%s order_id=%s admin=%s', user.id, asset_id, order.id, is_admin)
                 await _safe_callback_answer(callback, '暂无可修改的配置', show_alert=True)
                 return
             rows = []
@@ -3353,6 +3377,7 @@ def register_handlers(dp: Dispatcher):
                 logger.info('BOT_MESSAGE_SEND route=asset_upgrade_plans_fallback user_id=%s asset_id=%s order_id=%s chat_id=%s reply_to=%s sent_message_id=%s plans=%s', user.id, asset_id, order.id, callback.message.chat.id, callback.message.message_id, getattr(sent, 'message_id', None), len(plans))
             else:
                 logger.info('BOT_MESSAGE_EDIT route=asset_upgrade_plans user_id=%s asset_id=%s order_id=%s chat_id=%s message_id=%s plans=%s', user.id, asset_id, order.id, callback.message.chat.id, callback.message.message_id, len(plans))
+            await _safe_callback_answer(callback)
             return
         await _safe_callback_answer(callback, '未知操作', show_alert=True)
 
