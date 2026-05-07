@@ -467,6 +467,8 @@ async def _reply_cloud_query_results(message: Message, raw_text: str, state: FSM
             expires_at = getattr(asset, 'actual_expires_at', None) or getattr(asset, 'service_expires_at', None)
             expires_text = _format_local_dt(expires_at).split(' ', 1)[0] if expires_at else '未设置'
             status_text = asset.get_status_display() if hasattr(asset, 'get_status_display') else str(getattr(asset, 'status', '') or '未知')
+            account_label = str(getattr(asset, 'account_label', '') or '').strip()
+            account_text = f'\n账号标签: <code>{escape(account_label)}</code>' if include_start and account_label else ''
             if input_link and asset.provider == 'aws_lightsail' and not getattr(asset, 'mtproxy_link', None):
                 try:
                     asset = await _save_asset_main_proxy_link(asset.id, None, input_link)
@@ -480,7 +482,7 @@ async def _reply_cloud_query_results(message: Message, raw_text: str, state: FSM
             public_renew_order_id = getattr(asset, 'order_id', None) or 0
             results.append({
                 'ip': display_ip,
-                'text': f'IP: <code>{escape(display_ip)}</code>\n到期时间: {expires_text}' if not include_start and not is_owned_asset else f'IP: <code>{escape(display_ip)}</code>\n到期时间: {expires_text}\n自动续费: {"已绑定订单" if getattr(asset, "order_id", None) else "未绑定订单"}\n状态: {escape(status_text)}\n类型: 代理资产',
+                'text': f'IP: <code>{escape(display_ip)}</code>\n到期时间: {expires_text}' if not include_start and not is_owned_asset else f'IP: <code>{escape(display_ip)}</code>\n到期时间: {expires_text}\n自动续费: {"已绑定订单" if getattr(asset, "order_id", None) else "未绑定订单"}\n状态: {escape(status_text)}{account_text}\n类型: 代理资产',
                 'renewable': bool(is_owned_asset or public_renew_order_id),
                 'order_id': public_renew_order_id if not is_owned_asset and not include_start else 0,
                 'asset_id': asset.id if is_owned_asset or include_start else 0,
@@ -517,6 +519,8 @@ async def _reply_cloud_query_results(message: Message, raw_text: str, state: FSM
         expires_text = _format_local_dt(expires_at).split(' ', 1)[0] if expires_at else '今天到期'
         status_text = '固定 IP 保留中，可续费恢复' if is_retained_ip else '可续费'
         auto_renew_text = '已开启' if getattr(order, 'auto_renew_enabled', False) else '未开启'
+        account_label = str(getattr(order, 'account_label', '') or '').strip()
+        account_text = f'\n账号标签: <code>{escape(account_label)}</code>' if include_start and account_label else ''
         group_balance_lines = await get_cloud_order_group_balance_lines(order.id)
         balance_block = ''
         if group_balance_lines:
@@ -529,7 +533,7 @@ async def _reply_cloud_query_results(message: Message, raw_text: str, state: FSM
         can_user_config = bool(is_owned_order and order.provider == 'aws_lightsail' and order.status in {'completed', 'expiring', 'suspended'})
         results.append({
             'ip': display_ip,
-            'text': f'IP: <code>{escape(display_ip)}</code>\n到期时间: {expires_text}' if not include_start and not is_owned_order else f'IP: <code>{escape(display_ip)}</code>\n到期时间: {expires_text}\n自动续费: {auto_renew_text}\n状态: {status_text}{balance_block}',
+            'text': f'IP: <code>{escape(display_ip)}</code>\n到期时间: {expires_text}' if not include_start and not is_owned_order else f'IP: <code>{escape(display_ip)}</code>\n到期时间: {expires_text}\n自动续费: {auto_renew_text}\n状态: {status_text}{account_text}{balance_block}',
             'renewable': True,
             'order_id': order.id,
             'asset_id': 0,
