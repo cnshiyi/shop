@@ -1178,7 +1178,7 @@ async def _safe_callback_answer(callback: CallbackQuery, *args, **kwargs):
         return await callback.answer(*args, **kwargs)
     except TelegramBadRequest as exc:
         message = str(exc).lower()
-        if 'query is too old' in message or 'query id is invalid' in message or 'response timeout expired' in message:
+        if 'query is too old' in message or 'query id is invalid' in message or 'query_id_invalid' in message or 'response timeout expired' in message or 'query is already answered' in message:
             return None
         raise
     except TelegramNetworkError as exc:
@@ -3305,10 +3305,12 @@ def register_handlers(dp: Dispatcher):
 
     @dp.callback_query(F.data.startswith('cloud:assetaction:'))
     async def cb_cloud_asset_action(callback: CallbackQuery):
-        user = await get_or_create_user(callback.from_user.id, callback.from_user.username, callback.from_user.first_name)
         parts = callback.data.split(':')
         action = parts[2]
         asset_id = int(parts[3])
+        if action == 'upgrade':
+            await _safe_callback_answer(callback, '正在加载修改配置')
+        user = await get_or_create_user(callback.from_user.id, callback.from_user.username, callback.from_user.first_name)
         is_admin = await _is_admin_chat(callback.message)
         item = await get_proxy_asset_detail_for_admin(asset_id, 'asset') if is_admin else await get_user_proxy_asset_detail(asset_id, user.id, 'asset')
         if not item:
@@ -3891,6 +3893,7 @@ def register_handlers(dp: Dispatcher):
 
     @dp.callback_query(F.data.startswith('cloud:upgrade:'))
     async def cb_cloud_upgrade(callback: CallbackQuery):
+        await _safe_callback_answer(callback, '正在加载修改配置')
         user = await get_or_create_user(callback.from_user.id, callback.from_user.username, callback.from_user.first_name)
         order_id = int(callback.data.split(':')[2])
         is_admin = await _is_admin_chat(callback.message)
