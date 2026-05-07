@@ -17,11 +17,14 @@ from cloud.bootstrap import _build_mtproxy_script, _extract_tg_links
 from cloud.models import CloudAsset, CloudAutoRenewPatrolLog, CloudIpLog, CloudServerOrder, CloudServerPlan, CloudUserNoticeLog, Server
 from cloud.lifecycle import _apply_notice_schedule_to_order, _get_due_orders, _get_migration_due_orders, _get_orphan_asset_delete_due, _is_cloud_delete_safe_time, _is_cloud_suspend_time, _mark_suspended, _next_cloud_action_run_at, _notice_plan_text, _send_logged_cloud_notice, lifecycle_tick, sync_server_status_tick
 from cloud.ports import get_mtproxy_port_label, get_mtproxy_public_ports, is_valid_mtproxy_main_port
+from cloud.aws_lightsail import _resolve_static_ip_name_for_move
 from cloud.provisioning import (
     _candidate_cloud_account_ids,
     _extract_mtproxy_fields,
     _extract_proxy_links,
     _get_aws_create_payload,
+    _get_rebuild_static_ip_context,
+    _mark_failed,
     _mark_provisioning_start,
     _mark_rebuild_source_pending_deletion,
     _mark_success,
@@ -844,6 +847,70 @@ class CloudServerServicesTestCase(TestCase):
 
         self.assertEqual([item.id for item in due_orders], [old_order.id])
 
+    def test_mark_failed_schedules_incomplete_instance_cleanup(self):
+        order = CloudServerOrder.objects.create(
+            order_no='FAILED-CLEANUP-SCHEDULE',
+            user=self.user,
+            plan=self.plan,
+            provider=self.plan.provider,
+            region_code=self.plan.region_code,
+            region_name=self.plan.region_name,
+            plan_name=self.plan.plan_name,
+            quantity=1,
+            currency='USDT',
+            total_amount='19.00',
+            pay_amount='19.00',
+            pay_method='balance',
+            status='provisioning',
+            server_name='failed-instance-1',
+            instance_id='failed-instance-1',
+            public_ip='13.229.249.56',
+        )
+        cleanup_at = timezone.now() + timezone.timedelta(days=1)
+
+        async_to_sync(_mark_failed)(order.id, '固定 IP 迁移失败', cleanup_at=cleanup_at)
+
+        order.refresh_from_db()
+        self.assertEqual(order.status, 'failed')
+        self.assertEqual(order.delete_at, cleanup_at)
+        self.assertIn('固定 IP 迁移失败', order.provision_note)
+
+    def test_failed_instance_cleanup_due_orders_are_deleted(self):
+        order = CloudServerOrder.objects.create(
+            order_no='FAILED-CLEANUP-DUE',
+            user=self.user,
+            plan=self.plan,
+            provider=self.plan.provider,
+            region_code=self.plan.region_code,
+            region_name=self.plan.region_name,
+            plan_name=self.plan.plan_name,
+            quantity=1,
+            currency='USDT',
+            total_amount='19.00',
+            pay_amount='19.00',
+            pay_method='balance',
+            status='failed',
+            server_name='failed-instance-2',
+            instance_id='failed-instance-2',
+            public_ip='13.229.249.57',
+            delete_at=timezone.now() - timezone.timedelta(minutes=1),
+            provision_note='创建流程未完成，等待清理。',
+        )
+
+        due = async_to_sync(_get_due_orders)()
+        self.assertIn(order.id, [item.id for item in due['delete']])
+
+        async def fake_delete_instance(delete_order):
+            return True, '失败新实例已删除'
+
+        with patch('cloud.lifecycle._is_cloud_delete_safe_time', return_value=True), patch('cloud.lifecycle._delete_instance', side_effect=fake_delete_instance):
+            async_to_sync(lifecycle_tick)()
+
+        order.refresh_from_db()
+        self.assertEqual(order.status, 'deleted')
+        self.assertEqual(order.instance_id, '')
+        self.assertIn('失败新实例已删除', order.provision_note)
+
     def test_create_cloud_server_rebuild_order_reuses_original_static_ip_without_temp(self):
         source_order = CloudServerOrder.objects.create(
             order_no='HB-TEST-REBUILD-1',
@@ -879,6 +946,74 @@ class CloudServerServicesTestCase(TestCase):
         self.assertEqual(new_order.status, 'paid')
         source_order.refresh_from_db()
         self.assertIsNotNone(source_order.migration_due_at)
+
+    def test_rebuild_static_ip_context_corrects_stale_static_ip_name(self):
+        source_order = CloudServerOrder.objects.create(
+            order_no='HB-TEST-REBUILD-STATIC-RESOLVE-1',
+            user=self.user,
+            plan=self.plan,
+            provider=self.plan.provider,
+            region_code=self.plan.region_code,
+            region_name=self.plan.region_name,
+            plan_name=self.plan.plan_name,
+            quantity=1,
+            currency='USDT',
+            total_amount='19.00',
+            pay_amount='19.00',
+            pay_method='balance',
+            status='completed',
+            public_ip='3.1.169.183',
+            static_ip_name='260410007170',
+            mtproxy_port=8443,
+            mtproxy_secret='ee1234567890abcdef1234567890abcd',
+        )
+        rebuild_order = CloudServerOrder.objects.create(
+            order_no='HB-TEST-REBUILD-STATIC-RESOLVE-2',
+            user=self.user,
+            plan=self.plan,
+            provider=self.plan.provider,
+            region_code=self.plan.region_code,
+            region_name=self.plan.region_name,
+            plan_name=self.plan.plan_name,
+            quantity=1,
+            currency='USDT',
+            total_amount='19.00',
+            pay_amount='19.00',
+            pay_method='balance',
+            status='paid',
+            static_ip_name='260410007170',
+            replacement_for=source_order,
+        )
+        with patch('cloud.provisioning._resolve_aws_static_ip_name_for_order', return_value='StaticIp-real-name'):
+            context = async_to_sync(_get_rebuild_static_ip_context)(rebuild_order.id)
+
+        self.assertTrue(context['is_rebuild'])
+        self.assertEqual(context['original_static_ip_name'], 'StaticIp-real-name')
+        self.assertEqual(context['payload']['original_public_ip'], '3.1.169.183')
+        source_order.refresh_from_db()
+        rebuild_order.refresh_from_db()
+        self.assertEqual(source_order.static_ip_name, 'StaticIp-real-name')
+        self.assertEqual(rebuild_order.static_ip_name, 'StaticIp-real-name')
+
+    def test_resolve_static_ip_name_for_move_falls_back_to_public_ip(self):
+        class FakeClient:
+            def get_static_ip(self, staticIpName):
+                raise Exception(f'The StaticIp does not exist: {staticIpName}')
+
+            def get_static_ips(self, **kwargs):
+                return {
+                    'staticIps': [
+                        {'name': 'StaticIp-real-name', 'ipAddress': '13.229.249.56', 'attachedTo': 'old-instance'},
+                    ]
+                }
+
+        resolved = _resolve_static_ip_name_for_move(
+            FakeClient(),
+            '260410007170',
+            {'order_no': 'SRVDOWNGRADE-TEST', 'original_public_ip': '13.229.249.56'},
+        )
+
+        self.assertEqual(resolved, 'StaticIp-real-name')
 
     def test_rebuild_order_create_payload_skips_static_ip_binding(self):
         source_account = CloudAccountConfig.objects.create(

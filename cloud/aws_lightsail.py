@@ -256,7 +256,7 @@ def _create_instance_sync(order_data: dict, server_name: str):
             time.sleep(5)
         else:
             logger.warning('AWS 实例启动超时: order=%s server_name=%s last_state=%s', order_no, server_name, state)
-            return ProvisionResult(ok=False, note=f'AWS 实例已提交创建，但在规定时间内未进入 running: {server_name}')
+            return ProvisionResult(ok=False, instance_id=server_name, login_user=_default_login_user_for_blueprint(blueprint_id), login_password=password, note=f'AWS 实例已提交创建，但在规定时间内未进入 running: {server_name}')
 
         try:
             _ensure_instance_port_open(client, server_name, 22)
@@ -283,7 +283,7 @@ def _create_instance_sync(order_data: dict, server_name: str):
             except ClientError as exc:
                 if 'already exists' not in str(exc).lower():
                     logger.warning('AWS 固定 IP 分配失败: order=%s static_ip_name=%s error=%s', order_no, static_ip_name, exc)
-                    return ProvisionResult(ok=False, note='创建失败，请联系人工客服')
+                    return ProvisionResult(ok=False, instance_id=server_name, login_user=_default_login_user_for_blueprint(blueprint_id), login_password=password, static_ip_name=static_ip_name, note='创建失败，请联系人工客服')
                 logger.info('AWS 固定 IP 已存在: order=%s static_ip_name=%s', order_no, static_ip_name)
             client.attach_static_ip(staticIpName=static_ip_name, instanceName=server_name)
             logger.info('AWS 固定 IP 绑定完成: order=%s static_ip_name=%s server_name=%s', order_no, static_ip_name, server_name)
@@ -297,7 +297,7 @@ def _create_instance_sync(order_data: dict, server_name: str):
 
         if not public_ip:
             logger.warning('AWS 公网 IP 获取失败: order=%s server_name=%s static_ip_name=%s skip_static_ip=%s', order_no, server_name, static_ip_name, skip_static_ip)
-            return ProvisionResult(ok=False, note='创建失败，请联系人工客服')
+            return ProvisionResult(ok=False, instance_id=server_name, public_ip=public_ip, login_user=_default_login_user_for_blueprint(blueprint_id), login_password=password, static_ip_name=static_ip_name, note='创建失败，请联系人工客服')
 
         login_mode = 'SSH 公钥登录已启用，后续自动设置 root 密码' if public_key else 'root 密码'
         ip_note = '未绑定固定 IP，等待迁移原固定 IP' if skip_static_ip else '已绑定固定公网 IP'
@@ -326,10 +326,48 @@ def _create_instance_sync(order_data: dict, server_name: str):
         )
     except (BotoCoreError, ClientError) as exc:
         logger.exception('AWS Lightsail 创建失败: client_error order=%s server_name=%s error=%s', order_no, server_name, exc)
-        return ProvisionResult(ok=False, note=f'AWS Lightsail 创建失败: {exc}')
+        return ProvisionResult(ok=False, instance_id=server_name, public_ip=public_ip if 'public_ip' in locals() else '', login_user=_default_login_user_for_blueprint(blueprint_id) if 'blueprint_id' in locals() else '', login_password=password if 'password' in locals() else '', static_ip_name=static_ip_name if 'static_ip_name' in locals() else '', note=f'AWS Lightsail 创建失败: {exc}')
     except Exception as exc:
         logger.exception('AWS Lightsail 创建异常: order=%s server_name=%s error=%s', order_no, server_name, exc)
-        return ProvisionResult(ok=False, note=f'AWS Lightsail 创建异常: {exc}')
+        return ProvisionResult(ok=False, instance_id=server_name, public_ip=public_ip if 'public_ip' in locals() else '', login_user=_default_login_user_for_blueprint(blueprint_id) if 'blueprint_id' in locals() else '', login_password=password if 'password' in locals() else '', static_ip_name=static_ip_name if 'static_ip_name' in locals() else '', note=f'AWS Lightsail 创建异常: {exc}')
+
+
+def _static_ip_not_found(exc) -> bool:
+    text = str(exc).lower()
+    return 'notfoundexception' in exc.__class__.__name__.lower() or 'staticip does not exist' in text or 'does not exist' in text
+
+
+def _resolve_static_ip_name_for_move(client, static_ip_name: str, order_data: dict) -> str:
+    original_name = str(static_ip_name or '').strip()
+    if original_name:
+        try:
+            client.get_static_ip(staticIpName=original_name)
+            return original_name
+        except Exception as exc:
+            if not _static_ip_not_found(exc):
+                raise
+    candidate_ips = []
+    for key in ('original_public_ip', 'static_ip_public_ip', 'previous_public_ip', 'public_ip'):
+        value = str(order_data.get(key) or '').strip()
+        if value and value not in candidate_ips:
+            candidate_ips.append(value)
+    if not candidate_ips:
+        return original_name
+    token = None
+    while True:
+        kwargs = {'pageToken': token} if token else {}
+        response = client.get_static_ips(**kwargs)
+        for item in response.get('staticIps') or []:
+            ip_address = str(item.get('ipAddress') or '').strip()
+            if ip_address in candidate_ips:
+                resolved_name = str(item.get('name') or '').strip()
+                if resolved_name:
+                    logger.info('AWS 固定 IP 名称迁移前反查成功: order=%s old_static_ip_name=%s ip=%s resolved_static_ip_name=%s attached_to=%s', order_data.get('order_no'), original_name, ip_address, resolved_name, item.get('attachedTo') or '')
+                    return resolved_name
+        token = response.get('nextPageToken')
+        if not token:
+            break
+    return original_name
 
 
 def _move_static_ip_sync(order_data: dict, instance_name: str, static_ip_name: str, temp_static_ip_name: str = '') -> tuple[bool, str, str]:
@@ -344,6 +382,7 @@ def _move_static_ip_sync(order_data: dict, instance_name: str, static_ip_name: s
     except ImportError:
         return False, '', '未安装 boto3/botocore，无法迁移 AWS 固定 IP。'
     try:
+        static_ip_name = _resolve_static_ip_name_for_move(client, static_ip_name, order_data)
         logger.info('AWS 固定 IP 迁移开始: order=%s static_ip_name=%s target_instance=%s temp_static_ip_name=%s', order_no, static_ip_name, instance_name, temp_static_ip_name)
         try:
             client.attach_static_ip(staticIpName=static_ip_name, instanceName=instance_name)

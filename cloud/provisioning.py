@@ -6,7 +6,7 @@ from django.utils import timezone
 from django.db.models import Q
 
 from cloud.models import CloudAsset, Server
-from cloud.services import _update_order_primary_records, build_cloud_server_name, ensure_unique_cloud_server_name, record_cloud_ip_log
+from cloud.services import _resolve_aws_static_ip_name_for_order, _update_order_primary_records, build_cloud_server_name, ensure_unique_cloud_server_name, record_cloud_ip_log
 from core.cloud_accounts import choose_cloud_account_for_order, cloud_account_label, list_cloud_accounts_by_server_load
 from cloud.aliyun_simple import create_instance as create_aliyun_instance
 from cloud.aws_lightsail import create_instance as create_aws_instance, get_instance_public_ip, move_static_ip_to_instance
@@ -191,6 +191,8 @@ def _aws_order_payload(order: CloudServerOrder, *, static_ip_name: str | None = 
         'skip_static_ip': skip_static_ip,
         'cloud_account_id': order.cloud_account_id,
         'account_label': order.account_label,
+        'public_ip': order.public_ip,
+        'previous_public_ip': order.previous_public_ip,
     }
 
 
@@ -221,15 +223,25 @@ def _get_rebuild_static_ip_context(order_id: int):
     source = order.replacement_for if order and order.replacement_for_id else None
     if not order or not source or order.provider != 'aws_lightsail' or not order.static_ip_name or not source.static_ip_name:
         return {'is_rebuild': False}
+    original_static_ip_name = source.static_ip_name
+    resolved_static_ip_name = _resolve_aws_static_ip_name_for_order(source)
+    if resolved_static_ip_name and resolved_static_ip_name != original_static_ip_name:
+        source.static_ip_name = resolved_static_ip_name
+        source.save(update_fields=['static_ip_name', 'updated_at'])
+        order.static_ip_name = resolved_static_ip_name
+        order.save(update_fields=['static_ip_name', 'updated_at'])
+        original_static_ip_name = resolved_static_ip_name
+    payload = _aws_order_payload(order, static_ip_name='', skip_static_ip=True)
+    payload['original_public_ip'] = source.public_ip or source.previous_public_ip
     return {
         'is_rebuild': True,
         'source_order_id': source.id,
         'source_order_no': source.order_no,
-        'original_static_ip_name': source.static_ip_name,
+        'original_static_ip_name': original_static_ip_name,
         'temp_static_ip_name': '',
         'source_server_name': source.server_name,
         'source_instance_id': source.instance_id,
-        'payload': _aws_order_payload(order, static_ip_name='', skip_static_ip=True),
+        'payload': payload,
     }
 
 
@@ -449,6 +461,13 @@ def _mark_provisioning_start(order_id: int, server_name: str):
     return order
 
 
+FAILED_INSTANCE_CLEANUP_DELAY = timezone.timedelta(days=1)
+
+
+def _failed_instance_cleanup_note(cleanup_at):
+    return f'创建流程未完成，已计划在 {timezone.localtime(cleanup_at):%Y-%m-%d %H:%M} 自动删除失败新实例。'
+
+
 def _is_transient_create_failure(note: str) -> bool:
     text = str(note or '').lower()
     transient_markers = [
@@ -530,11 +549,14 @@ async def provision_cloud_server(order_id: int):
                 )
                 if result.ok:
                     break
+                if getattr(result, 'instance_id', ''):
+                    logger.warning('云服务器实例已创建但流程未完成，停止账号轮询并等待失败清理: order=%s account=%s instance_id=%s note=%s', order.order_no, account_label, result.instance_id, (result.note or '')[:1000])
+                    break
                 if create_attempt < create_attempts and _is_transient_create_failure(result.note):
                     logger.warning('云服务器创建遇到临时错误，先重试当前账号: order=%s account=%s note=%s', order.order_no, account_label, (result.note or '')[:1000])
                     continue
                 break
-            if result.ok:
+            if result.ok or getattr(result, 'instance_id', ''):
                 break
             attempted_notes.append(f'{account_label}: {result.note}')
             if attempt_index < len(account_ids):
@@ -568,9 +590,10 @@ async def provision_cloud_server(order_id: int):
                     rebuild_context.get('temp_static_ip_name') or final_static_ip_name,
                 )
                 if not ok_move:
-                    note = '\n'.join(part for part in [result.note, move_note] if part)
-                    logger.warning('云服务器重建失败: order=%s reason=static_ip_move_failed note=%s', order.order_no, move_note)
-                    saved = await _mark_failed(order_id, note)
+                    cleanup_at = timezone.now() + FAILED_INSTANCE_CLEANUP_DELAY
+                    note = '\n'.join(part for part in [result.note, move_note, _failed_instance_cleanup_note(cleanup_at)] if part)
+                    logger.warning('云服务器重建失败: order=%s reason=static_ip_move_failed cleanup_at=%s note=%s', order.order_no, cleanup_at, move_note)
+                    saved = await _mark_failed(order_id, note, cleanup_at=cleanup_at)
                     clear_provision_progress(order_id)
                     print('[PROVISION_RESULT]', {'order_id': saved.id, 'order_no': saved.order_no, 'status': saved.status, 'error': saved.provision_note})
                     return saved
@@ -660,13 +683,27 @@ async def provision_cloud_server(order_id: int):
             )
             return saved
 
+        cleanup_at = None
+        if getattr(result, 'instance_id', ''):
+            order = await _mark_instance_created(
+                order.id,
+                result.instance_id,
+                result.instance_id,
+                result.public_ip,
+                result.login_user or login_user,
+                result.login_password,
+                result.note,
+            )
+            cleanup_at = timezone.now() + FAILED_INSTANCE_CLEANUP_DELAY
+        note = '\n'.join(part for part in [result.note, _failed_instance_cleanup_note(cleanup_at) if cleanup_at else ''] if part)
         logger.warning(
-            '云服务器开通失败: order=%s reason=create_failed note=%s elapsed_seconds=%s',
+            '云服务器开通失败: order=%s reason=create_failed cleanup_at=%s note=%s elapsed_seconds=%s',
             order.order_no,
-            (result.note or '')[:1500],
+            cleanup_at,
+            (note or '')[:1500],
             (timezone.now() - started_at).total_seconds(),
         )
-        saved = await _mark_failed(order_id, result.note)
+        saved = await _mark_failed(order_id, note, cleanup_at=cleanup_at)
         clear_provision_progress(order_id)
         logger.warning('云服务器开通结束: order=%s status=%s note=%s', saved.order_no, saved.status, (saved.provision_note or '')[:1500])
         print('[PROVISION_RESULT]', {'order_id': saved.id, 'order_no': saved.order_no, 'status': saved.status, 'error': saved.provision_note})
@@ -866,12 +903,15 @@ def _mark_success(order_id: int, server_name: str, instance_id: str, public_ip: 
 
 
 @sync_to_async
-def _mark_failed(order_id: int, note: str):
-    logger.info('[PROVISION] mark_failed_start order_id=%s note=%s', order_id, (note or '')[:1500])
+def _mark_failed(order_id: int, note: str, cleanup_at=None):
+    logger.info('[PROVISION] mark_failed_start order_id=%s cleanup_at=%s note=%s', order_id, cleanup_at, (note or '')[:1500])
     order = CloudServerOrder.objects.get(id=order_id)
     order.status = 'failed'
     order.provision_note = note
     order.save(update_fields=['status', 'provision_note', 'updated_at'])
+    if cleanup_at and (order.server_name or order.instance_id):
+        CloudServerOrder.objects.filter(id=order.id).update(delete_at=cleanup_at, updated_at=timezone.now())
+        order.delete_at = cleanup_at
     server_record = _upsert_server_record(order, note)
     _update_order_primary_records(
         order,

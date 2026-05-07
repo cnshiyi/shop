@@ -3056,6 +3056,10 @@ def create_cloud_server_upgrade_order(order_id: int, user_id: int, target_plan_i
         return None, '当前仅支持 AWS Lightsail 修改配置迁移'
     if order.status not in {'completed', 'expiring', 'suspended'}:
         return None, '当前状态不允许修改配置'
+    resolved_static_ip_name = _resolve_aws_static_ip_name_for_order(order)
+    if resolved_static_ip_name and resolved_static_ip_name != order.static_ip_name:
+        order.static_ip_name = resolved_static_ip_name
+        order.save(update_fields=['static_ip_name', 'updated_at'])
     if not order.static_ip_name:
         return None, '当前服务器没有固定 IP，无法保证链接不变'
     if not _has_main_proxy_link(order):

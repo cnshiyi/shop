@@ -219,6 +219,9 @@ def _get_due_orders():
                 _append_due(due, 'delete', order)
             if order.status == 'deleted' and ip_recycle_at and ip_recycle_at <= now:
                 _append_due(due, 'recycle', order)
+    failed_cleanup_orders = CloudServerOrder.objects.filter(status='failed', delete_at__isnull=False, delete_at__lte=now).filter(Q(server_name__gt='') | Q(instance_id__gt='')).select_related('user')
+    for order in failed_cleanup_orders:
+        _append_due(due, 'delete', order)
     return {
         'renew_notice': list(due['renew_notice'].values()),
         'auto_renew_notice': list(due['auto_renew_notice'].values()),
@@ -1664,6 +1667,9 @@ async def lifecycle_tick(notify=None, notify_target=None, defer_destructive_seco
         result = await _delete_instance(order)
         note = _action_note(result)
         if _action_ok(result):
+            if order.status == 'failed':
+                await _mark_deleted(order.id, note or '失败新实例已按计划自动删除。')
+                continue
             notice = await _cloud_expiry_notice_payload(order.id)
             if not notice.get('valid'):
                 continue
