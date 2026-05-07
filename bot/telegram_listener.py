@@ -110,6 +110,15 @@ def _config_bool(value) -> bool:
     return str(value or '').strip().lower() in {'1', 'true', 'yes', 'on'}
 
 
+def _is_self_sender(sender, self_user_id) -> bool:
+    if not sender or self_user_id in (None, ''):
+        return False
+    try:
+        return int(getattr(sender, 'id', 0) or 0) == int(self_user_id)
+    except (TypeError, ValueError):
+        return False
+
+
 def _build_push_payload(*, is_outgoing: bool, is_private_chat: bool, sender_name: str | None, chat_title: str | None, text: str, content_type: str, private_enabled: bool, group_push_enabled: bool = False) -> tuple[str, str] | None:
     if is_outgoing:
         return None
@@ -249,7 +258,7 @@ async def _send_listener_push(*, title: str, body: str) -> bool:
         return False
 
 
-async def _record_event(account: LoginAccountSnapshot, event):
+async def _record_event(account: LoginAccountSnapshot, event, self_user_id=None):
     from telethon.tl.types import User
 
     message = event.message
@@ -257,7 +266,7 @@ async def _record_event(account: LoginAccountSnapshot, event):
         return
     sender = await event.get_sender()
     chat = await event.get_chat()
-    is_outgoing = bool(getattr(message, 'out', False))
+    is_outgoing = bool(getattr(message, 'out', False)) or _is_self_sender(sender, self_user_id)
     is_group_chat = not isinstance(chat, User)
     counterpart = None
     if is_outgoing and isinstance(chat, User):
@@ -322,10 +331,13 @@ async def _run_account_listener(account: LoginAccountSnapshot, stop_event: async
             await _mark_account(account.id, 'session_expired', 'Telegram 会话已失效，请重新登录')
             return
 
+        me = await client.get_me()
+        self_user_id = int(getattr(me, 'id', 0) or 0) or None
+
         @client.on(events.NewMessage())
         async def _handler(event):
             try:
-                await _record_event(account, event)
+                await _record_event(account, event, self_user_id=self_user_id)
             except Exception as exc:
                 logger.warning('个人号消息入库失败 account=%s err=%s', account.id, exc)
 

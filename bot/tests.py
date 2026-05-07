@@ -4,7 +4,7 @@ from asgiref.sync import async_to_sync
 from django.test import SimpleTestCase
 
 from bot.handlers import _retained_ip_renewal_plan_keyboard, _validate_reinstall_proxy_link
-from bot.telegram_listener import _build_bark_request, _build_push_payload
+from bot.telegram_listener import _build_bark_request, _build_push_payload, _is_self_sender
 from core.texts import BOT_TEXTS
 
 
@@ -45,6 +45,11 @@ class TelegramListenerPushTestCase(SimpleTestCase):
             private_enabled=True,
         )
         self.assertIsNone(payload)
+
+    def test_is_self_sender_matches_login_account_id(self):
+        self.assertTrue(_is_self_sender(SimpleNamespace(id='12345'), 12345))
+        self.assertFalse(_is_self_sender(SimpleNamespace(id='12345'), 67890))
+        self.assertFalse(_is_self_sender(SimpleNamespace(id='abc'), 12345))
 
     def test_build_bark_request_defaults_to_critical_notification(self):
         url, params = _build_bark_request(
