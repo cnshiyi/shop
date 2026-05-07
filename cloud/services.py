@@ -2934,6 +2934,8 @@ def list_cloud_server_upgrade_plans(order_id: int, user_id: int, admin: bool = F
     current_price = _renewal_price(order, order.user)
     blocks, target_expiry, _ = _upgrade_blocks_and_expiry(order.service_expires_at)
     plans = list(CloudServerPlan.objects.filter(provider=order.provider, region_code=order.region_code, is_active=True).order_by('price', 'sort_order', 'id'))
+    if not plans:
+        plans = list(CloudServerPlan.objects.filter(provider=order.provider, is_active=True).order_by('price', 'sort_order', 'id'))
     result = []
     for plan in plans:
         if plan.id == getattr(order, 'plan_id', None):
@@ -2968,6 +2970,8 @@ def create_cloud_server_upgrade_order(order_id: int, user_id: int, target_plan_i
         return None, '当前服务器缺少 MTProxy 密钥，无法保证链接不变'
     target_plan = CloudServerPlan.objects.filter(id=target_plan_id, provider=order.provider, region_code=order.region_code, is_active=True).first()
     if not target_plan:
+        target_plan = CloudServerPlan.objects.filter(id=target_plan_id, provider=order.provider, is_active=True).first()
+    if not target_plan:
         return None, '目标套餐不存在'
     current_price = _renewal_price(order, order.user)
     target_price = _apply_cloud_discount(Decimal(target_plan.price), order.user.cloud_discount_rate)
@@ -2999,8 +3003,8 @@ def create_cloud_server_upgrade_order(order_id: int, user_id: int, target_plan_i
         provider=target_plan.provider,
         cloud_account=order.cloud_account,
         account_label=order.account_label or order.provider,
-        region_code=target_plan.region_code,
-        region_name=target_plan.region_name,
+        region_code=order.region_code or target_plan.region_code,
+        region_name=order.region_name or target_plan.region_name,
         plan_name=target_plan.plan_name,
         provider_resource_id=(target_plan.provider_plan_id or None),
         quantity=1,
