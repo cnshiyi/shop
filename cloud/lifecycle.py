@@ -1371,23 +1371,25 @@ def _active_lifecycle_sync_accounts(provider: str):
 
 
 async def sync_server_status_tick():
-    regions = [
-        ('aliyun_simple', os.getenv('ALIYUN_REGION', 'cn-hongkong') or 'cn-hongkong'),
-        ('aws_lightsail', os.getenv('AWS_REGION', 'ap-southeast-1') or 'ap-southeast-1'),
+    sync_targets = [
+        (CloudAccountConfig.PROVIDER_ALIYUN, 'aliyun_simple', 'sync_aliyun_assets'),
+        (CloudAccountConfig.PROVIDER_AWS, 'aws_lightsail', 'sync_aws_assets'),
     ]
-    for provider, region in regions:
+    for account_provider, provider, command_name in sync_targets:
         try:
-            if provider == 'aliyun_simple':
-                accounts = await sync_to_async(_active_lifecycle_sync_accounts)(CloudAccountConfig.PROVIDER_ALIYUN)
-                command_name = 'sync_aliyun_assets'
-            else:
-                accounts = await sync_to_async(_active_lifecycle_sync_accounts)(CloudAccountConfig.PROVIDER_AWS)
-                command_name = 'sync_aws_assets'
+            accounts = await sync_to_async(_active_lifecycle_sync_accounts)(account_provider)
             for account in accounts:
-                await sync_to_async(call_command, thread_sensitive=False)(command_name, region=region, account_id=str(account.id))
-                logger.info('云服务器状态同步完成: provider=%s region=%s account_id=%s', provider, region, account.id)
+                if account_provider == CloudAccountConfig.PROVIDER_AWS:
+                    region = os.getenv('AWS_REGION', '').strip()
+                else:
+                    region = (getattr(account, 'region_hint', '') or os.getenv('ALIYUN_REGION', '') or 'cn-hongkong').strip()
+                kwargs = {'account_id': str(account.id)}
+                if region:
+                    kwargs['region'] = region
+                await sync_to_async(call_command, thread_sensitive=False)(command_name, **kwargs)
+                logger.info('云服务器状态同步完成: provider=%s region=%s account_id=%s', provider, region or 'all', account.id)
         except Exception as exc:
-            logger.warning('云服务器状态同步失败: provider=%s region=%s error=%s', provider, region, exc)
+            logger.warning('云服务器状态同步失败: provider=%s error=%s', provider, exc)
 
 
 async def sync_cloud_accounts_tick():

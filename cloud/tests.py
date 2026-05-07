@@ -1,4 +1,5 @@
 import json
+import os
 from decimal import Decimal
 from unittest.mock import patch
 
@@ -14,7 +15,7 @@ from bot.api import _shutdown_log_items, _unattached_ip_delete_items
 from bot.models import TelegramGroupFilter, TelegramUser
 from cloud.bootstrap import _build_mtproxy_script, _extract_tg_links
 from cloud.models import CloudAsset, CloudAutoRenewPatrolLog, CloudIpLog, CloudServerOrder, CloudServerPlan, CloudUserNoticeLog, Server
-from cloud.lifecycle import _apply_notice_schedule_to_order, _get_due_orders, _get_migration_due_orders, _get_orphan_asset_delete_due, _is_cloud_delete_safe_time, _is_cloud_suspend_time, _mark_suspended, _next_cloud_action_run_at, _notice_plan_text, _send_logged_cloud_notice, lifecycle_tick
+from cloud.lifecycle import _apply_notice_schedule_to_order, _get_due_orders, _get_migration_due_orders, _get_orphan_asset_delete_due, _is_cloud_delete_safe_time, _is_cloud_suspend_time, _mark_suspended, _next_cloud_action_run_at, _notice_plan_text, _send_logged_cloud_notice, lifecycle_tick, sync_server_status_tick
 from cloud.ports import get_mtproxy_port_label, get_mtproxy_public_ports, is_valid_mtproxy_main_port
 from cloud.provisioning import (
     _candidate_cloud_account_ids,
@@ -1993,6 +1994,40 @@ class CloudServerServicesTestCase(TestCase):
         self.assertEqual(mocked.call_args.args[0], 'sync_aws_assets')
         self.assertEqual(mocked.call_args.kwargs['account_id'], str(account.id))
         self.assertEqual(mocked.call_args.kwargs['region'], 'ap-southeast-1')
+
+    def test_lifecycle_aws_sync_scans_all_regions_without_env_region(self):
+        aws_account = CloudAccountConfig.objects.create(
+            provider=CloudAccountConfig.PROVIDER_AWS,
+            name='aws-lifecycle-all-region-sync',
+            external_account_id='acct-aws-lifecycle-all',
+            access_key='ak',
+            secret_key='sk',
+            region_hint='ap-southeast-1',
+            is_active=True,
+        )
+        aliyun_account = CloudAccountConfig.objects.create(
+            provider=CloudAccountConfig.PROVIDER_ALIYUN,
+            name='aliyun-lifecycle-region-sync',
+            external_account_id='acct-aliyun-lifecycle',
+            access_key='ak',
+            secret_key='sk',
+            region_hint='cn-hongkong',
+            is_active=True,
+        )
+        calls = []
+
+        def fake_call_command(command_name, **kwargs):
+            calls.append((command_name, kwargs))
+
+        with patch.dict(os.environ, {'AWS_REGION': '', 'ALIYUN_REGION': ''}, clear=False), patch('cloud.lifecycle.call_command', side_effect=fake_call_command):
+            async_to_sync(sync_server_status_tick)()
+
+        aws_call = next(item for item in calls if item[0] == 'sync_aws_assets')
+        aliyun_call = next(item for item in calls if item[0] == 'sync_aliyun_assets')
+        self.assertEqual(aws_call[1]['account_id'], str(aws_account.id))
+        self.assertNotIn('region', aws_call[1])
+        self.assertEqual(aliyun_call[1]['account_id'], str(aliyun_account.id))
+        self.assertEqual(aliyun_call[1]['region'], 'cn-hongkong')
 
     def test_delete_cloud_asset_only_removes_asset_record(self):
         order = CloudServerOrder.objects.create(
