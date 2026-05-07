@@ -473,6 +473,7 @@ async def _reply_cloud_query_results(message: Message, raw_text: str, state: FSM
                     'renewable': True,
                     'order_id': 0,
                     'asset_id': asset.id,
+                    'start_order_id': getattr(asset, 'order_id', None) or 0,
                     'can_reinit': can_admin_asset_reinit,
                     'can_config': can_admin_asset_config,
                     '_expires_at': expires_at,
@@ -543,7 +544,7 @@ async def _reply_cloud_query_results(message: Message, raw_text: str, state: FSM
     total_pages = max(1, math.ceil(len(results) / per_page))
     page_items = results[(page - 1) * per_page: page * per_page]
     text = '🔎 IP批量查询结果\n\n' + '\n\n'.join(item['text'] for item in page_items)
-    renewable_items = [{'ip': item['ip'], 'order_id': item.get('order_id') or 0, 'asset_id': item.get('asset_id') or 0, 'can_reinit': item.get('can_reinit'), 'can_config': item.get('can_config')} for item in page_items if item['renewable'] and (item.get('order_id') or item.get('asset_id'))]
+    renewable_items = [{'ip': item['ip'], 'order_id': item.get('order_id') or 0, 'asset_id': item.get('asset_id') or 0, 'start_order_id': item.get('start_order_id') or 0, 'can_reinit': item.get('can_reinit'), 'can_config': item.get('can_config')} for item in page_items if item['renewable'] and (item.get('order_id') or item.get('asset_id'))]
     sent = await message.answer(text, reply_markup=cloud_ip_query_result(page_items, renewable_items, page, total_pages, include_start=include_start, include_reinit=include_start), parse_mode='HTML')
     logger.info(
         'BOT_MESSAGE_SEND route=cloud_ip_query_result user_id=%s chat_id=%s reply_to=%s sent_message_id=%s result_count=%s renewable_count=%s page=%s total_pages=%s include_start=%s text_preview=%s',
@@ -2544,7 +2545,7 @@ def register_handlers(dp: Dispatcher):
         page = min(page, total_pages)
         page_items = results[(page - 1) * per_page: page * per_page]
         text = '🔎 IP批量查询结果\n\n' + '\n\n'.join(item['text'] for item in page_items)
-        renewable_items = [{'ip': item['ip'], 'order_id': item.get('order_id') or 0, 'asset_id': item.get('asset_id') or 0, 'can_reinit': item.get('can_reinit'), 'can_config': item.get('can_config')} for item in page_items if item['renewable'] and (item.get('order_id') or item.get('asset_id'))]
+        renewable_items = [{'ip': item['ip'], 'order_id': item.get('order_id') or 0, 'asset_id': item.get('asset_id') or 0, 'start_order_id': item.get('start_order_id') or 0, 'can_reinit': item.get('can_reinit'), 'can_config': item.get('can_config')} for item in page_items if item['renewable'] and (item.get('order_id') or item.get('asset_id'))]
         is_admin = await _is_admin_chat(callback.message)
         await _safe_edit_text(callback.message, text, reply_markup=cloud_ip_query_result(page_items, renewable_items, page, total_pages, include_start=is_admin, include_reinit=is_admin), parse_mode='HTML')
 

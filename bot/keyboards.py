@@ -748,6 +748,9 @@ def cloud_ip_query_result(result_items, renewable_items, page: int = 1, total_pa
                 action_buttons.append(InlineKeyboardButton(text=f'⚙️ 修改配置 {ip}', callback_data=f'cloud:upgrade:{order_id}'))
         elif asset_id > 0:
             action_buttons.append(InlineKeyboardButton(text=f'🔄 续费IP {ip}', callback_data=f'cloud:assetaction:renew:{asset_id}'))
+            start_order_id = int(item.get('start_order_id') or 0)
+            if include_start and start_order_id > 0:
+                action_buttons.append(InlineKeyboardButton(text=f'▶️ 开机 {ip}', callback_data=f'cloud:start:{start_order_id}'))
             if include_reinit and item.get('can_reinit'):
                 action_buttons.append(InlineKeyboardButton(text=f'🛠 重装IP {ip}', callback_data=f'cloud:assetinit:{asset_id}:cloud:querymenu'))
             if include_reinit and item.get('can_config'):

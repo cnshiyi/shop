@@ -331,7 +331,7 @@ def _ensure_mtproxy_after_renewal(order: CloudServerOrder) -> tuple[bool, str]:
         if ok:
             return True, '\n'.join(probe_notes)
         time.sleep(10)
-    logger.warning('CLOUD_RENEW_MTPROXY_REINSTALL order=%s ip=%s reason=%s', order.order_no, order.public_ip, note)
+    logger.warning('CLOUD_MTPROXY_REINSTALL order=%s ip=%s reason=%s', order.order_no, order.public_ip, note)
     install_ok, install_note = async_to_sync(install_mtproxy)(
         order.public_ip,
         order.login_user or 'root',
@@ -340,7 +340,7 @@ def _ensure_mtproxy_after_renewal(order: CloudServerOrder) -> tuple[bool, str]:
         order.mtproxy_secret or '',
         order.mtproxy_secret or '',
     )
-    return install_ok, '\n'.join(filter(None, [note, '续费后 MTProxy 异常，已重新安装。' if install_ok else '续费后 MTProxy 异常，重新安装失败。', install_note]))
+    return install_ok, '\n'.join(filter(None, [note, 'MTProxy 异常，已重新安装。' if install_ok else 'MTProxy 异常，重新安装失败。', install_note]))
 
 CUSTOM_REGIONS_CACHE_KEY = 'custom:regions:v1'
 CUSTOM_PLANS_CACHE_PREFIX = 'custom:plans:v1:'
@@ -2444,27 +2444,47 @@ def start_cloud_server_from_admin(order_id: int):
         instance = client.get_instance(instanceName=order.server_name).get('instance') or {}
         state = ((instance.get('state') or {}).get('name') or '').lower()
         public_ip = instance.get('publicIpAddress') or order.public_ip or order.previous_public_ip or '-'
+        notes = [f'云端初始状态: {state or "未知"}；IP={public_ip}。']
+        ok = True
+        sync_state = state
         if state == 'running':
-            note = f'当前已开机运行，无需重复开机。云端状态: running；IP={public_ip}。'
-            ok = True
-            sync_state = state
+            notes.append('服务器已在运行，无需云端开机。')
         elif state == 'stopped':
             client.start_instance(instanceName=order.server_name)
-            note = f'检测到云端状态 stopped，已发起开机。IP={public_ip}。'
-            ok = True
             sync_state = 'starting'
+            notes.append('检测到关机状态，已发起开机。')
             logger.info('CLOUD_ADMIN_START_INSTANCE order=%s server_name=%s previous_state=%s ip=%s', order.order_no, order.server_name, state, public_ip)
         elif state in {'pending', 'starting'}:
-            note = f'实例正在启动中，无需重复开机。云端状态: {state}；IP={public_ip}。'
-            ok = True
-            sync_state = state
+            notes.append('实例正在启动中，不重复提交开机。')
         elif state in {'stopping', 'shutting-down'}:
             ok, wait_note, sync_state, public_ip = _start_aws_instance_after_shutdown(client, order, state, public_ip, log_tag='CLOUD_ADMIN_WAIT_SHUTDOWN_START_INSTANCE')
-            note = f'初始状态 {state}；{wait_note}'
+            notes.append(wait_note)
         else:
-            note = f'当前云端状态为 {state or "未知"}，未执行开机。IP={public_ip}。'
             ok = False
-            sync_state = state
+            notes.append(f'当前云端状态为 {state or "未知"}，未执行开机。')
+        if ok and sync_state != 'running':
+            running = False
+            for attempt in range(1, AWS_START_WAIT_ATTEMPTS + 1):
+                time.sleep(AWS_START_WAIT_SECONDS)
+                sync_state, queried_ip = _aws_lightsail_instance_state(client, order.server_name)
+                public_ip = queried_ip if queried_ip != '-' else public_ip
+                if sync_state == 'running':
+                    running = True
+                    notes.append(f'第 {attempt}/{AWS_START_WAIT_ATTEMPTS} 次检查：服务器已运行。')
+                    break
+                if sync_state in {'stopped', 'terminated', 'deleted'}:
+                    notes.append(f'第 {attempt}/{AWS_START_WAIT_ATTEMPTS} 次检查：状态为 {sync_state}，无法继续检查程序。')
+                    break
+            if not running:
+                ok = False
+                notes.append(f'服务器尚未确认运行，当前状态: {sync_state or "未知"}。')
+        if ok and sync_state == 'running':
+            _sync_order_cloud_runtime_state(order, sync_state, public_ip, '\n'.join(notes))
+            order.refresh_from_db()
+            mtproxy_ok, mtproxy_note = _ensure_mtproxy_after_renewal(order)
+            notes.append(mtproxy_note)
+            ok = mtproxy_ok
+        note = '\n'.join(filter(None, notes))
         order.provision_note = '\n'.join(filter(None, [order.provision_note, f'管理员手动开机：{note}']))
         order.save(update_fields=['provision_note', 'updated_at'])
         _sync_order_cloud_runtime_state(order, sync_state, public_ip, order.provision_note)
