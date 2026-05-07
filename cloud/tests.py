@@ -1955,6 +1955,29 @@ class CloudServerServicesTestCase(TestCase):
         self.assertIn(visible_asset.id, asset_ids)
         self.assertIn(hidden_asset.id, asset_ids)
 
+    def test_unattached_ip_delete_items_skip_assets_attached_to_instance(self):
+        attached_asset = CloudAsset.objects.create(
+            kind=CloudAsset.KIND_SERVER,
+            source=CloudAsset.SOURCE_AWS_SYNC,
+            user=self.user,
+            provider='aws_lightsail',
+            region_code=self.plan.region_code,
+            region_name=self.plan.region_name,
+            asset_name='attached-static-ip-asset',
+            public_ip='5.5.5.8',
+            instance_id='attached-instance-1',
+            actual_expires_at=timezone.now() + timezone.timedelta(days=1),
+            status=CloudAsset.STATUS_RUNNING,
+            is_active=True,
+            provider_status='未附加固定IP',
+            note='旧同步残留：未附加固定IP',
+        )
+
+        items = _unattached_ip_delete_items(limit=20)
+        asset_ids = {item.get('id') for item in items}
+
+        self.assertNotIn(attached_asset.id, asset_ids)
+
     def test_sync_cloud_asset_status_uses_asset_scope(self):
         account = CloudAccountConfig.objects.create(
             provider=CloudAccountConfig.PROVIDER_AWS,

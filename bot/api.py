@@ -394,6 +394,7 @@ def _unattached_ip_delete_items(limit=50):
         CloudAsset.objects.select_related('user', 'cloud_account')
         .filter(kind=CloudAsset.KIND_SERVER)
         .filter(Q(provider_status__icontains='未附加') | Q(note__icontains='未附加IP') | Q(note__icontains='未附加固定IP'))
+        .filter(Q(instance_id__isnull=True) | Q(instance_id=''))
         .exclude(status__in=[
             CloudAsset.STATUS_DELETED,
             CloudAsset.STATUS_DELETING,
