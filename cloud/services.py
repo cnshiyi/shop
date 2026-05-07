@@ -2899,6 +2899,18 @@ def _upgrade_blocks_and_expiry(expires_at):
     return blocks, now + timezone.timedelta(days=target_days), remaining_days
 
 
+def _cloud_config_effective_current_price(current_price: Decimal, plans: list[CloudServerPlan], user: TelegramUser | None = None) -> Decimal:
+    current_price = Decimal(current_price).quantize(Decimal('0.01'))
+    plan_prices = sorted({
+        _apply_cloud_discount(Decimal(plan.price), getattr(user, 'cloud_discount_rate', Decimal('0'))).quantize(Decimal('0.01'))
+        for plan in plans
+    })
+    for plan_price in plan_prices:
+        if plan_price >= current_price:
+            return plan_price
+    return current_price
+
+
 def _cloud_order_lifecycle_fields(expires_at, renew_extension_days: int = 0) -> dict:
     if not expires_at:
         return {}
@@ -2936,12 +2948,13 @@ def list_cloud_server_upgrade_plans(order_id: int, user_id: int, admin: bool = F
     plans = list(CloudServerPlan.objects.filter(provider=order.provider, region_code=order.region_code, is_active=True).order_by('price', 'sort_order', 'id'))
     if not plans:
         plans = list(CloudServerPlan.objects.filter(provider=order.provider, is_active=True).order_by('price', 'sort_order', 'id'))
+    effective_current_price = _cloud_config_effective_current_price(current_price, plans, order.user)
     result = []
     for plan in plans:
         if plan.id == getattr(order, 'plan_id', None):
             continue
         target_price = _apply_cloud_discount(Decimal(plan.price), order.user.cloud_discount_rate)
-        price_delta = target_price - current_price
+        price_delta = target_price - effective_current_price
         if price_delta == 0:
             continue
         diff = (max(price_delta, Decimal('0')) * Decimal(blocks)).quantize(Decimal('0.01'))
@@ -2974,11 +2987,15 @@ def create_cloud_server_upgrade_order(order_id: int, user_id: int, target_plan_i
     if not target_plan:
         return None, '目标套餐不存在'
     current_price = _renewal_price(order, order.user)
+    candidate_plans = list(CloudServerPlan.objects.filter(provider=order.provider, region_code=order.region_code, is_active=True).order_by('price', 'sort_order', 'id'))
+    if not candidate_plans:
+        candidate_plans = list(CloudServerPlan.objects.filter(provider=order.provider, is_active=True).order_by('price', 'sort_order', 'id'))
+    effective_current_price = _cloud_config_effective_current_price(current_price, candidate_plans, order.user)
     target_price = _apply_cloud_discount(Decimal(target_plan.price), order.user.cloud_discount_rate)
-    if target_plan.id == getattr(order, 'plan_id', None) or target_price == current_price:
+    if target_plan.id == getattr(order, 'plan_id', None) or target_price == effective_current_price:
         return None, '目标套餐与当前配置相同'
     blocks, target_expiry, _ = _upgrade_blocks_and_expiry(order.service_expires_at)
-    price_delta = target_price - current_price
+    price_delta = target_price - effective_current_price
     diff = (max(price_delta, Decimal('0')) * Decimal(blocks)).quantize(Decimal('0.01'))
     charged_amount = Decimal('0.00') if admin else diff
     action_label = '升级配置' if price_delta > 0 else '降级配置'

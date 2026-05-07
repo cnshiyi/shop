@@ -737,20 +737,23 @@ def cloud_ip_query_result(result_items, renewable_items, page: int = 1, total_pa
         ip = item.get('ip') or '未知IP'
         order_id = int(item.get('order_id') or 0)
         asset_id = int(item.get('asset_id') or 0)
+        action_buttons = []
         if order_id > 0:
-            kb.row(InlineKeyboardButton(text=f'🔄 续费IP {ip}', callback_data=f'cloud:renew:{order_id}'))
+            action_buttons.append(InlineKeyboardButton(text=f'🔄 续费IP {ip}', callback_data=f'cloud:renew:{order_id}'))
             if include_start:
-                kb.row(InlineKeyboardButton(text=f'▶️ 开机 {ip}', callback_data=f'cloud:start:{order_id}'))
+                action_buttons.append(InlineKeyboardButton(text=f'▶️ 开机 {ip}', callback_data=f'cloud:start:{order_id}'))
             if include_reinit and item.get('can_reinit'):
-                kb.row(InlineKeyboardButton(text=f'🛠 重装IP {ip}', callback_data=f'cloud:reinit:{order_id}'))
+                action_buttons.append(InlineKeyboardButton(text=f'🛠 重装IP {ip}', callback_data=f'cloud:reinit:{order_id}'))
             if include_reinit and item.get('can_config'):
-                kb.row(InlineKeyboardButton(text=f'⚙️ 修改配置 {ip}', callback_data=f'cloud:upgrade:{order_id}'))
+                action_buttons.append(InlineKeyboardButton(text=f'⚙️ 修改配置 {ip}', callback_data=f'cloud:upgrade:{order_id}'))
         elif asset_id > 0:
-            kb.row(InlineKeyboardButton(text=f'🔄 续费IP {ip}', callback_data=f'cloud:assetaction:renew:{asset_id}'))
+            action_buttons.append(InlineKeyboardButton(text=f'🔄 续费IP {ip}', callback_data=f'cloud:assetaction:renew:{asset_id}'))
             if include_reinit and item.get('can_reinit'):
-                kb.row(InlineKeyboardButton(text=f'🛠 重装IP {ip}', callback_data=f'cloud:assetinit:{asset_id}:cloud:querymenu'))
+                action_buttons.append(InlineKeyboardButton(text=f'🛠 重装IP {ip}', callback_data=f'cloud:assetinit:{asset_id}:cloud:querymenu'))
             if include_reinit and item.get('can_config'):
-                kb.row(InlineKeyboardButton(text=f'⚙️ 修改配置 {ip}', callback_data=f'cloud:assetaction:upgrade:{asset_id}'))
+                action_buttons.append(InlineKeyboardButton(text=f'⚙️ 修改配置 {ip}', callback_data=f'cloud:assetaction:upgrade:{asset_id}'))
+        for start in range(0, len(action_buttons), 2):
+            kb.row(*action_buttons[start:start + 2])
     nav = []
     if page > 1:
         nav.append(InlineKeyboardButton(text='⬅️ 上一页', callback_data=f'cloud:queryip:page:{page - 1}'))

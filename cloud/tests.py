@@ -288,6 +288,76 @@ class CloudServerServicesTestCase(TestCase):
         self.assertEqual(new_order.pay_amount, Decimal('0.000000000'))
         self.assertIn('DOWNGRADE', new_order.order_no)
 
+    def test_cloud_config_change_ceil_custom_price_to_plan_tier(self):
+        self.user.balance = Decimal('100.000000')
+        self.user.save(update_fields=['balance', 'updated_at'])
+        small_plan = CloudServerPlan.objects.create(
+            provider=self.plan.provider,
+            region_code=self.plan.region_code,
+            region_name=self.plan.region_name,
+            plan_name='Nano 512M 20G 1TB',
+            cpu='1核',
+            memory='512MB',
+            storage='20GB SSD',
+            bandwidth='1TB',
+            price='10.00',
+            currency='USDT',
+            is_active=True,
+            sort_order=99,
+        )
+        large_plan = CloudServerPlan.objects.create(
+            provider=self.plan.provider,
+            region_code=self.plan.region_code,
+            region_name=self.plan.region_name,
+            plan_name='Large 2G 60G 3TB',
+            cpu='2核',
+            memory='2GB',
+            storage='60GB SSD',
+            bandwidth='3TB',
+            price='29.00',
+            currency='USDT',
+            is_active=True,
+            sort_order=101,
+        )
+        source = CloudServerOrder.objects.create(
+            order_no='HB-TEST-CEIL-PRICE-SOURCE',
+            user=self.user,
+            plan=self.plan,
+            provider=self.plan.provider,
+            region_code=self.plan.region_code,
+            region_name=self.plan.region_name,
+            plan_name=self.plan.plan_name,
+            quantity=1,
+            currency='USDT',
+            total_amount='15.00',
+            pay_amount='15.00',
+            pay_method='balance',
+            status='completed',
+            public_ip='8.8.4.6',
+            previous_public_ip='8.8.4.6',
+            instance_id='ceil-source-instance',
+            static_ip_name='StaticIp-ceil-source',
+            mtproxy_port=9528,
+            mtproxy_secret='0123456789abcdef0123456789abcdef',
+            mtproxy_link='tg://proxy?server=8.8.4.6&port=9528&secret=0123456789abcdef0123456789abcdef',
+            proxy_links=[{'label': '主链路', 'url': 'tg://proxy?server=8.8.4.6&port=9528&secret=0123456789abcdef0123456789abcdef'}],
+            service_started_at=timezone.now() - timezone.timedelta(days=1),
+            service_expires_at=timezone.now() + timezone.timedelta(days=1),
+        )
+
+        plans, err = async_to_sync(list_cloud_server_upgrade_plans)(source.id, self.user.id)
+        large = next(plan for plan in plans if plan['id'] == large_plan.id)
+        same_order, same_err = async_to_sync(create_cloud_server_upgrade_order)(source.id, self.user.id, self.plan.id)
+        large_order, large_err = async_to_sync(create_cloud_server_upgrade_order)(source.id, self.user.id, large_plan.id)
+
+        self.assertIsNone(err)
+        self.assertTrue(any(plan['id'] == small_plan.id and plan['action'] == 'downgrade' for plan in plans))
+        self.assertEqual(large['diff'], '10.000')
+        self.assertIsNone(same_order)
+        self.assertEqual(same_err, '目标套餐与当前配置相同')
+        self.assertIsNone(large_err)
+        self.assertEqual(large_order.pay_amount, Decimal('10.000000000'))
+
     def test_due_orders_use_order_expiry_for_lightsail_instead_of_stale_asset_expiry(self):
         order = CloudServerOrder.objects.create(
             order_no='HB-LIFECYCLE-DUE-1',
