@@ -73,8 +73,21 @@ def _iso(value):
     return timezone.localtime(value).isoformat() if timezone.is_aware(value) else value.isoformat()
 
 
+DASHBOARD_SESSION_IDLE_SECONDS = 60 * 60
+
+
 def _staff_required(user):
     return user.is_active and (user.is_staff or user.is_superuser)
+
+
+def _refresh_dashboard_session(request, session_key: str | None = None):
+    session = getattr(request, 'session', None)
+    if session is not None:
+        session.set_expiry(DASHBOARD_SESSION_IDLE_SECONDS)
+    if session_key:
+        Session.objects.filter(session_key=session_key, expire_date__gt=timezone.now()).update(
+            expire_date=timezone.now() + timezone.timedelta(seconds=DASHBOARD_SESSION_IDLE_SECONDS)
+        )
 
 
 def _session_token_for_request(request) -> str:
@@ -147,35 +160,45 @@ def _verify_totp_token(token: str, secret: str) -> bool:
 
 
 def _user_from_bearer_session(token: str):
+    user, _session_key = _user_and_session_key_from_bearer_session(token)
+    return user
+
+
+def _user_and_session_key_from_bearer_session(token: str):
     prefix = 'session-'
     if not token.startswith(prefix):
-        return None
+        return None, None
     session_key = token[len(prefix):].strip()
     if not session_key or session_key.isdigit():
-        return None
+        return None, None
     session = Session.objects.filter(session_key=session_key, expire_date__gt=timezone.now()).first()
     if not session:
-        return None
+        return None, None
     data = session.get_decoded()
     raw_user_id = data.get('_auth_user_id')
     if not raw_user_id:
-        return None
+        return None, None
     from django.contrib.auth import get_user_model
 
-    return get_user_model().objects.filter(pk=raw_user_id, is_active=True).first()
+    user = get_user_model().objects.filter(pk=raw_user_id, is_active=True).first()
+    return user, session_key if user else None
 
 
 def _authenticate_dashboard_request(request):
     user = getattr(request, 'user', None)
     if user and user.is_authenticated:
-        return user if _staff_required(user) else None
+        if _staff_required(user):
+            _refresh_dashboard_session(request)
+            return user
+        return None
     auth_header = request.headers.get('Authorization') or ''
     prefix = 'Bearer '
     if not auth_header.startswith(prefix):
         return None
-    user = _user_from_bearer_session(auth_header[len(prefix):].strip())
+    user, session_key = _user_and_session_key_from_bearer_session(auth_header[len(prefix):].strip())
     if user and _staff_required(user):
         request.user = user
+        _refresh_dashboard_session(request, session_key=session_key)
         return user
     return None
 
@@ -1166,7 +1189,7 @@ def auth_login(request):
         return _error('Google 验证码错误或已过期', status=401)
 
     login(request, user)
-    request.session.set_expiry(2 * 60 * 60)
+    request.session.set_expiry(DASHBOARD_SESSION_IDLE_SECONDS)
     return _ok(_dashboard_session_payload(request))
 
 
@@ -1230,7 +1253,7 @@ def auth_totp_bind(request):
     SiteConfig.set('dashboard_totp_secret', secret, sensitive=True)
     request.session.pop('dashboard_totp_pending_secret', None)
     request.session.pop('dashboard_totp_replacing_existing', None)
-    request.session.set_expiry(2 * 60 * 60)
+    request.session.set_expiry(DASHBOARD_SESSION_IDLE_SECONDS)
     return _ok({'enabled': True})
 
 

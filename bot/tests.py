@@ -1,11 +1,39 @@
 from types import SimpleNamespace
 
 from asgiref.sync import async_to_sync
-from django.test import SimpleTestCase
+from django.contrib.auth import get_user_model
+from django.contrib.auth.models import AnonymousUser
+from django.contrib.sessions.middleware import SessionMiddleware
+from django.contrib.sessions.models import Session
+from django.test import RequestFactory, SimpleTestCase, TestCase
+from django.utils import timezone
 
+from bot.api import DASHBOARD_SESSION_IDLE_SECONDS, _authenticate_dashboard_request
 from bot.handlers import _retained_ip_renewal_plan_keyboard, _validate_reinstall_proxy_link
 from bot.telegram_listener import _build_bark_request, _build_push_payload, _is_self_sender
 from core.texts import BOT_TEXTS
+
+
+class DashboardSessionExpiryTestCase(TestCase):
+    def test_authenticated_dashboard_request_refreshes_one_hour_idle_expiry(self):
+        user = get_user_model().objects.create_user(username='dashboard_staff', password='pass', is_staff=True)
+        request = RequestFactory().get('/api/auth/codes')
+        SessionMiddleware(lambda req: None).process_request(request)
+        request.session['_auth_user_id'] = str(user.pk)
+        request.session['_auth_user_backend'] = 'django.contrib.auth.backends.ModelBackend'
+        request.session['_auth_user_hash'] = user.get_session_auth_hash()
+        request.session.set_expiry(60)
+        request.session.save()
+        request.user = AnonymousUser()
+        request.META['HTTP_AUTHORIZATION'] = f'Bearer session-{request.session.session_key}'
+
+        authenticated = _authenticate_dashboard_request(request)
+
+        self.assertEqual(authenticated, user)
+        refreshed = Session.objects.get(session_key=request.session.session_key)
+        remaining_seconds = (refreshed.expire_date - timezone.now()).total_seconds()
+        self.assertGreater(remaining_seconds, DASHBOARD_SESSION_IDLE_SECONDS - 30)
+        self.assertLessEqual(remaining_seconds, DASHBOARD_SESSION_IDLE_SECONDS + 30)
 
 
 class TelegramListenerPushTestCase(SimpleTestCase):
