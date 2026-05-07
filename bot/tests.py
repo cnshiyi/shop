@@ -79,7 +79,7 @@ class TelegramListenerPushTestCase(SimpleTestCase):
         self.assertFalse(_is_self_sender(SimpleNamespace(id='12345'), 67890))
         self.assertFalse(_is_self_sender(SimpleNamespace(id='abc'), 12345))
 
-    def test_build_bark_request_defaults_to_critical_notification(self):
+    def test_build_bark_request_defaults_to_foldable_notification(self):
         url, params = _build_bark_request(
             'https://api.day.app/key/重要警告',
             title='📨 私聊消息',
@@ -90,7 +90,7 @@ class TelegramListenerPushTestCase(SimpleTestCase):
         self.assertEqual(url, 'https://api.day.app/key/重要警告')
         self.assertEqual(params['title'], '📨 私聊消息')
         self.assertEqual(params['body'], '收到一条新的私聊消息')
-        self.assertEqual(params['level'], 'critical')
+        self.assertEqual(params['level'], 'active')
         self.assertEqual(params['volume'], '5')
         self.assertEqual(params['sound'], 'paymentsuccess')
         self.assertEqual(params['group'], 'telegram-listener')

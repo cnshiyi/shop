@@ -226,7 +226,7 @@ def _bark_encrypt_payload(payload: dict[str, str], config: dict) -> tuple[str, s
 def _build_bark_request(bark_url: str, *, title: str, body: str, config: dict) -> tuple[str, dict[str, str]]:
     base_url, params, path_title = _split_bark_url(bark_url)
     notification_params = {
-        'level': 'critical',
+        'level': 'active',
         'volume': '5',
         'sound': 'paymentsuccess',
         'group': 'telegram-listener',
