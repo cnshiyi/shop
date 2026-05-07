@@ -1,6 +1,8 @@
 import asyncio
+import contextlib
 import logging
 import os
+import time
 from pathlib import Path
 
 os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'shop.settings')
@@ -25,6 +27,49 @@ from orders.runtime import check_resources, scan_forever, set_bot, set_resource_
 
 logger = logging.getLogger(__name__)
 
+BOT_ALIVE_LOG_INTERVAL_SECONDS = int(os.getenv('BOT_ALIVE_LOG_INTERVAL_SECONDS', '60') or '60')
+
+
+def _log_task_done(name: str):
+    def _callback(task: asyncio.Task):
+        if task.cancelled():
+            logger.warning('BOT_TASK_CANCELLED name=%s', name)
+            return
+        try:
+            exc = task.exception()
+        except Exception as err:
+            logger.exception('BOT_TASK_EXCEPTION_READ_FAILED name=%s error=%s', name, err)
+            return
+        if exc:
+            logger.exception('BOT_TASK_CRASHED name=%s error=%s', name, exc, exc_info=(type(exc), exc, exc.__traceback__))
+        else:
+            logger.warning('BOT_TASK_EXITED name=%s result=completed_without_exception', name)
+    return _callback
+
+
+async def _bot_alive_logger(started_at: float, scheduler: AsyncIOScheduler, scanner_task: asyncio.Task, telegram_listener_task: asyncio.Task):
+    while True:
+        await asyncio.sleep(max(BOT_ALIVE_LOG_INTERVAL_SECONDS, 10))
+        uptime_seconds = int(time.time() - started_at)
+        try:
+            jobs = scheduler.get_jobs() if scheduler.running else []
+            job_summary = ','.join(
+                f'{job.id}:{job.next_run_time.isoformat() if job.next_run_time else "none"}'
+                for job in jobs
+            )
+            logger.info(
+                'BOT_ALIVE pid=%s uptime_seconds=%s scheduler_running=%s jobs=%s scanner_done=%s listener_done=%s pending_tasks=%s',
+                os.getpid(),
+                uptime_seconds,
+                scheduler.running,
+                job_summary or '-',
+                scanner_task.done(),
+                telegram_listener_task.done(),
+                len([task for task in asyncio.all_tasks() if not task.done()]),
+            )
+        except Exception as exc:
+            logger.exception('BOT_ALIVE_LOG_FAILED error=%s', exc)
+
 
 async def delete_webhook_with_retry(bot, retries: int = 5, base_delay: float = 2.0):
     for attempt in range(1, retries + 1):
@@ -41,6 +86,19 @@ async def delete_webhook_with_retry(bot, retries: int = 5, base_delay: float = 2
 
 
 async def run_bot():
+    started_at = time.time()
+    loop = asyncio.get_running_loop()
+
+    def _handle_loop_exception(_loop, context):
+        message = context.get('message') or 'event loop exception'
+        exception = context.get('exception')
+        if exception:
+            logger.exception('BOT_LOOP_EXCEPTION message=%s error=%s context=%s', message, exception, context, exc_info=(type(exception), exception, exception.__traceback__))
+        else:
+            logger.error('BOT_LOOP_EXCEPTION message=%s context=%s', message, context)
+
+    loop.set_exception_handler(_handle_loop_exception)
+    logger.info('BOT_PROCESS_START pid=%s alive_interval_seconds=%s', os.getpid(), BOT_ALIVE_LOG_INTERVAL_SECONDS)
     if not BOT_TOKEN:
         logger.warning('未配置 BOT_TOKEN，跳过机器人启动')
         return
@@ -99,9 +157,13 @@ async def run_bot():
     scheduler.add_job(lambda: asyncio.to_thread(call_command, 'cleanup_old_records'), 'cron', hour=18, minute=0, id='old_records_cleanup', max_instances=1, coalesce=True)
     scheduler.start()
     scanner_stop = asyncio.Event()
-    scanner_task = asyncio.create_task(scan_forever(scanner_stop))
+    scanner_task = asyncio.create_task(scan_forever(scanner_stop), name='tron_scanner')
+    scanner_task.add_done_callback(_log_task_done('tron_scanner'))
     telegram_listener_stop = asyncio.Event()
-    telegram_listener_task = asyncio.create_task(run_telegram_account_listeners(telegram_listener_stop))
+    telegram_listener_task = asyncio.create_task(run_telegram_account_listeners(telegram_listener_stop), name='telegram_account_listener')
+    telegram_listener_task.add_done_callback(_log_task_done('telegram_account_listener'))
+    alive_task = asyncio.create_task(_bot_alive_logger(started_at, scheduler, scanner_task, telegram_listener_task), name='bot_alive_logger')
+    alive_task.add_done_callback(_log_task_done('bot_alive_logger'))
     logger.info('TRON 顺序扫块器已启动（移除6秒调度限制）')
     logger.info('资源巡检已启动 (每3分钟)')
     logger.info('定制套餐缓存刷新已启动 (每10分钟)')
@@ -123,17 +185,27 @@ async def run_bot():
             logger.exception('启动时云服务器生命周期检查失败: %s', exc)
         logger.info('Telegram Bot 已启动 (aiogram)')
         await delete_webhook_with_retry(bot)
-        await dp.start_polling(bot)
+        logger.info('BOT_POLLING_START pid=%s', os.getpid())
+        try:
+            await dp.start_polling(bot)
+            logger.warning('BOT_POLLING_STOPPED reason=returned_without_exception')
+        except Exception as exc:
+            logger.exception('BOT_POLLING_CRASHED error=%s', exc)
+            raise
     finally:
+        logger.warning('BOT_SHUTDOWN_START pid=%s uptime_seconds=%s', os.getpid(), int(time.time() - started_at))
         scanner_stop.set()
         scanner_task.cancel()
         telegram_listener_stop.set()
         telegram_listener_task.cancel()
-        await asyncio.gather(scanner_task, telegram_listener_task, return_exceptions=True)
-        scheduler.shutdown(wait=False)
+        alive_task.cancel()
+        await asyncio.gather(scanner_task, telegram_listener_task, alive_task, return_exceptions=True)
+        with contextlib.suppress(Exception):
+            scheduler.shutdown(wait=False)
         await cache_close()
         await close_fsm_storage()
         await bot.session.close()
+        logger.warning('BOT_SHUTDOWN_DONE pid=%s', os.getpid())
 
 
 def main():

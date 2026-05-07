@@ -122,7 +122,16 @@ def run_all() -> int:
     web_process = start_process('manage.py', 'runserver', '127.0.0.1:8000')
     bot_process = start_process('-m', 'bot.runner')
     try:
-        return web_process.wait()
+        while True:
+            web_code = web_process.poll()
+            bot_code = bot_process.poll()
+            if web_code is not None:
+                print(f'[run.py] web process exited code={web_code}', flush=True)
+                return web_code
+            if bot_code is not None:
+                print(f'[run.py] bot process exited code={bot_code}', flush=True)
+                return bot_code
+            time.sleep(2)
     finally:
         terminate_process(bot_process)
         terminate_process(web_process)
