@@ -93,6 +93,7 @@ class TelegramListenerPushTestCase(SimpleTestCase):
         self.assertEqual(params['level'], 'critical')
         self.assertEqual(params['volume'], '5')
         self.assertEqual(params['sound'], 'paymentsuccess')
+        self.assertEqual(params['group'], 'telegram-listener')
 
     def test_build_bark_request_keeps_existing_url_parameters(self):
         url, params = _build_bark_request(
@@ -106,6 +107,18 @@ class TelegramListenerPushTestCase(SimpleTestCase):
         self.assertEqual(params['level'], 'timeSensitive')
         self.assertEqual(params['volume'], '3')
         self.assertEqual(params['sound'], 'alarm')
+        self.assertEqual(params['group'], 'telegram-listener')
+
+    def test_build_bark_request_keeps_existing_group_parameter(self):
+        url, params = _build_bark_request(
+            'https://api.day.app/key/重要警告?group=shop-alerts',
+            title='📨 私聊消息',
+            body='收到一条新的私聊消息',
+            config={},
+        )
+
+        self.assertEqual(url, 'https://api.day.app/key/重要警告?group=shop-alerts')
+        self.assertEqual(params['group'], 'shop-alerts')
 
     def test_build_bark_request_adds_ciphertext_and_iv_when_encrypted(self):
         url, params = _build_bark_request(

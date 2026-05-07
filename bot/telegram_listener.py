@@ -229,6 +229,7 @@ def _build_bark_request(bark_url: str, *, title: str, body: str, config: dict) -
         'level': 'critical',
         'volume': '5',
         'sound': 'paymentsuccess',
+        'group': 'telegram-listener',
         **params,
     }
     payload = {**notification_params, 'title': title or path_title or '', 'body': body or ''}
