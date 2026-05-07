@@ -452,8 +452,7 @@ async def _reply_cloud_query_results(message: Message, raw_text: str, state: FSM
     results = []
     for index, ip in enumerate(query_ips):
         input_link = proxy_links_by_ip.get(ip)
-        order = await get_cloud_server_by_ip(ip)
-        if not order and include_start:
+        if include_start:
             asset = await get_proxy_asset_by_ip_for_admin(ip)
             if asset:
                 display_ip = str(asset.public_ip or asset.previous_public_ip or ip).strip()
@@ -470,7 +469,7 @@ async def _reply_cloud_query_results(message: Message, raw_text: str, state: FSM
                 can_admin_asset_config = bool(asset.provider == 'aws_lightsail')
                 results.append({
                     'ip': display_ip,
-                    'text': f'IP: <code>{escape(display_ip)}</code>\n到期时间: {expires_text}\n自动续费: 未绑定订单\n状态: {escape(status_text)}\n类型: 人工代理资产',
+                    'text': f'IP: <code>{escape(display_ip)}</code>\n到期时间: {expires_text}\n自动续费: {"已绑定订单" if getattr(asset, "order_id", None) else "未绑定订单"}\n状态: {escape(status_text)}\n类型: 人工代理资产',
                     'renewable': True,
                     'order_id': 0,
                     'asset_id': asset.id,
@@ -479,7 +478,8 @@ async def _reply_cloud_query_results(message: Message, raw_text: str, state: FSM
                     '_expires_at': expires_at,
                     '_input_index': index,
                 })
-            continue
+                continue
+        order = await get_cloud_server_by_ip(ip)
         if not order:
             continue
         display_ip = str(order.public_ip or order.previous_public_ip or ip).strip()
@@ -3356,10 +3356,12 @@ def register_handlers(dp: Dispatcher):
             if err:
                 logger.info('CLOUD_ASSET_UPGRADE_PLAN_DENIED user_id=%s asset_id=%s order_id=%s admin=%s reason=%s', user.id, asset_id, order.id, is_admin, err)
                 await _safe_callback_answer(callback, err, show_alert=True)
+                await callback.message.reply(f'⚙️ 修改配置暂不可用\n\n原因：{err}')
                 return
             if not plans:
                 logger.info('CLOUD_ASSET_UPGRADE_PLAN_EMPTY user_id=%s asset_id=%s order_id=%s admin=%s', user.id, asset_id, order.id, is_admin)
                 await _safe_callback_answer(callback, '暂无可修改的配置', show_alert=True)
+                await callback.message.reply('⚙️ 修改配置暂不可用\n\n原因：暂无可修改的配置')
                 return
             rows = []
             text_lines = ['⚙️ 修改配置', '', '请选择目标配置。升级会从 USDT 余额扣除差价；降级不退差价。系统会创建目标规格服务器，主/备用代理链接保持不变。']
@@ -3867,10 +3869,12 @@ def register_handlers(dp: Dispatcher):
         if err:
             logger.info('CLOUD_UPGRADE_PLAN_DENIED user_id=%s order_id=%s admin=%s reason=%s', user.id, order_id, is_admin, err)
             await _safe_callback_answer(callback, err, show_alert=True)
+            await callback.message.reply(f'⚙️ 修改配置暂不可用\n\n原因：{err}')
             return
         if not plans:
             logger.info('CLOUD_UPGRADE_PLAN_EMPTY user_id=%s order_id=%s admin=%s', user.id, order_id, is_admin)
             await _safe_callback_answer(callback, '暂无可修改的配置', show_alert=True)
+            await callback.message.reply('⚙️ 修改配置暂不可用\n\n原因：暂无可修改的配置')
             return
         rows = []
         text_lines = ['⚙️ 修改配置', '', '请选择目标配置。升级会从 USDT 余额扣除差价；降级不退差价。系统会创建目标规格服务器，主/备用代理链接保持不变。']
