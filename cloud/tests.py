@@ -1897,7 +1897,7 @@ class CloudServerServicesTestCase(TestCase):
 
         self.assertEqual(parse_datetime(row['delete_at']), delete_due_at)
 
-    def test_unattached_ip_delete_items_skip_assets_hidden_from_cloud_asset_list(self):
+    def test_unattached_ip_delete_items_include_future_plans_hidden_from_cloud_asset_list(self):
         inactive_account = CloudAccountConfig.objects.create(
             provider=CloudAccountConfig.PROVIDER_AWS,
             name='inactive-unattached',
@@ -1927,7 +1927,7 @@ class CloudServerServicesTestCase(TestCase):
             public_ip='5.5.5.5',
             actual_expires_at=timezone.now() + timezone.timedelta(days=1),
             status=CloudAsset.STATUS_RUNNING,
-            is_active=True,
+            is_active=False,
             provider_status='未附加固定IP',
             note='未附加固定IP',
         )
@@ -1953,7 +1953,7 @@ class CloudServerServicesTestCase(TestCase):
         asset_ids = {item.get('id') for item in items}
 
         self.assertIn(visible_asset.id, asset_ids)
-        self.assertNotIn(hidden_asset.id, asset_ids)
+        self.assertIn(hidden_asset.id, asset_ids)
 
     def test_sync_cloud_asset_status_uses_asset_scope(self):
         account = CloudAccountConfig.objects.create(

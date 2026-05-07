@@ -368,8 +368,15 @@ def _unattached_ip_delete_items(limit=50):
     now = timezone.now()
     delete_days = _runtime_int('cloud_unattached_ip_delete_after_days', 15)
     assets = list(
-        _active_cloud_asset_queryset()
+        CloudAsset.objects.select_related('user', 'cloud_account')
+        .filter(kind=CloudAsset.KIND_SERVER)
         .filter(Q(provider_status__icontains='未附加') | Q(note__icontains='未附加IP') | Q(note__icontains='未附加固定IP'))
+        .exclude(status__in=[
+            CloudAsset.STATUS_DELETED,
+            CloudAsset.STATUS_DELETING,
+            CloudAsset.STATUS_TERMINATED,
+            CloudAsset.STATUS_TERMINATING,
+        ])
         .order_by('actual_expires_at', 'created_at', '-updated_at')[:300]
     )
     items = []
