@@ -26,7 +26,7 @@ from cloud.provisioning import (
     _mark_rebuild_source_pending_deletion,
     _mark_success,
 )
-from cloud.services import apply_cloud_server_renewal, create_cloud_server_rebuild_order, create_cloud_server_renewal, create_cloud_server_upgrade_order, delay_cloud_server_expiry, ensure_cloud_asset_operation_order, get_proxy_asset_by_ip_for_admin, get_proxy_asset_by_ip_for_user, list_cloud_server_upgrade_plans, list_retained_ip_renewal_plans, mark_cloud_server_ip_change_requested, replace_cloud_asset_order_by_admin
+from cloud.services import apply_cloud_server_renewal, create_cloud_server_rebuild_order, create_cloud_server_renewal, create_cloud_server_upgrade_order, delay_cloud_server_expiry, ensure_cloud_asset_operation_order, get_cloud_server_by_ip_for_user, get_proxy_asset_by_ip_for_admin, get_proxy_asset_by_ip_for_user, list_cloud_server_upgrade_plans, list_retained_ip_renewal_plans, mark_cloud_server_ip_change_requested, replace_cloud_asset_order_by_admin
 from cloud.sync_safety import get_missing_confirmation_threshold
 from cloud.api import _cloud_order_source_tags, auto_renew_task_detail, cloud_order_detail, cloud_orders_list, delete_cloud_asset, delete_server, run_auto_renew_order, run_auto_renew_tasks, sync_cloud_asset_status, tasks_overview, update_cloud_asset
 from core.cloud_accounts import cloud_account_label
@@ -2022,6 +2022,31 @@ class CloudServerServicesTestCase(TestCase):
         self.assertEqual(admin_asset.service_expires_at, expires_at)
         self.assertEqual(user_asset.service_expires_at, expires_at)
         self.assertIsNone(hidden_asset)
+
+    def test_cloud_server_ip_query_requires_owner_identity(self):
+        other_user = TelegramUser.objects.create(tg_user_id=990003, username='other_order_query_user')
+        order = CloudServerOrder.objects.create(
+            order_no='IP-OWNER-QUERY-1',
+            user=self.user,
+            plan=self.plan,
+            provider=self.plan.provider,
+            region_code=self.plan.region_code,
+            region_name=self.plan.region_name,
+            plan_name=self.plan.plan_name,
+            quantity=1,
+            currency='USDT',
+            total_amount='19.00',
+            pay_amount='19.00',
+            status='completed',
+            public_ip='4.4.4.44',
+            service_expires_at=timezone.now() + timezone.timedelta(days=10),
+        )
+
+        owned_order = async_to_sync(get_cloud_server_by_ip_for_user)('4.4.4.44', self.user.id)
+        hidden_order = async_to_sync(get_cloud_server_by_ip_for_user)('4.4.4.44', other_user.id)
+
+        self.assertEqual(owned_order.id, order.id)
+        self.assertIsNone(hidden_order)
 
     def test_lifecycle_aws_sync_scans_all_regions_without_env_region(self):
         aws_account = CloudAccountConfig.objects.create(

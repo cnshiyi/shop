@@ -1319,8 +1319,7 @@ def get_proxy_asset_by_ip_for_user(ip: str, user_id: int):
         return None
     ip_q = Q(public_ip=normalized_ip) | Q(previous_public_ip=normalized_ip)
     asset = (
-        CloudAsset.objects.filter(ip_q, kind=CloudAsset.KIND_SERVER)
-        .filter(_user_asset_visibility_filter(user_id))
+        CloudAsset.objects.filter(ip_q, kind=CloudAsset.KIND_SERVER, user_id=user_id)
         .filter(_active_cloud_account_asset_filter())
         .exclude(status__in=_INACTIVE_ASSET_STATUSES)
         .select_related('order', 'user')
@@ -1415,6 +1414,48 @@ def get_cloud_server_by_ip(ip: str):
     retained_order = (
         CloudServerOrder.objects.filter(
             ip_q,
+            provider=CloudServerPlan.PROVIDER_AWS_LIGHTSAIL,
+            status='deleted',
+            ip_recycle_at__gt=timezone.now(),
+        )
+        .filter(Q(instance_id__isnull=True) | Q(instance_id=''))
+        .order_by('-ip_recycle_at', '-updated_at', '-id')
+        .first()
+    )
+    return _hydrate_order_from_proxy_asset(retained_order)
+
+
+@sync_to_async
+def get_cloud_server_by_ip_for_user(ip: str, user_id: int):
+    normalized_ip = (ip or '').strip()
+    if not normalized_ip:
+        return None
+    ip_q = Q(public_ip=normalized_ip) | Q(previous_public_ip=normalized_ip)
+    asset = (
+        CloudAsset.objects.filter(ip_q, user_id=user_id)
+        .exclude(status__in=_INACTIVE_ASSET_STATUSES)
+        .select_related('order')
+        .order_by('-updated_at', '-id')
+        .first()
+    )
+    if asset and asset.order_id and asset.order and asset.order.status not in {'deleted', 'deleting', 'expired', 'cancelled'}:
+        return _hydrate_order_from_proxy_asset(asset.order, asset=asset)
+    server = (
+        Server.objects.filter(ip_q, user_id=user_id)
+        .exclude(status__in=_INACTIVE_ASSET_STATUSES)
+        .select_related('order')
+        .order_by('-updated_at', '-id')
+        .first()
+    )
+    if server and server.order_id and server.order and server.order.status not in {'deleted', 'deleting', 'expired', 'cancelled'}:
+        return _hydrate_order_from_proxy_asset(server.order, server=server)
+    order = CloudServerOrder.objects.filter(ip_q, user_id=user_id, status__in=_ACTIVE_ORDER_STATUSES).order_by('-created_at').first()
+    if order:
+        return _hydrate_order_from_proxy_asset(order)
+    retained_order = (
+        CloudServerOrder.objects.filter(
+            ip_q,
+            user_id=user_id,
             provider=CloudServerPlan.PROVIDER_AWS_LIGHTSAIL,
             status='deleted',
             ip_recycle_at__gt=timezone.now(),
@@ -3444,6 +3485,7 @@ __all__ = [
     'get_cloud_server_auto_renew',
     'get_user_reminder_summary',
     'get_cloud_server_by_ip',
+    'get_cloud_server_by_ip_for_user',
     'get_cloud_server_for_admin',
     'get_proxy_asset_by_ip_for_admin',
     'get_proxy_asset_by_ip_for_user',
