@@ -2048,6 +2048,26 @@ class CloudServerServicesTestCase(TestCase):
         self.assertEqual(owned_order.id, order.id)
         self.assertIsNone(hidden_order)
 
+    def test_cloud_ip_query_keyboard_limits_non_owner_to_renewal(self):
+        from bot.keyboards import cloud_ip_query_result
+
+        markup = cloud_ip_query_result([], [{
+            'ip': '4.4.4.44',
+            'order_id': 123,
+            'asset_id': 0,
+            'can_change_ip': False,
+            'can_reinit': False,
+            'can_config': False,
+            'can_support': False,
+        }], include_start=False, include_reinit=False)
+        labels = [button.text for row in markup.inline_keyboard for button in row]
+
+        self.assertIn('🔄 续费IP 4.4.4.44', labels)
+        self.assertNotIn('🌐 更换IP 4.4.4.44', labels)
+        self.assertNotIn('🛠 重新安装 4.4.4.44', labels)
+        self.assertNotIn('⚙️ 修改配置 4.4.4.44', labels)
+        self.assertNotIn('👩‍💻 联系客服', labels)
+
     def test_lifecycle_aws_sync_scans_all_regions_without_env_region(self):
         aws_account = CloudAccountConfig.objects.create(
             provider=CloudAccountConfig.PROVIDER_AWS,
