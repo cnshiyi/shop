@@ -58,6 +58,7 @@ from cloud.services import (
     get_cloud_server_by_ip,
     get_cloud_server_for_admin,
     get_proxy_asset_by_ip_for_admin,
+    get_proxy_asset_by_ip_for_user,
     get_proxy_asset_detail_for_admin,
     get_user_cloud_server,
     get_user_proxy_asset_detail,
@@ -450,36 +451,40 @@ async def _reply_cloud_query_results(message: Message, raw_text: str, state: FSM
     query_ips = _extract_query_ips(raw_text)
     proxy_links_by_ip = _extract_proxy_links_by_ip(raw_text)
     results = []
+    user = None
     for index, ip in enumerate(query_ips):
         input_link = proxy_links_by_ip.get(ip)
         if include_start:
             asset = await get_proxy_asset_by_ip_for_admin(ip)
-            if asset:
-                display_ip = str(asset.public_ip or asset.previous_public_ip or ip).strip()
-                expires_at = getattr(asset, 'actual_expires_at', None)
-                expires_text = _format_local_dt(expires_at).split(' ', 1)[0] if expires_at else '未设置'
-                status_text = asset.get_status_display() if hasattr(asset, 'get_status_display') else str(getattr(asset, 'status', '') or '未知')
-                if input_link and asset.provider == 'aws_lightsail' and not getattr(asset, 'mtproxy_link', None):
-                    try:
-                        asset = await _save_asset_main_proxy_link(asset.id, None, input_link)
-                        logger.info('CLOUD_QUERY_PROXY_LINK_SAVED target=asset asset_id=%s ip=%s port=%s', asset.id, display_ip, input_link.get('port'))
-                    except Exception as exc:
-                        logger.warning('CLOUD_QUERY_PROXY_LINK_SAVE_FAILED target=asset asset_id=%s ip=%s error=%s', getattr(asset, 'id', None), display_ip, exc)
-                can_admin_asset_reinit = bool(asset.provider == 'aws_lightsail' and display_ip)
-                can_admin_asset_config = bool(asset.provider == 'aws_lightsail')
-                results.append({
-                    'ip': display_ip,
-                    'text': f'IP: <code>{escape(display_ip)}</code>\n到期时间: {expires_text}\n自动续费: {"已绑定订单" if getattr(asset, "order_id", None) else "未绑定订单"}\n状态: {escape(status_text)}\n类型: 人工代理资产',
-                    'renewable': True,
-                    'order_id': 0,
-                    'asset_id': asset.id,
-                    'start_order_id': getattr(asset, 'order_id', None) or 0,
-                    'can_reinit': can_admin_asset_reinit,
-                    'can_config': can_admin_asset_config,
-                    '_expires_at': expires_at,
-                    '_input_index': index,
-                })
-                continue
+        else:
+            user = user or await get_or_create_user(message.from_user.id, message.from_user.username, message.from_user.first_name)
+            asset = await get_proxy_asset_by_ip_for_user(ip, user.id)
+        if asset:
+            display_ip = str(asset.public_ip or asset.previous_public_ip or ip).strip()
+            expires_at = getattr(asset, 'actual_expires_at', None) or getattr(asset, 'service_expires_at', None)
+            expires_text = _format_local_dt(expires_at).split(' ', 1)[0] if expires_at else '未设置'
+            status_text = asset.get_status_display() if hasattr(asset, 'get_status_display') else str(getattr(asset, 'status', '') or '未知')
+            if input_link and asset.provider == 'aws_lightsail' and not getattr(asset, 'mtproxy_link', None):
+                try:
+                    asset = await _save_asset_main_proxy_link(asset.id, None, input_link)
+                    logger.info('CLOUD_QUERY_PROXY_LINK_SAVED target=asset asset_id=%s ip=%s port=%s', asset.id, display_ip, input_link.get('port'))
+                except Exception as exc:
+                    logger.warning('CLOUD_QUERY_PROXY_LINK_SAVE_FAILED target=asset asset_id=%s ip=%s error=%s', getattr(asset, 'id', None), display_ip, exc)
+            can_admin_asset_reinit = bool(include_start and asset.provider == 'aws_lightsail' and display_ip)
+            can_admin_asset_config = bool(include_start and asset.provider == 'aws_lightsail')
+            results.append({
+                'ip': display_ip,
+                'text': f'IP: <code>{escape(display_ip)}</code>\n到期时间: {expires_text}\n自动续费: {"已绑定订单" if getattr(asset, "order_id", None) else "未绑定订单"}\n状态: {escape(status_text)}\n类型: 代理资产',
+                'renewable': True,
+                'order_id': 0,
+                'asset_id': asset.id,
+                'start_order_id': getattr(asset, 'order_id', None) or 0,
+                'can_reinit': can_admin_asset_reinit,
+                'can_config': can_admin_asset_config,
+                '_expires_at': expires_at,
+                '_input_index': index,
+            })
+            continue
         order = await get_cloud_server_by_ip(ip)
         if not order:
             continue

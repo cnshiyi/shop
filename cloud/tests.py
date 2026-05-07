@@ -26,7 +26,7 @@ from cloud.provisioning import (
     _mark_rebuild_source_pending_deletion,
     _mark_success,
 )
-from cloud.services import apply_cloud_server_renewal, create_cloud_server_rebuild_order, create_cloud_server_renewal, create_cloud_server_upgrade_order, delay_cloud_server_expiry, ensure_cloud_asset_operation_order, list_cloud_server_upgrade_plans, list_retained_ip_renewal_plans, mark_cloud_server_ip_change_requested, replace_cloud_asset_order_by_admin
+from cloud.services import apply_cloud_server_renewal, create_cloud_server_rebuild_order, create_cloud_server_renewal, create_cloud_server_upgrade_order, delay_cloud_server_expiry, ensure_cloud_asset_operation_order, get_proxy_asset_by_ip_for_admin, get_proxy_asset_by_ip_for_user, list_cloud_server_upgrade_plans, list_retained_ip_renewal_plans, mark_cloud_server_ip_change_requested, replace_cloud_asset_order_by_admin
 from cloud.sync_safety import get_missing_confirmation_threshold
 from cloud.api import _cloud_order_source_tags, auto_renew_task_detail, cloud_order_detail, cloud_orders_list, delete_cloud_asset, delete_server, run_auto_renew_order, run_auto_renew_tasks, sync_cloud_asset_status, tasks_overview, update_cloud_asset
 from core.cloud_accounts import cloud_account_label
@@ -1994,6 +1994,34 @@ class CloudServerServicesTestCase(TestCase):
         self.assertEqual(mocked.call_args.args[0], 'sync_aws_assets')
         self.assertEqual(mocked.call_args.kwargs['account_id'], str(account.id))
         self.assertEqual(mocked.call_args.kwargs['region'], 'ap-southeast-1')
+
+    def test_proxy_asset_ip_query_exposes_manual_expiry_for_admin_and_user(self):
+        expires_at = timezone.now() + timezone.timedelta(days=12)
+        visible_asset = CloudAsset.objects.create(
+            kind=CloudAsset.KIND_SERVER,
+            source=CloudAsset.SOURCE_AWS_SYNC,
+            user=self.user,
+            provider='aws_lightsail',
+            region_code='ap-southeast-1',
+            region_name='新加坡',
+            asset_name='manual-query-visible',
+            public_ip='3.3.3.33',
+            actual_expires_at=expires_at,
+            price='19.00',
+            status=CloudAsset.STATUS_RUNNING,
+            is_active=True,
+        )
+        other_user = TelegramUser.objects.create(tg_user_id=990002, username='other_query_user')
+
+        admin_asset = async_to_sync(get_proxy_asset_by_ip_for_admin)('3.3.3.33')
+        user_asset = async_to_sync(get_proxy_asset_by_ip_for_user)('3.3.3.33', self.user.id)
+        hidden_asset = async_to_sync(get_proxy_asset_by_ip_for_user)('3.3.3.33', other_user.id)
+
+        self.assertEqual(admin_asset.id, visible_asset.id)
+        self.assertEqual(user_asset.id, visible_asset.id)
+        self.assertEqual(admin_asset.service_expires_at, expires_at)
+        self.assertEqual(user_asset.service_expires_at, expires_at)
+        self.assertIsNone(hidden_asset)
 
     def test_lifecycle_aws_sync_scans_all_regions_without_env_region(self):
         aws_account = CloudAccountConfig.objects.create(

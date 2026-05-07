@@ -1312,6 +1312,24 @@ def get_proxy_asset_by_ip_for_admin(ip: str):
     return _proxy_asset_view(asset) if asset else None
 
 
+@sync_to_async
+def get_proxy_asset_by_ip_for_user(ip: str, user_id: int):
+    normalized_ip = (ip or '').strip()
+    if not normalized_ip:
+        return None
+    ip_q = Q(public_ip=normalized_ip) | Q(previous_public_ip=normalized_ip)
+    asset = (
+        CloudAsset.objects.filter(ip_q, kind=CloudAsset.KIND_SERVER)
+        .filter(_user_asset_visibility_filter(user_id))
+        .filter(_active_cloud_account_asset_filter())
+        .exclude(status__in=_INACTIVE_ASSET_STATUSES)
+        .select_related('order', 'user')
+        .order_by('-updated_at', '-id')
+        .first()
+    )
+    return _proxy_asset_view(asset) if asset else None
+
+
 def _extract_asset_mtproxy_fields(note: str) -> tuple[str, str, str]:
     for raw_link in re.findall(r'tg://proxy\?[^"\'\s<>]+', note or ''):
         link = raw_link.rstrip(',.，。')
@@ -3428,6 +3446,7 @@ __all__ = [
     'get_cloud_server_by_ip',
     'get_cloud_server_for_admin',
     'get_proxy_asset_by_ip_for_admin',
+    'get_proxy_asset_by_ip_for_user',
     'get_proxy_asset_detail_for_admin',
     'get_user_cloud_server',
     'get_user_proxy_asset_detail',
