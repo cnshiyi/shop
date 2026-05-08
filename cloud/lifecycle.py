@@ -1449,17 +1449,47 @@ def _cloud_runtime_status_label(status: str, provider_status: str = '') -> str:
     return dict(CloudAsset.STATUS_CHOICES).get(status, '未知状态')
 
 
+def _daily_expiry_person_label(value) -> str:
+    text = str(value or '').strip().lstrip('@')
+    return f'@{escape(text)}' if text else '-'
+
+
 def _daily_expiry_line(item: dict, index: int) -> str:
-    user = item.get('username') or item.get('tg_user_id') or '-'
+    username = _daily_expiry_person_label(item.get('username') or item.get('tg_user_id'))
+    first_name = _daily_expiry_person_label(item.get('first_name'))
     expires_text = _format_notice_dt(item.get('expires_at'))
     region = item.get('region_name') or item.get('region_code') or '-'
     provider_status = item.get('provider_status') or '-'
     return (
-        f'{index}. IP: {escape(str(item.get("ip") or "-"))}\n'
-        f'   用户: {escape(str(user))}｜地区: {escape(str(region))}\n'
+        f'{index}. IP: <code>{escape(str(item.get("ip") or "-"))}</code>\n'
+        f'   用户名: {username}｜姓名: {first_name}｜地区: {escape(str(region))}\n'
         f'   到期: {escape(expires_text)}｜状态: {escape(str(item.get("status_label") or "未知状态"))}\n'
         f'   云端原始状态: {escape(str(provider_status))}'
     )
+
+
+def _daily_expiry_message_chunks(title: str, items: list[dict], date_text: str, total_counts: str) -> list[str]:
+    header = [
+        f'{title}（{escape(date_text)} 12:00）',
+        '状态已先执行云端同步后生成。',
+        total_counts,
+    ]
+    if not items:
+        return ['\n'.join([*header, '', '暂无记录。'])]
+    messages = []
+    lines = [*header, '']
+    max_length = 3900
+    for idx, item in enumerate(items, 1):
+        line = _daily_expiry_line(item, idx)
+        candidate = '\n'.join([*lines, line])
+        if len(candidate) > max_length and len(lines) > len(header) + 1:
+            messages.append('\n'.join(lines).rstrip())
+            lines = [*header, '', line]
+        else:
+            lines.append(line)
+    if lines:
+        messages.append('\n'.join(lines).rstrip())
+    return messages
 
 
 @sync_to_async
@@ -1499,7 +1529,8 @@ def _daily_expiry_summary_items() -> dict:
             'region_code': order.region_code,
             'region_name': order.region_name,
             'tg_user_id': getattr(user, 'tg_user_id', None),
-            'username': getattr(user, 'primary_username', '') or getattr(user, 'first_name', '') or '',
+            'username': getattr(user, 'primary_username', '') or '',
+            'first_name': getattr(user, 'first_name', '') or '',
         }
         if order.service_expires_at >= today_start:
             today_items.append(item)
@@ -1508,27 +1539,19 @@ def _daily_expiry_summary_items() -> dict:
     return {'date': today.isoformat(), 'today': today_items, 'expired': expired_items}
 
 
-def _daily_expiry_summary_text(summary: dict) -> str:
+def _daily_expiry_summary_texts(summary: dict) -> list[str]:
     today_items = summary.get('today') or []
     expired_items = summary.get('expired') or []
     date_text = summary.get('date') or timezone.localdate().isoformat()
-    lines = [
-        f'📌 云服务器到期汇总（{escape(date_text)} 12:00）',
-        '状态已先执行云端同步后生成。',
-        f'今日到期: {len(today_items)} 台｜已经到期: {len(expired_items)} 台',
-    ]
-    if today_items:
-        lines.extend(['', '🟡 今日到期'])
-        lines.extend(_daily_expiry_line(item, idx) for idx, item in enumerate(today_items, 1))
-    if expired_items:
-        lines.extend(['', '🔴 已经到期'])
-        lines.extend(_daily_expiry_line(item, idx) for idx, item in enumerate(expired_items, 1))
+    total_counts = f'今日到期: {len(today_items)} 台｜已经到期: {len(expired_items)} 台'
     if not today_items and not expired_items:
-        lines.extend(['', '今日没有到期或已到期服务器。'])
-    text = '\n'.join(lines)
-    if len(text) <= 3900:
-        return text
-    return text[:3800].rstrip() + '\n\n……内容较多，已截断，请到后台服务器列表查看完整结果。'
+        return _daily_expiry_message_chunks('📌 云服务器到期汇总', [], date_text, total_counts)
+    texts = []
+    if today_items:
+        texts.extend(_daily_expiry_message_chunks('🟡 今日到期服务器', today_items, date_text, total_counts))
+    if expired_items:
+        texts.extend(_daily_expiry_message_chunks('🔴 已经过期服务器', expired_items, date_text, total_counts))
+    return texts
 
 
 @sync_to_async
@@ -1564,7 +1587,7 @@ async def daily_expiry_summary_tick(notify_target=None, *, force: bool = False):
         return {'sent': 0, 'skipped': 'disabled'}
     await sync_server_status_tick()
     summary = await _daily_expiry_summary_items()
-    text = _daily_expiry_summary_text(summary)
+    texts = _daily_expiry_summary_texts(summary)
     sent = 0
     for target in targets:
         batch_id = _target_batch_id(_DAILY_EXPIRY_EVENT, target, summary.get('date') or timezone.localdate().isoformat())
@@ -1572,12 +1595,16 @@ async def daily_expiry_summary_tick(notify_target=None, *, force: bool = False):
             logger.info('CLOUD_DAILY_EXPIRY_SUMMARY_SKIP_DUPLICATE target=%s batch_id=%s', target, batch_id)
             continue
         delivered = False
+        delivered_parts = 0
         try:
-            delivered = await notify_target(target, text, None) is not False
+            for text in texts:
+                ok = await notify_target(target, text, None) is not False
+                delivered_parts += int(ok)
+            delivered = delivered_parts == len(texts)
             sent += int(delivered)
         except Exception as exc:
             logger.warning('CLOUD_DAILY_EXPIRY_SUMMARY_NOTIFY_FAILED target=%s error=%s', target, exc)
-        await _record_daily_expiry_summary(target, batch_id, delivered, text, summary)
+        await _record_daily_expiry_summary(target, batch_id, delivered, '\n\n'.join(texts), summary)
     logger.info('CLOUD_DAILY_EXPIRY_SUMMARY_DONE targets=%s sent=%s today=%s expired=%s', len(targets), sent, len(summary.get('today') or []), len(summary.get('expired') or []))
     return {'sent': sent, 'today': len(summary.get('today') or []), 'expired': len(summary.get('expired') or [])}
 

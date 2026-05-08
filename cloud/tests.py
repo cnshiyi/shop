@@ -2995,6 +2995,8 @@ class CloudServerServicesTestCase(TestCase):
         self.assertEqual(CloudUserNoticeLog.objects.filter(event_type='renew_notice', user=self.user, order=order, delivered=True).count(), 1)
 
     def test_daily_expiry_summary_uses_real_cloud_status_and_target_config(self):
+        self.user.first_name = '张三'
+        self.user.save(update_fields=['first_name'])
         now = timezone.now()
         today_order = CloudServerOrder.objects.create(
             order_no='DAILY-EXPIRY-TODAY-1',
@@ -3073,12 +3075,17 @@ class CloudServerServicesTestCase(TestCase):
 
         self.assertEqual(result['sent'], 1)
         sync_mock.assert_called_once()
-        self.assertEqual(len(sent), 1)
+        self.assertEqual(len(sent), 2)
+        self.assertIn('🟡 今日到期服务器', sent[0][1])
         self.assertIn('今日到期: 1 台｜已经到期: 1 台', sent[0][1])
-        self.assertIn('IP: 10.10.10.10', sent[0][1])
+        self.assertIn('IP: <code>10.10.10.10</code>', sent[0][1])
+        self.assertIn('用户名: @svc_test｜姓名: @张三', sent[0][1])
         self.assertIn('状态: 正在运行', sent[0][1])
-        self.assertIn('IP: 10.10.10.11', sent[0][1])
-        self.assertIn('状态: 已关机', sent[0][1])
+        self.assertIn('🔴 已经过期服务器', sent[1][1])
+        self.assertIn('IP: <code>10.10.10.11</code>', sent[1][1])
+        self.assertIn('用户名: @svc_test｜姓名: @张三', sent[1][1])
+        self.assertIn('状态: 已关机', sent[1][1])
+        self.assertNotIn('已截断', '\n'.join(text for _, text in sent))
         log = CloudUserNoticeLog.objects.get(event_type='daily_expiry_summary')
         self.assertTrue(log.delivered)
         self.assertEqual(log.target_chat_id, 10001)
