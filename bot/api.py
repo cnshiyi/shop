@@ -1225,6 +1225,17 @@ def shutdown_logs(request):
     return _ok(_shutdown_log_items(limit=limit))
 
 
+@dashboard_login_required
+@require_GET
+def ip_delete_logs(request):
+    try:
+        limit = int(request.GET.get('limit') or 100)
+    except (TypeError, ValueError):
+        limit = 100
+    limit = max(1, min(limit, 300))
+    return _ok(_unattached_ip_delete_items(limit=limit))
+
+
 @csrf_exempt
 @require_POST
 def auth_login(request):
@@ -2701,6 +2712,7 @@ __all__ = [
     'csrf',
     'delete_cloud_account',
     'init_site_configs',
+    'ip_delete_logs',
     'me',
     'overview',
     'products_list',

@@ -18,6 +18,7 @@ urlpatterns = [
     path('dashboard/me/', bot_api.me, name='me'),
     path('dashboard/overview/', bot_api.overview, name='overview'),
     path('dashboard/shutdown-logs/', bot_api.shutdown_logs, name='shutdown-logs'),
+    path('dashboard/ip-delete-logs/', bot_api.ip_delete_logs, name='ip-delete-logs'),
     path('users/', bot_api.users_list, name='users-list'),
     path('users/<int:user_id>/balance/', bot_api.update_user_balance, name='user-balance-update'),
     path('users/<int:user_id>/discount/', bot_api.update_user_discount, name='user-discount-update'),
