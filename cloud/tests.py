@@ -29,7 +29,7 @@ from cloud.provisioning import (
     _mark_rebuild_source_pending_deletion,
     _mark_success,
 )
-from cloud.services import apply_cloud_server_renewal, create_cloud_server_rebuild_order, create_cloud_server_renewal, create_cloud_server_upgrade_order, delay_cloud_server_expiry, ensure_cloud_asset_operation_order, get_cloud_server_by_ip_for_user, get_proxy_asset_by_ip_for_admin, get_proxy_asset_by_ip_for_user, list_cloud_server_upgrade_plans, list_retained_ip_renewal_plans, mark_cloud_server_ip_change_requested, replace_cloud_asset_order_by_admin
+from cloud.services import apply_cloud_server_renewal, create_cloud_server_rebuild_order, create_cloud_server_renewal, create_cloud_server_upgrade_order, delay_cloud_server_expiry, ensure_cloud_asset_operation_order, get_cloud_server_by_ip_for_user, get_proxy_asset_by_ip_for_admin, get_proxy_asset_by_ip_for_user, list_cloud_server_upgrade_plans, list_retained_ip_renewal_plans, mark_cloud_server_ip_change_requested, record_cloud_ip_log, replace_cloud_asset_order_by_admin
 from cloud.sync_safety import get_missing_confirmation_threshold
 from cloud.api import _cloud_order_source_tags, auto_renew_task_detail, cloud_order_detail, cloud_orders_list, delete_cloud_asset, delete_server, run_auto_renew_order, run_auto_renew_tasks, sync_cloud_asset_status, tasks_overview, update_cloud_asset
 from core.cloud_accounts import cloud_account_label
@@ -1975,6 +1975,126 @@ class CloudServerServicesTestCase(TestCase):
 
         self.assertEqual(parse_datetime(row['suspend_at']), order.suspend_at)
         self.assertEqual(parse_datetime(row['delete_at']), order.delete_at)
+
+    def test_cloud_ip_log_note_includes_context_and_dedupes_same_second(self):
+        expires_at = timezone.now() + timezone.timedelta(days=2)
+        order = CloudServerOrder.objects.create(
+            order_no='LOG-CONTEXT-ORDER-1',
+            user=self.user,
+            plan=self.plan,
+            provider=self.plan.provider,
+            region_code=self.plan.region_code,
+            region_name=self.plan.region_name,
+            plan_name=self.plan.plan_name,
+            quantity=1,
+            currency='USDT',
+            total_amount='19.00',
+            pay_amount='19.00',
+            pay_method='balance',
+            status='completed',
+            public_ip='8.8.8.8',
+            service_expires_at=expires_at,
+            suspend_at=expires_at + timezone.timedelta(days=3),
+            delete_at=expires_at + timezone.timedelta(days=4),
+        )
+        asset = CloudAsset.objects.create(
+            kind=CloudAsset.KIND_SERVER,
+            source=CloudAsset.SOURCE_ORDER,
+            order=order,
+            user=self.user,
+            provider='aws_lightsail',
+            region_code=self.plan.region_code,
+            region_name=self.plan.region_name,
+            asset_name='log-context-asset',
+            public_ip='8.8.8.8',
+            actual_expires_at=expires_at,
+            status=CloudAsset.STATUS_RUNNING,
+            is_active=True,
+        )
+
+        first = record_cloud_ip_log(event_type=CloudIpLog.EVENT_CREATED, order=order, asset=asset, public_ip='8.8.8.8', note='第一次创建')
+        second = record_cloud_ip_log(event_type=CloudIpLog.EVENT_CREATED, order=order, asset=asset, public_ip='8.8.8.8', note='同秒重复创建')
+
+        self.assertEqual(first.id, second.id)
+        self.assertEqual(CloudIpLog.objects.filter(order=order, event_type=CloudIpLog.EVENT_CREATED).count(), 1)
+        first.refresh_from_db()
+        self.assertIn('IP：8.8.8.8', first.note)
+        self.assertIn('用户：', first.note)
+        self.assertIn('到期时间：', first.note)
+        self.assertIn('执行计划：', first.note)
+        self.assertIn('执行内容：同秒重复创建', first.note)
+
+    def test_shutdown_log_items_include_execution_detail_and_links(self):
+        expires_at = timezone.now() - timezone.timedelta(hours=2)
+        order = CloudServerOrder.objects.create(
+            order_no='SHUTDOWN-DETAIL-ORDER-1',
+            user=self.user,
+            plan=self.plan,
+            provider=self.plan.provider,
+            region_code=self.plan.region_code,
+            region_name=self.plan.region_name,
+            plan_name=self.plan.plan_name,
+            quantity=1,
+            currency='USDT',
+            total_amount='19.00',
+            pay_amount='19.00',
+            pay_method='balance',
+            status='completed',
+            public_ip='7.7.7.7',
+            service_expires_at=expires_at,
+            provision_note='关机执行失败：余额不足',
+        )
+        asset = CloudAsset.objects.create(
+            kind=CloudAsset.KIND_SERVER,
+            source=CloudAsset.SOURCE_ORDER,
+            order=order,
+            user=self.user,
+            provider='aws_lightsail',
+            region_code=self.plan.region_code,
+            region_name=self.plan.region_name,
+            asset_name='shutdown-detail-asset',
+            public_ip='7.7.7.7',
+            actual_expires_at=expires_at,
+            status=CloudAsset.STATUS_UNKNOWN,
+            is_active=True,
+            note='关机执行失败：余额不足',
+        )
+
+        items = _shutdown_log_items(limit=20)
+        row = next(item for item in items if item.get('asset_id') == asset.id)
+
+        self.assertEqual(row['order_detail_path'], f'/admin/cloud-orders/{order.id}')
+        self.assertEqual(row['asset_detail_path'], f'/admin/cloud-assets/{asset.id}')
+        self.assertIn('执行状态：', row['note'])
+        self.assertIn('是否成功：失败', row['note'])
+        self.assertIn('执行时间：', row['note'])
+        self.assertIn('执行内容：', row['note'])
+        self.assertIn('失败原因：关机执行失败：余额不足', row['note'])
+
+    def test_unattached_ip_delete_items_include_name_expiry_and_detail_path(self):
+        delete_due_at = timezone.now() + timezone.timedelta(days=3)
+        asset = CloudAsset.objects.create(
+            kind=CloudAsset.KIND_SERVER,
+            source=CloudAsset.SOURCE_AWS_SYNC,
+            user=self.user,
+            provider='aws_lightsail',
+            region_code=self.plan.region_code,
+            region_name=self.plan.region_name,
+            asset_name='visible-unattached-name-expiry',
+            public_ip='5.5.5.9',
+            actual_expires_at=delete_due_at,
+            status=CloudAsset.STATUS_RUNNING,
+            is_active=True,
+            provider_status='未附加固定IP',
+            note='未附加固定IP',
+        )
+
+        items = _unattached_ip_delete_items(limit=20)
+        row = next(item for item in items if item.get('id') == asset.id)
+
+        self.assertEqual(row['asset_name'], 'visible-unattached-name-expiry')
+        self.assertEqual(row['detail_path'], f'/admin/cloud-assets/{asset.id}')
+        self.assertEqual(parse_datetime(row['service_expires_at']), delete_due_at)
 
     def test_cloud_orders_list_keeps_renew_pending_visible(self):
         order = CloudServerOrder.objects.create(

@@ -310,6 +310,36 @@ def _active_cloud_asset_queryset():
     )
 
 
+def _fmt_dashboard_dt(value):
+    if not value:
+        return '-'
+    try:
+        return timezone.localtime(value).strftime('%Y-%m-%d %H:%M:%S')
+    except Exception:
+        return str(value)
+
+
+def _extract_failure_reason(note):
+    text = str(note or '').strip()
+    if not text:
+        return '-'
+    lines = [line.strip() for line in text.splitlines() if line.strip()]
+    for line in reversed(lines):
+        if any(keyword in line for keyword in ['失败', '异常', '错误', 'error', 'Error', 'ERROR']):
+            return line[:300]
+    return '-'
+
+
+def _shutdown_execution_note(*, status_label, is_success, executed_at, action, failure_reason):
+    return '；'.join([
+        f'执行状态：{status_label or "-"}',
+        f'是否成功：{"成功" if is_success else "失败"}',
+        f'执行时间：{_fmt_dashboard_dt(executed_at)}',
+        f'执行内容：{action or "-"}',
+        f'失败原因：{failure_reason or "-"}',
+    ])
+
+
 def _shutdown_log_items(limit=100):
     cutoff = timezone.now() - timezone.timedelta(days=7)
     suspend_days = _runtime_int('cloud_suspend_after_days', 3)
@@ -343,11 +373,33 @@ def _shutdown_log_items(limit=100):
             delete_at = _with_runtime_time(suspend_at + timezone.timedelta(days=delete_days), 'cloud_delete_time')
             if delete_at and suspend_at and delete_at < suspend_at:
                 delete_at = suspend_at
+        status_label = _status_label(asset.status, CloudAsset.STATUS_CHOICES)
+        is_terminal_failure = asset.status in {CloudAsset.STATUS_UNKNOWN, CloudAsset.STATUS_DELETED, CloudAsset.STATUS_TERMINATED}
+        is_success = bool(asset.status in {CloudAsset.STATUS_RUNNING, 'completed'} and not is_terminal_failure)
+        if asset.status in {CloudAsset.STATUS_STOPPED, CloudAsset.STATUS_DELETING, CloudAsset.STATUS_TERMINATING}:
+            action = '到期关机/删机流程执行中'
+        elif asset.status in {CloudAsset.STATUS_DELETED, CloudAsset.STATUS_TERMINATED}:
+            action = '到期删机已执行'
+        elif suspend_at and timezone.now() >= suspend_at:
+            action = '到期关机待执行或已执行'
+        else:
+            action = '等待到期关机计划'
+        source_note = asset.note or getattr(order, 'provision_note', '') or ''
+        note = _shutdown_execution_note(
+            status_label=status_label,
+            is_success=is_success,
+            executed_at=asset.updated_at,
+            action=action,
+            failure_reason=_extract_failure_reason(source_note),
+        )
         items.append({
             'id': f'asset-{asset.id}',
             'order_id': asset.order_id,
             'asset_id': asset.id,
             'order_no': order.order_no if order else asset.asset_name or asset.instance_id or f'asset-{asset.id}',
+            'order_detail_path': f'/admin/cloud-orders/{order.id}' if order else '',
+            'asset_detail_path': f'/admin/cloud-assets/{asset.id}',
+            'detail_path': f'/admin/cloud-orders/{order.id}' if order else f'/admin/cloud-assets/{asset.id}',
             'user_display_name': user_display_name,
             'username_label': username_label,
             'public_ip': asset.public_ip or asset.previous_public_ip or '',
@@ -358,12 +410,12 @@ def _shutdown_log_items(limit=100):
             'external_account_id': external_account_id,
             'account_label': asset.account_label or (order.account_label if order else '') or '',
             'status': asset.status,
-            'status_label': _status_label(asset.status, CloudAsset.STATUS_CHOICES),
+            'status_label': status_label,
             'service_expires_at': expires_at,
             'suspend_at': suspend_at,
             'delete_at': delete_at,
-            'note': asset.note or '',
-            'logged_at': None,
+            'note': note,
+            'logged_at': asset.updated_at,
         })
 
     def sort_key(item):
@@ -411,13 +463,17 @@ def _unattached_ip_delete_items(limit=50):
         else:
             base_at = asset.updated_at or asset.created_at or now
             delete_at = _with_runtime_time(base_at + timezone.timedelta(days=delete_days), 'cloud_unattached_ip_delete_time')
+        asset_name = asset.asset_name or getattr(asset, 'static_ip_name', '') or asset.instance_id or f'asset-{asset.id}'
         items.append({
             'id': asset.id,
-            'asset_name': asset.asset_name or asset.instance_id or f'asset-{asset.id}',
+            'asset_name': asset_name,
+            'asset_detail_path': f'/admin/cloud-assets/{asset.id}',
+            'detail_path': f'/admin/cloud-assets/{asset.id}',
             'user_display_name': user_display_name,
             'username_label': username_label,
             'public_ip': asset.public_ip or asset.previous_public_ip or '',
             'provider_status': asset.provider_status or '',
+            'service_expires_at': _iso(asset.actual_expires_at),
             'delete_at': _iso(delete_at),
             'note': asset.note or '',
             'is_overdue': bool(delete_at and delete_at <= now),

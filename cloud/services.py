@@ -1640,19 +1640,30 @@ def record_cloud_ip_log(*, event_type, order=None, asset=None, server=None, publ
             or getattr(server_obj, 'previous_public_ip', None)
             or getattr(order_obj, 'previous_public_ip', None)
         )
-    if event_type == CloudIpLog.EVENT_DELETED:
-        lookup = CloudIpLog.objects.filter(event_type=event_type)
-        if asset_obj:
-            lookup = lookup.filter(asset=asset_obj)
-        elif server_obj:
-            lookup = lookup.filter(server=server_obj)
-        elif order_obj:
-            lookup = lookup.filter(order=order_obj)
-        if previous_ip:
-            lookup = lookup.filter(previous_public_ip=previous_ip)
-        existing = lookup.order_by('-created_at', '-id').first()
-        if existing:
-            return existing
+    final_note = _build_cloud_ip_log_note(event_type, order_obj, asset_obj, server_obj, current_ip, previous_ip, note or '')
+
+    lookup = CloudIpLog.objects.filter(event_type=event_type)
+    if asset_obj:
+        lookup = lookup.filter(asset=asset_obj)
+    elif server_obj:
+        lookup = lookup.filter(server=server_obj)
+    elif order_obj:
+        lookup = lookup.filter(order=order_obj)
+    if previous_ip:
+        lookup = lookup.filter(previous_public_ip=previous_ip)
+    if current_ip:
+        lookup = lookup.filter(public_ip=current_ip)
+    latest_existing = lookup.order_by('-created_at', '-id').first()
+    if latest_existing:
+        if event_type == CloudIpLog.EVENT_DELETED:
+            return latest_existing
+        latest_at = timezone.localtime(latest_existing.created_at).replace(microsecond=0)
+        now_at = timezone.localtime(timezone.now()).replace(microsecond=0)
+        if latest_at == now_at:
+            if latest_existing.note != final_note:
+                latest_existing.note = final_note
+                latest_existing.save(update_fields=['note'])
+            return latest_existing
 
     return CloudIpLog.objects.create(
         order=order_obj,
@@ -1669,7 +1680,7 @@ def record_cloud_ip_log(*, event_type, order=None, asset=None, server=None, publ
         public_ip=current_ip,
         previous_public_ip=previous_ip,
         event_type=event_type,
-        note=note or '',
+        note=final_note,
     )
 
 
@@ -1681,6 +1692,73 @@ def _fmt_amount(value):
     if value in (None, ''):
         return '-'
     return str(Decimal(str(value)).quantize(Decimal('0.01')))
+
+
+def _fmt_log_dt(value):
+    if not value:
+        return '-'
+    try:
+        return timezone.localtime(value).strftime('%Y-%m-%d %H:%M:%S')
+    except Exception:
+        return str(value)
+
+
+def _cloud_log_user_label(user_obj):
+    if not user_obj:
+        return '未绑定用户'
+    usernames = getattr(user_obj, 'usernames', None) or []
+    username = (usernames[0] if usernames else getattr(user_obj, 'username', '') or '').strip()
+    name = (getattr(user_obj, 'first_name', '') or '').strip()
+    tg_user_id = getattr(user_obj, 'tg_user_id', None)
+    username_label = f'@{username}' if username and not username.startswith('@') else username
+    parts = [part for part in [name, username_label, str(tg_user_id) if tg_user_id else ''] if part]
+    return ' / '.join(parts) or f'用户#{getattr(user_obj, "id", "-")}'
+
+
+def _cloud_log_execution_plan(order_obj, asset_obj=None):
+    suspend_at = getattr(order_obj, 'suspend_at', None) if order_obj else None
+    delete_at = getattr(order_obj, 'delete_at', None) if order_obj else None
+    recycle_at = getattr(order_obj, 'ip_recycle_at', None) if order_obj else None
+    if not suspend_at and asset_obj and getattr(asset_obj, 'actual_expires_at', None):
+        try:
+            expires_at = asset_obj.actual_expires_at
+            suspend_at = _with_runtime_time(expires_at + timezone.timedelta(days=_runtime_int_config('cloud_suspend_after_days', 3)), 'cloud_suspend_time')
+            delete_at = _with_runtime_time(suspend_at + timezone.timedelta(days=_runtime_int_config('cloud_delete_after_days', 0)), 'cloud_delete_time')
+            if delete_at and delete_at < suspend_at:
+                delete_at = suspend_at
+        except Exception:
+            pass
+    plan_parts = []
+    if suspend_at:
+        plan_parts.append(f'关机 {_fmt_log_dt(suspend_at)}')
+    if delete_at:
+        plan_parts.append(f'删机 {_fmt_log_dt(delete_at)}')
+    if recycle_at:
+        plan_parts.append(f'IP回收 {_fmt_log_dt(recycle_at)}')
+    return '，'.join(plan_parts) or '-'
+
+
+def _build_cloud_ip_log_note(event_type, order_obj, asset_obj, server_obj, current_ip, previous_ip, note):
+    user_obj = (
+        getattr(order_obj, 'user', None)
+        or getattr(asset_obj, 'user', None)
+        or getattr(server_obj, 'user', None)
+    )
+    expires_at = (
+        getattr(order_obj, 'service_expires_at', None)
+        or getattr(asset_obj, 'actual_expires_at', None)
+        or getattr(server_obj, 'expires_at', None)
+    )
+    ip_value = current_ip or previous_ip or '-'
+    base_parts = [
+        f'IP：{ip_value}',
+        f'用户：{_cloud_log_user_label(user_obj)}',
+        f'到期时间：{_fmt_log_dt(expires_at)}',
+        f'执行计划：{_cloud_log_execution_plan(order_obj, asset_obj)}',
+    ]
+    if note:
+        base_parts.append(f'执行内容：{note}')
+    return '；'.join(base_parts)
 
 
 def _trim_operation_order_no(source_order: CloudServerOrder | None, operation: str, suffix: str | None = None) -> str:
