@@ -213,18 +213,24 @@ def _resolve_asset(instance_name, instance_arn, public_ip, order, account=None):
     if account:
         label = cloud_account_label(account)
         lookup &= (Q(cloud_account=account) | Q(account_label=label) | (Q(cloud_account__isnull=True) & (Q(account_label='') | Q(account_label__isnull=True))))
-    candidates = Q()
-    if instance_name:
-        candidates |= Q(instance_id=instance_name) | Q(asset_name=instance_name)
-    if instance_arn:
-        candidates |= Q(provider_resource_id=instance_arn)
+    base_queryset = CloudAsset.objects.filter(lookup).filter(Q(order__isnull=True) | ~Q(order__status__in=_SYNC_EXCLUDED_ORDER_STATUSES)).exclude(status__in=_SYNC_EXCLUDED_ASSET_STATUSES)
+    direct_candidates = Q()
     if order:
-        candidates |= Q(order=order)
+        direct_candidates |= Q(order=order)
+    if instance_name:
+        direct_candidates |= Q(instance_id=instance_name) | Q(asset_name=instance_name)
+    if instance_arn:
+        direct_candidates |= Q(provider_resource_id=instance_arn)
+    if direct_candidates:
+        asset = base_queryset.filter(direct_candidates).order_by('-updated_at', '-id').first()
+        if asset:
+            return asset
     if public_ip:
-        candidates |= Q(public_ip=public_ip) | Q(previous_public_ip=public_ip)
-    if not candidates:
-        return None
-    return CloudAsset.objects.filter(lookup & candidates).filter(Q(order__isnull=True) | ~Q(order__status__in=_SYNC_EXCLUDED_ORDER_STATUSES)).exclude(status__in=_SYNC_EXCLUDED_ASSET_STATUSES).order_by('-updated_at', '-id').first()
+        public_ip_queryset = base_queryset.filter(Q(public_ip=public_ip) | Q(previous_public_ip=public_ip))
+        if order:
+            public_ip_queryset = public_ip_queryset.filter(Q(order__isnull=True) | Q(order=order))
+        return public_ip_queryset.order_by('-updated_at', '-id').first()
+    return None
 
 
 def _append_unique_line(text: str | None, line: str) -> str:
@@ -283,22 +289,28 @@ def _sync_order_deleted_from_cloud(order, old_public_ip, *, source: str = 'AWS å
 
 
 def _resolve_server(instance_name, instance_arn, public_ip, order, account=None):
-    candidates = Q()
-    if instance_name:
-        candidates |= Q(instance_id=instance_name) | Q(server_name=instance_name)
-    if instance_arn:
-        candidates |= Q(provider_resource_id=instance_arn)
     base = Q()
     if account:
         label = cloud_account_label(account)
         base &= (Q(account_label=label) | Q(account_label='') | Q(account_label__isnull=True))
+    base_queryset = Server.objects.filter(base).filter(Q(order__isnull=True) | ~Q(order__status__in=_SYNC_EXCLUDED_ORDER_STATUSES)).exclude(status__in=_SYNC_EXCLUDED_SERVER_STATUSES)
+    direct_candidates = Q()
     if order:
-        candidates |= Q(order=order)
+        direct_candidates |= Q(order=order)
+    if instance_name:
+        direct_candidates |= Q(instance_id=instance_name) | Q(server_name=instance_name)
+    if instance_arn:
+        direct_candidates |= Q(provider_resource_id=instance_arn)
+    if direct_candidates:
+        server = base_queryset.filter(direct_candidates).order_by('-updated_at', '-id').first()
+        if server:
+            return server
     if public_ip:
-        candidates |= Q(public_ip=public_ip) | Q(previous_public_ip=public_ip)
-    if not candidates:
-        return None
-    return Server.objects.filter(base & candidates).filter(Q(order__isnull=True) | ~Q(order__status__in=_SYNC_EXCLUDED_ORDER_STATUSES)).exclude(status__in=_SYNC_EXCLUDED_SERVER_STATUSES).order_by('-updated_at', '-id').first()
+        public_ip_queryset = base_queryset.filter(Q(public_ip=public_ip) | Q(previous_public_ip=public_ip))
+        if order:
+            public_ip_queryset = public_ip_queryset.filter(Q(order__isnull=True) | Q(order=order))
+        return public_ip_queryset.order_by('-updated_at', '-id').first()
+    return None
 
 
 def _resolve_asset_for_static_ip(static_ip_name, static_ip_arn, public_ip, account=None):

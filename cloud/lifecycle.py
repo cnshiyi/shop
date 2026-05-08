@@ -1,3 +1,4 @@
+import hashlib
 import logging
 import os
 import re
@@ -105,6 +106,14 @@ def _auto_renew_execution_notify_config() -> dict:
         event_mode = 'all'
     targets = _parse_notify_targets(get_runtime_config('cloud_auto_renew_execution_notify_chat_ids', ''))
     return {'enabled': enabled, 'events': event_mode, 'targets': targets}
+
+
+@sync_to_async
+def _daily_expiry_summary_config() -> dict:
+    return {
+        'enabled': _config_bool('cloud_daily_expiry_summary_enabled', '0'),
+        'targets': _parse_notify_targets(get_runtime_config('cloud_daily_expiry_summary_chat_ids', '')),
+    }
 
 
 def _filter_auto_renew_notify_results(results: list[dict], event_mode: str) -> list[dict]:
@@ -842,6 +851,11 @@ def _notice_batch_id(event: str, *order_ids: int) -> str:
     return uuid.uuid5(uuid.NAMESPACE_URL, key).hex[:16]
 
 
+def _target_batch_id(event: str, target, date_text: str) -> str:
+    digest = hashlib.sha1(str(target).encode('utf-8')).hexdigest()[:10]
+    return f'{event}:{date_text}:{digest}'
+
+
 @sync_to_async
 def _cloud_notice_already_delivered(event_type: str, *, user_id: int | None, order_id: int | None = None, batch_id: str = '') -> bool:
     if not user_id:
@@ -1404,6 +1418,168 @@ async def sync_server_status_tick():
                 logger.info('云服务器状态同步完成: provider=%s region=%s account_id=%s', provider, region or 'all', account.id)
         except Exception as exc:
             logger.warning('云服务器状态同步失败: provider=%s error=%s', provider, exc)
+
+
+_DAILY_EXPIRY_EVENT = 'daily_expiry_summary'
+_DAILY_EXPIRY_EXCLUDED_ORDER_STATUSES = {'pending', 'paid', 'provisioning', 'failed', 'cancelled', 'deleted'}
+_DAILY_EXPIRY_TERMINAL_STATUSES = {CloudAsset.STATUS_DELETED, CloudAsset.STATUS_DELETING, CloudAsset.STATUS_TERMINATED, CloudAsset.STATUS_TERMINATING}
+
+
+def _cloud_runtime_status_label(status: str, provider_status: str = '') -> str:
+    status = (status or '').strip().lower()
+    provider_status = (provider_status or '').strip()
+    if status == CloudAsset.STATUS_RUNNING:
+        return '正在运行'
+    if status in {CloudAsset.STATUS_STOPPED, CloudAsset.STATUS_SUSPENDED}:
+        return '已关机'
+    if status == CloudAsset.STATUS_STARTING:
+        return '启动中'
+    if status == CloudAsset.STATUS_STOPPING:
+        return '关机中'
+    if status in {CloudAsset.STATUS_TERMINATING, CloudAsset.STATUS_DELETING}:
+        return '删除中'
+    if status in {CloudAsset.STATUS_TERMINATED, CloudAsset.STATUS_DELETED}:
+        return '已删除'
+    if status == CloudAsset.STATUS_EXPIRED:
+        return '已过期'
+    if status == CloudAsset.STATUS_EXPIRED_GRACE:
+        return '到期延停'
+    if provider_status:
+        return provider_status
+    return dict(CloudAsset.STATUS_CHOICES).get(status, '未知状态')
+
+
+def _daily_expiry_line(item: dict, index: int) -> str:
+    user = item.get('username') or item.get('tg_user_id') or '-'
+    expires_text = _format_notice_dt(item.get('expires_at'))
+    region = item.get('region_name') or item.get('region_code') or '-'
+    provider_status = item.get('provider_status') or '-'
+    return (
+        f'{index}. IP: {escape(str(item.get("ip") or "-"))}\n'
+        f'   用户: {escape(str(user))}｜地区: {escape(str(region))}\n'
+        f'   到期: {escape(expires_text)}｜状态: {escape(str(item.get("status_label") or "未知状态"))}\n'
+        f'   云端原始状态: {escape(str(provider_status))}'
+    )
+
+
+@sync_to_async
+def _daily_expiry_summary_items() -> dict:
+    now = timezone.now()
+    today = timezone.localdate(now)
+    today_start = timezone.make_aware(timezone.datetime.combine(today, timezone.datetime.min.time()), timezone.get_current_timezone())
+    today_end = timezone.make_aware(timezone.datetime.combine(today, timezone.datetime.max.time()), timezone.get_current_timezone())
+    queryset = (
+        CloudServerOrder.objects.select_related('user', 'cloud_account')
+        .filter(service_expires_at__isnull=False, service_expires_at__lte=today_end)
+        .exclude(status__in=_DAILY_EXPIRY_EXCLUDED_ORDER_STATUSES)
+        .order_by('service_expires_at', 'id')
+    )
+    today_items = []
+    expired_items = []
+    for order in queryset:
+        asset = _order_primary_asset(order)
+        server = _order_primary_server(order)
+        source = asset or server
+        if source and getattr(source, 'status', '') in _DAILY_EXPIRY_TERMINAL_STATUSES and order.status in {'deleted', 'deleting'}:
+            continue
+        ip = (getattr(source, 'public_ip', None) or order.public_ip or order.previous_public_ip or '').strip()
+        if not ip:
+            continue
+        status = getattr(source, 'status', '') or CloudAsset.STATUS_UNKNOWN
+        provider_status = getattr(source, 'provider_status', '') or ''
+        user = getattr(order, 'user', None)
+        item = {
+            'order_id': order.id,
+            'order_no': order.order_no,
+            'ip': ip,
+            'expires_at': order.service_expires_at,
+            'status': status,
+            'status_label': _cloud_runtime_status_label(status, provider_status),
+            'provider_status': provider_status,
+            'region_code': order.region_code,
+            'region_name': order.region_name,
+            'tg_user_id': getattr(user, 'tg_user_id', None),
+            'username': getattr(user, 'primary_username', '') or getattr(user, 'first_name', '') or '',
+        }
+        if order.service_expires_at >= today_start:
+            today_items.append(item)
+        else:
+            expired_items.append(item)
+    return {'date': today.isoformat(), 'today': today_items, 'expired': expired_items}
+
+
+def _daily_expiry_summary_text(summary: dict) -> str:
+    today_items = summary.get('today') or []
+    expired_items = summary.get('expired') or []
+    date_text = summary.get('date') or timezone.localdate().isoformat()
+    lines = [
+        f'📌 云服务器到期汇总（{escape(date_text)} 12:00）',
+        '状态已先执行云端同步后生成。',
+        f'今日到期: {len(today_items)} 台｜已经到期: {len(expired_items)} 台',
+    ]
+    if today_items:
+        lines.extend(['', '🟡 今日到期'])
+        lines.extend(_daily_expiry_line(item, idx) for idx, item in enumerate(today_items, 1))
+    if expired_items:
+        lines.extend(['', '🔴 已经到期'])
+        lines.extend(_daily_expiry_line(item, idx) for idx, item in enumerate(expired_items, 1))
+    if not today_items and not expired_items:
+        lines.extend(['', '今日没有到期或已到期服务器。'])
+    text = '\n'.join(lines)
+    if len(text) <= 3900:
+        return text
+    return text[:3800].rstrip() + '\n\n……内容较多，已截断，请到后台服务器列表查看完整结果。'
+
+
+@sync_to_async
+def _daily_expiry_summary_already_sent(batch_id: str) -> bool:
+    return CloudUserNoticeLog.objects.filter(event_type=_DAILY_EXPIRY_EVENT, batch_id=batch_id, delivered=True).exists()
+
+
+@sync_to_async
+def _record_daily_expiry_summary(target, batch_id: str, delivered: bool, text: str, summary: dict):
+    target_chat_id = target if isinstance(target, int) else None
+    CloudUserNoticeLog.objects.create(
+        batch_id=batch_id,
+        event_type=_DAILY_EXPIRY_EVENT,
+        target_chat_id=target_chat_id,
+        is_batch=True,
+        delivered=delivered,
+        text_preview=str(text or '')[:1000],
+        extra={
+            'target': str(target),
+            'date': summary.get('date'),
+            'today_count': len(summary.get('today') or []),
+            'expired_count': len(summary.get('expired') or []),
+        },
+    )
+
+
+async def daily_expiry_summary_tick(notify_target=None, *, force: bool = False):
+    if not notify_target:
+        return {'sent': 0, 'skipped': 'missing_notify_target'}
+    config = await _daily_expiry_summary_config()
+    targets = config.get('targets') or []
+    if not config.get('enabled') or not targets:
+        return {'sent': 0, 'skipped': 'disabled'}
+    await sync_server_status_tick()
+    summary = await _daily_expiry_summary_items()
+    text = _daily_expiry_summary_text(summary)
+    sent = 0
+    for target in targets:
+        batch_id = _target_batch_id(_DAILY_EXPIRY_EVENT, target, summary.get('date') or timezone.localdate().isoformat())
+        if not force and await _daily_expiry_summary_already_sent(batch_id):
+            logger.info('CLOUD_DAILY_EXPIRY_SUMMARY_SKIP_DUPLICATE target=%s batch_id=%s', target, batch_id)
+            continue
+        delivered = False
+        try:
+            delivered = await notify_target(target, text, None) is not False
+            sent += int(delivered)
+        except Exception as exc:
+            logger.warning('CLOUD_DAILY_EXPIRY_SUMMARY_NOTIFY_FAILED target=%s error=%s', target, exc)
+        await _record_daily_expiry_summary(target, batch_id, delivered, text, summary)
+    logger.info('CLOUD_DAILY_EXPIRY_SUMMARY_DONE targets=%s sent=%s today=%s expired=%s', len(targets), sent, len(summary.get('today') or []), len(summary.get('expired') or []))
+    return {'sent': sent, 'today': len(summary.get('today') or []), 'expired': len(summary.get('expired') or [])}
 
 
 async def sync_cloud_accounts_tick():

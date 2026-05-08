@@ -1,7 +1,7 @@
 import json
 import os
 from decimal import Decimal
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 from asgiref.sync import async_to_sync
 from django.contrib.auth import get_user_model
@@ -15,7 +15,7 @@ from bot.api import _shutdown_log_items, _unattached_ip_delete_items
 from bot.models import TelegramGroupFilter, TelegramUser
 from cloud.bootstrap import _build_mtproxy_script, _extract_tg_links
 from cloud.models import CloudAsset, CloudAutoRenewPatrolLog, CloudIpLog, CloudServerOrder, CloudServerPlan, CloudUserNoticeLog, Server
-from cloud.lifecycle import _apply_notice_schedule_to_order, _get_due_orders, _get_migration_due_orders, _get_orphan_asset_delete_due, _is_cloud_delete_safe_time, _is_cloud_suspend_time, _mark_deleted, _mark_suspended, _next_cloud_action_run_at, _notice_plan_text, _send_logged_cloud_notice, lifecycle_tick, sync_server_status_tick
+from cloud.lifecycle import _apply_notice_schedule_to_order, _get_due_orders, _get_migration_due_orders, _get_orphan_asset_delete_due, _is_cloud_delete_safe_time, _is_cloud_suspend_time, _mark_deleted, _mark_suspended, _next_cloud_action_run_at, _notice_plan_text, _send_logged_cloud_notice, daily_expiry_summary_tick, lifecycle_tick, sync_server_status_tick
 from cloud.ports import get_mtproxy_port_label, get_mtproxy_public_ports, is_valid_mtproxy_main_port
 from cloud.aws_lightsail import _resolve_static_ip_name_for_move
 from cloud.provisioning import (
@@ -33,7 +33,7 @@ from cloud.services import apply_cloud_server_renewal, create_cloud_server_rebui
 from cloud.sync_safety import get_missing_confirmation_threshold
 from cloud.api import _cloud_order_source_tags, auto_renew_task_detail, cloud_order_detail, cloud_orders_list, delete_cloud_asset, delete_server, run_auto_renew_order, run_auto_renew_tasks, sync_cloud_asset_status, tasks_overview, update_cloud_asset
 from core.cloud_accounts import cloud_account_label
-from core.models import CloudAccountConfig
+from core.models import CloudAccountConfig, SiteConfig
 from orders.payment_scanner import _confirm_cloud_server_order
 
 
@@ -254,6 +254,158 @@ class CloudServerServicesTestCase(TestCase):
         self.assertIn('已有配置调整任务', second_err)
         self.assertEqual(CloudServerOrder.objects.filter(replacement_for=source).count(), 1)
         self.assertEqual(TelegramUser.objects.get(id=self.user.id).balance, balance_after_first)
+
+    def test_config_change_success_does_not_steal_old_server_record(self):
+        source = CloudServerOrder.objects.create(
+            order_no='HB-TEST-UPGRADE-SOURCE-SERVER',
+            user=self.user,
+            plan=self.plan,
+            provider=self.plan.provider,
+            region_code=self.plan.region_code,
+            region_name=self.plan.region_name,
+            plan_name=self.plan.plan_name,
+            quantity=1,
+            currency='USDT',
+            total_amount='19.00',
+            pay_amount='19.00',
+            pay_method='balance',
+            status='completed',
+            public_ip='8.8.4.44',
+            previous_public_ip='8.8.4.44',
+            server_name='old-config-instance',
+            instance_id='old-config-instance',
+            provider_resource_id='old-config-instance',
+            static_ip_name='StaticIp-config-source',
+            mtproxy_port=9528,
+            mtproxy_secret='0123456789abcdef0123456789abcdef',
+            service_started_at=timezone.now() - timezone.timedelta(days=1),
+            service_expires_at=timezone.now() + timezone.timedelta(days=20),
+        )
+        old_server = Server.objects.create(
+            order=source,
+            user=self.user,
+            provider=source.provider,
+            account_label=source.provider,
+            region_code=source.region_code,
+            region_name=source.region_name,
+            server_name=source.server_name,
+            instance_id=source.instance_id,
+            provider_resource_id=source.provider_resource_id,
+            public_ip=source.public_ip,
+            expires_at=source.service_expires_at,
+            status=Server.STATUS_RUNNING,
+            is_active=True,
+        )
+        replacement = CloudServerOrder.objects.create(
+            order_no='HB-TEST-UPGRADE-NEW-SERVER',
+            user=self.user,
+            plan=self.plan,
+            provider=self.plan.provider,
+            region_code=self.plan.region_code,
+            region_name=self.plan.region_name,
+            plan_name=self.plan.plan_name,
+            quantity=1,
+            currency='USDT',
+            total_amount='29.00',
+            pay_amount='10.00',
+            pay_method='balance',
+            status='provisioning',
+            public_ip='10.0.0.10',
+            replacement_for=source,
+            static_ip_name=source.static_ip_name,
+            mtproxy_port=source.mtproxy_port,
+            mtproxy_secret=source.mtproxy_secret,
+            service_started_at=source.service_started_at,
+            service_expires_at=source.service_expires_at,
+        )
+
+        async_to_sync(_mark_success)(
+            replacement.id,
+            'new-config-instance',
+            'new-config-instance',
+            source.public_ip,
+            'ubuntu',
+            'secret',
+            '配置调整完成',
+            source.static_ip_name,
+        )
+
+        old_server.refresh_from_db()
+        replacement.refresh_from_db()
+        new_server = Server.objects.filter(order=replacement).first()
+        self.assertEqual(old_server.order_id, source.id)
+        self.assertEqual(old_server.instance_id, source.instance_id)
+        self.assertIsNotNone(new_server)
+        self.assertNotEqual(new_server.id, old_server.id)
+        self.assertEqual(new_server.public_ip, source.public_ip)
+        self.assertEqual(new_server.expires_at, replacement.service_expires_at)
+
+    def test_aws_sync_resolver_does_not_match_replacement_by_old_ip(self):
+        from cloud.management.commands.sync_aws_assets import _resolve_server
+
+        source = CloudServerOrder.objects.create(
+            order_no='HB-TEST-AWS-SYNC-OLD-IP',
+            user=self.user,
+            plan=self.plan,
+            provider='aws_lightsail',
+            region_code=self.plan.region_code,
+            region_name=self.plan.region_name,
+            plan_name=self.plan.plan_name,
+            quantity=1,
+            currency='USDT',
+            total_amount='19.00',
+            pay_amount='19.00',
+            pay_method='balance',
+            status='completed',
+            public_ip='9.9.9.9',
+            previous_public_ip='9.9.9.9',
+            server_name='old-sync-instance',
+            instance_id='old-sync-instance',
+            provider_resource_id='old-sync-instance',
+            service_expires_at=timezone.now() + timezone.timedelta(days=20),
+        )
+        replacement = CloudServerOrder.objects.create(
+            order_no='HB-TEST-AWS-SYNC-NEW-IP',
+            user=self.user,
+            plan=self.plan,
+            provider='aws_lightsail',
+            region_code=self.plan.region_code,
+            region_name=self.plan.region_name,
+            plan_name=self.plan.plan_name,
+            quantity=1,
+            currency='USDT',
+            total_amount='19.00',
+            pay_amount='19.00',
+            pay_method='balance',
+            status='provisioning',
+            public_ip='9.9.9.9',
+            replacement_for=source,
+            server_name='new-sync-instance',
+            instance_id='new-sync-instance',
+            provider_resource_id='new-sync-instance',
+            service_expires_at=source.service_expires_at,
+        )
+        old_server = Server.objects.create(
+            order=source,
+            user=self.user,
+            provider='aws_lightsail',
+            account_label='aws_lightsail',
+            region_code=source.region_code,
+            region_name=source.region_name,
+            server_name=source.server_name,
+            instance_id=source.instance_id,
+            provider_resource_id=source.provider_resource_id,
+            public_ip=source.public_ip,
+            expires_at=source.service_expires_at,
+            status=Server.STATUS_RUNNING,
+            is_active=True,
+        )
+
+        resolved = _resolve_server(replacement.instance_id, replacement.provider_resource_id, replacement.public_ip, replacement)
+
+        self.assertIsNone(resolved)
+        old_server.refresh_from_db()
+        self.assertEqual(old_server.order_id, source.id)
 
     def test_cloud_config_change_lists_and_creates_downgrade_order(self):
         small_plan = CloudServerPlan.objects.create(
@@ -1154,6 +1306,66 @@ class CloudServerServicesTestCase(TestCase):
         self.assertEqual(asset.actual_expires_at, source.migration_due_at)
         self.assertEqual(server.expires_at, source.migration_due_at)
 
+    def test_rebuild_job_keeps_old_instance_until_migration_due(self):
+        from cloud.api import _run_rebuild_job
+
+        source = CloudServerOrder.objects.create(
+            order_no='REBUILD-JOB-SOURCE-KEEP-3D',
+            user=self.user,
+            plan=self.plan,
+            provider=self.plan.provider,
+            region_code=self.plan.region_code,
+            region_name=self.plan.region_name,
+            plan_name=self.plan.plan_name,
+            quantity=1,
+            currency='USDT',
+            total_amount='19.00',
+            pay_amount='19.00',
+            pay_method='balance',
+            status='deleting',
+            public_ip='1.2.3.40',
+            server_name='old-rebuild-job-instance',
+            instance_id='old-rebuild-job-instance',
+            migration_due_at=timezone.now() + timezone.timedelta(days=3),
+            service_expires_at=timezone.now() + timezone.timedelta(days=3),
+            delete_at=timezone.now() + timezone.timedelta(days=6),
+        )
+        replacement = CloudServerOrder.objects.create(
+            order_no='REBUILD-JOB-NEW-KEEP-3D',
+            user=self.user,
+            plan=self.plan,
+            provider=self.plan.provider,
+            region_code=self.plan.region_code,
+            region_name=self.plan.region_name,
+            plan_name=self.plan.plan_name,
+            quantity=1,
+            currency='USDT',
+            total_amount='19.00',
+            pay_amount='19.00',
+            pay_method='balance',
+            status='completed',
+            public_ip='1.2.3.40',
+            server_name='new-rebuild-job-instance',
+            instance_id='new-rebuild-job-instance',
+            replacement_for=source,
+            service_expires_at=timezone.now() + timezone.timedelta(days=30),
+        )
+
+        async def fake_provision_cloud_server(order_id):
+            self.assertEqual(order_id, replacement.id)
+            return replacement
+
+        with patch('cloud.api.provision_cloud_server', fake_provision_cloud_server), \
+            patch('cloud.api._delete_instance') as delete_instance, \
+            patch('cloud.api._mark_replaced_order_deleted') as mark_deleted:
+            _run_rebuild_job(replacement.id)
+
+        delete_instance.assert_not_called()
+        mark_deleted.assert_not_called()
+        source.refresh_from_db()
+        self.assertEqual(source.status, 'deleting')
+        self.assertIsNotNone(source.delete_at)
+
     def test_manual_admin_replace_order_takes_effect_immediately_for_aws_asset(self):
         old_expiry = timezone.now() + timezone.timedelta(days=10)
         new_expiry = timezone.now() + timezone.timedelta(days=40)
@@ -1427,6 +1639,74 @@ class CloudServerServicesTestCase(TestCase):
         self.assertGreater(order.ip_recycle_at, order.delete_at)
         self.assertEqual(asset.actual_expires_at, order.service_expires_at)
         self.assertEqual(server.expires_at, order.service_expires_at)
+
+    def test_dashboard_order_ip_and_name_update_syncs_asset_server(self):
+        order = CloudServerOrder.objects.create(
+            order_no='DASH-ORDER-IP-NAME-UPDATE-1',
+            user=self.user,
+            plan=self.plan,
+            provider=self.plan.provider,
+            region_code=self.plan.region_code,
+            region_name=self.plan.region_name,
+            plan_name=self.plan.plan_name,
+            quantity=1,
+            currency='USDT',
+            total_amount='19.00',
+            pay_amount='19.00',
+            pay_method='balance',
+            status='completed',
+            public_ip='4.4.4.40',
+            server_name='old-dashboard-name',
+            service_started_at=timezone.now(),
+            service_expires_at=timezone.now() + timezone.timedelta(days=20),
+        )
+        CloudAsset.objects.create(
+            kind=CloudAsset.KIND_SERVER,
+            source=CloudAsset.SOURCE_ORDER,
+            order=order,
+            user=self.user,
+            provider=order.provider,
+            region_code=order.region_code,
+            region_name=order.region_name,
+            asset_name=order.server_name,
+            public_ip=order.public_ip,
+            actual_expires_at=order.service_expires_at,
+        )
+        Server.objects.create(
+            source=Server.SOURCE_ORDER,
+            order=order,
+            user=self.user,
+            provider=order.provider,
+            region_code=order.region_code,
+            region_name=order.region_name,
+            server_name=order.server_name,
+            public_ip=order.public_ip,
+            expires_at=order.service_expires_at,
+        )
+        staff_user = get_user_model().objects.create_user(username='staff_order_ip_name_update', password='x', is_staff=True)
+        request = RequestFactory().patch(
+            f'/api/dashboard/cloud-orders/{order.id}/',
+            data=json.dumps({'public_ip': '4.4.4.41', 'server_name': 'new-dashboard-name'}),
+            content_type='application/json',
+            HTTP_AUTHORIZATION='',
+        )
+        request.user = staff_user
+
+        response = cloud_order_detail(request, order.id)
+
+        self.assertEqual(response.status_code, 200)
+        order.refresh_from_db()
+        asset = CloudAsset.objects.get(order=order)
+        server = Server.objects.get(order=order)
+        self.assertEqual(order.public_ip, '4.4.4.41')
+        self.assertEqual(order.previous_public_ip, '4.4.4.40')
+        self.assertEqual(order.server_name, 'new-dashboard-name')
+        self.assertEqual(asset.public_ip, '4.4.4.41')
+        self.assertEqual(asset.previous_public_ip, '4.4.4.40')
+        self.assertEqual(asset.asset_name, 'new-dashboard-name')
+        self.assertEqual(server.public_ip, '4.4.4.41')
+        self.assertEqual(server.previous_public_ip, '4.4.4.40')
+        self.assertEqual(server.server_name, 'new-dashboard-name')
 
     def test_aws_notice_schedule_does_not_override_manual_order_expiry(self):
         order = CloudServerOrder.objects.create(
@@ -2713,6 +2993,97 @@ class CloudServerServicesTestCase(TestCase):
         self.assertFalse(result2)
         self.assertEqual(len(sent), 1)
         self.assertEqual(CloudUserNoticeLog.objects.filter(event_type='renew_notice', user=self.user, order=order, delivered=True).count(), 1)
+
+    def test_daily_expiry_summary_uses_real_cloud_status_and_target_config(self):
+        now = timezone.now()
+        today_order = CloudServerOrder.objects.create(
+            order_no='DAILY-EXPIRY-TODAY-1',
+            user=self.user,
+            plan=self.plan,
+            provider=self.plan.provider,
+            region_code=self.plan.region_code,
+            region_name=self.plan.region_name,
+            plan_name=self.plan.plan_name,
+            quantity=1,
+            currency='USDT',
+            total_amount='19.00',
+            pay_amount='19.00',
+            pay_method='balance',
+            status='completed',
+            public_ip='10.10.10.10',
+            service_started_at=now - timezone.timedelta(days=30),
+            service_expires_at=now.replace(hour=9, minute=0, second=0, microsecond=0),
+        )
+        today_asset = CloudAsset.objects.create(
+            kind=CloudAsset.KIND_SERVER,
+            source=CloudAsset.SOURCE_ORDER,
+            order=today_order,
+            user=self.user,
+            provider=today_order.provider,
+            region_code=today_order.region_code,
+            region_name=today_order.region_name,
+            asset_name='daily-expiry-today',
+            public_ip='10.10.10.10',
+            actual_expires_at=today_order.service_expires_at,
+            status=CloudAsset.STATUS_RUNNING,
+            provider_status='running',
+        )
+        expired_order = CloudServerOrder.objects.create(
+            order_no='DAILY-EXPIRY-EXPIRED-1',
+            user=self.user,
+            plan=self.plan,
+            provider=self.plan.provider,
+            region_code=self.plan.region_code,
+            region_name=self.plan.region_name,
+            plan_name=self.plan.plan_name,
+            quantity=1,
+            currency='USDT',
+            total_amount='19.00',
+            pay_amount='19.00',
+            pay_method='balance',
+            status='completed',
+            public_ip='10.10.10.11',
+            service_started_at=now - timezone.timedelta(days=60),
+            service_expires_at=now - timezone.timedelta(days=1),
+        )
+        expired_asset = CloudAsset.objects.create(
+            kind=CloudAsset.KIND_SERVER,
+            source=CloudAsset.SOURCE_ORDER,
+            order=expired_order,
+            user=self.user,
+            provider=expired_order.provider,
+            region_code=expired_order.region_code,
+            region_name=expired_order.region_name,
+            asset_name='daily-expiry-expired',
+            public_ip='10.10.10.11',
+            actual_expires_at=expired_order.service_expires_at,
+            status=CloudAsset.STATUS_STOPPED,
+            provider_status='stopped',
+        )
+        SiteConfig.set('cloud_daily_expiry_summary_enabled', '1')
+        SiteConfig.set('cloud_daily_expiry_summary_chat_ids', '10001')
+        sent = []
+
+        async def fake_notify_target(chat_id, text, reply_markup=None):
+            sent.append((chat_id, text))
+            return True
+
+        with patch('cloud.lifecycle.sync_server_status_tick', new_callable=AsyncMock) as sync_mock:
+            result = async_to_sync(daily_expiry_summary_tick)(notify_target=fake_notify_target)
+
+        self.assertEqual(result['sent'], 1)
+        sync_mock.assert_called_once()
+        self.assertEqual(len(sent), 1)
+        self.assertIn('今日到期: 1 台｜已经到期: 1 台', sent[0][1])
+        self.assertIn('IP: 10.10.10.10', sent[0][1])
+        self.assertIn('状态: 正在运行', sent[0][1])
+        self.assertIn('IP: 10.10.10.11', sent[0][1])
+        self.assertIn('状态: 已关机', sent[0][1])
+        log = CloudUserNoticeLog.objects.get(event_type='daily_expiry_summary')
+        self.assertTrue(log.delivered)
+        self.assertEqual(log.target_chat_id, 10001)
+        self.assertEqual(log.extra['today_count'], 1)
+        self.assertEqual(log.extra['expired_count'], 1)
 
     def test_tasks_overview_exposes_click_paths_for_entry_and_order_number(self):
         order = CloudServerOrder.objects.create(

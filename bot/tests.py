@@ -1,4 +1,5 @@
 from types import SimpleNamespace
+from unittest.mock import AsyncMock, MagicMock, patch
 
 from asgiref.sync import async_to_sync
 from django.contrib.auth import get_user_model
@@ -8,7 +9,7 @@ from django.contrib.sessions.models import Session
 from django.test import RequestFactory, SimpleTestCase, TestCase
 from django.utils import timezone
 
-from bot.api import DASHBOARD_SESSION_IDLE_SECONDS, _authenticate_dashboard_request
+from bot.api import DASHBOARD_SESSION_IDLE_SECONDS, _authenticate_dashboard_request, test_daily_expiry_summary_notification
 from bot.handlers import _retained_ip_renewal_plan_keyboard, _validate_reinstall_proxy_link
 from bot.telegram_listener import _build_bark_request, _build_push_payload, _is_self_sender
 from core.texts import BOT_TEXTS
@@ -34,6 +35,26 @@ class DashboardSessionExpiryTestCase(TestCase):
         remaining_seconds = (refreshed.expire_date - timezone.now()).total_seconds()
         self.assertGreater(remaining_seconds, DASHBOARD_SESSION_IDLE_SECONDS - 30)
         self.assertLessEqual(remaining_seconds, DASHBOARD_SESSION_IDLE_SECONDS + 30)
+
+
+class DashboardNotificationTestCase(TestCase):
+    def test_daily_expiry_summary_test_endpoint_forces_send(self):
+        staff = get_user_model().objects.create_user(username='daily_expiry_staff', password='pass', is_staff=True)
+        request = RequestFactory().post('/api/admin/settings/site-configs/daily-expiry-summary/test/')
+        request.user = staff
+        bot = MagicMock()
+        bot.session.close = AsyncMock()
+
+        with patch('bot.api.get_runtime_config', return_value='123:test-token'):
+            with patch('aiogram.Bot', return_value=bot):
+                with patch('cloud.lifecycle.daily_expiry_summary_tick', new_callable=AsyncMock) as tick:
+                    tick.return_value = {'sent': 1, 'today': 2, 'expired': 3}
+                    response = test_daily_expiry_summary_notification(request)
+
+        self.assertEqual(response.status_code, 200)
+        tick.assert_awaited_once()
+        self.assertTrue(tick.await_args.kwargs.get('force'))
+        bot.session.close.assert_awaited_once()
 
 
 class TelegramListenerPushTestCase(SimpleTestCase):

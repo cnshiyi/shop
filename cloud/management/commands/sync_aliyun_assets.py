@@ -121,28 +121,28 @@ def _resolve_asset(instance_id, public_ip, account=None):
     if account:
         label = cloud_account_label(account)
         lookup &= (Q(cloud_account=account) | Q(account_label=label) | (Q(cloud_account__isnull=True) & (Q(account_label='') | Q(account_label__isnull=True))))
-    candidates = Q()
+    base_queryset = CloudAsset.objects.filter(lookup).filter(Q(order__isnull=True) | ~Q(order__status__in=_SYNC_EXCLUDED_ORDER_STATUSES)).exclude(status__in=_SYNC_EXCLUDED_ASSET_STATUSES)
     if instance_id:
-        candidates |= Q(instance_id=instance_id) | Q(provider_resource_id=instance_id) | Q(asset_name=instance_id)
+        asset = base_queryset.filter(Q(instance_id=instance_id) | Q(provider_resource_id=instance_id) | Q(asset_name=instance_id)).order_by('-updated_at', '-id').first()
+        if asset:
+            return asset
     if public_ip:
-        candidates |= Q(public_ip=public_ip) | Q(previous_public_ip=public_ip)
-    if not candidates:
-        return None
-    return CloudAsset.objects.filter(lookup & candidates).filter(Q(order__isnull=True) | ~Q(order__status__in=_SYNC_EXCLUDED_ORDER_STATUSES)).exclude(status__in=_SYNC_EXCLUDED_ASSET_STATUSES).order_by('-updated_at', '-id').first()
+        return base_queryset.filter(Q(public_ip=public_ip) | Q(previous_public_ip=public_ip)).filter(order__isnull=True).order_by('-updated_at', '-id').first()
+    return None
 
 
 def _resolve_server(instance_id, public_ip, account=None):
-    candidates = Q()
-    if instance_id:
-        candidates |= Q(instance_id=instance_id) | Q(provider_resource_id=instance_id) | Q(server_name=instance_id)
     base = Q()
     if account:
         base &= Q(account_label=cloud_account_label(account))
+    base_queryset = Server.objects.filter(base).filter(Q(order__isnull=True) | ~Q(order__status__in=_SYNC_EXCLUDED_ORDER_STATUSES)).exclude(status__in=_SYNC_EXCLUDED_SERVER_STATUSES)
+    if instance_id:
+        server = base_queryset.filter(Q(instance_id=instance_id) | Q(provider_resource_id=instance_id) | Q(server_name=instance_id)).order_by('-updated_at', '-id').first()
+        if server:
+            return server
     if public_ip:
-        candidates |= Q(public_ip=public_ip) | Q(previous_public_ip=public_ip)
-    if not candidates:
-        return None
-    return Server.objects.filter(base & candidates).filter(Q(order__isnull=True) | ~Q(order__status__in=_SYNC_EXCLUDED_ORDER_STATUSES)).exclude(status__in=_SYNC_EXCLUDED_SERVER_STATUSES).order_by('-updated_at', '-id').first()
+        return base_queryset.filter(Q(public_ip=public_ip) | Q(previous_public_ip=public_ip)).filter(order__isnull=True).order_by('-updated_at', '-id').first()
+    return None
 
 
 

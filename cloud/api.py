@@ -1833,10 +1833,14 @@ def cloud_order_detail(request, order_id):
                 changed_fields.update({'user', 'last_user_id'})
                 _sync_telegram_username(user, user_lookup)
 
+            original_public_ip = order.public_ip
             for field in ('server_name', 'public_ip', 'previous_public_ip', 'instance_id', 'provider_resource_id', 'static_ip_name', 'mtproxy_host', 'mtproxy_link', 'provision_note'):
                 if field in payload:
                     setattr(order, field, payload.get(field) or None)
                     changed_fields.add(field)
+            if 'public_ip' in payload and original_public_ip and original_public_ip != order.public_ip and 'previous_public_ip' not in payload:
+                order.previous_public_ip = original_public_ip
+                changed_fields.add('previous_public_ip')
             if 'mtproxy_port' in payload:
                 mtproxy_port = payload.get('mtproxy_port')
                 order.mtproxy_port = int(mtproxy_port) if mtproxy_port not in (None, '') else None
@@ -1890,6 +1894,9 @@ def cloud_order_detail(request, order_id):
                 if 'public_ip' in changed_fields:
                     asset_updates['public_ip'] = order.public_ip
                     server_updates['public_ip'] = order.public_ip
+                    if 'previous_public_ip' in changed_fields:
+                        asset_updates['previous_public_ip'] = order.previous_public_ip
+                        server_updates['previous_public_ip'] = order.previous_public_ip
                 if 'server_name' in changed_fields:
                     asset_updates['asset_name'] = order.server_name
                     server_updates['server_name'] = order.server_name
@@ -1933,11 +1940,11 @@ def _run_rebuild_job(new_order_id: int):
         try:
             saved = async_to_sync(provision_cloud_server)(new_order_id)
             if saved and getattr(saved, 'status', '') == 'completed' and getattr(saved, 'replacement_for_id', None):
-                source_order = CloudServerOrder.objects.filter(id=saved.replacement_for_id).first()
-                if not source_order:
-                    return
-                delete_note = async_to_sync(_delete_instance)(source_order)
-                async_to_sync(_mark_replaced_order_deleted)(source_order.id, f'重装迁移完成，新实例订单: {saved.order_no}；{delete_note}')
+                logger.info(
+                    'AWS 重装迁移后台任务完成，旧实例进入迁移保留期: new_order_id=%s replacement_for_id=%s',
+                    saved.id,
+                    saved.replacement_for_id,
+                )
                 return
             logger.warning('AWS 重装迁移后台任务未完成，准备重试: new_order_id=%s attempt=%s/%s status=%s', new_order_id, attempt, max_attempts, getattr(saved, 'status', None) if saved else None)
         except Exception:
@@ -1974,7 +1981,7 @@ def rebuild_server_preserve_link(request, server_id: int):
     thread.start()
     return _ok({
         'accepted': True,
-        'message': '已发起 AWS 重装迁移，后台失败会自动重试（最多 3 次），成功后将删除旧实例。',
+        'message': '已发起 AWS 重装迁移，后台失败会自动重试（最多 3 次），成功后旧实例保留 3 天再删除。',
         'order_id': order.id,
         'order_no': order.order_no,
         'replacement_for_id': order.replacement_for_id,

@@ -68,6 +68,7 @@ urlpatterns = [
     path('settings/site-configs/groups/', bot_api.site_config_groups, name='site-config-groups'),
     path('settings/site-configs/init/', bot_api.init_site_configs, name='site-configs-init'),
     path('settings/site-configs/init-texts/', bot_api.init_text_site_configs, name='site-configs-init-texts'),
+    path('settings/site-configs/daily-expiry-summary/test/', bot_api.test_daily_expiry_summary_notification, name='site-config-daily-expiry-summary-test'),
     path('settings/site-configs/<int:config_id>/', bot_api.update_site_config, name='site-config-update'),
     path('settings/buttons/', bot_api.button_config_detail, name='button-config-detail'),
     path('settings/buttons/update/', bot_api.update_button_config, name='button-config-update'),

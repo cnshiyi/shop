@@ -1406,6 +1406,8 @@ def site_config_groups(request):
             'cloud_auto_renew_execution_notify_enabled',
             'cloud_auto_renew_execution_notify_chat_ids',
             'cloud_auto_renew_execution_notify_events',
+            'cloud_daily_expiry_summary_enabled',
+            'cloud_daily_expiry_summary_chat_ids',
         ],
         'lifecycle': [
             'cloud_suspend_after_days',
@@ -1492,6 +1494,42 @@ def init_text_site_configs(request):
         return _error('初始化模式不正确', status=400)
     result = init_texts(mode)
     return _ok({'mode': mode, **result})
+
+
+@csrf_exempt
+@dashboard_login_required
+@require_POST
+def test_daily_expiry_summary_notification(request):
+    async def _send():
+        from aiogram import Bot
+
+        from cloud.lifecycle import daily_expiry_summary_tick
+
+        token = get_runtime_config('bot_token', '')
+        if not str(token or '').strip():
+            raise ValueError('未配置 Telegram 机器人 Token')
+        bot = Bot(str(token).strip())
+
+        async def _notify_target(chat_id, text: str, reply_markup=None):
+            await bot.send_message(chat_id=chat_id, text=text, reply_markup=reply_markup, parse_mode='HTML')
+            return True
+
+        try:
+            return await daily_expiry_summary_tick(notify_target=_notify_target, force=True)
+        finally:
+            await bot.session.close()
+
+    try:
+        result = async_to_sync(_send)()
+    except Exception as exc:
+        return _error(f'测试通知发送失败：{exc}', status=400)
+    if result.get('skipped') == 'disabled':
+        return _error('每日到期汇总通知未开启或未配置通知目标', status=400)
+    if result.get('skipped') == 'missing_notify_target':
+        return _error('通知发送器不可用', status=400)
+    if not result.get('sent'):
+        return _error('测试通知未送达，请检查 Chat ID / 群组 / 频道权限', status=400)
+    return _ok(result)
 
 
 @csrf_exempt
@@ -2718,6 +2756,7 @@ __all__ = [
     'products_list',
     'site_config_groups',
     'site_configs_list',
+    'test_daily_expiry_summary_notification',
     'update_cloud_account',
     'update_product',
     'update_site_config',

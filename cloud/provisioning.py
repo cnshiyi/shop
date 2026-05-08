@@ -121,19 +121,28 @@ def _upsert_server_record(order: CloudServerOrder, note: str):
         order_user = order.user
     except Exception:
         order_user = None
-    lookup = Q()
-    if order.instance_id:
-        lookup |= Q(instance_id=order.instance_id)
-    if order.provider_resource_id:
-        lookup |= Q(provider_resource_id=order.provider_resource_id)
-    if order.public_ip:
-        lookup |= Q(public_ip=order.public_ip)
+    server_record = None
     if order.id:
-        lookup |= Q(order=order)
-    if lookup:
-        server_record = Server.objects.filter(lookup).order_by('-updated_at', '-id').first()
-    else:
-        server_record = None
+        same_order_lookup = Q(order=order)
+        if order.instance_id:
+            same_order_lookup |= Q(instance_id=order.instance_id)
+        if order.provider_resource_id:
+            same_order_lookup |= Q(provider_resource_id=order.provider_resource_id)
+        if order.server_name:
+            same_order_lookup |= Q(server_name=order.server_name)
+        server_record = (
+            Server.objects.filter(same_order_lookup)
+            .filter(Q(order__isnull=True) | Q(order=order))
+            .order_by('-updated_at', '-id')
+            .first()
+        )
+    if not server_record and order.public_ip:
+        server_record = (
+            Server.objects.filter(Q(public_ip=order.public_ip) | Q(previous_public_ip=order.public_ip))
+            .filter(Q(order__isnull=True) | Q(order=order))
+            .order_by('-updated_at', '-id')
+            .first()
+        )
     defaults = {
             'source': Server.SOURCE_ORDER,
             'provider': order.provider,
