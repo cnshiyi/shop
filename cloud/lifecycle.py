@@ -1471,7 +1471,7 @@ def _daily_expiry_line(item: dict, index: int) -> str:
 def _daily_expiry_message_chunks(title: str, items: list[dict], date_text: str, total_counts: str) -> list[str]:
     header = [
         f'{title}（{escape(date_text)} 12:00）',
-        '状态已先执行云端同步后生成。',
+        '状态来自数据库当前记录。',
         total_counts,
     ]
     if not items:
@@ -1578,7 +1578,7 @@ def _record_daily_expiry_summary(target, batch_id: str, delivered: bool, text: s
     )
 
 
-async def daily_expiry_summary_tick(notify_target=None, *, force: bool = False, sync_cloud: bool = True):
+async def daily_expiry_summary_tick(notify_target=None, *, force: bool = False, sync_cloud: bool = False):
     if not notify_target:
         return {'sent': 0, 'skipped': 'missing_notify_target'}
     config = await _daily_expiry_summary_config()

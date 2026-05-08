@@ -3074,9 +3074,10 @@ class CloudServerServicesTestCase(TestCase):
             result = async_to_sync(daily_expiry_summary_tick)(notify_target=fake_notify_target)
 
         self.assertEqual(result['sent'], 1)
-        sync_mock.assert_called_once()
+        sync_mock.assert_not_called()
         self.assertEqual(len(sent), 2)
         self.assertIn('🟡 今日到期服务器', sent[0][1])
+        self.assertIn('状态来自数据库当前记录。', sent[0][1])
         self.assertIn('今日到期: 1 台｜已经到期: 1 台', sent[0][1])
         self.assertIn('IP: <code>10.10.10.10</code>', sent[0][1])
         self.assertIn('用户名: svc_test｜姓名: 张三', sent[0][1])
