@@ -1454,18 +1454,52 @@ def _daily_expiry_person_label(value) -> str:
     return escape(text) if text else '-'
 
 
-def _daily_expiry_line(item: dict, index: int) -> str:
+def _daily_expiry_user_label(item: dict) -> str:
     username = _daily_expiry_person_label(item.get('username') or item.get('tg_user_id'))
     first_name = _daily_expiry_person_label(item.get('first_name'))
+    return f'所属用户: {username}｜姓名: {first_name}'
+
+
+def _daily_expiry_user_key(item: dict) -> tuple[str, str, str]:
+    return (
+        str(item.get('tg_user_id') or ''),
+        str(item.get('username') or ''),
+        str(item.get('first_name') or ''),
+    )
+
+
+def _daily_expiry_line(item: dict, index: int) -> str:
     expires_text = _format_notice_dt(item.get('expires_at'))
     region = item.get('region_name') or item.get('region_code') or '-'
     provider_status = item.get('provider_status') or '-'
     return (
         f'{index}. IP: <code>{escape(str(item.get("ip") or "-"))}</code>\n'
-        f'   用户名: {username}｜姓名: {first_name}｜地区: {escape(str(region))}\n'
+        f'   地区: {escape(str(region))}\n'
         f'   到期: {escape(expires_text)}｜状态: {escape(str(item.get("status_label") or "未知状态"))}\n'
         f'   云端原始状态: {escape(str(provider_status))}'
     )
+
+
+def _daily_expiry_grouped_lines(items: list[dict]) -> list[str]:
+    grouped = []
+    current_key = None
+    current_items = []
+    for item in items:
+        key = _daily_expiry_user_key(item)
+        if current_key is not None and key != current_key:
+            grouped.append(current_items)
+            current_items = []
+        current_key = key
+        current_items.append(item)
+    if current_items:
+        grouped.append(current_items)
+    lines = []
+    for group_index, group_items in enumerate(grouped):
+        if group_index > 0:
+            lines.append('────────────')
+        lines.append(_daily_expiry_user_label(group_items[0]))
+        lines.extend(_daily_expiry_line(item, index) for index, item in enumerate(group_items, 1))
+    return lines
 
 
 def _daily_expiry_message_chunks(title: str, items: list[dict], date_text: str, total_counts: str) -> list[str]:
@@ -1479,8 +1513,7 @@ def _daily_expiry_message_chunks(title: str, items: list[dict], date_text: str, 
     messages = []
     lines = [*header, '']
     max_length = 3900
-    for idx, item in enumerate(items, 1):
-        line = _daily_expiry_line(item, idx)
+    for line in _daily_expiry_grouped_lines(items):
         candidate = '\n'.join([*lines, line])
         if len(candidate) > max_length and len(lines) > len(header) + 1:
             messages.append('\n'.join(lines).rstrip())
