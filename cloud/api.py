@@ -1058,10 +1058,19 @@ def _auto_renew_order_has_active_notice(order) -> bool:
     if getattr(order, 'status', None) not in {'completed', 'expiring', 'renew_pending'}:
         return False
     notice = _notice_payload_for_order(order)
-    if not notice:
+    ip = str(notice.get('ip') if notice else getattr(order, 'public_ip', None) or getattr(order, 'previous_public_ip', None) or '').strip()
+    if not ip:
         return False
-    ip = str(notice.get('ip') or getattr(order, 'public_ip', None) or getattr(order, 'previous_public_ip', None) or '').strip()
-    return bool(ip)
+    linked_assets = list(CloudAsset.objects.filter(kind=CloudAsset.KIND_SERVER, order=order).only('id', 'status', 'is_active')[:20])
+    if not linked_assets:
+        return True
+    excluded_statuses = {
+        CloudAsset.STATUS_DELETED,
+        CloudAsset.STATUS_DELETING,
+        CloudAsset.STATUS_TERMINATED,
+        CloudAsset.STATUS_TERMINATING,
+    }
+    return any(asset.is_active and asset.status not in excluded_statuses for asset in linked_assets)
 
 
 def _auto_renew_future_plan_items(now, next_run_at, due_orders: list):

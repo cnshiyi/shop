@@ -3097,6 +3097,43 @@ class CloudServerServicesTestCase(TestCase):
         retry_item = next(item for item in due_items if item['order_no'] == retry_order.order_no)
         self.assertEqual(retry_item['last_failure_reason'], '余额不足')
 
+    def test_auto_renew_detail_keeps_valid_order_without_asset(self):
+        due_order = CloudServerOrder.objects.create(
+            order_no='AUTO-RENEW-NO-ASSET-1',
+            user=self.user,
+            plan=self.plan,
+            provider=self.plan.provider,
+            region_code=self.plan.region_code,
+            region_name=self.plan.region_name,
+            plan_name=self.plan.plan_name,
+            quantity=1,
+            currency='USDT',
+            total_amount='19.00',
+            pay_amount='19.00',
+            pay_method='balance',
+            status='completed',
+            public_ip='10.0.9.1',
+            service_started_at=timezone.now() - timezone.timedelta(days=30),
+            service_expires_at=timezone.now() + timezone.timedelta(hours=12),
+            auto_renew_enabled=True,
+        )
+        staff_user = get_user_model().objects.create_user(username='staff_auto_renew_no_asset', password='x', is_staff=True)
+        request = RequestFactory().get('/api/dashboard/tasks/auto-renew/')
+        request.user = staff_user
+
+        async def fake_get_due_orders():
+            return {'auto_renew': [due_order]}
+
+        with patch('cloud.api._get_due_orders', side_effect=fake_get_due_orders):
+            response = auto_renew_task_detail(request)
+
+        payload = json.loads(response.content)
+        data = payload.get('data') or payload
+        queue_status_map = {item['order_no']: item['queue_status'] for item in data['due_items']}
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(queue_status_map[due_order.order_no], 'due_now')
+
     def test_run_auto_renew_tasks_executes_due_retry_and_fallback_queue(self):
         due_order = CloudServerOrder.objects.create(
             order_no='AUTO-RENEW-RUN-DUE-1',
