@@ -22,6 +22,7 @@ from django.db.models import Q
 from django.utils import timezone
 
 from core.runtime_config import get_runtime_config
+from cloud.note_utils import append_note
 from bot.config import BOT_TOKEN
 from bot.fsm import create_fsm_storage
 from bot.states import AdminReplyStates, CustomServerStates, MonitorStates, RechargeStates, CloudQueryStates
@@ -1700,7 +1701,7 @@ def _save_asset_main_proxy_link(asset_id: int, user_id: int | None, link_data: d
     links = [item for item in links if not (isinstance(item, dict) and str(item.get('port') or '') == str(asset.mtproxy_port))]
     links.insert(0, {'name': '主代理 mtg', 'server': link_data['server'], 'port': link_data['port'], 'secret': link_data['secret'], 'url': link_data['url']})
     asset.proxy_links = links
-    asset.note = '\n'.join(filter(None, [asset.note, '用户补充主代理链接，准备重新安装。']))
+    asset.note = append_note(asset.note, '用户补充主代理链接，准备重新安装。')
     asset.save(update_fields=['mtproxy_link', 'mtproxy_secret', 'mtproxy_host', 'mtproxy_port', 'proxy_links', 'note', 'updated_at'])
     return asset
 
@@ -1718,7 +1719,7 @@ def _save_user_main_proxy_link(order_id: int, link_data: dict[str, str]):
     links = [item for item in links if not (isinstance(item, dict) and str(item.get('port') or '') == str(order.mtproxy_port))]
     links.insert(0, {'name': '主代理 mtg', 'server': link_data['server'], 'port': link_data['port'], 'secret': link_data['secret'], 'url': link_data['url']})
     order.proxy_links = links
-    order.provision_note = '\n'.join(filter(None, [order.provision_note, '用户补充并校验主代理链接，准备重新安装。']))
+    order.provision_note = append_note(order.provision_note, '用户补充并校验主代理链接，准备重新安装。')
     order.save(update_fields=['mtproxy_link', 'mtproxy_secret', 'mtproxy_host', 'mtproxy_port', 'proxy_links', 'provision_note', 'updated_at'])
     _update_order_primary_records(
         order,

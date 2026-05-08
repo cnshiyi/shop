@@ -17,6 +17,7 @@ from django.utils import timezone
 
 from bot.models import TelegramUser
 from cloud.models import CloudAsset, CloudIpLog, CloudServerOrder, CloudServerPlan, Server, ServerPrice, _runtime_int_config, _with_runtime_time
+from cloud.note_utils import append_note
 from cloud.bootstrap import install_bbr, install_mtproxy
 from cloud.ports import get_mtproxy_public_ports
 from core.cache import get_redis
@@ -91,10 +92,14 @@ def _update_order_primary_records(order: CloudServerOrder | None, *, asset_updat
     server = _order_primary_server(order)
     if asset and asset_updates:
         updates = dict(asset_updates)
+        if 'note' in updates:
+            updates['note'] = append_note(asset.note, updates.get('note'))
         updates.setdefault('updated_at', now)
         CloudAsset.objects.filter(id=asset.id).update(**updates)
     if server and server_updates:
         updates = dict(server_updates)
+        if 'note' in updates:
+            updates['note'] = append_note(server.note, updates.get('note'))
         updates.setdefault('updated_at', now)
         Server.objects.filter(id=server.id).update(**updates)
     return asset, server
@@ -837,7 +842,7 @@ def set_cloud_server_port(order_id: int, user_id: int, port: int):
     if not order:
         return None
     order.mtproxy_port = port
-    order.provision_note = f'用户已确认端口 {port}，开始创建服务器。'
+    order.provision_note = append_note(order.provision_note, f'用户已确认端口 {port}，开始创建服务器。')
     order.save(update_fields=['mtproxy_port', 'provision_note', 'updated_at'])
     logger.info('云服务器端口确认: order=%s user=%s port=%s', order.order_no, user_id, port)
     return order
@@ -855,7 +860,7 @@ def prepare_cloud_server_order_instances(order_id: int, user_id: int, port: int)
         quantity = max(1, int(order.quantity or 1))
         order.mtproxy_port = port
         if quantity <= 1:
-            order.provision_note = f'用户已确认端口 {port}，开始创建服务器。'
+            order.provision_note = append_note(order.provision_note, f'用户已确认端口 {port}，开始创建服务器。')
             order.save(update_fields=['mtproxy_port', 'provision_note', 'updated_at'])
             logger.info('云服务器端口确认: order=%s user=%s port=%s quantity=1', order.order_no, user_id, port)
             return [order]
@@ -867,7 +872,7 @@ def prepare_cloud_server_order_instances(order_id: int, user_id: int, port: int)
         order.quantity = 1
         order.total_amount = per_total
         order.pay_amount = per_pay
-        order.provision_note = f'批量订单 {original_order_no} 已拆分：第 1/{quantity} 台，端口 {port}，开始创建服务器。'
+        order.provision_note = append_note(order.provision_note, f'批量订单 {original_order_no} 已拆分：第 1/{quantity} 台，端口 {port}，开始创建服务器。')
         order.save(update_fields=['quantity', 'total_amount', 'pay_amount', 'mtproxy_port', 'provision_note', 'updated_at'])
         for index in range(2, quantity + 1):
             clone = CloudServerOrder.objects.create(
@@ -2563,7 +2568,7 @@ def apply_cloud_server_renewal(order_id: int, days: int = 31, run_post_checks: b
     order = _hydrate_order_from_proxy_asset(CloudServerOrder.objects.get(id=order_id))
     ok, renew_note = _renew_aliyun_instance(order, days)
     if not ok:
-        order.provision_note = renew_note
+        order.provision_note = append_note(order.provision_note, renew_note)
         order.save(update_fields=['provision_note', 'updated_at'])
         raise ValueError(renew_note)
     now = timezone.now()
@@ -2597,7 +2602,10 @@ def apply_cloud_server_renewal(order_id: int, days: int = 31, run_post_checks: b
     else:
         post_notes.append('续费后运行状态与 MTProxy 巡检已提交后台执行。')
     base_note = '原到期时间未过期，已在原到期时间基础上顺延' if current_expires_at and current_expires_at > now else '原到期时间已过期或缺失，已从当前时间重新计算'
-    order.provision_note = '\n'.join(filter(None, [renew_note or f'续费成功，{base_note} {days} 天。', retention_note, *post_notes]))
+    order.provision_note = append_note(
+        order.provision_note,
+        '\n'.join(filter(None, [renew_note or f'续费成功，{base_note} {days} 天。', retention_note, *post_notes])),
+    )
     order.save(update_fields=['service_started_at', 'service_expires_at', 'renew_grace_expires_at', 'suspend_at', 'delete_at', 'ip_recycle_at', 'last_renewed_at', 'auto_renew_notice_sent_at', 'auto_renew_failure_notice_sent_at', 'delay_quota', 'ip_change_quota', 'status', 'provision_note', 'updated_at'])
     if retained_ip:
         recovery_order, recovery_err = _create_retained_ip_recovery_order(order, days)

@@ -19,6 +19,7 @@ from core.texts import site_text
 from orders.models import BalanceLedger
 from bot.models import TelegramUser
 from cloud.models import CloudAsset, CloudAutoRenewPatrolLog, CloudServerOrder, CloudUserNoticeLog, Server
+from cloud.note_utils import append_note
 from cloud.services import RenewalPriceMissingError, _cloud_order_lifecycle_fields, _hydrate_order_from_proxy_asset, _order_primary_asset, _order_primary_server, _renewal_price, _resolve_aws_static_ip_name_for_order, create_cloud_server_renewal_for_user, pay_cloud_server_renewal_with_balance, record_cloud_ip_log
 from bot.keyboards import cloud_auto_renew_notice_actions, cloud_expiry_actions, cloud_lifecycle_notice_actions
 
@@ -266,12 +267,12 @@ def _mark_suspended(order_id: int, note: str):
     server = _order_primary_server(order)
     if asset:
         asset.is_active = False
-        asset.note = order.provision_note
+        asset.note = append_note(asset.note, order.provision_note)
         asset.updated_at = now
         asset.save(update_fields=['is_active', 'note', 'updated_at'])
     if server:
         server.is_active = False
-        server.note = order.provision_note
+        server.note = append_note(server.note, order.provision_note)
         server.updated_at = now
         server.save(update_fields=['is_active', 'note', 'updated_at'])
     record_cloud_ip_log(event_type='suspended', order=order, asset=asset, server=server, note=note or '服务器进入延停状态')
@@ -300,7 +301,7 @@ def _mark_deleted(order_id: int, note: str):
         asset.provider_resource_id = None
         asset.provider_status = '固定IP保留中-实例已删除'
         asset.is_active = False
-        asset.note = order.provision_note
+        asset.note = append_note(asset.note, order.provision_note)
         asset.updated_at = now
         asset.save(update_fields=['public_ip', 'previous_public_ip', 'instance_id', 'provider_resource_id', 'provider_status', 'is_active', 'note', 'updated_at'])
     if server:
@@ -310,7 +311,7 @@ def _mark_deleted(order_id: int, note: str):
         server.provider_resource_id = None
         server.provider_status = '固定IP保留中-实例已删除'
         server.is_active = False
-        server.note = order.provision_note
+        server.note = append_note(server.note, order.provision_note)
         server.updated_at = now
         server.save(update_fields=['public_ip', 'previous_public_ip', 'instance_id', 'provider_resource_id', 'provider_status', 'is_active', 'note', 'updated_at'])
     record_cloud_ip_log(event_type='deleted', order=order, asset=asset, server=server, previous_public_ip=previous_public_ip, public_ip=previous_public_ip, note=retention_note)
@@ -347,13 +348,13 @@ def _mark_recycled(order_id: int, note: str):
         asset.previous_public_ip = previous_public_ip
         asset.public_ip = None
         asset.mtproxy_host = None
-        asset.note = order.provision_note
+        asset.note = append_note(asset.note, order.provision_note)
         asset.updated_at = now
         asset.save(update_fields=['previous_public_ip', 'public_ip', 'mtproxy_host', 'note', 'updated_at'])
     if server:
         server.previous_public_ip = previous_public_ip
         server.public_ip = None
-        server.note = order.provision_note
+        server.note = append_note(server.note, order.provision_note)
         server.updated_at = now
         server.save(update_fields=['previous_public_ip', 'public_ip', 'note', 'updated_at'])
     record_cloud_ip_log(event_type='recycled', order=order, asset=asset, server=server, previous_public_ip=previous_public_ip, public_ip=None, note=note or '公网IP已回收')
@@ -1232,20 +1233,21 @@ def _mark_orphan_asset_deleted(asset_id: int, note: str):
     asset.status = CloudAsset.STATUS_DELETED
     asset.provider_status = 'expired-deleted'
     asset.is_active = False
-    asset.note = '\n'.join(filter(None, [asset.note, note]))
+    asset.note = append_note(asset.note, note)
     asset.save(update_fields=['previous_public_ip', 'status', 'provider_status', 'is_active', 'note', 'updated_at'])
-    Server.objects.filter(order__isnull=True).filter(
+    server_queryset = Server.objects.filter(order__isnull=True).filter(
         provider=asset.provider,
         region_code=asset.region_code,
     ).filter(
         instance_id__in=[value for value in [asset.instance_id, asset.provider_resource_id] if value]
-    ).update(
-        previous_public_ip=previous_public_ip,
-        status=CloudAsset.STATUS_DELETED,
-        is_active=False,
-        note=asset.note,
-        updated_at=now,
     )
+    for server in server_queryset:
+        server.previous_public_ip = previous_public_ip
+        server.status = CloudAsset.STATUS_DELETED
+        server.is_active = False
+        server.note = append_note(server.note, asset.note)
+        server.updated_at = now
+        server.save(update_fields=['previous_public_ip', 'status', 'is_active', 'note', 'updated_at'])
     record_cloud_ip_log(event_type='deleted', asset=asset, previous_public_ip=previous_public_ip, public_ip=None, note=note or '无订单资产到期删除')
     return asset
 
@@ -1260,21 +1262,22 @@ def _mark_unattached_static_ip_deleted(asset_id: int, note: str):
     asset.status = CloudAsset.STATUS_DELETED
     asset.provider_status = '未附加固定IP-已到期删除'
     asset.is_active = False
-    asset.note = '\n'.join(filter(None, [asset.note, note]))
+    asset.note = append_note(asset.note, note)
     asset.save(update_fields=['previous_public_ip', 'public_ip', 'status', 'provider_status', 'is_active', 'note', 'updated_at'])
-    Server.objects.filter(order__isnull=True).filter(
+    server_queryset = Server.objects.filter(order__isnull=True).filter(
         provider=asset.provider,
         region_code=asset.region_code,
         public_ip=previous_public_ip,
-    ).update(
-        previous_public_ip=previous_public_ip,
-        public_ip=None,
-        status=CloudAsset.STATUS_DELETED,
-        provider_status='未附加固定IP-已到期删除',
-        is_active=False,
-        note=asset.note,
-        updated_at=now,
     )
+    for server in server_queryset:
+        server.previous_public_ip = previous_public_ip
+        server.public_ip = None
+        server.status = CloudAsset.STATUS_DELETED
+        server.provider_status = '未附加固定IP-已到期删除'
+        server.is_active = False
+        server.note = append_note(server.note, asset.note)
+        server.updated_at = now
+        server.save(update_fields=['previous_public_ip', 'public_ip', 'status', 'provider_status', 'is_active', 'note', 'updated_at'])
     record_cloud_ip_log(event_type='recycled', asset=asset, previous_public_ip=previous_public_ip, public_ip=None, note=note or '未附加固定IP已到期删除')
     return asset
 
@@ -1297,14 +1300,14 @@ def _mark_replaced_order_deleted(order_id: int, note: str):
         asset.is_active = False
         asset.public_ip = None
         asset.previous_public_ip = previous_public_ip
-        asset.note = order.provision_note
+        asset.note = append_note(asset.note, order.provision_note)
         asset.updated_at = now
         asset.save(update_fields=['is_active', 'public_ip', 'previous_public_ip', 'note', 'updated_at'])
     if server:
         server.is_active = False
         server.public_ip = None
         server.previous_public_ip = previous_public_ip
-        server.note = order.provision_note
+        server.note = append_note(server.note, order.provision_note)
         server.updated_at = now
         server.save(update_fields=['is_active', 'public_ip', 'previous_public_ip', 'note', 'updated_at'])
     record_cloud_ip_log(event_type='deleted', order=order, asset=asset, server=server, previous_public_ip=previous_public_ip, public_ip=None, note=note or '迁移结束，旧实例删除')

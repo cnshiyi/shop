@@ -1,5 +1,6 @@
 """cloud 域后台 API。"""
 
+import inspect
 import io
 import json
 import logging
@@ -45,8 +46,9 @@ from bot.api import (
 )
 from bot.models import TelegramGroupFilter, TelegramUser
 from cloud.lifecycle import _delete_instance, _get_due_orders, _mark_replaced_order_deleted, _notice_payload_for_order, _record_auto_renew_patrol_log, _run_auto_renew
-from cloud.services import AWS_REGION_NAMES, _cloud_order_lifecycle_fields, _update_order_primary_records, create_cloud_server_rebuild_order, ensure_cloud_server_pricing, ensure_manual_expiry_operation_order, ensure_manual_owner_operation_order, ensure_manual_price_operation_order, record_cloud_ip_log, refresh_custom_plan_cache, replace_cloud_asset_order_by_admin, set_cloud_server_auto_renew_admin
+from cloud.services import AWS_REGION_NAMES, RenewalPriceMissingError, _cloud_order_lifecycle_fields, _renewal_price, _update_order_primary_records, create_cloud_server_rebuild_order, ensure_cloud_server_pricing, ensure_manual_expiry_operation_order, ensure_manual_owner_operation_order, ensure_manual_price_operation_order, record_cloud_ip_log, refresh_custom_plan_cache, replace_cloud_asset_order_by_admin, set_cloud_server_auto_renew_admin
 from cloud.models import AddressMonitor, CloudAsset, CloudAutoRenewPatrolLog, CloudIpLog, CloudServerOrder, CloudServerPlan, Server, ServerPrice
+from cloud.note_utils import append_note
 from core.cloud_accounts import cloud_account_label
 from core.models import CloudAccountConfig, ExternalSyncLog
 from core.cache import get_redis
@@ -181,9 +183,8 @@ def _ensure_unattached_ip_expiry(asset: CloudAsset, *, now=None) -> bool:
     if not _is_unattached_ip_asset(asset) or asset.actual_expires_at:
         return False
     asset.actual_expires_at = _unattached_ip_delete_due_at(now=now)
-    note = asset.note or ''
     addition = f'自动补齐未附加IP删除计划: {asset.actual_expires_at.isoformat()}'
-    asset.note = f'{note}\n{addition}'.strip() if note else addition
+    asset.note = append_note(asset.note, addition)
     asset.save(update_fields=['actual_expires_at', 'note', 'updated_at'])
     return True
 
@@ -473,6 +474,10 @@ def update_cloud_asset(request, asset_id):
                 price_change_requested = previous_price != price
                 if asset.order_id and not str(getattr(asset.order, 'order_no', '') or '').startswith('SRVMANUAL'):
                     pending_order_updates['total_amount'] = price
+                    if getattr(asset.order, 'auto_renew_enabled', False):
+                        pending_order_updates['auto_renew_failure_notice_sent_at'] = None
+                        if getattr(asset.order, 'status', '') == 'renew_pending' and not getattr(asset.order, 'paid_at', None):
+                            pending_order_updates['pay_amount'] = price
 
             if 'currency' in payload:
                 asset.currency = (payload.get('currency') or 'USDT').strip() or 'USDT'
@@ -596,7 +601,7 @@ def update_cloud_asset(request, asset_id):
                 asset.actual_expires_at = None
                 asset.provider_status = '已重新绑定实例-待人工添加时间'
                 asset.is_active = True
-                asset.note = '\n'.join(filter(None, [str(asset.note or '').strip(), rebound_note]))
+                asset.note = append_note(asset.note, rebound_note)
                 if asset.status == CloudAsset.STATUS_UNKNOWN:
                     asset.status = CloudAsset.STATUS_RUNNING
 
@@ -623,7 +628,8 @@ def update_cloud_asset(request, asset_id):
                 server.region_code = asset.region_code
                 server.provider_resource_id = asset.provider_resource_id
                 server.public_ip = asset.public_ip
-                server.note = asset.note
+                if 'note' not in payload:
+                    server.note = append_note(server.note, asset.note)
                 server.sort_order = asset.sort_order
                 server.expires_at = asset.actual_expires_at
                 server.is_active = asset.is_active
@@ -862,7 +868,19 @@ def cloud_assets_list(request):
     return _ok({'groups': ordered_groups, 'items': items})
 
 
-def _auto_renew_task_status(order, now):
+def _auto_renew_failure_was_price_missing(reason: str | None) -> bool:
+    return '缺少续费价格' in str(reason or '') or '缺少价格' in str(reason or '')
+
+
+def _order_has_renewal_price(order) -> bool:
+    try:
+        _renewal_price(order, getattr(order, 'user', None))
+        return True
+    except RenewalPriceMissingError:
+        return False
+
+
+def _auto_renew_task_status(order, now, *, latest_failure_reason: str | None = None):
     if not getattr(order, 'auto_renew_enabled', False):
         return None
     last_renewed_at = getattr(order, 'last_renewed_at', None)
@@ -872,7 +890,16 @@ def _auto_renew_task_status(order, now):
     suspend_at = getattr(order, 'suspend_at', None)
     in_renew_window = bool(expires_at and expires_at <= now + timezone.timedelta(days=1) and expires_at > now)
     in_shutdown_fallback = bool(expires_at and expires_at <= now and suspend_at and suspend_at > now)
-    if order.status == 'renew_pending' and (in_renew_window or in_shutdown_fallback or expires_at and expires_at <= now):
+    in_retry_window = bool(in_renew_window or in_shutdown_fallback or expires_at and expires_at <= now)
+    price_missing_fixed = bool(
+        order.status == 'renew_pending'
+        and in_retry_window
+        and _auto_renew_failure_was_price_missing(latest_failure_reason)
+        and _order_has_renewal_price(order)
+    )
+    if price_missing_fixed:
+        return 'auto_renew_pending', '自动续费待执行'
+    if order.status == 'renew_pending' and in_retry_window:
         return 'auto_renew_failed', '自动续费失败/待补余额'
     if order.status in {'completed', 'expiring', 'renew_pending'} and (in_renew_window or in_shutdown_fallback):
         return 'auto_renew_pending', '自动续费待执行'
@@ -881,7 +908,12 @@ def _auto_renew_task_status(order, now):
 
 def _auto_renew_pinned_task(now):
     orders = list(CloudServerOrder.objects.filter(auto_renew_enabled=True).order_by('-updated_at')[:500])
-    statuses = [_auto_renew_task_status(order, now) for order in orders]
+    order_ids = [order.id for order in orders]
+    latest_failure_reasons = {}
+    for log in CloudAutoRenewPatrolLog.objects.filter(order_id__in=order_ids, is_success=False).order_by('-executed_at', '-id'):
+        if log.order_id not in latest_failure_reasons:
+            latest_failure_reasons[log.order_id] = log.failure_reason
+    statuses = [_auto_renew_task_status(order, now, latest_failure_reason=latest_failure_reasons.get(order.id)) for order in orders]
     failed_count = sum(1 for status in statuses if status and status[0] == 'auto_renew_failed')
     pending_count = sum(1 for status in statuses if status and status[0] == 'auto_renew_pending')
     success_count = sum(1 for status in statuses if status and status[0] == 'auto_renew_success')
@@ -1034,10 +1066,18 @@ def _collect_auto_renew_due_orders(now):
     history_qs = CloudAutoRenewPatrolLog.objects.select_related('order', 'user').order_by('-executed_at', '-id')
 
     retry_orders = []
-    recent_failed_logs = history_qs.filter(is_success=False, executed_at__gte=now - timezone.timedelta(days=7))
-    for log in recent_failed_logs:
+    recent_logs = history_qs.filter(executed_at__gte=now - timezone.timedelta(days=7))
+    seen_history_order_ids = set()
+    for log in recent_logs:
         order = getattr(log, 'order', None)
-        if not order or not getattr(order, 'auto_renew_enabled', False):
+        if not order:
+            continue
+        if order.id in seen_history_order_ids:
+            continue
+        seen_history_order_ids.add(order.id)
+        if log.is_success:
+            continue
+        if not getattr(order, 'auto_renew_enabled', False):
             continue
         if order.id in due_ids:
             continue
@@ -1066,12 +1106,23 @@ def _collect_auto_renew_due_orders(now):
     }
 
 
+async def _await_result(awaitable):
+    return await awaitable
+
+
+def _run_auto_renew_sync(order_id: int):
+    result = _run_auto_renew(order_id)
+    if inspect.isawaitable(result):
+        return async_to_sync(_await_result)(result)
+    return result
+
+
 def _manual_run_auto_renew_queue(orders: list[tuple[CloudServerOrder, str]], *, batch_id: str | None = None):
     batch_id = batch_id or uuid.uuid4().hex[:16]
     results = []
     for order, queue_status in orders:
         notice = _notice_payload_for_order(order) or {}
-        renewed, err, balance_change = _run_auto_renew(order.id)
+        renewed, err, balance_change = _run_auto_renew_sync(order.id)
         renewed_order_id = getattr(renewed, 'id', None) or order.id
         ip = notice.get('ip') or getattr(order, 'public_ip', None) or getattr(order, 'previous_public_ip', None) or '未分配'
         ok = not bool(err)
@@ -2293,13 +2344,15 @@ def _apply_server_missing_state(provider, region, existing_instance_ids, account
         queryset = queryset.exclude(instance_id__in=existing_instance_ids)
     missing_servers = list(queryset.select_related('order'))
     missing_note = f'云平台同步未发现该服务器，已标记为已删除；检查时间: {now.isoformat()}'
-    updated = queryset.update(
-        status=Server.STATUS_DELETED,
-        provider_status='已删除',
-        is_active=False,
-        note=missing_note,
-        updated_at=now,
-    )
+    updated = 0
+    for server in missing_servers:
+        server.status = Server.STATUS_DELETED
+        server.provider_status = '已删除'
+        server.is_active = False
+        server.note = append_note(server.note, missing_note)
+        server.updated_at = now
+        server.save(update_fields=['status', 'provider_status', 'is_active', 'note', 'updated_at'])
+        updated += 1
     order_ids = [item.order_id for item in missing_servers if item.order_id]
     instance_ids = [item.instance_id for item in missing_servers if item.instance_id]
     asset_scope = CloudAsset.objects.filter(kind=CloudAsset.KIND_SERVER, provider=provider)
@@ -2309,26 +2362,26 @@ def _apply_server_missing_state(provider, region, existing_instance_ids, account
         label = cloud_account_label(account)
         asset_scope = asset_scope.filter(Q(cloud_account=account) | Q(account_label=label))
     if order_ids:
-        CloudServerOrder.objects.filter(id__in=order_ids).exclude(status='deleted').update(
-            status='deleted',
-            provision_note=missing_note,
-            updated_at=now,
-        )
-        asset_scope.filter(order_id__in=order_ids).update(
-            status=CloudAsset.STATUS_DELETED,
-            provider_status='已删除',
-            is_active=False,
-            note=missing_note,
-            updated_at=now,
-        )
+        for order in CloudServerOrder.objects.filter(id__in=order_ids).exclude(status='deleted'):
+            order.status = 'deleted'
+            order.provision_note = append_note(order.provision_note, missing_note)
+            order.updated_at = now
+            order.save(update_fields=['status', 'provision_note', 'updated_at'])
+        for asset in asset_scope.filter(order_id__in=order_ids):
+            asset.status = CloudAsset.STATUS_DELETED
+            asset.provider_status = '已删除'
+            asset.is_active = False
+            asset.note = append_note(asset.note, missing_note)
+            asset.updated_at = now
+            asset.save(update_fields=['status', 'provider_status', 'is_active', 'note', 'updated_at'])
     if instance_ids:
-        asset_scope.filter(instance_id__in=instance_ids).update(
-            status=CloudAsset.STATUS_DELETED,
-            provider_status='已删除',
-            is_active=False,
-            note=missing_note,
-            updated_at=now,
-        )
+        for asset in asset_scope.filter(instance_id__in=instance_ids):
+            asset.status = CloudAsset.STATUS_DELETED
+            asset.provider_status = '已删除'
+            asset.is_active = False
+            asset.note = append_note(asset.note, missing_note)
+            asset.updated_at = now
+            asset.save(update_fields=['status', 'provider_status', 'is_active', 'note', 'updated_at'])
     return legacy_updated + updated
 
 

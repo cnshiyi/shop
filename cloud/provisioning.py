@@ -6,6 +6,7 @@ from django.utils import timezone
 from django.db.models import Q
 
 from cloud.models import CloudAsset, Server
+from cloud.note_utils import append_note
 from cloud.services import _resolve_aws_static_ip_name_for_order, _update_order_primary_records, build_cloud_server_name, ensure_unique_cloud_server_name, record_cloud_ip_log
 from core.cloud_accounts import choose_cloud_account_for_order, cloud_account_label, list_cloud_accounts_by_server_load
 from cloud.aliyun_simple import create_instance as create_aliyun_instance
@@ -149,7 +150,7 @@ def _upsert_server_record(order: CloudServerOrder, note: str):
             'expires_at': order.service_expires_at,
             'order': order,
             'user': order_user,
-            'note': note,
+            'note': append_note(getattr(server_record, 'note', None), note),
             'status': Server.STATUS_RUNNING if order.status in {'completed', 'expiring', 'renew_pending', 'suspended'} else Server.STATUS_PENDING,
             'is_active': order.status in {'provisioning', 'completed', 'expiring', 'renew_pending', 'suspended'},
         }
@@ -378,12 +379,13 @@ def _mark_instance_created(order_id: int, server_name: str, instance_id: str, pu
     order.public_ip = public_ip or order.public_ip
     order.login_user = login_user or order.login_user
     order.login_password = login_password or order.login_password
-    order.provision_note = '\n'.join(filter(None, [order.provision_note, note]))
+    order.provision_note = append_note(order.provision_note, note)
     order.save(update_fields=['status', 'server_name', 'instance_id', 'provider_resource_id', 'public_ip', 'login_user', 'login_password', 'provision_note', 'updated_at'])
     try:
         order_user = order.user
     except Exception:
         order_user = None
+    existing_asset = CloudAsset.objects.filter(order=order, kind=CloudAsset.KIND_SERVER).first()
     server_asset, _ = CloudAsset.objects.update_or_create(
         order=order,
         kind=CloudAsset.KIND_SERVER,
@@ -406,7 +408,7 @@ def _mark_instance_created(order_id: int, server_name: str, instance_id: str, pu
             'currency': order.currency,
             'order': order,
             'user': order_user,
-            'note': order.provision_note,
+            'note': append_note(getattr(existing_asset, 'note', None), order.provision_note),
             'status': CloudAsset.STATUS_PENDING,
             'is_active': True,
         },
@@ -421,12 +423,13 @@ def _mark_provisioning_start(order_id: int, server_name: str):
     order = CloudServerOrder.objects.get(id=order_id)
     order.status = 'provisioning'
     order.server_name = server_name
-    order.provision_note = '\n'.join(filter(None, [order.provision_note, f'开始创建服务器：{server_name}']))
+    order.provision_note = append_note(order.provision_note, f'开始创建服务器：{server_name}')
     order.save(update_fields=['status', 'server_name', 'provision_note', 'updated_at'])
     try:
         order_user = order.user
     except Exception:
         order_user = None
+    existing_asset = CloudAsset.objects.filter(order=order, kind=CloudAsset.KIND_SERVER).first()
     server_asset, _ = CloudAsset.objects.update_or_create(
         order=order,
         kind=CloudAsset.KIND_SERVER,
@@ -451,7 +454,7 @@ def _mark_provisioning_start(order_id: int, server_name: str):
             'currency': order.currency,
             'order': order,
             'user': order_user,
-            'note': order.provision_note,
+            'note': append_note(getattr(existing_asset, 'note', None), order.provision_note),
             'status': CloudAsset.STATUS_PENDING,
             'is_active': True,
         },
@@ -837,7 +840,7 @@ def _mark_success(order_id: int, server_name: str, instance_id: str, public_ip: 
     order.mtproxy_secret = mtproxy_secret
     order.login_user = login_user
     order.login_password = login_password
-    order.provision_note = note
+    order.provision_note = append_note(order.provision_note, note)
     order.static_ip_name = static_ip_name or order.static_ip_name
     order.completed_at = timezone.now()
     if not order.service_started_at:
@@ -856,6 +859,7 @@ def _mark_success(order_id: int, server_name: str, instance_id: str, public_ip: 
             order_user = order.user
         except Exception:
             order_user = None
+        existing_asset = CloudAsset.objects.filter(order=order, kind=CloudAsset.KIND_SERVER).first()
         server_asset, _ = CloudAsset.objects.update_or_create(
             order=order,
             kind=CloudAsset.KIND_SERVER,
@@ -882,7 +886,7 @@ def _mark_success(order_id: int, server_name: str, instance_id: str, public_ip: 
                 'currency': order.currency,
                 'order': order,
                 'user': order_user,
-                'note': note,
+                'note': append_note(getattr(existing_asset, 'note', None), note),
                 'status': CloudAsset.STATUS_RUNNING,
                 'is_active': True,
             },
@@ -907,7 +911,7 @@ def _mark_failed(order_id: int, note: str, cleanup_at=None):
     logger.info('[PROVISION] mark_failed_start order_id=%s cleanup_at=%s note=%s', order_id, cleanup_at, (note or '')[:1500])
     order = CloudServerOrder.objects.get(id=order_id)
     order.status = 'failed'
-    order.provision_note = note
+    order.provision_note = append_note(order.provision_note, note)
     order.save(update_fields=['status', 'provision_note', 'updated_at'])
     if cleanup_at and (order.server_name or order.instance_id):
         CloudServerOrder.objects.filter(id=order.id).update(delete_at=cleanup_at, updated_at=timezone.now())

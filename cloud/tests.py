@@ -2615,6 +2615,82 @@ class CloudServerServicesTestCase(TestCase):
         self.assertEqual(regular['detail_path'], f'/admin/cloud-orders/{order.id}')
         self.assertEqual(regular['order_detail_path'], f'/admin/cloud-orders/{order.id}')
 
+    def test_update_cloud_asset_price_restores_auto_renew_pending_state(self):
+        expires_at = timezone.now() + timezone.timedelta(hours=8)
+        order = CloudServerOrder.objects.create(
+            order_no='AUTO-RENEW-PRICE-FIX-1',
+            user=self.user,
+            plan=self.plan,
+            provider=self.plan.provider,
+            region_code=self.plan.region_code,
+            region_name=self.plan.region_name,
+            plan_name=self.plan.plan_name,
+            quantity=1,
+            currency='USDT',
+            total_amount='0.00',
+            pay_amount='0.00',
+            pay_method='address',
+            status='renew_pending',
+            public_ip='6.6.6.10',
+            service_started_at=timezone.now() - timezone.timedelta(days=30),
+            service_expires_at=expires_at,
+            suspend_at=expires_at + timezone.timedelta(days=1),
+            expired_at=timezone.now() + timezone.timedelta(minutes=30),
+            auto_renew_enabled=True,
+            auto_renew_failure_notice_sent_at=timezone.now(),
+        )
+        asset = CloudAsset.objects.create(
+            kind=CloudAsset.KIND_SERVER,
+            source=CloudAsset.SOURCE_ORDER,
+            order=order,
+            user=self.user,
+            provider=self.plan.provider,
+            region_code=self.plan.region_code,
+            region_name=self.plan.region_name,
+            asset_name='auto-renew-price-fix-proxy',
+            public_ip=order.public_ip,
+            actual_expires_at=expires_at,
+        )
+        CloudAutoRenewPatrolLog.objects.create(
+            order=order,
+            user=self.user,
+            batch_id='price-missing-batch',
+            order_no=order.order_no,
+            ip=order.public_ip,
+            provider=order.provider,
+            user_display_name='svc_test',
+            username_label='@svc_test',
+            tg_user_id=self.user.tg_user_id,
+            is_success=False,
+            failure_reason='该代理缺少续费价格，请先在后台代理列表填写人工价格。',
+        )
+        staff_user = get_user_model().objects.create_user(username='staff_auto_renew_price_fix', password='x', is_staff=True)
+        before_request = RequestFactory().get('/api/dashboard/tasks/')
+        before_request.user = staff_user
+        before_payload = json.loads(tasks_overview(before_request).content)
+        before_pinned = next(item for item in (before_payload.get('data') or before_payload) if item['id'] == -10001)
+        self.assertEqual(before_pinned['execution_status'], 'auto_renew_failed')
+
+        request = RequestFactory().patch(
+            f'/api/dashboard/cloud-assets/{asset.id}/',
+            data=json.dumps({'price': '29.00'}),
+            content_type='application/json',
+            HTTP_AUTHORIZATION='',
+        )
+        request.user = staff_user
+        response = update_cloud_asset(request, asset.id)
+
+        self.assertEqual(response.status_code, 200)
+        order.refresh_from_db()
+        self.assertEqual(order.total_amount, Decimal('29.00'))
+        self.assertEqual(order.pay_amount, Decimal('29.00'))
+        self.assertIsNone(order.auto_renew_failure_notice_sent_at)
+        after_request = RequestFactory().get('/api/dashboard/tasks/')
+        after_request.user = staff_user
+        after_payload = json.loads(tasks_overview(after_request).content)
+        after_pinned = next(item for item in (after_payload.get('data') or after_payload) if item['id'] == -10001)
+        self.assertEqual(after_pinned['execution_status'], 'auto_renew_pending')
+
     def test_cloud_asset_detail_exposes_related_order_click_path(self):
         order = CloudServerOrder.objects.create(
             order_no='ASSET-DETAIL-ORDER-1',
@@ -2783,6 +2859,25 @@ class CloudServerServicesTestCase(TestCase):
             service_expires_at=timezone.now() - timezone.timedelta(hours=1),
             auto_renew_enabled=True,
         )
+        resolved_order = CloudServerOrder.objects.create(
+            order_no='AUTO-RENEW-RESOLVED-1',
+            user=self.user,
+            plan=self.plan,
+            provider=self.plan.provider,
+            region_code=self.plan.region_code,
+            region_name=self.plan.region_name,
+            plan_name=self.plan.plan_name,
+            quantity=1,
+            currency='USDT',
+            total_amount='19.00',
+            pay_amount='19.00',
+            pay_method='balance',
+            status='completed',
+            public_ip='10.0.0.4',
+            service_started_at=timezone.now() - timezone.timedelta(days=30),
+            service_expires_at=timezone.now() + timezone.timedelta(days=20),
+            auto_renew_enabled=True,
+        )
         CloudAutoRenewPatrolLog.objects.create(
             order=retry_order,
             user=self.user,
@@ -2795,6 +2890,31 @@ class CloudServerServicesTestCase(TestCase):
             tg_user_id=self.user.tg_user_id,
             is_success=False,
             failure_reason='余额不足',
+        )
+        CloudAutoRenewPatrolLog.objects.create(
+            order=resolved_order,
+            user=self.user,
+            batch_id='resolved-batch-1',
+            order_no=resolved_order.order_no,
+            ip=resolved_order.public_ip,
+            provider=resolved_order.provider,
+            user_display_name='svc_test',
+            username_label='@svc_test',
+            tg_user_id=self.user.tg_user_id,
+            is_success=False,
+            failure_reason='曾经失败',
+        )
+        CloudAutoRenewPatrolLog.objects.create(
+            order=resolved_order,
+            user=self.user,
+            batch_id='resolved-batch-2',
+            order_no=resolved_order.order_no,
+            ip=resolved_order.public_ip,
+            provider=resolved_order.provider,
+            user_display_name='svc_test',
+            username_label='@svc_test',
+            tg_user_id=self.user.tg_user_id,
+            is_success=True,
         )
         staff_user = get_user_model().objects.create_user(username='staff_auto_renew_detail', password='x', is_staff=True)
         request = RequestFactory().get('/api/dashboard/tasks/auto-renew/')
@@ -2815,6 +2935,7 @@ class CloudServerServicesTestCase(TestCase):
         self.assertEqual(queue_status_map[due_order.order_no], 'due_now')
         self.assertEqual(queue_status_map[retry_order.order_no], 'retry_failed')
         self.assertEqual(queue_status_map[fallback_order.order_no], 'fallback_retry')
+        self.assertNotIn(resolved_order.order_no, queue_status_map)
         retry_item = next(item for item in due_items if item['order_no'] == retry_order.order_no)
         self.assertEqual(retry_item['last_failure_reason'], '余额不足')
 
@@ -3094,6 +3215,136 @@ class CloudServerServicesTestCase(TestCase):
         self.assertEqual(server.provider_status, '已重新绑定实例-待人工添加时间')
         self.assertTrue(server.is_active)
         self.assertEqual(server.status, Server.STATUS_RUNNING)
+
+    def test_system_note_updates_append_primary_records(self):
+        from cloud.services import _update_order_primary_records
+
+        order = CloudServerOrder.objects.create(
+            order_no='NOTE-APPEND-PRIMARY',
+            user=self.user,
+            plan=self.plan,
+            provider=self.plan.provider,
+            region_code=self.plan.region_code,
+            region_name=self.plan.region_name,
+            plan_name=self.plan.plan_name,
+            quantity=1,
+            currency='USDT',
+            total_amount='19.00',
+            pay_amount='19.00',
+            status='completed',
+            provision_note='订单旧备注',
+        )
+        asset = CloudAsset.objects.create(
+            kind=CloudAsset.KIND_SERVER,
+            source=CloudAsset.SOURCE_ORDER,
+            order=order,
+            user=self.user,
+            provider=self.plan.provider,
+            region_code=self.plan.region_code,
+            public_ip='10.9.9.1',
+            note='资产人工备注',
+        )
+        server = Server.objects.create(
+            source=Server.SOURCE_ORDER,
+            order=order,
+            user=self.user,
+            provider=self.plan.provider,
+            region_code=self.plan.region_code,
+            public_ip='10.9.9.1',
+            note='服务器人工备注',
+        )
+
+        _update_order_primary_records(order, asset_updates={'note': '系统追加备注'}, server_updates={'note': '系统追加备注'})
+
+        asset.refresh_from_db()
+        server.refresh_from_db()
+        self.assertEqual(asset.note, '资产人工备注\n系统追加备注')
+        self.assertEqual(server.note, '服务器人工备注\n系统追加备注')
+
+    def test_manual_cloud_asset_note_edit_still_overwrites(self):
+        order = CloudServerOrder.objects.create(
+            order_no='NOTE-MANUAL-OVERWRITE',
+            user=self.user,
+            plan=self.plan,
+            provider=self.plan.provider,
+            region_code=self.plan.region_code,
+            region_name=self.plan.region_name,
+            plan_name=self.plan.plan_name,
+            quantity=1,
+            currency='USDT',
+            total_amount='19.00',
+            pay_amount='19.00',
+            public_ip='10.9.9.2',
+            status='completed',
+        )
+        asset = CloudAsset.objects.create(
+            kind=CloudAsset.KIND_SERVER,
+            source=CloudAsset.SOURCE_AWS_SYNC,
+            order=order,
+            user=self.user,
+            provider='aws_lightsail',
+            region_code=self.plan.region_code,
+            region_name=self.plan.region_name,
+            public_ip='10.9.9.2',
+            status=CloudAsset.STATUS_RUNNING,
+            note='旧人工备注',
+            is_active=True,
+        )
+        server = Server.objects.create(
+            source=Server.SOURCE_AWS_SYNC,
+            order=order,
+            user=self.user,
+            provider='aws_lightsail',
+            region_code=self.plan.region_code,
+            region_name=self.plan.region_name,
+            public_ip='10.9.9.2',
+            status=Server.STATUS_RUNNING,
+            note='旧服务器备注',
+            is_active=True,
+        )
+        staff_user = get_user_model().objects.create_user(username='staff_manual_note_overwrite', password='x', is_staff=True)
+        request = RequestFactory().patch(
+            f'/api/dashboard/cloud-assets/{asset.id}/',
+            data=json.dumps({'note': '人工改后的备注'}),
+            content_type='application/json',
+            HTTP_AUTHORIZATION='',
+        )
+        request.user = staff_user
+
+        response = update_cloud_asset(request, asset.id)
+
+        self.assertEqual(response.status_code, 200)
+        asset.refresh_from_db()
+        server.refresh_from_db()
+        self.assertEqual(asset.note, '人工改后的备注')
+        self.assertEqual(server.note, '人工改后的备注')
+
+    def test_sync_missing_confirmation_note_preserves_existing_note(self):
+        from cloud.sync_safety import mark_missing_confirmation_pending
+
+        asset = CloudAsset.objects.create(
+            kind=CloudAsset.KIND_SERVER,
+            source=CloudAsset.SOURCE_AWS_SYNC,
+            provider='aws_lightsail',
+            region_code=self.plan.region_code,
+            public_ip='10.9.9.3',
+            provider_status='running',
+            note='保留人工备注',
+        )
+
+        with patch('cloud.sync_safety.get_missing_confirmation_threshold', return_value=2):
+            count, threshold = mark_missing_confirmation_pending(
+                asset,
+                old_public_ip='10.9.9.3',
+                now_iso='2026-05-08T00:00:00+08:00',
+                provider_status='云上未找到实例/IP',
+                pending_status='云上未找到实例/IP-待确认',
+            )
+
+        self.assertEqual((count, threshold), (1, 2))
+        self.assertIn('保留人工备注', asset.note)
+        self.assertIn('状态: 云上未找到实例/IP', asset.note)
+        self.assertIn('[missing_sync_count:1]', asset.note)
 
     def test_sync_missing_delete_threshold_is_configurable(self):
         with patch('cloud.sync_safety.get_runtime_config', return_value='3'):

@@ -1,6 +1,7 @@
 from django.utils import timezone
 
 from core.runtime_config import get_runtime_config
+from cloud.note_utils import append_note
 
 MISSING_SYNC_COUNT_MARKER = '[missing_sync_count:'
 MISSING_CONFIRMATION_THRESHOLD_DEFAULT = 2
@@ -36,7 +37,7 @@ def with_missing_confirmation_note(base_note: str, count: int) -> str:
         end = text.find(']', start)
         if end >= 0:
             text = (text[:start] + text[end + 1:]).rstrip()
-    return '\n'.join(filter(None, [text, f'{MISSING_SYNC_COUNT_MARKER}{max(0, int(count or 0))}]']))
+    return append_note(text, f'{MISSING_SYNC_COUNT_MARKER}{max(0, int(count or 0))}]')
 
 
 def mark_missing_confirmation_pending(record, *, old_public_ip: str, now_iso: str, provider_status: str, pending_status: str):
@@ -45,7 +46,10 @@ def mark_missing_confirmation_pending(record, *, old_public_ip: str, now_iso: st
     next_count = current_count + 1
     record.provider_status = pending_status
     record.note = with_missing_confirmation_note(
-        f'状态: {provider_status}；公网IP: {old_public_ip or "缺失"}；最近同步: {now_iso}；待确认次数: {next_count}/{threshold}',
+        append_note(
+            getattr(record, 'note', ''),
+            f'状态: {provider_status}；公网IP: {old_public_ip or "缺失"}；最近同步: {now_iso}；待确认次数: {next_count}/{threshold}',
+        ),
         next_count,
     )
     record.updated_at = timezone.now()
