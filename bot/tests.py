@@ -54,6 +54,7 @@ class DashboardNotificationTestCase(TestCase):
         self.assertEqual(response.status_code, 200)
         tick.assert_awaited_once()
         self.assertTrue(tick.await_args.kwargs.get('force'))
+        self.assertFalse(tick.await_args.kwargs.get('sync_cloud'))
         bot.session.close.assert_awaited_once()
 
 

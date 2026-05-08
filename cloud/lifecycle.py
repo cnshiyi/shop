@@ -1451,7 +1451,7 @@ def _cloud_runtime_status_label(status: str, provider_status: str = '') -> str:
 
 def _daily_expiry_person_label(value) -> str:
     text = str(value or '').strip().lstrip('@')
-    return f'@{escape(text)}' if text else '-'
+    return escape(text) if text else '-'
 
 
 def _daily_expiry_line(item: dict, index: int) -> str:
@@ -1578,14 +1578,15 @@ def _record_daily_expiry_summary(target, batch_id: str, delivered: bool, text: s
     )
 
 
-async def daily_expiry_summary_tick(notify_target=None, *, force: bool = False):
+async def daily_expiry_summary_tick(notify_target=None, *, force: bool = False, sync_cloud: bool = True):
     if not notify_target:
         return {'sent': 0, 'skipped': 'missing_notify_target'}
     config = await _daily_expiry_summary_config()
     targets = config.get('targets') or []
     if not config.get('enabled') or not targets:
         return {'sent': 0, 'skipped': 'disabled'}
-    await sync_server_status_tick()
+    if sync_cloud:
+        await sync_server_status_tick()
     summary = await _daily_expiry_summary_items()
     texts = _daily_expiry_summary_texts(summary)
     sent = 0

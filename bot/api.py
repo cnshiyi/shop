@@ -1516,7 +1516,7 @@ def test_daily_expiry_summary_notification(request):
             return True
 
         try:
-            return await daily_expiry_summary_tick(notify_target=_notify_target, force=True)
+            return await daily_expiry_summary_tick(notify_target=_notify_target, force=True, sync_cloud=False)
         finally:
             await bot.session.close()
 
