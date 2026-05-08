@@ -616,6 +616,74 @@ class CloudServerServicesTestCase(TestCase):
         self.assertFalse(any(item.id == order.id for item in due['suspend']))
         self.assertTrue(any(item.id == order.id for item in due['expire']))
 
+    def test_lifecycle_suspend_execution_guard_respects_account_shutdown_disabled(self):
+        account = CloudAccountConfig.objects.create(
+            provider=CloudAccountConfig.PROVIDER_AWS,
+            name='shutdown-off-exec',
+            external_account_id='acct-shutdown-off-exec',
+            access_key='ak',
+            secret_key='sk',
+            region_hint='ap-southeast-1',
+            shutdown_enabled=False,
+        )
+        order = CloudServerOrder.objects.create(
+            order_no='HB-LIFECYCLE-SUSPEND-GUARD-1',
+            user=self.user,
+            plan=self.plan,
+            provider=self.plan.provider,
+            cloud_account=account,
+            region_code=self.plan.region_code,
+            region_name=self.plan.region_name,
+            plan_name=self.plan.plan_name,
+            quantity=1,
+            currency='USDT',
+            total_amount='19.00',
+            pay_amount='19.00',
+            pay_method='balance',
+            status='completed',
+            public_ip='10.0.0.22',
+            service_started_at=timezone.now() - timezone.timedelta(days=40),
+            service_expires_at=timezone.now() - timezone.timedelta(days=5),
+            suspend_at=timezone.now() - timezone.timedelta(minutes=5),
+        )
+        CloudAsset.objects.create(
+            kind=CloudAsset.KIND_SERVER,
+            source=CloudAsset.SOURCE_ORDER,
+            order=order,
+            cloud_account=account,
+            user=self.user,
+            provider=order.provider,
+            region_code=order.region_code,
+            region_name=order.region_name,
+            asset_name='shutdown-off-exec-asset',
+            public_ip='10.0.0.22',
+            actual_expires_at=timezone.now() - timezone.timedelta(days=5),
+            is_active=True,
+        )
+        due = {
+            'renew_notice': [],
+            'auto_renew_notice': [],
+            'auto_renew': [],
+            'delete_notice': [],
+            'recycle_notice': [],
+            'expire': [],
+            'suspend': [order],
+            'delete': [],
+            'recycle': [],
+        }
+
+        with patch('cloud.lifecycle._get_due_orders', new_callable=AsyncMock, return_value=due), \
+            patch('cloud.lifecycle._get_migration_due_orders', new_callable=AsyncMock, return_value=[]), \
+            patch('cloud.lifecycle._get_orphan_asset_delete_due', new_callable=AsyncMock, return_value=[]), \
+            patch('cloud.lifecycle._get_unattached_static_ip_delete_due', new_callable=AsyncMock, return_value=[]), \
+            patch('cloud.lifecycle._is_cloud_suspend_time', return_value=True), \
+            patch('cloud.lifecycle._stop_instance', new_callable=AsyncMock) as stop_mock:
+            async_to_sync(lifecycle_tick)()
+
+        stop_mock.assert_not_awaited()
+        order.refresh_from_db()
+        self.assertEqual(order.status, 'completed')
+
     def test_due_orders_include_order_expiry_when_asset_expiry_missing(self):
         order = CloudServerOrder.objects.create(
             order_no='HB-LIFECYCLE-ORDER-EXPIRY-FALLBACK',

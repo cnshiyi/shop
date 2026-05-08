@@ -1149,6 +1149,24 @@ async def _stop_instance(order: CloudServerOrder) -> tuple[bool, str]:
     return await sync_to_async(_stop_instance_sync, thread_sensitive=False)(order)
 
 
+@sync_to_async
+def _can_execute_suspend(order_id: int) -> tuple[bool, str, CloudServerOrder | None]:
+    now = timezone.now()
+    order = CloudServerOrder.objects.select_related('cloud_account').filter(id=order_id).first()
+    if not order:
+        return False, '订单不存在，跳过关机。', None
+    if order.status not in {'completed', 'expiring', 'renew_pending'}:
+        return False, f'订单状态为 {order.status}，不执行关机。', order
+    asset = _order_primary_asset(order)
+    if not _shutdown_enabled_for_order(order, asset):
+        return False, '云账号关机计划已关闭，跳过真实关机。', order
+    if not order.suspend_at:
+        return False, '订单没有计划关机时间，跳过真实关机。', order
+    if order.suspend_at > now:
+        return False, f'未到计划关机时间 {order.suspend_at.isoformat()}，跳过真实关机。', order
+    return True, '', order
+
+
 def _delete_instance_sync(order: CloudServerOrder) -> tuple[bool, str]:
     if order.provider != 'aws_lightsail' or not order.server_name:
         return False, '非 AWS 资源，暂未执行真实删机。'
@@ -1896,6 +1914,13 @@ async def lifecycle_tick(notify=None, notify_target=None, defer_destructive_seco
         if not _is_cloud_suspend_time():
             logger.warning('CLOUD_SUSPEND_SKIP_OUTSIDE_WINDOW order_id=%s order_no=%s suspend_at=%s now=%s', order.id, order.order_no, order.suspend_at, timezone.now())
             continue
+        can_suspend, skip_reason, checked_order = await _can_execute_suspend(order.id)
+        if not can_suspend:
+            logger.warning('CLOUD_SUSPEND_SKIP_GUARD order_id=%s order_no=%s reason=%s now=%s', order.id, order.order_no, skip_reason, timezone.now())
+            if checked_order:
+                await _record_lifecycle_action_failed(checked_order.id, 'suspend_skipped', skip_reason)
+            continue
+        order = checked_order
         result = await _stop_instance(order)
         note = _action_note(result)
         if _action_ok(result):
