@@ -1500,14 +1500,15 @@ def init_text_site_configs(request):
 @dashboard_login_required
 @require_POST
 def test_daily_expiry_summary_notification(request):
+    token = SiteConfig.get('bot_token', '') or get_runtime_config('bot_token', '')
+    if not str(token or '').strip():
+        return _error('测试通知发送失败：未配置 Telegram 机器人 Token', status=400)
+
     async def _send():
         from aiogram import Bot
 
         from cloud.lifecycle import daily_expiry_summary_tick
 
-        token = get_runtime_config('bot_token', '')
-        if not str(token or '').strip():
-            raise ValueError('未配置 Telegram 机器人 Token')
         bot = Bot(str(token).strip())
 
         async def _notify_target(chat_id, text: str, reply_markup=None):
