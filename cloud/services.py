@@ -1596,6 +1596,13 @@ def _renewal_price(order: CloudServerOrder, user: TelegramUser | None = None) ->
     return amount
 
 
+def _renewal_wallet_charge_amount(order: CloudServerOrder, user: TelegramUser | None, currency: str) -> tuple[Decimal, Decimal]:
+    latest_usdt = _renewal_price(order, user).quantize(Decimal('0.01'))
+    if currency == 'TRX':
+        return latest_usdt, async_to_sync(usdt_to_trx)(latest_usdt)
+    return latest_usdt, latest_usdt
+
+
 def record_cloud_ip_log(*, event_type, order=None, asset=None, server=None, public_ip=None, previous_public_ip=None, note=''):
     asset_obj = asset
     server_obj = server
@@ -2734,11 +2741,11 @@ def pay_cloud_server_renewal_with_balance(order_id: int, user_id: int, currency:
                 return None, '当前订单状态不可钱包支付'
             if not _can_order_be_renewed(order):
                 return None, '该服务器IP已删除，禁止续费'
-            total = Decimal(str(order.pay_amount or order.total_amount or 0))
             if order.paid_at and order.pay_method == 'balance':
                 already_paid = True
             else:
                 user = TelegramUser.objects.select_for_update().get(id=user_id)
+                total_amount_usdt, total = _renewal_wallet_charge_amount(order, user, currency)
                 current_balance = Decimal(str(getattr(user, balance_field, 0) or 0))
                 if current_balance < total:
                     return None, f'{currency} 余额不足'
@@ -2748,6 +2755,7 @@ def pay_cloud_server_renewal_with_balance(order_id: int, user_id: int, currency:
                 paid_at = timezone.now()
                 CloudServerOrder.objects.filter(id=order.id).update(
                     currency=currency,
+                    total_amount=total_amount_usdt,
                     pay_method='balance',
                     pay_amount=total,
                     paid_at=paid_at,
@@ -2755,6 +2763,7 @@ def pay_cloud_server_renewal_with_balance(order_id: int, user_id: int, currency:
                     updated_at=paid_at,
                 )
                 order.currency = currency
+                order.total_amount = total_amount_usdt
                 order.pay_method = 'balance'
                 order.pay_amount = total
                 order.paid_at = paid_at

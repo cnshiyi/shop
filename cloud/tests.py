@@ -29,7 +29,7 @@ from cloud.provisioning import (
     _mark_rebuild_source_pending_deletion,
     _mark_success,
 )
-from cloud.services import apply_cloud_server_renewal, create_cloud_server_rebuild_order, create_cloud_server_renewal, create_cloud_server_upgrade_order, delay_cloud_server_expiry, ensure_cloud_asset_operation_order, get_cloud_server_by_ip_for_user, get_proxy_asset_by_ip_for_admin, get_proxy_asset_by_ip_for_user, list_cloud_server_upgrade_plans, list_retained_ip_renewal_plans, list_user_cloud_servers, mark_cloud_server_ip_change_requested, record_cloud_ip_log, replace_cloud_asset_order_by_admin
+from cloud.services import apply_cloud_server_renewal, create_cloud_server_rebuild_order, create_cloud_server_renewal, create_cloud_server_upgrade_order, delay_cloud_server_expiry, ensure_cloud_asset_operation_order, get_cloud_server_by_ip_for_user, get_proxy_asset_by_ip_for_admin, get_proxy_asset_by_ip_for_user, list_cloud_server_upgrade_plans, list_retained_ip_renewal_plans, list_user_cloud_servers, mark_cloud_server_ip_change_requested, pay_cloud_server_renewal_with_balance, record_cloud_ip_log, replace_cloud_asset_order_by_admin
 from cloud.sync_safety import get_missing_confirmation_threshold
 from cloud.api import _cloud_order_source_tags, auto_renew_task_detail, cloud_order_detail, cloud_orders_list, delete_cloud_asset, delete_server, run_auto_renew_order, run_auto_renew_tasks, sync_cloud_asset_status, tasks_overview, update_cloud_asset
 from core.cloud_accounts import cloud_account_label
@@ -2825,6 +2825,57 @@ class CloudServerServicesTestCase(TestCase):
         after_payload = json.loads(tasks_overview(after_request).content)
         after_pinned = next(item for item in (after_payload.get('data') or after_payload) if item['id'] == -10001)
         self.assertEqual(after_pinned['execution_status'], 'auto_renew_pending')
+
+    def test_renewal_balance_payment_uses_latest_proxy_price(self):
+        self.user.balance = Decimal('100.000000')
+        self.user.save(update_fields=['balance', 'updated_at'])
+        expires_at = timezone.now() + timezone.timedelta(hours=8)
+        order = CloudServerOrder.objects.create(
+            order_no='RENEW-LATEST-PROXY-PRICE-1',
+            user=self.user,
+            plan=self.plan,
+            provider=self.plan.provider,
+            region_code=self.plan.region_code,
+            region_name=self.plan.region_name,
+            plan_name=self.plan.plan_name,
+            quantity=1,
+            currency='USDT',
+            total_amount='19.00',
+            pay_amount='19.00',
+            pay_method='address',
+            status='renew_pending',
+            public_ip='6.6.6.11',
+            instance_id='i-renew-latest-price',
+            service_started_at=timezone.now() - timezone.timedelta(days=30),
+            service_expires_at=expires_at,
+            suspend_at=expires_at + timezone.timedelta(days=1),
+            expired_at=timezone.now() + timezone.timedelta(minutes=30),
+            auto_renew_enabled=True,
+        )
+        CloudAsset.objects.create(
+            kind=CloudAsset.KIND_SERVER,
+            source=CloudAsset.SOURCE_ORDER,
+            order=order,
+            user=self.user,
+            provider=self.plan.provider,
+            region_code=self.plan.region_code,
+            region_name=self.plan.region_name,
+            asset_name='renew-latest-proxy-price',
+            public_ip=order.public_ip,
+            instance_id=order.instance_id,
+            actual_expires_at=expires_at,
+            price=Decimal('29.00'),
+        )
+
+        renewed, err = async_to_sync(pay_cloud_server_renewal_with_balance)(order.id, self.user.id, 'USDT', 31)
+
+        self.assertIsNone(err)
+        self.assertIsNotNone(renewed)
+        order.refresh_from_db()
+        self.user.refresh_from_db()
+        self.assertEqual(order.total_amount, Decimal('29.00'))
+        self.assertEqual(order.pay_amount, Decimal('29.00'))
+        self.assertEqual(self.user.balance, Decimal('71.000000'))
 
     def test_cloud_asset_detail_exposes_related_order_click_path(self):
         order = CloudServerOrder.objects.create(
