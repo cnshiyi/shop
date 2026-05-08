@@ -1460,15 +1460,13 @@ async def _cloud_renewal_postcheck_and_notify(bot: Bot, chat_id: int, order_id: 
         await bot.send_message(chat_id=chat_id, text=f'⚠️ 续费后巡检发现异常，已记录并尝试修复。\n订单号: {getattr(checked, "order_no", "-") or "-"}\n请稍后再查看代理状态，或联系人工客服。')
         return
     balance_text = _renew_balance_change_text(balance_change)
-    plan_text = _cloud_order_plan_text(checked) if checked else ''
+    plan_text = _cloud_order_plan_text(checked, include_warnings=False) if checked else ''
     await bot.send_message(
         chat_id=chat_id,
         text='\n'.join(filter(None, [
-            '✅ 续费后巡检完成。',
-            f'订单号: {getattr(checked, "order_no", "-") or "-"}',
+            f'IP: {_cloud_order_ip_text(checked)}',
             plan_text,
             balance_text,
-            '服务器运行正常，MTProxy 主/备用端口正常。',
         ])),
     )
 
@@ -1852,7 +1850,11 @@ def _format_local_dt(value) -> str:
         return str(value)
 
 
-def _cloud_order_plan_text(order) -> str:
+def _cloud_order_ip_text(order) -> str:
+    return getattr(order, 'public_ip', None) or getattr(order, 'previous_public_ip', None) or '未分配'
+
+
+def _cloud_order_plan_text(order, include_warnings: bool = True) -> str:
     expires_at = getattr(order, 'service_expires_at', None)
     suspend_at = getattr(order, 'suspend_at', None)
     delete_at = getattr(order, 'delete_at', None)
@@ -1869,9 +1871,9 @@ def _cloud_order_plan_text(order) -> str:
         f'关机计划: {_format_local_dt(suspend_at)}（后台执行时间 {suspend_time_text}）',
         f'删除计划: {_format_local_dt(delete_at)}（后台执行时间 {delete_time_text}）',
     ])
-    if suspend_at:
+    if include_warnings and suspend_at:
         lines.append(f'请务必在 {_format_local_dt(suspend_at)} 之前完成续费，避免关机。')
-    if delete_at:
+    if include_warnings and delete_at:
         lines.append(f'如已关机，请务必在 {_format_local_dt(delete_at)} 之前完成续费，避免实例删除。')
     return '\n'.join(lines)
 

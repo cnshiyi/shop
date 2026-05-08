@@ -15,7 +15,7 @@ from bot.api import _shutdown_log_items, _unattached_ip_delete_items
 from bot.models import TelegramGroupFilter, TelegramUser
 from cloud.bootstrap import _build_mtproxy_script, _extract_tg_links
 from cloud.models import CloudAsset, CloudAutoRenewPatrolLog, CloudIpLog, CloudServerOrder, CloudServerPlan, CloudUserNoticeLog, Server
-from cloud.lifecycle import _apply_notice_schedule_to_order, _get_due_orders, _get_migration_due_orders, _get_orphan_asset_delete_due, _is_cloud_delete_safe_time, _is_cloud_suspend_time, _mark_suspended, _next_cloud_action_run_at, _notice_plan_text, _send_logged_cloud_notice, lifecycle_tick, sync_server_status_tick
+from cloud.lifecycle import _apply_notice_schedule_to_order, _get_due_orders, _get_migration_due_orders, _get_orphan_asset_delete_due, _is_cloud_delete_safe_time, _is_cloud_suspend_time, _mark_deleted, _mark_suspended, _next_cloud_action_run_at, _notice_plan_text, _send_logged_cloud_notice, lifecycle_tick, sync_server_status_tick
 from cloud.ports import get_mtproxy_port_label, get_mtproxy_public_ports, is_valid_mtproxy_main_port
 from cloud.aws_lightsail import _resolve_static_ip_name_for_move
 from cloud.provisioning import (
@@ -29,7 +29,7 @@ from cloud.provisioning import (
     _mark_rebuild_source_pending_deletion,
     _mark_success,
 )
-from cloud.services import apply_cloud_server_renewal, create_cloud_server_rebuild_order, create_cloud_server_renewal, create_cloud_server_upgrade_order, delay_cloud_server_expiry, ensure_cloud_asset_operation_order, get_cloud_server_by_ip_for_user, get_proxy_asset_by_ip_for_admin, get_proxy_asset_by_ip_for_user, list_cloud_server_upgrade_plans, list_retained_ip_renewal_plans, mark_cloud_server_ip_change_requested, record_cloud_ip_log, replace_cloud_asset_order_by_admin
+from cloud.services import apply_cloud_server_renewal, create_cloud_server_rebuild_order, create_cloud_server_renewal, create_cloud_server_upgrade_order, delay_cloud_server_expiry, ensure_cloud_asset_operation_order, get_cloud_server_by_ip_for_user, get_proxy_asset_by_ip_for_admin, get_proxy_asset_by_ip_for_user, list_cloud_server_upgrade_plans, list_retained_ip_renewal_plans, list_user_cloud_servers, mark_cloud_server_ip_change_requested, record_cloud_ip_log, replace_cloud_asset_order_by_admin
 from cloud.sync_safety import get_missing_confirmation_threshold
 from cloud.api import _cloud_order_source_tags, auto_renew_task_detail, cloud_order_detail, cloud_orders_list, delete_cloud_asset, delete_server, run_auto_renew_order, run_auto_renew_tasks, sync_cloud_asset_status, tasks_overview, update_cloud_asset
 from core.cloud_accounts import cloud_account_label
@@ -54,6 +54,21 @@ class CloudServerServicesTestCase(TestCase):
             currency='USDT',
             is_active=True,
             sort_order=100,
+        )
+
+    def _create_auto_renew_asset(self, order, *, status=None, asset_name=None):
+        return CloudAsset.objects.create(
+            kind=CloudAsset.KIND_SERVER,
+            source=CloudAsset.SOURCE_ORDER,
+            order=order,
+            user=order.user,
+            provider=order.provider,
+            region_code=order.region_code,
+            region_name=order.region_name,
+            asset_name=asset_name or f'{order.order_no}-asset',
+            public_ip=order.public_ip,
+            actual_expires_at=order.service_expires_at,
+            status=status or CloudAsset.STATUS_RUNNING,
         )
 
     def test_update_cloud_asset_rejects_collapsed_telegram_group_binding(self):
@@ -2998,6 +3013,28 @@ class CloudServerServicesTestCase(TestCase):
             service_expires_at=timezone.now() + timezone.timedelta(days=20),
             auto_renew_enabled=True,
         )
+        deleted_asset_order = CloudServerOrder.objects.create(
+            order_no='AUTO-RENEW-DELETED-ASSET-1',
+            user=self.user,
+            plan=self.plan,
+            provider=self.plan.provider,
+            region_code=self.plan.region_code,
+            region_name=self.plan.region_name,
+            plan_name=self.plan.plan_name,
+            quantity=1,
+            currency='USDT',
+            total_amount='19.00',
+            pay_amount='19.00',
+            pay_method='balance',
+            status='completed',
+            public_ip='10.0.0.5',
+            service_started_at=timezone.now() - timezone.timedelta(days=40),
+            service_expires_at=timezone.now() - timezone.timedelta(hours=3),
+            auto_renew_enabled=True,
+        )
+        for order in [due_order, retry_order, fallback_order, resolved_order]:
+            self._create_auto_renew_asset(order)
+        self._create_auto_renew_asset(deleted_asset_order, status=CloudAsset.STATUS_DELETED)
         CloudAutoRenewPatrolLog.objects.create(
             order=retry_order,
             user=self.user,
@@ -3056,6 +3093,7 @@ class CloudServerServicesTestCase(TestCase):
         self.assertEqual(queue_status_map[retry_order.order_no], 'retry_failed')
         self.assertEqual(queue_status_map[fallback_order.order_no], 'fallback_retry')
         self.assertNotIn(resolved_order.order_no, queue_status_map)
+        self.assertNotIn(deleted_asset_order.order_no, queue_status_map)
         retry_item = next(item for item in due_items if item['order_no'] == retry_order.order_no)
         self.assertEqual(retry_item['last_failure_reason'], '余额不足')
 
@@ -3117,6 +3155,8 @@ class CloudServerServicesTestCase(TestCase):
             service_expires_at=timezone.now() - timezone.timedelta(hours=2),
             auto_renew_enabled=True,
         )
+        for order in [due_order, retry_order, fallback_order]:
+            self._create_auto_renew_asset(order)
         CloudAutoRenewPatrolLog.objects.create(
             order=retry_order,
             user=self.user,
@@ -3181,6 +3221,7 @@ class CloudServerServicesTestCase(TestCase):
             service_expires_at=timezone.now() + timezone.timedelta(hours=4),
             auto_renew_enabled=True,
         )
+        self._create_auto_renew_asset(order)
         staff_user = get_user_model().objects.create_user(username='staff_auto_renew_single', password='x', is_staff=True)
         request = RequestFactory().post(f'/api/dashboard/tasks/auto-renew/orders/{order.id}/run/', data='{}', content_type='application/json')
         request.user = staff_user
@@ -3825,6 +3866,169 @@ class CloudServerServicesTestCase(TestCase):
         self.assertIn('云端运行中', asset.provider_status or '')
         self.assertIn('已到期关机，等待删除', asset.provider_status or '')
 
+
+    def test_proxy_list_hides_deleted_order_retained_ip(self):
+        order = CloudServerOrder.objects.create(
+            order_no='DELETED-LIST-HIDDEN-1',
+            user=self.user,
+            plan=self.plan,
+            provider=self.plan.provider,
+            region_code=self.plan.region_code,
+            region_name=self.plan.region_name,
+            plan_name=self.plan.plan_name,
+            quantity=1,
+            currency='USDT',
+            total_amount='19.00',
+            pay_amount='19.00',
+            status='deleted',
+            public_ip='20.20.20.30',
+            previous_public_ip='20.20.20.30',
+            ip_recycle_at=timezone.now() + timezone.timedelta(days=5),
+            instance_id='',
+        )
+        asset = CloudAsset.objects.create(
+            kind=CloudAsset.KIND_SERVER,
+            order=order,
+            user=self.user,
+            provider='aws_lightsail',
+            region_code=self.plan.region_code,
+            region_name=self.plan.region_name,
+            asset_name='StaticIp-hidden-retained',
+            public_ip='20.20.20.30',
+            previous_public_ip='20.20.20.30',
+            actual_expires_at=order.ip_recycle_at,
+            status=CloudAsset.STATUS_RUNNING,
+            provider_status='固定IP保留中-实例已删除',
+            is_active=False,
+        )
+
+        items = async_to_sync(list_user_cloud_servers)(self.user.id)
+        from cloud.services import get_user_proxy_asset_detail
+        detail = async_to_sync(get_user_proxy_asset_detail)(asset.id, self.user.id, 'asset')
+
+        self.assertFalse(any(getattr(item, 'asset_id', None) == asset.id for item in items))
+        self.assertIsNone(detail)
+
+    def test_cloud_sync_resolvers_ignore_deleted_ip_records(self):
+        asset = CloudAsset.objects.create(
+            kind=CloudAsset.KIND_SERVER,
+            user=self.user,
+            provider='aws_lightsail',
+            region_code=self.plan.region_code,
+            region_name=self.plan.region_name,
+            asset_name='deleted-sync-asset',
+            instance_id='deleted-sync-instance',
+            provider_resource_id='deleted-sync-arn',
+            public_ip=None,
+            previous_public_ip='20.20.20.31',
+            status=CloudAsset.STATUS_DELETED,
+            provider_status='已删除',
+            is_active=False,
+        )
+        server = Server.objects.create(
+            source=Server.SOURCE_AWS_SYNC,
+            user=self.user,
+            provider='aws_lightsail',
+            region_code=self.plan.region_code,
+            region_name=self.plan.region_name,
+            server_name='deleted-sync-server',
+            instance_id='deleted-sync-instance',
+            provider_resource_id='deleted-sync-arn',
+            public_ip=None,
+            previous_public_ip='20.20.20.31',
+            status=Server.STATUS_DELETED,
+            provider_status='已删除',
+            is_active=False,
+        )
+        from cloud.management.commands.sync_aliyun_assets import _resolve_asset as resolve_aliyun_asset
+        from cloud.management.commands.sync_aliyun_assets import _resolve_server as resolve_aliyun_server
+        from cloud.management.commands.sync_aws_assets import _resolve_asset as resolve_aws_asset
+        from cloud.management.commands.sync_aws_assets import _resolve_server as resolve_aws_server
+
+        self.assertIsNone(resolve_aws_asset(asset.instance_id, asset.provider_resource_id, asset.previous_public_ip, None))
+        self.assertIsNone(resolve_aws_server(server.instance_id, server.provider_resource_id, server.previous_public_ip, None))
+        self.assertIsNone(resolve_aliyun_asset(asset.instance_id, asset.previous_public_ip))
+        self.assertIsNone(resolve_aliyun_server(server.instance_id, server.previous_public_ip))
+
+    def test_delete_server_marks_instance_deleted_but_retains_static_ip(self):
+        recycle_at = timezone.now() + timezone.timedelta(days=7)
+        order = CloudServerOrder.objects.create(
+            order_no='DELETE-RETAIN-STATIC-1',
+            user=self.user,
+            plan=self.plan,
+            provider=self.plan.provider,
+            region_code=self.plan.region_code,
+            region_name=self.plan.region_name,
+            plan_name=self.plan.plan_name,
+            quantity=1,
+            currency='USDT',
+            total_amount='19.00',
+            pay_amount='19.00',
+            status='deleting',
+            public_ip='20.20.20.32',
+            previous_public_ip='20.20.20.32',
+            static_ip_name='StaticIp-delete-retain',
+            instance_id='delete-retain-instance',
+            provider_resource_id='delete-retain-arn',
+            ip_recycle_at=recycle_at,
+        )
+        asset = CloudAsset.objects.create(
+            kind=CloudAsset.KIND_SERVER,
+            order=order,
+            user=self.user,
+            provider='aws_lightsail',
+            region_code=self.plan.region_code,
+            region_name=self.plan.region_name,
+            asset_name='delete-retain-instance',
+            instance_id='delete-retain-instance',
+            provider_resource_id='delete-retain-arn',
+            public_ip='20.20.20.32',
+            previous_public_ip='20.20.20.32',
+            actual_expires_at=recycle_at,
+            status=CloudAsset.STATUS_RUNNING,
+            provider_status='运行中',
+            is_active=True,
+        )
+        server = Server.objects.create(
+            source=Server.SOURCE_ORDER,
+            order=order,
+            user=self.user,
+            provider='aws_lightsail',
+            region_code=self.plan.region_code,
+            region_name=self.plan.region_name,
+            server_name='delete-retain-instance',
+            instance_id='delete-retain-instance',
+            provider_resource_id='delete-retain-arn',
+            public_ip='20.20.20.32',
+            previous_public_ip='20.20.20.32',
+            expires_at=recycle_at,
+            status=Server.STATUS_RUNNING,
+            provider_status='运行中',
+            is_active=True,
+        )
+
+        async_to_sync(_mark_deleted)(order.id, '实例已删除，固定 IP 保留。')
+
+        order.refresh_from_db()
+        asset.refresh_from_db()
+        server.refresh_from_db()
+        self.assertEqual(order.status, 'deleted')
+        self.assertEqual(order.public_ip, '20.20.20.32')
+        self.assertEqual(order.previous_public_ip, '20.20.20.32')
+        self.assertEqual(order.static_ip_name, 'StaticIp-delete-retain')
+        self.assertEqual(order.ip_recycle_at, recycle_at)
+        self.assertIn('固定IP名=StaticIp-delete-retain', order.provision_note)
+        self.assertIn('未附加 IP 计划回收=', order.provision_note)
+        self.assertEqual(order.instance_id, '')
+        self.assertEqual(asset.public_ip, '20.20.20.32')
+        self.assertIsNone(asset.instance_id)
+        self.assertEqual(asset.status, CloudAsset.STATUS_DELETED)
+        self.assertEqual(asset.provider_status, '固定IP保留中-实例已删除')
+        self.assertEqual(server.public_ip, '20.20.20.32')
+        self.assertIsNone(server.instance_id)
+        self.assertEqual(server.status, Server.STATUS_DELETED)
+        self.assertEqual(server.provider_status, '固定IP保留中-实例已删除')
+        self.assertFalse(any(getattr(item, 'asset_id', None) == asset.id for item in async_to_sync(list_user_cloud_servers)(self.user.id)))
 
     def test_lifecycle_tick_releases_retained_static_ip_after_recycle_due(self):
         recycle_due_at = timezone.now() - timezone.timedelta(days=2)

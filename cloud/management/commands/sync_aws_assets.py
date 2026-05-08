@@ -17,6 +17,9 @@ logger = logging.getLogger(__name__)
 
 _ACTIVE_ORDER_STATUSES = {'pending', 'provisioning', 'completed', 'expiring', 'renew_pending', 'suspended'}
 _TRACEABLE_ORDER_STATUSES = _ACTIVE_ORDER_STATUSES | {'deleted'}
+_SYNC_EXCLUDED_ASSET_STATUSES = {CloudAsset.STATUS_DELETED, CloudAsset.STATUS_DELETING, CloudAsset.STATUS_TERMINATED, CloudAsset.STATUS_TERMINATING}
+_SYNC_EXCLUDED_SERVER_STATUSES = {Server.STATUS_DELETED, Server.STATUS_DELETING, Server.STATUS_TERMINATED, Server.STATUS_TERMINATING}
+_SYNC_EXCLUDED_ORDER_STATUSES = {'deleted', 'deleting', 'expired', 'cancelled'}
 _MISSING_PENDING_STATUS = '云上未找到实例/IP-待确认'
 
 
@@ -221,7 +224,7 @@ def _resolve_asset(instance_name, instance_arn, public_ip, order, account=None):
         candidates |= Q(public_ip=public_ip) | Q(previous_public_ip=public_ip)
     if not candidates:
         return None
-    return CloudAsset.objects.filter(lookup & candidates).order_by('-updated_at', '-id').first()
+    return CloudAsset.objects.filter(lookup & candidates).filter(Q(order__isnull=True) | ~Q(order__status__in=_SYNC_EXCLUDED_ORDER_STATUSES)).exclude(status__in=_SYNC_EXCLUDED_ASSET_STATUSES).order_by('-updated_at', '-id').first()
 
 
 def _append_unique_line(text: str | None, line: str) -> str:
@@ -295,7 +298,7 @@ def _resolve_server(instance_name, instance_arn, public_ip, order, account=None)
         candidates |= Q(public_ip=public_ip) | Q(previous_public_ip=public_ip)
     if not candidates:
         return None
-    return Server.objects.filter(base & candidates).order_by('-updated_at', '-id').first()
+    return Server.objects.filter(base & candidates).filter(Q(order__isnull=True) | ~Q(order__status__in=_SYNC_EXCLUDED_ORDER_STATUSES)).exclude(status__in=_SYNC_EXCLUDED_SERVER_STATUSES).order_by('-updated_at', '-id').first()
 
 
 def _resolve_asset_for_static_ip(static_ip_name, static_ip_arn, public_ip, account=None):
@@ -309,7 +312,7 @@ def _resolve_asset_for_static_ip(static_ip_name, static_ip_arn, public_ip, accou
     if static_ip_name:
         exact_candidates |= Q(asset_name=static_ip_name, instance_id__isnull=True)
     if exact_candidates:
-        asset = CloudAsset.objects.filter(lookup & exact_candidates).order_by('-updated_at', '-id').first()
+        asset = CloudAsset.objects.filter(lookup & exact_candidates).filter(Q(order__isnull=True) | ~Q(order__status__in=_SYNC_EXCLUDED_ORDER_STATUSES)).exclude(status__in=_SYNC_EXCLUDED_ASSET_STATUSES).order_by('-updated_at', '-id').first()
         if asset:
             return asset
 
@@ -317,6 +320,8 @@ def _resolve_asset_for_static_ip(static_ip_name, static_ip_arn, public_ip, accou
         return (
             CloudAsset.objects.filter(lookup & (Q(public_ip=public_ip) | Q(previous_public_ip=public_ip)))
             .filter(Q(instance_id__isnull=True) | Q(instance_id='') | Q(provider_status='未附加固定IP') | Q(provider_resource_id__contains='StaticIp'))
+            .filter(Q(order__isnull=True) | ~Q(order__status__in=_SYNC_EXCLUDED_ORDER_STATUSES))
+            .exclude(status__in=_SYNC_EXCLUDED_ASSET_STATUSES)
             .order_by('-updated_at', '-id')
             .first()
         )
@@ -328,7 +333,7 @@ def _mark_deleted_when_missing_in_aws(region, existing_instance_names, existing_
     queryset = CloudAsset.objects.filter(
         kind=CloudAsset.KIND_SERVER,
         provider='aws_lightsail',
-    ).exclude(status__in=[CloudAsset.STATUS_DELETED, CloudAsset.STATUS_TERMINATED])
+    ).exclude(status__in=_SYNC_EXCLUDED_ASSET_STATUSES)
     if account:
         label = cloud_account_label(account)
         queryset = queryset.filter(Q(cloud_account=account) | Q(account_label=label))
@@ -400,7 +405,7 @@ def _mark_deleted_when_missing_in_aws(region, existing_instance_names, existing_
         stdout.stdout.write(stdout.style.WARNING(
             f'IP校验 已删除 资产#{asset.id} IP={old_public_ip or "缺失"} 云上不存在'
         ))
-    server_queryset = Server.objects.filter(provider='aws_lightsail').exclude(status__in=[Server.STATUS_DELETED, Server.STATUS_TERMINATED])
+    server_queryset = Server.objects.filter(provider='aws_lightsail').exclude(status__in=_SYNC_EXCLUDED_SERVER_STATUSES)
     if account:
         server_queryset = server_queryset.filter(account_label=cloud_account_label(account))
     server_queryset = server_queryset.filter(
@@ -618,7 +623,7 @@ class Command(BaseCommand):
                         normalized_status = _elevate_deleted_when_ip_missing(normalized_status, public_ip)
                         bundle_id = item.get('bundleId') or '-'
                         blueprint_id = item.get('blueprintId') or '-'
-                        order_scope = CloudServerOrder.objects.filter(provider='aws_lightsail')
+                        order_scope = CloudServerOrder.objects.filter(provider='aws_lightsail', status__in=_ACTIVE_ORDER_STATUSES)
                         if account:
                             order_scope = order_scope.filter(Q(cloud_account=account) | Q(account_label=account_label))
                         order = order_scope.filter(

@@ -754,6 +754,18 @@ def toggle_cloud_asset_auto_renew(request, asset_id):
     return _ok(_asset_payload(asset))
 
 
+def _dashboard_sort_direction(request):
+    direction = (request.GET.get('sort_order') or request.GET.get('sort_direction') or '').strip().lower()
+    return 'desc' if direction in {'desc', 'descending', '降序'} else 'asc'
+
+
+def _dashboard_expiry_ordering(field_name: str, direction: str):
+    field = F(field_name)
+    if direction == 'desc':
+        return [field.desc(nulls_last=True), '-updated_at', '-id']
+    return [field.asc(nulls_last=True), '-updated_at', '-id']
+
+
 @dashboard_login_required
 @require_GET
 def cloud_assets_list(request):
@@ -776,6 +788,11 @@ def cloud_assets_list(request):
             | Q(account_label__isnull=True)
             | Q(account_label='')
         )
+        sort_by = (request.GET.get('sort_by') or '').strip().lower()
+        sort_direction = _dashboard_sort_direction(request)
+        ordering = ['-sort_order', F('actual_expires_at').asc(nulls_last=True), '-updated_at', '-id']
+        if sort_by in {'actual_expires_at', 'expires_at', 'days_left', 'remaining_days'}:
+            ordering = _dashboard_expiry_ordering('actual_expires_at', sort_direction)
         queryset = _apply_keyword_filter(
             queryset,
             keyword,
@@ -783,7 +800,7 @@ def cloud_assets_list(request):
                 'asset_name', 'public_ip', 'mtproxy_link', 'account_label', 'cloud_account__external_account_id', 'cloud_account__name', 'user__tg_user_id',
                 'user__username', 'order__order_no',
             ],
-        ).distinct().order_by('-sort_order', F('actual_expires_at').asc(nulls_last=True), '-updated_at', '-id')
+        ).distinct().order_by(*ordering)
         if not grouped and paginated:
             try:
                 page = max(int(request.GET.get('page') or '1'), 1)
@@ -1035,14 +1052,30 @@ def _auto_renew_due_item_payload(order, *, queue_status: str = 'due_now', queue_
     }
 
 
+def _auto_renew_order_has_active_notice(order) -> bool:
+    if not order:
+        return False
+    if getattr(order, 'status', None) not in {'completed', 'expiring', 'renew_pending'}:
+        return False
+    notice = _notice_payload_for_order(order)
+    if not notice:
+        return False
+    ip = str(notice.get('ip') or getattr(order, 'public_ip', None) or getattr(order, 'previous_public_ip', None) or '').strip()
+    return bool(ip)
+
+
 def _auto_renew_future_plan_items(now, next_run_at, due_orders: list):
     plan_items = []
     seen = set()
     for order in due_orders:
+        if not _auto_renew_order_has_active_notice(order):
+            continue
         seen.add(order.id)
         plan_items.append(_auto_renew_due_item_payload(order, queue_status='due_now', queue_status_label='本轮待执行', next_run_at=next_run_at))
     future_qs = CloudServerOrder.objects.select_related('user').filter(auto_renew_enabled=True, status__in=['completed', 'expiring', 'renew_pending']).exclude(id__in=list(seen)).order_by('service_expires_at', 'id')[:50]
     for order in future_qs:
+        if not _auto_renew_order_has_active_notice(order):
+            continue
         expires_at = getattr(order, 'service_expires_at', None)
         if not expires_at:
             continue
@@ -1061,7 +1094,7 @@ def _auto_renew_future_plan_items(now, next_run_at, due_orders: list):
 
 def _collect_auto_renew_due_orders(now):
     due = async_to_sync(_get_due_orders)()
-    due_orders = list(due.get('auto_renew') or [])
+    due_orders = [order for order in list(due.get('auto_renew') or []) if _auto_renew_order_has_active_notice(order)]
     due_ids = {order.id for order in due_orders}
     history_qs = CloudAutoRenewPatrolLog.objects.select_related('order', 'user').order_by('-executed_at', '-id')
 
@@ -1081,7 +1114,7 @@ def _collect_auto_renew_due_orders(now):
             continue
         if order.id in due_ids:
             continue
-        if order.status not in {'completed', 'expiring', 'renew_pending'}:
+        if not _auto_renew_order_has_active_notice(order):
             continue
         due_ids.add(order.id)
         retry_orders.append((order, 'retry_failed', '失败待重试', log.failure_reason))
@@ -1094,6 +1127,8 @@ def _collect_auto_renew_due_orders(now):
         service_expires_at__lte=now,
     ).exclude(id__in=list(due_ids)).order_by('service_expires_at', 'id')[:50]
     for order in fallback_qs:
+        if not _auto_renew_order_has_active_notice(order):
+            continue
         due_ids.add(order.id)
         fallback_orders.append((order, 'fallback_retry', '过期后兜底重试', None))
 
@@ -1636,7 +1671,12 @@ def servers_list(request):
     keyword = _get_keyword(request)
     dedup_raw = (request.GET.get('dedup') or '').lower()
     dedup = dedup_raw not in {'0', 'false', 'no', 'off'}
-    queryset = Server.objects.select_related('user', 'order').exclude(status=Server.STATUS_DELETED).exclude(public_ip__isnull=True).exclude(public_ip='').order_by('expires_at', '-updated_at', '-id')
+    sort_by = (request.GET.get('sort_by') or '').strip().lower()
+    sort_direction = _dashboard_sort_direction(request)
+    ordering = ['expires_at', '-updated_at', '-id']
+    if sort_by in {'expires_at', 'days_left', 'remaining_days'}:
+        ordering = _dashboard_expiry_ordering('expires_at', sort_direction)
+    queryset = Server.objects.select_related('user', 'order').exclude(status=Server.STATUS_DELETED).exclude(public_ip__isnull=True).exclude(public_ip='').order_by(*ordering)
     queryset = _apply_keyword_filter(
         queryset,
         keyword,

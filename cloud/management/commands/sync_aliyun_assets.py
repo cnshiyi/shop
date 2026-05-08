@@ -13,6 +13,9 @@ from cloud.sync_safety import mark_missing_confirmation_pending, with_missing_co
 
 
 _ACTIVE_ORDER_STATUSES = {'pending', 'provisioning', 'completed', 'expiring', 'renew_pending', 'suspended'}
+_SYNC_EXCLUDED_ASSET_STATUSES = {CloudAsset.STATUS_DELETED, CloudAsset.STATUS_DELETING, CloudAsset.STATUS_TERMINATED, CloudAsset.STATUS_TERMINATING}
+_SYNC_EXCLUDED_SERVER_STATUSES = {Server.STATUS_DELETED, Server.STATUS_DELETING, Server.STATUS_TERMINATED, Server.STATUS_TERMINATING}
+_SYNC_EXCLUDED_ORDER_STATUSES = {'deleted', 'deleting', 'expired', 'cancelled'}
 _MISSING_PENDING_STATUS = '云上未找到实例-待确认'
 
 
@@ -125,7 +128,7 @@ def _resolve_asset(instance_id, public_ip, account=None):
         candidates |= Q(public_ip=public_ip) | Q(previous_public_ip=public_ip)
     if not candidates:
         return None
-    return CloudAsset.objects.filter(lookup & candidates).order_by('-updated_at', '-id').first()
+    return CloudAsset.objects.filter(lookup & candidates).filter(Q(order__isnull=True) | ~Q(order__status__in=_SYNC_EXCLUDED_ORDER_STATUSES)).exclude(status__in=_SYNC_EXCLUDED_ASSET_STATUSES).order_by('-updated_at', '-id').first()
 
 
 def _resolve_server(instance_id, public_ip, account=None):
@@ -139,7 +142,7 @@ def _resolve_server(instance_id, public_ip, account=None):
         candidates |= Q(public_ip=public_ip) | Q(previous_public_ip=public_ip)
     if not candidates:
         return None
-    return Server.objects.filter(base & candidates).order_by('-updated_at', '-id').first()
+    return Server.objects.filter(base & candidates).filter(Q(order__isnull=True) | ~Q(order__status__in=_SYNC_EXCLUDED_ORDER_STATUSES)).exclude(status__in=_SYNC_EXCLUDED_SERVER_STATUSES).order_by('-updated_at', '-id').first()
 
 
 
@@ -152,7 +155,7 @@ def _mark_deleted_when_missing_in_aliyun(region, existing_instance_ids, stdout, 
     if account:
         label = cloud_account_label(account)
         queryset = queryset.filter(Q(cloud_account=account) | Q(account_label=label))
-    queryset = queryset.exclude(status__in=[CloudAsset.STATUS_DELETED, CloudAsset.STATUS_TERMINATED])
+    queryset = queryset.exclude(status__in=_SYNC_EXCLUDED_ASSET_STATUSES)
     queryset = queryset.filter(
         Q(region_code=region) | Q(region_code='') | Q(region_code__isnull=True)
     ).order_by('-updated_at', '-id')
@@ -317,7 +320,10 @@ class Command(BaseCommand):
                     'is_active': normalized_status in CloudAsset.ACTIVE_STATUSES,
                 }
                 asset = _resolve_asset(instance_id, public_ip, account)
-                linked_order = (getattr(asset, 'order', None) if asset else None) or _resolve_order_for_ip(public_ip, account)
+                linked_order = getattr(asset, 'order', None) if asset else None
+                if linked_order and linked_order.status not in _ACTIVE_ORDER_STATUSES:
+                    linked_order = None
+                linked_order = linked_order or _resolve_order_for_ip(public_ip, account)
                 if linked_order:
                     asset_defaults['order'] = linked_order
                     if not asset:

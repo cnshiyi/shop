@@ -418,6 +418,30 @@ def _format_local_dt(value) -> str:
         return str(value)
 
 
+def _cloud_order_ip_text(order) -> str:
+    return getattr(order, 'public_ip', None) or getattr(order, 'previous_public_ip', None) or '未分配'
+
+
+def _cloud_order_plan_text(order) -> str:
+    expires_at = getattr(order, 'service_expires_at', None)
+    suspend_at = getattr(order, 'suspend_at', None)
+    delete_at = getattr(order, 'delete_at', None)
+    auto_renew_enabled = bool(getattr(order, 'auto_renew_enabled', False))
+    auto_renew_at = expires_at - timezone.timedelta(days=1) if expires_at else None
+    suspend_time_text = str(get_runtime_config('cloud_suspend_time', '15:00') or '15:00').strip() or '15:00'
+    delete_time_text = str(get_runtime_config('cloud_delete_time', '15:00') or '15:00').strip() or '15:00'
+    lines = [f'到期时间: {_format_local_dt(expires_at)}']
+    if auto_renew_enabled:
+        lines.append(f'自动续费: 已开启，预计 {_format_local_dt(auto_renew_at)} 自动续费')
+    else:
+        lines.append('自动续费: 本IP未开启自动续费')
+    lines.extend([
+        f'关机计划: {_format_local_dt(suspend_at)}（后台执行时间 {suspend_time_text}）',
+        f'删除计划: {_format_local_dt(delete_at)}（后台执行时间 {delete_time_text}）',
+    ])
+    return '\n'.join(lines)
+
+
 async def _cloud_renewal_postcheck_and_notify(order: CloudServerOrder):
     await _notify_user(order.user_id, '🔎 续费已完成，正在检查服务器运行状态和 MTProxy 链路。')
     checked, err = await run_cloud_server_renewal_postcheck(order.id)
@@ -427,7 +451,7 @@ async def _cloud_renewal_postcheck_and_notify(order: CloudServerOrder):
     if err:
         await _notify_user(order.user_id, f'⚠️ 续费后巡检发现异常，已记录并尝试修复。\n订单号: {getattr(checked, "order_no", "-") or "-"}\n请稍后再查看代理状态，或联系人工客服。')
         return
-    await _notify_user(order.user_id, f'✅ 续费后巡检完成。\n订单号: {getattr(checked, "order_no", "-") or "-"}\n服务器运行正常，MTProxy 主/备用端口正常。')
+    await _notify_user(order.user_id, f'IP: {_cloud_order_ip_text(checked)}\n{_cloud_order_plan_text(checked)}')
 
 
 async def _provision_recovered_cloud_order(order: CloudServerOrder):

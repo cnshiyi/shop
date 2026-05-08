@@ -1046,6 +1046,7 @@ def pay_cloud_server_order_with_balance(order_id: int, user_id: int, currency: s
 _ACTIVE_ORDER_STATUSES = {'completed', 'expiring', 'suspended', 'renew_pending', 'paid', 'provisioning'}
 _VISIBLE_USER_SERVER_STATUSES = {'completed', 'expiring', 'suspended', 'renew_pending', 'provisioning', 'paid', 'failed'}
 _INACTIVE_ASSET_STATUSES = {'deleted', 'deleting', 'terminated', 'terminating', 'expired'}
+_INACTIVE_ORDER_STATUSES = {'deleted', 'deleting', 'expired', 'cancelled'}
 
 
 def _first_nonblank(*values) -> str:
@@ -1232,11 +1233,13 @@ def _user_asset_visibility_filter(user_id: int):
 @sync_to_async
 def list_user_cloud_servers(user_id: int):
     ip_filter = Q(public_ip__isnull=False) & ~Q(public_ip='')
+    active_order_filter = Q(order__isnull=True) | ~Q(order__status__in=_INACTIVE_ORDER_STATUSES)
     assets = (
         CloudAsset.objects.select_related('order')
         .filter(kind=CloudAsset.KIND_SERVER)
         .filter(_user_asset_visibility_filter(user_id))
         .filter(ip_filter)
+        .filter(active_order_filter)
         .filter(_active_cloud_account_asset_filter())
         .exclude(status__in=_INACTIVE_ASSET_STATUSES)
         .order_by('-sort_order', 'actual_expires_at', '-updated_at', '-id')
@@ -1247,11 +1250,13 @@ def list_user_cloud_servers(user_id: int):
 @sync_to_async
 def list_user_auto_renew_cloud_servers(user_id: int):
     ip_filter = Q(public_ip__isnull=False) & ~Q(public_ip='')
+    active_order_filter = Q(order__isnull=True) | ~Q(order__status__in=_INACTIVE_ORDER_STATUSES)
     assets = (
         CloudAsset.objects.select_related('order', 'user')
         .filter(kind=CloudAsset.KIND_SERVER)
         .filter(_user_asset_visibility_filter(user_id))
         .filter(ip_filter)
+        .filter(active_order_filter)
         .filter(_active_cloud_account_asset_filter())
         .exclude(status__in=_INACTIVE_ASSET_STATUSES)
         .order_by('-sort_order', 'actual_expires_at', '-updated_at', '-id')
@@ -1262,10 +1267,12 @@ def list_user_auto_renew_cloud_servers(user_id: int):
 @sync_to_async
 def list_all_auto_renew_cloud_servers():
     ip_filter = Q(public_ip__isnull=False) & ~Q(public_ip='')
+    active_order_filter = Q(order__isnull=True) | ~Q(order__status__in=_INACTIVE_ORDER_STATUSES)
     assets = (
         CloudAsset.objects.select_related('order', 'user')
         .filter(kind=CloudAsset.KIND_SERVER)
         .filter(ip_filter)
+        .filter(active_order_filter)
         .filter(_active_cloud_account_asset_filter())
         .exclude(status__in=_INACTIVE_ASSET_STATUSES)
         .order_by('-sort_order', 'user_id', 'actual_expires_at', '-updated_at', '-id')
@@ -1287,19 +1294,21 @@ def get_cloud_server_for_admin(order_id: int):
 
 @sync_to_async
 def get_user_proxy_asset_detail(item_id: int, user_id: int, kind: str):
+    active_order_filter = Q(order__isnull=True) | ~Q(order__status__in=_INACTIVE_ORDER_STATUSES)
     if kind == 'server':
-        server = Server.objects.filter(id=item_id, user_id=user_id).first()
+        server = Server.objects.filter(id=item_id, user_id=user_id).filter(active_order_filter).exclude(status__in=_INACTIVE_ASSET_STATUSES).first()
         return _proxy_server_view(server) if server else None
-    asset = CloudAsset.objects.filter(id=item_id, user_id=user_id).first()
+    asset = CloudAsset.objects.filter(id=item_id, user_id=user_id).filter(active_order_filter).exclude(status__in=_INACTIVE_ASSET_STATUSES).first()
     return _proxy_asset_view(asset) if asset else None
 
 
 @sync_to_async
 def get_proxy_asset_detail_for_admin(item_id: int, kind: str = 'asset'):
+    active_order_filter = Q(order__isnull=True) | ~Q(order__status__in=_INACTIVE_ORDER_STATUSES)
     if kind == 'server':
-        server = Server.objects.filter(id=item_id).first()
+        server = Server.objects.filter(id=item_id).filter(active_order_filter).exclude(status__in=_INACTIVE_ASSET_STATUSES).first()
         return _proxy_server_view(server) if server else None
-    asset = CloudAsset.objects.filter(id=item_id).first()
+    asset = CloudAsset.objects.filter(id=item_id).filter(active_order_filter).exclude(status__in=_INACTIVE_ASSET_STATUSES).first()
     return _proxy_asset_view(asset) if asset else None
 
 

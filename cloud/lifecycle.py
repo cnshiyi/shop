@@ -286,6 +286,12 @@ def _mark_deleted(order_id: int, note: str):
     asset = _order_primary_asset(order)
     server = _order_primary_server(order)
     previous_public_ip = order.public_ip or order.previous_public_ip
+    if order.provider == 'aws_lightsail' and not order.static_ip_name:
+        resolved_static_ip_name = _resolve_aws_static_ip_name_for_order(order)
+        if resolved_static_ip_name:
+            order.static_ip_name = resolved_static_ip_name
+    if not order.ip_recycle_at and order.delete_at:
+        order.ip_recycle_at = order.delete_at + timezone.timedelta(days=max(1, _config_int('cloud_unattached_ip_delete_after_days', 15)))
     order.status = 'deleted'
     order.public_ip = previous_public_ip
     order.previous_public_ip = previous_public_ip
@@ -293,27 +299,29 @@ def _mark_deleted(order_id: int, note: str):
     order.provision_note = '\n'.join(filter(None, [order.provision_note, retention_note]))
     order.instance_id = ''
     order.provider_resource_id = ''
-    order.save(update_fields=['status', 'public_ip', 'previous_public_ip', 'provision_note', 'instance_id', 'provider_resource_id', 'updated_at'])
+    order.save(update_fields=['status', 'public_ip', 'previous_public_ip', 'static_ip_name', 'ip_recycle_at', 'provision_note', 'instance_id', 'provider_resource_id', 'updated_at'])
     if asset:
         asset.public_ip = previous_public_ip
         asset.previous_public_ip = previous_public_ip
         asset.instance_id = None
         asset.provider_resource_id = None
+        asset.status = CloudAsset.STATUS_DELETED
         asset.provider_status = '固定IP保留中-实例已删除'
         asset.is_active = False
         asset.note = append_note(asset.note, order.provision_note)
         asset.updated_at = now
-        asset.save(update_fields=['public_ip', 'previous_public_ip', 'instance_id', 'provider_resource_id', 'provider_status', 'is_active', 'note', 'updated_at'])
+        asset.save(update_fields=['public_ip', 'previous_public_ip', 'instance_id', 'provider_resource_id', 'status', 'provider_status', 'is_active', 'note', 'updated_at'])
     if server:
         server.public_ip = previous_public_ip
         server.previous_public_ip = previous_public_ip
         server.instance_id = None
         server.provider_resource_id = None
+        server.status = Server.STATUS_DELETED
         server.provider_status = '固定IP保留中-实例已删除'
         server.is_active = False
         server.note = append_note(server.note, order.provision_note)
         server.updated_at = now
-        server.save(update_fields=['public_ip', 'previous_public_ip', 'instance_id', 'provider_resource_id', 'provider_status', 'is_active', 'note', 'updated_at'])
+        server.save(update_fields=['public_ip', 'previous_public_ip', 'instance_id', 'provider_resource_id', 'status', 'provider_status', 'is_active', 'note', 'updated_at'])
     record_cloud_ip_log(event_type='deleted', order=order, asset=asset, server=server, previous_public_ip=previous_public_ip, public_ip=previous_public_ip, note=retention_note)
     return order
 
@@ -394,7 +402,7 @@ def _secret_notice_hint(secret: str | None) -> str:
 
 def _retained_static_ip_note(order: CloudServerOrder, ip: str, action_note: str = '') -> str:
     return (
-        f'实例已删除，固定 IP 保留中；IP={ip or "缺失"}；端口={order.mtproxy_port or "-"}；'
+        f'实例已删除，固定 IP 保留中；IP={ip or "缺失"}；固定IP名={order.static_ip_name or "-"}；端口={order.mtproxy_port or "-"}；'
         f'secret={_secret_notice_hint(order.mtproxy_secret)}；服务到期={_format_notice_dt(order.service_expires_at)}；'
         f'宽限删机={_format_notice_dt(order.delete_at)}；未附加 IP 计划回收={_format_notice_dt(order.ip_recycle_at)}；'
         f'用户续费/重装时必须用旧 IP、旧端口、旧 secret 与用户提供链接逐项对照。{("；" + action_note) if action_note else ""}'
