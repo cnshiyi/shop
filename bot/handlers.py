@@ -525,6 +525,7 @@ async def _reply_cloud_query_results(message: Message, raw_text: str, state: FSM
                 'asset_id': 0 if is_public_view else (asset.id if can_asset_renew else 0),
                 'start_order_id': public_renew_order_id if include_start else 0,
                 'auto_renew_enabled': bool(linked_order.get('auto_renew_enabled')),
+                'can_auto_renew': bool(include_start or is_owned_asset),
                 'can_change_ip': can_admin_asset_change_ip or can_user_asset_change_ip,
                 'can_reinit': can_admin_asset_reinit or can_user_asset_operate,
                 'can_config': can_admin_asset_config or can_user_asset_operate,
@@ -577,6 +578,7 @@ async def _reply_cloud_query_results(message: Message, raw_text: str, state: FSM
             'order_id': order.id,
             'asset_id': 0,
             'auto_renew_enabled': bool(getattr(order, 'auto_renew_enabled', False)),
+            'can_auto_renew': bool(include_start or is_owned_order),
             'can_change_ip': can_admin_change_ip or can_user_change_ip,
             'can_reinit': can_admin_reinit or can_user_reinit,
             'can_config': can_admin_config or can_user_config,
@@ -613,7 +615,7 @@ async def _reply_cloud_query_results(message: Message, raw_text: str, state: FSM
     total_pages = max(1, math.ceil(len(results) / per_page))
     page_items = results[(page - 1) * per_page: page * per_page]
     text = '🔎 IP查询结果\n\n' + '\n\n'.join(item['text'] for item in page_items)
-    renewable_items = [{'ip': item['ip'], 'order_id': item.get('order_id') or 0, 'asset_id': item.get('asset_id') or 0, 'start_order_id': item.get('start_order_id') or 0, 'auto_renew_enabled': item.get('auto_renew_enabled'), 'can_change_ip': item.get('can_change_ip'), 'can_reinit': item.get('can_reinit'), 'can_config': item.get('can_config'), 'can_support': item.get('can_support')} for item in page_items if item['renewable'] and (item.get('order_id') or item.get('asset_id'))]
+    renewable_items = [{'ip': item['ip'], 'order_id': item.get('order_id') or 0, 'asset_id': item.get('asset_id') or 0, 'start_order_id': item.get('start_order_id') or 0, 'auto_renew_enabled': item.get('auto_renew_enabled'), 'can_auto_renew': item.get('can_auto_renew'), 'can_change_ip': item.get('can_change_ip'), 'can_reinit': item.get('can_reinit'), 'can_config': item.get('can_config'), 'can_support': item.get('can_support')} for item in page_items if item['renewable'] and (item.get('order_id') or item.get('asset_id'))]
     sent = await message.answer(text, reply_markup=cloud_ip_query_result(page_items, renewable_items, page, total_pages, include_start=include_start, include_reinit=include_start), parse_mode='HTML')
     logger.info(
         'BOT_MESSAGE_SEND route=cloud_ip_query_result user_id=%s chat_id=%s reply_to=%s sent_message_id=%s result_count=%s renewable_count=%s page=%s total_pages=%s include_start=%s text_preview=%s',
@@ -2702,7 +2704,7 @@ def register_handlers(dp: Dispatcher):
         page = min(page, total_pages)
         page_items = results[(page - 1) * per_page: page * per_page]
         text = '🔎 IP查询结果\n\n' + '\n\n'.join(item['text'] for item in page_items)
-        renewable_items = [{'ip': item['ip'], 'order_id': item.get('order_id') or 0, 'asset_id': item.get('asset_id') or 0, 'start_order_id': item.get('start_order_id') or 0, 'auto_renew_enabled': item.get('auto_renew_enabled'), 'can_change_ip': item.get('can_change_ip'), 'can_reinit': item.get('can_reinit'), 'can_config': item.get('can_config'), 'can_support': item.get('can_support')} for item in page_items if item['renewable'] and (item.get('order_id') or item.get('asset_id'))]
+        renewable_items = [{'ip': item['ip'], 'order_id': item.get('order_id') or 0, 'asset_id': item.get('asset_id') or 0, 'start_order_id': item.get('start_order_id') or 0, 'auto_renew_enabled': item.get('auto_renew_enabled'), 'can_auto_renew': item.get('can_auto_renew'), 'can_change_ip': item.get('can_change_ip'), 'can_reinit': item.get('can_reinit'), 'can_config': item.get('can_config'), 'can_support': item.get('can_support')} for item in page_items if item['renewable'] and (item.get('order_id') or item.get('asset_id'))]
         is_admin = await _is_admin_chat(callback.message)
         await _safe_edit_text(callback.message, text, reply_markup=cloud_ip_query_result(page_items, renewable_items, page, total_pages, include_start=is_admin, include_reinit=is_admin), parse_mode='HTML')
 

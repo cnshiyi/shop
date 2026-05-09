@@ -742,8 +742,9 @@ def cloud_ip_query_result(result_items, renewable_items, page: int = 1, total_pa
                 action_buttons.append(InlineKeyboardButton(text='🛠 重新安装', callback_data=f'cloud:reinit:{order_id}'))
             if item.get('can_config') and (include_reinit or item.get('can_support')):
                 action_buttons.append(InlineKeyboardButton(text='⚙️ 修改配置', callback_data=f'cloud:upgrade:{order_id}'))
-            auto_enabled = bool(item.get('auto_renew_enabled'))
-            action_buttons.append(InlineKeyboardButton(text=f'{"⛔ 关闭" if auto_enabled else "⚡ 开启"}自动续费', callback_data=f'cloud:autorenew:{"off" if auto_enabled else "on"}:{order_id}'))
+            if item.get('can_auto_renew') or include_start:
+                auto_enabled = bool(item.get('auto_renew_enabled'))
+                action_buttons.append(InlineKeyboardButton(text=f'{"⛔ 关闭" if auto_enabled else "⚡ 开启"}自动续费', callback_data=f'cloud:autorenew:{"off" if auto_enabled else "on"}:{order_id}'))
             if item.get('can_support'):
                 action_buttons.append(support_contact_button('cloud_query_ip', order_id))
         elif asset_id > 0:

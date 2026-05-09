@@ -3441,6 +3441,8 @@ class CloudServerServicesTestCase(TestCase):
         self.assertNotIn('🌐 更换IP', labels)
         self.assertNotIn('🛠 重新安装', labels)
         self.assertNotIn('⚙️ 修改配置', labels)
+        self.assertNotIn('⚡ 开启自动续费', labels)
+        self.assertNotIn('⛔ 关闭自动续费', labels)
         self.assertNotIn('👩‍💻 联系客服', labels)
 
     def test_lifecycle_aws_sync_scans_all_regions_without_env_region(self):
