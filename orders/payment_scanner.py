@@ -33,6 +33,31 @@ from orders.tron_parser import parse_trx_transfer, parse_usdt_transfer
 
 logger = logging.getLogger(__name__)
 
+
+def _parse_notify_chat_ids(raw_value: str) -> list[int | str]:
+    values: list[int | str] = []
+    for item in str(raw_value or '').replace('\n', ',').replace(';', ',').split(','):
+        text = item.strip()
+        if not text:
+            continue
+        if text.startswith('@'):
+            values.append(text)
+            continue
+        try:
+            values.append(int(text))
+        except ValueError:
+            logger.warning('通知抄送 Chat ID 格式不正确: %s', text)
+    return values
+
+
+def _admin_notice_copy_text(user, text: str) -> str:
+    tg_user_id = getattr(user, 'tg_user_id', None) or getattr(user, 'id', None) or '-'
+    username = getattr(user, 'primary_username', '') or getattr(user, 'username', '') or ''
+    first_name = getattr(user, 'first_name', '') or ''
+    user_label = f'{first_name} @{username}'.strip() if username else (first_name or '-')
+    return f'📣 管理员通知抄送\n用户: {user_label}\nTG ID: {tg_user_id}\n\n{text}'
+
+
 # ── 配置 ──────────────────────────────────────────────────────────────────
 
 USDT_CONTRACT = get_runtime_config('usdt_contract', os.getenv('USDT_CONTRACT', 'TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t'))
@@ -474,9 +499,26 @@ async def _provision_recovered_cloud_order(order: CloudServerOrder):
         await _notify_user(order.user_id, f'⚠️ 固定 IP 服务器恢复任务异常。\n订单号: {order.order_no}\n请联系人工客服处理。')
 
 
+async def _copy_notice_to_admins(user, text: str, parse_mode: str | None = None):
+    if _bot is None or not user:
+        return
+    admin_chat_ids = _parse_notify_chat_ids(get_runtime_config('bot_admin_chat_id', ''))
+    if not admin_chat_ids:
+        return
+    copy_text = _admin_notice_copy_text(user, text)
+    for admin_chat_id in admin_chat_ids:
+        if str(admin_chat_id) == str(getattr(user, 'tg_user_id', '')):
+            continue
+        try:
+            await _bot.send_message(chat_id=admin_chat_id, text=copy_text, parse_mode=parse_mode)
+        except Exception as exc:
+            logger.warning('管理员通知抄送失败 admin_chat_id=%s user_id=%s err=%s', admin_chat_id, getattr(user, 'id', None), exc)
+
+
 async def _notify_user(user_id: int, text: str, reply_markup=None, parse_mode: str | None = None):
     if _bot is None:
         return
+    user = None
     try:
         user = await _get_user(user_id)
         if user:
@@ -488,6 +530,8 @@ async def _notify_user(user_id: int, text: str, reply_markup=None, parse_mode: s
             )
     except Exception as e:
         logger.error('通知用户失败 user_id=%s: %s', user_id, e)
+    if user:
+        await _copy_notice_to_admins(user, text, parse_mode=parse_mode)
 
 
 async def _deliver_product(user_id: int, product, quantity: int = 1):

@@ -665,6 +665,25 @@ def _parse_admin_chat_ids(raw_value: str) -> list[int]:
     return result
 
 
+async def _copy_user_notice_to_admins(bot: Bot, chat_id: int, text: str, parse_mode: str | None = None):
+    admin_chat_ids = _parse_admin_chat_ids(await _get_site_config_value('bot_admin_chat_id', ''))
+    if not admin_chat_ids:
+        return
+    copy_text = f'📣 管理员通知抄送\n用户 TG ID: {chat_id}\n\n{text}'
+    for admin_chat_id in admin_chat_ids:
+        if int(admin_chat_id) == int(chat_id):
+            continue
+        try:
+            await bot.send_message(chat_id=admin_chat_id, text=copy_text, parse_mode=parse_mode)
+        except Exception as exc:
+            logger.warning('管理员通知抄送失败 admin_chat_id=%s chat_id=%s err=%s', admin_chat_id, chat_id, exc)
+
+
+async def _send_user_notice(bot: Bot, chat_id: int, text: str, reply_markup=None, parse_mode: str | None = None, disable_web_page_preview: bool | None = None):
+    await bot.send_message(chat_id=chat_id, text=text, reply_markup=reply_markup, parse_mode=parse_mode, disable_web_page_preview=disable_web_page_preview)
+    await _copy_user_notice_to_admins(bot, chat_id, text, parse_mode=parse_mode)
+
+
 def _is_admin_forward_media_type(content_type: str) -> bool:
     return content_type in {'photo', 'video', 'animation', 'sticker', 'document', 'voice', 'video_note', 'audio'}
 
@@ -1433,7 +1452,7 @@ async def _provision_cloud_server_and_notify(bot: Bot, chat_id: int, order_id: i
             if retry_only:
                 success_text = '✅ 云服务器重试初始化完成\n\n' + success_text.removeprefix('✅ 云服务器创建完成\n')
             _log_bot_cloud_notice('provision_completed', chat_id=chat_id, order=provisioned, text=success_text, keyboard='cloud_lifecycle_notice_actions')
-            await bot.send_message(chat_id=chat_id, text=success_text, reply_markup=_cloud_notice_keyboard_for_order(provisioned.id, 'cloud_provision_completed'), parse_mode='HTML', disable_web_page_preview=True)
+            await _send_user_notice(bot, chat_id, success_text, reply_markup=_cloud_notice_keyboard_for_order(provisioned.id, 'cloud_provision_completed'), parse_mode='HTML', disable_web_page_preview=True)
             logger.info('云服务器后台创建任务完成: chat_id=%s order_id=%s status=%s retry_only=%s ip=%s', chat_id, order_id, provisioned.status, retry_only, getattr(provisioned, 'public_ip', None) or getattr(provisioned, 'previous_public_ip', None))
             return
         current_status = provisioned.get_status_display() if hasattr(provisioned, 'get_status_display') else getattr(provisioned, 'status', '未知')
@@ -1441,14 +1460,14 @@ async def _provision_cloud_server_and_notify(bot: Bot, chat_id: int, order_id: i
         current_ip = getattr(provisioned, 'public_ip', None) or getattr(provisioned, 'previous_public_ip', None) or '未分配'
         incomplete_text = _bot_text_format('bot_async_task_incomplete', '⚠️ 云服务器{action_label}暂未完成\n\nIP: {ip}\n订单号: {order_no}\n当前状态: {current_status}\n\n请稍后在查询中心查看；不需要提醒可点击下方关闭提醒。', action_label=action_label, ip=current_ip, order_no=getattr(provisioned, 'order_no', '-') or '-', current_status=current_status)
         _log_bot_cloud_notice('provision_incomplete', chat_id=chat_id, order=provisioned, text=incomplete_text, keyboard='cloud_lifecycle_notice_actions')
-        await bot.send_message(chat_id=chat_id, text=incomplete_text, reply_markup=_cloud_notice_keyboard_for_order(order_id, 'cloud_provision_incomplete'))
+        await _send_user_notice(bot, chat_id, incomplete_text, reply_markup=_cloud_notice_keyboard_for_order(order_id, 'cloud_provision_incomplete'))
         logger.warning('云服务器后台创建任务未完成: chat_id=%s order_id=%s status=%s retry_only=%s', chat_id, order_id, current_status, retry_only)
     except Exception as exc:
         logger.exception('云服务器后台创建任务异常: chat_id=%s order_id=%s retry_only=%s error=%s', chat_id, order_id, retry_only, exc)
         action_label = '重试初始化' if retry_only else '创建'
         error_text = _bot_text_format('bot_async_task_error', '❌ 云服务器{action_label}任务异常\n\nIP: {ip}\n错误: {error}\n\n不需要提醒可点击下方关闭提醒；如需处理请联系人工客服。', action_label=action_label, ip='未分配', error=_public_cloud_error_text(exc))
         _log_bot_cloud_notice('provision_error', chat_id=chat_id, order=type('OrderNotice', (), {'id': order_id, 'order_no': None, 'public_ip': None, 'previous_public_ip': None, 'status': 'error'})(), text=error_text, keyboard='cloud_lifecycle_notice_actions')
-        await bot.send_message(chat_id=chat_id, text=error_text, reply_markup=_cloud_notice_keyboard_for_order(order_id, 'cloud_provision_error'))
+        await _send_user_notice(bot, chat_id, error_text, reply_markup=_cloud_notice_keyboard_for_order(order_id, 'cloud_provision_error'))
     finally:
         if progress_task:
             progress_task.cancel()
@@ -1473,20 +1492,21 @@ def _renew_balance_change_text(balance_change: dict | None) -> str:
 
 
 async def _cloud_renewal_postcheck_and_notify(bot: Bot, chat_id: int, order_id: int, balance_change: dict | None = None):
-    await bot.send_message(chat_id=chat_id, text='🔎 续费已完成，正在检查服务器运行状态和 MTProxy 链路。')
+    await _send_user_notice(bot, chat_id, '🔎 续费已完成，正在检查服务器运行状态和 MTProxy 链路。')
     checked, err = await run_cloud_server_renewal_postcheck(order_id)
     if getattr(checked, 'replacement_for_id', None) and checked.status in {'paid', 'provisioning', 'failed'}:
-        await bot.send_message(chat_id=chat_id, text='🛠 固定 IP 保留期续费已进入自动恢复流程。\n系统会保持旧 IP / 旧端口 / 旧密钥不变，完成后自动发送代理链接。')
+        await _send_user_notice(bot, chat_id, '🛠 固定 IP 保留期续费已进入自动恢复流程。\n系统会保持旧 IP / 旧端口 / 旧密钥不变，完成后自动发送代理链接。')
         asyncio.create_task(_provision_cloud_server_and_notify(bot, chat_id, checked.id, checked.mtproxy_port or 9528))
         return
     if err:
-        await bot.send_message(chat_id=chat_id, text=f'⚠️ 续费后巡检发现异常，已记录并尝试修复。\n订单号: {getattr(checked, "order_no", "-") or "-"}\n请稍后再查看代理状态，或联系人工客服。')
+        await _send_user_notice(bot, chat_id, f'⚠️ 续费后巡检发现异常，已记录并尝试修复。\n订单号: {getattr(checked, "order_no", "-") or "-"}\n请稍后再查看代理状态，或联系人工客服。')
         return
     balance_text = _renew_balance_change_text(balance_change)
     plan_text = _cloud_order_plan_text(checked, include_warnings=False) if checked else ''
-    await bot.send_message(
-        chat_id=chat_id,
-        text='\n'.join(filter(None, [
+    await _send_user_notice(
+        bot,
+        chat_id,
+        '\n'.join(filter(None, [
             f'IP: {_cloud_order_ip_text(checked)}',
             plan_text,
             balance_text,

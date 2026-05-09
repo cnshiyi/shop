@@ -30,6 +30,30 @@ logger = logging.getLogger(__name__)
 BOT_ALIVE_LOG_INTERVAL_SECONDS = int(os.getenv('BOT_ALIVE_LOG_INTERVAL_SECONDS', '60') or '60')
 
 
+def _parse_notify_chat_ids(raw_value: str) -> list[int | str]:
+    values: list[int | str] = []
+    for item in str(raw_value or '').replace('\n', ',').replace(';', ',').split(','):
+        text = item.strip()
+        if not text:
+            continue
+        if text.startswith('@'):
+            values.append(text)
+            continue
+        try:
+            values.append(int(text))
+        except ValueError:
+            logger.warning('通知抄送 Chat ID 格式不正确: %s', text)
+    return values
+
+
+def _admin_notice_copy_text(user, text: str) -> str:
+    tg_user_id = getattr(user, 'tg_user_id', None) or getattr(user, 'id', None) or '-'
+    username = getattr(user, 'primary_username', '') or getattr(user, 'username', '') or ''
+    first_name = getattr(user, 'first_name', '') or ''
+    user_label = f'{first_name} @{username}'.strip() if username else (first_name or '-')
+    return f'📣 管理员通知抄送\n用户: {user_label}\nTG ID: {tg_user_id}\n\n{text}'
+
+
 def _log_task_done(name: str):
     def _callback(task: asyncio.Task):
         if task.cancelled():
@@ -115,25 +139,42 @@ async def run_bot():
     set_bot(bot)
     set_resource_bot(bot)
 
+    async def _copy_notice_to_admins(user, text: str):
+        raw_admin_value = await asyncio.to_thread(get_runtime_config, 'bot_admin_chat_id', '')
+        admin_chat_ids = _parse_notify_chat_ids(raw_admin_value)
+        if not admin_chat_ids:
+            return
+        copy_text = _admin_notice_copy_text(user, text)
+        for admin_chat_id in admin_chat_ids:
+            if str(admin_chat_id) == str(getattr(user, 'tg_user_id', '')):
+                continue
+            try:
+                await bot.send_message(chat_id=admin_chat_id, text=copy_text, parse_mode='HTML')
+            except Exception as exc:
+                logger.warning('管理员通知抄送失败 admin_chat_id=%s user=%s err=%s', admin_chat_id, getattr(user, 'id', None), exc)
+
     async def _notify(user_id: int, text: str, reply_markup=None):
         from bot.models import TelegramUser
 
         user = await asyncio.to_thread(lambda: TelegramUser.objects.filter(id=user_id).first())
         if not user:
             return False
+        delivered = False
         try:
             await bot.send_message(user.tg_user_id, text, reply_markup=reply_markup, parse_mode='HTML')
-            return True
+            delivered = True
         except Exception as exc:
             logger.warning('机器人生命周期通知发送失败 user=%s err=%s，尝试个人号通知', user_id, exc)
             try:
                 sent = await send_with_notification_account(user.tg_user_id, text)
                 if sent:
-                    return True
-                logger.warning('个人号生命周期通知无可用账号 user=%s', user_id)
+                    delivered = True
+                else:
+                    logger.warning('个人号生命周期通知无可用账号 user=%s', user_id)
             except Exception as fallback_exc:
                 logger.warning('个人号生命周期通知发送失败 user=%s err=%s', user_id, fallback_exc)
-        return False
+        await _copy_notice_to_admins(user, text)
+        return delivered
 
     async def _notify_target(chat_id, text: str, reply_markup=None):
         try:
