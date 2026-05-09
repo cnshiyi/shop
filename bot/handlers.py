@@ -519,7 +519,7 @@ async def _reply_cloud_query_results(message: Message, raw_text: str, state: FSM
             action_order_id = public_renew_order_id if public_renew_order_id and not is_unattached_ip_asset else 0
             results.append({
                 'ip': display_ip,
-                'text': f'IP: <code>{escape(display_ip)}</code>\n到期时间: {expires_text}' if is_public_view else f'IP: <code>{escape(display_ip)}</code>\n到期时间: {expires_text}\n自动续费: {auto_renew_text}\n状态: {escape(status_text)}{account_text}\n类型: 代理资产',
+                'text': f'IP: <code>{escape(display_ip)}</code>\n到期时间: {expires_text}' if is_public_view else f'IP: <code>{escape(display_ip)}</code>\n到期时间: {expires_text}\n自动续费: {auto_renew_text}\n状态: {escape(status_text)}{account_text}',
                 'renewable': bool(can_asset_renew or action_order_id),
                 'order_id': action_order_id,
                 'asset_id': 0 if is_public_view else (asset.id if can_asset_renew else 0),
