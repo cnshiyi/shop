@@ -497,19 +497,34 @@ async def _reply_cloud_query_results(message: Message, raw_text: str, state: FSM
                     or 'StaticIp' in str(getattr(asset, 'provider_resource_id', '') or '')
                 )
             )
-            can_admin_asset_reinit = bool(include_start and asset.provider == 'aws_lightsail' and display_ip and not is_unattached_ip_asset)
-            can_admin_asset_config = bool(include_start and asset.provider == 'aws_lightsail' and not is_unattached_ip_asset)
-            can_user_asset_operate = bool(is_owned_asset and asset.provider == 'aws_lightsail' and display_ip and not is_unattached_ip_asset)
-            can_asset_renew = bool((is_owned_asset or include_start) and (is_unattached_ip_asset or not getattr(asset, 'order_id', None)))
             public_renew_order_id = getattr(asset, 'order_id', None) or 0
+            linked_order = await _cloud_asset_order_summary(public_renew_order_id) if public_renew_order_id else {}
+            linked_order_status = str(linked_order.get('status') or '').strip()
+            linked_order_provider = str(linked_order.get('provider') or asset.provider or '').strip()
+            auto_renew_text = '已开启' if linked_order.get('auto_renew_enabled') else ('未开启' if public_renew_order_id else '未绑定订单')
+            can_linked_order_operate = bool(
+                public_renew_order_id
+                and linked_order_provider == 'aws_lightsail'
+                and display_ip
+                and not is_unattached_ip_asset
+                and linked_order_status in {'completed', 'expiring', 'suspended', 'renew_pending'}
+            )
+            can_admin_asset_reinit = bool(include_start and can_linked_order_operate and linked_order.get('login_password'))
+            can_admin_asset_config = bool(include_start and can_linked_order_operate and linked_order_status in {'completed', 'expiring', 'suspended'})
+            can_admin_asset_change_ip = bool(include_start and can_linked_order_operate and linked_order_status in {'completed', 'expiring', 'suspended'})
+            can_user_asset_operate = bool(is_owned_asset and can_linked_order_operate)
+            can_user_asset_change_ip = bool(can_user_asset_operate and max(int(linked_order.get('ip_change_quota') or 0), 0) > 0)
+            can_asset_renew = bool((is_owned_asset or include_start) and (is_unattached_ip_asset or not public_renew_order_id))
+            action_order_id = public_renew_order_id if public_renew_order_id and not is_unattached_ip_asset else 0
             results.append({
                 'ip': display_ip,
-                'text': f'IP: <code>{escape(display_ip)}</code>\n到期时间: {expires_text}' if not include_start and not is_owned_asset else f'IP: <code>{escape(display_ip)}</code>\n到期时间: {expires_text}\n自动续费: {"已绑定订单" if getattr(asset, "order_id", None) else "未绑定订单"}\n状态: {escape(status_text)}{account_text}\n类型: 代理资产',
-                'renewable': bool(can_asset_renew or public_renew_order_id),
-                'order_id': public_renew_order_id if not is_owned_asset and not include_start else 0,
+                'text': f'IP: <code>{escape(display_ip)}</code>\n到期时间: {expires_text}' if not include_start and not is_owned_asset else f'IP: <code>{escape(display_ip)}</code>\n到期时间: {expires_text}\n自动续费: {auto_renew_text}\n状态: {escape(status_text)}{account_text}\n类型: 代理资产',
+                'renewable': bool(can_asset_renew or action_order_id),
+                'order_id': action_order_id,
                 'asset_id': asset.id if can_asset_renew else 0,
                 'start_order_id': public_renew_order_id,
-                'can_change_ip': can_user_asset_operate,
+                'auto_renew_enabled': bool(linked_order.get('auto_renew_enabled')),
+                'can_change_ip': can_admin_asset_change_ip or can_user_asset_change_ip,
                 'can_reinit': can_admin_asset_reinit or can_user_asset_operate,
                 'can_config': can_admin_asset_config or can_user_asset_operate,
                 'can_support': is_owned_asset,
@@ -550,6 +565,7 @@ async def _reply_cloud_query_results(message: Message, raw_text: str, state: FSM
         is_owned_order = bool(user and getattr(order, 'user_id', None) == user.id)
         can_admin_reinit = bool(include_start and order.provider == 'aws_lightsail' and display_ip and getattr(order, 'login_password', None) and order.status in {'completed', 'expiring', 'renew_pending', 'suspended', 'failed'})
         can_admin_config = bool(include_start and order.provider == 'aws_lightsail' and order.status in {'completed', 'expiring', 'suspended'})
+        can_admin_change_ip = bool(include_start and order.provider == 'aws_lightsail' and display_ip and order.status in {'completed', 'expiring', 'suspended'})
         can_user_change_ip = bool(is_owned_order and order.provider == 'aws_lightsail' and display_ip and order.status in {'completed', 'expiring', 'suspended'} and max(int(getattr(order, 'ip_change_quota', 0) or 0), 0) > 0)
         can_user_reinit = bool(is_owned_order and order.provider == 'aws_lightsail' and display_ip and getattr(order, 'login_password', None) and order.status == 'completed')
         can_user_config = bool(is_owned_order and order.provider == 'aws_lightsail' and order.status in {'completed', 'expiring', 'suspended'})
@@ -559,7 +575,8 @@ async def _reply_cloud_query_results(message: Message, raw_text: str, state: FSM
             'renewable': True,
             'order_id': order.id,
             'asset_id': 0,
-            'can_change_ip': can_user_change_ip,
+            'auto_renew_enabled': bool(getattr(order, 'auto_renew_enabled', False)),
+            'can_change_ip': can_admin_change_ip or can_user_change_ip,
             'can_reinit': can_admin_reinit or can_user_reinit,
             'can_config': can_admin_config or can_user_config,
             'can_support': is_owned_order,
@@ -594,8 +611,8 @@ async def _reply_cloud_query_results(message: Message, raw_text: str, state: FSM
     per_page = 8
     total_pages = max(1, math.ceil(len(results) / per_page))
     page_items = results[(page - 1) * per_page: page * per_page]
-    text = '🔎 IP批量查询结果\n\n' + '\n\n'.join(item['text'] for item in page_items)
-    renewable_items = [{'ip': item['ip'], 'order_id': item.get('order_id') or 0, 'asset_id': item.get('asset_id') or 0, 'start_order_id': item.get('start_order_id') or 0, 'can_change_ip': item.get('can_change_ip'), 'can_reinit': item.get('can_reinit'), 'can_config': item.get('can_config'), 'can_support': item.get('can_support')} for item in page_items if item['renewable'] and (item.get('order_id') or item.get('asset_id'))]
+    text = '🔎 IP查询结果\n\n' + '\n\n'.join(item['text'] for item in page_items)
+    renewable_items = [{'ip': item['ip'], 'order_id': item.get('order_id') or 0, 'asset_id': item.get('asset_id') or 0, 'start_order_id': item.get('start_order_id') or 0, 'auto_renew_enabled': item.get('auto_renew_enabled'), 'can_change_ip': item.get('can_change_ip'), 'can_reinit': item.get('can_reinit'), 'can_config': item.get('can_config'), 'can_support': item.get('can_support')} for item in page_items if item['renewable'] and (item.get('order_id') or item.get('asset_id'))]
     sent = await message.answer(text, reply_markup=cloud_ip_query_result(page_items, renewable_items, page, total_pages, include_start=include_start, include_reinit=include_start), parse_mode='HTML')
     logger.info(
         'BOT_MESSAGE_SEND route=cloud_ip_query_result user_id=%s chat_id=%s reply_to=%s sent_message_id=%s result_count=%s renewable_count=%s page=%s total_pages=%s include_start=%s text_preview=%s',
@@ -1741,6 +1758,22 @@ async def _validate_reinstall_proxy_link(order, link_data: dict[str, str], probe
 
 
 @sync_to_async
+def _cloud_asset_order_summary(order_id: int) -> dict:
+    from cloud.models import CloudServerOrder
+    order = CloudServerOrder.objects.filter(id=order_id).first()
+    if not order:
+        return {}
+    return {
+        'id': order.id,
+        'status': order.status,
+        'provider': order.provider,
+        'auto_renew_enabled': bool(order.auto_renew_enabled),
+        'login_password': bool(order.login_password),
+        'ip_change_quota': int(order.ip_change_quota or 0),
+    }
+
+
+@sync_to_async
 def _save_asset_main_proxy_link(asset_id: int, user_id: int | None, link_data: dict[str, str]):
     from cloud.models import CloudAsset
     qs = CloudAsset.objects.filter(id=asset_id)
@@ -2666,8 +2699,8 @@ def register_handlers(dp: Dispatcher):
         total_pages = max(1, math.ceil(len(results) / per_page))
         page = min(page, total_pages)
         page_items = results[(page - 1) * per_page: page * per_page]
-        text = '🔎 IP批量查询结果\n\n' + '\n\n'.join(item['text'] for item in page_items)
-        renewable_items = [{'ip': item['ip'], 'order_id': item.get('order_id') or 0, 'asset_id': item.get('asset_id') or 0, 'start_order_id': item.get('start_order_id') or 0, 'can_change_ip': item.get('can_change_ip'), 'can_reinit': item.get('can_reinit'), 'can_config': item.get('can_config'), 'can_support': item.get('can_support')} for item in page_items if item['renewable'] and (item.get('order_id') or item.get('asset_id'))]
+        text = '🔎 IP查询结果\n\n' + '\n\n'.join(item['text'] for item in page_items)
+        renewable_items = [{'ip': item['ip'], 'order_id': item.get('order_id') or 0, 'asset_id': item.get('asset_id') or 0, 'start_order_id': item.get('start_order_id') or 0, 'auto_renew_enabled': item.get('auto_renew_enabled'), 'can_change_ip': item.get('can_change_ip'), 'can_reinit': item.get('can_reinit'), 'can_config': item.get('can_config'), 'can_support': item.get('can_support')} for item in page_items if item['renewable'] and (item.get('order_id') or item.get('asset_id'))]
         is_admin = await _is_admin_chat(callback.message)
         await _safe_edit_text(callback.message, text, reply_markup=cloud_ip_query_result(page_items, renewable_items, page, total_pages, include_start=is_admin, include_reinit=is_admin), parse_mode='HTML')
 
@@ -3793,7 +3826,10 @@ def register_handlers(dp: Dispatcher):
         _, _, action, order_id_text = callback.data.split(':')
         order_id = int(order_id_text)
         enabled = action == 'on'
-        order = await set_cloud_server_auto_renew(order_id, user.id, enabled)
+        if await _is_admin_chat(callback.message):
+            order = await set_cloud_server_auto_renew_admin(order_id, enabled)
+        else:
+            order = await set_cloud_server_auto_renew(order_id, user.id, enabled)
         if order is False:
             await _safe_callback_answer(callback, '该服务器IP已删除，禁止续费', show_alert=True)
             return
