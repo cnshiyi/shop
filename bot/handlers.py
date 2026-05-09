@@ -520,10 +520,10 @@ async def _reply_cloud_query_results(message: Message, raw_text: str, state: FSM
             results.append({
                 'ip': display_ip,
                 'text': f'IP: <code>{escape(display_ip)}</code>\n到期时间: {expires_text}' if is_public_view else f'IP: <code>{escape(display_ip)}</code>\n到期时间: {expires_text}\n自动续费: {auto_renew_text}\n状态: {escape(status_text)}{account_text}\n类型: 代理资产',
-                'renewable': bool(not is_public_view and (can_asset_renew or action_order_id)),
-                'order_id': 0 if is_public_view else action_order_id,
+                'renewable': bool(can_asset_renew or action_order_id),
+                'order_id': action_order_id,
                 'asset_id': 0 if is_public_view else (asset.id if can_asset_renew else 0),
-                'start_order_id': 0 if is_public_view else public_renew_order_id,
+                'start_order_id': public_renew_order_id if include_start else 0,
                 'auto_renew_enabled': bool(linked_order.get('auto_renew_enabled')),
                 'can_change_ip': can_admin_asset_change_ip or can_user_asset_change_ip,
                 'can_reinit': can_admin_asset_reinit or can_user_asset_operate,
@@ -573,8 +573,8 @@ async def _reply_cloud_query_results(message: Message, raw_text: str, state: FSM
         results.append({
             'ip': display_ip,
             'text': f'IP: <code>{escape(display_ip)}</code>\n到期时间: {expires_text}' if is_public_view else f'IP: <code>{escape(display_ip)}</code>\n到期时间: {expires_text}\n自动续费: {auto_renew_text}\n状态: {status_text}{account_text}{balance_block}',
-            'renewable': not is_public_view,
-            'order_id': 0 if is_public_view else order.id,
+            'renewable': True,
+            'order_id': order.id,
             'asset_id': 0,
             'auto_renew_enabled': bool(getattr(order, 'auto_renew_enabled', False)),
             'can_change_ip': can_admin_change_ip or can_user_change_ip,
@@ -3732,6 +3732,8 @@ def register_handlers(dp: Dispatcher):
             return
         try:
             order = await create_cloud_server_renewal_by_public_query(order_id, 31) if is_admin else await create_cloud_server_renewal(order_id, user.id, 31)
+            if not order and not is_admin:
+                order = await create_cloud_server_renewal_by_public_query(order_id, 31)
         except RenewalPriceMissingError as exc:
             await _safe_callback_answer(callback, str(exc), show_alert=True)
             return
