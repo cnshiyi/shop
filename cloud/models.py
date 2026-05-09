@@ -228,6 +228,13 @@ class CloudServerOrder(models.Model):
 
     def save(self, *args, **kwargs):
         requested_update_fields = kwargs.get('update_fields')
+        requested_field_set = set(requested_update_fields or [])
+        preserve_unattached_ip_recycle_at = (
+            self.status == 'deleted'
+            and not str(self.instance_id or '').strip()
+            and self.ip_recycle_at
+            and not (requested_field_set & {'service_started_at', 'service_expires_at', 'lifecycle_days', 'renew_extension_days'})
+        )
         if self.completed_at and not self.service_started_at:
             self.service_started_at = self.completed_at
         if self.service_started_at and not self.service_expires_at:
@@ -242,7 +249,8 @@ class CloudServerOrder(models.Model):
             self.delete_at = _with_runtime_time(self.suspend_at + timezone.timedelta(days=delete_days), 'cloud_delete_time')
             if self.delete_at < self.suspend_at:
                 self.delete_at = self.suspend_at
-            self.ip_recycle_at = self.delete_at + timezone.timedelta(days=_runtime_int_config('cloud_unattached_ip_delete_after_days', 15))
+            if not preserve_unattached_ip_recycle_at:
+                self.ip_recycle_at = self.delete_at + timezone.timedelta(days=_runtime_int_config('cloud_unattached_ip_delete_after_days', 15))
         if requested_update_fields is not None:
             update_fields = set(requested_update_fields)
             if self.completed_at and 'completed_at' in update_fields:

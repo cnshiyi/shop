@@ -17,7 +17,7 @@ from django.utils import timezone
 
 from bot.models import TelegramUser
 from cloud.models import CloudAsset, CloudIpLog, CloudServerOrder, CloudServerPlan, Server, ServerPrice, _runtime_int_config, _with_runtime_time
-from cloud.note_utils import append_note
+from cloud.note_utils import append_note, prepend_note
 from cloud.bootstrap import install_bbr, install_mtproxy
 from cloud.ports import get_mtproxy_public_ports
 from core.cache import get_redis
@@ -1603,7 +1603,160 @@ def _renewal_wallet_charge_amount(order: CloudServerOrder, user: TelegramUser | 
     return latest_usdt, latest_usdt
 
 
-def record_cloud_ip_log(*, event_type, order=None, asset=None, server=None, public_ip=None, previous_public_ip=None, note=''):
+def _cloud_ip_log_chain_ip(*, order_obj=None, asset_obj=None, server_obj=None, current_ip=None, previous_ip=None):
+    return (
+        current_ip
+        or previous_ip
+        or getattr(order_obj, 'public_ip', None)
+        or getattr(order_obj, 'previous_public_ip', None)
+        or getattr(asset_obj, 'public_ip', None)
+        or getattr(asset_obj, 'previous_public_ip', None)
+        or getattr(server_obj, 'public_ip', None)
+        or getattr(server_obj, 'previous_public_ip', None)
+    )
+
+
+def _cloud_ip_log_chain_candidates(*, order_obj=None, asset_obj=None, server_obj=None, current_ip=None, previous_ip=None):
+    return [
+        value for value in dict.fromkeys([
+            current_ip,
+            previous_ip,
+            getattr(order_obj, 'public_ip', None),
+            getattr(order_obj, 'previous_public_ip', None),
+            getattr(asset_obj, 'public_ip', None),
+            getattr(asset_obj, 'previous_public_ip', None),
+            getattr(server_obj, 'public_ip', None),
+            getattr(server_obj, 'previous_public_ip', None),
+        ]) if value
+    ]
+
+
+def _cloud_ip_log_chain_lookup(*, order_obj=None, asset_obj=None, server_obj=None, chain_ips=None):
+    is_unattached_static_asset = bool(
+        asset_obj
+        and (
+            not getattr(asset_obj, 'instance_id', None)
+            or '未附加固定IP' in str(getattr(asset_obj, 'provider_status', '') or '')
+            or 'StaticIp' in str(getattr(asset_obj, 'provider_resource_id', '') or '')
+        )
+    )
+    relation_match = Q()
+    if asset_obj:
+        relation_match |= Q(asset=asset_obj)
+    if server_obj:
+        relation_match |= Q(server=server_obj)
+    if order_obj and not is_unattached_static_asset:
+        relation_match |= Q(order=order_obj)
+    if relation_match:
+        existing = CloudIpLog.objects.filter(relation_match).order_by('-created_at', '-id').first()
+        if existing:
+            return existing
+
+    asset_name = getattr(asset_obj, 'asset_name', None) or getattr(server_obj, 'server_name', None) or getattr(order_obj, 'server_name', None)
+    instance_id = getattr(asset_obj, 'instance_id', None) or getattr(server_obj, 'instance_id', None) or getattr(order_obj, 'instance_id', None)
+    scoped_match = Q()
+    if asset_name:
+        scoped_match |= Q(asset_name=asset_name)
+    if instance_id:
+        scoped_match |= Q(instance_id=instance_id)
+    if not scoped_match:
+        return None
+    ip_match = Q()
+    for chain_ip in chain_ips or []:
+        ip_match |= Q(public_ip=chain_ip) | Q(previous_public_ip=chain_ip)
+    if not ip_match:
+        return None
+    return CloudIpLog.objects.filter(scoped_match & ip_match).order_by('-created_at', '-id').first()
+
+
+def _replacement_lineage_ids(order_obj):
+    if not order_obj:
+        return set()
+    seen = set()
+    queue = [getattr(order_obj, 'id', None)]
+    while queue:
+        current_id = queue.pop(0)
+        if not current_id or current_id in seen:
+            continue
+        seen.add(current_id)
+        parent_id = CloudServerOrder.objects.filter(id=current_id).values_list('replacement_for_id', flat=True).first()
+        if parent_id and parent_id not in seen:
+            queue.append(parent_id)
+        child_ids = list(CloudServerOrder.objects.filter(replacement_for_id=current_id).values_list('id', flat=True))
+        for child_id in child_ids:
+            if child_id not in seen:
+                queue.append(child_id)
+    return seen
+
+
+def _should_rebind_cloud_ip_log(latest_existing, order_obj):
+    if not latest_existing or not order_obj or not latest_existing.order_id:
+        return False
+    if latest_existing.order_id == order_obj.id:
+        return False
+    lineage_ids = _replacement_lineage_ids(order_obj)
+    return bool(lineage_ids and latest_existing.order_id in lineage_ids)
+
+
+def _merge_cloud_ip_log_duplicates(target):
+    if not target:
+        return target
+    if target.pk and not CloudIpLog.objects.filter(pk=target.pk).exists():
+        return target
+    candidates = [value for value in dict.fromkeys([target.public_ip, target.previous_public_ip]) if value]
+    if not candidates:
+        return target
+    match = Q()
+    if target.asset_id:
+        match |= Q(asset_id=target.asset_id)
+    if target.server_id:
+        match |= Q(server_id=target.server_id)
+    if target.order_id:
+        match |= Q(order_id=target.order_id)
+    scoped_name_match = Q()
+    if target.asset_name:
+        scoped_name_match |= Q(asset_name=target.asset_name)
+    if target.instance_id:
+        scoped_name_match |= Q(instance_id=target.instance_id)
+    ip_match = Q()
+    for value in candidates:
+        ip_match |= Q(public_ip=value) | Q(previous_public_ip=value)
+    if scoped_name_match and ip_match:
+        match |= scoped_name_match & ip_match
+    if not match:
+        return target
+    duplicates = list(CloudIpLog.objects.filter(match).exclude(id=target.id).order_by('created_at', 'id'))
+    if not duplicates:
+        return target
+    for duplicate in duplicates:
+        target.order = target.order or duplicate.order
+        target.asset = target.asset or duplicate.asset
+        target.server = target.server or duplicate.server
+        target.user = target.user or duplicate.user
+        target.provider = target.provider or duplicate.provider
+        target.region_code = target.region_code or duplicate.region_code
+        target.region_name = target.region_name or duplicate.region_name
+        target.order_no = target.order_no or duplicate.order_no
+        target.asset_name = target.asset_name or duplicate.asset_name
+        target.instance_id = target.instance_id or duplicate.instance_id
+        target.provider_resource_id = target.provider_resource_id or duplicate.provider_resource_id
+        target.public_ip = target.public_ip or duplicate.public_ip
+        if duplicate.previous_public_ip and (
+            not target.previous_public_ip
+            or (target.public_ip and target.previous_public_ip == target.public_ip and duplicate.previous_public_ip != target.public_ip)
+        ):
+            target.previous_public_ip = duplicate.previous_public_ip
+        target.note = prepend_note(target.note, duplicate.note or '', unique=True)
+        duplicate.delete()
+    target.save(update_fields=[
+        'order', 'asset', 'server', 'user', 'provider', 'region_code', 'region_name',
+        'order_no', 'asset_name', 'instance_id', 'provider_resource_id', 'public_ip',
+        'previous_public_ip', 'note',
+    ])
+    return target
+
+
+def record_cloud_ip_log(*, event_type, order=None, asset=None, server=None, public_ip=None, previous_public_ip=None, note='', trigger_label: str | None = None):
     asset_obj = asset
     server_obj = server
     order_obj = order or getattr(asset_obj, 'order', None) or getattr(server_obj, 'order', None)
@@ -1656,32 +1809,63 @@ def record_cloud_ip_log(*, event_type, order=None, asset=None, server=None, publ
             or getattr(server_obj, 'previous_public_ip', None)
             or getattr(order_obj, 'previous_public_ip', None)
         )
-    final_note = _build_cloud_ip_log_note(event_type, order_obj, asset_obj, server_obj, current_ip, previous_ip, note or '')
-
-    lookup = CloudIpLog.objects.filter(event_type=event_type)
-    if asset_obj:
-        lookup = lookup.filter(asset=asset_obj)
-    elif server_obj:
-        lookup = lookup.filter(server=server_obj)
-    elif order_obj:
-        lookup = lookup.filter(order=order_obj)
-    if previous_ip:
-        lookup = lookup.filter(previous_public_ip=previous_ip)
-    if current_ip:
-        lookup = lookup.filter(public_ip=current_ip)
-    latest_existing = lookup.order_by('-created_at', '-id').first()
+    executed_at = timezone.now()
+    final_note = _build_cloud_ip_log_note(event_type, order_obj, asset_obj, server_obj, current_ip, previous_ip, note or '', executed_at=executed_at, trigger_label=trigger_label)
+    chain_ip = _cloud_ip_log_chain_ip(
+        order_obj=order_obj,
+        asset_obj=asset_obj,
+        server_obj=server_obj,
+        current_ip=current_ip,
+        previous_ip=previous_ip,
+    )
+    latest_existing = _cloud_ip_log_chain_lookup(
+        order_obj=order_obj,
+        asset_obj=asset_obj,
+        server_obj=server_obj,
+        chain_ips=_cloud_ip_log_chain_candidates(
+            order_obj=order_obj,
+            asset_obj=asset_obj,
+            server_obj=server_obj,
+            current_ip=current_ip,
+            previous_ip=previous_ip,
+        ),
+    )
     if latest_existing:
-        if event_type == CloudIpLog.EVENT_DELETED:
-            return latest_existing
-        latest_at = timezone.localtime(latest_existing.created_at).replace(microsecond=0)
-        now_at = timezone.localtime(timezone.now()).replace(microsecond=0)
-        if latest_at == now_at:
-            if latest_existing.note != final_note:
-                latest_existing.note = final_note
-                latest_existing.save(update_fields=['note'])
-            return latest_existing
+        if _should_rebind_cloud_ip_log(latest_existing, order_obj):
+            latest_existing.order = order_obj
+            latest_existing.asset = asset_obj or latest_existing.asset
+            latest_existing.server = server_obj or latest_existing.server
+            latest_existing.user = user_obj or latest_existing.user
+        else:
+            latest_existing.order = latest_existing.order or order_obj
+            latest_existing.asset = latest_existing.asset or asset_obj
+            latest_existing.server = latest_existing.server or server_obj
+            latest_existing.user = latest_existing.user or user_obj
+        latest_existing.provider = provider or latest_existing.provider
+        latest_existing.region_code = region_code or latest_existing.region_code
+        latest_existing.region_name = region_name or latest_existing.region_name
+        latest_existing.order_no = getattr(order_obj, 'order_no', None) or latest_existing.order_no
+        latest_existing.asset_name = asset_name or latest_existing.asset_name
+        latest_existing.instance_id = instance_id or latest_existing.instance_id
+        latest_existing.provider_resource_id = provider_resource_id or latest_existing.provider_resource_id
+        latest_existing.public_ip = current_ip or chain_ip or latest_existing.public_ip
+        is_terminal_ip_only_event = event_type in {CloudIpLog.EVENT_DELETED, CloudIpLog.EVENT_RECYCLED} and previous_ip and (not current_ip or current_ip == previous_ip)
+        if previous_ip and not (
+            is_terminal_ip_only_event
+            and latest_existing.previous_public_ip
+            and latest_existing.previous_public_ip != previous_ip
+        ):
+            latest_existing.previous_public_ip = previous_ip
+        latest_existing.event_type = event_type
+        latest_existing.note = prepend_note(latest_existing.note, final_note, unique=True)
+        latest_existing.save(update_fields=[
+            'order', 'asset', 'server', 'user', 'provider', 'region_code', 'region_name',
+            'order_no', 'asset_name', 'instance_id', 'provider_resource_id', 'public_ip',
+            'previous_public_ip', 'event_type', 'note',
+        ])
+        return _merge_cloud_ip_log_duplicates(latest_existing)
 
-    return CloudIpLog.objects.create(
+    created = CloudIpLog.objects.create(
         order=order_obj,
         asset=asset_obj,
         server=server_obj,
@@ -1693,11 +1877,12 @@ def record_cloud_ip_log(*, event_type, order=None, asset=None, server=None, publ
         asset_name=asset_name,
         instance_id=instance_id,
         provider_resource_id=provider_resource_id,
-        public_ip=current_ip,
+        public_ip=chain_ip or current_ip,
         previous_public_ip=previous_ip,
         event_type=event_type,
         note=final_note,
     )
+    return _merge_cloud_ip_log_duplicates(created)
 
 
 def _fmt_dt(value):
@@ -1731,7 +1916,35 @@ def _cloud_log_user_label(user_obj):
     return ' / '.join(parts) or f'用户#{getattr(user_obj, "id", "-")}'
 
 
+def _cloud_log_trigger_label(order_obj):
+    if not order_obj:
+        return '生命周期'
+    order_no = (getattr(order_obj, 'order_no', None) or '').upper()
+    if order_no.startswith('SRVIP'):
+        return '更换IP'
+    if order_no.startswith('SRVUPGRADE') or order_no.startswith('SRVDOWNGRADE'):
+        return '修改配置'
+    if order_no.startswith('SRVREBUILD'):
+        return '重装'
+    return '新购创建'
+
+
+def _is_unattached_static_ip_asset(asset_obj=None, server_obj=None):
+    target = asset_obj or server_obj
+    if not target:
+        return False
+    return (
+        not getattr(target, 'instance_id', None)
+        or '未附加固定IP' in str(getattr(target, 'provider_status', '') or '')
+        or '固定IP仍存在但未附加' in str(getattr(target, 'provider_status', '') or '')
+        or 'StaticIp' in str(getattr(target, 'provider_resource_id', '') or '')
+    )
+
+
 def _cloud_log_execution_plan(order_obj, asset_obj=None):
+    if _is_unattached_static_ip_asset(asset_obj):
+        release_at = getattr(asset_obj, 'actual_expires_at', None)
+        return f'释放固定IP {_fmt_log_dt(release_at)}' if release_at else '-'
     suspend_at = getattr(order_obj, 'suspend_at', None) if order_obj else None
     delete_at = getattr(order_obj, 'delete_at', None) if order_obj else None
     recycle_at = getattr(order_obj, 'ip_recycle_at', None) if order_obj else None
@@ -1754,13 +1967,17 @@ def _cloud_log_execution_plan(order_obj, asset_obj=None):
     return '，'.join(plan_parts) or '-'
 
 
-def _build_cloud_ip_log_note(event_type, order_obj, asset_obj, server_obj, current_ip, previous_ip, note):
+def _build_cloud_ip_log_note(event_type, order_obj, asset_obj, server_obj, current_ip, previous_ip, note, executed_at=None, trigger_label: str | None = None):
     user_obj = (
         getattr(order_obj, 'user', None)
         or getattr(asset_obj, 'user', None)
         or getattr(server_obj, 'user', None)
     )
+    is_unattached_static_ip = _is_unattached_static_ip_asset(asset_obj, server_obj)
     expires_at = (
+        getattr(asset_obj, 'actual_expires_at', None)
+        if is_unattached_static_ip else None
+    ) or (
         getattr(order_obj, 'service_expires_at', None)
         or getattr(asset_obj, 'actual_expires_at', None)
         or getattr(server_obj, 'expires_at', None)
@@ -1768,8 +1985,12 @@ def _build_cloud_ip_log_note(event_type, order_obj, asset_obj, server_obj, curre
     ip_value = current_ip or previous_ip or '-'
     base_parts = [
         f'IP：{ip_value}',
+        f'触发事件：{trigger_label or _cloud_log_trigger_label(order_obj)}',
+        f'订单号：{getattr(order_obj, "order_no", None) or "-"}',
+        f'服务器名：{getattr(order_obj, "server_name", None) or getattr(asset_obj, "asset_name", None) or getattr(server_obj, "server_name", None) or "-"}',
         f'用户：{_cloud_log_user_label(user_obj)}',
-        f'到期时间：{_fmt_log_dt(expires_at)}',
+        f'执行时间：{_fmt_log_dt(executed_at or timezone.now())}',
+        f'{"计划释放时间" if is_unattached_static_ip else "到期时间"}：{_fmt_log_dt(expires_at)}',
         f'执行计划：{_cloud_log_execution_plan(order_obj, asset_obj)}',
     ]
     if note:
@@ -1848,13 +2069,17 @@ def _set_source_migration_expiry(order: CloudServerOrder, migration_due_at, reas
         asset_count,
         server_count,
     )
+    source_trigger_label = '更换IP' if '更换 IP' in reason or '更换IP' in reason else ('重装' if '重装' in reason or '重建' in reason else None)
     record_cloud_ip_log(
         event_type='changed',
         order=order,
         public_ip=order.public_ip or None,
         previous_public_ip=order.previous_public_ip or None,
+        trigger_label=source_trigger_label,
         note=(
-            f'{reason}: 旧机日期已调整；'
+            f'{reason}: 旧服务器生命周期已更新；'
+            f'旧机订单 {order.order_no}；旧机IP {order.public_ip or order.previous_public_ip or "-"}；'
+            f'状态：旧服务器继续保留到迁移到期时间，之后进入宽限/删机/IP保留流程；'
             f'服务到期 {_fmt_dt(before["service_expires_at"])} -> {_fmt_dt(after["service_expires_at"])}；'
             f'宽限到期 {_fmt_dt(before["renew_grace_expires_at"])} -> {_fmt_dt(after["renew_grace_expires_at"])}；'
             f'删机时间 {_fmt_dt(before["delete_at"])} -> {_fmt_dt(after["delete_at"])}；'
@@ -2832,89 +3057,98 @@ def rebind_cloud_server_user(order_id: int, new_user_id: int):
 
 @sync_to_async
 def mark_cloud_server_ip_change_requested(order_id: int, user_id: int, region_code: str | None = None, port: int | None = None):
-    order = CloudServerOrder.objects.filter(id=order_id, user_id=user_id).first()
-    if not order:
-        return None
-    if order.status not in {'completed', 'expiring', 'suspended'}:
-        return False
-    if order.provider != 'aws_lightsail':
-        return False
-    remaining_ip_changes = max(int(getattr(order, 'ip_change_quota', 0) or 0), 0)
-    if remaining_ip_changes <= 0:
-        return False
-    target_region_code = region_code or order.region_code
-    if target_region_code == 'cn-hongkong':
-        return False
-    provider = 'aws_lightsail'
-    fallback_plan = CloudServerPlan.objects.filter(
-        provider=provider,
-        region_code=target_region_code,
-        is_active=True,
-    ).order_by('-sort_order', 'id').first()
-    if not fallback_plan:
+    with transaction.atomic():
+        order = CloudServerOrder.objects.select_for_update().filter(id=order_id, user_id=user_id).first()
+        if not order:
+            return None
+        if order.status not in {'completed', 'expiring', 'suspended'}:
+            return False
+        if order.provider != 'aws_lightsail':
+            return False
+        existing_replacement = CloudServerOrder.objects.filter(
+            replacement_for=order,
+            status__in={'paid', 'provisioning', 'completed'},
+        ).order_by('-created_at', '-id').first()
+        if existing_replacement:
+            return existing_replacement
+        remaining_ip_changes = max(int(getattr(order, 'ip_change_quota', 0) or 0), 0)
+        if remaining_ip_changes <= 0:
+            return False
+        target_region_code = region_code or order.region_code
+        if target_region_code == 'cn-hongkong':
+            return False
+        provider = 'aws_lightsail'
         fallback_plan = CloudServerPlan.objects.filter(
             provider=provider,
             region_code=target_region_code,
-            plan_name=order.plan_name,
             is_active=True,
         ).order_by('-sort_order', 'id').first()
-    if not fallback_plan:
-        return False
-    target_port = port or order.mtproxy_port or 9528
-    original_service_expires_at = order.service_expires_at
-    remaining_ip_changes -= 1
-    now = timezone.now()
-    migration_due_at = now + timezone.timedelta(days=5)
-    delete_at = migration_due_at + timezone.timedelta(days=3)
-    ip_recycle_at = delete_at + timezone.timedelta(days=15)
-    old_public_ip = order.public_ip or order.previous_public_ip or ''
-    old_port = order.mtproxy_port or target_port
-    old_secret = order.mtproxy_secret or ''
-    old_trace_note = (
-        f'更换 IP 追溯：来源订单 {order.order_no}；旧IP={old_public_ip or "-"}；旧端口={old_port or "-"}；'
-        f'旧secret={old_secret or "-"}；新订单为同配置服务器，会申请并绑定新的固定 IP；新订单必须继承旧 secret，用户提供链接时必须逐项对照 IP/端口/secret。'
-    )
-    new_order = CloudServerOrder.objects.create(
-        user_id=order.user_id,
-        order_no=_trim_operation_order_no(order, 'IP'),
-        plan_id=fallback_plan.id,
-        provider=fallback_plan.provider,
-        region_code=fallback_plan.region_code,
-        region_name=fallback_plan.region_name,
-        plan_name=fallback_plan.plan_name,
-        quantity=1,
-        currency=order.currency,
-        total_amount=order.total_amount,
-        pay_amount=order.pay_amount,
-        pay_method=order.pay_method,
-        status='paid',
-        lifecycle_days=order.lifecycle_days,
-        mtproxy_port=target_port,
-        mtproxy_secret=order.mtproxy_secret,
-        mtproxy_link=order.mtproxy_link,
-        proxy_links=order.proxy_links or [],
-        static_ip_name='',
-        service_started_at=order.service_started_at or now,
-        service_expires_at=original_service_expires_at,
-        migration_due_at=migration_due_at,
-        replacement_for=order,
-        renew_extension_days=order.renew_extension_days,
-        ip_change_quota=remaining_ip_changes,
-        last_user_id=order.last_user_id,
-        previous_public_ip=old_public_ip,
-        server_name=order.server_name,
-        image_name=order.image_name,
-        provision_note='\n'.join(filter(None, [order.provision_note, f'由订单 {order.order_no} 发起更换 IP，新建同配置服务器，地区: {fallback_plan.region_name}，端口: {target_port}，会申请并绑定新的固定 IP，需在 5 天内切换使用。', old_trace_note])),
-    )
-    order.ip_change_quota = remaining_ip_changes
-    order.save(update_fields=['ip_change_quota', 'updated_at'])
-    _set_source_migration_expiry(
-        order,
-        migration_due_at,
-        '更换 IP 新建同配置服务器，旧机到期时间调整',
-        f'已发起更换 IP，新实例订单: {new_order.order_no}。旧机追溯：旧IP={old_public_ip or "-"}；旧端口={old_port or "-"}；旧secret={old_secret or "-"}。新服务器为同配置服务器，会申请并绑定新的固定 IP，同时继承旧服务器原到期时间和旧 secret；旧服务器服务到期时间调整为 {migration_due_at:%Y-%m-%d %H:%M}，宽限 3 天后删除，删除后旧 IP 继续保留至 {ip_recycle_at:%Y-%m-%d %H:%M}。'
-    )
-    return new_order
+        if not fallback_plan:
+            fallback_plan = CloudServerPlan.objects.filter(
+                provider=provider,
+                region_code=target_region_code,
+                plan_name=order.plan_name,
+                is_active=True,
+            ).order_by('-sort_order', 'id').first()
+        if not fallback_plan:
+            return False
+        target_port = port or order.mtproxy_port or 9528
+        original_service_expires_at = order.service_expires_at
+        remaining_ip_changes -= 1
+        now = timezone.now()
+        migration_due_at = now + timezone.timedelta(days=5)
+        delete_at = migration_due_at + timezone.timedelta(days=3)
+        ip_recycle_at = delete_at + timezone.timedelta(days=15)
+        old_public_ip = order.public_ip or order.previous_public_ip or ''
+        old_port = order.mtproxy_port or target_port
+        old_secret = order.mtproxy_secret or ''
+        old_trace_note = (
+            f'更换 IP 追溯：来源订单 {order.order_no}；旧IP={old_public_ip or "-"}；旧端口={old_port or "-"}；'
+            f'旧secret={old_secret or "-"}；新订单为同配置服务器，会申请并绑定新的固定 IP；新订单必须继承旧 secret，用户提供链接时必须逐项对照 IP/端口/secret。'
+        )
+        new_order = CloudServerOrder.objects.create(
+            user_id=order.user_id,
+            order_no=_trim_operation_order_no(order, 'IP'),
+            plan_id=fallback_plan.id,
+            provider=fallback_plan.provider,
+            cloud_account=order.cloud_account,
+            account_label=order.account_label,
+            region_code=fallback_plan.region_code,
+            region_name=fallback_plan.region_name,
+            plan_name=fallback_plan.plan_name,
+            quantity=1,
+            currency=order.currency,
+            total_amount=order.total_amount,
+            pay_amount=order.pay_amount,
+            pay_method=order.pay_method,
+            status='paid',
+            lifecycle_days=order.lifecycle_days,
+            mtproxy_port=target_port,
+            mtproxy_secret=order.mtproxy_secret,
+            mtproxy_link=order.mtproxy_link,
+            proxy_links=order.proxy_links or [],
+            static_ip_name='',
+            service_started_at=order.service_started_at or now,
+            service_expires_at=original_service_expires_at,
+            migration_due_at=migration_due_at,
+            replacement_for=order,
+            renew_extension_days=order.renew_extension_days,
+            ip_change_quota=remaining_ip_changes,
+            last_user_id=order.last_user_id,
+            previous_public_ip=old_public_ip,
+            server_name=order.server_name,
+            image_name=order.image_name,
+            provision_note='\n'.join(filter(None, [order.provision_note, f'由订单 {order.order_no} 发起更换 IP，新建同配置服务器，地区: {fallback_plan.region_name}，端口: {target_port}，会申请并绑定新的固定 IP，需在 5 天内切换使用。', old_trace_note])),
+        )
+        order.ip_change_quota = remaining_ip_changes
+        order.save(update_fields=['ip_change_quota', 'updated_at'])
+        _set_source_migration_expiry(
+            order,
+            migration_due_at,
+            '更换 IP 新建同配置服务器，旧机到期时间调整',
+            f'已发起更换 IP，新实例订单: {new_order.order_no}。旧机追溯：旧IP={old_public_ip or "-"}；旧端口={old_port or "-"}；旧secret={old_secret or "-"}。新服务器为同配置服务器，会申请并绑定新的固定 IP，同时继承旧服务器原到期时间和旧 secret；旧服务器服务到期时间调整为 {migration_due_at:%Y-%m-%d %H:%M}，宽限 3 天后删除，删除后旧 IP 继续保留至 {ip_recycle_at:%Y-%m-%d %H:%M}。'
+        )
+        return new_order
 
 
 def _resolve_aws_static_ip_name_for_order(order: CloudServerOrder) -> str:
@@ -3263,6 +3497,20 @@ def create_cloud_server_upgrade_order(order_id: int, user_id: int, target_plan_i
             record_balance_ledger(user, ledger_type='cloud_order_balance_pay', currency='USDT', old_balance=old_balance, new_balance=user.balance, related_type='cloud_order', related_id=new_order.id, description=f'云服务器{action_label}补差价 #{new_order.order_no}')
         source_note = '\n'.join(filter(None, [order.provision_note, f'已由{initiator_label}发起{action_label}，新实例订单: {new_order.order_no}，补差价 {diff} USDT，实扣 {charged_amount} USDT。旧机追溯：旧IP={old_public_ip or "-"}；旧端口={old_port or "-"}；旧secret={old_secret or "-"}；固定IP={order.static_ip_name or "-"}；新配置={target_plan.plan_name}；新服务器必须继承旧 secret。']))
         CloudServerOrder.objects.filter(id=order.id).update(provision_note=source_note, updated_at=timezone.now())
+        record_cloud_ip_log(
+            event_type='changed',
+            order=locked_order,
+            public_ip=old_public_ip or locked_order.public_ip,
+            previous_public_ip=old_public_ip or locked_order.previous_public_ip,
+            trigger_label='修改配置',
+            note=(
+                f'{action_label}已发起，旧服务器生命周期进入迁移跟踪；'
+                f'旧机订单 {locked_order.order_no}；新实例订单 {new_order.order_no}；'
+                f'旧机IP {old_public_ip or "-"}；旧端口 {old_port or "-"}；固定IP {order.static_ip_name or "-"}；'
+                f'配置 {order.plan_name} -> {target_plan.plan_name}；'
+                f'当前处理：旧服务器继续服务，待新配置实例创建成功并迁移固定 IP 后，旧服务器会进入保留期并按计划删除。'
+            ),
+        )
     return new_order, None
 
 

@@ -13,14 +13,14 @@ from django.core.management import call_command
 from django.db.models import Q
 from django.utils import timezone
 
-from core.models import CloudAccountConfig
+from core.models import CloudAccountConfig, SiteConfig
 from core.runtime_config import get_runtime_config
 from core.texts import site_text
 
 from orders.models import BalanceLedger
 from bot.models import TelegramUser
-from cloud.models import CloudAsset, CloudAutoRenewPatrolLog, CloudServerOrder, CloudUserNoticeLog, Server
-from cloud.note_utils import append_note
+from cloud.models import CloudAsset, CloudAutoRenewPatrolLog, CloudServerOrder, CloudUserNoticeLog, Server, _with_runtime_time
+from cloud.note_utils import append_note, prepend_note
 from cloud.services import RenewalPriceMissingError, _cloud_order_lifecycle_fields, _hydrate_order_from_proxy_asset, _order_primary_asset, _order_primary_server, _renewal_price, _resolve_aws_static_ip_name_for_order, create_cloud_server_renewal_for_user, pay_cloud_server_renewal_with_balance, record_cloud_ip_log
 from bot.keyboards import cloud_auto_renew_notice_actions, cloud_expiry_actions, cloud_lifecycle_notice_actions
 
@@ -216,7 +216,7 @@ def _get_due_orders():
         )
         if active_order and order.auto_renew_enabled and (auto_renew_before_expiry or auto_renew_shutdown_fallback):
             _append_due(due, 'auto_renew', order)
-        if order.status in ['suspended', 'deleting'] and order.delete_reminder_enabled and delete_at and delete_at <= delete_notice_at and delete_at > now and not order.delete_notice_sent_at:
+        if shutdown_enabled and order.status in ['suspended', 'deleting'] and order.delete_reminder_enabled and delete_at and delete_at <= delete_notice_at and delete_at > now and not order.delete_notice_sent_at:
             _append_due(due, 'delete_notice', order)
         if order.status == 'deleted' and order.ip_recycle_reminder_enabled and ip_recycle_at and ip_recycle_at <= recycle_notice_at and ip_recycle_at > now and not order.recycle_notice_sent_at:
             _append_due(due, 'recycle_notice', order)
@@ -225,10 +225,23 @@ def _get_due_orders():
                 _append_due(due, 'expire', order)
             if active_order and shutdown_enabled and suspend_at and suspend_at <= now:
                 _append_due(due, 'suspend', order)
-            if order.status in ['suspended', 'deleting'] and delete_at and delete_at <= now:
+            if shutdown_enabled and order.status in ['suspended', 'deleting'] and delete_at and delete_at <= now:
                 _append_due(due, 'delete', order)
             if order.status == 'deleted' and ip_recycle_at and ip_recycle_at <= now:
                 _append_due(due, 'recycle', order)
+
+    retained_ip_orders = CloudServerOrder.objects.filter(
+        status='deleted',
+        ip_recycle_at__isnull=False,
+    ).filter(
+        Q(static_ip_name__gt='') | Q(public_ip__gt='') | Q(previous_public_ip__gt='')
+    ).select_related('user', 'cloud_account')
+    for order in retained_ip_orders:
+        if order.ip_recycle_reminder_enabled and order.ip_recycle_at <= recycle_notice_at and order.ip_recycle_at > now and not order.recycle_notice_sent_at:
+            _append_due(due, 'recycle_notice', order)
+        if order.provider != 'aliyun_simple' and order.ip_recycle_at <= now:
+            _append_due(due, 'recycle', order)
+
     failed_cleanup_orders = CloudServerOrder.objects.filter(status='failed', delete_at__isnull=False, delete_at__lte=now).filter(Q(server_name__gt='') | Q(instance_id__gt='')).select_related('user')
     for order in failed_cleanup_orders:
         _append_due(due, 'delete', order)
@@ -270,7 +283,7 @@ def _mark_suspended(order_id: int, note: str):
     now = timezone.now()
     order = CloudServerOrder.objects.get(id=order_id)
     order.status = 'suspended'
-    order.provision_note = '\n'.join(filter(None, [order.provision_note, note]))
+    order.provision_note = prepend_note(order.provision_note, note)
     order.save(update_fields=['status', 'provision_note', 'updated_at'])
     asset = _order_primary_asset(order)
     server = _order_primary_server(order)
@@ -299,13 +312,16 @@ def _mark_deleted(order_id: int, note: str):
         resolved_static_ip_name = _resolve_aws_static_ip_name_for_order(order)
         if resolved_static_ip_name:
             order.static_ip_name = resolved_static_ip_name
-    if not order.ip_recycle_at and order.delete_at:
-        order.ip_recycle_at = order.delete_at + timezone.timedelta(days=max(1, _config_int('cloud_unattached_ip_delete_after_days', 15)))
+    unattached_release_at = _with_runtime_time(
+        now + timezone.timedelta(days=max(1, _config_int('cloud_unattached_ip_delete_after_days', 15))),
+        'cloud_unattached_ip_delete_time',
+    )
+    order.ip_recycle_at = unattached_release_at
     order.status = 'deleted'
     order.public_ip = previous_public_ip
     order.previous_public_ip = previous_public_ip
     retention_note = _retained_static_ip_note(order, previous_public_ip, note)
-    order.provision_note = '\n'.join(filter(None, [order.provision_note, retention_note]))
+    order.provision_note = prepend_note(order.provision_note, retention_note)
     order.instance_id = ''
     order.provider_resource_id = ''
     order.save(update_fields=['status', 'public_ip', 'previous_public_ip', 'static_ip_name', 'ip_recycle_at', 'provision_note', 'instance_id', 'provider_resource_id', 'updated_at'])
@@ -314,23 +330,25 @@ def _mark_deleted(order_id: int, note: str):
         asset.previous_public_ip = previous_public_ip
         asset.instance_id = None
         asset.provider_resource_id = None
+        asset.actual_expires_at = order.ip_recycle_at or asset.actual_expires_at
         asset.status = CloudAsset.STATUS_DELETED
         asset.provider_status = '固定IP保留中-实例已删除'
         asset.is_active = False
         asset.note = append_note(asset.note, order.provision_note)
         asset.updated_at = now
-        asset.save(update_fields=['public_ip', 'previous_public_ip', 'instance_id', 'provider_resource_id', 'status', 'provider_status', 'is_active', 'note', 'updated_at'])
+        asset.save(update_fields=['public_ip', 'previous_public_ip', 'instance_id', 'provider_resource_id', 'actual_expires_at', 'status', 'provider_status', 'is_active', 'note', 'updated_at'])
     if server:
         server.public_ip = previous_public_ip
         server.previous_public_ip = previous_public_ip
         server.instance_id = None
         server.provider_resource_id = None
+        server.expires_at = order.ip_recycle_at or server.expires_at
         server.status = Server.STATUS_DELETED
         server.provider_status = '固定IP保留中-实例已删除'
         server.is_active = False
         server.note = append_note(server.note, order.provision_note)
         server.updated_at = now
-        server.save(update_fields=['public_ip', 'previous_public_ip', 'instance_id', 'provider_resource_id', 'status', 'provider_status', 'is_active', 'note', 'updated_at'])
+        server.save(update_fields=['public_ip', 'previous_public_ip', 'instance_id', 'provider_resource_id', 'expires_at', 'status', 'provider_status', 'is_active', 'note', 'updated_at'])
     record_cloud_ip_log(event_type='deleted', order=order, asset=asset, server=server, previous_public_ip=previous_public_ip, public_ip=previous_public_ip, note=retention_note)
     return order
 
@@ -349,7 +367,7 @@ def _mark_recycled(order_id: int, note: str):
     order.ip_recycle_at = None
     order.recycle_notice_sent_at = now
     order.ip_recycle_reminder_enabled = False
-    order.provision_note = '\n'.join(filter(None, [order.provision_note, note]))
+    order.provision_note = prepend_note(order.provision_note, note)
     CloudServerOrder.objects.filter(id=order.id).update(
         previous_public_ip=previous_public_ip,
         public_ip='',
@@ -560,11 +578,38 @@ def _active_notice_asset_for_order(order) -> CloudAsset | None:
     )
 
 
+def _retained_notice_payload_for_order(order) -> dict | None:
+    asset = _order_primary_asset(order)
+    server = _order_primary_server(order)
+    expires_at = getattr(order, 'service_expires_at', None) or getattr(asset, 'actual_expires_at', None) or getattr(server, 'expires_at', None)
+    ip_value = (
+        getattr(order, 'public_ip', None)
+        or getattr(order, 'previous_public_ip', None)
+        or getattr(asset, 'public_ip', None)
+        or getattr(asset, 'previous_public_ip', None)
+        or getattr(server, 'public_ip', None)
+        or getattr(server, 'previous_public_ip', None)
+    )
+    if not expires_at and not ip_value:
+        return None
+    return {
+        'ip': ip_value or '未分配',
+        'expires_at': expires_at,
+        'suspend_at': getattr(order, 'suspend_at', None),
+        'delete_at': getattr(order, 'delete_at', None),
+        'ip_recycle_at': getattr(order, 'ip_recycle_at', None),
+        'auto_renew_enabled': bool(getattr(order, 'auto_renew_enabled', False)),
+        'asset_id': getattr(asset, 'id', None),
+    }
+
+
 def _notice_payload_for_order(order) -> dict | None:
     asset = _active_notice_asset_for_order(order)
-    if not asset:
-        return None
-    return _notice_schedule(order, asset)
+    if asset:
+        return _notice_schedule(order, asset)
+    if getattr(order, 'status', None) == 'deleted':
+        return _retained_notice_payload_for_order(order)
+    return None
 
 
 def _apply_notice_schedule_to_order(order: CloudServerOrder, notice: dict) -> CloudServerOrder:
@@ -983,7 +1028,7 @@ def _record_lifecycle_action_failed(order_id: int, event_type: str, note: str):
     order = CloudServerOrder.objects.get(id=order_id)
     asset = _order_primary_asset(order)
     server = _order_primary_server(order)
-    order.provision_note = '\n'.join(filter(None, [order.provision_note, note]))
+    order.provision_note = prepend_note(order.provision_note, note)
     order.save(update_fields=['provision_note', 'updated_at'])
     record_cloud_ip_log(event_type=event_type, order=order, asset=asset, server=server, public_ip=order.public_ip, previous_public_ip=order.previous_public_ip, note=note)
     return order
@@ -1112,7 +1157,7 @@ def _get_orphan_asset_delete_due():
             kind=CloudAsset.KIND_SERVER,
             order__isnull=True,
             actual_expires_at__lte=now,
-        ).exclude(waiting_manual_time_q).exclude(unattached_static_ip_q).exclude(status__in=[CloudAsset.STATUS_DELETED, CloudAsset.STATUS_DELETING, CloudAsset.STATUS_TERMINATED])
+        ).exclude(cloud_account__shutdown_enabled=False).exclude(waiting_manual_time_q).exclude(unattached_static_ip_q).exclude(status__in=[CloudAsset.STATUS_DELETED, CloudAsset.STATUS_DELETING, CloudAsset.STATUS_TERMINATED])
     )
 
 
@@ -1334,7 +1379,7 @@ def _mark_replaced_order_deleted(order_id: int, note: str):
     order.instance_id = ''
     order.provider_resource_id = ''
     order.public_ip = ''
-    order.provision_note = '\n'.join(filter(None, [order.provision_note, note]))
+    order.provision_note = prepend_note(order.provision_note, note)
     order.save(update_fields=['status', 'previous_public_ip', 'instance_id', 'provider_resource_id', 'public_ip', 'provision_note', 'updated_at'])
     if asset:
         asset.is_active = False
@@ -1412,30 +1457,64 @@ def check_cloud_accounts_status(queryset=None):
     return results
 
 
+_LIFECYCLE_SYNC_CURSOR_KEY = 'cloud_asset_sync_next_account_cursor'
+
+
 def _active_lifecycle_sync_accounts(provider: str):
     return list(CloudAccountConfig.objects.filter(provider=provider, is_active=True).order_by('id'))
 
 
-async def sync_server_status_tick():
+def _next_lifecycle_sync_target():
     sync_targets = [
         (CloudAccountConfig.PROVIDER_ALIYUN, 'aliyun_simple', 'sync_aliyun_assets'),
         (CloudAccountConfig.PROVIDER_AWS, 'aws_lightsail', 'sync_aws_assets'),
     ]
+    candidates = []
     for account_provider, provider, command_name in sync_targets:
-        try:
-            accounts = await sync_to_async(_active_lifecycle_sync_accounts)(account_provider)
-            for account in accounts:
-                if account_provider == CloudAccountConfig.PROVIDER_AWS:
-                    region = os.getenv('AWS_REGION', '').strip()
-                else:
-                    region = (getattr(account, 'region_hint', '') or os.getenv('ALIYUN_REGION', '') or 'cn-hongkong').strip()
-                kwargs = {'account_id': str(account.id)}
-                if region:
-                    kwargs['region'] = region
-                await sync_to_async(call_command, thread_sensitive=False)(command_name, **kwargs)
-                logger.info('云服务器状态同步完成: provider=%s region=%s account_id=%s', provider, region or 'all', account.id)
-        except Exception as exc:
-            logger.warning('云服务器状态同步失败: provider=%s error=%s', provider, exc)
+        for account in _active_lifecycle_sync_accounts(account_provider):
+            candidates.append({
+                'key': f'{account_provider}:{account.id}',
+                'account_provider': account_provider,
+                'provider': provider,
+                'command_name': command_name,
+                'account': account,
+            })
+    if not candidates:
+        SiteConfig.set(_LIFECYCLE_SYNC_CURSOR_KEY, '')
+        return None
+    cursor = SiteConfig.get(_LIFECYCLE_SYNC_CURSOR_KEY, '')
+    next_index = 0
+    if cursor:
+        for index, item in enumerate(candidates):
+            if item['key'] == cursor:
+                next_index = (index + 1) % len(candidates)
+                break
+    target = candidates[next_index]
+    SiteConfig.set(_LIFECYCLE_SYNC_CURSOR_KEY, target['key'])
+    return target
+
+
+async def sync_server_status_tick():
+    target = await sync_to_async(_next_lifecycle_sync_target)()
+    if not target:
+        logger.info('云服务器状态同步跳过：没有启用的云账号')
+        return
+    account = target['account']
+    account_provider = target['account_provider']
+    provider = target['provider']
+    command_name = target['command_name']
+    try:
+        if account_provider == CloudAccountConfig.PROVIDER_AWS:
+            region = os.getenv('AWS_REGION', '').strip()
+        else:
+            region = (getattr(account, 'region_hint', '') or os.getenv('ALIYUN_REGION', '') or 'cn-hongkong').strip()
+        kwargs = {'account_id': str(account.id)}
+        if region:
+            kwargs['region'] = region
+        await sync_to_async(call_command, thread_sensitive=False)(command_name, **kwargs)
+        logger.info('云服务器状态同步完成: provider=%s region=%s account_id=%s cursor=%s', provider, region or 'all', account.id, target['key'])
+    except Exception as exc:
+        logger.warning('云服务器状态同步失败: provider=%s account_id=%s error=%s', provider, account.id, exc)
 
 
 _DAILY_EXPIRY_EVENT = 'daily_expiry_summary'

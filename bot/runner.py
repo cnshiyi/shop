@@ -171,7 +171,7 @@ async def run_bot():
     logger.info('云服务器生命周期调度已启动 (每10分钟)')
     logger.info('云服务器每日到期汇总通知已启动 (每天12:00)')
     logger.info('自动续费巡检已启动 (每30分钟，到期前1天至关机前持续兜底，失败通知冷却1小时)')
-    logger.info('云服务器状态同步已启动 (每%s秒)', cloud_sync_interval_seconds)
+    logger.info('云服务器状态同步已启动 (每%s秒，每次轮询1个云账号)', cloud_sync_interval_seconds)
     logger.info('云账号状态巡检已启动 (每15分钟)')
     logger.info('服务器去重任务已启动 (每20分钟)')
     logger.info('旧订单/聊天记录自动清理任务已启动 (每天18:00)')

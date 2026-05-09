@@ -6,8 +6,8 @@ from django.utils import timezone
 from django.db.models import Q
 
 from cloud.models import CloudAsset, Server
-from cloud.note_utils import append_note
-from cloud.services import _resolve_aws_static_ip_name_for_order, _update_order_primary_records, build_cloud_server_name, ensure_unique_cloud_server_name, record_cloud_ip_log
+from cloud.note_utils import append_note, prepend_note, with_note_time
+from cloud.services import _cloud_log_trigger_label, _resolve_aws_static_ip_name_for_order, _update_order_primary_records, build_cloud_server_name, ensure_unique_cloud_server_name, record_cloud_ip_log
 from core.cloud_accounts import choose_cloud_account_for_order, cloud_account_label, list_cloud_accounts_by_server_load
 from cloud.aliyun_simple import create_instance as create_aliyun_instance
 from cloud.aws_lightsail import create_instance as create_aws_instance, get_instance_public_ip, move_static_ip_to_instance
@@ -365,16 +365,19 @@ def _mark_rebuild_source_pending_deletion(order_id: int, replacement_order_id: i
         },
         now=now,
     )
+    action_label = _cloud_log_trigger_label(replacement)
     date_note = (
-        f'{note} 日期调整: '
+        f'{action_label}成功后旧服务器生命周期已更新：'
+        f'旧机订单 {source.order_no}；新实例订单 {replacement.order_no}；'
         f'旧机临时IP {source_temp_public_ip or "未获取"}；原固定/旧IP {previous_public_ip or "-"}；'
         f'旧端口 {source.mtproxy_port or "-"}；旧secret {source.mtproxy_secret or "-"}；'
+        f'处理结果：固定 IP 已迁移到新实例，旧服务器进入保留期，等待宽限期后删除；'
         f'服务到期 {_fmt_dt(before_dates["service_expires_at"])} -> {_fmt_dt(after_dates["service_expires_at"])}；'
         f'宽限到期 {_fmt_dt(before_dates["renew_grace_expires_at"])} -> {_fmt_dt(after_dates["renew_grace_expires_at"])}；'
         f'删机时间 {_fmt_dt(before_dates["delete_at"])} -> {_fmt_dt(after_dates["delete_at"])}；'
         f'IP保留到期 {_fmt_dt(before_dates["ip_recycle_at"])} -> {_fmt_dt(after_dates["ip_recycle_at"])}。'
     )
-    record_cloud_ip_log(event_type='changed', order=source, asset=asset, server=server, previous_public_ip=previous_public_ip, public_ip=source_temp_public_ip or replacement.public_ip, note=date_note)
+    record_cloud_ip_log(event_type='changed', order=source, asset=asset, server=server, previous_public_ip=previous_public_ip, public_ip=source_temp_public_ip or replacement.public_ip, note=date_note, trigger_label=action_label)
     return source
 
 
@@ -388,7 +391,7 @@ def _mark_instance_created(order_id: int, server_name: str, instance_id: str, pu
     order.public_ip = public_ip or order.public_ip
     order.login_user = login_user or order.login_user
     order.login_password = login_password or order.login_password
-    order.provision_note = append_note(order.provision_note, note)
+    order.provision_note = prepend_note(order.provision_note, with_note_time(note))
     order.save(update_fields=['status', 'server_name', 'instance_id', 'provider_resource_id', 'public_ip', 'login_user', 'login_password', 'provision_note', 'updated_at'])
     try:
         order_user = order.user
@@ -423,7 +426,8 @@ def _mark_instance_created(order_id: int, server_name: str, instance_id: str, pu
         },
     )
     server_record = _upsert_server_record(order, order.provision_note)
-    record_cloud_ip_log(event_type='created', order=order, asset=server_asset, server=server_record, public_ip=order.public_ip, note=f'云端实例已创建：{order.server_name}')
+    trigger_label = _cloud_log_trigger_label(order)
+    record_cloud_ip_log(event_type='created', order=order, asset=server_asset, server=server_record, public_ip=order.public_ip, note=f'{trigger_label}触发创建云端实例：{order.server_name}')
     return order
 
 
@@ -432,7 +436,7 @@ def _mark_provisioning_start(order_id: int, server_name: str):
     order = CloudServerOrder.objects.get(id=order_id)
     order.status = 'provisioning'
     order.server_name = server_name
-    order.provision_note = append_note(order.provision_note, f'开始创建服务器：{server_name}')
+    order.provision_note = prepend_note(order.provision_note, with_note_time(f'开始创建服务器：{server_name}'))
     order.save(update_fields=['status', 'server_name', 'provision_note', 'updated_at'])
     try:
         order_user = order.user
@@ -849,7 +853,7 @@ def _mark_success(order_id: int, server_name: str, instance_id: str, public_ip: 
     order.mtproxy_secret = mtproxy_secret
     order.login_user = login_user
     order.login_password = login_password
-    order.provision_note = append_note(order.provision_note, note)
+    order.provision_note = prepend_note(order.provision_note, with_note_time(note))
     order.static_ip_name = static_ip_name or order.static_ip_name
     order.completed_at = timezone.now()
     if not order.service_started_at:
@@ -920,7 +924,7 @@ def _mark_failed(order_id: int, note: str, cleanup_at=None):
     logger.info('[PROVISION] mark_failed_start order_id=%s cleanup_at=%s note=%s', order_id, cleanup_at, (note or '')[:1500])
     order = CloudServerOrder.objects.get(id=order_id)
     order.status = 'failed'
-    order.provision_note = append_note(order.provision_note, note)
+    order.provision_note = prepend_note(order.provision_note, with_note_time(note))
     order.save(update_fields=['status', 'provision_note', 'updated_at'])
     if cleanup_at and (order.server_name or order.instance_id):
         CloudServerOrder.objects.filter(id=order.id).update(delete_at=cleanup_at, updated_at=timezone.now())

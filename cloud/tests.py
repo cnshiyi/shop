@@ -1977,6 +1977,37 @@ class CloudServerServicesTestCase(TestCase):
             source_order.delete_at + timezone.timedelta(days=15),
         )
 
+    def test_mark_cloud_server_ip_change_requested_returns_existing_replacement(self):
+        source_order = CloudServerOrder.objects.create(
+            order_no='HB-TEST-REPLACE-EXISTING',
+            user=self.user,
+            plan=self.plan,
+            provider=self.plan.provider,
+            region_code=self.plan.region_code,
+            region_name=self.plan.region_name,
+            plan_name=self.plan.plan_name,
+            quantity=1,
+            currency='USDT',
+            total_amount='19.00',
+            pay_amount='19.00',
+            pay_method='balance',
+            status='completed',
+            public_ip='11.22.33.44',
+            service_started_at=timezone.now(),
+            service_expires_at=timezone.now() + timezone.timedelta(days=31),
+            ip_change_quota=1,
+        )
+
+        first_order = async_to_sync(mark_cloud_server_ip_change_requested)(source_order.id, self.user.id)
+        second_order = async_to_sync(mark_cloud_server_ip_change_requested)(source_order.id, self.user.id)
+
+        source_order.refresh_from_db()
+        self.assertIsNotNone(first_order)
+        self.assertIsNotNone(second_order)
+        self.assertEqual(first_order.id, second_order.id)
+        self.assertEqual(CloudServerOrder.objects.filter(replacement_for=source_order).count(), 1)
+        self.assertEqual(source_order.ip_change_quota, 0)
+
     def test_mark_provisioning_start_creates_pending_asset_server_and_log(self):
         order = CloudServerOrder.objects.create(
             order_no='HB-TEST-PROVISION-1',
@@ -2339,7 +2370,7 @@ class CloudServerServicesTestCase(TestCase):
         self.assertEqual(parse_datetime(row['suspend_at']), order.suspend_at)
         self.assertEqual(parse_datetime(row['delete_at']), order.delete_at)
 
-    def test_cloud_ip_log_note_includes_context_and_dedupes_same_second(self):
+    def test_cloud_ip_log_note_aggregates_into_single_ip_trace(self):
         expires_at = timezone.now() + timezone.timedelta(days=2)
         order = CloudServerOrder.objects.create(
             order_no='LOG-CONTEXT-ORDER-1',
@@ -2375,17 +2406,133 @@ class CloudServerServicesTestCase(TestCase):
             is_active=True,
         )
 
-        first = record_cloud_ip_log(event_type=CloudIpLog.EVENT_CREATED, order=order, asset=asset, public_ip='8.8.8.8', note='第一次创建')
-        second = record_cloud_ip_log(event_type=CloudIpLog.EVENT_CREATED, order=order, asset=asset, public_ip='8.8.8.8', note='同秒重复创建')
+        first = record_cloud_ip_log(event_type=CloudIpLog.EVENT_CREATED, order=order, asset=asset, public_ip=None, note='开始创建，暂未分配IP')
+        second = record_cloud_ip_log(event_type=CloudIpLog.EVENT_CREATED, order=order, asset=asset, public_ip='8.8.8.8', note='第一次创建')
+        third = record_cloud_ip_log(event_type=CloudIpLog.EVENT_CREATED, order=order, asset=asset, public_ip='8.8.8.8', note='同秒重复创建')
+        fourth = record_cloud_ip_log(event_type=CloudIpLog.EVENT_DELETED, order=order, asset=asset, previous_public_ip='8.8.8.8', public_ip=None, note='实例已删除')
 
         self.assertEqual(first.id, second.id)
-        self.assertEqual(CloudIpLog.objects.filter(order=order, event_type=CloudIpLog.EVENT_CREATED).count(), 1)
+        self.assertEqual(first.id, third.id)
+        self.assertEqual(first.id, fourth.id)
+        self.assertEqual(CloudIpLog.objects.filter(public_ip='8.8.8.8').count(), 1)
         first.refresh_from_db()
+        self.assertEqual(first.event_type, CloudIpLog.EVENT_DELETED)
         self.assertIn('IP：8.8.8.8', first.note)
         self.assertIn('用户：', first.note)
+        self.assertIn('执行时间：', first.note)
         self.assertIn('到期时间：', first.note)
         self.assertIn('执行计划：', first.note)
+        self.assertIn('执行内容：开始创建，暂未分配IP', first.note)
+        self.assertIn('执行内容：第一次创建', first.note)
         self.assertIn('执行内容：同秒重复创建', first.note)
+        self.assertIn('执行内容：实例已删除', first.note)
+
+        self.assertEqual(first.id, second.id)
+        self.assertEqual(first.id, third.id)
+        self.assertEqual(CloudIpLog.objects.filter(public_ip='8.8.8.8').count(), 1)
+        first.refresh_from_db()
+        self.assertEqual(first.event_type, CloudIpLog.EVENT_DELETED)
+        self.assertIn('IP：8.8.8.8', first.note)
+        self.assertIn('用户：', first.note)
+        self.assertIn('执行时间：', first.note)
+        self.assertIn('到期时间：', first.note)
+        self.assertIn('执行计划：', first.note)
+        self.assertIn('执行内容：第一次创建', first.note)
+        self.assertIn('执行内容：同秒重复创建', first.note)
+        self.assertIn('执行内容：实例已删除', first.note)
+
+    def test_cloud_ip_log_rebinds_trace_to_latest_replacement_order(self):
+        expires_at = timezone.now() + timezone.timedelta(days=2)
+        source_order = CloudServerOrder.objects.create(
+            order_no='LOG-TRACE-REPLACE-SOURCE',
+            user=self.user,
+            plan=self.plan,
+            provider=self.plan.provider,
+            region_code=self.plan.region_code,
+            region_name=self.plan.region_name,
+            plan_name=self.plan.plan_name,
+            quantity=1,
+            currency='USDT',
+            total_amount='19.00',
+            pay_amount='19.00',
+            pay_method='balance',
+            status='completed',
+            public_ip='9.9.9.9',
+            service_expires_at=expires_at,
+        )
+        source_asset = CloudAsset.objects.create(
+            kind=CloudAsset.KIND_SERVER,
+            source=CloudAsset.SOURCE_ORDER,
+            order=source_order,
+            user=self.user,
+            provider='aws_lightsail',
+            region_code=self.plan.region_code,
+            region_name=self.plan.region_name,
+            asset_name='trace-source',
+            public_ip='9.9.9.9',
+            actual_expires_at=expires_at,
+            status=CloudAsset.STATUS_RUNNING,
+            is_active=True,
+        )
+        replacement_order = CloudServerOrder.objects.create(
+            order_no='LOG-TRACE-REPLACE-NEW',
+            user=self.user,
+            plan=self.plan,
+            provider=self.plan.provider,
+            region_code=self.plan.region_code,
+            region_name=self.plan.region_name,
+            plan_name=self.plan.plan_name,
+            quantity=1,
+            currency='USDT',
+            total_amount='19.00',
+            pay_amount='19.00',
+            pay_method='balance',
+            status='paid',
+            public_ip='5.5.5.5',
+            previous_public_ip='9.9.9.9',
+            replacement_for=source_order,
+            service_expires_at=expires_at,
+        )
+        replacement_asset = CloudAsset.objects.create(
+            kind=CloudAsset.KIND_SERVER,
+            source=CloudAsset.SOURCE_ORDER,
+            order=replacement_order,
+            user=self.user,
+            provider='aws_lightsail',
+            region_code=self.plan.region_code,
+            region_name=self.plan.region_name,
+            asset_name='trace-replacement',
+            public_ip='5.5.5.5',
+            previous_public_ip='9.9.9.9',
+            actual_expires_at=expires_at,
+            status=CloudAsset.STATUS_PENDING,
+            is_active=True,
+        )
+
+        source_log = record_cloud_ip_log(
+            event_type=CloudIpLog.EVENT_CREATED,
+            order=source_order,
+            asset=source_asset,
+            public_ip='9.9.9.9',
+            note='源订单创建成功',
+        )
+        replacement_log = record_cloud_ip_log(
+            event_type=CloudIpLog.EVENT_CREATED,
+            order=replacement_order,
+            asset=replacement_asset,
+            public_ip='5.5.5.5',
+            previous_public_ip='9.9.9.9',
+            note='替换订单创建成功',
+        )
+
+        self.assertEqual(source_log.id, replacement_log.id)
+        source_log.refresh_from_db()
+        self.assertEqual(source_log.order_id, replacement_order.id)
+        self.assertEqual(source_log.asset_id, replacement_asset.id)
+        self.assertEqual(source_log.public_ip, '5.5.5.5')
+        self.assertEqual(source_log.previous_public_ip, '9.9.9.9')
+        self.assertIn('执行内容：源订单创建成功', source_log.note)
+        self.assertIn('执行内容：替换订单创建成功', source_log.note)
 
     def test_shutdown_log_items_include_execution_detail_and_links(self):
         expires_at = timezone.now() - timezone.timedelta(hours=2)
@@ -2572,6 +2719,76 @@ class CloudServerServicesTestCase(TestCase):
 
         self.assertIn(visible_asset.id, asset_ids)
         self.assertIn(hidden_asset.id, asset_ids)
+
+    def test_unattached_ip_delete_items_include_sync_deleted_history(self):
+        asset = CloudAsset.objects.create(
+            kind=CloudAsset.KIND_SERVER,
+            source=CloudAsset.SOURCE_AWS_SYNC,
+            user=self.user,
+            provider='aws_lightsail',
+            region_code=self.plan.region_code,
+            region_name=self.plan.region_name,
+            asset_name='sync-deleted-unattached-ip',
+            public_ip=None,
+            previous_public_ip='5.5.5.10',
+            status=CloudAsset.STATUS_DELETED,
+            is_active=False,
+            provider_status='云上未找到实例/IP',
+            note='未附加固定IP；状态: 云上未找到实例/IP',
+        )
+        record_cloud_ip_log(
+            event_type=CloudIpLog.EVENT_DELETED,
+            asset=asset,
+            previous_public_ip='5.5.5.10',
+            public_ip=None,
+            note='IP校验发现云上不存在，已标记删除',
+        )
+
+        items = _unattached_ip_delete_items(limit=20)
+        row = next(item for item in items if item.get('asset_name') == 'sync-deleted-unattached-ip')
+
+        self.assertEqual(row['public_ip'], '5.5.5.10')
+        self.assertIn('IP校验发现云上不存在，已标记删除', row['note'])
+        self.assertTrue(row['is_overdue'])
+
+    def test_ip_log_delete_keeps_previous_ip_from_change_chain(self):
+        order = CloudServerOrder.objects.create(
+            order_no='IP-LOG-CHAIN-DELETE-1',
+            user=self.user,
+            plan=self.plan,
+            provider=self.plan.provider,
+            region_code=self.plan.region_code,
+            region_name=self.plan.region_name,
+            plan_name=self.plan.plan_name,
+            quantity=1,
+            currency='USDT',
+            total_amount='19.00',
+            pay_amount='19.00',
+            status='completed',
+            public_ip='6.6.6.2',
+            previous_public_ip='6.6.6.1',
+        )
+        first = record_cloud_ip_log(
+            event_type=CloudIpLog.EVENT_CHANGED,
+            order=order,
+            public_ip='6.6.6.2',
+            previous_public_ip='6.6.6.1',
+            note='更换IP，6.6.6.1 -> 6.6.6.2',
+        )
+        second = record_cloud_ip_log(
+            event_type=CloudIpLog.EVENT_DELETED,
+            order=order,
+            public_ip=None,
+            previous_public_ip='6.6.6.2',
+            note='IP校验发现云上不存在，已标记删除',
+        )
+        first.refresh_from_db()
+
+        self.assertEqual(first.id, second.id)
+        self.assertEqual(first.public_ip, '6.6.6.2')
+        self.assertEqual(first.previous_public_ip, '6.6.6.1')
+        self.assertEqual(first.event_type, CloudIpLog.EVENT_DELETED)
+        self.assertIn('IP校验发现云上不存在，已标记删除', first.note)
 
     def test_unattached_ip_delete_items_skip_assets_attached_to_instance(self):
         attached_asset = CloudAsset.objects.create(
@@ -2806,6 +3023,7 @@ class CloudServerServicesTestCase(TestCase):
         self.assertEqual(order.status, 'completed')
         self.assertEqual(order.public_ip, '8.8.8.8')
         self.assertEqual(order.instance_id, 'i-delete-asset-only')
+        self.assertFalse(CloudIpLog.objects.filter(order=order, note__contains='后台手动删除代理列表记录').exists())
 
     def test_delete_cloud_asset_also_removes_residual_server_record(self):
         order = CloudServerOrder.objects.create(
@@ -2878,6 +3096,7 @@ class CloudServerServicesTestCase(TestCase):
         self.assertFalse(Server.objects.filter(id=server.id).exists())
         self.assertEqual(payload['data']['removed_servers'], 1)
         self.assertEqual(payload['data']['removed_server_ids'], [server.id])
+        self.assertTrue(CloudIpLog.objects.filter(order=order, note__contains='后台手动删除代理列表记录').exists())
 
     def test_reconcile_cloud_assets_skips_deleted_server_residual(self):
         order = CloudServerOrder.objects.create(
@@ -4624,6 +4843,67 @@ class CloudServerServicesTestCase(TestCase):
         self.assertEqual(order.static_ip_name, '')
         self.assertIsNone(asset.public_ip)
         self.assertEqual(asset.previous_public_ip, '20.20.20.20')
+        self.assertIn('AWS 固定 IP 已真实释放', order.provision_note or '')
+
+    def test_lifecycle_tick_releases_retained_static_ip_when_asset_already_deleted(self):
+        recycle_due_at = timezone.now() - timezone.timedelta(days=2)
+        order = CloudServerOrder.objects.create(
+            order_no='HB-TEST-RECYCLE-DELETED-ASSET',
+            user=self.user,
+            plan=self.plan,
+            provider=self.plan.provider,
+            region_code=self.plan.region_code,
+            region_name=self.plan.region_name,
+            plan_name=self.plan.plan_name,
+            quantity=1,
+            currency='USDT',
+            total_amount='19.00',
+            pay_amount='19.00',
+            status='deleted',
+            public_ip='20.20.20.21',
+            previous_public_ip='20.20.20.21',
+            static_ip_name='StaticIp-retained-deleted-asset',
+            service_expires_at=timezone.now() - timezone.timedelta(days=20),
+            delete_at=timezone.now() - timezone.timedelta(days=17),
+            ip_recycle_at=recycle_due_at,
+            instance_id='',
+        )
+        asset = CloudAsset.objects.create(
+            kind=CloudAsset.KIND_SERVER,
+            order=order,
+            user=self.user,
+            provider='aws_lightsail',
+            region_code=self.plan.region_code,
+            region_name=self.plan.region_name,
+            asset_name='StaticIp-retained-deleted-asset',
+            public_ip='20.20.20.21',
+            previous_public_ip='20.20.20.21',
+            actual_expires_at=recycle_due_at,
+            status=CloudAsset.STATUS_DELETED,
+            provider_status='固定IP保留中-实例已删除',
+            note='固定IP保留中',
+            is_active=False,
+        )
+
+        released = []
+
+        class FakeLightsailClient:
+            def release_static_ip(self, staticIpName):
+                released.append(staticIpName)
+                return {'operations': [{'id': 'op-retained-release-deleted-asset'}]}
+
+        with patch('cloud.lifecycle._aws_client', return_value=FakeLightsailClient()):
+            async_to_sync(lifecycle_tick)()
+
+        order.refresh_from_db()
+        asset.refresh_from_db()
+        self.assertEqual(released, ['StaticIp-retained-deleted-asset'])
+        self.assertIsNone(order.ip_recycle_at)
+        self.assertEqual(order.public_ip, '')
+        self.assertEqual(order.previous_public_ip, '20.20.20.21')
+        self.assertEqual(order.static_ip_name, '')
+        self.assertIsNone(asset.public_ip)
+        self.assertEqual(asset.previous_public_ip, '20.20.20.21')
         self.assertIn('AWS 固定 IP 已真实释放', order.provision_note or '')
 
     def test_lifecycle_tick_releases_overdue_unattached_static_ip(self):

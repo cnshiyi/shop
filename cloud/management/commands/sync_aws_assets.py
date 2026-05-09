@@ -1,13 +1,13 @@
 import logging
 
 from django.core.management.base import BaseCommand, CommandError
-from django.db.models import Q
+from django.db.models import Case, IntegerField, Q, Value, When
 from django.utils import timezone
 
 from bot.api import _provider_status_label
 from core.cloud_accounts import cloud_account_label, list_active_cloud_accounts
 from core.persistence import record_external_sync_log
-from cloud.models import CloudAsset, CloudServerOrder, Server
+from cloud.models import CloudAsset, CloudServerOrder, Server, _runtime_int_config, _with_runtime_time
 from cloud.note_utils import append_note
 from cloud.services import record_cloud_ip_log
 from cloud.sync_safety import get_missing_confirmation_threshold, mark_missing_confirmation_pending, with_missing_confirmation_note
@@ -15,11 +15,11 @@ from cloud.sync_safety import get_missing_confirmation_threshold, mark_missing_c
 
 logger = logging.getLogger(__name__)
 
-_ACTIVE_ORDER_STATUSES = {'pending', 'provisioning', 'completed', 'expiring', 'renew_pending', 'suspended'}
+_ACTIVE_ORDER_STATUSES = {'pending', 'provisioning', 'completed', 'expiring', 'renew_pending', 'suspended', 'deleting'}
 _TRACEABLE_ORDER_STATUSES = _ACTIVE_ORDER_STATUSES | {'deleted'}
-_SYNC_EXCLUDED_ASSET_STATUSES = {CloudAsset.STATUS_DELETED, CloudAsset.STATUS_DELETING, CloudAsset.STATUS_TERMINATED, CloudAsset.STATUS_TERMINATING}
-_SYNC_EXCLUDED_SERVER_STATUSES = {Server.STATUS_DELETED, Server.STATUS_DELETING, Server.STATUS_TERMINATED, Server.STATUS_TERMINATING}
-_SYNC_EXCLUDED_ORDER_STATUSES = {'deleted', 'deleting', 'expired', 'cancelled'}
+_SYNC_EXCLUDED_ASSET_STATUSES = {CloudAsset.STATUS_DELETED, CloudAsset.STATUS_TERMINATED}
+_SYNC_EXCLUDED_SERVER_STATUSES = {Server.STATUS_DELETED, Server.STATUS_TERMINATED}
+_SYNC_EXCLUDED_ORDER_STATUSES = {'deleted', 'expired', 'cancelled'}
 _MISSING_PENDING_STATUS = '云上未找到实例/IP-待确认'
 
 
@@ -126,6 +126,7 @@ def _release_static_ip_if_due(client, region, asset, static_ip_name, static_ip_a
             request_payload={'staticIpName': release_name, 'asset_id': asset.id, 'public_ip': public_ip},
             response_payload=response,
             is_success=True,
+            account=asset.cloud_account,
         )
         asset.status = CloudAsset.STATUS_DELETED
         asset.provider_status = '未附加固定IP-已到期删除'
@@ -136,6 +137,15 @@ def _release_static_ip_if_due(client, region, asset, static_ip_name, static_ip_a
             f"已到15天回收时间，系统已调用 AWS API 真实删除；删除时间: {timezone.now().isoformat()}",
         )
         asset.save(update_fields=['status', 'provider_status', 'is_active', 'note', 'updated_at'])
+        record_cloud_ip_log(
+            event_type='recycled',
+            order=getattr(asset, 'order', None),
+            asset=asset,
+            server=None,
+            previous_public_ip=public_ip or None,
+            public_ip=None,
+            note=f'AWS 同步删除未附加固定 IP：IP={public_ip or "缺失"}；固定IP名={release_name}；资产#{asset.id}；已调用 AWS release_static_ip。',
+        )
         stdout.write(stdout.style.WARNING(
             f'已删除 AWS {region} 未附加IP={public_ip or "缺失"} 名称={release_name} 资产#{asset.id}'
         ))
@@ -149,6 +159,7 @@ def _release_static_ip_if_due(client, region, asset, static_ip_name, static_ip_a
             response_payload={'error': str(exc)},
             is_success=False,
             error_message=str(exc),
+            account=asset.cloud_account,
         )
         asset.note = append_note(
             asset.note,
@@ -208,6 +219,40 @@ def _order_status_from_cloud_status(status):
     return 'completed'
 
 
+def _asset_resolve_ordering():
+    return [
+        Case(
+            When(status=CloudAsset.STATUS_DELETING, then=Value(0)),
+            default=Value(1),
+            output_field=IntegerField(),
+        ),
+        Case(
+            When(previous_public_ip__isnull=False, then=Value(0)),
+            default=Value(1),
+            output_field=IntegerField(),
+        ),
+        '-updated_at',
+        '-id',
+    ]
+
+
+def _server_resolve_ordering():
+    return [
+        Case(
+            When(status=Server.STATUS_DELETING, then=Value(0)),
+            default=Value(1),
+            output_field=IntegerField(),
+        ),
+        Case(
+            When(previous_public_ip__isnull=False, then=Value(0)),
+            default=Value(1),
+            output_field=IntegerField(),
+        ),
+        '-updated_at',
+        '-id',
+    ]
+
+
 def _resolve_asset(instance_name, instance_arn, public_ip, order, account=None):
     lookup = Q(kind=CloudAsset.KIND_SERVER)
     if account:
@@ -222,14 +267,14 @@ def _resolve_asset(instance_name, instance_arn, public_ip, order, account=None):
     if instance_arn:
         direct_candidates |= Q(provider_resource_id=instance_arn)
     if direct_candidates:
-        asset = base_queryset.filter(direct_candidates).order_by('-updated_at', '-id').first()
+        asset = base_queryset.filter(direct_candidates).order_by(*_asset_resolve_ordering()).first()
         if asset:
             return asset
     if public_ip:
         public_ip_queryset = base_queryset.filter(Q(public_ip=public_ip) | Q(previous_public_ip=public_ip))
         if order:
             public_ip_queryset = public_ip_queryset.filter(Q(order__isnull=True) | Q(order=order))
-        return public_ip_queryset.order_by('-updated_at', '-id').first()
+        return public_ip_queryset.order_by(*_asset_resolve_ordering()).first()
     return None
 
 
@@ -302,14 +347,14 @@ def _resolve_server(instance_name, instance_arn, public_ip, order, account=None)
     if instance_arn:
         direct_candidates |= Q(provider_resource_id=instance_arn)
     if direct_candidates:
-        server = base_queryset.filter(direct_candidates).order_by('-updated_at', '-id').first()
+        server = base_queryset.filter(direct_candidates).order_by(*_server_resolve_ordering()).first()
         if server:
             return server
     if public_ip:
         public_ip_queryset = base_queryset.filter(Q(public_ip=public_ip) | Q(previous_public_ip=public_ip))
         if order:
             public_ip_queryset = public_ip_queryset.filter(Q(order__isnull=True) | Q(order=order))
-        return public_ip_queryset.order_by('-updated_at', '-id').first()
+        return public_ip_queryset.order_by(*_server_resolve_ordering()).first()
     return None
 
 
@@ -324,7 +369,15 @@ def _resolve_asset_for_static_ip(static_ip_name, static_ip_arn, public_ip, accou
     if static_ip_name:
         exact_candidates |= Q(asset_name=static_ip_name, instance_id__isnull=True)
     if exact_candidates:
-        asset = CloudAsset.objects.filter(lookup & exact_candidates).filter(Q(order__isnull=True) | ~Q(order__status__in=_SYNC_EXCLUDED_ORDER_STATUSES)).exclude(status__in=_SYNC_EXCLUDED_ASSET_STATUSES).order_by('-updated_at', '-id').first()
+        asset = CloudAsset.objects.filter(lookup & exact_candidates).order_by(
+            Case(
+                When(status=CloudAsset.STATUS_UNKNOWN, then=Value(0)),
+                default=Value(1),
+                output_field=IntegerField(),
+            ),
+            '-updated_at',
+            '-id',
+        ).first()
         if asset:
             return asset
 
@@ -332,12 +385,88 @@ def _resolve_asset_for_static_ip(static_ip_name, static_ip_arn, public_ip, accou
         return (
             CloudAsset.objects.filter(lookup & (Q(public_ip=public_ip) | Q(previous_public_ip=public_ip)))
             .filter(Q(instance_id__isnull=True) | Q(instance_id='') | Q(provider_status='未附加固定IP') | Q(provider_resource_id__contains='StaticIp'))
-            .filter(Q(order__isnull=True) | ~Q(order__status__in=_SYNC_EXCLUDED_ORDER_STATUSES))
-            .exclude(status__in=_SYNC_EXCLUDED_ASSET_STATUSES)
-            .order_by('-updated_at', '-id')
+            .order_by(
+                Case(
+                    When(status=CloudAsset.STATUS_UNKNOWN, then=Value(0)),
+                    default=Value(1),
+                    output_field=IntegerField(),
+                ),
+                '-updated_at',
+                '-id',
+            )
             .first()
         )
     return None
+
+
+def _mark_ip_retained_as_unattached(public_ip, static_ip_name, retained_order, account, region, note, now, release_at=None):
+    if not public_ip:
+        return []
+    label = cloud_account_label(account) if account else ''
+    lookup = Q(kind=CloudAsset.KIND_SERVER, provider='aws_lightsail') & (Q(public_ip=public_ip) | Q(previous_public_ip=public_ip))
+    if account:
+        lookup &= (Q(cloud_account=account) | Q(account_label=label))
+    updated = []
+    for related in CloudAsset.objects.filter(lookup).exclude(provider_status__contains='未附加固定IP'):
+        if str(getattr(related, 'asset_name', '') or '') == str(static_ip_name or '') and not getattr(related, 'instance_id', None):
+            continue
+        related.previous_public_ip = related.previous_public_ip or related.public_ip or public_ip
+        related.public_ip = related.public_ip or public_ip
+        related.status = CloudAsset.STATUS_UNKNOWN
+        related.is_active = False
+        related.provider_status = '固定IP仍存在但未附加'
+        if release_at:
+            related.actual_expires_at = release_at
+        related.note = append_note(related.note, f'状态: 固定IP仍存在但未附加；公网IP: {public_ip}；固定IP名: {static_ip_name or "-"}；发现时间: {now.isoformat()}；计划释放时间: {release_at.isoformat() if release_at else "-"}；覆盖同步时间: {now.isoformat()}')
+        if retained_order and not related.order_id:
+            related.order = retained_order
+            related.user = retained_order.user
+        related.save(update_fields=['previous_public_ip', 'public_ip', 'actual_expires_at', 'status', 'is_active', 'provider_status', 'note', 'order', 'user', 'updated_at'])
+        trace = record_cloud_ip_log(
+            event_type='changed',
+            order=retained_order or getattr(related, 'order', None),
+            asset=related,
+            server=None,
+            public_ip=public_ip,
+            previous_public_ip=related.previous_public_ip,
+            note=f'AWS 同步覆盖：固定 IP 仍存在但未附加；IP={public_ip}；固定IP名={static_ip_name or "-"}；发现时间={now.isoformat()}；计划释放时间={release_at.isoformat() if release_at else "-"}；不标记删除。',
+            trigger_label='AWS同步',
+        )
+        if trace and trace.note:
+            cleaned_lines = []
+            for line in trace.note.split('\n'):
+                if public_ip in line and ('云上不存在' in line or '已标记删除' in line):
+                    continue
+                cleaned_lines.append(line)
+            cleaned_note = '\n'.join(line for line in cleaned_lines if line.strip())
+            if cleaned_note != trace.note:
+                trace.note = cleaned_note
+                trace.save(update_fields=['note'])
+        updated.append(f'{related.id}:{public_ip}:{related.asset_name}')
+    server_lookup = Q(provider='aws_lightsail') & (Q(public_ip=public_ip) | Q(previous_public_ip=public_ip))
+    if account:
+        server_lookup &= Q(account_label=label)
+    for server in Server.objects.filter(server_lookup):
+        server.previous_public_ip = server.previous_public_ip or server.public_ip or public_ip
+        server.public_ip = server.public_ip or public_ip
+        server.status = Server.STATUS_UNKNOWN
+        server.is_active = False
+        server.provider_status = '固定IP仍存在但未附加'
+        if release_at:
+            server.expires_at = release_at
+        server.note = append_note(server.note, f'状态: 固定IP仍存在但未附加；公网IP: {public_ip}；固定IP名: {static_ip_name or "-"}；发现时间: {now.isoformat()}；计划释放时间: {release_at.isoformat() if release_at else "-"}；覆盖同步时间: {now.isoformat()}')
+        if retained_order and not server.order_id:
+            server.order = retained_order
+            server.user = retained_order.user
+        server.save(update_fields=['previous_public_ip', 'public_ip', 'expires_at', 'status', 'is_active', 'provider_status', 'note', 'order', 'user', 'updated_at'])
+    if retained_order:
+        retained_order.public_ip = retained_order.public_ip or public_ip
+        retained_order.previous_public_ip = retained_order.previous_public_ip or public_ip
+        retained_order.static_ip_name = retained_order.static_ip_name or static_ip_name
+        retained_order.ip_recycle_at = release_at or retained_order.ip_recycle_at
+        retained_order.provision_note = _append_unique_line(retained_order.provision_note, note)
+        retained_order.save(update_fields=['public_ip', 'previous_public_ip', 'static_ip_name', 'ip_recycle_at', 'status', 'provision_note', 'updated_at'])
+    return updated
 
 
 def _mark_deleted_when_missing_in_aws(region, existing_instance_names, existing_public_ips, stdout, account=None):
@@ -363,7 +492,7 @@ def _mark_deleted_when_missing_in_aws(region, existing_instance_names, existing_
         )
         if instance_name and instance_name in existing_instance_names:
             continue
-        if is_static_ip_asset and public_ip and public_ip in existing_public_ips:
+        if public_ip and public_ip in existing_public_ips:
             continue
         old_public_ip = public_ip or str(asset.previous_public_ip or '').strip()
         pending_count, threshold = mark_missing_confirmation_pending(
@@ -429,7 +558,7 @@ def _mark_deleted_when_missing_in_aws(region, existing_instance_names, existing_
         is_static_ip_record = not instance_name or server.provider_status == '未附加固定IP' or 'StaticIp' in str(server.provider_resource_id or '')
         if instance_name and instance_name in existing_instance_names:
             continue
-        if is_static_ip_record and public_ip and public_ip in existing_public_ips:
+        if public_ip and public_ip in existing_public_ips:
             continue
         old_public_ip = public_ip or str(server.previous_public_ip or '').strip()
         pending_count, threshold = mark_missing_confirmation_pending(
@@ -606,6 +735,7 @@ class Command(BaseCommand):
                         request_payload=kwargs,
                         response_payload={'count': len(response.get('instances') or []), 'nextPageToken': response.get('nextPageToken')},
                         is_success=True,
+                        account=account,
                     )
                     instances = response.get('instances') or []
                     now_iso = timezone.now().isoformat()
@@ -657,8 +787,13 @@ class Command(BaseCommand):
                                 order_user = None
 
                         provider_status = _provider_status_label(state_name or None)
-                        preserve_lifecycle_status = bool(order and order.status in {'suspended', 'deleting'})
-                        if order and order.status == 'deleting':
+                        asset = _resolve_asset(instance_name, instance_arn, public_ip, order, account)
+                        old_status = asset.status if asset else None
+                        preserve_lifecycle_status = bool(
+                            (order and order.status in {'suspended', 'deleting'})
+                            or old_status in {CloudAsset.STATUS_SUSPENDED, CloudAsset.STATUS_DELETING, CloudAsset.STATUS_TERMINATING}
+                        )
+                        if (order and order.status == 'deleting') or old_status == CloudAsset.STATUS_DELETING:
                             provider_status = f'旧机保留期，等待删除（云端{provider_status}）'
                         elif order and order.status == 'suspended':
                             provider_status = f'已到期关机，等待删除（云端{provider_status}）'
@@ -688,14 +823,16 @@ class Command(BaseCommand):
                             'provider_status': provider_status,
                             'is_active': is_active,
                         }
-                        asset = _resolve_asset(instance_name, instance_arn, public_ip, order, account)
                         rebound_unattached_ip = bool(
                             asset
                             and '未附加' in str(getattr(asset, 'provider_status', '') or '')
                             and str(instance_name or '').strip()
                         )
                         if asset:
-                            asset_defaults['user'] = asset.user
+                            asset_defaults['user'] = asset.user or order_user
+                            if not asset.order_id and order:
+                                asset_defaults['order'] = order
+                                asset_defaults['actual_expires_at'] = expires_at
                             if rebound_unattached_ip:
                                 rebound_at = timezone.now()
                                 rebound_note = f'未附加IP已重新绑定到实例，已清空临时到期时间：{rebound_at.isoformat()}；等待人工添加真实到期时间。'
@@ -706,9 +843,9 @@ class Command(BaseCommand):
                             else:
                                 asset_defaults['actual_expires_at'] = asset.actual_expires_at
                         asset_signature = f'{instance_name or "-"}|{instance_arn or "-"}|{public_ip or "缺失"}'
-                        old_status = asset.status if asset else None
                         old_public_ip = asset.public_ip if asset else None
                         ip_changed = bool(asset and old_public_ip and old_public_ip != public_ip)
+                        created_asset_from_sync = asset is None
                         if asset:
                             claimed_signature = claimed_assets.get(asset.id)
                             if claimed_signature and claimed_signature != asset_signature:
@@ -727,6 +864,9 @@ class Command(BaseCommand):
                                 original_due_at = asset.actual_expires_at
                                 for key, value in asset_defaults.items():
                                     setattr(asset, key, value)
+                                if preserve_lifecycle_status and old_status:
+                                    asset.status = old_status
+                                    asset.is_active = old_status not in {CloudAsset.STATUS_DELETING, CloudAsset.STATUS_TERMINATING}
                                 if rebound_unattached_ip and asset.status == CloudAsset.STATUS_UNKNOWN:
                                     asset.status = CloudAsset.STATUS_RUNNING
                                 if original_due_at and not rebound_unattached_ip:
@@ -767,28 +907,47 @@ class Command(BaseCommand):
                             'is_active': is_active,
                         }
                         if asset:
-                            server_defaults['user'] = asset.user
-                            server_defaults['expires_at'] = asset.actual_expires_at
+                            server_defaults['user'] = asset.user or order_user
+                            server_defaults['expires_at'] = asset.actual_expires_at or expires_at
+                            if not asset.order_id and order:
+                                server_defaults['order'] = order
                             if rebound_unattached_ip:
                                 server_defaults['expires_at'] = asset_defaults['actual_expires_at']
                                 server_defaults['provider_status'] = asset_defaults['provider_status']
                                 server_defaults['note'] = asset_defaults['note']
                                 server_defaults['is_active'] = True
                         server = _resolve_server(instance_name, instance_arn, public_ip, order, account)
+                        old_server_status = server.status if server else None
                         if server:
-                            server_defaults['user'] = server.user
+                            server_defaults['user'] = server.user or order_user or getattr(asset, 'user', None)
                             server_defaults['expires_at'] = server.expires_at if not rebound_unattached_ip else asset_defaults['actual_expires_at']
+                            if not server.order_id and order:
+                                server_defaults['order'] = order
                         old_server_public_ip = server.public_ip if server else None
                         if server:
                             if old_server_public_ip and old_server_public_ip != public_ip:
                                 server.previous_public_ip = old_server_public_ip
                             for key, value in server_defaults.items():
                                 setattr(server, key, value)
+                            if preserve_lifecycle_status and old_server_status:
+                                server.status = old_server_status
+                                server.is_active = old_server_status not in {Server.STATUS_DELETING, Server.STATUS_TERMINATING}
                             if rebound_unattached_ip and server.status == Server.STATUS_UNKNOWN:
                                 server.status = Server.STATUS_RUNNING
                             server.save()
                         else:
                             server = Server.objects.create(**server_defaults)
+
+                        if created_asset_from_sync:
+                            record_cloud_ip_log(
+                                event_type='created',
+                                order=order,
+                                asset=asset,
+                                server=server,
+                                public_ip=public_ip or None,
+                                previous_public_ip=None,
+                                note=f'AWS 同步发现新实例：账号={account_label}；地区={region}；实例={instance_name or instance_arn}；IP={public_ip or "缺失"}；固定IP名={static_ip_name or "-"}。',
+                            )
 
                         if order:
                             if not preserve_lifecycle_status:
@@ -835,6 +994,9 @@ class Command(BaseCommand):
                 for item in static_ip_cache:
                     attached_to = item.get('attachedTo') or ''
                     public_ip = item.get('ipAddress') or ''
+                    if public_ip:
+                        existing_public_ips.add(public_ip)
+                        region_public_ips.add(public_ip)
                     if attached_to and attached_to in attached_instance_names:
                         continue
                     static_ip_name = item.get('name') or public_ip or 'aws-static-ip'
@@ -842,12 +1004,32 @@ class Command(BaseCommand):
                     location = item.get('location') or {}
                     provider_status = '未附加固定IP'
                     discovered_at = timezone.now()
-                    recycle_due_at = discovered_at + timezone.timedelta(days=15)
+                    recycle_due_at = _with_runtime_time(
+                        discovered_at + timezone.timedelta(days=max(1, _runtime_int_config('cloud_unattached_ip_delete_after_days', 15))),
+                        'cloud_unattached_ip_delete_time',
+                    )
                     note = (
                         f"状态: {provider_status}；公网IP: {public_ip or '缺失'}；固定IP名: {static_ip_name}；"
                         f"发现时间: {discovered_at.isoformat()}；计划删除时间: {recycle_due_at.isoformat()}；最近同步: {discovered_at.isoformat()}"
                     )
                     retained_order = _resolve_order_for_ip(public_ip, account) if public_ip else None
+                    if (
+                        retained_order
+                        and not str(retained_order.instance_id or '').strip()
+                        and retained_order.delete_at
+                        and retained_order.delete_at > discovered_at
+                        and retained_order.ip_recycle_at
+                        and retained_order.ip_recycle_at > recycle_due_at
+                    ):
+                        retained_order.ip_recycle_at = recycle_due_at
+                        if retained_order.status == 'completed':
+                            retained_order.status = 'deleted'
+                        retained_order.provision_note = append_note(
+                            retained_order.provision_note,
+                            f'AWS 同步校正未附加固定 IP 生命周期：实例已提前删除，固定 IP 从发现未附加时间重新计算 {max(1, _runtime_int_config("cloud_unattached_ip_delete_after_days", 15))} 天；计划释放时间={recycle_due_at.isoformat()}。',
+                        )
+                        retained_order.save(update_fields=['status', 'ip_recycle_at', 'provision_note', 'updated_at'])
+                        status_changed_items.append(f'{retained_order.id}:{public_ip}:unattached_lifecycle_rebased:{recycle_due_at.isoformat()}')
                     asset_defaults = {
                         'kind': CloudAsset.KIND_SERVER,
                         'source': CloudAsset.SOURCE_AWS_SYNC,
@@ -867,6 +1049,9 @@ class Command(BaseCommand):
                         'is_active': False,
                     }
                     if retained_order:
+                        if retained_order.ip_recycle_at:
+                            asset_defaults['actual_expires_at'] = retained_order.ip_recycle_at
+                            recycle_due_at = retained_order.ip_recycle_at
                         asset_defaults.update({
                             'order': retained_order,
                             'user': retained_order.user,
@@ -877,10 +1062,11 @@ class Command(BaseCommand):
                             'mtproxy_host': retained_order.mtproxy_host,
                         })
                     asset = _resolve_asset_for_static_ip(static_ip_name, static_ip_arn, public_ip, account)
+                    created_unattached_asset_from_sync = asset is None
                     if asset:
                         if asset.user_id:
                             asset_defaults['user'] = asset.user
-                        if asset.actual_expires_at:
+                        if asset.actual_expires_at and not getattr(retained_order, 'ip_recycle_at', None):
                             asset_defaults['actual_expires_at'] = asset.actual_expires_at
                     asset_signature = f'{static_ip_name or "-"}|{static_ip_arn or "-"}|{public_ip or "缺失"}'
                     old_status = asset.status if asset else None
@@ -896,9 +1082,30 @@ class Command(BaseCommand):
                             original_due_at = asset.actual_expires_at
                             for key, value in asset_defaults.items():
                                 setattr(asset, key, value)
-                            if original_due_at:
+                            should_preserve_unattached_due = (
+                                original_due_at
+                                and not getattr(retained_order, 'ip_recycle_at', None)
+                                and old_status == CloudAsset.STATUS_UNKNOWN
+                                and '未附加' in str(getattr(asset, 'provider_status', '') or '')
+                            )
+                            if should_preserve_unattached_due:
                                 asset.actual_expires_at = original_due_at
+                            due_changed = bool(original_due_at and asset.actual_expires_at and original_due_at != asset.actual_expires_at)
                             asset.save()
+                            if due_changed and old_status == CloudAsset.STATUS_UNKNOWN and '未附加' in str(getattr(asset, 'provider_status', '') or ''):
+                                record_cloud_ip_log(
+                                    event_type='changed',
+                                    order=retained_order or getattr(asset, 'order', None),
+                                    asset=asset,
+                                    server=None,
+                                    public_ip=public_ip or None,
+                                    previous_public_ip=public_ip or None,
+                                    note=(
+                                        f'AWS 同步校正未附加固定 IP 生命周期：账号={account_label}；地区={region}；'
+                                        f'IP={public_ip or "缺失"}；固定IP名={static_ip_name}；'
+                                        f'原计划释放时间={original_due_at.isoformat()}；计划释放时间={asset.actual_expires_at.isoformat()}。'
+                                    ),
+                                )
                             updated_count += 1
                             account_stats['updated'] += 1
                             updated_asset_ids.append(f'{asset.id}:{public_ip or "缺失"}:{static_ip_name or static_ip_arn}')
@@ -908,6 +1115,33 @@ class Command(BaseCommand):
                         created_count += 1
                         account_stats['created'] += 1
                         created_asset_ids.append(f'{asset.id}:{public_ip or "缺失"}:{static_ip_name or static_ip_arn}')
+                    if created_unattached_asset_from_sync:
+                        record_cloud_ip_log(
+                            event_type='created',
+                            order=retained_order,
+                            asset=asset,
+                            server=None,
+                            public_ip=public_ip or None,
+                            previous_public_ip=None,
+                            note=(
+                                f'AWS 同步发现未附加固定 IP：账号={account_label}；地区={region}；'
+                                f'IP={public_ip or "缺失"}；固定IP名={static_ip_name}；计划删除时间={asset.actual_expires_at.isoformat() if asset.actual_expires_at else "-"}。'
+                            ),
+                        )
+                    elif old_status is not None and old_status != CloudAsset.STATUS_UNKNOWN:
+                        record_cloud_ip_log(
+                            event_type='changed',
+                            order=retained_order or getattr(asset, 'order', None),
+                            asset=asset,
+                            server=None,
+                            public_ip=public_ip or None,
+                            previous_public_ip=None,
+                            note=(
+                                f'AWS 同步确认固定 IP 已分离为未附加状态：账号={account_label}；地区={region}；'
+                                f'IP={public_ip or "缺失"}；固定IP名={static_ip_name}；原状态={old_status}。'
+                            ),
+                        )
+
                     if retained_order:
                         order_note = (
                             f'AWS 同步确认固定 IP 未附加但仍保留；IP={public_ip or "缺失"}；固定IP名={static_ip_name}；'
@@ -917,12 +1151,10 @@ class Command(BaseCommand):
                             f'IP计划回收={retained_order.ip_recycle_at.isoformat() if retained_order.ip_recycle_at else recycle_due_at.isoformat()}；'
                             f'用户续费/重装时必须对照旧 IP、端口、secret。'
                         )
-                        retained_order.public_ip = retained_order.public_ip or public_ip
-                        retained_order.previous_public_ip = retained_order.previous_public_ip or public_ip
-                        retained_order.static_ip_name = retained_order.static_ip_name or static_ip_name
                         retained_order.ip_recycle_at = retained_order.ip_recycle_at or recycle_due_at
-                        retained_order.provision_note = _append_unique_line(retained_order.provision_note, order_note)
-                        retained_order.save(update_fields=['public_ip', 'previous_public_ip', 'static_ip_name', 'ip_recycle_at', 'provision_note', 'updated_at'])
+                        covered_items = _mark_ip_retained_as_unattached(public_ip, static_ip_name, retained_order, account, region, order_note, discovered_at, recycle_due_at)
+                        if covered_items:
+                            status_changed_items.extend([f'{item}:static_ip_retained_unattached' for item in covered_items])
                     if public_ip:
                         duplicate_static_assets = CloudAsset.objects.filter(
                             kind=CloudAsset.KIND_SERVER,
