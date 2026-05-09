@@ -1,3 +1,5 @@
+import asyncio
+import inspect
 import ipaddress
 import logging
 
@@ -37,3 +39,52 @@ def validate_server_connection_ip(target_ip, expected_ips, *, context: str = 'se
         return False, note
     logger.info('SERVER_CONNECTION_IP_GUARD_OK context=%s target=%s expected=%s', context, target, expected)
     return True, '服务器连接前 IP 校验通过'
+
+
+def _is_retryable_mismatch(target_ip, expected_ips) -> bool:
+    target = normalize_public_ip(target_ip)
+    expected = [normalize_public_ip(item) for item in (expected_ips or [])]
+    expected = [item for item in expected if item]
+    return bool(target and expected and target not in expected)
+
+
+async def validate_server_connection_ip_with_retry(
+    target_ip,
+    expected_ips,
+    *,
+    context: str = 'server_connection',
+    attempts: int = 3,
+    delay_seconds: float = 5,
+    refresh_target=None,
+    sleep=asyncio.sleep,
+) -> tuple[bool, str, str]:
+    attempts = max(1, int(attempts or 1))
+    current_target = target_ip
+    last_note = ''
+    for attempt in range(1, attempts + 1):
+        ok, note = validate_server_connection_ip(current_target, expected_ips, context=f'{context}:attempt:{attempt}')
+        if ok:
+            if attempt > 1:
+                return True, f'{note}（第 {attempt} 次校验通过）', normalize_public_ip(current_target)
+            return True, note, normalize_public_ip(current_target)
+        last_note = note
+        if attempt >= attempts or not _is_retryable_mismatch(current_target, expected_ips):
+            break
+        logger.warning(
+            'SERVER_CONNECTION_IP_GUARD_RETRY context=%s attempt=%s/%s target=%s expected=%s',
+            context,
+            attempt,
+            attempts,
+            current_target,
+            [normalize_public_ip(item) for item in (expected_ips or []) if normalize_public_ip(item)],
+        )
+        if delay_seconds > 0:
+            await sleep(delay_seconds)
+        if refresh_target:
+            refreshed = refresh_target()
+            if inspect.isawaitable(refreshed):
+                refreshed = await refreshed
+            if refreshed:
+                current_target = refreshed
+    retry_note = f'{last_note} 已重试 {attempts} 次，仍未匹配预期 IP。' if attempts > 1 and _is_retryable_mismatch(current_target, expected_ips) else last_note
+    return False, retry_note, normalize_public_ip(current_target)

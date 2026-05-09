@@ -8,6 +8,7 @@ import time
 from pathlib import Path
 
 from cloud.bootstrap import _derive_public_keys_from_private_keys
+from cloud.ip_guard import normalize_public_ip
 from cloud.ports import get_mtproxy_public_ports
 from cloud.schemas import ProvisionResult
 from django.apps import apps
@@ -448,6 +449,41 @@ def _get_instance_public_ip_sync(order_data: dict, instance_name: str) -> str:
         return ''
 
 
+def _iter_lightsail_pages(client, method_name: str, result_key: str):
+    token = ''
+    while True:
+        kwargs = {'pageToken': token} if token else {}
+        response = getattr(client, method_name)(**kwargs)
+        for item in response.get(result_key) or []:
+            yield item
+        token = response.get('nextPageToken') or ''
+        if not token:
+            break
+
+
+def _public_ip_exists_sync(order_data: dict, expected_ips) -> tuple[bool, str]:
+    expected = {normalize_public_ip(item) for item in (expected_ips or [])}
+    expected = {item for item in expected if item}
+    if not expected:
+        return False, '缺少可校验的预期公网 IP。'
+    client, client_error = _aws_client_from_order_data(order_data)
+    if not client:
+        return False, f'AWS 预期 IP 存在性确认失败：{client_error}'
+    try:
+        for item in _iter_lightsail_pages(client, 'get_static_ips', 'staticIps'):
+            ip_address = normalize_public_ip(item.get('ipAddress'))
+            if ip_address in expected:
+                return True, f'AWS 预期 IP {ip_address} 存在于固定 IP。'
+        for item in _iter_lightsail_pages(client, 'get_instances', 'instances'):
+            ip_address = normalize_public_ip(item.get('publicIpAddress'))
+            if ip_address in expected:
+                return True, f'AWS 预期 IP {ip_address} 存在于实例公网 IP。'
+    except Exception as exc:
+        logger.warning('AWS 预期 IP 存在性确认异常: order=%s expected=%s error=%s', order_data.get('order_no'), sorted(expected), exc)
+        return False, f'AWS 预期 IP 存在性确认异常：{exc}'
+    return False, f'AWS 预期 IP {" / ".join(sorted(expected))} 在当前云账号中不存在，已停止连接。'
+
+
 @sync_to_async(thread_sensitive=False)
 def move_static_ip_to_instance(order_data: dict, instance_name: str, static_ip_name: str, temp_static_ip_name: str = ''):
     return _move_static_ip_sync(order_data, instance_name, static_ip_name, temp_static_ip_name)
@@ -456,3 +492,8 @@ def move_static_ip_to_instance(order_data: dict, instance_name: str, static_ip_n
 @sync_to_async(thread_sensitive=False)
 def get_instance_public_ip(order_data: dict, instance_name: str):
     return _get_instance_public_ip_sync(order_data, instance_name)
+
+
+@sync_to_async(thread_sensitive=False)
+def public_ip_exists(order_data: dict, expected_ips):
+    return _public_ip_exists_sync(order_data, expected_ips)

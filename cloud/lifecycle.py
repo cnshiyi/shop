@@ -1220,6 +1220,8 @@ def _delete_instance_sync(order: CloudServerOrder) -> tuple[bool, str]:
         client.delete_instance(instanceName=order.server_name)
         return True, 'AWS 实例已执行删除，固定 IP 继续保留。'
     except Exception as exc:
+        if _is_aws_not_found_error(exc):
+            return True, f'AWS 实例云端已不存在，按已删除处理，固定 IP 继续保留：{order.server_name}'
         return False, f'AWS 实例删除失败: {exc}'
 
 
@@ -1235,6 +1237,8 @@ def _delete_replaced_server_sync(order: CloudServerOrder) -> tuple[bool, str]:
         client.delete_instance(instanceName=order.server_name)
         return True, '迁移期结束，旧 AWS 实例已删除。'
     except Exception as exc:
+        if _is_aws_not_found_error(exc):
+            return True, f'迁移期结束，旧 AWS 实例云端已不存在，按已删除处理：{order.server_name}'
         return False, f'迁移期结束，旧实例删除失败: {exc}'
 
 
@@ -1250,6 +1254,8 @@ def _delete_orphan_asset_instance_sync(asset: CloudAsset) -> tuple[bool, str]:
         client.delete_instance(instanceName=asset.asset_name)
         return True, '无订单 AWS 资产到期，已执行真实删机。'
     except Exception as exc:
+        if _is_aws_not_found_error(exc):
+            return True, f'无订单 AWS 资产云端已不存在，按已删除处理：{asset.asset_name}'
         return False, f'无订单 AWS 资产到期，真实删机失败: {exc}'
 
 

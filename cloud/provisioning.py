@@ -10,9 +10,9 @@ from cloud.note_utils import append_note, prepend_note, with_note_time
 from cloud.services import _cloud_log_trigger_label, _resolve_aws_static_ip_name_for_order, _update_order_primary_records, build_cloud_server_name, ensure_unique_cloud_server_name, is_cloud_asset_renewal_order, record_cloud_ip_log
 from core.cloud_accounts import choose_cloud_account_for_order, cloud_account_label, list_cloud_accounts_by_server_load
 from cloud.aliyun_simple import create_instance as create_aliyun_instance
-from cloud.aws_lightsail import create_instance as create_aws_instance, get_instance_public_ip, move_static_ip_to_instance
+from cloud.aws_lightsail import create_instance as create_aws_instance, get_instance_public_ip, move_static_ip_to_instance, public_ip_exists
 from cloud.bootstrap import build_mtproxy_links, install_bbr, install_mtproxy
-from cloud.ip_guard import validate_server_connection_ip
+from cloud.ip_guard import validate_server_connection_ip_with_retry
 from cloud.models import CloudServerOrder
 from cloud.ports import get_mtproxy_port_label, get_mtproxy_port_plan
 
@@ -632,13 +632,37 @@ async def provision_cloud_server(order_id: int):
                 expected_connection_ips = recovery_expected_ips
             else:
                 expected_connection_ips = [final_public_ip]
-            guard_ok, guard_note = validate_server_connection_ip(final_public_ip, expected_connection_ips, context=f'provision_order:{order.id}')
+            aws_payload = await _get_aws_create_payload(order.id) if order.provider == 'aws_lightsail' else None
+            if aws_payload:
+                ip_exists, ip_exists_note = await public_ip_exists(aws_payload, expected_connection_ips)
+                if not ip_exists:
+                    saved = await _mark_failed(order_id, ip_exists_note)
+                    clear_provision_progress(order_id)
+                    logger.warning('云服务器开通失败: order=%s reason=expected_ip_not_found note=%s', saved.order_no, ip_exists_note)
+                    print('[PROVISION_RESULT]', {'order_id': saved.id, 'order_no': saved.order_no, 'status': saved.status, 'error': saved.provision_note})
+                    return saved
+                logger.info('云服务器预期 IP 云端存在性确认通过: order=%s note=%s', order.order_no, ip_exists_note)
+
+            async def _refresh_guard_target_ip():
+                if not aws_payload or not result.instance_id:
+                    return ''
+                return await get_instance_public_ip(aws_payload, result.instance_id)
+
+            guard_ok, guard_note, guarded_public_ip = await validate_server_connection_ip_with_retry(
+                final_public_ip,
+                expected_connection_ips,
+                context=f'provision_order:{order.id}',
+                attempts=3,
+                delay_seconds=5,
+                refresh_target=_refresh_guard_target_ip,
+            )
             if not guard_ok:
                 saved = await _mark_failed(order_id, guard_note)
                 clear_provision_progress(order_id)
                 logger.warning('云服务器开通失败: order=%s reason=connection_ip_guard note=%s', saved.order_no, guard_note)
                 print('[PROVISION_RESULT]', {'order_id': saved.id, 'order_no': saved.order_no, 'status': saved.status, 'error': saved.provision_note})
                 return saved
+            final_public_ip = guarded_public_ip or final_public_ip
 
             set_provision_progress(order.id, '安装 BBR')
             logger.info('开始执行 BBR 初始化: order=%s public_ip=%s user=%s requested_user=%s', order.order_no, final_public_ip, bootstrap_user, bootstrap_user)

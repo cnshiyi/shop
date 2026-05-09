@@ -17,8 +17,8 @@ from cloud.bootstrap import _build_mtproxy_script, _extract_tg_links
 from cloud.models import CloudAsset, CloudAutoRenewPatrolLog, CloudIpLog, CloudServerOrder, CloudServerPlan, CloudUserNoticeLog, Server
 from cloud.lifecycle import _apply_notice_schedule_to_order, _get_due_orders, _get_migration_due_orders, _get_orphan_asset_delete_due, _is_cloud_delete_safe_time, _is_cloud_suspend_time, _mark_deleted, _mark_suspended, _next_cloud_action_run_at, _notice_plan_text, _send_logged_cloud_notice, daily_expiry_summary_tick, lifecycle_tick, sync_server_status_tick
 from cloud.ports import get_mtproxy_port_label, get_mtproxy_public_ports, is_valid_mtproxy_main_port
-from cloud.aws_lightsail import _resolve_static_ip_name_for_move
-from cloud.ip_guard import validate_server_connection_ip
+from cloud.aws_lightsail import _public_ip_exists_sync, _resolve_static_ip_name_for_move
+from cloud.ip_guard import validate_server_connection_ip, validate_server_connection_ip_with_retry
 from cloud.provisioning import (
     _candidate_cloud_account_ids,
     _extract_mtproxy_fields,
@@ -50,6 +50,178 @@ class CloudServerServicesTestCase(TestCase):
 
         self.assertFalse(ok)
         self.assertIn('目标 IP 无效', note)
+
+    def test_server_connection_ip_guard_retries_mismatch_until_refreshed(self):
+        refreshed = iter(['54.151.227.23', '13.228.232.184'])
+
+        ok, note, final_ip = async_to_sync(validate_server_connection_ip_with_retry)(
+            '54.151.227.23',
+            ['13.228.232.184'],
+            context='test_retry_mismatch',
+            attempts=3,
+            delay_seconds=0,
+            refresh_target=lambda: next(refreshed),
+        )
+
+        self.assertTrue(ok)
+        self.assertEqual(final_ip, '13.228.232.184')
+        self.assertIn('第 3 次校验通过', note)
+
+    def test_server_connection_ip_guard_does_not_retry_invalid_target(self):
+        refresh = AsyncMock(return_value='13.228.232.184')
+
+        ok, note, final_ip = async_to_sync(validate_server_connection_ip_with_retry)(
+            '127.0.0.1',
+            ['13.228.232.184'],
+            context='test_retry_invalid',
+            attempts=3,
+            delay_seconds=0,
+            refresh_target=refresh,
+        )
+
+        self.assertFalse(ok)
+        self.assertEqual(final_ip, '')
+        self.assertIn('目标 IP 无效', note)
+        refresh.assert_not_called()
+
+    def test_aws_expected_ip_existence_check_passes_when_static_ip_exists(self):
+        class Client:
+            def get_static_ips(self):
+                return {'staticIps': [{'ipAddress': '13.228.232.184'}]}
+
+            def get_instances(self):
+                return {'instances': []}
+
+        with patch('cloud.aws_lightsail._aws_client_from_order_data', return_value=(Client(), '')):
+            ok, note = _public_ip_exists_sync({'order_no': 'TEST'}, ['13.228.232.184'])
+
+        self.assertTrue(ok)
+        self.assertIn('存在于固定 IP', note)
+
+    def test_aws_expected_ip_existence_check_fails_when_ip_missing(self):
+        class Client:
+            def get_static_ips(self):
+                return {'staticIps': [{'ipAddress': '54.151.227.23'}]}
+
+            def get_instances(self):
+                return {'instances': [{'publicIpAddress': '54.151.227.24'}]}
+
+        with patch('cloud.aws_lightsail._aws_client_from_order_data', return_value=(Client(), '')):
+            ok, note = _public_ip_exists_sync({'order_no': 'TEST'}, ['13.228.232.184'])
+
+        self.assertFalse(ok)
+        self.assertIn('在当前云账号中不存在', note)
+
+    def test_manual_order_delete_bypasses_schedule_limits(self):
+        from bot.api import _run_shutdown_order_sync
+
+        order = CloudServerOrder.objects.create(
+            order_no='MANUAL-DELETE-BYPASS-ORDER-1',
+            user=self.user,
+            plan=self.plan,
+            provider=self.plan.provider,
+            region_code=self.plan.region_code,
+            region_name=self.plan.region_name,
+            plan_name=self.plan.plan_name,
+            quantity=1,
+            currency='USDT',
+            total_amount='19.00',
+            pay_amount='19.00',
+            status='deleting',
+            public_ip='52.77.18.241',
+            delete_at=timezone.now() + timezone.timedelta(days=1),
+        )
+        with patch('bot.api._is_cloud_delete_safe_time', return_value=False) as safe_time, \
+            patch('bot.api._delete_instance', new=AsyncMock(return_value=(True, 'manual delete ok'))), \
+            patch('bot.api._mark_deleted', new=AsyncMock()):
+            result = _run_shutdown_order_sync(order.id, enforce_schedule=False)
+
+        self.assertTrue(result['ok'])
+        safe_time.assert_not_called()
+
+    def test_manual_orphan_asset_delete_bypasses_schedule_limits(self):
+        from bot.api import _run_orphan_asset_delete_sync
+
+        asset = CloudAsset.objects.create(
+            kind=CloudAsset.KIND_SERVER,
+            source=CloudAsset.SOURCE_AWS_SYNC,
+            user=self.user,
+            provider='aws_lightsail',
+            region_code=self.plan.region_code,
+            region_name=self.plan.region_name,
+            asset_name='manual-owner-asset',
+            instance_id='manual-owner-asset-instance',
+            public_ip='52.77.18.241',
+            actual_expires_at=timezone.now() + timezone.timedelta(days=1),
+            status=CloudAsset.STATUS_RUNNING,
+            is_active=True,
+        )
+        with patch('bot.api._is_cloud_delete_safe_time', return_value=False) as safe_time, \
+            patch('bot.api._delete_orphan_asset_instance', new=AsyncMock(return_value=(True, 'manual asset delete ok'))), \
+            patch('bot.api._mark_orphan_asset_deleted', new=AsyncMock()):
+            result = _run_orphan_asset_delete_sync(asset.id, enforce_schedule=False)
+
+        self.assertTrue(result['ok'])
+        safe_time.assert_not_called()
+
+    def test_missing_aws_instance_delete_marks_order_history(self):
+        from bot.api import _run_shutdown_order_sync
+
+        class Client:
+            def delete_instance(self, instanceName):
+                raise Exception('NotFoundException: instance does not exist')
+
+        order = CloudServerOrder.objects.create(
+            order_no='MANUAL-MISSING-DELETE-ORDER-1',
+            user=self.user,
+            plan=self.plan,
+            provider=self.plan.provider,
+            region_code=self.plan.region_code,
+            region_name=self.plan.region_name,
+            plan_name=self.plan.plan_name,
+            quantity=1,
+            currency='USDT',
+            total_amount='19.00',
+            pay_amount='19.00',
+            status='deleting',
+            server_name='missing-instance',
+            public_ip='52.77.18.241',
+        )
+        with patch('cloud.lifecycle._aws_client', return_value=Client()):
+            result = _run_shutdown_order_sync(order.id, enforce_schedule=False)
+
+        order.refresh_from_db()
+        self.assertTrue(result['ok'])
+        self.assertEqual(order.status, 'deleted')
+        self.assertTrue(CloudIpLog.objects.filter(order=order, event_type='deleted').exists())
+
+    def test_missing_aws_orphan_asset_delete_marks_asset_history(self):
+        from bot.api import _run_orphan_asset_delete_sync
+
+        class Client:
+            def delete_instance(self, instanceName):
+                raise Exception('NotFoundException: instance does not exist')
+
+        asset = CloudAsset.objects.create(
+            kind=CloudAsset.KIND_SERVER,
+            source=CloudAsset.SOURCE_AWS_SYNC,
+            user=self.user,
+            provider='aws_lightsail',
+            region_code=self.plan.region_code,
+            region_name=self.plan.region_name,
+            asset_name='missing-orphan-asset',
+            instance_id='missing-orphan-asset',
+            public_ip='52.77.18.242',
+            status=CloudAsset.STATUS_RUNNING,
+            is_active=True,
+        )
+        with patch('cloud.lifecycle._aws_client', return_value=Client()):
+            result = _run_orphan_asset_delete_sync(asset.id, enforce_schedule=False)
+
+        asset.refresh_from_db()
+        self.assertTrue(result['ok'])
+        self.assertEqual(asset.status, CloudAsset.STATUS_DELETED)
+        self.assertTrue(CloudIpLog.objects.filter(asset=asset, event_type='deleted').exists())
 
     def setUp(self):
         self.factory = RequestFactory()
