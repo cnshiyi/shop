@@ -340,6 +340,51 @@ class CloudServerServicesTestCase(TestCase):
         self.assertEqual(new_server.public_ip, source.public_ip)
         self.assertEqual(new_server.expires_at, replacement.service_expires_at)
 
+    def test_asset_renewal_mark_success_starts_new_service_period(self):
+        old_release_at = timezone.now() + timezone.timedelta(days=7)
+        order = CloudServerOrder.objects.create(
+            order_no='HB-TEST-ASSET-RENEWAL-MARK-SUCCESS',
+            user=self.user,
+            plan=self.plan,
+            provider='aws_lightsail',
+            region_code=self.plan.region_code,
+            region_name=self.plan.region_name,
+            plan_name=self.plan.plan_name,
+            quantity=1,
+            currency='USDT',
+            total_amount='19.00',
+            pay_amount='19.00',
+            pay_method='balance',
+            status='provisioning',
+            public_ip='10.0.0.90',
+            previous_public_ip='10.0.0.90',
+            static_ip_name='StaticIp-asset-renewal-success',
+            mtproxy_port=443,
+            mtproxy_secret='secret',
+            lifecycle_days=31,
+            service_expires_at=old_release_at,
+            ip_recycle_at=old_release_at,
+            provision_note='未绑定代理资产续费：来源资产 #999；旧IP=10.0.0.90。',
+        )
+
+        async_to_sync(_mark_success)(
+            order.id,
+            'asset-renewal-instance',
+            'asset-renewal-instance',
+            order.public_ip,
+            'admin',
+            'secret',
+            '恢复完成',
+            order.static_ip_name,
+        )
+
+        order.refresh_from_db()
+        asset = CloudAsset.objects.get(order=order, kind=CloudAsset.KIND_SERVER)
+        self.assertEqual(order.status, 'completed')
+        self.assertGreater(order.service_expires_at, old_release_at)
+        self.assertEqual(order.service_expires_at.date(), (order.completed_at + timezone.timedelta(days=31)).date())
+        self.assertEqual(asset.actual_expires_at, order.service_expires_at)
+
     def test_aws_sync_resolver_does_not_match_replacement_by_old_ip(self):
         from cloud.management.commands.sync_aws_assets import _resolve_server
 

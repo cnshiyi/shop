@@ -7,7 +7,7 @@ from django.db.models import Q
 
 from cloud.models import CloudAsset, Server
 from cloud.note_utils import append_note, prepend_note, with_note_time
-from cloud.services import _cloud_log_trigger_label, _resolve_aws_static_ip_name_for_order, _update_order_primary_records, build_cloud_server_name, ensure_unique_cloud_server_name, record_cloud_ip_log
+from cloud.services import _cloud_log_trigger_label, _resolve_aws_static_ip_name_for_order, _update_order_primary_records, build_cloud_server_name, ensure_unique_cloud_server_name, is_cloud_asset_renewal_order, record_cloud_ip_log
 from core.cloud_accounts import choose_cloud_account_for_order, cloud_account_label, list_cloud_accounts_by_server_load
 from cloud.aliyun_simple import create_instance as create_aliyun_instance
 from cloud.aws_lightsail import create_instance as create_aws_instance, get_instance_public_ip, move_static_ip_to_instance
@@ -856,10 +856,14 @@ def _mark_success(order_id: int, server_name: str, instance_id: str, public_ip: 
     order.provision_note = prepend_note(order.provision_note, with_note_time(note))
     order.static_ip_name = static_ip_name or order.static_ip_name
     order.completed_at = timezone.now()
-    if not order.service_started_at:
+    if is_cloud_asset_renewal_order(order):
         order.service_started_at = order.completed_at
-    if not order.service_expires_at:
         order.service_expires_at = order.completed_at + timezone.timedelta(days=order.lifecycle_days or 31)
+    else:
+        if not order.service_started_at:
+            order.service_started_at = order.completed_at
+        if not order.service_expires_at:
+            order.service_expires_at = order.completed_at + timezone.timedelta(days=order.lifecycle_days or 31)
     try:
         order.last_user_id = order.user.tg_user_id
     except Exception:
