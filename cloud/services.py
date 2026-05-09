@@ -5,6 +5,7 @@ import logging
 import os
 import re
 import secrets
+import socket
 import string
 import time
 from decimal import Decimal, ROUND_CEILING
@@ -324,28 +325,29 @@ EOF"""
         client.close()
 
 
+def _probe_mtproxy_public_ports(ip: str, main_port: int, timeout: float = 3.0) -> tuple[bool, str]:
+    ports = get_mtproxy_public_ports(main_port)
+    open_ports = []
+    closed_ports = []
+    for port in ports:
+        try:
+            with socket.create_connection((ip, int(port)), timeout=timeout):
+                open_ports.append(str(port))
+        except OSError:
+            closed_ports.append(str(port))
+    if open_ports:
+        return True, f'MTProxy 公网端口可连接: {", ".join(open_ports)}。'
+    return False, f'MTProxy 公网端口暂不可连接: {", ".join(closed_ports)}。'
+
+
 def _ensure_mtproxy_after_renewal(order: CloudServerOrder) -> tuple[bool, str]:
-    if not order.public_ip or not order.login_password:
-        return True, '缺少登录信息，跳过 MTProxy 运行检查。'
-    probe_notes = []
-    ok = False
-    note = ''
-    for attempt in range(1, 7):
-        ok, note = _probe_mtproxy_ports(order.public_ip, order.login_user or 'root', order.login_password, order.mtproxy_port or 9528)
-        probe_notes.append(f'第 {attempt} 次检查: {note}')
-        if ok:
-            return True, '\n'.join(probe_notes)
-        time.sleep(10)
-    logger.warning('CLOUD_MTPROXY_REINSTALL order=%s ip=%s reason=%s', order.order_no, order.public_ip, note)
-    install_ok, install_note = async_to_sync(install_mtproxy)(
-        order.public_ip,
-        order.login_user or 'root',
-        order.login_password,
-        order.mtproxy_port or 9528,
-        order.mtproxy_secret or '',
-        order.mtproxy_secret or '',
-    )
-    return install_ok, '\n'.join(filter(None, [note, 'MTProxy 异常，已重新安装。' if install_ok else 'MTProxy 异常，重新安装失败。', install_note]))
+    if not order.public_ip:
+        return True, '缺少公网 IP，跳过 MTProxy 运行检查。'
+    ok, note = _probe_mtproxy_public_ports(order.public_ip, order.mtproxy_port or 9528)
+    if ok:
+        return True, note
+    logger.warning('CLOUD_MTPROXY_RENEWAL_PROBE_FAILED order=%s ip=%s reason=%s', order.order_no, order.public_ip, note)
+    return False, f'{note}\n续费不会自动重装服务器；如代理确实不可用，请手动点击“重新安装”。'
 
 CUSTOM_REGIONS_CACHE_KEY = 'custom:regions:v1'
 CUSTOM_PLANS_CACHE_PREFIX = 'custom:plans:v1:'
