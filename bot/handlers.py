@@ -69,6 +69,7 @@ from cloud.services import (
     list_all_auto_renew_cloud_servers,
     list_custom_regions,
     list_region_plans,
+    list_cloud_asset_renewal_plans,
     list_retained_ip_renewal_plans,
     list_user_auto_renew_cloud_servers,
     list_user_cloud_servers,
@@ -83,6 +84,7 @@ from cloud.services import (
     pay_cloud_server_order_with_balance,
     pay_cloud_server_renewal_with_balance,
     prepare_cloud_server_order_instances,
+    prepare_cloud_asset_renewal_with_link,
     prepare_retained_ip_renewal_with_link,
     run_cloud_server_renewal_postcheck,
     set_cloud_order_reminder,
@@ -935,6 +937,7 @@ def _callback_route_label(callback_data: str | None) -> str:
         ('cloud:queryip:page:', 'cloud.queryip.page IP查询分页'),
         ('cloud:renewpay:', 'cloud.renewpay 续费钱包支付'),
         ('cloud:renewwallet:', 'cloud.renewwallet 自动续费钱包支付'),
+        ('cloud:assetrenewplan:', 'cloud.assetrenewplan 未绑定资产续费选套餐'),
         ('cloud:renew:', 'cloud.renew 续费'),
         ('cloud:start:', 'cloud.start 管理员开机'),
         ('cloud:autorenew:', 'cloud.autorenew 自动续费开关'),
@@ -2174,6 +2177,40 @@ def _retained_ip_renewal_plan_keyboard(order_id: int, plans):
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
+def _asset_renewal_plan_text(asset, plans, user=None) -> str:
+    labels = ['套餐一', '套餐二', '套餐三', '套餐四', '套餐五', '套餐六', '套餐七', '套餐八', '套餐九']
+    ip = getattr(asset, 'public_ip', None) or getattr(asset, 'previous_public_ip', None) or '-'
+    region = _public_region_text(getattr(asset, 'region_name', None) or getattr(asset, 'region_code', None)) or '-'
+    lines = [
+        f'🔄 未绑定代理资产续费\n\nIP: {ip}\n地区: {region}\n\n这条代理还未绑定订单，请先选择套餐；选择后发送旧主代理链接，系统会生成支付订单。',
+        '',
+    ]
+    for idx, plan in enumerate(plans[:9], start=1):
+        label = labels[idx - 1] if idx - 1 < len(labels) else f'套餐{idx}'
+        display_name = _plan_display_name(plan)
+        display_description = (getattr(plan, 'display_description', None) or getattr(plan, 'plan_description', None) or '').strip()
+        discount_rate = Decimal(str(getattr(user, 'cloud_discount_rate', 100) or 100))
+        display_price = (Decimal(str(getattr(plan, 'price', 0) or 0)) * discount_rate / Decimal('100')).quantize(Decimal('0.001'))
+        currency = getattr(plan, 'currency', None) or 'USDT'
+        lines.append(f'{label}｜{display_name}｜{fmt_amount(display_price)} {currency}')
+        if display_description:
+            lines.append(display_description)
+        lines.append('')
+    lines.append('请选择下面的套餐按钮：')
+    return '\n'.join(lines)
+
+
+def _asset_renewal_plan_keyboard(asset_id: int, plans):
+    labels = ['套餐一', '套餐二', '套餐三', '套餐四', '套餐五', '套餐六', '套餐七', '套餐八', '套餐九']
+    buttons = []
+    for idx, plan in enumerate(plans[:9]):
+        label = labels[idx] if idx < len(labels) else f'套餐{idx + 1}'
+        buttons.append(InlineKeyboardButton(text=label, callback_data=f'cloud:assetrenewplan:{asset_id}:{plan.id}'))
+    rows = [buttons[index:index + 3] for index in range(0, len(buttons), 3)]
+    rows.append([InlineKeyboardButton(text='🔙 返回代理详情', callback_data=f'cloud:assetdetail:asset:{asset_id}:cloud:list:page:1')])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
 async def _send_cloud_renewal_payment_prompt(message: Message, order, user, *, edit: bool = False):
     trx_amount = await usdt_to_trx(order.pay_amount)
     receive_address = _receive_address()
@@ -3319,6 +3356,19 @@ def register_handlers(dp: Dispatcher):
         if not item:
             await _safe_callback_answer(callback, '代理记录不存在', show_alert=True)
             return
+        if action == 'renew' and not getattr(item, 'order_id', None):
+            asset, plans, plan_err = await list_cloud_asset_renewal_plans(asset_id, user.id, admin=is_admin)
+            if plan_err:
+                await _safe_callback_answer(callback, plan_err, show_alert=True)
+                return
+            if asset and plans:
+                display_user = getattr(asset, 'user', None) or user
+                await _safe_edit_text(
+                    callback.message,
+                    _asset_renewal_plan_text(asset, plans, display_user),
+                    reply_markup=_asset_renewal_plan_keyboard(asset.id, plans),
+                )
+                return
         order, err = await ensure_cloud_asset_operation_order(asset_id, user.id, admin=is_admin)
         if err:
             await _safe_callback_answer(callback, err, show_alert=True)
@@ -3606,6 +3656,29 @@ def register_handlers(dp: Dispatcher):
             await _safe_callback_answer(callback, '续费订单创建失败', show_alert=True)
             return
         await _send_cloud_renewal_payment_prompt(callback.message, order, user, edit=True)
+
+    @dp.callback_query(F.data.startswith('cloud:assetrenewplan:'))
+    async def cb_cloud_asset_renew_plan(callback: CallbackQuery, state: FSMContext):
+        await _safe_callback_answer(callback)
+        user = await get_or_create_user(callback.from_user.id, callback.from_user.username, callback.from_user.first_name)
+        _, _, raw_asset_id, raw_plan_id = callback.data.split(':')
+        asset_id = int(raw_asset_id)
+        plan_id = int(raw_plan_id)
+        is_admin = await _is_admin_chat(callback.message)
+        asset, plans, err = await list_cloud_asset_renewal_plans(asset_id, user.id, admin=is_admin)
+        if err:
+            await _safe_callback_answer(callback, err, show_alert=True)
+            return
+        plan = next((item for item in plans if item.id == plan_id), None)
+        if not asset or not plan:
+            await _safe_callback_answer(callback, '套餐不存在或当前状态已变化，请重新进入详情', show_alert=True)
+            return
+        await state.update_data(asset_renewal_asset_id=asset.id, asset_renewal_plan_id=plan.id, asset_renewal_admin=is_admin)
+        await state.set_state(CustomServerStates.waiting_retained_ip_renewal_link)
+        ip = getattr(asset, 'public_ip', None) or getattr(asset, 'previous_public_ip', None) or '-'
+        await callback.message.reply(
+            f'🔄 未绑定代理资产续费\n\n已选择套餐: {_plan_display_name(plan)}\nIP: {ip}\n\n请直接发送这台代理旧的主代理链接（tg://proxy?... 或 https://t.me/proxy?...）。\n校验通过后生成支付订单，支付完成后系统按所选套餐续费。'
+        )
 
     @dp.callback_query(F.data.startswith('cloud:renewplan:'))
     async def cb_cloud_retained_ip_renew_plan(callback: CallbackQuery, state: FSMContext):
@@ -3999,14 +4072,19 @@ def register_handlers(dp: Dispatcher):
         if await _handle_menu_interrupt(message, state):
             return
         data = await state.get_data()
+        asset_id = int(data.get('asset_renewal_asset_id') or 0)
         order_id = int(data.get('retained_ip_renewal_order_id') or 0)
-        plan_id = int(data.get('retained_ip_renewal_plan_id') or 0)
+        plan_id = int(data.get('asset_renewal_plan_id') or data.get('retained_ip_renewal_plan_id') or 0)
+        is_admin_asset_renewal = bool(data.get('asset_renewal_admin')) and await _is_admin_chat(message)
         is_admin_renewal = bool(data.get('retained_ip_renewal_admin')) and await _is_admin_chat(message)
         user = await get_or_create_user(message.from_user.id, message.from_user.username, message.from_user.first_name)
-        item = await get_cloud_server_for_admin(order_id) if is_admin_renewal else await get_user_cloud_server(order_id, user.id)
+        if asset_id:
+            item = await get_proxy_asset_detail_for_admin(asset_id, 'asset') if is_admin_asset_renewal else await get_user_proxy_asset_detail(asset_id, user.id, 'asset')
+        else:
+            item = await get_cloud_server_for_admin(order_id) if is_admin_renewal else await get_user_cloud_server(order_id, user.id)
         if not item:
             await state.clear()
-            await message.reply('服务器记录不存在，请重新进入云服务器详情。')
+            await message.reply('服务器或代理记录不存在，请重新进入详情。')
             return
         link_data = _parse_proxy_link(message.text or '')
         if not link_data:
@@ -4021,7 +4099,10 @@ def register_handlers(dp: Dispatcher):
         if not ok:
             await message.reply(_bot_text_format('bot_reinstall_validate_failed', '校验失败：{reason}', reason=reason))
             return
-        order, err = await prepare_retained_ip_renewal_with_link(order_id, user.id, plan_id, link_data, 31, admin=is_admin_renewal)
+        if asset_id:
+            order, err = await prepare_cloud_asset_renewal_with_link(asset_id, user.id, plan_id, link_data, 31, admin=is_admin_asset_renewal)
+        else:
+            order, err = await prepare_retained_ip_renewal_with_link(order_id, user.id, plan_id, link_data, 31, admin=is_admin_renewal)
         if err or not order:
             await message.reply(err or '续费订单创建失败，请重新进入详情后再试。')
             return

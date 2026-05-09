@@ -2696,6 +2696,32 @@ def create_cloud_server_renewal_for_user(order_id: int, user_id: int, days: int 
 
 
 @sync_to_async
+def list_cloud_asset_renewal_plans(asset_id: int, user_id: int, admin: bool = False):
+    asset_qs = CloudAsset.objects.select_related('user', 'order', 'cloud_account').filter(
+        id=asset_id,
+        kind=CloudAsset.KIND_SERVER,
+    ).exclude(status__in=_INACTIVE_ASSET_STATUSES)
+    if not admin:
+        asset_qs = asset_qs.filter(user_id=user_id)
+    asset = asset_qs.first()
+    if not asset:
+        return None, [], '代理记录不存在'
+    if asset.order_id:
+        return asset, [], None
+    if not str(asset.public_ip or asset.previous_public_ip or '').strip():
+        return asset, [], '代理缺少公网 IP，暂时无法续费'
+    provider = str(asset.provider or CloudServerPlan.PROVIDER_AWS_LIGHTSAIL).strip()
+    region_code = str(asset.region_code or '').strip()
+    plans_qs = CloudServerPlan.objects.filter(provider=provider, is_active=True)
+    if region_code:
+        plans_qs = plans_qs.filter(region_code=region_code)
+    plans = list(plans_qs.order_by('price', 'sort_order', 'id'))
+    if not plans:
+        return asset, [], '当前地区暂无可用套餐，请联系人工客服。'
+    return asset, plans, None
+
+
+@sync_to_async
 def list_retained_ip_renewal_plans(order_id: int, user_id: int, admin: bool = False):
     order_qs = CloudServerOrder.objects.select_related('user', 'plan').filter(id=order_id)
     if not admin:
@@ -2718,6 +2744,98 @@ def list_retained_ip_renewal_plans(order_id: int, user_id: int, admin: bool = Fa
     if not plans:
         return order, [], '当前地区暂无可用套餐，无法恢复未附加固定 IP。'
     return order, plans, None
+
+
+@sync_to_async
+def prepare_cloud_asset_renewal_with_link(asset_id: int, user_id: int, plan_id: int, link_data: dict[str, str], days: int = 31, admin: bool = False):
+    with transaction.atomic():
+        asset_qs = CloudAsset.objects.select_related('user', 'order', 'cloud_account').select_for_update().filter(
+            id=asset_id,
+            kind=CloudAsset.KIND_SERVER,
+        ).exclude(status__in=_INACTIVE_ASSET_STATUSES)
+        if not admin:
+            asset_qs = asset_qs.filter(user_id=user_id)
+        asset = asset_qs.first()
+        if not asset:
+            return None, '代理记录不存在'
+        if asset.order_id:
+            return None, '该代理已绑定订单，请重新进入详情续费'
+        public_ip = str(asset.public_ip or asset.previous_public_ip or '').strip()
+        if not public_ip:
+            return None, '代理缺少公网 IP，暂时无法续费'
+        target_plan = CloudServerPlan.objects.filter(
+            id=plan_id,
+            provider=asset.provider or CloudServerPlan.PROVIDER_AWS_LIGHTSAIL,
+            is_active=True,
+        ).first()
+        if not target_plan:
+            return None, '目标套餐不存在或已下架'
+        if asset.region_code and target_plan.region_code != asset.region_code:
+            return None, '目标套餐不属于当前代理地区'
+        renewal_user = asset.user if admin and asset.user_id else TelegramUser.objects.select_for_update().get(id=user_id)
+        discounted_total = _apply_cloud_discount(Decimal(target_plan.price), renewal_user.cloud_discount_rate)
+        now = timezone.now()
+        order = CloudServerOrder.objects.create(
+            user=renewal_user,
+            order_no=_generate_cloud_order_no('SRVASSET', f'RENEW{asset.id}'),
+            plan=target_plan,
+            provider=target_plan.provider,
+            cloud_account=asset.cloud_account or get_cloud_account_from_label(asset.account_label, target_plan.provider),
+            account_label=asset.account_label,
+            region_code=target_plan.region_code,
+            region_name=target_plan.region_name,
+            plan_name=target_plan.plan_name,
+            quantity=1,
+            currency=target_plan.currency or asset.currency or 'USDT',
+            total_amount=discounted_total,
+            pay_amount=_generate_unique_pay_amount(discounted_total, target_plan.currency or asset.currency or 'USDT'),
+            pay_method='address',
+            status='renew_pending',
+            lifecycle_days=days,
+            public_ip=asset.public_ip,
+            previous_public_ip=asset.previous_public_ip or asset.public_ip,
+            instance_id=asset.instance_id,
+            provider_resource_id=asset.provider_resource_id,
+            server_name=asset.asset_name,
+            static_ip_name=asset.asset_name if _is_unattached_static_ip_asset(asset) else '',
+            service_started_at=asset.created_at or now,
+            service_expires_at=asset.actual_expires_at,
+            ip_recycle_at=asset.actual_expires_at if _is_unattached_static_ip_asset(asset) else None,
+            mtproxy_link=link_data['url'],
+            mtproxy_secret=link_data['secret'],
+            mtproxy_host=link_data['server'],
+            mtproxy_port=int(link_data['port']),
+            proxy_links=[{'name': '主代理 mtg', 'server': link_data['server'], 'port': link_data['port'], 'secret': link_data['secret'], 'url': link_data['url']}],
+            login_user=asset.login_user,
+            login_password=asset.login_password,
+            last_user_id=getattr(renewal_user, 'tg_user_id', None),
+            expired_at=now + timezone.timedelta(minutes=30),
+            provision_note='\n'.join(filter(None, [
+                str(asset.note or '').strip(),
+                f'未绑定代理资产续费：来源资产 #{asset.id}；已选择套餐 {target_plan.plan_name}；旧IP={public_ip}；旧端口={link_data["port"]}；旧secret={link_data["secret"]}。支付完成后按该套餐续费，并继续使用旧主代理链接。',
+            ])),
+        )
+        if _is_unattached_static_ip_asset(asset) and asset.actual_expires_at:
+            CloudServerOrder.objects.filter(id=order.id).update(ip_recycle_at=asset.actual_expires_at, updated_at=timezone.now())
+            order.ip_recycle_at = asset.actual_expires_at
+        asset.order = order
+        asset.user = renewal_user
+        asset.price = discounted_total
+        asset.mtproxy_link = order.mtproxy_link
+        asset.mtproxy_secret = order.mtproxy_secret
+        asset.mtproxy_host = order.mtproxy_host
+        asset.mtproxy_port = order.mtproxy_port
+        asset.proxy_links = order.proxy_links
+        asset.save(update_fields=['order', 'user', 'price', 'mtproxy_link', 'mtproxy_secret', 'mtproxy_host', 'mtproxy_port', 'proxy_links', 'updated_at'])
+        record_cloud_ip_log(
+            event_type=CloudIpLog.EVENT_CREATED,
+            order=order,
+            asset=asset,
+            public_ip=asset.public_ip,
+            previous_public_ip=asset.previous_public_ip,
+            note=f'未绑定代理资产 #{asset.id} 选择套餐续费，生成待支付订单 {order.order_no}',
+        )
+        return order, None
 
 
 @sync_to_async
@@ -3846,6 +3964,7 @@ __all__ = [
     'create_cloud_server_renewal',
     'create_cloud_server_renewal_by_public_query',
     'create_cloud_server_renewal_for_user',
+    'list_cloud_asset_renewal_plans',
     'get_cloud_order_group_balance_lines',
     'delay_cloud_server_expiry',
     'disable_all_cloud_server_auto_renew',
@@ -3882,6 +4001,7 @@ __all__ = [
     'pay_cloud_server_renewal_with_balance',
     'refund_cloud_server_to_balance',
     'prepare_cloud_server_order_instances',
+    'prepare_cloud_asset_renewal_with_link',
     'create_cloud_server_upgrade_order',
     'list_cloud_server_upgrade_plans',
     'rebind_cloud_server_user',

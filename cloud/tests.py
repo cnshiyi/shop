@@ -29,7 +29,7 @@ from cloud.provisioning import (
     _mark_rebuild_source_pending_deletion,
     _mark_success,
 )
-from cloud.services import apply_cloud_server_renewal, create_cloud_server_rebuild_order, create_cloud_server_renewal, create_cloud_server_upgrade_order, delay_cloud_server_expiry, ensure_cloud_asset_operation_order, get_cloud_server_by_ip_for_user, get_proxy_asset_by_ip_for_admin, get_proxy_asset_by_ip_for_user, list_cloud_server_upgrade_plans, list_retained_ip_renewal_plans, list_user_cloud_servers, mark_cloud_server_ip_change_requested, pay_cloud_server_renewal_with_balance, record_cloud_ip_log, replace_cloud_asset_order_by_admin
+from cloud.services import apply_cloud_server_renewal, create_cloud_server_rebuild_order, create_cloud_server_renewal, create_cloud_server_upgrade_order, delay_cloud_server_expiry, ensure_cloud_asset_operation_order, get_cloud_server_by_ip_for_user, get_proxy_asset_by_ip_for_admin, get_proxy_asset_by_ip_for_user, list_cloud_asset_renewal_plans, list_cloud_server_upgrade_plans, list_retained_ip_renewal_plans, list_user_cloud_servers, mark_cloud_server_ip_change_requested, pay_cloud_server_renewal_with_balance, prepare_cloud_asset_renewal_with_link, record_cloud_ip_log, replace_cloud_asset_order_by_admin
 from cloud.sync_safety import get_missing_confirmation_threshold
 from cloud.api import _cloud_order_source_tags, auto_renew_task_detail, cloud_order_detail, cloud_orders_list, delete_cloud_asset, delete_server, run_auto_renew_order, run_auto_renew_tasks, sync_cloud_asset_status, tasks_overview, update_cloud_asset
 from core.cloud_accounts import cloud_account_label
@@ -1903,6 +1903,65 @@ class CloudServerServicesTestCase(TestCase):
         self.assertIsNotNone(order)
         self.assertEqual(order.cloud_account_id, account.id)
         self.assertEqual(order.account_label, asset.account_label)
+
+    def test_unbound_asset_renewal_lists_plans_without_creating_order(self):
+        asset = CloudAsset.objects.create(
+            kind=CloudAsset.KIND_SERVER,
+            source=CloudAsset.SOURCE_AWS_SYNC,
+            user=self.user,
+            provider='aws_lightsail',
+            region_code=self.plan.region_code,
+            region_name=self.plan.region_name,
+            asset_name='unbound-renewal-plan-list',
+            public_ip='31.31.31.30',
+            status=CloudAsset.STATUS_RUNNING,
+            is_active=True,
+        )
+
+        returned_asset, plans, error = async_to_sync(list_cloud_asset_renewal_plans)(asset.id, self.user.id)
+        asset.refresh_from_db()
+
+        self.assertIsNone(error)
+        self.assertEqual(returned_asset.id, asset.id)
+        self.assertTrue(plans)
+        self.assertIsNone(asset.order_id)
+
+    def test_prepare_unbound_asset_renewal_creates_pending_payment_order(self):
+        due_at = timezone.now() + timezone.timedelta(days=9)
+        asset = CloudAsset.objects.create(
+            kind=CloudAsset.KIND_SERVER,
+            source=CloudAsset.SOURCE_AWS_SYNC,
+            user=self.user,
+            provider='aws_lightsail',
+            region_code=self.plan.region_code,
+            region_name=self.plan.region_name,
+            asset_name='unbound-renewal-payment',
+            public_ip='31.31.31.32',
+            previous_public_ip='31.31.31.32',
+            actual_expires_at=due_at,
+            status=CloudAsset.STATUS_UNKNOWN,
+            provider_status='未附加固定IP',
+            note='未附加固定IP',
+            is_active=False,
+        )
+        link = {
+            'url': 'tg://proxy?server=31.31.31.32&port=9528&secret=eeeeeeeeeeeeeeee',
+            'server': '31.31.31.32',
+            'port': '9528',
+            'secret': 'eeeeeeeeeeeeeeee',
+        }
+
+        order, error = async_to_sync(prepare_cloud_asset_renewal_with_link)(asset.id, self.user.id, self.plan.id, link)
+        asset.refresh_from_db()
+
+        self.assertIsNone(error)
+        self.assertIsNotNone(order)
+        self.assertEqual(order.status, 'renew_pending')
+        self.assertEqual(order.plan_id, self.plan.id)
+        self.assertEqual(order.pay_method, 'address')
+        self.assertEqual(order.ip_recycle_at, due_at)
+        self.assertEqual(order.mtproxy_link, link['url'])
+        self.assertEqual(asset.order_id, order.id)
 
     def test_unattached_asset_operation_order_enters_retained_renewal_flow(self):
         due_at = timezone.now() + timezone.timedelta(days=9)
