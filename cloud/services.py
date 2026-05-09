@@ -3123,7 +3123,10 @@ def pay_cloud_server_renewal_with_balance(order_id: int, user_id: int, currency:
             order = _hydrate_order_from_proxy_asset(order)
             if order.status not in {'renew_pending', 'pending'}:
                 return None, '当前订单状态不可钱包支付'
-            if not _can_order_be_renewed(order):
+            asset_recovery_order = is_cloud_asset_renewal_order(order)
+            if asset_recovery_order:
+                order.service_expires_at = None
+            if not asset_recovery_order and not _can_order_be_renewed(order):
                 return None, '该服务器IP已删除，禁止续费'
             if order.paid_at and order.pay_method == 'balance':
                 already_paid = True
@@ -3137,15 +3140,20 @@ def pay_cloud_server_renewal_with_balance(order_id: int, user_id: int, currency:
                 setattr(user, balance_field, current_balance - total)
                 user.save(update_fields=[balance_field, 'updated_at'])
                 paid_at = timezone.now()
-                CloudServerOrder.objects.filter(id=order.id).update(
-                    currency=currency,
-                    total_amount=total_amount_usdt,
-                    pay_method='balance',
-                    pay_amount=total,
-                    paid_at=paid_at,
-                    expired_at=None,
-                    updated_at=paid_at,
-                )
+                order_updates = {
+                    'currency': currency,
+                    'total_amount': total_amount_usdt,
+                    'pay_method': 'balance',
+                    'pay_amount': total,
+                    'paid_at': paid_at,
+                    'expired_at': None,
+                    'updated_at': paid_at,
+                }
+                if asset_recovery_order:
+                    order_updates['status'] = 'paid'
+                    order.provision_note = append_note(order.provision_note, '已收款，正在恢复未绑定代理资产固定 IP。')
+                    order_updates['provision_note'] = order.provision_note
+                CloudServerOrder.objects.filter(id=order.id).update(**order_updates)
                 order.currency = currency
                 order.total_amount = total_amount_usdt
                 order.pay_method = 'balance'
@@ -3162,7 +3170,11 @@ def pay_cloud_server_renewal_with_balance(order_id: int, user_id: int, currency:
                     related_id=order.id,
                     description=f'云服务器续费订单 #{order.order_no} 钱包支付',
                 )
-            order = apply_cloud_server_renewal.__wrapped__(order_id, days, False)
+            if asset_recovery_order:
+                order.status = 'paid'
+                order.service_expires_at = None
+            else:
+                order = apply_cloud_server_renewal.__wrapped__(order_id, days, False)
         if not already_paid:
             order.renew_balance_change = {
                 'currency': currency,

@@ -2053,6 +2053,46 @@ class CloudServerServicesTestCase(TestCase):
         self.assertEqual(order.mtproxy_link, link['url'])
         self.assertEqual(asset.order_id, order.id)
 
+    def test_unbound_asset_renewal_wallet_payment_marks_paid_for_recovery(self):
+        self.user.balance = Decimal('100.000000')
+        self.user.save(update_fields=['balance', 'updated_at'])
+        due_at = timezone.now() + timezone.timedelta(days=9)
+        asset = CloudAsset.objects.create(
+            kind=CloudAsset.KIND_SERVER,
+            source=CloudAsset.SOURCE_AWS_SYNC,
+            user=self.user,
+            provider='aws_lightsail',
+            region_code=self.plan.region_code,
+            region_name=self.plan.region_name,
+            asset_name='unbound-renewal-wallet-payment',
+            public_ip='31.31.31.33',
+            previous_public_ip='31.31.31.33',
+            actual_expires_at=due_at,
+            status=CloudAsset.STATUS_UNKNOWN,
+            provider_status='未附加固定IP',
+            note='未附加固定IP',
+            is_active=False,
+        )
+        link = {
+            'url': 'tg://proxy?server=31.31.31.33&port=443&secret=eed5c148e2922f6c49611e7d53fe432a94617a7572652e6d6963726f736f66742e636f6d',
+            'server': '31.31.31.33',
+            'port': '443',
+            'secret': 'eed5c148e2922f6c49611e7d53fe432a94617a7572652e6d6963726f736f66742e636f6d',
+        }
+        order, error = async_to_sync(prepare_cloud_asset_renewal_with_link)(asset.id, self.user.id, self.plan.id, link)
+
+        paid_order, pay_error = async_to_sync(pay_cloud_server_renewal_with_balance)(order.id, self.user.id, 'USDT', 31)
+
+        self.assertIsNone(error)
+        self.assertIsNone(pay_error)
+        self.assertEqual(paid_order.id, order.id)
+        self.assertEqual(paid_order.status, 'paid')
+        self.assertEqual(paid_order.pay_method, 'balance')
+        self.assertIsNotNone(paid_order.paid_at)
+        self.assertIsNone(paid_order.service_expires_at)
+        self.assertEqual(paid_order.ip_recycle_at, due_at)
+        self.assertIn('正在恢复未绑定代理资产固定 IP', paid_order.provision_note)
+
     def test_unattached_asset_operation_order_enters_retained_renewal_flow(self):
         due_at = timezone.now() + timezone.timedelta(days=9)
         asset = CloudAsset.objects.create(

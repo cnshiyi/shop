@@ -3886,7 +3886,7 @@ def register_handlers(dp: Dispatcher):
                 return
             await _safe_edit_text(callback.message, f'❌ {_public_cloud_error_text(err)}。', reply_markup=wallet_recharge_prompt_menu())
             return
-        if getattr(order, 'replacement_for_id', None) and order.status in {'paid', 'provisioning', 'failed'}:
+        if (getattr(order, 'replacement_for_id', None) or is_cloud_asset_renewal_order(order)) and order.status in {'paid', 'provisioning', 'failed'}:
             await _safe_edit_text(callback.message, '✅ 云服务器续费成功，正在自动恢复固定 IP 服务器。\n\n系统会保持旧 IP / 旧端口 / 旧密钥不变，完成后自动发送代理链接。')
             asyncio.create_task(_provision_cloud_server_and_notify(callback.bot, callback.from_user.id, order.id, order.mtproxy_port or 9528))
             return
