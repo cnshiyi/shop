@@ -23,6 +23,7 @@ from django.utils import timezone
 
 from core.runtime_config import get_runtime_config
 from cloud.note_utils import append_note
+from cloud.ip_guard import validate_server_connection_ip
 from bot.config import BOT_TOKEN
 from bot.fsm import create_fsm_storage
 from bot.states import AdminReplyStates, CustomServerStates, MonitorStates, RechargeStates, CloudQueryStates
@@ -1711,9 +1712,10 @@ async def _validate_reinstall_proxy_link(order, link_data: dict[str, str], probe
         bool(getattr(order, 'login_password', None)),
         allow_client_port,
     )
-    if link_data['server'] != order_ip:
-        logger.warning('CLOUD_REINSTALL_LINK_COMPARE_FAIL reason=ip item_id=%s expected_ip=%s parsed_ip=%s', getattr(order, 'id', None), order_ip, link_data['server'])
-        return False, f'链接 IP 不匹配。当前服务器 IP 是 {order_ip}，你发的是 {link_data["server"]}'
+    guard_ok, guard_note = validate_server_connection_ip(link_data.get('server'), [order_ip], context=f'reinstall_link:{getattr(order, "id", None)}')
+    if not guard_ok:
+        logger.warning('CLOUD_REINSTALL_LINK_COMPARE_FAIL reason=ip_guard item_id=%s expected_ip=%s parsed_ip=%s note=%s', getattr(order, 'id', None), order_ip, link_data.get('server'), guard_note)
+        return False, f'链接 IP 不匹配。当前服务器 IP 是 {order_ip or "未记录"}，你发的是 {link_data["server"]}'
     if not allow_client_port and link_data['port'] != stored_order_port:
         logger.warning('CLOUD_REINSTALL_LINK_COMPARE_FAIL reason=port item_id=%s expected_port=%s parsed_port=%s', getattr(order, 'id', None), stored_order_port, link_data['port'])
         return False, f'链接端口不匹配。当前主代理端口是 {stored_order_port}，你发的是 {link_data["port"]}'

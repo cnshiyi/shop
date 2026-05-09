@@ -18,6 +18,7 @@ from cloud.models import CloudAsset, CloudAutoRenewPatrolLog, CloudIpLog, CloudS
 from cloud.lifecycle import _apply_notice_schedule_to_order, _get_due_orders, _get_migration_due_orders, _get_orphan_asset_delete_due, _is_cloud_delete_safe_time, _is_cloud_suspend_time, _mark_deleted, _mark_suspended, _next_cloud_action_run_at, _notice_plan_text, _send_logged_cloud_notice, daily_expiry_summary_tick, lifecycle_tick, sync_server_status_tick
 from cloud.ports import get_mtproxy_port_label, get_mtproxy_public_ports, is_valid_mtproxy_main_port
 from cloud.aws_lightsail import _resolve_static_ip_name_for_move
+from cloud.ip_guard import validate_server_connection_ip
 from cloud.provisioning import (
     _candidate_cloud_account_ids,
     _extract_mtproxy_fields,
@@ -38,6 +39,18 @@ from orders.payment_scanner import _confirm_cloud_server_order
 
 
 class CloudServerServicesTestCase(TestCase):
+    def test_server_connection_ip_guard_rejects_mismatch_before_ssh(self):
+        ok, note = validate_server_connection_ip('54.151.227.23', ['13.228.232.184'], context='test_mismatch')
+
+        self.assertFalse(ok)
+        self.assertIn('目标 IP 54.151.227.23 与预期 IP 13.228.232.184 不一致', note)
+
+    def test_server_connection_ip_guard_requires_public_ipv4(self):
+        ok, note = validate_server_connection_ip('127.0.0.1', ['127.0.0.1'], context='test_loopback')
+
+        self.assertFalse(ok)
+        self.assertIn('目标 IP 无效', note)
+
     def setUp(self):
         self.factory = RequestFactory()
         self.user = TelegramUser.objects.create(tg_user_id=990001, username='svc_test')

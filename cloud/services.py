@@ -20,6 +20,7 @@ from bot.models import TelegramUser
 from cloud.models import CloudAsset, CloudIpLog, CloudServerOrder, CloudServerPlan, Server, ServerPrice, _runtime_int_config, _with_runtime_time
 from cloud.note_utils import append_note, prepend_note
 from cloud.bootstrap import install_bbr, install_mtproxy
+from cloud.ip_guard import validate_server_connection_ip
 from cloud.ports import get_mtproxy_public_ports
 from core.cache import get_redis
 from core.cloud_accounts import choose_cloud_account_for_order, cloud_account_label, get_active_cloud_account, get_cloud_account_from_label
@@ -1401,6 +1402,11 @@ async def initialize_proxy_asset(asset_id: int, user_id: int):
     username = str(asset.login_user or '').strip() or ('admin' if asset.provider == 'aws_lightsail' else 'root')
     password = _generate_asset_login_password() if asset.provider == 'aws_lightsail' else (str(asset.login_password or '').strip() or _generate_asset_login_password())
     port = int(asset.mtproxy_port or 9528)
+    guard_ok, guard_note = validate_server_connection_ip(public_ip, [asset.public_ip, asset.previous_public_ip, asset.mtproxy_host], context=f'initialize_asset:{asset.id}')
+    if not guard_ok:
+        asset.note = append_note(asset.note, guard_note)
+        await sync_to_async(asset.save)(update_fields=['note', 'updated_at'])
+        return asset, guard_note
     bbr_ok, bbr_note = await install_bbr(public_ip, username, password, use_key_setup=asset.provider == 'aws_lightsail')
     mtproxy_ok, mtproxy_note = await install_mtproxy(public_ip, username, password, port, asset.mtproxy_secret or '', asset.mtproxy_secret or '')
     note = '\n'.join(part for part in [asset.note, '已执行同步资产代理初始化。', '' if bbr_ok else 'BBR 初始化失败，但继续检查 MTProxy 安装结果。', bbr_note, mtproxy_note] if part)

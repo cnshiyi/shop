@@ -12,6 +12,7 @@ from core.cloud_accounts import choose_cloud_account_for_order, cloud_account_la
 from cloud.aliyun_simple import create_instance as create_aliyun_instance
 from cloud.aws_lightsail import create_instance as create_aws_instance, get_instance_public_ip, move_static_ip_to_instance
 from cloud.bootstrap import build_mtproxy_links, install_bbr, install_mtproxy
+from cloud.ip_guard import validate_server_connection_ip
 from cloud.models import CloudServerOrder
 from cloud.ports import get_mtproxy_port_label, get_mtproxy_port_plan
 
@@ -588,6 +589,7 @@ async def provision_cloud_server(order_id: int):
 
         if result.ok:
             bootstrap_user = result.login_user or login_user
+            recovery_expected_ips = [order.public_ip, order.previous_public_ip] if is_cloud_asset_renewal_order(order) else []
             order = await _mark_instance_created(
                 order.id,
                 server_name,
@@ -623,6 +625,20 @@ async def provision_cloud_server(order_id: int):
                 source_instance_name = rebuild_context.get('source_server_name') or rebuild_context.get('source_instance_id') or ''
                 source_temp_public_ip = await get_instance_public_ip(rebuild_context['payload'], source_instance_name) if source_instance_name else ''
                 logger.info('云服务器重建固定 IP 已先迁移，后续安装使用正式 IP: order=%s install_ip=%s instance_id=%s source_instance=%s source_temp_public_ip=%s', order.order_no, final_public_ip, result.instance_id, source_instance_name, source_temp_public_ip)
+
+            if rebuild_context.get('is_rebuild'):
+                expected_connection_ips = [rebuild_context.get('payload', {}).get('original_public_ip')]
+            elif is_cloud_asset_renewal_order(order):
+                expected_connection_ips = recovery_expected_ips
+            else:
+                expected_connection_ips = [final_public_ip]
+            guard_ok, guard_note = validate_server_connection_ip(final_public_ip, expected_connection_ips, context=f'provision_order:{order.id}')
+            if not guard_ok:
+                saved = await _mark_failed(order_id, guard_note)
+                clear_provision_progress(order_id)
+                logger.warning('云服务器开通失败: order=%s reason=connection_ip_guard note=%s', saved.order_no, guard_note)
+                print('[PROVISION_RESULT]', {'order_id': saved.id, 'order_no': saved.order_no, 'status': saved.status, 'error': saved.provision_note})
+                return saved
 
             set_provision_progress(order.id, '安装 BBR')
             logger.info('开始执行 BBR 初始化: order=%s public_ip=%s user=%s requested_user=%s', order.order_no, final_public_ip, bootstrap_user, bootstrap_user)
@@ -751,6 +767,11 @@ async def reprovision_cloud_server_bootstrap(order_id: int):
         clear_provision_progress(order_id)
         return saved
     bootstrap_user = order.login_user or 'root'
+    guard_ok, guard_note = validate_server_connection_ip(order.public_ip, [order.public_ip, order.previous_public_ip], context=f'reprovision_order:{order.id}')
+    if not guard_ok:
+        saved = await _mark_failed(order_id, guard_note)
+        clear_provision_progress(order_id)
+        return saved
     logger.info('[PROVISION][RETRY] start order=%s public_ip=%s user=%s port=%s', order.order_no, order.public_ip, bootstrap_user, order.mtproxy_port)
     set_provision_progress(order.id, '安装 BBR')
     bbr_ok, bbr_note = await install_bbr(order.public_ip, bootstrap_user, order.login_password, use_key_setup=order.provider == 'aws_lightsail')

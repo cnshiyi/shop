@@ -220,6 +220,33 @@ class RetainedIpRenewalUiTestCase(SimpleTestCase):
         self.assertFalse(ok)
         self.assertIn('当前主代理端口是 9528', reason)
 
+    def test_validate_reinstall_proxy_link_rejects_target_ip_mismatch_before_probe(self):
+        order = SimpleNamespace(
+            id=1,
+            public_ip='13.228.232.184',
+            previous_public_ip='13.228.232.184',
+            mtproxy_port=443,
+            mtproxy_secret='abcdef1234567890',
+            login_password='would-not-probe',
+            login_user='root',
+        )
+        link_data = {
+            'server': '54.151.227.23',
+            'port': '443',
+            'secret': 'abcdef1234567890',
+            'url': 'tg://proxy?server=54.151.227.23&port=443&secret=***',
+        }
+
+        ok, reason = async_to_sync(_validate_reinstall_proxy_link)(
+            order,
+            link_data,
+            probe_when_possible=True,
+        )
+
+        self.assertFalse(ok)
+        self.assertIn('链接 IP 不匹配', reason)
+        self.assertIn('13.228.232.184', reason)
+
     def test_validate_reinstall_proxy_link_allows_client_port_override_for_reinstall(self):
         order = SimpleNamespace(
             id=1,
