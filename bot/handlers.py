@@ -470,7 +470,15 @@ async def _reply_cloud_query_results(message: Message, raw_text: str, state: FSM
             display_ip = str(asset.public_ip or asset.previous_public_ip or ip).strip()
             expires_at = getattr(asset, 'actual_expires_at', None) or getattr(asset, 'service_expires_at', None)
             expires_text = _format_local_dt(expires_at).split(' ', 1)[0] if expires_at else '未设置'
-            status_text = asset.get_status_display() if hasattr(asset, 'get_status_display') else str(getattr(asset, 'status', '') or '未知')
+            provider_status_text = str(getattr(asset, 'provider_status', '') or '').strip()
+            if '未附加固定IP' in provider_status_text or '未附加IP' in provider_status_text:
+                status_text = '未附加固定 IP，等待释放'
+            elif provider_status_text and provider_status_text not in {'unknown', '未知状态'}:
+                status_text = provider_status_text
+            else:
+                status_text = asset.get_status_display() if hasattr(asset, 'get_status_display') else str(getattr(asset, 'status', '') or '未知')
+                if status_text in {'unknown', '未知状态', '未知'}:
+                    status_text = '状态待同步'
             account_label = str(getattr(asset, 'account_label', '') or '').strip()
             account_text = f'\n账号标签: <code>{escape(account_label)}</code>' if include_start and account_label else ''
             if input_link and asset.provider == 'aws_lightsail' and not getattr(asset, 'mtproxy_link', None):

@@ -1156,6 +1156,8 @@ def _proxy_asset_view(asset: CloudAsset):
         plan_name=asset.asset_name or getattr(order, 'plan_name', None) or '人工代理',
         quantity=1,
         status=asset.status,
+        provider_status=asset.provider_status,
+        actual_expires_at=asset.actual_expires_at,
         provider=asset.provider or getattr(order, 'provider', None),
         account_label=asset.account_label or getattr(order, 'account_label', None),
         pay_method='manual',

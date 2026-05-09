@@ -1066,7 +1066,7 @@ class Command(BaseCommand):
                     if asset:
                         if asset.user_id:
                             asset_defaults['user'] = asset.user
-                        if asset.actual_expires_at and not getattr(retained_order, 'ip_recycle_at', None):
+                        if asset.actual_expires_at and asset.actual_expires_at > discovered_at and not getattr(retained_order, 'ip_recycle_at', None):
                             asset_defaults['actual_expires_at'] = asset.actual_expires_at
                     asset_signature = f'{static_ip_name or "-"}|{static_ip_arn or "-"}|{public_ip or "缺失"}'
                     old_status = asset.status if asset else None
@@ -1084,6 +1084,7 @@ class Command(BaseCommand):
                                 setattr(asset, key, value)
                             should_preserve_unattached_due = (
                                 original_due_at
+                                and original_due_at > discovered_at
                                 and not getattr(retained_order, 'ip_recycle_at', None)
                                 and old_status == CloudAsset.STATUS_UNKNOWN
                                 and '未附加' in str(getattr(asset, 'provider_status', '') or '')
