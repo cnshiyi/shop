@@ -3457,6 +3457,21 @@ class CloudServerServicesTestCase(TestCase):
         self.assertEqual(account_ids, [account.id])
         self.assertNotIn(other_account.id, account_ids)
 
+    def test_proxy_link_query_extracts_server_ip_only(self):
+        from bot.handlers import _extract_proxy_links_by_ip, _extract_query_ips
+
+        raw = 'https://t.me/proxy?server=3.0.162.212&port=443&secret=ee78fbdf52d2713cced14f283718ab6917617a7572652e6d6963726f736f66742e636f6d'
+
+        self.assertEqual(_extract_query_ips(raw), ['3.0.162.212'])
+        self.assertEqual(_extract_proxy_links_by_ip(raw)['3.0.162.212']['port'], '443')
+
+    def test_tg_proxy_link_query_extracts_server_ip_only(self):
+        from bot.handlers import _extract_query_ips
+
+        raw = 'tg://proxy?server=3.0.162.213&port=443&secret=abc'
+
+        self.assertEqual(_extract_query_ips(raw), ['3.0.162.213'])
+
     def test_cloud_server_ip_change_requires_owner_identity(self):
         other_user = TelegramUser.objects.create(tg_user_id=990005, username='other_order_ip_change_user')
         order = CloudServerOrder.objects.create(

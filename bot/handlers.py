@@ -152,12 +152,12 @@ def _extract_query_ip(raw_text: str) -> str:
         return ''
     if '://' in text:
         parsed = urlparse(text)
+        query_server = (parse_qs(parsed.query).get('server') or [''])[0]
+        if query_server and parsed.scheme in {'tg', 'http', 'https'} and (parsed.netloc == 'proxy' or parsed.netloc == 't.me'):
+            return query_server.strip().strip('[]')
         hostname = parsed.hostname or ''
         if hostname:
             return hostname.strip('[]')
-        query_server = (parse_qs(parsed.query).get('server') or [''])[0]
-        if query_server:
-            return query_server.strip().strip('[]')
     candidate = text.split()[0].strip()
     if candidate.startswith('tg://proxy?') or candidate.startswith('https://t.me/proxy?'):
         parsed = urlparse(candidate)
