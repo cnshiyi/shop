@@ -1535,6 +1535,15 @@ def _is_unattached_static_ip_asset(asset: CloudAsset | None) -> bool:
     )
 
 
+def _resolve_asset_original_cloud_account(asset: CloudAsset | None):
+    if not asset:
+        return None
+    account = getattr(asset, 'cloud_account', None)
+    if account and getattr(account, 'is_active', False):
+        return account
+    return get_cloud_account_from_label(getattr(asset, 'account_label', ''), getattr(asset, 'provider', None))
+
+
 def _cloud_asset_deleted_or_missing(asset: CloudAsset | None) -> bool:
     if not asset:
         return False
@@ -2748,6 +2757,8 @@ def list_cloud_asset_renewal_plans(asset_id: int, user_id: int, admin: bool = Fa
         return asset, [], None
     if not str(asset.public_ip or asset.previous_public_ip or '').strip():
         return asset, [], '代理缺少公网 IP，暂时无法续费'
+    if _is_unattached_static_ip_asset(asset) and not _resolve_asset_original_cloud_account(asset):
+        return asset, [], '原固定 IP 所属云账号不可用，暂时无法自助续费，请联系人工客服。'
     provider = str(asset.provider or CloudServerPlan.PROVIDER_AWS_LIGHTSAIL).strip()
     region_code = str(asset.region_code or '').strip()
     plans_qs = CloudServerPlan.objects.filter(provider=provider, is_active=True)
@@ -2803,6 +2814,9 @@ def prepare_cloud_asset_renewal_with_link(asset_id: int, user_id: int, plan_id: 
         public_ip = str(asset.public_ip or asset.previous_public_ip or '').strip()
         if not public_ip:
             return None, '代理缺少公网 IP，暂时无法续费'
+        original_account = _resolve_asset_original_cloud_account(asset)
+        if _is_unattached_static_ip_asset(asset) and not original_account:
+            return None, '原固定 IP 所属云账号不可用，暂时无法自助续费，请联系人工客服。'
         target_plan = CloudServerPlan.objects.filter(
             id=plan_id,
             provider=asset.provider or CloudServerPlan.PROVIDER_AWS_LIGHTSAIL,
@@ -2820,8 +2834,8 @@ def prepare_cloud_asset_renewal_with_link(asset_id: int, user_id: int, plan_id: 
             order_no=_generate_cloud_order_no('SRVASSET', f'RENEW{asset.id}'),
             plan=target_plan,
             provider=target_plan.provider,
-            cloud_account=asset.cloud_account or get_cloud_account_from_label(asset.account_label, target_plan.provider),
-            account_label=asset.account_label,
+            cloud_account=original_account if _is_unattached_static_ip_asset(asset) else (asset.cloud_account or get_cloud_account_from_label(asset.account_label, target_plan.provider)),
+            account_label=cloud_account_label(original_account) if _is_unattached_static_ip_asset(asset) else asset.account_label,
             region_code=target_plan.region_code,
             region_name=target_plan.region_name,
             plan_name=target_plan.plan_name,

@@ -3352,11 +3352,22 @@ class CloudServerServicesTestCase(TestCase):
 
     def test_public_unattached_asset_renewal_plans_are_available(self):
         other_user = TelegramUser.objects.create(tg_user_id=990006, username='other_unattached_asset_renew_user')
+        account = CloudAccountConfig.objects.create(
+            provider=CloudAccountConfig.PROVIDER_AWS,
+            name='strict-unattached-account',
+            external_account_id='acct-strict-unattached',
+            access_key='ak',
+            secret_key='sk',
+            region_hint=self.plan.region_code,
+            is_active=True,
+        )
         asset = CloudAsset.objects.create(
             kind=CloudAsset.KIND_SERVER,
             source=CloudAsset.SOURCE_AWS_SYNC,
             user=self.user,
             provider='aws_lightsail',
+            cloud_account=account,
+            account_label='aws+acct-strict-unattached+strict-unattached-account',
             region_code=self.plan.region_code,
             region_name=self.plan.region_name,
             asset_name='public-unattached-asset-renewal',
@@ -3377,6 +3388,74 @@ class CloudServerServicesTestCase(TestCase):
         self.assertEqual(public_asset.id, asset.id)
         self.assertGreaterEqual(len(public_plans), 1)
         self.assertIsNone(public_err)
+
+    def test_public_unattached_asset_renewal_requires_original_account(self):
+        other_user = TelegramUser.objects.create(tg_user_id=990007, username='other_unattached_asset_no_account')
+        asset = CloudAsset.objects.create(
+            kind=CloudAsset.KIND_SERVER,
+            source=CloudAsset.SOURCE_AWS_SYNC,
+            user=self.user,
+            provider='aws_lightsail',
+            region_code=self.plan.region_code,
+            region_name=self.plan.region_name,
+            asset_name='public-unattached-asset-no-account',
+            public_ip='4.4.4.48',
+            actual_expires_at=timezone.now() + timezone.timedelta(days=15),
+            status=CloudAsset.STATUS_UNKNOWN,
+            is_active=False,
+            provider_status='未附加固定IP',
+            provider_resource_id='arn:aws:lightsail:ap-southeast-1:test:StaticIp/public-unattached-asset-no-account',
+        )
+
+        public_asset, public_plans, public_err = async_to_sync(list_cloud_asset_renewal_plans)(asset.id, other_user.id, public=True)
+
+        self.assertEqual(public_asset.id, asset.id)
+        self.assertEqual(public_plans, [])
+        self.assertEqual(public_err, '原固定 IP 所属云账号不可用，暂时无法自助续费，请联系人工客服。')
+
+    def test_asset_recovery_candidates_only_original_account(self):
+        other_account = CloudAccountConfig.objects.create(
+            provider=CloudAccountConfig.PROVIDER_AWS,
+            name='other-strict-unattached-account',
+            external_account_id='acct-other-strict-unattached',
+            access_key='ak',
+            secret_key='sk',
+            region_hint=self.plan.region_code,
+            is_active=True,
+        )
+        account = CloudAccountConfig.objects.create(
+            provider=CloudAccountConfig.PROVIDER_AWS,
+            name='source-strict-unattached-account',
+            external_account_id='acct-source-strict-unattached',
+            access_key='ak',
+            secret_key='sk',
+            region_hint=self.plan.region_code,
+            is_active=True,
+        )
+        order = CloudServerOrder.objects.create(
+            order_no='ASSET-RECOVERY-STRICT-ACCOUNT',
+            user=self.user,
+            plan=self.plan,
+            provider=self.plan.provider,
+            cloud_account=account,
+            account_label='aws+acct-source-strict-unattached+source-strict-unattached-account',
+            region_code=self.plan.region_code,
+            region_name=self.plan.region_name,
+            plan_name=self.plan.plan_name,
+            quantity=1,
+            currency='USDT',
+            total_amount='19.00',
+            pay_amount='19.00',
+            status='paid',
+            public_ip='4.4.4.49',
+            static_ip_name='strict-static-ip',
+            provision_note='未绑定代理资产续费：来源资产 #999。',
+        )
+
+        account_ids = async_to_sync(_candidate_cloud_account_ids)(order.id)
+
+        self.assertEqual(account_ids, [account.id])
+        self.assertNotIn(other_account.id, account_ids)
 
     def test_cloud_server_ip_change_requires_owner_identity(self):
         other_user = TelegramUser.objects.create(tg_user_id=990005, username='other_order_ip_change_user')

@@ -533,6 +533,11 @@ async def provision_cloud_server(order_id: int):
 
         account_ids = await _candidate_cloud_account_ids(order.id)
         if not account_ids:
+            if is_cloud_asset_renewal_order(order):
+                note = '未附加固定 IP 恢复失败：原固定 IP 所属云账号不可用，已停止自动创建。'
+                logger.warning('云服务器开通失败: order=%s reason=asset_recovery_missing_cloud_account', order.order_no)
+                saved = await _mark_failed(order.id, note)
+                return saved
             account_ids = [None]
         result = None
         login_user = 'root'
@@ -773,6 +778,8 @@ def _candidate_cloud_account_ids(order_id: int):
     if order.replacement_for_id:
         account_id = getattr(order.replacement_for, 'cloud_account_id', None) or order.cloud_account_id
         return [account_id] if account_id else []
+    if is_cloud_asset_renewal_order(order):
+        return [order.cloud_account_id] if order.cloud_account_id else []
     accounts = list_cloud_accounts_by_server_load(order.provider, order.region_code)
     ids = [account.id for account in accounts]
     if order.cloud_account_id and order.cloud_account_id not in ids:
@@ -802,6 +809,8 @@ def _ensure_order_cloud_account(order_id: int):
     if not order:
         return None
     if not order.cloud_account_id:
+        if is_cloud_asset_renewal_order(order):
+            return order
         account = choose_cloud_account_for_order(order.provider, order.region_code)
         if account:
             order.cloud_account = account
