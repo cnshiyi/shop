@@ -76,7 +76,6 @@ from cloud.services import (
     list_user_cloud_servers,
     list_cloud_server_upgrade_plans,
     create_cloud_server_upgrade_order,
-    refund_cloud_server_to_balance,
     mark_cloud_server_ip_change_requested,
     mark_cloud_server_reinit_requested,
     mute_all_user_reminders,
@@ -2169,7 +2168,7 @@ def _cloud_order_readonly_text(order) -> str:
     text += f'\n创建时间: {order.created_at:%Y-%m-%d %H:%M:%S}'
     if status_hint:
         text += f'\n{status_hint}'
-    text += '\n\n此处仅用于查询订单，不提供自助操作。如需续费、退款、初始化或其他处理，请联系人工客服。'
+    text += '\n\n此处仅用于查询订单，不提供自助操作。如需续费、初始化或其他处理，请联系人工客服。'
     return text
 
 
@@ -2312,7 +2311,7 @@ async def _send_cloud_renewal_payment_prompt(message: Message, order, user, *, e
         f'自动续费: {"已开启" if auto_renew_enabled else "已关闭"}\n'
         f'收款地址: <code>{escape(receive_address)}</code>'
         f'{balance_suffix}\n\n'
-        '可直接地址支付，或使用下方钱包续费与自动续费开关。'
+        '可直接地址支付，或使用下方钱包按钮续费。自动续费默认使用钱包余额扣款。'
     )
     markup = cloud_server_renew_payment(order.id, order.pay_amount, trx_amount, bool(auto_renew_enabled))
     if edit:
@@ -3821,7 +3820,6 @@ def register_handlers(dp: Dispatcher):
 
     @dp.callback_query(F.data.startswith('cloud:autorenew:'))
     async def cb_cloud_auto_renew_toggle(callback: CallbackQuery):
-        await _safe_callback_answer(callback)
         user = await get_or_create_user(callback.from_user.id, callback.from_user.username, callback.from_user.first_name)
         _, _, action, order_id_text = callback.data.split(':')
         order_id = int(order_id_text)
@@ -3831,25 +3829,35 @@ def register_handlers(dp: Dispatcher):
         else:
             order = await set_cloud_server_auto_renew(order_id, user.id, enabled)
         if order is False:
-            await _safe_callback_answer(callback, '该服务器IP已删除，禁止续费', show_alert=True)
+            await _safe_callback_answer(callback, '当前状态不可开启钱包自动续费', show_alert=True)
             return
         if not order:
             await _safe_callback_answer(callback, '服务器记录不存在', show_alert=True)
             return
-        trx_amount = await usdt_to_trx(order.pay_amount or order.total_amount)
-        receive_address = _receive_address()
-        await _safe_edit_text(callback.message, 
-            '🔄 云服务器续费\n\n'
-            f'订单号: {order.order_no}\n'
-            '续费时长: 31天\n'
-            f'续费价格: {fmt_pay_amount(order.pay_amount or order.total_amount)} {order.currency}\n'
-            f'自动续费: {"已开启" if enabled else "已关闭"}\n'
-            f'收款地址: <code>{escape(receive_address)}</code>\n\n'
-            '可直接地址支付，或使用下方钱包续费与自动续费开关。',
-            parse_mode='HTML',
-            disable_web_page_preview=True,
-            reply_markup=cloud_server_renew_payment(order.id, order.pay_amount or order.total_amount, trx_amount, enabled),
-        )
+        label = order.public_ip or order.previous_public_ip or order.order_no
+        await _safe_callback_answer(callback, f'{label} 钱包自动续费已{"开启" if enabled else "关闭"}', show_alert=True)
+        if callback.message:
+            message_text = callback.message.html_text or callback.message.text or ''
+            for old_status in ('自动续费: 未开启', '自动续费: 已关闭', '自动续费: 已开启'):
+                if old_status in message_text:
+                    message_text = message_text.replace(old_status, f'自动续费: {"已开启" if enabled else "未开启"}', 1)
+                    break
+            current_markup = getattr(callback.message, 'reply_markup', None)
+            new_markup = None
+            if current_markup:
+                rows = []
+                target_on = f'cloud:autorenew:on:{order.id}'
+                target_off = f'cloud:autorenew:off:{order.id}'
+                for row in current_markup.inline_keyboard:
+                    new_row = []
+                    for button in row:
+                        if button.callback_data in {target_on, target_off}:
+                            new_row.append(InlineKeyboardButton(text=f'{"⛔ 关闭" if enabled else "⚡ 开启"}自动续费', callback_data=target_off if enabled else target_on))
+                        else:
+                            new_row.append(button)
+                    rows.append(new_row)
+                new_markup = InlineKeyboardMarkup(inline_keyboard=rows)
+            await _safe_edit_text(callback.message, message_text, reply_markup=new_markup or current_markup, parse_mode='HTML')
 
     def _retained_recovery_missing_payment_text(order) -> str:
         if not order or order.status != 'completed' or not order.paid_at:
@@ -4108,25 +4116,11 @@ def register_handlers(dp: Dispatcher):
 
     @dp.callback_query(F.data.startswith('cloud:refund:'))
     async def cb_cloud_refund(callback: CallbackQuery):
-        await _safe_callback_answer(callback)
-        order_id = int(callback.data.split(':')[2])
-        logger.info('CLOUD_REFUND_CONFIRM_PAGE user_id=%s order_id=%s callback_data=%s', getattr(callback.from_user, 'id', None), order_id, callback.data)
-        rows = [[InlineKeyboardButton(text='确认退款并改为3天后到期', callback_data=f'cloud:refundyes:{order_id}')], [InlineKeyboardButton(text='🔙 返回详情', callback_data=f'cloud:detail:{order_id}')]]
-        await _safe_edit_text(callback.message, '💸 退款确认\n\n到期时间少于 10 天的订单禁止退款。确认后会把退款金额退回余额，并把服务到期时间改为 3 天后；订单状态不变，后续仍可续费。确认继续？', reply_markup=InlineKeyboardMarkup(inline_keyboard=rows))
+        await _safe_callback_answer(callback, '自助退款入口已关闭，请联系人工客服处理', show_alert=True)
 
     @dp.callback_query(F.data.startswith('cloud:refundyes:'))
     async def cb_cloud_refund_yes(callback: CallbackQuery):
-        await _safe_callback_answer(callback)
-        user = await get_or_create_user(callback.from_user.id, callback.from_user.username, callback.from_user.first_name)
-        order_id = int(callback.data.split(':')[2])
-        logger.info('CLOUD_REFUND_EXEC_START user_id=%s order_id=%s callback_data=%s', user.id, order_id, callback.data)
-        result, err = await refund_cloud_server_to_balance(order_id, user.id)
-        if err:
-            logger.warning('CLOUD_REFUND_EXEC_DENIED user_id=%s order_id=%s reason=%s', user.id, order_id, err)
-            await _safe_callback_answer(callback, err, show_alert=True)
-            return
-        logger.info('CLOUD_REFUND_EXEC_OK user_id=%s order_id=%s amount=%s currency=%s', user.id, order_id, result['amount'], result['currency'])
-        await _safe_edit_text(callback.message, f"✅ 已退款 {fmt_amount(result['amount'])} {result['currency']} 至余额，服务到期时间已改为 3 天后，订单状态保持不变。", reply_markup=main_menu())
+        await _safe_callback_answer(callback, '自助退款入口已关闭，请联系人工客服处理', show_alert=True)
 
     @dp.callback_query(F.data.startswith('cloud:reinit:'))
     async def cb_cloud_reinit(callback: CallbackQuery, state: FSMContext):

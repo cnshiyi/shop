@@ -527,10 +527,6 @@ def cloud_server_renew_payment(order_id: int, amount, trx_amount, auto_renew_ena
     kb = InlineKeyboardBuilder()
     kb.row(InlineKeyboardButton(text=f'💳 USDT钱包支付 ({fmt_amount(amount)} U)', callback_data=f'cloud:renewpay:{order_id}:USDT'))
     kb.row(InlineKeyboardButton(text=f'💳 TRX钱包支付 ({fmt_amount(trx_amount)} TRX)', callback_data=f'cloud:renewpay:{order_id}:TRX'))
-    if auto_renew_enabled:
-        kb.row(InlineKeyboardButton(text='⛔ 关闭钱包自动续费', callback_data=f'cloud:autorenew:off:{order_id}'))
-    else:
-        kb.row(InlineKeyboardButton(text='⚡ 打开钱包自动续费', callback_data=f'cloud:autorenew:on:{order_id}'))
     kb.row(InlineKeyboardButton(text='🔙 返回详情', callback_data=f'cloud:detail:{order_id}'))
     return _log_inline_keyboard(
         'cloud_server_renew_payment',
@@ -556,8 +552,6 @@ def cloud_server_detail(order_id: int, can_renew: bool, can_change_ip: bool, can
         kb.button(text='🛠 重新安装', callback_data=f'cloud:reinit:{order_id}')
     if can_upgrade:
         kb.button(text='⚙️ 修改配置', callback_data=f'cloud:upgrade:{order_id}')
-    if can_refund:
-        kb.button(text='💸 退款', callback_data=f'cloud:refund:{order_id}')
     kb.button(text='🔙 返回列表', callback_data=back_callback)
     kb.adjust(2, 2, 2, 1)
     return _log_inline_keyboard(
