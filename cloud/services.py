@@ -1434,17 +1434,7 @@ def get_cloud_server_by_ip(ip: str):
     order = CloudServerOrder.objects.filter(ip_q, status__in=_ACTIVE_ORDER_STATUSES).order_by('-created_at').first()
     if order:
         return _hydrate_order_from_proxy_asset(order)
-    retained_order = (
-        CloudServerOrder.objects.filter(
-            ip_q,
-            provider=CloudServerPlan.PROVIDER_AWS_LIGHTSAIL,
-            status='deleted',
-            ip_recycle_at__gt=timezone.now(),
-        )
-        .filter(Q(instance_id__isnull=True) | Q(instance_id=''))
-        .order_by('-ip_recycle_at', '-updated_at', '-id')
-        .first()
-    )
+    retained_order = _valid_retained_order_for_ip(ip_q)
     return _hydrate_order_from_proxy_asset(retained_order)
 
 
@@ -1475,19 +1465,28 @@ def get_cloud_server_by_ip_for_user(ip: str, user_id: int):
     order = CloudServerOrder.objects.filter(ip_q, user_id=user_id, status__in=_ACTIVE_ORDER_STATUSES).order_by('-created_at').first()
     if order:
         return _hydrate_order_from_proxy_asset(order)
-    retained_order = (
-        CloudServerOrder.objects.filter(
-            ip_q,
-            user_id=user_id,
-            provider=CloudServerPlan.PROVIDER_AWS_LIGHTSAIL,
-            status='deleted',
-            ip_recycle_at__gt=timezone.now(),
-        )
-        .filter(Q(instance_id__isnull=True) | Q(instance_id=''))
-        .order_by('-ip_recycle_at', '-updated_at', '-id')
-        .first()
-    )
+    retained_order = _valid_retained_order_for_ip(ip_q, user_id=user_id)
     return _hydrate_order_from_proxy_asset(retained_order)
+
+
+def _valid_retained_order_for_ip(ip_q, user_id: int | None = None):
+    queryset = CloudServerOrder.objects.filter(
+        ip_q,
+        provider=CloudServerPlan.PROVIDER_AWS_LIGHTSAIL,
+        status='deleted',
+        ip_recycle_at__gt=timezone.now(),
+    ).filter(Q(instance_id__isnull=True) | Q(instance_id=''))
+    if user_id is not None:
+        queryset = queryset.filter(user_id=user_id)
+    for order in queryset.order_by('-ip_recycle_at', '-updated_at', '-id')[:10]:
+        retained_asset = (
+            CloudAsset.objects.filter(order=order, kind=CloudAsset.KIND_SERVER)
+            .order_by('-updated_at', '-id')
+            .first()
+        )
+        if retained_asset and not _cloud_asset_deleted_or_missing(retained_asset) and _is_unattached_static_ip_asset(retained_asset):
+            return order
+    return None
 
 
 def _is_unattached_static_ip_asset(asset: CloudAsset | None) -> bool:

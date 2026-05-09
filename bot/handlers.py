@@ -939,6 +939,7 @@ def _callback_route_label(callback_data: str | None) -> str:
         ('cloud:renewpay:', 'cloud.renewpay 续费钱包支付'),
         ('cloud:renewwallet:', 'cloud.renewwallet 自动续费钱包支付'),
         ('cloud:assetrenewplan:', 'cloud.assetrenewplan 未绑定资产续费选套餐'),
+        ('cloud:renewplan:', 'cloud.renewplan 保留IP续费选套餐'),
         ('cloud:renew:', 'cloud.renew 续费'),
         ('cloud:start:', 'cloud.start 管理员开机'),
         ('cloud:autorenew:', 'cloud.autorenew 自动续费开关'),
@@ -4107,7 +4108,7 @@ def register_handlers(dp: Dispatcher):
         ok, reason = await _validate_reinstall_proxy_link(
             item,
             link_data,
-            probe_when_possible=bool(getattr(item, 'login_password', None)),
+            probe_when_possible=False,
             allow_client_port=True,
         )
         if not ok:

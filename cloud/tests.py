@@ -1904,6 +1904,45 @@ class CloudServerServicesTestCase(TestCase):
         self.assertEqual(order.cloud_account_id, account.id)
         self.assertEqual(order.account_label, asset.account_label)
 
+    def test_deleted_retained_order_without_active_static_ip_is_not_query_result(self):
+        order = CloudServerOrder.objects.create(
+            order_no='HB-TEST-DELETED-RETAINED-MISSING',
+            user=self.user,
+            plan=self.plan,
+            provider='aws_lightsail',
+            region_code=self.plan.region_code,
+            region_name=self.plan.region_name,
+            plan_name=self.plan.plan_name,
+            quantity=1,
+            currency='USDT',
+            total_amount='19.00',
+            pay_amount='19.00',
+            pay_method='balance',
+            status='deleted',
+            public_ip='54.255.96.64',
+            previous_public_ip='54.255.96.64',
+            ip_recycle_at=timezone.now() + timezone.timedelta(days=10),
+        )
+        CloudAsset.objects.create(
+            order=order,
+            kind=CloudAsset.KIND_SERVER,
+            source=CloudAsset.SOURCE_AWS_SYNC,
+            user=self.user,
+            provider='aws_lightsail',
+            region_code=self.plan.region_code,
+            region_name=self.plan.region_name,
+            asset_name='released-static-ip',
+            public_ip='54.255.96.64',
+            status=CloudAsset.STATUS_DELETED,
+            provider_status='云上未找到',
+            note='云上不存在，已标记删除',
+            is_active=False,
+        )
+
+        result = async_to_sync(get_cloud_server_by_ip_for_user)('54.255.96.64', self.user.id)
+
+        self.assertIsNone(result)
+
     def test_unbound_asset_renewal_lists_plans_without_creating_order(self):
         asset = CloudAsset.objects.create(
             kind=CloudAsset.KIND_SERVER,
