@@ -383,15 +383,21 @@ def _confirm_cloud_server_order(order_id: int, tx_hash: str, payer_address: str 
             order.payer_address = payer_address or ''
             order.receive_address = receive_address or ''
             order.paid_at = timezone.now()
-            if order.status == 'renew_pending':
+            asset_recovery_order = is_cloud_asset_renewal_order(order)
+            if order.status == 'renew_pending' and not asset_recovery_order:
                 if not str(order.public_ip or order.previous_public_ip or '').strip() or order.status in {'deleted', 'deleting', 'expired'}:
                     return None
                 order.save(update_fields=['tx_hash', 'payer_address', 'receive_address', 'paid_at', 'updated_at'])
                 return apply_cloud_server_renewal.__wrapped__(order.id, order.lifecycle_days or 31, False)
             order.status = 'paid'
-            payment_note = '已收款，正在恢复未绑定代理资产固定 IP。' if is_cloud_asset_renewal_order(order) else '已收款，等待用户确认 MTProxy 端口后进入创建流程。默认端口为 9528。'
+            if asset_recovery_order:
+                order.service_expires_at = None
+            payment_note = '已收款，正在恢复未绑定代理资产固定 IP。' if asset_recovery_order else '已收款，等待用户确认 MTProxy 端口后进入创建流程。默认端口为 9528。'
             order.provision_note = '\n'.join(part for part in [str(order.provision_note or '').strip(), payment_note] if part)
-            order.save(update_fields=['status', 'tx_hash', 'payer_address', 'receive_address', 'paid_at', 'provision_note', 'updated_at'])
+            update_fields = ['status', 'tx_hash', 'payer_address', 'receive_address', 'paid_at', 'provision_note', 'updated_at']
+            if asset_recovery_order:
+                update_fields.append('service_expires_at')
+            order.save(update_fields=update_fields)
         return order
     except Exception as exc:
         logger.warning('云服务器真实支付确认失败 order=%s err=%s', order_id, exc)

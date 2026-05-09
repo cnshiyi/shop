@@ -3121,9 +3121,12 @@ def pay_cloud_server_renewal_with_balance(order_id: int, user_id: int, currency:
             if not order:
                 return None, '订单不存在'
             order = _hydrate_order_from_proxy_asset(order)
-            if order.status not in {'renew_pending', 'pending'}:
-                return None, '当前订单状态不可钱包支付'
             asset_recovery_order = is_cloud_asset_renewal_order(order)
+            if order.status not in {'renew_pending', 'pending'}:
+                if asset_recovery_order and order.status == 'completed' and not order.paid_at and not str(order.instance_id or '').strip():
+                    order.status = 'pending'
+                else:
+                    return None, '当前订单状态不可钱包支付'
             if asset_recovery_order:
                 order.service_expires_at = None
             if not asset_recovery_order and not _can_order_be_renewed(order):

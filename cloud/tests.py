@@ -2093,6 +2093,79 @@ class CloudServerServicesTestCase(TestCase):
         self.assertEqual(paid_order.ip_recycle_at, due_at)
         self.assertIn('正在恢复未绑定代理资产固定 IP', paid_order.provision_note)
 
+    def test_unbound_asset_renewal_wallet_payment_repairs_completed_unpaid_state(self):
+        self.user.balance = Decimal('100.000000')
+        self.user.save(update_fields=['balance', 'updated_at'])
+        due_at = timezone.now() + timezone.timedelta(days=9)
+        asset = CloudAsset.objects.create(
+            kind=CloudAsset.KIND_SERVER,
+            source=CloudAsset.SOURCE_AWS_SYNC,
+            user=self.user,
+            provider='aws_lightsail',
+            region_code=self.plan.region_code,
+            region_name=self.plan.region_name,
+            asset_name='unbound-renewal-wallet-repair',
+            public_ip='31.31.31.34',
+            previous_public_ip='31.31.31.34',
+            actual_expires_at=due_at,
+            status=CloudAsset.STATUS_UNKNOWN,
+            provider_status='未附加固定IP',
+            note='未附加固定IP',
+            is_active=False,
+        )
+        link = {
+            'url': 'tg://proxy?server=31.31.31.34&port=443&secret=eed5c148e2922f6c49611e7d53fe432a94617a7572652e6d6963726f736f66742e636f6d',
+            'server': '31.31.31.34',
+            'port': '443',
+            'secret': 'eed5c148e2922f6c49611e7d53fe432a94617a7572652e6d6963726f736f66742e636f6d',
+        }
+        order, _ = async_to_sync(prepare_cloud_asset_renewal_with_link)(asset.id, self.user.id, self.plan.id, link)
+        CloudServerOrder.objects.filter(id=order.id).update(status='completed', paid_at=None, instance_id='', service_expires_at=due_at)
+
+        paid_order, pay_error = async_to_sync(pay_cloud_server_renewal_with_balance)(order.id, self.user.id, 'USDT', 31)
+
+        self.assertIsNone(pay_error)
+        self.assertEqual(paid_order.status, 'paid')
+        self.assertIsNotNone(paid_order.paid_at)
+        self.assertIsNone(paid_order.service_expires_at)
+        self.assertEqual(paid_order.ip_recycle_at, due_at)
+
+    def test_unbound_asset_renewal_chain_payment_marks_paid_for_recovery(self):
+        due_at = timezone.now() + timezone.timedelta(days=9)
+        asset = CloudAsset.objects.create(
+            kind=CloudAsset.KIND_SERVER,
+            source=CloudAsset.SOURCE_AWS_SYNC,
+            user=self.user,
+            provider='aws_lightsail',
+            region_code=self.plan.region_code,
+            region_name=self.plan.region_name,
+            asset_name='unbound-renewal-chain-payment',
+            public_ip='31.31.31.35',
+            previous_public_ip='31.31.31.35',
+            actual_expires_at=due_at,
+            status=CloudAsset.STATUS_UNKNOWN,
+            provider_status='未附加固定IP',
+            note='未附加固定IP',
+            is_active=False,
+        )
+        link = {
+            'url': 'tg://proxy?server=31.31.31.35&port=443&secret=eed5c148e2922f6c49611e7d53fe432a94617a7572652e6d6963726f736f66742e636f6d',
+            'server': '31.31.31.35',
+            'port': '443',
+            'secret': 'eed5c148e2922f6c49611e7d53fe432a94617a7572652e6d6963726f736f66742e636f6d',
+        }
+        order, error = async_to_sync(prepare_cloud_asset_renewal_with_link)(asset.id, self.user.id, self.plan.id, link)
+
+        confirmed = async_to_sync(_confirm_cloud_server_order)(order.id, '0xassetrenewalchainpayment', 'payer', 'receiver')
+
+        self.assertIsNone(error)
+        self.assertIsNotNone(confirmed)
+        self.assertEqual(confirmed.status, 'paid')
+        self.assertIsNotNone(confirmed.paid_at)
+        self.assertIsNone(confirmed.service_expires_at)
+        self.assertEqual(confirmed.ip_recycle_at, due_at)
+        self.assertIn('正在恢复未绑定代理资产固定 IP', confirmed.provision_note)
+
     def test_unattached_asset_operation_order_enters_retained_renewal_flow(self):
         due_at = timezone.now() + timezone.timedelta(days=9)
         asset = CloudAsset.objects.create(
