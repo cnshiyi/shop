@@ -3520,12 +3520,16 @@ def mark_cloud_server_reinit_requested(order_id: int, user_id: int | None):
         order.provision_note = '\n'.join(filter(None, [order.provision_note, note]))
         order.save(update_fields=['provision_note', 'updated_at'])
         return order
+    if order.status not in {'completed', 'expiring', 'renew_pending', 'suspended'}:
+        return '当前状态不允许重新安装'
+    if not str(order.public_ip or '').strip() or not str(order.login_password or '').strip():
+        return False
     if not _has_main_proxy_link(order):
         return 'missing_main_link'
-    rebuild_order, err = create_cloud_server_rebuild_order(order.id)
-    if err:
-        return err
-    return rebuild_order
+    note = '用户发起当前服务器重新安装请求：仅重新执行 BBR/MTProxy 安装，不创建新实例，不迁移固定 IP。'
+    order.provision_note = '\n'.join(filter(None, [order.provision_note, note]))
+    order.save(update_fields=['provision_note', 'updated_at'])
+    return order
 
 
 def _has_main_proxy_link(order: CloudServerOrder) -> bool:

@@ -3619,9 +3619,9 @@ def register_handlers(dp: Dispatcher):
             await callback.message.reply(f'{rebuild_order}\n请重新进入详情并重新生成按钮。')
             return
         _ASSET_REINIT_INFLIGHT.add(asset_id)
-        logger.info('CLOUD_ASSET_REINIT_SUBMIT user_id=%s asset_id=%s order_id=%s rebuild_order_id=%s ip=%s', user.id, asset_id, order.id, rebuild_order.id, getattr(item, 'public_ip', None))
-        await callback.message.reply('🛠 已确认重建服务器：后台会新建干净服务器并安装代理，成功后迁移固定 IP，旧机保留 3 天。预计约 5 分钟，完成后会自动通知你。\n\n后台处理期间，底部菜单和其它按钮可正常使用。', reply_markup=main_menu())
-        task = asyncio.create_task(_provision_cloud_server_and_notify(bot, callback.from_user.id, rebuild_order.id, rebuild_order.mtproxy_port or 9528, retry_only=False))
+        logger.info('CLOUD_ASSET_REINIT_SUBMIT user_id=%s asset_id=%s order_id=%s target_order_id=%s ip=%s', user.id, asset_id, order.id, rebuild_order.id, getattr(item, 'public_ip', None))
+        await callback.message.reply('🛠 已确认重新安装：后台只会在当前服务器重新执行 BBR/MTProxy 安装，不会创建新实例，也不会迁移固定 IP。预计约 5 分钟，完成后会自动通知你。\n\n后台处理期间，底部菜单和其它按钮可正常使用。', reply_markup=main_menu())
+        task = asyncio.create_task(_provision_cloud_server_and_notify(bot, callback.from_user.id, rebuild_order.id, rebuild_order.mtproxy_port or 9528, retry_only=True))
         task.add_done_callback(lambda _task, _asset_id=asset_id: _ASSET_REINIT_INFLIGHT.discard(_asset_id))
 
     @dp.callback_query(F.data.startswith('cloud:detail:'))
