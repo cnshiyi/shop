@@ -2175,6 +2175,43 @@ class CloudServerServicesTestCase(TestCase):
         self.assertIsNone(paid_order.service_expires_at)
         self.assertEqual(paid_order.ip_recycle_at, due_at)
 
+    def test_completed_asset_recovery_order_renews_without_reprovisioning(self):
+        self.user.balance = Decimal('100.000000')
+        self.user.save(update_fields=['balance', 'updated_at'])
+        completed_at = timezone.now() - timezone.timedelta(days=1)
+        old_expiry = timezone.now() + timezone.timedelta(days=10)
+        order = CloudServerOrder.objects.create(
+            order_no='HB-TEST-ASSET-RECOVERY-NORMAL-RENEW',
+            user=self.user,
+            plan=self.plan,
+            provider='aws_lightsail',
+            region_code=self.plan.region_code,
+            region_name=self.plan.region_name,
+            plan_name=self.plan.plan_name,
+            quantity=1,
+            currency='USDT',
+            total_amount='19.00',
+            pay_amount='19.00',
+            pay_method='balance',
+            status='renew_pending',
+            public_ip='31.31.31.36',
+            instance_id='recovered-instance-36',
+            static_ip_name='StaticIp-recovered-36',
+            mtproxy_port=443,
+            mtproxy_secret='secret',
+            service_started_at=completed_at,
+            service_expires_at=old_expiry,
+            provision_note='未绑定代理资产续费：来源资产 #999；恢复完成。',
+        )
+
+        renewed, pay_error = async_to_sync(pay_cloud_server_renewal_with_balance)(order.id, self.user.id, 'USDT', 31)
+
+        self.assertIsNone(pay_error)
+        self.assertEqual(renewed.status, 'completed')
+        self.assertEqual(renewed.instance_id, 'recovered-instance-36')
+        self.assertGreater(renewed.service_expires_at, old_expiry)
+        self.assertIsNotNone(renewed.paid_at)
+
     def test_unbound_asset_renewal_chain_payment_marks_paid_for_recovery(self):
         due_at = timezone.now() + timezone.timedelta(days=9)
         asset = CloudAsset.objects.create(

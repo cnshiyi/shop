@@ -1053,7 +1053,15 @@ _ASSET_RENEWAL_MARKER = '未绑定代理资产续费'
 def is_cloud_asset_renewal_order(order: CloudServerOrder | None) -> bool:
     if not order:
         return False
-    return bool(_ASSET_RENEWAL_MARKER in str(getattr(order, 'provision_note', '') or ''))
+    if _ASSET_RENEWAL_MARKER not in str(getattr(order, 'provision_note', '') or ''):
+        return False
+    if (
+        str(getattr(order, 'instance_id', '') or '').strip()
+        and getattr(order, 'service_started_at', None)
+        and getattr(order, 'service_expires_at', None)
+    ):
+        return False
+    return True
 
 
 def _first_nonblank(*values) -> str:
