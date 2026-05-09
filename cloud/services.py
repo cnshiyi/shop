@@ -2732,15 +2732,17 @@ def create_cloud_server_renewal_for_user(order_id: int, user_id: int, days: int 
 
 
 @sync_to_async
-def list_cloud_asset_renewal_plans(asset_id: int, user_id: int, admin: bool = False):
+def list_cloud_asset_renewal_plans(asset_id: int, user_id: int, admin: bool = False, public: bool = False):
     asset_qs = CloudAsset.objects.select_related('user', 'order', 'cloud_account').filter(
         id=asset_id,
         kind=CloudAsset.KIND_SERVER,
     ).exclude(status__in=_INACTIVE_ASSET_STATUSES)
-    if not admin:
+    if not admin and not public:
         asset_qs = asset_qs.filter(user_id=user_id)
     asset = asset_qs.first()
     if not asset:
+        return None, [], '代理记录不存在'
+    if public and (asset.order_id or not _is_unattached_static_ip_asset(asset) or _cloud_asset_deleted_or_missing(asset)):
         return None, [], '代理记录不存在'
     if asset.order_id:
         return asset, [], None
@@ -2783,16 +2785,18 @@ def list_retained_ip_renewal_plans(order_id: int, user_id: int, admin: bool = Fa
 
 
 @sync_to_async
-def prepare_cloud_asset_renewal_with_link(asset_id: int, user_id: int, plan_id: int, link_data: dict[str, str], days: int = 31, admin: bool = False):
+def prepare_cloud_asset_renewal_with_link(asset_id: int, user_id: int, plan_id: int, link_data: dict[str, str], days: int = 31, admin: bool = False, public: bool = False):
     with transaction.atomic():
         asset_qs = CloudAsset.objects.select_related('user', 'order', 'cloud_account').select_for_update().filter(
             id=asset_id,
             kind=CloudAsset.KIND_SERVER,
         ).exclude(status__in=_INACTIVE_ASSET_STATUSES)
-        if not admin:
+        if not admin and not public:
             asset_qs = asset_qs.filter(user_id=user_id)
         asset = asset_qs.first()
         if not asset:
+            return None, '代理记录不存在'
+        if public and (asset.order_id or not _is_unattached_static_ip_asset(asset) or _cloud_asset_deleted_or_missing(asset)):
             return None, '代理记录不存在'
         if asset.order_id:
             return None, '该代理已绑定订单，请重新进入详情续费'

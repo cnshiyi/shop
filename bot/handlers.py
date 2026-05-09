@@ -515,14 +515,14 @@ async def _reply_cloud_query_results(message: Message, raw_text: str, state: FSM
             can_admin_asset_change_ip = bool(include_start and can_linked_order_operate and linked_order_status in {'completed', 'expiring', 'suspended'})
             can_user_asset_operate = bool(is_owned_asset and can_linked_order_operate)
             can_user_asset_change_ip = bool(can_user_asset_operate and max(int(linked_order.get('ip_change_quota') or 0), 0) > 0)
-            can_asset_renew = bool((is_owned_asset or include_start) and (is_unattached_ip_asset or not public_renew_order_id))
+            can_asset_renew = bool((is_owned_asset or include_start or is_public_view) and (is_unattached_ip_asset or not public_renew_order_id))
             action_order_id = public_renew_order_id if public_renew_order_id and not is_unattached_ip_asset else 0
             results.append({
                 'ip': display_ip,
                 'text': f'IP: <code>{escape(display_ip)}</code>\n到期时间: {expires_text}' if is_public_view else f'IP: <code>{escape(display_ip)}</code>\n到期时间: {expires_text}\n自动续费: {auto_renew_text}\n状态: {escape(status_text)}{account_text}',
                 'renewable': bool(can_asset_renew or action_order_id),
                 'order_id': action_order_id,
-                'asset_id': 0 if is_public_view else (asset.id if can_asset_renew else 0),
+                'asset_id': asset.id if can_asset_renew and not public_renew_order_id else 0,
                 'start_order_id': public_renew_order_id if include_start else 0,
                 'auto_renew_enabled': bool(linked_order.get('auto_renew_enabled')),
                 'can_auto_renew': bool(include_start or is_owned_asset),
@@ -3443,16 +3443,22 @@ def register_handlers(dp: Dispatcher):
         user = await get_or_create_user(callback.from_user.id, callback.from_user.username, callback.from_user.first_name)
         is_admin = await _is_admin_chat(callback.message)
         item = await get_proxy_asset_detail_for_admin(asset_id, 'asset') if is_admin else await get_user_proxy_asset_detail(asset_id, user.id, 'asset')
+        public_asset_renewal = False
+        if not item and action == 'renew' and not is_admin:
+            public_asset, public_plans, public_err = await list_cloud_asset_renewal_plans(asset_id, user.id, public=True)
+            if public_asset and public_plans:
+                item = public_asset
+                public_asset_renewal = True
         if not item:
             await _safe_callback_answer(callback, '代理记录不存在', show_alert=True)
             return
         if action == 'renew' and not getattr(item, 'order_id', None):
-            asset, plans, plan_err = await list_cloud_asset_renewal_plans(asset_id, user.id, admin=is_admin)
+            asset, plans, plan_err = await list_cloud_asset_renewal_plans(asset_id, user.id, admin=is_admin, public=public_asset_renewal)
             if plan_err:
                 await _safe_callback_answer(callback, plan_err, show_alert=True)
                 return
             if asset and plans:
-                display_user = getattr(asset, 'user', None) or user
+                display_user = user if public_asset_renewal else (getattr(asset, 'user', None) or user)
                 await _safe_edit_text(
                     callback.message,
                     _asset_renewal_plan_text(asset, plans, display_user),
@@ -3755,7 +3761,7 @@ def register_handlers(dp: Dispatcher):
         asset_id = int(raw_asset_id)
         plan_id = int(raw_plan_id)
         is_admin = await _is_admin_chat(callback.message)
-        asset, plans, err = await list_cloud_asset_renewal_plans(asset_id, user.id, admin=is_admin)
+        asset, plans, err = await list_cloud_asset_renewal_plans(asset_id, user.id, admin=is_admin, public=not is_admin)
         if err:
             await _safe_callback_answer(callback, err, show_alert=True)
             return
@@ -3763,7 +3769,7 @@ def register_handlers(dp: Dispatcher):
         if not asset or not plan:
             await _safe_callback_answer(callback, '套餐不存在或当前状态已变化，请重新进入详情', show_alert=True)
             return
-        await state.update_data(asset_renewal_asset_id=asset.id, asset_renewal_plan_id=plan.id, asset_renewal_admin=is_admin)
+        await state.update_data(asset_renewal_asset_id=asset.id, asset_renewal_plan_id=plan.id, asset_renewal_admin=is_admin, asset_renewal_public=not is_admin and getattr(asset, 'user_id', None) != user.id)
         await state.set_state(CustomServerStates.waiting_retained_ip_renewal_link)
         ip = getattr(asset, 'public_ip', None) or getattr(asset, 'previous_public_ip', None) or '-'
         await callback.message.reply(
@@ -4183,10 +4189,11 @@ def register_handlers(dp: Dispatcher):
         order_id = int(data.get('retained_ip_renewal_order_id') or 0)
         plan_id = int(data.get('asset_renewal_plan_id') or data.get('retained_ip_renewal_plan_id') or 0)
         is_admin_asset_renewal = bool(data.get('asset_renewal_admin')) and await _is_admin_chat(message)
+        is_public_asset_renewal = bool(data.get('asset_renewal_public')) and not is_admin_asset_renewal
         is_admin_renewal = bool(data.get('retained_ip_renewal_admin')) and await _is_admin_chat(message)
         user = await get_or_create_user(message.from_user.id, message.from_user.username, message.from_user.first_name)
         if asset_id:
-            item = await get_proxy_asset_detail_for_admin(asset_id, 'asset') if is_admin_asset_renewal else await get_user_proxy_asset_detail(asset_id, user.id, 'asset')
+            item = await get_proxy_asset_detail_for_admin(asset_id, 'asset') if (is_admin_asset_renewal or is_public_asset_renewal) else await get_user_proxy_asset_detail(asset_id, user.id, 'asset')
         else:
             item = await get_cloud_server_for_admin(order_id) if is_admin_renewal else await get_user_cloud_server(order_id, user.id)
         if not item:
@@ -4207,7 +4214,7 @@ def register_handlers(dp: Dispatcher):
             await message.reply(_bot_text_format('bot_reinstall_validate_failed', '校验失败：{reason}', reason=reason))
             return
         if asset_id:
-            order, err = await prepare_cloud_asset_renewal_with_link(asset_id, user.id, plan_id, link_data, 31, admin=is_admin_asset_renewal)
+            order, err = await prepare_cloud_asset_renewal_with_link(asset_id, user.id, plan_id, link_data, 31, admin=is_admin_asset_renewal, public=is_public_asset_renewal)
         else:
             order, err = await prepare_retained_ip_renewal_with_link(order_id, user.id, plan_id, link_data, 31, admin=is_admin_renewal)
         if err or not order:

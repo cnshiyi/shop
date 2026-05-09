@@ -3350,6 +3350,34 @@ class CloudServerServicesTestCase(TestCase):
         self.assertIsNotNone(public_renewal)
         self.assertEqual(public_renewal.user_id, self.user.id)
 
+    def test_public_unattached_asset_renewal_plans_are_available(self):
+        other_user = TelegramUser.objects.create(tg_user_id=990006, username='other_unattached_asset_renew_user')
+        asset = CloudAsset.objects.create(
+            kind=CloudAsset.KIND_SERVER,
+            source=CloudAsset.SOURCE_AWS_SYNC,
+            user=self.user,
+            provider='aws_lightsail',
+            region_code=self.plan.region_code,
+            region_name=self.plan.region_name,
+            asset_name='public-unattached-asset-renewal',
+            public_ip='4.4.4.47',
+            actual_expires_at=timezone.now() + timezone.timedelta(days=15),
+            status=CloudAsset.STATUS_UNKNOWN,
+            is_active=False,
+            provider_status='未附加固定IP',
+            provider_resource_id='arn:aws:lightsail:ap-southeast-1:test:StaticIp/public-unattached-asset-renewal',
+        )
+
+        denied_asset, denied_plans, denied_err = async_to_sync(list_cloud_asset_renewal_plans)(asset.id, other_user.id)
+        public_asset, public_plans, public_err = async_to_sync(list_cloud_asset_renewal_plans)(asset.id, other_user.id, public=True)
+
+        self.assertIsNone(denied_asset)
+        self.assertEqual(denied_plans, [])
+        self.assertEqual(denied_err, '代理记录不存在')
+        self.assertEqual(public_asset.id, asset.id)
+        self.assertGreaterEqual(len(public_plans), 1)
+        self.assertIsNone(public_err)
+
     def test_cloud_server_ip_change_requires_owner_identity(self):
         other_user = TelegramUser.objects.create(tg_user_id=990005, username='other_order_ip_change_user')
         order = CloudServerOrder.objects.create(
