@@ -29,7 +29,7 @@ from cloud.provisioning import (
     _mark_rebuild_source_pending_deletion,
     _mark_success,
 )
-from cloud.services import apply_cloud_server_renewal, create_cloud_server_rebuild_order, create_cloud_server_renewal, create_cloud_server_upgrade_order, delay_cloud_server_expiry, ensure_cloud_asset_operation_order, get_cloud_server_by_ip_for_user, get_proxy_asset_by_ip_for_admin, get_proxy_asset_by_ip_for_user, list_cloud_asset_renewal_plans, list_cloud_server_upgrade_plans, list_retained_ip_renewal_plans, list_user_cloud_servers, mark_cloud_server_ip_change_requested, pay_cloud_server_renewal_with_balance, prepare_cloud_asset_renewal_with_link, record_cloud_ip_log, replace_cloud_asset_order_by_admin
+from cloud.services import apply_cloud_server_renewal, create_cloud_server_rebuild_order, create_cloud_server_renewal, create_cloud_server_renewal_for_user, create_cloud_server_upgrade_order, delay_cloud_server_expiry, ensure_cloud_asset_operation_order, get_cloud_server_by_ip_for_user, get_proxy_asset_by_ip_for_admin, get_proxy_asset_by_ip_for_user, list_cloud_asset_renewal_plans, list_cloud_server_upgrade_plans, list_retained_ip_renewal_plans, list_user_cloud_servers, mark_cloud_server_ip_change_requested, pay_cloud_server_renewal_with_balance, prepare_cloud_asset_renewal_with_link, record_cloud_ip_log, replace_cloud_asset_order_by_admin
 from cloud.sync_safety import get_missing_confirmation_threshold
 from cloud.api import _cloud_order_source_tags, auto_renew_task_detail, cloud_order_detail, cloud_orders_list, delete_cloud_asset, delete_server, run_auto_renew_order, run_auto_renew_tasks, sync_cloud_asset_status, tasks_overview, update_cloud_asset
 from core.cloud_accounts import cloud_account_label
@@ -3323,6 +3323,63 @@ class CloudServerServicesTestCase(TestCase):
         self.assertEqual(owned_order.id, order.id)
         self.assertIsNone(hidden_order)
 
+    def test_cloud_server_public_renewal_requires_owner_identity(self):
+        other_user = TelegramUser.objects.create(tg_user_id=990004, username='other_order_renew_user')
+        order = CloudServerOrder.objects.create(
+            order_no='IP-OWNER-RENEW-1',
+            user=self.user,
+            plan=self.plan,
+            provider=self.plan.provider,
+            region_code=self.plan.region_code,
+            region_name=self.plan.region_name,
+            plan_name=self.plan.plan_name,
+            quantity=1,
+            currency='USDT',
+            total_amount='19.00',
+            pay_amount='19.00',
+            status='completed',
+            public_ip='4.4.4.45',
+            service_started_at=timezone.now() - timezone.timedelta(days=20),
+            service_expires_at=timezone.now() + timezone.timedelta(days=10),
+        )
+
+        denied = async_to_sync(create_cloud_server_renewal_for_user)(order.id, other_user.id, 31)
+        allowed = async_to_sync(create_cloud_server_renewal_for_user)(order.id, self.user.id, 31)
+
+        self.assertIsNone(denied)
+        self.assertIsNotNone(allowed)
+        self.assertEqual(allowed.user_id, self.user.id)
+
+    def test_cloud_server_ip_change_requires_owner_identity(self):
+        other_user = TelegramUser.objects.create(tg_user_id=990005, username='other_order_ip_change_user')
+        order = CloudServerOrder.objects.create(
+            order_no='IP-OWNER-CHANGE-1',
+            user=self.user,
+            plan=self.plan,
+            provider=self.plan.provider,
+            region_code=self.plan.region_code,
+            region_name=self.plan.region_name,
+            plan_name=self.plan.plan_name,
+            quantity=1,
+            currency='USDT',
+            total_amount='19.00',
+            pay_amount='19.00',
+            status='completed',
+            public_ip='4.4.4.46',
+            mtproxy_port=9528,
+            mtproxy_secret='abcdef',
+            ip_change_quota=1,
+            service_expires_at=timezone.now() + timezone.timedelta(days=10),
+        )
+
+        denied = async_to_sync(mark_cloud_server_ip_change_requested)(order.id, other_user.id, self.plan.region_code, 9528)
+        allowed = async_to_sync(mark_cloud_server_ip_change_requested)(order.id, self.user.id, self.plan.region_code, 9528)
+
+        self.assertIsNone(denied)
+        self.assertIsNotNone(allowed)
+        self.assertEqual(allowed.user_id, self.user.id)
+        self.assertEqual(allowed.replacement_for_id, order.id)
+
     def test_lifecycle_plans_excludes_cloud_missing_orphan_server(self):
         missing_asset = CloudAsset.objects.create(
             kind=CloudAsset.KIND_SERVER,
@@ -3380,10 +3437,10 @@ class CloudServerServicesTestCase(TestCase):
         }], include_start=False, include_reinit=False)
         labels = [button.text for row in markup.inline_keyboard for button in row]
 
-        self.assertIn('🔄 续费IP 4.4.4.44', labels)
-        self.assertNotIn('🌐 更换IP 4.4.4.44', labels)
-        self.assertNotIn('🛠 重新安装 4.4.4.44', labels)
-        self.assertNotIn('⚙️ 修改配置 4.4.4.44', labels)
+        self.assertIn('🔄 续费IP', labels)
+        self.assertNotIn('🌐 更换IP', labels)
+        self.assertNotIn('🛠 重新安装', labels)
+        self.assertNotIn('⚙️ 修改配置', labels)
         self.assertNotIn('👩‍💻 联系客服', labels)
 
     def test_lifecycle_aws_sync_scans_all_regions_without_env_region(self):

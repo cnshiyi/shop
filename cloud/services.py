@@ -2724,7 +2724,7 @@ def create_cloud_server_renewal_by_public_query(order_id: int, days: int = 31):
 
 @sync_to_async
 def create_cloud_server_renewal_for_user(order_id: int, user_id: int, days: int = 31):
-    order = CloudServerOrder.objects.select_related('user').filter(id=order_id).first()
+    order = CloudServerOrder.objects.select_related('user').filter(id=order_id, user_id=user_id).first()
     if not order:
         return None
     renewal_user = TelegramUser.objects.filter(id=user_id).first()
@@ -3240,9 +3240,12 @@ def rebind_cloud_server_user(order_id: int, new_user_id: int):
 
 
 @sync_to_async
-def mark_cloud_server_ip_change_requested(order_id: int, user_id: int, region_code: str | None = None, port: int | None = None):
+def mark_cloud_server_ip_change_requested(order_id: int, user_id: int, region_code: str | None = None, port: int | None = None, admin: bool = False):
     with transaction.atomic():
-        order = CloudServerOrder.objects.select_for_update().filter(id=order_id, user_id=user_id).first()
+        order_qs = CloudServerOrder.objects.select_for_update().filter(id=order_id)
+        if not admin:
+            order_qs = order_qs.filter(user_id=user_id)
+        order = order_qs.first()
         if not order:
             return None
         if order.status not in {'completed', 'expiring', 'suspended'}:

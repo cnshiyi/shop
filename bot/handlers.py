@@ -456,12 +456,13 @@ async def _reply_cloud_query_results(message: Message, raw_text: str, state: FSM
     proxy_links_by_ip = _extract_proxy_links_by_ip(raw_text)
     results = []
     user = None
+    if not include_start:
+        user = await get_or_create_user(message.from_user.id, message.from_user.username, message.from_user.first_name)
     for index, ip in enumerate(query_ips):
         input_link = proxy_links_by_ip.get(ip)
         if include_start:
             asset = await get_proxy_asset_by_ip_for_admin(ip)
         else:
-            user = user or await get_or_create_user(message.from_user.id, message.from_user.username, message.from_user.first_name)
             asset = await get_proxy_asset_by_ip_for_user(ip, user.id)
             if not asset:
                 asset = await get_proxy_asset_by_ip_for_admin(ip)
@@ -480,13 +481,14 @@ async def _reply_cloud_query_results(message: Message, raw_text: str, state: FSM
                     status_text = '状态待同步'
             account_label = str(getattr(asset, 'account_label', '') or '').strip()
             account_text = f'\n账号标签: <code>{escape(account_label)}</code>' if include_start and account_label else ''
-            if input_link and asset.provider == 'aws_lightsail' and not getattr(asset, 'mtproxy_link', None):
+            is_owned_asset = bool(user and getattr(asset, 'user_id', None) == user.id)
+            is_public_view = bool(not include_start and not is_owned_asset)
+            if input_link and (include_start or is_owned_asset) and asset.provider == 'aws_lightsail' and not getattr(asset, 'mtproxy_link', None):
                 try:
                     asset = await _save_asset_main_proxy_link(asset.id, None, input_link)
                     logger.info('CLOUD_QUERY_PROXY_LINK_SAVED target=asset asset_id=%s ip=%s port=%s', asset.id, display_ip, input_link.get('port'))
                 except Exception as exc:
                     logger.warning('CLOUD_QUERY_PROXY_LINK_SAVE_FAILED target=asset asset_id=%s ip=%s error=%s', getattr(asset, 'id', None), display_ip, exc)
-            is_owned_asset = bool(user and getattr(asset, 'user_id', None) == user.id)
             is_unattached_ip_asset = bool(
                 asset.provider == 'aws_lightsail'
                 and display_ip
@@ -517,11 +519,11 @@ async def _reply_cloud_query_results(message: Message, raw_text: str, state: FSM
             action_order_id = public_renew_order_id if public_renew_order_id and not is_unattached_ip_asset else 0
             results.append({
                 'ip': display_ip,
-                'text': f'IP: <code>{escape(display_ip)}</code>\n到期时间: {expires_text}' if not include_start and not is_owned_asset else f'IP: <code>{escape(display_ip)}</code>\n到期时间: {expires_text}\n自动续费: {auto_renew_text}\n状态: {escape(status_text)}{account_text}\n类型: 代理资产',
-                'renewable': bool(can_asset_renew or action_order_id),
-                'order_id': action_order_id,
-                'asset_id': asset.id if can_asset_renew else 0,
-                'start_order_id': public_renew_order_id,
+                'text': f'IP: <code>{escape(display_ip)}</code>\n到期时间: {expires_text}' if is_public_view else f'IP: <code>{escape(display_ip)}</code>\n到期时间: {expires_text}\n自动续费: {auto_renew_text}\n状态: {escape(status_text)}{account_text}\n类型: 代理资产',
+                'renewable': bool(not is_public_view and (can_asset_renew or action_order_id)),
+                'order_id': 0 if is_public_view else action_order_id,
+                'asset_id': 0 if is_public_view else (asset.id if can_asset_renew else 0),
+                'start_order_id': 0 if is_public_view else public_renew_order_id,
                 'auto_renew_enabled': bool(linked_order.get('auto_renew_enabled')),
                 'can_change_ip': can_admin_asset_change_ip or can_user_asset_change_ip,
                 'can_reinit': can_admin_asset_reinit or can_user_asset_operate,
@@ -534,14 +536,15 @@ async def _reply_cloud_query_results(message: Message, raw_text: str, state: FSM
         if include_start:
             order = await get_cloud_server_by_ip(ip)
         else:
-            user = user or await get_or_create_user(message.from_user.id, message.from_user.username, message.from_user.first_name)
             order = await get_cloud_server_by_ip_for_user(ip, user.id)
             if not order:
                 order = await get_cloud_server_by_ip(ip)
         if not order:
             continue
         display_ip = str(order.public_ip or order.previous_public_ip or ip).strip()
-        if input_link and order.provider == 'aws_lightsail' and not getattr(order, 'mtproxy_link', None):
+        is_owned_order = bool(user and getattr(order, 'user_id', None) == user.id)
+        is_public_view = bool(not include_start and not is_owned_order)
+        if input_link and (include_start or is_owned_order) and order.provider == 'aws_lightsail' and not getattr(order, 'mtproxy_link', None):
             try:
                 order = await _save_user_main_proxy_link(order.id, input_link)
                 logger.info('CLOUD_QUERY_PROXY_LINK_SAVED target=order order_id=%s ip=%s port=%s', order.id, display_ip, input_link.get('port'))
@@ -561,7 +564,6 @@ async def _reply_cloud_query_results(message: Message, raw_text: str, state: FSM
         balance_block = ''
         if group_balance_lines:
             balance_block = '\n多用户余额:\n' + '\n'.join(escape(line) for line in group_balance_lines)
-        is_owned_order = bool(user and getattr(order, 'user_id', None) == user.id)
         can_admin_reinit = bool(include_start and order.provider == 'aws_lightsail' and display_ip and getattr(order, 'login_password', None) and order.status in {'completed', 'expiring', 'renew_pending', 'suspended', 'failed'})
         can_admin_config = bool(include_start and order.provider == 'aws_lightsail' and order.status in {'completed', 'expiring', 'suspended'})
         can_admin_change_ip = bool(include_start and order.provider == 'aws_lightsail' and display_ip and order.status in {'completed', 'expiring', 'suspended'})
@@ -570,9 +572,9 @@ async def _reply_cloud_query_results(message: Message, raw_text: str, state: FSM
         can_user_config = bool(is_owned_order and order.provider == 'aws_lightsail' and order.status in {'completed', 'expiring', 'suspended'})
         results.append({
             'ip': display_ip,
-            'text': f'IP: <code>{escape(display_ip)}</code>\n到期时间: {expires_text}' if not include_start and not is_owned_order else f'IP: <code>{escape(display_ip)}</code>\n到期时间: {expires_text}\n自动续费: {auto_renew_text}\n状态: {status_text}{account_text}{balance_block}',
-            'renewable': True,
-            'order_id': order.id,
+            'text': f'IP: <code>{escape(display_ip)}</code>\n到期时间: {expires_text}' if is_public_view else f'IP: <code>{escape(display_ip)}</code>\n到期时间: {expires_text}\n自动续费: {auto_renew_text}\n状态: {status_text}{account_text}{balance_block}',
+            'renewable': not is_public_view,
+            'order_id': 0 if is_public_view else order.id,
             'asset_id': 0,
             'auto_renew_enabled': bool(getattr(order, 'auto_renew_enabled', False)),
             'can_change_ip': can_admin_change_ip or can_user_change_ip,
@@ -2579,7 +2581,8 @@ def register_handlers(dp: Dispatcher):
             return
         user = await get_or_create_user(message.from_user.id, message.from_user.username, message.from_user.first_name)
         if region_code:
-            order = await mark_cloud_server_ip_change_requested(order_id, user.id, region_code, port)
+            is_ip_change_admin = bool(data.get('cloud_ip_change_admin')) and await _is_admin_chat(message)
+            order = await mark_cloud_server_ip_change_requested(order_id, user.id, region_code, port, admin=is_ip_change_admin)
             await state.clear()
             if not order:
                 await message.answer(_bot_text('bot_change_ip_failed', '更换IP失败，请返回详情页重试。'), reply_markup=main_menu())
@@ -3728,9 +3731,7 @@ def register_handlers(dp: Dispatcher):
             )
             return
         try:
-            order = await create_cloud_server_renewal(order_id, user.id, 31)
-            if not order:
-                order = await create_cloud_server_renewal_by_public_query(order_id, 31)
+            order = await create_cloud_server_renewal_by_public_query(order_id, 31) if is_admin else await create_cloud_server_renewal(order_id, user.id, 31)
         except RenewalPriceMissingError as exc:
             await _safe_callback_answer(callback, str(exc), show_alert=True)
             return
@@ -3985,7 +3986,8 @@ def register_handlers(dp: Dispatcher):
         await _safe_callback_answer(callback)
         user = await get_or_create_user(callback.from_user.id, callback.from_user.username, callback.from_user.first_name)
         order_id = int(callback.data.split(':')[2])
-        order = await get_user_cloud_server(order_id, user.id)
+        is_admin = await _is_admin_chat(callback.message)
+        order = await get_cloud_server_for_admin(order_id) if is_admin else await get_user_cloud_server(order_id, user.id)
         if not order:
             await _safe_callback_answer(callback, '服务器记录不存在', show_alert=True)
             return
@@ -4004,7 +4006,12 @@ def register_handlers(dp: Dispatcher):
     @dp.callback_query(F.data.startswith('cloud:ipregions:more:'))
     async def cb_cloud_change_ip_regions_more(callback: CallbackQuery):
         await _safe_callback_answer(callback)
+        user = await get_or_create_user(callback.from_user.id, callback.from_user.username, callback.from_user.first_name)
         order_id = int(callback.data.split(':')[3])
+        order = await get_cloud_server_for_admin(order_id) if await _is_admin_chat(callback.message) else await get_user_cloud_server(order_id, user.id)
+        if not order:
+            await _safe_callback_answer(callback, '服务器记录不存在', show_alert=True)
+            return
         regions = [(code, name) for code, name in await _get_cached_custom_regions() if code != 'cn-hongkong']
         await _safe_edit_text(callback.message, 
             '🌐 更换IP\n\n请选择新的地区：',
@@ -4015,13 +4022,19 @@ def register_handlers(dp: Dispatcher):
     async def cb_cloud_change_ip_region(callback: CallbackQuery, state: FSMContext):
         await _safe_callback_answer(callback)
         _, _, raw_order_id, region_code = callback.data.split(':')
+        user = await get_or_create_user(callback.from_user.id, callback.from_user.username, callback.from_user.first_name)
         order_id = int(raw_order_id)
+        is_admin = await _is_admin_chat(callback.message)
+        order = await get_cloud_server_for_admin(order_id) if is_admin else await get_user_cloud_server(order_id, user.id)
+        if not order:
+            await _safe_callback_answer(callback, '服务器记录不存在', show_alert=True)
+            return
         if region_code == 'cn-hongkong':
             await _safe_callback_answer(callback, '当前节点暂不支持更换 IP', show_alert=True)
             return
         regions = [(code, name) for code, name in await _get_cached_custom_regions() if code != 'cn-hongkong']
         region_name = next((name for code, name in regions if code == region_code), region_code)
-        await state.update_data(cloud_ip_change_order_id=order_id, cloud_ip_change_region_code=region_code, cloud_ip_change_region_name=region_name)
+        await state.update_data(cloud_ip_change_order_id=order_id, cloud_ip_change_region_code=region_code, cloud_ip_change_region_name=region_name, cloud_ip_change_admin=is_admin)
         await _safe_edit_text(callback.message, 
             f'🌐 更换IP\n\n已选择节点：{_public_region_text(region_name) or "默认节点"}\n请选择端口：',
             reply_markup=cloud_server_change_ip_port_keyboard(order_id, region_code, region_name),
@@ -4033,7 +4046,8 @@ def register_handlers(dp: Dispatcher):
         _, _, _, raw_order_id, region_code = callback.data.split(':')
         order_id = int(raw_order_id)
         user = await get_or_create_user(callback.from_user.id, callback.from_user.username, callback.from_user.first_name)
-        new_order = await mark_cloud_server_ip_change_requested(order_id, user.id, region_code, 9528)
+        is_admin = await _is_admin_chat(callback.message)
+        new_order = await mark_cloud_server_ip_change_requested(order_id, user.id, region_code, 9528, admin=is_admin)
         await state.clear()
         if new_order is False:
             await _safe_callback_answer(callback, '当前状态不可更换 IP', show_alert=True)
@@ -4051,13 +4065,19 @@ def register_handlers(dp: Dispatcher):
     async def cb_cloud_change_ip_port_custom(callback: CallbackQuery, state: FSMContext):
         await _safe_callback_answer(callback, '已选择自定义端口')
         _, _, _, raw_order_id, region_code = callback.data.split(':')
+        user = await get_or_create_user(callback.from_user.id, callback.from_user.username, callback.from_user.first_name)
         order_id = int(raw_order_id)
+        is_admin = await _is_admin_chat(callback.message)
+        order = await get_cloud_server_for_admin(order_id) if is_admin else await get_user_cloud_server(order_id, user.id)
+        if not order:
+            await _safe_callback_answer(callback, '服务器记录不存在', show_alert=True)
+            return
         if region_code == 'cn-hongkong':
             await _safe_callback_answer(callback, '当前节点暂不支持更换 IP', show_alert=True)
             return
         regions = [(code, name) for code, name in await _get_cached_custom_regions() if code != 'cn-hongkong']
         region_name = next((name for code, name in regions if code == region_code), region_code)
-        await state.update_data(cloud_ip_change_order_id=order_id, cloud_ip_change_region_code=region_code, cloud_ip_change_region_name=region_name)
+        await state.update_data(cloud_ip_change_order_id=order_id, cloud_ip_change_region_code=region_code, cloud_ip_change_region_name=region_name, cloud_ip_change_admin=is_admin)
         await state.set_state(CustomServerStates.waiting_port)
         await callback.message.reply(
             f'✍️ 已选择更换IP自定义端口。\n节点：{_public_region_text(region_name) or "默认节点"}\n请发送 443 或 1025-65530 之间的端口号。'
