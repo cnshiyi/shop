@@ -281,10 +281,12 @@ def _create_instance_sync(order_data: dict, server_name: str):
                 client.allocate_static_ip(staticIpName=static_ip_name)
                 logger.info('AWS 固定 IP 已分配: order=%s static_ip_name=%s', order_no, static_ip_name)
             except ClientError as exc:
-                if 'already exists' not in str(exc).lower():
+                error_text = str(exc).lower()
+                name_exists = 'already exists' in error_text or 'some names are already in use' in error_text or 'name is already in use' in error_text
+                if not name_exists:
                     logger.warning('AWS 固定 IP 分配失败: order=%s static_ip_name=%s error=%s', order_no, static_ip_name, exc)
                     return ProvisionResult(ok=False, instance_id=server_name, login_user=_default_login_user_for_blueprint(blueprint_id), login_password=password, static_ip_name=static_ip_name, note='创建失败，请联系人工客服')
-                logger.info('AWS 固定 IP 已存在: order=%s static_ip_name=%s', order_no, static_ip_name)
+                logger.info('AWS 固定 IP 已存在，继续绑定到新实例: order=%s static_ip_name=%s', order_no, static_ip_name)
             client.attach_static_ip(staticIpName=static_ip_name, instanceName=server_name)
             logger.info('AWS 固定 IP 绑定完成: order=%s static_ip_name=%s server_name=%s', order_no, static_ip_name, server_name)
             for idx in range(30):

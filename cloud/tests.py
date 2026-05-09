@@ -1956,9 +1956,10 @@ class CloudServerServicesTestCase(TestCase):
 
         self.assertIsNone(error)
         self.assertIsNotNone(order)
-        self.assertEqual(order.status, 'renew_pending')
+        self.assertEqual(order.status, 'pending')
         self.assertEqual(order.plan_id, self.plan.id)
         self.assertEqual(order.pay_method, 'address')
+        self.assertIsNone(order.service_expires_at)
         self.assertEqual(order.ip_recycle_at, due_at)
         self.assertEqual(order.mtproxy_link, link['url'])
         self.assertEqual(asset.order_id, order.id)

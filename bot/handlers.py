@@ -66,6 +66,7 @@ from cloud.services import (
     get_user_proxy_asset_detail,
     ensure_cloud_asset_operation_order,
     initialize_proxy_asset,
+    is_cloud_asset_renewal_order,
     list_all_auto_renew_cloud_servers,
     list_custom_regions,
     list_region_plans,
@@ -1537,6 +1538,19 @@ async def _pay_cloud_server_order_with_balance_and_notify(bot: Bot, chat_id: int
                 text=f"{_bot_text('bot_custom_balance_insufficient', '❌ 余额不足，请先充值')}\n\n当前支付币种: {currency}",
                 reply_markup=wallet_recharge_prompt_menu(),
             )
+            return
+        if is_cloud_asset_renewal_order(order):
+            await bot.send_message(
+                chat_id=chat_id,
+                text=(
+                    '✅ 钱包支付成功\n\n'
+                    f'{_public_region_line(order.region_name)}'
+                    f'套餐: {order.plan_name}\n'
+                    f'支付金额: {fmt_pay_amount(order.pay_amount)} {order.currency}\n\n'
+                    '正在恢复未绑定代理资产固定 IP，系统会自动创建服务器并绑定旧 IP。'
+                ),
+            )
+            asyncio.create_task(_provision_cloud_server_and_notify(bot, chat_id, order.id, order.mtproxy_port or 9528))
             return
         await bot.send_message(
             chat_id=chat_id,
@@ -3677,7 +3691,7 @@ def register_handlers(dp: Dispatcher):
         await state.set_state(CustomServerStates.waiting_retained_ip_renewal_link)
         ip = getattr(asset, 'public_ip', None) or getattr(asset, 'previous_public_ip', None) or '-'
         await callback.message.reply(
-            f'🔄 未绑定代理资产续费\n\n已选择套餐: {_plan_display_name(plan)}\nIP: {ip}\n\n请直接发送这台代理旧的主代理链接（tg://proxy?... 或 https://t.me/proxy?...）。\n校验通过后生成支付订单，支付完成后系统按所选套餐续费。'
+            f'🔄 未绑定代理资产续费\n\n已选择套餐: {_plan_display_name(plan)}\nIP: {ip}\n\n请直接发送这台代理旧的主代理链接（tg://proxy?... 或 https://t.me/proxy?...）。\n校验通过后生成支付订单，支付完成后系统会自动创建服务器并绑定旧 IP。'
         )
 
     @dp.callback_query(F.data.startswith('cloud:renewplan:'))

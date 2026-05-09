@@ -1047,6 +1047,13 @@ _ACTIVE_ORDER_STATUSES = {'completed', 'expiring', 'suspended', 'renew_pending',
 _VISIBLE_USER_SERVER_STATUSES = {'completed', 'expiring', 'suspended', 'renew_pending', 'provisioning', 'paid', 'failed'}
 _INACTIVE_ASSET_STATUSES = {'deleted', 'deleting', 'terminated', 'terminating', 'expired'}
 _INACTIVE_ORDER_STATUSES = {'deleted', 'deleting', 'expired', 'cancelled'}
+_ASSET_RENEWAL_MARKER = '未绑定代理资产续费'
+
+
+def is_cloud_asset_renewal_order(order: CloudServerOrder | None) -> bool:
+    if not order:
+        return False
+    return bool(_ASSET_RENEWAL_MARKER in str(getattr(order, 'provision_note', '') or ''))
 
 
 def _first_nonblank(*values) -> str:
@@ -2790,7 +2797,7 @@ def prepare_cloud_asset_renewal_with_link(asset_id: int, user_id: int, plan_id: 
             total_amount=discounted_total,
             pay_amount=_generate_unique_pay_amount(discounted_total, target_plan.currency or asset.currency or 'USDT'),
             pay_method='address',
-            status='renew_pending',
+            status='pending',
             lifecycle_days=days,
             public_ip=asset.public_ip,
             previous_public_ip=asset.previous_public_ip or asset.public_ip,
@@ -2798,8 +2805,8 @@ def prepare_cloud_asset_renewal_with_link(asset_id: int, user_id: int, plan_id: 
             provider_resource_id=asset.provider_resource_id,
             server_name=asset.asset_name,
             static_ip_name=asset.asset_name if _is_unattached_static_ip_asset(asset) else '',
-            service_started_at=asset.created_at or now,
-            service_expires_at=asset.actual_expires_at,
+            service_started_at=None,
+            service_expires_at=None,
             ip_recycle_at=asset.actual_expires_at if _is_unattached_static_ip_asset(asset) else None,
             mtproxy_link=link_data['url'],
             mtproxy_secret=link_data['secret'],
@@ -2812,7 +2819,7 @@ def prepare_cloud_asset_renewal_with_link(asset_id: int, user_id: int, plan_id: 
             expired_at=now + timezone.timedelta(minutes=30),
             provision_note='\n'.join(filter(None, [
                 str(asset.note or '').strip(),
-                f'未绑定代理资产续费：来源资产 #{asset.id}；已选择套餐 {target_plan.plan_name}；旧IP={public_ip}；旧端口={link_data["port"]}；旧secret={link_data["secret"]}。支付完成后按该套餐续费，并继续使用旧主代理链接。',
+                f'{_ASSET_RENEWAL_MARKER}：来源资产 #{asset.id}；已选择套餐 {target_plan.plan_name}；旧IP={public_ip}；旧端口={link_data["port"]}；旧secret={link_data["secret"]}。支付完成后自动创建服务器并绑定该固定 IP，继续使用旧主代理链接。',
             ])),
         )
         if _is_unattached_static_ip_asset(asset) and asset.actual_expires_at:
@@ -3986,6 +3993,7 @@ __all__ = [
     'get_user_proxy_asset_detail',
     'ensure_cloud_asset_operation_order',
     'initialize_proxy_asset',
+    'is_cloud_asset_renewal_order',
     'list_custom_regions',
     'list_all_auto_renew_cloud_servers',
     'list_region_plans',

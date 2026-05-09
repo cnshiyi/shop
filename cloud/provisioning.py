@@ -901,6 +901,7 @@ def _mark_success(order_id: int, server_name: str, instance_id: str, public_ip: 
                 'user': order_user,
                 'note': append_note(getattr(existing_asset, 'note', None), note),
                 'status': CloudAsset.STATUS_RUNNING,
+                'provider_status': '运行中',
                 'is_active': True,
             },
         )

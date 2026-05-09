@@ -23,7 +23,7 @@ from orders.models import Order, Product, Recharge
 from orders.services import usdt_to_trx
 from bot.keyboards import custom_port_keyboard
 from cloud.provisioning import provision_cloud_server
-from cloud.services import apply_cloud_server_renewal, run_cloud_server_renewal_postcheck
+from cloud.services import apply_cloud_server_renewal, is_cloud_asset_renewal_order, run_cloud_server_renewal_postcheck
 from core.cache import get_config, get_redis, bump_daily_stats, get_daily_stats
 from core.runtime_config import get_runtime_config
 from core.persistence import bump_daily_address_stat, record_external_sync_log
@@ -389,7 +389,8 @@ def _confirm_cloud_server_order(order_id: int, tx_hash: str, payer_address: str 
                 order.save(update_fields=['tx_hash', 'payer_address', 'receive_address', 'paid_at', 'updated_at'])
                 return apply_cloud_server_renewal.__wrapped__(order.id, order.lifecycle_days or 31, False)
             order.status = 'paid'
-            order.provision_note = '已收款，等待用户确认 MTProxy 端口后进入创建流程。默认端口为 9528。'
+            payment_note = '已收款，正在恢复未绑定代理资产固定 IP。' if is_cloud_asset_renewal_order(order) else '已收款，等待用户确认 MTProxy 端口后进入创建流程。默认端口为 9528。'
+            order.provision_note = '\n'.join(part for part in [str(order.provision_note or '').strip(), payment_note] if part)
             order.save(update_fields=['status', 'tx_hash', 'payer_address', 'receive_address', 'paid_at', 'provision_note', 'updated_at'])
         return order
     except Exception as exc:
@@ -597,6 +598,9 @@ async def _process_payment(transfer: dict) -> bool:
             asyncio.create_task(_cloud_renewal_postcheck_and_notify(confirmed))
             return True
         if getattr(confirmed, 'replacement_for_id', None) and confirmed.status in {'paid', 'provisioning', 'failed'}:
+            asyncio.create_task(_provision_recovered_cloud_order(confirmed))
+            return True
+        if is_cloud_asset_renewal_order(confirmed) and confirmed.status in {'paid', 'provisioning', 'failed'}:
             asyncio.create_task(_provision_recovered_cloud_order(confirmed))
             return True
         await _notify_user(
