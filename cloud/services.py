@@ -1431,9 +1431,9 @@ def get_cloud_server_by_ip(ip: str):
     )
     if server and server.order_id and server.order and server.order.status not in {'deleted', 'deleting', 'expired', 'cancelled'}:
         return _hydrate_order_from_proxy_asset(server.order, server=server)
-    order = CloudServerOrder.objects.filter(ip_q, status__in=_ACTIVE_ORDER_STATUSES).order_by('-created_at').first()
-    if order:
-        return _hydrate_order_from_proxy_asset(order)
+    for order in CloudServerOrder.objects.filter(ip_q, status__in=_ACTIVE_ORDER_STATUSES).order_by('-created_at')[:10]:
+        if not _order_primary_asset_unavailable(order):
+            return _hydrate_order_from_proxy_asset(order)
     retained_order = _valid_retained_order_for_ip(ip_q)
     return _hydrate_order_from_proxy_asset(retained_order)
 
@@ -1462,11 +1462,27 @@ def get_cloud_server_by_ip_for_user(ip: str, user_id: int):
     )
     if server and server.order_id and server.order and server.order.status not in {'deleted', 'deleting', 'expired', 'cancelled'}:
         return _hydrate_order_from_proxy_asset(server.order, server=server)
-    order = CloudServerOrder.objects.filter(ip_q, user_id=user_id, status__in=_ACTIVE_ORDER_STATUSES).order_by('-created_at').first()
-    if order:
-        return _hydrate_order_from_proxy_asset(order)
+    for order in CloudServerOrder.objects.filter(ip_q, user_id=user_id, status__in=_ACTIVE_ORDER_STATUSES).order_by('-created_at')[:10]:
+        if not _order_primary_asset_unavailable(order):
+            return _hydrate_order_from_proxy_asset(order)
     retained_order = _valid_retained_order_for_ip(ip_q, user_id=user_id)
     return _hydrate_order_from_proxy_asset(retained_order)
+
+
+def _order_primary_asset_unavailable(order: CloudServerOrder | None) -> bool:
+    if not order:
+        return True
+    asset = _order_primary_asset(order)
+    if asset and _cloud_asset_deleted_or_missing(asset):
+        return True
+    if (
+        order.provider == CloudServerPlan.PROVIDER_AWS_LIGHTSAIL
+        and str(order.static_ip_name or '').strip()
+        and not str(order.instance_id or '').strip()
+        and order.status in _ACTIVE_ORDER_STATUSES
+    ):
+        return True
+    return False
 
 
 def _valid_retained_order_for_ip(ip_q, user_id: int | None = None):
@@ -1524,7 +1540,7 @@ def _cloud_asset_deleted_or_missing(asset: CloudAsset | None) -> bool:
 def _can_order_be_renewed(order: CloudServerOrder) -> bool:
     order = _hydrate_order_from_proxy_asset(order)
     has_ip = bool(str(order.public_ip or order.previous_public_ip or '').strip())
-    if not has_ip:
+    if not has_ip or _order_primary_asset_unavailable(order):
         return False
     if order.status in {'completed', 'expiring', 'suspended', 'renew_pending', 'paid', 'provisioning'}:
         return True
@@ -1545,6 +1561,7 @@ def _is_retained_ip_renewal_candidate(order: CloudServerOrder | None) -> bool:
         and order.ip_recycle_at > timezone.now()
         and has_ip
         and not str(order.instance_id or '').strip()
+        and not _order_primary_asset_unavailable(order)
     )
 
 

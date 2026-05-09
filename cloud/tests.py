@@ -1921,6 +1921,7 @@ class CloudServerServicesTestCase(TestCase):
             status='deleted',
             public_ip='54.255.96.64',
             previous_public_ip='54.255.96.64',
+            static_ip_name='released-static-ip',
             ip_recycle_at=timezone.now() + timezone.timedelta(days=10),
         )
         CloudAsset.objects.create(
@@ -1940,8 +1941,57 @@ class CloudServerServicesTestCase(TestCase):
         )
 
         result = async_to_sync(get_cloud_server_by_ip_for_user)('54.255.96.64', self.user.id)
+        retained_order, plans, err = async_to_sync(list_retained_ip_renewal_plans)(order.id, self.user.id)
 
         self.assertIsNone(result)
+        self.assertEqual(retained_order.id, order.id)
+        self.assertEqual(plans, [])
+        self.assertIsNone(err)
+
+    def test_completed_order_without_instance_and_released_static_ip_is_not_query_result(self):
+        order = CloudServerOrder.objects.create(
+            order_no='HB-TEST-COMPLETED-RELEASED-IP',
+            user=self.user,
+            plan=self.plan,
+            provider='aws_lightsail',
+            region_code=self.plan.region_code,
+            region_name=self.plan.region_name,
+            plan_name=self.plan.plan_name,
+            quantity=1,
+            currency='USDT',
+            total_amount='19.00',
+            pay_amount='19.00',
+            pay_method='balance',
+            status='completed',
+            public_ip='54.255.96.65',
+            previous_public_ip='54.255.96.65',
+            static_ip_name='released-static-ip-completed',
+            instance_id='',
+            ip_recycle_at=timezone.now() + timezone.timedelta(days=10),
+        )
+        CloudAsset.objects.create(
+            order=order,
+            kind=CloudAsset.KIND_SERVER,
+            source=CloudAsset.SOURCE_AWS_SYNC,
+            user=self.user,
+            provider='aws_lightsail',
+            region_code=self.plan.region_code,
+            region_name=self.plan.region_name,
+            asset_name='released-static-ip-completed',
+            public_ip='54.255.96.65',
+            status=CloudAsset.STATUS_DELETED,
+            provider_status='云上未找到',
+            note='云上不存在，已标记删除',
+            is_active=False,
+        )
+
+        result = async_to_sync(get_cloud_server_by_ip_for_user)('54.255.96.65', self.user.id)
+        retained_order, plans, err = async_to_sync(list_retained_ip_renewal_plans)(order.id, self.user.id)
+
+        self.assertIsNone(result)
+        self.assertEqual(retained_order.id, order.id)
+        self.assertEqual(plans, [])
+        self.assertIsNone(err)
 
     def test_unbound_asset_renewal_lists_plans_without_creating_order(self):
         asset = CloudAsset.objects.create(
