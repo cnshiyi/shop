@@ -1345,7 +1345,11 @@ def get_proxy_asset_by_ip_for_admin(ip: str):
         .order_by('-updated_at', '-id')[:10]
     )
     asset = next((item for item in assets if not _cloud_asset_deleted_or_missing(item)), None)
-    return _proxy_asset_view(asset) if asset else None
+    if not asset:
+        return None
+    view = _proxy_asset_view(asset)
+    view.matched_query_ip = normalized_ip
+    return view
 
 
 @sync_to_async
@@ -1362,7 +1366,11 @@ def get_proxy_asset_by_ip_for_user(ip: str, user_id: int):
         .order_by('-updated_at', '-id')[:10]
     )
     asset = next((item for item in assets if not _cloud_asset_deleted_or_missing(item)), None)
-    return _proxy_asset_view(asset) if asset else None
+    if not asset:
+        return None
+    view = _proxy_asset_view(asset)
+    view.matched_query_ip = normalized_ip
+    return view
 
 
 def _extract_asset_mtproxy_fields(note: str) -> tuple[str, str, str]:
@@ -1434,7 +1442,9 @@ def get_cloud_server_by_ip(ip: str):
     )
     asset = next((item for item in assets if not _cloud_asset_deleted_or_missing(item)), None)
     if asset and asset.order_id and asset.order and asset.order.status not in {'deleted', 'deleting', 'expired', 'cancelled'}:
-        return _hydrate_order_from_proxy_asset(asset.order, asset=asset)
+        order = _hydrate_order_from_proxy_asset(asset.order, asset=asset)
+        order.matched_query_ip = normalized_ip
+        return order
     server = (
         Server.objects.filter(ip_q)
         .exclude(status__in=_INACTIVE_ASSET_STATUSES)
@@ -1443,12 +1453,19 @@ def get_cloud_server_by_ip(ip: str):
         .first()
     )
     if server and server.order_id and server.order and server.order.status not in {'deleted', 'deleting', 'expired', 'cancelled'}:
-        return _hydrate_order_from_proxy_asset(server.order, server=server)
+        order = _hydrate_order_from_proxy_asset(server.order, server=server)
+        order.matched_query_ip = normalized_ip
+        return order
     for order in CloudServerOrder.objects.filter(ip_q, status__in=_ACTIVE_ORDER_STATUSES).order_by('-created_at')[:10]:
         if not _order_primary_asset_unavailable(order):
-            return _hydrate_order_from_proxy_asset(order)
+            hydrated = _hydrate_order_from_proxy_asset(order)
+            hydrated.matched_query_ip = normalized_ip
+            return hydrated
     retained_order = _valid_retained_order_for_ip(ip_q)
-    return _hydrate_order_from_proxy_asset(retained_order)
+    hydrated = _hydrate_order_from_proxy_asset(retained_order)
+    if hydrated:
+        hydrated.matched_query_ip = normalized_ip
+    return hydrated
 
 
 @sync_to_async
@@ -1465,7 +1482,9 @@ def get_cloud_server_by_ip_for_user(ip: str, user_id: int):
     )
     asset = next((item for item in assets if not _cloud_asset_deleted_or_missing(item)), None)
     if asset and asset.order_id and asset.order and asset.order.status not in {'deleted', 'deleting', 'expired', 'cancelled'}:
-        return _hydrate_order_from_proxy_asset(asset.order, asset=asset)
+        order = _hydrate_order_from_proxy_asset(asset.order, asset=asset)
+        order.matched_query_ip = normalized_ip
+        return order
     server = (
         Server.objects.filter(ip_q, user_id=user_id)
         .exclude(status__in=_INACTIVE_ASSET_STATUSES)
@@ -1474,12 +1493,19 @@ def get_cloud_server_by_ip_for_user(ip: str, user_id: int):
         .first()
     )
     if server and server.order_id and server.order and server.order.status not in {'deleted', 'deleting', 'expired', 'cancelled'}:
-        return _hydrate_order_from_proxy_asset(server.order, server=server)
+        order = _hydrate_order_from_proxy_asset(server.order, server=server)
+        order.matched_query_ip = normalized_ip
+        return order
     for order in CloudServerOrder.objects.filter(ip_q, user_id=user_id, status__in=_ACTIVE_ORDER_STATUSES).order_by('-created_at')[:10]:
         if not _order_primary_asset_unavailable(order):
-            return _hydrate_order_from_proxy_asset(order)
+            hydrated = _hydrate_order_from_proxy_asset(order)
+            hydrated.matched_query_ip = normalized_ip
+            return hydrated
     retained_order = _valid_retained_order_for_ip(ip_q, user_id=user_id)
-    return _hydrate_order_from_proxy_asset(retained_order)
+    hydrated = _hydrate_order_from_proxy_asset(retained_order)
+    if hydrated:
+        hydrated.matched_query_ip = normalized_ip
+    return hydrated
 
 
 def _order_primary_asset_unavailable(order: CloudServerOrder | None) -> bool:

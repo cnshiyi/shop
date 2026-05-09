@@ -29,7 +29,7 @@ from cloud.provisioning import (
     _mark_rebuild_source_pending_deletion,
     _mark_success,
 )
-from cloud.services import apply_cloud_server_renewal, create_cloud_server_rebuild_order, create_cloud_server_renewal, create_cloud_server_renewal_by_public_query, create_cloud_server_renewal_for_user, create_cloud_server_upgrade_order, delay_cloud_server_expiry, ensure_cloud_asset_operation_order, get_cloud_server_by_ip_for_user, get_proxy_asset_by_ip_for_admin, get_proxy_asset_by_ip_for_user, list_cloud_asset_renewal_plans, list_cloud_server_upgrade_plans, list_retained_ip_renewal_plans, list_user_cloud_servers, mark_cloud_server_ip_change_requested, pay_cloud_server_renewal_with_balance, prepare_cloud_asset_renewal_with_link, record_cloud_ip_log, replace_cloud_asset_order_by_admin
+from cloud.services import apply_cloud_server_renewal, create_cloud_server_rebuild_order, create_cloud_server_renewal, create_cloud_server_renewal_by_public_query, create_cloud_server_renewal_for_user, create_cloud_server_upgrade_order, delay_cloud_server_expiry, ensure_cloud_asset_operation_order, get_cloud_server_by_ip, get_cloud_server_by_ip_for_user, get_proxy_asset_by_ip_for_admin, get_proxy_asset_by_ip_for_user, list_cloud_asset_renewal_plans, list_cloud_server_upgrade_plans, list_retained_ip_renewal_plans, list_user_cloud_servers, mark_cloud_server_ip_change_requested, pay_cloud_server_renewal_with_balance, prepare_cloud_asset_renewal_with_link, record_cloud_ip_log, replace_cloud_asset_order_by_admin
 from cloud.sync_safety import get_missing_confirmation_threshold
 from cloud.api import _cloud_order_source_tags, auto_renew_task_detail, cloud_order_detail, cloud_orders_list, delete_cloud_asset, delete_server, run_auto_renew_order, run_auto_renew_tasks, sync_cloud_asset_status, tasks_overview, update_cloud_asset
 from core.cloud_accounts import cloud_account_label
@@ -3471,6 +3471,79 @@ class CloudServerServicesTestCase(TestCase):
         raw = 'tg://proxy?server=3.0.162.213&port=443&secret=abc'
 
         self.assertEqual(_extract_query_ips(raw), ['3.0.162.213'])
+
+    def test_ip_query_displays_matched_asset_ip_not_order_ip(self):
+        order = CloudServerOrder.objects.create(
+            order_no='IP-MATCH-ASSET-ORDER-1',
+            user=self.user,
+            plan=self.plan,
+            provider=self.plan.provider,
+            region_code=self.plan.region_code,
+            region_name=self.plan.region_name,
+            plan_name=self.plan.plan_name,
+            quantity=1,
+            currency='USDT',
+            total_amount='19.00',
+            pay_amount='19.00',
+            status='completed',
+            public_ip='54.151.227.23',
+            service_expires_at=timezone.now() + timezone.timedelta(days=10),
+        )
+        CloudAsset.objects.create(
+            kind=CloudAsset.KIND_SERVER,
+            source=CloudAsset.SOURCE_AWS_SYNC,
+            order=order,
+            user=self.user,
+            provider='aws_lightsail',
+            region_code=self.plan.region_code,
+            region_name=self.plan.region_name,
+            asset_name='ip-match-asset-order-1',
+            public_ip='3.0.162.212',
+            actual_expires_at=timezone.now() + timezone.timedelta(days=15),
+            status=CloudAsset.STATUS_RUNNING,
+            provider_status='运行中',
+        )
+
+        result = async_to_sync(get_cloud_server_by_ip)('3.0.162.212')
+
+        self.assertEqual(result.matched_query_ip, '3.0.162.212')
+        self.assertEqual(result.public_ip, '3.0.162.212')
+
+    def test_ip_query_displays_matched_previous_ip_not_order_ip(self):
+        order = CloudServerOrder.objects.create(
+            order_no='IP-MATCH-PREVIOUS-ORDER-1',
+            user=self.user,
+            plan=self.plan,
+            provider=self.plan.provider,
+            region_code=self.plan.region_code,
+            region_name=self.plan.region_name,
+            plan_name=self.plan.plan_name,
+            quantity=1,
+            currency='USDT',
+            total_amount='19.00',
+            pay_amount='19.00',
+            status='completed',
+            public_ip='54.151.227.24',
+            service_expires_at=timezone.now() + timezone.timedelta(days=10),
+        )
+        CloudAsset.objects.create(
+            kind=CloudAsset.KIND_SERVER,
+            source=CloudAsset.SOURCE_AWS_SYNC,
+            order=order,
+            user=self.user,
+            provider='aws_lightsail',
+            region_code=self.plan.region_code,
+            region_name=self.plan.region_name,
+            asset_name='ip-match-previous-order-1',
+            previous_public_ip='3.0.162.213',
+            actual_expires_at=timezone.now() + timezone.timedelta(days=15),
+            status=CloudAsset.STATUS_RUNNING,
+            provider_status='运行中',
+        )
+
+        result = async_to_sync(get_cloud_server_by_ip)('3.0.162.213')
+
+        self.assertEqual(result.matched_query_ip, '3.0.162.213')
 
     def test_cloud_server_ip_change_requires_owner_identity(self):
         other_user = TelegramUser.objects.create(tg_user_id=990005, username='other_order_ip_change_user')

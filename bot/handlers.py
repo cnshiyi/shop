@@ -467,7 +467,7 @@ async def _reply_cloud_query_results(message: Message, raw_text: str, state: FSM
             if not asset:
                 asset = await get_proxy_asset_by_ip_for_admin(ip)
         if asset:
-            display_ip = str(asset.public_ip or asset.previous_public_ip or ip).strip()
+            display_ip = str(getattr(asset, 'matched_query_ip', None) or asset.public_ip or asset.previous_public_ip or ip).strip()
             expires_at = getattr(asset, 'actual_expires_at', None) or getattr(asset, 'service_expires_at', None)
             expires_text = _format_local_dt(expires_at).split(' ', 1)[0] if expires_at else '未设置'
             provider_status_text = str(getattr(asset, 'provider_status', '') or '').strip()
@@ -546,7 +546,7 @@ async def _reply_cloud_query_results(message: Message, raw_text: str, state: FSM
                 order = await get_cloud_server_by_ip(ip)
         if not order:
             continue
-        display_ip = str(order.public_ip or order.previous_public_ip or ip).strip()
+        display_ip = str(getattr(order, 'matched_query_ip', None) or order.public_ip or order.previous_public_ip or ip).strip()
         is_owned_order = bool(user and getattr(order, 'user_id', None) == user.id)
         is_public_view = bool(not include_start and not is_owned_order)
         if input_link and (include_start or is_owned_order) and order.provider == 'aws_lightsail' and not getattr(order, 'mtproxy_link', None):
