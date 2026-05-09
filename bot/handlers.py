@@ -472,7 +472,7 @@ async def _reply_cloud_query_results(message: Message, raw_text: str, state: FSM
             expires_text = _format_local_dt(expires_at).split(' ', 1)[0] if expires_at else '未设置'
             provider_status_text = str(getattr(asset, 'provider_status', '') or '').strip()
             if '未附加固定IP' in provider_status_text or '未附加IP' in provider_status_text:
-                status_text = '未附加固定 IP，等待释放'
+                status_text = '已停止，请尽快续费'
             elif provider_status_text and provider_status_text not in {'unknown', '未知状态'}:
                 status_text = provider_status_text
             else:
@@ -517,9 +517,13 @@ async def _reply_cloud_query_results(message: Message, raw_text: str, state: FSM
             can_user_asset_change_ip = bool(can_user_asset_operate and max(int(linked_order.get('ip_change_quota') or 0), 0) > 0)
             can_asset_renew = bool((is_owned_asset or include_start or is_public_view) and (is_unattached_ip_asset or not public_renew_order_id))
             action_order_id = public_renew_order_id if public_renew_order_id and not is_unattached_ip_asset else 0
+            time_label = '删除时间' if is_unattached_ip_asset else '到期时间'
+            public_text = f'IP: <code>{escape(display_ip)}</code>\n{time_label}: {expires_text}'
+            if is_public_view and is_unattached_ip_asset:
+                public_text = f'{public_text}\n状态: {escape(status_text)}'
             results.append({
                 'ip': display_ip,
-                'text': f'IP: <code>{escape(display_ip)}</code>\n到期时间: {expires_text}' if is_public_view else f'IP: <code>{escape(display_ip)}</code>\n到期时间: {expires_text}\n自动续费: {auto_renew_text}\n状态: {escape(status_text)}{account_text}',
+                'text': public_text if is_public_view else f'IP: <code>{escape(display_ip)}</code>\n{time_label}: {expires_text}\n自动续费: {auto_renew_text}\n状态: {escape(status_text)}{account_text}',
                 'renewable': bool(can_asset_renew or action_order_id),
                 'order_id': action_order_id,
                 'asset_id': asset.id if can_asset_renew and not public_renew_order_id else 0,
