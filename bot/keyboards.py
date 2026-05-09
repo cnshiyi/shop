@@ -739,30 +739,30 @@ def cloud_ip_query_result(result_items, renewable_items, page: int = 1, total_pa
         asset_id = int(item.get('asset_id') or 0)
         action_buttons = []
         if order_id > 0:
-            action_buttons.append(InlineKeyboardButton(text=f'🔄 续费IP {ip}', callback_data=f'cloud:renew:{order_id}'))
+            action_buttons.append(InlineKeyboardButton(text='🔄 续费IP', callback_data=f'cloud:renew:{order_id}'))
             if include_start:
-                action_buttons.append(InlineKeyboardButton(text=f'▶️ 开机 {ip}', callback_data=f'cloud:start:{order_id}'))
+                action_buttons.append(InlineKeyboardButton(text='▶️ 开机', callback_data=f'cloud:start:{order_id}'))
             if item.get('can_change_ip'):
-                action_buttons.append(InlineKeyboardButton(text=f'🌐 更换IP {ip}', callback_data=f'cloud:ip:{order_id}'))
+                action_buttons.append(InlineKeyboardButton(text='🌐 更换IP', callback_data=f'cloud:ip:{order_id}'))
             if item.get('can_reinit') and (include_reinit or item.get('can_support')):
-                action_buttons.append(InlineKeyboardButton(text=f'🛠 重新安装 {ip}', callback_data=f'cloud:reinit:{order_id}'))
+                action_buttons.append(InlineKeyboardButton(text='🛠 重新安装', callback_data=f'cloud:reinit:{order_id}'))
             if item.get('can_config') and (include_reinit or item.get('can_support')):
-                action_buttons.append(InlineKeyboardButton(text=f'⚙️ 修改配置 {ip}', callback_data=f'cloud:upgrade:{order_id}'))
+                action_buttons.append(InlineKeyboardButton(text='⚙️ 修改配置', callback_data=f'cloud:upgrade:{order_id}'))
             auto_enabled = bool(item.get('auto_renew_enabled'))
-            action_buttons.append(InlineKeyboardButton(text=f'{"⛔ 关闭" if auto_enabled else "⚡ 开启"}自动续费 {ip}', callback_data=f'cloud:autorenew:{"off" if auto_enabled else "on"}:{order_id}'))
+            action_buttons.append(InlineKeyboardButton(text=f'{"⛔ 关闭" if auto_enabled else "⚡ 开启"}自动续费', callback_data=f'cloud:autorenew:{"off" if auto_enabled else "on"}:{order_id}'))
             if item.get('can_support'):
                 action_buttons.append(support_contact_button('cloud_query_ip', order_id))
         elif asset_id > 0:
-            action_buttons.append(InlineKeyboardButton(text=f'🔄 续费IP {ip}', callback_data=f'cloud:assetaction:renew:{asset_id}'))
+            action_buttons.append(InlineKeyboardButton(text='🔄 续费IP', callback_data=f'cloud:assetaction:renew:{asset_id}'))
             start_order_id = int(item.get('start_order_id') or 0)
             if include_start and start_order_id > 0:
-                action_buttons.append(InlineKeyboardButton(text=f'▶️ 开机 {ip}', callback_data=f'cloud:start:{start_order_id}'))
+                action_buttons.append(InlineKeyboardButton(text='▶️ 开机', callback_data=f'cloud:start:{start_order_id}'))
             if item.get('can_change_ip'):
-                action_buttons.append(InlineKeyboardButton(text=f'🌐 更换IP {ip}', callback_data=f'cloud:assetaction:changeip:{asset_id}'))
+                action_buttons.append(InlineKeyboardButton(text='🌐 更换IP', callback_data=f'cloud:assetaction:changeip:{asset_id}'))
             if item.get('can_reinit') and (include_reinit or item.get('can_support')):
-                action_buttons.append(InlineKeyboardButton(text=f'🛠 重新安装 {ip}', callback_data=f'cloud:assetinit:{asset_id}:cloud:querymenu'))
+                action_buttons.append(InlineKeyboardButton(text='🛠 重新安装', callback_data=f'cloud:assetinit:{asset_id}:cloud:querymenu'))
             if item.get('can_config') and (include_reinit or item.get('can_support')):
-                action_buttons.append(InlineKeyboardButton(text=f'⚙️ 修改配置 {ip}', callback_data=f'cloud:assetaction:upgrade:{asset_id}'))
+                action_buttons.append(InlineKeyboardButton(text='⚙️ 修改配置', callback_data=f'cloud:assetaction:upgrade:{asset_id}'))
             if item.get('can_support'):
                 action_buttons.append(support_contact_button('cloud_asset', asset_id))
         for start in range(0, len(action_buttons), 2):
