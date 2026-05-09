@@ -2185,6 +2185,33 @@ def delete_cloud_asset(request, asset_id: int):
     previous_public_ip = asset.public_ip or asset.previous_public_ip
     order = asset.order
 
+    def _clear_order_cloud_binding(target_order):
+        if not target_order:
+            return False
+        target_order.server_name = ''
+        target_order.instance_id = ''
+        target_order.provider_resource_id = ''
+        target_order.public_ip = None
+        target_order.previous_public_ip = None
+        target_order.static_ip_name = ''
+        target_order.mtproxy_host = ''
+        target_order.mtproxy_port = 0
+        target_order.mtproxy_secret = ''
+        target_order.mtproxy_link = ''
+        target_order.proxy_links = []
+        target_order.login_user = ''
+        target_order.login_password = ''
+        target_order.provision_note = append_note(
+            target_order.provision_note,
+            f'后台代理列表删除已清除云资源绑定；原IP={previous_public_ip or "-"}；后续云同步按全新资源处理，不再继承本订单状态；时间: {now.isoformat()}。',
+        )
+        target_order.save(update_fields=[
+            'server_name', 'instance_id', 'provider_resource_id', 'public_ip', 'previous_public_ip',
+            'static_ip_name', 'mtproxy_host', 'mtproxy_port', 'mtproxy_secret', 'mtproxy_link',
+            'proxy_links', 'login_user', 'login_password', 'provision_note', 'updated_at',
+        ])
+        return True
+
     residual_statuses = {
         CloudAsset.STATUS_DELETED,
         CloudAsset.STATUS_DELETING,
@@ -2210,32 +2237,37 @@ def delete_cloud_asset(request, asset_id: int):
             or '云上未找到' in asset_note
         )
 
-    related_servers = Server.objects.filter(
-        Q(order=order)
-        | Q(instance_id=asset.instance_id)
-        | Q(provider_resource_id=asset.provider_resource_id)
-        | Q(public_ip=asset.public_ip)
-        | Q(public_ip=asset.previous_public_ip)
-        | Q(previous_public_ip=asset.public_ip)
-        | Q(previous_public_ip=asset.previous_public_ip)
-    ).distinct()
+    server_lookup = Q()
+    if order:
+        server_lookup |= Q(order=order)
+    for value, fields in [
+        (asset.instance_id, ['instance_id']),
+        (asset.provider_resource_id, ['provider_resource_id']),
+        (asset.public_ip, ['public_ip', 'previous_public_ip']),
+        (asset.previous_public_ip, ['public_ip', 'previous_public_ip']),
+    ]:
+        value = str(value or '').strip()
+        if not value:
+            continue
+        for field in fields:
+            server_lookup |= Q(**{field: value})
+    related_servers = Server.objects.filter(server_lookup).distinct() if server_lookup else Server.objects.none()
     removed_server_ids = []
     for server in related_servers:
-        if not _looks_like_local_residual(server):
-            continue
         record_cloud_ip_log(
             event_type='deleted',
             order=getattr(server, 'order', None),
             server=server,
             previous_public_ip=server.public_ip or server.previous_public_ip,
             public_ip=None,
-            note=f'{note}；检测为本地残留服务器记录，已一并清理',
+            note=f'{note}；已一并清理关联服务器本地状态，后续云同步按全新资源处理',
         )
         removed_server_ids.append(server.id)
         server.delete()
 
     if _looks_like_local_residual(asset):
         record_cloud_ip_log(event_type='deleted', order=order, asset=asset, previous_public_ip=previous_public_ip, public_ip=None, note=note)
+    order_status_changed = _clear_order_cloud_binding(order)
     asset.delete()
     return _ok({
         'target_type': 'cloud_asset',
@@ -2246,7 +2278,7 @@ def delete_cloud_asset(request, asset_id: int):
         'exists_after': CloudAsset.objects.filter(id=asset_id).exists(),
         'removed_servers': len(removed_server_ids),
         'removed_server_ids': removed_server_ids,
-        'order_status_changed': False,
+        'order_status_changed': order_status_changed,
     })
 
 

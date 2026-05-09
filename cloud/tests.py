@@ -3764,13 +3764,24 @@ class CloudServerServicesTestCase(TestCase):
         response = delete_cloud_asset(request, asset.id)
 
         self.assertEqual(response.status_code, 200)
+        payload = json.loads(response.content)
         order.refresh_from_db()
         self.assertFalse(CloudAsset.objects.filter(id=asset.id).exists())
-        self.assertTrue(Server.objects.filter(id=server.id).exists())
+        self.assertFalse(Server.objects.filter(id=server.id).exists())
         self.assertEqual(order.status, 'completed')
-        self.assertEqual(order.public_ip, '8.8.8.8')
-        self.assertEqual(order.instance_id, 'i-delete-asset-only')
-        self.assertFalse(CloudIpLog.objects.filter(order=order, note__contains='后台手动删除代理列表记录').exists())
+        self.assertIsNone(order.public_ip)
+        self.assertIsNone(order.previous_public_ip)
+        self.assertEqual(order.instance_id, '')
+        self.assertEqual(order.provider_resource_id, '')
+        self.assertEqual(order.static_ip_name, '')
+        self.assertEqual(order.mtproxy_port, 0)
+        self.assertEqual(order.mtproxy_link, '')
+        self.assertEqual(order.proxy_links, [])
+        self.assertEqual(payload['data']['removed_servers'], 1)
+        self.assertEqual(payload['data']['order_status_changed'], True)
+        self.assertTrue(CloudIpLog.objects.filter(order=order, note__contains='后续云同步按全新资源处理').exists())
+        from cloud.management.commands.sync_aws_assets import _resolve_order_for_ip
+        self.assertIsNone(_resolve_order_for_ip('8.8.8.8'))
 
     def test_delete_cloud_asset_also_removes_residual_server_record(self):
         order = CloudServerOrder.objects.create(
@@ -3841,8 +3852,14 @@ class CloudServerServicesTestCase(TestCase):
         payload = json.loads(response.content)
         self.assertFalse(CloudAsset.objects.filter(id=asset.id).exists())
         self.assertFalse(Server.objects.filter(id=server.id).exists())
+        order.refresh_from_db()
         self.assertEqual(payload['data']['removed_servers'], 1)
         self.assertEqual(payload['data']['removed_server_ids'], [server.id])
+        self.assertEqual(payload['data']['order_status_changed'], True)
+        self.assertIsNone(order.public_ip)
+        self.assertIsNone(order.previous_public_ip)
+        self.assertEqual(order.instance_id, '')
+        self.assertEqual(order.provider_resource_id, '')
         self.assertTrue(CloudIpLog.objects.filter(order=order, note__contains='后台手动删除代理列表记录').exists())
 
     def test_reconcile_cloud_assets_skips_deleted_server_residual(self):
