@@ -612,21 +612,33 @@ def _shutdown_log_items(limit=100):
     ]
 
 
+def _cloud_asset_deleted_or_missing_q():
+    return (
+        Q(status__in=[
+            CloudAsset.STATUS_DELETED,
+            CloudAsset.STATUS_DELETING,
+            CloudAsset.STATUS_TERMINATED,
+            CloudAsset.STATUS_TERMINATING,
+        ])
+        | Q(provider_status__icontains='云上未找到')
+        | Q(provider_status__icontains='已到期删除')
+        | Q(provider_status__icontains='已删除')
+        | Q(note__icontains='云上不存在')
+        | Q(note__icontains='已标记删除')
+    )
+
+
 def _unattached_ip_delete_items(limit=50):
     now = timezone.now()
+    limit = max(1, min(int(limit or 50), 1000))
     delete_days = _runtime_int('cloud_unattached_ip_delete_after_days', 15)
     assets = list(
         CloudAsset.objects.select_related('user', 'cloud_account')
         .filter(kind=CloudAsset.KIND_SERVER)
         .filter(Q(provider_status__icontains='未附加') | Q(note__icontains='未附加IP') | Q(note__icontains='未附加固定IP'))
         .filter(Q(instance_id__isnull=True) | Q(instance_id=''))
-        .exclude(status__in=[
-            CloudAsset.STATUS_DELETED,
-            CloudAsset.STATUS_DELETING,
-            CloudAsset.STATUS_TERMINATED,
-            CloudAsset.STATUS_TERMINATING,
-        ])
-        .order_by('actual_expires_at', 'created_at', '-updated_at')[:300]
+        .exclude(_cloud_asset_deleted_or_missing_q())
+        .order_by('actual_expires_at', 'created_at', '-updated_at')[:limit]
     )
     items = []
     seen_trace_ids = set()
@@ -671,7 +683,7 @@ def _unattached_ip_delete_items(limit=50):
         | Q(note__icontains='执行内容：IP校验发现云上不存在，已标记删除')
         | Q(note__icontains='执行内容：服务器校验发现云上不存在，已标记删除')
         | Q(note__icontains='执行内容：真机测试：未附加IP删除')
-    ).filter(event_type__in=[CloudIpLog.EVENT_DELETED, CloudIpLog.EVENT_RECYCLED]).order_by('-id')[:300]
+    ).filter(event_type__in=[CloudIpLog.EVENT_DELETED, CloudIpLog.EVENT_RECYCLED]).order_by('-id')[:limit]
     for trace in history_traces:
         if trace.id in seen_trace_ids:
             continue
@@ -1513,6 +1525,7 @@ def _orphan_asset_delete_plan_item_payload(asset, *, queue_status='orphan_due', 
         execution_status = '即将进入删除执行窗口'
     elif queue_status == 'scheduled_future':
         execution_status = '等待服务器删除计划'
+    user_display_name, username_label = _telegram_user_labels(asset.user if getattr(asset, 'user', None) else None)
     return {
         'id': f'asset-{asset.id}',
         'item_type': 'orphan_asset',
@@ -1528,8 +1541,8 @@ def _orphan_asset_delete_plan_item_payload(asset, *, queue_status='orphan_due', 
         'queue_status_label': queue_status_label,
         'user_id': getattr(asset, 'user_id', None),
         'tg_user_id': getattr(asset.user, 'tg_user_id', None) if getattr(asset, 'user', None) else None,
-        'user_display_name': getattr(asset.user, 'display_name', '') if getattr(asset, 'user', None) else '未绑定用户',
-        'username_label': _username_label(asset.user) if getattr(asset, 'user', None) else '-',
+        'user_display_name': user_display_name,
+        'username_label': username_label,
         'service_expires_at': _iso(asset.actual_expires_at),
         'suspend_at': None,
         'delete_at': _iso(plan_at),
@@ -1580,8 +1593,8 @@ def _collect_shutdown_plan_queue(now):
             actual_expires_at__lte=now,
         ).exclude(waiting_manual_time_q)
         .exclude(unattached_static_ip_q)
-        .exclude(status__in=[CloudAsset.STATUS_DELETED, CloudAsset.STATUS_DELETING, CloudAsset.STATUS_TERMINATED, CloudAsset.STATUS_TERMINATING])
-        .order_by('actual_expires_at', 'id')[:100]
+        .exclude(_cloud_asset_deleted_or_missing_q())
+        .order_by('actual_expires_at', 'id')[:1000]
     )
     recent_failures = {}
     failure_logs = CloudIpLog.objects.select_related('order').filter(
@@ -1606,7 +1619,7 @@ def _collect_shutdown_plan_queue(now):
         status__in=['suspended', 'deleting'],
         delete_at__isnull=False,
         delete_at__lte=now,
-    ).exclude(id__in=list(due_ids)).order_by('delete_at', 'id')[:50]
+    ).exclude(id__in=list(due_ids)).order_by('delete_at', 'id')[:1000]
     for order in fallback_qs:
         fallback_orders.append(order)
         due_ids.add(order.id)
@@ -1622,13 +1635,13 @@ def _collect_shutdown_plan_queue(now):
         ).exclude(id__in=orphan_due_asset_ids)
         .exclude(waiting_manual_time_q)
         .exclude(unattached_static_ip_q)
-        .exclude(status__in=[CloudAsset.STATUS_DELETED, CloudAsset.STATUS_DELETING, CloudAsset.STATUS_TERMINATED, CloudAsset.STATUS_TERMINATING])
-        .order_by('actual_expires_at', 'id')[:100]
+        .exclude(_cloud_asset_deleted_or_missing_q())
+        .order_by('actual_expires_at', 'id')[:1000]
     )
     future_qs = CloudServerOrder.objects.select_related('user', 'cloud_account').filter(
         status__in=['suspended', 'deleting'],
         delete_at__isnull=False,
-    ).exclude(id__in=list(due_ids)).order_by('delete_at', 'id')[:100]
+    ).exclude(id__in=list(due_ids)).order_by('delete_at', 'id')[:1000]
     for order in future_qs:
         if not next_run_at or order.delete_at < next_run_at:
             next_run_at = order.delete_at
@@ -1733,10 +1746,10 @@ def _shutdown_history_order_payload(order):
 @require_GET
 def lifecycle_plans(request):
     try:
-        limit = int(request.GET.get('limit') or 120)
+        limit = int(request.GET.get('limit') or 1000)
     except (TypeError, ValueError):
-        limit = 120
-    limit = max(1, min(limit, 300))
+        limit = 1000
+    limit = max(1, min(limit, 1000))
     shutdown_items = _shutdown_log_items(limit=limit)
     ip_delete_items = _unattached_ip_delete_items(limit=limit)
     now = timezone.now()
@@ -1767,13 +1780,13 @@ def lifecycle_plans(request):
     shutdown_queue = _collect_shutdown_plan_queue(now)
     history_qs = CloudIpLog.objects.select_related('order', 'user').filter(
         event_type__in=['deleted', 'delete_failed', 'delete_skipped']
-    ).order_by('-created_at', '-id')[:200]
+    ).order_by('-created_at', '-id')[:limit]
     history_items = [_shutdown_history_item_payload(log) for log in history_qs]
     history_order_ids = {item.get('order_id') for item in history_items if item.get('order_id')}
-    fallback_deleted_orders = CloudServerOrder.objects.select_related('user').filter(status='deleted').exclude(id__in=list(history_order_ids)).order_by('-updated_at', '-id')[:200]
+    fallback_deleted_orders = CloudServerOrder.objects.select_related('user').filter(status='deleted').exclude(id__in=list(history_order_ids)).order_by('-updated_at', '-id')[:limit]
     history_items.extend(_shutdown_history_order_payload(order) for order in fallback_deleted_orders)
     history_items.sort(key=lambda item: parse_datetime(item.get('executed_at') or '') or datetime.min.replace(tzinfo=dt_timezone.utc), reverse=True)
-    history_items = history_items[:200]
+    history_items = history_items[:limit]
     pending_ip_delete_items = [item for item in ip_delete_items if item.get('is_overdue') and not item.get('is_history')]
     ip_delete_history_items = [item for item in ip_delete_items if item.get('is_history')]
     recent_since = now - timezone.timedelta(days=1)

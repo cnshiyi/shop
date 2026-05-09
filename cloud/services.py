@@ -1318,13 +1318,13 @@ def get_proxy_asset_by_ip_for_admin(ip: str):
     if not normalized_ip:
         return None
     ip_q = Q(public_ip=normalized_ip) | Q(previous_public_ip=normalized_ip)
-    asset = (
+    assets = (
         CloudAsset.objects.filter(ip_q, kind=CloudAsset.KIND_SERVER)
         .exclude(status__in=_INACTIVE_ASSET_STATUSES)
         .select_related('order', 'user')
-        .order_by('-updated_at', '-id')
-        .first()
+        .order_by('-updated_at', '-id')[:10]
     )
+    asset = next((item for item in assets if not _cloud_asset_deleted_or_missing(item)), None)
     return _proxy_asset_view(asset) if asset else None
 
 
@@ -1334,14 +1334,14 @@ def get_proxy_asset_by_ip_for_user(ip: str, user_id: int):
     if not normalized_ip:
         return None
     ip_q = Q(public_ip=normalized_ip) | Q(previous_public_ip=normalized_ip)
-    asset = (
+    assets = (
         CloudAsset.objects.filter(ip_q, kind=CloudAsset.KIND_SERVER, user_id=user_id)
         .filter(_active_cloud_account_asset_filter())
         .exclude(status__in=_INACTIVE_ASSET_STATUSES)
         .select_related('order', 'user')
-        .order_by('-updated_at', '-id')
-        .first()
+        .order_by('-updated_at', '-id')[:10]
     )
+    asset = next((item for item in assets if not _cloud_asset_deleted_or_missing(item)), None)
     return _proxy_asset_view(asset) if asset else None
 
 
@@ -1406,13 +1406,13 @@ def get_cloud_server_by_ip(ip: str):
     if not normalized_ip:
         return None
     ip_q = Q(public_ip=normalized_ip) | Q(previous_public_ip=normalized_ip)
-    asset = (
+    assets = (
         CloudAsset.objects.filter(ip_q)
         .exclude(status__in=_INACTIVE_ASSET_STATUSES)
         .select_related('order')
-        .order_by('-updated_at', '-id')
-        .first()
+        .order_by('-updated_at', '-id')[:10]
     )
+    asset = next((item for item in assets if not _cloud_asset_deleted_or_missing(item)), None)
     if asset and asset.order_id and asset.order and asset.order.status not in {'deleted', 'deleting', 'expired', 'cancelled'}:
         return _hydrate_order_from_proxy_asset(asset.order, asset=asset)
     server = (
@@ -1447,13 +1447,13 @@ def get_cloud_server_by_ip_for_user(ip: str, user_id: int):
     if not normalized_ip:
         return None
     ip_q = Q(public_ip=normalized_ip) | Q(previous_public_ip=normalized_ip)
-    asset = (
+    assets = (
         CloudAsset.objects.filter(ip_q, user_id=user_id)
         .exclude(status__in=_INACTIVE_ASSET_STATUSES)
         .select_related('order')
-        .order_by('-updated_at', '-id')
-        .first()
+        .order_by('-updated_at', '-id')[:10]
     )
+    asset = next((item for item in assets if not _cloud_asset_deleted_or_missing(item)), None)
     if asset and asset.order_id and asset.order and asset.order.status not in {'deleted', 'deleting', 'expired', 'cancelled'}:
         return _hydrate_order_from_proxy_asset(asset.order, asset=asset)
     server = (
@@ -1497,6 +1497,21 @@ def _is_unattached_static_ip_asset(asset: CloudAsset | None) -> bool:
             or '未附加固定IP' in note
             or 'StaticIp' in provider_resource_id
         )
+    )
+
+
+def _cloud_asset_deleted_or_missing(asset: CloudAsset | None) -> bool:
+    if not asset:
+        return False
+    provider_status = str(getattr(asset, 'provider_status', '') or '')
+    note = str(getattr(asset, 'note', '') or '')
+    return bool(
+        getattr(asset, 'status', '') in _INACTIVE_ASSET_STATUSES
+        or '云上未找到' in provider_status
+        or '已到期删除' in provider_status
+        or '已删除' in provider_status
+        or '云上不存在' in note
+        or '已标记删除' in note
     )
 
 

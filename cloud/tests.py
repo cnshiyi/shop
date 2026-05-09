@@ -11,7 +11,7 @@ from django.test import RequestFactory, TestCase
 from django.utils import timezone
 from django.utils.dateparse import parse_datetime
 
-from bot.api import _shutdown_log_items, _unattached_ip_delete_items
+from bot.api import _shutdown_log_items, _unattached_ip_delete_items, lifecycle_plans
 from bot.models import TelegramGroupFilter, TelegramUser
 from cloud.bootstrap import _build_mtproxy_script, _extract_tg_links
 from cloud.models import CloudAsset, CloudAutoRenewPatrolLog, CloudIpLog, CloudServerOrder, CloudServerPlan, CloudUserNoticeLog, Server
@@ -2751,6 +2751,44 @@ class CloudServerServicesTestCase(TestCase):
         self.assertIn('IP校验发现云上不存在，已标记删除', row['note'])
         self.assertTrue(row['is_overdue'])
 
+    def test_unattached_ip_delete_items_exclude_cloud_missing_active_plan(self):
+        missing_asset = CloudAsset.objects.create(
+            kind=CloudAsset.KIND_SERVER,
+            source=CloudAsset.SOURCE_AWS_SYNC,
+            user=self.user,
+            provider='aws_lightsail',
+            region_code=self.plan.region_code,
+            region_name=self.plan.region_name,
+            asset_name='missing-unattached-active-plan',
+            public_ip='5.5.5.11',
+            status=CloudAsset.STATUS_UNKNOWN,
+            is_active=False,
+            provider_status='云上未找到实例/IP-待确认',
+            note='未附加固定IP；IP校验发现云上不存在，已标记删除',
+            actual_expires_at=timezone.now() - timezone.timedelta(days=1),
+        )
+        visible_asset = CloudAsset.objects.create(
+            kind=CloudAsset.KIND_SERVER,
+            source=CloudAsset.SOURCE_AWS_SYNC,
+            user=self.user,
+            provider='aws_lightsail',
+            region_code=self.plan.region_code,
+            region_name=self.plan.region_name,
+            asset_name='visible-unattached-active-plan',
+            public_ip='5.5.5.12',
+            status=CloudAsset.STATUS_UNKNOWN,
+            is_active=False,
+            provider_status='未附加固定IP',
+            note='未附加固定IP',
+            actual_expires_at=timezone.now() - timezone.timedelta(days=1),
+        )
+
+        items = _unattached_ip_delete_items(limit=20)
+        active_asset_ids = {item.get('id') for item in items if not item.get('is_history')}
+
+        self.assertNotIn(missing_asset.id, active_asset_ids)
+        self.assertIn(visible_asset.id, active_asset_ids)
+
     def test_ip_log_delete_keeps_previous_ip_from_change_chain(self):
         order = CloudServerOrder.objects.create(
             order_no='IP-LOG-CHAIN-DELETE-1',
@@ -2881,6 +2919,41 @@ class CloudServerServicesTestCase(TestCase):
         self.assertEqual(user_asset.service_expires_at, expires_at)
         self.assertIsNone(hidden_asset)
 
+    def test_proxy_asset_ip_query_skips_cloud_missing_asset(self):
+        CloudAsset.objects.create(
+            kind=CloudAsset.KIND_SERVER,
+            source=CloudAsset.SOURCE_AWS_SYNC,
+            user=self.user,
+            provider='aws_lightsail',
+            region_code='ap-southeast-1',
+            region_name='新加坡',
+            asset_name='manual-query-missing',
+            public_ip='3.3.3.34',
+            actual_expires_at=timezone.now() + timezone.timedelta(days=12),
+            status=CloudAsset.STATUS_UNKNOWN,
+            is_active=False,
+            provider_status='云上未找到实例/IP-待确认',
+            note='未附加固定IP；IP校验发现云上不存在，已标记删除',
+        )
+        visible_asset = CloudAsset.objects.create(
+            kind=CloudAsset.KIND_SERVER,
+            source=CloudAsset.SOURCE_AWS_SYNC,
+            user=self.user,
+            provider='aws_lightsail',
+            region_code='ap-southeast-1',
+            region_name='新加坡',
+            asset_name='manual-query-visible-fallback',
+            public_ip='3.3.3.34',
+            actual_expires_at=timezone.now() + timezone.timedelta(days=15),
+            status=CloudAsset.STATUS_RUNNING,
+            is_active=True,
+            provider_status='运行中',
+        )
+
+        admin_asset = async_to_sync(get_proxy_asset_by_ip_for_admin)('3.3.3.34')
+
+        self.assertEqual(admin_asset.id, visible_asset.id)
+
     def test_cloud_server_ip_query_requires_owner_identity(self):
         other_user = TelegramUser.objects.create(tg_user_id=990003, username='other_order_query_user')
         order = CloudServerOrder.objects.create(
@@ -2905,6 +2978,49 @@ class CloudServerServicesTestCase(TestCase):
 
         self.assertEqual(owned_order.id, order.id)
         self.assertIsNone(hidden_order)
+
+    def test_lifecycle_plans_excludes_cloud_missing_orphan_server(self):
+        missing_asset = CloudAsset.objects.create(
+            kind=CloudAsset.KIND_SERVER,
+            source=CloudAsset.SOURCE_AWS_SYNC,
+            user=self.user,
+            provider='aws_lightsail',
+            region_code='ap-southeast-1',
+            region_name='新加坡',
+            asset_name='missing-orphan-server-plan',
+            public_ip='3.3.3.35',
+            instance_id='i-missing-orphan-server-plan',
+            actual_expires_at=timezone.now() - timezone.timedelta(days=1),
+            status=CloudAsset.STATUS_UNKNOWN,
+            is_active=False,
+            provider_status='云上未找到实例/IP-待确认',
+            note='服务器校验发现云上不存在，已标记删除',
+        )
+        visible_asset = CloudAsset.objects.create(
+            kind=CloudAsset.KIND_SERVER,
+            source=CloudAsset.SOURCE_AWS_SYNC,
+            user=self.user,
+            provider='aws_lightsail',
+            region_code='ap-southeast-1',
+            region_name='新加坡',
+            asset_name='visible-orphan-server-plan',
+            public_ip='3.3.3.36',
+            instance_id='i-visible-orphan-server-plan',
+            actual_expires_at=timezone.now() - timezone.timedelta(days=1),
+            status=CloudAsset.STATUS_RUNNING,
+            is_active=True,
+            provider_status='运行中',
+        )
+        staff_user = get_user_model().objects.create_user(username='staff_lifecycle_plan_missing', password='x', is_staff=True)
+        request = self.factory.get('/api/admin/tasks/plans/', {'limit': 1000})
+        request.user = staff_user
+
+        response = lifecycle_plans(request)
+        data = json.loads(response.content)['data']
+        due_ids = {item.get('asset_id') for item in data['due_items']}
+
+        self.assertNotIn(missing_asset.id, due_ids)
+        self.assertIn(visible_asset.id, due_ids)
 
     def test_cloud_ip_query_keyboard_limits_non_owner_to_renewal(self):
         from bot.keyboards import cloud_ip_query_result
