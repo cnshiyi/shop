@@ -1158,6 +1158,7 @@ def _proxy_asset_view(asset: CloudAsset):
         status=asset.status,
         provider_status=asset.provider_status,
         actual_expires_at=asset.actual_expires_at,
+        provider_resource_id=asset.provider_resource_id,
         provider=asset.provider or getattr(order, 'provider', None),
         account_label=asset.account_label or getattr(order, 'account_label', None),
         pay_method='manual',

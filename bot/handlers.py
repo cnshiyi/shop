@@ -488,16 +488,26 @@ async def _reply_cloud_query_results(message: Message, raw_text: str, state: FSM
                 except Exception as exc:
                     logger.warning('CLOUD_QUERY_PROXY_LINK_SAVE_FAILED target=asset asset_id=%s ip=%s error=%s', getattr(asset, 'id', None), display_ip, exc)
             is_owned_asset = bool(user and getattr(asset, 'user_id', None) == user.id)
-            can_admin_asset_reinit = bool(include_start and asset.provider == 'aws_lightsail' and display_ip)
-            can_admin_asset_config = bool(include_start and asset.provider == 'aws_lightsail')
-            can_user_asset_operate = bool(is_owned_asset and asset.provider == 'aws_lightsail' and display_ip)
+            is_unattached_ip_asset = bool(
+                asset.provider == 'aws_lightsail'
+                and display_ip
+                and (
+                    '未附加固定IP' in provider_status_text
+                    or '未附加IP' in provider_status_text
+                    or 'StaticIp' in str(getattr(asset, 'provider_resource_id', '') or '')
+                )
+            )
+            can_admin_asset_reinit = bool(include_start and asset.provider == 'aws_lightsail' and display_ip and not is_unattached_ip_asset)
+            can_admin_asset_config = bool(include_start and asset.provider == 'aws_lightsail' and not is_unattached_ip_asset)
+            can_user_asset_operate = bool(is_owned_asset and asset.provider == 'aws_lightsail' and display_ip and not is_unattached_ip_asset)
+            can_asset_renew = bool((is_owned_asset or include_start) and (is_unattached_ip_asset or not getattr(asset, 'order_id', None)))
             public_renew_order_id = getattr(asset, 'order_id', None) or 0
             results.append({
                 'ip': display_ip,
                 'text': f'IP: <code>{escape(display_ip)}</code>\n到期时间: {expires_text}' if not include_start and not is_owned_asset else f'IP: <code>{escape(display_ip)}</code>\n到期时间: {expires_text}\n自动续费: {"已绑定订单" if getattr(asset, "order_id", None) else "未绑定订单"}\n状态: {escape(status_text)}{account_text}\n类型: 代理资产',
-                'renewable': bool(is_owned_asset or public_renew_order_id),
+                'renewable': bool(can_asset_renew or public_renew_order_id),
                 'order_id': public_renew_order_id if not is_owned_asset and not include_start else 0,
-                'asset_id': asset.id if is_owned_asset or include_start else 0,
+                'asset_id': asset.id if can_asset_renew else 0,
                 'start_order_id': public_renew_order_id,
                 'can_change_ip': can_user_asset_operate,
                 'can_reinit': can_admin_asset_reinit or can_user_asset_operate,
