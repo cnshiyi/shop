@@ -1509,10 +1509,10 @@ def _notice_latest_log_map():
     mapped = {}
     for log in logs:
         keys = [(log.event_type, log.order_id)]
-        if log.event_type == 'renew_notice_batch':
-            keys.append(('renew_notice', log.order_id))
-            for order_id in (log.extra or {}).get('order_ids') or []:
-                keys.append(('renew_notice', order_id))
+        canonical_event = 'renew_notice' if log.event_type == 'renew_notice_batch' else log.event_type
+        keys.append((canonical_event, log.order_id))
+        for order_id in (log.extra or {}).get('order_ids') or []:
+            keys.append((canonical_event, order_id))
         for key in keys:
             if key[1] and key not in mapped:
                 mapped[key] = log

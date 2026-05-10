@@ -361,6 +361,75 @@ class CloudServerServicesTestCase(TestCase):
             status=status or CloudAsset.STATUS_RUNNING,
         )
 
+    def test_lifecycle_delete_notice_batches_multiple_ips_for_same_user(self):
+        now = timezone.now()
+        orders = []
+        for index in range(2):
+            order = CloudServerOrder.objects.create(
+                order_no=f'BATCH-DELETE-NOTICE-{index + 1}',
+                user=self.user,
+                plan=self.plan,
+                provider=self.plan.provider,
+                region_code=self.plan.region_code,
+                region_name=self.plan.region_name,
+                plan_name=self.plan.plan_name,
+                quantity=1,
+                currency='USDT',
+                total_amount='19.00',
+                pay_amount='19.00',
+                pay_method='balance',
+                status='suspended',
+                public_ip=f'10.66.0.{index + 1}',
+                service_started_at=now - timezone.timedelta(days=35),
+                service_expires_at=now - timezone.timedelta(days=2),
+                suspend_at=now - timezone.timedelta(days=1),
+                delete_at=now + timezone.timedelta(hours=12),
+                delete_reminder_enabled=True,
+            )
+            CloudAsset.objects.create(
+                kind=CloudAsset.KIND_SERVER,
+                source=CloudAsset.SOURCE_ORDER,
+                order=order,
+                user=self.user,
+                provider=order.provider,
+                region_code=order.region_code,
+                region_name=order.region_name,
+                asset_name=f'batch-delete-notice-{index + 1}',
+                public_ip=order.public_ip,
+                actual_expires_at=order.service_expires_at,
+                status=CloudAsset.STATUS_RUNNING,
+                is_active=True,
+            )
+            orders.append(order)
+        due = {
+            'renew_notice': [],
+            'auto_renew_notice': [],
+            'auto_renew': [],
+            'delete_notice': orders,
+            'recycle_notice': [],
+            'expire': [],
+            'suspend': [],
+            'delete': [],
+            'recycle': [],
+        }
+        notify = AsyncMock(return_value=True)
+
+        with patch('cloud.lifecycle._get_due_orders', new_callable=AsyncMock, return_value=due), \
+            patch('cloud.lifecycle._get_migration_due_orders', new_callable=AsyncMock, return_value=[]), \
+            patch('cloud.lifecycle._get_orphan_asset_delete_due', new_callable=AsyncMock, return_value=[]), \
+            patch('cloud.lifecycle._get_unattached_static_ip_delete_due', new_callable=AsyncMock, return_value=[]):
+            async_to_sync(lifecycle_tick)(notify=notify)
+
+        notify.assert_awaited_once()
+        _, text, _ = notify.await_args.args
+        self.assertIn('10.66.0.1', text)
+        self.assertIn('10.66.0.2', text)
+        self.assertNotIn('订单号', text)
+        self.assertEqual(CloudUserNoticeLog.objects.filter(event_type='delete_notice', is_batch=True).count(), 1)
+        for order in orders:
+            order.refresh_from_db()
+            self.assertIsNotNone(order.delete_notice_sent_at)
+
     def test_update_cloud_asset_rejects_collapsed_telegram_group_binding(self):
         admin = get_user_model().objects.create_user(username='admin_bind_group', password='x', is_staff=True)
         asset = CloudAsset.objects.create(
