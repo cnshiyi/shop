@@ -2047,8 +2047,6 @@ async def lifecycle_tick(notify=None, notify_target=None, defer_destructive_seco
     expire_ready_by_user = defaultdict(list)
     suspended_ready_by_user = defaultdict(list)
     deleted_ready_by_user = defaultdict(list)
-    recycled_ready_by_user = defaultdict(list)
-    migration_deleted_ready_by_user = defaultdict(list)
 
     for order in due['expire']:
         notice = await _cloud_expiry_notice_payload(order.id)
@@ -2107,9 +2105,7 @@ async def lifecycle_tick(notify=None, notify_target=None, defer_destructive_seco
         result = await _run_cloud_action_with_timeout(_release_order_static_ip(order), action='AWS 固定 IP 释放', target=order.order_no)
         note = _action_note(result)
         if _action_ok(result):
-            updated = await _mark_recycled(order.id, note)
-            if notify and getattr(updated, 'ip_recycle_reminder_enabled', True):
-                recycled_ready_by_user[updated.user_id].append((updated, notice))
+            await _mark_recycled(order.id, note)
         else:
             await _record_lifecycle_action_failed(order.id, 'recycle_failed', note)
 
@@ -2123,9 +2119,7 @@ async def lifecycle_tick(notify=None, notify_target=None, defer_destructive_seco
             notice = await _cloud_expiry_notice_payload(order.id)
             if not notice.get('valid'):
                 continue
-            updated = await _mark_replaced_order_deleted(order.id, note)
-            if notify and getattr(updated, 'delete_reminder_enabled', True):
-                migration_deleted_ready_by_user[updated.user_id].append((updated, notice))
+            await _mark_replaced_order_deleted(order.id, note)
         else:
             await _record_lifecycle_action_failed(order.id, 'delete_failed', note)
 
@@ -2227,65 +2221,6 @@ IP: {ip}
             _log_cloud_notice('deleted_notice_batch', orders[0], {'ip': f'{len(orders)} 个IP'}, text, 'cloud_lifecycle_notice_actions')
             await _send_logged_cloud_notice('deleted_notice_batch', notify, user_id, text, None, order=orders[0], notice={'ip': f'{len(orders)} 个IP'}, batch_id=_notice_batch_id('deleted_notice_batch', *order_ids), is_batch=True, extra={'order_ids': order_ids})
 
-    for user_id, pairs in recycled_ready_by_user.items():
-        if not await _user_can_receive_cloud_notice(user_id):
-            continue
-        orders = [item[0] for item in pairs]
-        if len(orders) == 1:
-            updated, notice = pairs[0]
-            text = _cloud_text_format(
-                'cloud_ip_retention_ended_notice',
-                '''📦 云服务器固定 IP 保留期已结束
-
-IP: {ip}
-订单号: {order_no}
-
-{plan_text}
-
-固定 IP 已超过删除计划，如有疑问请联系人工客服。''',
-                ip=notice['ip'],
-                order_no=updated.order_no,
-                plan_text=_notice_plan_text(updated, notice),
-            )
-            text = _ensure_notice_ip(text, notice['ip'])
-            _log_cloud_notice('ip_retention_ended_notice', updated, notice, text, 'cloud_lifecycle_notice_actions')
-            await _send_logged_cloud_notice('ip_retention_ended_notice', notify, user_id, text, cloud_lifecycle_notice_actions(updated.id, 'cloud_ip_retention_ended'), order=updated, notice=notice)
-            continue
-        order_ids = [order.id for order in orders]
-        text = await _lifecycle_notice_batch_text('📦 云服务器固定 IP 保留期已结束', order_ids, '以上固定 IP 保留期已结束，如有疑问请联系人工客服。')
-        if text:
-            _log_cloud_notice('ip_retention_ended_notice_batch', orders[0], {'ip': f'{len(orders)} 个IP'}, text, 'cloud_lifecycle_notice_actions')
-            await _send_logged_cloud_notice('ip_retention_ended_notice_batch', notify, user_id, text, None, order=orders[0], notice={'ip': f'{len(orders)} 个IP'}, batch_id=_notice_batch_id('ip_retention_ended_notice_batch', *order_ids), is_batch=True, extra={'order_ids': order_ids})
-
-    for user_id, pairs in migration_deleted_ready_by_user.items():
-        if not await _user_can_receive_cloud_notice(user_id):
-            continue
-        orders = [item[0] for item in pairs]
-        if len(orders) == 1:
-            updated, notice = pairs[0]
-            text = _cloud_text_format(
-                'cloud_migration_old_deleted_notice',
-                '''🧹 迁移期已结束，旧服务器已删除
-
-IP: {ip}
-订单号: {order_no}
-
-{plan_text}
-
-如仍需使用，请联系人工客服处理；不需要提醒可点击下方关闭提醒。''',
-                ip=notice['ip'],
-                order_no=updated.order_no,
-                plan_text=_notice_plan_text(updated, notice),
-            )
-            text = _ensure_notice_ip(text, notice['ip'])
-            _log_cloud_notice('migration_old_deleted_notice', updated, notice, text, 'cloud_lifecycle_notice_actions')
-            await _send_logged_cloud_notice('migration_old_deleted_notice', notify, user_id, text, cloud_lifecycle_notice_actions(updated.id, 'cloud_migration_old_deleted'), order=updated, notice=notice)
-            continue
-        order_ids = [order.id for order in orders]
-        text = await _lifecycle_notice_batch_text('🧹 迁移期已结束，旧服务器已删除', order_ids, '以上旧服务器已删除，如仍需处理，请联系人工客服。')
-        if text:
-            _log_cloud_notice('migration_old_deleted_notice_batch', orders[0], {'ip': f'{len(orders)} 个IP'}, text, 'cloud_lifecycle_notice_actions')
-            await _send_logged_cloud_notice('migration_old_deleted_notice_batch', notify, user_id, text, None, order=orders[0], notice={'ip': f'{len(orders)} 个IP'}, batch_id=_notice_batch_id('migration_old_deleted_notice_batch', *order_ids), is_batch=True, extra={'order_ids': order_ids})
     for asset in orphan_asset_delete_due:
         if not _is_cloud_delete_safe_time():
             logger.warning('CLOUD_ORPHAN_ASSET_DELETE_SKIP_OUTSIDE_WINDOW asset_id=%s ip=%s actual_expires_at=%s now=%s', asset.id, asset.public_ip, asset.actual_expires_at, timezone.now())
