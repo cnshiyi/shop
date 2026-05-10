@@ -1724,6 +1724,8 @@ def _notice_group_summary_items(items: list[dict], *, limit: int | None = None) 
             label = group.get('notice_type_label') or '通知'
             group['notice_text_preview'] = f'{label}：{group["user_display_name"]} 共 {group["ip_count"]} 个 IP，系统会合并成一条通知发送。'
     summary = sorted(grouped.values(), key=lambda item: item.get('next_notice_at') or '')
+    if limit:
+        summary = summary[:limit]
     for group in summary:
         order_ids = group.get('order_ids') or []
         payload = _notice_actual_batch_payload(group.get('notice_type') or '', order_ids)
@@ -1733,7 +1735,7 @@ def _notice_group_summary_items(items: list[dict], *, limit: int | None = None) 
         group['notice_text_preview'] = manual_text or payload.get('text') or group.get('notice_text_preview') or ''
         group['notice_count'] = 1
         group['ip_count'] = int(payload.get('count') or group.get('ip_count') or 0)
-    return summary[:limit] if limit else summary
+    return summary
 
 
 def _notice_history_group_items(logs) -> list[dict]:
@@ -1846,10 +1848,37 @@ def update_notice_plan_text(request):
     })
 
 
+def _request_int_param(request, key: str, default: int, *, minimum: int = 1, maximum: int = 500) -> int:
+    try:
+        value = int(request.GET.get(key) or default)
+    except (TypeError, ValueError):
+        value = default
+    return max(minimum, min(value, maximum))
+
+
+def _compact_notice_items(items: list[dict], *, text_limit: int = 1200, ip_limit: int = 50) -> list[dict]:
+    for item in items:
+        text = str(item.get('notice_text_preview') or item.get('text_preview') or '')
+        if len(text) > text_limit:
+            preview = text[:text_limit] + '\n...（文案过长，已折叠预览）'
+            if 'notice_text_preview' in item:
+                item['notice_text_preview'] = preview
+            if 'text_preview' in item:
+                item['text_preview'] = preview
+        ips = item.get('ips')
+        if isinstance(ips, list) and len(ips) > ip_limit:
+            item['ips'] = ips[:ip_limit] + [f'... 另有 {len(ips) - ip_limit} 个 IP']
+    return items
+
+
 @dashboard_login_required
 @require_GET
 def notice_task_detail(request):
     now = timezone.now()
+    limit = _request_int_param(request, 'limit', 50, maximum=300)
+    future_limit = _request_int_param(request, 'future_limit', 10, maximum=100)
+    history_limit = _request_int_param(request, 'history_limit', 50, maximum=300)
+    compact = str(request.GET.get('compact') or '').strip().lower() in {'1', 'true', 'yes', 'on'}
     due = async_to_sync(_get_due_orders)()
     next_run_at = now + timezone.timedelta(minutes=10)
     latest_logs = _notice_latest_log_map()
@@ -1869,11 +1898,13 @@ def notice_task_detail(request):
             ))
             seen_keys.add((notice_type, order.id))
     due_items.sort(key=lambda item: parse_datetime(item.get('notice_at') or '') or timezone.datetime.max.replace(tzinfo=dt_timezone.utc))
-    window_due_items, future_plan_items = _notice_task_future_items(now, next_run_at, seen_keys, latest_logs)
+    window_due_items, future_plan_items = _notice_task_future_items(now, next_run_at, seen_keys, latest_logs, future_limit=max(limit + future_limit, 50))
     due_items.extend(window_due_items)
     due_items.sort(key=lambda item: parse_datetime(item.get('notice_at') or '') or timezone.datetime.max.replace(tzinfo=dt_timezone.utc))
-    due_user_summary_items = _notice_group_summary_items(due_items)
-    future_user_summary_items = _notice_group_summary_items(future_plan_items, limit=10)
+    due_user_summary_items = _notice_group_summary_items(due_items, limit=limit)
+    future_user_summary_items = _notice_group_summary_items(future_plan_items, limit=future_limit)
+    visible_due_items = due_items[:limit]
+    visible_future_plan_items = future_plan_items[:future_limit]
     history_qs = CloudUserNoticeLog.objects.select_related('order', 'user').filter(event_type__in=list(_NOTICE_HISTORY_LABELS)).order_by('-created_at', '-id')
     recent_since = now - timezone.timedelta(days=1)
     recent_logs = history_qs.filter(created_at__gte=recent_since)
@@ -1895,11 +1926,11 @@ def notice_task_detail(request):
         'recent_failure_user_count': recent_logs.filter(delivered=False).values('user_id').distinct().count(),
         'retry_policy_label': '通知失败不会写入已通知时间；生命周期巡检会在下一轮继续重试，直到成功送达。',
         'notice_switches': _notice_switch_items(),
-        'due_items': due_items,
-        'due_user_summary_items': due_user_summary_items,
-        'future_plan_items': future_plan_items,
-        'future_user_summary_items': future_user_summary_items,
-        'history_items': _notice_history_group_items(history_qs[:200]),
+        'due_items': _compact_notice_items(visible_due_items) if compact else visible_due_items,
+        'due_user_summary_items': _compact_notice_items(due_user_summary_items) if compact else due_user_summary_items,
+        'future_plan_items': _compact_notice_items(visible_future_plan_items) if compact else visible_future_plan_items,
+        'future_user_summary_items': _compact_notice_items(future_user_summary_items) if compact else future_user_summary_items,
+        'history_items': _compact_notice_items(_notice_history_group_items(history_qs[:history_limit])) if compact else _notice_history_group_items(history_qs[:history_limit]),
     })
 
 
