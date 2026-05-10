@@ -1186,6 +1186,9 @@ def _auto_renew_due_item_payload(order, *, queue_status: str = 'due_now', queue_
         'status_label': _status_label(order.status, CloudServerOrder.STATUS_CHOICES),
         'queue_status': queue_status,
         'queue_status_label': queue_status_label,
+        **_notice_status_payload(sent_at=sent_at, latest_log=latest_log, queue_status=queue_status),
+        **_notice_channel_payload(user, latest_log),
+        'notice_text_preview': _notice_task_text_preview(order, notice_type, notice),
         'user_id': user.id if user else None,
         'tg_user_id': user.tg_user_id if user else None,
         'user_display_name': user_payload['display_name'] if user_payload else '未绑定用户',
@@ -1381,10 +1384,15 @@ def _auto_renew_history_item_payload(log):
 
 
 _NOTICE_TASK_TYPES = {
-    'renew_notice': {'label': '到期提醒', 'field': 'renew_notice_sent_at'},
-    'auto_renew_notice': {'label': '自动续费预提醒', 'field': 'auto_renew_notice_sent_at'},
-    'delete_notice': {'label': '删机提醒', 'field': 'delete_notice_sent_at'},
-    'recycle_notice': {'label': 'IP回收提醒', 'field': 'recycle_notice_sent_at'},
+    'renew_notice': {'label': '到期提醒', 'field': 'renew_notice_sent_at', 'event': 'renew_notice_batch'},
+    'auto_renew_notice': {'label': '自动续费预提醒', 'field': 'auto_renew_notice_sent_at', 'event': 'auto_renew_notice'},
+    'delete_notice': {'label': '删机提醒', 'field': 'delete_notice_sent_at', 'event': 'delete_notice'},
+    'recycle_notice': {'label': 'IP回收提醒', 'field': 'recycle_notice_sent_at', 'event': 'recycle_notice'},
+}
+
+_NOTICE_HISTORY_LABELS = {
+    **{key: item['label'] for key, item in _NOTICE_TASK_TYPES.items()},
+    'renew_notice_batch': '到期提醒',
 }
 
 
@@ -1406,7 +1414,45 @@ def _notice_task_time(order, notice_type: str, notice: dict | None = None):
     return None
 
 
-def _notice_task_item_payload(order, notice_type: str, *, queue_status='scheduled_future', queue_status_label='未来计划', next_run_at=None):
+def _notice_task_text_preview(order, notice_type: str, notice: dict | None = None) -> str:
+    notice = notice or _notice_payload_for_order(order) or {}
+    ip = notice.get('ip') or getattr(order, 'public_ip', None) or getattr(order, 'previous_public_ip', None) or '未分配'
+    expires_at = notice.get('expires_at') or getattr(order, 'service_expires_at', None)
+    if notice_type == 'renew_notice':
+        return f'到期提醒：IP {ip} 将于 {_iso(expires_at) or "-"} 到期，请及时续费或确认自动续费状态。'
+    if notice_type == 'auto_renew_notice':
+        auto_renew_at = expires_at - timezone.timedelta(days=1) if expires_at else None
+        return f'自动续费预提醒：IP {ip} 预计于 {_iso(auto_renew_at) or "-"} 自动续费。'
+    if notice_type == 'delete_notice':
+        return f'删机提醒：IP {ip} 计划于 {_iso(notice.get("delete_at") or getattr(order, "delete_at", None)) or "-"} 删除。'
+    if notice_type == 'recycle_notice':
+        return f'IP回收提醒：IP {ip} 计划于 {_iso(notice.get("ip_recycle_at") or getattr(order, "ip_recycle_at", None)) or "-"} 回收。'
+    return f'{_NOTICE_TASK_TYPES.get(notice_type, {}).get("label", notice_type)}：IP {ip}'
+
+
+def _notice_channel_payload(user, latest_log=None) -> dict:
+    target_chat_id = getattr(latest_log, 'target_chat_id', None)
+    if target_chat_id:
+        return {'notice_channel': 'telegram_chat', 'notice_channel_label': f'Telegram Chat {target_chat_id}'}
+    tg_user_id = getattr(user, 'tg_user_id', None) if user else None
+    if tg_user_id:
+        return {'notice_channel': 'telegram_private', 'notice_channel_label': f'Telegram 私聊 {tg_user_id}'}
+    return {'notice_channel': 'unbound', 'notice_channel_label': '未绑定通知渠道'}
+
+
+def _notice_status_payload(*, sent_at=None, latest_log=None, queue_status='scheduled_future') -> dict:
+    if sent_at:
+        return {'notice_status': 'sent', 'notice_status_label': '已通知', 'retry_label': '-'}
+    if latest_log and not latest_log.delivered:
+        return {'notice_status': 'failed_retry', 'notice_status_label': '通知失败，待重试', 'retry_label': '未标记已通知，下一轮生命周期巡检会继续重试'}
+    if queue_status in {'due_now', 'fallback_notice'}:
+        return {'notice_status': 'pending', 'notice_status_label': '待本轮通知', 'retry_label': '发送失败不会写入已通知时间，会在后续巡检重试'}
+    if queue_status == 'within_window':
+        return {'notice_status': 'scheduled_soon', 'notice_status_label': '两天内待通知', 'retry_label': '到通知时间后自动发送，失败则重试'}
+    return {'notice_status': 'scheduled', 'notice_status_label': '未来计划', 'retry_label': '未到通知时间'}
+
+
+def _notice_task_item_payload(order, notice_type: str, *, queue_status='scheduled_future', queue_status_label='未来计划', next_run_at=None, latest_log=None):
     user = getattr(order, 'user', None)
     usernames = list(getattr(user, 'usernames', []) or []) if user else []
     user_payload = _user_payload({
@@ -1419,6 +1465,7 @@ def _notice_task_item_payload(order, notice_type: str, *, queue_status='schedule
     }) if user else None
     notice = _notice_payload_for_order(order) or {}
     expires_at = notice.get('expires_at') or getattr(order, 'service_expires_at', None)
+    sent_at = getattr(order, _NOTICE_TASK_TYPES.get(notice_type, {}).get('field', ''), None)
     return {
         'id': f'{notice_type}-{order.id}',
         'order_id': order.id,
@@ -1432,6 +1479,9 @@ def _notice_task_item_payload(order, notice_type: str, *, queue_status='schedule
         'status_label': _status_label(order.status, CloudServerOrder.STATUS_CHOICES),
         'queue_status': queue_status,
         'queue_status_label': queue_status_label,
+        **_notice_status_payload(sent_at=sent_at, latest_log=latest_log, queue_status=queue_status),
+        **_notice_channel_payload(user, latest_log),
+        'notice_text_preview': _notice_task_text_preview(order, notice_type, notice),
         'user_id': user.id if user else None,
         'tg_user_id': user.tg_user_id if user else None,
         'user_display_name': user_payload['display_name'] if user_payload else '未绑定用户',
@@ -1450,7 +1500,26 @@ def _notice_task_item_payload(order, notice_type: str, *, queue_status='schedule
     }
 
 
-def _notice_task_future_items(now, next_run_at, seen_keys: set[tuple[str, int]]):
+def _notice_event_type(notice_type: str) -> str:
+    return _NOTICE_TASK_TYPES.get(notice_type, {}).get('event') or notice_type
+
+
+def _notice_latest_log_map():
+    logs = CloudUserNoticeLog.objects.filter(event_type__in=list(_NOTICE_HISTORY_LABELS)).order_by('-created_at', '-id')[:1000]
+    mapped = {}
+    for log in logs:
+        keys = [(log.event_type, log.order_id)]
+        if log.event_type == 'renew_notice_batch':
+            keys.append(('renew_notice', log.order_id))
+            for order_id in (log.extra or {}).get('order_ids') or []:
+                keys.append(('renew_notice', order_id))
+        for key in keys:
+            if key[1] and key not in mapped:
+                mapped[key] = log
+    return mapped
+
+
+def _notice_task_future_items(now, next_run_at, seen_keys: set[tuple[str, int]], latest_logs: dict, *, due_window_days=2, future_limit=10):
     items = []
     qs = CloudServerOrder.objects.select_related('user').filter(
         status__in=['completed', 'expiring', 'renew_pending', 'suspended', 'deleting', 'deleted'],
@@ -1478,16 +1547,25 @@ def _notice_task_future_items(now, next_run_at, seen_keys: set[tuple[str, int]])
                 continue
             if notice_at <= now:
                 queue_status, queue_status_label = 'fallback_notice', '已到通知时间'
-            elif notice_at <= now + timezone.timedelta(days=3):
-                queue_status, queue_status_label = 'within_window', '3天内待通知'
+            elif notice_at <= now + timezone.timedelta(days=due_window_days):
+                queue_status, queue_status_label = 'within_window', '两天内待通知'
             else:
                 queue_status, queue_status_label = 'scheduled_future', '未来计划'
-            items.append(_notice_task_item_payload(order, notice_type, queue_status=queue_status, queue_status_label=queue_status_label, next_run_at=next_run_at))
+            items.append(_notice_task_item_payload(
+                order,
+                notice_type,
+                queue_status=queue_status,
+                queue_status_label=queue_status_label,
+                next_run_at=next_run_at,
+                latest_log=latest_logs.get((notice_type, order.id)) or latest_logs.get((_notice_event_type(notice_type), order.id)),
+            ))
             seen_keys.add((notice_type, order.id))
             if len(items) >= 200:
-                return items
+                break
     items.sort(key=lambda item: parse_datetime(item.get('notice_at') or '') or timezone.datetime.max.replace(tzinfo=dt_timezone.utc))
-    return items
+    due_items = [item for item in items if item.get('queue_status') in {'fallback_notice', 'within_window'}]
+    future_items = [item for item in items if item.get('queue_status') == 'scheduled_future'][:future_limit]
+    return due_items, future_items
 
 
 def _notice_task_history_item_payload(log):
@@ -1497,16 +1575,20 @@ def _notice_task_history_item_payload(log):
         'order_id': log.order_id,
         'order_no': log.order_no or '-',
         'notice_type': log.event_type,
-        'notice_type_label': _NOTICE_TASK_TYPES.get(log.event_type, {}).get('label', log.event_type),
+        'notice_type_label': _NOTICE_HISTORY_LABELS.get(log.event_type, log.event_type),
         'ip': log.ip or '-',
         'user_id': log.user_id,
         'tg_user_id': getattr(log.user, 'tg_user_id', None) if getattr(log, 'user', None) else None,
         'user_display_name': getattr(log.user, 'display_name', '') or getattr(log.user, 'username', '') or '未绑定用户' if getattr(log, 'user', None) else '未绑定用户',
         'username_label': f'@{log.user.username}' if getattr(log, 'user', None) and getattr(log.user, 'username', '') else '-',
         'delivered': bool(log.delivered),
-        'result_label': '已送达' if log.delivered else '未送达',
+        'notice_status': 'sent' if log.delivered else 'failed_retry',
+        'notice_status_label': '已通知' if log.delivered else '通知失败，待重试',
+        'result_label': '已送达' if log.delivered else '未送达，后续巡检重试',
         'target_chat_id': log.target_chat_id,
+        **_notice_channel_payload(getattr(log, 'user', None), log),
         'text_preview': log.text_preview or '',
+        'retry_label': '-' if log.delivered else '未成功送达，不会写入已通知时间；后续生命周期巡检会重试',
         'created_at': _iso(log.created_at),
         'related_path': f'/admin/cloud-orders/{log.order_id}' if log.order_id else '',
         'detail_path': f'/admin/cloud-orders/{log.order_id}' if log.order_id else '',
@@ -1521,17 +1603,27 @@ def notice_task_detail(request):
     now = timezone.now()
     due = async_to_sync(_get_due_orders)()
     next_run_at = now + timezone.timedelta(minutes=10)
+    latest_logs = _notice_latest_log_map()
     due_items = []
     seen_keys = set()
     for notice_type, config in _NOTICE_TASK_TYPES.items():
         for order in list(due.get(notice_type) or []):
             if getattr(order, config['field'], None):
                 continue
-            due_items.append(_notice_task_item_payload(order, notice_type, queue_status='due_now', queue_status_label='本轮待通知', next_run_at=next_run_at))
+            due_items.append(_notice_task_item_payload(
+                order,
+                notice_type,
+                queue_status='due_now',
+                queue_status_label='本轮待通知',
+                next_run_at=next_run_at,
+                latest_log=latest_logs.get((notice_type, order.id)) or latest_logs.get((_notice_event_type(notice_type), order.id)),
+            ))
             seen_keys.add((notice_type, order.id))
     due_items.sort(key=lambda item: parse_datetime(item.get('notice_at') or '') or timezone.datetime.max.replace(tzinfo=dt_timezone.utc))
-    future_plan_items = _notice_task_future_items(now, next_run_at, seen_keys)
-    history_qs = CloudUserNoticeLog.objects.select_related('order', 'user').filter(event_type__in=list(_NOTICE_TASK_TYPES)).order_by('-created_at', '-id')
+    window_due_items, future_plan_items = _notice_task_future_items(now, next_run_at, seen_keys, latest_logs)
+    due_items.extend(window_due_items)
+    due_items.sort(key=lambda item: parse_datetime(item.get('notice_at') or '') or timezone.datetime.max.replace(tzinfo=dt_timezone.utc))
+    history_qs = CloudUserNoticeLog.objects.select_related('order', 'user').filter(event_type__in=list(_NOTICE_HISTORY_LABELS)).order_by('-created_at', '-id')
     recent_since = now - timezone.timedelta(days=1)
     recent_logs = history_qs.filter(created_at__gte=recent_since)
     latest_log = history_qs.first()
@@ -1545,6 +1637,7 @@ def notice_task_detail(request):
         'due_count': len(due_items),
         'recent_success_count': recent_logs.filter(delivered=True).count(),
         'recent_failure_count': recent_logs.filter(delivered=False).count(),
+        'retry_policy_label': '通知失败不会写入已通知时间；生命周期巡检会在下一轮继续重试，直到成功送达。',
         'due_items': due_items,
         'future_plan_items': future_plan_items,
         'history_items': [_notice_task_history_item_payload(item) for item in history_qs[:200]],
