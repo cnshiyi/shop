@@ -9,7 +9,7 @@ from decimal import Decimal
 from html import escape
 
 from aiogram.types import InlineKeyboardMarkup
-from asgiref.sync import sync_to_async
+from asgiref.sync import async_to_sync, sync_to_async
 from django.core.management import call_command
 from django.db.models import Q
 from django.utils import timezone
@@ -19,6 +19,7 @@ from core.runtime_config import get_runtime_config
 from core.texts import site_text
 
 from orders.models import BalanceLedger
+from orders.services import usdt_to_trx
 from bot.models import TelegramUser
 from cloud.models import CloudAsset, CloudAutoRenewPatrolLog, CloudServerOrder, CloudUserNoticeLog, Server, _with_runtime_time
 from cloud.note_utils import append_note, prepend_note
@@ -660,24 +661,22 @@ def _order_notice_ip(order, notice: dict | None = None) -> str:
 
 def _renew_notice_ip_summary(order, notice: dict) -> str:
     expires_at = notice.get('expires_at') or getattr(order, 'service_expires_at', None)
-    suspend_at = notice.get('suspend_at') or getattr(order, 'suspend_at', None)
-    delete_at = notice.get('delete_at') or getattr(order, 'delete_at', None)
-    ip_recycle_at = notice.get('ip_recycle_at') or getattr(order, 'ip_recycle_at', None)
     auto_renew_enabled = bool(notice.get('auto_renew_enabled') if 'auto_renew_enabled' in notice else getattr(order, 'auto_renew_enabled', False))
     auto_renew_at = expires_at - timezone.timedelta(days=1) if expires_at else None
-    auto_renew_lines = (
-        [f'自动续费状态: 已开启', f'预计 {_format_notice_dt(auto_renew_at)} 自动续费']
-        if auto_renew_enabled
-        else ['自动续费状态: 未开启']
-    )
-    lines = [
-        f'到期时间: {_format_notice_dt(expires_at)}',
-        *auto_renew_lines,
-        f'关机计划: {_format_notice_dt(suspend_at)}',
-        f'删机计划: {_format_notice_dt(delete_at)}',
-        f'IP删除计划: {_format_notice_dt(ip_recycle_at)}',
-    ]
-    return '\n'.join(lines)
+    auto_renew_text = f'已开启，预计 {_code_text(_format_notice_dt(auto_renew_at))} 自动续费' if auto_renew_enabled else '未开启'
+    return '\n'.join([
+        f'到期时间: {_code_text(_format_notice_dt(expires_at))}',
+        f'自动续费状态: {auto_renew_text}',
+    ])
+
+
+def _total_charge_line(total: Decimal) -> tuple[str, Decimal | None]:
+    try:
+        trx_total = async_to_sync(usdt_to_trx)(total)
+    except Exception as exc:
+        logger.warning('CLOUD_RENEW_NOTICE_TRX_ESTIMATE_FAILED total=%s error=%s', total, exc)
+        return f'预计总扣款: {_code_text(f"{total:.2f}")} USDT', None
+    return f'预计总扣款: {_code_text(f"{total:.2f}")} USDT / 约 {_code_text(trx_total)} TRX', trx_total
 
 
 @sync_to_async
@@ -704,19 +703,25 @@ def _renew_notice_batch_payload(order_ids: list[int]) -> dict:
         if amount is not None:
             total += amount
         lines.append('')
-        lines.append(f'IP: {_order_notice_ip(order, notice)}')
-        lines.append(f'价格: {amount:.2f} USDT' if amount is not None else '价格: 未设置，请联系客服确认')
+        lines.append(f'IP: {_code_text(_order_notice_ip(order, notice))}')
+        lines.append('')
+        lines.append(f'价格: {_code_text(f"{amount:.2f}")} USDT' if amount is not None else f'价格: {_code_text("未设置")}，请联系客服确认')
+        lines.append('')
         lines.append(_renew_notice_ip_summary(order, notice))
     if not kept_order_ids:
         return {'text': '', 'order_ids': [], 'first_order_id': None, 'count': 0}
     balance_lines = _group_balance_lines_for_orders(orders)
     if balance_lines:
         lines.extend(['', *balance_lines])
-    lines.extend(['', f'当前 USDT 余额: {balance:.6f}', f'预计总扣款: {total:.2f} USDT'])
-    if balance >= total:
+    trx_balance = Decimal(str(getattr(user, 'balance_trx', 0) or 0)) if user else Decimal('0')
+    total_charge_line, trx_total = _total_charge_line(total)
+    lines.extend(['', f'当前 USDT 余额: {_code_text(f"{balance:.6f}")} / TRX 余额: {_code_text(f"{trx_balance:.6f}")}', total_charge_line])
+    if balance >= total or (trx_total is not None and trx_balance >= trx_total):
         lines.append('余额检查: 充足。')
+    elif trx_total is not None:
+        lines.append(f'余额检查: 不足，预计还差 {_code_text(f"{max(total - balance, Decimal(0)):.6f}")} USDT 或 {_code_text(f"{max(trx_total - trx_balance, Decimal(0)):.6f}")} TRX。请在到期前充值，避免续费失败。')
     else:
-        lines.append(f'余额检查: 不足，预计还差 {(total - balance):.6f} USDT。请在到期前充值，避免续费失败。')
+        lines.append(f'余额检查: 不足，预计还差 {_code_text(f"{(total - balance):.6f}")} USDT。请在到期前充值，避免续费失败。')
     lines.append('如需续费，请进入“到期时间查询 → 代理列表”选择对应 IP。')
     lines.append('如需关闭自动续费，请进入“到期时间查询 → 自动续费查询”，选择对应 IP 后关闭自动续费。')
     return {'text': '\n'.join(lines), 'order_ids': kept_order_ids, 'first_order_id': kept_order_ids[0], 'count': len(kept_order_ids)}
