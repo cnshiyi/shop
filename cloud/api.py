@@ -52,7 +52,7 @@ from cloud.services import AWS_REGION_NAMES, RenewalPriceMissingError, _cloud_or
 from cloud.models import AddressMonitor, CloudAsset, CloudAutoRenewPatrolLog, CloudIpLog, CloudServerOrder, CloudServerPlan, CloudUserNoticeLog, Server, ServerPrice
 from cloud.note_utils import append_note, prepend_note
 from core.cloud_accounts import cloud_account_label
-from core.models import CloudAccountConfig, ExternalSyncLog
+from core.models import CloudAccountConfig, ExternalSyncLog, SiteConfig
 from core.cache import get_redis
 from core.persistence import record_external_sync_log
 from core.runtime_config import get_cloud_asset_sync_interval_seconds, get_runtime_config
@@ -1454,7 +1454,7 @@ def _notice_attempts_label(log) -> str:
 def _notice_attempt_payload(attempt: dict, *, pending: bool = False) -> dict:
     channel = attempt.get('channel') or ''
     if channel == 'bot':
-        name = attempt.get('channel_label') or 'Bot'
+        name = attempt.get('channel_label') or SiteConfig.get('bot_notice_sender_label', 'Bot')
     elif channel == 'account':
         name = attempt.get('account_label') or (f"账号{attempt.get('account_id')}" if attempt.get('account_id') else '个人号')
     else:
@@ -1472,10 +1472,12 @@ def _notice_attempt_payload(attempt: dict, *, pending: bool = False) -> dict:
 
 
 def _planned_notice_attempts(user) -> list[dict]:
-    attempts = [{'channel': 'bot', 'channel_label': 'Bot', 'ok': False, 'error': ''}]
+    attempts = [{'channel': 'bot', 'channel_label': SiteConfig.get('bot_notice_sender_label', 'Bot'), 'ok': False, 'error': ''}]
     accounts = TelegramLoginAccount.objects.filter(status='logged_in', notify_enabled=True).exclude(session_string__isnull=True).exclude(session_string='').order_by('-updated_at', '-id')[:10]
     for account in accounts:
-        attempts.append({'channel': 'account', 'account_id': account.id, 'account_label': account.label or f'账号{account.id}', 'ok': False, 'error': ''})
+        username = str(account.username or '').strip().lstrip('@')
+        account_label = f'{account.label} (@{username})' if username else (account.label or f'账号{account.id}')
+        attempts.append({'channel': 'account', 'account_id': account.id, 'account_label': account_label, 'ok': False, 'error': ''})
     return [_notice_attempt_payload(attempt, pending=True) for attempt in attempts]
 
 
@@ -1494,7 +1496,8 @@ def _notice_channel_payload(user, latest_log=None) -> dict:
     success = next((attempt for attempt in attempts if attempt.get('ok')), None)
     if success:
         if success.get('channel') == 'bot':
-            return {'notice_channel': 'telegram_bot', 'notice_channel_label': '机器人通知成功', 'notice_channel_attempts': attempt_items}
+            bot_label = success.get('channel_label') or SiteConfig.get('bot_notice_sender_label', 'Bot')
+            return {'notice_channel': 'telegram_bot', 'notice_channel_label': f'{bot_label} 通知成功', 'notice_channel_attempts': attempt_items}
         account_label = success.get('account_label') or (f"账号{success.get('account_id')}" if success.get('account_id') else '个人号')
         return {'notice_channel': 'telegram_account', 'notice_channel_label': f'{account_label} 通知成功', 'notice_channel_attempts': attempt_items}
     if attempts:
@@ -1502,7 +1505,8 @@ def _notice_channel_payload(user, latest_log=None) -> dict:
     tg_user_id = getattr(user, 'tg_user_id', None) if user else None
     if tg_user_id:
         account_count = max(len(attempt_items) - 1, 0)
-        label = f'Bot优先，失败后轮询{account_count}个账号' if account_count else 'Bot优先，暂无账号兜底'
+        bot_label = SiteConfig.get('bot_notice_sender_label', 'Bot')
+        label = f'{bot_label}优先，失败后轮询{account_count}个账号' if account_count else f'{bot_label}优先，暂无账号兜底'
         return {'notice_channel': 'telegram_fallback', 'notice_channel_label': label, 'notice_channel_attempts': attempt_items}
     return {'notice_channel': 'unbound', 'notice_channel_label': '未绑定通知渠道', 'notice_channel_attempts': []}
 

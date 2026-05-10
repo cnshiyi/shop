@@ -21,6 +21,7 @@ from bot.telegram_sender import send_with_notification_account_attempts
 from cloud.services import refresh_custom_plan_cache
 from cloud.lifecycle import auto_renew_patrol_tick, daily_expiry_summary_tick, lifecycle_tick, sync_server_status_tick, sync_cloud_accounts_tick
 from core.cache import refresh_config, close as cache_close
+from core.models import SiteConfig
 from core.runtime_config import get_cloud_asset_sync_interval_seconds, get_runtime_config
 from cloud.cache import init_monitor_cache
 from orders.runtime import check_resources, scan_forever, set_bot, set_resource_bot
@@ -138,6 +139,13 @@ async def run_bot():
     bot, dp = await create_dispatcher_and_register()
     set_bot(bot)
     set_resource_bot(bot)
+    bot_notice_label = 'Bot'
+    try:
+        me = await bot.get_me()
+        bot_notice_label = f'@{me.username}' if getattr(me, 'username', None) else (getattr(me, 'full_name', None) or f'Bot {me.id}')
+        await asyncio.to_thread(SiteConfig.set, 'bot_notice_sender_label', bot_notice_label)
+    except Exception as exc:
+        logger.warning('获取机器人身份失败，通知计划将使用默认 Bot 标签: %s', exc)
 
     async def _copy_notice_to_admins(user, text: str):
         raw_copy_value = await asyncio.to_thread(get_runtime_config, 'bot_notice_copy_chat_ids', '')
@@ -163,10 +171,10 @@ async def run_bot():
         delivered = False
         try:
             await bot.send_message(user.tg_user_id, text, reply_markup=reply_markup, parse_mode='HTML')
-            attempts.append({'channel': 'bot', 'channel_label': '机器人通知', 'ok': True, 'error': ''})
+            attempts.append({'channel': 'bot', 'channel_label': bot_notice_label, 'ok': True, 'error': ''})
             delivered = True
         except Exception as exc:
-            attempts.append({'channel': 'bot', 'channel_label': '机器人通知', 'ok': False, 'error': str(exc)})
+            attempts.append({'channel': 'bot', 'channel_label': bot_notice_label, 'ok': False, 'error': str(exc)})
             logger.warning('机器人生命周期通知发送失败 user=%s err=%s，尝试个人号通知', user_id, exc)
             try:
                 fallback_result = await send_with_notification_account_attempts(user.tg_user_id, text)

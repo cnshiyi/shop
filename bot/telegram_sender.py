@@ -24,7 +24,14 @@ def _notification_accounts() -> list[tuple[int, str, str]]:
         status='logged_in',
         notify_enabled=True,
     ).exclude(session_string__isnull=True).exclude(session_string='').order_by('-updated_at', '-id')
-    return [(item.id, item.label, item.session_string_plain) for item in accounts if item.session_string_plain]
+    rows = []
+    for item in accounts:
+        if not item.session_string_plain:
+            continue
+        username = str(item.username or '').strip().lstrip('@')
+        label = f'{item.label} (@{username})' if username else item.label
+        rows.append((item.id, label, item.session_string_plain))
+    return rows
 
 
 async def send_with_notification_account_attempts(chat_id: int, text: str) -> dict:
