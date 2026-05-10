@@ -1576,7 +1576,12 @@ def _orphan_asset_delete_plan_item_payload(asset, *, queue_status='orphan_due', 
     ip = asset.public_ip or asset.previous_public_ip or '未分配'
     plan_at = asset.actual_expires_at
     shutdown_enabled = _asset_shutdown_enabled(asset)
-    execution_status = '无订单同步资产已到期，待执行删除服务器'
+    linked_order = getattr(asset, 'order', None)
+    if linked_order and getattr(linked_order, 'status', '') in {'deleted', 'cancelled', 'expired'}:
+        queue_status_label = '过期存量服务器待删除'
+        execution_status = '关联订单已结束，服务器仍存在，待执行删除服务器'
+    else:
+        execution_status = '无订单同步资产已到期，待执行删除服务器'
     if not shutdown_enabled:
         queue_status = 'shutdown_disabled'
         queue_status_label = '关机计划关闭'
@@ -1648,12 +1653,13 @@ def _collect_shutdown_plan_queue(now):
         due_ids.add(order.id)
     waiting_manual_time_q = Q(provider_status__icontains='待人工添加时间') | Q(note__icontains='等待人工添加真实到期时间') | Q(note__icontains='等待人工添加时间')
     unattached_static_ip_q = Q(provider_status__icontains='未附加固定IP') | Q(note__icontains='未附加固定IP') | Q(provider_resource_id__icontains='StaticIp')
+    stale_linked_asset_q = Q(order__status__in=['deleted', 'cancelled', 'expired'])
     orphan_due_assets = list(
-        CloudAsset.objects.select_related('cloud_account', 'user').filter(
+        CloudAsset.objects.select_related('cloud_account', 'user', 'order').filter(
             kind=CloudAsset.KIND_SERVER,
-            order__isnull=True,
             actual_expires_at__lte=now,
-        ).exclude(waiting_manual_time_q)
+        ).filter(Q(order__isnull=True) | stale_linked_asset_q)
+        .exclude(waiting_manual_time_q)
         .exclude(unattached_static_ip_q)
         .exclude(_cloud_asset_deleted_or_missing_q())
         .order_by('actual_expires_at', 'id')[:1000]
@@ -1690,11 +1696,11 @@ def _collect_shutdown_plan_queue(now):
     future_items = []
     orphan_due_asset_ids = [asset.id for asset in orphan_due_assets]
     future_orphan_assets = list(
-        CloudAsset.objects.select_related('cloud_account', 'user').filter(
+        CloudAsset.objects.select_related('cloud_account', 'user', 'order').filter(
             kind=CloudAsset.KIND_SERVER,
-            order__isnull=True,
             actual_expires_at__gt=now,
-        ).exclude(id__in=orphan_due_asset_ids)
+        ).filter(Q(order__isnull=True) | stale_linked_asset_q)
+        .exclude(id__in=orphan_due_asset_ids)
         .exclude(waiting_manual_time_q)
         .exclude(unattached_static_ip_q)
         .exclude(_cloud_asset_deleted_or_missing_q())
@@ -1981,9 +1987,11 @@ def run_shutdown_plan_order(request, order_id):
 
 
 def _run_orphan_asset_delete_sync(asset_id: int, enforce_schedule: bool = True):
-    asset = CloudAsset.objects.select_related('cloud_account').filter(id=asset_id, order__isnull=True).first()
+    asset = CloudAsset.objects.select_related('cloud_account', 'order').filter(id=asset_id).first()
     if not asset:
-        return {'asset_id': asset_id, 'ip': '', 'ok': False, 'error': '无订单服务器资产不存在'}
+        return {'asset_id': asset_id, 'ip': '', 'ok': False, 'error': '服务器资产不存在'}
+    if asset.order_id and getattr(asset.order, 'status', '') not in {'deleted', 'cancelled', 'expired'}:
+        return {'asset_id': asset.id, 'ip': asset.public_ip or asset.previous_public_ip or '', 'ok': False, 'error': '该资产仍有关联订单，请走订单删除计划'}
     ip = asset.public_ip or asset.previous_public_ip or ''
     now = timezone.now()
     if asset.status in {CloudAsset.STATUS_DELETED, CloudAsset.STATUS_DELETING, CloudAsset.STATUS_TERMINATED, CloudAsset.STATUS_TERMINATING}:
