@@ -722,8 +722,6 @@ def _renew_notice_batch_payload(order_ids: list[int]) -> dict:
         lines.append(f'余额检查: 不足，预计还差 {_code_text(f"{max(total - balance, Decimal(0)):.6f}")} USDT 或 {_code_text(f"{max(trx_total - trx_balance, Decimal(0)):.6f}")} TRX。请在到期前充值，避免续费失败。')
     else:
         lines.append(f'余额检查: 不足，预计还差 {_code_text(f"{(total - balance):.6f}")} USDT。请在到期前充值，避免续费失败。')
-    lines.append('如需续费，请进入“到期时间查询 → 代理列表”选择对应 IP。')
-    lines.append('如需关闭自动续费，请进入“到期时间查询 → 自动续费查询”，选择对应 IP 后关闭自动续费。')
     return {'text': '\n'.join(lines), 'order_ids': kept_order_ids, 'first_order_id': kept_order_ids[0], 'count': len(kept_order_ids)}
 
 
@@ -790,6 +788,23 @@ def _lifecycle_notice_batch_text(title: str, order_ids: list[int], closing: str)
     return '\n'.join(lines).strip()
 
 
+def _balance_change_lines(balance_change: dict | None) -> list[str]:
+    if not balance_change:
+        return []
+    currency = str(balance_change.get('currency') or 'USDT')
+    before = balance_change.get('before')
+    amount = balance_change.get('amount')
+    after = balance_change.get('after')
+    lines = []
+    if before is not None:
+        lines.append(f'扣款前余额: {_code_text(f"{Decimal(str(before)):.6f}")} {currency}')
+    if amount is not None:
+        lines.append(f'本次扣款: {_code_text(f"{abs(Decimal(str(amount))):.6f}")} {currency}')
+    if after is not None:
+        lines.append(f'扣款后余额: {_code_text(f"{Decimal(str(after)):.6f}")} {currency}')
+    return lines
+
+
 @sync_to_async
 def _auto_renew_result_batch_text(results: list[dict]) -> str:
     executed = []
@@ -803,7 +818,7 @@ def _auto_renew_result_batch_text(results: list[dict]) -> str:
         ip = item.get('ip') or _order_notice_ip(order)
         if item.get('ok'):
             executed.append(ip)
-            successes.append((ip, _format_notice_dt(order.service_expires_at)))
+            successes.append((ip, _format_notice_dt(order.service_expires_at), item.get('balance_change')))
             continue
         fallback_retry = bool(item.get('fallback_retry'))
         if not _auto_renew_failure_notice_due(order):
@@ -817,13 +832,15 @@ def _auto_renew_result_batch_text(results: list[dict]) -> str:
         return ''
     lines = ['⚡ 自动续费执行结果', '']
     lines.append('本次执行自动续费 IP：')
-    lines.extend(f'- {ip}' for ip in executed)
+    lines.extend(_code_text(ip) for ip in executed)
     if successes:
         lines.extend(['', '执行成功：'])
-        lines.extend(f'- IP: {ip} | 新到期时间: {expires_at}' for ip, expires_at in successes)
+        for ip, expires_at, balance_change in successes:
+            lines.append(f'IP: {_code_text(ip)} | 新到期时间: {_code_text(expires_at)}')
+            lines.extend(_balance_change_lines(balance_change))
     if failures:
         lines.extend(['', '执行失败：'])
-        lines.extend(f'- IP: {ip} | 失败原因: {reason}' for ip, reason in failures)
+        lines.extend(f'IP: {_code_text(ip)} | 失败原因: {reason}' for ip, reason in failures)
     return '\n'.join(lines).strip()
 
 
@@ -854,12 +871,13 @@ def _auto_renew_success_batch_text(results: list[dict], title: str = '✅ 自动
         if not order:
             continue
         ip = item.get('ip') or _order_notice_ip(order)
-        payer_label = (item.get('balance_change') or {}).get('payer_label')
-        lines.append(f'IP: {ip}')
+        balance_change = item.get('balance_change') or {}
+        payer_label = balance_change.get('payer_label')
+        lines.append(f'IP: {_code_text(ip)}')
         if payer_label:
             lines.append(f'扣款用户: {payer_label}')
-        lines.append(f'新的到期时间: {_format_notice_dt(order.service_expires_at)}')
-        lines.append(_notice_plan_text(order, {'expires_at': order.service_expires_at, 'suspend_at': order.suspend_at, 'delete_at': order.delete_at, 'ip_recycle_at': order.ip_recycle_at, 'auto_renew_enabled': order.auto_renew_enabled}))
+        lines.append(f'新的到期时间: {_code_text(_format_notice_dt(order.service_expires_at))}')
+        lines.extend(_balance_change_lines(balance_change))
         lines.append('')
     return '\n'.join(lines).strip()
 
