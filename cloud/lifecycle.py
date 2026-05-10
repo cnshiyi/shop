@@ -2033,7 +2033,7 @@ async def lifecycle_tick(notify=None, notify_target=None, defer_destructive_seco
     orphan_asset_delete_due = await _get_orphan_asset_delete_due()
     unattached_static_ip_delete_due = await _get_unattached_static_ip_delete_due()
     logger.info(
-        'CLOUD_LIFECYCLE_DUE renew_notice=%s auto_renew_notice=%s auto_renew=%s delete_notice=%s recycle_notice=%s expire=%s suspend=%s delete=%s recycle=%s migration_due=%s orphan_asset_delete=%s renew_notice_days=%s renew_notice_debug_repeat=%s',
+        '云服务器生命周期扫描：续费提醒=%s 自动续费预提醒=%s 自动续费=%s 删机提醒=%s IP回收提醒=%s 到期标记=%s 待关机=%s 待删机=%s 待回收IP=%s 迁移旧机待删=%s 孤儿资源待删=%s 续费提醒天数=%s 调试重复提醒=%s',
         len(due['renew_notice']),
         len(due['auto_renew_notice']),
         len(due['auto_renew']),
@@ -2079,11 +2079,11 @@ async def lifecycle_tick(notify=None, notify_target=None, defer_destructive_seco
 
     for order in due['suspend']:
         if not _is_cloud_suspend_time():
-            logger.warning('CLOUD_SUSPEND_SKIP_OUTSIDE_WINDOW order_id=%s order_no=%s suspend_at=%s now=%s', order.id, order.order_no, order.suspend_at, timezone.now())
+            logger.warning('跳过云服务器关机：不在允许执行时间窗口 订单ID=%s 订单号=%s 计划关机=%s 当前时间=%s', order.id, order.order_no, order.suspend_at, timezone.now())
             continue
         can_suspend, skip_reason, checked_order = await _can_execute_suspend(order.id)
         if not can_suspend:
-            logger.warning('CLOUD_SUSPEND_SKIP_GUARD order_id=%s order_no=%s reason=%s now=%s', order.id, order.order_no, skip_reason, timezone.now())
+            logger.warning('跳过云服务器关机：安全检查未通过 订单ID=%s 订单号=%s 原因=%s 当前时间=%s', order.id, order.order_no, skip_reason, timezone.now())
             if checked_order:
                 await _record_lifecycle_action_failed(checked_order.id, 'suspend_skipped', skip_reason)
             continue
@@ -2100,7 +2100,7 @@ async def lifecycle_tick(notify=None, notify_target=None, defer_destructive_seco
 
     for order in due['delete']:
         if not _is_cloud_delete_safe_time():
-            logger.warning('CLOUD_DELETE_SKIP_OUTSIDE_WINDOW order_id=%s order_no=%s delete_at=%s now=%s', order.id, order.order_no, order.delete_at, timezone.now())
+            logger.warning('跳过云服务器删机：不在允许执行时间窗口 订单ID=%s 订单号=%s 计划删机=%s 当前时间=%s', order.id, order.order_no, order.delete_at, timezone.now())
             continue
         result = await _run_cloud_action_with_timeout(_delete_instance(order), action='AWS 实例删除', target=order.order_no)
         note = _action_note(result)
@@ -2128,7 +2128,7 @@ async def lifecycle_tick(notify=None, notify_target=None, defer_destructive_seco
 
     for order in migration_due_orders:
         if not _is_cloud_delete_safe_time():
-            logger.warning('CLOUD_MIGRATION_DELETE_SKIP_OUTSIDE_WINDOW order_id=%s order_no=%s migration_due_at=%s now=%s', order.id, order.order_no, order.migration_due_at, timezone.now())
+            logger.warning('跳过迁移旧服务器删机：不在允许执行时间窗口 订单ID=%s 订单号=%s 迁移清理时间=%s 当前时间=%s', order.id, order.order_no, order.migration_due_at, timezone.now())
             continue
         result = await _run_cloud_action_with_timeout(_delete_replaced_server(order), action='AWS 迁移旧实例删除', target=order.order_no)
         note = _action_note(result)
@@ -2142,27 +2142,27 @@ async def lifecycle_tick(notify=None, notify_target=None, defer_destructive_seco
 
     for asset in orphan_asset_delete_due:
         if not _is_cloud_delete_safe_time():
-            logger.warning('CLOUD_ORPHAN_ASSET_DELETE_SKIP_OUTSIDE_WINDOW asset_id=%s ip=%s actual_expires_at=%s now=%s', asset.id, asset.public_ip, asset.actual_expires_at, timezone.now())
+            logger.warning('跳过孤儿云资源删除：不在允许执行时间窗口 资源ID=%s IP=%s 实际到期=%s 当前时间=%s', asset.id, asset.public_ip, asset.actual_expires_at, timezone.now())
             continue
         result = await _run_cloud_action_with_timeout(_delete_orphan_asset_instance(asset), action='AWS 无订单实例删除', target=str(asset.id))
         note = _action_note(result)
         if _action_ok(result):
             updated = await _mark_orphan_asset_deleted(asset.id, note)
-            logger.info('CLOUD_ORPHAN_ASSET_DELETE asset_id=%s ip=%s provider=%s region=%s note=%s', updated.id, updated.previous_public_ip, updated.provider, updated.region_code, note)
+            logger.info('孤儿云资源已删除：资源ID=%s IP=%s 云厂商=%s 地区=%s 备注=%s', updated.id, updated.previous_public_ip, updated.provider, updated.region_code, note)
         elif asset.provider != 'aws_lightsail':
             updated = await _mark_orphan_asset_deleted(asset.id, note)
-            logger.info('CLOUD_ORPHAN_ASSET_LOCAL_DELETE asset_id=%s ip=%s provider=%s region=%s note=%s', updated.id, updated.previous_public_ip, updated.provider, updated.region_code, note)
+            logger.info('孤儿云资源已本地清理：资源ID=%s IP=%s 云厂商=%s 地区=%s 备注=%s', updated.id, updated.previous_public_ip, updated.provider, updated.region_code, note)
         else:
-            logger.warning('CLOUD_ORPHAN_ASSET_DELETE_FAILED asset_id=%s ip=%s provider=%s region=%s note=%s', asset.id, asset.public_ip, asset.provider, asset.region_code, note)
+            logger.warning('孤儿云资源删除失败：资源ID=%s IP=%s 云厂商=%s 地区=%s 备注=%s', asset.id, asset.public_ip, asset.provider, asset.region_code, note)
 
     for asset in unattached_static_ip_delete_due:
         if not _is_cloud_delete_safe_time():
-            logger.warning('CLOUD_UNATTACHED_STATIC_IP_DELETE_SKIP_OUTSIDE_WINDOW asset_id=%s ip=%s actual_expires_at=%s now=%s', asset.id, asset.public_ip, asset.actual_expires_at, timezone.now())
+            logger.warning('跳过未附加固定IP释放：不在允许执行时间窗口 资源ID=%s IP=%s 实际到期=%s 当前时间=%s', asset.id, asset.public_ip, asset.actual_expires_at, timezone.now())
             continue
         result = await _run_cloud_action_with_timeout(_release_unattached_static_ip(asset), action='AWS 未附加固定 IP 释放', target=str(asset.id))
         note = _action_note(result)
         if _action_ok(result):
             updated = await _mark_unattached_static_ip_deleted(asset.id, note)
-            logger.info('CLOUD_UNATTACHED_STATIC_IP_DELETE asset_id=%s ip=%s provider=%s region=%s note=%s', updated.id, updated.previous_public_ip, updated.provider, updated.region_code, note)
+            logger.info('未附加固定IP已释放：资源ID=%s IP=%s 云厂商=%s 地区=%s 备注=%s', updated.id, updated.previous_public_ip, updated.provider, updated.region_code, note)
         else:
-            logger.warning('CLOUD_UNATTACHED_STATIC_IP_DELETE_FAILED asset_id=%s ip=%s provider=%s region=%s note=%s', asset.id, asset.public_ip, asset.provider, asset.region_code, note)
+            logger.warning('未附加固定IP释放失败：资源ID=%s IP=%s 云厂商=%s 地区=%s 备注=%s', asset.id, asset.public_ip, asset.provider, asset.region_code, note)

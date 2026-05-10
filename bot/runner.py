@@ -82,17 +82,17 @@ async def _bot_alive_logger(started_at: float, scheduler: AsyncIOScheduler, scan
                 for job in jobs
             )
             logger.info(
-                'BOT_ALIVE pid=%s uptime_seconds=%s scheduler_running=%s jobs=%s scanner_done=%s listener_done=%s pending_tasks=%s',
+                '机器人心跳：进程=%s 运行时长=%s秒 调度器=%s 下次任务=%s 扫块器已结束=%s 个人号监听已结束=%s 待处理协程=%s',
                 os.getpid(),
                 uptime_seconds,
-                scheduler.running,
+                '运行中' if scheduler.running else '已停止',
                 job_summary or '-',
                 scanner_task.done(),
                 telegram_listener_task.done(),
                 len([task for task in asyncio.all_tasks() if not task.done()]),
             )
         except Exception as exc:
-            logger.exception('BOT_ALIVE_LOG_FAILED error=%s', exc)
+            logger.exception('机器人心跳日志输出失败：%s', exc)
 
 
 async def delete_webhook_with_retry(bot, retries: int = 5, base_delay: float = 2.0):
@@ -122,7 +122,7 @@ async def run_bot():
             logger.error('BOT_LOOP_EXCEPTION message=%s context=%s', message, context)
 
     loop.set_exception_handler(_handle_loop_exception)
-    logger.info('BOT_PROCESS_START pid=%s alive_interval_seconds=%s', os.getpid(), BOT_ALIVE_LOG_INTERVAL_SECONDS)
+    logger.info('机器人进程启动：进程=%s 心跳间隔=%s秒', os.getpid(), BOT_ALIVE_LOG_INTERVAL_SECONDS)
     if not BOT_TOKEN:
         logger.warning('未配置 BOT_TOKEN，跳过机器人启动')
         return
@@ -195,8 +195,11 @@ async def run_bot():
     scheduler.add_job(daily_expiry_summary_tick, 'cron', hour=12, minute=0, id='cloud_daily_expiry_summary', max_instances=1, coalesce=True, kwargs={'notify_target': _notify_target})
     scheduler.add_job(sync_server_status_tick, 'interval', seconds=cloud_sync_interval_seconds, id='cloud_server_sync', max_instances=1, coalesce=True)
     scheduler.add_job(sync_cloud_accounts_tick, 'interval', minutes=15, id='cloud_account_check', max_instances=1, coalesce=True)
-    scheduler.add_job(lambda: asyncio.to_thread(call_command, 'dedupe_servers'), 'interval', minutes=20, id='server_dedupe', max_instances=1, coalesce=True)
-    scheduler.add_job(lambda: asyncio.to_thread(call_command, 'cleanup_old_records'), 'cron', hour=18, minute=0, id='old_records_cleanup', max_instances=1, coalesce=True)
+    async def _run_management_command(command_name: str):
+        await asyncio.to_thread(call_command, command_name)
+
+    scheduler.add_job(_run_management_command, 'interval', minutes=20, id='server_dedupe', max_instances=1, coalesce=True, args=['dedupe_servers'])
+    scheduler.add_job(_run_management_command, 'cron', hour=18, minute=0, id='old_records_cleanup', max_instances=1, coalesce=True, args=['cleanup_old_records'])
     scheduler.start()
     scanner_stop = asyncio.Event()
     scanner_task = asyncio.create_task(scan_forever(scanner_stop), name='tron_scanner')
@@ -228,15 +231,15 @@ async def run_bot():
             logger.exception('启动时云服务器生命周期检查失败: %s', exc)
         logger.info('Telegram Bot 已启动 (aiogram)')
         await delete_webhook_with_retry(bot)
-        logger.info('BOT_POLLING_START pid=%s', os.getpid())
+        logger.info('机器人轮询启动：进程=%s', os.getpid())
         try:
             await dp.start_polling(bot)
-            logger.warning('BOT_POLLING_STOPPED reason=returned_without_exception')
+            logger.warning('机器人轮询已停止：原因=正常返回但不应退出')
         except Exception as exc:
-            logger.exception('BOT_POLLING_CRASHED error=%s', exc)
+            logger.exception('机器人轮询异常退出：%s', exc)
             raise
     finally:
-        logger.warning('BOT_SHUTDOWN_START pid=%s uptime_seconds=%s', os.getpid(), int(time.time() - started_at))
+        logger.warning('机器人开始关闭：进程=%s 运行时长=%s秒', os.getpid(), int(time.time() - started_at))
         scanner_stop.set()
         scanner_task.cancel()
         telegram_listener_stop.set()
@@ -273,6 +276,7 @@ def main():
     logging.getLogger('httpcore').setLevel(logging.WARNING)
     logging.getLogger('apscheduler').setLevel(logging.ERROR)
     logging.getLogger('aiogram.event').setLevel(logging.WARNING)
+    logging.getLogger('telethon.client.updates').setLevel(logging.WARNING)
     logging.getLogger('apscheduler.executors.default').setLevel(logging.ERROR)
     logging.getLogger('apscheduler.scheduler').setLevel(logging.ERROR)
     asyncio.run(run_bot())

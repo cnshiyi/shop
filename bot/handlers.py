@@ -1162,7 +1162,7 @@ class RawUserLoggingMiddleware:
             message_id = getattr(callback_message, 'message_id', None)
         if user and getattr(user, 'id', None):
             logger.info(
-                'BOT_UPDATE_IN event=%s route="%s" handler=%s user_id=%s username=%s first_name=%s chat_id=%s message_id=%s callback_data=%s text=%s',
+                '收到机器人更新：事件=%s 路由=%s 处理器=%s 用户ID=%s 用户名=%s 昵称=%s 会话ID=%s 消息ID=%s 按钮数据=%s 文本=%s',
                 event.__class__.__name__,
                 route_label,
                 handler_label,
@@ -1279,7 +1279,7 @@ class RawUserLoggingMiddleware:
             try:
                 if await _handle_admin_reply_message(bot, event, data.get('state')):
                     logger.info(
-                        'ADMIN_REPLY_MIDDLEWARE_HANDLED user_id=%s chat_id=%s message_id=%s route=%s',
+                        '管理员回复已处理：用户ID=%s 会话ID=%s 消息ID=%s 路由=%s',
                         getattr(user, 'id', None),
                         chat_id,
                         message_id,
@@ -1287,11 +1287,11 @@ class RawUserLoggingMiddleware:
                     )
                     return None
             except Exception as exc:
-                logger.warning('ADMIN_REPLY_MIDDLEWARE_ERROR user_id=%s chat_id=%s message_id=%s error=%s', getattr(user, 'id', None), chat_id, message_id, exc)
+                logger.warning('管理员回复处理失败：用户ID=%s 会话ID=%s 消息ID=%s 错误=%s', getattr(user, 'id', None), chat_id, message_id, exc)
         try:
             result = await handler(event, data)
             logger.info(
-                'BOT_UPDATE_DONE event=%s route="%s" handler=%s user_id=%s chat_id=%s message_id=%s callback_data=%s elapsed_ms=%.1f',
+                '机器人更新处理完成：事件=%s 路由=%s 处理器=%s 用户ID=%s 会话ID=%s 消息ID=%s 按钮数据=%s 耗时=%.1f毫秒',
                 event.__class__.__name__,
                 route_label,
                 handler_label,
@@ -1304,7 +1304,7 @@ class RawUserLoggingMiddleware:
             return result
         except Exception as exc:
             logger.exception(
-                'BOT_UPDATE_ERROR event=%s route="%s" handler=%s user_id=%s chat_id=%s message_id=%s callback_data=%s elapsed_ms=%.1f error=%s',
+                '机器人更新处理失败：事件=%s 路由=%s 处理器=%s 用户ID=%s 会话ID=%s 消息ID=%s 按钮数据=%s 耗时=%.1f毫秒 错误=%s',
                 event.__class__.__name__,
                 route_label,
                 handler_label,
@@ -2782,7 +2782,7 @@ def register_handlers(dp: Dispatcher):
         await state.clear()
         await get_or_create_user(message.from_user.id, message.from_user.username, message.from_user.first_name)
         sent = await message.answer(_bot_text('bot_welcome', '欢迎使用商城机器人！请选择操作：'), reply_markup=main_menu())
-        logger.info('BOT_MESSAGE_SEND route=start user_id=%s chat_id=%s reply_to=%s sent_message_id=%s', getattr(message.from_user, 'id', None), message.chat.id, message.message_id, getattr(sent, 'message_id', None))
+        logger.info('机器人消息已发送：路由=start 用户ID=%s 会话ID=%s 回复消息ID=%s 发送消息ID=%s', getattr(message.from_user, 'id', None), message.chat.id, message.message_id, getattr(sent, 'message_id', None))
 
     @dp.message(lambda message: (message.text or '').strip() in (MENU_BUTTONS | _current_menu_labels()))
     async def menu_handler(message: Message, state: FSMContext):
@@ -2798,21 +2798,21 @@ def register_handlers(dp: Dispatcher):
                 str(link_item.get('message') or '请点击下方按钮打开链接。'),
                 reply_markup=configured_link_menu(text) or main_menu(),
             )
-            logger.info('BOT_MESSAGE_SEND route=menu_link label=%s user_id=%s chat_id=%s reply_to=%s sent_message_id=%s', text, getattr(message.from_user, 'id', None), message.chat.id, message.message_id, getattr(sent, 'message_id', None))
+            logger.info('机器人消息已发送：路由=自定义菜单链接 标签=%s 用户ID=%s 会话ID=%s 回复消息ID=%s 发送消息ID=%s', text, getattr(message.from_user, 'id', None), message.chat.id, message.message_id, getattr(sent, 'message_id', None))
             return
 
         if text == '✨ 订阅':
             sent = await message.answer(_bot_text('bot_removed_products_entry', '商品购买入口已移除，请使用“🛠 购买节点”或“🔎 到期时间查询”。'), reply_markup=main_menu())
-            logger.info('BOT_MESSAGE_SEND route=menu_removed label=%s user_id=%s chat_id=%s reply_to=%s sent_message_id=%s', text, getattr(message.from_user, 'id', None), message.chat.id, message.message_id, getattr(sent, 'message_id', None))
+            logger.info('机器人消息已发送：路由=已移除菜单 标签=%s 用户ID=%s 会话ID=%s 回复消息ID=%s 发送消息ID=%s', text, getattr(message.from_user, 'id', None), message.chat.id, message.message_id, getattr(sent, 'message_id', None))
 
         elif text == '🛠 购买节点':
             regions = await list_custom_regions()
             sent = await message.answer(_bot_text('bot_custom_region_entry', '🛠 购买节点\n\n请选择热门地区：'), reply_markup=custom_region_menu(regions, expanded=False))
-            logger.info('BOT_MESSAGE_SEND route=menu_custom user_id=%s chat_id=%s reply_to=%s sent_message_id=%s', getattr(message.from_user, 'id', None), message.chat.id, message.message_id, getattr(sent, 'message_id', None))
+            logger.info('机器人消息已发送：路由=购买节点菜单 用户ID=%s 会话ID=%s 回复消息ID=%s 发送消息ID=%s', getattr(message.from_user, 'id', None), message.chat.id, message.message_id, getattr(sent, 'message_id', None))
 
         elif text == '🔎 到期时间查询':
             sent = await message.answer(_bot_text('bot_query_center_entry', '🔎 查询中心\n\n请选择查询方式：'), reply_markup=cloud_query_menu())
-            logger.info('BOT_MESSAGE_SEND route=menu_query user_id=%s chat_id=%s reply_to=%s sent_message_id=%s', getattr(message.from_user, 'id', None), message.chat.id, message.message_id, getattr(sent, 'message_id', None))
+            logger.info('机器人消息已发送：路由=查询中心菜单 用户ID=%s 会话ID=%s 回复消息ID=%s 发送消息ID=%s', getattr(message.from_user, 'id', None), message.chat.id, message.message_id, getattr(sent, 'message_id', None))
 
         elif text == '👤 个人中心':
             sent = await message.answer(
@@ -2821,7 +2821,7 @@ def register_handlers(dp: Dispatcher):
                 f'请选择要进入的功能：',
                 reply_markup=profile_menu(),
             )
-            logger.info('BOT_MESSAGE_SEND route=menu_profile user_id=%s chat_id=%s reply_to=%s sent_message_id=%s', getattr(message.from_user, 'id', None), message.chat.id, message.message_id, getattr(sent, 'message_id', None))
+            logger.info('机器人消息已发送：路由=个人中心菜单 用户ID=%s 会话ID=%s 回复消息ID=%s 发送消息ID=%s', getattr(message.from_user, 'id', None), message.chat.id, message.message_id, getattr(sent, 'message_id', None))
 
     @dp.callback_query(F.data == 'cloud:querymenu')
     async def cb_cloud_query_menu(callback: CallbackQuery, state: FSMContext):
