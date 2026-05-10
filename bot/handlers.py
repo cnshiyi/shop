@@ -1121,7 +1121,7 @@ class RawUserLoggingMiddleware:
             is_group_chat = str(chat_type) in {'group', 'supergroup', 'channel'}
             chat_username = None if is_group_chat else getattr(user, 'username', None)
             first_name = getattr(user, 'first_name', None)
-            if bot and not is_group_chat and (user.id == 1457254228 or not chat_username):
+            if bot and not is_group_chat:
                 try:
                     profile = await _get_cached_chat_profile(bot, user.id)
                     active_usernames = profile['active_usernames']
