@@ -2313,15 +2313,16 @@ async def _send_cloud_renewal_payment_prompt(message: Message, order, user, *, e
     group_balance_lines = await get_cloud_order_group_balance_lines(order.id)
     balance_text = '\n'.join(['多用户余额：', *group_balance_lines]) if group_balance_lines else ''
     balance_suffix = f'\n\n{balance_text}' if balance_text else ''
+    display_ip = str(getattr(order, 'public_ip', None) or getattr(order, 'previous_public_ip', None) or '').strip() or '未分配'
     text = (
         '🔄 云服务器续费\n\n'
-        f'订单号: {order.order_no}\n'
-        '续费时长: 31天\n'
-        f'续费价格: {fmt_pay_amount(order.pay_amount)} {order.currency}\n'
-        f'自动续费: {"已开启" if auto_renew_enabled else "已关闭"}\n'
+        f'IP: <code>{escape(display_ip)}</code>\n\n'
+        '续费时长: 31天\n\n'
+        f'续费价格: {fmt_pay_amount(order.pay_amount)} {order.currency}\n\n'
+        f'自动续费: {"已开启" if auto_renew_enabled else "已关闭"}\n\n'
         f'收款地址: <code>{escape(receive_address)}</code>'
         f'{balance_suffix}\n\n'
-        '可直接地址支付，或使用下方钱包按钮续费。自动续费默认使用钱包余额扣款。'
+        '可直接地址支付或使用下方钱包续费。自动续费默认使用钱包余额扣款，请保证余额充足。'
     )
     markup = cloud_server_renew_payment(order.id, order.pay_amount, trx_amount, bool(auto_renew_enabled))
     if edit:
