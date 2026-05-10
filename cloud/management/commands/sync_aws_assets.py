@@ -219,6 +219,22 @@ def _order_status_from_cloud_status(status):
     return 'completed'
 
 
+def _order_status_from_cloud_sync(order, status):
+    cloud_status = _order_status_from_cloud_status(status)
+    if cloud_status in {'deleted', 'expired', 'provisioning'} or not order:
+        return cloud_status
+    now = timezone.now()
+    if order.delete_at and order.delete_at <= now:
+        return 'deleting'
+    if order.status in {'suspended', 'deleting'}:
+        return order.status
+    if order.suspend_at and order.suspend_at <= now:
+        return 'suspended'
+    if order.service_expires_at and order.service_expires_at <= now:
+        return 'expiring'
+    return cloud_status
+
+
 def _asset_resolve_ordering():
     return [
         Case(
@@ -258,10 +274,20 @@ def _resolve_asset(instance_name, instance_arn, public_ip, order, account=None):
     if account:
         label = cloud_account_label(account)
         lookup &= (Q(cloud_account=account) | Q(account_label=label) | (Q(cloud_account__isnull=True) & (Q(account_label='') | Q(account_label__isnull=True))))
+    if order:
+        order_asset_q = Q()
+        if instance_name:
+            order_asset_q |= Q(instance_id=instance_name) | Q(asset_name=instance_name)
+        if instance_arn:
+            order_asset_q |= Q(provider_resource_id=instance_arn)
+        if public_ip:
+            order_asset_q |= Q(public_ip=public_ip) | Q(previous_public_ip=public_ip)
+        if order_asset_q:
+            order_asset = CloudAsset.objects.filter(kind=CloudAsset.KIND_SERVER, order=order).filter(order_asset_q).order_by(*_asset_resolve_ordering()).first()
+            if order_asset:
+                return order_asset
     base_queryset = CloudAsset.objects.filter(lookup).filter(Q(order__isnull=True) | ~Q(order__status__in=_SYNC_EXCLUDED_ORDER_STATUSES)).exclude(status__in=_SYNC_EXCLUDED_ASSET_STATUSES)
     direct_candidates = Q()
-    if order:
-        direct_candidates |= Q(order=order)
     if instance_name:
         direct_candidates |= Q(instance_id=instance_name) | Q(asset_name=instance_name)
     if instance_arn:
@@ -338,10 +364,20 @@ def _resolve_server(instance_name, instance_arn, public_ip, order, account=None)
     if account:
         label = cloud_account_label(account)
         base &= (Q(account_label=label) | Q(account_label='') | Q(account_label__isnull=True))
+    if order:
+        order_server_q = Q()
+        if instance_name:
+            order_server_q |= Q(instance_id=instance_name) | Q(server_name=instance_name)
+        if instance_arn:
+            order_server_q |= Q(provider_resource_id=instance_arn)
+        if public_ip:
+            order_server_q |= Q(public_ip=public_ip) | Q(previous_public_ip=public_ip)
+        if order_server_q:
+            order_server = Server.objects.filter(order=order).filter(order_server_q).order_by(*_server_resolve_ordering()).first()
+            if order_server:
+                return order_server
     base_queryset = Server.objects.filter(base).filter(Q(order__isnull=True) | ~Q(order__status__in=_SYNC_EXCLUDED_ORDER_STATUSES)).exclude(status__in=_SYNC_EXCLUDED_SERVER_STATUSES)
     direct_candidates = Q()
-    if order:
-        direct_candidates |= Q(order=order)
     if instance_name:
         direct_candidates |= Q(instance_id=instance_name) | Q(server_name=instance_name)
     if instance_arn:
@@ -766,17 +802,17 @@ class Command(BaseCommand):
                         bundle_id = item.get('bundleId') or '-'
                         blueprint_id = item.get('blueprintId') or '-'
                         order_scope = CloudServerOrder.objects.filter(provider='aws_lightsail', status__in=_ACTIVE_ORDER_STATUSES)
+                        traceable_order_scope = CloudServerOrder.objects.filter(provider='aws_lightsail', status__in=_TRACEABLE_ORDER_STATUSES)
                         if account:
-                            order_scope = order_scope.filter(Q(cloud_account=account) | Q(account_label=account_label))
-                        order = order_scope.filter(
-                            instance_id=instance_name,
-                        ).first() or order_scope.filter(
-                            provider_resource_id=instance_arn,
-                        ).first() or order_scope.filter(
-                            server_name=instance_name,
-                        ).first()
+                            account_filter = Q(cloud_account=account) | Q(account_label=account_label)
+                            order_scope = order_scope.filter(account_filter)
+                            traceable_order_scope = traceable_order_scope.filter(account_filter)
+                        exact_order_q = Q(instance_id=instance_name) | Q(provider_resource_id=instance_arn) | Q(server_name=instance_name)
+                        order = order_scope.filter(exact_order_q).first()
                         if not order and public_ip:
                             order = order_scope.filter(public_ip=public_ip).first()
+                        if not order:
+                            order = traceable_order_scope.filter(exact_order_q).first()
                         expires_at = order.service_expires_at if order else None
                         order_user = None
                         if order and order.user_id:
@@ -790,8 +826,8 @@ class Command(BaseCommand):
                         asset = _resolve_asset(instance_name, instance_arn, public_ip, order, account)
                         old_status = asset.status if asset else None
                         preserve_lifecycle_status = bool(
-                            (order and order.status in {'suspended', 'deleting'})
-                            or old_status in {CloudAsset.STATUS_SUSPENDED, CloudAsset.STATUS_DELETING, CloudAsset.STATUS_TERMINATING}
+                            (order and order.status == 'deleting')
+                            or old_status in {CloudAsset.STATUS_DELETING, CloudAsset.STATUS_TERMINATING}
                         )
                         if (order and order.status == 'deleting') or old_status == CloudAsset.STATUS_DELETING:
                             provider_status = f'旧机保留期，等待删除（云端{provider_status}）'
@@ -952,8 +988,14 @@ class Command(BaseCommand):
                             )
 
                         if order:
+                            original_order_status = order.status
                             if not preserve_lifecycle_status:
-                                order.status = _order_status_from_cloud_status(normalized_status)
+                                order.status = _order_status_from_cloud_sync(order, normalized_status)
+                            if original_order_status in _SYNC_EXCLUDED_ORDER_STATUSES and order.status != original_order_status:
+                                order.provision_note = _append_unique_line(
+                                    order.provision_note,
+                                    f'AWS 同步发现云端实例仍存在，已恢复订单状态：{original_order_status}->{order.status}；实例={instance_name or instance_arn or "-"}；IP={public_ip or "缺失"}；时间={timezone.now().isoformat()}。',
+                                )
                             order.cloud_account = account
                             order.account_label = account_label
                             order.region_code = region
@@ -968,7 +1010,7 @@ class Command(BaseCommand):
                             order.save(update_fields=[
                                 'status', 'cloud_account', 'account_label', 'region_code', 'region_name',
                                 'server_name', 'instance_id', 'provider_resource_id', 'static_ip_name',
-                                'previous_public_ip', 'public_ip', 'updated_at',
+                                'previous_public_ip', 'public_ip', 'provision_note', 'updated_at',
                             ])
 
                         if ip_changed:

@@ -5976,6 +5976,94 @@ class CloudServerServicesTestCase(TestCase):
         self.assertIn('云端运行中', asset.provider_status or '')
         self.assertIn('已到期关机，等待删除', asset.provider_status or '')
 
+    def test_sync_aws_assets_revives_deleted_order_when_instance_exists(self):
+        account = CloudAccountConfig.objects.create(
+            provider=CloudAccountConfig.PROVIDER_AWS,
+            name='aws-revive-deleted-order',
+            external_account_id='123456789012',
+            access_key='A' * 20,
+            secret_key='B' * 40,
+            region_hint='ap-southeast-1',
+            is_active=True,
+        )
+        account_label = cloud_account_label(account)
+        now = timezone.now()
+        order = CloudServerOrder.objects.create(
+            order_no='AWS-SYNC-REVIVE-DELETED-1',
+            user=self.user,
+            plan=self.plan,
+            cloud_account=account,
+            account_label=account_label,
+            provider='aws_lightsail',
+            region_code=self.plan.region_code,
+            region_name=self.plan.region_name,
+            plan_name=self.plan.plan_name,
+            quantity=1,
+            currency='USDT',
+            total_amount='19.00',
+            pay_amount='19.00',
+            pay_method='balance',
+            status='deleted',
+            public_ip=None,
+            previous_public_ip='10.9.0.8',
+            instance_id='i-revive-deleted-1',
+            provider_resource_id='arn:aws:lightsail:ap-southeast-1:123456789012:Instance/i-revive-deleted-1',
+            server_name='i-revive-deleted-1',
+            service_started_at=now - timezone.timedelta(days=20),
+            service_expires_at=now - timezone.timedelta(days=5),
+            suspend_at=now - timezone.timedelta(days=2),
+            delete_at=now - timezone.timedelta(days=1),
+        )
+        asset = CloudAsset.objects.create(
+            kind=CloudAsset.KIND_SERVER,
+            source=CloudAsset.SOURCE_AWS_SYNC,
+            order=order,
+            user=self.user,
+            provider='aws_lightsail',
+            cloud_account=account,
+            account_label=account_label,
+            region_code=self.plan.region_code,
+            region_name=self.plan.region_name,
+            asset_name='i-revive-deleted-1',
+            public_ip='10.9.0.8',
+            previous_public_ip='10.9.0.8',
+            instance_id=order.instance_id,
+            provider_resource_id=order.provider_resource_id,
+            actual_expires_at=order.service_expires_at,
+            status=CloudAsset.STATUS_RUNNING,
+            provider_status='运行中',
+            is_active=True,
+        )
+
+        class FakeLightsailClient:
+            def get_static_ips(self, **kwargs):
+                return {'staticIps': [], 'nextPageToken': None}
+
+            def get_instances(self, **kwargs):
+                return {
+                    'instances': [{
+                        'name': 'i-revive-deleted-1',
+                        'arn': 'arn:aws:lightsail:ap-southeast-1:123456789012:Instance/i-revive-deleted-1',
+                        'state': {'name': 'running'},
+                        'location': {'regionName': '新加坡'},
+                        'publicIpAddress': '10.9.0.8',
+                        'bundleId': 'micro_1_0',
+                        'blueprintId': 'debian_12',
+                    }],
+                    'nextPageToken': None,
+                }
+
+        with patch('cloud.management.commands.sync_aws_assets._list_regions', return_value=['ap-southeast-1']), patch('cloud.management.commands.sync_aws_assets._aws_account_identity', return_value='123456789012'), patch('cloud.management.commands.sync_aws_assets._lightsail_client', return_value=FakeLightsailClient()):
+            call_command('sync_aws_assets', region='ap-southeast-1')
+
+        order.refresh_from_db()
+        asset.refresh_from_db()
+        self.assertEqual(order.status, 'deleting')
+        self.assertEqual(order.public_ip, '10.9.0.8')
+        self.assertEqual(asset.status, CloudAsset.STATUS_RUNNING)
+        self.assertEqual(asset.order_id, order.id)
+        due = async_to_sync(_get_due_orders)()
+        self.assertIn(order.id, [item.id for item in due['delete']])
 
     def test_proxy_list_hides_deleted_order_retained_ip(self):
         order = CloudServerOrder.objects.create(
