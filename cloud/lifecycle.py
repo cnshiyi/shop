@@ -5,7 +5,7 @@ import os
 import re
 import uuid
 from collections import defaultdict
-from decimal import Decimal
+from decimal import Decimal, ROUND_HALF_UP
 from html import escape
 
 from aiogram.types import InlineKeyboardMarkup
@@ -30,6 +30,10 @@ logger = logging.getLogger(__name__)
 
 AUTO_RENEW_BEFORE_EXPIRY_WINDOW = timezone.timedelta(days=1)
 AUTO_RENEW_FAILURE_NOTICE_COOLDOWN = timezone.timedelta(hours=1)
+
+
+def _amount_2(value) -> str:
+    return f'{Decimal(str(value or 0)).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)}'
 
 
 def _cloud_text_format(key: str, default: str, **kwargs) -> str:
@@ -586,7 +590,7 @@ def _group_balance_lines_for_orders(orders: list[CloudServerOrder]) -> list[str]
             users.append(user)
     if len(users) <= 1:
         return []
-    return ['多用户 USDT 余额:', *[f'- {_user_display_label(user)}: {Decimal(str(getattr(user, "balance", 0) or 0)):.6f}' for user in users]]
+    return ['多用户 USDT 余额:', *[f'- {_user_display_label(user)}: {_amount_2(getattr(user, "balance", 0))}' for user in users]]
 
 
 def _active_notice_asset_for_order(order) -> CloudAsset | None:
@@ -675,8 +679,8 @@ def _total_charge_line(total: Decimal) -> tuple[str, Decimal | None]:
         trx_total = async_to_sync(usdt_to_trx)(total)
     except Exception as exc:
         logger.warning('CLOUD_RENEW_NOTICE_TRX_ESTIMATE_FAILED total=%s error=%s', total, exc)
-        return f'预计总扣款: {_code_text(f"{total:.2f}")} USDT', None
-    return f'预计总扣款: {_code_text(f"{total:.2f}")} USDT / 约 {_code_text(trx_total)} TRX', trx_total
+        return f'预计总扣款: {_code_text(_amount_2(total))} USDT', None
+    return f'预计总扣款: {_code_text(_amount_2(total))} USDT / 约 {_code_text(_amount_2(trx_total))} TRX', trx_total
 
 
 @sync_to_async
@@ -715,13 +719,13 @@ def _renew_notice_batch_payload(order_ids: list[int]) -> dict:
         lines.extend(['', *balance_lines])
     trx_balance = Decimal(str(getattr(user, 'balance_trx', 0) or 0)) if user else Decimal('0')
     total_charge_line, trx_total = _total_charge_line(total)
-    lines.extend(['', f'当前 USDT 余额: {_code_text(f"{balance:.6f}")} / TRX 余额: {_code_text(f"{trx_balance:.6f}")}', total_charge_line])
+    lines.extend(['', f'当前 USDT 余额: {_code_text(_amount_2(balance))} / TRX 余额: {_code_text(_amount_2(trx_balance))}', total_charge_line])
     if balance >= total or (trx_total is not None and trx_balance >= trx_total):
         lines.append('余额检查: 充足。')
     elif trx_total is not None:
-        lines.append(f'余额检查: 不足，预计还差 {_code_text(f"{max(total - balance, Decimal(0)):.6f}")} USDT 或 {_code_text(f"{max(trx_total - trx_balance, Decimal(0)):.6f}")} TRX。请在到期前充值，避免续费失败。')
+        lines.append(f'余额检查: 不足，预计还差 {_code_text(_amount_2(max(total - balance, Decimal(0))))} USDT 或 {_code_text(_amount_2(max(trx_total - trx_balance, Decimal(0))))} TRX。请在到期前充值，避免续费失败。')
     else:
-        lines.append(f'余额检查: 不足，预计还差 {_code_text(f"{(total - balance):.6f}")} USDT。请在到期前充值，避免续费失败。')
+        lines.append(f'余额检查: 不足，预计还差 {_code_text(_amount_2(total - balance))} USDT。请在到期前充值，避免续费失败。')
     return {'text': '\n'.join(lines), 'order_ids': kept_order_ids, 'first_order_id': kept_order_ids[0], 'count': len(kept_order_ids)}
 
 
@@ -755,11 +759,11 @@ def _auto_renew_notice_batch_payload(order_ids: list[int]) -> dict:
     balance_lines = _group_balance_lines_for_orders(orders)
     if balance_lines:
         lines.extend(['', *balance_lines])
-    lines.extend(['', f'当前 USDT 余额: {balance:.6f}', f'预计总扣款: {total:.2f} USDT'])
+    lines.extend(['', f'当前 USDT 余额: {_amount_2(balance)}', f'预计总扣款: {_amount_2(total)} USDT'])
     if balance >= total:
         lines.append('余额检查: 充足。')
     else:
-        lines.append(f'余额检查: 不足，预计还差 {(total - balance):.6f} USDT。请在自动续费时间前充值，避免续费失败。')
+        lines.append(f'余额检查: 不足，预计还差 {_amount_2(total - balance)} USDT。请在自动续费时间前充值，避免续费失败。')
     lines.append('如不需要自动续费，请进入“到期时间查询 → 自动续费查询”关闭对应 IP。')
     return {'text': '\n'.join(lines), 'order_ids': kept_order_ids, 'first_order_id': kept_order_ids[0], 'count': len(kept_order_ids)}
 
@@ -797,11 +801,11 @@ def _balance_change_lines(balance_change: dict | None) -> list[str]:
     after = balance_change.get('after')
     lines = []
     if before is not None:
-        lines.append(f'扣款前余额: {_code_text(f"{Decimal(str(before)):.6f}")} {currency}')
+        lines.append(f'扣款前余额: {_code_text(_amount_2(before))} {currency}')
     if amount is not None:
-        lines.append(f'本次扣款: {_code_text(f"{abs(Decimal(str(amount))):.6f}")} {currency}')
+        lines.append(f'本次扣款: {_code_text(_amount_2(abs(Decimal(str(amount)))))} {currency}')
     if after is not None:
-        lines.append(f'扣款后余额: {_code_text(f"{Decimal(str(after)):.6f}")} {currency}')
+        lines.append(f'扣款后余额: {_code_text(_amount_2(after))} {currency}')
     return lines
 
 
