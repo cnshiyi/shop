@@ -2102,9 +2102,11 @@ async def lifecycle_tick(notify=None, notify_target=None, defer_destructive_seco
         if not _is_cloud_delete_safe_time():
             logger.warning('跳过云服务器删机：不在允许执行时间窗口 订单ID=%s 订单号=%s 计划删机=%s 当前时间=%s', order.id, order.order_no, order.delete_at, timezone.now())
             continue
+        logger.info('开始执行云服务器删机：订单ID=%s 订单号=%s IP=%s 云厂商=%s 地区=%s', order.id, order.order_no, order.public_ip or order.previous_public_ip, order.provider, order.region_code)
         result = await _run_cloud_action_with_timeout(_delete_instance(order), action='AWS 实例删除', target=order.order_no)
         note = _action_note(result)
         if _action_ok(result):
+            logger.info('云服务器删机成功：订单ID=%s 订单号=%s IP=%s 备注=%s', order.id, order.order_no, order.public_ip or order.previous_public_ip, note)
             if order.status == 'failed':
                 await _mark_deleted(order.id, note or '失败新实例已按计划自动删除。')
                 continue
@@ -2113,37 +2115,45 @@ async def lifecycle_tick(notify=None, notify_target=None, defer_destructive_seco
                 continue
             await _mark_deleted(order.id, note)
         else:
+            logger.warning('云服务器删机失败：订单ID=%s 订单号=%s IP=%s 备注=%s', order.id, order.order_no, order.public_ip or order.previous_public_ip, note)
             await _record_lifecycle_action_failed(order.id, 'delete_failed', note)
 
     for order in due['recycle']:
         notice = await _cloud_expiry_notice_payload(order.id)
         if not notice.get('valid'):
             continue
+        logger.info('开始释放订单固定IP：订单ID=%s 订单号=%s IP=%s 云厂商=%s 地区=%s', order.id, order.order_no, order.public_ip or order.previous_public_ip, order.provider, order.region_code)
         result = await _run_cloud_action_with_timeout(_release_order_static_ip(order), action='AWS 固定 IP 释放', target=order.order_no)
         note = _action_note(result)
         if _action_ok(result):
+            logger.info('订单固定IP释放成功：订单ID=%s 订单号=%s IP=%s 备注=%s', order.id, order.order_no, order.public_ip or order.previous_public_ip, note)
             await _mark_recycled(order.id, note)
         else:
+            logger.warning('订单固定IP释放失败：订单ID=%s 订单号=%s IP=%s 备注=%s', order.id, order.order_no, order.public_ip or order.previous_public_ip, note)
             await _record_lifecycle_action_failed(order.id, 'recycle_failed', note)
 
     for order in migration_due_orders:
         if not _is_cloud_delete_safe_time():
             logger.warning('跳过迁移旧服务器删机：不在允许执行时间窗口 订单ID=%s 订单号=%s 迁移清理时间=%s 当前时间=%s', order.id, order.order_no, order.migration_due_at, timezone.now())
             continue
+        logger.info('开始删除迁移旧服务器：订单ID=%s 订单号=%s IP=%s 云厂商=%s 地区=%s', order.id, order.order_no, order.public_ip or order.previous_public_ip, order.provider, order.region_code)
         result = await _run_cloud_action_with_timeout(_delete_replaced_server(order), action='AWS 迁移旧实例删除', target=order.order_no)
         note = _action_note(result)
         if _action_ok(result):
+            logger.info('迁移旧服务器删除成功：订单ID=%s 订单号=%s IP=%s 备注=%s', order.id, order.order_no, order.public_ip or order.previous_public_ip, note)
             notice = await _cloud_expiry_notice_payload(order.id)
             if not notice.get('valid'):
                 continue
             await _mark_replaced_order_deleted(order.id, note)
         else:
+            logger.warning('迁移旧服务器删除失败：订单ID=%s 订单号=%s IP=%s 备注=%s', order.id, order.order_no, order.public_ip or order.previous_public_ip, note)
             await _record_lifecycle_action_failed(order.id, 'delete_failed', note)
 
     for asset in orphan_asset_delete_due:
         if not _is_cloud_delete_safe_time():
             logger.warning('跳过孤儿云资源删除：不在允许执行时间窗口 资源ID=%s IP=%s 实际到期=%s 当前时间=%s', asset.id, asset.public_ip, asset.actual_expires_at, timezone.now())
             continue
+        logger.info('开始删除孤儿云资源：资源ID=%s IP=%s 云厂商=%s 地区=%s', asset.id, asset.public_ip, asset.provider, asset.region_code)
         result = await _run_cloud_action_with_timeout(_delete_orphan_asset_instance(asset), action='AWS 无订单实例删除', target=str(asset.id))
         note = _action_note(result)
         if _action_ok(result):
@@ -2159,6 +2169,7 @@ async def lifecycle_tick(notify=None, notify_target=None, defer_destructive_seco
         if not _is_cloud_delete_safe_time():
             logger.warning('跳过未附加固定IP释放：不在允许执行时间窗口 资源ID=%s IP=%s 实际到期=%s 当前时间=%s', asset.id, asset.public_ip, asset.actual_expires_at, timezone.now())
             continue
+        logger.info('开始释放未附加固定IP：资源ID=%s IP=%s 云厂商=%s 地区=%s', asset.id, asset.public_ip, asset.provider, asset.region_code)
         result = await _run_cloud_action_with_timeout(_release_unattached_static_ip(asset), action='AWS 未附加固定 IP 释放', target=str(asset.id))
         note = _action_note(result)
         if _action_ok(result):
