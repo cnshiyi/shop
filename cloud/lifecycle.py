@@ -838,12 +838,12 @@ def _auto_renew_result_batch_text(results: list[dict]) -> str:
     lines.append('本次自动续费 IP：')
     lines.extend(_code_text(ip) for ip in executed)
     if successes:
-        lines.extend(['', '执行成功：'])
+        lines.extend(['', '续费成功：'])
         for ip, expires_at, balance_change in successes:
             lines.append(f'IP: {_code_text(ip)} | 新到期时间: {_code_text(expires_at)}')
             lines.extend(_balance_change_lines(balance_change))
     if failures:
-        lines.extend(['', '执行失败：'])
+        lines.extend(['', '续费失败：'])
         lines.extend(f'IP: {_code_text(ip)} | 失败原因: {reason}' for ip, reason in failures)
     return '\n'.join(lines).strip()
 
