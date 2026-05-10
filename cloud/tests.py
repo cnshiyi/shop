@@ -32,7 +32,7 @@ from cloud.provisioning import (
 )
 from cloud.services import apply_cloud_server_renewal, create_cloud_server_rebuild_order, create_cloud_server_renewal, create_cloud_server_renewal_by_public_query, create_cloud_server_renewal_for_user, create_cloud_server_upgrade_order, delay_cloud_server_expiry, ensure_cloud_asset_operation_order, get_cloud_server_by_ip, get_cloud_server_by_ip_for_user, get_proxy_asset_by_ip_for_admin, get_proxy_asset_by_ip_for_user, list_cloud_asset_renewal_plans, list_cloud_server_upgrade_plans, list_retained_ip_renewal_plans, list_user_cloud_servers, mark_cloud_server_ip_change_requested, mark_cloud_server_reinit_requested, pay_cloud_server_renewal_with_balance, prepare_cloud_asset_renewal_with_link, record_cloud_ip_log, replace_cloud_asset_order_by_admin
 from cloud.sync_safety import get_missing_confirmation_threshold
-from cloud.api import _cloud_order_source_tags, auto_renew_task_detail, cloud_order_detail, cloud_orders_list, delete_cloud_asset, delete_server, run_auto_renew_order, run_auto_renew_tasks, sync_cloud_asset_status, tasks_overview, update_cloud_asset
+from cloud.api import _cloud_order_source_tags, auto_renew_task_detail, cloud_order_detail, cloud_orders_list, delete_cloud_asset, delete_server, run_auto_renew_order, run_auto_renew_tasks, sync_cloud_asset_status, sync_cloud_assets, tasks_overview, update_cloud_asset
 from core.cloud_accounts import cloud_account_label
 from core.models import CloudAccountConfig, SiteConfig
 from orders.payment_scanner import _confirm_cloud_server_order
@@ -3514,6 +3514,56 @@ class CloudServerServicesTestCase(TestCase):
         asset_ids = {item.get('id') for item in items}
 
         self.assertNotIn(attached_asset.id, asset_ids)
+
+    def test_sync_cloud_assets_runs_enabled_accounts_and_merges_results(self):
+        aliyun_account = CloudAccountConfig.objects.create(
+            provider=CloudAccountConfig.PROVIDER_ALIYUN,
+            name='aliyun-sync-assets-all',
+            external_account_id='acct-aliyun-sync-assets-all',
+            access_key='ak',
+            secret_key='sk',
+            region_hint='cn-hongkong',
+            is_active=True,
+        )
+        aws_account = CloudAccountConfig.objects.create(
+            provider=CloudAccountConfig.PROVIDER_AWS,
+            name='aws-sync-assets-all',
+            external_account_id='acct-aws-sync-assets-all',
+            access_key='ak',
+            secret_key='sk',
+            region_hint='ap-southeast-1',
+            is_active=True,
+        )
+        staff_user = get_user_model().objects.create_user(username='staff_sync_assets_all', password='x', is_staff=True)
+        calls = []
+
+        class AwsCommand:
+            synced_regions = ['ap-southeast-1']
+            sync_errors = []
+
+        class AliyunCommand:
+            pass
+
+        def fake_call_command(command_name, **kwargs):
+            calls.append((command_name, kwargs))
+            if command_name == 'sync_aws_assets':
+                return AwsCommand(), f'aws account {kwargs.get("account_id")} ok\n'
+            return AliyunCommand(), f'aliyun account {kwargs.get("account_id")} ok\n'
+
+        request = RequestFactory().post('/api/dashboard/cloud-assets/sync/', data='{}', content_type='application/json')
+        request.user = staff_user
+        with patch('cloud.api._call_command_capture_threaded', side_effect=fake_call_command), patch('cloud.api._call_command_capture', return_value=(object(), 'reconcile ok\n')):
+            response = sync_cloud_assets(request)
+
+        self.assertEqual(response.status_code, 200)
+        payload = json.loads(response.content)['data']
+        self.assertTrue(payload['ok'])
+        self.assertTrue(payload['synced']['aliyun'])
+        self.assertTrue(payload['synced']['aws'])
+        self.assertTrue(payload['synced']['reconcile'])
+        self.assertIn('ap-southeast-1', payload['aws_regions'])
+        self.assertIn(('sync_aliyun_assets', {'region': 'cn-hongkong', 'account_id': str(aliyun_account.id)}), calls)
+        self.assertIn(('sync_aws_assets', {'region': '', 'account_id': str(aws_account.id)}), calls)
 
     def test_sync_cloud_asset_status_uses_asset_scope(self):
         account = CloudAccountConfig.objects.create(

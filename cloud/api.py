@@ -8,6 +8,7 @@ import re
 import threading
 import time
 import uuid
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from decimal import Decimal, InvalidOperation
 
 import httpx
@@ -15,7 +16,7 @@ from urllib.parse import urlparse
 
 from asgiref.sync import async_to_sync
 from django.core.management import get_commands, load_command_class
-from django.db import IntegrityError, transaction
+from django.db import IntegrityError, close_old_connections, transaction
 from django.db.models import Case, CharField, Count, F, IntegerField, Q, Value, When
 from django.db.models.functions import Cast
 from django.db.utils import ProgrammingError
@@ -162,6 +163,16 @@ def _call_command_capture(command_name: str, *args, **options):
     defaults.update(options)
     command.execute(*args, stdout=output, **defaults)
     return command, output.getvalue()
+
+
+def _call_command_capture_threaded(command_name: str, **options):
+    output = io.StringIO()
+    close_old_connections()
+    try:
+        command, log_text = _call_command_capture(command_name, stdout=output, **options)
+        return command, log_text
+    finally:
+        close_old_connections()
 
 
 def _is_unattached_ip_asset(asset: CloudAsset) -> bool:
@@ -2827,27 +2838,53 @@ def sync_cloud_assets(request):
     command_output = io.StringIO()
     aliyun_accounts = _active_sync_accounts(CloudAccountConfig.PROVIDER_ALIYUN)
     aws_accounts = _active_sync_accounts(CloudAccountConfig.PROVIDER_AWS)
-    aws_command = None
     warnings = []
+    sync_tasks = []
     for aliyun_account in aliyun_accounts:
-        try:
-            _call_command_capture('sync_aliyun_assets', region=aliyun_region, account_id=str(aliyun_account.id), stdout=command_output)
-            synced['aliyun'] = True
-        except Exception as exc:
-            message = f'阿里云账号#{getattr(aliyun_account, "id", "-")}代理同步失败: {exc}'
-            errors.append(message)
-            logger.exception('DASHBOARD_SYNC_ASSETS_ALIYUN_FAILED account_id=%s region=%s', getattr(aliyun_account, 'id', None), aliyun_region)
+        sync_tasks.append({
+            'provider': 'aliyun',
+            'account': aliyun_account,
+            'command': 'sync_aliyun_assets',
+            'kwargs': {'region': aliyun_region, 'account_id': str(aliyun_account.id)},
+        })
     for aws_account in aws_accounts:
-        try:
-            aws_command, _ = _call_command_capture('sync_aws_assets', region=aws_region, account_id=str(aws_account.id), stdout=command_output)
-            account_regions = getattr(aws_command, 'synced_regions', None) or [aws_region or 'all']
-            aws_regions.extend(region for region in account_regions if region not in aws_regions)
-            warnings.extend(getattr(aws_command, 'sync_errors', []) or [])
-            synced['aws'] = True
-        except Exception as exc:
-            message = f'AWS账号#{getattr(aws_account, "id", "-")}代理同步失败: {exc}'
-            errors.append(message)
-            logger.exception('DASHBOARD_SYNC_ASSETS_AWS_FAILED account_id=%s region=%s', getattr(aws_account, 'id', None), aws_region or 'all')
+        sync_tasks.append({
+            'provider': 'aws',
+            'account': aws_account,
+            'command': 'sync_aws_assets',
+            'kwargs': {'region': aws_region, 'account_id': str(aws_account.id)},
+        })
+
+    def run_task(task):
+        command, log_text = _call_command_capture_threaded(task['command'], **task['kwargs'])
+        return {'task': task, 'command': command, 'log_text': log_text}
+
+    max_workers = max(1, min(4, len(sync_tasks) or 1))
+    if sync_tasks:
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            future_map = {executor.submit(run_task, task): task for task in sync_tasks}
+            for future in as_completed(future_map):
+                task = future_map[future]
+                account = task['account']
+                try:
+                    result = future.result()
+                    command_output.write(result.get('log_text') or '')
+                    if task['provider'] == 'aliyun':
+                        synced['aliyun'] = True
+                    else:
+                        command = result['command']
+                        account_regions = getattr(command, 'synced_regions', None) or [aws_region or 'all']
+                        aws_regions.extend(region for region in account_regions if region not in aws_regions)
+                        warnings.extend(getattr(command, 'sync_errors', []) or [])
+                        synced['aws'] = True
+                except Exception as exc:
+                    if task['provider'] == 'aliyun':
+                        message = f'阿里云账号#{getattr(account, "id", "-")}代理同步失败: {exc}'
+                        logger.exception('DASHBOARD_SYNC_ASSETS_ALIYUN_FAILED account_id=%s region=%s', getattr(account, 'id', None), aliyun_region)
+                    else:
+                        message = f'AWS账号#{getattr(account, "id", "-")}代理同步失败: {exc}'
+                        logger.exception('DASHBOARD_SYNC_ASSETS_AWS_FAILED account_id=%s region=%s', getattr(account, 'id', None), aws_region or 'all')
+                    errors.append(message)
     try:
         _call_command_capture('reconcile_cloud_assets_from_servers', stdout=command_output)
         synced['reconcile'] = True
