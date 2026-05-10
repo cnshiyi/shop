@@ -1515,7 +1515,7 @@ def _notice_status_payload(*, sent_at=None, latest_log=None, queue_status='sched
     if queue_status in {'due_now', 'fallback_notice'}:
         return {'notice_status': 'pending', 'notice_status_label': '待本轮通知', 'retry_label': '发送失败不会写入已通知时间，会在后续巡检重试'}
     if queue_status == 'within_window':
-        return {'notice_status': 'scheduled_soon', 'notice_status_label': '两天内待通知', 'retry_label': '到通知时间后自动发送，失败则重试'}
+        return {'notice_status': 'scheduled_soon', 'notice_status_label': '3天内待通知', 'retry_label': '到通知时间后自动发送，失败则重试'}
     return {'notice_status': 'scheduled', 'notice_status_label': '未来计划', 'retry_label': '未到通知时间'}
 
 
@@ -1617,7 +1617,7 @@ def _notice_latest_log_map():
     return mapped
 
 
-def _notice_task_future_items(now, next_run_at, seen_keys: set[tuple[str, int]], latest_logs: dict, *, due_window_days=2, future_limit=10):
+def _notice_task_future_items(now, next_run_at, seen_keys: set[tuple[str, int]], latest_logs: dict, *, due_window_days=3, future_limit=10):
     items = []
     qs = CloudServerOrder.objects.select_related('user').filter(
         status__in=['completed', 'expiring', 'renew_pending', 'suspended', 'deleting', 'deleted'],
@@ -1646,7 +1646,7 @@ def _notice_task_future_items(now, next_run_at, seen_keys: set[tuple[str, int]],
             if notice_at <= now:
                 queue_status, queue_status_label = 'fallback_notice', '已到通知时间'
             elif notice_at <= now + timezone.timedelta(days=due_window_days):
-                queue_status, queue_status_label = 'within_window', '两天内待通知'
+                queue_status, queue_status_label = 'within_window', '3天内待通知'
             else:
                 queue_status, queue_status_label = 'scheduled_future', '未来计划'
             items.append(_notice_task_item_payload(
