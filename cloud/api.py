@@ -1451,20 +1451,60 @@ def _notice_attempts_label(log) -> str:
     return '；'.join(_notice_attempt_label(attempt) for attempt in attempts)
 
 
+def _notice_attempt_payload(attempt: dict, *, pending: bool = False) -> dict:
+    channel = attempt.get('channel') or ''
+    if channel == 'bot':
+        name = attempt.get('channel_label') or 'Bot'
+    elif channel == 'account':
+        name = attempt.get('account_label') or (f"账号{attempt.get('account_id')}" if attempt.get('account_id') else '个人号')
+    else:
+        name = attempt.get('channel_label') or channel or '未知渠道'
+    ok = bool(attempt.get('ok'))
+    status = 'pending' if pending else ('success' if ok else 'failed')
+    return {
+        'channel': channel,
+        'label': name,
+        'status': status,
+        'status_label': '待轮询' if pending else ('成功' if ok else '失败'),
+        'error': str(attempt.get('error') or '').strip(),
+        'account_id': attempt.get('account_id'),
+    }
+
+
+def _planned_notice_attempts(user) -> list[dict]:
+    attempts = [{'channel': 'bot', 'channel_label': 'Bot', 'ok': False, 'error': ''}]
+    accounts = TelegramLoginAccount.objects.filter(status='logged_in', notify_enabled=True).exclude(session_string__isnull=True).exclude(session_string='').order_by('-updated_at', '-id')[:10]
+    for account in accounts:
+        attempts.append({'channel': 'account', 'account_id': account.id, 'account_label': account.label or f'账号{account.id}', 'ok': False, 'error': ''})
+    return [_notice_attempt_payload(attempt, pending=True) for attempt in attempts]
+
+
+def _notice_channel_attempts_payload(user, latest_log=None) -> list[dict]:
+    attempts = ((getattr(latest_log, 'extra', None) or {}).get('send_attempts') or []) if latest_log else []
+    if attempts:
+        return [_notice_attempt_payload(attempt) for attempt in attempts]
+    if getattr(user, 'tg_user_id', None) if user else None:
+        return _planned_notice_attempts(user)
+    return []
+
+
 def _notice_channel_payload(user, latest_log=None) -> dict:
     attempts = ((getattr(latest_log, 'extra', None) or {}).get('send_attempts') or []) if latest_log else []
+    attempt_items = _notice_channel_attempts_payload(user, latest_log)
     success = next((attempt for attempt in attempts if attempt.get('ok')), None)
     if success:
         if success.get('channel') == 'bot':
-            return {'notice_channel': 'telegram_bot', 'notice_channel_label': '机器人通知成功'}
+            return {'notice_channel': 'telegram_bot', 'notice_channel_label': '机器人通知成功', 'notice_channel_attempts': attempt_items}
         account_label = success.get('account_label') or (f"账号{success.get('account_id')}" if success.get('account_id') else '个人号')
-        return {'notice_channel': 'telegram_account', 'notice_channel_label': f'{account_label} 通知成功'}
+        return {'notice_channel': 'telegram_account', 'notice_channel_label': f'{account_label} 通知成功', 'notice_channel_attempts': attempt_items}
     if attempts:
-        return {'notice_channel': 'telegram_fallback', 'notice_channel_label': '机器人优先，失败后账号轮询'}
+        return {'notice_channel': 'telegram_fallback', 'notice_channel_label': '机器人优先，失败后账号轮询', 'notice_channel_attempts': attempt_items}
     tg_user_id = getattr(user, 'tg_user_id', None) if user else None
     if tg_user_id:
-        return {'notice_channel': 'telegram_fallback', 'notice_channel_label': '机器人优先，失败后账号轮询'}
-    return {'notice_channel': 'unbound', 'notice_channel_label': '未绑定通知渠道'}
+        account_count = max(len(attempt_items) - 1, 0)
+        label = f'Bot优先，失败后轮询{account_count}个账号' if account_count else 'Bot优先，暂无账号兜底'
+        return {'notice_channel': 'telegram_fallback', 'notice_channel_label': label, 'notice_channel_attempts': attempt_items}
+    return {'notice_channel': 'unbound', 'notice_channel_label': '未绑定通知渠道', 'notice_channel_attempts': []}
 
 
 def _notice_status_payload(*, sent_at=None, latest_log=None, queue_status='scheduled_future') -> dict:
@@ -1640,6 +1680,7 @@ def _notice_group_summary_items(items: list[dict], *, limit: int | None = None) 
             'username_label': item.get('username_label') or '-',
             'notice_channel': item.get('notice_channel') or 'unbound',
             'notice_channel_label': item.get('notice_channel_label') or '未绑定通知渠道',
+            'notice_channel_attempts': item.get('notice_channel_attempts') or [],
             'notice_type': notice_type,
             'notice_type_label': item.get('notice_type_label') or notice_type,
             'notice_event': _notice_event_type(notice_type),
@@ -1654,6 +1695,8 @@ def _notice_group_summary_items(items: list[dict], *, limit: int | None = None) 
             'retry_label': item.get('retry_label') or '-',
             'related_path': item.get('related_path') or '',
         })
+        if item.get('notice_channel_attempts') and not group.get('notice_channel_attempts'):
+            group['notice_channel_attempts'] = item.get('notice_channel_attempts') or []
         group['notice_count'] += 1
         order_id = item.get('order_id')
         if order_id and order_id not in group['order_ids']:

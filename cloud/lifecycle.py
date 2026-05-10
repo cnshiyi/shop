@@ -680,6 +680,9 @@ def _renew_notice_batch_payload(order_ids: list[int]) -> dict:
     user = orders[0].user
     balance = Decimal(str(getattr(user, 'balance', 0) or 0)) if user else Decimal('0')
     total = Decimal('0')
+    auto_renew_total = Decimal('0')
+    manual_renew_count = 0
+    auto_renew_count = 0
     lines = ['⏰ IP到期提醒', '', '以下 IP 即将到期，请按计划及时续费：']
     kept_order_ids = []
     for order in orders:
@@ -693,6 +696,13 @@ def _renew_notice_batch_payload(order_ids: list[int]) -> dict:
         except RenewalPriceMissingError:
             logger.info('CLOUD_RENEW_NOTICE_SKIP_NO_PRICE order_id=%s order_no=%s', order.id, order.order_no)
             amount = None
+        auto_renew_enabled = bool(notice.get('auto_renew_enabled') if 'auto_renew_enabled' in notice else getattr(order, 'auto_renew_enabled', False))
+        if auto_renew_enabled:
+            auto_renew_count += 1
+            if amount is not None:
+                auto_renew_total += amount
+        else:
+            manual_renew_count += 1
         if amount is not None:
             total += amount
         lines.append('')
@@ -707,14 +717,21 @@ def _renew_notice_batch_payload(order_ids: list[int]) -> dict:
     if balance_lines:
         lines.extend(['', *balance_lines])
     trx_balance = Decimal(str(getattr(user, 'balance_trx', 0) or 0)) if user else Decimal('0')
-    total_charge_line, trx_total = _total_charge_line(total)
-    lines.extend(['', f'当前 USDT 余额: {_code_text(_amount_2(balance))} / TRX 余额: {_code_text(_amount_2(trx_balance))}', total_charge_line])
-    if balance >= total or (trx_total is not None and trx_balance >= trx_total):
-        lines.append('余额检查: 充足。')
-    elif trx_total is not None:
-        lines.append(f'余额检查: 不足，预计还差 {_code_text(_amount_2(max(total - balance, Decimal(0))))} USDT 或 {_code_text(_amount_2(max(trx_total - trx_balance, Decimal(0))))} TRX。请在到期前充值，避免续费失败。')
+    lines.extend(['', f'当前 USDT 余额: {_code_text(_amount_2(balance))} / TRX 余额: {_code_text(_amount_2(trx_balance))}'])
+    if auto_renew_count:
+        total_charge_line, trx_total = _total_charge_line(auto_renew_total)
+        lines.append(total_charge_line.replace('预计总扣款', f'已开启自动续费预计扣款（{auto_renew_count} 个IP）'))
+        if balance >= auto_renew_total or (trx_total is not None and trx_balance >= trx_total):
+            lines.append('自动续费余额检查: 充足。')
+        elif trx_total is not None:
+            lines.append(f'自动续费余额检查: 不足，预计还差 {_code_text(_amount_2(max(auto_renew_total - balance, Decimal(0))))} USDT 或 {_code_text(_amount_2(max(trx_total - trx_balance, Decimal(0))))} TRX。请在自动续费前充值，避免续费失败。')
+        else:
+            lines.append(f'自动续费余额检查: 不足，预计还差 {_code_text(_amount_2(auto_renew_total - balance))} USDT。请在自动续费前充值，避免续费失败。')
     else:
-        lines.append(f'余额检查: 不足，预计还差 {_code_text(_amount_2(total - balance))} USDT。请在到期前充值，避免续费失败。')
+        lines.append('已开启自动续费预计扣款: 0.00 USDT')
+        lines.append('余额检查: 本批 IP 未开启自动续费，不会自动扣款；如需继续使用，请手动续费或开启自动续费。')
+    if manual_renew_count and auto_renew_count:
+        lines.append(f'另有 {manual_renew_count} 个 IP 未开启自动续费，不计入自动扣款，请手动处理。')
     return {'text': '\n'.join(lines), 'order_ids': kept_order_ids, 'first_order_id': kept_order_ids[0], 'count': len(kept_order_ids)}
 
 
