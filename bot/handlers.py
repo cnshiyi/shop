@@ -696,7 +696,7 @@ async def _copy_user_notice_to_admins(bot: Bot, chat_id: int, text: str, parse_m
         return
     copy_text = f'📣 通知抄送\n用户 TG ID: {chat_id}\n\n{text}'
     for copy_chat_id in copy_chat_ids:
-        if int(copy_chat_id) == int(chat_id):
+        if str(copy_chat_id) == str(chat_id):
             continue
         try:
             await bot.send_message(chat_id=copy_chat_id, text=copy_text, parse_mode=parse_mode)
@@ -724,7 +724,7 @@ async def _send_admin_user_action_notice(bot: Bot | None, user, action: str, det
         lines.append(f'{escape(str(label))}: {escape(str(value if value is not None else "-"))}')
     text = '\n'.join(lines)
     for copy_chat_id in copy_chat_ids:
-        if chat_id and int(copy_chat_id) == chat_id:
+        if chat_id and str(copy_chat_id) == str(chat_id):
             continue
         try:
             await bot.send_message(chat_id=copy_chat_id, text=text, parse_mode='HTML')
@@ -734,7 +734,66 @@ async def _send_admin_user_action_notice(bot: Bot | None, user, action: str, det
 
 async def _send_user_notice(bot: Bot, chat_id: int, text: str, reply_markup=None, parse_mode: str | None = None, disable_web_page_preview: bool | None = None):
     await bot.send_message(chat_id=chat_id, text=text, reply_markup=reply_markup, parse_mode=parse_mode, disable_web_page_preview=disable_web_page_preview)
-    await _copy_user_notice_to_admins(bot, chat_id, text, parse_mode=parse_mode)
+
+
+async def _copy_user_operation_to_admins(bot: Bot | None, user, action: str, details: list[tuple[str, object]] | None = None):
+    await _send_admin_user_action_notice(bot, user, action, details)
+
+
+def _operation_event_details(event: TelegramObject, route_label: str, chat_id, message_id, callback_data: str | None) -> list[tuple[str, object]]:
+    details: list[tuple[str, object]] = [
+        ('入口', route_label),
+        ('Chat ID', chat_id or '-'),
+        ('消息ID', message_id or '-'),
+    ]
+    if callback_data:
+        details.append(('按钮数据', callback_data[:180]))
+    if isinstance(event, Message):
+        text = _message_text_for_router(event)
+        if text:
+            details.append(('内容', text[:300]))
+        else:
+            details.append(('消息类型', _message_content_type(event)))
+    return details
+
+
+async def _notice_copy_recipient_ids() -> set[str]:
+    return {str(item) for item in _parse_admin_chat_ids(await _get_site_config_value('bot_notice_copy_chat_ids', ''))}
+
+
+def _install_notice_copy_wrapper(bot: Bot):
+    if getattr(bot, '_notice_copy_wrapper_installed', False):
+        return
+    original_send_message = bot.send_message
+
+    async def _send_message_with_copy(*args, **kwargs):
+        result = await original_send_message(*args, **kwargs)
+        if getattr(bot, '_notice_copy_sending', False):
+            return result
+        chat_id = kwargs.get('chat_id') if 'chat_id' in kwargs else (args[0] if args else None)
+        text = kwargs.get('text') if 'text' in kwargs else (args[1] if len(args) > 1 else '')
+        try:
+            if chat_id is None or int(chat_id) < 0:
+                return result
+        except (TypeError, ValueError):
+            return result
+        try:
+            copy_recipient_ids = await _notice_copy_recipient_ids()
+            if str(chat_id) in copy_recipient_ids:
+                return result
+            if str(text or '').startswith('📣'):
+                return result
+            bot._notice_copy_sending = True
+            try:
+                await _copy_user_notice_to_admins(bot, int(chat_id), str(text or ''), parse_mode=kwargs.get('parse_mode'))
+            finally:
+                bot._notice_copy_sending = False
+        except Exception as exc:
+            logger.warning('用户结果抄送失败 chat_id=%s err=%s', chat_id, exc)
+        return result
+
+    bot.send_message = _send_message_with_copy
+    bot._notice_copy_wrapper_installed = True
 
 
 def _is_admin_forward_media_type(content_type: str) -> bool:
@@ -1159,6 +1218,16 @@ class RawUserLoggingMiddleware:
 
             if _should_sync_user(user.id, chat_username, first_name, active_usernames):
                 await get_or_create_user(user.id, chat_username, first_name, active_usernames)
+            if bot and not is_group_chat:
+                try:
+                    await _copy_user_operation_to_admins(
+                        bot,
+                        user,
+                        '操作',
+                        _operation_event_details(event, route_label, chat_id, message_id, callback_data),
+                    )
+                except Exception as exc:
+                    logger.warning('用户操作抄送失败 user_id=%s route=%s err=%s', user.id, route_label, exc)
             if isinstance(event, Message):
                 message_text = _message_text_for_router(event)
                 chat_id = getattr(event.chat, 'id', user.id)
@@ -4708,6 +4777,7 @@ def register_handlers(dp: Dispatcher):
 
 async def create_dispatcher_and_register() -> tuple[Bot, Dispatcher]:
     bot = Bot(token=BOT_TOKEN)
+    _install_notice_copy_wrapper(bot)
     storage = await create_fsm_storage()
     dp = Dispatcher(storage=storage)
     dp.message.middleware(RawUserLoggingMiddleware())
