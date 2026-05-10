@@ -1416,16 +1416,16 @@ async def _initialize_proxy_asset_and_notify(bot: Bot, chat_id: int, user_id: in
         if err:
             error_text = f'❌ 同步资产代理初始化失败\n\nIP: {getattr(asset, "public_ip", None) or getattr(asset, "previous_public_ip", None) or "未分配"}\n原因: {_public_cloud_error_text(err)}\n\n不需要提醒可点击下方关闭提醒；如需处理请联系人工客服。'
             _log_bot_cloud_notice('asset_init_failed', chat_id=chat_id, order=asset or type('AssetNotice', (), {'id': asset_id, 'order_no': None, 'public_ip': None, 'previous_public_ip': None, 'status': 'failed'})(), text=error_text, keyboard='cloud_lifecycle_notice_actions')
-            await bot.send_message(chat_id=chat_id, text=error_text, reply_markup=_cloud_notice_keyboard_for_order(getattr(asset, 'order_id', None) or asset_id, 'cloud_asset_init_failed'))
+            await _send_user_notice(bot, chat_id, error_text, reply_markup=_cloud_notice_keyboard_for_order(getattr(asset, 'order_id', None) or asset_id, 'cloud_asset_init_failed'))
             logger.warning('同步资产代理初始化失败: chat_id=%s user_id=%s asset_id=%s error=%s', chat_id, user_id, asset_id, err)
             return
         success_text = '✅ 同步资产代理初始化完成\n\n' + _cloud_server_created_text(asset, getattr(asset, 'mtproxy_port', None))
         _log_bot_cloud_notice('asset_init_completed', chat_id=chat_id, order=asset, text=success_text, keyboard='cloud_lifecycle_notice_actions')
-        await bot.send_message(chat_id=chat_id, text=success_text, reply_markup=_cloud_notice_keyboard_for_order(getattr(asset, 'order_id', None) or asset_id, 'cloud_asset_init_completed'), parse_mode='HTML', disable_web_page_preview=True)
+        await _send_user_notice(bot, chat_id, success_text, reply_markup=_cloud_notice_keyboard_for_order(getattr(asset, 'order_id', None) or asset_id, 'cloud_asset_init_completed'), parse_mode='HTML', disable_web_page_preview=True)
         logger.info('同步资产代理初始化完成: chat_id=%s user_id=%s asset_id=%s ip=%s', chat_id, user_id, asset_id, getattr(asset, 'public_ip', None))
     except Exception as exc:
         logger.exception('同步资产代理初始化异常: chat_id=%s user_id=%s asset_id=%s error=%s', chat_id, user_id, asset_id, exc)
-        await bot.send_message(chat_id=chat_id, text=f'❌ 同步资产代理初始化任务异常\n错误: {_public_cloud_error_text(exc)}', reply_markup=main_menu())
+        await _send_user_notice(bot, chat_id, f'❌ 同步资产代理初始化任务异常\n错误: {_public_cloud_error_text(exc)}', reply_markup=main_menu())
 
 
 async def _cloud_task_progress_reporter(bot: Bot, chat_id: int, order_id: int, action_label: str, interval_seconds: int = 1):
