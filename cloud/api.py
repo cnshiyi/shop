@@ -47,7 +47,7 @@ from bot.api import (
     dashboard_login_required,
 )
 from bot.models import TelegramGroupFilter, TelegramLoginAccount, TelegramUser
-from cloud.lifecycle import _auto_renew_notice_batch_payload, _delete_instance, _get_due_orders, _get_notice_text_override, _lifecycle_notice_batch_payload, _mark_replaced_order_deleted, _notice_payload_for_order, _notice_override_key, _record_auto_renew_patrol_log, _renew_notice_batch_payload, _run_auto_renew, _set_notice_text_override
+from cloud.lifecycle import NOTICE_TYPE_SWITCH_CONFIG, _auto_renew_notice_batch_payload, _delete_instance, _get_due_orders, _get_notice_text_override, _lifecycle_notice_batch_payload, _mark_replaced_order_deleted, _notice_payload_for_order, _notice_override_key, _record_auto_renew_patrol_log, _renew_notice_batch_payload, _run_auto_renew, _set_notice_text_override, cloud_notice_type_enabled
 from cloud.services import AWS_REGION_NAMES, RenewalPriceMissingError, _cloud_order_lifecycle_fields, _renewal_price, _update_order_primary_records, create_cloud_server_rebuild_order, ensure_cloud_server_pricing, ensure_manual_expiry_operation_order, ensure_manual_owner_operation_order, ensure_manual_price_operation_order, record_cloud_ip_log, refresh_custom_plan_cache, replace_cloud_asset_order_by_admin, set_cloud_server_auto_renew_admin
 from cloud.models import AddressMonitor, CloudAsset, CloudAutoRenewPatrolLog, CloudIpLog, CloudServerOrder, CloudServerPlan, CloudUserNoticeLog, Server, ServerPrice
 from cloud.note_utils import append_note, prepend_note
@@ -1633,6 +1633,8 @@ def _notice_task_future_items(now, next_run_at, seen_keys: set[tuple[str, int]],
         for notice_type, config in _NOTICE_TASK_TYPES.items():
             if (notice_type, order.id) in seen_keys:
                 continue
+            if not cloud_notice_type_enabled(notice_type):
+                continue
             sent_at = getattr(order, config['field'], None)
             if sent_at:
                 continue
@@ -1786,6 +1788,38 @@ def _notice_task_history_item_payload(log):
     }
 
 
+def _notice_switch_items() -> list[dict]:
+    return [
+        {
+            'notice_type': notice_type,
+            'label': config['label'],
+            'key': config['key'],
+            'enabled': cloud_notice_type_enabled(notice_type),
+        }
+        for notice_type, config in NOTICE_TYPE_SWITCH_CONFIG.items()
+    ]
+
+
+@csrf_exempt
+@dashboard_login_required
+@require_POST
+def update_notice_switches(request):
+    payload = _read_payload(request)
+    switches = payload.get('switches') or []
+    if not isinstance(switches, list):
+        return _error('通知开关参数无效', status=400)
+    known_keys = {config['key']: config for config in NOTICE_TYPE_SWITCH_CONFIG.values()}
+    for item in switches:
+        if not isinstance(item, dict):
+            continue
+        key = str(item.get('key') or '').strip()
+        if key not in known_keys:
+            continue
+        enabled = '1' if bool(item.get('enabled')) else '0'
+        SiteConfig.set(key, enabled)
+    return _ok({'notice_switches': _notice_switch_items()})
+
+
 @csrf_exempt
 @dashboard_login_required
 @require_POST
@@ -1860,6 +1894,7 @@ def notice_task_detail(request):
         'recent_failure_count': recent_logs.filter(delivered=False).count(),
         'recent_failure_user_count': recent_logs.filter(delivered=False).values('user_id').distinct().count(),
         'retry_policy_label': '通知失败不会写入已通知时间；生命周期巡检会在下一轮继续重试，直到成功送达。',
+        'notice_switches': _notice_switch_items(),
         'due_items': due_items,
         'due_user_summary_items': due_user_summary_items,
         'future_plan_items': future_plan_items,
@@ -3760,6 +3795,7 @@ __all__ = [
     'delete_cloud_order',
     'notice_task_detail',
     'update_notice_plan_text',
+    'update_notice_switches',
     'auto_renew_task_detail',
     'run_auto_renew_order',
     'run_auto_renew_tasks',

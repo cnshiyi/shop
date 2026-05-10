@@ -92,6 +92,21 @@ def _config_int(key: str, default: int) -> int:
         return default
 
 
+NOTICE_TYPE_SWITCH_CONFIG = {
+    'renew_notice': {'key': 'cloud_notice_renew_enabled', 'label': '到期提醒', 'default': '1'},
+    'auto_renew_notice': {'key': 'cloud_notice_auto_renew_enabled', 'label': '自动续费预提醒', 'default': '1'},
+    'delete_notice': {'key': 'cloud_notice_delete_enabled', 'label': '删机提醒', 'default': '1'},
+    'recycle_notice': {'key': 'cloud_notice_recycle_enabled', 'label': 'IP回收提醒', 'default': '1'},
+}
+
+
+def cloud_notice_type_enabled(notice_type: str) -> bool:
+    config = NOTICE_TYPE_SWITCH_CONFIG.get(notice_type)
+    if not config:
+        return True
+    return _config_bool(config['key'], config.get('default', '1'))
+
+
 def _parse_notify_targets(raw: str) -> list[int | str]:
     targets = []
     seen = set()
@@ -213,10 +228,10 @@ def _get_due_orders():
         ip_recycle_at = schedule['ip_recycle_at']
         active_order = order.status in ['completed', 'expiring', 'renew_pending']
         shutdown_enabled = _shutdown_enabled_for_order(order, asset)
-        if active_order and order.cloud_reminder_enabled and expires_at <= renew_notice_at and expires_at > now:
+        if cloud_notice_type_enabled('renew_notice') and active_order and order.cloud_reminder_enabled and expires_at <= renew_notice_at and expires_at > now:
             if renew_notice_debug_repeat or not order.renew_notice_sent_at:
                 _append_due(due, 'renew_notice', order)
-        if active_order and order.auto_renew_enabled and expires_at <= auto_renew_notice_at and expires_at > auto_renew_at and not order.auto_renew_notice_sent_at:
+        if cloud_notice_type_enabled('auto_renew_notice') and active_order and order.auto_renew_enabled and expires_at <= auto_renew_notice_at and expires_at > auto_renew_at and not order.auto_renew_notice_sent_at:
             _append_due(due, 'auto_renew_notice', order)
         auto_renew_before_expiry = expires_at <= auto_renew_at and expires_at > now
         auto_renew_shutdown_fallback = (
@@ -226,9 +241,9 @@ def _get_due_orders():
         )
         if active_order and order.auto_renew_enabled and (auto_renew_before_expiry or auto_renew_shutdown_fallback):
             _append_due(due, 'auto_renew', order)
-        if shutdown_enabled and order.status in ['suspended', 'deleting'] and order.delete_reminder_enabled and delete_at and delete_at <= delete_notice_at and delete_at > now and not order.delete_notice_sent_at:
+        if cloud_notice_type_enabled('delete_notice') and shutdown_enabled and order.status in ['suspended', 'deleting'] and order.delete_reminder_enabled and delete_at and delete_at <= delete_notice_at and delete_at > now and not order.delete_notice_sent_at:
             _append_due(due, 'delete_notice', order)
-        if order.status == 'deleted' and order.ip_recycle_reminder_enabled and ip_recycle_at and ip_recycle_at <= recycle_notice_at and ip_recycle_at > now and not order.recycle_notice_sent_at:
+        if cloud_notice_type_enabled('recycle_notice') and order.status == 'deleted' and order.ip_recycle_reminder_enabled and ip_recycle_at and ip_recycle_at <= recycle_notice_at and ip_recycle_at > now and not order.recycle_notice_sent_at:
             _append_due(due, 'recycle_notice', order)
         if order.provider != 'aliyun_simple':
             if order.status == 'completed' and expires_at <= now and not order.renew_notice_sent_at:
@@ -247,7 +262,7 @@ def _get_due_orders():
         Q(static_ip_name__gt='') | Q(public_ip__gt='') | Q(previous_public_ip__gt='')
     ).select_related('user', 'cloud_account')
     for order in retained_ip_orders:
-        if order.ip_recycle_reminder_enabled and order.ip_recycle_at <= recycle_notice_at and order.ip_recycle_at > now and not order.recycle_notice_sent_at:
+        if cloud_notice_type_enabled('recycle_notice') and order.ip_recycle_reminder_enabled and order.ip_recycle_at <= recycle_notice_at and order.ip_recycle_at > now and not order.recycle_notice_sent_at:
             _append_due(due, 'recycle_notice', order)
         if order.provider != 'aliyun_simple' and order.ip_recycle_at <= now:
             _append_due(due, 'recycle', order)
