@@ -1158,7 +1158,7 @@ def _is_cloud_action_time(config_key: str, default_time: str, now=None, window_m
     local_now = timezone.localtime(now or timezone.now())
     hour, minute = _config_time(config_key, default_time)
     scheduled = local_now.replace(hour=hour, minute=minute, second=0, microsecond=0)
-    return scheduled <= local_now < scheduled + timezone.timedelta(minutes=max(1, int(window_minutes or 10)))
+    return local_now >= scheduled
 
 
 def _next_cloud_action_run_at(config_key: str, default_time: str, *, now=None, min_delay_seconds: int = 0):
