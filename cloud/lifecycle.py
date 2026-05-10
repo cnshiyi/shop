@@ -516,15 +516,18 @@ def _renew_notice_plan_text(order, notice: dict | None = None) -> str:
     notice = notice or {}
     expires_at = notice.get('expires_at') or getattr(order, 'service_expires_at', None)
     suspend_at = notice.get('suspend_at') or getattr(order, 'suspend_at', None)
-    lines = [f'到期时间: {_code_text(_format_notice_dt(expires_at))}']
     try:
-        amount = f'{_renewal_price(order, getattr(order, "user", None)):.2f} USDT'
+        amount_text = f'{_renewal_price(order, getattr(order, "user", None)):.2f}'
+        amount_line = f'续费金额: {_code_text(amount_text)} USDT'
     except RenewalPriceMissingError:
-        amount = '未设置，请联系客服确认'
-    lines.append(f'续费金额: {_code_text(amount)}')
-    lines.append(f'关机计划: {_code_text(_format_notice_dt(suspend_at))}')
-    lines.append('请尽快完成续费，避免关机。')
-    return '\n'.join(lines)
+        amount_line = f'续费金额: {_code_text("未设置")}，请联系客服确认'
+    lines = [
+        f'到期时间: {_code_text(_format_notice_dt(expires_at))}',
+        amount_line,
+        f'关机计划: {_code_text(_format_notice_dt(suspend_at))}',
+        '请尽快完成续费，避免关机。',
+    ]
+    return '\n\n'.join(lines)
 
 
 def _user_display_label(user) -> str:
