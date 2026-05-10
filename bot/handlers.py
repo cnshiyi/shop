@@ -2599,7 +2599,7 @@ def register_handlers(dp: Dispatcher):
             await message.answer(
                 _bot_text_format(
                     'bot_ip_change_order_created',
-                    '✅ 更换IP新服务器已创建\n新订单号: {order_no}\n新节点: {region_name}\n新端口: {port}\n系统会新建同配置服务器并绑定新的固定 IP，请在 5 天内切换使用。',
+                    '🌐 已为你创建同配置新服务器\n\n新节点: {region_name}\n新端口: {port}\n系统会重写生成新的 IP，请在 5 天内迁移。',
                     order_no=order.order_no,
                     region_name=_public_region_text(region_name or order.region_name) or '默认节点',
                     port=port,
@@ -4073,7 +4073,7 @@ def register_handlers(dp: Dispatcher):
             await _safe_callback_answer(callback, '创建更换 IP 新服务器失败', show_alert=True)
             return
         await callback.message.reply(
-            f'🌐 已为你创建同配置换 IP 新服务器\n新订单号: {new_order.order_no}\n新节点: {_public_region_text(new_order.region_name) or "默认节点"}\n新端口: {new_order.mtproxy_port or 9528}\n系统会绑定新的固定 IP，请在 5 天内切换使用。\n\n后台创建期间，底部菜单和其它按钮可正常使用。',
+            f'🌐 已为你创建同配置新服务器\n\n新节点: {_public_region_text(new_order.region_name) or "默认节点"}\n新端口: {new_order.mtproxy_port or 9528}\n系统会重写生成新的 IP，请在 5 天内迁移。',
             reply_markup=main_menu(),
         )
         asyncio.create_task(_provision_cloud_server_and_notify(bot, callback.from_user.id, new_order.id, new_order.mtproxy_port or 9528))
