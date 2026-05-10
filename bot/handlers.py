@@ -704,6 +704,34 @@ async def _copy_user_notice_to_admins(bot: Bot, chat_id: int, text: str, parse_m
             logger.warning('管理员通知抄送失败 admin_chat_id=%s chat_id=%s err=%s', admin_chat_id, chat_id, exc)
 
 
+async def _send_admin_user_action_notice(bot: Bot | None, user, action: str, details: list[tuple[str, object]] | None = None):
+    if bot is None:
+        return
+    admin_chat_ids = _parse_admin_chat_ids(await _get_site_config_value('bot_admin_chat_id', ''))
+    if not admin_chat_ids:
+        return
+    chat_id = int(getattr(user, 'tg_user_id', 0) or 0)
+    username = _display_username(user)
+    first_name = str(getattr(user, 'first_name', '') or '').strip() or '-'
+    lines = [
+        f'📣 用户{escape(str(action))}',
+        '',
+        f'用户: {escape(username)}',
+        f'昵称: {escape(first_name)}',
+        f'TG ID: <code>{chat_id or "-"}</code>',
+    ]
+    for label, value in details or []:
+        lines.append(f'{escape(str(label))}: {escape(str(value if value is not None else "-"))}')
+    text = '\n'.join(lines)
+    for admin_chat_id in admin_chat_ids:
+        if chat_id and int(admin_chat_id) == chat_id:
+            continue
+        try:
+            await bot.send_message(chat_id=admin_chat_id, text=text, parse_mode='HTML')
+        except Exception as exc:
+            logger.warning('用户动作抄送失败 action=%s admin_chat_id=%s chat_id=%s err=%s', action, admin_chat_id, chat_id, exc)
+
+
 async def _send_user_notice(bot: Bot, chat_id: int, text: str, reply_markup=None, parse_mode: str | None = None, disable_web_page_preview: bool | None = None):
     await bot.send_message(chat_id=chat_id, text=text, reply_markup=reply_markup, parse_mode=parse_mode, disable_web_page_preview=disable_web_page_preview)
     await _copy_user_notice_to_admins(bot, chat_id, text, parse_mode=parse_mode)
@@ -1555,6 +1583,13 @@ async def _create_cloud_order_and_notify(bot: Bot, chat_id: int, user_id: int, p
             '系统已开始自动监控 USDT 和 TRX 到账，检测到支付成功后会自动进入后续流程。'
         )
         await bot.send_message(chat_id=chat_id, text=text, reply_markup=custom_currency_keyboard(None, None, None, order.id), parse_mode='HTML', disable_web_page_preview=True)
+        await _send_admin_user_action_notice(bot, type('UserNotice', (), {'tg_user_id': chat_id, 'username': None, 'first_name': ''})(), '购买', [
+            ('订单号', order.order_no),
+            ('套餐', plan_name),
+            ('节点', _public_region_text(region_name) or '-'),
+            ('数量', order.quantity),
+            ('金额', f'{fmt_pay_amount(order.pay_amount or order.total_amount)} {order.currency}'),
+        ])
         logger.info('云服务器后台建单任务完成: chat_id=%s user_id=%s order_id=%s order=%s currency=%s total=%s pay_amount=%s', chat_id, user_id, order.id, order.order_no, order.currency, order.total_amount, order.pay_amount)
     except Exception as exc:
         logger.exception('云服务器后台建单任务异常: chat_id=%s user_id=%s plan_id=%s quantity=%s currency=%s error=%s', chat_id, user_id, plan_id, quantity, currency, exc)
@@ -1585,6 +1620,14 @@ async def _buy_cloud_server_with_balance_and_notify(bot: Bot, chat_id: int, user
             ),
             reply_markup=custom_port_keyboard(order.id),
         )
+        await _send_admin_user_action_notice(bot, type('UserNotice', (), {'tg_user_id': chat_id, 'username': None, 'first_name': ''})(), '购买', [
+            ('订单号', order.order_no),
+            ('套餐', order.plan_name),
+            ('节点', _public_region_text(order.region_name) or '-'),
+            ('数量', order.quantity),
+            ('金额', f'{fmt_pay_amount(order.pay_amount)} {order.currency}'),
+            ('支付方式', '钱包余额'),
+        ])
         logger.info('云服务器后台钱包直付任务完成: chat_id=%s user_id=%s order_id=%s order=%s currency=%s qty=%s pay_amount=%s', chat_id, user_id, order.id, order.order_no, currency, order.quantity, order.pay_amount)
     except Exception as exc:
         logger.exception('云服务器后台钱包直付任务异常: chat_id=%s user_id=%s plan_id=%s quantity=%s currency=%s error=%s', chat_id, user_id, plan_id, quantity, currency, exc)
@@ -1614,6 +1657,12 @@ async def _pay_cloud_server_order_with_balance_and_notify(bot: Bot, chat_id: int
                     '正在恢复未绑定代理资产固定 IP，系统会自动创建服务器并绑定旧 IP。'
                 ),
             )
+            await _send_admin_user_action_notice(bot, type('UserNotice', (), {'tg_user_id': chat_id, 'username': None, 'first_name': ''})(), '续费', [
+                ('订单号', order.order_no),
+                ('套餐', order.plan_name),
+                ('金额', f'{fmt_pay_amount(order.pay_amount)} {order.currency}'),
+                ('支付方式', '钱包余额'),
+            ])
             asyncio.create_task(_provision_cloud_server_and_notify(bot, chat_id, order.id, order.mtproxy_port or 9528))
             return
         await bot.send_message(
@@ -1628,6 +1677,14 @@ async def _pay_cloud_server_order_with_balance_and_notify(bot: Bot, chat_id: int
             ),
             reply_markup=custom_port_keyboard(order.id),
         )
+        await _send_admin_user_action_notice(bot, type('UserNotice', (), {'tg_user_id': chat_id, 'username': None, 'first_name': ''})(), '购买', [
+            ('订单号', order.order_no),
+            ('套餐', order.plan_name),
+            ('节点', _public_region_text(order.region_name) or '-'),
+            ('数量', order.quantity),
+            ('金额', f'{fmt_pay_amount(order.pay_amount)} {order.currency}'),
+            ('支付方式', '钱包余额'),
+        ])
         logger.info('云服务器后台钱包补付任务完成: chat_id=%s user_id=%s order_id=%s order=%s currency=%s qty=%s pay_amount=%s', chat_id, user_id, order.id, order.order_no, currency, order.quantity, order.pay_amount)
     except Exception as exc:
         logger.exception('云服务器后台钱包补付任务异常: chat_id=%s user_id=%s order_id=%s currency=%s error=%s', chat_id, user_id, order_id, currency, exc)
@@ -2325,9 +2382,18 @@ async def _send_cloud_renewal_payment_prompt(message: Message, order, user, *, e
         '可直接地址支付或使用下方钱包续费。自动续费默认使用钱包余额扣款，请保证余额充足。'
     )
     markup = cloud_server_renew_payment(order.id, order.pay_amount, trx_amount, bool(auto_renew_enabled))
+    bot = getattr(message, 'bot', None)
     if edit:
-        return await _safe_edit_text(message, text, parse_mode='HTML', disable_web_page_preview=True, reply_markup=markup)
-    return await message.reply(text, parse_mode='HTML', disable_web_page_preview=True, reply_markup=markup)
+        result = await _safe_edit_text(message, text, parse_mode='HTML', disable_web_page_preview=True, reply_markup=markup)
+    else:
+        result = await message.reply(text, parse_mode='HTML', disable_web_page_preview=True, reply_markup=markup)
+    await _send_admin_user_action_notice(bot, user, '续费', [
+        ('订单号', getattr(order, 'order_no', '-') or '-'),
+        ('IP', display_ip),
+        ('金额', f'{fmt_pay_amount(order.pay_amount)} {order.currency}'),
+        ('时长', '31天'),
+    ])
+    return result
 
 
 def _receive_address() -> str:
@@ -2529,6 +2595,11 @@ def register_handlers(dp: Dispatcher):
             reply_markup=main_menu(),
             parse_mode='HTML',
         )
+        await _send_admin_user_action_notice(getattr(message, 'bot', None), user, '充值', [
+            ('充值ID', f'#{rc.id}'),
+            ('充值金额', f'{fmt_amount(amount)} {currency}'),
+            ('支付金额', f'{fmt_pay_amount(rc.pay_amount)} {currency}'),
+        ])
 
     @dp.message(CustomServerStates.waiting_quantity)
     async def custom_quantity_input(message: Message, state: FSMContext):
@@ -2550,6 +2621,7 @@ def register_handlers(dp: Dispatcher):
             return
         user = await get_or_create_user(message.from_user.id, message.from_user.username, message.from_user.first_name)
         order = await create_cloud_server_order(user.id, plan.id, 'USDT', quantity)
+        display_name = _plan_display_name(plan)
         logger.info('云服务器下单进入详情: tg_user_id=%s user=%s order_id=%s order=%s qty=%s region=%s plan_id=%s plan_name=%s currency=%s total=%s pay_amount=%s', getattr(message.from_user, 'id', None), user.id, order.id, order.order_no, order.quantity, order.region_code, plan.id, plan.plan_name, order.currency, order.total_amount, order.pay_amount)
         receive_address = _receive_address()
         await message.answer(
@@ -2565,6 +2637,13 @@ def register_handlers(dp: Dispatcher):
             parse_mode='HTML',
             disable_web_page_preview=True,
         )
+        await _send_admin_user_action_notice(getattr(message, 'bot', None), user, '购买', [
+            ('订单号', order.order_no),
+            ('套餐', display_name),
+            ('节点', _public_region_text(plan.region_name) or '-'),
+            ('数量', order.quantity),
+            ('金额', f'{fmt_pay_amount(order.pay_amount or order.total_amount)} {order.currency}'),
+        ])
 
     @dp.message(CustomServerStates.waiting_port)
     async def input_custom_server_port(message: Message, state: FSMContext, bot: Bot):
@@ -2606,6 +2685,11 @@ def register_handlers(dp: Dispatcher):
                 ),
                 reply_markup=main_menu(),
             )
+            await _send_admin_user_action_notice(bot, user, '换IP', [
+                ('新订单号', order.order_no),
+                ('新节点', _public_region_text(region_name or order.region_name) or '默认节点'),
+                ('新端口', port),
+            ])
             asyncio.create_task(_provision_cloud_server_and_notify(bot, message.chat.id, order.id, port))
             return
         orders = await prepare_cloud_server_order_instances(order_id, user.id, port)
@@ -3920,6 +4004,12 @@ def register_handlers(dp: Dispatcher):
             return
         if getattr(order, 'replacement_for_id', None) and order.status in {'paid', 'provisioning', 'failed'}:
             await _safe_edit_text(callback.message, '✅ 云服务器钱包续费成功，正在自动恢复固定 IP 服务器。\n\n系统会保持旧 IP / 旧端口 / 旧密钥不变，完成后自动发送代理链接。')
+            await _send_admin_user_action_notice(callback.bot, user, '续费', [
+                ('订单号', order.order_no),
+                ('IP', getattr(order, 'public_ip', None) or getattr(order, 'previous_public_ip', None) or '-'),
+                ('金额', f'{fmt_pay_amount(order.pay_amount)} {order.currency}'),
+                ('支付方式', '钱包自动续费'),
+            ])
             asyncio.create_task(_provision_cloud_server_and_notify(callback.bot, callback.from_user.id, order.id, order.mtproxy_port or 9528))
             return
         asyncio.create_task(_cloud_renewal_postcheck_and_notify(callback.bot, callback.from_user.id, order.id, getattr(order, 'renew_balance_change', None)))
@@ -3948,6 +4038,13 @@ def register_handlers(dp: Dispatcher):
                 can_resume_init=bool(order.status in {"paid", "provisioning", "failed"} and (order.public_ip or not order.mtproxy_secret or not order.mtproxy_link or not order.login_password)),
             ),
         )
+        await _send_admin_user_action_notice(callback.bot, user, '续费', [
+            ('订单号', order.order_no),
+            ('IP', getattr(order, 'public_ip', None) or getattr(order, 'previous_public_ip', None) or '-'),
+            ('金额', f'{fmt_pay_amount(order.pay_amount)} {order.currency}'),
+            ('时长', '31天'),
+            ('支付方式', '钱包自动续费'),
+        ])
 
     @dp.callback_query(F.data.startswith('cloud:renewpay:'))
     async def cb_cloud_renew_pay(callback: CallbackQuery):
@@ -3970,6 +4067,12 @@ def register_handlers(dp: Dispatcher):
             return
         if (getattr(order, 'replacement_for_id', None) or is_cloud_asset_renewal_order(order)) and order.status in {'paid', 'provisioning', 'failed'}:
             await _safe_edit_text(callback.message, '✅ 云服务器续费成功，正在自动恢复固定 IP 服务器。\n\n系统会保持旧 IP / 旧端口 / 旧密钥不变，完成后自动发送代理链接。')
+            await _send_admin_user_action_notice(callback.bot, user, '续费', [
+                ('订单号', order.order_no),
+                ('IP', getattr(order, 'public_ip', None) or getattr(order, 'previous_public_ip', None) or '-'),
+                ('金额', f'{fmt_pay_amount(order.pay_amount)} {order.currency}'),
+                ('支付币种', currency),
+            ])
             asyncio.create_task(_provision_cloud_server_and_notify(callback.bot, callback.from_user.id, order.id, order.mtproxy_port or 9528))
             return
         asyncio.create_task(_cloud_renewal_postcheck_and_notify(callback.bot, callback.from_user.id, order.id, getattr(order, 'renew_balance_change', None)))
@@ -3997,6 +4100,13 @@ def register_handlers(dp: Dispatcher):
                 can_resume_init=bool(order.status in {"paid", "provisioning", "failed"} and (order.public_ip or not order.mtproxy_secret or not order.mtproxy_link or not order.login_password)),
             ),
         )
+        await _send_admin_user_action_notice(callback.bot, user, '续费', [
+            ('订单号', order.order_no),
+            ('IP', getattr(order, 'public_ip', None) or getattr(order, 'previous_public_ip', None) or '-'),
+            ('金额', f'{fmt_pay_amount(order.pay_amount)} {order.currency}'),
+            ('时长', '31天'),
+            ('支付币种', currency),
+        ])
 
     @dp.callback_query(F.data.startswith('cloud:ip:'))
     async def cb_cloud_change_ip(callback: CallbackQuery):
@@ -4076,6 +4186,11 @@ def register_handlers(dp: Dispatcher):
             f'🌐 已为你创建同配置新服务器\n\n新节点: {_public_region_text(new_order.region_name) or "默认节点"}\n新端口: {new_order.mtproxy_port or 9528}\n系统会重写生成新的 IP，请在 5 天内迁移。',
             reply_markup=main_menu(),
         )
+        await _send_admin_user_action_notice(bot, user, '换IP', [
+            ('新订单号', new_order.order_no),
+            ('新节点', _public_region_text(new_order.region_name) or '默认节点'),
+            ('新端口', new_order.mtproxy_port or 9528),
+        ])
         asyncio.create_task(_provision_cloud_server_and_notify(bot, callback.from_user.id, new_order.id, new_order.mtproxy_port or 9528))
 
     @dp.callback_query(F.data.startswith('cloud:ipport:custom:'))
@@ -4299,6 +4414,11 @@ def register_handlers(dp: Dispatcher):
         retry_only = bool(not is_rebuild and order.public_ip and order.login_password)
         work_text = '新建服务器并安装代理，成功后迁移固定 IP，旧机保留 3 天' if is_rebuild else ('重新执行 BBR/MTProxy 安装' if retry_only else '继续创建服务器并完成初始化')
         await callback.message.reply(_bot_text_format('bot_reinstall_submitted', '🛠 已确认{action_text}，后台会{work_text}。预计约 5 分钟，完成后会自动通知你。\n\n后台处理期间，底部菜单和其它按钮可正常使用。', action_text=action_text, work_text=work_text), reply_markup=main_menu())
+        await _send_admin_user_action_notice(bot, user, '重装', [
+            ('订单号', order.order_no),
+            ('IP', getattr(order, 'public_ip', None) or getattr(order, 'previous_public_ip', None) or '-'),
+            ('动作', action_text),
+        ])
         asyncio.create_task(_provision_cloud_server_and_notify(bot, callback.from_user.id, order.id, order.mtproxy_port or 9528, retry_only=retry_only))
 
     @dp.callback_query(F.data.startswith('balance:detail:'))
