@@ -45,7 +45,7 @@ from bot.api import (
     _user_payload,
     dashboard_login_required,
 )
-from bot.models import TelegramGroupFilter, TelegramUser
+from bot.models import TelegramGroupFilter, TelegramLoginAccount, TelegramUser
 from cloud.lifecycle import _delete_instance, _get_due_orders, _mark_replaced_order_deleted, _notice_payload_for_order, _record_auto_renew_patrol_log, _run_auto_renew
 from cloud.services import AWS_REGION_NAMES, RenewalPriceMissingError, _cloud_order_lifecycle_fields, _renewal_price, _update_order_primary_records, create_cloud_server_rebuild_order, ensure_cloud_server_pricing, ensure_manual_expiry_operation_order, ensure_manual_owner_operation_order, ensure_manual_price_operation_order, record_cloud_ip_log, refresh_custom_plan_cache, replace_cloud_asset_order_by_admin, set_cloud_server_auto_renew_admin
 from cloud.models import AddressMonitor, CloudAsset, CloudAutoRenewPatrolLog, CloudIpLog, CloudServerOrder, CloudServerPlan, Server, ServerPrice
@@ -231,6 +231,14 @@ def _telegram_user_lookup_terms(value):
     return terms
 
 
+def _username_matches(saved_value, lookup_value) -> bool:
+    lookup_names = {item.lower() for item in TelegramUser.normalize_usernames(lookup_value)}
+    if not lookup_names:
+        return False
+    saved_names = {item.lower() for item in TelegramUser.normalize_usernames(saved_value)}
+    return bool(saved_names & lookup_names)
+
+
 def _resolve_telegram_user(value):
     terms = _telegram_user_lookup_terms(value)
     if not terms:
@@ -239,10 +247,28 @@ def _resolve_telegram_user(value):
     for raw in terms:
         if raw.isdigit():
             found = queryset.filter(Q(id=int(raw)) | Q(tg_user_id=int(raw))).first()
-        else:
-            found = queryset.filter(username__icontains=raw).first()
+            if found:
+                return found
+            continue
+        candidates = list(queryset.filter(username__icontains=raw).order_by('-updated_at', '-id')[:20])
+        found = next((item for item in candidates if _username_matches(item.username, raw)), None)
         if found:
             return found
+    for raw in terms:
+        account_query = Q(tg_user_id=int(raw)) if raw.isdigit() else Q(username__icontains=raw)
+        accounts = TelegramLoginAccount.objects.filter(account_query).exclude(tg_user_id__isnull=True).order_by('-updated_at', '-id')[:20]
+        account = next((item for item in accounts if raw.isdigit() or _username_matches(item.username, raw)), None)
+        if not account or not account.tg_user_id:
+            continue
+        user, _ = TelegramUser.objects.get_or_create(
+            tg_user_id=account.tg_user_id,
+            defaults={
+                'username': TelegramUser.serialize_usernames(account.username),
+                'first_name': account.label or '',
+            },
+        )
+        _sync_telegram_username(user, account.username)
+        return user
     return None
 
 

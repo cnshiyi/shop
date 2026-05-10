@@ -8,6 +8,7 @@ from core.crypto import decrypt_text, encrypt_text
 class TelegramLoginAccount(models.Model):
     label = models.CharField('账号备注', max_length=191)
     phone = models.CharField('手机号', max_length=64, blank=True, null=True)
+    tg_user_id = models.BigIntegerField('Telegram 用户ID', blank=True, null=True, db_index=True)
     username = models.CharField('用户名', max_length=191, blank=True, null=True)
     status = models.CharField('状态', max_length=32, default='pending', db_index=True)
     phone_code_hash = models.CharField('验证码哈希', max_length=191, blank=True, null=True)

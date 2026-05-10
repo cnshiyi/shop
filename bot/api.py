@@ -1004,6 +1004,7 @@ def _telegram_login_account_payload(item):
         'id': item.id,
         'label': item.label,
         'phone': item.phone or '',
+        'tg_user_id': item.tg_user_id,
         'username': item.username or '',
         'status': item.status,
         'note': item.note or '',
@@ -3051,12 +3052,14 @@ async def _telegram_sign_in_password(session_string: str, password: str, api_id:
 
 def _update_login_account_from_me(item, me, status='logged_in'):
     item.status = status
+    item.tg_user_id = getattr(me, 'id', None) or item.tg_user_id
     item.username = _merge_login_account_usernames(item.username, getattr(me, 'username', None)) or item.username
     item.label = getattr(me, 'first_name', None) or item.username or item.phone or item.label
-    _get_or_create_user_sync(getattr(me, 'id', 0), getattr(me, 'username', None), getattr(me, 'first_name', None))
+    if item.tg_user_id:
+        _get_or_create_user_sync(item.tg_user_id, getattr(me, 'username', None), getattr(me, 'first_name', None))
     item.note = '登录成功'
     item.last_synced_at = timezone.now()
-    item.save(update_fields=['status', 'username', 'label', 'note', 'last_synced_at', 'updated_at'])
+    item.save(update_fields=['status', 'tg_user_id', 'username', 'label', 'note', 'last_synced_at', 'updated_at'])
     return item
 
 
@@ -3378,15 +3381,25 @@ def create_telegram_login_account(request):
     phone = str(payload.get('phone') or '').strip()
     username = _limited_username_string(payload.get('username'))
     note = str(payload.get('note') or '').strip()
+    tg_user_id = None
+    raw_tg_user_id = str(payload.get('tg_user_id') or '').strip()
+    if raw_tg_user_id:
+        try:
+            tg_user_id = int(raw_tg_user_id)
+        except (TypeError, ValueError):
+            return _error('Telegram 用户ID必须是数字', status=400)
     if not label:
         return _error('账号备注不能为空', status=400)
     item = TelegramLoginAccount.objects.create(
         label=label,
         phone=phone or None,
+        tg_user_id=tg_user_id,
         username=username,
         note=note or '已登记。自动采集仅限 bot 会话内收到的用户资料和聊天记录；不会后台登录个人 Telegram 账号抓取私聊。',
         status='registered',
     )
+    if tg_user_id:
+        _get_or_create_user_sync(tg_user_id, username, label)
     return _ok(_telegram_login_account_payload(item))
 
 
