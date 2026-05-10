@@ -12,7 +12,7 @@ from core.cloud_accounts import choose_cloud_account_for_order, cloud_account_la
 from cloud.aliyun_simple import create_instance as create_aliyun_instance
 from cloud.aws_lightsail import create_instance as create_aws_instance, get_instance_public_ip, move_static_ip_to_instance, public_ip_exists
 from cloud.bootstrap import build_mtproxy_links, install_bbr, install_mtproxy
-from cloud.ip_guard import validate_server_connection_ip_with_retry
+from cloud.ip_guard import validate_server_connection_ip, validate_server_connection_ip_with_retry
 from cloud.models import CloudServerOrder
 from cloud.ports import get_mtproxy_port_label, get_mtproxy_port_plan
 

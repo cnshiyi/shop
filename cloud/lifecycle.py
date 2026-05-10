@@ -1,3 +1,4 @@
+import asyncio
 import hashlib
 import logging
 import os
@@ -1023,6 +1024,23 @@ def _action_ok(result) -> bool:
     return not isinstance(result, tuple) or bool(result[0])
 
 
+def _cloud_action_timeout_seconds() -> int:
+    try:
+        return max(10, int(str(get_runtime_config('cloud_action_timeout_seconds', '90')).strip() or 90))
+    except Exception:
+        return 90
+
+
+async def _run_cloud_action_with_timeout(coro, *, action: str, target: str):
+    timeout_seconds = _cloud_action_timeout_seconds()
+    try:
+        return await asyncio.wait_for(coro, timeout=timeout_seconds)
+    except asyncio.TimeoutError:
+        note = f'{action}超时：云 API 超过 {timeout_seconds} 秒未返回，已跳过本轮，避免卡住机器人；下次生命周期会重试。'
+        logger.warning('CLOUD_ACTION_TIMEOUT action=%s target=%s timeout_seconds=%s', action, target, timeout_seconds)
+        return False, note
+
+
 @sync_to_async
 def _record_lifecycle_action_failed(order_id: int, event_type: str, note: str):
     order = CloudServerOrder.objects.get(id=order_id)
@@ -2006,7 +2024,7 @@ async def lifecycle_tick(notify=None, notify_target=None, defer_destructive_seco
                 await _record_lifecycle_action_failed(checked_order.id, 'suspend_skipped', skip_reason)
             continue
         order = checked_order
-        result = await _stop_instance(order)
+        result = await _run_cloud_action_with_timeout(_stop_instance(order), action='AWS 实例关机', target=order.order_no)
         note = _action_note(result)
         if _action_ok(result):
             notice = await _cloud_expiry_notice_payload(order.id)
@@ -2022,7 +2040,7 @@ async def lifecycle_tick(notify=None, notify_target=None, defer_destructive_seco
         if not _is_cloud_delete_safe_time():
             logger.warning('CLOUD_DELETE_SKIP_OUTSIDE_WINDOW order_id=%s order_no=%s delete_at=%s now=%s', order.id, order.order_no, order.delete_at, timezone.now())
             continue
-        result = await _delete_instance(order)
+        result = await _run_cloud_action_with_timeout(_delete_instance(order), action='AWS 实例删除', target=order.order_no)
         note = _action_note(result)
         if _action_ok(result):
             if order.status == 'failed':
@@ -2041,7 +2059,7 @@ async def lifecycle_tick(notify=None, notify_target=None, defer_destructive_seco
         notice = await _cloud_expiry_notice_payload(order.id)
         if not notice.get('valid'):
             continue
-        result = await _release_order_static_ip(order)
+        result = await _run_cloud_action_with_timeout(_release_order_static_ip(order), action='AWS 固定 IP 释放', target=order.order_no)
         note = _action_note(result)
         if _action_ok(result):
             updated = await _mark_recycled(order.id, note)
@@ -2054,7 +2072,7 @@ async def lifecycle_tick(notify=None, notify_target=None, defer_destructive_seco
         if not _is_cloud_delete_safe_time():
             logger.warning('CLOUD_MIGRATION_DELETE_SKIP_OUTSIDE_WINDOW order_id=%s order_no=%s migration_due_at=%s now=%s', order.id, order.order_no, order.migration_due_at, timezone.now())
             continue
-        result = await _delete_replaced_server(order)
+        result = await _run_cloud_action_with_timeout(_delete_replaced_server(order), action='AWS 迁移旧实例删除', target=order.order_no)
         note = _action_note(result)
         if _action_ok(result):
             notice = await _cloud_expiry_notice_payload(order.id)
@@ -2227,7 +2245,7 @@ IP: {ip}
         if not _is_cloud_delete_safe_time():
             logger.warning('CLOUD_ORPHAN_ASSET_DELETE_SKIP_OUTSIDE_WINDOW asset_id=%s ip=%s actual_expires_at=%s now=%s', asset.id, asset.public_ip, asset.actual_expires_at, timezone.now())
             continue
-        result = await _delete_orphan_asset_instance(asset)
+        result = await _run_cloud_action_with_timeout(_delete_orphan_asset_instance(asset), action='AWS 无订单实例删除', target=str(asset.id))
         note = _action_note(result)
         if _action_ok(result):
             updated = await _mark_orphan_asset_deleted(asset.id, note)
@@ -2242,7 +2260,7 @@ IP: {ip}
         if not _is_cloud_delete_safe_time():
             logger.warning('CLOUD_UNATTACHED_STATIC_IP_DELETE_SKIP_OUTSIDE_WINDOW asset_id=%s ip=%s actual_expires_at=%s now=%s', asset.id, asset.public_ip, asset.actual_expires_at, timezone.now())
             continue
-        result = await _release_unattached_static_ip(asset)
+        result = await _run_cloud_action_with_timeout(_release_unattached_static_ip(asset), action='AWS 未附加固定 IP 释放', target=str(asset.id))
         note = _action_note(result)
         if _action_ok(result):
             updated = await _mark_unattached_static_ip_deleted(asset.id, note)
