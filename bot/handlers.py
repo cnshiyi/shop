@@ -285,22 +285,23 @@ def _tron_address_action_keyboard(address: str) -> InlineKeyboardMarkup:
 
 
 async def _fetch_tron_address_summary(address: str) -> dict:
+    headers = await build_trongrid_headers()
     async with httpx.AsyncClient(timeout=15) as client:
         account_resp = await client.post(
             f'{TRONGRID_BASE_URL}/wallet/getaccount',
             json={'address': address, 'visible': True},
-            headers=await build_trongrid_headers(),
+            headers=headers,
         )
         account_resp.raise_for_status()
         account_data = account_resp.json() or {}
         resource_resp = await client.post(
             f'{TRONGRID_BASE_URL}/wallet/getaccountresource',
             json={'address': address, 'visible': True},
-            headers=await build_trongrid_headers(),
+            headers=headers,
         )
         resource_resp.raise_for_status()
         resource_data = resource_resp.json() or {}
-        account_v1_resp = await client.get(f'{TRONGRID_BASE_URL}/v1/accounts/{address}', headers=await build_trongrid_headers())
+        account_v1_resp = await client.get(f'{TRONGRID_BASE_URL}/v1/accounts/{address}', headers=headers)
         account_v1_resp.raise_for_status()
         account_v1_data = account_v1_resp.json() or {}
         trc20_resp = await client.get(
