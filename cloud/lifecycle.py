@@ -1348,7 +1348,8 @@ def _get_migration_due_orders():
         CloudServerOrder.objects.filter(
             replacement_orders__isnull=False,
             migration_due_at__lte=now,
-        ).exclude(status__in=['deleted']).distinct()
+            status='deleting',
+        ).distinct()
     )
 
 

@@ -1534,7 +1534,7 @@ def _shutdown_plan_item_payload(order, *, queue_status='scheduled_future', queue
     elif queue_status == 'due_now':
         execution_status = '已到删除时间，待执行删除服务器'
     elif queue_status == 'within_window':
-        execution_status = '即将进入删除执行窗口'
+        execution_status = '3天内待执行删除服务器'
     else:
         execution_status = '等待服务器删除计划'
     execution_plan = f'删除服务器 {_fmt_dashboard_dt(plan_at)}' if plan_at else '等待删除时间'
@@ -1563,6 +1563,7 @@ def _shutdown_plan_item_payload(order, *, queue_status='scheduled_future', queue
         'last_failure_reason': last_failure_reason,
         'execution_status': execution_status,
         'execution_plan': execution_plan,
+        'note': order.provision_note or '',
         'related_path': f'/admin/cloud-orders/{order.id}',
         'detail_path': f'/admin/cloud-orders/{order.id}',
         'order_detail_path': f'/admin/cloud-orders/{order.id}',
@@ -1581,7 +1582,7 @@ def _orphan_asset_delete_plan_item_payload(asset, *, queue_status='orphan_due', 
         queue_status_label = '关机计划关闭'
         execution_status = '关机计划关闭，禁止真实关机和删机'
     elif queue_status == 'within_window':
-        execution_status = '即将进入删除执行窗口'
+        execution_status = '3天内待执行删除服务器'
     elif queue_status == 'scheduled_future':
         execution_status = '等待服务器删除计划'
     user_display_name, username_label = _telegram_user_labels(asset.user if getattr(asset, 'user', None) else None)
@@ -1610,6 +1611,7 @@ def _orphan_asset_delete_plan_item_payload(asset, *, queue_status='orphan_due', 
         'last_failure_reason': None,
         'execution_status': execution_status,
         'execution_plan': f'删除服务器 {_fmt_dashboard_dt(plan_at)}' if plan_at else '等待删除时间',
+        'note': asset.note or '',
         'cloud_account_id': asset.cloud_account_id,
         'cloud_account_name': account_name,
         'external_account_id': external_account_id,
@@ -1629,6 +1631,7 @@ def _asset_shutdown_enabled(asset):
 
 
 def _collect_shutdown_plan_queue(now):
+    pending_until = now + timezone.timedelta(days=3)
     due = async_to_sync(_get_due_orders)()
     due_orders = list(due.get('delete') or [])
     due_ids = {order.id for order in due_orders}
@@ -1704,11 +1707,11 @@ def _collect_shutdown_plan_queue(now):
     for order in future_qs:
         if not next_run_at or order.delete_at < next_run_at:
             next_run_at = order.delete_at
-        if order.delete_at <= now + timezone.timedelta(days=1):
-            queue_status, queue_status_label = 'within_window', '24小时内进入删机窗口'
-        else:
-            queue_status, queue_status_label = 'scheduled_future', '未来计划'
-        future_items.append(_shutdown_plan_item_payload(order, queue_status=queue_status, queue_status_label=queue_status_label, next_run_at=order.delete_at))
+        if order.delete_at <= pending_until:
+            due_ids.add(order.id)
+            due_orders.append(order)
+            continue
+        future_items.append(_shutdown_plan_item_payload(order, queue_status='scheduled_future', queue_status_label='未来计划', next_run_at=order.delete_at))
 
     due_items = [_shutdown_plan_item_payload(order, queue_status='due_now', queue_status_label='本轮待删除', next_run_at=order.delete_at) for order in due_orders]
     due_items.extend(_orphan_asset_delete_plan_item_payload(asset) for asset in orphan_due_assets)
@@ -1723,12 +1726,13 @@ def _collect_shutdown_plan_queue(now):
     for asset in future_orphan_assets:
         if not next_run_at or asset.actual_expires_at < next_run_at:
             next_run_at = asset.actual_expires_at
-        if asset.actual_expires_at <= now + timezone.timedelta(days=1):
-            queue_status, queue_status_label = 'within_window', '24小时内进入删机窗口'
-        else:
-            queue_status, queue_status_label = 'scheduled_future', '未来计划'
-        future_items.append(_orphan_asset_delete_plan_item_payload(asset, queue_status=queue_status, queue_status_label=queue_status_label))
+        if asset.actual_expires_at <= pending_until:
+            due_items.append(_orphan_asset_delete_plan_item_payload(asset, queue_status='within_window', queue_status_label='3天内待删除'))
+            continue
+        future_items.append(_orphan_asset_delete_plan_item_payload(asset, queue_status='scheduled_future', queue_status_label='未来计划'))
 
+    due_items.sort(key=lambda item: parse_datetime(item.get('delete_at') or '') or datetime.max.replace(tzinfo=dt_timezone.utc))
+    future_items.sort(key=lambda item: parse_datetime(item.get('delete_at') or '') or datetime.max.replace(tzinfo=dt_timezone.utc))
     return {
         'due_orders': due_orders,
         'retry_orders': [item[0] for item in recent_failures.values()],
@@ -1892,6 +1896,38 @@ def lifecycle_plans(request):
         'shutdown_items': shutdown_items,
         'ip_delete_items': ip_delete_items,
     })
+
+
+@csrf_exempt
+@dashboard_login_required
+@require_POST
+def update_lifecycle_plan_note(request):
+    payload = _json_payload(request)
+    item_type = str(payload.get('item_type') or '').strip()
+    note = str(payload.get('note') or '').strip()
+    order_id = payload.get('order_id')
+    asset_id = payload.get('asset_id') or payload.get('id')
+    if item_type == 'order' or order_id:
+        try:
+            order_id = int(order_id or 0)
+        except (TypeError, ValueError):
+            order_id = 0
+        order = CloudServerOrder.objects.filter(id=order_id).first()
+        if not order:
+            return _error('订单不存在', status=404)
+        order.provision_note = note
+        order.save(update_fields=['provision_note', 'updated_at'])
+        return _ok({'item_type': 'order', 'order_id': order.id, 'note': order.provision_note or ''})
+    try:
+        asset_id = int(asset_id or 0)
+    except (TypeError, ValueError):
+        asset_id = 0
+    asset = CloudAsset.objects.filter(id=asset_id).first()
+    if not asset:
+        return _error('资产不存在', status=404)
+    asset.note = note
+    asset.save(update_fields=['note', 'updated_at'])
+    return _ok({'item_type': item_type or 'asset', 'asset_id': asset.id, 'note': asset.note or ''})
 
 
 def _run_shutdown_order_sync(order_id: int, queue_status='manual_single', enforce_schedule: bool = True):

@@ -1374,7 +1374,7 @@ class CloudServerServicesTestCase(TestCase):
             total_amount='19.00',
             pay_amount='19.00',
             pay_method='balance',
-            status='completed',
+            status='deleting',
             public_ip='10.0.1.1',
             migration_due_at=timezone.now() - timezone.timedelta(minutes=1),
         )
@@ -1416,6 +1416,46 @@ class CloudServerServicesTestCase(TestCase):
         due_orders = async_to_sync(_get_migration_due_orders)()
 
         self.assertEqual([item.id for item in due_orders], [old_order.id])
+
+    def test_get_migration_due_orders_skips_non_deleting_orders(self):
+        old_order = CloudServerOrder.objects.create(
+            order_no='HB-MIGRATION-OLD-SKIP-1',
+            user=self.user,
+            plan=self.plan,
+            provider=self.plan.provider,
+            region_code=self.plan.region_code,
+            region_name=self.plan.region_name,
+            plan_name=self.plan.plan_name,
+            quantity=1,
+            currency='USDT',
+            total_amount='19.00',
+            pay_amount='19.00',
+            pay_method='balance',
+            status='completed',
+            public_ip='10.0.2.1',
+            migration_due_at=timezone.now() - timezone.timedelta(minutes=1),
+        )
+        CloudServerOrder.objects.create(
+            order_no='HB-MIGRATION-NEW-SKIP-1',
+            user=self.user,
+            plan=self.plan,
+            provider=self.plan.provider,
+            region_code=self.plan.region_code,
+            region_name=self.plan.region_name,
+            plan_name=self.plan.plan_name,
+            quantity=1,
+            currency='USDT',
+            total_amount='19.00',
+            pay_amount='19.00',
+            pay_method='balance',
+            status='completed',
+            public_ip='10.0.2.2',
+            replacement_for=old_order,
+        )
+
+        due_orders = async_to_sync(_get_migration_due_orders)()
+
+        self.assertEqual(due_orders, [])
 
     def test_mark_failed_schedules_incomplete_instance_cleanup(self):
         order = CloudServerOrder.objects.create(
