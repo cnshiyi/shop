@@ -258,10 +258,11 @@ def record_telegram_message(
     login_account_id: int | None = None,
     chat_title: str | None = None,
     source: str = 'bot',
+    active_usernames: list[str] | tuple[str, ...] | None = None,
 ):
     TelegramChatMessage = apps.get_model('bot', 'TelegramChatMessage')
-    user = _get_or_create_user_sync(tg_user_id, username, first_name)
-    username_snapshot = (_normalize_usernames(username) or [''])[0] or None
+    user = _get_or_create_user_sync(tg_user_id, username, first_name, active_usernames)
+    username_snapshot = (_normalize_usernames(active_usernames) or _normalize_usernames(username) or [''])[0] or None
     existing = None
     if message_id:
         existing = TelegramChatMessage.objects.filter(chat_id=chat_id, message_id=message_id, direction=direction).first()

@@ -17,7 +17,7 @@ from cryptography.hazmat.primitives.padding import PKCS7
 from asgiref.sync import sync_to_async
 from django.utils import timezone
 
-from bot.models import TelegramChatMessage, TelegramLoginAccount
+from bot.models import TelegramChatMessage, TelegramLoginAccount, TelegramUser
 from bot.services import record_telegram_message, telegram_group_delivery_flags
 from core.models import SiteConfig
 from core.runtime_config import get_runtime_config
@@ -76,8 +76,59 @@ def _mark_account(account_id: int, status: str, note: str = ''):
     TelegramLoginAccount.objects.filter(id=account_id).update(**fields)
 
 
+@sync_to_async
+def _sync_account_profile(account_id: int, entity, note: str = '监听中'):
+    tg_user_id = int(getattr(entity, 'id', 0) or 0) or None
+    usernames = TelegramUser.serialize_usernames(_entity_usernames(entity))
+    label = _entity_name(entity) or usernames or ''
+    fields = {
+        'status': 'logged_in',
+        'last_synced_at': timezone.now(),
+        'updated_at': timezone.now(),
+    }
+    if tg_user_id:
+        fields['tg_user_id'] = tg_user_id
+    if usernames:
+        fields['username'] = usernames
+    if label:
+        fields['label'] = label[:191]
+    if note:
+        fields['note'] = note[:1000]
+    TelegramLoginAccount.objects.filter(id=account_id).update(**fields)
+    if tg_user_id:
+        user, _ = TelegramUser.objects.get_or_create(
+            tg_user_id=tg_user_id,
+            defaults={'username': usernames, 'first_name': label[:191] if label else ''},
+        )
+        changed = []
+        if usernames and user.username != usernames:
+            user.username = usernames
+            changed.append('username')
+        if label and user.first_name != label[:191]:
+            user.first_name = label[:191]
+            changed.append('first_name')
+        if changed:
+            changed.append('updated_at')
+            user.save(update_fields=changed)
+
+
+def _entity_usernames(entity) -> list[str]:
+    values = []
+    username = getattr(entity, 'username', None)
+    if username:
+        values.append(username)
+    for item in getattr(entity, 'usernames', None) or []:
+        if getattr(item, 'active', True) is False:
+            continue
+        value = getattr(item, 'username', None) or str(item or '')
+        if value:
+            values.append(value)
+    return TelegramUser.normalize_usernames(values)
+
+
 def _entity_username(entity) -> str | None:
-    return getattr(entity, 'username', None) or None
+    usernames = _entity_usernames(entity)
+    return usernames[0] if usernames else None
 
 
 def _entity_name(entity) -> str | None:
@@ -302,6 +353,7 @@ async def _record_event(account: LoginAccountSnapshot, event, self_user_id=None)
         login_account_id=account.id,
         chat_title=chat_title,
         source='account',
+        active_usernames=_entity_usernames(counterpart),
     )
     push_config = await _cached_telegram_push_config()
     account_push_enabled = bool(account.listener_push_enabled)
@@ -334,6 +386,7 @@ async def _run_account_listener(account: LoginAccountSnapshot, stop_event: async
 
         me = await client.get_me()
         self_user_id = int(getattr(me, 'id', 0) or 0) or None
+        await _sync_account_profile(account.id, me)
 
         @client.on(events.NewMessage())
         async def _handler(event):
