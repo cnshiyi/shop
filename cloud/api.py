@@ -1564,14 +1564,16 @@ def _notice_task_future_items(now, next_run_at, seen_keys: set[tuple[str, int]],
                 break
     items.sort(key=lambda item: parse_datetime(item.get('notice_at') or '') or timezone.datetime.max.replace(tzinfo=dt_timezone.utc))
     due_items = [item for item in items if item.get('queue_status') in {'fallback_notice', 'within_window'}]
-    future_items = [item for item in items if item.get('queue_status') == 'scheduled_future'][:future_limit]
+    future_items = [item for item in items if item.get('queue_status') == 'scheduled_future']
     return due_items, future_items
 
 
-def _notice_user_summary_items(items: list[dict]) -> list[dict]:
+def _notice_group_summary_items(items: list[dict], *, limit: int | None = None) -> list[dict]:
     grouped = {}
     for item in items:
-        key = item.get('user_id') or f"unbound:{item.get('tg_user_id') or item.get('user_display_name') or 'unknown'}"
+        notice_type = item.get('notice_type') or ''
+        user_key = item.get('user_id') or f"unbound:{item.get('tg_user_id') or item.get('user_display_name') or 'unknown'}"
+        key = f'{user_key}:{notice_type}'
         group = grouped.setdefault(key, {
             'id': key,
             'user_id': item.get('user_id'),
@@ -1580,32 +1582,62 @@ def _notice_user_summary_items(items: list[dict]) -> list[dict]:
             'username_label': item.get('username_label') or '-',
             'notice_channel': item.get('notice_channel') or 'unbound',
             'notice_channel_label': item.get('notice_channel_label') or '未绑定通知渠道',
+            'notice_type': notice_type,
+            'notice_type_label': item.get('notice_type_label') or notice_type,
             'notice_count': 0,
             'ip_count': 0,
             'ips': [],
-            'notice_types': [],
-            'notice_type_labels': [],
             'pending_count': 0,
             'failed_retry_count': 0,
             'next_notice_at': item.get('notice_at'),
+            'notice_text_preview': '',
+            'retry_label': item.get('retry_label') or '-',
+            'related_path': item.get('related_path') or '',
         })
         group['notice_count'] += 1
         ip = item.get('ip') or '-'
         if ip not in group['ips']:
             group['ips'].append(ip)
             group['ip_count'] += 1
-        notice_type = item.get('notice_type') or ''
-        if notice_type and notice_type not in group['notice_types']:
-            group['notice_types'].append(notice_type)
-            group['notice_type_labels'].append(item.get('notice_type_label') or notice_type)
         if item.get('notice_status') in {'pending', 'scheduled_soon'}:
             group['pending_count'] += 1
         if item.get('notice_status') == 'failed_retry':
             group['failed_retry_count'] += 1
+            group['retry_label'] = item.get('retry_label') or group['retry_label']
         notice_at = item.get('notice_at')
         if notice_at and (not group.get('next_notice_at') or notice_at < group['next_notice_at']):
             group['next_notice_at'] = notice_at
-    return sorted(grouped.values(), key=lambda item: item.get('next_notice_at') or '')
+            group['related_path'] = item.get('related_path') or group.get('related_path') or ''
+        if not group.get('notice_text_preview'):
+            label = group.get('notice_type_label') or '通知'
+            group['notice_text_preview'] = f'{label}：{group["user_display_name"]} 共 {group["ip_count"]} 个 IP，系统会合并成一条通知发送。'
+    summary = sorted(grouped.values(), key=lambda item: item.get('next_notice_at') or '')
+    for group in summary:
+        label = group.get('notice_type_label') or '通知'
+        ip_text = ' / '.join(group.get('ips') or [])
+        group['notice_text_preview'] = f'{label}：{group["user_display_name"]} 共 {group["ip_count"]} 个 IP：{ip_text}。系统会合并成一条通知发送。'
+    return summary[:limit] if limit else summary
+
+
+def _notice_history_group_items(logs) -> list[dict]:
+    items = []
+    for log in logs:
+        extra = log.extra or {}
+        order_ids = extra.get('order_ids') or ([log.order_id] if log.order_id else [])
+        notice_type = 'renew_notice' if log.event_type == 'renew_notice_batch' else log.event_type
+        ip_count = len(order_ids) if order_ids else 1
+        item = _notice_task_history_item_payload(log)
+        item.update({
+            'id': log.batch_id or log.id,
+            'notice_type': notice_type,
+            'notice_type_label': _NOTICE_HISTORY_LABELS.get(log.event_type, log.event_type),
+            'notice_count': 1,
+            'ip_count': ip_count,
+            'ips': [log.ip] if log.ip else [],
+            'notice_text_preview': log.text_preview or '',
+        })
+        items.append(item)
+    return items
 
 
 def _notice_task_history_item_payload(log):
@@ -1663,8 +1695,8 @@ def notice_task_detail(request):
     window_due_items, future_plan_items = _notice_task_future_items(now, next_run_at, seen_keys, latest_logs)
     due_items.extend(window_due_items)
     due_items.sort(key=lambda item: parse_datetime(item.get('notice_at') or '') or timezone.datetime.max.replace(tzinfo=dt_timezone.utc))
-    due_user_summary_items = _notice_user_summary_items(due_items)
-    future_user_summary_items = _notice_user_summary_items(future_plan_items)
+    due_user_summary_items = _notice_group_summary_items(due_items)
+    future_user_summary_items = _notice_group_summary_items(future_plan_items, limit=10)
     history_qs = CloudUserNoticeLog.objects.select_related('order', 'user').filter(event_type__in=list(_NOTICE_HISTORY_LABELS)).order_by('-created_at', '-id')
     recent_since = now - timezone.timedelta(days=1)
     recent_logs = history_qs.filter(created_at__gte=recent_since)
@@ -1689,7 +1721,7 @@ def notice_task_detail(request):
         'due_user_summary_items': due_user_summary_items,
         'future_plan_items': future_plan_items,
         'future_user_summary_items': future_user_summary_items,
-        'history_items': [_notice_task_history_item_payload(item) for item in history_qs[:200]],
+        'history_items': _notice_history_group_items(history_qs[:200]),
     })
 
 
