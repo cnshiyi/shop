@@ -119,11 +119,23 @@ def cleanup_bot_runner() -> None:
             kill_pid(int(line))
 
 
+def web_autoreload_enabled() -> bool:
+    return env_bool('SHOP_WEB_AUTORELOAD', False)
+
+
+def build_runserver_command() -> list[str]:
+    command = [PYTHON, 'manage.py', 'runserver', '127.0.0.1:8000']
+    if not web_autoreload_enabled():
+        command.append('--noreload')
+    return command
+
+
 def run_web() -> int:
     cleanup_port(8000)
     run_manage('migrate')
     run_manage('ensure_dashboard_admin')
-    return subprocess.call([PYTHON, 'manage.py', 'runserver', '127.0.0.1:8000'], cwd=BASE_DIR, env=build_env())
+    print(f'[run.py] starting web autoreload={web_autoreload_enabled()}', flush=True)
+    return subprocess.call(build_runserver_command(), cwd=BASE_DIR, env=build_env())
 
 
 def should_keepalive_bot() -> bool:
@@ -162,7 +174,8 @@ def run_all() -> int:
     cleanup_bot_runner()
     run_manage('migrate')
     run_manage('ensure_dashboard_admin')
-    web_process = start_process('manage.py', 'runserver', '127.0.0.1:8000')
+    print(f'[run.py] starting web autoreload={web_autoreload_enabled()}', flush=True)
+    web_process = subprocess.Popen(build_runserver_command(), cwd=BASE_DIR, env=build_env())
     bot_process = start_process('-m', 'bot.runner')
     bot_restart_count = 0
     try:
