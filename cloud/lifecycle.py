@@ -489,33 +489,18 @@ def _code_text(value) -> str:
 def _notice_plan_text(order, notice: dict | None = None, *, include_expiry: bool = True, include_renewal_amount: bool = True) -> str:
     notice = notice or {}
     expires_at = notice.get('expires_at') or getattr(order, 'service_expires_at', None)
-    suspend_at = notice.get('suspend_at') or getattr(order, 'suspend_at', None)
-    delete_at = notice.get('delete_at') or getattr(order, 'delete_at', None)
-    ip_recycle_at = notice.get('ip_recycle_at') or getattr(order, 'ip_recycle_at', None)
     auto_renew_enabled = bool(notice.get('auto_renew_enabled') if 'auto_renew_enabled' in notice else getattr(order, 'auto_renew_enabled', False))
     auto_renew_at = expires_at - timezone.timedelta(days=1) if expires_at else None
     lines = []
     if include_expiry:
-        lines.append(f'到期时间: {_format_notice_dt(expires_at)}')
+        lines.append(f'到期时间: {_code_text(_format_notice_dt(expires_at))}')
     if include_renewal_amount:
         try:
-            lines.append(f'续费金额: {_renewal_price(order, getattr(order, "user", None)):.2f} USDT')
+            lines.append(f'价格: {_code_text(f"{_renewal_price(order, getattr(order, "user", None)):.2f}")} USDT')
         except RenewalPriceMissingError:
-            lines.append('续费金额: 未设置，请联系客服确认')
-    if auto_renew_enabled:
-        lines.append(f'自动续费: 已开启，预计 {_format_notice_dt(auto_renew_at)} 自动续费')
-    else:
-        lines.append('自动续费: 本IP未开启自动续费')
-    lines.append(f'关机计划: {_format_notice_dt(suspend_at)}（后台执行时间 { _config_time_text("cloud_suspend_time", "15:00") }）')
-    lines.append(f'删除计划: {_format_notice_dt(delete_at)}（后台执行时间 { _config_time_text("cloud_delete_time", "15:00") }）')
-    if ip_recycle_at:
-        lines.append(f'固定IP删除计划: {_format_notice_dt(ip_recycle_at)}')
-    if suspend_at:
-        lines.append(f'请务必在 {_format_notice_dt(suspend_at)} 之前完成续费，避免关机。')
-    if delete_at:
-        lines.append(f'如已关机，请务必在 {_format_notice_dt(delete_at)} 之前完成续费，避免实例删除。')
-    if ip_recycle_at:
-        lines.append(f'实例删除后仍需保留 IP 的，请务必在 {_format_notice_dt(ip_recycle_at)} 之前续费恢复。')
+            lines.append(f'价格: {_code_text("未设置")}，请联系客服确认')
+    auto_renew_text = f'已开启，预计 {_code_text(_format_notice_dt(auto_renew_at))} 自动续费' if auto_renew_enabled else '未开启'
+    lines.append(f'自动续费状态: {auto_renew_text}')
     return '\n'.join(lines)
 
 
