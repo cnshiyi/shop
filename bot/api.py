@@ -2182,6 +2182,7 @@ def site_config_groups(request):
             'telegram_listener_push_bark_encryption_key',
             'telegram_listener_push_bark_encryption_iv',
             'bot_admin_chat_id',
+            'bot_notice_copy_chat_ids',
             'cloud_auto_renew_execution_notify_enabled',
             'cloud_auto_renew_execution_notify_chat_ids',
             'cloud_auto_renew_execution_notify_events',
@@ -2339,9 +2340,7 @@ def update_site_config(request, config_id: int):
         if interval_seconds < 60:
             return _error('代理同步间隔不能小于60秒', status=400)
         plain_value = str(interval_seconds)
-    if item.key == 'bot_admin_chat_id':
-        if not plain_value:
-            return _error('管理员转发 Chat ID 不能为空', status=400)
+    if item.key in {'bot_admin_chat_id', 'bot_notice_copy_chat_ids'}:
         normalized = (
             plain_value
             .replace('，', ',')
@@ -2357,8 +2356,9 @@ def update_site_config(request, config_id: int):
             try:
                 parsed_ids.append(str(int(candidate)))
             except Exception:
-                return _error(f'管理员转发 Chat ID 格式不正确：{candidate}', status=400)
-        if not parsed_ids:
+                label = '抄送 Chat ID' if item.key == 'bot_notice_copy_chat_ids' else '管理员转发 Chat ID'
+                return _error(f'{label} 格式不正确：{candidate}', status=400)
+        if item.key == 'bot_admin_chat_id' and not parsed_ids:
             return _error('管理员转发 Chat ID 至少要有一个有效值', status=400)
         plain_value = ','.join(dict.fromkeys(parsed_ids))
     sort_order_raw = data.get('sort_order')

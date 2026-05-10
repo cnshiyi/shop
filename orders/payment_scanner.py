@@ -55,7 +55,7 @@ def _admin_notice_copy_text(user, text: str) -> str:
     username = getattr(user, 'primary_username', '') or getattr(user, 'username', '') or ''
     first_name = getattr(user, 'first_name', '') or ''
     user_label = f'{first_name} @{username}'.strip() if username else (first_name or '-')
-    return f'📣 管理员通知抄送\n用户: {user_label}\nTG ID: {tg_user_id}\n\n{text}'
+    return f'📣 通知抄送\n用户: {user_label}\nTG ID: {tg_user_id}\n\n{text}'
 
 
 # ── 配置 ──────────────────────────────────────────────────────────────────
@@ -502,17 +502,17 @@ async def _provision_recovered_cloud_order(order: CloudServerOrder):
 async def _copy_notice_to_admins(user, text: str, parse_mode: str | None = None):
     if _bot is None or not user:
         return
-    admin_chat_ids = _parse_notify_chat_ids(get_runtime_config('bot_admin_chat_id', ''))
-    if not admin_chat_ids:
+    copy_chat_ids = _parse_notify_chat_ids(get_runtime_config('bot_notice_copy_chat_ids', ''))
+    if not copy_chat_ids:
         return
     copy_text = _admin_notice_copy_text(user, text)
-    for admin_chat_id in admin_chat_ids:
-        if str(admin_chat_id) == str(getattr(user, 'tg_user_id', '')):
+    for copy_chat_id in copy_chat_ids:
+        if str(copy_chat_id) == str(getattr(user, 'tg_user_id', '')):
             continue
         try:
-            await _bot.send_message(chat_id=admin_chat_id, text=copy_text, parse_mode=parse_mode)
+            await _bot.send_message(chat_id=copy_chat_id, text=copy_text, parse_mode=parse_mode)
         except Exception as exc:
-            logger.warning('管理员通知抄送失败 admin_chat_id=%s user_id=%s err=%s', admin_chat_id, getattr(user, 'id', None), exc)
+            logger.warning('用户通知抄送失败 copy_chat_id=%s user_id=%s err=%s', copy_chat_id, getattr(user, 'id', None), exc)
 
 
 async def _notify_user(user_id: int, text: str, reply_markup=None, parse_mode: str | None = None):

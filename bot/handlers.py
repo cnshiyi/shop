@@ -691,24 +691,24 @@ def _parse_admin_chat_ids(raw_value: str) -> list[int]:
 
 
 async def _copy_user_notice_to_admins(bot: Bot, chat_id: int, text: str, parse_mode: str | None = None):
-    admin_chat_ids = _parse_admin_chat_ids(await _get_site_config_value('bot_admin_chat_id', ''))
-    if not admin_chat_ids:
+    copy_chat_ids = _parse_admin_chat_ids(await _get_site_config_value('bot_notice_copy_chat_ids', ''))
+    if not copy_chat_ids:
         return
-    copy_text = f'📣 管理员通知抄送\n用户 TG ID: {chat_id}\n\n{text}'
-    for admin_chat_id in admin_chat_ids:
-        if int(admin_chat_id) == int(chat_id):
+    copy_text = f'📣 通知抄送\n用户 TG ID: {chat_id}\n\n{text}'
+    for copy_chat_id in copy_chat_ids:
+        if int(copy_chat_id) == int(chat_id):
             continue
         try:
-            await bot.send_message(chat_id=admin_chat_id, text=copy_text, parse_mode=parse_mode)
+            await bot.send_message(chat_id=copy_chat_id, text=copy_text, parse_mode=parse_mode)
         except Exception as exc:
-            logger.warning('管理员通知抄送失败 admin_chat_id=%s chat_id=%s err=%s', admin_chat_id, chat_id, exc)
+            logger.warning('用户通知抄送失败 copy_chat_id=%s chat_id=%s err=%s', copy_chat_id, chat_id, exc)
 
 
 async def _send_admin_user_action_notice(bot: Bot | None, user, action: str, details: list[tuple[str, object]] | None = None):
     if bot is None:
         return
-    admin_chat_ids = _parse_admin_chat_ids(await _get_site_config_value('bot_admin_chat_id', ''))
-    if not admin_chat_ids:
+    copy_chat_ids = _parse_admin_chat_ids(await _get_site_config_value('bot_notice_copy_chat_ids', ''))
+    if not copy_chat_ids:
         return
     chat_id = int(getattr(user, 'tg_user_id', 0) or 0)
     username = _display_username(user)
@@ -723,13 +723,13 @@ async def _send_admin_user_action_notice(bot: Bot | None, user, action: str, det
     for label, value in details or []:
         lines.append(f'{escape(str(label))}: {escape(str(value if value is not None else "-"))}')
     text = '\n'.join(lines)
-    for admin_chat_id in admin_chat_ids:
-        if chat_id and int(admin_chat_id) == chat_id:
+    for copy_chat_id in copy_chat_ids:
+        if chat_id and int(copy_chat_id) == chat_id:
             continue
         try:
-            await bot.send_message(chat_id=admin_chat_id, text=text, parse_mode='HTML')
+            await bot.send_message(chat_id=copy_chat_id, text=text, parse_mode='HTML')
         except Exception as exc:
-            logger.warning('用户动作抄送失败 action=%s admin_chat_id=%s chat_id=%s err=%s', action, admin_chat_id, chat_id, exc)
+            logger.warning('用户动作抄送失败 action=%s copy_chat_id=%s chat_id=%s err=%s', action, copy_chat_id, chat_id, exc)
 
 
 async def _send_user_notice(bot: Bot, chat_id: int, text: str, reply_markup=None, parse_mode: str | None = None, disable_web_page_preview: bool | None = None):
