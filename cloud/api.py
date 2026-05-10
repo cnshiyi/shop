@@ -1568,6 +1568,46 @@ def _notice_task_future_items(now, next_run_at, seen_keys: set[tuple[str, int]],
     return due_items, future_items
 
 
+def _notice_user_summary_items(items: list[dict]) -> list[dict]:
+    grouped = {}
+    for item in items:
+        key = item.get('user_id') or f"unbound:{item.get('tg_user_id') or item.get('user_display_name') or 'unknown'}"
+        group = grouped.setdefault(key, {
+            'id': key,
+            'user_id': item.get('user_id'),
+            'tg_user_id': item.get('tg_user_id'),
+            'user_display_name': item.get('user_display_name') or '未绑定用户',
+            'username_label': item.get('username_label') or '-',
+            'notice_channel': item.get('notice_channel') or 'unbound',
+            'notice_channel_label': item.get('notice_channel_label') or '未绑定通知渠道',
+            'notice_count': 0,
+            'ip_count': 0,
+            'ips': [],
+            'notice_types': [],
+            'notice_type_labels': [],
+            'pending_count': 0,
+            'failed_retry_count': 0,
+            'next_notice_at': item.get('notice_at'),
+        })
+        group['notice_count'] += 1
+        ip = item.get('ip') or '-'
+        if ip not in group['ips']:
+            group['ips'].append(ip)
+            group['ip_count'] += 1
+        notice_type = item.get('notice_type') or ''
+        if notice_type and notice_type not in group['notice_types']:
+            group['notice_types'].append(notice_type)
+            group['notice_type_labels'].append(item.get('notice_type_label') or notice_type)
+        if item.get('notice_status') in {'pending', 'scheduled_soon'}:
+            group['pending_count'] += 1
+        if item.get('notice_status') == 'failed_retry':
+            group['failed_retry_count'] += 1
+        notice_at = item.get('notice_at')
+        if notice_at and (not group.get('next_notice_at') or notice_at < group['next_notice_at']):
+            group['next_notice_at'] = notice_at
+    return sorted(grouped.values(), key=lambda item: item.get('next_notice_at') or '')
+
+
 def _notice_task_history_item_payload(log):
     return {
         'id': log.id,
@@ -1623,6 +1663,8 @@ def notice_task_detail(request):
     window_due_items, future_plan_items = _notice_task_future_items(now, next_run_at, seen_keys, latest_logs)
     due_items.extend(window_due_items)
     due_items.sort(key=lambda item: parse_datetime(item.get('notice_at') or '') or timezone.datetime.max.replace(tzinfo=dt_timezone.utc))
+    due_user_summary_items = _notice_user_summary_items(due_items)
+    future_user_summary_items = _notice_user_summary_items(future_plan_items)
     history_qs = CloudUserNoticeLog.objects.select_related('order', 'user').filter(event_type__in=list(_NOTICE_HISTORY_LABELS)).order_by('-created_at', '-id')
     recent_since = now - timezone.timedelta(days=1)
     recent_logs = history_qs.filter(created_at__gte=recent_since)
@@ -1635,11 +1677,18 @@ def notice_task_detail(request):
         'last_run_at': _iso(getattr(latest_log, 'created_at', None)),
         'next_run_at': _iso(next_run_at),
         'due_count': len(due_items),
+        'due_user_count': len(due_user_summary_items),
+        'future_count': len(future_plan_items),
+        'future_user_count': len(future_user_summary_items),
         'recent_success_count': recent_logs.filter(delivered=True).count(),
+        'recent_success_user_count': recent_logs.filter(delivered=True).values('user_id').distinct().count(),
         'recent_failure_count': recent_logs.filter(delivered=False).count(),
+        'recent_failure_user_count': recent_logs.filter(delivered=False).values('user_id').distinct().count(),
         'retry_policy_label': '通知失败不会写入已通知时间；生命周期巡检会在下一轮继续重试，直到成功送达。',
         'due_items': due_items,
+        'due_user_summary_items': due_user_summary_items,
         'future_plan_items': future_plan_items,
+        'future_user_summary_items': future_user_summary_items,
         'history_items': [_notice_task_history_item_payload(item) for item in history_qs[:200]],
     })
 
