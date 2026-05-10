@@ -49,14 +49,17 @@ def _get_or_create_user_sync(
     active_usernames: list[str] | tuple[str, ...] | None = None,
 ):
     TelegramUser = _telegram_user_model()
-    incoming_usernames = _normalize_usernames(active_usernames) or _normalize_usernames(username)
+    active_username_list = _normalize_usernames(active_usernames)
+    incoming_usernames = active_username_list or _normalize_usernames(username)
+    usernames_are_authoritative = bool(active_username_list)
     if logger.isEnabledFor(logging.DEBUG):
         logger.debug(
-            'sync_user start tg_user_id=%s username=%s first_name=%s active_usernames=%s',
+            'sync_user start tg_user_id=%s username=%s first_name=%s active_usernames=%s authoritative=%s',
             tg_user_id,
             username,
             first_name,
             incoming_usernames,
+            usernames_are_authoritative,
         )
     user, _ = TelegramUser.objects.get_or_create(
         tg_user_id=tg_user_id,
@@ -66,8 +69,8 @@ def _get_or_create_user_sync(
         },
     )
     changed = []
-    merged_usernames = _merge_usernames(user.username, incoming_usernames)
-    serialized_usernames = _serialize_usernames(merged_usernames)
+    next_usernames = incoming_usernames if usernames_are_authoritative else _merge_usernames(user.username, incoming_usernames)
+    serialized_usernames = _serialize_usernames(next_usernames)
     if user.username != serialized_usernames:
         user.username = serialized_usernames
         changed.append('username')
