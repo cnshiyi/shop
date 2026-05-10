@@ -9,6 +9,7 @@ import threading
 import time
 import uuid
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from datetime import timezone as dt_timezone
 from decimal import Decimal, InvalidOperation
 
 import httpx
@@ -48,7 +49,7 @@ from bot.api import (
 from bot.models import TelegramGroupFilter, TelegramLoginAccount, TelegramUser
 from cloud.lifecycle import _delete_instance, _get_due_orders, _mark_replaced_order_deleted, _notice_payload_for_order, _record_auto_renew_patrol_log, _run_auto_renew
 from cloud.services import AWS_REGION_NAMES, RenewalPriceMissingError, _cloud_order_lifecycle_fields, _renewal_price, _update_order_primary_records, create_cloud_server_rebuild_order, ensure_cloud_server_pricing, ensure_manual_expiry_operation_order, ensure_manual_owner_operation_order, ensure_manual_price_operation_order, record_cloud_ip_log, refresh_custom_plan_cache, replace_cloud_asset_order_by_admin, set_cloud_server_auto_renew_admin
-from cloud.models import AddressMonitor, CloudAsset, CloudAutoRenewPatrolLog, CloudIpLog, CloudServerOrder, CloudServerPlan, Server, ServerPrice
+from cloud.models import AddressMonitor, CloudAsset, CloudAutoRenewPatrolLog, CloudIpLog, CloudServerOrder, CloudServerPlan, CloudUserNoticeLog, Server, ServerPrice
 from cloud.note_utils import append_note, prepend_note
 from core.cloud_accounts import cloud_account_label
 from core.models import CloudAccountConfig, ExternalSyncLog
@@ -1377,6 +1378,177 @@ def _auto_renew_history_item_payload(log):
         'order_detail_path': f'/admin/cloud-orders/{order_id}' if order_id else '',
         'order_link_path': f'/admin/cloud-orders/{order_id}' if order_id else '',
     }
+
+
+_NOTICE_TASK_TYPES = {
+    'renew_notice': {'label': '到期提醒', 'field': 'renew_notice_sent_at'},
+    'auto_renew_notice': {'label': '自动续费预提醒', 'field': 'auto_renew_notice_sent_at'},
+    'delete_notice': {'label': '删机提醒', 'field': 'delete_notice_sent_at'},
+    'recycle_notice': {'label': 'IP回收提醒', 'field': 'recycle_notice_sent_at'},
+}
+
+
+def _notice_task_time(order, notice_type: str, notice: dict | None = None):
+    notice = notice or _notice_payload_for_order(order) or {}
+    if notice_type == 'renew_notice':
+        expires_at = notice.get('expires_at') or getattr(order, 'service_expires_at', None)
+        notice_days = max(1, _runtime_int_config('cloud_renew_notice_days', 5))
+        return expires_at - timezone.timedelta(days=notice_days) if expires_at else None
+    if notice_type == 'auto_renew_notice':
+        expires_at = notice.get('expires_at') or getattr(order, 'service_expires_at', None)
+        return expires_at - timezone.timedelta(days=2) if expires_at else None
+    if notice_type == 'delete_notice':
+        delete_at = notice.get('delete_at') or getattr(order, 'delete_at', None)
+        return delete_at - timezone.timedelta(days=1) if delete_at else None
+    if notice_type == 'recycle_notice':
+        recycle_at = notice.get('ip_recycle_at') or getattr(order, 'ip_recycle_at', None)
+        return recycle_at - timezone.timedelta(days=1) if recycle_at else None
+    return None
+
+
+def _notice_task_item_payload(order, notice_type: str, *, queue_status='scheduled_future', queue_status_label='未来计划', next_run_at=None):
+    user = getattr(order, 'user', None)
+    usernames = list(getattr(user, 'usernames', []) or []) if user else []
+    user_payload = _user_payload({
+        'id': user.id,
+        'tg_user_id': user.tg_user_id,
+        'username': user.username,
+        'first_name': user.first_name,
+        'usernames': usernames,
+        'primary_username': usernames[0] if usernames else '',
+    }) if user else None
+    notice = _notice_payload_for_order(order) or {}
+    expires_at = notice.get('expires_at') or getattr(order, 'service_expires_at', None)
+    return {
+        'id': f'{notice_type}-{order.id}',
+        'order_id': order.id,
+        'order_no': order.order_no,
+        'notice_type': notice_type,
+        'notice_type_label': _NOTICE_TASK_TYPES.get(notice_type, {}).get('label', notice_type),
+        'ip': notice.get('ip') or getattr(order, 'public_ip', None) or getattr(order, 'previous_public_ip', None) or '未分配',
+        'provider': order.provider,
+        'provider_label': _provider_label(order.provider),
+        'status': order.status,
+        'status_label': _status_label(order.status, CloudServerOrder.STATUS_CHOICES),
+        'queue_status': queue_status,
+        'queue_status_label': queue_status_label,
+        'user_id': user.id if user else None,
+        'tg_user_id': user.tg_user_id if user else None,
+        'user_display_name': user_payload['display_name'] if user_payload else '未绑定用户',
+        'username_label': user_payload['username_label'] if user_payload else '-',
+        'notice_at': _iso(_notice_task_time(order, notice_type, notice)),
+        'service_expires_at': _iso(expires_at),
+        'auto_renew_at': _iso(expires_at - timezone.timedelta(days=1)) if expires_at else None,
+        'next_run_at': _iso(next_run_at),
+        'suspend_at': _iso(notice.get('suspend_at') or getattr(order, 'suspend_at', None)),
+        'delete_at': _iso(notice.get('delete_at') or getattr(order, 'delete_at', None)),
+        'ip_recycle_at': _iso(notice.get('ip_recycle_at') or getattr(order, 'ip_recycle_at', None)),
+        'related_path': f'/admin/cloud-orders/{order.id}',
+        'detail_path': f'/admin/cloud-orders/{order.id}',
+        'order_detail_path': f'/admin/cloud-orders/{order.id}',
+        'order_link_path': f'/admin/cloud-orders/{order.id}',
+    }
+
+
+def _notice_task_future_items(now, next_run_at, seen_keys: set[tuple[str, int]]):
+    items = []
+    qs = CloudServerOrder.objects.select_related('user').filter(
+        status__in=['completed', 'expiring', 'renew_pending', 'suspended', 'deleting', 'deleted'],
+    ).order_by('service_expires_at', 'delete_at', 'ip_recycle_at', 'id')[:1000]
+    for order in qs:
+        notice = _notice_payload_for_order(order)
+        if not notice:
+            continue
+        for notice_type, config in _NOTICE_TASK_TYPES.items():
+            if (notice_type, order.id) in seen_keys:
+                continue
+            sent_at = getattr(order, config['field'], None)
+            if sent_at:
+                continue
+            if notice_type == 'renew_notice' and (not order.cloud_reminder_enabled or order.status not in {'completed', 'expiring', 'renew_pending'}):
+                continue
+            if notice_type == 'auto_renew_notice' and (not order.auto_renew_enabled or order.status not in {'completed', 'expiring', 'renew_pending'}):
+                continue
+            if notice_type == 'delete_notice' and (not order.delete_reminder_enabled or order.status not in {'suspended', 'deleting'}):
+                continue
+            if notice_type == 'recycle_notice' and (not order.ip_recycle_reminder_enabled or order.status != 'deleted'):
+                continue
+            notice_at = _notice_task_time(order, notice_type, notice)
+            if not notice_at:
+                continue
+            if notice_at <= now:
+                queue_status, queue_status_label = 'fallback_notice', '已到通知时间'
+            elif notice_at <= now + timezone.timedelta(days=3):
+                queue_status, queue_status_label = 'within_window', '3天内待通知'
+            else:
+                queue_status, queue_status_label = 'scheduled_future', '未来计划'
+            items.append(_notice_task_item_payload(order, notice_type, queue_status=queue_status, queue_status_label=queue_status_label, next_run_at=next_run_at))
+            seen_keys.add((notice_type, order.id))
+            if len(items) >= 200:
+                return items
+    items.sort(key=lambda item: parse_datetime(item.get('notice_at') or '') or timezone.datetime.max.replace(tzinfo=dt_timezone.utc))
+    return items
+
+
+def _notice_task_history_item_payload(log):
+    return {
+        'id': log.id,
+        'batch_id': log.batch_id,
+        'order_id': log.order_id,
+        'order_no': log.order_no or '-',
+        'notice_type': log.event_type,
+        'notice_type_label': _NOTICE_TASK_TYPES.get(log.event_type, {}).get('label', log.event_type),
+        'ip': log.ip or '-',
+        'user_id': log.user_id,
+        'tg_user_id': getattr(log.user, 'tg_user_id', None) if getattr(log, 'user', None) else None,
+        'user_display_name': getattr(log.user, 'display_name', '') or getattr(log.user, 'username', '') or '未绑定用户' if getattr(log, 'user', None) else '未绑定用户',
+        'username_label': f'@{log.user.username}' if getattr(log, 'user', None) and getattr(log.user, 'username', '') else '-',
+        'delivered': bool(log.delivered),
+        'result_label': '已送达' if log.delivered else '未送达',
+        'target_chat_id': log.target_chat_id,
+        'text_preview': log.text_preview or '',
+        'created_at': _iso(log.created_at),
+        'related_path': f'/admin/cloud-orders/{log.order_id}' if log.order_id else '',
+        'detail_path': f'/admin/cloud-orders/{log.order_id}' if log.order_id else '',
+        'order_detail_path': f'/admin/cloud-orders/{log.order_id}' if log.order_id else '',
+        'order_link_path': f'/admin/cloud-orders/{log.order_id}' if log.order_id else '',
+    }
+
+
+@dashboard_login_required
+@require_GET
+def notice_task_detail(request):
+    now = timezone.now()
+    due = async_to_sync(_get_due_orders)()
+    next_run_at = now + timezone.timedelta(minutes=10)
+    due_items = []
+    seen_keys = set()
+    for notice_type, config in _NOTICE_TASK_TYPES.items():
+        for order in list(due.get(notice_type) or []):
+            if getattr(order, config['field'], None):
+                continue
+            due_items.append(_notice_task_item_payload(order, notice_type, queue_status='due_now', queue_status_label='本轮待通知', next_run_at=next_run_at))
+            seen_keys.add((notice_type, order.id))
+    due_items.sort(key=lambda item: parse_datetime(item.get('notice_at') or '') or timezone.datetime.max.replace(tzinfo=dt_timezone.utc))
+    future_plan_items = _notice_task_future_items(now, next_run_at, seen_keys)
+    history_qs = CloudUserNoticeLog.objects.select_related('order', 'user').filter(event_type__in=list(_NOTICE_TASK_TYPES)).order_by('-created_at', '-id')
+    recent_since = now - timezone.timedelta(days=1)
+    recent_logs = history_qs.filter(created_at__gte=recent_since)
+    latest_log = history_qs.first()
+    return _ok({
+        'task_key': 'cloud_notice_plan',
+        'task_label': '通知计划',
+        'status_label': '置顶任务',
+        'interval_minutes': 10,
+        'last_run_at': _iso(getattr(latest_log, 'created_at', None)),
+        'next_run_at': _iso(next_run_at),
+        'due_count': len(due_items),
+        'recent_success_count': recent_logs.filter(delivered=True).count(),
+        'recent_failure_count': recent_logs.filter(delivered=False).count(),
+        'due_items': due_items,
+        'future_plan_items': future_plan_items,
+        'history_items': [_notice_task_history_item_payload(item) for item in history_qs[:200]],
+    })
 
 
 @dashboard_login_required
@@ -3269,6 +3441,7 @@ __all__ = [
     'cloud_order_detail',
     'cloud_orders_list',
     'delete_cloud_order',
+    'notice_task_detail',
     'auto_renew_task_detail',
     'run_auto_renew_order',
     'run_auto_renew_tasks',

@@ -45,6 +45,7 @@ urlpatterns = [
     path('tasks/plans/orders/<int:order_id>/run/', bot_api.run_shutdown_plan_order, name='lifecycle-plan-order-run'),
     path('tasks/plans/orphan-assets/<int:asset_id>/run/', bot_api.run_orphan_asset_delete_plan, name='lifecycle-plan-orphan-asset-run'),
     path('tasks/plans/unattached-ips/<int:asset_id>/run/', bot_api.run_unattached_ip_delete_plan, name='lifecycle-plan-unattached-ip-run'),
+    path('tasks/notices/', cloud_api.notice_task_detail, name='notice-task-detail'),
     path('tasks/auto-renew/', cloud_api.auto_renew_task_detail, name='auto-renew-task-detail'),
     path('tasks/auto-renew/run/', cloud_api.run_auto_renew_tasks, name='auto-renew-task-run'),
     path('tasks/auto-renew/orders/<int:order_id>/run/', cloud_api.run_auto_renew_order, name='auto-renew-order-run'),
