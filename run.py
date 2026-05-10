@@ -29,6 +29,23 @@ def build_env() -> dict:
     return env
 
 
+def env_bool(name: str, default: bool = False) -> bool:
+    value = os.getenv(name)
+    if value is None:
+        return default
+    return value.strip().lower() in {'1', 'true', 'yes', 'on'}
+
+
+def env_int(name: str, default: int, minimum: int | None = None) -> int:
+    try:
+        value = int(str(os.getenv(name, str(default))).strip() or default)
+    except (TypeError, ValueError):
+        value = default
+    if minimum is not None:
+        value = max(minimum, value)
+    return value
+
+
 def run_manage(*args: str) -> None:
     subprocess.check_call([PYTHON, 'manage.py', *args], cwd=BASE_DIR, env=build_env())
 
@@ -109,9 +126,35 @@ def run_web() -> int:
     return subprocess.call([PYTHON, 'manage.py', 'runserver', '127.0.0.1:8000'], cwd=BASE_DIR, env=build_env())
 
 
+def should_keepalive_bot() -> bool:
+    return env_bool('SHOP_BOT_KEEPALIVE', True)
+
+
+def bot_keepalive_delay(restart_count: int) -> int:
+    base_delay = env_int('SHOP_BOT_KEEPALIVE_DELAY_SECONDS', 5, minimum=1)
+    max_delay = env_int('SHOP_BOT_KEEPALIVE_MAX_DELAY_SECONDS', 60, minimum=base_delay)
+    return min(max_delay, base_delay * max(1, restart_count))
+
+
+def bot_restart_limit() -> int:
+    return env_int('SHOP_BOT_KEEPALIVE_MAX_RESTARTS', 0, minimum=0)
+
+
 def run_bot() -> int:
     cleanup_bot_runner()
-    return subprocess.call([PYTHON, '-m', 'bot.runner'], cwd=BASE_DIR, env=build_env())
+    restart_count = 0
+    while True:
+        code = subprocess.call([PYTHON, '-m', 'bot.runner'], cwd=BASE_DIR, env=build_env())
+        if not should_keepalive_bot():
+            return code
+        restart_count += 1
+        limit = bot_restart_limit()
+        if limit and restart_count > limit:
+            print(f'[run.py] bot keepalive reached restart limit={limit}, last_code={code}', flush=True)
+            return code
+        delay = bot_keepalive_delay(restart_count)
+        print(f'[run.py] bot process exited code={code}; restarting in {delay}s (restart_count={restart_count})', flush=True)
+        time.sleep(delay)
 
 
 def run_all() -> int:
@@ -121,6 +164,7 @@ def run_all() -> int:
     run_manage('ensure_dashboard_admin')
     web_process = start_process('manage.py', 'runserver', '127.0.0.1:8000')
     bot_process = start_process('-m', 'bot.runner')
+    bot_restart_count = 0
     try:
         while True:
             web_code = web_process.poll()
@@ -129,8 +173,18 @@ def run_all() -> int:
                 print(f'[run.py] web process exited code={web_code}', flush=True)
                 return web_code
             if bot_code is not None:
-                print(f'[run.py] bot process exited code={bot_code}', flush=True)
-                return bot_code
+                if not should_keepalive_bot():
+                    print(f'[run.py] bot process exited code={bot_code}', flush=True)
+                    return bot_code
+                bot_restart_count += 1
+                limit = bot_restart_limit()
+                if limit and bot_restart_count > limit:
+                    print(f'[run.py] bot keepalive reached restart limit={limit}, last_code={bot_code}', flush=True)
+                    return bot_code
+                delay = bot_keepalive_delay(bot_restart_count)
+                print(f'[run.py] bot process exited code={bot_code}; restarting in {delay}s (restart_count={bot_restart_count})', flush=True)
+                time.sleep(delay)
+                bot_process = start_process('-m', 'bot.runner')
             time.sleep(2)
     finally:
         terminate_process(bot_process)
