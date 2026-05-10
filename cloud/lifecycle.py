@@ -475,6 +475,10 @@ def _ensure_notice_ip(text: str, ip: str) -> str:
     return str(text or '')
 
 
+def _code_text(value) -> str:
+    return f'<code>{escape(str(value or "-"))}</code>'
+
+
 def _notice_plan_text(order, notice: dict | None = None, *, include_expiry: bool = True, include_renewal_amount: bool = True) -> str:
     notice = notice or {}
     expires_at = notice.get('expires_at') or getattr(order, 'service_expires_at', None)
@@ -505,6 +509,21 @@ def _notice_plan_text(order, notice: dict | None = None, *, include_expiry: bool
         lines.append(f'如已关机，请务必在 {_format_notice_dt(delete_at)} 之前完成续费，避免实例删除。')
     if ip_recycle_at:
         lines.append(f'实例删除后仍需保留 IP 的，请务必在 {_format_notice_dt(ip_recycle_at)} 之前续费恢复。')
+    return '\n'.join(lines)
+
+
+def _renew_notice_plan_text(order, notice: dict | None = None) -> str:
+    notice = notice or {}
+    expires_at = notice.get('expires_at') or getattr(order, 'service_expires_at', None)
+    suspend_at = notice.get('suspend_at') or getattr(order, 'suspend_at', None)
+    lines = [f'到期时间: {_code_text(_format_notice_dt(expires_at))}']
+    try:
+        amount = f'{_renewal_price(order, getattr(order, "user", None)):.2f} USDT'
+    except RenewalPriceMissingError:
+        amount = '未设置，请联系客服确认'
+    lines.append(f'续费金额: {_code_text(amount)}')
+    lines.append(f'关机计划: {_code_text(_format_notice_dt(suspend_at))}')
+    lines.append('请尽快完成续费，避免关机。')
     return '\n'.join(lines)
 
 
@@ -1916,8 +1935,8 @@ async def lifecycle_tick(notify=None, notify_target=None, defer_destructive_seco
                 notice = await _cloud_expiry_notice_payload(order.id)
                 if not notice.get('valid'):
                     continue
-                auto_renew_text = '<b>本单已开启自动续费，将在到期前 1 天自动续费；到期前 2 天会发送自动续费预提醒。</b>' if notice['auto_renew_enabled'] else '<b>本单未开启自动续费。</b>'
-                text = f'⏰ IP到期提醒\n\nIP: {notice["ip"]}\n\n{_notice_plan_text(order, notice)}\n\n{auto_renew_text}\n\n如需续费，请点击下方“立即续费”。'
+                auto_renew_text = '<b>本单已开启自动续费。</b>' if notice['auto_renew_enabled'] else '<b>本单未开启自动续费。</b>'
+                text = f'⏰ IP到期提醒\n\nIP: {_code_text(notice["ip"])}\n\n{_renew_notice_plan_text(order, notice)}\n\n{auto_renew_text}\n\n如需续费，请点击下方“立即续费”。'
                 _log_cloud_notice('renew_notice', order, notice, text, 'cloud_expiry_actions')
                 sent = await _send_logged_cloud_notice('renew_notice', notify, order.user_id, text, cloud_expiry_actions(order.id), order=order, notice=notice)
                 if sent:
