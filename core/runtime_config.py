@@ -27,7 +27,7 @@ CONFIG_HELP = {
     'cloud_renew_notice_debug_repeat': 'IP到期提醒调试重复开关（1=忽略已提醒记录，启动/定时检查都会重复提醒；0=只提醒一次）',
     'dashboard_totp_secret': '后台 Google Authenticator TOTP 密钥（Base32，更换后旧绑定失效）',
     'cleanup_retention_days': '自动清理保留天数，默认100天；订单和聊天记录超过该天数会被定时清理',
-    'cloud_asset_sync_interval_seconds': '代理云资产自动同步/列表自动刷新间隔（秒），默认1800秒=30分钟',
+    'cloud_asset_sync_interval_seconds': '代理云资产自动同步/列表自动刷新间隔（秒），默认600秒=10分钟',
     'cloud_sync_missing_delete_confirmations': '云同步发现实例/IP 缺失时，连续命中多少次后才标记删除，默认2次',
     'cloud_auto_renew_execution_notify_enabled': '自动续费执行结果通知开关（1=开启，0=关闭）',
     'cloud_auto_renew_execution_notify_chat_ids': '自动续费执行结果通知目标 Chat ID（支持私聊/群/频道；多个用逗号、分号或换行分隔，频道也可填 @channelusername）',
@@ -44,7 +44,7 @@ CONFIG_HELP = {
     'telegram_listener_push_bark_encryption_padding': 'Bark 加密填充：pkcs7/noPadding',
 }
 
-CLOUD_ASSET_SYNC_INTERVAL_DEFAULT_SECONDS = 30 * 60
+CLOUD_ASSET_SYNC_INTERVAL_DEFAULT_SECONDS = 10 * 60
 CLOUD_ASSET_SYNC_INTERVAL_MIN_SECONDS = 60
 
 CONFIG_DEFAULTS = {

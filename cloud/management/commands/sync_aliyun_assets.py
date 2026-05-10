@@ -332,6 +332,7 @@ class Command(BaseCommand):
                 if asset:
                     asset_defaults['user'] = asset.user
                     asset_defaults['actual_expires_at'] = expires_at or asset.actual_expires_at
+                    asset_defaults['note'] = append_note(asset.note, note)
                 asset_signature = f'{instance_id or "-"}|{public_ip or "缺失"}'
                 old_status = asset.status if asset else None
                 old_public_ip = asset.public_ip if asset else None
@@ -398,6 +399,7 @@ class Command(BaseCommand):
                 if server:
                     server_defaults['user'] = server.user
                     server_defaults['expires_at'] = expires_at or server.expires_at
+                    server_defaults['note'] = append_note(server.note, note)
                 old_server_public_ip = server.public_ip if server else None
                 if server:
                     if old_server_public_ip and old_server_public_ip != public_ip:

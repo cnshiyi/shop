@@ -164,6 +164,108 @@ class CloudServerServicesTestCase(TestCase):
         self.assertTrue(result['ok'])
         safe_time.assert_not_called()
 
+    def test_manual_unattached_ip_delete_writes_log_and_history_item(self):
+        from bot.api import _run_unattached_ip_delete_sync
+
+        asset = CloudAsset.objects.create(
+            kind=CloudAsset.KIND_SERVER,
+            source=CloudAsset.SOURCE_AWS_SYNC,
+            user=self.user,
+            provider='aws_lightsail',
+            region_code=self.plan.region_code,
+            region_name=self.plan.region_name,
+            asset_name='manual-unattached-ip-delete',
+            provider_resource_id='arn:aws:lightsail:ap-southeast-1:123456789012:StaticIp/manual-unattached-ip-delete',
+            public_ip='52.77.18.244',
+            actual_expires_at=timezone.now() + timezone.timedelta(days=3),
+            status=CloudAsset.STATUS_UNKNOWN,
+            provider_status='未附加固定IP',
+            is_active=False,
+        )
+        with patch('bot.api._release_unattached_static_ip', new=AsyncMock(return_value=(True, 'manual release ok'))):
+            result = _run_unattached_ip_delete_sync(asset.id, enforce_schedule=False)
+
+        asset.refresh_from_db()
+        self.assertTrue(result['ok'])
+        self.assertEqual(asset.status, CloudAsset.STATUS_DELETED)
+        self.assertTrue(CloudIpLog.objects.filter(asset=asset, event_type=CloudIpLog.EVENT_RECYCLED).exists())
+        items = _unattached_ip_delete_items(limit=20)
+        history = [item for item in items if item.get('is_history') and item.get('public_ip') == '52.77.18.244']
+        self.assertTrue(history)
+        self.assertIn('manual release ok', history[0]['note'])
+
+    def test_legacy_unattached_ip_delete_log_without_known_note_shows_history(self):
+        asset = CloudAsset.objects.create(
+            kind=CloudAsset.KIND_SERVER,
+            source=CloudAsset.SOURCE_AWS_SYNC,
+            user=self.user,
+            provider='aws_lightsail',
+            region_code=self.plan.region_code,
+            region_name=self.plan.region_name,
+            asset_name='legacy-unattached-ip-delete',
+            provider_resource_id='arn:aws:lightsail:ap-southeast-1:123456789012:StaticIp/legacy-unattached-ip-delete',
+            previous_public_ip='52.77.18.245',
+            status=CloudAsset.STATUS_DELETED,
+            provider_status='未附加固定IP-已到期删除',
+            is_active=False,
+        )
+        record_cloud_ip_log(
+            event_type=CloudIpLog.EVENT_RECYCLED,
+            asset=asset,
+            previous_public_ip='52.77.18.245',
+            public_ip=None,
+            note='旧版本释放成功',
+        )
+
+        items = _unattached_ip_delete_items(limit=20)
+        history = [item for item in items if item.get('is_history') and item.get('public_ip') == '52.77.18.245']
+        self.assertTrue(history)
+        self.assertIn('旧版本释放成功', history[0]['note'])
+
+    def test_manual_order_delete_writes_server_history_item(self):
+        from bot.api import _run_shutdown_order_sync
+
+        order = CloudServerOrder.objects.create(
+            order_no='MANUAL-DELETE-HISTORY-ORDER-1',
+            user=self.user,
+            plan=self.plan,
+            provider=self.plan.provider,
+            region_code=self.plan.region_code,
+            region_name=self.plan.region_name,
+            plan_name=self.plan.plan_name,
+            quantity=1,
+            currency='USDT',
+            total_amount='19.00',
+            pay_amount='19.00',
+            status='deleting',
+            public_ip='52.77.18.246',
+            previous_public_ip='52.77.18.246',
+            service_expires_at=timezone.now() - timezone.timedelta(days=1),
+        )
+        CloudAsset.objects.create(
+            kind=CloudAsset.KIND_SERVER,
+            source=CloudAsset.SOURCE_ORDER,
+            order=order,
+            user=self.user,
+            provider=order.provider,
+            region_code=order.region_code,
+            region_name=order.region_name,
+            asset_name='manual-delete-history-order-asset',
+            public_ip=order.public_ip,
+            actual_expires_at=order.service_expires_at,
+            status=CloudAsset.STATUS_DELETING,
+            is_active=True,
+        )
+        with patch('bot.api._delete_instance', new=AsyncMock(return_value=(True, 'manual server delete ok'))):
+            result = _run_shutdown_order_sync(order.id, enforce_schedule=False)
+
+        self.assertTrue(result['ok'])
+        self.assertTrue(CloudIpLog.objects.filter(order=order, event_type=CloudIpLog.EVENT_DELETED).exists())
+        items = _shutdown_log_items(limit=20)
+        history = [item for item in items if item.get('public_ip') == '52.77.18.246']
+        self.assertTrue(history)
+        self.assertIn('manual server delete ok', history[0]['note'])
+
     def test_missing_aws_instance_delete_marks_order_history(self):
         from bot.api import _run_shutdown_order_sync
 
@@ -3882,15 +3984,52 @@ class CloudServerServicesTestCase(TestCase):
         def fake_call_command(command_name, **kwargs):
             calls.append((command_name, kwargs))
 
+        SiteConfig.set('cloud_asset_sync_next_account_cursor', '')
         with patch.dict(os.environ, {'AWS_REGION': '', 'ALIYUN_REGION': ''}, clear=False), patch('cloud.lifecycle.call_command', side_effect=fake_call_command):
             async_to_sync(sync_server_status_tick)()
+            async_to_sync(sync_server_status_tick)()
 
-        aws_call = next(item for item in calls if item[0] == 'sync_aws_assets')
-        aliyun_call = next(item for item in calls if item[0] == 'sync_aliyun_assets')
-        self.assertEqual(aws_call[1]['account_id'], str(aws_account.id))
-        self.assertNotIn('region', aws_call[1])
+        aliyun_call = calls[0]
+        aws_call = calls[1]
+        self.assertEqual(aliyun_call[0], 'sync_aliyun_assets')
         self.assertEqual(aliyun_call[1]['account_id'], str(aliyun_account.id))
         self.assertEqual(aliyun_call[1]['region'], 'cn-hongkong')
+        self.assertEqual(aws_call[0], 'sync_aws_assets')
+        self.assertEqual(aws_call[1]['account_id'], str(aws_account.id))
+        self.assertNotIn('region', aws_call[1])
+
+    def test_lifecycle_sync_rotates_one_active_account_per_tick(self):
+        first = CloudAccountConfig.objects.create(
+            provider=CloudAccountConfig.PROVIDER_AWS,
+            name='aws-lifecycle-rotate-1',
+            external_account_id='acct-rotate-1',
+            access_key='ak1',
+            secret_key='sk1',
+            region_hint='ap-southeast-1',
+            is_active=True,
+        )
+        second = CloudAccountConfig.objects.create(
+            provider=CloudAccountConfig.PROVIDER_AWS,
+            name='aws-lifecycle-rotate-2',
+            external_account_id='acct-rotate-2',
+            access_key='ak2',
+            secret_key='sk2',
+            region_hint='ap-southeast-1',
+            is_active=True,
+        )
+        SiteConfig.set('cloud_asset_sync_next_account_cursor', '')
+        calls = []
+
+        def fake_call_command(command_name, **kwargs):
+            calls.append((command_name, kwargs))
+
+        with patch.dict(os.environ, {'AWS_REGION': ''}, clear=False), patch('cloud.lifecycle.call_command', side_effect=fake_call_command):
+            async_to_sync(sync_server_status_tick)()
+            async_to_sync(sync_server_status_tick)()
+
+        self.assertEqual([item[1]['account_id'] for item in calls], [str(first.id), str(second.id)])
+        self.assertTrue(all(item[0] == 'sync_aws_assets' for item in calls))
+        self.assertTrue(all('region' not in item[1] for item in calls))
 
     def test_delete_cloud_asset_only_removes_asset_record(self):
         order = CloudServerOrder.objects.create(
@@ -5463,7 +5602,7 @@ class CloudServerServicesTestCase(TestCase):
         self.assertTrue(server.is_active)
         self.assertEqual(server.status, Server.STATUS_RUNNING)
 
-    def test_sync_aws_assets_rebases_stale_unattached_ip_due_time(self):
+    def test_sync_aws_assets_preserves_existing_unattached_ip_due_time(self):
         account = CloudAccountConfig.objects.create(
             provider=CloudAccountConfig.PROVIDER_AWS,
             name='aws-stale-unattached-ip',
@@ -5514,8 +5653,73 @@ class CloudServerServicesTestCase(TestCase):
 
         asset.refresh_from_db()
         self.assertEqual(asset.provider_status, '未附加固定IP')
-        self.assertGreater(asset.actual_expires_at, timezone.now())
+        self.assertEqual(asset.actual_expires_at, stale_due_at)
         self.assertIn('计划删除时间', asset.note or '')
+        self.assertIn('最近同步', asset.note or '')
+
+    def test_sync_aws_assets_appends_latest_status_note_for_existing_asset(self):
+        account = CloudAccountConfig.objects.create(
+            provider=CloudAccountConfig.PROVIDER_AWS,
+            name='aws-status-note-append',
+            external_account_id='123456789012',
+            access_key='A' * 20,
+            secret_key='B' * 40,
+            region_hint='ap-southeast-1',
+            is_active=True,
+        )
+        account_label = cloud_account_label(account)
+        asset = CloudAsset.objects.create(
+            kind=CloudAsset.KIND_SERVER,
+            source=CloudAsset.SOURCE_AWS_SYNC,
+            user=self.user,
+            provider='aws_lightsail',
+            cloud_account=account,
+            account_label=account_label,
+            region_code=self.plan.region_code,
+            region_name=self.plan.region_name,
+            asset_name='i-status-note-append',
+            instance_id='i-status-note-append',
+            provider_resource_id='arn:aws:lightsail:ap-southeast-1:123456789012:Instance/i-status-note-append',
+            public_ip='10.9.0.5',
+            actual_expires_at=timezone.now() + timezone.timedelta(days=10),
+            status=CloudAsset.STATUS_STOPPED,
+            provider_status='旧状态',
+            note='人工备注：不要覆盖',
+            is_active=False,
+        )
+
+        class FakeLightsailClient:
+            def get_static_ips(self, **kwargs):
+                return {'staticIps': [], 'nextPageToken': None}
+
+            def get_instances(self, **kwargs):
+                return {
+                    'instances': [{
+                        'name': 'i-status-note-append',
+                        'arn': 'arn:aws:lightsail:ap-southeast-1:123456789012:Instance/i-status-note-append',
+                        'state': {'name': 'running'},
+                        'location': {'regionName': '新加坡'},
+                        'publicIpAddress': '10.9.0.5',
+                        'bundleId': 'micro_1_0',
+                        'blueprintId': 'debian_12',
+                    }],
+                    'nextPageToken': None,
+                }
+
+        with patch('cloud.management.commands.sync_aws_assets._list_regions', return_value=['ap-southeast-1']), patch('cloud.management.commands.sync_aws_assets._aws_account_identity', return_value='123456789012'), patch('cloud.management.commands.sync_aws_assets._lightsail_client', return_value=FakeLightsailClient()):
+            call_command('sync_aws_assets', region='ap-southeast-1')
+
+        asset.refresh_from_db()
+        self.assertEqual(asset.provider_status, '运行中')
+        self.assertEqual(asset.status, CloudAsset.STATUS_RUNNING)
+        self.assertIn('人工备注：不要覆盖', asset.note or '')
+        self.assertIn('状态: 运行中', asset.note or '')
+        self.assertIn('最近同步', asset.note or '')
+
+    def test_cloud_asset_sync_interval_defaults_to_ten_minutes(self):
+        from core.runtime_config import get_cloud_asset_sync_interval_seconds
+
+        self.assertEqual(get_cloud_asset_sync_interval_seconds(), 600)
 
     def test_sync_aws_assets_keeps_runtime_running_when_order_is_suspended(self):
         account = CloudAccountConfig.objects.create(

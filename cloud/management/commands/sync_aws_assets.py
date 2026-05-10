@@ -415,9 +415,9 @@ def _mark_ip_retained_as_unattached(public_ip, static_ip_name, retained_order, a
         related.status = CloudAsset.STATUS_UNKNOWN
         related.is_active = False
         related.provider_status = '固定IP仍存在但未附加'
-        if release_at:
+        if release_at and not related.actual_expires_at:
             related.actual_expires_at = release_at
-        related.note = append_note(related.note, f'状态: 固定IP仍存在但未附加；公网IP: {public_ip}；固定IP名: {static_ip_name or "-"}；发现时间: {now.isoformat()}；计划释放时间: {release_at.isoformat() if release_at else "-"}；覆盖同步时间: {now.isoformat()}')
+        related.note = append_note(related.note, f'状态: 固定IP仍存在但未附加；公网IP: {public_ip}；固定IP名: {static_ip_name or "-"}；发现时间: {now.isoformat()}；计划释放时间: {related.actual_expires_at.isoformat() if related.actual_expires_at else "-"}；最近同步: {now.isoformat()}')
         if retained_order and not related.order_id:
             related.order = retained_order
             related.user = retained_order.user
@@ -838,10 +838,11 @@ class Command(BaseCommand):
                                 rebound_note = f'未附加IP已重新绑定到实例，已清空临时到期时间：{rebound_at.isoformat()}；等待人工添加真实到期时间。'
                                 asset_defaults['actual_expires_at'] = None
                                 asset_defaults['provider_status'] = '已重新绑定实例-待人工添加时间'
-                                asset_defaults['note'] = _append_unique_line(note, rebound_note)
+                                asset_defaults['note'] = append_note(asset.note, _append_unique_line(note, rebound_note))
                                 asset_defaults['is_active'] = True
                             else:
                                 asset_defaults['actual_expires_at'] = asset.actual_expires_at
+                                asset_defaults['note'] = append_note(asset.note, note)
                         asset_signature = f'{instance_name or "-"}|{instance_arn or "-"}|{public_ip or "缺失"}'
                         old_public_ip = asset.public_ip if asset else None
                         ip_changed = bool(asset and old_public_ip and old_public_ip != public_ip)
@@ -921,6 +922,7 @@ class Command(BaseCommand):
                         if server:
                             server_defaults['user'] = server.user or order_user or getattr(asset, 'user', None)
                             server_defaults['expires_at'] = server.expires_at if not rebound_unattached_ip else asset_defaults['actual_expires_at']
+                            server_defaults['note'] = append_note(server.note, server_defaults['note'])
                             if not server.order_id and order:
                                 server_defaults['order'] = order
                         old_server_public_ip = server.public_ip if server else None
@@ -1066,8 +1068,9 @@ class Command(BaseCommand):
                     if asset:
                         if asset.user_id:
                             asset_defaults['user'] = asset.user
-                        if asset.actual_expires_at and asset.actual_expires_at > discovered_at and not getattr(retained_order, 'ip_recycle_at', None):
+                        if asset.actual_expires_at:
                             asset_defaults['actual_expires_at'] = asset.actual_expires_at
+                        asset_defaults['note'] = append_note(asset.note, note)
                     asset_signature = f'{static_ip_name or "-"}|{static_ip_arn or "-"}|{public_ip or "缺失"}'
                     old_status = asset.status if asset else None
                     if asset:
@@ -1082,31 +1085,10 @@ class Command(BaseCommand):
                             original_due_at = asset.actual_expires_at
                             for key, value in asset_defaults.items():
                                 setattr(asset, key, value)
-                            should_preserve_unattached_due = (
-                                original_due_at
-                                and original_due_at > discovered_at
-                                and not getattr(retained_order, 'ip_recycle_at', None)
-                                and old_status == CloudAsset.STATUS_UNKNOWN
-                                and '未附加' in str(getattr(asset, 'provider_status', '') or '')
-                            )
-                            if should_preserve_unattached_due:
-                                asset.actual_expires_at = original_due_at
                             due_changed = bool(original_due_at and asset.actual_expires_at and original_due_at != asset.actual_expires_at)
                             asset.save()
-                            if due_changed and old_status == CloudAsset.STATUS_UNKNOWN and '未附加' in str(getattr(asset, 'provider_status', '') or ''):
-                                record_cloud_ip_log(
-                                    event_type='changed',
-                                    order=retained_order or getattr(asset, 'order', None),
-                                    asset=asset,
-                                    server=None,
-                                    public_ip=public_ip or None,
-                                    previous_public_ip=public_ip or None,
-                                    note=(
-                                        f'AWS 同步校正未附加固定 IP 生命周期：账号={account_label}；地区={region}；'
-                                        f'IP={public_ip or "缺失"}；固定IP名={static_ip_name}；'
-                                        f'原计划释放时间={original_due_at.isoformat()}；计划释放时间={asset.actual_expires_at.isoformat()}。'
-                                    ),
-                                )
+                            if due_changed:
+                                manual_expiry_preserved_items.append(f'{asset.id}:{public_ip or "缺失"}:{static_ip_name or static_ip_arn}:{original_due_at}')
                             updated_count += 1
                             account_stats['updated'] += 1
                             updated_asset_ids.append(f'{asset.id}:{public_ip or "缺失"}:{static_ip_name or static_ip_arn}')

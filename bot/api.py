@@ -628,6 +628,28 @@ def _cloud_asset_deleted_or_missing_q():
     )
 
 
+def _unattached_ip_delete_history_q():
+    terminal_q = Q(event_type__in=[CloudIpLog.EVENT_DELETED, CloudIpLog.EVENT_RECYCLED])
+    explicit_note_q = (
+        Q(note__icontains='未附加固定IP')
+        | Q(note__icontains='未附加 IP')
+        | Q(note__icontains='未附加IP')
+        | Q(note__icontains='AWS 同步删除未附加固定 IP')
+        | Q(note__icontains='IP校验发现云上不存在，已标记删除')
+        | Q(note__icontains='固定 IP 已释放')
+        | Q(note__icontains='固定 IP 云端已不存在')
+        | Q(note__icontains='release_static_ip')
+        | Q(note__icontains='真机测试：未附加IP删除')
+    )
+    asset_q = (
+        Q(asset__provider_status__icontains='未附加')
+        | Q(asset__provider_status__icontains='固定IP')
+        | Q(asset__note__icontains='未附加固定IP')
+        | Q(asset__provider_resource_id__icontains='StaticIp')
+    ) & (Q(asset__instance_id__isnull=True) | Q(asset__instance_id=''))
+    return terminal_q & (explicit_note_q | asset_q)
+
+
 def _unattached_ip_delete_items(limit=50):
     now = timezone.now()
     limit = max(1, min(int(limit or 50), 1000))
@@ -677,13 +699,8 @@ def _unattached_ip_delete_items(limit=50):
         })
 
     history_traces = CloudIpLog.objects.select_related('asset', 'order', 'user').filter(
-        Q(note__icontains='执行内容：固定 IP 保留期结束')
-        | Q(note__icontains='执行内容：未附加固定IP已到期删除')
-        | Q(note__icontains='执行内容：AWS 同步删除未附加固定 IP')
-        | Q(note__icontains='执行内容：IP校验发现云上不存在，已标记删除')
-        | Q(note__icontains='执行内容：服务器校验发现云上不存在，已标记删除')
-        | Q(note__icontains='执行内容：真机测试：未附加IP删除')
-    ).filter(event_type__in=[CloudIpLog.EVENT_DELETED, CloudIpLog.EVENT_RECYCLED]).order_by('-id')[:limit]
+        _unattached_ip_delete_history_q()
+    ).order_by('-id')[:limit]
     for trace in history_traces:
         if trace.id in seen_trace_ids:
             continue
