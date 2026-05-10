@@ -1,5 +1,6 @@
 import asyncio
 import hashlib
+import json
 import logging
 import os
 import re
@@ -32,6 +33,7 @@ AUTO_RENEW_BEFORE_EXPIRY_WINDOW = timezone.timedelta(days=1)
 AUTO_RENEW_FAILURE_NOTICE_COOLDOWN = timezone.timedelta(hours=1)
 AUTO_RENEW_RETRY_CHECK_INTERVAL = timezone.timedelta(minutes=10)
 AUTO_RENEW_RETRY_MAX_ATTEMPTS = 144
+NOTICE_TEXT_OVERRIDES_CONFIG_KEY = 'cloud_notice_text_overrides'
 
 
 def _amount_2(value) -> str:
@@ -762,23 +764,26 @@ async def _send_order_notice_batch(*, event: str, field_name: str, notify, user_
         return False
     first_order = orders[0]
     count = int(payload.get('count') or len(payload.get('order_ids') or []))
-    batch_id = _notice_batch_id(event, *(payload.get('order_ids') or []))
+    order_ids = payload.get('order_ids') or []
+    manual_text = await sync_to_async(_get_notice_text_override)(event, user_id, order_ids)
+    text = manual_text or payload['text']
+    batch_id = _notice_batch_id(event, *order_ids)
     notice_ip = f'{count} 个IP' if count > 1 else _order_notice_ip(first_order)
-    _log_cloud_notice(event, first_order, {'ip': notice_ip}, payload['text'], 'batch' if count > 1 else 'single')
+    _log_cloud_notice(event, first_order, {'ip': notice_ip}, text, 'batch' if count > 1 else 'single')
     sent = await _send_logged_cloud_notice(
         event,
         notify,
         user_id,
-        payload['text'],
+        text,
         reply_markup,
         order=first_order,
         notice={'ip': notice_ip},
         batch_id=batch_id,
         is_batch=count > 1,
-        extra={'order_ids': payload.get('order_ids') or []},
+        extra={'order_ids': order_ids, 'manual_override': bool(manual_text)},
     )
     if sent:
-        await _mark_many_notice_sent(payload.get('order_ids') or [], field_name)
+        await _mark_many_notice_sent(order_ids, field_name)
     return sent
 
 
@@ -1090,6 +1095,36 @@ async def _send_auto_renew_execution_target_notices(notify_target, results_by_us
 def _notice_batch_id(event: str, *order_ids: int) -> str:
     key = ':'.join([event, *[str(item) for item in order_ids]])
     return uuid.uuid5(uuid.NAMESPACE_URL, key).hex[:16]
+
+
+def _notice_override_key(event: str, user_id: int | None, order_ids: list[int] | tuple[int, ...]) -> str:
+    ordered_ids = sorted(int(item) for item in (order_ids or []) if item)
+    return f'{event}:{user_id or 0}:{_notice_batch_id(event, *ordered_ids)}'
+
+
+def _notice_text_overrides() -> dict:
+    raw = SiteConfig.get(NOTICE_TEXT_OVERRIDES_CONFIG_KEY, '{}')
+    try:
+        data = json.loads(raw or '{}')
+        return data if isinstance(data, dict) else {}
+    except Exception:
+        return {}
+
+
+def _get_notice_text_override(event: str, user_id: int | None, order_ids: list[int] | tuple[int, ...]) -> str:
+    return str(_notice_text_overrides().get(_notice_override_key(event, user_id, order_ids)) or '').strip()
+
+
+def _set_notice_text_override(event: str, user_id: int | None, order_ids: list[int] | tuple[int, ...], text: str) -> str:
+    key = _notice_override_key(event, user_id, order_ids)
+    data = _notice_text_overrides()
+    text = str(text or '').strip()
+    if text:
+        data[key] = text
+    else:
+        data.pop(key, None)
+    SiteConfig.set(NOTICE_TEXT_OVERRIDES_CONFIG_KEY, json.dumps(data, ensure_ascii=False))
+    return key
 
 
 def _target_batch_id(event: str, target, date_text: str) -> str:

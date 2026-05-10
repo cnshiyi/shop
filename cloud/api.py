@@ -47,7 +47,7 @@ from bot.api import (
     dashboard_login_required,
 )
 from bot.models import TelegramGroupFilter, TelegramLoginAccount, TelegramUser
-from cloud.lifecycle import _delete_instance, _get_due_orders, _mark_replaced_order_deleted, _notice_payload_for_order, _record_auto_renew_patrol_log, _run_auto_renew
+from cloud.lifecycle import _auto_renew_notice_batch_payload, _delete_instance, _get_due_orders, _get_notice_text_override, _lifecycle_notice_batch_payload, _mark_replaced_order_deleted, _notice_payload_for_order, _notice_override_key, _record_auto_renew_patrol_log, _renew_notice_batch_payload, _run_auto_renew, _set_notice_text_override
 from cloud.services import AWS_REGION_NAMES, RenewalPriceMissingError, _cloud_order_lifecycle_fields, _renewal_price, _update_order_primary_records, create_cloud_server_rebuild_order, ensure_cloud_server_pricing, ensure_manual_expiry_operation_order, ensure_manual_owner_operation_order, ensure_manual_price_operation_order, record_cloud_ip_log, refresh_custom_plan_cache, replace_cloud_asset_order_by_admin, set_cloud_server_auto_renew_admin
 from cloud.models import AddressMonitor, CloudAsset, CloudAutoRenewPatrolLog, CloudIpLog, CloudServerOrder, CloudServerPlan, CloudUserNoticeLog, Server, ServerPrice
 from cloud.note_utils import append_note, prepend_note
@@ -1504,6 +1504,37 @@ def _notice_event_type(notice_type: str) -> str:
     return _NOTICE_TASK_TYPES.get(notice_type, {}).get('event') or notice_type
 
 
+def _notice_actual_batch_payload(notice_type: str, order_ids: list[int]) -> dict:
+    if notice_type == 'renew_notice':
+        return async_to_sync(_renew_notice_batch_payload)(order_ids)
+    if notice_type == 'auto_renew_notice':
+        return async_to_sync(_auto_renew_notice_batch_payload)(order_ids)
+    if notice_type == 'delete_notice':
+        return async_to_sync(_lifecycle_notice_batch_payload)(
+            '⚠️ 云服务器删机提醒',
+            order_ids,
+            '如仍需使用，请尽快续费或联系人工客服处理。',
+        )
+    if notice_type == 'recycle_notice':
+        return async_to_sync(_lifecycle_notice_batch_payload)(
+            '♻️ 固定 IP 回收提醒',
+            order_ids,
+            '固定 IP 回收后将无法继续保留原 IP；如需恢复，请尽快联系人工客服。',
+        )
+    return {'text': '', 'order_ids': order_ids, 'first_order_id': order_ids[0] if order_ids else None, 'count': len(order_ids)}
+
+
+def _notice_manual_text_payload(notice_type: str, user_id: int | None, order_ids: list[int]) -> dict:
+    event = _notice_event_type(notice_type)
+    manual_text = _get_notice_text_override(event, user_id, order_ids)
+    return {
+        'notice_event': event,
+        'notice_override_key': _notice_override_key(event, user_id, order_ids),
+        'notice_manual_text': manual_text,
+        'notice_has_manual_text': bool(manual_text),
+    }
+
+
 def _notice_latest_log_map():
     logs = CloudUserNoticeLog.objects.filter(event_type__in=list(_NOTICE_HISTORY_LABELS)).order_by('-created_at', '-id')[:1000]
     mapped = {}
@@ -1584,9 +1615,11 @@ def _notice_group_summary_items(items: list[dict], *, limit: int | None = None) 
             'notice_channel_label': item.get('notice_channel_label') or '未绑定通知渠道',
             'notice_type': notice_type,
             'notice_type_label': item.get('notice_type_label') or notice_type,
+            'notice_event': _notice_event_type(notice_type),
             'notice_count': 0,
             'ip_count': 0,
             'ips': [],
+            'order_ids': [],
             'pending_count': 0,
             'failed_retry_count': 0,
             'next_notice_at': item.get('notice_at'),
@@ -1595,6 +1628,9 @@ def _notice_group_summary_items(items: list[dict], *, limit: int | None = None) 
             'related_path': item.get('related_path') or '',
         })
         group['notice_count'] += 1
+        order_id = item.get('order_id')
+        if order_id and order_id not in group['order_ids']:
+            group['order_ids'].append(order_id)
         ip = item.get('ip') or '-'
         if ip not in group['ips']:
             group['ips'].append(ip)
@@ -1613,9 +1649,14 @@ def _notice_group_summary_items(items: list[dict], *, limit: int | None = None) 
             group['notice_text_preview'] = f'{label}：{group["user_display_name"]} 共 {group["ip_count"]} 个 IP，系统会合并成一条通知发送。'
     summary = sorted(grouped.values(), key=lambda item: item.get('next_notice_at') or '')
     for group in summary:
-        label = group.get('notice_type_label') or '通知'
-        ip_text = ' / '.join(group.get('ips') or [])
-        group['notice_text_preview'] = f'{label}：{group["user_display_name"]} 共 {group["ip_count"]} 个 IP：{ip_text}。系统会合并成一条通知发送。'
+        order_ids = group.get('order_ids') or []
+        payload = _notice_actual_batch_payload(group.get('notice_type') or '', order_ids)
+        manual_payload = _notice_manual_text_payload(group.get('notice_type') or '', group.get('user_id'), order_ids)
+        manual_text = manual_payload.get('notice_manual_text') or ''
+        group.update(manual_payload)
+        group['notice_text_preview'] = manual_text or payload.get('text') or group.get('notice_text_preview') or ''
+        group['notice_count'] = 1
+        group['ip_count'] = int(payload.get('count') or group.get('ip_count') or 0)
     return summary[:limit] if limit else summary
 
 
@@ -1629,6 +1670,8 @@ def _notice_history_group_items(logs) -> list[dict]:
         item = _notice_task_history_item_payload(log)
         item.update({
             'id': log.batch_id or log.id,
+            'notice_event': log.event_type,
+            'order_ids': order_ids,
             'notice_type': notice_type,
             'notice_type_label': _NOTICE_HISTORY_LABELS.get(log.event_type, log.event_type),
             'notice_count': 1,
@@ -1667,6 +1710,32 @@ def _notice_task_history_item_payload(log):
         'order_detail_path': f'/admin/cloud-orders/{log.order_id}' if log.order_id else '',
         'order_link_path': f'/admin/cloud-orders/{log.order_id}' if log.order_id else '',
     }
+
+
+@csrf_exempt
+@dashboard_login_required
+@require_POST
+def update_notice_plan_text(request):
+    payload = _read_payload(request)
+    event = str(payload.get('notice_event') or payload.get('event') or '').strip()
+    user_id = payload.get('user_id')
+    order_ids = payload.get('order_ids') or []
+    text = str(payload.get('notice_text') or payload.get('text') or '').strip()
+    if not event:
+        return _error('缺少通知事件类型', status=400)
+    if not isinstance(order_ids, list) or not order_ids:
+        return _error('缺少通知订单列表', status=400)
+    try:
+        normalized_user_id = int(user_id) if user_id else None
+        normalized_order_ids = [int(item) for item in order_ids if item]
+    except Exception:
+        return _error('通知订单参数无效', status=400)
+    key = _set_notice_text_override(event, normalized_user_id, normalized_order_ids, text)
+    return _ok({
+        'notice_override_key': key,
+        'notice_manual_text': text,
+        'notice_has_manual_text': bool(text),
+    })
 
 
 @dashboard_login_required
@@ -3616,6 +3685,7 @@ __all__ = [
     'cloud_orders_list',
     'delete_cloud_order',
     'notice_task_detail',
+    'update_notice_plan_text',
     'auto_renew_task_detail',
     'run_auto_renew_order',
     'run_auto_renew_tasks',
