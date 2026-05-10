@@ -242,14 +242,20 @@ def _runtime_int(key: str, default: int) -> int:
         return default
 
 
-def _runtime_time(key: str, default: str = '15:00') -> tuple[int, int]:
+def _parse_runtime_time_point(raw: str, fallback: str = '15:00') -> tuple[int, int]:
     try:
-        raw = str(get_runtime_config(key, default) or default).strip()
-        hour_text, minute_text = raw.split(':', 1)
+        hour_text, minute_text = str(raw or fallback).strip().split(':', 1)
         return min(max(int(hour_text), 0), 23), min(max(int(minute_text), 0), 59)
     except Exception:
-        hour_text, minute_text = default.split(':', 1)
+        hour_text, minute_text = fallback.split(':', 1)
         return int(hour_text), int(minute_text)
+
+
+def _runtime_time(key: str, default: str = '15:00') -> tuple[int, int]:
+    raw = str(get_runtime_config(key, default) or default).strip()
+    if '-' in raw:
+        raw = raw.split('-', 1)[0].strip()
+    return _parse_runtime_time_point(raw, default)
 
 
 def _with_runtime_time(value, key: str, default: str = '15:00'):
@@ -2362,6 +2368,19 @@ def update_site_config(request, config_id: int):
         if item.key == 'bot_admin_chat_id' and not parsed_ids:
             return _error('管理员转发 Chat ID 至少要有一个有效值', status=400)
         plain_value = ','.join(dict.fromkeys(parsed_ids))
+    if item.key in {'cloud_suspend_time', 'cloud_delete_time', 'cloud_unattached_ip_delete_time'} and plain_value:
+        raw_time = plain_value.replace('～', '-').replace('—', '-').replace('–', '-').strip()
+        try:
+            if '-' in raw_time:
+                start_raw, end_raw = raw_time.split('-', 1)
+                start_hour, start_minute = _parse_runtime_time_point(start_raw, '15:00')
+                end_hour, end_minute = _parse_runtime_time_point(end_raw, '15:00')
+                plain_value = f'{start_hour:02d}:{start_minute:02d}-{end_hour:02d}:{end_minute:02d}'
+            else:
+                hour, minute = _parse_runtime_time_point(raw_time, '15:00')
+                plain_value = f'{hour:02d}:{minute:02d}'
+        except Exception:
+            return _error('生命周期执行时间格式不正确，请使用 HH:mm 或 HH:mm-HH:mm', status=400)
     sort_order_raw = data.get('sort_order')
     if sort_order_raw is not None:
         try:

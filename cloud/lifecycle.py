@@ -1144,26 +1144,41 @@ def _proxy_links_notice_text(order) -> str:
     return '\n'.join(lines)
 
 
-def _config_time(key: str, default: str = '15:00') -> tuple[int, int]:
+def _parse_time_point(raw: str, fallback: str = '15:00') -> tuple[int, int]:
     try:
-        raw = str(get_runtime_config(key, default) or default).strip()
-        hour_text, minute_text = raw.split(':', 1)
+        hour_text, minute_text = str(raw or fallback).strip().split(':', 1)
         return min(max(int(hour_text), 0), 23), min(max(int(minute_text), 0), 59)
     except Exception:
-        hour_text, minute_text = default.split(':', 1)
+        hour_text, minute_text = fallback.split(':', 1)
         return int(hour_text), int(minute_text)
+
+
+def _config_time_window(key: str, default: str = '15:00') -> tuple[tuple[int, int], tuple[int, int] | None]:
+    raw = str(get_runtime_config(key, default) or default).strip()
+    if '-' in raw:
+        start_raw, end_raw = raw.split('-', 1)
+        return _parse_time_point(start_raw, default), _parse_time_point(end_raw, default)
+    return _parse_time_point(raw, default), None
 
 
 def _is_cloud_action_time(config_key: str, default_time: str, now=None, window_minutes: int = 10) -> bool:
     local_now = timezone.localtime(now or timezone.now())
-    hour, minute = _config_time(config_key, default_time)
-    scheduled = local_now.replace(hour=hour, minute=minute, second=0, microsecond=0)
-    return local_now >= scheduled
+    (start_hour, start_minute), end_point = _config_time_window(config_key, default_time)
+    start_at = local_now.replace(hour=start_hour, minute=start_minute, second=0, microsecond=0)
+    if end_point is None:
+        return local_now >= start_at
+    end_hour, end_minute = end_point
+    end_at = local_now.replace(hour=end_hour, minute=end_minute, second=0, microsecond=0)
+    if end_at <= start_at:
+        end_at += timezone.timedelta(days=1)
+        if local_now < start_at:
+            local_now += timezone.timedelta(days=1)
+    return start_at <= local_now <= end_at
 
 
 def _next_cloud_action_run_at(config_key: str, default_time: str, *, now=None, min_delay_seconds: int = 0):
     base = timezone.localtime((now or timezone.now()) + timezone.timedelta(seconds=max(0, int(min_delay_seconds or 0))))
-    hour, minute = _config_time(config_key, default_time)
+    (hour, minute), _end_point = _config_time_window(config_key, default_time)
     scheduled = base.replace(hour=hour, minute=minute, second=0, microsecond=0)
     if scheduled < base:
         scheduled += timezone.timedelta(days=1)
@@ -1171,8 +1186,11 @@ def _next_cloud_action_run_at(config_key: str, default_time: str, *, now=None, m
 
 
 def _config_time_text(config_key: str, default_time: str) -> str:
-    hour, minute = _config_time(config_key, default_time)
-    return f'{hour:02d}:{minute:02d}'
+    start_point, end_point = _config_time_window(config_key, default_time)
+    start_text = f'{start_point[0]:02d}:{start_point[1]:02d}'
+    if end_point is None:
+        return start_text
+    return f'{start_text}-{end_point[0]:02d}:{end_point[1]:02d}'
 
 
 def _is_cloud_suspend_time(now=None) -> bool:
