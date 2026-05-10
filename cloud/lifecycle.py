@@ -21,15 +21,17 @@ from core.texts import site_text
 from orders.models import BalanceLedger
 from orders.services import usdt_to_trx
 from bot.models import TelegramUser
-from cloud.models import CloudAsset, CloudAutoRenewPatrolLog, CloudServerOrder, CloudUserNoticeLog, Server, _with_runtime_time
+from cloud.models import CloudAsset, CloudAutoRenewPatrolLog, CloudAutoRenewRetryTask, CloudServerOrder, CloudUserNoticeLog, Server, _with_runtime_time
 from cloud.note_utils import append_note, prepend_note
 from cloud.services import RenewalPriceMissingError, _cloud_order_lifecycle_fields, _hydrate_order_from_proxy_asset, _order_primary_asset, _order_primary_server, _renewal_price, _resolve_aws_static_ip_name_for_order, create_cloud_server_renewal_for_user, pay_cloud_server_renewal_with_balance, record_cloud_ip_log
-from bot.keyboards import cloud_auto_renew_notice_actions, cloud_expiry_actions, cloud_lifecycle_notice_actions
+from bot.keyboards import cloud_expiry_actions
 
 logger = logging.getLogger(__name__)
 
 AUTO_RENEW_BEFORE_EXPIRY_WINDOW = timezone.timedelta(days=1)
 AUTO_RENEW_FAILURE_NOTICE_COOLDOWN = timezone.timedelta(hours=1)
+AUTO_RENEW_RETRY_CHECK_INTERVAL = timezone.timedelta(minutes=10)
+AUTO_RENEW_RETRY_MAX_ATTEMPTS = 144
 
 
 def _amount_2(value) -> str:
@@ -851,6 +853,139 @@ def _auto_renew_result_batch_text(results: list[dict]) -> str:
 def _auto_renew_failure_notice_due(order) -> bool:
     failure_sent_at = getattr(order, 'auto_renew_failure_notice_sent_at', None)
     return not failure_sent_at or timezone.now() - failure_sent_at >= AUTO_RENEW_FAILURE_NOTICE_COOLDOWN
+
+
+def _auto_renew_retry_should_wait_for_recharge(error: str | None, balance_change: dict | None = None) -> bool:
+    text = str(error or '')
+    return any(keyword in text for keyword in ('余额不足', '余额不够', '请充值', 'insufficient'))
+
+
+@sync_to_async
+def _enqueue_auto_renew_retry(order_id: int, *, ip: str = '', error: str | None = None, balance_change: dict | None = None) -> bool:
+    if not _auto_renew_retry_should_wait_for_recharge(error, balance_change):
+        return False
+    order = CloudServerOrder.objects.select_related('user').filter(id=order_id).first()
+    if not order or not order.auto_renew_enabled:
+        return False
+    if order.status not in ('completed', 'renew_pending'):
+        return False
+    now = timezone.now()
+    task, _ = CloudAutoRenewRetryTask.objects.update_or_create(
+        order=order,
+        status=CloudAutoRenewRetryTask.STATUS_PENDING,
+        defaults={
+            'user': order.user,
+            'order_no': order.order_no,
+            'ip': ip or _order_notice_ip(order),
+            'failure_reason': error or '自动续费失败，等待用户充值后重试。',
+            'last_error': error or '',
+            'next_check_at': now + AUTO_RENEW_RETRY_CHECK_INTERVAL,
+        },
+    )
+    logger.info('CLOUD_AUTO_RENEW_RETRY_ENQUEUED task_id=%s order_id=%s order_no=%s ip=%s', task.id, order.id, order.order_no, task.ip)
+    return True
+
+
+def _auto_renew_retry_has_sufficient_balance(order) -> bool:
+    for candidate in _auto_renew_candidate_users(order):
+        try:
+            amount = _renewal_price(order, candidate)
+        except RenewalPriceMissingError:
+            continue
+        if Decimal(str(getattr(candidate, 'balance', 0) or 0)) >= amount:
+            return True
+    return False
+
+
+@sync_to_async
+def _due_auto_renew_retry_tasks(limit: int = 50) -> list[int]:
+    return list(
+        CloudAutoRenewRetryTask.objects
+        .filter(status=CloudAutoRenewRetryTask.STATUS_PENDING, next_check_at__lte=timezone.now())
+        .order_by('next_check_at', 'id')
+        .values_list('id', flat=True)[:limit]
+    )
+
+
+@sync_to_async
+def _run_auto_renew_retry_task(task_id: int) -> dict | None:
+    task = CloudAutoRenewRetryTask.objects.select_related('order', 'order__user').filter(id=task_id).first()
+    if not task or task.status != CloudAutoRenewRetryTask.STATUS_PENDING:
+        return None
+    now = timezone.now()
+    order = task.order
+    if not order or not order.auto_renew_enabled:
+        task.status = CloudAutoRenewRetryTask.STATUS_CANCELLED
+        task.cancelled_at = now
+        task.last_checked_at = now
+        task.last_error = '自动续费已关闭或订单不存在'
+        task.save(update_fields=['status', 'cancelled_at', 'last_checked_at', 'last_error', 'updated_at'])
+        return None
+    if order.status not in ('completed', 'renew_pending'):
+        task.status = CloudAutoRenewRetryTask.STATUS_CANCELLED
+        task.cancelled_at = now
+        task.last_checked_at = now
+        task.last_error = f'订单状态不可重试：{order.status}'
+        task.save(update_fields=['status', 'cancelled_at', 'last_checked_at', 'last_error', 'updated_at'])
+        return None
+    if not _auto_renew_retry_has_sufficient_balance(order):
+        task.attempts += 1
+        task.last_checked_at = now
+        task.next_check_at = now + AUTO_RENEW_RETRY_CHECK_INTERVAL
+        task.last_error = '余额仍不足，继续等待充值。'
+        if task.attempts >= AUTO_RENEW_RETRY_MAX_ATTEMPTS:
+            task.status = CloudAutoRenewRetryTask.STATUS_FAILED
+        task.save(update_fields=['attempts', 'last_checked_at', 'next_check_at', 'last_error', 'status', 'updated_at'])
+        return None
+    renewed, err, balance_change = _run_auto_renew.__wrapped__(order.id)
+    task.attempts += 1
+    task.last_checked_at = now
+    if renewed and not err:
+        task.status = CloudAutoRenewRetryTask.STATUS_SUCCEEDED
+        task.succeeded_at = timezone.now()
+        task.last_error = ''
+        task.save(update_fields=['attempts', 'last_checked_at', 'status', 'succeeded_at', 'last_error', 'updated_at'])
+        return {
+            'order_id': renewed.id,
+            'original_order_id': order.id,
+            'ip': task.ip or _order_notice_ip(renewed),
+            'ok': True,
+            'error': None,
+            'balance_change': balance_change,
+            'retry_task_id': task.id,
+        }
+    task.next_check_at = timezone.now() + AUTO_RENEW_RETRY_CHECK_INTERVAL
+    task.last_error = err or '自动续费重试失败'
+    if not _auto_renew_retry_should_wait_for_recharge(err, balance_change):
+        task.status = CloudAutoRenewRetryTask.STATUS_FAILED
+    elif task.attempts >= AUTO_RENEW_RETRY_MAX_ATTEMPTS:
+        task.status = CloudAutoRenewRetryTask.STATUS_FAILED
+    task.save(update_fields=['attempts', 'last_checked_at', 'next_check_at', 'last_error', 'status', 'updated_at'])
+    return None
+
+
+async def _process_auto_renew_retry_tasks(notify_target=None) -> int:
+    task_ids = await _due_auto_renew_retry_tasks()
+    if not task_ids:
+        return 0
+    results = []
+    batch_id = f'retry-{uuid.uuid4().hex[:10]}'
+    for task_id in task_ids:
+        result = await _run_auto_renew_retry_task(task_id)
+        if result:
+            await _record_auto_renew_patrol_log(
+                result.get('original_order_id') or result.get('order_id'),
+                batch_id=batch_id,
+                ip=result.get('ip') or '',
+                ok=True,
+                error=None,
+                balance_change=result.get('balance_change') or {},
+                renewed_order_id=result.get('order_id'),
+            )
+            results.append(result)
+    if results and notify_target:
+        await _send_auto_renew_execution_target_notices(notify_target, {'retry': results})
+    return len(results)
 
 
 def _auto_renew_notifiable_failure_order_ids(results: list[dict]) -> list[int]:
@@ -1863,6 +1998,7 @@ def _defer_startup_lifecycle_actions(due, migration_due_orders, orphan_asset_del
 
 
 async def auto_renew_patrol_tick(notify=None, notify_target=None):
+    await _process_auto_renew_retry_tasks(notify_target)
     due = await _get_due_orders()
     results_by_user = defaultdict(list)
     batch_id = uuid.uuid4().hex[:16]
@@ -1891,6 +2027,8 @@ async def auto_renew_patrol_tick(notify=None, notify_target=None):
             balance_change=balance_change,
             renewed_order_id=renewed_order_id,
         )
+        if not ok:
+            await _enqueue_auto_renew_retry(order.id, ip=notice['ip'], error=err, balance_change=balance_change)
         results_by_user[order.user_id].append({
             'order_id': renewed_order_id,
             'original_order_id': order.id,
@@ -1925,6 +2063,8 @@ async def lifecycle_tick(notify=None, notify_target=None, defer_destructive_seco
         due.get('config', {}).get('renew_notice_days'),
         due.get('config', {}).get('renew_notice_debug_repeat'),
     )
+
+    await _process_auto_renew_retry_tasks(notify_target)
 
     if defer_destructive_seconds and (due['suspend'] or due['delete'] or migration_due_orders or orphan_asset_delete_due):
         deferred_at = await _defer_startup_lifecycle_actions(due, migration_due_orders, orphan_asset_delete_due, defer_destructive_seconds)

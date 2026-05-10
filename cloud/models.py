@@ -464,6 +464,47 @@ class CloudIpLog(models.Model):
         return f'{self.order_no or self.asset_name or self.instance_id or "ip-log"} {self.event_type} {ip}'
 
 
+class CloudAutoRenewRetryTask(models.Model):
+    STATUS_PENDING = 'pending'
+    STATUS_SUCCEEDED = 'succeeded'
+    STATUS_CANCELLED = 'cancelled'
+    STATUS_FAILED = 'failed'
+    STATUS_CHOICES = [
+        (STATUS_PENDING, '待重试'),
+        (STATUS_SUCCEEDED, '已成功'),
+        (STATUS_CANCELLED, '已取消'),
+        (STATUS_FAILED, '重试失败'),
+    ]
+
+    order = models.ForeignKey('cloud.CloudServerOrder', verbose_name='云服务器订单', on_delete=models.CASCADE, related_name='auto_renew_retry_tasks')
+    user = models.ForeignKey('bot.TelegramUser', verbose_name='用户', on_delete=models.SET_NULL, blank=True, null=True, related_name='auto_renew_retry_tasks')
+    order_no = models.CharField('订单号', max_length=191, db_index=True)
+    ip = models.CharField('公网IP', max_length=128, blank=True, null=True, db_index=True)
+    status = models.CharField('状态', max_length=32, choices=STATUS_CHOICES, default=STATUS_PENDING, db_index=True)
+    failure_reason = models.TextField('失败原因', blank=True, null=True)
+    last_error = models.TextField('最后错误', blank=True, null=True)
+    attempts = models.PositiveIntegerField('重试次数', default=0)
+    next_check_at = models.DateTimeField('下次检查时间', db_index=True)
+    last_checked_at = models.DateTimeField('最后检查时间', blank=True, null=True)
+    succeeded_at = models.DateTimeField('成功时间', blank=True, null=True)
+    cancelled_at = models.DateTimeField('取消时间', blank=True, null=True)
+    created_at = models.DateTimeField('创建时间', auto_now_add=True, db_index=True)
+    updated_at = models.DateTimeField('更新时间', auto_now=True)
+
+    class Meta:
+        db_table = 'cloud_auto_renew_retry_task'
+        verbose_name = '自动续费重试任务'
+        verbose_name_plural = '自动续费重试任务'
+        ordering = ['next_check_at', 'id']
+        indexes = [
+            models.Index(fields=['status', 'next_check_at'], name='idx_auto_renew_retry_due'),
+            models.Index(fields=['order', 'status'], name='idx_auto_renew_retry_order'),
+        ]
+
+    def __str__(self):
+        return f'{self.order_no} {self.ip or "-"} {self.status}'
+
+
 class CloudAutoRenewPatrolLog(models.Model):
     order = models.ForeignKey('cloud.CloudServerOrder', verbose_name='云服务器订单', on_delete=models.SET_NULL, blank=True, null=True, related_name='auto_renew_patrol_logs')
     user = models.ForeignKey('bot.TelegramUser', verbose_name='用户', on_delete=models.SET_NULL, blank=True, null=True, related_name='auto_renew_patrol_logs')

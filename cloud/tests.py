@@ -14,8 +14,8 @@ from django.utils.dateparse import parse_datetime
 from bot.api import _shutdown_log_items, _unattached_ip_delete_items, lifecycle_plans
 from bot.models import TelegramGroupFilter, TelegramUser
 from cloud.bootstrap import _build_mtproxy_script, _extract_tg_links
-from cloud.models import CloudAsset, CloudAutoRenewPatrolLog, CloudIpLog, CloudServerOrder, CloudServerPlan, CloudUserNoticeLog, Server
-from cloud.lifecycle import _apply_notice_schedule_to_order, _get_due_orders, _get_migration_due_orders, _get_orphan_asset_delete_due, _is_cloud_delete_safe_time, _is_cloud_suspend_time, _mark_deleted, _mark_suspended, _next_cloud_action_run_at, _notice_plan_text, _send_logged_cloud_notice, daily_expiry_summary_tick, lifecycle_tick, sync_server_status_tick
+from cloud.models import CloudAsset, CloudAutoRenewPatrolLog, CloudAutoRenewRetryTask, CloudIpLog, CloudServerOrder, CloudServerPlan, CloudUserNoticeLog, Server
+from cloud.lifecycle import _apply_notice_schedule_to_order, _enqueue_auto_renew_retry, _get_due_orders, _get_migration_due_orders, _get_orphan_asset_delete_due, _is_cloud_delete_safe_time, _is_cloud_suspend_time, _mark_deleted, _mark_suspended, _next_cloud_action_run_at, _notice_plan_text, _process_auto_renew_retry_tasks, _send_logged_cloud_notice, auto_renew_patrol_tick, daily_expiry_summary_tick, lifecycle_tick, sync_server_status_tick
 from cloud.ports import get_mtproxy_port_label, get_mtproxy_public_ports, is_valid_mtproxy_main_port
 from cloud.aws_lightsail import _public_ip_exists_sync, _resolve_static_ip_name_for_move
 from cloud.ip_guard import validate_server_connection_ip, validate_server_connection_ip_with_retry
@@ -4556,6 +4556,62 @@ class CloudServerServicesTestCase(TestCase):
         self.assertEqual(pinned['order_link_path'], '/admin/tasks/auto-renew')
         self.assertEqual(regular['detail_path'], f'/admin/cloud-orders/{order.id}')
         self.assertEqual(regular['order_detail_path'], f'/admin/cloud-orders/{order.id}')
+
+    def test_auto_renew_retry_task_waits_for_recharge_then_retries(self):
+        expires_at = timezone.now() + timezone.timedelta(hours=8)
+        self.user.balance = Decimal('0.00')
+        self.user.save(update_fields=['balance', 'updated_at'])
+        order = CloudServerOrder.objects.create(
+            order_no='AUTO-RENEW-RETRY-AFTER-RECHARGE-1',
+            user=self.user,
+            plan=self.plan,
+            provider=self.plan.provider,
+            region_code=self.plan.region_code,
+            region_name=self.plan.region_name,
+            plan_name=self.plan.plan_name,
+            quantity=1,
+            currency='USDT',
+            total_amount='19.00',
+            pay_amount='19.00',
+            pay_method='address',
+            status='renew_pending',
+            public_ip='6.6.6.20',
+            instance_id='auto-renew-retry-instance',
+            service_started_at=timezone.now() - timezone.timedelta(days=30),
+            service_expires_at=expires_at,
+            suspend_at=expires_at + timezone.timedelta(days=1),
+            expired_at=timezone.now() + timezone.timedelta(minutes=30),
+            auto_renew_enabled=True,
+        )
+        self._create_auto_renew_asset(order)
+
+        enqueued = async_to_sync(_enqueue_auto_renew_retry)(order.id, ip=order.public_ip, error='USDT 余额不足', balance_change={'candidate_count': 1})
+        self.assertTrue(enqueued)
+        task = CloudAutoRenewRetryTask.objects.get(order=order, status=CloudAutoRenewRetryTask.STATUS_PENDING)
+        task.next_check_at = timezone.now() - timezone.timedelta(seconds=1)
+        task.save(update_fields=['next_check_at', 'updated_at'])
+
+        retried = async_to_sync(_process_auto_renew_retry_tasks)()
+        task.refresh_from_db()
+        order.refresh_from_db()
+        self.assertEqual(retried, 0)
+        self.assertEqual(task.status, CloudAutoRenewRetryTask.STATUS_PENDING)
+        self.assertEqual(order.status, 'renew_pending')
+
+        self.user.balance = Decimal('100.00')
+        self.user.save(update_fields=['balance', 'updated_at'])
+        task.next_check_at = timezone.now() - timezone.timedelta(seconds=1)
+        task.save(update_fields=['next_check_at', 'updated_at'])
+
+        retried = async_to_sync(_process_auto_renew_retry_tasks)()
+        task.refresh_from_db()
+        order.refresh_from_db()
+        self.user.refresh_from_db()
+        self.assertEqual(retried, 1)
+        self.assertEqual(task.status, CloudAutoRenewRetryTask.STATUS_SUCCEEDED)
+        self.assertEqual(order.status, 'completed')
+        self.assertEqual(self.user.balance, Decimal('81.000000'))
+        self.assertTrue(CloudAutoRenewPatrolLog.objects.filter(order=order, is_success=True).exists())
 
     def test_update_cloud_asset_price_restores_auto_renew_pending_state(self):
         expires_at = timezone.now() + timezone.timedelta(hours=8)
