@@ -27,21 +27,39 @@ def _notification_accounts() -> list[tuple[int, str, str]]:
     return [(item.id, item.label, item.session_string_plain) for item in accounts if item.session_string_plain]
 
 
-async def send_with_notification_account(chat_id: int, text: str) -> bool:
+async def send_with_notification_account_attempts(chat_id: int, text: str) -> dict:
     from telethon import TelegramClient
     from telethon.sessions import StringSession
 
-    api_id, api_hash = await _telegram_api_credentials()
-    for account_id, _label, session_string in await _notification_accounts():
+    attempts = []
+    try:
+        api_id, api_hash = await _telegram_api_credentials()
+    except Exception as exc:
+        return {'ok': False, 'attempts': [{'channel': 'account', 'ok': False, 'error': str(exc)}]}
+    accounts = await _notification_accounts()
+    if not accounts:
+        return {'ok': False, 'attempts': [{'channel': 'account', 'ok': False, 'error': '无可用通知账号'}]}
+    for account_id, label, session_string in accounts:
+        attempt = {'channel': 'account', 'account_id': account_id, 'account_label': label, 'ok': False, 'error': ''}
         client = TelegramClient(StringSession(session_string), api_id, api_hash)
         try:
             await client.connect()
             if not await client.is_user_authorized():
+                attempt['error'] = '账号未授权'
+                attempts.append(attempt)
                 continue
             await client.send_message(chat_id, text)
-            return True
-        except Exception:
+            attempt['ok'] = True
+            attempts.append(attempt)
+            return {'ok': True, 'attempts': attempts}
+        except Exception as exc:
+            attempt['error'] = str(exc)
+            attempts.append(attempt)
             continue
         finally:
             await client.disconnect()
-    return False
+    return {'ok': False, 'attempts': attempts}
+
+
+async def send_with_notification_account(chat_id: int, text: str) -> bool:
+    return bool((await send_with_notification_account_attempts(chat_id, text)).get('ok'))

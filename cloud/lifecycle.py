@@ -1037,11 +1037,17 @@ def _auto_renew_success_batch_text(results: list[dict], title: str = '✅ 自动
     return '\n'.join(lines).strip()
 
 
-async def _send_cloud_notice(notify, user_id: int, text: str, reply_markup=None) -> bool:
+async def _send_cloud_notice_result(notify, user_id: int, text: str, reply_markup=None) -> dict:
     if not notify:
-        return False
+        return {'ok': False, 'attempts': [{'channel': 'bot', 'ok': False, 'error': '通知发送器未初始化'}]}
     result = await notify(user_id, text, reply_markup)
-    return result is not False
+    if isinstance(result, dict):
+        return {'ok': bool(result.get('ok')), 'attempts': result.get('attempts') or []}
+    return {'ok': result is not False, 'attempts': []}
+
+
+async def _send_cloud_notice(notify, user_id: int, text: str, reply_markup=None) -> bool:
+    return bool((await _send_cloud_notice_result(notify, user_id, text, reply_markup)).get('ok'))
 
 
 async def _send_logged_cloud_notice(event: str, notify, user_id: int, text: str, reply_markup=None, *, order=None, notice: dict | None = None, batch_id: str = '', is_batch: bool = False, extra: dict | None = None) -> bool:
@@ -1049,7 +1055,9 @@ async def _send_logged_cloud_notice(event: str, notify, user_id: int, text: str,
     if await _cloud_notice_already_delivered(event, user_id=user_id, order_id=order_id, batch_id=batch_id):
         logger.info('CLOUD_NOTICE_SKIP_DUPLICATE event=%s user_id=%s order_id=%s batch_id=%s', event, user_id, order_id, batch_id)
         return False
-    delivered = await _send_cloud_notice(notify, user_id, text, reply_markup)
+    send_result = await _send_cloud_notice_result(notify, user_id, text, reply_markup)
+    delivered = bool(send_result.get('ok'))
+    log_extra = {**(extra or {}), 'send_attempts': send_result.get('attempts') or []}
     await _record_cloud_user_notice_log(
         event_type=event,
         user_id=user_id,
@@ -1060,7 +1068,7 @@ async def _send_logged_cloud_notice(event: str, notify, user_id: int, text: str,
         delivered=delivered,
         text=text,
         is_batch=is_batch,
-        extra=extra or {},
+        extra=log_extra,
     )
     return delivered
 

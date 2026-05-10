@@ -1400,7 +1400,10 @@ def _notice_task_time(order, notice_type: str, notice: dict | None = None):
     notice = notice or _notice_payload_for_order(order) or {}
     if notice_type == 'renew_notice':
         expires_at = notice.get('expires_at') or getattr(order, 'service_expires_at', None)
-        notice_days = max(1, _runtime_int_config('cloud_renew_notice_days', 5))
+        try:
+            notice_days = max(1, int(get_runtime_config('cloud_renew_notice_days', 5) or 5))
+        except Exception:
+            notice_days = 5
         return expires_at - timezone.timedelta(days=notice_days) if expires_at else None
     if notice_type == 'auto_renew_notice':
         expires_at = notice.get('expires_at') or getattr(order, 'service_expires_at', None)
@@ -1430,13 +1433,37 @@ def _notice_task_text_preview(order, notice_type: str, notice: dict | None = Non
     return f'{_NOTICE_TASK_TYPES.get(notice_type, {}).get("label", notice_type)}：IP {ip}'
 
 
+def _notice_attempt_label(attempt: dict) -> str:
+    channel = attempt.get('channel') or ''
+    if channel == 'bot':
+        name = attempt.get('channel_label') or 'Bot'
+    elif channel == 'account':
+        name = attempt.get('account_label') or (f"账号{attempt.get('account_id')}" if attempt.get('account_id') else '个人号')
+    else:
+        name = attempt.get('channel_label') or channel or '未知渠道'
+    status = '成功' if attempt.get('ok') else '失败'
+    error = str(attempt.get('error') or '').strip()
+    return f'{name}{status}' + (f'：{error}' if error and not attempt.get('ok') else '')
+
+
+def _notice_attempts_label(log) -> str:
+    attempts = ((getattr(log, 'extra', None) or {}).get('send_attempts') or []) if log else []
+    return '；'.join(_notice_attempt_label(attempt) for attempt in attempts)
+
+
 def _notice_channel_payload(user, latest_log=None) -> dict:
-    target_chat_id = getattr(latest_log, 'target_chat_id', None)
-    if target_chat_id:
-        return {'notice_channel': 'telegram_chat', 'notice_channel_label': f'Telegram Chat {target_chat_id}'}
+    attempts = ((getattr(latest_log, 'extra', None) or {}).get('send_attempts') or []) if latest_log else []
+    success = next((attempt for attempt in attempts if attempt.get('ok')), None)
+    if success:
+        if success.get('channel') == 'bot':
+            return {'notice_channel': 'telegram_bot', 'notice_channel_label': '机器人通知成功'}
+        account_label = success.get('account_label') or (f"账号{success.get('account_id')}" if success.get('account_id') else '个人号')
+        return {'notice_channel': 'telegram_account', 'notice_channel_label': f'{account_label} 通知成功'}
+    if attempts:
+        return {'notice_channel': 'telegram_fallback', 'notice_channel_label': '机器人优先，失败后账号轮询'}
     tg_user_id = getattr(user, 'tg_user_id', None) if user else None
     if tg_user_id:
-        return {'notice_channel': 'telegram_private', 'notice_channel_label': f'Telegram 私聊 {tg_user_id}'}
+        return {'notice_channel': 'telegram_fallback', 'notice_channel_label': '机器人优先，失败后账号轮询'}
     return {'notice_channel': 'unbound', 'notice_channel_label': '未绑定通知渠道'}
 
 
@@ -1444,7 +1471,7 @@ def _notice_status_payload(*, sent_at=None, latest_log=None, queue_status='sched
     if sent_at:
         return {'notice_status': 'sent', 'notice_status_label': '已通知', 'retry_label': '-'}
     if latest_log and not latest_log.delivered:
-        return {'notice_status': 'failed_retry', 'notice_status_label': '通知失败，待重试', 'retry_label': '未标记已通知，下一轮生命周期巡检会继续重试'}
+        return {'notice_status': 'failed_retry', 'notice_status_label': '通知失败，待重试', 'retry_label': (_notice_attempts_label(latest_log) + '；' if _notice_attempts_label(latest_log) else '') + '未标记已通知，下一轮生命周期巡检会继续重试'}
     if queue_status in {'due_now', 'fallback_notice'}:
         return {'notice_status': 'pending', 'notice_status_label': '待本轮通知', 'retry_label': '发送失败不会写入已通知时间，会在后续巡检重试'}
     if queue_status == 'within_window':
@@ -1699,11 +1726,11 @@ def _notice_task_history_item_payload(log):
         'delivered': bool(log.delivered),
         'notice_status': 'sent' if log.delivered else 'failed_retry',
         'notice_status_label': '已通知' if log.delivered else '通知失败，待重试',
-        'result_label': '已送达' if log.delivered else '未送达，后续巡检重试',
+        'result_label': (_notice_attempts_label(log) or '已送达') if log.delivered else (_notice_attempts_label(log) or '未送达，后续巡检重试'),
         'target_chat_id': log.target_chat_id,
         **_notice_channel_payload(getattr(log, 'user', None), log),
         'text_preview': log.text_preview or '',
-        'retry_label': '-' if log.delivered else '未成功送达，不会写入已通知时间；后续生命周期巡检会重试',
+        'retry_label': '-' if log.delivered else (_notice_attempts_label(log) + '；' if _notice_attempts_label(log) else '') + '未成功送达，不会写入已通知时间；后续生命周期巡检会重试',
         'created_at': _iso(log.created_at),
         'related_path': f'/admin/cloud-orders/{log.order_id}' if log.order_id else '',
         'detail_path': f'/admin/cloud-orders/{log.order_id}' if log.order_id else '',

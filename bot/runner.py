@@ -17,7 +17,7 @@ from bot.config import BOT_TOKEN
 from bot.fsm import close_fsm_storage
 from bot.handlers import create_dispatcher_and_register
 from bot.telegram_listener import run_telegram_account_listeners
-from bot.telegram_sender import send_with_notification_account
+from bot.telegram_sender import send_with_notification_account_attempts
 from cloud.services import refresh_custom_plan_cache
 from cloud.lifecycle import auto_renew_patrol_tick, daily_expiry_summary_tick, lifecycle_tick, sync_server_status_tick, sync_cloud_accounts_tick
 from core.cache import refresh_config, close as cache_close
@@ -158,23 +158,28 @@ async def run_bot():
 
         user = await asyncio.to_thread(lambda: TelegramUser.objects.filter(id=user_id).first())
         if not user:
-            return False
+            return {'ok': False, 'attempts': [{'channel': 'bot', 'ok': False, 'error': '用户不存在'}]}
+        attempts = []
         delivered = False
         try:
             await bot.send_message(user.tg_user_id, text, reply_markup=reply_markup, parse_mode='HTML')
+            attempts.append({'channel': 'bot', 'channel_label': '机器人通知', 'ok': True, 'error': ''})
             delivered = True
         except Exception as exc:
+            attempts.append({'channel': 'bot', 'channel_label': '机器人通知', 'ok': False, 'error': str(exc)})
             logger.warning('机器人生命周期通知发送失败 user=%s err=%s，尝试个人号通知', user_id, exc)
             try:
-                sent = await send_with_notification_account(user.tg_user_id, text)
-                if sent:
+                fallback_result = await send_with_notification_account_attempts(user.tg_user_id, text)
+                attempts.extend(fallback_result.get('attempts') or [])
+                if fallback_result.get('ok'):
                     delivered = True
                 else:
-                    logger.warning('个人号生命周期通知无可用账号 user=%s', user_id)
+                    logger.warning('个人号生命周期通知无可用账号 user=%s attempts=%s', user_id, fallback_result.get('attempts'))
             except Exception as fallback_exc:
+                attempts.append({'channel': 'account', 'ok': False, 'error': str(fallback_exc)})
                 logger.warning('个人号生命周期通知发送失败 user=%s err=%s', user_id, fallback_exc)
         await _copy_notice_to_admins(user, text)
-        return delivered
+        return {'ok': delivered, 'attempts': attempts}
 
     async def _notify_target(chat_id, text: str, reply_markup=None):
         try:
