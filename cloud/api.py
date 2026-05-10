@@ -1666,20 +1666,12 @@ def _notice_task_future_items(now, next_run_at, seen_keys: set[tuple[str, int]],
     return due_items, future_items
 
 
-def _notice_cycle_key(item: dict) -> str:
-    notice_at = parse_datetime(item.get('notice_at') or '')
-    if not notice_at:
-        return 'unknown'
-    return timezone.localtime(notice_at).strftime('%Y-%m-%d')
-
-
 def _notice_group_summary_items(items: list[dict], *, limit: int | None = None) -> list[dict]:
     grouped = {}
     for item in items:
         notice_type = item.get('notice_type') or ''
         user_key = item.get('user_id') or f"unbound:{item.get('tg_user_id') or item.get('user_display_name') or 'unknown'}"
-        cycle_key = _notice_cycle_key(item)
-        key = f'{user_key}:{notice_type}:{cycle_key}'
+        key = f'{user_key}:{notice_type}'
         group = grouped.setdefault(key, {
             'id': key,
             'user_id': item.get('user_id'),
@@ -1691,7 +1683,6 @@ def _notice_group_summary_items(items: list[dict], *, limit: int | None = None) 
             'notice_channel_attempts': item.get('notice_channel_attempts') or [],
             'notice_type': notice_type,
             'notice_type_label': item.get('notice_type_label') or notice_type,
-            'notice_cycle_key': cycle_key,
             'notice_event': _notice_event_type(notice_type),
             'notice_count': 0,
             'ip_count': 0,
