@@ -1635,7 +1635,7 @@ def _asset_shutdown_enabled(asset):
     return bool(getattr(account, 'shutdown_enabled', True))
 
 
-def _collect_shutdown_plan_queue(now):
+def _collect_shutdown_plan_queue(now, limit=100):
     pending_until = now + timezone.timedelta(days=3)
     due = async_to_sync(_get_due_orders)()
     due_orders = list(due.get('delete') or [])
@@ -1662,7 +1662,7 @@ def _collect_shutdown_plan_queue(now):
         .exclude(waiting_manual_time_q)
         .exclude(unattached_static_ip_q)
         .exclude(_cloud_asset_deleted_or_missing_q())
-        .order_by('actual_expires_at', 'id')[:1000]
+        .order_by('actual_expires_at', 'id')[:limit]
     )
     recent_failures = {}
     failure_logs = CloudIpLog.objects.select_related('order').filter(
@@ -1687,7 +1687,7 @@ def _collect_shutdown_plan_queue(now):
         status__in=['suspended', 'deleting'],
         delete_at__isnull=False,
         delete_at__lte=now,
-    ).exclude(id__in=list(due_ids)).order_by('delete_at', 'id')[:1000]
+    ).exclude(id__in=list(due_ids)).order_by('delete_at', 'id')[:limit]
     for order in fallback_qs:
         fallback_orders.append(order)
         due_ids.add(order.id)
@@ -1704,12 +1704,12 @@ def _collect_shutdown_plan_queue(now):
         .exclude(waiting_manual_time_q)
         .exclude(unattached_static_ip_q)
         .exclude(_cloud_asset_deleted_or_missing_q())
-        .order_by('actual_expires_at', 'id')[:1000]
+        .order_by('actual_expires_at', 'id')[:limit]
     )
     future_qs = CloudServerOrder.objects.select_related('user', 'cloud_account').filter(
         status__in=['suspended', 'deleting'],
         delete_at__isnull=False,
-    ).exclude(id__in=list(due_ids)).order_by('delete_at', 'id')[:1000]
+    ).exclude(id__in=list(due_ids)).order_by('delete_at', 'id')[:limit]
     for order in future_qs:
         if not next_run_at or order.delete_at < next_run_at:
             next_run_at = order.delete_at
@@ -1848,7 +1848,8 @@ def lifecycle_plans(request):
             parsed = timezone.make_aware(parsed, timezone.get_current_timezone())
         return parsed <= now
 
-    shutdown_queue = _collect_shutdown_plan_queue(now)
+    compact = str(request.GET.get('compact') or '').strip().lower() in {'1', 'true', 'yes', 'on'}
+    shutdown_queue = _collect_shutdown_plan_queue(now, limit=limit)
     history_qs = CloudIpLog.objects.select_related('order', 'user').filter(
         event_type__in=['deleted', 'delete_failed', 'delete_skipped']
     ).order_by('-created_at', '-id')[:limit]
@@ -1879,6 +1880,18 @@ def lifecycle_plans(request):
     ip_delete_history_items = [item for item in ip_delete_items if item.get('is_history')]
     recent_since = now - timezone.timedelta(days=1)
     recent_history = [item for item in history_items if item.get('executed_at') and parse_datetime(item['executed_at']) and parse_datetime(item['executed_at']) >= recent_since]
+    if compact:
+        def compact_notes(items):
+            for item in items:
+                note = str(item.get('note') or '')
+                if len(note) > 1200:
+                    item['note'] = note[:1200] + '\n...（备注过长，已折叠预览）'
+            return items
+        compact_notes(shutdown_items)
+        compact_notes(ip_delete_items)
+        compact_notes(history_items)
+        compact_notes(shutdown_queue['due_items'])
+        compact_notes(shutdown_queue['future_plan_items'])
     return _ok({
         'task_key': 'server_delete_plans',
         'task_label': '服务器删除计划',
@@ -2184,7 +2197,11 @@ def me(request):
 @dashboard_login_required
 @require_GET
 def site_configs_list(request):
+    group_key = str(request.GET.get('group') or '').strip()
     queryset = SiteConfig.objects.order_by('sort_order', 'key')
+    if group_key:
+        group_keys = _site_config_group_map().get(group_key, [])
+        queryset = queryset.filter(key__in=group_keys) if group_keys else SiteConfig.objects.none()
     return _ok([_site_config_payload(item) for item in queryset])
 
 
@@ -2209,8 +2226,8 @@ def init_button_config_view(request):
     return _ok(init_button_config())
 
 
-def site_config_groups(request):
-    groups = {
+def _site_config_group_map():
+    return {
         'database': ['mysql_host', 'mysql_port', 'mysql_database', 'mysql_user', 'mysql_password', 'redis_host', 'redis_port', 'redis_password', 'redis_db'],
         'system': [
             'bot_token',
@@ -2252,7 +2269,14 @@ def site_config_groups(request):
         ],
         **TEXT_GROUPS,
     }
-    existing = {item.key: item for item in SiteConfig.objects.all()}
+
+
+def site_config_groups(request):
+    groups = _site_config_group_map()
+    group_key = str(request.GET.get('group') or '').strip()
+    if group_key:
+        groups = {group_key: groups.get(group_key, [])}
+    existing = {item.key: item for item in SiteConfig.objects.filter(key__in=[key for keys in groups.values() for key in keys])}
     payload = []
     for group_key, keys in groups.items():
         items = []
