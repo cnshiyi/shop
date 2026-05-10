@@ -193,6 +193,7 @@ class CloudServerServicesTestCase(TestCase):
         history = [item for item in items if item.get('is_history') and item.get('public_ip') == '52.77.18.244']
         self.assertTrue(history)
         self.assertIn('manual release ok', history[0]['note'])
+        self.assertEqual(history[0]['deletion_source_label'], '人工手动删除')
 
     def test_legacy_unattached_ip_delete_log_without_known_note_shows_history(self):
         asset = CloudAsset.objects.create(
@@ -221,6 +222,7 @@ class CloudServerServicesTestCase(TestCase):
         history = [item for item in items if item.get('is_history') and item.get('public_ip') == '52.77.18.245']
         self.assertTrue(history)
         self.assertIn('旧版本释放成功', history[0]['note'])
+        self.assertEqual(history[0]['deletion_source_label'], '到期自动删除')
 
     def test_manual_order_delete_writes_server_history_item(self):
         from bot.api import _run_shutdown_order_sync
@@ -265,6 +267,7 @@ class CloudServerServicesTestCase(TestCase):
         history = [item for item in items if item.get('public_ip') == '52.77.18.246']
         self.assertTrue(history)
         self.assertIn('manual server delete ok', history[0]['note'])
+        self.assertEqual(history[0]['deletion_source_label'], '人工手动删除')
 
     def test_missing_aws_instance_delete_marks_order_history(self):
         from bot.api import _run_shutdown_order_sync

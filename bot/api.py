@@ -383,14 +383,37 @@ def _compact_failure_reason(note, *, fallback='失败/跳过'):
     return fallback
 
 
-def _shutdown_execution_note(*, status_label, is_success, executed_at, action, failure_reason):
-    return '；'.join([
+def _shutdown_execution_note(*, status_label, is_success, executed_at, action, failure_reason, deletion_source=''):
+    parts = [
         f'执行状态：{status_label or "-"}',
         f'是否成功：{"成功" if is_success else "失败"}',
         f'执行时间：{_fmt_dashboard_dt(executed_at)}',
         f'执行内容：{action or "-"}',
-        f'失败原因：{failure_reason or "-"}',
-    ])
+    ]
+    if deletion_source:
+        parts.append(f'删除来源：{deletion_source}')
+    parts.append(f'失败原因：{failure_reason or "-"}')
+    return '；'.join(parts)
+
+
+def _delete_source_label(note='', *, default='到期自动删除'):
+    text = str(note or '')
+    match = re.search(r'删除来源：([^；\n]+)', text)
+    if match:
+        return match.group(1).strip() or default
+    lowered = text.lower()
+    if any(keyword in text for keyword in ['人工手动删除', '手动删除', '人工删除']) or 'manual' in lowered:
+        return '人工手动删除'
+    if any(keyword in text for keyword in ['云上不存在', '已标记删除', '云端已不存在', '同步删除', '同步校验']):
+        return '同步校验删除'
+    return default
+
+
+def _with_delete_source(note, source):
+    text = str(note or '').strip()
+    if '删除来源：' in text:
+        return text
+    return f'删除来源：{source}；{text}' if text else f'删除来源：{source}'
 
 
 def _cloud_ip_trace_note_newest_first(note):
@@ -515,6 +538,7 @@ def _shutdown_log_items(limit=100):
                 executed_at=asset.updated_at,
                 action=action,
                 failure_reason=_extract_failure_reason(source_note),
+                deletion_source=_delete_source_label(source_note),
             )
             logged_at = asset.updated_at
         items.append({
@@ -536,6 +560,7 @@ def _shutdown_log_items(limit=100):
             'account_label': asset.account_label or (order.account_label if order else '') or '',
             'status': status,
             'status_label': status_label,
+            'deletion_source_label': _delete_source_label(note),
             'service_expires_at': expires_at,
             'suspend_at': suspend_at,
             'delete_at': delete_at,
@@ -579,6 +604,7 @@ def _shutdown_log_items(limit=100):
             'account_label': getattr(asset, 'account_label', '') or getattr(order, 'account_label', '') or '',
             'status': trace.event_type,
             'status_label': _status_label(trace.event_type, CloudIpLog.EVENT_CHOICES),
+            'deletion_source_label': _delete_source_label(note),
             'service_expires_at': expires_at,
             'suspend_at': suspend_at,
             'delete_at': delete_at,
@@ -690,6 +716,7 @@ def _unattached_ip_delete_items(limit=50):
             'username_label': username_label,
             'public_ip': (trace.public_ip if trace else None) or asset.public_ip or asset.previous_public_ip or '',
             'provider_status': asset.provider_status or (_status_label(trace.event_type, CloudIpLog.EVENT_CHOICES) if trace else ''),
+            'deletion_source_label': _delete_source_label(note, default='计划自动删除'),
             'service_expires_at': _iso(asset.actual_expires_at),
             'delete_at': _iso(delete_at),
             'logged_at': _iso(logged_at),
@@ -722,6 +749,7 @@ def _unattached_ip_delete_items(limit=50):
             'username_label': username_label,
             'public_ip': trace.public_ip or trace.previous_public_ip or '',
             'provider_status': _status_label(trace.event_type, CloudIpLog.EVENT_CHOICES),
+            'deletion_source_label': _delete_source_label(trace.note),
             'service_expires_at': _iso(getattr(asset, 'actual_expires_at', None) or getattr(order, 'service_expires_at', None)),
             'delete_at': _iso(delete_at),
             'logged_at': _iso(logged_at),
@@ -729,7 +757,14 @@ def _unattached_ip_delete_items(limit=50):
             'is_overdue': True,
             'is_history': True,
         })
-    return sorted(items, key=lambda item: (0 if item['is_overdue'] else 1, item.get('delete_at') or '', str(item['id'])))[:limit]
+    def sort_key(item):
+        if item.get('is_history'):
+            parsed = parse_datetime(item.get('logged_at') or item.get('delete_at') or '')
+            timestamp = parsed.timestamp() if parsed else 0
+            return (1, -timestamp, str(item['id']))
+        return (0, 0 if item['is_overdue'] else 1, item.get('delete_at') or '', str(item['id']))
+
+    return sorted(items, key=sort_key)[:limit]
 
 
 def _region_label(region_code, region_name=None):
@@ -1718,6 +1753,7 @@ def _shutdown_history_item_payload(log):
         'result_label': '成功' if ok else '失败/跳过',
         'failure_reason': '' if ok else _compact_failure_reason(log.note, fallback=_status_label(log.event_type, CloudIpLog.EVENT_CHOICES) or '失败/跳过'),
         'execution_status': _status_label(log.event_type, CloudIpLog.EVENT_CHOICES),
+        'deletion_source_label': _delete_source_label(log.note),
         'executed_at': _iso(log.created_at),
         'service_expires_at': _iso(getattr(order, 'service_expires_at', None)),
         'suspend_at': _iso(getattr(order, 'suspend_at', None)),
@@ -1748,6 +1784,7 @@ def _shutdown_history_order_payload(order):
         'result_label': '成功',
         'failure_reason': '',
         'execution_status': '服务器已删除',
+        'deletion_source_label': _delete_source_label(order.provision_note),
         'executed_at': _iso(executed_at),
         'service_expires_at': _iso(order.service_expires_at),
         'suspend_at': _iso(order.suspend_at),
@@ -1875,6 +1912,10 @@ def _run_shutdown_order_sync(order_id: int, queue_status='manual_single', enforc
             return {'order_id': order.id, 'order_no': order.order_no, 'ip': ip, 'queue_status': queue_status, 'ok': False, 'error': reason}
     ok, note = async_to_sync(_delete_instance)(order)
     if ok:
+        if not enforce_schedule or str(queue_status or '').startswith('manual'):
+            note = _with_delete_source(note, '人工手动删除')
+        else:
+            note = _with_delete_source(note, '到期自动删除')
         async_to_sync(_mark_deleted)(order.id, note)
         return {'order_id': order.id, 'order_no': order.order_no, 'ip': ip, 'queue_status': queue_status, 'ok': True, 'error': None}
     async_to_sync(_record_lifecycle_action_failed)(order.id, 'delete_failed', note)
@@ -1915,6 +1956,7 @@ def _run_orphan_asset_delete_sync(asset_id: int, enforce_schedule: bool = True):
             return {'asset_id': asset.id, 'ip': ip, 'ok': False, 'error': '当前不在后台配置的服务器删除执行时间窗口'}
     ok, note = async_to_sync(_delete_orphan_asset_instance)(asset)
     if ok:
+        note = _with_delete_source(note, '人工手动删除' if not enforce_schedule else '到期自动删除')
         async_to_sync(_mark_orphan_asset_deleted)(asset.id, note)
         return {'asset_id': asset.id, 'ip': ip, 'ok': True, 'error': None}
     return {'asset_id': asset.id, 'ip': ip, 'ok': False, 'error': note}
@@ -1952,6 +1994,7 @@ def _run_unattached_ip_delete_sync(asset_id: int, enforce_schedule: bool = True)
             return {'asset_id': asset.id, 'ip': ip, 'ok': False, 'error': '当前不在后台配置的删除执行时间窗口'}
     ok, note = async_to_sync(_release_unattached_static_ip)(asset)
     if ok:
+        note = _with_delete_source(note, '人工手动删除' if not enforce_schedule else '到期自动删除')
         async_to_sync(_mark_unattached_static_ip_deleted)(asset.id, note)
         return {'asset_id': asset.id, 'ip': ip, 'ok': True, 'error': None}
     return {'asset_id': asset.id, 'ip': ip, 'ok': False, 'error': note}
