@@ -2879,12 +2879,7 @@ def list_cloud_asset_renewal_plans(asset_id: int, user_id: int, admin: bool = Fa
     return asset, plans, None
 
 
-@sync_to_async
-def list_retained_ip_renewal_plans(order_id: int, user_id: int, admin: bool = False):
-    order_qs = CloudServerOrder.objects.select_related('user', 'plan').filter(id=order_id)
-    if not admin:
-        order_qs = order_qs.filter(user_id=user_id)
-    order = order_qs.first()
+def _retained_ip_renewal_plans_for_order(order: CloudServerOrder | None):
     if not order:
         return None, [], None
     order = _hydrate_order_from_proxy_asset(order)
@@ -2902,6 +2897,28 @@ def list_retained_ip_renewal_plans(order_id: int, user_id: int, admin: bool = Fa
     if not plans:
         return order, [], '当前地区暂无可用套餐，无法恢复未附加固定 IP。'
     return order, plans, None
+
+
+@sync_to_async
+def list_retained_ip_renewal_plans(order_id: int, user_id: int, admin: bool = False):
+    order_qs = CloudServerOrder.objects.select_related('user', 'plan').filter(id=order_id)
+    if not admin:
+        order_qs = order_qs.filter(user_id=user_id)
+    return _retained_ip_renewal_plans_for_order(order_qs.first())
+
+
+@sync_to_async
+def list_retained_ip_renewal_plans_by_asset(asset_id: int, user_id: int, admin: bool = False):
+    asset_qs = CloudAsset.objects.select_related('order', 'user', 'cloud_account').filter(
+        id=asset_id,
+        kind=CloudAsset.KIND_SERVER,
+    )
+    if not admin:
+        asset_qs = asset_qs.filter(user_id=user_id)
+    asset = asset_qs.first()
+    if not asset or not asset.order_id or not _is_retained_static_ip_asset(asset):
+        return None, [], None
+    return _retained_ip_renewal_plans_for_order(asset.order)
 
 
 @sync_to_async

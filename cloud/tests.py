@@ -32,7 +32,7 @@ from cloud.provisioning import (
     _mark_success,
     provision_cloud_server,
 )
-from cloud.services import _cloud_asset_deleted_or_missing, apply_cloud_server_renewal, create_cloud_server_rebuild_order, create_cloud_server_renewal, create_cloud_server_renewal_by_public_query, create_cloud_server_renewal_for_user, create_cloud_server_upgrade_order, delay_cloud_server_expiry, ensure_cloud_asset_operation_order, get_cloud_server_by_ip, get_cloud_server_by_ip_for_user, get_proxy_asset_by_ip_for_admin, get_proxy_asset_by_ip_for_user, list_cloud_asset_renewal_plans, list_cloud_server_upgrade_plans, list_retained_ip_renewal_plans, list_user_cloud_servers, mark_cloud_server_ip_change_requested, mark_cloud_server_reinit_requested, pay_cloud_server_renewal_with_balance, prepare_cloud_asset_renewal_with_link, record_cloud_ip_log, replace_cloud_asset_order_by_admin, run_cloud_server_renewal_postcheck
+from cloud.services import _cloud_asset_deleted_or_missing, apply_cloud_server_renewal, create_cloud_server_rebuild_order, create_cloud_server_renewal, create_cloud_server_renewal_by_public_query, create_cloud_server_renewal_for_user, create_cloud_server_upgrade_order, delay_cloud_server_expiry, ensure_cloud_asset_operation_order, get_cloud_server_by_ip, get_cloud_server_by_ip_for_user, get_proxy_asset_by_ip_for_admin, get_proxy_asset_by_ip_for_user, get_user_proxy_asset_detail, list_cloud_asset_renewal_plans, list_cloud_server_upgrade_plans, list_retained_ip_renewal_plans, list_retained_ip_renewal_plans_by_asset, list_user_cloud_servers, mark_cloud_server_ip_change_requested, mark_cloud_server_reinit_requested, pay_cloud_server_renewal_with_balance, prepare_cloud_asset_renewal_with_link, record_cloud_ip_log, replace_cloud_asset_order_by_admin, run_cloud_server_renewal_postcheck
 from cloud.sync_safety import get_missing_confirmation_threshold
 from cloud.api import _cloud_order_source_tags, auto_renew_task_detail, cloud_order_detail, cloud_orders_list, delete_cloud_asset, delete_server, run_auto_renew_order, run_auto_renew_tasks, sync_cloud_asset_status, sync_cloud_assets, tasks_overview, update_cloud_asset
 from core.cloud_accounts import cloud_account_label
@@ -3921,6 +3921,56 @@ class CloudServerServicesTestCase(TestCase):
         self.assertEqual(public_asset.id, asset.id)
         self.assertGreaterEqual(len(public_plans), 1)
         self.assertIsNone(public_err)
+
+    def test_retained_deleted_asset_renewal_plans_are_available_by_asset_button(self):
+        now = timezone.now()
+        order = CloudServerOrder.objects.create(
+            order_no='RETAINED-ASSET-BUTTON-1',
+            user=self.user,
+            plan=self.plan,
+            provider=self.plan.provider,
+            region_code=self.plan.region_code,
+            region_name=self.plan.region_name,
+            plan_name=self.plan.plan_name,
+            quantity=1,
+            currency='USDT',
+            total_amount='19.00',
+            pay_amount='19.00',
+            pay_method='balance',
+            status='deleted',
+            public_ip='4.4.4.49',
+            previous_public_ip='4.4.4.49',
+            instance_id='',
+            static_ip_name='retained-asset-button-ip',
+            ip_recycle_at=now + timezone.timedelta(days=10),
+            service_started_at=now - timezone.timedelta(days=40),
+            service_expires_at=now - timezone.timedelta(days=5),
+        )
+        asset = CloudAsset.objects.create(
+            kind=CloudAsset.KIND_SERVER,
+            source=CloudAsset.SOURCE_AWS_SYNC,
+            order=order,
+            user=self.user,
+            provider='aws_lightsail',
+            region_code=self.plan.region_code,
+            region_name=self.plan.region_name,
+            asset_name='retained-asset-button-ip',
+            public_ip='4.4.4.49',
+            previous_public_ip='4.4.4.49',
+            actual_expires_at=order.ip_recycle_at,
+            status=CloudAsset.STATUS_DELETED,
+            is_active=False,
+            provider_status='固定IP保留中-实例已删除',
+            note='实例删除后固定IP保留中',
+        )
+
+        detail = async_to_sync(get_user_proxy_asset_detail)(asset.id, self.user.id, 'asset')
+        retained_order, plans, err = async_to_sync(list_retained_ip_renewal_plans_by_asset)(asset.id, self.user.id)
+
+        self.assertIsNone(detail)
+        self.assertEqual(retained_order.id, order.id)
+        self.assertGreaterEqual(len(plans), 1)
+        self.assertIsNone(err)
 
     def test_public_unattached_asset_renewal_requires_original_account(self):
         other_user = TelegramUser.objects.create(tg_user_id=990007, username='other_unattached_asset_no_account')

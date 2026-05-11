@@ -73,6 +73,7 @@ from cloud.services import (
     list_region_plans,
     list_cloud_asset_renewal_plans,
     list_retained_ip_renewal_plans,
+    list_retained_ip_renewal_plans_by_asset,
     list_user_auto_renew_cloud_servers,
     list_user_cloud_servers,
     list_cloud_server_upgrade_plans,
@@ -3606,6 +3607,19 @@ def register_handlers(dp: Dispatcher):
         is_admin = await _is_admin_chat(callback.message)
         item = await get_proxy_asset_detail_for_admin(asset_id, 'asset') if is_admin else await get_user_proxy_asset_detail(asset_id, user.id, 'asset')
         public_asset_renewal = False
+        if not item and action == 'renew':
+            retained_order, retained_plans, retained_err = await list_retained_ip_renewal_plans_by_asset(asset_id, user.id, admin=is_admin)
+            if retained_err:
+                await _safe_callback_answer(callback, retained_err, show_alert=True)
+                return
+            if retained_order and retained_plans:
+                display_user = getattr(retained_order, 'user', None) or user
+                await _safe_edit_text(
+                    callback.message,
+                    _retained_ip_renewal_plan_text(retained_order, retained_plans, display_user),
+                    reply_markup=_retained_ip_renewal_plan_keyboard(retained_order.id, retained_plans),
+                )
+                return
         if not item and action == 'renew' and not is_admin:
             public_asset, public_plans, public_err = await list_cloud_asset_renewal_plans(asset_id, user.id, public=True)
             if public_asset and public_plans:
