@@ -636,9 +636,11 @@ async def provision_cloud_server(order_id: int):
             if aws_payload:
                 ip_exists, ip_exists_note = await public_ip_exists(aws_payload, expected_connection_ips)
                 if not ip_exists:
-                    saved = await _mark_failed(order_id, ip_exists_note)
+                    cleanup_at = timezone.now() + FAILED_INSTANCE_CLEANUP_DELAY
+                    note = '\n'.join(part for part in [ip_exists_note, _failed_instance_cleanup_note(cleanup_at)] if part)
+                    saved = await _mark_failed(order_id, note, cleanup_at=cleanup_at)
                     clear_provision_progress(order_id)
-                    logger.warning('云服务器开通失败: order=%s reason=expected_ip_not_found note=%s', saved.order_no, ip_exists_note)
+                    logger.warning('云服务器开通失败: order=%s reason=expected_ip_not_found cleanup_at=%s note=%s', saved.order_no, cleanup_at, ip_exists_note)
                     print('[PROVISION_RESULT]', {'order_id': saved.id, 'order_no': saved.order_no, 'status': saved.status, 'error': saved.provision_note})
                     return saved
                 logger.info('云服务器预期 IP 云端存在性确认通过: order=%s note=%s', order.order_no, ip_exists_note)
@@ -657,9 +659,11 @@ async def provision_cloud_server(order_id: int):
                 refresh_target=_refresh_guard_target_ip,
             )
             if not guard_ok:
-                saved = await _mark_failed(order_id, guard_note)
+                cleanup_at = timezone.now() + FAILED_INSTANCE_CLEANUP_DELAY
+                note = '\n'.join(part for part in [guard_note, _failed_instance_cleanup_note(cleanup_at)] if part)
+                saved = await _mark_failed(order_id, note, cleanup_at=cleanup_at)
                 clear_provision_progress(order_id)
-                logger.warning('云服务器开通失败: order=%s reason=connection_ip_guard note=%s', saved.order_no, guard_note)
+                logger.warning('云服务器开通失败: order=%s reason=connection_ip_guard cleanup_at=%s note=%s', saved.order_no, cleanup_at, guard_note)
                 print('[PROVISION_RESULT]', {'order_id': saved.id, 'order_no': saved.order_no, 'status': saved.status, 'error': saved.provision_note})
                 return saved
             final_public_ip = guarded_public_ip or final_public_ip
@@ -686,7 +690,9 @@ async def provision_cloud_server(order_id: int):
                     mtproxy_ok,
                     (timezone.now() - started_at).total_seconds(),
                 )
-                saved = await _mark_failed(order_id, note)
+                cleanup_at = timezone.now() + FAILED_INSTANCE_CLEANUP_DELAY
+                note = '\n'.join(part for part in [note, _failed_instance_cleanup_note(cleanup_at)] if part)
+                saved = await _mark_failed(order_id, note, cleanup_at=cleanup_at)
                 clear_provision_progress(order_id)
                 logger.warning('云服务器开通结束: order=%s status=%s note=%s', saved.order_no, saved.status, (saved.provision_note or '')[:1500])
                 print('[PROVISION_RESULT]', {'order_id': saved.id, 'order_no': saved.order_no, 'status': saved.status, 'error': saved.provision_note})

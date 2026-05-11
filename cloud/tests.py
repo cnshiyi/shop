@@ -1,6 +1,7 @@
 import json
 import os
 from decimal import Decimal
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
 from asgiref.sync import async_to_sync
@@ -29,6 +30,7 @@ from cloud.provisioning import (
     _mark_provisioning_start,
     _mark_rebuild_source_pending_deletion,
     _mark_success,
+    provision_cloud_server,
 )
 from cloud.services import apply_cloud_server_renewal, create_cloud_server_rebuild_order, create_cloud_server_renewal, create_cloud_server_renewal_by_public_query, create_cloud_server_renewal_for_user, create_cloud_server_upgrade_order, delay_cloud_server_expiry, ensure_cloud_asset_operation_order, get_cloud_server_by_ip, get_cloud_server_by_ip_for_user, get_proxy_asset_by_ip_for_admin, get_proxy_asset_by_ip_for_user, list_cloud_asset_renewal_plans, list_cloud_server_upgrade_plans, list_retained_ip_renewal_plans, list_user_cloud_servers, mark_cloud_server_ip_change_requested, mark_cloud_server_reinit_requested, pay_cloud_server_renewal_with_balance, prepare_cloud_asset_renewal_with_link, record_cloud_ip_log, replace_cloud_asset_order_by_admin, run_cloud_server_renewal_postcheck
 from cloud.sync_safety import get_missing_confirmation_threshold
@@ -6397,6 +6399,48 @@ class CloudServerServicesTestCase(TestCase):
         self.assertIsNone(err)
         self.assertIsNotNone(retained_order)
         self.assertTrue(plans)
+
+    def test_provision_expected_ip_failure_schedules_cleanup(self):
+        order = CloudServerOrder.objects.create(
+            order_no='PROVISION-IP-MISSING-CLEANUP',
+            user=self.user,
+            plan=self.plan,
+            provider=self.plan.provider,
+            region_code=self.plan.region_code,
+            region_name=self.plan.region_name,
+            plan_name=self.plan.plan_name,
+            quantity=1,
+            currency='USDT',
+            total_amount='19.00',
+            pay_amount='19.00',
+            pay_method='balance',
+            status='paid',
+            paid_at=timezone.now(),
+            public_ip='20.20.20.35',
+            previous_public_ip='20.20.20.35',
+            static_ip_name='StaticIp-provision-ip-missing-cleanup',
+            mtproxy_secret='eeeeeeeeeeeeeeee',
+            mtproxy_port=9528,
+        )
+        result = SimpleNamespace(
+            ok=True,
+            instance_id='provision-ip-missing-cleanup-instance',
+            public_ip='54.54.54.54',
+            login_user='admin',
+            login_password='pw',
+            note='AWS 实例已创建',
+            static_ip_name='StaticIp-provision-ip-missing-cleanup',
+            private_key_path='',
+        )
+
+        with patch('cloud.provisioning.create_aws_instance', new=AsyncMock(return_value=result)), \
+            patch('cloud.provisioning.public_ip_exists', new=AsyncMock(return_value=(False, '原固定 IP 已不在 AWS 账号中'))):
+            saved = async_to_sync(provision_cloud_server)(order.id)
+
+        self.assertEqual(saved.status, 'failed')
+        self.assertIsNotNone(saved.delete_at)
+        self.assertIn('创建流程未完成', saved.provision_note)
+        self.assertIn('原固定 IP 已不在 AWS 账号中', saved.provision_note)
 
     def test_retained_ip_postcheck_reuses_completed_recovery_order(self):
         recycle_at = timezone.now() + timezone.timedelta(days=7)
