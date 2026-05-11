@@ -47,7 +47,7 @@ from bot.api import (
     dashboard_login_required,
 )
 from bot.models import TelegramGroupFilter, TelegramLoginAccount, TelegramUser
-from cloud.lifecycle import NOTICE_TYPE_SWITCH_CONFIG, _auto_renew_notice_batch_payload, _delete_instance, _get_due_orders, _get_notice_text_override, _lifecycle_notice_batch_payload, _mark_replaced_order_deleted, _notice_payload_for_order, _notice_override_key, _record_auto_renew_patrol_log, _renew_notice_batch_payload, _run_auto_renew, _set_notice_text_override, cloud_notice_type_enabled
+from cloud.lifecycle import NOTICE_TYPE_SWITCH_CONFIG, _auto_renew_notice_batch_payload, _notice_effective_delivered, _delete_instance, _get_due_orders, _get_notice_text_override, _lifecycle_notice_batch_payload, _mark_replaced_order_deleted, _notice_payload_for_order, _notice_override_key, _record_auto_renew_patrol_log, _renew_notice_batch_payload, _run_auto_renew, _set_notice_text_override, cloud_notice_type_enabled
 from cloud.services import AWS_REGION_NAMES, RenewalPriceMissingError, _cloud_order_lifecycle_fields, _renewal_price, _update_order_primary_records, create_cloud_server_rebuild_order, ensure_cloud_server_pricing, ensure_manual_expiry_operation_order, ensure_manual_owner_operation_order, ensure_manual_price_operation_order, record_cloud_ip_log, refresh_custom_plan_cache, replace_cloud_asset_order_by_admin, set_cloud_server_auto_renew_admin
 from cloud.models import AddressMonitor, CloudAsset, CloudAutoRenewPatrolLog, CloudIpLog, CloudServerOrder, CloudServerPlan, CloudUserNoticeLog, Server, ServerPrice
 from cloud.note_utils import append_note, prepend_note
@@ -1762,6 +1762,7 @@ def _notice_history_group_items(logs) -> list[dict]:
 
 
 def _notice_task_history_item_payload(log):
+    delivered = _notice_effective_delivered(log)
     return {
         'id': log.id,
         'batch_id': log.batch_id,
@@ -1774,14 +1775,14 @@ def _notice_task_history_item_payload(log):
         'tg_user_id': getattr(log.user, 'tg_user_id', None) if getattr(log, 'user', None) else None,
         'user_display_name': getattr(log.user, 'display_name', '') or getattr(log.user, 'username', '') or '未绑定用户' if getattr(log, 'user', None) else '未绑定用户',
         'username_label': f'@{log.user.username}' if getattr(log, 'user', None) and getattr(log.user, 'username', '') else '-',
-        'delivered': bool(log.delivered),
-        'notice_status': 'sent' if log.delivered else 'failed_retry',
-        'notice_status_label': '已通知' if log.delivered else '通知失败，待重试',
-        'result_label': (_notice_attempts_label(log) or '已送达') if log.delivered else (_notice_attempts_label(log) or '未送达，后续巡检重试'),
+        'delivered': delivered,
+        'notice_status': 'sent' if delivered else 'failed_retry',
+        'notice_status_label': '已通知' if delivered else '通知失败，待重试',
+        'result_label': (_notice_attempts_label(log) or '已送达') if delivered else (_notice_attempts_label(log) or '未送达，后续巡检重试'),
         'target_chat_id': log.target_chat_id,
         **_notice_channel_payload(getattr(log, 'user', None), log),
         'text_preview': log.text_preview or '',
-        'retry_label': '-' if log.delivered else (_notice_attempts_label(log) + '；' if _notice_attempts_label(log) else '') + '未成功送达，不会写入已通知时间；后续生命周期巡检会重试',
+        'retry_label': '-' if delivered else (_notice_attempts_label(log) + '；' if _notice_attempts_label(log) else '') + '未成功送达，不会写入已通知时间；后续生命周期巡检会重试',
         'created_at': _iso(log.created_at),
         'related_path': f'/admin/cloud-orders/{log.order_id}' if log.order_id else '',
         'detail_path': f'/admin/cloud-orders/{log.order_id}' if log.order_id else '',
@@ -1912,6 +1913,12 @@ def notice_task_detail(request):
     recent_since = now - timezone.timedelta(days=1)
     recent_logs = history_qs.filter(created_at__gte=recent_since)
     latest_log = history_qs.first()
+    history_count = history_qs.count()
+    recent_log_items = list(recent_logs[:1000])
+    recent_success_count = sum(1 for log in recent_log_items if _notice_effective_delivered(log))
+    recent_failure_count = sum(1 for log in recent_log_items if not _notice_effective_delivered(log))
+    recent_success_user_count = len({log.user_id for log in recent_log_items if _notice_effective_delivered(log) and log.user_id})
+    recent_failure_user_count = len({log.user_id for log in recent_log_items if not _notice_effective_delivered(log) and log.user_id})
     return _ok({
         'task_key': 'cloud_notice_plan',
         'task_label': '通知计划',
@@ -1923,10 +1930,11 @@ def notice_task_detail(request):
         'due_user_count': due_user_total,
         'future_count': len(future_plan_items),
         'future_user_count': future_user_total,
-        'recent_success_count': recent_logs.filter(delivered=True).count(),
-        'recent_success_user_count': recent_logs.filter(delivered=True).values('user_id').distinct().count(),
-        'recent_failure_count': recent_logs.filter(delivered=False).count(),
-        'recent_failure_user_count': recent_logs.filter(delivered=False).values('user_id').distinct().count(),
+        'history_count': history_count,
+        'recent_success_count': recent_success_count,
+        'recent_success_user_count': recent_success_user_count,
+        'recent_failure_count': recent_failure_count,
+        'recent_failure_user_count': recent_failure_user_count,
         'retry_policy_label': '通知失败不会写入已通知时间；生命周期巡检会在下一轮继续重试，直到成功送达。',
         'notice_switches': _notice_switch_items(),
         'due_items': _compact_notice_items(visible_due_items) if compact else visible_due_items,

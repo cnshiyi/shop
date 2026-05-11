@@ -1069,13 +1069,26 @@ def _auto_renew_success_batch_text(results: list[dict], title: str = '✅ 自动
     return '\n'.join(lines).strip()
 
 
+def _notice_attempts_have_success(attempts) -> bool:
+    return any(bool(attempt.get('ok')) for attempt in (attempts or []) if isinstance(attempt, dict))
+
+
+def _notice_effective_delivered(log) -> bool:
+    if not getattr(log, 'delivered', False):
+        return False
+    attempts = ((getattr(log, 'extra', None) or {}).get('send_attempts') or []) if log else []
+    return True if not attempts else _notice_attempts_have_success(attempts)
+
+
 async def _send_cloud_notice_result(notify, user_id: int, text: str, reply_markup=None) -> dict:
     if not notify:
         return {'ok': False, 'attempts': [{'channel': 'bot', 'ok': False, 'error': '通知发送器未初始化'}]}
     result = await notify(user_id, text, reply_markup)
     if isinstance(result, dict):
-        return {'ok': bool(result.get('ok')), 'attempts': result.get('attempts') or []}
-    return {'ok': result is not False, 'attempts': []}
+        attempts = result.get('attempts') or []
+        ok = _notice_attempts_have_success(attempts) if attempts else bool(result.get('ok'))
+        return {'ok': ok, 'attempts': attempts}
+    return {'ok': result is True, 'attempts': []}
 
 
 async def _send_cloud_notice(notify, user_id: int, text: str, reply_markup=None) -> bool:
