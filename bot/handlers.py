@@ -523,12 +523,13 @@ async def _reply_cloud_query_results(message: Message, raw_text: str, state: FSM
             public_text = f'IP: <code>{escape(display_ip)}</code>\n{time_label}: {expires_text}'
             if is_public_view and is_unattached_ip_asset:
                 public_text = f'{public_text}\n状态: {escape(status_text)}'
+            action_asset_id = asset.id if can_asset_renew and (is_unattached_ip_asset or not public_renew_order_id) else 0
             results.append({
                 'ip': display_ip,
                 'text': public_text if is_public_view else f'IP: <code>{escape(display_ip)}</code>\n{time_label}: {expires_text}\n自动续费: {auto_renew_text}\n状态: {escape(status_text)}{account_text}',
                 'renewable': bool(can_asset_renew or action_order_id),
                 'order_id': action_order_id,
-                'asset_id': asset.id if can_asset_renew and not public_renew_order_id else 0,
+                'asset_id': action_asset_id,
                 'start_order_id': public_renew_order_id if include_start else 0,
                 'auto_renew_enabled': bool(linked_order.get('auto_renew_enabled')),
                 'can_auto_renew': bool(include_start or is_owned_asset),
