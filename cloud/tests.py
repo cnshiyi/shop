@@ -5921,6 +5921,119 @@ class CloudServerServicesTestCase(TestCase):
         self.assertTrue(server.is_active)
         self.assertEqual(server.status, Server.STATUS_RUNNING)
 
+    def test_sync_aws_assets_updates_retained_asset_after_renewal_recovery(self):
+        account = CloudAccountConfig.objects.create(
+            provider=CloudAccountConfig.PROVIDER_AWS,
+            name='aws-retained-recovered',
+            external_account_id='123456789012',
+            access_key='A' * 20,
+            secret_key='B' * 40,
+            region_hint='ap-southeast-1',
+            is_active=True,
+        )
+        account_label = cloud_account_label(account)
+        old_order = CloudServerOrder.objects.create(
+            order_no='RETAINED-RECOVERED-OLD',
+            user=self.user,
+            plan=self.plan,
+            provider=self.plan.provider,
+            region_code=self.plan.region_code,
+            region_name=self.plan.region_name,
+            plan_name=self.plan.plan_name,
+            quantity=1,
+            currency='USDT',
+            total_amount='19.00',
+            pay_amount='19.00',
+            status='deleted',
+            public_ip='10.9.0.3',
+            previous_public_ip='10.9.0.3',
+            instance_id='',
+            static_ip_name='recovered-static-ip',
+            ip_recycle_at=timezone.now() + timezone.timedelta(days=5),
+            cloud_account=account,
+            account_label=account_label,
+        )
+        recovery_expires_at = timezone.now() + timezone.timedelta(days=31)
+        recovery_order = CloudServerOrder.objects.create(
+            order_no='RETAINED-RECOVERED-NEW',
+            user=self.user,
+            plan=self.plan,
+            provider=self.plan.provider,
+            region_code=self.plan.region_code,
+            region_name=self.plan.region_name,
+            plan_name=self.plan.plan_name,
+            quantity=1,
+            currency='USDT',
+            total_amount='19.00',
+            pay_amount='19.00',
+            status='completed',
+            public_ip='10.9.0.3',
+            previous_public_ip='10.9.0.3',
+            instance_id='i-recovered-sync-1',
+            server_name='i-recovered-sync-1',
+            static_ip_name='recovered-static-ip',
+            service_expires_at=recovery_expires_at,
+            cloud_account=account,
+            account_label=account_label,
+        )
+        asset = CloudAsset.objects.create(
+            kind=CloudAsset.KIND_SERVER,
+            source=CloudAsset.SOURCE_AWS_SYNC,
+            order=old_order,
+            user=self.user,
+            provider='aws_lightsail',
+            cloud_account=account,
+            account_label=account_label,
+            region_code=self.plan.region_code,
+            region_name=self.plan.region_name,
+            asset_name='recovered-static-ip',
+            provider_resource_id='arn:aws:lightsail:ap-southeast-1:123456789012:StaticIp/recovered-static-ip',
+            public_ip='10.9.0.3',
+            previous_public_ip='10.9.0.3',
+            actual_expires_at=old_order.ip_recycle_at,
+            status=CloudAsset.STATUS_DELETED,
+            provider_status='固定IP保留中-实例已删除',
+            note='固定IP保留中-实例已删除',
+            is_active=False,
+        )
+
+        class FakeLightsailClient:
+            def get_static_ips(self, **kwargs):
+                return {'staticIps': [{
+                    'name': 'recovered-static-ip',
+                    'arn': 'arn:aws:lightsail:ap-southeast-1:123456789012:StaticIp/recovered-static-ip',
+                    'ipAddress': '10.9.0.3',
+                    'attachedTo': 'i-recovered-sync-1',
+                    'location': {'regionName': '新加坡'},
+                }], 'nextPageToken': None}
+
+            def get_instances(self, **kwargs):
+                return {
+                    'instances': [{
+                        'name': 'i-recovered-sync-1',
+                        'arn': 'arn:aws:lightsail:ap-southeast-1:123456789012:Instance/i-recovered-sync-1',
+                        'state': {'name': 'running'},
+                        'location': {'regionName': '新加坡'},
+                        'publicIpAddress': '10.9.0.3',
+                        'bundleId': 'micro_1_0',
+                        'blueprintId': 'debian_12',
+                    }],
+                    'nextPageToken': None,
+                }
+
+        with patch('cloud.management.commands.sync_aws_assets._list_regions', return_value=['ap-southeast-1']), patch('cloud.management.commands.sync_aws_assets._aws_account_identity', return_value='123456789012'), patch('cloud.management.commands.sync_aws_assets._lightsail_client', return_value=FakeLightsailClient()):
+            call_command('sync_aws_assets', region='ap-southeast-1')
+
+        asset.refresh_from_db()
+        self.assertEqual(CloudAsset.objects.filter(public_ip='10.9.0.3').count(), 1)
+        self.assertEqual(asset.instance_id, 'i-recovered-sync-1')
+        self.assertEqual(asset.order_id, recovery_order.id)
+        self.assertEqual(asset.status, CloudAsset.STATUS_RUNNING)
+        self.assertEqual(asset.provider_status, '运行中')
+        self.assertEqual(asset.actual_expires_at, recovery_expires_at)
+        self.assertTrue(asset.is_active)
+        self.assertIn('未附加IP已通过续费恢复并重新绑定到实例', asset.note or '')
+
     def test_sync_aws_assets_preserves_existing_unattached_ip_due_time(self):
         account = CloudAccountConfig.objects.create(
             provider=CloudAccountConfig.PROVIDER_AWS,

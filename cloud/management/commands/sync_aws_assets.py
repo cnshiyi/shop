@@ -408,6 +408,27 @@ def _resolve_server(instance_name, instance_arn, public_ip, order, account=None)
     return None
 
 
+def _static_ip_rebound_asset(asset: CloudAsset | None) -> bool:
+    if not asset:
+        return False
+    provider_status = str(getattr(asset, 'provider_status', '') or '')
+    note = str(getattr(asset, 'note', '') or '')
+    resource_id = str(getattr(asset, 'provider_resource_id', '') or '')
+    return bool(
+        getattr(asset, 'provider', None) == 'aws_lightsail'
+        and not str(getattr(asset, 'instance_id', '') or '').strip()
+        and (
+            '未附加固定IP' in provider_status
+            or '固定IP保留中' in provider_status
+            or '固定 IP 保留' in provider_status
+            or '未附加固定IP' in note
+            or '固定IP保留中' in note
+            or '固定 IP 保留' in note
+            or 'StaticIp' in resource_id
+        )
+    )
+
+
 def _resolve_asset_for_static_ip(static_ip_name, static_ip_arn, public_ip, account=None):
     lookup = Q(kind=CloudAsset.KIND_SERVER)
     if account:
@@ -837,7 +858,11 @@ class Command(BaseCommand):
                                 order_user = None
 
                         provider_status = _provider_status_label(state_name or None)
-                        asset = _resolve_asset(instance_name, instance_arn, public_ip, order, account)
+                        static_ip_name = attached_static_ip.get('name') or ''
+                        static_ip_arn = attached_static_ip.get('arn') or ''
+                        asset = _resolve_asset_for_static_ip(static_ip_name, static_ip_arn, public_ip, account) if static_ip_name and public_ip else None
+                        if not asset:
+                            asset = _resolve_asset(instance_name, instance_arn, public_ip, order, account)
                         old_status = asset.status if asset else None
                         preserve_lifecycle_status = bool(
                             (order and order.status == 'deleting')
@@ -847,7 +872,6 @@ class Command(BaseCommand):
                             provider_status = f'旧机保留期，等待删除（云端{provider_status}）'
                         elif order and order.status == 'suspended':
                             provider_status = f'已到期关机，等待删除（云端{provider_status}）'
-                        static_ip_name = attached_static_ip.get('name') or ''
                         static_ip_note = f"；固定IP名: {static_ip_name}" if static_ip_name else ''
                         note = f"状态: {provider_status}；公网IP: {public_ip or '缺失'}{static_ip_note}；套餐: {bundle_id}；镜像: {blueprint_id}；到期: {expires_at or '-'}；最近同步: {now_iso}"
                         is_active = normalized_status in Server.ACTIVE_STATUSES
@@ -875,20 +899,29 @@ class Command(BaseCommand):
                         }
                         rebound_unattached_ip = bool(
                             asset
-                            and '未附加' in str(getattr(asset, 'provider_status', '') or '')
                             and str(instance_name or '').strip()
+                            and (
+                                '未附加' in str(getattr(asset, 'provider_status', '') or '')
+                                or _static_ip_rebound_asset(asset)
+                            )
                         )
+                        rebound_to_order = bool(rebound_unattached_ip and order and getattr(order, 'service_expires_at', None))
                         if asset:
                             asset_defaults['user'] = asset.user or order_user
-                            if not asset.order_id and order:
+                            if (not asset.order_id and order) or rebound_to_order:
                                 asset_defaults['order'] = order
                                 asset_defaults['actual_expires_at'] = expires_at
                             if rebound_unattached_ip:
                                 rebound_at = timezone.now()
-                                rebound_note = f'未附加IP已重新绑定到实例，已清空临时到期时间：{rebound_at.isoformat()}；等待人工添加真实到期时间。'
-                                asset_defaults['actual_expires_at'] = None
-                                asset_defaults['provider_status'] = '已重新绑定实例-待人工添加时间'
-                                asset_defaults['note'] = append_note(asset.note, _append_unique_line(note, rebound_note))
+                                if rebound_to_order:
+                                    rebound_note = f'未附加IP已通过续费恢复并重新绑定到实例：{rebound_at.isoformat()}；已同步新订单到期时间。'
+                                    asset_defaults['actual_expires_at'] = expires_at
+                                    asset_defaults['provider_status'] = provider_status
+                                else:
+                                    rebound_note = f'未附加IP已重新绑定到实例，已清空临时到期时间：{rebound_at.isoformat()}；等待人工添加真实到期时间。'
+                                    asset_defaults['actual_expires_at'] = None
+                                    asset_defaults['provider_status'] = '已重新绑定实例-待人工添加时间'
+                                asset_defaults['note'] = append_note(_drop_stale_deleted_note_lines(asset.note), _append_unique_line(note, rebound_note))
                                 asset_defaults['is_active'] = True
                             else:
                                 asset_defaults['actual_expires_at'] = asset.actual_expires_at
@@ -960,7 +993,7 @@ class Command(BaseCommand):
                         if asset:
                             server_defaults['user'] = asset.user or order_user
                             server_defaults['expires_at'] = asset.actual_expires_at or expires_at
-                            if not asset.order_id and order:
+                            if (not asset.order_id and order) or rebound_to_order:
                                 server_defaults['order'] = order
                             if rebound_unattached_ip:
                                 server_defaults['expires_at'] = asset_defaults['actual_expires_at']
@@ -973,7 +1006,7 @@ class Command(BaseCommand):
                             server_defaults['user'] = server.user or order_user or getattr(asset, 'user', None)
                             server_defaults['expires_at'] = server.expires_at if not rebound_unattached_ip else asset_defaults['actual_expires_at']
                             server_defaults['note'] = append_note(_drop_stale_deleted_note_lines(server.note), server_defaults['note'])
-                            if not server.order_id and order:
+                            if (not server.order_id and order) or rebound_to_order:
                                 server_defaults['order'] = order
                         old_server_public_ip = server.public_ip if server else None
                         if server:
