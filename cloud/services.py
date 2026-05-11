@@ -2909,7 +2909,7 @@ def list_retained_ip_renewal_plans(order_id: int, user_id: int, admin: bool = Fa
 
 @sync_to_async
 def list_retained_ip_renewal_plans_by_asset(asset_id: int, user_id: int, admin: bool = False):
-    asset_qs = CloudAsset.objects.select_related('order', 'user', 'cloud_account').filter(
+    asset_qs = CloudAsset.objects.select_related('order', 'order__user', 'order__plan', 'user', 'cloud_account').filter(
         id=asset_id,
         kind=CloudAsset.KIND_SERVER,
     )
