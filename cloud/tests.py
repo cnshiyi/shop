@@ -2680,6 +2680,55 @@ class CloudServerServicesTestCase(TestCase):
         self.assertEqual(confirmed.ip_recycle_at, due_at)
         self.assertIn('正在恢复未绑定代理资产固定 IP', confirmed.provision_note)
 
+    def test_unsynced_deleted_aws_asset_prepares_static_ip_recovery(self):
+        account = CloudAccountConfig.objects.create(
+            provider=CloudAccountConfig.PROVIDER_AWS,
+            name='gray-zone-account',
+            region_hint=self.plan.region_code,
+            access_key='A' * 20,
+            secret_key='B' * 40,
+            is_active=True,
+        )
+        due_at = timezone.now() + timezone.timedelta(days=9)
+        asset = CloudAsset.objects.create(
+            kind=CloudAsset.KIND_SERVER,
+            source=CloudAsset.SOURCE_AWS_SYNC,
+            user=self.user,
+            provider='aws_lightsail',
+            cloud_account=account,
+            account_label=cloud_account_label(account),
+            region_code=self.plan.region_code,
+            region_name=self.plan.region_name,
+            asset_name='gray-zone-stale-instance',
+            instance_id='gray-zone-stale-instance',
+            public_ip='31.31.31.38',
+            previous_public_ip='31.31.31.38',
+            actual_expires_at=due_at,
+            status=CloudAsset.STATUS_RUNNING,
+            provider_status='运行中',
+            note='AWS 已删机但同步未更新，DB 仍是运行中资产',
+            mtproxy_port=443,
+            mtproxy_link='tg://proxy?server=31.31.31.38&port=443&secret=eeeeeeeeeeeeeeee',
+            mtproxy_secret='eeeeeeeeeeeeeeee',
+            mtproxy_host='31.31.31.38',
+            is_active=True,
+        )
+        link = {
+            'url': 'tg://proxy?server=31.31.31.38&port=443&secret=eeeeeeeeeeeeeeee',
+            'server': '31.31.31.38',
+            'port': '443',
+            'secret': 'eeeeeeeeeeeeeeee',
+        }
+
+        with patch('cloud.services._resolve_unattached_aws_static_ip_name_for_asset', return_value='StaticIp-gray-zone'):
+            order, error = async_to_sync(prepare_cloud_asset_renewal_with_link)(asset.id, self.user.id, self.plan.id, link)
+
+        self.assertIsNone(error)
+        self.assertIsNotNone(order)
+        self.assertEqual(order.static_ip_name, 'StaticIp-gray-zone')
+        self.assertEqual(order.cloud_account_id, account.id)
+        self.assertIn('灰区续费：AWS 实时确认固定 IP 未附加', order.provision_note)
+
     def test_unattached_asset_operation_order_enters_retained_renewal_flow(self):
         due_at = timezone.now() + timezone.timedelta(days=9)
         asset = CloudAsset.objects.create(
