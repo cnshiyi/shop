@@ -645,19 +645,26 @@ def _shutdown_log_items(limit=100):
 
 
 def _cloud_asset_deleted_or_missing_q():
-    return (
-        Q(status__in=[
-            CloudAsset.STATUS_DELETED,
-            CloudAsset.STATUS_DELETING,
-            CloudAsset.STATUS_TERMINATED,
-            CloudAsset.STATUS_TERMINATING,
-        ])
-        | Q(provider_status__icontains='云上未找到')
+    inactive_status_q = Q(status__in=[
+        CloudAsset.STATUS_DELETED,
+        CloudAsset.STATUS_DELETING,
+        CloudAsset.STATUS_TERMINATED,
+        CloudAsset.STATUS_TERMINATING,
+    ])
+    provider_missing_q = (
+        Q(provider_status__icontains='云上未找到')
         | Q(provider_status__icontains='已到期删除')
         | Q(provider_status__icontains='已删除')
-        | Q(note__icontains='云上不存在')
-        | Q(note__icontains='已标记删除')
     )
+    dirty_note_q = (Q(note__icontains='云上不存在') | Q(note__icontains='已标记删除')) & ~Q(status__in=[
+        CloudAsset.STATUS_RUNNING,
+        CloudAsset.STATUS_PENDING,
+        CloudAsset.STATUS_STARTING,
+        CloudAsset.STATUS_STOPPED,
+        CloudAsset.STATUS_SUSPENDED,
+        CloudAsset.STATUS_UNKNOWN,
+    ])
+    return inactive_status_q | provider_missing_q | dirty_note_q
 
 
 def _unattached_ip_delete_history_q():

@@ -296,6 +296,9 @@ def _resolve_asset(instance_name, instance_arn, public_ip, order, account=None):
         asset = base_queryset.filter(direct_candidates).order_by(*_asset_resolve_ordering()).first()
         if asset:
             return asset
+        deleted_asset = CloudAsset.objects.filter(lookup).filter(direct_candidates).filter(status__in=_SYNC_EXCLUDED_ASSET_STATUSES).order_by('-updated_at', '-id').first()
+        if deleted_asset:
+            return deleted_asset
     if public_ip:
         public_ip_queryset = base_queryset.filter(Q(public_ip=public_ip) | Q(previous_public_ip=public_ip))
         if order:
@@ -386,6 +389,9 @@ def _resolve_server(instance_name, instance_arn, public_ip, order, account=None)
         server = base_queryset.filter(direct_candidates).order_by(*_server_resolve_ordering()).first()
         if server:
             return server
+        deleted_server = Server.objects.filter(base).filter(direct_candidates).filter(status__in=_SYNC_EXCLUDED_SERVER_STATUSES).order_by('-updated_at', '-id').first()
+        if deleted_server:
+            return deleted_server
     if public_ip:
         public_ip_queryset = base_queryset.filter(Q(public_ip=public_ip) | Q(previous_public_ip=public_ip))
         if order:

@@ -1654,15 +1654,17 @@ def _resolve_unattached_aws_static_ip_name_for_asset(asset: CloudAsset | None) -
 def _cloud_asset_deleted_or_missing(asset: CloudAsset | None) -> bool:
     if not asset:
         return False
+    status = getattr(asset, 'status', '')
     provider_status = str(getattr(asset, 'provider_status', '') or '')
     note = str(getattr(asset, 'note', '') or '')
+    active_cloud_status = status in CloudAsset.ACTIVE_STATUSES or status in {CloudAsset.STATUS_STOPPED, CloudAsset.STATUS_SUSPENDED, CloudAsset.STATUS_UNKNOWN}
+    note_marks_missing = '云上不存在' in note or '已标记删除' in note
     return bool(
-        getattr(asset, 'status', '') in _INACTIVE_ASSET_STATUSES
+        status in _INACTIVE_ASSET_STATUSES
         or '云上未找到' in provider_status
         or '已到期删除' in provider_status
         or '已删除' in provider_status
-        or '云上不存在' in note
-        or '已标记删除' in note
+        or (note_marks_missing and not active_cloud_status)
     )
 
 

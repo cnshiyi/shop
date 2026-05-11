@@ -32,7 +32,7 @@ from cloud.provisioning import (
     _mark_success,
     provision_cloud_server,
 )
-from cloud.services import apply_cloud_server_renewal, create_cloud_server_rebuild_order, create_cloud_server_renewal, create_cloud_server_renewal_by_public_query, create_cloud_server_renewal_for_user, create_cloud_server_upgrade_order, delay_cloud_server_expiry, ensure_cloud_asset_operation_order, get_cloud_server_by_ip, get_cloud_server_by_ip_for_user, get_proxy_asset_by_ip_for_admin, get_proxy_asset_by_ip_for_user, list_cloud_asset_renewal_plans, list_cloud_server_upgrade_plans, list_retained_ip_renewal_plans, list_user_cloud_servers, mark_cloud_server_ip_change_requested, mark_cloud_server_reinit_requested, pay_cloud_server_renewal_with_balance, prepare_cloud_asset_renewal_with_link, record_cloud_ip_log, replace_cloud_asset_order_by_admin, run_cloud_server_renewal_postcheck
+from cloud.services import _cloud_asset_deleted_or_missing, apply_cloud_server_renewal, create_cloud_server_rebuild_order, create_cloud_server_renewal, create_cloud_server_renewal_by_public_query, create_cloud_server_renewal_for_user, create_cloud_server_upgrade_order, delay_cloud_server_expiry, ensure_cloud_asset_operation_order, get_cloud_server_by_ip, get_cloud_server_by_ip_for_user, get_proxy_asset_by_ip_for_admin, get_proxy_asset_by_ip_for_user, list_cloud_asset_renewal_plans, list_cloud_server_upgrade_plans, list_retained_ip_renewal_plans, list_user_cloud_servers, mark_cloud_server_ip_change_requested, mark_cloud_server_reinit_requested, pay_cloud_server_renewal_with_balance, prepare_cloud_asset_renewal_with_link, record_cloud_ip_log, replace_cloud_asset_order_by_admin, run_cloud_server_renewal_postcheck
 from cloud.sync_safety import get_missing_confirmation_threshold
 from cloud.api import _cloud_order_source_tags, auto_renew_task_detail, cloud_order_detail, cloud_orders_list, delete_cloud_asset, delete_server, run_auto_renew_order, run_auto_renew_tasks, sync_cloud_asset_status, sync_cloud_assets, tasks_overview, update_cloud_asset
 from core.cloud_accounts import cloud_account_label
@@ -6095,6 +6095,108 @@ class CloudServerServicesTestCase(TestCase):
         self.assertEqual(order.status, 'suspended')
         self.assertIn('云端运行中', asset.provider_status or '')
         self.assertIn('已到期关机，等待删除', asset.provider_status or '')
+
+    def test_dirty_deleted_note_does_not_hide_live_synced_asset(self):
+        asset = CloudAsset.objects.create(
+            kind=CloudAsset.KIND_SERVER,
+            source=CloudAsset.SOURCE_AWS_SYNC,
+            user=self.user,
+            provider='aws_lightsail',
+            region_code=self.plan.region_code,
+            region_name=self.plan.region_name,
+            asset_name='dirty-note-live-asset',
+            instance_id='dirty-note-live-asset',
+            public_ip='10.9.0.7',
+            status=CloudAsset.STATUS_RUNNING,
+            provider_status='运行中',
+            note='历史脏数据：IP校验发现云上不存在，已标记删除；最新同步又确认运行中',
+            is_active=True,
+        )
+
+        self.assertFalse(_cloud_asset_deleted_or_missing(asset))
+        queried = async_to_sync(get_proxy_asset_by_ip_for_user)('10.9.0.7', self.user.id)
+        self.assertIsNotNone(queried)
+        self.assertEqual(queried.id, asset.id)
+
+    def test_sync_aws_assets_revives_dirty_deleted_asset_when_instance_exists(self):
+        account = CloudAccountConfig.objects.create(
+            provider=CloudAccountConfig.PROVIDER_AWS,
+            name='aws-revive-dirty-deleted-asset',
+            external_account_id='123456789012',
+            access_key='A' * 20,
+            secret_key='B' * 40,
+            region_hint='ap-southeast-1',
+            is_active=True,
+        )
+        account_label = cloud_account_label(account)
+        asset = CloudAsset.objects.create(
+            kind=CloudAsset.KIND_SERVER,
+            source=CloudAsset.SOURCE_AWS_SYNC,
+            user=self.user,
+            provider='aws_lightsail',
+            cloud_account=account,
+            account_label=account_label,
+            region_code=self.plan.region_code,
+            region_name=self.plan.region_name,
+            asset_name='i-revive-dirty-deleted-asset',
+            public_ip='10.9.0.6',
+            previous_public_ip='10.9.0.6',
+            instance_id='i-revive-dirty-deleted-asset',
+            provider_resource_id='arn:aws:lightsail:ap-southeast-1:123456789012:Instance/i-revive-dirty-deleted-asset',
+            status=CloudAsset.STATUS_DELETED,
+            provider_status='云上未找到实例/IP-待确认',
+            note='IP校验发现云上不存在，已标记删除',
+            is_active=False,
+        )
+        server = Server.objects.create(
+            source=Server.SOURCE_AWS_SYNC,
+            user=self.user,
+            provider='aws_lightsail',
+            account_label=account_label,
+            region_code=self.plan.region_code,
+            region_name=self.plan.region_name,
+            server_name='i-revive-dirty-deleted-asset',
+            public_ip='10.9.0.6',
+            previous_public_ip='10.9.0.6',
+            instance_id='i-revive-dirty-deleted-asset',
+            provider_resource_id='arn:aws:lightsail:ap-southeast-1:123456789012:Instance/i-revive-dirty-deleted-asset',
+            status=Server.STATUS_DELETED,
+            provider_status='云上未找到实例/IP-待确认',
+            note='服务器校验发现云上不存在，已标记删除',
+            is_active=False,
+        )
+
+        class FakeLightsailClient:
+            def get_static_ips(self, **kwargs):
+                return {'staticIps': [], 'nextPageToken': None}
+
+            def get_instances(self, **kwargs):
+                return {
+                    'instances': [{
+                        'name': 'i-revive-dirty-deleted-asset',
+                        'arn': 'arn:aws:lightsail:ap-southeast-1:123456789012:Instance/i-revive-dirty-deleted-asset',
+                        'state': {'name': 'running'},
+                        'location': {'regionName': '新加坡'},
+                        'publicIpAddress': '10.9.0.6',
+                        'bundleId': 'micro_1_0',
+                        'blueprintId': 'debian_12',
+                    }],
+                    'nextPageToken': None,
+                }
+
+        with patch('cloud.management.commands.sync_aws_assets._list_regions', return_value=['ap-southeast-1']), patch('cloud.management.commands.sync_aws_assets._aws_account_identity', return_value='123456789012'), patch('cloud.management.commands.sync_aws_assets._lightsail_client', return_value=FakeLightsailClient()):
+            call_command('sync_aws_assets', region='ap-southeast-1')
+
+        asset.refresh_from_db()
+        server.refresh_from_db()
+        self.assertEqual(CloudAsset.objects.filter(instance_id='i-revive-dirty-deleted-asset').count(), 1)
+        self.assertEqual(asset.status, CloudAsset.STATUS_RUNNING)
+        self.assertTrue(asset.is_active)
+        self.assertEqual(server.status, Server.STATUS_RUNNING)
+        self.assertTrue(server.is_active)
+        queried = async_to_sync(get_proxy_asset_by_ip_for_user)('10.9.0.6', self.user.id)
+        self.assertIsNotNone(queried)
+        self.assertEqual(queried.id, asset.id)
 
     def test_sync_aws_assets_revives_deleted_order_when_instance_exists(self):
         account = CloudAccountConfig.objects.create(
