@@ -30,7 +30,7 @@ from cloud.provisioning import (
     _mark_rebuild_source_pending_deletion,
     _mark_success,
 )
-from cloud.services import apply_cloud_server_renewal, create_cloud_server_rebuild_order, create_cloud_server_renewal, create_cloud_server_renewal_by_public_query, create_cloud_server_renewal_for_user, create_cloud_server_upgrade_order, delay_cloud_server_expiry, ensure_cloud_asset_operation_order, get_cloud_server_by_ip, get_cloud_server_by_ip_for_user, get_proxy_asset_by_ip_for_admin, get_proxy_asset_by_ip_for_user, list_cloud_asset_renewal_plans, list_cloud_server_upgrade_plans, list_retained_ip_renewal_plans, list_user_cloud_servers, mark_cloud_server_ip_change_requested, mark_cloud_server_reinit_requested, pay_cloud_server_renewal_with_balance, prepare_cloud_asset_renewal_with_link, record_cloud_ip_log, replace_cloud_asset_order_by_admin
+from cloud.services import apply_cloud_server_renewal, create_cloud_server_rebuild_order, create_cloud_server_renewal, create_cloud_server_renewal_by_public_query, create_cloud_server_renewal_for_user, create_cloud_server_upgrade_order, delay_cloud_server_expiry, ensure_cloud_asset_operation_order, get_cloud_server_by_ip, get_cloud_server_by_ip_for_user, get_proxy_asset_by_ip_for_admin, get_proxy_asset_by_ip_for_user, list_cloud_asset_renewal_plans, list_cloud_server_upgrade_plans, list_retained_ip_renewal_plans, list_user_cloud_servers, mark_cloud_server_ip_change_requested, mark_cloud_server_reinit_requested, pay_cloud_server_renewal_with_balance, prepare_cloud_asset_renewal_with_link, record_cloud_ip_log, replace_cloud_asset_order_by_admin, run_cloud_server_renewal_postcheck
 from cloud.sync_safety import get_missing_confirmation_threshold
 from cloud.api import _cloud_order_source_tags, auto_renew_task_detail, cloud_order_detail, cloud_orders_list, delete_cloud_asset, delete_server, run_auto_renew_order, run_auto_renew_tasks, sync_cloud_asset_status, sync_cloud_assets, tasks_overview, update_cloud_asset
 from core.cloud_accounts import cloud_account_label
@@ -6397,6 +6397,57 @@ class CloudServerServicesTestCase(TestCase):
         self.assertIsNone(err)
         self.assertIsNotNone(retained_order)
         self.assertTrue(plans)
+
+    def test_retained_ip_postcheck_reuses_completed_recovery_order(self):
+        recycle_at = timezone.now() + timezone.timedelta(days=7)
+        source = CloudServerOrder.objects.create(
+            order_no='RETAINED-POSTCHECK-SOURCE',
+            user=self.user,
+            plan=self.plan,
+            provider=self.plan.provider,
+            region_code=self.plan.region_code,
+            region_name=self.plan.region_name,
+            plan_name=self.plan.plan_name,
+            quantity=1,
+            currency='USDT',
+            total_amount='19.00',
+            pay_amount='19.00',
+            pay_method='balance',
+            status='completed',
+            public_ip='20.20.20.34',
+            previous_public_ip='20.20.20.34',
+            static_ip_name='StaticIp-retained-postcheck-source',
+            instance_id='',
+            ip_recycle_at=recycle_at,
+            mtproxy_secret='eeeeeeeeeeeeeeee',
+            mtproxy_port=9528,
+        )
+        completed_recovery = CloudServerOrder.objects.create(
+            order_no='RETAINED-POSTCHECK-RECOVERY',
+            user=self.user,
+            plan=self.plan,
+            provider=self.plan.provider,
+            region_code=self.plan.region_code,
+            region_name=self.plan.region_name,
+            plan_name=self.plan.plan_name,
+            quantity=1,
+            currency='USDT',
+            total_amount='19.00',
+            pay_amount='19.00',
+            pay_method='balance',
+            status='completed',
+            public_ip='20.20.20.34',
+            previous_public_ip='20.20.20.34',
+            static_ip_name='StaticIp-retained-postcheck-source',
+            instance_id='retained-postcheck-recovered-instance',
+            replacement_for=source,
+        )
+
+        result, err = async_to_sync(run_cloud_server_renewal_postcheck)(source.id)
+
+        self.assertEqual(result.id, completed_recovery.id)
+        self.assertEqual(err, '固定 IP 保留期续费，已进入自动恢复流程。')
+        self.assertEqual(CloudServerOrder.objects.filter(replacement_for=source).count(), 1)
 
     def test_lifecycle_tick_releases_retained_static_ip_after_recycle_due(self):
         recycle_due_at = timezone.now() - timezone.timedelta(days=2)

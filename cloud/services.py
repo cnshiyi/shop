@@ -2740,7 +2740,7 @@ def _create_retained_ip_recovery_order(order: CloudServerOrder, days: int = 31):
             return None, '固定 IP 保留中，但缺少固定 IP 名称，无法自动恢复。'
     if not order.mtproxy_secret:
         return None, '固定 IP 保留中，但缺少旧 MTProxy 密钥，无法保持旧链接不变。'
-    existing = CloudServerOrder.objects.filter(replacement_for=order, status__in={'paid', 'provisioning', 'failed'}).order_by('-created_at', '-id').first()
+    existing = CloudServerOrder.objects.filter(replacement_for=order, status__in={'paid', 'provisioning', 'failed', 'completed'}).order_by('-created_at', '-id').first()
     if existing:
         return existing, ''
     fallback_plan = CloudServerPlan.objects.filter(
