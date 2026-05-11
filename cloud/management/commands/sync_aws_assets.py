@@ -314,6 +314,14 @@ def _append_unique_line(text: str | None, line: str) -> str:
     return current
 
 
+def _drop_stale_deleted_note_lines(text: str | None) -> str:
+    stale_keywords = ('云上不存在', '云上未找到实例/IP', '已标记删除', '同步删除')
+    return '\n'.join(
+        line for line in str(text or '').splitlines()
+        if line.strip() and not any(keyword in line for keyword in stale_keywords)
+    ).strip()
+
+
 def _sync_order_deleted_from_cloud(order, old_public_ip, *, source: str = 'AWS 同步校验', asset=None, server=None):
     before = {
         'status': order.status,
@@ -884,7 +892,7 @@ class Command(BaseCommand):
                                 asset_defaults['is_active'] = True
                             else:
                                 asset_defaults['actual_expires_at'] = asset.actual_expires_at
-                                asset_defaults['note'] = append_note(asset.note, note)
+                                asset_defaults['note'] = append_note(_drop_stale_deleted_note_lines(asset.note), note)
                         asset_signature = f'{instance_name or "-"}|{instance_arn or "-"}|{public_ip or "缺失"}'
                         old_public_ip = asset.public_ip if asset else None
                         ip_changed = bool(asset and old_public_ip and old_public_ip != public_ip)
@@ -964,7 +972,7 @@ class Command(BaseCommand):
                         if server:
                             server_defaults['user'] = server.user or order_user or getattr(asset, 'user', None)
                             server_defaults['expires_at'] = server.expires_at if not rebound_unattached_ip else asset_defaults['actual_expires_at']
-                            server_defaults['note'] = append_note(server.note, server_defaults['note'])
+                            server_defaults['note'] = append_note(_drop_stale_deleted_note_lines(server.note), server_defaults['note'])
                             if not server.order_id and order:
                                 server_defaults['order'] = order
                         old_server_public_ip = server.public_ip if server else None
@@ -1118,7 +1126,7 @@ class Command(BaseCommand):
                             asset_defaults['user'] = asset.user
                         if asset.actual_expires_at:
                             asset_defaults['actual_expires_at'] = asset.actual_expires_at
-                        asset_defaults['note'] = append_note(asset.note, note)
+                        asset_defaults['note'] = append_note(_drop_stale_deleted_note_lines(asset.note), note)
                     asset_signature = f'{static_ip_name or "-"}|{static_ip_arn or "-"}|{public_ip or "缺失"}'
                     old_status = asset.status if asset else None
                     if asset:
