@@ -1614,6 +1614,43 @@ def _resolve_asset_original_cloud_account(asset: CloudAsset | None):
     return get_cloud_account_from_label(getattr(asset, 'account_label', ''), getattr(asset, 'provider', None))
 
 
+def _resolve_unattached_aws_static_ip_name_for_asset(asset: CloudAsset | None) -> str:
+    if not asset or getattr(asset, 'provider', None) != CloudServerPlan.PROVIDER_AWS_LIGHTSAIL:
+        return ''
+    public_ip = str(getattr(asset, 'public_ip', '') or getattr(asset, 'previous_public_ip', '') or '').strip()
+    if not public_ip:
+        return ''
+    account = _resolve_asset_original_cloud_account(asset)
+    access_key = ''
+    secret_key = ''
+    if account:
+        ak = (account.access_key_plain or '').strip()
+        sk = (account.secret_key_plain or '').strip()
+        if ak and sk and len(ak) >= 16 and len(sk) >= 36:
+            access_key, secret_key = ak, sk
+    if not access_key or not secret_key:
+        access_key = os.getenv('AWS_ACCESS_KEY_ID', '')
+        secret_key = os.getenv('AWS_SECRET_ACCESS_KEY', '')
+    if not access_key or not secret_key:
+        return ''
+    try:
+        import boto3
+        client = boto3.client('lightsail', region_name=asset.region_code or 'ap-southeast-1', aws_access_key_id=access_key, aws_secret_access_key=secret_key)
+        token = None
+        while True:
+            kwargs = {'pageToken': token} if token else {}
+            response = client.get_static_ips(**kwargs)
+            for item in response.get('staticIps') or []:
+                if str(item.get('ipAddress') or '').strip() == public_ip and not str(item.get('attachedTo') or '').strip():
+                    return str(item.get('name') or '').strip()
+            token = response.get('nextPageToken')
+            if not token:
+                break
+    except Exception as exc:
+        logger.warning('AWS 未附加固定 IP 名称反查失败: asset=%s ip=%s error=%s', getattr(asset, 'id', None), public_ip, exc)
+    return ''
+
+
 def _cloud_asset_deleted_or_missing(asset: CloudAsset | None) -> bool:
     if not asset:
         return False
@@ -2899,6 +2936,7 @@ def prepare_cloud_asset_renewal_with_link(asset_id: int, user_id: int, plan_id: 
         renewal_user = asset.user if admin and asset.user_id else TelegramUser.objects.select_for_update().get(id=user_id)
         discounted_total = _apply_cloud_discount(Decimal(target_plan.price), renewal_user.cloud_discount_rate)
         now = timezone.now()
+        unattached_static_ip_name = asset.asset_name if _is_unattached_static_ip_asset(asset) else _resolve_unattached_aws_static_ip_name_for_asset(asset)
         order = CloudServerOrder.objects.create(
             user=renewal_user,
             order_no=_generate_cloud_order_no('SRVASSET', f'RENEW{asset.id}'),
@@ -2921,7 +2959,7 @@ def prepare_cloud_asset_renewal_with_link(asset_id: int, user_id: int, plan_id: 
             instance_id=asset.instance_id,
             provider_resource_id=asset.provider_resource_id,
             server_name=asset.asset_name,
-            static_ip_name=asset.asset_name if _is_unattached_static_ip_asset(asset) else '',
+            static_ip_name=unattached_static_ip_name,
             service_started_at=None,
             service_expires_at=None,
             ip_recycle_at=asset.actual_expires_at if _is_unattached_static_ip_asset(asset) else None,
@@ -2937,6 +2975,7 @@ def prepare_cloud_asset_renewal_with_link(asset_id: int, user_id: int, plan_id: 
             provision_note='\n'.join(filter(None, [
                 str(asset.note or '').strip(),
                 f'{_ASSET_RENEWAL_MARKER}：来源资产 #{asset.id}；已选择套餐 {target_plan.plan_name}；旧IP={public_ip}；旧端口={link_data["port"]}；旧secret={link_data["secret"]}。支付完成后自动创建服务器并绑定该固定 IP，继续使用旧主代理链接。',
+                f'灰区续费：AWS 实时确认固定 IP 未附加，固定IP名={unattached_static_ip_name}。' if unattached_static_ip_name and not _is_unattached_static_ip_asset(asset) else '',
             ])),
         )
         if _is_unattached_static_ip_asset(asset) and asset.actual_expires_at:
