@@ -1519,12 +1519,26 @@ def _order_primary_asset_unavailable(order: CloudServerOrder | None) -> bool:
         return True
     asset = _order_primary_asset(order)
     if asset and _cloud_asset_deleted_or_missing(asset):
-        return True
+        retained_alive = bool(
+            order.status in {'completed', 'expiring', 'suspended', 'deleted', 'renew_pending'}
+            and order.ip_recycle_at
+            and order.ip_recycle_at > timezone.now()
+            and _is_retained_static_ip_asset(asset)
+        )
+        if not retained_alive:
+            return True
+    active_retained_ip = bool(
+        asset
+        and order.ip_recycle_at
+        and order.ip_recycle_at > timezone.now()
+        and _is_retained_static_ip_asset(asset)
+    )
     if (
         order.provider == CloudServerPlan.PROVIDER_AWS_LIGHTSAIL
         and str(order.static_ip_name or '').strip()
         and not str(order.instance_id or '').strip()
         and order.status in _ACTIVE_ORDER_STATUSES
+        and not active_retained_ip
     ):
         return True
     return False
@@ -1545,9 +1559,27 @@ def _valid_retained_order_for_ip(ip_q, user_id: int | None = None):
             .order_by('-updated_at', '-id')
             .first()
         )
-        if retained_asset and not _cloud_asset_deleted_or_missing(retained_asset) and _is_unattached_static_ip_asset(retained_asset):
+        if retained_asset and _is_retained_static_ip_asset(retained_asset):
             return order
     return None
+
+
+def _is_retained_static_ip_asset(asset: CloudAsset | None) -> bool:
+    if not asset:
+        return False
+    provider_status = str(getattr(asset, 'provider_status', '') or '')
+    note = str(getattr(asset, 'note', '') or '')
+    return bool(
+        getattr(asset, 'provider', None) == CloudServerPlan.PROVIDER_AWS_LIGHTSAIL
+        and not str(getattr(asset, 'instance_id', '') or '').strip()
+        and (
+            '固定IP保留中' in provider_status
+            or '固定 IP 保留' in provider_status
+            or '固定IP保留中' in note
+            or '固定 IP 保留' in note
+            or _is_unattached_static_ip_asset(asset)
+        )
+    )
 
 
 def _is_unattached_static_ip_asset(asset: CloudAsset | None) -> bool:
@@ -1561,7 +1593,13 @@ def _is_unattached_static_ip_asset(asset: CloudAsset | None) -> bool:
         and not str(getattr(asset, 'instance_id', '') or '').strip()
         and (
             '未附加固定IP' in provider_status
+            or '未附加IP' in provider_status
+            or '固定IP保留中' in provider_status
+            or '固定 IP 保留' in provider_status
             or '未附加固定IP' in note
+            or '未附加IP' in note
+            or '固定IP保留中' in note
+            or '固定 IP 保留' in note
             or 'StaticIp' in provider_resource_id
         )
     )

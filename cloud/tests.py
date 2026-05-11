@@ -6297,6 +6297,58 @@ class CloudServerServicesTestCase(TestCase):
         self.assertEqual(server.provider_status, '固定IP保留中-实例已删除')
         self.assertFalse(any(getattr(item, 'asset_id', None) == asset.id for item in async_to_sync(list_user_cloud_servers)(self.user.id)))
 
+    def test_deleted_retained_static_ip_remains_query_renewable(self):
+        recycle_at = timezone.now() + timezone.timedelta(days=7)
+        order = CloudServerOrder.objects.create(
+            order_no='DELETE-RETAIN-QUERY-1',
+            user=self.user,
+            plan=self.plan,
+            provider=self.plan.provider,
+            region_code=self.plan.region_code,
+            region_name=self.plan.region_name,
+            plan_name=self.plan.plan_name,
+            quantity=1,
+            currency='USDT',
+            total_amount='19.00',
+            pay_amount='19.00',
+            status='deleting',
+            public_ip='20.20.20.33',
+            previous_public_ip='20.20.20.33',
+            static_ip_name='StaticIp-delete-retain-query',
+            instance_id='delete-retain-query-instance',
+            provider_resource_id='delete-retain-query-arn',
+            ip_recycle_at=recycle_at,
+            mtproxy_secret='eeeeeeeeeeeeeeee',
+            mtproxy_port=9528,
+        )
+        CloudAsset.objects.create(
+            kind=CloudAsset.KIND_SERVER,
+            order=order,
+            user=self.user,
+            provider='aws_lightsail',
+            region_code=self.plan.region_code,
+            region_name=self.plan.region_name,
+            asset_name='delete-retain-query-instance',
+            instance_id='delete-retain-query-instance',
+            provider_resource_id='delete-retain-query-arn',
+            public_ip='20.20.20.33',
+            previous_public_ip='20.20.20.33',
+            actual_expires_at=recycle_at,
+            status=CloudAsset.STATUS_RUNNING,
+            provider_status='运行中',
+            is_active=True,
+        )
+
+        async_to_sync(_mark_deleted)(order.id, '实例已删除，固定 IP 保留。')
+
+        queried = async_to_sync(get_cloud_server_by_ip_for_user)('20.20.20.33', self.user.id)
+        self.assertIsNotNone(queried)
+        self.assertEqual(queried.id, order.id)
+        retained_order, plans, err = async_to_sync(list_retained_ip_renewal_plans)(order.id, self.user.id)
+        self.assertIsNone(err)
+        self.assertIsNotNone(retained_order)
+        self.assertTrue(plans)
+
     def test_lifecycle_tick_releases_retained_static_ip_after_recycle_due(self):
         recycle_due_at = timezone.now() - timezone.timedelta(days=2)
         order = CloudServerOrder.objects.create(
