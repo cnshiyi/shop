@@ -1854,13 +1854,40 @@ def _reset_notice_sent_fields_for_log(log) -> int:
 @csrf_exempt
 @dashboard_login_required
 @require_POST
-def delete_notice_history(request, log_id: int):
-    log = CloudUserNoticeLog.objects.filter(id=log_id).first()
-    if not log:
+def delete_notice_history(request, identifier):
+    identifier = str(identifier or '').strip()
+    queryset = CloudUserNoticeLog.objects.none()
+    if identifier.isdigit():
+        log = CloudUserNoticeLog.objects.filter(id=int(identifier)).first()
+        if log and log.batch_id:
+            queryset = CloudUserNoticeLog.objects.filter(batch_id=log.batch_id)
+        elif log:
+            queryset = CloudUserNoticeLog.objects.filter(id=log.id)
+    if not queryset.exists():
+        queryset = CloudUserNoticeLog.objects.filter(batch_id=identifier)
+    logs = list(queryset)
+    if not logs:
         return _error('通知历史不存在', status=404)
-    reset_count = _reset_notice_sent_fields_for_log(log)
-    log.delete()
-    return _ok({'deleted': True, 'reset_count': reset_count})
+    field_order_ids = {}
+    for log in logs:
+        field_name = NOTICE_EVENT_SENT_FIELD_MAP.get(log.event_type)
+        if not field_name:
+            continue
+        ids = field_order_ids.setdefault(field_name, set())
+        extra_ids = ((log.extra or {}).get('order_ids') or []) if getattr(log, 'extra', None) else []
+        for item in extra_ids:
+            try:
+                ids.add(int(item))
+            except (TypeError, ValueError):
+                continue
+        if log.order_id:
+            ids.add(log.order_id)
+    reset_count = 0
+    for field_name, order_ids in field_order_ids.items():
+        if order_ids:
+            reset_count += CloudServerOrder.objects.filter(id__in=order_ids).update(**{field_name: None})
+    deleted_count, _ = queryset.delete()
+    return _ok({'deleted': True, 'deleted_count': deleted_count, 'reset_count': reset_count})
 
 
 @csrf_exempt
