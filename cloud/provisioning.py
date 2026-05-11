@@ -827,8 +827,8 @@ def _candidate_cloud_account_ids(order_id: int):
         return [order.cloud_account_id] if order.cloud_account_id else []
     accounts = list_cloud_accounts_by_server_load(order.provider, order.region_code)
     ids = [account.id for account in accounts]
-    if order.cloud_account_id and order.cloud_account_id not in ids:
-        ids.insert(0, order.cloud_account_id)
+    if order.cloud_account_id:
+        return [order.cloud_account_id, *[account_id for account_id in ids if account_id != order.cloud_account_id]]
     return ids
 
 
