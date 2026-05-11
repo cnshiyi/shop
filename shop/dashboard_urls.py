@@ -47,6 +47,7 @@ urlpatterns = [
     path('tasks/plans/unattached-ips/<int:asset_id>/run/', bot_api.run_unattached_ip_delete_plan, name='lifecycle-plan-unattached-ip-run'),
     path('tasks/notices/', cloud_api.notice_task_detail, name='notice-task-detail'),
     path('tasks/notices/switches/', cloud_api.update_notice_switches, name='notice-task-switches-update'),
+    path('tasks/notices/history/<int:log_id>/delete/', cloud_api.delete_notice_history, name='notice-history-delete'),
     path('tasks/notices/text/', cloud_api.update_notice_plan_text, name='notice-task-text-update'),
     path('tasks/auto-renew/', cloud_api.auto_renew_task_detail, name='auto-renew-task-detail'),
     path('tasks/auto-renew/run/', cloud_api.run_auto_renew_tasks, name='auto-renew-task-run'),

@@ -1823,6 +1823,46 @@ def update_notice_switches(request):
     return _ok({'notice_switches': _notice_switch_items()})
 
 
+NOTICE_EVENT_SENT_FIELD_MAP = {
+    'renew_notice': 'renew_notice_sent_at',
+    'renew_notice_batch': 'renew_notice_sent_at',
+    'auto_renew_notice': 'auto_renew_notice_sent_at',
+    'delete_notice': 'delete_notice_sent_at',
+    'recycle_notice': 'recycle_notice_sent_at',
+}
+
+
+def _reset_notice_sent_fields_for_log(log) -> int:
+    field_name = NOTICE_EVENT_SENT_FIELD_MAP.get(log.event_type)
+    if not field_name:
+        return 0
+    order_ids = []
+    extra_ids = ((log.extra or {}).get('order_ids') or []) if getattr(log, 'extra', None) else []
+    for item in extra_ids:
+        try:
+            order_ids.append(int(item))
+        except (TypeError, ValueError):
+            continue
+    if log.order_id:
+        order_ids.append(log.order_id)
+    order_ids = sorted(set(order_ids))
+    if not order_ids:
+        return 0
+    return CloudServerOrder.objects.filter(id__in=order_ids).update(**{field_name: None})
+
+
+@csrf_exempt
+@dashboard_login_required
+@require_POST
+def delete_notice_history(request, log_id: int):
+    log = CloudUserNoticeLog.objects.filter(id=log_id).first()
+    if not log:
+        return _error('通知历史不存在', status=404)
+    reset_count = _reset_notice_sent_fields_for_log(log)
+    log.delete()
+    return _ok({'deleted': True, 'reset_count': reset_count})
+
+
 @csrf_exempt
 @dashboard_login_required
 @require_POST
@@ -3837,6 +3877,7 @@ __all__ = [
     'delete_cloud_order',
     'notice_task_detail',
     'update_notice_plan_text',
+    'delete_notice_history',
     'update_notice_switches',
     'auto_renew_task_detail',
     'run_auto_renew_order',
