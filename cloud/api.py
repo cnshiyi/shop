@@ -1172,6 +1172,9 @@ def _auto_renew_due_item_payload(order, *, queue_status: str = 'due_now', queue_
         'usernames': usernames,
         'primary_username': usernames[0] if usernames else '',
     }) if user else None
+    notice_type = 'auto_renew_notice'
+    latest_log = None
+    sent_at = getattr(order, 'auto_renew_notice_sent_at', None)
     notice = _notice_payload_for_order(order) or {}
     expires_at = notice.get('expires_at') or getattr(order, 'service_expires_at', None)
     auto_renew_at = expires_at - timezone.timedelta(days=1) if expires_at else None

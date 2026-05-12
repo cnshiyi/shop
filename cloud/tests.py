@@ -32,7 +32,7 @@ from cloud.provisioning import (
     _mark_success,
     provision_cloud_server,
 )
-from cloud.services import _cloud_asset_deleted_or_missing, apply_cloud_server_renewal, create_cloud_server_rebuild_order, create_cloud_server_renewal, create_cloud_server_renewal_by_public_query, create_cloud_server_renewal_for_user, create_cloud_server_upgrade_order, delay_cloud_server_expiry, ensure_cloud_asset_operation_order, get_cloud_server_by_ip, get_cloud_server_by_ip_for_user, get_proxy_asset_by_ip_for_admin, get_proxy_asset_by_ip_for_user, get_user_proxy_asset_detail, list_cloud_asset_renewal_plans, list_cloud_server_upgrade_plans, list_retained_ip_renewal_plans, list_retained_ip_renewal_plans_by_asset, list_user_cloud_servers, mark_cloud_server_ip_change_requested, mark_cloud_server_reinit_requested, pay_cloud_server_renewal_with_balance, prepare_cloud_asset_renewal_with_link, record_cloud_ip_log, replace_cloud_asset_order_by_admin, run_cloud_server_renewal_postcheck
+from cloud.services import _cloud_asset_deleted_or_missing, apply_cloud_server_renewal, create_cloud_server_rebuild_order, create_cloud_server_renewal, create_cloud_server_renewal_by_public_query, create_cloud_server_renewal_for_user, create_cloud_server_upgrade_order, delay_cloud_server_expiry, ensure_cloud_asset_operation_order, get_cloud_server_by_ip, get_cloud_server_by_ip_for_user, get_proxy_asset_by_ip_for_admin, get_proxy_asset_by_ip_for_user, get_user_proxy_asset_detail, list_all_auto_renew_cloud_servers, list_cloud_asset_renewal_plans, list_cloud_server_upgrade_plans, list_retained_ip_renewal_plans, list_retained_ip_renewal_plans_by_asset, list_user_cloud_servers, mark_cloud_server_ip_change_requested, mark_cloud_server_reinit_requested, pay_cloud_server_renewal_with_balance, prepare_cloud_asset_renewal_with_link, record_cloud_ip_log, replace_cloud_asset_order_by_admin, run_cloud_server_renewal_postcheck
 from cloud.sync_safety import get_missing_confirmation_threshold
 from cloud.api import _cloud_order_source_tags, auto_renew_task_detail, cloud_order_detail, cloud_orders_list, delete_cloud_asset, delete_server, run_auto_renew_order, run_auto_renew_tasks, sync_cloud_asset_status, sync_cloud_assets, tasks_overview, update_cloud_asset
 from core.cloud_accounts import cloud_account_label
@@ -6538,7 +6538,8 @@ class CloudServerServicesTestCase(TestCase):
         self.assertIsNone(resolve_aliyun_server(server.instance_id, server.previous_public_ip))
 
     def test_delete_server_marks_instance_deleted_but_retains_static_ip(self):
-        recycle_at = timezone.now() + timezone.timedelta(days=7)
+        now = timezone.now()
+        recycle_at = now + timezone.timedelta(days=7)
         order = CloudServerOrder.objects.create(
             order_no='DELETE-RETAIN-STATIC-1',
             user=self.user,
@@ -6603,7 +6604,10 @@ class CloudServerServicesTestCase(TestCase):
         self.assertEqual(order.public_ip, '20.20.20.32')
         self.assertEqual(order.previous_public_ip, '20.20.20.32')
         self.assertEqual(order.static_ip_name, 'StaticIp-delete-retain')
-        self.assertEqual(order.ip_recycle_at, recycle_at)
+        self.assertGreater(order.ip_recycle_at, recycle_at)
+        self.assertGreater(order.ip_recycle_at, now + timezone.timedelta(days=14))
+        self.assertEqual(asset.actual_expires_at, order.ip_recycle_at)
+        self.assertEqual(server.expires_at, order.ip_recycle_at)
         self.assertIn('固定IP名=StaticIp-delete-retain', order.provision_note)
         self.assertIn('未附加 IP 计划回收=', order.provision_note)
         self.assertEqual(order.instance_id, '')
@@ -6616,6 +6620,54 @@ class CloudServerServicesTestCase(TestCase):
         self.assertEqual(server.status, Server.STATUS_DELETED)
         self.assertEqual(server.provider_status, '固定IP保留中-实例已删除')
         self.assertFalse(any(getattr(item, 'asset_id', None) == asset.id for item in async_to_sync(list_user_cloud_servers)(self.user.id)))
+
+    def test_unattached_static_ip_is_not_auto_renewed(self):
+        expires_at = timezone.now() + timezone.timedelta(hours=8)
+        order = CloudServerOrder.objects.create(
+            order_no='UNATTACHED-NO-AUTO-RENEW-1',
+            user=self.user,
+            plan=self.plan,
+            provider=self.plan.provider,
+            region_code=self.plan.region_code,
+            region_name=self.plan.region_name,
+            plan_name=self.plan.plan_name,
+            quantity=1,
+            currency='USDT',
+            total_amount='19.00',
+            pay_amount='19.00',
+            status='completed',
+            public_ip='20.20.20.34',
+            previous_public_ip='20.20.20.34',
+            static_ip_name='StaticIp-unattached-no-auto-renew',
+            service_expires_at=expires_at,
+            auto_renew_enabled=True,
+        )
+        asset = CloudAsset.objects.create(
+            kind=CloudAsset.KIND_SERVER,
+            order=order,
+            user=self.user,
+            provider='aws_lightsail',
+            region_code=self.plan.region_code,
+            region_name=self.plan.region_name,
+            asset_name='StaticIp-unattached-no-auto-renew',
+            provider_resource_id='arn:aws:lightsail:ap-southeast-1:123456789012:StaticIp/StaticIp-unattached-no-auto-renew',
+            public_ip='20.20.20.34',
+            previous_public_ip='20.20.20.34',
+            actual_expires_at=expires_at,
+            status=CloudAsset.STATUS_RUNNING,
+            provider_status='未附加固定IP',
+            is_active=False,
+            note='未附加固定IP',
+        )
+
+        due = async_to_sync(_get_due_orders)()
+        auto_renew_ids = {item.id for item in due['auto_renew']}
+        auto_renew_notice_ids = {item.id for item in due['auto_renew_notice']}
+        auto_renew_items = async_to_sync(list_all_auto_renew_cloud_servers)()
+
+        self.assertNotIn(order.id, auto_renew_ids)
+        self.assertNotIn(order.id, auto_renew_notice_ids)
+        self.assertFalse(any(getattr(item, 'asset_id', None) == asset.id for item in auto_renew_items))
 
     def test_deleted_retained_static_ip_remains_query_renewable(self):
         recycle_at = timezone.now() + timezone.timedelta(days=7)

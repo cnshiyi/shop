@@ -1282,7 +1282,7 @@ def list_user_auto_renew_cloud_servers(user_id: int):
         .exclude(status__in=_INACTIVE_ASSET_STATUSES)
         .order_by('-sort_order', 'actual_expires_at', '-updated_at', '-id')
     )
-    return [_proxy_asset_view(asset) for asset in assets]
+    return [_proxy_asset_view(asset) for asset in assets if not _is_unattached_static_ip_asset(asset)]
 
 
 @sync_to_async
@@ -1298,7 +1298,7 @@ def list_all_auto_renew_cloud_servers():
         .exclude(status__in=_INACTIVE_ASSET_STATUSES)
         .order_by('-sort_order', 'user_id', 'actual_expires_at', '-updated_at', '-id')
     )
-    return [_proxy_asset_view(asset) for asset in assets]
+    return [_proxy_asset_view(asset) for asset in assets if not _is_unattached_static_ip_asset(asset)]
 
 
 @sync_to_async

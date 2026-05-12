@@ -157,6 +157,29 @@ _NOTICE_ASSET_EXCLUDED_STATUSES = {
 }
 
 
+def _notice_asset_is_unattached_static_ip(asset: CloudAsset | None) -> bool:
+    if not asset:
+        return False
+    provider_status = str(getattr(asset, 'provider_status', '') or '')
+    note = str(getattr(asset, 'note', '') or '')
+    provider_resource_id = str(getattr(asset, 'provider_resource_id', '') or '')
+    return bool(
+        getattr(asset, 'provider', None) == 'aws_lightsail'
+        and not str(getattr(asset, 'instance_id', '') or '').strip()
+        and (
+            '未附加固定IP' in provider_status
+            or '未附加IP' in provider_status
+            or '固定IP保留中' in provider_status
+            or '固定 IP 保留' in provider_status
+            or '未附加固定IP' in note
+            or '未附加IP' in note
+            or '固定IP保留中' in note
+            or '固定 IP 保留' in note
+            or 'StaticIp' in provider_resource_id
+        )
+    )
+
+
 def _notice_asset_queryset():
     return (
         CloudAsset.objects.select_related('order', 'order__user', 'cloud_account', 'order__cloud_account')
@@ -231,7 +254,8 @@ def _get_due_orders():
         if cloud_notice_type_enabled('renew_notice') and active_order and order.cloud_reminder_enabled and expires_at <= renew_notice_at and expires_at > now:
             if renew_notice_debug_repeat or not order.renew_notice_sent_at:
                 _append_due(due, 'renew_notice', order)
-        if cloud_notice_type_enabled('auto_renew_notice') and active_order and order.auto_renew_enabled and expires_at <= auto_renew_notice_at and expires_at > auto_renew_at and not order.auto_renew_notice_sent_at:
+        auto_renew_allowed = not _notice_asset_is_unattached_static_ip(asset)
+        if auto_renew_allowed and cloud_notice_type_enabled('auto_renew_notice') and active_order and order.auto_renew_enabled and expires_at <= auto_renew_notice_at and expires_at > auto_renew_at and not order.auto_renew_notice_sent_at:
             _append_due(due, 'auto_renew_notice', order)
         auto_renew_before_expiry = expires_at <= auto_renew_at and expires_at > now
         auto_renew_shutdown_fallback = (
@@ -239,7 +263,7 @@ def _get_due_orders():
             and suspend_at
             and suspend_at > now
         )
-        if active_order and order.auto_renew_enabled and (auto_renew_before_expiry or auto_renew_shutdown_fallback):
+        if auto_renew_allowed and active_order and order.auto_renew_enabled and (auto_renew_before_expiry or auto_renew_shutdown_fallback):
             _append_due(due, 'auto_renew', order)
         if cloud_notice_type_enabled('delete_notice') and shutdown_enabled and order.status in ['suspended', 'deleting'] and order.delete_reminder_enabled and delete_at and delete_at <= delete_notice_at and delete_at > now and not order.delete_notice_sent_at:
             _append_due(due, 'delete_notice', order)
