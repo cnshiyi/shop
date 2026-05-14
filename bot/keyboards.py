@@ -381,7 +381,7 @@ def cloud_server_change_ip_port_keyboard(order_id: int, region_code: str, region
     return kb.as_markup()
 
 
-def cloud_server_list(orders, page: int = 1, total_pages: int = 1, prefix: str = 'cloud:list'):
+def cloud_server_list(orders, page: int = 1, total_pages: int = 1, prefix: str = 'cloud:list', renew_all: bool = False):
     kb = InlineKeyboardBuilder()
     for order in orders:
         ip = order.public_ip or order.previous_public_ip
@@ -395,6 +395,8 @@ def cloud_server_list(orders, page: int = 1, total_pages: int = 1, prefix: str =
             callback_data = f'cloud:detail:{order.id}:{prefix}:{page}'
         kb.button(text=f'{label} | {expires}', callback_data=callback_data)
     kb.adjust(1)
+    if renew_all and orders:
+        kb.row(InlineKeyboardButton(text='🔄 全部续费', callback_data='cloud:renewall:confirm'))
     nav = []
     if page > 1:
         nav.append(InlineKeyboardButton(text='⬅️ 上一页', callback_data=f'{prefix}:{page - 1}'))
@@ -417,6 +419,7 @@ def cloud_server_list(orders, page: int = 1, total_pages: int = 1, prefix: str =
         page=page,
         total_pages=total_pages,
         prefix=prefix,
+        renew_all=renew_all,
         order_ids=[getattr(order, 'id', None) for order in orders],
     )
 

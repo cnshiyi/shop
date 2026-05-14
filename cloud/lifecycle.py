@@ -542,6 +542,12 @@ def _notice_plan_text(order, notice: dict | None = None, *, include_expiry: bool
             lines.append(f'价格: {_code_text("未设置")}，请联系客服确认')
     auto_renew_text = f'已开启，预计 {_code_text(_format_notice_dt(auto_renew_at))} 自动续费' if auto_renew_enabled else '未开启'
     lines.append(f'自动续费状态: {auto_renew_text}')
+    suspend_at = notice.get('suspend_at') or getattr(order, 'suspend_at', None)
+    delete_at = notice.get('delete_at') or getattr(order, 'delete_at', None)
+    if suspend_at:
+        lines.append(f'关机计划: {_code_text(_format_notice_dt(suspend_at))}（后台执行时间 {_config_time_text("cloud_suspend_time", "15:00")}）')
+    if delete_at:
+        lines.append(f'删除计划: {_code_text(_format_notice_dt(delete_at))}（后台执行时间 {_config_time_text("cloud_delete_time", "15:00")}）')
     return '\n'.join(lines)
 
 
@@ -584,13 +590,60 @@ def _order_telegram_group_id(order) -> int | None:
     return asset.telegram_group_id if asset else None
 
 
+def _admin_notice_user_ids() -> set[int]:
+    result = set()
+    for key in ('bot_admin_chat_id', 'bot_notice_copy_chat_ids'):
+        for target in _parse_notify_targets(get_runtime_config(key, '')):
+            if isinstance(target, int) and target > 0:
+                result.add(target)
+    return result
+
+
+def _telegram_user_is_admin_notice_target(user) -> bool:
+    return bool(user and getattr(user, 'tg_user_id', None) in _admin_notice_user_ids())
+
+
+def _order_telegram_group_chat_id(order) -> int | None:
+    asset = (
+        CloudAsset.objects
+        .select_related('telegram_group')
+        .filter(order_id=getattr(order, 'id', None), telegram_group_id__isnull=False)
+        .order_by('-updated_at', '-id')
+        .first()
+    )
+    group = getattr(asset, 'telegram_group', None)
+    if not group or not getattr(group, 'enabled', True):
+        return None
+    return getattr(group, 'chat_id', None)
+
+
+def _group_orders_by_notice_target(orders):
+    grouped = defaultdict(list)
+    for order in orders:
+        user_id = getattr(order, 'user_id', None)
+        if not user_id:
+            continue
+        group_chat_id = _order_telegram_group_chat_id(order)
+        key = ('group', group_chat_id, user_id) if group_chat_id else ('user', user_id, user_id)
+        grouped[key].append(order)
+    return list(grouped.items())
+
+
 def _auto_renew_candidate_users(order) -> list[TelegramUser]:
     candidates = []
     seen = set()
+    admin_tg_user_ids = _admin_notice_user_ids()
+
+    def add_candidate(user) -> None:
+        if not user or user.id in seen:
+            return
+        seen.add(user.id)
+        if getattr(user, 'tg_user_id', None) in admin_tg_user_ids:
+            return
+        candidates.append(user)
+
     primary_user = getattr(order, 'user', None) or TelegramUser.objects.filter(id=getattr(order, 'user_id', None)).first()
-    if primary_user:
-        candidates.append(primary_user)
-        seen.add(primary_user.id)
+    add_candidate(primary_user)
     group_id = _order_telegram_group_id(order)
     if group_id:
         group_users = (
@@ -600,10 +653,7 @@ def _auto_renew_candidate_users(order) -> list[TelegramUser]:
             .order_by('-balance', 'id')
         )
         for user in group_users:
-            if user.id in seen:
-                continue
-            candidates.append(user)
-            seen.add(user.id)
+            add_candidate(user)
     return candidates
 
 
@@ -813,10 +863,10 @@ def _auto_renew_notice_batch_payload(order_ids: list[int]) -> dict:
     return {'text': '\n'.join(lines), 'order_ids': kept_order_ids, 'first_order_id': kept_order_ids[0], 'count': len(kept_order_ids)}
 
 
-async def _send_order_notice_batch(*, event: str, field_name: str, notify, user_id: int, orders: list[CloudServerOrder], payload: dict, reply_markup=None) -> bool:
+async def _send_order_notice_batch(*, event: str, field_name: str, notify, user_id: int, orders: list[CloudServerOrder], payload: dict, reply_markup=None, notify_target=None, target_chat_id: int | None = None) -> bool:
     if not payload.get('text') or not payload.get('order_ids'):
         return False
-    if not notify or not await _user_can_receive_cloud_notice(user_id):
+    if not await _user_can_receive_cloud_notice(user_id):
         return False
     first_order = orders[0]
     count = int(payload.get('count') or len(payload.get('order_ids') or []))
@@ -824,8 +874,29 @@ async def _send_order_notice_batch(*, event: str, field_name: str, notify, user_
     manual_text = await sync_to_async(_get_notice_text_override)(event, user_id, order_ids)
     text = manual_text or payload['text']
     batch_id = _notice_batch_id(event, *order_ids)
-    notice_ip = f'{count} 个IP' if count > 1 else _order_notice_ip(first_order)
+    notice_ip = f'{count} 个IP' if count > 1 else await sync_to_async(_order_notice_ip)(first_order)
     _log_cloud_notice(event, first_order, {'ip': notice_ip}, text, 'batch' if count > 1 else 'single')
+    base_extra = {'order_ids': order_ids, 'manual_override': bool(manual_text)}
+    if target_chat_id:
+        group_sent = await _send_logged_cloud_notice(
+            event,
+            notify_target,
+            user_id,
+            text,
+            reply_markup,
+            order=first_order,
+            notice={'ip': notice_ip},
+            batch_id=batch_id,
+            is_batch=count > 1,
+            target_chat_id=target_chat_id,
+            extra={**base_extra, 'notice_target': 'telegram_group'},
+        )
+        if group_sent:
+            await _mark_many_notice_sent(order_ids, field_name)
+            return True
+        logger.warning('CLOUD_NOTICE_GROUP_FALLBACK_PRIVATE event=%s user_id=%s target_chat_id=%s order_ids=%s', event, user_id, target_chat_id, order_ids)
+    if not notify:
+        return False
     sent = await _send_logged_cloud_notice(
         event,
         notify,
@@ -836,7 +907,7 @@ async def _send_order_notice_batch(*, event: str, field_name: str, notify, user_
         notice={'ip': notice_ip},
         batch_id=batch_id,
         is_batch=count > 1,
-        extra={'order_ids': order_ids, 'manual_override': bool(manual_text)},
+        extra={**base_extra, 'notice_target': 'private'},
     )
     if sent:
         await _mark_many_notice_sent(order_ids, field_name)
@@ -1115,16 +1186,30 @@ async def _send_cloud_notice_result(notify, user_id: int, text: str, reply_marku
     return {'ok': result is True, 'attempts': []}
 
 
+async def _send_cloud_target_notice_result(notify_target, chat_id: int, text: str, reply_markup=None) -> dict:
+    if not notify_target:
+        return {'ok': False, 'attempts': [{'channel': 'telegram_group', 'target_chat_id': chat_id, 'ok': False, 'error': '群组通知发送器未初始化'}]}
+    try:
+        result = await notify_target(chat_id, text, reply_markup)
+        ok = result is not False
+        return {'ok': ok, 'attempts': [{'channel': 'telegram_group', 'target_chat_id': chat_id, 'ok': ok, 'error': '' if ok else '群组通知返回失败'}]}
+    except Exception as exc:
+        return {'ok': False, 'attempts': [{'channel': 'telegram_group', 'target_chat_id': chat_id, 'ok': False, 'error': str(exc)}]}
+
+
 async def _send_cloud_notice(notify, user_id: int, text: str, reply_markup=None) -> bool:
     return bool((await _send_cloud_notice_result(notify, user_id, text, reply_markup)).get('ok'))
 
 
-async def _send_logged_cloud_notice(event: str, notify, user_id: int, text: str, reply_markup=None, *, order=None, notice: dict | None = None, batch_id: str = '', is_batch: bool = False, extra: dict | None = None) -> bool:
+async def _send_logged_cloud_notice(event: str, notify, user_id: int, text: str, reply_markup=None, *, order=None, notice: dict | None = None, batch_id: str = '', is_batch: bool = False, target_chat_id: int | None = None, extra: dict | None = None) -> bool:
     order_id = getattr(order, 'id', None)
     if await _cloud_notice_already_delivered(event, user_id=user_id, order_id=order_id, batch_id=batch_id):
         logger.info('CLOUD_NOTICE_SKIP_DUPLICATE event=%s user_id=%s order_id=%s batch_id=%s', event, user_id, order_id, batch_id)
         return False
-    send_result = await _send_cloud_notice_result(notify, user_id, text, reply_markup)
+    if target_chat_id:
+        send_result = await _send_cloud_target_notice_result(notify, target_chat_id, text, reply_markup)
+    else:
+        send_result = await _send_cloud_notice_result(notify, user_id, text, reply_markup)
     delivered = bool(send_result.get('ok'))
     log_extra = {**(extra or {}), 'send_attempts': send_result.get('attempts') or []}
     await _record_cloud_user_notice_log(
@@ -1134,6 +1219,7 @@ async def _send_logged_cloud_notice(event: str, notify, user_id: int, text: str,
         order_no=getattr(order, 'order_no', None),
         ip=(notice or {}).get('ip') or getattr(order, 'public_ip', None) or getattr(order, 'previous_public_ip', None),
         batch_id=batch_id,
+        target_chat_id=target_chat_id,
         delivered=delivered,
         text=text,
         is_batch=is_batch,
@@ -1291,12 +1377,19 @@ def _parse_time_point(raw: str, fallback: str = '15:00') -> tuple[int, int]:
         return int(hour_text), int(minute_text)
 
 
+def _config_time(key: str, default: str = '15:00') -> tuple[int, int]:
+    raw = str(get_runtime_config(key, default) or default).strip()
+    if '-' in raw:
+        raw = raw.split('-', 1)[0]
+    return _parse_time_point(raw, default)
+
+
 def _config_time_window(key: str, default: str = '15:00') -> tuple[tuple[int, int], tuple[int, int] | None]:
     raw = str(get_runtime_config(key, default) or default).strip()
     if '-' in raw:
         start_raw, end_raw = raw.split('-', 1)
         return _parse_time_point(start_raw, default), _parse_time_point(end_raw, default)
-    return _parse_time_point(raw, default), None
+    return _config_time(key, default), None
 
 
 def _is_cloud_action_time(config_key: str, default_time: str, now=None, window_minutes: int = 10) -> bool:
@@ -1304,7 +1397,8 @@ def _is_cloud_action_time(config_key: str, default_time: str, now=None, window_m
     (start_hour, start_minute), end_point = _config_time_window(config_key, default_time)
     start_at = local_now.replace(hour=start_hour, minute=start_minute, second=0, microsecond=0)
     if end_point is None:
-        return local_now >= start_at
+        end_at = start_at + timezone.timedelta(minutes=max(1, int(window_minutes or 10)))
+        return start_at <= local_now <= end_at
     end_hour, end_minute = end_point
     end_at = local_now.replace(hour=end_hour, minute=end_minute, second=0, microsecond=0)
     if end_at <= start_at:
@@ -1523,13 +1617,70 @@ def _get_unattached_static_ip_delete_due():
     )
 
 
+def _aws_instance_name_by_ip(client, public_ip: str) -> str:
+    public_ip = str(public_ip or '').strip()
+    if not public_ip:
+        return ''
+    token = None
+    while True:
+        kwargs = {'pageToken': token} if token else {}
+        response = client.get_instances(**kwargs)
+        for item in response.get('instances') or []:
+            if str(item.get('publicIpAddress') or '').strip() == public_ip:
+                return str(item.get('name') or '').strip()
+        token = response.get('nextPageToken')
+        if not token:
+            return ''
+
+
+def _aws_instance_name_for_order(order: CloudServerOrder, client=None) -> str:
+    public_ip = str(order.public_ip or order.previous_public_ip or '').strip()
+    if public_ip:
+        resolved = _aws_instance_name_by_ip(client or _aws_client(order.region_code, getattr(order, 'cloud_account', None)), public_ip)
+        if resolved:
+            return resolved
+    return str(order.server_name or '').strip()
+
+
+def _aws_instance_name_for_asset(asset: CloudAsset, client=None) -> str:
+    public_ip = str(asset.public_ip or asset.previous_public_ip or '').strip()
+    if public_ip:
+        resolved = _aws_instance_name_by_ip(client or _aws_client(asset.region_code, getattr(asset, 'cloud_account', None)), public_ip)
+        if resolved:
+            return resolved
+    return str(asset.asset_name or '').strip()
+
+
+def _aws_static_ip_name_for_asset(asset: CloudAsset, client=None) -> str:
+    public_ip = str(asset.public_ip or asset.previous_public_ip or '').strip()
+    client = client or _aws_client(asset.region_code, getattr(asset, 'cloud_account', None))
+    if public_ip:
+        token = None
+        while True:
+            kwargs = {'pageToken': token} if token else {}
+            response = client.get_static_ips(**kwargs)
+            for item in response.get('staticIps') or []:
+                if str(item.get('ipAddress') or '').strip() == public_ip:
+                    return str(item.get('name') or '').strip()
+            token = response.get('nextPageToken')
+            if not token:
+                break
+    release_name = str(asset.asset_name or '').strip()
+    if not release_name:
+        release_name = str(asset.provider_resource_id or '').rsplit('/', 1)[-1].strip()
+    return release_name
+
+
 def _stop_instance_sync(order: CloudServerOrder) -> tuple[bool, str]:
-    if order.provider != 'aws_lightsail' or not order.server_name:
+    if order.provider != 'aws_lightsail':
         return False, '非 AWS 资源，暂未执行真实关机。'
     try:
         client = _aws_client(order.region_code, getattr(order, 'cloud_account', None))
-        client.stop_instance(instanceName=order.server_name, force=True)
-        return True, 'AWS 实例已执行关机。'
+        instance_name = _aws_instance_name_for_order(order, client)
+        if not instance_name:
+            return False, 'AWS 实例关机失败：按 IP 未找到实例，且缺少实例名。'
+        client.stop_instance(instanceName=instance_name, force=True)
+        return True, f'AWS 实例已执行关机：{instance_name}。'
     except Exception as exc:
         return False, f'AWS 实例关机失败: {exc}'
 
@@ -1557,15 +1708,20 @@ def _can_execute_suspend(order_id: int) -> tuple[bool, str, CloudServerOrder | N
 
 
 def _delete_instance_sync(order: CloudServerOrder) -> tuple[bool, str]:
-    if order.provider != 'aws_lightsail' or not order.server_name:
+    if order.provider != 'aws_lightsail':
         return False, '非 AWS 资源，暂未执行真实删机。'
+    instance_name = str(order.server_name or '').strip()
     try:
         client = _aws_client(order.region_code, getattr(order, 'cloud_account', None))
-        client.delete_instance(instanceName=order.server_name)
-        return True, 'AWS 实例已执行删除，固定 IP 继续保留。'
+        if not instance_name:
+            instance_name = _aws_instance_name_for_order(order, client)
+        if not instance_name:
+            return False, 'AWS 实例删除失败：按 IP 未找到实例，且缺少实例名。'
+        client.delete_instance(instanceName=instance_name)
+        return True, f'AWS 实例已执行删除，固定 IP 继续保留：{instance_name}。'
     except Exception as exc:
         if _is_aws_not_found_error(exc):
-            return True, f'AWS 实例云端已不存在，按已删除处理，固定 IP 继续保留：{order.server_name}'
+            return True, f'AWS 实例云端已不存在，按已删除处理，固定 IP 继续保留：{instance_name or order.server_name}'
         return False, f'AWS 实例删除失败: {exc}'
 
 
@@ -1591,15 +1747,20 @@ async def _delete_replaced_server(order: CloudServerOrder) -> tuple[bool, str]:
 
 
 def _delete_orphan_asset_instance_sync(asset: CloudAsset) -> tuple[bool, str]:
-    if asset.provider != 'aws_lightsail' or not asset.asset_name:
-        return False, '无订单资产到期，非 AWS 或缺少实例名，已执行本地删除标记。'
+    if asset.provider != 'aws_lightsail':
+        return False, '无订单资产到期，非 AWS，已执行本地删除标记。'
+    instance_name = str(asset.asset_name or '').strip()
     try:
         client = _aws_client(asset.region_code, getattr(asset, 'cloud_account', None))
-        client.delete_instance(instanceName=asset.asset_name)
-        return True, '无订单 AWS 资产到期，已执行真实删机。'
+        if not instance_name:
+            instance_name = _aws_instance_name_for_asset(asset, client)
+        if not instance_name:
+            return False, '无订单 AWS 资产到期，但按 IP 未找到实例，且缺少实例名。'
+        client.delete_instance(instanceName=instance_name)
+        return True, f'无订单 AWS 资产到期，已执行真实删机：{instance_name}。'
     except Exception as exc:
         if _is_aws_not_found_error(exc):
-            return True, f'无订单 AWS 资产云端已不存在，按已删除处理：{asset.asset_name}'
+            return True, f'无订单 AWS 资产云端已不存在，按已删除处理：{instance_name or asset.asset_name}'
         return False, f'无订单 AWS 资产到期，真实删机失败: {exc}'
 
 
@@ -1640,18 +1801,18 @@ async def _release_order_static_ip(order: CloudServerOrder) -> tuple[bool, str]:
 def _release_unattached_static_ip_sync(asset: CloudAsset) -> tuple[bool, str]:
     if asset.provider != 'aws_lightsail':
         return False, '未附加固定IP到期，非 AWS 资源，暂未执行真实释放。'
-    release_name = str(asset.asset_name or '').strip()
-    if not release_name:
-        release_name = str(asset.provider_resource_id or '').rsplit('/', 1)[-1].strip()
-    if not release_name:
-        return False, '未附加固定IP到期，但缺少固定 IP 名称，无法执行真实释放。'
+    release_name = str(getattr(asset, 'static_ip_name', '') or '').strip() or str(getattr(asset, 'asset_name', '') or '').strip()
     try:
         client = _aws_client(asset.region_code, getattr(asset, 'cloud_account', None))
+        if not release_name:
+            release_name = _aws_static_ip_name_for_asset(asset, client)
+        if not release_name:
+            return False, '未附加固定IP到期，但按 IP 未找到固定 IP 名称，无法执行真实释放。'
         client.release_static_ip(staticIpName=release_name)
         return True, f'未附加固定IP到期，AWS 固定 IP 已真实释放：{release_name}'
     except Exception as exc:
         if _is_aws_not_found_error(exc):
-            return True, f'未附加固定IP到期，AWS 固定 IP 云端已不存在，按已释放处理：{release_name}'
+            return True, f'未附加固定IP到期，AWS 固定 IP 云端已不存在，按已释放处理：{release_name or asset.asset_name}'
         return False, f'未附加固定IP到期，AWS 固定 IP 真实释放失败: {exc}'
 
 
@@ -2219,30 +2380,34 @@ async def lifecycle_tick(notify=None, notify_target=None, defer_destructive_seco
         migration_due_orders = []
         orphan_asset_delete_due = []
 
-    for user_id, orders in _group_orders_by_user(due['renew_notice']).items():
+    for (target_kind, target_chat_id, user_id), orders in await sync_to_async(_group_orders_by_notice_target)(due['renew_notice']):
         payload = await _renew_notice_batch_payload([order.id for order in orders])
         await _send_order_notice_batch(
             event='renew_notice_batch',
             field_name='renew_notice_sent_at',
             notify=notify,
+            notify_target=notify_target,
+            target_chat_id=target_chat_id if target_kind == 'group' else None,
             user_id=user_id,
             orders=orders,
             payload=payload,
             reply_markup=cloud_expiry_actions(payload['first_order_id']) if payload.get('count') == 1 else None,
         )
 
-    for user_id, orders in _group_orders_by_user(due['auto_renew_notice']).items():
+    for (target_kind, target_chat_id, user_id), orders in await sync_to_async(_group_orders_by_notice_target)(due['auto_renew_notice']):
         payload = await _auto_renew_notice_batch_payload([order.id for order in orders])
         await _send_order_notice_batch(
             event='auto_renew_notice',
             field_name='auto_renew_notice_sent_at',
             notify=notify,
+            notify_target=notify_target,
+            target_chat_id=target_chat_id if target_kind == 'group' else None,
             user_id=user_id,
             orders=orders,
             payload=payload,
         )
 
-    for user_id, orders in _group_orders_by_user(due['delete_notice']).items():
+    for (target_kind, target_chat_id, user_id), orders in await sync_to_async(_group_orders_by_notice_target)(due['delete_notice']):
         payload = await _lifecycle_notice_batch_payload(
             '⚠️ 云服务器删机提醒',
             [order.id for order in orders],
@@ -2252,12 +2417,14 @@ async def lifecycle_tick(notify=None, notify_target=None, defer_destructive_seco
             event='delete_notice',
             field_name='delete_notice_sent_at',
             notify=notify,
+            notify_target=notify_target,
+            target_chat_id=target_chat_id if target_kind == 'group' else None,
             user_id=user_id,
             orders=orders,
             payload=payload,
         )
 
-    for user_id, orders in _group_orders_by_user(due['recycle_notice']).items():
+    for (target_kind, target_chat_id, user_id), orders in await sync_to_async(_group_orders_by_notice_target)(due['recycle_notice']):
         payload = await _lifecycle_notice_batch_payload(
             '♻️ 固定 IP 回收提醒',
             [order.id for order in orders],
@@ -2267,6 +2434,8 @@ async def lifecycle_tick(notify=None, notify_target=None, defer_destructive_seco
             event='recycle_notice',
             field_name='recycle_notice_sent_at',
             notify=notify,
+            notify_target=notify_target,
+            target_chat_id=target_chat_id if target_kind == 'group' else None,
             user_id=user_id,
             orders=orders,
             payload=payload,

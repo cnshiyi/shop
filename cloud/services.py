@@ -54,8 +54,24 @@ def _order_primary_asset(order: CloudServerOrder | None):
         match |= Q(provider_resource_id=provider_resource_id)
     if server_name:
         match |= Q(asset_name=server_name)
-    if match:
-        item = queryset.filter(match).order_by('-updated_at', '-id').first()
+    ip_match = Q()
+    if public_ip:
+        ip_match |= Q(public_ip=public_ip) | Q(previous_public_ip=public_ip)
+    if previous_public_ip:
+        ip_match |= Q(public_ip=previous_public_ip) | Q(previous_public_ip=previous_public_ip)
+    if ip_match:
+        item = queryset.filter(ip_match).order_by('-updated_at', '-id').first()
+        if item:
+            return item
+    fallback_match = Q()
+    if instance_id:
+        fallback_match |= Q(instance_id=instance_id)
+    if provider_resource_id:
+        fallback_match |= Q(provider_resource_id=provider_resource_id)
+    if server_name:
+        fallback_match |= Q(asset_name=server_name)
+    if fallback_match:
+        item = queryset.filter(fallback_match).order_by('-updated_at', '-id').first()
         if item:
             return item
     return queryset.order_by('-updated_at', '-id').first()
@@ -81,8 +97,24 @@ def _order_primary_server(order: CloudServerOrder | None):
         match |= Q(provider_resource_id=provider_resource_id)
     if server_name:
         match |= Q(server_name=server_name)
-    if match:
-        item = queryset.filter(match).order_by('-updated_at', '-id').first()
+    ip_match = Q()
+    if public_ip:
+        ip_match |= Q(public_ip=public_ip) | Q(previous_public_ip=public_ip)
+    if previous_public_ip:
+        ip_match |= Q(public_ip=previous_public_ip) | Q(previous_public_ip=previous_public_ip)
+    if ip_match:
+        item = queryset.filter(ip_match).order_by('-updated_at', '-id').first()
+        if item:
+            return item
+    fallback_match = Q()
+    if instance_id:
+        fallback_match |= Q(instance_id=instance_id)
+    if provider_resource_id:
+        fallback_match |= Q(provider_resource_id=provider_resource_id)
+    if server_name:
+        fallback_match |= Q(server_name=server_name)
+    if fallback_match:
+        item = queryset.filter(fallback_match).order_by('-updated_at', '-id').first()
         if item:
             return item
     return queryset.order_by('-updated_at', '-id').first()
@@ -1251,18 +1283,42 @@ def _user_asset_visibility_filter(user_id: int):
     return visibility
 
 
-@sync_to_async
-def list_user_cloud_servers(user_id: int):
+def _cloud_server_asset_queryset():
     ip_filter = Q(public_ip__isnull=False) & ~Q(public_ip='')
     active_order_filter = Q(order__isnull=True) | ~Q(order__status__in=_INACTIVE_ORDER_STATUSES)
-    assets = (
-        CloudAsset.objects.select_related('order')
+    return (
+        CloudAsset.objects.select_related('order', 'user', 'telegram_group')
         .filter(kind=CloudAsset.KIND_SERVER)
-        .filter(_user_asset_visibility_filter(user_id))
         .filter(ip_filter)
         .filter(active_order_filter)
         .filter(_active_cloud_account_asset_filter())
         .exclude(status__in=_INACTIVE_ASSET_STATUSES)
+    )
+
+
+def _group_filter_for_chat_id(chat_id: int):
+    from bot.models import TelegramGroupFilter
+    return TelegramGroupFilter.objects.filter(chat_id=chat_id, enabled=True).first()
+
+
+@sync_to_async
+def list_user_cloud_servers(user_id: int):
+    assets = (
+        _cloud_server_asset_queryset()
+        .filter(_user_asset_visibility_filter(user_id))
+        .order_by('-sort_order', 'actual_expires_at', '-updated_at', '-id')
+    )
+    return [_proxy_asset_view(asset) for asset in assets]
+
+
+@sync_to_async
+def list_group_cloud_servers(chat_id: int):
+    group = _group_filter_for_chat_id(chat_id)
+    if not group:
+        return []
+    assets = (
+        _cloud_server_asset_queryset()
+        .filter(telegram_group=group)
         .order_by('-sort_order', 'actual_expires_at', '-updated_at', '-id')
     )
     return [_proxy_asset_view(asset) for asset in assets]
@@ -1270,16 +1326,22 @@ def list_user_cloud_servers(user_id: int):
 
 @sync_to_async
 def list_user_auto_renew_cloud_servers(user_id: int):
-    ip_filter = Q(public_ip__isnull=False) & ~Q(public_ip='')
-    active_order_filter = Q(order__isnull=True) | ~Q(order__status__in=_INACTIVE_ORDER_STATUSES)
     assets = (
-        CloudAsset.objects.select_related('order', 'user')
-        .filter(kind=CloudAsset.KIND_SERVER)
+        _cloud_server_asset_queryset()
         .filter(_user_asset_visibility_filter(user_id))
-        .filter(ip_filter)
-        .filter(active_order_filter)
-        .filter(_active_cloud_account_asset_filter())
-        .exclude(status__in=_INACTIVE_ASSET_STATUSES)
+        .order_by('-sort_order', 'actual_expires_at', '-updated_at', '-id')
+    )
+    return [_proxy_asset_view(asset) for asset in assets if not _is_unattached_static_ip_asset(asset)]
+
+
+@sync_to_async
+def list_group_auto_renew_cloud_servers(chat_id: int):
+    group = _group_filter_for_chat_id(chat_id)
+    if not group:
+        return []
+    assets = (
+        _cloud_server_asset_queryset()
+        .filter(telegram_group=group)
         .order_by('-sort_order', 'actual_expires_at', '-updated_at', '-id')
     )
     return [_proxy_asset_view(asset) for asset in assets if not _is_unattached_static_ip_asset(asset)]
@@ -1320,6 +1382,17 @@ def get_user_proxy_asset_detail(item_id: int, user_id: int, kind: str):
         server = Server.objects.filter(id=item_id, user_id=user_id).filter(active_order_filter).exclude(status__in=_INACTIVE_ASSET_STATUSES).first()
         return _proxy_server_view(server) if server else None
     asset = CloudAsset.objects.filter(id=item_id, user_id=user_id).filter(active_order_filter).exclude(status__in=_INACTIVE_ASSET_STATUSES).first()
+    return _proxy_asset_view(asset) if asset else None
+
+
+@sync_to_async
+def get_group_proxy_asset_detail(item_id: int, chat_id: int, kind: str):
+    if kind == 'server':
+        return None
+    group = _group_filter_for_chat_id(chat_id)
+    if not group:
+        return None
+    asset = _cloud_server_asset_queryset().filter(id=item_id, telegram_group=group).first()
     return _proxy_asset_view(asset) if asset else None
 
 
@@ -1828,12 +1901,18 @@ def _cloud_ip_log_chain_lookup(*, order_obj=None, asset_obj=None, server_obj=Non
         scoped_match |= Q(asset_name=asset_name)
     if instance_id:
         scoped_match |= Q(instance_id=instance_id)
-    if not scoped_match:
-        return None
     ip_match = Q()
     for chain_ip in chain_ips or []:
         ip_match |= Q(public_ip=chain_ip) | Q(previous_public_ip=chain_ip)
     if not ip_match:
+        return None
+    if order_obj:
+        lineage_ids = _replacement_lineage_ids(order_obj)
+        if lineage_ids:
+            existing = CloudIpLog.objects.filter(order_id__in=lineage_ids).filter(ip_match).order_by('-created_at', '-id').first()
+            if existing:
+                return existing
+    if not scoped_match:
         return None
     return CloudIpLog.objects.filter(scoped_match & ip_match).order_by('-created_at', '-id').first()
 
@@ -2102,11 +2181,23 @@ def _is_unattached_static_ip_asset(asset_obj=None, server_obj=None):
     target = asset_obj or server_obj
     if not target:
         return False
-    return (
-        not getattr(target, 'instance_id', None)
-        or '未附加固定IP' in str(getattr(target, 'provider_status', '') or '')
-        or '固定IP仍存在但未附加' in str(getattr(target, 'provider_status', '') or '')
-        or 'StaticIp' in str(getattr(target, 'provider_resource_id', '') or '')
+    provider_status = str(getattr(target, 'provider_status', '') or '')
+    note = str(getattr(target, 'note', '') or '')
+    provider_resource_id = str(getattr(target, 'provider_resource_id', '') or '')
+    return bool(
+        not str(getattr(target, 'instance_id', '') or '').strip()
+        and (
+            '未附加固定IP' in provider_status
+            or '未附加IP' in provider_status
+            or '固定IP保留中' in provider_status
+            or '固定 IP 保留' in provider_status
+            or '固定IP仍存在但未附加' in provider_status
+            or '未附加固定IP' in note
+            or '未附加IP' in note
+            or '固定IP保留中' in note
+            or '固定 IP 保留' in note
+            or 'StaticIp' in provider_resource_id
+        )
     )
 
 
@@ -3485,7 +3576,7 @@ def mark_cloud_server_ip_change_requested(order_id: int, user_id: int, region_co
 
 
 def _resolve_aws_static_ip_name_for_order(order: CloudServerOrder) -> str:
-    public_ip = str(order.public_ip or '').strip()
+    public_ip = str(order.public_ip or order.previous_public_ip or '').strip()
     if order.provider != 'aws_lightsail' or not public_ip:
         return ''
     account = getattr(order, 'cloud_account', None) or get_active_cloud_account('aws', order.region_code)
@@ -4186,6 +4277,7 @@ __all__ = [
     'get_proxy_asset_by_ip_for_admin',
     'get_proxy_asset_by_ip_for_user',
     'get_proxy_asset_detail_for_admin',
+    'get_group_proxy_asset_detail',
     'get_user_cloud_server',
     'get_user_proxy_asset_detail',
     'ensure_cloud_asset_operation_order',
@@ -4193,6 +4285,8 @@ __all__ = [
     'is_cloud_asset_renewal_order',
     'list_custom_regions',
     'list_all_auto_renew_cloud_servers',
+    'list_group_auto_renew_cloud_servers',
+    'list_group_cloud_servers',
     'list_region_plans',
     'list_user_auto_renew_cloud_servers',
     'list_user_cloud_servers',

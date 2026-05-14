@@ -63,12 +63,15 @@ from cloud.services import (
     get_proxy_asset_by_ip_for_admin,
     get_proxy_asset_by_ip_for_user,
     get_proxy_asset_detail_for_admin,
+    get_group_proxy_asset_detail,
     get_user_cloud_server,
     get_user_proxy_asset_detail,
     ensure_cloud_asset_operation_order,
     initialize_proxy_asset,
     is_cloud_asset_renewal_order,
     list_all_auto_renew_cloud_servers,
+    list_group_auto_renew_cloud_servers,
+    list_group_cloud_servers,
     list_custom_regions,
     list_region_plans,
     list_cloud_asset_renewal_plans,
@@ -3376,12 +3379,50 @@ def register_handlers(dp: Dispatcher):
             text='✍️ 已选择自定义端口。\n请发送 443 或 1025-65530 之间的端口号，发送后我会立即提交服务器创建任务。',
         )
 
+    def _is_group_chat_message(message) -> bool:
+        return int(getattr(getattr(message, 'chat', None), 'id', 0) or 0) < 0
+
+    async def _visible_cloud_servers_for_context(callback: CallbackQuery, user):
+        if _is_group_chat_message(callback.message):
+            return await list_group_cloud_servers(callback.message.chat.id), '本群代理'
+        return await list_user_cloud_servers(user.id), '我的代理'
+
+    async def _visible_auto_renew_servers_for_context(callback: CallbackQuery, user, is_admin: bool):
+        if _is_group_chat_message(callback.message):
+            return await list_group_auto_renew_cloud_servers(callback.message.chat.id), '本群代理'
+        if is_admin:
+            return await list_all_auto_renew_cloud_servers(), '全部代理（管理员）'
+        return await list_user_auto_renew_cloud_servers(user.id), '我的代理'
+
+    async def _bulk_renew_visible_order_ids(callback: CallbackQuery, user) -> tuple[list[int], str, bool]:
+        visible_servers, scope = await _visible_cloud_servers_for_context(callback, user)
+        group_context = _is_group_chat_message(callback.message)
+        return _bulk_renewable_order_ids(visible_servers, user_id=user.id, group_context=group_context), scope, group_context
+
+    def _bulk_renewable_order_ids(items, *, user_id: int, group_context: bool) -> list[int]:
+        order_ids = []
+        seen = set()
+        allowed_statuses = {'running', 'completed', 'expiring', 'suspended', 'renew_pending', 'paid', 'provisioning'}
+        for item in items:
+            order_id = int(getattr(item, 'order_id', None) or getattr(item, 'id', 0) or 0)
+            if not order_id or order_id in seen:
+                continue
+            if not group_context and getattr(item, 'order_user_id', None) not in {None, user_id}:
+                continue
+            if not str(getattr(item, 'public_ip', None) or getattr(item, 'previous_public_ip', None) or '').strip():
+                continue
+            if str(getattr(item, 'status', '') or '') not in allowed_statuses:
+                continue
+            order_ids.append(order_id)
+            seen.add(order_id)
+        return order_ids
+
     @dp.callback_query(F.data == 'cloud:list')
     async def cb_cloud_list(callback: CallbackQuery, state: FSMContext):
         await state.clear()
         await _safe_callback_answer(callback)
         user = await get_or_create_user(callback.from_user.id, callback.from_user.username, callback.from_user.first_name)
-        visible_servers = await list_user_cloud_servers(user.id)
+        visible_servers, scope = await _visible_cloud_servers_for_context(callback, user)
         page = 1
         per_page = 8
         total_visible = len(visible_servers)
@@ -3391,7 +3432,7 @@ def register_handlers(dp: Dispatcher):
             await callback.message.delete()
             await callback.message.answer(_bot_text('bot_query_cloud_empty', '🔎 查询中心\n\n暂无可查询的代理记录。'), reply_markup=main_menu())
         else:
-            await _safe_edit_text(callback.message, '🔎 代理列表\n\n请选择要查看的代理：', reply_markup=cloud_server_list(page_items, page, total_pages, 'cloud:list:page'))
+            await _safe_edit_text(callback.message, f'🔎 代理列表\n\n{scope}\n请选择要查看的代理：', reply_markup=cloud_server_list(page_items, page, total_pages, 'cloud:list:page', renew_all=True))
 
     @dp.callback_query(F.data.startswith('cloud:list:page:'))
     async def cb_cloud_list_page(callback: CallbackQuery, state: FSMContext):
@@ -3399,7 +3440,7 @@ def register_handlers(dp: Dispatcher):
         await _safe_callback_answer(callback)
         user = await get_or_create_user(callback.from_user.id, callback.from_user.username, callback.from_user.first_name)
         page = max(1, int(callback.data.split(':')[3]))
-        visible_servers = await list_user_cloud_servers(user.id)
+        visible_servers, scope = await _visible_cloud_servers_for_context(callback, user)
         per_page = 8
         total_visible = len(visible_servers)
         total_pages = max(1, math.ceil(total_visible / per_page))
@@ -3410,30 +3451,108 @@ def register_handlers(dp: Dispatcher):
             return
         await _safe_edit_text(
             callback.message,
-            '🔎 代理列表\n\n请选择要查看的代理：',
-            reply_markup=cloud_server_list(page_items, page, total_pages, 'cloud:list:page'),
+            f'🔎 代理列表\n\n{scope}\n请选择要查看的代理：',
+            reply_markup=cloud_server_list(page_items, page, total_pages, 'cloud:list:page', renew_all=True),
         )
+
+    @dp.callback_query(F.data == 'cloud:renewall:confirm')
+    async def cb_cloud_renew_all_confirm(callback: CallbackQuery):
+        await _safe_callback_answer(callback)
+        user = await get_or_create_user(callback.from_user.id, callback.from_user.username, callback.from_user.first_name)
+        order_ids, scope, _group_context = await _bulk_renew_visible_order_ids(callback, user)
+        if not order_ids:
+            await _safe_callback_answer(callback, '当前列表暂无可续费代理', show_alert=True)
+            return
+        await _safe_edit_text(
+            callback.message,
+            '🔄 全部续费确认\n\n'
+            f'{scope}\n'
+            f'可续费数量: {len(order_ids)} 台\n\n'
+            '确认后将使用你的 USDT 钱包余额逐台续费 31 天；若余额不足或某台需要单独补充资料，会跳过并在结果里说明。',
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text=f'✅ 确认续费 {len(order_ids)} 台', callback_data='cloud:renewall:pay')],
+                [InlineKeyboardButton(text='🔙 返回代理列表', callback_data='cloud:list')],
+            ]),
+        )
+
+    @dp.callback_query(F.data == 'cloud:renewall:pay')
+    async def cb_cloud_renew_all_pay(callback: CallbackQuery):
+        await _safe_callback_answer(callback, '正在批量续费')
+        user = await get_or_create_user(callback.from_user.id, callback.from_user.username, callback.from_user.first_name)
+        is_admin = await _is_admin_chat(callback.message)
+        order_ids, scope, group_context = await _bulk_renew_visible_order_ids(callback, user)
+        if not order_ids:
+            await _safe_edit_text(callback.message, f'🔄 全部续费\n\n{scope}\n暂无可续费代理。', reply_markup=cloud_query_menu())
+            return
+        await _safe_edit_text(callback.message, f'🔄 全部续费\n\n{scope}\n正在处理 {len(order_ids)} 台代理，请稍候……')
+        paid = []
+        skipped = []
+        failed = []
+        for order_id in order_ids:
+            retained_order, retained_plans, retained_err = await list_retained_ip_renewal_plans(order_id, user.id, admin=is_admin or group_context)
+            if retained_err:
+                failed.append(f'#{order_id}: {retained_err}')
+                continue
+            if retained_order and retained_plans:
+                skipped.append(f'#{order_id}: 未附加固定 IP 需单独选择套餐/补链接')
+                continue
+            try:
+                renewal = await create_cloud_server_renewal_by_public_query(order_id, 31) if (is_admin or group_context) else await create_cloud_server_renewal(order_id, user.id, 31)
+            except RenewalPriceMissingError as exc:
+                failed.append(f'#{order_id}: {exc}')
+                continue
+            if renewal is False:
+                failed.append(f'#{order_id}: 该服务器 IP 已删除，禁止续费')
+                continue
+            if not renewal:
+                failed.append(f'#{order_id}: 续费订单创建失败')
+                continue
+            paid_order, pay_err = await pay_cloud_server_renewal_with_balance(renewal.id, user.id, 'USDT', 31)
+            if pay_err:
+                failed.append(f'#{order_id}: {pay_err}')
+                continue
+            paid.append(paid_order)
+            if (getattr(paid_order, 'replacement_for_id', None) or is_cloud_asset_renewal_order(paid_order)) and paid_order.status in {'paid', 'provisioning', 'failed'}:
+                asyncio.create_task(_provision_cloud_server_and_notify(callback.bot, callback.from_user.id, paid_order.id, paid_order.mtproxy_port or 9528))
+            else:
+                asyncio.create_task(_cloud_renewal_postcheck_and_notify(callback.bot, callback.from_user.id, paid_order.id, getattr(paid_order, 'renew_balance_change', None)))
+        lines = ['🔄 全部续费结果', '', scope, f'成功: {len(paid)} 台', f'跳过: {len(skipped)} 台', f'失败: {len(failed)} 台']
+        if paid:
+            lines.append('')
+            lines.append('已续费:')
+            for order in paid[:10]:
+                lines.append(f'- {getattr(order, "public_ip", None) or getattr(order, "previous_public_ip", None) or getattr(order, "order_no", None)}')
+            if len(paid) > 10:
+                lines.append(f'- 另 {len(paid) - 10} 台')
+        if skipped:
+            lines.append('')
+            lines.append('需单独处理:')
+            lines.extend(f'- {item}' for item in skipped[:8])
+        if failed:
+            lines.append('')
+            lines.append('失败原因:')
+            lines.extend(f'- {_public_cloud_error_text(item)}' for item in failed[:8])
+        await _safe_edit_text(callback.message, '\n'.join(lines), reply_markup=cloud_query_menu())
 
     async def _render_cloud_auto_renew_list(callback: CallbackQuery, page: int = 1):
         user = await get_or_create_user(callback.from_user.id, callback.from_user.username, callback.from_user.first_name)
         is_admin = await _is_admin_chat(callback.message)
-        visible_servers = await list_all_auto_renew_cloud_servers() if is_admin else await list_user_auto_renew_cloud_servers(user.id)
+        visible_servers, scope = await _visible_auto_renew_servers_for_context(callback, user, is_admin)
         per_page = 8
         total_visible = len(visible_servers)
         total_pages = max(1, math.ceil(total_visible / per_page))
         page = min(max(1, page), total_pages)
         page_items = visible_servers[(page - 1) * per_page: page * per_page]
         if not page_items:
-            await _safe_edit_text(callback.message, '⚡ 自动续费列表\n\n暂无可设置自动续费的代理。', reply_markup=cloud_query_menu())
+            await _safe_edit_text(callback.message, f'⚡ 自动续费列表\n\n{scope}\n暂无可设置自动续费的代理。', reply_markup=cloud_query_menu())
             return
         enabled_count = sum(1 for item in visible_servers if getattr(item, 'auto_renew_enabled', False))
         title = '⚡ 自动续费列表'
-        scope = '我的代理'
         text = f'{title}\n\n{scope}\n已开启 {enabled_count}/{total_visible}。\n✅=已开启，❌=已关闭；点击每行可开启/关闭。'
         await _safe_edit_text(
             callback.message,
             text,
-            reply_markup=cloud_auto_renew_server_list(page_items, page, total_pages, is_admin=is_admin),
+            reply_markup=cloud_auto_renew_server_list(page_items, page, total_pages, is_admin=is_admin and not _is_group_chat_message(callback.message)),
         )
 
     @dp.callback_query(F.data == 'cloud:autorenewlist')
@@ -3580,7 +3699,10 @@ def register_handlers(dp: Dispatcher):
             prefix = ':'.join(parts[4:-1])
             page = parts[-1]
             back_callback = f'{prefix}:{page}'
-        item = await get_proxy_asset_detail_for_admin(item_id, item_kind) if await _is_admin_chat(callback.message) else await get_user_proxy_asset_detail(item_id, user.id, item_kind)
+        if _is_group_chat_message(callback.message):
+            item = await get_group_proxy_asset_detail(item_id, callback.message.chat.id, item_kind)
+        else:
+            item = await get_proxy_asset_detail_for_admin(item_id, item_kind) if await _is_admin_chat(callback.message) else await get_user_proxy_asset_detail(item_id, user.id, item_kind)
         if not item:
             logger.warning('CLOUD_ASSET_DETAIL_DENIED user_id=%s item_id=%s callback_data=%s', user.id, item_id, callback.data)
             await _safe_callback_answer(callback, '代理记录不存在', show_alert=True)

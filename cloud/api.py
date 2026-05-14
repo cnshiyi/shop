@@ -563,10 +563,11 @@ def update_cloud_asset(request, asset_id):
                 if server:
                     server.user = owner_target
 
+            group_lookup_provided = 'telegram_group_query' in payload or 'telegram_group_id' in payload
             group_lookup = payload.get('telegram_group_query')
             if group_lookup is None and 'telegram_group_id' in payload:
                 group_lookup = payload.get('telegram_group_id')
-            if group_lookup is not None:
+            if group_lookup_provided:
                 if group_lookup in (None, ''):
                     asset.telegram_group = None
                 else:
@@ -909,6 +910,45 @@ def _dedupe_cloud_asset_rows(assets):
     return [item[1] for item in best.values()]
 
 
+def _cloud_asset_page_user_key(asset):
+    user_id = getattr(asset, 'user_id', None)
+    if user_id:
+        return f'user:{user_id}'
+    tg_user_id = getattr(getattr(asset, 'user', None), 'tg_user_id', None)
+    if tg_user_id:
+        return f'tg:{tg_user_id}'
+    return f'unbound:{getattr(asset, "id", "")}'
+
+
+def _paginate_cloud_assets_keep_users(assets, page: int, page_size: int):
+    grouped_assets = []
+    group_index = {}
+    for asset in assets:
+        key = _cloud_asset_page_user_key(asset)
+        if key not in group_index:
+            group_index[key] = len(grouped_assets)
+            grouped_assets.append([])
+        grouped_assets[group_index[key]].append(asset)
+
+    pages = []
+    current_page = []
+    current_count = 0
+    for group in grouped_assets:
+        group_count = len(group)
+        if current_page and current_count + group_count > page_size:
+            pages.append(current_page)
+            current_page = []
+            current_count = 0
+        current_page.extend(group)
+        current_count += group_count
+    if current_page or not pages:
+        pages.append(current_page)
+
+    page_count = len(pages)
+    safe_page = min(max(page, 1), page_count)
+    return pages[safe_page - 1], page_count, safe_page
+
+
 @dashboard_login_required
 @require_GET
 def cloud_assets_list(request):
@@ -965,15 +1005,15 @@ def cloud_assets_list(request):
             page_size = min(max(page_size, 10), 200)
             deduped_assets = _dedupe_cloud_asset_rows(list(queryset))
             total = len(deduped_assets)
-            offset = (page - 1) * page_size
-            items = [_asset_payload(asset) for asset in deduped_assets[offset:offset + page_size]]
-            return _ok({'items': items, 'total': total, 'page': page, 'page_size': page_size})
+            page_assets, total_pages, page = _paginate_cloud_assets_keep_users(deduped_assets, page, page_size)
+            items = [_asset_payload(asset) for asset in page_assets]
+            return _ok({'items': items, 'total': total, 'page': page, 'page_size': page_size, 'total_pages': total_pages})
         items = [_asset_payload(asset) for asset in _dedupe_cloud_asset_rows(list(queryset))]
     except ProgrammingError:
         if grouped:
             return _ok({'groups': [], 'items': []})
         if paginated:
-            return _ok({'items': [], 'total': 0, 'page': 1, 'page_size': 50})
+            return _ok({'items': [], 'total': 0, 'page': 1, 'page_size': 50, 'total_pages': 1})
         return _ok([])
 
     if not grouped:

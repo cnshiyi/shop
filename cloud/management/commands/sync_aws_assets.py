@@ -46,6 +46,35 @@ def _resolve_order_for_ip(public_ip, account=None):
     return queryset.filter(Q(status__in=_ACTIVE_ORDER_STATUSES) | Q(ip_recycle_at__gt=timezone.now())).order_by('-created_at', '-id').first()
 
 
+def _resolve_order_for_instance_sync(instance_name, instance_arn, public_ip, account=None):
+    order_scope = CloudServerOrder.objects.filter(provider='aws_lightsail', status__in=_ACTIVE_ORDER_STATUSES)
+    traceable_order_scope = CloudServerOrder.objects.filter(provider='aws_lightsail', status__in=_TRACEABLE_ORDER_STATUSES)
+    if account:
+        label = cloud_account_label(account)
+        account_filter = Q(cloud_account=account) | Q(account_label=label)
+        order_scope = order_scope.filter(account_filter)
+        traceable_order_scope = traceable_order_scope.filter(account_filter)
+    if public_ip:
+        ip_q = Q(public_ip=public_ip) | Q(previous_public_ip=public_ip)
+        order = order_scope.filter(ip_q).order_by('-created_at', '-id').first()
+        if order:
+            return order
+        order = traceable_order_scope.filter(ip_q).order_by('-created_at', '-id').first()
+        if order:
+            return order
+    exact_order_q = Q()
+    if instance_name:
+        exact_order_q |= Q(instance_id=instance_name) | Q(server_name=instance_name)
+    if instance_arn:
+        exact_order_q |= Q(provider_resource_id=instance_arn)
+    if exact_order_q:
+        order = order_scope.filter(exact_order_q).order_by('-created_at', '-id').first()
+        if order:
+            return order
+        return traceable_order_scope.filter(exact_order_q).order_by('-created_at', '-id').first()
+    return None
+
+
 NORMAL_AWS_STATES = {'running', 'pending', 'starting'}
 
 
@@ -274,36 +303,36 @@ def _resolve_asset(instance_name, instance_arn, public_ip, order, account=None):
     if account:
         label = cloud_account_label(account)
         lookup &= (Q(cloud_account=account) | Q(account_label=label) | (Q(cloud_account__isnull=True) & (Q(account_label='') | Q(account_label__isnull=True))))
-    if order:
-        order_asset_q = Q()
-        if instance_name:
-            order_asset_q |= Q(instance_id=instance_name) | Q(asset_name=instance_name)
-        if instance_arn:
-            order_asset_q |= Q(provider_resource_id=instance_arn)
-        if public_ip:
-            order_asset_q |= Q(public_ip=public_ip) | Q(previous_public_ip=public_ip)
-        if order_asset_q:
-            order_asset = CloudAsset.objects.filter(kind=CloudAsset.KIND_SERVER, order=order).filter(order_asset_q).order_by(*_asset_resolve_ordering()).first()
-            if order_asset:
-                return order_asset
     base_queryset = CloudAsset.objects.filter(lookup).filter(Q(order__isnull=True) | ~Q(order__status__in=_SYNC_EXCLUDED_ORDER_STATUSES)).exclude(status__in=_SYNC_EXCLUDED_ASSET_STATUSES)
+    if public_ip:
+        ip_q = Q(public_ip=public_ip) | Q(previous_public_ip=public_ip)
+        if order:
+            order_ip_asset = CloudAsset.objects.filter(kind=CloudAsset.KIND_SERVER, order=order).filter(ip_q).order_by(*_asset_resolve_ordering()).first()
+            if order_ip_asset:
+                return order_ip_asset
+        public_ip_queryset = base_queryset.filter(ip_q)
+        if order:
+            public_ip_queryset = public_ip_queryset.filter(Q(order__isnull=True) | Q(order=order))
+        asset = public_ip_queryset.order_by(*_asset_resolve_ordering()).first()
+        if asset:
+            return asset
     direct_candidates = Q()
     if instance_name:
         direct_candidates |= Q(instance_id=instance_name) | Q(asset_name=instance_name)
     if instance_arn:
         direct_candidates |= Q(provider_resource_id=instance_arn)
+    if order and direct_candidates:
+        order_asset = CloudAsset.objects.filter(kind=CloudAsset.KIND_SERVER, order=order).filter(direct_candidates).order_by(*_asset_resolve_ordering()).first()
+        if order_asset:
+            return order_asset
     if direct_candidates:
         asset = base_queryset.filter(direct_candidates).order_by(*_asset_resolve_ordering()).first()
         if asset:
             return asset
-        deleted_asset = CloudAsset.objects.filter(lookup).filter(direct_candidates).filter(status__in=_SYNC_EXCLUDED_ASSET_STATUSES).order_by('-updated_at', '-id').first()
-        if deleted_asset:
-            return deleted_asset
-    if public_ip:
-        public_ip_queryset = base_queryset.filter(Q(public_ip=public_ip) | Q(previous_public_ip=public_ip))
-        if order:
-            public_ip_queryset = public_ip_queryset.filter(Q(order__isnull=True) | Q(order=order))
-        return public_ip_queryset.order_by(*_asset_resolve_ordering()).first()
+        if account:
+            deleted_asset = CloudAsset.objects.filter(lookup).filter(direct_candidates).filter(status__in=_SYNC_EXCLUDED_ASSET_STATUSES).order_by('-updated_at', '-id').first()
+            if deleted_asset:
+                return deleted_asset
     return None
 
 
@@ -375,36 +404,36 @@ def _resolve_server(instance_name, instance_arn, public_ip, order, account=None)
     if account:
         label = cloud_account_label(account)
         base &= (Q(account_label=label) | Q(account_label='') | Q(account_label__isnull=True))
-    if order:
-        order_server_q = Q()
-        if instance_name:
-            order_server_q |= Q(instance_id=instance_name) | Q(server_name=instance_name)
-        if instance_arn:
-            order_server_q |= Q(provider_resource_id=instance_arn)
-        if public_ip:
-            order_server_q |= Q(public_ip=public_ip) | Q(previous_public_ip=public_ip)
-        if order_server_q:
-            order_server = Server.objects.filter(order=order).filter(order_server_q).order_by(*_server_resolve_ordering()).first()
-            if order_server:
-                return order_server
     base_queryset = Server.objects.filter(base).filter(Q(order__isnull=True) | ~Q(order__status__in=_SYNC_EXCLUDED_ORDER_STATUSES)).exclude(status__in=_SYNC_EXCLUDED_SERVER_STATUSES)
+    if public_ip:
+        ip_q = Q(public_ip=public_ip) | Q(previous_public_ip=public_ip)
+        if order:
+            order_ip_server = Server.objects.filter(order=order).filter(ip_q).order_by(*_server_resolve_ordering()).first()
+            if order_ip_server:
+                return order_ip_server
+        public_ip_queryset = base_queryset.filter(ip_q)
+        if order:
+            public_ip_queryset = public_ip_queryset.filter(Q(order__isnull=True) | Q(order=order))
+        server = public_ip_queryset.order_by(*_server_resolve_ordering()).first()
+        if server:
+            return server
     direct_candidates = Q()
     if instance_name:
         direct_candidates |= Q(instance_id=instance_name) | Q(server_name=instance_name)
     if instance_arn:
         direct_candidates |= Q(provider_resource_id=instance_arn)
+    if order and direct_candidates:
+        order_server = Server.objects.filter(order=order).filter(direct_candidates).order_by(*_server_resolve_ordering()).first()
+        if order_server:
+            return order_server
     if direct_candidates:
         server = base_queryset.filter(direct_candidates).order_by(*_server_resolve_ordering()).first()
         if server:
             return server
-        deleted_server = Server.objects.filter(base).filter(direct_candidates).filter(status__in=_SYNC_EXCLUDED_SERVER_STATUSES).order_by('-updated_at', '-id').first()
-        if deleted_server:
-            return deleted_server
-    if public_ip:
-        public_ip_queryset = base_queryset.filter(Q(public_ip=public_ip) | Q(previous_public_ip=public_ip))
-        if order:
-            public_ip_queryset = public_ip_queryset.filter(Q(order__isnull=True) | Q(order=order))
-        return public_ip_queryset.order_by(*_server_resolve_ordering()).first()
+        if account:
+            deleted_server = Server.objects.filter(base).filter(direct_candidates).filter(status__in=_SYNC_EXCLUDED_SERVER_STATUSES).order_by('-updated_at', '-id').first()
+            if deleted_server:
+                return deleted_server
     return None
 
 
@@ -434,39 +463,32 @@ def _resolve_asset_for_static_ip(static_ip_name, static_ip_arn, public_ip, accou
     if account:
         lookup &= Q(cloud_account=account)
 
+    static_ip_ordering = [
+        Case(
+            When(status=CloudAsset.STATUS_UNKNOWN, then=Value(0)),
+            default=Value(1),
+            output_field=IntegerField(),
+        ),
+        '-updated_at',
+        '-id',
+    ]
+    if public_ip:
+        asset = (
+            CloudAsset.objects.filter(lookup & (Q(public_ip=public_ip) | Q(previous_public_ip=public_ip)))
+            .filter(Q(instance_id__isnull=True) | Q(instance_id='') | Q(provider_status='未附加固定IP') | Q(provider_resource_id__contains='StaticIp'))
+            .order_by(*static_ip_ordering)
+            .first()
+        )
+        if asset:
+            return asset
+
     exact_candidates = Q()
     if static_ip_arn:
         exact_candidates |= Q(provider_resource_id=static_ip_arn)
     if static_ip_name:
         exact_candidates |= Q(asset_name=static_ip_name, instance_id__isnull=True)
     if exact_candidates:
-        asset = CloudAsset.objects.filter(lookup & exact_candidates).order_by(
-            Case(
-                When(status=CloudAsset.STATUS_UNKNOWN, then=Value(0)),
-                default=Value(1),
-                output_field=IntegerField(),
-            ),
-            '-updated_at',
-            '-id',
-        ).first()
-        if asset:
-            return asset
-
-    if public_ip:
-        return (
-            CloudAsset.objects.filter(lookup & (Q(public_ip=public_ip) | Q(previous_public_ip=public_ip)))
-            .filter(Q(instance_id__isnull=True) | Q(instance_id='') | Q(provider_status='未附加固定IP') | Q(provider_resource_id__contains='StaticIp'))
-            .order_by(
-                Case(
-                    When(status=CloudAsset.STATUS_UNKNOWN, then=Value(0)),
-                    default=Value(1),
-                    output_field=IntegerField(),
-                ),
-                '-updated_at',
-                '-id',
-            )
-            .first()
-        )
+        return CloudAsset.objects.filter(lookup & exact_candidates).order_by(*static_ip_ordering).first()
     return None
 
 
@@ -563,9 +585,9 @@ def _mark_deleted_when_missing_in_aws(region, existing_instance_names, existing_
         )
         if instance_name and instance_name in existing_instance_names:
             continue
-        if public_ip and public_ip in existing_public_ips:
-            continue
         old_public_ip = public_ip or str(asset.previous_public_ip or '').strip()
+        if old_public_ip and old_public_ip in existing_public_ips:
+            continue
         pending_count, threshold = mark_missing_confirmation_pending(
             asset,
             old_public_ip=old_public_ip,
@@ -629,9 +651,9 @@ def _mark_deleted_when_missing_in_aws(region, existing_instance_names, existing_
         is_static_ip_record = not instance_name or server.provider_status == '未附加固定IP' or 'StaticIp' in str(server.provider_resource_id or '')
         if instance_name and instance_name in existing_instance_names:
             continue
-        if public_ip and public_ip in existing_public_ips:
-            continue
         old_public_ip = public_ip or str(server.previous_public_ip or '').strip()
+        if old_public_ip and old_public_ip in existing_public_ips:
+            continue
         pending_count, threshold = mark_missing_confirmation_pending(
             server,
             old_public_ip=old_public_ip,
@@ -836,18 +858,7 @@ class Command(BaseCommand):
                         normalized_status = _elevate_deleted_when_ip_missing(normalized_status, public_ip)
                         bundle_id = item.get('bundleId') or '-'
                         blueprint_id = item.get('blueprintId') or '-'
-                        order_scope = CloudServerOrder.objects.filter(provider='aws_lightsail', status__in=_ACTIVE_ORDER_STATUSES)
-                        traceable_order_scope = CloudServerOrder.objects.filter(provider='aws_lightsail', status__in=_TRACEABLE_ORDER_STATUSES)
-                        if account:
-                            account_filter = Q(cloud_account=account) | Q(account_label=account_label)
-                            order_scope = order_scope.filter(account_filter)
-                            traceable_order_scope = traceable_order_scope.filter(account_filter)
-                        exact_order_q = Q(instance_id=instance_name) | Q(provider_resource_id=instance_arn) | Q(server_name=instance_name)
-                        order = order_scope.filter(exact_order_q).first()
-                        if not order and public_ip:
-                            order = order_scope.filter(public_ip=public_ip).first()
-                        if not order:
-                            order = traceable_order_scope.filter(exact_order_q).first()
+                        order = _resolve_order_for_instance_sync(instance_name, instance_arn, public_ip, account)
                         expires_at = order.service_expires_at if order else None
                         order_user = None
                         if order and order.user_id:

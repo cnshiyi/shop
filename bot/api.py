@@ -33,6 +33,7 @@ from bot.models import BotOperationLog, TelegramChatArchive, TelegramChatMessage
 from bot.services import _get_or_create_user_sync
 from cloud.lifecycle import _delete_instance, _delete_orphan_asset_instance, _get_due_orders, _get_orphan_asset_delete_due, _is_cloud_delete_safe_time, _mark_deleted, _mark_orphan_asset_deleted, _mark_unattached_static_ip_deleted, _record_lifecycle_action_failed, _release_unattached_static_ip, _shutdown_enabled_for_order
 from cloud.models import AddressMonitor, CloudAsset, CloudIpLog, CloudServerOrder
+from cloud.sync_safety import missing_confirmation_state
 from core.models import CloudAccountConfig, SiteConfig
 from core.button_config import init_button_config, load_button_config, save_button_config
 from core.runtime_config import CONFIG_HELP, SENSITIVE_CONFIG_KEYS, get_runtime_config
@@ -667,6 +668,24 @@ def _cloud_asset_deleted_or_missing_q():
     return inactive_status_q | provider_missing_q | dirty_note_q
 
 
+def _unattached_ip_deleted_or_missing_q():
+    inactive_status_q = Q(status__in=[
+        CloudAsset.STATUS_DELETED,
+        CloudAsset.STATUS_DELETING,
+        CloudAsset.STATUS_TERMINATED,
+        CloudAsset.STATUS_TERMINATING,
+    ])
+    final_missing_q = (
+        Q(provider_status__icontains='已到期删除')
+        | Q(provider_status__icontains='已删除')
+        | Q(note__icontains='IP校验发现云上不存在，已标记删除')
+        | Q(note__icontains='固定 IP 云端已不存在')
+        | Q(note__icontains='固定IP云端已不存在')
+        | Q(note__icontains='云上不存在，已标记删除')
+    )
+    return inactive_status_q | final_missing_q
+
+
 def _unattached_ip_delete_history_q():
     terminal_q = Q(event_type__in=[CloudIpLog.EVENT_DELETED, CloudIpLog.EVENT_RECYCLED])
     explicit_note_q = (
@@ -689,6 +708,59 @@ def _unattached_ip_delete_history_q():
     return terminal_q & (explicit_note_q | asset_q)
 
 
+def _ip_delete_item_quality(item: dict, duplicate_count: int = 0) -> dict:
+    note = str(item.get('note') or '')
+    provider_status = str(item.get('provider_status') or '')
+    flags = []
+    labels = []
+    if duplicate_count > 0:
+        flags.append('covered_duplicates')
+        labels.append(f'已覆盖 {duplicate_count} 条同 IP 旧记录')
+    if any(marker in note or marker in provider_status for marker in ['云上不存在', '云上未找到', '云端已不存在', '已标记删除']):
+        flags.append('cloud_missing')
+        labels.append('云上已不存在')
+    if any(marker in note or marker in provider_status for marker in ['历史脏数据', '脏数据', '待确认', 'missing_sync_count']):
+        flags.append('dirty_data')
+        labels.append('脏数据')
+    confirm_state = missing_confirmation_state(note)
+    item['missing_confirm_count'] = confirm_state['count']
+    item['missing_confirm_threshold'] = confirm_state['threshold']
+    item['missing_confirm_remaining'] = confirm_state['remaining']
+    item['missing_confirm_interval_minutes'] = confirm_state['interval_minutes']
+    item['missing_confirm_checked_at'] = _iso(confirm_state['checked_at'])
+    item['missing_confirm_next_check_at'] = _iso(confirm_state['next_check_at'])
+    item['missing_confirm_due'] = confirm_state['due']
+    if confirm_state['count'] > 0:
+        flags.append('missing_confirming')
+        labels.append(f'缺失确认 {confirm_state["count"]}/{confirm_state["threshold"]}')
+        if confirm_state['next_check_at'] and not confirm_state['due']:
+            labels.append(f'下次确认 {_fmt_dashboard_dt(confirm_state["next_check_at"])}')
+    item['quality_flags'] = flags
+    item['quality_label'] = '，'.join(labels)
+    if labels:
+        item['execution_status'] = f'{item.get("execution_status") or item.get("provider_status") or "-"}（{"，".join(labels)}）'
+    return item
+
+
+def _dedupe_ip_delete_items_by_ip(items: list[dict]) -> list[dict]:
+    buckets = {}
+    no_ip_items = []
+    for item in items:
+        ip = str(item.get('public_ip') or '').strip()
+        if not ip:
+            no_ip_items.append(_ip_delete_item_quality(item))
+            continue
+        buckets.setdefault(ip, []).append(item)
+    deduped = []
+    for ip_items in buckets.values():
+        ip_items = sorted(ip_items, key=lambda item: (
+            parse_datetime(item.get('logged_at') or item.get('delete_at') or '') or datetime.min.replace(tzinfo=dt_timezone.utc),
+            int(item.get('asset_id') or item.get('id') or 0) if str(item.get('asset_id') or item.get('id') or '').isdigit() else 0,
+        ), reverse=True)
+        deduped.append(_ip_delete_item_quality(ip_items[0], duplicate_count=len(ip_items) - 1))
+    return deduped + no_ip_items
+
+
 def _unattached_ip_delete_items(limit=50):
     now = timezone.now()
     limit = max(1, min(int(limit or 50), 1000))
@@ -698,7 +770,7 @@ def _unattached_ip_delete_items(limit=50):
         .filter(kind=CloudAsset.KIND_SERVER)
         .filter(Q(provider_status__icontains='未附加') | Q(note__icontains='未附加IP') | Q(note__icontains='未附加固定IP'))
         .filter(Q(instance_id__isnull=True) | Q(instance_id=''))
-        .exclude(_cloud_asset_deleted_or_missing_q())
+        .exclude(_unattached_ip_deleted_or_missing_q())
         .order_by('actual_expires_at', 'created_at', '-updated_at')[:limit]
     )
     items = []
@@ -722,6 +794,7 @@ def _unattached_ip_delete_items(limit=50):
         asset_name = asset.asset_name or getattr(asset, 'static_ip_name', '') or asset.instance_id or f'asset-{asset.id}'
         items.append({
             'id': asset.id,
+            'asset_id': asset.id,
             'asset_name': asset_name,
             'asset_detail_path': f'/admin/cloud-assets/{asset.id}',
             'detail_path': f'/admin/cloud-assets/{asset.id}',
@@ -755,6 +828,7 @@ def _unattached_ip_delete_items(limit=50):
         delete_at = logged_at or getattr(order, 'ip_recycle_at', None) or getattr(asset, 'actual_expires_at', None)
         items.append({
             'id': trace.id,
+            'asset_id': trace.asset_id,
             'asset_name': asset_name,
             'asset_detail_path': f'/admin/cloud-assets/{trace.asset_id}' if trace.asset_id else '',
             'detail_path': f'/admin/cloud-orders/{trace.order_id}' if trace.order_id else (f'/admin/cloud-assets/{trace.asset_id}' if trace.asset_id else ''),
@@ -777,6 +851,7 @@ def _unattached_ip_delete_items(limit=50):
             return (1, -timestamp, str(item['id']))
         return (0, 0 if item['is_overdue'] else 1, item.get('delete_at') or '', str(item['id']))
 
+    items = _dedupe_ip_delete_items_by_ip(items)
     return sorted(items, key=sort_key)[:limit]
 
 
