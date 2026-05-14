@@ -3376,7 +3376,7 @@ def register_handlers(dp: Dispatcher):
         await state.set_state(CustomServerStates.waiting_port)
         await bot.send_message(
             chat_id=callback.from_user.id,
-            text='✍️ 已选择自定义端口。\n请发送 443 或 1025-65530 之间的端口号，发送后我会立即提交服务器创建任务。',
+            text='✍️ 已选择自定义端口。\n请发送 443 或 1025-65529 之间的端口号，发送后我会立即提交服务器创建任务。',
         )
 
     def _is_group_chat_message(message) -> bool:
@@ -4419,7 +4419,7 @@ def register_handlers(dp: Dispatcher):
         await state.update_data(cloud_ip_change_order_id=order_id, cloud_ip_change_region_code=region_code, cloud_ip_change_region_name=region_name, cloud_ip_change_admin=is_admin)
         await state.set_state(CustomServerStates.waiting_port)
         await callback.message.reply(
-            f'✍️ 已选择更换IP自定义端口。\n节点：{_public_region_text(region_name) or "默认节点"}\n请发送 443 或 1025-65530 之间的端口号。'
+            f'✍️ 已选择更换IP自定义端口。\n节点：{_public_region_text(region_name) or "默认节点"}\n请发送 443 或 1025-65529 之间的端口号。'
         )
 
 

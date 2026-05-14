@@ -1,6 +1,22 @@
 from django.utils import timezone
 
 
+def _is_cloud_sync_status_line(line: str) -> bool:
+    text = str(line or '').strip()
+    return text.startswith('状态: ') and ('最近同步:' in text or '覆盖同步时间:' in text)
+
+
+def append_status_note(existing: str | None, addition: str | None) -> str:
+    next_text = str(addition or '').strip()
+    if not next_text:
+        return str(existing or '').strip()
+    if not _is_cloud_sync_status_line(next_text):
+        return append_note(existing, next_text)
+    kept = [line.strip() for line in str(existing or '').splitlines() if line.strip() and not _is_cloud_sync_status_line(line)]
+    kept.append(next_text)
+    return '\n'.join(kept)
+
+
 def append_note(existing: str | None, addition: str | None, *, unique: bool = False) -> str:
     base = str(existing or '').strip()
     next_text = str(addition or '').strip()

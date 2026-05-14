@@ -1,6 +1,8 @@
 from asgiref.sync import sync_to_async
 import logging
 import re
+from urllib.parse import urlparse
+
 from django.utils import timezone
 
 from django.db.models import Q
@@ -64,6 +66,25 @@ def _extract_proxy_links(note: str) -> list[dict[str, str]]:
             server = link.split('server=', 1)[1].split('&', 1)[0].strip()
         mode = get_mtproxy_port_label(main_port or port, port) if port else 'MTProxy'
         links.append({'name': mode, 'server': server, 'port': port, 'secret': secret, 'url': link})
+    for raw_link in re.findall(r'socks5://[^"\'\s<>]+', note or ''):
+        link = raw_link.rstrip(',.，。')
+        if not link or link in seen:
+            continue
+        parsed = urlparse(link)
+        port = str(parsed.port or '')
+        server = parsed.hostname or ''
+        username = parsed.username or ''
+        password = parsed.password or ''
+        seen.add(link)
+        links.append({
+            'name': get_mtproxy_port_label(main_port or port, port) if port else 'SOCKS5',
+            'server': server,
+            'port': port,
+            'username': username,
+            'password': password,
+            'secret': password or username,
+            'url': link,
+        })
     return links
 
 
@@ -110,11 +131,69 @@ def _extract_mtproxy_fields(note: str) -> tuple[str, str, str]:
     host = ''
     for item in _extract_proxy_links(note):
         link = item.get('url', '')
+        if not str(link).startswith('tg://proxy?'):
+            continue
         secret = item.get('secret', '')
         host = item.get('server', '')
         if link:
             break
     return link, secret, host
+
+
+def _compact_proxy_install_note(note: str, proxy_links: list[dict[str, str]], main_port: int | str | None = None) -> str:
+    if (
+        'MTProxy 安装完成' not in str(note or '')
+        and 'SOCKS5链接:' not in str(note or '')
+        and 'socks5://' not in str(note or '')
+        and 'tg://proxy?' not in str(note or '')
+    ):
+        return note
+    prefix = str(note or '').split('MTProxy 安装完成', 1)[0].strip()
+    mtproxy_ports = []
+    socks5_port = ''
+    for item in proxy_links or []:
+        if not isinstance(item, dict):
+            continue
+        port = str(item.get('port') or '').strip()
+        url = str(item.get('url') or '')
+        if not port:
+            continue
+        if url.startswith('socks5://'):
+            socks5_port = port
+        elif port not in mtproxy_ports:
+            mtproxy_ports.append(port)
+    lines = [
+        'MTProxy/SOCKS5 安装完成',
+        f'主代理端口: {main_port or (mtproxy_ports[0] if mtproxy_ports else "-")}',
+    ]
+    extra_mtproxy_ports = [port for port in mtproxy_ports if str(port) != str(main_port or '')]
+    if extra_mtproxy_ports:
+        lines.append(f'备用/Telemt端口: {", ".join(extra_mtproxy_ports)}')
+    if socks5_port:
+        lines.append(f'SOCKS5端口: {socks5_port}')
+    lines.append('代理链接已保存到代理链路列表。')
+    compact = '\n'.join(lines)
+    return '\n'.join(part for part in [prefix, compact] if part)
+
+
+def _strip_raw_proxy_link_lines(note: str | None) -> str:
+    lines = []
+    for raw_line in str(note or '').splitlines():
+        line = raw_line.strip()
+        if not line:
+            continue
+        if 'tg://proxy?' in line or 'socks5://' in line:
+            continue
+        if line.startswith(('TG链接:', '分享链接:', '扩展链接:', 'SOCKS5链接:')):
+            continue
+        lines.append(line)
+    return '\n'.join(lines)
+
+
+def _append_cloud_asset_note(existing: str | None, addition: str | None, proxy_links: list[dict[str, str]], main_port: int | str | None = None) -> str:
+    clean_addition = _compact_proxy_install_note(addition or '', proxy_links, main_port)
+    clean_addition = _strip_raw_proxy_link_lines(clean_addition)
+    return append_note(existing, clean_addition)
 
 
 def _upsert_server_record(order: CloudServerOrder, note: str):
@@ -392,7 +471,8 @@ def _mark_instance_created(order_id: int, server_name: str, instance_id: str, pu
     order.public_ip = public_ip or order.public_ip
     order.login_user = login_user or order.login_user
     order.login_password = login_password or order.login_password
-    order.provision_note = prepend_note(order.provision_note, with_note_time(note))
+    current_note = with_note_time(note)
+    order.provision_note = prepend_note(order.provision_note, current_note)
     order.save(update_fields=['status', 'server_name', 'instance_id', 'provider_resource_id', 'public_ip', 'login_user', 'login_password', 'provision_note', 'updated_at'])
     try:
         order_user = order.user
@@ -421,12 +501,12 @@ def _mark_instance_created(order_id: int, server_name: str, instance_id: str, pu
             'currency': order.currency,
             'order': order,
             'user': order_user,
-            'note': append_note(getattr(existing_asset, 'note', None), order.provision_note),
+            'note': append_note(getattr(existing_asset, 'note', None), current_note),
             'status': CloudAsset.STATUS_PENDING,
             'is_active': True,
         },
     )
-    server_record = _upsert_server_record(order, order.provision_note)
+    server_record = _upsert_server_record(order, current_note)
     trigger_label = _cloud_log_trigger_label(order)
     record_cloud_ip_log(event_type='created', order=order, asset=server_asset, server=server_record, public_ip=order.public_ip, note=f'{trigger_label}触发创建云端实例：{order.server_name}')
     return order
@@ -437,7 +517,8 @@ def _mark_provisioning_start(order_id: int, server_name: str):
     order = CloudServerOrder.objects.get(id=order_id)
     order.status = 'provisioning'
     order.server_name = server_name
-    order.provision_note = prepend_note(order.provision_note, with_note_time(f'开始创建服务器：{server_name}'))
+    current_note = with_note_time(f'开始创建服务器：{server_name}')
+    order.provision_note = prepend_note(order.provision_note, current_note)
     order.save(update_fields=['status', 'server_name', 'provision_note', 'updated_at'])
     try:
         order_user = order.user
@@ -468,12 +549,12 @@ def _mark_provisioning_start(order_id: int, server_name: str):
             'currency': order.currency,
             'order': order,
             'user': order_user,
-            'note': append_note(getattr(existing_asset, 'note', None), order.provision_note),
+            'note': append_note(getattr(existing_asset, 'note', None), current_note),
             'status': CloudAsset.STATUS_PENDING,
             'is_active': True,
         },
     )
-    server_record = _upsert_server_record(order, order.provision_note)
+    server_record = _upsert_server_record(order, current_note)
     record_cloud_ip_log(event_type='created', order=order, asset=server_asset, server=server_record, public_ip=order.public_ip, note=f'服务器开始创建：{server_name}')
     return order
 
@@ -902,6 +983,7 @@ def _mark_success(order_id: int, server_name: str, instance_id: str, public_ip: 
             'secret': mtproxy_secret or '',
             'url': mtproxy_link,
         })
+    compact_note = _compact_proxy_install_note(note, proxy_links, order.mtproxy_port or 9528)
     order.status = 'completed'
     order.server_name = server_name
     order.instance_id = instance_id
@@ -913,7 +995,7 @@ def _mark_success(order_id: int, server_name: str, instance_id: str, public_ip: 
     order.mtproxy_secret = mtproxy_secret
     order.login_user = login_user
     order.login_password = login_password
-    order.provision_note = prepend_note(order.provision_note, with_note_time(note))
+    order.provision_note = prepend_note(order.provision_note, with_note_time(compact_note))
     order.static_ip_name = static_ip_name or order.static_ip_name
     order.completed_at = timezone.now()
     if is_cloud_asset_renewal_order(order):
@@ -963,13 +1045,13 @@ def _mark_success(order_id: int, server_name: str, instance_id: str, public_ip: 
                 'currency': order.currency,
                 'order': order,
                 'user': order_user,
-                'note': append_note(getattr(existing_asset, 'note', None), note),
+                'note': _append_cloud_asset_note(getattr(existing_asset, 'note', None), compact_note, proxy_links, order.mtproxy_port or 9528),
                 'status': CloudAsset.STATUS_RUNNING,
                 'provider_status': '运行中',
                 'is_active': True,
             },
         )
-        server_record = _upsert_server_record(order, note)
+        server_record = _upsert_server_record(order, compact_note)
         record_cloud_ip_log(
             event_type='created',
             order=order,

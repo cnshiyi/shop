@@ -423,8 +423,44 @@ def _with_delete_source(note, source):
     return f'删除来源：{source}；{text}' if text else f'删除来源：{source}'
 
 
+def _compact_dashboard_note(note, *, max_chars=800):
+    noisy_prefixes = (
+        'Get:', 'Hit:', 'Ign:', 'Err:', 'Fetched ', 'Reading package lists',
+        'Building dependency tree', 'Reading state information', 'Selecting previously',
+        'Preparing to unpack', 'Unpacking ', 'Setting up ', 'Processing triggers',
+        'Created symlink ', 'Synchronizing state', 'Need to get ', 'After this operation',
+        'The following ', '0 upgraded,', 'debconf:', 'apt-listchanges:', 'WARNING:',
+    )
+    lines = []
+    seen = set()
+    latest_sync_status = ''
+    for raw_line in str(note or '').splitlines():
+        line = raw_line.strip()
+        if not line:
+            continue
+        if 'tg://proxy?' in line or 'socks5://' in line:
+            continue
+        if line.startswith(('TG链接:', '分享链接:', '扩展链接:', 'SOCKS5链接:')):
+            continue
+        if line.startswith(noisy_prefixes):
+            continue
+        if line.startswith('状态: ') and ('最近同步:' in line or '覆盖同步时间:' in line):
+            latest_sync_status = line
+            continue
+        if line in seen:
+            continue
+        seen.add(line)
+        lines.append(line)
+    if latest_sync_status and latest_sync_status not in seen:
+        lines.append(latest_sync_status)
+    text = '\n'.join(lines)
+    if max_chars and len(text) > max_chars:
+        return text[:max_chars].rstrip() + '\n...（备注过长，已折叠预览）'
+    return text
+
+
 def _cloud_ip_trace_note_newest_first(note):
-    text = str(note or '').strip()
+    text = _compact_dashboard_note(note, max_chars=1200)
     if not text:
         return ''
     lines = [line.strip() for line in text.splitlines() if line.strip()]
@@ -572,6 +608,7 @@ def _shutdown_log_items(limit=100):
             'suspend_at': suspend_at,
             'delete_at': delete_at,
             'note': note,
+            'display_note': _compact_dashboard_note(note, max_chars=500),
             'logged_at': logged_at,
         })
 
@@ -616,6 +653,7 @@ def _shutdown_log_items(limit=100):
             'suspend_at': suspend_at,
             'delete_at': delete_at,
             'note': note,
+            'display_note': _compact_dashboard_note(note, max_chars=500),
             'logged_at': logged_at,
         })
 
@@ -807,6 +845,7 @@ def _unattached_ip_delete_items(limit=50):
             'delete_at': _iso(delete_at),
             'logged_at': _iso(logged_at),
             'note': note,
+            'display_note': _compact_dashboard_note(note, max_chars=500),
             'is_overdue': bool(delete_at and delete_at <= now),
             'is_history': False,
         })
@@ -841,6 +880,7 @@ def _unattached_ip_delete_items(limit=50):
             'delete_at': _iso(delete_at),
             'logged_at': _iso(logged_at),
             'note': _cloud_ip_trace_note_newest_first(trace.note),
+            'display_note': _compact_dashboard_note(trace.note, max_chars=500),
             'is_overdue': True,
             'is_history': True,
         })
@@ -1646,6 +1686,7 @@ def _shutdown_plan_item_payload(order, *, queue_status='scheduled_future', queue
         'execution_status': execution_status,
         'execution_plan': execution_plan,
         'note': order.provision_note or '',
+        'display_note': _compact_dashboard_note(order.provision_note, max_chars=500),
         'related_path': f'/admin/cloud-orders/{order.id}',
         'detail_path': f'/admin/cloud-orders/{order.id}',
         'order_detail_path': f'/admin/cloud-orders/{order.id}',
@@ -1699,6 +1740,7 @@ def _orphan_asset_delete_plan_item_payload(asset, *, queue_status='orphan_due', 
         'execution_status': execution_status,
         'execution_plan': f'删除服务器 {_fmt_dashboard_dt(plan_at)}' if plan_at else '等待删除时间',
         'note': asset.note or '',
+        'display_note': _compact_dashboard_note(asset.note, max_chars=500),
         'cloud_account_id': asset.cloud_account_id,
         'cloud_account_name': account_name,
         'external_account_id': external_account_id,
@@ -1909,12 +1951,17 @@ def lifecycle_plans(request):
 
     def decorate_plan_item(item):
         note = str(item.get('note') or '')
+        item['display_note'] = _compact_dashboard_note(note, max_chars=500)
         first_line = next((line.strip() for line in note.splitlines() if line.strip()), '')
+        if not first_line.startswith('执行内容：'):
+            return item
         content_match = re.search(r'执行内容：([^\n]+?)(?:；(?:时间|账号|地区|IP|固定IP名|端口|secret|服务到期|宽限删机|用户续费)|$)', first_line)
         plan_match = re.search(r'执行计划：([^；\n]+)', first_line)
-        status_text = (content_match.group(1).strip() if content_match else '') or item.get('status_label') or ''
-        item['execution_status'] = status_text
-        item['execution_plan'] = plan_match.group(1).strip() if plan_match else ''
+        status_text = (content_match.group(1).strip() if content_match else '')
+        if status_text:
+            item['execution_status'] = status_text[:120]
+        if plan_match:
+            item['execution_plan'] = plan_match.group(1).strip()[:120]
         return item
 
     shutdown_items = [decorate_plan_item(item) for item in shutdown_items]

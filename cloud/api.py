@@ -345,6 +345,39 @@ def _infer_asset_order(asset):
     return CloudServerOrder.objects.select_related('user', 'plan').filter(lookup).order_by('-created_at', '-id').first()
 
 
+def _display_cloud_asset_note(note: str | None) -> str:
+    noisy_prefixes = (
+        'Get:', 'Hit:', 'Ign:', 'Err:', 'Fetched ', 'Reading package lists',
+        'Building dependency tree', 'Reading state information', 'Selecting previously',
+        'Preparing to unpack', 'Unpacking ', 'Setting up ', 'Processing triggers',
+        'Created symlink ', 'Synchronizing state', 'Need to get ', 'After this operation',
+        'The following ', '0 upgraded,', 'debconf:', 'apt-listchanges:', 'WARNING:',
+    )
+    lines = []
+    seen = set()
+    latest_sync_status = ''
+    for raw_line in str(note or '').splitlines():
+        line = raw_line.strip()
+        if not line:
+            continue
+        if 'tg://proxy?' in line or 'socks5://' in line:
+            continue
+        if line.startswith(('TG链接:', '分享链接:', '扩展链接:', 'SOCKS5链接:')):
+            continue
+        if line.startswith(noisy_prefixes):
+            continue
+        if line.startswith('状态: ') and ('最近同步:' in line or '覆盖同步时间:' in line):
+            latest_sync_status = line
+            continue
+        if line in seen:
+            continue
+        seen.add(line)
+        lines.append(line)
+    if latest_sync_status and latest_sync_status not in seen:
+        lines.append(latest_sync_status)
+    return '\n'.join(lines)
+
+
 def _asset_payload(asset):
     order = _infer_asset_order(asset)
     user = asset.user or getattr(order, 'user', None)
@@ -406,7 +439,7 @@ def _asset_payload(asset):
         'mtproxy_secret': _mask_secret(asset.mtproxy_secret or getattr(order, 'mtproxy_secret', None)),
         'has_mtproxy_secret': bool(asset.mtproxy_secret or getattr(order, 'mtproxy_secret', None)),
         'mtproxy_host': asset.mtproxy_host or getattr(order, 'mtproxy_host', None),
-        'note': asset.note,
+        'note': _display_cloud_asset_note(asset.note),
         'sort_order': asset.sort_order,
         'actual_expires_at': _iso(expires_at),
         'days_left': _days_left(expires_at),
@@ -910,7 +943,9 @@ def _dedupe_cloud_asset_rows(assets):
     return [item[1] for item in best.values()]
 
 
-def _cloud_asset_page_user_key(asset):
+def _cloud_asset_page_group_key(asset, group_by='user'):
+    if group_by == 'telegram_group' and getattr(asset, 'telegram_group_id', None):
+        return f'group:{asset.telegram_group_id}'
     user_id = getattr(asset, 'user_id', None)
     if user_id:
         return f'user:{user_id}'
@@ -920,11 +955,11 @@ def _cloud_asset_page_user_key(asset):
     return f'unbound:{getattr(asset, "id", "")}'
 
 
-def _paginate_cloud_assets_keep_users(assets, page: int, page_size: int):
+def _paginate_cloud_assets_keep_groups(assets, page: int, page_size: int, group_by='user'):
     grouped_assets = []
     group_index = {}
     for asset in assets:
-        key = _cloud_asset_page_user_key(asset)
+        key = _cloud_asset_page_group_key(asset, group_by)
         if key not in group_index:
             group_index[key] = len(grouped_assets)
             grouped_assets.append([])
@@ -999,13 +1034,13 @@ def cloud_assets_list(request):
             except (TypeError, ValueError):
                 page = 1
             try:
-                page_size = int(request.GET.get('page_size') or '50')
+                page_size = int(request.GET.get('page_size') or '20')
             except (TypeError, ValueError):
-                page_size = 50
+                page_size = 20
             page_size = min(max(page_size, 10), 200)
             deduped_assets = _dedupe_cloud_asset_rows(list(queryset))
             total = len(deduped_assets)
-            page_assets, total_pages, page = _paginate_cloud_assets_keep_users(deduped_assets, page, page_size)
+            page_assets, total_pages, page = _paginate_cloud_assets_keep_groups(deduped_assets, page, page_size, group_by)
             items = [_asset_payload(asset) for asset in page_assets]
             return _ok({'items': items, 'total': total, 'page': page, 'page_size': page_size, 'total_pages': total_pages})
         items = [_asset_payload(asset) for asset in _dedupe_cloud_asset_rows(list(queryset))]
@@ -1013,7 +1048,7 @@ def cloud_assets_list(request):
         if grouped:
             return _ok({'groups': [], 'items': []})
         if paginated:
-            return _ok({'items': [], 'total': 0, 'page': 1, 'page_size': 50, 'total_pages': 1})
+            return _ok({'items': [], 'total': 0, 'page': 1, 'page_size': 20, 'total_pages': 1})
         return _ok([])
 
     if not grouped:
@@ -2582,7 +2617,11 @@ def servers_list(request):
     ordering = ['expires_at', '-updated_at', '-id']
     if sort_by in {'expires_at', 'days_left', 'remaining_days'}:
         ordering = _dashboard_expiry_ordering('expires_at', sort_direction)
-    queryset = Server.objects.select_related('user', 'order').exclude(status=Server.STATUS_DELETED).exclude(public_ip__isnull=True).exclude(public_ip='').order_by(*ordering)
+    unattached_ip_q = (
+        (Q(provider_status__icontains='未附加') | Q(note__icontains='未附加IP') | Q(note__icontains='未附加固定IP'))
+        & (Q(instance_id__isnull=True) | Q(instance_id=''))
+    )
+    queryset = Server.objects.select_related('user', 'order').exclude(status=Server.STATUS_DELETED).exclude(public_ip__isnull=True).exclude(public_ip='').exclude(unattached_ip_q).order_by(*ordering)
     queryset = _apply_keyword_filter(
         queryset,
         keyword,
@@ -2978,8 +3017,8 @@ def delete_cloud_asset(request, asset_id: int):
         removed_server_ids.append(server.id)
         server.delete()
 
-    if _looks_like_local_residual(asset):
-        record_cloud_ip_log(event_type='deleted', order=order, asset=asset, previous_public_ip=previous_public_ip, public_ip=None, note=note)
+    if not CloudIpLog.objects.filter(asset_id=asset.id, event_type=CloudIpLog.EVENT_DELETED, note__contains='后台手动删除代理列表记录').exists():
+        record_cloud_ip_log(event_type=CloudIpLog.EVENT_DELETED, order=order, asset=asset, previous_public_ip=previous_public_ip, public_ip=None, note=note)
     order_status_changed = _clear_order_cloud_binding(order)
     asset.delete()
     return _ok({

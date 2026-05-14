@@ -338,12 +338,12 @@ def _mark_suspended(order_id: int, note: str):
     server = _order_primary_server(order)
     if asset:
         asset.is_active = False
-        asset.note = append_note(asset.note, order.provision_note)
+        asset.note = append_note(asset.note, note or '服务器进入延停状态')
         asset.updated_at = now
         asset.save(update_fields=['is_active', 'note', 'updated_at'])
     if server:
         server.is_active = False
-        server.note = append_note(server.note, order.provision_note)
+        server.note = append_note(server.note, note or '服务器进入延停状态')
         server.updated_at = now
         server.save(update_fields=['is_active', 'note', 'updated_at'])
     record_cloud_ip_log(event_type='suspended', order=order, asset=asset, server=server, note=note or '服务器进入延停状态')
@@ -383,7 +383,7 @@ def _mark_deleted(order_id: int, note: str):
         asset.status = CloudAsset.STATUS_DELETED
         asset.provider_status = '固定IP保留中-实例已删除'
         asset.is_active = False
-        asset.note = append_note(asset.note, order.provision_note)
+        asset.note = append_note(asset.note, retention_note)
         asset.updated_at = now
         asset.save(update_fields=['public_ip', 'previous_public_ip', 'instance_id', 'provider_resource_id', 'actual_expires_at', 'status', 'provider_status', 'is_active', 'note', 'updated_at'])
     if server:
@@ -395,7 +395,7 @@ def _mark_deleted(order_id: int, note: str):
         server.status = Server.STATUS_DELETED
         server.provider_status = '固定IP保留中-实例已删除'
         server.is_active = False
-        server.note = append_note(server.note, order.provision_note)
+        server.note = append_note(server.note, retention_note)
         server.updated_at = now
         server.save(update_fields=['public_ip', 'previous_public_ip', 'instance_id', 'provider_resource_id', 'expires_at', 'status', 'provider_status', 'is_active', 'note', 'updated_at'])
     record_cloud_ip_log(event_type='deleted', order=order, asset=asset, server=server, previous_public_ip=previous_public_ip, public_ip=previous_public_ip, note=retention_note)
@@ -432,13 +432,13 @@ def _mark_recycled(order_id: int, note: str):
         asset.previous_public_ip = previous_public_ip
         asset.public_ip = None
         asset.mtproxy_host = None
-        asset.note = append_note(asset.note, order.provision_note)
+        asset.note = append_note(asset.note, note or '公网IP已回收')
         asset.updated_at = now
         asset.save(update_fields=['previous_public_ip', 'public_ip', 'mtproxy_host', 'note', 'updated_at'])
     if server:
         server.previous_public_ip = previous_public_ip
         server.public_ip = None
-        server.note = append_note(server.note, order.provision_note)
+        server.note = append_note(server.note, note or '公网IP已回收')
         server.updated_at = now
         server.save(update_fields=['previous_public_ip', 'public_ip', 'note', 'updated_at'])
     record_cloud_ip_log(event_type='recycled', order=order, asset=asset, server=server, previous_public_ip=previous_public_ip, public_ip=None, note=note or '公网IP已回收')
@@ -1896,14 +1896,14 @@ def _mark_replaced_order_deleted(order_id: int, note: str):
         asset.is_active = False
         asset.public_ip = None
         asset.previous_public_ip = previous_public_ip
-        asset.note = append_note(asset.note, order.provision_note)
+        asset.note = append_note(asset.note, note or '迁移结束，旧实例删除')
         asset.updated_at = now
         asset.save(update_fields=['is_active', 'public_ip', 'previous_public_ip', 'note', 'updated_at'])
     if server:
         server.is_active = False
         server.public_ip = None
         server.previous_public_ip = previous_public_ip
-        server.note = append_note(server.note, order.provision_note)
+        server.note = append_note(server.note, note or '迁移结束，旧实例删除')
         server.updated_at = now
         server.save(update_fields=['is_active', 'public_ip', 'previous_public_ip', 'note', 'updated_at'])
     record_cloud_ip_log(event_type='deleted', order=order, asset=asset, server=server, previous_public_ip=previous_public_ip, public_ip=None, note=note or '迁移结束，旧实例删除')

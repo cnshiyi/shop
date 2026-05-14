@@ -8,7 +8,7 @@ from bot.api import _provider_status_label
 from core.cloud_accounts import cloud_account_label, list_active_cloud_accounts
 from core.persistence import record_external_sync_log
 from cloud.models import CloudAsset, CloudServerOrder, Server, _runtime_int_config, _with_runtime_time
-from cloud.note_utils import append_note
+from cloud.note_utils import append_note, append_status_note
 from cloud.services import record_cloud_ip_log
 from cloud.sync_safety import get_missing_confirmation_threshold, mark_missing_confirmation_pending, with_missing_confirmation_note
 
@@ -932,11 +932,11 @@ class Command(BaseCommand):
                                     rebound_note = f'未附加IP已重新绑定到实例，已清空临时到期时间：{rebound_at.isoformat()}；等待人工添加真实到期时间。'
                                     asset_defaults['actual_expires_at'] = None
                                     asset_defaults['provider_status'] = '已重新绑定实例-待人工添加时间'
-                                asset_defaults['note'] = append_note(_drop_stale_deleted_note_lines(asset.note), _append_unique_line(note, rebound_note))
+                                asset_defaults['note'] = append_note(append_status_note(_drop_stale_deleted_note_lines(asset.note), note), rebound_note, unique=True)
                                 asset_defaults['is_active'] = True
                             else:
                                 asset_defaults['actual_expires_at'] = asset.actual_expires_at
-                                asset_defaults['note'] = append_note(_drop_stale_deleted_note_lines(asset.note), note)
+                                asset_defaults['note'] = append_status_note(_drop_stale_deleted_note_lines(asset.note), note)
                         asset_signature = f'{instance_name or "-"}|{instance_arn or "-"}|{public_ip or "缺失"}'
                         old_public_ip = asset.public_ip if asset else None
                         ip_changed = bool(asset and old_public_ip and old_public_ip != public_ip)
@@ -1170,7 +1170,7 @@ class Command(BaseCommand):
                             asset_defaults['user'] = asset.user
                         if asset.actual_expires_at:
                             asset_defaults['actual_expires_at'] = asset.actual_expires_at
-                        asset_defaults['note'] = append_note(_drop_stale_deleted_note_lines(asset.note), note)
+                        asset_defaults['note'] = append_status_note(_drop_stale_deleted_note_lines(asset.note), note)
                     asset_signature = f'{static_ip_name or "-"}|{static_ip_arn or "-"}|{public_ip or "缺失"}'
                     old_status = asset.status if asset else None
                     if asset:

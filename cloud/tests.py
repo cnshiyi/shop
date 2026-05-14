@@ -17,11 +17,14 @@ from bot.models import TelegramGroupFilter, TelegramUser
 from cloud.bootstrap import _build_mtproxy_script, _extract_tg_links
 from cloud.models import CloudAsset, CloudAutoRenewPatrolLog, CloudAutoRenewRetryTask, CloudIpLog, CloudServerOrder, CloudServerPlan, CloudUserNoticeLog, Server
 from cloud.lifecycle import _apply_notice_schedule_to_order, _auto_renew_candidate_users, _enqueue_auto_renew_retry, _get_due_orders, _get_migration_due_orders, _get_orphan_asset_delete_due, _group_balance_lines_for_orders, _is_cloud_delete_safe_time, _is_cloud_suspend_time, _mark_deleted, _mark_suspended, _next_cloud_action_run_at, _notice_plan_text, _process_auto_renew_retry_tasks, _send_logged_cloud_notice, _send_order_notice_batch, auto_renew_patrol_tick, daily_expiry_summary_tick, lifecycle_tick, sync_server_status_tick
+from cloud.note_utils import append_status_note
 from cloud.ports import get_mtproxy_port_label, get_mtproxy_public_ports, is_valid_mtproxy_main_port
 from cloud.aws_lightsail import _public_ip_exists_sync, _resolve_static_ip_name_for_move
 from cloud.ip_guard import validate_server_connection_ip, validate_server_connection_ip_with_retry
 from cloud.provisioning import (
+    _append_cloud_asset_note,
     _candidate_cloud_account_ids,
+    _compact_proxy_install_note,
     _extract_mtproxy_fields,
     _extract_proxy_links,
     _get_aws_create_payload,
@@ -34,7 +37,7 @@ from cloud.provisioning import (
 )
 from cloud.services import _cloud_asset_deleted_or_missing, apply_cloud_server_renewal, create_cloud_server_rebuild_order, create_cloud_server_renewal, create_cloud_server_renewal_by_public_query, create_cloud_server_renewal_for_user, create_cloud_server_upgrade_order, delay_cloud_server_expiry, ensure_cloud_asset_operation_order, get_cloud_server_by_ip, get_cloud_server_by_ip_for_user, get_group_proxy_asset_detail, get_proxy_asset_by_ip_for_admin, get_proxy_asset_by_ip_for_user, get_user_proxy_asset_detail, list_all_auto_renew_cloud_servers, list_cloud_asset_renewal_plans, list_cloud_server_upgrade_plans, list_group_cloud_servers, list_retained_ip_renewal_plans, list_retained_ip_renewal_plans_by_asset, list_user_cloud_servers, mark_cloud_server_ip_change_requested, mark_cloud_server_reinit_requested, pay_cloud_server_renewal_with_balance, prepare_cloud_asset_renewal_with_link, record_cloud_ip_log, replace_cloud_asset_order_by_admin, run_cloud_server_renewal_postcheck
 from cloud.sync_safety import get_missing_confirmation_threshold
-from cloud.api import _cloud_order_source_tags, auto_renew_task_detail, cloud_assets_list, cloud_order_detail, cloud_orders_list, delete_cloud_asset, delete_server, run_auto_renew_order, run_auto_renew_tasks, sync_cloud_asset_status, sync_cloud_assets, tasks_overview, update_cloud_asset
+from cloud.api import _cloud_order_source_tags, _display_cloud_asset_note, auto_renew_task_detail, cloud_assets_list, cloud_order_detail, cloud_orders_list, delete_cloud_asset, delete_server, run_auto_renew_order, run_auto_renew_tasks, servers_list, sync_cloud_asset_status, sync_cloud_assets, tasks_overview, update_cloud_asset
 from core.cloud_accounts import cloud_account_label
 from core.models import CloudAccountConfig, SiteConfig
 from orders.payment_scanner import _confirm_cloud_server_order
@@ -571,6 +574,49 @@ class CloudServerServicesTestCase(TestCase):
         payload2 = json.loads(response2.content.decode('utf-8'))['data']
         boundary_ids = {asset.id for asset in boundary_assets}
         page2_boundary_ids = {item['id'] for item in payload2['items'] if item['user_id'] == boundary_user.id}
+        self.assertEqual(page2_boundary_ids, boundary_ids)
+
+    def test_cloud_assets_paginated_keeps_same_telegram_group_on_same_page(self):
+        admin = get_user_model().objects.create_user(username='admin_asset_group_pages', password='x', is_staff=True)
+        first_group = TelegramGroupFilter.objects.create(chat_id=-1001991001, title='Page First Group', enabled=True)
+        boundary_group = TelegramGroupFilter.objects.create(chat_id=-1001991002, title='Page Boundary Group', enabled=True)
+        tail_group = TelegramGroupFilter.objects.create(chat_id=-1001991003, title='Page Tail Group', enabled=True)
+
+        def create_asset(group, index, sort_order):
+            return CloudAsset.objects.create(
+                kind=CloudAsset.KIND_SERVER,
+                source=CloudAsset.SOURCE_AWS_SYNC,
+                user=self.user,
+                telegram_group=group,
+                provider='aws_lightsail',
+                region_code=self.plan.region_code,
+                region_name=self.plan.region_name,
+                asset_name=f'page-group-asset-{index}',
+                public_ip=f'10.78.0.{index}',
+                status=CloudAsset.STATUS_RUNNING,
+                sort_order=sort_order,
+            )
+
+        for index in range(1, 20):
+            create_asset(first_group, index, 200 - index)
+        boundary_assets = [create_asset(boundary_group, 20, 120), create_asset(boundary_group, 21, 119)]
+        create_asset(tail_group, 22, 10)
+
+        page1 = self.factory.get('/api/dashboard/cloud-assets/', {'paginated': '1', 'group_by': 'telegram_group', 'page': '1', 'page_size': '20'})
+        page1.user = admin
+        response1 = cloud_assets_list(page1)
+        payload1 = json.loads(response1.content.decode('utf-8'))['data']
+        self.assertEqual(response1.status_code, 200)
+        self.assertEqual(payload1['page_size'], 20)
+        self.assertGreaterEqual(payload1['total_pages'], 2)
+        self.assertFalse(any(item['telegram_group_id'] == boundary_group.id for item in payload1['items']))
+
+        page2 = self.factory.get('/api/dashboard/cloud-assets/', {'paginated': '1', 'group_by': 'telegram_group', 'page': '2', 'page_size': '20'})
+        page2.user = admin
+        response2 = cloud_assets_list(page2)
+        payload2 = json.loads(response2.content.decode('utf-8'))['data']
+        boundary_ids = {asset.id for asset in boundary_assets}
+        page2_boundary_ids = {item['id'] for item in payload2['items'] if item['telegram_group_id'] == boundary_group.id}
         self.assertEqual(page2_boundary_ids, boundary_ids)
 
     def test_create_cloud_server_renewal_rejects_deleted_or_ipless_order(self):
@@ -3138,10 +3184,12 @@ class CloudServerServicesTestCase(TestCase):
         self.assertTrue(is_valid_mtproxy_main_port(443))
         self.assertFalse(is_valid_mtproxy_main_port(444))
         self.assertFalse(is_valid_mtproxy_main_port(9529))
-        self.assertFalse(is_valid_mtproxy_main_port(65531))
-        self.assertEqual(get_mtproxy_public_ports(443), [443, 9529, 9530, 9531, 9532, 9533])
-        self.assertEqual(get_mtproxy_public_ports(8443), [8443, 9529, 9530, 9531, 9532, 9533])
+        self.assertFalse(is_valid_mtproxy_main_port(9534))
+        self.assertFalse(is_valid_mtproxy_main_port(65530))
+        self.assertEqual(get_mtproxy_public_ports(443), [443, 9529, 9530, 9531, 9532, 9533, 9534])
+        self.assertEqual(get_mtproxy_public_ports(8443), [8443, 9529, 9530, 9531, 9532, 9533, 9534])
         self.assertEqual(get_mtproxy_port_label(443, 9529), '备用 mtprotoproxy')
+        self.assertEqual(get_mtproxy_port_label(443, 9534), 'SOCKS5')
 
     def test_mtproxy_script_runs_mtg_with_fake_tls_secret(self):
         script = _build_mtproxy_script(443, 'eec3bda48fee649e9ea6e32d33cd5f3dd9617a7572652e6d6963726f736f66742e636f6d')
@@ -3163,9 +3211,70 @@ class CloudServerServicesTestCase(TestCase):
             '端口: 443\n'
             'TG链接: tg://proxy?server=1.2.3.4&port=443&secret=ee1234567890abcdef1234567890abcd\n'
             '扩展链接: tg://proxy?server=1.2.3.4&port=9529&secret=eeabcdefabcdefabcdefabcdefabcdefab\n'
-            '扩展链接: tg://proxy?server=1.2.3.4&port=9530&secret=eeabcdefabcdefabcdefabcdefabcdefab'
+            '扩展链接: tg://proxy?server=1.2.3.4&port=9530&secret=eeabcdefabcdefabcdefabcdefabcdefab\n'
+            'SOCKS5链接: socks5://abcdefabcdefabcdefabcdefabcdefab:abcdefabcdefabcdefabcdefabcdefab@1.2.3.4:9534'
         )
-        self.assertEqual([item['name'] for item in links], ['主代理 mtg', '备用 mtprotoproxy', 'Telemt A 三模式'])
+        self.assertEqual([item['name'] for item in links], ['主代理 mtg', '备用 mtprotoproxy', 'Telemt A 三模式', 'SOCKS5'])
+        self.assertEqual(links[-1]['username'], 'abcdefabcdefabcdefabcdefabcdefab')
+        self.assertEqual(links[-1]['password'], 'abcdefabcdefabcdefabcdefabcdefab')
+
+    def test_compact_proxy_install_note_removes_raw_links(self):
+        note = (
+            'AWS 实例已创建\n'
+            'MTProxy 安装完成\n'
+            'TG链接: tg://proxy?server=1.2.3.4&port=443&secret=ee1234\n'
+            'SOCKS5链接: socks5://abcdefabcdefabcdefabcdefabcdefab:abcdefabcdefabcdefabcdefabcdefab@1.2.3.4:9534\n'
+            '扩展链接: tg://proxy?server=1.2.3.4&port=9530&secret=eeabcd'
+        )
+        links = _extract_proxy_links(note)
+        compact = _compact_proxy_install_note(note, links, 443)
+
+        self.assertIn('AWS 实例已创建', compact)
+        self.assertIn('MTProxy/SOCKS5 安装完成', compact)
+        self.assertIn('SOCKS5端口: 9534', compact)
+        self.assertIn('代理链接已保存到代理链路列表。', compact)
+        self.assertNotIn('tg://proxy?', compact)
+        self.assertNotIn('socks5://', compact)
+
+    def test_append_status_note_replaces_old_sync_status(self):
+        note = append_status_note(
+            '人工备注\n状态: 运行中；公网IP: 1.1.1.1；最近同步: old',
+            '状态: 运行中；公网IP: 1.1.1.1；最近同步: new',
+        )
+
+        self.assertEqual(note, '人工备注\n状态: 运行中；公网IP: 1.1.1.1；最近同步: new')
+
+    def test_cloud_asset_note_display_hides_install_noise(self):
+        note = _display_cloud_asset_note(
+            '人工备注保留\n'
+            'TG链接: tg://proxy?server=1.2.3.4&port=443&secret=ee1234\n'
+            'Get:1 https://cdn-aws.deb.debian.org/debian bookworm InRelease [151 kB]\n'
+            'Reading package lists...\n'
+            'SOCKS5链接: socks5://secret:secret@1.2.3.4:9534\n'
+            'BBR 执行完成\n'
+            '状态: 运行中；公网IP: 1.1.1.1；最近同步: old\n'
+            '状态: 运行中；公网IP: 1.1.1.1；最近同步: new\n'
+            '人工备注保留'
+        )
+
+        self.assertEqual(note, '人工备注保留\nBBR 执行完成\n状态: 运行中；公网IP: 1.1.1.1；最近同步: new')
+
+    def test_cloud_asset_note_appends_clean_install_summary(self):
+        note = _append_cloud_asset_note(
+            '人工备注保留\nTG链接: tg://proxy?server=old&port=443&secret=old',
+            'MTProxy 安装完成\nTG链接: tg://proxy?server=1.2.3.4&port=443&secret=ee1234\nSOCKS5链接: socks5://secret:secret@1.2.3.4:9534',
+            [
+                {'name': '主代理 mtg', 'port': '443', 'url': 'tg://proxy?server=1.2.3.4&port=443&secret=ee1234'},
+                {'name': 'SOCKS5', 'port': '9534', 'url': 'socks5://secret:secret@1.2.3.4:9534'},
+            ],
+            443,
+        )
+
+        self.assertIn('人工备注保留', note)
+        self.assertIn('TG链接: tg://proxy?server=old&port=443&secret=old', note)
+        self.assertIn('MTProxy/SOCKS5 安装完成', note)
+        self.assertIn('SOCKS5端口: 9534', note)
+        self.assertNotIn('socks5://secret:secret@1.2.3.4:9534', note)
 
     def test_mark_success_preserves_existing_main_link_when_install_output_lacks_link(self):
         order = CloudServerOrder.objects.create(
@@ -3678,6 +3787,32 @@ class CloudServerServicesTestCase(TestCase):
         self.assertEqual(row['renew_status'], 'renew_pending')
         self.assertEqual(row['renew_status_label'], '续费待支付')
         self.assertTrue(row['can_renew'])
+
+    def test_unattached_ip_delete_items_compact_display_note(self):
+        asset = CloudAsset.objects.create(
+            kind=CloudAsset.KIND_SERVER,
+            source=CloudAsset.SOURCE_AWS_SYNC,
+            user=self.user,
+            provider='aws_lightsail',
+            region_code=self.plan.region_code,
+            region_name=self.plan.region_name,
+            asset_name='visible-unattached-compact-note',
+            public_ip='5.5.5.8',
+            status=CloudAsset.STATUS_RUNNING,
+            is_active=True,
+            provider_status='未附加固定IP',
+            note='未附加固定IP\nGet: apt noise\ntg://proxy?server=1.1.1.1&port=9528&secret=x\nsocks5://u:p@1.1.1.1:9534\n人工备注保留',
+        )
+
+        items = _unattached_ip_delete_items(limit=20)
+        row = next(item for item in items if item.get('id') == asset.id)
+
+        self.assertIn('未附加固定IP', row['display_note'])
+        self.assertIn('人工备注保留', row['display_note'])
+        self.assertNotIn('tg://proxy?', row['display_note'])
+        self.assertNotIn('socks5://', row['display_note'])
+        self.assertNotIn('Get:', row['display_note'])
+        self.assertIn('tg://proxy?', row['note'])
 
     def test_unattached_ip_delete_items_use_actual_expiry_as_delete_plan(self):
         delete_due_at = timezone.now() + timezone.timedelta(days=3)
@@ -4503,6 +4638,40 @@ class CloudServerServicesTestCase(TestCase):
         self.assertNotIn(missing_asset.id, due_ids)
         self.assertIn(visible_asset.id, due_ids)
 
+    def test_lifecycle_plans_keeps_remarks_out_of_execution_status(self):
+        order = CloudServerOrder.objects.create(
+            order_no='LIFECYCLE-PLAN-NOTE-COLUMNS-1',
+            user=self.user,
+            plan=self.plan,
+            provider=self.plan.provider,
+            region_code=self.plan.region_code,
+            region_name=self.plan.region_name,
+            plan_name=self.plan.plan_name,
+            quantity=1,
+            currency='USDT',
+            total_amount='19.00',
+            pay_amount='19.00',
+            status='suspended',
+            public_ip='3.3.3.37',
+            service_expires_at=timezone.now() - timezone.timedelta(days=3),
+            suspend_at=timezone.now() - timezone.timedelta(days=2),
+            delete_at=timezone.now() - timezone.timedelta(hours=1),
+            provision_note='人工备注：这是一段很长的业务备注，不应该侵占执行状态列。\nGet: apt noise\ntg://proxy?server=1.1.1.1&port=9528&secret=x',
+        )
+        staff_user = get_user_model().objects.create_user(username='staff_lifecycle_plan_columns', password='x', is_staff=True)
+        request = self.factory.get('/api/admin/tasks/plans/', {'limit': 1000})
+        request.user = staff_user
+
+        response = lifecycle_plans(request)
+        data = json.loads(response.content)['data']
+        row = next(item for item in data['due_items'] if item.get('order_id') == order.id)
+
+        self.assertEqual(row['execution_status'], '已到删除时间，待执行删除服务器')
+        self.assertEqual(row['execution_plan'][:5], '删除服务器')
+        self.assertIn('人工备注', row['display_note'])
+        self.assertNotIn('tg://proxy?', row['display_note'])
+        self.assertNotIn('Get:', row['display_note'])
+
     def test_cloud_ip_query_keyboard_limits_non_owner_to_renewal(self):
         from bot.keyboards import cloud_ip_query_result
 
@@ -4669,6 +4838,7 @@ class CloudServerServicesTestCase(TestCase):
         self.assertEqual(payload['data']['removed_servers'], 1)
         self.assertEqual(payload['data']['order_status_changed'], True)
         self.assertTrue(CloudIpLog.objects.filter(order=order, note__contains='后续云同步按全新资源处理').exists())
+        self.assertTrue(CloudIpLog.objects.filter(order=order, asset_name='delete-asset-only', event_type=CloudIpLog.EVENT_DELETED, note__contains='后台手动删除代理列表记录').exists())
         from cloud.management.commands.sync_aws_assets import _resolve_order_for_ip
         self.assertIsNone(_resolve_order_for_ip('8.8.8.8'))
 
@@ -4900,6 +5070,41 @@ class CloudServerServicesTestCase(TestCase):
 
         self.assertEqual(response.status_code, 404)
         self.assertTrue(CloudAsset.objects.filter(id=asset.id).exists())
+
+    def test_servers_list_excludes_unattached_static_ip_rows(self):
+        unattached = Server.objects.create(
+            user=self.user,
+            provider='aws_lightsail',
+            region_code=self.plan.region_code,
+            region_name=self.plan.region_name,
+            server_name='unattached-static-ip-row',
+            public_ip='9.9.9.10',
+            instance_id='',
+            status=Server.STATUS_RUNNING,
+            provider_status='未附加固定IP-续费保留中',
+            note='未附加固定IP',
+        )
+        attached = Server.objects.create(
+            user=self.user,
+            provider='aws_lightsail',
+            region_code=self.plan.region_code,
+            region_name=self.plan.region_name,
+            server_name='attached-server-row',
+            public_ip='9.9.9.11',
+            instance_id='i-attached-server-row',
+            status=Server.STATUS_RUNNING,
+            provider_status='运行中',
+        )
+        staff_user = get_user_model().objects.create_user(username='staff_servers_list_unattached', password='x', is_staff=True)
+        request = RequestFactory().get('/api/dashboard/servers/')
+        request.user = staff_user
+
+        response = servers_list(request)
+        data = json.loads(response.content)['data']
+        ids = {item['id'] for item in data}
+
+        self.assertNotIn(unattached.id, ids)
+        self.assertIn(attached.id, ids)
 
     def test_send_logged_cloud_notice_deduplicates_same_event_and_order(self):
         order = CloudServerOrder.objects.create(

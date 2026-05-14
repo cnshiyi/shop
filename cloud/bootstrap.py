@@ -310,6 +310,7 @@ def _build_mtproxy_script(port: int, desired_secret: str = '', desired_backup_se
     telemt_classic_port = port_plan['telemt_classic']
     telemt_secure_port = port_plan['telemt_secure']
     telemt_tls_port = port_plan['telemt_tls']
+    socks5_port = port_plan['socks5']
     return rf'''#!/usr/bin/env bash
 set -euo pipefail
 export DEBIAN_FRONTEND=noninteractive
@@ -610,6 +611,7 @@ TELEMT_API_ALL=19091
 TELEMT_API_CLASSIC=19092
 TELEMT_API_SECURE=19093
 TELEMT_API_TLS=19094
+SOCKS5_PORT={socks5_port}
 PUBLIC_IP=$(curl -4 -fsS ifconfig.me || hostname -I | awk '{{print $1}}' || echo 127.0.0.1)
 TELEMT_BASE_SECRET=$(printf '%s' "$SECRET" | sed -E 's/^ee//' | cut -c1-32)
 if ! printf '%s' "$TELEMT_BASE_SECRET" | grep -Eq '^[0-9a-fA-F]{{32}}$'; then
@@ -835,6 +837,78 @@ echo "MTPROXY_TELEMT_A_LINKS=$TELEMT_ALL_LINKS"
 echo "MTPROXY_TELEMT_B_CLASSIC_LINKS=$TELEMT_CLASSIC_LINKS"
 echo "MTPROXY_TELEMT_B_SECURE_LINKS=$TELEMT_SECURE_LINKS"
 echo "MTPROXY_TELEMT_B_TLS_LINKS=$TELEMT_TLS_LINKS"
+SOCKS5_USER="$TELEMT_BASE_SECRET"
+SOCKS5_PASS="$TELEMT_BASE_SECRET"
+if ! command -v gost >/dev/null 2>&1; then
+  GOST_VERSION="3.2.4"
+  GOST_ARCH=$(uname -m)
+  case "$GOST_ARCH" in
+    x86_64|amd64) GOST_ARCH="amd64" ;;
+    aarch64|arm64) GOST_ARCH="arm64" ;;
+    *)
+      echo 'MTProxy 安装失败'
+      echo "SOCKS5 安装失败：不支持的系统架构 $GOST_ARCH"
+      echo 'MTPROXY_STATUS=FAILED'
+      echo "MTPROXY_ERROR=SOCKS5 安装失败：不支持的系统架构 $GOST_ARCH"
+      exit 1
+      ;;
+  esac
+  GOST_TMP=$(mktemp -d)
+  curl -fsSL "https://github.com/go-gost/gost/releases/download/v${{GOST_VERSION}}/gost_${{GOST_VERSION}}_linux_${{GOST_ARCH}}.tar.gz" -o "$GOST_TMP/gost.tar.gz"
+  tar -xzf "$GOST_TMP/gost.tar.gz" -C "$GOST_TMP"
+  install -m 0755 "$GOST_TMP/gost" /usr/local/bin/gost
+  rm -rf "$GOST_TMP"
+fi
+cat > /etc/systemd/system/gost-socks5.service <<EOF
+[Unit]
+Description=GOST SOCKS5 Service
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=root
+ExecStart=/usr/local/bin/gost -L "socks5://$SOCKS5_USER:$SOCKS5_PASS@:$SOCKS5_PORT"
+Restart=always
+RestartSec=3
+LimitNOFILE=655350
+
+[Install]
+WantedBy=multi-user.target
+EOF
+systemctl daemon-reload
+systemctl enable gost-socks5.service >/dev/null 2>&1
+systemctl restart gost-socks5.service
+sleep 2
+SOCKS5_PORT_OK=0
+if systemctl is-active --quiet gost-socks5.service; then
+  if command -v ss >/dev/null 2>&1; then
+    if ss -lntup 2>/dev/null | grep -E "[:.]($SOCKS5_PORT)\b" >/dev/null 2>&1; then
+      SOCKS5_PORT_OK=1
+    fi
+  elif command -v netstat >/dev/null 2>&1; then
+    if netstat -lntup 2>/dev/null | grep -E "[:.]($SOCKS5_PORT)\b" >/dev/null 2>&1; then
+      SOCKS5_PORT_OK=1
+    fi
+  fi
+fi
+if [ "$SOCKS5_PORT_OK" != "1" ]; then
+  systemctl status gost-socks5.service --no-pager || true
+  journalctl -u gost-socks5.service -n 80 --no-pager || true
+  echo 'MTProxy 安装失败'
+  echo "SOCKS5 端口 $SOCKS5_PORT 未运行"
+  echo 'MTPROXY_STATUS=FAILED'
+  echo "MTPROXY_ERROR=SOCKS5 端口 $SOCKS5_PORT 未运行"
+  exit 1
+fi
+if command -v ufw >/dev/null 2>&1; then
+  ufw allow "$SOCKS5_PORT"/tcp || true
+fi
+echo "MTPROXY_SOCKS5_STATUS=OK"
+echo "MTPROXY_SOCKS5_PORT=$SOCKS5_PORT"
+echo "MTPROXY_SOCKS5_USER=$SOCKS5_USER"
+echo "MTPROXY_SOCKS5_PASS=$SOCKS5_PASS"
+echo "MTPROXY_SOCKS5_LINK=socks5://$SOCKS5_USER:$SOCKS5_PASS@$PUBLIC_IP:$SOCKS5_PORT"
 PROC_OK=0
 if ps -ef | grep -i 'mtproto-proxy' | grep -v grep >/dev/null 2>&1; then
   PROC_OK=1
@@ -901,6 +975,7 @@ def _sanitize_bootstrap_output(text: str) -> str:
     sanitized_lines = []
     secret_pattern = re.compile(r'(secret(?:=|:|\s+)[\s\"\']*)(ee|dd)?[0-9a-fA-F]{32,}(\b|$)', re.IGNORECASE)
     link_secret_pattern = re.compile(r'(secret=)(ee|dd)?[0-9a-fA-F]{32,}', re.IGNORECASE)
+    socks5_auth_pattern = re.compile(r'(socks5://)([^:\s/@]+):([^@\s]+)@', re.IGNORECASE)
     pass_assignment_pattern = re.compile(r'(PASS=)[^\s]+')
     chpasswd_pattern = re.compile(r'((?:root|admin):)[^\s]+')
     for raw_line in (text or '').splitlines():
@@ -908,6 +983,7 @@ def _sanitize_bootstrap_output(text: str) -> str:
         line = pass_assignment_pattern.sub(r'\1***', line)
         line = chpasswd_pattern.sub(r'\1***', line)
         line = link_secret_pattern.sub(r'\1***', line)
+        line = socks5_auth_pattern.sub(r'\1***:***@', line)
         line = secret_pattern.sub(r'\1***', line)
         sanitized_lines.append(line)
     return '\n'.join(sanitized_lines)
@@ -1212,6 +1288,11 @@ async def install_mtproxy(ip: str, username: str, password: str, port: int = MTP
     mtproxy_backup_restart_link = ''
     telemt_a_port = ''
     telemt_b_ports = ''
+    socks5_status = ''
+    socks5_port = ''
+    socks5_user = ''
+    socks5_pass = ''
+    socks5_link = ''
     sanitized_output = _sanitize_mtproxy_output(output)
     for line in output.splitlines():
         if line.startswith('MTPROXY_SECRET='):
@@ -1240,6 +1321,16 @@ async def install_mtproxy(ip: str, username: str, password: str, port: int = MTP
             telemt_a_port = line.split('=', 1)[1].strip()
         elif line.startswith('MTPROXY_TELEMT_B_PORTS='):
             telemt_b_ports = line.split('=', 1)[1].strip()
+        elif line.startswith('MTPROXY_SOCKS5_STATUS='):
+            socks5_status = line.split('=', 1)[1].strip()
+        elif line.startswith('MTPROXY_SOCKS5_PORT='):
+            socks5_port = line.split('=', 1)[1].strip()
+        elif line.startswith('MTPROXY_SOCKS5_USER='):
+            socks5_user = line.split('=', 1)[1].strip()
+        elif line.startswith('MTPROXY_SOCKS5_PASS='):
+            socks5_pass = line.split('=', 1)[1].strip()
+        elif line.startswith('MTPROXY_SOCKS5_LINK='):
+            socks5_link = line.split('=', 1)[1].strip()
     if sanitized_output:
         _log_multiline_output('[BOOTSTRAP][MTPROXY]', sanitized_output)
     logger.info('%s', _build_bootstrap_full_log('MTPROXY', ip, bootstrap_username, ok, sanitized_output))
@@ -1298,7 +1389,13 @@ async def install_mtproxy(ip: str, username: str, password: str, port: int = MTP
                 add_extra_link(f'tg://proxy?server={ip}&port={telemt_b_port_values[0].strip()}&secret={telemt_b_classic_secret}')
                 add_extra_link(f'tg://proxy?server={ip}&port={telemt_b_port_values[1].strip()}&secret={telemt_b_secure_secret}')
                 add_extra_link(f'tg://proxy?server={ip}&port={telemt_b_port_values[2].strip()}&secret={telemt_b_tls_secret}')
+        if not socks5_link and (socks5_user or core_secret):
+            socks5_port_value = str(socks5_port or actual_port_plan['socks5'])
+            socks5_username = socks5_user or core_secret
+            socks5_password = socks5_pass or socks5_username
+            socks5_link = f'socks5://{socks5_username}:{socks5_password}@{ip}:{socks5_port_value}'
         link_lines = '\n'.join(f'扩展链接: {link}' for link in extra_links)
+        socks5_line = f'\nSOCKS5链接: {socks5_link}' if socks5_link else ''
         verified_output = (
             'MTProxy 安装完成\n'
             f'状态: 运行正常\n'
@@ -1307,8 +1404,10 @@ async def install_mtproxy(ip: str, username: str, password: str, port: int = MTP
             f'备用代理: {mtproxy_backup_provider or "mtprotoproxy"} {mtproxy_backup_status or "OK"} 端口 {mtproxy_backup_port or actual_port_plan["backup"]}\n'
             f'Telemt A(Docker三模式): 端口 {telemt_a_port or actual_port_plan["telemt_all"]}\n'
             f'Telemt B(systemd单模式): 端口 {telemt_b_ports or telemt_b_ports_default}\n'
+            f'SOCKS5: {socks5_status or "OK"} 端口 {socks5_port or actual_port_plan["socks5"]}\n'
             f'TG链接: {tg_link}\n'
             f'分享链接: {tme_link}'
+            + socks5_line
             + (f'\n{link_lines}' if link_lines else '')
         )
         _log_multiline_output('[BOOTSTRAP][MTPROXY_LINK]', verified_output)

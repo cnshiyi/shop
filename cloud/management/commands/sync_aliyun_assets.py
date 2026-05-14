@@ -5,7 +5,7 @@ from django.utils.dateparse import parse_datetime
 
 from bot.api import _provider_status_label
 from cloud.models import CloudAsset, CloudServerOrder, Server
-from cloud.note_utils import append_note
+from cloud.note_utils import append_note, append_status_note
 from cloud.aliyun_simple import _build_client, _region_endpoint, _runtime_options
 from core.cloud_accounts import cloud_account_label, list_active_cloud_accounts
 from cloud.services import record_cloud_ip_log
@@ -332,7 +332,7 @@ class Command(BaseCommand):
                 if asset:
                     asset_defaults['user'] = asset.user
                     asset_defaults['actual_expires_at'] = expires_at or asset.actual_expires_at
-                    asset_defaults['note'] = append_note(asset.note, note)
+                    asset_defaults['note'] = append_status_note(asset.note, note)
                 asset_signature = f'{instance_id or "-"}|{public_ip or "缺失"}'
                 old_status = asset.status if asset else None
                 old_public_ip = asset.public_ip if asset else None
@@ -399,7 +399,7 @@ class Command(BaseCommand):
                 if server:
                     server_defaults['user'] = server.user
                     server_defaults['expires_at'] = expires_at or server.expires_at
-                    server_defaults['note'] = append_note(server.note, note)
+                    server_defaults['note'] = append_status_note(server.note, note)
                 old_server_public_ip = server.public_ip if server else None
                 if server:
                     if old_server_public_ip and old_server_public_ip != public_ip:

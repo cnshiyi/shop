@@ -10,6 +10,7 @@ import string
 import time
 from decimal import Decimal, ROUND_CEILING
 from types import SimpleNamespace
+from urllib.parse import urlparse
 
 from asgiref.sync import async_to_sync, sync_to_async
 from django.db import transaction
@@ -1463,6 +1464,47 @@ def _generate_asset_login_password(length: int = 18) -> str:
     return ''.join(secrets.choice(alphabet) for _ in range(length))
 
 
+def _strip_raw_proxy_link_lines(note: str | None) -> str:
+    lines = []
+    for raw_line in str(note or '').splitlines():
+        line = raw_line.strip()
+        if not line:
+            continue
+        if 'tg://proxy?' in line or 'socks5://' in line:
+            continue
+        if line.startswith(('TG链接:', '分享链接:', '扩展链接:', 'SOCKS5链接:')):
+            continue
+        lines.append(line)
+    return '\n'.join(lines)
+
+
+def _compact_asset_proxy_init_note(note: str, links: list[dict], main_port: int | str | None = None) -> str:
+    if 'MTProxy 安装完成' not in str(note or '') and 'tg://proxy?' not in str(note or '') and 'socks5://' not in str(note or ''):
+        return note
+    mtproxy_ports = []
+    socks5_port = ''
+    for item in links or []:
+        port = str(item.get('port') or '').strip()
+        url = str(item.get('url') or '')
+        if not port:
+            continue
+        if url.startswith('socks5://'):
+            socks5_port = port
+        elif port not in mtproxy_ports:
+            mtproxy_ports.append(port)
+    lines = [
+        'MTProxy/SOCKS5 安装完成',
+        f'主代理端口: {main_port or (mtproxy_ports[0] if mtproxy_ports else "-")}',
+    ]
+    extra_ports = [port for port in mtproxy_ports if str(port) != str(main_port or '')]
+    if extra_ports:
+        lines.append(f'备用/Telemt端口: {", ".join(extra_ports)}')
+    if socks5_port:
+        lines.append(f'SOCKS5端口: {socks5_port}')
+    lines.append('代理链接已保存到代理链路列表。')
+    return '\n'.join(lines)
+
+
 async def initialize_proxy_asset(asset_id: int, user_id: int):
     asset = await sync_to_async(
         lambda: CloudAsset.objects.filter(id=asset_id, user_id=user_id).first()
@@ -1482,19 +1524,21 @@ async def initialize_proxy_asset(asset_id: int, user_id: int):
         return asset, guard_note
     bbr_ok, bbr_note = await install_bbr(public_ip, username, password, use_key_setup=asset.provider == 'aws_lightsail')
     mtproxy_ok, mtproxy_note = await install_mtproxy(public_ip, username, password, port, asset.mtproxy_secret or '', asset.mtproxy_secret or '')
-    note = '\n'.join(part for part in [asset.note, '已执行同步资产代理初始化。', '' if bbr_ok else 'BBR 初始化失败，但继续检查 MTProxy 安装结果。', bbr_note, mtproxy_note] if part)
     if not mtproxy_ok:
-        asset.note = note
+        asset.note = append_note(asset.note, '\n'.join(part for part in ['已执行同步资产代理初始化。', '' if bbr_ok else 'BBR 初始化失败，但继续检查 MTProxy 安装结果。', bbr_note, _strip_raw_proxy_link_lines(_compact_asset_proxy_init_note(mtproxy_note, [], port))] if part))
         await sync_to_async(asset.save)(update_fields=['note', 'updated_at'])
         return asset, 'MTProxy 安装失败，请查看后台日志'
     mtproxy_link, mtproxy_secret, mtproxy_host = _extract_asset_mtproxy_fields(mtproxy_note)
     links = []
     if mtproxy_link:
         links.append({'label': '主链路', 'url': mtproxy_link, 'port': port, 'secret': mtproxy_secret})
-    for index, link in enumerate(re.findall(r'tg://proxy\?[^"\'\s<>]+', mtproxy_note or ''), start=1):
-        if mtproxy_link and link == mtproxy_link:
+    for raw_link in re.findall(r'tg://proxy\?[^"\'\s<>]+', mtproxy_note or ''):
+        if mtproxy_link and raw_link == mtproxy_link:
             continue
-        links.append({'label': f'备用链路 {index}', 'url': link})
+        links.append({'label': f'备用链路 {len(links)}', 'url': raw_link})
+    for raw_link in re.findall(r'socks5://[^"\'\s<>]+', mtproxy_note or ''):
+        parsed = urlparse(raw_link)
+        links.append({'label': 'SOCKS5', 'url': raw_link, 'port': str(parsed.port or '')})
     asset.login_user = username
     asset.login_password = password
     asset.mtproxy_port = port
@@ -1502,7 +1546,7 @@ async def initialize_proxy_asset(asset_id: int, user_id: int):
     asset.mtproxy_secret = mtproxy_secret or asset.mtproxy_secret
     asset.mtproxy_host = mtproxy_host or public_ip
     asset.proxy_links = links or asset.proxy_links
-    asset.note = note
+    asset.note = append_note(asset.note, _strip_raw_proxy_link_lines(_compact_asset_proxy_init_note(mtproxy_note, links, port)))
     await sync_to_async(asset.save)(update_fields=['login_user', 'login_password', 'mtproxy_port', 'mtproxy_link', 'mtproxy_secret', 'mtproxy_host', 'proxy_links', 'note', 'updated_at'])
     return asset, None
 
