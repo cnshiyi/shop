@@ -132,8 +132,8 @@ from core.models import SiteConfig
 from core.texts import site_text
 from core.trongrid import build_trongrid_headers
 from cloud.provisioning import get_provision_progress, provision_cloud_server, reprovision_cloud_server_bootstrap
-from cloud.bootstrap import _probe_mtproxy_state, build_mtproxy_links
-from cloud.ports import is_valid_mtproxy_main_port, mtproxy_port_validation_hint
+from cloud.bootstrap import _normalize_mtproxy_core_secret, _probe_mtproxy_state, build_mtproxy_links
+from cloud.ports import get_mtproxy_port_plan, is_valid_mtproxy_main_port, mtproxy_port_validation_hint
 
 logger = logging.getLogger(__name__)
 
@@ -1439,11 +1439,40 @@ def _cloud_server_created_text(order, port: int | None = None, title: str | None
     actual_port = port or getattr(order, 'mtproxy_port', '') or ''
     raw_secret = getattr(order, 'mtproxy_secret', '') or ''
     display_secret = ''
-    for item in getattr(order, 'proxy_links', None) or []:
-        link = item.get('url') if isinstance(item, dict) else ''
+    def _link_port(link: str) -> str:
+        try:
+            return (parse_qs(urlparse(str(link or '')).query).get('port') or [''])[0]
+        except Exception:
+            return ''
+
+    def _telegram_socks_link(link: str) -> str:
+        try:
+            parsed = urlparse(str(link or ''))
+            if parsed.scheme != 'socks5' or not parsed.hostname or not parsed.port:
+                return ''
+            username = unquote(parsed.username or '')
+            password = unquote(parsed.password or '')
+            return f'tg://socks?server={parsed.hostname}&port={parsed.port}&user={username}&pass={password}'
+        except Exception:
+            return ''
+
+    def add_extra_link(link: str):
+        link = str(link or '').strip().strip('"\'，。')
+        if link.startswith('socks5://'):
+            telegram_socks_link = _telegram_socks_link(link)
+            if not telegram_socks_link:
+                return
+            link = telegram_socks_link
+        if link.startswith(('tg://proxy?', 'https://t.me/proxy?')) and _link_port(link) == str(get_mtproxy_port_plan(actual_port or 9528)['socks5']):
+            return
         if link and link not in seen_links:
             extra_links.append(link)
             seen_links.add(link)
+
+    for item in getattr(order, 'proxy_links', None) or []:
+        link = item.get('url') if isinstance(item, dict) else ''
+        if link:
+            add_extra_link(link)
             if not mtproxy_link:
                 mtproxy_link = link
     note = getattr(order, 'provision_note', '') or ''
@@ -1456,12 +1485,20 @@ def _cloud_server_created_text(order, port: int | None = None, title: str | None
             share_link = line[line.find('https://t.me/proxy?'):].strip()
         if 'tg://proxy?' in line:
             link = line[line.find('tg://proxy?'):].strip().strip('"\',，。')
-            if link and link not in seen_links:
-                extra_links.append(link)
-                seen_links.add(link)
+            add_extra_link(link)
             if not mtproxy_link:
                 mtproxy_link = link
-    one_click_link = share_link or mtproxy_link or '-'
+        if 'socks5://' in line:
+            add_extra_link(line[line.find('socks5://'):].strip())
+    has_socks5_link = any(str(link).startswith(('socks5://', 'tg://socks?')) for link in extra_links)
+    if not has_socks5_link and 'SOCKS5:' in note and public_ip and raw_secret:
+        socks5_secret = _normalize_mtproxy_core_secret(raw_secret) or raw_secret
+        socks5_port = get_mtproxy_port_plan(actual_port or 9528)['socks5']
+        port_match = re.search(r'SOCKS5:\s*[^\n]*?端口\s*(\d+)', note)
+        if port_match:
+            socks5_port = int(port_match.group(1))
+        add_extra_link(f'socks5://{socks5_secret}:{socks5_secret}@{public_ip}:{socks5_port}')
+    one_click_link = mtproxy_link or share_link or '-'
     if 'secret=' in one_click_link:
         display_secret = one_click_link.split('secret=', 1)[1].split('&', 1)[0].strip()
     elif mtproxy_link and 'secret=' in mtproxy_link:
@@ -1477,7 +1514,11 @@ def _cloud_server_created_text(order, port: int | None = None, title: str | None
     if additional_links:
         lines.append('')
         lines.append('备用链路:')
-        for index, link in enumerate(additional_links[:8], start=1):
+        socks5_links = [link for link in additional_links if str(link).startswith(('socks5://', 'tg://socks?'))]
+        other_links = [link for link in additional_links if not str(link).startswith(('socks5://', 'tg://socks?'))]
+        for link in socks5_links:
+            lines.append(f'SOCKS5: {escape(link)}')
+        for index, link in enumerate(other_links[:8], start=1):
             lines.append(f'{index}. {escape(link)}')
     lines.append('')
     lines.append(_cloud_order_plan_text(order))

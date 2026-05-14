@@ -891,7 +891,7 @@ async def reprovision_cloud_server_bootstrap(order_id: int):
     mtproxy_ok, mtproxy_note = await install_mtproxy(order.public_ip, bootstrap_user, order.login_password, order.mtproxy_port, order.mtproxy_secret or '', order.mtproxy_secret or '')
     logger.info('[PROVISION][RETRY] mtproxy_result order=%s ok=%s note=%s', order.order_no, mtproxy_ok, (mtproxy_note or '')[:1000])
     bbr_warning = '' if bbr_ok else 'BBR 初始化失败，但 MTProxy 已安装成功，订单按代理可用处理。'
-    note = '\n'.join(part for part in [order.provision_note, '已执行重试初始化。', bbr_warning, bbr_note, mtproxy_note] if part)
+    note = '\n'.join(part for part in ['已执行重试初始化。', bbr_warning, bbr_note, mtproxy_note] if part)
     if not mtproxy_ok:
         saved = await _mark_failed(order_id, note)
         clear_provision_progress(order_id)

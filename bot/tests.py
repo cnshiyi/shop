@@ -10,7 +10,7 @@ from django.test import RequestFactory, SimpleTestCase, TestCase
 from django.utils import timezone
 
 from bot.api import DASHBOARD_SESSION_IDLE_SECONDS, _authenticate_dashboard_request, test_daily_expiry_summary_notification
-from bot.handlers import _retained_ip_renewal_plan_keyboard, _validate_reinstall_proxy_link
+from bot.handlers import _cloud_server_created_text, _retained_ip_renewal_plan_keyboard, _validate_reinstall_proxy_link
 from bot.telegram_listener import _build_bark_request, _build_push_payload, _is_self_sender
 from core.texts import BOT_TEXTS
 
@@ -273,6 +273,72 @@ class RetainedIpRenewalUiTestCase(SimpleTestCase):
 
         self.assertTrue(ok)
         self.assertEqual(reason, '主链接格式和 IP 校验通过')
+
+    def test_cloud_server_created_text_includes_socks5_proxy_link(self):
+        order = SimpleNamespace(
+            public_ip='1.2.3.4',
+            mtproxy_port=443,
+            mtproxy_secret='eeabcdefabcdefabcdefabcdefabcdefab617a7572652e6d6963726f736f66742e636f6d',
+            mtproxy_link='tg://proxy?server=1.2.3.4&port=443&secret=eeabcdefabcdefabcdefabcdefabcdefab617a7572652e6d6963726f736f66742e636f6d',
+            proxy_links=[
+                {'name': '主代理 mtg', 'url': 'tg://proxy?server=1.2.3.4&port=443&secret=eeabcdefabcdefabcdefabcdefabcdefab617a7572652e6d6963726f736f66742e636f6d', 'port': '443'},
+                {'name': 'SOCKS5', 'url': 'socks5://abcdefabcdefabcdefabcdefabcdefab:abcdefabcdefabcdefabcdefabcdefab@1.2.3.4:9534', 'port': '9534'},
+            ],
+            provision_note='',
+            service_expires_at=None,
+            auto_renew_enabled=False,
+            status='completed',
+        )
+
+        with patch('bot.handlers._bot_text', side_effect=lambda _key, default: default), patch('bot.handlers.get_runtime_config', side_effect=lambda _key, default=None: default):
+            text = _cloud_server_created_text(order, 443)
+
+        self.assertIn('SOCKS5:', text)
+        self.assertIn('tg://socks?server=1.2.3.4&amp;port=9534&amp;user=abcdefabcdefabcdefabcdefabcdefab&amp;pass=abcdefabcdefabcdefabcdefabcdefab', text)
+        self.assertNotIn('socks5://abcdefabcdefabcdefabcdefabcdefab', text)
+
+    def test_cloud_server_created_text_recovers_socks5_from_install_note(self):
+        order = SimpleNamespace(
+            public_ip='1.2.3.4',
+            mtproxy_port=443,
+            mtproxy_secret='eeabcdefabcdefabcdefabcdefabcdefab617a7572652e6d6963726f736f66742e636f6d',
+            mtproxy_link='tg://proxy?server=1.2.3.4&port=443&secret=eeabcdefabcdefabcdefabcdefabcdefab617a7572652e6d6963726f736f66742e636f6d',
+            proxy_links=[],
+            provision_note='MTProxy 安装完成\nSOCKS5: OK 端口 9534',
+            service_expires_at=None,
+            auto_renew_enabled=False,
+            status='completed',
+        )
+
+        with patch('bot.handlers._bot_text', side_effect=lambda _key, default: default), patch('bot.handlers.get_runtime_config', side_effect=lambda _key, default=None: default):
+            text = _cloud_server_created_text(order, 443)
+
+        self.assertIn('SOCKS5:', text)
+        self.assertIn('tg://socks?server=1.2.3.4&amp;port=9534&amp;user=abcdefabcdefabcdefabcdefabcdefab&amp;pass=abcdefabcdefabcdefabcdefabcdefab', text)
+        self.assertNotIn('socks5://abcdefabcdefabcdefabcdefabcdefab', text)
+
+    def test_cloud_server_created_text_prefers_main_proxy_link_for_one_click(self):
+        order = SimpleNamespace(
+            public_ip='1.2.3.4',
+            mtproxy_port=9528,
+            mtproxy_secret='eeabcdefabcdefabcdefabcdefabcdefab617a7572652e6d6963726f736f66742e636f6d',
+            mtproxy_link='tg://proxy?server=1.2.3.4&port=9528&secret=main',
+            proxy_links=[
+                {'name': '主代理 mtg', 'url': 'tg://proxy?server=1.2.3.4&port=9528&secret=main', 'port': '9528'},
+                {'name': 'SOCKS5', 'url': 'socks5://abcdefabcdefabcdefabcdefabcdefab:abcdefabcdefabcdefabcdefabcdefab@1.2.3.4:9534', 'port': '9534'},
+            ],
+            provision_note='分享链接: https://t.me/proxy?server=1.2.3.4&port=9534&secret=wrong',
+            service_expires_at=None,
+            auto_renew_enabled=False,
+            status='completed',
+        )
+
+        with patch('bot.handlers._bot_text', side_effect=lambda _key, default: default), patch('bot.handlers.get_runtime_config', side_effect=lambda _key, default=None: default):
+            text = _cloud_server_created_text(order, 9528)
+
+        self.assertIn('一键链接: tg://proxy?server=1.2.3.4&amp;port=9528&amp;secret=main', text)
+        self.assertNotIn('一键链接: https://t.me/proxy?server=1.2.3.4&amp;port=9534&amp;secret=wrong', text)
+        self.assertNotIn('port=9534&amp;secret=wrong', text)
 
     def test_retained_ip_renewal_plan_keyboard_uses_three_columns(self):
         plans = [SimpleNamespace(id=index) for index in range(1, 8)]
