@@ -1039,7 +1039,6 @@ def _unattached_ip_delete_history_q():
     terminal_q = Q(event_type__in=[CloudIpLog.EVENT_DELETED, CloudIpLog.EVENT_RECYCLED])
     explicit_note_q = (
         Q(note__icontains='未附加固定IP')
-        | Q(note__icontains='未附加 IP')
         | Q(note__icontains='未附加IP')
         | Q(note__icontains='AWS 同步删除未附加固定 IP')
         | Q(note__icontains='IP校验发现云上不存在，已标记删除')
@@ -1050,7 +1049,6 @@ def _unattached_ip_delete_history_q():
     )
     asset_q = (
         Q(asset__provider_status__icontains='未附加')
-        | Q(asset__provider_status__icontains='固定IP')
         | Q(asset__note__icontains='未附加固定IP')
         | Q(asset__provider_resource_id__icontains='StaticIp')
     ) & (Q(asset__instance_id__isnull=True) | Q(asset__instance_id=''))

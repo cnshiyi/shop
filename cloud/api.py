@@ -477,8 +477,13 @@ def _cloud_asset_risk_state(asset, order, expires_at, provider_status_label, dis
     shutdown_enabled = _cloud_asset_shutdown_enabled(asset, order)
     is_unattached_ip = (
         '未附加' in provider_text
+        or '固定IP保留中' in provider_text
+        or '固定 IP 保留中' in provider_text
         or '未附加IP' in note_text
+        or '未附加 IP' in note_text
         or '未附加固定IP' in note_text
+        or '固定IP保留中' in note_text
+        or '固定 IP 保留中' in note_text
         or status_text == 'unattached'
     )
 
@@ -4250,6 +4255,9 @@ def _resolve_sync_account_for_asset(asset):
     account = getattr(asset, 'cloud_account', None)
     if account and account.provider == provider and account.is_active:
         return account
+    order_account = getattr(getattr(asset, 'order', None), 'cloud_account', None)
+    if order_account and order_account.provider == provider and order_account.is_active:
+        return order_account
     account_label = str(
         getattr(asset, 'account_label', '')
         or cloud_account_label(account)
@@ -4266,6 +4274,35 @@ def _resolve_sync_account_for_asset(asset):
             if cloud_account_label(candidate) == account_label:
                 return candidate
     return None
+
+
+def _asset_retained_static_ip_sync_scope(asset):
+    public_ip = str(getattr(asset, 'public_ip', '') or getattr(asset, 'previous_public_ip', '') or '').strip()
+    order = getattr(asset, 'order', None)
+    provider_status = str(getattr(asset, 'provider_status', '') or '')
+    note = str(getattr(asset, 'note', '') or '')
+    is_retained = bool(
+        public_ip
+        and not str(getattr(asset, 'instance_id', '') or '').strip()
+        and (
+            '固定IP保留中' in provider_status
+            or '固定 IP 保留中' in provider_status
+            or '固定IP保留中' in note
+            or '固定 IP 保留中' in note
+            or (
+                order
+                and getattr(order, 'status', '') == 'deleted'
+                and getattr(order, 'ip_recycle_at', None)
+            )
+        )
+    )
+    if not is_retained:
+        return None
+    static_name = str(getattr(order, 'static_ip_name', '') if order else '').strip()
+    provider_resource_id = str(getattr(asset, 'provider_resource_id', '') or '').strip()
+    if not static_name and 'StaticIp' in provider_resource_id:
+        static_name = provider_resource_id.rsplit('/', 1)[-1]
+    return {'instance_id': static_name, 'public_ip': public_ip}
 
 
 def _provider_sync_source(provider: str) -> str:
@@ -4365,6 +4402,13 @@ def sync_cloud_asset_status(request, asset_id):
         return _error('未找到可用的云账号配置，请先检查该代理绑定的云账号是否启用', status=400)
 
     region_code = str(getattr(asset, 'region_code', '') or getattr(account, 'region_hint', '') or '').strip()
+    retained_scope = _asset_retained_static_ip_sync_scope(asset) if provider == CloudAccountConfig.PROVIDER_AWS else None
+    scope_instance_id = (
+        (retained_scope or {}).get('instance_id')
+        if retained_scope is not None
+        else (asset.instance_id or asset.provider_resource_id or asset.asset_name or '')
+    )
+    scope_public_ip = (retained_scope or {}).get('public_ip') or asset.public_ip or asset.previous_public_ip or ''
     command_output = io.StringIO()
     errors = []
     command_name = 'sync_aws_assets' if provider == CloudAccountConfig.PROVIDER_AWS else 'sync_aliyun_assets'
@@ -4373,8 +4417,8 @@ def sync_cloud_asset_status(request, asset_id):
         'provider': provider,
         'region_code': region_code or 'all',
         'account_id': account.id,
-        'instance_id': asset.instance_id or '',
-        'public_ip': asset.public_ip or asset.previous_public_ip or '',
+        'instance_id': scope_instance_id,
+        'public_ip': scope_public_ip,
     }
     logger.info('CLOUD_SYNC_SINGLE_REQUEST_START run_id=%s payload=%s', sync_run_id, request_payload)
     try:
@@ -4383,8 +4427,8 @@ def sync_cloud_asset_status(request, asset_id):
             command_kwargs['region'] = region_code
         command_kwargs.update({
             'asset_id': str(asset.id),
-            'instance_id': asset.instance_id or asset.provider_resource_id or asset.asset_name or '',
-            'public_ip': asset.public_ip or asset.previous_public_ip or '',
+            'instance_id': scope_instance_id,
+            'public_ip': scope_public_ip,
         })
         _call_command_capture(command_name, **command_kwargs)
         logger.info('CLOUD_SYNC_SINGLE_REQUEST_DONE run_id=%s asset_id=%s command=%s kwargs=%s', sync_run_id, asset.id, command_name, {key: value for key, value in command_kwargs.items() if key != 'stdout'})
@@ -4412,8 +4456,8 @@ def sync_cloud_asset_status(request, asset_id):
         'logs': _sync_log_tail(command_output),
         'scope': {
             'asset_id': asset.id,
-            'instance_id': asset.instance_id or '',
-            'public_ip': asset.public_ip or asset.previous_public_ip or '',
+            'instance_id': scope_instance_id,
+            'public_ip': scope_public_ip,
         },
     }
     if not errors:

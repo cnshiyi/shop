@@ -5849,6 +5849,69 @@ class CloudServerServicesTestCase(TestCase):
         self.assertEqual(mocked.call_args.kwargs['account_id'], str(account.id))
         self.assertEqual(mocked.call_args.kwargs['region'], 'ap-southeast-1')
 
+    def test_sync_retained_ip_asset_uses_order_account_and_static_ip_scope(self):
+        account = CloudAccountConfig.objects.create(
+            provider=CloudAccountConfig.PROVIDER_AWS,
+            name='single-retained-ip-sync',
+            external_account_id='acct-single-retained-ip-sync',
+            access_key='ak',
+            secret_key='sk',
+            region_hint='ap-southeast-1',
+            is_active=True,
+        )
+        order = CloudServerOrder.objects.create(
+            order_no='SINGLE-RETAINED-IP-SYNC-1',
+            user=self.user,
+            plan=self.plan,
+            provider=self.plan.provider,
+            cloud_account=account,
+            account_label=cloud_account_label(account),
+            region_code='ap-southeast-1',
+            region_name='新加坡',
+            plan_name=self.plan.plan_name,
+            quantity=1,
+            currency='USDT',
+            total_amount='19.00',
+            pay_amount='19.00',
+            status='deleted',
+            public_ip='3.3.3.44',
+            previous_public_ip='3.3.3.44',
+            static_ip_name='StaticIp-single-retained-sync',
+            ip_recycle_at=timezone.now() + timezone.timedelta(days=10),
+        )
+        asset = CloudAsset.objects.create(
+            kind=CloudAsset.KIND_SERVER,
+            source=CloudAsset.SOURCE_ORDER,
+            order=order,
+            user=self.user,
+            provider='aws_lightsail',
+            region_code='ap-southeast-1',
+            region_name='新加坡',
+            asset_name='stale-deleted-instance-name',
+            public_ip='3.3.3.44',
+            previous_public_ip='3.3.3.44',
+            actual_expires_at=order.ip_recycle_at,
+            status=CloudAsset.STATUS_DELETED,
+            provider_status='固定IP保留中-实例已删除',
+            is_active=False,
+        )
+        staff_user = get_user_model().objects.create_user(username='staff_retained_asset_sync_one', password='x', is_staff=True, is_superuser=True)
+        with patch('cloud.api._call_command_capture', return_value=(object(), None)) as mocked:
+            request = RequestFactory().post(f'/api/dashboard/cloud-assets/{asset.id}/sync/', data='{}', content_type='application/json')
+            request.user = staff_user
+            response = sync_cloud_asset_status(request, asset.id)
+
+        self.assertEqual(response.status_code, 200)
+        payload = json.loads(response.content)['data']
+        self.assertTrue(payload['ok'])
+        self.assertEqual(payload['scope']['instance_id'], 'StaticIp-single-retained-sync')
+        self.assertEqual(payload['scope']['public_ip'], '3.3.3.44')
+        mocked.assert_called_once()
+        self.assertEqual(mocked.call_args.args[0], 'sync_aws_assets')
+        self.assertEqual(mocked.call_args.kwargs['account_id'], str(account.id))
+        self.assertEqual(mocked.call_args.kwargs['instance_id'], 'StaticIp-single-retained-sync')
+        self.assertEqual(mocked.call_args.kwargs['public_ip'], '3.3.3.44')
+
     def test_proxy_asset_ip_query_exposes_manual_expiry_for_admin_and_user(self):
         expires_at = timezone.now() + timezone.timedelta(days=12)
         visible_asset = CloudAsset.objects.create(
@@ -6451,6 +6514,11 @@ class CloudServerServicesTestCase(TestCase):
         self.assertEqual(history_row['deletion_source_label'], '人工手动删除')
         self.assertIn('manual lifecycle delete ok', history_row['note'])
         self.assertEqual(history_row['execution_status'], '已删除')
+        ip_delete_rows = [
+            item for item in data['ip_delete_items']
+            if item.get('order_id') == order.id or item.get('public_ip') == '52.77.18.247'
+        ]
+        self.assertFalse(ip_delete_rows)
 
     def test_lifecycle_plans_compact_request_keeps_ip_delete_history_item(self):
         now = timezone.now()
@@ -10760,6 +10828,14 @@ class CloudServerServicesTestCase(TestCase):
         self.assertEqual(server.status, Server.STATUS_DELETED)
         self.assertEqual(server.provider_status, '固定IP保留中-实例已删除')
         self.assertFalse(any(getattr(item, 'asset_id', None) == asset.id for item in async_to_sync(list_user_cloud_servers)(self.user.id)))
+        admin = get_user_model().objects.create_user(username='admin_retained_ip_asset_filter', password='x', is_staff=True)
+        request = self.factory.get('/api/dashboard/cloud-assets/', {'paginated': '1', 'risk_status': 'unattached_ip'})
+        request.user = admin
+        response = cloud_assets_list(request)
+        payload = json.loads(response.content.decode('utf-8'))['data']
+        retained_row = next(item for item in payload['items'] if item['id'] == asset.id)
+        self.assertEqual(retained_row['risk_status'], 'unattached_ip')
+        self.assertIn('unattached_ip', retained_row['risk_statuses'])
 
     def test_unattached_static_ip_is_not_auto_renewed(self):
         expires_at = timezone.now() + timezone.timedelta(hours=8)
