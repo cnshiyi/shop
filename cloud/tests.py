@@ -40,7 +40,7 @@ from cloud.provisioning import (
 )
 from cloud.services import _cloud_asset_deleted_or_missing, apply_cloud_server_renewal, create_cloud_server_order, create_cloud_server_rebuild_order, create_cloud_server_renewal, create_cloud_server_renewal_by_public_query, create_cloud_server_renewal_for_user, create_cloud_server_upgrade_order, ensure_cloud_asset_operation_order, get_cloud_server_by_ip, get_cloud_server_by_ip_for_user, get_group_proxy_asset_detail, get_proxy_asset_by_ip_for_admin, get_proxy_asset_by_ip_for_user, get_user_proxy_asset_detail, list_all_auto_renew_cloud_servers, list_cloud_asset_renewal_plans, list_cloud_server_upgrade_plans, list_group_cloud_servers, list_retained_ip_renewal_plans, list_retained_ip_renewal_plans_by_asset, list_user_cloud_servers, mark_cloud_server_ip_change_requested, mark_cloud_server_reinit_requested, pay_cloud_server_order_with_balance, pay_cloud_server_renewal_with_balance, prepare_cloud_asset_renewal_with_link, prepare_retained_ip_renewal_with_link, rebind_cloud_server_user, record_cloud_ip_log, replace_cloud_asset_order_by_admin, run_cloud_server_renewal_postcheck, set_group_cloud_server_auto_renew
 from cloud.sync_safety import get_missing_confirmation_threshold
-from cloud.api import _apply_server_missing_state, _cloud_order_source_tags, _display_cloud_asset_note, _fetch_address_chain_balances, auto_renew_task_detail, cloud_assets_list, cloud_order_detail, cloud_orders_list, delete_cloud_asset, delete_cloud_order, delete_notice_history, delete_server, notice_task_detail, refresh_notice_plan_table, run_auto_renew_order, run_auto_renew_tasks, servers_list, sync_cloud_asset_status, sync_cloud_assets, tasks_overview, update_cloud_asset, update_cloud_order_status
+from cloud.api import _apply_server_missing_state, _cloud_order_source_tags, _display_cloud_asset_note, _fetch_address_chain_balances, auto_renew_task_detail, cloud_assets_list, cloud_order_detail, cloud_orders_list, delete_cloud_asset, delete_cloud_order, delete_notice_history, delete_server, notice_task_detail, refresh_notice_plan_table, run_auto_renew_order, run_auto_renew_tasks, servers_list, sync_cloud_asset_status, sync_cloud_assets, tasks_overview, update_cloud_asset, update_cloud_order_status, update_notice_plan_text, update_notice_switches
 from core.cloud_accounts import cloud_account_label, cloud_account_label_variants, list_cloud_accounts_by_server_load
 from core.models import CloudAccountConfig, SiteConfig
 from core.persistence import bump_daily_address_stat
@@ -1345,8 +1345,42 @@ class CloudServerServicesTestCase(TestCase):
             order.refresh_from_db()
             self.assertIsNotNone(order.delete_notice_sent_at)
 
+    def test_update_cloud_asset_write_requires_superuser(self):
+        staff = get_user_model().objects.create_user(username='staff_asset_update_forbidden', password='x', is_staff=True)
+        asset = CloudAsset.objects.create(
+            kind=CloudAsset.KIND_SERVER,
+            source=CloudAsset.SOURCE_AWS_SYNC,
+            user=self.user,
+            provider='aws_lightsail',
+            region_code=self.plan.region_code,
+            region_name=self.plan.region_name,
+            asset_name='staff-forbidden-update-asset',
+            public_ip='11.11.10.10',
+            status=CloudAsset.STATUS_RUNNING,
+            price='19.00',
+        )
+
+        request = self.factory.patch(
+            '/api/dashboard/cloud-assets/%s/' % asset.id,
+            data=json.dumps({
+                'public_ip': '11.11.10.11',
+                'actual_expires_at': (timezone.now() + timezone.timedelta(days=10)).isoformat(),
+                'price': '29.00',
+            }),
+            content_type='application/json',
+        )
+        request.user = staff
+
+        response = update_cloud_asset(request, asset.id)
+
+        self.assertEqual(response.status_code, 403)
+        self.assertEqual(json.loads(response.content.decode('utf-8'))['message'], '需要超级管理员权限')
+        asset.refresh_from_db()
+        self.assertEqual(asset.public_ip, '11.11.10.10')
+        self.assertEqual(asset.price, Decimal('19.00'))
+
     def test_update_cloud_asset_rejects_collapsed_telegram_group_binding(self):
-        admin = get_user_model().objects.create_user(username='admin_bind_group', password='x', is_staff=True)
+        admin = get_user_model().objects.create_user(username='admin_bind_group', password='x', is_staff=True, is_superuser=True)
         asset = CloudAsset.objects.create(
             kind=CloudAsset.KIND_SERVER,
             source=CloudAsset.SOURCE_AWS_SYNC,
@@ -1396,7 +1430,7 @@ class CloudServerServicesTestCase(TestCase):
         self.assertEqual(asset.telegram_group_id, visible_group.id)
 
     def test_update_cloud_asset_allows_clearing_telegram_group_binding(self):
-        admin = get_user_model().objects.create_user(username='admin_unbind_group', password='x', is_staff=True)
+        admin = get_user_model().objects.create_user(username='admin_unbind_group', password='x', is_staff=True, is_superuser=True)
         group = TelegramGroupFilter.objects.create(
             chat_id=-1002001,
             title='Bound Group',
@@ -3356,7 +3390,7 @@ class CloudServerServicesTestCase(TestCase):
             actual_expires_at=old_expiry,
             price='19.00',
         )
-        staff_user = get_user_model().objects.create_user(username='staff_api_price_replace', password='x', is_staff=True)
+        staff_user = get_user_model().objects.create_user(username='staff_api_price_replace', password='x', is_staff=True, is_superuser=True)
         request = RequestFactory().patch(
             f'/api/dashboard/cloud-assets/{asset.id}/',
             data=json.dumps({
@@ -3567,7 +3601,7 @@ class CloudServerServicesTestCase(TestCase):
             public_ip=order.public_ip,
             expires_at=order.service_expires_at,
         )
-        staff_user = get_user_model().objects.create_user(username='staff_asset_ip_update', password='x', is_staff=True)
+        staff_user = get_user_model().objects.create_user(username='staff_asset_ip_update', password='x', is_staff=True, is_superuser=True)
         request = RequestFactory().patch(
             f'/api/dashboard/cloud-assets/{asset.id}/',
             data=json.dumps({'public_ip': '4.4.4.43'}),
@@ -3632,7 +3666,7 @@ class CloudServerServicesTestCase(TestCase):
             public_ip='4.4.4.45',
             expires_at=order.service_expires_at,
         )
-        staff_user = get_user_model().objects.create_user(username='staff_asset_ip_presync', password='x', is_staff=True)
+        staff_user = get_user_model().objects.create_user(username='staff_asset_ip_presync', password='x', is_staff=True, is_superuser=True)
         request = RequestFactory().patch(
             f'/api/dashboard/cloud-assets/{asset.id}/',
             data=json.dumps({'public_ip': '4.4.4.45'}),
@@ -3717,7 +3751,7 @@ class CloudServerServicesTestCase(TestCase):
             public_ip=order.public_ip,
             expires_at=order.service_expires_at,
         )
-        staff_user = get_user_model().objects.create_user(username='staff_asset_scoped_server', password='x', is_staff=True)
+        staff_user = get_user_model().objects.create_user(username='staff_asset_scoped_server', password='x', is_staff=True, is_superuser=True)
         request = RequestFactory().patch(
             f'/api/dashboard/cloud-assets/{asset.id}/',
             data=json.dumps({'public_ip': '4.4.4.51'}),
@@ -3763,7 +3797,7 @@ class CloudServerServicesTestCase(TestCase):
             public_ip='4.4.4.70',
             expires_at=asset.actual_expires_at,
         )
-        staff_user = get_user_model().objects.create_user(username='staff_legacy_label_update', password='x', is_staff=True)
+        staff_user = get_user_model().objects.create_user(username='staff_legacy_label_update', password='x', is_staff=True, is_superuser=True)
         request = RequestFactory().patch(
             f'/api/dashboard/cloud-assets/{asset.id}/',
             data=json.dumps({'public_ip': '4.4.4.71'}),
@@ -3796,7 +3830,7 @@ class CloudServerServicesTestCase(TestCase):
             public_ip='4.4.4.61',
             actual_expires_at=timezone.now() + timezone.timedelta(days=20),
         )
-        staff_user = get_user_model().objects.create_user(username='staff_create_server_account_label', password='x', is_staff=True)
+        staff_user = get_user_model().objects.create_user(username='staff_create_server_account_label', password='x', is_staff=True, is_superuser=True)
         request = RequestFactory().patch(
             f'/api/dashboard/cloud-assets/{asset.id}/',
             data=json.dumps({'note': '触发补建服务器记录'}),
@@ -4674,7 +4708,7 @@ class CloudServerServicesTestCase(TestCase):
             price='29.00',
         )
         new_user = TelegramUser.objects.create(tg_user_id=990003, username='aliyun_target')
-        staff_user = get_user_model().objects.create_user(username='staff_api_1', password='x', is_staff=True)
+        staff_user = get_user_model().objects.create_user(username='staff_api_1', password='x', is_staff=True, is_superuser=True)
         request = RequestFactory().patch(
             f'/api/dashboard/cloud-assets/{asset.id}/',
             data=json.dumps({
@@ -6532,6 +6566,58 @@ class CloudServerServicesTestCase(TestCase):
         self.assertEqual(row['ip'], '7.7.7.71')
         self.assertTrue(CloudNoticePlan.objects.filter(notice_type='renew_notice', order=order, data_group=CloudNoticePlan.DATA_GROUP_ACTIVE).exists())
 
+    def test_notice_write_actions_require_superuser(self):
+        staff_user = get_user_model().objects.create_user(username='staff_notice_write_blocked', password='x', is_staff=True)
+        order = CloudServerOrder.objects.create(
+            order_no='NOTICE-WRITE-BLOCKED-1',
+            user=self.user,
+            plan=self.plan,
+            provider=self.plan.provider,
+            region_code=self.plan.region_code,
+            region_name=self.plan.region_name,
+            plan_name=self.plan.plan_name,
+            quantity=1,
+            currency='USDT',
+            total_amount='19.00',
+            pay_amount='19.00',
+            status='completed',
+            public_ip='7.7.7.73',
+        )
+        log = CloudUserNoticeLog.objects.create(
+            user=self.user,
+            order=order,
+            batch_id='notice-write-blocked-1',
+            event_type='renew_notice_batch',
+            target_chat_id=123456,
+            order_no=order.order_no,
+            ip=order.public_ip,
+            is_batch=True,
+            delivered=True,
+            text_preview='到期提醒：测试权限拦截',
+            extra={'order_ids': [order.id]},
+        )
+
+        switch_request = self.factory.post(
+            '/api/admin/tasks/notices/switches/',
+            data=json.dumps({'switches': [{'key': 'cloud_daily_expiry_summary_enabled', 'enabled': False}]}),
+            content_type='application/json',
+        )
+        switch_request.user = staff_user
+        self.assertEqual(update_notice_switches(switch_request).status_code, 403)
+
+        text_request = self.factory.post(
+            '/api/admin/tasks/notices/text/',
+            data=json.dumps({'notice_event': 'renew_notice', 'order_ids': [order.id], 'notice_text': 'blocked'}),
+            content_type='application/json',
+        )
+        text_request.user = staff_user
+        self.assertEqual(update_notice_plan_text(text_request).status_code, 403)
+
+        delete_request = self.factory.post(f'/api/admin/tasks/notices/history/{log.id}/delete/')
+        delete_request.user = staff_user
+        self.assertEqual(delete_notice_history(delete_request, str(log.id)).status_code, 403)
+        self.assertTrue(CloudUserNoticeLog.objects.filter(id=log.id).exists())
+
     def test_delete_notice_history_removes_cloud_notice_plan_history_row(self):
         order = CloudServerOrder.objects.create(
             order_no='NOTICE-PLAN-HISTORY-DELETE-1',
@@ -6561,7 +6647,7 @@ class CloudServerServicesTestCase(TestCase):
             text_preview='到期提醒：测试历史删除',
             extra={'order_ids': [order.id], 'send_attempts': [{'channel': 'bot', 'channel_label': 'Bot', 'ok': True, 'error': ''}]},
         )
-        staff_user = get_user_model().objects.create_user(username='staff_notice_plan_history_delete', password='x', is_staff=True)
+        staff_user = get_user_model().objects.create_user(username='staff_notice_plan_history_delete', password='x', is_staff=True, is_superuser=True)
         sync_request = self.factory.get('/api/admin/tasks/notices/', {'limit': 20, 'future_limit': 20, 'history_limit': 20})
         sync_request.user = staff_user
         sync_response = notice_task_detail(sync_request)
@@ -7711,7 +7797,7 @@ class CloudServerServicesTestCase(TestCase):
             is_success=False,
             failure_reason='该代理缺少续费价格，请先在后台代理列表填写人工价格。',
         )
-        staff_user = get_user_model().objects.create_user(username='staff_auto_renew_price_fix', password='x', is_staff=True)
+        staff_user = get_user_model().objects.create_user(username='staff_auto_renew_price_fix', password='x', is_staff=True, is_superuser=True)
         before_request = RequestFactory().get('/api/dashboard/tasks/')
         before_request.user = staff_user
         before_payload = json.loads(tasks_overview(before_request).content)
@@ -8299,7 +8385,7 @@ class CloudServerServicesTestCase(TestCase):
             note='未附加固定IP',
             is_active=False,
         )
-        staff_user = get_user_model().objects.create_user(username='staff_refresh_unattached_plan', password='x', is_staff=True)
+        staff_user = get_user_model().objects.create_user(username='staff_refresh_unattached_plan', password='x', is_staff=True, is_superuser=True)
         request = RequestFactory().patch(
             f'/api/dashboard/cloud-assets/{asset.id}/',
             data=json.dumps({'note': '未附加固定IP\n人工刷新删除计划'}),
@@ -8350,7 +8436,7 @@ class CloudServerServicesTestCase(TestCase):
             note='未附加固定IP',
             is_active=False,
         )
-        staff_user = get_user_model().objects.create_user(username='staff_rebound_manual', password='x', is_staff=True)
+        staff_user = get_user_model().objects.create_user(username='staff_rebound_manual', password='x', is_staff=True, is_superuser=True)
         request = RequestFactory().patch(
             f'/api/dashboard/cloud-assets/{asset.id}/',
             data=json.dumps({'instance_id': 'i-rebound-manual-1'}),
@@ -8463,7 +8549,7 @@ class CloudServerServicesTestCase(TestCase):
             note='旧服务器备注',
             is_active=True,
         )
-        staff_user = get_user_model().objects.create_user(username='staff_manual_note_overwrite', password='x', is_staff=True)
+        staff_user = get_user_model().objects.create_user(username='staff_manual_note_overwrite', password='x', is_staff=True, is_superuser=True)
         request = RequestFactory().patch(
             f'/api/dashboard/cloud-assets/{asset.id}/',
             data=json.dumps({'note': '人工改后的备注'}),

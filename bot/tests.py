@@ -12,7 +12,7 @@ from django.contrib.sessions.models import Session
 from django.test import RequestFactory, SimpleTestCase, TestCase
 from django.utils import timezone
 
-from bot.api import DASHBOARD_SESSION_IDLE_SECONDS, _authenticate_dashboard_request, admin_users_list, archive_telegram_chat, create_admin_user, delete_cloud_account, me, site_config_groups, test_daily_expiry_summary_notification, verify_cloud_account
+from bot.api import DASHBOARD_SESSION_IDLE_SECONDS, _authenticate_dashboard_request, admin_users_list, archive_telegram_chat, auth_totp_start, create_admin_user, create_cloud_account, create_product, delete_cloud_account, me, send_telegram_chat_message, site_config_groups, telegram_login_start, test_daily_expiry_summary_notification, update_cloud_account, update_site_config, verify_cloud_account
 from bot.handlers import _cloud_renewal_postcheck_and_notify, _cloud_server_created_text, _fetch_tron_address_summary, _hydrate_order_proxy_links, _install_notice_copy_wrapper, _proxy_links_text, _requires_recovery_provision, _retained_ip_renewal_plan_keyboard, _trongrid_get_with_key_fallback, _trongrid_post_with_key_fallback, _validate_reinstall_proxy_link
 from bot.models import TelegramChatArchive, TelegramChatMessage, TelegramLoginAccount, TelegramUser
 from bot.services import record_telegram_message
@@ -20,6 +20,7 @@ from bot.telegram_listener import _build_bark_request, _build_push_payload, _is_
 from cloud.models import CloudAsset, CloudServerOrder, CloudServerPlan
 from core.models import CloudAccountConfig, SiteConfig
 from core.texts import BOT_TEXTS
+from orders.models import Product
 
 
 class DashboardSessionExpiryTestCase(TestCase):
@@ -93,6 +94,30 @@ class DashboardAuthSurfaceTestCase(TestCase):
         self.assertFalse(get_user_model().objects.filter(username='new_root').exists())
         self.assertEqual(payload['message'], '需要超级管理员权限')
 
+    def test_sensitive_dashboard_write_actions_require_superuser(self):
+        staff = get_user_model().objects.create_user(username='staff_no_sensitive_write', password='pass', is_staff=True)
+        config = SiteConfig.objects.create(key='cloud_delete_time', value='15:00', is_sensitive=False)
+        product_payload = {'name': 'blocked-product', 'price': '1.00', 'stock': 1}
+
+        cases = [
+            (auth_totp_start, RequestFactory().post('/api/admin/auth/totp/start', data=json.dumps({}), content_type='application/json'), ()),
+            (update_site_config, RequestFactory().post(f'/api/admin/settings/site-configs/{config.id}/', data=json.dumps({'value': '16:00'}), content_type='application/json'), (config.id,)),
+            (telegram_login_start, RequestFactory().post('/api/admin/telegram/login/start/', data=json.dumps({'phone': '+10000000000'}), content_type='application/json'), ()),
+            (send_telegram_chat_message, RequestFactory().post('/api/admin/telegram/messages/send/', data=json.dumps({'chat_id': 1, 'text': 'blocked'}), content_type='application/json'), ()),
+            (create_product, RequestFactory().post('/api/admin/products/create/', data=json.dumps(product_payload), content_type='application/json'), ()),
+        ]
+
+        for view_func, request, args in cases:
+            request.user = staff
+            response = view_func(request, *args)
+            payload = json.loads(response.content.decode('utf-8'))
+            self.assertEqual(response.status_code, 403)
+            self.assertEqual(payload['message'], '需要超级管理员权限')
+
+        config.refresh_from_db()
+        self.assertEqual(config.value, '15:00')
+        self.assertFalse(Product.objects.filter(name='blocked-product').exists())
+
     def test_superuser_can_list_admin_users(self):
         root = get_user_model().objects.create_user(username='root_admin_user_manage', password='pass', is_staff=True, is_superuser=True)
         request = RequestFactory().get('/api/admin/admin-users/')
@@ -105,7 +130,7 @@ class DashboardAuthSurfaceTestCase(TestCase):
         self.assertTrue(any(item['username'] == root.username for item in payload['data']))
 
     def test_archive_telegram_chat_parses_string_false_as_unarchive(self):
-        user = get_user_model().objects.create_user(username='dashboard_archive_staff', password='pass', is_staff=True)
+        user = get_user_model().objects.create_user(username='dashboard_archive_staff', password='pass', is_staff=True, is_superuser=True)
         TelegramChatArchive.objects.create(chat_id=-10012345, title='Archived Group')
         TelegramChatMessage.objects.create(
             tg_user_id=12345,
@@ -166,8 +191,87 @@ class TelegramMessageRecordingTestCase(TestCase):
 
 
 class DashboardCloudAccountVerifyTestCase(TestCase):
+    def test_cloud_account_write_actions_require_superuser(self):
+        staff = get_user_model().objects.create_user(username='cloud_account_write_staff', password='pass', is_staff=True)
+        account = CloudAccountConfig.objects.create(
+            provider=CloudAccountConfig.PROVIDER_AWS,
+            name='aws-staff-forbidden',
+            access_key='aws-ak',
+            secret_key='aws-sk',
+            region_hint='ap-southeast-1',
+            is_active=True,
+        )
+
+        create_request = RequestFactory().post(
+            '/api/admin/settings/cloud-accounts/create/',
+            data=json.dumps({
+                'provider': CloudAccountConfig.PROVIDER_AWS,
+                'name': 'blocked-create',
+                'access_key': 'new-ak',
+                'secret_key': 'new-sk',
+            }),
+            content_type='application/json',
+        )
+        create_request.user = staff
+        self.assertEqual(create_cloud_account(create_request).status_code, 403)
+        self.assertFalse(CloudAccountConfig.objects.filter(name='blocked-create').exists())
+
+        update_request = RequestFactory().post(
+            f'/api/admin/settings/cloud-accounts/{account.id}/',
+            data=json.dumps({'name': 'blocked-update'}),
+            content_type='application/json',
+        )
+        update_request.user = staff
+        self.assertEqual(update_cloud_account(update_request, account.id).status_code, 403)
+        account.refresh_from_db()
+        self.assertEqual(account.name, 'aws-staff-forbidden')
+
+        verify_request = RequestFactory().post(f'/api/admin/settings/cloud-accounts/{account.id}/verify/')
+        verify_request.user = staff
+        self.assertEqual(verify_cloud_account(verify_request, account.id).status_code, 403)
+
+        delete_request = RequestFactory().post(f'/api/admin/settings/cloud-accounts/{account.id}/delete/')
+        delete_request.user = staff
+        self.assertEqual(delete_cloud_account(delete_request, account.id).status_code, 403)
+        self.assertTrue(CloudAccountConfig.objects.filter(id=account.id).exists())
+
+    def test_superuser_can_create_update_and_delete_unlinked_cloud_account(self):
+        root = get_user_model().objects.create_user(username='cloud_account_write_root', password='pass', is_staff=True, is_superuser=True)
+
+        create_request = RequestFactory().post(
+            '/api/admin/settings/cloud-accounts/create/',
+            data=json.dumps({
+                'provider': CloudAccountConfig.PROVIDER_AWS,
+                'name': 'aws-root-created',
+                'access_key': 'aws-ak',
+                'secret_key': 'aws-sk',
+                'region_hint': 'ap-southeast-1',
+            }),
+            content_type='application/json',
+        )
+        create_request.user = root
+        create_response = create_cloud_account(create_request)
+        self.assertEqual(create_response.status_code, 200)
+        account_id = json.loads(create_response.content.decode('utf-8'))['data']['id']
+
+        update_request = RequestFactory().post(
+            f'/api/admin/settings/cloud-accounts/{account_id}/',
+            data=json.dumps({'name': 'aws-root-updated', 'is_active': False}),
+            content_type='application/json',
+        )
+        update_request.user = root
+        self.assertEqual(update_cloud_account(update_request, account_id).status_code, 200)
+        account = CloudAccountConfig.objects.get(id=account_id)
+        self.assertEqual(account.name, 'aws-root-updated')
+        self.assertFalse(account.is_active)
+
+        delete_request = RequestFactory().post(f'/api/admin/settings/cloud-accounts/{account_id}/delete/')
+        delete_request.user = root
+        self.assertEqual(delete_cloud_account(delete_request, account_id).status_code, 200)
+        self.assertFalse(CloudAccountConfig.objects.filter(id=account_id).exists())
+
     def test_delete_cloud_account_blocks_linked_business_data(self):
-        staff = get_user_model().objects.create_user(username='cloud_account_delete_staff', password='pass', is_staff=True)
+        staff = get_user_model().objects.create_user(username='cloud_account_delete_staff', password='pass', is_staff=True, is_superuser=True)
         account = CloudAccountConfig.objects.create(
             provider=CloudAccountConfig.PROVIDER_AWS,
             name='aws-linked-account',
@@ -196,7 +300,7 @@ class DashboardCloudAccountVerifyTestCase(TestCase):
         self.assertTrue(CloudAccountConfig.objects.filter(id=account.id).exists())
 
     def test_aliyun_verify_passes_account_without_global_env_mutation(self):
-        staff = get_user_model().objects.create_user(username='aliyun_verify_staff', password='pass', is_staff=True)
+        staff = get_user_model().objects.create_user(username='aliyun_verify_staff', password='pass', is_staff=True, is_superuser=True)
         account = CloudAccountConfig.objects.create(
             provider=CloudAccountConfig.PROVIDER_ALIYUN,
             name='aliyun-verify-account',
@@ -294,7 +398,7 @@ class BotOrderProxyLinkHydrationTestCase(TestCase):
 
 class DashboardNotificationTestCase(TestCase):
     def test_daily_expiry_summary_test_endpoint_forces_send(self):
-        staff = get_user_model().objects.create_user(username='daily_expiry_staff', password='pass', is_staff=True)
+        staff = get_user_model().objects.create_user(username='daily_expiry_staff', password='pass', is_staff=True, is_superuser=True)
         request = RequestFactory().post('/api/admin/settings/site-configs/daily-expiry-summary/test/')
         request.user = staff
         bot = MagicMock()

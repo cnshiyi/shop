@@ -2962,7 +2962,7 @@ def auth_codes(request):
 
 
 @csrf_exempt
-@dashboard_login_required
+@dashboard_superuser_required
 @require_POST
 def auth_totp_start(request):
     payload = _json_payload(request)
@@ -2985,7 +2985,7 @@ def auth_totp_start(request):
 
 
 @csrf_exempt
-@dashboard_login_required
+@dashboard_superuser_required
 @require_POST
 def auth_totp_bind(request):
     payload = _json_payload(request)
@@ -3053,7 +3053,7 @@ def button_config_detail(request):
 
 
 @csrf_exempt
-@dashboard_login_required
+@dashboard_superuser_required
 @require_POST
 def update_button_config(request):
     payload = _read_payload(request)
@@ -3061,7 +3061,7 @@ def update_button_config(request):
 
 
 @csrf_exempt
-@dashboard_login_required
+@dashboard_superuser_required
 @require_POST
 def init_button_config_view(request):
     return _ok(init_button_config())
@@ -3153,7 +3153,7 @@ def site_config_groups(request):
 
 
 @csrf_exempt
-@dashboard_login_required
+@dashboard_superuser_required
 @require_POST
 def init_site_configs(request):
     payload = _read_payload(request)
@@ -3176,7 +3176,7 @@ def init_site_configs(request):
 
 
 @csrf_exempt
-@dashboard_login_required
+@dashboard_superuser_required
 @require_POST
 def init_text_site_configs(request):
     enabled = str(get_runtime_config('text_init_enabled', '1')).lower() not in {'0', 'false', 'no', 'off'}
@@ -3191,7 +3191,7 @@ def init_text_site_configs(request):
 
 
 @csrf_exempt
-@dashboard_login_required
+@dashboard_superuser_required
 @require_POST
 def test_daily_expiry_summary_notification(request):
     token = SiteConfig.get('bot_token', '') or get_runtime_config('bot_token', '')
@@ -3228,7 +3228,7 @@ def test_daily_expiry_summary_notification(request):
 
 
 @csrf_exempt
-@dashboard_login_required
+@dashboard_superuser_required
 @require_POST
 def update_site_config(request, config_id: int):
     item = SiteConfig.objects.filter(id=config_id).first()
@@ -3313,7 +3313,7 @@ def cloud_accounts_list(request):
 
 
 @csrf_exempt
-@dashboard_login_required
+@dashboard_superuser_required
 @require_POST
 def create_cloud_account(request):
     payload = _read_payload(request)
@@ -3354,6 +3354,8 @@ def update_cloud_account(request, account_id: int):
         return _ok(_cloud_account_detail_payload(item))
     if request.method != 'POST':
         return _error('请求方法不支持', status=405)
+    if not getattr(request.user, 'is_superuser', False):
+        return _error('需要超级管理员权限', status=403)
     payload = _read_payload(request)
     provider = (payload.get('provider') or item.provider).strip()
     name = (payload.get('name') or item.name).strip()
@@ -3385,7 +3387,7 @@ def update_cloud_account(request, account_id: int):
 
 
 @csrf_exempt
-@dashboard_login_required
+@dashboard_superuser_required
 @require_POST
 def delete_cloud_account(request, account_id: int):
     item = CloudAccountConfig.objects.filter(id=account_id).first()
@@ -3407,7 +3409,7 @@ def delete_cloud_account(request, account_id: int):
 
 
 @csrf_exempt
-@dashboard_login_required
+@dashboard_superuser_required
 @require_POST
 def verify_cloud_account(request, account_id: int):
     item = CloudAccountConfig.objects.filter(id=account_id).first()
@@ -3736,7 +3738,7 @@ def update_user_balance(request, user_id):
 
 
 @csrf_exempt
-@dashboard_login_required
+@dashboard_superuser_required
 @require_POST
 def update_user_discount(request, user_id):
     payload = _read_payload(request)
@@ -3987,7 +3989,7 @@ def _update_login_account_from_me(item, me, status='logged_in'):
 
 
 @csrf_exempt
-@dashboard_login_required
+@dashboard_superuser_required
 @require_POST
 def check_telegram_login_account_status(request, account_id: int):
     item = TelegramLoginAccount.objects.filter(id=account_id).first()
@@ -4016,7 +4018,7 @@ def check_telegram_login_account_status(request, account_id: int):
 
 
 @csrf_exempt
-@dashboard_login_required
+@dashboard_superuser_required
 @require_POST
 def update_telegram_account_notify(request, account_id: int):
     payload = _read_payload(request)
@@ -4032,7 +4034,7 @@ def update_telegram_account_notify(request, account_id: int):
 
 
 @csrf_exempt
-@dashboard_login_required
+@dashboard_superuser_required
 @require_POST
 def telegram_login_start(request):
     payload = _read_payload(request)
@@ -4058,7 +4060,7 @@ def telegram_login_start(request):
 
 
 @csrf_exempt
-@dashboard_login_required
+@dashboard_superuser_required
 @require_POST
 def telegram_login_code(request):
     payload = _read_payload(request)
@@ -4089,7 +4091,7 @@ def telegram_login_code(request):
 
 
 @csrf_exempt
-@dashboard_login_required
+@dashboard_superuser_required
 @require_POST
 def telegram_login_password(request):
     payload = _read_payload(request)
@@ -4135,7 +4137,7 @@ def telegram_group_filters_list(request):
 
 
 @csrf_exempt
-@dashboard_login_required
+@dashboard_superuser_required
 @require_POST
 def create_telegram_group_filter(request):
     payload = _read_payload(request)
@@ -4193,7 +4195,7 @@ def telegram_group_filter_detail(request, group_id: int):
 
 
 @csrf_exempt
-@dashboard_login_required
+@dashboard_superuser_required
 @require_POST
 def update_telegram_group_filter(request, group_id: int):
     item = TelegramGroupFilter.objects.filter(id=group_id).first()
@@ -4237,7 +4239,7 @@ def update_telegram_group_filter(request, group_id: int):
 
 
 @csrf_exempt
-@dashboard_login_required
+@dashboard_superuser_required
 @require_POST
 def send_telegram_chat_message(request):
     payload = _read_payload(request)
@@ -4282,7 +4284,7 @@ def send_telegram_chat_message(request):
 
 
 @csrf_exempt
-@dashboard_login_required
+@dashboard_superuser_required
 @require_POST
 def archive_telegram_chat(request):
     payload = _read_payload(request)
@@ -4302,7 +4304,7 @@ def archive_telegram_chat(request):
 
 
 @csrf_exempt
-@dashboard_login_required
+@dashboard_superuser_required
 @require_POST
 def create_telegram_login_account(request):
     payload = _read_payload(request)
@@ -4382,7 +4384,7 @@ def products_list(request):
 
 
 @csrf_exempt
-@dashboard_login_required
+@dashboard_superuser_required
 @require_POST
 def create_product(request):
     payload = _read_payload(request)
@@ -4414,7 +4416,7 @@ def create_product(request):
 
 
 @csrf_exempt
-@dashboard_login_required
+@dashboard_superuser_required
 @require_POST
 def update_product(request, product_id: int):
     item = Product.objects.filter(id=product_id).first()

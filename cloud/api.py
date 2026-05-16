@@ -809,6 +809,8 @@ def update_cloud_asset(request, asset_id):
             'lifecycle_order_links': lifecycle_order_links,
         })
         return _ok(payload)
+    if not getattr(request.user, 'is_superuser', False):
+        return _error('需要超级管理员权限', status=403)
     payload = _read_payload(request)
     owner_change_requested = False
     expiry_change_requested = False
@@ -2418,7 +2420,7 @@ def _notice_switch_items() -> list[dict]:
 
 
 @csrf_exempt
-@dashboard_login_required
+@dashboard_superuser_required
 @require_POST
 def update_notice_switches(request):
     payload = _read_payload(request)
@@ -2466,7 +2468,7 @@ def _reset_notice_sent_fields_for_log(log) -> int:
 
 
 @csrf_exempt
-@dashboard_login_required
+@dashboard_superuser_required
 @require_POST
 def delete_notice_history(request, identifier):
     identifier = str(identifier or '').strip()
@@ -2511,7 +2513,7 @@ def delete_notice_history(request, identifier):
 
 
 @csrf_exempt
-@dashboard_login_required
+@dashboard_superuser_required
 @require_POST
 def update_notice_plan_text(request):
     payload = _read_payload(request)
