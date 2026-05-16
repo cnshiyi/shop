@@ -475,6 +475,12 @@ def _cloud_asset_risk_state(asset, order, expires_at, provider_status_label, dis
     note_text = str(asset.note or '')
     days_left = _days_left(expires_at)
     shutdown_enabled = _cloud_asset_shutdown_enabled(asset, order)
+    is_unattached_ip = (
+        '未附加' in provider_text
+        or '未附加IP' in note_text
+        or '未附加固定IP' in note_text
+        or status_text == 'unattached'
+    )
 
     def set_risk(status: str, label: str, rank: int, reason: str):
         nonlocal risk_status, risk_label, risk_rank
@@ -497,16 +503,11 @@ def _cloud_asset_risk_state(asset, order, expires_at, provider_status_label, dis
         set_risk('auto_renew_off', '续费关闭', 13, '自动续费关闭')
     if not shutdown_enabled:
         set_risk('shutdown_disabled', '关机计划关闭', 4, '云账号已关闭关机计划')
-    if (
-        '未附加' in provider_text
-        or '未附加IP' in note_text
-        or '未附加固定IP' in note_text
-        or status_text == 'unattached'
-    ):
+    if is_unattached_ip:
         set_risk('unattached_ip', '未附加固定IP', 3, '固定IP未附加实例')
-    if expires_at and expires_at <= now:
+    if not is_unattached_ip and expires_at and expires_at <= now:
         set_risk('expired', '已过期', 1, '服务已过期')
-    elif isinstance(days_left, int) and days_left <= 7:
+    elif not is_unattached_ip and isinstance(days_left, int) and days_left <= 7:
         set_risk('due_soon', '即将到期', 2, f'剩余 {days_left} 天')
     if (
         status_text in {'failed', 'unknown'}

@@ -1683,6 +1683,59 @@ class CloudServerServicesTestCase(TestCase):
         search_payload = json.loads(search_response.content.decode('utf-8'))['data']
         self.assertEqual([item['id'] for item in search_payload['items']], [due_asset.id])
 
+    def test_cloud_asset_expired_filter_excludes_unattached_ip_assets(self):
+        admin = get_user_model().objects.create_user(username='admin_asset_expired_unattached_filter', password='x', is_staff=True)
+        group = TelegramGroupFilter.objects.create(chat_id=-1001993002, title='Risk Filter Group 2', enabled=True)
+        expired_at = timezone.now() - timezone.timedelta(days=1)
+        expired_asset = CloudAsset.objects.create(
+            kind=CloudAsset.KIND_SERVER,
+            source=CloudAsset.SOURCE_AWS_SYNC,
+            user=self.user,
+            telegram_group=group,
+            provider='aws_lightsail',
+            region_code=self.plan.region_code,
+            region_name=self.plan.region_name,
+            asset_name='expired-running-asset',
+            public_ip='10.88.0.10',
+            actual_expires_at=expired_at,
+            status=CloudAsset.STATUS_RUNNING,
+        )
+        unattached_asset = CloudAsset.objects.create(
+            kind=CloudAsset.KIND_SERVER,
+            source=CloudAsset.SOURCE_AWS_SYNC,
+            user=self.user,
+            telegram_group=group,
+            provider='aws_lightsail',
+            region_code=self.plan.region_code,
+            region_name=self.plan.region_name,
+            asset_name='expired-unattached-ip-asset',
+            public_ip='10.88.0.11',
+            actual_expires_at=expired_at,
+            status=CloudAsset.STATUS_UNKNOWN,
+            provider_status='未附加固定IP',
+            is_active=False,
+        )
+
+        expired_request = self.factory.get('/api/dashboard/cloud-assets/', {'paginated': '1', 'risk_status': 'expired'})
+        expired_request.user = admin
+        expired_response = cloud_assets_list(expired_request)
+        expired_payload = json.loads(expired_response.content.decode('utf-8'))['data']
+
+        self.assertEqual(expired_response.status_code, 200)
+        self.assertEqual([item['id'] for item in expired_payload['items']], [expired_asset.id])
+        self.assertEqual(expired_payload['risk_counts']['expired'], 1)
+        self.assertEqual(expired_payload['risk_counts']['unattached_ip'], 1)
+
+        unattached_request = self.factory.get('/api/dashboard/cloud-assets/', {'paginated': '1', 'risk_status': 'unattached_ip'})
+        unattached_request.user = admin
+        unattached_response = cloud_assets_list(unattached_request)
+        unattached_payload = json.loads(unattached_response.content.decode('utf-8'))['data']
+
+        self.assertEqual(unattached_response.status_code, 200)
+        self.assertEqual([item['id'] for item in unattached_payload['items']], [unattached_asset.id])
+        self.assertEqual(unattached_payload['items'][0]['risk_status'], 'unattached_ip')
+        self.assertNotIn('expired', unattached_payload['items'][0]['risk_statuses'])
+
     def test_create_cloud_server_renewal_rejects_deleted_or_ipless_order(self):
         order = CloudServerOrder.objects.create(
             order_no='HB-TEST-RENEW-1',
