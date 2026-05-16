@@ -6,6 +6,7 @@ import math
 import re
 import secrets
 import time
+from datetime import datetime as dt_datetime
 from decimal import Decimal, InvalidOperation
 from html import escape
 from urllib.parse import parse_qs, urlparse, unquote
@@ -21,6 +22,7 @@ from aiogram.types import CallbackQuery, ErrorEvent, InlineKeyboardButton, Inlin
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 from django.db.models import Q
 from django.utils import timezone
+from django.utils.dateparse import parse_date, parse_datetime
 
 from core.runtime_config import get_runtime_config
 from cloud.note_utils import append_note
@@ -100,6 +102,7 @@ from cloud.services import (
     start_cloud_server_from_admin,
     unmute_all_user_reminders,
     unmute_cloud_reminders,
+    update_cloud_item_expiry_for_admin,
 )
 from orders.services import (
     add_monitor,
@@ -548,7 +551,7 @@ async def _reply_cloud_query_results(message: Message, raw_text: str, state: FSM
                 and not is_unattached_ip_asset
                 and linked_order_status in {'completed', 'expiring', 'suspended', 'renew_pending'}
             )
-            can_admin_asset_reinit = bool(include_start and can_linked_order_operate and linked_order.get('login_password'))
+            can_admin_asset_reinit = bool(include_start and can_linked_order_operate and (linked_order.get('login_password') or getattr(asset, 'login_password', None)))
             can_admin_asset_config = bool(include_start and can_linked_order_operate and linked_order_status in {'completed', 'expiring', 'suspended'})
             can_admin_asset_change_ip = bool(include_start and can_linked_order_operate and linked_order_status in {'completed', 'expiring', 'suspended'})
             can_user_asset_operate = bool(is_owned_asset and can_linked_order_operate)
@@ -1888,16 +1891,16 @@ def _orders_page(orders, page: int, total: int):
     return _bot_text('bot_orders_list_title', '📋 我的订单：'), kb_order_list(orders, page, total_pages)
 
 
-def _balance_details_page(items, page: int, total: int):
+def _balance_details_page(items, page: int, total: int, detail_filter: str = 'all'):
     total_pages = max(1, math.ceil(total / 8))
     if not items:
-        return _bot_text('bot_balance_details_empty', '💳 余额明细\n\n暂无余额流水。'), balance_details_list([], 1, 1)
+        return _bot_text('bot_balance_details_empty', '💳 余额明细\n\n暂无余额流水。'), balance_details_list([], 1, 1, detail_filter)
     lines = [_bot_text('bot_balance_detail_title', '💳 余额明细'), '']
     for item in items:
         icon = '🟢' if item['direction'] == 'in' else '🔴'
         created_at = item['created_at'].strftime('%m-%d %H:%M') if item.get('created_at') else '-'
         lines.append(f"{icon} {item['title']} | {item['amount']} {item['currency']} | {created_at}")
-    return '\n'.join(lines), balance_details_list(items, page, total_pages)
+    return '\n'.join(lines), balance_details_list(items, page, total_pages, detail_filter)
 
 
 def _parse_proxy_link(text: str) -> dict[str, str] | None:
@@ -2195,6 +2198,23 @@ def _format_local_dt(value) -> str:
         return timezone.localtime(value).strftime('%Y-%m-%d %H:%M')
     except Exception:
         return str(value)
+
+
+def _parse_admin_expiry_input(raw_text: str):
+    value = str(raw_text or '').strip()
+    if not value:
+        return None
+    normalized = value.replace('年', '-').replace('月', '-').replace('日', ' ').replace('/', '-').strip()
+    parsed = parse_datetime(normalized)
+    if parsed is None:
+        parsed_date = parse_date(normalized)
+        if parsed_date:
+            parsed = dt_datetime.combine(parsed_date, dt_datetime.min.time()).replace(hour=15)
+    if parsed is None:
+        return None
+    if timezone.is_naive(parsed):
+        parsed = timezone.make_aware(parsed, timezone.get_current_timezone())
+    return parsed.astimezone(timezone.get_current_timezone())
 
 
 def _cloud_order_ip_text(order) -> str:
@@ -3071,18 +3091,24 @@ def register_handlers(dp: Dispatcher):
         is_admin = await _is_admin_chat(callback.message)
         await _safe_edit_text(callback.message, text, reply_markup=cloud_ip_query_result(page_items, renewable_items, page, total_pages, include_start=is_admin, include_reinit=is_admin), parse_mode='HTML')
 
-    async def _render_profile_cloud_orders(callback: CallbackQuery, page: int = 1):
+    async def _render_profile_cloud_orders(callback: CallbackQuery, page: int = 1, order_filter: str = 'all'):
         user = await get_or_create_user(callback.from_user.id, callback.from_user.username, callback.from_user.first_name)
         per_page = 8
-        orders, total = await list_cloud_orders(user.id, page=page, per_page=per_page)
+        order_filter = str(order_filter or 'all').strip().lower()
+        orders, total = await list_cloud_orders(user.id, page=page, per_page=per_page, order_filter=order_filter)
         total_pages = max(1, math.ceil(total / per_page))
         if not orders:
-            await _safe_edit_text(callback.message, _bot_text('bot_cloud_orders_empty', '☁️ 云服务器订单\n\n暂无云服务器订单。'), reply_markup=profile_menu())
+            await _safe_edit_text(
+                callback.message,
+                _bot_text('bot_cloud_orders_empty', '☁️ 云服务器订单\n\n暂无云服务器订单。'),
+                reply_markup=cloud_order_list([], 1, 1, f'profile:orders:cloud:filter:{order_filter}:page', order_filter=order_filter),
+            )
             return
+        prefix = f'profile:orders:cloud:filter:{order_filter}:page'
         await _safe_edit_text(
             callback.message,
             _bot_text('bot_cloud_orders_entry', '☁️ 云服务器订单\n\n请选择要查看的订单：'),
-            reply_markup=cloud_order_list(orders, page, total_pages, 'profile:orders:cloud:page'),
+            reply_markup=cloud_order_list(orders, page, total_pages, prefix, order_filter=order_filter),
         )
 
     @dp.callback_query(F.data == 'profile:orders')
@@ -3096,6 +3122,14 @@ def register_handlers(dp: Dispatcher):
         await _render_profile_cloud_orders(callback, page=1)
         await _safe_callback_answer(callback)
 
+    @dp.callback_query(F.data.startswith('profile:orders:cloud:filter:'))
+    async def cb_profile_cloud_orders_filter(callback: CallbackQuery):
+        await _safe_callback_answer(callback)
+        parts = callback.data.split(':')
+        order_filter = parts[4] if len(parts) > 4 else 'all'
+        page = int(parts[6]) if len(parts) > 6 and parts[5] == 'page' else 1
+        await _render_profile_cloud_orders(callback, page=page, order_filter=order_filter)
+
     @dp.callback_query(F.data == 'profile:cart')
     async def cb_profile_cart(callback: CallbackQuery):
         await _safe_callback_answer(callback)
@@ -3103,10 +3137,32 @@ def register_handlers(dp: Dispatcher):
 
     @dp.callback_query(F.data == 'profile:balance_details')
     async def cb_profile_balance_details(callback: CallbackQuery):
+        await _render_profile_balance_details(callback, page=1, detail_filter='all')
+        await _safe_callback_answer(callback)
+
+    async def _render_profile_balance_details(callback: CallbackQuery, page: int = 1, detail_filter: str = 'all'):
         user = await get_or_create_user(callback.from_user.id, callback.from_user.username, callback.from_user.first_name)
-        items, total = await list_balance_details(user.id)
-        text_out, kb = _balance_details_page(items, 1, total)
+        detail_filter = str(detail_filter or 'all').strip().lower()
+        items, total = await list_balance_details(user.id, page=page, detail_filter=detail_filter)
+        text_out, kb = _balance_details_page(items, page, total, detail_filter)
         await _safe_edit_text(callback.message, text_out, reply_markup=kb)
+
+    @dp.callback_query(F.data.startswith('profile:balance_details:filter:'))
+    async def cb_profile_balance_details_filter(callback: CallbackQuery):
+        detail_filter = callback.data.rsplit(':', 1)[-1] or 'all'
+        await _render_profile_balance_details(callback, page=1, detail_filter=detail_filter)
+        await _safe_callback_answer(callback)
+
+    @dp.callback_query(F.data.startswith('bdpage:'))
+    async def cb_profile_balance_details_page(callback: CallbackQuery):
+        parts = callback.data.split(':')
+        if len(parts) >= 3:
+            detail_filter = parts[1] or 'all'
+            page = int(parts[2])
+        else:
+            detail_filter = 'all'
+            page = int(parts[1])
+        await _render_profile_balance_details(callback, page=max(1, page), detail_filter=detail_filter)
         await _safe_callback_answer(callback)
 
     async def _render_profile_reminders(callback: CallbackQuery, page: int = 1):
@@ -3890,19 +3946,8 @@ def register_handlers(dp: Dispatcher):
     @dp.callback_query(F.data.startswith('profile:orders:cloud:page:'))
     async def cb_profile_cloud_orders_page(callback: CallbackQuery):
         await _safe_callback_answer(callback)
-        user = await get_or_create_user(callback.from_user.id, callback.from_user.username, callback.from_user.first_name)
         page = max(1, int(callback.data.split(':')[4]))
-        per_page = 8
-        orders, total = await list_cloud_orders(user.id, page=page, per_page=per_page)
-        total_pages = max(1, math.ceil(total / per_page))
-        if not orders:
-            await _safe_edit_text(callback.message, '☁️ 云服务器订单\n\n暂无云服务器订单。', reply_markup=profile_menu())
-            return
-        await _safe_edit_text(
-            callback.message,
-            '☁️ 云服务器订单\n\n请选择要查看的订单：',
-            reply_markup=cloud_order_list(orders, page, total_pages, 'profile:orders:cloud:page'),
-        )
+        await _render_profile_cloud_orders(callback, page=page, order_filter='all')
 
     @dp.callback_query(F.data.startswith('cloud:orderdetail:'))
     async def cb_cloud_order_detail(callback: CallbackQuery):
@@ -4005,10 +4050,27 @@ def register_handlers(dp: Dispatcher):
             else:
                 rows.append([InlineKeyboardButton(text='🔄 续费', callback_data=f'cloud:assetaction:renew:{item_id}')])
         else:
-            rows = [
-                [InlineKeyboardButton(text='🔄 续费', callback_data=f'cloud:assetaction:renew:{item_id}'), InlineKeyboardButton(text='🌐 更换IP', callback_data=f'cloud:assetaction:changeip:{item_id}')],
-                [InlineKeyboardButton(text='🛠 重新安装', callback_data=f'cloud:assetinit:{item_id}:{back_callback}'), InlineKeyboardButton(text='⚙️ 修改配置', callback_data=f'cloud:assetaction:upgrade:{item_id}')],
-            ]
+            status = str(getattr(item, 'status', '') or '')
+            provider = str(getattr(item, 'provider', '') or '')
+            has_ip = bool(str(getattr(item, 'public_ip', '') or '').strip())
+            can_change_ip = bool(provider == 'aws_lightsail' and status in {'completed', 'running', 'expiring', 'suspended'} and (is_admin_context or getattr(item, 'order_user_id', None) == user.id))
+            can_reinit = bool(provider == 'aws_lightsail' and has_ip and getattr(item, 'login_password', None) and (is_admin_context or status in {'completed', 'running'}))
+            can_config = bool(provider == 'aws_lightsail' and status in {'completed', 'running', 'expiring', 'suspended'} and (is_admin_context or getattr(item, 'order_user_id', None) == user.id))
+            rows = [[InlineKeyboardButton(text='🔄 续费', callback_data=f'cloud:assetaction:renew:{item_id}')]]
+            second_row = []
+            if can_change_ip:
+                second_row.append(InlineKeyboardButton(text='🌐 更换IP', callback_data=f'cloud:assetaction:changeip:{item_id}'))
+            if can_reinit:
+                second_row.append(InlineKeyboardButton(text='🛠 重新安装', callback_data=f'cloud:assetinit:{item_id}:{back_callback}'))
+            if second_row:
+                rows.append(second_row)
+            third_row = []
+            if can_config:
+                third_row.append(InlineKeyboardButton(text='⚙️ 修改配置', callback_data=f'cloud:assetaction:upgrade:{item_id}'))
+            if is_admin_context:
+                third_row.append(InlineKeyboardButton(text='🕒 修改时间', callback_data=f'cloud:adminexp:asset:{item_id}:{back_callback}'))
+            if third_row:
+                rows.append(third_row)
         rows.append([support_contact_button('cloud_asset', item_id)])
         rows.append([InlineKeyboardButton(text='🔙 返回代理列表', callback_data=back_callback)])
         await _safe_edit_text(callback.message, _cloud_asset_detail_text(item), reply_markup=InlineKeyboardMarkup(inline_keyboard=rows), parse_mode='HTML')
@@ -4975,6 +5037,51 @@ def register_handlers(dp: Dispatcher):
             ('动作', action_text),
         ])
         asyncio.create_task(_provision_cloud_server_and_notify(bot, callback.from_user.id, order.id, order.mtproxy_port or 9528, retry_only=retry_only))
+
+    @dp.callback_query(F.data.startswith('cloud:adminexp:'))
+    async def cb_cloud_admin_expiry(callback: CallbackQuery, state: FSMContext):
+        if not await _is_admin_chat(callback.message):
+            await _safe_callback_answer(callback, '仅管理员可使用', show_alert=True)
+            return
+        parts = callback.data.split(':', 4)
+        if len(parts) < 4:
+            await _safe_callback_answer(callback, '参数无效', show_alert=True)
+            return
+        item_kind = parts[2]
+        item_id = int(parts[3])
+        back_callback = parts[4] if len(parts) > 4 else 'cloud:querymenu'
+        await state.update_data(admin_expiry_kind=item_kind, admin_expiry_item_id=item_id, admin_expiry_back=back_callback)
+        await state.set_state(CustomServerStates.waiting_admin_expiry_time)
+        await _safe_callback_answer(callback, '请输入新的到期时间')
+        await callback.message.reply(
+            '🕒 修改到期时间\n\n请输入新的到期时间，例如：\n2026-06-30 15:00\n或只输入日期：2026-06-30'
+        )
+
+    @dp.message(CustomServerStates.waiting_admin_expiry_time)
+    async def msg_cloud_admin_expiry_time(message: Message, state: FSMContext):
+        if await _handle_menu_interrupt(message, state):
+            return
+        if not await _is_admin_chat(message):
+            await state.clear()
+            await message.reply('仅管理员可使用。', reply_markup=main_menu())
+            return
+        expires_at = _parse_admin_expiry_input(message.text or '')
+        if not expires_at:
+            await message.reply('时间格式不正确，请发送类似 2026-06-30 15:00 的时间。')
+            return
+        data = await state.get_data()
+        item_kind = str(data.get('admin_expiry_kind') or 'order')
+        item_id = int(data.get('admin_expiry_item_id') or 0)
+        item, err = await update_cloud_item_expiry_for_admin(item_id, item_kind, expires_at)
+        await state.clear()
+        if err or not item:
+            await message.reply(err or '修改失败，请重新查询后再试。', reply_markup=main_menu())
+            return
+        label = getattr(item, 'public_ip', None) or getattr(item, 'previous_public_ip', None) or getattr(item, 'order_no', None) or f'{item_kind}:{item_id}'
+        await message.reply(
+            f'✅ 已修改到期时间\n\n{label}\n新时间: {_format_local_dt(expires_at)}',
+            reply_markup=main_menu(),
+        )
 
     @dp.callback_query(F.data.startswith('balance:detail:'))
     async def cb_balance_detail(callback: CallbackQuery):

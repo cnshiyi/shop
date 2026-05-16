@@ -1,6 +1,7 @@
 import asyncio
 import json
 import sys
+from decimal import Decimal
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -14,13 +15,17 @@ from django.utils import timezone
 
 from bot.api import DASHBOARD_SESSION_IDLE_SECONDS, _authenticate_dashboard_request, admin_users_list, archive_telegram_chat, auth_totp_start, create_admin_user, create_cloud_account, create_product, delete_cloud_account, me, send_telegram_chat_message, site_config_groups, telegram_login_start, test_daily_expiry_summary_notification, update_cloud_account, update_site_config, verify_cloud_account
 from bot.handlers import _cloud_renewal_postcheck_and_notify, _cloud_server_created_text, _fetch_tron_address_summary, _hydrate_order_proxy_links, _install_notice_copy_wrapper, _proxy_links_text, _requires_recovery_provision, _retained_ip_renewal_plan_keyboard, _trongrid_get_with_key_fallback, _trongrid_post_with_key_fallback, _validate_reinstall_proxy_link
+from bot.keyboards import balance_details_list, cloud_ip_query_result, cloud_order_list
 from bot.models import TelegramChatArchive, TelegramChatMessage, TelegramLoginAccount, TelegramUser
 from bot.services import record_telegram_message
 from bot.telegram_listener import _build_bark_request, _build_push_payload, _is_self_sender
-from cloud.models import CloudAsset, CloudServerOrder, CloudServerPlan
+from cloud.models import CloudAsset, CloudServerOrder, CloudServerPlan, Server
+from cloud.services import update_cloud_item_expiry_for_admin
 from core.models import CloudAccountConfig, SiteConfig
 from core.texts import BOT_TEXTS
-from orders.models import Product
+from orders.ledger import record_balance_ledger
+from orders.models import Product, Recharge
+from orders.services import list_balance_details, list_cloud_orders
 
 
 class DashboardSessionExpiryTestCase(TestCase):
@@ -912,3 +917,192 @@ class RetainedIpRenewalUiTestCase(SimpleTestCase):
         self.assertEqual(len(messages), 2)
         self.assertIn('正在检查服务器运行状态', messages[0]['text'])
         self.assertIn('续费已完成，但续费后巡检通知失败', messages[1]['text'])
+
+
+class BotOrderAndBalanceFilterTestCase(TestCase):
+    def setUp(self):
+        self.user = TelegramUser.objects.create(tg_user_id=9911001, username='filter_user')
+        self.plan = CloudServerPlan.objects.create(
+            provider='aws_lightsail',
+            region_code='ap-southeast-1',
+            region_name='新加坡',
+            plan_name='Micro',
+            price='19.00',
+            currency='USDT',
+            is_active=True,
+        )
+
+    def _cloud_order(self, order_no, status='pending', public_ip='', paid=False, note=''):
+        return CloudServerOrder.objects.create(
+            order_no=order_no,
+            user=self.user,
+            plan=self.plan,
+            provider=self.plan.provider,
+            region_code=self.plan.region_code,
+            region_name=self.plan.region_name,
+            plan_name=self.plan.plan_name,
+            quantity=1,
+            currency='USDT',
+            total_amount='19.00',
+            pay_amount='19.00',
+            pay_method='balance' if paid else 'address',
+            status=status,
+            public_ip=public_ip,
+            paid_at=timezone.now() if paid else None,
+            service_expires_at=timezone.now() + timezone.timedelta(days=30),
+            provision_note=note,
+        )
+
+    def test_cloud_order_filters_and_button_label_prefer_ip(self):
+        paid_order = self._cloud_order('ORDER-PAID-1', status='completed', public_ip='1.2.3.4', paid=True)
+        unpaid_order = self._cloud_order('ORDER-PENDING-1', status='pending')
+        renew_order = self._cloud_order('ORDER-RENEW-1', status='renew_pending', public_ip='2.2.2.2', note='用户发起续费')
+
+        paid_items, paid_total = async_to_sync(list_cloud_orders)(self.user.id, order_filter='paid')
+        unpaid_items, unpaid_total = async_to_sync(list_cloud_orders)(self.user.id, order_filter='unpaid')
+        renew_items, renew_total = async_to_sync(list_cloud_orders)(self.user.id, order_filter='renew')
+
+        self.assertEqual(paid_total, 1)
+        self.assertEqual(paid_items[0].id, paid_order.id)
+        self.assertEqual(unpaid_total, 2)
+        self.assertIn(unpaid_order.id, {item.id for item in unpaid_items})
+        self.assertIn(renew_order.id, {item.id for item in renew_items})
+        self.assertEqual(renew_total, 1)
+
+        markup = cloud_order_list([paid_order], 1, 1, order_filter='paid')
+        button_texts = [button.text for row in markup.inline_keyboard for button in row]
+        self.assertTrue(any(text.startswith('1.2.3.4 | 已完成') for text in button_texts))
+        self.assertTrue(any(text == '• 已支付' for text in button_texts))
+
+    def test_balance_detail_filters_and_pagination_callbacks_keep_filter(self):
+        old_balance = self.user.balance
+        self.user.balance = Decimal('50.00')
+        self.user.save(update_fields=['balance', 'updated_at'])
+        record_balance_ledger(
+            self.user,
+            ledger_type='cloud_order_balance_pay',
+            currency='USDT',
+            old_balance=Decimal('50.00'),
+            new_balance=Decimal('31.00'),
+            related_type='cloud_order',
+            related_id=1,
+            description='云服务器订单余额支付',
+        )
+        Recharge.objects.create(
+            user=self.user,
+            currency='USDT',
+            amount='20.00',
+            pay_amount='20.00',
+            status='completed',
+            receive_address='TTestAddress',
+            completed_at=timezone.now(),
+        )
+        self.user.balance = old_balance
+        self.user.save(update_fields=['balance', 'updated_at'])
+
+        pay_items, pay_total = async_to_sync(list_balance_details)(self.user.id, detail_filter='pay')
+        recharge_items, recharge_total = async_to_sync(list_balance_details)(self.user.id, detail_filter='recharge')
+
+        self.assertEqual(pay_total, 1)
+        self.assertEqual(pay_items[0]['direction'], 'out')
+        self.assertGreaterEqual(recharge_total, 1)
+
+        markup = balance_details_list(pay_items, page=2, total_pages=3, detail_filter='pay')
+        callback_data = [button.callback_data for row in markup.inline_keyboard for button in row]
+        self.assertIn('bdpage:pay:1', callback_data)
+        self.assertIn('bdpage:pay:3', callback_data)
+
+    def test_admin_query_keyboard_includes_reinstall_and_expiry_actions(self):
+        markup = cloud_ip_query_result(
+            [],
+            [{
+                'ip': '1.2.3.4',
+                'order_id': 123,
+                'asset_id': 0,
+                'can_reinit': True,
+                'can_config': True,
+                'can_auto_renew': True,
+                'auto_renew_enabled': False,
+            }],
+            include_start=True,
+            include_reinit=True,
+        )
+        texts = [button.text for row in markup.inline_keyboard for button in row]
+        callbacks = [button.callback_data for row in markup.inline_keyboard for button in row]
+
+        self.assertIn('🛠 重新安装', texts)
+        self.assertIn('🕒 修改时间', texts)
+        self.assertIn('cloud:adminexp:order:123:cloud:querymenu', callbacks)
+
+
+class BotAdminExpiryUpdateTestCase(TestCase):
+    def setUp(self):
+        self.user = TelegramUser.objects.create(tg_user_id=9912001, username='expiry_user')
+        self.plan = CloudServerPlan.objects.create(
+            provider='aws_lightsail',
+            region_code='ap-southeast-1',
+            region_name='新加坡',
+            plan_name='Micro',
+            price='19.00',
+            currency='USDT',
+            is_active=True,
+        )
+
+    def test_admin_expiry_update_syncs_order_asset_and_server(self):
+        old_expiry = timezone.now() + timezone.timedelta(days=5)
+        new_expiry = timezone.now() + timezone.timedelta(days=40)
+        order = CloudServerOrder.objects.create(
+            order_no='ADMIN-EXPIRY-ORDER-1',
+            user=self.user,
+            plan=self.plan,
+            provider=self.plan.provider,
+            region_code=self.plan.region_code,
+            region_name=self.plan.region_name,
+            plan_name=self.plan.plan_name,
+            quantity=1,
+            currency='USDT',
+            total_amount='19.00',
+            pay_amount='19.00',
+            pay_method='balance',
+            status='completed',
+            public_ip='8.8.8.8',
+            service_expires_at=old_expiry,
+        )
+        asset = CloudAsset.objects.create(
+            kind=CloudAsset.KIND_SERVER,
+            source=CloudAsset.SOURCE_ORDER,
+            order=order,
+            user=self.user,
+            provider=order.provider,
+            region_code=order.region_code,
+            region_name=order.region_name,
+            asset_name='expiry-asset',
+            public_ip='8.8.8.8',
+            status=CloudAsset.STATUS_RUNNING,
+            actual_expires_at=old_expiry,
+        )
+        server = Server.objects.create(
+            source=Server.SOURCE_ORDER,
+            order=order,
+            user=self.user,
+            provider=order.provider,
+            region_code=order.region_code,
+            region_name=order.region_name,
+            server_name='expiry-server',
+            public_ip='8.8.8.8',
+            status=Server.STATUS_RUNNING,
+            expires_at=old_expiry,
+        )
+
+        with patch('cloud.services._refresh_dashboard_plan_snapshots_after_service_change'):
+            updated, err = async_to_sync(update_cloud_item_expiry_for_admin)(order.id, 'order', new_expiry)
+
+        self.assertIsNone(err)
+        self.assertEqual(updated.id, order.id)
+        order.refresh_from_db()
+        asset.refresh_from_db()
+        server.refresh_from_db()
+        self.assertEqual(order.service_expires_at, new_expiry)
+        self.assertEqual(asset.actual_expires_at, new_expiry)
+        self.assertEqual(server.expires_at, new_expiry)
+        self.assertIsNone(order.renew_notice_sent_at)

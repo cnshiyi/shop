@@ -1531,6 +1531,10 @@ def _auto_renew_pinned_task(now):
     plan_qs = CloudAutoRenewPlan.objects.filter(data_group=CloudAutoRenewPlan.DATA_GROUP_ACTIVE)
     total_enabled = CloudServerOrder.objects.filter(auto_renew_enabled=True).count()
     failed_count = plan_qs.filter(queue_status='retry_failed').count()
+    if failed_count:
+        _sync_auto_renew_plan_table(now=now)
+        plan_qs = CloudAutoRenewPlan.objects.filter(data_group=CloudAutoRenewPlan.DATA_GROUP_ACTIVE)
+        failed_count = plan_qs.filter(queue_status='retry_failed').count()
     pending_count = plan_qs.filter(queue_status__in=list(_AUTO_RENEW_PLAN_DUE_STATUSES)).count()
     success_count = CloudAutoRenewPatrolLog.objects.filter(is_success=True, executed_at__gte=now - timezone.timedelta(days=1)).count()
     latest_time = (
@@ -1980,8 +1984,21 @@ def _build_auto_renew_plan_items(now=None):
         )
         for order in due_orders
     ]
+    def retry_item_payload(order, queue_status, queue_status_label, last_failure_reason):
+        status = _auto_renew_task_status(order, now, latest_failure_reason=last_failure_reason)
+        if status and status[0] == 'auto_renew_pending':
+            queue_status = 'due_now'
+            queue_status_label = '本轮待执行'
+        return _auto_renew_due_item_payload(
+            order,
+            queue_status=queue_status,
+            queue_status_label=queue_status_label,
+            next_run_at=next_run_at,
+            last_failure_reason=last_failure_reason,
+        )
+
     due_items.extend([
-        _auto_renew_due_item_payload(order, queue_status=queue_status, queue_status_label=queue_status_label, next_run_at=next_run_at, last_failure_reason=last_failure_reason)
+        retry_item_payload(order, queue_status, queue_status_label, last_failure_reason)
         for order, queue_status, queue_status_label, last_failure_reason in queue['retry_orders']
     ])
     due_items.extend([

@@ -2044,7 +2044,7 @@ def _shutdown_plan_item_payload(order, *, queue_status='scheduled_future', queue
     elif queue_status == 'retry_failed':
         execution_status = '上次删除失败，等待重试'
     elif queue_status == 'fallback_retry':
-        execution_status = '已过删除时间，等待兜底重试'
+        execution_status = '已到删除时间，待执行删除服务器'
     elif queue_status == 'due_now':
         execution_status = '已到删除时间，待执行删除服务器'
     elif queue_status == 'within_window':
@@ -2507,11 +2507,16 @@ def lifecycle_plans(request):
             plan_state_label = '关机计划关闭'
             should_execute = False
             blocked_reason = '关机计划关闭，禁止真实关机和删机'
-        elif queue_status in {'retry_failed', 'fallback_retry'}:
+        elif queue_status == 'retry_failed':
             resource_state = 'instance_present'
             resource_state_label = '实例待重试处理'
             plan_state = 'pending'
             plan_state_label = '待重试'
+        elif queue_status == 'fallback_retry':
+            resource_state = 'instance_present'
+            resource_state_label = '实例仍存在'
+            plan_state = 'pending'
+            plan_state_label = '待执行'
         elif queue_status in {'due_now', 'within_window', 'orphan_due'}:
             resource_state = 'instance_present'
             resource_state_label = '实例仍存在'

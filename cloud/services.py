@@ -1569,6 +1569,65 @@ def get_proxy_asset_by_ip_for_user(ip: str, user_id: int):
     return view
 
 
+def _update_cloud_order_expiry(order: CloudServerOrder, expires_at, *, now=None, note: str = ''):
+    now = now or timezone.now()
+    order.service_expires_at = expires_at
+    lifecycle = _cloud_order_lifecycle_fields(expires_at)
+    for field, value in lifecycle.items():
+        setattr(order, field, value)
+    order.renew_notice_sent_at = None
+    order.auto_renew_notice_sent_at = None
+    order.auto_renew_failure_notice_sent_at = None
+    order.delete_notice_sent_at = None
+    order.recycle_notice_sent_at = None
+    if note:
+        order.provision_note = append_note(order.provision_note, f'{note}：{expires_at:%Y-%m-%d %H:%M:%S}')
+    order.save(update_fields=[
+        'service_expires_at', 'renew_grace_expires_at', 'suspend_at', 'delete_at', 'ip_recycle_at',
+        'renew_notice_sent_at', 'auto_renew_notice_sent_at', 'auto_renew_failure_notice_sent_at',
+        'delete_notice_sent_at', 'recycle_notice_sent_at', 'provision_note', 'updated_at',
+    ])
+    _update_order_primary_records(
+        order,
+        asset_updates={'actual_expires_at': expires_at, 'updated_at': now},
+        server_updates={'expires_at': expires_at, 'updated_at': now},
+        now=now,
+    )
+    record_cloud_ip_log(
+        event_type='changed',
+        order=order,
+        public_ip=order.public_ip,
+        previous_public_ip=order.previous_public_ip,
+        note=f'{note or "管理员修改到期时间"}：{expires_at:%Y-%m-%d %H:%M:%S}',
+    )
+    transaction.on_commit(lambda: _refresh_dashboard_plan_snapshots_after_service_change(f'bot_admin_expiry:{order.id}'))
+    return order
+
+
+@sync_to_async
+def update_cloud_item_expiry_for_admin(item_id: int, item_kind: str, expires_at):
+    now = timezone.now()
+    item_kind = str(item_kind or 'order').strip().lower()
+    if item_kind == 'asset':
+        asset = CloudAsset.objects.select_related('order', 'cloud_account').filter(id=item_id, kind=CloudAsset.KIND_SERVER).exclude(status__in=_INACTIVE_ASSET_STATUSES).first()
+        if not asset:
+            return None, '代理记录不存在'
+        asset.actual_expires_at = expires_at
+        asset.note = append_note(asset.note, f'管理员通过机器人修改到期时间：{expires_at:%Y-%m-%d %H:%M:%S}')
+        asset.save(update_fields=['actual_expires_at', 'note', 'updated_at'])
+        server_updates = {'expires_at': expires_at, 'updated_at': now}
+        Server.objects.filter(scoped_server_match_for_asset(asset, include_order=True)).update(**server_updates)
+        if asset.order_id:
+            _update_cloud_order_expiry(asset.order, expires_at, now=now, note='管理员通过机器人修改到期时间')
+        return _proxy_asset_view(CloudAsset.objects.select_related('order', 'user').get(id=asset.id)), None
+
+    order = CloudServerOrder.objects.select_related('user', 'cloud_account').filter(id=item_id).first()
+    if not order:
+        return None, '订单不存在'
+    _update_cloud_order_expiry(order, expires_at, now=now, note='管理员通过机器人修改到期时间')
+    return _hydrate_order_from_proxy_asset(CloudServerOrder.objects.get(id=order.id)), None
+
+
 def _extract_asset_mtproxy_fields(note: str) -> tuple[str, str, str]:
     for raw_link in re.findall(r'tg://proxy\?[^"\'\s<>]+', note or ''):
         link = raw_link.rstrip(',.，。')
@@ -4476,6 +4535,7 @@ __all__ = [
     'get_group_proxy_asset_detail',
     'get_user_cloud_server',
     'get_user_proxy_asset_detail',
+    'update_cloud_item_expiry_for_admin',
     'ensure_cloud_asset_operation_order',
     'initialize_proxy_asset',
     'is_cloud_asset_renewal_order',

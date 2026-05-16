@@ -386,6 +386,7 @@ def cloud_server_list(orders, page: int = 1, total_pages: int = 1, prefix: str =
     for order in orders:
         ip = order.public_ip or order.previous_public_ip
         label = ip or getattr(order, 'order_no', None) or f'订单 {order.id}'
+        status = order.get_status_display() if hasattr(order, 'get_status_display') else (getattr(order, 'status', None) or '-')
         expires_at = getattr(order, 'service_expires_at', None) or getattr(order, 'actual_expires_at', None) or getattr(order, 'expires_at', None)
         expires = _format_local_date(expires_at)
         item_kind = getattr(order, '_proxy_item_kind', '')
@@ -393,7 +394,7 @@ def cloud_server_list(orders, page: int = 1, total_pages: int = 1, prefix: str =
             callback_data = f'cloud:assetdetail:{item_kind}:{order.id}:{prefix}:{page}'
         else:
             callback_data = f'cloud:detail:{order.id}:{prefix}:{page}'
-        kb.button(text=f'{label} | {expires}', callback_data=callback_data)
+        kb.button(text=f'{label} | {status} | {expires}', callback_data=callback_data)
     kb.adjust(1)
     if renew_all and orders:
         kb.row(InlineKeyboardButton(text='🔄 全部续费', callback_data='cloud:renewall:confirm'))
@@ -569,8 +570,16 @@ def cloud_server_detail(order_id: int, can_renew: bool, can_change_ip: bool, can
     )
 
 
-def cloud_order_list(orders, page: int = 1, total_pages: int = 1, prefix: str = 'profile:orders:cloud:page'):
-    kb = InlineKeyboardBuilder()
+_CLOUD_ORDER_FILTER_LABELS = {
+    'all': '全部',
+    'paid': '已支付',
+    'unpaid': '未付款',
+    'renew': '续费',
+    'new': '新购',
+}
+
+
+def _cloud_order_button_label(order) -> str:
     status_labels = {
         'pending': '待支付',
         'paid': '已支付',
@@ -584,11 +593,24 @@ def cloud_order_list(orders, page: int = 1, total_pages: int = 1, prefix: str = 
         'deleted': '已删除',
         'expired': '已过期',
     }
+    status = status_labels.get(getattr(order, 'status', '') or '') or getattr(order, 'status', '') or '-'
+    ip = getattr(order, 'public_ip', None) or getattr(order, 'previous_public_ip', None)
+    primary = ip or getattr(order, 'order_no', None) or f'订单 {getattr(order, "id", "-")}'
+    amount = fmt_amount(getattr(order, 'pay_amount', None) or getattr(order, 'total_amount', None) or 0)
+    return f'{primary} | {status} | {amount} {getattr(order, "currency", "")}'
+
+
+def cloud_order_list(orders, page: int = 1, total_pages: int = 1, prefix: str = 'profile:orders:cloud:page', order_filter: str = 'all'):
+    kb = InlineKeyboardBuilder()
+    filter_rows = []
+    for value, label in _CLOUD_ORDER_FILTER_LABELS.items():
+        prefix_text = '• ' if value == order_filter else ''
+        filter_rows.append(InlineKeyboardButton(text=f'{prefix_text}{label}', callback_data=f'profile:orders:cloud:filter:{value}'))
+    kb.row(*filter_rows[:3])
+    kb.row(*filter_rows[3:])
     for order in orders:
-        status = status_labels.get(getattr(order, 'status', '') or '') or getattr(order, 'status', '') or '-'
-        amount = fmt_amount(getattr(order, 'pay_amount', None) or getattr(order, 'total_amount', None) or 0)
         kb.row(InlineKeyboardButton(
-            text=f'{getattr(order, "order_no", "-")} | {status} | {amount} {getattr(order, "currency", "")}',
+            text=_cloud_order_button_label(order),
             callback_data=f'cloud:orderdetail:{order.id}:{prefix}:{page}',
         ))
     nav = []
@@ -605,6 +627,7 @@ def cloud_order_list(orders, page: int = 1, total_pages: int = 1, prefix: str = 
         page=page,
         total_pages=total_pages,
         prefix=prefix,
+        order_filter=order_filter,
         order_ids=[getattr(order, 'id', None) for order in orders],
     )
 
@@ -696,8 +719,23 @@ def order_list(orders, page: int, total_pages: int):
     return kb.as_markup()
 
 
-def balance_details_list(items, page: int, total_pages: int):
+_BALANCE_DETAIL_FILTER_LABELS = {
+    'all': '全部',
+    'in': '收入',
+    'out': '支出',
+    'recharge': '充值',
+    'pay': '消费',
+}
+
+
+def balance_details_list(items, page: int, total_pages: int, detail_filter: str = 'all'):
     kb = InlineKeyboardBuilder()
+    filter_buttons = []
+    for value, label in _BALANCE_DETAIL_FILTER_LABELS.items():
+        prefix = '• ' if value == detail_filter else ''
+        filter_buttons.append(InlineKeyboardButton(text=f'{prefix}{label}', callback_data=f'profile:balance_details:filter:{value}'))
+    kb.row(*filter_buttons[:3])
+    kb.row(*filter_buttons[3:])
     for item in items:
         icon = '🟢' if item['direction'] == 'in' else '🔴'
         kb.row(InlineKeyboardButton(
@@ -706,9 +744,9 @@ def balance_details_list(items, page: int, total_pages: int):
         ))
     nav = []
     if page > 1:
-        nav.append(InlineKeyboardButton(text='⬅️ 上一页', callback_data=f'bdpage:{page - 1}'))
+        nav.append(InlineKeyboardButton(text='⬅️ 上一页', callback_data=f'bdpage:{detail_filter}:{page - 1}'))
     if page < total_pages:
-        nav.append(InlineKeyboardButton(text='➡️ 下一页', callback_data=f'bdpage:{page + 1}'))
+        nav.append(InlineKeyboardButton(text='➡️ 下一页', callback_data=f'bdpage:{detail_filter}:{page + 1}'))
     if nav:
         kb.row(*nav)
     kb.row(InlineKeyboardButton(text='🔙 返回个人中心', callback_data='profile:back_to_menu'))
@@ -742,6 +780,8 @@ def cloud_ip_query_result(result_items, renewable_items, page: int = 1, total_pa
                 action_buttons.append(InlineKeyboardButton(text='🛠 重新安装', callback_data=f'cloud:reinit:{order_id}'))
             if item.get('can_config') and (include_reinit or item.get('can_support')):
                 action_buttons.append(InlineKeyboardButton(text='⚙️ 修改配置', callback_data=f'cloud:upgrade:{order_id}'))
+            if include_start:
+                action_buttons.append(InlineKeyboardButton(text='🕒 修改时间', callback_data=f'cloud:adminexp:order:{order_id}:cloud:querymenu'))
             if item.get('can_auto_renew') or include_start:
                 auto_enabled = bool(item.get('auto_renew_enabled'))
                 action_buttons.append(InlineKeyboardButton(text=f'{"⛔ 关闭" if auto_enabled else "⚡ 开启"}自动续费', callback_data=f'cloud:autorenew:{"off" if auto_enabled else "on"}:{order_id}'))
@@ -758,6 +798,8 @@ def cloud_ip_query_result(result_items, renewable_items, page: int = 1, total_pa
                 action_buttons.append(InlineKeyboardButton(text='🛠 重新安装', callback_data=f'cloud:assetinit:{asset_id}:cloud:querymenu'))
             if item.get('can_config') and (include_reinit or item.get('can_support')):
                 action_buttons.append(InlineKeyboardButton(text='⚙️ 修改配置', callback_data=f'cloud:assetaction:upgrade:{asset_id}'))
+            if include_start:
+                action_buttons.append(InlineKeyboardButton(text='🕒 修改时间', callback_data=f'cloud:adminexp:asset:{asset_id}:cloud:querymenu'))
             if item.get('can_support'):
                 action_buttons.append(support_contact_button('cloud_asset', asset_id))
         for start in range(0, len(action_buttons), 2):

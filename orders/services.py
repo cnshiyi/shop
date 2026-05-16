@@ -225,8 +225,21 @@ def _first_nonblank(*values) -> str:
     return ''
 
 
+def _cloud_order_filter_queryset(queryset, order_filter: str):
+    order_filter = str(order_filter or 'all').strip().lower()
+    if order_filter == 'paid':
+        return queryset.filter(Q(paid_at__isnull=False) | Q(status__in={'paid', 'provisioning', 'completed', 'expiring', 'suspended'}))
+    if order_filter == 'unpaid':
+        return queryset.filter(status__in={'pending', 'renew_pending'}, paid_at__isnull=True)
+    if order_filter == 'renew':
+        return queryset.filter(Q(status='renew_pending') | Q(last_renewed_at__isnull=False) | Q(provision_note__icontains='续费'))
+    if order_filter == 'new':
+        return queryset.filter(replacement_for__isnull=True).exclude(Q(status='renew_pending') | Q(last_renewed_at__isnull=False) | Q(provision_note__icontains='续费'))
+    return queryset
+
+
 @sync_to_async
-def list_cloud_orders(user_id: int, page: int = 1, per_page: int = 8):
+def list_cloud_orders(user_id: int, page: int = 1, per_page: int = 8, order_filter: str = 'all'):
     """个人中心订单查询：只按订单表展示，不复用代理列表逻辑。"""
     queryset = (
         CloudServerOrder.objects
@@ -234,6 +247,7 @@ def list_cloud_orders(user_id: int, page: int = 1, per_page: int = 8):
         .exclude(status__in={'deleted'})
         .order_by('service_expires_at', '-created_at', '-id')
     )
+    queryset = _cloud_order_filter_queryset(queryset, order_filter)
     total = queryset.count()
     start = max(0, (page - 1) * per_page)
     return list(queryset[start:start + per_page]), total
@@ -248,13 +262,15 @@ def get_cloud_order(order_id: int, user_id: int | None = None):
 
 
 @sync_to_async
-def list_balance_details(user_id: int, page: int = 1, per_page: int = 8):
+def list_balance_details(user_id: int, page: int = 1, per_page: int = 8, detail_filter: str = 'all'):
     user = TelegramUser.objects.filter(id=user_id).first()
     if not user:
         return [], 0
+    detail_filter = str(detail_filter or 'all').strip().lower()
     recharge_items = [
         {
             'id': f'recharge-{recharge.id}',
+            'kind': 'recharge',
             'title': f'充值 #{recharge.id}',
             'description': f'充值订单已完成，余额增加 {_fmt_decimal(recharge.amount)} {recharge.currency}',
             'currency': recharge.currency,
@@ -266,9 +282,12 @@ def list_balance_details(user_id: int, page: int = 1, per_page: int = 8):
         }
         for recharge in Recharge.objects.filter(user_id=user_id, status='completed').order_by('-completed_at', '-created_at')[:200]
     ]
+    if detail_filter not in {'all', 'in', 'recharge'}:
+        recharge_items = []
     ledger_items = [
         {
             'id': f'ledger-{ledger.id}',
+            'kind': 'ledger',
             'title': ledger.get_type_display(),
             'description': ledger.description or ledger.get_type_display(),
             'currency': ledger.currency,
@@ -280,6 +299,14 @@ def list_balance_details(user_id: int, page: int = 1, per_page: int = 8):
         }
         for ledger in BalanceLedger.objects.filter(user_id=user_id).order_by('-created_at', '-id')[:300]
     ]
+    if detail_filter == 'in':
+        ledger_items = [item for item in ledger_items if item['direction'] == 'in']
+    elif detail_filter == 'out':
+        ledger_items = [item for item in ledger_items if item['direction'] == 'out']
+    elif detail_filter == 'recharge':
+        ledger_items = [item for item in ledger_items if item['title'] == '充值入账']
+    elif detail_filter == 'pay':
+        ledger_items = [item for item in ledger_items if item['direction'] == 'out' or '支付' in item['title']]
     items = sorted([*ledger_items, *recharge_items], key=lambda item: item['created_at'] or timezone.now(), reverse=True)
     paginator = Paginator(items, per_page)
     page_obj = paginator.get_page(page)
