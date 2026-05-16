@@ -566,6 +566,12 @@ def _failed_instance_cleanup_note(cleanup_at):
     return f'创建流程未完成，已计划在 {timezone.localtime(cleanup_at):%Y-%m-%d %H:%M} 自动删除失败新实例。'
 
 
+def _cloud_created_server_name(provider: str, requested_server_name: str, result) -> str:
+    if provider == 'aws_lightsail':
+        return str(getattr(result, 'instance_id', '') or requested_server_name or '').strip()
+    return str(requested_server_name or '').strip()
+
+
 def _is_transient_create_failure(note: str) -> bool:
     text = str(note or '').lower()
     transient_markers = [
@@ -620,6 +626,16 @@ async def provision_cloud_server(order_id: int):
                 logger.warning('云服务器开通失败: order=%s reason=asset_recovery_missing_cloud_account', order.order_no)
                 saved = await _mark_failed(order.id, note)
                 return saved
+            if order.provider == 'aws_lightsail':
+                note = 'AWS 创建失败：没有可用的后台云账号，已拒绝回退默认账号或环境变量创建实例。'
+                logger.warning('云服务器开通失败: order=%s reason=aws_missing_cloud_account', order.order_no)
+                saved = await _mark_failed(order.id, note)
+                return saved
+            if order.provider == 'aliyun_simple':
+                note = '阿里云创建失败：没有可用的后台云账号，已拒绝回退默认账号或环境变量创建实例。'
+                logger.warning('云服务器开通失败: order=%s reason=aliyun_missing_cloud_account', order.order_no)
+                saved = await _mark_failed(order.id, note)
+                return saved
             account_ids = [None]
         result = None
         login_user = 'root'
@@ -671,9 +687,10 @@ async def provision_cloud_server(order_id: int):
         if result.ok:
             bootstrap_user = result.login_user or login_user
             recovery_expected_ips = [order.public_ip, order.previous_public_ip] if is_cloud_asset_renewal_order(order) else []
+            created_server_name = _cloud_created_server_name(order.provider, server_name, result)
             order = await _mark_instance_created(
                 order.id,
-                server_name,
+                created_server_name,
                 result.instance_id,
                 result.public_ip,
                 bootstrap_user,
@@ -782,7 +799,7 @@ async def provision_cloud_server(order_id: int):
             set_provision_progress(order.id, '保存开通结果')
             saved = await _mark_success(
                 order_id,
-                server_name,
+                created_server_name,
                 result.instance_id,
                 final_public_ip,
                 result.login_user or login_user,

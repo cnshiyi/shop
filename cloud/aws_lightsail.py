@@ -1,6 +1,5 @@
 from asgiref.sync import sync_to_async
 import logging
-import os
 import re
 import secrets
 import string
@@ -12,8 +11,6 @@ from cloud.ip_guard import normalize_public_ip
 from cloud.ports import get_mtproxy_public_ports
 from cloud.schemas import ProvisionResult
 from django.apps import apps
-
-from core.cloud_accounts import get_active_cloud_account
 
 logger = logging.getLogger(__name__)
 
@@ -133,6 +130,8 @@ systemctl restart ssh || systemctl restart sshd || true
 
 
 def _load_public_key() -> str:
+    import os
+
     env_value = (os.getenv('AWS_LIGHTSAIL_PUBLIC_KEY') or '').strip()
     if env_value:
         return env_value
@@ -180,19 +179,16 @@ def _aws_client_from_order_data(order_data: dict):
     if account_id:
         CloudAccountConfig = apps.get_model('core', 'CloudAccountConfig')
         account = CloudAccountConfig.objects.filter(id=account_id, provider='aws', is_active=True).first()
-    account = account or get_active_cloud_account('aws', region)
+    if not account:
+        return None, '缺少绑定的 AWS 云账号，拒绝回退默认账号创建或迁移实例。'
     access_key = ''
     secret_key = ''
-    if account:
-        ak = (account.access_key_plain or '').strip()
-        sk = (account.secret_key_plain or '').strip()
-        if ak and sk and len(ak) >= 16 and len(sk) >= 36:
-            access_key, secret_key = ak, sk
+    ak = (account.access_key_plain or '').strip()
+    sk = (account.secret_key_plain or '').strip()
+    if ak and sk and len(ak) >= 16 and len(sk) >= 36:
+        access_key, secret_key = ak, sk
     if not access_key or not secret_key:
-        access_key = os.getenv('AWS_ACCESS_KEY_ID', '')
-        secret_key = os.getenv('AWS_SECRET_ACCESS_KEY', '')
-    if not access_key or not secret_key:
-        return None, '未配置 AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY。'
+        return None, f'AWS 云账号#{getattr(account, "id", "-")}凭据缺失或疑似截断，拒绝创建或迁移实例。'
     try:
         import boto3
     except ImportError:

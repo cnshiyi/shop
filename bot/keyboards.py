@@ -541,12 +541,10 @@ def cloud_server_renew_payment(order_id: int, amount, trx_amount, auto_renew_ena
     )
 
 
-def cloud_server_detail(order_id: int, can_renew: bool, can_change_ip: bool, can_reinit: bool = False, can_delay: bool = False, back_callback: str = 'cloud:list', can_upgrade: bool = False, can_refund: bool = False, can_resume_init: bool = False):
+def cloud_server_detail(order_id: int, can_renew: bool, can_change_ip: bool, can_reinit: bool = False, back_callback: str = 'cloud:list', can_upgrade: bool = False, can_refund: bool = False, can_resume_init: bool = False):
     kb = InlineKeyboardBuilder()
     if can_renew:
         kb.button(text='🔄 续费', callback_data=f'cloud:renew:{order_id}')
-    if can_delay:
-        kb.button(text='🕒 延期', callback_data=f'cloud:delay:{order_id}:10')
     if can_change_ip:
         kb.button(text='🌐 更换IP', callback_data=f'cloud:ip:{order_id}')
     if can_resume_init:
@@ -564,7 +562,6 @@ def cloud_server_detail(order_id: int, can_renew: bool, can_change_ip: bool, can
         can_renew=can_renew,
         can_change_ip=can_change_ip,
         can_reinit=can_reinit,
-        can_delay=can_delay,
         can_upgrade=can_upgrade,
         can_refund=can_refund,
         can_resume_init=can_resume_init,

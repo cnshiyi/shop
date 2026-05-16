@@ -16,7 +16,10 @@ from bot.api import (
     _status_label,
     _user_payload,
     dashboard_login_required,
+    dashboard_superuser_required,
 )
+from bot.models import TelegramUser
+from orders.ledger import record_balance_ledger
 from orders.models import Order, Recharge
 
 
@@ -107,16 +110,18 @@ def _recharge_detail_payload(recharge):
 
 
 @transaction.atomic
-def _apply_recharge_status(recharge, new_status):
+def _apply_recharge_status(recharge, new_status, operator=None):
     now = timezone.now()
-    old_status = recharge.status
     allowed_statuses = {choice[0] for choice in Recharge.STATUS_CHOICES}
     if new_status not in allowed_statuses:
         raise ValueError('充值订单状态不正确')
+
+    recharge = Recharge.objects.select_related('user').select_for_update().get(pk=recharge.pk)
+    old_status = recharge.status
     if new_status == old_status:
         return recharge
 
-    user = recharge.user
+    user = TelegramUser.objects.select_for_update().get(pk=recharge.user_id)
     balance_field = 'balance_trx' if recharge.currency == 'TRX' else 'balance'
 
     if old_status == 'completed' and new_status != 'completed':
@@ -125,11 +130,34 @@ def _apply_recharge_status(recharge, new_status):
             raise ValueError('用户余额不足，无法从已完成回退状态')
         setattr(user, balance_field, current_balance - recharge.amount)
         user.save(update_fields=[balance_field, 'updated_at'])
+        record_balance_ledger(
+            user,
+            ledger_type='manual_adjust',
+            currency=recharge.currency,
+            old_balance=current_balance,
+            new_balance=getattr(user, balance_field),
+            related_type='recharge',
+            related_id=recharge.id,
+            description=f'Dashboard 将充值订单 #{recharge.id} 从已完成改为 {_status_label(new_status, Recharge.STATUS_CHOICES)}，余额回退',
+            operator=operator,
+        )
         recharge.completed_at = None
 
     if new_status == 'completed' and old_status != 'completed':
-        setattr(user, balance_field, getattr(user, balance_field) + recharge.amount)
+        old_balance = getattr(user, balance_field)
+        setattr(user, balance_field, old_balance + recharge.amount)
         user.save(update_fields=[balance_field, 'updated_at'])
+        record_balance_ledger(
+            user,
+            ledger_type='recharge',
+            currency=recharge.currency,
+            old_balance=old_balance,
+            new_balance=getattr(user, balance_field),
+            related_type='recharge',
+            related_id=recharge.id,
+            description=f'Dashboard 手动确认充值订单 #{recharge.id} 入账',
+            operator=operator,
+        )
         recharge.completed_at = recharge.completed_at or now
     elif new_status in {'pending', 'expired'}:
         recharge.completed_at = None
@@ -159,7 +187,7 @@ def recharge_detail(request, recharge_id):
 
 
 @csrf_exempt
-@dashboard_login_required
+@dashboard_superuser_required
 @require_POST
 def update_recharge_status(request, recharge_id):
     recharge = Recharge.objects.select_related('user').filter(pk=recharge_id).first()
@@ -170,7 +198,8 @@ def update_recharge_status(request, recharge_id):
     if not new_status:
         return _error('充值订单状态不能为空')
     try:
-        recharge = _apply_recharge_status(recharge, new_status)
+        operator = getattr(request.user, 'username', '') or str(getattr(request.user, 'id', '') or '')
+        recharge = _apply_recharge_status(recharge, new_status, operator=operator)
     except ValueError as exc:
         return _error(str(exc))
     except Exception as exc:

@@ -87,7 +87,6 @@ BOT_TEXTS = {
     'bot_custom_port_success': ('✅ 端口设置成功：{port}\n已开始后台创建服务器，我会在完成后主动通知你。', '云服务器端口设置成功提示'),
     'bot_ip_change_order_created': ('✅ 更换IP迁移单已创建\n新订单号: {order_no}\n新地区: {region_name}\n新端口: {port}\n旧服务器将于 5 天后到期，请尽快完成迁移。', '更换 IP 迁移单创建成功提示'),
     'bot_query_cloud_empty': ('🔎 查询中心\n\n暂无可查询的代理记录。', '查询中心无代理记录提示'),
-    'bot_cloud_extend_success': ('🕒 已为订单 {order_no} 延期 {days} 天，系统将自动顺延删机前宽限时间。', '云服务器延期成功提示'),
     'bot_cloud_upgrade_submitted': ('⬆️ 已扣除升级差价并提交升级任务。\n新订单: {order_no}\n升级完成后会自动发送新的服务器信息，代理链接保持不变。', '云服务器升级提交成功提示'),
     'bot_reinstall_need_main_link': ('当前服务器缺少主代理链接。请直接发送这台服务器的主代理链接，我会先校验 IP 和服务器实际密钥；如果系统记录的主端口不对，会以你发送的主链接端口为准。校验通过后再让你确认是否重新安装。', '重装缺少主代理链接提示'),
     'bot_resume_init_confirm': ('⚠️ 确认继续初始化？\n\n系统会重新执行 BBR/MTProxy 安装并生成代理链接。', '继续初始化确认提示'),

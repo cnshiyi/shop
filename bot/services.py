@@ -265,7 +265,12 @@ def record_telegram_message(
     username_snapshot = (_normalize_usernames(active_usernames) or _normalize_usernames(username) or [''])[0] or None
     existing = None
     if message_id:
-        existing = TelegramChatMessage.objects.filter(chat_id=chat_id, message_id=message_id, direction=direction).first()
+        existing_queryset = TelegramChatMessage.objects.filter(chat_id=chat_id, message_id=message_id, direction=direction)
+        if login_account_id is None:
+            existing_queryset = existing_queryset.filter(login_account_id__isnull=True)
+        else:
+            existing_queryset = existing_queryset.filter(login_account_id=login_account_id)
+        existing = existing_queryset.first()
     if existing:
         changed = []
         if not existing.user_id and user:

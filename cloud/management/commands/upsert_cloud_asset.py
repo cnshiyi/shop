@@ -1,10 +1,12 @@
 from decimal import Decimal, InvalidOperation
 
 from django.core.management.base import BaseCommand, CommandError
+from django.db.models import Q
 from django.utils.dateparse import parse_datetime
 
 from bot.models import TelegramUser
 from cloud.models import CloudAsset, Server
+from core.cloud_accounts import cloud_account_label, get_cloud_account_from_label
 
 
 def _resolve_user(value):
@@ -34,6 +36,7 @@ class Command(BaseCommand):
         parser.add_argument('--instance-id', default='')
         parser.add_argument('--asset-name', default='')
         parser.add_argument('--provider', default='aws_lightsail')
+        parser.add_argument('--account-label', default='', help='云账号标识；建议填写，避免跨账号覆盖同名实例')
         parser.add_argument('--region-code', default='')
         parser.add_argument('--region-name', default='')
         parser.add_argument('--public-ip', default='')
@@ -50,6 +53,11 @@ class Command(BaseCommand):
     def handle(self, *args, **options):
         instance_id = (options.get('instance_id') or '').strip()
         asset_name = (options.get('asset_name') or '').strip()
+        provider = (options.get('provider') or '').strip()
+        account_label = (options.get('account_label') or '').strip()
+        cloud_account = get_cloud_account_from_label(account_label, provider) if account_label else None
+        if cloud_account and not account_label:
+            account_label = cloud_account_label(cloud_account)
         if not instance_id and not asset_name:
             raise CommandError('至少提供 --instance-id 或 --asset-name 之一。')
 
@@ -59,11 +67,19 @@ class Command(BaseCommand):
             if actual_expires_at is None:
                 raise CommandError('`--actual-expires-at` 格式错误，请传 ISO 时间。')
 
-        lookup = {'kind': options['kind']}
-        if instance_id:
-            lookup['instance_id'] = instance_id
+        lookup_q = Q(kind=options['kind'], provider=provider)
+        if account_label:
+            lookup_q &= Q(account_label=account_label)
         else:
-            lookup['asset_name'] = asset_name
+            lookup_q &= (Q(account_label='') | Q(account_label__isnull=True))
+        if options.get('region_code'):
+            lookup_q &= Q(region_code=options['region_code'])
+        if options.get('public_ip'):
+            lookup_q &= Q(public_ip=options['public_ip'])
+        elif instance_id:
+            lookup_q &= Q(instance_id=instance_id)
+        else:
+            lookup_q &= Q(asset_name=asset_name)
 
         user = None
         if options.get('user'):
@@ -73,7 +89,9 @@ class Command(BaseCommand):
 
         create_defaults = {
             'source': CloudAsset.SOURCE_AWS_MANUAL,
-            'provider': options['provider'],
+            'provider': provider,
+            'cloud_account': cloud_account,
+            'account_label': account_label or None,
             'region_code': options['region_code'] or None,
             'region_name': options['region_name'] or None,
             'asset_name': asset_name or instance_id,
@@ -88,12 +106,21 @@ class Command(BaseCommand):
             'note': options['note'] or None,
             'is_active': not options['inactive'],
         }
-        asset, created = CloudAsset.objects.get_or_create(**lookup, defaults=create_defaults)
+        asset = CloudAsset.objects.filter(lookup_q).order_by('-updated_at', '-id').first()
+        created = asset is None
+        if created:
+            asset = CloudAsset.objects.create(
+                kind=options['kind'],
+                instance_id=instance_id or None,
+                **create_defaults,
+            )
         if not created:
             update_fields = []
             updates = {
                 'source': CloudAsset.SOURCE_AWS_MANUAL,
-                'provider': options['provider'],
+                'provider': provider,
+                'cloud_account': cloud_account,
+                'account_label': account_label or asset.account_label,
                 'asset_name': asset_name or instance_id,
                 'currency': options.get('currency') or 'USDT',
             }
@@ -129,15 +156,25 @@ class Command(BaseCommand):
                 update_fields.append('updated_at')
                 asset.save(update_fields=sorted(set(update_fields)))
         if asset.kind == CloudAsset.KIND_SERVER:
+            server_lookup = {
+                'provider': asset.provider,
+                'account_label': asset.account_label or '',
+                'region_code': asset.region_code,
+            }
+            if asset.public_ip:
+                server_lookup['public_ip'] = asset.public_ip
+            else:
+                server_lookup['instance_id'] = asset.instance_id or asset.provider_resource_id or asset.public_ip
             Server.objects.update_or_create(
-                instance_id=asset.instance_id or asset.provider_resource_id or asset.public_ip,
+                **server_lookup,
                 defaults={
                     'source': Server.SOURCE_AWS_MANUAL,
                     'provider': asset.provider,
-                    'account_label': asset.provider,
+                    'account_label': asset.account_label or '',
                     'region_code': asset.region_code,
                     'region_name': asset.region_name,
                     'server_name': asset.asset_name,
+                    'instance_id': asset.instance_id,
                     'provider_resource_id': asset.provider_resource_id or asset.instance_id,
                     'public_ip': asset.public_ip,
                     'previous_public_ip': asset.previous_public_ip,

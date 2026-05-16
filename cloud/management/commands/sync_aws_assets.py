@@ -5,7 +5,7 @@ from django.db.models import Case, IntegerField, Q, Value, When
 from django.utils import timezone
 
 from bot.api import _provider_status_label
-from core.cloud_accounts import cloud_account_label, list_active_cloud_accounts
+from core.cloud_accounts import cloud_account_label, cloud_account_label_variants, list_active_cloud_accounts
 from core.persistence import record_external_sync_log
 from cloud.models import CloudAsset, CloudServerOrder, Server, _runtime_int_config, _with_runtime_time
 from cloud.note_utils import append_note, append_status_note
@@ -41,8 +41,8 @@ def _resolve_order_for_ip(public_ip, account=None):
         status__in=_TRACEABLE_ORDER_STATUSES,
     )
     if account:
-        label = cloud_account_label(account)
-        queryset = queryset.filter(Q(cloud_account=account) | Q(account_label=label))
+        labels = cloud_account_label_variants(account)
+        queryset = queryset.filter(Q(cloud_account=account) | Q(account_label__in=labels))
     return queryset.filter(Q(status__in=_ACTIVE_ORDER_STATUSES) | Q(ip_recycle_at__gt=timezone.now())).order_by('-created_at', '-id').first()
 
 
@@ -50,8 +50,8 @@ def _resolve_order_for_instance_sync(instance_name, instance_arn, public_ip, acc
     order_scope = CloudServerOrder.objects.filter(provider='aws_lightsail', status__in=_ACTIVE_ORDER_STATUSES)
     traceable_order_scope = CloudServerOrder.objects.filter(provider='aws_lightsail', status__in=_TRACEABLE_ORDER_STATUSES)
     if account:
-        label = cloud_account_label(account)
-        account_filter = Q(cloud_account=account) | Q(account_label=label)
+        labels = cloud_account_label_variants(account)
+        account_filter = Q(cloud_account=account) | Q(account_label__in=labels)
         order_scope = order_scope.filter(account_filter)
         traceable_order_scope = traceable_order_scope.filter(account_filter)
     if public_ip:
@@ -142,6 +142,28 @@ def _lightsail_client(region, account=None):
 def _release_static_ip_if_due(client, region, asset, static_ip_name, static_ip_arn, public_ip, stdout):
     due_at = asset.actual_expires_at
     if not due_at or due_at > timezone.now() or asset.status == CloudAsset.STATUS_DELETED:
+        return False
+    if getattr(getattr(asset, 'cloud_account', None), 'shutdown_enabled', True) is False:
+        reason = '关机/删机计划已关闭，AWS 同步拒绝真实释放未附加固定 IP'
+        record_external_sync_log(
+            source='aws_lightsail',
+            action='release_static_ip',
+            target=f'{region}:{static_ip_name or asset.asset_name or public_ip or asset.id}',
+            request_payload={'staticIpName': static_ip_name or asset.asset_name or '', 'asset_id': asset.id, 'public_ip': public_ip},
+            response_payload={'skipped': True, 'reason': reason},
+            is_success=True,
+            account=asset.cloud_account,
+        )
+        asset.note = append_note(
+            asset.note,
+            f"状态: 未附加固定IP；公网IP: {public_ip or '缺失'}；固定IP名: {static_ip_name or asset.asset_name or '-'}；"
+            f"{reason}；最近同步: {timezone.now().isoformat()}",
+        )
+        asset.provider_status = '未附加固定IP-关机计划关闭'
+        asset.save(update_fields=['provider_status', 'note', 'updated_at'])
+        stdout.write(stdout.style.WARNING(
+            f'跳过 AWS {region} 未附加IP释放：{reason} 资产#{asset.id} IP={public_ip or "缺失"}'
+        ))
         return False
     release_name = static_ip_name or asset.asset_name or ''
     if not release_name:
@@ -264,56 +286,70 @@ def _order_status_from_cloud_sync(order, status):
     return cloud_status
 
 
-def _asset_resolve_ordering():
-    return [
+def _asset_resolve_ordering(public_ip=''):
+    ordering = []
+    if public_ip:
+        ordering.append(Case(
+            When(public_ip=public_ip, then=Value(0)),
+            When(previous_public_ip=public_ip, then=Value(1)),
+            default=Value(2),
+            output_field=IntegerField(),
+        ))
+    ordering.extend([
         Case(
             When(status=CloudAsset.STATUS_DELETING, then=Value(0)),
             default=Value(1),
             output_field=IntegerField(),
         ),
-        Case(
-            When(previous_public_ip__isnull=False, then=Value(0)),
-            default=Value(1),
-            output_field=IntegerField(),
-        ),
         '-updated_at',
         '-id',
-    ]
+    ])
+    return ordering
 
 
-def _server_resolve_ordering():
-    return [
+def _server_resolve_ordering(public_ip=''):
+    ordering = []
+    if public_ip:
+        ordering.append(Case(
+            When(public_ip=public_ip, then=Value(0)),
+            When(previous_public_ip=public_ip, then=Value(1)),
+            default=Value(2),
+            output_field=IntegerField(),
+        ))
+    ordering.extend([
         Case(
             When(status=Server.STATUS_DELETING, then=Value(0)),
             default=Value(1),
             output_field=IntegerField(),
         ),
-        Case(
-            When(previous_public_ip__isnull=False, then=Value(0)),
-            default=Value(1),
-            output_field=IntegerField(),
-        ),
         '-updated_at',
         '-id',
-    ]
+    ])
+    return ordering
 
 
-def _resolve_asset(instance_name, instance_arn, public_ip, order, account=None):
+def _resolve_asset(instance_name, instance_arn, public_ip, order, account=None, region_code=''):
     lookup = Q(kind=CloudAsset.KIND_SERVER)
     if account:
-        label = cloud_account_label(account)
-        lookup &= (Q(cloud_account=account) | Q(account_label=label) | (Q(cloud_account__isnull=True) & (Q(account_label='') | Q(account_label__isnull=True))))
+        labels = cloud_account_label_variants(account)
+        lookup &= (Q(cloud_account=account) | Q(account_label__in=labels) | (Q(cloud_account__isnull=True) & (Q(account_label='') | Q(account_label__isnull=True))))
+    region_code = str(region_code or '').strip()
+    if region_code:
+        lookup &= Q(region_code=region_code)
     base_queryset = CloudAsset.objects.filter(lookup).filter(Q(order__isnull=True) | ~Q(order__status__in=_SYNC_EXCLUDED_ORDER_STATUSES)).exclude(status__in=_SYNC_EXCLUDED_ASSET_STATUSES)
     if public_ip:
         ip_q = Q(public_ip=public_ip) | Q(previous_public_ip=public_ip)
         if order:
-            order_ip_asset = CloudAsset.objects.filter(kind=CloudAsset.KIND_SERVER, order=order).filter(ip_q).order_by(*_asset_resolve_ordering()).first()
+            order_asset_queryset = CloudAsset.objects.filter(kind=CloudAsset.KIND_SERVER, order=order)
+            if region_code:
+                order_asset_queryset = order_asset_queryset.filter(region_code=region_code)
+            order_ip_asset = order_asset_queryset.filter(ip_q).order_by(*_asset_resolve_ordering(public_ip)).first()
             if order_ip_asset:
                 return order_ip_asset
         public_ip_queryset = base_queryset.filter(ip_q)
         if order:
             public_ip_queryset = public_ip_queryset.filter(Q(order__isnull=True) | Q(order=order))
-        asset = public_ip_queryset.order_by(*_asset_resolve_ordering()).first()
+        asset = public_ip_queryset.order_by(*_asset_resolve_ordering(public_ip)).first()
         if asset:
             return asset
     direct_candidates = Q()
@@ -322,7 +358,10 @@ def _resolve_asset(instance_name, instance_arn, public_ip, order, account=None):
     if instance_arn:
         direct_candidates |= Q(provider_resource_id=instance_arn)
     if order and direct_candidates:
-        order_asset = CloudAsset.objects.filter(kind=CloudAsset.KIND_SERVER, order=order).filter(direct_candidates).order_by(*_asset_resolve_ordering()).first()
+        order_asset_queryset = CloudAsset.objects.filter(kind=CloudAsset.KIND_SERVER, order=order)
+        if region_code:
+            order_asset_queryset = order_asset_queryset.filter(region_code=region_code)
+        order_asset = order_asset_queryset.filter(direct_candidates).order_by(*_asset_resolve_ordering()).first()
         if order_asset:
             return order_asset
     if direct_candidates:
@@ -399,22 +438,28 @@ def _sync_order_deleted_from_cloud(order, old_public_ip, *, source: str = 'AWS �
     )
 
 
-def _resolve_server(instance_name, instance_arn, public_ip, order, account=None):
+def _resolve_server(instance_name, instance_arn, public_ip, order, account=None, region_code=''):
     base = Q()
     if account:
-        label = cloud_account_label(account)
-        base &= (Q(account_label=label) | Q(account_label='') | Q(account_label__isnull=True))
+        labels = cloud_account_label_variants(account)
+        base &= (Q(account_label__in=labels) | Q(account_label='') | Q(account_label__isnull=True))
+    region_code = str(region_code or '').strip()
+    if region_code:
+        base &= Q(region_code=region_code)
     base_queryset = Server.objects.filter(base).filter(Q(order__isnull=True) | ~Q(order__status__in=_SYNC_EXCLUDED_ORDER_STATUSES)).exclude(status__in=_SYNC_EXCLUDED_SERVER_STATUSES)
     if public_ip:
         ip_q = Q(public_ip=public_ip) | Q(previous_public_ip=public_ip)
         if order:
-            order_ip_server = Server.objects.filter(order=order).filter(ip_q).order_by(*_server_resolve_ordering()).first()
+            order_server_queryset = Server.objects.filter(order=order)
+            if region_code:
+                order_server_queryset = order_server_queryset.filter(region_code=region_code)
+            order_ip_server = order_server_queryset.filter(ip_q).order_by(*_server_resolve_ordering(public_ip)).first()
             if order_ip_server:
                 return order_ip_server
         public_ip_queryset = base_queryset.filter(ip_q)
         if order:
             public_ip_queryset = public_ip_queryset.filter(Q(order__isnull=True) | Q(order=order))
-        server = public_ip_queryset.order_by(*_server_resolve_ordering()).first()
+        server = public_ip_queryset.order_by(*_server_resolve_ordering(public_ip)).first()
         if server:
             return server
     direct_candidates = Q()
@@ -423,7 +468,10 @@ def _resolve_server(instance_name, instance_arn, public_ip, order, account=None)
     if instance_arn:
         direct_candidates |= Q(provider_resource_id=instance_arn)
     if order and direct_candidates:
-        order_server = Server.objects.filter(order=order).filter(direct_candidates).order_by(*_server_resolve_ordering()).first()
+        order_server_queryset = Server.objects.filter(order=order)
+        if region_code:
+            order_server_queryset = order_server_queryset.filter(region_code=region_code)
+        order_server = order_server_queryset.filter(direct_candidates).order_by(*_server_resolve_ordering()).first()
         if order_server:
             return order_server
     if direct_candidates:
@@ -458,10 +506,13 @@ def _static_ip_rebound_asset(asset: CloudAsset | None) -> bool:
     )
 
 
-def _resolve_asset_for_static_ip(static_ip_name, static_ip_arn, public_ip, account=None):
+def _resolve_asset_for_static_ip(static_ip_name, static_ip_arn, public_ip, account=None, region_code=''):
     lookup = Q(kind=CloudAsset.KIND_SERVER)
     if account:
         lookup &= Q(cloud_account=account)
+    region_code = str(region_code or '').strip()
+    if region_code:
+        lookup &= Q(region_code=region_code)
 
     static_ip_ordering = [
         Case(
@@ -496,9 +547,10 @@ def _mark_ip_retained_as_unattached(public_ip, static_ip_name, retained_order, a
     if not public_ip:
         return []
     label = cloud_account_label(account) if account else ''
+    labels = cloud_account_label_variants(account) if account else []
     lookup = Q(kind=CloudAsset.KIND_SERVER, provider='aws_lightsail') & (Q(public_ip=public_ip) | Q(previous_public_ip=public_ip))
     if account:
-        lookup &= (Q(cloud_account=account) | Q(account_label=label))
+        lookup &= (Q(cloud_account=account) | Q(account_label__in=labels))
     updated = []
     for related in CloudAsset.objects.filter(lookup).exclude(provider_status__contains='未附加固定IP'):
         if str(getattr(related, 'asset_name', '') or '') == str(static_ip_name or '') and not getattr(related, 'instance_id', None):
@@ -538,7 +590,7 @@ def _mark_ip_retained_as_unattached(public_ip, static_ip_name, retained_order, a
         updated.append(f'{related.id}:{public_ip}:{related.asset_name}')
     server_lookup = Q(provider='aws_lightsail') & (Q(public_ip=public_ip) | Q(previous_public_ip=public_ip))
     if account:
-        server_lookup &= Q(account_label=label)
+        server_lookup &= Q(account_label__in=labels)
     for server in Server.objects.filter(server_lookup):
         server.previous_public_ip = server.previous_public_ip or server.public_ip or public_ip
         server.public_ip = server.public_ip or public_ip
@@ -569,8 +621,8 @@ def _mark_deleted_when_missing_in_aws(region, existing_instance_names, existing_
         provider='aws_lightsail',
     ).exclude(status__in=_SYNC_EXCLUDED_ASSET_STATUSES)
     if account:
-        label = cloud_account_label(account)
-        queryset = queryset.filter(Q(cloud_account=account) | Q(account_label=label))
+        labels = cloud_account_label_variants(account)
+        queryset = queryset.filter(Q(cloud_account=account) | Q(account_label__in=labels))
     queryset = queryset.filter(
         Q(region_code=region) | Q(region_code='') | Q(region_code__isnull=True)
     ).order_by('-updated_at', '-id')
@@ -608,13 +660,25 @@ def _mark_deleted_when_missing_in_aws(region, existing_instance_names, existing_
         asset.provider_status = '云上未找到实例/IP'
         asset.note = with_missing_confirmation_note(append_note(asset.note, f'状态: 云上未找到实例/IP；公网IP: {old_public_ip or "缺失"}；最近同步: {now_iso}'), pending_count)
         asset.save(update_fields=['status', 'is_active', 'previous_public_ip', 'public_ip', 'provider_status', 'note', 'updated_at'])
-        server_queryset = Server.objects.filter(
-            Q(instance_id=instance_name) | Q(provider_resource_id=asset.provider_resource_id) | Q(public_ip=public_ip) | Q(previous_public_ip=old_public_ip),
-            provider='aws_lightsail',
-        )
-        if account:
-            server_queryset = server_queryset.filter(account_label=cloud_account_label(account))
-        server = server_queryset.order_by('-updated_at', '-id').first()
+        server_lookup = Q()
+        provider_resource_id = str(asset.provider_resource_id or '').strip()
+        if instance_name:
+            server_lookup |= Q(instance_id=instance_name)
+        if provider_resource_id:
+            server_lookup |= Q(provider_resource_id=provider_resource_id)
+        if public_ip:
+            server_lookup |= Q(public_ip=public_ip)
+        if old_public_ip:
+            server_lookup |= Q(previous_public_ip=old_public_ip)
+        server = None
+        if server_lookup:
+            server_queryset = Server.objects.filter(
+                server_lookup,
+                provider='aws_lightsail',
+            )
+            if account:
+                server_queryset = server_queryset.filter(account_label__in=cloud_account_label_variants(account))
+            server = server_queryset.order_by('-updated_at', '-id').first()
         if server:
             server.status = Server.STATUS_DELETED
             server.is_active = False
@@ -641,7 +705,7 @@ def _mark_deleted_when_missing_in_aws(region, existing_instance_names, existing_
         ))
     server_queryset = Server.objects.filter(provider='aws_lightsail').exclude(status__in=_SYNC_EXCLUDED_SERVER_STATUSES)
     if account:
-        server_queryset = server_queryset.filter(account_label=cloud_account_label(account))
+        server_queryset = server_queryset.filter(account_label__in=cloud_account_label_variants(account))
     server_queryset = server_queryset.filter(
         Q(region_code=region) | Q(region_code='') | Q(region_code__isnull=True)
     ).order_by('-updated_at', '-id')
@@ -699,6 +763,9 @@ class Command(BaseCommand):
     def add_arguments(self, parser):
         parser.add_argument('--region', default='', help='AWS Lightsail 地域；留空则同步全部可用地区')
         parser.add_argument('--account-id', default='', help='只同步指定后台云账号 ID')
+        parser.add_argument('--asset-id', default='', help='只处理指定资产 ID 对应资源')
+        parser.add_argument('--instance-id', default='', help='只处理指定实例名/实例 ARN')
+        parser.add_argument('--public-ip', default='', help='只处理指定公网 IP')
 
     def handle(self, *args, **options):
         accounts = list_active_cloud_accounts('aws')
@@ -709,6 +776,39 @@ class Command(BaseCommand):
                 raise CommandError(f'未找到启用的 AWS 云账号 #{account_id}')
         if not accounts:
             raise CommandError('未添加启用的 AWS 云账号，拒绝使用环境变量同步。请先在后台「云账号」添加 AWS 账号。')
+        target_asset_id = str(options.get('asset_id') or '').strip()
+        target_instance_id = str(options.get('instance_id') or '').strip()
+        target_public_ip = str(options.get('public_ip') or '').strip()
+        target_scope_enabled = bool(target_asset_id or target_instance_id or target_public_ip)
+        if target_asset_id and not (target_instance_id or target_public_ip):
+            target_asset = CloudAsset.objects.filter(pk=target_asset_id).first()
+            if target_asset:
+                target_instance_id = target_asset.instance_id or target_asset.provider_resource_id or target_asset.asset_name or ''
+                target_public_ip = target_asset.public_ip or target_asset.previous_public_ip or ''
+        target_scope = {
+            'asset_id': target_asset_id,
+            'instance_id': target_instance_id,
+            'public_ip': target_public_ip,
+        }
+        self.stdout.write(
+            f'AWS同步开始：账号数={len(accounts)}；region={options["region"] or "all"}；目标={target_scope if any(target_scope.values()) else "全部"}'
+        )
+        logger.info(
+            'AWS_SYNC_START accounts=%s region=%s target_scope=%s',
+            [getattr(account, 'id', None) for account in accounts],
+            options['region'] or 'all',
+            target_scope,
+        )
+
+        def target_matches(*values):
+            if not target_scope_enabled:
+                return True
+            normalized_values = {str(value or '').strip() for value in values if str(value or '').strip()}
+            return bool(
+                (target_instance_id and target_instance_id in normalized_values)
+                or (target_public_ip and target_public_ip in normalized_values)
+            )
+
         before_asset_total = CloudAsset.objects.filter(kind=CloudAsset.KIND_SERVER).count()
         count = 0
         created_count = 0
@@ -732,8 +832,20 @@ class Command(BaseCommand):
 
         synced_regions = []
         for account in accounts:
-            regions = _list_regions(options['region'], account)
             account_label = cloud_account_label(account) or 'aws'
+            try:
+                regions = _list_regions(options['region'], account)
+            except Exception as exc:
+                logger.exception(
+                    'AWS_SYNC_LIST_REGIONS_FAILED account_id=%s account_label=%s region=%s error=%s',
+                    getattr(account, 'id', None),
+                    account_label,
+                    options['region'] or 'all',
+                    exc,
+                )
+                raise
+            self.stdout.write(f'AWS账号同步开始：账号={account_label}；账号ID={getattr(account, "id", "-")}；地区={regions}')
+            logger.info('AWS_SYNC_ACCOUNT_START account_id=%s account_label=%s regions=%s', getattr(account, 'id', None), account_label, regions)
             account_stats = {
                 'label': account_label,
                 'source': _aws_credential_source(account),
@@ -748,7 +860,12 @@ class Command(BaseCommand):
                 'errors': [],
             }
             for region in regions:
-                client = _lightsail_client(region, account)
+                logger.info('AWS_SYNC_REGION_START account_id=%s account_label=%s region=%s', getattr(account, 'id', None), account_label, region)
+                try:
+                    client = _lightsail_client(region, account)
+                except Exception as exc:
+                    logger.exception('AWS_SYNC_CLIENT_FAILED account_id=%s account_label=%s region=%s error=%s', getattr(account, 'id', None), account_label, region, exc)
+                    raise
                 region_failed = False
                 region_instance_ids = []
                 region_public_ips = set()
@@ -781,6 +898,14 @@ class Command(BaseCommand):
                         region_failed = True
                         break
                     static_ips = static_ip_response.get('staticIps') or []
+                    logger.info(
+                        'AWS_SYNC_STATIC_IP_PAGE account_id=%s account_label=%s region=%s count=%s next=%s',
+                        getattr(account, 'id', None),
+                        account_label,
+                        region,
+                        len(static_ips),
+                        bool(static_ip_response.get('nextPageToken')),
+                    )
                     static_ip_cache.extend(static_ips)
                     for static_ip_item in static_ips:
                         static_public_ip = static_ip_item.get('ipAddress') or ''
@@ -831,6 +956,14 @@ class Command(BaseCommand):
                         account=account,
                     )
                     instances = response.get('instances') or []
+                    logger.info(
+                        'AWS_SYNC_INSTANCE_PAGE account_id=%s account_label=%s region=%s count=%s next=%s',
+                        getattr(account, 'id', None),
+                        account_label,
+                        region,
+                        len(instances),
+                        bool(response.get('nextPageToken')),
+                    )
                     now_iso = timezone.now().isoformat()
                     for item in instances:
                         instance_name = item.get('name') or ''
@@ -852,6 +985,8 @@ class Command(BaseCommand):
                         attached_static_ip = attached_static_ip_by_instance.get(instance_name) or {}
                         instance_public_ip = item.get('publicIpAddress') or ''
                         public_ip = attached_static_ip.get('ip') or instance_public_ip
+                        if not target_matches(instance_name, instance_arn, public_ip, instance_public_ip):
+                            continue
                         if public_ip:
                             existing_public_ips.add(public_ip)
                             region_public_ips.add(public_ip)
@@ -871,9 +1006,9 @@ class Command(BaseCommand):
                         provider_status = _provider_status_label(state_name or None)
                         static_ip_name = attached_static_ip.get('name') or ''
                         static_ip_arn = attached_static_ip.get('arn') or ''
-                        asset = _resolve_asset_for_static_ip(static_ip_name, static_ip_arn, public_ip, account) if static_ip_name and public_ip else None
+                        asset = _resolve_asset_for_static_ip(static_ip_name, static_ip_arn, public_ip, account, region) if static_ip_name and public_ip else None
                         if not asset:
-                            asset = _resolve_asset(instance_name, instance_arn, public_ip, order, account)
+                            asset = _resolve_asset(instance_name, instance_arn, public_ip, order, account, region)
                         old_status = asset.status if asset else None
                         preserve_lifecycle_status = bool(
                             (order and order.status == 'deleting')
@@ -1011,7 +1146,7 @@ class Command(BaseCommand):
                                 server_defaults['provider_status'] = asset_defaults['provider_status']
                                 server_defaults['note'] = asset_defaults['note']
                                 server_defaults['is_active'] = True
-                        server = _resolve_server(instance_name, instance_arn, public_ip, order, account)
+                        server = _resolve_server(instance_name, instance_arn, public_ip, order, account, region)
                         old_server_status = server.status if server else None
                         if server:
                             server_defaults['user'] = server.user or order_user or getattr(asset, 'user', None)
@@ -1103,6 +1238,8 @@ class Command(BaseCommand):
                         continue
                     static_ip_name = item.get('name') or public_ip or 'aws-static-ip'
                     static_ip_arn = item.get('arn') or static_ip_name
+                    if not target_matches(static_ip_name, static_ip_arn, public_ip):
+                        continue
                     location = item.get('location') or {}
                     provider_status = '未附加固定IP'
                     discovered_at = timezone.now()
@@ -1242,10 +1379,15 @@ class Command(BaseCommand):
                         duplicate_static_assets = CloudAsset.objects.filter(
                             kind=CloudAsset.KIND_SERVER,
                             provider='aws_lightsail',
+                            region_code=region,
                             public_ip=public_ip,
                         ).exclude(id=asset.id).filter(
                             Q(instance_id__isnull=True) | Q(instance_id='') | Q(provider_status='未附加固定IP') | Q(provider_resource_id__contains='StaticIp')
                         )
+                        if account:
+                            duplicate_static_assets = duplicate_static_assets.filter(
+                                Q(cloud_account=account) | Q(account_label__in=cloud_account_label_variants(account))
+                            )
                         for duplicate in duplicate_static_assets:
                             duplicate.status = CloudAsset.STATUS_DELETED
                             duplicate.is_active = False
@@ -1264,15 +1406,16 @@ class Command(BaseCommand):
                     count += 1
                     account_stats['count'] += 1
 
-                verification_deleted_items.extend(
-                    _mark_deleted_when_missing_in_aws(
-                        region=region,
-                        existing_instance_names=set(region_instance_ids),
-                        existing_public_ips=existing_public_ips,
-                        stdout=self,
-                        account=account,
+                if not target_scope_enabled:
+                    verification_deleted_items.extend(
+                        _mark_deleted_when_missing_in_aws(
+                            region=region,
+                            existing_instance_names=set(region_instance_ids),
+                            existing_public_ips=existing_public_ips,
+                            stdout=self,
+                            account=account,
+                        )
                     )
-                )
                 synced_instance_ids_by_region.setdefault(region, set()).update(region_instance_ids)
                 synced_public_ips_by_region.setdefault(region, set()).update(region_public_ips)
             error_text = f"；错误={account_stats['errors'][:5]}" if account_stats['errors'] else ''
@@ -1293,6 +1436,7 @@ class Command(BaseCommand):
                     account.STATUS_OK,
                     f"AWS 同步完成，账号ID {account_stats['aws_account'] or '-'}，地区 {','.join(account_stats['regions']) or '-'}，扫描 0 台。",
                 )
+            logger.info('AWS_SYNC_ACCOUNT_DONE account_id=%s account_label=%s stats=%s', getattr(account, 'id', None), account_label, account_stats)
 
         after_asset_total = CloudAsset.objects.filter(kind=CloudAsset.KIND_SERVER).count()
         self.stdout.write(self.style.SUCCESS(
@@ -1321,4 +1465,13 @@ class Command(BaseCommand):
         self.synced_instance_ids = synced_instance_ids
         self.synced_instance_ids_by_region = synced_instance_ids_by_region
         self.sync_errors = sync_errors
+        self.summary = {
+            'count': count,
+            'created': created_count,
+            'updated': updated_count,
+            'unattached': unattached_ip_count,
+            'deleted_by_missing_ip': deleted_by_missing_ip_count,
+            'regions': synced_regions,
+        }
+        logger.info('AWS_SYNC_DONE summary=%s errors=%s detail_parts=%s', self.summary, sync_errors, detail_parts)
         return None

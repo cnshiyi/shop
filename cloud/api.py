@@ -16,11 +16,12 @@ import httpx
 from urllib.parse import urlparse
 
 from asgiref.sync import async_to_sync
+from django.core.cache import cache
 from django.core.management import get_commands, load_command_class
 from django.db import IntegrityError, close_old_connections, transaction
 from django.db.models import Case, CharField, Count, F, IntegerField, Q, Value, When
 from django.db.models.functions import Cast
-from django.db.utils import ProgrammingError
+from django.db.utils import OperationalError, ProgrammingError
 from django.utils import timezone
 from django.utils.dateparse import parse_date, parse_datetime
 from django.views.decorators.csrf import csrf_exempt
@@ -45,13 +46,14 @@ from bot.api import (
     _status_label,
     _user_payload,
     dashboard_login_required,
+    dashboard_superuser_required,
 )
 from bot.models import TelegramGroupFilter, TelegramLoginAccount, TelegramUser
 from cloud.lifecycle import NOTICE_TYPE_SWITCH_CONFIG, _auto_renew_notice_batch_payload, _notice_effective_delivered, _delete_instance, _get_due_orders, _get_notice_text_override, _lifecycle_notice_batch_payload, _mark_replaced_order_deleted, _notice_payload_for_order, _notice_override_key, _record_auto_renew_patrol_log, _renew_notice_batch_payload, _run_auto_renew, _set_notice_text_override, cloud_notice_type_enabled
-from cloud.services import AWS_REGION_NAMES, RenewalPriceMissingError, _cloud_order_lifecycle_fields, _renewal_price, _update_order_primary_records, create_cloud_server_rebuild_order, ensure_cloud_server_pricing, ensure_manual_expiry_operation_order, ensure_manual_owner_operation_order, ensure_manual_price_operation_order, record_cloud_ip_log, refresh_custom_plan_cache, replace_cloud_asset_order_by_admin, set_cloud_server_auto_renew_admin
-from cloud.models import AddressMonitor, CloudAsset, CloudAutoRenewPatrolLog, CloudIpLog, CloudServerOrder, CloudServerPlan, CloudUserNoticeLog, Server, ServerPrice
+from cloud.services import AWS_REGION_NAMES, RenewalPriceMissingError, _cloud_order_lifecycle_fields, _renewal_price, _update_order_primary_records, create_cloud_server_rebuild_order, ensure_cloud_server_pricing, ensure_manual_expiry_operation_order, ensure_manual_owner_operation_order, ensure_manual_price_operation_order, record_cloud_ip_log, refresh_custom_plan_cache, replace_cloud_asset_order_by_admin, scoped_server_match_for_asset, set_cloud_server_auto_renew_admin
+from cloud.models import AddressMonitor, CloudAsset, CloudAutoRenewPatrolLog, CloudAutoRenewPlan, CloudIpLog, CloudNoticePlan, CloudServerOrder, CloudServerPlan, CloudUserNoticeLog, Server, ServerPrice
 from cloud.note_utils import append_note, prepend_note
-from core.cloud_accounts import cloud_account_label
+from core.cloud_accounts import cloud_account_label, cloud_account_label_variants
 from core.models import CloudAccountConfig, ExternalSyncLog, SiteConfig
 from core.cache import get_redis
 from core.persistence import record_external_sync_log
@@ -60,9 +62,47 @@ from core.trongrid import build_trongrid_headers
 from cloud.provisioning import provision_cloud_server
 
 logger = logging.getLogger(__name__)
+_SYNC_CONSOLE_LOG_MAX_CHARS = 50000
+
+
+def _is_db_table_not_ready_error(exc: Exception) -> bool:
+    message = str(exc).lower()
+    return any(marker in message for marker in ['no such table', 'does not exist', 'undefined table'])
+
+
+class CapturedCommandError(RuntimeError):
+    def __init__(self, command_name: str, log_text: str, original_error: Exception):
+        super().__init__(str(original_error))
+        self.command_name = command_name
+        self.log_text = log_text
+        self.original_error = original_error
+
+
+def _trim_sync_console_log(log_text: str, *, limit: int = _SYNC_CONSOLE_LOG_MAX_CHARS) -> str:
+    text = str(log_text or '').strip()
+    if len(text) <= limit:
+        return text
+    return f'{text[-limit:]}\n... 同步日志过长，控制台仅显示最后 {limit} 字符'
+
+
+def _log_sync_command_output(tag: str, log_text: str, *, level: int = logging.INFO):
+    text = _trim_sync_console_log(log_text)
+    if text:
+        logger.log(level, '%s\n%s', tag, text)
 
 ADDRESS_BALANCE_CACHE_TTL = 60
 ADDRESS_BALANCE_CACHE_PREFIX = 'address_balance:'
+
+
+def _trongrid_headers_without_key(headers: dict | None) -> dict:
+    return {key: value for key, value in dict(headers or {}).items() if key.lower() != 'tron-pro-api-key'}
+
+
+def _trongrid_sync_get_with_key_fallback(client: httpx.Client, url: str, headers: dict):
+    resp = client.get(url, headers=headers)
+    if resp.status_code == 401 and headers.get('TRON-PRO-API-KEY'):
+        resp = client.get(url, headers=_trongrid_headers_without_key(headers))
+    return resp
 
 
 def _fetch_address_chain_balances(address: str):
@@ -79,8 +119,9 @@ def _fetch_address_chain_balances(address: str):
     usdt_contract = get_runtime_config('usdt_contract', 'TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t')
     trongrid_base_url = get_runtime_config('trongrid_base_url', 'https://api.trongrid.io')
     try:
+        headers = async_to_sync(build_trongrid_headers)()
         with httpx.Client(timeout=8) as client:
-            resp = client.get(f'{trongrid_base_url}/v1/accounts/{address}', headers=build_trongrid_headers())
+            resp = _trongrid_sync_get_with_key_fallback(client, f'{trongrid_base_url}/v1/accounts/{address}', headers)
             resp.raise_for_status()
             data = resp.json() or {}
         account_items = data.get('data') or []
@@ -172,6 +213,14 @@ def _call_command_capture_threaded(command_name: str, **options):
     try:
         command, log_text = _call_command_capture(command_name, stdout=output, **options)
         return command, log_text
+    except Exception as exc:
+        log_text = output.getvalue()
+        _log_sync_command_output(
+            f'CLOUD_SYNC_COMMAND_FAILED command={command_name} options={{{", ".join(f"{key}={value}" for key, value in sorted(options.items()))}}}',
+            log_text,
+            level=logging.ERROR,
+        )
+        raise CapturedCommandError(command_name, log_text, exc) from exc
     finally:
         close_old_connections()
 
@@ -331,18 +380,47 @@ def _infer_asset_order(asset):
     order = getattr(asset, 'order', None)
     if order:
         return order
-    names = {str(getattr(asset, 'asset_name', '') or '').strip(), str(getattr(asset, 'instance_id', '') or '').strip()}
-    ips = {str(getattr(asset, 'public_ip', '') or '').strip(), str(getattr(asset, 'previous_public_ip', '') or '').strip()}
+    provider = str(getattr(asset, 'provider', '') or '').strip()
+    region_code = str(getattr(asset, 'region_code', '') or '').strip()
+    account = getattr(asset, 'cloud_account', None)
+    account_labels = cloud_account_label_variants(account) if account else []
+    asset_account_label = str(getattr(asset, 'account_label', '') or '').strip()
+    if asset_account_label:
+        account_labels.append(asset_account_label)
+    account_labels = list(dict.fromkeys(label for label in account_labels if label))
+    names = {
+        str(getattr(asset, 'asset_name', '') or '').strip(),
+        str(getattr(asset, 'instance_id', '') or '').strip(),
+        str(getattr(asset, 'provider_resource_id', '') or '').strip(),
+    }
+    ips = {
+        str(getattr(asset, 'public_ip', '') or '').strip(),
+        str(getattr(asset, 'previous_public_ip', '') or '').strip(),
+    }
     names.discard('')
     ips.discard('')
-    lookup = Q()
-    if names:
-        lookup |= Q(server_name__in=names) | Q(instance_id__in=names)
-    if ips:
-        lookup |= Q(public_ip__in=ips) | Q(previous_public_ip__in=ips)
-    if not lookup:
+    if not names and not ips:
         return None
-    return CloudServerOrder.objects.select_related('user', 'plan').filter(lookup).order_by('-created_at', '-id').first()
+    queryset = CloudServerOrder.objects.select_related('user', 'plan', 'cloud_account')
+    if provider:
+        queryset = queryset.filter(provider=provider)
+    if region_code:
+        queryset = queryset.filter(Q(region_code=region_code) | Q(region_code='') | Q(region_code__isnull=True))
+    if getattr(asset, 'user_id', None):
+        queryset = queryset.filter(Q(user_id=asset.user_id) | Q(user__isnull=True))
+    if getattr(asset, 'cloud_account_id', None):
+        queryset = queryset.filter(Q(cloud_account_id=asset.cloud_account_id) | Q(account_label__in=account_labels))
+    elif account_labels:
+        queryset = queryset.filter(Q(account_label__in=account_labels) | Q(account_label='') | Q(account_label__isnull=True))
+    if ips:
+        ip_lookup = Q(public_ip__in=ips) | Q(previous_public_ip__in=ips)
+        found = queryset.filter(ip_lookup).order_by('-updated_at', '-id').first()
+        if found:
+            return found
+    if names:
+        name_lookup = Q(server_name__in=names) | Q(instance_id__in=names) | Q(provider_resource_id__in=names)
+        return queryset.filter(name_lookup).order_by('-updated_at', '-id').first()
+    return None
 
 
 def _display_cloud_asset_note(note: str | None) -> str:
@@ -376,6 +454,167 @@ def _display_cloud_asset_note(note: str | None) -> str:
     if latest_sync_status and latest_sync_status not in seen:
         lines.append(latest_sync_status)
     return '\n'.join(lines)
+
+
+def _cloud_asset_shutdown_enabled(asset, order=None) -> bool:
+    account = getattr(asset, 'cloud_account', None) or getattr(order, 'cloud_account', None)
+    if account is not None:
+        return bool(getattr(account, 'shutdown_enabled', True))
+    return True
+
+
+def _cloud_asset_risk_state(asset, order, expires_at, provider_status_label, display_status, user) -> dict:
+    now = timezone.now()
+    reasons = []
+    risk_statuses = []
+    risk_status = 'other'
+    risk_label = '其他'
+    risk_rank = 99
+    provider_text = str(provider_status_label or asset.provider_status or '')
+    status_text = str(display_status or asset.status or '')
+    note_text = str(asset.note or '')
+    days_left = _days_left(expires_at)
+    shutdown_enabled = _cloud_asset_shutdown_enabled(asset, order)
+
+    def set_risk(status: str, label: str, rank: int, reason: str):
+        nonlocal risk_status, risk_label, risk_rank
+        if status and status not in risk_statuses:
+            risk_statuses.append(status)
+        if rank < risk_rank:
+            risk_status = status
+            risk_label = label
+            risk_rank = rank
+        if reason and reason not in reasons:
+            reasons.append(reason)
+
+    if status_text == CloudAsset.STATUS_RUNNING and isinstance(days_left, int) and days_left > 7:
+        set_risk('normal', '运行中', 20, '')
+    if not user:
+        set_risk('unbound_user', '未绑定用户', 12, '未绑定用户')
+    if not getattr(asset, 'telegram_group_id', None):
+        set_risk('unbound_group', '未绑定群组', 14, '未绑定群组')
+    if order and not getattr(order, 'auto_renew_enabled', False):
+        set_risk('auto_renew_off', '续费关闭', 13, '自动续费关闭')
+    if not shutdown_enabled:
+        set_risk('shutdown_disabled', '关机计划关闭', 4, '云账号已关闭关机计划')
+    if (
+        '未附加' in provider_text
+        or '未附加IP' in note_text
+        or '未附加固定IP' in note_text
+        or status_text == 'unattached'
+    ):
+        set_risk('unattached_ip', '未附加固定IP', 3, '固定IP未附加实例')
+    if expires_at and expires_at <= now:
+        set_risk('expired', '已过期', 1, '服务已过期')
+    elif isinstance(days_left, int) and days_left <= 7:
+        set_risk('due_soon', '即将到期', 2, f'剩余 {days_left} 天')
+    if (
+        status_text in {'failed', 'unknown'}
+        or '失败' in provider_text
+        or '异常' in provider_text
+        or '云上未找到' in provider_text
+        or '云上不存在' in provider_text
+        or '待确认' in provider_text
+    ):
+        set_risk('abnormal', '异常/待确认', 5, provider_text or '状态异常')
+    if status_text in {CloudAsset.STATUS_DELETED, CloudAsset.STATUS_DELETING, CloudAsset.STATUS_TERMINATED, CloudAsset.STATUS_TERMINATING}:
+        set_risk('deleted', '已删除/终止', 30, '资产已删除或终止')
+
+    return {
+        'risk_status': risk_status,
+        'risk_statuses': risk_statuses or ['other'],
+        'risk_label': risk_label,
+        'risk_rank': risk_rank,
+        'risk_reasons': reasons,
+        'shutdown_enabled': shutdown_enabled,
+    }
+
+
+def _filter_cloud_asset_payloads_by_risk(items: list[dict], risk_status: str) -> list[dict]:
+    risk_status = str(risk_status or '').strip()
+    if not risk_status or risk_status == 'all':
+        return items
+    return [
+        item for item in items
+        if risk_status in (item.get('risk_statuses') or [item.get('risk_status') or 'normal'])
+    ]
+
+
+def _cloud_asset_risk_counts(items: list[dict]) -> dict:
+    counts = {'all': len(items)}
+    for item in items:
+        statuses = item.get('risk_statuses') or [item.get('risk_status') or 'normal']
+        for status in set(statuses):
+            counts[status] = counts.get(status, 0) + 1
+    return counts
+
+
+def _paginate_payloads(items: list[dict], page: int, page_size: int):
+    total = len(items)
+    total_pages = max((total + page_size - 1) // page_size, 1)
+    safe_page = min(max(page, 1), total_pages)
+    start = (safe_page - 1) * page_size
+    return items[start:start + page_size], total, total_pages, safe_page
+
+
+def _cloud_asset_payload_page_group_key(item: dict, group_by='user'):
+    if group_by == 'telegram_group' and item.get('telegram_group_id'):
+        return f"group:{item.get('telegram_group_id')}"
+    user_id = item.get('user_id')
+    if user_id:
+        return f'user:{user_id}'
+    tg_user_id = item.get('tg_user_id')
+    if tg_user_id:
+        return f'tg:{tg_user_id}'
+    return f"unbound:{item.get('id', '')}"
+
+
+def _paginate_payloads_keep_groups(items: list[dict], page: int, page_size: int, group_by='user'):
+    grouped_items = []
+    group_index = {}
+    for item in items:
+        key = _cloud_asset_payload_page_group_key(item, group_by)
+        if key not in group_index:
+            group_index[key] = len(grouped_items)
+            grouped_items.append([])
+        grouped_items[group_index[key]].append(item)
+
+    pages = []
+    current_page = []
+    current_count = 0
+    for group in grouped_items:
+        group_count = len(group)
+        if current_page and current_count + group_count > page_size:
+            pages.append(current_page)
+            current_page = []
+            current_count = 0
+        current_page.extend(group)
+        current_count += group_count
+    if current_page or not pages:
+        pages.append(current_page)
+
+    page_count = len(pages)
+    safe_page = min(max(page, 1), page_count)
+    return pages[safe_page - 1], len(items), page_count, safe_page
+
+
+def _sort_cloud_asset_payloads(items: list[dict], sort_by: str, sort_direction: str) -> list[dict]:
+    def expires_key(item):
+        return item.get('actual_expires_at') or '9999-12-31T23:59:59'
+
+    if sort_by in {'actual_expires_at', 'expires_at', 'days_left', 'remaining_days'}:
+        base_items = sorted(items, key=lambda item: (
+            int(item.get('risk_rank') or 20),
+            -int(item.get('sort_order') or 0),
+            -int(item.get('id') or 0),
+        ))
+        return sorted(base_items, key=expires_key, reverse=sort_direction == 'desc')
+    return sorted(items, key=lambda item: (
+        int(item.get('risk_rank') or 20),
+        expires_key(item),
+        -int(item.get('sort_order') or 0),
+        -int(item.get('id') or 0),
+    ))
 
 
 def _asset_payload(asset):
@@ -416,6 +655,7 @@ def _asset_payload(asset):
         display_status = 'unattached'
         display_status_label = '未附加固定IP'
         provider_status_label = '固定IP仍存在但未附加'
+    risk_state = _cloud_asset_risk_state(asset, order, expires_at, provider_status_label, display_status, user)
     return {
         'id': asset.id,
         'kind': asset.kind,
@@ -431,6 +671,7 @@ def _asset_payload(asset):
         'asset_name': asset.asset_name,
         'instance_id': asset.instance_id,
         'provider_resource_id': asset.provider_resource_id,
+        'static_ip_name': getattr(order, 'static_ip_name', '') if order else '',
         'public_ip': asset.public_ip or asset.previous_public_ip or getattr(order, 'public_ip', None) or getattr(order, 'previous_public_ip', None),
         'previous_public_ip': asset.previous_public_ip or getattr(order, 'previous_public_ip', None),
         'mtproxy_link': asset.mtproxy_link or getattr(order, 'mtproxy_link', None),
@@ -464,9 +705,41 @@ def _asset_payload(asset):
         'status': display_status,
         'status_label': display_status_label,
         'provider_status': provider_status_label,
+        **risk_state,
         'is_active': asset.is_active,
         'updated_at': _iso(asset.updated_at),
     }
+
+
+def _refresh_dashboard_plan_snapshots(reason: str = '', *, lifecycle_limit: int = 1000):
+    try:
+        _sync_auto_renew_plan_table(now=timezone.now())
+    except (OperationalError, ProgrammingError) as exc:
+        if _is_db_table_not_ready_error(exc):
+            logger.debug('DASHBOARD_SNAPSHOT_AUTO_RENEW_REFRESH_SKIPPED reason=%s error=%s', reason, exc)
+        else:
+            logger.exception('DASHBOARD_SNAPSHOT_AUTO_RENEW_REFRESH_FAILED reason=%s', reason)
+    except Exception:
+        logger.exception('DASHBOARD_SNAPSHOT_AUTO_RENEW_REFRESH_FAILED reason=%s', reason)
+    try:
+        _sync_notice_plan_table(limit=500, future_limit=200, history_limit=1000)
+    except (OperationalError, ProgrammingError) as exc:
+        if _is_db_table_not_ready_error(exc):
+            logger.debug('DASHBOARD_SNAPSHOT_NOTICE_REFRESH_SKIPPED reason=%s error=%s', reason, exc)
+        else:
+            logger.exception('DASHBOARD_SNAPSHOT_NOTICE_REFRESH_FAILED reason=%s', reason)
+    except Exception:
+        logger.exception('DASHBOARD_SNAPSHOT_NOTICE_REFRESH_FAILED reason=%s', reason)
+    try:
+        from bot import api as bot_api
+        bot_api._sync_lifecycle_plan_table(limit=lifecycle_limit)
+    except (OperationalError, ProgrammingError) as exc:
+        if _is_db_table_not_ready_error(exc):
+            logger.debug('DASHBOARD_SNAPSHOT_LIFECYCLE_REFRESH_SKIPPED reason=%s error=%s', reason, exc)
+        else:
+            logger.exception('DASHBOARD_SNAPSHOT_LIFECYCLE_REFRESH_FAILED reason=%s', reason)
+    except Exception:
+        logger.exception('DASHBOARD_SNAPSHOT_LIFECYCLE_REFRESH_FAILED reason=%s', reason)
 
 
 @csrf_exempt
@@ -550,6 +823,7 @@ def update_cloud_asset(request, asset_id):
     is_unattached_ip = False
     linked_order_id = None
     pending_order_updates = {}
+    refresh_snapshots_needed = False
     try:
         with transaction.atomic():
             asset = CloudAsset.objects.select_for_update().select_related('order', 'user', 'cloud_account', 'telegram_group').get(pk=asset_id)
@@ -559,16 +833,7 @@ def update_cloud_asset(request, asset_id):
             previous_price = asset.price if asset.price is not None else getattr(asset.order, 'total_amount', None)
             linked_order_id = asset.order_id
 
-            server = None
-            server_lookup = Q()
-            if asset.instance_id:
-                server_lookup |= Q(instance_id=asset.instance_id)
-            if asset.provider_resource_id:
-                server_lookup |= Q(provider_resource_id=asset.provider_resource_id)
-            if asset.order_id:
-                server_lookup |= Q(order_id=asset.order_id)
-            if server_lookup:
-                server = Server.objects.select_for_update().filter(server_lookup).first()
+            server = Server.objects.select_for_update().filter(scoped_server_match_for_asset(asset, include_order=True)).first()
 
             user_lookup = payload.get('user_query') or payload.get('user_id') or payload.get('tg_user_id') or payload.get('username')
             username_raw = payload.get('user_query') or payload.get('username')
@@ -597,6 +862,8 @@ def update_cloud_asset(request, asset_id):
                     server.user = owner_target
 
             group_lookup_provided = 'telegram_group_query' in payload or 'telegram_group_id' in payload
+            if group_lookup_provided:
+                refresh_snapshots_needed = True
             group_lookup = payload.get('telegram_group_query')
             if group_lookup is None and 'telegram_group_id' in payload:
                 group_lookup = payload.get('telegram_group_id')
@@ -623,6 +890,7 @@ def update_cloud_asset(request, asset_id):
                     return _error(str(exc), status=400)
                 asset.price = price
                 price_change_requested = previous_price != price
+                refresh_snapshots_needed = refresh_snapshots_needed or price_change_requested
                 if asset.order_id and not str(getattr(asset.order, 'order_no', '') or '').startswith('SRVMANUAL'):
                     pending_order_updates['total_amount'] = price
                     if getattr(asset.order, 'auto_renew_enabled', False):
@@ -632,6 +900,7 @@ def update_cloud_asset(request, asset_id):
 
             if 'currency' in payload:
                 asset.currency = (payload.get('currency') or 'USDT').strip() or 'USDT'
+                refresh_snapshots_needed = True
                 if asset.order_id and asset.order.currency != asset.currency:
                     pending_order_updates['currency'] = asset.currency
 
@@ -648,6 +917,7 @@ def update_cloud_asset(request, asset_id):
                 if server:
                     server.expires_at = asset.actual_expires_at
                 if asset.order_id and not is_unattached_ip:
+                    refresh_snapshots_needed = True
                     same_order_active_assets = CloudAsset.objects.filter(
                         order_id=asset.order_id,
                         kind=CloudAsset.KIND_SERVER,
@@ -670,6 +940,7 @@ def update_cloud_asset(request, asset_id):
 
             if asset.order_id:
                 if 'mtproxy_link' in payload:
+                    refresh_snapshots_needed = True
                     pending_order_updates['mtproxy_link'] = payload.get('mtproxy_link') or None
                 if 'mtproxy_secret' in payload:
                     pending_order_updates['mtproxy_secret'] = payload.get('mtproxy_secret') or None
@@ -681,6 +952,7 @@ def update_cloud_asset(request, asset_id):
                 if 'provider_resource_id' in payload:
                     pending_order_updates['provider_resource_id'] = payload.get('provider_resource_id') or None
                 if 'public_ip' in payload:
+                    refresh_snapshots_needed = True
                     pending_order_updates['public_ip'] = payload.get('public_ip') or None
                 if 'asset_name' in payload:
                     pending_order_updates['server_name'] = payload.get('asset_name') or None
@@ -691,6 +963,8 @@ def update_cloud_asset(request, asset_id):
             if 'public_ip' in payload:
                 if old_public_ip and old_public_ip != new_public_ip:
                     asset.previous_public_ip = old_public_ip
+                    if asset.order_id and not is_unattached_ip:
+                        pending_order_updates['previous_public_ip'] = old_public_ip
 
             for field in ('asset_name', 'public_ip', 'provider_resource_id', 'instance_id', 'mtproxy_link', 'mtproxy_secret', 'mtproxy_host', 'note'):
                 if field in payload:
@@ -705,10 +979,10 @@ def update_cloud_asset(request, asset_id):
                 if 'asset_name' in payload:
                     server.server_name = payload.get('asset_name') or None
                 if 'public_ip' in payload:
-                    old_public_ip = server.public_ip
+                    old_server_public_ip = server.public_ip
                     server.public_ip = payload.get('public_ip') or None
-                    if old_public_ip and old_public_ip != server.public_ip:
-                        server.previous_public_ip = old_public_ip
+                    if old_server_public_ip and old_server_public_ip != server.public_ip:
+                        server.previous_public_ip = old_server_public_ip
                 if 'provider_resource_id' in payload:
                     server.provider_resource_id = payload.get('provider_resource_id') or None
                 if 'instance_id' in payload:
@@ -722,6 +996,7 @@ def update_cloud_asset(request, asset_id):
                 if 'note' in payload:
                     server.note = payload.get('note') or None
             if 'is_active' in payload:
+                refresh_snapshots_needed = True
                 asset.is_active = str(payload.get('is_active')).lower() in {'1', 'true', 'yes', 'on'}
                 if server:
                     server.is_active = asset.is_active
@@ -779,6 +1054,8 @@ def update_cloud_asset(request, asset_id):
                 server.region_code = asset.region_code
                 server.provider_resource_id = asset.provider_resource_id
                 server.public_ip = asset.public_ip
+                if 'public_ip' in payload and old_public_ip and old_public_ip != asset.public_ip:
+                    server.previous_public_ip = old_public_ip
                 if 'note' not in payload:
                     server.note = append_note(server.note, asset.note)
                 server.sort_order = asset.sort_order
@@ -791,13 +1068,15 @@ def update_cloud_asset(request, asset_id):
                 if asset.asset_name:
                     server.server_name = asset.asset_name
                 if server.account_label in (None, ''):
-                    server.account_label = asset.provider
+                    server.account_label = asset.account_label or cloud_account_label(getattr(asset, 'cloud_account', None)) or asset.provider
                 server.save()
 
             asset.save()
             owner_target_after_commit = owner_target
             expiry_change_requested = manual_expires_at is not None and not is_unattached_ip
+            refresh_snapshots_needed = refresh_snapshots_needed or owner_change_requested or expiry_change_requested
             public_ip_changed = 'public_ip' in payload and str(old_public_ip or '') != str(new_public_ip or '')
+            refresh_snapshots_needed = refresh_snapshots_needed or public_ip_changed or bool(pending_order_updates)
             changed_public_ip_before = old_public_ip
             changed_public_ip_after = new_public_ip
     except CloudAsset.DoesNotExist:
@@ -862,16 +1141,7 @@ def update_cloud_asset(request, asset_id):
         except Exception as exc:
             logger.exception('CLOUD_ASSET_MANUAL_PRICE_AUDIT_ORDER_FAILED asset_id=%s error=%s', asset_id, exc)
     if public_ip_changed:
-        server = None
-        server_lookup = Q()
-        if asset.instance_id:
-            server_lookup |= Q(instance_id=asset.instance_id)
-        if asset.provider_resource_id:
-            server_lookup |= Q(provider_resource_id=asset.provider_resource_id)
-        if asset.order_id:
-            server_lookup |= Q(order_id=asset.order_id)
-        if server_lookup:
-            server = Server.objects.filter(server_lookup).first()
+        server = Server.objects.filter(scoped_server_match_for_asset(asset, include_order=True)).first()
         record_cloud_ip_log(
             event_type='changed',
             order=asset.order,
@@ -881,12 +1151,14 @@ def update_cloud_asset(request, asset_id):
             public_ip=changed_public_ip_after,
             note=f'后台手动更新IP：{changed_public_ip_before or "未分配"} → {changed_public_ip_after or "未分配"}',
         )
+    if refresh_snapshots_needed:
+        _refresh_dashboard_plan_snapshots(f'cloud_asset:{asset_id}')
     asset = CloudAsset.objects.select_related('user', 'order', 'cloud_account', 'telegram_group').get(pk=asset_id)
     return _ok(_asset_payload(asset))
 
 
 @csrf_exempt
-@dashboard_login_required
+@dashboard_superuser_required
 @require_POST
 def toggle_cloud_asset_auto_renew(request, asset_id):
     asset = CloudAsset.objects.select_related('order', 'user', 'cloud_account', 'telegram_group').filter(pk=asset_id).first()
@@ -901,6 +1173,7 @@ def toggle_cloud_asset_auto_renew(request, asset_id):
         return _error('当前状态不可开启自动续费', status=400)
     if not order:
         return _error('订单不存在', status=404)
+    _refresh_dashboard_plan_snapshots(f'cloud_asset_auto_renew:{asset_id}')
     asset = CloudAsset.objects.select_related('user', 'order', 'cloud_account', 'telegram_group').get(pk=asset_id)
     return _ok(_asset_payload(asset))
 
@@ -925,7 +1198,12 @@ def _dedupe_cloud_asset_rows(assets):
     best = {}
     for asset in assets:
         ip = _asset_display_ip(asset)
-        key = ip or f'id:{asset.id}'
+        cloud_account_id = getattr(asset, 'cloud_account_id', None)
+        account_label = str(getattr(asset, 'account_label', '') or cloud_account_label(getattr(asset, 'cloud_account', None)) or '').strip()
+        account_key = f'cloud_account:{cloud_account_id}' if cloud_account_id else f'label:{account_label}'
+        provider = str(getattr(asset, 'provider', '') or '').strip()
+        region_code = str(getattr(asset, 'region_code', '') or '').strip()
+        key = f'{provider}:{account_key}:{region_code}:{ip}' if ip else f'id:{asset.id}'
         is_unattached = '未附加' in str(asset.provider_status or '') or '固定IP仍存在但未附加' in str(asset.provider_status or '')
         is_deleted = asset.status in {CloudAsset.STATUS_DELETED, CloudAsset.STATUS_TERMINATED}
         score = (
@@ -984,76 +1262,7 @@ def _paginate_cloud_assets_keep_groups(assets, page: int, page_size: int, group_
     return pages[safe_page - 1], page_count, safe_page
 
 
-@dashboard_login_required
-@require_GET
-def cloud_assets_list(request):
-    keyword = _get_keyword(request)
-    grouped = (request.GET.get('grouped') or '').lower() in {'1', 'true', 'yes'}
-    group_by = (request.GET.get('group_by') or 'telegram_group').strip().lower()
-    if group_by not in {'telegram_group', 'user'}:
-        group_by = 'telegram_group'
-    paginated = (request.GET.get('paginated') or '').lower() in {'1', 'true', 'yes'}
-    try:
-        active_account_labels = _cloud_account_labels_queryset(True)
-        inactive_account_labels = _cloud_account_labels_queryset(False)
-        unattached_ip_values = list(
-            CloudAsset.objects.filter(
-                kind=CloudAsset.KIND_SERVER,
-                provider_status__contains='未附加固定IP',
-                public_ip__isnull=False,
-            ).exclude(public_ip='').values_list('public_ip', flat=True)[:1000]
-        )
-        queryset = CloudAsset.objects.select_related('user', 'order', 'cloud_account', 'telegram_group').filter(kind=CloudAsset.KIND_SERVER).exclude(
-            Q(cloud_account__is_active=False)
-            | Q(account_label__in=inactive_account_labels),
-        ).exclude(
-            Q(status__in=[CloudAsset.STATUS_DELETED, CloudAsset.STATUS_TERMINATED])
-            & (Q(public_ip__in=unattached_ip_values) | Q(previous_public_ip__in=unattached_ip_values))
-        ).filter(
-            Q(cloud_account__is_active=True)
-            | Q(account_label__in=active_account_labels)
-            | Q(account_label__isnull=True)
-            | Q(account_label='')
-        )
-        sort_by = (request.GET.get('sort_by') or '').strip().lower()
-        sort_direction = _dashboard_sort_direction(request)
-        ordering = ['-sort_order', F('actual_expires_at').asc(nulls_last=True), '-updated_at', '-id']
-        if sort_by in {'actual_expires_at', 'expires_at', 'days_left', 'remaining_days'}:
-            ordering = _dashboard_expiry_ordering('actual_expires_at', sort_direction)
-        queryset = _apply_keyword_filter(
-            queryset,
-            keyword,
-            [
-                'asset_name', 'public_ip', 'mtproxy_link', 'account_label', 'cloud_account__external_account_id', 'cloud_account__name', 'user__tg_user_id',
-                'user__username', 'order__order_no',
-            ],
-        ).distinct().order_by(*ordering)
-        if not grouped and paginated:
-            try:
-                page = max(int(request.GET.get('page') or '1'), 1)
-            except (TypeError, ValueError):
-                page = 1
-            try:
-                page_size = int(request.GET.get('page_size') or '20')
-            except (TypeError, ValueError):
-                page_size = 20
-            page_size = min(max(page_size, 10), 200)
-            deduped_assets = _dedupe_cloud_asset_rows(list(queryset))
-            total = len(deduped_assets)
-            page_assets, total_pages, page = _paginate_cloud_assets_keep_groups(deduped_assets, page, page_size, group_by)
-            items = [_asset_payload(asset) for asset in page_assets]
-            return _ok({'items': items, 'total': total, 'page': page, 'page_size': page_size, 'total_pages': total_pages})
-        items = [_asset_payload(asset) for asset in _dedupe_cloud_asset_rows(list(queryset))]
-    except ProgrammingError:
-        if grouped:
-            return _ok({'groups': [], 'items': []})
-        if paginated:
-            return _ok({'items': [], 'total': 0, 'page': 1, 'page_size': 20, 'total_pages': 1})
-        return _ok([])
-
-    if not grouped:
-        return _ok(items)
-
+def _group_cloud_asset_payloads(items, group_by='telegram_group'):
     groups = {}
     for item in items:
         if group_by == 'user':
@@ -1110,7 +1319,126 @@ def cloud_assets_list(request):
         min((row['actual_expires_at'] or '9999-12-31T23:59:59') for row in group['items']),
         str(group.get('user_display_name') or group.get('telegram_group_title') or '未绑定'),
     ))
-    return _ok({'groups': ordered_groups, 'items': items})
+    return ordered_groups
+
+
+def _cloud_assets_base_queryset():
+    active_account_labels = _cloud_account_labels_queryset(True)
+    inactive_account_labels = _cloud_account_labels_queryset(False)
+    unattached_ip_values = list(
+        CloudAsset.objects.filter(
+            kind=CloudAsset.KIND_SERVER,
+            provider_status__contains='未附加固定IP',
+            public_ip__isnull=False,
+        ).exclude(public_ip='').values_list('public_ip', flat=True)[:1000]
+    )
+    return CloudAsset.objects.select_related('user', 'order', 'cloud_account', 'telegram_group').filter(kind=CloudAsset.KIND_SERVER).exclude(
+        Q(cloud_account__is_active=False)
+        | Q(account_label__in=inactive_account_labels),
+    ).exclude(
+        Q(status__in=[CloudAsset.STATUS_DELETED, CloudAsset.STATUS_TERMINATED])
+        & (Q(public_ip__in=unattached_ip_values) | Q(previous_public_ip__in=unattached_ip_values))
+    ).filter(
+        Q(cloud_account__is_active=True)
+        | Q(account_label__in=active_account_labels)
+        | Q(account_label__isnull=True)
+        | Q(account_label='')
+    )
+
+
+def _apply_cloud_assets_keyword(queryset, keyword):
+    return _apply_keyword_filter(
+        queryset,
+        keyword,
+        [
+            'asset_name', 'instance_id', 'provider_resource_id', 'public_ip', 'previous_public_ip',
+            'mtproxy_link', 'account_label', 'cloud_account__external_account_id', 'cloud_account__name',
+            'user__tg_user_id', 'user__username', 'telegram_group__title', 'telegram_group__username',
+            'telegram_group__chat_id', 'order__order_no', 'order__server_name', 'order__instance_id',
+            'order__provider_resource_id', 'order__static_ip_name', 'order__previous_public_ip',
+            'order__mtproxy_host', 'order__mtproxy_link',
+        ],
+    )
+
+
+@dashboard_login_required
+@require_GET
+def cloud_assets_list(request):
+    keyword = _get_keyword(request)
+    grouped = (request.GET.get('grouped') or '').lower() in {'1', 'true', 'yes'}
+    group_by = (request.GET.get('group_by') or 'telegram_group').strip().lower()
+    if group_by not in {'telegram_group', 'user'}:
+        group_by = 'telegram_group'
+    paginated = (request.GET.get('paginated') or '').lower() in {'1', 'true', 'yes'}
+    risk_status = (request.GET.get('risk_status') or 'all').strip()
+    try:
+        queryset = _cloud_assets_base_queryset()
+        sort_by = (request.GET.get('sort_by') or '').strip().lower()
+        sort_direction = _dashboard_sort_direction(request)
+        ordering = ['-sort_order', F('actual_expires_at').asc(nulls_last=True), '-updated_at', '-id']
+        if sort_by in {'actual_expires_at', 'expires_at', 'days_left', 'remaining_days'}:
+            ordering = _dashboard_expiry_ordering('actual_expires_at', sort_direction)
+        queryset = _apply_cloud_assets_keyword(queryset, keyword).distinct().order_by(*ordering)
+        items = [_asset_payload(asset) for asset in _dedupe_cloud_asset_rows(list(queryset))]
+        items = _sort_cloud_asset_payloads(items, sort_by, sort_direction)
+        risk_counts = _cloud_asset_risk_counts(items)
+        items = _filter_cloud_asset_payloads_by_risk(items, risk_status)
+        if not grouped and paginated:
+            try:
+                page = max(int(request.GET.get('page') or '1'), 1)
+            except (TypeError, ValueError):
+                page = 1
+            try:
+                page_size = int(request.GET.get('page_size') or '20')
+            except (TypeError, ValueError):
+                page_size = 20
+            page_size = min(max(page_size, 10), 200)
+            page_items, total, total_pages, page = _paginate_payloads_keep_groups(items, page, page_size, group_by)
+            return _ok({'items': page_items, 'total': total, 'page': page, 'page_size': page_size, 'total_pages': total_pages, 'risk_counts': risk_counts})
+        if grouped and paginated:
+            try:
+                page = max(int(request.GET.get('page') or '1'), 1)
+            except (TypeError, ValueError):
+                page = 1
+            try:
+                page_size = int(request.GET.get('page_size') or '20')
+            except (TypeError, ValueError):
+                page_size = 20
+            page_size = min(max(page_size, 1), 100)
+            ordered_groups = _group_cloud_asset_payloads(items, group_by)
+            total = len(ordered_groups)
+            total_pages = max((total + page_size - 1) // page_size, 1)
+            page = min(page, total_pages)
+            start = (page - 1) * page_size
+            page_groups = ordered_groups[start:start + page_size]
+            page_items = [row for group in page_groups for row in group['items']]
+            return _ok({'groups': page_groups, 'items': page_items, 'total': total, 'page': page, 'page_size': page_size, 'total_pages': total_pages, 'risk_counts': risk_counts})
+    except ProgrammingError:
+        if grouped and paginated:
+            return _ok({'groups': [], 'items': [], 'total': 0, 'page': 1, 'page_size': 20, 'total_pages': 1, 'risk_counts': {'all': 0}})
+        if grouped:
+            return _ok({'groups': [], 'items': [], 'risk_counts': {'all': 0}})
+        if paginated:
+            return _ok({'items': [], 'total': 0, 'page': 1, 'page_size': 20, 'total_pages': 1, 'risk_counts': {'all': 0}})
+        return _ok([])
+
+    if not grouped:
+        return _ok(items)
+
+    ordered_groups = _group_cloud_asset_payloads(items, group_by)
+    return _ok({'groups': ordered_groups, 'items': items, 'risk_counts': risk_counts})
+
+
+@dashboard_login_required
+@require_GET
+def cloud_assets_risk_summary(request):
+    keyword = _get_keyword(request)
+    try:
+        queryset = _apply_cloud_assets_keyword(_cloud_assets_base_queryset(), keyword).distinct().order_by('-updated_at', '-id')
+        items = [_asset_payload(asset) for asset in _dedupe_cloud_asset_rows(list(queryset))]
+        return _ok({'risk_counts': _cloud_asset_risk_counts(items), 'total': len(items)})
+    except ProgrammingError:
+        return _ok({'risk_counts': {'all': 0}, 'total': 0})
 
 
 def _auto_renew_failure_was_price_missing(reason: str | None) -> bool:
@@ -1152,17 +1480,18 @@ def _auto_renew_task_status(order, now, *, latest_failure_reason: str | None = N
 
 
 def _auto_renew_pinned_task(now):
-    orders = list(CloudServerOrder.objects.filter(auto_renew_enabled=True).order_by('-updated_at')[:500])
-    order_ids = [order.id for order in orders]
-    latest_failure_reasons = {}
-    for log in CloudAutoRenewPatrolLog.objects.filter(order_id__in=order_ids, is_success=False).order_by('-executed_at', '-id'):
-        if log.order_id not in latest_failure_reasons:
-            latest_failure_reasons[log.order_id] = log.failure_reason
-    statuses = [_auto_renew_task_status(order, now, latest_failure_reason=latest_failure_reasons.get(order.id)) for order in orders]
-    failed_count = sum(1 for status in statuses if status and status[0] == 'auto_renew_failed')
-    pending_count = sum(1 for status in statuses if status and status[0] == 'auto_renew_pending')
-    success_count = sum(1 for status in statuses if status and status[0] == 'auto_renew_success')
-    latest_time = max((order.last_renewed_at or order.updated_at or order.created_at for order in orders), default=now)
+    if _auto_renew_plan_table_stale(max_age_seconds=300):
+        _sync_auto_renew_plan_table(now=now)
+    plan_qs = CloudAutoRenewPlan.objects.filter(data_group=CloudAutoRenewPlan.DATA_GROUP_ACTIVE)
+    total_enabled = CloudServerOrder.objects.filter(auto_renew_enabled=True).count()
+    failed_count = plan_qs.filter(queue_status='retry_failed').count()
+    pending_count = plan_qs.filter(queue_status__in=list(_AUTO_RENEW_PLAN_DUE_STATUSES)).count()
+    success_count = CloudAutoRenewPatrolLog.objects.filter(is_success=True, executed_at__gte=now - timezone.timedelta(days=1)).count()
+    latest_time = (
+        plan_qs.order_by('-updated_at').values_list('updated_at', flat=True).first()
+        or CloudAutoRenewPatrolLog.objects.order_by('-executed_at').values_list('executed_at', flat=True).first()
+        or now
+    )
     if failed_count:
         execution_status, execution_status_label = 'auto_renew_failed', '自动续费失败/待补余额'
     elif pending_count:
@@ -1183,8 +1512,8 @@ def _auto_renew_pinned_task(now):
         'provider': 'system',
         'provider_label': '系统任务',
         'plan_name': '多IP自动续费',
-        'public_ip': f'{len(orders)} 个IP',
-        'note': f'固定置顶任务，不重复新建；每30分钟巡检一次。开启自动续费 {len(orders)} 个，待执行 {pending_count} 个，失败/待补余额 {failed_count} 个，近24小时成功 {success_count} 个。',
+        'public_ip': f'{total_enabled} 个IP',
+        'note': f'固定置顶任务，不重复新建；每30分钟巡检一次。开启自动续费 {total_enabled} 个，待执行 {pending_count} 个，失败/待补余额 {failed_count} 个，近24小时成功 {success_count} 个。',
         'created_at': None,
         'updated_at': _iso(latest_time),
         'related_path': '/admin/tasks/auto-renew',
@@ -1461,6 +1790,198 @@ def _auto_renew_history_item_payload(log):
     }
 
 
+_AUTO_RENEW_PLAN_DUE_STATUSES = {'due_now', 'retry_failed', 'fallback_retry'}
+
+
+def _parse_api_datetime(value):
+    if not value:
+        return None
+    parsed = parse_datetime(value) if isinstance(value, str) else value
+    if not parsed:
+        return None
+    if timezone.is_naive(parsed):
+        parsed = timezone.make_aware(parsed, timezone.get_current_timezone())
+    return parsed
+
+
+def _auto_renew_plan_source_key(item: dict) -> str:
+    return f"order:{item.get('order_id') or item.get('id')}"
+
+
+def _auto_renew_plan_row_defaults(item: dict) -> dict:
+    return {
+        'source_key': _auto_renew_plan_source_key(item),
+        'data_group': CloudAutoRenewPlan.DATA_GROUP_ACTIVE,
+        'queue_status': item.get('queue_status') or '',
+        'queue_status_label': item.get('queue_status_label') or '',
+        'order_id': item.get('order_id') or None,
+        'user_id': item.get('user_id') or None,
+        'order_no': item.get('order_no') or '',
+        'ip': item.get('ip') or '',
+        'provider': item.get('provider') or '',
+        'provider_label': item.get('provider_label') or '',
+        'status': item.get('status') or '',
+        'status_label': item.get('status_label') or '',
+        'user_display_name': item.get('user_display_name') or '',
+        'username_label': item.get('username_label') or '',
+        'balance': item.get('balance') or '',
+        'service_expires_at': _parse_api_datetime(item.get('service_expires_at')),
+        'auto_renew_at': _parse_api_datetime(item.get('auto_renew_at')),
+        'next_run_at': _parse_api_datetime(item.get('next_run_at')),
+        'suspend_at': _parse_api_datetime(item.get('suspend_at')),
+        'delete_at': _parse_api_datetime(item.get('delete_at')),
+        'ip_recycle_at': _parse_api_datetime(item.get('ip_recycle_at')),
+        'last_failure_reason': item.get('last_failure_reason') or '',
+        'related_path': item.get('related_path') or '',
+        'detail_path': item.get('detail_path') or '',
+        'order_detail_path': item.get('order_detail_path') or '',
+        'order_link_path': item.get('order_link_path') or '',
+        'source_snapshot': item,
+    }
+
+
+def _auto_renew_plan_row_payload(row) -> dict:
+    snapshot = dict(row.source_snapshot or {})
+    snapshot.update({
+        'id': row.id,
+        'order_id': row.order_id,
+        'order_no': row.order_no or '',
+        'ip': row.ip or '',
+        'provider': row.provider or '',
+        'provider_label': row.provider_label or '',
+        'status': row.status or '',
+        'status_label': row.status_label or '',
+        'queue_status': row.queue_status or '',
+        'queue_status_label': row.queue_status_label or '',
+        'user_id': row.user_id,
+        'tg_user_id': snapshot.get('tg_user_id'),
+        'user_display_name': row.user_display_name or '未绑定用户',
+        'username_label': row.username_label or '-',
+        'balance': row.balance or None,
+        'service_expires_at': _iso(row.service_expires_at),
+        'auto_renew_at': _iso(row.auto_renew_at),
+        'next_run_at': _iso(row.next_run_at),
+        'last_failure_reason': row.last_failure_reason or None,
+        'suspend_at': _iso(row.suspend_at),
+        'delete_at': _iso(row.delete_at),
+        'ip_recycle_at': _iso(row.ip_recycle_at),
+        'related_path': row.related_path or '',
+        'detail_path': row.detail_path or row.related_path or '',
+        'order_detail_path': row.order_detail_path or row.related_path or '',
+        'order_link_path': row.order_link_path or row.related_path or '',
+    })
+    return snapshot
+
+
+def _upsert_auto_renew_plan_rows(items: list[dict]):
+    payloads = {
+        _auto_renew_plan_source_key(item): _auto_renew_plan_row_defaults(item)
+        for item in items
+        if item.get('order_id') or item.get('id')
+    }
+    source_keys = list(payloads)
+    existing_rows = {row.source_key: row for row in CloudAutoRenewPlan.objects.filter(source_key__in=source_keys)}
+    update_fields = [
+        'data_group', 'queue_status', 'queue_status_label', 'order_id', 'user_id', 'order_no', 'ip', 'provider',
+        'provider_label', 'status', 'status_label', 'user_display_name', 'username_label', 'balance',
+        'service_expires_at', 'auto_renew_at', 'next_run_at', 'suspend_at', 'delete_at', 'ip_recycle_at',
+        'last_failure_reason', 'related_path', 'detail_path', 'order_detail_path', 'order_link_path',
+        'source_snapshot', 'updated_at',
+    ]
+    create_rows = []
+    update_rows = []
+    for source_key, defaults in payloads.items():
+        row = existing_rows.get(source_key)
+        if not row:
+            create_rows.append(CloudAutoRenewPlan(**defaults))
+            continue
+        for field, value in defaults.items():
+            setattr(row, field, value)
+        update_rows.append(row)
+    if create_rows:
+        CloudAutoRenewPlan.objects.bulk_create(create_rows, batch_size=500)
+    if update_rows:
+        CloudAutoRenewPlan.objects.bulk_update(update_rows, update_fields, batch_size=500)
+    qs = CloudAutoRenewPlan.objects.filter(data_group=CloudAutoRenewPlan.DATA_GROUP_ACTIVE)
+    if source_keys:
+        qs.exclude(source_key__in=source_keys).delete()
+    else:
+        qs.delete()
+
+
+def _build_auto_renew_plan_items(now=None):
+    now = now or timezone.now()
+    queue = _collect_auto_renew_due_orders(now)
+    history_qs = queue['history_qs']
+    latest_log = history_qs.first()
+    last_run_at = getattr(latest_log, 'executed_at', None)
+    next_run_at = (last_run_at + timezone.timedelta(minutes=30)) if last_run_at else (now + timezone.timedelta(minutes=30))
+    due_orders = queue['due_orders']
+    latest_failure_by_order = {}
+    for log in history_qs.filter(is_success=False, executed_at__gte=now - timezone.timedelta(days=7)):
+        if log.order_id and log.order_id not in latest_failure_by_order:
+            latest_failure_by_order[log.order_id] = log.failure_reason
+    def due_queue_state(order):
+        status = _auto_renew_task_status(order, now, latest_failure_reason=latest_failure_by_order.get(order.id))
+        return status[0] if status else ''
+    due_items = [
+        _auto_renew_due_item_payload(
+            order,
+            queue_status='retry_failed' if due_queue_state(order) == 'auto_renew_failed' else 'due_now',
+            queue_status_label='失败待重试' if due_queue_state(order) == 'auto_renew_failed' else '本轮待执行',
+            next_run_at=next_run_at,
+            last_failure_reason=latest_failure_by_order.get(order.id),
+        )
+        for order in due_orders
+    ]
+    due_items.extend([
+        _auto_renew_due_item_payload(order, queue_status=queue_status, queue_status_label=queue_status_label, next_run_at=next_run_at, last_failure_reason=last_failure_reason)
+        for order, queue_status, queue_status_label, last_failure_reason in queue['retry_orders']
+    ])
+    due_items.extend([
+        _auto_renew_due_item_payload(order, queue_status=queue_status, queue_status_label=queue_status_label, next_run_at=next_run_at)
+        for order, queue_status, queue_status_label, _ in queue['fallback_orders']
+    ])
+    all_future_items = _auto_renew_future_plan_items(
+        now,
+        next_run_at,
+        [
+            *due_orders,
+            *[item[0] for item in queue['retry_orders']],
+            *[item[0] for item in queue['fallback_orders']],
+        ],
+    )
+    future_plan_items = [
+        item for item in all_future_items
+        if item.get('queue_status') not in _AUTO_RENEW_PLAN_DUE_STATUSES
+    ]
+    return {
+        'due_items': due_items,
+        'future_plan_items': future_plan_items,
+        'history_qs': history_qs,
+        'last_run_at': last_run_at,
+        'next_run_at': next_run_at,
+    }
+
+
+def _sync_auto_renew_plan_table(now=None):
+    bundle = _build_auto_renew_plan_items(now=now)
+    _upsert_auto_renew_plan_rows([*bundle['due_items'], *bundle['future_plan_items']])
+    return bundle
+
+
+def _auto_renew_plan_table_stale(max_age_seconds: int = 300) -> bool:
+    latest_updated_at = CloudAutoRenewPlan.objects.order_by('-updated_at').values_list('updated_at', flat=True).first()
+    if not latest_updated_at:
+        return True
+    return latest_updated_at < timezone.now() - timezone.timedelta(seconds=max_age_seconds)
+
+
+def _cloud_auto_renew_plan_items():
+    rows = CloudAutoRenewPlan.objects.filter(data_group=CloudAutoRenewPlan.DATA_GROUP_ACTIVE).order_by('auto_renew_at', 'next_run_at', '-updated_at', '-id')
+    return [_auto_renew_plan_row_payload(row) for row in rows]
+
+
 _NOTICE_TASK_TYPES = {
     'renew_notice': {'label': '到期提醒', 'field': 'renew_notice_sent_at', 'event': 'renew_notice_batch'},
     'auto_renew_notice': {'label': '自动续费预提醒', 'field': 'auto_renew_notice_sent_at', 'event': 'auto_renew_notice'},
@@ -1549,28 +2070,34 @@ def _notice_attempt_payload(attempt: dict, *, pending: bool = False) -> dict:
     }
 
 
-def _planned_notice_attempts(user) -> list[dict]:
-    attempts = [{'channel': 'bot', 'channel_label': SiteConfig.get('bot_notice_sender_label', 'Bot'), 'ok': False, 'error': ''}]
+def _planned_notice_account_attempts() -> list[dict]:
+    account_attempts = []
     accounts = TelegramLoginAccount.objects.filter(status='logged_in', notify_enabled=True).exclude(session_string__isnull=True).exclude(session_string='').order_by('-updated_at', '-id')[:10]
     for account in accounts:
         username = str(account.username or '').strip().lstrip('@')
         account_label = f'{account.label} (@{username})' if username else (account.label or f'账号{account.id}')
-        attempts.append({'channel': 'account', 'account_id': account.id, 'account_label': account_label, 'ok': False, 'error': ''})
+        account_attempts.append({'channel': 'account', 'account_id': account.id, 'account_label': account_label, 'ok': False, 'error': ''})
+    return account_attempts
+
+
+def _planned_notice_attempts(user, account_attempts: list[dict] | None = None) -> list[dict]:
+    attempts = [{'channel': 'bot', 'channel_label': SiteConfig.get('bot_notice_sender_label', 'Bot'), 'ok': False, 'error': ''}]
+    attempts.extend(account_attempts if account_attempts is not None else _planned_notice_account_attempts())
     return [_notice_attempt_payload(attempt, pending=True) for attempt in attempts]
 
 
-def _notice_channel_attempts_payload(user, latest_log=None) -> list[dict]:
+def _notice_channel_attempts_payload(user, latest_log=None, account_attempts: list[dict] | None = None) -> list[dict]:
     attempts = ((getattr(latest_log, 'extra', None) or {}).get('send_attempts') or []) if latest_log else []
     if attempts:
         return [_notice_attempt_payload(attempt) for attempt in attempts]
     if getattr(user, 'tg_user_id', None) if user else None:
-        return _planned_notice_attempts(user)
+        return _planned_notice_attempts(user, account_attempts)
     return []
 
 
-def _notice_channel_payload(user, latest_log=None) -> dict:
+def _notice_channel_payload(user, latest_log=None, account_attempts: list[dict] | None = None) -> dict:
     attempts = ((getattr(latest_log, 'extra', None) or {}).get('send_attempts') or []) if latest_log else []
-    attempt_items = _notice_channel_attempts_payload(user, latest_log)
+    attempt_items = _notice_channel_attempts_payload(user, latest_log, account_attempts)
     success = next((attempt for attempt in attempts if attempt.get('ok')), None)
     if success:
         if success.get('channel') == 'bot':
@@ -1601,7 +2128,7 @@ def _notice_status_payload(*, sent_at=None, latest_log=None, queue_status='sched
     return {'notice_status': 'scheduled', 'notice_status_label': '未来计划', 'retry_label': '未到通知时间'}
 
 
-def _notice_task_item_payload(order, notice_type: str, *, queue_status='scheduled_future', queue_status_label='未来计划', next_run_at=None, latest_log=None):
+def _notice_task_item_payload(order, notice_type: str, *, queue_status='scheduled_future', queue_status_label='未来计划', next_run_at=None, latest_log=None, account_attempts: list[dict] | None = None, notice: dict | None = None):
     user = getattr(order, 'user', None)
     usernames = list(getattr(user, 'usernames', []) or []) if user else []
     user_payload = _user_payload({
@@ -1612,7 +2139,7 @@ def _notice_task_item_payload(order, notice_type: str, *, queue_status='schedule
         'usernames': usernames,
         'primary_username': usernames[0] if usernames else '',
     }) if user else None
-    notice = _notice_payload_for_order(order) or {}
+    notice = notice or _notice_payload_for_order(order) or {}
     expires_at = notice.get('expires_at') or getattr(order, 'service_expires_at', None)
     sent_at = getattr(order, _NOTICE_TASK_TYPES.get(notice_type, {}).get('field', ''), None)
     return {
@@ -1629,7 +2156,7 @@ def _notice_task_item_payload(order, notice_type: str, *, queue_status='schedule
         'queue_status': queue_status,
         'queue_status_label': queue_status_label,
         **_notice_status_payload(sent_at=sent_at, latest_log=latest_log, queue_status=queue_status),
-        **_notice_channel_payload(user, latest_log),
+        **_notice_channel_payload(user, latest_log, account_attempts),
         'notice_text_preview': _notice_task_text_preview(order, notice_type, notice),
         'user_id': user.id if user else None,
         'tg_user_id': user.tg_user_id if user else None,
@@ -1699,13 +2226,18 @@ def _notice_latest_log_map():
     return mapped
 
 
-def _notice_task_future_items(now, next_run_at, seen_keys: set[tuple[str, int]], latest_logs: dict, *, due_window_days=3, future_limit=10):
+def _notice_task_future_items(now, next_run_at, seen_keys: set[tuple[str, int]], latest_logs: dict, *, due_window_days=3, future_limit=10, account_attempts: list[dict] | None = None, notice_cache: dict[int, dict | None] | None = None):
     items = []
     qs = CloudServerOrder.objects.select_related('user').filter(
         status__in=['completed', 'expiring', 'renew_pending', 'suspended', 'deleting', 'deleted'],
     ).order_by('service_expires_at', 'delete_at', 'ip_recycle_at', 'id')[:1000]
     for order in qs:
-        notice = _notice_payload_for_order(order)
+        if notice_cache is not None and order.id in notice_cache:
+            notice = notice_cache[order.id]
+        else:
+            notice = _notice_payload_for_order(order)
+            if notice_cache is not None:
+                notice_cache[order.id] = notice
         if not notice:
             continue
         for notice_type, config in _NOTICE_TASK_TYPES.items():
@@ -1740,6 +2272,8 @@ def _notice_task_future_items(now, next_run_at, seen_keys: set[tuple[str, int]],
                 queue_status_label=queue_status_label,
                 next_run_at=next_run_at,
                 latest_log=latest_logs.get((notice_type, order.id)) or latest_logs.get((_notice_event_type(notice_type), order.id)),
+                account_attempts=account_attempts,
+                notice=notice,
             ))
             seen_keys.add((notice_type, order.id))
             if len(items) >= 200:
@@ -1816,16 +2350,17 @@ def _notice_group_summary_items(items: list[dict], *, limit: int | None = None, 
     return visible_summary, total
 
 
-def _notice_history_group_items(logs) -> list[dict]:
+def _notice_history_group_items(logs, account_attempts: list[dict] | None = None) -> list[dict]:
     items = []
     for log in logs:
         extra = log.extra or {}
         order_ids = extra.get('order_ids') or ([log.order_id] if log.order_id else [])
         notice_type = 'renew_notice' if log.event_type == 'renew_notice_batch' else log.event_type
         ip_count = len(order_ids) if order_ids else 1
-        item = _notice_task_history_item_payload(log)
+        item = _notice_task_history_item_payload(log, account_attempts=account_attempts)
         item.update({
             'id': log.batch_id or log.id,
+            'log_id': log.id,
             'notice_event': log.event_type,
             'order_ids': order_ids,
             'notice_type': notice_type,
@@ -1839,10 +2374,11 @@ def _notice_history_group_items(logs) -> list[dict]:
     return items
 
 
-def _notice_task_history_item_payload(log):
+def _notice_task_history_item_payload(log, *, account_attempts: list[dict] | None = None):
     delivered = _notice_effective_delivered(log)
     return {
         'id': log.id,
+        'log_id': log.id,
         'batch_id': log.batch_id,
         'order_id': log.order_id,
         'order_no': log.order_no or '-',
@@ -1858,7 +2394,7 @@ def _notice_task_history_item_payload(log):
         'notice_status_label': '已通知' if delivered else '通知失败，待重试',
         'result_label': (_notice_attempts_label(log) or '已送达') if delivered else (_notice_attempts_label(log) or '未送达，后续巡检重试'),
         'target_chat_id': log.target_chat_id,
-        **_notice_channel_payload(getattr(log, 'user', None), log),
+        **_notice_channel_payload(getattr(log, 'user', None), log, account_attempts),
         'text_preview': log.text_preview or '',
         'retry_label': '-' if delivered else (_notice_attempts_label(log) + '；' if _notice_attempts_label(log) else '') + '未成功送达，不会写入已通知时间；后续生命周期巡检会重试',
         'created_at': _iso(log.created_at),
@@ -1964,6 +2500,12 @@ def delete_notice_history(request, identifier):
     for field_name, order_ids in field_order_ids.items():
         if order_ids:
             reset_count += CloudServerOrder.objects.filter(id__in=order_ids).update(**{field_name: None})
+    plan_history_qs = CloudNoticePlan.objects.filter(data_group=CloudNoticePlan.DATA_GROUP_HISTORY)
+    if identifier.isdigit():
+        plan_history_qs = plan_history_qs.filter(Q(log_id=int(identifier)) | Q(batch_id=identifier))
+    else:
+        plan_history_qs = plan_history_qs.filter(batch_id=identifier)
+    plan_history_qs.delete()
     deleted_count, _ = queryset.delete()
     return _ok({'deleted': True, 'deleted_count': deleted_count, 'reset_count': reset_count})
 
@@ -2002,6 +2544,20 @@ def _request_int_param(request, key: str, default: int, *, minimum: int = 1, max
     return max(minimum, min(value, maximum))
 
 
+def _request_json_payload(request) -> dict:
+    try:
+        raw = request.body.decode('utf-8') if getattr(request, 'body', None) else ''
+    except Exception:
+        raw = ''
+    if not raw.strip():
+        return {}
+    try:
+        payload = json.loads(raw)
+    except Exception:
+        return {}
+    return payload if isinstance(payload, dict) else {}
+
+
 def _compact_notice_items(items: list[dict], *, text_limit: int = 1200, ip_limit: int = 50) -> list[dict]:
     for item in items:
         text = str(item.get('notice_text_preview') or item.get('text_preview') or '')
@@ -2017,6 +2573,213 @@ def _compact_notice_items(items: list[dict], *, text_limit: int = 1200, ip_limit
     return items
 
 
+def _notice_plan_row_source_key(item: dict, *, data_group: str) -> str:
+    notice_type = str(item.get('notice_type') or '').strip()
+    if not notice_type:
+        return ''
+    if data_group == 'history':
+        source_id = item.get('log_id') or item.get('batch_id') or item.get('id')
+        return f'{data_group}:{notice_type}:{source_id}' if source_id is not None else ''
+    source_id = item.get('order_id') or item.get('id')
+    return f'{data_group}:{notice_type}:{source_id}' if source_id is not None else ''
+
+
+def _notice_plan_row_defaults(item: dict, *, data_group: str, source_key: str) -> dict:
+    return {
+        'source_key': source_key,
+        'notice_type': str(item.get('notice_type') or '').strip(),
+        'data_group': data_group,
+        'queue_status': item.get('queue_status'),
+        'queue_status_label': item.get('queue_status_label'),
+        'order_id': item.get('order_id'),
+        'user_id': item.get('user_id'),
+        'order_no': item.get('order_no'),
+        'ip': item.get('ip'),
+        'provider': item.get('provider'),
+        'provider_label': item.get('provider_label'),
+        'status': item.get('status'),
+        'status_label': item.get('status_label'),
+        'user_display_name': item.get('user_display_name'),
+        'username_label': item.get('username_label'),
+        'notice_channel': item.get('notice_channel'),
+        'notice_channel_label': item.get('notice_channel_label'),
+        'notice_channel_attempts': item.get('notice_channel_attempts') or [],
+        'notice_status': item.get('notice_status'),
+        'notice_status_label': item.get('notice_status_label'),
+        'retry_label': item.get('retry_label'),
+        'notice_text_preview': item.get('notice_text_preview'),
+        'notice_at': parse_datetime(item['notice_at']) if item.get('notice_at') else None,
+        'next_run_at': parse_datetime(item['next_run_at']) if item.get('next_run_at') else None,
+        'sent_at': parse_datetime(item['sent_at']) if item.get('sent_at') else None,
+        'logged_at': parse_datetime(item['created_at']) if item.get('created_at') else (parse_datetime(item['logged_at']) if item.get('logged_at') else None),
+        'delivered': bool(item.get('delivered')),
+        'batch_id': item.get('batch_id'),
+        'log_id': item.get('log_id'),
+        'related_path': item.get('related_path'),
+        'detail_path': item.get('detail_path'),
+        'order_detail_path': item.get('order_detail_path'),
+        'order_link_path': item.get('order_link_path'),
+        'source_snapshot': dict(item),
+    }
+
+
+def _notice_plan_row_payload(row) -> dict:
+    payload = dict(row.source_snapshot or {})
+    payload.update({
+        'id': row.id,
+        'source_key': row.source_key,
+        'notice_type': row.notice_type,
+        'data_group': row.data_group,
+        'queue_status': row.queue_status,
+        'queue_status_label': row.queue_status_label,
+        'order_id': row.order_id or payload.get('order_id'),
+        'user_id': row.user_id or payload.get('user_id'),
+        'order_no': row.order_no or payload.get('order_no') or '-',
+        'ip': row.ip or payload.get('ip') or '未分配',
+        'provider': row.provider or payload.get('provider'),
+        'provider_label': row.provider_label or payload.get('provider_label'),
+        'status': row.status or payload.get('status'),
+        'status_label': row.status_label or payload.get('status_label'),
+        'user_display_name': row.user_display_name or payload.get('user_display_name') or '未绑定用户',
+        'username_label': row.username_label or payload.get('username_label') or '-',
+        'notice_channel': row.notice_channel or payload.get('notice_channel') or 'unbound',
+        'notice_channel_label': row.notice_channel_label or payload.get('notice_channel_label') or '未绑定通知渠道',
+        'notice_channel_attempts': row.notice_channel_attempts or payload.get('notice_channel_attempts') or [],
+        'notice_status': row.notice_status or payload.get('notice_status') or 'pending',
+        'notice_status_label': row.notice_status_label or payload.get('notice_status_label') or '未来计划',
+        'retry_label': row.retry_label or payload.get('retry_label') or '-',
+        'notice_text_preview': row.notice_text_preview or payload.get('notice_text_preview') or payload.get('text_preview') or '',
+        'notice_at': _iso(row.notice_at) or payload.get('notice_at'),
+        'next_run_at': _iso(row.next_run_at) or payload.get('next_run_at'),
+        'sent_at': _iso(row.sent_at) or payload.get('sent_at'),
+        'logged_at': _iso(row.logged_at) or payload.get('created_at') or payload.get('logged_at'),
+        'delivered': bool(row.delivered),
+        'batch_id': row.batch_id or payload.get('batch_id') or '',
+        'log_id': row.log_id or payload.get('log_id'),
+        'related_path': row.related_path or payload.get('related_path') or '',
+        'detail_path': row.detail_path or payload.get('detail_path') or '',
+        'order_detail_path': row.order_detail_path or payload.get('order_detail_path') or '',
+        'order_link_path': row.order_link_path or payload.get('order_link_path') or '',
+    })
+    return payload
+
+
+def _upsert_notice_plan_rows(items: list[dict], *, data_group: str):
+    source_keys = []
+    payload_map = {}
+    for item in items:
+        source_key = _notice_plan_row_source_key(item, data_group=data_group)
+        if not source_key:
+            continue
+        source_keys.append(source_key)
+        payload_map[source_key] = _notice_plan_row_defaults(item, data_group=data_group, source_key=source_key)
+    existing_rows = {row.source_key: row for row in CloudNoticePlan.objects.filter(source_key__in=source_keys, notice_type__in=[item.get('notice_type') for item in items if item.get('notice_type')], data_group=data_group)}
+    create_rows = []
+    update_rows = []
+    update_fields = ['queue_status', 'queue_status_label', 'order', 'user', 'order_no', 'ip', 'provider', 'provider_label', 'status', 'status_label', 'user_display_name', 'username_label', 'notice_channel', 'notice_channel_label', 'notice_channel_attempts', 'notice_status', 'notice_status_label', 'retry_label', 'notice_text_preview', 'notice_at', 'next_run_at', 'sent_at', 'logged_at', 'delivered', 'batch_id', 'log_id', 'related_path', 'detail_path', 'order_detail_path', 'order_link_path', 'source_snapshot', 'updated_at']
+    for source_key, defaults in payload_map.items():
+        notice_type = defaults['notice_type']
+        row = existing_rows.get(source_key)
+        if row:
+            changed = False
+            for field, value in defaults.items():
+                if getattr(row, field) != value:
+                    setattr(row, field, value)
+                    changed = True
+            if changed:
+                update_rows.append(row)
+        else:
+            row = CloudNoticePlan(**{key: value for key, value in defaults.items() if key not in {'order_id', 'user_id'}})
+            if defaults.get('order_id'):
+                row.order_id = defaults['order_id']
+            if defaults.get('user_id'):
+                row.user_id = defaults['user_id']
+            create_rows.append(row)
+    if create_rows:
+        CloudNoticePlan.objects.bulk_create(create_rows, batch_size=500)
+    if update_rows:
+        CloudNoticePlan.objects.bulk_update(update_rows, update_fields, batch_size=500)
+    qs = CloudNoticePlan.objects.filter(data_group=data_group)
+    if source_keys:
+        qs.exclude(source_key__in=source_keys).delete()
+    else:
+        qs.delete()
+
+
+def _sync_notice_plan_table(*, limit=1000, future_limit=200, history_limit=1000):
+    now = timezone.now()
+    due = async_to_sync(_get_due_orders)()
+    next_run_at = now + timezone.timedelta(minutes=10)
+    latest_logs = _notice_latest_log_map()
+    account_attempts = _planned_notice_account_attempts()
+    notice_cache: dict[int, dict | None] = {}
+    due_items = []
+    seen_keys = set()
+    for notice_type, config in _NOTICE_TASK_TYPES.items():
+        for order in list(due.get(notice_type) or []):
+            if getattr(order, config['field'], None):
+                continue
+            notice = notice_cache.get(order.id)
+            if order.id not in notice_cache:
+                notice = _notice_payload_for_order(order)
+                notice_cache[order.id] = notice
+            due_items.append(_notice_task_item_payload(
+                order,
+                notice_type,
+                queue_status='due_now',
+                queue_status_label='本轮待通知',
+                next_run_at=next_run_at,
+                latest_log=latest_logs.get((notice_type, order.id)) or latest_logs.get((_notice_event_type(notice_type), order.id)),
+                account_attempts=account_attempts,
+                notice=notice,
+            ))
+            seen_keys.add((notice_type, order.id))
+    due_items.sort(key=lambda item: parse_datetime(item.get('notice_at') or '') or timezone.datetime.max.replace(tzinfo=dt_timezone.utc))
+    window_due_items, future_plan_items = _notice_task_future_items(
+        now,
+        next_run_at,
+        seen_keys,
+        latest_logs,
+        future_limit=max(limit + future_limit, 200),
+        account_attempts=account_attempts,
+        notice_cache=notice_cache,
+    )
+    due_items.extend(window_due_items)
+    due_items.sort(key=lambda item: parse_datetime(item.get('notice_at') or '') or timezone.datetime.max.replace(tzinfo=dt_timezone.utc))
+    active_items = [*due_items, *future_plan_items]
+    history_qs = CloudUserNoticeLog.objects.select_related('order', 'user').filter(event_type__in=list(_NOTICE_HISTORY_LABELS)).order_by('-created_at', '-id')
+    history_rows = _notice_history_group_items(history_qs[:max(history_limit, 1000)], account_attempts=account_attempts)
+    _upsert_notice_plan_rows(active_items, data_group='active')
+    _upsert_notice_plan_rows(history_rows, data_group='history')
+    return {'active_items': active_items, 'history_items': history_rows}
+
+
+def _cloud_notice_plan_items(*, data_group: str):
+    rows = CloudNoticePlan.objects.filter(data_group=data_group).order_by('notice_at', 'next_run_at', '-logged_at', '-updated_at', '-id')
+    return [_notice_plan_row_payload(row) for row in rows]
+
+
+@csrf_exempt
+@dashboard_login_required
+@require_POST
+def refresh_notice_plan_table(request):
+    payload = _request_json_payload(request)
+    limit = _request_int_param(request, 'limit', int(payload.get('limit') or 1000), maximum=1000)
+    future_limit = _request_int_param(request, 'future_limit', int(payload.get('future_limit') or 200), maximum=2000)
+    history_limit = _request_int_param(request, 'history_limit', int(payload.get('history_limit') or 1000), maximum=5000)
+    bundle = _sync_notice_plan_table(limit=limit, future_limit=future_limit, history_limit=history_limit)
+    active_items = bundle.get('active_items') or []
+    due_items = [item for item in active_items if item.get('queue_status') in {'due_now', 'fallback_notice', 'within_window'}]
+    future_items = [item for item in active_items if item.get('queue_status') == 'scheduled_future']
+    history_items = bundle.get('history_items') or []
+    return _ok({
+        'refreshed': True,
+        'due_count': len(due_items),
+        'future_count': len(future_items),
+        'history_count': len(history_items),
+    })
+
+
 @dashboard_login_required
 @require_GET
 def notice_task_detail(request):
@@ -2028,54 +2791,50 @@ def notice_task_detail(request):
     history_limit = _request_int_param(request, 'history_limit', 10, maximum=100)
     history_offset = _request_int_param(request, 'history_offset', 0, minimum=0, maximum=100000)
     compact = str(request.GET.get('compact') or '').strip().lower() in {'1', 'true', 'yes', 'on'}
-    due = async_to_sync(_get_due_orders)()
+
     next_run_at = now + timezone.timedelta(minutes=10)
-    latest_logs = _notice_latest_log_map()
-    due_items = []
-    seen_keys = set()
-    for notice_type, config in _NOTICE_TASK_TYPES.items():
-        for order in list(due.get(notice_type) or []):
-            if getattr(order, config['field'], None):
-                continue
-            due_items.append(_notice_task_item_payload(
-                order,
-                notice_type,
-                queue_status='due_now',
-                queue_status_label='本轮待通知',
-                next_run_at=next_run_at,
-                latest_log=latest_logs.get((notice_type, order.id)) or latest_logs.get((_notice_event_type(notice_type), order.id)),
-            ))
-            seen_keys.add((notice_type, order.id))
+    _sync_notice_plan_table(limit=max(limit, 200), future_limit=max(future_limit, 200), history_limit=max(history_limit, 200))
+
+    active_items = _cloud_notice_plan_items(data_group='active')
+    due_items = [item for item in active_items if item.get('queue_status') in {'due_now', 'fallback_notice', 'within_window'}]
+    future_plan_items = [item for item in active_items if item.get('queue_status') == 'scheduled_future']
     due_items.sort(key=lambda item: parse_datetime(item.get('notice_at') or '') or timezone.datetime.max.replace(tzinfo=dt_timezone.utc))
-    window_due_items, future_plan_items = _notice_task_future_items(now, next_run_at, seen_keys, latest_logs, future_limit=max(limit + future_limit, 50))
-    due_items.extend(window_due_items)
-    due_items.sort(key=lambda item: parse_datetime(item.get('notice_at') or '') or timezone.datetime.max.replace(tzinfo=dt_timezone.utc))
+    future_plan_items.sort(key=lambda item: parse_datetime(item.get('notice_at') or '') or timezone.datetime.max.replace(tzinfo=dt_timezone.utc))
+
     due_user_summary_items, due_user_total = _notice_group_summary_items(due_items, limit=limit, offset=offset)
     future_user_summary_items, future_user_total = _notice_group_summary_items(future_plan_items, limit=future_limit, offset=future_offset)
     visible_due_items = due_items[offset:offset + limit]
     visible_future_plan_items = future_plan_items[future_offset:future_offset + future_limit]
-    history_qs = CloudUserNoticeLog.objects.select_related('order', 'user').filter(event_type__in=list(_NOTICE_HISTORY_LABELS)).order_by('-created_at', '-id')
+
+    history_all_items = _cloud_notice_plan_items(data_group='history')
+    history_all_items.sort(key=lambda item: parse_datetime(item.get('created_at') or item.get('logged_at') or '') or timezone.datetime.min.replace(tzinfo=dt_timezone.utc), reverse=True)
+    visible_history_items = history_all_items[history_offset:history_offset + history_limit]
     recent_since = now - timezone.timedelta(days=1)
-    recent_logs = history_qs.filter(created_at__gte=recent_since)
-    latest_log = history_qs.first()
-    history_count = history_qs.count()
-    recent_log_items = list(recent_logs[:1000])
-    recent_success_count = sum(1 for log in recent_log_items if _notice_effective_delivered(log))
-    recent_failure_count = sum(1 for log in recent_log_items if not _notice_effective_delivered(log))
-    recent_success_user_count = len({log.user_id for log in recent_log_items if _notice_effective_delivered(log) and log.user_id})
-    recent_failure_user_count = len({log.user_id for log in recent_log_items if not _notice_effective_delivered(log) and log.user_id})
+    recent_history_items = [
+        item for item in history_all_items
+        if parse_datetime(item.get('created_at') or item.get('logged_at') or '')
+        and parse_datetime(item.get('created_at') or item.get('logged_at') or '') >= recent_since
+    ]
+    latest_history_item = history_all_items[0] if history_all_items else None
+    recent_success_count = sum(1 for item in recent_history_items if item.get('delivered'))
+    recent_failure_count = sum(1 for item in recent_history_items if not item.get('delivered'))
+    recent_success_user_count = len({item.get('user_id') for item in recent_history_items if item.get('delivered') and item.get('user_id')})
+    recent_failure_user_count = len({item.get('user_id') for item in recent_history_items if not item.get('delivered') and item.get('user_id')})
+    last_refresh_at = CloudNoticePlan.objects.order_by('-updated_at').values_list('updated_at', flat=True).first()
+
     return _ok({
         'task_key': 'cloud_notice_plan',
         'task_label': '通知计划',
         'status_label': '置顶任务',
         'interval_minutes': 10,
-        'last_run_at': _iso(getattr(latest_log, 'created_at', None)),
+        'last_run_at': (latest_history_item or {}).get('created_at') or (latest_history_item or {}).get('logged_at'),
         'next_run_at': _iso(next_run_at),
+        'last_refresh_at': _iso(last_refresh_at),
         'due_count': len(due_items),
         'due_user_count': due_user_total,
         'future_count': len(future_plan_items),
         'future_user_count': future_user_total,
-        'history_count': history_count,
+        'history_count': len(history_all_items),
         'recent_success_count': recent_success_count,
         'recent_success_user_count': recent_success_user_count,
         'recent_failure_count': recent_failure_count,
@@ -2086,7 +2845,7 @@ def notice_task_detail(request):
         'due_user_summary_items': _compact_notice_items(due_user_summary_items) if compact else due_user_summary_items,
         'future_plan_items': _compact_notice_items(visible_future_plan_items) if compact else visible_future_plan_items,
         'future_user_summary_items': _compact_notice_items(future_user_summary_items) if compact else future_user_summary_items,
-        'history_items': _compact_notice_items(_notice_history_group_items(history_qs[history_offset:history_offset + history_limit])) if compact else _notice_history_group_items(history_qs[history_offset:history_offset + history_limit]),
+        'history_items': _compact_notice_items(visible_history_items) if compact else visible_history_items,
     })
 
 
@@ -2094,9 +2853,14 @@ def notice_task_detail(request):
 @require_GET
 def auto_renew_task_detail(request):
     now = timezone.now()
-    queue = _collect_auto_renew_due_orders(now)
-    due_orders = queue['due_orders']
-    history_qs = queue['history_qs']
+    force_refresh = str(request.GET.get('refresh') or request.GET.get('sync') or '').strip().lower() in {'1', 'true', 'yes', 'on'}
+    did_refresh = False
+    if force_refresh or _auto_renew_plan_table_stale():
+        bundle = _sync_auto_renew_plan_table(now=now)
+        did_refresh = True
+    else:
+        bundle = {}
+    history_qs = bundle.get('history_qs') or CloudAutoRenewPatrolLog.objects.select_related('order', 'user').order_by('-executed_at', '-id')
     history_items = [_auto_renew_history_item_payload(item) for item in history_qs[:200]]
     latest_log = history_qs.first()
     recent_since = now - timezone.timedelta(days=1)
@@ -2109,30 +2873,10 @@ def auto_renew_task_detail(request):
     latest_batch_success_count = latest_batch_qs.filter(is_success=True).count() if latest_batch_id else 0
     latest_batch_failure_count = latest_batch_qs.filter(is_success=False).count() if latest_batch_id else 0
     latest_failed_ips = list(latest_batch_qs.filter(is_success=False).values_list('ip', flat=True)[:20]) if latest_batch_id else []
-
-    due_items = [
-        _auto_renew_due_item_payload(order, queue_status='due_now', queue_status_label='本轮待执行', next_run_at=next_run_at)
-        for order in due_orders
-    ]
-    due_items.extend([
-        _auto_renew_due_item_payload(order, queue_status=queue_status, queue_status_label=queue_status_label, next_run_at=next_run_at, last_failure_reason=last_failure_reason)
-        for order, queue_status, queue_status_label, last_failure_reason in queue['retry_orders']
-    ])
-    due_items.extend([
-        _auto_renew_due_item_payload(order, queue_status=queue_status, queue_status_label=queue_status_label, next_run_at=next_run_at)
-        for order, queue_status, queue_status_label, _ in queue['fallback_orders']
-    ])
-
-    future_plan_items = _auto_renew_future_plan_items(
-        now,
-        next_run_at,
-        [
-            *due_orders,
-            *[item[0] for item in queue['retry_orders']],
-            *[item[0] for item in queue['fallback_orders']],
-        ],
-    )
-    future_plan_items = [item for item in future_plan_items if item.get('queue_status') != 'fallback_retry']
+    plan_items = _cloud_auto_renew_plan_items()
+    due_items = [item for item in plan_items if item.get('queue_status') in _AUTO_RENEW_PLAN_DUE_STATUSES]
+    future_plan_items = [item for item in plan_items if item.get('queue_status') not in _AUTO_RENEW_PLAN_DUE_STATUSES]
+    last_refresh_at = CloudAutoRenewPlan.objects.order_by('-updated_at').values_list('updated_at', flat=True).first()
     return _ok({
         'task_key': 'auto_renew_patrol',
         'task_label': '自动续费巡检',
@@ -2140,6 +2884,9 @@ def auto_renew_task_detail(request):
         'interval_minutes': 30,
         'last_run_at': _iso(last_run_at),
         'next_run_at': _iso(next_run_at),
+        'last_refresh_at': _iso(last_refresh_at),
+        'refreshed': did_refresh,
+        'cache_mode': 'refreshed' if did_refresh else 'cached',
         'due_count': len(due_items),
         'recent_success_count': recent_logs.filter(is_success=True).count(),
         'recent_failure_count': recent_logs.filter(is_success=False).count(),
@@ -2155,7 +2902,7 @@ def auto_renew_task_detail(request):
 
 
 @csrf_exempt
-@dashboard_login_required
+@dashboard_superuser_required
 @require_POST
 def run_auto_renew_tasks(request):
     now = timezone.now()
@@ -2164,6 +2911,7 @@ def run_auto_renew_tasks(request):
     orders.extend((order, queue_status) for order, queue_status, _, _ in queue['retry_orders'])
     orders.extend((order, queue_status) for order, queue_status, _, _ in queue['fallback_orders'])
     if not orders:
+        _refresh_dashboard_plan_snapshots('auto_renew_run_empty')
         return _ok({
             'batch_id': '',
             'items': [],
@@ -2173,12 +2921,13 @@ def run_auto_renew_tasks(request):
             'message': '当前没有可执行的续费任务',
         })
     result = _manual_run_auto_renew_queue(orders)
+    _refresh_dashboard_plan_snapshots('auto_renew_run_all')
     result['message'] = f"本次共执行 {result['total']} 条续费任务"
     return _ok(result)
 
 
 @csrf_exempt
-@dashboard_login_required
+@dashboard_superuser_required
 @require_POST
 def run_auto_renew_order(request, order_id):
     order = CloudServerOrder.objects.select_related('user').filter(pk=order_id).first()
@@ -2189,6 +2938,7 @@ def run_auto_renew_order(request, order_id):
     if order.status not in {'completed', 'expiring', 'renew_pending'}:
         return _error('当前订单状态不可执行续费', status=400)
     result = _manual_run_auto_renew_queue([(order, 'manual_single')])
+    _refresh_dashboard_plan_snapshots(f'auto_renew_run_order:{order_id}')
     result['message'] = '续费任务已执行'
     return _ok(result)
 
@@ -2419,6 +3169,7 @@ def _cloud_order_detail_payload(order):
         'suspend_time_config': str(get_runtime_config('cloud_suspend_time', '15:00') or '15:00').strip() or '15:00',
         'delete_time_config': str(get_runtime_config('cloud_delete_time', '15:00') or '15:00').strip() or '15:00',
         'last_renewed_at': _iso(order.last_renewed_at),
+        'auto_renew_enabled': order.auto_renew_enabled,
         'last_user_id': order.last_user_id,
         'mtproxy_port': order.mtproxy_port,
         'mtproxy_link': order.mtproxy_link,
@@ -2544,12 +3295,35 @@ def cloud_orders_list(request):
 
 
 @csrf_exempt
-@dashboard_login_required
+@dashboard_superuser_required
 @require_POST
 def delete_cloud_order(request, order_id):
     order = CloudServerOrder.objects.filter(id=order_id).first()
     if not order:
         return _error('订单不存在', status=404)
+    linked_asset_count = CloudAsset.objects.filter(order=order).count()
+    linked_server_count = Server.objects.filter(order=order).count()
+    cloud_identity_values = [
+        order.public_ip,
+        order.previous_public_ip,
+        order.instance_id,
+        order.provider_resource_id,
+        order.server_name,
+        order.static_ip_name,
+    ]
+    if linked_asset_count or linked_server_count or any(str(value or '').strip() for value in cloud_identity_values):
+        logger.warning(
+            'DASHBOARD_CLOUD_ORDER_DELETE_BLOCKED order_id=%s order_no=%s assets=%s servers=%s user=%s',
+            order_id,
+            order.order_no,
+            linked_asset_count,
+            linked_server_count,
+            getattr(request.user, 'id', None),
+        )
+        return _error(
+            '订单已关联云资源，已阻止物理删除；请先在订单详情里改状态，或处理关联资产/服务器后再删除。',
+            status=409,
+        )
     order_no = order.order_no
     order.delete()
     logger.info('DASHBOARD_CLOUD_ORDER_DELETE order_id=%s order_no=%s user=%s', order_id, order_no, getattr(request.user, 'id', None))
@@ -2653,19 +3427,66 @@ def _append_provision_note(order, note):
     return prepend_note(order.provision_note, note)
 
 
+def _primary_record_updates_for_order_status(order_status: str, note: str | None = None):
+    active_statuses = {'completed', 'renew_pending', 'expiring'}
+    inactive_statuses = {'failed', 'cancelled', 'expired', 'deleted', 'suspended', 'deleting', 'pending'}
+    if order_status in active_statuses:
+        asset_updates = {
+            'is_active': True,
+            'status': CloudAsset.STATUS_RUNNING,
+        }
+        server_updates = {
+            'is_active': True,
+            'status': Server.STATUS_RUNNING,
+        }
+    elif order_status in inactive_statuses:
+        asset_status_map = {
+            'deleted': CloudAsset.STATUS_DELETED,
+            'deleting': CloudAsset.STATUS_DELETING,
+            'expired': CloudAsset.STATUS_EXPIRED,
+            'suspended': CloudAsset.STATUS_STOPPED,
+            'failed': CloudAsset.STATUS_UNKNOWN,
+            'cancelled': CloudAsset.STATUS_UNKNOWN,
+            'pending': CloudAsset.STATUS_PENDING,
+        }
+        server_status_map = {
+            'deleted': Server.STATUS_DELETED,
+            'deleting': Server.STATUS_DELETING,
+            'expired': Server.STATUS_EXPIRED,
+            'suspended': Server.STATUS_STOPPED,
+            'failed': Server.STATUS_UNKNOWN,
+            'cancelled': Server.STATUS_UNKNOWN,
+            'pending': Server.STATUS_PENDING,
+        }
+        asset_updates = {
+            'is_active': False,
+            'status': asset_status_map.get(order_status, CloudAsset.STATUS_UNKNOWN),
+        }
+        server_updates = {
+            'is_active': False,
+            'status': server_status_map.get(order_status, Server.STATUS_UNKNOWN),
+        }
+    else:
+        return {}, {}
+    if note:
+        asset_updates['note'] = note
+        server_updates['note'] = note
+    return asset_updates, server_updates
+
+
 @transaction.atomic
 def _apply_cloud_order_status(order, new_status):
     now = timezone.now()
-    old_status = order.status
     allowed_statuses = {choice[0] for choice in CloudServerOrder.STATUS_CHOICES}
     if new_status not in allowed_statuses:
         raise ValueError('订单状态不正确')
+    order = CloudServerOrder.objects.select_related('user', 'plan').select_for_update().get(pk=order.pk)
+    old_status = order.status
     if new_status == old_status:
         return order
 
     note = None
     trigger_provision = False
-    active_statuses = {'completed', 'renew_pending', 'expiring'}
     inactive_statuses = {'failed', 'cancelled', 'expired', 'deleted', 'suspended', 'deleting', 'pending'}
 
     if new_status in {'paid', 'provisioning', 'completed'} and not order.paid_at:
@@ -2705,32 +3526,12 @@ def _apply_cloud_order_status(order, new_status):
     order.provision_note = _append_provision_note(order, note)
     order.save()
 
-    if new_status in active_statuses:
+    asset_updates, server_updates = _primary_record_updates_for_order_status(new_status, order.provision_note)
+    if asset_updates or server_updates:
         _update_order_primary_records(
             order,
-            asset_updates={
-                'is_active': True,
-                'note': order.provision_note,
-            },
-            server_updates={
-                'is_active': True,
-                'status': Server.STATUS_RUNNING if new_status == 'completed' else Server.STATUS_PENDING,
-                'note': order.provision_note,
-            },
-            now=now,
-        )
-    elif new_status in inactive_statuses:
-        _update_order_primary_records(
-            order,
-            asset_updates={
-                'is_active': False,
-                'note': order.provision_note,
-            },
-            server_updates={
-                'is_active': False,
-                'status': Server.STATUS_DELETED if new_status == 'deleted' else Server.STATUS_STOPPED,
-                'note': order.provision_note,
-            },
+            asset_updates=asset_updates,
+            server_updates=server_updates,
             now=now,
         )
 
@@ -2742,7 +3543,7 @@ def _apply_cloud_order_status(order, new_status):
 
 
 @csrf_exempt
-@dashboard_login_required
+@dashboard_superuser_required
 @require_http_methods(['GET', 'POST', 'PUT', 'PATCH'])
 def cloud_order_detail(request, order_id):
     order = CloudServerOrder.objects.select_related('user', 'plan').filter(pk=order_id).first()
@@ -2807,7 +3608,7 @@ def cloud_order_detail(request, order_id):
                     setattr(order, field, _parse_iso_datetime(payload.get(field), label) if payload.get(field) else None)
                     changed_fields.add(field)
             if 'service_expires_at' in changed_fields and 'service_expires_at' in payload:
-                lifecycle_updates = _cloud_order_lifecycle_fields(order.service_expires_at, getattr(order, 'renew_extension_days', 0)) if order.service_expires_at else {
+                lifecycle_updates = _cloud_order_lifecycle_fields(order.service_expires_at) if order.service_expires_at else {
                     'renew_grace_expires_at': None,
                     'suspend_at': None,
                     'delete_at': None,
@@ -2830,15 +3631,28 @@ def cloud_order_detail(request, order_id):
                 if 'public_ip' in changed_fields:
                     asset_updates['public_ip'] = order.public_ip
                     server_updates['public_ip'] = order.public_ip
-                    if 'previous_public_ip' in changed_fields:
-                        asset_updates['previous_public_ip'] = order.previous_public_ip
-                        server_updates['previous_public_ip'] = order.previous_public_ip
+                if 'previous_public_ip' in changed_fields:
+                    asset_updates['previous_public_ip'] = order.previous_public_ip
+                    server_updates['previous_public_ip'] = order.previous_public_ip
                 if 'server_name' in changed_fields:
                     asset_updates['asset_name'] = order.server_name
                     server_updates['server_name'] = order.server_name
+                if 'instance_id' in changed_fields:
+                    asset_updates['instance_id'] = order.instance_id
+                    server_updates['instance_id'] = order.instance_id
+                if 'provider_resource_id' in changed_fields:
+                    asset_updates['provider_resource_id'] = order.provider_resource_id
+                    server_updates['provider_resource_id'] = order.provider_resource_id
+                for mtproxy_field in ('mtproxy_host', 'mtproxy_link', 'mtproxy_port'):
+                    if mtproxy_field in changed_fields:
+                        asset_updates[mtproxy_field] = getattr(order, mtproxy_field)
                 if 'service_expires_at' in changed_fields:
                     asset_updates['actual_expires_at'] = order.service_expires_at
                     server_updates['expires_at'] = order.service_expires_at
+                if 'status' in changed_fields:
+                    status_asset_updates, status_server_updates = _primary_record_updates_for_order_status(order.status, order.provision_note)
+                    asset_updates.update(status_asset_updates)
+                    server_updates.update(status_server_updates)
                 if asset_updates or server_updates:
                     _update_order_primary_records(order, asset_updates=asset_updates, server_updates=server_updates)
     except ValueError as exc:
@@ -2848,7 +3662,7 @@ def cloud_order_detail(request, order_id):
 
 
 @csrf_exempt
-@dashboard_login_required
+@dashboard_superuser_required
 @require_POST
 def update_cloud_order_status(request, order_id):
     order = CloudServerOrder.objects.select_related('user', 'plan').filter(pk=order_id).first()
@@ -2904,7 +3718,7 @@ def _run_rebuild_job(new_order_id: int):
 
 
 @csrf_exempt
-@dashboard_login_required
+@dashboard_superuser_required
 @require_POST
 def rebuild_server_preserve_link(request, server_id: int):
     server = Server.objects.select_related('order').filter(id=server_id).first()
@@ -2925,7 +3739,7 @@ def rebuild_server_preserve_link(request, server_id: int):
 
 
 @csrf_exempt
-@dashboard_login_required
+@dashboard_superuser_required
 @require_http_methods(['POST', 'DELETE'])
 def delete_cloud_asset(request, asset_id: int):
     asset = CloudAsset.objects.select_related('order').filter(id=asset_id).first()
@@ -2989,21 +3803,7 @@ def delete_cloud_asset(request, asset_id: int):
             or '云上未找到' in asset_note
         )
 
-    server_lookup = Q()
-    if order:
-        server_lookup |= Q(order=order)
-    for value, fields in [
-        (asset.instance_id, ['instance_id']),
-        (asset.provider_resource_id, ['provider_resource_id']),
-        (asset.public_ip, ['public_ip', 'previous_public_ip']),
-        (asset.previous_public_ip, ['public_ip', 'previous_public_ip']),
-    ]:
-        value = str(value or '').strip()
-        if not value:
-            continue
-        for field in fields:
-            server_lookup |= Q(**{field: value})
-    related_servers = Server.objects.filter(server_lookup).distinct() if server_lookup else Server.objects.none()
+    related_servers = Server.objects.filter(scoped_server_match_for_asset(asset, include_order=True, include_ip=True)).distinct()
     removed_server_ids = []
     for server in related_servers:
         record_cloud_ip_log(
@@ -3035,7 +3835,7 @@ def delete_cloud_asset(request, asset_id: int):
 
 
 @csrf_exempt
-@dashboard_login_required
+@dashboard_superuser_required
 @require_http_methods(['POST', 'DELETE'])
 def delete_server(request, server_id: int):
     server = Server.objects.select_related('order').filter(id=server_id).first()
@@ -3073,10 +3873,8 @@ def _cloud_account_labels_queryset(is_active: bool | None = None):
         queryset = queryset.filter(is_active=is_active)
     labels = []
     for account in queryset:
-        label = cloud_account_label(account)
-        if label:
-            labels.append(label)
-    return labels
+        labels.extend(cloud_account_label_variants(account))
+    return list(dict.fromkeys(labels))
 
 
 @dashboard_login_required
@@ -3190,7 +3988,7 @@ def servers_statistics(request):
 
 
 @csrf_exempt
-@dashboard_login_required
+@dashboard_superuser_required
 @require_http_methods(['POST'])
 def create_cloud_plan(request):
     data = _read_payload(request)
@@ -3254,7 +4052,7 @@ def create_cloud_plan(request):
 
 
 @csrf_exempt
-@dashboard_login_required
+@dashboard_superuser_required
 @require_http_methods(['POST'])
 def delete_cloud_plan(request, plan_id: int):
     plan = CloudServerPlan.objects.filter(id=plan_id).first()
@@ -3268,7 +4066,7 @@ def delete_cloud_plan(request, plan_id: int):
 
 
 @csrf_exempt
-@dashboard_login_required
+@dashboard_superuser_required
 @require_http_methods(['POST'])
 def update_cloud_plan(request, plan_id: int):
     plan = CloudServerPlan.objects.filter(id=plan_id).first()
@@ -3347,10 +4145,9 @@ def update_cloud_plan(request, plan_id: int):
 
 def _apply_server_missing_state(provider, region, existing_instance_ids, account=None):
     now = timezone.now()
-    existing_instance_ids = {str(item) for item in existing_instance_ids if item}
     queryset = Server.objects.filter(provider=provider, region_code=region).exclude(instance_id__isnull=True).exclude(instance_id='')
     if account:
-        queryset = queryset.filter(account_label=cloud_account_label(account))
+        queryset = queryset.filter(account_label__in=cloud_account_label_variants(account))
     legacy_queryset = queryset.filter(provider_status='missing')
     legacy_updated = legacy_queryset.update(
         status=Server.STATUS_DELETED,
@@ -3364,54 +4161,18 @@ def _apply_server_missing_state(provider, region, existing_instance_ids, account
         ),
         updated_at=now,
     )
-    queryset = queryset.filter(is_active=True)
-    if existing_instance_ids:
-        queryset = queryset.exclude(instance_id__in=existing_instance_ids)
-    missing_servers = list(queryset.select_related('order'))
-    missing_note = f'云平台同步未发现该服务器，已标记为已删除；检查时间: {now.isoformat()}'
-    updated = 0
-    for server in missing_servers:
-        server.status = Server.STATUS_DELETED
-        server.provider_status = '已删除'
-        server.is_active = False
-        server.note = append_note(server.note, missing_note)
-        server.updated_at = now
-        server.save(update_fields=['status', 'provider_status', 'is_active', 'note', 'updated_at'])
-        updated += 1
-    order_ids = [item.order_id for item in missing_servers if item.order_id]
-    instance_ids = [item.instance_id for item in missing_servers if item.instance_id]
-    asset_scope = CloudAsset.objects.filter(kind=CloudAsset.KIND_SERVER, provider=provider)
-    if region:
-        asset_scope = asset_scope.filter(Q(region_code=region) | Q(region_code='') | Q(region_code__isnull=True))
-    if account:
-        label = cloud_account_label(account)
-        asset_scope = asset_scope.filter(Q(cloud_account=account) | Q(account_label=label))
-    if order_ids:
-        for order in CloudServerOrder.objects.filter(id__in=order_ids).exclude(status='deleted'):
-            order.status = 'deleted'
-            order.provision_note = prepend_note(order.provision_note, missing_note)
-            order.updated_at = now
-            order.save(update_fields=['status', 'provision_note', 'updated_at'])
-        for asset in asset_scope.filter(order_id__in=order_ids):
-            asset.status = CloudAsset.STATUS_DELETED
-            asset.provider_status = '已删除'
-            asset.is_active = False
-            asset.note = append_note(asset.note, missing_note)
-            asset.updated_at = now
-            asset.save(update_fields=['status', 'provider_status', 'is_active', 'note', 'updated_at'])
-    if instance_ids:
-        for asset in asset_scope.filter(instance_id__in=instance_ids):
-            asset.status = CloudAsset.STATUS_DELETED
-            asset.provider_status = '已删除'
-            asset.is_active = False
-            asset.note = append_note(asset.note, missing_note)
-            asset.updated_at = now
-            asset.save(update_fields=['status', 'provider_status', 'is_active', 'note', 'updated_at'])
-    return legacy_updated + updated
+    logger.info(
+        'DASHBOARD_SYNC_SERVERS_MISSING_STATE_SKIPPED provider=%s region=%s account_id=%s synced_instance_count=%s reason=managed_by_provider_sync_confirmation',
+        provider,
+        region,
+        getattr(account, 'id', None),
+        len([item for item in existing_instance_ids or [] if item]),
+    )
+    return legacy_updated
 
 
 @csrf_exempt
-@dashboard_login_required
+@dashboard_superuser_required
 @require_POST
 def sync_servers(request):
     payload = _read_payload(request)
@@ -3504,10 +4265,92 @@ def _resolve_sync_account_for_asset(asset):
     return None
 
 
+def _provider_sync_source(provider: str) -> str:
+    return ExternalSyncLog.SOURCE_AWS if provider == 'aws' else ExternalSyncLog.SOURCE_ALIYUN
+
+
+def _sync_task_lock_key(task: dict) -> str:
+    account = task.get('account')
+    account_id = getattr(account, 'id', 'none')
+    region = str((task.get('kwargs') or {}).get('region') or 'all')
+    return f"cloud_asset_sync:{task.get('provider')}:{account_id}:{region}"
+
+
+def _sync_task_payload(task: dict) -> dict:
+    account = task.get('account')
+    kwargs = task.get('kwargs') or {}
+    return {
+        'provider': task.get('provider'),
+        'account': _sync_account_payload(account) if account else None,
+        'region': kwargs.get('region') or 'all',
+        'command': task.get('command'),
+    }
+
+
+def _run_sync_task_with_lock(task: dict, *, ttl_seconds: int = 900) -> dict:
+    lock_key = _sync_task_lock_key(task)
+    started_at = timezone.now()
+    state_payload = {**_sync_task_payload(task), 'started_at': _iso(started_at)}
+    if not cache.add(lock_key, json.dumps(state_payload, ensure_ascii=False), timeout=ttl_seconds):
+        logger.warning('CLOUD_SYNC_TASK_SKIPPED run_id=%s lock_key=%s payload=%s', task.get('run_id') or '-', lock_key, state_payload)
+        return {'task': task, 'skipped': True, 'reason': '同账号/地区已有同步正在运行', 'duration_seconds': 0, 'log_text': ''}
+    try:
+        logger.info('CLOUD_SYNC_TASK_START run_id=%s lock_key=%s payload=%s kwargs=%s', task.get('run_id') or '-', lock_key, state_payload, task.get('kwargs') or {})
+        command, log_text = _call_command_capture_threaded(task['command'], **task['kwargs'])
+        duration = max((timezone.now() - started_at).total_seconds(), 0)
+        summary = getattr(command, 'summary', {}) if command else {}
+        logger.info('CLOUD_SYNC_TASK_DONE run_id=%s lock_key=%s duration_seconds=%.3f summary=%s', task.get('run_id') or '-', lock_key, duration, summary)
+        _log_sync_command_output(f'CLOUD_SYNC_TASK_LOG run_id={task.get("run_id") or "-"} command={task.get("command")}', log_text)
+        return {'task': task, 'command': command, 'log_text': log_text, 'skipped': False, 'duration_seconds': round(duration, 3)}
+    finally:
+        cache.delete(lock_key)
+
+
+def _parse_int_list(value) -> set[int]:
+    if value is None:
+        return set()
+    if isinstance(value, str):
+        raw_items = re.split(r'[,，\s]+', value.strip())
+    elif isinstance(value, (list, tuple, set)):
+        raw_items = value
+    else:
+        raw_items = [value]
+    result = set()
+    for item in raw_items:
+        try:
+            parsed = int(item)
+            if parsed > 0:
+                result.add(parsed)
+        except (TypeError, ValueError):
+            continue
+    return result
+
+
+def _parse_provider_scope(value) -> set[str]:
+    if value is None or value == '':
+        return {'aliyun', 'aws'}
+    if isinstance(value, str):
+        raw_items = re.split(r'[,，\s]+', value.strip())
+    elif isinstance(value, (list, tuple, set)):
+        raw_items = value
+    else:
+        raw_items = [value]
+    providers = {str(item or '').strip().lower() for item in raw_items}
+    normalized = set()
+    if 'all' in providers:
+        return {'aliyun', 'aws'}
+    if providers & {'aliyun', CloudAccountConfig.PROVIDER_ALIYUN}:
+        normalized.add('aliyun')
+    if providers & {'aws', CloudAccountConfig.PROVIDER_AWS, 'aws_lightsail'}:
+        normalized.add('aws')
+    return normalized or {'aliyun', 'aws'}
+
+
 @csrf_exempt
-@dashboard_login_required
+@dashboard_superuser_required
 @require_POST
 def sync_cloud_asset_status(request, asset_id):
+    sync_run_id = uuid.uuid4().hex[:8]
     asset = CloudAsset.objects.select_related('order', 'user', 'cloud_account', 'telegram_group').filter(pk=asset_id).first()
     if not asset:
         return _error('云资产不存在', status=404)
@@ -3527,21 +4370,33 @@ def sync_cloud_asset_status(request, asset_id):
         'provider': provider,
         'region_code': region_code or 'all',
         'account_id': account.id,
+        'instance_id': asset.instance_id or '',
+        'public_ip': asset.public_ip or asset.previous_public_ip or '',
     }
+    logger.info('CLOUD_SYNC_SINGLE_REQUEST_START run_id=%s payload=%s', sync_run_id, request_payload)
     try:
         command_kwargs = {'account_id': str(account.id), 'stdout': command_output}
         if region_code:
             command_kwargs['region'] = region_code
+        command_kwargs.update({
+            'asset_id': str(asset.id),
+            'instance_id': asset.instance_id or asset.provider_resource_id or asset.asset_name or '',
+            'public_ip': asset.public_ip or asset.previous_public_ip or '',
+        })
         _call_command_capture(command_name, **command_kwargs)
+        logger.info('CLOUD_SYNC_SINGLE_REQUEST_DONE run_id=%s asset_id=%s command=%s kwargs=%s', sync_run_id, asset.id, command_name, {key: value for key, value in command_kwargs.items() if key != 'stdout'})
     except Exception as exc:
         errors.append(str(exc))
         logger.exception(
-            'DASHBOARD_SYNC_SINGLE_ASSET_FAILED asset_id=%s provider=%s region=%s account_id=%s',
+            'DASHBOARD_SYNC_SINGLE_ASSET_FAILED run_id=%s asset_id=%s provider=%s region=%s account_id=%s kwargs=%s',
+            sync_run_id,
             asset.id,
             provider,
             region_code or 'all',
             getattr(account, 'id', None),
+            {key: value for key, value in command_kwargs.items() if key != 'stdout'},
         )
+        _log_sync_command_output(f'CLOUD_SYNC_SINGLE_FAILED_LOG run_id={sync_run_id} command={command_name}', _sync_log_text(command_output), level=logging.ERROR)
 
     refreshed = CloudAsset.objects.select_related('order', 'user', 'cloud_account', 'telegram_group').filter(pk=asset_id).first()
     response_payload = {
@@ -3552,7 +4407,15 @@ def sync_cloud_asset_status(request, asset_id):
         'account': _sync_account_payload(account),
         'errors': errors,
         'logs': _sync_log_tail(command_output),
+        'scope': {
+            'asset_id': asset.id,
+            'instance_id': asset.instance_id or '',
+            'public_ip': asset.public_ip or asset.previous_public_ip or '',
+        },
     }
+    if not errors:
+        _refresh_dashboard_plan_snapshots(f'cloud_asset_sync:{asset.id}', lifecycle_limit=1000)
+    _log_sync_command_output(f'CLOUD_SYNC_SINGLE_REQUEST_LOG run_id={sync_run_id} command={command_name}', _sync_log_text(command_output))
     _record_dashboard_sync_log(
         action='sync_cloud_asset_status',
         target=f'asset:{asset.id}',
@@ -3565,42 +4428,102 @@ def sync_cloud_asset_status(request, asset_id):
 
 
 @csrf_exempt
-@dashboard_login_required
+@dashboard_superuser_required
 @require_POST
 def sync_cloud_assets(request):
+    sync_run_id = uuid.uuid4().hex[:8]
     payload = _read_payload(request)
     aliyun_region = (payload.get('region') or request.POST.get('region') or request.GET.get('region') or 'cn-hongkong').strip() or 'cn-hongkong'
     aws_region = (payload.get('aws_region') or request.POST.get('aws_region') or request.GET.get('aws_region') or '').strip()
     if aws_region.lower() == 'all':
         aws_region = ''
+    providers = _parse_provider_scope(payload.get('providers') or payload.get('provider') or request.GET.get('provider'))
+    requested_account_ids = _parse_int_list(payload.get('account_ids') or request.GET.get('account_ids'))
+    requested_asset_ids = _parse_int_list(payload.get('asset_ids') or request.GET.get('asset_ids'))
     errors = []
     synced = {'aliyun': False, 'aws': False, 'reconcile': False}
     aws_regions = []
     command_output = io.StringIO()
     aliyun_accounts = _active_sync_accounts(CloudAccountConfig.PROVIDER_ALIYUN)
     aws_accounts = _active_sync_accounts(CloudAccountConfig.PROVIDER_AWS)
+    logger.info(
+        'CLOUD_SYNC_REQUEST_START run_id=%s providers=%s aliyun_region=%s aws_region=%s account_ids=%s asset_ids=%s payload=%s',
+        sync_run_id,
+        sorted(providers),
+        aliyun_region,
+        aws_region or 'all',
+        sorted(requested_account_ids),
+        sorted(requested_asset_ids),
+        payload,
+    )
+    if requested_account_ids:
+        aliyun_accounts = [account for account in aliyun_accounts if account.id in requested_account_ids]
+        aws_accounts = [account for account in aws_accounts if account.id in requested_account_ids]
+    selected_assets = []
+    selected_account_keys = set()
+    selected_single_asset = None
+    if requested_asset_ids:
+        selected_assets = list(CloudAsset.objects.select_related('cloud_account', 'order').filter(id__in=requested_asset_ids))
+        if len(selected_assets) == 1:
+            selected_single_asset = selected_assets[0]
+        for asset in selected_assets:
+            provider = _sync_provider_for_asset(asset)
+            account = _resolve_sync_account_for_asset(asset)
+            if provider == CloudAccountConfig.PROVIDER_ALIYUN and account:
+                selected_account_keys.add(('aliyun', account.id))
+            elif provider == CloudAccountConfig.PROVIDER_AWS and account:
+                selected_account_keys.add(('aws', account.id))
+        if selected_account_keys:
+            providers = {provider for provider, _ in selected_account_keys}
+            aliyun_accounts = [account for account in aliyun_accounts if ('aliyun', account.id) in selected_account_keys]
+            aws_accounts = [account for account in aws_accounts if ('aws', account.id) in selected_account_keys]
     warnings = []
     sync_tasks = []
-    for aliyun_account in aliyun_accounts:
-        sync_tasks.append({
-            'provider': 'aliyun',
-            'account': aliyun_account,
-            'command': 'sync_aliyun_assets',
-            'kwargs': {'region': aliyun_region, 'account_id': str(aliyun_account.id)},
-        })
-    for aws_account in aws_accounts:
-        sync_tasks.append({
-            'provider': 'aws',
-            'account': aws_account,
-            'command': 'sync_aws_assets',
-            'kwargs': {'region': aws_region, 'account_id': str(aws_account.id)},
-        })
+    if 'aliyun' in providers:
+        for aliyun_account in aliyun_accounts:
+            kwargs = {'region': aliyun_region, 'account_id': str(aliyun_account.id)}
+            if selected_single_asset:
+                kwargs.update({
+                    'asset_id': str(selected_single_asset.id),
+                    'instance_id': selected_single_asset.instance_id or selected_single_asset.provider_resource_id or '',
+                    'public_ip': selected_single_asset.public_ip or selected_single_asset.previous_public_ip or '',
+                })
+            sync_tasks.append({
+                'run_id': sync_run_id,
+                'provider': 'aliyun',
+                'account': aliyun_account,
+                'command': 'sync_aliyun_assets',
+                'kwargs': kwargs,
+            })
+    if 'aws' in providers:
+        for aws_account in aws_accounts:
+            kwargs = {'region': aws_region, 'account_id': str(aws_account.id)}
+            if selected_single_asset:
+                kwargs.update({
+                    'asset_id': str(selected_single_asset.id),
+                    'instance_id': selected_single_asset.instance_id or selected_single_asset.provider_resource_id or selected_single_asset.asset_name or '',
+                    'public_ip': selected_single_asset.public_ip or selected_single_asset.previous_public_ip or '',
+                })
+            sync_tasks.append({
+                'run_id': sync_run_id,
+                'provider': 'aws',
+                'account': aws_account,
+                'command': 'sync_aws_assets',
+                'kwargs': kwargs,
+            })
+    logger.info(
+        'CLOUD_SYNC_TASKS_BUILT run_id=%s task_count=%s tasks=%s',
+        sync_run_id,
+        len(sync_tasks),
+        [_sync_task_payload(task) for task in sync_tasks],
+    )
 
     def run_task(task):
-        command, log_text = _call_command_capture_threaded(task['command'], **task['kwargs'])
-        return {'task': task, 'command': command, 'log_text': log_text}
+        return _run_sync_task_with_lock(task)
 
     max_workers = max(1, min(4, len(sync_tasks) or 1))
+    task_results = []
+    skipped_tasks = []
     if sync_tasks:
         with ThreadPoolExecutor(max_workers=max_workers) as executor:
             future_map = {executor.submit(run_task, task): task for task in sync_tasks}
@@ -3609,6 +4532,15 @@ def sync_cloud_assets(request):
                 account = task['account']
                 try:
                     result = future.result()
+                    if result.get('skipped'):
+                        skipped_tasks.append({**_sync_task_payload(task), 'reason': result.get('reason') or '同步已在运行'})
+                        continue
+                    command = result.get('command')
+                    task_results.append({
+                        **_sync_task_payload(task),
+                        'duration_seconds': result.get('duration_seconds'),
+                        'summary': getattr(command, 'summary', {}) if command else {},
+                    })
                     command_output.write(result.get('log_text') or '')
                     if task['provider'] == 'aliyun':
                         synced['aliyun'] = True
@@ -3619,26 +4551,59 @@ def sync_cloud_assets(request):
                         warnings.extend(getattr(command, 'sync_errors', []) or [])
                         synced['aws'] = True
                 except Exception as exc:
+                    captured_log = getattr(exc, 'log_text', '') or ''
+                    if captured_log:
+                        command_output.write(captured_log)
                     if task['provider'] == 'aliyun':
                         message = f'阿里云账号#{getattr(account, "id", "-")}代理同步失败: {exc}'
-                        logger.exception('DASHBOARD_SYNC_ASSETS_ALIYUN_FAILED account_id=%s region=%s', getattr(account, 'id', None), aliyun_region)
+                        logger.exception('DASHBOARD_SYNC_ASSETS_ALIYUN_FAILED run_id=%s account_id=%s region=%s kwargs=%s', sync_run_id, getattr(account, 'id', None), aliyun_region, task.get('kwargs') or {})
                     else:
                         message = f'AWS账号#{getattr(account, "id", "-")}代理同步失败: {exc}'
-                        logger.exception('DASHBOARD_SYNC_ASSETS_AWS_FAILED account_id=%s region=%s', getattr(account, 'id', None), aws_region or 'all')
+                        logger.exception('DASHBOARD_SYNC_ASSETS_AWS_FAILED run_id=%s account_id=%s region=%s kwargs=%s', sync_run_id, getattr(account, 'id', None), aws_region or 'all', task.get('kwargs') or {})
+                    _log_sync_command_output(f'CLOUD_SYNC_TASK_FAILED_LOG run_id={sync_run_id} command={task.get("command")}', captured_log, level=logging.ERROR)
                     errors.append(message)
     try:
+        logger.info('CLOUD_SYNC_RECONCILE_START run_id=%s', sync_run_id)
         _call_command_capture('reconcile_cloud_assets_from_servers', stdout=command_output)
         synced['reconcile'] = True
+        logger.info('CLOUD_SYNC_RECONCILE_DONE run_id=%s', sync_run_id)
     except Exception as exc:
         message = f'代理列表补齐失败: {exc}'
         errors.append(message)
-        logger.exception('DASHBOARD_SYNC_ASSETS_RECONCILE_FAILED')
+        logger.exception('DASHBOARD_SYNC_ASSETS_RECONCILE_FAILED run_id=%s', sync_run_id)
     ok = not errors or any(synced.values())
-    response_payload = {'ok': ok, 'synced': synced, 'aliyun_region': aliyun_region, 'aws_region': aws_region or 'all', 'aws_regions': aws_regions, 'errors': errors, 'warnings': warnings[:50], 'logs': _sync_log_tail(command_output), 'accounts': {'aliyun': [_sync_account_payload(account) for account in aliyun_accounts], 'aws': [_sync_account_payload(account) for account in aws_accounts]}}
+    response_payload = {
+        'ok': ok,
+        'synced': synced,
+        'aliyun_region': aliyun_region,
+        'aws_region': aws_region or 'all',
+        'aws_regions': aws_regions,
+        'providers': sorted(providers),
+        'asset_ids': sorted(requested_asset_ids),
+        'errors': errors,
+        'warnings': warnings[:50],
+        'logs': _sync_log_tail(command_output),
+        'tasks': task_results,
+        'skipped_tasks': skipped_tasks,
+        'accounts': {'aliyun': [_sync_account_payload(account) for account in aliyun_accounts], 'aws': [_sync_account_payload(account) for account in aws_accounts]},
+    }
+    logger.info(
+        'CLOUD_SYNC_REQUEST_DONE run_id=%s ok=%s synced=%s errors=%s warnings=%s tasks=%s skipped=%s',
+        sync_run_id,
+        ok,
+        synced,
+        errors,
+        warnings[:20],
+        task_results,
+        skipped_tasks,
+    )
+    _log_sync_command_output(f'CLOUD_SYNC_REQUEST_LOG run_id={sync_run_id}', _sync_log_text(command_output))
+    if ok:
+        _refresh_dashboard_plan_snapshots(f'cloud_assets_sync:{sync_run_id}', lifecycle_limit=1000)
     _record_dashboard_sync_log(
         action='sync_cloud_assets',
-        target=f'aliyun:{aliyun_region};aws:{aws_region or "all"}',
-        request_payload={'aliyun_region': aliyun_region, 'aws_region': aws_region or 'all'},
+        target=f'providers:{",".join(sorted(providers))};aliyun:{aliyun_region};aws:{aws_region or "all"}',
+        request_payload={'aliyun_region': aliyun_region, 'aws_region': aws_region or 'all', 'providers': sorted(providers), 'account_ids': sorted(requested_account_ids), 'asset_ids': sorted(requested_asset_ids)},
         response_payload={**response_payload, 'log_text': _sync_log_text(command_output)},
         is_success=ok,
         error_message='; '.join(errors[:10]),
@@ -3647,7 +4612,7 @@ def sync_cloud_assets(request):
 
 
 @csrf_exempt
-@dashboard_login_required
+@dashboard_superuser_required
 @require_POST
 def sync_cloud_plans(request):
     before_pricing_count = ServerPrice.objects.filter(is_active=True).count()
@@ -3907,12 +4872,34 @@ def cloud_assets_sync_status(request):
         CloudAsset.STATUS_TERMINATED,
         CloudAsset.STATUS_TERMINATING,
     ]).count()
+    recent_syncs = []
+    for log in ExternalSyncLog.objects.filter(source=ExternalSyncLog.SOURCE_DASHBOARD, action='sync_cloud_assets').order_by('-created_at', '-id')[:5]:
+        response_payload = {}
+        try:
+            response_payload = json.loads(log.response_payload or '{}')
+        except Exception:
+            response_payload = {}
+        recent_syncs.append({
+            'id': log.id,
+            'created_at': _iso(log.created_at),
+            'is_success': log.is_success,
+            'target': log.target or '',
+            'error_message': log.error_message or '',
+            'providers': response_payload.get('providers') or [],
+            'tasks': response_payload.get('tasks') or [],
+            'skipped_tasks': response_payload.get('skipped_tasks') or [],
+        })
     return _ok({
         'auto_sync_every_seconds': get_cloud_asset_sync_interval_seconds(),
         'last_synced_at': _iso(last_synced_at),
         'aws_existing_count': aws_existing_count,
         'aliyun_existing_count': aliyun_existing_count,
         'unattached_ip_count': unattached_ip_count,
+        'accounts': {
+            'aliyun': [_sync_account_payload(account) for account in _active_sync_accounts(CloudAccountConfig.PROVIDER_ALIYUN)],
+            'aws': [_sync_account_payload(account) for account in _active_sync_accounts(CloudAccountConfig.PROVIDER_AWS)],
+        },
+        'recent_syncs': recent_syncs,
     })
 
 
@@ -3978,6 +4965,7 @@ def monitors_list(request):
 
 __all__ = [
     'cloud_assets_list',
+    'cloud_assets_risk_summary',
     'cloud_assets_sync_status',
     'sync_cloud_asset_status',
     'cloud_ip_logs_list',

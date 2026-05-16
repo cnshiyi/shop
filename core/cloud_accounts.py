@@ -21,6 +21,23 @@ def cloud_account_label(account) -> str:
     return f'{account.provider}+{account_id}+{account.name}'[:191]
 
 
+def cloud_account_label_variants(account) -> list[str]:
+    if not account:
+        return []
+    provider = str(getattr(account, 'provider', '') or '').strip()
+    provider_aliases = _provider_values(provider)
+    name = str(getattr(account, 'name', '') or '').strip()
+    external_id = str(getattr(account, 'external_account_id', '') or '').strip()
+    db_id = str(getattr(account, 'id', '') or '').strip()
+    ids = [item for item in [external_id, db_id] if item]
+    labels = [cloud_account_label(account)]
+    for provider_value in provider_aliases:
+        for account_id in ids:
+            labels.append(f'{provider_value}+{account_id}+{name}'[:191])
+            labels.append(f'{provider_value}:{account_id}:{name}'[:191])
+    return list(dict.fromkeys(item for item in labels if item))
+
+
 def get_cloud_account_from_label(label: str, provider: str | None = None):
     text = str(label or '').strip()
     if not text:
@@ -44,7 +61,7 @@ def get_cloud_account_from_label(label: str, provider: str | None = None):
             if account:
                 return account
     for account in queryset.order_by('id'):
-        if cloud_account_label(account) == text:
+        if text in cloud_account_label_variants(account):
             return account
     return None
 
@@ -83,8 +100,9 @@ def list_cloud_accounts_by_server_load(provider: str, region_code: str | None = 
         return []
     Server = apps.get_model('cloud', 'Server')
     provider_values = _provider_values(provider)
-    labels = {item.id: cloud_account_label(item) for item in candidates}
-    queryset = Server.objects.filter(provider__in=provider_values, account_label__in=list(labels.values()))
+    labels = {item.id: cloud_account_label_variants(item) for item in candidates}
+    all_labels = list(dict.fromkeys(label for variants in labels.values() for label in variants))
+    queryset = Server.objects.filter(provider__in=provider_values, account_label__in=all_labels)
     region = str(region_code or '').strip()
     if region:
         queryset = queryset.filter(Q(region_code=region) | Q(region_code='') | Q(region_code__isnull=True))
@@ -92,7 +110,7 @@ def list_cloud_accounts_by_server_load(provider: str, region_code: str | None = 
         row['account_label']: row['count']
         for row in queryset.values('account_label').annotate(count=Count('id'))
     }
-    return sorted(candidates, key=lambda item: (loads_by_label.get(labels[item.id], 0), item.id))
+    return sorted(candidates, key=lambda item: (sum(loads_by_label.get(label, 0) for label in labels[item.id]), item.id))
 
 
 def choose_cloud_account_for_order(provider: str, region_code: str | None = None):

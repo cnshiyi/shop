@@ -1,4 +1,5 @@
 import asyncio
+import hashlib
 import json
 import logging
 import os
@@ -18,7 +19,8 @@ from django.utils import timezone
 
 from orders.ledger import record_balance_ledger
 from bot.models import TelegramUser
-from cloud.models import AddressMonitor, CloudServerOrder
+from cloud.models import AddressMonitor, CloudAsset, CloudServerOrder
+from cloud.note_utils import append_note
 from orders.models import Order, Product, Recharge
 from orders.services import usdt_to_trx
 from bot.keyboards import custom_port_keyboard
@@ -136,18 +138,20 @@ async def _refresh_runtime_flags(force: bool = False):
 # ── 内部辅助 ──────────────────────────────────────────────────────────────
 
 def _cache_tx_detail(tx_hash: str, detail: dict):
-    detail_key = tx_hash[:16]
-    _recent_tx_details[tx_hash] = detail
-    _recent_tx_keys[detail_key] = tx_hash
+    user_id = str(detail.get('user_id') or '').strip()
+    cache_key = f'{tx_hash}:{user_id}' if user_id else tx_hash
+    detail_key = hashlib.sha1(cache_key.encode('utf-8')).hexdigest()[:16] if user_id else tx_hash[:16]
+    _recent_tx_details[cache_key] = detail
+    _recent_tx_keys[detail_key] = cache_key
     if len(_recent_tx_details) > MAX_TX_DETAIL_CACHE:
-        old_tx_hash, _ = _recent_tx_details.popitem(last=False)
-        old_keys = [key for key, value in _recent_tx_keys.items() if value == old_tx_hash]
+        old_cache_key, _ = _recent_tx_details.popitem(last=False)
+        old_keys = [key for key, value in _recent_tx_keys.items() if value == old_cache_key]
         for key in old_keys:
             _recent_tx_keys.pop(key, None)
+    return detail_key
 
 
-def _build_tx_detail_keyboard(tx_hash: str) -> InlineKeyboardMarkup:
-    detail_key = tx_hash[:16]
+def _build_tx_detail_keyboard(detail_key: str) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[[InlineKeyboardButton(text='查看交易详情', callback_data=f'mon:txd:{detail_key}')]]
     )
@@ -192,18 +196,38 @@ def _short_addr(addr: str) -> str:
 
 
 async def _record_daily_stats(address: str, currency: str, direction: str, amount: Decimal, user_id: int, monitor_id: int | None = None):
+    return await _record_daily_stats_for_monitors(
+        address,
+        currency,
+        direction,
+        amount,
+        [{'user_id': user_id, 'id': monitor_id}],
+    )
+
+
+async def _record_daily_stats_for_monitors(address: str, currency: str, direction: str, amount: Decimal, monitors: list[dict]):
     amount_units = int((Decimal(str(amount or 0)) * Decimal('1000000')).to_integral_value(rounding=ROUND_DOWN))
     await bump_daily_stats(address, currency, direction, amount=amount_units)
-    await sync_to_async(bump_daily_address_stat)(
-        user_id=user_id,
-        address=address,
-        currency=currency,
-        direction=direction,
-        amount=amount,
-        monitor_id=monitor_id,
-        account_scope='platform',
-        account_key='default',
-    )
+    seen = set()
+    for mon in monitors or []:
+        user_id = mon.get('user_id')
+        monitor_id = mon.get('id')
+        if not user_id:
+            continue
+        key = (int(user_id), int(monitor_id or 0))
+        if key in seen:
+            continue
+        seen.add(key)
+        await sync_to_async(bump_daily_address_stat)(
+            user_id=user_id,
+            address=address,
+            currency=currency,
+            direction=direction,
+            amount=amount,
+            monitor_id=monitor_id,
+            account_scope='platform',
+            account_key='default',
+        )
     income_units = await get_daily_stats(f'{address}:{currency}:income')
     expense_units = await get_daily_stats(f'{address}:{currency}:expense')
     return {
@@ -242,12 +266,25 @@ def _expire_timed_out_payment_orders():
         expired_at__isnull=False,
         expired_at__lte=now,
     ).update(status='expired')
-    cloud_count = CloudServerOrder.objects.filter(
+    expired_cloud_payment_qs = CloudServerOrder.objects.filter(
         pay_method='address',
         status='pending',
         expired_at__isnull=False,
         expired_at__lte=now,
-    ).update(status='expired')
+    )
+    expired_asset_renewal_order_ids = [
+        order.id for order in expired_cloud_payment_qs
+        if is_cloud_asset_renewal_order(order)
+    ]
+    cloud_count = expired_cloud_payment_qs.update(status='expired')
+    if expired_asset_renewal_order_ids:
+        for asset in CloudAsset.objects.filter(order_id__in=expired_asset_renewal_order_ids).order_by('id'):
+            asset.order = None
+            asset.note = append_note(
+                asset.note,
+                f'续费地址支付窗口已于 {now:%Y-%m-%d %H:%M} 超时关闭，已解除过期支付订单绑定，可重新发起续费。',
+            )
+            asset.save(update_fields=['order', 'note', 'updated_at'])
     renewal_expired_count = 0
     renewal_orders = list(CloudServerOrder.objects.filter(
         pay_method='address',
@@ -303,8 +340,6 @@ def _get_pending_recharges(currency: str):
 @sync_to_async
 def _get_pending_cloud_server_orders(currency: str):
     currency_filter = Q(currency=currency)
-    if currency == 'TRX':
-        currency_filter |= Q(currency='USDT')
     return list(
         CloudServerOrder.objects.filter(
             _active_payment_q(),
@@ -345,13 +380,22 @@ def _confirm_order_paid(order_id: int, tx_hash: str, payer_address: str = '', re
         order.payer_address = payer_address or ''
         order.receive_address = receive_address or ''
         order.paid_at = timezone.now()
-        order.save(update_fields=['status', 'tx_hash', 'payer_address', 'receive_address', 'paid_at', 'updated_at'])
         product = Product.objects.select_for_update().get(id=order.product_id)
+        if product.stock != -1 and product.stock < order.quantity:
+            logger.warning(
+                '商品订单链上支付拒绝: order=%s tx=%s reason=stock_insufficient stock=%s quantity=%s',
+                order_id,
+                tx_hash,
+                product.stock,
+                order.quantity,
+            )
+            return None
+        order.save(update_fields=['status', 'tx_hash', 'payer_address', 'receive_address', 'paid_at'])
         if product.stock != -1:
             product.stock -= order.quantity
             product.save(update_fields=['stock', 'updated_at'])
         order.status = 'delivered'
-        order.save(update_fields=['status', 'updated_at'])
+        order.save(update_fields=['status'])
     return order
 
 
@@ -502,7 +546,7 @@ async def _provision_recovered_cloud_order(order: CloudServerOrder):
 async def _copy_notice_to_admins(user, text: str, parse_mode: str | None = None):
     if _bot is None or not user:
         return
-    copy_chat_ids = _parse_notify_chat_ids(get_runtime_config('bot_notice_copy_chat_ids', ''))
+    copy_chat_ids = _parse_notify_chat_ids(await get_config('bot_notice_copy_chat_ids', ''))
     if not copy_chat_ids:
         return
     copy_text = _admin_notice_copy_text(user, text)
@@ -559,8 +603,6 @@ def _cloud_expected_transfer_amount(order: CloudServerOrder, currency: str) -> D
     payable = Decimal(str(order.pay_amount or order.total_amount or 0))
     if order.currency == currency:
         return payable
-    if currency == 'TRX' and order.currency == 'USDT':
-        return usdt_to_trx.__wrapped__(payable)
     return None
 
 
@@ -676,10 +718,12 @@ async def _get_address_chain_balances(address: str) -> tuple[Decimal | None, Dec
         except Exception:
             pass
     try:
+        headers = await build_trongrid_headers()
         async with httpx.AsyncClient(timeout=10) as client:
-            trx_resp = await client.get(
+            trx_resp = await _trongrid_get_with_key_fallback(
+                client,
                 f'{TRONGRID_BASE_URL}/v1/accounts/{address}',
-                headers=build_trongrid_headers(),
+                headers,
             )
             trx_resp.raise_for_status()
             trx_data = trx_resp.json() or {}
@@ -709,6 +753,24 @@ async def _get_address_chain_balances(address: str) -> tuple[Decimal | None, Dec
         return None, None
 
 
+def _trongrid_headers_without_key(headers: dict | None) -> dict:
+    return {key: value for key, value in dict(headers or {}).items() if key.lower() != 'tron-pro-api-key'}
+
+
+async def _trongrid_get_with_key_fallback(client: httpx.AsyncClient, url: str, headers: dict):
+    resp = await client.get(url, headers=headers)
+    if resp.status_code == 401 and headers.get('TRON-PRO-API-KEY'):
+        resp = await client.get(url, headers=_trongrid_headers_without_key(headers))
+    return resp
+
+
+async def _trongrid_post_with_key_fallback(client: httpx.AsyncClient, url: str, payload: dict, headers: dict):
+    resp = await client.post(url, json=payload, headers=headers)
+    if resp.status_code == 401 and headers.get('TRON-PRO-API-KEY'):
+        resp = await client.post(url, json=payload, headers=_trongrid_headers_without_key(headers))
+    return resp
+
+
 def _format_chain_balance(value: Decimal | None, currency: str) -> str:
     if value is None:
         return f'查询失败 {currency}'
@@ -719,10 +781,11 @@ async def _get_fee_text(tx_hash: str) -> str:
     try:
         headers = await build_trongrid_headers()
         async with httpx.AsyncClient(timeout=10) as client:
-            resp = await client.post(
+            resp = await _trongrid_post_with_key_fallback(
+                client,
                 f'{TRONGRID_BASE_URL}/wallet/gettransactioninfobyid',
-                json={'value': tx_hash},
-                headers=headers,
+                {'value': tx_hash},
+                headers,
             )
             resp.raise_for_status()
             info = resp.json() or {}
@@ -809,14 +872,15 @@ async def _process_monitor_notification(transfer: dict, monitors: list[dict], da
             f'💹 今日利润: {escape(fmt_amount(profit))} {escape(currency)}'
         )
 
-        _cache_tx_detail(tx_hash, {
+        detail_key = _cache_tx_detail(tx_hash, {
+            'user_id': mon['user_id'],
             'remark': remark, 'from': from_addr, 'to': to_addr,
             'time': tx_time, 'amount': f'{amount_prefix}{fmt_amount(amount)}',
             'currency': currency, 'tx_hash': tx_hash,
             'raw': transfer.get('raw_tx', ''), 'fee_text': fee_text,
             'direction': direction,
         })
-        await _notify_user(mon['user_id'], text, reply_markup=_build_tx_detail_keyboard(tx_hash), parse_mode='HTML')
+        await _notify_user(mon['user_id'], text, reply_markup=_build_tx_detail_keyboard(detail_key), parse_mode='HTML')
 
 
 # ── 摘要日志 ──────────────────────────────────────────────────────────────
@@ -911,10 +975,10 @@ async def _handle_block_data(block_data: dict) -> bool:
                 _scan_stats['payments'] += 1
 
         if to_addr in monitor_cache:
-            stats = await _record_daily_stats(to_addr, transfer['currency'], 'income', transfer['amount'], monitor_cache[to_addr][0]['user_id'], monitor_cache[to_addr][0].get('id'))
+            stats = await _record_daily_stats_for_monitors(to_addr, transfer['currency'], 'income', transfer['amount'], monitor_cache[to_addr])
             await _process_monitor_notification(transfer, monitor_cache[to_addr], stats, 'income')
         if from_addr in monitor_cache and from_addr != to_addr:
-            stats = await _record_daily_stats(from_addr, transfer['currency'], 'expense', transfer['amount'], monitor_cache[from_addr][0]['user_id'], monitor_cache[from_addr][0].get('id'))
+            stats = await _record_daily_stats_for_monitors(from_addr, transfer['currency'], 'expense', transfer['amount'], monitor_cache[from_addr])
             await _process_monitor_notification(transfer, monitor_cache[from_addr], stats, 'expense')
     return True
 

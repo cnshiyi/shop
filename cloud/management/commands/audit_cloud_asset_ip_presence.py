@@ -5,6 +5,7 @@ from django.core.management.base import BaseCommand, CommandError
 from cloud.aliyun_simple import _build_client, _region_endpoint, _runtime_options
 from cloud.management.commands.sync_aws_assets import _lightsail_client
 from cloud.models import CloudAsset
+from core.cloud_accounts import cloud_account_label, get_cloud_account_from_label, list_active_cloud_accounts
 
 
 class Command(BaseCommand):
@@ -14,8 +15,10 @@ class Command(BaseCommand):
         parser.add_argument('--provider', default='', help='可选：aws_lightsail / aliyun_simple')
         parser.add_argument('--limit', type=int, default=200)
 
-    def _load_aws_inventory(self, region: str):
-        client = _lightsail_client(region)
+    def _load_aws_inventory(self, region: str, account):
+        if not account:
+            raise CommandError('AWS 审计必须能解析到云账号，避免误用环境变量或错误账号。')
+        client = _lightsail_client(region, account=account)
         instances = {}
         next_page_token = None
         while True:
@@ -43,8 +46,8 @@ class Command(BaseCommand):
                 break
         return {'instances': instances, 'static_ips': static_ips}
 
-    def _load_aliyun_inventory(self, region: str):
-        client = _build_client(_region_endpoint(region))
+    def _load_aliyun_inventory(self, region: str, account):
+        client = _build_client(_region_endpoint(region), account=account)
         if not client:
             raise CommandError(f'阿里云地区 {region} 未配置可用凭据。')
         from alibabacloud_swas_open20200601 import models as swas_models
@@ -71,17 +74,22 @@ class Command(BaseCommand):
 
         grouped = defaultdict(list)
         for asset in assets:
-            grouped[(asset.provider or '', asset.region_code or '')].append(asset)
+            account = asset.cloud_account or get_cloud_account_from_label(asset.account_label, asset.provider)
+            if not account and asset.provider == 'aws_lightsail':
+                candidates = list_active_cloud_accounts('aws_lightsail', asset.region_code)
+                account = candidates[0] if len(candidates) == 1 else None
+            account_key = cloud_account_label(account) if account else (asset.account_label or '')
+            grouped[(asset.provider or '', asset.region_code or '', account_key, account)].append(asset)
 
         self.stdout.write(self.style.SUCCESS(f'开始审计：数据库代理记录 {len(assets)} 条。'))
-        for (asset_provider, region_code), rows in grouped.items():
-            self.stdout.write(self.style.WARNING(f'--- 分组 provider={asset_provider or "-"} region={region_code or "-"} count={len(rows)} ---'))
+        for (asset_provider, region_code, account_key, account), rows in grouped.items():
+            self.stdout.write(self.style.WARNING(f'--- 分组 provider={asset_provider or "-"} account={account_key or "-"} region={region_code or "-"} count={len(rows)} ---'))
             inventory = None
             try:
                 if asset_provider == 'aws_lightsail':
-                    inventory = self._load_aws_inventory(region_code or 'ap-southeast-1')
+                    inventory = self._load_aws_inventory(region_code or 'ap-southeast-1', account)
                 elif asset_provider == 'aliyun_simple':
-                    inventory = self._load_aliyun_inventory(region_code or 'cn-hongkong')
+                    inventory = self._load_aliyun_inventory(region_code or 'cn-hongkong', account)
                 else:
                     self.stdout.write(f'跳过未知 provider：{asset_provider or "-"}')
                     continue

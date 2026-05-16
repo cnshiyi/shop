@@ -110,3 +110,45 @@ SESSION_EXPIRE_AT_BROWSER_CLOSE = True
 SESSION_SAVE_EVERY_REQUEST = False
 
 DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'
+
+LOG_LEVEL = os.getenv('LOG_LEVEL', 'INFO')
+CLOUD_LOG_LEVEL = os.getenv('CLOUD_LOG_LEVEL', LOG_LEVEL)
+
+LOGGING = {
+    'version': 1,
+    'disable_existing_loggers': False,
+    'formatters': {
+        'console': {
+            'format': '%(asctime)s [%(levelname)s] %(name)s: %(message)s',
+        },
+    },
+    'handlers': {
+        'console': {
+            'class': 'logging.StreamHandler',
+            'formatter': 'console',
+            'level': 'DEBUG',
+        },
+    },
+    'loggers': {
+        'cloud': {
+            'handlers': ['console'],
+            'level': CLOUD_LOG_LEVEL,
+            'propagate': False,
+        },
+        'core': {
+            'handlers': ['console'],
+            'level': LOG_LEVEL,
+            'propagate': False,
+        },
+        'bot': {
+            'handlers': ['console'],
+            'level': LOG_LEVEL,
+            'propagate': False,
+        },
+        'django.request': {
+            'handlers': ['console'],
+            'level': 'ERROR',
+            'propagate': False,
+        },
+    },
+}

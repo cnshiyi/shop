@@ -1,7 +1,8 @@
 from django.core.management.base import BaseCommand
-from django.db.models import Q
+from django.db.models import Case, IntegerField, Q, Value, When
 
 from cloud.models import CloudAsset, Server
+from core.cloud_accounts import cloud_account_label_variants, get_cloud_account_from_label
 
 
 SOURCE_MAP = {
@@ -23,18 +24,63 @@ RESIDUAL_ORDER_STATUSES = {'deleted', 'deleting', 'expired', 'cancelled', 'refun
 
 def _resolve_asset(server: Server):
     lookup = Q(kind=CloudAsset.KIND_SERVER)
-    candidates = Q()
+    if server.provider:
+        lookup &= Q(provider=server.provider)
+    account = _server_cloud_account(server)
+    if account:
+        lookup &= (Q(cloud_account=account) | Q(account_label__in=cloud_account_label_variants(account)))
+    elif server.account_label:
+        lookup &= Q(account_label=server.account_label)
+    queryset = CloudAsset.objects.filter(lookup)
+    ordering = [
+        Case(
+            When(status=CloudAsset.STATUS_DELETING, then=Value(0)),
+            When(status=CloudAsset.STATUS_RUNNING, then=Value(1)),
+            default=Value(2),
+            output_field=IntegerField(),
+        ),
+        '-updated_at',
+        '-id',
+    ]
+    public_ip = str(server.public_ip or '').strip()
+    previous_public_ip = str(server.previous_public_ip or '').strip()
+    if public_ip:
+        asset = queryset.filter(Q(public_ip=public_ip) | Q(previous_public_ip=public_ip)).order_by(
+            Case(
+                When(public_ip=public_ip, then=Value(0)),
+                When(previous_public_ip=public_ip, then=Value(1)),
+                default=Value(2),
+                output_field=IntegerField(),
+            ),
+            *ordering,
+        ).first()
+        if asset:
+            return asset
+    if previous_public_ip:
+        asset = queryset.filter(Q(public_ip=previous_public_ip) | Q(previous_public_ip=previous_public_ip)).order_by(*ordering).first()
+        if asset:
+            return asset
     if server.order_id:
-        candidates |= Q(order=server.order)
+        asset = queryset.filter(order=server.order).order_by(*ordering).first()
+        if asset:
+            return asset
+    direct_candidates = Q()
     if server.instance_id:
-        candidates |= Q(instance_id=server.instance_id)
+        direct_candidates |= Q(instance_id=server.instance_id)
     if server.provider_resource_id:
-        candidates |= Q(provider_resource_id=server.provider_resource_id)
-    if server.public_ip:
-        candidates |= Q(public_ip=server.public_ip)
-    if not candidates:
+        direct_candidates |= Q(provider_resource_id=server.provider_resource_id)
+    if not direct_candidates:
         return None
-    return CloudAsset.objects.filter(lookup & candidates).order_by('-updated_at', '-id').first()
+    if server.region_code:
+        queryset = queryset.filter(region_code=server.region_code)
+    return queryset.filter(direct_candidates).order_by(*ordering).first()
+
+
+def _server_cloud_account(server: Server):
+    order = getattr(server, 'order', None)
+    if order and getattr(order, 'cloud_account_id', None):
+        return order.cloud_account
+    return get_cloud_account_from_label(server.account_label or '', server.provider)
 
 
 def _should_reconcile_server(server: Server) -> bool:
@@ -72,10 +118,14 @@ class Command(BaseCommand):
                 continue
             asset = _resolve_asset(server)
             order = server.order
+            cloud_account = _server_cloud_account(server)
+            account_label = server.account_label or getattr(order, 'account_label', None) or ''
             defaults = {
                 'kind': CloudAsset.KIND_SERVER,
                 'source': SOURCE_MAP.get(server.source, CloudAsset.SOURCE_ORDER),
                 'provider': server.provider,
+                'cloud_account': cloud_account,
+                'account_label': account_label,
                 'region_code': server.region_code,
                 'region_name': server.region_name,
                 'asset_name': server.server_name,

@@ -22,6 +22,17 @@ logger = logging.getLogger(__name__)
 _cached_rate: Decimal | None = None
 _cache_time = 0.0
 _CACHE_TTL = 60
+CART_MAX_QUANTITY = 99
+
+
+def _normalize_cart_quantity(quantity: int) -> int:
+    try:
+        normalized = int(quantity or 1)
+    except (TypeError, ValueError):
+        normalized = 1
+    if normalized < 1:
+        normalized = 1
+    return min(normalized, CART_MAX_QUANTITY)
 
 
 def _generate_order_no() -> str:
@@ -106,14 +117,14 @@ async def get_exchange_rate_display() -> str:
 
 @sync_to_async
 def add_to_cart(user_id: int, product_id: int, quantity: int = 1, item_type: str = 'product'):
-    quantity = max(1, int(quantity or 1))
+    quantity = _normalize_cart_quantity(quantity)
     if item_type == 'cloud_plan':
         plan = CloudServerPlan.objects.filter(id=product_id, is_active=True).first()
         if not plan:
             return None
         item = CartItem.objects.filter(user_id=user_id, item_type='cloud_plan', cloud_plan_id=product_id).first()
         if item:
-            item.quantity += quantity
+            item.quantity = min(CART_MAX_QUANTITY, int(item.quantity or 0) + quantity)
             item.save(update_fields=['quantity', 'updated_at'])
             return item
         return CartItem.objects.create(user_id=user_id, item_type='cloud_plan', cloud_plan_id=product_id, quantity=quantity)
@@ -122,7 +133,7 @@ def add_to_cart(user_id: int, product_id: int, quantity: int = 1, item_type: str
         return None
     item = CartItem.objects.filter(user_id=user_id, item_type='product', product_id=product_id).first()
     if item:
-        item.quantity += quantity
+        item.quantity = min(CART_MAX_QUANTITY, int(item.quantity or 0) + quantity)
         item.save(update_fields=['quantity', 'updated_at'])
         return item
     return CartItem.objects.create(user_id=user_id, item_type='product', product_id=product_id, quantity=quantity)
@@ -162,7 +173,7 @@ def clear_cart(user_id: int, item_type: str | None = None):
 
 @sync_to_async
 def create_cart_address_orders(user_id: int, currency: str = 'USDT'):
-    items = list(CartItem.objects.select_related('product', 'cloud_plan').filter(user_id=user_id, item_type='product', product__is_active=True))
+    items = list(CartItem.objects.select_related('product').filter(user_id=user_id, item_type='product', product__is_active=True))
     orders = []
     for item in items:
         total = Decimal(str(item.product.price or 0)) * item.quantity
@@ -173,7 +184,8 @@ def create_cart_address_orders(user_id: int, currency: str = 'USDT'):
             quantity=item.quantity, currency=currency, total_amount=total, pay_amount=pay_amount,
             pay_method='address', status='pending', expired_at=expired_at,
         ))
-    CartItem.objects.filter(user_id=user_id).delete()
+    if items:
+        CartItem.objects.filter(user_id=user_id, item_type='product', id__in=[item.id for item in items]).delete()
     return orders
 
 
@@ -331,7 +343,7 @@ def create_address_order(user_id: int, product_id: int, quantity: int, total: De
 
 @sync_to_async
 def create_cart_balance_orders(user_id: int, currency: str = 'USDT'):
-    items = list(CartItem.objects.select_related('product').filter(user_id=user_id, product__is_active=True))
+    items = list(CartItem.objects.select_related('product').filter(user_id=user_id, item_type='product', product__is_active=True))
     created_orders = []
     with transaction.atomic():
         user = TelegramUser.objects.select_for_update().get(id=user_id)
@@ -372,7 +384,8 @@ def create_cart_balance_orders(user_id: int, currency: str = 'USDT'):
             )
             running_balance = next_balance
             created_orders.append(order)
-        CartItem.objects.filter(user_id=user_id).delete()
+        if items:
+            CartItem.objects.filter(user_id=user_id, item_type='product', id__in=[item.id for item in items]).delete()
     return created_orders, None
 
 

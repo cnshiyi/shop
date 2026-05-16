@@ -159,6 +159,7 @@ class TelegramGroupFilter(models.Model):
     enabled = models.BooleanField('允许转发', default=False, db_index=True)
     push_enabled = models.BooleanField('允许推送', default=False, db_index=True)
     collapsed = models.BooleanField('折叠', default=False, db_index=True)
+    archived = models.BooleanField('归档', default=False, db_index=True)
     created_at = models.DateTimeField('创建时间', auto_now_add=True)
     updated_at = models.DateTimeField('更新时间', auto_now=True)
 

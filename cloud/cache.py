@@ -35,12 +35,15 @@ async def init_monitor_cache(force_log: bool = False):
         )
     )
     pipe = r.pipeline()
+    grouped: dict[str, list[dict]] = {}
     for mon in monitors:
-        pipe.hset(MONITORS_KEY, mon['address'], json.dumps(_monitor_entry(mon), ensure_ascii=False))
+        grouped.setdefault(mon['address'], []).append(_monitor_entry(mon))
+    for address, entries in grouped.items():
+        pipe.hset(MONITORS_KEY, address, json.dumps(entries, ensure_ascii=False))
     await pipe.execute()
     now = time.time()
     if force_log or now - _last_init_log_at >= 600:
-        logger.info('监控缓存已同步: %d 个地址', len(monitors))
+        logger.info('监控缓存已同步: %d 个地址，%d 个监控', len(grouped), len(monitors))
         _last_init_log_at = now
 
 
@@ -59,6 +62,30 @@ def _monitor_entry(mon: dict) -> dict:
         'energy_threshold': int(mon.get('energy_threshold', 1) or 0),
         'bandwidth_threshold': int(mon.get('bandwidth_threshold', 1) or 0),
     }
+
+
+def _decode_monitor_entries(raw) -> list[dict]:
+    if not raw:
+        return []
+    if isinstance(raw, bytes):
+        raw = raw.decode()
+    try:
+        data = json.loads(raw)
+    except Exception:
+        logger.warning('监控缓存解析失败，已忽略异常缓存: raw=%r', raw)
+        return []
+    if isinstance(data, list):
+        return [item for item in data if isinstance(item, dict)]
+    if isinstance(data, dict):
+        return [data]
+    return []
+
+
+async def _write_monitor_entries(redis, address: str, entries: list[dict]):
+    if entries:
+        await redis.hset(MONITORS_KEY, address, json.dumps(entries, ensure_ascii=False))
+    else:
+        await redis.hdel(MONITORS_KEY, address)
 
 
 async def add_monitor_to_cache(monitor_id: int, user_id: int, address: str,
@@ -83,23 +110,33 @@ async def add_monitor_to_cache(monitor_id: int, user_id: int, address: str,
         'energy_threshold': int(energy_threshold or 0),
         'bandwidth_threshold': int(bandwidth_threshold or 0),
     }
-    await r.hset(MONITORS_KEY, address, json.dumps(entry, ensure_ascii=False))
+    entries = _decode_monitor_entries(await r.hget(MONITORS_KEY, address))
+    entries = [item for item in entries if int(item.get('id') or 0) != int(monitor_id)]
+    entries.append(entry)
+    await _write_monitor_entries(r, address, entries)
 
 
-async def remove_monitor_from_cache(address: str):
+async def remove_monitor_from_cache(address: str, monitor_id: int | None = None):
     r = await get_redis()
     if r is None:
         return
-    await r.hdel(MONITORS_KEY, address)
+    if monitor_id is None:
+        await r.hdel(MONITORS_KEY, address)
+        return
+    entries = [
+        item for item in _decode_monitor_entries(await r.hget(MONITORS_KEY, address))
+        if int(item.get('id') or 0) != int(monitor_id)
+    ]
+    await _write_monitor_entries(r, address, entries)
 
 
-async def update_monitor_threshold_in_cache(address: str, currency: str, amount):
+async def update_monitor_threshold_in_cache(address: str, currency: str, amount, monitor_id: int | None = None):
     r = await get_redis()
     if r is None:
         return
     raw = await r.hget(MONITORS_KEY, address)
-    if raw:
-        entry = json.loads(raw)
+    entries = _decode_monitor_entries(raw)
+    if entries:
         key_map = {
             'USDT': 'usdt_threshold',
             'TRX': 'trx_threshold',
@@ -107,20 +144,25 @@ async def update_monitor_threshold_in_cache(address: str, currency: str, amount)
             'BANDWIDTH': 'bandwidth_threshold',
         }
         key = key_map.get(str(currency or '').upper(), 'trx_threshold')
-        entry[key] = int(amount) if key in {'energy_threshold', 'bandwidth_threshold'} else str(amount)
-        await r.hset(MONITORS_KEY, address, json.dumps(entry, ensure_ascii=False))
+        for entry in entries:
+            if monitor_id is not None and int(entry.get('id') or 0) != int(monitor_id):
+                continue
+            entry[key] = int(amount) if key in {'energy_threshold', 'bandwidth_threshold'} else str(amount)
+        await _write_monitor_entries(r, address, entries)
 
 
-async def update_monitor_flag_in_cache(address: str, field: str, value: bool):
+async def update_monitor_flag_in_cache(address: str, field: str, value: bool, monitor_id: int | None = None):
     r = await get_redis()
     if r is None:
         return
     raw = await r.hget(MONITORS_KEY, address)
-    if raw:
-        entry = json.loads(raw)
-        if field in {'monitor_transfers', 'monitor_resources'}:
+    entries = _decode_monitor_entries(raw)
+    if entries and field in {'monitor_transfers', 'monitor_resources'}:
+        for entry in entries:
+            if monitor_id is not None and int(entry.get('id') or 0) != int(monitor_id):
+                continue
             entry[field] = value
-            await r.hset(MONITORS_KEY, address, json.dumps(entry, ensure_ascii=False))
+        await _write_monitor_entries(r, address, entries)
 
 
 async def get_monitor_addresses() -> dict[str, list[dict]]:
@@ -132,7 +174,11 @@ async def get_monitor_addresses() -> dict[str, list[dict]]:
             if all_data:
                 result: dict[str, list[dict]] = {}
                 for addr, raw in all_data.items():
-                    result.setdefault(addr, []).append(json.loads(raw))
+                    if isinstance(addr, bytes):
+                        addr = addr.decode()
+                    entries = _decode_monitor_entries(raw)
+                    if entries:
+                        result.setdefault(addr, []).extend(entries)
                 return result
         except Exception as exc:
             now = time.time()

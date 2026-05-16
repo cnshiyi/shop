@@ -1,4 +1,5 @@
 import json
+import re
 from datetime import datetime
 from decimal import Decimal
 
@@ -32,7 +33,7 @@ def record_external_sync_log(*, source: str, action: str, target: str = '', requ
         request_payload=_to_json(request_payload),
         response_payload=_to_json(response_payload),
         is_success=is_success,
-        error_message=error_message or '',
+        error_message=_sanitize_text(error_message or ''),
     )
 
 
@@ -92,8 +93,64 @@ def _to_json(value):
     if value in (None, ''):
         return ''
     if isinstance(value, str):
-        return value
+        return _sanitize_text(value)
     try:
-        return json.dumps(value, ensure_ascii=False, default=str)
+        return json.dumps(_sanitize_payload(value), ensure_ascii=False, default=str)
     except Exception:
-        return str(value)
+        return _sanitize_text(str(value))
+
+
+_SENSITIVE_KEY_PARTS = (
+    'access_key',
+    'accesskey',
+    'api_key',
+    'apikey',
+    'authorization',
+    'auth_token',
+    'login_password',
+    'mtproxy_secret',
+    'password',
+    'private_key',
+    'secret',
+    'secret_key',
+    'secretkey',
+    'session_string',
+    'token',
+)
+_SENSITIVE_ASSIGNMENT_RE = re.compile(
+    r'(?i)(access[_-]?key|api[_-]?key|authorization|login[_-]?password|mtproxy[_-]?secret|password|private[_-]?key|secret[_-]?key|secret|session[_-]?string|token)\s*[:=]\s*([^,;&\r\n]+)'
+)
+
+
+def _is_sensitive_key(key) -> bool:
+    normalized = str(key or '').lower().replace('-', '_')
+    return any(part in normalized for part in _SENSITIVE_KEY_PARTS)
+
+
+def _sanitize_payload(value):
+    if isinstance(value, dict):
+        return {
+            key: '***'
+            if _is_sensitive_key(key)
+            else _sanitize_payload(item)
+            for key, item in value.items()
+        }
+    if isinstance(value, (list, tuple, set)):
+        return [_sanitize_payload(item) for item in value]
+    if isinstance(value, str):
+        return _sanitize_text(value)
+    return value
+
+
+def _sanitize_text(value: str) -> str:
+    if not value:
+        return ''
+    text = str(value)
+    stripped = text.strip()
+    if stripped and stripped[0] in '[{':
+        try:
+            parsed = json.loads(stripped)
+            return json.dumps(_sanitize_payload(parsed), ensure_ascii=False, default=str)
+        except Exception:
+            pass
+    return _SENSITIVE_ASSIGNMENT_RE.sub(r'\1=***', text)

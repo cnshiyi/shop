@@ -1,4 +1,4 @@
-from django.core.management.base import BaseCommand
+from django.core.management.base import BaseCommand, CommandError
 from django.contrib.auth import get_user_model
 from django.conf import settings
 import os
@@ -10,7 +10,7 @@ class Command(BaseCommand):
     def handle(self, *args, **options):
         User = get_user_model()
         username = os.getenv('DASHBOARD_ADMIN_USERNAME', 'admin')
-        password = os.getenv('DASHBOARD_ADMIN_PASSWORD', 'Admin@123456')
+        password = os.getenv('DASHBOARD_ADMIN_PASSWORD')
         email = os.getenv('DASHBOARD_ADMIN_EMAIL', '')
 
         user = User.objects.filter(username=username).first()
@@ -38,5 +38,7 @@ class Command(BaseCommand):
                 self.stdout.write(self.style.SUCCESS(f'Dashboard admin already ready: {username}'))
             return
 
-        User.objects.create_superuser(username=username, email=email, password=password)
+        if not password and not settings.DEBUG:
+            raise CommandError('生产环境创建后台管理员必须设置 DASHBOARD_ADMIN_PASSWORD。')
+        User.objects.create_superuser(username=username, email=email, password=password or 'Admin@123456')
         self.stdout.write(self.style.SUCCESS(f'Created dashboard admin: {username}'))

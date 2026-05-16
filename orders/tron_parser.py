@@ -18,6 +18,17 @@ def hex_to_tron_address(hex_addr: str) -> str:
     return base58.b58encode(addr_bytes + checksum).decode()
 
 
+def is_valid_tron_address(address: str) -> bool:
+    try:
+        text = str(address or '').strip()
+        if not text.startswith('T'):
+            return False
+        decoded = base58.b58decode_check(text)
+        return len(decoded) == 21 and decoded[0] == 0x41
+    except Exception:
+        return False
+
+
 def parse_usdt_transfer(transaction: dict, usdt_contract: str) -> dict | None:
     try:
         tx_hash = transaction.get('txID')

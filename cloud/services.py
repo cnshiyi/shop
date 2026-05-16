@@ -14,7 +14,7 @@ from urllib.parse import urlparse
 
 from asgiref.sync import async_to_sync, sync_to_async
 from django.db import transaction
-from django.db.models import Q
+from django.db.models import Case, IntegerField, Q, Value, When
 from django.utils import timezone
 
 from bot.models import TelegramUser
@@ -24,7 +24,7 @@ from cloud.bootstrap import install_bbr, install_mtproxy
 from cloud.ip_guard import validate_server_connection_ip
 from cloud.ports import get_mtproxy_public_ports
 from core.cache import get_redis
-from core.cloud_accounts import choose_cloud_account_for_order, cloud_account_label, get_active_cloud_account, get_cloud_account_from_label
+from core.cloud_accounts import choose_cloud_account_for_order, cloud_account_label, cloud_account_label_variants, get_active_cloud_account, get_cloud_account_from_label
 from core.models import CloudAccountConfig
 from core.order_numbers import unique_timestamp_order_no
 from orders.ledger import record_balance_ledger
@@ -33,6 +33,70 @@ from orders.services import _generate_unique_pay_amount, usdt_to_trx
 
 logger = logging.getLogger(__name__)
 CUSTOM_CACHE_TTL = 600
+CLOUD_ORDER_MAX_QUANTITY = 99
+
+
+def scoped_server_match_for_asset(asset: CloudAsset | None, *, include_order: bool = True, include_ip: bool = False):
+    if not asset:
+        return Q(pk__in=[])
+    identity = Q()
+    if include_order and getattr(asset, 'order_id', None):
+        identity |= Q(order_id=asset.order_id)
+    for value, fields in [
+        (getattr(asset, 'instance_id', None), ['instance_id']),
+        (getattr(asset, 'provider_resource_id', None), ['provider_resource_id']),
+    ]:
+        value = str(value or '').strip()
+        if not value:
+            continue
+        for field in fields:
+            identity |= Q(**{field: value})
+    if include_ip:
+        for value in [getattr(asset, 'public_ip', None), getattr(asset, 'previous_public_ip', None)]:
+            value = str(value or '').strip()
+            if value:
+                identity |= Q(public_ip=value) | Q(previous_public_ip=value)
+    if not identity:
+        return Q(pk__in=[])
+
+    scope = Q()
+    provider = str(getattr(asset, 'provider', '') or '').strip()
+    if provider:
+        scope &= Q(provider=provider)
+    account = getattr(asset, 'cloud_account', None)
+    account_label = str(getattr(asset, 'account_label', '') or cloud_account_label(account) or '').strip()
+    account_labels = []
+    if account_label:
+        account_labels.append(account_label)
+    account_labels.extend(cloud_account_label_variants(account))
+    account_labels = list(dict.fromkeys(label for label in account_labels if label))
+    if account_labels:
+        scope &= Q(account_label__in=account_labels)
+    else:
+        scope &= (Q(account_label='') | Q(account_label__isnull=True))
+    region_code = str(getattr(asset, 'region_code', '') or '').strip()
+    if region_code:
+        scope &= Q(region_code=region_code)
+    return scope & identity
+
+
+def _normalize_cloud_order_quantity(quantity: int) -> int:
+    try:
+        normalized = int(quantity or 1)
+    except (TypeError, ValueError):
+        normalized = 1
+    if normalized < 1 or normalized > CLOUD_ORDER_MAX_QUANTITY:
+        raise ValueError(f'购买数量需在 1-{CLOUD_ORDER_MAX_QUANTITY} 之间')
+    return normalized
+
+
+def _refresh_dashboard_plan_snapshots_after_service_change(reason: str = '', *, lifecycle_limit: int = 1000):
+    try:
+        from cloud import api as cloud_api
+        cloud_api._refresh_dashboard_plan_snapshots(reason, lifecycle_limit=lifecycle_limit)
+        logger.info('CLOUD_SERVICE_DASHBOARD_SNAPSHOTS_REFRESHED reason=%s', reason)
+    except Exception:
+        logger.exception('CLOUD_SERVICE_DASHBOARD_SNAPSHOTS_REFRESH_FAILED reason=%s', reason)
 
 
 def _order_primary_asset(order: CloudServerOrder | None):
@@ -61,7 +125,18 @@ def _order_primary_asset(order: CloudServerOrder | None):
     if previous_public_ip:
         ip_match |= Q(public_ip=previous_public_ip) | Q(previous_public_ip=previous_public_ip)
     if ip_match:
-        item = queryset.filter(ip_match).order_by('-updated_at', '-id').first()
+        item = queryset.filter(ip_match).order_by(
+            Case(
+                When(public_ip=public_ip, then=Value(0)) if public_ip else When(pk__isnull=True, then=Value(9)),
+                When(public_ip=previous_public_ip, then=Value(1)) if previous_public_ip else When(pk__isnull=True, then=Value(9)),
+                When(previous_public_ip=public_ip, then=Value(2)) if public_ip else When(pk__isnull=True, then=Value(9)),
+                When(previous_public_ip=previous_public_ip, then=Value(3)) if previous_public_ip else When(pk__isnull=True, then=Value(9)),
+                default=Value(9),
+                output_field=IntegerField(),
+            ),
+            '-updated_at',
+            '-id',
+        ).first()
         if item:
             return item
     fallback_match = Q()
@@ -104,7 +179,18 @@ def _order_primary_server(order: CloudServerOrder | None):
     if previous_public_ip:
         ip_match |= Q(public_ip=previous_public_ip) | Q(previous_public_ip=previous_public_ip)
     if ip_match:
-        item = queryset.filter(ip_match).order_by('-updated_at', '-id').first()
+        item = queryset.filter(ip_match).order_by(
+            Case(
+                When(public_ip=public_ip, then=Value(0)) if public_ip else When(pk__isnull=True, then=Value(9)),
+                When(public_ip=previous_public_ip, then=Value(1)) if previous_public_ip else When(pk__isnull=True, then=Value(9)),
+                When(previous_public_ip=public_ip, then=Value(2)) if public_ip else When(pk__isnull=True, then=Value(9)),
+                When(previous_public_ip=previous_public_ip, then=Value(3)) if previous_public_ip else When(pk__isnull=True, then=Value(9)),
+                default=Value(9),
+                output_field=IntegerField(),
+            ),
+            '-updated_at',
+            '-id',
+        ).first()
         if item:
             return item
     fallback_match = Q()
@@ -146,13 +232,13 @@ def _active_cloud_account_asset_filter():
     for account in CloudAccountConfig.objects.filter(
         provider__in=[CloudAccountConfig.PROVIDER_AWS, CloudAccountConfig.PROVIDER_ALIYUN],
     ):
-        label = cloud_account_label(account)
-        if not label:
-            continue
+        labels = cloud_account_label_variants(account)
         if account.is_active:
-            active_labels.append(label)
+            active_labels.extend(labels)
         else:
-            inactive_labels.append(label)
+            inactive_labels.extend(labels)
+    active_labels = list(dict.fromkeys(active_labels))
+    inactive_labels = list(dict.fromkeys(inactive_labels))
     return (
         ~Q(cloud_account__is_active=False)
         & ~Q(account_label__in=inactive_labels)
@@ -170,9 +256,9 @@ def _renew_aliyun_instance(order: CloudServerOrder, days: int = 31):
         return True, ''
     if not str(order.instance_id or '').strip():
         return False, '阿里云实例ID缺失，无法执行真实续费'
-    account = getattr(order, 'cloud_account', None) or get_active_cloud_account('aliyun', order.region_code)
-    if not account:
-        return False, '未配置阿里云账号，无法执行真实续费'
+    account = getattr(order, 'cloud_account', None)
+    if not account or not getattr(account, 'is_active', False):
+        return False, '缺少订单绑定的启用阿里云账号，拒绝回退默认账号执行真实续费'
     try:
         from alibabacloud_swas_open20200601 import models as swas_models
         from cloud.aliyun_simple import _build_client, _region_endpoint, _runtime_options
@@ -197,14 +283,16 @@ def _renew_aliyun_instance(order: CloudServerOrder, days: int = 31):
 
 
 def _aws_lightsail_client_for_order(order: CloudServerOrder):
-    import boto3
-
-    account = getattr(order, 'cloud_account', None) or get_active_cloud_account('aws', order.region_code)
+    account = getattr(order, 'cloud_account', None) or get_cloud_account_from_label(getattr(order, 'account_label', ''), 'aws')
+    if not account:
+        raise ValueError('缺少绑定的 AWS 云账号，拒绝回退默认账号执行实例启动检查。')
+    if not getattr(account, 'is_active', False):
+        raise ValueError(f'AWS 云账号#{getattr(account, "id", "-")}已停用，拒绝执行实例启动检查。')
     access_key = (getattr(account, 'access_key_plain', '') or '').strip() if account else ''
     secret_key = (getattr(account, 'secret_key_plain', '') or '').strip() if account else ''
-    if not access_key or not secret_key:
-        access_key = os.getenv('AWS_ACCESS_KEY_ID', '')
-        secret_key = os.getenv('AWS_SECRET_ACCESS_KEY', '')
+    if not access_key or not secret_key or len(access_key) < 16 or len(secret_key) < 36:
+        raise ValueError(f'AWS 云账号#{getattr(account, "id", "-")}凭据缺失或疑似截断，拒绝执行实例启动检查。')
+    import boto3
     return boto3.client(
         'lightsail',
         region_name=order.region_code or getattr(account, 'region_hint', None) or 'ap-southeast-1',
@@ -254,16 +342,43 @@ def _aws_lightsail_instance_state(client, server_name: str) -> tuple[str, str]:
     return state, public_ip
 
 
-def _start_aws_instance_after_shutdown(client, order: CloudServerOrder, state: str, public_ip: str, *, log_tag: str) -> tuple[bool, str, str, str]:
+def _aws_instance_name_by_ip(client, public_ip: str) -> str:
+    public_ip = str(public_ip or '').strip()
+    if not public_ip:
+        return ''
+    token = None
+    while True:
+        kwargs = {'pageToken': token} if token else {}
+        response = client.get_instances(**kwargs)
+        for item in response.get('instances') or []:
+            if str(item.get('publicIpAddress') or '').strip() == public_ip:
+                return str(item.get('name') or '').strip()
+        token = response.get('nextPageToken')
+        if not token:
+            return ''
+
+
+def _aws_instance_name_for_order_runtime(client, order: CloudServerOrder) -> str:
+    for public_ip in [getattr(order, 'public_ip', None), getattr(order, 'previous_public_ip', None)]:
+        resolved = _aws_instance_name_by_ip(client, public_ip)
+        if resolved:
+            return resolved
+    return str(getattr(order, 'server_name', '') or '').strip()
+
+
+def _start_aws_instance_after_shutdown(client, order: CloudServerOrder, state: str, public_ip: str, *, log_tag: str, instance_name: str = '') -> tuple[bool, str, str, str]:
     current_state = (state or '').lower()
     current_ip = public_ip or order.public_ip or order.previous_public_ip or '-'
+    target_name = instance_name or _aws_instance_name_for_order_runtime(client, order)
+    if not target_name:
+        return False, f'云端正在关机，但按 IP 未找到实例且缺少实例名，无法开机。IP={current_ip}。', current_state, current_ip
     for attempt in range(1, AWS_START_WAIT_ATTEMPTS + 1):
         time.sleep(AWS_START_WAIT_SECONDS)
-        current_state, queried_ip = _aws_lightsail_instance_state(client, order.server_name)
+        current_state, queried_ip = _aws_lightsail_instance_state(client, target_name)
         current_ip = queried_ip if queried_ip != '-' else current_ip
         if current_state == 'stopped':
-            client.start_instance(instanceName=order.server_name)
-            logger.info('%s order=%s server_name=%s previous_state=%s wait_attempt=%s ip=%s', log_tag, order.order_no, order.server_name, current_state, attempt, current_ip)
+            client.start_instance(instanceName=target_name)
+            logger.info('%s order=%s server_name=%s previous_state=%s wait_attempt=%s ip=%s', log_tag, order.order_no, target_name, current_state, attempt, current_ip)
             return True, f'云端正在关机，等待第 {attempt}/{AWS_START_WAIT_ATTEMPTS} 次后变为 stopped，已立即发起开机。IP={current_ip}。', 'starting', current_ip
         if current_state == 'running':
             return True, f'云端正在关机，等待第 {attempt}/{AWS_START_WAIT_ATTEMPTS} 次后已恢复 running。IP={current_ip}。', current_state, current_ip
@@ -275,11 +390,14 @@ def _start_aws_instance_after_shutdown(client, order: CloudServerOrder, state: s
 
 
 def _ensure_aws_instance_running(order: CloudServerOrder) -> tuple[bool, str]:
-    if order.provider != 'aws_lightsail' or not order.server_name:
+    if order.provider != 'aws_lightsail':
         return True, ''
     try:
         client = _aws_lightsail_client_for_order(order)
-        instance = client.get_instance(instanceName=order.server_name).get('instance') or {}
+        instance_name = _aws_instance_name_for_order_runtime(client, order)
+        if not instance_name:
+            return False, 'AWS 实例启动检查失败：按 IP 未找到实例，且缺少实例名。'
+        instance = client.get_instance(instanceName=instance_name).get('instance') or {}
         state = ((instance.get('state') or {}).get('name') or '').lower()
         public_ip = instance.get('publicIpAddress') or order.public_ip or order.previous_public_ip or '-'
         if state == 'running':
@@ -287,17 +405,17 @@ def _ensure_aws_instance_running(order: CloudServerOrder) -> tuple[bool, str]:
             _sync_order_cloud_runtime_state(order, state, public_ip, note)
             return True, note
         if state == 'stopped':
-            client.start_instance(instanceName=order.server_name)
+            client.start_instance(instanceName=instance_name)
             note = f'AWS 实例续费后检查：检测到关机状态 stopped，已发起开机；IP={public_ip}。'
             _sync_order_cloud_runtime_state(order, 'starting', public_ip, note)
-            logger.info('CLOUD_RENEW_START_INSTANCE order=%s server_name=%s previous_state=%s ip=%s', order.order_no, order.server_name, state, public_ip)
+            logger.info('CLOUD_RENEW_START_INSTANCE order=%s server_name=%s previous_state=%s ip=%s', order.order_no, instance_name, state, public_ip)
             return True, note
         if state in {'pending', 'starting'}:
             note = f'AWS 实例续费后检查：实例正在启动中，暂不重复开机；云端状态={state}；IP={public_ip}。'
             _sync_order_cloud_runtime_state(order, state, public_ip, note)
             return False, note
         if state in {'stopping', 'shutting-down'}:
-            ok, wait_note, sync_state, public_ip = _start_aws_instance_after_shutdown(client, order, state, public_ip, log_tag='CLOUD_RENEW_WAIT_SHUTDOWN_START_INSTANCE')
+            ok, wait_note, sync_state, public_ip = _start_aws_instance_after_shutdown(client, order, state, public_ip, log_tag='CLOUD_RENEW_WAIT_SHUTDOWN_START_INSTANCE', instance_name=instance_name)
             note = f'AWS 实例续费后检查：初始状态 {state}；{wait_note}'
             _sync_order_cloud_runtime_state(order, sync_state, public_ip, note)
             return ok, note
@@ -956,12 +1074,15 @@ def _apply_cloud_discount(plan_price: Decimal, discount_rate) -> Decimal:
 
 @sync_to_async
 def create_cloud_server_order(user_id: int, plan_id: int, currency: str = 'USDT', quantity: int = 1):
+    requested_currency = str(currency or 'USDT').upper()
+    if requested_currency != 'USDT':
+        logger.warning('云服务器地址支付仅支持 USDT，已忽略请求币种: user=%s plan=%s requested_currency=%s', user_id, plan_id, requested_currency)
+    currency = 'USDT'
     plan = CloudServerPlan.objects.get(id=plan_id, is_active=True)
     user = TelegramUser.objects.get(id=user_id)
-    quantity = max(1, int(quantity or 1))
+    quantity = _normalize_cloud_order_quantity(quantity)
     discounted_total_usdt = (_apply_cloud_discount(Decimal(plan.price), user.cloud_discount_rate) * quantity).quantize(Decimal('0.01'))
-    payable_base = async_to_sync(usdt_to_trx)(discounted_total_usdt) if currency == 'TRX' else discounted_total_usdt
-    pay_amount = _generate_unique_pay_amount(payable_base, currency)
+    pay_amount = _generate_unique_pay_amount(discounted_total_usdt, currency)
     expired_at = timezone.now() + timezone.timedelta(minutes=5)
     account = choose_cloud_account_for_order(plan.provider, plan.region_code)
     order = CloudServerOrder.objects.create(
@@ -992,7 +1113,7 @@ def create_cloud_server_order(user_id: int, plan_id: int, currency: str = 'USDT'
 @sync_to_async
 def buy_cloud_server_with_balance(user_id: int, plan_id: int, currency: str = 'USDT', quantity: int = 1):
     plan = CloudServerPlan.objects.get(id=plan_id, is_active=True)
-    quantity = max(1, int(quantity or 1))
+    quantity = _normalize_cloud_order_quantity(quantity)
     with transaction.atomic():
         user = TelegramUser.objects.select_for_update().get(id=user_id)
         discounted_total_usdt = (_apply_cloud_discount(Decimal(plan.price), user.cloud_discount_rate) * quantity).quantize(Decimal('0.01'))
@@ -1046,7 +1167,7 @@ def pay_cloud_server_order_with_balance(order_id: int, user_id: int, currency: s
         order = CloudServerOrder.objects.select_for_update().select_related('plan').filter(id=order_id, user_id=user_id).first()
         if not order or order.status != 'pending':
             return None, '订单不存在或状态不可支付'
-        payable_usdt = Decimal(str(order.pay_amount or order.total_amount or 0))
+        payable_usdt = Decimal(str(order.total_amount or order.pay_amount or 0))
         total = async_to_sync(usdt_to_trx)(payable_usdt) if currency == 'TRX' else payable_usdt
         user = TelegramUser.objects.select_for_update().get(id=user_id)
         balance_field = 'balance_trx' if currency == 'TRX' else 'balance'
@@ -1745,9 +1866,6 @@ def _resolve_unattached_aws_static_ip_name_for_asset(asset: CloudAsset | None) -
         sk = (account.secret_key_plain or '').strip()
         if ak and sk and len(ak) >= 16 and len(sk) >= 36:
             access_key, secret_key = ak, sk
-    if not access_key or not secret_key:
-        access_key = os.getenv('AWS_ACCESS_KEY_ID', '')
-        secret_key = os.getenv('AWS_SECRET_ACCESS_KEY', '')
     if not access_key or not secret_key:
         return ''
     try:
@@ -2602,15 +2720,11 @@ def replace_cloud_asset_order_by_admin(
             f'来源资产 #{asset.id}；来源订单 #{base_order.id}。',
         ])),
     )
+    server_match = scoped_server_match_for_asset(asset, include_order=True)
     asset.order = new_order
     asset.user = target_user
     asset.actual_expires_at = target_expires_at
     asset.save(update_fields=['order', 'user', 'actual_expires_at', 'updated_at'])
-    server_match = Q(order_id=base_order.id)
-    if asset.instance_id:
-        server_match |= Q(instance_id=asset.instance_id)
-    if asset.provider_resource_id:
-        server_match |= Q(provider_resource_id=asset.provider_resource_id)
     Server.objects.filter(server_match).update(
         order=new_order,
         user=target_user,
@@ -2634,12 +2748,11 @@ def ensure_manual_owner_operation_order(asset: CloudAsset, new_user: TelegramUse
     old_user = previous_user if previous_user is not None else asset.user
     if not new_user:
         old_label = getattr(old_user, 'tg_user_id', None) or getattr(old_user, 'username', None) or '-'
+        server_match = scoped_server_match_for_asset(asset, include_order=True)
         asset.user = None
         asset.order = None
         asset.save(update_fields=['user', 'order', 'updated_at'])
-        server_count = Server.objects.filter(
-            Q(instance_id=asset.instance_id) | Q(provider_resource_id=asset.provider_resource_id)
-        ).update(user=None, updated_at=timezone.now())
+        server_count = Server.objects.filter(server_match).update(user=None, updated_at=timezone.now())
         logger.info('CLOUD_MANUAL_OWNER_UNBIND asset_id=%s public_ip=%s old_user=%s server_count=%s actor=%s', asset.id, asset.public_ip, old_label, server_count, actor)
         record_cloud_ip_log(event_type='changed', asset=asset, public_ip=asset.public_ip, previous_public_ip=asset.previous_public_ip, note=f'{actor}: 人工清空所属人；原所属人 {old_label}；同步 Server {server_count} 条。')
         return None, None
@@ -2657,14 +2770,8 @@ def ensure_manual_owner_operation_order(asset: CloudAsset, new_user: TelegramUse
         return None, None
     order.provision_note = '\n'.join(filter(None, [order.provision_note, f'{actor}: 人工编辑所属人 {old_label} -> {new_label}，生成独立操作订单用于审计，不改写资产原订单绑定。']))
     order.save(update_fields=['provision_note', 'updated_at'])
-    server_match = Q()
-    if asset.order_id:
-        server_match |= Q(order_id=asset.order_id)
-    if asset.instance_id:
-        server_match |= Q(instance_id=asset.instance_id)
-    if asset.provider_resource_id:
-        server_match |= Q(provider_resource_id=asset.provider_resource_id)
-    server_count = Server.objects.filter(server_match).update(user=new_user, updated_at=timezone.now()) if server_match else 0
+    server_match = scoped_server_match_for_asset(asset, include_order=True)
+    server_count = Server.objects.filter(server_match).update(user=new_user, updated_at=timezone.now())
     logger.info('CLOUD_MANUAL_OWNER_ORDER order_id=%s order_no=%s asset_id=%s public_ip=%s old_user=%s new_user=%s server_count=%s actor=%s', order.id, order.order_no, asset.id, asset.public_ip, old_label, new_label, server_count, actor)
     record_cloud_ip_log(event_type='changed', order=order, asset=asset, public_ip=asset.public_ip, previous_public_ip=asset.previous_public_ip, note=f'{actor}: 人工编辑所属人 {old_label} -> {new_label}；操作订单 {order.order_no}；同步 Server {server_count} 条。')
     return order, None
@@ -2709,14 +2816,8 @@ def ensure_manual_expiry_operation_order(asset: CloudAsset, new_expires_at, acto
     order.save(update_fields=['provision_note', 'updated_at'])
     asset.actual_expires_at = new_expires_at
     asset.save(update_fields=['actual_expires_at', 'updated_at'])
-    server_match = Q()
-    if asset.order_id:
-        server_match |= Q(order_id=asset.order_id)
-    if asset.instance_id:
-        server_match |= Q(instance_id=asset.instance_id)
-    if asset.provider_resource_id:
-        server_match |= Q(provider_resource_id=asset.provider_resource_id)
-    server_count = Server.objects.filter(server_match).update(expires_at=new_expires_at, updated_at=timezone.now()) if server_match else 0
+    server_match = scoped_server_match_for_asset(asset, include_order=True)
+    server_count = Server.objects.filter(server_match).update(expires_at=new_expires_at, updated_at=timezone.now())
     logger.info(
         'CLOUD_MANUAL_EXPIRY_ORDER order_id=%s order_no=%s asset_id=%s public_ip=%s old_expires_at=%s new_expires_at=%s server_count=%s actor=%s',
         order.id,
@@ -2914,7 +3015,6 @@ def _create_retained_ip_recovery_order(order: CloudServerOrder, days: int = 31):
         proxy_links=order.proxy_links or [],
         static_ip_name=order.static_ip_name,
         replacement_for=order,
-        renew_extension_days=order.renew_extension_days,
         last_user_id=order.last_user_id,
         previous_public_ip=old_public_ip,
         service_started_at=now,
@@ -2937,16 +3037,19 @@ def _prepare_cloud_server_renewal(order: CloudServerOrder, renewal_user: Telegra
     if not _can_order_be_renewed(order):
         return False
     retained_ip = bool(order.status == 'deleted' and order.ip_recycle_at and order.ip_recycle_at > timezone.now())
+    renewal_price = _renewal_price(order, renewal_user)
     order.status = 'renew_pending'
     order.lifecycle_days = days
+    order.currency = 'USDT'
+    order.total_amount = renewal_price
     order.pay_method = 'address'
-    order.pay_amount = _generate_unique_pay_amount(_renewal_price(order, renewal_user), order.currency)
+    order.pay_amount = _generate_unique_pay_amount(renewal_price, order.currency)
     order.tx_hash = None
     order.payer_address = ''
     order.receive_address = ''
     order.paid_at = None
     order.expired_at = timezone.now() + timezone.timedelta(minutes=30)
-    save_fields = ['status', 'lifecycle_days', 'pay_method', 'pay_amount', 'tx_hash', 'payer_address', 'receive_address', 'paid_at', 'expired_at', 'updated_at']
+    save_fields = ['status', 'lifecycle_days', 'currency', 'total_amount', 'pay_method', 'pay_amount', 'tx_hash', 'payer_address', 'receive_address', 'paid_at', 'expired_at', 'updated_at']
     if retained_ip:
         order.provision_note = '\n'.join(filter(None, [
             order.provision_note,
@@ -3091,6 +3194,7 @@ def prepare_cloud_asset_renewal_with_link(asset_id: int, user_id: int, plan_id: 
         discounted_total = _apply_cloud_discount(Decimal(target_plan.price), renewal_user.cloud_discount_rate)
         now = timezone.now()
         unattached_static_ip_name = asset.asset_name if _is_unattached_static_ip_asset(asset) else _resolve_unattached_aws_static_ip_name_for_asset(asset)
+        payment_currency = 'USDT'
         order = CloudServerOrder.objects.create(
             user=renewal_user,
             order_no=_generate_cloud_order_no('SRVASSET', f'RENEW{asset.id}'),
@@ -3102,9 +3206,9 @@ def prepare_cloud_asset_renewal_with_link(asset_id: int, user_id: int, plan_id: 
             region_name=target_plan.region_name,
             plan_name=target_plan.plan_name,
             quantity=1,
-            currency=target_plan.currency or asset.currency or 'USDT',
+            currency=payment_currency,
             total_amount=discounted_total,
-            pay_amount=_generate_unique_pay_amount(discounted_total, target_plan.currency or asset.currency or 'USDT'),
+            pay_amount=_generate_unique_pay_amount(discounted_total, payment_currency),
             pay_method='address',
             status='pending',
             lifecycle_days=days,
@@ -3179,16 +3283,17 @@ def prepare_retained_ip_renewal_with_link(order_id: int, user_id: int, plan_id: 
             return None, '目标套餐不存在或不属于当前固定 IP 地区'
         renewal_user = order.user if admin and order.user_id else TelegramUser.objects.select_for_update().get(id=user_id)
         discounted_total = _apply_cloud_discount(Decimal(target_plan.price), renewal_user.cloud_discount_rate)
+        payment_currency = 'USDT'
         old_ip = order.public_ip or order.previous_public_ip or ''
         order.plan = target_plan
         order.provider = target_plan.provider
         order.region_code = target_plan.region_code
         order.region_name = target_plan.region_name
         order.plan_name = target_plan.plan_name
-        order.currency = target_plan.currency or order.currency
+        order.currency = payment_currency
         order.total_amount = discounted_total
         order.pay_method = 'address'
-        order.pay_amount = _generate_unique_pay_amount(discounted_total, order.currency)
+        order.pay_amount = _generate_unique_pay_amount(discounted_total, payment_currency)
         order.status = 'renew_pending'
         order.lifecycle_days = days
         order.tx_hash = None
@@ -3272,11 +3377,12 @@ def start_cloud_server_from_admin(order_id: int):
     order = _hydrate_order_from_proxy_asset(order)
     if order.provider != 'aws_lightsail':
         return order, '当前云平台暂不支持机器人开机'
-    if not order.server_name:
-        return order, '缺少实例名称，无法查询云端状态'
     try:
         client = _aws_lightsail_client_for_order(order)
-        instance = client.get_instance(instanceName=order.server_name).get('instance') or {}
+        instance_name = _aws_instance_name_for_order_runtime(client, order)
+        if not instance_name:
+            return order, '按 IP 未找到实例，且缺少实例名称，无法查询云端状态'
+        instance = client.get_instance(instanceName=instance_name).get('instance') or {}
         state = ((instance.get('state') or {}).get('name') or '').lower()
         public_ip = instance.get('publicIpAddress') or order.public_ip or order.previous_public_ip or '-'
         notes = [f'云端初始状态: {state or "未知"}；IP={public_ip}。']
@@ -3285,14 +3391,14 @@ def start_cloud_server_from_admin(order_id: int):
         if state == 'running':
             notes.append('服务器已在运行，无需云端开机。')
         elif state == 'stopped':
-            client.start_instance(instanceName=order.server_name)
+            client.start_instance(instanceName=instance_name)
             sync_state = 'starting'
             notes.append('检测到关机状态，已发起开机。')
-            logger.info('CLOUD_ADMIN_START_INSTANCE order=%s server_name=%s previous_state=%s ip=%s', order.order_no, order.server_name, state, public_ip)
+            logger.info('CLOUD_ADMIN_START_INSTANCE order=%s server_name=%s previous_state=%s ip=%s', order.order_no, instance_name, state, public_ip)
         elif state in {'pending', 'starting'}:
             notes.append('实例正在启动中，不重复提交开机。')
         elif state in {'stopping', 'shutting-down'}:
-            ok, wait_note, sync_state, public_ip = _start_aws_instance_after_shutdown(client, order, state, public_ip, log_tag='CLOUD_ADMIN_WAIT_SHUTDOWN_START_INSTANCE')
+            ok, wait_note, sync_state, public_ip = _start_aws_instance_after_shutdown(client, order, state, public_ip, log_tag='CLOUD_ADMIN_WAIT_SHUTDOWN_START_INSTANCE', instance_name=instance_name)
             notes.append(wait_note)
         else:
             ok = False
@@ -3301,7 +3407,7 @@ def start_cloud_server_from_admin(order_id: int):
             running = False
             for attempt in range(1, AWS_START_WAIT_ATTEMPTS + 1):
                 time.sleep(AWS_START_WAIT_SECONDS)
-                sync_state, queried_ip = _aws_lightsail_instance_state(client, order.server_name)
+                sync_state, queried_ip = _aws_lightsail_instance_state(client, instance_name)
                 public_ip = queried_ip if queried_ip != '-' else public_ip
                 if sync_state == 'running':
                     running = True
@@ -3351,7 +3457,6 @@ def apply_cloud_server_renewal(order_id: int, days: int = 31, run_post_checks: b
         order.auto_renew_notice_sent_at = None
     if hasattr(order, 'auto_renew_failure_notice_sent_at'):
         order.auto_renew_failure_notice_sent_at = None
-    order.delay_quota = max(int(order.delay_quota or 0), 0) + 1
     order.ip_change_quota = max(int(getattr(order, 'ip_change_quota', 0) or 0), 0) + 1
     retained_ip = bool(order.status in {'deleted', 'renew_pending'} and order.ip_recycle_at and (order.public_ip or order.previous_public_ip) and not order.instance_id)
     order.status = 'completed'
@@ -3375,7 +3480,7 @@ def apply_cloud_server_renewal(order_id: int, days: int = 31, run_post_checks: b
         order.provision_note,
         '\n'.join(filter(None, [renew_note or f'续费成功，{base_note} {days} 天。', retention_note, *post_notes])),
     )
-    order.save(update_fields=['service_started_at', 'service_expires_at', 'renew_grace_expires_at', 'suspend_at', 'delete_at', 'ip_recycle_at', 'last_renewed_at', 'auto_renew_notice_sent_at', 'auto_renew_failure_notice_sent_at', 'delay_quota', 'ip_change_quota', 'status', 'provision_note', 'updated_at'])
+    order.save(update_fields=['service_started_at', 'service_expires_at', 'renew_grace_expires_at', 'suspend_at', 'delete_at', 'ip_recycle_at', 'last_renewed_at', 'auto_renew_notice_sent_at', 'auto_renew_failure_notice_sent_at', 'ip_change_quota', 'status', 'provision_note', 'updated_at'])
     if retained_ip:
         recovery_order, recovery_err = _create_retained_ip_recovery_order(order, days)
         if recovery_err:
@@ -3395,6 +3500,7 @@ def apply_cloud_server_renewal(order_id: int, days: int = 31, run_post_checks: b
         previous_public_ip=order.previous_public_ip,
         note=f'服务器续费 {days} 天，新的服务到期时间：{order.service_expires_at:%Y-%m-%d %H:%M}；{renew_note}',
     )
+    transaction.on_commit(lambda: _refresh_dashboard_plan_snapshots_after_service_change(f'cloud_server_renewal:{order.id}'))
     return recovery_order or order
 
 
@@ -3513,11 +3619,29 @@ def run_cloud_server_renewal_postcheck(order_id: int):
 
 @sync_to_async
 def rebind_cloud_server_user(order_id: int, new_user_id: int):
-    order = CloudServerOrder.objects.select_related('user').get(id=order_id)
-    order.user_id = new_user_id
-    order.last_user_id = order.user.tg_user_id if hasattr(order.user, 'tg_user_id') else order.last_user_id
-    order.save(update_fields=['user', 'last_user_id', 'updated_at'])
-    return order
+    with transaction.atomic():
+        order = CloudServerOrder.objects.select_for_update().select_related('user').get(id=order_id)
+        old_user_id = order.user_id
+        new_user = TelegramUser.objects.get(id=new_user_id)
+        order.user = new_user
+        order.last_user_id = getattr(new_user, 'tg_user_id', None) or new_user.id
+        order.save(update_fields=['user', 'last_user_id', 'updated_at'])
+        asset, server = _update_order_primary_records(
+            order,
+            asset_updates={'user': new_user},
+            server_updates={'user': new_user},
+            now=timezone.now(),
+        )
+        record_cloud_ip_log(
+            event_type='changed',
+            order=order,
+            asset=asset,
+            server=server,
+            public_ip=order.public_ip,
+            previous_public_ip=order.previous_public_ip,
+            note=f'服务器所属用户已更新：{old_user_id or "-"} -> {new_user.id}',
+        )
+        return order
 
 
 @sync_to_async
@@ -3600,7 +3724,6 @@ def mark_cloud_server_ip_change_requested(order_id: int, user_id: int, region_co
             service_expires_at=original_service_expires_at,
             migration_due_at=migration_due_at,
             replacement_for=order,
-            renew_extension_days=order.renew_extension_days,
             ip_change_quota=remaining_ip_changes,
             last_user_id=order.last_user_id,
             previous_public_ip=old_public_ip,
@@ -3623,7 +3746,7 @@ def _resolve_aws_static_ip_name_for_order(order: CloudServerOrder) -> str:
     public_ip = str(order.public_ip or order.previous_public_ip or '').strip()
     if order.provider != 'aws_lightsail' or not public_ip:
         return ''
-    account = getattr(order, 'cloud_account', None) or get_active_cloud_account('aws', order.region_code)
+    account = getattr(order, 'cloud_account', None) or get_cloud_account_from_label(getattr(order, 'account_label', ''), 'aws')
     access_key = ''
     secret_key = ''
     if account:
@@ -3632,10 +3755,7 @@ def _resolve_aws_static_ip_name_for_order(order: CloudServerOrder) -> str:
         if ak and sk and len(ak) >= 16 and len(sk) >= 36:
             access_key, secret_key = ak, sk
     if not access_key or not secret_key:
-        access_key = os.getenv('AWS_ACCESS_KEY_ID', '')
-        secret_key = os.getenv('AWS_SECRET_ACCESS_KEY', '')
-    if not access_key or not secret_key:
-        logger.warning('AWS 固定 IP 名称反查失败: order=%s ip=%s reason=missing_credentials', order.order_no, public_ip)
+        logger.warning('AWS 固定 IP 名称反查失败: order=%s ip=%s reason=missing_bound_account_credentials', order.order_no, public_ip)
         return ''
     try:
         import boto3
@@ -3725,7 +3845,6 @@ def create_cloud_server_rebuild_order(order_id: int):
         proxy_links=order.proxy_links or [],
         static_ip_name=order.static_ip_name,
         replacement_for=order,
-        renew_extension_days=order.renew_extension_days,
         last_user_id=order.last_user_id,
         previous_public_ip=old_public_ip,
         service_started_at=order.service_started_at,
@@ -3802,11 +3921,10 @@ def _cloud_config_effective_current_price(current_price: Decimal, plans: list[Cl
     return current_price
 
 
-def _cloud_order_lifecycle_fields(expires_at, renew_extension_days: int = 0) -> dict:
+def _cloud_order_lifecycle_fields(expires_at) -> dict:
     if not expires_at:
         return {}
-    extension_days = max(int(renew_extension_days or 0), 0)
-    suspend_days = _runtime_int_config('cloud_suspend_after_days', 3) + extension_days
+    suspend_days = _runtime_int_config('cloud_suspend_after_days', 3)
     delete_days = _runtime_int_config('cloud_delete_after_days', 0)
     suspend_at = _with_runtime_time(expires_at + timezone.timedelta(days=suspend_days), 'cloud_suspend_time')
     delete_at = _with_runtime_time(suspend_at + timezone.timedelta(days=delete_days), 'cloud_delete_time')
@@ -3902,7 +4020,7 @@ def create_cloud_server_upgrade_order(order_id: int, user_id: int, target_plan_i
     old_port = order.mtproxy_port or 9528
     old_secret = order.mtproxy_secret or ''
     new_order_no = _trim_operation_order_no(order, operation_code, suffix)
-    lifecycle_fields = _cloud_order_lifecycle_fields(target_expiry, getattr(order, 'renew_extension_days', 0))
+    lifecycle_fields = _cloud_order_lifecycle_fields(target_expiry)
     old_trace_note = (
         f'{action_label}追溯：来源订单 {order.order_no}；旧IP={old_public_ip or "-"}；旧端口={old_port or "-"}；'
         f'旧secret={old_secret or "-"}；固定IP={order.static_ip_name or "-"}；'
@@ -3988,41 +4106,43 @@ def create_cloud_server_upgrade_order(order_id: int, user_id: int, target_plan_i
 
 @sync_to_async
 def refund_cloud_server_to_balance(order_id: int, user_id: int):
-    order = _hydrate_order_from_proxy_asset(CloudServerOrder.objects.select_related('plan', 'user').filter(id=order_id, user_id=user_id).first())
-    if not order:
-        logger.warning('云服务器退款拒绝: order_id=%s user_id=%s reason=not_found', order_id, user_id)
-        return None, '服务器记录不存在'
-    logger.info('云服务器退款检查: order=%s user_id=%s status=%s public_ip=%s expires_at=%s pay_amount=%s total_amount=%s currency=%s', order.order_no, user_id, order.status, order.public_ip, order.service_expires_at, order.pay_amount, order.total_amount, order.currency)
-    if order.status not in {'paid', 'provisioning', 'failed', 'completed', 'expiring', 'suspended'}:
-        logger.warning('云服务器退款拒绝: order=%s user_id=%s status=%s reason=status_not_allowed', order.order_no, user_id, order.status)
-        return None, '当前状态不允许退款'
-    if BalanceLedger.objects.filter(type='manual_adjust', direction='in', related_type='cloud_order', related_id=order.id, description__startswith='云服务器剩余价值退款 #').exists():
-        logger.warning('云服务器退款拒绝: order=%s user_id=%s reason=already_refunded', order.order_no, user_id)
-        return None, '该订单已退款，不能重复退款'
-    now = timezone.now()
-    min_refund_expires_at = now + timezone.timedelta(days=10)
-    if order.service_expires_at and order.service_expires_at < min_refund_expires_at:
-        logger.warning('云服务器退款拒绝: order=%s user_id=%s expires_at=%s reason=less_than_10_days', order.order_no, user_id, order.service_expires_at)
-        return None, '到期时间少于 10 天，禁止退款'
-    currency = order.currency or 'USDT'
-    is_delivered = order.status in {'completed', 'expiring', 'suspended'}
-    monthly = _renewal_price(order, order.user) if is_delivered else Decimal(str(order.pay_amount or order.total_amount or 0))
-    if is_delivered:
-        if not str(order.public_ip or '').strip():
-            logger.warning('云服务器退款拒绝: order=%s user_id=%s reason=missing_public_ip', order.order_no, user_id)
-            return None, '当前服务器缺少有效 IP，不允许退款'
-        if not order.service_expires_at or order.service_expires_at <= now:
-            logger.warning('云服务器退款拒绝: order=%s user_id=%s expires_at=%s reason=no_remaining_time', order.order_no, user_id, order.service_expires_at)
-            return None, '当前服务器没有剩余有效期可退款'
-        seconds_left = Decimal(str((order.service_expires_at - now).total_seconds()))
-        refund = (monthly * seconds_left / Decimal(str(31 * 86400))).quantize(Decimal('0.001'))
-    else:
-        refund = monthly.quantize(Decimal('0.001'))
-    if refund <= 0:
-        logger.warning('云服务器退款拒绝: order=%s user_id=%s refund=%s reason=zero_amount', order.order_no, user_id, refund)
-        return None, '退款金额为 0'
-    logger.info('云服务器退款准备入账: order=%s user_id=%s refund=%s currency=%s delivered=%s', order.order_no, user_id, refund, currency, is_delivered)
+    refund_result = None
     with transaction.atomic():
+        order = CloudServerOrder.objects.select_related('plan', 'user').select_for_update().filter(id=order_id, user_id=user_id).first()
+        order = _hydrate_order_from_proxy_asset(order)
+        if not order:
+            logger.warning('云服务器退款拒绝: order_id=%s user_id=%s reason=not_found', order_id, user_id)
+            return None, '服务器记录不存在'
+        logger.info('云服务器退款检查: order=%s user_id=%s status=%s public_ip=%s expires_at=%s pay_amount=%s total_amount=%s currency=%s', order.order_no, user_id, order.status, order.public_ip, order.service_expires_at, order.pay_amount, order.total_amount, order.currency)
+        if order.status not in {'paid', 'provisioning', 'failed', 'completed', 'expiring', 'suspended'}:
+            logger.warning('云服务器退款拒绝: order=%s user_id=%s status=%s reason=status_not_allowed', order.order_no, user_id, order.status)
+            return None, '当前状态不允许退款'
+        if BalanceLedger.objects.filter(type='manual_adjust', direction='in', related_type='cloud_order', related_id=order.id, description__startswith='云服务器剩余价值退款 #').exists():
+            logger.warning('云服务器退款拒绝: order=%s user_id=%s reason=already_refunded', order.order_no, user_id)
+            return None, '该订单已退款，不能重复退款'
+        now = timezone.now()
+        min_refund_expires_at = now + timezone.timedelta(days=10)
+        if order.service_expires_at and order.service_expires_at < min_refund_expires_at:
+            logger.warning('云服务器退款拒绝: order=%s user_id=%s expires_at=%s reason=less_than_10_days', order.order_no, user_id, order.service_expires_at)
+            return None, '到期时间少于 10 天，禁止退款'
+        currency = order.currency or 'USDT'
+        is_delivered = order.status in {'completed', 'expiring', 'suspended'}
+        monthly = _renewal_price(order, order.user) if is_delivered else Decimal(str(order.pay_amount or order.total_amount or 0))
+        if is_delivered:
+            if not str(order.public_ip or '').strip():
+                logger.warning('云服务器退款拒绝: order=%s user_id=%s reason=missing_public_ip', order.order_no, user_id)
+                return None, '当前服务器缺少有效 IP，不允许退款'
+            if not order.service_expires_at or order.service_expires_at <= now:
+                logger.warning('云服务器退款拒绝: order=%s user_id=%s expires_at=%s reason=no_remaining_time', order.order_no, user_id, order.service_expires_at)
+                return None, '当前服务器没有剩余有效期可退款'
+            seconds_left = Decimal(str((order.service_expires_at - now).total_seconds()))
+            refund = (monthly * seconds_left / Decimal(str(31 * 86400))).quantize(Decimal('0.001'))
+        else:
+            refund = monthly.quantize(Decimal('0.001'))
+        if refund <= 0:
+            logger.warning('云服务器退款拒绝: order=%s user_id=%s refund=%s reason=zero_amount', order.order_no, user_id, refund)
+            return None, '退款金额为 0'
+        logger.info('云服务器退款准备入账: order=%s user_id=%s refund=%s currency=%s delivered=%s', order.order_no, user_id, refund, currency, is_delivered)
         user = TelegramUser.objects.select_for_update().get(id=user_id)
         balance_field = 'balance_trx' if currency == 'TRX' else 'balance'
         old_balance = Decimal(str(getattr(user, balance_field, 0) or 0))
@@ -4042,7 +4162,8 @@ def refund_cloud_server_to_balance(order_id: int, user_id: int):
         asset_count = 1 if asset else 0
         server_count = 1 if server else 0
         logger.info('云服务器退款完成: order=%s user_id=%s refund=%s currency=%s new_balance=%s refund_expires_at=%s asset_updated=%s server_updated=%s', order.order_no, user_id, refund, currency, getattr(user, balance_field), refund_expires_at, asset_count, server_count)
-    return {'amount': refund, 'currency': currency, 'order': order}, None
+        refund_result = {'amount': refund, 'currency': currency, 'order': order}
+    return refund_result, None
 
 
 @sync_to_async
@@ -4234,6 +4355,38 @@ def _set_all_cloud_server_auto_renew(enabled: bool, user_id: int | None = None):
 
 
 @sync_to_async
+def set_group_cloud_server_auto_renew(chat_id: int, enabled: bool):
+    group = _group_filter_for_chat_id(chat_id)
+    if not group:
+        return {'updated': 0, 'skipped': 0, 'total': 0}
+    assets = (
+        _cloud_server_asset_queryset()
+        .filter(telegram_group=group, order__isnull=False)
+        .select_related('order')
+        .order_by('order_id', '-updated_at', '-id')
+    )
+    order_ids = []
+    seen = set()
+    skipped = 0
+    for asset in assets:
+        if _is_unattached_static_ip_asset(asset):
+            skipped += 1
+            continue
+        if not asset.order_id or asset.order_id in seen:
+            continue
+        seen.add(asset.order_id)
+        order_ids.append(asset.order_id)
+    updated = 0
+    for order in CloudServerOrder.objects.filter(id__in=order_ids):
+        result = _set_cloud_server_auto_renew(order, enabled)
+        if result:
+            updated += 1
+        else:
+            skipped += 1
+    return {'updated': updated, 'skipped': skipped, 'total': len(order_ids) + skipped}
+
+
+@sync_to_async
 def enable_all_cloud_server_auto_renew(user_id: int):
     return _set_all_cloud_server_auto_renew(True, user_id)
 
@@ -4273,28 +4426,6 @@ def get_cloud_server_auto_renew(order_id: int, user_id: int):
     return bool(order.auto_renew_enabled)
 
 
-@sync_to_async
-def delay_cloud_server_expiry(order_id: int, user_id: int, days: int = 5):
-    order = CloudServerOrder.objects.filter(id=order_id, user_id=user_id).first()
-    if not order:
-        return None
-    expires_at = order.service_expires_at
-    if not expires_at:
-        return False, '当前订单未设置到期时间'
-    now = timezone.now()
-    if expires_at < now:
-        return False, '服务器已到期，不能延期'
-    if expires_at > now + timezone.timedelta(days=5):
-        return False, '仅允许在到期前5天内使用延期'
-    delay_quota = max(int(order.delay_quota or 0), 0)
-    if delay_quota <= 0:
-        return False, '暂无可用延期次数'
-    order.renew_extension_days = max(int(order.renew_extension_days or 0), 0) + max(int(days or 0), 0)
-    order.delay_quota = delay_quota - 1
-    order.save(update_fields=['renew_extension_days', 'delay_quota', 'renew_grace_expires_at', 'suspend_at', 'delete_at', 'ip_recycle_at', 'updated_at'])
-    return order, None
-
-
 __all__ = [
     'apply_cloud_server_renewal',
     'build_cloud_server_name',
@@ -4305,7 +4436,6 @@ __all__ = [
     'create_cloud_server_renewal_for_user',
     'list_cloud_asset_renewal_plans',
     'get_cloud_order_group_balance_lines',
-    'delay_cloud_server_expiry',
     'disable_all_cloud_server_auto_renew',
     'disable_all_cloud_server_auto_renew_admin',
     'ensure_cloud_server_pricing',
@@ -4351,6 +4481,7 @@ __all__ = [
     'refresh_custom_plan_cache',
     'record_cloud_ip_log',
     'set_cloud_order_reminder',
+    'set_group_cloud_server_auto_renew',
     'set_cloud_server_auto_renew',
     'set_cloud_server_auto_renew_admin',
     'set_cloud_server_port',

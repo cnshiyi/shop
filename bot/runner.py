@@ -199,18 +199,20 @@ async def run_bot():
 
     cloud_sync_interval_seconds = await asyncio.to_thread(get_cloud_asset_sync_interval_seconds)
 
+    async def _run_management_command(command_name: str):
+        await asyncio.to_thread(call_command, command_name)
+
     # TRON 扫块器 / 资源巡检 / 生命周期调度
     scheduler = AsyncIOScheduler()
     scheduler.add_job(check_resources, 'interval', minutes=3, id='tron_resource_checker', max_instances=1)
     scheduler.add_job(refresh_custom_plan_cache, 'interval', minutes=10, id='custom_plan_cache_refresh', max_instances=1, coalesce=True)
     scheduler.add_job(lifecycle_tick, 'interval', minutes=10, id='cloud_lifecycle', max_instances=1, kwargs={'notify': _notify, 'notify_target': _notify_target})
+    scheduler.add_job(_run_management_command, 'interval', minutes=10, id='cloud_lifecycle_plan_refresh', max_instances=1, coalesce=True, args=['refresh_lifecycle_plans'])
+    scheduler.add_job(_run_management_command, 'interval', minutes=10, id='cloud_notice_plan_refresh', max_instances=1, coalesce=True, args=['refresh_notice_plans'])
     scheduler.add_job(auto_renew_patrol_tick, 'interval', minutes=30, id='cloud_auto_renew_patrol', max_instances=1, coalesce=True, kwargs={'notify': _notify, 'notify_target': _notify_target})
     scheduler.add_job(daily_expiry_summary_tick, 'cron', hour=12, minute=0, id='cloud_daily_expiry_summary', max_instances=1, coalesce=True, kwargs={'notify_target': _notify_target})
     scheduler.add_job(sync_server_status_tick, 'interval', seconds=cloud_sync_interval_seconds, id='cloud_server_sync', max_instances=1, coalesce=True)
     scheduler.add_job(sync_cloud_accounts_tick, 'interval', minutes=15, id='cloud_account_check', max_instances=1, coalesce=True)
-    async def _run_management_command(command_name: str):
-        await asyncio.to_thread(call_command, command_name)
-
     scheduler.add_job(_run_management_command, 'interval', minutes=20, id='server_dedupe', max_instances=1, coalesce=True, args=['dedupe_servers'])
     scheduler.add_job(_run_management_command, 'cron', hour=18, minute=0, id='old_records_cleanup', max_instances=1, coalesce=True, args=['cleanup_old_records'])
     scheduler.start()
@@ -226,6 +228,8 @@ async def run_bot():
     logger.info('资源巡检已启动 (每3分钟)')
     logger.info('定制套餐缓存刷新已启动 (每10分钟)')
     logger.info('云服务器生命周期调度已启动 (每10分钟)')
+    logger.info('删机计划表刷新已启动 (每10分钟)')
+    logger.info('通知计划表刷新已启动 (每10分钟)')
     logger.info('云服务器每日到期汇总通知已启动 (每天12:00)')
     logger.info('自动续费巡检已启动 (每30分钟，到期前1天至关机前持续兜底，失败通知冷却1小时)')
     logger.info('云服务器状态同步已启动 (每%s秒，每次轮询1个云账号)', cloud_sync_interval_seconds)

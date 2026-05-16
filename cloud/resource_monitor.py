@@ -1,4 +1,5 @@
 import logging
+import hashlib
 from datetime import datetime
 from html import escape
 from collections import OrderedDict
@@ -11,6 +12,7 @@ from django.apps import apps
 from django.utils import timezone
 
 from core.persistence import record_external_sync_log, save_resource_snapshot
+from core.runtime_config import get_runtime_config
 from core.trongrid import build_trongrid_headers
 from cloud.cache import get_monitor_addresses
 
@@ -34,14 +36,28 @@ def get_resource_detail(detail_key: str) -> dict | None:
 
 
 def _cache_resource_detail(detail_id: str, detail: dict):
-    short_key = detail_id[:16]
-    _recent_resource_details[detail_id] = detail
-    _recent_resource_keys[short_key] = detail_id
+    user_id = str(detail.get('user_id') or '').strip()
+    cache_key = f'{detail_id}:{user_id}' if user_id else detail_id
+    short_key = hashlib.sha1(cache_key.encode('utf-8')).hexdigest()[:16] if user_id else detail_id[:16]
+    _recent_resource_details[cache_key] = detail
+    _recent_resource_keys[short_key] = cache_key
     if len(_recent_resource_details) > MAX_RESOURCE_DETAIL_CACHE:
-        old_id, _ = _recent_resource_details.popitem(last=False)
-        old_keys = [key for key, value in _recent_resource_keys.items() if value == old_id]
+        old_key, _ = _recent_resource_details.popitem(last=False)
+        old_keys = [key for key, value in _recent_resource_keys.items() if value == old_key]
         for key in old_keys:
             _recent_resource_keys.pop(key, None)
+    return short_key
+
+
+def _trongrid_headers_without_key(headers: dict | None) -> dict:
+    return {key: value for key, value in dict(headers or {}).items() if key.lower() != 'tron-pro-api-key'}
+
+
+async def _trongrid_post_with_key_fallback(client: httpx.AsyncClient, url: str, payload: dict, headers: dict):
+    resp = await client.post(url, json=payload, headers=headers)
+    if resp.status_code == 401 and headers.get('TRON-PRO-API-KEY'):
+        resp = await client.post(url, json=payload, headers=_trongrid_headers_without_key(headers))
+    return resp
 
 
 @sync_to_async
@@ -81,8 +97,10 @@ async def _notify(user_id: int, text: str, reply_markup=None):
 
 async def _fetch_account_resource(address: str) -> tuple[int, int]:
     headers = await build_trongrid_headers()
+    base_url = await sync_to_async(get_runtime_config, thread_sensitive=False)('trongrid_base_url', TRONGRID_BASE_URL)
+    base_url = str(base_url or TRONGRID_BASE_URL).rstrip('/')
     async with httpx.AsyncClient(timeout=10) as client:
-        resp = await client.post(f'{TRONGRID_BASE_URL}/wallet/getaccountresource', json={'address': address, 'visible': True}, headers=headers)
+        resp = await _trongrid_post_with_key_fallback(client, f'{base_url}/wallet/getaccountresource', {'address': address, 'visible': True}, headers)
         resp.raise_for_status()
         data = resp.json() or {}
         await sync_to_async(record_external_sync_log)(
@@ -149,7 +167,8 @@ async def check_resources():
                     '📘 说明: 仅在资源增加时通知，正常转账消耗不通知。',
                 ])
                 detail_id = f"{address}:{now_text}"
-                _cache_resource_detail(detail_id, {
+                detail_key = _cache_resource_detail(detail_id, {
+                    'user_id': mon['user_id'],
                     'address': address,
                     'remark': remark,
                     'time': now_text,
@@ -164,7 +183,7 @@ async def check_resources():
                     mon['user_id'],
                     '\n'.join(lines),
                     reply_markup=InlineKeyboardMarkup(
-                        inline_keyboard=[[InlineKeyboardButton(text='查看资源详情', callback_data=f'mon:resd:{detail_id[:16]}')]]
+                        inline_keyboard=[[InlineKeyboardButton(text='查看资源详情', callback_data=f'mon:resd:{detail_key}')]]
                     ),
                 )
     except Exception as exc:

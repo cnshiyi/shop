@@ -5,7 +5,6 @@ import binascii
 import hashlib
 import hmac
 import json
-import os
 import re
 import secrets
 import struct
@@ -17,7 +16,6 @@ from urllib.parse import quote
 from asgiref.sync import async_to_sync
 
 from django.contrib.auth import authenticate, get_user_model, login, logout
-from django.contrib.auth.decorators import login_required
 from django.contrib.sessions.models import Session
 from django.db import ProgrammingError, transaction
 from django.db.models import Q, CharField, Count, Max, Sum
@@ -32,8 +30,9 @@ from django.views.decorators.http import require_GET, require_POST
 from bot.models import BotOperationLog, TelegramChatArchive, TelegramChatMessage, TelegramGroupFilter, TelegramLoginAccount, TelegramUser
 from bot.services import _get_or_create_user_sync
 from cloud.lifecycle import _delete_instance, _delete_orphan_asset_instance, _get_due_orders, _get_orphan_asset_delete_due, _is_cloud_delete_safe_time, _mark_deleted, _mark_orphan_asset_deleted, _mark_unattached_static_ip_deleted, _record_lifecycle_action_failed, _release_unattached_static_ip, _shutdown_enabled_for_order
-from cloud.models import AddressMonitor, CloudAsset, CloudIpLog, CloudServerOrder
+from cloud.models import AddressMonitor, CloudAsset, CloudIpLog, CloudLifecyclePlan, CloudLifecyclePlanNote, CloudServerOrder
 from cloud.sync_safety import missing_confirmation_state
+from core.cloud_accounts import cloud_account_label_variants
 from core.models import CloudAccountConfig, SiteConfig
 from core.button_config import init_button_config, load_button_config, save_button_config
 from core.runtime_config import CONFIG_HELP, SENSITIVE_CONFIG_KEYS, get_runtime_config
@@ -216,6 +215,15 @@ def dashboard_login_required(view_func):
     return wrapped
 
 
+def dashboard_superuser_required(view_func):
+    @dashboard_login_required
+    def wrapped(request, *args, **kwargs):
+        if not getattr(request.user, 'is_superuser', False):
+            return _error('需要超级管理员权限', status=403)
+        return view_func(request, *args, **kwargs)
+    return wrapped
+
+
 def _status_label(status, choices=()):
     hardcoded = {
         CloudAsset.STATUS_RUNNING: '运行中',
@@ -298,18 +306,16 @@ def _asset_is_unattached_ip(asset):
 
 def _active_cloud_asset_queryset():
     active_account_ids = list(CloudAccountConfig.objects.filter(is_active=True).values_list('id', flat=True))
-    active_account_labels = list(
-        CloudAccountConfig.objects.filter(is_active=True)
-        .exclude(external_account_id__isnull=True)
-        .exclude(external_account_id='')
-        .values_list('external_account_id', flat=True)
-    )
-    inactive_account_labels = list(
-        CloudAccountConfig.objects.filter(is_active=False)
-        .exclude(external_account_id__isnull=True)
-        .exclude(external_account_id='')
-        .values_list('external_account_id', flat=True)
-    )
+    active_account_labels = [
+        label
+        for account in CloudAccountConfig.objects.filter(is_active=True)
+        for label in cloud_account_label_variants(account)
+    ]
+    inactive_account_labels = [
+        label
+        for account in CloudAccountConfig.objects.filter(is_active=False)
+        for label in cloud_account_label_variants(account)
+    ]
     return (
         CloudAsset.objects.select_related('order', 'user', 'cloud_account', 'order__cloud_account')
         .filter(kind=CloudAsset.KIND_SERVER, is_active=True)
@@ -459,6 +465,88 @@ def _compact_dashboard_note(note, *, max_chars=800):
     return text
 
 
+def _lifecycle_plan_note_scope(item_type='', *, order_id=None, asset_id=None):
+    item_type = str(item_type or '').strip()
+    if item_type == 'order' or order_id:
+        return CloudLifecyclePlanNote.PLAN_KIND_SHUTDOWN_ORDER, int(order_id or 0), None
+    if item_type == 'orphan_asset':
+        return CloudLifecyclePlanNote.PLAN_KIND_ORPHAN_ASSET_DELETE, None, int(asset_id or 0)
+    return CloudLifecyclePlanNote.PLAN_KIND_UNATTACHED_IP_DELETE, None, int(asset_id or 0)
+
+
+def _lifecycle_plan_note_maps(*, order_ids=None, orphan_asset_ids=None, unattached_asset_ids=None):
+    order_ids = [int(item) for item in (order_ids or []) if int(item or 0) > 0]
+    orphan_asset_ids = [int(item) for item in (orphan_asset_ids or []) if int(item or 0) > 0]
+    unattached_asset_ids = [int(item) for item in (unattached_asset_ids or []) if int(item or 0) > 0]
+    conditions = Q()
+    if order_ids:
+        conditions |= Q(plan_kind=CloudLifecyclePlanNote.PLAN_KIND_SHUTDOWN_ORDER, order_id__in=order_ids)
+    if orphan_asset_ids:
+        conditions |= Q(plan_kind=CloudLifecyclePlanNote.PLAN_KIND_ORPHAN_ASSET_DELETE, asset_id__in=orphan_asset_ids)
+    if unattached_asset_ids:
+        conditions |= Q(plan_kind=CloudLifecyclePlanNote.PLAN_KIND_UNATTACHED_IP_DELETE, asset_id__in=unattached_asset_ids)
+    if not conditions:
+        return {}, {}, {}
+    order_map = {}
+    orphan_asset_map = {}
+    unattached_asset_map = {}
+    rows = CloudLifecyclePlanNote.objects.filter(conditions).order_by('-updated_at', '-id')
+    for row in rows:
+        if row.plan_kind == CloudLifecyclePlanNote.PLAN_KIND_SHUTDOWN_ORDER and row.order_id and row.order_id not in order_map:
+            order_map[row.order_id] = row
+        elif row.plan_kind == CloudLifecyclePlanNote.PLAN_KIND_ORPHAN_ASSET_DELETE and row.asset_id and row.asset_id not in orphan_asset_map:
+            orphan_asset_map[row.asset_id] = row
+        elif row.plan_kind == CloudLifecyclePlanNote.PLAN_KIND_UNATTACHED_IP_DELETE and row.asset_id and row.asset_id not in unattached_asset_map:
+            unattached_asset_map[row.asset_id] = row
+    return order_map, orphan_asset_map, unattached_asset_map
+
+
+def _lifecycle_plan_note_text(note_obj) -> str:
+    return str(getattr(note_obj, 'note', '') or '').strip()
+
+
+def _save_lifecycle_plan_note(*, item_type='', note='', order=None, asset=None, actor=None):
+    plan_kind, order_id, asset_id = _lifecycle_plan_note_scope(
+        item_type,
+        order_id=getattr(order, 'id', None),
+        asset_id=getattr(asset, 'id', None),
+    )
+    filters = {'plan_kind': plan_kind}
+    if order_id:
+        filters['order_id'] = order_id
+    elif asset_id:
+        filters['asset_id'] = asset_id
+    else:
+        return None
+    qs = CloudLifecyclePlanNote.objects.filter(**filters).order_by('-updated_at', '-id')
+    value = str(note or '').strip()
+    keep = qs.first()
+    if not value:
+        qs.delete()
+        return None
+    if keep:
+        updates = []
+        if keep.note != value:
+            keep.note = value
+            updates.append('note')
+        if actor and getattr(actor, 'is_authenticated', False):
+            keep.updated_by = actor
+            updates.append('updated_by')
+        if updates:
+            keep.save(update_fields=[*updates, 'updated_at'])
+        qs.exclude(id=keep.id).delete()
+        return keep
+    create_kwargs = {'note': value}
+    if order_id:
+        create_kwargs['order'] = order
+    if asset_id:
+        create_kwargs['asset'] = asset
+    if actor and getattr(actor, 'is_authenticated', False):
+        create_kwargs['created_by'] = actor
+        create_kwargs['updated_by'] = actor
+    return CloudLifecyclePlanNote.objects.create(plan_kind=plan_kind, **create_kwargs)
+
+
 def _cloud_ip_trace_note_newest_first(note):
     text = _compact_dashboard_note(note, max_chars=1200)
     if not text:
@@ -476,6 +564,183 @@ def _cloud_ip_trace_note_newest_first(note):
     if first_time and last_time and first_time < last_time:
         lines = list(reversed(lines))
     return '\n'.join(lines)
+
+
+def _lifecycle_plan_row_source_key(item: dict, *, plan_kind: str, data_group: str) -> str:
+    if plan_kind == CloudLifecyclePlan.PLAN_KIND_SHUTDOWN_ORDER and item.get('order_id'):
+        return f'{data_group}:order:{item.get("order_id")}'
+    if item.get('asset_id'):
+        return f'{data_group}:asset:{item.get("asset_id")}'
+    if item.get('id') is not None:
+        return f'{data_group}:item:{item.get("id")}'
+    return ''
+
+
+def _lifecycle_plan_row_defaults(item: dict, *, plan_kind: str, data_group: str, source_key: str) -> dict:
+    note = str(item.get('note') or '').strip()
+    display_note = str(item.get('display_note') or _compact_dashboard_note(note, max_chars=500) or '').strip()
+    next_run_at = item.get('next_run_at') or item.get('delete_at') or item.get('executed_at')
+    return {
+        'source_key': source_key,
+        'plan_kind': plan_kind,
+        'data_group': data_group,
+        'queue_status': item.get('queue_status'),
+        'queue_status_label': item.get('queue_status_label'),
+        'order_id': item.get('order_id'),
+        'asset_id': item.get('asset_id'),
+        'user_id': item.get('user_id'),
+        'user_display_name': item.get('user_display_name'),
+        'username_label': item.get('username_label'),
+        'ip': item.get('ip') or item.get('public_ip') or '',
+        'provider': item.get('provider'),
+        'provider_label': item.get('provider_label'),
+        'status': item.get('status'),
+        'status_label': item.get('status_label'),
+        'service_expires_at': parse_datetime(item['service_expires_at']) if item.get('service_expires_at') else None,
+        'suspend_at': parse_datetime(item['suspend_at']) if item.get('suspend_at') else None,
+        'delete_at': parse_datetime(item['delete_at']) if item.get('delete_at') else None,
+        'ip_recycle_at': parse_datetime(item['ip_recycle_at']) if item.get('ip_recycle_at') else None,
+        'next_run_at': parse_datetime(next_run_at) if isinstance(next_run_at, str) and next_run_at else next_run_at,
+        'logged_at': parse_datetime(item['logged_at']) if item.get('logged_at') else (parse_datetime(item['executed_at']) if item.get('executed_at') else None),
+        'last_failure_reason': item.get('last_failure_reason') or item.get('failure_reason'),
+        'execution_status': item.get('execution_status'),
+        'execution_plan': item.get('execution_plan'),
+        'note': note,
+        'display_note': display_note,
+        'deletion_source_label': item.get('deletion_source_label'),
+        'related_path': item.get('related_path'),
+        'detail_path': item.get('detail_path'),
+        'order_detail_path': item.get('order_detail_path'),
+        'order_link_path': item.get('order_link_path'),
+        'asset_detail_path': item.get('asset_detail_path'),
+        'source_snapshot': dict(item),
+    }
+
+
+def _lifecycle_plan_row_payload(row) -> dict:
+    payload = dict(row.source_snapshot or {})
+    payload.update({
+        'id': row.id,
+        'source_key': row.source_key,
+        'plan_kind': row.plan_kind,
+        'data_group': row.data_group,
+        'queue_status': row.queue_status,
+        'queue_status_label': row.queue_status_label,
+        'order_id': row.order_id,
+        'asset_id': row.asset_id,
+        'user_id': row.user_id,
+        'user_display_name': row.user_display_name,
+        'username_label': row.username_label,
+        'ip': row.ip or payload.get('ip') or payload.get('public_ip') or '',
+        'provider': row.provider or payload.get('provider'),
+        'provider_label': row.provider_label or payload.get('provider_label'),
+        'status': row.status or payload.get('status'),
+        'status_label': row.status_label or payload.get('status_label'),
+        'service_expires_at': _iso(row.service_expires_at) or payload.get('service_expires_at'),
+        'suspend_at': _iso(row.suspend_at) or payload.get('suspend_at'),
+        'delete_at': _iso(row.delete_at) or payload.get('delete_at'),
+        'ip_recycle_at': _iso(row.ip_recycle_at) or payload.get('ip_recycle_at'),
+        'next_run_at': _iso(row.next_run_at) or payload.get('next_run_at'),
+        'logged_at': _iso(row.logged_at) or payload.get('logged_at') or payload.get('executed_at'),
+        'last_failure_reason': row.last_failure_reason,
+        'failure_reason': row.last_failure_reason or payload.get('failure_reason') or '',
+        'execution_status': row.execution_status,
+        'execution_plan': row.execution_plan,
+        'note': row.note or '',
+        'display_note': row.display_note or _compact_dashboard_note(row.note, max_chars=500),
+        'deletion_source_label': row.deletion_source_label,
+        'related_path': row.related_path or payload.get('related_path') or '',
+        'detail_path': row.detail_path or payload.get('detail_path') or '',
+        'order_detail_path': row.order_detail_path or payload.get('order_detail_path') or '',
+        'order_link_path': row.order_link_path or payload.get('order_link_path') or '',
+        'asset_detail_path': row.asset_detail_path or payload.get('asset_detail_path') or '',
+    })
+    return payload
+
+
+def _upsert_lifecycle_plan_rows(items: list[dict], *, plan_kind: str, data_group: str):
+    source_keys = []
+    payload_map = {}
+    for item in items:
+        source_key = _lifecycle_plan_row_source_key(item, plan_kind=plan_kind, data_group=data_group)
+        if not source_key:
+            continue
+        source_keys.append(source_key)
+        payload_map[source_key] = _lifecycle_plan_row_defaults(item, plan_kind=plan_kind, data_group=data_group, source_key=source_key)
+    existing_rows = {row.source_key: row for row in CloudLifecyclePlan.objects.filter(plan_kind=plan_kind, data_group=data_group, source_key__in=source_keys)}
+    create_rows = []
+    update_rows = []
+    update_fields = ['queue_status', 'queue_status_label', 'order_id', 'asset_id', 'user_id', 'user_display_name', 'username_label', 'ip', 'provider', 'provider_label', 'status', 'status_label', 'service_expires_at', 'suspend_at', 'delete_at', 'ip_recycle_at', 'next_run_at', 'logged_at', 'last_failure_reason', 'execution_status', 'execution_plan', 'note', 'display_note', 'deletion_source_label', 'related_path', 'detail_path', 'order_detail_path', 'order_link_path', 'asset_detail_path', 'source_snapshot', 'updated_at']
+    for source_key, defaults in payload_map.items():
+        row = existing_rows.get(source_key)
+        if row:
+            changed = False
+            for field, value in defaults.items():
+                if getattr(row, field) != value:
+                    setattr(row, field, value)
+                    changed = True
+            if changed:
+                update_rows.append(row)
+        else:
+            create_rows.append(CloudLifecyclePlan(**defaults))
+    if create_rows:
+        CloudLifecyclePlan.objects.bulk_create(create_rows, batch_size=500)
+    if update_rows:
+        CloudLifecyclePlan.objects.bulk_update(update_rows, update_fields, batch_size=500)
+    qs = CloudLifecyclePlan.objects.filter(plan_kind=plan_kind, data_group=data_group)
+    if source_keys:
+        qs.exclude(source_key__in=source_keys).delete()
+    else:
+        qs.delete()
+
+
+def _collect_lifecycle_plan_rows(*, limit=1000):
+    now = timezone.now()
+    shutdown_queue = _collect_shutdown_plan_queue(now, limit=limit)
+    history_qs = CloudIpLog.objects.select_related('order', 'user').filter(event_type__in=['deleted', 'delete_failed', 'delete_skipped']).order_by('-created_at', '-id')[:limit]
+    shutdown_history_items = [_shutdown_history_item_payload(log) for log in history_qs]
+    history_order_ids = {item.get('order_id') for item in shutdown_history_items if item.get('order_id')}
+    fallback_deleted_orders = CloudServerOrder.objects.select_related('user').filter(status='deleted').exclude(id__in=list(history_order_ids)).order_by('-updated_at', '-id')[:limit]
+    shutdown_history_items.extend(_shutdown_history_order_payload(order) for order in fallback_deleted_orders)
+    ip_delete_items = _unattached_ip_delete_items(limit=limit)
+    return {'due_items': shutdown_queue['due_items'], 'future_plan_items': shutdown_queue['future_plan_items'], 'history_items': shutdown_history_items, 'shutdown_items': [*shutdown_queue['due_items'], *shutdown_queue['future_plan_items']], 'ip_delete_items': ip_delete_items}
+
+
+def _sync_lifecycle_plan_table(*, limit=1000):
+    bundle = _collect_lifecycle_plan_rows(limit=limit)
+    shutdown_active = [*bundle['due_items'], *bundle['future_plan_items']]
+    shutdown_order_active = [item for item in shutdown_active if item.get('item_type') == 'order']
+    orphan_asset_active = [item for item in shutdown_active if item.get('item_type') == 'orphan_asset']
+    shutdown_history = bundle['history_items']
+    ip_delete_active = [item for item in bundle['ip_delete_items'] if not item.get('is_history')]
+    ip_delete_history = [item for item in bundle['ip_delete_items'] if item.get('is_history')]
+    _upsert_lifecycle_plan_rows(shutdown_order_active, plan_kind=CloudLifecyclePlan.PLAN_KIND_SHUTDOWN_ORDER, data_group='active')
+    _upsert_lifecycle_plan_rows(orphan_asset_active, plan_kind=CloudLifecyclePlan.PLAN_KIND_ORPHAN_ASSET_DELETE, data_group='active')
+    _upsert_lifecycle_plan_rows(shutdown_history, plan_kind=CloudLifecyclePlan.PLAN_KIND_SHUTDOWN_ORDER, data_group='history')
+    _upsert_lifecycle_plan_rows(ip_delete_active, plan_kind=CloudLifecyclePlan.PLAN_KIND_UNATTACHED_IP_DELETE, data_group='active')
+    _upsert_lifecycle_plan_rows(ip_delete_history, plan_kind=CloudLifecyclePlan.PLAN_KIND_UNATTACHED_IP_DELETE, data_group='history')
+    return bundle
+
+
+def _cloud_lifecycle_plan_items(*, plan_kind: str, data_group: str):
+    rows = CloudLifecyclePlan.objects.filter(plan_kind=plan_kind, data_group=data_group).order_by('delete_at', 'next_run_at', '-updated_at', '-id')
+    return [_lifecycle_plan_row_payload(row) for row in rows]
+
+
+def _lifecycle_plan_last_refresh_at():
+    return CloudLifecyclePlan.objects.filter(plan_kind__in=[
+        CloudLifecyclePlan.PLAN_KIND_SHUTDOWN_ORDER,
+        CloudLifecyclePlan.PLAN_KIND_ORPHAN_ASSET_DELETE,
+        CloudLifecyclePlan.PLAN_KIND_UNATTACHED_IP_DELETE,
+    ]).order_by('-updated_at').values_list('updated_at', flat=True).first()
+
+
+def _lifecycle_plan_table_has_rows() -> bool:
+    return CloudLifecyclePlan.objects.filter(plan_kind__in=[
+        CloudLifecyclePlan.PLAN_KIND_SHUTDOWN_ORDER,
+        CloudLifecyclePlan.PLAN_KIND_ORPHAN_ASSET_DELETE,
+        CloudLifecyclePlan.PLAN_KIND_UNATTACHED_IP_DELETE,
+    ]).exists()
 
 
 def _cloud_ip_trace_logged_at(note, fallback=None):
@@ -522,6 +787,51 @@ def _cloud_ip_trace_for_asset_or_order(asset=None, order=None):
     return lookup.order_by('-id').first()
 
 
+def _cloud_ip_trace_maps_for_assets(assets):
+    asset_ids = [asset.id for asset in assets if getattr(asset, 'id', None)]
+    order_ids = [asset.order_id for asset in assets if getattr(asset, 'order_id', None)]
+    ips = [
+        ip
+        for asset in assets
+        for ip in [str(getattr(asset, 'public_ip', '') or '').strip(), str(getattr(asset, 'previous_public_ip', '') or '').strip()]
+        if ip
+    ]
+    conditions = Q()
+    if asset_ids:
+        conditions |= Q(asset_id__in=asset_ids)
+    if order_ids:
+        conditions |= Q(order_id__in=order_ids)
+    if ips:
+        conditions |= Q(public_ip__in=ips) | Q(previous_public_ip__in=ips)
+    if not conditions:
+        return {}, {}, {}
+    logs = CloudIpLog.objects.select_related('order', 'asset', 'user').filter(conditions).order_by('-id')[:5000]
+    by_asset = {}
+    by_order = {}
+    by_ip = {}
+    for log in logs:
+        if log.asset_id and log.asset_id not in by_asset:
+            by_asset[log.asset_id] = log
+        if log.order_id and log.order_id not in by_order:
+            by_order[log.order_id] = log
+        for ip in [str(log.public_ip or '').strip(), str(log.previous_public_ip or '').strip()]:
+            if ip and ip not in by_ip:
+                by_ip[ip] = log
+    return by_asset, by_order, by_ip
+
+
+def _cloud_ip_trace_from_maps(asset, trace_maps):
+    by_asset, by_order, by_ip = trace_maps
+    if getattr(asset, 'id', None) in by_asset:
+        return by_asset[asset.id]
+    if getattr(asset, 'order_id', None) in by_order:
+        return by_order[asset.order_id]
+    for ip in [str(getattr(asset, 'public_ip', '') or '').strip(), str(getattr(asset, 'previous_public_ip', '') or '').strip()]:
+        if ip and ip in by_ip:
+            return by_ip[ip]
+    return None
+
+
 def _shutdown_log_items(limit=100):
     cutoff = timezone.now() - timezone.timedelta(days=7)
     suspend_days = _runtime_int('cloud_suspend_after_days', 3)
@@ -533,12 +843,13 @@ def _shutdown_log_items(limit=100):
         .filter(Q(actual_expires_at__isnull=False) | Q(order__service_expires_at__isnull=False))
         .order_by('actual_expires_at', '-updated_at')[:500]
     )
+    trace_maps = _cloud_ip_trace_maps_for_assets(assets)
     seen_trace_ids = set()
     for asset in assets:
         if _asset_is_unattached_ip(asset) and asset.status in {CloudAsset.STATUS_DELETED, CloudAsset.STATUS_DELETING, CloudAsset.STATUS_TERMINATED, CloudAsset.STATUS_TERMINATING}:
             continue
         order = asset.order if asset.order_id and asset.order else None
-        trace = _cloud_ip_trace_for_asset_or_order(asset=asset, order=order)
+        trace = _cloud_ip_trace_from_maps(asset, trace_maps)
         expires_at = getattr(order, 'service_expires_at', None) or asset.actual_expires_at
         user_display_name, username_label = _telegram_user_labels(asset.user or (order.user if order else None))
         account_name, external_account_id = _cloud_account_labels(asset)
@@ -748,19 +1059,21 @@ def _unattached_ip_delete_history_q():
 
 def _ip_delete_item_quality(item: dict, duplicate_count: int = 0) -> dict:
     note = str(item.get('note') or '')
+    source_note = str(item.get('source_note') or '')
     provider_status = str(item.get('provider_status') or '')
+    confirm_note = '\n'.join(filter(None, [note, source_note, provider_status]))
     flags = []
     labels = []
     if duplicate_count > 0:
         flags.append('covered_duplicates')
         labels.append(f'已覆盖 {duplicate_count} 条同 IP 旧记录')
-    if any(marker in note or marker in provider_status for marker in ['云上不存在', '云上未找到', '云端已不存在', '已标记删除']):
+    if any(marker in confirm_note for marker in ['云上不存在', '云上未找到', '云端已不存在', '已标记删除']):
         flags.append('cloud_missing')
         labels.append('云上已不存在')
-    if any(marker in note or marker in provider_status for marker in ['历史脏数据', '脏数据', '待确认', 'missing_sync_count']):
+    if any(marker in confirm_note for marker in ['历史脏数据', '脏数据', '待确认', 'missing_sync_count']):
         flags.append('dirty_data')
         labels.append('脏数据')
-    confirm_state = missing_confirmation_state(note)
+    confirm_state = missing_confirmation_state(confirm_note)
     item['missing_confirm_count'] = confirm_state['count']
     item['missing_confirm_threshold'] = confirm_state['threshold']
     item['missing_confirm_remaining'] = confirm_state['remaining']
@@ -778,6 +1091,58 @@ def _ip_delete_item_quality(item: dict, duplicate_count: int = 0) -> dict:
     if labels:
         item['execution_status'] = f'{item.get("execution_status") or item.get("provider_status") or "-"}（{"，".join(labels)}）'
     return item
+
+
+def _unattached_ip_delete_attempt_state(item: dict, *, is_history: bool | None = None) -> dict:
+    text_parts = []
+    seen_parts = set()
+    for value in [
+        item.get('source_note'),
+        item.get('note'),
+        item.get('provider_status'),
+        item.get('execution_status'),
+    ]:
+        text_value = str(value or '').strip()
+        if not text_value or text_value in seen_parts:
+            continue
+        seen_parts.add(text_value)
+        text_parts.append(text_value)
+    text = '\n'.join(text_parts)
+    explicit_numbers = [
+        int(match.group(1))
+        for match in re.finditer(r'第\s*(\d+)\s*次(?:执行)?(?:删除|释放|删除确认)', text)
+        if match.group(1).isdigit()
+    ]
+    attempt_markers = [
+        'AWS API 删除失败',
+        '系统已调用 AWS API 真实删除',
+        'AWS 固定 IP 已真实释放',
+        'AWS 固定 IP 真实释放失败',
+        'AWS 固定 IP 云端已不存在',
+        '已调用 AWS release_static_ip',
+        'release_static_ip',
+        '释放固定IP成功',
+        '固定 IP 已释放',
+        '固定IP已释放',
+    ]
+    marker_count = 0
+    for line in [line.strip() for line in text.splitlines() if line.strip()]:
+        if any(marker in line for marker in attempt_markers):
+            marker_count += 1
+    count = max([marker_count, *explicit_numbers], default=0)
+    history = bool(item.get('is_history')) if is_history is None else bool(is_history)
+    next_attempt = None if history else count + 1
+    if history:
+        label = f'第{max(count, 1)}次删除已完成'
+    elif count > 0:
+        label = f'已尝试{count}次，待第{next_attempt}次删除'
+    else:
+        label = '尚未执行，待第1次删除'
+    return {
+        'delete_attempt_count': count,
+        'delete_next_attempt': next_attempt,
+        'delete_attempt_label': label,
+    }
 
 
 def _dedupe_ip_delete_items_by_ip(items: list[dict]) -> list[dict]:
@@ -811,26 +1176,35 @@ def _unattached_ip_delete_items(limit=50):
         .exclude(_unattached_ip_deleted_or_missing_q())
         .order_by('actual_expires_at', 'created_at', '-updated_at')[:limit]
     )
+    _, _, unattached_note_map = _lifecycle_plan_note_maps(unattached_asset_ids=[asset.id for asset in assets])
+    trace_maps = _cloud_ip_trace_maps_for_assets(assets)
     items = []
     seen_trace_ids = set()
     active_unattached_ips = {str(asset.public_ip or '').strip() for asset in assets if str(asset.public_ip or '').strip()}
     for asset in assets:
+        confirm_state = missing_confirmation_state(getattr(asset, 'note', ''))
+        if confirm_state['count'] >= confirm_state['threshold']:
+            continue
         user_display_name, username_label = _telegram_user_labels(asset.user)
         if asset.actual_expires_at:
             delete_at = asset.actual_expires_at
         else:
             base_at = asset.updated_at or asset.created_at or now
             delete_at = _with_runtime_time(base_at + timezone.timedelta(days=delete_days), 'cloud_unattached_ip_delete_time')
-        trace = _cloud_ip_trace_for_asset_or_order(asset=asset)
+        trace = _cloud_ip_trace_from_maps(asset, trace_maps)
+        trace_note = ''
         if trace:
-            note = _cloud_ip_trace_note_newest_first(trace.note)
+            trace_note = _cloud_ip_trace_note_newest_first(trace.note)
             logged_at = _cloud_ip_trace_logged_at(trace.note, trace.created_at)
             seen_trace_ids.add(trace.id)
         else:
-            note = asset.note or ''
             logged_at = asset.updated_at
+        source_note = trace_note or str(getattr(asset, 'note', '') or '').strip()
+        plan_note = _lifecycle_plan_note_text(unattached_note_map.get(asset.id))
+        note = plan_note
+        display_note_source = plan_note or source_note
         asset_name = asset.asset_name or getattr(asset, 'static_ip_name', '') or asset.instance_id or f'asset-{asset.id}'
-        items.append({
+        item = {
             'id': asset.id,
             'asset_id': asset.id,
             'asset_name': asset_name,
@@ -840,15 +1214,22 @@ def _unattached_ip_delete_items(limit=50):
             'username_label': username_label,
             'public_ip': (trace.public_ip if trace else None) or asset.public_ip or asset.previous_public_ip or '',
             'provider_status': asset.provider_status or (_status_label(trace.event_type, CloudIpLog.EVENT_CHOICES) if trace else ''),
-            'deletion_source_label': _delete_source_label(note, default='计划自动删除'),
+            'deletion_source_label': _delete_source_label(trace_note, default='计划自动删除'),
             'service_expires_at': _iso(asset.actual_expires_at),
             'delete_at': _iso(delete_at),
             'logged_at': _iso(logged_at),
+            'source_note': source_note,
             'note': note,
-            'display_note': _compact_dashboard_note(note, max_chars=500),
+            'display_note': _compact_dashboard_note(display_note_source, max_chars=500),
             'is_overdue': bool(delete_at and delete_at <= now),
             'is_history': False,
-        })
+        }
+        if not _asset_shutdown_enabled(asset):
+            item['queue_status'] = 'shutdown_disabled'
+            item['queue_status_label'] = '关机计划关闭'
+            item['execution_status'] = '关机计划关闭，禁止真实释放固定 IP'
+        item.update(_unattached_ip_delete_attempt_state(item, is_history=False))
+        items.append(item)
 
     history_traces = CloudIpLog.objects.select_related('asset', 'order', 'user').filter(
         _unattached_ip_delete_history_q()
@@ -865,7 +1246,7 @@ def _unattached_ip_delete_items(limit=50):
         asset_name = trace.asset_name or getattr(order, 'static_ip_name', '') or getattr(asset, 'asset_name', '') or trace.instance_id or f'trace-{trace.id}'
         logged_at = _cloud_ip_trace_logged_at(trace.note, trace.created_at)
         delete_at = logged_at or getattr(order, 'ip_recycle_at', None) or getattr(asset, 'actual_expires_at', None)
-        items.append({
+        item = {
             'id': trace.id,
             'asset_id': trace.asset_id,
             'asset_name': asset_name,
@@ -879,11 +1260,14 @@ def _unattached_ip_delete_items(limit=50):
             'service_expires_at': _iso(getattr(asset, 'actual_expires_at', None) or getattr(order, 'service_expires_at', None)),
             'delete_at': _iso(delete_at),
             'logged_at': _iso(logged_at),
+            'source_note': _cloud_ip_trace_note_newest_first(trace.note),
             'note': _cloud_ip_trace_note_newest_first(trace.note),
             'display_note': _compact_dashboard_note(trace.note, max_chars=500),
             'is_overdue': True,
             'is_history': True,
-        })
+        }
+        item.update(_unattached_ip_delete_attempt_state(item, is_history=True))
+        items.append(item)
     def sort_key(item):
         if item.get('is_history'):
             parsed = parse_datetime(item.get('logged_at') or item.get('delete_at') or '')
@@ -1008,16 +1392,25 @@ def _parse_decimal(value, field_label):
 def _site_config_payload(item):
     is_sensitive = item.key in SENSITIVE_CONFIG_KEYS
     value = SiteConfig.get(item.key, '')
-    value_preview = value if item.key == 'trongrid_api_key' else (item.masked_value() if is_sensitive else (item.value or ''))
+    value_preview = _masked_sensitive_preview(value) if is_sensitive else (item.value or '')
     return {
         'id': item.id,
         'key': item.key,
-        'value': value,
+        'value': '' if is_sensitive else value,
         'value_preview': value_preview,
         'is_sensitive': is_sensitive,
         'description': CONFIG_HELP.get(item.key, '') or text_description(item.key, ''),
         'sort_order': item.sort_order,
     }
+
+
+def _masked_sensitive_preview(value):
+    plain = str(value or '')
+    if not plain:
+        return ''
+    if len(plain) <= 6:
+        return '*' * len(plain)
+    return f'{plain[:3]}***{plain[-3:]}'
 
 
 def _default_cloud_account_region(provider: str) -> str:
@@ -1214,6 +1607,7 @@ def _telegram_group_filter_payload(item):
         'enabled': bool(item.enabled),
         'push_enabled': bool(getattr(item, 'push_enabled', False)),
         'collapsed': bool(item.collapsed),
+        'archived': bool(getattr(item, 'archived', False)),
         'updated_at': _iso(item.updated_at),
         'created_at': _iso(item.created_at),
     }
@@ -1640,7 +2034,7 @@ def ip_delete_logs(request):
     return _ok(_unattached_ip_delete_items(limit=limit))
 
 
-def _shutdown_plan_item_payload(order, *, queue_status='scheduled_future', queue_status_label='未来计划', next_run_at=None, last_failure_reason=None):
+def _shutdown_plan_item_payload(order, *, queue_status='scheduled_future', queue_status_label='未来计划', next_run_at=None, last_failure_reason=None, note=''):
     user_display_name, username_label = _telegram_user_labels(order.user)
     notice_ip = order.public_ip or order.previous_public_ip or '未分配'
     plan_at = next_run_at or order.delete_at
@@ -1660,6 +2054,7 @@ def _shutdown_plan_item_payload(order, *, queue_status='scheduled_future', queue
     else:
         execution_status = '等待服务器删除计划'
     execution_plan = f'删除服务器 {_fmt_dashboard_dt(plan_at)}' if plan_at else '等待删除时间'
+    note = str(note or '').strip()
     return {
         'id': f'order-{order.id}',
         'item_type': 'order',
@@ -1685,8 +2080,9 @@ def _shutdown_plan_item_payload(order, *, queue_status='scheduled_future', queue
         'last_failure_reason': last_failure_reason,
         'execution_status': execution_status,
         'execution_plan': execution_plan,
-        'note': order.provision_note or '',
-        'display_note': _compact_dashboard_note(order.provision_note, max_chars=500),
+        'source_note': str(getattr(order, 'provision_note', '') or '').strip(),
+        'note': note,
+        'display_note': _compact_dashboard_note(note, max_chars=500),
         'related_path': f'/admin/cloud-orders/{order.id}',
         'detail_path': f'/admin/cloud-orders/{order.id}',
         'order_detail_path': f'/admin/cloud-orders/{order.id}',
@@ -1694,7 +2090,7 @@ def _shutdown_plan_item_payload(order, *, queue_status='scheduled_future', queue
     }
 
 
-def _orphan_asset_delete_plan_item_payload(asset, *, queue_status='orphan_due', queue_status_label='无订单资产待删除'):
+def _orphan_asset_delete_plan_item_payload(asset, *, queue_status='orphan_due', queue_status_label='无订单资产待删除', note=''):
     account_name, external_account_id = _cloud_account_labels(asset)
     ip = asset.public_ip or asset.previous_public_ip or '未分配'
     plan_at = asset.actual_expires_at
@@ -1714,6 +2110,7 @@ def _orphan_asset_delete_plan_item_payload(asset, *, queue_status='orphan_due', 
     elif queue_status == 'scheduled_future':
         execution_status = '等待服务器删除计划'
     user_display_name, username_label = _telegram_user_labels(asset.user if getattr(asset, 'user', None) else None)
+    note = str(note or '').strip()
     return {
         'id': f'asset-{asset.id}',
         'item_type': 'orphan_asset',
@@ -1739,8 +2136,9 @@ def _orphan_asset_delete_plan_item_payload(asset, *, queue_status='orphan_due', 
         'last_failure_reason': None,
         'execution_status': execution_status,
         'execution_plan': f'删除服务器 {_fmt_dashboard_dt(plan_at)}' if plan_at else '等待删除时间',
-        'note': asset.note or '',
-        'display_note': _compact_dashboard_note(asset.note, max_chars=500),
+        'source_note': str(getattr(asset, 'note', '') or '').strip(),
+        'note': note,
+        'display_note': _compact_dashboard_note(note, max_chars=500),
         'cloud_account_id': asset.cloud_account_id,
         'cloud_account_name': account_name,
         'external_account_id': external_account_id,
@@ -1770,7 +2168,7 @@ def _collect_shutdown_plan_queue(now, limit=100):
             delete_at__isnull=False,
             delete_at__lte=now,
             cloud_account__shutdown_enabled=False,
-        ).exclude(id__in=list(due_ids)).order_by('delete_at', 'id')[:100]
+        ).exclude(provider='aliyun_simple').exclude(id__in=list(due_ids)).order_by('delete_at', 'id')[:100]
     )
     for order in disabled_due_orders:
         due_orders.append(order)
@@ -1783,6 +2181,7 @@ def _collect_shutdown_plan_queue(now, limit=100):
             kind=CloudAsset.KIND_SERVER,
             actual_expires_at__lte=now,
         ).filter(Q(order__isnull=True) | stale_linked_asset_q)
+        .exclude(provider='aliyun_simple')
         .exclude(waiting_manual_time_q)
         .exclude(unattached_static_ip_q)
         .exclude(_cloud_asset_deleted_or_missing_q())
@@ -1800,6 +2199,8 @@ def _collect_shutdown_plan_queue(now, limit=100):
         order = log.order
         if not order or order.id in due_ids:
             continue
+        if order.provider == 'aliyun_simple':
+            continue
         if order.status not in {'suspended', 'deleting', 'failed'}:
             continue
         if order.delete_at and order.delete_at <= now:
@@ -1811,7 +2212,7 @@ def _collect_shutdown_plan_queue(now, limit=100):
         status__in=['suspended', 'deleting'],
         delete_at__isnull=False,
         delete_at__lte=now,
-    ).exclude(id__in=list(due_ids)).order_by('delete_at', 'id')[:limit]
+    ).exclude(provider='aliyun_simple').exclude(id__in=list(due_ids)).order_by('delete_at', 'id')[:limit]
     for order in fallback_qs:
         fallback_orders.append(order)
         due_ids.add(order.id)
@@ -1824,6 +2225,7 @@ def _collect_shutdown_plan_queue(now, limit=100):
             kind=CloudAsset.KIND_SERVER,
             actual_expires_at__gt=now,
         ).filter(Q(order__isnull=True) | stale_linked_asset_q)
+        .exclude(provider='aliyun_simple')
         .exclude(id__in=orphan_due_asset_ids)
         .exclude(waiting_manual_time_q)
         .exclude(unattached_static_ip_q)
@@ -1833,7 +2235,16 @@ def _collect_shutdown_plan_queue(now, limit=100):
     future_qs = CloudServerOrder.objects.select_related('user', 'cloud_account').filter(
         status__in=['suspended', 'deleting'],
         delete_at__isnull=False,
-    ).exclude(id__in=list(due_ids)).order_by('delete_at', 'id')[:limit]
+    ).exclude(provider='aliyun_simple').exclude(id__in=list(due_ids)).order_by('delete_at', 'id')[:limit]
+    order_note_map, orphan_note_map, _ = _lifecycle_plan_note_maps(
+        order_ids=[
+            *[order.id for order in due_orders],
+            *[order.id for order, _ in recent_failures.values()],
+            *[order.id for order in fallback_orders],
+            *[order.id for order in future_qs],
+        ],
+        orphan_asset_ids=[*orphan_due_asset_ids, *[asset.id for asset in future_orphan_assets]],
+    )
     for order in future_qs:
         if not next_run_at or order.delete_at < next_run_at:
             next_run_at = order.delete_at
@@ -1841,25 +2252,72 @@ def _collect_shutdown_plan_queue(now, limit=100):
             due_ids.add(order.id)
             due_orders.append(order)
             continue
-        future_items.append(_shutdown_plan_item_payload(order, queue_status='scheduled_future', queue_status_label='未来计划', next_run_at=order.delete_at))
+        future_items.append(
+            _shutdown_plan_item_payload(
+                order,
+                queue_status='scheduled_future',
+                queue_status_label='未来计划',
+                next_run_at=order.delete_at,
+                note=_lifecycle_plan_note_text(order_note_map.get(order.id)),
+            )
+        )
 
-    due_items = [_shutdown_plan_item_payload(order, queue_status='due_now', queue_status_label='本轮待删除', next_run_at=order.delete_at) for order in due_orders]
-    due_items.extend(_orphan_asset_delete_plan_item_payload(asset) for asset in orphan_due_assets)
+    due_items = [
+        _shutdown_plan_item_payload(
+            order,
+            queue_status='due_now',
+            queue_status_label='本轮待删除',
+            next_run_at=order.delete_at,
+            note=_lifecycle_plan_note_text(order_note_map.get(order.id)),
+        )
+        for order in due_orders
+    ]
+    due_items.extend(
+        _orphan_asset_delete_plan_item_payload(asset, note=_lifecycle_plan_note_text(orphan_note_map.get(asset.id)))
+        for asset in orphan_due_assets
+    )
     due_items.extend([
-        _shutdown_plan_item_payload(order, queue_status='retry_failed', queue_status_label='删除失败待重试', next_run_at=order.delete_at, last_failure_reason=reason)
+        _shutdown_plan_item_payload(
+            order,
+            queue_status='retry_failed',
+            queue_status_label='删除失败待重试',
+            next_run_at=order.delete_at,
+            last_failure_reason=reason,
+            note=_lifecycle_plan_note_text(order_note_map.get(order.id)),
+        )
         for order, reason in recent_failures.values()
     ])
     due_items.extend([
-        _shutdown_plan_item_payload(order, queue_status='fallback_retry', queue_status_label='过期兜底重试', next_run_at=order.delete_at)
+        _shutdown_plan_item_payload(
+            order,
+            queue_status='fallback_retry',
+            queue_status_label='过期兜底重试',
+            next_run_at=order.delete_at,
+            note=_lifecycle_plan_note_text(order_note_map.get(order.id)),
+        )
         for order in fallback_orders
     ])
     for asset in future_orphan_assets:
         if not next_run_at or asset.actual_expires_at < next_run_at:
             next_run_at = asset.actual_expires_at
         if asset.actual_expires_at <= pending_until:
-            due_items.append(_orphan_asset_delete_plan_item_payload(asset, queue_status='within_window', queue_status_label='3天内待删除'))
+            due_items.append(
+                _orphan_asset_delete_plan_item_payload(
+                    asset,
+                    queue_status='within_window',
+                    queue_status_label='3天内待删除',
+                    note=_lifecycle_plan_note_text(orphan_note_map.get(asset.id)),
+                )
+            )
             continue
-        future_items.append(_orphan_asset_delete_plan_item_payload(asset, queue_status='scheduled_future', queue_status_label='未来计划'))
+        future_items.append(
+            _orphan_asset_delete_plan_item_payload(
+                asset,
+                queue_status='scheduled_future',
+                queue_status_label='未来计划',
+                note=_lifecycle_plan_note_text(orphan_note_map.get(asset.id)),
+            )
+        )
 
     due_items.sort(key=lambda item: parse_datetime(item.get('delete_at') or '') or datetime.max.replace(tzinfo=dt_timezone.utc))
     future_items.sort(key=lambda item: parse_datetime(item.get('delete_at') or '') or datetime.max.replace(tzinfo=dt_timezone.utc))
@@ -1895,6 +2353,9 @@ def _shutdown_history_item_payload(log):
         'failure_reason': '' if ok else _compact_failure_reason(log.note, fallback=_status_label(log.event_type, CloudIpLog.EVENT_CHOICES) or '失败/跳过'),
         'execution_status': _status_label(log.event_type, CloudIpLog.EVENT_CHOICES),
         'deletion_source_label': _delete_source_label(log.note),
+        'source_note': log.note or '',
+        'note': log.note or '',
+        'display_note': _compact_dashboard_note(log.note or '', max_chars=500),
         'executed_at': _iso(log.created_at),
         'service_expires_at': _iso(getattr(order, 'service_expires_at', None)),
         'suspend_at': _iso(getattr(order, 'suspend_at', None)),
@@ -1926,6 +2387,9 @@ def _shutdown_history_order_payload(order):
         'failure_reason': '',
         'execution_status': '服务器已删除',
         'deletion_source_label': _delete_source_label(order.provision_note),
+        'source_note': order.provision_note or '',
+        'note': order.provision_note or '',
+        'display_note': _compact_dashboard_note(order.provision_note or '', max_chars=500),
         'executed_at': _iso(executed_at),
         'service_expires_at': _iso(order.service_expires_at),
         'suspend_at': _iso(order.suspend_at),
@@ -1945,49 +2409,243 @@ def lifecycle_plans(request):
     except (TypeError, ValueError):
         limit = 1000
     limit = max(1, min(limit, 1000))
-    shutdown_items = _shutdown_log_items(limit=limit)
-    ip_delete_items = _unattached_ip_delete_items(limit=limit)
     now = timezone.now()
+
+    def parse_item_dt(value, default=None):
+        if not value:
+            return default
+        parsed = parse_datetime(value) if isinstance(value, str) else value
+        if not parsed:
+            return default
+        if timezone.is_naive(parsed):
+            parsed = timezone.make_aware(parsed, timezone.get_current_timezone())
+        return parsed
 
     def decorate_plan_item(item):
         note = str(item.get('note') or '')
-        item['display_note'] = _compact_dashboard_note(note, max_chars=500)
+        incoming_display_note = str(item.get('display_note') or '')
+        source_note = str(item.get('source_note') or '')
+        item['display_note'] = _compact_dashboard_note(note or incoming_display_note or source_note, max_chars=500)
+        is_ip_delete_item = str(item.get('plan_kind') or '') == CloudLifecyclePlan.PLAN_KIND_UNATTACHED_IP_DELETE
+        delete_attempt = _unattached_ip_delete_attempt_state(item) if is_ip_delete_item else {}
+        if delete_attempt:
+            item.update(delete_attempt)
         first_line = next((line.strip() for line in note.splitlines() if line.strip()), '')
-        if not first_line.startswith('执行内容：'):
-            return item
-        content_match = re.search(r'执行内容：([^\n]+?)(?:；(?:时间|账号|地区|IP|固定IP名|端口|secret|服务到期|宽限删机|用户续费)|$)', first_line)
-        plan_match = re.search(r'执行计划：([^；\n]+)', first_line)
-        status_text = (content_match.group(1).strip() if content_match else '')
-        if status_text:
-            item['execution_status'] = status_text[:120]
-        if plan_match:
-            item['execution_plan'] = plan_match.group(1).strip()[:120]
+        if first_line.startswith('执行内容：'):
+            content_match = re.search(r'执行内容：([^\n]+?)(?:；(?:时间|账号|地区|IP|固定IP名|端口|secret|服务到期|宽限删机|用户续费)|$)', first_line)
+            plan_match = re.search(r'执行计划：([^；\n]+)', first_line)
+            status_text = (content_match.group(1).strip() if content_match else '')
+            if status_text:
+                item['execution_status'] = status_text[:120]
+            if plan_match:
+                item['execution_plan'] = plan_match.group(1).strip()[:120]
+
+        provider_status = str(item.get('provider_status') or item.get('status_label') or item.get('status') or '')
+        queue_status = str(item.get('queue_status') or '')
+        item_type = str(item.get('item_type') or '')
+        execution_status = str(item.get('execution_status') or '')
+        merged_text = '\n'.join(filter(None, [source_note, note, provider_status, execution_status, str(item.get('deletion_source_label') or '')]))
+        merged_text = merged_text.replace('固定 IP', '固定IP')
+        confirm_state = missing_confirmation_state('\n'.join(filter(None, [source_note, note, provider_status, execution_status])))
+        confirm_summary = ''
+        if confirm_state['count'] > 0:
+            confirm_summary = f'删除确认进度：第{confirm_state["count"]}/{confirm_state["threshold"]}次删除确认'
+        cloud_missing = any(marker in merged_text for marker in ['云上已不存在', '云上未找到实例/IP', '云端已不存在', '已标记删除'])
+        instance_deleted = any(marker in merged_text for marker in ['已执行真实删机', '实例已删除', 'AWS 实例已执行删除', '服务器已删除'])
+        ip_retained = any(marker in merged_text for marker in ['固定IP保留中', '固定IP仍存在但未附加', '未附加固定IP', '固定IP已分离为未附加状态'])
+        shutdown_disabled = queue_status == 'shutdown_disabled' or '关机计划关闭' in merged_text
+        is_history = bool(item.get('is_history') or item.get('executed_at'))
+
+        resource_state = 'unknown'
+        resource_state_label = '状态待确认'
+        plan_state = 'pending'
+        plan_state_label = '待执行'
+        should_execute = not is_history
+        blocked_reason = ''
+
+        if is_history:
+            plan_state = 'completed'
+            plan_state_label = '历史记录'
+            should_execute = False
+        if confirm_state['count'] > 0 and not is_history:
+            resource_state = 'missing_confirming'
+            resource_state_label = f'云上缺失待确认（第{confirm_state["count"]}/{confirm_state["threshold"]}次）'
+            plan_state = 'blocked'
+            plan_state_label = '等待确认'
+            should_execute = False
+            blocked_reason = f'仍在缺失确认窗口，当前为第{confirm_state["count"]}/{confirm_state["threshold"]}次删除确认'
+        elif cloud_missing:
+            resource_state = 'cloud_missing'
+            resource_state_label = '云上已不存在'
+            plan_state = 'completed'
+            plan_state_label = '无需执行'
+            should_execute = False
+            blocked_reason = '云上已不存在，无需继续执行删机'
+        elif instance_deleted and ip_retained:
+            resource_state = 'instance_deleted_ip_retained'
+            resource_state_label = '实例已删除（固定IP保留中）'
+            plan_state = 'completed'
+            plan_state_label = '等待IP回收'
+            should_execute = False
+            blocked_reason = '实例已删除，仅剩固定IP保留或回收计划'
+        elif instance_deleted:
+            resource_state = 'instance_deleted'
+            resource_state_label = '实例已删除'
+            plan_state = 'completed'
+            plan_state_label = '无需执行'
+            should_execute = False
+            blocked_reason = '实例已删除，无需继续执行删机'
+        elif item_type == 'orphan_asset' and ip_retained:
+            resource_state = 'fixed_ip_unattached'
+            resource_state_label = '固定IP未附加'
+            plan_state = 'completed'
+            plan_state_label = '等待IP回收'
+            should_execute = False
+            blocked_reason = '当前已不是待删服务器，只剩固定IP回收事项'
+        elif shutdown_disabled:
+            resource_state = 'instance_present'
+            resource_state_label = '实例仍存在'
+            plan_state = 'shutdown_disabled'
+            plan_state_label = '关机计划关闭'
+            should_execute = False
+            blocked_reason = '关机计划关闭，禁止真实关机和删机'
+        elif queue_status in {'retry_failed', 'fallback_retry'}:
+            resource_state = 'instance_present'
+            resource_state_label = '实例待重试处理'
+            plan_state = 'pending'
+            plan_state_label = '待重试'
+        elif queue_status in {'due_now', 'within_window', 'orphan_due'}:
+            resource_state = 'instance_present'
+            resource_state_label = '实例仍存在'
+            plan_state = 'pending'
+            plan_state_label = '待执行'
+        elif queue_status == 'scheduled_future':
+            resource_state = 'instance_present'
+            resource_state_label = '实例仍存在'
+            plan_state = 'scheduled'
+            plan_state_label = '已排期'
+        elif item.get('is_history'):
+            resource_state = 'history'
+            resource_state_label = '历史记录'
+        elif ip_retained:
+            resource_state = 'fixed_ip_unattached'
+            resource_state_label = '固定IP未附加'
+            plan_state = 'scheduled'
+            plan_state_label = '等待回收'
+        elif str(item.get('status') or '') in {CloudAsset.STATUS_RUNNING, CloudAsset.STATUS_PENDING, CloudAsset.STATUS_STARTING, CloudAsset.STATUS_STOPPED, CloudAsset.STATUS_SUSPENDED}:
+            resource_state = 'instance_present'
+            resource_state_label = '实例仍存在'
+
+        delete_attempt_label = str(item.get('delete_attempt_label') or '')
+        if delete_attempt_label and is_ip_delete_item and confirm_state['count'] <= 0:
+            resource_state_label = f'{resource_state_label}（{delete_attempt_label}）'
+
+        display_note_parts = [note or (source_note if is_ip_delete_item else item.get('display_note'))]
+        if confirm_summary and not is_history:
+            display_note_parts.append(confirm_summary)
+        if delete_attempt_label and is_ip_delete_item and confirm_state['count'] <= 0:
+            display_note_parts.append(f'删除次数：{delete_attempt_label}')
+        item['display_note'] = _compact_dashboard_note('\n'.join(filter(None, display_note_parts)), max_chars=500)
+
+        item['resource_state'] = resource_state
+        item['resource_state_label'] = resource_state_label
+        item['plan_state'] = plan_state
+        item['plan_state_label'] = plan_state_label
+        item['should_execute'] = should_execute
+        item['blocked_reason'] = blocked_reason
+        item['status_summary'] = f'真实状态：{resource_state_label}；计划状态：{plan_state_label}' + (f'；原因：{blocked_reason}' if blocked_reason else '')
         return item
 
-    shutdown_items = [decorate_plan_item(item) for item in shutdown_items]
-    ip_delete_items = [decorate_plan_item(item) for item in ip_delete_items]
+    def dedupe_shutdown_active_items(items):
+        passthrough = []
+        buckets = {}
+        for item in items:
+            if str(item.get('item_type') or '') != 'orphan_asset':
+                passthrough.append(item)
+                continue
+            key = str(item.get('ip') or item.get('public_ip') or item.get('asset_id') or item.get('id') or '').strip()
+            if not key:
+                passthrough.append(item)
+                continue
+            buckets.setdefault(key, []).append(item)
+        deduped = list(passthrough)
+        for bucket in buckets.values():
+            bucket = sorted(
+                bucket,
+                key=lambda entry: (
+                    parse_item_dt(entry.get('logged_at') or entry.get('next_run_at') or entry.get('delete_at'), datetime.min.replace(tzinfo=dt_timezone.utc)),
+                    int(entry.get('asset_id') or 0),
+                ),
+                reverse=True,
+            )
+            keep = bucket[0]
+            duplicate_count = len(bucket) - 1
+            if duplicate_count > 0:
+                labels = [str(keep.get('quality_label') or '').strip(), f'已覆盖 {duplicate_count} 条同 IP 旧服务器记录']
+                keep['quality_label'] = '，'.join([label for label in labels if label])
+                flags = list(keep.get('quality_flags') or [])
+                if 'covered_duplicates' not in flags:
+                    flags.append('covered_duplicates')
+                keep['quality_flags'] = flags
+            deduped.append(keep)
+        return deduped
 
-    def is_due(value):
-        if not value:
-            return False
-        parsed = parse_datetime(value)
-        if not parsed:
-            return False
-        if timezone.is_naive(parsed):
-            parsed = timezone.make_aware(parsed, timezone.get_current_timezone())
-        return parsed <= now
+    def convert_completed_active_to_history(item):
+        executed_at = item.get('logged_at') or item.get('delete_at') or item.get('next_run_at')
+        return {
+            **item,
+            'executed_at': executed_at,
+            'failure_reason': None,
+            'is_success': True,
+            'result_label': '已完成',
+            'execution_status': item.get('resource_state_label') or item.get('execution_status') or '已完成',
+        }
 
     compact = str(request.GET.get('compact') or '').strip().lower() in {'1', 'true', 'yes', 'on'}
-    shutdown_queue = _collect_shutdown_plan_queue(now, limit=limit)
-    history_qs = CloudIpLog.objects.select_related('order', 'user').filter(
-        event_type__in=['deleted', 'delete_failed', 'delete_skipped']
-    ).order_by('-created_at', '-id')[:limit]
-    history_items = [_shutdown_history_item_payload(log) for log in history_qs]
-    history_order_ids = {item.get('order_id') for item in history_items if item.get('order_id')}
-    fallback_deleted_orders = CloudServerOrder.objects.select_related('user').filter(status='deleted').exclude(id__in=list(history_order_ids)).order_by('-updated_at', '-id')[:limit]
-    history_items.extend(_shutdown_history_order_payload(order) for order in fallback_deleted_orders)
-    history_items.sort(key=lambda item: parse_datetime(item.get('executed_at') or '') or datetime.min.replace(tzinfo=dt_timezone.utc), reverse=True)
+    force_refresh = str(request.GET.get('refresh') or request.GET.get('sync') or '').strip().lower() in {'1', 'true', 'yes', 'on'}
+    did_refresh = False
+    if force_refresh or not _lifecycle_plan_table_has_rows():
+        sync_limit = max(limit, 1000)
+        _sync_lifecycle_plan_table(limit=sync_limit)
+        did_refresh = True
+    shutdown_active_items = _cloud_lifecycle_plan_items(plan_kind=CloudLifecyclePlan.PLAN_KIND_SHUTDOWN_ORDER, data_group='active')
+    shutdown_active_items.extend(_cloud_lifecycle_plan_items(plan_kind=CloudLifecyclePlan.PLAN_KIND_ORPHAN_ASSET_DELETE, data_group='active'))
+    shutdown_active_items = [decorate_plan_item(item) for item in shutdown_active_items]
+
+    completed_shutdown_items = [
+        item for item in shutdown_active_items
+        if item.get('plan_state') == 'completed' and not item.get('should_execute')
+    ]
+    shutdown_active_items = [
+        item for item in shutdown_active_items
+        if not (item.get('plan_state') == 'completed' and not item.get('should_execute'))
+    ]
+    shutdown_active_items = dedupe_shutdown_active_items(shutdown_active_items)
+
+    history_items = _cloud_lifecycle_plan_items(plan_kind=CloudLifecyclePlan.PLAN_KIND_SHUTDOWN_ORDER, data_group='history')
+    history_items = [decorate_plan_item(item) for item in history_items]
+    history_items.extend(convert_completed_active_to_history(item) for item in completed_shutdown_items)
+    history_items.sort(
+        key=lambda item: parse_item_dt(item.get('executed_at') or item.get('logged_at') or '', datetime.min.replace(tzinfo=dt_timezone.utc)),
+        reverse=True,
+    )
     history_items = history_items[:limit]
+
+    ip_delete_items = _cloud_lifecycle_plan_items(plan_kind=CloudLifecyclePlan.PLAN_KIND_UNATTACHED_IP_DELETE, data_group='active')
+    ip_delete_items.extend(_cloud_lifecycle_plan_items(plan_kind=CloudLifecyclePlan.PLAN_KIND_UNATTACHED_IP_DELETE, data_group='history'))
+    ip_delete_items = [decorate_plan_item(item) for item in ip_delete_items]
+
+    server_pending_until = now + timezone.timedelta(days=7)
+
+    def is_server_future(item):
+        delete_at = parse_item_dt(item.get('delete_at'))
+        if delete_at:
+            return delete_at > server_pending_until
+        return str(item.get('queue_status') or '') == 'scheduled_future'
+
+    due_items = [item for item in shutdown_active_items if not is_server_future(item)]
+    future_plan_items = [item for item in shutdown_active_items if is_server_future(item)]
+    shutdown_items = list(shutdown_active_items)
     ip_delete_pending_until = now + timezone.timedelta(days=7)
 
     def is_ip_delete_pending(item):
@@ -1996,19 +2654,16 @@ def lifecycle_plans(request):
         if item.get('is_overdue'):
             return True
         delete_at = item.get('delete_at')
-        if not delete_at:
-            return False
-        parsed = parse_datetime(delete_at)
-        if not parsed:
-            return False
-        if timezone.is_naive(parsed):
-            parsed = timezone.make_aware(parsed, timezone.get_current_timezone())
-        return parsed <= ip_delete_pending_until
+        parsed = parse_item_dt(delete_at)
+        return bool(parsed and parsed <= ip_delete_pending_until)
 
     pending_ip_delete_items = [item for item in ip_delete_items if is_ip_delete_pending(item)]
     ip_delete_history_items = [item for item in ip_delete_items if item.get('is_history')]
     recent_since = now - timezone.timedelta(days=1)
-    recent_history = [item for item in history_items if item.get('executed_at') and parse_datetime(item['executed_at']) and parse_datetime(item['executed_at']) >= recent_since]
+    recent_history = [
+        item for item in history_items
+        if parse_item_dt(item.get('executed_at')) and parse_item_dt(item.get('executed_at')) >= recent_since
+    ]
     if compact:
         def compact_notes(items):
             for item in items:
@@ -2019,8 +2674,9 @@ def lifecycle_plans(request):
         compact_notes(shutdown_items)
         compact_notes(ip_delete_items)
         compact_notes(history_items)
-        compact_notes(shutdown_queue['due_items'])
-        compact_notes(shutdown_queue['future_plan_items'])
+        compact_notes(due_items)
+        compact_notes(future_plan_items)
+    last_refresh_at = _lifecycle_plan_last_refresh_at()
     return _ok({
         'task_key': 'server_delete_plans',
         'task_label': '服务器删除计划',
@@ -2028,21 +2684,46 @@ def lifecycle_plans(request):
         'interval_minutes': 1440,
         'last_run_at': history_items[0]['executed_at'] if history_items else None,
         'next_run_at': _iso(_next_runtime_time('cloud_delete_time', '15:00', now)),
-        'due_count': len(shutdown_queue['due_items']),
+        'last_refresh_at': _iso(last_refresh_at),
+        'refreshed': did_refresh,
+        'cache_mode': 'refreshed' if did_refresh else 'cached',
+        'due_count': len(due_items),
         'recent_success_count': sum(1 for item in recent_history if item.get('is_success')),
         'recent_failure_count': sum(1 for item in recent_history if not item.get('is_success')),
         'pending_ip_delete_count': len(pending_ip_delete_items),
         'server_delete_history_count': len(history_items),
         'ip_delete_history_count': len(ip_delete_history_items),
-        'shutdown_count': len(shutdown_queue['due_items']) + len(shutdown_queue['future_plan_items']),
-        'shutdown_due_count': len(shutdown_queue['due_items']),
+        'shutdown_count': len(due_items) + len(future_plan_items),
+        'shutdown_due_count': len(due_items),
         'ip_delete_count': len(pending_ip_delete_items),
         'ip_delete_due_count': len(pending_ip_delete_items),
-        'due_items': shutdown_queue['due_items'],
-        'future_plan_items': shutdown_queue['future_plan_items'],
+        'due_items': due_items,
+        'future_plan_items': future_plan_items,
         'history_items': history_items,
         'shutdown_items': shutdown_items,
         'ip_delete_items': ip_delete_items,
+    })
+
+
+@csrf_exempt
+@dashboard_login_required
+@require_POST
+def refresh_lifecycle_plan_table(request):
+    payload = _json_payload(request)
+    try:
+        limit = int(payload.get('limit') or request.POST.get('limit') or request.GET.get('limit') or 1000)
+    except (TypeError, ValueError):
+        limit = 1000
+    limit = max(1, min(limit, 1000))
+    bundle = _sync_lifecycle_plan_table(limit=limit)
+    last_refresh_at = _lifecycle_plan_last_refresh_at()
+    return _ok({
+        'refreshed': True,
+        'last_refresh_at': _iso(last_refresh_at),
+        'due_count': len(bundle.get('due_items') or []),
+        'future_count': len(bundle.get('future_plan_items') or []),
+        'history_count': len(bundle.get('history_items') or []),
+        'ip_delete_count': len(bundle.get('ip_delete_items') or []),
     })
 
 
@@ -2055,6 +2736,7 @@ def update_lifecycle_plan_note(request):
     note = str(payload.get('note') or '').strip()
     order_id = payload.get('order_id')
     asset_id = payload.get('asset_id') or payload.get('id')
+    actor = request.user if getattr(request, 'user', None) and getattr(request.user, 'is_authenticated', False) else None
     if item_type == 'order' or order_id:
         try:
             order_id = int(order_id or 0)
@@ -2063,9 +2745,10 @@ def update_lifecycle_plan_note(request):
         order = CloudServerOrder.objects.filter(id=order_id).first()
         if not order:
             return _error('订单不存在', status=404)
-        order.provision_note = note
-        order.save(update_fields=['provision_note', 'updated_at'])
-        return _ok({'item_type': 'order', 'order_id': order.id, 'note': order.provision_note or ''})
+        plan_note = _save_lifecycle_plan_note(item_type='order', note=note, order=order, actor=actor)
+        note_text = _lifecycle_plan_note_text(plan_note)
+        CloudLifecyclePlan.objects.filter(plan_kind=CloudLifecyclePlan.PLAN_KIND_SHUTDOWN_ORDER, order=order).update(note=note_text, display_note=_compact_dashboard_note(note_text, max_chars=500))
+        return _ok({'item_type': 'order', 'order_id': order.id, 'note': note_text, 'display_note': _compact_dashboard_note(note_text, max_chars=500)})
     try:
         asset_id = int(asset_id or 0)
     except (TypeError, ValueError):
@@ -2073,9 +2756,12 @@ def update_lifecycle_plan_note(request):
     asset = CloudAsset.objects.filter(id=asset_id).first()
     if not asset:
         return _error('资产不存在', status=404)
-    asset.note = note
-    asset.save(update_fields=['note', 'updated_at'])
-    return _ok({'item_type': item_type or 'asset', 'asset_id': asset.id, 'note': asset.note or ''})
+    effective_item_type = item_type or 'asset'
+    plan_note = _save_lifecycle_plan_note(item_type=effective_item_type, note=note, asset=asset, actor=actor)
+    note_text = _lifecycle_plan_note_text(plan_note)
+    plan_kind = CloudLifecyclePlan.PLAN_KIND_ORPHAN_ASSET_DELETE if effective_item_type == 'orphan_asset' else CloudLifecyclePlan.PLAN_KIND_UNATTACHED_IP_DELETE
+    CloudLifecyclePlan.objects.filter(plan_kind=plan_kind, asset=asset).update(note=note_text, display_note=_compact_dashboard_note(note_text, max_chars=500))
+    return _ok({'item_type': effective_item_type, 'asset_id': asset.id, 'note': note_text, 'display_note': _compact_dashboard_note(note_text, max_chars=500)})
 
 
 def _run_shutdown_order_sync(order_id: int, queue_status='manual_single', enforce_schedule: bool = True):
@@ -2086,6 +2772,10 @@ def _run_shutdown_order_sync(order_id: int, queue_status='manual_single', enforc
     now = timezone.now()
     if order.status not in {'suspended', 'deleting', 'failed'}:
         reason = f'当前状态为 {_status_label(order.status, CloudServerOrder.STATUS_CHOICES)}，未进入服务器删除阶段'
+        async_to_sync(_record_lifecycle_action_failed)(order.id, 'delete_skipped', reason)
+        return {'order_id': order.id, 'order_no': order.order_no, 'ip': ip, 'queue_status': queue_status, 'ok': False, 'error': reason}
+    if order.provider == 'aliyun_simple':
+        reason = '阿里云轻量服务器当前未接入删除 API，本系统只执行创建、续费和状态同步；不会执行真实删机。'
         async_to_sync(_record_lifecycle_action_failed)(order.id, 'delete_skipped', reason)
         return {'order_id': order.id, 'order_no': order.order_no, 'ip': ip, 'queue_status': queue_status, 'ok': False, 'error': reason}
     if not _shutdown_enabled_for_order(order):
@@ -2114,10 +2804,11 @@ def _run_shutdown_order_sync(order_id: int, queue_status='manual_single', enforc
 
 
 @csrf_exempt
-@dashboard_login_required
+@dashboard_superuser_required
 @require_POST
 def run_shutdown_plan_order(request, order_id):
     result = _run_shutdown_order_sync(order_id, 'manual_single', enforce_schedule=False)
+    _sync_lifecycle_plan_table(limit=1000)
     return _ok({
         'batch_id': secrets.token_hex(8),
         'items': [result],
@@ -2138,6 +2829,8 @@ def _run_orphan_asset_delete_sync(asset_id: int, enforce_schedule: bool = True):
     now = timezone.now()
     if asset.status in {CloudAsset.STATUS_DELETED, CloudAsset.STATUS_DELETING, CloudAsset.STATUS_TERMINATED, CloudAsset.STATUS_TERMINATING}:
         return {'asset_id': asset.id, 'ip': ip, 'ok': False, 'error': '该服务器资产已删除，不需要重复执行'}
+    if asset.provider == 'aliyun_simple':
+        return {'asset_id': asset.id, 'ip': ip, 'ok': False, 'error': '阿里云轻量服务器当前未接入删除 API，本系统不会执行真实删机。'}
     if not _asset_shutdown_enabled(asset):
         return {'asset_id': asset.id, 'ip': ip, 'ok': False, 'error': '云账号关机计划已关闭，跳过真实删机。'}
     if _asset_is_unattached_ip(asset) or not str(asset.instance_id or asset.provider_resource_id or asset.asset_name or '').strip():
@@ -2156,10 +2849,11 @@ def _run_orphan_asset_delete_sync(asset_id: int, enforce_schedule: bool = True):
 
 
 @csrf_exempt
-@dashboard_login_required
+@dashboard_superuser_required
 @require_POST
 def run_orphan_asset_delete_plan(request, asset_id):
     result = _run_orphan_asset_delete_sync(asset_id, enforce_schedule=False)
+    _sync_lifecycle_plan_table(limit=1000)
     return _ok({
         'batch_id': secrets.token_hex(8),
         'items': [result],
@@ -2178,6 +2872,8 @@ def _run_unattached_ip_delete_sync(asset_id: int, enforce_schedule: bool = True)
     now = timezone.now()
     if asset.status in {CloudAsset.STATUS_DELETED, CloudAsset.STATUS_DELETING, CloudAsset.STATUS_TERMINATED, CloudAsset.STATUS_TERMINATING}:
         return {'asset_id': asset.id, 'ip': ip, 'ok': False, 'error': '该 IP 已删除，不需要重复执行'}
+    if not _asset_shutdown_enabled(asset):
+        return {'asset_id': asset.id, 'ip': ip, 'ok': False, 'error': '云账号关机计划已关闭，跳过真实释放固定 IP。'}
     if asset.instance_id:
         return {'asset_id': asset.id, 'ip': ip, 'ok': False, 'error': '该 IP 仍有关联实例，不能按未附加 IP 删除'}
     if enforce_schedule:
@@ -2194,10 +2890,11 @@ def _run_unattached_ip_delete_sync(asset_id: int, enforce_schedule: bool = True)
 
 
 @csrf_exempt
-@dashboard_login_required
+@dashboard_superuser_required
 @require_POST
 def run_unattached_ip_delete_plan(request, asset_id):
     result = _run_unattached_ip_delete_sync(asset_id, enforce_schedule=False)
+    _sync_lifecycle_plan_table(limit=1000)
     return _ok({
         'batch_id': secrets.token_hex(8),
         'items': [result],
@@ -2251,7 +2948,17 @@ def auth_refresh(request):
 @dashboard_login_required
 @require_GET
 def auth_codes(request):
-    return _ok(['dashboard', 'users', 'cloud', 'finance', 'monitoring', 'settings'])
+    codes = ['dashboard', 'users', 'cloud:read', 'finance:read', 'monitoring:read', 'settings:read']
+    if getattr(request.user, 'is_superuser', False):
+        codes.extend([
+            'superuser',
+            'users:write',
+            'cloud:write',
+            'cloud:danger',
+            'finance:write',
+            'settings:write',
+        ])
+    return _ok(codes)
 
 
 @csrf_exempt
@@ -2301,6 +3008,7 @@ def auth_totp_bind(request):
 @require_GET
 def user_info(request):
     username = request.user.get_username() or 'admin'
+    is_superuser = bool(getattr(request.user, 'is_superuser', False))
     return _ok({
         'userId': str(request.user.pk),
         'username': username,
@@ -2309,10 +3017,14 @@ def user_info(request):
         'desc': 'Shop 管理后台管理员',
         'homePath': '/admin/analytics',
         'token': _session_token_for_request(request),
+        'is_superuser': is_superuser,
+        'is_staff': bool(getattr(request.user, 'is_staff', False)),
+        'roles': ['superuser' if is_superuser else 'staff'],
+        'permissions': ['superuser', 'cloud:danger'] if is_superuser else [],
     })
 
 
-@login_required
+@dashboard_login_required
 @require_GET
 def me(request):
     return _ok({
@@ -2400,6 +3112,8 @@ def _site_config_group_map():
     }
 
 
+@dashboard_login_required
+@require_GET
 def site_config_groups(request):
     groups = _site_config_group_map()
     group_key = str(request.GET.get('group') or '').strip()
@@ -2422,16 +3136,12 @@ def site_config_groups(request):
             stored_value = SiteConfig.get(key, '') if obj else ''
             effective_value = stored_value or get_runtime_config(key, '')
             value_preview = effective_value
-            if is_sensitive and effective_value and key != 'trongrid_api_key':
-                plain = effective_value
-                if len(plain) <= 6:
-                    value_preview = '*' * len(plain)
-                else:
-                    value_preview = f'{plain[:3]}***{plain[-3:]}'
+            if is_sensitive:
+                value_preview = _masked_sensitive_preview(effective_value)
             items.append({
                 'key': key,
                 'id': obj.id if obj else None,
-                'value': effective_value,
+                'value': '' if is_sensitive else effective_value,
                 'value_preview': value_preview,
                 'default_value': text_default(key, ''),
                 'is_sensitive': is_sensitive,
@@ -2681,6 +3391,17 @@ def delete_cloud_account(request, account_id: int):
     item = CloudAccountConfig.objects.filter(id=account_id).first()
     if not item:
         return _error('云账号不存在', status=404)
+    linked_asset_count = CloudAsset.objects.filter(cloud_account=item).count()
+    linked_order_count = CloudServerOrder.objects.filter(cloud_account=item).count()
+    linked_log_count = item.sync_logs.count()
+    if linked_asset_count or linked_order_count or linked_log_count:
+        return _error(
+            (
+                '该云账号已有业务数据，不能物理删除；请改为停用账号。'
+                f'关联资产 {linked_asset_count} 条，关联订单 {linked_order_count} 条，同步日志 {linked_log_count} 条。'
+            ),
+            status=400,
+        )
     item.delete()
     return _ok(True)
 
@@ -2728,35 +3449,21 @@ def verify_cloud_account(request, account_id: int):
             from cloud.aliyun_simple import _build_client as _default_build_client
             from cloud.aliyun_simple import _region_endpoint, _runtime_options
 
-            old_key = os.environ.get('ALIBABA_CLOUD_ACCESS_KEY_ID')
-            old_secret = os.environ.get('ALIBABA_CLOUD_ACCESS_KEY_SECRET')
-            try:
-                os.environ['ALIBABA_CLOUD_ACCESS_KEY_ID'] = item.access_key_plain
-                os.environ['ALIBABA_CLOUD_ACCESS_KEY_SECRET'] = item.secret_key_plain
-                client = _default_build_client(_region_endpoint(region or 'cn-hongkong'))
-                if not client:
-                    raise ValueError('无法创建阿里云客户端')
-                response = client.list_instances_with_options(
-                    swas_models.ListInstancesRequest(region_id=region or 'cn-hongkong', page_size=10),
-                    _runtime_options(),
-                )
-                instances = response.body.to_map().get('Instances', []) or []
-                count = len(instances)
-                account_id = _fetch_aliyun_account_id(item)
-                if account_id and item.external_account_id != account_id:
-                    item.external_account_id = account_id
-                    item.save(update_fields=['external_account_id', 'updated_at'])
-                item.mark_status(CloudAccountConfig.STATUS_OK, f'验证成功，账号ID {account_id or "-"}，实例数 {count}，地区 {region or "cn-hongkong"}')
-                return _ok({'valid': True, 'provider': item.provider, 'region': region or 'cn-hongkong', 'instance_count': count, 'account': _cloud_account_payload(item)})
-            finally:
-                if old_key is None:
-                    os.environ.pop('ALIBABA_CLOUD_ACCESS_KEY_ID', None)
-                else:
-                    os.environ['ALIBABA_CLOUD_ACCESS_KEY_ID'] = old_key
-                if old_secret is None:
-                    os.environ.pop('ALIBABA_CLOUD_ACCESS_KEY_SECRET', None)
-                else:
-                    os.environ['ALIBABA_CLOUD_ACCESS_KEY_SECRET'] = old_secret
+            client = _default_build_client(_region_endpoint(region or 'cn-hongkong'), account=item)
+            if not client:
+                raise ValueError('无法创建阿里云客户端')
+            response = client.list_instances_with_options(
+                swas_models.ListInstancesRequest(region_id=region or 'cn-hongkong', page_size=10),
+                _runtime_options(),
+            )
+            instances = response.body.to_map().get('Instances', []) or []
+            count = len(instances)
+            account_id = _fetch_aliyun_account_id(item)
+            if account_id and item.external_account_id != account_id:
+                item.external_account_id = account_id
+                item.save(update_fields=['external_account_id', 'updated_at'])
+            item.mark_status(CloudAccountConfig.STATUS_OK, f'验证成功，账号ID {account_id or "-"}，实例数 {count}，地区 {region or "cn-hongkong"}')
+            return _ok({'valid': True, 'provider': item.provider, 'region': region or 'cn-hongkong', 'instance_count': count, 'account': _cloud_account_payload(item)})
         item.mark_status(CloudAccountConfig.STATUS_UNSUPPORTED, '暂不支持该云平台验证')
         return _error('暂不支持该云平台', status=400)
     except Exception as exc:
@@ -2764,7 +3471,7 @@ def verify_cloud_account(request, account_id: int):
         return _error(f'验证失败: {exc}', status=400)
 
 
-@dashboard_login_required
+@dashboard_superuser_required
 @require_GET
 def admin_users_list(request):
     User = get_user_model()
@@ -2773,7 +3480,7 @@ def admin_users_list(request):
 
 
 @csrf_exempt
-@dashboard_login_required
+@dashboard_superuser_required
 @require_POST
 def create_admin_user(request):
     User = get_user_model()
@@ -2800,7 +3507,7 @@ def create_admin_user(request):
 
 
 @csrf_exempt
-@dashboard_login_required
+@dashboard_superuser_required
 @require_POST
 def update_admin_user(request, user_id: int):
     User = get_user_model()
@@ -2842,7 +3549,7 @@ def update_admin_user(request, user_id: int):
 
 
 @csrf_exempt
-@dashboard_login_required
+@dashboard_superuser_required
 @require_POST
 def delete_admin_user(request, user_id: int):
     User = get_user_model()
@@ -2981,7 +3688,7 @@ def users_list(request):
 
 
 @csrf_exempt
-@dashboard_login_required
+@dashboard_superuser_required
 @require_POST
 def update_user_balance(request, user_id):
     payload = _read_payload(request)
@@ -3416,7 +4123,7 @@ def telegram_group_filters_list(request):
     binding_only = str(request.GET.get('binding_only') or '').lower() in {'1', 'true', 'yes', 'on'}
     queryset = TelegramGroupFilter.objects.order_by('-updated_at', '-id')
     if binding_only:
-        queryset = queryset.filter(collapsed=False)
+        queryset = queryset.filter(collapsed=False, archived=False)
     if keyword:
         query = Q(title__icontains=keyword) | Q(username__icontains=keyword)
         try:
@@ -3443,6 +4150,7 @@ def create_telegram_group_filter(request):
         enabled=_payload_bool(payload, 'enabled'),
         push_enabled=_payload_bool(payload, 'push_enabled'),
         collapsed=_payload_bool(payload, 'collapsed'),
+        archived=_payload_bool(payload, 'archived'),
     )
     return _ok(_telegram_group_filter_payload(item))
 
@@ -3517,6 +4225,11 @@ def update_telegram_group_filter(request, group_id: int):
         if item.collapsed != collapsed:
             item.collapsed = collapsed
             changed.append('collapsed')
+    if 'archived' in payload:
+        archived = _payload_bool(payload, 'archived')
+        if getattr(item, 'archived', False) != archived:
+            item.archived = archived
+            changed.append('archived')
     if changed:
         changed.append('updated_at')
         item.save(update_fields=changed)
@@ -3574,7 +4287,7 @@ def send_telegram_chat_message(request):
 def archive_telegram_chat(request):
     payload = _read_payload(request)
     raw_chat_id = payload.get('chat_id')
-    archived = bool(payload.get('archived', True))
+    archived = _payload_bool(payload, 'archived', True)
     try:
         chat_id = int(raw_chat_id)
     except (TypeError, ValueError):

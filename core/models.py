@@ -1,7 +1,9 @@
 import logging
+from threading import RLock
 
 from django.db import connection, models
 from django.db import close_old_connections
+from django.db.utils import OperationalError, ProgrammingError
 from django.utils import timezone
 
 from .crypto import decrypt_text, encrypt_text
@@ -9,7 +11,20 @@ from .crypto import decrypt_text, encrypt_text
 logger = logging.getLogger(__name__)
 
 
+def _is_site_config_table_not_ready(exc: Exception) -> bool:
+    message = str(exc).lower()
+    return 'core_site_config' in message and any(
+        marker in message
+        for marker in ['no such table', 'does not exist', 'undefined table']
+    )
+
+
 class SiteConfig(models.Model):
+    _CACHE_MISSING = object()
+    _CACHE_TTL_SECONDS = 30
+    _plain_value_cache = {}
+    _cache_lock = RLock()
+
     key = models.CharField('键', max_length=191, unique=True, db_index=True)
     value = models.TextField('值', blank=True, null=True)
     is_sensitive = models.BooleanField('敏感配置', default=False)
@@ -21,15 +36,54 @@ class SiteConfig(models.Model):
         verbose_name_plural = '系统配置'
 
     @classmethod
+    def _cache_get(cls, key: str):
+        with cls._cache_lock:
+            cached = cls._plain_value_cache.get(key, cls._CACHE_MISSING)
+            if cached is cls._CACHE_MISSING:
+                return cls._CACHE_MISSING
+            value, cached_at = cached
+            if (timezone.now() - cached_at).total_seconds() > cls._CACHE_TTL_SECONDS:
+                cls._plain_value_cache.pop(key, None)
+                return cls._CACHE_MISSING
+            return value
+
+    @classmethod
+    def _cache_set(cls, key: str, value):
+        with cls._cache_lock:
+            cls._plain_value_cache[key] = (value, timezone.now())
+
+    @classmethod
+    def clear_cache(cls, key: str | None = None):
+        with cls._cache_lock:
+            if key is None:
+                cls._plain_value_cache.clear()
+            else:
+                cls._plain_value_cache.pop(key, None)
+
+    @classmethod
     def get(cls, key: str, default: str = '') -> str:
+        cached = cls._cache_get(key)
+        if cached is not cls._CACHE_MISSING:
+            return default if cached is None else (cached or default)
         try:
             if not connection.in_atomic_block:
                 close_old_connections()
             obj = cls.objects.filter(key=key).first()
             if not obj:
+                cls._cache_set(key, None)
                 return default
             value = obj.value or ''
-            return decrypt_text(value) if obj.is_sensitive else (value or default)
+            plain_value = decrypt_text(value) if obj.is_sensitive else value
+            cls._cache_set(key, plain_value)
+            return plain_value or default
+        except (OperationalError, ProgrammingError) as exc:
+            if connection.in_atomic_block:
+                raise
+            if _is_site_config_table_not_ready(exc):
+                logger.debug('SiteConfig.get 跳过：配置表未就绪 key=%s', key)
+                return default
+            logger.exception('SiteConfig.get 读取失败 key=%s', key)
+            return default
         except Exception:
             if connection.in_atomic_block:
                 raise
@@ -43,6 +97,7 @@ class SiteConfig(models.Model):
             key=key,
             defaults={'value': stored_value, 'is_sensitive': sensitive},
         )
+        cls.clear_cache(key)
         return obj
 
     def save(self, *args, **kwargs):
@@ -51,6 +106,7 @@ class SiteConfig(models.Model):
             if not current.startswith('gAAAA'):
                 self.value = encrypt_text(current)
         super().save(*args, **kwargs)
+        self.clear_cache(self.key)
 
     def masked_value(self) -> str:
         plain = self.get(self.key, '')
@@ -59,6 +115,12 @@ class SiteConfig(models.Model):
         if len(plain) <= 8:
             return '*' * len(plain)
         return f'{plain[:4]}***{plain[-4:]}'
+
+    def delete(self, *args, **kwargs):
+        key = self.key
+        result = super().delete(*args, **kwargs)
+        self.clear_cache(key)
+        return result
 
     def __str__(self):
         return self.key

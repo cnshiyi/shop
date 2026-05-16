@@ -285,10 +285,12 @@ def _open_instance_port(client, region_code: str, instance_id: str, port: int) -
 
 def _create_instance_sync(order, server_name: str):
     region_code = order.region_code or 'cn-hongkong'
-    account = getattr(order, 'cloud_account', None) or get_active_cloud_account('aliyun', region_code)
+    account = getattr(order, 'cloud_account', None)
+    if not account or not getattr(account, 'is_active', False):
+        return ProvisionResult(ok=False, note='阿里云创建失败：缺少订单绑定的启用云账号，拒绝回退默认账号或环境变量创建实例。')
     client = _build_client(_region_endpoint(region_code), account=account)
     if not client:
-        return ProvisionResult(ok=False, note='未配置 ALIBABA_CLOUD_ACCESS_KEY_ID / ALIBABA_CLOUD_ACCESS_KEY_SECRET。')
+        return ProvisionResult(ok=False, note=f'阿里云云账号#{getattr(account, "id", "-")}凭据缺失，无法创建实例。')
 
     try:
         from alibabacloud_swas_open20200601 import models as swas_models

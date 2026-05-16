@@ -1,5 +1,7 @@
+import logging
+
 from django.core.management.base import BaseCommand, CommandError
-from django.db.models import Q
+from django.db.models import Case, IntegerField, Q, Value, When
 from django.utils import timezone
 from django.utils.dateparse import parse_datetime
 
@@ -7,16 +9,19 @@ from bot.api import _provider_status_label
 from cloud.models import CloudAsset, CloudServerOrder, Server
 from cloud.note_utils import append_note, append_status_note
 from cloud.aliyun_simple import _build_client, _region_endpoint, _runtime_options
-from core.cloud_accounts import cloud_account_label, list_active_cloud_accounts
-from cloud.services import record_cloud_ip_log
+from core.cloud_accounts import cloud_account_label, cloud_account_label_variants, list_active_cloud_accounts
+from core.persistence import record_external_sync_log
+from cloud.services import _cloud_order_lifecycle_fields, record_cloud_ip_log
 from cloud.sync_safety import mark_missing_confirmation_pending, with_missing_confirmation_note
 
 
-_ACTIVE_ORDER_STATUSES = {'pending', 'provisioning', 'completed', 'expiring', 'renew_pending', 'suspended'}
+_ACTIVE_ORDER_STATUSES = {'pending', 'provisioning', 'completed', 'expiring', 'renew_pending', 'suspended', 'deleting'}
 _SYNC_EXCLUDED_ASSET_STATUSES = {CloudAsset.STATUS_DELETED, CloudAsset.STATUS_DELETING, CloudAsset.STATUS_TERMINATED, CloudAsset.STATUS_TERMINATING}
 _SYNC_EXCLUDED_SERVER_STATUSES = {Server.STATUS_DELETED, Server.STATUS_DELETING, Server.STATUS_TERMINATED, Server.STATUS_TERMINATING}
 _SYNC_EXCLUDED_ORDER_STATUSES = {'deleted', 'deleting', 'expired', 'cancelled'}
 _MISSING_PENDING_STATUS = '云上未找到实例-待确认'
+
+logger = logging.getLogger(__name__)
 
 
 def _resolve_order_for_ip(public_ip, account=None):
@@ -28,8 +33,8 @@ def _resolve_order_for_ip(public_ip, account=None):
         status__in=_ACTIVE_ORDER_STATUSES,
     )
     if account:
-        label = cloud_account_label(account)
-        queryset = queryset.filter(Q(cloud_account=account) | Q(account_label=label))
+        labels = cloud_account_label_variants(account)
+        queryset = queryset.filter(Q(cloud_account=account) | Q(account_label__in=labels))
     return queryset.order_by('-created_at', '-id').first()
 
 
@@ -116,33 +121,112 @@ def _order_status_from_cloud_status(status):
     return 'completed'
 
 
-def _resolve_asset(instance_id, public_ip, account=None):
+def _order_status_from_cloud_sync(order, status, expires_at=None):
+    cloud_status = _order_status_from_cloud_status(status)
+    if cloud_status in {'deleted', 'expired', 'provisioning'} or not order:
+        return cloud_status
+    effective_expires_at = expires_at or getattr(order, 'service_expires_at', None)
+    if cloud_status == 'completed' and effective_expires_at and effective_expires_at <= timezone.now():
+        return 'expiring'
+    return cloud_status
+
+
+def _resolve_asset(instance_id, public_ip, account=None, region_code=''):
     lookup = Q(kind=CloudAsset.KIND_SERVER)
     if account:
-        label = cloud_account_label(account)
-        lookup &= (Q(cloud_account=account) | Q(account_label=label) | (Q(cloud_account__isnull=True) & (Q(account_label='') | Q(account_label__isnull=True))))
+        labels = cloud_account_label_variants(account)
+        lookup &= (Q(cloud_account=account) | Q(account_label__in=labels) | (Q(cloud_account__isnull=True) & (Q(account_label='') | Q(account_label__isnull=True))))
+    region_code = str(region_code or '').strip()
+    if region_code:
+        lookup &= Q(region_code=region_code)
     base_queryset = CloudAsset.objects.filter(lookup).filter(Q(order__isnull=True) | ~Q(order__status__in=_SYNC_EXCLUDED_ORDER_STATUSES)).exclude(status__in=_SYNC_EXCLUDED_ASSET_STATUSES)
+    if public_ip:
+        asset = base_queryset.filter(Q(public_ip=public_ip) | Q(previous_public_ip=public_ip)).order_by(*_asset_resolve_ordering(public_ip)).first()
+        if asset:
+            return asset
     if instance_id:
         asset = base_queryset.filter(Q(instance_id=instance_id) | Q(provider_resource_id=instance_id) | Q(asset_name=instance_id)).order_by('-updated_at', '-id').first()
         if asset:
             return asset
-    if public_ip:
-        return base_queryset.filter(Q(public_ip=public_ip) | Q(previous_public_ip=public_ip)).filter(order__isnull=True).order_by('-updated_at', '-id').first()
     return None
 
 
-def _resolve_server(instance_id, public_ip, account=None):
+def _resolve_server(instance_id, public_ip, account=None, region_code=''):
     base = Q()
     if account:
-        base &= Q(account_label=cloud_account_label(account))
+        base &= Q(account_label__in=cloud_account_label_variants(account))
+    region_code = str(region_code or '').strip()
+    if region_code:
+        base &= Q(region_code=region_code)
     base_queryset = Server.objects.filter(base).filter(Q(order__isnull=True) | ~Q(order__status__in=_SYNC_EXCLUDED_ORDER_STATUSES)).exclude(status__in=_SYNC_EXCLUDED_SERVER_STATUSES)
+    if public_ip:
+        server = base_queryset.filter(Q(public_ip=public_ip) | Q(previous_public_ip=public_ip)).order_by(*_server_resolve_ordering(public_ip)).first()
+        if server:
+            return server
     if instance_id:
         server = base_queryset.filter(Q(instance_id=instance_id) | Q(provider_resource_id=instance_id) | Q(server_name=instance_id)).order_by('-updated_at', '-id').first()
         if server:
             return server
-    if public_ip:
-        return base_queryset.filter(Q(public_ip=public_ip) | Q(previous_public_ip=public_ip)).filter(order__isnull=True).order_by('-updated_at', '-id').first()
     return None
+
+
+def _asset_resolve_ordering(public_ip=''):
+    ordering = []
+    if public_ip:
+        ordering.append(Case(
+            When(public_ip=public_ip, then=Value(0)),
+            When(previous_public_ip=public_ip, then=Value(1)),
+            default=Value(2),
+            output_field=IntegerField(),
+        ))
+    ordering.extend(['-updated_at', '-id'])
+    return ordering
+
+
+def _server_resolve_ordering(public_ip=''):
+    ordering = []
+    if public_ip:
+        ordering.append(Case(
+            When(public_ip=public_ip, then=Value(0)),
+            When(previous_public_ip=public_ip, then=Value(1)),
+            default=Value(2),
+            output_field=IntegerField(),
+        ))
+    ordering.extend(['-updated_at', '-id'])
+    return ordering
+
+
+def _aliyun_order_updates_from_sync(linked_order, *, normalized_status, expires_at, account, account_label, region, item, asset_name, instance_id, public_ip):
+    previous_public_ip = linked_order.previous_public_ip
+    if public_ip and linked_order.public_ip != public_ip:
+        previous_public_ip = linked_order.public_ip or linked_order.previous_public_ip
+    order_updates = {
+        'status': _order_status_from_cloud_sync(linked_order, normalized_status, expires_at),
+        'provider': 'aliyun_simple',
+        'cloud_account': account,
+        'account_label': account_label,
+        'region_code': region,
+        'region_name': item.get('RegionId') or region,
+        'server_name': asset_name,
+        'instance_id': instance_id,
+        'provider_resource_id': instance_id,
+        'previous_public_ip': previous_public_ip,
+        'public_ip': public_ip or None,
+        'updated_at': timezone.now(),
+    }
+    if expires_at:
+        expiry_changed = linked_order.service_expires_at != expires_at
+        order_updates['service_expires_at'] = expires_at
+        order_updates.update(_cloud_order_lifecycle_fields(expires_at))
+        if expiry_changed:
+            order_updates.update({
+                'renew_notice_sent_at': None,
+                'auto_renew_notice_sent_at': None,
+                'auto_renew_failure_notice_sent_at': None,
+                'delete_notice_sent_at': None,
+                'recycle_notice_sent_at': None,
+            })
+    return order_updates
 
 
 
@@ -153,8 +237,8 @@ def _mark_deleted_when_missing_in_aliyun(region, existing_instance_ids, stdout, 
         provider='aliyun_simple',
     )
     if account:
-        label = cloud_account_label(account)
-        queryset = queryset.filter(Q(cloud_account=account) | Q(account_label=label))
+        labels = cloud_account_label_variants(account)
+        queryset = queryset.filter(Q(cloud_account=account) | Q(account_label__in=labels))
     queryset = queryset.exclude(status__in=_SYNC_EXCLUDED_ASSET_STATUSES)
     queryset = queryset.filter(
         Q(region_code=region) | Q(region_code='') | Q(region_code__isnull=True)
@@ -186,13 +270,26 @@ def _mark_deleted_when_missing_in_aliyun(region, existing_instance_ids, stdout, 
         asset.provider_status = '云上未找到实例'
         asset.note = with_missing_confirmation_note(append_note(asset.note, f'状态: 云上未找到实例；公网IP: {old_public_ip or "缺失"}；最近同步: {now_iso}'), pending_count)
         asset.save(update_fields=['status', 'is_active', 'previous_public_ip', 'public_ip', 'provider_status', 'note', 'updated_at'])
-        server_queryset = Server.objects.filter(
-            Q(instance_id=instance_id) | Q(provider_resource_id=asset.provider_resource_id) | Q(public_ip=public_ip) | Q(previous_public_ip=old_public_ip),
-            provider='aliyun_simple',
-        )
-        if account:
-            server_queryset = server_queryset.filter(account_label=cloud_account_label(account))
-        server = server_queryset.order_by('-updated_at', '-id').first()
+        server_lookup = Q()
+        provider_resource_id = str(asset.provider_resource_id or '').strip()
+        if instance_id:
+            server_lookup |= Q(instance_id=instance_id)
+        if provider_resource_id:
+            server_lookup |= Q(provider_resource_id=provider_resource_id)
+        if public_ip:
+            server_lookup |= Q(public_ip=public_ip)
+        if old_public_ip:
+            server_lookup |= Q(previous_public_ip=old_public_ip)
+        server = None
+        if server_lookup:
+            server_queryset = Server.objects.filter(
+                server_lookup,
+                provider='aliyun_simple',
+                region_code=region,
+            )
+            if account:
+                server_queryset = server_queryset.filter(account_label__in=cloud_account_label_variants(account))
+            server = server_queryset.order_by('-updated_at', '-id').first()
         if server:
             server.status = Server.STATUS_DELETED
             server.is_active = False
@@ -229,15 +326,53 @@ class Command(BaseCommand):
     def add_arguments(self, parser):
         parser.add_argument('--region', default='cn-hongkong', help='阿里云地域代码，默认 cn-hongkong')
         parser.add_argument('--account-id', default='', help='只同步指定后台云账号 ID')
+        parser.add_argument('--asset-id', default='', help='只处理指定资产 ID 对应资源')
+        parser.add_argument('--instance-id', default='', help='只处理指定实例 ID')
+        parser.add_argument('--public-ip', default='', help='只处理指定公网 IP')
 
     def handle(self, *args, **options):
         region = options['region']
-        accounts = list_active_cloud_accounts('aliyun', region) or [None]
+        accounts = list_active_cloud_accounts('aliyun', region)
         account_id = str(options.get('account_id') or '').strip()
         if account_id:
             accounts = [account for account in accounts if account and str(account.id) == account_id]
             if not accounts:
                 raise CommandError(f'未找到启用的阿里云云账号 #{account_id}')
+        if not accounts:
+            raise CommandError('未添加启用的阿里云云账号，拒绝使用环境变量同步。请先在后台「云账号」添加阿里云账号。')
+        target_asset_id = str(options.get('asset_id') or '').strip()
+        target_instance_id = str(options.get('instance_id') or '').strip()
+        target_public_ip = str(options.get('public_ip') or '').strip()
+        target_scope_enabled = bool(target_asset_id or target_instance_id or target_public_ip)
+        if target_asset_id and not (target_instance_id or target_public_ip):
+            target_asset = CloudAsset.objects.filter(pk=target_asset_id).first()
+            if target_asset:
+                target_instance_id = target_asset.instance_id or target_asset.provider_resource_id or ''
+                target_public_ip = target_asset.public_ip or target_asset.previous_public_ip or ''
+        target_scope = {
+            'asset_id': target_asset_id,
+            'instance_id': target_instance_id,
+            'public_ip': target_public_ip,
+        }
+        self.stdout.write(
+            f'阿里云同步开始：账号数={len(accounts)}；region={region}；目标={target_scope if any(target_scope.values()) else "全部"}'
+        )
+        logger.info(
+            'ALIYUN_SYNC_START accounts=%s region=%s target_scope=%s',
+            [getattr(account, 'id', None) for account in accounts if account],
+            region,
+            target_scope,
+        )
+
+        def target_matches(*values):
+            if not target_scope_enabled:
+                return True
+            normalized_values = {str(value or '').strip() for value in values if str(value or '').strip()}
+            return bool(
+                (target_instance_id and target_instance_id in normalized_values)
+                or (target_public_ip and target_public_ip in normalized_values)
+            )
+
         before_asset_total = CloudAsset.objects.filter(kind=CloudAsset.KIND_SERVER).count()
 
         from alibabacloud_swas_open20200601 import models as swas_models
@@ -254,8 +389,11 @@ class Command(BaseCommand):
         synced_instance_ids = []
         verification_deleted_items = []
         account_summary_lines = []
+        sync_errors = []
         for account in accounts:
             account_label = cloud_account_label(account) or 'aliyun'
+            self.stdout.write(f'阿里云账号同步开始：账号={account_label}；账号ID={getattr(account, "id", "-")}；地区={region}')
+            logger.info('ALIYUN_SYNC_ACCOUNT_START account_id=%s account_label=%s region=%s', getattr(account, 'id', None), account_label, region)
             account_stats = {
                 'label': account_label,
                 'region': region,
@@ -267,17 +405,71 @@ class Command(BaseCommand):
             }
             client = _build_client(_region_endpoint(region), account=account)
             if not client:
-                self.stdout.write(self.style.WARNING(f'跳过阿里云账号 {account_label}：无法创建客户端'))
+                message = f'跳过阿里云账号 {account_label}：无法创建客户端'
+                self.stdout.write(self.style.WARNING(message))
+                logger.warning('ALIYUN_SYNC_CLIENT_SKIPPED account_id=%s account_label=%s region=%s reason=%s', getattr(account, 'id', None), account_label, region, message)
+                sync_errors.append(message)
+                if account:
+                    account.mark_status(account.STATUS_ERROR, message)
+                record_external_sync_log(
+                    source='aliyun',
+                    action='list_instances',
+                    target=region,
+                    request_payload={'region_id': region, 'account_id': getattr(account, 'id', None)},
+                    response_payload={'error': message},
+                    is_success=False,
+                    error_message=message,
+                    account=account,
+                )
                 continue
             instances = []
             page_number = 1
             while True:
-                response = client.list_instances_with_options(
-                    swas_models.ListInstancesRequest(region_id=region, page_size=100, page_number=page_number),
-                    _runtime_options(),
-                )
+                try:
+                    response = client.list_instances_with_options(
+                        swas_models.ListInstancesRequest(region_id=region, page_size=100, page_number=page_number),
+                        _runtime_options(),
+                    )
+                except Exception as exc:
+                    logger.exception('ALIYUN_SYNC_LIST_INSTANCES_FAILED account_id=%s account_label=%s region=%s page=%s error=%s', getattr(account, 'id', None), account_label, region, page_number, exc)
+                    message = f'阿里云账号 {account_label} 地区 {region} 第 {page_number} 页实例同步失败: {exc}'
+                    sync_errors.append(message)
+                    if account:
+                        account.mark_status(account.STATUS_ERROR, message)
+                    record_external_sync_log(
+                        source='aliyun',
+                        action='list_instances',
+                        target=region,
+                        request_payload={'region_id': region, 'page_size': 100, 'page_number': page_number},
+                        response_payload={'error': str(exc)},
+                        is_success=False,
+                        error_message=str(exc),
+                        account=account,
+                    )
+                    raise
                 body = response.body.to_map()
                 page_items = body.get('Instances', []) or []
+                record_external_sync_log(
+                    source='aliyun',
+                    action='list_instances',
+                    target=region,
+                    request_payload={'region_id': region, 'page_size': 100, 'page_number': page_number},
+                    response_payload={
+                        'count': len(page_items),
+                        'total': body.get('TotalCount') or body.get('Total') or 0,
+                    },
+                    is_success=True,
+                    account=account,
+                )
+                logger.info(
+                    'ALIYUN_SYNC_INSTANCE_PAGE account_id=%s account_label=%s region=%s page=%s count=%s total=%s',
+                    getattr(account, 'id', None),
+                    account_label,
+                    region,
+                    page_number,
+                    len(page_items),
+                    body.get('TotalCount') or body.get('Total') or 0,
+                )
                 instances.extend(page_items)
                 total_count = int(body.get('TotalCount') or body.get('Total') or 0)
                 if len(page_items) < 100 or (total_count and len(instances) >= total_count):
@@ -287,6 +479,8 @@ class Command(BaseCommand):
             for item in instances:
                 instance_id = item.get('InstanceId') or ''
                 public_ip = item.get('PublicIpAddress') or item.get('PublicIp') or ''
+                if not target_matches(instance_id, public_ip):
+                    continue
                 expires_at = _parse_expire_time(item)
                 account_id = _resolve_account_id(item)
                 normalized_status, raw_status, business_status, disable_reason = _resolve_aliyun_status(item, expires_at)
@@ -319,7 +513,7 @@ class Command(BaseCommand):
                     'provider_status': provider_status,
                     'is_active': normalized_status in CloudAsset.ACTIVE_STATUSES,
                 }
-                asset = _resolve_asset(instance_id, public_ip, account)
+                asset = _resolve_asset(instance_id, public_ip, account, region)
                 linked_order = getattr(asset, 'order', None) if asset else None
                 if linked_order and linked_order.status not in _ACTIVE_ORDER_STATUSES:
                     linked_order = None
@@ -371,7 +565,7 @@ class Command(BaseCommand):
                     account_stats['deleted_by_missing_ip'] += 1
                     deleted_by_missing_ip_items.append(f'{asset.id}:{public_ip or "缺失"}:{asset_name or instance_id}')
 
-                server = _resolve_server(instance_id, public_ip, account)
+                server = _resolve_server(instance_id, public_ip, account, region)
                 server_defaults = {
                     'source': Server.SOURCE_ALIYUN,
                     'provider': 'aliyun_simple',
@@ -411,33 +605,22 @@ class Command(BaseCommand):
                     Server.objects.create(**server_defaults)
 
                 if linked_order:
-                    previous_public_ip = linked_order.previous_public_ip
-                    if public_ip and linked_order.public_ip != public_ip:
-                        previous_public_ip = linked_order.public_ip or linked_order.previous_public_ip
-                    order_updates = {
-                        'status': _order_status_from_cloud_status(normalized_status),
-                        'provider': 'aliyun_simple',
-                        'cloud_account': account,
-                        'account_label': account_label,
-                        'region_code': region,
-                        'region_name': item.get('RegionId') or region,
-                        'server_name': asset_name,
-                        'instance_id': instance_id,
-                        'provider_resource_id': instance_id,
-                        'previous_public_ip': previous_public_ip,
-                        'public_ip': public_ip or None,
-                        'renew_grace_expires_at': None,
-                        'suspend_at': None,
-                        'delete_at': None,
-                        'ip_recycle_at': None,
-                        'updated_at': timezone.now(),
-                    }
-                    if expires_at:
-                        order_updates['service_expires_at'] = expires_at
+                    order_updates = _aliyun_order_updates_from_sync(
+                        linked_order,
+                        normalized_status=normalized_status,
+                        expires_at=expires_at,
+                        account=account,
+                        account_label=account_label,
+                        region=region,
+                        item=item,
+                        asset_name=asset_name,
+                        instance_id=instance_id,
+                        public_ip=public_ip,
+                    )
                     CloudServerOrder.objects.filter(pk=linked_order.pk).update(**order_updates)
 
                 if ip_changed:
-                    refreshed_server = _resolve_server(instance_id, public_ip, account)
+                    refreshed_server = _resolve_server(instance_id, public_ip, account, region)
                     record_cloud_ip_log(
                         event_type='changed',
                         asset=asset,
@@ -451,17 +634,24 @@ class Command(BaseCommand):
                 account_stats['ips'].append(f'{public_ip or "缺失"}:{asset_name or instance_id}')
                 count += 1
                 account_stats['count'] += 1
-            verification_deleted_items.extend(
-                _mark_deleted_when_missing_in_aliyun(
-                    region=region,
-                    existing_instance_ids=set(account_instance_ids),
-                    stdout=self,
-                    account=account,
+            if not target_scope_enabled:
+                verification_deleted_items.extend(
+                    _mark_deleted_when_missing_in_aliyun(
+                        region=region,
+                        existing_instance_ids=set(account_instance_ids),
+                        stdout=self,
+                        account=account,
+                    )
                 )
-            )
             account_summary_lines.append(
                 f"账号={account_stats['label']}；地区={account_stats['region']}；扫描={account_stats['count']}；新增={account_stats['created']}；更新={account_stats['updated']}；缺IP删除={account_stats['deleted_by_missing_ip']}；IP={account_stats['ips'] or ['无']}"
             )
+            if account:
+                account.mark_status(
+                    account.STATUS_OK,
+                    f"阿里云同步完成，地区 {region}，扫描 {account_stats['count']} 台，新增 {account_stats['created']} 条，更新 {account_stats['updated']} 条。",
+                )
+            logger.info('ALIYUN_SYNC_ACCOUNT_DONE account_id=%s account_label=%s stats=%s', getattr(account, 'id', None), account_label, account_stats)
         after_asset_total = CloudAsset.objects.filter(kind=CloudAsset.KIND_SERVER).count()
         self.stdout.write(self.style.SUCCESS(
             f'阿里云同步汇总：代理列表原有 {before_asset_total} 条；扫描服务器 {count} 条；覆盖 {len(accounts)} 个账号；新增 {created_count} 条，更新 {updated_count} 条；因公网IP缺失抬为已删除 {deleted_by_missing_ip_count} 条；同步后代理列表共 {after_asset_total} 条。'
@@ -482,4 +672,13 @@ class Command(BaseCommand):
         if detail_parts:
             self.stdout.write(f'阿里云同步详情：{"；".join(detail_parts)}')
         self.synced_instance_ids = synced_instance_ids
+        self.summary = {
+            'count': count,
+            'created': created_count,
+            'updated': updated_count,
+            'deleted_by_missing_ip': deleted_by_missing_ip_count,
+            'region': region,
+        }
+        self.sync_errors = sync_errors
+        logger.info('ALIYUN_SYNC_DONE summary=%s errors=%s detail_parts=%s', self.summary, sync_errors, detail_parts)
         return None

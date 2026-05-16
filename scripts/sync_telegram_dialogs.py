@@ -229,9 +229,7 @@ async def sync_account(account: dict, *, limit: int, include_groups: bool, dry_r
                 username = sender_username
                 first_name = sender_name or chat_title
                 tg_user_id = chat_id
-                if dry_run:
-                    await upsert_telegram_group_filter(chat_id, chat_title, _username(entity))
-                else:
+                if not dry_run:
                     enabled = await should_forward_telegram_group(chat_id, chat_title, _username(entity))
                     if not enabled:
                         stats['skipped_groups'] += 1
