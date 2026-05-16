@@ -3603,6 +3603,28 @@ def run_cloud_server_renewal_postcheck(order_id: int):
         if recovery_err:
             return order, recovery_err
         return recovery_order or order, '固定 IP 保留期续费，已进入自动恢复流程。'
+    primary_asset = _order_primary_asset(order)
+    primary_server = _order_primary_server(order)
+
+    def _record_is_running(record) -> bool:
+        if not record:
+            return False
+        if getattr(record, 'is_active', True) is False:
+            return False
+        status = str(getattr(record, 'status', '') or '').lower()
+        provider_status = str(getattr(record, 'provider_status', '') or '').lower()
+        return status == CloudAsset.STATUS_RUNNING or provider_status == 'running'
+
+    if _record_is_running(primary_asset) or _record_is_running(primary_server):
+        note = '续费后自动巡检：本地记录为正在运行，已跳过开机和 MTProxy 巡检。'
+        _update_order_primary_records(
+            order,
+            asset_updates={'actual_expires_at': order.service_expires_at},
+            server_updates={'expires_at': order.service_expires_at},
+        )
+        order.provision_note = append_note(order.provision_note, note)
+        order.save(update_fields=['provision_note', 'updated_at'])
+        return order, None
     notes = []
     start_ok, start_note = _ensure_aws_instance_running(order)
     notes.append(start_note)

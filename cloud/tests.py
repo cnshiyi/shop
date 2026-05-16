@@ -380,11 +380,16 @@ class CloudServerServicesTestCase(TestCase):
     def test_manual_order_delete_bypasses_schedule_limits(self):
         from bot.api import _run_shutdown_order_sync
 
+        account = self._aws_test_account()
+        account.shutdown_enabled = False
+        account.save(update_fields=['shutdown_enabled', 'updated_at'])
         order = CloudServerOrder.objects.create(
             order_no='MANUAL-DELETE-BYPASS-ORDER-1',
             user=self.user,
             plan=self.plan,
             provider=self.plan.provider,
+            cloud_account=account,
+            account_label=cloud_account_label(account),
             region_code=self.plan.region_code,
             region_name=self.plan.region_name,
             plan_name=self.plan.plan_name,
@@ -407,11 +412,16 @@ class CloudServerServicesTestCase(TestCase):
     def test_manual_orphan_asset_delete_bypasses_schedule_limits(self):
         from bot.api import _run_orphan_asset_delete_sync
 
+        account = self._aws_test_account()
+        account.shutdown_enabled = False
+        account.save(update_fields=['shutdown_enabled', 'updated_at'])
         asset = CloudAsset.objects.create(
             kind=CloudAsset.KIND_SERVER,
             source=CloudAsset.SOURCE_AWS_SYNC,
             user=self.user,
             provider='aws_lightsail',
+            cloud_account=account,
+            account_label=cloud_account_label(account),
             region_code=self.plan.region_code,
             region_name=self.plan.region_name,
             asset_name='manual-owner-asset',
@@ -433,11 +443,16 @@ class CloudServerServicesTestCase(TestCase):
     def test_manual_unattached_ip_delete_writes_log_and_history_item(self):
         from bot.api import _run_unattached_ip_delete_sync
 
+        account = self._aws_test_account()
+        account.shutdown_enabled = False
+        account.save(update_fields=['shutdown_enabled', 'updated_at'])
         asset = CloudAsset.objects.create(
             kind=CloudAsset.KIND_SERVER,
             source=CloudAsset.SOURCE_AWS_SYNC,
             user=self.user,
             provider='aws_lightsail',
+            cloud_account=account,
+            account_label=cloud_account_label(account),
             region_code=self.plan.region_code,
             region_name=self.plan.region_name,
             asset_name='manual-unattached-ip-delete',
@@ -618,7 +633,7 @@ class CloudServerServicesTestCase(TestCase):
         )
 
         due_ids = {item.id for item in async_to_sync(_get_unattached_static_ip_delete_due)()}
-        result = _run_unattached_ip_delete_sync(asset.id, enforce_schedule=False)
+        result = _run_unattached_ip_delete_sync(asset.id, enforce_schedule=True)
         items = _unattached_ip_delete_items(limit=20)
         row = next(item for item in items if item.get('asset_id') == asset.id)
 
@@ -1716,6 +1731,75 @@ class CloudServerServicesTestCase(TestCase):
         renewed.refresh_from_db()
         self.assertEqual(renewed.service_started_at, original_started_at)
         self.assertGreater(renewed.service_expires_at, original_expiry)
+
+    def test_renewal_postcheck_skips_running_records(self):
+        old_expiry = timezone.now() + timezone.timedelta(days=7)
+        new_expiry = timezone.now() + timezone.timedelta(days=38)
+        order = CloudServerOrder.objects.create(
+            order_no='HB-TEST-RENEW-POSTCHECK-RUNNING',
+            user=self.user,
+            plan=self.plan,
+            provider=self.plan.provider,
+            region_code=self.plan.region_code,
+            region_name=self.plan.region_name,
+            plan_name=self.plan.plan_name,
+            quantity=1,
+            currency='USDT',
+            total_amount='19.00',
+            pay_amount='19.00',
+            pay_method='balance',
+            status='completed',
+            server_name='renew-postcheck-running',
+            instance_id='renew-postcheck-running',
+            public_ip='8.8.4.9',
+            service_expires_at=new_expiry,
+        )
+        asset = CloudAsset.objects.create(
+            kind=CloudAsset.KIND_SERVER,
+            source=CloudAsset.SOURCE_ORDER,
+            order=order,
+            user=self.user,
+            provider=order.provider,
+            region_code=order.region_code,
+            region_name=order.region_name,
+            asset_name=order.server_name,
+            instance_id=order.instance_id,
+            public_ip=order.public_ip,
+            actual_expires_at=old_expiry,
+            status=CloudAsset.STATUS_RUNNING,
+            provider_status='running',
+            is_active=True,
+        )
+        server = Server.objects.create(
+            source=Server.SOURCE_ORDER,
+            order=order,
+            user=self.user,
+            provider=order.provider,
+            region_code=order.region_code,
+            region_name=order.region_name,
+            server_name=order.server_name,
+            instance_id=order.instance_id,
+            public_ip=order.public_ip,
+            expires_at=old_expiry,
+            status=Server.STATUS_RUNNING,
+            provider_status='running',
+            is_active=True,
+        )
+
+        with patch('cloud.services._ensure_aws_instance_running') as ensure_running, \
+            patch('cloud.services._ensure_mtproxy_after_renewal') as ensure_mtproxy:
+            checked, error = async_to_sync(run_cloud_server_renewal_postcheck)(order.id)
+
+        self.assertIsNone(error)
+        self.assertEqual(checked.id, order.id)
+        ensure_running.assert_not_called()
+        ensure_mtproxy.assert_not_called()
+        order.refresh_from_db()
+        asset.refresh_from_db()
+        server.refresh_from_db()
+        self.assertIn('已跳过开机和 MTProxy 巡检', order.provision_note)
+        self.assertEqual(asset.actual_expires_at, order.service_expires_at)
+        self.assertEqual(server.expires_at, order.service_expires_at)
 
     def test_address_renewal_failure_rolls_back_paid_fields(self):
         order = CloudServerOrder.objects.create(
