@@ -748,6 +748,23 @@ def _refresh_dashboard_plan_snapshots(reason: str = '', *, lifecycle_limit: int 
         logger.exception('DASHBOARD_SNAPSHOT_LIFECYCLE_REFRESH_FAILED reason=%s', reason)
 
 
+def _refresh_dashboard_plan_snapshots_deferred(reason: str = '', *, lifecycle_limit: int = 300):
+    lock_key = 'dashboard:snapshot-refresh:deferred'
+    if not cache.add(lock_key, reason or 'pending', timeout=60):
+        logger.info('DASHBOARD_SNAPSHOT_DEFERRED_SKIPPED reason=%s', reason)
+        return
+
+    def _run():
+        close_old_connections()
+        try:
+            _refresh_dashboard_plan_snapshots(reason, lifecycle_limit=lifecycle_limit)
+        finally:
+            cache.delete(lock_key)
+            close_old_connections()
+
+    threading.Thread(target=_run, name='dashboard-snapshot-refresh', daemon=True).start()
+
+
 @csrf_exempt
 @dashboard_login_required
 @require_http_methods(['GET', 'POST', 'PUT', 'PATCH'])
@@ -1160,7 +1177,7 @@ def update_cloud_asset(request, asset_id):
             note=f'后台手动更新IP：{changed_public_ip_before or "未分配"} → {changed_public_ip_after or "未分配"}',
         )
     if refresh_snapshots_needed:
-        _refresh_dashboard_plan_snapshots(f'cloud_asset:{asset_id}')
+        _refresh_dashboard_plan_snapshots_deferred(f'cloud_asset:{asset_id}')
     asset = CloudAsset.objects.select_related('user', 'order', 'cloud_account', 'telegram_group').get(pk=asset_id)
     return _ok(_asset_payload(asset))
 

@@ -1478,6 +1478,35 @@ class CloudServerServicesTestCase(TestCase):
         asset.refresh_from_db()
         self.assertIsNone(asset.telegram_group_id)
 
+    def test_update_cloud_asset_defers_snapshot_refresh(self):
+        admin = get_user_model().objects.create_user(username='admin_defer_asset_refresh', password='x', is_staff=True, is_superuser=True)
+        asset = CloudAsset.objects.create(
+            kind=CloudAsset.KIND_SERVER,
+            source=CloudAsset.SOURCE_AWS_SYNC,
+            user=self.user,
+            provider='aws_lightsail',
+            region_code=self.plan.region_code,
+            region_name=self.plan.region_name,
+            asset_name='defer-refresh-asset',
+            public_ip='10.88.9.9',
+            status=CloudAsset.STATUS_RUNNING,
+            is_active=True,
+        )
+        request = self.factory.patch(
+            '/api/dashboard/cloud-assets/%s/' % asset.id,
+            data=json.dumps({'is_active': False}),
+            content_type='application/json',
+        )
+        request.user = admin
+
+        with patch('cloud.api._refresh_dashboard_plan_snapshots') as direct_refresh, \
+            patch('cloud.api._refresh_dashboard_plan_snapshots_deferred') as deferred_refresh:
+            response = update_cloud_asset(request, asset.id)
+
+        self.assertEqual(response.status_code, 200)
+        direct_refresh.assert_not_called()
+        deferred_refresh.assert_called_once_with(f'cloud_asset:{asset.id}')
+
     def test_cloud_assets_paginated_keeps_same_user_on_same_page(self):
         admin = get_user_model().objects.create_user(username='admin_asset_pages', password='x', is_staff=True)
         first_user = TelegramUser.objects.create(tg_user_id=991001, username='page_first')
