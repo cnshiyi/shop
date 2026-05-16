@@ -1398,11 +1398,15 @@ def _apply_cloud_assets_keyword(queryset, keyword):
         keyword,
         [
             'asset_name', 'instance_id', 'provider_resource_id', 'public_ip', 'previous_public_ip',
-            'mtproxy_link', 'account_label', 'cloud_account__external_account_id', 'cloud_account__name',
-            'user__tg_user_id', 'user__username', 'telegram_group__title', 'telegram_group__username',
-            'telegram_group__chat_id', 'order__order_no', 'order__server_name', 'order__instance_id',
-            'order__provider_resource_id', 'order__static_ip_name', 'order__previous_public_ip',
-            'order__mtproxy_host', 'order__mtproxy_link',
+            'mtproxy_host', 'mtproxy_link', 'mtproxy_secret', 'note', 'provider_status',
+            'region_code', 'region_name', 'account_label', 'cloud_account__external_account_id',
+            'cloud_account__name', 'user__tg_user_id', 'user__username', 'user__first_name',
+            'telegram_group__title', 'telegram_group__username', 'telegram_group__chat_id',
+            'order__order_no', 'order__server_name', 'order__plan_name', 'order__region_code',
+            'order__region_name', 'order__instance_id', 'order__provider_resource_id',
+            'order__static_ip_name', 'order__public_ip', 'order__previous_public_ip',
+            'order__mtproxy_host', 'order__mtproxy_link', 'order__provision_note',
+            'order__server__server_name', 'order__server__note',
         ],
     )
 

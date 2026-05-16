@@ -1712,6 +1712,104 @@ class CloudServerServicesTestCase(TestCase):
         search_payload = json.loads(search_response.content.decode('utf-8'))['data']
         self.assertEqual([item['id'] for item in search_payload['items']], [due_asset.id])
 
+    def test_cloud_assets_search_filters_full_dataset_before_pagination(self):
+        admin = get_user_model().objects.create_user(username='admin_asset_full_search', password='x', is_staff=True)
+        target_user = TelegramUser.objects.create(tg_user_id=991900, username='target_full_search', first_name='代理昵称阿尔法')
+        target_group = TelegramGroupFilter.objects.create(chat_id=-1001991900, title='Full Search Group', enabled=True)
+        target_order = CloudServerOrder.objects.create(
+            order_no='FULL-SEARCH-ORDER-001',
+            user=target_user,
+            plan=self.plan,
+            provider=self.plan.provider,
+            region_code=self.plan.region_code,
+            region_name=self.plan.region_name,
+            plan_name=self.plan.plan_name,
+            quantity=1,
+            currency='USDT',
+            total_amount='19.00',
+            pay_amount='19.00',
+            status='completed',
+            server_name='full-search-order-name-alpha',
+            public_ip='10.90.0.250',
+            service_expires_at=timezone.now() + timezone.timedelta(days=90),
+            auto_renew_enabled=True,
+        )
+        target_asset = CloudAsset.objects.create(
+            kind=CloudAsset.KIND_SERVER,
+            source=CloudAsset.SOURCE_AWS_SYNC,
+            order=target_order,
+            user=target_user,
+            telegram_group=target_group,
+            provider='aws_lightsail',
+            region_code=self.plan.region_code,
+            region_name=self.plan.region_name,
+            asset_name='full-search-asset-alpha',
+            public_ip='10.90.0.250',
+            actual_expires_at=timezone.now() + timezone.timedelta(days=90),
+            status=CloudAsset.STATUS_RUNNING,
+            sort_order=1,
+        )
+        Server.objects.create(
+            source=Server.SOURCE_AWS_SYNC,
+            order=target_order,
+            user=target_user,
+            provider='aws_lightsail',
+            region_code=self.plan.region_code,
+            region_name=self.plan.region_name,
+            server_name='full-search-server-alias-alpha',
+            public_ip='10.90.0.250',
+            status=Server.STATUS_RUNNING,
+            sort_order=1,
+        )
+        for index in range(12):
+            user = TelegramUser.objects.create(tg_user_id=991910 + index, username=f'decoy_full_search_{index}')
+            CloudAsset.objects.create(
+                kind=CloudAsset.KIND_SERVER,
+                source=CloudAsset.SOURCE_AWS_SYNC,
+                user=user,
+                provider='aws_lightsail',
+                region_code=self.plan.region_code,
+                region_name=self.plan.region_name,
+                asset_name=f'decoy-full-search-{index}',
+                public_ip=f'10.90.0.{index + 1}',
+                actual_expires_at=timezone.now() + timezone.timedelta(days=30),
+                status=CloudAsset.STATUS_RUNNING,
+                sort_order=200 - index,
+            )
+
+        first_page_request = self.factory.get('/api/dashboard/cloud-assets/', {'paginated': '1', 'page': '1', 'page_size': '10'})
+        first_page_request.user = admin
+        first_page_response = cloud_assets_list(first_page_request)
+        first_page_payload = json.loads(first_page_response.content.decode('utf-8'))['data']
+        self.assertGreater(first_page_payload['total'], 10)
+        self.assertNotIn(target_asset.id, {item['id'] for item in first_page_payload['items']})
+
+        grouped_search_request = self.factory.get('/api/dashboard/cloud-assets/', {
+            'grouped': '1',
+            'paginated': '1',
+            'group_by': 'user',
+            'page': '1',
+            'page_size': '10',
+            'keyword': 'server-alias',
+        })
+        grouped_search_request.user = admin
+        grouped_search_response = cloud_assets_list(grouped_search_request)
+        grouped_search_payload = json.loads(grouped_search_response.content.decode('utf-8'))['data']
+        self.assertEqual(grouped_search_response.status_code, 200)
+        self.assertEqual(grouped_search_payload['total'], 1)
+        self.assertEqual([item['id'] for item in grouped_search_payload['items']], [target_asset.id])
+
+        nickname_search_request = self.factory.get('/api/dashboard/cloud-assets/', {
+            'paginated': '1',
+            'page': '1',
+            'page_size': '10',
+            'keyword': '昵称阿尔法',
+        })
+        nickname_search_request.user = admin
+        nickname_search_response = cloud_assets_list(nickname_search_request)
+        nickname_search_payload = json.loads(nickname_search_response.content.decode('utf-8'))['data']
+        self.assertEqual([item['id'] for item in nickname_search_payload['items']], [target_asset.id])
+
     def test_cloud_asset_expired_filter_excludes_unattached_ip_assets(self):
         admin = get_user_model().objects.create_user(username='admin_asset_expired_unattached_filter', password='x', is_staff=True)
         group = TelegramGroupFilter.objects.create(chat_id=-1001993002, title='Risk Filter Group 2', enabled=True)
