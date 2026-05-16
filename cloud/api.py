@@ -5,6 +5,7 @@ import io
 import json
 import logging
 import re
+import sys
 import threading
 import time
 import uuid
@@ -68,6 +69,11 @@ _SYNC_CONSOLE_LOG_MAX_CHARS = 50000
 def _is_db_table_not_ready_error(exc: Exception) -> bool:
     message = str(exc).lower()
     return any(marker in message for marker in ['no such table', 'does not exist', 'undefined table'])
+
+
+def _is_interpreter_shutdown_error(exc: Exception) -> bool:
+    message = str(exc).lower()
+    return sys.is_finalizing() or 'interpreter shutdown' in message or 'cannot schedule new futures' in message
 
 
 class CapturedCommandError(RuntimeError):
@@ -725,6 +731,11 @@ def _refresh_dashboard_plan_snapshots(reason: str = '', *, lifecycle_limit: int 
             logger.debug('DASHBOARD_SNAPSHOT_AUTO_RENEW_REFRESH_SKIPPED reason=%s error=%s', reason, exc)
         else:
             logger.exception('DASHBOARD_SNAPSHOT_AUTO_RENEW_REFRESH_FAILED reason=%s', reason)
+    except RuntimeError as exc:
+        if _is_interpreter_shutdown_error(exc):
+            logger.info('DASHBOARD_SNAPSHOT_AUTO_RENEW_REFRESH_SKIPPED reason=%s error=%s', reason, exc)
+        else:
+            logger.exception('DASHBOARD_SNAPSHOT_AUTO_RENEW_REFRESH_FAILED reason=%s', reason)
     except Exception:
         logger.exception('DASHBOARD_SNAPSHOT_AUTO_RENEW_REFRESH_FAILED reason=%s', reason)
     try:
@@ -732,6 +743,11 @@ def _refresh_dashboard_plan_snapshots(reason: str = '', *, lifecycle_limit: int 
     except (OperationalError, ProgrammingError) as exc:
         if _is_db_table_not_ready_error(exc):
             logger.debug('DASHBOARD_SNAPSHOT_NOTICE_REFRESH_SKIPPED reason=%s error=%s', reason, exc)
+        else:
+            logger.exception('DASHBOARD_SNAPSHOT_NOTICE_REFRESH_FAILED reason=%s', reason)
+    except RuntimeError as exc:
+        if _is_interpreter_shutdown_error(exc):
+            logger.info('DASHBOARD_SNAPSHOT_NOTICE_REFRESH_SKIPPED reason=%s error=%s', reason, exc)
         else:
             logger.exception('DASHBOARD_SNAPSHOT_NOTICE_REFRESH_FAILED reason=%s', reason)
     except Exception:
@@ -742,6 +758,11 @@ def _refresh_dashboard_plan_snapshots(reason: str = '', *, lifecycle_limit: int 
     except (OperationalError, ProgrammingError) as exc:
         if _is_db_table_not_ready_error(exc):
             logger.debug('DASHBOARD_SNAPSHOT_LIFECYCLE_REFRESH_SKIPPED reason=%s error=%s', reason, exc)
+        else:
+            logger.exception('DASHBOARD_SNAPSHOT_LIFECYCLE_REFRESH_FAILED reason=%s', reason)
+    except RuntimeError as exc:
+        if _is_interpreter_shutdown_error(exc):
+            logger.info('DASHBOARD_SNAPSHOT_LIFECYCLE_REFRESH_SKIPPED reason=%s error=%s', reason, exc)
         else:
             logger.exception('DASHBOARD_SNAPSHOT_LIFECYCLE_REFRESH_FAILED reason=%s', reason)
     except Exception:
