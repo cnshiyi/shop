@@ -3671,6 +3671,8 @@ def cloud_assets_sync_status(request):
             'skipped_tasks': response_payload.get('skipped_tasks') or [],
         })
     last_synced_at = recent_syncs[0]['created_at'] if recent_syncs else None
+    auto_sync_every_seconds = max(_site_int_config('cloud_asset_sync_interval_seconds', 5 * 60 * 60), 60)
+    unattached_ip_count = CloudAsset.objects.filter(_unattached_ip_cloud_asset_filter()).count()
     return _ok({
         'accounts': {
             'aliyun': [_cloud_account_payload(item) for item in CloudAccountConfig.objects.filter(provider=CloudAccountConfig.PROVIDER_ALIYUN, is_active=True)],
@@ -3678,10 +3680,10 @@ def cloud_assets_sync_status(request):
         },
         'aliyun_existing_count': CloudAsset.objects.filter(provider__in=['aliyun', 'aliyun_simple']).count(),
         'aws_existing_count': CloudAsset.objects.filter(provider__in=['aws', 'aws_lightsail']).count(),
-        'auto_sync_every_seconds': 5 * 60 * 60,
+        'auto_sync_every_seconds': auto_sync_every_seconds,
         'last_synced_at': last_synced_at,
         'recent_syncs': recent_syncs,
-        'unattached_ip_count': 0,
+        'unattached_ip_count': unattached_ip_count,
     })
 
 

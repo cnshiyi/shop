@@ -251,6 +251,36 @@ class DashboardApiRegressionTests(TestCase):
         self.assertEqual(order.user_id, tg_user.id)
         self.assertIsNone(order.last_user_id)
 
+    def test_cloud_asset_sync_status_uses_config_and_real_unattached_count(self):
+        SiteConfig.set('cloud_asset_sync_interval_seconds', '120')
+        CloudAsset.objects.create(
+            kind=CloudAsset.KIND_SERVER,
+            source=CloudAsset.SOURCE_AWS_SYNC,
+            provider='aws_lightsail',
+            region_code='ap-southeast-1',
+            asset_name='orphan-ip',
+            public_ip='',
+            status=CloudAsset.STATUS_STOPPED,
+            provider_status='unattached_static_ip',
+            is_active=False,
+        )
+        CloudAsset.objects.create(
+            kind=CloudAsset.KIND_SERVER,
+            source=CloudAsset.SOURCE_ORDER,
+            provider='aws_lightsail',
+            region_code='ap-southeast-1',
+            asset_name='active-server',
+            public_ip='203.0.113.10',
+            status=CloudAsset.STATUS_RUNNING,
+            is_active=True,
+        )
+        client = self._login(self.staff)
+
+        payload = client.get('/api/admin/cloud-assets/sync-status/').json()['data']
+
+        self.assertEqual(payload['auto_sync_every_seconds'], 120)
+        self.assertEqual(payload['unattached_ip_count'], 1)
+
     def test_recharge_status_updates_balance_and_ledger(self):
         tg_user = TelegramUser.objects.create(
             tg_user_id=990102,
