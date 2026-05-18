@@ -7,6 +7,7 @@ from biz.models import CloudAsset, Server
 from biz.services import build_cloud_server_name, ensure_unique_cloud_server_name
 from cloud.aliyun_simple import create_instance as create_aliyun_instance
 from cloud.aws_lightsail import create_instance as create_aws_instance
+from cloud.aws_lightsail import cleanup_created_resources as cleanup_aws_resources
 from cloud.bootstrap import install_bbr, install_mtproxy
 from mall.models import CloudServerOrder
 
@@ -85,9 +86,29 @@ def _get_aws_order_payload(order: CloudServerOrder):
     }
 
 
+async def _cleanup_aws_after_failed_provision(order_payload: dict, instance_name: str = '', static_ip_name: str = '') -> str:
+    if not instance_name and not static_ip_name:
+        return ''
+    try:
+        notes = await cleanup_aws_resources(order_payload, instance_name, static_ip_name)
+    except Exception as exc:
+        logger.exception(
+            'AWS 开通失败补偿清理异常: order=%s instance=%s static_ip=%s error=%s',
+            order_payload.get('order_no'),
+            instance_name,
+            static_ip_name,
+            exc,
+        )
+        return f'AWS 开通失败补偿清理异常: {exc}'
+    return '\n'.join(['AWS 开通失败补偿清理：', *notes])
+
+
 async def provision_cloud_server(order_id: int):
     started_at = timezone.now()
     logger.info('云服务器开通开始: order_id=%s', order_id)
+    order_payload = None
+    result = None
+    order = None
     try:
         order, skip_reason = await _claim_order_for_provisioning(order_id)
         if not order:
@@ -119,9 +140,11 @@ async def provision_cloud_server(order_id: int):
 
         if order.provider == 'aws_lightsail':
             logger.info('云服务器创建开始: order=%s provider=AWS Lightsail server_name=%s', order.order_no, server_name)
-            result = await create_aws_instance(await _get_aws_order_payload(order), server_name)
+            order_payload = await _get_aws_order_payload(order)
+            result = await create_aws_instance(order_payload, server_name)
             login_user = 'admin'
         else:
+            order_payload = None
             logger.info('云服务器创建开始: order=%s provider=%s server_name=%s', order.order_no, order.provider, server_name)
             result = await create_aliyun_instance(order, server_name)
             login_user = 'root'
@@ -148,11 +171,21 @@ async def provision_cloud_server(order_id: int):
 
             note = '\n'.join(part for part in [result.note, bbr_note, mtproxy_note] if part)
             if not bbr_ok or not mtproxy_ok:
+                cleanup_note = ''
+                if order.provider == 'aws_lightsail':
+                    cleanup_note = await _cleanup_aws_after_failed_provision(
+                        order_payload or await _get_aws_order_payload(order),
+                        result.instance_id,
+                        result.static_ip_name,
+                    )
+                    if cleanup_note:
+                        note = '\n'.join(part for part in [note, cleanup_note] if part)
                 logger.warning(
-                    '云服务器开通失败: order=%s reason=bootstrap_failed bbr_ok=%s mtproxy_ok=%s elapsed_seconds=%s',
+                    '云服务器开通失败: order=%s reason=bootstrap_failed bbr_ok=%s mtproxy_ok=%s cleanup=%s elapsed_seconds=%s',
                     order.order_no,
                     bbr_ok,
                     mtproxy_ok,
+                    cleanup_note,
                     (timezone.now() - started_at).total_seconds(),
                 )
                 saved = await _mark_failed(order_id, note)
@@ -162,7 +195,7 @@ async def provision_cloud_server(order_id: int):
 
             saved = await _mark_success(
                 order_id,
-                server_name,
+                result.instance_id or server_name,
                 result.instance_id,
                 result.public_ip,
                 result.static_ip_name,
@@ -209,6 +242,14 @@ async def provision_cloud_server(order_id: int):
             (result.note or '')[:1500],
             (timezone.now() - started_at).total_seconds(),
         )
+        if order.provider == 'aws_lightsail' and (result.instance_id or result.static_ip_name):
+            cleanup_note = await _cleanup_aws_after_failed_provision(
+                order_payload or await _get_aws_order_payload(order),
+                result.instance_id,
+                result.static_ip_name,
+            )
+            if cleanup_note:
+                result.note = '\n'.join(part for part in [result.note, cleanup_note] if part)
         saved = await _mark_failed(order_id, result.note)
         logger.warning('云服务器开通结束: order=%s status=%s note=%s', saved.order_no, saved.status, (saved.provision_note or '')[:1500])
         print('[PROVISION_RESULT]', {'order_id': saved.id, 'order_no': saved.order_no, 'status': saved.status, 'error': saved.provision_note})
@@ -216,7 +257,20 @@ async def provision_cloud_server(order_id: int):
     except Exception as exc:
         logger.exception('云服务器开通异常: order_id=%s error=%s', order_id, exc)
         try:
-            saved = await _mark_failed(order_id, f'云服务器开通异常: {exc}')
+            cleanup_note = ''
+            if (
+                order is not None
+                and getattr(order, 'provider', '') == 'aws_lightsail'
+                and result is not None
+                and (getattr(result, 'instance_id', '') or getattr(result, 'static_ip_name', ''))
+            ):
+                cleanup_note = await _cleanup_aws_after_failed_provision(
+                    order_payload or await _get_aws_order_payload(order),
+                    result.instance_id,
+                    result.static_ip_name,
+                )
+            fail_note = '\n'.join(part for part in [f'云服务器开通异常: {exc}', cleanup_note] if part)
+            saved = await _mark_failed(order_id, fail_note)
             logger.warning('云服务器开通异常结束: order=%s status=%s note=%s', saved.order_no, saved.status, (saved.provision_note or '')[:1500])
             print('[PROVISION_RESULT]', {'order_id': saved.id, 'order_no': saved.order_no, 'status': saved.status, 'error': saved.provision_note})
             return saved

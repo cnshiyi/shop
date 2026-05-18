@@ -8,11 +8,13 @@ from tron.parser import _timestamp_ms
 from tron.scanner import (
     _confirm_cloud_server_order,
     _confirm_order_paid,
+    _confirm_recharge,
     _get_pending_address_orders,
     _get_pending_cloud_server_orders,
     _transfer_not_before_created_at,
     cleanup_expired_payment_windows,
 )
+from finance.models import Recharge
 
 
 class TronPaymentMatchingTests(SimpleTestCase):
@@ -112,6 +114,34 @@ class TronCloudServerRenewalTests(TestCase):
         self.assertGreater(order.service_expires_at, original_expires_at)
         self.assertEqual(asset.actual_expires_at, order.service_expires_at)
         self.assertEqual(server.expires_at, order.service_expires_at)
+
+    def test_confirm_rejects_expired_cloud_server_order_inside_transaction(self):
+        user = TelegramUser.objects.create(tg_user_id=990303, username='tron_expired_cloud_confirm')
+        plan = self._create_plan()
+        order = CloudServerOrder.objects.create(
+            order_no='TRON-CONFIRM-EXPIRED-CLOUD',
+            user=user,
+            plan=plan,
+            provider=plan.provider,
+            region_code=plan.region_code,
+            region_name=plan.region_name,
+            plan_name=plan.plan_name,
+            quantity=1,
+            currency='USDT',
+            total_amount='10.00',
+            pay_amount='10.123',
+            pay_method='address',
+            status='pending',
+            lifecycle_days=31,
+            expired_at=timezone.now() - timezone.timedelta(seconds=1),
+        )
+
+        confirmed = async_to_sync(_confirm_cloud_server_order)(order.id, 'tron-expired-cloud-tx')
+
+        self.assertIsNone(confirmed)
+        order.refresh_from_db()
+        self.assertEqual(order.status, 'pending')
+        self.assertFalse(order.tx_hash)
 
     def test_expired_address_renewal_reverts_to_active_status(self):
         user = TelegramUser.objects.create(tg_user_id=990302, username='tron_renew_expired_user')
@@ -259,3 +289,48 @@ class TronProductAddressOrderTests(TestCase):
         self.assertEqual(order.status, 'delivered')
         self.assertFalse(order.stock_reserved)
         self.assertEqual(self.product.stock, 0)
+
+    def test_confirm_rejects_expired_product_order_inside_transaction(self):
+        order = Order.objects.create(
+            order_no='TRON-PRODUCT-CONFIRM-EXPIRED',
+            user=self.user,
+            product=self.product,
+            product_name=self.product.name,
+            quantity=1,
+            currency='USDT',
+            total_amount='5.00',
+            pay_amount='5.111',
+            pay_method='address',
+            status='pending',
+            stock_reserved=True,
+            expired_at=timezone.now() - timezone.timedelta(seconds=1),
+        )
+
+        confirmed = async_to_sync(_confirm_order_paid)(order.id, 'tron-product-expired-confirm-tx')
+
+        self.assertIsNone(confirmed)
+        order.refresh_from_db()
+        self.assertEqual(order.status, 'pending')
+        self.assertFalse(order.tx_hash)
+
+
+class TronRechargeTests(TestCase):
+    def test_confirm_rejects_expired_recharge_inside_transaction(self):
+        user = TelegramUser.objects.create(tg_user_id=990501, username='tron_recharge_expired')
+        recharge = Recharge.objects.create(
+            user=user,
+            currency='USDT',
+            amount='8.00',
+            pay_amount='8.123',
+            status='pending',
+            expired_at=timezone.now() - timezone.timedelta(seconds=1),
+        )
+
+        confirmed = async_to_sync(_confirm_recharge)(recharge.id, 'tron-expired-recharge-tx')
+
+        self.assertIsNone(confirmed)
+        recharge.refresh_from_db()
+        user.refresh_from_db()
+        self.assertEqual(recharge.status, 'pending')
+        self.assertFalse(recharge.tx_hash)
+        self.assertEqual(user.balance, 0)

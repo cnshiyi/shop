@@ -1,6 +1,7 @@
 import json
 import time
 from decimal import Decimal
+from unittest.mock import AsyncMock, patch
 
 from asgiref.sync import async_to_sync
 from django.contrib.auth import get_user_model
@@ -9,7 +10,8 @@ from django.utils import timezone
 
 from accounts.models import BalanceLedger, TelegramUser
 from cloud.lifecycle import auto_renew_tick
-from cloud.provisioning import _claim_order_for_provisioning
+from cloud.provisioning import _claim_order_for_provisioning, provision_cloud_server
+from cloud.schemas import ProvisionResult
 from core.models import CloudAccountConfig, SiteConfig
 from dashboard_api.views import _totp_code
 from finance.models import Recharge
@@ -699,3 +701,116 @@ class DashboardApiRegressionTests(TestCase):
         self.assertEqual(claimed.status, 'provisioning')
         self.assertEqual(duplicate.id, order.id)
         self.assertIn('已在创建中', duplicate_reason)
+
+    def test_aws_bootstrap_failure_triggers_cleanup_compensation(self):
+        tg_user = TelegramUser.objects.create(
+            tg_user_id=990111,
+            username='provision_cleanup_user',
+        )
+        plan = CloudServerPlan.objects.create(
+            provider='aws_lightsail',
+            region_code='ap-southeast-1',
+            region_name='新加坡',
+            plan_name='Provision Cleanup Plan',
+            price='10.00',
+            currency='USDT',
+            is_active=True,
+        )
+        order = CloudServerOrder.objects.create(
+            order_no='DASH-PROVISION-CLEANUP-1',
+            user=tg_user,
+            plan=plan,
+            provider=plan.provider,
+            region_code=plan.region_code,
+            region_name=plan.region_name,
+            plan_name=plan.plan_name,
+            quantity=1,
+            currency='USDT',
+            total_amount='10.00',
+            pay_amount='10.00',
+            status='paid',
+        )
+
+        with (
+            patch('cloud.provisioning.create_aws_instance', new_callable=AsyncMock) as create_mock,
+            patch('cloud.provisioning.install_bbr') as bbr_mock,
+            patch('cloud.provisioning.install_mtproxy') as mtproxy_mock,
+            patch('cloud.provisioning.cleanup_aws_resources', new_callable=AsyncMock) as cleanup_mock,
+        ):
+            create_mock.return_value = ProvisionResult(
+                ok=True,
+                instance_id='cleanup-instance',
+                public_ip='203.0.113.90',
+                static_ip_name='cleanup-instance-ip',
+                login_user='admin',
+                login_password='SecretPass123',
+                note='created',
+            )
+            bbr_mock.return_value = (False, 'bbr failed')
+            mtproxy_mock.return_value = (True, 'mtproxy ok')
+            cleanup_mock.return_value = ['AWS 固定 IP 已释放: cleanup-instance-ip', 'AWS 实例已删除: cleanup-instance']
+
+            saved = async_to_sync(provision_cloud_server)(order.id)
+
+        self.assertEqual(saved.status, 'failed')
+        cleanup_mock.assert_called_once()
+        cleanup_args = cleanup_mock.call_args.args
+        self.assertEqual(cleanup_args[1], 'cleanup-instance')
+        self.assertEqual(cleanup_args[2], 'cleanup-instance-ip')
+        order.refresh_from_db()
+        self.assertIn('AWS 开通失败补偿清理', order.provision_note)
+        self.assertIn('AWS 实例已删除', order.provision_note)
+
+    def test_aws_bootstrap_exception_triggers_cleanup_compensation(self):
+        tg_user = TelegramUser.objects.create(
+            tg_user_id=990112,
+            username='provision_cleanup_exception_user',
+        )
+        plan = CloudServerPlan.objects.create(
+            provider='aws_lightsail',
+            region_code='ap-southeast-1',
+            region_name='新加坡',
+            plan_name='Provision Cleanup Exception Plan',
+            price='10.00',
+            currency='USDT',
+            is_active=True,
+        )
+        order = CloudServerOrder.objects.create(
+            order_no='DASH-PROVISION-CLEANUP-EXC',
+            user=tg_user,
+            plan=plan,
+            provider=plan.provider,
+            region_code=plan.region_code,
+            region_name=plan.region_name,
+            plan_name=plan.plan_name,
+            quantity=1,
+            currency='USDT',
+            total_amount='10.00',
+            pay_amount='10.00',
+            status='paid',
+        )
+
+        with (
+            patch('cloud.provisioning.create_aws_instance', new_callable=AsyncMock) as create_mock,
+            patch('cloud.provisioning.install_bbr') as bbr_mock,
+            patch('cloud.provisioning.cleanup_aws_resources', new_callable=AsyncMock) as cleanup_mock,
+        ):
+            create_mock.return_value = ProvisionResult(
+                ok=True,
+                instance_id='cleanup-exception-instance',
+                public_ip='203.0.113.91',
+                static_ip_name='cleanup-exception-instance-ip',
+                login_user='admin',
+                login_password='SecretPass123',
+                note='created',
+            )
+            bbr_mock.side_effect = RuntimeError('ssh exploded')
+            cleanup_mock.return_value = ['AWS 固定 IP 已释放: cleanup-exception-instance-ip', 'AWS 实例已删除: cleanup-exception-instance']
+
+            saved = async_to_sync(provision_cloud_server)(order.id)
+
+        self.assertEqual(saved.status, 'failed')
+        cleanup_mock.assert_called_once()
+        order.refresh_from_db()
+        self.assertIn('云服务器开通异常: ssh exploded', order.provision_note)
+        self.assertIn('AWS 开通失败补偿清理', order.provision_note)

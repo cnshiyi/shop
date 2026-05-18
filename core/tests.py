@@ -1,6 +1,10 @@
+import os
+
+from django.core.exceptions import ImproperlyConfigured
 from django.test import TestCase
 
 from core.cloud_accounts import get_active_cloud_account
+from core.crypto import SecretDecryptionError, decrypt_text, encrypt_text
 from core.models import CloudAccountConfig
 
 
@@ -57,3 +61,32 @@ class CloudAccountSelectionTests(TestCase):
 
         self.assertEqual(get_active_cloud_account('aws'), ok_hk)
         self.assertEqual(get_active_cloud_account('aws', 'ap-southeast-1'), ok_sg)
+
+
+class CryptoConfigTests(TestCase):
+    def test_encrypt_requires_config_encryption_key_outside_sqlite_tests(self):
+        old_key = os.environ.pop('CONFIG_ENCRYPTION_KEY', None)
+        old_test_flag = os.environ.get('DJANGO_TEST_SQLITE')
+        old_debug = os.environ.get('DEBUG')
+        os.environ['DJANGO_TEST_SQLITE'] = '0'
+        os.environ['DEBUG'] = '0'
+        try:
+            with self.assertRaises(ImproperlyConfigured):
+                encrypt_text('secret')
+        finally:
+            if old_key is not None:
+                os.environ['CONFIG_ENCRYPTION_KEY'] = old_key
+            if old_test_flag is None:
+                os.environ.pop('DJANGO_TEST_SQLITE', None)
+            else:
+                os.environ['DJANGO_TEST_SQLITE'] = old_test_flag
+            if old_debug is None:
+                os.environ.pop('DEBUG', None)
+            else:
+                os.environ['DEBUG'] = old_debug
+
+    def test_decrypt_keeps_legacy_plaintext_but_rejects_bad_fernet_payload(self):
+        self.assertEqual(decrypt_text('legacy-plain-secret'), 'legacy-plain-secret')
+
+        with self.assertRaises(SecretDecryptionError):
+            decrypt_text('gAAAA-invalid-token')

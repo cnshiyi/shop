@@ -1,7 +1,11 @@
+import logging
+
 from django.db import models
 from django.utils import timezone
 
-from core.crypto import decrypt_text, encrypt_text
+from core.crypto import SecretDecryptionError, decrypt_text, encrypt_text
+
+logger = logging.getLogger(__name__)
 
 
 def _encrypt_secret_field(value: str | None) -> str | None:
@@ -12,7 +16,13 @@ def _encrypt_secret_field(value: str | None) -> str | None:
 
 
 def _decrypt_secret_field(value: str | None) -> str | None:
-    return decrypt_text(value or '') if value else value
+    if not value:
+        return value
+    try:
+        return decrypt_text(value)
+    except SecretDecryptionError as exc:
+        logger.error('服务器登录密码解密失败: %s', exc)
+        return ''
 
 
 class EncryptedPasswordMixin:

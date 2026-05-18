@@ -71,7 +71,7 @@ python -m pip install -e .
 - 首页与导航已做响应式适配，可随屏幕宽度自动切换布局
 
 ## 方案 B：独立后台前端
-- 后端接口仍由当前仓库提供：`/api/admin/` 与 `/api/dashboard/`
+- 后端接口仍由当前仓库提供：登录/刷新等公开会话接口走 `/api/auth/*`，后台业务接口走 `/api/admin/*`
 - 真实前端仓库位于 `/Users/a399/Desktop/shop/vue-shop-admin`
 - 当前实际使用前端位于 `/Users/a399/Desktop/shop/vue-shop-admin/apps/web-antd`
 - 当前仓库内的 `dashboard_web/` 仅保留说明文档，不承载真实前端源码
@@ -90,6 +90,7 @@ python -m pip install -e .
 
 ### 2. 配置环境变量
 主要配置位于 `.env`：
+- `CONFIG_ENCRYPTION_KEY`（必填，用于加密数据库中的敏感配置；生产环境禁止缺失或使用默认弱密钥）
 - `BOT_TOKEN`
 - `REDIS_URL`
 - `MYSQL_HOST`
@@ -203,7 +204,8 @@ Redis 中维护按天隔离的临时统计：
 
 ## 配置与敏感信息管理
 - 支持在 Django Admin 的 `系统配置` 中维护：`bot_token`、`telegram_api_id`、`telegram_api_hash`、`receive_address`、`trongrid_api_key`、`redis_url`、`database_url`、`mysql_host`、`mysql_port`、`mysql_user`、`mysql_password`、`mysql_database`、`admin_password_notice`
-- 敏感配置会通过 `core.crypto` 加密后写入数据库，后台列表页显示脱敏值
+- 敏感配置会通过 `core.crypto` 使用 `CONFIG_ENCRYPTION_KEY` 加密后写入数据库，后台列表页显示脱敏值
+- 早期使用 `SECRET_KEY` 加密的历史敏感配置仅在 `DEBUG=1` 下兼容读取，读取时会有告警；应尽快配置 `CONFIG_ENCRYPTION_KEY` 并重新保存敏感配置完成迁移
 - 支持在 Django Admin 的 `云账户配置` 中维护多个 `AWS / 阿里云` 账户，`access_key / secret_key` 同样加密存库
 - 如本地 MySQL 账号无建库权限，可设置 `DJANGO_TEST_REUSE_DB=1` 让 Django 测试复用当前库；也可通过 `MYSQL_TEST_DATABASE` 指定已有可用测试库名
 

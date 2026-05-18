@@ -160,6 +160,9 @@ def _create_instance_sync(order_data: dict, server_name: str):
     blueprint_id = 'debian_12'
     static_ip_name = f'{server_name}-ip'[:255]
 
+    client = None
+    created_instance_name = ''
+    allocated_static_ip_name = ''
     try:
         client = boto3.client(
             'lightsail',
@@ -170,6 +173,7 @@ def _create_instance_sync(order_data: dict, server_name: str):
         logger.info('AWS 客户端已就绪: order=%s region=%s bundle=%s blueprint=%s static_ip_name=%s', order_no, region, bundle_id, blueprint_id, static_ip_name)
 
         server_name = _next_available_instance_name(client, server_name)
+        created_instance_name = server_name
         static_ip_name = f'{server_name}-ip'[:255]
         logger.info('AWS 实例命名完成: order=%s server_name=%s static_ip_name=%s', order_no, server_name, static_ip_name)
 
@@ -192,7 +196,7 @@ def _create_instance_sync(order_data: dict, server_name: str):
             time.sleep(5)
         else:
             logger.warning('AWS 实例启动超时: order=%s server_name=%s last_state=%s', order_no, server_name, state)
-            return ProvisionResult(ok=False, note=f'AWS 实例已提交创建，但在规定时间内未进入 running: {server_name}')
+            return ProvisionResult(ok=False, instance_id=created_instance_name, note=f'AWS 实例已提交创建，但在规定时间内未进入 running: {server_name}')
 
         try:
             _ensure_instance_port_open(client, server_name, 22)
@@ -203,12 +207,14 @@ def _create_instance_sync(order_data: dict, server_name: str):
 
         try:
             client.allocate_static_ip(staticIpName=static_ip_name)
+            allocated_static_ip_name = static_ip_name
             logger.info('AWS 固定 IP 已分配: order=%s static_ip_name=%s', order_no, static_ip_name)
         except ClientError as exc:
             if 'already exists' not in str(exc).lower():
                 logger.warning('AWS 固定 IP 分配失败: order=%s static_ip_name=%s error=%s', order_no, static_ip_name, exc)
-                return ProvisionResult(ok=False, note='创建失败，请联系人工客服')
+                return ProvisionResult(ok=False, instance_id=created_instance_name, note='创建失败，请联系人工客服')
             logger.info('AWS 固定 IP 已存在: order=%s static_ip_name=%s', order_no, static_ip_name)
+            allocated_static_ip_name = static_ip_name
         client.attach_static_ip(staticIpName=static_ip_name, instanceName=server_name)
         logger.info('AWS 固定 IP 绑定完成: order=%s static_ip_name=%s server_name=%s', order_no, static_ip_name, server_name)
 
@@ -223,7 +229,7 @@ def _create_instance_sync(order_data: dict, server_name: str):
 
         if not public_ip:
             logger.warning('AWS 固定公网 IP 获取失败: order=%s server_name=%s static_ip_name=%s', order_no, server_name, static_ip_name)
-            return ProvisionResult(ok=False, note='创建失败，请联系人工客服')
+            return ProvisionResult(ok=False, instance_id=created_instance_name, static_ip_name=allocated_static_ip_name, note='创建失败，请联系人工客服')
 
         login_mode = 'SSH 公钥登录已启用，后续自动设置 root 密码' if public_key else 'root 密码'
         note = (
@@ -251,12 +257,71 @@ def _create_instance_sync(order_data: dict, server_name: str):
         )
     except (BotoCoreError, ClientError) as exc:
         logger.exception('AWS Lightsail 创建失败: client_error order=%s server_name=%s error=%s', order_no, server_name, exc)
-        return ProvisionResult(ok=False, note=f'AWS Lightsail 创建失败: {exc}')
+        return ProvisionResult(ok=False, instance_id=created_instance_name, static_ip_name=allocated_static_ip_name, note=f'AWS Lightsail 创建失败: {exc}')
     except Exception as exc:
         logger.exception('AWS Lightsail 创建异常: order=%s server_name=%s error=%s', order_no, server_name, exc)
-        return ProvisionResult(ok=False, note=f'AWS Lightsail 创建异常: {exc}')
+        return ProvisionResult(ok=False, instance_id=created_instance_name, static_ip_name=allocated_static_ip_name, note=f'AWS Lightsail 创建异常: {exc}')
+
+
+def _cleanup_created_resources_sync(
+    *,
+    region: str,
+    access_key: str,
+    secret_key: str,
+    instance_name: str = '',
+    static_ip_name: str = '',
+) -> list[str]:
+    notes: list[str] = []
+    if not access_key or not secret_key:
+        return ['AWS 清理跳过：缺少凭据。']
+    try:
+        import boto3
+    except ImportError:
+        return ['AWS 清理跳过：未安装 boto3。']
+
+    client = boto3.client(
+        'lightsail',
+        region_name=region or 'ap-southeast-1',
+        aws_access_key_id=access_key,
+        aws_secret_access_key=secret_key,
+    )
+    if static_ip_name:
+        try:
+            static_ip = client.get_static_ip(staticIpName=static_ip_name).get('staticIp') or {}
+            if static_ip.get('attachedTo'):
+                client.detach_static_ip(staticIpName=static_ip_name)
+                notes.append(f'AWS 固定 IP 已解绑: {static_ip_name}')
+        except Exception as exc:
+            notes.append(f'AWS 固定 IP 解绑检查失败: {static_ip_name} {exc}')
+        try:
+            client.release_static_ip(staticIpName=static_ip_name)
+            notes.append(f'AWS 固定 IP 已释放: {static_ip_name}')
+        except Exception as exc:
+            notes.append(f'AWS 固定 IP 释放失败: {static_ip_name} {exc}')
+    if instance_name:
+        try:
+            client.delete_instance(instanceName=instance_name)
+            notes.append(f'AWS 实例已删除: {instance_name}')
+        except Exception as exc:
+            notes.append(f'AWS 实例删除失败: {instance_name} {exc}')
+    return notes or ['AWS 清理跳过：没有可清理资源。']
 
 
 @sync_to_async
 def create_instance(order_data: dict, server_name: str):
     return _create_instance_sync(order_data, server_name)
+
+
+@sync_to_async
+def cleanup_created_resources(order_data: dict, instance_name: str = '', static_ip_name: str = '') -> list[str]:
+    region = order_data.get('region_code') or 'ap-southeast-1'
+    account = get_active_cloud_account('aws', region)
+    access_key = account.access_key_plain if account else os.getenv('AWS_ACCESS_KEY_ID', '')
+    secret_key = account.secret_key_plain if account else os.getenv('AWS_SECRET_ACCESS_KEY', '')
+    return _cleanup_created_resources_sync(
+        region=region,
+        access_key=access_key,
+        secret_key=secret_key,
+        instance_name=instance_name,
+        static_ip_name=static_ip_name,
+    )

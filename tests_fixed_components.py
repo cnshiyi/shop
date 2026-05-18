@@ -338,7 +338,7 @@ class TestUrlsCompatibility(unittest.TestCase):
     avoiding the old three-way duplicate namespace registration.
     """
 
-    def test_frontend_and_canonical_api_paths_resolve(self):
+    def test_frontend_and_public_auth_paths_resolve(self):
         import os
         os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'shop.settings')
         import django
@@ -347,7 +347,7 @@ class TestUrlsCompatibility(unittest.TestCase):
         from django.urls import resolve
 
         expected = {
-            '/api/auth/login': 'dashboard_api:auth-login',
+            '/api/auth/login': 'dashboard_api_public:auth-login',
             '/api/admin/auth/login': 'dashboard_api_admin:auth-login',
             '/api/admin/users/': 'dashboard_api_admin:users-list',
             '/api/admin/cloud-assets/': 'dashboard_api_admin:cloud-assets-list',
@@ -356,6 +356,17 @@ class TestUrlsCompatibility(unittest.TestCase):
             {path: resolve(path).view_name for path in expected},
             expected,
         )
+
+    def test_bare_admin_api_paths_do_not_resolve(self):
+        import os
+        os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'shop.settings')
+        import django
+        django.setup()
+
+        from django.urls import Resolver404, resolve
+
+        with self.assertRaises(Resolver404):
+            resolve('/api/users/')
 
     def test_urls_file_has_no_dashboard_duplicate_prefix(self):
         import pathlib

@@ -187,6 +187,16 @@ def _transfer_not_before_created_at(transfer: dict, target) -> bool:
     return tx_dt + timezone.timedelta(seconds=PAYMENT_CREATED_AT_GRACE_SECONDS) >= created_at
 
 
+def _payment_window_is_open(target, now=None) -> bool:
+    expired_at = getattr(target, 'expired_at', None)
+    if not expired_at:
+        return True
+    now = now or timezone.now()
+    if timezone.is_naive(expired_at):
+        expired_at = timezone.make_aware(expired_at, timezone.get_current_timezone())
+    return expired_at > now
+
+
 def _short_addr(addr: str) -> str:
     if len(addr) > 14:
         return f'{addr[:6]}...{addr[-4:]}'
@@ -329,6 +339,8 @@ def _confirm_order_paid(order_id: int, tx_hash: str):
         order = Order.objects.select_for_update().get(id=order_id)
         if order.status != 'pending':
             return None
+        if not _payment_window_is_open(order):
+            return None
         if order.pay_method == 'address' and not order.stock_reserved:
             product = Product.objects.select_for_update().get(id=order.product_id)
             if product.stock != -1:
@@ -360,6 +372,8 @@ def _confirm_recharge(recharge_id: int, tx_hash: str):
             return None
         rc = Recharge.objects.select_for_update().get(id=recharge_id)
         if rc.status != 'pending':
+            return None
+        if not _payment_window_is_open(rc):
             return None
         rc.status = 'completed'
         rc.tx_hash = tx_hash
@@ -395,6 +409,8 @@ def _confirm_cloud_server_order(order_id: int, tx_hash: str):
             return None
         order = CloudServerOrder.objects.select_for_update().get(id=order_id)
         if order.status not in {'pending', 'renew_pending'}:
+            return None
+        if not _payment_window_is_open(order):
             return None
         order.tx_hash = tx_hash
         order.paid_at = timezone.now()

@@ -1,7 +1,11 @@
+import logging
+
 from django.db import models
 from django.utils import timezone
 
-from .crypto import decrypt_text, encrypt_text
+from .crypto import SecretDecryptionError, decrypt_text, encrypt_text
+
+logger = logging.getLogger(__name__)
 
 
 class SiteConfig(models.Model):
@@ -22,6 +26,9 @@ class SiteConfig(models.Model):
                 return default
             value = obj.value or ''
             return decrypt_text(value) if obj.is_sensitive else (value or default)
+        except SecretDecryptionError as exc:
+            logger.error('系统敏感配置解密失败: key=%s error=%s', key, exc)
+            return default
         except Exception:
             return default
 
@@ -110,11 +117,19 @@ class CloudAccountConfig(models.Model):
 
     @property
     def access_key_plain(self) -> str:
-        return decrypt_text(self.access_key or '')
+        try:
+            return decrypt_text(self.access_key or '')
+        except SecretDecryptionError as exc:
+            logger.error('云账户 Access Key 解密失败: account_id=%s provider=%s error=%s', self.id, self.provider, exc)
+            return ''
 
     @property
     def secret_key_plain(self) -> str:
-        return decrypt_text(self.secret_key or '')
+        try:
+            return decrypt_text(self.secret_key or '')
+        except SecretDecryptionError as exc:
+            logger.error('云账户 Secret Key 解密失败: account_id=%s provider=%s error=%s', self.id, self.provider, exc)
+            return ''
 
     @staticmethod
     def _mask_secret(value: str) -> str:
