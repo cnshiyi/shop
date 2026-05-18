@@ -90,6 +90,20 @@ DATABASES = {
     }
 }
 
+# Warn if using default weak MySQL credentials in production
+if not DEBUG:
+    db_user = DATABASES['default']['USER']
+    db_password = DATABASES['default']['PASSWORD']
+    db_name = DATABASES['default']['NAME']
+    if db_user == 'a' or db_password == '123456' or db_name == 'a':
+        import warnings
+        warnings.warn(
+            '⚠️  生产环境检测到默认弱 MySQL 凭据。请立即配置 MYSQL_USER、MYSQL_PASSWORD、MYSQL_DATABASE 环境变量。'
+            '当前配置: USER=%s PASSWORD=%s DATABASE=%s' % (db_user, '***' if db_password else '(empty)', db_name),
+            RuntimeWarning,
+            stacklevel=2
+        )
+
 if os.getenv('DJANGO_TEST_SQLITE', '0') == '1':
     DATABASES['default'] = {
         'ENGINE': 'django.db.backends.sqlite3',

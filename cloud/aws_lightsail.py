@@ -139,7 +139,7 @@ def _create_instance_sync(order_data: dict, server_name: str):
     plan_name = order_data.get('plan_name')
     mtproxy_port = int(order_data.get('mtproxy_port') or 9528)
 
-    account = get_active_cloud_account('aws')
+    account = get_active_cloud_account('aws', region)
     access_key = account.access_key_plain if account else os.getenv('AWS_ACCESS_KEY_ID', '')
     secret_key = account.secret_key_plain if account else os.getenv('AWS_SECRET_ACCESS_KEY', '')
     logger.info('AWS Lightsail 创建开始: order=%s provider=%s region=%s plan=%s server_name=%s', order_no, provider, region, plan_name, server_name)

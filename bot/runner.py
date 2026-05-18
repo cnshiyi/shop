@@ -16,12 +16,12 @@ from bot.fsm import close_fsm_storage
 from bot.handlers import create_dispatcher_and_register
 from bot.telegram_listener import TelegramAccountListenerManager
 from biz.services import refresh_custom_plan_cache
-from cloud.lifecycle import lifecycle_tick, sync_server_status_tick, sync_cloud_accounts_tick
+from cloud.lifecycle import auto_renew_tick, lifecycle_tick, sync_server_status_tick, sync_cloud_accounts_tick
 from core.cache import refresh_config, close as cache_close
 from core.models import SiteConfig
 from monitoring.cache import init_monitor_cache
 from tron.resource_checker import check_resources, set_bot as set_resource_bot
-from tron.scanner import scan_block, set_bot
+from tron.scanner import cleanup_expired_payment_windows, scan_block, set_bot
 
 logger = logging.getLogger(__name__)
 _scan_lock = asyncio.Lock()
@@ -66,7 +66,9 @@ async def run_bot():
     scheduler = AsyncIOScheduler()
     scheduler.add_job(_scan_block_job, 'interval', seconds=6, id='tron_scanner', coalesce=True)
     scheduler.add_job(check_resources, 'interval', minutes=3, id='tron_resource_checker', max_instances=1)
+    scheduler.add_job(cleanup_expired_payment_windows, 'interval', minutes=1, id='payment_window_cleanup', max_instances=1, coalesce=True)
     scheduler.add_job(refresh_custom_plan_cache, 'interval', minutes=10, id='custom_plan_cache_refresh', max_instances=1, coalesce=True)
+    scheduler.add_job(auto_renew_tick, 'interval', minutes=60, id='cloud_auto_renew', max_instances=1, kwargs={'notify': _notify})
     scheduler.add_job(lifecycle_tick, 'interval', minutes=10, id='cloud_lifecycle', max_instances=1, kwargs={'notify': _notify})
     scheduler.add_job(sync_server_status_tick, 'interval', minutes=3, id='cloud_server_sync', max_instances=1, coalesce=True)
     scheduler.add_job(sync_cloud_accounts_tick, 'interval', minutes=15, id='cloud_account_check', max_instances=1, coalesce=True)
@@ -74,7 +76,9 @@ async def run_bot():
     scheduler.start()
     logger.info('TRON 扫块器已启动 (每6秒)')
     logger.info('资源巡检已启动 (每3分钟)')
+    logger.info('支付窗口过期清理已启动 (每1分钟)')
     logger.info('定制套餐缓存刷新已启动 (每10分钟)')
+    logger.info('云服务器自动续费调度已启动 (每60分钟)')
     logger.info('云服务器生命周期调度已启动 (每10分钟)')
     logger.info('云服务器状态同步已启动 (每3分钟)')
     logger.info('云账号状态巡检已启动 (每15分钟)')

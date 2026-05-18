@@ -36,7 +36,21 @@
 
 ## 启动方式
 ### 1. 安装依赖
-使用项目虚拟环境安装依赖。
+本项目使用 `pyproject.toml` + `uv.lock` 管理依赖，Python 版本要求为 `>=3.13`。
+
+```bash
+cd /Users/a399/Desktop/shop/shop
+uv sync
+```
+
+如果不用 `uv`，也可以手动创建虚拟环境后安装当前项目依赖：
+
+```bash
+cd /Users/a399/Desktop/shop/shop
+python3.13 -m venv .venv
+source .venv/bin/activate
+python -m pip install -e .
+```
 
 ## 数据流与持久化说明
 - 已新增 `docs/DATA_FLOW_AND_PERSISTENCE.md`，用于盘点项目中所有主要数据来源、读取入口、写入入口与统一落库规范
@@ -58,8 +72,8 @@
 
 ## 方案 B：独立后台前端
 - 后端接口仍由当前仓库提供：`/api/admin/` 与 `/api/dashboard/`
-- 真实前端仓库位于 `C:\Users\Administrator\Desktop\vue-vben-admin`
-- 当前实际使用前端位于 `C:\Users\Administrator\Desktop\vue-vben-admin\apps\web-antd`
+- 真实前端仓库位于 `/Users/a399/Desktop/shop/vue-shop-admin`
+- 当前实际使用前端位于 `/Users/a399/Desktop/shop/vue-shop-admin/apps/web-antd`
 - 当前仓库内的 `dashboard_web/` 仅保留说明文档，不承载真实前端源码
 - 如需修改后台页面、菜单、文案、代理与交互，请直接在前端仓库修改
 
@@ -92,13 +106,31 @@
 
 ### 3. 执行迁移
 ```bash
-python manage.py migrate
+uv run python manage.py migrate
 ```
 
 ### 4. 启动项目
+仅启动 Django 后端：
+
+```bash
+uv run python manage.py runserver 127.0.0.1:8000
+```
+
+或者在 PyCharm 中运行：
+
+```bash
+python run.py web
+```
+
+执行数据库迁移、启动 Django，并同时启动机器人 runner：
+
 ```bash
 python run.py
 ```
+
+本机 PyCharm 解释器选择：
+
+- `/Users/a399/Desktop/shop/shop/.venv/bin/python`
 
 ## 机器人能力
 ### 主菜单
@@ -170,7 +202,7 @@ Redis 中维护按天隔离的临时统计：
 - 缓存职责现固定为：`core/cache.py` + `monitoring/cache.py`
 
 ## 配置与敏感信息管理
-- 支持在 Django Admin 的 `系统配置` 中维护：`bot_token`、`m_account_token`、`receive_address`、`trongrid_api_key`、`redis_url`、`database_url`、`mysql_host`、`mysql_port`、`mysql_user`、`mysql_password`、`mysql_database`、`admin_password_notice`
+- 支持在 Django Admin 的 `系统配置` 中维护：`bot_token`、`telegram_api_id`、`telegram_api_hash`、`receive_address`、`trongrid_api_key`、`redis_url`、`database_url`、`mysql_host`、`mysql_port`、`mysql_user`、`mysql_password`、`mysql_database`、`admin_password_notice`
 - 敏感配置会通过 `core.crypto` 加密后写入数据库，后台列表页显示脱敏值
 - 支持在 Django Admin 的 `云账户配置` 中维护多个 `AWS / 阿里云` 账户，`access_key / secret_key` 同样加密存库
 - 如本地 MySQL 账号无建库权限，可设置 `DJANGO_TEST_REUSE_DB=1` 让 Django 测试复用当前库；也可通过 `MYSQL_TEST_DATABASE` 指定已有可用测试库名

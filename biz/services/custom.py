@@ -130,8 +130,8 @@ def _generate_order_no() -> str:
     return f'SRV{int(time.time() * 1000)}{random.randint(1000, 9999)}'
 
 
-def _build_aliyun_client(endpoint: str = 'swas.cn-hangzhou.aliyuncs.com'):
-    account = get_active_cloud_account('aliyun')
+def _build_aliyun_client(endpoint: str = 'swas.cn-hangzhou.aliyuncs.com', region_hint: str | None = None):
+    account = get_active_cloud_account('aliyun', region_hint)
     key = account.access_key_plain if account else os.getenv('ALIBABA_CLOUD_ACCESS_KEY_ID', '')
     secret = account.secret_key_plain if account else os.getenv('ALIBABA_CLOUD_ACCESS_KEY_SECRET', '')
     if not key or not secret:
@@ -155,7 +155,7 @@ def _parse_aliyun_price(value) -> Decimal:
 
 
 def _fetch_aliyun_plan_templates(region_code: str):
-    client = _build_aliyun_client()
+    client = _build_aliyun_client(region_hint=region_code)
     if not client:
         return DEFAULT_ALIYUN_PLAN_TEMPLATES
     try:
@@ -184,7 +184,7 @@ def _fetch_aliyun_plan_templates(region_code: str):
 
 
 def _fetch_aws_bundle_templates():
-    account = get_active_cloud_account('aws')
+    account = get_active_cloud_account('aws', 'ap-southeast-1')
     key = account.access_key_plain if account else os.getenv('AWS_ACCESS_KEY_ID', '')
     secret = account.secret_key_plain if account else os.getenv('AWS_SECRET_ACCESS_KEY', '')
     if not key or not secret:
@@ -636,11 +636,18 @@ def buy_cloud_server_with_balance(user_id: int, plan_id: int, currency: str = 'U
 
 @sync_to_async
 def pay_cloud_server_order_with_balance(order_id: int, user_id: int, currency: str = 'USDT'):
-    order = CloudServerOrder.objects.select_related('plan').filter(id=order_id, user_id=user_id, status='pending').first()
-    if not order:
-        return None, '订单不存在或状态不可支付'
-    total = usdt_to_trx.__wrapped__(order.total_amount) if currency == 'TRX' else Decimal(order.total_amount)
     with transaction.atomic():
+        order = CloudServerOrder.objects.select_related('plan').select_for_update().filter(id=order_id, user_id=user_id).first()
+        if not order:
+            return None, '订单不存在或状态不可支付'
+        if order.status != 'pending':
+            return None, '订单不存在或状态不可支付'
+        now = timezone.now()
+        if order.expired_at and order.expired_at <= now:
+            order.status = 'expired'
+            order.save(update_fields=['status', 'updated_at'])
+            return None, '订单已过期，请重新下单'
+        total = usdt_to_trx.__wrapped__(order.total_amount) if currency == 'TRX' else Decimal(order.total_amount)
         user = TelegramUser.objects.select_for_update().get(id=user_id)
         balance_field = 'balance_trx' if currency == 'TRX' else 'balance'
         current_balance = Decimal(str(getattr(user, balance_field, 0) or 0))
@@ -655,7 +662,8 @@ def pay_cloud_server_order_with_balance(order_id: int, user_id: int, currency: s
         order.pay_method = 'balance'
         order.status = 'paid'
         order.paid_at = timezone.now()
-        order.save(update_fields=['currency', 'pay_amount', 'pay_method', 'status', 'paid_at', 'updated_at'])
+        order.expired_at = None
+        order.save(update_fields=['currency', 'pay_amount', 'pay_method', 'status', 'paid_at', 'expired_at', 'updated_at'])
         record_balance_ledger(
             user,
             ledger_type='cloud_order_balance_pay',
@@ -672,11 +680,14 @@ def pay_cloud_server_order_with_balance(order_id: int, user_id: int, currency: s
 
 @sync_to_async
 def set_cloud_server_port(order_id: int, user_id: int, port: int):
-    order = CloudServerOrder.objects.filter(id=order_id, user_id=user_id).first()
-    if not order:
-        return None
-    order.mtproxy_port = port
-    order.provision_note = f'用户已确认端口 {port}，开始创建服务器。'
-    order.save(update_fields=['mtproxy_port', 'provision_note', 'updated_at'])
+    with transaction.atomic():
+        order = CloudServerOrder.objects.select_for_update().filter(id=order_id, user_id=user_id).first()
+        if not order:
+            return None
+        if order.status != 'paid' or order.instance_id or order.provider_resource_id or order.public_ip:
+            return False
+        order.mtproxy_port = port
+        order.provision_note = f'用户已确认端口 {port}，开始创建服务器。'
+        order.save(update_fields=['mtproxy_port', 'provision_note', 'updated_at'])
     logger.info('云服务器端口确认: order=%s user=%s port=%s', order.order_no, user_id, port)
     return order

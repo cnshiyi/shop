@@ -1,19 +1,31 @@
 import logging
 import os
 from dataclasses import dataclass
+from decimal import Decimal
 
 from aiogram.types import InlineKeyboardMarkup
 from asgiref.sync import sync_to_async
 from django.core.management import call_command
+from django.db import transaction
 from django.utils import timezone
 
-from core.models import CloudAccountConfig
+from core.models import CloudAccountConfig, SiteConfig
 
 from accounts.models import TelegramUser
+from accounts.services import record_balance_ledger
 from biz.models import CloudAsset, CloudServerOrder, Server
 from bot.keyboards import cloud_expiry_actions
 
 logger = logging.getLogger(__name__)
+
+NOTICE_SWITCH_CONFIG_KEYS = {
+    'renew_notice': 'cloud_notice_renew_enabled',
+    'auto_renew_notice': 'cloud_notice_auto_renew_enabled',
+    'delete_notice': 'cloud_notice_delete_enabled',
+    'recycle_notice': 'cloud_notice_recycle_enabled',
+}
+NOTICE_TEXT_CONFIG_PREFIX = 'cloud_notice_text_override'
+AUTO_RENEW_ELIGIBLE_STATUSES = {'completed', 'expiring', 'suspended'}
 
 
 @dataclass
@@ -57,6 +69,151 @@ def _aws_client(region: str):
     )
 
 
+def _notice_enabled(notice_type: str) -> bool:
+    config_key = NOTICE_SWITCH_CONFIG_KEYS.get(notice_type)
+    if not config_key:
+        return True
+    return str(SiteConfig.get(config_key, '1')).strip().lower() in {'1', 'true', 'yes', 'on'}
+
+
+def _site_switch_enabled(key: str, default: str = '1') -> bool:
+    return str(SiteConfig.get(key, default)).strip().lower() in {'1', 'true', 'yes', 'on'}
+
+
+def _auto_renew_result_notice_enabled(event: str) -> bool:
+    if not _notice_enabled('auto_renew_notice'):
+        return False
+    if not _site_switch_enabled('cloud_auto_renew_execution_notify_enabled', '1'):
+        return False
+    raw_events = str(SiteConfig.get('cloud_auto_renew_execution_notify_events', 'all') or '').strip().lower()
+    if not raw_events:
+        return True
+    tokens = {item.strip() for item in raw_events.replace('，', ',').replace(';', ',').split(',') if item.strip()}
+    if not tokens or tokens.intersection({'all', '*', '全部'}):
+        return True
+    success_tokens = {'success', 'succeeded', 'ok', 'done', '成功'}
+    failure_tokens = {'failure', 'failed', 'fail', 'error', '失败', '异常'}
+    if event == 'success':
+        return bool(tokens.intersection(success_tokens))
+    if event == 'failure':
+        return bool(tokens.intersection(failure_tokens))
+    return False
+
+
+class _NoticeFormatDict(dict):
+    def __missing__(self, key):
+        return '{' + key + '}'
+
+
+def _notice_override_config_key(notice_type, user_id):
+    return f"{NOTICE_TEXT_CONFIG_PREFIX}_{notice_type}_{user_id or 'unbound'}"
+
+
+def _notice_text(order: CloudServerOrder, notice_type: str, default_text: str, extra: dict | None = None) -> str:
+    template = SiteConfig.get(_notice_override_config_key(notice_type, order.user_id), '')
+    if not template:
+        return default_text
+    values = _NoticeFormatDict({
+        'delete_at': order.delete_at or '',
+        'ip': order.public_ip or order.previous_public_ip or '',
+        'ip_recycle_at': order.ip_recycle_at or '',
+        'order_no': order.order_no or '',
+        'provider': order.provider or '',
+        'service_expires_at': order.service_expires_at or '',
+        'status': order.status or '',
+    })
+    if extra:
+        values.update(extra)
+    try:
+        return str(template).format_map(values)
+    except (KeyError, ValueError):
+        return str(template)
+
+
+def _auto_renew_before_days() -> int:
+    raw = SiteConfig.get('cloud_auto_renew_before_days', '1')
+    try:
+        return max(int(raw), 0)
+    except (TypeError, ValueError):
+        return 1
+
+
+def _auto_renew_amount(order: CloudServerOrder) -> Decimal:
+    discount_rate = Decimal(str(getattr(order.user, 'cloud_discount_rate', 100) or 100))
+    if discount_rate <= 0:
+        discount_rate = Decimal('100')
+    return (Decimal(str(order.total_amount or 0)) * discount_rate / Decimal('100')).quantize(Decimal('0.01'))
+
+
+@sync_to_async
+def _get_auto_renew_due_orders():
+    now = timezone.now()
+    renew_before = timezone.timedelta(days=_auto_renew_before_days())
+    return list(
+        CloudServerOrder.objects.select_related('user').filter(
+            auto_renew_enabled=True,
+            service_expires_at__isnull=False,
+            service_expires_at__lte=now + renew_before,
+            status__in=AUTO_RENEW_ELIGIBLE_STATUSES,
+        ).order_by('service_expires_at', 'id')[:100]
+    )
+
+
+@sync_to_async
+def _apply_auto_renew(order_id: int):
+    now = timezone.now()
+    with transaction.atomic():
+        order = CloudServerOrder.objects.select_for_update().select_related('user').filter(id=order_id).first()
+        if not order:
+            return None, '订单不存在'
+        if not order.auto_renew_enabled:
+            return order, '订单未开启自动续费'
+        if order.status not in AUTO_RENEW_ELIGIBLE_STATUSES:
+            return order, '当前订单状态不可自动续费'
+        if not order.public_ip:
+            return order, '订单没有公网 IP，不能自动续费'
+        user = TelegramUser.objects.select_for_update().get(id=order.user_id)
+        amount = _auto_renew_amount(order)
+        old_balance = Decimal(str(user.balance or 0))
+        if old_balance < amount:
+            return order, f'USDT 余额不足，需要 {amount}，当前 {old_balance}'
+        user.balance = old_balance - amount
+        user.save(update_fields=['balance', 'updated_at'])
+        base = order.service_expires_at or now
+        if base < now:
+            base = now
+        order.service_expires_at = base + timezone.timedelta(days=max(int(order.lifecycle_days or 31), 1))
+        order.last_renewed_at = now
+        order.status = 'completed'
+        order.currency = 'USDT'
+        order.pay_method = 'balance'
+        order.pay_amount = amount
+        order.paid_at = now
+        order.expired_at = None
+        order.renew_notice_sent_at = None
+        order.delete_notice_sent_at = None
+        order.recycle_notice_sent_at = None
+        order.save(update_fields=[
+            'service_expires_at', 'last_renewed_at', 'status', 'currency',
+            'pay_method', 'pay_amount', 'paid_at', 'expired_at',
+            'renew_notice_sent_at', 'delete_notice_sent_at', 'recycle_notice_sent_at',
+            'updated_at',
+        ])
+        CloudAsset.objects.filter(order=order).update(actual_expires_at=order.service_expires_at, updated_at=now)
+        Server.objects.filter(order=order).update(expires_at=order.service_expires_at, updated_at=now)
+        record_balance_ledger(
+            user,
+            ledger_type='cloud_order_balance_pay',
+            currency='USDT',
+            old_balance=old_balance,
+            new_balance=user.balance,
+            related_type='cloud_order',
+            related_id=order.id,
+            description=f'云服务器自动续费订单 #{order.order_no}',
+        )
+        return order, None
+
+
 @sync_to_async
 def _get_due_orders():
     now = timezone.now()
@@ -64,9 +221,9 @@ def _get_due_orders():
     delete_notice_at = now + timezone.timedelta(days=1)
     recycle_notice_at = now + timezone.timedelta(days=1)
     return {
-        'renew_notice': list(CloudServerOrder.objects.filter(status__in=['completed', 'expiring', 'renew_pending'], service_expires_at__lte=renew_notice_at, service_expires_at__gt=now, renew_notice_sent_at__isnull=True)),
-        'delete_notice': list(CloudServerOrder.objects.filter(status__in=['suspended', 'deleting'], delete_at__lte=delete_notice_at, delete_at__gt=now, delete_notice_sent_at__isnull=True)),
-        'recycle_notice': list(CloudServerOrder.objects.filter(status='deleted', ip_recycle_at__lte=recycle_notice_at, ip_recycle_at__gt=now, recycle_notice_sent_at__isnull=True)),
+        'renew_notice': list(CloudServerOrder.objects.filter(status__in=['completed', 'expiring', 'renew_pending'], service_expires_at__lte=renew_notice_at, service_expires_at__gt=now, renew_notice_sent_at__isnull=True)) if _notice_enabled('renew_notice') else [],
+        'delete_notice': list(CloudServerOrder.objects.filter(status__in=['suspended', 'deleting'], delete_at__lte=delete_notice_at, delete_at__gt=now, delete_notice_sent_at__isnull=True)) if _notice_enabled('delete_notice') else [],
+        'recycle_notice': list(CloudServerOrder.objects.filter(status='deleted', ip_recycle_at__lte=recycle_notice_at, ip_recycle_at__gt=now, recycle_notice_sent_at__isnull=True)) if _notice_enabled('recycle_notice') else [],
         'expire': list(CloudServerOrder.objects.filter(status='completed', service_expires_at__lte=now)),
         'suspend': list(CloudServerOrder.objects.filter(status__in=['completed', 'expiring', 'renew_pending'], suspend_at__lte=now)),
         'delete': list(CloudServerOrder.objects.filter(status__in=['suspended', 'deleting'], delete_at__lte=now)),
@@ -379,6 +536,39 @@ async def sync_cloud_accounts_tick():
         logger.warning('云账号状态巡检失败: %s', exc)
 
 
+async def auto_renew_tick(notify=None):
+    due_orders = await _get_auto_renew_due_orders()
+    failure_notice_enabled = await sync_to_async(_auto_renew_result_notice_enabled)('failure')
+    success_notice_enabled = await sync_to_async(_auto_renew_result_notice_enabled)('success')
+    for order in due_orders:
+        updated, error = await _apply_auto_renew(order.id)
+        target = updated or order
+        if error:
+            logger.warning('云服务器自动续费失败: order=%s error=%s', target.order_no, error)
+            if notify and failure_notice_enabled and target.user_id and await _user_can_receive_cloud_notice(target.user_id):
+                await notify(
+                    target.user_id,
+                    _notice_text(
+                        target,
+                        'auto_renew_notice',
+                        f'⚠️ 云服务器自动续费失败\n订单号: {target.order_no}\n{error}',
+                        {'error': error},
+                    ),
+                )
+            continue
+        logger.info('云服务器自动续费完成: order=%s expires_at=%s', target.order_no, target.service_expires_at)
+        if notify and success_notice_enabled and target.user_id and await _user_can_receive_cloud_notice(target.user_id):
+            await notify(
+                target.user_id,
+                _notice_text(
+                    target,
+                    'auto_renew_notice',
+                    f'✅ 云服务器自动续费成功\n订单号: {target.order_no}\n新的到期时间: {target.service_expires_at}',
+                    {'new_service_expires_at': target.service_expires_at or ''},
+                ),
+            )
+
+
 async def lifecycle_tick(notify=None):
     due = await _get_due_orders()
     migration_due_orders = await _get_migration_due_orders()
@@ -387,19 +577,37 @@ async def lifecycle_tick(notify=None):
         if notify and await _user_can_receive_cloud_notice(order.user_id):
             await notify(
                 order.user_id,
-                f'⏰ 云服务器到期提醒\n订单号: {order.order_no}\n到期时间: {order.service_expires_at}\n将在到期后进入宽限与删机流程，请及时处理。',
+                _notice_text(
+                    order,
+                    'renew_notice',
+                    f'⏰ 云服务器到期提醒\n订单号: {order.order_no}\n到期时间: {order.service_expires_at}\n将在到期后进入宽限与删机流程，请及时处理。',
+                ),
                 cloud_expiry_actions(order.id),
             )
         await _mark_notice_sent(order.id, 'renew_notice_sent_at')
 
     for order in due['delete_notice']:
         if notify and await _user_can_receive_cloud_notice(order.user_id):
-            await notify(order.user_id, f'⚠️ 云服务器删机提醒\n订单号: {order.order_no}\n计划删机时间: {order.delete_at}\n如需保留，请尽快处理。')
+            await notify(
+                order.user_id,
+                _notice_text(
+                    order,
+                    'delete_notice',
+                    f'⚠️ 云服务器删机提醒\n订单号: {order.order_no}\n计划删机时间: {order.delete_at}\n如需保留，请尽快处理。',
+                ),
+            )
         await _mark_notice_sent(order.id, 'delete_notice_sent_at')
 
     for order in due['recycle_notice']:
         if notify and await _user_can_receive_cloud_notice(order.user_id):
-            await notify(order.user_id, f'📦 固定IP删除提醒\n订单号: {order.order_no}\n计划删除IP时间: {order.ip_recycle_at}\n如需保留，请尽快处理。')
+            await notify(
+                order.user_id,
+                _notice_text(
+                    order,
+                    'recycle_notice',
+                    f'📦 固定IP删除提醒\n订单号: {order.order_no}\n计划删除IP时间: {order.ip_recycle_at}\n如需保留，请尽快处理。',
+                ),
+            )
         await _mark_notice_sent(order.id, 'recycle_notice_sent_at')
 
     for order in due['expire']:

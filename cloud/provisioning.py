@@ -1,5 +1,6 @@
 from asgiref.sync import sync_to_async
 import logging
+from django.db import transaction
 from django.utils import timezone
 
 from biz.models import CloudAsset, Server
@@ -88,10 +89,13 @@ async def provision_cloud_server(order_id: int):
     started_at = timezone.now()
     logger.info('云服务器开通开始: order_id=%s', order_id)
     try:
-        order = await _get_order(order_id)
+        order, skip_reason = await _claim_order_for_provisioning(order_id)
         if not order:
             logger.warning('云服务器开通失败: 订单不存在 order_id=%s', order_id)
             return None
+        if skip_reason:
+            logger.warning('云服务器开通跳过: order=%s status=%s reason=%s', order.order_no, order.status, skip_reason)
+            return order
 
         order_tg_user_id = await _get_order_tg_user_id(order)
 
@@ -243,6 +247,24 @@ async def reprovision_cloud_server_bootstrap(order_id: int):
 @sync_to_async
 def _get_order(order_id: int):
     return CloudServerOrder.objects.filter(id=order_id).first()
+
+
+@sync_to_async
+def _claim_order_for_provisioning(order_id: int):
+    with transaction.atomic():
+        order = CloudServerOrder.objects.select_for_update().filter(id=order_id).first()
+        if not order:
+            return None, '订单不存在'
+        if order.instance_id or order.provider_resource_id or order.public_ip:
+            return order, '订单已有云资源，跳过重复创建。'
+        if order.status == 'provisioning':
+            return order, '订单已在创建中，跳过重复任务。'
+        if order.status != 'paid':
+            return order, f'订单状态为 {order.status}，不是待创建状态。'
+        order.status = 'provisioning'
+        order.provision_note = '\n'.join(filter(None, [order.provision_note, '创建任务已领取，开始调用云平台。']))
+        order.save(update_fields=['status', 'provision_note', 'updated_at'])
+        return order, None
 
 
 @sync_to_async

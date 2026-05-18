@@ -453,6 +453,7 @@ class Order(models.Model):
     pay_method = models.CharField('支付方式', max_length=32, choices=PAY_METHOD_CHOICES)
     status = models.CharField('状态', max_length=32, choices=STATUS_CHOICES, default='pending', db_index=True)
     tx_hash = models.CharField('交易哈希', max_length=191, unique=True, blank=True, null=True)
+    stock_reserved = models.BooleanField('库存已预占', default=False, db_index=True)
     created_at = models.DateTimeField('创建时间', auto_now_add=True)
     paid_at = models.DateTimeField('支付时间', blank=True, null=True)
     expired_at = models.DateTimeField('过期时间', blank=True, null=True)

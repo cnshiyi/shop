@@ -93,16 +93,25 @@ def clear_cart(user_id: int, item_type: str | None = None):
 def create_cart_address_orders(user_id: int, currency: str = 'USDT'):
     items = list(CartItem.objects.select_related('product', 'cloud_plan').filter(user_id=user_id, item_type='product', product__is_active=True))
     orders = []
-    for item in items:
-        total = Decimal(str(item.product.price or 0)) * item.quantity
-        pay_amount = _generate_unique_pay_amount(total, currency)
-        expired_at = timezone.now() + timezone.timedelta(minutes=15)
-        orders.append(Order.objects.create(
-            order_no=_generate_order_no(), user_id=user_id, product=item.product, product_name=item.product.name,
-            quantity=item.quantity, currency=currency, total_amount=total, pay_amount=pay_amount,
-            pay_method='address', status='pending', expired_at=expired_at,
-        ))
-    CartItem.objects.filter(user_id=user_id).delete()
+    with transaction.atomic():
+        for item in items:
+            product = Product.objects.select_for_update().get(id=item.product_id)
+            if product.stock != -1 and product.stock < item.quantity:
+                raise ValueError(f'商品 {product.name} 库存不足')
+        for item in items:
+            product = Product.objects.select_for_update().get(id=item.product_id)
+            total = Decimal(str(product.price or 0)) * item.quantity
+            pay_amount = _generate_unique_pay_amount(total, currency)
+            expired_at = timezone.now() + timezone.timedelta(minutes=15)
+            if product.stock != -1:
+                product.stock -= item.quantity
+                product.save(update_fields=['stock', 'updated_at'])
+            orders.append(Order.objects.create(
+                order_no=_generate_order_no(), user_id=user_id, product=product, product_name=product.name,
+                quantity=item.quantity, currency=currency, total_amount=total, pay_amount=pay_amount,
+                pay_method='address', status='pending', stock_reserved=(product.stock != -1), expired_at=expired_at,
+            ))
+        CartItem.objects.filter(user_id=user_id, item_type='product').delete()
     return orders
 
 
@@ -276,14 +285,20 @@ def get_balance_detail(user_id: int, raw_item_id: str):
 
 @sync_to_async
 def create_address_order(user_id: int, product_id: int, quantity: int, total: Decimal, currency: str):
-    product = Product.objects.get(id=product_id)
-    pay_amount = _generate_unique_pay_amount(total, currency)
-    expired_at = timezone.now() + timezone.timedelta(minutes=15)
-    return Order.objects.create(
-        order_no=_generate_order_no(), user_id=user_id, product=product, product_name=product.name,
-        quantity=quantity, currency=currency, total_amount=total, pay_amount=pay_amount,
-        pay_method='address', status='pending', expired_at=expired_at,
-    )
+    with transaction.atomic():
+        product = Product.objects.select_for_update().get(id=product_id)
+        if product.stock != -1 and product.stock < quantity:
+            raise ValueError('库存不足')
+        pay_amount = _generate_unique_pay_amount(total, currency)
+        expired_at = timezone.now() + timezone.timedelta(minutes=15)
+        if product.stock != -1:
+            product.stock -= quantity
+            product.save(update_fields=['stock', 'updated_at'])
+        return Order.objects.create(
+            order_no=_generate_order_no(), user_id=user_id, product=product, product_name=product.name,
+            quantity=quantity, currency=currency, total_amount=total, pay_amount=pay_amount,
+            pay_method='address', status='pending', stock_reserved=(product.stock != -1), expired_at=expired_at,
+        )
 
 
 @sync_to_async

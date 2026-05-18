@@ -3,7 +3,7 @@ import logging
 import os
 import time
 from collections import OrderedDict
-from datetime import datetime
+from datetime import datetime, timezone as dt_timezone
 from decimal import Decimal
 from html import escape
 
@@ -12,11 +12,12 @@ import httpx
 from aiogram import Bot
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 from asgiref.sync import sync_to_async
+from django.db import transaction
 from django.db.models import Q
 from django.utils import timezone
 
 from accounts.services import record_balance_ledger
-from biz.models import AddressMonitor, Recharge, Order, Product, TelegramUser, CloudServerOrder
+from biz.models import AddressMonitor, Recharge, Order, Product, TelegramUser, CloudAsset, CloudServerOrder, Server
 from biz.services import usdt_to_trx
 from bot.keyboards import custom_port_keyboard
 from cloud.provisioning import provision_cloud_server
@@ -34,6 +35,7 @@ USDT_CONTRACT = os.getenv('USDT_CONTRACT', 'TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t')
 TRONGRID_BASE_URL = os.getenv('TRONGRID_BASE_URL', 'https://api.trongrid.io')
 SCANNER_VERBOSE = os.getenv('SCANNER_VERBOSE', '0') == '1'
 MAX_BACKFILL_BLOCKS = int(os.getenv('TRON_SCANNER_MAX_BACKFILL_BLOCKS', '20') or '20')
+PAYMENT_CREATED_AT_GRACE_SECONDS = int(os.getenv('TRON_PAYMENT_CREATED_AT_GRACE_SECONDS', '60') or '60')
 
 # ── 内部状态 ──────────────────────────────────────────────────────────────
 
@@ -158,6 +160,33 @@ def _now_str() -> str:
     return datetime.now().strftime('%H:%M:%S')
 
 
+def _transfer_datetime(transfer: dict):
+    raw = transfer.get('timestamp_ms')
+    try:
+        if raw is None:
+            return None
+        return datetime.fromtimestamp(int(raw) / 1000, tz=dt_timezone.utc)
+    except (TypeError, ValueError, OSError):
+        return None
+
+
+def _format_transfer_time(transfer: dict) -> str:
+    tx_dt = _transfer_datetime(transfer)
+    if not tx_dt:
+        return datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+    return timezone.localtime(tx_dt).strftime('%Y-%m-%d %H:%M:%S')
+
+
+def _transfer_not_before_created_at(transfer: dict, target) -> bool:
+    tx_dt = _transfer_datetime(transfer)
+    created_at = getattr(target, 'created_at', None)
+    if not tx_dt or not created_at:
+        return True
+    if timezone.is_naive(created_at):
+        created_at = timezone.make_aware(created_at, timezone.get_current_timezone())
+    return tx_dt + timezone.timedelta(seconds=PAYMENT_CREATED_AT_GRACE_SECONDS) >= created_at
+
+
 def _short_addr(addr: str) -> str:
     if len(addr) > 14:
         return f'{addr[:6]}...{addr[-4:]}'
@@ -181,15 +210,82 @@ async def _record_daily_stats(address: str, currency: str, direction: str, amoun
 
 # ── DB access (sync → async) ────────────────────────────────────────────
 
-@sync_to_async
-def _get_pending_address_orders(currency: str):
-    now = timezone.now()
-    Order.objects.filter(
+def _expire_address_orders(now=None) -> int:
+    now = now or timezone.now()
+    expired_count = 0
+    expired_orders = list(Order.objects.select_related('product').filter(
         pay_method='address',
         status='pending',
         expired_at__isnull=False,
         expired_at__lte=now,
+    ))
+    for order in expired_orders:
+        with transaction.atomic():
+            locked_order = Order.objects.select_for_update().select_related('product').filter(id=order.id, status='pending').first()
+            if not locked_order:
+                continue
+            product = Product.objects.select_for_update().get(id=locked_order.product_id)
+            if locked_order.stock_reserved and product.stock != -1:
+                product.stock += locked_order.quantity
+                product.save(update_fields=['stock', 'updated_at'])
+            locked_order.status = 'expired'
+            locked_order.stock_reserved = False
+            locked_order.save(update_fields=['status', 'stock_reserved'])
+            expired_count += 1
+    return expired_count
+
+
+def _expire_recharges(now=None) -> int:
+    now = now or timezone.now()
+    return Recharge.objects.filter(
+        status='pending',
+        expired_at__isnull=False,
+        expired_at__lte=now,
     ).update(status='expired')
+
+
+def _expire_cloud_server_orders(now=None) -> int:
+    now = now or timezone.now()
+    expired_created_count = CloudServerOrder.objects.filter(
+        pay_method='address',
+        status='pending',
+        expired_at__isnull=False,
+        expired_at__lte=now,
+    ).update(status='expired', updated_at=now)
+    expired_renewal_count = 0
+    expired_renewals = CloudServerOrder.objects.filter(
+        pay_method='address',
+        status='renew_pending',
+        expired_at__isnull=False,
+        expired_at__lte=now,
+    )
+    for order in expired_renewals:
+        if order.service_expires_at and order.service_expires_at <= now:
+            reverted_status = 'suspended' if order.suspend_at and order.suspend_at <= now else 'expiring'
+        else:
+            reverted_status = 'completed'
+        order.status = reverted_status
+        order.expired_at = None
+        order.provision_note = '\n'.join(filter(None, [order.provision_note, '续费支付窗口超时，已恢复服务器原状态。']))
+        order.save(update_fields=['status', 'expired_at', 'provision_note', 'updated_at'])
+        expired_renewal_count += 1
+    return expired_created_count + expired_renewal_count
+
+
+@sync_to_async
+def cleanup_expired_payment_windows():
+    now = timezone.now()
+    return {
+        'orders': _expire_address_orders(now),
+        'recharges': _expire_recharges(now),
+        'cloud_orders': _expire_cloud_server_orders(now),
+    }
+
+
+@sync_to_async
+def _get_pending_address_orders(currency: str):
+    now = timezone.now()
+    _expire_address_orders(now)
     return list(
         Order.objects.filter(pay_method='address', status='pending', currency=currency)
         .filter(Q(expired_at__isnull=True) | Q(expired_at__gt=now))
@@ -200,11 +296,7 @@ def _get_pending_address_orders(currency: str):
 @sync_to_async
 def _get_pending_recharges(currency: str):
     now = timezone.now()
-    Recharge.objects.filter(
-        status='pending',
-        expired_at__isnull=False,
-        expired_at__lte=now,
-    ).update(status='expired')
+    _expire_recharges(now)
     return list(
         Recharge.objects.filter(status='pending', currency=currency)
         .filter(Q(expired_at__isnull=True) | Q(expired_at__gt=now))
@@ -215,12 +307,7 @@ def _get_pending_recharges(currency: str):
 @sync_to_async
 def _get_pending_cloud_server_orders(currency: str):
     now = timezone.now()
-    CloudServerOrder.objects.filter(
-        pay_method='address',
-        status='pending',
-        expired_at__isnull=False,
-        expired_at__lte=now,
-    ).update(status='expired', updated_at=now)
+    _expire_cloud_server_orders(now)
     return list(
         CloudServerOrder.objects.filter(pay_method='address', status__in=['pending', 'renew_pending'])
         .filter(currency=currency)
@@ -242,18 +329,20 @@ def _confirm_order_paid(order_id: int, tx_hash: str):
         order = Order.objects.select_for_update().get(id=order_id)
         if order.status != 'pending':
             return None
-        product = Product.objects.select_for_update().get(id=order.product_id)
-        if product.stock != -1 and product.stock < order.quantity:
-            order.status = 'expired'
-            order.save(update_fields=['status'])
-            return None
+        if order.pay_method == 'address' and not order.stock_reserved:
+            product = Product.objects.select_for_update().get(id=order.product_id)
+            if product.stock != -1:
+                if product.stock < order.quantity:
+                    order.status = 'expired'
+                    order.save(update_fields=['status'])
+                    return None
+                product.stock -= order.quantity
+                product.save(update_fields=['stock', 'updated_at'])
         order.status = 'paid'
         order.tx_hash = tx_hash
         order.paid_at = timezone.now()
-        order.save(update_fields=['status', 'tx_hash', 'paid_at'])
-        if product.stock != -1:
-            product.stock -= order.quantity
-            product.save(update_fields=['stock'])
+        order.stock_reserved = False
+        order.save(update_fields=['status', 'tx_hash', 'paid_at', 'stock_reserved'])
         order.status = 'delivered'
         order.save(update_fields=['status'])
     return order
@@ -309,6 +398,7 @@ def _confirm_cloud_server_order(order_id: int, tx_hash: str):
             return None
         order.tx_hash = tx_hash
         order.paid_at = timezone.now()
+        order.expired_at = None
         if order.status == 'renew_pending':
             base = order.service_expires_at or timezone.now()
             if base < timezone.now():
@@ -317,11 +407,20 @@ def _confirm_cloud_server_order(order_id: int, tx_hash: str):
             order.last_renewed_at = timezone.now()
             order.status = 'completed'
             order.provision_note = '续费成功，服务有效期已顺延。'
-            order.save(update_fields=['tx_hash', 'paid_at', 'service_expires_at', 'last_renewed_at', 'status', 'provision_note', 'updated_at'])
+            order.renew_notice_sent_at = None
+            order.delete_notice_sent_at = None
+            order.recycle_notice_sent_at = None
+            order.save(update_fields=[
+                'tx_hash', 'paid_at', 'expired_at', 'service_expires_at', 'last_renewed_at',
+                'status', 'provision_note', 'renew_notice_sent_at', 'delete_notice_sent_at',
+                'recycle_notice_sent_at', 'updated_at',
+            ])
+            CloudAsset.objects.filter(order=order).update(actual_expires_at=order.service_expires_at, updated_at=timezone.now())
+            Server.objects.filter(order=order).update(expires_at=order.service_expires_at, updated_at=timezone.now())
             return order
         order.status = 'paid'
         order.provision_note = '已收款，等待用户确认 MTProxy 端口后进入创建流程。默认端口为 9528。'
-        order.save(update_fields=['status', 'tx_hash', 'paid_at', 'provision_note', 'updated_at'])
+        order.save(update_fields=['status', 'tx_hash', 'paid_at', 'expired_at', 'provision_note', 'updated_at'])
     return order
 
 
@@ -378,10 +477,15 @@ async def _process_payment(transfer: dict) -> bool:
     amount = transfer['amount']
     tx_hash = transfer['tx_hash']
     currency = transfer['currency']
+    if not tx_hash:
+        return False
 
     pending_orders = await _get_pending_address_orders(currency)
     for order in pending_orders:
         if order.pay_amount == amount:
+            if not _transfer_not_before_created_at(transfer, order):
+                logger.warning('跳过早于订单创建时间的转账: order=%s tx=%s amount=%s %s', order.order_no, tx_hash, amount, currency)
+                continue
             confirmed = await _confirm_order_paid(order.id, tx_hash)
             if confirmed:
                 logger.info(
@@ -398,6 +502,9 @@ async def _process_payment(transfer: dict) -> bool:
     pending_recharges = await _get_pending_recharges(currency)
     for rc in pending_recharges:
         if rc.pay_amount == amount:
+            if not _transfer_not_before_created_at(transfer, rc):
+                logger.warning('跳过早于充值创建时间的转账: recharge=%s tx=%s amount=%s %s', rc.id, tx_hash, amount, currency)
+                continue
             confirmed = await _confirm_recharge(rc.id, tx_hash)
             if confirmed:
                 logger.info(
@@ -415,6 +522,9 @@ async def _process_payment(transfer: dict) -> bool:
             usdt_amount = Decimal(order.total_amount or 0)
             expected_amount = usdt_to_trx.__wrapped__(usdt_amount) if currency == 'TRX' else usdt_amount
         if expected_amount == amount:
+            if not _transfer_not_before_created_at(transfer, order):
+                logger.warning('跳过早于云订单创建时间的转账: order=%s tx=%s amount=%s %s', order.order_no, tx_hash, amount, currency)
+                continue
             confirmed = await _confirm_cloud_server_order(order.id, tx_hash)
             if confirmed:
                 logger.info(
@@ -473,7 +583,7 @@ async def _process_monitor_notification(transfer: dict, monitors: list[dict], da
     from_addr = transfer['from']
     to_addr = transfer['to']
     tx_hash = transfer['tx_hash']
-    tx_time = transfer.get('timestamp') or datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+    tx_time = _format_transfer_time(transfer)
     is_income = direction == 'income'
     title_icon = '🟢' if is_income else '🔴'
     title_word = '收入' if is_income else '支出'

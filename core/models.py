@@ -116,6 +116,22 @@ class CloudAccountConfig(models.Model):
     def secret_key_plain(self) -> str:
         return decrypt_text(self.secret_key or '')
 
+    @staticmethod
+    def _mask_secret(value: str) -> str:
+        if not value:
+            return ''
+        if len(value) <= 8:
+            return '*' * len(value)
+        return f'{value[:4]}***{value[-4:]}'
+
+    @property
+    def access_key_preview(self) -> str:
+        return self._mask_secret(self.access_key_plain)
+
+    @property
+    def secret_key_preview(self) -> str:
+        return self._mask_secret(self.secret_key_plain)
+
     def __str__(self):
         return f'{self.get_provider_display()} - {self.name}'
 

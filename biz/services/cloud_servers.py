@@ -13,7 +13,7 @@ from .commerce import _generate_unique_pay_amount
 
 
 def _can_order_be_renewed(order: CloudServerOrder) -> bool:
-    if order.status in {'deleted', 'deleting'}:
+    if order.status not in {'completed', 'expiring', 'suspended'}:
         return False
     if not order.public_ip:
         return False
@@ -35,7 +35,7 @@ def _renewal_pay_amount(order: CloudServerOrder, currency: str, user: TelegramUs
 
 @sync_to_async
 def create_cloud_server_renewal(order_id: int, user_id: int, days: int = 31, currency: str | None = None):
-    order = CloudServerOrder.objects.select_related('user').filter(id=order_id).first()
+    order = CloudServerOrder.objects.select_related('user').filter(id=order_id, user_id=user_id).first()
     if not order:
         return None
     if not _can_order_be_renewed(order):
@@ -45,9 +45,10 @@ def create_cloud_server_renewal(order_id: int, user_id: int, days: int = 31, cur
     renewal_user = TelegramUser.objects.filter(id=user_id).first()
     pay_currency = currency or order.currency or 'USDT'
     order.currency = pay_currency
+    order.pay_method = 'address'
     order.pay_amount = _generate_unique_pay_amount(_renewal_pay_amount(order, pay_currency, renewal_user), pay_currency)
     order.expired_at = timezone.now() + timezone.timedelta(minutes=30)
-    order.save(update_fields=['status', 'lifecycle_days', 'currency', 'pay_amount', 'expired_at', 'updated_at'])
+    order.save(update_fields=['status', 'lifecycle_days', 'currency', 'pay_method', 'pay_amount', 'expired_at', 'updated_at'])
     return order
 
 
@@ -61,7 +62,14 @@ def apply_cloud_server_renewal(order_id: int, days: int = 31):
     order.last_renewed_at = timezone.now()
     order.delay_quota = max(int(order.delay_quota or 0), 0) + 1
     order.status = 'completed'
-    order.save(update_fields=['service_expires_at', 'last_renewed_at', 'delay_quota', 'status', 'updated_at'])
+    order.renew_notice_sent_at = None
+    order.delete_notice_sent_at = None
+    order.recycle_notice_sent_at = None
+    order.save(update_fields=[
+        'service_expires_at', 'last_renewed_at', 'delay_quota', 'status',
+        'renew_notice_sent_at', 'delete_notice_sent_at', 'recycle_notice_sent_at',
+        'updated_at',
+    ])
     CloudAsset.objects.filter(order=order).update(actual_expires_at=order.service_expires_at, updated_at=timezone.now())
     Server.objects.filter(order=order).update(expires_at=order.service_expires_at, updated_at=timezone.now())
     return order
@@ -73,7 +81,7 @@ def pay_cloud_server_renewal_with_balance(order_id: int, user_id: int, currency:
         order = CloudServerOrder.objects.select_related('user').select_for_update().filter(id=order_id, user_id=user_id).first()
         if not order:
             return None, '订单不存在'
-        if order.status not in {'renew_pending', 'pending'}:
+        if order.status != 'renew_pending':
             return None, '当前订单状态不可钱包支付'
         balance_field = 'balance_trx' if currency == 'TRX' else 'balance'
         user = TelegramUser.objects.select_for_update().get(id=user_id)
@@ -120,6 +128,11 @@ def mark_cloud_server_ip_change_requested(order_id: int, user_id: int, region_co
         return None
     if order.status not in {'completed', 'expiring', 'suspended'}:
         return False
+    existing_replacement = order.replacement_orders.exclude(
+        status__in=['deleted', 'cancelled', 'failed', 'expired'],
+    ).order_by('-created_at', '-id').first()
+    if existing_replacement:
+        return existing_replacement
     target_region_code = region_code or order.region_code
     provider = 'aliyun_simple' if target_region_code == 'cn-hongkong' else 'aws_lightsail'
     fallback_plan = CloudServerPlan.objects.filter(
@@ -201,6 +214,8 @@ def set_cloud_server_auto_renew(order_id: int, user_id: int, enabled: bool):
     order = CloudServerOrder.objects.filter(id=order_id, user_id=user_id).first()
     if not order:
         return None
+    if enabled and not _can_order_be_renewed(order):
+        return False
     order.auto_renew_enabled = enabled
     order.save(update_fields=['auto_renew_enabled', 'updated_at'])
     return order

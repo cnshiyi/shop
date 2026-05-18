@@ -6,6 +6,14 @@ import base58
 TRANSFER_METHOD_ID = 'a9059cbb'
 
 
+def _timestamp_ms(transaction: dict) -> int | None:
+    try:
+        value = (transaction.get('raw_data') or {}).get('timestamp')
+        return int(value) if value is not None else None
+    except (TypeError, ValueError):
+        return None
+
+
 def hex_to_tron_address(hex_addr: str) -> str:
     if hex_addr.startswith('0x'):
         hex_addr = '41' + hex_addr[2:]
@@ -47,7 +55,14 @@ def parse_usdt_transfer(transaction: dict, usdt_contract: str) -> dict | None:
         amount_raw = int(data[72:136], 16)
         amount = Decimal(amount_raw) / Decimal('1000000')
         from_address = hex_to_tron_address(value.get('owner_address', ''))
-        return {'from': from_address, 'to': to_address, 'amount': amount, 'tx_hash': tx_hash, 'currency': 'USDT'}
+        return {
+            'from': from_address,
+            'to': to_address,
+            'amount': amount,
+            'tx_hash': tx_hash,
+            'currency': 'USDT',
+            'timestamp_ms': _timestamp_ms(transaction),
+        }
     except Exception:
         return None
 
@@ -72,6 +87,13 @@ def parse_trx_transfer(transaction: dict) -> dict | None:
         to_address = hex_to_tron_address(to_hex)
         amount = Decimal(value.get('amount', 0)) / Decimal('1000000')
         from_address = hex_to_tron_address(value.get('owner_address', ''))
-        return {'from': from_address, 'to': to_address, 'amount': amount, 'tx_hash': tx_hash, 'currency': 'TRX'}
+        return {
+            'from': from_address,
+            'to': to_address,
+            'amount': amount,
+            'tx_hash': tx_hash,
+            'currency': 'TRX',
+            'timestamp_ms': _timestamp_ms(transaction),
+        }
     except Exception:
         return None

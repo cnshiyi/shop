@@ -23,8 +23,8 @@ def _rand_password(length: int = 18) -> str:
     return ''.join(secrets.choice(alphabet) for _ in range(length))
 
 
-def _build_client(endpoint: str = 'swas.cn-hangzhou.aliyuncs.com'):
-    account = get_active_cloud_account('aliyun')
+def _build_client(endpoint: str = 'swas.cn-hangzhou.aliyuncs.com', region_hint: str | None = None):
+    account = get_active_cloud_account('aliyun', region_hint)
     access_key = account.access_key_plain if account else os.getenv('ALIBABA_CLOUD_ACCESS_KEY_ID', '')
     secret_key = account.secret_key_plain if account else os.getenv('ALIBABA_CLOUD_ACCESS_KEY_SECRET', '')
     if not access_key or not secret_key:
@@ -248,7 +248,7 @@ def _open_instance_port(client, region_code: str, instance_id: str, port: int) -
 
 async def create_instance(order, server_name: str):
     region_code = order.region_code or 'cn-hongkong'
-    client = _build_client(_region_endpoint(region_code))
+    client = _build_client(_region_endpoint(region_code), region_code)
     if not client:
         return ProvisionResult(ok=False, note='未配置 ALIBABA_CLOUD_ACCESS_KEY_ID / ALIBABA_CLOUD_ACCESS_KEY_SECRET。')
 

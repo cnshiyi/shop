@@ -309,8 +309,8 @@ async def _pay_cloud_server_order_with_balance_and_notify(bot: Bot, chat_id: int
             logger.warning('云服务器后台钱包补付失败: chat_id=%s user_id=%s order_id=%s currency=%s error=%s', chat_id, user_id, order_id, currency, err)
             await bot.send_message(
                 chat_id=chat_id,
-                text=f"{_bot_text('bot_custom_balance_insufficient', '❌ 余额不足，请先充值')}\n\n当前支付币种: {currency}",
-                reply_markup=wallet_recharge_prompt_menu(),
+                text=f'❌ 钱包支付失败：{err}\n\n当前支付币种: {currency}',
+                reply_markup=wallet_recharge_prompt_menu() if '余额不足' in str(err) else main_menu(),
             )
             return
         await bot.send_message(
@@ -658,6 +658,9 @@ def register_handlers(dp: Dispatcher):
         order = await set_cloud_server_port(order_id, user.id, port)
         logger.info('云服务器提交自定义端口: tg_user_id=%s user=%s order_id=%s port=%s result=%s', getattr(message.from_user, 'id', None), user.id, order_id, port, getattr(order, 'order_no', None))
         await state.clear()
+        if order is False:
+            await message.answer('当前订单状态无法设置端口或已提交创建，请到查询中心查看最新状态。', reply_markup=main_menu())
+            return
         if not order:
             await message.answer('订单不存在，无法设置端口。', reply_markup=main_menu())
             return
@@ -723,7 +726,7 @@ def register_handlers(dp: Dispatcher):
             order = await get_cloud_server_by_ip(ip)
             if not order:
                 continue
-            can_renew = bool(order.public_ip and order.status not in {'deleted', 'deleting', 'expired'})
+            can_renew = bool(order.public_ip and order.status in {'completed', 'expiring', 'suspended'})
             renew_text = '可续费' if can_renew else '不可续费'
             results.append({
                 'ip': ip,
@@ -1190,6 +1193,9 @@ def register_handlers(dp: Dispatcher):
         user = await get_or_create_user(callback.from_user.id, callback.from_user.username, callback.from_user.first_name)
         order = await set_cloud_server_port(order_id, user.id, 9528)
         logger.info('云服务器使用默认端口: tg_user_id=%s user=%s order_id=%s port=9528 result=%s', getattr(callback.from_user, 'id', None), user.id, order_id, getattr(order, 'order_no', None))
+        if order is False:
+            await _safe_callback_answer(callback, '当前订单状态无法设置端口或已提交创建', show_alert=True)
+            return
         if not order:
             await _safe_callback_answer(callback, '订单不存在', show_alert=True)
             return
@@ -1281,7 +1287,7 @@ def register_handlers(dp: Dispatcher):
         if not order:
             await _safe_callback_answer(callback, '服务器记录不存在', show_alert=True)
             return
-        can_renew = bool(order.public_ip and order.status not in {'deleted', 'deleting', 'expired'})
+        can_renew = bool(order.public_ip and order.status in {'completed', 'expiring', 'suspended'})
         can_change_ip = order.status in {'completed', 'expiring', 'suspended'}
         can_reinit = bool(order.public_ip and order.login_password and order.status in {'completed', 'failed'})
         now = timezone.now()
@@ -1363,6 +1369,9 @@ def register_handlers(dp: Dispatcher):
         order_id = int(order_id_text)
         enabled = action == 'on'
         order = await set_cloud_server_auto_renew(order_id, user.id, enabled)
+        if order is False:
+            await _safe_callback_answer(callback, '当前服务器状态不可开启自动续费', show_alert=True)
+            return
         if not order:
             await _safe_callback_answer(callback, '服务器记录不存在', show_alert=True)
             return
@@ -1622,6 +1631,9 @@ def register_handlers(dp: Dispatcher):
                 order = await create_address_order(user.id, product.id, quantity, total, currency)
             except PayAmountCollisionError as exc:
                 await callback.message.edit_text(str(exc), reply_markup=main_menu())
+                return
+            except ValueError as exc:
+                await callback.message.edit_text(f'❌ {exc}', reply_markup=main_menu())
                 return
             addr = _receive_address()
             await callback.message.edit_text(
