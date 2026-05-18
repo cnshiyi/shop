@@ -39,7 +39,7 @@ from .monitoring import (
     toggle_monitor_flag,
 )
 from .payments import create_recharge, list_recharges
-from .rates import get_exchange_rate_display, get_trx_price, usdt_to_trx
+from .rates import convert_usdt_to_trx_sync, get_exchange_rate_display, get_trx_price, usdt_to_trx, warm_trx_price_cache
 from .users import get_or_create_user
 
 __all__ = [
@@ -58,6 +58,7 @@ __all__ = [
     'create_cloud_server_renewal',
     'delay_cloud_server_expiry',
     'delete_monitor',
+    'convert_usdt_to_trx_sync',
     'get_cloud_server_auto_renew',
     'get_exchange_rate_display',
     'get_balance_detail',
@@ -69,6 +70,7 @@ __all__ = [
     'get_product',
     'get_trx_price',
     'get_user_cloud_server',
+    'warm_trx_price_cache',
     'mark_cloud_server_ip_change_requested',
     'mark_cloud_server_reinit_requested',
     'pay_cloud_server_renewal_with_balance',

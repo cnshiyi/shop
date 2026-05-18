@@ -8,7 +8,7 @@ from mall.models import CloudServerPlan
 from accounts.models import TelegramUser
 from accounts.services import record_balance_ledger
 from biz.models import CloudAsset, CloudServerOrder, Server
-from .rates import usdt_to_trx
+from .rates import convert_usdt_to_trx_sync
 from .commerce import _generate_unique_pay_amount
 
 
@@ -30,7 +30,7 @@ def _renewal_price(order: CloudServerOrder, user: TelegramUser | None = None) ->
 
 def _renewal_pay_amount(order: CloudServerOrder, currency: str, user: TelegramUser | None = None) -> Decimal:
     usdt_amount = _renewal_price(order, user)
-    return usdt_to_trx.__wrapped__(usdt_amount) if currency == 'TRX' else usdt_amount
+    return convert_usdt_to_trx_sync(usdt_amount) if currency == 'TRX' else usdt_amount
 
 
 @sync_to_async

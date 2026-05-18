@@ -15,7 +15,7 @@ from mall.models import ServerPrice
 from core.cache import get_redis
 from core.cloud_accounts import get_active_cloud_account
 from .commerce import _generate_unique_pay_amount
-from .rates import usdt_to_trx
+from .rates import convert_usdt_to_trx_sync, usdt_to_trx
 
 logger = logging.getLogger(__name__)
 
@@ -555,7 +555,7 @@ def _apply_cloud_discount(plan_price: Decimal, discount_rate) -> Decimal:
 
 
 def _cloud_pay_amount(total_usdt: Decimal, currency: str) -> Decimal:
-    return usdt_to_trx.__wrapped__(total_usdt) if currency == 'TRX' else Decimal(total_usdt)
+    return convert_usdt_to_trx_sync(total_usdt) if currency == 'TRX' else Decimal(total_usdt)
 
 
 @sync_to_async
@@ -595,7 +595,7 @@ def buy_cloud_server_with_balance(user_id: int, plan_id: int, currency: str = 'U
     with transaction.atomic():
         user = TelegramUser.objects.select_for_update().get(id=user_id)
         total_usdt = _apply_cloud_discount(Decimal(plan.price), user.cloud_discount_rate) * quantity
-        total = usdt_to_trx.__wrapped__(total_usdt) if currency == 'TRX' else total_usdt
+        total = convert_usdt_to_trx_sync(total_usdt) if currency == 'TRX' else total_usdt
         balance_field = 'balance_trx' if currency == 'TRX' else 'balance'
         current_balance = Decimal(str(getattr(user, balance_field, 0) or 0))
         if current_balance < total:
@@ -647,7 +647,7 @@ def pay_cloud_server_order_with_balance(order_id: int, user_id: int, currency: s
             order.status = 'expired'
             order.save(update_fields=['status', 'updated_at'])
             return None, '订单已过期，请重新下单'
-        total = usdt_to_trx.__wrapped__(order.total_amount) if currency == 'TRX' else Decimal(order.total_amount)
+        total = convert_usdt_to_trx_sync(order.total_amount) if currency == 'TRX' else Decimal(order.total_amount)
         user = TelegramUser.objects.select_for_update().get(id=user_id)
         balance_field = 'balance_trx' if currency == 'TRX' else 'balance'
         current_balance = Decimal(str(getattr(user, balance_field, 0) or 0))

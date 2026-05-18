@@ -1,3 +1,4 @@
+import asyncio
 from unittest.mock import patch
 
 from asgiref.sync import async_to_sync
@@ -14,6 +15,7 @@ from biz.services.cloud_servers import (
     set_cloud_server_auto_renew,
 )
 from biz.services.custom import pay_cloud_server_order_with_balance, set_cloud_server_port
+from biz.services.rates import convert_usdt_to_trx_sync, get_trx_price, get_trx_price_sync, warm_trx_price_cache
 from mall.models import CloudServerOrder, CloudServerPlan, Product
 
 
@@ -348,3 +350,98 @@ class CommerceServicesTestCase(TestCase):
 
         product.refresh_from_db()
         self.assertEqual(product.stock, 0)
+
+
+class RatesServiceTestCase(TestCase):
+    def setUp(self):
+        from biz.services import rates as rates_module
+
+        rates_module._cached_rate = None
+        rates_module._cache_time = 0.0
+
+    def test_get_trx_price_reuses_cache_under_concurrency(self):
+        from biz.services import rates as rates_module
+
+        class FakeResponse:
+            def raise_for_status(self):
+                return None
+
+            def json(self):
+                return {'price': '0.125'}
+
+        class FakeClient:
+            call_count = 0
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, exc_type, exc, tb):
+                return None
+
+            async def get(self, url):
+                FakeClient.call_count += 1
+                return FakeResponse()
+
+        async def run():
+            with patch.object(rates_module.httpx, 'AsyncClient', return_value=FakeClient()):
+                first, second, third = await asyncio.gather(
+                    get_trx_price(),
+                    get_trx_price(),
+                    get_trx_price(),
+                )
+            return first, second, third, FakeClient.call_count
+
+        first, second, third, call_count = async_to_sync(run)()
+        self.assertEqual(first, Decimal('0.125'))
+        self.assertEqual(second, Decimal('0.125'))
+        self.assertEqual(third, Decimal('0.125'))
+        self.assertEqual(call_count, 1)
+
+    def test_get_trx_price_sync_reuses_cache(self):
+        from biz.services import rates as rates_module
+
+        class FakeResponse:
+            def raise_for_status(self):
+                return None
+
+            def json(self):
+                return {'price': '0.250'}
+
+        class FakeClient:
+            call_count = 0
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, tb):
+                return None
+
+            def get(self, url):
+                FakeClient.call_count += 1
+                return FakeResponse()
+
+        with patch.object(rates_module.httpx, 'Client', return_value=FakeClient()):
+            first = get_trx_price_sync()
+            second = get_trx_price_sync()
+
+        self.assertEqual(first, Decimal('0.250'))
+        self.assertEqual(second, Decimal('0.250'))
+        self.assertEqual(FakeClient.call_count, 1)
+
+    def test_convert_usdt_to_trx_sync_quantizes_result(self):
+        from biz.services import rates as rates_module
+
+        with patch.object(rates_module, 'get_trx_price_sync', return_value=Decimal('0.25')):
+            amount = convert_usdt_to_trx_sync(Decimal('1.00'))
+
+        self.assertEqual(amount, Decimal('4.000'))
+
+    def test_warm_trx_price_cache_swallows_fetch_errors(self):
+        from biz.services import rates as rates_module
+
+        async def run():
+            with patch.object(rates_module, 'get_trx_price', side_effect=RuntimeError('boom')):
+                return await warm_trx_price_cache()
+
+        result = async_to_sync(run)()
+        self.assertIsNone(result)
