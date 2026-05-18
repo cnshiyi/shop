@@ -108,7 +108,7 @@ class Command(BaseCommand):
                     'public_ip': asset.public_ip,
                     'previous_public_ip': asset.previous_public_ip,
                     'login_user': asset.login_user,
-                    'login_password': asset.login_password,
+                    'login_password': asset.login_password_plain,
                     'expires_at': asset.actual_expires_at,
                     'order': asset.order,
                     'user': asset.user,

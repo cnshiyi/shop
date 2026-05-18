@@ -1,6 +1,33 @@
 from django.db import models
 from django.utils import timezone
 
+from core.crypto import decrypt_text, encrypt_text
+
+
+def _encrypt_secret_field(value: str | None) -> str | None:
+    if not value:
+        return value
+    text = str(value)
+    return text if text.startswith('gAAAA') else encrypt_text(text)
+
+
+def _decrypt_secret_field(value: str | None) -> str | None:
+    return decrypt_text(value or '') if value else value
+
+
+class EncryptedPasswordMixin:
+    def _prepare_encrypted_fields(self):
+        if hasattr(self, 'login_password') and self.login_password:
+            self.login_password = _encrypt_secret_field(self.login_password)
+
+    @property
+    def login_password_plain(self) -> str:
+        return _decrypt_secret_field(getattr(self, 'login_password', '') or '') or ''
+
+    def save(self, *args, **kwargs):
+        self._prepare_encrypted_fields()
+        super().save(*args, **kwargs)
+
 
 class Product(models.Model):
     CONTENT_TEXT = 'text'
@@ -128,7 +155,7 @@ class ServerPrice(models.Model):
         return f'{self.region_name} {self.server_name} ({self.bundle_code})'
 
 
-class CloudServerOrder(models.Model):
+class CloudServerOrder(EncryptedPasswordMixin, models.Model):
     STATUS_CHOICES = (
         ('pending', '待支付'),
         ('paid', '已支付'),
@@ -222,6 +249,7 @@ class CloudServerOrder(models.Model):
             self.ip_recycle_at = self.delete_at + timezone.timedelta(days=15)
 
     def save(self, *args, **kwargs):
+        self._prepare_encrypted_fields()
         update_fields = kwargs.get('update_fields')
         lifecycle_trigger_fields = {
             'completed_at',
@@ -250,7 +278,7 @@ class CloudServerOrder(models.Model):
         return self.order_no
 
 
-class CloudAsset(models.Model):
+class CloudAsset(EncryptedPasswordMixin, models.Model):
     STATUS_RUNNING = 'running'
     STATUS_PENDING = 'pending'
     STATUS_STARTING = 'starting'
@@ -337,7 +365,7 @@ class CloudAsset(models.Model):
         return self.asset_name or self.instance_id or self.public_ip or f'asset-{self.pk}'
 
 
-class Server(models.Model):
+class Server(EncryptedPasswordMixin, models.Model):
     STATUS_RUNNING = CloudAsset.STATUS_RUNNING
     STATUS_PENDING = CloudAsset.STATUS_PENDING
     STATUS_STARTING = CloudAsset.STATUS_STARTING

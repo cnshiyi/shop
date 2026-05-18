@@ -179,7 +179,7 @@ def mark_cloud_server_reinit_requested(order_id: int, user_id: int):
     order = CloudServerOrder.objects.filter(id=order_id, user_id=user_id).first()
     if not order:
         return None
-    if not order.public_ip or not order.login_password:
+    if not order.public_ip or not order.login_password_plain:
         return False
     order.provision_note = '\n'.join(filter(None, [order.provision_note, '用户发起重试初始化请求。']))
     order.save(update_fields=['provision_note', 'updated_at'])

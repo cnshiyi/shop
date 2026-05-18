@@ -49,7 +49,7 @@ def _upsert_server_record(order: CloudServerOrder, note: str):
             'public_ip': order.public_ip,
             'previous_public_ip': order.previous_public_ip,
             'login_user': order.login_user,
-            'login_password': order.login_password,
+            'login_password': order.login_password_plain,
             'expires_at': order.service_expires_at,
             'order': order,
             'user': order_user,
@@ -225,18 +225,19 @@ async def reprovision_cloud_server_bootstrap(order_id: int):
     order = await _get_order(order_id)
     if not order:
         return None
-    if not order.public_ip or not order.login_password:
+    login_password = order.login_password_plain
+    if not order.public_ip or not login_password:
         return await _mark_failed(order_id, '重试初始化失败：缺少公网 IP 或登录密码。')
     bootstrap_user = order.login_user or 'root'
     logger.info('[PROVISION][RETRY] start order=%s public_ip=%s user=%s port=%s', order.order_no, order.public_ip, bootstrap_user, order.mtproxy_port)
-    bbr_ok, bbr_note = await install_bbr(order.public_ip, bootstrap_user, order.login_password)
+    bbr_ok, bbr_note = await install_bbr(order.public_ip, bootstrap_user, login_password)
     logger.info('[PROVISION][RETRY] bbr_result order=%s ok=%s note=%s', order.order_no, bbr_ok, (bbr_note or '')[:1000])
-    mtproxy_ok, mtproxy_note = await install_mtproxy(order.public_ip, bootstrap_user, order.login_password, order.mtproxy_port)
+    mtproxy_ok, mtproxy_note = await install_mtproxy(order.public_ip, bootstrap_user, login_password, order.mtproxy_port)
     logger.info('[PROVISION][RETRY] mtproxy_result order=%s ok=%s note=%s', order.order_no, mtproxy_ok, (mtproxy_note or '')[:1000])
     note = '\n'.join(part for part in [order.provision_note, '已执行重试初始化。', bbr_note, mtproxy_note] if part)
     if not bbr_ok or not mtproxy_ok:
         return await _mark_failed(order_id, note)
-    return await _mark_success(order_id, order.server_name or order.instance_id or '', order.instance_id or order.provider_resource_id or '', order.public_ip, order.static_ip_name or '', order.login_user or 'root', order.login_password, note)
+    return await _mark_success(order_id, order.server_name or order.instance_id or '', order.instance_id or order.provider_resource_id or '', order.public_ip, order.static_ip_name or '', order.login_user or 'root', login_password, note)
 
 
 @sync_to_async

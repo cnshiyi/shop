@@ -3334,7 +3334,7 @@ def _cloud_order_detail_payload(order):
         'public_ip': order.public_ip,
         'previous_public_ip': order.previous_public_ip,
         'login_user': order.login_user,
-        'login_password': order.login_password,
+        'login_password': order.login_password_plain,
         'provision_note': order.provision_note,
         'created_at': _iso(order.created_at),
         'paid_at': _iso(order.paid_at),

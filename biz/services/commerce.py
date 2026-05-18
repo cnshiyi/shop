@@ -13,6 +13,10 @@ from biz.models import CartItem, CloudServerOrder, Order, Product, Recharge, Tel
 from mall.models import CloudServerPlan
 
 
+class PayAmountCollisionError(RuntimeError):
+    pass
+
+
 def _generate_order_no() -> str:
     return f'ORD{int(time.time() * 1000)}{random.randint(1000, 9999)}'
 
@@ -26,7 +30,7 @@ def _generate_unique_pay_amount(base_amount: Decimal, currency: str) -> Decimal:
         cloud_order_exists = CloudServerOrder.objects.filter(pay_amount=pay_amount, status__in=['pending', 'renew_pending'], currency=currency).exists()
         if not order_exists and not recharge_exists and not cloud_order_exists:
             return pay_amount
-    return (base + Decimal(random.randint(1, 999)) / Decimal('1000')).quantize(Decimal('0.001'), rounding=ROUND_DOWN)
+    raise PayAmountCollisionError(f'{currency} 支付尾数已耗尽，请稍后重试或更换金额。')
 
 
 @sync_to_async

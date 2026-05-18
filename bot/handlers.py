@@ -40,6 +40,7 @@ from biz.services import (
     get_order, list_cloud_orders, get_cloud_order, list_balance_details, get_balance_detail, remove_cart_item,
     get_cloud_server_auto_renew, set_cloud_server_auto_renew, get_cloud_server_by_ip,
 )
+from biz.services.commerce import PayAmountCollisionError
 from core.formatters import fmt_amount, fmt_pay_amount
 from core.models import SiteConfig
 from cloud.provisioning import provision_cloud_server, reprovision_cloud_server_bootstrap
@@ -161,41 +162,14 @@ class RawUserLoggingMiddleware:
             active_usernames = []
             chat_username = getattr(user, 'username', None)
             first_name = getattr(user, 'first_name', None)
-            if bot and (user.id == 1457254228 or not chat_username):
+            if bot and not chat_username:
                 try:
                     profile = await _get_cached_chat_profile(bot, user.id)
                     active_usernames = profile['active_usernames']
                     chat_username = profile['username'] or chat_username
                     first_name = profile['first_name'] or first_name
-                    chat = profile['chat']
-                    if user.id == 1457254228:
-                        chat_payload = {
-                            'id': getattr(chat, 'id', None),
-                            'type': getattr(chat, 'type', None),
-                            'first_name': getattr(chat, 'first_name', None),
-                            'last_name': getattr(chat, 'last_name', None),
-                            'username': getattr(chat, 'username', None),
-                            'active_usernames': getattr(chat, 'active_usernames', None),
-                            'model_extra': getattr(chat, 'model_extra', None),
-                        }
-                        logger.info('Telegram get_chat用户对象: user_id=%s payload=%s', user.id, chat_payload)
                 except Exception as exc:
                     logger.warning('Telegram get_chat用户对象获取失败: user_id=%s err=%s', user.id, exc)
-
-            if user.id == 1457254228:
-                payload = {
-                    'id': user.id,
-                    'is_bot': getattr(user, 'is_bot', None),
-                    'first_name': getattr(user, 'first_name', None),
-                    'last_name': getattr(user, 'last_name', None),
-                    'full_name': getattr(user, 'full_name', None),
-                    'username': getattr(user, 'username', None),
-                    'language_code': getattr(user, 'language_code', None),
-                    'is_premium': getattr(user, 'is_premium', None),
-                    'added_to_attachment_menu': getattr(user, 'added_to_attachment_menu', None),
-                    'model_extra': getattr(user, 'model_extra', None),
-                }
-                logger.info('原始Telegram用户对象: event=%s payload=%s', event.__class__.__name__, payload)
 
             if _should_sync_user(user.id, chat_username, first_name, active_usernames):
                 await get_or_create_user(user.id, chat_username, first_name, active_usernames)
@@ -293,7 +267,8 @@ async def _create_cloud_order_and_notify(bot: Bot, chat_id: int, user_id: int, p
         logger.info('云服务器后台建单任务完成: chat_id=%s user_id=%s order_id=%s order=%s currency=%s total=%s pay_amount=%s', chat_id, user_id, order.id, order.order_no, order.currency, order.total_amount, order.pay_amount)
     except Exception as exc:
         logger.exception('云服务器后台建单任务异常: chat_id=%s user_id=%s plan_id=%s quantity=%s currency=%s error=%s', chat_id, user_id, plan_id, quantity, currency, exc)
-        await bot.send_message(chat_id=chat_id, text=f'❌ 创建订单失败，请稍后重试。\n错误: {exc}', reply_markup=main_menu())
+        text = str(exc) if isinstance(exc, PayAmountCollisionError) else f'❌ 创建订单失败，请稍后重试。\n错误: {exc}'
+        await bot.send_message(chat_id=chat_id, text=text, reply_markup=main_menu())
 
 
 async def _buy_cloud_server_with_balance_and_notify(bot: Bot, chat_id: int, user_id: int, plan_id: int, quantity: int, currency: str):
@@ -560,7 +535,7 @@ def register_handlers(dp: Dispatcher):
         from monitoring.cache import update_monitor_threshold_in_cache
         mon = await get_monitor(mid, user.id)
         if mon:
-            await update_monitor_threshold_in_cache(mon.address, 'USDT', val)
+            await update_monitor_threshold_in_cache(mon.address, 'USDT', val, mon.id)
         await state.clear()
         await message.answer(f'✅ USDT 阈值已更新为 {fmt_amount(val)}', reply_markup=main_menu())
 
@@ -580,7 +555,7 @@ def register_handlers(dp: Dispatcher):
         from monitoring.cache import update_monitor_threshold_in_cache
         mon = await get_monitor(mid, user.id)
         if mon:
-            await update_monitor_threshold_in_cache(mon.address, 'TRX', val)
+            await update_monitor_threshold_in_cache(mon.address, 'TRX', val, mon.id)
         await state.clear()
         await message.answer(f'✅ TRX 阈值已更新为 {fmt_amount(val)}', reply_markup=main_menu())
 
@@ -597,7 +572,11 @@ def register_handlers(dp: Dispatcher):
         currency = data['recharge_currency']
         addr = _receive_address()
         user = await get_or_create_user(message.from_user.id, message.from_user.username, message.from_user.first_name)
-        rc = await create_recharge(user.id, amount, currency, addr)
+        try:
+            rc = await create_recharge(user.id, amount, currency, addr)
+        except PayAmountCollisionError as exc:
+            await message.answer(str(exc), reply_markup=main_menu())
+            return
         await state.clear()
         await message.answer(
             f'💰 充值订单已创建\n充值金额: {fmt_amount(amount)} {currency}\n'
@@ -623,7 +602,11 @@ def register_handlers(dp: Dispatcher):
             await message.answer('套餐不存在或已下架，请重新选择。', reply_markup=main_menu())
             return
         user = await get_or_create_user(message.from_user.id, message.from_user.username, message.from_user.first_name)
-        order = await create_cloud_server_order(user.id, plan.id, 'USDT', quantity)
+        try:
+            order = await create_cloud_server_order(user.id, plan.id, 'USDT', quantity)
+        except PayAmountCollisionError as exc:
+            await message.answer(str(exc), reply_markup=main_menu())
+            return
         logger.info('云服务器下单进入详情: tg_user_id=%s user=%s order_id=%s order=%s qty=%s region=%s plan_id=%s plan_name=%s currency=%s total=%s pay_amount=%s', getattr(message.from_user, 'id', None), user.id, order.id, order.order_no, order.quantity, order.region_code, plan.id, plan.plan_name, order.currency, order.total_amount, order.pay_amount)
         receive_address = _receive_address()
         await message.answer(
@@ -892,7 +875,11 @@ def register_handlers(dp: Dispatcher):
                 reply_markup=custom_port_keyboard(order.id),
             )
             return
-        order = await create_cloud_server_order(user.id, plan.id, currency, quantity)
+        try:
+            order = await create_cloud_server_order(user.id, plan.id, currency, quantity)
+        except PayAmountCollisionError as exc:
+            await callback.message.edit_text(str(exc), reply_markup=main_menu())
+            return
         await clear_cart(user.id, item_type='cloud_plan')
         await state.update_data(custom_order_id=order.id, custom_quantity=quantity, custom_currency=currency)
         receive_address = _receive_address()
@@ -1342,7 +1329,11 @@ def register_handlers(dp: Dispatcher):
         await _safe_callback_answer(callback)
         user = await get_or_create_user(callback.from_user.id, callback.from_user.username, callback.from_user.first_name)
         order_id = int(callback.data.split(':')[2])
-        order = await create_cloud_server_renewal(order_id, user.id, 31, 'USDT')
+        try:
+            order = await create_cloud_server_renewal(order_id, user.id, 31, 'USDT')
+        except PayAmountCollisionError as exc:
+            await _safe_callback_answer(callback, str(exc), show_alert=True)
+            return
         if order is False:
             await _safe_callback_answer(callback, '该服务器IP已删除，禁止续费', show_alert=True)
             return
@@ -1627,7 +1618,11 @@ def register_handlers(dp: Dispatcher):
                 elif product.content_type == 'video' and product.content_video:
                     await bot.send_video(chat_id=callback.from_user.id, video=product.content_video, caption=product.content_text or '')
         else:
-            order = await create_address_order(user.id, product.id, quantity, total, currency)
+            try:
+                order = await create_address_order(user.id, product.id, quantity, total, currency)
+            except PayAmountCollisionError as exc:
+                await callback.message.edit_text(str(exc), reply_markup=main_menu())
+                return
             addr = _receive_address()
             await callback.message.edit_text(
                 f'📋 订单已创建\n订单号: {order.order_no}\n支付币种: {currency}\n'
@@ -1732,7 +1727,7 @@ def register_handlers(dp: Dispatcher):
             await _safe_callback_answer(callback, '监控不存在', show_alert=True)
             return
         from monitoring.cache import update_monitor_flag_in_cache
-        await update_monitor_flag_in_cache(monitor.address, field, getattr(monitor, field))
+        await update_monitor_flag_in_cache(monitor.address, field, getattr(monitor, field), monitor.id)
         await callback.message.edit_text(
             f'{"🟢" if monitor.is_active else "🔴"} 监控详情\n地址: <code>{monitor.address}</code>\n备注: {monitor.remark or "无"}\n'
             f'💸 监控转账: {"开启" if monitor.monitor_transfers else "关闭"}\n'
@@ -1768,7 +1763,7 @@ def register_handlers(dp: Dispatcher):
         mon = await get_monitor(mid, user.id)
         if mon:
             from monitoring.cache import remove_monitor_from_cache
-            await remove_monitor_from_cache(mon.address)
+            await remove_monitor_from_cache(mon.address, mon.id)
         await delete_monitor(mid, user.id)
         await callback.message.edit_text('🗑 监控已删除。', reply_markup=monitor_menu())
         await _safe_callback_answer(callback)

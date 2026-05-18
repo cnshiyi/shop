@@ -35,12 +35,20 @@ def _instance_name(order: CloudServerOrder) -> str:
 
 def _aws_client(region: str):
     import boto3
-    account = CloudAccountConfig.objects.filter(
+    base_queryset = CloudAccountConfig.objects.filter(
         provider=CloudAccountConfig.PROVIDER_AWS,
         is_active=True,
-    ).order_by('id').first()
+    ).order_by('id')
+    if base_queryset.exists() and not base_queryset.exclude(status=CloudAccountConfig.STATUS_ERROR).exists():
+        account = base_queryset.filter(region_hint=region).first() or base_queryset.first()
+        raise RuntimeError(f'AWS 云账号 {account.name} 当前巡检异常，已跳过生命周期动作：{account.status_note or "请在云账号设置中重新检查密钥"}')
+    ok_queryset = base_queryset.filter(status=CloudAccountConfig.STATUS_OK)
+    queryset = ok_queryset if ok_queryset.exists() else base_queryset.exclude(status=CloudAccountConfig.STATUS_ERROR)
+    account = queryset.filter(region_hint=region).first() or queryset.first()
     access_key = account.access_key_plain if account else ''
     secret_key = account.secret_key_plain if account else ''
+    if not access_key or not secret_key:
+        raise RuntimeError('未配置可用的 AWS 云账号，无法执行 AWS 生命周期动作。')
     return boto3.client(
         'lightsail',
         region_name=region,

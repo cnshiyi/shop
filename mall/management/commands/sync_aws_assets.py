@@ -11,10 +11,14 @@ STATIC_IP_KIND = CloudAsset.KIND_MTPROXY
 
 
 def _resolve_aws_account(region):
-    queryset = CloudAccountConfig.objects.filter(
+    base_queryset = CloudAccountConfig.objects.filter(
         provider=CloudAccountConfig.PROVIDER_AWS,
         is_active=True,
-    ).order_by('-status', 'id')
+    ).order_by('id')
+    if base_queryset.exists() and not base_queryset.exclude(status=CloudAccountConfig.STATUS_ERROR).exists():
+        return base_queryset.filter(region_hint=region).first() or base_queryset.first()
+    ok_queryset = base_queryset.filter(status=CloudAccountConfig.STATUS_OK)
+    queryset = ok_queryset if ok_queryset.exists() else base_queryset.exclude(status=CloudAccountConfig.STATUS_ERROR)
     region_account = queryset.filter(region_hint=region).first()
     return region_account or queryset.first()
 
@@ -32,6 +36,8 @@ def _lightsail_client(region):
     secret_key = account.secret_key_plain if account else os.getenv('AWS_SECRET_ACCESS_KEY', '')
     if not access_key or not secret_key:
         raise CommandError('未配置启用中的 AWS 云账号或 AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY，无法同步 AWS。')
+    if account and account.status == CloudAccountConfig.STATUS_ERROR:
+        raise CommandError(f'AWS 云账号 {account.name} 当前巡检异常，已跳过同步：{account.status_note or "请在云账号设置中重新检查密钥"}')
 
     return (
         boto3.client(
@@ -68,7 +74,22 @@ class Command(BaseCommand):
             kwargs = {}
             if next_page_token:
                 kwargs['pageToken'] = next_page_token
-            response = client.get_instances(**kwargs)
+            try:
+                response = client.get_instances(**kwargs)
+            except Exception as exc:
+                if account:
+                    account.mark_status(CloudAccountConfig.STATUS_ERROR, str(exc))
+                record_external_sync_log(
+                    source='aws_lightsail',
+                    action='get_instances',
+                    target=region,
+                    request_payload=kwargs,
+                    response_payload={},
+                    is_success=False,
+                    error_message=str(exc),
+                    account=account,
+                )
+                raise CommandError(f'AWS 同步失败，账号已标记异常：{exc}')
             record_external_sync_log(
                 source='aws_lightsail',
                 action='get_instances',

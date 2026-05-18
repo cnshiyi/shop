@@ -10,6 +10,10 @@ load_dotenv(BASE_DIR / '.env', override=True)
 
 SECRET_KEY = os.getenv('SECRET_KEY', 'dev-secret-key-change-me')
 DEBUG = os.getenv('DEBUG', '1') == '1'
+if not DEBUG and SECRET_KEY == 'dev-secret-key-change-me':
+    raise RuntimeError('生产环境必须配置 SECRET_KEY，不能使用默认开发密钥。')
+if not DEBUG and not os.getenv('CONFIG_ENCRYPTION_KEY'):
+    raise RuntimeError('生产环境必须配置 CONFIG_ENCRYPTION_KEY，用于加密敏感配置。')
 def _split_csv_env(value: str):
     return [item.strip() for item in (value or '').split(',') if item.strip()]
 
