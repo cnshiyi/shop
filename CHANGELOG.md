@@ -47,7 +47,7 @@
 
 ## v0.5.01 - 2026-04-19
 - 补齐后台默认管理员初始化：新增 `ensure_dashboard_admin` 管理命令，支持通过 `DASHBOARD_ADMIN_USERNAME` / `DASHBOARD_ADMIN_PASSWORD` 自动创建或修复 dashboard 登录账号，避免数据库为空时前端登录一直返回 `401`。
-- 开发环境默认提供后台初始账号：`admin / Admin@123456`。
+- 当前版本不再内置固定默认密码；已有管理员在未设置 `DASHBOARD_ADMIN_PASSWORD` 时不会被重置，新建管理员在生产环境必须显式提供密码，开发/测试环境会生成一次性随机密码。
 
 ### 验证
 - `python manage.py ensure_dashboard_admin`

@@ -87,6 +87,7 @@ python -m pip install -e .
 - 阿里云自动同步：`python manage.py sync_aliyun_assets --region cn-hongkong`
 - AWS / 代理手工录入：`python manage.py upsert_cloud_asset --kind server --instance-id xxx --asset-name xxx --public-ip x.x.x.x --actual-expires-at 2026-05-15T00:00:00+08:00`
 - 手工录入 `MTProxy`：`python manage.py upsert_cloud_asset --kind mtproxy --asset-name proxy-1 --public-ip x.x.x.x --mtproxy-port 9528 --mtproxy-link "tg://proxy?..." --actual-expires-at 2026-05-15T00:00:00+08:00`
+- 后台管理员初始化：`python manage.py ensure_dashboard_admin`。生产环境必须先设置 `DASHBOARD_ADMIN_PASSWORD`；开发/测试环境未设置时会生成一次性随机密码，且不会重置已有管理员密码。
 
 ### 2. 配置环境变量
 主要配置位于 `.env`：
