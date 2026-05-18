@@ -1,4 +1,5 @@
 import base64
+from contextlib import contextmanager
 import hashlib
 import os
 import warnings
@@ -9,6 +10,20 @@ from cryptography.fernet import Fernet, InvalidToken
 
 class SecretDecryptionError(ValueError):
     """Raised when an encrypted secret cannot be decrypted with the active key."""
+
+
+_ALLOW_LEGACY_SECRET_KEY_DECRYPTION = False
+
+
+@contextmanager
+def allow_legacy_secret_key_decryption():
+    global _ALLOW_LEGACY_SECRET_KEY_DECRYPTION
+    previous = _ALLOW_LEGACY_SECRET_KEY_DECRYPTION
+    _ALLOW_LEGACY_SECRET_KEY_DECRYPTION = True
+    try:
+        yield
+    finally:
+        _ALLOW_LEGACY_SECRET_KEY_DECRYPTION = previous
 
 
 def _encode_key(raw: str) -> bytes:
@@ -33,7 +48,13 @@ def _build_key() -> bytes:
 
 
 def _legacy_decryption_secrets() -> list[str]:
-    if os.getenv('DJANGO_TEST_SQLITE', '0') == '1' or os.getenv('DEBUG', '1') != '1':
+    if (
+        not _ALLOW_LEGACY_SECRET_KEY_DECRYPTION
+        and (
+            os.getenv('DJANGO_TEST_SQLITE', '0') == '1'
+            or os.getenv('DEBUG', '1') != '1'
+        )
+    ):
         return []
     legacy_secret = os.getenv('SECRET_KEY') or 'dev-secret-key-change-me'
     if legacy_secret == os.getenv('CONFIG_ENCRYPTION_KEY'):

@@ -1,11 +1,13 @@
 import os
+from io import StringIO
 
 from django.core.exceptions import ImproperlyConfigured
+from django.core.management import call_command
 from django.test import TestCase
 
 from core.cloud_accounts import get_active_cloud_account
 from core.crypto import SecretDecryptionError, decrypt_text, encrypt_text
-from core.models import CloudAccountConfig
+from core.models import CloudAccountConfig, SiteConfig
 
 
 class CloudAccountSelectionTests(TestCase):
@@ -90,3 +92,47 @@ class CryptoConfigTests(TestCase):
 
         with self.assertRaises(SecretDecryptionError):
             decrypt_text('gAAAA-invalid-token')
+
+    def test_reencrypt_secrets_rewrites_legacy_secret_key_values(self):
+        old_config_key = os.environ.get('CONFIG_ENCRYPTION_KEY')
+        old_secret_key = os.environ.get('SECRET_KEY')
+        old_debug = os.environ.get('DEBUG')
+        os.environ['SECRET_KEY'] = 'legacy-secret-key'
+        os.environ['CONFIG_ENCRYPTION_KEY'] = 'active-config-encryption-key'
+        os.environ['DEBUG'] = '0'
+        try:
+            os.environ['CONFIG_ENCRYPTION_KEY'] = 'legacy-secret-key'
+            legacy_value = encrypt_text('legacy-token')
+            os.environ['CONFIG_ENCRYPTION_KEY'] = 'active-config-encryption-key'
+            config = SiteConfig.objects.create(
+                key='bot_token',
+                value=legacy_value,
+                is_sensitive=True,
+            )
+
+            with self.assertRaises(SecretDecryptionError):
+                decrypt_text(config.value)
+
+            call_command(
+                'reencrypt_secrets',
+                '--allow-legacy-secret-key',
+                '--write',
+                stdout=StringIO(),
+            )
+            config.refresh_from_db()
+
+            self.assertEqual(decrypt_text(config.value), 'legacy-token')
+            self.assertNotEqual(config.value, legacy_value)
+        finally:
+            if old_config_key is None:
+                os.environ.pop('CONFIG_ENCRYPTION_KEY', None)
+            else:
+                os.environ['CONFIG_ENCRYPTION_KEY'] = old_config_key
+            if old_secret_key is None:
+                os.environ.pop('SECRET_KEY', None)
+            else:
+                os.environ['SECRET_KEY'] = old_secret_key
+            if old_debug is None:
+                os.environ.pop('DEBUG', None)
+            else:
+                os.environ['DEBUG'] = old_debug

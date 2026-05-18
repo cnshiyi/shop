@@ -205,7 +205,8 @@ Redis 中维护按天隔离的临时统计：
 ## 配置与敏感信息管理
 - 支持在 Django Admin 的 `系统配置` 中维护：`bot_token`、`telegram_api_id`、`telegram_api_hash`、`receive_address`、`trongrid_api_key`、`redis_url`、`database_url`、`mysql_host`、`mysql_port`、`mysql_user`、`mysql_password`、`mysql_database`、`admin_password_notice`
 - 敏感配置会通过 `core.crypto` 使用 `CONFIG_ENCRYPTION_KEY` 加密后写入数据库，后台列表页显示脱敏值
-- 早期使用 `SECRET_KEY` 加密的历史敏感配置仅在 `DEBUG=1` 下兼容读取，读取时会有告警；应尽快配置 `CONFIG_ENCRYPTION_KEY` 并重新保存敏感配置完成迁移
+- 早期使用 `SECRET_KEY` 加密的历史敏感配置仅在 `DEBUG=1` 或显式迁移命令中兼容读取，读取时会有告警；生产升级前应配置 `CONFIG_ENCRYPTION_KEY` 并执行一次重加密迁移
+- 重加密迁移先 dry-run：`python manage.py reencrypt_secrets --allow-legacy-secret-key`；确认无误后写入：`python manage.py reencrypt_secrets --allow-legacy-secret-key --write`
 - 支持在 Django Admin 的 `云账户配置` 中维护多个 `AWS / 阿里云` 账户，`access_key / secret_key` 同样加密存库
 - 如本地 MySQL 账号无建库权限，可设置 `DJANGO_TEST_REUSE_DB=1` 让 Django 测试复用当前库；也可通过 `MYSQL_TEST_DATABASE` 指定已有可用测试库名
 
