@@ -90,7 +90,8 @@ python -m pip install -e .
 
 ### 2. 配置环境变量
 主要配置位于 `.env`：
-- `CONFIG_ENCRYPTION_KEY`（必填，用于加密数据库中的敏感配置；生产环境禁止缺失或使用默认弱密钥）
+- `SECRET_KEY`（必填，生产环境必须使用强随机字符串）
+- `CONFIG_ENCRYPTION_KEY`（必填，用于加密数据库中的敏感配置；生产环境禁止缺失或使用默认弱密钥，必须与 `SECRET_KEY` 使用不同的强随机字符串）
 - `BOT_TOKEN`
 - `REDIS_URL`
 - `MYSQL_HOST`
@@ -106,6 +107,11 @@ python -m pip install -e .
 - `DEFAULT_SERVER_IMAGE`
 
 不要提交真实 `.env`、云厂商私钥或 `tmp/` 调试脚本；仓库只保留 `.env.example` 作为模板。如果这些凭据曾经进入 Git 历史，请立即在 Telegram、AWS、阿里云等平台轮换对应 token/AK/SK/私钥。
+
+## 当前设计假设
+- 后台权限模型是单租户管理后台：超级管理员可以操作全部资源；普通管理员只保留登录、刷新令牌、修改自己密码等基础能力。若后续要多管理员分权，需要为按 ID 操作资源的接口补 ownership 校验。
+- 链上支付模型使用一个全局 `receive_address` 收款地址，并通过币种 + 唯一尾数金额匹配 pending 订单。同币种同金额的极端碰撞由创建订单时的尾数去重避免；暂不支持多收款地址轮换或按订单独立收款地址。
+- 本地 `python run.py` 只负责开发期同时拉起 Django 与 Bot；生产环境应使用 `systemd`、`supervisor`、容器编排等工具托管 Web/Bot 进程，负责崩溃重启和告警。
 
 ### 3. 执行迁移
 ```bash

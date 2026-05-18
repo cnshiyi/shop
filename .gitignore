@@ -29,7 +29,10 @@ tmp_*
 
 # Private keys and cloud credentials
 *.pem
-secrets/**/*.pem
+secrets/**
+!secrets/**/
+!secrets/**/README.md
+!secrets/**/.gitkeep
 
 # OS
 .DS_Store
