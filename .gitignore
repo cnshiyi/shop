@@ -16,10 +16,20 @@ staticfiles/
 
 # Env
 .env
+.env.*
+!.env.example
 
 # IDE
 .idea/
 .vscode/
+
+# Local scratch files
+tmp/
+tmp_*
+
+# Private keys and cloud credentials
+*.pem
+secrets/**/*.pem
 
 # OS
 .DS_Store

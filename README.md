@@ -105,6 +105,8 @@ python -m pip install -e .
 - `ALIBABA_CLOUD_ACCESS_KEY_SECRET`
 - `DEFAULT_SERVER_IMAGE`
 
+不要提交真实 `.env`、云厂商私钥或 `tmp/` 调试脚本；仓库只保留 `.env.example` 作为模板。如果这些凭据曾经进入 Git 历史，请立即在 Telegram、AWS、阿里云等平台轮换对应 token/AK/SK/私钥。
+
 ### 3. 执行迁移
 ```bash
 uv run python manage.py migrate
