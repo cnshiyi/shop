@@ -244,6 +244,7 @@ def _create_instance_sync(order_data: dict, server_name: str):
             ok=True,
             instance_id=server_name,
             public_ip=public_ip,
+            static_ip_name=static_ip_name,
             login_user=_default_login_user_for_blueprint(blueprint_id),
             login_password=password,
             note=note,

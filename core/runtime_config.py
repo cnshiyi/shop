@@ -2,10 +2,9 @@ import os
 
 
 CONFIG_HELP = {
-    'bot_token': 'Telegram 机器人 Token',
-    'm_account_token': 'M 账号 Token',
+    'bot_token': 'Telegram 机器人访问令牌',
     'receive_address': '收款地址（USDT/TRX 共用）',
-    'trongrid_api_key': 'TRON API Key',
+    'trongrid_api_key': 'TRONGrid 接口密钥',
     'redis_url': 'Redis 连接地址',
     'database_url': '数据库连接串（优先）',
     'mysql_database': 'MySQL 数据库名',
@@ -13,13 +12,16 @@ CONFIG_HELP = {
     'mysql_password': 'MySQL 密码',
     'mysql_host': 'MySQL 主机',
     'mysql_port': 'MySQL 端口',
+    'telegram_api_hash': 'Telegram 登录应用密钥',
+    'telegram_api_id': 'Telegram 登录应用 ID',
+    'telegram_drop_pending_updates_on_start': '机器人启动时是否丢弃 Telegram 待处理更新',
 }
 
 SENSITIVE_CONFIG_KEYS = {
     'bot_token',
-    'm_account_token',
     'trongrid_api_key',
     'mysql_password',
+    'telegram_api_hash',
     'database_url',
 }
 
@@ -34,6 +36,9 @@ CONFIG_ENV_MAP = {
     'mysql_host': 'MYSQL_HOST',
     'mysql_port': 'MYSQL_PORT',
     'receive_address': 'RECEIVE_ADDRESS',
+    'telegram_api_hash': 'TELEGRAM_API_HASH',
+    'telegram_api_id': 'TELEGRAM_API_ID',
+    'telegram_drop_pending_updates_on_start': 'TELEGRAM_DROP_PENDING_UPDATES_ON_START',
     'trongrid_api_key': 'TRONGRID_API_KEY',
 }
 

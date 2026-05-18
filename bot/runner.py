@@ -9,12 +9,16 @@ import django
 django.setup()
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
+from django.core.management import call_command
+
 from bot.config import BOT_TOKEN
 from bot.fsm import close_fsm_storage
 from bot.handlers import create_dispatcher_and_register
+from bot.telegram_listener import TelegramAccountListenerManager
 from biz.services import refresh_custom_plan_cache
 from cloud.lifecycle import lifecycle_tick, sync_server_status_tick, sync_cloud_accounts_tick
 from core.cache import refresh_config, close as cache_close
+from core.models import SiteConfig
 from monitoring.cache import init_monitor_cache
 from tron.resource_checker import check_resources, set_bot as set_resource_bot
 from tron.scanner import scan_block, set_bot
@@ -46,6 +50,8 @@ async def run_bot():
     bot, dp = await create_dispatcher_and_register()
     set_bot(bot)
     set_resource_bot(bot)
+    telegram_listener = TelegramAccountListenerManager(bot)
+    await telegram_listener.start()
 
     async def _notify(user_id: int, text: str, reply_markup=None):
         try:
@@ -75,11 +81,14 @@ async def run_bot():
     logger.info('服务器去重任务已启动 (每20分钟)')
 
     logger.info('Telegram Bot 已启动 (aiogram)')
-    await bot.delete_webhook(drop_pending_updates=True)
+    logger.info('Telegram 登录账号监听器已启动')
+    drop_pending_updates = SiteConfig.get('telegram_drop_pending_updates_on_start', '0').lower() in {'1', 'true', 'yes', 'on'}
+    await bot.delete_webhook(drop_pending_updates=drop_pending_updates)
     try:
         await dp.start_polling(bot)
     finally:
         scheduler.shutdown(wait=False)
+        await telegram_listener.stop()
         await cache_close()
         await close_fsm_storage()
 

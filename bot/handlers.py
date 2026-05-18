@@ -284,10 +284,10 @@ async def _create_cloud_order_and_notify(bot: Bot, chat_id: int, user_id: int, p
             f'地区: {region_name}\n'
             f'套餐: {plan_name}\n'
             f'数量: {order.quantity}\n'
-            f'支付金额: {fmt_pay_amount(order.total_amount)} USDT / {fmt_pay_amount(await usdt_to_trx(order.total_amount))} TRX\n'
+            f'支付金额: {fmt_pay_amount(order.pay_amount)} {order.currency}\n'
             f'支付地址: `{receive_address}`\n'
             '订单 5 分钟有效，请在有效期内完成支付。\n\n'
-            '系统已开始自动监控 USDT 和 TRX 到账，检测到支付成功后会自动进入后续流程。'
+            f'请按上方币种和金额精确转账，系统检测到 {order.currency} 到账后会自动进入后续流程。'
         )
         await bot.send_message(chat_id=chat_id, text=text, reply_markup=custom_currency_keyboard(None, None, None, order.id), parse_mode='Markdown')
         logger.info('云服务器后台建单任务完成: chat_id=%s user_id=%s order_id=%s order=%s currency=%s total=%s pay_amount=%s', chat_id, user_id, order.id, order.order_no, order.currency, order.total_amount, order.pay_amount)
@@ -631,10 +631,10 @@ def register_handlers(dp: Dispatcher):
             f'地区: {plan.region_name}\n'
             f'套餐: {plan.plan_name}\n'
             f'数量: {order.quantity}\n'
-            f'支付金额: {fmt_pay_amount(order.total_amount)} USDT / {fmt_pay_amount(await usdt_to_trx(order.total_amount))} TRX\n'
+            f'支付金额: {fmt_pay_amount(order.pay_amount)} {order.currency}\n'
             f'支付地址: `{receive_address}`\n'
             '订单 5 分钟有效，请在有效期内完成支付。\n\n'
-            + _bot_text('bot_custom_order_notice', '系统已开始自动监控 USDT 和 TRX 到账，检测到支付成功后会自动进入后续流程。'),
+            + _bot_text('bot_custom_order_notice', f'请按上方币种和金额精确转账，系统检测到 {order.currency} 到账后会自动进入后续流程。'),
             reply_markup=custom_currency_keyboard(None, None, None, order.id),
             parse_mode='Markdown',
         )
@@ -902,10 +902,10 @@ def register_handlers(dp: Dispatcher):
             f'地区: {plan.region_name}\n'
             f'套餐: {plan.plan_name}\n'
             f'数量: {order.quantity}\n'
-            f'支付金额: {fmt_pay_amount(order.total_amount)} USDT / {fmt_pay_amount(await usdt_to_trx(order.total_amount))} TRX\n'
+            f'支付金额: {fmt_pay_amount(order.pay_amount)} {order.currency}\n'
             f'支付地址: `{receive_address}`\n'
             '订单 5 分钟有效，请在有效期内完成支付。\n\n'
-            '系统已开始自动监控 USDT 和 TRX 到账，检测到支付成功后会自动进入后续流程。',
+            f'请按上方币种和金额精确转账，系统检测到 {order.currency} 到账后会自动进入后续流程。',
             reply_markup=custom_currency_keyboard(None, None, None, order.id),
             parse_mode='Markdown',
         )
@@ -1038,7 +1038,7 @@ def register_handlers(dp: Dispatcher):
             f'USDT金额: {fmt_pay_amount(usdt_amount)} USDT\n'
             f'TRX金额: {fmt_pay_amount(trx_amount)} TRX\n'
             f'支付地址: `{receive_address}`\n\n'
-            + _bot_text('bot_custom_order_notice', '系统已开始自动监控 USDT 和 TRX 到账，检测到支付成功后会自动进入后续流程。')
+            + _bot_text('bot_custom_order_notice', '请先选择支付方式；生成订单后会出现唯一支付金额，请按订单金额精确转账。')
         )
         await _safe_callback_answer(callback)
         await _safe_edit_text(callback.message, text, reply_markup=custom_payment_keyboard(plan.id, quantity), parse_mode='Markdown')
@@ -1066,7 +1066,7 @@ def register_handlers(dp: Dispatcher):
             f'USDT金额: {fmt_pay_amount(usdt_amount)} USDT\n'
             f'TRX金额: {fmt_pay_amount(trx_amount)} TRX\n'
             f'支付地址: `{receive_address}`\n\n'
-            + _bot_text('bot_custom_order_notice', '系统已开始自动监控 USDT 和 TRX 到账，检测到支付成功后会自动进入后续流程。')
+            + _bot_text('bot_custom_order_notice', '请先选择支付方式；生成订单后会出现唯一支付金额，请按订单金额精确转账。')
         )
         await _safe_edit_text(callback.message, text, reply_markup=custom_payment_keyboard(plan.id, quantity), parse_mode='Markdown')
 
@@ -1342,7 +1342,7 @@ def register_handlers(dp: Dispatcher):
         await _safe_callback_answer(callback)
         user = await get_or_create_user(callback.from_user.id, callback.from_user.username, callback.from_user.first_name)
         order_id = int(callback.data.split(':')[2])
-        order = await create_cloud_server_renewal(order_id, user.id, 31)
+        order = await create_cloud_server_renewal(order_id, user.id, 31, 'USDT')
         if order is False:
             await _safe_callback_answer(callback, '该服务器IP已删除，禁止续费', show_alert=True)
             return
@@ -1356,10 +1356,10 @@ def register_handlers(dp: Dispatcher):
             '🔄 云服务器续费\n\n'
             f'订单号: {order.order_no}\n'
             '续费时长: 31天\n'
-            f'续费价格: {fmt_pay_amount(order.pay_amount)} {order.currency}\n'
+            f'续费价格: {fmt_pay_amount(order.pay_amount)} USDT / {fmt_pay_amount(trx_amount)} TRX\n'
             f'自动续费: {"已开启" if auto_renew_enabled else "已关闭"}\n'
             f'收款地址: `{receive_address}`\n\n'
-            '可直接地址支付，或使用下方钱包续费与自动续费开关。',
+            f'地址支付请精确转账 {fmt_pay_amount(order.pay_amount)} {order.currency}；下方按钮是钱包余额续费与自动续费开关。',
             parse_mode='Markdown',
             reply_markup=cloud_server_renew_payment(order.id, order.pay_amount, trx_amount, bool(auto_renew_enabled)),
         )
@@ -1384,7 +1384,7 @@ def register_handlers(dp: Dispatcher):
             f'续费价格: {fmt_pay_amount(order.pay_amount or order.total_amount)} {order.currency}\n'
             f'自动续费: {"已开启" if enabled else "已关闭"}\n'
             f'收款地址: `{receive_address}`\n\n'
-            '可直接地址支付，或使用下方钱包续费与自动续费开关。',
+            f'地址支付请精确转账 {fmt_pay_amount(order.pay_amount or order.total_amount)} {order.currency}；下方按钮是钱包余额续费与自动续费开关。',
             parse_mode='Markdown',
             reply_markup=cloud_server_renew_payment(order.id, order.pay_amount or order.total_amount, trx_amount, enabled),
         )

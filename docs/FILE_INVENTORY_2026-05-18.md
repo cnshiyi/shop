@@ -1,0 +1,1324 @@
+# 全量文件索引 2026-05-18
+
+范围：`/Users/a399/Desktop/shop` 下源码、配置、脚本与文档。排除依赖目录、构建产物、历史归档、图片/二进制/密钥正文：`.git`、`node_modules`、`.venv`、`dist`、`build`、`archive`、`docs`、`output`、图片、压缩包、`.pem` 等。
+
+索引文件数：1249。敏感文件只标注存在和风险，不展开内容。
+
+## .run
+- `.run/backend.pid`：本地运行进程 PID 记录。
+- `.run/frontend.pid`：本地运行进程 PID 记录。
+## README.md
+- `README.md`：项目说明/历史记录/设计文档。
+## shop/.env
+- `shop/.env`：仓库源码/配置文件。 **敏感/高风险：不要外发内容。**
+## shop/.gitignore
+- `shop/.gitignore`：仓库源码/配置文件。
+## shop/ARCHITECTURE.md
+- `shop/ARCHITECTURE.md`：项目说明/历史记录/设计文档。
+## shop/CHANGELOG.md
+- `shop/CHANGELOG.md`：项目说明/历史记录/设计文档。
+## shop/MEMORY.md
+- `shop/MEMORY.md`：项目说明/历史记录/设计文档。
+## shop/README.md
+- `shop/README.md`：项目说明/历史记录/设计文档。
+## shop/accounts
+- `shop/accounts/__init__.py`：Python 包初始化文件。
+- `shop/accounts/admin.py`：Django Admin 注册入口。
+- `shop/accounts/apps.py`：Django AppConfig。
+- `shop/accounts/management/commands/backfill_usernames_to_users.py`：用户、用户名、余额流水相关后端文件。
+- `shop/accounts/migrations/0001_initial.py`：Django 数据库迁移文件，定义历史表结构变更。
+- `shop/accounts/migrations/0002_telegramusername.py`：Django 数据库迁移文件，定义历史表结构变更。
+- `shop/accounts/migrations/0003_telegramuser_username_text.py`：Django 数据库迁移文件，定义历史表结构变更。
+- `shop/accounts/migrations/0004_telegramusername_ci_constraints.py`：Django 数据库迁移文件，定义历史表结构变更。
+- `shop/accounts/migrations/0005_balanceledger.py`：Django 数据库迁移文件，定义历史表结构变更。
+- `shop/accounts/migrations/0005_remove_telegramusername_ci_constraint.py`：Django 数据库迁移文件，定义历史表结构变更。
+- `shop/accounts/migrations/0006_merge_20260418_2359.py`：Django 数据库迁移文件，定义历史表结构变更。
+- `shop/accounts/migrations/0007_telegramuser_cloud_discount_rate.py`：Django 数据库迁移文件，定义历史表结构变更。
+- `shop/accounts/migrations/0008_telegramuser_cloud_reminder_muted_until.py`：Django 数据库迁移文件，定义历史表结构变更。
+- `shop/accounts/migrations/__init__.py`：Python 包初始化文件。
+- `shop/accounts/models.py`：Django 数据模型定义。
+- `shop/accounts/services.py`：用户、用户名、余额流水相关后端文件。
+## shop/biz
+- `shop/biz/__init__.py`：Python 包初始化文件。
+- `shop/biz/apps.py`：Django AppConfig。
+- `shop/biz/models.py`：Django 数据模型定义。
+- `shop/biz/services/__init__.py`：Python 包初始化文件。
+- `shop/biz/services/cloud_queries.py`：机器人业务服务层，承接商品、充值、云服务器、监控等业务操作。
+- `shop/biz/services/cloud_servers.py`：机器人业务服务层，承接商品、充值、云服务器、监控等业务操作。
+- `shop/biz/services/commerce.py`：机器人业务服务层，承接商品、充值、云服务器、监控等业务操作。
+- `shop/biz/services/custom.py`：机器人业务服务层，承接商品、充值、云服务器、监控等业务操作。
+- `shop/biz/services/monitoring.py`：机器人业务服务层，承接商品、充值、云服务器、监控等业务操作。
+- `shop/biz/services/payments.py`：机器人业务服务层，承接商品、充值、云服务器、监控等业务操作。
+- `shop/biz/services/rates.py`：机器人业务服务层，承接商品、充值、云服务器、监控等业务操作。
+- `shop/biz/services/users.py`：机器人业务服务层，承接商品、充值、云服务器、监控等业务操作。
+- `shop/biz/tests.py`：业务聚合模块，包含服务导出和测试。
+## shop/bot
+- `shop/bot/__init__.py`：Python 包初始化文件。
+- `shop/bot/admin.py`：Django Admin 注册入口。
+- `shop/bot/apps.py`：Django AppConfig。
+- `shop/bot/config.py`：Telegram 机器人配置、键盘、回调处理、运行器或监听器。
+- `shop/bot/fsm.py`：Telegram 机器人配置、键盘、回调处理、运行器或监听器。
+- `shop/bot/handlers.py`：Telegram 机器人配置、键盘、回调处理、运行器或监听器。
+- `shop/bot/keyboards.py`：Telegram 机器人配置、键盘、回调处理、运行器或监听器。
+- `shop/bot/models.py`：Django 数据模型定义。
+- `shop/bot/runner.py`：Telegram 机器人配置、键盘、回调处理、运行器或监听器。
+- `shop/bot/states/__init__.py`：Python 包初始化文件。
+- `shop/bot/states/cloud_query.py`：Telegram 机器人 FSM 状态定义。
+- `shop/bot/states/custom.py`：Telegram 机器人 FSM 状态定义。
+- `shop/bot/states/monitor.py`：Telegram 机器人 FSM 状态定义。
+- `shop/bot/states/recharge.py`：Telegram 机器人 FSM 状态定义。
+- `shop/bot/telegram_listener.py`：Telegram 机器人配置、键盘、回调处理、运行器或监听器。
+## shop/cloud
+- `shop/cloud/__init__.py`：Python 包初始化文件。
+- `shop/cloud/aliyun_simple.py`：云厂商实例创建、初始化、生命周期动作。
+- `shop/cloud/aws_lightsail.py`：云厂商实例创建、初始化、生命周期动作。
+- `shop/cloud/bootstrap.py`：云厂商实例创建、初始化、生命周期动作。
+- `shop/cloud/lifecycle.py`：云厂商实例创建、初始化、生命周期动作。
+- `shop/cloud/provisioning.py`：云厂商实例创建、初始化、生命周期动作。
+- `shop/cloud/schemas.py`：云厂商实例创建、初始化、生命周期动作。
+## shop/core
+- `shop/core/__init__.py`：Python 包初始化文件。
+- `shop/core/admin.py`：Django Admin 注册入口。
+- `shop/core/apps.py`：Django AppConfig。
+- `shop/core/cache.py`：配置、加密、缓存、云账号、持久化日志等核心基础设施。
+- `shop/core/cloud_accounts.py`：配置、加密、缓存、云账号、持久化日志等核心基础设施。
+- `shop/core/crypto.py`：配置、加密、缓存、云账号、持久化日志等核心基础设施。
+- `shop/core/formatters.py`：配置、加密、缓存、云账号、持久化日志等核心基础设施。
+- `shop/core/management/commands/ensure_dashboard_admin.py`：配置、加密、缓存、云账号、持久化日志等核心基础设施。
+- `shop/core/migrations/0001_initial.py`：Django 数据库迁移文件，定义历史表结构变更。
+- `shop/core/migrations/0002_sensitive_config_and_cloud_accounts.py`：Django 数据库迁移文件，定义历史表结构变更。
+- `shop/core/migrations/0003_cloudaccount_status_fields.py`：Django 数据库迁移文件，定义历史表结构变更。
+- `shop/core/migrations/0004_external_sync_log.py`：Django 数据库迁移文件，定义历史表结构变更。
+- `shop/core/migrations/__init__.py`：Python 包初始化文件。
+- `shop/core/models.py`：Django 数据模型定义。
+- `shop/core/persistence.py`：配置、加密、缓存、云账号、持久化日志等核心基础设施。
+- `shop/core/runtime_config.py`：配置、加密、缓存、云账号、持久化日志等核心基础设施。
+- `shop/core/templatetags/__init__.py`：Python 包初始化文件。
+- `shop/core/templatetags/admin_metrics.py`：配置、加密、缓存、云账号、持久化日志等核心基础设施。
+- `shop/core/views.py`：Django 视图/API 处理逻辑。
+## shop/dashboard_api
+- `shop/dashboard_api/__init__.py`：Python 包初始化文件。
+- `shop/dashboard_api/apps.py`：Django AppConfig。
+- `shop/dashboard_api/urls.py`：Django URL 路由定义。
+- `shop/dashboard_api/views.py`：Django 视图/API 处理逻辑。
+## shop/dashboard_web
+- `shop/dashboard_web/README.md`：项目说明/历史记录/设计文档。
+## shop/finance
+- `shop/finance/__init__.py`：Python 包初始化文件。
+- `shop/finance/admin.py`：Django Admin 注册入口。
+- `shop/finance/apps.py`：Django AppConfig。
+- `shop/finance/migrations/0001_initial.py`：Django 数据库迁移文件，定义历史表结构变更。
+- `shop/finance/migrations/__init__.py`：Python 包初始化文件。
+- `shop/finance/models.py`：Django 数据模型定义。
+## shop/mall
+- `shop/mall/__init__.py`：Python 包初始化文件。
+- `shop/mall/admin.py`：Django Admin 注册入口。
+- `shop/mall/apps.py`：Django AppConfig。
+- `shop/mall/management/__init__.py`：Python 包初始化文件。
+- `shop/mall/management/commands/__init__.py`：Python 包初始化文件。
+- `shop/mall/management/commands/dedupe_servers.py`：资产同步、套餐同步、数据修复类 Django management command。
+- `shop/mall/management/commands/sync_aliyun_assets.py`：资产同步、套餐同步、数据修复类 Django management command。
+- `shop/mall/management/commands/sync_aws_assets.py`：资产同步、套餐同步、数据修复类 Django management command。
+- `shop/mall/management/commands/upsert_cloud_asset.py`：资产同步、套餐同步、数据修复类 Django management command。
+- `shop/mall/migrations/0001_cloud_servers.py`：Django 数据库迁移文件，定义历史表结构变更。
+- `shop/mall/migrations/0002_cloud_server_credentials.py`：Django 数据库迁移文件，定义历史表结构变更。
+- `shop/mall/migrations/0003_cloud_server_port.py`：Django 数据库迁移文件，定义历史表结构变更。
+- `shop/mall/migrations/0004_cloud_server_lifecycle.py`：Django 数据库迁移文件，定义历史表结构变更。
+- `shop/mall/migrations/0005_cloud_server_quantity.py`：Django 数据库迁移文件，定义历史表结构变更。
+- `shop/mall/migrations/0006_cloud_asset.py`：Django 数据库迁移文件，定义历史表结构变更。
+- `shop/mall/migrations/0007_server.py`：Django 数据库迁移文件，定义历史表结构变更。
+- `shop/mall/migrations/0008_cloudasset_price_currency.py`：Django 数据库迁移文件，定义历史表结构变更。
+- `shop/mall/migrations/0009_product_order.py`：Django 数据库迁移文件，定义历史表结构变更。
+- `shop/mall/migrations/0010_cloud_asset_server_status.py`：Django 数据库迁移文件，定义历史表结构变更。
+- `shop/mall/migrations/0011_alter_cloudasset_status_alter_server_status.py`：Django 数据库迁移文件，定义历史表结构变更。
+- `shop/mall/migrations/0012_add_expired_grace_status.py`：Django 数据库迁移文件，定义历史表结构变更。
+- `shop/mall/migrations/0013_cloudserverplan_plan_description_cloudserverpricing.py`：Django 数据库迁移文件，定义历史表结构变更。
+- `shop/mall/migrations/0014_cloud_reminders_and_replacement.py`：Django 数据库迁移文件，定义历史表结构变更。
+- `shop/mall/migrations/0015_cart_item.py`：Django 数据库迁移文件，定义历史表结构变更。
+- `shop/mall/migrations/0016_merge_20260419_1311.py`：Django 数据库迁移文件，定义历史表结构变更。
+- `shop/mall/migrations/0017_cloud_plan_cost_prices.py`：Django 数据库迁移文件，定义历史表结构变更。
+- `shop/mall/migrations/0018_alter_cloudserverplan_price.py`：Django 数据库迁移文件，定义历史表结构变更。
+- `shop/mall/migrations/0019_cloudserverorder_auto_renew_enabled.py`：Django 数据库迁移文件，定义历史表结构变更。
+- `shop/mall/migrations/0020_cloudserverorder_delay_applied.py`：Django 数据库迁移文件，定义历史表结构变更。
+- `shop/mall/migrations/0021_replace_delay_applied_with_delay_quota.py`：Django 数据库迁移文件，定义历史表结构变更。
+- `shop/mall/migrations/0022_serverprice.py`：Django 数据库迁移文件，定义历史表结构变更。
+- `shop/mall/migrations/0023_drop_legacy_cloud_server_pricing.py`：Django 数据库迁移文件，定义历史表结构变更。
+- `shop/mall/migrations/0024_delete_cloudserverpricing.py`：Django 数据库迁移文件，定义历史表结构变更。
+- `shop/mall/migrations/__init__.py`：Python 包初始化文件。
+- `shop/mall/models.py`：Django 数据模型定义。
+## shop/manage.py
+- `shop/manage.py`：仓库源码/配置文件。
+## shop/monitoring
+- `shop/monitoring/__init__.py`：Python 包初始化文件。
+- `shop/monitoring/admin.py`：Django Admin 注册入口。
+- `shop/monitoring/apps.py`：Django AppConfig。
+- `shop/monitoring/cache.py`：TRON 地址监控模型与缓存同步。
+- `shop/monitoring/migrations/0001_initial.py`：Django 数据库迁移文件，定义历史表结构变更。
+- `shop/monitoring/migrations/__init__.py`：Python 包初始化文件。
+- `shop/monitoring/models.py`：Django 数据模型定义。
+## shop/pyproject.toml
+- `shop/pyproject.toml`：配置、脚本、样式或前端源码。
+## shop/query
+- `shop/query`：仓库源码/配置文件。
+## shop/run.py
+- `shop/run.py`：仓库源码/配置文件。
+## shop/secrets
+- `shop/secrets/lightsail/README.md`：项目说明/历史记录/设计文档。 **敏感/高风险：不要外发内容。**
+## shop/shop
+- `shop/shop/__init__.py`：Python 包初始化文件。
+- `shop/shop/asgi.py`：Django 部署入口。
+- `shop/shop/settings.py`：Django 项目配置。
+- `shop/shop/urls.py`：Django URL 路由定义。
+- `shop/shop/wsgi.py`：Django 部署入口。
+## shop/tmp
+- `shop/tmp/check_debian_admin_env.sh`：本地验证/修复脚本，部分会触达真实云资源，仅审计记录不建议生产调用。 **敏感/高风险：不要外发内容。**
+- `shop/tmp/check_new_mtproxy.py`：本地验证/修复脚本，部分会触达真实云资源，仅审计记录不建议生产调用。 **敏感/高风险：不要外发内容。**
+- `shop/tmp/check_run_command.py`：本地验证/修复脚本，部分会触达真实云资源，仅审计记录不建议生产调用。 **敏感/高风险：不要外发内容。**
+- `shop/tmp/cleanup_aws_test_resources.py`：本地验证/修复脚本，部分会触达真实云资源，仅审计记录不建议生产调用。 **敏感/高风险：不要外发内容。**
+- `shop/tmp/create_flow_test_instance.py`：本地验证/修复脚本，部分会触达真实云资源，仅审计记录不建议生产调用。 **敏感/高风险：不要外发内容。**
+- `shop/tmp/debug_set_password.sh`：本地验证/修复脚本，部分会触达真实云资源，仅审计记录不建议生产调用。 **敏感/高风险：不要外发内容。**
+- `shop/tmp/enable_password_login.sh`：本地验证/修复脚本，部分会触达真实云资源，仅审计记录不建议生产调用。 **敏感/高风险：不要外发内容。**
+- `shop/tmp/inspect_aws_machine.sh`：本地验证/修复脚本，部分会触达真实云资源，仅审计记录不建议生产调用。 **敏感/高风险：不要外发内容。**
+- `shop/tmp/inspect_aws_userdata.sh`：本地验证/修复脚本，部分会触达真实云资源，仅审计记录不建议生产调用。 **敏感/高风险：不要外发内容。**
+- `shop/tmp/inspect_cloud_init_errors.sh`：本地验证/修复脚本，部分会触达真实云资源，仅审计记录不建议生产调用。 **敏感/高风险：不要外发内容。**
+- `shop/tmp/install_mtproxy_after_password_relogin.py`：本地验证/修复脚本，部分会触达真实云资源，仅审计记录不建议生产调用。 **敏感/高风险：不要外发内容。**
+- `shop/tmp/install_mtproxy_via_project.py`：本地验证/修复脚本，部分会触达真实云资源，仅审计记录不建议生产调用。 **敏感/高风险：不要外发内容。**
+- `shop/tmp/overnight_task_list.md`：本地验证/修复脚本，部分会触达真实云资源，仅审计记录不建议生产调用。 **敏感/高风险：不要外发内容。**
+- `shop/tmp/read_remote_mtproxy.py`：本地验证/修复脚本，部分会触达真实云资源，仅审计记录不建议生产调用。 **敏感/高风险：不要外发内容。**
+- `shop/tmp/run_aws_create_and_ssh_test.py`：本地验证/修复脚本，部分会触达真实云资源，仅审计记录不建议生产调用。 **敏感/高风险：不要外发内容。**
+- `shop/tmp/run_aws_create_instance_only.py`：本地验证/修复脚本，部分会触达真实云资源，仅审计记录不建议生产调用。 **敏感/高风险：不要外发内容。**
+- `shop/tmp/run_full_flow_new_machine.py`：本地验证/修复脚本，部分会触达真实云资源，仅审计记录不建议生产调用。 **敏感/高风险：不要外发内容。**
+- `shop/tmp/run_full_flow_new_machine_2.py`：本地验证/修复脚本，部分会触达真实云资源，仅审计记录不建议生产调用。 **敏感/高风险：不要外发内容。**
+- `shop/tmp/run_ip_full_chain.py`：本地验证/修复脚本，部分会触达真实云资源，仅审计记录不建议生产调用。 **敏感/高风险：不要外发内容。**
+- `shop/tmp/run_latest_full_chain.py`：本地验证/修复脚本，部分会触达真实云资源，仅审计记录不建议生产调用。 **敏感/高风险：不要外发内容。**
+- `shop/tmp/run_latest_mtproxy_verify.py`：本地验证/修复脚本，部分会触达真实云资源，仅审计记录不建议生产调用。 **敏感/高风险：不要外发内容。**
+- `shop/tmp/run_password_relogin_flow.py`：本地验证/修复脚本，部分会触达真实云资源，仅审计记录不建议生产调用。 **敏感/高风险：不要外发内容。**
+- `shop/tmp/run_remote_bbr.sh`：本地验证/修复脚本，部分会触达真实云资源，仅审计记录不建议生产调用。 **敏感/高风险：不要外发内容。**
+- `shop/tmp/run_remote_mtproxy_check.sh`：本地验证/修复脚本，部分会触达真实云资源，仅审计记录不建议生产调用。 **敏感/高风险：不要外发内容。**
+- `shop/tmp/setup_mtproxy_systemd.sh`：本地验证/修复脚本，部分会触达真实云资源，仅审计记录不建议生产调用。 **敏感/高风险：不要外发内容。**
+- `shop/tmp/test_paramiko_login.py`：本地验证/修复脚本，部分会触达真实云资源，仅审计记录不建议生产调用。 **敏感/高风险：不要外发内容。**
+- `shop/tmp/test_paramiko_login_latest.py`：本地验证/修复脚本，部分会触达真实云资源，仅审计记录不建议生产调用。 **敏感/高风险：不要外发内容。**
+- `shop/tmp/test_paramiko_login_ubuntu.py`：本地验证/修复脚本，部分会触达真实云资源，仅审计记录不建议生产调用。 **敏感/高风险：不要外发内容。**
+- `shop/tmp/verify_aws_chain.py`：本地验证/修复脚本，部分会触达真实云资源，仅审计记录不建议生产调用。 **敏感/高风险：不要外发内容。**
+- `shop/tmp/verify_step3.py`：本地验证/修复脚本，部分会触达真实云资源，仅审计记录不建议生产调用。 **敏感/高风险：不要外发内容。**
+## shop/tmp_check_admin_routes.py
+- `shop/tmp_check_admin_routes.py`：本地验证/修复脚本，部分会触达真实云资源，仅审计记录不建议生产调用。
+## shop/tmp_mtproxy.sh
+- `shop/tmp_mtproxy.sh`：本地验证/修复脚本，部分会触达真实云资源，仅审计记录不建议生产调用。
+## shop/tmp_restart_openclaw_gateway.cmd
+- `shop/tmp_restart_openclaw_gateway.cmd`：本地验证/修复脚本，部分会触达真实云资源，仅审计记录不建议生产调用。
+## shop/tmp_verify_permissions.py
+- `shop/tmp_verify_permissions.py`：本地验证/修复脚本，部分会触达真实云资源，仅审计记录不建议生产调用。
+## shop/tmp_verify_replace_fallback.py
+- `shop/tmp_verify_replace_fallback.py`：本地验证/修复脚本，部分会触达真实云资源，仅审计记录不建议生产调用。
+## shop/tools
+- `shop/tools/fix_backend.py`：本地验证/修复脚本，部分会触达真实云资源，仅审计记录不建议生产调用。
+- `shop/tools/monitoring/migrations/__init__.py`：Python 包初始化文件。
+## shop/tron
+- `shop/tron/__init__.py`：Python 包初始化文件。
+- `shop/tron/parser.py`：TRON 交易解析、扫链、资源检测逻辑。
+- `shop/tron/resource_checker.py`：TRON 交易解析、扫链、资源检测逻辑。
+- `shop/tron/scanner.py`：TRON 交易解析、扫链、资源检测逻辑。
+## vue-shop-admin/.browserslistrc
+- `vue-shop-admin/.browserslistrc`：前端 monorepo 根配置、说明或工具配置。
+## vue-shop-admin/.changeset
+- `vue-shop-admin/.changeset/README.md`：前端 monorepo 根配置、说明或工具配置。
+- `vue-shop-admin/.changeset/config.json`：前端 monorepo 根配置、说明或工具配置。
+## vue-shop-admin/.commitlintrc.js
+- `vue-shop-admin/.commitlintrc.js`：前端 monorepo 根配置、说明或工具配置。
+## vue-shop-admin/.dockerignore
+- `vue-shop-admin/.dockerignore`：前端 monorepo 根配置、说明或工具配置。
+## vue-shop-admin/.editorconfig
+- `vue-shop-admin/.editorconfig`：前端 monorepo 根配置、说明或工具配置。
+## vue-shop-admin/.gitattributes
+- `vue-shop-admin/.gitattributes`：前端 monorepo 根配置、说明或工具配置。
+## vue-shop-admin/.gitconfig
+- `vue-shop-admin/.gitconfig`：前端 monorepo 根配置、说明或工具配置。
+## vue-shop-admin/.github
+- `vue-shop-admin/.github/CODEOWNERS`：GitHub 工作流、模板或贡献配置。
+- `vue-shop-admin/.github/ISSUE_TEMPLATE/bug-report.yml`：GitHub 工作流、模板或贡献配置。
+- `vue-shop-admin/.github/ISSUE_TEMPLATE/docs.yml`：GitHub 工作流、模板或贡献配置。
+- `vue-shop-admin/.github/ISSUE_TEMPLATE/feature-request.yml`：GitHub 工作流、模板或贡献配置。
+- `vue-shop-admin/.github/actions/setup-node/action.yml`：GitHub 工作流、模板或贡献配置。
+- `vue-shop-admin/.github/commit-convention.md`：GitHub 工作流、模板或贡献配置。
+- `vue-shop-admin/.github/config.yml`：GitHub 工作流、模板或贡献配置。
+- `vue-shop-admin/.github/contributing.md`：GitHub 工作流、模板或贡献配置。
+- `vue-shop-admin/.github/dependabot.yml`：GitHub 工作流、模板或贡献配置。
+- `vue-shop-admin/.github/pull_request_template.md`：GitHub 工作流、模板或贡献配置。
+- `vue-shop-admin/.github/release-drafter.yml`：GitHub 工作流、模板或贡献配置。
+- `vue-shop-admin/.github/semantic.yml`：GitHub 工作流、模板或贡献配置。
+- `vue-shop-admin/.github/workflows/build.yml`：GitHub 工作流、模板或贡献配置。
+- `vue-shop-admin/.github/workflows/changeset-version.yml`：GitHub 工作流、模板或贡献配置。
+- `vue-shop-admin/.github/workflows/ci.yml`：GitHub 工作流、模板或贡献配置。
+- `vue-shop-admin/.github/workflows/codeql.yml`：GitHub 工作流、模板或贡献配置。
+- `vue-shop-admin/.github/workflows/deploy.yml`：GitHub 工作流、模板或贡献配置。
+- `vue-shop-admin/.github/workflows/draft.yml`：GitHub 工作流、模板或贡献配置。
+- `vue-shop-admin/.github/workflows/issue-close-require.yml`：GitHub 工作流、模板或贡献配置。
+- `vue-shop-admin/.github/workflows/issue-labeled.yml`：GitHub 工作流、模板或贡献配置。
+- `vue-shop-admin/.github/workflows/lock.yml`：GitHub 工作流、模板或贡献配置。
+- `vue-shop-admin/.github/workflows/release-tag.yml`：GitHub 工作流、模板或贡献配置。
+- `vue-shop-admin/.github/workflows/rerun.yml`：GitHub 工作流、模板或贡献配置。
+- `vue-shop-admin/.github/workflows/semantic-pull-request.yml`：GitHub 工作流、模板或贡献配置。
+- `vue-shop-admin/.github/workflows/stale.yml`：GitHub 工作流、模板或贡献配置。
+## vue-shop-admin/.gitignore
+- `vue-shop-admin/.gitignore`：前端 monorepo 根配置、说明或工具配置。
+## vue-shop-admin/.gitpod.yml
+- `vue-shop-admin/.gitpod.yml`：前端 monorepo 根配置、说明或工具配置。
+## vue-shop-admin/.node-version
+- `vue-shop-admin/.node-version`：前端 monorepo 根配置、说明或工具配置。
+## vue-shop-admin/.npmrc
+- `vue-shop-admin/.npmrc`：前端 monorepo 根配置、说明或工具配置。
+## vue-shop-admin/.stylelintignore
+- `vue-shop-admin/.stylelintignore`：前端 monorepo 根配置、说明或工具配置。
+## vue-shop-admin/DEVELOPMENT.md
+- `vue-shop-admin/DEVELOPMENT.md`：前端 monorepo 根配置、说明或工具配置。
+## vue-shop-admin/LICENSE
+- `vue-shop-admin/LICENSE`：前端 monorepo 根配置、说明或工具配置。
+## vue-shop-admin/README.ja-JP.md
+- `vue-shop-admin/README.ja-JP.md`：前端 monorepo 根配置、说明或工具配置。
+## vue-shop-admin/README.md
+- `vue-shop-admin/README.md`：前端 monorepo 根配置、说明或工具配置。
+## vue-shop-admin/README.zh-CN.md
+- `vue-shop-admin/README.zh-CN.md`：前端 monorepo 根配置、说明或工具配置。
+## vue-shop-admin/apps
+- `vue-shop-admin/apps/web-antd/.env`：web-antd 应用配置或入口。 **敏感/高风险：不要外发内容。**
+- `vue-shop-admin/apps/web-antd/.env.analyze`：web-antd 应用配置或入口。 **敏感/高风险：不要外发内容。**
+- `vue-shop-admin/apps/web-antd/.env.development`：web-antd 应用配置或入口。 **敏感/高风险：不要外发内容。**
+- `vue-shop-admin/apps/web-antd/.env.production`：web-antd 应用配置或入口。 **敏感/高风险：不要外发内容。**
+- `vue-shop-admin/apps/web-antd/index.html`：web-antd 应用配置或入口。
+- `vue-shop-admin/apps/web-antd/package.json`：web-antd 应用配置或入口。
+- `vue-shop-admin/apps/web-antd/src/adapter/component/index.ts`：UI/表格/表单适配层。
+- `vue-shop-admin/apps/web-antd/src/adapter/form.ts`：UI/表格/表单适配层。
+- `vue-shop-admin/apps/web-antd/src/adapter/vxe-table.ts`：UI/表格/表单适配层。
+- `vue-shop-admin/apps/web-antd/src/api/admin.ts`：前端 API 类型与请求封装。
+- `vue-shop-admin/apps/web-antd/src/api/core/auth.ts`：前端 API 类型与请求封装。
+- `vue-shop-admin/apps/web-antd/src/api/core/index.ts`：前端 API 类型与请求封装。
+- `vue-shop-admin/apps/web-antd/src/api/core/menu.ts`：前端 API 类型与请求封装。
+- `vue-shop-admin/apps/web-antd/src/api/core/user.ts`：前端 API 类型与请求封装。
+- `vue-shop-admin/apps/web-antd/src/api/index.ts`：前端 API 类型与请求封装。
+- `vue-shop-admin/apps/web-antd/src/api/request.ts`：前端 API 类型与请求封装。
+- `vue-shop-admin/apps/web-antd/src/app.vue`：web-antd 应用配置或入口。
+- `vue-shop-admin/apps/web-antd/src/bootstrap.ts`：web-antd 应用配置或入口。
+- `vue-shop-admin/apps/web-antd/src/layouts/auth.vue`：前端布局组件。
+- `vue-shop-admin/apps/web-antd/src/layouts/basic.vue`：前端布局组件。
+- `vue-shop-admin/apps/web-antd/src/layouts/index.ts`：前端布局组件。
+- `vue-shop-admin/apps/web-antd/src/locales/README.md`：前端国际化文案。
+- `vue-shop-admin/apps/web-antd/src/locales/index.ts`：前端国际化文案。
+- `vue-shop-admin/apps/web-antd/src/locales/langs/en-US/page.json`：前端国际化文案。
+- `vue-shop-admin/apps/web-antd/src/locales/langs/zh-CN/page.json`：前端国际化文案。
+- `vue-shop-admin/apps/web-antd/src/main.ts`：web-antd 应用配置或入口。
+- `vue-shop-admin/apps/web-antd/src/preferences.ts`：web-antd 应用配置或入口。
+- `vue-shop-admin/apps/web-antd/src/router/access.ts`：前端路由、菜单与导航守卫。
+- `vue-shop-admin/apps/web-antd/src/router/guard.ts`：前端路由、菜单与导航守卫。
+- `vue-shop-admin/apps/web-antd/src/router/index.ts`：前端路由、菜单与导航守卫。
+- `vue-shop-admin/apps/web-antd/src/router/routes/core.ts`：前端路由、菜单与导航守卫。
+- `vue-shop-admin/apps/web-antd/src/router/routes/index.ts`：前端路由、菜单与导航守卫。
+- `vue-shop-admin/apps/web-antd/src/router/routes/modules/admin.ts`：前端路由、菜单与导航守卫。
+- `vue-shop-admin/apps/web-antd/src/store/auth.ts`：前端 Pinia 状态管理。
+- `vue-shop-admin/apps/web-antd/src/store/index.ts`：前端 Pinia 状态管理。
+- `vue-shop-admin/apps/web-antd/src/utils/dashboard-permissions.ts`：web-antd 应用配置或入口。
+- `vue-shop-admin/apps/web-antd/src/views/_core/README.md`：Vben 核心页面，如登录、错误页、个人页。
+- `vue-shop-admin/apps/web-antd/src/views/_core/about/index.vue`：Vben 核心页面，如登录、错误页、个人页。
+- `vue-shop-admin/apps/web-antd/src/views/_core/authentication/login.vue`：Vben 核心页面，如登录、错误页、个人页。
+- `vue-shop-admin/apps/web-antd/src/views/_core/fallback/coming-soon.vue`：Vben 核心页面，如登录、错误页、个人页。
+- `vue-shop-admin/apps/web-antd/src/views/_core/fallback/forbidden.vue`：Vben 核心页面，如登录、错误页、个人页。
+- `vue-shop-admin/apps/web-antd/src/views/_core/fallback/internal-error.vue`：Vben 核心页面，如登录、错误页、个人页。
+- `vue-shop-admin/apps/web-antd/src/views/_core/fallback/not-found.vue`：Vben 核心页面，如登录、错误页、个人页。
+- `vue-shop-admin/apps/web-antd/src/views/_core/fallback/offline.vue`：Vben 核心页面，如登录、错误页、个人页。
+- `vue-shop-admin/apps/web-antd/src/views/_core/profile/base-setting.vue`：Vben 核心页面，如登录、错误页、个人页。
+- `vue-shop-admin/apps/web-antd/src/views/_core/profile/index.vue`：Vben 核心页面，如登录、错误页、个人页。
+- `vue-shop-admin/apps/web-antd/src/views/_core/profile/notification-setting.vue`：Vben 核心页面，如登录、错误页、个人页。
+- `vue-shop-admin/apps/web-antd/src/views/_core/profile/password-setting.vue`：Vben 核心页面，如登录、错误页、个人页。
+- `vue-shop-admin/apps/web-antd/src/views/_core/profile/security-setting.vue`：Vben 核心页面，如登录、错误页、个人页。
+- `vue-shop-admin/apps/web-antd/src/views/dashboard/analytics/analytics-trends.vue`：后台管理业务页面 Vue 组件。
+- `vue-shop-admin/apps/web-antd/src/views/dashboard/analytics/analytics-visits-data.vue`：后台管理业务页面 Vue 组件。
+- `vue-shop-admin/apps/web-antd/src/views/dashboard/analytics/analytics-visits-sales.vue`：后台管理业务页面 Vue 组件。
+- `vue-shop-admin/apps/web-antd/src/views/dashboard/analytics/analytics-visits-source.vue`：后台管理业务页面 Vue 组件。
+- `vue-shop-admin/apps/web-antd/src/views/dashboard/analytics/analytics-visits.vue`：后台管理业务页面 Vue 组件。
+- `vue-shop-admin/apps/web-antd/src/views/dashboard/analytics/index.vue`：后台管理业务页面 Vue 组件。
+- `vue-shop-admin/apps/web-antd/src/views/dashboard/cloud-assets/detail.vue`：后台管理业务页面 Vue 组件。
+- `vue-shop-admin/apps/web-antd/src/views/dashboard/cloud-assets/index.vue`：后台管理业务页面 Vue 组件。
+- `vue-shop-admin/apps/web-antd/src/views/dashboard/cloud-ip-logs/index.vue`：后台管理业务页面 Vue 组件。
+- `vue-shop-admin/apps/web-antd/src/views/dashboard/cloud-orders/detail.vue`：后台管理业务页面 Vue 组件。
+- `vue-shop-admin/apps/web-antd/src/views/dashboard/cloud-orders/index.vue`：后台管理业务页面 Vue 组件。
+- `vue-shop-admin/apps/web-antd/src/views/dashboard/cloud-plans/index.vue`：后台管理业务页面 Vue 组件。
+- `vue-shop-admin/apps/web-antd/src/views/dashboard/cloud-pricing/index.vue`：后台管理业务页面 Vue 组件。
+- `vue-shop-admin/apps/web-antd/src/views/dashboard/django-admin/index.vue`：后台管理业务页面 Vue 组件。
+- `vue-shop-admin/apps/web-antd/src/views/dashboard/ip-delete-logs/index.vue`：后台管理业务页面 Vue 组件。
+- `vue-shop-admin/apps/web-antd/src/views/dashboard/monitors/index.vue`：后台管理业务页面 Vue 组件。
+- `vue-shop-admin/apps/web-antd/src/views/dashboard/operation-logs/index.vue`：后台管理业务页面 Vue 组件。
+- `vue-shop-admin/apps/web-antd/src/views/dashboard/recharges/detail.vue`：后台管理业务页面 Vue 组件。
+- `vue-shop-admin/apps/web-antd/src/views/dashboard/recharges/index.vue`：后台管理业务页面 Vue 组件。
+- `vue-shop-admin/apps/web-antd/src/views/dashboard/server-logs/index.vue`：后台管理业务页面 Vue 组件。
+- `vue-shop-admin/apps/web-antd/src/views/dashboard/server-statistics/index.vue`：后台管理业务页面 Vue 组件。
+- `vue-shop-admin/apps/web-antd/src/views/dashboard/servers/index.vue`：后台管理业务页面 Vue 组件。
+- `vue-shop-admin/apps/web-antd/src/views/dashboard/settings/admins.vue`：后台管理业务页面 Vue 组件。
+- `vue-shop-admin/apps/web-antd/src/views/dashboard/settings/buttons.vue`：后台管理业务页面 Vue 组件。
+- `vue-shop-admin/apps/web-antd/src/views/dashboard/settings/cloud-accounts.vue`：后台管理业务页面 Vue 组件。
+- `vue-shop-admin/apps/web-antd/src/views/dashboard/settings/components/site-config-cards.vue`：后台管理业务页面 Vue 组件。
+- `vue-shop-admin/apps/web-antd/src/views/dashboard/settings/components/site-config-group.vue`：后台管理业务页面 Vue 组件。
+- `vue-shop-admin/apps/web-antd/src/views/dashboard/settings/database.vue`：后台管理业务页面 Vue 组件。
+- `vue-shop-admin/apps/web-antd/src/views/dashboard/settings/index.vue`：后台管理业务页面 Vue 组件。
+- `vue-shop-admin/apps/web-antd/src/views/dashboard/settings/lifecycle.vue`：后台管理业务页面 Vue 组件。
+- `vue-shop-admin/apps/web-antd/src/views/dashboard/settings/logs.vue`：后台管理业务页面 Vue 组件。
+- `vue-shop-admin/apps/web-antd/src/views/dashboard/settings/notifications.vue`：后台管理业务页面 Vue 组件。
+- `vue-shop-admin/apps/web-antd/src/views/dashboard/settings/password.vue`：后台管理业务页面 Vue 组件。
+- `vue-shop-admin/apps/web-antd/src/views/dashboard/settings/payment.vue`：后台管理业务页面 Vue 组件。
+- `vue-shop-admin/apps/web-antd/src/views/dashboard/settings/system.vue`：后台管理业务页面 Vue 组件。
+- `vue-shop-admin/apps/web-antd/src/views/dashboard/settings/telegram.vue`：后台管理业务页面 Vue 组件。
+- `vue-shop-admin/apps/web-antd/src/views/dashboard/settings/texts.vue`：后台管理业务页面 Vue 组件。
+- `vue-shop-admin/apps/web-antd/src/views/dashboard/tasks/auto-renew-detail.vue`：后台管理业务页面 Vue 组件。
+- `vue-shop-admin/apps/web-antd/src/views/dashboard/tasks/index.vue`：后台管理业务页面 Vue 组件。
+- `vue-shop-admin/apps/web-antd/src/views/dashboard/tasks/notices.vue`：后台管理业务页面 Vue 组件。
+- `vue-shop-admin/apps/web-antd/src/views/dashboard/tasks/plans.vue`：后台管理业务页面 Vue 组件。
+- `vue-shop-admin/apps/web-antd/src/views/dashboard/telegram-accounts/accounts.vue`：后台管理业务页面 Vue 组件。
+- `vue-shop-admin/apps/web-antd/src/views/dashboard/telegram-accounts/chats.vue`：后台管理业务页面 Vue 组件。
+- `vue-shop-admin/apps/web-antd/src/views/dashboard/telegram-accounts/groups.vue`：后台管理业务页面 Vue 组件。
+- `vue-shop-admin/apps/web-antd/src/views/dashboard/telegram-accounts/index.vue`：后台管理业务页面 Vue 组件。
+- `vue-shop-admin/apps/web-antd/src/views/dashboard/users/balance-details.vue`：后台管理业务页面 Vue 组件。
+- `vue-shop-admin/apps/web-antd/src/views/dashboard/users/index.vue`：后台管理业务页面 Vue 组件。
+- `vue-shop-admin/apps/web-antd/src/views/dashboard/workspace/index.vue`：后台管理业务页面 Vue 组件。
+- `vue-shop-admin/apps/web-antd/tsconfig.json`：web-antd 应用配置或入口。
+- `vue-shop-admin/apps/web-antd/tsconfig.node.json`：web-antd 应用配置或入口。
+- `vue-shop-admin/apps/web-antd/vite.config.ts`：web-antd 应用配置或入口。
+## vue-shop-admin/cspell.json
+- `vue-shop-admin/cspell.json`：前端 monorepo 根配置、说明或工具配置。
+## vue-shop-admin/eslint.config.mjs
+- `vue-shop-admin/eslint.config.mjs`：前端 monorepo 根配置、说明或工具配置。
+## vue-shop-admin/internal
+- `vue-shop-admin/internal/lint-configs/commitlint-config/index.mjs`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/internal/lint-configs/commitlint-config/package.json`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/internal/lint-configs/eslint-config/package.json`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/internal/lint-configs/eslint-config/src/configs/ignores.ts`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/internal/lint-configs/eslint-config/src/configs/index.ts`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/internal/lint-configs/eslint-config/src/configs/javascript.ts`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/internal/lint-configs/eslint-config/src/configs/jsonc.ts`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/internal/lint-configs/eslint-config/src/configs/node.ts`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/internal/lint-configs/eslint-config/src/configs/perfectionist.ts`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/internal/lint-configs/eslint-config/src/configs/pnpm.ts`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/internal/lint-configs/eslint-config/src/configs/typescript.ts`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/internal/lint-configs/eslint-config/src/configs/unicorn.ts`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/internal/lint-configs/eslint-config/src/configs/vue.ts`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/internal/lint-configs/eslint-config/src/configs/yaml.ts`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/internal/lint-configs/eslint-config/src/custom-config.ts`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/internal/lint-configs/eslint-config/src/index.ts`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/internal/lint-configs/eslint-config/src/util.ts`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/internal/lint-configs/eslint-config/tsconfig.json`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/internal/lint-configs/eslint-config/tsdown.config.ts`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/internal/lint-configs/oxfmt-config/package.json`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/internal/lint-configs/oxfmt-config/src/index.ts`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/internal/lint-configs/oxfmt-config/tsconfig.json`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/internal/lint-configs/oxfmt-config/tsdown.config.ts`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/internal/lint-configs/oxlint-config/package.json`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/internal/lint-configs/oxlint-config/src/configs/command.ts`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/internal/lint-configs/oxlint-config/src/configs/comments.ts`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/internal/lint-configs/oxlint-config/src/configs/ignores.ts`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/internal/lint-configs/oxlint-config/src/configs/import.ts`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/internal/lint-configs/oxlint-config/src/configs/index.ts`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/internal/lint-configs/oxlint-config/src/configs/javascript.ts`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/internal/lint-configs/oxlint-config/src/configs/node.ts`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/internal/lint-configs/oxlint-config/src/configs/overrides.ts`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/internal/lint-configs/oxlint-config/src/configs/plugins.ts`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/internal/lint-configs/oxlint-config/src/configs/tailwindcss.ts`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/internal/lint-configs/oxlint-config/src/configs/test.ts`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/internal/lint-configs/oxlint-config/src/configs/typescript.ts`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/internal/lint-configs/oxlint-config/src/configs/unicorn.ts`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/internal/lint-configs/oxlint-config/src/configs/vue.ts`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/internal/lint-configs/oxlint-config/src/index.ts`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/internal/lint-configs/oxlint-config/tsconfig.json`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/internal/lint-configs/oxlint-config/tsdown.config.ts`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/internal/lint-configs/stylelint-config/index.mjs`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/internal/lint-configs/stylelint-config/package.json`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/internal/node-utils/package.json`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/internal/node-utils/scripts/build.mjs`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/internal/node-utils/src/__tests__/hash.test.ts`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/internal/node-utils/src/__tests__/path.test.ts`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/internal/node-utils/src/constants.ts`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/internal/node-utils/src/date.ts`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/internal/node-utils/src/formatter.ts`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/internal/node-utils/src/fs.ts`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/internal/node-utils/src/git.ts`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/internal/node-utils/src/hash.ts`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/internal/node-utils/src/index.ts`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/internal/node-utils/src/monorepo.ts`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/internal/node-utils/src/path.ts`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/internal/node-utils/src/spinner.ts`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/internal/node-utils/tsconfig.build.json`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/internal/node-utils/tsconfig.json`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/internal/node-utils/tsdown.config.ts`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/internal/tailwind-config/package.json`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/internal/tailwind-config/src/index.ts`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/internal/tailwind-config/src/theme.css`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/internal/tailwind-config/tsconfig.json`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/internal/tsconfig/base.json`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/internal/tsconfig/library.json`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/internal/tsconfig/node.json`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/internal/tsconfig/package.json`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/internal/tsconfig/web-app.json`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/internal/tsconfig/web.json`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/internal/vite-config/package.json`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/internal/vite-config/src/config/application.ts`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/internal/vite-config/src/config/common.ts`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/internal/vite-config/src/config/index.ts`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/internal/vite-config/src/config/library.ts`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/internal/vite-config/src/index.ts`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/internal/vite-config/src/options.ts`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/internal/vite-config/src/plugins/archiver.ts`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/internal/vite-config/src/plugins/extra-app-config.ts`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/internal/vite-config/src/plugins/html.ts`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/internal/vite-config/src/plugins/importmap.ts`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/internal/vite-config/src/plugins/index.ts`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/internal/vite-config/src/plugins/inject-app-loading/README.md`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/internal/vite-config/src/plugins/inject-app-loading/default-loading-antd.html`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/internal/vite-config/src/plugins/inject-app-loading/default-loading.html`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/internal/vite-config/src/plugins/inject-app-loading/index.ts`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/internal/vite-config/src/plugins/inject-metadata.ts`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/internal/vite-config/src/plugins/license.ts`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/internal/vite-config/src/plugins/nitro-mock.ts`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/internal/vite-config/src/plugins/print.ts`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/internal/vite-config/src/plugins/tailwind-reference.ts`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/internal/vite-config/src/plugins/vxe-table.ts`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/internal/vite-config/src/typing.ts`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/internal/vite-config/src/utils/env.ts`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/internal/vite-config/tsconfig.json`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/internal/vite-config/tsdown.config.ts`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+## vue-shop-admin/lefthook.yml
+- `vue-shop-admin/lefthook.yml`：前端 monorepo 根配置、说明或工具配置。
+## vue-shop-admin/oxfmt.config.ts
+- `vue-shop-admin/oxfmt.config.ts`：前端 monorepo 根配置、说明或工具配置。
+## vue-shop-admin/oxlint.config.ts
+- `vue-shop-admin/oxlint.config.ts`：前端 monorepo 根配置、说明或工具配置。
+## vue-shop-admin/package.json
+- `vue-shop-admin/package.json`：前端 monorepo 根配置、说明或工具配置。
+## vue-shop-admin/packages
+- `vue-shop-admin/packages/@core/README.md`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/@core/base/README.md`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/@core/base/design/package.json`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/@core/base/design/src/css/global.css`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/@core/base/design/src/css/nprogress.css`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/@core/base/design/src/css/transition.css`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/@core/base/design/src/css/ui.css`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/@core/base/design/src/design-tokens/dark.css`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/@core/base/design/src/design-tokens/default.css`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/@core/base/design/src/design-tokens/index.ts`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/@core/base/design/src/index.ts`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/@core/base/design/src/scss-bem/bem.scss`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/@core/base/design/src/scss-bem/constants.scss`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/@core/base/design/tsconfig.json`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/@core/base/design/vite.config.ts`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/@core/base/icons/package.json`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/@core/base/icons/src/create-icon.ts`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/@core/base/icons/src/index.ts`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/@core/base/icons/src/lucide.ts`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/@core/base/icons/tsconfig.json`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/@core/base/icons/tsdown.config.ts`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/@core/base/shared/package.json`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/@core/base/shared/src/cache/__tests__/storage-manager.test.ts`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/@core/base/shared/src/cache/index.ts`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/@core/base/shared/src/cache/storage-manager.ts`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/@core/base/shared/src/cache/types.ts`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/@core/base/shared/src/color/__tests__/convert.test.ts`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/@core/base/shared/src/color/color.ts`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/@core/base/shared/src/color/convert.ts`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/@core/base/shared/src/color/generator.ts`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/@core/base/shared/src/color/index.ts`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/@core/base/shared/src/constants/globals.ts`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/@core/base/shared/src/constants/index.ts`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/@core/base/shared/src/constants/vben.ts`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/@core/base/shared/src/global-state.ts`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/@core/base/shared/src/store.ts`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/@core/base/shared/src/utils/__tests__/date.test.ts`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/@core/base/shared/src/utils/__tests__/diff.test.ts`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/@core/base/shared/src/utils/__tests__/dom.test.ts`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/@core/base/shared/src/utils/__tests__/inference.test.ts`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/@core/base/shared/src/utils/__tests__/letter.test.ts`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/@core/base/shared/src/utils/__tests__/resources.test.ts`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/@core/base/shared/src/utils/__tests__/stack.test.ts`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/@core/base/shared/src/utils/__tests__/state-handler.test.ts`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/@core/base/shared/src/utils/__tests__/tree.test.ts`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/@core/base/shared/src/utils/__tests__/unique.test.ts`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/@core/base/shared/src/utils/__tests__/update-css-variables.test.ts`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/@core/base/shared/src/utils/__tests__/util.test.ts`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/@core/base/shared/src/utils/__tests__/window.test.ts`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/@core/base/shared/src/utils/cn.ts`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/@core/base/shared/src/utils/date.ts`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/@core/base/shared/src/utils/diff.ts`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/@core/base/shared/src/utils/dom.ts`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/@core/base/shared/src/utils/download.ts`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/@core/base/shared/src/utils/index.ts`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/@core/base/shared/src/utils/inference.ts`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/@core/base/shared/src/utils/letter.ts`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/@core/base/shared/src/utils/merge.ts`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/@core/base/shared/src/utils/nprogress.ts`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/@core/base/shared/src/utils/resources.ts`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/@core/base/shared/src/utils/stack.ts`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/@core/base/shared/src/utils/state-handler.ts`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/@core/base/shared/src/utils/to.ts`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/@core/base/shared/src/utils/tree.ts`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/@core/base/shared/src/utils/unique.ts`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/@core/base/shared/src/utils/update-css-variables.ts`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/@core/base/shared/src/utils/util.ts`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/@core/base/shared/src/utils/window.ts`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/@core/base/shared/tsconfig.json`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/@core/base/shared/tsdown.config.ts`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/@core/base/typings/package.json`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/@core/base/typings/src/app.d.ts`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/@core/base/typings/src/basic.d.ts`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/@core/base/typings/src/helper.d.ts`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/@core/base/typings/src/index.ts`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/@core/base/typings/src/menu-record.ts`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/@core/base/typings/src/tabs.ts`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/@core/base/typings/src/vue-router.d.ts`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/@core/base/typings/tsconfig.json`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/@core/base/typings/tsdown.config.ts`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/@core/base/typings/vue-router.d.ts`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/@core/composables/package.json`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/@core/composables/src/__tests__/use-sortable.test.ts`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/@core/composables/src/index.ts`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/@core/composables/src/use-is-mobile.ts`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/@core/composables/src/use-layout-style.ts`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/@core/composables/src/use-namespace.ts`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/@core/composables/src/use-priority-value.ts`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/@core/composables/src/use-scroll-lock.ts`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/@core/composables/src/use-simple-locale/README.md`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/@core/composables/src/use-simple-locale/index.ts`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/@core/composables/src/use-simple-locale/messages.ts`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/@core/composables/src/use-sortable.ts`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/@core/composables/tsconfig.json`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/@core/composables/tsdown.config.ts`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/@core/preferences/__tests__/__snapshots__/config.test.ts.snap`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/@core/preferences/__tests__/config.test.ts`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/@core/preferences/__tests__/preferences.test.ts`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/@core/preferences/package.json`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/@core/preferences/src/config.ts`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/@core/preferences/src/constants.ts`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/@core/preferences/src/index.ts`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/@core/preferences/src/preferences.ts`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/@core/preferences/src/types.ts`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/@core/preferences/src/update-css-variables.ts`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/@core/preferences/src/use-preferences.ts`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/@core/preferences/tsconfig.json`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/@core/preferences/tsdown.config.ts`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/@core/ui-kit/README.md`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/@core/ui-kit/form-ui/__tests__/form-api.test.ts`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/@core/ui-kit/form-ui/package.json`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/@core/ui-kit/form-ui/src/components/form-actions.vue`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/@core/ui-kit/form-ui/src/config.ts`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/@core/ui-kit/form-ui/src/field-name.ts`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/@core/ui-kit/form-ui/src/form-api.ts`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/@core/ui-kit/form-ui/src/form-render/context.ts`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/@core/ui-kit/form-ui/src/form-render/dependencies.ts`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/@core/ui-kit/form-ui/src/form-render/expandable.ts`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/@core/ui-kit/form-ui/src/form-render/form-field.vue`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/@core/ui-kit/form-ui/src/form-render/form-label.vue`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/@core/ui-kit/form-ui/src/form-render/form.vue`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/@core/ui-kit/form-ui/src/form-render/helper.ts`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/@core/ui-kit/form-ui/src/form-render/index.ts`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/@core/ui-kit/form-ui/src/index.ts`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/@core/ui-kit/form-ui/src/types.ts`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/@core/ui-kit/form-ui/src/use-form-context.ts`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/@core/ui-kit/form-ui/src/use-vben-form.ts`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/@core/ui-kit/form-ui/src/vben-form.vue`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/@core/ui-kit/form-ui/src/vben-use-form.vue`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/@core/ui-kit/form-ui/tsconfig.json`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/@core/ui-kit/form-ui/tsdown.config.ts`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/@core/ui-kit/layout-ui/package.json`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/@core/ui-kit/layout-ui/src/components/index.ts`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/@core/ui-kit/layout-ui/src/components/layout-content.vue`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/@core/ui-kit/layout-ui/src/components/layout-footer.vue`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/@core/ui-kit/layout-ui/src/components/layout-header.vue`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/@core/ui-kit/layout-ui/src/components/layout-sidebar.vue`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/@core/ui-kit/layout-ui/src/components/layout-tabbar.vue`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/@core/ui-kit/layout-ui/src/components/widgets/index.ts`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/@core/ui-kit/layout-ui/src/components/widgets/sidebar-collapse-button.vue`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/@core/ui-kit/layout-ui/src/components/widgets/sidebar-fixed-button.vue`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/@core/ui-kit/layout-ui/src/hooks/use-layout.ts`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/@core/ui-kit/layout-ui/src/hooks/use-sidebar-drag.ts`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/@core/ui-kit/layout-ui/src/index.ts`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/@core/ui-kit/layout-ui/src/vben-layout.ts`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/@core/ui-kit/layout-ui/src/vben-layout.vue`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/@core/ui-kit/layout-ui/tsconfig.json`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/@core/ui-kit/layout-ui/tsdown.config.ts`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/@core/ui-kit/menu-ui/README.md`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/@core/ui-kit/menu-ui/package.json`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/@core/ui-kit/menu-ui/src/components/collapse-transition.vue`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/@core/ui-kit/menu-ui/src/components/index.ts`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/@core/ui-kit/menu-ui/src/components/menu-badge-dot.vue`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/@core/ui-kit/menu-ui/src/components/menu-badge.vue`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/@core/ui-kit/menu-ui/src/components/menu-item.vue`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/@core/ui-kit/menu-ui/src/components/menu.vue`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/@core/ui-kit/menu-ui/src/components/normal-menu/index.ts`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/@core/ui-kit/menu-ui/src/components/normal-menu/normal-menu.ts`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/@core/ui-kit/menu-ui/src/components/normal-menu/normal-menu.vue`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/@core/ui-kit/menu-ui/src/components/sub-menu-content.vue`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/@core/ui-kit/menu-ui/src/components/sub-menu.vue`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/@core/ui-kit/menu-ui/src/hooks/index.ts`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/@core/ui-kit/menu-ui/src/hooks/use-menu-context.ts`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/@core/ui-kit/menu-ui/src/hooks/use-menu-scroll.ts`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/@core/ui-kit/menu-ui/src/hooks/use-menu.ts`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/@core/ui-kit/menu-ui/src/index.ts`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/@core/ui-kit/menu-ui/src/menu.vue`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/@core/ui-kit/menu-ui/src/sub-menu.vue`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/@core/ui-kit/menu-ui/src/types.ts`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/@core/ui-kit/menu-ui/src/utils/index.ts`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/@core/ui-kit/menu-ui/tsconfig.json`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/@core/ui-kit/menu-ui/tsdown.config.ts`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/@core/ui-kit/popup-ui/package.json`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/@core/ui-kit/popup-ui/src/alert/AlertBuilder.ts`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/@core/ui-kit/popup-ui/src/alert/alert.ts`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/@core/ui-kit/popup-ui/src/alert/alert.vue`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/@core/ui-kit/popup-ui/src/alert/index.ts`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/@core/ui-kit/popup-ui/src/drawer/__tests__/drawer-api.test.ts`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/@core/ui-kit/popup-ui/src/drawer/drawer-api.ts`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/@core/ui-kit/popup-ui/src/drawer/drawer.ts`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/@core/ui-kit/popup-ui/src/drawer/drawer.vue`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/@core/ui-kit/popup-ui/src/drawer/index.ts`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/@core/ui-kit/popup-ui/src/drawer/use-drawer.ts`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/@core/ui-kit/popup-ui/src/index.ts`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/@core/ui-kit/popup-ui/src/modal/__tests__/modal-api.test.ts`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/@core/ui-kit/popup-ui/src/modal/index.ts`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/@core/ui-kit/popup-ui/src/modal/modal-api.ts`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/@core/ui-kit/popup-ui/src/modal/modal.ts`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/@core/ui-kit/popup-ui/src/modal/modal.vue`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/@core/ui-kit/popup-ui/src/modal/use-modal-draggable.ts`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/@core/ui-kit/popup-ui/src/modal/use-modal.ts`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/@core/ui-kit/popup-ui/tsconfig.json`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/@core/ui-kit/popup-ui/tsdown.config.ts`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/@core/ui-kit/shadcn-ui/components.json`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/@core/ui-kit/shadcn-ui/package.json`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/@core/ui-kit/shadcn-ui/src/assets/index.css`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/@core/ui-kit/shadcn-ui/src/components/avatar/avatar.vue`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/@core/ui-kit/shadcn-ui/src/components/avatar/index.ts`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/@core/ui-kit/shadcn-ui/src/components/back-top/back-top.vue`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/@core/ui-kit/shadcn-ui/src/components/back-top/backtop.ts`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/@core/ui-kit/shadcn-ui/src/components/back-top/index.ts`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/@core/ui-kit/shadcn-ui/src/components/back-top/use-backtop.ts`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/@core/ui-kit/shadcn-ui/src/components/breadcrumb/breadcrumb-background.vue`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/@core/ui-kit/shadcn-ui/src/components/breadcrumb/breadcrumb-view.vue`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/@core/ui-kit/shadcn-ui/src/components/breadcrumb/breadcrumb.vue`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/@core/ui-kit/shadcn-ui/src/components/breadcrumb/index.ts`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/@core/ui-kit/shadcn-ui/src/components/breadcrumb/types.ts`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/@core/ui-kit/shadcn-ui/src/components/button/button-group.vue`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/@core/ui-kit/shadcn-ui/src/components/button/button.ts`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/@core/ui-kit/shadcn-ui/src/components/button/button.vue`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/@core/ui-kit/shadcn-ui/src/components/button/check-button-group.vue`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/@core/ui-kit/shadcn-ui/src/components/button/icon-button.vue`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/@core/ui-kit/shadcn-ui/src/components/button/index.ts`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/@core/ui-kit/shadcn-ui/src/components/checkbox/checkbox.vue`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/@core/ui-kit/shadcn-ui/src/components/checkbox/index.ts`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/@core/ui-kit/shadcn-ui/src/components/context-menu/context-menu.vue`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/@core/ui-kit/shadcn-ui/src/components/context-menu/index.ts`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/@core/ui-kit/shadcn-ui/src/components/context-menu/interface.ts`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/@core/ui-kit/shadcn-ui/src/components/count-to-animator/count-to-animator.vue`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/@core/ui-kit/shadcn-ui/src/components/count-to-animator/index.ts`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/@core/ui-kit/shadcn-ui/src/components/dropdown-menu/dropdown-menu.vue`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/@core/ui-kit/shadcn-ui/src/components/dropdown-menu/dropdown-radio-menu.vue`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/@core/ui-kit/shadcn-ui/src/components/dropdown-menu/index.ts`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/@core/ui-kit/shadcn-ui/src/components/dropdown-menu/interface.ts`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/@core/ui-kit/shadcn-ui/src/components/expandable-arrow/expandable-arrow.vue`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/@core/ui-kit/shadcn-ui/src/components/expandable-arrow/index.ts`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/@core/ui-kit/shadcn-ui/src/components/full-screen/full-screen.vue`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/@core/ui-kit/shadcn-ui/src/components/full-screen/index.ts`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/@core/ui-kit/shadcn-ui/src/components/hover-card/hover-card.vue`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/@core/ui-kit/shadcn-ui/src/components/hover-card/index.ts`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/@core/ui-kit/shadcn-ui/src/components/icon/icon.vue`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/@core/ui-kit/shadcn-ui/src/components/icon/index.ts`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/@core/ui-kit/shadcn-ui/src/components/index.ts`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/@core/ui-kit/shadcn-ui/src/components/input-password/index.ts`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/@core/ui-kit/shadcn-ui/src/components/input-password/input-password.vue`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/@core/ui-kit/shadcn-ui/src/components/input-password/password-strength.vue`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/@core/ui-kit/shadcn-ui/src/components/logo/index.ts`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/@core/ui-kit/shadcn-ui/src/components/logo/logo.vue`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/@core/ui-kit/shadcn-ui/src/components/pin-input/index.ts`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/@core/ui-kit/shadcn-ui/src/components/pin-input/input.vue`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/@core/ui-kit/shadcn-ui/src/components/pin-input/types.ts`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/@core/ui-kit/shadcn-ui/src/components/popover/index.ts`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/@core/ui-kit/shadcn-ui/src/components/popover/popover.vue`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/@core/ui-kit/shadcn-ui/src/components/render-content/index.ts`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/@core/ui-kit/shadcn-ui/src/components/render-content/render-content.vue`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/@core/ui-kit/shadcn-ui/src/components/scrollbar/index.ts`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/@core/ui-kit/shadcn-ui/src/components/scrollbar/scrollbar.vue`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/@core/ui-kit/shadcn-ui/src/components/segmented/index.ts`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/@core/ui-kit/shadcn-ui/src/components/segmented/segmented.vue`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/@core/ui-kit/shadcn-ui/src/components/segmented/tabs-indicator.vue`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/@core/ui-kit/shadcn-ui/src/components/segmented/types.ts`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/@core/ui-kit/shadcn-ui/src/components/select/index.ts`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/@core/ui-kit/shadcn-ui/src/components/select/select.vue`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/@core/ui-kit/shadcn-ui/src/components/spine-text/index.ts`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/@core/ui-kit/shadcn-ui/src/components/spine-text/spine-text.vue`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/@core/ui-kit/shadcn-ui/src/components/spinner/index.ts`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/@core/ui-kit/shadcn-ui/src/components/spinner/loading.vue`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/@core/ui-kit/shadcn-ui/src/components/spinner/spinner.vue`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/@core/ui-kit/shadcn-ui/src/components/tooltip/help-tooltip.vue`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/@core/ui-kit/shadcn-ui/src/components/tooltip/index.ts`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/@core/ui-kit/shadcn-ui/src/components/tooltip/tooltip.vue`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/@core/ui-kit/shadcn-ui/src/index.ts`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/@core/ui-kit/shadcn-ui/src/ui/accordion/Accordion.vue`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/@core/ui-kit/shadcn-ui/src/ui/accordion/AccordionContent.vue`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/@core/ui-kit/shadcn-ui/src/ui/accordion/AccordionItem.vue`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/@core/ui-kit/shadcn-ui/src/ui/accordion/AccordionTrigger.vue`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/@core/ui-kit/shadcn-ui/src/ui/accordion/index.ts`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/@core/ui-kit/shadcn-ui/src/ui/alert-dialog/AlertDialog.vue`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/@core/ui-kit/shadcn-ui/src/ui/alert-dialog/AlertDialogAction.vue`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/@core/ui-kit/shadcn-ui/src/ui/alert-dialog/AlertDialogCancel.vue`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/@core/ui-kit/shadcn-ui/src/ui/alert-dialog/AlertDialogContent.vue`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/@core/ui-kit/shadcn-ui/src/ui/alert-dialog/AlertDialogDescription.vue`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/@core/ui-kit/shadcn-ui/src/ui/alert-dialog/AlertDialogOverlay.vue`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/@core/ui-kit/shadcn-ui/src/ui/alert-dialog/AlertDialogTitle.vue`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/@core/ui-kit/shadcn-ui/src/ui/alert-dialog/index.ts`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/@core/ui-kit/shadcn-ui/src/ui/avatar/Avatar.vue`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/@core/ui-kit/shadcn-ui/src/ui/avatar/AvatarFallback.vue`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/@core/ui-kit/shadcn-ui/src/ui/avatar/AvatarImage.vue`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/@core/ui-kit/shadcn-ui/src/ui/avatar/avatar.ts`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/@core/ui-kit/shadcn-ui/src/ui/avatar/index.ts`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/@core/ui-kit/shadcn-ui/src/ui/badge/Badge.vue`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/@core/ui-kit/shadcn-ui/src/ui/badge/badge.ts`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/@core/ui-kit/shadcn-ui/src/ui/badge/index.ts`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/@core/ui-kit/shadcn-ui/src/ui/breadcrumb/Breadcrumb.vue`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/@core/ui-kit/shadcn-ui/src/ui/breadcrumb/BreadcrumbEllipsis.vue`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/@core/ui-kit/shadcn-ui/src/ui/breadcrumb/BreadcrumbItem.vue`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/@core/ui-kit/shadcn-ui/src/ui/breadcrumb/BreadcrumbLink.vue`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/@core/ui-kit/shadcn-ui/src/ui/breadcrumb/BreadcrumbList.vue`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/@core/ui-kit/shadcn-ui/src/ui/breadcrumb/BreadcrumbPage.vue`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/@core/ui-kit/shadcn-ui/src/ui/breadcrumb/BreadcrumbSeparator.vue`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/@core/ui-kit/shadcn-ui/src/ui/breadcrumb/index.ts`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/@core/ui-kit/shadcn-ui/src/ui/button/Button.vue`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/@core/ui-kit/shadcn-ui/src/ui/button/button.ts`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/@core/ui-kit/shadcn-ui/src/ui/button/index.ts`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/@core/ui-kit/shadcn-ui/src/ui/button/types.ts`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/@core/ui-kit/shadcn-ui/src/ui/card/Card.vue`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/@core/ui-kit/shadcn-ui/src/ui/card/CardContent.vue`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/@core/ui-kit/shadcn-ui/src/ui/card/CardDescription.vue`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/@core/ui-kit/shadcn-ui/src/ui/card/CardFooter.vue`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/@core/ui-kit/shadcn-ui/src/ui/card/CardHeader.vue`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/@core/ui-kit/shadcn-ui/src/ui/card/CardTitle.vue`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/@core/ui-kit/shadcn-ui/src/ui/card/index.ts`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/@core/ui-kit/shadcn-ui/src/ui/checkbox/Checkbox.vue`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/@core/ui-kit/shadcn-ui/src/ui/checkbox/index.ts`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/@core/ui-kit/shadcn-ui/src/ui/context-menu/ContextMenu.vue`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/@core/ui-kit/shadcn-ui/src/ui/context-menu/ContextMenuCheckboxItem.vue`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/@core/ui-kit/shadcn-ui/src/ui/context-menu/ContextMenuContent.vue`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/@core/ui-kit/shadcn-ui/src/ui/context-menu/ContextMenuGroup.vue`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/@core/ui-kit/shadcn-ui/src/ui/context-menu/ContextMenuItem.vue`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/@core/ui-kit/shadcn-ui/src/ui/context-menu/ContextMenuLabel.vue`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/@core/ui-kit/shadcn-ui/src/ui/context-menu/ContextMenuPortal.vue`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/@core/ui-kit/shadcn-ui/src/ui/context-menu/ContextMenuRadioGroup.vue`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/@core/ui-kit/shadcn-ui/src/ui/context-menu/ContextMenuRadioItem.vue`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/@core/ui-kit/shadcn-ui/src/ui/context-menu/ContextMenuSeparator.vue`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/@core/ui-kit/shadcn-ui/src/ui/context-menu/ContextMenuShortcut.vue`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/@core/ui-kit/shadcn-ui/src/ui/context-menu/ContextMenuSub.vue`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/@core/ui-kit/shadcn-ui/src/ui/context-menu/ContextMenuSubContent.vue`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/@core/ui-kit/shadcn-ui/src/ui/context-menu/ContextMenuSubTrigger.vue`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/@core/ui-kit/shadcn-ui/src/ui/context-menu/ContextMenuTrigger.vue`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/@core/ui-kit/shadcn-ui/src/ui/context-menu/index.ts`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/@core/ui-kit/shadcn-ui/src/ui/dialog/Dialog.vue`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/@core/ui-kit/shadcn-ui/src/ui/dialog/DialogClose.vue`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/@core/ui-kit/shadcn-ui/src/ui/dialog/DialogContent.vue`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/@core/ui-kit/shadcn-ui/src/ui/dialog/DialogDescription.vue`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/@core/ui-kit/shadcn-ui/src/ui/dialog/DialogFooter.vue`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/@core/ui-kit/shadcn-ui/src/ui/dialog/DialogHeader.vue`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/@core/ui-kit/shadcn-ui/src/ui/dialog/DialogOverlay.vue`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/@core/ui-kit/shadcn-ui/src/ui/dialog/DialogScrollContent.vue`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/@core/ui-kit/shadcn-ui/src/ui/dialog/DialogTitle.vue`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/@core/ui-kit/shadcn-ui/src/ui/dialog/DialogTrigger.vue`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/@core/ui-kit/shadcn-ui/src/ui/dialog/index.ts`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/@core/ui-kit/shadcn-ui/src/ui/dropdown-menu/DropdownMenu.vue`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/@core/ui-kit/shadcn-ui/src/ui/dropdown-menu/DropdownMenuCheckboxItem.vue`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/@core/ui-kit/shadcn-ui/src/ui/dropdown-menu/DropdownMenuContent.vue`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/@core/ui-kit/shadcn-ui/src/ui/dropdown-menu/DropdownMenuGroup.vue`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/@core/ui-kit/shadcn-ui/src/ui/dropdown-menu/DropdownMenuItem.vue`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/@core/ui-kit/shadcn-ui/src/ui/dropdown-menu/DropdownMenuLabel.vue`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/@core/ui-kit/shadcn-ui/src/ui/dropdown-menu/DropdownMenuRadioGroup.vue`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/@core/ui-kit/shadcn-ui/src/ui/dropdown-menu/DropdownMenuRadioItem.vue`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/@core/ui-kit/shadcn-ui/src/ui/dropdown-menu/DropdownMenuSeparator.vue`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/@core/ui-kit/shadcn-ui/src/ui/dropdown-menu/DropdownMenuShortcut.vue`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/@core/ui-kit/shadcn-ui/src/ui/dropdown-menu/DropdownMenuSub.vue`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/@core/ui-kit/shadcn-ui/src/ui/dropdown-menu/DropdownMenuSubContent.vue`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/@core/ui-kit/shadcn-ui/src/ui/dropdown-menu/DropdownMenuSubTrigger.vue`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/@core/ui-kit/shadcn-ui/src/ui/dropdown-menu/DropdownMenuTrigger.vue`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/@core/ui-kit/shadcn-ui/src/ui/dropdown-menu/index.ts`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/@core/ui-kit/shadcn-ui/src/ui/form/FormControl.vue`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/@core/ui-kit/shadcn-ui/src/ui/form/FormDescription.vue`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/@core/ui-kit/shadcn-ui/src/ui/form/FormItem.vue`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/@core/ui-kit/shadcn-ui/src/ui/form/FormLabel.vue`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/@core/ui-kit/shadcn-ui/src/ui/form/FormMessage.vue`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/@core/ui-kit/shadcn-ui/src/ui/form/index.ts`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/@core/ui-kit/shadcn-ui/src/ui/form/injectionKeys.ts`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/@core/ui-kit/shadcn-ui/src/ui/form/useFormField.ts`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/@core/ui-kit/shadcn-ui/src/ui/hover-card/HoverCard.vue`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/@core/ui-kit/shadcn-ui/src/ui/hover-card/HoverCardContent.vue`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/@core/ui-kit/shadcn-ui/src/ui/hover-card/HoverCardTrigger.vue`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/@core/ui-kit/shadcn-ui/src/ui/hover-card/index.ts`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/@core/ui-kit/shadcn-ui/src/ui/index.ts`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/@core/ui-kit/shadcn-ui/src/ui/input/Input.vue`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/@core/ui-kit/shadcn-ui/src/ui/input/index.ts`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/@core/ui-kit/shadcn-ui/src/ui/label/Label.vue`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/@core/ui-kit/shadcn-ui/src/ui/label/index.ts`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/@core/ui-kit/shadcn-ui/src/ui/number-field/NumberField.vue`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/@core/ui-kit/shadcn-ui/src/ui/number-field/NumberFieldContent.vue`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/@core/ui-kit/shadcn-ui/src/ui/number-field/NumberFieldDecrement.vue`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/@core/ui-kit/shadcn-ui/src/ui/number-field/NumberFieldIncrement.vue`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/@core/ui-kit/shadcn-ui/src/ui/number-field/NumberFieldInput.vue`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/@core/ui-kit/shadcn-ui/src/ui/number-field/index.ts`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/@core/ui-kit/shadcn-ui/src/ui/pagination/PaginationEllipsis.vue`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/@core/ui-kit/shadcn-ui/src/ui/pagination/PaginationFirst.vue`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/@core/ui-kit/shadcn-ui/src/ui/pagination/PaginationLast.vue`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/@core/ui-kit/shadcn-ui/src/ui/pagination/PaginationNext.vue`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/@core/ui-kit/shadcn-ui/src/ui/pagination/PaginationPrev.vue`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/@core/ui-kit/shadcn-ui/src/ui/pagination/index.ts`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/@core/ui-kit/shadcn-ui/src/ui/pin-input/PinInput.vue`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/@core/ui-kit/shadcn-ui/src/ui/pin-input/PinInputGroup.vue`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/@core/ui-kit/shadcn-ui/src/ui/pin-input/PinInputInput.vue`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/@core/ui-kit/shadcn-ui/src/ui/pin-input/PinInputSeparator.vue`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/@core/ui-kit/shadcn-ui/src/ui/pin-input/index.ts`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/@core/ui-kit/shadcn-ui/src/ui/popover/Popover.vue`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/@core/ui-kit/shadcn-ui/src/ui/popover/PopoverContent.vue`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/@core/ui-kit/shadcn-ui/src/ui/popover/PopoverTrigger.vue`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/@core/ui-kit/shadcn-ui/src/ui/popover/index.ts`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/@core/ui-kit/shadcn-ui/src/ui/radio-group/RadioGroup.vue`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/@core/ui-kit/shadcn-ui/src/ui/radio-group/RadioGroupItem.vue`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/@core/ui-kit/shadcn-ui/src/ui/radio-group/index.ts`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/@core/ui-kit/shadcn-ui/src/ui/resizable/ResizableHandle.vue`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/@core/ui-kit/shadcn-ui/src/ui/resizable/ResizablePanelGroup.vue`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/@core/ui-kit/shadcn-ui/src/ui/resizable/index.ts`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/@core/ui-kit/shadcn-ui/src/ui/scroll-area/ScrollArea.vue`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/@core/ui-kit/shadcn-ui/src/ui/scroll-area/ScrollBar.vue`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/@core/ui-kit/shadcn-ui/src/ui/scroll-area/index.ts`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/@core/ui-kit/shadcn-ui/src/ui/select/Select.vue`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/@core/ui-kit/shadcn-ui/src/ui/select/SelectContent.vue`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/@core/ui-kit/shadcn-ui/src/ui/select/SelectGroup.vue`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/@core/ui-kit/shadcn-ui/src/ui/select/SelectItem.vue`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/@core/ui-kit/shadcn-ui/src/ui/select/SelectItemText.vue`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/@core/ui-kit/shadcn-ui/src/ui/select/SelectLabel.vue`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/@core/ui-kit/shadcn-ui/src/ui/select/SelectScrollDownButton.vue`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/@core/ui-kit/shadcn-ui/src/ui/select/SelectScrollUpButton.vue`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/@core/ui-kit/shadcn-ui/src/ui/select/SelectSeparator.vue`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/@core/ui-kit/shadcn-ui/src/ui/select/SelectTrigger.vue`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/@core/ui-kit/shadcn-ui/src/ui/select/SelectValue.vue`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/@core/ui-kit/shadcn-ui/src/ui/select/index.ts`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/@core/ui-kit/shadcn-ui/src/ui/separator/Separator.vue`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/@core/ui-kit/shadcn-ui/src/ui/separator/index.ts`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/@core/ui-kit/shadcn-ui/src/ui/sheet/Sheet.vue`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/@core/ui-kit/shadcn-ui/src/ui/sheet/SheetClose.vue`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/@core/ui-kit/shadcn-ui/src/ui/sheet/SheetContent.vue`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/@core/ui-kit/shadcn-ui/src/ui/sheet/SheetDescription.vue`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/@core/ui-kit/shadcn-ui/src/ui/sheet/SheetFooter.vue`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/@core/ui-kit/shadcn-ui/src/ui/sheet/SheetHeader.vue`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/@core/ui-kit/shadcn-ui/src/ui/sheet/SheetOverlay.vue`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/@core/ui-kit/shadcn-ui/src/ui/sheet/SheetTitle.vue`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/@core/ui-kit/shadcn-ui/src/ui/sheet/SheetTrigger.vue`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/@core/ui-kit/shadcn-ui/src/ui/sheet/index.ts`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/@core/ui-kit/shadcn-ui/src/ui/sheet/sheet.ts`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/@core/ui-kit/shadcn-ui/src/ui/switch/Switch.vue`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/@core/ui-kit/shadcn-ui/src/ui/switch/index.ts`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/@core/ui-kit/shadcn-ui/src/ui/tabs/Tabs.vue`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/@core/ui-kit/shadcn-ui/src/ui/tabs/TabsContent.vue`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/@core/ui-kit/shadcn-ui/src/ui/tabs/TabsList.vue`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/@core/ui-kit/shadcn-ui/src/ui/tabs/TabsTrigger.vue`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/@core/ui-kit/shadcn-ui/src/ui/tabs/index.ts`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/@core/ui-kit/shadcn-ui/src/ui/textarea/Textarea.vue`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/@core/ui-kit/shadcn-ui/src/ui/textarea/index.ts`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/@core/ui-kit/shadcn-ui/src/ui/toggle-group/ToggleGroup.vue`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/@core/ui-kit/shadcn-ui/src/ui/toggle-group/ToggleGroupItem.vue`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/@core/ui-kit/shadcn-ui/src/ui/toggle-group/index.ts`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/@core/ui-kit/shadcn-ui/src/ui/toggle/Toggle.vue`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/@core/ui-kit/shadcn-ui/src/ui/toggle/index.ts`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/@core/ui-kit/shadcn-ui/src/ui/toggle/toggle.ts`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/@core/ui-kit/shadcn-ui/src/ui/tooltip/Tooltip.vue`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/@core/ui-kit/shadcn-ui/src/ui/tooltip/TooltipContent.vue`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/@core/ui-kit/shadcn-ui/src/ui/tooltip/TooltipProvider.vue`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/@core/ui-kit/shadcn-ui/src/ui/tooltip/TooltipTrigger.vue`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/@core/ui-kit/shadcn-ui/src/ui/tooltip/index.ts`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/@core/ui-kit/shadcn-ui/src/ui/tree/index.ts`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/@core/ui-kit/shadcn-ui/src/ui/tree/tree.vue`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/@core/ui-kit/shadcn-ui/src/ui/tree/types.ts`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/@core/ui-kit/shadcn-ui/tsconfig.json`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/@core/ui-kit/tabs-ui/package.json`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/@core/ui-kit/tabs-ui/src/components/index.ts`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/@core/ui-kit/tabs-ui/src/components/tabs-chrome/tabs.vue`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/@core/ui-kit/tabs-ui/src/components/tabs/tabs.vue`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/@core/ui-kit/tabs-ui/src/components/widgets/index.ts`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/@core/ui-kit/tabs-ui/src/components/widgets/tool-more.vue`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/@core/ui-kit/tabs-ui/src/components/widgets/tool-refresh.vue`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/@core/ui-kit/tabs-ui/src/components/widgets/tool-screen.vue`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/@core/ui-kit/tabs-ui/src/index.ts`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/@core/ui-kit/tabs-ui/src/tabs-view.vue`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/@core/ui-kit/tabs-ui/src/types.ts`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/@core/ui-kit/tabs-ui/src/use-tabs-drag.ts`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/@core/ui-kit/tabs-ui/src/use-tabs-view-scroll.ts`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/@core/ui-kit/tabs-ui/tsconfig.json`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/@core/ui-kit/tabs-ui/tsdown.config.ts`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/constants/README.md`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/constants/package.json`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/constants/src/core.ts`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/constants/src/index.ts`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/constants/tsconfig.json`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/effects/README.md`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/effects/access/package.json`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/effects/access/src/access-control.vue`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/effects/access/src/accessible.ts`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/effects/access/src/directive.ts`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/effects/access/src/index.ts`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/effects/access/src/use-access.ts`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/effects/access/tsconfig.json`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/effects/common-ui/package.json`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/effects/common-ui/src/components/api-component/api-component.vue`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/effects/common-ui/src/components/api-component/index.ts`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/effects/common-ui/src/components/api-component/types.ts`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/effects/common-ui/src/components/captcha/hooks/useCaptchaPoints.ts`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/effects/common-ui/src/components/captcha/index.ts`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/effects/common-ui/src/components/captcha/point-selection-captcha/index.vue`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/effects/common-ui/src/components/captcha/point-selection-captcha/point-selection-captcha-card.vue`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/effects/common-ui/src/components/captcha/slider-captcha/index.vue`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/effects/common-ui/src/components/captcha/slider-captcha/slider-captcha-action.vue`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/effects/common-ui/src/components/captcha/slider-captcha/slider-captcha-bar.vue`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/effects/common-ui/src/components/captcha/slider-captcha/slider-captcha-content.vue`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/effects/common-ui/src/components/captcha/slider-rotate-captcha/index.vue`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/effects/common-ui/src/components/captcha/slider-translate-captcha/index.vue`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/effects/common-ui/src/components/captcha/types.ts`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/effects/common-ui/src/components/col-page/col-page.vue`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/effects/common-ui/src/components/col-page/index.ts`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/effects/common-ui/src/components/col-page/types.ts`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/effects/common-ui/src/components/count-to/count-to.vue`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/effects/common-ui/src/components/count-to/index.ts`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/effects/common-ui/src/components/count-to/types.ts`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/effects/common-ui/src/components/cropper/cropper.vue`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/effects/common-ui/src/components/cropper/index.ts`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/effects/common-ui/src/components/ellipsis-text/ellipsis-text.vue`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/effects/common-ui/src/components/ellipsis-text/index.ts`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/effects/common-ui/src/components/icon-picker/icon-picker.vue`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/effects/common-ui/src/components/icon-picker/icons.ts`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/effects/common-ui/src/components/icon-picker/index.ts`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/effects/common-ui/src/components/icon-picker/types.ts`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/effects/common-ui/src/components/index.ts`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/effects/common-ui/src/components/json-viewer/index.ts`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/effects/common-ui/src/components/json-viewer/index.vue`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/effects/common-ui/src/components/json-viewer/style.scss`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/effects/common-ui/src/components/json-viewer/types.ts`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/effects/common-ui/src/components/loading/directive.ts`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/effects/common-ui/src/components/loading/index.ts`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/effects/common-ui/src/components/loading/loading.vue`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/effects/common-ui/src/components/loading/spinner.vue`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/effects/common-ui/src/components/page/__tests__/page.test.ts`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/effects/common-ui/src/components/page/index.ts`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/effects/common-ui/src/components/page/page.vue`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/effects/common-ui/src/components/page/types.ts`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/effects/common-ui/src/components/resize/index.ts`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/effects/common-ui/src/components/resize/resize.vue`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/effects/common-ui/src/components/tippy/directive.ts`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/effects/common-ui/src/components/tippy/index.ts`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/effects/common-ui/src/components/tree/index.ts`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/effects/common-ui/src/components/tree/tree.vue`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/effects/common-ui/src/index.ts`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/effects/common-ui/src/ui/about/about.ts`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/effects/common-ui/src/ui/about/about.vue`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/effects/common-ui/src/ui/about/index.ts`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/effects/common-ui/src/ui/authentication/index.ts`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/effects/common-ui/src/ui/authentication/login-expired-modal.vue`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/effects/common-ui/src/ui/authentication/types.ts`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/effects/common-ui/src/ui/dashboard/analysis/analysis-chart-card.vue`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/effects/common-ui/src/ui/dashboard/analysis/analysis-charts-tabs.vue`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/effects/common-ui/src/ui/dashboard/analysis/analysis-overview.vue`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/effects/common-ui/src/ui/dashboard/analysis/index.ts`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/effects/common-ui/src/ui/dashboard/index.ts`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/effects/common-ui/src/ui/dashboard/typing.ts`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/effects/common-ui/src/ui/dashboard/workbench/index.ts`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/effects/common-ui/src/ui/dashboard/workbench/workbench-header.vue`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/effects/common-ui/src/ui/dashboard/workbench/workbench-project.vue`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/effects/common-ui/src/ui/dashboard/workbench/workbench-quick-nav.vue`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/effects/common-ui/src/ui/dashboard/workbench/workbench-todo.vue`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/effects/common-ui/src/ui/dashboard/workbench/workbench-trends.vue`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/effects/common-ui/src/ui/fallback/fallback.ts`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/effects/common-ui/src/ui/fallback/fallback.vue`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/effects/common-ui/src/ui/fallback/icons/icon-403.vue`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/effects/common-ui/src/ui/fallback/icons/icon-404.vue`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/effects/common-ui/src/ui/fallback/icons/icon-500.vue`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/effects/common-ui/src/ui/fallback/icons/icon-coming-soon.vue`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/effects/common-ui/src/ui/fallback/icons/icon-offline.vue`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/effects/common-ui/src/ui/fallback/index.ts`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/effects/common-ui/src/ui/index.ts`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/effects/common-ui/src/ui/profile/base-setting.vue`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/effects/common-ui/src/ui/profile/index.ts`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/effects/common-ui/src/ui/profile/notification-setting.vue`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/effects/common-ui/src/ui/profile/password-setting.vue`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/effects/common-ui/src/ui/profile/profile.vue`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/effects/common-ui/src/ui/profile/security-setting.vue`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/effects/common-ui/src/ui/profile/types.ts`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/effects/common-ui/tsconfig.json`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/effects/hooks/README.md`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/effects/hooks/package.json`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/effects/hooks/src/index.ts`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/effects/hooks/src/use-app-config.ts`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/effects/hooks/src/use-content-maximize.ts`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/effects/hooks/src/use-design-tokens.ts`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/effects/hooks/src/use-hover-toggle.ts`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/effects/hooks/src/use-pagination.ts`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/effects/hooks/src/use-refresh.ts`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/effects/hooks/src/use-tabs.ts`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/effects/hooks/src/use-watermark.ts`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/effects/hooks/tsconfig.json`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/effects/layouts/package.json`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/effects/layouts/src/authentication/authentication.vue`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/effects/layouts/src/authentication/form.vue`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/effects/layouts/src/authentication/icons/slogan.vue`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/effects/layouts/src/authentication/index.ts`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/effects/layouts/src/authentication/toolbar.vue`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/effects/layouts/src/authentication/types.ts`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/effects/layouts/src/basic/README.md`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/effects/layouts/src/basic/content/content-spinner.vue`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/effects/layouts/src/basic/content/content.vue`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/effects/layouts/src/basic/content/index.ts`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/effects/layouts/src/basic/content/use-content-spinner.ts`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/effects/layouts/src/basic/copyright/copyright.vue`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/effects/layouts/src/basic/copyright/index.ts`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/effects/layouts/src/basic/footer/footer.vue`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/effects/layouts/src/basic/footer/index.ts`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/effects/layouts/src/basic/header/header.vue`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/effects/layouts/src/basic/header/index.ts`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/effects/layouts/src/basic/index.ts`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/effects/layouts/src/basic/layout.vue`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/effects/layouts/src/basic/menu/extra-menu.vue`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/effects/layouts/src/basic/menu/index.ts`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/effects/layouts/src/basic/menu/menu.vue`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/effects/layouts/src/basic/menu/mixed-menu.vue`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/effects/layouts/src/basic/menu/use-extra-menu.ts`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/effects/layouts/src/basic/menu/use-mixed-menu.ts`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/effects/layouts/src/basic/menu/use-navigation.ts`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/effects/layouts/src/basic/tabbar/index.ts`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/effects/layouts/src/basic/tabbar/tabbar.vue`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/effects/layouts/src/basic/tabbar/use-tabbar.ts`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/effects/layouts/src/hooks/index.ts`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/effects/layouts/src/iframe/iframe-router-view.vue`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/effects/layouts/src/iframe/iframe-view.vue`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/effects/layouts/src/iframe/index.ts`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/effects/layouts/src/index.ts`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/effects/layouts/src/route-cached/index.ts`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/effects/layouts/src/route-cached/route-cached-page.vue`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/effects/layouts/src/route-cached/route-cached-view.vue`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/effects/layouts/src/widgets/breadcrumb.vue`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/effects/layouts/src/widgets/check-updates/check-updates.vue`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/effects/layouts/src/widgets/check-updates/index.ts`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/effects/layouts/src/widgets/color-toggle.vue`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/effects/layouts/src/widgets/global-search/global-search.vue`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/effects/layouts/src/widgets/global-search/index.ts`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/effects/layouts/src/widgets/global-search/search-panel.vue`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/effects/layouts/src/widgets/index.ts`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/effects/layouts/src/widgets/language-toggle.vue`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/effects/layouts/src/widgets/layout-toggle.vue`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/effects/layouts/src/widgets/lock-screen/index.ts`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/effects/layouts/src/widgets/lock-screen/lock-screen-modal.vue`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/effects/layouts/src/widgets/lock-screen/lock-screen.vue`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/effects/layouts/src/widgets/notification/index.ts`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/effects/layouts/src/widgets/notification/notification.vue`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/effects/layouts/src/widgets/notification/types.ts`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/effects/layouts/src/widgets/preferences/blocks/block.vue`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/effects/layouts/src/widgets/preferences/blocks/checkbox-item.vue`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/effects/layouts/src/widgets/preferences/blocks/custom/custom.vue`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/effects/layouts/src/widgets/preferences/blocks/general/animation.vue`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/effects/layouts/src/widgets/preferences/blocks/general/general.vue`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/effects/layouts/src/widgets/preferences/blocks/index.ts`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/effects/layouts/src/widgets/preferences/blocks/input-item.vue`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/effects/layouts/src/widgets/preferences/blocks/layout/breadcrumb.vue`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/effects/layouts/src/widgets/preferences/blocks/layout/content.vue`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/effects/layouts/src/widgets/preferences/blocks/layout/copyright.vue`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/effects/layouts/src/widgets/preferences/blocks/layout/footer.vue`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/effects/layouts/src/widgets/preferences/blocks/layout/header.vue`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/effects/layouts/src/widgets/preferences/blocks/layout/layout.vue`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/effects/layouts/src/widgets/preferences/blocks/layout/navigation.vue`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/effects/layouts/src/widgets/preferences/blocks/layout/sidebar.vue`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/effects/layouts/src/widgets/preferences/blocks/layout/tabbar.vue`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/effects/layouts/src/widgets/preferences/blocks/layout/widget.vue`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/effects/layouts/src/widgets/preferences/blocks/number-field-item.vue`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/effects/layouts/src/widgets/preferences/blocks/select-item.vue`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/effects/layouts/src/widgets/preferences/blocks/shortcut-keys/global.vue`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/effects/layouts/src/widgets/preferences/blocks/switch-item.vue`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/effects/layouts/src/widgets/preferences/blocks/theme/builtin.vue`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/effects/layouts/src/widgets/preferences/blocks/theme/color-mode.vue`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/effects/layouts/src/widgets/preferences/blocks/theme/font-size.vue`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/effects/layouts/src/widgets/preferences/blocks/theme/radius.vue`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/effects/layouts/src/widgets/preferences/blocks/theme/theme.vue`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/effects/layouts/src/widgets/preferences/blocks/toggle-item.vue`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/effects/layouts/src/widgets/preferences/icons/content-compact.vue`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/effects/layouts/src/widgets/preferences/icons/full-content.vue`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/effects/layouts/src/widgets/preferences/icons/header-mixed-nav.vue`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/effects/layouts/src/widgets/preferences/icons/header-nav.vue`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/effects/layouts/src/widgets/preferences/icons/header-sidebar-nav.vue`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/effects/layouts/src/widgets/preferences/icons/index.ts`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/effects/layouts/src/widgets/preferences/icons/mixed-nav.vue`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/effects/layouts/src/widgets/preferences/icons/setting.vue`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/effects/layouts/src/widgets/preferences/icons/sidebar-mixed-nav.vue`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/effects/layouts/src/widgets/preferences/icons/sidebar-nav.vue`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/effects/layouts/src/widgets/preferences/index.ts`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/effects/layouts/src/widgets/preferences/preferences-button.vue`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/effects/layouts/src/widgets/preferences/preferences-drawer.vue`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/effects/layouts/src/widgets/preferences/preferences.vue`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/effects/layouts/src/widgets/preferences/use-open-preferences.ts`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/effects/layouts/src/widgets/theme-toggle/index.ts`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/effects/layouts/src/widgets/theme-toggle/theme-button.vue`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/effects/layouts/src/widgets/theme-toggle/theme-toggle.vue`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/effects/layouts/src/widgets/timezone/index.ts`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/effects/layouts/src/widgets/timezone/timezone-button.vue`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/effects/layouts/src/widgets/user-dropdown/index.ts`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/effects/layouts/src/widgets/user-dropdown/user-dropdown.vue`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/effects/layouts/tsconfig.json`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/effects/plugins/README.md`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/effects/plugins/package.json`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/effects/plugins/src/echarts/README.md`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/effects/plugins/src/echarts/echarts-ui.vue`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/effects/plugins/src/echarts/echarts.ts`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/effects/plugins/src/echarts/index.ts`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/effects/plugins/src/echarts/types.ts`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/effects/plugins/src/echarts/use-echarts.ts`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/effects/plugins/src/index.ts`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/effects/plugins/src/motion/README.md`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/effects/plugins/src/motion/index.ts`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/effects/plugins/src/motion/types.ts`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/effects/plugins/src/plugins-context.ts`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/effects/plugins/src/tiptap/extensions.ts`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/effects/plugins/src/tiptap/index.ts`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/effects/plugins/src/tiptap/preview.vue`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/effects/plugins/src/tiptap/style.css`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/effects/plugins/src/tiptap/tiptap.vue`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/effects/plugins/src/tiptap/toolbar.ts`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/effects/plugins/src/tiptap/types.ts`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/effects/plugins/src/tiptap/use-tiptap-toolbar.ts`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/effects/plugins/src/types.ts`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/effects/plugins/src/vxe-table/README.md`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/effects/plugins/src/vxe-table/api.ts`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/effects/plugins/src/vxe-table/extends.ts`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/effects/plugins/src/vxe-table/index.ts`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/effects/plugins/src/vxe-table/init.ts`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/effects/plugins/src/vxe-table/style.css`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/effects/plugins/src/vxe-table/types.ts`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/effects/plugins/src/vxe-table/use-vxe-grid.ts`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/effects/plugins/src/vxe-table/use-vxe-grid.vue`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/effects/plugins/tsconfig.json`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/effects/request/package.json`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/effects/request/src/index.ts`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/effects/request/src/request-client/index.ts`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/effects/request/src/request-client/modules/downloader.test.ts`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/effects/request/src/request-client/modules/downloader.ts`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/effects/request/src/request-client/modules/interceptor.ts`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/effects/request/src/request-client/modules/sse.test.ts`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/effects/request/src/request-client/modules/sse.ts`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/effects/request/src/request-client/modules/uploader.test.ts`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/effects/request/src/request-client/modules/uploader.ts`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/effects/request/src/request-client/preset-interceptors.ts`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/effects/request/src/request-client/request-client.test.ts`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/effects/request/src/request-client/request-client.ts`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/effects/request/src/request-client/types.ts`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/effects/request/tsconfig.json`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/icons/README.md`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/icons/package.json`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/icons/src/iconify/index.ts`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/icons/src/icons/empty-icon.vue`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/icons/src/index.ts`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/icons/src/svg/index.ts`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/icons/src/svg/load.ts`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/icons/tsconfig.json`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/locales/package.json`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/locales/src/i18n.ts`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/locales/src/index.ts`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/locales/src/langs/en-US/authentication.json`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/locales/src/langs/en-US/common.json`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/locales/src/langs/en-US/preferences.json`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/locales/src/langs/en-US/profile.json`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/locales/src/langs/en-US/ui.json`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/locales/src/langs/zh-CN/authentication.json`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/locales/src/langs/zh-CN/common.json`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/locales/src/langs/zh-CN/preferences.json`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/locales/src/langs/zh-CN/profile.json`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/locales/src/langs/zh-CN/ui.json`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/locales/src/typing.ts`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/locales/tsconfig.json`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/preferences/package.json`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/preferences/src/index.ts`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/preferences/tsconfig.json`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/stores/package.json`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/stores/shim-pinia.d.ts`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/stores/src/index.ts`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/stores/src/modules/access.test.ts`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/stores/src/modules/access.ts`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/stores/src/modules/index.ts`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/stores/src/modules/tabbar.test.ts`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/stores/src/modules/tabbar.ts`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/stores/src/modules/timezone.ts`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/stores/src/modules/user.test.ts`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/stores/src/modules/user.ts`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/stores/src/setup.ts`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/stores/tsconfig.json`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/styles/README.md`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/styles/package.json`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/styles/src/antd/index.css`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/styles/src/antdv-next/index.css`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/styles/src/ele/index.css`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/styles/src/global/index.scss`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/styles/src/index.ts`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/styles/src/naive/index.css`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/styles/src/style-exports.d.ts`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/styles/tsconfig.json`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/types/README.md`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/types/global.d.ts`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/types/package.json`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/types/src/index.ts`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/types/src/user.ts`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/types/tsconfig.json`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/utils/README.md`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/utils/package.json`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/utils/src/helpers/__tests__/find-menu-by-path.test.ts`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/utils/src/helpers/__tests__/generate-menus.test.ts`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/utils/src/helpers/__tests__/generate-routes-frontend.test.ts`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/utils/src/helpers/__tests__/merge-route-modules.test.ts`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/utils/src/helpers/find-menu-by-path.ts`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/utils/src/helpers/generate-menus.ts`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/utils/src/helpers/generate-routes-backend.ts`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/utils/src/helpers/generate-routes-frontend.ts`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/utils/src/helpers/get-popup-container.ts`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/utils/src/helpers/index.ts`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/utils/src/helpers/merge-route-modules.ts`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/utils/src/helpers/reset-routes.ts`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/utils/src/helpers/unmount-global-loading.ts`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/utils/src/index.ts`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/packages/utils/tsconfig.json`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+## vue-shop-admin/pnpm-lock.yaml
+- `vue-shop-admin/pnpm-lock.yaml`：前端 monorepo 根配置、说明或工具配置。
+## vue-shop-admin/pnpm-workspace.yaml
+- `vue-shop-admin/pnpm-workspace.yaml`：前端 monorepo 根配置、说明或工具配置。
+## vue-shop-admin/recent-changes-status.txt
+- `vue-shop-admin/recent-changes-status.txt`：前端 monorepo 根配置、说明或工具配置。
+## vue-shop-admin/recent-changes.patch
+- `vue-shop-admin/recent-changes.patch`：前端 monorepo 根配置、说明或工具配置。
+## vue-shop-admin/scripts
+- `vue-shop-admin/scripts/clean.mjs`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/scripts/deploy/Dockerfile`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/scripts/deploy/build-local-docker-image.sh`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/scripts/deploy/nginx.conf`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/scripts/turbo-run/README.md`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/scripts/turbo-run/bin/turbo-run.mjs`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/scripts/turbo-run/package.json`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/scripts/turbo-run/src/index.ts`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/scripts/turbo-run/src/run.ts`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/scripts/turbo-run/tsconfig.json`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/scripts/turbo-run/tsdown.config.ts`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/scripts/vsh/README.md`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/scripts/vsh/bin/vsh.mjs`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/scripts/vsh/env.d.ts`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/scripts/vsh/package.json`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/scripts/vsh/src/check-circular/index.ts`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/scripts/vsh/src/check-dep/index.ts`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/scripts/vsh/src/code-workspace/index.ts`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/scripts/vsh/src/index.ts`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/scripts/vsh/src/lint/index.ts`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/scripts/vsh/src/publint/index.ts`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/scripts/vsh/tsconfig.json`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+- `vue-shop-admin/scripts/vsh/tsdown.config.ts`：Vben monorepo 框架/工具链文件，非本项目业务核心。
+## vue-shop-admin/stylelint.config.mjs
+- `vue-shop-admin/stylelint.config.mjs`：前端 monorepo 根配置、说明或工具配置。
+## vue-shop-admin/tea.yaml
+- `vue-shop-admin/tea.yaml`：前端 monorepo 根配置、说明或工具配置。
+## vue-shop-admin/turbo.json
+- `vue-shop-admin/turbo.json`：前端 monorepo 根配置、说明或工具配置。
+## vue-shop-admin/vben-admin.code-workspace
+- `vue-shop-admin/vben-admin.code-workspace`：前端 monorepo 根配置、说明或工具配置。
+## vue-shop-admin/vitest.config.ts
+- `vue-shop-admin/vitest.config.ts`：前端 monorepo 根配置、说明或工具配置。

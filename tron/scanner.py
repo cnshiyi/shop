@@ -12,6 +12,7 @@ import httpx
 from aiogram import Bot
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 from asgiref.sync import sync_to_async
+from django.db.models import Q
 from django.utils import timezone
 
 from accounts.services import record_balance_ledger
@@ -20,6 +21,7 @@ from biz.services import usdt_to_trx
 from bot.keyboards import custom_port_keyboard
 from cloud.provisioning import provision_cloud_server
 from core.cache import get_config, bump_daily_stats
+from core.models import SiteConfig
 from core.persistence import bump_daily_address_stat, record_external_sync_log
 from monitoring.cache import get_monitor_addresses, maybe_sync_monitors, init_monitor_cache
 from tron.parser import parse_trx_transfer, parse_usdt_transfer
@@ -31,6 +33,7 @@ logger = logging.getLogger(__name__)
 USDT_CONTRACT = os.getenv('USDT_CONTRACT', 'TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t')
 TRONGRID_BASE_URL = os.getenv('TRONGRID_BASE_URL', 'https://api.trongrid.io')
 SCANNER_VERBOSE = os.getenv('SCANNER_VERBOSE', '0') == '1'
+MAX_BACKFILL_BLOCKS = int(os.getenv('TRON_SCANNER_MAX_BACKFILL_BLOCKS', '20') or '20')
 
 # ── 内部状态 ──────────────────────────────────────────────────────────────
 
@@ -85,6 +88,25 @@ def _receive_address() -> str:
 def _trongrid_api_key() -> str:
     from core.models import SiteConfig
     return SiteConfig.get('trongrid_api_key', '')
+
+
+def _block_number(block_data: dict) -> int | None:
+    try:
+        return int(((block_data.get('block_header') or {}).get('raw_data') or {}).get('number'))
+    except (TypeError, ValueError):
+        return None
+
+
+def _last_scanned_block_number() -> int | None:
+    raw = SiteConfig.get('tron_scanner_last_block_number', '')
+    try:
+        return int(raw) if raw else None
+    except (TypeError, ValueError):
+        return None
+
+
+def _set_last_scanned_block_number(block_number: int):
+    SiteConfig.set('tron_scanner_last_block_number', str(int(block_number)))
 
 
 def _cache_tx_detail(tx_hash: str, detail: dict):
@@ -161,24 +183,48 @@ async def _record_daily_stats(address: str, currency: str, direction: str, amoun
 
 @sync_to_async
 def _get_pending_address_orders(currency: str):
+    now = timezone.now()
+    Order.objects.filter(
+        pay_method='address',
+        status='pending',
+        expired_at__isnull=False,
+        expired_at__lte=now,
+    ).update(status='expired')
     return list(
         Order.objects.filter(pay_method='address', status='pending', currency=currency)
+        .filter(Q(expired_at__isnull=True) | Q(expired_at__gt=now))
         .order_by('created_at')
     )
 
 
 @sync_to_async
 def _get_pending_recharges(currency: str):
+    now = timezone.now()
+    Recharge.objects.filter(
+        status='pending',
+        expired_at__isnull=False,
+        expired_at__lte=now,
+    ).update(status='expired')
     return list(
         Recharge.objects.filter(status='pending', currency=currency)
+        .filter(Q(expired_at__isnull=True) | Q(expired_at__gt=now))
         .order_by('created_at')
     )
 
 
 @sync_to_async
-def _get_pending_cloud_server_orders():
+def _get_pending_cloud_server_orders(currency: str):
+    now = timezone.now()
+    CloudServerOrder.objects.filter(
+        pay_method='address',
+        status='pending',
+        expired_at__isnull=False,
+        expired_at__lte=now,
+    ).update(status='expired', updated_at=now)
     return list(
         CloudServerOrder.objects.filter(pay_method='address', status__in=['pending', 'renew_pending'])
+        .filter(currency=currency)
+        .filter(Q(expired_at__isnull=True) | Q(expired_at__gt=now))
         .order_by('created_at')
     )
 
@@ -187,19 +233,29 @@ def _get_pending_cloud_server_orders():
 def _confirm_order_paid(order_id: int, tx_hash: str):
     from django.db import transaction
     with transaction.atomic():
+        if (
+            Order.objects.filter(tx_hash=tx_hash).exists()
+            or Recharge.objects.filter(tx_hash=tx_hash).exists()
+            or CloudServerOrder.objects.filter(tx_hash=tx_hash).exists()
+        ):
+            return None
         order = Order.objects.select_for_update().get(id=order_id)
         if order.status != 'pending':
+            return None
+        product = Product.objects.select_for_update().get(id=order.product_id)
+        if product.stock != -1 and product.stock < order.quantity:
+            order.status = 'expired'
+            order.save(update_fields=['status'])
             return None
         order.status = 'paid'
         order.tx_hash = tx_hash
         order.paid_at = timezone.now()
-        order.save(update_fields=['status', 'tx_hash', 'paid_at', 'updated_at'])
-        product = order.product
+        order.save(update_fields=['status', 'tx_hash', 'paid_at'])
         if product.stock != -1:
             product.stock -= order.quantity
-            product.save(update_fields=['stock', 'updated_at'])
+            product.save(update_fields=['stock'])
         order.status = 'delivered'
-        order.save(update_fields=['status', 'updated_at'])
+        order.save(update_fields=['status'])
     return order
 
 
@@ -207,13 +263,19 @@ def _confirm_order_paid(order_id: int, tx_hash: str):
 def _confirm_recharge(recharge_id: int, tx_hash: str):
     from django.db import transaction
     with transaction.atomic():
+        if (
+            Order.objects.filter(tx_hash=tx_hash).exists()
+            or Recharge.objects.filter(tx_hash=tx_hash).exists()
+            or CloudServerOrder.objects.filter(tx_hash=tx_hash).exists()
+        ):
+            return None
         rc = Recharge.objects.select_for_update().get(id=recharge_id)
         if rc.status != 'pending':
             return None
         rc.status = 'completed'
         rc.tx_hash = tx_hash
         rc.completed_at = timezone.now()
-        rc.save(update_fields=['status', 'tx_hash', 'completed_at', 'updated_at'])
+        rc.save(update_fields=['status', 'tx_hash', 'completed_at'])
         user = TelegramUser.objects.select_for_update().get(id=rc.user_id)
         field = 'balance_trx' if rc.currency == 'TRX' else 'balance'
         old_balance = getattr(user, field)
@@ -236,6 +298,12 @@ def _confirm_recharge(recharge_id: int, tx_hash: str):
 def _confirm_cloud_server_order(order_id: int, tx_hash: str):
     from django.db import transaction
     with transaction.atomic():
+        if (
+            Order.objects.filter(tx_hash=tx_hash).exists()
+            or Recharge.objects.filter(tx_hash=tx_hash).exists()
+            or CloudServerOrder.objects.filter(tx_hash=tx_hash).exists()
+        ):
+            return None
         order = CloudServerOrder.objects.select_for_update().get(id=order_id)
         if order.status not in {'pending', 'renew_pending'}:
             return None
@@ -340,11 +408,12 @@ async def _process_payment(transfer: dict) -> bool:
                 return True
             return False
 
-    pending_cloud_orders = await _get_pending_cloud_server_orders()
+    pending_cloud_orders = await _get_pending_cloud_server_orders(currency)
     for order in pending_cloud_orders:
         expected_amount = order.pay_amount
-        if order.pay_method == 'address' and order.status == 'pending':
-            expected_amount = usdt_to_trx.__wrapped__(order.total_amount) if currency == 'TRX' else Decimal(order.total_amount)
+        if expected_amount is None:
+            usdt_amount = Decimal(order.total_amount or 0)
+            expected_amount = usdt_to_trx.__wrapped__(usdt_amount) if currency == 'TRX' else usdt_amount
         if expected_amount == amount:
             confirmed = await _confirm_cloud_server_order(order.id, tx_hash)
             if confirmed:
@@ -497,6 +566,68 @@ async def _log_scan_summary(force: bool = False):
 
 # ── 主扫描循环 ─────────────────────────────────────────────────────────────
 
+async def _process_block_data(block_data: dict) -> bool:
+    block_id = block_data.get('blockID', '')
+    if not block_id or block_id in _processed_blocks:
+        return False
+
+    _processed_blocks[block_id] = True
+    _scan_stats['blocks'] += 1
+    if len(_processed_blocks) > MAX_CACHE:
+        _processed_blocks.popitem(last=False)
+
+    transactions = block_data.get('transactions', [])
+    _scan_stats['transactions'] += len(transactions)
+
+    if SCANNER_VERBOSE:
+        logger.info('[scan] %s block=%s txs=%d', _now_str(), block_id[:16], len(transactions))
+
+    if not transactions:
+        return True
+
+    await maybe_sync_monitors()
+    monitor_cache = await get_monitor_addresses()
+
+    receive_address = await get_config('receive_address', '')
+
+    for tx in transactions:
+        transfer = parse_usdt_transfer(tx, USDT_CONTRACT)
+        if transfer is None:
+            transfer = parse_trx_transfer(tx)
+        if transfer is None:
+            continue
+
+        _scan_stats['transfers'] += 1
+        from_addr = transfer['from']
+        to_addr = transfer['to']
+
+        if receive_address and to_addr == receive_address:
+            matched = await _process_payment(transfer)
+            if matched:
+                _scan_stats['payments'] += 1
+
+        if to_addr in monitor_cache:
+            stats = await _record_daily_stats(to_addr, transfer['currency'], 'income', transfer['amount'], monitor_cache[to_addr][0]['user_id'], monitor_cache[to_addr][0].get('id'))
+            await _process_monitor_notification(transfer, monitor_cache[to_addr], stats, 'income')
+        if from_addr in monitor_cache and from_addr != to_addr:
+            stats = await _record_daily_stats(from_addr, transfer['currency'], 'expense', transfer['amount'], monitor_cache[from_addr][0]['user_id'], monitor_cache[from_addr][0].get('id'))
+            await _process_monitor_notification(transfer, monitor_cache[from_addr], stats, 'expense')
+    return True
+
+
+async def _fetch_block_by_number(client: httpx.AsyncClient, block_number: int, headers: dict) -> dict | None:
+    resp = await client.post(
+        f'{TRONGRID_BASE_URL}/wallet/getblockbynum',
+        json={'num': int(block_number), 'detail': True},
+        headers=headers,
+    )
+    if resp.status_code == 429:
+        raise RuntimeError('rate_limited')
+    resp.raise_for_status()
+    data = resp.json() or {}
+    return data if data.get('blockID') else None
+
+
 async def scan_block():
     global _last_rate_limit_log_at
     try:
@@ -516,57 +647,32 @@ async def scan_block():
             resp.raise_for_status()
             block_data = resp.json()
 
-        block_id = block_data.get('blockID', '')
-        if not block_id or block_id in _processed_blocks:
-            await _log_scan_summary()
-            return
+        current_number = _block_number(block_data)
+        last_number = await sync_to_async(_last_scanned_block_number)()
+        if current_number is not None and last_number is not None and last_number < current_number - 1:
+            backfill_to = min(current_number - 1, last_number + max(MAX_BACKFILL_BLOCKS, 1))
+            async with httpx.AsyncClient(timeout=10) as client:
+                for block_number in range(last_number + 1, backfill_to + 1):
+                    try:
+                        backfill_data = await _fetch_block_by_number(client, block_number, headers)
+                    except RuntimeError as exc:
+                        if str(exc) == 'rate_limited':
+                            now = time.time()
+                            if now - _last_rate_limit_log_at >= 60:
+                                logger.warning('TRON 补扫触发 429 限流，已暂停本轮补扫')
+                                _last_rate_limit_log_at = now
+                            break
+                        raise
+                    if backfill_data:
+                        await _process_block_data(backfill_data)
+                    await sync_to_async(_set_last_scanned_block_number)(block_number)
+            if backfill_to < current_number - 1:
+                await _log_scan_summary()
+                return
 
-        _processed_blocks[block_id] = True
-        _scan_stats['blocks'] += 1
-        if len(_processed_blocks) > MAX_CACHE:
-            _processed_blocks.popitem(last=False)
-
-        transactions = block_data.get('transactions', [])
-        _scan_stats['transactions'] += len(transactions)
-
-        # 静默模式：只打印时间和区块号
-        if SCANNER_VERBOSE:
-            logger.info('[scan] %s block=%s txs=%d', _now_str(), block_id[:16], len(transactions))
-
-        if not transactions:
-            await _log_scan_summary()
-            return
-
-        # 定时同步 Redis 缓存
-        await maybe_sync_monitors()
-        monitor_cache = await get_monitor_addresses()
-
-        receive_address = await get_config('receive_address', '')
-
-        for tx in transactions:
-            transfer = parse_usdt_transfer(tx, USDT_CONTRACT)
-            if transfer is None:
-                transfer = parse_trx_transfer(tx)
-            if transfer is None:
-                continue
-
-            _scan_stats['transfers'] += 1
-            from_addr = transfer['from']
-            to_addr = transfer['to']
-
-            # 支付匹配
-            if receive_address and to_addr == receive_address:
-                matched = await _process_payment(transfer)
-                if matched:
-                    _scan_stats['payments'] += 1
-
-            # 监控通知（有格式化详情日志）
-            if to_addr in monitor_cache:
-                stats = await _record_daily_stats(to_addr, transfer['currency'], 'income', transfer['amount'], monitor_cache[to_addr][0]['user_id'], monitor_cache[to_addr][0].get('id'))
-                await _process_monitor_notification(transfer, monitor_cache[to_addr], stats, 'income')
-            if from_addr in monitor_cache and from_addr != to_addr:
-                stats = await _record_daily_stats(from_addr, transfer['currency'], 'expense', transfer['amount'], monitor_cache[from_addr][0]['user_id'], monitor_cache[from_addr][0].get('id'))
-                await _process_monitor_notification(transfer, monitor_cache[from_addr], stats, 'expense')
+        processed = await _process_block_data(block_data)
+        if processed and current_number is not None:
+            await sync_to_async(_set_last_scanned_block_number)(current_number)
 
         await _log_scan_summary()
     except Exception as e:

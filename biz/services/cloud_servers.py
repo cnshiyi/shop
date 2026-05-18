@@ -8,6 +8,7 @@ from mall.models import CloudServerPlan
 from accounts.models import TelegramUser
 from accounts.services import record_balance_ledger
 from biz.models import CloudAsset, CloudServerOrder, Server
+from .rates import usdt_to_trx
 from .commerce import _generate_unique_pay_amount
 
 
@@ -27,8 +28,13 @@ def _renewal_price(order: CloudServerOrder, user: TelegramUser | None = None) ->
     return (total_amount * discount_rate / Decimal('100')).quantize(Decimal('0.01'))
 
 
+def _renewal_pay_amount(order: CloudServerOrder, currency: str, user: TelegramUser | None = None) -> Decimal:
+    usdt_amount = _renewal_price(order, user)
+    return usdt_to_trx.__wrapped__(usdt_amount) if currency == 'TRX' else usdt_amount
+
+
 @sync_to_async
-def create_cloud_server_renewal(order_id: int, user_id: int, days: int = 31):
+def create_cloud_server_renewal(order_id: int, user_id: int, days: int = 31, currency: str | None = None):
     order = CloudServerOrder.objects.select_related('user').filter(id=order_id).first()
     if not order:
         return None
@@ -37,9 +43,11 @@ def create_cloud_server_renewal(order_id: int, user_id: int, days: int = 31):
     order.status = 'renew_pending'
     order.lifecycle_days = days
     renewal_user = TelegramUser.objects.filter(id=user_id).first()
-    order.pay_amount = _generate_unique_pay_amount(_renewal_price(order, renewal_user), order.currency)
+    pay_currency = currency or order.currency or 'USDT'
+    order.currency = pay_currency
+    order.pay_amount = _generate_unique_pay_amount(_renewal_pay_amount(order, pay_currency, renewal_user), pay_currency)
     order.expired_at = timezone.now() + timezone.timedelta(minutes=30)
-    order.save(update_fields=['status', 'lifecycle_days', 'pay_amount', 'expired_at', 'updated_at'])
+    order.save(update_fields=['status', 'lifecycle_days', 'currency', 'pay_amount', 'expired_at', 'updated_at'])
     return order
 
 
@@ -69,7 +77,7 @@ def pay_cloud_server_renewal_with_balance(order_id: int, user_id: int, currency:
             return None, '当前订单状态不可钱包支付'
         balance_field = 'balance_trx' if currency == 'TRX' else 'balance'
         user = TelegramUser.objects.select_for_update().get(id=user_id)
-        total = Decimal(str(order.pay_amount or order.total_amount or 0))
+        total = _renewal_pay_amount(order, currency, user)
         current_balance = Decimal(str(getattr(user, balance_field, 0) or 0))
         if current_balance < total:
             return None, f'{currency} 余额不足'

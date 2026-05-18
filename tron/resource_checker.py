@@ -85,6 +85,7 @@ async def _fetch_account_resource(address: str) -> tuple[int, int]:
     async with httpx.AsyncClient(timeout=10) as client:
         resp = await client.post(f'{TRONGRID_BASE_URL}/wallet/getaccountresource', json={'address': address, 'visible': True}, headers=headers)
         resp.raise_for_status()
+        data = resp.json() or {}
         record_external_sync_log(
             source='trongrid',
             action='get_account_resource',

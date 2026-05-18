@@ -1,11 +1,22 @@
 from django.core.management.base import BaseCommand, CommandError
 from django.utils import timezone
 
+from core.models import CloudAccountConfig
 from core.persistence import record_external_sync_log
 from mall.models import CloudAsset, CloudServerOrder, Server
 
 
 NORMAL_AWS_STATES = {'running', 'pending', 'starting'}
+STATIC_IP_KIND = CloudAsset.KIND_MTPROXY
+
+
+def _resolve_aws_account(region):
+    queryset = CloudAccountConfig.objects.filter(
+        provider=CloudAccountConfig.PROVIDER_AWS,
+        is_active=True,
+    ).order_by('-status', 'id')
+    region_account = queryset.filter(region_hint=region).first()
+    return region_account or queryset.first()
 
 
 def _lightsail_client(region):
@@ -16,16 +27,20 @@ def _lightsail_client(region):
 
     import os
 
-    access_key = os.getenv('AWS_ACCESS_KEY_ID', '')
-    secret_key = os.getenv('AWS_SECRET_ACCESS_KEY', '')
+    account = _resolve_aws_account(region)
+    access_key = account.access_key_plain if account else os.getenv('AWS_ACCESS_KEY_ID', '')
+    secret_key = account.secret_key_plain if account else os.getenv('AWS_SECRET_ACCESS_KEY', '')
     if not access_key or not secret_key:
-        raise CommandError('未配置 AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY，无法同步 AWS。')
+        raise CommandError('未配置启用中的 AWS 云账号或 AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY，无法同步 AWS。')
 
-    return boto3.client(
-        'lightsail',
-        region_name=region,
-        aws_access_key_id=access_key,
-        aws_secret_access_key=secret_key,
+    return (
+        boto3.client(
+            'lightsail',
+            region_name=region,
+            aws_access_key_id=access_key,
+            aws_secret_access_key=secret_key,
+        ),
+        account,
     )
 
 
@@ -44,7 +59,7 @@ class Command(BaseCommand):
 
     def handle(self, *args, **options):
         region = options['region']
-        client = _lightsail_client(region)
+        client, account = _lightsail_client(region)
         count = 0
         synced_instance_ids = []
         next_page_token = None
@@ -61,6 +76,7 @@ class Command(BaseCommand):
                 request_payload=kwargs,
                 response_payload={'count': len(response.get('instances') or []), 'nextPageToken': response.get('nextPageToken')},
                 is_success=True,
+                account=account,
             )
             instances = response.get('instances') or []
             now_iso = timezone.now().isoformat()
@@ -153,6 +169,57 @@ class Command(BaseCommand):
             next_page_token = response.get('nextPageToken')
             if not next_page_token:
                 break
+
+        try:
+            static_response = client.get_static_ips()
+            static_ips = static_response.get('staticIps') or []
+            record_external_sync_log(
+                source='aws_lightsail',
+                action='get_static_ips',
+                target=region,
+                request_payload={},
+                response_payload={'count': len(static_ips)},
+                is_success=True,
+                account=account,
+            )
+            for item in static_ips:
+                if item.get('attachedTo'):
+                    continue
+                name = item.get('name') or ''
+                ip_address = item.get('ipAddress') or ''
+                location = item.get('location') or {}
+                note = f"固定 IP 未附加；最近同步: {timezone.now().isoformat()}"
+                asset, _ = CloudAsset.objects.update_or_create(
+                    kind=STATIC_IP_KIND,
+                    source=CloudAsset.SOURCE_AWS_SYNC,
+                    provider='aws_lightsail',
+                    asset_name=name,
+                    defaults={
+                        'region_code': region,
+                        'region_name': location.get('regionName') or region,
+                        'provider_resource_id': item.get('arn') or name,
+                        'public_ip': ip_address,
+                        'currency': 'USDT',
+                        'note': note,
+                        'status': CloudAsset.STATUS_STOPPED,
+                        'provider_status': 'unattached_static_ip',
+                        'is_active': False,
+                    },
+                )
+                count += 1
+                self.stdout.write(self.style.WARNING(f'已同步 AWS 未附加固定 IP {asset.asset_name or ip_address}'))
+        except Exception as exc:
+            record_external_sync_log(
+                source='aws_lightsail',
+                action='get_static_ips',
+                target=region,
+                request_payload={},
+                response_payload={},
+                is_success=False,
+                error_message=str(exc),
+                account=account,
+            )
+            self.stdout.write(self.style.WARNING(f'同步 AWS 固定 IP 失败: {exc}'))
 
         self.stdout.write(self.style.SUCCESS(f'完成，共同步 {count} 台 AWS 服务器。'))
         self.synced_instance_ids = synced_instance_ids

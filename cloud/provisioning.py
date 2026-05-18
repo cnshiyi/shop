@@ -161,6 +161,7 @@ async def provision_cloud_server(order_id: int):
                 server_name,
                 result.instance_id,
                 result.public_ip,
+                result.static_ip_name,
                 result.login_user or login_user,
                 result.login_password,
                 note,
@@ -235,7 +236,7 @@ async def reprovision_cloud_server_bootstrap(order_id: int):
     note = '\n'.join(part for part in [order.provision_note, '已执行重试初始化。', bbr_note, mtproxy_note] if part)
     if not bbr_ok or not mtproxy_ok:
         return await _mark_failed(order_id, note)
-    return await _mark_success(order_id, order.server_name or order.instance_id or '', order.instance_id or order.provider_resource_id or '', order.public_ip, order.login_user or 'root', order.login_password, note)
+    return await _mark_success(order_id, order.server_name or order.instance_id or '', order.instance_id or order.provider_resource_id or '', order.public_ip, order.static_ip_name or '', order.login_user or 'root', order.login_password, note)
 
 
 @sync_to_async
@@ -244,7 +245,7 @@ def _get_order(order_id: int):
 
 
 @sync_to_async
-def _mark_success(order_id: int, server_name: str, instance_id: str, public_ip: str, login_user: str, login_password: str, note: str):
+def _mark_success(order_id: int, server_name: str, instance_id: str, public_ip: str, static_ip_name: str, login_user: str, login_password: str, note: str):
     logger.info('[PROVISION] mark_success_start order_id=%s server_name=%s instance_id=%s public_ip=%s', order_id, server_name, instance_id, public_ip)
     order = CloudServerOrder.objects.get(id=order_id)
     mtproxy_link, mtproxy_secret, mtproxy_host = _extract_mtproxy_fields(note)
@@ -253,6 +254,7 @@ def _mark_success(order_id: int, server_name: str, instance_id: str, public_ip: 
     order.instance_id = instance_id
     order.provider_resource_id = instance_id
     order.public_ip = public_ip
+    order.static_ip_name = static_ip_name
     order.mtproxy_host = mtproxy_host or public_ip
     order.mtproxy_link = mtproxy_link
     order.mtproxy_secret = mtproxy_secret
@@ -268,7 +270,7 @@ def _mark_success(order_id: int, server_name: str, instance_id: str, public_ip: 
         order.last_user_id = order.user.tg_user_id
     except Exception:
         order.last_user_id = order.user_id or 0
-    order.save(update_fields=['status', 'server_name', 'instance_id', 'provider_resource_id', 'public_ip', 'mtproxy_host', 'mtproxy_link', 'mtproxy_secret', 'login_user', 'login_password', 'provision_note', 'completed_at', 'service_started_at', 'service_expires_at', 'last_user_id', 'updated_at'])
+    order.save(update_fields=['status', 'server_name', 'instance_id', 'provider_resource_id', 'public_ip', 'static_ip_name', 'mtproxy_host', 'mtproxy_link', 'mtproxy_secret', 'login_user', 'login_password', 'provision_note', 'completed_at', 'service_started_at', 'service_expires_at', 'last_user_id', 'updated_at'])
     logger.info('[PROVISION] order_saved order=%s status=%s service_started_at=%s service_expires_at=%s mtproxy_host=%s mtproxy_link=%s', order.order_no, order.status, order.service_started_at, order.service_expires_at, order.mtproxy_host, order.mtproxy_link)
 
     try:

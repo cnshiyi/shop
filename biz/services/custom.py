@@ -554,6 +554,10 @@ def _apply_cloud_discount(plan_price: Decimal, discount_rate) -> Decimal:
     return (Decimal(plan_price) * rate / Decimal('100')).quantize(Decimal('0.01'))
 
 
+def _cloud_pay_amount(total_usdt: Decimal, currency: str) -> Decimal:
+    return usdt_to_trx.__wrapped__(total_usdt) if currency == 'TRX' else Decimal(total_usdt)
+
+
 @sync_to_async
 def create_cloud_server_order(user_id: int, plan_id: int, currency: str = 'USDT', quantity: int = 1):
     plan = CloudServerPlan.objects.get(id=plan_id, is_active=True)
@@ -561,7 +565,7 @@ def create_cloud_server_order(user_id: int, plan_id: int, currency: str = 'USDT'
     quantity = max(1, int(quantity or 1))
     unit_price = _apply_cloud_discount(Decimal(plan.price), user.cloud_discount_rate)
     total = unit_price * quantity
-    pay_amount = _generate_unique_pay_amount(total, currency)
+    pay_amount = _generate_unique_pay_amount(_cloud_pay_amount(total, currency), currency)
     expired_at = timezone.now() + timezone.timedelta(minutes=5)
     order = CloudServerOrder.objects.create(
         order_no=_generate_order_no(),

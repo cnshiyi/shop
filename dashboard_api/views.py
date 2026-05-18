@@ -1,11 +1,16 @@
+import base64
+import io
+import json
+import secrets
+import time
 from decimal import Decimal, InvalidOperation
+from urllib.parse import quote
 
 from asgiref.sync import async_to_sync
-from django.contrib.auth import authenticate, login, logout
+from django.contrib.auth import authenticate, get_user_model, login, logout
 from django.contrib.auth.models import AnonymousUser
-from django.contrib.auth.decorators import login_required, user_passes_test
 from django.core.management import call_command
-from django.db import ProgrammingError, transaction
+from django.db import IntegrityError, ProgrammingError, transaction
 from django.db.models import BooleanField, Case, CharField, Count, Q, Value, When
 from django.db.models.functions import Cast
 from django.http import JsonResponse
@@ -15,23 +20,120 @@ from django.views.decorators.csrf import csrf_exempt, ensure_csrf_cookie
 from django.views.decorators.http import require_GET, require_http_methods, require_POST
 
 from core.runtime_config import CONFIG_HELP, SENSITIVE_CONFIG_KEYS
-from core.models import CloudAccountConfig, SiteConfig
+from core.models import CloudAccountConfig, ExternalSyncLog, SiteConfig
+from core.persistence import record_external_sync_log
 from accounts.models import BalanceLedger, TelegramUser, TelegramUsername
 from finance.models import Recharge
 from mall.models import CloudAsset, CloudServerOrder, Order, Product, Server, CloudServerPlan, ServerPrice
 from monitoring.models import AddressMonitor
+from cloud.lifecycle import (
+    _delete_instance,
+    _mark_deleted,
+    _mark_recycled,
+    _release_static_ip,
+    mark_static_ip_asset_released,
+    release_aws_static_ip_asset,
+)
 from cloud.provisioning import provision_cloud_server
+from biz.services.cloud_servers import mark_cloud_server_ip_change_requested
 from biz.services.custom import ensure_cloud_server_plans, refresh_custom_plan_cache
 
 
+DASHBOARD_TEXT_CONFIG_DEFAULTS = {
+    'bot_custom_quantity_title': '请选择购买数量',
+    'bot_custom_quantity_hint': '可输入自定义数量。',
+    'bot_custom_payment_title': '请选择支付方式',
+    'bot_custom_payment_hint': '请按页面提示完成支付。',
+    'bot_custom_wallet_title': '充值钱包',
+    'bot_custom_pending_order': '你有未完成订单，请继续处理。',
+    'bot_custom_pending_wallet': '请先完成充值后再继续。',
+    'bot_custom_order_notice': '订单已创建，请留意状态变化。',
+    'bot_custom_port_hint': '默认端口可在订单详情中查看。',
+    'bot_custom_balance_insufficient': '余额不足，请先充值。',
+}
+
+DASHBOARD_CONFIG_DEFAULTS = {
+    **DASHBOARD_TEXT_CONFIG_DEFAULTS,
+}
+
+DASHBOARD_CONFIG_LABELS = {
+    'admin_password_notice': '后台密码提醒文案',
+    'alibaba_cloud_account_id': '阿里云主账号 ID',
+    'aliyun_account_id': '阿里云账号 ID',
+    'aliyun_region': '阿里云默认地域',
+    'aws_access_key_id': 'AWS 访问密钥 ID',
+    'aws_region': 'AWS 默认地域',
+    'aws_secret_access_key': 'AWS 私密访问密钥',
+    'bot_custom_balance_insufficient': '余额不足提示',
+    'bot_custom_order_notice': '订单创建提示',
+    'bot_custom_payment_hint': '支付方式提示',
+    'bot_custom_payment_title': '支付方式标题',
+    'bot_custom_pending_order': '未完成订单提示',
+    'bot_custom_pending_wallet': '待充值提示',
+    'bot_custom_port_hint': '端口选择提示',
+    'bot_custom_quantity_hint': '购买数量提示',
+    'bot_custom_quantity_title': '购买数量标题',
+    'bot_custom_wallet_title': '钱包充值标题',
+    'bot_token': 'Telegram 机器人访问令牌',
+    'cleanup_retention_days': '清理日志保留天数',
+    'cloud_asset_sync_interval_seconds': '云资产自动同步间隔（秒）',
+    'cloud_auto_renew_execution_notify_enabled': '自动续费结果通知',
+    'cloud_auto_renew_execution_notify_events': '自动续费通知事件',
+    'cloud_daily_expiry_summary_enabled': '每日到期汇总通知',
+    'cloud_delete_after_days': '关机后删机等待天数',
+    'cloud_delete_time': '删机任务执行时间',
+    'cloud_renew_notice_days': '续费提醒提前天数',
+    'cloud_renew_notice_debug_repeat': '续费提醒调试重复发送',
+    'cloud_suspend_after_days': '到期后关机宽限天数',
+    'cloud_suspend_time': '关机任务执行时间',
+    'cloud_unattached_ip_delete_after_days': '未附加固定 IP 保留天数',
+    'cloud_unattached_ip_delete_time': '固定 IP 回收执行时间',
+    'dashboard_totp_secret': '后台 Google Authenticator 二级验证',
+    'database_url': '数据库连接地址（优先）',
+    'db_host': '数据库主机',
+    'db_name': '数据库名称',
+    'db_password': '数据库密码',
+    'db_port': '数据库端口',
+    'db_user': '数据库用户名',
+    'fsm_data_ttl': '机器人临时数据保留时间（秒）',
+    'fsm_state_ttl': '机器人会话状态保留时间（秒）',
+    'receive_address': '收款地址（USDT/TRX 共用）',
+    'redis_db': 'Redis 数据库编号',
+    'redis_port': 'Redis 端口',
+    'redis_url': 'Redis 连接地址',
+    'scanner_block_log_enabled': '区块扫描日志',
+    'scanner_verbose': '扫描详细日志',
+    'telegram_listener_push_enabled': 'Telegram 操作通知',
+    'telegram_listener_push_private_enabled': 'Telegram 私聊通知',
+    'telegram_api_hash': 'Telegram 登录应用密钥',
+    'telegram_api_id': 'Telegram 登录应用 ID',
+    'telegram_webhook_url': 'Telegram 回调地址',
+    'text_init_enabled': '启用默认文案初始化',
+    'trongrid_api_key': 'TRONGrid 接口密钥',
+}
+
+DASHBOARD_SENSITIVE_CONFIG_KEYS = SENSITIVE_CONFIG_KEYS | {
+    'aws_secret_access_key',
+    'dashboard_totp_secret',
+    'db_password',
+    'telegram_api_hash',
+}
+
+
+def _dashboard_config_label(key):
+    return DASHBOARD_CONFIG_LABELS.get(key) or CONFIG_HELP.get(key, '')
+
+
 def _site_config_payload(item):
+    is_sensitive = item.is_sensitive or item.key in DASHBOARD_SENSITIVE_CONFIG_KEYS
     return {
         'id': item.id,
         'key': item.key,
         'value': SiteConfig.get(item.key, ''),
-        'value_preview': item.masked_value() if item.is_sensitive else (item.value or ''),
-        'is_sensitive': item.is_sensitive,
-        'description': CONFIG_HELP.get(item.key, ''),
+        'value_preview': item.masked_value() if is_sensitive else (item.value or ''),
+        'is_sensitive': is_sensitive,
+        'description': _dashboard_config_label(item.key),
+        'default_value': DASHBOARD_CONFIG_DEFAULTS.get(item.key, ''),
     }
 
 
@@ -50,6 +152,25 @@ def _cloud_account_payload(item):
         'status_note': item.status_note,
         'last_checked_at': _iso(item.last_checked_at),
     }
+
+
+def _admin_user_payload(user):
+    return {
+        'id': user.id,
+        'username': user.get_username(),
+        'email': user.email or '',
+        'is_active': bool(user.is_active),
+        'is_staff': bool(user.is_staff),
+        'is_superuser': bool(user.is_superuser),
+        'last_login': _iso(user.last_login),
+        'date_joined': _iso(user.date_joined),
+    }
+
+
+def _require_superuser(request):
+    if not getattr(request, 'user', None) or not request.user.is_superuser:
+        return _error('需要超级管理员权限', status=403)
+    return None
 
 
 def _record_balance_ledger(user, *, currency, old_balance, new_balance, ledger_type='manual_adjust', related_type=None, related_id=None, description='', operator=None):
@@ -352,8 +473,421 @@ def _read_payload(request):
     return request.POST.dict() if hasattr(request.POST, 'dict') else request.POST
 
 
+def _normalize_cloud_provider(value):
+    provider = str(value or '').strip().lower()
+    if provider in {'aliyun', 'aliyun_simple', 'alibaba', 'alibaba_cloud'}:
+        return 'aliyun'
+    if provider in {'aws', 'aws_lightsail', 'lightsail'}:
+        return 'aws'
+    return ''
+
+
+def _cloud_sync_task(provider, region, *, reason='', asset_ids=None):
+    command = 'sync_aliyun_assets' if provider == 'aliyun' else 'sync_aws_assets'
+    return {
+        'provider': provider,
+        'region': region,
+        'command': command,
+        'reason': reason,
+        'summary': {
+            'asset_ids': asset_ids or [],
+        },
+    }
+
+
+def _run_cloud_sync_task(task):
+    stdout = io.StringIO()
+    started_at = time.monotonic()
+    call_command(task['command'], region=task['region'], stdout=stdout)
+    duration = round(time.monotonic() - started_at, 3)
+    output = [line.strip() for line in stdout.getvalue().splitlines() if line.strip()]
+    return {
+        **task,
+        'duration_seconds': duration,
+        'logs': output[-20:],
+    }
+
+
+def _selected_cloud_sync_tasks(asset_ids):
+    if not asset_ids:
+        return [], []
+    assets = CloudAsset.objects.filter(pk__in=asset_ids).only('id', 'provider', 'region_code')
+    tasks = {}
+    skipped = []
+    for asset in assets:
+        provider = _normalize_cloud_provider(asset.provider)
+        region = (asset.region_code or '').strip()
+        if not provider or not region:
+            skipped.append({
+                'provider': provider or asset.provider or '',
+                'region': region,
+                'reason': f'资产 #{asset.id} 缺少云厂商或地域，无法定位同步任务',
+                'summary': {'asset_ids': [asset.id]},
+            })
+            continue
+        key = (provider, region)
+        if key not in tasks:
+            tasks[key] = _cloud_sync_task(
+                provider,
+                region,
+                reason='按选中资产涉及的云厂商和地域同步',
+                asset_ids=[],
+            )
+        tasks[key]['summary']['asset_ids'].append(asset.id)
+
+    missing_ids = sorted(set(asset_ids) - {asset.id for asset in assets})
+    for asset_id in missing_ids:
+        skipped.append({
+            'provider': '',
+            'region': '',
+            'reason': f'资产 #{asset_id} 不存在',
+            'summary': {'asset_ids': [asset_id]},
+        })
+    return list(tasks.values()), skipped
+
+
+def _dashboard_sync_log_payload(tasks, skipped_tasks, errors, synced):
+    return {
+        'tasks': tasks,
+        'skipped_tasks': skipped_tasks,
+        'errors': errors,
+        'synced': synced,
+    }
+
+
 def _get_keyword(request):
     return (request.GET.get('keyword') or request.GET.get('q') or request.GET.get('search') or '').strip()
+
+
+def _json_config(key, default):
+    raw = SiteConfig.get(key, '')
+    if not raw:
+        return json.loads(json.dumps(default, ensure_ascii=False))
+    try:
+        return json.loads(raw)
+    except (TypeError, ValueError):
+        return json.loads(json.dumps(default, ensure_ascii=False))
+
+
+def _set_json_config(key, value):
+    SiteConfig.set(key, json.dumps(value, ensure_ascii=False), sensitive=False)
+
+
+def _telegram_session_config_key(account_id):
+    return f'telegram_login_session_{account_id}'
+
+
+def _get_telegram_session(account_id):
+    return SiteConfig.get(_telegram_session_config_key(account_id), '')
+
+
+def _set_telegram_session(account_id, session_string):
+    SiteConfig.set(
+        _telegram_session_config_key(account_id),
+        session_string or '',
+        sensitive=True,
+    )
+
+
+def _telegram_api_config():
+    api_id_raw = SiteConfig.get('telegram_api_id', '').strip()
+    api_hash = SiteConfig.get('telegram_api_hash', '').strip()
+    if not api_id_raw or not api_hash:
+        raise ValueError('请先在“设置 / Telegram 登录设置”填写登录应用 ID 和登录应用密钥。')
+    try:
+        api_id = int(api_id_raw)
+    except (TypeError, ValueError) as exc:
+        raise ValueError('Telegram 登录应用 ID 必须是数字。') from exc
+    return api_id, api_hash
+
+
+def _telegram_error_message(exc):
+    name = exc.__class__.__name__
+    if name == 'PhoneNumberInvalidError':
+        return '手机号不正确，请检查国家区号和号码。'
+    if name == 'PhoneCodeInvalidError':
+        return '验证码不正确，请重新输入。'
+    if name == 'PhoneCodeExpiredError':
+        return '验证码已过期，请重新发送。'
+    if name in {'PasswordHashInvalidError', 'PasswordHashInvalidError'}:
+        return '二级密码不正确。'
+    if name == 'SessionPasswordNeededError':
+        return '需要输入二级密码。'
+    if name == 'FloodWaitError':
+        seconds = getattr(exc, 'seconds', None)
+        if seconds:
+            return f'Telegram 限制请求过快，请等待 {seconds} 秒后再试。'
+    return str(exc) or 'Telegram 请求失败。'
+
+
+def _telethon_user_payload(me):
+    usernames = []
+    username = getattr(me, 'username', None)
+    if username:
+        usernames.append(str(username).lstrip('@'))
+    for item in getattr(me, 'usernames', None) or []:
+        value = getattr(item, 'username', None) or str(item)
+        if value:
+            usernames.append(str(value).lstrip('@'))
+    usernames = _split_usernames(','.join(usernames))
+    return {
+        'first_name': getattr(me, 'first_name', '') or '',
+        'phone': getattr(me, 'phone', '') or '',
+        'tg_user_id': int(getattr(me, 'id', 0) or 0),
+        'username': usernames[0] if usernames else '',
+        'usernames': usernames,
+    }
+
+
+def _save_telegram_identity(tg_user_id, usernames=None, first_name=''):
+    if not tg_user_id:
+        return None
+    username_text = ','.join(_split_usernames(','.join(usernames or [])))
+    user, _ = TelegramUser.objects.get_or_create(
+        tg_user_id=int(tg_user_id),
+        defaults={'username': username_text, 'first_name': first_name or ''},
+    )
+    changed_fields = []
+    if first_name and user.first_name != first_name:
+        user.first_name = first_name
+        changed_fields.append('first_name')
+    if changed_fields:
+        changed_fields.append('updated_at')
+        user.save(update_fields=changed_fields)
+    _sync_telegram_username(user, username_text)
+    return user
+
+
+def _normalize_telegram_account(item):
+    now = _iso(timezone.now())
+    normalized = {
+        'created_at': item.get('created_at') or now,
+        'first_name': item.get('first_name') or '',
+        'has_session': bool(item.get('has_session')),
+        'id': int(item.get('id') or 0),
+        'label': item.get('label') or item.get('phone') or 'Telegram 账号',
+        'last_synced_at': item.get('last_synced_at'),
+        'listener_push_enabled': bool(item.get('listener_push_enabled', False)),
+        'note': item.get('note') or '',
+        'notify_enabled': bool(item.get('notify_enabled', True)),
+        'phone': item.get('phone') or '',
+        'phone_code_hash': item.get('phone_code_hash') or '',
+        'status': item.get('status') or 'registered',
+        'tg_user_id': item.get('tg_user_id'),
+        'updated_at': item.get('updated_at') or now,
+        'username': item.get('username') or '',
+        'usernames': _split_usernames(item.get('username')) or item.get('usernames') or [],
+    }
+    normalized['has_session'] = bool(_get_telegram_session(normalized['id']))
+    return normalized
+
+
+def _normalize_telegram_accounts_overview(overview):
+    accounts = [
+        _normalize_telegram_account(item)
+        for item in overview.get('accounts', [])
+        if isinstance(item, dict)
+    ]
+    overview['accounts'] = accounts
+    return overview
+
+
+def _find_telegram_account(overview, account_id):
+    for item in overview.setdefault('accounts', []):
+        if int(item.get('id') or 0) == int(account_id or 0):
+            return item
+    return None
+
+
+def _next_telegram_account_id(accounts):
+    return max([int(item.get('id') or 0) for item in accounts] or [0]) + 1
+
+
+def _ensure_telegram_login_account(overview, phone):
+    accounts = overview.setdefault('accounts', [])
+    for item in accounts:
+        if str(item.get('phone') or '').strip() == phone:
+            return item
+    next_id = _next_telegram_account_id(accounts)
+    now = _iso(timezone.now())
+    item = {
+        'id': next_id,
+        'label': phone or f'Telegram 账号 {next_id}',
+        'phone': phone,
+        'username': '',
+        'usernames': [],
+        'tg_user_id': None,
+        'first_name': '',
+        'note': '',
+        'status': 'pending',
+        'notify_enabled': True,
+        'listener_push_enabled': False,
+        'has_session': False,
+        'created_at': now,
+        'updated_at': now,
+        'last_synced_at': None,
+        'phone_code_hash': '',
+    }
+    accounts.append(item)
+    return item
+
+
+def _finalize_telegram_account(account, profile, session_string):
+    now = _iso(timezone.now())
+    usernames = _split_usernames(','.join(profile.get('usernames') or []))
+    username_text = ','.join(usernames)
+    account.update({
+        'first_name': profile.get('first_name') or account.get('first_name') or '',
+        'has_session': True,
+        'last_synced_at': now,
+        'phone': account.get('phone') or profile.get('phone') or '',
+        'phone_code_hash': '',
+        'status': 'logged_in',
+        'tg_user_id': profile.get('tg_user_id') or account.get('tg_user_id'),
+        'updated_at': now,
+        'username': username_text,
+        'usernames': usernames,
+    })
+    if not account.get('label') or account.get('label') == account.get('phone'):
+        account['label'] = (
+            profile.get('first_name')
+            or (f"@{usernames[0]}" if usernames else '')
+            or account.get('phone')
+            or f"Telegram 账号 {account.get('id')}"
+        )
+    _set_telegram_session(account['id'], session_string)
+    _save_telegram_identity(account.get('tg_user_id'), usernames, account.get('first_name') or '')
+    return account
+
+
+def _telegram_users_from_db(messages=None):
+    messages = messages or []
+    stats = {}
+    for message in messages:
+        tg_user_id = message.get('tg_user_id')
+        if not tg_user_id:
+            continue
+        item = stats.setdefault(int(tg_user_id), {'count': 0, 'latest_at': None, 'latest_message': ''})
+        item['count'] += 1
+        created_at = message.get('created_at')
+        if created_at and (not item['latest_at'] or created_at > item['latest_at']):
+            item['latest_at'] = created_at
+            item['latest_message'] = message.get('text') or ''
+    users = []
+    for user in TelegramUser.objects.prefetch_related('telegramusernames').order_by('-updated_at', '-id')[:500]:
+        usernames = user.usernames
+        payload = _user_payload({
+            'id': user.id,
+            'tg_user_id': user.tg_user_id,
+            'username': user.username,
+            'first_name': user.first_name,
+            'usernames': usernames,
+            'primary_username': usernames[0] if usernames else '',
+        })
+        stat = stats.get(int(user.tg_user_id), {})
+        users.append({
+            **payload,
+            'latest_at': stat.get('latest_at'),
+            'latest_message': stat.get('latest_message') or '',
+            'message_count': stat.get('count') or 0,
+        })
+    return users
+
+
+async def _telegram_send_code_async(phone, api_id, api_hash):
+    from telethon import TelegramClient
+    from telethon.sessions import StringSession
+
+    client = TelegramClient(StringSession(''), api_id, api_hash)
+    try:
+        await client.connect()
+        sent = await client.send_code_request(phone)
+        return {
+            'phone_code_hash': sent.phone_code_hash,
+            'session_string': client.session.save(),
+        }
+    finally:
+        await client.disconnect()
+
+
+async def _telegram_sign_in_code_async(session_string, phone, code, phone_code_hash, api_id, api_hash):
+    from telethon import TelegramClient
+    from telethon.errors import SessionPasswordNeededError
+    from telethon.sessions import StringSession
+
+    client = TelegramClient(StringSession(session_string or ''), api_id, api_hash)
+    try:
+        await client.connect()
+        try:
+            await client.sign_in(phone=phone, code=code, phone_code_hash=phone_code_hash)
+        except SessionPasswordNeededError:
+            return {
+                'requires_password': True,
+                'session_string': client.session.save(),
+            }
+        me = await client.get_me()
+        return {
+            'profile': _telethon_user_payload(me),
+            'requires_password': False,
+            'session_string': client.session.save(),
+        }
+    finally:
+        await client.disconnect()
+
+
+async def _telegram_sign_in_password_async(session_string, password, api_id, api_hash):
+    from telethon import TelegramClient
+    from telethon.sessions import StringSession
+
+    client = TelegramClient(StringSession(session_string or ''), api_id, api_hash)
+    try:
+        await client.connect()
+        await client.sign_in(password=password or '')
+        me = await client.get_me()
+        return {
+            'profile': _telethon_user_payload(me),
+            'session_string': client.session.save(),
+        }
+    finally:
+        await client.disconnect()
+
+
+async def _telegram_check_session_async(session_string, api_id, api_hash):
+    from telethon import TelegramClient
+    from telethon.sessions import StringSession
+
+    client = TelegramClient(StringSession(session_string or ''), api_id, api_hash)
+    try:
+        await client.connect()
+        if not await client.is_user_authorized():
+            return {'authorized': False, 'session_string': client.session.save()}
+        me = await client.get_me()
+        return {
+            'authorized': True,
+            'profile': _telethon_user_payload(me),
+            'session_string': client.session.save(),
+        }
+    finally:
+        await client.disconnect()
+
+
+async def _telegram_send_message_async(session_string, chat_id, text, api_id, api_hash):
+    from telethon import TelegramClient
+    from telethon.sessions import StringSession
+
+    client = TelegramClient(StringSession(session_string or ''), api_id, api_hash)
+    try:
+        await client.connect()
+        if not await client.is_user_authorized():
+            raise ValueError('Telegram 会话已失效，请重新登录账号。')
+        sent = await client.send_message(chat_id, text)
+        return {
+            'message_id': getattr(sent, 'id', None),
+            'created_at': _iso(getattr(sent, 'date', None) or timezone.now()),
+            'session_string': client.session.save(),
+        }
+    finally:
+        await client.disconnect()
 
 
 def _apply_keyword_filter(queryset, keyword, fields):
@@ -438,25 +972,34 @@ def auth_refresh(request):
 @dashboard_login_required
 @require_GET
 def auth_codes(request):
-    return _ok(['dashboard', 'users', 'cloud', 'finance', 'monitoring', 'settings'])
+    codes = ['dashboard', 'users', 'cloud', 'finance', 'monitoring', 'settings']
+    if request.user.is_superuser:
+        codes.append('superuser')
+    return _ok(codes)
 
 
 @dashboard_login_required
 @require_GET
 def user_info(request):
     username = request.user.get_username() or 'admin'
+    is_superuser = bool(request.user.is_superuser)
+    roles = ['superuser'] if is_superuser else ['staff']
+    permissions = ['superuser'] if is_superuser else []
     return _ok({
         'userId': str(request.user.pk),
         'username': username,
         'realName': request.user.get_full_name() or username,
         'avatar': '',
         'desc': 'Shop 管理后台管理员',
-        'homePath': '/admin/workspace',
+        'homePath': '/admin/cloud-assets',
+        'is_superuser': is_superuser,
+        'permissions': permissions,
+        'roles': roles,
         'token': f'session-{request.user.pk}',
     })
 
 
-@login_required
+@dashboard_login_required
 @require_GET
 def me(request):
     return _ok({
@@ -474,15 +1017,57 @@ def site_configs_list(request):
     return _ok([_site_config_payload(item) for item in queryset])
 
 
+def _dashboard_site_config_groups():
+    return {
+        'system': ['dashboard_totp_secret', 'text_init_enabled'],
+        'payment': ['receive_address', 'trongrid_api_key'],
+        'logs': [
+            'scanner_block_log_enabled', 'scanner_verbose', 'cloud_renew_notice_debug_repeat',
+            'cleanup_retention_days',
+        ],
+        'notifications': [
+            'bot_token', 'telegram_webhook_url', 'telegram_listener_push_enabled',
+            'telegram_listener_push_private_enabled', 'cloud_auto_renew_execution_notify_enabled',
+            'cloud_auto_renew_execution_notify_events', 'cloud_daily_expiry_summary_enabled',
+            'admin_password_notice',
+        ],
+        'telegram_login': ['telegram_api_id', 'telegram_api_hash'],
+        'lifecycle': [
+            'cloud_asset_sync_interval_seconds', 'cloud_renew_notice_days',
+            'cloud_suspend_after_days', 'cloud_suspend_time', 'cloud_delete_after_days',
+            'cloud_delete_time', 'cloud_unattached_ip_delete_after_days',
+            'cloud_unattached_ip_delete_time', 'fsm_state_ttl', 'fsm_data_ttl',
+        ],
+        'database': [
+            'database_url', 'db_host', 'db_port', 'db_name', 'db_user', 'db_password',
+            'redis_url', 'redis_port', 'redis_db',
+        ],
+        'custom_text': [
+            'bot_custom_quantity_title', 'bot_custom_quantity_hint', 'bot_custom_payment_title',
+            'bot_custom_payment_hint', 'bot_custom_wallet_title', 'bot_custom_pending_order',
+            'bot_custom_pending_wallet', 'bot_custom_order_notice', 'bot_custom_port_hint',
+            'bot_custom_balance_insufficient',
+        ],
+        'aws': ['aws_access_key_id', 'aws_secret_access_key', 'aws_region'],
+        'aliyun': ['alibaba_cloud_account_id', 'aliyun_account_id', 'aliyun_region'],
+    }
+
+
 @csrf_exempt
 @dashboard_login_required
 @require_POST
 def init_site_configs(request):
     created = 0
-    for key in CONFIG_HELP:
+    keys = set(CONFIG_HELP)
+    for group_keys in _dashboard_site_config_groups().values():
+        keys.update(group_keys)
+    for key in sorted(keys):
         _, was_created = SiteConfig.objects.get_or_create(
             key=key,
-            defaults={'value': '', 'is_sensitive': key in SENSITIVE_CONFIG_KEYS},
+            defaults={
+                'value': DASHBOARD_CONFIG_DEFAULTS.get(key, ''),
+                'is_sensitive': key in DASHBOARD_SENSITIVE_CONFIG_KEYS,
+            },
         )
         created += int(was_created)
     return _ok({'created': created})
@@ -495,12 +1080,190 @@ def update_site_config(request, config_id: int):
     item = SiteConfig.objects.filter(id=config_id).first()
     if not item:
         return _error('配置不存在', status=404)
-    data = request.POST or request.GET
-    item.is_sensitive = str(data.get('is_sensitive', item.is_sensitive)).lower() in {'1', 'true', 'yes', 'on'}
+    data = _read_payload(request) or request.GET
+    item.is_sensitive = (
+        str(data.get('is_sensitive', item.is_sensitive)).lower() in {'1', 'true', 'yes', 'on'}
+        or item.key in DASHBOARD_SENSITIVE_CONFIG_KEYS
+    )
+    preserve_existing = str(data.get('preserve_existing', '')).lower() in {'1', 'true', 'yes', 'on'}
+    if preserve_existing and item.is_sensitive:
+        item.save(update_fields=['is_sensitive', 'updated_at'])
+        return _ok(_site_config_payload(item))
     value = data.get('value')
     SiteConfig.set(item.key, '' if value is None else str(value), sensitive=item.is_sensitive)
     item = SiteConfig.objects.get(id=item.id)
     return _ok(_site_config_payload(item))
+
+
+@csrf_exempt
+@dashboard_login_required
+@require_POST
+def init_text_configs(request):
+    payload = _read_payload(request)
+    mode = payload.get('mode') or 'missing_only'
+    created = 0
+    updated = 0
+    for key, default_value in DASHBOARD_TEXT_CONFIG_DEFAULTS.items():
+        obj, was_created = SiteConfig.objects.get_or_create(
+            key=key,
+            defaults={'value': default_value, 'is_sensitive': False},
+        )
+        if was_created:
+            created += 1
+        elif mode == 'reset_defaults':
+            obj.value = default_value
+            obj.is_sensitive = False
+            obj.save(update_fields=['value', 'is_sensitive'])
+            updated += 1
+    return _ok({'created': created, 'updated': updated, 'mode': mode})
+
+
+@csrf_exempt
+@dashboard_login_required
+@require_POST
+def test_daily_expiry_summary(request):
+    return _ok({'expired': 0, 'sent': 0, 'today': 0})
+
+
+@csrf_exempt
+@dashboard_login_required
+@require_POST
+def start_totp_bind(request):
+    secret = base64.b32encode(secrets.token_bytes(10)).decode('ascii').rstrip('=')
+    label = quote(f"Shop Admin:{request.user.get_username() or 'admin'}")
+    issuer = quote('Shop Admin')
+    otpauth_url = f'otpauth://totp/{label}?secret={secret}&issuer={issuer}'
+    SiteConfig.set('dashboard_totp_pending_secret', secret, sensitive=True)
+    return _ok({'enabled': bool(SiteConfig.get('dashboard_totp_secret', '')), 'secret': secret, 'otpauthUrl': otpauth_url})
+
+
+@csrf_exempt
+@dashboard_login_required
+@require_POST
+def bind_totp(request):
+    payload = _read_payload(request)
+    token = str(payload.get('otp_token') or '').strip()
+    if len(token) != 6 or not token.isdigit():
+        return _error('请输入 6 位动态码', status=400)
+    pending_secret = SiteConfig.get('dashboard_totp_pending_secret', '')
+    if not pending_secret:
+        return _error('请先生成绑定二维码', status=400)
+    SiteConfig.set('dashboard_totp_secret', pending_secret, sensitive=True)
+    SiteConfig.set('dashboard_totp_pending_secret', '', sensitive=True)
+    return _ok({'enabled': True})
+
+
+@dashboard_login_required
+@require_GET
+def admin_users_list(request):
+    denied = _require_superuser(request)
+    if denied:
+        return denied
+    User = get_user_model()
+    queryset = User.objects.order_by('-is_superuser', '-is_staff', 'username', 'id')
+    return _ok([_admin_user_payload(item) for item in queryset])
+
+
+@csrf_exempt
+@dashboard_login_required
+@require_POST
+def create_admin_user(request):
+    denied = _require_superuser(request)
+    if denied:
+        return denied
+    payload = _read_payload(request)
+    username = str(payload.get('username') or '').strip()
+    password = str(payload.get('password') or '').strip()
+    if not username:
+        return _error('用户名不能为空')
+    if not password:
+        return _error('新管理员密码不能为空')
+    User = get_user_model()
+    user = User(
+        username=username,
+        email=str(payload.get('email') or '').strip(),
+        is_active=bool(payload.get('is_active', True)),
+        is_staff=True,
+        is_superuser=bool(payload.get('is_superuser', False)),
+    )
+    user.set_password(password)
+    try:
+        user.save()
+    except IntegrityError:
+        return _error('用户名已存在')
+    return _ok(_admin_user_payload(user))
+
+
+@csrf_exempt
+@dashboard_login_required
+@require_POST
+def update_admin_user(request, user_id):
+    denied = _require_superuser(request)
+    if denied:
+        return denied
+    User = get_user_model()
+    user = User.objects.filter(pk=user_id).first()
+    if not user:
+        return _error('管理员不存在', status=404)
+    payload = _read_payload(request)
+    username = str(payload.get('username') or user.get_username()).strip()
+    if not username:
+        return _error('用户名不能为空')
+    is_active = bool(payload.get('is_active', user.is_active))
+    is_superuser = bool(payload.get('is_superuser', user.is_superuser))
+    if user.id == request.user.id and (not is_active or not is_superuser):
+        return _error('不能停用当前账号或取消自己的超级管理员权限')
+    user.username = username
+    user.email = str(payload.get('email') or '').strip()
+    user.is_active = is_active
+    user.is_staff = True
+    user.is_superuser = is_superuser
+    password = str(payload.get('password') or '').strip()
+    if password:
+        user.set_password(password)
+    try:
+        user.save()
+    except IntegrityError:
+        return _error('用户名已存在')
+    return _ok(_admin_user_payload(user))
+
+
+@csrf_exempt
+@dashboard_login_required
+@require_POST
+def delete_admin_user(request, user_id):
+    denied = _require_superuser(request)
+    if denied:
+        return denied
+    User = get_user_model()
+    user = User.objects.filter(pk=user_id).first()
+    if not user:
+        return _error('管理员不存在', status=404)
+    if user.id == request.user.id:
+        return _error('不能删除当前登录账号')
+    if user.is_superuser and User.objects.filter(is_active=True, is_superuser=True).exclude(pk=user.id).count() == 0:
+        return _error('不能删除最后一个超级管理员')
+    user.delete()
+    return _ok(True)
+
+
+@csrf_exempt
+@dashboard_login_required
+@require_POST
+def change_admin_password(request):
+    payload = _read_payload(request)
+    old_password = str(payload.get('old_password') or '')
+    new_password = str(payload.get('new_password') or '')
+    confirm_password = str(payload.get('confirm_password') or '')
+    if not request.user.check_password(old_password):
+        return _error('旧密码不正确')
+    if not new_password:
+        return _error('新密码不能为空')
+    if new_password != confirm_password:
+        return _error('两次输入的新密码不一致')
+    request.user.set_password(new_password)
+    request.user.save(update_fields=['password'])
+    return _ok(True)
 
 
 @dashboard_login_required
@@ -691,7 +1454,63 @@ def delete_server(request, server_id: int):
     return _ok(True)
 
 
-@login_required
+@csrf_exempt
+@dashboard_login_required
+@require_POST
+def rebuild_server_preserve_link(request, server_id: int):
+    denied = _require_superuser(request)
+    if denied:
+        return denied
+    server = Server.objects.select_related('order').filter(id=server_id).first()
+    if not server:
+        return _error('服务器不存在', status=404)
+    order = server.order
+    if not order:
+        return _error('服务器未关联云订单，无法创建迁移单')
+    existing = order.replacement_orders.order_by('-created_at').first()
+    if existing:
+        return _ok({
+            'accepted': True,
+            'message': '已存在保留链接迁移单',
+            'order_id': existing.id,
+            'order_no': existing.order_no,
+            'replacement_for_id': order.id,
+        })
+    try:
+        new_order = async_to_sync(mark_cloud_server_ip_change_requested)(
+            order.id,
+            order.user_id,
+            order.region_code,
+            order.mtproxy_port or 9528,
+        )
+    except IntegrityError:
+        existing = order.replacement_orders.order_by('-created_at').first()
+        if existing:
+            return _ok({
+                'accepted': True,
+                'message': '已存在保留链接迁移单',
+                'order_id': existing.id,
+                'order_no': existing.order_no,
+                'replacement_for_id': order.id,
+            })
+        return _error('创建迁移单失败：订单号已存在')
+    except Exception as exc:
+        return _error(f'创建迁移单失败: {exc}', status=500)
+    if new_order is False:
+        return _error('当前订单状态不可创建保留链接迁移单')
+    if not new_order:
+        return _error('未找到可用于迁移的订单或套餐')
+    async_to_sync(provision_cloud_server)(new_order.id)
+    return _ok({
+        'accepted': True,
+        'message': '保留链接迁移单已创建',
+        'order_id': new_order.id,
+        'order_no': new_order.order_no,
+        'replacement_for_id': order.id,
+    })
+
+
+@dashboard_login_required
 @require_GET
 def overview(request):
     users_total = TelegramUser.objects.count()
@@ -748,7 +1567,7 @@ def overview(request):
     })
 
 
-@login_required
+@dashboard_login_required
 @require_GET
 def users_list(request):
     keyword = _get_keyword(request)
@@ -874,7 +1693,7 @@ def update_user_discount(request, user_id):
     })
 
 
-@login_required
+@dashboard_login_required
 @require_GET
 def user_balance_details(request, user_id):
     user = TelegramUser.objects.prefetch_related('telegramusernames').filter(pk=user_id).first()
@@ -966,7 +1785,7 @@ def user_balance_details(request, user_id):
     })
 
 
-@login_required
+@dashboard_login_required
 @require_GET
 def products_list(request):
     keyword = _get_keyword(request)
@@ -1097,7 +1916,651 @@ def tasks_overview(request):
     return _ok(items)
 
 
-@login_required
+def _notice_switches():
+    return [
+        {'key': 'renew_notice', 'label': '续费提醒', 'notice_type': 'renew_notice', 'enabled': True},
+        {'key': 'auto_renew_notice', 'label': '自动续费提醒', 'notice_type': 'auto_renew_notice', 'enabled': True},
+        {'key': 'delete_notice', 'label': '删除提醒', 'notice_type': 'delete_notice', 'enabled': True},
+        {'key': 'recycle_notice', 'label': 'IP 回收提醒', 'notice_type': 'recycle_notice', 'enabled': True},
+    ]
+
+
+def _empty_run_result(message='本地开发环境暂无待执行任务'):
+    return {
+        'batch_id': '',
+        'success_count': 0,
+        'failure_count': 0,
+        'total': 0,
+        'items': [],
+        'message': message,
+    }
+
+
+def _cloud_task_user_payload(user):
+    if not user:
+        return {
+            'user_id': None,
+            'tg_user_id': None,
+            'user_display_name': '未绑定用户',
+            'username_label': '-',
+        }
+    usernames = user.usernames
+    payload = _user_payload({
+        'id': user.id,
+        'tg_user_id': user.tg_user_id,
+        'username': user.username,
+        'first_name': user.first_name,
+        'usernames': usernames,
+        'primary_username': usernames[0] if usernames else '',
+    })
+    return {
+        'user_id': user.id,
+        'tg_user_id': user.tg_user_id,
+        'user_display_name': payload['display_name'],
+        'username_label': payload['username_label'],
+    }
+
+
+def _task_time_state(target):
+    if not target:
+        return ('scheduled', '未设置时间')
+    return ('pending', '待执行') if target <= timezone.now() else ('scheduled', '已计划')
+
+
+def _shutdown_plan_item(order, *, item_type='order', asset=None, is_history=False):
+    time_state, time_label = _task_time_state(order.delete_at)
+    if order.status == 'deleted':
+        plan_state, plan_state_label = ('completed', '已删除')
+        resource_state, resource_state_label = ('instance_deleted_ip_retained', '实例已删，固定 IP 保留')
+    else:
+        plan_state, plan_state_label = time_state, time_label
+        resource_state, resource_state_label = ('instance_present', '实例仍存在')
+    public_ip = order.public_ip or order.previous_public_ip or getattr(asset, 'public_ip', '') or ''
+    note = order.provision_note or getattr(asset, 'note', '') or ''
+    return {
+        **_cloud_task_user_payload(order.user),
+        'id': f'{item_type}-{order.id}',
+        'asset_id': getattr(asset, 'id', None),
+        'asset_name': getattr(asset, 'asset_name', None) or order.server_name or order.instance_id or public_ip,
+        'order_id': order.id,
+        'order_no': order.order_no,
+        'item_type': item_type,
+        'ip': public_ip,
+        'service_expires_at': _iso(order.service_expires_at),
+        'suspend_at': _iso(order.suspend_at),
+        'delete_at': _iso(order.delete_at),
+        'ip_recycle_at': _iso(order.ip_recycle_at),
+        'status': order.status,
+        'status_label': _status_label(order.status, CloudServerOrder.STATUS_CHOICES),
+        'provider': order.provider,
+        'provider_label': _provider_label(order.provider),
+        'queue_status': 'history' if is_history else ('due_now' if order.delete_at and order.delete_at <= timezone.now() else 'scheduled'),
+        'queue_status_label': '历史记录' if is_history else ('到期待删' if order.delete_at and order.delete_at <= timezone.now() else '计划中'),
+        'resource_state': resource_state,
+        'resource_state_label': resource_state_label,
+        'plan_state': plan_state,
+        'plan_state_label': plan_state_label,
+        'should_execute': bool(order.status in {'suspended', 'deleting'} and order.delete_at and order.delete_at <= timezone.now()),
+        'execution_status': note or plan_state_label,
+        'note': note,
+        'display_note': note,
+        'detail_path': f'/admin/cloud-orders/{order.id}',
+        'related_path': f'/admin/cloud-orders/{order.id}',
+        'next_run_at': _iso(order.delete_at),
+    }
+
+
+def _shutdown_history_item(order):
+    item = _shutdown_plan_item(order, is_history=True)
+    return {
+        **item,
+        'id': f'order-history-{order.id}',
+        'executed_at': _iso(order.updated_at),
+        'is_success': order.status == 'deleted',
+        'result_label': '已删除' if order.status == 'deleted' else '未完成',
+        'failure_reason': '' if order.status == 'deleted' else (order.provision_note or ''),
+        'deletion_source_label': '订单生命周期',
+    }
+
+
+def _ip_delete_item_from_order(order, *, is_history=False):
+    time_state, time_label = _task_time_state(order.ip_recycle_at)
+    active_ip = order.public_ip or ''
+    previous_ip = order.previous_public_ip or active_ip
+    released = order.status == 'deleted' and not order.public_ip and not order.static_ip_name
+    if released:
+        plan_state, plan_state_label = ('completed', '已释放')
+        resource_state, resource_state_label = ('cloud_missing', '固定 IP 已释放')
+    else:
+        plan_state, plan_state_label = time_state, time_label
+        resource_state, resource_state_label = ('fixed_ip_unattached', '固定 IP 保留中')
+    note = order.provision_note or ''
+    return {
+        **_cloud_task_user_payload(order.user),
+        'id': order.id,
+        'asset_id': order.id,
+        'asset_name': order.static_ip_name or order.server_name or previous_ip or order.order_no,
+        'public_ip': active_ip or previous_ip,
+        'provider_status': '固定IP保留' if not released else '已释放',
+        'delete_at': _iso(order.ip_recycle_at),
+        'service_expires_at': _iso(order.service_expires_at),
+        'note': note,
+        'display_note': note,
+        'logged_at': _iso(order.updated_at),
+        'is_history': is_history or released,
+        'is_overdue': bool(order.ip_recycle_at and order.ip_recycle_at <= timezone.now()),
+        'deletion_source_label': '订单固定 IP',
+        'execution_status': note or plan_state_label,
+        'plan_state': plan_state,
+        'plan_state_label': plan_state_label,
+        'resource_state': resource_state,
+        'resource_state_label': resource_state_label,
+        'should_execute': bool(order.status == 'deleted' and order.ip_recycle_at and order.ip_recycle_at <= timezone.now() and (order.public_ip or order.static_ip_name)),
+        'detail_path': f'/admin/cloud-orders/{order.id}',
+        'asset_detail_path': f'/admin/cloud-orders/{order.id}',
+    }
+
+
+def _site_int_config(key, default):
+    raw = SiteConfig.get(key, str(default))
+    try:
+        return int(raw)
+    except (TypeError, ValueError):
+        return default
+
+
+def _static_ip_asset_delete_at(asset):
+    days = max(_site_int_config('cloud_unattached_ip_delete_after_days', 15), 0)
+    return asset.created_at + timezone.timedelta(days=days)
+
+
+def _ip_delete_item_from_asset(asset, *, is_history=False):
+    delete_at = _static_ip_asset_delete_at(asset)
+    released = asset.status == CloudAsset.STATUS_DELETED or str(asset.provider_status or '').lower() == 'released'
+    time_state, time_label = _task_time_state(delete_at)
+    if released:
+        plan_state, plan_state_label = ('completed', '已释放')
+        resource_state, resource_state_label = ('cloud_missing', '固定 IP 已释放')
+    else:
+        plan_state, plan_state_label = time_state, time_label
+        resource_state, resource_state_label = ('fixed_ip_unattached', '固定 IP 未附加')
+    return {
+        **_cloud_task_user_payload(asset.user),
+        'id': asset.id,
+        'asset_id': asset.id,
+        'asset_name': asset.asset_name or asset.public_ip or f'asset-{asset.id}',
+        'public_ip': asset.public_ip or asset.previous_public_ip or '',
+        'provider_status': asset.provider_status or 'unattached',
+        'delete_at': _iso(delete_at),
+        'service_expires_at': _iso(asset.actual_expires_at),
+        'note': asset.note or '',
+        'display_note': asset.note or '',
+        'logged_at': _iso(asset.updated_at),
+        'is_history': is_history or released,
+        'is_overdue': bool(delete_at and delete_at <= timezone.now()),
+        'deletion_source_label': '未附加固定 IP',
+        'execution_status': asset.note or plan_state_label,
+        'plan_state': plan_state,
+        'plan_state_label': plan_state_label,
+        'resource_state': resource_state,
+        'resource_state_label': resource_state_label,
+        'should_execute': bool(not released and delete_at <= timezone.now()),
+        'detail_path': f'/admin/cloud-assets/{asset.id}',
+        'asset_detail_path': f'/admin/cloud-assets/{asset.id}',
+    }
+
+
+def _lifecycle_plan_payload(refreshed=False):
+    now = timezone.now()
+    orders = list(
+        CloudServerOrder.objects.select_related('user').filter(
+            status__in=['suspended', 'deleting', 'deleted'],
+        ).order_by('delete_at', 'ip_recycle_at', '-updated_at')[:300]
+    )
+    static_ip_assets = list(
+        CloudAsset.objects.select_related('user').filter(
+            kind=CloudAsset.KIND_MTPROXY,
+            source=CloudAsset.SOURCE_AWS_SYNC,
+            provider='aws_lightsail',
+        ).filter(
+            Q(provider_status__icontains='unattached')
+            | Q(provider_status__icontains='固定IP')
+            | Q(provider_status='released')
+        ).order_by('created_at', '-updated_at')[:300]
+    )
+    due_items = [
+        _shutdown_plan_item(order)
+        for order in orders
+        if order.status in {'suspended', 'deleting'} and order.delete_at and order.delete_at <= now
+    ]
+    future_items = [
+        _shutdown_plan_item(order)
+        for order in orders
+        if order.status in {'suspended', 'deleting'} and (not order.delete_at or order.delete_at > now)
+    ]
+    history_items = [_shutdown_history_item(order) for order in orders if order.status == 'deleted']
+    ip_delete_items = [
+        _ip_delete_item_from_order(order, is_history=not (order.public_ip or order.static_ip_name))
+        for order in orders
+        if order.status == 'deleted'
+    ]
+    ip_delete_items.extend(
+        _ip_delete_item_from_asset(asset, is_history=asset.status == CloudAsset.STATUS_DELETED)
+        for asset in static_ip_assets
+    )
+    pending_ip_delete_items = [
+        item for item in ip_delete_items
+        if not item['is_history']
+        and (
+            item.get('is_overdue')
+            or (
+                item.get('delete_at')
+                and parse_datetime(item['delete_at'])
+                and parse_datetime(item['delete_at']) <= now + timezone.timedelta(days=7)
+            )
+        )
+    ]
+    ip_due_count = len([item for item in pending_ip_delete_items if item.get('is_overdue')])
+    return {
+        'task_key': 'lifecycle_plans',
+        'task_label': '删除计划',
+        'status_label': f'待删机 {len(due_items)} / 待释放 IP {ip_due_count}',
+        'interval_minutes': 60,
+        'last_run_at': None,
+        'last_refresh_at': _iso(now),
+        'next_run_at': _iso(min([o.delete_at for o in orders if o.delete_at and o.delete_at > now] + [o.ip_recycle_at for o in orders if o.ip_recycle_at and o.ip_recycle_at > now], default=None)),
+        'due_count': len(due_items),
+        'due_items': due_items,
+        'future_plan_items': future_items,
+        'history_items': history_items,
+        'ip_delete_count': len(ip_delete_items),
+        'ip_delete_due_count': ip_due_count,
+        'ip_delete_history_count': len([item for item in ip_delete_items if item['is_history']]),
+        'ip_delete_items': ip_delete_items,
+        'pending_ip_delete_count': len(pending_ip_delete_items),
+        'recent_failure_count': 0,
+        'recent_success_count': len(history_items),
+        'server_delete_history_count': len(history_items),
+        'shutdown_count': len(due_items) + len(future_items),
+        'shutdown_due_count': len(due_items),
+        'shutdown_items': due_items,
+        'cache_mode': 'refreshed' if refreshed else 'live-db',
+        'refreshed': refreshed,
+    }
+
+
+def _notice_type_label(notice_type):
+    return {
+        'renew_notice': '续费提醒',
+        'delete_notice': '删除提醒',
+        'recycle_notice': 'IP 回收提醒',
+    }.get(notice_type, notice_type or '-')
+
+
+def _notice_channel_payload(user):
+    if not user:
+        return ('unbound', '未绑定用户', [{'channel': 'unbound', 'label': '未绑定用户', 'status': 'failed', 'status_label': '不可发送', 'error': '未绑定用户'}])
+    return ('telegram_user', 'Telegram 用户', [{'channel': 'telegram_user', 'label': 'Telegram 用户', 'status': 'pending', 'status_label': '待发送', 'error': ''}])
+
+
+def _notice_text(order, notice_type):
+    if notice_type == 'renew_notice':
+        return f'云服务器到期提醒：订单 {order.order_no} 将于 {order.service_expires_at} 到期，请及时续费。'
+    if notice_type == 'delete_notice':
+        return f'云服务器删机提醒：订单 {order.order_no} 计划于 {order.delete_at} 删除实例。'
+    if notice_type == 'recycle_notice':
+        return f'固定 IP 删除提醒：订单 {order.order_no} 计划于 {order.ip_recycle_at} 释放固定 IP。'
+    return f'云服务器通知：订单 {order.order_no}'
+
+
+def _notice_item(order, notice_type, notice_at, *, is_history=False):
+    channel, channel_label, attempts = _notice_channel_payload(order.user)
+    text = _notice_text(order, notice_type)
+    sent_field = {
+        'renew_notice': order.renew_notice_sent_at,
+        'delete_notice': order.delete_notice_sent_at,
+        'recycle_notice': order.recycle_notice_sent_at,
+    }.get(notice_type)
+    status = 'sent' if sent_field else ('pending' if notice_at and notice_at <= timezone.now() else 'scheduled_soon')
+    return {
+        **_cloud_task_user_payload(order.user),
+        'id': f'{notice_type}-{order.id}',
+        'order_id': order.id,
+        'order_no': order.order_no,
+        'ip': order.public_ip or order.previous_public_ip or '',
+        'provider': order.provider,
+        'provider_label': _provider_label(order.provider),
+        'status': order.status,
+        'status_label': _status_label(order.status, CloudServerOrder.STATUS_CHOICES),
+        'service_expires_at': _iso(order.service_expires_at),
+        'suspend_at': _iso(order.suspend_at),
+        'delete_at': _iso(order.delete_at),
+        'ip_recycle_at': _iso(order.ip_recycle_at),
+        'notice_at': _iso(notice_at),
+        'next_notice_at': _iso(notice_at),
+        'auto_renew_at': None,
+        'notice_type': notice_type,
+        'notice_type_label': _notice_type_label(notice_type),
+        'notice_channel': channel,
+        'notice_channel_label': channel_label,
+        'notice_channel_attempts': attempts,
+        'notice_status': status,
+        'notice_status_label': {'sent': '已发送', 'pending': '待发送', 'scheduled_soon': '计划中'}.get(status, status),
+        'notice_text_preview': text,
+        'retry_label': '失败后下次任务重试',
+        'queue_status': 'history' if is_history else ('due_now' if notice_at and notice_at <= timezone.now() else 'scheduled'),
+        'queue_status_label': '历史记录' if is_history else ('待发送' if notice_at and notice_at <= timezone.now() else '计划中'),
+        'detail_path': f'/admin/cloud-orders/{order.id}',
+        'related_path': f'/admin/cloud-orders/{order.id}',
+    }
+
+
+def _notice_summary_item(item):
+    return {
+        'id': f"{item['notice_type']}-{item['user_id'] or 'unbound'}",
+        'user_id': item['user_id'],
+        'tg_user_id': item['tg_user_id'],
+        'user_display_name': item['user_display_name'],
+        'username_label': item['username_label'],
+        'notice_type': item['notice_type'],
+        'notice_type_label': item['notice_type_label'],
+        'notice_event': item['notice_type'],
+        'notice_channel': item['notice_channel'],
+        'notice_channel_label': item['notice_channel_label'],
+        'notice_channel_attempts': item['notice_channel_attempts'],
+        'notice_count': 1,
+        'pending_count': 1 if item['notice_status'] != 'sent' else 0,
+        'failed_retry_count': 0,
+        'ip_count': 1 if item['ip'] else 0,
+        'ips': [item['ip']] if item['ip'] else [],
+        'order_ids': [item['order_id']] if item['order_id'] else [],
+        'next_notice_at': item['next_notice_at'],
+        'notice_text_preview': item['notice_text_preview'],
+        'notice_has_manual_text': False,
+        'notice_manual_text': '',
+        'notice_override_key': f"{item['notice_type']}:{item['user_id'] or 'unbound'}",
+        'retry_label': item['retry_label'],
+        'related_path': item['related_path'],
+    }
+
+
+def _notice_plan_payload(refreshed=False):
+    now = timezone.now()
+    renew_window = now + timezone.timedelta(days=5)
+    delete_window = now + timezone.timedelta(days=1)
+    recycle_window = now + timezone.timedelta(days=1)
+    items = []
+    for order in CloudServerOrder.objects.select_related('user').filter(
+        status__in=['completed', 'expiring', 'renew_pending'],
+        service_expires_at__isnull=False,
+        service_expires_at__lte=renew_window,
+        service_expires_at__gt=now,
+        renew_notice_sent_at__isnull=True,
+    )[:100]:
+        items.append(_notice_item(order, 'renew_notice', order.service_expires_at))
+    for order in CloudServerOrder.objects.select_related('user').filter(
+        status__in=['suspended', 'deleting'],
+        delete_at__isnull=False,
+        delete_at__lte=delete_window,
+        delete_at__gt=now,
+        delete_notice_sent_at__isnull=True,
+    )[:100]:
+        items.append(_notice_item(order, 'delete_notice', order.delete_at))
+    for order in CloudServerOrder.objects.select_related('user').filter(
+        status='deleted',
+        ip_recycle_at__isnull=False,
+        ip_recycle_at__lte=recycle_window,
+        ip_recycle_at__gt=now,
+        recycle_notice_sent_at__isnull=True,
+    )[:100]:
+        items.append(_notice_item(order, 'recycle_notice', order.ip_recycle_at))
+    history_items = []
+    sent_filters = (
+        ('renew_notice', 'renew_notice_sent_at'),
+        ('delete_notice', 'delete_notice_sent_at'),
+        ('recycle_notice', 'recycle_notice_sent_at'),
+    )
+    for notice_type, field in sent_filters:
+        for order in CloudServerOrder.objects.select_related('user').filter(**{f'{field}__isnull': False}).order_by(f'-{field}')[:30]:
+            item = _notice_item(order, notice_type, getattr(order, field), is_history=True)
+            item.update({
+                'batch_id': '',
+                'created_at': _iso(getattr(order, field)),
+                'delivered': True,
+                'result_label': '已标记发送',
+                'target_chat_id': order.user.tg_user_id if order.user else None,
+                'text_preview': item['notice_text_preview'],
+                'ip_count': 1 if item['ip'] else 0,
+                'ips': [item['ip']] if item['ip'] else [],
+            })
+            history_items.append(item)
+    history_items.sort(key=lambda item: item.get('created_at') or '', reverse=True)
+    due_items = [item for item in items if item['notice_at'] and parse_datetime(item['notice_at']) and parse_datetime(item['notice_at']) <= now]
+    future_items = [item for item in items if item not in due_items]
+    return {
+        'task_key': 'notice_plans',
+        'task_label': '通知计划',
+        'status_label': f'待发送 {len(due_items)} / 计划中 {len(future_items)}',
+        'interval_minutes': 60,
+        'last_run_at': None,
+        'last_refresh_at': _iso(now),
+        'next_run_at': _iso(min([parse_datetime(item['notice_at']) for item in future_items if item.get('notice_at') and parse_datetime(item['notice_at'])], default=None)),
+        'due_count': len(due_items),
+        'due_items': due_items,
+        'due_user_count': len({item['user_id'] for item in due_items}),
+        'due_user_summary_items': [_notice_summary_item(item) for item in due_items],
+        'future_count': len(future_items),
+        'future_plan_items': future_items,
+        'future_user_count': len({item['user_id'] for item in future_items}),
+        'future_user_summary_items': [_notice_summary_item(item) for item in future_items],
+        'history_count': len(history_items),
+        'history_items': history_items[:100],
+        'notice_switches': _notice_switches(),
+        'recent_failure_count': 0,
+        'recent_failure_user_count': 0,
+        'recent_success_count': len(history_items),
+        'recent_success_user_count': len({item['user_id'] for item in history_items}),
+        'retry_policy_label': '失败后按任务配置重试',
+    }
+
+
+@dashboard_login_required
+@require_GET
+def lifecycle_plans(request):
+    return _ok(_lifecycle_plan_payload())
+
+
+@csrf_exempt
+@dashboard_login_required
+@require_POST
+def refresh_lifecycle_plans(request):
+    payload = _lifecycle_plan_payload(refreshed=True)
+    return _ok({
+        **payload,
+        'future_count': len(payload['future_plan_items']),
+        'history_count': len(payload['history_items']),
+    })
+
+
+@csrf_exempt
+@dashboard_login_required
+@require_POST
+def update_lifecycle_plan_note(request):
+    payload = _read_payload(request)
+    note = payload.get('note') or ''
+    item_type = str(payload.get('item_type') or '')
+    order_id = payload.get('order_id')
+    asset_id = payload.get('asset_id')
+    target_id = str(payload.get('id') or '').split('-')[-1]
+    if order_id or (target_id.isdigit() and item_type != 'static_ip_asset' and not asset_id):
+        resolved_id = int(order_id or target_id)
+        order = CloudServerOrder.objects.filter(id=resolved_id).first()
+        if order:
+            order.provision_note = note
+            order.save(update_fields=['provision_note', 'updated_at'])
+            CloudAsset.objects.filter(order=order).update(note=note, updated_at=timezone.now())
+            Server.objects.filter(order=order).update(note=note, updated_at=timezone.now())
+    elif asset_id or target_id.isdigit():
+        resolved_id = int(asset_id or target_id)
+        asset = CloudAsset.objects.filter(id=resolved_id).first()
+        if asset:
+            asset.note = note
+            asset.save(update_fields=['note', 'updated_at'])
+    return _ok({'note': note, 'display_note': note})
+
+
+def _run_static_ip_asset_release(asset_id):
+    asset = CloudAsset.objects.filter(id=asset_id).first()
+    if not asset:
+        return None, _empty_run_result('未附加 IP 计划不存在')
+    result = async_to_sync(release_aws_static_ip_asset)(asset)
+    ok = result.ok
+    updated = async_to_sync(mark_static_ip_asset_released)(asset.id, result.note) if ok else asset
+    return updated, {
+        'batch_id': f'manual-{timezone.now().strftime("%Y%m%d%H%M%S")}',
+        'success_count': 1 if ok else 0,
+        'failure_count': 0 if ok else 1,
+        'total': 1,
+        'items': [{
+            'id': updated.id,
+            'order_id': None,
+            'ok': ok,
+            'ip': updated.public_ip or updated.previous_public_ip or '',
+            'order_no': '',
+            'queue_status': 'done' if ok else 'failed',
+            'error': '' if ok else result.note,
+            'message': result.note,
+        }],
+        'message': 'IP 删除完成' if ok else 'IP 删除失败',
+    }
+
+
+@csrf_exempt
+@dashboard_login_required
+@require_POST
+def run_lifecycle_plan_item(request, *args, **kwargs):
+    order_id = kwargs.get('order_id') or kwargs.get('asset_id')
+    is_ip_release = 'unattached-ips' in request.path
+    if is_ip_release and 'unattached-ips' in request.path:
+        asset = CloudAsset.objects.filter(
+            id=order_id,
+            kind=CloudAsset.KIND_MTPROXY,
+            source=CloudAsset.SOURCE_AWS_SYNC,
+            provider='aws_lightsail',
+        ).first()
+        if asset:
+            _, result = _run_static_ip_asset_release(order_id)
+            return _ok(result)
+    order = CloudServerOrder.objects.filter(id=order_id).first()
+    if not order:
+        return _error('计划项不存在', status=404)
+    if is_ip_release:
+        result = async_to_sync(_release_static_ip)(order)
+        ok = result.ok
+        updated = async_to_sync(_mark_recycled)(order.id, result.note) if ok else order
+        label = 'IP 删除完成' if ok else 'IP 删除失败'
+    else:
+        result = async_to_sync(_delete_instance)(order)
+        ok = result.ok
+        updated = async_to_sync(_mark_deleted)(order.id, result.note) if ok else order
+        label = '服务器删除完成' if ok else '服务器删除失败'
+    return _ok({
+        'batch_id': f'manual-{timezone.now().strftime("%Y%m%d%H%M%S")}',
+        'success_count': 1 if ok else 0,
+        'failure_count': 0 if ok else 1,
+        'total': 1,
+        'items': [{
+            'id': updated.id,
+            'order_id': updated.id,
+            'ok': ok,
+            'ip': updated.public_ip or updated.previous_public_ip or '',
+            'order_no': updated.order_no,
+            'queue_status': 'done' if ok else 'failed',
+            'error': '' if ok else result.note,
+            'message': result.note,
+        }],
+        'message': label,
+    })
+
+
+@dashboard_login_required
+@require_GET
+def notice_plans(request):
+    return _ok(_notice_plan_payload())
+
+
+@csrf_exempt
+@dashboard_login_required
+@require_POST
+def refresh_notice_plans(request):
+    return _ok({**_notice_plan_payload(refreshed=True), 'refreshed': True})
+
+
+@csrf_exempt
+@dashboard_login_required
+@require_POST
+def delete_notice_history(request, log_id):
+    return _ok({'deleted': True, 'reset_count': 0})
+
+
+@csrf_exempt
+@dashboard_login_required
+@require_POST
+def update_notice_switches(request):
+    payload = _read_payload(request)
+    return _ok({'notice_switches': payload.get('switches') or _notice_switches()})
+
+
+@csrf_exempt
+@dashboard_login_required
+@require_POST
+def update_notice_text(request):
+    payload = _read_payload(request)
+    notice_type = payload.get('event') or payload.get('notice_type') or 'notice'
+    user_id = payload.get('user_id') or payload.get('tg_user_id') or 'all'
+    return _ok({
+        'notice_has_manual_text': bool(payload.get('notice_text')),
+        'notice_manual_text': payload.get('notice_text') or '',
+        'notice_override_key': f"{notice_type}:{user_id}",
+    })
+
+
+@dashboard_login_required
+@require_GET
+def auto_renew_tasks(request):
+    return _ok({
+        'task_key': 'auto_renew',
+        'task_label': '续费列表',
+        'status_label': '暂无待续费订单',
+        'interval_minutes': 60,
+        'last_run_at': None,
+        'last_refresh_at': None,
+        'next_run_at': None,
+        'due_count': 0,
+        'due_items': [],
+        'future_plan_items': [],
+        'history_items': [],
+        'latest_batch_count': 0,
+        'latest_batch_failure_count': 0,
+        'latest_batch_id': '',
+        'latest_batch_success_count': 0,
+        'latest_failed_ips': [],
+        'notice_switches': _notice_switches(),
+        'recent_failure_count': 0,
+        'recent_success_count': 0,
+        'cache_mode': 'local-empty',
+        'refreshed': False,
+    })
+
+
+@csrf_exempt
+@dashboard_login_required
+@require_POST
+def run_auto_renew_tasks(request, *args, **kwargs):
+    return _ok(_empty_run_result('本地开发环境暂无待续费订单'))
+
+
+@dashboard_login_required
 @require_GET
 def orders_list(request):
     keyword = _get_keyword(request)
@@ -1111,7 +2574,7 @@ def orders_list(request):
     return _ok(items)
 
 
-@login_required
+@dashboard_login_required
 @require_GET
 def cloud_orders_list(request):
     keyword = _get_keyword(request)
@@ -1220,6 +2683,56 @@ def _asset_payload(asset):
     }
 
 
+def _cloud_order_summary_payload(order):
+    if not order:
+        return None
+    return {
+        'id': order.id,
+        'order_id': order.id,
+        'order_no': order.order_no,
+        'status': order.status,
+        'status_label': _status_label(order.status, CloudServerOrder.STATUS_CHOICES),
+        'provider': order.provider,
+        'provider_label': _provider_label(order.provider),
+        'plan_name': order.plan_name,
+        'public_ip': order.public_ip,
+        'previous_public_ip': order.previous_public_ip,
+        'service_expires_at': _iso(order.service_expires_at),
+        'suspend_at': _iso(order.suspend_at),
+        'delete_at': _iso(order.delete_at),
+        'ip_recycle_at': _iso(order.ip_recycle_at),
+        'created_at': _iso(order.created_at),
+        'detail_path': f'/admin/cloud-orders/{order.id}',
+        'order_detail_path': f'/admin/cloud-orders/{order.id}',
+        'order_link_path': f'/admin/cloud-orders/{order.id}',
+        'order_source_tags': [],
+        'order_source_tag_labels': [],
+    }
+
+
+def _asset_detail_payload(asset):
+    order = asset.order
+    payload = _asset_payload(asset)
+    payload.update({
+        'created_at': _iso(asset.created_at),
+        'service_started_at': _iso(getattr(order, 'service_started_at', None)),
+        'service_expires_at': _iso(getattr(order, 'service_expires_at', None) or asset.actual_expires_at),
+        'renew_grace_expires_at': _iso(getattr(order, 'renew_grace_expires_at', None)),
+        'suspend_at': _iso(getattr(order, 'suspend_at', None)),
+        'delete_at': _iso(getattr(order, 'delete_at', None)),
+        'ip_recycle_at': _iso(getattr(order, 'ip_recycle_at', None)),
+        'last_renewed_at': _iso(getattr(order, 'last_renewed_at', None)),
+        'order_status': getattr(order, 'status', None),
+        'order_status_label': _status_label(getattr(order, 'status', None), CloudServerOrder.STATUS_CHOICES),
+        'provision_note': getattr(order, 'provision_note', None),
+        'related_order': _cloud_order_summary_payload(order),
+        'history_orders': [_cloud_order_summary_payload(order)] if order else [],
+        'ip_logs': [],
+        'lifecycle_order_links': {},
+    })
+    return payload
+
+
 def _resolve_telegram_user(value):
     raw = str(value or '').strip().lstrip('@')
     if not raw:
@@ -1240,6 +2753,69 @@ def _parse_iso_datetime(value, field_label='时间'):
     if timezone.is_naive(parsed):
         parsed = timezone.make_aware(parsed, timezone.get_current_timezone())
     return parsed
+
+
+def _active_cloud_asset_filter():
+    return Q(
+        is_active=True,
+        status__in=[
+            CloudAsset.STATUS_RUNNING,
+            CloudAsset.STATUS_PENDING,
+            CloudAsset.STATUS_STARTING,
+        ],
+    )
+
+
+def _expired_cloud_asset_filter(now=None):
+    now = now or timezone.now()
+    return Q(status__in=[CloudAsset.STATUS_EXPIRED, CloudAsset.STATUS_EXPIRED_GRACE, CloudAsset.STATUS_DELETED]) | Q(actual_expires_at__lte=now)
+
+
+def _unattached_ip_cloud_asset_filter():
+    return Q(public_ip__isnull=True) | Q(public_ip='') | Q(provider_status__icontains='未附加') | Q(provider_status__icontains='固定IP保留')
+
+
+def _apply_cloud_asset_risk_filter(queryset, risk_status):
+    risk_status = str(risk_status or 'all').strip()
+    if risk_status in {'', 'all'}:
+        return queryset
+    now = timezone.now()
+    expired_filter = _expired_cloud_asset_filter(now)
+    active_filter = _active_cloud_asset_filter()
+    if risk_status == 'normal':
+        return queryset.filter(active_filter)
+    if risk_status == 'due_soon':
+        return queryset.filter(actual_expires_at__gt=now, actual_expires_at__lte=now + timezone.timedelta(days=7))
+    if risk_status == 'expired':
+        return queryset.filter(expired_filter)
+    if risk_status == 'unattached_ip':
+        return queryset.filter(_unattached_ip_cloud_asset_filter())
+    if risk_status == 'abnormal':
+        return queryset.exclude(active_filter).exclude(expired_filter)
+    if risk_status == 'unbound_user':
+        return queryset.filter(user__isnull=True)
+    if risk_status == 'auto_renew_off':
+        return queryset.filter(Q(order__isnull=True) | Q(order__auto_renew_enabled=False))
+    return queryset
+
+
+def _cloud_asset_risk_counts(queryset):
+    now = timezone.now()
+    active_filter = _active_cloud_asset_filter()
+    expired_filter = _expired_cloud_asset_filter(now)
+    all_count = queryset.count()
+    return {
+        'all': all_count,
+        'normal': queryset.filter(active_filter).count(),
+        'due_soon': queryset.filter(actual_expires_at__gt=now, actual_expires_at__lte=now + timezone.timedelta(days=7)).count(),
+        'expired': queryset.filter(expired_filter).count(),
+        'unattached_ip': queryset.filter(_unattached_ip_cloud_asset_filter()).count(),
+        'abnormal': queryset.exclude(active_filter).exclude(expired_filter).count(),
+        'shutdown_disabled': 0,
+        'unbound_user': queryset.filter(user__isnull=True).count(),
+        'unbound_group': 0,
+        'auto_renew_off': queryset.filter(Q(order__isnull=True) | Q(order__auto_renew_enabled=False)).count(),
+    }
 
 
 def _sync_telegram_username(user, username=None):
@@ -1277,7 +2853,7 @@ def _sync_telegram_username(user, username=None):
             item.save(update_fields=['is_primary', 'updated_at'])
 
 
-@login_required
+@dashboard_login_required
 @require_GET
 def cloud_assets_list(request):
     keyword = _get_keyword(request)
@@ -1291,13 +2867,15 @@ def cloud_assets_list(request):
                 'asset_name', 'public_ip', 'mtproxy_link', 'user__tg_user_id',
                 'user__username', 'user__telegramusernames__username', 'order__order_no',
             ],
-        ).distinct().order_by('actual_expires_at', '-updated_at', '-id')
+        ).distinct()
+        risk_counts = _cloud_asset_risk_counts(queryset)
+        queryset = _apply_cloud_asset_risk_filter(queryset, request.GET.get('risk_status')).order_by('actual_expires_at', '-updated_at', '-id')
         items = [_asset_payload(asset) for asset in queryset[:200]]
     except ProgrammingError:
         return _ok({'groups': [], 'items': []} if grouped else [])
 
     if not grouped:
-        return _ok(items)
+        return _ok({'items': items, 'total': len(items), 'page': 1, 'page_size': 200, 'risk_counts': risk_counts} if (request.GET.get('paginated') or '').lower() in {'1', 'true', 'yes'} else items)
 
     groups = {}
     for item in items:
@@ -1316,13 +2894,19 @@ def cloud_assets_list(request):
         min((row['actual_expires_at'] or '9999-12-31T23:59:59') for row in group['items']),
         str(group['tg_user_id'] or 'zzzz'),
     ))
-    return _ok({'groups': ordered_groups, 'items': items})
+    return _ok({'groups': ordered_groups, 'items': items, 'total': len(items), 'page': 1, 'page_size': 200, 'risk_counts': risk_counts})
 
 
 @csrf_exempt
 @dashboard_login_required
-@require_http_methods(['POST', 'PUT', 'PATCH'])
+@require_http_methods(['GET', 'POST', 'PUT', 'PATCH'])
 def update_cloud_asset(request, asset_id):
+    if request.method == 'GET':
+        asset = CloudAsset.objects.select_related('order', 'user').prefetch_related('user__telegramusernames').filter(pk=asset_id).first()
+        if not asset:
+            return _error('云资产不存在', status=404)
+        return _ok(_asset_detail_payload(asset))
+
     payload = _read_payload(request)
     try:
         with transaction.atomic():
@@ -1479,6 +3063,182 @@ def update_cloud_asset(request, asset_id):
 
     asset = CloudAsset.objects.select_related('user', 'order').prefetch_related('user__telegramusernames').get(pk=asset_id)
     return _ok(_asset_payload(asset))
+
+
+@dashboard_login_required
+@require_GET
+def cloud_assets_sync_status(request):
+    recent_syncs = []
+    for item in ExternalSyncLog.objects.filter(source__in=[
+        ExternalSyncLog.SOURCE_AWS,
+        ExternalSyncLog.SOURCE_ALIYUN,
+        ExternalSyncLog.SOURCE_DASHBOARD,
+    ]).order_by('-created_at', '-id')[:10]:
+        response_payload = {}
+        try:
+            response_payload = json.loads(item.response_payload or '{}')
+        except (TypeError, ValueError):
+            response_payload = {}
+        recent_syncs.append({
+            'id': item.id,
+            'target': item.target or item.action,
+            'providers': [item.source] if item.source else [],
+            'is_success': item.is_success,
+            'error_message': item.error_message or '',
+            'created_at': _iso(item.created_at),
+            'tasks': response_payload.get('tasks') or [],
+            'skipped_tasks': response_payload.get('skipped_tasks') or [],
+        })
+    last_synced_at = recent_syncs[0]['created_at'] if recent_syncs else None
+    return _ok({
+        'accounts': {
+            'aliyun': [_cloud_account_payload(item) for item in CloudAccountConfig.objects.filter(provider=CloudAccountConfig.PROVIDER_ALIYUN, is_active=True)],
+            'aws': [_cloud_account_payload(item) for item in CloudAccountConfig.objects.filter(provider=CloudAccountConfig.PROVIDER_AWS, is_active=True)],
+        },
+        'aliyun_existing_count': CloudAsset.objects.filter(provider__in=['aliyun', 'aliyun_simple']).count(),
+        'aws_existing_count': CloudAsset.objects.filter(provider__in=['aws', 'aws_lightsail']).count(),
+        'auto_sync_every_seconds': 5 * 60 * 60,
+        'last_synced_at': last_synced_at,
+        'recent_syncs': recent_syncs,
+        'unattached_ip_count': 0,
+    })
+
+
+@dashboard_login_required
+@require_GET
+def cloud_asset_risk_summary(request):
+    keyword = _get_keyword(request)
+    queryset = CloudAsset.objects.select_related('user', 'order').prefetch_related('user__telegramusernames')
+    queryset = _apply_keyword_filter(
+        queryset,
+        keyword,
+        [
+            'asset_name', 'public_ip', 'mtproxy_link', 'user__tg_user_id',
+            'user__username', 'user__telegramusernames__username', 'order__order_no',
+        ],
+    ).distinct()
+    risk_counts = _cloud_asset_risk_counts(queryset)
+    return _ok({'risk_counts': risk_counts, 'total': risk_counts['all']})
+
+
+@dashboard_login_required
+@require_GET
+def cloud_asset_ip_logs(request):
+    items = []
+    keyword = _get_keyword(request)
+    logs = ExternalSyncLog.objects.order_by('-created_at', '-id')
+    if keyword:
+        logs = logs.filter(Q(target__icontains=keyword) | Q(action__icontains=keyword) | Q(error_message__icontains=keyword))
+    for item in logs[:200]:
+        items.append({
+            'id': item.id,
+            'event_type': item.action or item.source,
+            'event_label': dict(ExternalSyncLog.SOURCE_CHOICES).get(item.source, item.source),
+            'provider': item.source,
+            'provider_label': dict(ExternalSyncLog.SOURCE_CHOICES).get(item.source, item.source),
+            'provider_resource_id': item.target,
+            'instance_id': None,
+            'public_ip': None,
+            'previous_public_ip': None,
+            'region_code': None,
+            'region_name': None,
+            'region_label': None,
+            'asset_id': None,
+            'asset_name': None,
+            'server_id': None,
+            'order_id': None,
+            'order_no': None,
+            'user_id': None,
+            'tg_user_id': None,
+            'user_display_name': '-',
+            'username_label': '-',
+            'note': item.error_message or item.response_payload or item.request_payload or '',
+            'created_at': _iso(item.created_at),
+        })
+    return _ok(items)
+
+
+@dashboard_login_required
+@require_GET
+def dashboard_ip_delete_logs(request):
+    return _ok([])
+
+
+@dashboard_login_required
+@require_GET
+def bot_operation_logs(request):
+    return _ok([])
+
+
+@csrf_exempt
+@dashboard_login_required
+@require_POST
+def toggle_cloud_asset_auto_renew(request, asset_id):
+    payload = _read_payload(request)
+    asset = CloudAsset.objects.select_related('order', 'user').prefetch_related('user__telegramusernames').filter(pk=asset_id).first()
+    if not asset:
+        return _error('云资产不存在', status=404)
+    enabled = str(payload.get('enabled')).lower() in {'1', 'true', 'yes', 'on'}
+    if asset.order:
+        asset.order.auto_renew_enabled = enabled
+        asset.order.save(update_fields=['auto_renew_enabled', 'updated_at'])
+    return _ok(_asset_payload(asset))
+
+
+@csrf_exempt
+@dashboard_login_required
+@require_POST
+def sync_cloud_asset_status(request, asset_id):
+    asset = CloudAsset.objects.select_related('order', 'user').prefetch_related('user__telegramusernames').filter(pk=asset_id).first()
+    if not asset:
+        return _error('云资产不存在', status=404)
+    original_updated_at = asset.updated_at
+    provider = _normalize_cloud_provider(asset.provider)
+    region = (asset.region_code or '').strip()
+    errors = []
+    logs = []
+    task = None
+    if not provider or not region:
+        errors.append('资产缺少云厂商或地域，无法同步云上状态。')
+    else:
+        task = _cloud_sync_task(
+            provider,
+            region,
+            reason=f'更新资产 #{asset.id} 的云上状态',
+            asset_ids=[asset.id],
+        )
+        try:
+            result = _run_cloud_sync_task(task)
+            logs = result.get('logs') or []
+        except Exception as exc:
+            errors.append(f'{provider.upper()} {region} 同步失败: {exc}')
+
+    asset = CloudAsset.objects.select_related('order', 'user').prefetch_related('user__telegramusernames').filter(pk=asset_id).first()
+    if not errors and asset and provider and region:
+        if asset.updated_at <= original_updated_at:
+            errors.append('已完成地域同步，但未在云上同步结果中找到该实例，请确认实例是否已被删除或实例 ID 是否正确。')
+    return _ok({
+        'ok': len(errors) == 0,
+        'asset': _asset_payload(asset) if asset else None,
+        'provider': provider or asset.provider if asset else provider,
+        'region_code': region,
+        'task': task,
+        'logs': logs,
+        'errors': errors,
+    })
+
+
+@csrf_exempt
+@dashboard_login_required
+@require_POST
+def delete_cloud_asset(request, asset_id):
+    asset = CloudAsset.objects.select_related('order', 'user').prefetch_related('user__telegramusernames').filter(pk=asset_id).first()
+    if not asset:
+        return _error('云资产不存在', status=404)
+    asset.status = CloudAsset.STATUS_DELETED
+    asset.is_active = False
+    asset.save(update_fields=['status', 'is_active', 'updated_at'])
+    return _ok(True)
 
 
 def _server_payload(server):
@@ -1698,35 +3458,626 @@ def _apply_recharge_status(recharge, new_status):
 @dashboard_login_required
 @require_GET
 def site_config_groups(request):
-    groups = {
-        'database': ['database_url', 'db_host', 'db_port', 'db_name', 'db_user', 'db_password'],
-        'tron': ['receive_address', 'trongrid_api_key'],
-        'aws': ['aws_access_key_id', 'aws_secret_access_key', 'aws_region'],
-        'aliyun': ['alibaba_cloud_account_id', 'aliyun_account_id', 'aliyun_region'],
-        'bot': ['bot_token', 'telegram_webhook_url'],
-        'runtime': ['redis_url', 'm_account_token', 'admin_password_notice'],
-        'custom_text': [
-            'bot_custom_quantity_title', 'bot_custom_quantity_hint', 'bot_custom_payment_title',
-            'bot_custom_payment_hint', 'bot_custom_wallet_title', 'bot_custom_pending_order',
-            'bot_custom_pending_wallet', 'bot_custom_order_notice', 'bot_custom_port_hint',
-            'bot_custom_balance_insufficient',
-        ],
-    }
+    groups = _dashboard_site_config_groups()
     existing = {item.key: item for item in SiteConfig.objects.all()}
     payload = []
     for group_key, keys in groups.items():
         items = []
-        for key in keys:
+        for index, key in enumerate(keys):
             obj = existing.get(key)
+            is_sensitive = bool(
+                (obj and obj.is_sensitive) or key in DASHBOARD_SENSITIVE_CONFIG_KEYS,
+            )
             items.append({
                 'key': key,
                 'id': obj.id if obj else None,
                 'value': SiteConfig.get(key, ''),
-                'is_sensitive': bool(getattr(obj, 'is_sensitive', key in SENSITIVE_CONFIG_KEYS)),
-                'description': CONFIG_HELP.get(key, ''),
+                'value_preview': obj.masked_value() if obj and is_sensitive else (obj.value if obj else ''),
+                'is_sensitive': is_sensitive,
+                'description': _dashboard_config_label(key),
+                'default_value': DASHBOARD_CONFIG_DEFAULTS.get(key, ''),
+                'sort_order': index,
             })
         payload.append({'group': group_key, 'items': items})
     return _ok(payload)
+
+
+DEFAULT_BUTTON_CONFIG = {
+    'row_size': 2,
+    'items': [
+        {'key': 'buy_proxy', 'label': '购买代理', 'type': 'business', 'sort_order': 10, 'enabled': True, 'locked': True},
+        {'key': 'my_orders', 'label': '我的订单', 'type': 'business', 'sort_order': 20, 'enabled': True, 'locked': True},
+        {'key': 'recharge', 'label': '充值余额', 'type': 'business', 'sort_order': 30, 'enabled': True, 'locked': True},
+        {'key': 'support', 'label': '联系客服', 'type': 'business', 'sort_order': 40, 'enabled': True, 'locked': True},
+    ],
+}
+
+
+def _button_config_payload():
+    config = _json_config('dashboard_button_config', DEFAULT_BUTTON_CONFIG)
+    items = config.get('items') if isinstance(config, dict) else []
+    normalized_items = []
+    for index, item in enumerate(items or []):
+        normalized_items.append({
+            'key': str(item.get('key') or f'button_{index}'),
+            'label': str(item.get('label') or ''),
+            'button_label': item.get('button_label') or '',
+            'url': item.get('url') or '',
+            'message': item.get('message') or '',
+            'type': item.get('type') if item.get('type') in {'business', 'link'} else 'link',
+            'sort_order': int(item.get('sort_order') or 0),
+            'enabled': bool(item.get('enabled', True)),
+            'locked': bool(item.get('locked', False)),
+        })
+    return {'row_size': int(config.get('row_size') or 2), 'items': normalized_items}
+
+
+@dashboard_login_required
+@require_GET
+def button_config(request):
+    return _ok(_button_config_payload())
+
+
+@csrf_exempt
+@dashboard_login_required
+@require_POST
+def update_button_config(request):
+    payload = _read_payload(request)
+    config = {
+        'row_size': int(payload.get('row_size') or 2),
+        'items': payload.get('items') if isinstance(payload.get('items'), list) else [],
+    }
+    _set_json_config('dashboard_button_config', config)
+    return _ok(_button_config_payload())
+
+
+@csrf_exempt
+@dashboard_login_required
+@require_POST
+def init_button_config(request):
+    _set_json_config('dashboard_button_config', DEFAULT_BUTTON_CONFIG)
+    return _ok(_button_config_payload())
+
+
+def _telegram_groups():
+    return _json_config('dashboard_telegram_groups', [])
+
+
+def _set_telegram_groups(groups):
+    _set_json_config('dashboard_telegram_groups', groups)
+
+
+def _telegram_accounts_overview():
+    overview = _json_config('dashboard_telegram_accounts_overview', {
+        'accounts': [],
+        'chats': [],
+        'messages': [],
+        'users': [],
+    })
+    return _normalize_telegram_accounts_overview(overview)
+
+
+@dashboard_login_required
+@require_GET
+def telegram_accounts(request):
+    overview = _telegram_accounts_overview()
+    keyword = _get_keyword(request).lower()
+    archived = str(request.GET.get('archived') or '').lower()
+    messages = overview.get('messages', [])
+    users = _telegram_users_from_db(messages)
+    if keyword:
+        overview['chats'] = [
+            item for item in overview.get('chats', [])
+            if keyword in str(item.get('title') or '').lower() or keyword in str(item.get('latest_message') or '').lower()
+        ]
+        messages = [
+            item for item in overview.get('messages', [])
+            if keyword in str(item.get('text') or '').lower() or keyword in str(item.get('chat_title') or '').lower()
+        ]
+        users = [
+            item for item in users
+            if keyword in str(item.get('display_name') or '').lower()
+            or keyword in str(item.get('username_label') or '').lower()
+            or keyword in str(item.get('tg_user_id') or '').lower()
+        ]
+    if archived in {'0', 'false', 'no'}:
+        overview['chats'] = [item for item in overview.get('chats', []) if not item.get('archived')]
+    return _ok({
+        'accounts': overview.get('accounts', []),
+        'chats': overview.get('chats', []),
+        'messages': messages,
+        'users': users,
+    })
+
+
+@csrf_exempt
+@dashboard_login_required
+@require_POST
+def create_telegram_account(request):
+    payload = _read_payload(request)
+    overview = _telegram_accounts_overview()
+    accounts = overview.setdefault('accounts', [])
+    next_id = _next_telegram_account_id(accounts)
+    usernames = _split_usernames(payload.get('username') or '')
+    tg_user_id = int(payload.get('tg_user_id')) if str(payload.get('tg_user_id') or '').isdigit() else None
+    item = {
+        'id': next_id,
+        'label': payload.get('label') or payload.get('phone') or f'Telegram 账号 {next_id}',
+        'phone': payload.get('phone') or '',
+        'username': ','.join(usernames),
+        'usernames': usernames,
+        'tg_user_id': tg_user_id,
+        'first_name': payload.get('first_name') or '',
+        'note': payload.get('note') or '',
+        'status': 'registered',
+        'notify_enabled': True,
+        'listener_push_enabled': False,
+        'has_session': False,
+        'created_at': _iso(timezone.now()),
+        'updated_at': _iso(timezone.now()),
+        'last_synced_at': None,
+    }
+    accounts.append(item)
+    if tg_user_id:
+        _save_telegram_identity(tg_user_id, usernames, item.get('first_name') or '')
+    _set_json_config('dashboard_telegram_accounts_overview', overview)
+    return _ok(item)
+
+
+@csrf_exempt
+@dashboard_login_required
+@require_POST
+def telegram_account_status(request, account_id):
+    overview = _telegram_accounts_overview()
+    item = _find_telegram_account(overview, account_id)
+    if not item:
+        return _error('Telegram 账号不存在', status=404)
+    session_string = _get_telegram_session(account_id)
+    if not session_string:
+        if item.get('status') == 'logged_in':
+            item['status'] = 'session_expired'
+            item['updated_at'] = _iso(timezone.now())
+            _set_json_config('dashboard_telegram_accounts_overview', overview)
+        return _ok(_normalize_telegram_account(item))
+    try:
+        api_id, api_hash = _telegram_api_config()
+        result = async_to_sync(_telegram_check_session_async)(session_string, api_id, api_hash)
+    except Exception as exc:
+        item['status'] = 'listener_error'
+        item['note'] = _telegram_error_message(exc)
+        item['updated_at'] = _iso(timezone.now())
+        _set_json_config('dashboard_telegram_accounts_overview', overview)
+        return _ok(_normalize_telegram_account(item))
+    if result.get('authorized'):
+        _finalize_telegram_account(item, result.get('profile') or {}, result.get('session_string') or session_string)
+    else:
+        item['status'] = 'session_expired'
+        item['has_session'] = False
+        item['updated_at'] = _iso(timezone.now())
+    _set_json_config('dashboard_telegram_accounts_overview', overview)
+    return _ok(_normalize_telegram_account(item))
+
+
+@csrf_exempt
+@dashboard_login_required
+@require_POST
+def telegram_account_notify(request, account_id):
+    payload = _read_payload(request)
+    overview = _telegram_accounts_overview()
+    for item in overview.get('accounts', []):
+        if int(item.get('id') or 0) == account_id:
+            if payload.get('listener_push_enabled') and not _get_telegram_session(account_id):
+                return _error('请先完成 Telegram 账号登录，再开启监听推送。')
+            if 'notify_enabled' in payload:
+                item['notify_enabled'] = bool(payload.get('notify_enabled'))
+            if 'listener_push_enabled' in payload:
+                item['listener_push_enabled'] = bool(payload.get('listener_push_enabled'))
+            item['updated_at'] = _iso(timezone.now())
+            _set_json_config('dashboard_telegram_accounts_overview', overview)
+            return _ok(item)
+    return _error('Telegram 账号不存在', status=404)
+
+
+@csrf_exempt
+@dashboard_login_required
+@require_POST
+def start_telegram_login(request):
+    payload = _read_payload(request)
+    phone = str(payload.get('phone') or '').strip()
+    if not phone:
+        return _error('请输入 Telegram 手机号。')
+    try:
+        api_id, api_hash = _telegram_api_config()
+    except ValueError as exc:
+        return _error(str(exc))
+    overview = _telegram_accounts_overview()
+    account = _ensure_telegram_login_account(overview, phone)
+    account['status'] = 'pending'
+    account['updated_at'] = _iso(timezone.now())
+    try:
+        result = async_to_sync(_telegram_send_code_async)(phone, api_id, api_hash)
+    except Exception as exc:
+        account['status'] = 'error'
+        account['note'] = _telegram_error_message(exc)
+        _set_json_config('dashboard_telegram_accounts_overview', overview)
+        return _error(account['note'])
+    account['phone_code_hash'] = result.get('phone_code_hash') or ''
+    account['status'] = 'code_sent'
+    account['has_session'] = True
+    account['note'] = ''
+    account['updated_at'] = _iso(timezone.now())
+    _set_telegram_session(account['id'], result.get('session_string') or '')
+    _set_json_config('dashboard_telegram_accounts_overview', overview)
+    return _ok({
+        'account': _normalize_telegram_account(account),
+        'account_id': account['id'],
+        'next_step': 'code',
+    })
+
+
+@csrf_exempt
+@dashboard_login_required
+@require_POST
+def submit_telegram_login_code(request):
+    payload = _read_payload(request)
+    account_id = payload.get('account_id')
+    code = str(payload.get('code') or '').strip().replace(' ', '')
+    if not account_id:
+        return _error('登录会话不存在，请重新输入手机号。')
+    if not code:
+        return _error('请输入 Telegram 验证码。')
+    overview = _telegram_accounts_overview()
+    account = _find_telegram_account(overview, account_id)
+    if not account:
+        return _error('Telegram 账号不存在', status=404)
+    session_string = _get_telegram_session(account_id)
+    if not session_string or not account.get('phone_code_hash'):
+        account['status'] = 'session_expired'
+        account['updated_at'] = _iso(timezone.now())
+        _set_json_config('dashboard_telegram_accounts_overview', overview)
+        return _error('登录会话已过期，请重新发送验证码。')
+    try:
+        api_id, api_hash = _telegram_api_config()
+        result = async_to_sync(_telegram_sign_in_code_async)(
+            session_string,
+            account.get('phone') or '',
+            code,
+            account.get('phone_code_hash') or '',
+            api_id,
+            api_hash,
+        )
+    except Exception as exc:
+        account['status'] = 'error'
+        account['note'] = _telegram_error_message(exc)
+        account['updated_at'] = _iso(timezone.now())
+        _set_json_config('dashboard_telegram_accounts_overview', overview)
+        return _error(account['note'])
+    if result.get('requires_password'):
+        account['status'] = 'password_required'
+        account['has_session'] = True
+        account['updated_at'] = _iso(timezone.now())
+        _set_telegram_session(account['id'], result.get('session_string') or session_string)
+        _set_json_config('dashboard_telegram_accounts_overview', overview)
+        return _ok({
+            'account': _normalize_telegram_account(account),
+            'account_id': account['id'],
+            'next_step': 'password',
+            'requires_password': True,
+        })
+    _finalize_telegram_account(account, result.get('profile') or {}, result.get('session_string') or session_string)
+    account['note'] = ''
+    _set_json_config('dashboard_telegram_accounts_overview', overview)
+    return _ok({
+        'account': _normalize_telegram_account(account),
+        'account_id': account['id'],
+        'next_step': 'done',
+        'requires_password': False,
+    })
+
+
+@csrf_exempt
+@dashboard_login_required
+@require_POST
+def submit_telegram_login_password(request):
+    payload = _read_payload(request)
+    account_id = payload.get('account_id')
+    if not account_id:
+        return _error('登录会话不存在，请重新输入手机号。')
+    overview = _telegram_accounts_overview()
+    account = _find_telegram_account(overview, account_id)
+    if not account:
+        return _error('Telegram 账号不存在', status=404)
+    session_string = _get_telegram_session(account_id)
+    if not session_string:
+        account['status'] = 'session_expired'
+        account['updated_at'] = _iso(timezone.now())
+        _set_json_config('dashboard_telegram_accounts_overview', overview)
+        return _error('登录会话已过期，请重新发送验证码。')
+    try:
+        api_id, api_hash = _telegram_api_config()
+        result = async_to_sync(_telegram_sign_in_password_async)(
+            session_string,
+            payload.get('password') or '',
+            api_id,
+            api_hash,
+        )
+    except Exception as exc:
+        account['status'] = 'error'
+        account['note'] = _telegram_error_message(exc)
+        account['updated_at'] = _iso(timezone.now())
+        _set_json_config('dashboard_telegram_accounts_overview', overview)
+        return _error(account['note'])
+    _finalize_telegram_account(account, result.get('profile') or {}, result.get('session_string') or session_string)
+    account['note'] = ''
+    _set_json_config('dashboard_telegram_accounts_overview', overview)
+    return _ok({
+        'account': _normalize_telegram_account(account),
+        'account_id': account['id'],
+        'next_step': 'done',
+    })
+
+
+@dashboard_login_required
+@require_GET
+def telegram_groups(request):
+    keyword = _get_keyword(request).lower()
+    groups = _telegram_groups()
+    if keyword:
+        groups = [
+            item for item in groups
+            if keyword in str(item.get('title') or '').lower() or keyword in str(item.get('username') or '').lower()
+        ]
+    return _ok(groups)
+
+
+@csrf_exempt
+@dashboard_login_required
+@require_POST
+def create_telegram_group(request):
+    payload = _read_payload(request)
+    groups = _telegram_groups()
+    next_id = max([int(item.get('id') or 0) for item in groups] or [0]) + 1
+    now = _iso(timezone.now())
+    item = {
+        'id': next_id,
+        'chat_id': int(payload.get('chat_id')) if str(payload.get('chat_id') or '').lstrip('-').isdigit() else next_id,
+        'title': payload.get('title') or f'群组 {next_id}',
+        'username': payload.get('username') or '',
+        'enabled': bool(payload.get('enabled', False)),
+        'push_enabled': bool(payload.get('push_enabled', False)),
+        'collapsed': bool(payload.get('collapsed', False)),
+        'archived': bool(payload.get('archived', False)),
+        'created_at': now,
+        'updated_at': now,
+    }
+    groups.append(item)
+    _set_telegram_groups(groups)
+    return _ok(item)
+
+
+@csrf_exempt
+@dashboard_login_required
+@require_POST
+def update_telegram_group(request, group_id):
+    payload = _read_payload(request)
+    groups = _telegram_groups()
+    for item in groups:
+        if int(item.get('id') or 0) == group_id:
+            for field in ('title', 'username'):
+                if field in payload:
+                    item[field] = payload.get(field) or ''
+            if 'chat_id' in payload and str(payload.get('chat_id') or '').lstrip('-').isdigit():
+                item['chat_id'] = int(payload.get('chat_id'))
+            for field in ('enabled', 'push_enabled', 'collapsed', 'archived'):
+                if field in payload:
+                    item[field] = bool(payload.get(field))
+            item['updated_at'] = _iso(timezone.now())
+            _set_telegram_groups(groups)
+            return _ok(item)
+    return _error('Telegram 群组不存在', status=404)
+
+
+@dashboard_login_required
+@require_GET
+def telegram_group_detail(request, group_id):
+    for item in _telegram_groups():
+        if int(item.get('id') or 0) == group_id:
+            chat_id = int(item.get('chat_id') or 0)
+            overview = _telegram_accounts_overview()
+            messages = [
+                message for message in overview.get('messages', [])
+                if int(message.get('chat_id') or 0) == chat_id
+            ]
+            member_stats = {}
+            for message in messages:
+                tg_user_id = int(message.get('tg_user_id') or 0)
+                if not tg_user_id:
+                    continue
+                stat = member_stats.setdefault(tg_user_id, {
+                    'first_name': message.get('first_name_snapshot') or '',
+                    'last_seen_at': None,
+                    'message_count': 0,
+                    'tg_user_id': tg_user_id,
+                    'username': message.get('username_snapshot') or '',
+                })
+                stat['message_count'] += 1
+                if message.get('first_name_snapshot'):
+                    stat['first_name'] = message.get('first_name_snapshot')
+                if message.get('username_snapshot'):
+                    stat['username'] = message.get('username_snapshot')
+                if message.get('created_at') and (
+                    not stat['last_seen_at'] or message.get('created_at') > stat['last_seen_at']
+                ):
+                    stat['last_seen_at'] = message.get('created_at')
+
+            users = {
+                user.tg_user_id: user
+                for user in TelegramUser.objects.filter(tg_user_id__in=member_stats).prefetch_related('telegramusernames')
+            }
+            members = []
+            for tg_user_id, stat in member_stats.items():
+                user = users.get(tg_user_id)
+                usernames = user.usernames if user else _split_usernames(stat.get('username') or '')
+                username = usernames[0] if usernames else stat.get('username') or ''
+                first_name = (user.first_name if user else stat.get('first_name')) or ''
+                members.append({
+                    'display_label': first_name or (f'@{username}' if username else f'ID {tg_user_id}'),
+                    'display_name': first_name or (f'@{username}' if username else f'ID {tg_user_id}'),
+                    'first_name': first_name,
+                    'last_seen_at': stat.get('last_seen_at'),
+                    'message_count': stat.get('message_count') or 0,
+                    'tg_user_id': tg_user_id,
+                    'username': username,
+                })
+            members.sort(key=lambda member: (member.get('last_seen_at') or '', member.get('message_count') or 0), reverse=True)
+            return _ok({'group': item, 'members': members, 'messages': messages[:200]})
+    return _error('Telegram 群组不存在', status=404)
+
+
+@dashboard_login_required
+@require_GET
+def telegram_messages(request):
+    overview = _telegram_accounts_overview()
+    messages = overview.get('messages', [])
+    chat_id = request.GET.get('chat_id')
+    tg_user_id = request.GET.get('tg_user_id')
+    if str(chat_id or '').lstrip('-').isdigit():
+        chat_id_value = int(chat_id)
+        messages = [
+            item for item in messages
+            if int(item.get('chat_id') or 0) == chat_id_value
+        ]
+    if str(tg_user_id or '').isdigit():
+        tg_user_id_value = int(tg_user_id)
+        messages = [
+            item for item in messages
+            if int(item.get('tg_user_id') or 0) == tg_user_id_value
+        ]
+    return _ok(messages)
+
+
+@csrf_exempt
+@dashboard_login_required
+@require_POST
+def send_telegram_message(request):
+    payload = _read_payload(request)
+    text = str(payload.get('text') or '').strip()
+    if not text:
+        return _error('请输入要发送的消息。')
+    chat_id_raw = payload.get('chat_id')
+    try:
+        chat_id = int(chat_id_raw)
+    except (TypeError, ValueError):
+        return _error('聊天对象 ID 不正确。')
+
+    overview = _telegram_accounts_overview()
+    account = None
+    login_account_id = payload.get('login_account_id')
+    if login_account_id:
+        account = _find_telegram_account(overview, login_account_id)
+    if not account:
+        for item in overview.get('accounts', []):
+            if item.get('status') == 'logged_in' and _get_telegram_session(item.get('id')):
+                account = item
+                break
+    if not account:
+        return _error('没有可用的 Telegram 登录账号，请先完成账号登录。')
+    if not account.get('notify_enabled', True):
+        return _error('该账号已关闭通知发送，请先开启账号通知。')
+    session_string = _get_telegram_session(account.get('id'))
+    if not session_string:
+        account['status'] = 'session_expired'
+        account['updated_at'] = _iso(timezone.now())
+        _set_json_config('dashboard_telegram_accounts_overview', overview)
+        return _error('Telegram 会话已失效，请重新登录账号。')
+
+    try:
+        api_id, api_hash = _telegram_api_config()
+        result = async_to_sync(_telegram_send_message_async)(session_string, chat_id, text, api_id, api_hash)
+    except Exception as exc:
+        return _error(_telegram_error_message(exc))
+
+    _set_telegram_session(account['id'], result.get('session_string') or session_string)
+    messages = overview.setdefault('messages', [])
+    next_id = max([int(item.get('id') or 0) for item in messages] or [0]) + 1
+    chat_title = str(payload.get('chat_title') or '')
+    for chat in overview.get('chats', []):
+        if int(chat.get('chat_id') or 0) == chat_id:
+            chat_title = chat_title or chat.get('title') or str(chat_id)
+            break
+    chat_title = chat_title or str(chat_id)
+    item = {
+        'chat_id': chat_id,
+        'chat_title': chat_title,
+        'content_type': 'text',
+        'created_at': result.get('created_at') or _iso(timezone.now()),
+        'direction': 'out',
+        'direction_label': '发出',
+        'first_name_snapshot': account.get('first_name') or '',
+        'id': next_id,
+        'login_account_id': account.get('id'),
+        'login_account_label': account.get('label') or '',
+        'message_id': result.get('message_id'),
+        'source': 'telegram_login',
+        'source_label': 'Telegram 登录账号',
+        'text': text,
+        'tg_user_id': account.get('tg_user_id') or 0,
+        'username_snapshot': (account.get('username') or '').split(',', 1)[0],
+    }
+    messages.insert(0, item)
+    chats = overview.setdefault('chats', [])
+    chat = None
+    for existing in chats:
+        if int(existing.get('chat_id') or 0) == chat_id:
+            chat = existing
+            break
+    if not chat:
+        chat = {
+            'archived': False,
+            'chat_id': chat_id,
+            'is_group': chat_id < 0,
+            'login_account_id': account.get('id'),
+            'login_account_label': account.get('label') or '',
+            'message_count': 0,
+            'source': 'telegram_login',
+            'source_label': 'Telegram 登录账号',
+            'subtitle': account.get('label') or '',
+            'title': chat_title,
+        }
+        chats.insert(0, chat)
+    chat.update({
+        'latest_at': item['created_at'],
+        'latest_message': text,
+        'message_count': int(chat.get('message_count') or 0) + 1,
+    })
+    _set_json_config('dashboard_telegram_accounts_overview', overview)
+    return _ok(item)
+
+
+@csrf_exempt
+@dashboard_login_required
+@require_POST
+def archive_telegram_chat(request):
+    payload = _read_payload(request)
+    chat_id_raw = payload.get('chat_id')
+    if not str(chat_id_raw or '').lstrip('-').isdigit():
+        return _error('会话 ID 不正确。')
+    chat_id = int(chat_id_raw)
+    login_account_id = payload.get('login_account_id')
+    archived = bool(payload.get('archived'))
+    overview = _telegram_accounts_overview()
+    for item in overview.setdefault('chats', []):
+        same_chat = int(item.get('chat_id') or 0) == chat_id
+        same_account = (
+            not login_account_id
+            or int(item.get('login_account_id') or 0) == int(login_account_id)
+        )
+        if same_chat and same_account:
+            item['archived'] = archived
+            item['updated_at'] = _iso(timezone.now())
+            _set_json_config('dashboard_telegram_accounts_overview', overview)
+            return _ok(item)
+    return _error('Telegram 会话不存在', status=404)
 
 
 @transaction.atomic
@@ -1815,12 +4166,81 @@ def _apply_cloud_order_status(order, new_status):
     return order
 
 
+@csrf_exempt
 @dashboard_login_required
-@require_GET
+@require_http_methods(['GET', 'POST', 'PUT', 'PATCH'])
 def cloud_order_detail(request, order_id):
     order = CloudServerOrder.objects.select_related('user', 'plan').prefetch_related('user__telegramusernames').filter(pk=order_id).first()
     if not order:
         return _error('订单不存在', status=404)
+    if request.method == 'GET':
+        return _ok(_cloud_order_detail_payload(order))
+
+    payload = _read_payload(request)
+    try:
+        with transaction.atomic():
+            order = CloudServerOrder.objects.select_for_update().select_related('user', 'plan').get(pk=order_id)
+            user_lookup = payload.get('user_query') or payload.get('user_id') or payload.get('tg_user_id') or payload.get('username')
+            username_raw = payload.get('user_query') or payload.get('username')
+            if user_lookup not in (None, ''):
+                user = _resolve_telegram_user(user_lookup)
+                if not user:
+                    return _error('未找到匹配的 Telegram 用户', status=404)
+                order.user = user
+                order.last_user_id = user.tg_user_id
+                _sync_telegram_username(user, username_raw)
+                CloudAsset.objects.filter(order=order).update(user=user, updated_at=timezone.now())
+                Server.objects.filter(order=order).update(user=user, updated_at=timezone.now())
+
+            new_status = str(payload.get('status') or '').strip()
+            if new_status and new_status != order.status:
+                order = _apply_cloud_order_status(order, new_status)
+
+            for field in ('server_name', 'public_ip', 'provision_note'):
+                if field in payload:
+                    setattr(order, field, payload.get(field) or None)
+            if 'total_amount' in payload and payload.get('total_amount') not in (None, ''):
+                order.total_amount = _parse_decimal(payload.get('total_amount'), '总金额')
+            if 'pay_amount' in payload:
+                order.pay_amount = _parse_decimal(payload.get('pay_amount'), '应付金额') if payload.get('pay_amount') not in (None, '') else None
+            datetime_updates = {}
+            for field, label in (
+                ('service_expires_at', '服务到期时间'),
+                ('suspend_at', '计划关机时间'),
+                ('delete_at', '计划删机时间'),
+                ('ip_recycle_at', 'IP 保留到期时间'),
+            ):
+                if field in payload:
+                    datetime_updates[field] = _parse_iso_datetime(payload.get(field), label)
+                    setattr(order, field, datetime_updates[field])
+            order.save()
+            manual_datetime_updates = {
+                field: value for field, value in datetime_updates.items()
+                if field in {'suspend_at', 'delete_at'}
+            }
+            if manual_datetime_updates:
+                manual_datetime_updates['updated_at'] = timezone.now()
+                CloudServerOrder.objects.filter(pk=order.pk).update(**manual_datetime_updates)
+                order.refresh_from_db()
+            asset_updates = {'updated_at': timezone.now()}
+            server_updates = {'updated_at': timezone.now()}
+            if 'server_name' in payload:
+                asset_updates['asset_name'] = order.server_name
+                server_updates['server_name'] = order.server_name
+            if 'public_ip' in payload:
+                asset_updates['public_ip'] = order.public_ip
+                server_updates['public_ip'] = order.public_ip
+            if 'service_expires_at' in payload:
+                asset_updates['actual_expires_at'] = order.service_expires_at
+                server_updates['expires_at'] = order.service_expires_at
+            if len(asset_updates) > 1:
+                CloudAsset.objects.filter(order=order).update(**asset_updates)
+            if len(server_updates) > 1:
+                Server.objects.filter(order=order).update(**server_updates)
+    except ValueError as exc:
+        return _error(str(exc), status=400)
+    except Exception as exc:
+        return _error(f'保存订单失败: {exc}', status=500)
     return _ok(_cloud_order_detail_payload(order))
 
 
@@ -1842,6 +4262,22 @@ def update_cloud_order_status(request, order_id):
     except Exception as exc:
         return _error(f'更新订单状态失败: {exc}', status=500)
     return _ok(_cloud_order_detail_payload(order))
+
+
+@csrf_exempt
+@dashboard_login_required
+@require_POST
+def delete_cloud_order(request, order_id):
+    denied = _require_superuser(request)
+    if denied:
+        return denied
+    order = CloudServerOrder.objects.filter(pk=order_id).first()
+    if not order:
+        return _error('订单不存在', status=404)
+    CloudAsset.objects.filter(order=order).update(order=None, updated_at=timezone.now())
+    Server.objects.filter(order=order).update(order=None, updated_at=timezone.now())
+    order.delete()
+    return _ok(True)
 
 
 @dashboard_login_required
@@ -1873,7 +4309,7 @@ def update_recharge_status(request, recharge_id):
     return _ok(_recharge_detail_payload(recharge))
 
 
-@login_required
+@dashboard_login_required
 @require_GET
 def servers_statistics(request):
     keyword = _get_keyword(request)
@@ -1960,26 +4396,75 @@ def servers_statistics(request):
 @dashboard_login_required
 @require_POST
 def sync_cloud_assets(request):
-    aliyun_region = (request.POST.get('region') or request.GET.get('region') or 'cn-hongkong').strip() or 'cn-hongkong'
-    aws_region = (request.POST.get('aws_region') or request.GET.get('aws_region') or 'ap-southeast-1').strip() or 'ap-southeast-1'
+    payload = _read_payload(request)
+    aliyun_region = (str(payload.get('region') or request.GET.get('region') or 'cn-hongkong')).strip() or 'cn-hongkong'
+    aws_region = (str(payload.get('aws_region') or request.GET.get('aws_region') or 'ap-southeast-1')).strip() or 'ap-southeast-1'
+    if aws_region.lower() == 'all':
+        aws_region = 'ap-southeast-1'
+    raw_providers = payload.get('providers')
+    if isinstance(raw_providers, str):
+        raw_providers = [part.strip() for part in raw_providers.split(',') if part.strip()]
+    providers = [_normalize_cloud_provider(item) for item in (raw_providers or [])]
+    providers = [item for item in providers if item]
+    try:
+        asset_ids = [int(item) for item in (payload.get('asset_ids') or []) if str(item).strip()]
+    except (TypeError, ValueError):
+        return _error('asset_ids 参数格式不正确')
+
+    requested_providers = providers or ['aliyun', 'aws']
+    tasks = []
+    skipped_tasks = []
+    if asset_ids:
+        selected_tasks, selected_skipped = _selected_cloud_sync_tasks(asset_ids)
+        if providers:
+            selected_tasks = [task for task in selected_tasks if task['provider'] in providers]
+        tasks.extend(selected_tasks)
+        skipped_tasks.extend(selected_skipped)
+    else:
+        if 'aliyun' in requested_providers:
+            tasks.append(_cloud_sync_task('aliyun', aliyun_region, reason='后台手动同步'))
+        if 'aws' in requested_providers:
+            tasks.append(_cloud_sync_task('aws', aws_region, reason='后台手动同步'))
+
     errors = []
     synced = {'aliyun': False, 'aws': False}
-    try:
-        call_command('sync_aliyun_assets', region=aliyun_region)
-        synced['aliyun'] = True
-    except Exception as exc:
-        errors.append(f'阿里云代理同步失败: {exc}')
-    try:
-        call_command('sync_aws_assets', region=aws_region)
-        synced['aws'] = True
-    except Exception as exc:
-        errors.append(f'AWS 代理同步失败: {exc}')
+    completed_tasks = []
+    for task in tasks:
+        provider = task['provider']
+        try:
+            completed = _run_cloud_sync_task(task)
+            completed_tasks.append(completed)
+            synced[provider] = True
+        except Exception as exc:
+            task_error = f"{'阿里云' if provider == 'aliyun' else 'AWS'} {task['region']} 代理同步失败: {exc}"
+            errors.append(task_error)
+            skipped_tasks.append({**task, 'reason': task_error})
+
+    response_payload = {
+        'ok': len(errors) == 0,
+        'synced': synced,
+        'providers': requested_providers,
+        'aliyun_region': aliyun_region,
+        'aws_region': aws_region,
+        'tasks': completed_tasks,
+        'skipped_tasks': skipped_tasks,
+        'errors': errors,
+    }
+    record_external_sync_log(
+        source=ExternalSyncLog.SOURCE_DASHBOARD,
+        action='sync_cloud_assets',
+        target=','.join(requested_providers),
+        request_payload=payload,
+        response_payload=_dashboard_sync_log_payload(completed_tasks, skipped_tasks, errors, synced),
+        is_success=not errors,
+        error_message='；'.join(errors),
+    )
     if errors and not any(synced.values()):
         return _error('；'.join(errors), status=500)
-    return _ok({'synced': synced, 'aliyun_region': aliyun_region, 'aws_region': aws_region, 'errors': errors})
+    return _ok(response_payload)
 
 
-@login_required
+@dashboard_login_required
 @require_GET
 def servers_list(request):
     keyword = _get_keyword(request)
@@ -2297,7 +4782,7 @@ def update_cloud_plan(request, plan_id: int):
         return _error('提交的套餐数据格式不正确')
     async_to_sync(refresh_custom_plan_cache)()
     return _ok(_cloud_plan_payload(plan))
-@login_required
+@dashboard_login_required
 @require_GET
 def recharges_list(request):
     keyword = _get_keyword(request)
@@ -2310,7 +4795,7 @@ def recharges_list(request):
     return _ok(items)
 
 
-@login_required
+@dashboard_login_required
 @require_GET
 def monitors_list(request):
     keyword = _get_keyword(request)

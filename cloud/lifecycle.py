@@ -1,5 +1,6 @@
 import logging
 import os
+from dataclasses import dataclass
 
 from aiogram.types import InlineKeyboardMarkup
 from asgiref.sync import sync_to_async
@@ -15,13 +16,36 @@ from bot.keyboards import cloud_expiry_actions
 logger = logging.getLogger(__name__)
 
 
+@dataclass
+class CloudActionResult:
+    ok: bool
+    action: str
+    provider: str
+    target: str
+    note: str
+
+
+def _action_result(ok: bool, action: str, provider: str, target: str, note: str) -> CloudActionResult:
+    return CloudActionResult(ok=ok, action=action, provider=provider, target=target, note=note)
+
+
+def _instance_name(order: CloudServerOrder) -> str:
+    return order.server_name or order.instance_id or order.provider_resource_id or ''
+
+
 def _aws_client(region: str):
     import boto3
+    account = CloudAccountConfig.objects.filter(
+        provider=CloudAccountConfig.PROVIDER_AWS,
+        is_active=True,
+    ).order_by('id').first()
+    access_key = account.access_key_plain if account else ''
+    secret_key = account.secret_key_plain if account else ''
     return boto3.client(
         'lightsail',
         region_name=region,
-        aws_access_key_id=os.getenv('AWS_ACCESS_KEY_ID', ''),
-        aws_secret_access_key=os.getenv('AWS_SECRET_ACCESS_KEY', ''),
+        aws_access_key_id=access_key,
+        aws_secret_access_key=secret_key,
     )
 
 
@@ -149,37 +173,89 @@ def _get_migration_due_orders():
     )
 
 
-async def _stop_instance(order: CloudServerOrder) -> str:
-    if order.provider != 'aws_lightsail' or not order.server_name:
-        return '非 AWS 资源，暂未执行真实关机。'
+async def _stop_instance(order: CloudServerOrder) -> CloudActionResult:
+    instance_name = _instance_name(order)
+    if order.provider != 'aws_lightsail' or not instance_name:
+        return _action_result(True, 'stop_instance', order.provider, instance_name, '非 AWS 资源，暂未执行真实关机。')
     try:
         client = _aws_client(order.region_code)
-        client.stop_instance(instanceName=order.server_name, force=True)
-        return 'AWS 实例已执行关机。'
+        client.stop_instance(instanceName=instance_name, force=True)
+        return _action_result(True, 'stop_instance', order.provider, instance_name, 'AWS 实例已执行关机。')
     except Exception as exc:
-        return f'AWS 实例关机失败: {exc}'
+        return _action_result(False, 'stop_instance', order.provider, instance_name, f'AWS 实例关机失败: {exc}')
 
 
-async def _delete_instance(order: CloudServerOrder) -> str:
-    if order.provider != 'aws_lightsail' or not order.server_name:
-        return '非 AWS 资源，暂未执行真实删机。'
+async def _delete_instance(order: CloudServerOrder) -> CloudActionResult:
+    instance_name = _instance_name(order)
+    if order.provider != 'aws_lightsail' or not instance_name:
+        return _action_result(True, 'delete_instance', order.provider, instance_name, '非 AWS 资源，暂未执行真实删机。')
     try:
         client = _aws_client(order.region_code)
-        client.delete_instance(instanceName=order.server_name)
-        return 'AWS 实例已执行删除，固定 IP 继续保留。'
+        client.delete_instance(instanceName=instance_name)
+        return _action_result(True, 'delete_instance', order.provider, instance_name, 'AWS 实例已执行删除，固定 IP 继续保留。')
     except Exception as exc:
-        return f'AWS 实例删除失败: {exc}'
+        return _action_result(False, 'delete_instance', order.provider, instance_name, f'AWS 实例删除失败: {exc}')
 
 
-async def _delete_replaced_server(order: CloudServerOrder) -> str:
-    if order.provider != 'aws_lightsail' or not order.server_name:
-        return '迁移期结束，旧服务器已标记删除。'
+async def _delete_replaced_server(order: CloudServerOrder) -> CloudActionResult:
+    instance_name = _instance_name(order)
+    if order.provider != 'aws_lightsail' or not instance_name:
+        return _action_result(True, 'delete_replaced_server', order.provider, instance_name, '迁移期结束，旧服务器已标记删除。')
     try:
         client = _aws_client(order.region_code)
-        client.delete_instance(instanceName=order.server_name)
-        return '迁移期结束，旧 AWS 实例已删除。'
+        client.delete_instance(instanceName=instance_name)
+        return _action_result(True, 'delete_replaced_server', order.provider, instance_name, '迁移期结束，旧 AWS 实例已删除。')
     except Exception as exc:
-        return f'迁移期结束，旧实例删除失败: {exc}'
+        return _action_result(False, 'delete_replaced_server', order.provider, instance_name, f'迁移期结束，旧实例删除失败: {exc}')
+
+
+async def _release_static_ip(order: CloudServerOrder) -> CloudActionResult:
+    if order.provider != 'aws_lightsail' or not order.static_ip_name:
+        return _action_result(True, 'release_static_ip', order.provider, order.static_ip_name or '', '无 AWS 固定 IP 名称，已释放数据库占位。')
+    try:
+        client = _aws_client(order.region_code)
+        try:
+            static_ip = client.get_static_ip(staticIpName=order.static_ip_name).get('staticIp') or {}
+            if static_ip.get('attachedTo'):
+                client.detach_static_ip(staticIpName=order.static_ip_name)
+        except Exception:
+            pass
+        client.release_static_ip(staticIpName=order.static_ip_name)
+        return _action_result(True, 'release_static_ip', order.provider, order.static_ip_name, f'AWS 固定 IP 已释放: {order.static_ip_name}')
+    except Exception as exc:
+        return _action_result(False, 'release_static_ip', order.provider, order.static_ip_name, f'AWS 固定 IP 释放失败: {exc}')
+
+
+async def release_aws_static_ip_asset(asset: CloudAsset) -> CloudActionResult:
+    if asset.provider != 'aws_lightsail' or not asset.asset_name:
+        return _action_result(True, 'release_static_ip_asset', asset.provider or '', asset.asset_name or '', '非 AWS 固定 IP 资产，未执行云端释放。')
+    try:
+        client = _aws_client(asset.region_code or 'ap-southeast-1')
+        try:
+            static_ip = client.get_static_ip(staticIpName=asset.asset_name).get('staticIp') or {}
+            if static_ip.get('attachedTo'):
+                client.detach_static_ip(staticIpName=asset.asset_name)
+        except Exception:
+            pass
+        client.release_static_ip(staticIpName=asset.asset_name)
+        return _action_result(True, 'release_static_ip_asset', asset.provider or '', asset.asset_name, f'AWS 固定 IP 已释放: {asset.asset_name}')
+    except Exception as exc:
+        return _action_result(False, 'release_static_ip_asset', asset.provider or '', asset.asset_name or '', f'AWS 固定 IP 释放失败: {exc}')
+
+
+@sync_to_async
+def mark_static_ip_asset_released(asset_id: int, note: str):
+    now = timezone.now()
+    asset = CloudAsset.objects.get(id=asset_id)
+    previous_public_ip = asset.public_ip or asset.previous_public_ip
+    asset.previous_public_ip = previous_public_ip
+    asset.public_ip = None
+    asset.provider_status = 'released'
+    asset.status = CloudAsset.STATUS_DELETED
+    asset.is_active = False
+    asset.note = '\n'.join(filter(None, [asset.note, note]))
+    asset.save(update_fields=['previous_public_ip', 'public_ip', 'provider_status', 'status', 'is_active', 'note', 'updated_at'])
+    return asset
 
 
 @sync_to_async
@@ -309,24 +385,43 @@ async def lifecycle_tick(notify=None):
             await notify(updated.user_id, f'⏰ 云服务器即将到期\n订单号: {updated.order_no}\n请尽快续费，未续费将按规则关机/删机。')
 
     for order in due['suspend']:
-        note = await _stop_instance(order)
-        updated = await _mark_suspended(order.id, note)
+        result = await _stop_instance(order)
+        updated = await _mark_suspended(order.id, result.note)
         if notify:
             await notify(updated.user_id, f'⚠️ 云服务器已关机\n订单号: {updated.order_no}\n如需继续使用，请尽快续费。')
 
     for order in due['delete']:
-        note = await _delete_instance(order)
-        updated = await _mark_deleted(order.id, note)
+        result = await _delete_instance(order)
+        if not result.ok:
+            updated = await _mark_suspended(order.id, result.note)
+        else:
+            updated = await _mark_deleted(order.id, result.note)
         if notify:
-            await notify(updated.user_id, f'🗑 云服务器实例已删除\n订单号: {updated.order_no}\n固定 IP 仍保留，可在保留期内续费恢复。')
+            if not result.ok:
+                await notify(updated.user_id, f'⚠️ 云服务器实例删除失败\n订单号: {updated.order_no}\n{result.note}')
+            else:
+                await notify(updated.user_id, f'🗑 云服务器实例已删除\n订单号: {updated.order_no}\n固定 IP 仍保留，可在保留期内续费恢复。')
 
     for order in due['recycle']:
-        updated = await _mark_recycled(order.id, '固定 IP 保留期结束，已释放数据库占位。')
+        result = await _release_static_ip(order)
+        if not result.ok:
+            updated = order
+        else:
+            updated = await _mark_recycled(order.id, result.note)
         if notify:
-            await notify(updated.user_id, f'📦 云服务器固定 IP 保留期已结束\n订单号: {updated.order_no}')
+            if not result.ok:
+                await notify(updated.user_id, f'⚠️ 云服务器固定 IP 删除失败\n订单号: {updated.order_no}\n{result.note}')
+            else:
+                await notify(updated.user_id, f'📦 云服务器固定 IP 保留期已结束\n订单号: {updated.order_no}')
 
     for order in migration_due_orders:
-        note = await _delete_replaced_server(order)
-        updated = await _mark_replaced_order_deleted(order.id, note)
+        result = await _delete_replaced_server(order)
+        if not result.ok:
+            updated = order
+        else:
+            updated = await _mark_replaced_order_deleted(order.id, result.note)
         if notify:
-            await notify(updated.user_id, f'🧹 迁移期已结束，旧服务器已删除\n订单号: {updated.order_no}')
+            if not result.ok:
+                await notify(updated.user_id, f'⚠️ 迁移期旧服务器删除失败\n订单号: {updated.order_no}\n{result.note}')
+            else:
+                await notify(updated.user_id, f'🧹 迁移期已结束，旧服务器已删除\n订单号: {updated.order_no}')

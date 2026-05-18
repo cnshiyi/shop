@@ -209,7 +209,7 @@ class CloudServerOrder(models.Model):
         verbose_name_plural = '云服务器订单'
         ordering = ['-created_at']
 
-    def save(self, *args, **kwargs):
+    def recalculate_lifecycle_dates(self):
         if self.completed_at and not self.service_started_at:
             self.service_started_at = self.completed_at
         if self.service_started_at and not self.service_expires_at:
@@ -220,6 +220,30 @@ class CloudServerOrder(models.Model):
             self.suspend_at = self.service_expires_at + timezone.timedelta(days=grace_days)
             self.delete_at = self.suspend_at + timezone.timedelta(days=3)
             self.ip_recycle_at = self.delete_at + timezone.timedelta(days=15)
+
+    def save(self, *args, **kwargs):
+        update_fields = kwargs.get('update_fields')
+        lifecycle_trigger_fields = {
+            'completed_at',
+            'service_started_at',
+            'service_expires_at',
+            'lifecycle_days',
+            'renew_extension_days',
+        }
+        should_recalculate = update_fields is None or bool(lifecycle_trigger_fields.intersection(set(update_fields)))
+        if should_recalculate:
+            self.recalculate_lifecycle_dates()
+            if update_fields is not None:
+                expanded_fields = set(update_fields)
+                expanded_fields.update({
+                    'service_started_at',
+                    'service_expires_at',
+                    'renew_grace_expires_at',
+                    'suspend_at',
+                    'delete_at',
+                    'ip_recycle_at',
+                })
+                kwargs['update_fields'] = list(expanded_fields)
         super().save(*args, **kwargs)
 
     def __str__(self):
