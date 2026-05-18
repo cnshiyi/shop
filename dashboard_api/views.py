@@ -8,6 +8,7 @@ from urllib.parse import quote
 
 from asgiref.sync import async_to_sync
 from django.contrib.auth import authenticate, get_user_model, login, logout
+from django.core import signing
 from django.contrib.auth.models import AnonymousUser
 from django.core.management import call_command
 from django.db import IntegrityError, ProgrammingError, transaction
@@ -234,19 +235,45 @@ def _staff_required(user):
     return user.is_active and (user.is_staff or user.is_superuser)
 
 
+def _make_session_token(user_pk: int) -> str:
+    """Issue an HMAC-signed token that encodes the user PK.
+
+    Format returned to the client: ``session-<signed_value>``
+    The signed value is produced by Django's ``signing`` module (uses SECRET_KEY
+    + salt + timestamp), so it cannot be forged or tampered with.
+    """
+    return 'session-' + signing.dumps(user_pk, salt='dashboard-session', compress=True)
+
+
+def _verify_session_token(token: str):
+    """Return the user PK encoded in *token*, or None if invalid/expired.
+
+    Tokens are valid for 30 days (2_592_000 seconds).  Tampering or using a
+    token after SECRET_KEY rotation causes BadSignature → returns None.
+    """
+    prefix = 'session-'
+    if not token.startswith(prefix):
+        return None
+    signed = token[len(prefix):]
+    try:
+        return signing.loads(signed, salt='dashboard-session', max_age=2_592_000)
+    except signing.SignatureExpired:
+        return None
+    except signing.BadSignature:
+        return None
+
+
 def _authenticate_dashboard_request(request):
     if getattr(request, 'user', None) and request.user.is_authenticated:
         return request.user
     auth_header = request.headers.get('Authorization') or ''
-    prefix = 'Bearer session-'
-    if not auth_header.startswith(prefix):
+    if not auth_header.startswith('Bearer '):
         return None
-    raw_user_id = auth_header[len(prefix):].strip()
-    if not raw_user_id.isdigit():
+    token = auth_header[len('Bearer '):].strip()
+    user_pk = _verify_session_token(token)
+    if user_pk is None:
         return None
-    from django.contrib.auth import get_user_model
-
-    user = get_user_model().objects.filter(pk=int(raw_user_id), is_active=True).first()
+    user = get_user_model().objects.filter(pk=user_pk, is_active=True).first()
     if user:
         request.user = user
     return user
@@ -951,7 +978,7 @@ def auth_login(request):
         return _error('用户已禁用', status=403)
 
     login(request, user)
-    return _ok({'accessToken': f'session-{user.pk}'})
+    return _ok({'accessToken': _make_session_token(user.pk)})
 
 
 @csrf_exempt
@@ -966,7 +993,7 @@ def auth_logout(request):
 @dashboard_login_required
 @require_POST
 def auth_refresh(request):
-    return _ok(f'session-{request.user.pk}')
+    return _ok({'accessToken': _make_session_token(request.user.pk)})
 
 
 @dashboard_login_required
@@ -995,7 +1022,7 @@ def user_info(request):
         'is_superuser': is_superuser,
         'permissions': permissions,
         'roles': roles,
-        'token': f'session-{request.user.pk}',
+        'token': _make_session_token(request.user.pk),
     })
 
 

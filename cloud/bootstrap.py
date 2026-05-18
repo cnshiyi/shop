@@ -221,7 +221,17 @@ WORKDIR='{MTPROXY_DIR}'
 mkdir -p "$WORKDIR"
 cd "$WORKDIR"
 rm -f mtproxy.sh
-curl -fsSL -o mtproxy.sh https://raw.githubusercontent.com/ellermister/mtproxy/master/mtproxy.sh
+# Pinned to a specific commit to avoid supply-chain risk from a mutable master branch.
+# To update: run `git ls-remote https://github.com/ellermister/mtproxy master` to get
+# the latest commit SHA, verify the script content, then replace the hash below.
+# Last verified: 2026-05-18.
+MTPROXY_COMMIT="310baeaba7e4dff7c320b9a7b08b5c05848752c1"
+MTPROXY_URL="https://raw.githubusercontent.com/ellermister/mtproxy/${{MTPROXY_COMMIT}}/mtproxy.sh"
+if ! curl -fsSL --max-time 30 -o mtproxy.sh "$MTPROXY_URL"; then
+  echo "MTProxy 安装失败"
+  echo "无法下载固定版本安装脚本: $MTPROXY_URL"
+  exit 1
+fi
 chmod +x mtproxy.sh
 INSTALL_OUTPUT="$(printf '%s\n%s\n%s\n%s\n%s\n' '2' '{port}' '18888' '{MTPROXY_FAKE_TLS_DOMAIN}' '' | bash mtproxy.sh 2>&1 || true)"
 printf '%s\n' "$INSTALL_OUTPUT"

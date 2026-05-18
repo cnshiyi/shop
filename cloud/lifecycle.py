@@ -33,6 +33,27 @@ def _instance_name(order: CloudServerOrder) -> str:
     return order.server_name or order.instance_id or order.provider_resource_id or ''
 
 
+def _aliyun_client(region: str):
+    """Return an Aliyun SWAS client using the active cloud account credentials."""
+    from alibabacloud_swas_open20200601.client import Client
+    from alibabacloud_tea_openapi import models as open_api_models
+    from cloud.aliyun_simple import _region_endpoint
+    from core.cloud_accounts import get_active_cloud_account
+
+    account = get_active_cloud_account('aliyun')
+    if not account:
+        raise RuntimeError('未配置可用的阿里云账号，无法执行阿里云生命周期动作。')
+    access_key = account.access_key_plain
+    secret_key = account.secret_key_plain
+    if not access_key or not secret_key:
+        raise RuntimeError('阿里云客户端创建失败，请检查 AK/SK 配置。')
+    return Client(open_api_models.Config(
+        access_key_id=access_key,
+        access_key_secret=secret_key,
+        endpoint=_region_endpoint(region or 'cn-hongkong'),
+    ))
+
+
 def _aws_client(region: str):
     import boto3
     base_queryset = CloudAccountConfig.objects.filter(
@@ -183,38 +204,104 @@ def _get_migration_due_orders():
 
 async def _stop_instance(order: CloudServerOrder) -> CloudActionResult:
     instance_name = _instance_name(order)
-    if order.provider != 'aws_lightsail' or not instance_name:
-        return _action_result(True, 'stop_instance', order.provider, instance_name, '非 AWS 资源，暂未执行真实关机。')
-    try:
-        client = _aws_client(order.region_code)
-        client.stop_instance(instanceName=instance_name, force=True)
-        return _action_result(True, 'stop_instance', order.provider, instance_name, 'AWS 实例已执行关机。')
-    except Exception as exc:
-        return _action_result(False, 'stop_instance', order.provider, instance_name, f'AWS 实例关机失败: {exc}')
+    if order.provider == 'aws_lightsail':
+        if not instance_name:
+            return _action_result(True, 'stop_instance', order.provider, instance_name, 'AWS 实例名为空，跳过关机。')
+        try:
+            client = _aws_client(order.region_code)
+            client.stop_instance(instanceName=instance_name, force=True)
+            return _action_result(True, 'stop_instance', order.provider, instance_name, 'AWS 实例已执行关机。')
+        except Exception as exc:
+            return _action_result(False, 'stop_instance', order.provider, instance_name, f'AWS 实例关机失败: {exc}')
+    elif order.provider == 'aliyun_simple':
+        instance_id = order.instance_id or order.provider_resource_id
+        if not instance_id:
+            return _action_result(True, 'stop_instance', order.provider, instance_name, '阿里云实例 ID 为空，跳过关机。')
+        try:
+            from alibabacloud_swas_open20200601 import models as swas_models
+            from cloud.aliyun_simple import _runtime_options
+            client = await sync_to_async(_aliyun_client)(order.region_code or 'cn-hongkong')
+            await sync_to_async(client.stop_instance_with_options)(
+                swas_models.StopInstanceRequest(
+                    instance_id=instance_id,
+                    region_id=order.region_code or 'cn-hongkong',
+                ),
+                _runtime_options(),
+            )
+            return _action_result(True, 'stop_instance', order.provider, instance_id, '阿里云实例已执行关机。')
+        except Exception as exc:
+            return _action_result(False, 'stop_instance', order.provider, instance_name, f'阿里云实例关机失败: {exc}')
+    else:
+        return _action_result(True, 'stop_instance', order.provider, instance_name, f'提供商 {order.provider} 暂不支持自动关机，已跳过。')
 
 
 async def _delete_instance(order: CloudServerOrder) -> CloudActionResult:
     instance_name = _instance_name(order)
-    if order.provider != 'aws_lightsail' or not instance_name:
-        return _action_result(True, 'delete_instance', order.provider, instance_name, '非 AWS 资源，暂未执行真实删机。')
-    try:
-        client = _aws_client(order.region_code)
-        client.delete_instance(instanceName=instance_name)
-        return _action_result(True, 'delete_instance', order.provider, instance_name, 'AWS 实例已执行删除，固定 IP 继续保留。')
-    except Exception as exc:
-        return _action_result(False, 'delete_instance', order.provider, instance_name, f'AWS 实例删除失败: {exc}')
+    if order.provider == 'aws_lightsail':
+        if not instance_name:
+            return _action_result(True, 'delete_instance', order.provider, instance_name, 'AWS 实例名为空，跳过删机。')
+        try:
+            client = _aws_client(order.region_code)
+            client.delete_instance(instanceName=instance_name)
+            return _action_result(True, 'delete_instance', order.provider, instance_name, 'AWS 实例已执行删除，固定 IP 继续保留。')
+        except Exception as exc:
+            return _action_result(False, 'delete_instance', order.provider, instance_name, f'AWS 实例删除失败: {exc}')
+    elif order.provider == 'aliyun_simple':
+        # Aliyun SWAS prepaid instances cannot be force-deleted via API.
+        # Stop the instance so it no longer consumes resources; it will expire
+        # naturally at the end of the billing period.
+        instance_id = order.instance_id or order.provider_resource_id
+        if not instance_id:
+            return _action_result(True, 'delete_instance', order.provider, instance_name, '阿里云实例 ID 为空，已标记删除。')
+        try:
+            from alibabacloud_swas_open20200601 import models as swas_models
+            from cloud.aliyun_simple import _runtime_options
+            client = await sync_to_async(_aliyun_client)(order.region_code or 'cn-hongkong')
+            await sync_to_async(client.stop_instance_with_options)(
+                swas_models.StopInstanceRequest(
+                    instance_id=instance_id,
+                    region_id=order.region_code or 'cn-hongkong',
+                ),
+                _runtime_options(),
+            )
+            return _action_result(True, 'delete_instance', order.provider, instance_id, '阿里云预付费实例已关机（预付费实例到期后自动释放，无法提前删除）。')
+        except Exception as exc:
+            return _action_result(False, 'delete_instance', order.provider, instance_name, f'阿里云实例关机失败: {exc}')
+    else:
+        return _action_result(True, 'delete_instance', order.provider, instance_name, f'提供商 {order.provider} 暂不支持自动删机，已标记删除。')
 
 
 async def _delete_replaced_server(order: CloudServerOrder) -> CloudActionResult:
     instance_name = _instance_name(order)
-    if order.provider != 'aws_lightsail' or not instance_name:
-        return _action_result(True, 'delete_replaced_server', order.provider, instance_name, '迁移期结束，旧服务器已标记删除。')
-    try:
-        client = _aws_client(order.region_code)
-        client.delete_instance(instanceName=instance_name)
-        return _action_result(True, 'delete_replaced_server', order.provider, instance_name, '迁移期结束，旧 AWS 实例已删除。')
-    except Exception as exc:
-        return _action_result(False, 'delete_replaced_server', order.provider, instance_name, f'迁移期结束，旧实例删除失败: {exc}')
+    if order.provider == 'aws_lightsail':
+        if not instance_name:
+            return _action_result(True, 'delete_replaced_server', order.provider, instance_name, '迁移期结束，旧服务器已标记删除。')
+        try:
+            client = _aws_client(order.region_code)
+            client.delete_instance(instanceName=instance_name)
+            return _action_result(True, 'delete_replaced_server', order.provider, instance_name, '迁移期结束，旧 AWS 实例已删除。')
+        except Exception as exc:
+            return _action_result(False, 'delete_replaced_server', order.provider, instance_name, f'迁移期结束，旧实例删除失败: {exc}')
+    elif order.provider == 'aliyun_simple':
+        instance_id = order.instance_id or order.provider_resource_id
+        if not instance_id:
+            return _action_result(True, 'delete_replaced_server', order.provider, instance_name, '迁移期结束，阿里云旧实例 ID 为空，已标记删除。')
+        try:
+            from alibabacloud_swas_open20200601 import models as swas_models
+            from cloud.aliyun_simple import _runtime_options
+            client = await sync_to_async(_aliyun_client)(order.region_code or 'cn-hongkong')
+            await sync_to_async(client.stop_instance_with_options)(
+                swas_models.StopInstanceRequest(
+                    instance_id=instance_id,
+                    region_id=order.region_code or 'cn-hongkong',
+                ),
+                _runtime_options(),
+            )
+            return _action_result(True, 'delete_replaced_server', order.provider, instance_id, '迁移期结束，阿里云旧实例已关机（预付费实例到期后自动释放）。')
+        except Exception as exc:
+            return _action_result(False, 'delete_replaced_server', order.provider, instance_name, f'迁移期结束，阿里云旧实例关机失败: {exc}')
+    else:
+        return _action_result(True, 'delete_replaced_server', order.provider, instance_name, f'迁移期结束，提供商 {order.provider} 暂不支持自动删机，已标记删除。')
 
 
 async def _release_static_ip(order: CloudServerOrder) -> CloudActionResult:
