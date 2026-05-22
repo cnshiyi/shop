@@ -3008,8 +3008,7 @@ class CloudServerServicesTestCase(TestCase):
         with patch('cloud.lifecycle._config_time', side_effect=[(15, 30), (16, 45)]):
             text = _notice_plan_text(order)
         self.assertIn('关机计划:', text)
-        self.assertIn('后台执行时间 15:30', text)
-        self.assertIn('后台执行时间 16:45', text)
+        self.assertNotIn('后台执行时间', text)
 
     def test_get_migration_due_orders_is_distinct(self):
         old_order = CloudServerOrder.objects.create(

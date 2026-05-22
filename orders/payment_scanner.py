@@ -504,16 +504,14 @@ def _cloud_order_plan_text(order) -> str:
     delete_at = getattr(order, 'delete_at', None)
     auto_renew_enabled = bool(getattr(order, 'auto_renew_enabled', False))
     auto_renew_at = expires_at - timezone.timedelta(days=1) if expires_at else None
-    suspend_time_text = str(get_runtime_config('cloud_suspend_time', '15:00') or '15:00').strip() or '15:00'
-    delete_time_text = str(get_runtime_config('cloud_delete_time', '15:00') or '15:00').strip() or '15:00'
     lines = [f'到期时间: {_format_local_dt(expires_at)}']
     if auto_renew_enabled:
         lines.append(f'自动续费: 已开启，预计 {_format_local_dt(auto_renew_at)} 自动续费')
     else:
         lines.append('自动续费: 本IP未开启自动续费')
     lines.extend([
-        f'关机计划: {_format_local_dt(suspend_at)}（后台执行时间 {suspend_time_text}）',
-        f'删除计划: {_format_local_dt(delete_at)}（后台执行时间 {delete_time_text}）',
+        f'关机计划: {_format_local_dt(suspend_at)}',
+        f'删除计划: {_format_local_dt(delete_at)}',
     ])
     return '\n'.join(lines)
 

@@ -577,9 +577,9 @@ def _notice_plan_text(order, notice: dict | None = None, *, include_expiry: bool
     suspend_at = notice.get('suspend_at') or getattr(order, 'suspend_at', None)
     delete_at = notice.get('delete_at') or getattr(order, 'delete_at', None)
     if suspend_at:
-        lines.append(f'关机计划: {_code_text(_format_notice_dt(suspend_at))}（后台执行时间 {_config_time_text("cloud_suspend_time", "15:00")}）')
+        lines.append(f'关机计划: {_code_text(_format_notice_dt(suspend_at))}')
     if delete_at:
-        lines.append(f'删除计划: {_code_text(_format_notice_dt(delete_at))}（后台执行时间 {_config_time_text("cloud_delete_time", "15:00")}）')
+        lines.append(f'删除计划: {_code_text(_format_notice_dt(delete_at))}')
     return '\n'.join(lines)
 
 
