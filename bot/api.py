@@ -37,6 +37,7 @@ from core.models import CloudAccountConfig, SiteConfig
 from core.button_config import init_button_config, load_button_config, save_button_config
 from core.runtime_config import CONFIG_HELP, SENSITIVE_CONFIG_KEYS, get_runtime_config
 from core.trongrid import parse_trongrid_api_keys
+from core.crypto import decrypt_text
 from core.texts import TEXT_GROUPS, all_text_keys, init_texts, text_default, text_description
 from orders.models import BalanceLedger, Order, Product, Recharge
 
@@ -1517,7 +1518,11 @@ def _parse_decimal(value, field_label):
 def _site_config_payload(item):
     is_sensitive = item.key in SENSITIVE_CONFIG_KEYS
     value = SiteConfig.get(item.key, '')
+    if item.key == 'trongrid_api_key':
+        value = decrypt_text(item.value or '')
     value_preview = _masked_sensitive_preview(value) if is_sensitive else (item.value or '')
+    if item.key == 'trongrid_api_key':
+        value_preview = value
     return {
         'id': item.id,
         'key': item.key,
@@ -3169,6 +3174,8 @@ def site_config_groups(request):
             obj = existing.get(key)
             is_sensitive = key in SENSITIVE_CONFIG_KEYS
             stored_value = SiteConfig.get(key, '') if obj else ''
+            if key == 'trongrid_api_key' and obj:
+                stored_value = decrypt_text(obj.value or '')
             effective_value = stored_value or get_runtime_config(key, '')
             value_preview = effective_value
             if is_sensitive:
