@@ -107,6 +107,25 @@ def _candidate_plans(client, region_code: str, plan_name: str) -> list[dict]:
     return result
 
 
+def _prefer_plan_id(candidate_plans: list[dict], desired_plan_id: str) -> list[dict]:
+    desired = str(desired_plan_id or '').strip()
+    if not desired:
+        return candidate_plans
+    matched = []
+    unmatched = []
+    seen = set()
+    for item in candidate_plans:
+        plan_id = str(item.get('PlanId') or '').strip()
+        if not plan_id or plan_id in seen:
+            continue
+        seen.add(plan_id)
+        if plan_id == desired:
+            matched.append(item)
+        else:
+            unmatched.append(item)
+    return [*matched, *unmatched] if matched else candidate_plans
+
+
 def _pick_image(client, region_code: str) -> dict:
     from alibabacloud_swas_open20200601 import models as swas_models
 
@@ -310,10 +329,10 @@ def _create_instance_sync(order, server_name: str):
         diagnostics = []
         desired_plan_id = str(getattr(order, 'provider_resource_id', '') or '').strip()
         if desired_plan_id:
-            candidate_plans = [item for item in candidate_plans if str(item.get('PlanId') or '').strip() == desired_plan_id] or candidate_plans
+            candidate_plans = _prefer_plan_id(candidate_plans, desired_plan_id)
             diagnostics.append(f'指定真实 PlanId: {desired_plan_id}')
 
-        for item in candidate_plans[:6]:
+        for item in candidate_plans:
             current_plan_id = item.get('PlanId') or ''
             current_plan_type = str(item.get('PlanType') or '')
             current_plan_price = str(item.get('OriginPrice') or '')

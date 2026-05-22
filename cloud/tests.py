@@ -105,6 +105,19 @@ class CloudServerServicesTestCase(TestCase):
 
         self.assertEqual([item.id for item in ordered[:2]], [second.id, first.id])
 
+    def test_aliyun_desired_plan_id_is_preferred_without_locking_candidates(self):
+        from cloud.aliyun_simple import _prefer_plan_id
+
+        plans = [
+            {'PlanId': 'fallback-plan', 'OriginPrice': '$5'},
+            {'PlanId': 'desired-plan', 'OriginPrice': '$4'},
+            {'PlanId': 'larger-plan', 'OriginPrice': '$8'},
+        ]
+
+        ordered = _prefer_plan_id(plans, 'desired-plan')
+
+        self.assertEqual([item['PlanId'] for item in ordered], ['desired-plan', 'fallback-plan', 'larger-plan'])
+
     def test_aws_sync_server_resolution_accepts_legacy_account_label(self):
         from cloud.management.commands.sync_aws_assets import _resolve_server
 
