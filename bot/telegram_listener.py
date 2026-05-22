@@ -377,7 +377,13 @@ async def _run_account_listener(account: LoginAccountSnapshot, stop_event: async
     from telethon.sessions import StringSession
 
     api_id, api_hash = await _telegram_api_credentials()
-    client = TelegramClient(StringSession(account.session_string), api_id, api_hash)
+    try:
+        session = StringSession(account.session_string)
+    except ValueError:
+        await _mark_account(account.id, 'session_expired', 'Telegram 会话数据无效，请重新登录')
+        logger.warning('Telegram个人号会话数据无效 account=%s label=%s', account.id, account.label)
+        return
+    client = TelegramClient(session, api_id, api_hash)
     try:
         await client.connect()
         if not await client.is_user_authorized():

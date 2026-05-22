@@ -731,16 +731,39 @@ def _parse_admin_chat_ids(raw_value: str) -> list[int]:
     return result
 
 
-async def _copy_user_notice_to_admins(bot: Bot, chat_id: int, text: str, parse_mode: str | None = None):
+def _reply_markup_button_summary(reply_markup) -> str:
+    if not reply_markup:
+        return ''
+    rows = getattr(reply_markup, 'inline_keyboard', None)
+    if rows is None and isinstance(reply_markup, dict):
+        rows = reply_markup.get('inline_keyboard')
+    labels = []
+    for row in rows or []:
+        row_labels = []
+        for button in row or []:
+            label = getattr(button, 'text', None)
+            if label is None and isinstance(button, dict):
+                label = button.get('text')
+            if label:
+                row_labels.append(str(label))
+        if row_labels:
+            labels.append(' | '.join(row_labels))
+    return '\n'.join(labels)
+
+
+async def _copy_user_notice_to_admins(bot: Bot, chat_id: int, text: str, parse_mode: str | None = None, title: str = '通知抄送', reply_markup=None):
     copy_chat_ids = _parse_admin_chat_ids(await _get_site_config_value('bot_notice_copy_chat_ids', ''))
     if not copy_chat_ids:
         return
-    copy_text = f'📣 通知抄送\n用户 TG ID: {chat_id}\n\n{text}'
+    button_summary = _reply_markup_button_summary(reply_markup)
+    if button_summary:
+        button_text = escape(button_summary) if parse_mode == 'HTML' else button_summary
+        text = f'{text}\n\n按钮:\n{button_text}'
+    copy_text = f'📣 {title}\n用户 TG ID: {chat_id}\n\n{text}'
     for copy_chat_id in copy_chat_ids:
-        if str(copy_chat_id) == str(chat_id):
-            continue
         try:
             await bot.send_message(chat_id=copy_chat_id, text=copy_text, parse_mode=parse_mode)
+            logger.info('用户通知抄送成功 title=%s copy_chat_id=%s chat_id=%s text_preview=%s', title, copy_chat_id, chat_id, str(text or '').replace('\n', ' ')[:180])
         except Exception as exc:
             logger.warning('用户通知抄送失败 copy_chat_id=%s chat_id=%s err=%s', copy_chat_id, chat_id, exc)
 
@@ -751,7 +774,7 @@ async def _send_admin_user_action_notice(bot: Bot | None, user, action: str, det
     copy_chat_ids = _parse_admin_chat_ids(await _get_site_config_value('bot_notice_copy_chat_ids', ''))
     if not copy_chat_ids:
         return
-    chat_id = int(getattr(user, 'tg_user_id', 0) or 0)
+    chat_id = int(getattr(user, 'tg_user_id', None) or getattr(user, 'id', 0) or 0)
     username = _display_username(user)
     first_name = str(getattr(user, 'first_name', '') or '').strip() or '-'
     lines = [
@@ -765,8 +788,6 @@ async def _send_admin_user_action_notice(bot: Bot | None, user, action: str, det
         lines.append(f'{escape(str(label))}: {escape(str(value if value is not None else "-"))}')
     text = '\n'.join(lines)
     for copy_chat_id in copy_chat_ids:
-        if chat_id and str(copy_chat_id) == str(chat_id):
-            continue
         try:
             await bot.send_message(chat_id=copy_chat_id, text=text, parse_mode='HTML')
         except Exception as exc:
@@ -806,6 +827,7 @@ def _install_notice_copy_wrapper(bot: Bot):
     if getattr(bot, '_notice_copy_wrapper_installed', False):
         return
     original_send_message = bot.send_message
+    original_edit_message_text = bot.edit_message_text
 
     async def _send_message_with_copy(*args, **kwargs):
         result = await original_send_message(*args, **kwargs)
@@ -820,20 +842,45 @@ def _install_notice_copy_wrapper(bot: Bot):
             return result
         try:
             copy_recipient_ids = await _notice_copy_recipient_ids()
-            if str(chat_id) in copy_recipient_ids:
-                return result
             if str(text or '').startswith('📣'):
                 return result
             token = _NOTICE_COPY_SENDING.set(True)
             try:
-                await _copy_user_notice_to_admins(bot, int(chat_id), str(text or ''), parse_mode=kwargs.get('parse_mode'))
+                await _copy_user_notice_to_admins(bot, int(chat_id), str(text or ''), parse_mode=kwargs.get('parse_mode'), title='机器人回复', reply_markup=kwargs.get('reply_markup'))
             finally:
                 _NOTICE_COPY_SENDING.reset(token)
         except Exception as exc:
             logger.warning('用户结果抄送失败 chat_id=%s err=%s', chat_id, exc)
         return result
 
+    async def _edit_message_text_with_copy(*args, **kwargs):
+        result = await original_edit_message_text(*args, **kwargs)
+        if _NOTICE_COPY_SENDING.get():
+            return result
+        text = kwargs.get('text') if 'text' in kwargs else (args[0] if args else '')
+        chat_id = kwargs.get('chat_id') if 'chat_id' in kwargs else (args[1] if len(args) > 1 else None)
+        if chat_id is None:
+            return result
+        try:
+            if int(chat_id) < 0:
+                return result
+        except (TypeError, ValueError):
+            return result
+        try:
+            copy_recipient_ids = await _notice_copy_recipient_ids()
+            if str(text or '').startswith('📣'):
+                return result
+            token = _NOTICE_COPY_SENDING.set(True)
+            try:
+                await _copy_user_notice_to_admins(bot, int(chat_id), str(text or ''), parse_mode=kwargs.get('parse_mode'), title='机器人回复（编辑消息）', reply_markup=kwargs.get('reply_markup'))
+            finally:
+                _NOTICE_COPY_SENDING.reset(token)
+        except Exception as exc:
+            logger.warning('用户编辑结果抄送失败 chat_id=%s err=%s', chat_id, exc)
+        return result
+
     bot.send_message = _send_message_with_copy
+    bot.edit_message_text = _edit_message_text_with_copy
     bot._notice_copy_wrapper_installed = True
 
 
@@ -1109,6 +1156,12 @@ def _callback_route_label(callback_data: str | None) -> str:
         'mon:add': 'monitor.add 添加监控',
         'mon:list': 'monitor.list 监控列表',
         'mon:back': 'monitor.back 返回监控列表',
+        'cloud:renewall:confirm': 'cloud.renewall.confirm 全部续费确认',
+        'cloud:renewall:pay': 'cloud.renewall.pay 确认全部续费',
+        'cart:checkout:balance:USDT': 'cart.checkout.balance.USDT 购物车余额结算',
+        'cart:checkout:address:USDT': 'cart.checkout.address.USDT 购物车地址结算',
+        'cart:clear': 'cart.clear 清空购物车',
+        'back_to_products': 'product.back_to_products 返回商品列表',
         'noop': 'noop 无操作',
     }
     if data in exact:
@@ -1145,11 +1198,17 @@ def _callback_route_label(callback_data: str | None) -> str:
         ('cloud:refund:', 'cloud.refund 退款确认'),
         ('cloud:reinitconfirm:', 'cloud.reinitconfirm 确认重新初始化'),
         ('cloud:reinit:', 'cloud.reinit 重新安装/继续初始化'),
+        ('cloud:adminexp:', 'cloud.adminexp 修改到期时间'),
         ('profile:orders:cloud:page:', 'profile.orders.cloud.page 云服务器订单分页'),
+        ('profile:orders:cloud:filter:', 'profile.orders.cloud.filter 云服务器订单筛选'),
         ('profile:reminders:ip:', 'profile.reminders.ip IP提醒详情'),
         ('profile:reminders:order:', 'profile.reminders.order 单IP生命周期提醒开关'),
         ('profile:reminders:auto:', 'profile.reminders.auto 单IP自动续费开关'),
         ('profile:reminders:page:', 'profile.reminders.page 提醒列表分页'),
+        ('profile:balance_details:filter:', 'profile.balance_details.filter 余额明细筛选'),
+        ('support:contact:', 'support.contact 联系客服'),
+        ('adminreply:hint:', 'adminreply.hint 回复用户提示'),
+        ('adminreply:mute3d:', 'adminreply.mute3d 关闭3天转发'),
         ('custom:region:', 'custom.region 选择地区'),
         ('custom:plan:', 'custom.plan 选择套餐'),
         ('custom:qty:', 'custom.qty 选择数量'),
@@ -1162,9 +1221,17 @@ def _callback_route_label(callback_data: str | None) -> str:
         ('custom:port:default:', 'custom.port.default 默认端口'),
         ('custom:port:custom:', 'custom.port.custom 自定义端口'),
         ('balance:detail:', 'balance.detail 余额明细详情'),
+        ('bdpage:', 'balance.page 余额明细分页'),
         ('rcur:', 'recharge.currency 充值币种'),
         ('rpage:', 'recharge.page 充值分页'),
         ('rdetail:', 'recharge.detail 充值详情'),
+        ('cart:remove:', 'cart.remove 删除购物车商品'),
+        ('product:', 'product.detail 商品详情'),
+        ('ppage:', 'product.page 商品分页'),
+        ('qty:', 'product.quantity 选择商品数量'),
+        ('pay:', 'product.pay 商品支付'),
+        ('order_detail:', 'order.detail 商品订单详情'),
+        ('opage:', 'order.page 商品订单分页'),
         ('mon:detail:', 'monitor.detail 监控详情'),
         ('mon:toggle:', 'monitor.toggle 监控开关'),
         ('mon:threshold:', 'monitor.threshold 设置阈值'),
@@ -1365,6 +1432,13 @@ async def _safe_edit_text(message: Message, text: str, **kwargs):
     try:
         sent = await message.edit_text(text, **kwargs)
         logger.info('BOT_MESSAGE_EDIT chat_id=%s message_id=%s text_preview=%s', getattr(getattr(message, 'chat', None), 'id', None), getattr(message, 'message_id', None), str(text or '').replace('\n', ' ')[:180])
+        bot = getattr(message, 'bot', None)
+        chat_id = getattr(getattr(message, 'chat', None), 'id', None)
+        if bot and chat_id:
+            try:
+                await _copy_user_notice_to_admins(bot, int(chat_id), str(text or ''), parse_mode=kwargs.get('parse_mode'), title='机器人回复（编辑消息）', reply_markup=kwargs.get('reply_markup'))
+            except Exception as exc:
+                logger.warning('用户编辑结果抄送失败 chat_id=%s err=%s', chat_id, exc)
         return sent
     except TelegramBadRequest as exc:
         error_text = str(exc).lower()

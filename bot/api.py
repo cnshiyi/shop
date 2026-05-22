@@ -1546,6 +1546,8 @@ def _telegram_chat_user_payload(user, latest=None, message_count=0):
         'username_label': f'@{user.primary_username}' if user.primary_username else '-',
         'usernames': user.usernames,
         'message_count': message_count,
+        'latest_chat_id': latest.chat_id if latest else None,
+        'latest_login_account_id': latest.login_account_id if latest else None,
         'latest_message': latest.text if latest else '',
         'latest_at': _iso(latest.created_at) if latest else None,
     }
@@ -3858,28 +3860,62 @@ def user_balance_details(request, user_id):
 @require_GET
 def telegram_accounts_overview(request):
     keyword = (request.GET.get('keyword') or '').strip().lstrip('@')
+    scope = (request.GET.get('scope') or '').strip().lower()
     include_archived = (request.GET.get('archived') or '').strip() in {'1', 'true', 'yes'}
-    archived_ids = set(TelegramChatArchive.objects.values_list('chat_id', flat=True))
     accounts = TelegramLoginAccount.objects.order_by('-updated_at', '-id')
-    users = TelegramUser.objects.order_by('-updated_at', '-id')
-    messages = TelegramChatMessage.objects.select_related('user', 'login_account').order_by('-created_at', '-id')
     if keyword:
         accounts = accounts.filter(Q(label__icontains=keyword) | Q(phone__icontains=keyword) | Q(username__icontains=keyword))
+    if scope == 'accounts':
+        return _ok({
+            'accounts': [_telegram_login_account_payload(item) for item in accounts[:50]],
+            'chats': [],
+            'users': [],
+            'messages': [],
+        })
+
+    users = TelegramUser.objects.order_by('-updated_at', '-id')
+    if keyword:
         user_filter = Q(username__icontains=keyword) | Q(first_name__icontains=keyword)
-        message_filter = Q(text__icontains=keyword) | Q(username_snapshot__icontains=keyword) | Q(first_name_snapshot__icontains=keyword)
         if keyword.isdigit():
             user_filter |= Q(tg_user_id=int(keyword))
-            message_filter |= Q(tg_user_id=int(keyword))
         users = users.filter(user_filter)
+
+    user_items = list(users[:100])
+    user_ids = [item.tg_user_id for item in user_items]
+    user_messages = TelegramChatMessage.objects.filter(tg_user_id__in=user_ids)
+    counts = dict(
+        user_messages.values('tg_user_id')
+        .annotate(total=Count('id'))
+        .values_list('tg_user_id', 'total')
+    )
+    latest_by_user = {}
+    for msg in (
+        user_messages.select_related('login_account')
+        .order_by('-created_at', '-id')
+        .iterator(chunk_size=200)
+    ):
+        latest_by_user.setdefault(msg.tg_user_id, msg)
+        if len(latest_by_user) >= len(user_ids):
+            break
+    if scope in {'', 'users'}:
+        return _ok({
+            'accounts': [_telegram_login_account_payload(item) for item in accounts[:50]],
+            'chats': [],
+            'users': [_telegram_chat_user_payload(user, latest_by_user.get(user.tg_user_id), counts.get(user.tg_user_id, 0)) for user in user_items],
+            'messages': [],
+        })
+
+    archived_ids = set(TelegramChatArchive.objects.values_list('chat_id', flat=True))
+    messages = TelegramChatMessage.objects.select_related('user', 'login_account').order_by('-created_at', '-id')
+    if keyword:
+        message_filter = Q(text__icontains=keyword) | Q(username_snapshot__icontains=keyword) | Q(first_name_snapshot__icontains=keyword)
+        if keyword.isdigit():
+            message_filter |= Q(tg_user_id=int(keyword))
         messages = messages.filter(message_filter)
-    counts = dict(TelegramChatMessage.objects.values('tg_user_id').annotate(total=Count('id')).values_list('tg_user_id', 'total'))
     if not include_archived and archived_ids:
         messages = messages.exclude(chat_id__in=archived_ids)
     chat_counts = dict(messages.values('chat_id').annotate(total=Count('id')).values_list('chat_id', 'total'))
-    latest_by_user = {}
     latest_by_chat = {}
-    for msg in TelegramChatMessage.objects.select_related('login_account').order_by('-created_at', '-id')[:2000]:
-        latest_by_user.setdefault(msg.tg_user_id, msg)
     for msg in messages.select_related('login_account').iterator(chunk_size=500):
         latest_by_chat.setdefault(msg.chat_id, msg)
         if len(latest_by_chat) >= 100:
@@ -3887,8 +3923,8 @@ def telegram_accounts_overview(request):
     return _ok({
         'accounts': [_telegram_login_account_payload(item) for item in accounts[:50]],
         'chats': [_telegram_chat_payload(chat_id, latest, chat_counts.get(chat_id, 0), archived_ids) for chat_id, latest in list(latest_by_chat.items())[:100]],
-        'users': [_telegram_chat_user_payload(user, latest_by_user.get(user.tg_user_id), counts.get(user.tg_user_id, 0)) for user in users[:100]],
-        'messages': [_telegram_message_payload(item) for item in messages[:200]],
+        'users': [_telegram_chat_user_payload(user, latest_by_user.get(user.tg_user_id), counts.get(user.tg_user_id, 0)) for user in user_items],
+        'messages': [],
     })
 
 
@@ -4344,6 +4380,8 @@ def telegram_chat_messages(request):
     user_id = request.GET.get('user_id')
     tg_user_id = request.GET.get('tg_user_id')
     chat_id = request.GET.get('chat_id')
+    if not any([user_id, tg_user_id, chat_id]):
+        return _ok([])
     qs = TelegramChatMessage.objects.select_related('user', 'login_account').order_by('-created_at', '-id')
     if user_id:
         qs = qs.filter(user_id=user_id)
