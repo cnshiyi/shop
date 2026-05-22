@@ -2355,10 +2355,14 @@ def _notice_group_summary_items(items: list[dict], *, limit: int | None = None, 
     grouped = {}
     for item in items:
         notice_type = item.get('notice_type') or ''
+        queue_status = item.get('queue_status') or ''
+        plan_scope = 'future' if queue_status == 'scheduled_future' else 'due'
         user_key = item.get('user_id') or f"unbound:{item.get('tg_user_id') or item.get('user_display_name') or 'unknown'}"
-        key = f'{user_key}:{notice_type}'
+        key = f'{user_key}:{notice_type}:{plan_scope}'
         group = grouped.setdefault(key, {
             'id': key,
+            'plan_scope': plan_scope,
+            'plan_scope_label': '未来计划' if plan_scope == 'future' else '近期计划',
             'user_id': item.get('user_id'),
             'tg_user_id': item.get('tg_user_id'),
             'user_display_name': item.get('user_display_name') or '未绑定用户',
@@ -2402,7 +2406,12 @@ def _notice_group_summary_items(items: list[dict], *, limit: int | None = None, 
         if not group.get('notice_text_preview'):
             label = group.get('notice_type_label') or '通知'
             group['notice_text_preview'] = f'{label}：{group["user_display_name"]} 共 {group["ip_count"]} 个 IP，系统会合并成一条通知发送。'
-    summary = sorted(grouped.values(), key=lambda item: item.get('next_notice_at') or '')
+    summary = sorted(grouped.values(), key=lambda item: (
+        item.get('user_display_name') or '',
+        item.get('username_label') or '',
+        item.get('next_notice_at') or '',
+        item.get('notice_type_label') or '',
+    ))
     total = len(summary)
     visible_summary = summary[offset:offset + limit] if limit else summary[offset:]
     for group in visible_summary:
@@ -2870,6 +2879,11 @@ def notice_task_detail(request):
 
     due_user_summary_items, due_user_total = _notice_group_summary_items(due_items, limit=limit, offset=offset)
     future_user_summary_items, future_user_total = _notice_group_summary_items(future_plan_items, limit=future_limit, offset=future_offset)
+    active_user_summary_items, active_user_total = _notice_group_summary_items(
+        [*due_items, *future_plan_items],
+        limit=limit,
+        offset=offset,
+    )
     visible_due_items = due_items[offset:offset + limit]
     visible_future_plan_items = future_plan_items[future_offset:future_offset + future_limit]
 
@@ -2901,6 +2915,7 @@ def notice_task_detail(request):
         'due_user_count': due_user_total,
         'future_count': len(future_plan_items),
         'future_user_count': future_user_total,
+        'active_user_count': active_user_total,
         'history_count': len(history_all_items),
         'recent_success_count': recent_success_count,
         'recent_success_user_count': recent_success_user_count,
@@ -2912,6 +2927,7 @@ def notice_task_detail(request):
         'due_user_summary_items': _compact_notice_items(due_user_summary_items) if compact else due_user_summary_items,
         'future_plan_items': _compact_notice_items(visible_future_plan_items) if compact else visible_future_plan_items,
         'future_user_summary_items': _compact_notice_items(future_user_summary_items) if compact else future_user_summary_items,
+        'active_user_summary_items': _compact_notice_items(active_user_summary_items) if compact else active_user_summary_items,
         'history_items': _compact_notice_items(visible_history_items) if compact else visible_history_items,
     })
 

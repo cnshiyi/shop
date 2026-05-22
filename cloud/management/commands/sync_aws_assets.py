@@ -614,12 +614,13 @@ def _mark_ip_retained_as_unattached(public_ip, static_ip_name, retained_order, a
     return updated
 
 
-def _mark_deleted_when_missing_in_aws(region, existing_instance_names, existing_public_ips, stdout, account=None):
+def _mark_deleted_when_missing_in_aws(region, existing_instance_names, existing_public_ips, stdout, account=None, asset_queryset=None, server_queryset=None):
     verification_deleted_items = []
-    queryset = CloudAsset.objects.filter(
+    queryset = asset_queryset if asset_queryset is not None else CloudAsset.objects.filter(
         kind=CloudAsset.KIND_SERVER,
         provider='aws_lightsail',
-    ).exclude(status__in=_SYNC_EXCLUDED_ASSET_STATUSES)
+    )
+    queryset = queryset.exclude(status__in=_SYNC_EXCLUDED_ASSET_STATUSES)
     if account:
         labels = cloud_account_label_variants(account)
         queryset = queryset.filter(Q(cloud_account=account) | Q(account_label__in=labels))
@@ -703,7 +704,8 @@ def _mark_deleted_when_missing_in_aws(region, existing_instance_names, existing_
         stdout.stdout.write(stdout.style.WARNING(
             f'IP校验 已删除 资产#{asset.id} IP={old_public_ip or "缺失"} 云上不存在'
         ))
-    server_queryset = Server.objects.filter(provider='aws_lightsail').exclude(status__in=_SYNC_EXCLUDED_SERVER_STATUSES)
+    server_queryset = server_queryset if server_queryset is not None else Server.objects.filter(provider='aws_lightsail')
+    server_queryset = server_queryset.exclude(status__in=_SYNC_EXCLUDED_SERVER_STATUSES)
     if account:
         server_queryset = server_queryset.filter(account_label__in=cloud_account_label_variants(account))
     server_queryset = server_queryset.filter(
@@ -1414,6 +1416,59 @@ class Command(BaseCommand):
                             existing_public_ips=existing_public_ips,
                             stdout=self,
                             account=account,
+                        )
+                    )
+                else:
+                    scoped_assets = CloudAsset.objects.filter(
+                        kind=CloudAsset.KIND_SERVER,
+                        provider='aws_lightsail',
+                    ).exclude(status__in=_SYNC_EXCLUDED_ASSET_STATUSES)
+                    scoped_servers = Server.objects.filter(provider='aws_lightsail').exclude(status__in=_SYNC_EXCLUDED_SERVER_STATUSES)
+                    if target_asset_id:
+                        scoped_assets = scoped_assets.filter(pk=target_asset_id)
+                        target_asset = scoped_assets.first()
+                        if target_asset:
+                            server_filter = Q()
+                            scoped_name = str(target_asset.instance_id or target_asset.asset_name or '').strip()
+                            scoped_resource_id = str(target_asset.provider_resource_id or '').strip()
+                            scoped_ip = str(target_asset.public_ip or target_asset.previous_public_ip or '').strip()
+                            if scoped_name:
+                                server_filter |= Q(instance_id=scoped_name) | Q(server_name=scoped_name)
+                            if scoped_resource_id:
+                                server_filter |= Q(provider_resource_id=scoped_resource_id)
+                            if scoped_ip:
+                                server_filter |= Q(public_ip=scoped_ip) | Q(previous_public_ip=scoped_ip)
+                            scoped_servers = scoped_servers.filter(server_filter) if server_filter else scoped_servers.none()
+                        else:
+                            scoped_servers = scoped_servers.none()
+                    else:
+                        scoped_filter = Q()
+                        if target_instance_id:
+                            scoped_filter |= Q(instance_id=target_instance_id) | Q(provider_resource_id=target_instance_id) | Q(asset_name=target_instance_id)
+                        if target_public_ip:
+                            scoped_filter |= Q(public_ip=target_public_ip) | Q(previous_public_ip=target_public_ip)
+                        scoped_assets = scoped_assets.filter(scoped_filter) if scoped_filter else scoped_assets.none()
+                        scoped_servers = scoped_servers.filter(
+                            Q(instance_id=target_instance_id) | Q(provider_resource_id=target_instance_id) | Q(server_name=target_instance_id)
+                            | Q(public_ip=target_public_ip) | Q(previous_public_ip=target_public_ip)
+                        ) if scoped_filter else scoped_servers.none()
+                    scoped_assets = scoped_assets.filter(
+                        Q(cloud_account=account) | Q(account_label__in=cloud_account_label_variants(account)),
+                        Q(region_code=region) | Q(region_code='') | Q(region_code__isnull=True),
+                    )
+                    scoped_servers = scoped_servers.filter(
+                        Q(account_label__in=cloud_account_label_variants(account)),
+                        Q(region_code=region) | Q(region_code='') | Q(region_code__isnull=True),
+                    )
+                    verification_deleted_items.extend(
+                        _mark_deleted_when_missing_in_aws(
+                            region=region,
+                            existing_instance_names=set(region_instance_ids),
+                            existing_public_ips=existing_public_ips,
+                            stdout=self,
+                            account=account,
+                            asset_queryset=scoped_assets,
+                            server_queryset=scoped_servers,
                         )
                     )
                 synced_instance_ids_by_region.setdefault(region, set()).update(region_instance_ids)
