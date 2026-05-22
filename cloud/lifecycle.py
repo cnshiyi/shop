@@ -85,6 +85,14 @@ def _config_bool(key: str, default: str = '0') -> bool:
     return str(get_runtime_config(key, default)).strip().lower() in {'1', 'true', 'yes', 'on'}
 
 
+def cloud_server_delete_enabled() -> bool:
+    return _config_bool('cloud_server_delete_enabled', '0')
+
+
+def cloud_ip_delete_enabled() -> bool:
+    return _config_bool('cloud_ip_delete_enabled', '0')
+
+
 def _config_int(key: str, default: int) -> int:
     try:
         return int(str(get_runtime_config(key, str(default))).strip() or default)
@@ -2452,25 +2460,26 @@ def _order_action_ip(order) -> str:
 def _defer_startup_lifecycle_actions(due, migration_due_orders, orphan_asset_delete_due, delay_seconds: int):
     suspend_run_at = _next_cloud_action_run_at('cloud_suspend_time', '15:00', min_delay_seconds=delay_seconds)
     delete_run_at = _next_cloud_action_run_at('cloud_delete_time', '15:00', min_delay_seconds=delay_seconds)
+    can_defer_delete = cloud_server_delete_enabled()
     for order in due.get('suspend') or []:
         CloudServerOrder.objects.filter(id=order.id).update(suspend_at=suspend_run_at, updated_at=timezone.now())
         logger.warning(
             'CLOUD_STARTUP_DEFER_SUSPEND order_id=%s order_no=%s ip=%s old_suspend_at=%s deferred_until=%s message="启动检查命中到期关机，IP %s 将顺延到后台设定关机时间执行"',
             order.id, order.order_no, _order_action_ip(order), order.suspend_at, suspend_run_at, _order_action_ip(order),
         )
-    for order in due.get('delete') or []:
+    for order in (due.get('delete') or []) if can_defer_delete else []:
         CloudServerOrder.objects.filter(id=order.id).update(delete_at=delete_run_at, updated_at=timezone.now())
         logger.warning(
             'CLOUD_STARTUP_DEFER_DELETE order_id=%s order_no=%s ip=%s old_delete_at=%s deferred_until=%s message="启动检查命中到期删机，IP %s 将顺延到后台设定删机时间执行"',
             order.id, order.order_no, _order_action_ip(order), order.delete_at, delete_run_at, _order_action_ip(order),
         )
-    for order in migration_due_orders or []:
+    for order in (migration_due_orders or []) if can_defer_delete else []:
         CloudServerOrder.objects.filter(id=order.id).update(migration_due_at=delete_run_at, updated_at=timezone.now())
         logger.warning(
             'CLOUD_STARTUP_DEFER_MIGRATION_DELETE order_id=%s order_no=%s ip=%s old_migration_due_at=%s deferred_until=%s message="启动检查命中迁移旧机删机，IP %s 将顺延到后台设定删机时间执行"',
             order.id, order.order_no, _order_action_ip(order), order.migration_due_at, delete_run_at, _order_action_ip(order),
         )
-    for asset in orphan_asset_delete_due or []:
+    for asset in (orphan_asset_delete_due or []) if can_defer_delete else []:
         CloudAsset.objects.filter(id=asset.id).update(actual_expires_at=delete_run_at, updated_at=timezone.now())
         logger.warning(
             'CLOUD_STARTUP_DEFER_ORPHAN_ASSET_DELETE asset_id=%s ip=%s old_actual_expires_at=%s deferred_until=%s message="启动检查命中无订单资产删机，IP %s 将顺延到后台设定删机时间执行"',
@@ -2652,6 +2661,10 @@ async def lifecycle_tick(notify=None, notify_target=None, defer_destructive_seco
             await _record_lifecycle_action_failed(order.id, 'suspend_failed', note)
 
     for order in due['delete']:
+        if not await sync_to_async(cloud_server_delete_enabled, thread_sensitive=False)():
+            logger.warning('跳过云服务器删机：删除服务器总开关已关闭 订单ID=%s 订单号=%s IP=%s', order.id, order.order_no, order.public_ip or order.previous_public_ip)
+            await _record_lifecycle_action_failed(order.id, 'delete_skipped', '删除服务器总开关已关闭，跳过真实删机。')
+            continue
         if not await sync_to_async(_is_cloud_delete_safe_time, thread_sensitive=False)():
             logger.warning('跳过云服务器删机：不在允许执行时间窗口 订单ID=%s 订单号=%s 计划删机=%s 当前时间=%s', order.id, order.order_no, order.delete_at, timezone.now())
             continue
@@ -2672,6 +2685,10 @@ async def lifecycle_tick(notify=None, notify_target=None, defer_destructive_seco
             await _record_lifecycle_action_failed(order.id, 'delete_failed', note)
 
     for order in due['recycle']:
+        if not await sync_to_async(cloud_ip_delete_enabled, thread_sensitive=False)():
+            logger.warning('跳过订单固定IP释放：删除IP总开关已关闭 订单ID=%s 订单号=%s IP=%s', order.id, order.order_no, order.public_ip or order.previous_public_ip)
+            await _record_lifecycle_action_failed(order.id, 'recycle_skipped', '删除IP总开关已关闭，跳过真实释放固定 IP。')
+            continue
         notice = await _cloud_expiry_notice_payload(order.id)
         if not notice.get('valid'):
             continue
@@ -2686,6 +2703,10 @@ async def lifecycle_tick(notify=None, notify_target=None, defer_destructive_seco
             await _record_lifecycle_action_failed(order.id, 'recycle_failed', note)
 
     for order in migration_due_orders:
+        if not await sync_to_async(cloud_server_delete_enabled, thread_sensitive=False)():
+            logger.warning('跳过迁移旧服务器删机：删除服务器总开关已关闭 订单ID=%s 订单号=%s IP=%s', order.id, order.order_no, order.public_ip or order.previous_public_ip)
+            await _record_lifecycle_action_failed(order.id, 'delete_skipped', '删除服务器总开关已关闭，跳过真实删机。')
+            continue
         if not await sync_to_async(_is_cloud_delete_safe_time, thread_sensitive=False)():
             logger.warning('跳过迁移旧服务器删机：不在允许执行时间窗口 订单ID=%s 订单号=%s 迁移清理时间=%s 当前时间=%s', order.id, order.order_no, order.migration_due_at, timezone.now())
             continue
@@ -2703,6 +2724,9 @@ async def lifecycle_tick(notify=None, notify_target=None, defer_destructive_seco
             await _record_lifecycle_action_failed(order.id, 'delete_failed', note)
 
     for asset in orphan_asset_delete_due:
+        if not await sync_to_async(cloud_server_delete_enabled, thread_sensitive=False)():
+            logger.warning('跳过孤儿云资源删除：删除服务器总开关已关闭 资源ID=%s IP=%s', asset.id, asset.public_ip)
+            continue
         if not await sync_to_async(_is_cloud_delete_safe_time, thread_sensitive=False)():
             logger.warning('跳过孤儿云资源删除：不在允许执行时间窗口 资源ID=%s IP=%s 实际到期=%s 当前时间=%s', asset.id, asset.public_ip, asset.actual_expires_at, timezone.now())
             continue
@@ -2721,6 +2745,9 @@ async def lifecycle_tick(notify=None, notify_target=None, defer_destructive_seco
             logger.warning('孤儿云资源删除失败：资源ID=%s IP=%s 云厂商=%s 地区=%s 备注=%s', asset.id, asset.public_ip, asset.provider, asset.region_code, note)
 
     for asset in unattached_static_ip_delete_due:
+        if not await sync_to_async(cloud_ip_delete_enabled, thread_sensitive=False)():
+            logger.warning('跳过未附加固定IP释放：删除IP总开关已关闭 资源ID=%s IP=%s', asset.id, asset.public_ip)
+            continue
         if not await sync_to_async(_is_cloud_delete_safe_time, thread_sensitive=False)():
             logger.warning('跳过未附加固定IP释放：不在允许执行时间窗口 资源ID=%s IP=%s 实际到期=%s 当前时间=%s', asset.id, asset.public_ip, asset.actual_expires_at, timezone.now())
             continue

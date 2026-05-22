@@ -29,7 +29,7 @@ from django.views.decorators.http import require_GET, require_POST
 
 from bot.models import BotOperationLog, TelegramChatArchive, TelegramChatMessage, TelegramGroupFilter, TelegramLoginAccount, TelegramUser
 from bot.services import _get_or_create_user_sync
-from cloud.lifecycle import _delete_instance, _delete_orphan_asset_instance, _get_due_orders, _get_orphan_asset_delete_due, _is_cloud_delete_safe_time, _mark_deleted, _mark_orphan_asset_deleted, _mark_unattached_static_ip_deleted, _record_lifecycle_action_failed, _release_unattached_static_ip, _shutdown_enabled_for_order
+from cloud.lifecycle import _delete_instance, _delete_orphan_asset_instance, _get_due_orders, _get_orphan_asset_delete_due, _is_cloud_delete_safe_time, _mark_deleted, _mark_orphan_asset_deleted, _mark_unattached_static_ip_deleted, _record_lifecycle_action_failed, _release_unattached_static_ip, _shutdown_enabled_for_order, cloud_ip_delete_enabled, cloud_server_delete_enabled
 from cloud.models import AddressMonitor, CloudAsset, CloudIpLog, CloudLifecyclePlan, CloudLifecyclePlanNote, CloudServerOrder
 from cloud.sync_safety import missing_confirmation_state
 from core.cloud_accounts import cloud_account_label_variants
@@ -2783,6 +2783,10 @@ def _run_shutdown_order_sync(order_id: int, queue_status='manual_single', enforc
         reason = '阿里云轻量服务器当前未接入删除 API，本系统只执行创建、续费和状态同步；不会执行真实删机。'
         async_to_sync(_record_lifecycle_action_failed)(order.id, 'delete_skipped', reason)
         return {'order_id': order.id, 'order_no': order.order_no, 'ip': ip, 'queue_status': queue_status, 'ok': False, 'error': reason}
+    if not cloud_server_delete_enabled():
+        reason = '删除服务器总开关已关闭，跳过真实删机。'
+        async_to_sync(_record_lifecycle_action_failed)(order.id, 'delete_skipped', reason)
+        return {'order_id': order.id, 'order_no': order.order_no, 'ip': ip, 'queue_status': queue_status, 'ok': False, 'error': reason}
     if enforce_schedule and not _shutdown_enabled_for_order(order):
         reason = '云账号关机计划已关闭，跳过真实删机。'
         async_to_sync(_record_lifecycle_action_failed)(order.id, 'delete_skipped', reason)
@@ -2836,6 +2840,8 @@ def _run_orphan_asset_delete_sync(asset_id: int, enforce_schedule: bool = True):
         return {'asset_id': asset.id, 'ip': ip, 'ok': False, 'error': '该服务器资产已删除，不需要重复执行'}
     if asset.provider == 'aliyun_simple':
         return {'asset_id': asset.id, 'ip': ip, 'ok': False, 'error': '阿里云轻量服务器当前未接入删除 API，本系统不会执行真实删机。'}
+    if not cloud_server_delete_enabled():
+        return {'asset_id': asset.id, 'ip': ip, 'ok': False, 'error': '删除服务器总开关已关闭，跳过真实删机。'}
     if enforce_schedule and not _asset_shutdown_enabled(asset):
         return {'asset_id': asset.id, 'ip': ip, 'ok': False, 'error': '云账号关机计划已关闭，跳过真实删机。'}
     if _asset_is_unattached_ip(asset) or not str(asset.instance_id or asset.provider_resource_id or asset.asset_name or '').strip():
@@ -2877,6 +2883,8 @@ def _run_unattached_ip_delete_sync(asset_id: int, enforce_schedule: bool = True)
     now = timezone.now()
     if asset.status in {CloudAsset.STATUS_DELETED, CloudAsset.STATUS_DELETING, CloudAsset.STATUS_TERMINATED, CloudAsset.STATUS_TERMINATING}:
         return {'asset_id': asset.id, 'ip': ip, 'ok': False, 'error': '该 IP 已删除，不需要重复执行'}
+    if not cloud_ip_delete_enabled():
+        return {'asset_id': asset.id, 'ip': ip, 'ok': False, 'error': '删除IP总开关已关闭，跳过真实释放固定 IP。'}
     if enforce_schedule and not _asset_shutdown_enabled(asset):
         return {'asset_id': asset.id, 'ip': ip, 'ok': False, 'error': '云账号关机计划已关闭，跳过真实释放固定 IP。'}
     if asset.instance_id:
@@ -3085,6 +3093,10 @@ def _site_config_group_map():
             'receive_address',
             'trongrid_api_key',
         ],
+        'cloud_actions': [
+            'cloud_server_delete_enabled',
+            'cloud_ip_delete_enabled',
+        ],
         'logs': [
             'scanner_block_log_enabled',
             'scanner_verbose',
@@ -3108,8 +3120,6 @@ def _site_config_group_map():
             'cloud_suspend_time',
             'cloud_delete_after_days',
             'cloud_delete_time',
-            'cloud_unattached_ip_delete_after_days',
-            'cloud_unattached_ip_delete_time',
             'cloud_asset_sync_interval_seconds',
             'cloud_sync_missing_delete_confirmations',
         ],
