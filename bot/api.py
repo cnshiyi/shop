@@ -1065,7 +1065,8 @@ def _sort_lifecycle_active_items(items: list[dict]) -> list[dict]:
     return sorted(
         items,
         key=lambda item: (
-            _plan_item_dt(item, 'next_run_at', 'delete_at', 'suspend_at', default=far_future),
+            _plan_item_dt(item, 'delete_at', 'next_run_at', 'suspend_at', default=far_future),
+            str(item.get('user_id') or item.get('tg_user_id') or item.get('user_display_name') or item.get('username_label') or '').lower(),
             str(item.get('plan_kind') or ''),
             str(item.get('id') or item.get('asset_id') or item.get('order_id') or ''),
         ),

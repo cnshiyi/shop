@@ -7084,6 +7084,48 @@ class CloudServerServicesTestCase(TestCase):
         delete_times = [parse_datetime(item['delete_at']) for item in rows]
         self.assertEqual(delete_times, sorted(delete_times))
 
+    def test_lifecycle_plans_group_same_delete_time_by_user(self):
+        second_user = TelegramUser.objects.create(tg_user_id=990002, username='svc_test_two')
+        same_delete_at = timezone.now() + timezone.timedelta(days=10)
+        assets = []
+        for public_ip, user, label in [
+            ('5.5.5.71', second_user, 'second-a'),
+            ('5.5.5.72', self.user, 'first-a'),
+            ('5.5.5.73', second_user, 'second-b'),
+            ('5.5.5.74', self.user, 'first-b'),
+        ]:
+            assets.append(CloudAsset.objects.create(
+                kind=CloudAsset.KIND_SERVER,
+                source=CloudAsset.SOURCE_AWS_SYNC,
+                user=user,
+                provider='aws_lightsail',
+                region_code=self.plan.region_code,
+                region_name=self.plan.region_name,
+                asset_name=f'sort-user-group-{label}',
+                instance_id=f'sort-user-group-{label}',
+                public_ip=public_ip,
+                status=CloudAsset.STATUS_RUNNING,
+                is_active=True,
+                actual_expires_at=same_delete_at,
+            ))
+        staff_user = get_user_model().objects.create_user(username='staff_lifecycle_sort_user_group', password='x', is_staff=True)
+        request = self.factory.get('/api/admin/tasks/plans/', {'limit': 1000, 'refresh': 1})
+        request.user = staff_user
+
+        response = lifecycle_plans(request)
+        data = json.loads(response.content)['data']
+        rows = [
+            item for item in data['shutdown_items']
+            if item.get('asset_id') in {asset.id for asset in assets}
+        ]
+
+        grouped_user_ids = [item['user_id'] for item in rows]
+        self.assertEqual(len(grouped_user_ids), 4)
+        self.assertIn(grouped_user_ids, [
+            [self.user.id, self.user.id, second_user.id, second_user.id],
+            [second_user.id, second_user.id, self.user.id, self.user.id],
+        ])
+
     def test_lifecycle_plans_move_deleted_unattached_ip_active_row_to_history(self):
         asset = CloudAsset.objects.create(
             kind=CloudAsset.KIND_SERVER,
