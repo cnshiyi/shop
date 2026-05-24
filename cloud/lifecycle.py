@@ -246,6 +246,95 @@ def _shutdown_enabled_for_order(order: CloudServerOrder, asset: CloudAsset | Non
     return bool(getattr(account, 'shutdown_enabled', True))
 
 
+def _orphan_asset_server_delete_at(asset: CloudAsset):
+    expires_at = getattr(asset, 'actual_expires_at', None)
+    if not expires_at:
+        return None
+    schedule = _cloud_order_lifecycle_fields(expires_at)
+    return schedule.get('delete_at') or expires_at
+
+
+def _orphan_asset_server_delete_blocked_until(asset: CloudAsset, now=None):
+    now = now or timezone.now()
+    delete_at = _orphan_asset_server_delete_at(asset)
+    if delete_at and delete_at > now:
+        return delete_at
+    return None
+
+
+@sync_to_async
+def _can_execute_delete(order_id: int) -> tuple[bool, str, CloudServerOrder | None]:
+    now = timezone.now()
+    order = CloudServerOrder.objects.select_related('cloud_account').filter(id=order_id).first()
+    if not order:
+        return False, '订单不存在，跳过删机。', None
+    if order.status not in {'suspended', 'deleting', 'failed'}:
+        return False, f'订单状态为 {order.status}，不执行删机。', order
+    if order.provider == 'aliyun_simple':
+        return False, '阿里云轻量服务器当前未接入删除 API，本系统不会执行真实删机。', order
+    if not _shutdown_enabled_for_order(order, _order_primary_asset(order)):
+        return False, '云账号关机计划已关闭，跳过真实删机。', order
+    if not order.delete_at:
+        return False, '订单没有计划删机时间，跳过真实删机。', order
+    if order.delete_at > now:
+        return False, f'未到计划删机时间 {order.delete_at.isoformat()}，跳过真实删机。', order
+    return True, '', order
+
+
+@sync_to_async
+def _can_execute_recycle(order_id: int) -> tuple[bool, str, CloudServerOrder | None]:
+    now = timezone.now()
+    order = CloudServerOrder.objects.select_related('cloud_account').filter(id=order_id).first()
+    if not order:
+        return False, '订单不存在，跳过释放固定 IP。', None
+    if order.status != 'deleted':
+        return False, f'订单状态为 {order.status}，不执行释放固定 IP。', order
+    if not order.ip_recycle_at:
+        return False, '订单没有计划释放 IP 时间，跳过真实释放固定 IP。', order
+    if order.ip_recycle_at > now:
+        return False, f'未到计划释放 IP 时间 {order.ip_recycle_at.isoformat()}，跳过真实释放固定 IP。', order
+    return True, '', order
+
+
+@sync_to_async
+def _can_execute_orphan_asset_delete(asset_id: int) -> tuple[bool, str, CloudAsset | None]:
+    now = timezone.now()
+    asset = CloudAsset.objects.select_related('cloud_account').filter(id=asset_id).first()
+    if not asset:
+        return False, '资产不存在，跳过无订单资产删机。', None
+    if asset.status in {CloudAsset.STATUS_DELETED, CloudAsset.STATUS_DELETING, CloudAsset.STATUS_TERMINATED, CloudAsset.STATUS_TERMINATING}:
+        return False, '该无订单资产已删除，不重复执行删机。', asset
+    if asset.provider == 'aliyun_simple':
+        return False, '阿里云轻量服务器当前未接入删除 API，本系统不会执行真实删机。', asset
+    if asset.cloud_account_id and not getattr(asset.cloud_account, 'shutdown_enabled', True):
+        return False, '云账号关机计划已关闭，跳过真实删机。', asset
+    if not asset.actual_expires_at:
+        return False, '无订单资产没有计划删除时间，跳过真实删机。', asset
+    blocked_until = _orphan_asset_server_delete_blocked_until(asset, now=now)
+    if blocked_until:
+        return False, f'未到计划删除时间 {blocked_until.isoformat()}，跳过真实删机。', asset
+    return True, '', asset
+
+
+@sync_to_async
+def _can_execute_unattached_static_ip_delete(asset_id: int) -> tuple[bool, str, CloudAsset | None]:
+    now = timezone.now()
+    asset = CloudAsset.objects.select_related('cloud_account').filter(id=asset_id).first()
+    if not asset:
+        return False, '资产不存在，跳过未附加固定 IP 释放。', None
+    if asset.status in {CloudAsset.STATUS_DELETED, CloudAsset.STATUS_DELETING, CloudAsset.STATUS_TERMINATED, CloudAsset.STATUS_TERMINATING}:
+        return False, '该未附加固定 IP 已删除，不重复执行释放。', asset
+    if asset.cloud_account_id and not getattr(asset.cloud_account, 'shutdown_enabled', True):
+        return False, '云账号关机计划已关闭，跳过真实释放固定 IP。', asset
+    if str(asset.instance_id or '').strip():
+        return False, '该固定 IP 仍有关联实例，不能按未附加 IP 释放。', asset
+    if not asset.actual_expires_at:
+        return False, '未附加固定 IP 没有计划删除时间，跳过真实释放固定 IP。', asset
+    if asset.actual_expires_at > now:
+        return False, f'未到计划释放 IP 时间 {asset.actual_expires_at.isoformat()}，跳过真实释放固定 IP。', asset
+    return True, '', asset
+
+
 @sync_to_async
 def _get_due_orders():
     now = timezone.now()
@@ -1738,13 +1827,18 @@ def _get_orphan_asset_delete_due():
     now = timezone.now()
     waiting_manual_time_q = Q(provider_status__icontains='待人工添加时间') | Q(note__icontains='等待人工添加真实到期时间') | Q(note__icontains='等待人工添加时间')
     unattached_static_ip_q = Q(provider_status__icontains='未附加固定IP') | Q(note__icontains='未附加固定IP') | Q(provider_resource_id__icontains='StaticIp')
-    return list(
+    candidates = list(
         CloudAsset.objects.select_related('cloud_account').filter(
             kind=CloudAsset.KIND_SERVER,
             order__isnull=True,
             actual_expires_at__lte=now,
         ).exclude(provider='aliyun_simple').exclude(cloud_account__shutdown_enabled=False).exclude(waiting_manual_time_q).exclude(unattached_static_ip_q).exclude(status__in=[CloudAsset.STATUS_DELETED, CloudAsset.STATUS_DELETING, CloudAsset.STATUS_TERMINATED])
     )
+    return [
+        asset
+        for asset in candidates
+        if (_orphan_asset_server_delete_at(asset) or timezone.datetime.max.replace(tzinfo=timezone.get_current_timezone())) <= now
+    ]
 
 
 @sync_to_async
@@ -2474,9 +2568,8 @@ def _defer_startup_lifecycle_actions(due, migration_due_orders, orphan_asset_del
             order.id, order.order_no, _order_action_ip(order), order.migration_due_at, delete_run_at, _order_action_ip(order),
         )
     for asset in (orphan_asset_delete_due or []) if can_defer_delete else []:
-        CloudAsset.objects.filter(id=asset.id).update(actual_expires_at=delete_run_at, updated_at=timezone.now())
         logger.warning(
-            'CLOUD_STARTUP_DEFER_ORPHAN_ASSET_DELETE asset_id=%s ip=%s old_actual_expires_at=%s deferred_until=%s message="启动检查命中无订单资产删机，IP %s 将顺延到后台设定删机时间执行"',
+            'CLOUD_STARTUP_DEFER_ORPHAN_ASSET_DELETE asset_id=%s ip=%s actual_expires_at=%s deferred_until=%s message="启动检查命中无订单资产删机，IP %s 本轮跳过真实删机，不改写真正到期时间"',
             asset.id, asset.public_ip or asset.previous_public_ip or '未分配', asset.actual_expires_at, delete_run_at, asset.public_ip or asset.previous_public_ip or '未分配',
         )
     return {'suspend': suspend_run_at, 'delete': delete_run_at}
@@ -2659,6 +2752,13 @@ async def lifecycle_tick(notify=None, notify_target=None, defer_destructive_seco
             logger.warning('跳过云服务器删机：删除服务器总开关已关闭 订单ID=%s 订单号=%s IP=%s', order.id, order.order_no, order.public_ip or order.previous_public_ip)
             await _record_lifecycle_action_failed(order.id, 'delete_skipped', '删除服务器总开关已关闭，跳过真实删机。')
             continue
+        can_delete, skip_reason, checked_order = await _can_execute_delete(order.id)
+        if not can_delete:
+            logger.warning('跳过云服务器删机：计划校验未通过 订单ID=%s 订单号=%s 原因=%s 当前时间=%s', order.id, order.order_no, skip_reason, timezone.now())
+            if checked_order:
+                await _record_lifecycle_action_failed(checked_order.id, 'delete_skipped', skip_reason)
+            continue
+        order = checked_order
         if not await sync_to_async(_is_cloud_delete_safe_time, thread_sensitive=False)():
             logger.warning('跳过云服务器删机：不在允许执行时间窗口 订单ID=%s 订单号=%s 计划删机=%s 当前时间=%s', order.id, order.order_no, order.delete_at, timezone.now())
             continue
@@ -2683,6 +2783,13 @@ async def lifecycle_tick(notify=None, notify_target=None, defer_destructive_seco
             logger.warning('跳过订单固定IP释放：删除IP总开关已关闭 订单ID=%s 订单号=%s IP=%s', order.id, order.order_no, order.public_ip or order.previous_public_ip)
             await _record_lifecycle_action_failed(order.id, 'recycle_skipped', '删除IP总开关已关闭，跳过真实释放固定 IP。')
             continue
+        can_recycle, skip_reason, checked_order = await _can_execute_recycle(order.id)
+        if not can_recycle:
+            logger.warning('跳过订单固定IP释放：计划校验未通过 订单ID=%s 订单号=%s 原因=%s 当前时间=%s', order.id, order.order_no, skip_reason, timezone.now())
+            if checked_order:
+                await _record_lifecycle_action_failed(checked_order.id, 'recycle_skipped', skip_reason)
+            continue
+        order = checked_order
         notice = await _cloud_expiry_notice_payload(order.id)
         if not notice.get('valid'):
             continue
@@ -2721,6 +2828,11 @@ async def lifecycle_tick(notify=None, notify_target=None, defer_destructive_seco
         if not await sync_to_async(cloud_server_delete_enabled, thread_sensitive=False)():
             logger.warning('跳过孤儿云资源删除：删除服务器总开关已关闭 资源ID=%s IP=%s', asset.id, asset.public_ip)
             continue
+        can_delete_asset, skip_reason, checked_asset = await _can_execute_orphan_asset_delete(asset.id)
+        if not can_delete_asset:
+            logger.warning('跳过孤儿云资源删除：计划校验未通过 资源ID=%s IP=%s 原因=%s 当前时间=%s', asset.id, asset.public_ip, skip_reason, timezone.now())
+            continue
+        asset = checked_asset
         if not await sync_to_async(_is_cloud_delete_safe_time, thread_sensitive=False)():
             logger.warning('跳过孤儿云资源删除：不在允许执行时间窗口 资源ID=%s IP=%s 实际到期=%s 当前时间=%s', asset.id, asset.public_ip, asset.actual_expires_at, timezone.now())
             continue
@@ -2742,6 +2854,11 @@ async def lifecycle_tick(notify=None, notify_target=None, defer_destructive_seco
         if not await sync_to_async(cloud_ip_delete_enabled, thread_sensitive=False)():
             logger.warning('跳过未附加固定IP释放：删除IP总开关已关闭 资源ID=%s IP=%s', asset.id, asset.public_ip)
             continue
+        can_delete_ip, skip_reason, checked_asset = await _can_execute_unattached_static_ip_delete(asset.id)
+        if not can_delete_ip:
+            logger.warning('跳过未附加固定IP释放：计划校验未通过 资源ID=%s IP=%s 原因=%s 当前时间=%s', asset.id, asset.public_ip, skip_reason, timezone.now())
+            continue
+        asset = checked_asset
         if not await sync_to_async(_is_cloud_delete_safe_time, thread_sensitive=False)():
             logger.warning('跳过未附加固定IP释放：不在允许执行时间窗口 资源ID=%s IP=%s 实际到期=%s 当前时间=%s', asset.id, asset.public_ip, asset.actual_expires_at, timezone.now())
             continue

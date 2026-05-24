@@ -29,8 +29,9 @@ from django.views.decorators.http import require_GET, require_POST
 
 from bot.models import BotOperationLog, TelegramChatArchive, TelegramChatMessage, TelegramGroupFilter, TelegramLoginAccount, TelegramUser
 from bot.services import _get_or_create_user_sync
-from cloud.lifecycle import _delete_instance, _delete_orphan_asset_instance, _get_due_orders, _get_orphan_asset_delete_due, _is_cloud_delete_safe_time, _mark_deleted, _mark_orphan_asset_deleted, _mark_unattached_static_ip_deleted, _record_lifecycle_action_failed, _release_unattached_static_ip, _shutdown_enabled_for_order, cloud_ip_delete_enabled, cloud_server_delete_enabled
-from cloud.models import AddressMonitor, CloudAsset, CloudIpLog, CloudLifecyclePlan, CloudLifecyclePlanNote, CloudServerOrder
+from cloud.lifecycle import _delete_instance, _delete_orphan_asset_instance, _get_due_orders, _get_orphan_asset_delete_due, _is_cloud_delete_safe_time, _mark_deleted, _mark_orphan_asset_deleted, _mark_unattached_static_ip_deleted, _orphan_asset_server_delete_blocked_until, _record_lifecycle_action_failed, _release_unattached_static_ip, _shutdown_enabled_for_order, cloud_ip_delete_enabled, cloud_server_delete_enabled
+from cloud.models import AddressMonitor, CloudAsset, CloudIpLog, CloudLifecyclePlan, CloudLifecyclePlanNote, CloudServerOrder, Server
+from cloud.services import scoped_server_match_for_asset
 from cloud.sync_safety import missing_confirmation_state
 from core.cloud_accounts import cloud_account_label, cloud_account_label_variants
 from core.models import CloudAccountConfig, SiteConfig
@@ -275,6 +276,23 @@ def _with_runtime_time(value, key: str, default: str = '15:00'):
     local_value = timezone.localtime(value) if timezone.is_aware(value) else value
     local_value = local_value.replace(hour=hour, minute=minute, second=0, microsecond=0)
     return local_value if timezone.is_aware(local_value) else timezone.make_aware(local_value, timezone.get_current_timezone())
+
+
+def _server_asset_lifecycle_times(asset):
+    expires_at = getattr(asset, 'actual_expires_at', None)
+    if not expires_at:
+        return None, None, None
+    suspend_at = _with_runtime_time(
+        expires_at + timezone.timedelta(days=_runtime_int('cloud_suspend_after_days', 3)),
+        'cloud_suspend_time',
+    )
+    delete_at = _with_runtime_time(
+        suspend_at + timezone.timedelta(days=_runtime_int('cloud_delete_after_days', 0)),
+        'cloud_delete_time',
+    )
+    if delete_at and suspend_at and delete_at < suspend_at:
+        delete_at = suspend_at
+    return expires_at, suspend_at, delete_at
 
 
 def _next_runtime_time(key: str, default: str = '15:00', now=None):
@@ -550,6 +568,23 @@ def _compact_dashboard_note(note, *, max_chars=800):
     return text
 
 
+def _asset_note_text(asset) -> str:
+    return str(getattr(asset, 'note', '') or '').strip()
+
+
+def _asset_display_note(asset, *, fallback: str = '', max_chars: int = 500) -> str:
+    return _compact_dashboard_note(_asset_note_text(asset) or fallback, max_chars=max_chars)
+
+
+def _sync_asset_note_to_server(asset):
+    if not asset:
+        return 0
+    return Server.objects.filter(scoped_server_match_for_asset(asset, include_order=True)).update(
+        note=_asset_note_text(asset) or None,
+        updated_at=timezone.now(),
+    )
+
+
 def _lifecycle_plan_note_scope(item_type='', *, order_id=None, asset_id=None):
     item_type = str(item_type or '').strip()
     if item_type == 'order' or order_id:
@@ -764,11 +799,25 @@ def _refresh_plan_payload_from_assets(items):
         item['status'] = asset.status
         item['status_label'] = _status_label(asset.status, CloudAsset.STATUS_CHOICES)
         item['provider_status'] = asset.provider_status or ''
-        item['service_expires_at'] = _iso(asset.actual_expires_at)
-        item['delete_at'] = _iso(asset.actual_expires_at)
-        item['next_run_at'] = _iso(asset.actual_expires_at)
+        if item.get('plan_kind') == CloudLifecyclePlan.PLAN_KIND_UNATTACHED_IP_DELETE:
+            item['service_expires_at'] = _iso(asset.actual_expires_at)
+            item['delete_at'] = _iso(asset.actual_expires_at)
+            item['next_run_at'] = _iso(asset.actual_expires_at)
+        else:
+            expires_at, suspend_at, delete_at = _server_asset_lifecycle_times(asset)
+            item['service_expires_at'] = _iso(expires_at)
+            item['suspend_at'] = _iso(suspend_at)
+            item['delete_at'] = _iso(delete_at)
+            item['next_run_at'] = _iso(delete_at)
+            item['execution_plan'] = f'删除服务器 {_fmt_dashboard_dt(delete_at)}' if delete_at else '等待删除时间'
         item['asset_name'] = asset.asset_name
-        item['source_note'] = str(asset.note or item.get('source_note') or '').strip()
+        item['source_note'] = str(item.get('source_note') or '').strip() or _asset_note_text(asset)
+        if item.get('data_group') == 'active' and item.get('plan_kind') in {
+            CloudLifecyclePlan.PLAN_KIND_ORPHAN_ASSET_DELETE,
+            CloudLifecyclePlan.PLAN_KIND_UNATTACHED_IP_DELETE,
+        }:
+            item['note'] = _asset_note_text(asset)
+            item['display_note'] = _asset_display_note(asset, fallback=item.get('display_note') or item.get('source_note') or '')
         item['detail_path'] = f'/admin/cloud-assets/{asset.id}'
         item['related_path'] = f'/admin/cloud-assets/{asset.id}'
         item['asset_detail_path'] = f'/admin/cloud-assets/{asset.id}'
@@ -777,7 +826,42 @@ def _refresh_plan_payload_from_assets(items):
         item['cloud_account_name'] = account_name
         item['external_account_id'] = external_account_id
         refreshed.append(item)
+    _persist_refreshed_asset_plan_notes(refreshed)
     return refreshed
+
+
+def _persist_refreshed_asset_plan_notes(items):
+    row_ids = [
+        item.get('id')
+        for item in items
+        if item.get('id')
+        and item.get('data_group') == 'active'
+        and item.get('plan_kind') in {
+            CloudLifecyclePlan.PLAN_KIND_ORPHAN_ASSET_DELETE,
+            CloudLifecyclePlan.PLAN_KIND_UNATTACHED_IP_DELETE,
+        }
+    ]
+    if not row_ids:
+        return 0
+    rows = {
+        row.id: row
+        for row in CloudLifecyclePlan.objects.filter(id__in=row_ids).only('id', 'note', 'display_note')
+    }
+    dirty_rows = []
+    for item in items:
+        row = rows.get(item.get('id'))
+        if not row:
+            continue
+        note = str(item.get('note') or '').strip()
+        display_note = str(item.get('display_note') or '').strip()
+        if row.note == note and row.display_note == display_note:
+            continue
+        row.note = note
+        row.display_note = display_note
+        dirty_rows.append(row)
+    if dirty_rows:
+        CloudLifecyclePlan.objects.bulk_update(dirty_rows, ['note', 'display_note'], batch_size=500)
+    return len(dirty_rows)
 
 
 def _upsert_lifecycle_plan_rows(items: list[dict], *, plan_kind: str, data_group: str):
@@ -1302,7 +1386,6 @@ def _unattached_ip_delete_items(limit=50, assets=None):
             asset for asset in assets
             if _asset_is_unattached_ip(asset) or 'StaticIp' in str(getattr(asset, 'provider_resource_id', '') or '')
         ][:limit]
-    _, _, unattached_note_map = _lifecycle_plan_note_maps(unattached_asset_ids=[asset.id for asset in assets])
     trace_maps = _cloud_ip_trace_maps_for_assets(assets)
     items = []
     seen_trace_ids = set()
@@ -1325,10 +1408,8 @@ def _unattached_ip_delete_items(limit=50, assets=None):
             seen_trace_ids.add(trace.id)
         else:
             logged_at = asset.updated_at
-        source_note = trace_note or str(getattr(asset, 'note', '') or '').strip()
-        plan_note = _lifecycle_plan_note_text(unattached_note_map.get(asset.id))
-        note = plan_note
-        display_note_source = plan_note or source_note
+        note = _asset_note_text(asset)
+        source_note = trace_note or note
         asset_name = asset.asset_name or getattr(asset, 'static_ip_name', '') or asset.instance_id or f'asset-{asset.id}'
         item = {
             'id': asset.id,
@@ -1346,7 +1427,7 @@ def _unattached_ip_delete_items(limit=50, assets=None):
             'logged_at': _iso(logged_at),
             'source_note': source_note,
             'note': note,
-            'display_note': _compact_dashboard_note(display_note_source, max_chars=500),
+            'display_note': _asset_display_note(asset, fallback=trace_note, max_chars=500),
             'is_overdue': bool(delete_at and delete_at <= now),
             'is_history': False,
         }
@@ -2229,7 +2310,8 @@ def _shutdown_plan_item_payload(order, *, queue_status='scheduled_future', queue
 def _asset_delete_plan_item_payload(asset, *, queue_status='scheduled_future', queue_status_label='计划中', note=''):
     account_name, external_account_id = _cloud_account_labels(asset)
     ip = asset.public_ip or asset.previous_public_ip or '未分配'
-    plan_at = asset.actual_expires_at
+    expires_at, suspend_at, delete_at = _server_asset_lifecycle_times(asset)
+    plan_at = delete_at
     shutdown_enabled = _asset_shutdown_enabled(asset)
     linked_order = getattr(asset, 'order', None)
     if linked_order and getattr(linked_order, 'status', '') in {'deleted', 'cancelled', 'expired'}:
@@ -2248,7 +2330,7 @@ def _asset_delete_plan_item_payload(asset, *, queue_status='scheduled_future', q
     elif queue_status == 'scheduled_future':
         execution_status = '删除计划已生成'
     user_display_name, username_label = _telegram_user_labels(asset.user if getattr(asset, 'user', None) else None)
-    note = str(note or '').strip()
+    note = str(note or _asset_note_text(asset)).strip()
     return {
         'id': f'asset-{asset.id}',
         'item_type': 'orphan_asset',
@@ -2266,17 +2348,17 @@ def _asset_delete_plan_item_payload(asset, *, queue_status='scheduled_future', q
         'tg_user_id': getattr(asset.user, 'tg_user_id', None) if getattr(asset, 'user', None) else None,
         'user_display_name': user_display_name,
         'username_label': username_label,
-        'service_expires_at': _iso(asset.actual_expires_at),
-        'suspend_at': _iso(getattr(linked_order, 'suspend_at', None)),
+        'service_expires_at': _iso(expires_at),
+        'suspend_at': _iso(suspend_at),
         'delete_at': _iso(plan_at),
         'ip_recycle_at': _iso(getattr(linked_order, 'ip_recycle_at', None)),
         'next_run_at': _iso(plan_at),
         'last_failure_reason': None,
         'execution_status': execution_status,
         'execution_plan': f'删除服务器 {_fmt_dashboard_dt(plan_at)}' if plan_at else '等待删除时间',
-        'source_note': str(getattr(asset, 'note', '') or getattr(linked_order, 'provision_note', '') or '').strip(),
+        'source_note': _asset_note_text(asset) or str(getattr(linked_order, 'provision_note', '') or '').strip(),
         'note': note,
-        'display_note': _compact_dashboard_note(note, max_chars=500),
+        'display_note': _asset_display_note(asset, fallback=note, max_chars=500),
         'cloud_account_id': asset.cloud_account_id,
         'cloud_account_name': account_name,
         'external_account_id': external_account_id,
@@ -2307,21 +2389,18 @@ def _collect_shutdown_plan_queue(now, limit=100):
     next_run_at = None
     due_items = []
     future_items = []
-    _, orphan_note_map, _ = _lifecycle_plan_note_maps(
-        orphan_asset_ids=[asset.id for asset in server_assets],
-    )
     for asset in server_assets[:limit]:
         if not asset.actual_expires_at:
             continue
-        if not next_run_at or asset.actual_expires_at < next_run_at:
-            next_run_at = asset.actual_expires_at
-        if asset.actual_expires_at <= pending_until:
+        _expires_at, _suspend_at, delete_at = _server_asset_lifecycle_times(asset)
+        if not next_run_at or (delete_at and delete_at < next_run_at):
+            next_run_at = delete_at
+        if delete_at and delete_at <= pending_until:
             due_items.append(
                 _asset_delete_plan_item_payload(
                     asset,
-                    queue_status='due_now' if asset.actual_expires_at <= now else 'within_window',
-                    queue_status_label='待执行' if asset.actual_expires_at <= now else '计划中',
-                    note=_lifecycle_plan_note_text(orphan_note_map.get(asset.id)),
+                    queue_status='due_now' if delete_at <= now else 'within_window',
+                    queue_status_label='待执行' if delete_at <= now else '计划中',
                 )
             )
             continue
@@ -2330,7 +2409,6 @@ def _collect_shutdown_plan_queue(now, limit=100):
                 asset,
                 queue_status='scheduled_future',
                 queue_status_label='计划中',
-                note=_lifecycle_plan_note_text(orphan_note_map.get(asset.id)),
             )
         )
 
@@ -2441,7 +2519,7 @@ def lifecycle_plans(request):
         note = str(item.get('note') or '')
         incoming_display_note = str(item.get('display_note') or '')
         source_note = str(item.get('source_note') or '')
-        item['display_note'] = _compact_dashboard_note(note or incoming_display_note or source_note, max_chars=500)
+        item['display_note'] = _compact_dashboard_note(incoming_display_note or note or source_note, max_chars=500)
         is_ip_delete_item = str(item.get('plan_kind') or '') == CloudLifecyclePlan.PLAN_KIND_UNATTACHED_IP_DELETE
         delete_attempt = _unattached_ip_delete_attempt_state(item) if is_ip_delete_item else {}
         if delete_attempt:
@@ -2568,7 +2646,7 @@ def lifecycle_plans(request):
         if delete_attempt_label and is_ip_delete_item and confirm_state['count'] <= 0:
             resource_state_label = f'{resource_state_label}（{delete_attempt_label}）'
 
-        display_note_parts = [note or (source_note if is_ip_delete_item else item.get('display_note'))]
+        display_note_parts = [item.get('display_note') or note or (source_note if is_ip_delete_item else '')]
         if confirm_summary and not is_history:
             display_note_parts.append(confirm_summary)
         if delete_attempt_label and is_ip_delete_item and confirm_state['count'] <= 0:
@@ -2790,11 +2868,14 @@ def update_lifecycle_plan_note(request):
     if not asset:
         return _error('资产不存在', status=404)
     effective_item_type = item_type or 'asset'
-    plan_note = _save_lifecycle_plan_note(item_type=effective_item_type, note=note, asset=asset, actor=actor)
-    note_text = _lifecycle_plan_note_text(plan_note)
+    note_text = note
+    asset.note = note_text or None
+    asset.save(update_fields=['note', 'updated_at'])
+    _sync_asset_note_to_server(asset)
     plan_kind = CloudLifecyclePlan.PLAN_KIND_ORPHAN_ASSET_DELETE if effective_item_type == 'orphan_asset' else CloudLifecyclePlan.PLAN_KIND_UNATTACHED_IP_DELETE
-    CloudLifecyclePlan.objects.filter(plan_kind=plan_kind, asset=asset).update(note=note_text, display_note=_compact_dashboard_note(note_text, max_chars=500))
-    return _ok({'item_type': effective_item_type, 'asset_id': asset.id, 'note': note_text, 'display_note': _compact_dashboard_note(note_text, max_chars=500)})
+    display_note = _asset_display_note(asset, max_chars=500)
+    CloudLifecyclePlan.objects.filter(plan_kind=plan_kind, asset=asset).update(note=note_text, display_note=display_note)
+    return _ok({'item_type': effective_item_type, 'asset_id': asset.id, 'note': note_text, 'display_note': display_note})
 
 
 def _run_shutdown_order_sync(order_id: int, queue_status='manual_single', enforce_schedule: bool = True):
@@ -2820,6 +2901,10 @@ def _run_shutdown_order_sync(order_id: int, queue_status='manual_single', enforc
         async_to_sync(_record_lifecycle_action_failed)(order.id, 'delete_skipped', reason)
         return {'order_id': order.id, 'order_no': order.order_no, 'ip': ip, 'queue_status': queue_status, 'ok': False, 'error': reason}
     if enforce_schedule:
+        if not order.delete_at:
+            reason = '订单没有计划删机时间，跳过真实删机。'
+            async_to_sync(_record_lifecycle_action_failed)(order.id, 'delete_skipped', reason)
+            return {'order_id': order.id, 'order_no': order.order_no, 'ip': ip, 'queue_status': queue_status, 'ok': False, 'error': reason}
         if order.delete_at and order.delete_at > now:
             reason = f'服务器删除时间未到：{timezone.localtime(order.delete_at).strftime("%Y-%m-%d %H:%M:%S")}'
             async_to_sync(_record_lifecycle_action_failed)(order.id, 'delete_skipped', reason)
@@ -2844,7 +2929,7 @@ def _run_shutdown_order_sync(order_id: int, queue_status='manual_single', enforc
 @dashboard_superuser_required
 @require_POST
 def run_shutdown_plan_order(request, order_id):
-    result = _run_shutdown_order_sync(order_id, 'manual_single', enforce_schedule=False)
+    result = _run_shutdown_order_sync(order_id, 'manual_single', enforce_schedule=True)
     _sync_lifecycle_plan_table(limit=1000)
     return _ok({
         'batch_id': secrets.token_hex(8),
@@ -2873,8 +2958,11 @@ def _run_orphan_asset_delete_sync(asset_id: int, enforce_schedule: bool = True):
     if _asset_is_unattached_ip(asset) or not str(asset.instance_id or asset.provider_resource_id or asset.asset_name or '').strip():
         return {'asset_id': asset.id, 'ip': ip, 'ok': False, 'error': '该资产不是可删服务器，请走未附加 IP 删除'}
     if enforce_schedule:
-        if asset.actual_expires_at and asset.actual_expires_at > now:
-            return {'asset_id': asset.id, 'ip': ip, 'ok': False, 'error': f'未到服务器删除时间：{timezone.localtime(asset.actual_expires_at).strftime("%Y-%m-%d %H:%M:%S")}' }
+        if not asset.actual_expires_at:
+            return {'asset_id': asset.id, 'ip': ip, 'ok': False, 'error': '服务器没有计划删除时间，跳过真实删机。'}
+        blocked_until = _orphan_asset_server_delete_blocked_until(asset, now=now)
+        if blocked_until:
+            return {'asset_id': asset.id, 'ip': ip, 'ok': False, 'error': f'未到服务器删除时间：{timezone.localtime(blocked_until).strftime("%Y-%m-%d %H:%M:%S")}'}
         if not _is_cloud_delete_safe_time(now):
             return {'asset_id': asset.id, 'ip': ip, 'ok': False, 'error': '当前不在后台配置的服务器删除执行时间窗口'}
     ok, note = async_to_sync(_delete_orphan_asset_instance)(asset)
@@ -2889,7 +2977,7 @@ def _run_orphan_asset_delete_sync(asset_id: int, enforce_schedule: bool = True):
 @dashboard_superuser_required
 @require_POST
 def run_orphan_asset_delete_plan(request, asset_id):
-    result = _run_orphan_asset_delete_sync(asset_id, enforce_schedule=False)
+    result = _run_orphan_asset_delete_sync(asset_id, enforce_schedule=True)
     _sync_lifecycle_plan_table(limit=1000)
     return _ok({
         'batch_id': secrets.token_hex(8),
@@ -2916,6 +3004,8 @@ def _run_unattached_ip_delete_sync(asset_id: int, enforce_schedule: bool = True)
     if asset.instance_id:
         return {'asset_id': asset.id, 'ip': ip, 'ok': False, 'error': '该 IP 仍有关联实例，不能按未附加 IP 删除'}
     if enforce_schedule:
+        if not asset.actual_expires_at:
+            return {'asset_id': asset.id, 'ip': ip, 'ok': False, 'error': 'IP 没有计划删除时间，跳过真实释放固定 IP。'}
         if asset.actual_expires_at and asset.actual_expires_at > now:
             return {'asset_id': asset.id, 'ip': ip, 'ok': False, 'error': f'未到 IP 删除时间：{timezone.localtime(asset.actual_expires_at).strftime("%Y-%m-%d %H:%M:%S")}' }
         if not _is_cloud_delete_safe_time(now):
@@ -2932,7 +3022,7 @@ def _run_unattached_ip_delete_sync(asset_id: int, enforce_schedule: bool = True)
 @dashboard_superuser_required
 @require_POST
 def run_unattached_ip_delete_plan(request, asset_id):
-    result = _run_unattached_ip_delete_sync(asset_id, enforce_schedule=False)
+    result = _run_unattached_ip_delete_sync(asset_id, enforce_schedule=True)
     _sync_lifecycle_plan_table(limit=1000)
     return _ok({
         'batch_id': secrets.token_hex(8),

@@ -3477,6 +3477,9 @@ def start_cloud_server_from_admin(order_id: int):
                 ok = False
                 notes.append(f'服务器尚未确认运行，当前状态: {sync_state or "未知"}。')
         if ok and sync_state == 'running':
+            if order.status == 'suspended':
+                order.status = 'completed'
+                order.save(update_fields=['status', 'updated_at'])
             _sync_order_cloud_runtime_state(order, sync_state, public_ip, '\n'.join(notes))
             order.refresh_from_db()
             mtproxy_ok, mtproxy_note = _ensure_mtproxy_after_renewal(order)

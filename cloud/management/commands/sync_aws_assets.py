@@ -147,6 +147,25 @@ def _release_static_ip_if_due(client, region, asset, static_ip_name, static_ip_a
     due_at = asset.actual_expires_at
     if not due_at or due_at > timezone.now() or asset.status == CloudAsset.STATUS_DELETED:
         return False
+    from cloud.lifecycle import cloud_ip_delete_enabled
+
+    if not cloud_ip_delete_enabled():
+        reason = '删除IP总开关已关闭，AWS 同步拒绝真实释放未附加固定 IP'
+        record_external_sync_log(
+            source='aws_lightsail',
+            action='release_static_ip',
+            target=f'{region}:{static_ip_name or asset.asset_name or public_ip or asset.id}',
+            request_payload={'staticIpName': static_ip_name or asset.asset_name or '', 'asset_id': asset.id, 'public_ip': public_ip},
+            response_payload={'skipped': True, 'reason': reason},
+            is_success=True,
+            account=asset.cloud_account,
+        )
+        asset.provider_status = '未附加固定IP-删除IP总开关关闭'
+        asset.save(update_fields=['provider_status', 'updated_at'])
+        stdout.write(stdout.style.WARNING(
+            f'跳过 AWS {region} 未附加IP释放：{reason} 资产#{asset.id} IP={public_ip or "缺失"}'
+        ))
+        return False
     if getattr(getattr(asset, 'cloud_account', None), 'shutdown_enabled', True) is False:
         reason = '关机/删机计划已关闭，AWS 同步拒绝真实释放未附加固定 IP'
         record_external_sync_log(
@@ -684,7 +703,7 @@ def _mark_deleted_when_missing_in_aws(region, existing_instance_names, existing_
         if instance_name and instance_name in existing_instance_names:
             continue
         old_public_ip = public_ip or str(asset.previous_public_ip or '').strip()
-        if old_public_ip and old_public_ip in existing_public_ips:
+        if old_public_ip and old_public_ip in existing_public_ips and (is_static_ip_asset or not instance_name):
             continue
         server_lookup = Q()
         provider_resource_id = str(asset.provider_resource_id or '').strip()
@@ -729,7 +748,7 @@ def _mark_deleted_when_missing_in_aws(region, existing_instance_names, existing_
         if instance_name and instance_name in existing_instance_names:
             continue
         old_public_ip = public_ip or str(server.previous_public_ip or '').strip()
-        if old_public_ip and old_public_ip in existing_public_ips:
+        if old_public_ip and old_public_ip in existing_public_ips and (is_static_ip_record or not instance_name):
             continue
         order = getattr(server, 'order', None) or _resolve_order_for_ip(old_public_ip, account)
         _delete_server_missing_in_aws(

@@ -494,13 +494,15 @@ def _cloud_asset_static_ip_name(asset, order=None) -> str:
     return asset_static_ip_name or str(getattr(order, 'static_ip_name', '') if order else '').strip()
 
 
-def _cloud_asset_provider_status_label(asset) -> str:
-    inactive_account_labels = set(_cloud_account_labels_queryset(False))
-    asset_account_label = str(getattr(asset, 'account_label', '') or '').strip()
-    if (
-        getattr(getattr(asset, 'cloud_account', None), 'is_active', True) is False
-        or (asset_account_label and asset_account_label in inactive_account_labels)
-    ):
+def _cloud_asset_provider_status_label(asset, account_label: str | None = None) -> str:
+    active_account_labels = set(_cloud_account_labels_queryset(True))
+    account = getattr(asset, 'cloud_account', None)
+    asset_account_label = str(account_label or getattr(asset, 'account_label', '') or '').strip()
+    account_disabled = (
+        getattr(account, 'is_active', True) is False
+        or (asset_account_label and asset_account_label not in active_account_labels)
+    )
+    if account_disabled:
         base_label = _provider_status_label(asset.provider_status)
         return f'云账号已停用 / {base_label}' if base_label and base_label != '-' else '云账号已停用'
     if asset.status == CloudAsset.STATUS_DELETED:
@@ -592,18 +594,29 @@ def _cloud_asset_risk_state(asset, order, expires_at, provider_status_label, dis
 
 def _filter_cloud_asset_payloads_by_risk(items: list[dict], risk_status: str) -> list[dict]:
     risk_status = str(risk_status or '').strip()
+    def _statuses(item):
+        return item.get('risk_statuses') or [item.get('risk_status') or 'normal']
+
     if not risk_status or risk_status == 'all':
-        return items
+        return [
+            item for item in items
+            if 'account_disabled' not in _statuses(item)
+        ]
     return [
         item for item in items
-        if risk_status in (item.get('risk_statuses') or [item.get('risk_status') or 'normal'])
+        if risk_status in _statuses(item)
+        and (risk_status == 'account_disabled' or 'account_disabled' not in _statuses(item))
     ]
 
 
 def _cloud_asset_risk_counts(items: list[dict]) -> dict:
-    counts = {'all': len(items)}
+    counts = {'all': 0}
     for item in items:
         statuses = item.get('risk_statuses') or [item.get('risk_status') or 'normal']
+        if 'account_disabled' in statuses:
+            counts['account_disabled'] = counts.get('account_disabled', 0) + 1
+            continue
+        counts['all'] += 1
         for status in set(statuses):
             counts[status] = counts.get(status, 0) + 1
     return counts
@@ -702,15 +715,16 @@ def _asset_payload(asset):
     cloud_account_id = asset.cloud_account_id or getattr(order, 'cloud_account_id', None)
     display_status = asset.status
     display_status_label = '旧机保留中' if asset.status == CloudAsset.STATUS_DELETING and '旧机保留期' in str(asset.provider_status or '') else _status_label(asset.status, CloudAsset.STATUS_CHOICES)
-    provider_status_label = _cloud_asset_provider_status_label(asset)
+    provider_status_label = _cloud_asset_provider_status_label(asset, account_label)
+    provider_account_disabled = '云账号已停用' in str(provider_status_label or '')
     if asset.status == CloudAsset.STATUS_UNKNOWN and '未附加' in str(asset.provider_status or ''):
         display_status = 'unattached'
         display_status_label = '未附加固定IP'
-        provider_status_label = '未附加固定IP'
+        provider_status_label = '云账号已停用 / 未附加固定IP' if provider_account_disabled else '未附加固定IP'
     elif asset.status == CloudAsset.STATUS_UNKNOWN and '固定IP仍存在但未附加' in str(asset.provider_status or ''):
         display_status = 'unattached'
         display_status_label = '未附加固定IP'
-        provider_status_label = '固定IP仍存在但未附加'
+        provider_status_label = '云账号已停用 / 固定IP仍存在但未附加' if provider_account_disabled else '固定IP仍存在但未附加'
     risk_state = _cloud_asset_risk_state(asset, order, expires_at, provider_status_label, display_status, user)
     return {
         'id': asset.id,
@@ -796,6 +810,10 @@ def _refresh_dashboard_plan_snapshots(reason: str = '', *, lifecycle_limit: int 
             logger.exception('DASHBOARD_SNAPSHOT_NOTICE_REFRESH_FAILED reason=%s', reason)
     except Exception:
         logger.exception('DASHBOARD_SNAPSHOT_NOTICE_REFRESH_FAILED reason=%s', reason)
+    _refresh_lifecycle_plan_snapshot(reason, lifecycle_limit=lifecycle_limit)
+
+
+def _refresh_lifecycle_plan_snapshot(reason: str = '', *, lifecycle_limit: int = 1000):
     try:
         from bot import api as bot_api
         bot_api._sync_lifecycle_plan_table(limit=lifecycle_limit)
@@ -1238,6 +1256,8 @@ def update_cloud_asset(request, asset_id):
             public_ip=changed_public_ip_after,
             note=f'后台手动更新IP：{changed_public_ip_before or "未分配"} → {changed_public_ip_after or "未分配"}',
         )
+    if 'actual_expires_at' in payload:
+        _refresh_lifecycle_plan_snapshot(f'cloud_asset_expiry:{asset_id}', lifecycle_limit=1000)
     if refresh_snapshots_needed:
         _refresh_dashboard_plan_snapshots_deferred(f'cloud_asset:{asset_id}')
     asset = CloudAsset.objects.select_related('user', 'order', 'cloud_account', 'telegram_group').get(pk=asset_id)

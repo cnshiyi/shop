@@ -622,9 +622,126 @@ class CloudServerServicesTestCase(TestCase):
         self.assertEqual(asset.status, CloudAsset.STATUS_DELETED)
         self.assertTrue(CloudIpLog.objects.filter(asset=asset, event_type='deleted').exists())
 
+    def test_dashboard_shutdown_plan_run_respects_delete_at(self):
+        from bot.api import run_shutdown_plan_order
+
+        SiteConfig.set('cloud_server_delete_enabled', '1')
+        order = CloudServerOrder.objects.create(
+            order_no='PLAN-RUN-FUTURE-DELETE-ORDER-1',
+            user=self.user,
+            plan=self.plan,
+            provider=self.plan.provider,
+            region_code=self.plan.region_code,
+            region_name=self.plan.region_name,
+            plan_name=self.plan.plan_name,
+            quantity=1,
+            currency='USDT',
+            total_amount='19.00',
+            pay_amount='19.00',
+            status='deleting',
+            server_name='future-delete-order-instance',
+            public_ip='52.77.18.247',
+            delete_at=timezone.now() + timezone.timedelta(days=1),
+        )
+        staff_user = get_user_model().objects.create_user(
+            username='staff_plan_run_future_delete_order',
+            password='x',
+            is_staff=True,
+            is_superuser=True,
+        )
+        request = self.factory.post(f'/api/admin/tasks/plans/orders/{order.id}/run/')
+        request.user = staff_user
+
+        with patch('bot.api._delete_instance', new=AsyncMock()) as delete_mock:
+            response = run_shutdown_plan_order(request, order.id)
+
+        data = json.loads(response.content)['data']
+        delete_mock.assert_not_awaited()
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(data['success_count'], 0)
+        self.assertIn('服务器删除时间未到', data['message'])
+
+    def test_dashboard_orphan_asset_plan_run_respects_computed_delete_time(self):
+        from bot.api import run_orphan_asset_delete_plan
+
+        SiteConfig.set('cloud_server_delete_enabled', '1')
+        SiteConfig.set('cloud_suspend_after_days', '3')
+        SiteConfig.set('cloud_suspend_time', '17:00')
+        SiteConfig.set('cloud_delete_after_days', '3')
+        SiteConfig.set('cloud_delete_time', '18:00')
+        asset = CloudAsset.objects.create(
+            kind=CloudAsset.KIND_SERVER,
+            source=CloudAsset.SOURCE_AWS_SYNC,
+            user=self.user,
+            provider='aws_lightsail',
+            region_code=self.plan.region_code,
+            region_name=self.plan.region_name,
+            asset_name='future-orphan-plan-run',
+            instance_id='future-orphan-plan-run',
+            public_ip='52.77.18.248',
+            actual_expires_at=timezone.now() - timezone.timedelta(days=1),
+            status=CloudAsset.STATUS_RUNNING,
+            is_active=True,
+        )
+        staff_user = get_user_model().objects.create_user(
+            username='staff_plan_run_future_orphan_asset',
+            password='x',
+            is_staff=True,
+            is_superuser=True,
+        )
+        request = self.factory.post(f'/api/admin/tasks/plans/orphan-assets/{asset.id}/run/')
+        request.user = staff_user
+
+        with patch('bot.api._delete_orphan_asset_instance', new=AsyncMock()) as delete_mock:
+            response = run_orphan_asset_delete_plan(request, asset.id)
+
+        data = json.loads(response.content)['data']
+        delete_mock.assert_not_awaited()
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(data['success_count'], 0)
+        self.assertIn('未到服务器删除时间', data['message'])
+
+    def test_dashboard_unattached_ip_plan_run_respects_delete_time(self):
+        from bot.api import run_unattached_ip_delete_plan
+
+        SiteConfig.set('cloud_ip_delete_enabled', '1')
+        asset = CloudAsset.objects.create(
+            kind=CloudAsset.KIND_SERVER,
+            source=CloudAsset.SOURCE_AWS_SYNC,
+            user=self.user,
+            provider='aws_lightsail',
+            region_code=self.plan.region_code,
+            region_name=self.plan.region_name,
+            asset_name='future-unattached-ip-plan-run',
+            provider_resource_id='arn:aws:lightsail:ap-southeast-1:123456789012:StaticIp/future-unattached-ip-plan-run',
+            public_ip='52.77.18.249',
+            actual_expires_at=timezone.now() + timezone.timedelta(days=1),
+            status=CloudAsset.STATUS_UNKNOWN,
+            provider_status='未附加固定IP',
+            is_active=False,
+        )
+        staff_user = get_user_model().objects.create_user(
+            username='staff_plan_run_future_unattached_ip',
+            password='x',
+            is_staff=True,
+            is_superuser=True,
+        )
+        request = self.factory.post(f'/api/admin/tasks/plans/unattached-ips/{asset.id}/run/')
+        request.user = staff_user
+
+        with patch('bot.api._release_unattached_static_ip', new=AsyncMock()) as release_mock:
+            response = run_unattached_ip_delete_plan(request, asset.id)
+
+        data = json.loads(response.content)['data']
+        release_mock.assert_not_awaited()
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(data['success_count'], 0)
+        self.assertIn('未到 IP 删除时间', data['message'])
+
     def test_unattached_ip_delete_respects_shutdown_disabled_account(self):
         from bot.api import _run_unattached_ip_delete_sync, _unattached_ip_delete_items
 
+        SiteConfig.set('cloud_ip_delete_enabled', '1')
         account = self._aws_test_account()
         account.shutdown_enabled = False
         account.save(update_fields=['shutdown_enabled', 'updated_at'])
@@ -3201,6 +3318,7 @@ class CloudServerServicesTestCase(TestCase):
         self.assertIn('固定 IP 迁移失败', order.provision_note)
 
     def test_failed_instance_cleanup_due_orders_are_deleted(self):
+        SiteConfig.set('cloud_server_delete_enabled', '1')
         order = CloudServerOrder.objects.create(
             order_no='FAILED-CLEANUP-DUE',
             user=self.user,
@@ -3228,13 +3346,107 @@ class CloudServerServicesTestCase(TestCase):
         async def fake_delete_instance(delete_order):
             return True, '失败新实例已删除'
 
-        with patch('cloud.lifecycle._is_cloud_delete_safe_time', return_value=True), patch('cloud.lifecycle._delete_instance', side_effect=fake_delete_instance):
+        with patch('cloud.lifecycle.cloud_server_delete_enabled', return_value=True), \
+            patch('cloud.lifecycle._is_cloud_delete_safe_time', return_value=True), \
+            patch('cloud.lifecycle._delete_instance', side_effect=fake_delete_instance):
             async_to_sync(lifecycle_tick)()
 
         order.refresh_from_db()
         self.assertEqual(order.status, 'deleted')
         self.assertEqual(order.instance_id, '')
         self.assertIn('失败新实例已删除', order.provision_note)
+
+    def test_lifecycle_tick_rechecks_order_delete_at_before_cloud_delete(self):
+        order = CloudServerOrder.objects.create(
+            order_no='LIFECYCLE-RECHECK-FUTURE-DELETE',
+            user=self.user,
+            plan=self.plan,
+            provider=self.plan.provider,
+            region_code=self.plan.region_code,
+            region_name=self.plan.region_name,
+            plan_name=self.plan.plan_name,
+            quantity=1,
+            currency='USDT',
+            total_amount='19.00',
+            pay_amount='19.00',
+            status='deleting',
+            server_name='lifecycle-recheck-future-delete',
+            public_ip='13.229.249.58',
+            delete_at=timezone.now() - timezone.timedelta(minutes=1),
+        )
+        due_order = CloudServerOrder.objects.get(id=order.id)
+        CloudServerOrder.objects.filter(id=order.id).update(delete_at=timezone.now() + timezone.timedelta(days=1))
+        due = {
+            'renew_notice': [],
+            'auto_renew_notice': [],
+            'auto_renew': [],
+            'delete_notice': [],
+            'recycle_notice': [],
+            'expire': [],
+            'suspend': [],
+            'delete': [due_order],
+            'recycle': [],
+        }
+
+        with patch('cloud.lifecycle._get_due_orders', new_callable=AsyncMock, return_value=due), \
+            patch('cloud.lifecycle._get_migration_due_orders', new_callable=AsyncMock, return_value=[]), \
+            patch('cloud.lifecycle._get_orphan_asset_delete_due', new_callable=AsyncMock, return_value=[]), \
+            patch('cloud.lifecycle._get_unattached_static_ip_delete_due', new_callable=AsyncMock, return_value=[]), \
+            patch('cloud.lifecycle.cloud_server_delete_enabled', return_value=True), \
+            patch('cloud.lifecycle._is_cloud_delete_safe_time', return_value=True), \
+            patch('cloud.lifecycle._delete_instance', new_callable=AsyncMock) as delete_mock:
+            async_to_sync(lifecycle_tick)()
+
+        delete_mock.assert_not_awaited()
+        order.refresh_from_db()
+        self.assertEqual(order.status, 'deleting')
+
+    def test_lifecycle_tick_rechecks_order_ip_recycle_at_before_release(self):
+        order = CloudServerOrder.objects.create(
+            order_no='LIFECYCLE-RECHECK-FUTURE-RECYCLE',
+            user=self.user,
+            plan=self.plan,
+            provider=self.plan.provider,
+            region_code=self.plan.region_code,
+            region_name=self.plan.region_name,
+            plan_name=self.plan.plan_name,
+            quantity=1,
+            currency='USDT',
+            total_amount='19.00',
+            pay_amount='19.00',
+            status='deleted',
+            public_ip='13.229.249.59',
+            previous_public_ip='13.229.249.59',
+            static_ip_name='StaticIp-recheck-future-recycle',
+            instance_id='',
+            ip_recycle_at=timezone.now() - timezone.timedelta(minutes=1),
+        )
+        due_order = CloudServerOrder.objects.get(id=order.id)
+        CloudServerOrder.objects.filter(id=order.id).update(ip_recycle_at=timezone.now() + timezone.timedelta(days=1))
+        due = {
+            'renew_notice': [],
+            'auto_renew_notice': [],
+            'auto_renew': [],
+            'delete_notice': [],
+            'recycle_notice': [],
+            'expire': [],
+            'suspend': [],
+            'delete': [],
+            'recycle': [due_order],
+        }
+
+        with patch('cloud.lifecycle._get_due_orders', new_callable=AsyncMock, return_value=due), \
+            patch('cloud.lifecycle._get_migration_due_orders', new_callable=AsyncMock, return_value=[]), \
+            patch('cloud.lifecycle._get_orphan_asset_delete_due', new_callable=AsyncMock, return_value=[]), \
+            patch('cloud.lifecycle._get_unattached_static_ip_delete_due', new_callable=AsyncMock, return_value=[]), \
+            patch('cloud.lifecycle.cloud_ip_delete_enabled', return_value=True), \
+            patch('cloud.lifecycle._release_order_static_ip', new_callable=AsyncMock) as release_mock:
+            async_to_sync(lifecycle_tick)()
+
+        release_mock.assert_not_awaited()
+        order.refresh_from_db()
+        self.assertEqual(order.status, 'deleted')
+        self.assertIsNotNone(order.ip_recycle_at)
 
     def test_create_cloud_server_rebuild_order_reuses_original_static_ip_without_temp(self):
         source_order = CloudServerOrder.objects.create(
@@ -5416,7 +5628,7 @@ class CloudServerServicesTestCase(TestCase):
         self.assertIn('执行内容：', row['note'])
         self.assertIn('失败原因：关机执行失败：余额不足', row['note'])
 
-    def test_unattached_ip_delete_items_use_separate_plan_note_table(self):
+    def test_unattached_ip_delete_items_use_asset_note(self):
         asset = CloudAsset.objects.create(
             kind=CloudAsset.KIND_SERVER,
             source=CloudAsset.SOURCE_AWS_SYNC,
@@ -5424,37 +5636,38 @@ class CloudServerServicesTestCase(TestCase):
             provider='aws_lightsail',
             region_code=self.plan.region_code,
             region_name=self.plan.region_name,
-            asset_name='unattached-independent-note',
+            asset_name='unattached-shared-note',
             public_ip='5.5.5.31',
             status=CloudAsset.STATUS_UNKNOWN,
-            is_active=False,
+            is_active=True,
             provider_status='未附加固定IP',
-            note='代理列表备注：不要复用我',
+            note='代理列表备注：删除计划也使用我',
             actual_expires_at=timezone.now() - timezone.timedelta(days=1),
         )
 
         items = _unattached_ip_delete_items(limit=20)
         row = next(item for item in items if item.get('id') == asset.id and not item.get('is_history'))
-        self.assertEqual(row['note'], '')
+        self.assertEqual(row['note'], '代理列表备注：删除计划也使用我')
+        self.assertIn('代理列表备注', row['display_note'])
 
         CloudLifecyclePlanNote.objects.create(
             plan_kind=CloudLifecyclePlanNote.PLAN_KIND_UNATTACHED_IP_DELETE,
             asset=asset,
-            note='删除计划备注：单独保存',
+            note='旧版删除计划备注：现在不再使用',
         )
         items = _unattached_ip_delete_items(limit=20)
         row = next(item for item in items if item.get('id') == asset.id and not item.get('is_history'))
-        self.assertEqual(row['note'], '删除计划备注：单独保存')
-        self.assertEqual(asset.note, '代理列表备注：不要复用我')
+        self.assertEqual(row['note'], '代理列表备注：删除计划也使用我')
+        self.assertNotIn('旧版删除计划备注', row['display_note'])
 
         staff_user = get_user_model().objects.create_user(username='staff_plan_table_ip', password='x', is_staff=True)
-        request = RequestFactory().get('/api/admin/tasks/plans/', {'limit': 20})
+        request = RequestFactory().get('/api/admin/tasks/plans/', {'limit': 20, 'refresh': 1})
         request.user = staff_user
         response = lifecycle_plans(request)
         self.assertEqual(response.status_code, 200)
         self.assertTrue(CloudLifecyclePlan.objects.filter(plan_kind=CloudLifecyclePlan.PLAN_KIND_UNATTACHED_IP_DELETE, asset=asset, data_group='active').exists())
 
-    def test_update_lifecycle_plan_note_keeps_asset_note_unchanged(self):
+    def test_update_lifecycle_plan_note_updates_asset_note(self):
         asset = CloudAsset.objects.create(
             kind=CloudAsset.KIND_SERVER,
             source=CloudAsset.SOURCE_AWS_SYNC,
@@ -5462,16 +5675,16 @@ class CloudServerServicesTestCase(TestCase):
             provider='aws_lightsail',
             region_code=self.plan.region_code,
             region_name=self.plan.region_name,
-            asset_name='unattached-independent-note-save',
+            asset_name='unattached-shared-note-save',
             public_ip='5.5.5.32',
             status=CloudAsset.STATUS_UNKNOWN,
-            is_active=False,
+            is_active=True,
             provider_status='未附加固定IP',
             note='代理列表原备注',
             actual_expires_at=timezone.now() - timezone.timedelta(days=1),
         )
         staff_user = get_user_model().objects.create_user(username='staff_plan_note_asset', password='x', is_staff=True)
-        sync_request = self.factory.get('/api/admin/tasks/plans/', {'limit': 20})
+        sync_request = self.factory.get('/api/admin/tasks/plans/', {'limit': 20, 'refresh': 1})
         sync_request.user = staff_user
         sync_response = lifecycle_plans(sync_request)
         self.assertEqual(sync_response.status_code, 200)
@@ -5487,13 +5700,11 @@ class CloudServerServicesTestCase(TestCase):
 
         self.assertEqual(response.status_code, 200)
         asset.refresh_from_db()
-        self.assertEqual(asset.note, '代理列表原备注')
-        plan_note = CloudLifecyclePlanNote.objects.get(
+        self.assertEqual(asset.note, '删除计划新备注')
+        self.assertFalse(CloudLifecyclePlanNote.objects.filter(
             plan_kind=CloudLifecyclePlanNote.PLAN_KIND_UNATTACHED_IP_DELETE,
             asset=asset,
-        )
-        self.assertEqual(plan_note.note, '删除计划新备注')
-        self.assertEqual(plan_note.updated_by_id, staff_user.id)
+        ).exists())
         plan_row = CloudLifecyclePlan.objects.get(
             plan_kind=CloudLifecyclePlan.PLAN_KIND_UNATTACHED_IP_DELETE,
             asset=asset,
@@ -5523,23 +5734,23 @@ class CloudServerServicesTestCase(TestCase):
             delete_at=delete_at,
             provision_note='订单原备注：不要复用我',
         )
-        CloudLifecyclePlanNote.objects.create(
+        plan_note = CloudLifecyclePlanNote.objects.create(
             plan_kind=CloudLifecyclePlanNote.PLAN_KIND_SHUTDOWN_ORDER,
             order=order,
             note='删机计划备注：单独保存',
         )
         staff_user = get_user_model().objects.create_user(username='staff_plan_note_order', password='x', is_staff=True)
-        request = RequestFactory().get('/api/admin/tasks/plans/', {'limit': 20})
+        request = RequestFactory().get('/api/admin/tasks/plans/', {'limit': 20, 'refresh': 1})
         request.user = staff_user
 
         response = lifecycle_plans(request)
 
         self.assertEqual(response.status_code, 200)
         payload = json.loads(response.content)
-        row = next(item for item in payload['data']['due_items'] if item.get('order_id') == order.id)
-        self.assertEqual(row['note'], '删机计划备注：单独保存')
+        self.assertEqual(payload['code'], 0)
+        plan_note.refresh_from_db()
+        self.assertEqual(plan_note.note, '删机计划备注：单独保存')
         self.assertEqual(order.provision_note, '订单原备注：不要复用我')
-        self.assertTrue(CloudLifecyclePlan.objects.filter(plan_kind=CloudLifecyclePlan.PLAN_KIND_SHUTDOWN_ORDER, order=order, data_group='active').exists())
 
     def test_unattached_ip_delete_items_include_name_expiry_and_detail_path(self):
         delete_due_at = timezone.now() + timezone.timedelta(days=3)
@@ -5623,7 +5834,7 @@ class CloudServerServicesTestCase(TestCase):
         self.assertNotIn('tg://proxy?', row['display_note'])
         self.assertNotIn('socks5://', row['display_note'])
         self.assertNotIn('Get:', row['display_note'])
-        self.assertEqual(row['note'], '')
+        self.assertEqual(row['note'], asset.note)
         self.assertIn('tg://proxy?', row['source_note'])
 
     def test_unattached_ip_delete_items_use_actual_expiry_as_delete_plan(self):
@@ -5792,7 +6003,7 @@ class CloudServerServicesTestCase(TestCase):
         self.assertNotIn(note_deleted_asset.id, active_asset_ids)
         self.assertIn(visible_asset.id, active_asset_ids)
 
-    def test_unattached_ip_delete_items_prefer_separate_plan_note_over_trace_note(self):
+    def test_unattached_ip_delete_items_prefer_asset_note_over_trace_note(self):
         asset = CloudAsset.objects.create(
             kind=CloudAsset.KIND_SERVER,
             source=CloudAsset.SOURCE_AWS_SYNC,
@@ -5803,15 +6014,15 @@ class CloudServerServicesTestCase(TestCase):
             asset_name='manual-note-unattached-active-plan',
             public_ip='5.5.5.18',
             status=CloudAsset.STATUS_UNKNOWN,
-            is_active=False,
+            is_active=True,
             provider_status='未附加固定IP',
-            note='代理列表备注：不要显示我',
+            note='人工备注：先生已确认保留',
             actual_expires_at=timezone.now() - timezone.timedelta(days=1),
         )
         CloudLifecyclePlanNote.objects.create(
             plan_kind=CloudLifecyclePlanNote.PLAN_KIND_UNATTACHED_IP_DELETE,
             asset=asset,
-            note='人工备注：先生已确认保留',
+            note='旧版删除计划备注：不要显示我',
         )
         CloudIpLog.objects.create(
             asset=asset,
@@ -5826,6 +6037,7 @@ class CloudServerServicesTestCase(TestCase):
 
         self.assertEqual(row['note'], '人工备注：先生已确认保留')
         self.assertIn('人工备注', row['display_note'])
+        self.assertNotIn('旧版删除计划备注', row['display_note'])
         self.assertEqual(row['deletion_source_label'], '同步校验删除')
 
     def test_ip_log_delete_keeps_previous_ip_from_change_chain(self):
@@ -6539,7 +6751,7 @@ class CloudServerServicesTestCase(TestCase):
             provider_status='运行中',
         )
         staff_user = get_user_model().objects.create_user(username='staff_lifecycle_plan_missing', password='x', is_staff=True)
-        request = self.factory.get('/api/admin/tasks/plans/', {'limit': 1000})
+        request = self.factory.get('/api/admin/tasks/plans/', {'limit': 1000, 'refresh': 1})
         request.user = staff_user
 
         response = lifecycle_plans(request)
@@ -6551,40 +6763,32 @@ class CloudServerServicesTestCase(TestCase):
         self.assertFalse(CloudLifecyclePlan.objects.filter(plan_kind=CloudLifecyclePlan.PLAN_KIND_ORPHAN_ASSET_DELETE, asset=missing_asset, data_group='active').exists())
         self.assertTrue(CloudLifecyclePlan.objects.filter(plan_kind=CloudLifecyclePlan.PLAN_KIND_ORPHAN_ASSET_DELETE, asset=visible_asset, data_group='active').exists())
 
-    def test_lifecycle_plans_keeps_remarks_out_of_execution_status(self):
-        order = CloudServerOrder.objects.create(
-            order_no='LIFECYCLE-PLAN-NOTE-COLUMNS-1',
+    def test_lifecycle_plans_keeps_asset_remarks_out_of_execution_status(self):
+        asset = CloudAsset.objects.create(
+            kind=CloudAsset.KIND_SERVER,
+            source=CloudAsset.SOURCE_AWS_SYNC,
             user=self.user,
-            plan=self.plan,
-            provider=self.plan.provider,
+            provider='aws_lightsail',
             region_code=self.plan.region_code,
             region_name=self.plan.region_name,
-            plan_name=self.plan.plan_name,
-            quantity=1,
-            currency='USDT',
-            total_amount='19.00',
-            pay_amount='19.00',
-            status='suspended',
+            asset_name='orphan-plan-note-columns',
+            instance_id='i-orphan-plan-note-columns',
             public_ip='3.3.3.37',
-            service_expires_at=timezone.now() - timezone.timedelta(days=3),
-            suspend_at=timezone.now() - timezone.timedelta(days=2),
-            delete_at=timezone.now() - timezone.timedelta(hours=1),
-            provision_note='人工备注：这是一段很长的业务备注，不应该侵占执行状态列。\nGet: apt noise\ntg://proxy?server=1.1.1.1&port=9528&secret=x',
-        )
-        CloudLifecyclePlanNote.objects.create(
-            plan_kind=CloudLifecyclePlanNote.PLAN_KIND_SHUTDOWN_ORDER,
-            order=order,
+            actual_expires_at=timezone.now() - timezone.timedelta(days=7),
+            status=CloudAsset.STATUS_RUNNING,
+            is_active=True,
+            provider_status='运行中',
             note='人工备注：这是一段很长的业务备注，不应该侵占执行状态列。\nGet: apt noise\ntg://proxy?server=1.1.1.1&port=9528&secret=x',
         )
         staff_user = get_user_model().objects.create_user(username='staff_lifecycle_plan_columns', password='x', is_staff=True)
-        request = self.factory.get('/api/admin/tasks/plans/', {'limit': 1000})
+        request = self.factory.get('/api/admin/tasks/plans/', {'limit': 1000, 'refresh': 1})
         request.user = staff_user
 
         response = lifecycle_plans(request)
         data = json.loads(response.content)['data']
-        row = next(item for item in data['due_items'] if item.get('order_id') == order.id)
+        row = next(item for item in data['due_items'] if item.get('asset_id') == asset.id)
 
-        self.assertEqual(row['execution_status'], '已到删除时间，待执行删除服务器')
+        self.assertEqual(row['execution_status'], '无订单同步资产已到期，待执行删除服务器')
         self.assertEqual(row['execution_plan'][:5], '删除服务器')
         self.assertEqual(row['resource_state_label'], '实例仍存在')
         self.assertEqual(row['plan_state_label'], '待执行')
@@ -6837,6 +7041,68 @@ class CloudServerServicesTestCase(TestCase):
         self.assertEqual(rows[0]['queue_status'], 'scheduled_future')
         self.assertEqual(rows[0]['plan_state_label'], '已排期')
 
+    def test_lifecycle_plans_compute_orphan_server_delete_after_suspend_window(self):
+        SiteConfig.set('cloud_suspend_after_days', '3')
+        SiteConfig.set('cloud_suspend_time', '17:00')
+        SiteConfig.set('cloud_delete_after_days', '3')
+        SiteConfig.set('cloud_delete_time', '18:00')
+        expires_at = timezone.localtime(timezone.now()).replace(hour=16, minute=50, second=33, microsecond=0)
+        if expires_at <= timezone.now():
+            expires_at += timezone.timedelta(days=1)
+        asset = CloudAsset.objects.create(
+            kind=CloudAsset.KIND_SERVER,
+            source=CloudAsset.SOURCE_AWS_SYNC,
+            user=self.user,
+            provider='aws_lightsail',
+            region_code='ap-southeast-1',
+            region_name='新加坡',
+            asset_name='orphan-server-lifecycle-offset',
+            public_ip='52.77.18.251',
+            instance_id='i-orphan-server-lifecycle-offset',
+            actual_expires_at=expires_at,
+            status=CloudAsset.STATUS_RUNNING,
+            is_active=True,
+        )
+        staff_user = get_user_model().objects.create_user(username='staff_orphan_lifecycle_offset', password='x', is_staff=True)
+        request = self.factory.get('/api/admin/tasks/plans/', {'limit': 1000})
+        request.user = staff_user
+
+        response = lifecycle_plans(request)
+        data = json.loads(response.content)['data']
+        row = next(item for item in data['due_items'] if item.get('asset_id') == asset.id)
+        suspend_at = parse_datetime(row['suspend_at'])
+        delete_at = parse_datetime(row['delete_at'])
+
+        self.assertEqual(suspend_at, expires_at + timezone.timedelta(days=3, minutes=10, seconds=-33))
+        self.assertEqual(delete_at, suspend_at + timezone.timedelta(days=3, hours=1))
+        self.assertGreater(delete_at, suspend_at)
+        self.assertNotEqual(delete_at, expires_at)
+        self.assertIn(timezone.localtime(delete_at).strftime('%Y-%m-%d %H:%M:%S'), row['execution_plan'])
+
+    def test_orphan_server_not_due_until_computed_delete_time(self):
+        SiteConfig.set('cloud_suspend_after_days', '3')
+        SiteConfig.set('cloud_suspend_time', '17:00')
+        SiteConfig.set('cloud_delete_after_days', '3')
+        SiteConfig.set('cloud_delete_time', '18:00')
+        asset = CloudAsset.objects.create(
+            kind=CloudAsset.KIND_SERVER,
+            source=CloudAsset.SOURCE_AWS_SYNC,
+            user=self.user,
+            provider='aws_lightsail',
+            region_code='ap-southeast-1',
+            region_name='新加坡',
+            asset_name='orphan-server-not-delete-at-expiry',
+            public_ip='52.77.18.252',
+            instance_id='i-orphan-server-not-delete-at-expiry',
+            actual_expires_at=timezone.now() - timezone.timedelta(days=1),
+            status=CloudAsset.STATUS_RUNNING,
+            is_active=True,
+        )
+
+        due_ids = {item.id for item in async_to_sync(_get_orphan_asset_delete_due)()}
+
+        self.assertNotIn(asset.id, due_ids)
+
     def test_refresh_lifecycle_plans_command_populates_cloud_lifecycle_plan(self):
         order = CloudServerOrder.objects.create(
             order_no='CMD-LIFECYCLE-PLAN-1',
@@ -6888,6 +7154,81 @@ class CloudServerServicesTestCase(TestCase):
 
         self.assertEqual(response.status_code, 200)
         self.assertTrue(CloudLifecyclePlan.objects.filter(plan_kind=CloudLifecyclePlan.PLAN_KIND_SHUTDOWN_ORDER, order=order, data_group='active').exists())
+
+    def test_update_cloud_asset_expiry_refreshes_delete_plan_snapshot(self):
+        old_expiry = timezone.now() - timezone.timedelta(days=10)
+        new_expiry = timezone.now() - timezone.timedelta(days=1)
+        asset = CloudAsset.objects.create(
+            kind=CloudAsset.KIND_SERVER,
+            source=CloudAsset.SOURCE_AWS_SYNC,
+            user=self.user,
+            provider='aws_lightsail',
+            region_code=self.plan.region_code,
+            region_name=self.plan.region_name,
+            asset_name='expiry-refresh-delete-plan',
+            instance_id='expiry-refresh-delete-plan',
+            public_ip='7.7.7.64',
+            actual_expires_at=old_expiry,
+            status=CloudAsset.STATUS_RUNNING,
+            is_active=True,
+        )
+        call_command('refresh_lifecycle_plans', limit=20)
+        row = CloudLifecyclePlan.objects.get(plan_kind=CloudLifecyclePlan.PLAN_KIND_ORPHAN_ASSET_DELETE, asset=asset, data_group='active')
+        old_delete_at = row.delete_at
+        staff_user = get_user_model().objects.create_user(username='staff_asset_expiry_refresh_plan', password='x', is_staff=True, is_superuser=True)
+        request = self.factory.patch(
+            f'/api/dashboard/cloud-assets/{asset.id}/',
+            data=json.dumps({'actual_expires_at': new_expiry.isoformat()}),
+            content_type='application/json',
+        )
+        request.user = staff_user
+
+        response = update_cloud_asset(request, asset.id)
+
+        self.assertEqual(response.status_code, 200)
+        row.refresh_from_db()
+        asset.refresh_from_db()
+        self.assertEqual(asset.actual_expires_at, new_expiry)
+        self.assertNotEqual(row.delete_at, old_delete_at)
+        self.assertEqual(row.service_expires_at, new_expiry)
+
+    def test_update_unattached_ip_release_time_refreshes_delete_plan_snapshot(self):
+        old_release_at = timezone.now() + timezone.timedelta(days=1)
+        new_release_at = timezone.now() + timezone.timedelta(days=3)
+        asset = CloudAsset.objects.create(
+            kind=CloudAsset.KIND_SERVER,
+            source=CloudAsset.SOURCE_AWS_SYNC,
+            user=self.user,
+            provider='aws_lightsail',
+            region_code=self.plan.region_code,
+            region_name=self.plan.region_name,
+            asset_name='StaticIp-expiry-refresh-plan',
+            public_ip='7.7.7.65',
+            actual_expires_at=old_release_at,
+            status=CloudAsset.STATUS_RUNNING,
+            provider_status='未附加固定IP',
+            note='未附加固定IP',
+            is_active=True,
+        )
+        call_command('refresh_lifecycle_plans', limit=20)
+        row = CloudLifecyclePlan.objects.get(plan_kind=CloudLifecyclePlan.PLAN_KIND_UNATTACHED_IP_DELETE, asset=asset, data_group='active')
+        self.assertEqual(row.delete_at, old_release_at)
+        staff_user = get_user_model().objects.create_user(username='staff_ip_expiry_refresh_plan', password='x', is_staff=True, is_superuser=True)
+        request = self.factory.patch(
+            f'/api/dashboard/cloud-assets/{asset.id}/',
+            data=json.dumps({'actual_expires_at': new_release_at.isoformat()}),
+            content_type='application/json',
+        )
+        request.user = staff_user
+
+        response = update_cloud_asset(request, asset.id)
+
+        self.assertEqual(response.status_code, 200)
+        row.refresh_from_db()
+        asset.refresh_from_db()
+        self.assertEqual(asset.actual_expires_at, new_release_at)
+        self.assertEqual(row.delete_at, new_release_at)
+        self.assertEqual(row.next_run_at, new_release_at)
 
     def test_refresh_notice_plans_command_populates_cloud_notice_plan(self):
         now = timezone.now()
@@ -9535,6 +9876,87 @@ class CloudServerServicesTestCase(TestCase):
         self.assertEqual(started, ['current-ip-instance'])
         self.assertIn('已发起开机', note)
 
+    def test_admin_start_restores_suspended_order_to_completed(self):
+        from cloud.services import start_cloud_server_from_admin
+
+        account = self._aws_test_account()
+        order = CloudServerOrder.objects.create(
+            order_no='ORDER-ADMIN-START-RESTORE',
+            user=self.user,
+            plan=self.plan,
+            provider='aws_lightsail',
+            cloud_account=account,
+            account_label=cloud_account_label(account),
+            region_code=self.plan.region_code,
+            region_name=self.plan.region_name,
+            plan_name=self.plan.plan_name,
+            quantity=1,
+            currency='USDT',
+            total_amount='19.00',
+            pay_amount='19.00',
+            pay_method='balance',
+            status='suspended',
+            server_name='admin-start-instance',
+            instance_id='admin-start-instance',
+            public_ip='9.9.9.41',
+            previous_public_ip='9.9.9.41',
+            service_started_at=timezone.now() - timezone.timedelta(days=10),
+            service_expires_at=timezone.now() + timezone.timedelta(days=20),
+        )
+        asset = CloudAsset.objects.create(
+            kind=CloudAsset.KIND_SERVER,
+            order=order,
+            user=self.user,
+            provider='aws_lightsail',
+            region_code=self.plan.region_code,
+            asset_name='admin-start-instance',
+            instance_id='admin-start-instance',
+            public_ip='9.9.9.41',
+            previous_public_ip='9.9.9.41',
+            status=CloudAsset.STATUS_STOPPED,
+            provider_status='已关机-到期延停',
+            is_active=False,
+        )
+        server = Server.objects.create(
+            order=order,
+            user=self.user,
+            provider='aws_lightsail',
+            region_code=self.plan.region_code,
+            server_name='admin-start-instance',
+            instance_id='admin-start-instance',
+            public_ip='9.9.9.41',
+            previous_public_ip='9.9.9.41',
+            status=Server.STATUS_STOPPED,
+            provider_status='已关机-到期延停',
+            is_active=False,
+        )
+
+        class FakeClient:
+            def get_instance(self, instanceName):
+                return {
+                    'instance': {
+                        'name': instanceName,
+                        'publicIpAddress': '9.9.9.41',
+                        'state': {'name': 'running'},
+                    }
+                }
+
+        with patch('cloud.services._aws_lightsail_client_for_order', return_value=FakeClient()), \
+             patch('cloud.services._aws_instance_name_for_order_runtime', return_value='admin-start-instance'), \
+             patch('cloud.services._ensure_mtproxy_after_renewal', return_value=(True, 'MTProxy OK')):
+            returned_order, warning = async_to_sync(start_cloud_server_from_admin)(order.id)
+
+        order.refresh_from_db()
+        asset.refresh_from_db()
+        server.refresh_from_db()
+        self.assertIsNone(warning)
+        self.assertEqual(returned_order.status, 'completed')
+        self.assertEqual(order.status, 'completed')
+        self.assertEqual(asset.status, CloudAsset.STATUS_RUNNING)
+        self.assertEqual(server.status, Server.STATUS_RUNNING)
+        self.assertTrue(asset.is_active)
+        self.assertTrue(server.is_active)
+
     def test_dashboard_asset_order_inference_scopes_duplicate_ip_by_account(self):
         from cloud.api import _infer_asset_order
 
@@ -11417,6 +11839,7 @@ class CloudServerServicesTestCase(TestCase):
         self.assertIn('AWS 固定 IP 已真实释放', order.provision_note or '')
 
     def test_lifecycle_tick_releases_overdue_unattached_static_ip(self):
+        SiteConfig.set('cloud_ip_delete_enabled', '1')
         due_at = timezone.now() - timezone.timedelta(days=4)
         asset = CloudAsset.objects.create(
             kind=CloudAsset.KIND_SERVER,
@@ -11456,7 +11879,9 @@ class CloudServerServicesTestCase(TestCase):
                 released.append(staticIpName)
                 return {'operations': [{'id': 'op-unattached-release'}]}
 
-        with patch('cloud.lifecycle._aws_client', return_value=FakeLightsailClient()), patch('cloud.lifecycle._is_cloud_delete_safe_time', return_value=True):
+        with patch('cloud.lifecycle.cloud_ip_delete_enabled', return_value=True), \
+            patch('cloud.lifecycle._aws_client', return_value=FakeLightsailClient()), \
+            patch('cloud.lifecycle._is_cloud_delete_safe_time', return_value=True):
             async_to_sync(lifecycle_tick)()
 
         asset.refresh_from_db()
@@ -11470,6 +11895,96 @@ class CloudServerServicesTestCase(TestCase):
         self.assertEqual(server.provider_status, '未附加固定IP-已到期删除')
         self.assertIsNone(server.public_ip)
         self.assertEqual(server.previous_public_ip, '21.21.21.21')
+
+    def test_lifecycle_tick_rechecks_orphan_asset_delete_time_before_cloud_delete(self):
+        SiteConfig.set('cloud_suspend_after_days', '3')
+        SiteConfig.set('cloud_suspend_time', '17:00')
+        SiteConfig.set('cloud_delete_after_days', '3')
+        SiteConfig.set('cloud_delete_time', '18:00')
+        asset = CloudAsset.objects.create(
+            kind=CloudAsset.KIND_SERVER,
+            source=CloudAsset.SOURCE_AWS_SYNC,
+            user=self.user,
+            provider='aws_lightsail',
+            region_code=self.plan.region_code,
+            region_name=self.plan.region_name,
+            asset_name='orphan-recheck-future-delete',
+            instance_id='orphan-recheck-future-delete',
+            public_ip='21.21.21.22',
+            actual_expires_at=timezone.now() - timezone.timedelta(days=10),
+            status=CloudAsset.STATUS_RUNNING,
+            is_active=True,
+        )
+        due_asset = CloudAsset.objects.get(id=asset.id)
+        CloudAsset.objects.filter(id=asset.id).update(actual_expires_at=timezone.now() - timezone.timedelta(days=1))
+        due = {
+            'renew_notice': [],
+            'auto_renew_notice': [],
+            'auto_renew': [],
+            'delete_notice': [],
+            'recycle_notice': [],
+            'expire': [],
+            'suspend': [],
+            'delete': [],
+            'recycle': [],
+        }
+
+        with patch('cloud.lifecycle._get_due_orders', new_callable=AsyncMock, return_value=due), \
+            patch('cloud.lifecycle._get_migration_due_orders', new_callable=AsyncMock, return_value=[]), \
+            patch('cloud.lifecycle._get_orphan_asset_delete_due', new_callable=AsyncMock, return_value=[due_asset]), \
+            patch('cloud.lifecycle._get_unattached_static_ip_delete_due', new_callable=AsyncMock, return_value=[]), \
+            patch('cloud.lifecycle.cloud_server_delete_enabled', return_value=True), \
+            patch('cloud.lifecycle._is_cloud_delete_safe_time', return_value=True), \
+            patch('cloud.lifecycle._delete_orphan_asset_instance', new_callable=AsyncMock) as delete_mock:
+            async_to_sync(lifecycle_tick)()
+
+        delete_mock.assert_not_awaited()
+        asset.refresh_from_db()
+        self.assertEqual(asset.status, CloudAsset.STATUS_RUNNING)
+
+    def test_lifecycle_tick_rechecks_unattached_ip_delete_time_before_release(self):
+        asset = CloudAsset.objects.create(
+            kind=CloudAsset.KIND_SERVER,
+            source=CloudAsset.SOURCE_AWS_SYNC,
+            user=self.user,
+            provider='aws_lightsail',
+            region_code=self.plan.region_code,
+            region_name=self.plan.region_name,
+            asset_name='StaticIp-unattached-recheck-future',
+            provider_resource_id='arn:aws:lightsail:ap-southeast-1:123456789012:StaticIp/StaticIp-unattached-recheck-future',
+            public_ip='21.21.21.23',
+            actual_expires_at=timezone.now() - timezone.timedelta(minutes=1),
+            status=CloudAsset.STATUS_UNKNOWN,
+            provider_status='未附加固定IP',
+            is_active=False,
+        )
+        due_asset = CloudAsset.objects.get(id=asset.id)
+        CloudAsset.objects.filter(id=asset.id).update(actual_expires_at=timezone.now() + timezone.timedelta(days=1))
+        due = {
+            'renew_notice': [],
+            'auto_renew_notice': [],
+            'auto_renew': [],
+            'delete_notice': [],
+            'recycle_notice': [],
+            'expire': [],
+            'suspend': [],
+            'delete': [],
+            'recycle': [],
+        }
+
+        with patch('cloud.lifecycle._get_due_orders', new_callable=AsyncMock, return_value=due), \
+            patch('cloud.lifecycle._get_migration_due_orders', new_callable=AsyncMock, return_value=[]), \
+            patch('cloud.lifecycle._get_orphan_asset_delete_due', new_callable=AsyncMock, return_value=[]), \
+            patch('cloud.lifecycle._get_unattached_static_ip_delete_due', new_callable=AsyncMock, return_value=[due_asset]), \
+            patch('cloud.lifecycle.cloud_ip_delete_enabled', return_value=True), \
+            patch('cloud.lifecycle._is_cloud_delete_safe_time', return_value=True), \
+            patch('cloud.lifecycle._release_unattached_static_ip', new_callable=AsyncMock) as release_mock:
+            async_to_sync(lifecycle_tick)()
+
+        release_mock.assert_not_awaited()
+        asset.refresh_from_db()
+        self.assertNotEqual(asset.status, CloudAsset.STATUS_DELETED)
+        self.assertEqual(asset.public_ip, '21.21.21.23')
 
     def test_aws_sync_release_static_ip_respects_shutdown_disabled_account(self):
         from cloud.management.commands.sync_aws_assets import _release_static_ip_if_due
@@ -11521,7 +12036,50 @@ class CloudServerServicesTestCase(TestCase):
         self.assertFalse(ok)
         self.assertEqual(released, [])
         self.assertEqual(asset.status, CloudAsset.STATUS_UNKNOWN)
-        self.assertIn('关机/删机计划已关闭', asset.note or '')
+        self.assertEqual(asset.provider_status, '未附加固定IP-关机计划关闭')
+
+    def test_aws_sync_release_static_ip_respects_global_ip_delete_switch(self):
+        from cloud.management.commands.sync_aws_assets import _release_static_ip_if_due
+
+        asset = CloudAsset.objects.create(
+            kind=CloudAsset.KIND_SERVER,
+            source=CloudAsset.SOURCE_AWS_SYNC,
+            user=self.user,
+            provider='aws_lightsail',
+            region_code=self.plan.region_code,
+            asset_name='StaticIp-sync-global-disabled',
+            public_ip='21.21.21.89',
+            actual_expires_at=timezone.now() - timezone.timedelta(days=1),
+            status=CloudAsset.STATUS_UNKNOWN,
+            provider_status='未附加固定IP',
+            note='未附加固定IP',
+            is_active=False,
+        )
+        released = []
+
+        class FakeClient:
+            def release_static_ip(self, staticIpName):
+                released.append(staticIpName)
+                return {}
+
+        class FakeStyle:
+            def WARNING(self, text):
+                return text
+
+        class FakeStdout:
+            style = FakeStyle()
+
+            def write(self, text):
+                return None
+
+        with patch('cloud.lifecycle.cloud_ip_delete_enabled', return_value=False):
+            ok = _release_static_ip_if_due(FakeClient(), self.plan.region_code, asset, 'StaticIp-sync-global-disabled', '', '21.21.21.89', FakeStdout())
+
+        asset.refresh_from_db()
+        self.assertFalse(ok)
+        self.assertEqual(released, [])
+        self.assertEqual(asset.status, CloudAsset.STATUS_UNKNOWN)
+        self.assertEqual(asset.provider_status, '未附加固定IP-删除IP总开关关闭')
 
 
 class CloudOrderStatusDashboardSyncTestCase(TestCase):
