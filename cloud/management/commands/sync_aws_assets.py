@@ -8,8 +8,8 @@ from bot.api import _provider_status_label
 from core.cloud_accounts import cloud_account_label, cloud_account_label_variants, list_active_cloud_accounts
 from core.persistence import record_external_sync_log
 from cloud.models import CloudAsset, CloudServerOrder, Server, _runtime_int_config, _with_runtime_time
-from cloud.note_utils import append_note, append_status_note
-from cloud.services import drop_asset_note_update, record_cloud_ip_log
+from cloud.note_utils import append_note
+from cloud.services import record_cloud_ip_log, sync_cloud_asset_user_binding
 
 
 logger = logging.getLogger(__name__)
@@ -452,11 +452,7 @@ def _delete_asset_missing_in_aws(asset, *, old_public_ip, instance_name, server,
     asset.previous_public_ip = old_public_ip or asset.previous_public_ip
     asset.public_ip = None
     asset.provider_status = _MISSING_DELETED_STATUS
-    asset.note = _append_unique_line(
-        asset.note,
-        f'IP校验发现云上不存在，已标记删除；IP={old_public_ip or "缺失"}；实例={instance_name or asset.asset_name or "-"}；时间={timezone.now().isoformat()}。',
-    )
-    asset.save(update_fields=['status', 'is_active', 'previous_public_ip', 'public_ip', 'provider_status', 'note', 'updated_at'])
+    asset.save(update_fields=['status', 'is_active', 'previous_public_ip', 'public_ip', 'provider_status', 'updated_at'])
     if server:
         _delete_server_missing_in_aws(server, old_public_ip=old_public_ip, order=order, stdout=stdout, emit_log=False)
     if order:
@@ -481,11 +477,7 @@ def _delete_server_missing_in_aws(server, *, old_public_ip, order, stdout, emit_
     server.previous_public_ip = old_public_ip or server.previous_public_ip
     server.public_ip = None
     server.provider_status = _MISSING_DELETED_STATUS
-    server.note = _append_unique_line(
-        server.note,
-        f'服务器校验发现云上不存在，已标记删除；IP={old_public_ip or "缺失"}；实例={server.instance_id or server.server_name or "-"}；时间={timezone.now().isoformat()}。',
-    )
-    server.save(update_fields=['status', 'is_active', 'previous_public_ip', 'public_ip', 'provider_status', 'note', 'updated_at'])
+    server.save(update_fields=['status', 'is_active', 'previous_public_ip', 'public_ip', 'provider_status', 'updated_at'])
     if order:
         _sync_order_deleted_from_cloud(order, old_public_ip, source='AWS 同步 Server 校验删除', server=server)
     if emit_log:
@@ -663,11 +655,10 @@ def _mark_ip_retained_as_unattached(public_ip, static_ip_name, retained_order, a
         server.provider_status = '固定IP仍存在但未附加'
         if release_at:
             server.expires_at = release_at
-        server.note = append_note(server.note, f'状态: 固定IP仍存在但未附加；公网IP: {public_ip}；固定IP名: {static_ip_name or "-"}；发现时间: {now.isoformat()}；计划释放时间: {release_at.isoformat() if release_at else "-"}；覆盖同步时间: {now.isoformat()}')
         if retained_order and not server.order_id:
             server.order = retained_order
             server.user = retained_order.user
-        server.save(update_fields=['previous_public_ip', 'public_ip', 'expires_at', 'status', 'is_active', 'provider_status', 'note', 'order', 'user', 'updated_at'])
+        server.save(update_fields=['previous_public_ip', 'public_ip', 'expires_at', 'status', 'is_active', 'provider_status', 'order', 'user', 'updated_at'])
     if retained_order:
         retained_order.public_ip = retained_order.public_ip or public_ip
         retained_order.previous_public_ip = retained_order.previous_public_ip or public_ip
@@ -1043,7 +1034,6 @@ class Command(BaseCommand):
                             'currency': 'USDT',
                             'order': order,
                             'user': order_user,
-                            'note': note,
                             'status': normalized_status,
                             'provider_status': provider_status,
                             'is_active': is_active,
@@ -1099,6 +1089,8 @@ class Command(BaseCommand):
                                     asset.is_active = old_status not in {CloudAsset.STATUS_DELETING, CloudAsset.STATUS_TERMINATING}
                                 if rebound_unattached_ip and asset.status == CloudAsset.STATUS_UNKNOWN:
                                     asset.status = CloudAsset.STATUS_RUNNING
+                                if not getattr(asset, 'user_id', None):
+                                    sync_cloud_asset_user_binding(asset, persist=False)
                                 if original_due_at and not rebound_unattached_ip:
                                     manual_expiry_preserved_items.append(f'{asset.id}:{public_ip or "缺失"}:{instance_name or instance_arn}:{original_due_at}')
                                 asset.save()
@@ -1107,6 +1099,7 @@ class Command(BaseCommand):
                                 updated_asset_ids.append(f'{asset.id}:{public_ip or "缺失"}:{instance_name or asset.asset_name}')
                         else:
                             asset = CloudAsset.objects.create(**asset_defaults)
+                            sync_cloud_asset_user_binding(asset)
                             claimed_assets[asset.id] = asset_signature
                             created_count += 1
                             account_stats['created'] += 1
@@ -1131,7 +1124,6 @@ class Command(BaseCommand):
                             'expires_at': expires_at,
                             'order': order,
                             'user': order_user,
-                            'note': note,
                             'status': normalized_status,
                             'provider_status': provider_status,
                             'is_active': is_active,
@@ -1144,14 +1136,12 @@ class Command(BaseCommand):
                             if rebound_unattached_ip:
                                 server_defaults['expires_at'] = asset_defaults['actual_expires_at']
                                 server_defaults['provider_status'] = asset_defaults['provider_status']
-                                server_defaults['note'] = note
                                 server_defaults['is_active'] = True
                         server = _resolve_server(instance_name, instance_arn, public_ip, order, account, region)
                         old_server_status = server.status if server else None
                         if server:
                             server_defaults['user'] = server.user or order_user or getattr(asset, 'user', None)
                             server_defaults['expires_at'] = server.expires_at if not rebound_unattached_ip else asset_defaults['actual_expires_at']
-                            server_defaults['note'] = append_note(_drop_stale_deleted_note_lines(server.note), server_defaults['note'])
                             if (not server.order_id and order) or rebound_to_order:
                                 server_defaults['order'] = order
                         old_server_public_ip = server.public_ip if server else None
@@ -1165,6 +1155,8 @@ class Command(BaseCommand):
                                 server.is_active = old_server_status not in {Server.STATUS_DELETING, Server.STATUS_TERMINATING}
                             if rebound_unattached_ip and server.status == Server.STATUS_UNKNOWN:
                                 server.status = Server.STATUS_RUNNING
+                            if not getattr(server, 'user_id', None) and getattr(asset, 'user_id', None):
+                                server.user = asset.user
                             server.save()
                         else:
                             server = Server.objects.create(**server_defaults)
@@ -1282,7 +1274,6 @@ class Command(BaseCommand):
                         'provider_resource_id': static_ip_arn,
                         'public_ip': public_ip,
                         'actual_expires_at': recycle_due_at,
-                        'note': note,
                         'status': CloudAsset.STATUS_UNKNOWN,
                         'provider_status': provider_status,
                         'is_active': False,
@@ -1321,6 +1312,8 @@ class Command(BaseCommand):
                             original_due_at = asset.actual_expires_at
                             for key, value in asset_defaults.items():
                                 setattr(asset, key, value)
+                            if not getattr(asset, 'user_id', None):
+                                sync_cloud_asset_user_binding(asset, persist=False)
                             due_changed = bool(original_due_at and asset.actual_expires_at and original_due_at != asset.actual_expires_at)
                             asset.save()
                             if due_changed:
@@ -1330,6 +1323,7 @@ class Command(BaseCommand):
                             updated_asset_ids.append(f'{asset.id}:{public_ip or "缺失"}:{static_ip_name or static_ip_arn}')
                     else:
                         asset = CloudAsset.objects.create(**asset_defaults)
+                        sync_cloud_asset_user_binding(asset)
                         claimed_assets[asset.id] = asset_signature
                         created_count += 1
                         account_stats['created'] += 1

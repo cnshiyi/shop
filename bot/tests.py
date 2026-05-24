@@ -18,7 +18,7 @@ from bot.handlers import _cloud_renewal_postcheck_and_notify, _cloud_server_crea
 from bot.keyboards import balance_details_list, cloud_ip_query_result, cloud_order_list
 from bot.models import TelegramChatArchive, TelegramChatMessage, TelegramLoginAccount, TelegramUser
 from bot.services import record_telegram_message
-from bot.telegram_listener import _build_bark_request, _build_push_payload, _is_self_sender
+from bot.telegram_listener import _build_bark_request, _build_push_payload, _is_self_sender, _sync_account_profile
 from cloud.models import CloudAsset, CloudServerOrder, CloudServerPlan, Server
 from cloud.services import update_cloud_item_expiry_for_admin
 from core.models import CloudAccountConfig, SiteConfig
@@ -168,6 +168,56 @@ class BotRunnerWarmCacheTestCase(SimpleTestCase):
 
 
 class TelegramMessageRecordingTestCase(TestCase):
+    def test_recording_same_tg_user_refreshes_name_and_prioritizes_new_username(self):
+        async_to_sync(record_telegram_message)(
+            tg_user_id=70000,
+            chat_id=70000,
+            message_id=1,
+            direction=TelegramChatMessage.DIRECTION_IN,
+            content_type='text',
+            text='old profile',
+            username='old_user',
+            first_name='旧昵称',
+            source='bot',
+        )
+
+        async_to_sync(record_telegram_message)(
+            tg_user_id=70000,
+            chat_id=70000,
+            message_id=2,
+            direction=TelegramChatMessage.DIRECTION_IN,
+            content_type='text',
+            text='new profile',
+            username='new_user',
+            first_name='新昵称',
+            source='bot',
+            active_usernames=['new_user', 'new_alias'],
+        )
+
+        user = TelegramUser.objects.get(tg_user_id=70000)
+        self.assertEqual(user.first_name, '新昵称')
+        self.assertEqual(user.usernames[:3], ['new_user', 'new_alias', 'old_user'])
+
+    def test_login_account_profile_refreshes_shared_user_by_tg_id(self):
+        account = TelegramLoginAccount.objects.create(
+            label='旧登录账号',
+            tg_user_id=70002,
+            username='old_login',
+            status='logged_in',
+        )
+        TelegramUser.objects.create(tg_user_id=70002, username='old_login', first_name='旧昵称')
+        entity = SimpleNamespace(id=70002, username='new_login', first_name='新昵称', last_name='', usernames=[])
+
+        async_to_sync(_sync_account_profile)(account.id, entity, note='监听中')
+
+        account.refresh_from_db()
+        user = TelegramUser.objects.get(tg_user_id=70002)
+        self.assertEqual(account.tg_user_id, 70002)
+        self.assertEqual(account.username, 'new_login')
+        self.assertEqual(account.label, '新昵称')
+        self.assertEqual(user.first_name, '新昵称')
+        self.assertEqual(user.usernames[:2], ['new_login', 'old_login'])
+
     def test_personal_account_messages_are_deduped_per_login_account(self):
         first_account = TelegramLoginAccount.objects.create(label='listener-a', status='logged_in')
         second_account = TelegramLoginAccount.objects.create(label='listener-b', status='logged_in')
@@ -282,6 +332,97 @@ class DashboardCloudAccountVerifyTestCase(TestCase):
         delete_request.user = root
         self.assertEqual(delete_cloud_account(delete_request, account_id).status_code, 200)
         self.assertFalse(CloudAccountConfig.objects.filter(id=account_id).exists())
+
+    def test_cloud_account_external_account_id_must_be_unique_per_provider(self):
+        root = get_user_model().objects.create_user(username='cloud_account_unique_root', password='pass', is_staff=True, is_superuser=True)
+        existing = CloudAccountConfig.objects.create(
+            provider=CloudAccountConfig.PROVIDER_AWS,
+            name='aws-existing',
+            external_account_id='123456789012',
+            access_key='aws-ak-existing',
+            secret_key='aws-sk-existing',
+            region_hint='ap-southeast-1',
+            is_active=True,
+        )
+        other = CloudAccountConfig.objects.create(
+            provider=CloudAccountConfig.PROVIDER_AWS,
+            name='aws-other',
+            access_key='aws-ak-other',
+            secret_key='aws-sk-other',
+            region_hint='ap-southeast-1',
+            is_active=True,
+        )
+
+        create_request = RequestFactory().post(
+            '/api/admin/settings/cloud-accounts/create/',
+            data=json.dumps({
+                'provider': CloudAccountConfig.PROVIDER_AWS,
+                'name': 'aws-duplicate',
+                'external_account_id': existing.external_account_id,
+                'access_key': 'aws-ak-new',
+                'secret_key': 'aws-sk-new',
+            }),
+            content_type='application/json',
+        )
+        create_request.user = root
+        create_response = create_cloud_account(create_request)
+        create_payload = json.loads(create_response.content.decode('utf-8'))
+
+        self.assertEqual(create_response.status_code, 400)
+        self.assertIn('云厂商账号ID已存在', create_payload['message'])
+        self.assertFalse(CloudAccountConfig.objects.filter(name='aws-duplicate').exists())
+
+        update_request = RequestFactory().post(
+            f'/api/admin/settings/cloud-accounts/{other.id}/',
+            data=json.dumps({'external_account_id': existing.external_account_id}),
+            content_type='application/json',
+        )
+        update_request.user = root
+        update_response = update_cloud_account(update_request, other.id)
+        update_payload = json.loads(update_response.content.decode('utf-8'))
+
+        self.assertEqual(update_response.status_code, 400)
+        self.assertIn('云厂商账号ID已存在', update_payload['message'])
+        other.refresh_from_db()
+        self.assertFalse(other.external_account_id)
+
+    def test_cloud_account_verify_blocks_duplicate_external_account_id(self):
+        staff = get_user_model().objects.create_user(username='aws_verify_unique_staff', password='pass', is_staff=True, is_superuser=True)
+        CloudAccountConfig.objects.create(
+            provider=CloudAccountConfig.PROVIDER_AWS,
+            name='aws-owner',
+            external_account_id='123456789012',
+            access_key='aws-ak-owner',
+            secret_key='aws-sk-owner',
+            region_hint='ap-southeast-1',
+            is_active=True,
+        )
+        account = CloudAccountConfig.objects.create(
+            provider=CloudAccountConfig.PROVIDER_AWS,
+            name='aws-candidate',
+            access_key='aws-ak-candidate',
+            secret_key='aws-sk-candidate',
+            region_hint='ap-southeast-1',
+            is_active=True,
+        )
+        request = RequestFactory().post(
+            f'/api/admin/settings/cloud-accounts/{account.id}/verify/',
+            data=json.dumps({'region': 'ap-southeast-1'}),
+            content_type='application/json',
+        )
+        request.user = staff
+
+        fake_lightsail = SimpleNamespace(get_instances=lambda: {'instances': []})
+        fake_sts = SimpleNamespace(get_caller_identity=lambda: {'Account': '123456789012'})
+
+        with patch('boto3.client', side_effect=[fake_lightsail, fake_sts]):
+            response = verify_cloud_account(request, account.id)
+        payload = json.loads(response.content.decode('utf-8'))
+
+        self.assertEqual(response.status_code, 400)
+        self.assertIn('云厂商账号ID已存在', payload['message'])
+        account.refresh_from_db()
+        self.assertFalse(account.external_account_id)
 
     def test_user_proxy_count_follows_cloud_account_active_state(self):
         root = get_user_model().objects.create_user(username='root_proxy_count', password='pass', is_staff=True, is_superuser=True)

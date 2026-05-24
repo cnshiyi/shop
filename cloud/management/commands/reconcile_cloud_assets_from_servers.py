@@ -158,7 +158,6 @@ class Command(BaseCommand):
                 'currency': getattr(order, 'currency', None) if order else 'USDT',
                 'order': order,
                 'user': server.user,
-                'note': server.note,
                 'sort_order': server.sort_order or 99,
                 'status': server.status,
                 'provider_status': server.provider_status,
@@ -173,8 +172,6 @@ class Command(BaseCommand):
                 defaults['actual_expires_at'] = asset.actual_expires_at
                 if asset.price is not None:
                     defaults['price'] = asset.price
-                if asset.note:
-                    defaults['note'] = asset.note
                 asset_signature = f'{server.instance_id or "-"}|{server.provider_resource_id or "-"}|{server.public_ip or "缺失"}'
                 claimed_signature = claimed_assets.get(asset.id)
                 if claimed_signature and claimed_signature != asset_signature:

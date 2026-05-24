@@ -17,7 +17,7 @@ from django.db import transaction
 from django.db.models import Case, IntegerField, Q, Value, When
 from django.utils import timezone
 
-from bot.models import TelegramUser
+from bot.models import TelegramLoginAccount, TelegramUser
 from cloud.models import CloudAsset, CloudIpLog, CloudServerOrder, CloudServerPlan, Server, ServerPrice, _runtime_int_config, _with_runtime_time
 from cloud.note_utils import append_note, prepend_note
 from cloud.bootstrap import install_bbr, install_mtproxy
@@ -222,12 +222,22 @@ def _update_order_primary_records(order: CloudServerOrder | None, *, asset_updat
         updates.setdefault('updated_at', now)
         CloudAsset.objects.filter(id=asset.id).update(**updates)
     if server and server_updates:
-        updates = dict(server_updates)
-        if 'note' in updates:
-            updates['note'] = append_note(server.note, updates.get('note'))
+        updates = drop_asset_note_update(server_updates)
         updates.setdefault('updated_at', now)
-        Server.objects.filter(id=server.id).update(**updates)
+        if updates:
+            Server.objects.filter(id=server.id).update(**updates)
     return asset, server
+
+
+def _maybe_tg_user_id(value) -> int | None:
+    text = str(value or '').strip()
+    if not text or not text.isdigit() or _is_asset_date_token(text):
+        return None
+    try:
+        user_id = int(text)
+    except (TypeError, ValueError):
+        return None
+    return user_id if user_id > 0 else None
 
 
 def _active_cloud_account_asset_filter():
@@ -330,8 +340,6 @@ def _sync_order_cloud_runtime_state(order: CloudServerOrder, state: str, public_
     }
     if public_ip and public_ip != '-':
         updates['public_ip'] = public_ip
-    if note:
-        updates['note'] = note
     _update_order_primary_records(order, asset_updates=updates, server_updates=updates)
 
 
@@ -1209,6 +1217,7 @@ _VISIBLE_USER_SERVER_STATUSES = {'completed', 'expiring', 'suspended', 'renew_pe
 _INACTIVE_ASSET_STATUSES = {'deleted', 'deleting', 'terminated', 'terminating', 'expired'}
 _INACTIVE_ORDER_STATUSES = {'deleted', 'deleting', 'expired', 'cancelled'}
 _ASSET_RENEWAL_MARKER = '未绑定代理资产续费'
+_ASSET_TG_USER_ID_RE = re.compile(r'(?<!\d)(\d{5,20})(?!\d)')
 
 
 def is_cloud_asset_renewal_order(order: CloudServerOrder | None) -> bool:
@@ -1353,6 +1362,188 @@ def _proxy_asset_view(asset: CloudAsset):
         note=asset.note,
         get_status_display=lambda: asset.get_status_display(),
     )
+
+
+def _is_asset_date_token(value: str) -> bool:
+    text = str(value or '').strip()
+    if len(text) != 8 or not text.isdigit() or not text.startswith(('19', '20')):
+        return False
+    try:
+        year = int(text[:4])
+        month = int(text[4:6])
+        day = int(text[6:8])
+    except ValueError:
+        return False
+    return 1900 <= year <= 2099 and 1 <= month <= 12 and 1 <= day <= 31
+
+
+def _asset_identity_texts(asset: CloudAsset | None) -> list[str]:
+    if not asset:
+        return []
+    order = getattr(asset, 'order', None)
+    values = [
+        getattr(asset, 'asset_name', None),
+        getattr(asset, 'instance_id', None),
+        getattr(asset, 'provider_resource_id', None),
+        getattr(asset, 'mtproxy_host', None),
+        getattr(order, 'order_no', None),
+        getattr(order, 'server_name', None),
+        getattr(order, 'last_user_id', None),
+    ]
+    result = []
+    seen = set()
+    for value in values:
+        text = str(value or '').strip()
+        if not text or text in seen:
+            continue
+        result.append(text)
+        seen.add(text)
+    return result
+
+
+def _asset_identity_tg_user_ids(asset: CloudAsset | None) -> list[int]:
+    result = []
+    seen = set()
+    order = getattr(asset, 'order', None)
+    direct_user_id = _maybe_tg_user_id(getattr(order, 'last_user_id', None))
+    if direct_user_id:
+        result.append(direct_user_id)
+        seen.add(direct_user_id)
+    for text in _asset_identity_texts(asset):
+        for match in _ASSET_TG_USER_ID_RE.findall(text):
+            if _is_asset_date_token(match):
+                continue
+            try:
+                value = int(match)
+            except (TypeError, ValueError):
+                continue
+            if value <= 0 or value in seen:
+                continue
+            result.append(value)
+            seen.add(value)
+    return result
+
+
+def _asset_identity_username_tokens(asset: CloudAsset | None) -> list[str]:
+    result = []
+    seen = set()
+    ignored = {'aws', 'aliyun', 'staticip', 'lightsail', 'server'}
+    for text in _asset_identity_texts(asset):
+        for token in re.findall(r'[A-Za-z][A-Za-z0-9_]{2,63}', text):
+            normalized = token.strip().lstrip('@')
+            key = normalized.lower()
+            if not normalized or key in seen or key in ignored:
+                continue
+            result.append(normalized)
+            seen.add(key)
+    return result
+
+
+def _merge_telegram_user_from_login_account(account: TelegramLoginAccount | None) -> TelegramUser | None:
+    if not account or not getattr(account, 'tg_user_id', None):
+        return None
+    usernames = TelegramUser.normalize_usernames(getattr(account, 'username', None))
+    serialized_usernames = TelegramUser.serialize_usernames(usernames)
+    first_name = str(getattr(account, 'label', '') or '').strip()
+    user, _ = TelegramUser.objects.get_or_create(
+        tg_user_id=account.tg_user_id,
+        defaults={
+            'username': serialized_usernames,
+            'first_name': first_name[:191],
+        },
+    )
+    changed = []
+    if usernames:
+        merged = []
+        seen = set()
+        for item in [*user.usernames, *usernames]:
+            key = item.lower()
+            if item and key not in seen:
+                merged.append(item)
+                seen.add(key)
+        next_usernames = TelegramUser.serialize_usernames(merged)
+        if user.username != next_usernames:
+            user.username = next_usernames
+            changed.append('username')
+    if first_name and user.first_name != first_name[:191]:
+        user.first_name = first_name[:191]
+        changed.append('first_name')
+    if changed:
+        changed.append('updated_at')
+        user.save(update_fields=changed)
+    return user
+
+
+def _resolve_cloud_asset_identity_user(asset: CloudAsset | None) -> TelegramUser | None:
+    if not asset:
+        return None
+    if getattr(asset, 'user_id', None):
+        return getattr(asset, 'user', None) or TelegramUser.objects.filter(id=asset.user_id).first()
+    order = getattr(asset, 'order', None)
+    if getattr(order, 'user_id', None):
+        return getattr(order, 'user', None) or TelegramUser.objects.filter(id=order.user_id).first()
+
+    server = (
+        Server.objects.select_related('user')
+        .filter(scoped_server_match_for_asset(asset, include_order=True), user__isnull=False)
+        .order_by('-updated_at', '-id')
+        .first()
+    )
+    if server and server.user_id:
+        return server.user
+
+    ips = [value for value in [asset.public_ip, asset.previous_public_ip] if value]
+    trace_query = Q(asset=asset)
+    if ips:
+        trace_query |= Q(public_ip__in=ips) | Q(previous_public_ip__in=ips)
+    trace = (
+        CloudIpLog.objects.select_related('user')
+        .filter(trace_query)
+        .filter(user__isnull=False)
+        .order_by('-id')
+        .first()
+    )
+    if trace and trace.user_id:
+        return trace.user
+
+    for tg_user_id in _asset_identity_tg_user_ids(asset):
+        user = TelegramUser.objects.filter(tg_user_id=tg_user_id).first()
+        if user:
+            return user
+        account = TelegramLoginAccount.objects.filter(tg_user_id=tg_user_id).order_by('-updated_at', '-id').first()
+        user = _merge_telegram_user_from_login_account(account)
+        if user:
+            return user
+
+    for username in _asset_identity_username_tokens(asset):
+        username_key = username.lower()
+        candidates = list(TelegramUser.objects.filter(username__icontains=username).order_by('-updated_at', '-id')[:20])
+        for candidate in candidates:
+            if username_key in {item.lower() for item in candidate.usernames}:
+                return candidate
+        accounts = list(TelegramLoginAccount.objects.filter(username__icontains=username).exclude(tg_user_id__isnull=True).order_by('-updated_at', '-id')[:20])
+        for account in accounts:
+            if username_key in {item.lower() for item in TelegramUser.normalize_usernames(account.username)}:
+                user = _merge_telegram_user_from_login_account(account)
+                if user:
+                    return user
+    return None
+
+
+def sync_cloud_asset_user_binding(asset: CloudAsset | None, *, persist: bool = True) -> TelegramUser | None:
+    user = _resolve_cloud_asset_identity_user(asset)
+    if not asset or not user:
+        return user
+    if persist and getattr(asset, 'user_id', None) != user.id:
+        now = timezone.now()
+        CloudAsset.objects.filter(id=asset.id).update(user=user, updated_at=now)
+        asset.user = user
+        asset.user_id = user.id
+        Server.objects.filter(scoped_server_match_for_asset(asset, include_order=True), user__isnull=True).update(
+            user=user,
+            updated_at=now,
+        )
+    return user
 
 
 def _proxy_server_view(server: Server):
@@ -3550,8 +3741,8 @@ def apply_cloud_server_renewal(order_id: int, days: int = 31, run_post_checks: b
     asset_update = {'actual_expires_at': order.service_expires_at, 'updated_at': timezone.now()}
     server_update = {'expires_at': order.service_expires_at, 'updated_at': timezone.now()}
     if retained_ip:
-        asset_update.update({'public_ip': order.public_ip or order.previous_public_ip, 'previous_public_ip': order.public_ip or order.previous_public_ip, 'provider_status': '未附加固定IP-续费保留中', 'is_active': False, 'note': order.provision_note})
-        server_update.update({'public_ip': order.public_ip or order.previous_public_ip, 'previous_public_ip': order.public_ip or order.previous_public_ip, 'provider_status': '未附加固定IP-续费保留中', 'is_active': False, 'note': order.provision_note})
+        asset_update.update({'public_ip': order.public_ip or order.previous_public_ip, 'previous_public_ip': order.public_ip or order.previous_public_ip, 'provider_status': '未附加固定IP-续费保留中', 'is_active': False})
+        server_update.update({'public_ip': order.public_ip or order.previous_public_ip, 'previous_public_ip': order.public_ip or order.previous_public_ip, 'provider_status': '未附加固定IP-续费保留中', 'is_active': False})
     _update_order_primary_records(order, asset_updates=asset_update, server_updates=server_update)
     record_cloud_ip_log(
         event_type=CloudIpLog.EVENT_RENEWED,
@@ -4569,6 +4760,7 @@ __all__ = [
     'set_cloud_server_auto_renew_admin',
     'set_cloud_server_port',
     'start_cloud_server_from_admin',
+    'sync_cloud_asset_user_binding',
     'unmute_all_user_reminders',
     'unmute_cloud_reminders',
 ]

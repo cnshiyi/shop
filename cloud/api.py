@@ -51,7 +51,7 @@ from bot.api import (
 )
 from bot.models import TelegramGroupFilter, TelegramLoginAccount, TelegramUser
 from cloud.lifecycle import NOTICE_TYPE_SWITCH_CONFIG, _auto_renew_notice_batch_payload, _notice_effective_delivered, _delete_instance, _get_due_orders, _get_notice_text_override, _lifecycle_notice_batch_payload, _mark_replaced_order_deleted, _notice_payload_for_order, _notice_override_key, _record_auto_renew_patrol_log, _renew_notice_batch_payload, _run_auto_renew, _set_notice_text_override, cloud_notice_type_enabled
-from cloud.services import AWS_REGION_NAMES, RenewalPriceMissingError, _cloud_order_lifecycle_fields, _renewal_price, _update_order_primary_records, create_cloud_server_rebuild_order, drop_asset_note_update, ensure_cloud_server_pricing, ensure_manual_expiry_operation_order, ensure_manual_owner_operation_order, ensure_manual_price_operation_order, record_cloud_ip_log, refresh_custom_plan_cache, replace_cloud_asset_order_by_admin, scoped_server_match_for_asset, set_cloud_server_auto_renew_admin
+from cloud.services import AWS_REGION_NAMES, RenewalPriceMissingError, _cloud_order_lifecycle_fields, _renewal_price, _update_order_primary_records, create_cloud_server_rebuild_order, drop_asset_note_update, ensure_cloud_asset_operation_order, ensure_cloud_server_pricing, ensure_manual_expiry_operation_order, ensure_manual_owner_operation_order, ensure_manual_price_operation_order, record_cloud_ip_log, refresh_custom_plan_cache, replace_cloud_asset_order_by_admin, scoped_server_match_for_asset, set_cloud_server_auto_renew_admin, sync_cloud_asset_user_binding
 from cloud.models import AddressMonitor, CloudAsset, CloudAutoRenewPatrolLog, CloudAutoRenewPlan, CloudIpLog, CloudNoticePlan, CloudServerOrder, CloudServerPlan, CloudUserNoticeLog, Server, ServerPrice
 from cloud.note_utils import append_note, prepend_note
 from core.cloud_accounts import cloud_account_label, cloud_account_label_variants
@@ -437,7 +437,6 @@ def _display_cloud_asset_note(note: str | None) -> str:
     )
     lines = []
     seen = set()
-    latest_sync_status = ''
     for raw_line in str(note or '').splitlines():
         line = raw_line.strip()
         if not line:
@@ -449,14 +448,11 @@ def _display_cloud_asset_note(note: str | None) -> str:
         if line.startswith(noisy_prefixes):
             continue
         if line.startswith('状态: ') and ('最近同步:' in line or '覆盖同步时间:' in line):
-            latest_sync_status = line
             continue
         if line in seen:
             continue
         seen.add(line)
         lines.append(line)
-    if latest_sync_status and latest_sync_status not in seen:
-        lines.append(latest_sync_status)
     return '\n'.join(lines)
 
 
@@ -692,7 +688,10 @@ def _sort_cloud_asset_payloads(items: list[dict], sort_by: str, sort_direction: 
 
 def _asset_payload(asset):
     order = _infer_asset_order(asset)
-    user = asset.user or getattr(order, 'user', None)
+    if order and not getattr(asset, 'order_id', None):
+        asset.order = order
+        asset.order_id = order.id
+    user = asset.user or getattr(order, 'user', None) or sync_cloud_asset_user_binding(asset)
     user_payload = None
     if user:
         usernames = user.usernames
@@ -771,6 +770,7 @@ def _asset_payload(asset):
         'order_no': order.order_no if order else '',
         'order_detail_path': f'/admin/cloud-orders/{order.id}' if order else '',
         'order_link_path': f'/admin/cloud-orders/{order.id}' if order else '',
+        'can_auto_renew': bool(user and not (display_status == 'unattached' or '未附加' in str(provider_status_label or ''))),
         'auto_renew_enabled': bool(getattr(order, 'auto_renew_enabled', False)),
         'status': display_status,
         'status_label': display_status_label,
@@ -1161,8 +1161,6 @@ def update_cloud_asset(request, asset_id):
                 server.public_ip = asset.public_ip
                 if 'public_ip' in payload and old_public_ip and old_public_ip != asset.public_ip:
                     server.previous_public_ip = old_public_ip
-                if 'note' not in payload:
-                    server.note = append_note(server.note, asset.note)
                 server.sort_order = asset.sort_order
                 server.expires_at = asset.actual_expires_at
                 server.is_active = asset.is_active
@@ -1271,10 +1269,20 @@ def toggle_cloud_asset_auto_renew(request, asset_id):
     asset = CloudAsset.objects.select_related('order', 'user', 'cloud_account', 'telegram_group').filter(pk=asset_id).first()
     if not asset:
         return _error('云资产不存在', status=404)
-    if not asset.order_id:
-        return _error('该代理未绑定订单，无法设置自动续费', status=400)
     payload = _read_payload(request)
     enabled = str(payload.get('enabled')).lower() in {'1', 'true', 'yes', 'on'}
+    if not asset.user_id:
+        sync_cloud_asset_user_binding(asset)
+    if not asset.user_id:
+        return _error('该代理未绑定用户，无法设置自动续费', status=400)
+    if not asset.order_id:
+        order, err = async_to_sync(ensure_cloud_asset_operation_order)(asset.id, asset.user_id, True)
+        if err:
+            return _error(err, status=400)
+        if not order:
+            return _error('该代理无法生成操作订单，无法设置自动续费', status=400)
+        asset.order = order
+        asset.order_id = order.id
     order = async_to_sync(set_cloud_server_auto_renew_admin)(asset.order_id, enabled)
     if order is False:
         return _error('当前状态不可开启自动续费', status=400)
@@ -3644,8 +3652,6 @@ def _primary_record_updates_for_order_status(order_status: str, note: str | None
         }
     else:
         return {}, {}
-    if note:
-        server_updates['note'] = note
     return asset_updates, server_updates
 
 
@@ -3888,7 +3894,7 @@ def _run_rebuild_job(new_order_id: int):
         _update_order_primary_records(
             source_order,
             asset_updates=drop_asset_note_update({'note': failure_note}),
-            server_updates={'note': failure_note},
+            server_updates=drop_asset_note_update({'note': failure_note}),
         )
 
 

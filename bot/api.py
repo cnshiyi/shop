@@ -29,7 +29,7 @@ from django.views.decorators.http import require_GET, require_POST
 
 from bot.models import BotOperationLog, TelegramChatArchive, TelegramChatMessage, TelegramGroupFilter, TelegramLoginAccount, TelegramUser
 from bot.services import _get_or_create_user_sync
-from cloud.lifecycle import _delete_instance, _delete_orphan_asset_instance, _get_due_orders, _get_orphan_asset_delete_due, _is_cloud_delete_safe_time, _mark_deleted, _mark_orphan_asset_deleted, _mark_unattached_static_ip_deleted, _orphan_asset_server_delete_blocked_until, _record_lifecycle_action_failed, _release_unattached_static_ip, _shutdown_enabled_for_order, cloud_ip_delete_enabled, cloud_server_delete_enabled
+from cloud.lifecycle import _delete_instance, _delete_orphan_asset_instance, _get_due_orders, _get_orphan_asset_delete_due, _is_cloud_delete_safe_time, _is_cloud_unattached_ip_delete_time, _mark_deleted, _mark_orphan_asset_deleted, _mark_unattached_static_ip_deleted, _orphan_asset_server_delete_blocked_until, _record_lifecycle_action_failed, _release_unattached_static_ip, _shutdown_enabled_for_order, cloud_ip_delete_enabled, cloud_server_delete_enabled
 from cloud.models import AddressMonitor, CloudAsset, CloudIpLog, CloudLifecyclePlan, CloudLifecyclePlanNote, CloudServerOrder, Server
 from cloud.services import scoped_server_match_for_asset
 from cloud.sync_safety import missing_confirmation_state
@@ -641,7 +641,6 @@ def _compact_dashboard_note(note, *, max_chars=800):
     )
     lines = []
     seen = set()
-    latest_sync_status = ''
     for raw_line in str(note or '').splitlines():
         line = raw_line.strip()
         if not line:
@@ -653,14 +652,11 @@ def _compact_dashboard_note(note, *, max_chars=800):
         if line.startswith(noisy_prefixes):
             continue
         if line.startswith('状态: ') and ('最近同步:' in line or '覆盖同步时间:' in line):
-            latest_sync_status = line
             continue
         if line in seen:
             continue
         seen.add(line)
         lines.append(line)
-    if latest_sync_status and latest_sync_status not in seen:
-        lines.append(latest_sync_status)
     text = '\n'.join(lines)
     if max_chars and len(text) > max_chars:
         return text[:max_chars].rstrip() + '\n...（备注过长，已折叠预览）'
@@ -1453,6 +1449,14 @@ def _move_completed_ip_delete_rows_to_history(items: list[dict]) -> tuple[list[d
         if item.get('is_history') or item.get('data_group') == 'history':
             converted_history_items.append(item)
             continue
+        confirm_text = '\n'.join(
+            str(item.get(key) or '')
+            for key in ['source_note', 'note', 'provider_status', 'execution_status']
+        )
+        confirm_state = missing_confirmation_state(confirm_text)
+        if 0 < confirm_state['count'] < confirm_state['threshold']:
+            active_items.append(item)
+            continue
         if item.get('plan_state') == 'completed' or _unattached_ip_deleted_or_missing_text(item):
             converted_history_items.append(_ip_delete_completed_active_to_history(item))
             row_id = item.get('id')
@@ -1676,7 +1680,7 @@ def _unattached_ip_delete_items(limit=50, assets=None):
     seen_trace_ids = set()
     active_unattached_ips = {str(asset.public_ip or '').strip() for asset in assets if str(asset.public_ip or '').strip()}
     for asset in assets:
-        confirm_state = missing_confirmation_state(getattr(asset, 'note', ''))
+        confirm_state = missing_confirmation_state('\n'.join(filter(None, [getattr(asset, 'provider_status', ''), getattr(asset, 'note', '')])))
         if confirm_state['count'] >= confirm_state['threshold']:
             continue
         user_display_name, username_label = _telegram_user_labels(asset.user)
@@ -1985,6 +1989,21 @@ def _cloud_account_payload(item):
         'status_note': item.status_note,
         'last_checked_at': _iso(item.last_checked_at),
     }
+
+
+def _find_duplicate_cloud_account(*, provider: str, external_account_id: str = '', exclude_id: int | None = None):
+    normalized_provider = str(provider or '').strip()
+    normalized_external_id = str(external_account_id or '').strip()
+    if not normalized_provider or not normalized_external_id:
+        return None
+    qs = CloudAccountConfig.objects.filter(provider=normalized_provider, external_account_id=normalized_external_id)
+    if exclude_id:
+        qs = qs.exclude(id=exclude_id)
+    return qs.first()
+
+
+def _cloud_account_duplicate_error(duplicate):
+    return f'云厂商账号ID已存在：{duplicate.get_provider_display()} / {duplicate.name}（内部ID {duplicate.id}）'
 
 
 def _external_sync_log_payload(item):
@@ -3328,8 +3347,8 @@ def _run_unattached_ip_delete_sync(asset_id: int, enforce_schedule: bool = True)
             return {'asset_id': asset.id, 'ip': ip, 'ok': False, 'error': 'IP 没有计划删除时间，跳过真实释放固定 IP。'}
         if asset.actual_expires_at and asset.actual_expires_at > now:
             return {'asset_id': asset.id, 'ip': ip, 'ok': False, 'error': f'未到 IP 删除时间：{timezone.localtime(asset.actual_expires_at).strftime("%Y-%m-%d %H:%M:%S")}' }
-        if not _is_cloud_delete_safe_time(now):
-            return {'asset_id': asset.id, 'ip': ip, 'ok': False, 'error': '当前不在后台配置的删除执行时间窗口'}
+        if not _is_cloud_unattached_ip_delete_time(now):
+            return {'asset_id': asset.id, 'ip': ip, 'ok': False, 'error': '当前不在后台配置的 IP 删除执行时间窗口'}
     ok, note = async_to_sync(_release_unattached_static_ip)(asset)
     if ok:
         note = _with_delete_source(note, '人工手动删除' if not enforce_schedule else '到期自动删除')
@@ -3784,6 +3803,9 @@ def create_cloud_account(request):
         return _error('账户名称不能为空', status=400)
     if not access_key or not secret_key:
         return _error('Access Key 和 Secret Key 不能为空', status=400)
+    duplicate = _find_duplicate_cloud_account(provider=provider, external_account_id=external_account_id)
+    if duplicate:
+        return _error(_cloud_account_duplicate_error(duplicate), status=400)
     item = CloudAccountConfig.objects.create(
         provider=provider,
         name=name,
@@ -3822,10 +3844,20 @@ def update_cloud_account(request, account_id: int):
         return _error('云平台类型不正确', status=400)
     if not name:
         return _error('账户名称不能为空', status=400)
+    normalized_external_account_id = str(
+        item.external_account_id if external_account_id is None else external_account_id or ''
+    ).strip()
+    duplicate = _find_duplicate_cloud_account(
+        provider=provider,
+        external_account_id=normalized_external_account_id,
+        exclude_id=item.id,
+    )
+    if duplicate:
+        return _error(_cloud_account_duplicate_error(duplicate), status=400)
     item.provider = provider
     item.name = name
     if external_account_id is not None:
-        item.external_account_id = str(external_account_id or '').strip() or None
+        item.external_account_id = normalized_external_account_id or None
     if access_key not in (None, ''):
         item.access_key = str(access_key).strip()
     if secret_key not in (None, ''):
@@ -3895,6 +3927,13 @@ def verify_cloud_account(request, account_id: int):
             except Exception:
                 account_id = ''
             if account_id and item.external_account_id != account_id:
+                duplicate = _find_duplicate_cloud_account(
+                    provider=item.provider,
+                    external_account_id=account_id,
+                    exclude_id=item.id,
+                )
+                if duplicate:
+                    raise ValueError(_cloud_account_duplicate_error(duplicate))
                 item.external_account_id = account_id
                 item.save(update_fields=['external_account_id', 'updated_at'])
             item.mark_status(CloudAccountConfig.STATUS_OK, f'验证成功，账号ID {account_id or "-"}，实例数 {count}，地区 {region or "ap-southeast-1"}')
@@ -3915,6 +3954,13 @@ def verify_cloud_account(request, account_id: int):
             count = len(instances)
             account_id = _fetch_aliyun_account_id(item)
             if account_id and item.external_account_id != account_id:
+                duplicate = _find_duplicate_cloud_account(
+                    provider=item.provider,
+                    external_account_id=account_id,
+                    exclude_id=item.id,
+                )
+                if duplicate:
+                    raise ValueError(_cloud_account_duplicate_error(duplicate))
                 item.external_account_id = account_id
                 item.save(update_fields=['external_account_id', 'updated_at'])
             item.mark_status(CloudAccountConfig.STATUS_OK, f'验证成功，账号ID {account_id or "-"}，实例数 {count}，地区 {region or "cn-hongkong"}')

@@ -239,7 +239,6 @@ def _upsert_server_record(order: CloudServerOrder, note: str):
             'expires_at': order.service_expires_at,
             'order': order,
             'user': order_user,
-            'note': append_note(getattr(server_record, 'note', None), note),
             'status': Server.STATUS_RUNNING if order.status in {'completed', 'expiring', 'renew_pending', 'suspended'} else Server.STATUS_PENDING,
             'is_active': order.status in {'provisioning', 'completed', 'expiring', 'renew_pending', 'suspended'},
         }
@@ -353,8 +352,8 @@ def _mark_rebuild_source_pending_deletion(order_id: int, replacement_order_id: i
         source.save(update_fields=['previous_public_ip', 'public_ip', 'mtproxy_host', 'provision_note', 'updated_at'])
         _update_order_primary_records(
             source,
-            asset_updates={'previous_public_ip': previous_public_ip, 'public_ip': previous_public_ip, 'note': source.provision_note},
-            server_updates={'previous_public_ip': previous_public_ip, 'public_ip': previous_public_ip, 'note': source.provision_note},
+            asset_updates={'previous_public_ip': previous_public_ip, 'public_ip': previous_public_ip},
+            server_updates={'previous_public_ip': previous_public_ip, 'public_ip': previous_public_ip},
             now=now,
         )
         record_cloud_ip_log(event_type='renewed', order=source, previous_public_ip=previous_public_ip, public_ip=previous_public_ip, note=f'固定 IP 保留期恢复完成，新实例订单: {replacement.order_no}')
@@ -432,7 +431,6 @@ def _mark_rebuild_source_pending_deletion(order_id: int, replacement_order_id: i
             'mtproxy_host': None,
             'actual_expires_at': migration_due_at,
             'is_active': False,
-            'note': source.provision_note,
         },
         server_updates={
             'status': CloudAsset.STATUS_DELETING,
@@ -441,7 +439,6 @@ def _mark_rebuild_source_pending_deletion(order_id: int, replacement_order_id: i
             'provider_status': '旧机保留期，等待删除',
             'expires_at': migration_due_at,
             'is_active': False,
-            'note': source.provision_note,
         },
         now=now,
     )
@@ -1091,7 +1088,7 @@ def _mark_failed(order_id: int, note: str, cleanup_at=None):
     _update_order_primary_records(
         order,
         asset_updates=drop_asset_note_update({'note': note, 'status': CloudAsset.STATUS_UNKNOWN, 'is_active': False}),
-        server_updates={'note': note, 'status': Server.STATUS_UNKNOWN, 'is_active': False},
+        server_updates=drop_asset_note_update({'note': note, 'status': Server.STATUS_UNKNOWN, 'is_active': False}),
         now=timezone.now(),
     )
     logger.info('[PROVISION] failed_server_record_synced order=%s server_record_id=%s', order.order_no, getattr(server_record, 'id', None))

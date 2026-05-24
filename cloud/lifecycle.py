@@ -16,6 +16,7 @@ from django.db.models import Q
 from django.utils import timezone
 
 from core.models import CloudAccountConfig, SiteConfig
+from core.cloud_accounts import cloud_account_label_variants
 from core.runtime_config import get_runtime_config
 from core.texts import site_text
 
@@ -23,7 +24,7 @@ from orders.models import BalanceLedger
 from orders.services import usdt_to_trx
 from bot.models import TelegramUser
 from cloud.models import CloudAsset, CloudAutoRenewPatrolLog, CloudAutoRenewRetryTask, CloudServerOrder, CloudUserNoticeLog, Server, _with_runtime_time
-from cloud.note_utils import append_note, prepend_note
+from cloud.note_utils import prepend_note
 from cloud.services import RenewalPriceMissingError, _cloud_order_lifecycle_fields, _hydrate_order_from_proxy_asset, _order_primary_asset, _order_primary_server, _prepare_cloud_server_renewal, _renewal_price, _resolve_aws_static_ip_name_for_order, pay_cloud_server_renewal_with_balance, record_cloud_ip_log
 from bot.keyboards import cloud_expiry_actions
 
@@ -457,9 +458,8 @@ def _mark_suspended(order_id: int, note: str):
         server.status = Server.STATUS_STOPPED
         server.provider_status = '已关机-到期延停'
         server.is_active = False
-        server.note = append_note(server.note, note or '服务器进入延停状态')
         server.updated_at = now
-        server.save(update_fields=['status', 'provider_status', 'is_active', 'note', 'updated_at'])
+        server.save(update_fields=['status', 'provider_status', 'is_active', 'updated_at'])
     record_cloud_ip_log(event_type='suspended', order=order, asset=asset, server=server, note=note or '服务器进入延停状态')
     return order
 
@@ -508,9 +508,8 @@ def _mark_deleted(order_id: int, note: str):
         server.status = Server.STATUS_DELETED
         server.provider_status = '固定IP保留中-实例已删除'
         server.is_active = False
-        server.note = append_note(server.note, retention_note)
         server.updated_at = now
-        server.save(update_fields=['public_ip', 'previous_public_ip', 'instance_id', 'provider_resource_id', 'expires_at', 'status', 'provider_status', 'is_active', 'note', 'updated_at'])
+        server.save(update_fields=['public_ip', 'previous_public_ip', 'instance_id', 'provider_resource_id', 'expires_at', 'status', 'provider_status', 'is_active', 'updated_at'])
     record_cloud_ip_log(event_type='deleted', order=order, asset=asset, server=server, previous_public_ip=previous_public_ip, public_ip=previous_public_ip, note=retention_note)
     return order
 
@@ -556,9 +555,8 @@ def _mark_recycled(order_id: int, note: str):
         server.status = Server.STATUS_DELETED
         server.provider_status = '公网IP已回收'
         server.is_active = False
-        server.note = append_note(server.note, note or '公网IP已回收')
         server.updated_at = now
-        server.save(update_fields=['previous_public_ip', 'public_ip', 'status', 'provider_status', 'is_active', 'note', 'updated_at'])
+        server.save(update_fields=['previous_public_ip', 'public_ip', 'status', 'provider_status', 'is_active', 'updated_at'])
     record_cloud_ip_log(event_type='recycled', order=order, asset=asset, server=server, previous_public_ip=previous_public_ip, public_ip=None, note=note or '公网IP已回收')
     return order
 
@@ -1670,6 +1668,10 @@ def _is_cloud_delete_safe_time(now=None) -> bool:
     return _is_cloud_action_time('cloud_delete_time', '15:00', now=now)
 
 
+def _is_cloud_unattached_ip_delete_time(now=None) -> bool:
+    return _is_cloud_action_time('cloud_unattached_ip_delete_time', '15:00', now=now)
+
+
 def _action_note(result) -> str:
     if isinstance(result, tuple):
         return str(result[1] if len(result) > 1 else result[0])
@@ -1899,6 +1901,52 @@ def _aws_instance_name_for_asset(asset: CloudAsset, client=None) -> str:
     return str(asset.asset_name or '').strip()
 
 
+def _static_ip_name_from_resource_id(value) -> str:
+    text = str(value or '').strip()
+    if not text or 'StaticIp' not in text:
+        return ''
+    return text.rsplit('/', 1)[-1] or text
+
+
+def _looks_like_static_ip_asset(asset: CloudAsset | None) -> bool:
+    if not asset:
+        return False
+    provider_status = str(getattr(asset, 'provider_status', '') or '')
+    provider_resource_id = str(getattr(asset, 'provider_resource_id', '') or '')
+    return (
+        'StaticIp' in provider_resource_id
+        or '未附加固定IP' in provider_status
+        or '固定IP仍存在' in provider_status
+    )
+
+
+def _static_ip_name_from_asset(asset: CloudAsset | None) -> str:
+    if not _looks_like_static_ip_asset(asset):
+        return ''
+    return _static_ip_name_from_resource_id(getattr(asset, 'provider_resource_id', '')) or str(getattr(asset, 'asset_name', '') or '').strip()
+
+
+def _aws_static_ip_name_from_order_asset(order: CloudServerOrder) -> str:
+    public_ip = str(order.public_ip or order.previous_public_ip or '').strip()
+    if not public_ip:
+        return ''
+    account = getattr(order, 'cloud_account', None)
+    labels = cloud_account_label_variants(account) if account else []
+    lookup = Q(provider='aws_lightsail', kind=CloudAsset.KIND_SERVER) & (Q(public_ip=public_ip) | Q(previous_public_ip=public_ip))
+    if str(order.region_code or '').strip():
+        lookup &= Q(region_code=order.region_code)
+    account_lookup = Q(order=order)
+    if account:
+        account_lookup |= Q(cloud_account=account)
+    if labels:
+        account_lookup |= Q(account_label__in=labels)
+    for asset in CloudAsset.objects.filter(lookup & account_lookup).order_by('-updated_at', '-id'):
+        name = _static_ip_name_from_asset(asset)
+        if name:
+            return name
+    return ''
+
+
 def _aws_static_ip_name_for_order(order: CloudServerOrder, client=None) -> str:
     public_ip = str(order.public_ip or order.previous_public_ip or '').strip()
     client = client or _aws_client(order.region_code, getattr(order, 'cloud_account', None))
@@ -1916,7 +1964,7 @@ def _aws_static_ip_name_for_order(order: CloudServerOrder, client=None) -> str:
                     break
         except Exception as exc:
             logger.warning('AWS 固定 IP 名称按 IP 反查失败，回退订单固定 IP 名: order=%s ip=%s error=%s', getattr(order, 'order_no', None), public_ip, exc)
-    return str(order.static_ip_name or '').strip()
+    return str(order.static_ip_name or '').strip() or _aws_static_ip_name_from_order_asset(order)
 
 
 def _aws_static_ip_name_for_asset(asset: CloudAsset, client=None) -> str:
@@ -2110,9 +2158,8 @@ def _mark_orphan_asset_deleted(asset_id: int, note: str):
         server.previous_public_ip = previous_public_ip
         server.status = CloudAsset.STATUS_DELETED
         server.is_active = False
-        server.note = append_note(server.note, note)
         server.updated_at = now
-        server.save(update_fields=['previous_public_ip', 'status', 'is_active', 'note', 'updated_at'])
+        server.save(update_fields=['previous_public_ip', 'status', 'is_active', 'updated_at'])
     record_cloud_ip_log(event_type='deleted', asset=asset, previous_public_ip=previous_public_ip, public_ip=None, note=note or '无订单资产到期删除')
     return asset
 
@@ -2139,9 +2186,8 @@ def _mark_unattached_static_ip_deleted(asset_id: int, note: str):
         server.status = CloudAsset.STATUS_DELETED
         server.provider_status = '未附加固定IP-已到期删除'
         server.is_active = False
-        server.note = append_note(server.note, note)
         server.updated_at = now
-        server.save(update_fields=['previous_public_ip', 'public_ip', 'status', 'provider_status', 'is_active', 'note', 'updated_at'])
+        server.save(update_fields=['previous_public_ip', 'public_ip', 'status', 'provider_status', 'is_active', 'updated_at'])
     record_cloud_ip_log(event_type='recycled', asset=asset, previous_public_ip=previous_public_ip, public_ip=None, note=note or '未附加固定IP已到期删除')
     return asset
 
@@ -2174,9 +2220,8 @@ def _mark_replaced_order_deleted(order_id: int, note: str):
         server.is_active = False
         server.public_ip = None
         server.previous_public_ip = previous_public_ip
-        server.note = append_note(server.note, note or '迁移结束，旧实例删除')
         server.updated_at = now
-        server.save(update_fields=['status', 'provider_status', 'is_active', 'public_ip', 'previous_public_ip', 'note', 'updated_at'])
+        server.save(update_fields=['status', 'provider_status', 'is_active', 'public_ip', 'previous_public_ip', 'updated_at'])
     record_cloud_ip_log(event_type='deleted', order=order, asset=asset, server=server, previous_public_ip=previous_public_ip, public_ip=None, note=note or '迁移结束，旧实例删除')
     return order
 
@@ -2790,6 +2835,9 @@ async def lifecycle_tick(notify=None, notify_target=None, defer_destructive_seco
                 await _record_lifecycle_action_failed(checked_order.id, 'recycle_skipped', skip_reason)
             continue
         order = checked_order
+        if not await sync_to_async(_is_cloud_unattached_ip_delete_time, thread_sensitive=False)():
+            logger.warning('跳过订单固定IP释放：不在允许执行时间窗口 订单ID=%s 订单号=%s 计划释放=%s 当前时间=%s', order.id, order.order_no, order.ip_recycle_at, timezone.now())
+            continue
         notice = await _cloud_expiry_notice_payload(order.id)
         if not notice.get('valid'):
             continue
@@ -2859,7 +2907,7 @@ async def lifecycle_tick(notify=None, notify_target=None, defer_destructive_seco
             logger.warning('跳过未附加固定IP释放：计划校验未通过 资源ID=%s IP=%s 原因=%s 当前时间=%s', asset.id, asset.public_ip, skip_reason, timezone.now())
             continue
         asset = checked_asset
-        if not await sync_to_async(_is_cloud_delete_safe_time, thread_sensitive=False)():
+        if not await sync_to_async(_is_cloud_unattached_ip_delete_time, thread_sensitive=False)():
             logger.warning('跳过未附加固定IP释放：不在允许执行时间窗口 资源ID=%s IP=%s 实际到期=%s 当前时间=%s', asset.id, asset.public_ip, asset.actual_expires_at, timezone.now())
             continue
         logger.info('开始释放未附加固定IP：资源ID=%s IP=%s 云厂商=%s 地区=%s', asset.id, asset.public_ip, asset.provider, asset.region_code)

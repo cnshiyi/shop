@@ -69,7 +69,7 @@ def _get_or_create_user_sync(
         },
     )
     changed = []
-    next_usernames = incoming_usernames if usernames_are_authoritative else _merge_usernames(user.username, incoming_usernames)
+    next_usernames = _merge_usernames(user.username, incoming_usernames)
     serialized_usernames = _serialize_usernames(next_usernames)
     if user.username != serialized_usernames:
         user.username = serialized_usernames

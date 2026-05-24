@@ -7,11 +7,10 @@ from django.utils.dateparse import parse_datetime
 
 from bot.api import _provider_status_label
 from cloud.models import CloudAsset, CloudServerOrder, Server
-from cloud.note_utils import append_note, append_status_note
 from cloud.aliyun_simple import _build_client, _region_endpoint, _runtime_options
 from core.cloud_accounts import cloud_account_label, cloud_account_label_variants, list_active_cloud_accounts
 from core.persistence import record_external_sync_log
-from cloud.services import _cloud_order_lifecycle_fields, record_cloud_ip_log
+from cloud.services import _cloud_order_lifecycle_fields, record_cloud_ip_log, sync_cloud_asset_user_binding
 
 
 _ACTIVE_ORDER_STATUSES = {'pending', 'provisioning', 'completed', 'expiring', 'renew_pending', 'suspended', 'deleting'}
@@ -259,11 +258,7 @@ def _mark_deleted_when_missing_in_aliyun(region, existing_instance_ids, stdout, 
         asset.previous_public_ip = old_public_ip or asset.previous_public_ip
         asset.public_ip = None
         asset.provider_status = _MISSING_DELETED_STATUS
-        asset.note = append_note(
-            asset.note,
-            f'IP校验发现云上不存在，已标记删除；IP={old_public_ip or "缺失"}；实例={instance_id or asset.asset_name or "-"}；时间={now_iso}。',
-        )
-        asset.save(update_fields=['status', 'is_active', 'previous_public_ip', 'public_ip', 'provider_status', 'note', 'updated_at'])
+        asset.save(update_fields=['status', 'is_active', 'previous_public_ip', 'public_ip', 'provider_status', 'updated_at'])
         server_lookup = Q()
         provider_resource_id = str(asset.provider_resource_id or '').strip()
         if instance_id:
@@ -290,11 +285,7 @@ def _mark_deleted_when_missing_in_aliyun(region, existing_instance_ids, stdout, 
             server.previous_public_ip = old_public_ip or server.previous_public_ip
             server.public_ip = None
             server.provider_status = _MISSING_DELETED_STATUS
-            server.note = append_note(
-                server.note,
-                f'服务器校验发现云上不存在，已标记删除；IP={old_public_ip or "缺失"}；实例={instance_id or server.server_name or "-"}；时间={now_iso}。',
-            )
-            server.save(update_fields=['status', 'is_active', 'previous_public_ip', 'public_ip', 'provider_status', 'note', 'updated_at'])
+            server.save(update_fields=['status', 'is_active', 'previous_public_ip', 'public_ip', 'provider_status', 'updated_at'])
         order = getattr(asset, 'order', None) or _resolve_order_for_ip(old_public_ip, account)
         if order:
             order.status = 'deleted'
@@ -506,7 +497,6 @@ class Command(BaseCommand):
                     'public_ip': public_ip,
                     'actual_expires_at': expires_at,
                     'currency': 'USDT',
-                    'note': note,
                     'status': normalized_status,
                     'provider_status': provider_status,
                     'is_active': normalized_status in CloudAsset.ACTIVE_STATUSES,
@@ -545,12 +535,15 @@ class Command(BaseCommand):
                             asset.previous_public_ip = old_public_ip
                         for key, value in asset_defaults.items():
                             setattr(asset, key, value)
+                        if not getattr(asset, 'user_id', None):
+                            sync_cloud_asset_user_binding(asset, persist=False)
                         asset.save()
                         updated_count += 1
                         account_stats['updated'] += 1
                         updated_asset_ids.append(f'{asset.id}:{public_ip or "缺失"}:{instance_id or asset_name}')
                 else:
                     asset = CloudAsset.objects.create(**asset_defaults)
+                    sync_cloud_asset_user_binding(asset)
                     claimed_assets[asset.id] = asset_signature
                     created_count += 1
                     account_stats['created'] += 1
@@ -574,7 +567,6 @@ class Command(BaseCommand):
                     'provider_resource_id': instance_id,
                     'public_ip': public_ip,
                     'expires_at': expires_at,
-                    'note': note,
                     'status': normalized_status,
                     'provider_status': provider_status,
                     'is_active': normalized_status in Server.ACTIVE_STATUSES,
@@ -590,13 +582,14 @@ class Command(BaseCommand):
                 if server:
                     server_defaults['user'] = server.user
                     server_defaults['expires_at'] = expires_at or server.expires_at
-                    server_defaults['note'] = append_status_note(server.note, note)
                 old_server_public_ip = server.public_ip if server else None
                 if server:
                     if old_server_public_ip and old_server_public_ip != public_ip:
                         server.previous_public_ip = old_server_public_ip
                     for key, value in server_defaults.items():
                         setattr(server, key, value)
+                    if not getattr(server, 'user_id', None) and getattr(asset, 'user_id', None):
+                        server.user = asset.user
                     server.save()
                 else:
                     Server.objects.create(**server_defaults)

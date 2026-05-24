@@ -101,8 +101,9 @@ def _sync_account_profile(account_id: int, entity, note: str = '监听中'):
             defaults={'username': usernames, 'first_name': label[:191] if label else ''},
         )
         changed = []
-        if usernames and user.username != usernames:
-            user.username = usernames
+        merged_usernames = TelegramUser.serialize_usernames([*TelegramUser.normalize_usernames(usernames), *user.usernames])
+        if merged_usernames and user.username != merged_usernames:
+            user.username = merged_usernames
             changed.append('username')
         if label and user.first_name != label[:191]:
             user.first_name = label[:191]
