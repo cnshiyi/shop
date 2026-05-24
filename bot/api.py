@@ -372,6 +372,28 @@ def _cloud_asset_plan_stats(assets=None):
     }
 
 
+def _visible_lifecycle_plan_stats(shutdown_items: list[dict] | None = None, ip_delete_items: list[dict] | None = None):
+    shutdown_items = list(shutdown_items or [])
+    ip_delete_items = list(ip_delete_items or [])
+    active_shutdown = [item for item in shutdown_items if not item.get('is_history')]
+    pending_ip_delete = [
+        item for item in ip_delete_items
+        if not item.get('is_history') and item.get('plan_state') not in {'completed'}
+    ]
+    missing_expiry = [
+        item for item in active_shutdown
+        if item.get('queue_status') == 'waiting_manual_time'
+        or item.get('plan_state') == 'waiting_manual_time'
+        or not item.get('delete_at')
+    ]
+    return {
+        'source_asset_count': len(active_shutdown) + len(pending_ip_delete),
+        'server_asset_count': len(active_shutdown),
+        'missing_expiry_count': len(missing_expiry),
+        'unattached_ip_count': len(pending_ip_delete),
+    }
+
+
 def _active_cloud_asset_queryset():
     active_account_ids = list(CloudAccountConfig.objects.filter(is_active=True).values_list('id', flat=True))
     active_account_labels = [
@@ -2764,7 +2786,7 @@ def lifecycle_plans(request):
         item for item in history_items
         if parse_item_dt(item.get('executed_at')) and parse_item_dt(item.get('executed_at')) >= recent_since
     ]
-    plan_stats = _cloud_asset_plan_stats()
+    plan_stats = _visible_lifecycle_plan_stats(due_items + future_plan_items, ip_delete_items)
     if compact:
         def compact_notes(items):
             for item in items:

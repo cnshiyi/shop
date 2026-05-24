@@ -9587,6 +9587,58 @@ class CloudServerServicesTestCase(TestCase):
         sync_mock.assert_not_called()
         self.assertEqual(json.loads(second_response.content)['data']['cache_mode'], 'cached')
 
+    def test_lifecycle_plan_counts_match_visible_rows(self):
+        server_asset = CloudAsset.objects.create(
+            kind=CloudAsset.KIND_SERVER,
+            source=CloudAsset.SOURCE_AWS_SYNC,
+            user=self.user,
+            provider='aws_lightsail',
+            region_code=self.plan.region_code,
+            region_name=self.plan.region_name,
+            asset_name='visible-count-server',
+            instance_id='visible-count-server',
+            public_ip='5.5.5.41',
+            status=CloudAsset.STATUS_RUNNING,
+            is_active=True,
+            actual_expires_at=timezone.now() - timezone.timedelta(days=7),
+        )
+        ip_asset = CloudAsset.objects.create(
+            kind=CloudAsset.KIND_SERVER,
+            source=CloudAsset.SOURCE_AWS_SYNC,
+            user=self.user,
+            provider='aws_lightsail',
+            region_code=self.plan.region_code,
+            region_name=self.plan.region_name,
+            asset_name='visible-count-static-ip',
+            public_ip='5.5.5.42',
+            status=CloudAsset.STATUS_RUNNING,
+            is_active=True,
+            provider_status='未附加固定IP',
+            note='未附加固定IP',
+            actual_expires_at=timezone.now() + timezone.timedelta(days=1),
+        )
+        CloudIpLog.objects.create(
+            event_type='deleted',
+            asset=ip_asset,
+            public_ip='5.5.5.42',
+            note='未附加固定IP到期，AWS 固定 IP 已真实释放：visible-count-static-ip',
+        )
+        staff_user = get_user_model().objects.create_user(username='staff_lifecycle_visible_counts', password='x', is_staff=True)
+        request = self.factory.get('/api/admin/tasks/plans/', {'limit': 1000, 'refresh': 1})
+        request.user = staff_user
+
+        response = lifecycle_plans(request)
+        data = json.loads(response.content)['data']
+        pending_ip_delete = [
+            item for item in data['ip_delete_items']
+            if not item.get('is_history') and item.get('plan_state') != 'completed'
+        ]
+
+        self.assertEqual(data['server_asset_count'], len(data['due_items']) + len(data['future_plan_items']))
+        self.assertEqual(data['unattached_ip_count'], len(pending_ip_delete))
+        self.assertEqual(data['source_asset_count'], data['server_asset_count'] + data['unattached_ip_count'])
+        self.assertTrue(any(item.get('asset_id') == server_asset.id for item in data['due_items'] + data['future_plan_items']))
+
     def test_unattached_ip_delete_items_hide_confirmed_missing_ip(self):
         from cloud.sync_safety import with_missing_confirmation_note
 
