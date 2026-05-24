@@ -61,7 +61,7 @@ def _get_or_create_user_sync(
             incoming_usernames,
             usernames_are_authoritative,
         )
-    user, _ = TelegramUser.objects.get_or_create(
+    user, created = TelegramUser.objects.get_or_create(
         tg_user_id=tg_user_id,
         defaults={
             'username': _serialize_usernames(incoming_usernames),
@@ -69,6 +69,8 @@ def _get_or_create_user_sync(
         },
     )
     changed = []
+    previous_username = '' if created else user.username
+    previous_first_name = '' if created else user.first_name
     next_usernames = _merge_usernames(user.username, incoming_usernames)
     serialized_usernames = _serialize_usernames(next_usernames)
     if user.username != serialized_usernames:
@@ -80,6 +82,19 @@ def _get_or_create_user_sync(
     if changed:
         changed.append('updated_at')
         user.save(update_fields=changed)
+    if created or changed:
+        logger.info(
+            '用户资料同步完成: tg_user_id=%s user_id=%s created=%s changed=%s previous_username=%s current_username=%s previous_first_name=%s current_first_name=%s active_usernames=%s',
+            tg_user_id,
+            user.id,
+            created,
+            [field for field in changed if field != 'updated_at'],
+            previous_username or '',
+            user.username or '',
+            previous_first_name or '',
+            user.first_name or '',
+            incoming_usernames,
+        )
     return user
 
 

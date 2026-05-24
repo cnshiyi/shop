@@ -181,22 +181,30 @@ class TelegramMessageRecordingTestCase(TestCase):
             source='bot',
         )
 
-        async_to_sync(record_telegram_message)(
-            tg_user_id=70000,
-            chat_id=70000,
-            message_id=2,
-            direction=TelegramChatMessage.DIRECTION_IN,
-            content_type='text',
-            text='new profile',
-            username='new_user',
-            first_name='新昵称',
-            source='bot',
-            active_usernames=['new_user', 'new_alias'],
-        )
+        with self.assertLogs('bot.services', level='INFO') as log:
+            async_to_sync(record_telegram_message)(
+                tg_user_id=70000,
+                chat_id=70000,
+                message_id=2,
+                direction=TelegramChatMessage.DIRECTION_IN,
+                content_type='text',
+                text='new profile',
+                username='new_user',
+                first_name='新昵称',
+                source='bot',
+                active_usernames=['new_user', 'new_alias'],
+            )
 
         user = TelegramUser.objects.get(tg_user_id=70000)
         self.assertEqual(user.first_name, '新昵称')
         self.assertEqual(user.usernames[:3], ['new_user', 'new_alias', 'old_user'])
+        log_text = '\n'.join(log.output)
+        self.assertIn('用户资料同步完成', log_text)
+        self.assertIn('tg_user_id=70000', log_text)
+        self.assertIn('previous_username=old_user', log_text)
+        self.assertIn('current_username=new_user,new_alias,old_user', log_text)
+        self.assertIn('previous_first_name=旧昵称', log_text)
+        self.assertIn('current_first_name=新昵称', log_text)
 
     def test_login_account_profile_refreshes_shared_user_by_tg_id(self):
         account = TelegramLoginAccount.objects.create(
@@ -208,7 +216,8 @@ class TelegramMessageRecordingTestCase(TestCase):
         TelegramUser.objects.create(tg_user_id=70002, username='old_login', first_name='旧昵称')
         entity = SimpleNamespace(id=70002, username='new_login', first_name='新昵称', last_name='', usernames=[])
 
-        async_to_sync(_sync_account_profile)(account.id, entity, note='监听中')
+        with self.assertLogs('bot.telegram_listener', level='INFO') as log:
+            async_to_sync(_sync_account_profile)(account.id, entity, note='监听中')
 
         account.refresh_from_db()
         user = TelegramUser.objects.get(tg_user_id=70002)
@@ -217,6 +226,14 @@ class TelegramMessageRecordingTestCase(TestCase):
         self.assertEqual(account.label, '新昵称')
         self.assertEqual(user.first_name, '新昵称')
         self.assertEqual(user.usernames[:2], ['new_login', 'old_login'])
+        log_text = '\n'.join(log.output)
+        self.assertIn('Telegram登录账号用户资料同步完成', log_text)
+        self.assertIn(f'account_id={account.id}', log_text)
+        self.assertIn('tg_user_id=70002', log_text)
+        self.assertIn('previous_username=old_login', log_text)
+        self.assertIn('current_username=new_login,old_login', log_text)
+        self.assertIn('previous_first_name=旧昵称', log_text)
+        self.assertIn('current_first_name=新昵称', log_text)
 
     def test_personal_account_messages_are_deduped_per_login_account(self):
         first_account = TelegramLoginAccount.objects.create(label='listener-a', status='logged_in')

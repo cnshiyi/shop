@@ -96,11 +96,13 @@ def _sync_account_profile(account_id: int, entity, note: str = '监听中'):
         fields['note'] = note[:1000]
     TelegramLoginAccount.objects.filter(id=account_id).update(**fields)
     if tg_user_id:
-        user, _ = TelegramUser.objects.get_or_create(
+        user, created = TelegramUser.objects.get_or_create(
             tg_user_id=tg_user_id,
             defaults={'username': usernames, 'first_name': label[:191] if label else ''},
         )
         changed = []
+        previous_username = '' if created else user.username
+        previous_first_name = '' if created else user.first_name
         merged_usernames = TelegramUser.serialize_usernames([*TelegramUser.normalize_usernames(usernames), *user.usernames])
         if merged_usernames and user.username != merged_usernames:
             user.username = merged_usernames
@@ -111,6 +113,19 @@ def _sync_account_profile(account_id: int, entity, note: str = '监听中'):
         if changed:
             changed.append('updated_at')
             user.save(update_fields=changed)
+        if created or changed:
+            logger.info(
+                'Telegram登录账号用户资料同步完成: account_id=%s tg_user_id=%s user_id=%s created=%s changed=%s previous_username=%s current_username=%s previous_first_name=%s current_first_name=%s',
+                account_id,
+                tg_user_id,
+                user.id,
+                created,
+                [field for field in changed if field != 'updated_at'],
+                previous_username or '',
+                user.username or '',
+                previous_first_name or '',
+                user.first_name or '',
+            )
 
 
 def _entity_usernames(entity) -> list[str]:
