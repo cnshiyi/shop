@@ -775,7 +775,7 @@ class TelegramListenerPushTestCase(SimpleTestCase):
             bot = FakeBot()
             copies = []
 
-            async def fake_copy(_bot, chat_id, text, parse_mode=None):
+            async def fake_copy(_bot, chat_id, text, parse_mode=None, **kwargs):
                 copies.append((chat_id, text, parse_mode))
                 if len(copies) == 1:
                     await asyncio.sleep(0.02)
