@@ -1211,8 +1211,10 @@ def _callback_route_label(callback_data: str | None) -> str:
         ('adminreply:mute3d:', 'adminreply.mute3d 关闭3天转发'),
         ('custom:region:', 'custom.region 选择地区'),
         ('custom:plan:', 'custom.plan 选择套餐'),
+        ('custom:quantitypage:', 'custom.quantitypage 数量页'),
         ('custom:qty:', 'custom.qty 选择数量'),
         ('custom:paypage:', 'custom.paypage 支付页'),
+        ('custom:orderpaypage:', 'custom.orderpaypage 订单支付页'),
         ('custom:qtycart:', 'custom.qtycart 加入购物车'),
         ('custom:walletpay:', 'custom.walletpay 钱包补付'),
         ('custom:wallet:', 'custom.wallet 钱包支付币种'),
@@ -1872,7 +1874,7 @@ async def _buy_cloud_server_with_balance_and_notify(bot: Bot, chat_id: int, user
             await bot.send_message(
                 chat_id=chat_id,
                 text=f"{_bot_text('bot_custom_balance_insufficient', '❌ 余额不足，请先充值')}\n\n当前支付币种: {currency}",
-                reply_markup=wallet_recharge_prompt_menu(),
+                reply_markup=wallet_recharge_prompt_menu(f'custom:quantitypage:{plan_id}:{quantity}', '🔙 返回数量'),
             )
             return
         await bot.send_message(
@@ -1910,7 +1912,7 @@ async def _pay_cloud_server_order_with_balance_and_notify(bot: Bot, chat_id: int
             await bot.send_message(
                 chat_id=chat_id,
                 text=f"{_bot_text('bot_custom_balance_insufficient', '❌ 余额不足，请先充值')}\n\n当前支付币种: {currency}",
-                reply_markup=wallet_recharge_prompt_menu(),
+                reply_markup=wallet_recharge_prompt_menu(f'custom:orderpaypage:{order_id}', '🔙 返回支付页'),
             )
             return
         if is_cloud_asset_renewal_order(order):
@@ -2121,8 +2123,7 @@ def _save_asset_main_proxy_link(asset_id: int, user_id: int | None, link_data: d
     links = [item for item in links if not (isinstance(item, dict) and str(item.get('port') or '') == str(asset.mtproxy_port))]
     links.insert(0, {'name': '主代理 mtg', 'server': link_data['server'], 'port': link_data['port'], 'secret': link_data['secret'], 'url': link_data['url']})
     asset.proxy_links = links
-    asset.note = append_note(asset.note, '用户补充主代理链接，准备重新安装。')
-    asset.save(update_fields=['mtproxy_link', 'mtproxy_secret', 'mtproxy_host', 'mtproxy_port', 'proxy_links', 'note', 'updated_at'])
+    asset.save(update_fields=['mtproxy_link', 'mtproxy_secret', 'mtproxy_host', 'mtproxy_port', 'proxy_links', 'updated_at'])
     return asset
 
 
@@ -2611,6 +2612,23 @@ def _custom_plan_text(region_name: str, plans) -> str:
     return '\n'.join(lines)
 
 
+def _cloud_order_payment_text(order) -> str:
+    receive_address = _receive_address()
+    display_name = _plan_display_name(order)
+    amount = Decimal(str(getattr(order, 'pay_amount', None) or getattr(order, 'total_amount', None) or 0))
+    currency = getattr(order, 'currency', None) or 'USDT'
+    return (
+        _bot_text('bot_custom_payment_title', '🧾 支付页面') + '\n\n'
+        f'订单号: {getattr(order, "order_no", "-")}\n'
+        f'{_public_region_line(getattr(order, "region_name", None))}'
+        f'套餐: {display_name}\n'
+        f'数量: {getattr(order, "quantity", 1) or 1}\n'
+        f'支付金额: {fmt_pay_amount(amount)} {currency}\n'
+        f'支付地址: <code>{escape(receive_address)}</code>\n\n'
+        + _bot_text('bot_custom_order_notice', f'系统已开始自动监控 {currency} 到账，检测到支付成功后会自动进入后续流程。')
+    )
+
+
 def _retained_ip_renewal_plan_text(order, plans, user=None) -> str:
     labels = ['套餐一', '套餐二', '套餐三', '套餐四', '套餐五', '套餐六', '套餐七', '套餐八', '套餐九']
     ip = getattr(order, 'public_ip', None) or getattr(order, 'previous_public_ip', None) or '-'
@@ -2686,7 +2704,13 @@ def _asset_renewal_plan_keyboard(asset_id: int, plans):
 
 async def _send_cloud_renewal_payment_prompt(message: Message, order, user, *, edit: bool = False):
     wallet_usdt_amount = Decimal(str(getattr(order, 'total_amount', None) or getattr(order, 'pay_amount', 0) or 0))
-    trx_amount = await usdt_to_trx(wallet_usdt_amount)
+    trx_amount = None
+    trx_rate_notice = ''
+    try:
+        trx_amount = await usdt_to_trx(wallet_usdt_amount)
+    except Exception as exc:
+        logger.warning('云服务器续费 TRX 汇率获取失败，已隐藏 TRX 钱包支付按钮: order_id=%s error=%s', getattr(order, 'id', None), exc)
+        trx_rate_notice = '\nTRX 钱包支付暂不可用，请先使用 USDT 钱包续费或地址支付。'
     receive_address = _receive_address()
     auto_renew_enabled = await get_cloud_server_auto_renew(order.id, getattr(order, 'user_id', getattr(user, 'id', None)))
     group_balance_lines = await get_cloud_order_group_balance_lines(order.id)
@@ -2703,6 +2727,7 @@ async def _send_cloud_renewal_payment_prompt(message: Message, order, user, *, e
         f'收款地址: <code>{escape(receive_address)}</code>'
         f'{balance_suffix}\n\n'
         f'地址支付仅监控 {order.currency or "USDT"} 精确到账；也可使用下方钱包续费。自动续费默认使用钱包余额扣款，请保证余额充足。'
+        f'{trx_rate_notice}'
     )
     markup = cloud_server_renew_payment(order.id, wallet_usdt_amount, trx_amount, bool(auto_renew_enabled))
     bot = getattr(message, 'bot', None)
@@ -3484,6 +3509,33 @@ def register_handlers(dp: Dispatcher):
         await _safe_edit_text(callback.message, text, reply_markup=custom_payment_keyboard(pending_order.id, plan.id, quantity), parse_mode='HTML', disable_web_page_preview=True)
 
 
+    @dp.callback_query(F.data.startswith('custom:quantitypage:'))
+    async def cb_custom_quantity_page(callback: CallbackQuery, state: FSMContext):
+        await _safe_callback_answer(callback)
+        _, _, plan_id_text, quantity_text = callback.data.split(':')
+        plan_id = int(plan_id_text)
+        quantity = _parse_custom_cloud_quantity(quantity_text) or 1
+        plan = await get_cloud_plan(plan_id)
+        if not plan:
+            await _safe_callback_answer(callback, '套餐不存在或已下架', show_alert=True)
+            return
+        user = await get_or_create_user(callback.from_user.id, callback.from_user.username, callback.from_user.first_name)
+        display_name = _plan_display_name(plan)
+        discount_rate = Decimal(str(getattr(user, 'cloud_discount_rate', 100) or 100))
+        display_price = (Decimal(str(plan.price)) * discount_rate / Decimal('100')).quantize(Decimal('0.001'))
+        await state.update_data(custom_plan_id=plan.id, custom_plan_name=display_name, custom_plan_price=str(display_price), custom_region_code=plan.region_code, custom_region_name=plan.region_name, custom_quantity=quantity)
+        text = (
+            _bot_text('bot_custom_quantity_title', '请选择购买数量') + '\n\n'
+            f'{_public_region_line(plan.region_name)}'
+            f'套餐: {display_name}\n'
+            f'套餐说明: {getattr(plan, "plan_description", None) or "无"}\n'
+            f'单价: {fmt_amount(display_price)} USDT\n'
+            f'专属折扣: {discount_rate}%\n\n'
+            + _bot_text('bot_custom_quantity_hint', '请选择数量，或输入自定义数量。')
+        )
+        await _safe_edit_text(callback.message, text, reply_markup=custom_quantity_keyboard(plan.id, quantity))
+
+
     @dp.callback_query(F.data.startswith('custom:paypage:'))
     async def cb_custom_paypage(callback: CallbackQuery, state: FSMContext):
         await _safe_callback_answer(callback)
@@ -3514,6 +3566,39 @@ def register_handlers(dp: Dispatcher):
             + _bot_text('bot_custom_order_notice', '系统已开始自动监控 USDT 到账，检测到支付成功后会自动进入后续流程。')
         )
         await _safe_edit_text(callback.message, text, reply_markup=custom_payment_keyboard(pending_order.id, plan.id, quantity), parse_mode='HTML', disable_web_page_preview=True)
+
+
+    @dp.callback_query(F.data.startswith('custom:orderpaypage:'))
+    async def cb_custom_order_paypage(callback: CallbackQuery, state: FSMContext):
+        await _safe_callback_answer(callback)
+        order_id = int(callback.data.split(':')[2])
+        user = await get_or_create_user(callback.from_user.id, callback.from_user.username, callback.from_user.first_name)
+        from cloud.models import CloudServerOrder
+        order = await asyncio.to_thread(lambda: CloudServerOrder.objects.filter(id=order_id, user_id=user.id).first())
+        if not order:
+            await _safe_callback_answer(callback, '订单不存在', show_alert=True)
+            return
+        plan_id = int(getattr(order, 'plan_id', None) or 0)
+        if plan_id <= 0:
+            await _safe_callback_answer(callback, '订单缺少套餐信息，无法返回支付页', show_alert=True)
+            return
+        quantity = int(getattr(order, 'quantity', 1) or 1)
+        await state.update_data(
+            custom_plan_id=plan_id,
+            custom_plan_name=_plan_display_name(order),
+            custom_plan_price=str(getattr(order, 'pay_amount', None) or getattr(order, 'total_amount', None) or 0),
+            custom_region_code=getattr(order, 'region_code', None),
+            custom_region_name=getattr(order, 'region_name', None),
+            custom_quantity=quantity,
+            custom_order_id=order.id,
+        )
+        await _safe_edit_text(
+            callback.message,
+            _cloud_order_payment_text(order),
+            reply_markup=custom_payment_keyboard(order.id, plan_id, quantity),
+            parse_mode='HTML',
+            disable_web_page_preview=True,
+        )
 
 
     @dp.callback_query(F.data.startswith('custom:qtycart:'))
@@ -3553,13 +3638,14 @@ def register_handlers(dp: Dispatcher):
             await _safe_callback_answer(callback, '套餐不存在或已下架', show_alert=True)
             return
         await state.update_data(custom_plan_id=plan_id, custom_quantity=quantity)
+        order_id = data.get('custom_order_id')
         usdt_amount = Decimal(str(getattr(plan, 'price', 0))) * quantity
         trx_amount = await usdt_to_trx(usdt_amount)
         logger.info('云服务器钱包币种页准备完成: tg_user_id=%s plan_id=%s quantity=%s usdt=%s trx=%s', getattr(callback.from_user, 'id', None), plan_id, quantity, usdt_amount, trx_amount)
         await _safe_edit_text(
             callback.message,
             _bot_text('bot_custom_wallet_title', '请选择钱包支付币种：'),
-            reply_markup=custom_wallet_keyboard(plan.id, quantity, usdt_amount, trx_amount),
+            reply_markup=custom_wallet_keyboard(plan.id, quantity, usdt_amount, trx_amount, order_id),
         )
 
     @dp.callback_query(F.data.startswith('custom:currency:'))
@@ -3636,10 +3722,14 @@ def register_handlers(dp: Dispatcher):
         current_balance = Decimal(str(getattr(user, 'balance_trx' if currency == 'TRX' else 'balance', 0) or 0))
         if current_balance < total_amount:
             await _safe_callback_answer(callback, f'{currency} 余额不足', show_alert=True)
+            data = await state.get_data()
+            back_order_id = data.get('custom_order_id')
+            back_callback = f'custom:orderpaypage:{back_order_id}' if back_order_id else f'custom:quantitypage:{plan_id}:{quantity}'
+            back_text = '🔙 返回支付页' if back_order_id else '🔙 返回数量'
             await _safe_edit_text(
                 callback.message,
                 f"{_bot_text('bot_custom_balance_insufficient', '❌ 余额不足，请先充值')}\n\n当前支付币种: {currency}",
-                reply_markup=wallet_recharge_prompt_menu(),
+                reply_markup=wallet_recharge_prompt_menu(back_callback, back_text),
             )
             return
         message_key = f'{getattr(getattr(callback.message, "chat", None), "id", 0)}:{getattr(callback.message, "message_id", 0)}'
@@ -3695,7 +3785,7 @@ def register_handlers(dp: Dispatcher):
             await _safe_edit_text(
                 callback.message,
                 f"{_bot_text('bot_custom_balance_insufficient', '❌ 余额不足，请先充值')}\n\n当前支付币种: {currency}",
-                reply_markup=wallet_recharge_prompt_menu(),
+                reply_markup=wallet_recharge_prompt_menu(f'custom:orderpaypage:{order_id}', '🔙 返回支付页'),
             )
             return
         await _safe_edit_text(
@@ -4660,7 +4750,7 @@ def register_handlers(dp: Dispatcher):
                 return
             await _safe_edit_text(callback.message, 
                 f'❌ 钱包自动续费失败：{_public_cloud_error_text(err)}。\n请先充值余额后再试，或使用下方地址支付。',
-                reply_markup=wallet_recharge_prompt_menu(),
+                reply_markup=wallet_recharge_prompt_menu(f'cloud:renew:{order_id}', '🔙 返回续费支付'),
             )
             return
         if _requires_recovery_provision(order):
@@ -4733,7 +4823,7 @@ def register_handlers(dp: Dispatcher):
                 asyncio.create_task(_cloud_renewal_postcheck_and_notify(callback.bot, callback.from_user.id, existing.id))
                 await _safe_edit_text(callback.message, f'✅ 这笔续费已完成。\n\n订单号: {existing.order_no}\n{_cloud_order_plan_text(existing)}\n\n我会继续执行续费后巡检。')
                 return
-            await _safe_edit_text(callback.message, f'❌ {_public_cloud_error_text(err)}。', reply_markup=wallet_recharge_prompt_menu())
+            await _safe_edit_text(callback.message, f'❌ {_public_cloud_error_text(err)}。', reply_markup=wallet_recharge_prompt_menu(f'cloud:renew:{order_id}', '🔙 返回续费支付'))
             return
         if _requires_recovery_provision(order):
             await _safe_edit_text(callback.message, '✅ 云服务器续费成功，正在自动恢复固定 IP 服务器。\n\n系统会保持旧 IP / 旧端口 / 旧密钥不变，完成后自动发送代理链接。')

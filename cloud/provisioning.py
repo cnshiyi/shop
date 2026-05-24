@@ -9,7 +9,7 @@ from django.db.models import Q
 
 from cloud.models import CloudAsset, Server
 from cloud.note_utils import append_note, prepend_note, with_note_time
-from cloud.services import _cloud_log_trigger_label, _resolve_aws_static_ip_name_for_order, _update_order_primary_records, build_cloud_server_name, ensure_unique_cloud_server_name, is_cloud_asset_renewal_order, record_cloud_ip_log
+from cloud.services import _cloud_log_trigger_label, _resolve_aws_static_ip_name_for_order, _update_order_primary_records, build_cloud_server_name, drop_asset_note_update, ensure_unique_cloud_server_name, is_cloud_asset_renewal_order, record_cloud_ip_log
 from core.cloud_accounts import choose_cloud_account_for_order, cloud_account_label, list_cloud_accounts_by_server_load
 from cloud.aliyun_simple import create_instance as create_aliyun_instance
 from cloud.aws_lightsail import create_instance as create_aws_instance, get_instance_public_ip, move_static_ip_to_instance, public_ip_exists
@@ -478,7 +478,6 @@ def _mark_instance_created(order_id: int, server_name: str, instance_id: str, pu
         order_user = order.user
     except Exception:
         order_user = None
-    existing_asset = CloudAsset.objects.filter(order=order, kind=CloudAsset.KIND_SERVER).first()
     server_asset, _ = CloudAsset.objects.update_or_create(
         order=order,
         kind=CloudAsset.KIND_SERVER,
@@ -501,7 +500,6 @@ def _mark_instance_created(order_id: int, server_name: str, instance_id: str, pu
             'currency': order.currency,
             'order': order,
             'user': order_user,
-            'note': append_note(getattr(existing_asset, 'note', None), current_note),
             'status': CloudAsset.STATUS_PENDING,
             'is_active': True,
         },
@@ -524,7 +522,6 @@ def _mark_provisioning_start(order_id: int, server_name: str):
         order_user = order.user
     except Exception:
         order_user = None
-    existing_asset = CloudAsset.objects.filter(order=order, kind=CloudAsset.KIND_SERVER).first()
     server_asset, _ = CloudAsset.objects.update_or_create(
         order=order,
         kind=CloudAsset.KIND_SERVER,
@@ -549,7 +546,6 @@ def _mark_provisioning_start(order_id: int, server_name: str):
             'currency': order.currency,
             'order': order,
             'user': order_user,
-            'note': append_note(getattr(existing_asset, 'note', None), current_note),
             'status': CloudAsset.STATUS_PENDING,
             'is_active': True,
         },
@@ -1035,7 +1031,6 @@ def _mark_success(order_id: int, server_name: str, instance_id: str, public_ip: 
             order_user = order.user
         except Exception:
             order_user = None
-        existing_asset = CloudAsset.objects.filter(order=order, kind=CloudAsset.KIND_SERVER).first()
         server_asset, _ = CloudAsset.objects.update_or_create(
             order=order,
             kind=CloudAsset.KIND_SERVER,
@@ -1062,7 +1057,6 @@ def _mark_success(order_id: int, server_name: str, instance_id: str, public_ip: 
                 'currency': order.currency,
                 'order': order,
                 'user': order_user,
-                'note': _append_cloud_asset_note(getattr(existing_asset, 'note', None), compact_note, proxy_links, order.mtproxy_port or 9528),
                 'status': CloudAsset.STATUS_RUNNING,
                 'provider_status': '运行中',
                 'is_active': True,
@@ -1096,7 +1090,7 @@ def _mark_failed(order_id: int, note: str, cleanup_at=None):
     server_record = _upsert_server_record(order, note)
     _update_order_primary_records(
         order,
-        asset_updates={'note': note, 'status': CloudAsset.STATUS_UNKNOWN, 'is_active': False},
+        asset_updates=drop_asset_note_update({'note': note, 'status': CloudAsset.STATUS_UNKNOWN, 'is_active': False}),
         server_updates={'note': note, 'status': Server.STATUS_UNKNOWN, 'is_active': False},
         now=timezone.now(),
     )

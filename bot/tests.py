@@ -13,7 +13,7 @@ from django.contrib.sessions.models import Session
 from django.test import RequestFactory, SimpleTestCase, TestCase
 from django.utils import timezone
 
-from bot.api import DASHBOARD_SESSION_IDLE_SECONDS, _authenticate_dashboard_request, admin_users_list, archive_telegram_chat, auth_totp_start, create_admin_user, create_cloud_account, create_product, delete_cloud_account, me, send_telegram_chat_message, site_config_groups, telegram_login_start, test_daily_expiry_summary_notification, update_cloud_account, update_site_config, verify_cloud_account
+from bot.api import DASHBOARD_SESSION_IDLE_SECONDS, _active_proxy_counts_by_user, _authenticate_dashboard_request, admin_users_list, archive_telegram_chat, auth_totp_start, create_admin_user, create_cloud_account, create_product, delete_cloud_account, me, send_telegram_chat_message, site_config_groups, telegram_login_start, test_daily_expiry_summary_notification, update_cloud_account, update_site_config, users_list, verify_cloud_account
 from bot.handlers import _cloud_renewal_postcheck_and_notify, _cloud_server_created_text, _fetch_tron_address_summary, _hydrate_order_proxy_links, _install_notice_copy_wrapper, _proxy_links_text, _requires_recovery_provision, _retained_ip_renewal_plan_keyboard, _trongrid_get_with_key_fallback, _trongrid_post_with_key_fallback, _validate_reinstall_proxy_link
 from bot.keyboards import balance_details_list, cloud_ip_query_result, cloud_order_list
 from bot.models import TelegramChatArchive, TelegramChatMessage, TelegramLoginAccount, TelegramUser
@@ -274,6 +274,46 @@ class DashboardCloudAccountVerifyTestCase(TestCase):
         delete_request.user = root
         self.assertEqual(delete_cloud_account(delete_request, account_id).status_code, 200)
         self.assertFalse(CloudAccountConfig.objects.filter(id=account_id).exists())
+
+    def test_user_proxy_count_follows_cloud_account_active_state(self):
+        root = get_user_model().objects.create_user(username='root_proxy_count', password='pass', is_staff=True, is_superuser=True)
+        user = TelegramUser.objects.create(tg_user_id=900001, username='alpha / beta', first_name='Tester')
+        account = CloudAccountConfig.objects.create(
+            provider=CloudAccountConfig.PROVIDER_AWS,
+            name='count-account',
+            access_key='ak',
+            secret_key='sk',
+            region_hint='ap-southeast-1',
+            is_active=True,
+        )
+        CloudAsset.objects.create(
+            kind=CloudAsset.KIND_SERVER,
+            source=CloudAsset.SOURCE_AWS_SYNC,
+            provider='aws_lightsail',
+            cloud_account=account,
+            account_label='aws+count-account',
+            region_code='ap-southeast-1',
+            asset_name='count-server',
+            instance_id='count-instance',
+            public_ip='203.0.113.10',
+            user=user,
+            status=CloudAsset.STATUS_RUNNING,
+            is_active=True,
+        )
+
+        self.assertEqual(_active_proxy_counts_by_user([user.id]).get(user.id), 1)
+        request = RequestFactory().get('/api/admin/users/', {'keyword': str(user.tg_user_id)})
+        request.user = root
+        payload = json.loads(users_list(request).content.decode('utf-8'))
+        self.assertEqual(payload['data'][0]['proxy_count'], 1)
+        self.assertEqual(payload['data'][0]['username_label'], '@alpha｜@beta')
+
+        account.is_active = False
+        account.save(update_fields=['is_active'])
+
+        self.assertEqual(_active_proxy_counts_by_user([user.id]).get(user.id, 0), 0)
+        payload = json.loads(users_list(request).content.decode('utf-8'))
+        self.assertEqual(payload['data'][0]['proxy_count'], 0)
 
     def test_delete_cloud_account_blocks_linked_business_data(self):
         staff = get_user_model().objects.create_user(username='cloud_account_delete_staff', password='pass', is_staff=True, is_superuser=True)

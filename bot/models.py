@@ -74,7 +74,14 @@ class TelegramUser(models.Model):
             for item in value:
                 merged.extend(TelegramUser.normalize_usernames(item))
             value = ','.join(merged)
-        raw = str(value).replace('，', ',').replace(' / ', ',').replace('/', ',')
+        raw = (
+            str(value)
+            .replace('，', ',')
+            .replace('｜', ',')
+            .replace('|', ',')
+            .replace(' / ', ',')
+            .replace('/', ',')
+        )
         result = []
         seen = set()
         for item in raw.split(','):

@@ -288,7 +288,7 @@ def custom_quantity_keyboard(plan_id: int, quantity: int | None = None):
 def custom_payment_keyboard(order_id: int, plan_id: int, quantity: int):
     kb = InlineKeyboardBuilder()
     kb.row(InlineKeyboardButton(text='💳 钱包支付', callback_data=f'custom:walletpay:{order_id}'))
-    kb.row(InlineKeyboardButton(text='🔙 返回数量', callback_data=f'custom:plan:{plan_id}'))
+    kb.row(InlineKeyboardButton(text='🔙 返回数量', callback_data=f'custom:quantitypage:{plan_id}:{quantity}'))
     return kb.as_markup()
 
 
@@ -296,20 +296,21 @@ def custom_currency_keyboard(plan_id: int | None, usdt_amount=None, trx_amount=N
     kb = InlineKeyboardBuilder()
     if plan_id is not None:
         kb.row(InlineKeyboardButton(text='💳 钱包支付', callback_data=f'custom:wallet:{plan_id}:{quantity}'))
-        kb.row(InlineKeyboardButton(text='🔙 返回地区', callback_data='custom:regions'))
+        kb.row(InlineKeyboardButton(text='🔙 返回数量', callback_data=f'custom:quantitypage:{plan_id}:{quantity}'))
     else:
         kb.row(InlineKeyboardButton(text='💳 钱包支付', callback_data=f'custom:walletpay:{order_id}'))
-        kb.row(InlineKeyboardButton(text='🔙 返回', callback_data='custom:regions'))
+        kb.row(InlineKeyboardButton(text='🔙 返回支付页', callback_data=f'custom:orderpaypage:{order_id}'))
     return kb.as_markup()
 
 
-def custom_wallet_keyboard(plan_id: int, quantity: int, usdt_amount=None, trx_amount=None):
+def custom_wallet_keyboard(plan_id: int, quantity: int, usdt_amount=None, trx_amount=None, order_id: int | None = None):
     kb = InlineKeyboardBuilder()
     kb.row(
         InlineKeyboardButton(text=f'💳 钱包 USDT ({fmt_amount(usdt_amount)} U)', callback_data=f'custom:balance:{plan_id}:{quantity}:USDT'),
         InlineKeyboardButton(text=f'💳 钱包 TRX ({fmt_amount(trx_amount)} TRX)', callback_data=f'custom:balance:{plan_id}:{quantity}:TRX'),
     )
-    kb.row(InlineKeyboardButton(text='🔙 返回地区', callback_data='custom:regions'))
+    back_callback = f'custom:orderpaypage:{order_id}' if order_id else f'custom:quantitypage:{plan_id}:{quantity}'
+    kb.row(InlineKeyboardButton(text='🔙 返回支付页', callback_data=back_callback))
     return kb.as_markup()
 
 
@@ -319,7 +320,7 @@ def custom_order_wallet_keyboard(order_id: int, usdt_amount, trx_amount):
         InlineKeyboardButton(text=f'💳 钱包 USDT ({fmt_amount(usdt_amount)} U)', callback_data=f'custom:walletpay:{order_id}:USDT'),
         InlineKeyboardButton(text=f'💳 钱包 TRX ({fmt_amount(trx_amount)} TRX)', callback_data=f'custom:walletpay:{order_id}:TRX'),
     )
-    kb.row(InlineKeyboardButton(text='🔙 返回', callback_data='custom:regions'))
+    kb.row(InlineKeyboardButton(text='🔙 返回支付页', callback_data=f'custom:orderpaypage:{order_id}'))
     return kb.as_markup()
 
 
@@ -530,7 +531,8 @@ def cloud_auto_renew_notice_actions(order_id: int):
 def cloud_server_renew_payment(order_id: int, amount, trx_amount, auto_renew_enabled: bool = False):
     kb = InlineKeyboardBuilder()
     kb.row(InlineKeyboardButton(text=f'💳 USDT钱包支付 ({fmt_amount(amount)} U)', callback_data=f'cloud:renewpay:{order_id}:USDT'))
-    kb.row(InlineKeyboardButton(text=f'💳 TRX钱包支付 ({fmt_amount(trx_amount)} TRX)', callback_data=f'cloud:renewpay:{order_id}:TRX'))
+    if trx_amount is not None:
+        kb.row(InlineKeyboardButton(text=f'💳 TRX钱包支付 ({fmt_amount(trx_amount)} TRX)', callback_data=f'cloud:renewpay:{order_id}:TRX'))
     kb.row(InlineKeyboardButton(text='🔙 返回详情', callback_data=f'cloud:detail:{order_id}'))
     return _log_inline_keyboard(
         'cloud_server_renew_payment',
@@ -666,11 +668,11 @@ def product_list(products, page: int, total_pages: int):
     return kb.as_markup()
 
 
-def wallet_recharge_prompt_menu():
+def wallet_recharge_prompt_menu(back_callback: str = 'profile:back_to_menu', back_text: str = '🔙 返回个人中心'):
     kb = InlineKeyboardBuilder()
     kb.row(
         InlineKeyboardButton(text='💰 去钱包充值', callback_data='profile:recharge'),
-        InlineKeyboardButton(text='🔙 返回个人中心', callback_data='profile:back_to_menu'),
+        InlineKeyboardButton(text=back_text, callback_data=back_callback),
     )
     return kb.as_markup()
 

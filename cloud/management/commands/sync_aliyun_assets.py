@@ -12,16 +12,20 @@ from cloud.aliyun_simple import _build_client, _region_endpoint, _runtime_option
 from core.cloud_accounts import cloud_account_label, cloud_account_label_variants, list_active_cloud_accounts
 from core.persistence import record_external_sync_log
 from cloud.services import _cloud_order_lifecycle_fields, record_cloud_ip_log
-from cloud.sync_safety import mark_missing_confirmation_pending, with_missing_confirmation_note
 
 
 _ACTIVE_ORDER_STATUSES = {'pending', 'provisioning', 'completed', 'expiring', 'renew_pending', 'suspended', 'deleting'}
 _SYNC_EXCLUDED_ASSET_STATUSES = {CloudAsset.STATUS_DELETED, CloudAsset.STATUS_DELETING, CloudAsset.STATUS_TERMINATED, CloudAsset.STATUS_TERMINATING}
 _SYNC_EXCLUDED_SERVER_STATUSES = {Server.STATUS_DELETED, Server.STATUS_DELETING, Server.STATUS_TERMINATED, Server.STATUS_TERMINATING}
 _SYNC_EXCLUDED_ORDER_STATUSES = {'deleted', 'deleting', 'expired', 'cancelled'}
-_MISSING_PENDING_STATUS = '云上未找到实例-待确认'
+_MISSING_DELETED_STATUS = '云上未找到实例'
 
 logger = logging.getLogger(__name__)
+
+
+def _visible_asset_total():
+    from cloud.api import _cloud_assets_base_queryset, _dedupe_cloud_asset_rows
+    return len(_dedupe_cloud_asset_rows(list(_cloud_assets_base_queryset())))
 
 
 def _resolve_order_for_ip(public_ip, account=None):
@@ -250,25 +254,15 @@ def _mark_deleted_when_missing_in_aliyun(region, existing_instance_ids, stdout, 
         if instance_id and instance_id in existing_instance_ids:
             continue
         old_public_ip = public_ip or str(asset.previous_public_ip or '').strip()
-        pending_count, threshold = mark_missing_confirmation_pending(
-            asset,
-            old_public_ip=old_public_ip,
-            now_iso=now_iso,
-            provider_status='云上未找到实例',
-            pending_status=_MISSING_PENDING_STATUS,
-        )
-        if pending_count < threshold:
-            asset.save(update_fields=['provider_status', 'note', 'updated_at'])
-            stdout.stdout.write(stdout.style.WARNING(
-                f'IP校验 待确认 资产#{asset.id} IP={old_public_ip or "缺失"} 云上不存在 第{pending_count}/{threshold}次'
-            ))
-            continue
         asset.status = CloudAsset.STATUS_DELETED
         asset.is_active = False
         asset.previous_public_ip = old_public_ip or asset.previous_public_ip
         asset.public_ip = None
-        asset.provider_status = '云上未找到实例'
-        asset.note = with_missing_confirmation_note(append_note(asset.note, f'状态: 云上未找到实例；公网IP: {old_public_ip or "缺失"}；最近同步: {now_iso}'), pending_count)
+        asset.provider_status = _MISSING_DELETED_STATUS
+        asset.note = append_note(
+            asset.note,
+            f'IP校验发现云上不存在，已标记删除；IP={old_public_ip or "缺失"}；实例={instance_id or asset.asset_name or "-"}；时间={now_iso}。',
+        )
         asset.save(update_fields=['status', 'is_active', 'previous_public_ip', 'public_ip', 'provider_status', 'note', 'updated_at'])
         server_lookup = Q()
         provider_resource_id = str(asset.provider_resource_id or '').strip()
@@ -295,8 +289,11 @@ def _mark_deleted_when_missing_in_aliyun(region, existing_instance_ids, stdout, 
             server.is_active = False
             server.previous_public_ip = old_public_ip or server.previous_public_ip
             server.public_ip = None
-            server.provider_status = '云上未找到实例'
-            server.note = with_missing_confirmation_note(append_note(server.note, f'状态: 云上未找到实例；公网IP: {old_public_ip or "缺失"}；最近同步: {now_iso}'), pending_count)
+            server.provider_status = _MISSING_DELETED_STATUS
+            server.note = append_note(
+                server.note,
+                f'服务器校验发现云上不存在，已标记删除；IP={old_public_ip or "缺失"}；实例={instance_id or server.server_name or "-"}；时间={now_iso}。',
+            )
             server.save(update_fields=['status', 'is_active', 'previous_public_ip', 'public_ip', 'provider_status', 'note', 'updated_at'])
         order = getattr(asset, 'order', None) or _resolve_order_for_ip(old_public_ip, account)
         if order:
@@ -374,6 +371,7 @@ class Command(BaseCommand):
             )
 
         before_asset_total = CloudAsset.objects.filter(kind=CloudAsset.KIND_SERVER).count()
+        before_visible_asset_total = _visible_asset_total()
 
         from alibabacloud_swas_open20200601 import models as swas_models
         count = 0
@@ -526,7 +524,6 @@ class Command(BaseCommand):
                 if asset:
                     asset_defaults['user'] = asset.user
                     asset_defaults['actual_expires_at'] = expires_at or asset.actual_expires_at
-                    asset_defaults['note'] = append_status_note(asset.note, note)
                 asset_signature = f'{instance_id or "-"}|{public_ip or "缺失"}'
                 old_status = asset.status if asset else None
                 old_public_ip = asset.public_ip if asset else None
@@ -653,8 +650,9 @@ class Command(BaseCommand):
                 )
             logger.info('ALIYUN_SYNC_ACCOUNT_DONE account_id=%s account_label=%s stats=%s', getattr(account, 'id', None), account_label, account_stats)
         after_asset_total = CloudAsset.objects.filter(kind=CloudAsset.KIND_SERVER).count()
+        after_visible_asset_total = _visible_asset_total()
         self.stdout.write(self.style.SUCCESS(
-            f'阿里云同步汇总：代理列表原有 {before_asset_total} 条；扫描服务器 {count} 条；覆盖 {len(accounts)} 个账号；新增 {created_count} 条，更新 {updated_count} 条；因公网IP缺失抬为已删除 {deleted_by_missing_ip_count} 条；同步后代理列表共 {after_asset_total} 条。'
+            f'阿里云同步汇总：资产总记录 {before_asset_total}->{after_asset_total} 条；当前可见代理 {before_visible_asset_total}->{after_visible_asset_total} 条；扫描服务器 {count} 条；覆盖 {len(accounts)} 个账号；新增 {created_count} 条，更新 {updated_count} 条；因公网IP缺失抬为已删除 {deleted_by_missing_ip_count} 条。'
         ))
         if account_summary_lines:
             self.stdout.write(f'阿里云按账号同步详情：{" || ".join(account_summary_lines)}')

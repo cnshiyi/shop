@@ -36,6 +36,12 @@ CUSTOM_CACHE_TTL = 600
 CLOUD_ORDER_MAX_QUANTITY = 99
 
 
+def drop_asset_note_update(updates: dict | None) -> dict:
+    next_updates = dict(updates or {})
+    next_updates.pop('note', None)
+    return next_updates
+
+
 def scoped_server_match_for_asset(asset: CloudAsset | None, *, include_order: bool = True, include_ip: bool = False):
     if not asset:
         return Q(pk__in=[])
@@ -212,9 +218,7 @@ def _update_order_primary_records(order: CloudServerOrder | None, *, asset_updat
     asset = _order_primary_asset(order)
     server = _order_primary_server(order)
     if asset and asset_updates:
-        updates = dict(asset_updates)
-        if 'note' in updates:
-            updates['note'] = append_note(asset.note, updates.get('note'))
+        updates = drop_asset_note_update(asset_updates)
         updates.setdefault('updated_at', now)
         CloudAsset.objects.filter(id=asset.id).update(**updates)
     if server and server_updates:
@@ -1613,8 +1617,7 @@ def update_cloud_item_expiry_for_admin(item_id: int, item_kind: str, expires_at)
         if not asset:
             return None, '代理记录不存在'
         asset.actual_expires_at = expires_at
-        asset.note = append_note(asset.note, f'管理员通过机器人修改到期时间：{expires_at:%Y-%m-%d %H:%M:%S}')
-        asset.save(update_fields=['actual_expires_at', 'note', 'updated_at'])
+        asset.save(update_fields=['actual_expires_at', 'updated_at'])
         server_updates = {'expires_at': expires_at, 'updated_at': now}
         Server.objects.filter(scoped_server_match_for_asset(asset, include_order=True)).update(**server_updates)
         if asset.order_id:
@@ -1699,14 +1702,10 @@ async def initialize_proxy_asset(asset_id: int, user_id: int):
     port = int(asset.mtproxy_port or 9528)
     guard_ok, guard_note = validate_server_connection_ip(public_ip, [asset.public_ip, asset.previous_public_ip, asset.mtproxy_host], context=f'initialize_asset:{asset.id}')
     if not guard_ok:
-        asset.note = append_note(asset.note, guard_note)
-        await sync_to_async(asset.save)(update_fields=['note', 'updated_at'])
         return asset, guard_note
     bbr_ok, bbr_note = await install_bbr(public_ip, username, password, use_key_setup=asset.provider == 'aws_lightsail')
     mtproxy_ok, mtproxy_note = await install_mtproxy(public_ip, username, password, port, asset.mtproxy_secret or '', asset.mtproxy_secret or '')
     if not mtproxy_ok:
-        asset.note = append_note(asset.note, '\n'.join(part for part in ['已执行同步资产代理初始化。', '' if bbr_ok else 'BBR 初始化失败，但继续检查 MTProxy 安装结果。', bbr_note, _strip_raw_proxy_link_lines(_compact_asset_proxy_init_note(mtproxy_note, [], port))] if part))
-        await sync_to_async(asset.save)(update_fields=['note', 'updated_at'])
         return asset, 'MTProxy 安装失败，请查看后台日志'
     mtproxy_link, mtproxy_secret, mtproxy_host = _extract_asset_mtproxy_fields(mtproxy_note)
     links = []
@@ -1726,8 +1725,7 @@ async def initialize_proxy_asset(asset_id: int, user_id: int):
     asset.mtproxy_secret = mtproxy_secret or asset.mtproxy_secret
     asset.mtproxy_host = mtproxy_host or public_ip
     asset.proxy_links = links or asset.proxy_links
-    asset.note = append_note(asset.note, _strip_raw_proxy_link_lines(_compact_asset_proxy_init_note(mtproxy_note, links, port)))
-    await sync_to_async(asset.save)(update_fields=['login_user', 'login_password', 'mtproxy_port', 'mtproxy_link', 'mtproxy_secret', 'mtproxy_host', 'proxy_links', 'note', 'updated_at'])
+    await sync_to_async(asset.save)(update_fields=['login_user', 'login_password', 'mtproxy_port', 'mtproxy_link', 'mtproxy_secret', 'mtproxy_host', 'proxy_links', 'updated_at'])
     return asset, None
 
 

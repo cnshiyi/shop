@@ -22,6 +22,11 @@ RESIDUAL_SERVER_STATUSES = {
 RESIDUAL_ORDER_STATUSES = {'deleted', 'deleting', 'expired', 'cancelled', 'refunded', 'failed'}
 
 
+def _visible_asset_total():
+    from cloud.api import _cloud_assets_base_queryset, _dedupe_cloud_asset_rows
+    return len(_dedupe_cloud_asset_rows(list(_cloud_assets_base_queryset())))
+
+
 def _resolve_asset(server: Server):
     lookup = Q(kind=CloudAsset.KIND_SERVER)
     if server.provider:
@@ -85,14 +90,21 @@ def _server_cloud_account(server: Server):
 
 def _should_reconcile_server(server: Server) -> bool:
     order = getattr(server, 'order', None)
+    account = _server_cloud_account(server)
     provider_status = str(getattr(server, 'provider_status', '') or '')
     note = str(getattr(server, 'note', '') or '')
     return not (
         server.status in RESIDUAL_SERVER_STATUSES
         or (order and order.status in RESIDUAL_ORDER_STATUSES)
         or not getattr(server, 'is_active', True)
+        or (server.account_label and not account)
+        or (account and not account.is_active)
         or '云上未找到' in provider_status
+        or '云上不存在' in provider_status
+        or '已标记删除' in provider_status
         or '云上未找到' in note
+        or '云上不存在' in note
+        or '已标记删除' in note
     )
 
 
@@ -101,6 +113,7 @@ class Command(BaseCommand):
 
     def handle(self, *args, **options):
         before_asset_total = CloudAsset.objects.filter(kind=CloudAsset.KIND_SERVER).count()
+        before_visible_asset_total = _visible_asset_total()
         server_total = Server.objects.count()
         created_count = 0
         updated_count = 0
@@ -110,6 +123,7 @@ class Command(BaseCommand):
         skipped_asset_ids = []
         conflict_skipped_items = []
         claimed_assets = {}
+        processed_asset_ids = set()
         queryset = Server.objects.select_related('order', 'user').order_by('-updated_at', '-id')
         for server in queryset:
             if not _should_reconcile_server(server):
@@ -151,6 +165,10 @@ class Command(BaseCommand):
                 'is_active': server.is_active,
             }
             if asset:
+                if asset.id in processed_asset_ids:
+                    skipped_count += 1
+                    skipped_asset_ids.append(f'{asset.id}:{server.public_ip or "缺失"}:{server.instance_id or server.server_name or "-"}:duplicate')
+                    continue
                 defaults['user'] = asset.user
                 defaults['actual_expires_at'] = asset.actual_expires_at
                 if asset.price is not None:
@@ -171,6 +189,7 @@ class Command(BaseCommand):
                     )
                     continue
                 claimed_assets[asset.id] = asset_signature
+                processed_asset_ids.add(asset.id)
                 dirty = False
                 for key, value in defaults.items():
                     if getattr(asset, key) != value:
@@ -186,12 +205,14 @@ class Command(BaseCommand):
                 continue
             created = CloudAsset.objects.create(**defaults)
             claimed_assets[created.id] = f'{server.instance_id or "-"}|{server.provider_resource_id or "-"}|{server.public_ip or "缺失"}'
+            processed_asset_ids.add(created.id)
             created_count += 1
             created_asset_ids.append(f'{created.id}:{server.public_ip or "缺失"}:{server.instance_id or server.server_name or "-"}')
 
         after_asset_total = CloudAsset.objects.filter(kind=CloudAsset.KIND_SERVER).count()
+        after_visible_asset_total = _visible_asset_total()
         self.stdout.write(self.style.SUCCESS(
-            f'代理列表补齐汇总：服务器表 {server_total} 条；代理列表原有 {before_asset_total} 条；新增 {created_count} 条，更新 {updated_count} 条，跳过 {skipped_count} 条；补齐后代理列表共 {after_asset_total} 条。'
+            f'代理列表补齐汇总：服务器表 {server_total} 条；资产总记录 {before_asset_total}->{after_asset_total} 条；当前可见代理 {before_visible_asset_total}->{after_visible_asset_total} 条；新增 {created_count} 条，更新 {updated_count} 条，跳过 {skipped_count} 条。'
         ))
         self.stdout.write(
             f'代理列表补齐详情：新增ID={created_asset_ids[:20] or []}；更新ID={updated_asset_ids[:20] or []}；跳过ID={skipped_asset_ids[:20] or []}；冲突跳过={conflict_skipped_items[:20] or []}'

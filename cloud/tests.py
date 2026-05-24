@@ -1823,6 +1823,71 @@ class CloudServerServicesTestCase(TestCase):
         nickname_search_payload = json.loads(nickname_search_response.content.decode('utf-8'))['data']
         self.assertEqual([item['id'] for item in nickname_search_payload['items']], [target_asset.id])
 
+    def test_cloud_assets_search_expands_to_all_assets_for_matched_user(self):
+        admin = get_user_model().objects.create_user(username='admin_asset_user_search_expand', password='x', is_staff=True)
+        target_user = TelegramUser.objects.create(
+            tg_user_id=991930,
+            username='alpha_search_user,backup_alpha_name',
+            first_name='搜索昵称甲',
+        )
+        other_user = TelegramUser.objects.create(tg_user_id=991931, username='other_search_user', first_name='搜索昵称乙')
+        target_assets = [
+            CloudAsset.objects.create(
+                kind=CloudAsset.KIND_SERVER,
+                source=CloudAsset.SOURCE_AWS_SYNC,
+                user=target_user,
+                provider='aws_lightsail',
+                region_code=self.plan.region_code,
+                region_name=self.plan.region_name,
+                asset_name='search-expand-primary',
+                public_ip='10.91.0.10',
+                actual_expires_at=timezone.now() + timezone.timedelta(days=30),
+                status=CloudAsset.STATUS_RUNNING,
+                sort_order=20,
+            ),
+            CloudAsset.objects.create(
+                kind=CloudAsset.KIND_SERVER,
+                source=CloudAsset.SOURCE_AWS_SYNC,
+                user=target_user,
+                provider='aws_lightsail',
+                region_code=self.plan.region_code,
+                region_name=self.plan.region_name,
+                asset_name='search-expand-secondary',
+                public_ip='10.91.0.11',
+                actual_expires_at=timezone.now() + timezone.timedelta(days=31),
+                status=CloudAsset.STATUS_RUNNING,
+                sort_order=10,
+            ),
+        ]
+        decoy_asset = CloudAsset.objects.create(
+            kind=CloudAsset.KIND_SERVER,
+            source=CloudAsset.SOURCE_AWS_SYNC,
+            user=other_user,
+            provider='aws_lightsail',
+            region_code=self.plan.region_code,
+            region_name=self.plan.region_name,
+            asset_name='search-expand-decoy',
+            public_ip='10.91.0.12',
+            actual_expires_at=timezone.now() + timezone.timedelta(days=32),
+            status=CloudAsset.STATUS_RUNNING,
+            sort_order=30,
+        )
+
+        for keyword in ['10.91.0.10', '@backup_alpha', '昵称甲']:
+            request = self.factory.get('/api/dashboard/cloud-assets/', {
+                'paginated': '1',
+                'page': '1',
+                'page_size': '10',
+                'keyword': keyword,
+            })
+            request.user = admin
+            response = cloud_assets_list(request)
+            payload = json.loads(response.content.decode('utf-8'))['data']
+            result_ids = {item['id'] for item in payload['items']}
+            self.assertEqual(response.status_code, 200)
+            self.assertEqual(result_ids, {item.id for item in target_assets})
+            self.assertNotIn(decoy_asset.id, result_ids)
+
     def test_cloud_asset_expired_filter_excludes_unattached_ip_assets(self):
         admin = get_user_model().objects.create_user(username='admin_asset_expired_unattached_filter', password='x', is_staff=True)
         group = TelegramGroupFilter.objects.create(chat_id=-1001993002, title='Risk Filter Group 2', enabled=True)
@@ -7367,6 +7432,64 @@ class CloudServerServicesTestCase(TestCase):
         asset = CloudAsset.objects.get(instance_id='reconcile-account-server')
         self.assertEqual(asset.account_label, label)
         self.assertEqual(asset.cloud_account, account)
+
+    def test_reconcile_cloud_assets_skips_inactive_cloud_account_server(self):
+        account = CloudAccountConfig.objects.create(
+            provider=CloudAccountConfig.PROVIDER_AWS,
+            name='reconcile-inactive-account',
+            external_account_id='123456789012',
+            access_key='A' * 20,
+            secret_key='B' * 40,
+            is_active=False,
+        )
+        label = cloud_account_label(account)
+        Server.objects.create(
+            source=Server.SOURCE_AWS_SYNC,
+            user=self.user,
+            provider='aws_lightsail',
+            account_label=label,
+            region_code='ap-southeast-1',
+            region_name='新加坡',
+            server_name='inactive-account-server',
+            instance_id='inactive-account-server',
+            public_ip='13.250.30.203',
+            status=Server.STATUS_RUNNING,
+            is_active=True,
+        )
+
+        call_command('reconcile_cloud_assets_from_servers')
+
+        self.assertFalse(CloudAsset.objects.filter(instance_id='inactive-account-server').exists())
+
+    def test_reconcile_cloud_assets_skips_server_marked_cloud_missing(self):
+        account = CloudAccountConfig.objects.create(
+            provider=CloudAccountConfig.PROVIDER_AWS,
+            name='reconcile-missing-account',
+            external_account_id='123456789012',
+            access_key='A' * 20,
+            secret_key='B' * 40,
+            is_active=True,
+        )
+        label = cloud_account_label(account)
+        Server.objects.create(
+            source=Server.SOURCE_AWS_SYNC,
+            user=self.user,
+            provider='aws_lightsail',
+            account_label=label,
+            region_code='ap-southeast-1',
+            region_name='新加坡',
+            server_name='missing-account-server',
+            instance_id='missing-account-server',
+            public_ip='13.250.30.204',
+            status=Server.STATUS_RUNNING,
+            provider_status='云上未找到实例/IP',
+            note='服务器校验发现云上不存在，已标记删除',
+            is_active=True,
+        )
+
+        call_command('reconcile_cloud_assets_from_servers')
+
+        self.assertFalse(CloudAsset.objects.filter(instance_id='missing-account-server').exists())
 
     def test_reconcile_cloud_assets_matches_legacy_account_label_variants(self):
         account = CloudAccountConfig.objects.create(

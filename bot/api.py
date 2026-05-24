@@ -1468,7 +1468,14 @@ def _region_label(region_code, region_name=None):
 def _split_usernames(username):
     if not username:
         return []
-    normalized = str(username).replace('，', ',').replace(' / ', ',').replace('/', ',')
+    normalized = (
+        str(username)
+        .replace('，', ',')
+        .replace('｜', ',')
+        .replace('|', ',')
+        .replace(' / ', ',')
+        .replace('/', ',')
+    )
     parts = [item.strip().lstrip('@') for item in normalized.split(',')]
     result = []
     seen = set()
@@ -1490,7 +1497,7 @@ def _user_payload(item):
         'display_name': display_name,
         'primary_username': primary_username,
         'usernames': usernames,
-        'username_label': ' / '.join(f'@{name}' for name in usernames) if usernames else '-',
+        'username_label': '｜'.join(f'@{name}' for name in usernames) if usernames else '-',
     }
 
 
@@ -1501,7 +1508,7 @@ def _telegram_user_labels(user):
     first_name = (getattr(user, 'first_name', '') or '').strip()
     primary_username = getattr(user, 'primary_username', '') or (usernames[0] if usernames else '')
     display_name = first_name or (f'@{primary_username}' if primary_username else str(getattr(user, 'tg_user_id', '') or getattr(user, 'id', '')))
-    username_label = ' / '.join(f'@{name}' for name in usernames) if usernames else '-'
+    username_label = '｜'.join(f'@{name}' for name in usernames) if usernames else '-'
     return display_name, username_label
 
 
@@ -1651,12 +1658,13 @@ def _cloud_account_detail_payload(item):
 
 
 def _telegram_login_account_payload(item):
+    usernames = TelegramUser.normalize_usernames(item.username)
     return {
         'id': item.id,
         'label': item.label,
         'phone': item.phone or '',
         'tg_user_id': item.tg_user_id,
-        'username': item.username or '',
+        'username': '｜'.join(usernames) if usernames else '',
         'status': item.status,
         'note': item.note or '',
         'notify_enabled': bool(getattr(item, 'notify_enabled', True)),
@@ -1669,13 +1677,14 @@ def _telegram_login_account_payload(item):
 
 
 def _telegram_chat_user_payload(user, latest=None, message_count=0):
+    _, username_label = _telegram_user_labels(user)
     return {
         'id': user.id,
         'tg_user_id': user.tg_user_id,
         'display_name': user.first_name or user.primary_username or str(user.tg_user_id),
         'first_name': user.first_name or '',
         'primary_username': user.primary_username,
-        'username_label': f'@{user.primary_username}' if user.primary_username else '-',
+        'username_label': username_label,
         'usernames': user.usernames,
         'message_count': message_count,
         'latest_chat_id': latest.chat_id if latest else None,
@@ -1870,22 +1879,14 @@ def _proxy_asset_count(asset):
 
 
 def _active_proxy_counts_by_user(user_ids=None):
-    active_statuses = [
-        CloudAsset.STATUS_RUNNING,
-        CloudAsset.STATUS_PENDING,
-        CloudAsset.STATUS_STARTING,
-        CloudAsset.STATUS_STOPPED,
-        CloudAsset.STATUS_SUSPENDED,
-        CloudAsset.STATUS_EXPIRED_GRACE,
-    ]
-    qs = CloudAsset.objects.filter(is_active=True, status__in=active_statuses).filter(
+    qs = _active_cloud_asset_queryset().filter(
         Q(user_id__isnull=False) | Q(order__user_id__isnull=False)
     ).select_related('order')
     if user_ids is not None:
         user_ids = set(user_ids)
         qs = qs.filter(Q(user_id__in=user_ids) | Q(order__user_id__in=user_ids))
     counts = {}
-    for asset in qs.only('user_id', 'order__user_id', 'proxy_links', 'mtproxy_link'):
+    for asset in qs:
         user_id = asset.user_id or (asset.order.user_id if asset.order_id and asset.order else None)
         if not user_id:
             continue

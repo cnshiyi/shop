@@ -51,7 +51,7 @@ from bot.api import (
 )
 from bot.models import TelegramGroupFilter, TelegramLoginAccount, TelegramUser
 from cloud.lifecycle import NOTICE_TYPE_SWITCH_CONFIG, _auto_renew_notice_batch_payload, _notice_effective_delivered, _delete_instance, _get_due_orders, _get_notice_text_override, _lifecycle_notice_batch_payload, _mark_replaced_order_deleted, _notice_payload_for_order, _notice_override_key, _record_auto_renew_patrol_log, _renew_notice_batch_payload, _run_auto_renew, _set_notice_text_override, cloud_notice_type_enabled
-from cloud.services import AWS_REGION_NAMES, RenewalPriceMissingError, _cloud_order_lifecycle_fields, _renewal_price, _update_order_primary_records, create_cloud_server_rebuild_order, ensure_cloud_server_pricing, ensure_manual_expiry_operation_order, ensure_manual_owner_operation_order, ensure_manual_price_operation_order, record_cloud_ip_log, refresh_custom_plan_cache, replace_cloud_asset_order_by_admin, scoped_server_match_for_asset, set_cloud_server_auto_renew_admin
+from cloud.services import AWS_REGION_NAMES, RenewalPriceMissingError, _cloud_order_lifecycle_fields, _renewal_price, _update_order_primary_records, create_cloud_server_rebuild_order, drop_asset_note_update, ensure_cloud_server_pricing, ensure_manual_expiry_operation_order, ensure_manual_owner_operation_order, ensure_manual_price_operation_order, record_cloud_ip_log, refresh_custom_plan_cache, replace_cloud_asset_order_by_admin, scoped_server_match_for_asset, set_cloud_server_auto_renew_admin
 from cloud.models import AddressMonitor, CloudAsset, CloudAutoRenewPatrolLog, CloudAutoRenewPlan, CloudIpLog, CloudNoticePlan, CloudServerOrder, CloudServerPlan, CloudUserNoticeLog, Server, ServerPrice
 from cloud.note_utils import append_note, prepend_note
 from core.cloud_accounts import cloud_account_label, cloud_account_label_variants
@@ -250,9 +250,7 @@ def _ensure_unattached_ip_expiry(asset: CloudAsset, *, now=None) -> bool:
     if not _is_unattached_ip_asset(asset) or asset.actual_expires_at:
         return False
     asset.actual_expires_at = _unattached_ip_delete_due_at(now=now)
-    addition = f'自动补齐未附加IP删除计划: {asset.actual_expires_at.isoformat()}'
-    asset.note = append_note(asset.note, addition)
-    asset.save(update_fields=['actual_expires_at', 'note', 'updated_at'])
+    asset.save(update_fields=['actual_expires_at', 'updated_at'])
     return True
 
 
@@ -469,6 +467,53 @@ def _cloud_asset_shutdown_enabled(asset, order=None) -> bool:
     return True
 
 
+def _static_ip_name_from_resource_id(value) -> str:
+    text = str(value or '').strip()
+    if not text or 'StaticIp' not in text:
+        return ''
+    return text.rsplit('/', 1)[-1] or text
+
+
+def _cloud_asset_static_ip_name(asset, order=None) -> str:
+    asset_static_ip_name = ''
+    provider_status = str(getattr(asset, 'provider_status', '') or '')
+    provider_resource_id = str(getattr(asset, 'provider_resource_id', '') or '')
+    if (
+        '未附加' in provider_status
+        or '固定IP保留' in provider_status
+        or 'StaticIp' in provider_resource_id
+    ):
+        asset_static_ip_name = (
+            _static_ip_name_from_resource_id(provider_resource_id)
+            or (
+                str(getattr(asset, 'asset_name', '') or '').strip()
+                if not str(getattr(asset, 'instance_id', '') or '').strip()
+                else ''
+            )
+        )
+    return asset_static_ip_name or str(getattr(order, 'static_ip_name', '') if order else '').strip()
+
+
+def _cloud_asset_provider_status_label(asset) -> str:
+    inactive_account_labels = set(_cloud_account_labels_queryset(False))
+    asset_account_label = str(getattr(asset, 'account_label', '') or '').strip()
+    if (
+        getattr(getattr(asset, 'cloud_account', None), 'is_active', True) is False
+        or (asset_account_label and asset_account_label in inactive_account_labels)
+    ):
+        base_label = _provider_status_label(asset.provider_status)
+        return f'云账号已停用 / {base_label}' if base_label and base_label != '-' else '云账号已停用'
+    if asset.status == CloudAsset.STATUS_DELETED:
+        return '已删除'
+    if asset.status == CloudAsset.STATUS_TERMINATED:
+        return '已终止'
+    label = _provider_status_label(asset.provider_status)
+    parts = [part.strip() for part in str(label or '').split('/') if part.strip()]
+    if len(parts) > 1 and '运行中' in parts and all(part in {'运行中', '正常'} for part in parts):
+        return '运行中'
+    return label
+
+
 def _cloud_asset_risk_state(asset, order, expires_at, provider_status_label, display_status, user) -> dict:
     now = timezone.now()
     reasons = []
@@ -524,11 +569,14 @@ def _cloud_asset_risk_state(asset, order, expires_at, provider_status_label, dis
         status_text in {'failed', 'unknown'}
         or '失败' in provider_text
         or '异常' in provider_text
+        or '云账号已停用' in provider_text
         or '云上未找到' in provider_text
         or '云上不存在' in provider_text
         or '待确认' in provider_text
     ):
         set_risk('abnormal', '异常/待确认', 5, provider_text or '状态异常')
+    if '云账号已停用' in provider_text:
+        set_risk('account_disabled', '云账号已停用', 6, '云账号已停用')
     if status_text in {CloudAsset.STATUS_DELETED, CloudAsset.STATUS_DELETING, CloudAsset.STATUS_TERMINATED, CloudAsset.STATUS_TERMINATING}:
         set_risk('deleted', '已删除/终止', 30, '资产已删除或终止')
 
@@ -654,11 +702,7 @@ def _asset_payload(asset):
     cloud_account_id = asset.cloud_account_id or getattr(order, 'cloud_account_id', None)
     display_status = asset.status
     display_status_label = '旧机保留中' if asset.status == CloudAsset.STATUS_DELETING and '旧机保留期' in str(asset.provider_status or '') else _status_label(asset.status, CloudAsset.STATUS_CHOICES)
-    provider_status_label = (
-        '已删除' if asset.status == CloudAsset.STATUS_DELETED else (
-            '已终止' if asset.status == CloudAsset.STATUS_TERMINATED else _provider_status_label(asset.provider_status)
-        )
-    )
+    provider_status_label = _cloud_asset_provider_status_label(asset)
     if asset.status == CloudAsset.STATUS_UNKNOWN and '未附加' in str(asset.provider_status or ''):
         display_status = 'unattached'
         display_status_label = '未附加固定IP'
@@ -683,7 +727,7 @@ def _asset_payload(asset):
         'asset_name': asset.asset_name,
         'instance_id': asset.instance_id,
         'provider_resource_id': asset.provider_resource_id,
-        'static_ip_name': getattr(order, 'static_ip_name', '') if order else '',
+        'static_ip_name': _cloud_asset_static_ip_name(asset, order),
         'public_ip': asset.public_ip or asset.previous_public_ip or getattr(order, 'public_ip', None) or getattr(order, 'previous_public_ip', None),
         'previous_public_ip': asset.previous_public_ip or getattr(order, 'previous_public_ip', None),
         'mtproxy_link': asset.mtproxy_link or getattr(order, 'mtproxy_link', None),
@@ -1068,12 +1112,9 @@ def update_cloud_asset(request, asset_id):
             )
             refresh_unattached_delete_due = bool(is_unattached_ip and payload and 'actual_expires_at' not in payload and not rebound_to_instance)
             if rebound_to_instance:
-                rebound_now = timezone.now()
-                rebound_note = f'未附加IP已重新绑定到实例，已清空临时到期时间：{rebound_now.isoformat()}；等待人工添加真实到期时间。'
                 asset.actual_expires_at = None
                 asset.provider_status = '已重新绑定实例-待人工添加时间'
                 asset.is_active = True
-                asset.note = append_note(asset.note, rebound_note)
                 if asset.status == CloudAsset.STATUS_UNKNOWN:
                     asset.status = CloudAsset.STATUS_RUNNING
 
@@ -1369,8 +1410,6 @@ def _group_cloud_asset_payloads(items, group_by='telegram_group'):
 
 
 def _cloud_assets_base_queryset():
-    active_account_labels = _cloud_account_labels_queryset(True)
-    inactive_account_labels = _cloud_account_labels_queryset(False)
     unattached_ip_values = list(
         CloudAsset.objects.filter(
             kind=CloudAsset.KIND_SERVER,
@@ -1379,20 +1418,54 @@ def _cloud_assets_base_queryset():
         ).exclude(public_ip='').values_list('public_ip', flat=True)[:1000]
     )
     return CloudAsset.objects.select_related('user', 'order', 'cloud_account', 'telegram_group').filter(kind=CloudAsset.KIND_SERVER).exclude(
-        Q(cloud_account__is_active=False)
-        | Q(account_label__in=inactive_account_labels),
-    ).exclude(
         Q(status__in=[CloudAsset.STATUS_DELETED, CloudAsset.STATUS_TERMINATED])
         & (Q(public_ip__in=unattached_ip_values) | Q(previous_public_ip__in=unattached_ip_values))
-    ).filter(
-        Q(cloud_account__is_active=True)
-        | Q(account_label__in=active_account_labels)
-        | Q(account_label__isnull=True)
-        | Q(account_label='')
     )
 
 
 def _apply_cloud_assets_keyword(queryset, keyword):
+    keyword_text = str(keyword or '').strip()
+    if not keyword_text:
+        return queryset
+    normalized_keyword = keyword_text.lstrip('@')
+    direct_fields = [
+        'asset_name', 'instance_id', 'provider_resource_id', 'public_ip', 'previous_public_ip',
+        'mtproxy_host', 'mtproxy_link', 'mtproxy_secret', 'note', 'provider_status',
+        'region_code', 'region_name', 'account_label', 'cloud_account__external_account_id',
+        'cloud_account__name', 'user__tg_user_id', 'user__username', 'user__first_name',
+        'telegram_group__title', 'telegram_group__username', 'telegram_group__chat_id',
+        'order__order_no', 'order__server_name', 'order__plan_name', 'order__region_code',
+        'order__region_name', 'order__instance_id', 'order__provider_resource_id',
+        'order__static_ip_name', 'order__public_ip', 'order__previous_public_ip',
+        'order__mtproxy_host', 'order__mtproxy_link', 'order__provision_note',
+        'order__server__server_name', 'order__server__note',
+    ]
+    direct_condition = Q()
+    for field in direct_fields:
+        direct_condition |= Q(**{f'{field}__icontains': keyword_text})
+        if normalized_keyword != keyword_text:
+            direct_condition |= Q(**{f'{field}__icontains': normalized_keyword})
+    matched_user_ids = set(
+        queryset.filter(direct_condition)
+        .exclude(user_id__isnull=True)
+        .values_list('user_id', flat=True)[:500]
+    )
+    user_condition = (
+        Q(username__icontains=keyword_text)
+        | Q(first_name__icontains=keyword_text)
+        | Q(tg_user_id__icontains=keyword_text)
+    )
+    if normalized_keyword != keyword_text:
+        user_condition |= Q(username__icontains=normalized_keyword)
+    matched_user_ids.update(
+        TelegramUser.objects.filter(user_condition).values_list('id', flat=True)[:500]
+    )
+    if not matched_user_ids:
+        return queryset.filter(direct_condition)
+    return queryset.filter(direct_condition | Q(user_id__in=matched_user_ids))
+
+
+def _apply_cloud_assets_direct_keyword(queryset, keyword):
     return _apply_keyword_filter(
         queryset,
         keyword,
@@ -3552,7 +3625,6 @@ def _primary_record_updates_for_order_status(order_status: str, note: str | None
     else:
         return {}, {}
     if note:
-        asset_updates['note'] = note
         server_updates['note'] = note
     return asset_updates, server_updates
 
@@ -3795,7 +3867,7 @@ def _run_rebuild_job(new_order_id: int):
         source_order.save(update_fields=['provision_note', 'updated_at'])
         _update_order_primary_records(
             source_order,
-            asset_updates={'note': failure_note},
+            asset_updates=drop_asset_note_update({'note': failure_note}),
             server_updates={'note': failure_note},
         )
 

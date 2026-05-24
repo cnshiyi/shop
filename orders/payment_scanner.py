@@ -20,7 +20,6 @@ from django.utils import timezone
 from orders.ledger import record_balance_ledger
 from bot.models import TelegramUser
 from cloud.models import AddressMonitor, CloudAsset, CloudServerOrder
-from cloud.note_utils import append_note
 from orders.models import Order, Product, Recharge
 from orders.services import usdt_to_trx
 from bot.keyboards import custom_port_keyboard
@@ -280,11 +279,7 @@ def _expire_timed_out_payment_orders():
     if expired_asset_renewal_order_ids:
         for asset in CloudAsset.objects.filter(order_id__in=expired_asset_renewal_order_ids).order_by('id'):
             asset.order = None
-            asset.note = append_note(
-                asset.note,
-                f'续费地址支付窗口已于 {now:%Y-%m-%d %H:%M} 超时关闭，已解除过期支付订单绑定，可重新发起续费。',
-            )
-            asset.save(update_fields=['order', 'note', 'updated_at'])
+            asset.save(update_fields=['order', 'updated_at'])
     renewal_expired_count = 0
     renewal_orders = list(CloudServerOrder.objects.filter(
         pay_method='address',
