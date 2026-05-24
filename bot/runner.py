@@ -24,6 +24,7 @@ from core.cache import refresh_config, close as cache_close
 from core.models import SiteConfig
 from core.runtime_config import get_cloud_asset_sync_interval_seconds, get_runtime_config
 from cloud.cache import init_monitor_cache
+from orders.services import get_trx_price
 from orders.runtime import check_resources, scan_forever, set_bot, set_resource_bot
 
 logger = logging.getLogger(__name__)
@@ -110,6 +111,13 @@ async def delete_webhook_with_retry(bot, retries: int = 5, base_delay: float = 2
             await asyncio.sleep(delay)
 
 
+async def warm_trx_rate_cache():
+    try:
+        await get_trx_price(force_refresh=True)
+    except Exception as exc:
+        logger.warning('TRX 汇率缓存预热失败: %s', exc)
+
+
 async def run_bot():
     started_at = time.time()
     loop = asyncio.get_running_loop()
@@ -133,6 +141,7 @@ async def run_bot():
         await refresh_config(['receive_address', 'trongrid_api_key'])
         await init_monitor_cache(force_log=True)
         await refresh_custom_plan_cache()
+        await warm_trx_rate_cache()
     except Exception as e:
         logger.error('Redis 缓存初始化失败: %s', e)
 
@@ -205,6 +214,7 @@ async def run_bot():
     # TRON 扫块器 / 资源巡检 / 生命周期调度
     scheduler = AsyncIOScheduler()
     scheduler.add_job(check_resources, 'interval', minutes=3, id='tron_resource_checker', max_instances=1)
+    scheduler.add_job(warm_trx_rate_cache, 'interval', hours=24, id='trx_rate_cache_refresh', max_instances=1, coalesce=True)
     scheduler.add_job(refresh_custom_plan_cache, 'interval', minutes=10, id='custom_plan_cache_refresh', max_instances=1, coalesce=True)
     scheduler.add_job(lifecycle_tick, 'interval', minutes=10, id='cloud_lifecycle', max_instances=1, kwargs={'notify': _notify, 'notify_target': _notify_target})
     scheduler.add_job(_run_management_command, 'interval', minutes=10, id='cloud_lifecycle_plan_refresh', max_instances=1, coalesce=True, args=['refresh_lifecycle_plans'])
@@ -226,6 +236,7 @@ async def run_bot():
     alive_task.add_done_callback(_log_task_done('bot_alive_logger'))
     logger.info('TRON 顺序扫块器已启动（移除6秒调度限制）')
     logger.info('资源巡检已启动 (每3分钟)')
+    logger.info('TRX 汇率缓存刷新已启动 (每24小时)')
     logger.info('定制套餐缓存刷新已启动 (每10分钟)')
     logger.info('云服务器生命周期调度已启动 (每10分钟)')
     logger.info('删机计划表刷新已启动 (每10分钟)')

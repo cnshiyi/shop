@@ -786,6 +786,9 @@ def _cloud_ip_trace_note_newest_first(note):
 
 
 def _lifecycle_plan_row_source_key(item: dict, *, plan_kind: str, data_group: str) -> str:
+    existing_source_key = str(item.get('source_key') or '').strip()
+    if existing_source_key.startswith(f'{data_group}:'):
+        return existing_source_key
     if item.get('asset_id'):
         return f'{data_group}:asset:{item.get("asset_id")}'
     if plan_kind == CloudLifecyclePlan.PLAN_KIND_SHUTDOWN_ORDER and item.get('order_id'):
@@ -1013,24 +1016,69 @@ def _collect_lifecycle_plan_rows(*, limit=1000):
 
 
 def _sync_lifecycle_plan_table(*, limit=1000):
+    archived_ip_delete_history = _completed_unattached_ip_plan_history_items()
+    stored_ip_delete_history = _cloud_lifecycle_plan_items(
+        plan_kind=CloudLifecyclePlan.PLAN_KIND_UNATTACHED_IP_DELETE,
+        data_group='history',
+    )
     bundle = _collect_lifecycle_plan_rows(limit=limit)
     shutdown_active = [*bundle['due_items'], *bundle['future_plan_items']]
     shutdown_order_active = [item for item in shutdown_active if item.get('item_type') == 'order']
     orphan_asset_active = [item for item in shutdown_active if item.get('item_type') == 'orphan_asset']
     shutdown_history = bundle['history_items']
     ip_delete_active = [item for item in bundle['ip_delete_items'] if not item.get('is_history')]
-    ip_delete_history = [item for item in bundle['ip_delete_items'] if item.get('is_history')]
+    ip_delete_history = [
+        *stored_ip_delete_history,
+        *archived_ip_delete_history,
+        *[item for item in bundle['ip_delete_items'] if item.get('is_history')],
+    ]
     _upsert_lifecycle_plan_rows(shutdown_order_active, plan_kind=CloudLifecyclePlan.PLAN_KIND_SHUTDOWN_ORDER, data_group='active')
     _upsert_lifecycle_plan_rows(orphan_asset_active, plan_kind=CloudLifecyclePlan.PLAN_KIND_ORPHAN_ASSET_DELETE, data_group='active')
     _upsert_lifecycle_plan_rows(shutdown_history, plan_kind=CloudLifecyclePlan.PLAN_KIND_SHUTDOWN_ORDER, data_group='history')
     _upsert_lifecycle_plan_rows(ip_delete_active, plan_kind=CloudLifecyclePlan.PLAN_KIND_UNATTACHED_IP_DELETE, data_group='active')
     _upsert_lifecycle_plan_rows(ip_delete_history, plan_kind=CloudLifecyclePlan.PLAN_KIND_UNATTACHED_IP_DELETE, data_group='history')
+    bundle['ip_delete_items'] = [*ip_delete_active, *ip_delete_history]
     return bundle
 
 
 def _cloud_lifecycle_plan_items(*, plan_kind: str, data_group: str):
     rows = CloudLifecyclePlan.objects.filter(plan_kind=plan_kind, data_group=data_group).order_by('delete_at', 'next_run_at', '-updated_at', '-id')
     return [_lifecycle_plan_row_payload(row) for row in rows]
+
+
+def _plan_item_dt(item: dict, *keys: str, default=None):
+    for key in keys:
+        value = item.get(key)
+        if not value:
+            continue
+        parsed = parse_datetime(value) if isinstance(value, str) else value
+        if not parsed:
+            continue
+        if timezone.is_naive(parsed):
+            parsed = timezone.make_aware(parsed, timezone.get_current_timezone())
+        return parsed
+    return default
+
+
+def _sort_lifecycle_active_items(items: list[dict]) -> list[dict]:
+    far_future = datetime.max.replace(tzinfo=dt_timezone.utc)
+    return sorted(
+        items,
+        key=lambda item: (
+            _plan_item_dt(item, 'next_run_at', 'delete_at', 'suspend_at', default=far_future),
+            str(item.get('plan_kind') or ''),
+            str(item.get('id') or item.get('asset_id') or item.get('order_id') or ''),
+        ),
+    )
+
+
+def _sort_lifecycle_history_items(items: list[dict]) -> list[dict]:
+    far_past = datetime.min.replace(tzinfo=dt_timezone.utc)
+    return sorted(
+        items,
+        key=lambda item: _plan_item_dt(item, 'executed_at', 'logged_at', 'delete_at', default=far_past),
+        reverse=True,
+    )
 
 
 def _lifecycle_plan_last_refresh_at():
@@ -1339,6 +1387,143 @@ def _unattached_ip_deleted_or_missing_q():
         | Q(note__icontains='云上不存在，已标记删除')
     )
     return inactive_status_q | final_missing_q
+
+
+def _unattached_ip_deleted_or_missing_text(item: dict) -> bool:
+    text = '\n'.join(
+        str(item.get(key) or '')
+        for key in ['source_note', 'note', 'provider_status', 'execution_status', 'deletion_source_label']
+    ).replace('固定 IP', '固定IP')
+    status = str(item.get('status') or '')
+    if status in {
+        CloudAsset.STATUS_DELETED,
+        CloudAsset.STATUS_TERMINATED,
+    }:
+        return True
+    return any(marker in text for marker in [
+        '已到期删除',
+        '已删除',
+        '固定IP已释放',
+        '释放固定IP成功',
+        '固定IP云端已不存在',
+        '云端已不存在',
+        '云上已不存在',
+        '云上不存在，已标记删除',
+        'IP校验发现云上不存在，已标记删除',
+    ])
+
+
+def _ip_delete_completed_active_to_history(item: dict) -> dict:
+    executed_at = item.get('logged_at') or item.get('delete_at') or item.get('next_run_at')
+    source_note = item.get('source_note') or item.get('note') or item.get('display_note') or '固定 IP 已删除'
+    history = {
+        **item,
+        'is_history': True,
+        'executed_at': executed_at,
+        'logged_at': executed_at,
+        'provider_status': item.get('provider_status') or '已删除',
+        'deletion_source_label': item.get('deletion_source_label') or _delete_source_label(source_note),
+        'execution_status': item.get('execution_status') or '固定 IP 已删除',
+        'note': source_note,
+        'display_note': item.get('display_note') or _compact_dashboard_note(source_note, max_chars=500),
+    }
+    history.update(_unattached_ip_delete_attempt_state(history, is_history=True))
+    return history
+
+
+def _completed_unattached_ip_plan_history_items() -> list[dict]:
+    items = _cloud_lifecycle_plan_items(
+        plan_kind=CloudLifecyclePlan.PLAN_KIND_UNATTACHED_IP_DELETE,
+        data_group='active',
+    )
+    items = _refresh_plan_payload_from_assets(items)
+    return [
+        _ip_delete_completed_active_to_history(item)
+        for item in items
+        if _unattached_ip_deleted_or_missing_text(item)
+    ]
+
+
+def _move_completed_ip_delete_rows_to_history(items: list[dict]) -> tuple[list[dict], list[dict], int]:
+    converted_history_items = []
+    active_items = []
+    completed_row_ids = []
+    for item in items:
+        if item.get('is_history') or item.get('data_group') == 'history':
+            converted_history_items.append(item)
+            continue
+        if item.get('plan_state') == 'completed' or _unattached_ip_deleted_or_missing_text(item):
+            converted_history_items.append(_ip_delete_completed_active_to_history(item))
+            row_id = item.get('id')
+            if isinstance(row_id, int):
+                completed_row_ids.append(row_id)
+            continue
+        active_items.append(item)
+
+    if not completed_row_ids:
+        return active_items, converted_history_items, 0
+
+    source_rows = {
+        row.id: row
+        for row in CloudLifecyclePlan.objects.filter(
+            id__in=completed_row_ids,
+            plan_kind=CloudLifecyclePlan.PLAN_KIND_UNATTACHED_IP_DELETE,
+            data_group='active',
+        )
+    }
+    history_payloads = [
+        _lifecycle_plan_row_defaults(
+            _ip_delete_completed_active_to_history(item),
+            plan_kind=CloudLifecyclePlan.PLAN_KIND_UNATTACHED_IP_DELETE,
+            data_group='history',
+            source_key=f'history:asset:{item.get("asset_id")}' if item.get('asset_id') else f'history:row:{item.get("id")}',
+        )
+        for item in items
+        if item.get('id') in source_rows
+    ]
+    for payload in history_payloads:
+        payload['data_group'] = 'history'
+    existing_rows = {
+        row.source_key: row
+        for row in CloudLifecyclePlan.objects.filter(
+            plan_kind=CloudLifecyclePlan.PLAN_KIND_UNATTACHED_IP_DELETE,
+            data_group='history',
+            source_key__in=[payload['source_key'] for payload in history_payloads],
+        )
+    }
+    create_rows = []
+    update_rows = []
+    update_fields = [
+        'queue_status', 'queue_status_label', 'order_id', 'asset_id', 'user_id',
+        'user_display_name', 'username_label', 'ip', 'provider', 'provider_label',
+        'status', 'status_label', 'service_expires_at', 'suspend_at', 'delete_at',
+        'ip_recycle_at', 'next_run_at', 'logged_at', 'last_failure_reason',
+        'execution_status', 'execution_plan', 'note', 'display_note',
+        'deletion_source_label', 'related_path', 'detail_path', 'order_detail_path',
+        'order_link_path', 'asset_detail_path', 'source_snapshot', 'updated_at',
+    ]
+    for payload in history_payloads:
+        row = existing_rows.get(payload['source_key'])
+        if not row:
+            create_rows.append(CloudLifecyclePlan(**payload))
+            continue
+        changed = False
+        for field, value in payload.items():
+            if getattr(row, field) != value:
+                setattr(row, field, value)
+                changed = True
+        if changed:
+            update_rows.append(row)
+    if create_rows:
+        CloudLifecyclePlan.objects.bulk_create(create_rows, batch_size=500)
+    if update_rows:
+        CloudLifecyclePlan.objects.bulk_update(update_rows, update_fields, batch_size=500)
+    deleted, _ = CloudLifecyclePlan.objects.filter(
+        id__in=completed_row_ids,
+        plan_kind=CloudLifecyclePlan.PLAN_KIND_UNATTACHED_IP_DELETE,
+        data_group='active',
+    ).delete()
+    return active_items, converted_history_items, deleted
 
 
 def _unattached_ip_delete_history_q():
@@ -2867,6 +3052,10 @@ def lifecycle_plans(request):
     ip_delete_items = _refresh_plan_payload_from_assets(ip_delete_items)
     ip_delete_items = [decorate_plan_item(item) for item in ip_delete_items]
 
+    active_ip_delete_items, converted_ip_history_items, _deleted_ip_plan_count = _move_completed_ip_delete_rows_to_history(ip_delete_items)
+    converted_ip_history_items = [decorate_plan_item(item) for item in converted_ip_history_items]
+    ip_delete_items = [*active_ip_delete_items, *converted_ip_history_items]
+
     shutdown_items = list(shutdown_active_items)
     due_items = list(shutdown_items)
     future_plan_items = []
@@ -2883,6 +3072,12 @@ def lifecycle_plans(request):
 
     pending_ip_delete_items = [item for item in ip_delete_items if is_ip_delete_pending(item)]
     ip_delete_history_items = [item for item in ip_delete_items if item.get('is_history')]
+    shutdown_items = _sort_lifecycle_active_items(shutdown_items)
+    due_items = _sort_lifecycle_active_items(due_items)
+    future_plan_items = _sort_lifecycle_active_items(future_plan_items)
+    ip_delete_items = _sort_lifecycle_active_items([item for item in ip_delete_items if not item.get('is_history')]) + _sort_lifecycle_history_items(ip_delete_history_items)
+    pending_ip_delete_items = _sort_lifecycle_active_items(pending_ip_delete_items)
+    ip_delete_history_items = _sort_lifecycle_history_items(ip_delete_history_items)
     recent_since = now - timezone.timedelta(days=1)
     recent_history = [
         item for item in history_items

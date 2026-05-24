@@ -9,7 +9,7 @@ from bot.models import TelegramUser
 from cloud.models import AddressMonitor, CloudAsset, CloudServerOrder, CloudServerPlan, DailyAddressStat
 from orders.models import BalanceLedger, CartItem, Order, Product, Recharge
 from orders.payment_scanner import _cache_tx_detail, _confirm_order_paid, _copy_notice_to_admins, _expire_timed_out_payment_orders, _get_address_chain_balances, _get_pending_address_orders, _get_pending_cloud_server_orders, _process_payment, _record_daily_stats_for_monitors, get_tx_detail, set_bot
-from orders.services import create_cart_address_orders, create_cart_balance_orders
+from orders.services import create_cart_address_orders, create_cart_balance_orders, get_trx_price
 from orders.tron_parser import is_valid_tron_address
 
 
@@ -59,6 +59,85 @@ class OrderBalancePaymentTestCase(TestCase):
         ledgers = list(BalanceLedger.objects.filter(user=user, type='order_balance_pay').order_by('created_at', 'id'))
         self.assertEqual([ledger.before_balance for ledger in ledgers], [Decimal('20.000000000'), Decimal('16.000000000')])
         self.assertEqual([ledger.after_balance for ledger in ledgers], [Decimal('16.000000000'), Decimal('10.000000000')])
+
+    def test_trx_price_uses_redis_cache_before_network(self):
+        class FakeRedis:
+            async def get(self, key):
+                return '0.123456'
+
+        with patch('orders.services.get_redis', new=AsyncMock(return_value=FakeRedis())):
+            with patch('orders.services.httpx.AsyncClient') as client_mock:
+                from orders import services
+                services._cached_rate = None
+                services._cache_time = 0.0
+
+                rate = async_to_sync(get_trx_price)()
+
+        self.assertEqual(rate, Decimal('0.123456'))
+        client_mock.assert_not_called()
+
+    def test_trx_price_writes_daily_redis_cache_after_network_fetch(self):
+        class FakeRedis:
+            def __init__(self):
+                self.values = {}
+                self.ttl = None
+
+            async def get(self, key):
+                return None
+
+            async def setex(self, key, ttl, value):
+                self.ttl = ttl
+                self.values[key] = value
+
+            async def set(self, key, value):
+                self.values[key] = value
+
+        class FakeResponse:
+            def raise_for_status(self):
+                return None
+
+            def json(self):
+                return {'price': '0.222222'}
+
+        class FakeClient:
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, exc_type, exc, tb):
+                return False
+
+            async def get(self, url):
+                return FakeResponse()
+
+        fake_redis = FakeRedis()
+        with patch('orders.services.get_redis', new=AsyncMock(return_value=fake_redis)):
+            with patch('orders.services.httpx.AsyncClient', return_value=FakeClient()):
+                from orders import services
+                services._cached_rate = None
+                services._cache_time = 0.0
+
+                rate = async_to_sync(get_trx_price)()
+
+        self.assertEqual(rate, Decimal('0.222222'))
+        self.assertEqual(fake_redis.ttl, 86400)
+        self.assertEqual(fake_redis.values['orders:trx_usdt_price:v1'], '0.222222')
+        self.assertEqual(fake_redis.values['orders:trx_usdt_price:last'], '0.222222')
+
+    def test_trx_price_uses_last_known_redis_cache_before_network(self):
+        class FakeRedis:
+            async def get(self, key):
+                return '0.333333' if key == 'orders:trx_usdt_price:last' else None
+
+        with patch('orders.services.get_redis', new=AsyncMock(return_value=FakeRedis())):
+            with patch('orders.services.httpx.AsyncClient') as client_mock:
+                from orders import services
+                services._cached_rate = None
+                services._cache_time = 0.0
+
+                rate = async_to_sync(get_trx_price)()
+
+        self.assertEqual(rate, Decimal('0.333333'))
+        client_mock.assert_not_called()
 
     def test_cart_address_checkout_keeps_cloud_plan_items(self):
         user = TelegramUser.objects.create(tg_user_id=990202, username='cart_address_keep_cloud')

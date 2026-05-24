@@ -12,6 +12,7 @@ from django.db import transaction
 from django.db.models import Q
 from django.utils import timezone
 
+from core.cache import get_redis
 from core.order_numbers import unique_timestamp_order_no
 from orders.ledger import record_balance_ledger
 from bot.models import TelegramUser
@@ -21,7 +22,9 @@ from orders.models import BalanceLedger, CartItem, Order, Product, Recharge
 logger = logging.getLogger(__name__)
 _cached_rate: Decimal | None = None
 _cache_time = 0.0
-_CACHE_TTL = 60
+_CACHE_TTL = 86400
+_TRX_PRICE_CACHE_KEY = 'orders:trx_usdt_price:v1'
+_TRX_PRICE_LAST_CACHE_KEY = 'orders:trx_usdt_price:last'
 CART_MAX_QUANTITY = 99
 
 
@@ -85,17 +88,44 @@ def get_recharge(user_id: int, recharge_id: int):
     return Recharge.objects.filter(user_id=user_id, id=recharge_id).first()
 
 
-async def get_trx_price() -> Decimal:
+async def get_trx_price(*, force_refresh: bool = False) -> Decimal:
     global _cached_rate, _cache_time
     now = time.time()
-    if _cached_rate is not None and now - _cache_time < _CACHE_TTL:
+    if not force_refresh and _cached_rate is not None and now - _cache_time < _CACHE_TTL:
         return _cached_rate
+
+    redis_client = await get_redis()
+    if redis_client is not None and not force_refresh:
+        try:
+            cached = await redis_client.get(_TRX_PRICE_CACHE_KEY)
+            if cached:
+                _cached_rate = Decimal(str(cached))
+                _cache_time = now
+                return _cached_rate
+        except Exception as exc:
+            logger.warning('读取 TRX 汇率缓存失败: %s', exc)
+
+        try:
+            cached = await redis_client.get(_TRX_PRICE_LAST_CACHE_KEY)
+            if cached:
+                _cached_rate = Decimal(str(cached))
+                _cache_time = now
+                return _cached_rate
+        except Exception as exc:
+            logger.warning('读取 TRX 最近汇率缓存失败: %s', exc)
+
     try:
         async with httpx.AsyncClient(timeout=5) as client:
             response = await client.get('https://api.binance.com/api/v3/ticker/price?symbol=TRXUSDT')
             response.raise_for_status()
             _cached_rate = Decimal(response.json()['price'])
             _cache_time = now
+            if redis_client is not None:
+                try:
+                    await redis_client.setex(_TRX_PRICE_CACHE_KEY, _CACHE_TTL, str(_cached_rate))
+                    await redis_client.set(_TRX_PRICE_LAST_CACHE_KEY, str(_cached_rate))
+                except Exception as exc:
+                    logger.warning('写入 TRX 汇率缓存失败: %s', exc)
             return _cached_rate
     except Exception as exc:
         logger.warning('获取 TRX 汇率失败: %s', exc)

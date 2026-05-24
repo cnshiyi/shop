@@ -159,6 +159,14 @@ class DashboardAuthSurfaceTestCase(TestCase):
         self.assertFalse(TelegramChatArchive.objects.filter(chat_id=-10012345).exists())
 
 
+class BotRunnerWarmCacheTestCase(SimpleTestCase):
+    def test_warm_trx_rate_cache_swallows_rate_errors(self):
+        from bot.runner import warm_trx_rate_cache
+
+        with patch('bot.runner.get_trx_price', new=AsyncMock(side_effect=RuntimeError('rate failed'))):
+            async_to_sync(warm_trx_rate_cache)()
+
+
 class TelegramMessageRecordingTestCase(TestCase):
     def test_personal_account_messages_are_deduped_per_login_account(self):
         first_account = TelegramLoginAccount.objects.create(label='listener-a', status='logged_in')

@@ -7026,6 +7026,133 @@ class CloudServerServicesTestCase(TestCase):
         self.assertGreaterEqual(data['ip_delete_history_count'], 1)
         self.assertEqual(rows[0]['deletion_source_label'], '人工手动删除')
 
+    def test_lifecycle_plans_sort_shutdown_items_by_delete_time(self):
+        later_asset = CloudAsset.objects.create(
+            kind=CloudAsset.KIND_SERVER,
+            source=CloudAsset.SOURCE_AWS_SYNC,
+            user=self.user,
+            provider='aws_lightsail',
+            region_code=self.plan.region_code,
+            region_name=self.plan.region_name,
+            asset_name='sort-delete-plan-later',
+            instance_id='sort-delete-plan-later',
+            public_ip='5.5.5.61',
+            status=CloudAsset.STATUS_RUNNING,
+            is_active=True,
+            actual_expires_at=timezone.now() + timezone.timedelta(days=30),
+        )
+        earlier_asset = CloudAsset.objects.create(
+            kind=CloudAsset.KIND_SERVER,
+            source=CloudAsset.SOURCE_AWS_SYNC,
+            user=self.user,
+            provider='aws_lightsail',
+            region_code=self.plan.region_code,
+            region_name=self.plan.region_name,
+            asset_name='sort-delete-plan-earlier',
+            instance_id='sort-delete-plan-earlier',
+            public_ip='5.5.5.62',
+            status=CloudAsset.STATUS_RUNNING,
+            is_active=True,
+            actual_expires_at=timezone.now() + timezone.timedelta(days=10),
+        )
+        middle_asset = CloudAsset.objects.create(
+            kind=CloudAsset.KIND_SERVER,
+            source=CloudAsset.SOURCE_AWS_SYNC,
+            user=self.user,
+            provider='aws_lightsail',
+            region_code=self.plan.region_code,
+            region_name=self.plan.region_name,
+            asset_name='sort-delete-plan-middle',
+            instance_id='sort-delete-plan-middle',
+            public_ip='5.5.5.63',
+            status=CloudAsset.STATUS_RUNNING,
+            is_active=True,
+            actual_expires_at=timezone.now() + timezone.timedelta(days=20),
+        )
+        staff_user = get_user_model().objects.create_user(username='staff_lifecycle_sort_delete_time', password='x', is_staff=True)
+        request = self.factory.get('/api/admin/tasks/plans/', {'limit': 1000, 'refresh': 1})
+        request.user = staff_user
+
+        response = lifecycle_plans(request)
+        data = json.loads(response.content)['data']
+        rows = [
+            item for item in data['shutdown_items']
+            if item.get('asset_id') in {later_asset.id, earlier_asset.id, middle_asset.id}
+        ]
+
+        self.assertEqual([item['asset_id'] for item in rows], [earlier_asset.id, middle_asset.id, later_asset.id])
+        delete_times = [parse_datetime(item['delete_at']) for item in rows]
+        self.assertEqual(delete_times, sorted(delete_times))
+
+    def test_lifecycle_plans_move_deleted_unattached_ip_active_row_to_history(self):
+        asset = CloudAsset.objects.create(
+            kind=CloudAsset.KIND_SERVER,
+            source=CloudAsset.SOURCE_AWS_SYNC,
+            user=self.user,
+            provider='aws_lightsail',
+            region_code=self.plan.region_code,
+            region_name=self.plan.region_name,
+            asset_name='completed-unattached-ip-active-row',
+            public_ip='5.5.5.64',
+            status=CloudAsset.STATUS_RUNNING,
+            is_active=True,
+            provider_status='未附加固定IP',
+            note='未附加固定IP',
+            actual_expires_at=timezone.now() - timezone.timedelta(days=1),
+        )
+        call_command('refresh_lifecycle_plans', limit=20)
+        self.assertTrue(CloudLifecyclePlan.objects.filter(
+            plan_kind=CloudLifecyclePlan.PLAN_KIND_UNATTACHED_IP_DELETE,
+            asset=asset,
+            data_group='active',
+        ).exists())
+        asset.status = CloudAsset.STATUS_DELETED
+        asset.is_active = False
+        asset.provider_status = '已删除'
+        asset.note = '固定 IP 已释放'
+        asset.save(update_fields=['status', 'is_active', 'provider_status', 'note', 'updated_at'])
+        call_command('refresh_lifecycle_plans', limit=20)
+
+        self.assertTrue(CloudLifecyclePlan.objects.filter(
+            plan_kind=CloudLifecyclePlan.PLAN_KIND_UNATTACHED_IP_DELETE,
+            asset=asset,
+            data_group='history',
+        ).exists())
+        self.assertFalse(CloudLifecyclePlan.objects.filter(
+            plan_kind=CloudLifecyclePlan.PLAN_KIND_UNATTACHED_IP_DELETE,
+            asset=asset,
+            data_group='active',
+        ).exists())
+
+        staff_user = get_user_model().objects.create_user(username='staff_lifecycle_ip_active_to_history', password='x', is_staff=True)
+        request = self.factory.get('/api/admin/tasks/plans/', {'limit': 1000})
+        request.user = staff_user
+
+        response = lifecycle_plans(request)
+        data = json.loads(response.content)['data']
+        history_rows = [
+            item for item in data['ip_delete_items']
+            if item.get('asset_id') == asset.id and item.get('is_history')
+        ]
+        active_rows = [
+            item for item in data['ip_delete_items']
+            if item.get('asset_id') == asset.id and not item.get('is_history')
+        ]
+
+        self.assertFalse(active_rows)
+        self.assertTrue(history_rows)
+        self.assertFalse(CloudLifecyclePlan.objects.filter(
+            plan_kind=CloudLifecyclePlan.PLAN_KIND_UNATTACHED_IP_DELETE,
+            asset=asset,
+            data_group='active',
+        ).exists())
+        self.assertTrue(CloudLifecyclePlan.objects.filter(
+            plan_kind=CloudLifecyclePlan.PLAN_KIND_UNATTACHED_IP_DELETE,
+            asset=asset,
+            data_group='history',
+        ).exists())
+        self.assertGreaterEqual(data['ip_delete_history_count'], 1)
+
     def test_lifecycle_plans_include_future_server_plan_item(self):
         delete_at = timezone.now() + timezone.timedelta(days=9)
         order = CloudServerOrder.objects.create(
