@@ -333,20 +333,97 @@ def _asset_waiting_manual_time_q():
     )
 
 
-def _active_cloud_asset_plan_rows(limit=1000):
-    waiting_manual_time_q = _asset_waiting_manual_time_q()
-    return _dedupe_cloud_asset_plan_rows(
-        list(
-            _active_cloud_asset_queryset()
-            .exclude(provider='aliyun_simple')
-            .exclude(_cloud_asset_deleted_or_missing_q())
-            .order_by('actual_expires_at', '-updated_at', '-id')[: max(limit * 3, 1000)]
+def _active_cloud_asset_plan_rows(limit=None):
+    return _proxy_list_cloud_asset_plan_rows(limit=limit)
+
+
+def _proxy_list_account_disabled(asset, *, active_account_labels: set[str] | None = None):
+    active_account_labels = active_account_labels if active_account_labels is not None else set(_active_cloud_account_labels())
+    account = getattr(asset, 'cloud_account', None)
+    account_label = str(
+        getattr(asset, 'account_label', '')
+        or cloud_account_label(account)
+        or getattr(getattr(asset, 'order', None), 'account_label', '')
+        or ''
+    ).strip()
+    return bool(
+        getattr(account, 'is_active', True) is False
+        or (account_label and account_label not in active_account_labels)
+    )
+
+
+def _active_cloud_account_labels():
+    labels = []
+    for account in CloudAccountConfig.objects.filter(
+        provider__in=[CloudAccountConfig.PROVIDER_AWS, CloudAccountConfig.PROVIDER_ALIYUN],
+        is_active=True,
+    ):
+        labels.extend(cloud_account_label_variants(account))
+    return list(dict.fromkeys(labels))
+
+
+def _proxy_list_cloud_asset_queryset():
+    unattached_ip_values = list(
+        CloudAsset.objects.filter(
+            kind=CloudAsset.KIND_SERVER,
+            provider_status__contains='未附加固定IP',
+            public_ip__isnull=False,
+        ).exclude(public_ip='').values_list('public_ip', flat=True)[:1000]
+    )
+    return (
+        CloudAsset.objects.select_related('order', 'user', 'cloud_account', 'order__cloud_account')
+        .filter(kind=CloudAsset.KIND_SERVER)
+        .exclude(
+            Q(status__in=[CloudAsset.STATUS_DELETED, CloudAsset.STATUS_TERMINATED])
+            & (Q(public_ip__in=unattached_ip_values) | Q(previous_public_ip__in=unattached_ip_values))
         )
     )
 
 
+def _proxy_list_cloud_asset_plan_rows(limit=None):
+    queryset = _proxy_list_cloud_asset_queryset().distinct().order_by('-sort_order', 'actual_expires_at', '-updated_at', '-id')
+    rows = _dedupe_cloud_asset_plan_rows(list(queryset))
+    active_account_labels = set(_active_cloud_account_labels())
+    rows = [
+        asset for asset in rows
+        if not _proxy_list_account_disabled(asset, active_account_labels=active_account_labels)
+    ]
+    if limit:
+        return rows[: max(1, int(limit))]
+    return rows
+
+
+def _asset_is_sync_only_lifecycle(asset):
+    return getattr(asset, 'provider', '') == 'aliyun_simple'
+
+
+def _asset_deleted_or_missing(asset):
+    status = getattr(asset, 'status', '')
+    provider_status = str(getattr(asset, 'provider_status', '') or '')
+    note = str(getattr(asset, 'note', '') or '')
+    if status in {
+        CloudAsset.STATUS_DELETED,
+        CloudAsset.STATUS_DELETING,
+        CloudAsset.STATUS_TERMINATED,
+        CloudAsset.STATUS_TERMINATING,
+    }:
+        return True
+    if any(marker in provider_status for marker in ['云上未找到', '已到期删除', '已删除']):
+        return True
+    if any(marker in note for marker in ['云上不存在', '已标记删除']) and status not in {
+        CloudAsset.STATUS_RUNNING,
+        CloudAsset.STATUS_PENDING,
+        CloudAsset.STATUS_STARTING,
+        CloudAsset.STATUS_STOPPED,
+        CloudAsset.STATUS_SUSPENDED,
+        CloudAsset.STATUS_UNKNOWN,
+    }:
+        return True
+    return False
+
+
 def _cloud_asset_plan_stats(assets=None):
-    plan_assets = list(assets) if assets is not None else _active_cloud_asset_plan_rows(limit=1000)
+    plan_assets = list(assets) if assets is not None else _active_cloud_asset_plan_rows()
     server_assets = [
         asset for asset in plan_assets
         if not _asset_is_unattached_ip(asset)
@@ -2336,7 +2413,14 @@ def _asset_delete_plan_item_payload(asset, *, queue_status='scheduled_future', q
     plan_at = delete_at
     shutdown_enabled = _asset_shutdown_enabled(asset)
     linked_order = getattr(asset, 'order', None)
-    if linked_order and getattr(linked_order, 'status', '') in {'deleted', 'cancelled', 'expired'}:
+    if _asset_is_sync_only_lifecycle(asset):
+        suspend_at = None
+        delete_at = None
+        plan_at = None
+        queue_status = 'sync_only'
+        queue_status_label = '只同步/自然释放'
+        execution_status = '阿里云只同步状态，按云厂商自然释放；本系统不执行真实关机和删机'
+    elif linked_order and getattr(linked_order, 'status', '') in {'deleted', 'cancelled', 'expired'}:
         queue_status_label = '待处理'
         execution_status = '关联订单已结束，服务器仍存在，待执行删除服务器'
     elif linked_order:
@@ -2377,7 +2461,7 @@ def _asset_delete_plan_item_payload(asset, *, queue_status='scheduled_future', q
         'next_run_at': _iso(plan_at),
         'last_failure_reason': None,
         'execution_status': execution_status,
-        'execution_plan': f'删除服务器 {_fmt_dashboard_dt(plan_at)}' if plan_at else '等待删除时间',
+        'execution_plan': '只同步/自然释放' if queue_status == 'sync_only' else (f'删除服务器 {_fmt_dashboard_dt(plan_at)}' if plan_at else '等待删除时间'),
         'source_note': _asset_note_text(asset) or str(getattr(linked_order, 'provision_note', '') or '').strip(),
         'note': note,
         'display_note': _asset_display_note(asset, fallback=note, max_chars=500),
@@ -2406,13 +2490,24 @@ def _asset_shutdown_enabled(asset):
 
 def _collect_shutdown_plan_queue(now, limit=100):
     pending_until = now + timezone.timedelta(days=7)
-    plan_assets = _active_cloud_asset_plan_rows(limit=limit)
+    plan_assets = _active_cloud_asset_plan_rows()
     server_assets = [asset for asset in plan_assets if not _asset_is_unattached_ip(asset) and 'StaticIp' not in str(asset.provider_resource_id or '')]
     next_run_at = None
     due_items = []
     future_items = []
     for asset in server_assets[:limit]:
         if not asset.actual_expires_at:
+            continue
+        if _asset_deleted_or_missing(asset):
+            continue
+        if _asset_is_sync_only_lifecycle(asset):
+            future_items.append(
+                _asset_delete_plan_item_payload(
+                    asset,
+                    queue_status='sync_only',
+                    queue_status_label='只同步/自然释放',
+                )
+            )
             continue
         _expires_at, _suspend_at, delete_at = _server_asset_lifecycle_times(asset)
         if not next_run_at or (delete_at and delete_at < next_run_at):
@@ -2647,6 +2742,13 @@ def lifecycle_plans(request):
             plan_state_label = '待处理'
             should_execute = False
             blocked_reason = '代理列表资产缺少到期时间，请先维护到期时间'
+        elif queue_status == 'sync_only':
+            resource_state = 'sync_only'
+            resource_state_label = '只同步/自然释放'
+            plan_state = 'sync_only'
+            plan_state_label = '只同步/自然释放'
+            should_execute = False
+            blocked_reason = '该云厂商不执行本地删机计划，仅同步状态，资源按云端自然释放'
         elif queue_status == 'scheduled_future':
             resource_state = 'instance_present'
             resource_state_label = '实例仍存在'
@@ -2786,7 +2888,7 @@ def lifecycle_plans(request):
         item for item in history_items
         if parse_item_dt(item.get('executed_at')) and parse_item_dt(item.get('executed_at')) >= recent_since
     ]
-    plan_stats = _visible_lifecycle_plan_stats(due_items + future_plan_items, ip_delete_items)
+    plan_stats = _cloud_asset_plan_stats()
     if compact:
         def compact_notes(items):
             for item in items:

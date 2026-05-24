@@ -5860,7 +5860,7 @@ class CloudServerServicesTestCase(TestCase):
 
         self.assertEqual(parse_datetime(row['delete_at']), delete_due_at)
 
-    def test_unattached_ip_delete_items_include_future_plans_hidden_from_cloud_asset_list(self):
+    def test_unattached_ip_delete_items_skip_inactive_cloud_account_assets(self):
         inactive_account = CloudAccountConfig.objects.create(
             provider=CloudAccountConfig.PROVIDER_AWS,
             name='inactive-unattached',
@@ -5916,7 +5916,7 @@ class CloudServerServicesTestCase(TestCase):
         asset_ids = {item.get('id') for item in items}
 
         self.assertIn(visible_asset.id, asset_ids)
-        self.assertIn(hidden_asset.id, asset_ids)
+        self.assertNotIn(hidden_asset.id, asset_ids)
 
     def test_unattached_ip_delete_items_include_sync_deleted_history(self):
         asset = CloudAsset.objects.create(
@@ -6826,6 +6826,23 @@ class CloudServerServicesTestCase(TestCase):
             suspend_at=timezone.now() - timezone.timedelta(days=2),
             delete_at=timezone.now() - timezone.timedelta(hours=1),
         )
+        CloudAsset.objects.create(
+            kind=CloudAsset.KIND_SERVER,
+            source=CloudAsset.SOURCE_ORDER,
+            order=order,
+            user=self.user,
+            provider=order.provider,
+            cloud_account=account,
+            account_label=cloud_account_label(account),
+            region_code=order.region_code,
+            region_name=order.region_name,
+            asset_name='shutdown-disabled-plan-state-asset',
+            instance_id='shutdown-disabled-plan-state-asset',
+            public_ip=order.public_ip,
+            actual_expires_at=order.service_expires_at,
+            status=CloudAsset.STATUS_RUNNING,
+            is_active=True,
+        )
         staff_user = get_user_model().objects.create_user(username='staff_lifecycle_shutdown_disabled_state', password='x', is_staff=True)
         request = self.factory.get('/api/admin/tasks/plans/', {'limit': 1000})
         request.user = staff_user
@@ -7122,10 +7139,29 @@ class CloudServerServicesTestCase(TestCase):
             suspend_at=timezone.now() - timezone.timedelta(days=1),
             delete_at=timezone.now() + timezone.timedelta(hours=1),
         )
+        CloudAsset.objects.create(
+            kind=CloudAsset.KIND_SERVER,
+            source=CloudAsset.SOURCE_ORDER,
+            order=order,
+            user=self.user,
+            provider=order.provider,
+            region_code=order.region_code,
+            region_name=order.region_name,
+            asset_name='cmd-lifecycle-plan-asset',
+            instance_id='cmd-lifecycle-plan-asset',
+            public_ip=order.public_ip,
+            actual_expires_at=order.service_expires_at,
+            status=CloudAsset.STATUS_RUNNING,
+            is_active=True,
+        )
 
         call_command('refresh_lifecycle_plans', limit=20)
 
-        self.assertTrue(CloudLifecyclePlan.objects.filter(plan_kind=CloudLifecyclePlan.PLAN_KIND_SHUTDOWN_ORDER, order=order, data_group='active').exists())
+        self.assertTrue(CloudLifecyclePlan.objects.filter(
+            plan_kind=CloudLifecyclePlan.PLAN_KIND_ORPHAN_ASSET_DELETE,
+            asset__order=order,
+            data_group='active',
+        ).exists())
 
     def test_refresh_lifecycle_plan_table_api_populates_cloud_lifecycle_plan(self):
         order = CloudServerOrder.objects.create(
@@ -7146,6 +7182,21 @@ class CloudServerServicesTestCase(TestCase):
             suspend_at=timezone.now() - timezone.timedelta(days=1),
             delete_at=timezone.now() + timezone.timedelta(hours=1),
         )
+        CloudAsset.objects.create(
+            kind=CloudAsset.KIND_SERVER,
+            source=CloudAsset.SOURCE_ORDER,
+            order=order,
+            user=self.user,
+            provider=order.provider,
+            region_code=order.region_code,
+            region_name=order.region_name,
+            asset_name='api-lifecycle-refresh-asset',
+            instance_id='api-lifecycle-refresh-asset',
+            public_ip=order.public_ip,
+            actual_expires_at=order.service_expires_at,
+            status=CloudAsset.STATUS_RUNNING,
+            is_active=True,
+        )
         staff_user = get_user_model().objects.create_user(username='staff_api_lifecycle_refresh', password='x', is_staff=True)
         request = self.factory.post('/api/admin/tasks/plans/refresh/', data=json.dumps({'limit': 20}), content_type='application/json')
         request.user = staff_user
@@ -7153,7 +7204,11 @@ class CloudServerServicesTestCase(TestCase):
         response = refresh_lifecycle_plan_table(request)
 
         self.assertEqual(response.status_code, 200)
-        self.assertTrue(CloudLifecyclePlan.objects.filter(plan_kind=CloudLifecyclePlan.PLAN_KIND_SHUTDOWN_ORDER, order=order, data_group='active').exists())
+        self.assertTrue(CloudLifecyclePlan.objects.filter(
+            plan_kind=CloudLifecyclePlan.PLAN_KIND_ORPHAN_ASSET_DELETE,
+            asset__order=order,
+            data_group='active',
+        ).exists())
 
     def test_update_cloud_asset_expiry_refreshes_delete_plan_snapshot(self):
         old_expiry = timezone.now() - timezone.timedelta(days=10)
@@ -9587,16 +9642,34 @@ class CloudServerServicesTestCase(TestCase):
         sync_mock.assert_not_called()
         self.assertEqual(json.loads(second_response.content)['data']['cache_mode'], 'cached')
 
-    def test_lifecycle_plan_counts_match_visible_rows(self):
+    def test_lifecycle_plan_counts_match_proxy_list_assets(self):
+        active_account = CloudAccountConfig.objects.create(
+            provider=CloudAccountConfig.PROVIDER_AWS,
+            name='lifecycle-count-active',
+            external_account_id='acct-lifecycle-count-active',
+            access_key='A' * 20,
+            secret_key='B' * 40,
+            is_active=True,
+        )
+        inactive_account = CloudAccountConfig.objects.create(
+            provider=CloudAccountConfig.PROVIDER_AWS,
+            name='lifecycle-count-disabled',
+            external_account_id='acct-lifecycle-count-disabled',
+            access_key='C' * 20,
+            secret_key='D' * 40,
+            is_active=False,
+        )
         server_asset = CloudAsset.objects.create(
             kind=CloudAsset.KIND_SERVER,
             source=CloudAsset.SOURCE_AWS_SYNC,
             user=self.user,
             provider='aws_lightsail',
+            cloud_account=active_account,
+            account_label=cloud_account_label(active_account),
             region_code=self.plan.region_code,
             region_name=self.plan.region_name,
-            asset_name='visible-count-server',
-            instance_id='visible-count-server',
+            asset_name='proxy-count-server',
+            instance_id='proxy-count-server',
             public_ip='5.5.5.41',
             status=CloudAsset.STATUS_RUNNING,
             is_active=True,
@@ -9607,9 +9680,11 @@ class CloudServerServicesTestCase(TestCase):
             source=CloudAsset.SOURCE_AWS_SYNC,
             user=self.user,
             provider='aws_lightsail',
+            cloud_account=active_account,
+            account_label=cloud_account_label(active_account),
             region_code=self.plan.region_code,
             region_name=self.plan.region_name,
-            asset_name='visible-count-static-ip',
+            asset_name='proxy-count-static-ip',
             public_ip='5.5.5.42',
             status=CloudAsset.STATUS_RUNNING,
             is_active=True,
@@ -9617,27 +9692,57 @@ class CloudServerServicesTestCase(TestCase):
             note='未附加固定IP',
             actual_expires_at=timezone.now() + timezone.timedelta(days=1),
         )
-        CloudIpLog.objects.create(
-            event_type='deleted',
-            asset=ip_asset,
-            public_ip='5.5.5.42',
-            note='未附加固定IP到期，AWS 固定 IP 已真实释放：visible-count-static-ip',
+        aliyun_asset = CloudAsset.objects.create(
+            kind=CloudAsset.KIND_SERVER,
+            source=CloudAsset.SOURCE_ALIYUN,
+            user=self.user,
+            provider='aliyun_simple',
+            region_code='cn-hongkong',
+            region_name='中国香港',
+            asset_name='proxy-count-aliyun',
+            instance_id='i-proxy-count-aliyun',
+            public_ip='5.5.5.43',
+            status=CloudAsset.STATUS_RUNNING,
+            is_active=True,
+            actual_expires_at=timezone.now() + timezone.timedelta(days=30),
+        )
+        CloudAsset.objects.create(
+            kind=CloudAsset.KIND_SERVER,
+            source=CloudAsset.SOURCE_AWS_SYNC,
+            user=self.user,
+            provider='aws_lightsail',
+            cloud_account=inactive_account,
+            account_label=cloud_account_label(inactive_account),
+            region_code=self.plan.region_code,
+            region_name=self.plan.region_name,
+            asset_name='proxy-count-disabled-account',
+            instance_id='proxy-count-disabled-account',
+            public_ip='5.5.5.44',
+            status=CloudAsset.STATUS_RUNNING,
+            is_active=True,
+            actual_expires_at=timezone.now() + timezone.timedelta(days=30),
         )
         staff_user = get_user_model().objects.create_user(username='staff_lifecycle_visible_counts', password='x', is_staff=True)
+        list_request = self.factory.get('/api/dashboard/cloud-assets/', {'paginated': '1', 'page_size': '100', 'risk_status': 'all'})
+        list_request.user = staff_user
+        list_response = cloud_assets_list(list_request)
+        list_payload = json.loads(list_response.content.decode('utf-8'))['data']
         request = self.factory.get('/api/admin/tasks/plans/', {'limit': 1000, 'refresh': 1})
         request.user = staff_user
 
         response = lifecycle_plans(request)
         data = json.loads(response.content)['data']
-        pending_ip_delete = [
-            item for item in data['ip_delete_items']
-            if not item.get('is_history') and item.get('plan_state') != 'completed'
-        ]
 
-        self.assertEqual(data['server_asset_count'], len(data['due_items']) + len(data['future_plan_items']))
-        self.assertEqual(data['unattached_ip_count'], len(pending_ip_delete))
+        self.assertEqual(list_payload['total'], 3)
+        self.assertEqual(data['source_asset_count'], list_payload['total'])
+        self.assertEqual(data['server_asset_count'], 2)
+        self.assertEqual(data['unattached_ip_count'], 1)
         self.assertEqual(data['source_asset_count'], data['server_asset_count'] + data['unattached_ip_count'])
         self.assertTrue(any(item.get('asset_id') == server_asset.id for item in data['due_items'] + data['future_plan_items']))
+        self.assertTrue(any(item.get('asset_id') == ip_asset.id for item in data['ip_delete_items']))
+        aliyun_row = next(item for item in data['due_items'] + data['future_plan_items'] if item.get('asset_id') == aliyun_asset.id)
+        self.assertEqual(aliyun_row['plan_state_label'], '只同步/自然释放')
+        self.assertFalse(aliyun_row['should_execute'])
 
     def test_unattached_ip_delete_items_hide_confirmed_missing_ip(self):
         from cloud.sync_safety import with_missing_confirmation_note
