@@ -6,7 +6,6 @@ from django.utils import timezone
 from django.utils.dateparse import parse_datetime
 
 from cloud.models import CloudAsset, CloudServerOrder
-from cloud.server_records import Server
 from cloud.aliyun_simple import _build_client, _region_endpoint, _runtime_options
 from core.cloud_accounts import cloud_account_label, cloud_account_label_variants, list_active_cloud_accounts
 from core.dashboard_api import _provider_status_label
@@ -18,7 +17,6 @@ from cloud.sync_safety import clear_missing_confirmation_state, mark_missing_con
 
 _ACTIVE_ORDER_STATUSES = {'pending', 'provisioning', 'completed', 'expiring', 'renew_pending', 'suspended', 'deleting'}
 _SYNC_EXCLUDED_ASSET_STATUSES = {CloudAsset.STATUS_DELETED, CloudAsset.STATUS_DELETING, CloudAsset.STATUS_TERMINATED, CloudAsset.STATUS_TERMINATING}
-_SYNC_EXCLUDED_SERVER_STATUSES = {Server.STATUS_DELETED, Server.STATUS_DELETING, Server.STATUS_TERMINATED, Server.STATUS_TERMINATING}
 _SYNC_EXCLUDED_ORDER_STATUSES = {'deleted', 'deleting', 'expired', 'cancelled'}
 _MISSING_DELETED_STATUS = '云上未找到实例'
 
@@ -76,14 +74,6 @@ def _parse_expire_time(item):
                 return parsed
 
     return None
-
-
-def _resolve_account_id(item):
-    for key in ('OwnerId', 'AccountId', 'ResourceOwnerId', 'UserId'):
-        value = item.get(key)
-        if value:
-            return str(value)
-    return 'aliyun'
 
 
 def _resolve_aliyun_status(item, expires_at=None):
@@ -161,39 +151,7 @@ def _resolve_asset(instance_id, public_ip, account=None, region_code=''):
     return None
 
 
-def _resolve_server(instance_id, public_ip, account=None, region_code=''):
-    base = Q()
-    if account:
-        base &= Q(account_label__in=cloud_account_label_variants(account))
-    region_code = str(region_code or '').strip()
-    if region_code:
-        base &= Q(region_code=region_code)
-    base_queryset = Server.objects.filter(base).filter(Q(order__isnull=True) | ~Q(order__status__in=_SYNC_EXCLUDED_ORDER_STATUSES)).exclude(status__in=_SYNC_EXCLUDED_SERVER_STATUSES)
-    if public_ip:
-        server = base_queryset.filter(Q(public_ip=public_ip) | Q(previous_public_ip=public_ip)).order_by(*_server_resolve_ordering(public_ip)).first()
-        if server:
-            return server
-    if instance_id:
-        server = base_queryset.filter(Q(instance_id=instance_id) | Q(provider_resource_id=instance_id) | Q(server_name=instance_id)).order_by('-updated_at', '-id').first()
-        if server:
-            return server
-    return None
-
-
 def _asset_resolve_ordering(public_ip=''):
-    ordering = []
-    if public_ip:
-        ordering.append(Case(
-            When(public_ip=public_ip, then=Value(0)),
-            When(previous_public_ip=public_ip, then=Value(1)),
-            default=Value(2),
-            output_field=IntegerField(),
-        ))
-    ordering.extend(['-updated_at', '-id'])
-    return ordering
-
-
-def _server_resolve_ordering(public_ip=''):
     ordering = []
     if public_ip:
         ordering.append(Case(
@@ -279,40 +237,6 @@ def _mark_deleted_when_missing_in_aliyun(region, existing_instance_ids, stdout, 
         asset.public_ip = None
         asset.provider_status = _MISSING_DELETED_STATUS
         asset.save(update_fields=['status', 'is_active', 'previous_public_ip', 'public_ip', 'provider_status', 'sync_state', 'updated_at'])
-        server_lookup = Q()
-        provider_resource_id = str(asset.provider_resource_id or '').strip()
-        if instance_id:
-            server_lookup |= Q(instance_id=instance_id)
-        if provider_resource_id:
-            server_lookup |= Q(provider_resource_id=provider_resource_id)
-        if public_ip:
-            server_lookup |= Q(public_ip=public_ip)
-        if old_public_ip:
-            server_lookup |= Q(previous_public_ip=old_public_ip)
-        server = None
-        if server_lookup:
-            server_queryset = Server.objects.filter(
-                server_lookup,
-                provider='aliyun_simple',
-                region_code=region,
-            )
-            if account:
-                server_queryset = server_queryset.filter(account_label__in=cloud_account_label_variants(account))
-            server = server_queryset.order_by('-updated_at', '-id').first()
-        if server and getattr(server, 'id', None) != getattr(asset, 'id', None):
-            mark_missing_confirmation_pending(
-                server,
-                old_public_ip=old_public_ip,
-                now_iso=now_iso,
-                provider_status=_MISSING_DELETED_STATUS,
-                pending_status=f'{_MISSING_DELETED_STATUS}-待确认',
-            )
-            server.status = Server.STATUS_DELETED
-            server.is_active = False
-            server.previous_public_ip = old_public_ip or server.previous_public_ip
-            server.public_ip = None
-            server.provider_status = _MISSING_DELETED_STATUS
-            server.save(update_fields=['status', 'is_active', 'previous_public_ip', 'public_ip', 'provider_status', 'sync_state', 'updated_at'])
         order = getattr(asset, 'order', None) or _resolve_order_for_ip(old_public_ip, account)
         if order:
             order.status = 'deleted'
@@ -323,7 +247,6 @@ def _mark_deleted_when_missing_in_aliyun(region, existing_instance_ids, stdout, 
             event_type='deleted',
             order=order,
             asset=asset,
-            server=server,
             previous_public_ip=old_public_ip or None,
             public_ip=None,
             note='IP校验发现云上不存在，已标记删除',
@@ -498,7 +421,6 @@ class Command(BaseCommand):
                 if not target_matches(instance_id, public_ip):
                     continue
                 expires_at = _parse_expire_time(item)
-                account_id = _resolve_account_id(item)
                 normalized_status, raw_status, business_status, disable_reason = _resolve_aliyun_status(item, expires_at)
                 normalized_status = _elevate_deleted_when_ip_missing(normalized_status, public_ip)
                 provider_status = _provider_status_label(' / '.join([part for part in [raw_status or None, business_status or None, disable_reason or None] if part]) or None)
@@ -584,47 +506,6 @@ class Command(BaseCommand):
                     account_stats['deleted_by_missing_ip'] += 1
                     deleted_by_missing_ip_items.append(f'{asset.id}:{public_ip or "缺失"}:{asset_name or instance_id}')
 
-                server = _resolve_server(instance_id, public_ip, account, region)
-                server_defaults = {
-                    'source': Server.SOURCE_ALIYUN,
-                    'provider': 'aliyun_simple',
-                    'account_label': account_label or account_id,
-                    'region_code': region,
-                    'region_name': item.get('RegionId') or region,
-                    'server_name': asset_name,
-                    'instance_id': instance_id,
-                    'provider_resource_id': instance_id,
-                    'public_ip': public_ip,
-                    'expires_at': expires_at,
-                    'status': normalized_status,
-                    'provider_status': provider_status,
-                    'is_active': normalized_status in Server.ACTIVE_STATUSES,
-                }
-                if linked_order:
-                    server_defaults['order'] = linked_order
-                    if not server:
-                        server_defaults['user'] = linked_order.user
-                    server_defaults['expires_at'] = expires_at or linked_order.service_expires_at
-                if asset:
-                    server_defaults['user'] = asset.user
-                    server_defaults['expires_at'] = expires_at or asset.actual_expires_at
-                if server:
-                    server_defaults['user'] = server.user
-                    server_defaults['expires_at'] = expires_at or server.expires_at
-                old_server_public_ip = server.public_ip if server else None
-                if server:
-                    if old_server_public_ip and old_server_public_ip != public_ip:
-                        server.previous_public_ip = old_server_public_ip
-                    for key, value in server_defaults.items():
-                        setattr(server, key, value)
-                    if not getattr(server, 'user_id', None) and getattr(asset, 'user_id', None):
-                        server.user = asset.user
-                    if normalized_status not in {CloudAsset.STATUS_DELETED, CloudAsset.STATUS_TERMINATED}:
-                        clear_missing_confirmation_state(server)
-                    server.save()
-                else:
-                    Server.objects.create(**server_defaults)
-
                 if linked_order:
                     order_updates = _aliyun_order_updates_from_sync(
                         linked_order,
@@ -641,11 +522,9 @@ class Command(BaseCommand):
                     CloudServerOrder.objects.filter(pk=linked_order.pk).update(**order_updates)
 
                 if ip_changed:
-                    refreshed_server = _resolve_server(instance_id, public_ip, account, region)
                     record_cloud_ip_log(
                         event_type='changed',
                         asset=asset,
-                        server=refreshed_server,
                         public_ip=public_ip,
                         previous_public_ip=old_public_ip,
                         note=f'自动同步发现 IP 变化：{old_public_ip} -> {public_ip}',

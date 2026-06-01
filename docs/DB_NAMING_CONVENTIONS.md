@@ -83,6 +83,8 @@
 - `cloud_price`
 - `cloud_order`
 - `cloud_asset`
+- `cloud_asset_dashboard_snapshot`
+- `cloud_asset_sync_job`
 - `cloud_ip_log`
 - `cloud_lifecycle_plan_note`
 - `cloud_lifecycle_plan`

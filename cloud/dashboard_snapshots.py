@@ -25,6 +25,21 @@ def _is_interpreter_shutdown_error(exc: Exception) -> bool:
 def _refresh_dashboard_plan_snapshots(reason: str = '', *, lifecycle_limit: int = 1000):
     try:
         from cloud import api as cloud_api
+        cloud_api.refresh_cloud_asset_dashboard_snapshots(reason=reason or 'dashboard_snapshot_refresh', full=True)
+    except (OperationalError, ProgrammingError) as exc:
+        if _is_db_table_not_ready_error(exc):
+            logger.debug('DASHBOARD_SNAPSHOT_CLOUD_ASSET_REFRESH_SKIPPED reason=%s error=%s', reason, exc)
+        else:
+            logger.exception('DASHBOARD_SNAPSHOT_CLOUD_ASSET_REFRESH_FAILED reason=%s', reason)
+    except RuntimeError as exc:
+        if _is_interpreter_shutdown_error(exc):
+            logger.info('DASHBOARD_SNAPSHOT_CLOUD_ASSET_REFRESH_SKIPPED reason=%s error=%s', reason, exc)
+        else:
+            logger.exception('DASHBOARD_SNAPSHOT_CLOUD_ASSET_REFRESH_FAILED reason=%s', reason)
+    except Exception:
+        logger.exception('DASHBOARD_SNAPSHOT_CLOUD_ASSET_REFRESH_FAILED reason=%s', reason)
+    try:
+        from cloud import api as cloud_api
         cloud_api._sync_auto_renew_plan_table(now=timezone.now())
     except (OperationalError, ProgrammingError) as exc:
         if _is_db_table_not_ready_error(exc):

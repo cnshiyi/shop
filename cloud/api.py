@@ -5,6 +5,7 @@ import io
 import json
 import logging
 import re
+import threading
 import uuid
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import timezone as dt_timezone
@@ -17,9 +18,9 @@ from asgiref.sync import async_to_sync
 from django.core.cache import cache
 from django.core.management import get_commands, load_command_class
 from django.db import IntegrityError, close_old_connections, transaction
-from django.db.models import Case, CharField, Count, F, IntegerField, Q, Value, When
+from django.db.models import Case, CharField, Count, F, IntegerField, Min, Q, Value, When
 from django.db.models.functions import Cast
-from django.db.utils import ProgrammingError
+from django.db.utils import OperationalError, ProgrammingError
 from django.utils import timezone
 from django.utils.dateparse import parse_date, parse_datetime
 from django.views.decorators.csrf import csrf_exempt
@@ -33,7 +34,7 @@ from cloud.asset_queries import cloud_assets_base_queryset, dedupe_cloud_asset_r
 from cloud.dashboard_api_helpers import _dashboard_expiry_ordering, _dashboard_sort_direction, _generate_cloud_plan_config_id, _preserve_link_status_label, _preserve_link_status_with_countdown
 from cloud.dashboard_snapshots import _refresh_dashboard_plan_snapshots, _refresh_dashboard_plan_snapshots_deferred, _refresh_lifecycle_plan_snapshot
 from cloud.services import AWS_REGION_NAMES, RenewalPriceMissingError, _renewal_price, _update_order_primary_records, create_cloud_server_rebuild_order, drop_asset_note_update, ensure_cloud_asset_operation_order, ensure_cloud_server_pricing, ensure_manual_expiry_operation_order, ensure_manual_owner_operation_order, ensure_manual_price_operation_order, record_cloud_ip_log, refresh_custom_plan_cache, replace_cloud_asset_order_by_admin, set_cloud_server_auto_renew_admin, sync_cloud_asset_user_binding
-from cloud.models import AddressMonitor, CloudAsset, CloudAutoRenewPatrolLog, CloudAutoRenewPlan, CloudIpLog, CloudNoticePlan, CloudServerOrder, CloudServerPlan, CloudUserNoticeLog, ServerPrice
+from cloud.models import AddressMonitor, CloudAsset, CloudAssetDashboardSnapshot, CloudAssetSyncJob, CloudAutoRenewPatrolLog, CloudAutoRenewPlan, CloudIpLog, CloudNoticePlan, CloudServerOrder, CloudServerPlan, CloudUserNoticeLog, ServerPrice
 from cloud.note_utils import append_note, prepend_note
 from core.cloud_accounts import cloud_account_label, cloud_account_label_variants, list_cloud_account_labels
 from core.dashboard_api import _apply_keyword_filter, _countdown_label, _days_left, _decimal_to_str, _error, _get_keyword, _iso, _ok, _parse_decimal, _provider_label, _provider_status_label, _read_payload, _region_label, _server_source_label, _split_usernames, _status_label, _user_payload, dashboard_login_required, dashboard_superuser_required
@@ -490,6 +491,279 @@ def _cloud_asset_payloads(assets, *, allow_mutation=False):
     asset_list = list(assets)
     context = _build_cloud_asset_payload_context(asset_list, allow_mutation=allow_mutation)
     return [_asset_payload(asset, context=context) for asset in asset_list]
+
+
+_DASHBOARD_RISK_FLAGS = {
+    'normal': 'risk_normal',
+    'due_soon': 'risk_due_soon',
+    'expired': 'risk_expired',
+    'unattached_ip': 'risk_unattached_ip',
+    'abnormal': 'risk_abnormal',
+    'account_disabled': 'risk_account_disabled',
+    'shutdown_disabled': 'risk_shutdown_disabled',
+    'unbound_user': 'risk_unbound_user',
+    'unbound_group': 'risk_unbound_group',
+    'auto_renew_off': 'risk_auto_renew_off',
+    'deleted': 'risk_deleted',
+}
+
+
+def _snapshot_group_key(item: dict, group_by='user') -> str:
+    if group_by == 'telegram_group' and item.get('telegram_group_id'):
+        return f"group:{item.get('telegram_group_id')}"
+    user_id = item.get('user_id')
+    if user_id:
+        return f'user:{user_id}'
+    tg_user_id = item.get('tg_user_id')
+    if tg_user_id:
+        return f'tg:{tg_user_id}'
+    return f"unbound:{item.get('id', '')}"
+
+
+def _snapshot_group_label(item: dict, group_by='user') -> str:
+    if group_by == 'telegram_group' and item.get('telegram_group_id'):
+        return str(item.get('telegram_group_title') or item.get('telegram_group_username') or item.get('telegram_group_chat_id') or '未绑定群组')
+    return str(item.get('user_display_name') or item.get('username_label') or item.get('tg_user_id') or '未绑定用户')
+
+
+def _snapshot_search_text(item: dict) -> str:
+    values = [
+        item.get('asset_name'), item.get('instance_id'), item.get('provider_resource_id'),
+        item.get('public_ip'), item.get('previous_public_ip'), item.get('mtproxy_host'),
+        item.get('mtproxy_link'), item.get('note'), item.get('provider_status'),
+        item.get('region_code'), item.get('region_name'), item.get('region_label'),
+        item.get('account_label'), item.get('user_display_name'), item.get('username_label'),
+        item.get('tg_user_id'), item.get('telegram_group_title'), item.get('telegram_group_username'),
+        item.get('telegram_group_chat_id'), item.get('order_no'),
+    ]
+    proxy_links = item.get('proxy_links') or []
+    if isinstance(proxy_links, list):
+        values.extend(proxy_links)
+    return '\n'.join(str(value) for value in values if value not in {None, ''})
+
+
+def _snapshot_defaults_from_payload(item: dict) -> dict:
+    statuses = item.get('risk_statuses') or [item.get('risk_status') or 'other']
+    statuses = list(dict.fromkeys(str(status or 'other') for status in statuses))
+    flags = {field: False for field in _DASHBOARD_RISK_FLAGS.values()}
+    for status in statuses:
+        field = _DASHBOARD_RISK_FLAGS.get(status)
+        if field:
+            flags[field] = True
+    return {
+        'payload': item,
+        'search_text': _snapshot_search_text(item),
+        'provider': item.get('provider') or '',
+        'cloud_account_id': item.get('cloud_account_id'),
+        'account_label': item.get('account_label') or '',
+        'region_code': item.get('region_code') or '',
+        'public_ip': item.get('public_ip') or '',
+        'status': item.get('status') or '',
+        'is_active': bool(item.get('is_active')),
+        'actual_expires_at': parse_datetime(item.get('actual_expires_at')) if item.get('actual_expires_at') else None,
+        'sort_order': int(item.get('sort_order') or 99),
+        'user_id': item.get('user_id'),
+        'tg_user_id': item.get('tg_user_id'),
+        'telegram_group_id': item.get('telegram_group_id'),
+        'group_user_key': _snapshot_group_key(item, 'user'),
+        'group_user_label': _snapshot_group_label(item, 'user')[:191],
+        'group_telegram_key': _snapshot_group_key(item, 'telegram_group'),
+        'group_telegram_label': _snapshot_group_label(item, 'telegram_group')[:191],
+        'risk_status': item.get('risk_status') or 'other',
+        'risk_rank': int(item.get('risk_rank') or 99),
+        'risk_statuses': statuses,
+        'asset_updated_at': parse_datetime(item.get('updated_at')) if item.get('updated_at') else None,
+        **flags,
+    }
+
+
+def refresh_cloud_asset_dashboard_snapshots(asset_ids=None, *, reason: str = '', full: bool | None = None) -> dict:
+    started_at = timezone.now()
+    if full is None:
+        full = not asset_ids
+    queryset = cloud_assets_base_queryset()
+    if asset_ids:
+        queryset = queryset.filter(id__in=list(asset_ids))
+    assets = dedupe_cloud_asset_rows(list(queryset.order_by('-sort_order', F('actual_expires_at').asc(nulls_last=True), '-updated_at', '-id')))
+    payloads = _cloud_asset_payloads(assets, allow_mutation=False)
+    existing = {
+        row.asset_id: row
+        for row in CloudAssetDashboardSnapshot.objects.filter(asset_id__in=[item['id'] for item in payloads])
+    }
+    create_rows = []
+    update_rows = []
+    update_fields = [
+        'payload', 'search_text', 'provider', 'cloud_account_id', 'account_label', 'region_code',
+        'public_ip', 'status', 'is_active', 'actual_expires_at', 'sort_order', 'user_id', 'tg_user_id',
+        'telegram_group_id', 'group_user_key', 'group_user_label', 'group_telegram_key',
+        'group_telegram_label', 'risk_status', 'risk_rank', 'risk_statuses', 'risk_normal',
+        'risk_due_soon', 'risk_expired', 'risk_unattached_ip', 'risk_abnormal',
+        'risk_account_disabled', 'risk_shutdown_disabled', 'risk_unbound_user',
+        'risk_unbound_group', 'risk_auto_renew_off', 'risk_deleted', 'asset_updated_at',
+    ]
+    for item in payloads:
+        defaults = _snapshot_defaults_from_payload(item)
+        row = existing.get(item['id'])
+        if row:
+            for key, value in defaults.items():
+                setattr(row, key, value)
+            update_rows.append(row)
+        else:
+            create_rows.append(CloudAssetDashboardSnapshot(asset_id=item['id'], **defaults))
+    if create_rows:
+        CloudAssetDashboardSnapshot.objects.bulk_create(create_rows, batch_size=500)
+    if update_rows:
+        CloudAssetDashboardSnapshot.objects.bulk_update(update_rows, update_fields, batch_size=500)
+    if full:
+        keep_ids = [item['id'] for item in payloads]
+        stale_qs = CloudAssetDashboardSnapshot.objects.all()
+        if keep_ids:
+            stale_qs = stale_qs.exclude(asset_id__in=keep_ids)
+        stale_qs.delete()
+    duration = max((timezone.now() - started_at).total_seconds(), 0)
+    logger.info(
+        'CLOUD_ASSET_DASHBOARD_SNAPSHOT_REFRESH reason=%s full=%s assets=%s created=%s updated=%s duration=%.3f',
+        reason,
+        full,
+        len(payloads),
+        len(create_rows),
+        len(update_rows),
+        duration,
+    )
+    return {'assets': len(payloads), 'created': len(create_rows), 'updated': len(update_rows), 'duration_seconds': round(duration, 3)}
+
+
+def _ensure_cloud_asset_dashboard_snapshots(reason: str = 'list') -> bool:
+    asset_total = CloudAsset.objects.filter(kind=CloudAsset.KIND_SERVER).count()
+    snapshot_total = CloudAssetDashboardSnapshot.objects.count()
+    if asset_total and not snapshot_total:
+        refresh_cloud_asset_dashboard_snapshots(reason=f'{reason}:empty', full=True)
+        return True
+    latest_asset = (
+        CloudAsset.objects
+        .filter(kind=CloudAsset.KIND_SERVER)
+        .order_by('-updated_at')
+        .values_list('updated_at', flat=True)
+        .first()
+    )
+    latest_snapshot = CloudAssetDashboardSnapshot.objects.order_by('-asset_updated_at').values_list('asset_updated_at', flat=True).first()
+    if latest_asset and (not latest_snapshot or latest_snapshot < latest_asset):
+        refresh_cloud_asset_dashboard_snapshots(reason=f'{reason}:stale', full=True)
+        return True
+    return False
+
+
+def _dashboard_snapshot_queryset(keyword=''):
+    queryset = CloudAssetDashboardSnapshot.objects.all()
+    keyword_text = str(keyword or '').strip()
+    if not keyword_text:
+        return queryset
+    normalized_keyword = keyword_text.lstrip('@')
+    keyword_q = Q(search_text__icontains=keyword_text)
+    if normalized_keyword != keyword_text:
+        keyword_q |= Q(search_text__icontains=normalized_keyword)
+    matched_user_ids = set(
+        queryset.filter(keyword_q).exclude(user_id__isnull=True).values_list('user_id', flat=True)[:500]
+    )
+    user_condition = (
+        Q(username__icontains=keyword_text)
+        | Q(first_name__icontains=keyword_text)
+        | Q(tg_user_id__icontains=keyword_text)
+    )
+    if normalized_keyword != keyword_text:
+        user_condition |= Q(username__icontains=normalized_keyword)
+    matched_user_ids.update(TelegramUser.objects.filter(user_condition).values_list('id', flat=True)[:500])
+    if matched_user_ids:
+        keyword_q |= Q(user_id__in=matched_user_ids)
+    return queryset.filter(keyword_q)
+
+
+def _filter_dashboard_snapshots_by_risk(queryset, risk_status: str):
+    risk_status = str(risk_status or '').strip()
+    if not risk_status or risk_status == 'all':
+        return queryset.filter(risk_account_disabled=False)
+    field = _DASHBOARD_RISK_FLAGS.get(risk_status)
+    if not field:
+        return queryset.none()
+    queryset = queryset.filter(**{field: True})
+    if risk_status != 'account_disabled':
+        queryset = queryset.filter(risk_account_disabled=False)
+    return queryset
+
+
+def _dashboard_snapshot_risk_counts(queryset) -> dict:
+    aggregates = {
+        'all': Count('id', filter=Q(risk_account_disabled=False)),
+    }
+    for status, field in _DASHBOARD_RISK_FLAGS.items():
+        if status == 'account_disabled':
+            aggregates[status] = Count('id', filter=Q(**{field: True}))
+        else:
+            aggregates[status] = Count('id', filter=Q(risk_account_disabled=False, **{field: True}))
+    counts = queryset.aggregate(**aggregates)
+    return {key: int(value or 0) for key, value in counts.items()}
+
+
+def _dashboard_snapshot_ordering(sort_by: str, sort_direction: str):
+    if sort_by in {'actual_expires_at', 'expires_at', 'days_left', 'remaining_days'}:
+        expires = F('actual_expires_at').desc(nulls_last=True) if sort_direction == 'desc' else F('actual_expires_at').asc(nulls_last=True)
+        return [expires, 'risk_rank', '-sort_order', '-asset_id']
+    return ['risk_rank', F('actual_expires_at').asc(nulls_last=True), '-sort_order', '-asset_id']
+
+
+def _snapshot_payloads(rows):
+    return [dict(row.payload or {}) for row in rows]
+
+
+def _parse_dashboard_page(request, *, default_size=20, min_size=1, max_size=200):
+    try:
+        page = max(int(request.GET.get('page') or '1'), 1)
+    except (TypeError, ValueError):
+        page = 1
+    try:
+        page_size = int(request.GET.get('page_size') or str(default_size))
+    except (TypeError, ValueError):
+        page_size = default_size
+    page_size = min(max(page_size, min_size), max_size)
+    return page, page_size
+
+
+def _paginate_dashboard_snapshot_queryset(queryset, request, *, sort_by='', sort_direction='', default_size=20, min_size=1, max_size=200):
+    page, page_size = _parse_dashboard_page(request, default_size=default_size, min_size=min_size, max_size=max_size)
+    total = queryset.count()
+    total_pages = max((total + page_size - 1) // page_size, 1)
+    page = min(page, total_pages)
+    start = (page - 1) * page_size
+    rows = list(queryset.order_by(*_dashboard_snapshot_ordering(sort_by, sort_direction))[start:start + page_size])
+    return _snapshot_payloads(rows), total, total_pages, page, page_size
+
+
+def _dashboard_snapshot_group_page(queryset, request, *, group_by='user', sort_by='', sort_direction=''):
+    page, page_size = _parse_dashboard_page(request, default_size=20, min_size=1, max_size=100)
+    group_field = 'group_telegram_key' if group_by == 'telegram_group' else 'group_user_key'
+    group_label = 'group_telegram_label' if group_by == 'telegram_group' else 'group_user_label'
+    grouped = list(
+        queryset.values(group_field)
+        .annotate(group_expires=Min('actual_expires_at'), group_name=Min(group_label), min_risk=Min('risk_rank'))
+        .order_by(F('group_expires').asc(nulls_last=True), 'group_name', group_field)
+    )
+    total = len(grouped)
+    total_pages = max((total + page_size - 1) // page_size, 1)
+    page = min(page, total_pages)
+    page_keys = [row[group_field] for row in grouped[(page - 1) * page_size:page * page_size]]
+    if not page_keys:
+        return [], [], total, total_pages, page, page_size
+    order_index = {key: index for index, key in enumerate(page_keys)}
+    rows = list(
+        queryset
+        .filter(**{f'{group_field}__in': page_keys})
+        .order_by(*_dashboard_snapshot_ordering(sort_by, sort_direction))
+    )
+    items = _snapshot_payloads(rows)
+    ordered_groups = _group_cloud_asset_payloads(items, group_by)
+    ordered_groups.sort(key=lambda group: order_index.get(group.get('user_key'), 999999))
+    page_items = [row for group in ordered_groups for row in group['items']]
+    return ordered_groups, page_items, total, total_pages, page, page_size
 
 
 def _display_cloud_asset_note(note: str | None) -> str:
@@ -1397,50 +1671,51 @@ def cloud_assets_list(request):
         group_by = 'telegram_group'
     paginated = (request.GET.get('paginated') or '').lower() in {'1', 'true', 'yes'}
     risk_status = (request.GET.get('risk_status') or 'all').strip()
+    show_deleted = (request.GET.get('show_deleted') or '').lower() in {'1', 'true', 'yes'}
+    sort_by = (request.GET.get('sort_by') or '').strip().lower()
+    sort_direction = _dashboard_sort_direction(request)
     try:
-        queryset = cloud_assets_base_queryset()
-        sort_by = (request.GET.get('sort_by') or '').strip().lower()
-        sort_direction = _dashboard_sort_direction(request)
-        ordering = ['-sort_order', F('actual_expires_at').asc(nulls_last=True), '-updated_at', '-id']
-        if sort_by in {'actual_expires_at', 'expires_at', 'days_left', 'remaining_days'}:
-            ordering = _dashboard_expiry_ordering('actual_expires_at', sort_direction)
-        queryset = _apply_cloud_assets_keyword(queryset, keyword).distinct().order_by(*ordering)
-        assets = dedupe_cloud_asset_rows(list(queryset))
-        items = _cloud_asset_payloads(assets, allow_mutation=False)
-        items = _sort_cloud_asset_payloads(items, sort_by, sort_direction)
-        risk_counts = _cloud_asset_risk_counts(items)
-        items = _filter_cloud_asset_payloads_by_risk(items, risk_status)
+        _ensure_cloud_asset_dashboard_snapshots('cloud_assets_list')
+        base_queryset = _dashboard_snapshot_queryset(keyword)
+        risk_counts = _dashboard_snapshot_risk_counts(base_queryset)
+        queryset = _filter_dashboard_snapshots_by_risk(base_queryset, risk_status)
+        if not show_deleted and risk_status in {'', 'all'}:
+            queryset = queryset.filter(
+                Q(risk_unattached_ip=True)
+                | (
+                    Q(is_active=True)
+                    & ~Q(status__in=[
+                        CloudAsset.STATUS_DELETED,
+                        CloudAsset.STATUS_DELETING,
+                        CloudAsset.STATUS_EXPIRED,
+                        CloudAsset.STATUS_TERMINATED,
+                        CloudAsset.STATUS_TERMINATING,
+                        CloudAsset.STATUS_UNKNOWN,
+                    ])
+                )
+            )
         if not grouped and paginated:
-            try:
-                page = max(int(request.GET.get('page') or '1'), 1)
-            except (TypeError, ValueError):
-                page = 1
-            try:
-                page_size = int(request.GET.get('page_size') or '20')
-            except (TypeError, ValueError):
-                page_size = 20
-            page_size = min(max(page_size, 10), 200)
-            page_items, total, total_pages, page = _paginate_payloads_keep_groups(items, page, page_size, group_by)
+            page_items, total, total_pages, page, page_size = _paginate_dashboard_snapshot_queryset(
+                queryset,
+                request,
+                sort_by=sort_by,
+                sort_direction=sort_direction,
+                default_size=20,
+                min_size=10,
+                max_size=200,
+            )
             return _ok({'items': page_items, 'total': total, 'page': page, 'page_size': page_size, 'total_pages': total_pages, 'risk_counts': risk_counts})
         if grouped and paginated:
-            try:
-                page = max(int(request.GET.get('page') or '1'), 1)
-            except (TypeError, ValueError):
-                page = 1
-            try:
-                page_size = int(request.GET.get('page_size') or '20')
-            except (TypeError, ValueError):
-                page_size = 20
-            page_size = min(max(page_size, 1), 100)
-            ordered_groups = _group_cloud_asset_payloads(items, group_by)
-            total = len(ordered_groups)
-            total_pages = max((total + page_size - 1) // page_size, 1)
-            page = min(page, total_pages)
-            start = (page - 1) * page_size
-            page_groups = ordered_groups[start:start + page_size]
-            page_items = [row for group in page_groups for row in group['items']]
+            page_groups, page_items, total, total_pages, page, page_size = _dashboard_snapshot_group_page(
+                queryset,
+                request,
+                group_by=group_by,
+                sort_by=sort_by,
+                sort_direction=sort_direction,
+            )
             return _ok({'groups': page_groups, 'items': page_items, 'total': total, 'page': page, 'page_size': page_size, 'total_pages': total_pages, 'risk_counts': risk_counts})
-    except ProgrammingError:
+        items = _snapshot_payloads(list(queryset.order_by(*_dashboard_snapshot_ordering(sort_by, sort_direction))))
+    except (OperationalError, ProgrammingError):
         if grouped and paginated:
             return _ok({'groups': [], 'items': [], 'total': 0, 'page': 1, 'page_size': 20, 'total_pages': 1, 'risk_counts': {'all': 0}})
         if grouped:
@@ -1461,11 +1736,10 @@ def cloud_assets_list(request):
 def cloud_assets_risk_summary(request):
     keyword = _get_keyword(request)
     try:
-        queryset = _apply_cloud_assets_keyword(cloud_assets_base_queryset(), keyword).distinct().order_by('-updated_at', '-id')
-        assets = dedupe_cloud_asset_rows(list(queryset))
-        items = _cloud_asset_payloads(assets, allow_mutation=False)
-        return _ok({'risk_counts': _cloud_asset_risk_counts(items), 'total': len(items)})
-    except ProgrammingError:
+        _ensure_cloud_asset_dashboard_snapshots('cloud_assets_risk_summary')
+        queryset = _dashboard_snapshot_queryset(keyword)
+        return _ok({'risk_counts': _dashboard_snapshot_risk_counts(queryset), 'total': queryset.count()})
+    except (OperationalError, ProgrammingError):
         return _ok({'risk_counts': {'all': 0}, 'total': 0})
 
 
@@ -3971,7 +4245,7 @@ def _parse_provider_scope(value) -> set[str]:
 @dashboard_superuser_required
 @require_POST
 def sync_cloud_asset_status(request, asset_id):
-    sync_run_id = uuid.uuid4().hex[:8]
+    sync_run_id = uuid.uuid4().hex
     asset = CloudAsset.objects.select_related('order', 'user', 'cloud_account', 'telegram_group').filter(pk=asset_id).first()
     if not asset:
         return _error('云资产不存在', status=404)
@@ -4055,19 +4329,16 @@ def sync_cloud_asset_status(request, asset_id):
     return _ok(response_payload)
 
 
-@csrf_exempt
-@dashboard_superuser_required
-@require_POST
-def sync_cloud_assets(request):
-    sync_run_id = uuid.uuid4().hex[:8]
-    payload = _read_payload(request)
-    aliyun_region = (payload.get('region') or request.POST.get('region') or request.GET.get('region') or 'cn-hongkong').strip() or 'cn-hongkong'
-    aws_region = (payload.get('aws_region') or request.POST.get('aws_region') or request.GET.get('aws_region') or '').strip()
+def _run_cloud_assets_sync(payload, *, sync_run_id: str | None = None, job: CloudAssetSyncJob | None = None):
+    sync_run_id = sync_run_id or uuid.uuid4().hex[:8]
+    payload = dict(payload or {})
+    aliyun_region = (payload.get('region') or 'cn-hongkong').strip() or 'cn-hongkong'
+    aws_region = (payload.get('aws_region') or '').strip()
     if aws_region.lower() == 'all':
         aws_region = ''
-    providers = _parse_provider_scope(payload.get('providers') or payload.get('provider') or request.GET.get('provider'))
-    requested_account_ids = _parse_int_list(payload.get('account_ids') or request.GET.get('account_ids'))
-    requested_asset_ids = _parse_int_list(payload.get('asset_ids') or request.GET.get('asset_ids'))
+    providers = _parse_provider_scope(payload.get('providers') or payload.get('provider'))
+    requested_account_ids = _parse_int_list(payload.get('account_ids'))
+    requested_asset_ids = _parse_int_list(payload.get('asset_ids'))
     errors = []
     synced = {'aliyun': False, 'aws': False, 'reconcile': False}
     aws_regions = []
@@ -4150,6 +4421,15 @@ def sync_cloud_assets(request):
         len(sync_tasks),
         [_sync_task_payload(task) for task in sync_tasks],
     )
+    if job:
+        CloudAssetSyncJob.objects.filter(pk=job.pk).update(
+            progress_current=0,
+            progress_total=len(sync_tasks),
+            current_task='同步任务已生成' if sync_tasks else '没有可执行同步任务',
+            warnings=warnings[:50],
+            errors=errors[:50],
+            updated_at=timezone.now(),
+        )
 
     def run_task(task):
         return _run_sync_task_with_lock(task)
@@ -4160,6 +4440,7 @@ def sync_cloud_assets(request):
     if sync_tasks:
         with ThreadPoolExecutor(max_workers=max_workers) as executor:
             future_map = {executor.submit(run_task, task): task for task in sync_tasks}
+            completed_tasks = 0
             for future in as_completed(future_map):
                 task = future_map[future]
                 account = task['account']
@@ -4196,6 +4477,17 @@ def sync_cloud_assets(request):
                         logger.exception('DASHBOARD_SYNC_ASSETS_AWS_FAILED run_id=%s account_id=%s region=%s kwargs=%s', sync_run_id, getattr(account, 'id', None), aws_region or 'all', task.get('kwargs') or {})
                     _log_sync_command_output(f'CLOUD_SYNC_TASK_FAILED_LOG run_id={sync_run_id} command={task.get("command")}', captured_log, level=logging.ERROR)
                     errors.append(message)
+                finally:
+                    completed_tasks += 1
+                    if job:
+                        CloudAssetSyncJob.objects.filter(pk=job.pk).update(
+                            progress_current=completed_tasks,
+                            progress_total=len(sync_tasks),
+                            current_task=f'{task.get("provider") or "-"}:{getattr(account, "id", "-")} 已处理',
+                            warnings=warnings[:50],
+                            errors=errors[:50],
+                            updated_at=timezone.now(),
+                        )
     synced['reconcile'] = True
     logger.info('CLOUD_SYNC_RECONCILE_SKIPPED run_id=%s reason=cloud_asset_is_canonical', sync_run_id)
     ok = not errors or synced['aliyun'] or synced['aws']
@@ -4235,7 +4527,178 @@ def sync_cloud_assets(request):
         is_success=ok,
         error_message='; '.join(errors[:10]),
     )
-    return _ok(response_payload)
+    return response_payload
+
+
+def _cloud_assets_sync_request_payload(request) -> dict:
+    payload = dict(_read_payload(request) or {})
+    fallbacks = {
+        'region': request.POST.get('region') or request.GET.get('region'),
+        'aws_region': request.POST.get('aws_region') or request.GET.get('aws_region'),
+        'provider': request.POST.get('provider') or request.GET.get('provider'),
+        'providers': request.POST.get('providers') or request.GET.get('providers'),
+        'account_ids': request.POST.get('account_ids') or request.GET.get('account_ids'),
+        'asset_ids': request.POST.get('asset_ids') or request.GET.get('asset_ids'),
+    }
+    for key, value in fallbacks.items():
+        if key not in payload and value not in (None, ''):
+            payload[key] = value
+    return payload
+
+
+def _cloud_assets_sync_scope(payload: dict) -> dict:
+    providers = sorted(_parse_provider_scope(payload.get('providers') or payload.get('provider')))
+    account_ids = sorted(_parse_int_list(payload.get('account_ids')))
+    asset_ids = sorted(_parse_int_list(payload.get('asset_ids')))
+    aliyun_region = str(payload.get('region') or 'cn-hongkong').strip() or 'cn-hongkong'
+    aws_region = str(payload.get('aws_region') or '').strip()
+    if aws_region.lower() == 'all':
+        aws_region = ''
+    return {
+        'providers': providers,
+        'account_ids': account_ids,
+        'asset_ids': asset_ids,
+        'aliyun_region': aliyun_region,
+        'aws_region': aws_region or 'all',
+    }
+
+
+def _cloud_asset_sync_job_payload(job: CloudAssetSyncJob) -> dict:
+    result_payload = dict(job.result_payload or {})
+    progress_total = int(job.progress_total or 0)
+    progress_current = int(job.progress_current or 0)
+    progress_percent = 100 if job.is_terminal else (round(progress_current * 100 / progress_total) if progress_total else 0)
+    payload = {
+        'id': job.id,
+        'job_id': job.id,
+        'run_id': job.run_id,
+        'status': job.status,
+        'status_label': dict(CloudAssetSyncJob.STATUS_CHOICES).get(job.status, job.status),
+        'is_terminal': job.is_terminal,
+        'progress_current': progress_current,
+        'progress_total': progress_total,
+        'progress_percent': progress_percent,
+        'current_task': job.current_task or '',
+        'providers': job.providers or [],
+        'account_ids': job.account_ids or [],
+        'asset_ids': job.asset_ids or [],
+        'scope': job.scope or {},
+        'errors': job.errors or result_payload.get('errors') or [],
+        'warnings': job.warnings or result_payload.get('warnings') or [],
+        'logs': job.logs or result_payload.get('logs') or [],
+        'tasks': result_payload.get('tasks') or [],
+        'skipped_tasks': result_payload.get('skipped_tasks') or [],
+        'result': result_payload,
+        'ok': result_payload.get('ok') if result_payload else job.status not in {CloudAssetSyncJob.STATUS_FAILED},
+        'created_at': _iso(job.created_at),
+        'started_at': _iso(job.started_at),
+        'finished_at': _iso(job.finished_at),
+        'updated_at': _iso(job.updated_at),
+        'requested_by_id': job.requested_by_id,
+    }
+    return payload
+
+
+def _execute_cloud_asset_sync_job(job_or_id):
+    job = job_or_id if isinstance(job_or_id, CloudAssetSyncJob) else CloudAssetSyncJob.objects.get(pk=job_or_id)
+    started_at = timezone.now()
+    CloudAssetSyncJob.objects.filter(pk=job.pk).update(
+        status=CloudAssetSyncJob.STATUS_RUNNING,
+        started_at=started_at,
+        current_task='开始同步云资产',
+        updated_at=started_at,
+    )
+    job.refresh_from_db()
+    try:
+        result_payload = _run_cloud_assets_sync(job.request_payload or {}, sync_run_id=job.run_id, job=job)
+        errors = result_payload.get('errors') or []
+        warnings = result_payload.get('warnings') or []
+        if result_payload.get('ok') and not errors:
+            status = CloudAssetSyncJob.STATUS_SUCCEEDED
+        elif result_payload.get('ok'):
+            status = CloudAssetSyncJob.STATUS_PARTIAL
+        else:
+            status = CloudAssetSyncJob.STATUS_FAILED
+        finished_at = timezone.now()
+        CloudAssetSyncJob.objects.filter(pk=job.pk).update(
+            status=status,
+            progress_current=F('progress_total'),
+            current_task='同步完成' if status != CloudAssetSyncJob.STATUS_FAILED else '同步失败',
+            errors=errors[:50],
+            warnings=warnings[:50],
+            logs=result_payload.get('logs') or [],
+            result_payload=result_payload,
+            finished_at=finished_at,
+            updated_at=finished_at,
+        )
+    except Exception as exc:
+        finished_at = timezone.now()
+        logger.exception('CLOUD_SYNC_JOB_FAILED job_id=%s run_id=%s', job.id, job.run_id)
+        CloudAssetSyncJob.objects.filter(pk=job.pk).update(
+            status=CloudAssetSyncJob.STATUS_FAILED,
+            current_task='同步异常退出',
+            errors=[str(exc)],
+            finished_at=finished_at,
+            updated_at=finished_at,
+        )
+    job.refresh_from_db()
+    return job
+
+
+def _start_cloud_asset_sync_job(job_id: int):
+    def _run():
+        close_old_connections()
+        try:
+            _execute_cloud_asset_sync_job(job_id)
+        finally:
+            close_old_connections()
+
+    thread = threading.Thread(target=_run, name=f'cloud-asset-sync-{job_id}', daemon=True)
+    thread.start()
+
+
+@csrf_exempt
+@dashboard_superuser_required
+@require_POST
+def sync_cloud_assets(request):
+    payload = _cloud_assets_sync_request_payload(request)
+    scope = _cloud_assets_sync_scope(payload)
+    sync_run_id = uuid.uuid4().hex
+    requested_by = request.user if getattr(request.user, 'is_authenticated', False) else None
+    job = CloudAssetSyncJob.objects.create(
+        run_id=sync_run_id,
+        requested_by=requested_by,
+        request_payload=payload,
+        providers=scope['providers'],
+        account_ids=scope['account_ids'],
+        asset_ids=scope['asset_ids'],
+        scope=scope,
+        current_task='已加入同步队列',
+    )
+    logger.info('CLOUD_SYNC_JOB_QUEUED job_id=%s run_id=%s scope=%s payload=%s', job.id, job.run_id, scope, payload)
+    _start_cloud_asset_sync_job(job.id)
+    return _ok({
+        'ok': True,
+        'queued': True,
+        'job_id': job.id,
+        'run_id': job.run_id,
+        'status': job.status,
+        'message': '云资产同步已加入后台队列',
+        'job': _cloud_asset_sync_job_payload(job),
+        'tasks': [],
+        'skipped_tasks': [],
+        'errors': [],
+        'warnings': [],
+    })
+
+
+@dashboard_login_required
+@require_GET
+def cloud_asset_sync_job_detail(request, job_id: int):
+    job = CloudAssetSyncJob.objects.filter(pk=job_id).first()
+    if not job:
+        return _error('同步任务不存在', status=404)
+    return _ok(_cloud_asset_sync_job_payload(job))
 
 
 @csrf_exempt
@@ -4405,6 +4868,14 @@ def cloud_assets_sync_status(request):
             'tasks': response_payload.get('tasks') or [],
             'skipped_tasks': response_payload.get('skipped_tasks') or [],
         })
+    recent_jobs = [
+        _cloud_asset_sync_job_payload(job)
+        for job in CloudAssetSyncJob.objects.order_by('-created_at', '-id')[:5]
+    ]
+    active_jobs = [
+        item for item in recent_jobs
+        if item.get('status') in {CloudAssetSyncJob.STATUS_QUEUED, CloudAssetSyncJob.STATUS_RUNNING}
+    ]
     return _ok({
         'auto_sync_every_seconds': get_cloud_asset_sync_interval_seconds(),
         'last_synced_at': _iso(last_synced_at),
@@ -4416,6 +4887,8 @@ def cloud_assets_sync_status(request):
             'aws': [_sync_account_payload(account) for account in _active_sync_accounts(CloudAccountConfig.PROVIDER_AWS)],
         },
         'recent_syncs': recent_syncs,
+        'recent_jobs': recent_jobs,
+        'active_jobs': active_jobs,
     })
 
 
@@ -4499,6 +4972,7 @@ from cloud.api_plans import (  # noqa: E402
 __all__ = [
     'cloud_assets_list',
     'cloud_assets_risk_summary',
+    'cloud_asset_sync_job_detail',
     'cloud_assets_sync_status',
     'sync_cloud_asset_status',
     'cloud_ip_logs_list',

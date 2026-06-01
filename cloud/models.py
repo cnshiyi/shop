@@ -343,6 +343,115 @@ class CloudAsset(models.Model):
     def expires_at(self, value):
         self.actual_expires_at = value
 
+
+class CloudAssetDashboardSnapshot(models.Model):
+    asset = models.OneToOneField('cloud.CloudAsset', verbose_name='云资产', on_delete=models.CASCADE, related_name='dashboard_snapshot')
+    payload = models.JSONField('列表载荷', default=dict, blank=True)
+    search_text = models.TextField('搜索文本', blank=True)
+    provider = models.CharField('云厂商', max_length=32, blank=True, null=True, db_index=True)
+    cloud_account = models.ForeignKey('core.CloudAccountConfig', verbose_name='云账号', on_delete=models.SET_NULL, blank=True, null=True, related_name='cloud_asset_dashboard_snapshots')
+    account_label = models.CharField('账户/来源标识', max_length=191, blank=True, null=True, db_index=True)
+    region_code = models.CharField('地区代码', max_length=64, blank=True, null=True, db_index=True)
+    public_ip = models.CharField('公网IP', max_length=128, blank=True, null=True, db_index=True)
+    status = models.CharField('状态', max_length=32, blank=True, null=True, db_index=True)
+    is_active = models.BooleanField('是否活跃', default=True, db_index=True)
+    actual_expires_at = models.DateTimeField('实际到期时间', blank=True, null=True, db_index=True)
+    sort_order = models.IntegerField('排序', default=99, db_index=True)
+    user = models.ForeignKey('bot.TelegramUser', verbose_name='绑定用户', on_delete=models.SET_NULL, blank=True, null=True, related_name='cloud_asset_dashboard_snapshots')
+    tg_user_id = models.BigIntegerField('Telegram 用户ID', blank=True, null=True, db_index=True)
+    telegram_group = models.ForeignKey('bot.TelegramGroupFilter', verbose_name='绑定群组', on_delete=models.SET_NULL, blank=True, null=True, related_name='cloud_asset_dashboard_snapshots')
+    group_user_key = models.CharField('用户分组键', max_length=191, db_index=True)
+    group_user_label = models.CharField('用户分组标签', max_length=191, blank=True)
+    group_telegram_key = models.CharField('群组分组键', max_length=191, db_index=True)
+    group_telegram_label = models.CharField('群组分组标签', max_length=191, blank=True)
+    risk_status = models.CharField('风险状态', max_length=64, default='other', db_index=True)
+    risk_rank = models.IntegerField('风险排序', default=99, db_index=True)
+    risk_statuses = models.JSONField('风险状态集合', default=list, blank=True)
+    risk_normal = models.BooleanField('运行中', default=False, db_index=True)
+    risk_due_soon = models.BooleanField('即将到期', default=False, db_index=True)
+    risk_expired = models.BooleanField('已过期', default=False, db_index=True)
+    risk_unattached_ip = models.BooleanField('未附加固定IP', default=False, db_index=True)
+    risk_abnormal = models.BooleanField('异常/待确认', default=False, db_index=True)
+    risk_account_disabled = models.BooleanField('云账号已停用', default=False, db_index=True)
+    risk_shutdown_disabled = models.BooleanField('关机计划关闭', default=False, db_index=True)
+    risk_unbound_user = models.BooleanField('未绑定用户', default=False, db_index=True)
+    risk_unbound_group = models.BooleanField('未绑定群组', default=False, db_index=True)
+    risk_auto_renew_off = models.BooleanField('续费关闭', default=False, db_index=True)
+    risk_deleted = models.BooleanField('已删除/终止', default=False, db_index=True)
+    asset_updated_at = models.DateTimeField('资产更新时间', blank=True, null=True, db_index=True)
+    refreshed_at = models.DateTimeField('快照刷新时间', auto_now=True, db_index=True)
+    created_at = models.DateTimeField('创建时间', auto_now_add=True)
+
+    class Meta:
+        db_table = 'cloud_asset_dashboard_snapshot'
+        verbose_name = '云资产列表快照'
+        verbose_name_plural = '云资产列表快照'
+        ordering = ['risk_rank', 'actual_expires_at', '-sort_order', '-asset_id']
+        indexes = [
+            models.Index(fields=['risk_account_disabled', 'risk_rank', 'actual_expires_at'], name='cad_risk_display_idx'),
+            models.Index(fields=['group_user_key', 'risk_rank', 'actual_expires_at'], name='cad_group_user_idx'),
+            models.Index(fields=['group_telegram_key', 'risk_rank', 'actual_expires_at'], name='cad_group_tg_idx'),
+            models.Index(fields=['provider', 'cloud_account', 'region_code', 'status'], name='cad_provider_scope_idx'),
+            models.Index(fields=['risk_unattached_ip', 'is_active', 'status'], name='idx_cad_display_state'),
+        ]
+
+    def __str__(self):
+        return f'dashboard-snapshot:{self.asset_id}'
+
+
+class CloudAssetSyncJob(models.Model):
+    STATUS_QUEUED = 'queued'
+    STATUS_RUNNING = 'running'
+    STATUS_SUCCEEDED = 'succeeded'
+    STATUS_PARTIAL = 'partial'
+    STATUS_FAILED = 'failed'
+    STATUS_CHOICES = (
+        (STATUS_QUEUED, '排队中'),
+        (STATUS_RUNNING, '运行中'),
+        (STATUS_SUCCEEDED, '已完成'),
+        (STATUS_PARTIAL, '部分完成'),
+        (STATUS_FAILED, '失败'),
+    )
+    TERMINAL_STATUSES = {STATUS_SUCCEEDED, STATUS_PARTIAL, STATUS_FAILED}
+
+    run_id = models.CharField('运行ID', max_length=32, unique=True, db_index=True)
+    status = models.CharField('状态', max_length=32, choices=STATUS_CHOICES, default=STATUS_QUEUED, db_index=True)
+    requested_by = models.ForeignKey(settings.AUTH_USER_MODEL, verbose_name='发起人', on_delete=models.SET_NULL, blank=True, null=True, related_name='cloud_asset_sync_jobs')
+    request_payload = models.JSONField('请求参数', default=dict, blank=True)
+    providers = models.JSONField('云厂商范围', default=list, blank=True)
+    account_ids = models.JSONField('账号范围', default=list, blank=True)
+    asset_ids = models.JSONField('资产范围', default=list, blank=True)
+    scope = models.JSONField('同步范围', default=dict, blank=True)
+    progress_current = models.PositiveIntegerField('已完成任务数', default=0)
+    progress_total = models.PositiveIntegerField('总任务数', default=0)
+    current_task = models.CharField('当前任务', max_length=255, default='', blank=True)
+    logs = models.JSONField('日志摘要', default=list, blank=True)
+    warnings = models.JSONField('警告', default=list, blank=True)
+    errors = models.JSONField('错误', default=list, blank=True)
+    result_payload = models.JSONField('结果载荷', default=dict, blank=True)
+    started_at = models.DateTimeField('开始时间', blank=True, null=True, db_index=True)
+    finished_at = models.DateTimeField('结束时间', blank=True, null=True, db_index=True)
+    created_at = models.DateTimeField('创建时间', auto_now_add=True, db_index=True)
+    updated_at = models.DateTimeField('更新时间', auto_now=True)
+
+    class Meta:
+        db_table = 'cloud_asset_sync_job'
+        verbose_name = '云资产同步任务'
+        verbose_name_plural = '云资产同步任务'
+        ordering = ['-created_at', '-id']
+        indexes = [
+            models.Index(fields=['status', 'created_at'], name='idx_cloud_sync_job_status'),
+            models.Index(fields=['requested_by', 'created_at'], name='idx_cloud_sync_job_user'),
+        ]
+
+    @property
+    def is_terminal(self):
+        return self.status in self.TERMINAL_STATUSES
+
+    def __str__(self):
+        return f'cloud-asset-sync:{self.run_id}:{self.status}'
+
+
 class CloudIpLog(models.Model):
     EVENT_CREATED = 'created'
     EVENT_CHANGED = 'changed'

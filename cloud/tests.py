@@ -19,7 +19,7 @@ from django.utils.dateparse import parse_datetime
 from bot.api import _shutdown_log_items, _unattached_ip_delete_items, lifecycle_plans, refresh_lifecycle_plan_table, update_lifecycle_plan_note
 from bot.models import TelegramGroupFilter, TelegramUser
 from cloud.bootstrap import _build_mtproxy_script, _extract_tg_links
-from cloud.models import CloudAsset, CloudAutoRenewPatrolLog, CloudAutoRenewRetryTask, CloudIpLog, CloudLifecyclePlan, CloudLifecyclePlanNote, CloudNoticePlan, CloudServerOrder, CloudServerPlan, CloudUserNoticeLog, DailyAddressStat
+from cloud.models import CloudAsset, CloudAssetDashboardSnapshot, CloudAssetSyncJob, CloudAutoRenewPatrolLog, CloudAutoRenewRetryTask, CloudIpLog, CloudLifecyclePlan, CloudLifecyclePlanNote, CloudNoticePlan, CloudServerOrder, CloudServerPlan, CloudUserNoticeLog, DailyAddressStat
 from cloud.server_records import Server
 from cloud.lifecycle import _apply_notice_schedule_to_order, _auto_renew_candidate_users, _enqueue_auto_renew_retry, _get_due_orders, _get_migration_due_orders, _get_orphan_asset_delete_due, _get_unattached_static_ip_delete_due, _group_balance_lines_for_orders, _is_cloud_delete_safe_time, _is_cloud_suspend_time, _mark_deleted, _mark_suspended, _next_cloud_action_run_at, _notice_plan_text, _process_auto_renew_retry_tasks, _run_auto_renew, _send_logged_cloud_notice, _send_order_notice_batch, auto_renew_patrol_tick, daily_expiry_summary_tick, lifecycle_tick, sync_server_status_tick
 from cloud.note_utils import append_status_note
@@ -43,7 +43,7 @@ from cloud.provisioning import (
 )
 from cloud.services import _cloud_asset_deleted_or_missing, apply_cloud_server_renewal, create_cloud_server_order, create_cloud_server_rebuild_order, create_cloud_server_renewal, create_cloud_server_renewal_by_public_query, create_cloud_server_renewal_for_user, create_cloud_server_upgrade_order, ensure_cloud_asset_operation_order, get_cloud_server_by_ip, get_cloud_server_by_ip_for_user, get_group_proxy_asset_detail, get_proxy_asset_by_ip_for_admin, get_proxy_asset_by_ip_for_user, get_user_proxy_asset_detail, list_all_auto_renew_cloud_servers, list_cloud_asset_renewal_plans, list_cloud_server_upgrade_plans, list_group_cloud_servers, list_retained_ip_renewal_plans, list_retained_ip_renewal_plans_by_asset, list_user_cloud_servers, mark_cloud_server_ip_change_requested, mark_cloud_server_reinit_requested, pay_cloud_server_order_with_balance, pay_cloud_server_renewal_with_balance, prepare_cloud_asset_renewal_with_link, prepare_retained_ip_renewal_with_link, rebind_cloud_server_user, record_cloud_ip_log, replace_cloud_asset_order_by_admin, run_cloud_server_renewal_postcheck, set_cloud_server_auto_renew_admin, set_group_cloud_server_auto_renew, sync_cloud_asset_user_binding
 from cloud.sync_safety import get_missing_confirmation_threshold
-from cloud.api import _apply_server_missing_state, _cloud_order_source_tags, _display_cloud_asset_note, _fetch_address_chain_balances, auto_renew_task_detail, cloud_assets_list, cloud_order_detail, cloud_orders_list, delete_cloud_asset, delete_cloud_order, delete_notice_history, delete_server, notice_task_detail, refresh_notice_plan_table, run_auto_renew_order, run_auto_renew_tasks, servers_list, sync_cloud_asset_status, sync_cloud_assets, tasks_overview, update_cloud_asset, update_cloud_order_status, update_notice_plan_text, update_notice_switches
+from cloud.api import _apply_server_missing_state, _cloud_order_source_tags, _display_cloud_asset_note, _execute_cloud_asset_sync_job, _fetch_address_chain_balances, auto_renew_task_detail, cloud_asset_sync_job_detail, cloud_assets_list, cloud_order_detail, cloud_orders_list, delete_cloud_asset, delete_cloud_order, delete_notice_history, delete_server, notice_task_detail, refresh_cloud_asset_dashboard_snapshots, refresh_notice_plan_table, run_auto_renew_order, run_auto_renew_tasks, servers_list, sync_cloud_asset_status, sync_cloud_assets, tasks_overview, update_cloud_asset, update_cloud_order_status, update_notice_plan_text, update_notice_switches
 from core.cloud_accounts import cloud_account_label, cloud_account_label_variants, list_cloud_accounts_by_server_load
 from core.models import CloudAccountConfig, SiteConfig
 from core.persistence import bump_daily_address_stat
@@ -1180,6 +1180,34 @@ class CloudServerServicesTestCase(TestCase):
         asset.refresh_from_db()
         self.assertIsNone(asset.actual_expires_at)
 
+    def test_cloud_asset_dashboard_snapshot_refresh_materializes_paginated_list(self):
+        asset = CloudAsset.objects.create(
+            kind=CloudAsset.KIND_SERVER,
+            source=CloudAsset.SOURCE_AWS_SYNC,
+            user=self.user,
+            provider='aws_lightsail',
+            region_code=self.plan.region_code,
+            region_name=self.plan.region_name,
+            asset_name='snapshot-list-asset',
+            public_ip='10.77.88.3',
+            status=CloudAsset.STATUS_RUNNING,
+            actual_expires_at=timezone.now() + timezone.timedelta(days=30),
+        )
+        summary = refresh_cloud_asset_dashboard_snapshots(asset_ids=[asset.id], reason='test', full=False)
+        self.assertEqual(summary['assets'], 1)
+        self.assertTrue(CloudAssetDashboardSnapshot.objects.filter(asset=asset, search_text__icontains='snapshot-list-asset').exists())
+
+        admin = get_user_model().objects.create_user(username='snapshot_list_admin', password='x', is_staff=True)
+        request = self.factory.get('/api/dashboard/cloud-assets/', {'paginated': '1', 'keyword': 'snapshot-list-asset'})
+        request.user = admin
+        with patch('cloud.api._cloud_asset_payloads', side_effect=AssertionError('list should read dashboard snapshots')):
+            response = cloud_assets_list(request)
+        payload = json.loads(response.content.decode('utf-8'))['data']
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(payload['total'], 1)
+        self.assertEqual(payload['items'][0]['id'], asset.id)
+
     def test_dedupe_cloud_assets_does_not_merge_cross_region_same_instance(self):
         for region, public_ip in [('ap-southeast-1', '13.250.30.15'), ('ap-northeast-1', '13.250.30.16')]:
             CloudAsset.objects.create(
@@ -1756,7 +1784,7 @@ class CloudServerServicesTestCase(TestCase):
         direct_refresh.assert_not_called()
         deferred_refresh.assert_called_once_with(f'cloud_asset:{asset.id}')
 
-    def test_cloud_assets_paginated_keeps_same_user_on_same_page(self):
+    def test_cloud_assets_paginated_uses_true_database_pages(self):
         admin = get_user_model().objects.create_user(username='admin_asset_pages', password='x', is_staff=True)
         first_user = TelegramUser.objects.create(tg_user_id=991001, username='page_first')
         boundary_user = TelegramUser.objects.create(tg_user_id=991002, username='page_boundary')
@@ -1788,7 +1816,8 @@ class CloudServerServicesTestCase(TestCase):
         self.assertEqual(response1.status_code, 200)
         self.assertEqual(payload1['page_size'], 50)
         self.assertGreaterEqual(payload1['total_pages'], 2)
-        self.assertFalse(any(item['user_id'] == boundary_user.id for item in payload1['items']))
+        self.assertEqual(len(payload1['items']), 50)
+        self.assertEqual([item['user_id'] for item in payload1['items'] if item['user_id'] == boundary_user.id], [boundary_user.id])
 
         page2 = self.factory.get('/api/dashboard/cloud-assets/', {'paginated': '1', 'page': '2', 'page_size': '50'})
         page2.user = admin
@@ -1796,9 +1825,10 @@ class CloudServerServicesTestCase(TestCase):
         payload2 = json.loads(response2.content.decode('utf-8'))['data']
         boundary_ids = {asset.id for asset in boundary_assets}
         page2_boundary_ids = {item['id'] for item in payload2['items'] if item['user_id'] == boundary_user.id}
-        self.assertEqual(page2_boundary_ids, boundary_ids)
+        self.assertEqual(len(page2_boundary_ids), 1)
+        self.assertNotEqual(page2_boundary_ids, boundary_ids)
 
-    def test_cloud_assets_paginated_keeps_same_telegram_group_on_same_page(self):
+    def test_cloud_assets_paginated_uses_true_database_pages_for_telegram_group_sort(self):
         admin = get_user_model().objects.create_user(username='admin_asset_group_pages', password='x', is_staff=True)
         first_group = TelegramGroupFilter.objects.create(chat_id=-1001991001, title='Page First Group', enabled=True)
         boundary_group = TelegramGroupFilter.objects.create(chat_id=-1001991002, title='Page Boundary Group', enabled=True)
@@ -1831,7 +1861,8 @@ class CloudServerServicesTestCase(TestCase):
         self.assertEqual(response1.status_code, 200)
         self.assertEqual(payload1['page_size'], 20)
         self.assertGreaterEqual(payload1['total_pages'], 2)
-        self.assertFalse(any(item['telegram_group_id'] == boundary_group.id for item in payload1['items']))
+        self.assertEqual(len(payload1['items']), 20)
+        self.assertEqual([item['telegram_group_id'] for item in payload1['items'] if item['telegram_group_id'] == boundary_group.id], [boundary_group.id])
 
         page2 = self.factory.get('/api/dashboard/cloud-assets/', {'paginated': '1', 'group_by': 'telegram_group', 'page': '2', 'page_size': '20'})
         page2.user = admin
@@ -1839,7 +1870,8 @@ class CloudServerServicesTestCase(TestCase):
         payload2 = json.loads(response2.content.decode('utf-8'))['data']
         boundary_ids = {asset.id for asset in boundary_assets}
         page2_boundary_ids = {item['id'] for item in payload2['items'] if item['telegram_group_id'] == boundary_group.id}
-        self.assertEqual(page2_boundary_ids, boundary_ids)
+        self.assertEqual(len(page2_boundary_ids), 1)
+        self.assertNotEqual(page2_boundary_ids, boundary_ids)
 
     def test_cloud_assets_grouped_paginated_uses_twenty_user_groups_per_page(self):
         admin = get_user_model().objects.create_user(username='admin_asset_grouped_user_pages', password='x', is_staff=True)
@@ -1998,18 +2030,6 @@ class CloudServerServicesTestCase(TestCase):
             status=CloudAsset.STATUS_RUNNING,
             sort_order=1,
         )
-        Server.objects.create(
-            source=Server.SOURCE_AWS_SYNC,
-            order=target_order,
-            user=target_user,
-            provider='aws_lightsail',
-            region_code=self.plan.region_code,
-            region_name=self.plan.region_name,
-            server_name='full-search-server-alias-alpha',
-            public_ip='10.90.0.250',
-            status=Server.STATUS_RUNNING,
-            sort_order=1,
-        )
         for index in range(12):
             user = TelegramUser.objects.create(tg_user_id=991910 + index, username=f'decoy_full_search_{index}')
             CloudAsset.objects.create(
@@ -2039,7 +2059,7 @@ class CloudServerServicesTestCase(TestCase):
             'group_by': 'user',
             'page': '1',
             'page_size': '10',
-            'keyword': 'server-alias',
+            'keyword': 'order-name-alpha',
         })
         grouped_search_request.user = admin
         grouped_search_response = cloud_assets_list(grouped_search_request)
@@ -6331,18 +6351,36 @@ class CloudServerServicesTestCase(TestCase):
 
         request = RequestFactory().post('/api/dashboard/cloud-assets/sync/', data='{}', content_type='application/json')
         request = self._attach_bearer_session(request, staff_user)
-        with patch('cloud.api._call_command_capture_threaded', side_effect=fake_call_command), patch('cloud.api._call_command_capture', return_value=(object(), 'reconcile ok\n')):
+        with patch('cloud.api._start_cloud_asset_sync_job') as start_job:
             response = sync_cloud_assets(request)
 
         self.assertEqual(response.status_code, 200)
         payload = json.loads(response.content)['data']
         self.assertTrue(payload['ok'])
-        self.assertTrue(payload['synced']['aliyun'])
-        self.assertTrue(payload['synced']['aws'])
-        self.assertTrue(payload['synced']['reconcile'])
-        self.assertIn('ap-southeast-1', payload['aws_regions'])
+        self.assertTrue(payload['queued'])
+        start_job.assert_called_once_with(payload['job_id'])
+
+        job = CloudAssetSyncJob.objects.get(pk=payload['job_id'])
+        with patch('cloud.api._call_command_capture_threaded', side_effect=fake_call_command), \
+            patch('cloud.api._refresh_dashboard_plan_snapshots_deferred'):
+            job = _execute_cloud_asset_sync_job(job)
+
+        result = job.result_payload
+        self.assertEqual(job.status, CloudAssetSyncJob.STATUS_SUCCEEDED)
+        self.assertTrue(result['ok'])
+        self.assertTrue(result['synced']['aliyun'])
+        self.assertTrue(result['synced']['aws'])
+        self.assertTrue(result['synced']['reconcile'])
+        self.assertIn('ap-southeast-1', result['aws_regions'])
         self.assertIn(('sync_aliyun_assets', {'region': 'cn-hongkong', 'account_id': str(aliyun_account.id)}), calls)
         self.assertIn(('sync_aws_assets', {'region': '', 'account_id': str(aws_account.id)}), calls)
+
+        detail_request = RequestFactory().get(f'/api/dashboard/cloud-assets/sync-jobs/{job.id}/')
+        detail_request.user = staff_user
+        detail_response = cloud_asset_sync_job_detail(detail_request, job.id)
+        detail_payload = json.loads(detail_response.content)['data']
+        self.assertEqual(detail_payload['status'], CloudAssetSyncJob.STATUS_SUCCEEDED)
+        self.assertEqual({task['provider'] for task in detail_payload['tasks']}, {'aliyun', 'aws'})
 
     def test_sync_cloud_assets_with_selected_assets_uses_asset_scoped_tasks(self):
         account = CloudAccountConfig.objects.create(
@@ -6398,14 +6436,23 @@ class CloudServerServicesTestCase(TestCase):
             content_type='application/json',
         )
         request = self._attach_bearer_session(request, staff_user)
-        with patch('cloud.api._call_command_capture_threaded', side_effect=fake_call_command), \
-            patch('cloud.api._refresh_dashboard_plan_snapshots_deferred'):
+        with patch('cloud.api._start_cloud_asset_sync_job') as start_job:
             response = sync_cloud_assets(request)
 
         self.assertEqual(response.status_code, 200)
         payload = json.loads(response.content)['data']
         self.assertTrue(payload['ok'])
-        self.assertTrue(payload['synced']['aws'])
+        self.assertTrue(payload['queued'])
+        start_job.assert_called_once_with(payload['job_id'])
+
+        job = CloudAssetSyncJob.objects.get(pk=payload['job_id'])
+        with patch('cloud.api._call_command_capture_threaded', side_effect=fake_call_command), \
+            patch('cloud.api._refresh_dashboard_plan_snapshots_deferred'):
+            job = _execute_cloud_asset_sync_job(job)
+
+        result = job.result_payload
+        self.assertEqual(job.status, CloudAssetSyncJob.STATUS_SUCCEEDED)
+        self.assertTrue(result['synced']['aws'])
         self.assertEqual(len(calls), 2)
         self.assertEqual({call[1]['asset_id'] for call in calls}, {str(first_asset.id), str(second_asset.id)})
         self.assertTrue(all(call[0] == 'sync_aws_assets' for call in calls))

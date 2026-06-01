@@ -533,6 +533,47 @@ The focused DB test run is blocked by local MySQL test database permissions:
 Access denied for user 'a'@'localhost' to database 'test_a'
 ```
 
+## 2026-06-01 cloud-asset-list-and-sync-performance
+
+### Scope
+
+Twenty-second refactor pass optimized the slow proxy asset list and dashboard-triggered cloud sync path.
+
+### Runtime Changes
+
+- Added `cloud_asset_dashboard_snapshot` as a materialized dashboard list table for cloud assets.
+- `cloud_assets_list()` and `cloud_assets_risk_summary()` now read snapshot rows for search, risk filters, grouping, counts, and database pagination instead of rebuilding every row on each request.
+- Added `refresh_cloud_asset_dashboard_snapshots` management command and wired dashboard snapshot refreshes after sync/service changes.
+- Added `cloud_asset_sync_job` to queue dashboard sync requests, track progress/result/log tails, and expose `/admin/cloud-assets/sync-jobs/<id>/`.
+- `/admin/cloud-assets/sync/` now returns immediately with a queued job; the background thread executes account/asset scoped sync tasks and records the final result.
+- AWS and Alibaba Cloud sync commands no longer maintain the retired `Server` compatibility mirror; `cloud_asset` remains the single cloud resource truth.
+- The admin frontend now uses true server-side pagination in non-grouped proxy list mode and polls cloud sync jobs until terminal status.
+- The "show deleted" toggle is sent to the backend so pagination totals match the visible list.
+- Database naming and data-flow docs now list the new snapshot/job tables.
+
+### Verification
+
+Passed locally:
+
+```bash
+uv run python -m py_compile cloud/api.py cloud/dashboard_snapshots.py cloud/models.py cloud/tests.py cloud/management/commands/sync_aws_assets.py cloud/management/commands/sync_aliyun_assets.py cloud/management/commands/refresh_cloud_asset_dashboard_snapshots.py shop/dashboard_urls.py
+uv run python manage.py check
+uv run python manage.py makemigrations cloud --dry-run --check
+cd /Users/a399/Desktop/data/vue-shop-admin && ./node_modules/.bin/vue-tsc --noEmit --skipLibCheck -p apps/web-antd/tsconfig.json
+```
+
+Blocked locally:
+
+```bash
+uv run python manage.py test cloud.tests.CloudServerServicesTestCase.test_cloud_asset_dashboard_snapshot_refresh_materializes_paginated_list ... --keepdb --noinput
+```
+
+The focused DB test run is still blocked by local MySQL test database permissions:
+
+```text
+Access denied for user 'a'@'localhost' to database 'test_a'
+```
+
 ## 2026-06-01 proxy-list-and-sync-performance
 
 ### Scope
