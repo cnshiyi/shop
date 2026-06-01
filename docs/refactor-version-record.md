@@ -1,5 +1,28 @@
 # Refactor Version Record
 
+## 2026-06-02 cloud-sync-manual-field-preservation
+
+### Scope
+
+Small sync safety pass for retained asset ownership and expiry preservation.
+
+### Runtime Changes
+
+- AWS retained-IP sync no longer overwrites an existing `CloudAsset.user` when attaching a retained order to an orderless asset.
+- Aliyun sync no longer overwrites an existing `CloudAsset.actual_expires_at` on already tracked assets.
+- Empty asset owners are still backfilled from the retained order when appropriate.
+- Added focused regression coverage for AWS retained-IP owner preservation and Aliyun retained-asset expiry preservation.
+
+### Verification
+
+Passed locally with `PYTHONDONTWRITEBYTECODE=1 DJANGO_TEST_SQLITE=1`:
+
+```bash
+uv run python manage.py check
+uv run python -m py_compile cloud/management/commands/sync_aws_assets.py cloud/management/commands/sync_aliyun_assets.py cloud/tests.py
+uv run python manage.py test cloud.tests.CloudServerServicesTestCase.test_sync_aws_retained_ip_preserves_existing_asset_user cloud.tests.CloudServerServicesTestCase.test_sync_aliyun_assets_preserves_existing_asset_expiry cloud.tests.CloudServerServicesTestCase.test_sync_aws_assets_updates_retained_asset_after_renewal_recovery --noinput --verbosity 1
+```
+
 ## 2026-06-02 cloud-asset-payload-readonly-guard
 
 ### Scope

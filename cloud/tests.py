@@ -11411,6 +11411,65 @@ class CloudServerServicesTestCase(TestCase):
         self.assertIsNone(updates['delete_notice_sent_at'])
 
     # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
+    def test_sync_aliyun_assets_preserves_existing_asset_expiry(self):
+        account = CloudAccountConfig.objects.create(
+            provider=CloudAccountConfig.PROVIDER_ALIYUN,
+            name='aliyun-preserve-asset-expiry',
+            external_account_id='aliyun-preserve-asset-expiry',
+            access_key='A' * 20,
+            secret_key='B' * 40,
+            region_hint='cn-hongkong',
+            is_active=True,
+        )
+        account_label = cloud_account_label(account)
+        old_expires_at = timezone.now() + timezone.timedelta(days=3)
+        cloud_expires_at = timezone.now() + timezone.timedelta(days=31)
+        asset = CloudAsset.objects.create(
+            kind=CloudAsset.KIND_SERVER,
+            source=CloudAsset.SOURCE_ALIYUN,
+            user=self.user,
+            provider='aliyun_simple',
+            cloud_account=account,
+            account_label=account_label,
+            region_code='cn-hongkong',
+            region_name='中国香港',
+            asset_name='aliyun-preserve-asset-expiry',
+            instance_id='i-aliyun-preserve-asset-expiry',
+            provider_resource_id='i-aliyun-preserve-asset-expiry',
+            public_ip='6.6.6.71',
+            actual_expires_at=old_expires_at,
+            status=CloudAsset.STATUS_RUNNING,
+            is_active=True,
+        )
+
+        fake_aliyun_module = SimpleNamespace(models=SimpleNamespace(ListInstancesRequest=lambda **kwargs: kwargs))
+
+        # 测试类：组织 FakeAliyunClient 相关的回归测试。
+        class FakeAliyunClient:
+            # 功能：读取并返回列表数据；当前函数属于 云资产、云订单和生命周期。
+            def list_instances_with_options(self, request, runtime_options):
+                return SimpleNamespace(body=SimpleNamespace(to_map=lambda: {
+                    'Instances': [{
+                        'InstanceId': 'i-aliyun-preserve-asset-expiry',
+                        'InstanceName': 'aliyun-preserve-asset-expiry',
+                        'PublicIpAddress': '6.6.6.71',
+                        'RegionId': 'cn-hongkong',
+                        'Status': 'Running',
+                        'BusinessStatus': 'Normal',
+                        'ExpiredTime': cloud_expires_at.isoformat(),
+                    }],
+                    'TotalCount': 1,
+                }))
+
+        with patch.dict(sys.modules, {'alibabacloud_swas_open20200601': fake_aliyun_module}), \
+            patch('cloud.management.commands.sync_aliyun_assets._build_client', return_value=FakeAliyunClient()):
+            call_command('sync_aliyun_assets', region='cn-hongkong', account_id=str(account.id))
+
+        asset.refresh_from_db()
+        self.assertEqual(asset.actual_expires_at, old_expires_at)
+        self.assertEqual(asset.status, CloudAsset.STATUS_RUNNING)
+
+    # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
     def test_sync_aliyun_missing_instance_requires_five_passes_before_delete(self):
         from cloud.management.commands.sync_aliyun_assets import _mark_deleted_when_missing_in_aliyun
 
@@ -11860,6 +11919,77 @@ class CloudServerServicesTestCase(TestCase):
         self.assertEqual(asset.actual_expires_at, recovery_expires_at)
         self.assertTrue(asset.is_active)
         self.assertEqual(asset.note, '固定IP保留中-实例已删除')
+
+    # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
+    def test_sync_aws_retained_ip_preserves_existing_asset_user(self):
+        from cloud.management.commands.sync_aws_assets import _mark_ip_retained_as_unattached
+
+        account = CloudAccountConfig.objects.create(
+            provider=CloudAccountConfig.PROVIDER_AWS,
+            name='aws-retained-user-preserve',
+            external_account_id='123456789012',
+            access_key='A' * 20,
+            secret_key='B' * 40,
+            region_hint='ap-southeast-1',
+            is_active=True,
+        )
+        account_label = cloud_account_label(account)
+        order_owner = TelegramUser.objects.create(tg_user_id=21989081, username='retained_order_owner')
+        existing_owner = TelegramUser.objects.create(tg_user_id=21989082, username='retained_asset_owner')
+        retained_order = CloudServerOrder.objects.create(
+            order_no='AWS-RETAINED-OWNER-PRESERVE-1',
+            user=order_owner,
+            plan=self.plan,
+            provider='aws_lightsail',
+            cloud_account=account,
+            account_label=account_label,
+            region_code=self.plan.region_code,
+            region_name=self.plan.region_name,
+            plan_name=self.plan.plan_name,
+            quantity=1,
+            currency='USDT',
+            total_amount='19.00',
+            pay_amount='19.00',
+            status='deleted',
+            public_ip='10.9.0.7',
+            previous_public_ip='10.9.0.7',
+            static_ip_name='retain-user-ip',
+            ip_recycle_at=timezone.now() + timezone.timedelta(days=7),
+        )
+        asset = CloudAsset.objects.create(
+            kind=CloudAsset.KIND_SERVER,
+            source=CloudAsset.SOURCE_AWS_SYNC,
+            user=existing_owner,
+            provider='aws_lightsail',
+            cloud_account=account,
+            account_label=account_label,
+            region_code=self.plan.region_code,
+            region_name=self.plan.region_name,
+            asset_name='retain-user-related-instance',
+            instance_id='i-retain-user-related-instance',
+            public_ip='10.9.0.7',
+            status=CloudAsset.STATUS_DELETED,
+            provider_status='固定IP保留中-实例已删除',
+            is_active=False,
+        )
+
+        updated = _mark_ip_retained_as_unattached(
+            '10.9.0.7',
+            'retain-user-ip',
+            retained_order,
+            account,
+            self.plan.region_code,
+            'AWS 同步测试保留固定 IP',
+            timezone.now(),
+            retained_order.ip_recycle_at,
+        )
+
+        asset.refresh_from_db()
+        self.assertTrue(updated)
+        self.assertEqual(asset.order_id, retained_order.id)
+        self.assertEqual(asset.user_id, existing_owner.id)
+        self.assertEqual(asset.provider_status, '固定IP仍存在但未附加')
+        self.assertEqual(asset.actual_expires_at, retained_order.ip_recycle_at)
 
     # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
     def test_sync_aws_assets_preserves_existing_unattached_ip_due_time(self):

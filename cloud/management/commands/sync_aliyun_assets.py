@@ -23,6 +23,7 @@ _MISSING_DELETED_STATUS = '云上未找到实例'
 logger = logging.getLogger(__name__)
 
 
+# 功能：提供 阿里云资产同步 的内部辅助逻辑，供同模块流程复用。
 def _visible_asset_total():
     return (
         CloudAsset.objects
@@ -32,6 +33,7 @@ def _visible_asset_total():
     )
 
 
+# 功能：提供 阿里云资产同步 的内部辅助逻辑，供同模块流程复用。
 def _resolve_order_for_ip(public_ip, account=None):
     normalized_ip = str(public_ip or '').strip()
     if not normalized_ip:
@@ -49,6 +51,7 @@ def _resolve_order_for_ip(public_ip, account=None):
 NORMAL_ALIYUN_STATES = {'running', 'starting', 'pending'}
 
 
+# 功能：提供 阿里云资产同步 的内部辅助逻辑，供同模块流程复用。
 def _parse_datetime_value(value):
     if not value:
         return None
@@ -60,6 +63,7 @@ def _parse_datetime_value(value):
     return None
 
 
+# 功能：提供 阿里云资产同步 的内部辅助逻辑，供同模块流程复用。
 def _parse_expire_time(item):
     for key in ('ExpiredTime', 'ExpireTime', 'ExpirationTime', 'EndTime'):
         parsed = _parse_datetime_value(item.get(key))
@@ -76,6 +80,7 @@ def _parse_expire_time(item):
     return None
 
 
+# 功能：提供 阿里云资产同步 的内部辅助逻辑，供同模块流程复用。
 def _resolve_aliyun_status(item, expires_at=None):
     raw_status = str(item.get('Status') or '').strip().lower()
     business_status = str(item.get('BusinessStatus') or '').strip().lower()
@@ -101,14 +106,17 @@ def _resolve_aliyun_status(item, expires_at=None):
     return CloudAsset.STATUS_UNKNOWN, raw_status, business_status, disable_reason
 
 
+# 功能：提供 阿里云资产同步 的内部辅助逻辑，供同模块流程复用。
 def _status_label(status):
     return dict(CloudAsset.STATUS_CHOICES).get(status, status or '-')
 
 
+# 功能：提供 阿里云资产同步 的内部辅助逻辑，供同模块流程复用。
 def _elevate_deleted_when_ip_missing(status, public_ip):
     return status
 
 
+# 功能：提供 阿里云资产同步 的内部辅助逻辑，供同模块流程复用。
 def _order_status_from_cloud_status(status):
     if status in {CloudAsset.STATUS_PENDING, CloudAsset.STATUS_STARTING}:
         return 'provisioning'
@@ -121,6 +129,7 @@ def _order_status_from_cloud_status(status):
     return 'completed'
 
 
+# 功能：提供 阿里云资产同步 的内部辅助逻辑，供同模块流程复用。
 def _order_status_from_cloud_sync(order, status, expires_at=None):
     cloud_status = _order_status_from_cloud_status(status)
     if cloud_status in {'deleted', 'expired', 'provisioning'} or not order:
@@ -131,6 +140,7 @@ def _order_status_from_cloud_sync(order, status, expires_at=None):
     return cloud_status
 
 
+# 功能：提供 阿里云资产同步 的内部辅助逻辑，供同模块流程复用。
 def _resolve_asset(instance_id, public_ip, account=None, region_code=''):
     lookup = Q(kind=CloudAsset.KIND_SERVER)
     if account:
@@ -151,6 +161,7 @@ def _resolve_asset(instance_id, public_ip, account=None, region_code=''):
     return None
 
 
+# 功能：提供 阿里云资产同步 的内部辅助逻辑，供同模块流程复用。
 def _asset_resolve_ordering(public_ip=''):
     ordering = []
     if public_ip:
@@ -164,6 +175,7 @@ def _asset_resolve_ordering(public_ip=''):
     return ordering
 
 
+# 功能：提供 阿里云资产同步 的内部辅助逻辑，供同模块流程复用。
 def _aliyun_order_updates_from_sync(linked_order, *, normalized_status, expires_at, account, account_label, region, item, asset_name, instance_id, public_ip):
     previous_public_ip = linked_order.previous_public_ip
     if public_ip and linked_order.public_ip != public_ip:
@@ -198,6 +210,7 @@ def _aliyun_order_updates_from_sync(linked_order, *, normalized_status, expires_
 
 
 
+# 功能：提供 阿里云资产同步 的内部辅助逻辑，供同模块流程复用。
 def _mark_deleted_when_missing_in_aliyun(region, existing_instance_ids, stdout, account=None):
     verification_deleted_items = []
     queryset = CloudAsset.objects.filter(
@@ -258,9 +271,11 @@ def _mark_deleted_when_missing_in_aliyun(region, existing_instance_ids, stdout, 
     return verification_deleted_items
 
 
+# 命令类：封装 阿里云资产同步 的 Django 管理命令。
 class Command(BaseCommand):
     help = '同步阿里云轻量应用服务器到统一云资产表'
 
+    # 功能：处理 阿里云资产同步 中的 add arguments 业务流程。
     def add_arguments(self, parser):
         parser.add_argument('--region', default='cn-hongkong', help='阿里云地域代码，默认 cn-hongkong')
         parser.add_argument('--account-id', default='', help='只同步指定后台云账号 ID')
@@ -268,6 +283,7 @@ class Command(BaseCommand):
         parser.add_argument('--instance-id', default='', help='只处理指定实例 ID')
         parser.add_argument('--public-ip', default='', help='只处理指定公网 IP')
 
+    # 功能：执行 Django 管理命令的主流程。
     def handle(self, *args, **options):
         region = options['region']
         accounts = list_active_cloud_accounts('aliyun', region)
@@ -302,6 +318,7 @@ class Command(BaseCommand):
             target_scope,
         )
 
+        # 功能：处理 阿里云资产同步 中的 target matches 业务流程。
         def target_matches(*values):
             if not target_scope_enabled:
                 return True
@@ -462,7 +479,7 @@ class Command(BaseCommand):
                     asset_defaults['actual_expires_at'] = expires_at or linked_order.service_expires_at
                 if asset:
                     asset_defaults['user'] = asset.user
-                    asset_defaults['actual_expires_at'] = expires_at or asset.actual_expires_at
+                    asset_defaults['actual_expires_at'] = asset.actual_expires_at
                 asset_signature = f'{instance_id or "-"}|{public_ip or "缺失"}'
                 old_status = asset.status if asset else None
                 old_public_ip = asset.public_ip if asset else None
