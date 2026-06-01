@@ -605,6 +605,31 @@ The focused DB test run is blocked by local MySQL test database permissions:
 Access denied for user 'a'@'localhost' to database 'test_a'
 ```
 
+## 2026-06-02 cloud-asset-edit-api-split
+
+### Scope
+
+Twenty-second refactor pass split cloud asset mutation endpoints out of the large asset list API module and tightened status/log behavior around dangerous asset operations.
+
+### Runtime Changes
+
+- Added `cloud/api_asset_edit.py` for cloud asset detail, manual edit, auto-renew toggle, and dashboard delete endpoints.
+- Kept `cloud/api.py` as a compatibility facade that re-exports old `cloud.api.*` names and patch points for existing imports/tests.
+- `shop/dashboard_urls.py` now imports cloud dashboard route handlers from domain modules directly instead of routing through `cloud.api`.
+- `cloud/api_assets.py` now owns asset list, risk summary, snapshot refresh, and asset payload helpers only.
+- Manual refresh of unattached static IP delete plans now updates related same-order/same-resource records and logs `CLOUD_UNATTACHED_IP_DELETE_DUE_REFRESHED`.
+- Dashboard asset deletion now deletes same-order/same-resource residual records, clears the order cloud binding, writes `CloudIpLog`, and logs removed residual ids through structured logger fields.
+- Updated legacy direct-view tests to attach the current dashboard bearer session for write endpoints.
+
+### Verification
+
+Passed locally:
+
+```bash
+uv run python -m py_compile cloud/api.py cloud/api_assets.py cloud/api_asset_edit.py shop/dashboard_urls.py cloud/tests.py
+DJANGO_TEST_REUSE_DB=1 uv run python manage.py test cloud.tests.CloudServerServicesTestCase.test_cloud_assets_list_uses_bulk_order_inference_without_per_asset_fallback cloud.tests.CloudServerServicesTestCase.test_sync_cloud_asset_status_uses_asset_scope cloud.tests.CloudServerServicesTestCase.test_update_cloud_asset_defers_snapshot_refresh cloud.tests.CloudServerServicesTestCase.test_update_cloud_asset_refreshes_unattached_ip_delete_plan cloud.tests.CloudServerServicesTestCase.test_delete_cloud_asset_only_removes_asset_record cloud.tests.CloudServerServicesTestCase.test_delete_cloud_asset_also_removes_residual_server_record cloud.tests_task_center.CloudTaskCenterApiTestCase --keepdb --noinput --verbosity 1
+```
+
 ## 2026-06-02 cloud-dashboard-api-domain-split
 
 ### Scope

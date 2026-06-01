@@ -1850,7 +1850,7 @@ class CloudServerServicesTestCase(TestCase):
             data=json.dumps({'is_active': False}),
             content_type='application/json',
         )
-        request.user = admin
+        request = self._attach_bearer_session(request, admin)
 
         with patch('cloud.api._refresh_dashboard_plan_snapshots') as direct_refresh, \
             patch('cloud.api._refresh_dashboard_plan_snapshots_deferred') as deferred_refresh:
@@ -1858,7 +1858,7 @@ class CloudServerServicesTestCase(TestCase):
 
         self.assertEqual(response.status_code, 200)
         direct_refresh.assert_not_called()
-        deferred_refresh.assert_called_once_with(f'cloud_asset:{asset.id}')
+        deferred_refresh.assert_called_once_with(f'cloud_asset:{asset.id}', cloud_asset_ids=[asset.id])
 
     # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
     def test_cloud_assets_paginated_uses_true_database_pages(self):
@@ -8401,7 +8401,7 @@ class CloudServerServicesTestCase(TestCase):
         )
         staff_user = get_user_model().objects.create_user(username='staff_asset_delete_only', password='x', is_staff=True, is_superuser=True)
         request = RequestFactory().post(f'/api/dashboard/cloud-assets/{asset.id}/delete/')
-        request.user = staff_user
+        request = self._attach_bearer_session(request, staff_user)
 
         response = delete_cloud_asset(request, asset.id)
 
@@ -8488,7 +8488,7 @@ class CloudServerServicesTestCase(TestCase):
         )
         staff_user = get_user_model().objects.create_user(username='staff_asset_delete_residual', password='x', is_staff=True, is_superuser=True)
         request = RequestFactory().post(f'/api/dashboard/cloud-assets/{asset.id}/delete/')
-        request.user = staff_user
+        request = self._attach_bearer_session(request, staff_user)
 
         response = delete_cloud_asset(request, asset.id)
 
@@ -10087,7 +10087,7 @@ class CloudServerServicesTestCase(TestCase):
             content_type='application/json',
             HTTP_AUTHORIZATION='',
         )
-        request.user = staff_user
+        request = self._attach_bearer_session(request, staff_user)
 
         response = update_cloud_asset(request, asset.id)
 

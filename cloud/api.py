@@ -18,8 +18,10 @@ from cloud.api_assets import (
     _sync_telegram_username,
     cloud_assets_list,
     cloud_assets_risk_summary,
-    delete_cloud_asset,
     refresh_cloud_asset_dashboard_snapshots,
+)
+from cloud.api_asset_edit import (
+    delete_cloud_asset,
     toggle_cloud_asset_auto_renew,
     update_cloud_asset,
 )
