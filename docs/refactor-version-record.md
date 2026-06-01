@@ -1,5 +1,27 @@
 # Refactor Version Record
 
+## 2026-06-02 aws-retained-ip-missing-skip
+
+### Scope
+
+Small AWS retained static IP sync consistency fix.
+
+### Runtime Changes
+
+- AWS missing-instance verification now treats `固定IP仍存在但未附加` and `固定IP保留中` provider states as static-IP-backed assets.
+- A retained static IP that still exists remotely will not be moved into missing-confirmation state just because the old instance id no longer appears.
+- Added focused regression coverage for the retained-IP preservation path followed by missing verification in the same sync cycle.
+
+### Verification
+
+Passed locally with `PYTHONDONTWRITEBYTECODE=1 DJANGO_TEST_SQLITE=1`:
+
+```bash
+uv run python -m py_compile cloud/management/commands/sync_aws_assets.py cloud/tests.py
+uv run python manage.py check
+uv run python manage.py test cloud.tests.CloudServerServicesTestCase.test_sync_aws_retained_ip_preserves_existing_asset_user cloud.tests.CloudServerServicesTestCase.test_aws_retained_unattached_asset_is_not_missing_deleted_when_static_ip_exists --noinput --verbosity 1
+```
+
 ## 2026-06-02 sync-user-binding-persist-false
 
 ### Scope

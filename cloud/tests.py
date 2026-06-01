@@ -12193,6 +12193,97 @@ class CloudServerServicesTestCase(TestCase):
         self.assertEqual(asset.actual_expires_at, retained_order.ip_recycle_at)
 
     # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
+    def test_aws_retained_unattached_asset_is_not_missing_deleted_when_static_ip_exists(self):
+        from cloud.management.commands.sync_aws_assets import _mark_deleted_when_missing_in_aws, _mark_ip_retained_as_unattached
+
+        # 测试类：组织 DummyStyle 相关的回归测试。
+        class DummyStyle:
+            # 功能：处理 云资产、云订单和生命周期 中的 WARNING 业务流程。
+            def WARNING(self, text):
+                return text
+
+        # 测试类：组织 DummyStdout 相关的回归测试。
+        class DummyStdout:
+            # 功能：初始化对象状态和依赖。
+            def __init__(self):
+                self.stdout = self
+                self.style = DummyStyle()
+
+            # 功能：处理 云资产、云订单和生命周期 中的 write 业务流程。
+            def write(self, text):
+                return text
+
+        account = CloudAccountConfig.objects.create(
+            provider=CloudAccountConfig.PROVIDER_AWS,
+            name='aws-retained-static-skip-missing',
+            external_account_id='123456789012',
+            access_key='A' * 20,
+            secret_key='B' * 40,
+            region_hint='ap-southeast-1',
+            is_active=True,
+        )
+        account_label = cloud_account_label(account)
+        retained_order = CloudServerOrder.objects.create(
+            order_no='AWS-RETAINED-SKIP-MISSING-1',
+            user=self.user,
+            plan=self.plan,
+            provider='aws_lightsail',
+            cloud_account=account,
+            account_label=account_label,
+            region_code=self.plan.region_code,
+            region_name=self.plan.region_name,
+            plan_name=self.plan.plan_name,
+            quantity=1,
+            currency='USDT',
+            total_amount='19.00',
+            pay_amount='19.00',
+            status='deleted',
+            public_ip='10.9.0.8',
+            previous_public_ip='10.9.0.8',
+            static_ip_name='retain-skip-missing-ip',
+            ip_recycle_at=timezone.now() + timezone.timedelta(days=7),
+        )
+        asset = CloudAsset.objects.create(
+            kind=CloudAsset.KIND_SERVER,
+            source=CloudAsset.SOURCE_AWS_SYNC,
+            user=self.user,
+            provider='aws_lightsail',
+            cloud_account=account,
+            account_label=account_label,
+            region_code=self.plan.region_code,
+            region_name=self.plan.region_name,
+            asset_name='retain-skip-missing-related-instance',
+            instance_id='i-retain-skip-missing-related-instance',
+            public_ip='10.9.0.8',
+            status=CloudAsset.STATUS_DELETED,
+            provider_status='固定IP保留中-实例已删除',
+            is_active=False,
+        )
+
+        _mark_ip_retained_as_unattached(
+            '10.9.0.8',
+            'retain-skip-missing-ip',
+            retained_order,
+            account,
+            self.plan.region_code,
+            'AWS 同步测试保留固定 IP',
+            timezone.now(),
+            retained_order.ip_recycle_at,
+        )
+        deleted = _mark_deleted_when_missing_in_aws(
+            self.plan.region_code,
+            set(),
+            {'10.9.0.8'},
+            DummyStdout(),
+            account=account,
+        )
+
+        asset.refresh_from_db()
+        self.assertEqual(deleted, [])
+        self.assertEqual(asset.provider_status, '固定IP仍存在但未附加')
+        self.assertNotIn('missing_confirmation', asset.sync_state)
+
+    # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
     def test_sync_aws_assets_preserves_existing_unattached_ip_due_time(self):
         account = CloudAccountConfig.objects.create(
             provider=CloudAccountConfig.PROVIDER_AWS,

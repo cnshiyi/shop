@@ -617,9 +617,12 @@ def _mark_deleted_when_missing_in_aws(region, existing_instance_names, existing_
     for asset in queryset:
         instance_name = str(asset.instance_id or '').strip()
         public_ip = str(asset.public_ip or '').strip()
+        provider_status = str(asset.provider_status or '')
         is_static_ip_asset = (
             not instance_name
-            or asset.provider_status == '未附加固定IP'
+            or provider_status == '未附加固定IP'
+            or '固定IP仍存在但未附加' in provider_status
+            or '固定IP保留中' in provider_status
             or 'StaticIp' in str(asset.provider_resource_id or '')
         )
         if instance_name and instance_name in existing_instance_names:
