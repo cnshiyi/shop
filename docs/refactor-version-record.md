@@ -358,3 +358,30 @@ Passed locally:
 uv run python -m py_compile bot/api.py bot/api_telegram.py
 uv run python manage.py check
 ```
+
+## 2026-06-01 dashboard-api-core-extraction
+
+### Scope
+
+Twelfth refactor pass addressed the cross-domain coupling where cloud and orders dashboard APIs imported private helpers from `bot/api.py`.
+
+### Runtime Changes
+
+- Added `core/dashboard_api.py` as the shared dashboard API utility module.
+- Moved generic helpers into core:
+  - response helpers: `_ok`, `_error`
+  - formatting helpers: `_iso`, `_decimal_to_str`, `_parse_decimal`
+  - request/query helpers: `_read_payload`, `_get_keyword`, `_apply_keyword_filter`
+  - payload/label helpers: `_split_usernames`, `_user_payload`, `_status_label`, `_days_left`, `_countdown_label`, `_provider_label`, `_provider_status_label`, `_region_label`, `_server_source_label`
+  - dashboard session/auth helpers and decorators
+- `bot/api.py` now re-exports those helpers for compatibility.
+- `cloud/api.py`, `cloud/api_servers.py`, `cloud/api_plans.py`, and `orders/api.py` import shared helpers/decorators from `core.dashboard_api`, removing their `bot.api` helper dependency.
+
+### Verification
+
+Passed locally:
+
+```bash
+uv run python -m py_compile core/dashboard_api.py bot/api.py bot/api_auth.py bot/api_users.py bot/api_operation_logs.py bot/api_cloud_accounts.py bot/api_site_configs.py bot/api_admin_users.py bot/api_products.py bot/api_telegram.py cloud/api.py cloud/api_servers.py cloud/api_plans.py orders/api.py
+uv run python manage.py check
+```

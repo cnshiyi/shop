@@ -7,22 +7,9 @@ from django.db import IntegrityError
 from django.views.decorators.csrf import csrf_exempt
 from django.views.decorators.http import require_GET, require_http_methods
 
-from bot.api import (
-    _apply_keyword_filter,
-    _decimal_to_str,
-    _error,
-    _get_keyword,
-    _iso,
-    _ok,
-    _parse_decimal,
-    _provider_label,
-    _read_payload,
-    _region_label,
-    dashboard_login_required,
-    dashboard_superuser_required,
-)
 from cloud.models import CloudServerOrder, CloudServerPlan, ServerPrice
 from cloud.services import refresh_custom_plan_cache
+from core.dashboard_api import _apply_keyword_filter, _decimal_to_str, _error, _get_keyword, _iso, _ok, _parse_decimal, _provider_label, _read_payload, _region_label, dashboard_login_required, dashboard_superuser_required
 
 
 def _api_helpers():

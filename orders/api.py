@@ -5,20 +5,8 @@ from django.utils import timezone
 from django.views.decorators.csrf import csrf_exempt
 from django.views.decorators.http import require_GET, require_POST
 
-from bot.api import (
-    _apply_keyword_filter,
-    _decimal_to_str,
-    _error,
-    _get_keyword,
-    _iso,
-    _ok,
-    _read_payload,
-    _status_label,
-    _user_payload,
-    dashboard_login_required,
-    dashboard_superuser_required,
-)
 from bot.models import TelegramUser
+from core.dashboard_api import _apply_keyword_filter, _decimal_to_str, _error, _get_keyword, _iso, _ok, _read_payload, _status_label, _user_payload, dashboard_login_required, dashboard_superuser_required
 from orders.ledger import record_balance_ledger
 from orders.models import Order, Recharge
 

@@ -7,25 +7,9 @@ from django.utils import timezone
 from django.views.decorators.csrf import csrf_exempt
 from django.views.decorators.http import require_GET, require_POST, require_http_methods
 
-from bot.api import (
-    _apply_keyword_filter,
-    _countdown_label,
-    _days_left,
-    _error,
-    _get_keyword,
-    _iso,
-    _ok,
-    _provider_label,
-    _provider_status_label,
-    _region_label,
-    _server_source_label,
-    _status_label,
-    _user_payload,
-    dashboard_login_required,
-    dashboard_superuser_required,
-)
 from cloud.models import CloudAsset, CloudIpLog
 from core.cloud_accounts import cloud_account_label, cloud_account_label_variants
+from core.dashboard_api import _apply_keyword_filter, _countdown_label, _days_left, _error, _get_keyword, _iso, _ok, _provider_label, _provider_status_label, _region_label, _server_source_label, _status_label, _user_payload, dashboard_login_required, dashboard_superuser_required
 from core.models import CloudAccountConfig
 
 
@@ -302,4 +286,3 @@ def servers_statistics(request):
         'items': items,
         'summary': total_row,
     })
-
