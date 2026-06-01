@@ -1745,6 +1745,53 @@ class CloudServerServicesTestCase(TestCase):
         self.assertEqual(asset.price, Decimal('19.00'))
 
     # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
+    def test_update_cloud_asset_blank_mtproxy_secret_preserves_existing_secret(self):
+        admin = get_user_model().objects.create_user(username='admin_preserve_asset_secret', password='x', is_staff=True, is_superuser=True)
+        order = CloudServerOrder.objects.create(
+            order_no='PRESERVE-ASSET-SECRET-1',
+            user=self.user,
+            plan=self.plan,
+            provider=self.plan.provider,
+            region_code=self.plan.region_code,
+            region_name=self.plan.region_name,
+            plan_name=self.plan.plan_name,
+            quantity=1,
+            currency='USDT',
+            total_amount='19.00',
+            pay_amount='19.00',
+            pay_method='balance',
+            status='completed',
+            mtproxy_secret='order-secret',
+        )
+        asset = CloudAsset.objects.create(
+            kind=CloudAsset.KIND_SERVER,
+            source=CloudAsset.SOURCE_AWS_SYNC,
+            order=order,
+            user=self.user,
+            provider='aws_lightsail',
+            region_code=self.plan.region_code,
+            region_name=self.plan.region_name,
+            asset_name='preserve-secret-asset',
+            public_ip='11.11.10.12',
+            status=CloudAsset.STATUS_RUNNING,
+            mtproxy_secret='asset-secret',
+        )
+        request = self.factory.patch(
+            '/api/dashboard/cloud-assets/%s/' % asset.id,
+            data=json.dumps({'mtproxy_secret': ''}),
+            content_type='application/json',
+        )
+        request = self._attach_bearer_session(request, admin)
+
+        response = update_cloud_asset(request, asset.id)
+
+        self.assertEqual(response.status_code, 200)
+        order.refresh_from_db()
+        asset.refresh_from_db()
+        self.assertEqual(order.mtproxy_secret, 'order-secret')
+        self.assertEqual(asset.mtproxy_secret, 'asset-secret')
+
+    # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
     def test_update_cloud_asset_rejects_collapsed_telegram_group_binding(self):
         admin = get_user_model().objects.create_user(username='admin_bind_group', password='x', is_staff=True, is_superuser=True)
         asset = CloudAsset.objects.create(
@@ -4267,7 +4314,7 @@ class CloudServerServicesTestCase(TestCase):
             service_expires_at=old_expiry,
         )
         old_suspend_at = order.suspend_at
-        CloudAsset.objects.create(
+        asset = CloudAsset.objects.create(
             kind=CloudAsset.KIND_SERVER,
             source=CloudAsset.SOURCE_ORDER,
             order=order,
@@ -4279,7 +4326,7 @@ class CloudServerServicesTestCase(TestCase):
             public_ip='4.4.4.5',
             actual_expires_at=old_expiry,
         )
-        Server.objects.create(
+        server = Server.objects.create(
             source=Server.SOURCE_ORDER,
             order=order,
             user=self.user,
@@ -4290,6 +4337,10 @@ class CloudServerServicesTestCase(TestCase):
             public_ip='4.4.4.5',
             expires_at=old_expiry,
         )
+        asset.refresh_from_db()
+        server.refresh_from_db()
+        old_asset_expiry = asset.actual_expires_at
+        old_server_expiry = server.expires_at
         staff_user = get_user_model().objects.create_user(username='staff_order_expiry_update', password='x', is_staff=True, is_superuser=True)
         request = RequestFactory().patch(
             f'/api/dashboard/cloud-orders/{order.id}/',
@@ -4297,21 +4348,21 @@ class CloudServerServicesTestCase(TestCase):
             content_type='application/json',
             HTTP_AUTHORIZATION='',
         )
-        request.user = staff_user
+        request = self._attach_bearer_session(request, staff_user)
 
         response = cloud_order_detail(request, order.id)
 
         self.assertEqual(response.status_code, 200)
         order.refresh_from_db()
-        asset = CloudAsset.objects.get(order=order)
-        server = Server.objects.get(order=order)
+        asset.refresh_from_db()
+        server.refresh_from_db()
         self.assertEqual(order.service_expires_at, CloudServerOrder.normalize_expiry_time(new_expiry))
         self.assertGreater(order.suspend_at, old_suspend_at)
         self.assertEqual(order.renew_grace_expires_at, order.suspend_at)
         self.assertGreaterEqual(order.delete_at, order.suspend_at)
         self.assertGreater(order.ip_recycle_at, order.delete_at)
-        self.assertEqual(asset.actual_expires_at, order.service_expires_at)
-        self.assertEqual(server.expires_at, order.service_expires_at)
+        self.assertEqual(asset.actual_expires_at, old_asset_expiry)
+        self.assertEqual(server.expires_at, old_server_expiry)
 
     # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
     def test_dashboard_order_ip_and_name_update_syncs_asset_server(self):
@@ -13492,7 +13543,13 @@ class CloudOrderStatusDashboardSyncTestCase(TestCase):
     # 功能：提供 云资产、云订单和生命周期 的内部辅助逻辑，供同模块流程复用。
     def _post_json(self, view, path, payload, *args):
         request = self.factory.post(path, data=json.dumps(payload), content_type='application/json')
-        request.user = self.admin
+        SessionMiddleware(lambda req: None).process_request(request)
+        request.session['_auth_user_id'] = str(self.admin.pk)
+        request.session['_auth_user_backend'] = 'django.contrib.auth.backends.ModelBackend'
+        request.session['_auth_user_hash'] = self.admin.get_session_auth_hash()
+        request.session.save()
+        request.user = AnonymousUser()
+        request.META['HTTP_AUTHORIZATION'] = f'Bearer session-{request.session.session_key}'
         return view(request, *args)
 
     # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
@@ -13530,6 +13587,12 @@ class CloudOrderStatusDashboardSyncTestCase(TestCase):
     # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
     def test_order_detail_manual_edit_syncs_cloud_identity_and_proxy_fields(self):
         order, asset, server = self._create_order_with_primary_records()
+        asset_expiry = timezone.now() + timezone.timedelta(days=20)
+        server_expiry = timezone.now() + timezone.timedelta(days=21)
+        asset.actual_expires_at = asset_expiry
+        asset.save(update_fields=['actual_expires_at'])
+        server.expires_at = server_expiry
+        server.save(update_fields=['actual_expires_at'])
         expires_at = timezone.now() + timezone.timedelta(days=45)
 
         response = self._post_json(cloud_order_detail, f'/admin/cloud-orders/{order.id}/', {
@@ -13561,8 +13624,8 @@ class CloudOrderStatusDashboardSyncTestCase(TestCase):
         self.assertEqual(asset.mtproxy_host, '203.0.113.88')
         self.assertEqual(asset.mtproxy_link, 'tg://proxy?server=203.0.113.88&port=443&secret=abcdef')
         self.assertEqual(asset.mtproxy_port, 443)
-        self.assertEqual(asset.actual_expires_at, order.service_expires_at)
-        self.assertEqual(server.expires_at, order.service_expires_at)
+        self.assertEqual(asset.actual_expires_at, asset_expiry)
+        self.assertEqual(server.expires_at, server_expiry)
 
     # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
     def test_order_detail_manual_previous_ip_edit_syncs_primary_records(self):

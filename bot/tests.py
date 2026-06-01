@@ -75,6 +75,22 @@ class DashboardAuthSurfaceTestCase(TestCase):
         self.assertEqual(response.status_code, 401)
         self.assertNotIn(b'123456789:test-token', response.content)
 
+    def test_sensitive_site_config_blank_value_preserves_existing_secret(self):
+        root = get_user_model().objects.create_user(username='root_preserve_site_secret', password='pass', is_staff=True, is_superuser=True)
+        config = SiteConfig.set('bot_token', '123456789:existing-token', sensitive=True)
+        request = RequestFactory().post(
+            f'/api/admin/settings/site-configs/{config.id}/',
+            data=json.dumps({'value': ''}),
+            content_type='application/json',
+        )
+        self._attach_bearer_session(request, root)
+
+        response = update_site_config(request, config.id)
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(SiteConfig.get('bot_token'), '123456789:existing-token')
+        self.assertNotIn(b'123456789:existing-token', response.content)
+
     def test_dashboard_me_accepts_bearer_session(self):
         user = get_user_model().objects.create_user(username='dashboard_me_staff', password='pass', is_staff=True)
         request = self._authorized_get('/api/dashboard/me/', user)

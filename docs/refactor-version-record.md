@@ -11,6 +11,8 @@ Small safety pass after the backend refactor to guard runtime ownership, expiry,
 - Dashboard cloud order edits no longer reverse-sync `CloudServerOrder.user` or `service_expires_at` into `CloudAsset.user` / `actual_expires_at`.
 - Dashboard cloud asset edits preserve existing `mtproxy_secret` when the submitted value is blank.
 - Sensitive site config updates preserve the existing value when the submitted value is blank.
+- Order primary-record updates now apply cloud identity, status, and proxy-field changes to all server-like `CloudAsset` records tied to the same order, while still preserving manual owner and expiry fields.
+- Added focused regression coverage for blank sensitive config saves, blank MTProxy secret saves, order expiry edits, and multi-record order detail sync.
 
 ### Verification
 
@@ -20,6 +22,8 @@ Passed locally with `UV_CACHE_DIR=/private/tmp/shop-uv-cache`:
 uv run python manage.py check
 uv run python -m py_compile bot/api.py bot/handlers.py cloud/services.py cloud/bootstrap.py cloud/api.py cloud/api_asset_edit.py cloud/sync_jobs.py cloud/management/commands/sync_aws_assets.py cloud/management/commands/sync_aliyun_assets.py cloud/management/commands/process_cloud_asset_sync_jobs.py orders/payment_scanner.py orders/tron_parser.py
 uv run python -m py_compile bot/api_site_configs.py cloud/api_orders.py
+uv run python -m py_compile bot/tests.py cloud/tests.py cloud/services.py
+DJANGO_TEST_REUSE_DB=1 uv run python manage.py test bot.tests.DashboardAuthSurfaceTestCase.test_sensitive_site_config_blank_value_preserves_existing_secret cloud.tests.CloudServerServicesTestCase.test_update_cloud_asset_blank_mtproxy_secret_preserves_existing_secret cloud.tests.CloudServerServicesTestCase.test_dashboard_order_expiry_update_recomputes_lifecycle_plan cloud.tests.CloudOrderStatusDashboardSyncTestCase.test_order_detail_manual_edit_syncs_cloud_identity_and_proxy_fields --keepdb --noinput --verbosity 1
 ```
 
 ## 2026-06-01 task-center-and-monitor-split

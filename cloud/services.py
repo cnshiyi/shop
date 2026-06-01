@@ -183,7 +183,11 @@ def _update_order_primary_records(order: CloudServerOrder | None, *, asset_updat
         updates.update(_asset_update_from_server_fields(server_updates))
     if asset and updates:
         updates.setdefault('updated_at', now)
-        CloudAsset.objects.filter(id=asset.id).update(**updates)
+        target_queryset = CloudAsset.objects.filter(kind=CloudAsset.KIND_SERVER, order=order)
+        if target_queryset.exists():
+            target_queryset.update(**updates)
+        else:
+            CloudAsset.objects.filter(id=asset.id).update(**updates)
     return asset, None
 
 
