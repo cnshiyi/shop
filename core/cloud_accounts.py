@@ -38,6 +38,19 @@ def cloud_account_label_variants(account) -> list[str]:
     return list(dict.fromkeys(item for item in labels if item))
 
 
+def list_cloud_account_labels(is_active: bool | None = None) -> list[str]:
+    CloudAccountConfig = apps.get_model('core', 'CloudAccountConfig')
+    queryset = CloudAccountConfig.objects.filter(
+        provider__in=['aws', 'aliyun'],
+    )
+    if is_active is not None:
+        queryset = queryset.filter(is_active=is_active)
+    labels = []
+    for account in queryset.order_by('id'):
+        labels.extend(cloud_account_label_variants(account))
+    return list(dict.fromkeys(labels))
+
+
 def get_cloud_account_from_label(label: str, provider: str | None = None):
     text = str(label or '').strip()
     if not text:
@@ -98,11 +111,11 @@ def list_cloud_accounts_by_server_load(provider: str, region_code: str | None = 
     candidates = list_active_cloud_accounts(provider, region_code)
     if not candidates:
         return []
-    Server = apps.get_model('cloud', 'Server')
+    CloudAsset = apps.get_model('cloud', 'CloudAsset')
     provider_values = _provider_values(provider)
     labels = {item.id: cloud_account_label_variants(item) for item in candidates}
     all_labels = list(dict.fromkeys(label for variants in labels.values() for label in variants))
-    queryset = Server.objects.filter(provider__in=provider_values, account_label__in=all_labels)
+    queryset = CloudAsset.objects.filter(kind='server', provider__in=provider_values, account_label__in=all_labels)
     region = str(region_code or '').strip()
     if region:
         queryset = queryset.filter(Q(region_code=region) | Q(region_code='') | Q(region_code__isnull=True))

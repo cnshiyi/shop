@@ -1,15 +1,16 @@
 from django.core.management.base import BaseCommand
 from django.db.models import Count
 
-from cloud.server_records import Server
+from cloud.models import CloudAsset
 
 
 class Command(BaseCommand):
-    help = '清理 servers 表重复记录，保留每组最新一条有效记录'
+    help = '清理云服务器资产重复记录，保留每组最新一条有效记录'
 
     def handle(self, *args, **options):
         duplicate_groups = (
-            Server.objects.exclude(instance_id__isnull=True)
+            CloudAsset.objects.filter(kind=CloudAsset.KIND_SERVER)
+            .exclude(instance_id__isnull=True)
             .exclude(instance_id='')
             .values('provider', 'account_label', 'region_code', 'instance_id', 'public_ip', 'previous_public_ip')
             .annotate(total=Count('id'))
@@ -17,7 +18,8 @@ class Command(BaseCommand):
         )
         removed = 0
         for group in duplicate_groups:
-            queryset = Server.objects.filter(
+            queryset = CloudAsset.objects.filter(
+                kind=CloudAsset.KIND_SERVER,
                 provider=group['provider'],
                 account_label=group['account_label'],
                 region_code=group['region_code'],
@@ -29,5 +31,5 @@ class Command(BaseCommand):
             for item in queryset.exclude(pk=keep.pk):
                 item.delete()
                 removed += 1
-                self.stdout.write(self.style.WARNING(f"已删除重复服务器 #{item.pk} {item.provider}:{item.account_label or '-'}:{item.instance_id}"))
+                self.stdout.write(self.style.WARNING(f"已删除重复云资产 #{item.pk} {item.provider}:{item.account_label or '-'}:{item.instance_id}"))
         self.stdout.write(self.style.SUCCESS(f'完成，共删除 {removed} 条重复服务器记录。'))

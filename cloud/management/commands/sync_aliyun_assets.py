@@ -5,7 +5,6 @@ from django.db.models import Case, IntegerField, Q, Value, When
 from django.utils import timezone
 from django.utils.dateparse import parse_datetime
 
-from cloud.asset_queries import cloud_assets_base_queryset, dedupe_cloud_asset_rows
 from cloud.models import CloudAsset, CloudServerOrder
 from cloud.server_records import Server
 from cloud.aliyun_simple import _build_client, _region_endpoint, _runtime_options
@@ -27,7 +26,12 @@ logger = logging.getLogger(__name__)
 
 
 def _visible_asset_total():
-    return len(dedupe_cloud_asset_rows(list(cloud_assets_base_queryset())))
+    return (
+        CloudAsset.objects
+        .filter(kind=CloudAsset.KIND_SERVER, is_active=True)
+        .exclude(status__in=[CloudAsset.STATUS_DELETED, CloudAsset.STATUS_TERMINATED])
+        .count()
+    )
 
 
 def _resolve_order_for_ip(public_ip, account=None):

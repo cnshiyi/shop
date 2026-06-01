@@ -8,8 +8,10 @@ from unittest.mock import AsyncMock, patch
 
 from asgiref.sync import async_to_sync
 from django.contrib.auth import get_user_model
+from django.contrib.auth.models import AnonymousUser
 from django.core.management import call_command
 from django.core.management.base import CommandError
+from django.contrib.sessions.middleware import SessionMiddleware
 from django.test import RequestFactory, TestCase
 from django.utils import timezone
 from django.utils.dateparse import parse_datetime
@@ -830,6 +832,16 @@ class CloudServerServicesTestCase(TestCase):
             sort_order=100,
         )
 
+    def _attach_bearer_session(self, request, user):
+        SessionMiddleware(lambda req: None).process_request(request)
+        request.session['_auth_user_id'] = str(user.pk)
+        request.session['_auth_user_backend'] = 'django.contrib.auth.backends.ModelBackend'
+        request.session['_auth_user_hash'] = user.get_session_auth_hash()
+        request.session.save()
+        request.user = AnonymousUser()
+        request.META['HTTP_AUTHORIZATION'] = f'Bearer session-{request.session.session_key}'
+        return request
+
     def _aws_test_account(self):
         account = getattr(self, '_cached_aws_test_account', None)
         if account:
@@ -1100,6 +1112,73 @@ class CloudServerServicesTestCase(TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertEqual(payload['total'], 1)
         self.assertEqual(payload['items'][0]['id'], keep_asset.id)
+
+    def test_cloud_assets_list_uses_bulk_order_inference_without_per_asset_fallback(self):
+        order = CloudServerOrder.objects.create(
+            order_no='BULK-LIST-INFER-001',
+            user=self.user,
+            plan=self.plan,
+            provider=self.plan.provider,
+            region_code=self.plan.region_code,
+            region_name=self.plan.region_name,
+            plan_name=self.plan.plan_name,
+            quantity=1,
+            currency='USDT',
+            total_amount='19.00',
+            pay_amount='19.00',
+            status='completed',
+            public_ip='10.77.88.1',
+            service_expires_at=timezone.now() + timezone.timedelta(days=30),
+        )
+        asset = CloudAsset.objects.create(
+            kind=CloudAsset.KIND_SERVER,
+            source=CloudAsset.SOURCE_AWS_SYNC,
+            provider='aws_lightsail',
+            region_code=self.plan.region_code,
+            region_name=self.plan.region_name,
+            asset_name='bulk-list-infer-asset',
+            public_ip='10.77.88.1',
+            status=CloudAsset.STATUS_RUNNING,
+            actual_expires_at=timezone.now() + timezone.timedelta(days=30),
+        )
+        admin = get_user_model().objects.create_user(username='bulk_list_infer_admin', password='x', is_staff=True)
+        request = self.factory.get('/api/dashboard/cloud-assets/', {'paginated': '1'})
+        request.user = admin
+
+        with patch('cloud.api._infer_asset_order', side_effect=AssertionError('per-asset order inference should not run')):
+            response = cloud_assets_list(request)
+        payload = json.loads(response.content.decode('utf-8'))['data']
+
+        self.assertEqual(response.status_code, 200)
+        row = next(item for item in payload['items'] if item['id'] == asset.id)
+        self.assertEqual(row['order_id'], order.id)
+        self.assertEqual(row['user_id'], self.user.id)
+
+    def test_cloud_assets_list_does_not_persist_unattached_ip_expiry(self):
+        asset = CloudAsset.objects.create(
+            kind=CloudAsset.KIND_SERVER,
+            source=CloudAsset.SOURCE_AWS_SYNC,
+            provider='aws_lightsail',
+            region_code=self.plan.region_code,
+            region_name=self.plan.region_name,
+            asset_name='list-unattached-no-write',
+            public_ip='10.77.88.2',
+            status=CloudAsset.STATUS_UNKNOWN,
+            provider_status='未附加固定IP',
+            actual_expires_at=None,
+        )
+        admin = get_user_model().objects.create_user(username='list_unattached_no_write_admin', password='x', is_staff=True)
+        request = self.factory.get('/api/dashboard/cloud-assets/', {'paginated': '1', 'risk_status': 'unattached_ip'})
+        request.user = admin
+
+        response = cloud_assets_list(request)
+        payload = json.loads(response.content.decode('utf-8'))['data']
+
+        self.assertEqual(response.status_code, 200)
+        row = next(item for item in payload['items'] if item['id'] == asset.id)
+        self.assertTrue(row['actual_expires_at'])
+        asset.refresh_from_db()
+        self.assertIsNone(asset.actual_expires_at)
 
     def test_dedupe_cloud_assets_does_not_merge_cross_region_same_instance(self):
         for region, public_ip in [('ap-southeast-1', '13.250.30.15'), ('ap-northeast-1', '13.250.30.16')]:
@@ -6251,7 +6330,7 @@ class CloudServerServicesTestCase(TestCase):
             return AliyunCommand(), f'aliyun account {kwargs.get("account_id")} ok\n'
 
         request = RequestFactory().post('/api/dashboard/cloud-assets/sync/', data='{}', content_type='application/json')
-        request.user = staff_user
+        request = self._attach_bearer_session(request, staff_user)
         with patch('cloud.api._call_command_capture_threaded', side_effect=fake_call_command), patch('cloud.api._call_command_capture', return_value=(object(), 'reconcile ok\n')):
             response = sync_cloud_assets(request)
 
@@ -6264,6 +6343,74 @@ class CloudServerServicesTestCase(TestCase):
         self.assertIn('ap-southeast-1', payload['aws_regions'])
         self.assertIn(('sync_aliyun_assets', {'region': 'cn-hongkong', 'account_id': str(aliyun_account.id)}), calls)
         self.assertIn(('sync_aws_assets', {'region': '', 'account_id': str(aws_account.id)}), calls)
+
+    def test_sync_cloud_assets_with_selected_assets_uses_asset_scoped_tasks(self):
+        account = CloudAccountConfig.objects.create(
+            provider=CloudAccountConfig.PROVIDER_AWS,
+            name='aws-selected-asset-sync',
+            external_account_id='acct-selected-asset-sync',
+            access_key='A' * 20,
+            secret_key='B' * 40,
+            region_hint='ap-southeast-1',
+            is_active=True,
+        )
+        first_asset = CloudAsset.objects.create(
+            kind=CloudAsset.KIND_SERVER,
+            source=CloudAsset.SOURCE_AWS_SYNC,
+            user=self.user,
+            provider='aws_lightsail',
+            cloud_account=account,
+            account_label=cloud_account_label(account),
+            region_code='ap-southeast-1',
+            asset_name='selected-sync-one',
+            instance_id='selected-sync-one',
+            public_ip='10.88.30.1',
+            status=CloudAsset.STATUS_RUNNING,
+        )
+        second_asset = CloudAsset.objects.create(
+            kind=CloudAsset.KIND_SERVER,
+            source=CloudAsset.SOURCE_AWS_SYNC,
+            user=self.user,
+            provider='aws_lightsail',
+            cloud_account=account,
+            account_label=cloud_account_label(account),
+            region_code='ap-southeast-1',
+            asset_name='selected-sync-two',
+            instance_id='selected-sync-two',
+            public_ip='10.88.30.2',
+            status=CloudAsset.STATUS_RUNNING,
+        )
+        staff_user = get_user_model().objects.create_user(username='staff_sync_selected_assets', password='x', is_staff=True, is_superuser=True)
+        calls = []
+
+        class AwsCommand:
+            synced_regions = ['ap-southeast-1']
+            sync_errors = []
+            summary = {'updated': 1}
+
+        def fake_call_command(command_name, **kwargs):
+            calls.append((command_name, kwargs))
+            return AwsCommand(), f'aws asset {kwargs.get("asset_id")} ok\n'
+
+        request = RequestFactory().post(
+            '/api/dashboard/cloud-assets/sync/',
+            data=json.dumps({'asset_ids': [first_asset.id, second_asset.id]}),
+            content_type='application/json',
+        )
+        request = self._attach_bearer_session(request, staff_user)
+        with patch('cloud.api._call_command_capture_threaded', side_effect=fake_call_command), \
+            patch('cloud.api._refresh_dashboard_plan_snapshots_deferred'):
+            response = sync_cloud_assets(request)
+
+        self.assertEqual(response.status_code, 200)
+        payload = json.loads(response.content)['data']
+        self.assertTrue(payload['ok'])
+        self.assertTrue(payload['synced']['aws'])
+        self.assertEqual(len(calls), 2)
+        self.assertEqual({call[1]['asset_id'] for call in calls}, {str(first_asset.id), str(second_asset.id)})
+        self.assertTrue(all(call[0] == 'sync_aws_assets' for call in calls))
+        self.assertTrue(all(call[1]['region'] == 'ap-southeast-1' for call in calls))
+        self.assertFalse(any('asset_id' not in call[1] for call in calls))
 
     def test_sync_cloud_asset_status_uses_asset_scope(self):
         account = CloudAccountConfig.objects.create(
@@ -6293,7 +6440,7 @@ class CloudServerServicesTestCase(TestCase):
         staff_user = get_user_model().objects.create_user(username='staff_asset_sync_one', password='x', is_staff=True, is_superuser=True)
         with patch('cloud.api._call_command_capture', return_value=(object(), None)) as mocked:
             request = RequestFactory().post(f'/api/dashboard/cloud-assets/{asset.id}/sync/', data='{}', content_type='application/json')
-            request.user = staff_user
+            request = self._attach_bearer_session(request, staff_user)
             response = sync_cloud_asset_status(request, asset.id)
 
         self.assertEqual(response.status_code, 200)
@@ -6354,7 +6501,7 @@ class CloudServerServicesTestCase(TestCase):
         staff_user = get_user_model().objects.create_user(username='staff_retained_asset_sync_one', password='x', is_staff=True, is_superuser=True)
         with patch('cloud.api._call_command_capture', return_value=(object(), None)) as mocked:
             request = RequestFactory().post(f'/api/dashboard/cloud-assets/{asset.id}/sync/', data='{}', content_type='application/json')
-            request.user = staff_user
+            request = self._attach_bearer_session(request, staff_user)
             response = sync_cloud_asset_status(request, asset.id)
 
         self.assertEqual(response.status_code, 200)

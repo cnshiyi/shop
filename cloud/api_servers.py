@@ -10,7 +10,7 @@ from django.views.decorators.http import require_GET, require_POST, require_http
 from cloud.models import CloudAsset, CloudIpLog
 from cloud.dashboard_api_helpers import _dashboard_expiry_ordering, _dashboard_sort_direction, _preserve_link_status_label, _preserve_link_status_with_countdown
 from cloud.services import AWS_REGION_NAMES, create_cloud_server_rebuild_order, record_cloud_ip_log, run_cloud_server_rebuild_job
-from core.cloud_accounts import cloud_account_label, cloud_account_label_variants
+from core.cloud_accounts import cloud_account_label, cloud_account_label_variants, list_cloud_account_labels
 from core.dashboard_api import _apply_keyword_filter, _countdown_label, _days_left, _error, _get_keyword, _iso, _ok, _provider_label, _provider_status_label, _region_label, _server_source_label, _status_label, _user_payload, dashboard_login_required, dashboard_superuser_required
 from core.models import CloudAccountConfig
 
@@ -159,15 +159,7 @@ def _statistics_account_label(account) -> str:
 
 
 def _cloud_account_labels_queryset(is_active: bool | None = None):
-    queryset = CloudAccountConfig.objects.filter(
-        provider__in=[CloudAccountConfig.PROVIDER_AWS, CloudAccountConfig.PROVIDER_ALIYUN],
-    )
-    if is_active is not None:
-        queryset = queryset.filter(is_active=is_active)
-    labels = []
-    for account in queryset:
-        labels.extend(cloud_account_label_variants(account))
-    return list(dict.fromkeys(labels))
+    return list_cloud_account_labels(is_active)
 
 
 @dashboard_login_required

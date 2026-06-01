@@ -533,6 +533,43 @@ The focused DB test run is blocked by local MySQL test database permissions:
 Access denied for user 'a'@'localhost' to database 'test_a'
 ```
 
+## 2026-06-01 proxy-list-and-sync-performance
+
+### Scope
+
+Twenty-seventh refactor pass optimized dashboard proxy list loading and selected-asset cloud sync.
+
+### Runtime Changes
+
+- Added `core.cloud_accounts.list_cloud_account_labels()` so dashboard payload rendering can load active cloud account labels once per request instead of once per asset.
+- Added a `CloudAssetPayloadContext` for proxy list payloads:
+  - bulk infers missing `CloudServerOrder` links by IP/name/resource identifiers;
+  - disables per-row order fallback queries in list/risk-summary reads;
+  - avoids `sync_cloud_asset_user_binding()` writes during list rendering;
+  - computes missing unattached-IP expiry for display without saving during a GET.
+- `cloud_assets_list` and `cloud_assets_risk_summary` now build payloads through the shared context.
+- `sync_cloud_assets` now treats selected `asset_ids` as real asset-scoped sync tasks instead of widening to full account sync. Multi-select creates scoped tasks with `asset_id`, `instance_id`, `public_ip`, account, and region.
+- Sync task locks include the scoped asset/resource key, so two selected assets in the same account/region do not skip each other.
+- Removed the runtime reconcile command call from dashboard sync because `CloudAsset(kind='server')` is now canonical.
+- Dashboard sync snapshot refresh now uses the deferred refresh path.
+- AWS/Aliyun sync command visible-count summaries use a cheap active asset count instead of full dashboard dedupe scans.
+- Frontend proxy list load now uses `risk_counts` returned by the list endpoint and avoids the duplicate concurrent risk-summary request.
+
+### Verification
+
+Passed locally:
+
+```bash
+uv run python -m py_compile core/cloud_accounts.py cloud/api.py cloud/api_servers.py cloud/management/commands/sync_aws_assets.py cloud/management/commands/sync_aliyun_assets.py cloud/management/commands/reconcile_cloud_assets_from_servers.py
+uv run python manage.py check
+DJANGO_TEST_REUSE_DB=1 uv run python manage.py test cloud.tests.CloudServerServicesTestCase.test_cloud_assets_list_uses_bulk_order_inference_without_per_asset_fallback cloud.tests.CloudServerServicesTestCase.test_cloud_assets_list_does_not_persist_unattached_ip_expiry cloud.tests.CloudServerServicesTestCase.test_sync_cloud_assets_with_selected_assets_uses_asset_scoped_tasks --keepdb --noinput --verbosity 1
+DJANGO_TEST_REUSE_DB=1 uv run python manage.py test cloud.tests.CloudServerServicesTestCase.test_sync_cloud_assets_runs_enabled_accounts_and_merges_results cloud.tests.CloudServerServicesTestCase.test_sync_cloud_asset_status_uses_asset_scope cloud.tests.CloudServerServicesTestCase.test_sync_retained_ip_asset_uses_order_account_and_static_ip_scope --keepdb --noinput --verbosity 1
+DJANGO_TEST_REUSE_DB=1 uv run python manage.py test cloud.tests.CloudServerServicesTestCase.test_cloud_assets_list_dedupes_same_cloud_account_label_variants cloud.tests.CloudServerServicesTestCase.test_cloud_assets_paginated_keeps_same_user_on_same_page cloud.tests.CloudServerServicesTestCase.test_cloud_assets_paginated_keeps_same_telegram_group_on_same_page cloud.tests.CloudServerServicesTestCase.test_cloud_assets_grouped_paginated_uses_twenty_user_groups_per_page --keepdb --noinput --verbosity 1
+(cd /Users/a399/Desktop/data/vue-shop-admin && ./node_modules/.bin/vue-tsc --noEmit --skipLibCheck -p apps/web-antd/tsconfig.json)
+```
+
+Frontend note: `pnpm -F @vben/web-antd typecheck` is blocked by local engine mismatch (`pnpm 9.15.9`, Node `v26.0.0`), so the same `vue-tsc` command was run directly.
+
 ## 2026-06-01 aws-lightsail-structured-create-log
 
 ### Scope
@@ -593,6 +630,32 @@ Passed locally:
 ```bash
 uv run python -m py_compile cloud/management/commands/sync_aws_assets.py
 DJANGO_TEST_REUSE_DB=1 uv run python manage.py test cloud.tests.CloudServerServicesTestCase.test_sync_missing_confirmation_note_preserves_existing_note cloud.tests.CloudServerServicesTestCase.test_sync_missing_confirmation_requires_interval cloud.tests.CloudServerServicesTestCase.test_unattached_ip_delete_items_expose_missing_confirmation_state cloud.tests.CloudServerServicesTestCase.test_lifecycle_plans_unattached_ip_show_confirmation_progress_in_state_and_note cloud.tests.CloudServerServicesTestCase.test_sync_aws_missing_instance_requires_five_passes_before_delete cloud.tests.CloudServerServicesTestCase.test_sync_aliyun_missing_instance_requires_five_passes_before_delete --keepdb --noinput --verbosity 1
+```
+
+## 2026-06-01 server-compat-runtime-shrink
+
+### Scope
+
+Twenty-sixth refactor pass removed more runtime dependency on the `cloud.server_records.Server` compatibility wrapper.
+
+### Runtime Changes
+
+- `core.cloud_accounts.list_cloud_accounts_by_server_load()` now counts `CloudAsset(kind='server')` directly.
+- `upsert_cloud_asset` no longer writes a duplicate compatibility `Server` row after creating/updating the canonical asset.
+- `dedupe_servers` now de-duplicates canonical server assets in `cloud_asset`.
+- `reconcile_cloud_assets_from_servers` is now an explicit no-op compatibility command because `cloud_server` has already been removed.
+- Remaining runtime compatibility wrapper imports are limited to AWS/Aliyun sync commands; historical migrations and tests still reference old labels intentionally.
+
+### Verification
+
+Passed locally:
+
+```bash
+uv run python -m py_compile core/cloud_accounts.py cloud/management/commands/upsert_cloud_asset.py cloud/management/commands/dedupe_servers.py cloud/management/commands/reconcile_cloud_assets_from_servers.py
+uv run python manage.py check
+uv run python manage.py reconcile_cloud_assets_from_servers
+uv run python manage.py dedupe_servers
+DJANGO_TEST_REUSE_DB=1 uv run python manage.py test core.tests.CloudAccountSelectionTestCase --keepdb --noinput --verbosity 1
 ```
 
 ## 2026-06-01 dashboard-api-helper-extraction

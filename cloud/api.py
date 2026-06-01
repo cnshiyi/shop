@@ -35,7 +35,7 @@ from cloud.dashboard_snapshots import _refresh_dashboard_plan_snapshots, _refres
 from cloud.services import AWS_REGION_NAMES, RenewalPriceMissingError, _renewal_price, _update_order_primary_records, create_cloud_server_rebuild_order, drop_asset_note_update, ensure_cloud_asset_operation_order, ensure_cloud_server_pricing, ensure_manual_expiry_operation_order, ensure_manual_owner_operation_order, ensure_manual_price_operation_order, record_cloud_ip_log, refresh_custom_plan_cache, replace_cloud_asset_order_by_admin, set_cloud_server_auto_renew_admin, sync_cloud_asset_user_binding
 from cloud.models import AddressMonitor, CloudAsset, CloudAutoRenewPatrolLog, CloudAutoRenewPlan, CloudIpLog, CloudNoticePlan, CloudServerOrder, CloudServerPlan, CloudUserNoticeLog, ServerPrice
 from cloud.note_utils import append_note, prepend_note
-from core.cloud_accounts import cloud_account_label, cloud_account_label_variants
+from core.cloud_accounts import cloud_account_label, cloud_account_label_variants, list_cloud_account_labels
 from core.dashboard_api import _apply_keyword_filter, _countdown_label, _days_left, _decimal_to_str, _error, _get_keyword, _iso, _ok, _parse_decimal, _provider_label, _provider_status_label, _read_payload, _region_label, _server_source_label, _split_usernames, _status_label, _user_payload, dashboard_login_required, dashboard_superuser_required
 from core.models import CloudAccountConfig, ExternalSyncLog, SiteConfig
 from core.cache import get_redis
@@ -366,6 +366,132 @@ def _infer_asset_order(asset):
     return None
 
 
+class CloudAssetPayloadContext:
+    def __init__(self, *, active_account_labels=None, inferred_orders=None, allow_mutation=True, now=None):
+        self.active_account_labels = set(active_account_labels or [])
+        self.inferred_orders = inferred_orders or {}
+        self.allow_mutation = allow_mutation
+        self.now = now or timezone.now()
+
+
+def _asset_lookup_values(asset):
+    names = {
+        str(getattr(asset, 'asset_name', '') or '').strip(),
+        str(getattr(asset, 'instance_id', '') or '').strip(),
+        str(getattr(asset, 'provider_resource_id', '') or '').strip(),
+    }
+    ips = {
+        str(getattr(asset, 'public_ip', '') or '').strip(),
+        str(getattr(asset, 'previous_public_ip', '') or '').strip(),
+    }
+    names.discard('')
+    ips.discard('')
+    return names, ips
+
+
+def _asset_account_label_variants(asset):
+    account = getattr(asset, 'cloud_account', None)
+    labels = cloud_account_label_variants(account) if account else []
+    asset_account_label = str(getattr(asset, 'account_label', '') or '').strip()
+    if asset_account_label:
+        labels.append(asset_account_label)
+    return list(dict.fromkeys(label for label in labels if label))
+
+
+def _order_matches_asset_lookup(order, asset, account_labels) -> bool:
+    provider = str(getattr(asset, 'provider', '') or '').strip()
+    region_code = str(getattr(asset, 'region_code', '') or '').strip()
+    if provider and order.provider != provider:
+        return False
+    if region_code and str(order.region_code or '') not in {region_code, ''}:
+        return False
+    if getattr(asset, 'user_id', None) and order.user_id != asset.user_id:
+        return False
+    if getattr(asset, 'cloud_account_id', None):
+        return order.cloud_account_id == asset.cloud_account_id or str(order.account_label or '') in account_labels
+    if account_labels:
+        return str(order.account_label or '') in account_labels or not str(order.account_label or '').strip()
+    return True
+
+
+def _bulk_infer_asset_orders(assets):
+    targets = []
+    all_names = set()
+    all_ips = set()
+    providers = set()
+    for asset in assets:
+        if getattr(asset, 'order_id', None):
+            continue
+        names, ips = _asset_lookup_values(asset)
+        if not names and not ips:
+            continue
+        account_labels = _asset_account_label_variants(asset)
+        targets.append((asset, names, ips, account_labels))
+        all_names.update(names)
+        all_ips.update(ips)
+        provider = str(getattr(asset, 'provider', '') or '').strip()
+        if provider:
+            providers.add(provider)
+    if not targets:
+        return {}
+
+    lookup = Q()
+    if all_ips:
+        lookup |= Q(public_ip__in=all_ips) | Q(previous_public_ip__in=all_ips)
+    if all_names:
+        lookup |= Q(server_name__in=all_names) | Q(instance_id__in=all_names) | Q(provider_resource_id__in=all_names)
+    queryset = CloudServerOrder.objects.select_related('user', 'plan', 'cloud_account').filter(lookup)
+    if providers:
+        queryset = queryset.filter(provider__in=providers)
+    orders = list(queryset.order_by('-updated_at', '-id'))
+
+    by_ip = {}
+    by_name = {}
+    for order in orders:
+        for value in {str(order.public_ip or '').strip(), str(order.previous_public_ip or '').strip()}:
+            if value:
+                by_ip.setdefault(value, []).append(order)
+        for value in {str(order.server_name or '').strip(), str(order.instance_id or '').strip(), str(order.provider_resource_id or '').strip()}:
+            if value:
+                by_name.setdefault(value, []).append(order)
+
+    inferred = {}
+    for asset, names, ips, account_labels in targets:
+        for ip in ips:
+            for order in by_ip.get(ip, []):
+                if _order_matches_asset_lookup(order, asset, account_labels):
+                    inferred[asset.id] = order
+                    break
+            if asset.id in inferred:
+                break
+        if asset.id in inferred:
+            continue
+        for name in names:
+            for order in by_name.get(name, []):
+                if _order_matches_asset_lookup(order, asset, account_labels):
+                    inferred[asset.id] = order
+                    break
+            if asset.id in inferred:
+                break
+    return inferred
+
+
+def _build_cloud_asset_payload_context(assets, *, allow_mutation=False):
+    asset_list = list(assets)
+    return CloudAssetPayloadContext(
+        active_account_labels=list_cloud_account_labels(True),
+        inferred_orders=_bulk_infer_asset_orders(asset_list),
+        allow_mutation=allow_mutation,
+        now=timezone.now(),
+    )
+
+
+def _cloud_asset_payloads(assets, *, allow_mutation=False):
+    asset_list = list(assets)
+    context = _build_cloud_asset_payload_context(asset_list, allow_mutation=allow_mutation)
+    return [_asset_payload(asset, context=context) for asset in asset_list]
+
+
 def _display_cloud_asset_note(note: str | None) -> str:
     noisy_prefixes = (
         'Get:', 'Hit:', 'Ign:', 'Err:', 'Fetched ', 'Reading package lists',
@@ -429,8 +555,11 @@ def _cloud_asset_static_ip_name(asset, order=None) -> str:
     return asset_static_ip_name or str(getattr(order, 'static_ip_name', '') if order else '').strip()
 
 
-def _cloud_asset_provider_status_label(asset, account_label: str | None = None) -> str:
-    active_account_labels = set(_cloud_account_labels_queryset(True))
+def _cloud_asset_provider_status_label(asset, account_label: str | None = None, *, active_account_labels=None) -> str:
+    if active_account_labels is None:
+        active_account_labels = set(list_cloud_account_labels(True))
+    else:
+        active_account_labels = set(active_account_labels)
     account = getattr(asset, 'cloud_account', None)
     asset_account_label = str(account_label or getattr(asset, 'account_label', '') or '').strip()
     account_disabled = (
@@ -625,12 +754,17 @@ def _sort_cloud_asset_payloads(items: list[dict], sort_by: str, sort_direction: 
     ))
 
 
-def _asset_payload(asset):
-    order = _infer_asset_order(asset)
-    if order and not getattr(asset, 'order_id', None):
+def _asset_payload(asset, *, context: CloudAssetPayloadContext | None = None):
+    context = context or CloudAssetPayloadContext(active_account_labels=list_cloud_account_labels(True))
+    order = getattr(asset, 'order', None) or context.inferred_orders.get(getattr(asset, 'id', None))
+    if not order and context.allow_mutation:
+        order = _infer_asset_order(asset)
+    if context.allow_mutation and order and not getattr(asset, 'order_id', None):
         asset.order = order
         asset.order_id = order.id
-    user = asset.user or getattr(order, 'user', None) or sync_cloud_asset_user_binding(asset)
+    user = asset.user or getattr(order, 'user', None)
+    if not user and context.allow_mutation:
+        user = sync_cloud_asset_user_binding(asset)
     user_payload = None
     if user:
         usernames = user.usernames
@@ -642,8 +776,12 @@ def _asset_payload(asset):
             'usernames': usernames,
             'primary_username': usernames[0] if usernames else '',
         })
-    _ensure_unattached_ip_expiry(asset)
     expires_at = asset.actual_expires_at
+    if _is_unattached_ip_asset(asset) and not expires_at:
+        expires_at = _unattached_ip_delete_due_at(now=context.now)
+        if context.allow_mutation:
+            asset.actual_expires_at = expires_at
+            asset.save(update_fields=['actual_expires_at', 'updated_at'])
     countdown_label = _countdown_label(expires_at)
     preserve_link_status = _preserve_link_status_with_countdown(
         _preserve_link_status_label(asset.note, getattr(order, 'provision_note', None)),
@@ -653,7 +791,7 @@ def _asset_payload(asset):
     cloud_account_id = asset.cloud_account_id or getattr(order, 'cloud_account_id', None)
     display_status = asset.status
     display_status_label = '旧机保留中' if asset.status == CloudAsset.STATUS_DELETING and '旧机保留期' in str(asset.provider_status or '') else _status_label(asset.status, CloudAsset.STATUS_CHOICES)
-    provider_status_label = _cloud_asset_provider_status_label(asset, account_label)
+    provider_status_label = _cloud_asset_provider_status_label(asset, account_label, active_account_labels=context.active_account_labels)
     provider_account_disabled = '云账号已停用' in str(provider_status_label or '')
     if asset.status == CloudAsset.STATUS_UNKNOWN and '未附加' in str(asset.provider_status or ''):
         display_status = 'unattached'
@@ -1267,7 +1405,8 @@ def cloud_assets_list(request):
         if sort_by in {'actual_expires_at', 'expires_at', 'days_left', 'remaining_days'}:
             ordering = _dashboard_expiry_ordering('actual_expires_at', sort_direction)
         queryset = _apply_cloud_assets_keyword(queryset, keyword).distinct().order_by(*ordering)
-        items = [_asset_payload(asset) for asset in dedupe_cloud_asset_rows(list(queryset))]
+        assets = dedupe_cloud_asset_rows(list(queryset))
+        items = _cloud_asset_payloads(assets, allow_mutation=False)
         items = _sort_cloud_asset_payloads(items, sort_by, sort_direction)
         risk_counts = _cloud_asset_risk_counts(items)
         items = _filter_cloud_asset_payloads_by_risk(items, risk_status)
@@ -1323,7 +1462,8 @@ def cloud_assets_risk_summary(request):
     keyword = _get_keyword(request)
     try:
         queryset = _apply_cloud_assets_keyword(cloud_assets_base_queryset(), keyword).distinct().order_by('-updated_at', '-id')
-        items = [_asset_payload(asset) for asset in dedupe_cloud_asset_rows(list(queryset))]
+        assets = dedupe_cloud_asset_rows(list(queryset))
+        items = _cloud_asset_payloads(assets, allow_mutation=False)
         return _ok({'risk_counts': _cloud_asset_risk_counts(items), 'total': len(items)})
     except ProgrammingError:
         return _ok({'risk_counts': {'all': 0}, 'total': 0})
@@ -3623,7 +3763,7 @@ def sync_servers(request):
             message = f'AWS账号#{getattr(aws_account, "id", "-")}同步失败: {exc}'
             errors.append(message)
             logger.exception('DASHBOARD_SYNC_SERVERS_AWS_FAILED account_id=%s region=%s', getattr(aws_account, 'id', None), aws_region or 'all')
-    ok = not errors or any(synced.values())
+    ok = not errors or synced['aliyun'] or synced['aws']
     response_payload = {'ok': ok, 'synced': synced, 'missing': missing, 'aliyun_region': aliyun_region, 'aws_region': aws_region or 'all', 'aws_regions': aws_regions, 'errors': errors, 'warnings': warnings[:50], 'logs': _sync_log_tail(command_output), 'accounts': {'aliyun': [_sync_account_payload(account) for account in aliyun_accounts], 'aws': [_sync_account_payload(account) for account in aws_accounts]}}
     _record_dashboard_sync_log(
         action='sync_servers',
@@ -3702,6 +3842,47 @@ def _asset_retained_static_ip_sync_scope(asset):
     return {'instance_id': static_name, 'public_ip': public_ip}
 
 
+def _sync_task_for_asset(asset, *, account=None, default_aliyun_region='cn-hongkong', default_aws_region=''):
+    provider = _sync_provider_for_asset(asset)
+    if not provider:
+        return None, '当前资产暂不支持同步'
+    account = account or _resolve_sync_account_for_asset(asset)
+    if not account:
+        return None, '未找到可用云账号'
+    region_code = str(getattr(asset, 'region_code', '') or getattr(account, 'region_hint', '') or '').strip()
+    if provider == CloudAccountConfig.PROVIDER_ALIYUN:
+        region_code = region_code or default_aliyun_region or 'cn-hongkong'
+        command_name = 'sync_aliyun_assets'
+        scope_instance_id = asset.instance_id or asset.provider_resource_id or ''
+        scope_public_ip = asset.public_ip or asset.previous_public_ip or ''
+        provider_key = 'aliyun'
+    else:
+        region_code = region_code or default_aws_region or ''
+        command_name = 'sync_aws_assets'
+        retained_scope = _asset_retained_static_ip_sync_scope(asset)
+        scope_instance_id = (
+            (retained_scope or {}).get('instance_id')
+            if retained_scope is not None
+            else (asset.instance_id or asset.provider_resource_id or asset.asset_name or '')
+        )
+        scope_public_ip = (retained_scope or {}).get('public_ip') or asset.public_ip or asset.previous_public_ip or ''
+        provider_key = 'aws'
+    kwargs = {
+        'region': region_code,
+        'account_id': str(account.id),
+        'asset_id': str(asset.id),
+        'instance_id': scope_instance_id,
+        'public_ip': scope_public_ip,
+    }
+    return {
+        'provider': provider_key,
+        'account': account,
+        'command': command_name,
+        'kwargs': kwargs,
+        'asset': asset,
+    }, ''
+
+
 def _provider_sync_source(provider: str) -> str:
     return ExternalSyncLog.SOURCE_AWS if provider == 'aws' else ExternalSyncLog.SOURCE_ALIYUN
 
@@ -3710,7 +3891,9 @@ def _sync_task_lock_key(task: dict) -> str:
     account = task.get('account')
     account_id = getattr(account, 'id', 'none')
     region = str((task.get('kwargs') or {}).get('region') or 'all')
-    return f"cloud_asset_sync:{task.get('provider')}:{account_id}:{region}"
+    kwargs = task.get('kwargs') or {}
+    scope = str(kwargs.get('asset_id') or kwargs.get('instance_id') or kwargs.get('public_ip') or 'all').replace(':', '_')
+    return f"cloud_asset_sync:{task.get('provider')}:{account_id}:{region}:{scope}"
 
 
 def _sync_task_payload(task: dict) -> dict:
@@ -3721,6 +3904,7 @@ def _sync_task_payload(task: dict) -> dict:
         'account': _sync_account_payload(account) if account else None,
         'region': kwargs.get('region') or 'all',
         'command': task.get('command'),
+        'asset_id': kwargs.get('asset_id') or None,
     }
 
 
@@ -3858,7 +4042,7 @@ def sync_cloud_asset_status(request, asset_id):
         },
     }
     if not errors:
-        _refresh_dashboard_plan_snapshots(f'cloud_asset_sync:{asset.id}', lifecycle_limit=1000)
+        _refresh_dashboard_plan_snapshots_deferred(f'cloud_asset_sync:{asset.id}')
     _log_sync_command_output(f'CLOUD_SYNC_SINGLE_REQUEST_LOG run_id={sync_run_id} command={command_name}', _sync_log_text(command_output))
     _record_dashboard_sync_log(
         action='sync_cloud_asset_status',
@@ -3903,35 +4087,46 @@ def sync_cloud_assets(request):
     if requested_account_ids:
         aliyun_accounts = [account for account in aliyun_accounts if account.id in requested_account_ids]
         aws_accounts = [account for account in aws_accounts if account.id in requested_account_ids]
+    warnings = []
     selected_assets = []
     selected_account_keys = set()
-    selected_single_asset = None
+    selected_asset_tasks = []
     if requested_asset_ids:
         selected_assets = list(CloudAsset.objects.select_related('cloud_account', 'order').filter(id__in=requested_asset_ids))
-        if len(selected_assets) == 1:
-            selected_single_asset = selected_assets[0]
+        found_asset_ids = {asset.id for asset in selected_assets}
+        missing_asset_ids = sorted(requested_asset_ids - found_asset_ids)
+        if missing_asset_ids:
+            warnings.append(f'部分选中资产不存在，已跳过: {missing_asset_ids[:20]}')
         for asset in selected_assets:
-            provider = _sync_provider_for_asset(asset)
-            account = _resolve_sync_account_for_asset(asset)
-            if provider == CloudAccountConfig.PROVIDER_ALIYUN and account:
-                selected_account_keys.add(('aliyun', account.id))
-            elif provider == CloudAccountConfig.PROVIDER_AWS and account:
-                selected_account_keys.add(('aws', account.id))
-        if selected_account_keys:
-            providers = {provider for provider, _ in selected_account_keys}
+            task, warning = _sync_task_for_asset(
+                asset,
+                default_aliyun_region=aliyun_region,
+                default_aws_region=aws_region,
+            )
+            if warning:
+                warnings.append(f'资产#{asset.id}: {warning}')
+                continue
+            if task['provider'] not in providers:
+                warnings.append(f'资产#{asset.id}: 不在本次同步厂商范围内，已跳过')
+                continue
+            if requested_account_ids and getattr(task['account'], 'id', None) not in requested_account_ids:
+                warnings.append(f'资产#{asset.id}: 不在本次同步账号范围内，已跳过')
+                continue
+            task['run_id'] = sync_run_id
+            selected_asset_tasks.append(task)
+            selected_account_keys.add((task['provider'], getattr(task['account'], 'id', None)))
+        if selected_asset_tasks:
+            providers = {task['provider'] for task in selected_asset_tasks}
             aliyun_accounts = [account for account in aliyun_accounts if ('aliyun', account.id) in selected_account_keys]
             aws_accounts = [account for account in aws_accounts if ('aws', account.id) in selected_account_keys]
-    warnings = []
+        else:
+            errors.append('选中资产没有可同步任务，已避免退化为全账号同步')
     sync_tasks = []
-    if 'aliyun' in providers:
+    if selected_asset_tasks:
+        sync_tasks = selected_asset_tasks
+    elif 'aliyun' in providers:
         for aliyun_account in aliyun_accounts:
             kwargs = {'region': aliyun_region, 'account_id': str(aliyun_account.id)}
-            if selected_single_asset:
-                kwargs.update({
-                    'asset_id': str(selected_single_asset.id),
-                    'instance_id': selected_single_asset.instance_id or selected_single_asset.provider_resource_id or '',
-                    'public_ip': selected_single_asset.public_ip or selected_single_asset.previous_public_ip or '',
-                })
             sync_tasks.append({
                 'run_id': sync_run_id,
                 'provider': 'aliyun',
@@ -3939,15 +4134,9 @@ def sync_cloud_assets(request):
                 'command': 'sync_aliyun_assets',
                 'kwargs': kwargs,
             })
-    if 'aws' in providers:
+    if not selected_asset_tasks and 'aws' in providers:
         for aws_account in aws_accounts:
             kwargs = {'region': aws_region, 'account_id': str(aws_account.id)}
-            if selected_single_asset:
-                kwargs.update({
-                    'asset_id': str(selected_single_asset.id),
-                    'instance_id': selected_single_asset.instance_id or selected_single_asset.provider_resource_id or selected_single_asset.asset_name or '',
-                    'public_ip': selected_single_asset.public_ip or selected_single_asset.previous_public_ip or '',
-                })
             sync_tasks.append({
                 'run_id': sync_run_id,
                 'provider': 'aws',
@@ -3990,7 +4179,8 @@ def sync_cloud_assets(request):
                         synced['aliyun'] = True
                     else:
                         command = result['command']
-                        account_regions = getattr(command, 'synced_regions', None) or [aws_region or 'all']
+                        task_region = (task.get('kwargs') or {}).get('region') or aws_region or 'all'
+                        account_regions = getattr(command, 'synced_regions', None) or [task_region]
                         aws_regions.extend(region for region in account_regions if region not in aws_regions)
                         warnings.extend(getattr(command, 'sync_errors', []) or [])
                         synced['aws'] = True
@@ -4006,16 +4196,9 @@ def sync_cloud_assets(request):
                         logger.exception('DASHBOARD_SYNC_ASSETS_AWS_FAILED run_id=%s account_id=%s region=%s kwargs=%s', sync_run_id, getattr(account, 'id', None), aws_region or 'all', task.get('kwargs') or {})
                     _log_sync_command_output(f'CLOUD_SYNC_TASK_FAILED_LOG run_id={sync_run_id} command={task.get("command")}', captured_log, level=logging.ERROR)
                     errors.append(message)
-    try:
-        logger.info('CLOUD_SYNC_RECONCILE_START run_id=%s', sync_run_id)
-        _call_command_capture('reconcile_cloud_assets_from_servers', stdout=command_output)
-        synced['reconcile'] = True
-        logger.info('CLOUD_SYNC_RECONCILE_DONE run_id=%s', sync_run_id)
-    except Exception as exc:
-        message = f'代理列表补齐失败: {exc}'
-        errors.append(message)
-        logger.exception('DASHBOARD_SYNC_ASSETS_RECONCILE_FAILED run_id=%s', sync_run_id)
-    ok = not errors or any(synced.values())
+    synced['reconcile'] = True
+    logger.info('CLOUD_SYNC_RECONCILE_SKIPPED run_id=%s reason=cloud_asset_is_canonical', sync_run_id)
+    ok = not errors or synced['aliyun'] or synced['aws']
     response_payload = {
         'ok': ok,
         'synced': synced,
@@ -4043,7 +4226,7 @@ def sync_cloud_assets(request):
     )
     _log_sync_command_output(f'CLOUD_SYNC_REQUEST_LOG run_id={sync_run_id}', _sync_log_text(command_output))
     if ok:
-        _refresh_dashboard_plan_snapshots(f'cloud_assets_sync:{sync_run_id}', lifecycle_limit=1000)
+        _refresh_dashboard_plan_snapshots_deferred(f'cloud_assets_sync:{sync_run_id}')
     _record_dashboard_sync_log(
         action='sync_cloud_assets',
         target=f'providers:{",".join(sorted(providers))};aliyun:{aliyun_region};aws:{aws_region or "all"}',
@@ -4179,7 +4362,7 @@ def cloud_assets_sync_status(request):
         last_synced_at = latest_asset.updated_at
 
     since = last_synced_at
-    active_account_labels = _cloud_account_labels_queryset(True)
+    active_account_labels = list_cloud_account_labels(True)
     active_account_filter = (
         Q(cloud_account__is_active=True)
         | Q(cloud_account__isnull=True, account_label__in=active_account_labels)

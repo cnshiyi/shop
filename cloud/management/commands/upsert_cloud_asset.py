@@ -6,7 +6,6 @@ from django.utils.dateparse import parse_datetime
 
 from bot.models import TelegramUser
 from cloud.models import CloudAsset
-from cloud.server_records import Server
 from core.cloud_accounts import cloud_account_label, get_cloud_account_from_label
 
 
@@ -156,37 +155,5 @@ class Command(BaseCommand):
             if update_fields:
                 update_fields.append('updated_at')
                 asset.save(update_fields=sorted(set(update_fields)))
-        if asset.kind == CloudAsset.KIND_SERVER:
-            server_lookup = {
-                'provider': asset.provider,
-                'account_label': asset.account_label or '',
-                'region_code': asset.region_code,
-            }
-            if asset.public_ip:
-                server_lookup['public_ip'] = asset.public_ip
-            else:
-                server_lookup['instance_id'] = asset.instance_id or asset.provider_resource_id or asset.public_ip
-            Server.objects.update_or_create(
-                **server_lookup,
-                defaults={
-                    'source': Server.SOURCE_AWS_MANUAL,
-                    'provider': asset.provider,
-                    'account_label': asset.account_label or '',
-                    'region_code': asset.region_code,
-                    'region_name': asset.region_name,
-                    'server_name': asset.asset_name,
-                    'instance_id': asset.instance_id,
-                    'provider_resource_id': asset.provider_resource_id or asset.instance_id,
-                    'public_ip': asset.public_ip,
-                    'previous_public_ip': asset.previous_public_ip,
-                    'login_user': asset.login_user,
-                    'login_password': asset.login_password,
-                    'expires_at': asset.actual_expires_at,
-                    'order': asset.order,
-                    'user': asset.user,
-                    'note': asset.note,
-                    'is_active': asset.is_active,
-                },
-            )
         action = '创建' if created else '更新'
         self.stdout.write(self.style.SUCCESS(f'{action}成功: {asset.id} {asset.asset_name or asset.instance_id}'))
