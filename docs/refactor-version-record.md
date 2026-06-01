@@ -517,3 +517,28 @@ Documentation-only change. Source table list was checked with:
 ```bash
 rg -n "db_table\\s*=|class Meta:" core bot orders cloud -g'*.py'
 ```
+
+## 2026-06-01 encrypted-config-invalid-token-handling
+
+### Scope
+
+Eighteenth refactor pass tightened encrypted configuration handling so broken Fernet-looking ciphertext is not silently treated as plaintext.
+
+### Runtime Changes
+
+- `core/crypto.py:decrypt_text()` still returns legacy plaintext values unchanged when they do not look encrypted.
+- Values starting with the Fernet token prefix `gAAAA` now log `CONFIG_DECRYPT_INVALID_TOKEN` and return an empty string when decryption fails.
+- Added focused tests for:
+  - legacy plaintext fallback
+  - invalid Fernet-like token handling after an encryption key mismatch
+- Fixed `core/tests.py` to import the `Server` compatibility model from `cloud.server_records`, matching the current cloud asset architecture.
+
+### Verification
+
+Passed locally:
+
+```bash
+uv run python -m py_compile core/crypto.py core/tests.py core/models.py bot/models.py bot/api_site_configs.py
+uv run python manage.py test core.tests.CryptoDecryptTestCase --keepdb
+uv run python manage.py check
+```

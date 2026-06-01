@@ -2,17 +2,33 @@ import json
 import os
 from unittest.mock import patch
 
-from django.test import TestCase
+from django.test import SimpleTestCase, TestCase
 from django.contrib.auth import get_user_model
 from django.core.management import call_command
 from django.core.management.base import CommandError
 from django.test import override_settings
 
-from cloud.models import Server
+from cloud.server_records import Server
 from core.cloud_accounts import cloud_account_label_variants, list_cloud_accounts_by_server_load
+from core.crypto import decrypt_text, encrypt_text
 from core.models import CloudAccountConfig
 from core.models import SiteConfig
 from core.persistence import record_external_sync_log
+
+
+class CryptoDecryptTestCase(SimpleTestCase):
+    def test_plain_legacy_value_still_returns_as_plaintext(self):
+        self.assertEqual(decrypt_text('legacy-plain-value'), 'legacy-plain-value')
+
+    def test_invalid_fernet_like_token_does_not_fallback_to_ciphertext(self):
+        with patch.dict(os.environ, {'CONFIG_ENCRYPTION_KEY': 'first-key'}, clear=False):
+            encrypted = encrypt_text('secret-value')
+        with patch.dict(os.environ, {'CONFIG_ENCRYPTION_KEY': 'second-key'}, clear=False):
+            with self.assertLogs('core.crypto', level='WARNING') as logs:
+                decrypted = decrypt_text(encrypted)
+
+        self.assertEqual(decrypted, '')
+        self.assertIn('CONFIG_DECRYPT_INVALID_TOKEN', '\n'.join(logs.output))
 
 
 class SiteConfigCacheTestCase(TestCase):
