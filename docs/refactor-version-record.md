@@ -491,3 +491,29 @@ The focused test run is blocked by local MySQL test database permissions:
 ```text
 Access denied for user 'a'@'localhost' to database 'test_a'
 ```
+
+## 2026-06-01 db-naming-convention-alignment
+
+### Scope
+
+Seventeenth refactor pass corrected database naming documentation so it matches the actual runtime schema.
+
+### Runtime Changes
+
+- Updated `docs/DB_NAMING_CONVENTIONS.md` from the previous idealized plural-table convention to the real project convention:
+  - `core_*`
+  - `bot_*`
+  - `order_*`
+  - `cloud_*`
+- Documented the current `db_table` inventory for `core`, `bot`, `orders`, and `cloud`.
+- Clarified that new runtime tables should use `域前缀_单数语义名`.
+- Explicitly marked plural alternatives such as `cloud_assets`, `cloud_server_orders`, and `balance_ledgers` as non-default unless part of a planned migration.
+- Reconfirmed `cloud_asset` as the cloud resource source-of-truth table.
+
+### Verification
+
+Documentation-only change. Source table list was checked with:
+
+```bash
+rg -n "db_table\\s*=|class Meta:" core bot orders cloud -g'*.py'
+```
