@@ -20,7 +20,8 @@ from cloud.dashboard_api_helpers import _dashboard_sort_direction, _preserve_lin
 from cloud.dashboard_snapshots import _refresh_dashboard_plan_snapshots, _refresh_dashboard_plan_snapshots_deferred, _refresh_lifecycle_plan_snapshot
 from cloud.lifecycle_schedule import compute_order_lifecycle_fields, compute_unattached_ip_release_at
 from cloud.models import CloudAsset, CloudAssetDashboardSnapshot, CloudIpLog, CloudServerOrder
-from cloud.services import ensure_cloud_asset_operation_order, ensure_manual_expiry_operation_order, ensure_manual_owner_operation_order, ensure_manual_price_operation_order, replace_cloud_asset_order_by_admin, set_cloud_server_auto_renew_admin, sync_cloud_asset_user_binding
+from cloud.note_utils import append_note
+from cloud.services import ensure_cloud_asset_operation_order, ensure_manual_expiry_operation_order, ensure_manual_owner_operation_order, ensure_manual_price_operation_order, record_cloud_ip_log, replace_cloud_asset_order_by_admin, set_cloud_server_auto_renew_admin, sync_cloud_asset_user_binding
 from core.cloud_accounts import cloud_account_label, cloud_account_label_variants, list_cloud_account_labels
 from core.dashboard_api import _apply_keyword_filter, _countdown_label, _days_left, _decimal_to_str, _error, _get_keyword, _iso, _ok, _parse_decimal, _provider_label, _provider_status_label, _read_payload, _region_label, _server_source_label, _split_usernames, _status_label, _user_payload, dashboard_login_required, dashboard_superuser_required
 
@@ -1389,6 +1390,74 @@ def toggle_cloud_asset_auto_renew(request, asset_id):
     _cloud_api_override('_refresh_dashboard_plan_snapshots', _refresh_dashboard_plan_snapshots)(f'cloud_asset_auto_renew:{asset_id}')
     asset = CloudAsset.objects.select_related('user', 'order', 'cloud_account', 'telegram_group').get(pk=asset_id)
     return _ok(_asset_payload(asset))
+
+
+# 功能：删除或标记删除相关业务对象；当前函数属于 云资产后台 API。
+@csrf_exempt
+@dashboard_superuser_required
+@require_http_methods(['POST', 'DELETE'])
+def delete_cloud_asset(request, asset_id: int):
+    asset = CloudAsset.objects.select_related('order').filter(id=asset_id).first()
+    if not asset:
+        return _error('代理记录不存在', status=404)
+    now = timezone.now()
+    before_status = asset.status
+    note = f'后台手动删除代理列表记录；时间: {now.isoformat()}'
+    previous_public_ip = asset.public_ip or asset.previous_public_ip
+    order = asset.order
+
+    # 功能：提供 云资产后台 API 的内部辅助逻辑，供同模块流程复用。
+    def _clear_order_cloud_binding(target_order):
+        if not target_order:
+            return False
+        target_order.server_name = ''
+        target_order.instance_id = ''
+        target_order.provider_resource_id = ''
+        target_order.public_ip = None
+        target_order.previous_public_ip = None
+        target_order.static_ip_name = ''
+        target_order.mtproxy_host = ''
+        target_order.mtproxy_port = 0
+        target_order.mtproxy_secret = ''
+        target_order.mtproxy_link = ''
+        target_order.proxy_links = []
+        target_order.login_user = ''
+        target_order.login_password = ''
+        target_order.provision_note = append_note(
+            target_order.provision_note,
+            f'后台代理列表删除已清除云资源绑定；原IP={previous_public_ip or "-"}；后续云同步按全新资源处理，不再继承本订单状态；时间: {now.isoformat()}。',
+        )
+        target_order.save(update_fields=[
+            'server_name', 'instance_id', 'provider_resource_id', 'public_ip', 'previous_public_ip',
+            'static_ip_name', 'mtproxy_host', 'mtproxy_port', 'mtproxy_secret', 'mtproxy_link',
+            'proxy_links', 'login_user', 'login_password', 'provision_note', 'updated_at',
+        ])
+        return True
+
+    if not CloudIpLog.objects.filter(asset_id=asset.id, event_type=CloudIpLog.EVENT_DELETED, note__contains='后台手动删除代理列表记录').exists():
+        record_cloud_ip_log(event_type=CloudIpLog.EVENT_DELETED, order=order, asset=asset, previous_public_ip=previous_public_ip, public_ip=None, note=note)
+    order_status_changed = _clear_order_cloud_binding(order)
+    asset.delete()
+    logger.info(
+        'DASHBOARD_CLOUD_ASSET_DELETED asset_id=%s order_id=%s before_status=%s previous_public_ip=%s order_binding_cleared=%s actor_id=%s',
+        asset_id,
+        getattr(order, 'id', None),
+        before_status,
+        previous_public_ip,
+        order_status_changed,
+        getattr(request.user, 'id', None),
+    )
+    return _ok({
+        'target_type': 'cloud_asset',
+        'target_id': asset_id,
+        'before_status': before_status,
+        'after_status': None,
+        'hard_deleted': True,
+        'exists_after': CloudAsset.objects.filter(id=asset_id).exists(),
+        'removed_servers': 0,
+        'removed_server_ids': [],
+        'order_status_changed': order_status_changed,
+    })
 
 
 # 功能：提供 后台 API 接口 的内部辅助逻辑，供同模块流程复用。

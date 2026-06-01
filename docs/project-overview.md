@@ -172,13 +172,15 @@ DB_ENGINE=sqlite SQLITE_NAME=local.sqlite3 uv run python run.py web
   - 缺失确认、二次确认、防误删保护
 - `cloud/api.py`
   - 云后台 API 兼容聚合层
-  - 保留单条代理状态更新、服务器同步、套餐同步，并 re-export 拆分后的域接口给 URL 聚合使用
+  - re-export 拆分后的域接口给 URL 聚合使用，并保留旧 `cloud.api.*` patch/import 点
 - `cloud/api_assets.py`
   - 代理列表、风险摘要、代理编辑、自动续费开关、代理列表快照刷新
 - `cloud/api_orders.py`
   - 云订单列表、详情、状态更新、订单删除保护
 - `cloud/api_tasks.py`
   - 旧任务列表、通知计划、自动续费详情和手动执行
+- `cloud/api_sync.py`
+  - 单条代理状态同步、服务器同步、套餐/价格同步
 - `cloud/api_monitors.py`
   - 地址监控链上余额查询
   - 云资产 IP / 生命周期日志列表

@@ -154,13 +154,14 @@ uv run python manage.py process_cloud_asset_sync_jobs --once
 uv run python manage.py prune_cloud_sync_job_events --days 90 --keep-per-job 500 --dry-run
 ```
 
-云后台 API 已经从 `cloud/api.py` 拆成域模块，`cloud/api.py` 只保留兼容导出和少量同步入口：
+云后台 API 已经从 `cloud/api.py` 拆成域模块，`cloud/api.py` 只保留兼容导出：
 
-- `cloud/api.py`：兼容导出、单条代理状态更新、服务器同步、套餐同步。
+- `cloud/api.py`：兼容聚合层，保留旧 `cloud.api.*` 导入和测试 patch 点。
 - `cloud/api_assets.py`：代理列表、风险摘要、代理编辑、自动续费开关、代理列表快照刷新。
 - `cloud/api_orders.py`：云订单列表、详情、状态更新、订单删除保护。
 - `cloud/api_tasks.py`：旧任务列表、通知计划、自动续费详情与手动执行。
 - `cloud/api_monitors.py`：监控地址和 IP 日志 API。
+- `cloud/api_sync.py`：单条代理状态同步、服务器同步、套餐/价格同步。
 - `cloud/sync_jobs.py`：负责同步任务入队、worker 执行、任务事件、任务取消/重试、同步状态、同步任务指标 API。
 - 批量同步任务按账号/选中资产串行执行，不再在线程池里并发写任务状态；每个子任务完成后检查取消请求，保证状态推进和事件顺序可读。
 - `CloudAssetSyncJobEvent` 事件表通过 `job_id` 标量索引关联任务，不加外键；生产环境用 `prune_cloud_sync_job_events` 定期清理。

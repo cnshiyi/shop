@@ -33,6 +33,14 @@ ADDRESS_BALANCE_CACHE_TTL = 60
 ADDRESS_BALANCE_CACHE_PREFIX = 'address_balance:'
 
 
+def _cloud_api_override(name: str, fallback):
+    try:
+        from cloud import api as cloud_api
+    except Exception:
+        return fallback
+    return getattr(cloud_api, name, fallback)
+
+
 def _trongrid_headers_without_key(headers: dict | None) -> dict:
     return {key: value for key, value in dict(headers or {}).items() if key.lower() != 'tron-pro-api-key'}
 
@@ -46,7 +54,7 @@ def _trongrid_sync_get_with_key_fallback(client: httpx.Client, url: str, headers
 
 def _fetch_address_chain_balances(address: str):
     cache_key = f'{ADDRESS_BALANCE_CACHE_PREFIX}{address}'
-    redis_client = async_to_sync(get_redis)()
+    redis_client = async_to_sync(_cloud_api_override('get_redis', get_redis))()
     if redis_client is not None:
         try:
             cached = async_to_sync(redis_client.get)(cache_key)
@@ -58,8 +66,9 @@ def _fetch_address_chain_balances(address: str):
     usdt_contract = get_runtime_config('usdt_contract', 'TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t')
     trongrid_base_url = get_runtime_config('trongrid_base_url', 'https://api.trongrid.io')
     try:
-        headers = async_to_sync(build_trongrid_headers)()
-        with httpx.Client(timeout=8) as client:
+        headers = async_to_sync(_cloud_api_override('build_trongrid_headers', build_trongrid_headers))()
+        httpx_module = _cloud_api_override('httpx', httpx)
+        with httpx_module.Client(timeout=8) as client:
             resp = _trongrid_sync_get_with_key_fallback(client, f'{trongrid_base_url}/v1/accounts/{address}', headers)
             resp.raise_for_status()
             data = resp.json() or {}

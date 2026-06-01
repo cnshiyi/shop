@@ -636,6 +636,37 @@ Notes:
 
 - The older direct `RequestFactory` POST tests that do not attach dashboard Bearer credentials still return 401 under the current dashboard write-auth policy; they were not used as pass/fail gates for this split.
 
+## 2026-06-02 cloud-api-sync-facade-split
+
+### Scope
+
+Twenty-third refactor pass removed the remaining real sync/delete implementations from `cloud/api.py`, leaving it as a compatibility facade.
+
+### Runtime Changes
+
+- Added `cloud/api_sync.py` for dashboard server sync, single cloud asset status sync, cloud plan/price sync, and missing-state confirmation helpers.
+- Moved `delete_cloud_asset()` into `cloud/api_assets.py` so asset deletion now lives with the rest of the asset dashboard API.
+- Reduced `cloud/api.py` from 460 lines to 148 lines; it now only re-exports domain modules and old private patch/import points.
+- Kept legacy patch compatibility for:
+  - `cloud.api._call_command_capture`
+  - `cloud.api._apply_server_missing_state`
+  - `cloud.api._refresh_dashboard_plan_snapshots_deferred`
+  - `cloud.api.get_redis`
+  - `cloud.api.build_trongrid_headers`
+  - `cloud.api.httpx`
+- Added structured logs for cloud plan/price sync start, completion, and failure.
+
+### Verification
+
+Passed locally:
+
+```bash
+uv run python -m py_compile cloud/api.py cloud/api_assets.py cloud/api_sync.py cloud/api_monitors.py cloud/api_servers.py cloud/api_plans.py
+uv run python manage.py check
+git diff --check
+DJANGO_TEST_REUSE_DB=1 uv run python manage.py test cloud.tests.CloudServerServicesTestCase.test_sync_servers_missing_state_does_not_bypass_provider_confirmation cloud.tests.CloudServerServicesTestCase.test_sync_cloud_asset_status_uses_asset_scope cloud.tests.CloudServerServicesTestCase.test_rebuild_job_keeps_old_instance_until_migration_due cloud.tests.DashboardTronBalanceQueryTestCase.test_fetch_address_chain_balances_uses_resolved_headers cloud.tests_task_center.CloudTaskCenterApiTestCase --keepdb --noinput --verbosity 1
+```
+
 ## 2026-06-01 cloud-sync-worker-and-status-tracking
 
 ### Scope
