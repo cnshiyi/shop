@@ -23,6 +23,7 @@ from orders.models import BalanceLedger
 from orders.services import usdt_to_trx
 from bot.models import TelegramUser
 from cloud.lifecycle_schedule import compute_order_lifecycle_fields, compute_orphan_asset_delete_at, compute_unattached_ip_release_at
+from cloud.dashboard_snapshots import _refresh_dashboard_plan_snapshots
 from cloud.models import CloudAsset, CloudAutoRenewPatrolLog, CloudAutoRenewRetryTask, CloudServerOrder, CloudUserNoticeLog
 from cloud.note_utils import prepend_note
 from cloud.services import RenewalPriceMissingError, _hydrate_order_from_proxy_asset, _order_primary_asset, _prepare_cloud_server_renewal, _renewal_price, _resolve_aws_static_ip_name_for_order, pay_cloud_server_renewal_with_balance, record_cloud_ip_log
@@ -118,8 +119,7 @@ def cloud_notice_type_enabled(notice_type: str) -> bool:
 
 def _refresh_dashboard_snapshots_from_lifecycle(reason: str = '', *, lifecycle_limit: int = 1000):
     try:
-        from cloud import api as cloud_api
-        cloud_api._refresh_dashboard_plan_snapshots(reason, lifecycle_limit=lifecycle_limit)
+        _refresh_dashboard_plan_snapshots(reason, lifecycle_limit=lifecycle_limit)
         logger.info('CLOUD_LIFECYCLE_DASHBOARD_SNAPSHOTS_REFRESHED reason=%s', reason)
     except Exception:
         logger.exception('CLOUD_LIFECYCLE_DASHBOARD_SNAPSHOTS_REFRESH_FAILED reason=%s', reason)

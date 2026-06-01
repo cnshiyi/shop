@@ -8,18 +8,14 @@ from django.views.decorators.csrf import csrf_exempt
 from django.views.decorators.http import require_GET, require_POST, require_http_methods
 
 from cloud.models import CloudAsset, CloudIpLog
+from cloud.dashboard_api_helpers import _dashboard_expiry_ordering, _dashboard_sort_direction, _preserve_link_status_label, _preserve_link_status_with_countdown
+from cloud.services import AWS_REGION_NAMES, create_cloud_server_rebuild_order, record_cloud_ip_log, run_cloud_server_rebuild_job
 from core.cloud_accounts import cloud_account_label, cloud_account_label_variants
 from core.dashboard_api import _apply_keyword_filter, _countdown_label, _days_left, _error, _get_keyword, _iso, _ok, _provider_label, _provider_status_label, _region_label, _server_source_label, _status_label, _user_payload, dashboard_login_required, dashboard_superuser_required
 from core.models import CloudAccountConfig
 
 
-def _api_helpers():
-    from cloud import api as cloud_api
-    return cloud_api
-
-
 def _server_payload(asset):
-    cloud_api = _api_helpers()
     user = asset.user
     user_payload = None
     if user:
@@ -60,8 +56,8 @@ def _server_payload(asset):
         'order_no': order.order_no if order else '',
         'order_detail_path': f'/admin/cloud-orders/{order.id}' if order else '',
         'provider_status': '已删除' if asset.status == CloudAsset.STATUS_DELETED else _provider_status_label(asset.provider_status),
-        'preserve_link_status': cloud_api._preserve_link_status_with_countdown(
-            cloud_api._preserve_link_status_label(asset.note, getattr(order, 'provision_note', None)),
+        'preserve_link_status': _preserve_link_status_with_countdown(
+            _preserve_link_status_label(asset.note, getattr(order, 'provision_note', None)),
             _countdown_label(asset.actual_expires_at),
         ),
         'is_active': asset.is_active,
@@ -72,15 +68,14 @@ def _server_payload(asset):
 @dashboard_login_required
 @require_GET
 def servers_list(request):
-    cloud_api = _api_helpers()
     keyword = _get_keyword(request)
     dedup_raw = (request.GET.get('dedup') or '').lower()
     dedup = dedup_raw not in {'0', 'false', 'no', 'off'}
     sort_by = (request.GET.get('sort_by') or '').strip().lower()
-    sort_direction = cloud_api._dashboard_sort_direction(request)
+    sort_direction = _dashboard_sort_direction(request)
     ordering = ['actual_expires_at', '-updated_at', '-id']
     if sort_by in {'expires_at', 'days_left', 'remaining_days'}:
-        ordering = cloud_api._dashboard_expiry_ordering('actual_expires_at', sort_direction)
+        ordering = _dashboard_expiry_ordering('actual_expires_at', sort_direction)
     unattached_ip_q = (
         (Q(provider_status__icontains='未附加') | Q(note__icontains='未附加IP') | Q(note__icontains='未附加固定IP'))
         & (Q(instance_id__isnull=True) | Q(instance_id=''))
@@ -115,14 +110,13 @@ def servers_list(request):
 @dashboard_superuser_required
 @require_POST
 def rebuild_server_preserve_link(request, server_id: int):
-    cloud_api = _api_helpers()
     asset = CloudAsset.objects.select_related('order').filter(id=server_id, kind=CloudAsset.KIND_SERVER).first()
     if not asset or not asset.order_id:
         return _error('服务器不存在或未关联订单', status=404)
-    order, error = cloud_api.create_cloud_server_rebuild_order(asset.order_id)
+    order, error = create_cloud_server_rebuild_order(asset.order_id)
     if error:
         return _error(error, status=400)
-    thread = threading.Thread(target=cloud_api._run_rebuild_job, args=(order.id,), daemon=True)
+    thread = threading.Thread(target=run_cloud_server_rebuild_job, args=(order.id,), daemon=True)
     thread.start()
     return _ok({
         'accepted': True,
@@ -137,7 +131,6 @@ def rebuild_server_preserve_link(request, server_id: int):
 @dashboard_superuser_required
 @require_http_methods(['POST', 'DELETE'])
 def delete_server(request, server_id: int):
-    cloud_api = _api_helpers()
     asset = CloudAsset.objects.select_related('order').filter(id=server_id, kind=CloudAsset.KIND_SERVER).first()
     if not asset:
         return _error('服务器不存在', status=404)
@@ -147,7 +140,7 @@ def delete_server(request, server_id: int):
     previous_public_ip = asset.public_ip or asset.previous_public_ip
     order = asset.order
 
-    cloud_api.record_cloud_ip_log(event_type='deleted', order=order, asset=asset, previous_public_ip=previous_public_ip, public_ip=None, note=note)
+    record_cloud_ip_log(event_type='deleted', order=order, asset=asset, previous_public_ip=previous_public_ip, public_ip=None, note=note)
     asset.delete()
     return _ok({
         'target_type': 'cloud_asset',
@@ -181,8 +174,7 @@ def _cloud_account_labels_queryset(is_active: bool | None = None):
 @require_GET
 def servers_statistics(request):
     keyword = _get_keyword(request)
-    cloud_api = _api_helpers()
-    aws_regions = [{'region_code': code, 'region_label': label} for code, label in cloud_api.AWS_REGION_NAMES.items()]
+    aws_regions = [{'region_code': code, 'region_label': label} for code, label in AWS_REGION_NAMES.items()]
     region_pairs = [*aws_regions, {'region_code': 'cn-hongkong', 'region_label': '香港'}]
     region_codes = [item['region_code'] for item in region_pairs]
 

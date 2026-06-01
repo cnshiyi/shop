@@ -5,9 +5,6 @@ import io
 import json
 import logging
 import re
-import sys
-import threading
-import time
 import uuid
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import timezone as dt_timezone
@@ -22,7 +19,7 @@ from django.core.management import get_commands, load_command_class
 from django.db import IntegrityError, close_old_connections, transaction
 from django.db.models import Case, CharField, Count, F, IntegerField, Q, Value, When
 from django.db.models.functions import Cast
-from django.db.utils import OperationalError, ProgrammingError
+from django.db.utils import ProgrammingError
 from django.utils import timezone
 from django.utils.dateparse import parse_date, parse_datetime
 from django.views.decorators.csrf import csrf_exempt
@@ -32,6 +29,8 @@ from bot.models import TelegramGroupFilter, TelegramLoginAccount, TelegramUser
 from cloud.lifecycle import NOTICE_TYPE_SWITCH_CONFIG, _auto_renew_notice_batch_payload, _notice_effective_delivered, _get_due_orders, _get_notice_text_override, _lifecycle_notice_batch_payload, _notice_payload_for_order, _notice_override_key, _record_auto_renew_patrol_log, _renew_notice_batch_payload, _run_auto_renew, _set_notice_text_override, cloud_notice_type_enabled
 from cloud.lifecycle_schedule import compute_order_lifecycle_fields, compute_unattached_ip_release_at
 from cloud.lifecycle_state import primary_record_updates_for_order_status
+from cloud.dashboard_api_helpers import _dashboard_expiry_ordering, _dashboard_sort_direction, _generate_cloud_plan_config_id, _preserve_link_status_label, _preserve_link_status_with_countdown
+from cloud.dashboard_snapshots import _refresh_dashboard_plan_snapshots, _refresh_dashboard_plan_snapshots_deferred, _refresh_lifecycle_plan_snapshot
 from cloud.services import AWS_REGION_NAMES, RenewalPriceMissingError, _renewal_price, _update_order_primary_records, create_cloud_server_rebuild_order, drop_asset_note_update, ensure_cloud_asset_operation_order, ensure_cloud_server_pricing, ensure_manual_expiry_operation_order, ensure_manual_owner_operation_order, ensure_manual_price_operation_order, record_cloud_ip_log, refresh_custom_plan_cache, replace_cloud_asset_order_by_admin, set_cloud_server_auto_renew_admin, sync_cloud_asset_user_binding
 from cloud.models import AddressMonitor, CloudAsset, CloudAutoRenewPatrolLog, CloudAutoRenewPlan, CloudIpLog, CloudNoticePlan, CloudServerOrder, CloudServerPlan, CloudUserNoticeLog, ServerPrice
 from cloud.note_utils import append_note, prepend_note
@@ -46,16 +45,6 @@ from cloud.provisioning import provision_cloud_server
 
 logger = logging.getLogger(__name__)
 _SYNC_CONSOLE_LOG_MAX_CHARS = 50000
-
-
-def _is_db_table_not_ready_error(exc: Exception) -> bool:
-    message = str(exc).lower()
-    return any(marker in message for marker in ['no such table', 'does not exist', 'undefined table'])
-
-
-def _is_interpreter_shutdown_error(exc: Exception) -> bool:
-    message = str(exc).lower()
-    return sys.is_finalizing() or 'interpreter shutdown' in message or 'cannot schedule new futures' in message
 
 
 class CapturedCommandError(RuntimeError):
@@ -230,10 +219,6 @@ def _ensure_unattached_ip_expiry(asset: CloudAsset, *, now=None) -> bool:
     return True
 
 
-def _generate_cloud_plan_config_id():
-    return f'cfg-{uuid.uuid4().hex[:12]}'
-
-
 def _telegram_user_lookup_terms(value):
     raw = str(value or '').strip()
     if not raw:
@@ -331,29 +316,6 @@ def _sync_telegram_username(user, username=None):
             seen.add(key)
     user.username = ','.join(merged)
     user.save(update_fields=['username', 'updated_at'])
-
-
-def _preserve_link_status_label(*notes):
-    text = '\n'.join(str(item or '') for item in notes if item)
-    if '继续保留旧机服务' in text:
-        return '重装失败，仍使用旧机'
-    if '已发起重装迁移' in text:
-        return '重装迁移中'
-    if '重装迁移完成' in text:
-        return '已切换到新机'
-    return ''
-
-
-def _preserve_link_status_with_countdown(status_label, countdown_label):
-    status_label = str(status_label or '').strip()
-    countdown_label = str(countdown_label or '').strip()
-    if status_label == '重装迁移中':
-        return ''
-    if not status_label:
-        return ''
-    if countdown_label and countdown_label != '-' and '剩余' not in status_label and '已过期' not in status_label:
-        return f'{status_label}（{countdown_label}）'
-    return status_label
 
 
 def _infer_asset_order(asset):
@@ -757,73 +719,6 @@ def _asset_payload(asset):
     }
 
 
-def _refresh_dashboard_plan_snapshots(reason: str = '', *, lifecycle_limit: int = 1000):
-    try:
-        _sync_auto_renew_plan_table(now=timezone.now())
-    except (OperationalError, ProgrammingError) as exc:
-        if _is_db_table_not_ready_error(exc):
-            logger.debug('DASHBOARD_SNAPSHOT_AUTO_RENEW_REFRESH_SKIPPED reason=%s error=%s', reason, exc)
-        else:
-            logger.exception('DASHBOARD_SNAPSHOT_AUTO_RENEW_REFRESH_FAILED reason=%s', reason)
-    except RuntimeError as exc:
-        if _is_interpreter_shutdown_error(exc):
-            logger.info('DASHBOARD_SNAPSHOT_AUTO_RENEW_REFRESH_SKIPPED reason=%s error=%s', reason, exc)
-        else:
-            logger.exception('DASHBOARD_SNAPSHOT_AUTO_RENEW_REFRESH_FAILED reason=%s', reason)
-    except Exception:
-        logger.exception('DASHBOARD_SNAPSHOT_AUTO_RENEW_REFRESH_FAILED reason=%s', reason)
-    try:
-        _sync_notice_plan_table(limit=500, future_limit=200, history_limit=1000)
-    except (OperationalError, ProgrammingError) as exc:
-        if _is_db_table_not_ready_error(exc):
-            logger.debug('DASHBOARD_SNAPSHOT_NOTICE_REFRESH_SKIPPED reason=%s error=%s', reason, exc)
-        else:
-            logger.exception('DASHBOARD_SNAPSHOT_NOTICE_REFRESH_FAILED reason=%s', reason)
-    except RuntimeError as exc:
-        if _is_interpreter_shutdown_error(exc):
-            logger.info('DASHBOARD_SNAPSHOT_NOTICE_REFRESH_SKIPPED reason=%s error=%s', reason, exc)
-        else:
-            logger.exception('DASHBOARD_SNAPSHOT_NOTICE_REFRESH_FAILED reason=%s', reason)
-    except Exception:
-        logger.exception('DASHBOARD_SNAPSHOT_NOTICE_REFRESH_FAILED reason=%s', reason)
-    _refresh_lifecycle_plan_snapshot(reason, lifecycle_limit=lifecycle_limit)
-
-
-def _refresh_lifecycle_plan_snapshot(reason: str = '', *, lifecycle_limit: int = 1000):
-    try:
-        from bot import api as bot_api
-        bot_api._sync_lifecycle_plan_table(limit=lifecycle_limit)
-    except (OperationalError, ProgrammingError) as exc:
-        if _is_db_table_not_ready_error(exc):
-            logger.debug('DASHBOARD_SNAPSHOT_LIFECYCLE_REFRESH_SKIPPED reason=%s error=%s', reason, exc)
-        else:
-            logger.exception('DASHBOARD_SNAPSHOT_LIFECYCLE_REFRESH_FAILED reason=%s', reason)
-    except RuntimeError as exc:
-        if _is_interpreter_shutdown_error(exc):
-            logger.info('DASHBOARD_SNAPSHOT_LIFECYCLE_REFRESH_SKIPPED reason=%s error=%s', reason, exc)
-        else:
-            logger.exception('DASHBOARD_SNAPSHOT_LIFECYCLE_REFRESH_FAILED reason=%s', reason)
-    except Exception:
-        logger.exception('DASHBOARD_SNAPSHOT_LIFECYCLE_REFRESH_FAILED reason=%s', reason)
-
-
-def _refresh_dashboard_plan_snapshots_deferred(reason: str = '', *, lifecycle_limit: int = 300):
-    lock_key = 'dashboard:snapshot-refresh:deferred'
-    if not cache.add(lock_key, reason or 'pending', timeout=60):
-        logger.info('DASHBOARD_SNAPSHOT_DEFERRED_SKIPPED reason=%s', reason)
-        return
-
-    def _run():
-        close_old_connections()
-        try:
-            _refresh_dashboard_plan_snapshots(reason, lifecycle_limit=lifecycle_limit)
-        finally:
-            cache.delete(lock_key)
-            close_old_connections()
-
-    threading.Thread(target=_run, name='dashboard-snapshot-refresh', daemon=True).start()
-
-
 @csrf_exempt
 @dashboard_login_required
 @require_http_methods(['GET', 'POST', 'PUT', 'PATCH'])
@@ -1191,18 +1086,6 @@ def toggle_cloud_asset_auto_renew(request, asset_id):
     _refresh_dashboard_plan_snapshots(f'cloud_asset_auto_renew:{asset_id}')
     asset = CloudAsset.objects.select_related('user', 'order', 'cloud_account', 'telegram_group').get(pk=asset_id)
     return _ok(_asset_payload(asset))
-
-
-def _dashboard_sort_direction(request):
-    direction = (request.GET.get('sort_order') or request.GET.get('sort_direction') or '').strip().lower()
-    return 'desc' if direction in {'desc', 'descending', '降序'} else 'asc'
-
-
-def _dashboard_expiry_ordering(field_name: str, direction: str):
-    field = F(field_name)
-    if direction == 'desc':
-        return [field.desc(nulls_last=True), '-updated_at', '-id']
-    return [field.asc(nulls_last=True), '-updated_at', '-id']
 
 
 def _asset_display_ip(asset):
@@ -3625,42 +3508,6 @@ def update_cloud_order_status(request, order_id):
     except Exception as exc:
         return _error(f'更新订单状态失败: {exc}', status=500)
     return _ok(_cloud_order_detail_payload(order))
-
-
-def _run_rebuild_job(new_order_id: int):
-    max_attempts = 3
-    retry_delays = [0, 20, 60]
-    for attempt in range(1, max_attempts + 1):
-        if attempt > 1:
-            time.sleep(retry_delays[attempt - 1])
-        try:
-            saved = async_to_sync(provision_cloud_server)(new_order_id)
-            if saved and getattr(saved, 'status', '') == 'completed' and getattr(saved, 'replacement_for_id', None):
-                logger.info(
-                    'AWS 重装迁移后台任务完成，旧实例进入迁移保留期: new_order_id=%s replacement_for_id=%s',
-                    saved.id,
-                    saved.replacement_for_id,
-                )
-                return
-            logger.warning('AWS 重装迁移后台任务未完成，准备重试: new_order_id=%s attempt=%s/%s status=%s', new_order_id, attempt, max_attempts, getattr(saved, 'status', None) if saved else None)
-        except Exception:
-            logger.exception('AWS 重装迁移后台任务异常，准备重试: new_order_id=%s attempt=%s/%s', new_order_id, attempt, max_attempts)
-
-    order = CloudServerOrder.objects.filter(id=new_order_id).first()
-    if not order:
-        return
-    failure_note = f'重装迁移自动重试失败：已重试 {max_attempts} 次，继续保留旧机服务，请人工检查后再试。'
-    order.provision_note = '\n'.join(filter(None, [order.provision_note, failure_note]))
-    order.save(update_fields=['provision_note', 'updated_at'])
-    source_order = CloudServerOrder.objects.filter(id=order.replacement_for_id).first()
-    if source_order:
-        source_order.provision_note = '\n'.join(filter(None, [source_order.provision_note, failure_note]))
-        source_order.save(update_fields=['provision_note', 'updated_at'])
-        _update_order_primary_records(
-            source_order,
-            asset_updates=drop_asset_note_update({'note': failure_note}),
-            server_updates=drop_asset_note_update({'note': failure_note}),
-        )
 
 
 @csrf_exempt

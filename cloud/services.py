@@ -22,6 +22,7 @@ from cloud.lifecycle_schedule import compute_order_lifecycle_fields, runtime_int
 from cloud.models import CloudAsset, CloudIpLog, CloudServerOrder, CloudServerPlan, ServerPrice
 from cloud.note_utils import append_note, prepend_note
 from cloud.bootstrap import install_bbr, install_mtproxy
+from cloud.dashboard_snapshots import _refresh_dashboard_plan_snapshots
 from cloud.ip_guard import validate_server_connection_ip
 from cloud.ports import get_mtproxy_public_ports
 from core.cache import get_redis
@@ -108,8 +109,7 @@ def _normalize_cloud_order_quantity(quantity: int) -> int:
 
 def _refresh_dashboard_plan_snapshots_after_service_change(reason: str = '', *, lifecycle_limit: int = 1000):
     try:
-        from cloud import api as cloud_api
-        cloud_api._refresh_dashboard_plan_snapshots(reason, lifecycle_limit=lifecycle_limit)
+        _refresh_dashboard_plan_snapshots(reason, lifecycle_limit=lifecycle_limit)
         logger.info('CLOUD_SERVICE_DASHBOARD_SNAPSHOTS_REFRESHED reason=%s', reason)
     except Exception:
         logger.exception('CLOUD_SERVICE_DASHBOARD_SNAPSHOTS_REFRESH_FAILED reason=%s', reason)
@@ -3957,6 +3957,44 @@ def create_cloud_server_rebuild_order(order_id: int):
     return new_order, None
 
 
+def run_cloud_server_rebuild_job(new_order_id: int):
+    from cloud.provisioning import provision_cloud_server
+
+    max_attempts = 3
+    retry_delays = [0, 20, 60]
+    for attempt in range(1, max_attempts + 1):
+        if attempt > 1:
+            time.sleep(retry_delays[attempt - 1])
+        try:
+            saved = async_to_sync(provision_cloud_server)(new_order_id)
+            if saved and getattr(saved, 'status', '') == 'completed' and getattr(saved, 'replacement_for_id', None):
+                logger.info(
+                    'AWS 重装迁移后台任务完成，旧实例进入迁移保留期: new_order_id=%s replacement_for_id=%s',
+                    saved.id,
+                    saved.replacement_for_id,
+                )
+                return
+            logger.warning('AWS 重装迁移后台任务未完成，准备重试: new_order_id=%s attempt=%s/%s status=%s', new_order_id, attempt, max_attempts, getattr(saved, 'status', None) if saved else None)
+        except Exception:
+            logger.exception('AWS 重装迁移后台任务异常，准备重试: new_order_id=%s attempt=%s/%s', new_order_id, attempt, max_attempts)
+
+    order = CloudServerOrder.objects.filter(id=new_order_id).first()
+    if not order:
+        return
+    failure_note = f'重装迁移自动重试失败：已重试 {max_attempts} 次，继续保留旧机服务，请人工检查后再试。'
+    order.provision_note = '\n'.join(filter(None, [order.provision_note, failure_note]))
+    order.save(update_fields=['provision_note', 'updated_at'])
+    source_order = CloudServerOrder.objects.filter(id=order.replacement_for_id).first()
+    if source_order:
+        source_order.provision_note = '\n'.join(filter(None, [source_order.provision_note, failure_note]))
+        source_order.save(update_fields=['provision_note', 'updated_at'])
+        _update_order_primary_records(
+            source_order,
+            asset_updates=drop_asset_note_update({'note': failure_note}),
+            server_updates=drop_asset_note_update({'note': failure_note}),
+        )
+
+
 @sync_to_async
 def mark_cloud_server_reinit_requested(order_id: int, user_id: int | None):
     qs = CloudServerOrder.objects.filter(id=order_id)
@@ -4559,6 +4597,7 @@ __all__ = [
     'rebind_cloud_server_user',
     'refresh_custom_plan_cache',
     'record_cloud_ip_log',
+    'run_cloud_server_rebuild_job',
     'set_cloud_order_reminder',
     'set_group_cloud_server_auto_renew',
     'set_cloud_server_auto_renew',

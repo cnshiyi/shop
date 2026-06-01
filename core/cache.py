@@ -23,6 +23,11 @@ def _site_config_model():
     return apps.get_model('core', 'SiteConfig')
 
 
+def _site_config_get_with_runtime_default(key: str, default: str = '') -> str:
+    SiteConfig = _site_config_model()
+    return SiteConfig.get(key, get_runtime_config(key, default))
+
+
 def build_redis_url() -> str:
     host = get_runtime_config('redis_host', os.getenv('REDIS_HOST', '127.0.0.1')).strip() or '127.0.0.1'
     port = get_runtime_config('redis_port', os.getenv('REDIS_PORT', '6379')).strip() or '6379'
@@ -58,8 +63,7 @@ async def refresh_config(keys: list[str] | None = None):
 async def get_config(key: str, default: str = '') -> str:
     if key in _cached_config and _cached_config[key] != '':
         return _cached_config[key]
-    SiteConfig = _site_config_model()
-    value = await asyncio.to_thread(lambda: SiteConfig.get(key, get_runtime_config(key, default)))
+    value = await asyncio.to_thread(_site_config_get_with_runtime_default, key, default)
     if value != '':
         _cached_config[key] = value
     return value

@@ -407,3 +407,52 @@ Passed locally:
 uv run python -m py_compile cloud/provisioning.py core/dashboard_api.py bot/api.py cloud/api.py cloud/api_servers.py cloud/api_plans.py orders/api.py
 uv run python manage.py check
 ```
+
+## 2026-06-01 cloud-dashboard-api-helper-extraction
+
+### Scope
+
+Fourteenth refactor pass reduced reverse dependencies where split cloud dashboard API modules treated `cloud/api.py` as a shared helper library.
+
+### Runtime Changes
+
+- Added `cloud/dashboard_snapshots.py` as the single dashboard snapshot refresh coordinator.
+- `cloud/services.py` and `cloud/lifecycle.py` now refresh dashboard snapshots through `cloud.dashboard_snapshots` instead of importing `cloud.api`.
+- Added `cloud/dashboard_api_helpers.py` for cloud dashboard display helpers:
+  - cloud plan config id generation
+  - preserve-link status labels
+  - dashboard sort direction and expiry ordering
+- `cloud/api_servers.py` and `cloud/api_plans.py` no longer import `cloud.api` through `_api_helpers()`.
+- Moved rebuild background retry execution from `cloud/api.py` into `cloud/services.py` as `run_cloud_server_rebuild_job()`.
+- Kept `cloud/api.py` importing the extracted helper names so existing internal references and compatibility imports continue to work.
+
+### Verification
+
+Passed locally:
+
+```bash
+uv run python -m py_compile cloud/dashboard_api_helpers.py cloud/dashboard_snapshots.py cloud/api.py cloud/api_servers.py cloud/api_plans.py cloud/services.py cloud/lifecycle.py
+uv run python manage.py check
+```
+
+## 2026-06-01 async-runtime-config-fix
+
+### Scope
+
+Fifteenth refactor pass addressed the P0 issue where `get_runtime_config()` returns env/default values in a running async event loop and can miss updated `SiteConfig` values.
+
+### Runtime Changes
+
+- Replaced async runtime config reads in `bot/runner.py`, `bot/handlers.py`, and `cloud/resource_monitor.py` with `await core.cache.get_config(...)`.
+- Removed `asyncio.to_thread(get_runtime_config, ...)` and `sync_to_async(get_runtime_config, ...)` usage from async runtime paths.
+- Refactored `core/cache.py:get_config()` so sync DB/default fallback happens inside a dedicated thread helper.
+- Verified there are no remaining direct `get_runtime_config()` calls inside `async def` bodies, and no remaining `to_thread/sync_to_async(get_runtime_config)` adapters.
+
+### Verification
+
+Passed locally:
+
+```bash
+uv run python -m py_compile core/cache.py core/runtime_config.py bot/runner.py bot/handlers.py cloud/resource_monitor.py cloud/dashboard_api_helpers.py cloud/dashboard_snapshots.py cloud/api.py cloud/api_servers.py cloud/api_plans.py cloud/services.py cloud/lifecycle.py
+uv run python manage.py check
+```

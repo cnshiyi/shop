@@ -24,7 +24,7 @@ from django.db.models import Q
 from django.utils import timezone
 from django.utils.dateparse import parse_date, parse_datetime
 
-from core.runtime_config import get_runtime_config
+from core.cache import get_config
 from cloud.note_utils import append_note
 from cloud.ip_guard import validate_server_connection_ip
 from bot.config import BOT_TOKEN
@@ -319,7 +319,7 @@ async def _trongrid_post_with_key_fallback(client: httpx.AsyncClient, url: str, 
 
 async def _fetch_tron_address_summary(address: str) -> dict:
     headers = await build_trongrid_headers()
-    base_url = await sync_to_async(get_runtime_config, thread_sensitive=False)('trongrid_base_url', TRONGRID_BASE_URL)
+    base_url = await get_config('trongrid_base_url', TRONGRID_BASE_URL)
     base_url = str(base_url or TRONGRID_BASE_URL).rstrip('/')
     async with httpx.AsyncClient(timeout=15) as client:
         account_resp = await _trongrid_post_with_key_fallback(

@@ -20,9 +20,9 @@ from bot.telegram_listener import run_telegram_account_listeners
 from bot.telegram_sender import send_with_notification_account_attempts
 from cloud.services import refresh_custom_plan_cache
 from cloud.lifecycle import auto_renew_patrol_tick, daily_expiry_summary_tick, lifecycle_tick, sync_server_status_tick, sync_cloud_accounts_tick
-from core.cache import refresh_config, close as cache_close
+from core.cache import close as cache_close, get_config, refresh_config
 from core.models import SiteConfig
-from core.runtime_config import get_cloud_asset_sync_interval_seconds, get_runtime_config
+from core.runtime_config import CLOUD_ASSET_SYNC_INTERVAL_DEFAULT_SECONDS, CLOUD_ASSET_SYNC_INTERVAL_MIN_SECONDS
 from cloud.cache import init_monitor_cache
 from orders.services import get_trx_price
 from orders.runtime import check_resources, scan_forever, set_bot, set_resource_bot
@@ -157,7 +157,7 @@ async def run_bot():
         logger.warning('获取机器人身份失败，通知计划将使用默认 Bot 标签: %s', exc)
 
     async def _copy_notice_to_admins(user, text: str):
-        raw_copy_value = await asyncio.to_thread(get_runtime_config, 'bot_notice_copy_chat_ids', '')
+        raw_copy_value = await get_config('bot_notice_copy_chat_ids', '')
         copy_chat_ids = _parse_notify_chat_ids(raw_copy_value)
         if not copy_chat_ids:
             return
@@ -206,7 +206,15 @@ async def run_bot():
             logger.warning('机器人自动续费执行目标通知发送失败 chat_id=%s err=%s', chat_id, exc)
             return False
 
-    cloud_sync_interval_seconds = await asyncio.to_thread(get_cloud_asset_sync_interval_seconds)
+    cloud_sync_interval_raw = await get_config(
+        'cloud_asset_sync_interval_seconds',
+        str(CLOUD_ASSET_SYNC_INTERVAL_DEFAULT_SECONDS),
+    )
+    try:
+        cloud_sync_interval_seconds = int(str(cloud_sync_interval_raw or '').strip())
+    except (TypeError, ValueError):
+        cloud_sync_interval_seconds = CLOUD_ASSET_SYNC_INTERVAL_DEFAULT_SECONDS
+    cloud_sync_interval_seconds = max(cloud_sync_interval_seconds, CLOUD_ASSET_SYNC_INTERVAL_MIN_SECONDS)
 
     async def _run_management_command(command_name: str):
         await asyncio.to_thread(call_command, command_name)
@@ -252,7 +260,7 @@ async def run_bot():
     try:
         logger.info('启动时执行云服务器生命周期检查')
         try:
-            defer_seconds = int(str(get_runtime_config('cloud_startup_lifecycle_defer_seconds', '0')).strip() or 0)
+            defer_seconds = int(str(await get_config('cloud_startup_lifecycle_defer_seconds', '0')).strip() or 0)
             await lifecycle_tick(notify=_notify, notify_target=_notify_target, defer_destructive_seconds=max(defer_seconds, 0))
             logger.info('启动时云服务器生命周期检查完成')
         except Exception as exc:
