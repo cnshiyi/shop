@@ -533,6 +533,46 @@ The focused DB test run is blocked by local MySQL test database permissions:
 Access denied for user 'a'@'localhost' to database 'test_a'
 ```
 
+## 2026-06-01 cloud-sync-worker-and-status-tracking
+
+### Scope
+
+Latest refactor pass made dashboard-triggered proxy synchronization durable and explicitly observable.
+
+### Runtime Changes
+
+- `/admin/cloud-assets/sync/` now only creates a `CloudAssetSyncJob` queue record and returns immediately.
+- Added `process_cloud_asset_sync_jobs` as the persistent DB-backed worker for queued sync jobs.
+- `run.py worker` starts the sync worker, and `run.py all` now starts web, bot, and the sync worker together.
+- Added sync job list and retry APIs:
+  - `/admin/cloud-assets/sync-jobs/`
+  - `/admin/cloud-assets/sync-jobs/<id>/retry/`
+- Sync job status is now the durable status surface:
+  - `queued`
+  - `running`
+  - `succeeded`
+  - `partial`
+  - `failed`
+- Worker and sync execution update `progress_current`, `progress_total`, `current_task`, `errors`, `warnings`, `logs`, `started_at`, and `finished_at` throughout execution.
+- Dashboard snapshot refreshes are now scoped:
+  - full cloud sync refreshes the complete `cloud_asset_dashboard_snapshot`
+  - selected asset sync and single-asset updates refresh only the affected asset IDs
+- The admin frontend has a sync job drawer for status, progress, results, logs, and retry; polling updates the visible job row without blocking the whole proxy list after enqueue.
+- `lefthook.yml` no longer hardcodes `/opt/homebrew/bin/pnpm`, so Git hooks can use the current shell `pnpm`.
+
+### Verification
+
+Passed locally:
+
+```bash
+uv run python -m py_compile run.py cloud/api.py cloud/dashboard_snapshots.py cloud/models.py cloud/tests.py cloud/management/commands/process_cloud_asset_sync_jobs.py shop/dashboard_urls.py
+uv run python manage.py check
+uv run python manage.py makemigrations cloud --dry-run --check
+DJANGO_TEST_REUSE_DB=1 uv run python manage.py test cloud.tests.CloudServerServicesTestCase.test_sync_cloud_assets_runs_enabled_accounts_and_merges_results cloud.tests.CloudServerServicesTestCase.test_sync_cloud_assets_with_selected_assets_uses_asset_scoped_tasks cloud.tests.CloudServerServicesTestCase.test_process_cloud_asset_sync_jobs_worker_processes_queued_job --keepdb --noinput --verbosity 1
+(cd /Users/a399/Desktop/data/vue-shop-admin && ./node_modules/.bin/vue-tsc --noEmit --skipLibCheck -p apps/web-antd/tsconfig.json)
+git diff --check
+```
+
 ## 2026-06-01 cloud-asset-list-and-sync-performance
 
 ### Scope

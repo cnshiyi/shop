@@ -43,7 +43,7 @@ from cloud.provisioning import (
 )
 from cloud.services import _cloud_asset_deleted_or_missing, apply_cloud_server_renewal, create_cloud_server_order, create_cloud_server_rebuild_order, create_cloud_server_renewal, create_cloud_server_renewal_by_public_query, create_cloud_server_renewal_for_user, create_cloud_server_upgrade_order, ensure_cloud_asset_operation_order, get_cloud_server_by_ip, get_cloud_server_by_ip_for_user, get_group_proxy_asset_detail, get_proxy_asset_by_ip_for_admin, get_proxy_asset_by_ip_for_user, get_user_proxy_asset_detail, list_all_auto_renew_cloud_servers, list_cloud_asset_renewal_plans, list_cloud_server_upgrade_plans, list_group_cloud_servers, list_retained_ip_renewal_plans, list_retained_ip_renewal_plans_by_asset, list_user_cloud_servers, mark_cloud_server_ip_change_requested, mark_cloud_server_reinit_requested, pay_cloud_server_order_with_balance, pay_cloud_server_renewal_with_balance, prepare_cloud_asset_renewal_with_link, prepare_retained_ip_renewal_with_link, rebind_cloud_server_user, record_cloud_ip_log, replace_cloud_asset_order_by_admin, run_cloud_server_renewal_postcheck, set_cloud_server_auto_renew_admin, set_group_cloud_server_auto_renew, sync_cloud_asset_user_binding
 from cloud.sync_safety import get_missing_confirmation_threshold
-from cloud.api import _apply_server_missing_state, _cloud_order_source_tags, _display_cloud_asset_note, _execute_cloud_asset_sync_job, _fetch_address_chain_balances, auto_renew_task_detail, cloud_asset_sync_job_detail, cloud_assets_list, cloud_order_detail, cloud_orders_list, delete_cloud_asset, delete_cloud_order, delete_notice_history, delete_server, notice_task_detail, refresh_cloud_asset_dashboard_snapshots, refresh_notice_plan_table, run_auto_renew_order, run_auto_renew_tasks, servers_list, sync_cloud_asset_status, sync_cloud_assets, tasks_overview, update_cloud_asset, update_cloud_order_status, update_notice_plan_text, update_notice_switches
+from cloud.api import _apply_server_missing_state, _cloud_order_source_tags, _display_cloud_asset_note, _execute_cloud_asset_sync_job, _fetch_address_chain_balances, auto_renew_task_detail, cloud_asset_sync_job_detail, cloud_asset_sync_jobs_list, cloud_assets_list, cloud_order_detail, cloud_orders_list, delete_cloud_asset, delete_cloud_order, delete_notice_history, delete_server, notice_task_detail, refresh_cloud_asset_dashboard_snapshots, refresh_notice_plan_table, retry_cloud_asset_sync_job, run_auto_renew_order, run_auto_renew_tasks, servers_list, sync_cloud_asset_status, sync_cloud_assets, tasks_overview, update_cloud_asset, update_cloud_order_status, update_notice_plan_text, update_notice_switches
 from core.cloud_accounts import cloud_account_label, cloud_account_label_variants, list_cloud_accounts_by_server_load
 from core.models import CloudAccountConfig, SiteConfig
 from core.persistence import bump_daily_address_stat
@@ -6351,22 +6351,27 @@ class CloudServerServicesTestCase(TestCase):
 
         request = RequestFactory().post('/api/dashboard/cloud-assets/sync/', data='{}', content_type='application/json')
         request = self._attach_bearer_session(request, staff_user)
-        with patch('cloud.api._start_cloud_asset_sync_job') as start_job:
-            response = sync_cloud_assets(request)
+        response = sync_cloud_assets(request)
 
         self.assertEqual(response.status_code, 200)
         payload = json.loads(response.content)['data']
         self.assertTrue(payload['ok'])
         self.assertTrue(payload['queued'])
-        start_job.assert_called_once_with(payload['job_id'])
 
         job = CloudAssetSyncJob.objects.get(pk=payload['job_id'])
+        self.assertEqual(job.status, CloudAssetSyncJob.STATUS_QUEUED)
+        self.assertEqual(job.current_task, '已加入同步队列')
         with patch('cloud.api._call_command_capture_threaded', side_effect=fake_call_command), \
             patch('cloud.api._refresh_dashboard_plan_snapshots_deferred'):
             job = _execute_cloud_asset_sync_job(job)
 
         result = job.result_payload
         self.assertEqual(job.status, CloudAssetSyncJob.STATUS_SUCCEEDED)
+        self.assertEqual(job.progress_current, job.progress_total)
+        self.assertEqual(job.progress_total, 2)
+        self.assertEqual(job.current_task, '同步完成')
+        self.assertIsNotNone(job.started_at)
+        self.assertIsNotNone(job.finished_at)
         self.assertTrue(result['ok'])
         self.assertTrue(result['synced']['aliyun'])
         self.assertTrue(result['synced']['aws'])
@@ -6380,7 +6385,24 @@ class CloudServerServicesTestCase(TestCase):
         detail_response = cloud_asset_sync_job_detail(detail_request, job.id)
         detail_payload = json.loads(detail_response.content)['data']
         self.assertEqual(detail_payload['status'], CloudAssetSyncJob.STATUS_SUCCEEDED)
+        self.assertEqual(detail_payload['progress_percent'], 100)
+        self.assertEqual(detail_payload['current_task'], '同步完成')
         self.assertEqual({task['provider'] for task in detail_payload['tasks']}, {'aliyun', 'aws'})
+
+        list_request = RequestFactory().get('/api/dashboard/cloud-assets/sync-jobs/')
+        list_request.user = staff_user
+        list_response = cloud_asset_sync_jobs_list(list_request)
+        list_payload = json.loads(list_response.content)['data']
+        self.assertEqual(list_response.status_code, 200)
+        self.assertEqual(list_payload['items'][0]['id'], job.id)
+
+        retry_request = RequestFactory().post(f'/api/dashboard/cloud-assets/sync-jobs/{job.id}/retry/', data='{}', content_type='application/json')
+        retry_request = self._attach_bearer_session(retry_request, staff_user)
+        retry_response = retry_cloud_asset_sync_job(retry_request, job.id)
+        retry_payload = json.loads(retry_response.content)['data']
+        self.assertEqual(retry_response.status_code, 200)
+        self.assertTrue(retry_payload['queued'])
+        self.assertEqual(CloudAssetSyncJob.objects.get(pk=retry_payload['job_id']).scope['retry_of_job_id'], job.id)
 
     def test_sync_cloud_assets_with_selected_assets_uses_asset_scoped_tasks(self):
         account = CloudAccountConfig.objects.create(
@@ -6436,14 +6458,12 @@ class CloudServerServicesTestCase(TestCase):
             content_type='application/json',
         )
         request = self._attach_bearer_session(request, staff_user)
-        with patch('cloud.api._start_cloud_asset_sync_job') as start_job:
-            response = sync_cloud_assets(request)
+        response = sync_cloud_assets(request)
 
         self.assertEqual(response.status_code, 200)
         payload = json.loads(response.content)['data']
         self.assertTrue(payload['ok'])
         self.assertTrue(payload['queued'])
-        start_job.assert_called_once_with(payload['job_id'])
 
         job = CloudAssetSyncJob.objects.get(pk=payload['job_id'])
         with patch('cloud.api._call_command_capture_threaded', side_effect=fake_call_command), \
@@ -6458,6 +6478,68 @@ class CloudServerServicesTestCase(TestCase):
         self.assertTrue(all(call[0] == 'sync_aws_assets' for call in calls))
         self.assertTrue(all(call[1]['region'] == 'ap-southeast-1' for call in calls))
         self.assertFalse(any('asset_id' not in call[1] for call in calls))
+
+    def test_process_cloud_asset_sync_jobs_worker_processes_queued_job(self):
+        account = CloudAccountConfig.objects.create(
+            provider=CloudAccountConfig.PROVIDER_AWS,
+            name='worker-asset-sync',
+            external_account_id='acct-worker-asset-sync',
+            access_key='A' * 20,
+            secret_key='B' * 40,
+            region_hint='ap-southeast-1',
+            is_active=True,
+        )
+        asset = CloudAsset.objects.create(
+            kind=CloudAsset.KIND_SERVER,
+            source=CloudAsset.SOURCE_AWS_SYNC,
+            user=self.user,
+            provider='aws_lightsail',
+            cloud_account=account,
+            account_label=cloud_account_label(account),
+            region_code='ap-southeast-1',
+            asset_name='worker-sync-asset',
+            instance_id='worker-sync-asset',
+            public_ip='10.88.31.1',
+            status=CloudAsset.STATUS_RUNNING,
+        )
+        staff_user = get_user_model().objects.create_user(username='staff_worker_sync', password='x', is_staff=True, is_superuser=True)
+        request = RequestFactory().post(
+            '/api/dashboard/cloud-assets/sync/',
+            data=json.dumps({'asset_ids': [asset.id]}),
+            content_type='application/json',
+        )
+        request = self._attach_bearer_session(request, staff_user)
+        response = sync_cloud_assets(request)
+        payload = json.loads(response.content)['data']
+
+        self.assertTrue(payload['queued'])
+        job = CloudAssetSyncJob.objects.get(pk=payload['job_id'])
+        self.assertEqual(job.status, CloudAssetSyncJob.STATUS_QUEUED)
+
+        calls = []
+
+        class AwsCommand:
+            synced_regions = ['ap-southeast-1']
+            sync_errors = []
+
+        def fake_call_command(command_name, **kwargs):
+            calls.append((command_name, kwargs))
+            return AwsCommand(), 'worker job ok\n'
+
+        with patch('cloud.api._call_command_capture_threaded', side_effect=fake_call_command), \
+            patch('cloud.api._refresh_dashboard_plan_snapshots_deferred'), \
+            patch('cloud.management.commands.process_cloud_asset_sync_jobs.close_old_connections'):
+            call_command('process_cloud_asset_sync_jobs', '--once', '--worker-id', 'test-worker', '--poll-interval', '0.1', '--stale-running-minutes', '0')
+
+        job.refresh_from_db()
+        self.assertEqual(job.status, CloudAssetSyncJob.STATUS_SUCCEEDED)
+        self.assertEqual(job.progress_current, job.progress_total)
+        self.assertEqual(job.current_task, '同步完成')
+        self.assertIsNotNone(job.started_at)
+        self.assertIsNotNone(job.finished_at)
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(calls[0][0], 'sync_aws_assets')
+        self.assertEqual(calls[0][1]['asset_id'], str(asset.id))
 
     def test_sync_cloud_asset_status_uses_asset_scope(self):
         account = CloudAccountConfig.objects.create(

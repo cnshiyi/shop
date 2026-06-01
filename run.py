@@ -119,6 +119,22 @@ def cleanup_bot_runner() -> None:
             kill_pid(int(line))
 
 
+def cleanup_cloud_sync_worker() -> None:
+    try:
+        result = subprocess.run(
+            ['pgrep', '-f', 'process_cloud_asset_sync_jobs'],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+    except FileNotFoundError:
+        return
+    for line in result.stdout.splitlines():
+        line = line.strip()
+        if line.isdigit():
+            kill_pid(int(line))
+
+
 def web_autoreload_enabled() -> bool:
     return env_bool('SHOP_WEB_AUTORELOAD', False)
 
@@ -169,19 +185,47 @@ def run_bot() -> int:
         time.sleep(delay)
 
 
+def cloud_sync_worker_enabled() -> bool:
+    return env_bool('SHOP_CLOUD_SYNC_WORKER_ENABLED', True)
+
+
+def build_cloud_sync_worker_command() -> list[str]:
+    poll_interval = env_int('SHOP_CLOUD_SYNC_WORKER_POLL_SECONDS', 2, minimum=1)
+    stale_minutes = env_int('SHOP_CLOUD_SYNC_WORKER_STALE_MINUTES', 90, minimum=0)
+    return [
+        PYTHON,
+        'manage.py',
+        'process_cloud_asset_sync_jobs',
+        '--poll-interval',
+        str(poll_interval),
+        '--stale-running-minutes',
+        str(stale_minutes),
+    ]
+
+
+def run_worker() -> int:
+    run_manage('migrate')
+    print('[run.py] starting cloud sync worker', flush=True)
+    return subprocess.call(build_cloud_sync_worker_command(), cwd=BASE_DIR, env=build_env())
+
+
 def run_all() -> int:
     cleanup_port(8000)
     cleanup_bot_runner()
+    cleanup_cloud_sync_worker()
     run_manage('migrate')
     run_manage('ensure_dashboard_admin')
     print(f'[run.py] starting web autoreload={web_autoreload_enabled()}', flush=True)
     web_process = subprocess.Popen(build_runserver_command(), cwd=BASE_DIR, env=build_env())
     bot_process = start_process('-m', 'bot.runner')
+    worker_process = subprocess.Popen(build_cloud_sync_worker_command(), cwd=BASE_DIR, env=build_env()) if cloud_sync_worker_enabled() else None
     bot_restart_count = 0
+    worker_restart_count = 0
     try:
         while True:
             web_code = web_process.poll()
             bot_code = bot_process.poll()
+            worker_code = worker_process.poll() if worker_process else None
             if web_code is not None:
                 print(f'[run.py] web process exited code={web_code}', flush=True)
                 return web_code
@@ -198,8 +242,15 @@ def run_all() -> int:
                 print(f'[run.py] bot process exited code={bot_code}; restarting in {delay}s (restart_count={bot_restart_count})', flush=True)
                 time.sleep(delay)
                 bot_process = start_process('-m', 'bot.runner')
+            if worker_process and worker_code is not None:
+                worker_restart_count += 1
+                delay = min(60, 5 * worker_restart_count)
+                print(f'[run.py] cloud sync worker exited code={worker_code}; restarting in {delay}s (restart_count={worker_restart_count})', flush=True)
+                time.sleep(delay)
+                worker_process = subprocess.Popen(build_cloud_sync_worker_command(), cwd=BASE_DIR, env=build_env())
             time.sleep(2)
     finally:
+        terminate_process(worker_process)
         terminate_process(bot_process)
         terminate_process(web_process)
 
@@ -210,9 +261,11 @@ def main() -> None:
         raise SystemExit(run_web())
     if mode == 'bot':
         raise SystemExit(run_bot())
+    if mode == 'worker':
+        raise SystemExit(run_worker())
     if mode == 'all':
         raise SystemExit(run_all())
-    raise SystemExit('用法: python run.py [all|web|bot]')
+    raise SystemExit('用法: python run.py [all|web|bot|worker]')
 
 
 if __name__ == '__main__':

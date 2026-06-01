@@ -1,6 +1,7 @@
 """Dashboard snapshot refresh coordination for cloud runtime changes."""
 
 import logging
+import hashlib
 import sys
 import threading
 
@@ -22,10 +23,31 @@ def _is_interpreter_shutdown_error(exc: Exception) -> bool:
     return sys.is_finalizing() or 'interpreter shutdown' in message or 'cannot schedule new futures' in message
 
 
-def _refresh_dashboard_plan_snapshots(reason: str = '', *, lifecycle_limit: int = 1000):
+def _normalize_asset_ids(asset_ids):
+    if not asset_ids:
+        return None
+    normalized = []
+    for value in asset_ids:
+        try:
+            parsed = int(value)
+        except (TypeError, ValueError):
+            continue
+        if parsed > 0 and parsed not in normalized:
+            normalized.append(parsed)
+    return normalized or None
+
+
+def _refresh_dashboard_plan_snapshots(reason: str = '', *, lifecycle_limit: int = 1000, cloud_asset_ids=None, full_cloud_assets: bool | None = None):
+    normalized_asset_ids = _normalize_asset_ids(cloud_asset_ids)
+    if full_cloud_assets is None:
+        full_cloud_assets = normalized_asset_ids is None
     try:
         from cloud import api as cloud_api
-        cloud_api.refresh_cloud_asset_dashboard_snapshots(reason=reason or 'dashboard_snapshot_refresh', full=True)
+        cloud_api.refresh_cloud_asset_dashboard_snapshots(
+            asset_ids=normalized_asset_ids,
+            reason=reason or 'dashboard_snapshot_refresh',
+            full=full_cloud_assets,
+        )
     except (OperationalError, ProgrammingError) as exc:
         if _is_db_table_not_ready_error(exc):
             logger.debug('DASHBOARD_SNAPSHOT_CLOUD_ASSET_REFRESH_SKIPPED reason=%s error=%s', reason, exc)
@@ -89,16 +111,31 @@ def _refresh_lifecycle_plan_snapshot(reason: str = '', *, lifecycle_limit: int =
         logger.exception('DASHBOARD_SNAPSHOT_LIFECYCLE_REFRESH_FAILED reason=%s', reason)
 
 
-def _refresh_dashboard_plan_snapshots_deferred(reason: str = '', *, lifecycle_limit: int = 300):
-    lock_key = 'dashboard:snapshot-refresh:deferred'
+def _refresh_dashboard_plan_snapshots_deferred(reason: str = '', *, lifecycle_limit: int = 300, cloud_asset_ids=None, full_cloud_assets: bool | None = None):
+    normalized_asset_ids = _normalize_asset_ids(cloud_asset_ids)
+    if full_cloud_assets is None:
+        full_cloud_assets = normalized_asset_ids is None
+    if full_cloud_assets:
+        scope_key = 'full'
+    else:
+        scope_key = 'assets:' + ','.join(str(value) for value in normalized_asset_ids or [])
+        if len(scope_key) > 120:
+            digest = hashlib.sha1(scope_key.encode('utf-8')).hexdigest()[:16]
+            scope_key = f'assets:{digest}'
+    lock_key = f'dashboard:snapshot-refresh:deferred:{scope_key}'
     if not cache.add(lock_key, reason or 'pending', timeout=60):
-        logger.info('DASHBOARD_SNAPSHOT_DEFERRED_SKIPPED reason=%s', reason)
+        logger.info('DASHBOARD_SNAPSHOT_DEFERRED_SKIPPED reason=%s scope=%s', reason, scope_key)
         return
 
     def _run():
         close_old_connections()
         try:
-            _refresh_dashboard_plan_snapshots(reason, lifecycle_limit=lifecycle_limit)
+            _refresh_dashboard_plan_snapshots(
+                reason,
+                lifecycle_limit=lifecycle_limit,
+                cloud_asset_ids=normalized_asset_ids,
+                full_cloud_assets=full_cloud_assets,
+            )
         finally:
             cache.delete(lock_key)
             close_old_connections()

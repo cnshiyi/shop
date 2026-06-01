@@ -26,7 +26,24 @@ uv run python run.py all
 ```bash
 uv run python run.py web
 uv run python run.py bot
+uv run python run.py worker
 ```
+
+`run.py all` 会同时拉起 web、bot 和云资产同步 worker。只运行 `run.py web` 时，后台“代理同步”只会创建 `CloudAssetSyncJob` 队列记录，不会真正执行同步；本地调试同步链路时需要同时运行 `run.py worker` 或直接使用 `run.py all`。
+
+云资产同步 worker 常用环境变量：
+
+- `SHOP_CLOUD_SYNC_WORKER_ENABLED=0`：`run.py all` 不启动 worker
+- `SHOP_CLOUD_SYNC_WORKER_POLL_SECONDS=2`：无任务时轮询间隔
+- `SHOP_CLOUD_SYNC_WORKER_STALE_MINUTES=90`：运行中超过该分钟数的任务重新入队；`0` 表示关闭恢复
+
+同步状态更新必须保持可观测：
+
+- `CloudAssetSyncJob.status`：`queued` → `running` → `succeeded` / `partial` / `failed`
+- `progress_current` / `progress_total`：按账号或选中资产任务推进
+- `current_task`：记录 worker 领取、任务生成和最近完成的 provider/account
+- `errors` / `warnings` / `logs`：写入可展示摘要，前端“同步任务”抽屉直接读取这些字段
+- 同步成功后触发 `cloud_asset_dashboard_snapshot` 刷新；选中资产同步只增量刷新对应资产，全量同步刷新完整快照
 
 常用启动脚本：
 
@@ -128,18 +145,19 @@ uv run python -m py_compile bot/api.py bot/handlers.py cloud/services.py cloud/b
 云同步相关：
 
 ```bash
-uv run python -m py_compile cloud/management/commands/sync_aws_assets.py cloud/management/commands/sync_aliyun_assets.py cloud/management/commands/reconcile_cloud_assets_from_servers.py
+uv run python -m py_compile cloud/management/commands/sync_aws_assets.py cloud/management/commands/sync_aliyun_assets.py cloud/management/commands/reconcile_cloud_assets_from_servers.py cloud/management/commands/process_cloud_asset_sync_jobs.py
 uv run python manage.py sync_aws_assets --region ap-southeast-1
 uv run python manage.py sync_aliyun_assets --region cn-hongkong
+uv run python manage.py process_cloud_asset_sync_jobs --once
 ```
 
 如果用户反馈“没生效”，优先检查：
 
 ```bash
-ps -axo pid,lstart,command | grep -E 'run.py all|bot.runner|manage.py runserver' | grep -v grep
+ps -axo pid,lstart,command | grep -E 'run.py all|bot.runner|manage.py runserver|process_cloud_asset_sync_jobs' | grep -v grep
 ```
 
-很多 Bot/生命周期修改必须重启 `/Users/aaaa/Desktop/shop/run.py all` 或 `bot.runner` 才生效。
+很多 Bot/生命周期/云同步修改必须重启 `run.py all`、`bot.runner` 或 `process_cloud_asset_sync_jobs` 才生效。
 
 ## 开发方向
 

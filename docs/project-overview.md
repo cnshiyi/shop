@@ -23,6 +23,7 @@ uv sync
 uv run python manage.py check
 uv run python run.py web
 uv run python run.py bot
+uv run python run.py worker
 uv run python run.py all
 ```
 
@@ -34,7 +35,7 @@ DB_ENGINE=sqlite SQLITE_NAME=local.sqlite3 uv run python run.py web
 
 ## 3. 关键启动链
 
-- `run.py`：统一启动器，负责 `web` / `bot` / `all`
+- `run.py`：统一启动器，负责 `web` / `bot` / `worker` / `all`
 - `shop/settings.py`：数据库、会话、日志、敏感配置、默认 hosts
 - `shop/urls.py`：总路由
 - `shop/dashboard_urls.py`：后台 API 聚合路由
@@ -45,7 +46,16 @@ DB_ENGINE=sqlite SQLITE_NAME=local.sqlite3 uv run python run.py web
 - `manage.py ensure_dashboard_admin`
 - `manage.py runserver 127.0.0.1:8000`
 
-`run.py all` 会同时拉起 web 和 bot，并对 bot 做 keepalive 重启。
+`run.py worker` 会先执行迁移，然后启动 `process_cloud_asset_sync_jobs` 持久化同步 worker。
+
+`run.py all` 会同时拉起 web、bot 和云资产同步 worker，并对 bot / worker 做 keepalive 重启。后台“代理同步”接口只负责创建 `CloudAssetSyncJob` 队列记录；如果只运行 `run.py web`，同步任务会停留在 queued，必须另外运行 `run.py worker`。
+
+云资产同步状态是持久化业务状态：
+
+- `queued`：后台 API 已入队，等待 worker 领取
+- `running`：worker 已领取并执行，持续更新 `progress_current`、`progress_total`、`current_task`
+- `succeeded` / `partial` / `failed`：终态，写入 `errors`、`warnings`、`logs`、`result_payload`
+- 同步成功后刷新代理列表快照；选中资产同步走增量快照刷新，全账号同步刷新完整快照
 
 ## 4. 重要实现清单
 
@@ -138,6 +148,8 @@ DB_ENGINE=sqlite SQLITE_NAME=local.sqlite3 uv run python run.py web
   - `CloudLifecyclePlan`：生命周期执行计划
   - `CloudNoticePlan`：通知计划
   - `CloudAutoRenewPlan`：自动续费计划
+  - `CloudAssetDashboardSnapshot`：代理列表查询快照，支撑后台分页、搜索和风险统计
+  - `CloudAssetSyncJob`：后台代理同步任务队列，记录状态、进度、结果、日志和重试来源
   - `DailyAddressStat` / `ResourceSnapshot` / `AddressMonitor` 等监控相关表
 - `cloud/services.py`
   - 云资产/订单/生命周期/通知的业务编排
@@ -167,6 +179,8 @@ DB_ENGINE=sqlite SQLITE_NAME=local.sqlite3 uv run python run.py web
   - `dedupe_cloud_assets`
   - `audit_cloud_asset_ip_presence`
   - `upsert_cloud_asset`
+  - `refresh_cloud_asset_dashboard_snapshots`
+  - `process_cloud_asset_sync_jobs`
 
 ## 5. 路由面
 
@@ -177,6 +191,7 @@ DB_ENGINE=sqlite SQLITE_NAME=local.sqlite3 uv run python run.py web
 - Telegram 账号、登录、群组、消息
 - 商品、订单、充值
 - 云资产、云订单、云套餐、价格、服务器
+- 云资产同步任务列表、详情、重试和状态轮询
 - 生命周期、通知、自动续费、监控
 - 站点配置、按钮配置、云账号、管理员账号
 

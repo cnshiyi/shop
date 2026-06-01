@@ -5,7 +5,6 @@ import io
 import json
 import logging
 import re
-import threading
 import uuid
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import timezone as dt_timezone
@@ -1465,7 +1464,7 @@ def update_cloud_asset(request, asset_id):
     if 'actual_expires_at' in payload:
         _refresh_lifecycle_plan_snapshot(f'cloud_asset_expiry:{asset_id}', lifecycle_limit=1000)
     if refresh_snapshots_needed:
-        _refresh_dashboard_plan_snapshots_deferred(f'cloud_asset:{asset_id}')
+        _refresh_dashboard_plan_snapshots_deferred(f'cloud_asset:{asset_id}', cloud_asset_ids=[asset_id])
     asset = CloudAsset.objects.select_related('user', 'order', 'cloud_account', 'telegram_group').get(pk=asset_id)
     return _ok(_asset_payload(asset))
 
@@ -4316,7 +4315,7 @@ def sync_cloud_asset_status(request, asset_id):
         },
     }
     if not errors:
-        _refresh_dashboard_plan_snapshots_deferred(f'cloud_asset_sync:{asset.id}')
+        _refresh_dashboard_plan_snapshots_deferred(f'cloud_asset_sync:{asset.id}', cloud_asset_ids=[asset.id])
     _log_sync_command_output(f'CLOUD_SYNC_SINGLE_REQUEST_LOG run_id={sync_run_id} command={command_name}', _sync_log_text(command_output))
     _record_dashboard_sync_log(
         action='sync_cloud_asset_status',
@@ -4518,7 +4517,11 @@ def _run_cloud_assets_sync(payload, *, sync_run_id: str | None = None, job: Clou
     )
     _log_sync_command_output(f'CLOUD_SYNC_REQUEST_LOG run_id={sync_run_id}', _sync_log_text(command_output))
     if ok:
-        _refresh_dashboard_plan_snapshots_deferred(f'cloud_assets_sync:{sync_run_id}')
+        _refresh_dashboard_plan_snapshots_deferred(
+            f'cloud_assets_sync:{sync_run_id}',
+            cloud_asset_ids=sorted(requested_asset_ids) or None,
+            full_cloud_assets=not bool(requested_asset_ids),
+        )
     _record_dashboard_sync_log(
         action='sync_cloud_assets',
         target=f'providers:{",".join(sorted(providers))};aliyun:{aliyun_region};aws:{aws_region or "all"}',
@@ -4645,18 +4648,6 @@ def _execute_cloud_asset_sync_job(job_or_id):
     return job
 
 
-def _start_cloud_asset_sync_job(job_id: int):
-    def _run():
-        close_old_connections()
-        try:
-            _execute_cloud_asset_sync_job(job_id)
-        finally:
-            close_old_connections()
-
-    thread = threading.Thread(target=_run, name=f'cloud-asset-sync-{job_id}', daemon=True)
-    thread.start()
-
-
 @csrf_exempt
 @dashboard_superuser_required
 @require_POST
@@ -4676,14 +4667,13 @@ def sync_cloud_assets(request):
         current_task='已加入同步队列',
     )
     logger.info('CLOUD_SYNC_JOB_QUEUED job_id=%s run_id=%s scope=%s payload=%s', job.id, job.run_id, scope, payload)
-    _start_cloud_asset_sync_job(job.id)
     return _ok({
         'ok': True,
         'queued': True,
         'job_id': job.id,
         'run_id': job.run_id,
         'status': job.status,
-        'message': '云资产同步已加入后台队列',
+        'message': '云资产同步已加入后台队列，等待同步 worker 执行',
         'job': _cloud_asset_sync_job_payload(job),
         'tasks': [],
         'skipped_tasks': [],
@@ -4694,11 +4684,66 @@ def sync_cloud_assets(request):
 
 @dashboard_login_required
 @require_GET
+def cloud_asset_sync_jobs_list(request):
+    queryset = CloudAssetSyncJob.objects.order_by('-created_at', '-id')
+    status = str(request.GET.get('status') or '').strip()
+    if status:
+        queryset = queryset.filter(status=status)
+    page, page_size = _parse_dashboard_page(request, default_size=20, min_size=1, max_size=100)
+    total = queryset.count()
+    total_pages = max((total + page_size - 1) // page_size, 1)
+    page = min(page, total_pages)
+    start = (page - 1) * page_size
+    jobs = list(queryset[start:start + page_size])
+    return _ok({
+        'items': [_cloud_asset_sync_job_payload(job) for job in jobs],
+        'total': total,
+        'page': page,
+        'page_size': page_size,
+        'total_pages': total_pages,
+    })
+
+
+@dashboard_login_required
+@require_GET
 def cloud_asset_sync_job_detail(request, job_id: int):
     job = CloudAssetSyncJob.objects.filter(pk=job_id).first()
     if not job:
         return _error('同步任务不存在', status=404)
     return _ok(_cloud_asset_sync_job_payload(job))
+
+
+@csrf_exempt
+@dashboard_superuser_required
+@require_POST
+def retry_cloud_asset_sync_job(request, job_id: int):
+    source_job = CloudAssetSyncJob.objects.filter(pk=job_id).first()
+    if not source_job:
+        return _error('同步任务不存在', status=404)
+    if source_job.status in {CloudAssetSyncJob.STATUS_QUEUED, CloudAssetSyncJob.STATUS_RUNNING}:
+        return _error('任务仍在队列或执行中，不能重复重试', status=400)
+    scope = _cloud_assets_sync_scope(source_job.request_payload or {})
+    requested_by = request.user if getattr(request.user, 'is_authenticated', False) else None
+    job = CloudAssetSyncJob.objects.create(
+        run_id=uuid.uuid4().hex,
+        requested_by=requested_by,
+        request_payload=source_job.request_payload or {},
+        providers=scope['providers'],
+        account_ids=scope['account_ids'],
+        asset_ids=scope['asset_ids'],
+        scope={**scope, 'retry_of_job_id': source_job.id},
+        current_task='重试任务已加入同步队列',
+    )
+    logger.info('CLOUD_SYNC_JOB_RETRY_QUEUED source_job_id=%s job_id=%s run_id=%s scope=%s', source_job.id, job.id, job.run_id, job.scope)
+    return _ok({
+        'ok': True,
+        'queued': True,
+        'job_id': job.id,
+        'run_id': job.run_id,
+        'status': job.status,
+        'message': '同步重试已加入后台队列',
+        'job': _cloud_asset_sync_job_payload(job),
+    })
 
 
 @csrf_exempt
@@ -4873,8 +4918,10 @@ def cloud_assets_sync_status(request):
         for job in CloudAssetSyncJob.objects.order_by('-created_at', '-id')[:5]
     ]
     active_jobs = [
-        item for item in recent_jobs
-        if item.get('status') in {CloudAssetSyncJob.STATUS_QUEUED, CloudAssetSyncJob.STATUS_RUNNING}
+        _cloud_asset_sync_job_payload(job)
+        for job in CloudAssetSyncJob.objects
+        .filter(status__in=[CloudAssetSyncJob.STATUS_QUEUED, CloudAssetSyncJob.STATUS_RUNNING])
+        .order_by('created_at', 'id')[:5]
     ]
     return _ok({
         'auto_sync_every_seconds': get_cloud_asset_sync_interval_seconds(),
@@ -4972,7 +5019,9 @@ from cloud.api_plans import (  # noqa: E402
 __all__ = [
     'cloud_assets_list',
     'cloud_assets_risk_summary',
+    'cloud_asset_sync_jobs_list',
     'cloud_asset_sync_job_detail',
+    'retry_cloud_asset_sync_job',
     'cloud_assets_sync_status',
     'sync_cloud_asset_status',
     'cloud_ip_logs_list',
