@@ -67,6 +67,7 @@ urlpatterns = [
     path('cloud-assets/sync-status/', cloud_api.cloud_assets_sync_status, name='cloud-assets-sync-status'),
     path('cloud-assets/sync-jobs/', cloud_api.cloud_asset_sync_jobs_list, name='cloud-assets-sync-jobs-list'),
     path('cloud-assets/sync-jobs/<int:job_id>/', cloud_api.cloud_asset_sync_job_detail, name='cloud-assets-sync-job-detail'),
+    path('cloud-assets/sync-jobs/<int:job_id>/cancel/', cloud_api.cancel_cloud_asset_sync_job, name='cloud-assets-sync-job-cancel'),
     path('cloud-assets/sync-jobs/<int:job_id>/retry/', cloud_api.retry_cloud_asset_sync_job, name='cloud-assets-sync-job-retry'),
     path('cloud-assets/sync/', cloud_api.sync_cloud_assets, name='cloud-assets-sync'),
     path('cloud-orders/', cloud_api.cloud_orders_list, name='cloud-orders-list'),

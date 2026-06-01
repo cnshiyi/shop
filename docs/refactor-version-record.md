@@ -547,17 +547,22 @@ Latest refactor pass made dashboard-triggered proxy synchronization durable and 
 - Added sync job list and retry APIs:
   - `/admin/cloud-assets/sync-jobs/`
   - `/admin/cloud-assets/sync-jobs/<id>/retry/`
+  - `/admin/cloud-assets/sync-jobs/<id>/cancel/`
 - Sync job status is now the durable status surface:
   - `queued`
   - `running`
   - `succeeded`
   - `partial`
   - `failed`
-- Worker and sync execution update `progress_current`, `progress_total`, `current_task`, `errors`, `warnings`, `logs`, `started_at`, and `finished_at` throughout execution.
+  - `cancelled`
+- Added `cloud_asset_sync_job_event` for detailed sync event timelines:
+  - queued / claimed / status / task / progress / log / warning / error / cancel / retry / heartbeat
+  - the event table stores `job_id` as an indexed scalar instead of a foreign key so detailed logging cannot lock or block the main job status row
+- Worker and sync execution update `worker_id`, `worker_heartbeat_at`, `progress_current`, `progress_total`, `current_task`, `errors`, `warnings`, `logs`, `started_at`, `finished_at`, and cancel request fields throughout execution.
 - Dashboard snapshot refreshes are now scoped:
   - full cloud sync refreshes the complete `cloud_asset_dashboard_snapshot`
   - selected asset sync and single-asset updates refresh only the affected asset IDs
-- The admin frontend has a sync job drawer for status, progress, results, logs, and retry; polling updates the visible job row without blocking the whole proxy list after enqueue.
+- The admin frontend has a sync job drawer for status, progress, worker heartbeat, results, detailed events, logs, cancel, retry, status filters, and failed-only filtering; polling updates the visible job row without blocking the whole proxy list after enqueue.
 - `lefthook.yml` no longer hardcodes `/opt/homebrew/bin/pnpm`, so Git hooks can use the current shell `pnpm`.
 
 ### Verification
@@ -568,7 +573,8 @@ Passed locally:
 uv run python -m py_compile run.py cloud/api.py cloud/dashboard_snapshots.py cloud/models.py cloud/tests.py cloud/management/commands/process_cloud_asset_sync_jobs.py shop/dashboard_urls.py
 uv run python manage.py check
 uv run python manage.py makemigrations cloud --dry-run --check
-DJANGO_TEST_REUSE_DB=1 uv run python manage.py test cloud.tests.CloudServerServicesTestCase.test_sync_cloud_assets_runs_enabled_accounts_and_merges_results cloud.tests.CloudServerServicesTestCase.test_sync_cloud_assets_with_selected_assets_uses_asset_scoped_tasks cloud.tests.CloudServerServicesTestCase.test_process_cloud_asset_sync_jobs_worker_processes_queued_job --keepdb --noinput --verbosity 1
+uv run python manage.py sqlmigrate cloud 0042
+DJANGO_TEST_REUSE_DB=1 uv run python manage.py test cloud.tests.CloudServerServicesTestCase.test_sync_cloud_assets_runs_enabled_accounts_and_merges_results cloud.tests.CloudServerServicesTestCase.test_cancel_queued_cloud_asset_sync_job_marks_terminal_and_events cloud.tests.CloudServerServicesTestCase.test_process_cloud_asset_sync_jobs_worker_processes_queued_job --keepdb --noinput --verbosity 1
 (cd /Users/a399/Desktop/data/vue-shop-admin && ./node_modules/.bin/vue-tsc --noEmit --skipLibCheck -p apps/web-antd/tsconfig.json)
 git diff --check
 ```

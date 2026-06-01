@@ -39,10 +39,12 @@ uv run python run.py worker
 
 同步状态更新必须保持可观测：
 
-- `CloudAssetSyncJob.status`：`queued` → `running` → `succeeded` / `partial` / `failed`
+- `CloudAssetSyncJob.status`：`queued` → `running` → `succeeded` / `partial` / `failed` / `cancelled`
 - `progress_current` / `progress_total`：按账号或选中资产任务推进
 - `current_task`：记录 worker 领取、任务生成和最近完成的 provider/account
 - `errors` / `warnings` / `logs`：写入可展示摘要，前端“同步任务”抽屉直接读取这些字段
+- `worker_id` / `worker_heartbeat_at`：记录 worker 归属和最近心跳，卡住任务按 heartbeat 超时接管
+- `CloudAssetSyncJobEvent`：记录 queued、claimed、status、task、progress、log、warning、error、cancel、retry、heartbeat 事件；事件表只存 `job_id` 数字索引，不加外键，避免日志写入阻塞同步主状态
 - 同步成功后触发 `cloud_asset_dashboard_snapshot` 刷新；选中资产同步只增量刷新对应资产，全量同步刷新完整快照
 
 常用启动脚本：

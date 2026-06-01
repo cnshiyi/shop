@@ -54,7 +54,9 @@ DB_ENGINE=sqlite SQLITE_NAME=local.sqlite3 uv run python run.py web
 
 - `queued`：后台 API 已入队，等待 worker 领取
 - `running`：worker 已领取并执行，持续更新 `progress_current`、`progress_total`、`current_task`
-- `succeeded` / `partial` / `failed`：终态，写入 `errors`、`warnings`、`logs`、`result_payload`
+- `succeeded` / `partial` / `failed` / `cancelled`：终态，写入 `errors`、`warnings`、`logs`、`result_payload`
+- `CloudAssetSyncJobEvent` 记录完整事件时间线，包括入队、领取、状态变化、子任务、进度、日志、错误、取消、重试和 worker 心跳
+- 事件表以 `job_id` 数字索引关联任务，不使用外键，避免详细日志写入反向锁住同步主状态
 - 同步成功后刷新代理列表快照；选中资产同步走增量快照刷新，全账号同步刷新完整快照
 
 ## 4. 重要实现清单
@@ -149,7 +151,8 @@ DB_ENGINE=sqlite SQLITE_NAME=local.sqlite3 uv run python run.py web
   - `CloudNoticePlan`：通知计划
   - `CloudAutoRenewPlan`：自动续费计划
   - `CloudAssetDashboardSnapshot`：代理列表查询快照，支撑后台分页、搜索和风险统计
-  - `CloudAssetSyncJob`：后台代理同步任务队列，记录状态、进度、结果、日志和重试来源
+  - `CloudAssetSyncJob`：后台代理同步任务队列，记录状态、进度、结果、日志、worker 心跳、取消和重试来源
+  - `CloudAssetSyncJobEvent`：同步任务事件流，记录详细状态更新时间线
   - `DailyAddressStat` / `ResourceSnapshot` / `AddressMonitor` 等监控相关表
 - `cloud/services.py`
   - 云资产/订单/生命周期/通知的业务编排

@@ -33,7 +33,7 @@ from cloud.asset_queries import cloud_assets_base_queryset, dedupe_cloud_asset_r
 from cloud.dashboard_api_helpers import _dashboard_expiry_ordering, _dashboard_sort_direction, _generate_cloud_plan_config_id, _preserve_link_status_label, _preserve_link_status_with_countdown
 from cloud.dashboard_snapshots import _refresh_dashboard_plan_snapshots, _refresh_dashboard_plan_snapshots_deferred, _refresh_lifecycle_plan_snapshot
 from cloud.services import AWS_REGION_NAMES, RenewalPriceMissingError, _renewal_price, _update_order_primary_records, create_cloud_server_rebuild_order, drop_asset_note_update, ensure_cloud_asset_operation_order, ensure_cloud_server_pricing, ensure_manual_expiry_operation_order, ensure_manual_owner_operation_order, ensure_manual_price_operation_order, record_cloud_ip_log, refresh_custom_plan_cache, replace_cloud_asset_order_by_admin, set_cloud_server_auto_renew_admin, sync_cloud_asset_user_binding
-from cloud.models import AddressMonitor, CloudAsset, CloudAssetDashboardSnapshot, CloudAssetSyncJob, CloudAutoRenewPatrolLog, CloudAutoRenewPlan, CloudIpLog, CloudNoticePlan, CloudServerOrder, CloudServerPlan, CloudUserNoticeLog, ServerPrice
+from cloud.models import AddressMonitor, CloudAsset, CloudAssetDashboardSnapshot, CloudAssetSyncJob, CloudAssetSyncJobEvent, CloudAutoRenewPatrolLog, CloudAutoRenewPlan, CloudIpLog, CloudNoticePlan, CloudServerOrder, CloudServerPlan, CloudUserNoticeLog, ServerPrice
 from cloud.note_utils import append_note, prepend_note
 from core.cloud_accounts import cloud_account_label, cloud_account_label_variants, list_cloud_account_labels
 from core.dashboard_api import _apply_keyword_filter, _countdown_label, _days_left, _decimal_to_str, _error, _get_keyword, _iso, _ok, _parse_decimal, _provider_label, _provider_status_label, _read_payload, _region_label, _server_source_label, _split_usernames, _status_label, _user_payload, dashboard_login_required, dashboard_superuser_required
@@ -165,6 +165,114 @@ def _record_dashboard_sync_log(*, action: str, target: str, request_payload: dic
         )
     except Exception:
         logger.exception('DASHBOARD_SYNC_LOG_RECORD_FAILED action=%s target=%s', action, target)
+
+
+def _sync_job_event_payload(event: CloudAssetSyncJobEvent) -> dict:
+    return {
+        'id': event.id,
+        'event_type': event.event_type,
+        'event_type_label': dict(CloudAssetSyncJobEvent.TYPE_CHOICES).get(event.event_type, event.event_type),
+        'status_from': event.status_from or '',
+        'status_to': event.status_to or '',
+        'message': event.message or '',
+        'payload': event.payload or {},
+        'worker_id': event.worker_id or '',
+        'actor_id': event.actor_id,
+        'created_at': _iso(event.created_at),
+    }
+
+
+def _record_sync_job_event(
+    job_or_id,
+    event_type: str,
+    message: str = '',
+    *,
+    payload: dict | None = None,
+    status_from: str = '',
+    status_to: str = '',
+    worker_id: str = '',
+    actor=None,
+    log_level: int = logging.INFO,
+) -> CloudAssetSyncJobEvent | None:
+    job_id = job_or_id.pk if isinstance(job_or_id, CloudAssetSyncJob) else int(job_or_id)
+    payload = dict(payload or {})
+    try:
+        event = CloudAssetSyncJobEvent.objects.create(
+            job_id=job_id,
+            event_type=event_type,
+            status_from=status_from or '',
+            status_to=status_to or '',
+            message=str(message or '')[:255],
+            payload=payload,
+            worker_id=str(worker_id or '')[:64],
+            actor=actor if getattr(actor, 'is_authenticated', False) else None,
+        )
+        logger.log(
+            log_level,
+            'CLOUD_SYNC_JOB_EVENT job_id=%s event_type=%s status_from=%s status_to=%s worker_id=%s message=%s payload=%s',
+            job_id,
+            event_type,
+            status_from or '',
+            status_to or '',
+            worker_id or '',
+            message,
+            payload,
+        )
+        return event
+    except Exception:
+        logger.exception('CLOUD_SYNC_JOB_EVENT_RECORD_FAILED job_id=%s event_type=%s message=%s', job_id, event_type, message)
+        return None
+
+
+def _update_sync_job_status(job: CloudAssetSyncJob, status: str, current_task: str, *, event_type: str = CloudAssetSyncJobEvent.TYPE_STATUS, payload: dict | None = None, worker_id: str = '', actor=None, **updates):
+    previous_status = job.status
+    now = timezone.now()
+    update_payload = {
+        'status': status,
+        'current_task': current_task,
+        'updated_at': now,
+        **updates,
+    }
+    CloudAssetSyncJob.objects.filter(pk=job.pk).update(**update_payload)
+    _record_sync_job_event(
+        job,
+        event_type,
+        current_task,
+        payload=payload,
+        status_from=previous_status,
+        status_to=status,
+        worker_id=worker_id or getattr(job, 'worker_id', ''),
+        actor=actor,
+    )
+    job.status = status
+    job.current_task = current_task
+
+
+def _heartbeat_sync_job(job_or_id, *, worker_id: str = '', current_task: str = '', payload: dict | None = None, record_event: bool = False):
+    job_id = job_or_id.pk if isinstance(job_or_id, CloudAssetSyncJob) else int(job_or_id)
+    now = timezone.now()
+    updates = {
+        'worker_heartbeat_at': now,
+        'updated_at': now,
+    }
+    if worker_id:
+        updates['worker_id'] = str(worker_id)[:64]
+    if current_task:
+        updates['current_task'] = current_task[:255]
+    CloudAssetSyncJob.objects.filter(pk=job_id).update(**updates)
+    if record_event:
+        _record_sync_job_event(
+            job_id,
+            CloudAssetSyncJobEvent.TYPE_HEARTBEAT,
+            current_task or 'worker heartbeat',
+            payload=payload or {},
+            worker_id=worker_id,
+        )
+
+
+def _sync_job_cancel_requested(job_or_id) -> bool:
+    job_id = job_or_id.pk if isinstance(job_or_id, CloudAssetSyncJob) else int(job_or_id)
+    return CloudAssetSyncJob.objects.filter(pk=job_id, cancel_requested_at__isnull=False).exists()
 
 
 def _call_command_capture(command_name: str, *args, **options):
@@ -4036,7 +4144,7 @@ def sync_servers(request):
             message = f'AWS账号#{getattr(aws_account, "id", "-")}同步失败: {exc}'
             errors.append(message)
             logger.exception('DASHBOARD_SYNC_SERVERS_AWS_FAILED account_id=%s region=%s', getattr(aws_account, 'id', None), aws_region or 'all')
-    ok = not errors or synced['aliyun'] or synced['aws']
+    ok = (not cancelled) and (not errors or synced['aliyun'] or synced['aws'])
     response_payload = {'ok': ok, 'synced': synced, 'missing': missing, 'aliyun_region': aliyun_region, 'aws_region': aws_region or 'all', 'aws_regions': aws_regions, 'errors': errors, 'warnings': warnings[:50], 'logs': _sync_log_tail(command_output), 'accounts': {'aliyun': [_sync_account_payload(account) for account in aliyun_accounts], 'aws': [_sync_account_payload(account) for account in aws_accounts]}}
     _record_dashboard_sync_log(
         action='sync_servers',
@@ -4354,6 +4462,23 @@ def _run_cloud_assets_sync(payload, *, sync_run_id: str | None = None, job: Clou
         sorted(requested_asset_ids),
         payload,
     )
+    if job:
+        _record_sync_job_event(
+            job,
+            CloudAssetSyncJobEvent.TYPE_STATUS,
+            '同步请求开始',
+            payload={
+                'providers': sorted(providers),
+                'aliyun_region': aliyun_region,
+                'aws_region': aws_region or 'all',
+                'account_ids': sorted(requested_account_ids),
+                'asset_ids': sorted(requested_asset_ids),
+                'request_payload': payload,
+            },
+            status_from=job.status,
+            status_to=CloudAssetSyncJob.STATUS_RUNNING,
+            worker_id=job.worker_id,
+        )
     if requested_account_ids:
         aliyun_accounts = [account for account in aliyun_accounts if account.id in requested_account_ids]
         aws_accounts = [account for account in aws_accounts if account.id in requested_account_ids]
@@ -4429,6 +4554,31 @@ def _run_cloud_assets_sync(payload, *, sync_run_id: str | None = None, job: Clou
             errors=errors[:50],
             updated_at=timezone.now(),
         )
+        _record_sync_job_event(
+            job,
+            CloudAssetSyncJobEvent.TYPE_TASK,
+            '同步任务已生成' if sync_tasks else '没有可执行同步任务',
+            payload={
+                'task_count': len(sync_tasks),
+                'tasks': [_sync_task_payload(task) for task in sync_tasks],
+                'warnings': warnings[:50],
+                'errors': errors[:50],
+            },
+            worker_id=job.worker_id,
+        )
+
+    cancelled = False
+    if job and _sync_job_cancel_requested(job):
+        cancelled = True
+        warnings.append('同步任务已取消，未执行任何云同步任务')
+        _record_sync_job_event(
+            job,
+            CloudAssetSyncJobEvent.TYPE_CANCEL,
+            '同步任务在执行前被取消',
+            payload={'progress_current': 0, 'progress_total': len(sync_tasks)},
+            worker_id=job.worker_id,
+        )
+        sync_tasks = []
 
     def run_task(task):
         return _run_sync_task_with_lock(task)
@@ -4437,24 +4587,63 @@ def _run_cloud_assets_sync(payload, *, sync_run_id: str | None = None, job: Clou
     task_results = []
     skipped_tasks = []
     if sync_tasks:
+        if job:
+            for task in sync_tasks:
+                _record_sync_job_event(
+                    job,
+                    CloudAssetSyncJobEvent.TYPE_TASK,
+                    '同步子任务开始',
+                    payload=_sync_task_payload(task),
+                    worker_id=job.worker_id,
+                )
         with ThreadPoolExecutor(max_workers=max_workers) as executor:
             future_map = {executor.submit(run_task, task): task for task in sync_tasks}
             completed_tasks = 0
             for future in as_completed(future_map):
                 task = future_map[future]
                 account = task['account']
+                task_payload = _sync_task_payload(task)
+                cancel_after_task = False
                 try:
                     result = future.result()
                     if result.get('skipped'):
-                        skipped_tasks.append({**_sync_task_payload(task), 'reason': result.get('reason') or '同步已在运行'})
+                        skipped_payload = {**task_payload, 'reason': result.get('reason') or '同步已在运行'}
+                        skipped_tasks.append(skipped_payload)
+                        if job:
+                            _record_sync_job_event(
+                                job,
+                                CloudAssetSyncJobEvent.TYPE_WARNING,
+                                '同步子任务跳过',
+                                payload=skipped_payload,
+                                worker_id=job.worker_id,
+                                log_level=logging.WARNING,
+                            )
                         continue
                     command = result.get('command')
-                    task_results.append({
-                        **_sync_task_payload(task),
+                    result_payload = {
+                        **task_payload,
                         'duration_seconds': result.get('duration_seconds'),
                         'summary': getattr(command, 'summary', {}) if command else {},
-                    })
-                    command_output.write(result.get('log_text') or '')
+                    }
+                    task_results.append(result_payload)
+                    log_text = result.get('log_text') or ''
+                    command_output.write(log_text)
+                    if job:
+                        _record_sync_job_event(
+                            job,
+                            CloudAssetSyncJobEvent.TYPE_TASK,
+                            '同步子任务完成',
+                            payload=result_payload,
+                            worker_id=job.worker_id,
+                        )
+                        if log_text:
+                            _record_sync_job_event(
+                                job,
+                                CloudAssetSyncJobEvent.TYPE_LOG,
+                                '同步子任务日志',
+                                payload={**task_payload, 'log_tail': [line for line in log_text.splitlines() if line.strip()][-80:]},
+                                worker_id=job.worker_id,
+                            )
                     if task['provider'] == 'aliyun':
                         synced['aliyun'] = True
                     else:
@@ -4476,6 +4665,15 @@ def _run_cloud_assets_sync(payload, *, sync_run_id: str | None = None, job: Clou
                         logger.exception('DASHBOARD_SYNC_ASSETS_AWS_FAILED run_id=%s account_id=%s region=%s kwargs=%s', sync_run_id, getattr(account, 'id', None), aws_region or 'all', task.get('kwargs') or {})
                     _log_sync_command_output(f'CLOUD_SYNC_TASK_FAILED_LOG run_id={sync_run_id} command={task.get("command")}', captured_log, level=logging.ERROR)
                     errors.append(message)
+                    if job:
+                        _record_sync_job_event(
+                            job,
+                            CloudAssetSyncJobEvent.TYPE_ERROR,
+                            '同步子任务失败',
+                            payload={**task_payload, 'error': str(exc), 'log_tail': [line for line in captured_log.splitlines() if line.strip()][-80:]},
+                            worker_id=job.worker_id,
+                            log_level=logging.ERROR,
+                        )
                 finally:
                     completed_tasks += 1
                     if job:
@@ -4487,9 +4685,38 @@ def _run_cloud_assets_sync(payload, *, sync_run_id: str | None = None, job: Clou
                             errors=errors[:50],
                             updated_at=timezone.now(),
                         )
+                        _record_sync_job_event(
+                            job,
+                            CloudAssetSyncJobEvent.TYPE_PROGRESS,
+                            f'{completed_tasks}/{len(sync_tasks)} 已处理',
+                            payload={'progress_current': completed_tasks, 'progress_total': len(sync_tasks), 'task': task_payload},
+                            worker_id=job.worker_id,
+                        )
+                        _heartbeat_sync_job(
+                            job,
+                            worker_id=job.worker_id,
+                            current_task=f'{task.get("provider") or "-"}:{getattr(account, "id", "-")} 已处理',
+                            payload={'progress_current': completed_tasks, 'progress_total': len(sync_tasks), **task_payload},
+                        )
+                    if job and _sync_job_cancel_requested(job):
+                        cancelled = True
+                        warnings.append('同步任务收到取消请求，已停止调度后续任务')
+                        for pending_future in future_map:
+                            if pending_future is not future:
+                                pending_future.cancel()
+                        _record_sync_job_event(
+                            job,
+                            CloudAssetSyncJobEvent.TYPE_CANCEL,
+                            '同步任务收到取消请求',
+                            payload={'progress_current': completed_tasks, 'progress_total': len(sync_tasks)},
+                            worker_id=job.worker_id,
+                        )
+                        cancel_after_task = True
+                if cancel_after_task:
+                    break
     synced['reconcile'] = True
     logger.info('CLOUD_SYNC_RECONCILE_SKIPPED run_id=%s reason=cloud_asset_is_canonical', sync_run_id)
-    ok = not errors or synced['aliyun'] or synced['aws']
+    ok = (not cancelled) and (not errors or synced['aliyun'] or synced['aws'])
     response_payload = {
         'ok': ok,
         'synced': synced,
@@ -4503,6 +4730,7 @@ def _run_cloud_assets_sync(payload, *, sync_run_id: str | None = None, job: Clou
         'logs': _sync_log_tail(command_output),
         'tasks': task_results,
         'skipped_tasks': skipped_tasks,
+        'cancelled': cancelled,
         'accounts': {'aliyun': [_sync_account_payload(account) for account in aliyun_accounts], 'aws': [_sync_account_payload(account) for account in aws_accounts]},
     }
     logger.info(
@@ -4571,6 +4799,11 @@ def _cloud_asset_sync_job_payload(job: CloudAssetSyncJob) -> dict:
     progress_total = int(job.progress_total or 0)
     progress_current = int(job.progress_current or 0)
     progress_percent = 100 if job.is_terminal else (round(progress_current * 100 / progress_total) if progress_total else 0)
+    events = [
+        _sync_job_event_payload(event)
+        for event in CloudAssetSyncJobEvent.objects.filter(job_id=job.id).order_by('-created_at', '-id')[:80]
+    ]
+    events.reverse()
     payload = {
         'id': job.id,
         'job_id': job.id,
@@ -4589,10 +4822,17 @@ def _cloud_asset_sync_job_payload(job: CloudAssetSyncJob) -> dict:
         'errors': job.errors or result_payload.get('errors') or [],
         'warnings': job.warnings or result_payload.get('warnings') or [],
         'logs': job.logs or result_payload.get('logs') or [],
+        'events': events,
         'tasks': result_payload.get('tasks') or [],
         'skipped_tasks': result_payload.get('skipped_tasks') or [],
         'result': result_payload,
-        'ok': result_payload.get('ok') if result_payload else job.status not in {CloudAssetSyncJob.STATUS_FAILED},
+        'cancelled': bool(job.cancel_requested_at) or job.status == CloudAssetSyncJob.STATUS_CANCELLED or bool(result_payload.get('cancelled')),
+        'can_cancel': job.status in {CloudAssetSyncJob.STATUS_QUEUED, CloudAssetSyncJob.STATUS_RUNNING} and not job.cancel_requested_at,
+        'worker_id': job.worker_id or '',
+        'worker_heartbeat_at': _iso(job.worker_heartbeat_at),
+        'cancel_requested_at': _iso(job.cancel_requested_at),
+        'cancel_requested_by_id': job.cancel_requested_by_id,
+        'ok': result_payload.get('ok') if result_payload else job.status not in {CloudAssetSyncJob.STATUS_FAILED, CloudAssetSyncJob.STATUS_CANCELLED},
         'created_at': _iso(job.created_at),
         'started_at': _iso(job.started_at),
         'finished_at': _iso(job.finished_at),
@@ -4604,35 +4844,82 @@ def _cloud_asset_sync_job_payload(job: CloudAssetSyncJob) -> dict:
 
 def _execute_cloud_asset_sync_job(job_or_id):
     job = job_or_id if isinstance(job_or_id, CloudAssetSyncJob) else CloudAssetSyncJob.objects.get(pk=job_or_id)
+    job.refresh_from_db()
+    if job.status == CloudAssetSyncJob.STATUS_CANCELLED:
+        _record_sync_job_event(
+            job,
+            CloudAssetSyncJobEvent.TYPE_CANCEL,
+            '任务已取消，worker 跳过执行',
+            payload={'run_id': job.run_id},
+            status_from=job.status,
+            status_to=job.status,
+            worker_id=job.worker_id,
+        )
+        return job
     started_at = timezone.now()
+    previous_status = job.status
     CloudAssetSyncJob.objects.filter(pk=job.pk).update(
         status=CloudAssetSyncJob.STATUS_RUNNING,
         started_at=started_at,
+        worker_heartbeat_at=started_at,
         current_task='开始同步云资产',
         updated_at=started_at,
+    )
+    _record_sync_job_event(
+        job,
+        CloudAssetSyncJobEvent.TYPE_STATUS,
+        '开始同步云资产',
+        payload={'run_id': job.run_id, 'request_payload': job.request_payload or {}},
+        status_from=previous_status,
+        status_to=CloudAssetSyncJob.STATUS_RUNNING,
+        worker_id=job.worker_id,
     )
     job.refresh_from_db()
     try:
         result_payload = _run_cloud_assets_sync(job.request_payload or {}, sync_run_id=job.run_id, job=job)
         errors = result_payload.get('errors') or []
         warnings = result_payload.get('warnings') or []
-        if result_payload.get('ok') and not errors:
+        if result_payload.get('cancelled') or _sync_job_cancel_requested(job):
+            status = CloudAssetSyncJob.STATUS_CANCELLED
+        elif result_payload.get('ok') and not errors:
             status = CloudAssetSyncJob.STATUS_SUCCEEDED
         elif result_payload.get('ok'):
             status = CloudAssetSyncJob.STATUS_PARTIAL
         else:
             status = CloudAssetSyncJob.STATUS_FAILED
         finished_at = timezone.now()
+        current_task = (
+            '同步已取消'
+            if status == CloudAssetSyncJob.STATUS_CANCELLED
+            else ('同步完成' if status != CloudAssetSyncJob.STATUS_FAILED else '同步失败')
+        )
         CloudAssetSyncJob.objects.filter(pk=job.pk).update(
             status=status,
             progress_current=F('progress_total'),
-            current_task='同步完成' if status != CloudAssetSyncJob.STATUS_FAILED else '同步失败',
+            current_task=current_task,
             errors=errors[:50],
             warnings=warnings[:50],
             logs=result_payload.get('logs') or [],
             result_payload=result_payload,
             finished_at=finished_at,
             updated_at=finished_at,
+        )
+        _record_sync_job_event(
+            job,
+            CloudAssetSyncJobEvent.TYPE_STATUS,
+            current_task,
+            payload={
+                'status': status,
+                'errors': errors[:50],
+                'warnings': warnings[:50],
+                'tasks': result_payload.get('tasks') or [],
+                'skipped_tasks': result_payload.get('skipped_tasks') or [],
+                'cancelled': bool(result_payload.get('cancelled')),
+            },
+            status_from=CloudAssetSyncJob.STATUS_RUNNING,
+            status_to=status,
+            worker_id=job.worker_id,
+            log_level=logging.WARNING if status in {CloudAssetSyncJob.STATUS_FAILED, CloudAssetSyncJob.STATUS_CANCELLED} else logging.INFO,
         )
     except Exception as exc:
         finished_at = timezone.now()
@@ -4643,6 +4930,16 @@ def _execute_cloud_asset_sync_job(job_or_id):
             errors=[str(exc)],
             finished_at=finished_at,
             updated_at=finished_at,
+        )
+        _record_sync_job_event(
+            job,
+            CloudAssetSyncJobEvent.TYPE_ERROR,
+            '同步异常退出',
+            payload={'error': str(exc)},
+            status_from=CloudAssetSyncJob.STATUS_RUNNING,
+            status_to=CloudAssetSyncJob.STATUS_FAILED,
+            worker_id=job.worker_id,
+            log_level=logging.ERROR,
         )
     job.refresh_from_db()
     return job
@@ -4667,6 +4964,15 @@ def sync_cloud_assets(request):
         current_task='已加入同步队列',
     )
     logger.info('CLOUD_SYNC_JOB_QUEUED job_id=%s run_id=%s scope=%s payload=%s', job.id, job.run_id, scope, payload)
+    _record_sync_job_event(
+        job,
+        CloudAssetSyncJobEvent.TYPE_QUEUED,
+        '同步任务已入队',
+        payload={'scope': scope, 'request_payload': payload},
+        status_from='',
+        status_to=CloudAssetSyncJob.STATUS_QUEUED,
+        actor=requested_by,
+    )
     return _ok({
         'ok': True,
         'queued': True,
@@ -4687,8 +4993,16 @@ def sync_cloud_assets(request):
 def cloud_asset_sync_jobs_list(request):
     queryset = CloudAssetSyncJob.objects.order_by('-created_at', '-id')
     status = str(request.GET.get('status') or '').strip()
+    failed_only = str(request.GET.get('failed_only') or '').strip().lower() in {'1', 'true', 'yes', 'on'}
+    if failed_only:
+        queryset = queryset.filter(status__in=[CloudAssetSyncJob.STATUS_FAILED, CloudAssetSyncJob.STATUS_PARTIAL])
+    elif status == 'active':
+        queryset = queryset.filter(status__in=[CloudAssetSyncJob.STATUS_QUEUED, CloudAssetSyncJob.STATUS_RUNNING])
+    elif status == 'terminal':
+        queryset = queryset.filter(status__in=CloudAssetSyncJob.TERMINAL_STATUSES)
     if status:
-        queryset = queryset.filter(status=status)
+        if status not in {'active', 'terminal'}:
+            queryset = queryset.filter(status=status)
     page, page_size = _parse_dashboard_page(request, default_size=20, min_size=1, max_size=100)
     total = queryset.count()
     total_pages = max((total + page_size - 1) // page_size, 1)
@@ -4735,6 +5049,22 @@ def retry_cloud_asset_sync_job(request, job_id: int):
         current_task='重试任务已加入同步队列',
     )
     logger.info('CLOUD_SYNC_JOB_RETRY_QUEUED source_job_id=%s job_id=%s run_id=%s scope=%s', source_job.id, job.id, job.run_id, job.scope)
+    _record_sync_job_event(
+        source_job,
+        CloudAssetSyncJobEvent.TYPE_RETRY,
+        '已创建重试任务',
+        payload={'retry_job_id': job.id, 'retry_run_id': job.run_id},
+        actor=requested_by,
+    )
+    _record_sync_job_event(
+        job,
+        CloudAssetSyncJobEvent.TYPE_QUEUED,
+        '重试任务已入队',
+        payload={'retry_of_job_id': source_job.id, 'scope': job.scope},
+        status_from='',
+        status_to=CloudAssetSyncJob.STATUS_QUEUED,
+        actor=requested_by,
+    )
     return _ok({
         'ok': True,
         'queued': True,
@@ -4743,6 +5073,64 @@ def retry_cloud_asset_sync_job(request, job_id: int):
         'status': job.status,
         'message': '同步重试已加入后台队列',
         'job': _cloud_asset_sync_job_payload(job),
+    })
+
+
+@csrf_exempt
+@dashboard_superuser_required
+@require_POST
+def cancel_cloud_asset_sync_job(request, job_id: int):
+    job = CloudAssetSyncJob.objects.filter(pk=job_id).first()
+    if not job:
+        return _error('同步任务不存在', status=404)
+    if job.is_terminal:
+        return _error('任务已结束，不能取消', status=400)
+    actor = request.user if getattr(request.user, 'is_authenticated', False) else None
+    now = timezone.now()
+    if job.status == CloudAssetSyncJob.STATUS_QUEUED:
+        CloudAssetSyncJob.objects.filter(pk=job.pk).update(
+            status=CloudAssetSyncJob.STATUS_CANCELLED,
+            cancel_requested_at=now,
+            cancel_requested_by=actor,
+            current_task='任务已取消',
+            finished_at=now,
+            updated_at=now,
+        )
+        _record_sync_job_event(
+            job,
+            CloudAssetSyncJobEvent.TYPE_CANCEL,
+            '排队任务已取消',
+            payload={'previous_status': job.status},
+            status_from=job.status,
+            status_to=CloudAssetSyncJob.STATUS_CANCELLED,
+            actor=actor,
+            log_level=logging.WARNING,
+        )
+    else:
+        CloudAssetSyncJob.objects.filter(pk=job.pk).update(
+            cancel_requested_at=now,
+            cancel_requested_by=actor,
+            current_task='取消请求已提交，等待当前子任务结束',
+            updated_at=now,
+        )
+        _record_sync_job_event(
+            job,
+            CloudAssetSyncJobEvent.TYPE_CANCEL,
+            '运行中任务收到取消请求',
+            payload={'previous_status': job.status, 'progress_current': job.progress_current, 'progress_total': job.progress_total},
+            status_from=job.status,
+            status_to=job.status,
+            worker_id=job.worker_id,
+            actor=actor,
+            log_level=logging.WARNING,
+        )
+    job.refresh_from_db()
+    logger.warning('CLOUD_SYNC_JOB_CANCEL_REQUESTED job_id=%s run_id=%s status=%s actor_id=%s', job.id, job.run_id, job.status, getattr(actor, 'id', None))
+    return _ok({
+        'ok': True,
+        'cancelled': job.status == CloudAssetSyncJob.STATUS_CANCELLED,
+        'job': _cloud_asset_sync_job_payload(job),
+        'message': '同步任务已取消' if job.status == CloudAssetSyncJob.STATUS_CANCELLED else '取消请求已提交',
     })
 
 
@@ -5021,6 +5409,7 @@ __all__ = [
     'cloud_assets_risk_summary',
     'cloud_asset_sync_jobs_list',
     'cloud_asset_sync_job_detail',
+    'cancel_cloud_asset_sync_job',
     'retry_cloud_asset_sync_job',
     'cloud_assets_sync_status',
     'sync_cloud_asset_status',

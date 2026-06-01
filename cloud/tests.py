@@ -19,7 +19,7 @@ from django.utils.dateparse import parse_datetime
 from bot.api import _shutdown_log_items, _unattached_ip_delete_items, lifecycle_plans, refresh_lifecycle_plan_table, update_lifecycle_plan_note
 from bot.models import TelegramGroupFilter, TelegramUser
 from cloud.bootstrap import _build_mtproxy_script, _extract_tg_links
-from cloud.models import CloudAsset, CloudAssetDashboardSnapshot, CloudAssetSyncJob, CloudAutoRenewPatrolLog, CloudAutoRenewRetryTask, CloudIpLog, CloudLifecyclePlan, CloudLifecyclePlanNote, CloudNoticePlan, CloudServerOrder, CloudServerPlan, CloudUserNoticeLog, DailyAddressStat
+from cloud.models import CloudAsset, CloudAssetDashboardSnapshot, CloudAssetSyncJob, CloudAssetSyncJobEvent, CloudAutoRenewPatrolLog, CloudAutoRenewRetryTask, CloudIpLog, CloudLifecyclePlan, CloudLifecyclePlanNote, CloudNoticePlan, CloudServerOrder, CloudServerPlan, CloudUserNoticeLog, DailyAddressStat
 from cloud.server_records import Server
 from cloud.lifecycle import _apply_notice_schedule_to_order, _auto_renew_candidate_users, _enqueue_auto_renew_retry, _get_due_orders, _get_migration_due_orders, _get_orphan_asset_delete_due, _get_unattached_static_ip_delete_due, _group_balance_lines_for_orders, _is_cloud_delete_safe_time, _is_cloud_suspend_time, _mark_deleted, _mark_suspended, _next_cloud_action_run_at, _notice_plan_text, _process_auto_renew_retry_tasks, _run_auto_renew, _send_logged_cloud_notice, _send_order_notice_batch, auto_renew_patrol_tick, daily_expiry_summary_tick, lifecycle_tick, sync_server_status_tick
 from cloud.note_utils import append_status_note
@@ -43,7 +43,7 @@ from cloud.provisioning import (
 )
 from cloud.services import _cloud_asset_deleted_or_missing, apply_cloud_server_renewal, create_cloud_server_order, create_cloud_server_rebuild_order, create_cloud_server_renewal, create_cloud_server_renewal_by_public_query, create_cloud_server_renewal_for_user, create_cloud_server_upgrade_order, ensure_cloud_asset_operation_order, get_cloud_server_by_ip, get_cloud_server_by_ip_for_user, get_group_proxy_asset_detail, get_proxy_asset_by_ip_for_admin, get_proxy_asset_by_ip_for_user, get_user_proxy_asset_detail, list_all_auto_renew_cloud_servers, list_cloud_asset_renewal_plans, list_cloud_server_upgrade_plans, list_group_cloud_servers, list_retained_ip_renewal_plans, list_retained_ip_renewal_plans_by_asset, list_user_cloud_servers, mark_cloud_server_ip_change_requested, mark_cloud_server_reinit_requested, pay_cloud_server_order_with_balance, pay_cloud_server_renewal_with_balance, prepare_cloud_asset_renewal_with_link, prepare_retained_ip_renewal_with_link, rebind_cloud_server_user, record_cloud_ip_log, replace_cloud_asset_order_by_admin, run_cloud_server_renewal_postcheck, set_cloud_server_auto_renew_admin, set_group_cloud_server_auto_renew, sync_cloud_asset_user_binding
 from cloud.sync_safety import get_missing_confirmation_threshold
-from cloud.api import _apply_server_missing_state, _cloud_order_source_tags, _display_cloud_asset_note, _execute_cloud_asset_sync_job, _fetch_address_chain_balances, auto_renew_task_detail, cloud_asset_sync_job_detail, cloud_asset_sync_jobs_list, cloud_assets_list, cloud_order_detail, cloud_orders_list, delete_cloud_asset, delete_cloud_order, delete_notice_history, delete_server, notice_task_detail, refresh_cloud_asset_dashboard_snapshots, refresh_notice_plan_table, retry_cloud_asset_sync_job, run_auto_renew_order, run_auto_renew_tasks, servers_list, sync_cloud_asset_status, sync_cloud_assets, tasks_overview, update_cloud_asset, update_cloud_order_status, update_notice_plan_text, update_notice_switches
+from cloud.api import _apply_server_missing_state, _cloud_order_source_tags, _display_cloud_asset_note, _execute_cloud_asset_sync_job, _fetch_address_chain_balances, auto_renew_task_detail, cancel_cloud_asset_sync_job, cloud_asset_sync_job_detail, cloud_asset_sync_jobs_list, cloud_assets_list, cloud_order_detail, cloud_orders_list, delete_cloud_asset, delete_cloud_order, delete_notice_history, delete_server, notice_task_detail, refresh_cloud_asset_dashboard_snapshots, refresh_notice_plan_table, retry_cloud_asset_sync_job, run_auto_renew_order, run_auto_renew_tasks, servers_list, sync_cloud_asset_status, sync_cloud_assets, tasks_overview, update_cloud_asset, update_cloud_order_status, update_notice_plan_text, update_notice_switches
 from core.cloud_accounts import cloud_account_label, cloud_account_label_variants, list_cloud_accounts_by_server_load
 from core.models import CloudAccountConfig, SiteConfig
 from core.persistence import bump_daily_address_stat
@@ -6361,6 +6361,7 @@ class CloudServerServicesTestCase(TestCase):
         job = CloudAssetSyncJob.objects.get(pk=payload['job_id'])
         self.assertEqual(job.status, CloudAssetSyncJob.STATUS_QUEUED)
         self.assertEqual(job.current_task, '已加入同步队列')
+        self.assertTrue(CloudAssetSyncJobEvent.objects.filter(job_id=job.id, event_type=CloudAssetSyncJobEvent.TYPE_QUEUED).exists())
         with patch('cloud.api._call_command_capture_threaded', side_effect=fake_call_command), \
             patch('cloud.api._refresh_dashboard_plan_snapshots_deferred'):
             job = _execute_cloud_asset_sync_job(job)
@@ -6372,6 +6373,8 @@ class CloudServerServicesTestCase(TestCase):
         self.assertEqual(job.current_task, '同步完成')
         self.assertIsNotNone(job.started_at)
         self.assertIsNotNone(job.finished_at)
+        self.assertTrue(CloudAssetSyncJobEvent.objects.filter(job_id=job.id, event_type=CloudAssetSyncJobEvent.TYPE_PROGRESS).exists())
+        self.assertTrue(CloudAssetSyncJobEvent.objects.filter(job_id=job.id, event_type=CloudAssetSyncJobEvent.TYPE_LOG).exists())
         self.assertTrue(result['ok'])
         self.assertTrue(result['synced']['aliyun'])
         self.assertTrue(result['synced']['aws'])
@@ -6387,6 +6390,7 @@ class CloudServerServicesTestCase(TestCase):
         self.assertEqual(detail_payload['status'], CloudAssetSyncJob.STATUS_SUCCEEDED)
         self.assertEqual(detail_payload['progress_percent'], 100)
         self.assertEqual(detail_payload['current_task'], '同步完成')
+        self.assertTrue(detail_payload['events'])
         self.assertEqual({task['provider'] for task in detail_payload['tasks']}, {'aliyun', 'aws'})
 
         list_request = RequestFactory().get('/api/dashboard/cloud-assets/sync-jobs/')
@@ -6403,6 +6407,28 @@ class CloudServerServicesTestCase(TestCase):
         self.assertEqual(retry_response.status_code, 200)
         self.assertTrue(retry_payload['queued'])
         self.assertEqual(CloudAssetSyncJob.objects.get(pk=retry_payload['job_id']).scope['retry_of_job_id'], job.id)
+        self.assertTrue(CloudAssetSyncJobEvent.objects.filter(job_id=job.id, event_type=CloudAssetSyncJobEvent.TYPE_RETRY).exists())
+
+    def test_cancel_queued_cloud_asset_sync_job_marks_terminal_and_events(self):
+        staff_user = get_user_model().objects.create_user(username='staff_cancel_sync_job', password='x', is_staff=True, is_superuser=True)
+        request = RequestFactory().post('/api/dashboard/cloud-assets/sync/', data='{}', content_type='application/json')
+        request = self._attach_bearer_session(request, staff_user)
+        response = sync_cloud_assets(request)
+        payload = json.loads(response.content)['data']
+        job = CloudAssetSyncJob.objects.get(pk=payload['job_id'])
+
+        cancel_request = RequestFactory().post(f'/api/dashboard/cloud-assets/sync-jobs/{job.id}/cancel/', data='{}', content_type='application/json')
+        cancel_request = self._attach_bearer_session(cancel_request, staff_user)
+        cancel_response = cancel_cloud_asset_sync_job(cancel_request, job.id)
+        cancel_payload = json.loads(cancel_response.content)['data']
+
+        self.assertEqual(cancel_response.status_code, 200)
+        self.assertTrue(cancel_payload['cancelled'])
+        job.refresh_from_db()
+        self.assertEqual(job.status, CloudAssetSyncJob.STATUS_CANCELLED)
+        self.assertIsNotNone(job.cancel_requested_at)
+        self.assertEqual(job.cancel_requested_by, staff_user)
+        self.assertTrue(CloudAssetSyncJobEvent.objects.filter(job_id=job.id, event_type=CloudAssetSyncJobEvent.TYPE_CANCEL).exists())
 
     def test_sync_cloud_assets_with_selected_assets_uses_asset_scoped_tasks(self):
         account = CloudAccountConfig.objects.create(
@@ -6535,8 +6561,12 @@ class CloudServerServicesTestCase(TestCase):
         self.assertEqual(job.status, CloudAssetSyncJob.STATUS_SUCCEEDED)
         self.assertEqual(job.progress_current, job.progress_total)
         self.assertEqual(job.current_task, '同步完成')
+        self.assertEqual(job.worker_id, 'test-worker')
+        self.assertIsNotNone(job.worker_heartbeat_at)
         self.assertIsNotNone(job.started_at)
         self.assertIsNotNone(job.finished_at)
+        self.assertTrue(CloudAssetSyncJobEvent.objects.filter(job_id=job.id, event_type=CloudAssetSyncJobEvent.TYPE_CLAIMED, worker_id='test-worker').exists())
+        self.assertTrue(CloudAssetSyncJobEvent.objects.filter(job_id=job.id, event_type=CloudAssetSyncJobEvent.TYPE_HEARTBEAT, worker_id='test-worker').exists())
         self.assertEqual(len(calls), 1)
         self.assertEqual(calls[0][0], 'sync_aws_assets')
         self.assertEqual(calls[0][1]['asset_id'], str(asset.id))

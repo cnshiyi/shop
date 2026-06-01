@@ -405,14 +405,16 @@ class CloudAssetSyncJob(models.Model):
     STATUS_SUCCEEDED = 'succeeded'
     STATUS_PARTIAL = 'partial'
     STATUS_FAILED = 'failed'
+    STATUS_CANCELLED = 'cancelled'
     STATUS_CHOICES = (
         (STATUS_QUEUED, '排队中'),
         (STATUS_RUNNING, '运行中'),
         (STATUS_SUCCEEDED, '已完成'),
         (STATUS_PARTIAL, '部分完成'),
         (STATUS_FAILED, '失败'),
+        (STATUS_CANCELLED, '已取消'),
     )
-    TERMINAL_STATUSES = {STATUS_SUCCEEDED, STATUS_PARTIAL, STATUS_FAILED}
+    TERMINAL_STATUSES = {STATUS_SUCCEEDED, STATUS_PARTIAL, STATUS_FAILED, STATUS_CANCELLED}
 
     run_id = models.CharField('运行ID', max_length=32, unique=True, db_index=True)
     status = models.CharField('状态', max_length=32, choices=STATUS_CHOICES, default=STATUS_QUEUED, db_index=True)
@@ -429,6 +431,10 @@ class CloudAssetSyncJob(models.Model):
     warnings = models.JSONField('警告', default=list, blank=True)
     errors = models.JSONField('错误', default=list, blank=True)
     result_payload = models.JSONField('结果载荷', default=dict, blank=True)
+    worker_id = models.CharField('Worker ID', max_length=64, default='', blank=True, db_index=True)
+    worker_heartbeat_at = models.DateTimeField('Worker 心跳时间', blank=True, null=True, db_index=True)
+    cancel_requested_at = models.DateTimeField('取消请求时间', blank=True, null=True, db_index=True)
+    cancel_requested_by = models.ForeignKey(settings.AUTH_USER_MODEL, verbose_name='取消发起人', on_delete=models.SET_NULL, blank=True, null=True, related_name='cancelled_cloud_asset_sync_jobs')
     started_at = models.DateTimeField('开始时间', blank=True, null=True, db_index=True)
     finished_at = models.DateTimeField('结束时间', blank=True, null=True, db_index=True)
     created_at = models.DateTimeField('创建时间', auto_now_add=True, db_index=True)
@@ -442,6 +448,7 @@ class CloudAssetSyncJob(models.Model):
         indexes = [
             models.Index(fields=['status', 'created_at'], name='idx_cloud_sync_job_status'),
             models.Index(fields=['requested_by', 'created_at'], name='idx_cloud_sync_job_user'),
+            models.Index(fields=['status', 'worker_heartbeat_at'], name='idx_cloud_sync_job_heartbeat'),
         ]
 
     @property
@@ -450,6 +457,57 @@ class CloudAssetSyncJob(models.Model):
 
     def __str__(self):
         return f'cloud-asset-sync:{self.run_id}:{self.status}'
+
+
+class CloudAssetSyncJobEvent(models.Model):
+    TYPE_QUEUED = 'queued'
+    TYPE_CLAIMED = 'claimed'
+    TYPE_STATUS = 'status'
+    TYPE_PROGRESS = 'progress'
+    TYPE_TASK = 'task'
+    TYPE_WARNING = 'warning'
+    TYPE_ERROR = 'error'
+    TYPE_LOG = 'log'
+    TYPE_CANCEL = 'cancel'
+    TYPE_RETRY = 'retry'
+    TYPE_HEARTBEAT = 'heartbeat'
+    TYPE_CHOICES = (
+        (TYPE_QUEUED, '入队'),
+        (TYPE_CLAIMED, '领取'),
+        (TYPE_STATUS, '状态'),
+        (TYPE_PROGRESS, '进度'),
+        (TYPE_TASK, '任务'),
+        (TYPE_WARNING, '警告'),
+        (TYPE_ERROR, '错误'),
+        (TYPE_LOG, '日志'),
+        (TYPE_CANCEL, '取消'),
+        (TYPE_RETRY, '重试'),
+        (TYPE_HEARTBEAT, '心跳'),
+    )
+
+    job_id = models.BigIntegerField('同步任务ID', db_index=True)
+    event_type = models.CharField('事件类型', max_length=32, choices=TYPE_CHOICES, db_index=True)
+    status_from = models.CharField('原状态', max_length=32, default='', blank=True)
+    status_to = models.CharField('新状态', max_length=32, default='', blank=True, db_index=True)
+    message = models.CharField('事件摘要', max_length=255, default='', blank=True)
+    payload = models.JSONField('事件载荷', default=dict, blank=True)
+    worker_id = models.CharField('Worker ID', max_length=64, default='', blank=True, db_index=True)
+    actor = models.ForeignKey(settings.AUTH_USER_MODEL, verbose_name='操作人', on_delete=models.SET_NULL, blank=True, null=True, related_name='cloud_asset_sync_job_events')
+    created_at = models.DateTimeField('创建时间', auto_now_add=True, db_index=True)
+
+    class Meta:
+        db_table = 'cloud_asset_sync_job_event'
+        verbose_name = '云资产同步任务事件'
+        verbose_name_plural = '云资产同步任务事件'
+        ordering = ['created_at', 'id']
+        indexes = [
+            models.Index(fields=['job_id', 'created_at'], name='idx_cloud_sync_event_job_time'),
+            models.Index(fields=['event_type', 'created_at'], name='idx_cloud_sync_event_type_time'),
+            models.Index(fields=['worker_id', 'created_at'], name='idx_cloud_sync_event_worker'),
+        ]
+
+    def __str__(self):
+        return f'cloud-asset-sync-event:{self.job_id}:{self.event_type}'
 
 
 class CloudIpLog(models.Model):
