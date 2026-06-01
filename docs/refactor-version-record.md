@@ -331,3 +331,30 @@ Passed locally:
 uv run python -m py_compile bot/api.py bot/api_operation_logs.py
 uv run python manage.py check
 ```
+
+## 2026-06-01 bot-telegram-api-split
+
+### Scope
+
+Eleventh refactor pass moved Telegram dashboard login, chat, message, and group-filter endpoints out of `bot/api.py`.
+
+### Runtime Changes
+
+- Added `bot/api_telegram.py` for:
+  - Telegram account overview
+  - personal account login/code/password/status flows
+  - account notification toggles
+  - group filter list/detail/create/update
+  - chat message send/archive/list
+  - Telegram payload and validation helpers
+- Preserved compatibility exports from `bot/api.py` for moved public views and private helper names.
+- Removed Telegram-specific model/service imports from `bot/api.py`.
+
+### Verification
+
+Passed locally:
+
+```bash
+uv run python -m py_compile bot/api.py bot/api_telegram.py
+uv run python manage.py check
+```
