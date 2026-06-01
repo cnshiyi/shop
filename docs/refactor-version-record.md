@@ -553,6 +553,27 @@ uv run python -m py_compile cloud/aws_lightsail.py
 uv run python manage.py check
 ```
 
+## 2026-06-01 cache-redis-fallback-observability
+
+### Scope
+
+Twenty-fourth refactor pass made Redis daily-stat fallback paths observable without changing the local fallback behavior.
+
+### Runtime Changes
+
+- `core/cache.py` now logs debug entries when Redis daily-stat increment, read, or close operations fail.
+- The in-process fallback counters still run exactly as before when Redis is unavailable.
+
+### Verification
+
+Passed locally:
+
+```bash
+uv run python -m py_compile core/cache.py
+uv run python manage.py check
+git diff --check
+```
+
 ## 2026-06-01 dashboard-api-helper-extraction
 
 ### Scope

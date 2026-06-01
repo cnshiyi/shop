@@ -130,8 +130,8 @@ async def bump_daily_stats(*parts, amount: int | None = None) -> int:
     if redis_client is not None:
         try:
             return int(await redis_client.hincrby(redis_key, key, amount))
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.debug('REDIS_DAILY_STATS_INCREMENT_FAILED key=%s amount=%s error=%s', key, amount, exc)
     async with _daily_stats_lock:
         current = int(_daily_stats[today].get(key, 0) or 0) + amount
         _daily_stats[today][key] = current
@@ -146,8 +146,8 @@ async def get_daily_stats(key: str, default: int = 0) -> int:
         try:
             value = await redis_client.hget(redis_key, key)
             return int(value or default)
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.debug('REDIS_DAILY_STATS_READ_FAILED key=%s default=%s error=%s', key, default, exc)
     async with _daily_stats_lock:
         return int(_daily_stats[today].get(key, default) or default)
 
@@ -157,8 +157,8 @@ async def close():
     if _redis is not None:
         try:
             await _redis.close()
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.debug('REDIS_CLOSE_FAILED error=%s', exc)
         _redis = None
 
 
