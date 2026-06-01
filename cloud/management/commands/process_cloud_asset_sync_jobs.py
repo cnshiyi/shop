@@ -12,8 +12,9 @@ from cloud.models import CloudAssetSyncJob, CloudAssetSyncJobEvent
 logger = logging.getLogger(__name__)
 
 
+# 功能：提供 云资产、云订单和生命周期 的内部辅助逻辑，供同模块流程复用。
 def _claim_next_job(worker_id: str):
-    from cloud.api import _record_sync_job_event
+    from cloud.sync_jobs import _record_sync_job_event
 
     while True:
         job_id = (
@@ -51,8 +52,9 @@ def _claim_next_job(worker_id: str):
             return job
 
 
+# 功能：提供 云资产、云订单和生命周期 的内部辅助逻辑，供同模块流程复用。
 def _recover_stale_running_jobs(stale_minutes: int):
-    from cloud.api import _record_sync_job_event
+    from cloud.sync_jobs import _record_sync_job_event
 
     if stale_minutes <= 0:
         return 0
@@ -93,9 +95,11 @@ def _recover_stale_running_jobs(stale_minutes: int):
     return recovered
 
 
+# 命令类：封装 云资产、云订单和生命周期 的 Django 管理命令。
 class Command(BaseCommand):
     help = '处理云资产后台同步任务队列'
 
+    # 功能：处理 云资产、云订单和生命周期 中的 add arguments 业务流程。
     def add_arguments(self, parser):
         parser.add_argument('--once', action='store_true', help='只处理当前队列后退出')
         parser.add_argument('--poll-interval', type=float, default=2.0, help='无任务时轮询间隔秒数')
@@ -103,8 +107,9 @@ class Command(BaseCommand):
         parser.add_argument('--stale-running-minutes', type=int, default=90, help='运行中超过该分钟数的任务重新入队；0 表示关闭')
         parser.add_argument('--worker-id', default='', help='自定义 worker 标识')
 
+    # 功能：执行 Django 管理命令的主流程。
     def handle(self, *args, **options):
-        from cloud.api import _execute_cloud_asset_sync_job, _heartbeat_sync_job, _record_sync_job_event
+        from cloud.sync_jobs import _execute_cloud_asset_sync_job, _heartbeat_sync_job, _record_sync_job_event
 
         once = bool(options.get('once'))
         poll_interval = max(float(options.get('poll_interval') or 2.0), 0.1)

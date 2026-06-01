@@ -147,11 +147,20 @@ uv run python -m py_compile bot/api.py bot/handlers.py cloud/services.py cloud/b
 云同步相关：
 
 ```bash
-uv run python -m py_compile cloud/management/commands/sync_aws_assets.py cloud/management/commands/sync_aliyun_assets.py cloud/management/commands/reconcile_cloud_assets_from_servers.py cloud/management/commands/process_cloud_asset_sync_jobs.py
+uv run python -m py_compile cloud/sync_jobs.py cloud/management/commands/sync_aws_assets.py cloud/management/commands/sync_aliyun_assets.py cloud/management/commands/reconcile_cloud_assets_from_servers.py cloud/management/commands/process_cloud_asset_sync_jobs.py cloud/management/commands/prune_cloud_sync_job_events.py
 uv run python manage.py sync_aws_assets --region ap-southeast-1
 uv run python manage.py sync_aliyun_assets --region cn-hongkong
 uv run python manage.py process_cloud_asset_sync_jobs --once
+uv run python manage.py prune_cloud_sync_job_events --days 90 --keep-per-job 500 --dry-run
 ```
+
+云资产同步后台实现已经从 `cloud/api.py` 拆到 `cloud/sync_jobs.py`：
+
+- `cloud/api.py`：保留代理列表、单条代理状态更新、云订单、套餐、生命周期等后台 API，并 re-export 同步任务入口以兼容现有 URL 聚合。
+- `cloud/sync_jobs.py`：负责同步任务入队、worker 执行、任务事件、任务取消/重试、同步状态、同步任务指标 API。
+- 批量同步任务按账号/选中资产串行执行，不再在线程池里并发写任务状态；每个子任务完成后检查取消请求，保证状态推进和事件顺序可读。
+- `CloudAssetSyncJobEvent` 事件表通过 `job_id` 标量索引关联任务，不加外键；生产环境用 `prune_cloud_sync_job_events` 定期清理。
+- 后台路由新增 `GET /api/admin/cloud-assets/sync-jobs/metrics/`（同一聚合路由也挂在 `/api/dashboard/` 和 `/api/` 前缀下），前端代理列表抽屉和同步任务详情页读取这份指标。
 
 如果用户反馈“没生效”，优先检查：
 

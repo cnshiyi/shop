@@ -6,7 +6,6 @@ import json
 import logging
 import re
 import uuid
-from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import timezone as dt_timezone
 from decimal import Decimal
 
@@ -14,9 +13,7 @@ import httpx
 from urllib.parse import urlparse
 
 from asgiref.sync import async_to_sync
-from django.core.cache import cache
-from django.core.management import get_commands, load_command_class
-from django.db import IntegrityError, close_old_connections, transaction
+from django.db import IntegrityError, transaction
 from django.db.models import Case, CharField, Count, F, IntegerField, Min, Q, Value, When
 from django.db.models.functions import Cast
 from django.db.utils import OperationalError, ProgrammingError
@@ -33,49 +30,52 @@ from cloud.asset_queries import cloud_assets_base_queryset, dedupe_cloud_asset_r
 from cloud.dashboard_api_helpers import _dashboard_expiry_ordering, _dashboard_sort_direction, _generate_cloud_plan_config_id, _preserve_link_status_label, _preserve_link_status_with_countdown
 from cloud.dashboard_snapshots import _refresh_dashboard_plan_snapshots, _refresh_dashboard_plan_snapshots_deferred, _refresh_lifecycle_plan_snapshot
 from cloud.services import AWS_REGION_NAMES, RenewalPriceMissingError, _renewal_price, _update_order_primary_records, create_cloud_server_rebuild_order, drop_asset_note_update, ensure_cloud_asset_operation_order, ensure_cloud_server_pricing, ensure_manual_expiry_operation_order, ensure_manual_owner_operation_order, ensure_manual_price_operation_order, record_cloud_ip_log, refresh_custom_plan_cache, replace_cloud_asset_order_by_admin, set_cloud_server_auto_renew_admin, sync_cloud_asset_user_binding
-from cloud.models import AddressMonitor, CloudAsset, CloudAssetDashboardSnapshot, CloudAssetSyncJob, CloudAssetSyncJobEvent, CloudAutoRenewPatrolLog, CloudAutoRenewPlan, CloudIpLog, CloudNoticePlan, CloudServerOrder, CloudServerPlan, CloudUserNoticeLog, ServerPrice
+from cloud.models import AddressMonitor, CloudAsset, CloudAssetDashboardSnapshot, CloudAutoRenewPatrolLog, CloudAutoRenewPlan, CloudIpLog, CloudNoticePlan, CloudServerOrder, CloudServerPlan, CloudUserNoticeLog, ServerPrice
 from cloud.note_utils import append_note, prepend_note
 from core.cloud_accounts import cloud_account_label, cloud_account_label_variants, list_cloud_account_labels
 from core.dashboard_api import _apply_keyword_filter, _countdown_label, _days_left, _decimal_to_str, _error, _get_keyword, _iso, _ok, _parse_decimal, _provider_label, _provider_status_label, _read_payload, _region_label, _server_source_label, _split_usernames, _status_label, _user_payload, dashboard_login_required, dashboard_superuser_required
 from core.models import CloudAccountConfig, ExternalSyncLog, SiteConfig
 from core.cache import get_redis
-from core.persistence import record_external_sync_log
-from core.runtime_config import get_cloud_asset_sync_interval_seconds, get_runtime_config
+from core.runtime_config import get_runtime_config
 from core.trongrid import build_trongrid_headers
 from cloud.provisioning import provision_cloud_server
+from cloud.sync_jobs import (  # noqa: E402
+    _active_sync_accounts,
+    _asset_retained_static_ip_sync_scope,
+    _call_command_capture,
+    _cloud_asset_sync_job_payload,
+    _execute_cloud_asset_sync_job,
+    _heartbeat_sync_job,
+    _log_sync_command_output,
+    _record_dashboard_sync_log,
+    _record_sync_job_event,
+    _resolve_sync_account_for_asset,
+    _sync_account_payload,
+    _sync_log_tail,
+    _sync_log_text,
+    _sync_provider_for_asset,
+    cancel_cloud_asset_sync_job,
+    cloud_asset_sync_jobs_metrics,
+    cloud_asset_sync_job_detail,
+    cloud_asset_sync_jobs_list,
+    cloud_assets_sync_status,
+    retry_cloud_asset_sync_job,
+    sync_cloud_assets,
+)
 
 logger = logging.getLogger(__name__)
-_SYNC_CONSOLE_LOG_MAX_CHARS = 50000
 
-
-class CapturedCommandError(RuntimeError):
-    def __init__(self, command_name: str, log_text: str, original_error: Exception):
-        super().__init__(str(original_error))
-        self.command_name = command_name
-        self.log_text = log_text
-        self.original_error = original_error
-
-
-def _trim_sync_console_log(log_text: str, *, limit: int = _SYNC_CONSOLE_LOG_MAX_CHARS) -> str:
-    text = str(log_text or '').strip()
-    if len(text) <= limit:
-        return text
-    return f'{text[-limit:]}\n... 同步日志过长，控制台仅显示最后 {limit} 字符'
-
-
-def _log_sync_command_output(tag: str, log_text: str, *, level: int = logging.INFO):
-    text = _trim_sync_console_log(log_text)
-    if text:
-        logger.log(level, '%s\n%s', tag, text)
 
 ADDRESS_BALANCE_CACHE_TTL = 60
 ADDRESS_BALANCE_CACHE_PREFIX = 'address_balance:'
 
 
+# 功能：提供 后台 API 接口 的内部辅助逻辑，供同模块流程复用。
 def _trongrid_headers_without_key(headers: dict | None) -> dict:
     return {key: value for key, value in dict(headers or {}).items() if key.lower() != 'tron-pro-api-key'}
 
 
+# 功能：提供 后台 API 接口 的内部辅助逻辑，供同模块流程复用。
 def _trongrid_sync_get_with_key_fallback(client: httpx.Client, url: str, headers: dict):
     resp = client.get(url, headers=headers)
     if resp.status_code == 401 and headers.get('TRON-PRO-API-KEY'):
@@ -83,6 +83,7 @@ def _trongrid_sync_get_with_key_fallback(client: httpx.Client, url: str, headers
     return resp
 
 
+# 功能：提供 后台 API 接口 的内部辅助逻辑，供同模块流程复用。
 def _fetch_address_chain_balances(address: str):
     cache_key = f'{ADDRESS_BALANCE_CACHE_PREFIX}{address}'
     redis_client = async_to_sync(get_redis)()
@@ -128,197 +129,17 @@ def _fetch_address_chain_balances(address: str):
         return None, None, str(exc)
 
 
-def _active_sync_accounts(provider: str):
-    return list(CloudAccountConfig.objects.filter(provider=provider, is_active=True).order_by('id'))
-
-
-def _sync_account_payload(account):
-    if not account:
-        return None
-    return {
-        'id': account.id,
-        'provider': account.provider,
-        'name': account.name,
-        'label': cloud_account_label(account),
-    }
-
-
-def _sync_log_tail(output: io.StringIO, limit: int = 80) -> list[str]:
-    lines = [line.strip() for line in output.getvalue().splitlines() if line.strip()]
-    return lines[-limit:]
-
-
-def _sync_log_text(output: io.StringIO, limit: int = 200) -> str:
-    return '\n'.join(_sync_log_tail(output, limit=limit))
-
-
-def _record_dashboard_sync_log(*, action: str, target: str, request_payload: dict, response_payload: dict, is_success: bool, error_message: str = ''):
-    try:
-        record_external_sync_log(
-            source=ExternalSyncLog.SOURCE_DASHBOARD,
-            action=action,
-            target=target,
-            request_payload=request_payload,
-            response_payload=response_payload,
-            is_success=is_success,
-            error_message=error_message,
-        )
-    except Exception:
-        logger.exception('DASHBOARD_SYNC_LOG_RECORD_FAILED action=%s target=%s', action, target)
-
-
-def _sync_job_event_payload(event: CloudAssetSyncJobEvent) -> dict:
-    return {
-        'id': event.id,
-        'event_type': event.event_type,
-        'event_type_label': dict(CloudAssetSyncJobEvent.TYPE_CHOICES).get(event.event_type, event.event_type),
-        'status_from': event.status_from or '',
-        'status_to': event.status_to or '',
-        'message': event.message or '',
-        'payload': event.payload or {},
-        'worker_id': event.worker_id or '',
-        'actor_id': event.actor_id,
-        'created_at': _iso(event.created_at),
-    }
-
-
-def _record_sync_job_event(
-    job_or_id,
-    event_type: str,
-    message: str = '',
-    *,
-    payload: dict | None = None,
-    status_from: str = '',
-    status_to: str = '',
-    worker_id: str = '',
-    actor=None,
-    log_level: int = logging.INFO,
-) -> CloudAssetSyncJobEvent | None:
-    job_id = job_or_id.pk if isinstance(job_or_id, CloudAssetSyncJob) else int(job_or_id)
-    payload = dict(payload or {})
-    try:
-        event = CloudAssetSyncJobEvent.objects.create(
-            job_id=job_id,
-            event_type=event_type,
-            status_from=status_from or '',
-            status_to=status_to or '',
-            message=str(message or '')[:255],
-            payload=payload,
-            worker_id=str(worker_id or '')[:64],
-            actor=actor if getattr(actor, 'is_authenticated', False) else None,
-        )
-        logger.log(
-            log_level,
-            'CLOUD_SYNC_JOB_EVENT job_id=%s event_type=%s status_from=%s status_to=%s worker_id=%s message=%s payload=%s',
-            job_id,
-            event_type,
-            status_from or '',
-            status_to or '',
-            worker_id or '',
-            message,
-            payload,
-        )
-        return event
-    except Exception:
-        logger.exception('CLOUD_SYNC_JOB_EVENT_RECORD_FAILED job_id=%s event_type=%s message=%s', job_id, event_type, message)
-        return None
-
-
-def _update_sync_job_status(job: CloudAssetSyncJob, status: str, current_task: str, *, event_type: str = CloudAssetSyncJobEvent.TYPE_STATUS, payload: dict | None = None, worker_id: str = '', actor=None, **updates):
-    previous_status = job.status
-    now = timezone.now()
-    update_payload = {
-        'status': status,
-        'current_task': current_task,
-        'updated_at': now,
-        **updates,
-    }
-    CloudAssetSyncJob.objects.filter(pk=job.pk).update(**update_payload)
-    _record_sync_job_event(
-        job,
-        event_type,
-        current_task,
-        payload=payload,
-        status_from=previous_status,
-        status_to=status,
-        worker_id=worker_id or getattr(job, 'worker_id', ''),
-        actor=actor,
-    )
-    job.status = status
-    job.current_task = current_task
-
-
-def _heartbeat_sync_job(job_or_id, *, worker_id: str = '', current_task: str = '', payload: dict | None = None, record_event: bool = False):
-    job_id = job_or_id.pk if isinstance(job_or_id, CloudAssetSyncJob) else int(job_or_id)
-    now = timezone.now()
-    updates = {
-        'worker_heartbeat_at': now,
-        'updated_at': now,
-    }
-    if worker_id:
-        updates['worker_id'] = str(worker_id)[:64]
-    if current_task:
-        updates['current_task'] = current_task[:255]
-    CloudAssetSyncJob.objects.filter(pk=job_id).update(**updates)
-    if record_event:
-        _record_sync_job_event(
-            job_id,
-            CloudAssetSyncJobEvent.TYPE_HEARTBEAT,
-            current_task or 'worker heartbeat',
-            payload=payload or {},
-            worker_id=worker_id,
-        )
-
-
-def _sync_job_cancel_requested(job_or_id) -> bool:
-    job_id = job_or_id.pk if isinstance(job_or_id, CloudAssetSyncJob) else int(job_or_id)
-    return CloudAssetSyncJob.objects.filter(pk=job_id, cancel_requested_at__isnull=False).exists()
-
-
-def _call_command_capture(command_name: str, *args, **options):
-    output = options.pop('stdout', None) or io.StringIO()
-    command = load_command_class(get_commands()[command_name], command_name)
-    defaults = {
-        'force_color': False,
-        'no_color': False,
-        'pythonpath': None,
-        'settings': None,
-        'skip_checks': True,
-        'stderr': io.StringIO(),
-        'traceback': False,
-        'verbosity': 1,
-    }
-    defaults.update(options)
-    command.execute(*args, stdout=output, **defaults)
-    return command, output.getvalue()
-
-
-def _call_command_capture_threaded(command_name: str, **options):
-    output = io.StringIO()
-    close_old_connections()
-    try:
-        command, log_text = _call_command_capture(command_name, stdout=output, **options)
-        return command, log_text
-    except Exception as exc:
-        log_text = output.getvalue()
-        _log_sync_command_output(
-            f'CLOUD_SYNC_COMMAND_FAILED command={command_name} options={{{", ".join(f"{key}={value}" for key, value in sorted(options.items()))}}}',
-            log_text,
-            level=logging.ERROR,
-        )
-        raise CapturedCommandError(command_name, log_text, exc) from exc
-    finally:
-        close_old_connections()
-
-
+# 功能：提供 后台 API 接口 的内部辅助逻辑，供同模块流程复用。
 def _is_unattached_ip_asset(asset: CloudAsset) -> bool:
     return '未附加' in str(asset.provider_status or '')
 
 
+# 功能：提供 后台 API 接口 的内部辅助逻辑，供同模块流程复用。
 def _unattached_ip_delete_due_at(*, now=None):
     return compute_unattached_ip_release_at(now or timezone.now())
 
 
+# 功能：提供 后台 API 接口 的内部辅助逻辑，供同模块流程复用。
 def _ensure_unattached_ip_expiry(asset: CloudAsset, *, now=None) -> bool:
     """未附加固定 IP 必须有计划删除时间；缺失时按系统配置补齐。"""
     if not _is_unattached_ip_asset(asset) or asset.actual_expires_at:
@@ -328,6 +149,7 @@ def _ensure_unattached_ip_expiry(asset: CloudAsset, *, now=None) -> bool:
     return True
 
 
+# 功能：提供 后台 API 接口 的内部辅助逻辑，供同模块流程复用。
 def _telegram_user_lookup_terms(value):
     raw = str(value or '').strip()
     if not raw:
@@ -335,6 +157,7 @@ def _telegram_user_lookup_terms(value):
 
     terms = []
 
+    # 功能：处理 后台 API 接口 中的 add 业务流程。
     def add(term):
         normalized = str(term or '').strip().strip('`"\'<>，,。；;：:').lstrip('@')
         if normalized and normalized not in terms:
@@ -355,6 +178,7 @@ def _telegram_user_lookup_terms(value):
     return terms
 
 
+# 功能：提供 后台 API 接口 的内部辅助逻辑，供同模块流程复用。
 def _username_matches(saved_value, lookup_value) -> bool:
     lookup_names = {item.lower() for item in TelegramUser.normalize_usernames(lookup_value)}
     if not lookup_names:
@@ -363,6 +187,7 @@ def _username_matches(saved_value, lookup_value) -> bool:
     return bool(saved_names & lookup_names)
 
 
+# 功能：提供 后台 API 接口 的内部辅助逻辑，供同模块流程复用。
 def _resolve_telegram_user(value):
     terms = _telegram_user_lookup_terms(value)
     if not terms:
@@ -396,6 +221,7 @@ def _resolve_telegram_user(value):
     return None
 
 
+# 功能：提供 后台 API 接口 的内部辅助逻辑，供同模块流程复用。
 def _parse_iso_datetime(value, field_label='时间'):
     raw = str(value or '').strip()
     if not raw:
@@ -412,6 +238,7 @@ def _parse_iso_datetime(value, field_label='时间'):
     return parsed
 
 
+# 功能：提供 后台 API 接口 的内部辅助逻辑，供同模块流程复用。
 def _sync_telegram_username(user, username=None):
     incoming = _split_usernames(username)
     if not incoming:
@@ -427,6 +254,7 @@ def _sync_telegram_username(user, username=None):
     user.save(update_fields=['username', 'updated_at'])
 
 
+# 功能：提供 后台 API 接口 的内部辅助逻辑，供同模块流程复用。
 def _infer_asset_order(asset):
     order = getattr(asset, 'order', None)
     if order:
@@ -474,7 +302,9 @@ def _infer_asset_order(asset):
     return None
 
 
+# 类型说明：封装 后台 API 接口 中 CloudAssetPayloadContext 相关的数据和行为。
 class CloudAssetPayloadContext:
+    # 功能：初始化对象状态和依赖。
     def __init__(self, *, active_account_labels=None, inferred_orders=None, allow_mutation=True, now=None):
         self.active_account_labels = set(active_account_labels or [])
         self.inferred_orders = inferred_orders or {}
@@ -482,6 +312,7 @@ class CloudAssetPayloadContext:
         self.now = now or timezone.now()
 
 
+# 功能：提供 后台 API 接口 的内部辅助逻辑，供同模块流程复用。
 def _asset_lookup_values(asset):
     names = {
         str(getattr(asset, 'asset_name', '') or '').strip(),
@@ -497,6 +328,7 @@ def _asset_lookup_values(asset):
     return names, ips
 
 
+# 功能：提供 后台 API 接口 的内部辅助逻辑，供同模块流程复用。
 def _asset_account_label_variants(asset):
     account = getattr(asset, 'cloud_account', None)
     labels = cloud_account_label_variants(account) if account else []
@@ -506,6 +338,7 @@ def _asset_account_label_variants(asset):
     return list(dict.fromkeys(label for label in labels if label))
 
 
+# 功能：提供 后台 API 接口 的内部辅助逻辑，供同模块流程复用。
 def _order_matches_asset_lookup(order, asset, account_labels) -> bool:
     provider = str(getattr(asset, 'provider', '') or '').strip()
     region_code = str(getattr(asset, 'region_code', '') or '').strip()
@@ -522,6 +355,7 @@ def _order_matches_asset_lookup(order, asset, account_labels) -> bool:
     return True
 
 
+# 功能：提供 后台 API 接口 的内部辅助逻辑，供同模块流程复用。
 def _bulk_infer_asset_orders(assets):
     targets = []
     all_names = set()
@@ -584,6 +418,7 @@ def _bulk_infer_asset_orders(assets):
     return inferred
 
 
+# 功能：提供 后台 API 接口 的内部辅助逻辑，供同模块流程复用。
 def _build_cloud_asset_payload_context(assets, *, allow_mutation=False):
     asset_list = list(assets)
     return CloudAssetPayloadContext(
@@ -594,6 +429,7 @@ def _build_cloud_asset_payload_context(assets, *, allow_mutation=False):
     )
 
 
+# 功能：提供 后台 API 接口 的内部辅助逻辑，供同模块流程复用。
 def _cloud_asset_payloads(assets, *, allow_mutation=False):
     asset_list = list(assets)
     context = _build_cloud_asset_payload_context(asset_list, allow_mutation=allow_mutation)
@@ -615,6 +451,7 @@ _DASHBOARD_RISK_FLAGS = {
 }
 
 
+# 功能：提供 后台 API 接口 的内部辅助逻辑，供同模块流程复用。
 def _snapshot_group_key(item: dict, group_by='user') -> str:
     if group_by == 'telegram_group' and item.get('telegram_group_id'):
         return f"group:{item.get('telegram_group_id')}"
@@ -627,12 +464,14 @@ def _snapshot_group_key(item: dict, group_by='user') -> str:
     return f"unbound:{item.get('id', '')}"
 
 
+# 功能：提供 后台 API 接口 的内部辅助逻辑，供同模块流程复用。
 def _snapshot_group_label(item: dict, group_by='user') -> str:
     if group_by == 'telegram_group' and item.get('telegram_group_id'):
         return str(item.get('telegram_group_title') or item.get('telegram_group_username') or item.get('telegram_group_chat_id') or '未绑定群组')
     return str(item.get('user_display_name') or item.get('username_label') or item.get('tg_user_id') or '未绑定用户')
 
 
+# 功能：提供 后台 API 接口 的内部辅助逻辑，供同模块流程复用。
 def _snapshot_search_text(item: dict) -> str:
     values = [
         item.get('asset_name'), item.get('instance_id'), item.get('provider_resource_id'),
@@ -649,6 +488,7 @@ def _snapshot_search_text(item: dict) -> str:
     return '\n'.join(str(value) for value in values if value not in {None, ''})
 
 
+# 功能：提供 后台 API 接口 的内部辅助逻辑，供同模块流程复用。
 def _snapshot_defaults_from_payload(item: dict) -> dict:
     statuses = item.get('risk_statuses') or [item.get('risk_status') or 'other']
     statuses = list(dict.fromkeys(str(status or 'other') for status in statuses))
@@ -684,6 +524,7 @@ def _snapshot_defaults_from_payload(item: dict) -> dict:
     }
 
 
+# 功能：刷新缓存、快照或派生数据；当前函数属于 后台 API 接口。
 def refresh_cloud_asset_dashboard_snapshots(asset_ids=None, *, reason: str = '', full: bool | None = None) -> dict:
     started_at = timezone.now()
     if full is None:
@@ -740,6 +581,7 @@ def refresh_cloud_asset_dashboard_snapshots(asset_ids=None, *, reason: str = '',
     return {'assets': len(payloads), 'created': len(create_rows), 'updated': len(update_rows), 'duration_seconds': round(duration, 3)}
 
 
+# 功能：提供 后台 API 接口 的内部辅助逻辑，供同模块流程复用。
 def _ensure_cloud_asset_dashboard_snapshots(reason: str = 'list') -> bool:
     asset_total = CloudAsset.objects.filter(kind=CloudAsset.KIND_SERVER).count()
     snapshot_total = CloudAssetDashboardSnapshot.objects.count()
@@ -760,6 +602,7 @@ def _ensure_cloud_asset_dashboard_snapshots(reason: str = 'list') -> bool:
     return False
 
 
+# 功能：提供 后台 API 接口 的内部辅助逻辑，供同模块流程复用。
 def _dashboard_snapshot_queryset(keyword=''):
     queryset = CloudAssetDashboardSnapshot.objects.all()
     keyword_text = str(keyword or '').strip()
@@ -785,6 +628,7 @@ def _dashboard_snapshot_queryset(keyword=''):
     return queryset.filter(keyword_q)
 
 
+# 功能：提供 后台 API 接口 的内部辅助逻辑，供同模块流程复用。
 def _filter_dashboard_snapshots_by_risk(queryset, risk_status: str):
     risk_status = str(risk_status or '').strip()
     if not risk_status or risk_status == 'all':
@@ -798,6 +642,7 @@ def _filter_dashboard_snapshots_by_risk(queryset, risk_status: str):
     return queryset
 
 
+# 功能：提供 后台 API 接口 的内部辅助逻辑，供同模块流程复用。
 def _dashboard_snapshot_risk_counts(queryset) -> dict:
     aggregates = {
         'all': Count('id', filter=Q(risk_account_disabled=False)),
@@ -811,6 +656,7 @@ def _dashboard_snapshot_risk_counts(queryset) -> dict:
     return {key: int(value or 0) for key, value in counts.items()}
 
 
+# 功能：提供 后台 API 接口 的内部辅助逻辑，供同模块流程复用。
 def _dashboard_snapshot_ordering(sort_by: str, sort_direction: str):
     if sort_by in {'actual_expires_at', 'expires_at', 'days_left', 'remaining_days'}:
         expires = F('actual_expires_at').desc(nulls_last=True) if sort_direction == 'desc' else F('actual_expires_at').asc(nulls_last=True)
@@ -818,10 +664,12 @@ def _dashboard_snapshot_ordering(sort_by: str, sort_direction: str):
     return ['risk_rank', F('actual_expires_at').asc(nulls_last=True), '-sort_order', '-asset_id']
 
 
+# 功能：提供 后台 API 接口 的内部辅助逻辑，供同模块流程复用。
 def _snapshot_payloads(rows):
     return [dict(row.payload or {}) for row in rows]
 
 
+# 功能：提供 后台 API 接口 的内部辅助逻辑，供同模块流程复用。
 def _parse_dashboard_page(request, *, default_size=20, min_size=1, max_size=200):
     try:
         page = max(int(request.GET.get('page') or '1'), 1)
@@ -835,6 +683,7 @@ def _parse_dashboard_page(request, *, default_size=20, min_size=1, max_size=200)
     return page, page_size
 
 
+# 功能：提供 后台 API 接口 的内部辅助逻辑，供同模块流程复用。
 def _paginate_dashboard_snapshot_queryset(queryset, request, *, sort_by='', sort_direction='', default_size=20, min_size=1, max_size=200):
     page, page_size = _parse_dashboard_page(request, default_size=default_size, min_size=min_size, max_size=max_size)
     total = queryset.count()
@@ -845,6 +694,7 @@ def _paginate_dashboard_snapshot_queryset(queryset, request, *, sort_by='', sort
     return _snapshot_payloads(rows), total, total_pages, page, page_size
 
 
+# 功能：提供 后台 API 接口 的内部辅助逻辑，供同模块流程复用。
 def _dashboard_snapshot_group_page(queryset, request, *, group_by='user', sort_by='', sort_direction=''):
     page, page_size = _parse_dashboard_page(request, default_size=20, min_size=1, max_size=100)
     group_field = 'group_telegram_key' if group_by == 'telegram_group' else 'group_user_key'
@@ -873,6 +723,7 @@ def _dashboard_snapshot_group_page(queryset, request, *, group_by='user', sort_b
     return ordered_groups, page_items, total, total_pages, page, page_size
 
 
+# 功能：提供 后台 API 接口 的内部辅助逻辑，供同模块流程复用。
 def _display_cloud_asset_note(note: str | None) -> str:
     noisy_prefixes = (
         'Get:', 'Hit:', 'Ign:', 'Err:', 'Fetched ', 'Reading package lists',
@@ -902,6 +753,7 @@ def _display_cloud_asset_note(note: str | None) -> str:
     return '\n'.join(lines)
 
 
+# 功能：提供 后台 API 接口 的内部辅助逻辑，供同模块流程复用。
 def _cloud_asset_shutdown_enabled(asset, order=None) -> bool:
     account = getattr(asset, 'cloud_account', None) or getattr(order, 'cloud_account', None)
     if account is not None:
@@ -909,6 +761,7 @@ def _cloud_asset_shutdown_enabled(asset, order=None) -> bool:
     return True
 
 
+# 功能：提供 后台 API 接口 的内部辅助逻辑，供同模块流程复用。
 def _static_ip_name_from_resource_id(value) -> str:
     text = str(value or '').strip()
     if not text or 'StaticIp' not in text:
@@ -916,6 +769,7 @@ def _static_ip_name_from_resource_id(value) -> str:
     return text.rsplit('/', 1)[-1] or text
 
 
+# 功能：提供 后台 API 接口 的内部辅助逻辑，供同模块流程复用。
 def _cloud_asset_static_ip_name(asset, order=None) -> str:
     asset_static_ip_name = ''
     provider_status = str(getattr(asset, 'provider_status', '') or '')
@@ -936,6 +790,7 @@ def _cloud_asset_static_ip_name(asset, order=None) -> str:
     return asset_static_ip_name or str(getattr(order, 'static_ip_name', '') if order else '').strip()
 
 
+# 功能：提供 后台 API 接口 的内部辅助逻辑，供同模块流程复用。
 def _cloud_asset_provider_status_label(asset, account_label: str | None = None, *, active_account_labels=None) -> str:
     if active_account_labels is None:
         active_account_labels = set(list_cloud_account_labels(True))
@@ -961,6 +816,7 @@ def _cloud_asset_provider_status_label(asset, account_label: str | None = None, 
     return label
 
 
+# 功能：提供 后台 API 接口 的内部辅助逻辑，供同模块流程复用。
 def _cloud_asset_risk_state(asset, order, expires_at, provider_status_label, display_status, user) -> dict:
     now = timezone.now()
     reasons = []
@@ -985,6 +841,7 @@ def _cloud_asset_risk_state(asset, order, expires_at, provider_status_label, dis
         or status_text == 'unattached'
     )
 
+    # 功能：设置运行状态或配置值；当前函数属于 后台 API 接口。
     def set_risk(status: str, label: str, rank: int, reason: str):
         nonlocal risk_status, risk_label, risk_rank
         if status and status not in risk_statuses:
@@ -1037,8 +894,10 @@ def _cloud_asset_risk_state(asset, order, expires_at, provider_status_label, dis
     }
 
 
+# 功能：提供 后台 API 接口 的内部辅助逻辑，供同模块流程复用。
 def _filter_cloud_asset_payloads_by_risk(items: list[dict], risk_status: str) -> list[dict]:
     risk_status = str(risk_status or '').strip()
+    # 功能：提供 后台 API 接口 的内部辅助逻辑，供同模块流程复用。
     def _statuses(item):
         return item.get('risk_statuses') or [item.get('risk_status') or 'normal']
 
@@ -1054,6 +913,7 @@ def _filter_cloud_asset_payloads_by_risk(items: list[dict], risk_status: str) ->
     ]
 
 
+# 功能：提供 后台 API 接口 的内部辅助逻辑，供同模块流程复用。
 def _cloud_asset_risk_counts(items: list[dict]) -> dict:
     counts = {'all': 0}
     for item in items:
@@ -1067,6 +927,7 @@ def _cloud_asset_risk_counts(items: list[dict]) -> dict:
     return counts
 
 
+# 功能：提供 后台 API 接口 的内部辅助逻辑，供同模块流程复用。
 def _paginate_payloads(items: list[dict], page: int, page_size: int):
     total = len(items)
     total_pages = max((total + page_size - 1) // page_size, 1)
@@ -1075,6 +936,7 @@ def _paginate_payloads(items: list[dict], page: int, page_size: int):
     return items[start:start + page_size], total, total_pages, safe_page
 
 
+# 功能：提供 后台 API 接口 的内部辅助逻辑，供同模块流程复用。
 def _cloud_asset_payload_page_group_key(item: dict, group_by='user'):
     if group_by == 'telegram_group' and item.get('telegram_group_id'):
         return f"group:{item.get('telegram_group_id')}"
@@ -1087,6 +949,7 @@ def _cloud_asset_payload_page_group_key(item: dict, group_by='user'):
     return f"unbound:{item.get('id', '')}"
 
 
+# 功能：提供 后台 API 接口 的内部辅助逻辑，供同模块流程复用。
 def _paginate_payloads_keep_groups(items: list[dict], page: int, page_size: int, group_by='user'):
     grouped_items = []
     group_index = {}
@@ -1116,7 +979,9 @@ def _paginate_payloads_keep_groups(items: list[dict], page: int, page_size: int,
     return pages[safe_page - 1], len(items), page_count, safe_page
 
 
+# 功能：提供 后台 API 接口 的内部辅助逻辑，供同模块流程复用。
 def _sort_cloud_asset_payloads(items: list[dict], sort_by: str, sort_direction: str) -> list[dict]:
+    # 功能：处理 后台 API 接口 中的 expires key 业务流程。
     def expires_key(item):
         return item.get('actual_expires_at') or '9999-12-31T23:59:59'
 
@@ -1135,6 +1000,7 @@ def _sort_cloud_asset_payloads(items: list[dict], sort_by: str, sort_direction: 
     ))
 
 
+# 功能：提供 后台 API 接口 的内部辅助逻辑，供同模块流程复用。
 def _asset_payload(asset, *, context: CloudAssetPayloadContext | None = None):
     context = context or CloudAssetPayloadContext(active_account_labels=list_cloud_account_labels(True))
     order = getattr(asset, 'order', None) or context.inferred_orders.get(getattr(asset, 'id', None))
@@ -1239,6 +1105,7 @@ def _asset_payload(asset, *, context: CloudAssetPayloadContext | None = None):
     }
 
 
+# 功能：更新相关业务对象；当前函数属于 后台 API 接口。
 @csrf_exempt
 @dashboard_login_required
 @require_http_methods(['GET', 'POST', 'PUT', 'PATCH'])
@@ -1577,6 +1444,7 @@ def update_cloud_asset(request, asset_id):
     return _ok(_asset_payload(asset))
 
 
+# 功能：处理 后台 API 接口 中的 toggle cloud asset auto renew 业务流程。
 @csrf_exempt
 @dashboard_superuser_required
 @require_POST
@@ -1608,6 +1476,7 @@ def toggle_cloud_asset_auto_renew(request, asset_id):
     return _ok(_asset_payload(asset))
 
 
+# 功能：提供 后台 API 接口 的内部辅助逻辑，供同模块流程复用。
 def _cloud_asset_page_group_key(asset, group_by='user'):
     if group_by == 'telegram_group' and getattr(asset, 'telegram_group_id', None):
         return f'group:{asset.telegram_group_id}'
@@ -1620,6 +1489,7 @@ def _cloud_asset_page_group_key(asset, group_by='user'):
     return f'unbound:{getattr(asset, "id", "")}'
 
 
+# 功能：提供 后台 API 接口 的内部辅助逻辑，供同模块流程复用。
 def _paginate_cloud_assets_keep_groups(assets, page: int, page_size: int, group_by='user'):
     grouped_assets = []
     group_index = {}
@@ -1649,6 +1519,7 @@ def _paginate_cloud_assets_keep_groups(assets, page: int, page_size: int, group_
     return pages[safe_page - 1], page_count, safe_page
 
 
+# 功能：提供 后台 API 接口 的内部辅助逻辑，供同模块流程复用。
 def _group_cloud_asset_payloads(items, group_by='telegram_group'):
     groups = {}
     for item in items:
@@ -1709,6 +1580,7 @@ def _group_cloud_asset_payloads(items, group_by='telegram_group'):
     return ordered_groups
 
 
+# 功能：提供 后台 API 接口 的内部辅助逻辑，供同模块流程复用。
 def _apply_cloud_assets_keyword(queryset, keyword):
     keyword_text = str(keyword or '').strip()
     if not keyword_text:
@@ -1750,6 +1622,7 @@ def _apply_cloud_assets_keyword(queryset, keyword):
     return queryset.filter(direct_condition | Q(user_id__in=matched_user_ids))
 
 
+# 功能：提供 后台 API 接口 的内部辅助逻辑，供同模块流程复用。
 def _apply_cloud_assets_direct_keyword(queryset, keyword):
     return _apply_keyword_filter(
         queryset,
@@ -1768,6 +1641,7 @@ def _apply_cloud_assets_direct_keyword(queryset, keyword):
     )
 
 
+# 功能：处理 后台 API 接口 中的 cloud assets list 业务流程。
 @dashboard_login_required
 @require_GET
 def cloud_assets_list(request):
@@ -1838,6 +1712,7 @@ def cloud_assets_list(request):
     return _ok({'groups': ordered_groups, 'items': items, 'risk_counts': risk_counts})
 
 
+# 功能：处理 后台 API 接口 中的 cloud assets risk summary 业务流程。
 @dashboard_login_required
 @require_GET
 def cloud_assets_risk_summary(request):
@@ -1850,10 +1725,12 @@ def cloud_assets_risk_summary(request):
         return _ok({'risk_counts': {'all': 0}, 'total': 0})
 
 
+# 功能：提供 后台 API 接口 的内部辅助逻辑，供同模块流程复用。
 def _auto_renew_failure_was_price_missing(reason: str | None) -> bool:
     return '缺少续费价格' in str(reason or '') or '缺少价格' in str(reason or '')
 
 
+# 功能：提供 后台 API 接口 的内部辅助逻辑，供同模块流程复用。
 def _order_has_renewal_price(order) -> bool:
     try:
         _renewal_price(order, getattr(order, 'user', None))
@@ -1862,6 +1739,7 @@ def _order_has_renewal_price(order) -> bool:
         return False
 
 
+# 功能：提供 后台 API 接口 的内部辅助逻辑，供同模块流程复用。
 def _auto_renew_task_status(order, now, *, latest_failure_reason: str | None = None):
     if not getattr(order, 'auto_renew_enabled', False):
         return None
@@ -1888,6 +1766,7 @@ def _auto_renew_task_status(order, now, *, latest_failure_reason: str | None = N
     return None
 
 
+# 功能：提供 后台 API 接口 的内部辅助逻辑，供同模块流程复用。
 def _auto_renew_pinned_task(now):
     if _auto_renew_plan_table_stale(max_age_seconds=300):
         _sync_auto_renew_plan_table(now=now)
@@ -1936,6 +1815,7 @@ def _auto_renew_pinned_task(now):
     }
 
 
+# 功能：处理 后台 API 接口 中的 tasks overview 业务流程。
 @dashboard_login_required
 @require_GET
 def tasks_overview(request):
@@ -1978,6 +1858,7 @@ def tasks_overview(request):
     return _ok(items[:50])
 
 
+# 功能：提供 后台 API 接口 的内部辅助逻辑，供同模块流程复用。
 def _auto_renew_due_item_payload(order, *, queue_status: str = 'due_now', queue_status_label: str = '本轮待执行', next_run_at=None, last_failure_reason: str | None = None):
     user = getattr(order, 'user', None)
     usernames = list(getattr(user, 'usernames', []) or []) if user else []
@@ -2028,6 +1909,7 @@ def _auto_renew_due_item_payload(order, *, queue_status: str = 'due_now', queue_
     }
 
 
+# 功能：提供 后台 API 接口 的内部辅助逻辑，供同模块流程复用。
 def _auto_renew_order_has_active_notice(order) -> bool:
     if not order:
         return False
@@ -2049,6 +1931,7 @@ def _auto_renew_order_has_active_notice(order) -> bool:
     return any(asset.is_active and asset.status not in excluded_statuses for asset in linked_assets)
 
 
+# 功能：提供 后台 API 接口 的内部辅助逻辑，供同模块流程复用。
 def _auto_renew_future_plan_items(now, next_run_at, due_orders: list):
     plan_items = []
     seen = set()
@@ -2077,6 +1960,7 @@ def _auto_renew_future_plan_items(now, next_run_at, due_orders: list):
     return plan_items
 
 
+# 功能：提供 后台 API 接口 的内部辅助逻辑，供同模块流程复用。
 def _collect_auto_renew_due_orders(now):
     due = async_to_sync(_get_due_orders)()
     due_orders = [order for order in list(due.get('auto_renew') or []) if _auto_renew_order_has_active_notice(order)]
@@ -2126,10 +2010,12 @@ def _collect_auto_renew_due_orders(now):
     }
 
 
+# 功能：提供 后台 API 接口 的内部辅助逻辑，供同模块流程复用。
 async def _await_result(awaitable):
     return await awaitable
 
 
+# 功能：提供 后台 API 接口 的内部辅助逻辑，供同模块流程复用。
 def _run_auto_renew_sync(order_id: int):
     result = _run_auto_renew(order_id)
     if inspect.isawaitable(result):
@@ -2137,6 +2023,7 @@ def _run_auto_renew_sync(order_id: int):
     return result
 
 
+# 功能：提供 后台 API 接口 的内部辅助逻辑，供同模块流程复用。
 def _manual_run_auto_renew_queue(orders: list[tuple[CloudServerOrder, str]], *, batch_id: str | None = None):
     batch_id = batch_id or uuid.uuid4().hex[:16]
     results = []
@@ -2173,6 +2060,7 @@ def _manual_run_auto_renew_queue(orders: list[tuple[CloudServerOrder, str]], *, 
     }
 
 
+# 功能：提供 后台 API 接口 的内部辅助逻辑，供同模块流程复用。
 def _auto_renew_history_item_payload(log):
     order_id = getattr(log, 'completed_order_id', None) or getattr(log, 'order_id', None)
     return {
@@ -2206,6 +2094,7 @@ def _auto_renew_history_item_payload(log):
 _AUTO_RENEW_PLAN_DUE_STATUSES = {'due_now', 'retry_failed', 'fallback_retry'}
 
 
+# 功能：提供 后台 API 接口 的内部辅助逻辑，供同模块流程复用。
 def _parse_api_datetime(value):
     if not value:
         return None
@@ -2217,10 +2106,12 @@ def _parse_api_datetime(value):
     return parsed
 
 
+# 功能：提供 后台 API 接口 的内部辅助逻辑，供同模块流程复用。
 def _auto_renew_plan_source_key(item: dict) -> str:
     return f"order:{item.get('order_id') or item.get('id')}"
 
 
+# 功能：提供 后台 API 接口 的内部辅助逻辑，供同模块流程复用。
 def _auto_renew_plan_row_defaults(item: dict) -> dict:
     return {
         'source_key': _auto_renew_plan_source_key(item),
@@ -2253,6 +2144,7 @@ def _auto_renew_plan_row_defaults(item: dict) -> dict:
     }
 
 
+# 功能：提供 后台 API 接口 的内部辅助逻辑，供同模块流程复用。
 def _auto_renew_plan_row_payload(row) -> dict:
     snapshot = dict(row.source_snapshot or {})
     snapshot.update({
@@ -2286,6 +2178,7 @@ def _auto_renew_plan_row_payload(row) -> dict:
     return snapshot
 
 
+# 功能：提供 后台 API 接口 的内部辅助逻辑，供同模块流程复用。
 def _upsert_auto_renew_plan_rows(items: list[dict]):
     payloads = {
         _auto_renew_plan_source_key(item): _auto_renew_plan_row_defaults(item)
@@ -2322,6 +2215,7 @@ def _upsert_auto_renew_plan_rows(items: list[dict]):
         qs.delete()
 
 
+# 功能：提供 后台 API 接口 的内部辅助逻辑，供同模块流程复用。
 def _build_auto_renew_plan_items(now=None):
     now = now or timezone.now()
     queue = _collect_auto_renew_due_orders(now)
@@ -2334,6 +2228,7 @@ def _build_auto_renew_plan_items(now=None):
     for log in history_qs.filter(is_success=False, executed_at__gte=now - timezone.timedelta(days=7)):
         if log.order_id and log.order_id not in latest_failure_by_order:
             latest_failure_by_order[log.order_id] = log.failure_reason
+    # 功能：处理 后台 API 接口 中的 due queue state 业务流程。
     def due_queue_state(order):
         status = _auto_renew_task_status(order, now, latest_failure_reason=latest_failure_by_order.get(order.id))
         return status[0] if status else ''
@@ -2347,6 +2242,7 @@ def _build_auto_renew_plan_items(now=None):
         )
         for order in due_orders
     ]
+    # 功能：处理 后台 API 接口 中的 retry item payload 业务流程。
     def retry_item_payload(order, queue_status, queue_status_label, last_failure_reason):
         status = _auto_renew_task_status(order, now, latest_failure_reason=last_failure_reason)
         if status and status[0] == 'auto_renew_pending':
@@ -2390,12 +2286,14 @@ def _build_auto_renew_plan_items(now=None):
     }
 
 
+# 功能：提供 后台 API 接口 的内部辅助逻辑，供同模块流程复用。
 def _sync_auto_renew_plan_table(now=None):
     bundle = _build_auto_renew_plan_items(now=now)
     _upsert_auto_renew_plan_rows([*bundle['due_items'], *bundle['future_plan_items']])
     return bundle
 
 
+# 功能：提供 后台 API 接口 的内部辅助逻辑，供同模块流程复用。
 def _auto_renew_plan_table_stale(max_age_seconds: int = 300) -> bool:
     latest_updated_at = CloudAutoRenewPlan.objects.order_by('-updated_at').values_list('updated_at', flat=True).first()
     if not latest_updated_at:
@@ -2403,6 +2301,7 @@ def _auto_renew_plan_table_stale(max_age_seconds: int = 300) -> bool:
     return latest_updated_at < timezone.now() - timezone.timedelta(seconds=max_age_seconds)
 
 
+# 功能：提供 后台 API 接口 的内部辅助逻辑，供同模块流程复用。
 def _cloud_auto_renew_plan_items():
     rows = CloudAutoRenewPlan.objects.filter(data_group=CloudAutoRenewPlan.DATA_GROUP_ACTIVE).order_by('auto_renew_at', 'next_run_at', '-updated_at', '-id')
     return [_auto_renew_plan_row_payload(row) for row in rows]
@@ -2421,6 +2320,7 @@ _NOTICE_HISTORY_LABELS = {
 }
 
 
+# 功能：提供 后台 API 接口 的内部辅助逻辑，供同模块流程复用。
 def _notice_task_time(order, notice_type: str, notice: dict | None = None):
     notice = notice or _notice_payload_for_order(order) or {}
     if notice_type == 'renew_notice':
@@ -2442,6 +2342,7 @@ def _notice_task_time(order, notice_type: str, notice: dict | None = None):
     return None
 
 
+# 功能：提供 后台 API 接口 的内部辅助逻辑，供同模块流程复用。
 def _notice_task_text_preview(order, notice_type: str, notice: dict | None = None) -> str:
     notice = notice or _notice_payload_for_order(order) or {}
     ip = notice.get('ip') or getattr(order, 'public_ip', None) or getattr(order, 'previous_public_ip', None) or '未分配'
@@ -2458,6 +2359,7 @@ def _notice_task_text_preview(order, notice_type: str, notice: dict | None = Non
     return f'{_NOTICE_TASK_TYPES.get(notice_type, {}).get("label", notice_type)}：IP {ip}'
 
 
+# 功能：提供 后台 API 接口 的内部辅助逻辑，供同模块流程复用。
 def _notice_attempt_label(attempt: dict) -> str:
     channel = attempt.get('channel') or ''
     if channel == 'bot':
@@ -2471,11 +2373,13 @@ def _notice_attempt_label(attempt: dict) -> str:
     return f'{name}{status}' + (f'：{error}' if error and not attempt.get('ok') else '')
 
 
+# 功能：提供 后台 API 接口 的内部辅助逻辑，供同模块流程复用。
 def _notice_attempts_label(log) -> str:
     attempts = ((getattr(log, 'extra', None) or {}).get('send_attempts') or []) if log else []
     return '；'.join(_notice_attempt_label(attempt) for attempt in attempts)
 
 
+# 功能：提供 后台 API 接口 的内部辅助逻辑，供同模块流程复用。
 def _notice_attempt_payload(attempt: dict, *, pending: bool = False) -> dict:
     channel = attempt.get('channel') or ''
     if channel == 'bot':
@@ -2496,6 +2400,7 @@ def _notice_attempt_payload(attempt: dict, *, pending: bool = False) -> dict:
     }
 
 
+# 功能：提供 后台 API 接口 的内部辅助逻辑，供同模块流程复用。
 def _planned_notice_account_attempts() -> list[dict]:
     account_attempts = []
     accounts = TelegramLoginAccount.objects.filter(status='logged_in', notify_enabled=True).exclude(session_string__isnull=True).exclude(session_string='').order_by('-updated_at', '-id')[:10]
@@ -2506,12 +2411,14 @@ def _planned_notice_account_attempts() -> list[dict]:
     return account_attempts
 
 
+# 功能：提供 后台 API 接口 的内部辅助逻辑，供同模块流程复用。
 def _planned_notice_attempts(user, account_attempts: list[dict] | None = None) -> list[dict]:
     attempts = [{'channel': 'bot', 'channel_label': SiteConfig.get('bot_notice_sender_label', 'Bot'), 'ok': False, 'error': ''}]
     attempts.extend(account_attempts if account_attempts is not None else _planned_notice_account_attempts())
     return [_notice_attempt_payload(attempt, pending=True) for attempt in attempts]
 
 
+# 功能：提供 后台 API 接口 的内部辅助逻辑，供同模块流程复用。
 def _notice_channel_attempts_payload(user, latest_log=None, account_attempts: list[dict] | None = None) -> list[dict]:
     attempts = ((getattr(latest_log, 'extra', None) or {}).get('send_attempts') or []) if latest_log else []
     if attempts:
@@ -2521,6 +2428,7 @@ def _notice_channel_attempts_payload(user, latest_log=None, account_attempts: li
     return []
 
 
+# 功能：提供 后台 API 接口 的内部辅助逻辑，供同模块流程复用。
 def _notice_channel_payload(user, latest_log=None, account_attempts: list[dict] | None = None) -> dict:
     attempts = ((getattr(latest_log, 'extra', None) or {}).get('send_attempts') or []) if latest_log else []
     attempt_items = _notice_channel_attempts_payload(user, latest_log, account_attempts)
@@ -2542,6 +2450,7 @@ def _notice_channel_payload(user, latest_log=None, account_attempts: list[dict] 
     return {'notice_channel': 'unbound', 'notice_channel_label': '未绑定通知渠道', 'notice_channel_attempts': []}
 
 
+# 功能：提供 后台 API 接口 的内部辅助逻辑，供同模块流程复用。
 def _notice_status_payload(*, sent_at=None, latest_log=None, queue_status='scheduled_future') -> dict:
     if sent_at:
         return {'notice_status': 'sent', 'notice_status_label': '已通知', 'retry_label': '-'}
@@ -2554,6 +2463,7 @@ def _notice_status_payload(*, sent_at=None, latest_log=None, queue_status='sched
     return {'notice_status': 'scheduled', 'notice_status_label': '未来计划', 'retry_label': '未到通知时间'}
 
 
+# 功能：提供 后台 API 接口 的内部辅助逻辑，供同模块流程复用。
 def _notice_task_item_payload(order, notice_type: str, *, queue_status='scheduled_future', queue_status_label='未来计划', next_run_at=None, latest_log=None, account_attempts: list[dict] | None = None, notice: dict | None = None):
     user = getattr(order, 'user', None)
     usernames = list(getattr(user, 'usernames', []) or []) if user else []
@@ -2602,10 +2512,12 @@ def _notice_task_item_payload(order, notice_type: str, *, queue_status='schedule
     }
 
 
+# 功能：提供 后台 API 接口 的内部辅助逻辑，供同模块流程复用。
 def _notice_event_type(notice_type: str) -> str:
     return _NOTICE_TASK_TYPES.get(notice_type, {}).get('event') or notice_type
 
 
+# 功能：提供 后台 API 接口 的内部辅助逻辑，供同模块流程复用。
 def _notice_actual_batch_payload(notice_type: str, order_ids: list[int]) -> dict:
     if notice_type == 'renew_notice':
         return async_to_sync(_renew_notice_batch_payload)(order_ids)
@@ -2626,6 +2538,7 @@ def _notice_actual_batch_payload(notice_type: str, order_ids: list[int]) -> dict
     return {'text': '', 'order_ids': order_ids, 'first_order_id': order_ids[0] if order_ids else None, 'count': len(order_ids)}
 
 
+# 功能：提供 后台 API 接口 的内部辅助逻辑，供同模块流程复用。
 def _notice_manual_text_payload(notice_type: str, user_id: int | None, order_ids: list[int]) -> dict:
     event = _notice_event_type(notice_type)
     manual_text = _get_notice_text_override(event, user_id, order_ids)
@@ -2637,6 +2550,7 @@ def _notice_manual_text_payload(notice_type: str, user_id: int | None, order_ids
     }
 
 
+# 功能：提供 后台 API 接口 的内部辅助逻辑，供同模块流程复用。
 def _notice_latest_log_map():
     logs = CloudUserNoticeLog.objects.filter(event_type__in=list(_NOTICE_HISTORY_LABELS)).order_by('-created_at', '-id')[:1000]
     mapped = {}
@@ -2652,6 +2566,7 @@ def _notice_latest_log_map():
     return mapped
 
 
+# 功能：提供 后台 API 接口 的内部辅助逻辑，供同模块流程复用。
 def _notice_task_future_items(now, next_run_at, seen_keys: set[tuple[str, int]], latest_logs: dict, *, due_window_days=3, future_limit=10, account_attempts: list[dict] | None = None, notice_cache: dict[int, dict | None] | None = None):
     items = []
     qs = CloudServerOrder.objects.select_related('user').filter(
@@ -2710,6 +2625,7 @@ def _notice_task_future_items(now, next_run_at, seen_keys: set[tuple[str, int]],
     return due_items, future_items
 
 
+# 功能：提供 后台 API 接口 的内部辅助逻辑，供同模块流程复用。
 def _notice_group_summary_items(items: list[dict], *, limit: int | None = None, offset: int = 0) -> tuple[list[dict], int]:
     grouped = {}
     for item in items:
@@ -2785,6 +2701,7 @@ def _notice_group_summary_items(items: list[dict], *, limit: int | None = None, 
     return visible_summary, total
 
 
+# 功能：提供 后台 API 接口 的内部辅助逻辑，供同模块流程复用。
 def _notice_history_group_items(logs, account_attempts: list[dict] | None = None) -> list[dict]:
     items = []
     for log in logs:
@@ -2809,6 +2726,7 @@ def _notice_history_group_items(logs, account_attempts: list[dict] | None = None
     return items
 
 
+# 功能：提供 后台 API 接口 的内部辅助逻辑，供同模块流程复用。
 def _notice_task_history_item_payload(log, *, account_attempts: list[dict] | None = None):
     delivered = _notice_effective_delivered(log)
     return {
@@ -2840,6 +2758,7 @@ def _notice_task_history_item_payload(log, *, account_attempts: list[dict] | Non
     }
 
 
+# 功能：提供 后台 API 接口 的内部辅助逻辑，供同模块流程复用。
 def _notice_switch_items() -> list[dict]:
     return [
         {
@@ -2852,6 +2771,7 @@ def _notice_switch_items() -> list[dict]:
     ]
 
 
+# 功能：更新相关业务对象；当前函数属于 后台 API 接口。
 @csrf_exempt
 @dashboard_superuser_required
 @require_POST
@@ -2881,6 +2801,7 @@ NOTICE_EVENT_SENT_FIELD_MAP = {
 }
 
 
+# 功能：提供 后台 API 接口 的内部辅助逻辑，供同模块流程复用。
 def _reset_notice_sent_fields_for_log(log) -> int:
     field_name = NOTICE_EVENT_SENT_FIELD_MAP.get(log.event_type)
     if not field_name:
@@ -2900,6 +2821,7 @@ def _reset_notice_sent_fields_for_log(log) -> int:
     return CloudServerOrder.objects.filter(id__in=order_ids).update(**{field_name: None})
 
 
+# 功能：删除或标记删除相关业务对象；当前函数属于 后台 API 接口。
 @csrf_exempt
 @dashboard_superuser_required
 @require_POST
@@ -2945,6 +2867,7 @@ def delete_notice_history(request, identifier):
     return _ok({'deleted': True, 'deleted_count': deleted_count, 'reset_count': reset_count})
 
 
+# 功能：更新相关业务对象；当前函数属于 后台 API 接口。
 @csrf_exempt
 @dashboard_superuser_required
 @require_POST
@@ -2971,6 +2894,7 @@ def update_notice_plan_text(request):
     })
 
 
+# 功能：提供 后台 API 接口 的内部辅助逻辑，供同模块流程复用。
 def _request_int_param(request, key: str, default: int, *, minimum: int = 1, maximum: int = 500) -> int:
     try:
         value = int(request.GET.get(key) or default)
@@ -2979,6 +2903,7 @@ def _request_int_param(request, key: str, default: int, *, minimum: int = 1, max
     return max(minimum, min(value, maximum))
 
 
+# 功能：提供 后台 API 接口 的内部辅助逻辑，供同模块流程复用。
 def _request_json_payload(request) -> dict:
     try:
         raw = request.body.decode('utf-8') if getattr(request, 'body', None) else ''
@@ -2993,6 +2918,7 @@ def _request_json_payload(request) -> dict:
     return payload if isinstance(payload, dict) else {}
 
 
+# 功能：提供 后台 API 接口 的内部辅助逻辑，供同模块流程复用。
 def _compact_notice_items(items: list[dict], *, text_limit: int = 1200, ip_limit: int = 50) -> list[dict]:
     for item in items:
         text = str(item.get('notice_text_preview') or item.get('text_preview') or '')
@@ -3008,6 +2934,7 @@ def _compact_notice_items(items: list[dict], *, text_limit: int = 1200, ip_limit
     return items
 
 
+# 功能：提供 后台 API 接口 的内部辅助逻辑，供同模块流程复用。
 def _notice_plan_row_source_key(item: dict, *, data_group: str) -> str:
     notice_type = str(item.get('notice_type') or '').strip()
     if not notice_type:
@@ -3019,6 +2946,7 @@ def _notice_plan_row_source_key(item: dict, *, data_group: str) -> str:
     return f'{data_group}:{notice_type}:{source_id}' if source_id is not None else ''
 
 
+# 功能：提供 后台 API 接口 的内部辅助逻辑，供同模块流程复用。
 def _notice_plan_row_defaults(item: dict, *, data_group: str, source_key: str) -> dict:
     return {
         'source_key': source_key,
@@ -3058,6 +2986,7 @@ def _notice_plan_row_defaults(item: dict, *, data_group: str, source_key: str) -
     }
 
 
+# 功能：提供 后台 API 接口 的内部辅助逻辑，供同模块流程复用。
 def _notice_plan_row_payload(row) -> dict:
     payload = dict(row.source_snapshot or {})
     payload.update({
@@ -3099,6 +3028,7 @@ def _notice_plan_row_payload(row) -> dict:
     return payload
 
 
+# 功能：提供 后台 API 接口 的内部辅助逻辑，供同模块流程复用。
 def _upsert_notice_plan_rows(items: list[dict], *, data_group: str):
     source_keys = []
     payload_map = {}
@@ -3141,6 +3071,7 @@ def _upsert_notice_plan_rows(items: list[dict], *, data_group: str):
         qs.delete()
 
 
+# 功能：提供 后台 API 接口 的内部辅助逻辑，供同模块流程复用。
 def _sync_notice_plan_table(*, limit=1000, future_limit=200, history_limit=1000):
     now = timezone.now()
     due = async_to_sync(_get_due_orders)()
@@ -3189,11 +3120,13 @@ def _sync_notice_plan_table(*, limit=1000, future_limit=200, history_limit=1000)
     return {'active_items': active_items, 'history_items': history_rows}
 
 
+# 功能：提供 后台 API 接口 的内部辅助逻辑，供同模块流程复用。
 def _cloud_notice_plan_items(*, data_group: str):
     rows = CloudNoticePlan.objects.filter(data_group=data_group).order_by('notice_at', 'next_run_at', '-logged_at', '-updated_at', '-id')
     return [_notice_plan_row_payload(row) for row in rows]
 
 
+# 功能：刷新缓存、快照或派生数据；当前函数属于 后台 API 接口。
 @csrf_exempt
 @dashboard_login_required
 @require_POST
@@ -3215,6 +3148,7 @@ def refresh_notice_plan_table(request):
     })
 
 
+# 功能：处理 后台 API 接口 中的 notice task detail 业务流程。
 @dashboard_login_required
 @require_GET
 def notice_task_detail(request):
@@ -3291,6 +3225,7 @@ def notice_task_detail(request):
     })
 
 
+# 功能：处理 后台 API 接口 中的 auto renew task detail 业务流程。
 @dashboard_login_required
 @require_GET
 def auto_renew_task_detail(request):
@@ -3343,6 +3278,7 @@ def auto_renew_task_detail(request):
     })
 
 
+# 功能：执行一次业务动作或后台任务；当前函数属于 后台 API 接口。
 @csrf_exempt
 @dashboard_superuser_required
 @require_POST
@@ -3368,6 +3304,7 @@ def run_auto_renew_tasks(request):
     return _ok(result)
 
 
+# 功能：执行一次业务动作或后台任务；当前函数属于 后台 API 接口。
 @csrf_exempt
 @dashboard_superuser_required
 @require_POST
@@ -3385,6 +3322,7 @@ def run_auto_renew_order(request, order_id):
     return _ok(result)
 
 
+# 功能：提供 后台 API 接口 的内部辅助逻辑，供同模块流程复用。
 def _cloud_execution_status(note: str | None):
     text = str(note or '').strip()
     if not text:
@@ -3400,6 +3338,7 @@ def _cloud_execution_status(note: str | None):
     return '', ''
 
 
+# 功能：提供 后台 API 接口 的内部辅助逻辑，供同模块流程复用。
 def _mask_secret(value, keep=4):
     text = str(value or '')
     if not text:
@@ -3409,12 +3348,14 @@ def _mask_secret(value, keep=4):
     return f'{text[:keep]}***{text[-keep:]}'
 
 
+# 功能：提供 后台 API 接口 的内部辅助逻辑，供同模块流程复用。
 def _cloud_order_source_tags(order):
     note = str(getattr(order, 'provision_note', '') or '')
     order_no = str(getattr(order, 'order_no', '') or '')
     tags: list[tuple[str, str]] = []
     seen = set()
 
+    # 功能：处理 后台 API 接口 中的 add 业务流程。
     def add(tag_key: str, tag_label: str):
         if tag_key in seen:
             return
@@ -3440,12 +3381,14 @@ def _cloud_order_source_tags(order):
     return tags
 
 
+# 功能：提供 后台 API 接口 的内部辅助逻辑，供同模块流程复用。
 def _cloud_order_source_label(order):
     tags = _cloud_order_source_tags(order)
     first_tag = tags[0] if tags else ('new', '新购')
     return first_tag[0], first_tag[1]
 
 
+# 功能：提供 后台 API 接口 的内部辅助逻辑，供同模块流程复用。
 def _cloud_order_summary_payload(order):
     if not order:
         return None
@@ -3476,6 +3419,7 @@ def _cloud_order_summary_payload(order):
     }
 
 
+# 功能：提供 后台 API 接口 的内部辅助逻辑，供同模块流程复用。
 def _order_lineage_ids(order):
     if not order:
         return set()
@@ -3496,6 +3440,7 @@ def _order_lineage_ids(order):
     return seen
 
 
+# 功能：提供 后台 API 接口 的内部辅助逻辑，供同模块流程复用。
 def _cloud_asset_detail_log_queryset(asset, order):
     order_ids = _order_lineage_ids(order)
     asset_names = {str(asset.asset_name or '').strip(), str(asset.instance_id or '').strip()}
@@ -3533,6 +3478,7 @@ def _cloud_asset_detail_log_queryset(asset, order):
     return CloudIpLog.objects.filter(log_lookup).distinct().order_by('-created_at', '-id')
 
 
+# 功能：提供 后台 API 接口 的内部辅助逻辑，供同模块流程复用。
 def _related_order_history_payload(order):
     if not order:
         return []
@@ -3562,6 +3508,7 @@ def _related_order_history_payload(order):
     return [_cloud_order_summary_payload(item) for item in deduped]
 
 
+# 功能：提供 后台 API 接口 的内部辅助逻辑，供同模块流程复用。
 def _cloud_order_detail_payload(order):
     user = order.user
     usernames = user.usernames if user else []
@@ -3651,6 +3598,7 @@ def _cloud_order_detail_payload(order):
     return payload
 
 
+# 功能：处理 后台 API 接口 中的 cloud orders list 业务流程。
 @dashboard_login_required
 @require_GET
 def cloud_orders_list(request):
@@ -3736,6 +3684,7 @@ def cloud_orders_list(request):
     return _ok(items)
 
 
+# 功能：删除或标记删除相关业务对象；当前函数属于 后台 API 接口。
 @csrf_exempt
 @dashboard_superuser_required
 @require_POST
@@ -3770,16 +3719,19 @@ def delete_cloud_order(request, order_id):
     return _ok(True)
 
 
+# 功能：提供 后台 API 接口 的内部辅助逻辑，供同模块流程复用。
 def _append_provision_note(order, note):
     if not note:
         return order.provision_note
     return prepend_note(order.provision_note, note)
 
 
+# 功能：提供 后台 API 接口 的内部辅助逻辑，供同模块流程复用。
 def _primary_record_updates_for_order_status(order_status: str, note: str | None = None):
     return primary_record_updates_for_order_status(order_status)
 
 
+# 功能：提供 后台 API 接口 的内部辅助逻辑，供同模块流程复用。
 @transaction.atomic
 def _apply_cloud_order_status(order, new_status):
     now = timezone.now()
@@ -3848,6 +3800,7 @@ def _apply_cloud_order_status(order, new_status):
     return order
 
 
+# 功能：处理 后台 API 接口 中的 cloud order detail 业务流程。
 @csrf_exempt
 @dashboard_superuser_required
 @require_http_methods(['GET', 'POST', 'PUT', 'PATCH'])
@@ -3967,6 +3920,7 @@ def cloud_order_detail(request, order_id):
     return _ok(_cloud_order_detail_payload(order))
 
 
+# 功能：更新相关业务对象；当前函数属于 后台 API 接口。
 @csrf_exempt
 @dashboard_superuser_required
 @require_POST
@@ -3987,6 +3941,7 @@ def update_cloud_order_status(request, order_id):
     return _ok(_cloud_order_detail_payload(order))
 
 
+# 功能：删除或标记删除相关业务对象；当前函数属于 后台 API 接口。
 @csrf_exempt
 @dashboard_superuser_required
 @require_http_methods(['POST', 'DELETE'])
@@ -4000,6 +3955,7 @@ def delete_cloud_asset(request, asset_id: int):
     previous_public_ip = asset.public_ip or asset.previous_public_ip
     order = asset.order
 
+    # 功能：提供 后台 API 接口 的内部辅助逻辑，供同模块流程复用。
     def _clear_order_cloud_binding(target_order):
         if not target_order:
             return False
@@ -4036,6 +3992,7 @@ def delete_cloud_asset(request, asset_id: int):
     }
     residual_order_statuses = {'deleted', 'deleting', 'expired', 'cancelled', 'refunded', 'failed'}
 
+    # 功能：提供 后台 API 接口 的内部辅助逻辑，供同模块流程复用。
     def _looks_like_local_residual(item):
         provider_status = str(getattr(item, 'provider_status', '') or '')
         item_note = str(getattr(item, 'note', '') or '')
@@ -4069,6 +4026,7 @@ def delete_cloud_asset(request, asset_id: int):
     })
 
 
+# 功能：提供 后台 API 接口 的内部辅助逻辑，供同模块流程复用。
 def _apply_server_missing_state(provider, region, existing_instance_ids, account=None):
     now = timezone.now()
     queryset = CloudAsset.objects.filter(kind=CloudAsset.KIND_SERVER, provider=provider, region_code=region).exclude(instance_id__isnull=True).exclude(instance_id='')
@@ -4097,6 +4055,7 @@ def _apply_server_missing_state(provider, region, existing_instance_ids, account
     return legacy_updated
 
 
+# 功能：同步外部或派生数据；当前函数属于 后台 API 接口。
 @csrf_exempt
 @dashboard_superuser_required
 @require_POST
@@ -4157,197 +4116,7 @@ def sync_servers(request):
     return _ok(response_payload)
 
 
-def _sync_provider_for_asset(asset) -> str:
-    provider = str(getattr(asset, 'provider', '') or '').strip().lower()
-    if provider == 'aws_lightsail':
-        return CloudAccountConfig.PROVIDER_AWS
-    if provider == 'aliyun_simple':
-        return CloudAccountConfig.PROVIDER_ALIYUN
-    return ''
-
-
-def _resolve_sync_account_for_asset(asset):
-    provider = _sync_provider_for_asset(asset)
-    if not provider:
-        return None
-    account = getattr(asset, 'cloud_account', None)
-    if account and account.provider == provider and account.is_active:
-        return account
-    order_account = getattr(getattr(asset, 'order', None), 'cloud_account', None)
-    if order_account and order_account.provider == provider and order_account.is_active:
-        return order_account
-    account_label = str(
-        getattr(asset, 'account_label', '')
-        or cloud_account_label(account)
-        or getattr(getattr(asset, 'order', None), 'account_label', '')
-        or ''
-    ).strip()
-    queryset = CloudAccountConfig.objects.filter(provider=provider, is_active=True).order_by('id')
-    if getattr(asset, 'cloud_account_id', None):
-        matched = queryset.filter(id=asset.cloud_account_id).first()
-        if matched:
-            return matched
-    if account_label:
-        for candidate in queryset:
-            if cloud_account_label(candidate) == account_label:
-                return candidate
-    return None
-
-
-def _asset_retained_static_ip_sync_scope(asset):
-    public_ip = str(getattr(asset, 'public_ip', '') or getattr(asset, 'previous_public_ip', '') or '').strip()
-    order = getattr(asset, 'order', None)
-    provider_status = str(getattr(asset, 'provider_status', '') or '')
-    note = str(getattr(asset, 'note', '') or '')
-    is_retained = bool(
-        public_ip
-        and not str(getattr(asset, 'instance_id', '') or '').strip()
-        and (
-            '固定IP保留中' in provider_status
-            or '固定 IP 保留中' in provider_status
-            or '固定IP保留中' in note
-            or '固定 IP 保留中' in note
-            or (
-                order
-                and getattr(order, 'status', '') == 'deleted'
-                and getattr(order, 'ip_recycle_at', None)
-            )
-        )
-    )
-    if not is_retained:
-        return None
-    static_name = str(getattr(order, 'static_ip_name', '') if order else '').strip()
-    provider_resource_id = str(getattr(asset, 'provider_resource_id', '') or '').strip()
-    if not static_name and 'StaticIp' in provider_resource_id:
-        static_name = provider_resource_id.rsplit('/', 1)[-1]
-    return {'instance_id': static_name, 'public_ip': public_ip}
-
-
-def _sync_task_for_asset(asset, *, account=None, default_aliyun_region='cn-hongkong', default_aws_region=''):
-    provider = _sync_provider_for_asset(asset)
-    if not provider:
-        return None, '当前资产暂不支持同步'
-    account = account or _resolve_sync_account_for_asset(asset)
-    if not account:
-        return None, '未找到可用云账号'
-    region_code = str(getattr(asset, 'region_code', '') or getattr(account, 'region_hint', '') or '').strip()
-    if provider == CloudAccountConfig.PROVIDER_ALIYUN:
-        region_code = region_code or default_aliyun_region or 'cn-hongkong'
-        command_name = 'sync_aliyun_assets'
-        scope_instance_id = asset.instance_id or asset.provider_resource_id or ''
-        scope_public_ip = asset.public_ip or asset.previous_public_ip or ''
-        provider_key = 'aliyun'
-    else:
-        region_code = region_code or default_aws_region or ''
-        command_name = 'sync_aws_assets'
-        retained_scope = _asset_retained_static_ip_sync_scope(asset)
-        scope_instance_id = (
-            (retained_scope or {}).get('instance_id')
-            if retained_scope is not None
-            else (asset.instance_id or asset.provider_resource_id or asset.asset_name or '')
-        )
-        scope_public_ip = (retained_scope or {}).get('public_ip') or asset.public_ip or asset.previous_public_ip or ''
-        provider_key = 'aws'
-    kwargs = {
-        'region': region_code,
-        'account_id': str(account.id),
-        'asset_id': str(asset.id),
-        'instance_id': scope_instance_id,
-        'public_ip': scope_public_ip,
-    }
-    return {
-        'provider': provider_key,
-        'account': account,
-        'command': command_name,
-        'kwargs': kwargs,
-        'asset': asset,
-    }, ''
-
-
-def _provider_sync_source(provider: str) -> str:
-    return ExternalSyncLog.SOURCE_AWS if provider == 'aws' else ExternalSyncLog.SOURCE_ALIYUN
-
-
-def _sync_task_lock_key(task: dict) -> str:
-    account = task.get('account')
-    account_id = getattr(account, 'id', 'none')
-    region = str((task.get('kwargs') or {}).get('region') or 'all')
-    kwargs = task.get('kwargs') or {}
-    scope = str(kwargs.get('asset_id') or kwargs.get('instance_id') or kwargs.get('public_ip') or 'all').replace(':', '_')
-    return f"cloud_asset_sync:{task.get('provider')}:{account_id}:{region}:{scope}"
-
-
-def _sync_task_payload(task: dict) -> dict:
-    account = task.get('account')
-    kwargs = task.get('kwargs') or {}
-    return {
-        'provider': task.get('provider'),
-        'account': _sync_account_payload(account) if account else None,
-        'region': kwargs.get('region') or 'all',
-        'command': task.get('command'),
-        'asset_id': kwargs.get('asset_id') or None,
-    }
-
-
-def _run_sync_task_with_lock(task: dict, *, ttl_seconds: int = 900) -> dict:
-    lock_key = _sync_task_lock_key(task)
-    started_at = timezone.now()
-    state_payload = {**_sync_task_payload(task), 'started_at': _iso(started_at)}
-    if not cache.add(lock_key, json.dumps(state_payload, ensure_ascii=False), timeout=ttl_seconds):
-        logger.warning('CLOUD_SYNC_TASK_SKIPPED run_id=%s lock_key=%s payload=%s', task.get('run_id') or '-', lock_key, state_payload)
-        return {'task': task, 'skipped': True, 'reason': '同账号/地区已有同步正在运行', 'duration_seconds': 0, 'log_text': ''}
-    try:
-        logger.info('CLOUD_SYNC_TASK_START run_id=%s lock_key=%s payload=%s kwargs=%s', task.get('run_id') or '-', lock_key, state_payload, task.get('kwargs') or {})
-        command, log_text = _call_command_capture_threaded(task['command'], **task['kwargs'])
-        duration = max((timezone.now() - started_at).total_seconds(), 0)
-        summary = getattr(command, 'summary', {}) if command else {}
-        logger.info('CLOUD_SYNC_TASK_DONE run_id=%s lock_key=%s duration_seconds=%.3f summary=%s', task.get('run_id') or '-', lock_key, duration, summary)
-        _log_sync_command_output(f'CLOUD_SYNC_TASK_LOG run_id={task.get("run_id") or "-"} command={task.get("command")}', log_text)
-        return {'task': task, 'command': command, 'log_text': log_text, 'skipped': False, 'duration_seconds': round(duration, 3)}
-    finally:
-        cache.delete(lock_key)
-
-
-def _parse_int_list(value) -> set[int]:
-    if value is None:
-        return set()
-    if isinstance(value, str):
-        raw_items = re.split(r'[,，\s]+', value.strip())
-    elif isinstance(value, (list, tuple, set)):
-        raw_items = value
-    else:
-        raw_items = [value]
-    result = set()
-    for item in raw_items:
-        try:
-            parsed = int(item)
-            if parsed > 0:
-                result.add(parsed)
-        except (TypeError, ValueError):
-            continue
-    return result
-
-
-def _parse_provider_scope(value) -> set[str]:
-    if value is None or value == '':
-        return {'aliyun', 'aws'}
-    if isinstance(value, str):
-        raw_items = re.split(r'[,，\s]+', value.strip())
-    elif isinstance(value, (list, tuple, set)):
-        raw_items = value
-    else:
-        raw_items = [value]
-    providers = {str(item or '').strip().lower() for item in raw_items}
-    normalized = set()
-    if 'all' in providers:
-        return {'aliyun', 'aws'}
-    if providers & {'aliyun', CloudAccountConfig.PROVIDER_ALIYUN}:
-        normalized.add('aliyun')
-    if providers & {'aws', CloudAccountConfig.PROVIDER_AWS, 'aws_lightsail'}:
-        normalized.add('aws')
-    return normalized or {'aliyun', 'aws'}
-
-
+# 功能：同步外部或派生数据；当前函数属于 后台 API 接口。
 @csrf_exempt
 @dashboard_superuser_required
 @require_POST
@@ -4436,704 +4205,7 @@ def sync_cloud_asset_status(request, asset_id):
     return _ok(response_payload)
 
 
-def _run_cloud_assets_sync(payload, *, sync_run_id: str | None = None, job: CloudAssetSyncJob | None = None):
-    sync_run_id = sync_run_id or uuid.uuid4().hex[:8]
-    payload = dict(payload or {})
-    aliyun_region = (payload.get('region') or 'cn-hongkong').strip() or 'cn-hongkong'
-    aws_region = (payload.get('aws_region') or '').strip()
-    if aws_region.lower() == 'all':
-        aws_region = ''
-    providers = _parse_provider_scope(payload.get('providers') or payload.get('provider'))
-    requested_account_ids = _parse_int_list(payload.get('account_ids'))
-    requested_asset_ids = _parse_int_list(payload.get('asset_ids'))
-    errors = []
-    synced = {'aliyun': False, 'aws': False, 'reconcile': False}
-    aws_regions = []
-    command_output = io.StringIO()
-    aliyun_accounts = _active_sync_accounts(CloudAccountConfig.PROVIDER_ALIYUN)
-    aws_accounts = _active_sync_accounts(CloudAccountConfig.PROVIDER_AWS)
-    logger.info(
-        'CLOUD_SYNC_REQUEST_START run_id=%s providers=%s aliyun_region=%s aws_region=%s account_ids=%s asset_ids=%s payload=%s',
-        sync_run_id,
-        sorted(providers),
-        aliyun_region,
-        aws_region or 'all',
-        sorted(requested_account_ids),
-        sorted(requested_asset_ids),
-        payload,
-    )
-    if job:
-        _record_sync_job_event(
-            job,
-            CloudAssetSyncJobEvent.TYPE_STATUS,
-            '同步请求开始',
-            payload={
-                'providers': sorted(providers),
-                'aliyun_region': aliyun_region,
-                'aws_region': aws_region or 'all',
-                'account_ids': sorted(requested_account_ids),
-                'asset_ids': sorted(requested_asset_ids),
-                'request_payload': payload,
-            },
-            status_from=job.status,
-            status_to=CloudAssetSyncJob.STATUS_RUNNING,
-            worker_id=job.worker_id,
-        )
-    if requested_account_ids:
-        aliyun_accounts = [account for account in aliyun_accounts if account.id in requested_account_ids]
-        aws_accounts = [account for account in aws_accounts if account.id in requested_account_ids]
-    warnings = []
-    selected_assets = []
-    selected_account_keys = set()
-    selected_asset_tasks = []
-    if requested_asset_ids:
-        selected_assets = list(CloudAsset.objects.select_related('cloud_account', 'order').filter(id__in=requested_asset_ids))
-        found_asset_ids = {asset.id for asset in selected_assets}
-        missing_asset_ids = sorted(requested_asset_ids - found_asset_ids)
-        if missing_asset_ids:
-            warnings.append(f'部分选中资产不存在，已跳过: {missing_asset_ids[:20]}')
-        for asset in selected_assets:
-            task, warning = _sync_task_for_asset(
-                asset,
-                default_aliyun_region=aliyun_region,
-                default_aws_region=aws_region,
-            )
-            if warning:
-                warnings.append(f'资产#{asset.id}: {warning}')
-                continue
-            if task['provider'] not in providers:
-                warnings.append(f'资产#{asset.id}: 不在本次同步厂商范围内，已跳过')
-                continue
-            if requested_account_ids and getattr(task['account'], 'id', None) not in requested_account_ids:
-                warnings.append(f'资产#{asset.id}: 不在本次同步账号范围内，已跳过')
-                continue
-            task['run_id'] = sync_run_id
-            selected_asset_tasks.append(task)
-            selected_account_keys.add((task['provider'], getattr(task['account'], 'id', None)))
-        if selected_asset_tasks:
-            providers = {task['provider'] for task in selected_asset_tasks}
-            aliyun_accounts = [account for account in aliyun_accounts if ('aliyun', account.id) in selected_account_keys]
-            aws_accounts = [account for account in aws_accounts if ('aws', account.id) in selected_account_keys]
-        else:
-            errors.append('选中资产没有可同步任务，已避免退化为全账号同步')
-    sync_tasks = []
-    if selected_asset_tasks:
-        sync_tasks = selected_asset_tasks
-    elif 'aliyun' in providers:
-        for aliyun_account in aliyun_accounts:
-            kwargs = {'region': aliyun_region, 'account_id': str(aliyun_account.id)}
-            sync_tasks.append({
-                'run_id': sync_run_id,
-                'provider': 'aliyun',
-                'account': aliyun_account,
-                'command': 'sync_aliyun_assets',
-                'kwargs': kwargs,
-            })
-    if not selected_asset_tasks and 'aws' in providers:
-        for aws_account in aws_accounts:
-            kwargs = {'region': aws_region, 'account_id': str(aws_account.id)}
-            sync_tasks.append({
-                'run_id': sync_run_id,
-                'provider': 'aws',
-                'account': aws_account,
-                'command': 'sync_aws_assets',
-                'kwargs': kwargs,
-            })
-    logger.info(
-        'CLOUD_SYNC_TASKS_BUILT run_id=%s task_count=%s tasks=%s',
-        sync_run_id,
-        len(sync_tasks),
-        [_sync_task_payload(task) for task in sync_tasks],
-    )
-    if job:
-        CloudAssetSyncJob.objects.filter(pk=job.pk).update(
-            progress_current=0,
-            progress_total=len(sync_tasks),
-            current_task='同步任务已生成' if sync_tasks else '没有可执行同步任务',
-            warnings=warnings[:50],
-            errors=errors[:50],
-            updated_at=timezone.now(),
-        )
-        _record_sync_job_event(
-            job,
-            CloudAssetSyncJobEvent.TYPE_TASK,
-            '同步任务已生成' if sync_tasks else '没有可执行同步任务',
-            payload={
-                'task_count': len(sync_tasks),
-                'tasks': [_sync_task_payload(task) for task in sync_tasks],
-                'warnings': warnings[:50],
-                'errors': errors[:50],
-            },
-            worker_id=job.worker_id,
-        )
-
-    cancelled = False
-    if job and _sync_job_cancel_requested(job):
-        cancelled = True
-        warnings.append('同步任务已取消，未执行任何云同步任务')
-        _record_sync_job_event(
-            job,
-            CloudAssetSyncJobEvent.TYPE_CANCEL,
-            '同步任务在执行前被取消',
-            payload={'progress_current': 0, 'progress_total': len(sync_tasks)},
-            worker_id=job.worker_id,
-        )
-        sync_tasks = []
-
-    def run_task(task):
-        return _run_sync_task_with_lock(task)
-
-    max_workers = max(1, min(4, len(sync_tasks) or 1))
-    task_results = []
-    skipped_tasks = []
-    if sync_tasks:
-        if job:
-            for task in sync_tasks:
-                _record_sync_job_event(
-                    job,
-                    CloudAssetSyncJobEvent.TYPE_TASK,
-                    '同步子任务开始',
-                    payload=_sync_task_payload(task),
-                    worker_id=job.worker_id,
-                )
-        with ThreadPoolExecutor(max_workers=max_workers) as executor:
-            future_map = {executor.submit(run_task, task): task for task in sync_tasks}
-            completed_tasks = 0
-            for future in as_completed(future_map):
-                task = future_map[future]
-                account = task['account']
-                task_payload = _sync_task_payload(task)
-                cancel_after_task = False
-                try:
-                    result = future.result()
-                    if result.get('skipped'):
-                        skipped_payload = {**task_payload, 'reason': result.get('reason') or '同步已在运行'}
-                        skipped_tasks.append(skipped_payload)
-                        if job:
-                            _record_sync_job_event(
-                                job,
-                                CloudAssetSyncJobEvent.TYPE_WARNING,
-                                '同步子任务跳过',
-                                payload=skipped_payload,
-                                worker_id=job.worker_id,
-                                log_level=logging.WARNING,
-                            )
-                        continue
-                    command = result.get('command')
-                    result_payload = {
-                        **task_payload,
-                        'duration_seconds': result.get('duration_seconds'),
-                        'summary': getattr(command, 'summary', {}) if command else {},
-                    }
-                    task_results.append(result_payload)
-                    log_text = result.get('log_text') or ''
-                    command_output.write(log_text)
-                    if job:
-                        _record_sync_job_event(
-                            job,
-                            CloudAssetSyncJobEvent.TYPE_TASK,
-                            '同步子任务完成',
-                            payload=result_payload,
-                            worker_id=job.worker_id,
-                        )
-                        if log_text:
-                            _record_sync_job_event(
-                                job,
-                                CloudAssetSyncJobEvent.TYPE_LOG,
-                                '同步子任务日志',
-                                payload={**task_payload, 'log_tail': [line for line in log_text.splitlines() if line.strip()][-80:]},
-                                worker_id=job.worker_id,
-                            )
-                    if task['provider'] == 'aliyun':
-                        synced['aliyun'] = True
-                    else:
-                        command = result['command']
-                        task_region = (task.get('kwargs') or {}).get('region') or aws_region or 'all'
-                        account_regions = getattr(command, 'synced_regions', None) or [task_region]
-                        aws_regions.extend(region for region in account_regions if region not in aws_regions)
-                        warnings.extend(getattr(command, 'sync_errors', []) or [])
-                        synced['aws'] = True
-                except Exception as exc:
-                    captured_log = getattr(exc, 'log_text', '') or ''
-                    if captured_log:
-                        command_output.write(captured_log)
-                    if task['provider'] == 'aliyun':
-                        message = f'阿里云账号#{getattr(account, "id", "-")}代理同步失败: {exc}'
-                        logger.exception('DASHBOARD_SYNC_ASSETS_ALIYUN_FAILED run_id=%s account_id=%s region=%s kwargs=%s', sync_run_id, getattr(account, 'id', None), aliyun_region, task.get('kwargs') or {})
-                    else:
-                        message = f'AWS账号#{getattr(account, "id", "-")}代理同步失败: {exc}'
-                        logger.exception('DASHBOARD_SYNC_ASSETS_AWS_FAILED run_id=%s account_id=%s region=%s kwargs=%s', sync_run_id, getattr(account, 'id', None), aws_region or 'all', task.get('kwargs') or {})
-                    _log_sync_command_output(f'CLOUD_SYNC_TASK_FAILED_LOG run_id={sync_run_id} command={task.get("command")}', captured_log, level=logging.ERROR)
-                    errors.append(message)
-                    if job:
-                        _record_sync_job_event(
-                            job,
-                            CloudAssetSyncJobEvent.TYPE_ERROR,
-                            '同步子任务失败',
-                            payload={**task_payload, 'error': str(exc), 'log_tail': [line for line in captured_log.splitlines() if line.strip()][-80:]},
-                            worker_id=job.worker_id,
-                            log_level=logging.ERROR,
-                        )
-                finally:
-                    completed_tasks += 1
-                    if job:
-                        CloudAssetSyncJob.objects.filter(pk=job.pk).update(
-                            progress_current=completed_tasks,
-                            progress_total=len(sync_tasks),
-                            current_task=f'{task.get("provider") or "-"}:{getattr(account, "id", "-")} 已处理',
-                            warnings=warnings[:50],
-                            errors=errors[:50],
-                            updated_at=timezone.now(),
-                        )
-                        _record_sync_job_event(
-                            job,
-                            CloudAssetSyncJobEvent.TYPE_PROGRESS,
-                            f'{completed_tasks}/{len(sync_tasks)} 已处理',
-                            payload={'progress_current': completed_tasks, 'progress_total': len(sync_tasks), 'task': task_payload},
-                            worker_id=job.worker_id,
-                        )
-                        _heartbeat_sync_job(
-                            job,
-                            worker_id=job.worker_id,
-                            current_task=f'{task.get("provider") or "-"}:{getattr(account, "id", "-")} 已处理',
-                            payload={'progress_current': completed_tasks, 'progress_total': len(sync_tasks), **task_payload},
-                        )
-                    if job and _sync_job_cancel_requested(job):
-                        cancelled = True
-                        warnings.append('同步任务收到取消请求，已停止调度后续任务')
-                        for pending_future in future_map:
-                            if pending_future is not future:
-                                pending_future.cancel()
-                        _record_sync_job_event(
-                            job,
-                            CloudAssetSyncJobEvent.TYPE_CANCEL,
-                            '同步任务收到取消请求',
-                            payload={'progress_current': completed_tasks, 'progress_total': len(sync_tasks)},
-                            worker_id=job.worker_id,
-                        )
-                        cancel_after_task = True
-                if cancel_after_task:
-                    break
-    synced['reconcile'] = True
-    logger.info('CLOUD_SYNC_RECONCILE_SKIPPED run_id=%s reason=cloud_asset_is_canonical', sync_run_id)
-    ok = (not cancelled) and (not errors or synced['aliyun'] or synced['aws'])
-    response_payload = {
-        'ok': ok,
-        'synced': synced,
-        'aliyun_region': aliyun_region,
-        'aws_region': aws_region or 'all',
-        'aws_regions': aws_regions,
-        'providers': sorted(providers),
-        'asset_ids': sorted(requested_asset_ids),
-        'errors': errors,
-        'warnings': warnings[:50],
-        'logs': _sync_log_tail(command_output),
-        'tasks': task_results,
-        'skipped_tasks': skipped_tasks,
-        'cancelled': cancelled,
-        'accounts': {'aliyun': [_sync_account_payload(account) for account in aliyun_accounts], 'aws': [_sync_account_payload(account) for account in aws_accounts]},
-    }
-    logger.info(
-        'CLOUD_SYNC_REQUEST_DONE run_id=%s ok=%s synced=%s errors=%s warnings=%s tasks=%s skipped=%s',
-        sync_run_id,
-        ok,
-        synced,
-        errors,
-        warnings[:20],
-        task_results,
-        skipped_tasks,
-    )
-    _log_sync_command_output(f'CLOUD_SYNC_REQUEST_LOG run_id={sync_run_id}', _sync_log_text(command_output))
-    if ok:
-        _refresh_dashboard_plan_snapshots_deferred(
-            f'cloud_assets_sync:{sync_run_id}',
-            cloud_asset_ids=sorted(requested_asset_ids) or None,
-            full_cloud_assets=not bool(requested_asset_ids),
-        )
-    _record_dashboard_sync_log(
-        action='sync_cloud_assets',
-        target=f'providers:{",".join(sorted(providers))};aliyun:{aliyun_region};aws:{aws_region or "all"}',
-        request_payload={'aliyun_region': aliyun_region, 'aws_region': aws_region or 'all', 'providers': sorted(providers), 'account_ids': sorted(requested_account_ids), 'asset_ids': sorted(requested_asset_ids)},
-        response_payload={**response_payload, 'log_text': _sync_log_text(command_output)},
-        is_success=ok,
-        error_message='; '.join(errors[:10]),
-    )
-    return response_payload
-
-
-def _cloud_assets_sync_request_payload(request) -> dict:
-    payload = dict(_read_payload(request) or {})
-    fallbacks = {
-        'region': request.POST.get('region') or request.GET.get('region'),
-        'aws_region': request.POST.get('aws_region') or request.GET.get('aws_region'),
-        'provider': request.POST.get('provider') or request.GET.get('provider'),
-        'providers': request.POST.get('providers') or request.GET.get('providers'),
-        'account_ids': request.POST.get('account_ids') or request.GET.get('account_ids'),
-        'asset_ids': request.POST.get('asset_ids') or request.GET.get('asset_ids'),
-    }
-    for key, value in fallbacks.items():
-        if key not in payload and value not in (None, ''):
-            payload[key] = value
-    return payload
-
-
-def _cloud_assets_sync_scope(payload: dict) -> dict:
-    providers = sorted(_parse_provider_scope(payload.get('providers') or payload.get('provider')))
-    account_ids = sorted(_parse_int_list(payload.get('account_ids')))
-    asset_ids = sorted(_parse_int_list(payload.get('asset_ids')))
-    aliyun_region = str(payload.get('region') or 'cn-hongkong').strip() or 'cn-hongkong'
-    aws_region = str(payload.get('aws_region') or '').strip()
-    if aws_region.lower() == 'all':
-        aws_region = ''
-    return {
-        'providers': providers,
-        'account_ids': account_ids,
-        'asset_ids': asset_ids,
-        'aliyun_region': aliyun_region,
-        'aws_region': aws_region or 'all',
-    }
-
-
-def _cloud_asset_sync_job_payload(job: CloudAssetSyncJob) -> dict:
-    result_payload = dict(job.result_payload or {})
-    progress_total = int(job.progress_total or 0)
-    progress_current = int(job.progress_current or 0)
-    progress_percent = 100 if job.is_terminal else (round(progress_current * 100 / progress_total) if progress_total else 0)
-    events = [
-        _sync_job_event_payload(event)
-        for event in CloudAssetSyncJobEvent.objects.filter(job_id=job.id).order_by('-created_at', '-id')[:80]
-    ]
-    events.reverse()
-    payload = {
-        'id': job.id,
-        'job_id': job.id,
-        'run_id': job.run_id,
-        'status': job.status,
-        'status_label': dict(CloudAssetSyncJob.STATUS_CHOICES).get(job.status, job.status),
-        'is_terminal': job.is_terminal,
-        'progress_current': progress_current,
-        'progress_total': progress_total,
-        'progress_percent': progress_percent,
-        'current_task': job.current_task or '',
-        'providers': job.providers or [],
-        'account_ids': job.account_ids or [],
-        'asset_ids': job.asset_ids or [],
-        'scope': job.scope or {},
-        'errors': job.errors or result_payload.get('errors') or [],
-        'warnings': job.warnings or result_payload.get('warnings') or [],
-        'logs': job.logs or result_payload.get('logs') or [],
-        'events': events,
-        'tasks': result_payload.get('tasks') or [],
-        'skipped_tasks': result_payload.get('skipped_tasks') or [],
-        'result': result_payload,
-        'cancelled': bool(job.cancel_requested_at) or job.status == CloudAssetSyncJob.STATUS_CANCELLED or bool(result_payload.get('cancelled')),
-        'can_cancel': job.status in {CloudAssetSyncJob.STATUS_QUEUED, CloudAssetSyncJob.STATUS_RUNNING} and not job.cancel_requested_at,
-        'worker_id': job.worker_id or '',
-        'worker_heartbeat_at': _iso(job.worker_heartbeat_at),
-        'cancel_requested_at': _iso(job.cancel_requested_at),
-        'cancel_requested_by_id': job.cancel_requested_by_id,
-        'ok': result_payload.get('ok') if result_payload else job.status not in {CloudAssetSyncJob.STATUS_FAILED, CloudAssetSyncJob.STATUS_CANCELLED},
-        'created_at': _iso(job.created_at),
-        'started_at': _iso(job.started_at),
-        'finished_at': _iso(job.finished_at),
-        'updated_at': _iso(job.updated_at),
-        'requested_by_id': job.requested_by_id,
-    }
-    return payload
-
-
-def _execute_cloud_asset_sync_job(job_or_id):
-    job = job_or_id if isinstance(job_or_id, CloudAssetSyncJob) else CloudAssetSyncJob.objects.get(pk=job_or_id)
-    job.refresh_from_db()
-    if job.status == CloudAssetSyncJob.STATUS_CANCELLED:
-        _record_sync_job_event(
-            job,
-            CloudAssetSyncJobEvent.TYPE_CANCEL,
-            '任务已取消，worker 跳过执行',
-            payload={'run_id': job.run_id},
-            status_from=job.status,
-            status_to=job.status,
-            worker_id=job.worker_id,
-        )
-        return job
-    started_at = timezone.now()
-    previous_status = job.status
-    CloudAssetSyncJob.objects.filter(pk=job.pk).update(
-        status=CloudAssetSyncJob.STATUS_RUNNING,
-        started_at=started_at,
-        worker_heartbeat_at=started_at,
-        current_task='开始同步云资产',
-        updated_at=started_at,
-    )
-    _record_sync_job_event(
-        job,
-        CloudAssetSyncJobEvent.TYPE_STATUS,
-        '开始同步云资产',
-        payload={'run_id': job.run_id, 'request_payload': job.request_payload or {}},
-        status_from=previous_status,
-        status_to=CloudAssetSyncJob.STATUS_RUNNING,
-        worker_id=job.worker_id,
-    )
-    job.refresh_from_db()
-    try:
-        result_payload = _run_cloud_assets_sync(job.request_payload or {}, sync_run_id=job.run_id, job=job)
-        errors = result_payload.get('errors') or []
-        warnings = result_payload.get('warnings') or []
-        if result_payload.get('cancelled') or _sync_job_cancel_requested(job):
-            status = CloudAssetSyncJob.STATUS_CANCELLED
-        elif result_payload.get('ok') and not errors:
-            status = CloudAssetSyncJob.STATUS_SUCCEEDED
-        elif result_payload.get('ok'):
-            status = CloudAssetSyncJob.STATUS_PARTIAL
-        else:
-            status = CloudAssetSyncJob.STATUS_FAILED
-        finished_at = timezone.now()
-        current_task = (
-            '同步已取消'
-            if status == CloudAssetSyncJob.STATUS_CANCELLED
-            else ('同步完成' if status != CloudAssetSyncJob.STATUS_FAILED else '同步失败')
-        )
-        CloudAssetSyncJob.objects.filter(pk=job.pk).update(
-            status=status,
-            progress_current=F('progress_total'),
-            current_task=current_task,
-            errors=errors[:50],
-            warnings=warnings[:50],
-            logs=result_payload.get('logs') or [],
-            result_payload=result_payload,
-            finished_at=finished_at,
-            updated_at=finished_at,
-        )
-        _record_sync_job_event(
-            job,
-            CloudAssetSyncJobEvent.TYPE_STATUS,
-            current_task,
-            payload={
-                'status': status,
-                'errors': errors[:50],
-                'warnings': warnings[:50],
-                'tasks': result_payload.get('tasks') or [],
-                'skipped_tasks': result_payload.get('skipped_tasks') or [],
-                'cancelled': bool(result_payload.get('cancelled')),
-            },
-            status_from=CloudAssetSyncJob.STATUS_RUNNING,
-            status_to=status,
-            worker_id=job.worker_id,
-            log_level=logging.WARNING if status in {CloudAssetSyncJob.STATUS_FAILED, CloudAssetSyncJob.STATUS_CANCELLED} else logging.INFO,
-        )
-    except Exception as exc:
-        finished_at = timezone.now()
-        logger.exception('CLOUD_SYNC_JOB_FAILED job_id=%s run_id=%s', job.id, job.run_id)
-        CloudAssetSyncJob.objects.filter(pk=job.pk).update(
-            status=CloudAssetSyncJob.STATUS_FAILED,
-            current_task='同步异常退出',
-            errors=[str(exc)],
-            finished_at=finished_at,
-            updated_at=finished_at,
-        )
-        _record_sync_job_event(
-            job,
-            CloudAssetSyncJobEvent.TYPE_ERROR,
-            '同步异常退出',
-            payload={'error': str(exc)},
-            status_from=CloudAssetSyncJob.STATUS_RUNNING,
-            status_to=CloudAssetSyncJob.STATUS_FAILED,
-            worker_id=job.worker_id,
-            log_level=logging.ERROR,
-        )
-    job.refresh_from_db()
-    return job
-
-
-@csrf_exempt
-@dashboard_superuser_required
-@require_POST
-def sync_cloud_assets(request):
-    payload = _cloud_assets_sync_request_payload(request)
-    scope = _cloud_assets_sync_scope(payload)
-    sync_run_id = uuid.uuid4().hex
-    requested_by = request.user if getattr(request.user, 'is_authenticated', False) else None
-    job = CloudAssetSyncJob.objects.create(
-        run_id=sync_run_id,
-        requested_by=requested_by,
-        request_payload=payload,
-        providers=scope['providers'],
-        account_ids=scope['account_ids'],
-        asset_ids=scope['asset_ids'],
-        scope=scope,
-        current_task='已加入同步队列',
-    )
-    logger.info('CLOUD_SYNC_JOB_QUEUED job_id=%s run_id=%s scope=%s payload=%s', job.id, job.run_id, scope, payload)
-    _record_sync_job_event(
-        job,
-        CloudAssetSyncJobEvent.TYPE_QUEUED,
-        '同步任务已入队',
-        payload={'scope': scope, 'request_payload': payload},
-        status_from='',
-        status_to=CloudAssetSyncJob.STATUS_QUEUED,
-        actor=requested_by,
-    )
-    return _ok({
-        'ok': True,
-        'queued': True,
-        'job_id': job.id,
-        'run_id': job.run_id,
-        'status': job.status,
-        'message': '云资产同步已加入后台队列，等待同步 worker 执行',
-        'job': _cloud_asset_sync_job_payload(job),
-        'tasks': [],
-        'skipped_tasks': [],
-        'errors': [],
-        'warnings': [],
-    })
-
-
-@dashboard_login_required
-@require_GET
-def cloud_asset_sync_jobs_list(request):
-    queryset = CloudAssetSyncJob.objects.order_by('-created_at', '-id')
-    status = str(request.GET.get('status') or '').strip()
-    failed_only = str(request.GET.get('failed_only') or '').strip().lower() in {'1', 'true', 'yes', 'on'}
-    if failed_only:
-        queryset = queryset.filter(status__in=[CloudAssetSyncJob.STATUS_FAILED, CloudAssetSyncJob.STATUS_PARTIAL])
-    elif status == 'active':
-        queryset = queryset.filter(status__in=[CloudAssetSyncJob.STATUS_QUEUED, CloudAssetSyncJob.STATUS_RUNNING])
-    elif status == 'terminal':
-        queryset = queryset.filter(status__in=CloudAssetSyncJob.TERMINAL_STATUSES)
-    if status:
-        if status not in {'active', 'terminal'}:
-            queryset = queryset.filter(status=status)
-    page, page_size = _parse_dashboard_page(request, default_size=20, min_size=1, max_size=100)
-    total = queryset.count()
-    total_pages = max((total + page_size - 1) // page_size, 1)
-    page = min(page, total_pages)
-    start = (page - 1) * page_size
-    jobs = list(queryset[start:start + page_size])
-    return _ok({
-        'items': [_cloud_asset_sync_job_payload(job) for job in jobs],
-        'total': total,
-        'page': page,
-        'page_size': page_size,
-        'total_pages': total_pages,
-    })
-
-
-@dashboard_login_required
-@require_GET
-def cloud_asset_sync_job_detail(request, job_id: int):
-    job = CloudAssetSyncJob.objects.filter(pk=job_id).first()
-    if not job:
-        return _error('同步任务不存在', status=404)
-    return _ok(_cloud_asset_sync_job_payload(job))
-
-
-@csrf_exempt
-@dashboard_superuser_required
-@require_POST
-def retry_cloud_asset_sync_job(request, job_id: int):
-    source_job = CloudAssetSyncJob.objects.filter(pk=job_id).first()
-    if not source_job:
-        return _error('同步任务不存在', status=404)
-    if source_job.status in {CloudAssetSyncJob.STATUS_QUEUED, CloudAssetSyncJob.STATUS_RUNNING}:
-        return _error('任务仍在队列或执行中，不能重复重试', status=400)
-    scope = _cloud_assets_sync_scope(source_job.request_payload or {})
-    requested_by = request.user if getattr(request.user, 'is_authenticated', False) else None
-    job = CloudAssetSyncJob.objects.create(
-        run_id=uuid.uuid4().hex,
-        requested_by=requested_by,
-        request_payload=source_job.request_payload or {},
-        providers=scope['providers'],
-        account_ids=scope['account_ids'],
-        asset_ids=scope['asset_ids'],
-        scope={**scope, 'retry_of_job_id': source_job.id},
-        current_task='重试任务已加入同步队列',
-    )
-    logger.info('CLOUD_SYNC_JOB_RETRY_QUEUED source_job_id=%s job_id=%s run_id=%s scope=%s', source_job.id, job.id, job.run_id, job.scope)
-    _record_sync_job_event(
-        source_job,
-        CloudAssetSyncJobEvent.TYPE_RETRY,
-        '已创建重试任务',
-        payload={'retry_job_id': job.id, 'retry_run_id': job.run_id},
-        actor=requested_by,
-    )
-    _record_sync_job_event(
-        job,
-        CloudAssetSyncJobEvent.TYPE_QUEUED,
-        '重试任务已入队',
-        payload={'retry_of_job_id': source_job.id, 'scope': job.scope},
-        status_from='',
-        status_to=CloudAssetSyncJob.STATUS_QUEUED,
-        actor=requested_by,
-    )
-    return _ok({
-        'ok': True,
-        'queued': True,
-        'job_id': job.id,
-        'run_id': job.run_id,
-        'status': job.status,
-        'message': '同步重试已加入后台队列',
-        'job': _cloud_asset_sync_job_payload(job),
-    })
-
-
-@csrf_exempt
-@dashboard_superuser_required
-@require_POST
-def cancel_cloud_asset_sync_job(request, job_id: int):
-    job = CloudAssetSyncJob.objects.filter(pk=job_id).first()
-    if not job:
-        return _error('同步任务不存在', status=404)
-    if job.is_terminal:
-        return _error('任务已结束，不能取消', status=400)
-    actor = request.user if getattr(request.user, 'is_authenticated', False) else None
-    now = timezone.now()
-    if job.status == CloudAssetSyncJob.STATUS_QUEUED:
-        CloudAssetSyncJob.objects.filter(pk=job.pk).update(
-            status=CloudAssetSyncJob.STATUS_CANCELLED,
-            cancel_requested_at=now,
-            cancel_requested_by=actor,
-            current_task='任务已取消',
-            finished_at=now,
-            updated_at=now,
-        )
-        _record_sync_job_event(
-            job,
-            CloudAssetSyncJobEvent.TYPE_CANCEL,
-            '排队任务已取消',
-            payload={'previous_status': job.status},
-            status_from=job.status,
-            status_to=CloudAssetSyncJob.STATUS_CANCELLED,
-            actor=actor,
-            log_level=logging.WARNING,
-        )
-    else:
-        CloudAssetSyncJob.objects.filter(pk=job.pk).update(
-            cancel_requested_at=now,
-            cancel_requested_by=actor,
-            current_task='取消请求已提交，等待当前子任务结束',
-            updated_at=now,
-        )
-        _record_sync_job_event(
-            job,
-            CloudAssetSyncJobEvent.TYPE_CANCEL,
-            '运行中任务收到取消请求',
-            payload={'previous_status': job.status, 'progress_current': job.progress_current, 'progress_total': job.progress_total},
-            status_from=job.status,
-            status_to=job.status,
-            worker_id=job.worker_id,
-            actor=actor,
-            log_level=logging.WARNING,
-        )
-    job.refresh_from_db()
-    logger.warning('CLOUD_SYNC_JOB_CANCEL_REQUESTED job_id=%s run_id=%s status=%s actor_id=%s', job.id, job.run_id, job.status, getattr(actor, 'id', None))
-    return _ok({
-        'ok': True,
-        'cancelled': job.status == CloudAssetSyncJob.STATUS_CANCELLED,
-        'job': _cloud_asset_sync_job_payload(job),
-        'message': '同步任务已取消' if job.status == CloudAssetSyncJob.STATUS_CANCELLED else '取消请求已提交',
-    })
-
-
+# 功能：同步外部或派生数据；当前函数属于 后台 API 接口。
 @csrf_exempt
 @dashboard_superuser_required
 @require_POST
@@ -5179,6 +4251,7 @@ def sync_cloud_plans(request):
     })
 
 
+# 功能：提供 后台 API 接口 的内部辅助逻辑，供同模块流程复用。
 def _cloud_ip_log_note_newest_first(note):
     text = str(note or '').strip()
     if not text:
@@ -5187,6 +4260,7 @@ def _cloud_ip_log_note_newest_first(note):
     if len(lines) <= 1:
         return text
 
+    # 功能：提供 后台 API 接口 的内部辅助逻辑，供同模块流程复用。
     def _line_time(line):
         match = re.search(r'执行时间：(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})', line)
         return match.group(1) if match else ''
@@ -5198,6 +4272,7 @@ def _cloud_ip_log_note_newest_first(note):
     return '\n'.join(lines)
 
 
+# 功能：提供 后台 API 接口 的内部辅助逻辑，供同模块流程复用。
 def _cloud_ip_log_payload(item):
     user = item.user
     usernames = user.usernames if user else []
@@ -5239,94 +4314,7 @@ def _cloud_ip_log_payload(item):
     }
 
 
-@dashboard_login_required
-@require_GET
-def cloud_assets_sync_status(request):
-    latest_log = ExternalSyncLog.objects.filter(
-        source__in=[ExternalSyncLog.SOURCE_AWS, ExternalSyncLog.SOURCE_ALIYUN],
-        is_success=True,
-    ).order_by('-created_at', '-id').first()
-    latest_asset = CloudAsset.objects.filter(
-        source__in=[CloudAsset.SOURCE_AWS_SYNC, CloudAsset.SOURCE_ALIYUN],
-    ).order_by('-updated_at', '-id').first()
-    last_synced_at = None
-    if latest_log and latest_asset:
-        last_synced_at = max(latest_log.created_at, latest_asset.updated_at)
-    elif latest_log:
-        last_synced_at = latest_log.created_at
-    elif latest_asset:
-        last_synced_at = latest_asset.updated_at
-
-    since = last_synced_at
-    active_account_labels = list_cloud_account_labels(True)
-    active_account_filter = (
-        Q(cloud_account__is_active=True)
-        | Q(cloud_account__isnull=True, account_label__in=active_account_labels)
-    )
-    aws_existing_count = CloudAsset.objects.filter(
-        active_account_filter,
-        kind=CloudAsset.KIND_SERVER,
-        provider='aws_lightsail',
-    ).exclude(status=CloudAsset.STATUS_DELETED).count()
-    aliyun_existing_count = CloudAsset.objects.filter(
-        active_account_filter,
-        kind=CloudAsset.KIND_SERVER,
-        provider='aliyun_simple',
-    ).exclude(status=CloudAsset.STATUS_DELETED).count()
-    unattached_ip_count = CloudAsset.objects.filter(
-        active_account_filter,
-        kind=CloudAsset.KIND_SERVER,
-    ).filter(
-        Q(provider_status__icontains='未附加') | Q(note__icontains='未附加IP') | Q(note__icontains='未附加固定IP')
-    ).exclude(status__in=[
-        CloudAsset.STATUS_DELETED,
-        CloudAsset.STATUS_DELETING,
-        CloudAsset.STATUS_TERMINATED,
-        CloudAsset.STATUS_TERMINATING,
-    ]).count()
-    recent_syncs = []
-    for log in ExternalSyncLog.objects.filter(source=ExternalSyncLog.SOURCE_DASHBOARD, action='sync_cloud_assets').order_by('-created_at', '-id')[:5]:
-        response_payload = {}
-        try:
-            response_payload = json.loads(log.response_payload or '{}')
-        except Exception:
-            response_payload = {}
-        recent_syncs.append({
-            'id': log.id,
-            'created_at': _iso(log.created_at),
-            'is_success': log.is_success,
-            'target': log.target or '',
-            'error_message': log.error_message or '',
-            'providers': response_payload.get('providers') or [],
-            'tasks': response_payload.get('tasks') or [],
-            'skipped_tasks': response_payload.get('skipped_tasks') or [],
-        })
-    recent_jobs = [
-        _cloud_asset_sync_job_payload(job)
-        for job in CloudAssetSyncJob.objects.order_by('-created_at', '-id')[:5]
-    ]
-    active_jobs = [
-        _cloud_asset_sync_job_payload(job)
-        for job in CloudAssetSyncJob.objects
-        .filter(status__in=[CloudAssetSyncJob.STATUS_QUEUED, CloudAssetSyncJob.STATUS_RUNNING])
-        .order_by('created_at', 'id')[:5]
-    ]
-    return _ok({
-        'auto_sync_every_seconds': get_cloud_asset_sync_interval_seconds(),
-        'last_synced_at': _iso(last_synced_at),
-        'aws_existing_count': aws_existing_count,
-        'aliyun_existing_count': aliyun_existing_count,
-        'unattached_ip_count': unattached_ip_count,
-        'accounts': {
-            'aliyun': [_sync_account_payload(account) for account in _active_sync_accounts(CloudAccountConfig.PROVIDER_ALIYUN)],
-            'aws': [_sync_account_payload(account) for account in _active_sync_accounts(CloudAccountConfig.PROVIDER_AWS)],
-        },
-        'recent_syncs': recent_syncs,
-        'recent_jobs': recent_jobs,
-        'active_jobs': active_jobs,
-    })
-
-
+# 功能：处理 后台 API 接口 中的 cloud ip logs list 业务流程。
 @dashboard_login_required
 @require_GET
 def cloud_ip_logs_list(request):
@@ -5348,6 +4336,7 @@ def cloud_ip_logs_list(request):
     return _ok([_cloud_ip_log_payload(item) for item in queryset[:200]])
 
 
+# 功能：处理 后台 API 接口 中的 monitors list 业务流程。
 @dashboard_login_required
 @require_GET
 def monitors_list(request):
@@ -5408,6 +4397,7 @@ __all__ = [
     'cloud_assets_list',
     'cloud_assets_risk_summary',
     'cloud_asset_sync_jobs_list',
+    'cloud_asset_sync_jobs_metrics',
     'cloud_asset_sync_job_detail',
     'cancel_cloud_asset_sync_job',
     'retry_cloud_asset_sync_job',

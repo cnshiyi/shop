@@ -172,6 +172,12 @@ DB_ENGINE=sqlite SQLITE_NAME=local.sqlite3 uv run python run.py web
   - 缺失确认、二次确认、防误删保护
 - `cloud/api.py`
   - 云资产、云订单、云套餐、价格、监控、通知、自动续费等后台接口
+  - 单条代理状态更新仍保留在这里，批量同步任务入口从 `cloud/sync_jobs.py` re-export 给 URL 聚合使用
+- `cloud/sync_jobs.py`
+  - 云资产批量同步任务运行时
+  - 负责 `CloudAssetSyncJob` 入队、详情、列表、取消、重试、状态摘要和指标 API
+  - worker 执行按账号/选中资产串行推进，所有子任务开始、完成、日志、错误、进度和取消都写入 `CloudAssetSyncJobEvent`
+  - 同步成功后触发代理列表快照刷新；选中资产只刷新对应资产，全量同步刷新完整快照
 - `cloud/management/commands/`
   - `sync_aws_assets`
   - `sync_aliyun_assets`
@@ -184,6 +190,7 @@ DB_ENGINE=sqlite SQLITE_NAME=local.sqlite3 uv run python run.py web
   - `upsert_cloud_asset`
   - `refresh_cloud_asset_dashboard_snapshots`
   - `process_cloud_asset_sync_jobs`
+  - `prune_cloud_sync_job_events`
 
 ## 5. 路由面
 
@@ -194,7 +201,7 @@ DB_ENGINE=sqlite SQLITE_NAME=local.sqlite3 uv run python run.py web
 - Telegram 账号、登录、群组、消息
 - 商品、订单、充值
 - 云资产、云订单、云套餐、价格、服务器
-- 云资产同步任务列表、详情、重试和状态轮询
+- 云资产同步任务列表、详情、指标、重试、取消和状态轮询
 - 生命周期、通知、自动续费、监控
 - 站点配置、按钮配置、云账号、管理员账号
 
@@ -221,12 +228,16 @@ DB_ENGINE=sqlite SQLITE_NAME=local.sqlite3 uv run python run.py web
 
 ```bash
 uv run python manage.py check
-uv run python run.py web
+uv run python -m py_compile cloud/api.py cloud/sync_jobs.py cloud/management/commands/process_cloud_asset_sync_jobs.py cloud/management/commands/prune_cloud_sync_job_events.py shop/dashboard_urls.py
+uv run python manage.py makemigrations cloud --dry-run --check
+DJANGO_TEST_REUSE_DB=1 uv run python manage.py test cloud.tests.CloudServerServicesTestCase.test_sync_cloud_assets_runs_enabled_accounts_and_merges_results cloud.tests.CloudServerServicesTestCase.test_cloud_asset_sync_jobs_metrics_returns_operational_summary cloud.tests.CloudServerServicesTestCase.test_cancel_queued_cloud_asset_sync_job_marks_terminal_and_events cloud.tests.CloudServerServicesTestCase.test_sync_cloud_assets_with_selected_assets_uses_asset_scoped_tasks cloud.tests.CloudServerServicesTestCase.test_process_cloud_asset_sync_jobs_worker_processes_queued_job --keepdb --noinput --verbosity 1
 ```
 
-当前 web 已可在本地启动，访问地址为：
+前端验证在 `/Users/a399/Desktop/data/vue-shop-admin` 执行：
 
-`http://127.0.0.1:8000`
+```bash
+./node_modules/.bin/vue-tsc --noEmit --skipLibCheck -p apps/web-antd/tsconfig.json
+```
 
 ## 8. 运维备注
 

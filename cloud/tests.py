@@ -43,14 +43,16 @@ from cloud.provisioning import (
 )
 from cloud.services import _cloud_asset_deleted_or_missing, apply_cloud_server_renewal, create_cloud_server_order, create_cloud_server_rebuild_order, create_cloud_server_renewal, create_cloud_server_renewal_by_public_query, create_cloud_server_renewal_for_user, create_cloud_server_upgrade_order, ensure_cloud_asset_operation_order, get_cloud_server_by_ip, get_cloud_server_by_ip_for_user, get_group_proxy_asset_detail, get_proxy_asset_by_ip_for_admin, get_proxy_asset_by_ip_for_user, get_user_proxy_asset_detail, list_all_auto_renew_cloud_servers, list_cloud_asset_renewal_plans, list_cloud_server_upgrade_plans, list_group_cloud_servers, list_retained_ip_renewal_plans, list_retained_ip_renewal_plans_by_asset, list_user_cloud_servers, mark_cloud_server_ip_change_requested, mark_cloud_server_reinit_requested, pay_cloud_server_order_with_balance, pay_cloud_server_renewal_with_balance, prepare_cloud_asset_renewal_with_link, prepare_retained_ip_renewal_with_link, rebind_cloud_server_user, record_cloud_ip_log, replace_cloud_asset_order_by_admin, run_cloud_server_renewal_postcheck, set_cloud_server_auto_renew_admin, set_group_cloud_server_auto_renew, sync_cloud_asset_user_binding
 from cloud.sync_safety import get_missing_confirmation_threshold
-from cloud.api import _apply_server_missing_state, _cloud_order_source_tags, _display_cloud_asset_note, _execute_cloud_asset_sync_job, _fetch_address_chain_balances, auto_renew_task_detail, cancel_cloud_asset_sync_job, cloud_asset_sync_job_detail, cloud_asset_sync_jobs_list, cloud_assets_list, cloud_order_detail, cloud_orders_list, delete_cloud_asset, delete_cloud_order, delete_notice_history, delete_server, notice_task_detail, refresh_cloud_asset_dashboard_snapshots, refresh_notice_plan_table, retry_cloud_asset_sync_job, run_auto_renew_order, run_auto_renew_tasks, servers_list, sync_cloud_asset_status, sync_cloud_assets, tasks_overview, update_cloud_asset, update_cloud_order_status, update_notice_plan_text, update_notice_switches
+from cloud.api import _apply_server_missing_state, _cloud_order_source_tags, _display_cloud_asset_note, _execute_cloud_asset_sync_job, _fetch_address_chain_balances, auto_renew_task_detail, cancel_cloud_asset_sync_job, cloud_asset_sync_job_detail, cloud_asset_sync_jobs_list, cloud_asset_sync_jobs_metrics, cloud_assets_list, cloud_order_detail, cloud_orders_list, delete_cloud_asset, delete_cloud_order, delete_notice_history, delete_server, notice_task_detail, refresh_cloud_asset_dashboard_snapshots, refresh_notice_plan_table, retry_cloud_asset_sync_job, run_auto_renew_order, run_auto_renew_tasks, servers_list, sync_cloud_asset_status, sync_cloud_assets, tasks_overview, update_cloud_asset, update_cloud_order_status, update_notice_plan_text, update_notice_switches
 from core.cloud_accounts import cloud_account_label, cloud_account_label_variants, list_cloud_accounts_by_server_load
 from core.models import CloudAccountConfig, SiteConfig
 from core.persistence import bump_daily_address_stat
 from orders.payment_scanner import _confirm_cloud_server_order
 
 
+# 测试类：组织 CloudServerServicesTestCase 相关的回归测试。
 class CloudServerServicesTestCase(TestCase):
+    # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
     def test_cloud_account_label_variants_cover_legacy_colon_labels(self):
         account = CloudAccountConfig.objects.create(
             provider=CloudAccountConfig.PROVIDER_AWS,
@@ -68,6 +70,7 @@ class CloudServerServicesTestCase(TestCase):
         self.assertIn('aws:123456789012:legacy-label-account', variants)
         self.assertNotIn('aws', variants)
 
+    # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
     def test_account_load_does_not_count_provider_only_legacy_label_for_every_account(self):
         first = CloudAccountConfig.objects.create(
             provider=CloudAccountConfig.PROVIDER_AWS,
@@ -108,6 +111,7 @@ class CloudServerServicesTestCase(TestCase):
 
         self.assertEqual([item.id for item in ordered[:2]], [second.id, first.id])
 
+    # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
     def test_aliyun_desired_plan_id_is_preferred_without_locking_candidates(self):
         from cloud.aliyun_simple import _prefer_plan_id
 
@@ -121,6 +125,7 @@ class CloudServerServicesTestCase(TestCase):
 
         self.assertEqual([item['PlanId'] for item in ordered], ['desired-plan', 'fallback-plan', 'larger-plan'])
 
+    # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
     def test_aws_sync_server_resolution_accepts_legacy_account_label(self):
         from cloud.management.commands.sync_aws_assets import _resolve_server
 
@@ -148,6 +153,7 @@ class CloudServerServicesTestCase(TestCase):
 
         self.assertEqual(resolved, server)
 
+    # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
     def test_aws_sync_resolution_does_not_match_cross_region_same_instance_without_ip(self):
         from cloud.management.commands.sync_aws_assets import _resolve_asset, _resolve_server
 
@@ -183,6 +189,7 @@ class CloudServerServicesTestCase(TestCase):
         self.assertIsNone(_resolve_asset('same-name-no-ip', '', '', None, account, 'ap-southeast-1'))
         self.assertIsNone(_resolve_server('same-name-no-ip', '', '', None, account, 'ap-southeast-1'))
 
+    # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
     def test_aliyun_sync_resolution_does_not_match_cross_region_same_instance_without_ip(self):
         from cloud.management.commands.sync_aliyun_assets import _resolve_asset, _resolve_server
 
@@ -218,6 +225,7 @@ class CloudServerServicesTestCase(TestCase):
         self.assertIsNone(_resolve_asset('aliyun-same-name-no-ip', '', account, 'cn-hongkong'))
         self.assertIsNone(_resolve_server('aliyun-same-name-no-ip', '', account, 'cn-hongkong'))
 
+    # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
     def test_aliyun_audit_inventory_uses_asset_account(self):
         from cloud.management.commands.audit_cloud_asset_ip_presence import Command
 
@@ -231,7 +239,9 @@ class CloudServerServicesTestCase(TestCase):
         )
         captured = {}
 
+        # 测试类：组织 FakeClient 相关的回归测试。
         class FakeClient:
+            # 功能：查询并返回列表数据；当前函数属于 云资产、云订单和生命周期。
             def list_instances_with_options(self, request, runtime_options):
                 captured['request'] = request
                 return SimpleNamespace(body=SimpleNamespace(to_map=lambda: {'Instances': []}))
@@ -245,6 +255,7 @@ class CloudServerServicesTestCase(TestCase):
         build_client.assert_called_once()
         self.assertIs(build_client.call_args.kwargs['account'], account)
 
+    # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
     def test_daily_address_stats_are_separated_by_account_key(self):
         user = TelegramUser.objects.create(tg_user_id=9901001, username='daily_stat_scope')
         stats_date = timezone.localdate()
@@ -282,12 +293,14 @@ class CloudServerServicesTestCase(TestCase):
             2,
         )
 
+    # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
     def test_server_connection_ip_guard_rejects_mismatch_before_ssh(self):
         ok, note = validate_server_connection_ip('54.151.227.23', ['13.228.232.184'], context='test_mismatch')
 
         self.assertFalse(ok)
         self.assertIn('目标 IP 54.151.227.23 与预期 IP 13.228.232.184 不一致', note)
 
+    # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
     def test_cloud_created_server_name_uses_actual_aws_instance_name_only(self):
         aws_result = SimpleNamespace(instance_id='requested-node-1')
         aliyun_result = SimpleNamespace(instance_id='i-aliyun-resource-id')
@@ -295,6 +308,7 @@ class CloudServerServicesTestCase(TestCase):
         self.assertEqual(_cloud_created_server_name('aws_lightsail', 'requested-node', aws_result), 'requested-node-1')
         self.assertEqual(_cloud_created_server_name('aliyun_simple', 'requested-node', aliyun_result), 'requested-node')
 
+    # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
     def test_cloud_orders_list_exposes_auto_renew_enabled(self):
         order = CloudServerOrder.objects.create(
             order_no='ORDER-LIST-AUTO-RENEW-1',
@@ -325,12 +339,14 @@ class CloudServerServicesTestCase(TestCase):
         row = next(item for item in rows if item['id'] == order.id)
         self.assertTrue(row['auto_renew_enabled'])
 
+    # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
     def test_server_connection_ip_guard_requires_public_ipv4(self):
         ok, note = validate_server_connection_ip('127.0.0.1', ['127.0.0.1'], context='test_loopback')
 
         self.assertFalse(ok)
         self.assertIn('目标 IP 无效', note)
 
+    # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
     def test_server_connection_ip_guard_retries_mismatch_until_refreshed(self):
         refreshed = iter(['54.151.227.23', '13.228.232.184'])
 
@@ -347,6 +363,7 @@ class CloudServerServicesTestCase(TestCase):
         self.assertEqual(final_ip, '13.228.232.184')
         self.assertIn('第 3 次校验通过', note)
 
+    # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
     def test_server_connection_ip_guard_does_not_retry_invalid_target(self):
         refresh = AsyncMock(return_value='13.228.232.184')
 
@@ -365,11 +382,15 @@ class CloudServerServicesTestCase(TestCase):
         self.assertIn('目标 IP 无效', note)
         refresh.assert_not_called()
 
+    # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
     def test_aws_expected_ip_existence_check_passes_when_static_ip_exists(self):
+        # 测试类：组织 Client 相关的回归测试。
         class Client:
+            # 功能：读取并返回相关数据；当前函数属于 云资产、云订单和生命周期。
             def get_static_ips(self):
                 return {'staticIps': [{'ipAddress': '13.228.232.184'}]}
 
+            # 功能：读取并返回相关数据；当前函数属于 云资产、云订单和生命周期。
             def get_instances(self):
                 return {'instances': []}
 
@@ -379,11 +400,15 @@ class CloudServerServicesTestCase(TestCase):
         self.assertTrue(ok)
         self.assertIn('存在于固定 IP', note)
 
+    # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
     def test_aws_expected_ip_existence_check_fails_when_ip_missing(self):
+        # 测试类：组织 Client 相关的回归测试。
         class Client:
+            # 功能：读取并返回相关数据；当前函数属于 云资产、云订单和生命周期。
             def get_static_ips(self):
                 return {'staticIps': [{'ipAddress': '54.151.227.23'}]}
 
+            # 功能：读取并返回相关数据；当前函数属于 云资产、云订单和生命周期。
             def get_instances(self):
                 return {'instances': [{'publicIpAddress': '54.151.227.24'}]}
 
@@ -393,6 +418,7 @@ class CloudServerServicesTestCase(TestCase):
         self.assertFalse(ok)
         self.assertIn('在当前云账号中不存在', note)
 
+    # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
     def test_manual_order_delete_bypasses_schedule_limits(self):
         from bot.api import _run_shutdown_order_sync
 
@@ -425,6 +451,7 @@ class CloudServerServicesTestCase(TestCase):
         self.assertTrue(result['ok'])
         safe_time.assert_not_called()
 
+    # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
     def test_manual_orphan_asset_delete_bypasses_schedule_limits(self):
         from bot.api import _run_orphan_asset_delete_sync
 
@@ -456,6 +483,7 @@ class CloudServerServicesTestCase(TestCase):
         self.assertTrue(result['ok'])
         safe_time.assert_not_called()
 
+    # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
     def test_manual_unattached_ip_delete_writes_log_and_history_item(self):
         from bot.api import _run_unattached_ip_delete_sync
 
@@ -492,6 +520,7 @@ class CloudServerServicesTestCase(TestCase):
         self.assertIn('manual release ok', history[0]['note'])
         self.assertEqual(history[0]['deletion_source_label'], '人工手动删除')
 
+    # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
     def test_legacy_unattached_ip_delete_log_without_known_note_shows_history(self):
         asset = CloudAsset.objects.create(
             kind=CloudAsset.KIND_SERVER,
@@ -521,6 +550,7 @@ class CloudServerServicesTestCase(TestCase):
         self.assertIn('旧版本释放成功', history[0]['note'])
         self.assertEqual(history[0]['deletion_source_label'], '到期自动删除')
 
+    # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
     def test_manual_order_delete_writes_server_history_item(self):
         from bot.api import _run_shutdown_order_sync
 
@@ -566,10 +596,13 @@ class CloudServerServicesTestCase(TestCase):
         self.assertIn('manual server delete ok', history[0]['note'])
         self.assertEqual(history[0]['deletion_source_label'], '人工手动删除')
 
+    # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
     def test_missing_aws_instance_delete_marks_order_history(self):
         from bot.api import _run_shutdown_order_sync
 
+        # 测试类：组织 Client 相关的回归测试。
         class Client:
+            # 功能：删除或标记删除相关业务对象；当前函数属于 云资产、云订单和生命周期。
             def delete_instance(self, instanceName):
                 raise Exception('NotFoundException: instance does not exist')
 
@@ -597,10 +630,13 @@ class CloudServerServicesTestCase(TestCase):
         self.assertEqual(order.status, 'deleted')
         self.assertTrue(CloudIpLog.objects.filter(order=order, event_type='deleted').exists())
 
+    # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
     def test_missing_aws_orphan_asset_delete_marks_asset_history(self):
         from bot.api import _run_orphan_asset_delete_sync
 
+        # 测试类：组织 Client 相关的回归测试。
         class Client:
+            # 功能：删除或标记删除相关业务对象；当前函数属于 云资产、云订单和生命周期。
             def delete_instance(self, instanceName):
                 raise Exception('NotFoundException: instance does not exist')
 
@@ -625,6 +661,7 @@ class CloudServerServicesTestCase(TestCase):
         self.assertEqual(asset.status, CloudAsset.STATUS_DELETED)
         self.assertTrue(CloudIpLog.objects.filter(asset=asset, event_type='deleted').exists())
 
+    # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
     def test_dashboard_shutdown_plan_run_respects_delete_at(self):
         from bot.api import run_shutdown_plan_order
 
@@ -664,6 +701,7 @@ class CloudServerServicesTestCase(TestCase):
         self.assertEqual(data['success_count'], 0)
         self.assertIn('服务器删除时间未到', data['message'])
 
+    # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
     def test_dashboard_orphan_asset_plan_run_respects_computed_delete_time(self):
         from bot.api import run_orphan_asset_delete_plan
 
@@ -704,6 +742,7 @@ class CloudServerServicesTestCase(TestCase):
         self.assertEqual(data['success_count'], 0)
         self.assertIn('未到服务器删除时间', data['message'])
 
+    # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
     def test_dashboard_unattached_ip_plan_run_respects_delete_time(self):
         from bot.api import run_unattached_ip_delete_plan
 
@@ -741,6 +780,7 @@ class CloudServerServicesTestCase(TestCase):
         self.assertEqual(data['success_count'], 0)
         self.assertIn('未到 IP 删除时间', data['message'])
 
+    # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
     def test_dashboard_unattached_ip_plan_run_uses_ip_delete_time_window(self):
         from bot.api import run_unattached_ip_delete_plan
 
@@ -780,6 +820,7 @@ class CloudServerServicesTestCase(TestCase):
         self.assertEqual(data['success_count'], 0)
         self.assertIn('IP 删除执行时间窗口', data['message'])
 
+    # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
     def test_unattached_ip_delete_respects_shutdown_disabled_account(self):
         from bot.api import _run_unattached_ip_delete_sync, _unattached_ip_delete_items
 
@@ -814,6 +855,7 @@ class CloudServerServicesTestCase(TestCase):
         self.assertIn('关机计划已关闭', result['error'])
         self.assertEqual(row['queue_status'], 'shutdown_disabled')
 
+    # 功能：处理 云资产、云订单和生命周期 中的 setUp 业务流程。
     def setUp(self):
         self.factory = RequestFactory()
         self.user = TelegramUser.objects.create(tg_user_id=990001, username='svc_test')
@@ -832,6 +874,7 @@ class CloudServerServicesTestCase(TestCase):
             sort_order=100,
         )
 
+    # 功能：提供 云资产、云订单和生命周期 的内部辅助逻辑，供同模块流程复用。
     def _attach_bearer_session(self, request, user):
         SessionMiddleware(lambda req: None).process_request(request)
         request.session['_auth_user_id'] = str(user.pk)
@@ -842,6 +885,7 @@ class CloudServerServicesTestCase(TestCase):
         request.META['HTTP_AUTHORIZATION'] = f'Bearer session-{request.session.session_key}'
         return request
 
+    # 功能：提供 云资产、云订单和生命周期 的内部辅助逻辑，供同模块流程复用。
     def _aws_test_account(self):
         account = getattr(self, '_cached_aws_test_account', None)
         if account:
@@ -857,12 +901,14 @@ class CloudServerServicesTestCase(TestCase):
         self._cached_aws_test_account = account
         return account
 
+    # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
     def test_lifecycle_aws_client_requires_bound_account(self):
         from cloud.lifecycle import _aws_client
 
         with self.assertRaisesMessage(ValueError, '缺少绑定的 AWS 云账号'):
             _aws_client(self.plan.region_code, None)
 
+    # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
     def test_aws_create_client_requires_bound_account(self):
         from cloud.aws_lightsail import _aws_client_from_order_data
 
@@ -875,6 +921,7 @@ class CloudServerServicesTestCase(TestCase):
         self.assertIsNone(client)
         self.assertIn('缺少绑定的 AWS 云账号', error)
 
+    # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
     def test_aliyun_create_and_renew_require_bound_account(self):
         from cloud.aliyun_simple import _create_instance_sync
 
@@ -903,6 +950,7 @@ class CloudServerServicesTestCase(TestCase):
         self.assertFalse(create_result.ok)
         self.assertIn('缺少订单绑定的启用云账号', create_result.note)
 
+    # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
     def test_renewal_aws_runtime_check_requires_bound_account(self):
         from cloud.services import _aws_lightsail_client_for_order
 
@@ -926,6 +974,7 @@ class CloudServerServicesTestCase(TestCase):
         with self.assertRaisesMessage(ValueError, '缺少绑定的 AWS 云账号'):
             _aws_lightsail_client_for_order(order)
 
+    # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
     def test_sync_servers_missing_state_does_not_bypass_provider_confirmation(self):
         order = CloudServerOrder.objects.create(
             order_no='SYNC-SERVERS-NO-INSTANT-DELETE',
@@ -983,6 +1032,7 @@ class CloudServerServicesTestCase(TestCase):
         self.assertEqual(asset.status, CloudAsset.STATUS_RUNNING)
         self.assertEqual(server.status, Server.STATUS_RUNNING)
 
+    # 功能：提供 云资产、云订单和生命周期 的内部辅助逻辑，供同模块流程复用。
     def _create_auto_renew_asset(self, order, *, status=None, asset_name=None):
         return CloudAsset.objects.create(
             kind=CloudAsset.KIND_SERVER,
@@ -998,6 +1048,7 @@ class CloudServerServicesTestCase(TestCase):
             status=status or CloudAsset.STATUS_RUNNING,
         )
 
+    # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
     def test_dedupe_cloud_assets_does_not_merge_cross_account_same_ip(self):
         CloudAsset.objects.create(
             kind=CloudAsset.KIND_SERVER,
@@ -1024,6 +1075,7 @@ class CloudServerServicesTestCase(TestCase):
 
         self.assertEqual(CloudAsset.objects.filter(public_ip='13.250.30.10').count(), 2)
 
+    # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
     def test_dedupe_cloud_assets_merges_same_cloud_account_label_variants(self):
         account = CloudAccountConfig.objects.create(
             provider=CloudAccountConfig.PROVIDER_AWS,
@@ -1069,6 +1121,7 @@ class CloudServerServicesTestCase(TestCase):
         log.refresh_from_db()
         self.assertEqual(log.asset_id, keep_asset.id)
 
+    # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
     def test_cloud_assets_list_dedupes_same_cloud_account_label_variants(self):
         account = CloudAccountConfig.objects.create(
             provider=CloudAccountConfig.PROVIDER_AWS,
@@ -1113,6 +1166,7 @@ class CloudServerServicesTestCase(TestCase):
         self.assertEqual(payload['total'], 1)
         self.assertEqual(payload['items'][0]['id'], keep_asset.id)
 
+    # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
     def test_cloud_assets_list_uses_bulk_order_inference_without_per_asset_fallback(self):
         order = CloudServerOrder.objects.create(
             order_no='BULK-LIST-INFER-001',
@@ -1154,6 +1208,7 @@ class CloudServerServicesTestCase(TestCase):
         self.assertEqual(row['order_id'], order.id)
         self.assertEqual(row['user_id'], self.user.id)
 
+    # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
     def test_cloud_assets_list_does_not_persist_unattached_ip_expiry(self):
         asset = CloudAsset.objects.create(
             kind=CloudAsset.KIND_SERVER,
@@ -1180,6 +1235,7 @@ class CloudServerServicesTestCase(TestCase):
         asset.refresh_from_db()
         self.assertIsNone(asset.actual_expires_at)
 
+    # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
     def test_cloud_asset_dashboard_snapshot_refresh_materializes_paginated_list(self):
         asset = CloudAsset.objects.create(
             kind=CloudAsset.KIND_SERVER,
@@ -1208,6 +1264,7 @@ class CloudServerServicesTestCase(TestCase):
         self.assertEqual(payload['total'], 1)
         self.assertEqual(payload['items'][0]['id'], asset.id)
 
+    # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
     def test_dedupe_cloud_assets_does_not_merge_cross_region_same_instance(self):
         for region, public_ip in [('ap-southeast-1', '13.250.30.15'), ('ap-northeast-1', '13.250.30.16')]:
             CloudAsset.objects.create(
@@ -1226,6 +1283,7 @@ class CloudServerServicesTestCase(TestCase):
 
         self.assertEqual(CloudAsset.objects.filter(instance_id='same-instance-name').count(), 2)
 
+    # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
     def test_dedupe_cloud_assets_keeps_same_instance_with_different_ips(self):
         for public_ip in ['13.250.31.15', '13.250.31.16']:
             CloudAsset.objects.create(
@@ -1244,6 +1302,7 @@ class CloudServerServicesTestCase(TestCase):
 
         self.assertEqual(CloudAsset.objects.filter(instance_id='same-instance-different-ip').count(), 2)
 
+    # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
     def test_dedupe_servers_does_not_delete_cross_account_instance_id(self):
         Server.objects.create(
             source=Server.SOURCE_AWS_SYNC,
@@ -1268,6 +1327,7 @@ class CloudServerServicesTestCase(TestCase):
 
         self.assertEqual(Server.objects.filter(instance_id='same-instance-name').count(), 2)
 
+    # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
     def test_dedupe_servers_does_not_delete_cross_region_instance_id(self):
         for region, public_ip in [('ap-southeast-1', '13.250.30.17'), ('ap-northeast-1', '13.250.30.18')]:
             Server.objects.create(
@@ -1284,6 +1344,7 @@ class CloudServerServicesTestCase(TestCase):
 
         self.assertEqual(Server.objects.filter(instance_id='same-region-instance-name').count(), 2)
 
+    # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
     def test_dedupe_servers_keeps_same_instance_with_different_ips(self):
         for public_ip in ['13.250.31.17', '13.250.31.18']:
             Server.objects.create(
@@ -1300,6 +1361,7 @@ class CloudServerServicesTestCase(TestCase):
 
         self.assertEqual(Server.objects.filter(instance_id='server-same-instance-different-ip').count(), 2)
 
+    # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
     def test_upsert_cloud_asset_keeps_server_records_separated_by_account(self):
         for account_label, public_ip in [('aws+111+primary', '13.250.30.13'), ('aws+222+secondary', '13.250.30.14')]:
             call_command(
@@ -1315,6 +1377,7 @@ class CloudServerServicesTestCase(TestCase):
         self.assertEqual(CloudAsset.objects.filter(instance_id='manual-same-instance').count(), 2)
         self.assertEqual(Server.objects.filter(instance_id='manual-same-instance').count(), 2)
 
+    # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
     def test_upsert_cloud_asset_keeps_same_instance_with_different_ips(self):
         for public_ip in ['13.250.31.19', '13.250.31.20']:
             call_command(
@@ -1332,6 +1395,7 @@ class CloudServerServicesTestCase(TestCase):
         self.assertTrue(Server.objects.filter(instance_id='manual-same-instance-different-ip', public_ip='13.250.31.19').exists())
         self.assertTrue(Server.objects.filter(instance_id='manual-same-instance-different-ip', public_ip='13.250.31.20').exists())
 
+    # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
     def test_rebind_cloud_server_user_syncs_order_asset_and_server(self):
         new_user = TelegramUser.objects.create(tg_user_id=990002, username='svc_rebind_new')
         order = CloudServerOrder.objects.create(
@@ -1388,6 +1452,7 @@ class CloudServerServicesTestCase(TestCase):
         self.assertEqual(asset.user_id, new_user.id)
         self.assertEqual(server.user_id, new_user.id)
 
+    # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
     def test_cloud_order_wallet_pay_uses_total_amount_not_address_unique_amount(self):
         self.user.balance = Decimal('19.00')
         self.user.save(update_fields=['balance', 'updated_at'])
@@ -1417,6 +1482,7 @@ class CloudServerServicesTestCase(TestCase):
         self.assertEqual(paid_order.pay_amount, Decimal('19.000000000'))
         self.assertEqual(paid_order.currency, 'USDT')
 
+    # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
     def test_cloud_order_wallet_pay_trx_converts_total_amount_once(self):
         self.user.balance_trx = Decimal('100.00')
         self.user.save(update_fields=['balance_trx', 'updated_at'])
@@ -1436,6 +1502,7 @@ class CloudServerServicesTestCase(TestCase):
             status='pending',
         )
 
+        # 功能：处理 云资产、云订单和生命周期 中的 fake usdt to trx 业务流程。
         async def fake_usdt_to_trx(amount):
             self.assertEqual(amount, Decimal('19.000000'))
             return Decimal('100.00')
@@ -1451,6 +1518,7 @@ class CloudServerServicesTestCase(TestCase):
         self.assertEqual(paid_order.pay_amount, Decimal('100.000000000'))
         self.assertEqual(paid_order.currency, 'TRX')
 
+    # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
     def test_cloud_renewal_address_order_uses_usdt_even_after_trx_wallet_order(self):
         order = CloudServerOrder.objects.create(
             order_no='RENEW-TRX-SOURCE-USDT-ADDRESS-1',
@@ -1479,6 +1547,7 @@ class CloudServerServicesTestCase(TestCase):
         self.assertGreaterEqual(renewal.pay_amount, Decimal('19.001000000'))
         self.assertLess(renewal.pay_amount, Decimal('20.000000000'))
 
+    # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
     def test_cloud_address_order_forces_usdt_when_requested_trx(self):
         order = async_to_sync(create_cloud_server_order)(self.user.id, self.plan.id, 'TRX', 1)
 
@@ -1487,6 +1556,7 @@ class CloudServerServicesTestCase(TestCase):
         self.assertGreaterEqual(order.pay_amount, Decimal('19.001000000'))
         self.assertLess(order.pay_amount, Decimal('20.000000000'))
 
+    # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
     def test_unbound_asset_renewal_address_order_forces_usdt_from_trx_source(self):
         self.plan.currency = 'TRX'
         self.plan.save(update_fields=['currency'])
@@ -1527,6 +1597,7 @@ class CloudServerServicesTestCase(TestCase):
         self.assertGreaterEqual(order.pay_amount, Decimal('19.001000000'))
         self.assertLess(order.pay_amount, Decimal('20.000000000'))
 
+    # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
     def test_retained_ip_renewal_address_order_forces_usdt_from_trx_order(self):
         self.plan.currency = 'TRX'
         self.plan.save(update_fields=['currency'])
@@ -1568,6 +1639,7 @@ class CloudServerServicesTestCase(TestCase):
         self.assertGreaterEqual(renewal.pay_amount, Decimal('19.001000000'))
         self.assertLess(renewal.pay_amount, Decimal('20.000000000'))
 
+    # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
     def test_lifecycle_delete_notice_batches_multiple_ips_for_same_user(self):
         now = timezone.now()
         orders = []
@@ -1637,6 +1709,7 @@ class CloudServerServicesTestCase(TestCase):
             order.refresh_from_db()
             self.assertIsNotNone(order.delete_notice_sent_at)
 
+    # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
     def test_update_cloud_asset_write_requires_superuser(self):
         staff = get_user_model().objects.create_user(username='staff_asset_update_forbidden', password='x', is_staff=True)
         asset = CloudAsset.objects.create(
@@ -1671,6 +1744,7 @@ class CloudServerServicesTestCase(TestCase):
         self.assertEqual(asset.public_ip, '11.11.10.10')
         self.assertEqual(asset.price, Decimal('19.00'))
 
+    # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
     def test_update_cloud_asset_rejects_collapsed_telegram_group_binding(self):
         admin = get_user_model().objects.create_user(username='admin_bind_group', password='x', is_staff=True, is_superuser=True)
         asset = CloudAsset.objects.create(
@@ -1721,6 +1795,7 @@ class CloudServerServicesTestCase(TestCase):
         asset.refresh_from_db()
         self.assertEqual(asset.telegram_group_id, visible_group.id)
 
+    # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
     def test_update_cloud_asset_allows_clearing_telegram_group_binding(self):
         admin = get_user_model().objects.create_user(username='admin_unbind_group', password='x', is_staff=True, is_superuser=True)
         group = TelegramGroupFilter.objects.create(
@@ -1755,6 +1830,7 @@ class CloudServerServicesTestCase(TestCase):
         asset.refresh_from_db()
         self.assertIsNone(asset.telegram_group_id)
 
+    # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
     def test_update_cloud_asset_defers_snapshot_refresh(self):
         admin = get_user_model().objects.create_user(username='admin_defer_asset_refresh', password='x', is_staff=True, is_superuser=True)
         asset = CloudAsset.objects.create(
@@ -1784,12 +1860,14 @@ class CloudServerServicesTestCase(TestCase):
         direct_refresh.assert_not_called()
         deferred_refresh.assert_called_once_with(f'cloud_asset:{asset.id}')
 
+    # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
     def test_cloud_assets_paginated_uses_true_database_pages(self):
         admin = get_user_model().objects.create_user(username='admin_asset_pages', password='x', is_staff=True)
         first_user = TelegramUser.objects.create(tg_user_id=991001, username='page_first')
         boundary_user = TelegramUser.objects.create(tg_user_id=991002, username='page_boundary')
         tail_user = TelegramUser.objects.create(tg_user_id=991003, username='page_tail')
 
+        # 功能：创建相关业务对象；当前函数属于 云资产、云订单和生命周期。
         def create_asset(user, index, sort_order):
             return CloudAsset.objects.create(
                 kind=CloudAsset.KIND_SERVER,
@@ -1828,12 +1906,14 @@ class CloudServerServicesTestCase(TestCase):
         self.assertEqual(len(page2_boundary_ids), 1)
         self.assertNotEqual(page2_boundary_ids, boundary_ids)
 
+    # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
     def test_cloud_assets_paginated_uses_true_database_pages_for_telegram_group_sort(self):
         admin = get_user_model().objects.create_user(username='admin_asset_group_pages', password='x', is_staff=True)
         first_group = TelegramGroupFilter.objects.create(chat_id=-1001991001, title='Page First Group', enabled=True)
         boundary_group = TelegramGroupFilter.objects.create(chat_id=-1001991002, title='Page Boundary Group', enabled=True)
         tail_group = TelegramGroupFilter.objects.create(chat_id=-1001991003, title='Page Tail Group', enabled=True)
 
+        # 功能：创建相关业务对象；当前函数属于 云资产、云订单和生命周期。
         def create_asset(group, index, sort_order):
             return CloudAsset.objects.create(
                 kind=CloudAsset.KIND_SERVER,
@@ -1873,6 +1953,7 @@ class CloudServerServicesTestCase(TestCase):
         self.assertEqual(len(page2_boundary_ids), 1)
         self.assertNotEqual(page2_boundary_ids, boundary_ids)
 
+    # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
     def test_cloud_assets_grouped_paginated_uses_twenty_user_groups_per_page(self):
         admin = get_user_model().objects.create_user(username='admin_asset_grouped_user_pages', password='x', is_staff=True)
         for index in range(1, 23):
@@ -1909,6 +1990,7 @@ class CloudServerServicesTestCase(TestCase):
         self.assertEqual(len(payload2['groups']), 2)
         self.assertEqual(len(payload2['items']), 2)
 
+    # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
     def test_cloud_assets_list_filters_by_risk_and_searches_asset_identifiers(self):
         admin = get_user_model().objects.create_user(username='admin_asset_risk_filter', password='x', is_staff=True)
         group = TelegramGroupFilter.objects.create(chat_id=-1001993001, title='Risk Filter Group', enabled=True)
@@ -1993,6 +2075,7 @@ class CloudServerServicesTestCase(TestCase):
         search_payload = json.loads(search_response.content.decode('utf-8'))['data']
         self.assertEqual([item['id'] for item in search_payload['items']], [due_asset.id])
 
+    # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
     def test_cloud_assets_search_filters_full_dataset_before_pagination(self):
         admin = get_user_model().objects.create_user(username='admin_asset_full_search', password='x', is_staff=True)
         target_user = TelegramUser.objects.create(tg_user_id=991900, username='target_full_search', first_name='代理昵称阿尔法')
@@ -2079,6 +2162,7 @@ class CloudServerServicesTestCase(TestCase):
         nickname_search_payload = json.loads(nickname_search_response.content.decode('utf-8'))['data']
         self.assertEqual([item['id'] for item in nickname_search_payload['items']], [target_asset.id])
 
+    # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
     def test_cloud_assets_search_expands_to_all_assets_for_matched_user(self):
         admin = get_user_model().objects.create_user(username='admin_asset_user_search_expand', password='x', is_staff=True)
         target_user = TelegramUser.objects.create(
@@ -2144,6 +2228,7 @@ class CloudServerServicesTestCase(TestCase):
             self.assertEqual(result_ids, {item.id for item in target_assets})
             self.assertNotIn(decoy_asset.id, result_ids)
 
+    # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
     def test_cloud_asset_expired_filter_excludes_unattached_ip_assets(self):
         admin = get_user_model().objects.create_user(username='admin_asset_expired_unattached_filter', password='x', is_staff=True)
         group = TelegramGroupFilter.objects.create(chat_id=-1001993002, title='Risk Filter Group 2', enabled=True)
@@ -2197,6 +2282,7 @@ class CloudServerServicesTestCase(TestCase):
         self.assertEqual(unattached_payload['items'][0]['risk_status'], 'unattached_ip')
         self.assertNotIn('expired', unattached_payload['items'][0]['risk_statuses'])
 
+    # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
     def test_create_cloud_server_renewal_rejects_deleted_or_ipless_order(self):
         order = CloudServerOrder.objects.create(
             order_no='HB-TEST-RENEW-1',
@@ -2218,6 +2304,7 @@ class CloudServerServicesTestCase(TestCase):
 
         self.assertFalse(result)
 
+    # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
     def test_apply_cloud_server_renewal_keeps_original_service_started_at(self):
         original_started_at = timezone.now() - timezone.timedelta(days=20)
         original_expiry = timezone.now() + timezone.timedelta(days=10)
@@ -2246,6 +2333,7 @@ class CloudServerServicesTestCase(TestCase):
         self.assertEqual(renewed.service_started_at, original_started_at)
         self.assertGreater(renewed.service_expires_at, original_expiry)
 
+    # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
     def test_renewal_postcheck_skips_running_records(self):
         old_expiry = timezone.now() + timezone.timedelta(days=7)
         new_expiry = timezone.now() + timezone.timedelta(days=38)
@@ -2315,6 +2403,7 @@ class CloudServerServicesTestCase(TestCase):
         self.assertEqual(asset.actual_expires_at, order.service_expires_at)
         self.assertEqual(server.expires_at, order.service_expires_at)
 
+    # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
     def test_address_renewal_failure_rolls_back_paid_fields(self):
         order = CloudServerOrder.objects.create(
             order_no='HB-TEST-ADDR-RENEW-FAIL',
@@ -2346,6 +2435,7 @@ class CloudServerServicesTestCase(TestCase):
         self.assertEqual(order.payer_address or '', '')
         self.assertEqual(order.receive_address or '', '')
 
+    # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
     def test_cloud_upgrade_wallet_payment_is_idempotent(self):
         self.user.balance = Decimal('100.000000')
         self.user.save(update_fields=['balance', 'updated_at'])
@@ -2400,6 +2490,7 @@ class CloudServerServicesTestCase(TestCase):
         self.assertEqual(CloudServerOrder.objects.filter(replacement_for=source).count(), 1)
         self.assertEqual(TelegramUser.objects.get(id=self.user.id).balance, balance_after_first)
 
+    # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
     def test_config_change_success_does_not_steal_old_server_record(self):
         source = CloudServerOrder.objects.create(
             order_no='HB-TEST-UPGRADE-SOURCE-SERVER',
@@ -2485,6 +2576,7 @@ class CloudServerServicesTestCase(TestCase):
         self.assertEqual(new_server.public_ip, source.public_ip)
         self.assertEqual(new_server.expires_at, replacement.service_expires_at)
 
+    # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
     def test_asset_renewal_mark_success_starts_new_service_period(self):
         old_release_at = timezone.now() + timezone.timedelta(days=7)
         order = CloudServerOrder.objects.create(
@@ -2530,6 +2622,7 @@ class CloudServerServicesTestCase(TestCase):
         self.assertEqual(order.service_expires_at.date(), (order.completed_at + timezone.timedelta(days=31)).date())
         self.assertEqual(asset.actual_expires_at, order.service_expires_at)
 
+    # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
     def test_aws_sync_resolver_does_not_match_replacement_by_old_ip(self):
         from cloud.management.commands.sync_aws_assets import _resolve_server
 
@@ -2597,6 +2690,7 @@ class CloudServerServicesTestCase(TestCase):
         old_server.refresh_from_db()
         self.assertEqual(old_server.order_id, source.id)
 
+    # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
     def test_aws_sync_resolver_prefers_ip_over_changed_instance_name(self):
         from cloud.management.commands.sync_aws_assets import _resolve_asset, _resolve_order_for_instance_sync, _resolve_server
 
@@ -2707,6 +2801,7 @@ class CloudServerServicesTestCase(TestCase):
         self.assertEqual(resolved_server.id, ip_server.id)
         self.assertNotEqual(resolved_asset.id, dirty_name_asset.id)
 
+    # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
     def test_cloud_config_change_lists_and_creates_downgrade_order(self):
         small_plan = CloudServerPlan.objects.create(
             provider=self.plan.provider,
@@ -2759,6 +2854,7 @@ class CloudServerServicesTestCase(TestCase):
         self.assertEqual(new_order.pay_amount, Decimal('0.000000000'))
         self.assertIn('DOWNGRADE', new_order.order_no)
 
+    # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
     def test_cloud_config_change_ceil_custom_price_to_plan_tier(self):
         self.user.balance = Decimal('100.000000')
         self.user.save(update_fields=['balance', 'updated_at'])
@@ -2829,6 +2925,7 @@ class CloudServerServicesTestCase(TestCase):
         self.assertIsNone(large_err)
         self.assertEqual(large_order.pay_amount, Decimal('10.000000000'))
 
+    # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
     def test_due_orders_use_order_expiry_for_lightsail_instead_of_stale_asset_expiry(self):
         order = CloudServerOrder.objects.create(
             order_no='HB-LIFECYCLE-DUE-1',
@@ -2867,6 +2964,7 @@ class CloudServerServicesTestCase(TestCase):
         self.assertFalse(any(item.id == order.id for item in due['suspend']))
         self.assertFalse(any(item.id == order.id for item in due['delete']))
 
+    # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
     def test_due_orders_skip_suspend_when_account_shutdown_disabled(self):
         account = CloudAccountConfig.objects.create(
             provider=CloudAccountConfig.PROVIDER_AWS,
@@ -2916,6 +3014,7 @@ class CloudServerServicesTestCase(TestCase):
         self.assertFalse(any(item.id == order.id for item in due['suspend']))
         self.assertTrue(any(item.id == order.id for item in due['expire']))
 
+    # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
     def test_lifecycle_suspend_execution_guard_respects_account_shutdown_disabled(self):
         account = CloudAccountConfig.objects.create(
             provider=CloudAccountConfig.PROVIDER_AWS,
@@ -2984,6 +3083,7 @@ class CloudServerServicesTestCase(TestCase):
         order.refresh_from_db()
         self.assertEqual(order.status, 'completed')
 
+    # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
     def test_due_orders_include_order_expiry_when_asset_expiry_missing(self):
         order = CloudServerOrder.objects.create(
             order_no='HB-LIFECYCLE-ORDER-EXPIRY-FALLBACK',
@@ -3021,6 +3121,7 @@ class CloudServerServicesTestCase(TestCase):
 
         self.assertTrue(any(item.id == order.id for item in due['expire']))
 
+    # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
     def test_due_orders_respect_deferred_suspend_at(self):
         order = CloudServerOrder.objects.create(
             order_no='HB-LIFECYCLE-DEFERRED-SUSPEND',
@@ -3061,6 +3162,7 @@ class CloudServerServicesTestCase(TestCase):
 
         self.assertFalse(any(item.id == order.id for item in due['suspend']))
 
+    # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
     def test_orphan_rebound_asset_waiting_manual_time_is_not_delete_due(self):
         asset = CloudAsset.objects.create(
             kind=CloudAsset.KIND_SERVER,
@@ -3083,6 +3185,7 @@ class CloudServerServicesTestCase(TestCase):
 
         self.assertFalse(any(item.id == asset.id for item in due))
 
+    # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
     def test_due_orders_restore_suspend_after_account_shutdown_reenabled(self):
         account = CloudAccountConfig.objects.create(
             provider=CloudAccountConfig.PROVIDER_AWS,
@@ -3136,6 +3239,7 @@ class CloudServerServicesTestCase(TestCase):
 
         self.assertTrue(any(item.id == order.id for item in due['suspend']))
 
+    # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
     def test_mark_suspended_only_updates_latest_asset_and_server(self):
         order = CloudServerOrder.objects.create(
             order_no='HB-LIFECYCLE-SUSPEND-1',
@@ -3220,6 +3324,7 @@ class CloudServerServicesTestCase(TestCase):
         self.assertIn('unit-test suspend', active_asset.note)
         self.assertIn('unit-test suspend', active_server.note)
 
+    # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
     def test_cloud_action_time_only_runs_in_configured_window(self):
         base = timezone.localtime(timezone.now()).replace(hour=15, minute=5, second=0, microsecond=0)
         with patch('cloud.lifecycle._config_time', return_value=(15, 0)):
@@ -3228,6 +3333,7 @@ class CloudServerServicesTestCase(TestCase):
             self.assertFalse(_is_cloud_suspend_time(now=base.replace(minute=11)))
             self.assertFalse(_is_cloud_delete_safe_time(now=base.replace(minute=11)))
 
+    # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
     def test_lifecycle_tick_reads_suspend_time_config_outside_async_loop(self):
         now = timezone.now()
         local_now = timezone.localtime(now)
@@ -3280,6 +3386,7 @@ class CloudServerServicesTestCase(TestCase):
             'recycle': [],
         }
 
+        # 功能：处理 云资产、云订单和生命周期 中的 runtime config side effect 业务流程。
         def runtime_config_side_effect(key, default=None):
             if key == 'cloud_suspend_time':
                 try:
@@ -3299,6 +3406,7 @@ class CloudServerServicesTestCase(TestCase):
 
         stop_mock.assert_awaited_once()
 
+    # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
     def test_next_cloud_action_run_at_sticks_to_configured_time(self):
         base = timezone.localtime(timezone.now()).replace(hour=16, minute=20, second=0, microsecond=0)
         with patch('cloud.lifecycle._config_time', return_value=(15, 0)):
@@ -3306,6 +3414,7 @@ class CloudServerServicesTestCase(TestCase):
         self.assertEqual((run_at.hour, run_at.minute), (15, 0))
         self.assertGreater(run_at, base + timezone.timedelta(seconds=3600))
 
+    # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
     def test_notice_plan_text_shows_configured_execution_time(self):
         order = CloudServerOrder.objects.create(
             order_no='PLAN-TEXT-1',
@@ -3331,6 +3440,7 @@ class CloudServerServicesTestCase(TestCase):
         self.assertIn('关机计划:', text)
         self.assertNotIn('后台执行时间', text)
 
+    # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
     def test_get_migration_due_orders_is_distinct(self):
         old_order = CloudServerOrder.objects.create(
             order_no='HB-MIGRATION-OLD-1',
@@ -3388,6 +3498,7 @@ class CloudServerServicesTestCase(TestCase):
 
         self.assertEqual([item.id for item in due_orders], [old_order.id])
 
+    # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
     def test_get_migration_due_orders_skips_non_deleting_orders(self):
         old_order = CloudServerOrder.objects.create(
             order_no='HB-MIGRATION-OLD-SKIP-1',
@@ -3428,6 +3539,7 @@ class CloudServerServicesTestCase(TestCase):
 
         self.assertEqual(due_orders, [])
 
+    # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
     def test_mark_failed_schedules_incomplete_instance_cleanup(self):
         order = CloudServerOrder.objects.create(
             order_no='FAILED-CLEANUP-SCHEDULE',
@@ -3456,6 +3568,7 @@ class CloudServerServicesTestCase(TestCase):
         self.assertEqual(order.delete_at, cleanup_at)
         self.assertIn('固定 IP 迁移失败', order.provision_note)
 
+    # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
     def test_failed_instance_cleanup_due_orders_are_deleted(self):
         SiteConfig.set('cloud_server_delete_enabled', '1')
         order = CloudServerOrder.objects.create(
@@ -3482,6 +3595,7 @@ class CloudServerServicesTestCase(TestCase):
         due = async_to_sync(_get_due_orders)()
         self.assertIn(order.id, [item.id for item in due['delete']])
 
+        # 功能：处理 云资产、云订单和生命周期 中的 fake delete instance 业务流程。
         async def fake_delete_instance(delete_order):
             return True, '失败新实例已删除'
 
@@ -3495,6 +3609,7 @@ class CloudServerServicesTestCase(TestCase):
         self.assertEqual(order.instance_id, '')
         self.assertIn('失败新实例已删除', order.provision_note)
 
+    # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
     def test_lifecycle_tick_rechecks_order_delete_at_before_cloud_delete(self):
         order = CloudServerOrder.objects.create(
             order_no='LIFECYCLE-RECHECK-FUTURE-DELETE',
@@ -3540,6 +3655,7 @@ class CloudServerServicesTestCase(TestCase):
         order.refresh_from_db()
         self.assertEqual(order.status, 'deleting')
 
+    # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
     def test_lifecycle_tick_rechecks_order_ip_recycle_at_before_release(self):
         order = CloudServerOrder.objects.create(
             order_no='LIFECYCLE-RECHECK-FUTURE-RECYCLE',
@@ -3587,6 +3703,7 @@ class CloudServerServicesTestCase(TestCase):
         self.assertEqual(order.status, 'deleted')
         self.assertIsNotNone(order.ip_recycle_at)
 
+    # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
     def test_create_cloud_server_rebuild_order_reuses_original_static_ip_without_temp(self):
         source_order = CloudServerOrder.objects.create(
             order_no='HB-TEST-REBUILD-1',
@@ -3623,6 +3740,7 @@ class CloudServerServicesTestCase(TestCase):
         source_order.refresh_from_db()
         self.assertIsNotNone(source_order.migration_due_at)
 
+    # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
     def test_reinit_request_reinstalls_current_server_without_rebuild_order(self):
         source_order = CloudServerOrder.objects.create(
             order_no='HB-TEST-REINIT-NO-REBUILD-1',
@@ -3656,6 +3774,7 @@ class CloudServerServicesTestCase(TestCase):
         self.assertIn('不创建新实例，不迁移固定 IP', source_order.provision_note)
         self.assertIsNone(source_order.migration_due_at)
 
+    # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
     def test_rebuild_static_ip_context_corrects_stale_static_ip_name(self):
         source_order = CloudServerOrder.objects.create(
             order_no='HB-TEST-REBUILD-STATIC-RESOLVE-1',
@@ -3704,11 +3823,15 @@ class CloudServerServicesTestCase(TestCase):
         self.assertEqual(source_order.static_ip_name, 'StaticIp-real-name')
         self.assertEqual(rebuild_order.static_ip_name, 'StaticIp-real-name')
 
+    # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
     def test_resolve_static_ip_name_for_move_falls_back_to_public_ip(self):
+        # 测试类：组织 FakeClient 相关的回归测试。
         class FakeClient:
+            # 功能：读取并返回相关数据；当前函数属于 云资产、云订单和生命周期。
             def get_static_ip(self, staticIpName):
                 raise Exception(f'The StaticIp does not exist: {staticIpName}')
 
+            # 功能：读取并返回相关数据；当前函数属于 云资产、云订单和生命周期。
             def get_static_ips(self, **kwargs):
                 return {
                     'staticIps': [
@@ -3724,6 +3847,7 @@ class CloudServerServicesTestCase(TestCase):
 
         self.assertEqual(resolved, 'StaticIp-real-name')
 
+    # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
     def test_rebuild_order_create_payload_skips_static_ip_binding(self):
         source_account = CloudAccountConfig.objects.create(
             provider='aws',
@@ -3796,6 +3920,7 @@ class CloudServerServicesTestCase(TestCase):
         self.assertEqual(payload['cloud_account_id'], source_account.id)
         self.assertEqual(account_ids, [source_account.id])
 
+    # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
     def test_rebuild_source_expiry_moves_to_three_day_migration_due(self):
         source = CloudServerOrder.objects.create(
             order_no='REBUILD-SOURCE-EXPIRY',
@@ -3848,6 +3973,7 @@ class CloudServerServicesTestCase(TestCase):
         self.assertEqual(asset.actual_expires_at, source.migration_due_at)
         self.assertEqual(server.expires_at, source.migration_due_at)
 
+    # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
     def test_rebuild_job_keeps_old_instance_until_migration_due(self):
         from cloud.api import _run_rebuild_job
 
@@ -3893,6 +4019,7 @@ class CloudServerServicesTestCase(TestCase):
             service_expires_at=timezone.now() + timezone.timedelta(days=30),
         )
 
+        # 功能：处理 云资产、云订单和生命周期 中的 fake provision cloud server 业务流程。
         async def fake_provision_cloud_server(order_id):
             self.assertEqual(order_id, replacement.id)
             return replacement
@@ -3908,6 +4035,7 @@ class CloudServerServicesTestCase(TestCase):
         self.assertEqual(source.status, 'deleting')
         self.assertIsNotNone(source.delete_at)
 
+    # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
     def test_manual_admin_replace_order_takes_effect_immediately_for_aws_asset(self):
         old_expiry = timezone.now() + timezone.timedelta(days=10)
         new_expiry = timezone.now() + timezone.timedelta(days=40)
@@ -3988,6 +4116,7 @@ class CloudServerServicesTestCase(TestCase):
         self.assertEqual(new_order.service_expires_at, new_expiry)
         self.assertEqual(new_order.replacement_for_id, old_order.id)
 
+    # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
     def test_manual_admin_replace_order_aggregates_price_change_into_same_order(self):
         old_expiry = timezone.now() + timezone.timedelta(days=10)
         new_expiry = timezone.now() + timezone.timedelta(days=40)
@@ -4048,6 +4177,7 @@ class CloudServerServicesTestCase(TestCase):
             ['manual_expiry_change', 'manual_price_change'],
         )
 
+    # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
     def test_update_cloud_asset_for_aws_creates_single_replace_order_for_expiry_and_price(self):
         old_expiry = timezone.now() + timezone.timedelta(days=10)
         new_expiry = timezone.now() + timezone.timedelta(days=20)
@@ -4114,6 +4244,7 @@ class CloudServerServicesTestCase(TestCase):
             0,
         )
 
+    # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
     def test_dashboard_order_expiry_update_recomputes_lifecycle_plan(self):
         old_expiry = timezone.now() + timezone.timedelta(days=1)
         new_expiry = timezone.now() + timezone.timedelta(days=20)
@@ -4182,6 +4313,7 @@ class CloudServerServicesTestCase(TestCase):
         self.assertEqual(asset.actual_expires_at, order.service_expires_at)
         self.assertEqual(server.expires_at, order.service_expires_at)
 
+    # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
     def test_dashboard_order_ip_and_name_update_syncs_asset_server(self):
         order = CloudServerOrder.objects.create(
             order_no='DASH-ORDER-IP-NAME-UPDATE-1',
@@ -4250,6 +4382,7 @@ class CloudServerServicesTestCase(TestCase):
         self.assertEqual(server.previous_public_ip, '4.4.4.40')
         self.assertEqual(server.server_name, 'new-dashboard-name')
 
+    # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
     def test_dashboard_asset_ip_update_syncs_order_previous_ip(self):
         order = CloudServerOrder.objects.create(
             order_no='DASH-ASSET-IP-UPDATE-1',
@@ -4315,6 +4448,7 @@ class CloudServerServicesTestCase(TestCase):
         self.assertEqual(server.public_ip, '4.4.4.43')
         self.assertEqual(server.previous_public_ip, '4.4.4.42')
 
+    # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
     def test_dashboard_asset_ip_update_uses_asset_old_ip_when_server_was_pre_synced(self):
         order = CloudServerOrder.objects.create(
             order_no='DASH-ASSET-IP-PRESYNC-1',
@@ -4384,6 +4518,7 @@ class CloudServerServicesTestCase(TestCase):
         self.assertEqual(log.previous_public_ip, '4.4.4.44')
         self.assertEqual(log.public_ip, '4.4.4.45')
 
+    # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
     def test_dashboard_asset_update_does_not_touch_cross_account_same_instance_server(self):
         order = CloudServerOrder.objects.create(
             order_no='DASH-ASSET-SCOPED-SERVER-1',
@@ -4460,6 +4595,7 @@ class CloudServerServicesTestCase(TestCase):
         self.assertEqual(right_server.public_ip, '4.4.4.51')
         self.assertEqual(wrong_server.public_ip, '4.4.4.99')
 
+    # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
     def test_dashboard_asset_update_matches_legacy_colon_account_label(self):
         account = self._aws_test_account()
         plus_label = cloud_account_label(account)
@@ -4505,6 +4641,7 @@ class CloudServerServicesTestCase(TestCase):
         self.assertEqual(server.public_ip, '4.4.4.71')
         self.assertEqual(server.account_label, legacy_label)
 
+    # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
     def test_dashboard_asset_update_created_server_preserves_account_label(self):
         account = self._aws_test_account()
         label = cloud_account_label(account)
@@ -4539,6 +4676,7 @@ class CloudServerServicesTestCase(TestCase):
         self.assertEqual(server.provider, self.plan.provider)
         self.assertEqual(server.region_code, self.plan.region_code)
 
+    # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
     def test_aws_notice_schedule_does_not_override_manual_order_expiry(self):
         order = CloudServerOrder.objects.create(
             order_no='MANUAL-NOTICE-OLD-1',
@@ -4572,6 +4710,7 @@ class CloudServerServicesTestCase(TestCase):
         self.assertEqual(order.service_expires_at, manual_expiry)
         self.assertEqual(order.suspend_at, notice_expiry)
 
+    # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
     def test_rebuild_payload_prefers_source_account_when_rebuild_order_is_polluted(self):
         source_account = CloudAccountConfig.objects.create(
             provider='aws',
@@ -4636,6 +4775,7 @@ class CloudServerServicesTestCase(TestCase):
         self.assertEqual(payload['account_label'], source_order.account_label)
         self.assertEqual(account_ids, [source_account.id])
 
+    # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
     def test_asset_operation_order_resolves_account_from_label(self):
         account = CloudAccountConfig.objects.create(
             provider='aws',
@@ -4667,6 +4807,7 @@ class CloudServerServicesTestCase(TestCase):
         self.assertEqual(order.cloud_account_id, account.id)
         self.assertEqual(order.account_label, asset.account_label)
 
+    # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
     def test_deleted_retained_order_without_active_static_ip_is_not_query_result(self):
         order = CloudServerOrder.objects.create(
             order_no='HB-TEST-DELETED-RETAINED-MISSING',
@@ -4711,6 +4852,7 @@ class CloudServerServicesTestCase(TestCase):
         self.assertEqual(plans, [])
         self.assertIsNone(err)
 
+    # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
     def test_completed_order_without_instance_and_released_static_ip_is_not_query_result(self):
         order = CloudServerOrder.objects.create(
             order_no='HB-TEST-COMPLETED-RELEASED-IP',
@@ -4756,6 +4898,7 @@ class CloudServerServicesTestCase(TestCase):
         self.assertEqual(plans, [])
         self.assertIsNone(err)
 
+    # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
     def test_unbound_asset_renewal_lists_plans_without_creating_order(self):
         asset = CloudAsset.objects.create(
             kind=CloudAsset.KIND_SERVER,
@@ -4778,6 +4921,7 @@ class CloudServerServicesTestCase(TestCase):
         self.assertTrue(plans)
         self.assertIsNone(asset.order_id)
 
+    # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
     def test_prepare_unbound_asset_renewal_creates_pending_payment_order(self):
         due_at = timezone.now() + timezone.timedelta(days=9)
         account = self._aws_test_account()
@@ -4819,6 +4963,7 @@ class CloudServerServicesTestCase(TestCase):
         self.assertEqual(order.mtproxy_link, link['url'])
         self.assertEqual(asset.order_id, order.id)
 
+    # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
     def test_unbound_asset_renewal_wallet_payment_marks_paid_for_recovery(self):
         self.user.balance = Decimal('100.000000')
         self.user.save(update_fields=['balance', 'updated_at'])
@@ -4862,6 +5007,7 @@ class CloudServerServicesTestCase(TestCase):
         self.assertEqual(paid_order.ip_recycle_at, due_at)
         self.assertIn('正在恢复未绑定代理资产固定 IP', paid_order.provision_note)
 
+    # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
     def test_unbound_asset_renewal_wallet_payment_repairs_completed_unpaid_state(self):
         self.user.balance = Decimal('100.000000')
         self.user.save(update_fields=['balance', 'updated_at'])
@@ -4902,6 +5048,7 @@ class CloudServerServicesTestCase(TestCase):
         self.assertIsNone(paid_order.service_expires_at)
         self.assertEqual(paid_order.ip_recycle_at, due_at)
 
+    # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
     def test_completed_asset_recovery_order_renews_without_reprovisioning(self):
         self.user.balance = Decimal('100.000000')
         self.user.save(update_fields=['balance', 'updated_at'])
@@ -4939,6 +5086,7 @@ class CloudServerServicesTestCase(TestCase):
         self.assertGreater(renewed.service_expires_at, old_expiry)
         self.assertIsNotNone(renewed.paid_at)
 
+    # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
     def test_unbound_asset_renewal_chain_payment_marks_paid_for_recovery(self):
         due_at = timezone.now() + timezone.timedelta(days=9)
         account = self._aws_test_account()
@@ -4978,6 +5126,7 @@ class CloudServerServicesTestCase(TestCase):
         self.assertEqual(confirmed.ip_recycle_at, due_at)
         self.assertIn('正在恢复未绑定代理资产固定 IP', confirmed.provision_note)
 
+    # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
     def test_unsynced_deleted_aws_asset_prepares_static_ip_recovery(self):
         account = CloudAccountConfig.objects.create(
             provider=CloudAccountConfig.PROVIDER_AWS,
@@ -5027,6 +5176,7 @@ class CloudServerServicesTestCase(TestCase):
         self.assertEqual(order.cloud_account_id, account.id)
         self.assertIn('灰区续费：AWS 实时确认固定 IP 未附加', order.provision_note)
 
+    # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
     def test_unattached_asset_operation_order_enters_retained_renewal_flow(self):
         due_at = timezone.now() + timezone.timedelta(days=9)
         asset = CloudAsset.objects.create(
@@ -5062,6 +5212,7 @@ class CloudServerServicesTestCase(TestCase):
         self.assertTrue(plans)
         self.assertEqual(retained_order.id, order.id)
 
+    # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
     def test_mark_cloud_server_ip_change_requested_falls_back_when_plan_missing(self):
         original_expires_at = timezone.now() + timezone.timedelta(days=31)
         source_order = CloudServerOrder.objects.create(
@@ -5100,6 +5251,7 @@ class CloudServerServicesTestCase(TestCase):
             source_order.delete_at + timezone.timedelta(days=15),
         )
 
+    # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
     def test_mark_cloud_server_ip_change_requested_returns_existing_replacement(self):
         source_order = CloudServerOrder.objects.create(
             order_no='HB-TEST-REPLACE-EXISTING',
@@ -5131,6 +5283,7 @@ class CloudServerServicesTestCase(TestCase):
         self.assertEqual(CloudServerOrder.objects.filter(replacement_for=source_order).count(), 1)
         self.assertEqual(source_order.ip_change_quota, 0)
 
+    # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
     def test_mark_provisioning_start_creates_pending_asset_server_and_log(self):
         order = CloudServerOrder.objects.create(
             order_no='HB-TEST-PROVISION-1',
@@ -5164,6 +5317,7 @@ class CloudServerServicesTestCase(TestCase):
         self.assertEqual(log.event_type, CloudIpLog.EVENT_CREATED)
         self.assertIn('服务器开始创建', log.note)
 
+    # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
     def test_extract_mtproxy_fields_keeps_fake_tls_secret_and_link(self):
         link, secret, host = _extract_mtproxy_fields(
             'MTProxy 安装完成\n'
@@ -5176,6 +5330,7 @@ class CloudServerServicesTestCase(TestCase):
         self.assertEqual(link, 'tg://proxy?server=1.2.3.4&port=8443&secret=ee1234567890abcdef1234567890abcd617a7572652e6d6963726f736f66742e636f6d')
         self.assertEqual(secret, 'ee1234567890abcdef1234567890abcd617a7572652e6d6963726f736f66742e636f6d')
 
+    # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
     def test_mark_success_updates_existing_server_asset_instead_of_creating_duplicate(self):
         order = CloudServerOrder.objects.create(
             order_no='HB-TEST-PROVISION-2',
@@ -5213,10 +5368,12 @@ class CloudServerServicesTestCase(TestCase):
         self.assertIn('tg://proxy?', asset.mtproxy_link or '')
         self.assertEqual(asset.mtproxy_port, 8443)
 
+    # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
     def test_sync_aws_assets_requires_database_cloud_account(self):
         with self.assertRaisesMessage(CommandError, '未添加启用的 AWS 云账号'):
             call_command('sync_aws_assets', region='ap-southeast-1')
 
+    # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
     def test_backup_ports_are_fixed(self):
         self.assertTrue(is_valid_mtproxy_main_port(443))
         self.assertFalse(is_valid_mtproxy_main_port(444))
@@ -5228,11 +5385,13 @@ class CloudServerServicesTestCase(TestCase):
         self.assertEqual(get_mtproxy_port_label(443, 9529), '备用 mtprotoproxy')
         self.assertEqual(get_mtproxy_port_label(443, 9534), 'SOCKS5')
 
+    # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
     def test_mtproxy_script_runs_mtg_with_fake_tls_secret(self):
         script = _build_mtproxy_script(443, 'eec3bda48fee649e9ea6e32d33cd5f3dd9617a7572652e6d6963726f736f66742e636f6d')
         self.assertIn('RUN_SECRET="ee${RUN_SECRET}617a7572652e6d6963726f736f66742e636f6d"', script)
         self.assertIn('$WORKDIR/bin/mtg run $RUN_SECRET', script)
 
+    # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
     def test_mtproxy_extra_links_exclude_main_port(self):
         links = _extract_tg_links(
             'TG链接: tg://proxy?server=1.2.3.4&port=443&secret=ee11111111111111111111111111111111\n'
@@ -5242,6 +5401,7 @@ class CloudServerServicesTestCase(TestCase):
         )
         self.assertEqual(links, ['tg://proxy?server=1.2.3.4&port=9529&secret=ee33333333333333333333333333333333'])
 
+    # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
     def test_extract_proxy_links_labels_custom_low_port_plan(self):
         links = _extract_proxy_links(
             'MTProxy 安装完成\n'
@@ -5255,6 +5415,7 @@ class CloudServerServicesTestCase(TestCase):
         self.assertEqual(links[-1]['username'], 'abcdefabcdefabcdefabcdefabcdefab')
         self.assertEqual(links[-1]['password'], 'abcdefabcdefabcdefabcdefabcdefab')
 
+    # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
     def test_compact_proxy_install_note_removes_raw_links(self):
         note = (
             'AWS 实例已创建\n'
@@ -5273,6 +5434,7 @@ class CloudServerServicesTestCase(TestCase):
         self.assertNotIn('tg://proxy?', compact)
         self.assertNotIn('socks5://', compact)
 
+    # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
     def test_append_status_note_replaces_old_sync_status(self):
         note = append_status_note(
             '人工备注\n状态: 运行中；公网IP: 1.1.1.1；最近同步: old',
@@ -5281,6 +5443,7 @@ class CloudServerServicesTestCase(TestCase):
 
         self.assertEqual(note, '人工备注\n状态: 运行中；公网IP: 1.1.1.1；最近同步: new')
 
+    # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
     def test_cloud_asset_note_display_hides_install_and_sync_noise(self):
         note = _display_cloud_asset_note(
             '人工备注保留\n'
@@ -5296,6 +5459,7 @@ class CloudServerServicesTestCase(TestCase):
 
         self.assertEqual(note, '人工备注保留\nBBR 执行完成')
 
+    # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
     def test_cloud_asset_note_appends_clean_install_summary(self):
         note = _append_cloud_asset_note(
             '人工备注保留\nTG链接: tg://proxy?server=old&port=443&secret=old',
@@ -5313,6 +5477,7 @@ class CloudServerServicesTestCase(TestCase):
         self.assertIn('SOCKS5端口: 9534', note)
         self.assertNotIn('socks5://secret:secret@1.2.3.4:9534', note)
 
+    # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
     def test_mark_success_preserves_existing_main_link_when_install_output_lacks_link(self):
         order = CloudServerOrder.objects.create(
             order_no='HB-TEST-REBUILD-LINK',
@@ -5351,6 +5516,7 @@ class CloudServerServicesTestCase(TestCase):
         self.assertEqual(order.mtproxy_secret, 'ee1234567890abcdef1234567890abcd')
         self.assertEqual(order.proxy_links[0]['port'], '443')
 
+    # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
     def test_non_aws_manual_asset_edit_updates_existing_order_in_place(self):
         old_expiry = timezone.now() + timezone.timedelta(days=10)
         new_expiry = timezone.now() + timezone.timedelta(days=35)
@@ -5428,6 +5594,7 @@ class CloudServerServicesTestCase(TestCase):
         self.assertIn('人工编辑所属人', owner_audit_order.provision_note or '')
         self.assertNotIn('人工编辑到期时间', owner_audit_order.provision_note or '')
 
+    # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
     def test_manual_order_source_tags_support_multiple_labels_on_same_order(self):
         order = CloudServerOrder.objects.create(
             order_no='SRVMANUAL-MULTI-1',
@@ -5456,6 +5623,7 @@ class CloudServerServicesTestCase(TestCase):
             ['人工改用户', '人工改价格'],
         )
 
+    # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
     def test_shutdown_log_items_skip_assets_hidden_from_cloud_asset_list(self):
         inactive_account = CloudAccountConfig.objects.create(
             provider=CloudAccountConfig.PROVIDER_AWS,
@@ -5511,6 +5679,7 @@ class CloudServerServicesTestCase(TestCase):
         self.assertIn(visible_asset.id, asset_ids)
         self.assertNotIn(hidden_asset.id, asset_ids)
 
+    # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
     def test_shutdown_log_items_prefer_order_lifecycle_schedule(self):
         expires_at = timezone.now() + timezone.timedelta(days=1)
         order = CloudServerOrder.objects.create(
@@ -5556,6 +5725,7 @@ class CloudServerServicesTestCase(TestCase):
         self.assertEqual(parse_datetime(row['suspend_at']), order.suspend_at)
         self.assertEqual(parse_datetime(row['delete_at']), order.delete_at)
 
+    # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
     def test_cloud_ip_log_note_aggregates_into_single_ip_trace(self):
         expires_at = timezone.now() + timezone.timedelta(days=2)
         order = CloudServerOrder.objects.create(
@@ -5627,6 +5797,7 @@ class CloudServerServicesTestCase(TestCase):
         self.assertIn('执行内容：同秒重复创建', first.note)
         self.assertIn('执行内容：实例已删除', first.note)
 
+    # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
     def test_cloud_ip_log_rebinds_trace_to_latest_replacement_order(self):
         expires_at = timezone.now() + timezone.timedelta(days=2)
         source_order = CloudServerOrder.objects.create(
@@ -5720,6 +5891,7 @@ class CloudServerServicesTestCase(TestCase):
         self.assertIn('执行内容：源订单创建成功', source_log.note)
         self.assertIn('执行内容：替换订单创建成功', source_log.note)
 
+    # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
     def test_shutdown_log_items_include_execution_detail_and_links(self):
         expires_at = timezone.now() - timezone.timedelta(hours=2)
         order = CloudServerOrder.objects.create(
@@ -5767,6 +5939,7 @@ class CloudServerServicesTestCase(TestCase):
         self.assertIn('执行内容：', row['note'])
         self.assertIn('失败原因：关机执行失败：余额不足', row['note'])
 
+    # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
     def test_unattached_ip_delete_items_use_asset_note(self):
         asset = CloudAsset.objects.create(
             kind=CloudAsset.KIND_SERVER,
@@ -5806,6 +5979,7 @@ class CloudServerServicesTestCase(TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertTrue(CloudLifecyclePlan.objects.filter(plan_kind=CloudLifecyclePlan.PLAN_KIND_UNATTACHED_IP_DELETE, asset=asset, data_group='active').exists())
 
+    # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
     def test_update_lifecycle_plan_note_updates_asset_note(self):
         asset = CloudAsset.objects.create(
             kind=CloudAsset.KIND_SERVER,
@@ -5851,6 +6025,7 @@ class CloudServerServicesTestCase(TestCase):
         )
         self.assertEqual(plan_row.note, '删除计划新备注')
 
+    # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
     def test_lifecycle_plans_use_separate_order_plan_note(self):
         delete_at = timezone.now() + timezone.timedelta(hours=1)
         order = CloudServerOrder.objects.create(
@@ -5891,6 +6066,7 @@ class CloudServerServicesTestCase(TestCase):
         self.assertEqual(plan_note.note, '删机计划备注：单独保存')
         self.assertEqual(order.provision_note, '订单原备注：不要复用我')
 
+    # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
     def test_unattached_ip_delete_items_include_name_expiry_and_detail_path(self):
         delete_due_at = timezone.now() + timezone.timedelta(days=3)
         asset = CloudAsset.objects.create(
@@ -5916,6 +6092,7 @@ class CloudServerServicesTestCase(TestCase):
         self.assertEqual(row['detail_path'], f'/admin/cloud-assets/{asset.id}')
         self.assertEqual(parse_datetime(row['service_expires_at']), delete_due_at)
 
+    # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
     def test_cloud_orders_list_keeps_renew_pending_visible(self):
         order = CloudServerOrder.objects.create(
             order_no='CLOUD-ORDER-LIST-RENEW-PENDING-1',
@@ -5949,6 +6126,7 @@ class CloudServerServicesTestCase(TestCase):
         self.assertEqual(row['renew_status_label'], '续费待支付')
         self.assertTrue(row['can_renew'])
 
+    # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
     def test_unattached_ip_delete_items_compact_display_note(self):
         asset = CloudAsset.objects.create(
             kind=CloudAsset.KIND_SERVER,
@@ -5976,6 +6154,7 @@ class CloudServerServicesTestCase(TestCase):
         self.assertEqual(row['note'], asset.note)
         self.assertIn('tg://proxy?', row['source_note'])
 
+    # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
     def test_unattached_ip_delete_items_use_actual_expiry_as_delete_plan(self):
         delete_due_at = timezone.now() + timezone.timedelta(days=3)
         asset = CloudAsset.objects.create(
@@ -5999,6 +6178,7 @@ class CloudServerServicesTestCase(TestCase):
 
         self.assertEqual(parse_datetime(row['delete_at']), delete_due_at)
 
+    # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
     def test_unattached_ip_delete_items_skip_inactive_cloud_account_assets(self):
         inactive_account = CloudAccountConfig.objects.create(
             provider=CloudAccountConfig.PROVIDER_AWS,
@@ -6057,6 +6237,7 @@ class CloudServerServicesTestCase(TestCase):
         self.assertIn(visible_asset.id, asset_ids)
         self.assertNotIn(hidden_asset.id, asset_ids)
 
+    # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
     def test_unattached_ip_delete_items_include_sync_deleted_history(self):
         asset = CloudAsset.objects.create(
             kind=CloudAsset.KIND_SERVER,
@@ -6088,6 +6269,7 @@ class CloudServerServicesTestCase(TestCase):
         self.assertIn('IP校验发现云上不存在，已标记删除', row['note'])
         self.assertTrue(row['is_overdue'])
 
+    # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
     def test_unattached_ip_delete_items_exclude_cloud_missing_active_plan(self):
         missing_asset = CloudAsset.objects.create(
             kind=CloudAsset.KIND_SERVER,
@@ -6142,6 +6324,7 @@ class CloudServerServicesTestCase(TestCase):
         self.assertNotIn(note_deleted_asset.id, active_asset_ids)
         self.assertIn(visible_asset.id, active_asset_ids)
 
+    # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
     def test_unattached_ip_delete_items_prefer_asset_note_over_trace_note(self):
         asset = CloudAsset.objects.create(
             kind=CloudAsset.KIND_SERVER,
@@ -6179,6 +6362,7 @@ class CloudServerServicesTestCase(TestCase):
         self.assertNotIn('旧版删除计划备注', row['display_note'])
         self.assertEqual(row['deletion_source_label'], '同步校验删除')
 
+    # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
     def test_ip_log_delete_keeps_previous_ip_from_change_chain(self):
         order = CloudServerOrder.objects.create(
             order_no='IP-LOG-CHAIN-DELETE-1',
@@ -6218,6 +6402,7 @@ class CloudServerServicesTestCase(TestCase):
         self.assertEqual(first.event_type, CloudIpLog.EVENT_DELETED)
         self.assertIn('IP校验发现云上不存在，已标记删除', first.note)
 
+    # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
     def test_unattached_ip_delete_items_dedupe_same_ip_and_mark_covered(self):
         old_asset = CloudAsset.objects.create(
             kind=CloudAsset.KIND_SERVER,
@@ -6260,6 +6445,7 @@ class CloudServerServicesTestCase(TestCase):
         self.assertIn('covered_duplicates', rows[0].get('quality_flags') or [])
         self.assertIn('已覆盖 1 条同 IP 旧记录', rows[0].get('quality_label') or '')
 
+    # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
     def test_unattached_ip_delete_items_mark_cloud_missing_history(self):
         asset = CloudAsset.objects.create(
             kind=CloudAsset.KIND_SERVER,
@@ -6291,6 +6477,7 @@ class CloudServerServicesTestCase(TestCase):
         self.assertIn('云上已不存在', row.get('quality_label') or '')
         self.assertIn('云上已不存在', row.get('execution_status') or '')
 
+    # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
     def test_unattached_ip_delete_items_skip_assets_attached_to_instance(self):
         attached_asset = CloudAsset.objects.create(
             kind=CloudAsset.KIND_SERVER,
@@ -6314,6 +6501,7 @@ class CloudServerServicesTestCase(TestCase):
 
         self.assertNotIn(attached_asset.id, asset_ids)
 
+    # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
     def test_sync_cloud_assets_runs_enabled_accounts_and_merges_results(self):
         aliyun_account = CloudAccountConfig.objects.create(
             provider=CloudAccountConfig.PROVIDER_ALIYUN,
@@ -6336,13 +6524,16 @@ class CloudServerServicesTestCase(TestCase):
         staff_user = get_user_model().objects.create_user(username='staff_sync_assets_all', password='x', is_staff=True, is_superuser=True)
         calls = []
 
+        # 测试类：组织 AwsCommand 相关的回归测试。
         class AwsCommand:
             synced_regions = ['ap-southeast-1']
             sync_errors = []
 
+        # 测试类：组织 AliyunCommand 相关的回归测试。
         class AliyunCommand:
             pass
 
+        # 功能：处理 云资产、云订单和生命周期 中的 fake call command 业务流程。
         def fake_call_command(command_name, **kwargs):
             calls.append((command_name, kwargs))
             if command_name == 'sync_aws_assets':
@@ -6362,8 +6553,8 @@ class CloudServerServicesTestCase(TestCase):
         self.assertEqual(job.status, CloudAssetSyncJob.STATUS_QUEUED)
         self.assertEqual(job.current_task, '已加入同步队列')
         self.assertTrue(CloudAssetSyncJobEvent.objects.filter(job_id=job.id, event_type=CloudAssetSyncJobEvent.TYPE_QUEUED).exists())
-        with patch('cloud.api._call_command_capture_threaded', side_effect=fake_call_command), \
-            patch('cloud.api._refresh_dashboard_plan_snapshots_deferred'):
+        with patch('cloud.sync_jobs._call_command_capture_threaded', side_effect=fake_call_command), \
+            patch('cloud.sync_jobs._refresh_dashboard_plan_snapshots_deferred'):
             job = _execute_cloud_asset_sync_job(job)
 
         result = job.result_payload
@@ -6409,6 +6600,41 @@ class CloudServerServicesTestCase(TestCase):
         self.assertEqual(CloudAssetSyncJob.objects.get(pk=retry_payload['job_id']).scope['retry_of_job_id'], job.id)
         self.assertTrue(CloudAssetSyncJobEvent.objects.filter(job_id=job.id, event_type=CloudAssetSyncJobEvent.TYPE_RETRY).exists())
 
+    # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
+    def test_cloud_asset_sync_jobs_metrics_returns_operational_summary(self):
+        now = timezone.now()
+        staff_user = get_user_model().objects.create_user(username='staff_sync_metrics', password='x', is_staff=True)
+        running_job = CloudAssetSyncJob.objects.create(
+            run_id='metrics-running-job',
+            status=CloudAssetSyncJob.STATUS_RUNNING,
+            started_at=now - timezone.timedelta(minutes=30),
+            worker_heartbeat_at=now - timezone.timedelta(minutes=20),
+            current_task='metrics running',
+        )
+        failed_job = CloudAssetSyncJob.objects.create(
+            run_id='metrics-failed-job',
+            status=CloudAssetSyncJob.STATUS_FAILED,
+            started_at=now - timezone.timedelta(minutes=10),
+            finished_at=now - timezone.timedelta(minutes=5),
+            errors=['boom'],
+            current_task='metrics failed',
+        )
+        CloudAssetSyncJobEvent.objects.create(job_id=running_job.id, event_type=CloudAssetSyncJobEvent.TYPE_HEARTBEAT, message='stale heartbeat')
+        CloudAssetSyncJobEvent.objects.create(job_id=failed_job.id, event_type=CloudAssetSyncJobEvent.TYPE_ERROR, message='failed')
+
+        request = RequestFactory().get('/api/dashboard/cloud-assets/sync-jobs/metrics/?window_hours=24')
+        request.user = staff_user
+        response = cloud_asset_sync_jobs_metrics(request)
+        payload = json.loads(response.content)['data']
+
+        self.assertEqual(response.status_code, 200)
+        self.assertGreaterEqual(payload['active_count'], 1)
+        self.assertGreaterEqual(payload['failed_count'], 1)
+        self.assertGreaterEqual(payload['stale_running_count'], 1)
+        self.assertEqual(payload['latest_failed_job']['id'], failed_job.id)
+        self.assertGreaterEqual(payload['event_counts'][CloudAssetSyncJobEvent.TYPE_ERROR], 1)
+
+    # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
     def test_cancel_queued_cloud_asset_sync_job_marks_terminal_and_events(self):
         staff_user = get_user_model().objects.create_user(username='staff_cancel_sync_job', password='x', is_staff=True, is_superuser=True)
         request = RequestFactory().post('/api/dashboard/cloud-assets/sync/', data='{}', content_type='application/json')
@@ -6430,6 +6656,7 @@ class CloudServerServicesTestCase(TestCase):
         self.assertEqual(job.cancel_requested_by, staff_user)
         self.assertTrue(CloudAssetSyncJobEvent.objects.filter(job_id=job.id, event_type=CloudAssetSyncJobEvent.TYPE_CANCEL).exists())
 
+    # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
     def test_sync_cloud_assets_with_selected_assets_uses_asset_scoped_tasks(self):
         account = CloudAccountConfig.objects.create(
             provider=CloudAccountConfig.PROVIDER_AWS,
@@ -6469,11 +6696,13 @@ class CloudServerServicesTestCase(TestCase):
         staff_user = get_user_model().objects.create_user(username='staff_sync_selected_assets', password='x', is_staff=True, is_superuser=True)
         calls = []
 
+        # 测试类：组织 AwsCommand 相关的回归测试。
         class AwsCommand:
             synced_regions = ['ap-southeast-1']
             sync_errors = []
             summary = {'updated': 1}
 
+        # 功能：处理 云资产、云订单和生命周期 中的 fake call command 业务流程。
         def fake_call_command(command_name, **kwargs):
             calls.append((command_name, kwargs))
             return AwsCommand(), f'aws asset {kwargs.get("asset_id")} ok\n'
@@ -6492,8 +6721,8 @@ class CloudServerServicesTestCase(TestCase):
         self.assertTrue(payload['queued'])
 
         job = CloudAssetSyncJob.objects.get(pk=payload['job_id'])
-        with patch('cloud.api._call_command_capture_threaded', side_effect=fake_call_command), \
-            patch('cloud.api._refresh_dashboard_plan_snapshots_deferred'):
+        with patch('cloud.sync_jobs._call_command_capture_threaded', side_effect=fake_call_command), \
+            patch('cloud.sync_jobs._refresh_dashboard_plan_snapshots_deferred'):
             job = _execute_cloud_asset_sync_job(job)
 
         result = job.result_payload
@@ -6505,6 +6734,7 @@ class CloudServerServicesTestCase(TestCase):
         self.assertTrue(all(call[1]['region'] == 'ap-southeast-1' for call in calls))
         self.assertFalse(any('asset_id' not in call[1] for call in calls))
 
+    # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
     def test_process_cloud_asset_sync_jobs_worker_processes_queued_job(self):
         account = CloudAccountConfig.objects.create(
             provider=CloudAccountConfig.PROVIDER_AWS,
@@ -6544,16 +6774,18 @@ class CloudServerServicesTestCase(TestCase):
 
         calls = []
 
+        # 测试类：组织 AwsCommand 相关的回归测试。
         class AwsCommand:
             synced_regions = ['ap-southeast-1']
             sync_errors = []
 
+        # 功能：处理 云资产、云订单和生命周期 中的 fake call command 业务流程。
         def fake_call_command(command_name, **kwargs):
             calls.append((command_name, kwargs))
             return AwsCommand(), 'worker job ok\n'
 
-        with patch('cloud.api._call_command_capture_threaded', side_effect=fake_call_command), \
-            patch('cloud.api._refresh_dashboard_plan_snapshots_deferred'), \
+        with patch('cloud.sync_jobs._call_command_capture_threaded', side_effect=fake_call_command), \
+            patch('cloud.sync_jobs._refresh_dashboard_plan_snapshots_deferred'), \
             patch('cloud.management.commands.process_cloud_asset_sync_jobs.close_old_connections'):
             call_command('process_cloud_asset_sync_jobs', '--once', '--worker-id', 'test-worker', '--poll-interval', '0.1', '--stale-running-minutes', '0')
 
@@ -6571,6 +6803,7 @@ class CloudServerServicesTestCase(TestCase):
         self.assertEqual(calls[0][0], 'sync_aws_assets')
         self.assertEqual(calls[0][1]['asset_id'], str(asset.id))
 
+    # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
     def test_sync_cloud_asset_status_uses_asset_scope(self):
         account = CloudAccountConfig.objects.create(
             provider=CloudAccountConfig.PROVIDER_AWS,
@@ -6611,6 +6844,7 @@ class CloudServerServicesTestCase(TestCase):
         self.assertEqual(mocked.call_args.kwargs['account_id'], str(account.id))
         self.assertEqual(mocked.call_args.kwargs['region'], 'ap-southeast-1')
 
+    # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
     def test_sync_retained_ip_asset_uses_order_account_and_static_ip_scope(self):
         account = CloudAccountConfig.objects.create(
             provider=CloudAccountConfig.PROVIDER_AWS,
@@ -6674,6 +6908,7 @@ class CloudServerServicesTestCase(TestCase):
         self.assertEqual(mocked.call_args.kwargs['instance_id'], 'StaticIp-single-retained-sync')
         self.assertEqual(mocked.call_args.kwargs['public_ip'], '3.3.3.44')
 
+    # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
     def test_proxy_asset_ip_query_exposes_manual_expiry_for_admin_and_user(self):
         expires_at = timezone.now() + timezone.timedelta(days=12)
         visible_asset = CloudAsset.objects.create(
@@ -6702,6 +6937,7 @@ class CloudServerServicesTestCase(TestCase):
         self.assertEqual(user_asset.service_expires_at, expires_at)
         self.assertIsNone(hidden_asset)
 
+    # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
     def test_proxy_asset_ip_query_skips_cloud_missing_asset(self):
         CloudAsset.objects.create(
             kind=CloudAsset.KIND_SERVER,
@@ -6737,6 +6973,7 @@ class CloudServerServicesTestCase(TestCase):
 
         self.assertEqual(admin_asset.id, visible_asset.id)
 
+    # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
     def test_cloud_server_ip_query_requires_owner_identity(self):
         other_user = TelegramUser.objects.create(tg_user_id=990003, username='other_order_query_user')
         order = CloudServerOrder.objects.create(
@@ -6762,6 +6999,7 @@ class CloudServerServicesTestCase(TestCase):
         self.assertEqual(owned_order.id, order.id)
         self.assertIsNone(hidden_order)
 
+    # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
     def test_cloud_server_public_renewal_allows_stranger_payment_entry(self):
         other_user = TelegramUser.objects.create(tg_user_id=990004, username='other_order_renew_user')
         order = CloudServerOrder.objects.create(
@@ -6789,6 +7027,7 @@ class CloudServerServicesTestCase(TestCase):
         self.assertIsNotNone(public_renewal)
         self.assertEqual(public_renewal.user_id, self.user.id)
 
+    # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
     def test_public_unattached_asset_renewal_plans_are_available(self):
         other_user = TelegramUser.objects.create(tg_user_id=990006, username='other_unattached_asset_renew_user')
         account = CloudAccountConfig.objects.create(
@@ -6828,6 +7067,7 @@ class CloudServerServicesTestCase(TestCase):
         self.assertGreaterEqual(len(public_plans), 1)
         self.assertIsNone(public_err)
 
+    # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
     def test_retained_deleted_asset_renewal_plans_are_available_by_asset_button(self):
         now = timezone.now()
         order = CloudServerOrder.objects.create(
@@ -6878,6 +7118,7 @@ class CloudServerServicesTestCase(TestCase):
         self.assertGreaterEqual(len(plans), 1)
         self.assertIsNone(err)
 
+    # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
     def test_public_unattached_asset_renewal_requires_original_account(self):
         other_user = TelegramUser.objects.create(tg_user_id=990007, username='other_unattached_asset_no_account')
         asset = CloudAsset.objects.create(
@@ -6902,6 +7143,7 @@ class CloudServerServicesTestCase(TestCase):
         self.assertEqual(public_plans, [])
         self.assertEqual(public_err, '原固定 IP 所属云账号不可用，暂时无法自助续费，请联系人工客服。')
 
+    # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
     def test_asset_recovery_candidates_only_original_account(self):
         other_account = CloudAccountConfig.objects.create(
             provider=CloudAccountConfig.PROVIDER_AWS,
@@ -6946,6 +7188,7 @@ class CloudServerServicesTestCase(TestCase):
         self.assertEqual(account_ids, [account.id])
         self.assertNotIn(other_account.id, account_ids)
 
+    # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
     def test_proxy_link_query_extracts_server_ip_only(self):
         from bot.handlers import _extract_proxy_links_by_ip, _extract_query_ips
 
@@ -6954,6 +7197,7 @@ class CloudServerServicesTestCase(TestCase):
         self.assertEqual(_extract_query_ips(raw), ['3.0.162.212'])
         self.assertEqual(_extract_proxy_links_by_ip(raw)['3.0.162.212']['port'], '443')
 
+    # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
     def test_tg_proxy_link_query_extracts_server_ip_only(self):
         from bot.handlers import _extract_query_ips
 
@@ -6961,6 +7205,7 @@ class CloudServerServicesTestCase(TestCase):
 
         self.assertEqual(_extract_query_ips(raw), ['3.0.162.213'])
 
+    # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
     def test_ip_query_displays_matched_asset_ip_not_order_ip(self):
         order = CloudServerOrder.objects.create(
             order_no='IP-MATCH-ASSET-ORDER-1',
@@ -6998,6 +7243,7 @@ class CloudServerServicesTestCase(TestCase):
         self.assertEqual(result.matched_query_ip, '3.0.162.212')
         self.assertEqual(result.public_ip, '3.0.162.212')
 
+    # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
     def test_ip_query_displays_matched_previous_ip_not_order_ip(self):
         order = CloudServerOrder.objects.create(
             order_no='IP-MATCH-PREVIOUS-ORDER-1',
@@ -7034,6 +7280,7 @@ class CloudServerServicesTestCase(TestCase):
 
         self.assertEqual(result.matched_query_ip, '3.0.162.213')
 
+    # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
     def test_cloud_server_ip_change_requires_owner_identity(self):
         other_user = TelegramUser.objects.create(tg_user_id=990005, username='other_order_ip_change_user')
         order = CloudServerOrder.objects.create(
@@ -7064,6 +7311,7 @@ class CloudServerServicesTestCase(TestCase):
         self.assertEqual(allowed.user_id, self.user.id)
         self.assertEqual(allowed.replacement_for_id, order.id)
 
+    # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
     def test_lifecycle_plans_excludes_cloud_missing_orphan_server(self):
         missing_asset = CloudAsset.objects.create(
             kind=CloudAsset.KIND_SERVER,
@@ -7109,6 +7357,7 @@ class CloudServerServicesTestCase(TestCase):
         self.assertFalse(CloudLifecyclePlan.objects.filter(plan_kind=CloudLifecyclePlan.PLAN_KIND_ORPHAN_ASSET_DELETE, asset=missing_asset, data_group='active').exists())
         self.assertTrue(CloudLifecyclePlan.objects.filter(plan_kind=CloudLifecyclePlan.PLAN_KIND_ORPHAN_ASSET_DELETE, asset=visible_asset, data_group='active').exists())
 
+    # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
     def test_lifecycle_plans_keeps_asset_remarks_out_of_execution_status(self):
         asset = CloudAsset.objects.create(
             kind=CloudAsset.KIND_SERVER,
@@ -7143,6 +7392,7 @@ class CloudServerServicesTestCase(TestCase):
         self.assertNotIn('tg://proxy?', row['display_note'])
         self.assertNotIn('Get:', row['display_note'])
 
+    # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
     def test_lifecycle_plans_show_shutdown_disabled_plan_state(self):
         account = CloudAccountConfig.objects.create(
             provider=CloudAccountConfig.PROVIDER_AWS,
@@ -7203,6 +7453,7 @@ class CloudServerServicesTestCase(TestCase):
         self.assertFalse(row['should_execute'])
         self.assertIn('关机计划关闭', row['blocked_reason'])
 
+    # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
     def test_lifecycle_plans_move_deleted_orphan_server_out_of_future(self):
         asset = CloudAsset.objects.create(
             kind=CloudAsset.KIND_SERVER,
@@ -7235,6 +7486,7 @@ class CloudServerServicesTestCase(TestCase):
         self.assertEqual(history_row['plan_state_label'], '等待IP回收')
         self.assertFalse(history_row['should_execute'])
 
+    # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
     def test_manual_order_delete_enters_lifecycle_success_history(self):
         from bot.api import _run_shutdown_order_sync
 
@@ -7291,6 +7543,7 @@ class CloudServerServicesTestCase(TestCase):
         ]
         self.assertFalse(ip_delete_rows)
 
+    # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
     def test_lifecycle_plans_compact_request_keeps_ip_delete_history_item(self):
         now = timezone.now()
         for index in range(60):
@@ -7339,6 +7592,7 @@ class CloudServerServicesTestCase(TestCase):
         self.assertGreaterEqual(data['ip_delete_history_count'], 1)
         self.assertTrue(any(item.get('is_history') and item.get('public_ip') == '52.77.18.250' for item in data['ip_delete_items']))
 
+    # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
     def test_lifecycle_plans_include_ip_delete_history_item(self):
         asset = CloudAsset.objects.create(
             kind=CloudAsset.KIND_SERVER,
@@ -7372,6 +7626,7 @@ class CloudServerServicesTestCase(TestCase):
         self.assertGreaterEqual(data['ip_delete_history_count'], 1)
         self.assertEqual(rows[0]['deletion_source_label'], '人工手动删除')
 
+    # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
     def test_lifecycle_plans_sort_shutdown_items_by_delete_time(self):
         later_asset = CloudAsset.objects.create(
             kind=CloudAsset.KIND_SERVER,
@@ -7430,6 +7685,7 @@ class CloudServerServicesTestCase(TestCase):
         delete_times = [parse_datetime(item['delete_at']) for item in rows]
         self.assertEqual(delete_times, sorted(delete_times))
 
+    # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
     def test_lifecycle_plans_group_same_delete_time_by_user(self):
         second_user = TelegramUser.objects.create(tg_user_id=990002, username='svc_test_two')
         same_delete_at = timezone.now() + timezone.timedelta(days=10)
@@ -7472,6 +7728,7 @@ class CloudServerServicesTestCase(TestCase):
             [second_user.id, second_user.id, self.user.id, self.user.id],
         ])
 
+    # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
     def test_lifecycle_plans_move_deleted_unattached_ip_active_row_to_history(self):
         asset = CloudAsset.objects.create(
             kind=CloudAsset.KIND_SERVER,
@@ -7541,6 +7798,7 @@ class CloudServerServicesTestCase(TestCase):
         ).exists())
         self.assertGreaterEqual(data['ip_delete_history_count'], 1)
 
+    # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
     def test_lifecycle_plans_include_future_server_plan_item(self):
         delete_at = timezone.now() + timezone.timedelta(days=9)
         order = CloudServerOrder.objects.create(
@@ -7573,6 +7831,7 @@ class CloudServerServicesTestCase(TestCase):
         self.assertEqual(rows[0]['queue_status'], 'scheduled_future')
         self.assertEqual(rows[0]['plan_state_label'], '已排期')
 
+    # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
     def test_lifecycle_plans_compute_orphan_server_delete_after_suspend_window(self):
         SiteConfig.set('cloud_suspend_after_days', '3')
         SiteConfig.set('cloud_suspend_time', '17:00')
@@ -7611,6 +7870,7 @@ class CloudServerServicesTestCase(TestCase):
         self.assertNotEqual(delete_at, expires_at)
         self.assertIn(timezone.localtime(delete_at).strftime('%Y-%m-%d %H:%M:%S'), row['execution_plan'])
 
+    # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
     def test_orphan_server_not_due_until_computed_delete_time(self):
         SiteConfig.set('cloud_suspend_after_days', '3')
         SiteConfig.set('cloud_suspend_time', '17:00')
@@ -7635,6 +7895,7 @@ class CloudServerServicesTestCase(TestCase):
 
         self.assertNotIn(asset.id, due_ids)
 
+    # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
     def test_refresh_lifecycle_plans_command_populates_cloud_lifecycle_plan(self):
         order = CloudServerOrder.objects.create(
             order_no='CMD-LIFECYCLE-PLAN-1',
@@ -7678,6 +7939,7 @@ class CloudServerServicesTestCase(TestCase):
             data_group='active',
         ).exists())
 
+    # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
     def test_refresh_lifecycle_plan_table_api_populates_cloud_lifecycle_plan(self):
         order = CloudServerOrder.objects.create(
             order_no='API-LIFECYCLE-REFRESH-1',
@@ -7725,6 +7987,7 @@ class CloudServerServicesTestCase(TestCase):
             data_group='active',
         ).exists())
 
+    # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
     def test_update_cloud_asset_expiry_refreshes_delete_plan_snapshot(self):
         old_expiry = timezone.now() - timezone.timedelta(days=10)
         new_expiry = timezone.now() - timezone.timedelta(days=1)
@@ -7762,6 +8025,7 @@ class CloudServerServicesTestCase(TestCase):
         self.assertNotEqual(row.delete_at, old_delete_at)
         self.assertEqual(row.service_expires_at, new_expiry)
 
+    # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
     def test_update_unattached_ip_release_time_refreshes_delete_plan_snapshot(self):
         old_release_at = timezone.now() + timezone.timedelta(days=1)
         new_release_at = timezone.now() + timezone.timedelta(days=3)
@@ -7800,6 +8064,7 @@ class CloudServerServicesTestCase(TestCase):
         self.assertEqual(row.delete_at, new_release_at)
         self.assertEqual(row.next_run_at, new_release_at)
 
+    # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
     def test_refresh_notice_plans_command_populates_cloud_notice_plan(self):
         now = timezone.now()
         order = CloudServerOrder.objects.create(
@@ -7825,6 +8090,7 @@ class CloudServerServicesTestCase(TestCase):
 
         self.assertTrue(CloudNoticePlan.objects.filter(notice_type='renew_notice', order=order, data_group='active').exists())
 
+    # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
     def test_refresh_notice_plan_table_api_populates_cloud_notice_plan(self):
         now = timezone.now()
         order = CloudServerOrder.objects.create(
@@ -7854,6 +8120,7 @@ class CloudServerServicesTestCase(TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertTrue(CloudNoticePlan.objects.filter(notice_type='renew_notice', order=order, data_group='active').exists())
 
+    # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
     def test_notice_task_detail_uses_cloud_notice_plan_table(self):
         now = timezone.now()
         order = CloudServerOrder.objects.create(
@@ -7886,6 +8153,7 @@ class CloudServerServicesTestCase(TestCase):
         self.assertEqual(row['ip'], '7.7.7.71')
         self.assertTrue(CloudNoticePlan.objects.filter(notice_type='renew_notice', order=order, data_group=CloudNoticePlan.DATA_GROUP_ACTIVE).exists())
 
+    # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
     def test_notice_write_actions_require_superuser(self):
         staff_user = get_user_model().objects.create_user(username='staff_notice_write_blocked', password='x', is_staff=True)
         order = CloudServerOrder.objects.create(
@@ -7938,6 +8206,7 @@ class CloudServerServicesTestCase(TestCase):
         self.assertEqual(delete_notice_history(delete_request, str(log.id)).status_code, 403)
         self.assertTrue(CloudUserNoticeLog.objects.filter(id=log.id).exists())
 
+    # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
     def test_delete_notice_history_removes_cloud_notice_plan_history_row(self):
         order = CloudServerOrder.objects.create(
             order_no='NOTICE-PLAN-HISTORY-DELETE-1',
@@ -7981,6 +8250,7 @@ class CloudServerServicesTestCase(TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertFalse(CloudNoticePlan.objects.filter(notice_type='renew_notice', data_group=CloudNoticePlan.DATA_GROUP_HISTORY, log_id=log.id).exists())
 
+    # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
     def test_cloud_ip_query_keyboard_limits_non_owner_to_renewal(self):
         from bot.keyboards import cloud_ip_query_result
 
@@ -8003,6 +8273,7 @@ class CloudServerServicesTestCase(TestCase):
         self.assertNotIn('⛔ 关闭自动续费', labels)
         self.assertNotIn('👩‍💻 联系客服', labels)
 
+    # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
     def test_lifecycle_aws_sync_scans_all_regions_without_env_region(self):
         aws_account = CloudAccountConfig.objects.create(
             provider=CloudAccountConfig.PROVIDER_AWS,
@@ -8024,6 +8295,7 @@ class CloudServerServicesTestCase(TestCase):
         )
         calls = []
 
+        # 功能：处理 云资产、云订单和生命周期 中的 fake call command 业务流程。
         def fake_call_command(command_name, **kwargs):
             calls.append((command_name, kwargs))
 
@@ -8041,6 +8313,7 @@ class CloudServerServicesTestCase(TestCase):
         self.assertEqual(aws_call[1]['account_id'], str(aws_account.id))
         self.assertNotIn('region', aws_call[1])
 
+    # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
     def test_lifecycle_sync_rotates_one_active_account_per_tick(self):
         first = CloudAccountConfig.objects.create(
             provider=CloudAccountConfig.PROVIDER_AWS,
@@ -8063,6 +8336,7 @@ class CloudServerServicesTestCase(TestCase):
         SiteConfig.set('cloud_asset_sync_next_account_cursor', '')
         calls = []
 
+        # 功能：处理 云资产、云订单和生命周期 中的 fake call command 业务流程。
         def fake_call_command(command_name, **kwargs):
             calls.append((command_name, kwargs))
 
@@ -8074,6 +8348,7 @@ class CloudServerServicesTestCase(TestCase):
         self.assertTrue(all(item[0] == 'sync_aws_assets' for item in calls))
         self.assertTrue(all('region' not in item[1] for item in calls))
 
+    # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
     def test_delete_cloud_asset_only_removes_asset_record(self):
         order = CloudServerOrder.objects.create(
             order_no='DELETE-ASSET-ONLY-1',
@@ -8151,6 +8426,7 @@ class CloudServerServicesTestCase(TestCase):
         from cloud.management.commands.sync_aws_assets import _resolve_order_for_ip
         self.assertIsNone(_resolve_order_for_ip('8.8.8.8'))
 
+    # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
     def test_delete_cloud_asset_also_removes_residual_server_record(self):
         order = CloudServerOrder.objects.create(
             order_no='DELETE-ASSET-RESIDUAL-1',
@@ -8230,6 +8506,7 @@ class CloudServerServicesTestCase(TestCase):
         self.assertEqual(order.provider_resource_id, '')
         self.assertTrue(CloudIpLog.objects.filter(order=order, note__contains='后台手动删除代理列表记录').exists())
 
+    # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
     def test_reconcile_cloud_assets_skips_deleted_server_residual(self):
         order = CloudServerOrder.objects.create(
             order_no='RECONCILE-DELETED-SERVER-1',
@@ -8279,6 +8556,7 @@ class CloudServerServicesTestCase(TestCase):
             ).exists()
         )
 
+    # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
     def test_reconcile_cloud_assets_does_not_match_cross_provider_instance_id(self):
         CloudAsset.objects.create(
             kind=CloudAsset.KIND_SERVER,
@@ -8314,6 +8592,7 @@ class CloudServerServicesTestCase(TestCase):
         self.assertTrue(CloudAsset.objects.filter(provider='aliyun_simple', instance_id='shared-instance-id').exists())
         self.assertTrue(CloudAsset.objects.filter(provider='aws_lightsail', instance_id='shared-instance-id').exists())
 
+    # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
     def test_reconcile_cloud_assets_preserves_server_account_label(self):
         account = CloudAccountConfig.objects.create(
             provider=CloudAccountConfig.PROVIDER_AWS,
@@ -8344,6 +8623,7 @@ class CloudServerServicesTestCase(TestCase):
         self.assertEqual(asset.account_label, label)
         self.assertEqual(asset.cloud_account, account)
 
+    # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
     def test_reconcile_cloud_assets_skips_inactive_cloud_account_server(self):
         account = CloudAccountConfig.objects.create(
             provider=CloudAccountConfig.PROVIDER_AWS,
@@ -8372,6 +8652,7 @@ class CloudServerServicesTestCase(TestCase):
 
         self.assertFalse(CloudAsset.objects.filter(instance_id='inactive-account-server').exists())
 
+    # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
     def test_reconcile_cloud_assets_skips_server_marked_cloud_missing(self):
         account = CloudAccountConfig.objects.create(
             provider=CloudAccountConfig.PROVIDER_AWS,
@@ -8402,6 +8683,7 @@ class CloudServerServicesTestCase(TestCase):
 
         self.assertFalse(CloudAsset.objects.filter(instance_id='missing-account-server').exists())
 
+    # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
     def test_reconcile_cloud_assets_matches_legacy_account_label_variants(self):
         account = CloudAccountConfig.objects.create(
             provider=CloudAccountConfig.PROVIDER_AWS,
@@ -8452,6 +8734,7 @@ class CloudServerServicesTestCase(TestCase):
         self.assertEqual(asset.cloud_account, account)
         self.assertEqual(asset.account_label, legacy_label)
 
+    # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
     def test_reconcile_cloud_assets_does_not_match_cross_region_same_instance_without_ip(self):
         CloudAsset.objects.create(
             kind=CloudAsset.KIND_SERVER,
@@ -8485,6 +8768,7 @@ class CloudServerServicesTestCase(TestCase):
         self.assertTrue(CloudAsset.objects.filter(instance_id='reconcile-same-instance', region_code='us-east-1').exists())
         self.assertTrue(CloudAsset.objects.filter(instance_id='reconcile-same-instance', region_code='ap-southeast-1').exists())
 
+    # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
     def test_delete_server_only_removes_server_record(self):
         order = CloudServerOrder.objects.create(
             order_no='DELETE-SERVER-ONLY-1',
@@ -8549,6 +8833,7 @@ class CloudServerServicesTestCase(TestCase):
         self.assertEqual(order.public_ip, '9.9.9.9')
         self.assertEqual(order.instance_id, 'i-delete-server-only')
 
+    # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
     def test_delete_server_does_not_fallback_to_asset_id(self):
         order = CloudServerOrder.objects.create(
             order_no='DELETE-SERVER-NO-FALLBACK-1',
@@ -8586,6 +8871,7 @@ class CloudServerServicesTestCase(TestCase):
         self.assertEqual(response.status_code, 404)
         self.assertTrue(CloudAsset.objects.filter(id=asset.id).exists())
 
+    # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
     def test_servers_list_excludes_unattached_static_ip_rows(self):
         unattached = Server.objects.create(
             user=self.user,
@@ -8621,6 +8907,7 @@ class CloudServerServicesTestCase(TestCase):
         self.assertNotIn(unattached.id, ids)
         self.assertIn(attached.id, ids)
 
+    # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
     def test_send_logged_cloud_notice_deduplicates_same_event_and_order(self):
         order = CloudServerOrder.objects.create(
             order_no='NOTICE-DEDUPE-1',
@@ -8642,6 +8929,7 @@ class CloudServerServicesTestCase(TestCase):
         )
         sent = []
 
+        # 功能：处理 云资产、云订单和生命周期 中的 fake notify 业务流程。
         async def fake_notify(user_id, text, reply_markup=None):
             sent.append((user_id, text))
             return True
@@ -8654,6 +8942,7 @@ class CloudServerServicesTestCase(TestCase):
         self.assertEqual(len(sent), 1)
         self.assertEqual(CloudUserNoticeLog.objects.filter(event_type='renew_notice', user=self.user, order=order, delivered=True).count(), 1)
 
+    # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
     def test_group_cloud_server_list_is_scoped_to_current_group(self):
         first_user = TelegramUser.objects.create(tg_user_id=991997001, username='group_scope_first')
         second_user = TelegramUser.objects.create(tg_user_id=991997002, username='group_scope_second')
@@ -8674,6 +8963,7 @@ class CloudServerServicesTestCase(TestCase):
         self.assertIsNotNone(first_detail)
         self.assertIsNone(denied_detail)
 
+    # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
     def test_group_auto_renew_bulk_toggle_is_scoped_to_current_group(self):
         first_user = TelegramUser.objects.create(tg_user_id=991997101, username='group_auto_first')
         second_user = TelegramUser.objects.create(tg_user_id=991997102, username='group_auto_second')
@@ -8692,6 +8982,7 @@ class CloudServerServicesTestCase(TestCase):
         self.assertTrue(first_order.auto_renew_enabled)
         self.assertFalse(second_order.auto_renew_enabled)
 
+    # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
     def test_auto_renew_candidates_exclude_admin_notice_users(self):
         admin_user = TelegramUser.objects.create(tg_user_id=991998001, username='auto_admin', balance='999.00')
         other_user = TelegramUser.objects.create(tg_user_id=991998002, username='auto_group_member', balance='88.00')
@@ -8733,6 +9024,7 @@ class CloudServerServicesTestCase(TestCase):
         self.assertIn('svc_test', balance_text)
         self.assertIn('auto_group_member', balance_text)
 
+    # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
     def test_auto_renew_candidates_exclude_primary_admin_user(self):
         admin_user = TelegramUser.objects.create(tg_user_id=991998003, username='primary_admin', balance='999.00')
         member_user = TelegramUser.objects.create(tg_user_id=991998004, username='primary_group_member', balance='50.00')
@@ -8764,6 +9056,7 @@ class CloudServerServicesTestCase(TestCase):
 
         self.assertEqual([user.id for user in candidates], [member_user.id])
 
+    # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
     def test_auto_renew_group_member_can_pay_when_owner_balance_insufficient(self):
         owner = self.user
         owner.balance = Decimal('0.00')
@@ -8807,6 +9100,7 @@ class CloudServerServicesTestCase(TestCase):
         self.assertEqual(member.balance, Decimal('81.000000'))
         self.assertEqual(balance_change['payer_user_id'], member.id)
 
+    # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
     def test_send_order_notice_batch_prefers_bound_group_and_skips_private(self):
         group = TelegramGroupFilter.objects.create(
             chat_id=-1001888001,
@@ -8848,10 +9142,12 @@ class CloudServerServicesTestCase(TestCase):
         private_sent = []
         group_sent = []
 
+        # 功能：处理 云资产、云订单和生命周期 中的 fake notify 业务流程。
         async def fake_notify(user_id, text, reply_markup=None):
             private_sent.append((user_id, text))
             return True
 
+        # 功能：处理 云资产、云订单和生命周期 中的 fake notify target 业务流程。
         async def fake_notify_target(chat_id, text, reply_markup=None):
             group_sent.append((chat_id, text))
             return True
@@ -8877,6 +9173,7 @@ class CloudServerServicesTestCase(TestCase):
         self.assertEqual(log.target_chat_id, group.chat_id)
         self.assertEqual(log.extra['notice_target'], 'telegram_group')
 
+    # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
     def test_send_order_notice_batch_falls_back_private_when_group_fails(self):
         order = CloudServerOrder.objects.create(
             order_no='NOTICE-GROUP-FALLBACK-1',
@@ -8899,10 +9196,12 @@ class CloudServerServicesTestCase(TestCase):
         private_sent = []
         group_sent = []
 
+        # 功能：处理 云资产、云订单和生命周期 中的 fake notify 业务流程。
         async def fake_notify(user_id, text, reply_markup=None):
             private_sent.append((user_id, text))
             return True
 
+        # 功能：处理 云资产、云订单和生命周期 中的 fake notify target 业务流程。
         async def fake_notify_target(chat_id, text, reply_markup=None):
             group_sent.append((chat_id, text))
             return False
@@ -8931,6 +9230,7 @@ class CloudServerServicesTestCase(TestCase):
         self.assertIsNone(logs[1].target_chat_id)
         self.assertEqual(logs[1].extra['notice_target'], 'private')
 
+    # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
     def test_daily_expiry_summary_uses_real_cloud_status_and_target_config(self):
         self.user.first_name = '张三'
         self.user.save(update_fields=['first_name'])
@@ -9007,6 +9307,7 @@ class CloudServerServicesTestCase(TestCase):
         SiteConfig.set('cloud_daily_expiry_summary_chat_ids', '10001')
         sent = []
 
+        # 功能：处理 云资产、云订单和生命周期 中的 fake notify target 业务流程。
         async def fake_notify_target(chat_id, text, reply_markup=None):
             sent.append((chat_id, text))
             return True
@@ -9034,6 +9335,7 @@ class CloudServerServicesTestCase(TestCase):
         self.assertEqual(log.extra['today_count'], 1)
         self.assertEqual(log.extra['expired_count'], 1)
 
+    # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
     def test_tasks_overview_exposes_click_paths_for_entry_and_order_number(self):
         order = CloudServerOrder.objects.create(
             order_no='TASK-LINK-1',
@@ -9070,6 +9372,7 @@ class CloudServerServicesTestCase(TestCase):
         self.assertEqual(regular['detail_path'], f'/admin/cloud-orders/{order.id}')
         self.assertEqual(regular['order_detail_path'], f'/admin/cloud-orders/{order.id}')
 
+    # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
     def test_auto_renew_retry_task_waits_for_recharge_then_retries(self):
         expires_at = timezone.now() + timezone.timedelta(hours=8)
         self.user.balance = Decimal('0.00')
@@ -9126,6 +9429,7 @@ class CloudServerServicesTestCase(TestCase):
         self.assertEqual(self.user.balance, Decimal('81.000000'))
         self.assertTrue(CloudAutoRenewPatrolLog.objects.filter(order=order, is_success=True).exists())
 
+    # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
     def test_update_cloud_asset_price_restores_auto_renew_pending_state(self):
         expires_at = timezone.now() + timezone.timedelta(hours=8)
         order = CloudServerOrder.objects.create(
@@ -9202,6 +9506,7 @@ class CloudServerServicesTestCase(TestCase):
         after_pinned = next(item for item in (after_payload.get('data') or after_payload) if item['id'] == -10001)
         self.assertEqual(after_pinned['execution_status'], 'auto_renew_pending')
 
+    # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
     def test_renewal_balance_payment_uses_latest_proxy_price(self):
         self.user.balance = Decimal('100.000000')
         self.user.save(update_fields=['balance', 'updated_at'])
@@ -9253,6 +9558,7 @@ class CloudServerServicesTestCase(TestCase):
         self.assertEqual(order.pay_amount, Decimal('29.00'))
         self.assertEqual(self.user.balance, Decimal('71.000000'))
 
+    # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
     def test_cloud_asset_detail_exposes_related_order_click_path(self):
         order = CloudServerOrder.objects.create(
             order_no='ASSET-DETAIL-ORDER-1',
@@ -9297,6 +9603,7 @@ class CloudServerServicesTestCase(TestCase):
         self.assertEqual(data['order_link_path'], f'/admin/cloud-orders/{order.id}')
         self.assertEqual(data['related_order']['order_link_path'], f'/admin/cloud-orders/{order.id}')
 
+    # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
     def test_cloud_asset_detail_exposes_history_orders_with_click_paths(self):
         root_order = CloudServerOrder.objects.create(
             order_no='ASSET-HISTORY-ROOT-1',
@@ -9363,6 +9670,7 @@ class CloudServerServicesTestCase(TestCase):
         root_item = next(item for item in history_orders if item['id'] == root_order.id)
         self.assertEqual(root_item['order_detail_path'], f'/admin/cloud-orders/{root_order.id}')
 
+    # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
     def test_auto_renew_task_detail_includes_due_retry_and_fallback_items(self):
         due_order = CloudServerOrder.objects.create(
             order_no='AUTO-RENEW-DUE-1',
@@ -9504,6 +9812,7 @@ class CloudServerServicesTestCase(TestCase):
         request = RequestFactory().get('/api/dashboard/tasks/auto-renew/')
         request.user = staff_user
 
+        # 功能：处理 云资产、云订单和生命周期 中的 fake get due orders 业务流程。
         async def fake_get_due_orders():
             return {'auto_renew': [due_order]}
 
@@ -9524,6 +9833,7 @@ class CloudServerServicesTestCase(TestCase):
         retry_item = next(item for item in due_items if item['order_no'] == retry_order.order_no)
         self.assertEqual(retry_item['last_failure_reason'], '余额不足')
 
+    # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
     def test_auto_renew_detail_keeps_valid_order_without_asset(self):
         due_order = CloudServerOrder.objects.create(
             order_no='AUTO-RENEW-NO-ASSET-1',
@@ -9548,6 +9858,7 @@ class CloudServerServicesTestCase(TestCase):
         request = RequestFactory().get('/api/dashboard/tasks/auto-renew/')
         request.user = staff_user
 
+        # 功能：处理 云资产、云订单和生命周期 中的 fake get due orders 业务流程。
         async def fake_get_due_orders():
             return {'auto_renew': [due_order]}
 
@@ -9561,6 +9872,7 @@ class CloudServerServicesTestCase(TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertEqual(queue_status_map[due_order.order_no], 'due_now')
 
+    # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
     def test_run_auto_renew_tasks_executes_due_retry_and_fallback_queue(self):
         due_order = CloudServerOrder.objects.create(
             order_no='AUTO-RENEW-RUN-DUE-1',
@@ -9638,9 +9950,11 @@ class CloudServerServicesTestCase(TestCase):
         request = RequestFactory().post('/api/dashboard/tasks/auto-renew/run/', data='{}', content_type='application/json')
         request.user = staff_user
 
+        # 功能：处理 云资产、云订单和生命周期 中的 fake get due orders 业务流程。
         async def fake_get_due_orders():
             return {'auto_renew': [due_order]}
 
+        # 功能：处理 云资产、云订单和生命周期 中的 fake run auto renew 业务流程。
         def fake_run_auto_renew(order_id):
             order = CloudServerOrder.objects.get(id=order_id)
             if order_id == retry_order.id:
@@ -9665,6 +9979,7 @@ class CloudServerServicesTestCase(TestCase):
         self.assertEqual(item_map[fallback_order.order_no]['queue_status'], 'fallback_retry')
         self.assertEqual(CloudAutoRenewPatrolLog.objects.filter(batch_id=data['batch_id']).count(), 3)
 
+    # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
     def test_run_auto_renew_order_executes_single_order(self):
         order = CloudServerOrder.objects.create(
             order_no='AUTO-RENEW-SINGLE-1',
@@ -9690,6 +10005,7 @@ class CloudServerServicesTestCase(TestCase):
         request = RequestFactory().post(f'/api/dashboard/tasks/auto-renew/orders/{order.id}/run/', data='{}', content_type='application/json')
         request.user = staff_user
 
+        # 功能：处理 云资产、云订单和生命周期 中的 fake run auto renew 业务流程。
         def fake_run_auto_renew(order_id):
             renewed = CloudServerOrder.objects.get(id=order_id)
             return renewed, None, {'currency': 'USDT', 'amount': Decimal('19.00'), 'before': Decimal('50.00'), 'after': Decimal('31.00'), 'payer_user_id': self.user.id}
@@ -9706,6 +10022,7 @@ class CloudServerServicesTestCase(TestCase):
         self.assertTrue(data['items'][0]['ok'])
         self.assertTrue(CloudAutoRenewPatrolLog.objects.filter(batch_id=data['batch_id'], order=order).exists())
 
+    # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
     def test_update_cloud_asset_refreshes_unattached_ip_delete_plan(self):
         old_due_at = timezone.now() + timezone.timedelta(days=2)
         old_ip_recycle_at = timezone.now() + timezone.timedelta(days=2)
@@ -9782,6 +10099,7 @@ class CloudServerServicesTestCase(TestCase):
         self.assertEqual(server.expires_at, asset.actual_expires_at)
         self.assertEqual(order.ip_recycle_at, asset.actual_expires_at)
 
+    # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
     def test_update_cloud_asset_rebinds_unattached_ip_to_instance(self):
         asset = CloudAsset.objects.create(
             kind=CloudAsset.KIND_SERVER,
@@ -9840,6 +10158,7 @@ class CloudServerServicesTestCase(TestCase):
         self.assertTrue(server.is_active)
         self.assertEqual(server.status, Server.STATUS_RUNNING)
 
+    # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
     def test_system_note_updates_preserve_manual_primary_record_notes(self):
         from cloud.services import _update_order_primary_records
 
@@ -9885,6 +10204,7 @@ class CloudServerServicesTestCase(TestCase):
         self.assertEqual(asset.note, '资产人工备注')
         self.assertEqual(server.note, '服务器人工备注')
 
+    # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
     def test_sync_cloud_asset_user_binding_uses_asset_name_tg_id(self):
         user = TelegramUser.objects.create(
             tg_user_id=21989077,
@@ -9909,6 +10229,7 @@ class CloudServerServicesTestCase(TestCase):
         self.assertEqual(resolved.id, user.id)
         self.assertEqual(asset.user_id, user.id)
 
+    # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
     def test_toggle_auto_renew_creates_operation_order_for_bound_asset_without_order(self):
         user = TelegramUser.objects.create(
             tg_user_id=21989078,
@@ -9942,6 +10263,7 @@ class CloudServerServicesTestCase(TestCase):
         self.assertTrue(updated.auto_renew_enabled)
         self.assertEqual(asset.order_id, order.id)
 
+    # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
     def test_manual_cloud_asset_note_edit_still_overwrites(self):
         order = CloudServerOrder.objects.create(
             order_no='NOTE-MANUAL-OVERWRITE',
@@ -10000,6 +10322,7 @@ class CloudServerServicesTestCase(TestCase):
         self.assertEqual(asset.note, '人工改后的备注')
         self.assertEqual(server.note, '人工改后的备注')
 
+    # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
     def test_sync_missing_confirmation_note_preserves_existing_note(self):
         from cloud.sync_safety import mark_missing_confirmation_pending, missing_confirmation_state
 
@@ -10028,6 +10351,7 @@ class CloudServerServicesTestCase(TestCase):
         self.assertEqual(missing_confirmation_state(asset)['count'], 1)
         self.assertEqual(asset.sync_state['missing_confirmation']['old_public_ip'], '10.9.9.3')
 
+    # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
     def test_sync_missing_delete_threshold_is_at_least_five(self):
         with patch('cloud.sync_safety.get_runtime_config', return_value='3'):
             self.assertEqual(get_missing_confirmation_threshold(), 5)
@@ -10036,6 +10360,7 @@ class CloudServerServicesTestCase(TestCase):
         with patch('cloud.sync_safety.get_runtime_config', return_value='7'):
             self.assertEqual(get_missing_confirmation_threshold(), 7)
 
+    # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
     def test_sync_missing_confirmation_requires_interval(self):
         from cloud.sync_safety import mark_missing_confirmation_pending, missing_confirmation_count
 
@@ -10069,6 +10394,7 @@ class CloudServerServicesTestCase(TestCase):
         self.assertEqual(asset.note, '保留人工备注')
         self.assertEqual(missing_confirmation_count(asset), 1)
 
+    # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
     def test_unattached_ip_delete_items_expose_missing_confirmation_state(self):
         from cloud.sync_safety import mark_missing_confirmation_pending
 
@@ -10108,6 +10434,7 @@ class CloudServerServicesTestCase(TestCase):
         self.assertIn('missing_confirming', row.get('quality_flags') or [])
         self.assertIn('缺失确认 1/', row.get('quality_label') or '')
 
+    # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
     def test_lifecycle_plans_unattached_ip_show_confirmation_progress_in_state_and_note(self):
         from cloud.sync_safety import mark_missing_confirmation_pending
 
@@ -10147,6 +10474,7 @@ class CloudServerServicesTestCase(TestCase):
         self.assertIn('第1/5次删除确认', row['display_note'])
         self.assertIn('第1/5次删除确认', row['blocked_reason'])
 
+    # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
     def test_lifecycle_plans_unattached_ip_show_delete_attempt_in_state_and_note(self):
         asset = CloudAsset.objects.create(
             kind=CloudAsset.KIND_SERVER,
@@ -10185,6 +10513,7 @@ class CloudServerServicesTestCase(TestCase):
         self.assertIn('已尝试2次，待第3次删除', row['resource_state_label'])
         self.assertIn('删除次数：已尝试2次，待第3次删除', row['display_note'])
 
+    # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
     def test_lifecycle_plans_read_cached_table_after_initial_refresh(self):
         CloudAsset.objects.create(
             kind=CloudAsset.KIND_SERVER,
@@ -10215,6 +10544,7 @@ class CloudServerServicesTestCase(TestCase):
         sync_mock.assert_not_called()
         self.assertEqual(json.loads(second_response.content)['data']['cache_mode'], 'cached')
 
+    # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
     def test_lifecycle_plan_counts_match_proxy_list_assets(self):
         active_account = CloudAccountConfig.objects.create(
             provider=CloudAccountConfig.PROVIDER_AWS,
@@ -10317,6 +10647,7 @@ class CloudServerServicesTestCase(TestCase):
         self.assertEqual(aliyun_row['plan_state_label'], '只同步/自然释放')
         self.assertFalse(aliyun_row['should_execute'])
 
+    # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
     def test_unattached_ip_delete_items_hide_confirmed_missing_ip(self):
         asset = CloudAsset.objects.create(
             kind=CloudAsset.KIND_SERVER,
@@ -10346,17 +10677,23 @@ class CloudServerServicesTestCase(TestCase):
 
         self.assertFalse(any(item.get('public_ip') == '5.5.5.23' for item in items))
 
+    # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
     def test_sync_aws_missing_instance_requires_five_passes_before_delete(self):
         from cloud.management.commands.sync_aws_assets import _mark_deleted_when_missing_in_aws
 
+        # 测试类：组织 DummyStyle 相关的回归测试。
         class DummyStyle:
+            # 功能：处理 云资产、云订单和生命周期 中的 WARNING 业务流程。
             def WARNING(self, text):
                 return text
 
+        # 测试类：组织 DummyStdout 相关的回归测试。
         class DummyStdout:
+            # 功能：初始化对象状态和依赖。
             def __init__(self):
                 self.stdout = self
                 self.style = DummyStyle()
+            # 功能：处理 云资产、云订单和生命周期 中的 write 业务流程。
             def write(self, text):
                 return text
 
@@ -10440,6 +10777,7 @@ class CloudServerServicesTestCase(TestCase):
         self.assertEqual(server.status, Server.STATUS_DELETED)
         self.assertEqual(order.status, 'deleted')
 
+    # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
     def test_order_primary_records_prefer_ip_over_stale_names(self):
         from cloud.services import _order_primary_asset, _order_primary_server
 
@@ -10519,19 +10857,25 @@ class CloudServerServicesTestCase(TestCase):
         self.assertNotEqual(_order_primary_asset(order).id, stale_asset.id)
         self.assertNotEqual(_order_primary_server(order).id, stale_server.id)
 
+    # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
     def test_lifecycle_aws_resource_resolution_prefers_ip(self):
         from cloud.lifecycle import _aws_instance_name_for_order, _aws_static_ip_name_for_asset, _delete_instance_sync, _delete_orphan_asset_instance_sync
 
+        # 测试类：组织 FakeClient 相关的回归测试。
         class FakeClient:
+            # 功能：初始化对象状态和依赖。
             def __init__(self):
                 self.deleted_instances = []
 
+            # 功能：读取并返回相关数据；当前函数属于 云资产、云订单和生命周期。
             def get_instances(self, **kwargs):
                 return {'instances': [{'name': 'current-ip-instance', 'publicIpAddress': '9.9.9.30'}]}
 
+            # 功能：读取并返回相关数据；当前函数属于 云资产、云订单和生命周期。
             def get_static_ips(self, **kwargs):
                 return {'staticIps': [{'name': 'current-static-ip-name', 'ipAddress': '9.9.9.31'}]}
 
+            # 功能：删除或标记删除相关业务对象；当前函数属于 云资产、云订单和生命周期。
             def delete_instance(self, instanceName):
                 self.deleted_instances.append(instanceName)
 
@@ -10572,20 +10916,25 @@ class CloudServerServicesTestCase(TestCase):
         self.assertTrue(ok)
         self.assertEqual(orphan_client.deleted_instances, ['current-ip-instance'])
 
+    # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
     def test_aws_renewal_start_check_prefers_ip_over_stale_server_name(self):
         from cloud.services import _ensure_aws_instance_running
 
         started = []
 
+        # 测试类：组织 FakeClient 相关的回归测试。
         class FakeClient:
+            # 功能：读取并返回相关数据；当前函数属于 云资产、云订单和生命周期。
             def get_instances(self, **kwargs):
                 return {'instances': [{'name': 'current-ip-instance', 'publicIpAddress': '9.9.9.40'}]}
 
+            # 功能：读取并返回相关数据；当前函数属于 云资产、云订单和生命周期。
             def get_instance(self, instanceName):
                 if instanceName == 'stale-server-name':
                     raise AssertionError('should not query stale server name first')
                 return {'instance': {'name': instanceName, 'publicIpAddress': '9.9.9.40', 'state': {'name': 'stopped'}}}
 
+            # 功能：启动任务、流程或云资源；当前函数属于 云资产、云订单和生命周期。
             def start_instance(self, instanceName):
                 started.append(instanceName)
 
@@ -10614,6 +10963,7 @@ class CloudServerServicesTestCase(TestCase):
         self.assertEqual(started, ['current-ip-instance'])
         self.assertIn('已发起开机', note)
 
+    # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
     def test_admin_start_restores_suspended_order_to_completed(self):
         from cloud.services import start_cloud_server_from_admin
 
@@ -10669,7 +11019,9 @@ class CloudServerServicesTestCase(TestCase):
             is_active=False,
         )
 
+        # 测试类：组织 FakeClient 相关的回归测试。
         class FakeClient:
+            # 功能：读取并返回相关数据；当前函数属于 云资产、云订单和生命周期。
             def get_instance(self, instanceName):
                 return {
                     'instance': {
@@ -10695,6 +11047,7 @@ class CloudServerServicesTestCase(TestCase):
         self.assertTrue(asset.is_active)
         self.assertTrue(server.is_active)
 
+    # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
     def test_dashboard_asset_order_inference_scopes_duplicate_ip_by_account(self):
         from cloud.api import _infer_asset_order
 
@@ -10768,17 +11121,23 @@ class CloudServerServicesTestCase(TestCase):
         self.assertEqual(_infer_asset_order(asset), target_order)
         self.assertNotEqual(_infer_asset_order(asset), stale_order)
 
+    # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
     def test_sync_aws_missing_check_uses_previous_public_ip_before_delete(self):
         from cloud.management.commands.sync_aws_assets import _mark_deleted_when_missing_in_aws
 
+        # 测试类：组织 DummyStyle 相关的回归测试。
         class DummyStyle:
+            # 功能：处理 云资产、云订单和生命周期 中的 WARNING 业务流程。
             def WARNING(self, text):
                 return text
 
+        # 测试类：组织 DummyStdout 相关的回归测试。
         class DummyStdout:
+            # 功能：初始化对象状态和依赖。
             def __init__(self):
                 self.stdout = self
                 self.style = DummyStyle()
+            # 功能：处理 云资产、云订单和生命周期 中的 write 业务流程。
             def write(self, text):
                 return text
 
@@ -10847,17 +11206,23 @@ class CloudServerServicesTestCase(TestCase):
         self.assertEqual(order.status, 'completed')
         self.assertNotIn('云上未找到实例/IP-待确认', asset.provider_status or '')
 
+    # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
     def test_sync_aws_missing_blank_asset_does_not_delete_unrelated_blank_server(self):
         from cloud.management.commands.sync_aws_assets import _mark_deleted_when_missing_in_aws
 
+        # 测试类：组织 DummyStyle 相关的回归测试。
         class DummyStyle:
+            # 功能：处理 云资产、云订单和生命周期 中的 WARNING 业务流程。
             def WARNING(self, text):
                 return text
 
+        # 测试类：组织 DummyStdout 相关的回归测试。
         class DummyStdout:
+            # 功能：初始化对象状态和依赖。
             def __init__(self):
                 self.stdout = self
                 self.style = DummyStyle()
+            # 功能：处理 云资产、云订单和生命周期 中的 write 业务流程。
             def write(self, text):
                 return text
 
@@ -10896,6 +11261,7 @@ class CloudServerServicesTestCase(TestCase):
         self.assertEqual(asset.status, CloudAsset.STATUS_DELETED)
         self.assertEqual(server.status, Server.STATUS_RUNNING)
 
+    # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
     def test_sync_aliyun_order_update_recalculates_lifecycle_on_expiry_change(self):
         from cloud.management.commands.sync_aliyun_assets import _aliyun_order_updates_from_sync
 
@@ -10959,17 +11325,23 @@ class CloudServerServicesTestCase(TestCase):
         self.assertIsNone(updates['auto_renew_notice_sent_at'])
         self.assertIsNone(updates['delete_notice_sent_at'])
 
+    # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
     def test_sync_aliyun_missing_instance_requires_five_passes_before_delete(self):
         from cloud.management.commands.sync_aliyun_assets import _mark_deleted_when_missing_in_aliyun
 
+        # 测试类：组织 DummyStyle 相关的回归测试。
         class DummyStyle:
+            # 功能：处理 云资产、云订单和生命周期 中的 WARNING 业务流程。
             def WARNING(self, text):
                 return text
 
+        # 测试类：组织 DummyStdout 相关的回归测试。
         class DummyStdout:
+            # 功能：初始化对象状态和依赖。
             def __init__(self):
                 self.stdout = self
                 self.style = DummyStyle()
+            # 功能：处理 云资产、云订单和生命周期 中的 write 业务流程。
             def write(self, text):
                 return text
 
@@ -11053,17 +11425,23 @@ class CloudServerServicesTestCase(TestCase):
         self.assertEqual(server.status, Server.STATUS_DELETED)
         self.assertEqual(order.status, 'deleted')
 
+    # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
     def test_sync_aliyun_missing_blank_asset_does_not_delete_unrelated_blank_server(self):
         from cloud.management.commands.sync_aliyun_assets import _mark_deleted_when_missing_in_aliyun
 
+        # 测试类：组织 DummyStyle 相关的回归测试。
         class DummyStyle:
+            # 功能：处理 云资产、云订单和生命周期 中的 WARNING 业务流程。
             def WARNING(self, text):
                 return text
 
+        # 测试类：组织 DummyStdout 相关的回归测试。
         class DummyStdout:
+            # 功能：初始化对象状态和依赖。
             def __init__(self):
                 self.stdout = self
                 self.style = DummyStyle()
+            # 功能：处理 云资产、云订单和生命周期 中的 write 业务流程。
             def write(self, text):
                 return text
 
@@ -11102,6 +11480,7 @@ class CloudServerServicesTestCase(TestCase):
         self.assertEqual(asset.status, CloudAsset.STATUS_DELETED)
         self.assertEqual(server.status, Server.STATUS_RUNNING)
 
+    # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
     def test_aliyun_order_is_not_enqueued_for_shutdown_delete_plan(self):
         from bot.api import _collect_shutdown_plan_queue
 
@@ -11133,6 +11512,7 @@ class CloudServerServicesTestCase(TestCase):
 
         self.assertNotIn(order.id, order_ids)
 
+    # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
     def test_manual_aliyun_delete_plan_is_blocked_without_local_delete(self):
         from bot.api import _run_shutdown_order_sync
 
@@ -11166,6 +11546,7 @@ class CloudServerServicesTestCase(TestCase):
         self.assertIn('未接入删除 API', result['error'])
         self.assertEqual(order.status, 'suspended')
 
+    # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
     def test_failed_aliyun_order_is_not_enqueued_for_fallback_delete(self):
         order = CloudServerOrder.objects.create(
             order_no='ALIYUN-FAILED-NO-FALLBACK-DELETE-1',
@@ -11194,6 +11575,7 @@ class CloudServerServicesTestCase(TestCase):
 
         self.assertNotIn(order.id, [item.id for item in due['delete']])
 
+    # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
     def test_sync_aws_assets_rebinds_unattached_ip_when_instance_reappears(self):
         account = CloudAccountConfig.objects.create(
             provider=CloudAccountConfig.PROVIDER_AWS,
@@ -11239,10 +11621,13 @@ class CloudServerServicesTestCase(TestCase):
             is_active=False,
         )
 
+        # 测试类：组织 FakeLightsailClient 相关的回归测试。
         class FakeLightsailClient:
+            # 功能：读取并返回相关数据；当前函数属于 云资产、云订单和生命周期。
             def get_static_ips(self, **kwargs):
                 return {'staticIps': [], 'nextPageToken': None}
 
+            # 功能：读取并返回相关数据；当前函数属于 云资产、云订单和生命周期。
             def get_instances(self, **kwargs):
                 return {
                     'instances': [{
@@ -11274,6 +11659,7 @@ class CloudServerServicesTestCase(TestCase):
         self.assertTrue(server.is_active)
         self.assertEqual(server.status, Server.STATUS_RUNNING)
 
+    # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
     def test_sync_aws_assets_updates_retained_asset_after_renewal_recovery(self):
         account = CloudAccountConfig.objects.create(
             provider=CloudAccountConfig.PROVIDER_AWS,
@@ -11350,7 +11736,9 @@ class CloudServerServicesTestCase(TestCase):
             is_active=False,
         )
 
+        # 测试类：组织 FakeLightsailClient 相关的回归测试。
         class FakeLightsailClient:
+            # 功能：读取并返回相关数据；当前函数属于 云资产、云订单和生命周期。
             def get_static_ips(self, **kwargs):
                 return {'staticIps': [{
                     'name': 'recovered-static-ip',
@@ -11360,6 +11748,7 @@ class CloudServerServicesTestCase(TestCase):
                     'location': {'regionName': '新加坡'},
                 }], 'nextPageToken': None}
 
+            # 功能：读取并返回相关数据；当前函数属于 云资产、云订单和生命周期。
             def get_instances(self, **kwargs):
                 return {
                     'instances': [{
@@ -11387,6 +11776,7 @@ class CloudServerServicesTestCase(TestCase):
         self.assertTrue(asset.is_active)
         self.assertEqual(asset.note, '固定IP保留中-实例已删除')
 
+    # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
     def test_sync_aws_assets_preserves_existing_unattached_ip_due_time(self):
         account = CloudAccountConfig.objects.create(
             provider=CloudAccountConfig.PROVIDER_AWS,
@@ -11417,7 +11807,9 @@ class CloudServerServicesTestCase(TestCase):
             is_active=False,
         )
 
+        # 测试类：组织 FakeLightsailClient 相关的回归测试。
         class FakeLightsailClient:
+            # 功能：读取并返回相关数据；当前函数属于 云资产、云订单和生命周期。
             def get_static_ips(self, **kwargs):
                 return {
                     'staticIps': [{
@@ -11430,6 +11822,7 @@ class CloudServerServicesTestCase(TestCase):
                     'nextPageToken': None,
                 }
 
+            # 功能：读取并返回相关数据；当前函数属于 云资产、云订单和生命周期。
             def get_instances(self, **kwargs):
                 return {'instances': [], 'nextPageToken': None}
 
@@ -11441,6 +11834,7 @@ class CloudServerServicesTestCase(TestCase):
         self.assertEqual(asset.actual_expires_at, stale_due_at)
         self.assertEqual(asset.note, '未附加固定IP')
 
+    # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
     def test_sync_aws_unattached_ip_duplicate_cleanup_is_account_scoped(self):
         account_a = CloudAccountConfig.objects.create(
             provider=CloudAccountConfig.PROVIDER_AWS,
@@ -11475,7 +11869,9 @@ class CloudServerServicesTestCase(TestCase):
             is_active=False,
         )
 
+        # 测试类：组织 FakeLightsailClient 相关的回归测试。
         class FakeLightsailClient:
+            # 功能：读取并返回相关数据；当前函数属于 云资产、云订单和生命周期。
             def get_static_ips(self, **kwargs):
                 return {
                     'staticIps': [{
@@ -11488,6 +11884,7 @@ class CloudServerServicesTestCase(TestCase):
                     'nextPageToken': None,
                 }
 
+            # 功能：读取并返回相关数据；当前函数属于 云资产、云订单和生命周期。
             def get_instances(self, **kwargs):
                 return {'instances': [], 'nextPageToken': None}
 
@@ -11500,6 +11897,7 @@ class CloudServerServicesTestCase(TestCase):
         self.assertEqual(foreign_asset.status, CloudAsset.STATUS_UNKNOWN)
         self.assertEqual(foreign_asset.public_ip, '10.9.0.40')
 
+    # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
     def test_sync_aws_assets_preserves_existing_manual_asset_note(self):
         account = CloudAccountConfig.objects.create(
             provider=CloudAccountConfig.PROVIDER_AWS,
@@ -11531,10 +11929,13 @@ class CloudServerServicesTestCase(TestCase):
             is_active=False,
         )
 
+        # 测试类：组织 FakeLightsailClient 相关的回归测试。
         class FakeLightsailClient:
+            # 功能：读取并返回相关数据；当前函数属于 云资产、云订单和生命周期。
             def get_static_ips(self, **kwargs):
                 return {'staticIps': [], 'nextPageToken': None}
 
+            # 功能：读取并返回相关数据；当前函数属于 云资产、云订单和生命周期。
             def get_instances(self, **kwargs):
                 return {
                     'instances': [{
@@ -11557,11 +11958,13 @@ class CloudServerServicesTestCase(TestCase):
         self.assertEqual(asset.status, CloudAsset.STATUS_RUNNING)
         self.assertEqual(asset.note, '人工备注：不要覆盖')
 
+    # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
     def test_cloud_asset_sync_interval_defaults_to_ten_minutes(self):
         from core.runtime_config import get_cloud_asset_sync_interval_seconds
 
         self.assertEqual(get_cloud_asset_sync_interval_seconds(), 600)
 
+    # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
     def test_sync_aws_assets_keeps_runtime_running_when_order_is_suspended(self):
         account = CloudAccountConfig.objects.create(
             provider=CloudAccountConfig.PROVIDER_AWS,
@@ -11636,10 +12039,13 @@ class CloudServerServicesTestCase(TestCase):
             is_active=False,
         )
 
+        # 测试类：组织 FakeLightsailClient 相关的回归测试。
         class FakeLightsailClient:
+            # 功能：读取并返回相关数据；当前函数属于 云资产、云订单和生命周期。
             def get_static_ips(self, **kwargs):
                 return {'staticIps': [], 'nextPageToken': None}
 
+            # 功能：读取并返回相关数据；当前函数属于 云资产、云订单和生命周期。
             def get_instances(self, **kwargs):
                 return {
                     'instances': [{
@@ -11668,6 +12074,7 @@ class CloudServerServicesTestCase(TestCase):
         self.assertIn('云端运行中', asset.provider_status or '')
         self.assertIn('已到期关机，等待删除', asset.provider_status or '')
 
+    # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
     def test_dirty_deleted_note_does_not_hide_live_synced_asset(self):
         asset = CloudAsset.objects.create(
             kind=CloudAsset.KIND_SERVER,
@@ -11690,6 +12097,7 @@ class CloudServerServicesTestCase(TestCase):
         self.assertIsNotNone(queried)
         self.assertEqual(queried.id, asset.id)
 
+    # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
     def test_sync_aws_assets_revives_dirty_deleted_asset_when_instance_exists(self):
         account = CloudAccountConfig.objects.create(
             provider=CloudAccountConfig.PROVIDER_AWS,
@@ -11738,10 +12146,13 @@ class CloudServerServicesTestCase(TestCase):
             is_active=False,
         )
 
+        # 测试类：组织 FakeLightsailClient 相关的回归测试。
         class FakeLightsailClient:
+            # 功能：读取并返回相关数据；当前函数属于 云资产、云订单和生命周期。
             def get_static_ips(self, **kwargs):
                 return {'staticIps': [], 'nextPageToken': None}
 
+            # 功能：读取并返回相关数据；当前函数属于 云资产、云订单和生命周期。
             def get_instances(self, **kwargs):
                 return {
                     'instances': [{
@@ -11773,6 +12184,7 @@ class CloudServerServicesTestCase(TestCase):
         self.assertIsNotNone(queried)
         self.assertEqual(queried.id, asset.id)
 
+    # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
     def test_sync_aws_assets_revives_deleted_order_when_instance_exists(self):
         account = CloudAccountConfig.objects.create(
             provider=CloudAccountConfig.PROVIDER_AWS,
@@ -11832,10 +12244,13 @@ class CloudServerServicesTestCase(TestCase):
             is_active=True,
         )
 
+        # 测试类：组织 FakeLightsailClient 相关的回归测试。
         class FakeLightsailClient:
+            # 功能：读取并返回相关数据；当前函数属于 云资产、云订单和生命周期。
             def get_static_ips(self, **kwargs):
                 return {'staticIps': [], 'nextPageToken': None}
 
+            # 功能：读取并返回相关数据；当前函数属于 云资产、云订单和生命周期。
             def get_instances(self, **kwargs):
                 return {
                     'instances': [{
@@ -11863,6 +12278,7 @@ class CloudServerServicesTestCase(TestCase):
         due = async_to_sync(_get_due_orders)()
         self.assertIn(order.id, [item.id for item in due['delete']])
 
+    # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
     def test_proxy_list_hides_deleted_order_retained_ip(self):
         order = CloudServerOrder.objects.create(
             order_no='DELETED-LIST-HIDDEN-1',
@@ -11905,6 +12321,7 @@ class CloudServerServicesTestCase(TestCase):
         self.assertFalse(any(getattr(item, 'asset_id', None) == asset.id for item in items))
         self.assertIsNone(detail)
 
+    # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
     def test_cloud_sync_resolvers_ignore_deleted_ip_records(self):
         asset = CloudAsset.objects.create(
             kind=CloudAsset.KIND_SERVER,
@@ -11946,6 +12363,7 @@ class CloudServerServicesTestCase(TestCase):
         self.assertIsNone(resolve_aliyun_asset(asset.instance_id, asset.previous_public_ip))
         self.assertIsNone(resolve_aliyun_server(server.instance_id, server.previous_public_ip))
 
+    # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
     def test_cloud_sync_resolvers_keep_ip_primary_when_instance_changes(self):
         aws_account = CloudAccountConfig.objects.create(
             provider=CloudAccountConfig.PROVIDER_AWS,
@@ -12103,6 +12521,7 @@ class CloudServerServicesTestCase(TestCase):
         self.assertEqual(resolve_aliyun_asset(aliyun_direct_conflict.instance_id, '20.20.20.42', aliyun_account).id, aliyun_ip_asset.id)
         self.assertEqual(resolve_aliyun_server('aliyun-new-instance-conflict', '20.20.20.42', aliyun_account).id, aliyun_ip_server.id)
 
+    # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
     def test_cloud_sync_resolvers_prefer_current_ip_over_stale_previous_ip(self):
         current_asset = CloudAsset.objects.create(
             kind=CloudAsset.KIND_SERVER,
@@ -12165,6 +12584,7 @@ class CloudServerServicesTestCase(TestCase):
         self.assertEqual(resolve_aws_server('', '', '20.20.20.50', None).id, current_server.id)
         self.assertNotEqual(stale_asset.id, current_asset.id)
 
+    # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
     def test_delete_server_marks_instance_deleted_but_retains_static_ip(self):
         now = timezone.now()
         recycle_at = now + timezone.timedelta(days=7)
@@ -12257,6 +12677,7 @@ class CloudServerServicesTestCase(TestCase):
         self.assertEqual(retained_row['risk_status'], 'unattached_ip')
         self.assertIn('unattached_ip', retained_row['risk_statuses'])
 
+    # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
     def test_unattached_static_ip_is_not_auto_renewed(self):
         expires_at = timezone.now() + timezone.timedelta(hours=8)
         order = CloudServerOrder.objects.create(
@@ -12305,6 +12726,7 @@ class CloudServerServicesTestCase(TestCase):
         self.assertNotIn(order.id, auto_renew_notice_ids)
         self.assertFalse(any(getattr(item, 'asset_id', None) == asset.id for item in auto_renew_items))
 
+    # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
     def test_deleted_retained_static_ip_remains_query_renewable(self):
         recycle_at = timezone.now() + timezone.timedelta(days=7)
         order = CloudServerOrder.objects.create(
@@ -12357,6 +12779,7 @@ class CloudServerServicesTestCase(TestCase):
         self.assertIsNotNone(retained_order)
         self.assertTrue(plans)
 
+    # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
     def test_provision_expected_ip_failure_schedules_cleanup(self):
         order = CloudServerOrder.objects.create(
             order_no='PROVISION-IP-MISSING-CLEANUP',
@@ -12401,6 +12824,7 @@ class CloudServerServicesTestCase(TestCase):
         self.assertIn('创建流程未完成', saved.provision_note)
         self.assertIn('原固定 IP 已不在 AWS 账号中', saved.provision_note)
 
+    # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
     def test_retained_ip_postcheck_reuses_completed_recovery_order(self):
         recycle_at = timezone.now() + timezone.timedelta(days=7)
         source = CloudServerOrder.objects.create(
@@ -12452,6 +12876,7 @@ class CloudServerServicesTestCase(TestCase):
         self.assertEqual(err, '固定 IP 保留期续费，已进入自动恢复流程。')
         self.assertEqual(CloudServerOrder.objects.filter(replacement_for=source).count(), 1)
 
+    # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
     def test_lifecycle_tick_releases_retained_static_ip_after_recycle_due(self):
         recycle_due_at = timezone.now() - timezone.timedelta(days=2)
         order = CloudServerOrder.objects.create(
@@ -12494,7 +12919,9 @@ class CloudServerServicesTestCase(TestCase):
 
         released = []
 
+        # 测试类：组织 FakeLightsailClient 相关的回归测试。
         class FakeLightsailClient:
+            # 功能：处理 云资产、云订单和生命周期 中的 release static ip 业务流程。
             def release_static_ip(self, staticIpName):
                 released.append(staticIpName)
                 return {'operations': [{'id': 'op-retained-release'}]}
@@ -12514,6 +12941,7 @@ class CloudServerServicesTestCase(TestCase):
         self.assertEqual(asset.previous_public_ip, '20.20.20.20')
         self.assertIn('AWS 固定 IP 已真实释放', order.provision_note or '')
 
+    # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
     def test_lifecycle_tick_releases_retained_static_ip_when_asset_already_deleted(self):
         recycle_due_at = timezone.now() - timezone.timedelta(days=2)
         order = CloudServerOrder.objects.create(
@@ -12556,7 +12984,9 @@ class CloudServerServicesTestCase(TestCase):
 
         released = []
 
+        # 测试类：组织 FakeLightsailClient 相关的回归测试。
         class FakeLightsailClient:
+            # 功能：处理 云资产、云订单和生命周期 中的 release static ip 业务流程。
             def release_static_ip(self, staticIpName):
                 released.append(staticIpName)
                 return {'operations': [{'id': 'op-retained-release-deleted-asset'}]}
@@ -12576,6 +13006,7 @@ class CloudServerServicesTestCase(TestCase):
         self.assertEqual(asset.previous_public_ip, '20.20.20.21')
         self.assertIn('AWS 固定 IP 已真实释放', order.provision_note or '')
 
+    # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
     def test_lifecycle_tick_recycle_respects_ip_delete_time_window(self):
         order = CloudServerOrder.objects.create(
             order_no='HB-TEST-RECYCLE-WINDOW-BLOCKED',
@@ -12624,6 +13055,7 @@ class CloudServerServicesTestCase(TestCase):
         self.assertEqual(order.status, 'deleted')
         self.assertIsNotNone(order.ip_recycle_at)
 
+    # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
     def test_release_order_static_ip_uses_static_ip_asset_name_when_order_name_missing(self):
         from cloud.lifecycle import _release_order_static_ip_sync
 
@@ -12669,10 +13101,13 @@ class CloudServerServicesTestCase(TestCase):
         )
         released = []
 
+        # 测试类：组织 FakeLightsailClient 相关的回归测试。
         class FakeLightsailClient:
+            # 功能：读取并返回相关数据；当前函数属于 云资产、云订单和生命周期。
             def get_static_ips(self, **kwargs):
                 return {'staticIps': []}
 
+            # 功能：处理 云资产、云订单和生命周期 中的 release static ip 业务流程。
             def release_static_ip(self, staticIpName):
                 released.append(staticIpName)
                 return {'operations': [{'id': 'op-retained-asset-fallback'}]}
@@ -12684,6 +13119,7 @@ class CloudServerServicesTestCase(TestCase):
         self.assertEqual(released, ['StaticIp-retained-asset-fallback'])
         self.assertIn('AWS 固定 IP 已真实释放', note)
 
+    # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
     def test_lifecycle_tick_releases_overdue_unattached_static_ip(self):
         SiteConfig.set('cloud_ip_delete_enabled', '1')
         due_at = timezone.now() - timezone.timedelta(days=4)
@@ -12720,7 +13156,9 @@ class CloudServerServicesTestCase(TestCase):
 
         released = []
 
+        # 测试类：组织 FakeLightsailClient 相关的回归测试。
         class FakeLightsailClient:
+            # 功能：处理 云资产、云订单和生命周期 中的 release static ip 业务流程。
             def release_static_ip(self, staticIpName):
                 released.append(staticIpName)
                 return {'operations': [{'id': 'op-unattached-release'}]}
@@ -12742,6 +13180,7 @@ class CloudServerServicesTestCase(TestCase):
         self.assertIsNone(server.public_ip)
         self.assertEqual(server.previous_public_ip, '21.21.21.21')
 
+    # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
     def test_lifecycle_tick_unattached_ip_uses_ip_delete_time_window(self):
         asset = CloudAsset.objects.create(
             kind=CloudAsset.KIND_SERVER,
@@ -12785,6 +13224,7 @@ class CloudServerServicesTestCase(TestCase):
         self.assertNotEqual(asset.status, CloudAsset.STATUS_DELETED)
         self.assertEqual(asset.public_ip, '21.21.21.24')
 
+    # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
     def test_lifecycle_tick_rechecks_orphan_asset_delete_time_before_cloud_delete(self):
         SiteConfig.set('cloud_suspend_after_days', '3')
         SiteConfig.set('cloud_suspend_time', '17:00')
@@ -12831,6 +13271,7 @@ class CloudServerServicesTestCase(TestCase):
         asset.refresh_from_db()
         self.assertEqual(asset.status, CloudAsset.STATUS_RUNNING)
 
+    # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
     def test_lifecycle_tick_rechecks_unattached_ip_delete_time_before_release(self):
         asset = CloudAsset.objects.create(
             kind=CloudAsset.KIND_SERVER,
@@ -12875,6 +13316,7 @@ class CloudServerServicesTestCase(TestCase):
         self.assertNotEqual(asset.status, CloudAsset.STATUS_DELETED)
         self.assertEqual(asset.public_ip, '21.21.21.23')
 
+    # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
     def test_aws_sync_release_static_ip_respects_shutdown_disabled_account(self):
         from cloud.management.commands.sync_aws_assets import _release_static_ip_if_due
 
@@ -12904,18 +13346,24 @@ class CloudServerServicesTestCase(TestCase):
         )
         released = []
 
+        # 测试类：组织 FakeClient 相关的回归测试。
         class FakeClient:
+            # 功能：处理 云资产、云订单和生命周期 中的 release static ip 业务流程。
             def release_static_ip(self, staticIpName):
                 released.append(staticIpName)
                 return {}
 
+        # 测试类：组织 FakeStyle 相关的回归测试。
         class FakeStyle:
+            # 功能：处理 云资产、云订单和生命周期 中的 WARNING 业务流程。
             def WARNING(self, text):
                 return text
 
+        # 测试类：组织 FakeStdout 相关的回归测试。
         class FakeStdout:
             style = FakeStyle()
 
+            # 功能：处理 云资产、云订单和生命周期 中的 write 业务流程。
             def write(self, text):
                 return None
 
@@ -12927,6 +13375,7 @@ class CloudServerServicesTestCase(TestCase):
         self.assertEqual(asset.status, CloudAsset.STATUS_UNKNOWN)
         self.assertEqual(asset.provider_status, '未附加固定IP-关机计划关闭')
 
+    # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
     def test_aws_sync_release_static_ip_respects_global_ip_delete_switch(self):
         from cloud.management.commands.sync_aws_assets import _release_static_ip_if_due
 
@@ -12946,18 +13395,24 @@ class CloudServerServicesTestCase(TestCase):
         )
         released = []
 
+        # 测试类：组织 FakeClient 相关的回归测试。
         class FakeClient:
+            # 功能：处理 云资产、云订单和生命周期 中的 release static ip 业务流程。
             def release_static_ip(self, staticIpName):
                 released.append(staticIpName)
                 return {}
 
+        # 测试类：组织 FakeStyle 相关的回归测试。
         class FakeStyle:
+            # 功能：处理 云资产、云订单和生命周期 中的 WARNING 业务流程。
             def WARNING(self, text):
                 return text
 
+        # 测试类：组织 FakeStdout 相关的回归测试。
         class FakeStdout:
             style = FakeStyle()
 
+            # 功能：处理 云资产、云订单和生命周期 中的 write 业务流程。
             def write(self, text):
                 return None
 
@@ -12971,7 +13426,9 @@ class CloudServerServicesTestCase(TestCase):
         self.assertEqual(asset.provider_status, '未附加固定IP-删除IP总开关关闭')
 
 
+# 测试类：组织 CloudOrderStatusDashboardSyncTestCase 相关的回归测试。
 class CloudOrderStatusDashboardSyncTestCase(TestCase):
+    # 功能：处理 云资产、云订单和生命周期 中的 setUp 业务流程。
     def setUp(self):
         self.factory = RequestFactory()
         self.admin = get_user_model().objects.create_user(username='status-admin', password='x', is_staff=True, is_superuser=True)
@@ -12986,6 +13443,7 @@ class CloudOrderStatusDashboardSyncTestCase(TestCase):
             is_active=True,
         )
 
+    # 功能：提供 云资产、云订单和生命周期 的内部辅助逻辑，供同模块流程复用。
     def _create_order_with_primary_records(self):
         order = CloudServerOrder.objects.create(
             order_no='STATUS-SYNC-ORDER',
@@ -13031,11 +13489,13 @@ class CloudOrderStatusDashboardSyncTestCase(TestCase):
         )
         return order, asset, server
 
+    # 功能：提供 云资产、云订单和生命周期 的内部辅助逻辑，供同模块流程复用。
     def _post_json(self, view, path, payload, *args):
         request = self.factory.post(path, data=json.dumps(payload), content_type='application/json')
         request.user = self.admin
         return view(request, *args)
 
+    # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
     def test_status_endpoint_syncs_primary_asset_and_server_status(self):
         order, asset, server = self._create_order_with_primary_records()
 
@@ -13051,6 +13511,7 @@ class CloudOrderStatusDashboardSyncTestCase(TestCase):
         self.assertFalse(server.is_active)
         self.assertEqual(server.status, Server.STATUS_STOPPED)
 
+    # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
     def test_order_detail_status_edit_syncs_primary_asset_and_server_status(self):
         order, asset, server = self._create_order_with_primary_records()
 
@@ -13066,6 +13527,7 @@ class CloudOrderStatusDashboardSyncTestCase(TestCase):
         self.assertFalse(server.is_active)
         self.assertEqual(server.status, Server.STATUS_DELETED)
 
+    # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
     def test_order_detail_manual_edit_syncs_cloud_identity_and_proxy_fields(self):
         order, asset, server = self._create_order_with_primary_records()
         expires_at = timezone.now() + timezone.timedelta(days=45)
@@ -13102,6 +13564,7 @@ class CloudOrderStatusDashboardSyncTestCase(TestCase):
         self.assertEqual(asset.actual_expires_at, order.service_expires_at)
         self.assertEqual(server.expires_at, order.service_expires_at)
 
+    # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
     def test_order_detail_manual_previous_ip_edit_syncs_primary_records(self):
         order, asset, server = self._create_order_with_primary_records()
 
@@ -13118,6 +13581,7 @@ class CloudOrderStatusDashboardSyncTestCase(TestCase):
         self.assertEqual(asset.previous_public_ip, '203.0.113.9')
         self.assertEqual(server.previous_public_ip, '203.0.113.9')
 
+    # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
     def test_delete_cloud_order_blocks_physical_delete_when_cloud_records_exist(self):
         order, asset, server = self._create_order_with_primary_records()
 
@@ -13128,6 +13592,7 @@ class CloudOrderStatusDashboardSyncTestCase(TestCase):
         self.assertTrue(CloudAsset.objects.filter(id=asset.id, order=order).exists())
         self.assertTrue(Server.objects.filter(id=server.id, order=order).exists())
 
+    # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
     def test_delete_cloud_order_allows_unlinked_pending_order(self):
         order = CloudServerOrder.objects.create(
             order_no='DELETE-UNLINKED-PENDING',
@@ -13151,18 +13616,23 @@ class CloudOrderStatusDashboardSyncTestCase(TestCase):
         self.assertFalse(CloudServerOrder.objects.filter(id=order.id).exists())
 
 
+# 测试类：组织 DashboardTronBalanceQueryTestCase 相关的回归测试。
 class DashboardTronBalanceQueryTestCase(TestCase):
+    # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
     def test_resource_monitor_uses_runtime_trongrid_base_url(self):
         from cloud.resource_monitor import _fetch_account_resource
 
         captured = {}
 
+        # 测试类：组织 FakeResponse 相关的回归测试。
         class FakeResponse:
             status_code = 200
 
+            # 功能：处理 云资产、云订单和生命周期 中的 raise for status 业务流程。
             def raise_for_status(self):
                 return None
 
+            # 功能：处理 云资产、云订单和生命周期 中的 json 业务流程。
             def json(self):
                 return {
                     'freeNetLimit': 100,
@@ -13173,20 +13643,26 @@ class DashboardTronBalanceQueryTestCase(TestCase):
                     'EnergyUsed': 30,
                 }
 
+        # 测试类：组织 FakeAsyncClient 相关的回归测试。
         class FakeAsyncClient:
+            # 功能：初始化对象状态和依赖。
             def __init__(self, *args, **kwargs):
                 pass
 
+            # 功能：提供 云资产、云订单和生命周期 的内部辅助逻辑，供同模块流程复用。
             async def __aenter__(self):
                 return self
 
+            # 功能：提供 云资产、云订单和生命周期 的内部辅助逻辑，供同模块流程复用。
             async def __aexit__(self, exc_type, exc, tb):
                 return False
 
+            # 功能：处理 云资产、云订单和生命周期 中的 post 业务流程。
             async def post(self, url, json=None, headers=None):
                 captured['url'] = url
                 return FakeResponse()
 
+        # 功能：处理 云资产、云订单和生命周期 中的 fake build headers 业务流程。
         async def fake_build_headers():
             return {'TRON-PRO-API-KEY': 'resource-key'}
 
@@ -13201,6 +13677,7 @@ class DashboardTronBalanceQueryTestCase(TestCase):
         self.assertEqual(bandwidth, 135)
         self.assertEqual(captured['url'], 'https://custom.trongrid.example/wallet/getaccountresource')
 
+    # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
     def test_resource_detail_cache_is_scoped_per_user_for_same_address_time(self):
         from cloud.resource_monitor import _cache_resource_detail, get_resource_detail
 
@@ -13211,15 +13688,19 @@ class DashboardTronBalanceQueryTestCase(TestCase):
         self.assertEqual(get_resource_detail(first_key)['remark'], 'first')
         self.assertEqual(get_resource_detail(second_key)['remark'], 'second')
 
+    # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
     def test_fetch_address_chain_balances_uses_resolved_headers(self):
         captured = {}
 
+        # 测试类：组织 FakeResponse 相关的回归测试。
         class FakeResponse:
             status_code = 200
 
+            # 功能：处理 云资产、云订单和生命周期 中的 raise for status 业务流程。
             def raise_for_status(self):
                 return None
 
+            # 功能：处理 云资产、云订单和生命周期 中的 json 业务流程。
             def json(self):
                 return {
                     'data': [{
@@ -13228,23 +13709,30 @@ class DashboardTronBalanceQueryTestCase(TestCase):
                     }],
                 }
 
+        # 测试类：组织 FakeClient 相关的回归测试。
         class FakeClient:
+            # 功能：初始化对象状态和依赖。
             def __init__(self, *args, **kwargs):
                 pass
 
+            # 功能：提供 云资产、云订单和生命周期 的内部辅助逻辑，供同模块流程复用。
             def __enter__(self):
                 return self
 
+            # 功能：提供 云资产、云订单和生命周期 的内部辅助逻辑，供同模块流程复用。
             def __exit__(self, exc_type, exc, tb):
                 return False
 
+            # 功能：处理 云资产、云订单和生命周期 中的 get 业务流程。
             def get(self, url, headers=None):
                 captured['headers'] = headers
                 return FakeResponse()
 
+        # 功能：处理 云资产、云订单和生命周期 中的 fake get redis 业务流程。
         async def fake_get_redis():
             return None
 
+        # 功能：处理 云资产、云订单和生命周期 中的 fake build headers 业务流程。
         async def fake_build_headers():
             return {'TRON-PRO-API-KEY': 'dashboard-key'}
 

@@ -1,5 +1,44 @@
 # Refactor Version Record
 
+## 2026-06-01 cloud-sync-runtime-split
+
+### Scope
+
+This refactor split cloud asset sync execution out of `cloud/api.py` and made sync jobs easier to operate, observe, and clean up.
+
+### Runtime Changes
+
+- Added `cloud/sync_jobs.py` as the cloud asset sync job runtime module.
+- `cloud/api.py` now keeps cloud asset/order/dashboard API logic and re-exports sync job endpoints for existing dashboard URL aggregation.
+- `process_cloud_asset_sync_jobs` imports execution helpers from `cloud.sync_jobs`, no longer from `cloud.api`.
+- Bulk sync job subtasks now run serially instead of using a thread pool, so progress updates, event ordering, heartbeat, and cancellation are deterministic.
+- Added `cloud_asset_sync_jobs_metrics` API at `cloud-assets/sync-jobs/metrics/`.
+- `cloud_assets_sync_status` now embeds the same metrics summary used by the frontend.
+- Added `prune_cloud_sync_job_events` for event-table cleanup by age and per-job retention.
+
+### Frontend Changes
+
+- Added `/admin/cloud-sync-jobs/:id` as a dedicated sync job detail page in `/Users/a399/Desktop/data/vue-shop-admin/apps/web-antd`.
+- Proxy list sync drawer now shows task metrics and links each job row to the detail page.
+- Frontend API types now include `DashboardCloudAssetSyncJobsMetrics`.
+
+### Verification
+
+Passed locally:
+
+```bash
+uv run python -m py_compile cloud/api.py cloud/sync_jobs.py cloud/management/commands/process_cloud_asset_sync_jobs.py cloud/management/commands/prune_cloud_sync_job_events.py shop/dashboard_urls.py
+uv run python manage.py check
+uv run python manage.py makemigrations cloud --dry-run --check
+DJANGO_TEST_REUSE_DB=1 uv run python manage.py test cloud.tests.CloudServerServicesTestCase.test_sync_cloud_assets_runs_enabled_accounts_and_merges_results cloud.tests.CloudServerServicesTestCase.test_cloud_asset_sync_jobs_metrics_returns_operational_summary cloud.tests.CloudServerServicesTestCase.test_cancel_queued_cloud_asset_sync_job_marks_terminal_and_events cloud.tests.CloudServerServicesTestCase.test_sync_cloud_assets_with_selected_assets_uses_asset_scoped_tasks cloud.tests.CloudServerServicesTestCase.test_process_cloud_asset_sync_jobs_worker_processes_queued_job --keepdb --noinput --verbosity 1
+```
+
+Frontend validation passed in `/Users/a399/Desktop/data/vue-shop-admin`:
+
+```bash
+./node_modules/.bin/vue-tsc --noEmit --skipLibCheck -p apps/web-antd/tsconfig.json
+```
+
 ## 2026-06-01 cloud-asset-lifecycle-refactor
 
 ### Scope
