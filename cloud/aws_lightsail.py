@@ -304,16 +304,16 @@ def _create_instance_sync(order_data: dict, server_name: str):
             f'AWS Lightsail 创建成功，{ip_note}。实例名: {server_name}，'
             f'套餐: {bundle_id}，镜像: {blueprint_id}，{login_mode}登录已启用。'
         )
-        logger.info('AWS Lightsail 创建成功: order=%s server_name=%s public_ip=%s bundle=%s blueprint=%s', order_no, server_name, public_ip, bundle_id, blueprint_id)
-        print('[AWS_CREATE_RESULT]', {
-            'order_no': order_no,
-            'server_name': server_name,
-            'region': region,
-            'bundle_id': bundle_id,
-            'blueprint_id': blueprint_id,
-            'public_ip': public_ip,
-            'static_ip_name': static_ip_name,
-        })
+        logger.info(
+            'AWS_CREATE_RESULT order_no=%s server_name=%s region=%s bundle_id=%s blueprint_id=%s public_ip=%s static_ip_name=%s',
+            order_no,
+            server_name,
+            region,
+            bundle_id,
+            blueprint_id,
+            public_ip,
+            static_ip_name,
+        )
         return ProvisionResult(
             ok=True,
             instance_id=server_name,

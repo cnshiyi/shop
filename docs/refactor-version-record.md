@@ -533,6 +533,26 @@ The focused DB test run is blocked by local MySQL test database permissions:
 Access denied for user 'a'@'localhost' to database 'test_a'
 ```
 
+## 2026-06-01 aws-lightsail-structured-create-log
+
+### Scope
+
+Twenty-second refactor pass removed the remaining runtime `print` from AWS Lightsail provisioning and routed the result through structured logging.
+
+### Runtime Changes
+
+- Replaced the `print('[AWS_CREATE_RESULT]', ...)` stdout dump in `cloud/aws_lightsail.py` with a structured `logger.info(...)` event.
+- The creation log now carries `order_no`, `server_name`, `region`, `bundle_id`, `blueprint_id`, `public_ip`, and `static_ip_name` as log fields.
+
+### Verification
+
+Passed locally:
+
+```bash
+uv run python -m py_compile cloud/aws_lightsail.py
+uv run python manage.py check
+```
+
 ## 2026-06-01 cloud-asset-query-helper
 
 ### Scope
