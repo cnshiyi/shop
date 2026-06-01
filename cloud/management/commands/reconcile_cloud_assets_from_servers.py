@@ -1,6 +1,7 @@
 from django.core.management.base import BaseCommand
 from django.db.models import Case, IntegerField, Q, Value, When
 
+from cloud.asset_queries import cloud_assets_base_queryset, dedupe_cloud_asset_rows
 from cloud.models import CloudAsset
 from cloud.server_records import Server
 from core.cloud_accounts import cloud_account_label_variants, get_cloud_account_from_label
@@ -24,8 +25,7 @@ RESIDUAL_ORDER_STATUSES = {'deleted', 'deleting', 'expired', 'cancelled', 'refun
 
 
 def _visible_asset_total():
-    from cloud.api import _cloud_assets_base_queryset, _dedupe_cloud_asset_rows
-    return len(_dedupe_cloud_asset_rows(list(_cloud_assets_base_queryset())))
+    return len(dedupe_cloud_asset_rows(list(cloud_assets_base_queryset())))
 
 
 def _resolve_asset(server: Server):

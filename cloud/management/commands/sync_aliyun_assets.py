@@ -5,11 +5,12 @@ from django.db.models import Case, IntegerField, Q, Value, When
 from django.utils import timezone
 from django.utils.dateparse import parse_datetime
 
-from bot.api import _provider_status_label
+from cloud.asset_queries import cloud_assets_base_queryset, dedupe_cloud_asset_rows
 from cloud.models import CloudAsset, CloudServerOrder
 from cloud.server_records import Server
 from cloud.aliyun_simple import _build_client, _region_endpoint, _runtime_options
 from core.cloud_accounts import cloud_account_label, cloud_account_label_variants, list_active_cloud_accounts
+from core.dashboard_api import _provider_status_label
 from core.persistence import record_external_sync_log
 from cloud.lifecycle_schedule import compute_order_lifecycle_fields
 from cloud.services import record_cloud_ip_log, sync_cloud_asset_user_binding
@@ -26,8 +27,7 @@ logger = logging.getLogger(__name__)
 
 
 def _visible_asset_total():
-    from cloud.api import _cloud_assets_base_queryset, _dedupe_cloud_asset_rows
-    return len(_dedupe_cloud_asset_rows(list(_cloud_assets_base_queryset())))
+    return len(dedupe_cloud_asset_rows(list(cloud_assets_base_queryset())))
 
 
 def _resolve_order_for_ip(public_ip, account=None):

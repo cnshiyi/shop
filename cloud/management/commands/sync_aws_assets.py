@@ -4,8 +4,9 @@ from django.core.management.base import BaseCommand, CommandError
 from django.db.models import Case, IntegerField, Q, Value, When
 from django.utils import timezone
 
-from bot.api import _provider_status_label
+from cloud.asset_queries import cloud_assets_base_queryset, dedupe_cloud_asset_rows
 from core.cloud_accounts import cloud_account_label, cloud_account_label_variants, list_active_cloud_accounts
+from core.dashboard_api import _provider_status_label
 from core.persistence import record_external_sync_log
 from cloud.lifecycle_schedule import compute_unattached_ip_release_at, runtime_int_config
 from cloud.models import CloudAsset, CloudServerOrder
@@ -26,8 +27,7 @@ _MISSING_DELETED_STATUS = '云上未找到实例/IP'
 
 
 def _visible_asset_total():
-    from cloud.api import _cloud_assets_base_queryset, _dedupe_cloud_asset_rows
-    return len(_dedupe_cloud_asset_rows(list(_cloud_assets_base_queryset())))
+    return len(dedupe_cloud_asset_rows(list(cloud_assets_base_queryset())))
 
 
 def _mask_secret(secret):

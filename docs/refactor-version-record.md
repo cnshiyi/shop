@@ -533,6 +533,29 @@ The focused DB test run is blocked by local MySQL test database permissions:
 Access denied for user 'a'@'localhost' to database 'test_a'
 ```
 
+## 2026-06-01 cloud-asset-query-helper
+
+### Scope
+
+Twenty-first refactor pass moved shared cloud asset list visibility and de-duplication logic out of dashboard API modules.
+
+### Runtime Changes
+
+- Added `cloud/asset_queries.py` for canonical `CloudAsset` visible-list and de-duplication helpers.
+- `cloud/api.py` now consumes the shared asset query helpers instead of owning them.
+- AWS sync, Alibaba Cloud sync, and asset reconciliation commands no longer import `cloud.api` just to count visible assets.
+- AWS and Alibaba Cloud sync commands now import `_provider_status_label` from `core.dashboard_api` instead of `bot.api`.
+
+### Verification
+
+Passed locally:
+
+```bash
+uv run python -m py_compile cloud/asset_queries.py cloud/api.py cloud/management/commands/sync_aws_assets.py cloud/management/commands/sync_aliyun_assets.py cloud/management/commands/reconcile_cloud_assets_from_servers.py
+uv run python manage.py check
+git diff --check
+```
+
 ## 2026-06-01 db-naming-convention-alignment
 
 ### Scope
