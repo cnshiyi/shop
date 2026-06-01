@@ -284,3 +284,29 @@ Passed locally:
 uv run python -m py_compile bot/api.py bot/api_auth.py bot/api_cloud_accounts.py bot/api_site_configs.py
 uv run python manage.py check
 ```
+
+## 2026-06-01 bot-user-balance-api-split
+
+### Scope
+
+Ninth refactor pass moved Telegram user listing and balance management endpoints out of `bot/api.py`.
+
+### Runtime Changes
+
+- Added `bot/api_users.py` for:
+  - user list
+  - manual USDT/TRX balance update
+  - cloud discount update
+  - user balance detail timeline
+  - balance ledger payload and manual ledger recording helpers
+- Preserved compatibility exports from `bot/api.py` for moved public views and private ledger helper names.
+- Removed unused balance/query imports from `bot/api.py`.
+
+### Verification
+
+Passed locally:
+
+```bash
+uv run python -m py_compile bot/api.py bot/api_users.py
+uv run python manage.py check
+```
