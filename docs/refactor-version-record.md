@@ -164,3 +164,26 @@ Passed locally:
 uv run python -m py_compile cloud/api.py cloud/api_servers.py cloud/api_plans.py
 uv run python manage.py check
 ```
+
+## 2026-06-01 bot-product-api-split
+
+### Scope
+
+Fourth refactor pass started splitting the oversized `bot/api.py` dashboard module.
+
+### Runtime Changes
+
+- Added `bot/api_products.py` for product dashboard endpoints:
+  - product list
+  - product create
+  - product update
+- `bot/api.py` keeps compatibility exports for `products_list`, `create_product`, and `update_product`, so existing dashboard URL imports continue to work.
+
+### Verification
+
+Passed locally:
+
+```bash
+uv run python -m py_compile bot/api.py bot/api_products.py
+uv run python manage.py check
+```
