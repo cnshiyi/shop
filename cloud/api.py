@@ -10,7 +10,6 @@ from cloud.api_assets import (
     _build_cloud_asset_payload_context,
     _cloud_asset_payloads,
     _display_cloud_asset_note,
-    _ensure_cloud_asset_dashboard_snapshots,
     _ensure_unattached_ip_expiry,
     _infer_asset_order,
     _parse_iso_datetime,
@@ -18,8 +17,8 @@ from cloud.api_assets import (
     _sync_telegram_username,
     cloud_assets_list,
     cloud_assets_risk_summary,
-    refresh_cloud_asset_dashboard_snapshots,
 )
+from cloud.api_asset_snapshots import _ensure_cloud_asset_dashboard_snapshots, refresh_cloud_asset_dashboard_snapshots
 from cloud.api_asset_edit import (
     delete_cloud_asset,
     toggle_cloud_asset_auto_renew,

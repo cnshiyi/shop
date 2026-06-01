@@ -157,7 +157,8 @@ uv run python manage.py prune_cloud_sync_job_events --days 90 --keep-per-job 500
 云后台 API 已经从 `cloud/api.py` 拆成域模块，`cloud/api.py` 只保留兼容导出：
 
 - `cloud/api.py`：兼容聚合层，保留旧 `cloud.api.*` 导入和测试 patch 点。
-- `cloud/api_assets.py`：代理列表、风险摘要、代理列表快照刷新和资产载荷辅助。
+- `cloud/api_assets.py`：代理列表、风险摘要和资产载荷辅助。
+- `cloud/api_asset_snapshots.py`：代理列表快照刷新、快照搜索、风险计数、分页和分组。
 - `cloud/api_asset_edit.py`：代理详情、人工编辑、自动续费开关和后台删除；删除会清理同资源残留记录，未附加固定 IP 刷新会同步相关记录到期时间。
 - `cloud/api_orders.py`：云订单列表、详情、状态更新、订单删除保护。
 - `cloud/api_tasks.py`：旧任务列表、通知计划、自动续费详情与手动执行。

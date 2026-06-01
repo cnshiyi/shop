@@ -630,6 +630,29 @@ uv run python -m py_compile cloud/api.py cloud/api_assets.py cloud/api_asset_edi
 DJANGO_TEST_REUSE_DB=1 uv run python manage.py test cloud.tests.CloudServerServicesTestCase.test_cloud_assets_list_uses_bulk_order_inference_without_per_asset_fallback cloud.tests.CloudServerServicesTestCase.test_sync_cloud_asset_status_uses_asset_scope cloud.tests.CloudServerServicesTestCase.test_update_cloud_asset_defers_snapshot_refresh cloud.tests.CloudServerServicesTestCase.test_update_cloud_asset_refreshes_unattached_ip_delete_plan cloud.tests.CloudServerServicesTestCase.test_delete_cloud_asset_only_removes_asset_record cloud.tests.CloudServerServicesTestCase.test_delete_cloud_asset_also_removes_residual_server_record cloud.tests_task_center.CloudTaskCenterApiTestCase --keepdb --noinput --verbosity 1
 ```
 
+## 2026-06-02 cloud-asset-snapshot-api-split
+
+### Scope
+
+Twenty-third refactor pass split cloud asset dashboard snapshot refresh/query/pagination logic out of the cloud asset list endpoint module.
+
+### Runtime Changes
+
+- Added `cloud/api_asset_snapshots.py` for `CloudAssetDashboardSnapshot` refresh, search, risk counts, ordering, pagination, and grouped page construction.
+- `cloud/api_assets.py` now focuses on asset list endpoints and asset payload construction.
+- Removed obsolete in-memory payload pagination/risk filtering helpers that were no longer used after the snapshot-backed list path became the runtime path.
+- `cloud/api.py` imports snapshot refresh compatibility exports from `cloud/api_asset_snapshots.py` directly.
+- `cloud/api_assets.py` dropped snapshot table imports and no longer owns snapshot persistence logic.
+
+### Verification
+
+Passed locally:
+
+```bash
+uv run python -m py_compile cloud/api.py cloud/api_assets.py cloud/api_asset_snapshots.py cloud/api_asset_edit.py shop/dashboard_urls.py cloud/tests.py
+git diff --check
+```
+
 ## 2026-06-02 cloud-dashboard-api-domain-split
 
 ### Scope
