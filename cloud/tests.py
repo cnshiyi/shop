@@ -9695,7 +9695,7 @@ class CloudServerServicesTestCase(TestCase):
         self.assertEqual(server.note, '人工改后的备注')
 
     def test_sync_missing_confirmation_note_preserves_existing_note(self):
-        from cloud.sync_safety import mark_missing_confirmation_pending
+        from cloud.sync_safety import mark_missing_confirmation_pending, missing_confirmation_state
 
         asset = CloudAsset.objects.create(
             kind=CloudAsset.KIND_SERVER,
@@ -9718,8 +9718,9 @@ class CloudServerServicesTestCase(TestCase):
 
         self.assertEqual((count, threshold), (1, 2))
         self.assertEqual(asset.note, '保留人工备注')
-        self.assertIn('云上未找到实例/IP-待确认', asset.provider_status)
-        self.assertIn('[missing_sync_count:1]', asset.provider_status)
+        self.assertEqual(asset.provider_status, '云上未找到实例/IP-待确认')
+        self.assertEqual(missing_confirmation_state(asset)['count'], 1)
+        self.assertEqual(asset.sync_state['missing_confirmation']['old_public_ip'], '10.9.9.3')
 
     def test_sync_missing_delete_threshold_is_at_least_five(self):
         with patch('cloud.sync_safety.get_runtime_config', return_value='3'):
@@ -9760,7 +9761,7 @@ class CloudServerServicesTestCase(TestCase):
         self.assertEqual(first_count, 1)
         self.assertEqual(second_count, 1)
         self.assertEqual(asset.note, '保留人工备注')
-        self.assertEqual(missing_confirmation_count(asset.provider_status), 1)
+        self.assertEqual(missing_confirmation_count(asset), 1)
 
     def test_unattached_ip_delete_items_expose_missing_confirmation_state(self):
         from cloud.sync_safety import mark_missing_confirmation_pending
@@ -9787,7 +9788,7 @@ class CloudServerServicesTestCase(TestCase):
             provider_status='云上未找到实例/IP',
             pending_status='云上未找到实例/IP-待确认',
         )
-        asset.save(update_fields=['provider_status', 'updated_at'])
+        asset.save(update_fields=['provider_status', 'sync_state', 'updated_at'])
 
         items = _unattached_ip_delete_items(limit=20)
         row = next(item for item in items if item.get('public_ip') == '5.5.5.22' and not item.get('is_history'))
@@ -9826,7 +9827,7 @@ class CloudServerServicesTestCase(TestCase):
             provider_status='云上未找到实例/IP',
             pending_status='云上未找到实例/IP-待确认',
         )
-        asset.save(update_fields=['provider_status', 'updated_at'])
+        asset.save(update_fields=['provider_status', 'sync_state', 'updated_at'])
 
         staff_user = get_user_model().objects.create_user(username='staff_lifecycle_unattached_confirm_progress', password='x', is_staff=True)
         request = self.factory.get('/api/admin/tasks/plans/', {'limit': 1000, 'refresh': '1'})
@@ -10022,7 +10023,15 @@ class CloudServerServicesTestCase(TestCase):
             public_ip='5.5.5.23',
             status=CloudAsset.STATUS_UNKNOWN,
             is_active=False,
-            provider_status='未附加固定IP；状态: 云上未找到实例/IP [missing_sync_count:5]',
+            provider_status='云上未找到实例/IP',
+            sync_state={
+                'missing_confirmation': {
+                    'status': 'confirmed',
+                    'count': 5,
+                    'threshold': 5,
+                    'checked_at': timezone.now().isoformat(),
+                },
+            },
             note='人工备注',
             actual_expires_at=timezone.now() + timezone.timedelta(days=1),
         )
@@ -10104,6 +10113,7 @@ class CloudServerServicesTestCase(TestCase):
         self.assertEqual(deleted, [])
         self.assertEqual(asset.status, CloudAsset.STATUS_RUNNING)
         self.assertEqual(asset.provider_status, '云上未找到实例/IP-待确认')
+        self.assertEqual(asset.sync_state['missing_confirmation']['count'], 1)
         self.assertEqual(server.status, Server.STATUS_RUNNING)
         self.assertEqual(order.status, 'completed')
 
@@ -10120,6 +10130,7 @@ class CloudServerServicesTestCase(TestCase):
         asset.refresh_from_db(); server.refresh_from_db(); order.refresh_from_db()
         self.assertTrue(deleted)
         self.assertEqual(asset.status, CloudAsset.STATUS_DELETED)
+        self.assertGreaterEqual(asset.sync_state['missing_confirmation']['count'], 5)
         self.assertEqual(server.status, Server.STATUS_DELETED)
         self.assertEqual(order.status, 'deleted')
 
@@ -10715,6 +10726,7 @@ class CloudServerServicesTestCase(TestCase):
         self.assertEqual(deleted, [])
         self.assertEqual(asset.status, CloudAsset.STATUS_RUNNING)
         self.assertEqual(asset.provider_status, '云上未找到实例-待确认')
+        self.assertEqual(asset.sync_state['missing_confirmation']['count'], 1)
         self.assertEqual(server.status, Server.STATUS_RUNNING)
         self.assertEqual(order.status, 'completed')
 
@@ -10731,6 +10743,7 @@ class CloudServerServicesTestCase(TestCase):
         asset.refresh_from_db(); server.refresh_from_db(); order.refresh_from_db()
         self.assertTrue(deleted)
         self.assertEqual(asset.status, CloudAsset.STATUS_DELETED)
+        self.assertGreaterEqual(asset.sync_state['missing_confirmation']['count'], 5)
         self.assertEqual(server.status, Server.STATUS_DELETED)
         self.assertEqual(order.status, 'deleted')
 

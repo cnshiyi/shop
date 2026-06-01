@@ -1271,11 +1271,7 @@ def _move_completed_ip_delete_rows_to_history(items: list[dict]) -> tuple[list[d
         if item.get('is_history') or item.get('data_group') == 'history':
             converted_history_items.append(item)
             continue
-        confirm_text = '\n'.join(
-            str(item.get(key) or '')
-            for key in ['source_note', 'note', 'provider_status', 'execution_status']
-        )
-        confirm_state = missing_confirmation_state(confirm_text)
+        confirm_state = missing_confirmation_state(item)
         if 0 < confirm_state['count'] < confirm_state['threshold']:
             active_items.append(item)
             continue
@@ -1386,10 +1382,10 @@ def _ip_delete_item_quality(item: dict, duplicate_count: int = 0) -> dict:
     if any(marker in confirm_note for marker in ['云上不存在', '云上未找到', '云端已不存在', '已标记删除']):
         flags.append('cloud_missing')
         labels.append('云上已不存在')
-    if any(marker in confirm_note for marker in ['历史脏数据', '脏数据', '待确认', 'missing_sync_count']):
+    if any(marker in confirm_note for marker in ['历史脏数据', '脏数据', '待确认']):
         flags.append('dirty_data')
         labels.append('脏数据')
-    confirm_state = missing_confirmation_state(confirm_note)
+    confirm_state = missing_confirmation_state(item)
     item['missing_confirm_count'] = confirm_state['count']
     item['missing_confirm_threshold'] = confirm_state['threshold']
     item['missing_confirm_remaining'] = confirm_state['remaining']
@@ -1501,7 +1497,7 @@ def _unattached_ip_delete_items(limit=50, assets=None):
     seen_trace_ids = set()
     active_unattached_ips = {str(asset.public_ip or '').strip() for asset in assets if str(asset.public_ip or '').strip()}
     for asset in assets:
-        confirm_state = missing_confirmation_state('\n'.join(filter(None, [getattr(asset, 'provider_status', ''), getattr(asset, 'note', '')])))
+        confirm_state = missing_confirmation_state(asset)
         if confirm_state['count'] >= confirm_state['threshold']:
             continue
         user_display_name, username_label = _telegram_user_labels(asset.user)
@@ -1538,6 +1534,7 @@ def _unattached_ip_delete_items(limit=50, assets=None):
             'source_note': source_note,
             'note': note,
             'display_note': _asset_display_note(asset, fallback=trace_note, max_chars=500),
+            'sync_state': getattr(asset, 'sync_state', {}) or {},
             'is_overdue': bool(delete_at and delete_at <= now),
             'is_history': False,
         }
@@ -2106,7 +2103,7 @@ def lifecycle_plans(request):
         execution_status = str(item.get('execution_status') or '')
         merged_text = '\n'.join(filter(None, [source_note, note, provider_status, execution_status, str(item.get('deletion_source_label') or '')]))
         merged_text = merged_text.replace('固定 IP', '固定IP')
-        confirm_state = missing_confirmation_state('\n'.join(filter(None, [source_note, note, provider_status, execution_status])))
+        confirm_state = missing_confirmation_state(item)
         confirm_summary = ''
         if confirm_state['count'] > 0:
             confirm_summary = f'删除确认进度：第{confirm_state["count"]}/{confirm_state["threshold"]}次删除确认'

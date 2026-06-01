@@ -12,6 +12,7 @@ from cloud.models import CloudAsset, CloudServerOrder
 from cloud.server_records import Server
 from cloud.note_utils import append_note
 from cloud.services import record_cloud_ip_log, sync_cloud_asset_user_binding
+from cloud.sync_safety import clear_missing_confirmation_state, mark_missing_confirmation_pending
 
 
 logger = logging.getLogger(__name__)
@@ -454,7 +455,7 @@ def _delete_asset_missing_in_aws(asset, *, old_public_ip, instance_name, server,
     asset.previous_public_ip = old_public_ip or asset.previous_public_ip
     asset.public_ip = None
     asset.provider_status = _MISSING_DELETED_STATUS
-    asset.save(update_fields=['status', 'is_active', 'previous_public_ip', 'public_ip', 'provider_status', 'updated_at'])
+    asset.save(update_fields=['status', 'is_active', 'previous_public_ip', 'public_ip', 'provider_status', 'sync_state', 'updated_at'])
     if server:
         _delete_server_missing_in_aws(server, old_public_ip=old_public_ip, order=order, stdout=stdout, emit_log=False)
     if order:
@@ -473,13 +474,58 @@ def _delete_asset_missing_in_aws(asset, *, old_public_ip, instance_name, server,
     ))
 
 
+def _mark_asset_missing_confirmation_in_aws(asset, *, old_public_ip, now_iso, server=None, stdout=None) -> bool:
+    count, threshold = mark_missing_confirmation_pending(
+        asset,
+        old_public_ip=old_public_ip,
+        now_iso=now_iso,
+        provider_status=_MISSING_DELETED_STATUS,
+        pending_status=f'{_MISSING_DELETED_STATUS}-待确认',
+    )
+    if count >= threshold:
+        return True
+    asset.save(update_fields=['provider_status', 'sync_state', 'updated_at'])
+    if server and getattr(server, 'id', None) != getattr(asset, 'id', None):
+        mark_missing_confirmation_pending(
+            server,
+            old_public_ip=old_public_ip,
+            now_iso=now_iso,
+            provider_status=_MISSING_DELETED_STATUS,
+            pending_status=f'{_MISSING_DELETED_STATUS}-待确认',
+        )
+        server.save(update_fields=['provider_status', 'sync_state', 'updated_at'])
+    if stdout:
+        stdout.stdout.write(stdout.style.WARNING(
+            f'IP校验 待确认 资产#{asset.id} IP={old_public_ip or "缺失"} 云上不存在 第{count}/{threshold}次'
+        ))
+    return False
+
+
+def _mark_server_missing_confirmation_in_aws(server, *, old_public_ip, now_iso, stdout=None) -> bool:
+    count, threshold = mark_missing_confirmation_pending(
+        server,
+        old_public_ip=old_public_ip,
+        now_iso=now_iso,
+        provider_status=_MISSING_DELETED_STATUS,
+        pending_status=f'{_MISSING_DELETED_STATUS}-待确认',
+    )
+    if count >= threshold:
+        return True
+    server.save(update_fields=['provider_status', 'sync_state', 'updated_at'])
+    if stdout:
+        stdout.stdout.write(stdout.style.WARNING(
+            f'服务器校验 待确认 Server#{server.id} IP={old_public_ip or "缺失"} 云上不存在 第{count}/{threshold}次'
+        ))
+    return False
+
+
 def _delete_server_missing_in_aws(server, *, old_public_ip, order, stdout, emit_log=True):
     server.status = Server.STATUS_DELETED
     server.is_active = False
     server.previous_public_ip = old_public_ip or server.previous_public_ip
     server.public_ip = None
     server.provider_status = _MISSING_DELETED_STATUS
-    server.save(update_fields=['status', 'is_active', 'previous_public_ip', 'public_ip', 'provider_status', 'updated_at'])
+    server.save(update_fields=['status', 'is_active', 'previous_public_ip', 'public_ip', 'provider_status', 'sync_state', 'updated_at'])
     if order:
         _sync_order_deleted_from_cloud(order, old_public_ip, source='AWS 同步 Server 校验删除', server=server)
     if emit_log:
@@ -718,6 +764,8 @@ def _mark_deleted_when_missing_in_aws(region, existing_instance_names, existing_
                 server_queryset = server_queryset.filter(account_label__in=cloud_account_label_variants(account))
             server = server_queryset.order_by('-updated_at', '-id').first()
         order = getattr(asset, 'order', None) or _resolve_order_for_ip(old_public_ip, account)
+        if not _mark_asset_missing_confirmation_in_aws(asset, old_public_ip=old_public_ip, now_iso=now_iso, server=server, stdout=stdout):
+            continue
         _delete_asset_missing_in_aws(
             asset,
             old_public_ip=old_public_ip,
@@ -744,6 +792,8 @@ def _mark_deleted_when_missing_in_aws(region, existing_instance_names, existing_
         if old_public_ip and old_public_ip in existing_public_ips and (is_static_ip_record or not instance_name):
             continue
         order = getattr(server, 'order', None) or _resolve_order_for_ip(old_public_ip, account)
+        if not _mark_server_missing_confirmation_in_aws(server, old_public_ip=old_public_ip, now_iso=now_iso, stdout=stdout):
+            continue
         _delete_server_missing_in_aws(
             server,
             old_public_ip=old_public_ip,
@@ -1095,6 +1145,8 @@ class Command(BaseCommand):
                                     sync_cloud_asset_user_binding(asset, persist=False)
                                 if original_due_at and not rebound_unattached_ip:
                                     manual_expiry_preserved_items.append(f'{asset.id}:{public_ip or "缺失"}:{instance_name or instance_arn}:{original_due_at}')
+                                if normalized_status not in {CloudAsset.STATUS_DELETED, CloudAsset.STATUS_TERMINATED}:
+                                    clear_missing_confirmation_state(asset)
                                 asset.save()
                                 updated_count += 1
                                 account_stats['updated'] += 1
@@ -1159,6 +1211,8 @@ class Command(BaseCommand):
                                 server.status = Server.STATUS_RUNNING
                             if not getattr(server, 'user_id', None) and getattr(asset, 'user_id', None):
                                 server.user = asset.user
+                            if normalized_status not in {CloudAsset.STATUS_DELETED, CloudAsset.STATUS_TERMINATED}:
+                                clear_missing_confirmation_state(server)
                             server.save()
                         else:
                             server = Server.objects.create(**server_defaults)

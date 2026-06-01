@@ -303,6 +303,7 @@ class CloudAsset(models.Model):
     user = models.ForeignKey('bot.TelegramUser', verbose_name='绑定用户', on_delete=models.SET_NULL, blank=True, null=True)
     telegram_group = models.ForeignKey('bot.TelegramGroupFilter', verbose_name='绑定群组', on_delete=models.SET_NULL, blank=True, null=True)
     note = models.TextField('备注', blank=True, null=True)
+    sync_state = models.JSONField('同步状态', default=dict, blank=True)
     sort_order = models.IntegerField('排序', default=99, db_index=True)
     status = models.CharField('状态', max_length=32, choices=STATUS_CHOICES, default=STATUS_RUNNING, db_index=True)
     provider_status = models.CharField('云厂商原始状态', max_length=64, blank=True, null=True, db_index=True)

@@ -13,6 +13,7 @@ from core.cloud_accounts import cloud_account_label, cloud_account_label_variant
 from core.persistence import record_external_sync_log
 from cloud.lifecycle_schedule import compute_order_lifecycle_fields
 from cloud.services import record_cloud_ip_log, sync_cloud_asset_user_binding
+from cloud.sync_safety import clear_missing_confirmation_state, mark_missing_confirmation_pending
 
 
 _ACTIVE_ORDER_STATUSES = {'pending', 'provisioning', 'completed', 'expiring', 'renew_pending', 'suspended', 'deleting'}
@@ -255,12 +256,25 @@ def _mark_deleted_when_missing_in_aliyun(region, existing_instance_ids, stdout, 
         if instance_id and instance_id in existing_instance_ids:
             continue
         old_public_ip = public_ip or str(asset.previous_public_ip or '').strip()
+        count, threshold = mark_missing_confirmation_pending(
+            asset,
+            old_public_ip=old_public_ip,
+            now_iso=now_iso,
+            provider_status=_MISSING_DELETED_STATUS,
+            pending_status=f'{_MISSING_DELETED_STATUS}-待确认',
+        )
+        if count < threshold:
+            asset.save(update_fields=['provider_status', 'sync_state', 'updated_at'])
+            stdout.stdout.write(stdout.style.WARNING(
+                f'IP校验 待确认 资产#{asset.id} IP={old_public_ip or "缺失"} 云上不存在 第{count}/{threshold}次'
+            ))
+            continue
         asset.status = CloudAsset.STATUS_DELETED
         asset.is_active = False
         asset.previous_public_ip = old_public_ip or asset.previous_public_ip
         asset.public_ip = None
         asset.provider_status = _MISSING_DELETED_STATUS
-        asset.save(update_fields=['status', 'is_active', 'previous_public_ip', 'public_ip', 'provider_status', 'updated_at'])
+        asset.save(update_fields=['status', 'is_active', 'previous_public_ip', 'public_ip', 'provider_status', 'sync_state', 'updated_at'])
         server_lookup = Q()
         provider_resource_id = str(asset.provider_resource_id or '').strip()
         if instance_id:
@@ -281,13 +295,20 @@ def _mark_deleted_when_missing_in_aliyun(region, existing_instance_ids, stdout, 
             if account:
                 server_queryset = server_queryset.filter(account_label__in=cloud_account_label_variants(account))
             server = server_queryset.order_by('-updated_at', '-id').first()
-        if server:
+        if server and getattr(server, 'id', None) != getattr(asset, 'id', None):
+            mark_missing_confirmation_pending(
+                server,
+                old_public_ip=old_public_ip,
+                now_iso=now_iso,
+                provider_status=_MISSING_DELETED_STATUS,
+                pending_status=f'{_MISSING_DELETED_STATUS}-待确认',
+            )
             server.status = Server.STATUS_DELETED
             server.is_active = False
             server.previous_public_ip = old_public_ip or server.previous_public_ip
             server.public_ip = None
             server.provider_status = _MISSING_DELETED_STATUS
-            server.save(update_fields=['status', 'is_active', 'previous_public_ip', 'public_ip', 'provider_status', 'updated_at'])
+            server.save(update_fields=['status', 'is_active', 'previous_public_ip', 'public_ip', 'provider_status', 'sync_state', 'updated_at'])
         order = getattr(asset, 'order', None) or _resolve_order_for_ip(old_public_ip, account)
         if order:
             order.status = 'deleted'
@@ -539,6 +560,8 @@ class Command(BaseCommand):
                             setattr(asset, key, value)
                         if not getattr(asset, 'user_id', None):
                             sync_cloud_asset_user_binding(asset, persist=False)
+                        if normalized_status not in {CloudAsset.STATUS_DELETED, CloudAsset.STATUS_TERMINATED}:
+                            clear_missing_confirmation_state(asset)
                         asset.save()
                         updated_count += 1
                         account_stats['updated'] += 1
@@ -592,6 +615,8 @@ class Command(BaseCommand):
                         setattr(server, key, value)
                     if not getattr(server, 'user_id', None) and getattr(asset, 'user_id', None):
                         server.user = asset.user
+                    if normalized_status not in {CloudAsset.STATUS_DELETED, CloudAsset.STATUS_TERMINATED}:
+                        clear_missing_confirmation_state(server)
                     server.save()
                 else:
                     Server.objects.create(**server_defaults)

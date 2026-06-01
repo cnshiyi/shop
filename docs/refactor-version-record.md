@@ -492,6 +492,47 @@ The focused test run is blocked by local MySQL test database permissions:
 Access denied for user 'a'@'localhost' to database 'test_a'
 ```
 
+## 2026-06-01 cloud-sync-structured-state
+
+### Scope
+
+Twentieth refactor pass replaced the cloud missing-delete confirmation marker text with structured cloud asset sync state.
+
+### Runtime Changes
+
+- Added `CloudAsset.sync_state` JSON field and migration `0040_cloudasset_sync_state`.
+- `cloud/sync_safety.py` now treats `sync_state['missing_confirmation']` as the source of truth.
+- Removed parsing and writing of legacy `[missing_sync_count:...]` / `[msc_at:...]` provider-status markers.
+- AWS and Alibaba Cloud missing-resource sync now:
+  - increments structured confirmation count on each missing pass
+  - keeps the asset/server running while count is below threshold
+  - deletes only after the structured count reaches the configured threshold
+  - clears missing confirmation state when a later sync sees the resource live again
+- Dashboard lifecycle/delete-plan views now read confirmation progress from item/asset `sync_state`.
+- Updated affected tests to assert structured `sync_state` instead of provider-status marker text.
+
+### Verification
+
+Passed locally:
+
+```bash
+uv run python -m py_compile cloud/sync_safety.py cloud/models.py cloud/migrations/0040_cloudasset_sync_state.py cloud/server_records.py cloud/management/commands/sync_aws_assets.py cloud/management/commands/sync_aliyun_assets.py bot/api.py cloud/tests.py
+uv run python manage.py makemigrations --check --dry-run
+uv run python manage.py check
+```
+
+Blocked locally:
+
+```bash
+uv run python manage.py test cloud.tests.CloudServerServicesTestCase.test_sync_missing_confirmation_note_preserves_existing_note cloud.tests.CloudServerServicesTestCase.test_sync_missing_confirmation_requires_interval cloud.tests.CloudServerServicesTestCase.test_unattached_ip_delete_items_expose_missing_confirmation_state cloud.tests.CloudServerServicesTestCase.test_lifecycle_plans_unattached_ip_show_confirmation_progress_in_state_and_note cloud.tests.CloudServerServicesTestCase.test_sync_aws_missing_instance_requires_five_passes_before_delete cloud.tests.CloudServerServicesTestCase.test_sync_aliyun_missing_instance_requires_five_passes_before_delete --keepdb
+```
+
+The focused DB test run is blocked by local MySQL test database permissions:
+
+```text
+Access denied for user 'a'@'localhost' to database 'test_a'
+```
+
 ## 2026-06-01 db-naming-convention-alignment
 
 ### Scope
