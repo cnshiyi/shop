@@ -1,5 +1,27 @@
 # Refactor Version Record
 
+## 2026-06-02 early-provisioning-asset-field-preservation
+
+### Scope
+
+Small follow-up to the provisioning asset preservation pass.
+
+### Runtime Changes
+
+- Early provisioning asset writes now preserve existing asset owner, expiry, MTProxy link, secret, host, port, proxy-link list, price, and currency when updating an existing asset.
+- `_upsert_server_asset()` and early provisioning helpers share the same default-value preservation helper.
+- Added focused regression coverage for `_mark_provisioning_start()` and `_mark_instance_created()` so manual asset fields are not clobbered before final success handling.
+
+### Verification
+
+Passed locally with `PYTHONDONTWRITEBYTECODE=1 DJANGO_TEST_SQLITE=1`:
+
+```bash
+uv run python -m py_compile cloud/provisioning.py cloud/tests.py
+uv run python manage.py check
+uv run python manage.py test cloud.tests.CloudServerServicesTestCase.test_mark_success_preserves_existing_manual_asset_fields_on_update cloud.tests.CloudServerServicesTestCase.test_early_provisioning_steps_preserve_existing_manual_asset_fields --noinput --verbosity 1
+```
+
 ## 2026-06-02 provisioning-asset-field-preservation
 
 ### Scope

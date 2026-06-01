@@ -237,6 +237,26 @@ def _append_cloud_asset_note(existing: str | None, addition: str | None, proxy_l
     return append_note(existing, clean_addition)
 
 
+def _preserve_existing_asset_defaults(defaults: dict, asset: CloudAsset | None) -> dict:
+    if not asset:
+        return defaults
+    preserved_values = {
+        'user': asset.user if asset.user_id else defaults.get('user'),
+        'actual_expires_at': asset.actual_expires_at or defaults.get('actual_expires_at'),
+        'mtproxy_link': asset.mtproxy_link or defaults.get('mtproxy_link'),
+        'proxy_links': asset.proxy_links or defaults.get('proxy_links'),
+        'mtproxy_secret': asset.mtproxy_secret or defaults.get('mtproxy_secret'),
+        'mtproxy_host': asset.mtproxy_host or defaults.get('mtproxy_host'),
+        'mtproxy_port': asset.mtproxy_port or defaults.get('mtproxy_port'),
+        'price': asset.price if asset.price is not None else defaults.get('price'),
+        'currency': asset.currency or defaults.get('currency'),
+    }
+    for key, value in preserved_values.items():
+        if key in defaults:
+            defaults[key] = value
+    return defaults
+
+
 def _upsert_server_asset(order: CloudServerOrder, note: str):
     try:
         order_user = order.user
@@ -293,20 +313,8 @@ def _upsert_server_asset(order: CloudServerOrder, note: str):
             'is_active': order.status in {'provisioning', 'completed', 'expiring', 'renew_pending', 'suspended'},
         }
     if server_asset:
-        preserved_values = {
-            'user': server_asset.user if server_asset.user_id else defaults.get('user'),
-            'actual_expires_at': server_asset.actual_expires_at or defaults.get('actual_expires_at'),
-            'mtproxy_link': server_asset.mtproxy_link or defaults.get('mtproxy_link'),
-            'proxy_links': server_asset.proxy_links or defaults.get('proxy_links'),
-            'mtproxy_secret': server_asset.mtproxy_secret or defaults.get('mtproxy_secret'),
-            'mtproxy_host': server_asset.mtproxy_host or defaults.get('mtproxy_host'),
-            'mtproxy_port': server_asset.mtproxy_port or defaults.get('mtproxy_port'),
-            'price': server_asset.price if server_asset.price is not None else defaults.get('price'),
-            'currency': server_asset.currency or defaults.get('currency'),
-        }
+        _preserve_existing_asset_defaults(defaults, server_asset)
         for key, value in defaults.items():
-            if key in preserved_values:
-                value = preserved_values[key]
             setattr(server_asset, key, value)
         server_asset.save()
         return server_asset
@@ -538,31 +546,34 @@ def _mark_instance_created(order_id: int, server_name: str, instance_id: str, pu
         order_user = order.user
     except Exception:
         order_user = None
+    asset_defaults = {
+        'source': CloudAsset.SOURCE_ORDER,
+        'provider': order.provider,
+        'cloud_account': order.cloud_account,
+        'account_label': order.account_label or order.provider,
+        'region_code': order.region_code,
+        'region_name': order.region_name,
+        'asset_name': order.server_name,
+        'instance_id': order.instance_id,
+        'provider_resource_id': order.provider_resource_id or order.instance_id,
+        'public_ip': order.public_ip,
+        'login_user': order.login_user,
+        'login_password': order.login_password,
+        'mtproxy_port': order.mtproxy_port,
+        'actual_expires_at': order.service_expires_at,
+        'price': order.total_amount,
+        'currency': order.currency,
+        'order': order,
+        'user': order_user,
+        'status': CloudAsset.STATUS_PENDING,
+        'is_active': True,
+    }
+    existing_asset = CloudAsset.objects.filter(order=order, kind=CloudAsset.KIND_SERVER).order_by('-updated_at', '-id').first()
+    _preserve_existing_asset_defaults(asset_defaults, existing_asset)
     server_asset, _ = CloudAsset.objects.update_or_create(
         order=order,
         kind=CloudAsset.KIND_SERVER,
-        defaults={
-            'source': CloudAsset.SOURCE_ORDER,
-            'provider': order.provider,
-            'cloud_account': order.cloud_account,
-            'account_label': order.account_label or order.provider,
-            'region_code': order.region_code,
-            'region_name': order.region_name,
-            'asset_name': order.server_name,
-            'instance_id': order.instance_id,
-            'provider_resource_id': order.provider_resource_id or order.instance_id,
-            'public_ip': order.public_ip,
-            'login_user': order.login_user,
-            'login_password': order.login_password,
-            'mtproxy_port': order.mtproxy_port,
-            'actual_expires_at': order.service_expires_at,
-            'price': order.total_amount,
-            'currency': order.currency,
-            'order': order,
-            'user': order_user,
-            'status': CloudAsset.STATUS_PENDING,
-            'is_active': True,
-        },
+        defaults=asset_defaults,
     )
     trigger_label = _cloud_log_trigger_label(order)
     record_cloud_ip_log(event_type='created', order=order, asset=server_asset, public_ip=order.public_ip, note=f'{trigger_label}触发创建云端实例：{order.server_name}')
@@ -581,33 +592,36 @@ def _mark_provisioning_start(order_id: int, server_name: str):
         order_user = order.user
     except Exception:
         order_user = None
+    asset_defaults = {
+        'source': CloudAsset.SOURCE_ORDER,
+        'provider': order.provider,
+        'cloud_account': order.cloud_account,
+        'account_label': order.account_label or order.provider,
+        'region_code': order.region_code,
+        'region_name': order.region_name,
+        'asset_name': server_name,
+        'instance_id': order.instance_id,
+        'provider_resource_id': order.provider_resource_id,
+        'public_ip': order.public_ip,
+        'mtproxy_port': order.mtproxy_port,
+        'mtproxy_link': order.mtproxy_link,
+        'proxy_links': order.proxy_links or [],
+        'mtproxy_secret': order.mtproxy_secret,
+        'mtproxy_host': order.mtproxy_host,
+        'actual_expires_at': order.service_expires_at,
+        'price': order.total_amount,
+        'currency': order.currency,
+        'order': order,
+        'user': order_user,
+        'status': CloudAsset.STATUS_PENDING,
+        'is_active': True,
+    }
+    existing_asset = CloudAsset.objects.filter(order=order, kind=CloudAsset.KIND_SERVER).order_by('-updated_at', '-id').first()
+    _preserve_existing_asset_defaults(asset_defaults, existing_asset)
     server_asset, _ = CloudAsset.objects.update_or_create(
         order=order,
         kind=CloudAsset.KIND_SERVER,
-        defaults={
-            'source': CloudAsset.SOURCE_ORDER,
-            'provider': order.provider,
-            'cloud_account': order.cloud_account,
-            'account_label': order.account_label or order.provider,
-            'region_code': order.region_code,
-            'region_name': order.region_name,
-            'asset_name': server_name,
-            'instance_id': order.instance_id,
-            'provider_resource_id': order.provider_resource_id,
-            'public_ip': order.public_ip,
-            'mtproxy_port': order.mtproxy_port,
-            'mtproxy_link': order.mtproxy_link,
-            'proxy_links': order.proxy_links or [],
-            'mtproxy_secret': order.mtproxy_secret,
-            'mtproxy_host': order.mtproxy_host,
-            'actual_expires_at': order.service_expires_at,
-            'price': order.total_amount,
-            'currency': order.currency,
-            'order': order,
-            'user': order_user,
-            'status': CloudAsset.STATUS_PENDING,
-            'is_active': True,
-        },
+        defaults=asset_defaults,
     )
     record_cloud_ip_log(event_type='created', order=order, asset=server_asset, public_ip=order.public_ip, note=f'服务器开始创建：{server_name}')
     return order

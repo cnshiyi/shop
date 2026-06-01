@@ -36,6 +36,7 @@ from cloud.provisioning import (
     _get_aws_create_payload,
     _get_rebuild_static_ip_context,
     _mark_failed,
+    _mark_instance_created,
     _mark_provisioning_start,
     _mark_rebuild_source_pending_deletion,
     _mark_success,
@@ -5536,6 +5537,62 @@ class CloudServerServicesTestCase(TestCase):
         self.assertEqual(asset.mtproxy_secret, 'old-secret')
         self.assertEqual(asset.mtproxy_port, 8443)
         self.assertEqual(asset.proxy_links[0]['url'], old_link)
+
+    # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
+    def test_early_provisioning_steps_preserve_existing_manual_asset_fields(self):
+        existing_owner = TelegramUser.objects.create(tg_user_id=21989112, username='early_manual_asset_owner')
+        order_expiry = timezone.now() + timezone.timedelta(days=30)
+        manual_expiry = timezone.now() + timezone.timedelta(days=9)
+        manual_link = 'tg://proxy?server=1.2.3.6&port=9443&secret=manual-secret'
+        order = CloudServerOrder.objects.create(
+            order_no='HB-TEST-PROVISION-EARLY-MANUAL-ASSET',
+            user=self.user,
+            plan=self.plan,
+            provider=self.plan.provider,
+            region_code=self.plan.region_code,
+            region_name=self.plan.region_name,
+            plan_name=self.plan.plan_name,
+            quantity=1,
+            currency='USDT',
+            total_amount='19.00',
+            pay_amount='19.00',
+            pay_method='balance',
+            status='paid',
+            mtproxy_port=8443,
+            service_expires_at=order_expiry,
+        )
+
+        async_to_sync(_mark_provisioning_start)(order.id, 'sg-test-node-03')
+        asset = CloudAsset.objects.get(order=order, kind=CloudAsset.KIND_SERVER)
+        asset.user = existing_owner
+        asset.actual_expires_at = manual_expiry
+        asset.mtproxy_host = '1.2.3.6'
+        asset.mtproxy_port = 9443
+        asset.mtproxy_secret = 'manual-secret'
+        asset.mtproxy_link = manual_link
+        asset.proxy_links = [{'name': '手工代理', 'server': '1.2.3.6', 'port': '9443', 'secret': 'manual-secret', 'url': manual_link}]
+        asset.save(update_fields=['user', 'actual_expires_at', 'mtproxy_host', 'mtproxy_port', 'mtproxy_secret', 'mtproxy_link', 'proxy_links', 'updated_at'])
+
+        async_to_sync(_mark_provisioning_start)(order.id, 'sg-test-node-03')
+        async_to_sync(_mark_instance_created)(
+            order.id,
+            'sg-test-node-03',
+            'ins-003',
+            '1.2.3.6',
+            'root',
+            'pass',
+            '实例已创建，等待安装代理',
+        )
+
+        asset.refresh_from_db()
+        self.assertEqual(asset.user_id, existing_owner.id)
+        self.assertEqual(asset.actual_expires_at, manual_expiry)
+        self.assertEqual(asset.mtproxy_link, manual_link)
+        self.assertEqual(asset.mtproxy_secret, 'manual-secret')
+        self.assertEqual(asset.mtproxy_port, 9443)
+        self.assertEqual(asset.proxy_links[0]['url'], manual_link)
+        self.assertEqual(asset.instance_id, 'ins-003')
+        self.assertEqual(asset.public_ip, '1.2.3.6')
 
     # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
     def test_sync_aws_assets_requires_database_cloud_account(self):
