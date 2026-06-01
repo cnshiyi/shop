@@ -40,6 +40,7 @@ urlpatterns = [
     path('products/', bot_api.products_list, name='products-list'),
     path('orders/', orders_api.orders_list, name='orders-list'),
     path('tasks/', cloud_api.tasks_overview, name='tasks-overview'),
+    path('tasks/center/', cloud_api.task_center_overview, name='task-center-overview'),
     path('tasks/plans/', bot_api.lifecycle_plans, name='lifecycle-plans'),
     path('tasks/plans/refresh/', bot_api.refresh_lifecycle_plan_table, name='lifecycle-plans-refresh'),
     path('tasks/plans/notes/', bot_api.update_lifecycle_plan_note, name='lifecycle-plan-note-update'),

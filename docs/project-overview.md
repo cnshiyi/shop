@@ -173,11 +173,18 @@ DB_ENGINE=sqlite SQLITE_NAME=local.sqlite3 uv run python run.py web
 - `cloud/api.py`
   - 云资产、云订单、云套餐、价格、监控、通知、自动续费等后台接口
   - 单条代理状态更新仍保留在这里，批量同步任务入口从 `cloud/sync_jobs.py` re-export 给 URL 聚合使用
+- `cloud/api_monitors.py`
+  - 地址监控链上余额查询
+  - 云资产 IP / 生命周期日志列表
+  - 监控地址后台列表
 - `cloud/sync_jobs.py`
   - 云资产批量同步任务运行时
   - 负责 `CloudAssetSyncJob` 入队、详情、列表、取消、重试、状态摘要和指标 API
   - worker 执行按账号/选中资产串行推进，所有子任务开始、完成、日志、错误、进度和取消都写入 `CloudAssetSyncJobEvent`
   - 同步成功后触发代理列表快照刷新；选中资产只刷新对应资产，全量同步刷新完整快照
+- `cloud/task_center.py`
+  - 统一任务中心聚合 API
+  - 汇总云资产同步、云订单任务、生命周期计划、通知计划和自动续费计划
 - `cloud/management/commands/`
   - `sync_aws_assets`
   - `sync_aliyun_assets`
@@ -201,7 +208,7 @@ DB_ENGINE=sqlite SQLITE_NAME=local.sqlite3 uv run python run.py web
 - Telegram 账号、登录、群组、消息
 - 商品、订单、充值
 - 云资产、云订单、云套餐、价格、服务器
-- 云资产同步任务列表、详情、指标、重试、取消和状态轮询
+- 任务中心、云资产同步任务列表、详情、指标、重试、取消和状态轮询
 - 生命周期、通知、自动续费、监控
 - 站点配置、按钮配置、云账号、管理员账号
 

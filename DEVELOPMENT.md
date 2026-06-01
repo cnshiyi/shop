@@ -162,6 +162,13 @@ uv run python manage.py prune_cloud_sync_job_events --days 90 --keep-per-job 500
 - `CloudAssetSyncJobEvent` 事件表通过 `job_id` 标量索引关联任务，不加外键；生产环境用 `prune_cloud_sync_job_events` 定期清理。
 - 后台路由新增 `GET /api/admin/cloud-assets/sync-jobs/metrics/`（同一聚合路由也挂在 `/api/dashboard/` 和 `/api/` 前缀下），前端代理列表抽屉和同步任务详情页读取这份指标。
 
+后台任务中心：
+
+- `GET /api/admin/tasks/center/` 由 `cloud/task_center.py` 提供统一任务摘要。
+- 当前聚合范围包括云资产同步、云订单任务、生命周期计划、通知计划和自动续费计划。
+- `/admin/tasks` 前端页优先读取任务中心 API；如果 API 不可用，回退到旧的 `/admin/tasks/` 任务列表。
+- `cloud/api_monitors.py` 接管监控地址和 IP 日志 API，`cloud/api.py` 只做兼容导出。
+
 如果用户反馈“没生效”，优先检查：
 
 ```bash

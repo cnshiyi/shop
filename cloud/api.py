@@ -9,7 +9,6 @@ import uuid
 from datetime import timezone as dt_timezone
 from decimal import Decimal
 
-import httpx
 from urllib.parse import urlparse
 
 from asgiref.sync import async_to_sync
@@ -30,15 +29,19 @@ from cloud.asset_queries import cloud_assets_base_queryset, dedupe_cloud_asset_r
 from cloud.dashboard_api_helpers import _dashboard_expiry_ordering, _dashboard_sort_direction, _generate_cloud_plan_config_id, _preserve_link_status_label, _preserve_link_status_with_countdown
 from cloud.dashboard_snapshots import _refresh_dashboard_plan_snapshots, _refresh_dashboard_plan_snapshots_deferred, _refresh_lifecycle_plan_snapshot
 from cloud.services import AWS_REGION_NAMES, RenewalPriceMissingError, _renewal_price, _update_order_primary_records, create_cloud_server_rebuild_order, drop_asset_note_update, ensure_cloud_asset_operation_order, ensure_cloud_server_pricing, ensure_manual_expiry_operation_order, ensure_manual_owner_operation_order, ensure_manual_price_operation_order, record_cloud_ip_log, refresh_custom_plan_cache, replace_cloud_asset_order_by_admin, set_cloud_server_auto_renew_admin, sync_cloud_asset_user_binding
-from cloud.models import AddressMonitor, CloudAsset, CloudAssetDashboardSnapshot, CloudAutoRenewPatrolLog, CloudAutoRenewPlan, CloudIpLog, CloudNoticePlan, CloudServerOrder, CloudServerPlan, CloudUserNoticeLog, ServerPrice
+from cloud.models import CloudAsset, CloudAssetDashboardSnapshot, CloudAutoRenewPatrolLog, CloudAutoRenewPlan, CloudIpLog, CloudNoticePlan, CloudServerOrder, CloudServerPlan, CloudUserNoticeLog, ServerPrice
 from cloud.note_utils import append_note, prepend_note
 from core.cloud_accounts import cloud_account_label, cloud_account_label_variants, list_cloud_account_labels
 from core.dashboard_api import _apply_keyword_filter, _countdown_label, _days_left, _decimal_to_str, _error, _get_keyword, _iso, _ok, _parse_decimal, _provider_label, _provider_status_label, _read_payload, _region_label, _server_source_label, _split_usernames, _status_label, _user_payload, dashboard_login_required, dashboard_superuser_required
 from core.models import CloudAccountConfig, ExternalSyncLog, SiteConfig
-from core.cache import get_redis
 from core.runtime_config import get_runtime_config
-from core.trongrid import build_trongrid_headers
 from cloud.provisioning import provision_cloud_server
+from cloud.api_monitors import (  # noqa: E402
+    _fetch_address_chain_balances,
+    cloud_ip_logs_list,
+    monitors_list,
+)
+from cloud.task_center import task_center_overview  # noqa: E402
 from cloud.sync_jobs import (  # noqa: E402
     _active_sync_accounts,
     _asset_retained_static_ip_sync_scope,
@@ -64,69 +67,6 @@ from cloud.sync_jobs import (  # noqa: E402
 )
 
 logger = logging.getLogger(__name__)
-
-
-ADDRESS_BALANCE_CACHE_TTL = 60
-ADDRESS_BALANCE_CACHE_PREFIX = 'address_balance:'
-
-
-# 功能：提供 后台 API 接口 的内部辅助逻辑，供同模块流程复用。
-def _trongrid_headers_without_key(headers: dict | None) -> dict:
-    return {key: value for key, value in dict(headers or {}).items() if key.lower() != 'tron-pro-api-key'}
-
-
-# 功能：提供 后台 API 接口 的内部辅助逻辑，供同模块流程复用。
-def _trongrid_sync_get_with_key_fallback(client: httpx.Client, url: str, headers: dict):
-    resp = client.get(url, headers=headers)
-    if resp.status_code == 401 and headers.get('TRON-PRO-API-KEY'):
-        resp = client.get(url, headers=_trongrid_headers_without_key(headers))
-    return resp
-
-
-# 功能：提供 后台 API 接口 的内部辅助逻辑，供同模块流程复用。
-def _fetch_address_chain_balances(address: str):
-    cache_key = f'{ADDRESS_BALANCE_CACHE_PREFIX}{address}'
-    redis_client = async_to_sync(get_redis)()
-    if redis_client is not None:
-        try:
-            cached = async_to_sync(redis_client.get)(cache_key)
-            if cached:
-                payload = json.loads(cached)
-                return Decimal(str(payload.get('usdt', '0'))), Decimal(str(payload.get('trx', '0'))), None
-        except Exception:
-            pass
-    usdt_contract = get_runtime_config('usdt_contract', 'TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t')
-    trongrid_base_url = get_runtime_config('trongrid_base_url', 'https://api.trongrid.io')
-    try:
-        headers = async_to_sync(build_trongrid_headers)()
-        with httpx.Client(timeout=8) as client:
-            resp = _trongrid_sync_get_with_key_fallback(client, f'{trongrid_base_url}/v1/accounts/{address}', headers)
-            resp.raise_for_status()
-            data = resp.json() or {}
-        account_items = data.get('data') or []
-        account = account_items[0] if account_items else {}
-        trx_balance = Decimal(str(account.get('balance', 0) or 0)) / Decimal('1000000')
-        usdt_balance = Decimal('0')
-        for item in account.get('trc20') or []:
-            if not isinstance(item, dict):
-                continue
-            for contract, value in item.items():
-                if str(contract).lower() == str(usdt_contract).lower():
-                    usdt_balance = Decimal(str(value or '0')) / Decimal('1000000')
-                    break
-        if redis_client is not None:
-            try:
-                async_to_sync(redis_client.setex)(
-                    cache_key,
-                    ADDRESS_BALANCE_CACHE_TTL,
-                    json.dumps({'usdt': str(usdt_balance), 'trx': str(trx_balance)}),
-                )
-            except Exception:
-                pass
-        return usdt_balance, trx_balance, None
-    except Exception as exc:
-        logger.warning('地址监控链上余额查询失败 address=%s error=%s', address, exc)
-        return None, None, str(exc)
 
 
 # 功能：提供 后台 API 接口 的内部辅助逻辑，供同模块流程复用。
@@ -4251,130 +4191,6 @@ def sync_cloud_plans(request):
     })
 
 
-# 功能：提供 后台 API 接口 的内部辅助逻辑，供同模块流程复用。
-def _cloud_ip_log_note_newest_first(note):
-    text = str(note or '').strip()
-    if not text:
-        return ''
-    lines = [line.strip() for line in text.splitlines() if line.strip()]
-    if len(lines) <= 1:
-        return text
-
-    # 功能：提供 后台 API 接口 的内部辅助逻辑，供同模块流程复用。
-    def _line_time(line):
-        match = re.search(r'执行时间：(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})', line)
-        return match.group(1) if match else ''
-
-    first_time = _line_time(lines[0])
-    last_time = _line_time(lines[-1])
-    if first_time and last_time and first_time < last_time:
-        lines = list(reversed(lines))
-    return '\n'.join(lines)
-
-
-# 功能：提供 后台 API 接口 的内部辅助逻辑，供同模块流程复用。
-def _cloud_ip_log_payload(item):
-    user = item.user
-    usernames = user.usernames if user else []
-    user_payload = _user_payload({
-        'id': user.id,
-        'tg_user_id': user.tg_user_id,
-        'username': user.username,
-        'first_name': user.first_name,
-        'usernames': usernames,
-        'primary_username': usernames[0] if usernames else '',
-    }) if user else None
-    return {
-        'id': item.id,
-        'event_type': item.event_type,
-        'event_label': _status_label(item.event_type, CloudIpLog.EVENT_CHOICES),
-        'provider': item.provider,
-        'provider_label': _provider_label(item.provider),
-        'region_code': item.region_code,
-        'region_name': item.region_name,
-        'region_label': _region_label(item.region_code, item.region_name),
-        'order_id': item.order_id,
-        'order_no': item.order_no,
-        'order_detail_path': f'/admin/cloud-orders/{item.order_id}' if item.order_id else '',
-        'asset_id': item.asset_id,
-        'asset_detail_path': f'/admin/cloud-assets/{item.asset_id}' if item.asset_id else '',
-        'detail_path': f'/admin/cloud-orders/{item.order_id}' if item.order_id else (f'/admin/cloud-assets/{item.asset_id}' if item.asset_id else ''),
-        'server_id': None,
-        'asset_name': item.asset_name,
-        'instance_id': item.instance_id,
-        'provider_resource_id': item.provider_resource_id,
-        'public_ip': item.public_ip,
-        'previous_public_ip': item.previous_public_ip,
-        'note': _cloud_ip_log_note_newest_first(item.note),
-        'created_at': _iso(item.created_at),
-        'user_id': user.id if user else None,
-        'tg_user_id': user.tg_user_id if user else None,
-        'user_display_name': user_payload['display_name'] if user_payload else '未绑定用户',
-        'username_label': user_payload['username_label'] if user_payload else '-',
-    }
-
-
-# 功能：处理 后台 API 接口 中的 cloud ip logs list 业务流程。
-@dashboard_login_required
-@require_GET
-def cloud_ip_logs_list(request):
-    keyword = _get_keyword(request)
-    log_type = (request.GET.get('log_type') or 'ip').strip()
-    queryset = CloudIpLog.objects.select_related('user', 'order', 'asset').order_by('-created_at', '-id')
-    queryset = _apply_keyword_filter(
-        queryset,
-        keyword,
-        ['order_no', 'asset_name', 'instance_id', 'provider_resource_id', 'public_ip', 'previous_public_ip', 'note', 'user__tg_user_id', 'user__username'],
-    )
-    if log_type == 'server':
-        queryset = queryset.filter(
-            Q(order__isnull=False)
-            | Q(asset__kind=CloudAsset.KIND_SERVER)
-        )
-    elif log_type == 'operation':
-        queryset = queryset.filter(note__isnull=False).exclude(note='')
-    return _ok([_cloud_ip_log_payload(item) for item in queryset[:200]])
-
-
-# 功能：处理 后台 API 接口 中的 monitors list 业务流程。
-@dashboard_login_required
-@require_GET
-def monitors_list(request):
-    keyword = _get_keyword(request)
-    queryset = AddressMonitor.objects.select_related('user').order_by('-created_at')
-    queryset = _apply_keyword_filter(
-        queryset,
-        keyword,
-        ['address', 'remark', 'daily_income_currency', 'daily_expense_currency', 'user__tg_user_id', 'user__username'],
-    )
-    items = list(
-        queryset[:100].values(
-            'id', 'address', 'remark', 'monitor_transfers', 'monitor_resources',
-            'usdt_threshold', 'trx_threshold', 'energy_threshold', 'bandwidth_threshold',
-            'daily_income', 'daily_expense', 'daily_income_currency', 'daily_expense_currency',
-            'stats_date', 'is_active', 'created_at', 'resource_checked_at', 'user__tg_user_id', 'user__username'
-        )
-    )
-    payload = []
-    for item in items:
-        usdt_balance, trx_balance, balance_error = _fetch_address_chain_balances(item['address'])
-        payload.append({
-            **item,
-            'usdt_threshold': _decimal_to_str(item['usdt_threshold']),
-            'trx_threshold': _decimal_to_str(item['trx_threshold']),
-            'daily_income': _decimal_to_str(item['daily_income']),
-            'daily_expense': _decimal_to_str(item['daily_expense']),
-            'chain_usdt_balance': _decimal_to_str(usdt_balance) if usdt_balance is not None else None,
-            'chain_trx_balance': _decimal_to_str(trx_balance) if trx_balance is not None else None,
-            'chain_balance_error': balance_error,
-            'created_at': _iso(item['created_at']),
-            'resource_checked_at': _iso(item['resource_checked_at']),
-            'tg_user_id': item.pop('user__tg_user_id', None),
-            'username': item.pop('user__username', None),
-        })
-    return _ok(payload)
-
-
 from cloud.api_servers import (  # noqa: E402
     delete_server,
     rebuild_server_preserve_link,
@@ -4415,6 +4231,7 @@ __all__ = [
     'run_auto_renew_order',
     'run_auto_renew_tasks',
     'tasks_overview',
+    'task_center_overview',
     'cloud_plans_list',
     'cloud_pricing_list',
     'create_cloud_plan',

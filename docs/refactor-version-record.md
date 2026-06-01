@@ -1,5 +1,38 @@
 # Refactor Version Record
 
+## 2026-06-01 task-center-and-monitor-split
+
+### Scope
+
+This pass kept splitting the oversized cloud API surface, added a unified task center API, and moved monitor/IP-log endpoints into a dedicated module.
+
+### Runtime Changes
+
+- Added `cloud/api_monitors.py` for cloud IP logs and address monitor APIs.
+- Added `cloud/task_center.py` for a unified backend task center overview.
+- `cloud/api.py` now re-exports the monitor APIs and task center API for URL compatibility.
+- Added `GET /admin/tasks/center/` and kept `GET /admin/tasks/` as the legacy task list.
+- Added a refactor worktree boundary document so future passes can distinguish owned edits from existing dirty files.
+
+### Frontend Changes
+
+- Upgraded `/admin/tasks` into a task center page with health cards and a searchable task table.
+
+### Verification
+
+Passed locally:
+
+```bash
+uv run python -m py_compile cloud/api.py cloud/api_monitors.py cloud/task_center.py shop/dashboard_urls.py
+DJANGO_TEST_REUSE_DB=1 uv run python manage.py test cloud.tests_task_center.CloudTaskCenterApiTestCase --keepdb --noinput --verbosity 1
+```
+
+Frontend validation passed in `/Users/a399/Desktop/data/vue-shop-admin`:
+
+```bash
+./node_modules/.bin/vue-tsc --noEmit --skipLibCheck -p apps/web-antd/tsconfig.json
+```
+
 ## 2026-06-01 cloud-sync-runtime-split
 
 ### Scope
