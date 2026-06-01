@@ -50,9 +50,10 @@ from bot.api import (
     dashboard_superuser_required,
 )
 from bot.models import TelegramGroupFilter, TelegramLoginAccount, TelegramUser
-from cloud.lifecycle import NOTICE_TYPE_SWITCH_CONFIG, _auto_renew_notice_batch_payload, _notice_effective_delivered, _delete_instance, _get_due_orders, _get_notice_text_override, _lifecycle_notice_batch_payload, _mark_replaced_order_deleted, _notice_payload_for_order, _notice_override_key, _record_auto_renew_patrol_log, _renew_notice_batch_payload, _run_auto_renew, _set_notice_text_override, cloud_notice_type_enabled
-from cloud.services import AWS_REGION_NAMES, RenewalPriceMissingError, _cloud_order_lifecycle_fields, _renewal_price, _update_order_primary_records, create_cloud_server_rebuild_order, drop_asset_note_update, ensure_cloud_asset_operation_order, ensure_cloud_server_pricing, ensure_manual_expiry_operation_order, ensure_manual_owner_operation_order, ensure_manual_price_operation_order, record_cloud_ip_log, refresh_custom_plan_cache, replace_cloud_asset_order_by_admin, scoped_server_match_for_asset, set_cloud_server_auto_renew_admin, sync_cloud_asset_user_binding
-from cloud.models import AddressMonitor, CloudAsset, CloudAutoRenewPatrolLog, CloudAutoRenewPlan, CloudIpLog, CloudNoticePlan, CloudServerOrder, CloudServerPlan, CloudUserNoticeLog, Server, ServerPrice
+from cloud.lifecycle import NOTICE_TYPE_SWITCH_CONFIG, _auto_renew_notice_batch_payload, _notice_effective_delivered, _get_due_orders, _get_notice_text_override, _lifecycle_notice_batch_payload, _notice_payload_for_order, _notice_override_key, _record_auto_renew_patrol_log, _renew_notice_batch_payload, _run_auto_renew, _set_notice_text_override, cloud_notice_type_enabled
+from cloud.lifecycle_schedule import compute_order_lifecycle_fields, compute_unattached_ip_release_at
+from cloud.services import AWS_REGION_NAMES, RenewalPriceMissingError, _renewal_price, _update_order_primary_records, create_cloud_server_rebuild_order, drop_asset_note_update, ensure_cloud_asset_operation_order, ensure_cloud_server_pricing, ensure_manual_expiry_operation_order, ensure_manual_owner_operation_order, ensure_manual_price_operation_order, record_cloud_ip_log, refresh_custom_plan_cache, replace_cloud_asset_order_by_admin, set_cloud_server_auto_renew_admin, sync_cloud_asset_user_binding
+from cloud.models import AddressMonitor, CloudAsset, CloudAutoRenewPatrolLog, CloudAutoRenewPlan, CloudIpLog, CloudNoticePlan, CloudServerOrder, CloudServerPlan, CloudUserNoticeLog, ServerPrice
 from cloud.note_utils import append_note, prepend_note
 from core.cloud_accounts import cloud_account_label, cloud_account_label_variants
 from core.models import CloudAccountConfig, ExternalSyncLog, SiteConfig
@@ -236,13 +237,7 @@ def _is_unattached_ip_asset(asset: CloudAsset) -> bool:
 
 
 def _unattached_ip_delete_due_at(*, now=None):
-    from core.runtime_config import get_runtime_config
-    try:
-        delete_days = max(int(str(get_runtime_config('cloud_unattached_ip_delete_after_days', '15') or '15').strip()), 0)
-    except (TypeError, ValueError):
-        delete_days = 15
-    now = now or timezone.now()
-    return now + timezone.timedelta(days=delete_days)
+    return compute_unattached_ip_release_at(now or timezone.now())
 
 
 def _ensure_unattached_ip_expiry(asset: CloudAsset, *, now=None) -> bool:
@@ -941,8 +936,6 @@ def update_cloud_asset(request, asset_id):
             previous_price = asset.price if asset.price is not None else getattr(asset.order, 'total_amount', None)
             linked_order_id = asset.order_id
 
-            server = Server.objects.select_for_update().filter(scoped_server_match_for_asset(asset, include_order=True)).first()
-
             user_lookup = payload.get('user_query') or payload.get('user_id') or payload.get('tg_user_id') or payload.get('username')
             username_raw = payload.get('user_query') or payload.get('username')
             clear_user = str(payload.get('clear_user') or '').lower() in {'1', 'true', 'yes', 'on'}
@@ -955,8 +948,6 @@ def update_cloud_asset(request, asset_id):
                 if asset.order_id and not is_unattached_ip:
                     pending_order_updates['user_id'] = None
                     pending_order_updates['last_user_id'] = None
-                if server:
-                    server.user = None
             elif user_lookup not in (None, ''):
                 owner_target = _resolve_telegram_user(user_lookup)
                 if not owner_target:
@@ -1043,7 +1034,7 @@ def update_cloud_asset(request, asset_id):
                             'auto_renew_failure_notice_sent_at': None,
                             'delete_notice_sent_at': None,
                             'recycle_notice_sent_at': None,
-                            **_cloud_order_lifecycle_fields(manual_expires_at),
+                            **compute_order_lifecycle_fields(manual_expires_at),
                         })
 
             if asset.order_id:
@@ -1115,16 +1106,6 @@ def update_cloud_asset(request, asset_id):
                     asset.sort_order = int(sort_order) if sort_order not in (None, '') else 99
                 except (TypeError, ValueError):
                     return _error('排序必须是数字', status=400)
-                if server:
-                    server.sort_order = asset.sort_order
-
-            if user_lookup not in (None, '') and server:
-                server.user = asset.user
-            if asset.kind == CloudAsset.KIND_SERVER and not server and not is_unattached_ip:
-                server = Server(
-                    source=(asset.source or Server.SOURCE_ORDER) if asset.source in {choice[0] for choice in Server.SOURCE_CHOICES} else Server.SOURCE_ORDER,
-                    instance_id=asset.instance_id or asset.provider_resource_id or asset.public_ip,
-                )
             rebound_to_instance = bool(
                 old_provider_status and '未附加' in old_provider_status and str(asset.instance_id or '').strip()
             )
@@ -1139,40 +1120,9 @@ def update_cloud_asset(request, asset_id):
             if refresh_unattached_delete_due:
                 refreshed_due_at = _unattached_ip_delete_due_at()
                 asset.actual_expires_at = refreshed_due_at
-                if server:
-                    server.expires_at = refreshed_due_at
                 if linked_order_id:
                     pending_order_updates['ip_recycle_at'] = refreshed_due_at
                     pending_order_updates['recycle_notice_sent_at'] = None
-
-            if server:
-                if asset.order_id:
-                    server.order = asset.order
-                if asset.instance_id:
-                    server.instance_id = asset.instance_id
-                elif not server.instance_id:
-                    server.instance_id = asset.provider_resource_id or asset.public_ip
-                server.user = asset.user
-                server.source = server.source or Server.SOURCE_ORDER
-                server.provider = asset.provider
-                server.region_name = asset.region_name
-                server.region_code = asset.region_code
-                server.provider_resource_id = asset.provider_resource_id
-                server.public_ip = asset.public_ip
-                if 'public_ip' in payload and old_public_ip and old_public_ip != asset.public_ip:
-                    server.previous_public_ip = old_public_ip
-                server.sort_order = asset.sort_order
-                server.expires_at = asset.actual_expires_at
-                server.is_active = asset.is_active
-                if rebound_to_instance:
-                    server.provider_status = asset.provider_status
-                    if server.status == Server.STATUS_UNKNOWN:
-                        server.status = Server.STATUS_RUNNING
-                if asset.asset_name:
-                    server.server_name = asset.asset_name
-                if server.account_label in (None, ''):
-                    server.account_label = asset.account_label or cloud_account_label(getattr(asset, 'cloud_account', None)) or asset.provider
-                server.save()
 
             asset.save()
             owner_target_after_commit = owner_target
@@ -1244,12 +1194,10 @@ def update_cloud_asset(request, asset_id):
         except Exception as exc:
             logger.exception('CLOUD_ASSET_MANUAL_PRICE_AUDIT_ORDER_FAILED asset_id=%s error=%s', asset_id, exc)
     if public_ip_changed:
-        server = Server.objects.filter(scoped_server_match_for_asset(asset, include_order=True)).first()
         record_cloud_ip_log(
             event_type='changed',
             order=asset.order,
             asset=asset,
-            server=server,
             previous_public_ip=changed_public_ip_before,
             public_ip=changed_public_ip_after,
             note=f'后台手动更新IP：{changed_public_ip_before or "未分配"} → {changed_public_ip_after or "未分配"}',
@@ -3486,7 +3434,6 @@ def delete_cloud_order(request, order_id):
     if not order:
         return _error('订单不存在', status=404)
     linked_asset_count = CloudAsset.objects.filter(order=order).count()
-    linked_server_count = Server.objects.filter(order=order).count()
     cloud_identity_values = [
         order.public_ip,
         order.previous_public_ip,
@@ -3495,17 +3442,16 @@ def delete_cloud_order(request, order_id):
         order.server_name,
         order.static_ip_name,
     ]
-    if linked_asset_count or linked_server_count or any(str(value or '').strip() for value in cloud_identity_values):
+    if linked_asset_count or any(str(value or '').strip() for value in cloud_identity_values):
         logger.warning(
-            'DASHBOARD_CLOUD_ORDER_DELETE_BLOCKED order_id=%s order_no=%s assets=%s servers=%s user=%s',
+            'DASHBOARD_CLOUD_ORDER_DELETE_BLOCKED order_id=%s order_no=%s assets=%s user=%s',
             order_id,
             order.order_no,
             linked_asset_count,
-            linked_server_count,
             getattr(request.user, 'id', None),
         )
         return _error(
-            '订单已关联云资源，已阻止物理删除；请先在订单详情里改状态，或处理关联资产/服务器后再删除。',
+            '订单已关联云资源，已阻止物理删除；请先在订单详情里改状态，或处理关联资产后再删除。',
             status=409,
         )
     order_no = order.order_no
@@ -3514,8 +3460,8 @@ def delete_cloud_order(request, order_id):
     return _ok(True)
 
 
-def _server_payload(server):
-    user = server.user
+def _server_payload(asset):
+    user = asset.user
     user_payload = None
     if user:
         usernames = user.usernames
@@ -3527,26 +3473,26 @@ def _server_payload(server):
             'usernames': usernames,
             'primary_username': usernames[0] if usernames else '',
         })
-    order = server.order
+    order = asset.order
     return {
-        'id': server.id,
-        'status': server.status,
-        'status_label': '旧机保留中' if server.status == Server.STATUS_DELETING and '旧机保留期' in str(server.provider_status or '') else _status_label(server.status, Server.STATUS_CHOICES),
-        'source': server.source,
-        'source_label': _server_source_label(server.source),
-        'provider': server.provider,
-        'provider_label': _provider_label(server.provider),
-        'account_label': server.account_label,
-        'region_label': _region_label(server.region_code, server.region_name),
-        'region_name': server.region_name,
-        'server_name': server.server_name,
-        'instance_id': server.instance_id,
-        'provider_resource_id': server.provider_resource_id,
-        'public_ip': server.public_ip,
-        'login_user': server.login_user,
-        'expires_at': _iso(server.expires_at),
-        'days_left': _days_left(server.expires_at),
-        'status_countdown': _countdown_label(server.expires_at),
+        'id': asset.id,
+        'status': asset.status,
+        'status_label': '旧机保留中' if asset.status == CloudAsset.STATUS_DELETING and '旧机保留期' in str(asset.provider_status or '') else _status_label(asset.status, CloudAsset.STATUS_CHOICES),
+        'source': asset.source,
+        'source_label': _server_source_label(asset.source),
+        'provider': asset.provider,
+        'provider_label': _provider_label(asset.provider),
+        'account_label': asset.account_label,
+        'region_label': _region_label(asset.region_code, asset.region_name),
+        'region_name': asset.region_name,
+        'server_name': asset.asset_name,
+        'instance_id': asset.instance_id,
+        'provider_resource_id': asset.provider_resource_id,
+        'public_ip': asset.public_ip,
+        'login_user': asset.login_user,
+        'expires_at': _iso(asset.actual_expires_at),
+        'days_left': _days_left(asset.actual_expires_at),
+        'status_countdown': _countdown_label(asset.actual_expires_at),
         'user_id': user.id if user else None,
         'tg_user_id': user.tg_user_id if user else None,
         'user_display_name': user_payload['display_name'] if user_payload else '未绑定用户',
@@ -3554,13 +3500,13 @@ def _server_payload(server):
         'order_id': order.id if order else None,
         'order_no': order.order_no if order else '',
         'order_detail_path': f'/admin/cloud-orders/{order.id}' if order else '',
-        'provider_status': '已删除' if server.status == Server.STATUS_DELETED else _provider_status_label(server.provider_status),
+        'provider_status': '已删除' if asset.status == CloudAsset.STATUS_DELETED else _provider_status_label(asset.provider_status),
         'preserve_link_status': _preserve_link_status_with_countdown(
-            _preserve_link_status_label(server.note, getattr(order, 'provision_note', None)),
-            _countdown_label(server.expires_at),
+            _preserve_link_status_label(asset.note, getattr(order, 'provision_note', None)),
+            _countdown_label(asset.actual_expires_at),
         ),
-        'is_active': server.is_active,
-        'updated_at': _iso(server.updated_at),
+        'is_active': asset.is_active,
+        'updated_at': _iso(asset.updated_at),
     }
 
 
@@ -3572,18 +3518,18 @@ def servers_list(request):
     dedup = dedup_raw not in {'0', 'false', 'no', 'off'}
     sort_by = (request.GET.get('sort_by') or '').strip().lower()
     sort_direction = _dashboard_sort_direction(request)
-    ordering = ['expires_at', '-updated_at', '-id']
+    ordering = ['actual_expires_at', '-updated_at', '-id']
     if sort_by in {'expires_at', 'days_left', 'remaining_days'}:
-        ordering = _dashboard_expiry_ordering('expires_at', sort_direction)
+        ordering = _dashboard_expiry_ordering('actual_expires_at', sort_direction)
     unattached_ip_q = (
         (Q(provider_status__icontains='未附加') | Q(note__icontains='未附加IP') | Q(note__icontains='未附加固定IP'))
         & (Q(instance_id__isnull=True) | Q(instance_id=''))
     )
-    queryset = Server.objects.select_related('user', 'order').exclude(status=Server.STATUS_DELETED).exclude(public_ip__isnull=True).exclude(public_ip='').exclude(unattached_ip_q).order_by(*ordering)
+    queryset = CloudAsset.objects.select_related('user', 'order').filter(kind=CloudAsset.KIND_SERVER).exclude(status=CloudAsset.STATUS_DELETED).exclude(public_ip__isnull=True).exclude(public_ip='').exclude(unattached_ip_q).order_by(*ordering)
     queryset = _apply_keyword_filter(
         queryset,
         keyword,
-        ['server_name', 'instance_id', 'public_ip', 'account_label', 'provider', 'region_name', 'user__tg_user_id', 'user__username', 'order__order_no'],
+        ['asset_name', 'instance_id', 'public_ip', 'account_label', 'provider', 'region_name', 'user__tg_user_id', 'user__username', 'order__order_no'],
     )
     provider = (request.GET.get('provider') or '').strip()
     region_code = (request.GET.get('region_code') or '').strip()
@@ -3619,10 +3565,7 @@ def _primary_record_updates_for_order_status(order_status: str, note: str | None
             'is_active': True,
             'status': CloudAsset.STATUS_RUNNING,
         }
-        server_updates = {
-            'is_active': True,
-            'status': Server.STATUS_RUNNING,
-        }
+        server_updates = dict(asset_updates)
     elif order_status in inactive_statuses:
         asset_status_map = {
             'deleted': CloudAsset.STATUS_DELETED,
@@ -3633,23 +3576,11 @@ def _primary_record_updates_for_order_status(order_status: str, note: str | None
             'cancelled': CloudAsset.STATUS_UNKNOWN,
             'pending': CloudAsset.STATUS_PENDING,
         }
-        server_status_map = {
-            'deleted': Server.STATUS_DELETED,
-            'deleting': Server.STATUS_DELETING,
-            'expired': Server.STATUS_EXPIRED,
-            'suspended': Server.STATUS_STOPPED,
-            'failed': Server.STATUS_UNKNOWN,
-            'cancelled': Server.STATUS_UNKNOWN,
-            'pending': Server.STATUS_PENDING,
-        }
         asset_updates = {
             'is_active': False,
             'status': asset_status_map.get(order_status, CloudAsset.STATUS_UNKNOWN),
         }
-        server_updates = {
-            'is_active': False,
-            'status': server_status_map.get(order_status, Server.STATUS_UNKNOWN),
-        }
+        server_updates = dict(asset_updates)
     else:
         return {}, {}
     return asset_updates, server_updates
@@ -3789,7 +3720,7 @@ def cloud_order_detail(request, order_id):
                     setattr(order, field, _parse_iso_datetime(payload.get(field), label) if payload.get(field) else None)
                     changed_fields.add(field)
             if 'service_expires_at' in changed_fields and 'service_expires_at' in payload:
-                lifecycle_updates = _cloud_order_lifecycle_fields(order.service_expires_at) if order.service_expires_at else {
+                lifecycle_updates = compute_order_lifecycle_fields(order.service_expires_at) if order.service_expires_at else {
                     'renew_grace_expires_at': None,
                     'suspend_at': None,
                     'delete_at': None,
@@ -3902,10 +3833,10 @@ def _run_rebuild_job(new_order_id: int):
 @dashboard_superuser_required
 @require_POST
 def rebuild_server_preserve_link(request, server_id: int):
-    server = Server.objects.select_related('order').filter(id=server_id).first()
-    if not server or not server.order_id:
+    asset = CloudAsset.objects.select_related('order').filter(id=server_id, kind=CloudAsset.KIND_SERVER).first()
+    if not asset or not asset.order_id:
         return _error('服务器不存在或未关联订单', status=404)
-    order, error = create_cloud_server_rebuild_order(server.order_id)
+    order, error = create_cloud_server_rebuild_order(asset.order_id)
     if error:
         return _error(error, status=400)
     thread = threading.Thread(target=_run_rebuild_job, args=(order.id,), daemon=True)
@@ -3968,35 +3899,21 @@ def delete_cloud_asset(request, asset_id: int):
     }
     residual_order_statuses = {'deleted', 'deleting', 'expired', 'cancelled', 'refunded', 'failed'}
 
-    def _looks_like_local_residual(server):
-        provider_status = str(getattr(server, 'provider_status', '') or '')
-        server_note = str(getattr(server, 'note', '') or '')
+    def _looks_like_local_residual(item):
+        provider_status = str(getattr(item, 'provider_status', '') or '')
+        item_note = str(getattr(item, 'note', '') or '')
         asset_provider_status = str(getattr(asset, 'provider_status', '') or '')
         asset_note = str(getattr(asset, 'note', '') or '')
         return (
             asset.status in residual_statuses
-            or server.status in residual_statuses
+            or item.status in residual_statuses
             or (order and order.status in residual_order_statuses)
-            or not getattr(server, 'is_active', True)
+            or not getattr(item, 'is_active', True)
             or '云上未找到' in provider_status
-            or '云上未找到' in server_note
+            or '云上未找到' in item_note
             or '云上未找到' in asset_provider_status
             or '云上未找到' in asset_note
         )
-
-    related_servers = Server.objects.filter(scoped_server_match_for_asset(asset, include_order=True, include_ip=True)).distinct()
-    removed_server_ids = []
-    for server in related_servers:
-        record_cloud_ip_log(
-            event_type='deleted',
-            order=getattr(server, 'order', None),
-            server=server,
-            previous_public_ip=server.public_ip or server.previous_public_ip,
-            public_ip=None,
-            note=f'{note}；已一并清理关联服务器本地状态，后续云同步按全新资源处理',
-        )
-        removed_server_ids.append(server.id)
-        server.delete()
 
     if not CloudIpLog.objects.filter(asset_id=asset.id, event_type=CloudIpLog.EVENT_DELETED, note__contains='后台手动删除代理列表记录').exists():
         record_cloud_ip_log(event_type=CloudIpLog.EVENT_DELETED, order=order, asset=asset, previous_public_ip=previous_public_ip, public_ip=None, note=note)
@@ -4009,8 +3926,8 @@ def delete_cloud_asset(request, asset_id: int):
         'after_status': None,
         'hard_deleted': True,
         'exists_after': CloudAsset.objects.filter(id=asset_id).exists(),
-        'removed_servers': len(removed_server_ids),
-        'removed_server_ids': removed_server_ids,
+        'removed_servers': 0,
+        'removed_server_ids': [],
         'order_status_changed': order_status_changed,
     })
 
@@ -4019,24 +3936,24 @@ def delete_cloud_asset(request, asset_id: int):
 @dashboard_superuser_required
 @require_http_methods(['POST', 'DELETE'])
 def delete_server(request, server_id: int):
-    server = Server.objects.select_related('order').filter(id=server_id).first()
-    if not server:
+    asset = CloudAsset.objects.select_related('order').filter(id=server_id, kind=CloudAsset.KIND_SERVER).first()
+    if not asset:
         return _error('服务器不存在', status=404)
     now = timezone.now()
-    before_status = server.status
+    before_status = asset.status
     note = f'后台手动删除服务器列表记录；时间: {now.isoformat()}'
-    previous_public_ip = server.public_ip or server.previous_public_ip
-    order = server.order
+    previous_public_ip = asset.public_ip or asset.previous_public_ip
+    order = asset.order
 
-    record_cloud_ip_log(event_type='deleted', order=order, server=server, previous_public_ip=previous_public_ip, public_ip=None, note=note)
-    server.delete()
+    record_cloud_ip_log(event_type='deleted', order=order, asset=asset, previous_public_ip=previous_public_ip, public_ip=None, note=note)
+    asset.delete()
     return _ok({
-        'target_type': 'server',
+        'target_type': 'cloud_asset',
         'target_id': server_id,
         'before_status': before_status,
         'after_status': None,
         'hard_deleted': True,
-        'exists_after': Server.objects.filter(id=server_id).exists(),
+        'exists_after': CloudAsset.objects.filter(id=server_id, kind=CloudAsset.KIND_SERVER).exists(),
         'removed_assets': 0,
         'order_status_changed': False,
     })
@@ -4067,16 +3984,16 @@ def servers_statistics(request):
     region_codes = [item['region_code'] for item in region_pairs]
 
     active_statuses = [
-        Server.STATUS_RUNNING,
-        Server.STATUS_PENDING,
-        Server.STATUS_STARTING,
-        Server.STATUS_STOPPED,
-        Server.STATUS_SUSPENDED,
-        Server.STATUS_EXPIRED_GRACE,
+        CloudAsset.STATUS_RUNNING,
+        CloudAsset.STATUS_PENDING,
+        CloudAsset.STATUS_STARTING,
+        CloudAsset.STATUS_STOPPED,
+        CloudAsset.STATUS_SUSPENDED,
+        CloudAsset.STATUS_EXPIRED_GRACE,
     ]
     active_account_labels = _cloud_account_labels_queryset(True)
     inactive_account_labels = _cloud_account_labels_queryset(False)
-    queryset = Server.objects.select_related('order', 'order__cloud_account').filter(status__in=active_statuses).exclude(
+    queryset = CloudAsset.objects.select_related('order', 'order__cloud_account').filter(kind=CloudAsset.KIND_SERVER, status__in=active_statuses).exclude(
         account_label__in=inactive_account_labels,
     ).filter(
         Q(account_label__in=active_account_labels)
@@ -4088,7 +4005,7 @@ def servers_statistics(request):
         queryset = _apply_keyword_filter(
             queryset,
             keyword,
-            ['region_code', 'region_name', 'provider', 'account_label', 'server_name', 'instance_id', 'public_ip'],
+            ['region_code', 'region_name', 'provider', 'account_label', 'asset_name', 'instance_id', 'public_ip'],
         )
     rows = list(
         queryset
@@ -4326,12 +4243,12 @@ def update_cloud_plan(request, plan_id: int):
 
 def _apply_server_missing_state(provider, region, existing_instance_ids, account=None):
     now = timezone.now()
-    queryset = Server.objects.filter(provider=provider, region_code=region).exclude(instance_id__isnull=True).exclude(instance_id='')
+    queryset = CloudAsset.objects.filter(kind=CloudAsset.KIND_SERVER, provider=provider, region_code=region).exclude(instance_id__isnull=True).exclude(instance_id='')
     if account:
         queryset = queryset.filter(account_label__in=cloud_account_label_variants(account))
     legacy_queryset = queryset.filter(provider_status='missing')
     legacy_updated = legacy_queryset.update(
-        status=Server.STATUS_DELETED,
+        status=CloudAsset.STATUS_DELETED,
         provider_status='已删除',
         is_active=False,
         note=Case(
@@ -5032,7 +4949,7 @@ def _cloud_ip_log_payload(item):
         'asset_id': item.asset_id,
         'asset_detail_path': f'/admin/cloud-assets/{item.asset_id}' if item.asset_id else '',
         'detail_path': f'/admin/cloud-orders/{item.order_id}' if item.order_id else (f'/admin/cloud-assets/{item.asset_id}' if item.asset_id else ''),
-        'server_id': item.server_id,
+        'server_id': None,
         'asset_name': item.asset_name,
         'instance_id': item.instance_id,
         'provider_resource_id': item.provider_resource_id,

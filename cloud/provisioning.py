@@ -7,7 +7,7 @@ from django.utils import timezone
 
 from django.db.models import Q
 
-from cloud.models import CloudAsset, Server
+from cloud.models import CloudAsset
 from cloud.note_utils import append_note, prepend_note, with_note_time
 from cloud.services import _cloud_log_trigger_label, _resolve_aws_static_ip_name_for_order, _update_order_primary_records, build_cloud_server_name, drop_asset_note_update, ensure_unique_cloud_server_name, is_cloud_asset_renewal_order, record_cloud_ip_log
 from core.cloud_accounts import choose_cloud_account_for_order, cloud_account_label, list_cloud_accounts_by_server_load
@@ -196,12 +196,12 @@ def _append_cloud_asset_note(existing: str | None, addition: str | None, proxy_l
     return append_note(existing, clean_addition)
 
 
-def _upsert_server_record(order: CloudServerOrder, note: str):
+def _upsert_server_asset(order: CloudServerOrder, note: str):
     try:
         order_user = order.user
     except Exception:
         order_user = None
-    server_record = None
+    server_asset = None
     if order.id:
         same_order_lookup = Q(order=order)
         if order.instance_id:
@@ -209,45 +209,47 @@ def _upsert_server_record(order: CloudServerOrder, note: str):
         if order.provider_resource_id:
             same_order_lookup |= Q(provider_resource_id=order.provider_resource_id)
         if order.server_name:
-            same_order_lookup |= Q(server_name=order.server_name)
-        server_record = (
-            Server.objects.filter(same_order_lookup)
+            same_order_lookup |= Q(asset_name=order.server_name)
+        server_asset = (
+            CloudAsset.objects.filter(kind=CloudAsset.KIND_SERVER).filter(same_order_lookup)
             .filter(Q(order__isnull=True) | Q(order=order))
             .order_by('-updated_at', '-id')
             .first()
         )
-    if not server_record and order.public_ip:
-        server_record = (
-            Server.objects.filter(Q(public_ip=order.public_ip) | Q(previous_public_ip=order.public_ip))
+    if not server_asset and order.public_ip:
+        server_asset = (
+            CloudAsset.objects.filter(kind=CloudAsset.KIND_SERVER).filter(Q(public_ip=order.public_ip) | Q(previous_public_ip=order.public_ip))
             .filter(Q(order__isnull=True) | Q(order=order))
             .order_by('-updated_at', '-id')
             .first()
         )
     defaults = {
-            'source': Server.SOURCE_ORDER,
+            'kind': CloudAsset.KIND_SERVER,
+            'source': CloudAsset.SOURCE_ORDER,
             'provider': order.provider,
+            'cloud_account': order.cloud_account,
             'account_label': order.account_label or order.provider,
             'region_code': order.region_code,
             'region_name': order.region_name,
-            'server_name': order.server_name,
+            'asset_name': order.server_name,
             'instance_id': order.instance_id,
             'provider_resource_id': order.provider_resource_id or order.instance_id,
             'public_ip': order.public_ip,
             'previous_public_ip': order.previous_public_ip,
             'login_user': order.login_user,
             'login_password': order.login_password,
-            'expires_at': order.service_expires_at,
+            'actual_expires_at': order.service_expires_at,
             'order': order,
             'user': order_user,
-            'status': Server.STATUS_RUNNING if order.status in {'completed', 'expiring', 'renew_pending', 'suspended'} else Server.STATUS_PENDING,
+            'status': CloudAsset.STATUS_RUNNING if order.status in {'completed', 'expiring', 'renew_pending', 'suspended'} else CloudAsset.STATUS_PENDING,
             'is_active': order.status in {'provisioning', 'completed', 'expiring', 'renew_pending', 'suspended'},
         }
-    if server_record:
+    if server_asset:
         for key, value in defaults.items():
-            setattr(server_record, key, value)
-        server_record.save()
-        return server_record
-    return Server.objects.create(**defaults)
+            setattr(server_asset, key, value)
+        server_asset.save()
+        return server_asset
+    return CloudAsset.objects.create(**defaults)
 
 
 @sync_to_async
@@ -454,7 +456,7 @@ def _mark_rebuild_source_pending_deletion(order_id: int, replacement_order_id: i
         f'删机时间 {_fmt_dt(before_dates["delete_at"])} -> {_fmt_dt(after_dates["delete_at"])}；'
         f'IP保留到期 {_fmt_dt(before_dates["ip_recycle_at"])} -> {_fmt_dt(after_dates["ip_recycle_at"])}。'
     )
-    record_cloud_ip_log(event_type='changed', order=source, asset=asset, server=server, previous_public_ip=previous_public_ip, public_ip=source_temp_public_ip or replacement.public_ip, note=date_note, trigger_label=action_label)
+    record_cloud_ip_log(event_type='changed', order=source, asset=asset, previous_public_ip=previous_public_ip, public_ip=source_temp_public_ip or replacement.public_ip, note=date_note, trigger_label=action_label)
     return source
 
 
@@ -501,9 +503,8 @@ def _mark_instance_created(order_id: int, server_name: str, instance_id: str, pu
             'is_active': True,
         },
     )
-    server_record = _upsert_server_record(order, current_note)
     trigger_label = _cloud_log_trigger_label(order)
-    record_cloud_ip_log(event_type='created', order=order, asset=server_asset, server=server_record, public_ip=order.public_ip, note=f'{trigger_label}触发创建云端实例：{order.server_name}')
+    record_cloud_ip_log(event_type='created', order=order, asset=server_asset, public_ip=order.public_ip, note=f'{trigger_label}触发创建云端实例：{order.server_name}')
     return order
 
 
@@ -547,8 +548,7 @@ def _mark_provisioning_start(order_id: int, server_name: str):
             'is_active': True,
         },
     )
-    server_record = _upsert_server_record(order, current_note)
-    record_cloud_ip_log(event_type='created', order=order, asset=server_asset, server=server_record, public_ip=order.public_ip, note=f'服务器开始创建：{server_name}')
+    record_cloud_ip_log(event_type='created', order=order, asset=server_asset, public_ip=order.public_ip, note=f'服务器开始创建：{server_name}')
     return order
 
 
@@ -1059,16 +1059,15 @@ def _mark_success(order_id: int, server_name: str, instance_id: str, public_ip: 
                 'is_active': True,
             },
         )
-        server_record = _upsert_server_record(order, compact_note)
+        server_asset = _upsert_server_asset(order, compact_note)
         record_cloud_ip_log(
             event_type='created',
             order=order,
             asset=server_asset,
-            server=server_record,
             public_ip=public_ip,
             note=f'服务器创建并分配IP：{public_ip or "未分配"}',
         )
-        logger.info('[PROVISION] server_asset_saved order=%s asset_id=%s server_record_id=%s expires_at=%s host=%s port=%s link=%s', order.order_no, server_asset.id, getattr(server_record, 'id', None), order.service_expires_at, mtproxy_host or public_ip, order.mtproxy_port, mtproxy_link)
+        logger.info('[PROVISION] server_asset_saved order=%s asset_id=%s expires_at=%s host=%s port=%s link=%s', order.order_no, server_asset.id, order.service_expires_at, mtproxy_host or public_ip, order.mtproxy_port, mtproxy_link)
     except Exception as exc:
         logger.exception('[PROVISION] asset_sync_failed order=%s error=%s', order.order_no, exc)
     return order
@@ -1084,13 +1083,13 @@ def _mark_failed(order_id: int, note: str, cleanup_at=None):
     if cleanup_at and (order.server_name or order.instance_id):
         CloudServerOrder.objects.filter(id=order.id).update(delete_at=cleanup_at, updated_at=timezone.now())
         order.delete_at = cleanup_at
-    server_record = _upsert_server_record(order, note)
+    server_asset = _upsert_server_asset(order, note)
     _update_order_primary_records(
         order,
         asset_updates=drop_asset_note_update({'note': note, 'status': CloudAsset.STATUS_UNKNOWN, 'is_active': False}),
-        server_updates=drop_asset_note_update({'note': note, 'status': Server.STATUS_UNKNOWN, 'is_active': False}),
+        server_updates=drop_asset_note_update({'note': note, 'status': CloudAsset.STATUS_UNKNOWN, 'is_active': False}),
         now=timezone.now(),
     )
-    logger.info('[PROVISION] failed_server_record_synced order=%s server_record_id=%s', order.order_no, getattr(server_record, 'id', None))
+    logger.info('[PROVISION] failed_server_asset_synced order=%s asset_id=%s', order.order_no, getattr(server_asset, 'id', None))
     logger.info('[PROVISION] mark_failed_done order=%s status=%s', order.order_no, order.status)
     return order

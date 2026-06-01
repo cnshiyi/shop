@@ -29,9 +29,10 @@ from django.views.decorators.http import require_GET, require_POST
 
 from bot.models import BotOperationLog, TelegramChatArchive, TelegramChatMessage, TelegramGroupFilter, TelegramLoginAccount, TelegramUser
 from bot.services import _get_or_create_user_sync
-from cloud.lifecycle import _delete_instance, _delete_orphan_asset_instance, _get_due_orders, _get_orphan_asset_delete_due, _is_cloud_delete_safe_time, _is_cloud_unattached_ip_delete_time, _mark_deleted, _mark_orphan_asset_deleted, _mark_unattached_static_ip_deleted, _orphan_asset_server_delete_blocked_until, _record_lifecycle_action_failed, _release_unattached_static_ip, _shutdown_enabled_for_order, cloud_ip_delete_enabled, cloud_server_delete_enabled
-from cloud.models import AddressMonitor, CloudAsset, CloudIpLog, CloudLifecyclePlan, CloudLifecyclePlanNote, CloudServerOrder, Server
-from cloud.services import scoped_server_match_for_asset
+from cloud.lifecycle import _shutdown_enabled_for_order
+from cloud.lifecycle_execution import run_orphan_asset_delete, run_shutdown_order_delete, run_unattached_ip_release
+from cloud.lifecycle_schedule import compute_order_lifecycle_schedule, compute_unattached_ip_release_at
+from cloud.models import AddressMonitor, CloudAsset, CloudIpLog, CloudLifecyclePlan, CloudLifecyclePlanNote, CloudServerOrder
 from cloud.sync_safety import missing_confirmation_state
 from core.cloud_accounts import cloud_account_label, cloud_account_label_variants
 from core.models import CloudAccountConfig, SiteConfig
@@ -269,30 +270,12 @@ def _runtime_time(key: str, default: str = '15:00') -> tuple[int, int]:
     return _parse_runtime_time_point(raw, default)
 
 
-def _with_runtime_time(value, key: str, default: str = '15:00'):
-    if not value:
-        return None
-    hour, minute = _runtime_time(key, default)
-    local_value = timezone.localtime(value) if timezone.is_aware(value) else value
-    local_value = local_value.replace(hour=hour, minute=minute, second=0, microsecond=0)
-    return local_value if timezone.is_aware(local_value) else timezone.make_aware(local_value, timezone.get_current_timezone())
-
-
 def _server_asset_lifecycle_times(asset):
     expires_at = getattr(asset, 'actual_expires_at', None)
     if not expires_at:
         return None, None, None
-    suspend_at = _with_runtime_time(
-        expires_at + timezone.timedelta(days=_runtime_int('cloud_suspend_after_days', 3)),
-        'cloud_suspend_time',
-    )
-    delete_at = _with_runtime_time(
-        suspend_at + timezone.timedelta(days=_runtime_int('cloud_delete_after_days', 0)),
-        'cloud_delete_time',
-    )
-    if delete_at and suspend_at and delete_at < suspend_at:
-        delete_at = suspend_at
-    return expires_at, suspend_at, delete_at
+    schedule = compute_order_lifecycle_schedule(expires_at)
+    return expires_at, schedule.suspend_at, schedule.delete_at
 
 
 def _next_runtime_time(key: str, default: str = '15:00', now=None):
@@ -672,12 +655,7 @@ def _asset_display_note(asset, *, fallback: str = '', max_chars: int = 500) -> s
 
 
 def _sync_asset_note_to_server(asset):
-    if not asset:
-        return 0
-    return Server.objects.filter(scoped_server_match_for_asset(asset, include_order=True)).update(
-        note=_asset_note_text(asset) or None,
-        updated_at=timezone.now(),
-    )
+    return 0
 
 
 def _lifecycle_plan_note_scope(item_type='', *, order_id=None, asset_id=None):
@@ -1185,8 +1163,6 @@ def _cloud_ip_trace_from_maps(asset, trace_maps):
 
 def _shutdown_log_items(limit=100):
     cutoff = timezone.now() - timezone.timedelta(days=7)
-    suspend_days = _runtime_int('cloud_suspend_after_days', 3)
-    delete_days = _runtime_int('cloud_delete_after_days', 0)
 
     items = []
     assets = list(
@@ -1215,10 +1191,9 @@ def _shutdown_log_items(limit=100):
             suspend_at = order.suspend_at
             delete_at = order.delete_at
         else:
-            suspend_at = _with_runtime_time(expires_at + timezone.timedelta(days=suspend_days), 'cloud_suspend_time')
-            delete_at = _with_runtime_time(suspend_at + timezone.timedelta(days=delete_days), 'cloud_delete_time')
-            if delete_at and suspend_at and delete_at < suspend_at:
-                delete_at = suspend_at
+            schedule = compute_order_lifecycle_schedule(expires_at)
+            suspend_at = schedule.suspend_at
+            delete_at = schedule.delete_at
         status = trace.event_type if trace else asset.status
         status_label = _status_label(status, CloudIpLog.EVENT_CHOICES if trace else CloudAsset.STATUS_CHOICES)
         is_terminal_failure = asset.status in {CloudAsset.STATUS_UNKNOWN, CloudAsset.STATUS_DELETED, CloudAsset.STATUS_TERMINATED}
@@ -1661,7 +1636,6 @@ def _dedupe_ip_delete_items_by_ip(items: list[dict]) -> list[dict]:
 def _unattached_ip_delete_items(limit=50, assets=None):
     now = timezone.now()
     limit = max(1, min(int(limit or 50), 1000))
-    delete_days = _runtime_int('cloud_unattached_ip_delete_after_days', 15)
     if assets is None:
         assets = list(
             _active_cloud_asset_queryset()
@@ -1688,7 +1662,7 @@ def _unattached_ip_delete_items(limit=50, assets=None):
             delete_at = asset.actual_expires_at
         else:
             base_at = asset.updated_at or asset.created_at or now
-            delete_at = _with_runtime_time(base_at + timezone.timedelta(days=delete_days), 'cloud_unattached_ip_delete_time')
+            delete_at = compute_unattached_ip_release_at(base_at)
         trace = _cloud_ip_trace_from_maps(asset, trace_maps)
         trace_note = ''
         if trace:
@@ -3218,50 +3192,7 @@ def update_lifecycle_plan_note(request):
 
 
 def _run_shutdown_order_sync(order_id: int, queue_status='manual_single', enforce_schedule: bool = True):
-    order = CloudServerOrder.objects.select_related('user', 'cloud_account').filter(id=order_id).first()
-    if not order:
-        return {'order_id': order_id, 'order_no': '', 'ip': '', 'queue_status': queue_status, 'ok': False, 'error': '订单不存在'}
-    ip = order.public_ip or order.previous_public_ip or '未分配'
-    now = timezone.now()
-    if order.status not in {'suspended', 'deleting', 'failed'}:
-        reason = f'当前状态为 {_status_label(order.status, CloudServerOrder.STATUS_CHOICES)}，未进入服务器删除阶段'
-        async_to_sync(_record_lifecycle_action_failed)(order.id, 'delete_skipped', reason)
-        return {'order_id': order.id, 'order_no': order.order_no, 'ip': ip, 'queue_status': queue_status, 'ok': False, 'error': reason}
-    if order.provider == 'aliyun_simple':
-        reason = '阿里云轻量服务器当前未接入删除 API，本系统只执行创建、续费和状态同步；不会执行真实删机。'
-        async_to_sync(_record_lifecycle_action_failed)(order.id, 'delete_skipped', reason)
-        return {'order_id': order.id, 'order_no': order.order_no, 'ip': ip, 'queue_status': queue_status, 'ok': False, 'error': reason}
-    if not cloud_server_delete_enabled():
-        reason = '删除服务器总开关已关闭，跳过真实删机。'
-        async_to_sync(_record_lifecycle_action_failed)(order.id, 'delete_skipped', reason)
-        return {'order_id': order.id, 'order_no': order.order_no, 'ip': ip, 'queue_status': queue_status, 'ok': False, 'error': reason}
-    if enforce_schedule and not _shutdown_enabled_for_order(order):
-        reason = '云账号关机计划已关闭，跳过真实删机。'
-        async_to_sync(_record_lifecycle_action_failed)(order.id, 'delete_skipped', reason)
-        return {'order_id': order.id, 'order_no': order.order_no, 'ip': ip, 'queue_status': queue_status, 'ok': False, 'error': reason}
-    if enforce_schedule:
-        if not order.delete_at:
-            reason = '订单没有计划删机时间，跳过真实删机。'
-            async_to_sync(_record_lifecycle_action_failed)(order.id, 'delete_skipped', reason)
-            return {'order_id': order.id, 'order_no': order.order_no, 'ip': ip, 'queue_status': queue_status, 'ok': False, 'error': reason}
-        if order.delete_at and order.delete_at > now:
-            reason = f'服务器删除时间未到：{timezone.localtime(order.delete_at).strftime("%Y-%m-%d %H:%M:%S")}'
-            async_to_sync(_record_lifecycle_action_failed)(order.id, 'delete_skipped', reason)
-            return {'order_id': order.id, 'order_no': order.order_no, 'ip': ip, 'queue_status': queue_status, 'ok': False, 'error': reason}
-        if not _is_cloud_delete_safe_time(now):
-            reason = '当前不在后台配置的服务器删除执行时间窗口'
-            async_to_sync(_record_lifecycle_action_failed)(order.id, 'delete_skipped', reason)
-            return {'order_id': order.id, 'order_no': order.order_no, 'ip': ip, 'queue_status': queue_status, 'ok': False, 'error': reason}
-    ok, note = async_to_sync(_delete_instance)(order)
-    if ok:
-        if not enforce_schedule or str(queue_status or '').startswith('manual'):
-            note = _with_delete_source(note, '人工手动删除')
-        else:
-            note = _with_delete_source(note, '到期自动删除')
-        async_to_sync(_mark_deleted)(order.id, note)
-        return {'order_id': order.id, 'order_no': order.order_no, 'ip': ip, 'queue_status': queue_status, 'ok': True, 'error': None}
-    async_to_sync(_record_lifecycle_action_failed)(order.id, 'delete_failed', note)
-    return {'order_id': order.id, 'order_no': order.order_no, 'ip': ip, 'queue_status': queue_status, 'ok': False, 'error': note}
+    return run_shutdown_order_delete(order_id, queue_status=queue_status, enforce_schedule=enforce_schedule)
 
 
 @csrf_exempt
@@ -3281,35 +3212,7 @@ def run_shutdown_plan_order(request, order_id):
 
 
 def _run_orphan_asset_delete_sync(asset_id: int, enforce_schedule: bool = True):
-    asset = CloudAsset.objects.select_related('cloud_account', 'order').filter(id=asset_id).first()
-    if not asset:
-        return {'asset_id': asset_id, 'ip': '', 'ok': False, 'error': '服务器资产不存在'}
-    ip = asset.public_ip or asset.previous_public_ip or ''
-    now = timezone.now()
-    if asset.status in {CloudAsset.STATUS_DELETED, CloudAsset.STATUS_DELETING, CloudAsset.STATUS_TERMINATED, CloudAsset.STATUS_TERMINATING}:
-        return {'asset_id': asset.id, 'ip': ip, 'ok': False, 'error': '该服务器资产已删除，不需要重复执行'}
-    if asset.provider == 'aliyun_simple':
-        return {'asset_id': asset.id, 'ip': ip, 'ok': False, 'error': '阿里云轻量服务器当前未接入删除 API，本系统不会执行真实删机。'}
-    if not cloud_server_delete_enabled():
-        return {'asset_id': asset.id, 'ip': ip, 'ok': False, 'error': '删除服务器总开关已关闭，跳过真实删机。'}
-    if enforce_schedule and not _asset_shutdown_enabled(asset):
-        return {'asset_id': asset.id, 'ip': ip, 'ok': False, 'error': '云账号关机计划已关闭，跳过真实删机。'}
-    if _asset_is_unattached_ip(asset) or not str(asset.instance_id or asset.provider_resource_id or asset.asset_name or '').strip():
-        return {'asset_id': asset.id, 'ip': ip, 'ok': False, 'error': '该资产不是可删服务器，请走未附加 IP 删除'}
-    if enforce_schedule:
-        if not asset.actual_expires_at:
-            return {'asset_id': asset.id, 'ip': ip, 'ok': False, 'error': '服务器没有计划删除时间，跳过真实删机。'}
-        blocked_until = _orphan_asset_server_delete_blocked_until(asset, now=now)
-        if blocked_until:
-            return {'asset_id': asset.id, 'ip': ip, 'ok': False, 'error': f'未到服务器删除时间：{timezone.localtime(blocked_until).strftime("%Y-%m-%d %H:%M:%S")}'}
-        if not _is_cloud_delete_safe_time(now):
-            return {'asset_id': asset.id, 'ip': ip, 'ok': False, 'error': '当前不在后台配置的服务器删除执行时间窗口'}
-    ok, note = async_to_sync(_delete_orphan_asset_instance)(asset)
-    if ok:
-        note = _with_delete_source(note, '人工手动删除' if not enforce_schedule else '到期自动删除')
-        async_to_sync(_mark_orphan_asset_deleted)(asset.id, note)
-        return {'asset_id': asset.id, 'ip': ip, 'ok': True, 'error': None}
-    return {'asset_id': asset.id, 'ip': ip, 'ok': False, 'error': note}
+    return run_orphan_asset_delete(asset_id, enforce_schedule=enforce_schedule)
 
 
 @csrf_exempt
@@ -3329,32 +3232,7 @@ def run_orphan_asset_delete_plan(request, asset_id):
 
 
 def _run_unattached_ip_delete_sync(asset_id: int, enforce_schedule: bool = True):
-    asset = CloudAsset.objects.select_related('cloud_account').filter(id=asset_id).first()
-    if not asset:
-        return {'asset_id': asset_id, 'ip': '', 'ok': False, 'error': 'IP 资产不存在'}
-    ip = asset.public_ip or asset.previous_public_ip or ''
-    now = timezone.now()
-    if asset.status in {CloudAsset.STATUS_DELETED, CloudAsset.STATUS_DELETING, CloudAsset.STATUS_TERMINATED, CloudAsset.STATUS_TERMINATING}:
-        return {'asset_id': asset.id, 'ip': ip, 'ok': False, 'error': '该 IP 已删除，不需要重复执行'}
-    if not cloud_ip_delete_enabled():
-        return {'asset_id': asset.id, 'ip': ip, 'ok': False, 'error': '删除IP总开关已关闭，跳过真实释放固定 IP。'}
-    if enforce_schedule and not _asset_shutdown_enabled(asset):
-        return {'asset_id': asset.id, 'ip': ip, 'ok': False, 'error': '云账号关机计划已关闭，跳过真实释放固定 IP。'}
-    if asset.instance_id:
-        return {'asset_id': asset.id, 'ip': ip, 'ok': False, 'error': '该 IP 仍有关联实例，不能按未附加 IP 删除'}
-    if enforce_schedule:
-        if not asset.actual_expires_at:
-            return {'asset_id': asset.id, 'ip': ip, 'ok': False, 'error': 'IP 没有计划删除时间，跳过真实释放固定 IP。'}
-        if asset.actual_expires_at and asset.actual_expires_at > now:
-            return {'asset_id': asset.id, 'ip': ip, 'ok': False, 'error': f'未到 IP 删除时间：{timezone.localtime(asset.actual_expires_at).strftime("%Y-%m-%d %H:%M:%S")}' }
-        if not _is_cloud_unattached_ip_delete_time(now):
-            return {'asset_id': asset.id, 'ip': ip, 'ok': False, 'error': '当前不在后台配置的 IP 删除执行时间窗口'}
-    ok, note = async_to_sync(_release_unattached_static_ip)(asset)
-    if ok:
-        note = _with_delete_source(note, '人工手动删除' if not enforce_schedule else '到期自动删除')
-        async_to_sync(_mark_unattached_static_ip_deleted)(asset.id, note)
-        return {'asset_id': asset.id, 'ip': ip, 'ok': True, 'error': None}
-    return {'asset_id': asset.id, 'ip': ip, 'ok': False, 'error': note}
+    return run_unattached_ip_release(asset_id, enforce_schedule=enforce_schedule)
 
 
 @csrf_exempt

@@ -415,8 +415,8 @@ class CloudServerServicesTestCase(TestCase):
             delete_at=timezone.now() + timezone.timedelta(days=1),
         )
         with patch('bot.api._is_cloud_delete_safe_time', return_value=False) as safe_time, \
-            patch('bot.api._delete_instance', new=AsyncMock(return_value=(True, 'manual delete ok'))), \
-            patch('bot.api._mark_deleted', new=AsyncMock()):
+            patch('cloud.lifecycle._delete_instance', new=AsyncMock(return_value=(True, 'manual delete ok'))), \
+            patch('cloud.lifecycle._mark_deleted', new=AsyncMock()):
             result = _run_shutdown_order_sync(order.id, enforce_schedule=False)
 
         self.assertTrue(result['ok'])
@@ -446,8 +446,8 @@ class CloudServerServicesTestCase(TestCase):
         )
         original_asset_id = asset.id
         with patch('bot.api._is_cloud_delete_safe_time', return_value=False) as safe_time, \
-            patch('bot.api._delete_orphan_asset_instance', new=AsyncMock(return_value=(True, 'manual asset delete ok'))), \
-            patch('bot.api._mark_orphan_asset_deleted', new=AsyncMock()):
+            patch('cloud.lifecycle._delete_orphan_asset_instance', new=AsyncMock(return_value=(True, 'manual asset delete ok'))), \
+            patch('cloud.lifecycle._mark_orphan_asset_deleted', new=AsyncMock()):
             result = _run_orphan_asset_delete_sync(asset.id, enforce_schedule=False)
 
         self.assertTrue(result['ok'])
@@ -476,7 +476,7 @@ class CloudServerServicesTestCase(TestCase):
             provider_status='未附加固定IP',
             is_active=False,
         )
-        with patch('bot.api._release_unattached_static_ip', new=AsyncMock(return_value=(True, 'manual release ok'))):
+        with patch('cloud.lifecycle._release_unattached_static_ip', new=AsyncMock(return_value=(True, 'manual release ok'))):
             result = _run_unattached_ip_delete_sync(asset.id, enforce_schedule=False)
 
         asset.refresh_from_db()
@@ -552,7 +552,7 @@ class CloudServerServicesTestCase(TestCase):
             status=CloudAsset.STATUS_DELETING,
             is_active=True,
         )
-        with patch('bot.api._delete_instance', new=AsyncMock(return_value=(True, 'manual server delete ok'))):
+        with patch('cloud.lifecycle._delete_instance', new=AsyncMock(return_value=(True, 'manual server delete ok'))):
             result = _run_shutdown_order_sync(order.id, enforce_schedule=False)
 
         self.assertTrue(result['ok'])
@@ -652,7 +652,7 @@ class CloudServerServicesTestCase(TestCase):
         request = self.factory.post(f'/api/admin/tasks/plans/orders/{order.id}/run/')
         request.user = staff_user
 
-        with patch('bot.api._delete_instance', new=AsyncMock()) as delete_mock:
+        with patch('cloud.lifecycle._delete_instance', new=AsyncMock()) as delete_mock:
             response = run_shutdown_plan_order(request, order.id)
 
         data = json.loads(response.content)['data']
@@ -692,7 +692,7 @@ class CloudServerServicesTestCase(TestCase):
         request = self.factory.post(f'/api/admin/tasks/plans/orphan-assets/{asset.id}/run/')
         request.user = staff_user
 
-        with patch('bot.api._delete_orphan_asset_instance', new=AsyncMock()) as delete_mock:
+        with patch('cloud.lifecycle._delete_orphan_asset_instance', new=AsyncMock()) as delete_mock:
             response = run_orphan_asset_delete_plan(request, asset.id)
 
         data = json.loads(response.content)['data']
@@ -729,7 +729,7 @@ class CloudServerServicesTestCase(TestCase):
         request = self.factory.post(f'/api/admin/tasks/plans/unattached-ips/{asset.id}/run/')
         request.user = staff_user
 
-        with patch('bot.api._release_unattached_static_ip', new=AsyncMock()) as release_mock:
+        with patch('cloud.lifecycle._release_unattached_static_ip', new=AsyncMock()) as release_mock:
             response = run_unattached_ip_delete_plan(request, asset.id)
 
         data = json.loads(response.content)['data']
@@ -767,7 +767,7 @@ class CloudServerServicesTestCase(TestCase):
         request.user = staff_user
 
         with patch('bot.api._is_cloud_unattached_ip_delete_time', return_value=False) as safe_time, \
-            patch('bot.api._release_unattached_static_ip', new=AsyncMock()) as release_mock:
+            patch('cloud.lifecycle._release_unattached_static_ip', new=AsyncMock()) as release_mock:
             response = run_unattached_ip_delete_plan(request, asset.id)
 
         data = json.loads(response.content)['data']
@@ -6962,7 +6962,7 @@ class CloudServerServicesTestCase(TestCase):
             status=CloudAsset.STATUS_DELETING,
             is_active=True,
         )
-        with patch('bot.api._delete_instance', new=AsyncMock(return_value=(True, 'manual lifecycle delete ok'))):
+        with patch('cloud.lifecycle._delete_instance', new=AsyncMock(return_value=(True, 'manual lifecycle delete ok'))):
             result = _run_shutdown_order_sync(order.id, enforce_schedule=False)
 
         self.assertTrue(result['ok'])

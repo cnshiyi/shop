@@ -10,7 +10,8 @@ from cloud.models import CloudAsset, CloudServerOrder, Server
 from cloud.aliyun_simple import _build_client, _region_endpoint, _runtime_options
 from core.cloud_accounts import cloud_account_label, cloud_account_label_variants, list_active_cloud_accounts
 from core.persistence import record_external_sync_log
-from cloud.services import _cloud_order_lifecycle_fields, record_cloud_ip_log, sync_cloud_asset_user_binding
+from cloud.lifecycle_schedule import compute_order_lifecycle_fields
+from cloud.services import record_cloud_ip_log, sync_cloud_asset_user_binding
 
 
 _ACTIVE_ORDER_STATUSES = {'pending', 'provisioning', 'completed', 'expiring', 'renew_pending', 'suspended', 'deleting'}
@@ -220,7 +221,7 @@ def _aliyun_order_updates_from_sync(linked_order, *, normalized_status, expires_
     if expires_at:
         expiry_changed = linked_order.service_expires_at != expires_at
         order_updates['service_expires_at'] = expires_at
-        order_updates.update(_cloud_order_lifecycle_fields(expires_at))
+        order_updates.update(compute_order_lifecycle_fields(expires_at))
         if expiry_changed:
             order_updates.update({
                 'renew_notice_sent_at': None,

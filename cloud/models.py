@@ -1,41 +1,15 @@
 """cloud 域模型。"""
 
 import uuid
-from datetime import timezone as dt_timezone
+from copy import copy
 from decimal import Decimal
 
 from django.conf import settings
 from django.db import models
+from django.db.models import Q
 from django.utils import timezone
 
-
-def _runtime_int_config(key: str, default: int) -> int:
-    try:
-        from core.runtime_config import get_runtime_config
-        value = int(str(get_runtime_config(key, str(default)) or default).strip())
-        return max(value, 0)
-    except Exception:
-        return default
-
-
-def _runtime_time_config(key: str, default: str = '15:00') -> tuple[int, int]:
-    try:
-        from core.runtime_config import get_runtime_config
-        raw = str(get_runtime_config(key, default) or default).strip()
-        hour_text, minute_text = raw.split(':', 1)
-        hour = min(max(int(hour_text), 0), 23)
-        minute = min(max(int(minute_text), 0), 59)
-        return hour, minute
-    except Exception:
-        hour_text, minute_text = default.split(':', 1)
-        return int(hour_text), int(minute_text)
-
-
-def _with_runtime_time(value, key: str, default: str = '15:00'):
-    hour, minute = _runtime_time_config(key, default)
-    local_value = timezone.localtime(value) if timezone.is_aware(value) else value
-    local_value = local_value.replace(hour=hour, minute=minute, second=0, microsecond=0)
-    return local_value.astimezone(dt_timezone.utc) if timezone.is_aware(local_value) else local_value
+from cloud.lifecycle_schedule import compute_order_lifecycle_schedule, normalize_service_expiry
 
 
 class CloudServerPlan(models.Model):
@@ -219,13 +193,7 @@ class CloudServerOrder(models.Model):
 
     @staticmethod
     def normalize_expiry_time(value):
-        if not value:
-            return value
-        local_value = timezone.localtime(value) if timezone.is_aware(value) else value
-        if local_value.hour == 0 and local_value.minute == 0 and local_value.second == 0 and local_value.microsecond == 0:
-            local_value = local_value.replace(hour=15)
-            return local_value.astimezone(dt_timezone.utc) if timezone.is_aware(local_value) else timezone.make_aware(local_value, timezone.get_current_timezone()).astimezone(dt_timezone.utc)
-        return value
+        return normalize_service_expiry(value)
 
     def save(self, *args, **kwargs):
         requested_update_fields = kwargs.get('update_fields')
@@ -242,15 +210,12 @@ class CloudServerOrder(models.Model):
             self.service_expires_at = self.service_started_at + timezone.timedelta(days=self.lifecycle_days)
         self.service_expires_at = self.normalize_expiry_time(self.service_expires_at)
         if self.service_expires_at:
-            suspend_days = _runtime_int_config('cloud_suspend_after_days', 3)
-            delete_days = _runtime_int_config('cloud_delete_after_days', 0)
-            self.suspend_at = _with_runtime_time(self.service_expires_at + timezone.timedelta(days=suspend_days), 'cloud_suspend_time')
-            self.renew_grace_expires_at = self.suspend_at
-            self.delete_at = _with_runtime_time(self.suspend_at + timezone.timedelta(days=delete_days), 'cloud_delete_time')
-            if self.delete_at < self.suspend_at:
-                self.delete_at = self.suspend_at
+            schedule = compute_order_lifecycle_schedule(self.service_expires_at)
+            self.suspend_at = schedule.suspend_at
+            self.renew_grace_expires_at = schedule.renew_grace_expires_at
+            self.delete_at = schedule.delete_at
             if not preserve_unattached_ip_recycle_at:
-                self.ip_recycle_at = self.delete_at + timezone.timedelta(days=_runtime_int_config('cloud_unattached_ip_delete_after_days', 15))
+                self.ip_recycle_at = schedule.ip_recycle_at
         if requested_update_fields is not None:
             update_fields = set(requested_update_fields)
             if self.completed_at and 'completed_at' in update_fields:
@@ -356,8 +321,103 @@ class CloudAsset(models.Model):
     def __str__(self):
         return self.asset_name or self.instance_id or self.public_ip or f'asset-{self.pk}'
 
+    @property
+    def server_name(self):
+        return self.asset_name
 
-class Server(models.Model):
+    @server_name.setter
+    def server_name(self, value):
+        self.asset_name = value
+
+    @property
+    def expires_at(self):
+        return self.actual_expires_at
+
+    @expires_at.setter
+    def expires_at(self, value):
+        self.actual_expires_at = value
+
+
+def _server_lookup_key(key: str) -> str:
+    if key == 'server_name' or key.startswith('server_name__'):
+        return 'asset_name' + key[len('server_name'):]
+    if key == 'expires_at' or key.startswith('expires_at__'):
+        return 'actual_expires_at' + key[len('expires_at'):]
+    return key
+
+
+def _server_payload_kwargs(kwargs: dict | None) -> dict:
+    return {_server_lookup_key(key): value for key, value in dict(kwargs or {}).items()}
+
+
+def _server_payload_ordering(fields):
+    result = []
+    for field in fields:
+        prefix = '-' if str(field).startswith('-') else ''
+        name = str(field)[1:] if prefix else str(field)
+        result.append(prefix + _server_lookup_key(name))
+    return result
+
+
+def _server_payload_q(node):
+    mapped = copy(node)
+    children = []
+    for child in node.children:
+        if isinstance(child, Q):
+            children.append(_server_payload_q(child))
+        elif isinstance(child, tuple) and len(child) == 2:
+            children.append((_server_lookup_key(child[0]), child[1]))
+        else:
+            children.append(child)
+    mapped.children = children
+    return mapped
+
+
+class _ServerCompatManager:
+    def _queryset(self):
+        return CloudAsset.objects.filter(kind=CloudAsset.KIND_SERVER)
+
+    def _args(self, args):
+        return [_server_payload_q(arg) if isinstance(arg, Q) else arg for arg in args]
+
+    def all(self):
+        return self._queryset()
+
+    def filter(self, *args, **kwargs):
+        return self._queryset().filter(*self._args(args), **_server_payload_kwargs(kwargs))
+
+    def exclude(self, *args, **kwargs):
+        return self._queryset().exclude(*self._args(args), **_server_payload_kwargs(kwargs))
+
+    def order_by(self, *fields):
+        return self._queryset().order_by(*_server_payload_ordering(fields))
+
+    def select_related(self, *fields):
+        return self._queryset().select_related(*fields)
+
+    def count(self):
+        return self._queryset().count()
+
+    def get(self, *args, **kwargs):
+        return self.filter(*args, **kwargs).get()
+
+    def create(self, **kwargs):
+        data = _server_payload_kwargs(kwargs)
+        data.setdefault('kind', CloudAsset.KIND_SERVER)
+        data.setdefault('currency', 'USDT')
+        return CloudAsset.objects.create(**data)
+
+    def update_or_create(self, defaults=None, **kwargs):
+        return CloudAsset.objects.update_or_create(
+            defaults=_server_payload_kwargs(defaults or {}),
+            **_server_payload_kwargs(kwargs),
+        )
+
+    def __getattr__(self, name):
+        return getattr(self._queryset(), name)
+
+
+class Server:
     STATUS_RUNNING = CloudAsset.STATUS_RUNNING
     STATUS_PENDING = CloudAsset.STATUS_PENDING
     STATUS_STARTING = CloudAsset.STATUS_STARTING
@@ -385,37 +445,7 @@ class Server(models.Model):
         (SOURCE_ORDER, '订单创建'),
     )
 
-    source = models.CharField('来源', max_length=32, choices=SOURCE_CHOICES, default=SOURCE_ORDER, db_index=True)
-    provider = models.CharField('云厂商', max_length=32, blank=True, null=True, db_index=True)
-    account_label = models.CharField('账户/来源标识', max_length=191, blank=True, null=True, db_index=True)
-    region_code = models.CharField('地区代码', max_length=64, blank=True, null=True, db_index=True)
-    region_name = models.CharField('地区名称', max_length=128, blank=True, null=True)
-    server_name = models.CharField('服务器名称', max_length=191, blank=True, null=True, db_index=True)
-    instance_id = models.CharField('实例ID', max_length=191, blank=True, null=True, db_index=True)
-    provider_resource_id = models.CharField('云资源ID', max_length=191, blank=True, null=True, db_index=True)
-    public_ip = models.CharField('公网IP', max_length=128, blank=True, null=True, db_index=True)
-    previous_public_ip = models.CharField('历史公网IP', max_length=128, blank=True, null=True)
-    login_user = models.CharField('登录账号', max_length=64, blank=True, null=True)
-    login_password = models.CharField('登录密码', max_length=191, blank=True, null=True)
-    expires_at = models.DateTimeField('到期时间', blank=True, null=True, db_index=True)
-    order = models.ForeignKey('cloud.CloudServerOrder', verbose_name='关联订单', on_delete=models.SET_NULL, blank=True, null=True)
-    user = models.ForeignKey('bot.TelegramUser', verbose_name='绑定用户', on_delete=models.SET_NULL, blank=True, null=True)
-    note = models.TextField('备注', blank=True, null=True)
-    sort_order = models.IntegerField('排序', default=99, db_index=True)
-    status = models.CharField('状态', max_length=32, choices=STATUS_CHOICES, default=CloudAsset.STATUS_RUNNING, db_index=True)
-    provider_status = models.CharField('云厂商原始状态', max_length=64, blank=True, null=True, db_index=True)
-    is_active = models.BooleanField('有效', default=True, db_index=True)
-    created_at = models.DateTimeField('创建时间', auto_now_add=True)
-    updated_at = models.DateTimeField('更新时间', auto_now=True)
-
-    class Meta:
-        db_table = 'cloud_server'
-        verbose_name = '服务器'
-        verbose_name_plural = '服务器'
-        ordering = ['expires_at', '-updated_at', '-id']
-
-    def __str__(self):
-        return self.server_name or self.instance_id or self.public_ip or f'server-{self.pk}'
+    objects = _ServerCompatManager()
 
 
 class CloudIpLog(models.Model):
@@ -438,7 +468,6 @@ class CloudIpLog(models.Model):
 
     order = models.ForeignKey('cloud.CloudServerOrder', verbose_name='关联订单', on_delete=models.SET_NULL, blank=True, null=True, related_name='ip_logs')
     asset = models.ForeignKey('cloud.CloudAsset', verbose_name='关联资产', on_delete=models.SET_NULL, blank=True, null=True, related_name='ip_logs')
-    server = models.ForeignKey('cloud.Server', verbose_name='关联服务器', on_delete=models.SET_NULL, blank=True, null=True, related_name='ip_logs')
     user = models.ForeignKey('bot.TelegramUser', verbose_name='关联用户', on_delete=models.SET_NULL, blank=True, null=True, related_name='cloud_ip_logs')
     provider = models.CharField('云厂商', max_length=32, blank=True, null=True, db_index=True)
     region_code = models.CharField('地区代码', max_length=64, blank=True, null=True, db_index=True)

@@ -52,7 +52,7 @@
 - `server_prices` / `mall_serverprice` → `cloud_price`
 - `cloud_server_orders` / `mall_cloudserverorder` → `cloud_order`
 - `cloud_assets` / `mall_cloudasset` → `cloud_asset`
-- `servers` / `mall_server` → `cloud_server`
+- `servers` / `mall_server` → `cloud_asset`（`Server` 仅保留为指向 `cloud_asset` 的兼容投影）
 - `address_monitors` / `monitoring_addressmonitor` → `cloud_address_monitor`
 - `daily_address_stats` / `monitoring_dailyaddressstat` → `cloud_address_stat_daily`
 - `resource_snapshots` / `monitoring_resourcesnapshot` → `cloud_resource_snapshot`
@@ -104,7 +104,7 @@
 - [x] `server_prices` → `cloud_price`
 - [x] `cloud_server_orders` → `cloud_order`
 - [x] `cloud_assets` → `cloud_asset`
-- [x] `servers` → `cloud_server`
+- [x] `servers` → `cloud_asset`（已删除独立 `cloud_server` 表）
 
 #### 批次 D/E 进行中
 - [x] `address_monitors` → `cloud_address_monitor`

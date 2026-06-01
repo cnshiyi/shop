@@ -7,7 +7,8 @@ from django.utils import timezone
 from bot.api import _provider_status_label
 from core.cloud_accounts import cloud_account_label, cloud_account_label_variants, list_active_cloud_accounts
 from core.persistence import record_external_sync_log
-from cloud.models import CloudAsset, CloudServerOrder, Server, _runtime_int_config, _with_runtime_time
+from cloud.lifecycle_schedule import compute_unattached_ip_release_at, runtime_int_config
+from cloud.models import CloudAsset, CloudServerOrder, Server
 from cloud.note_utils import append_note
 from cloud.services import record_cloud_ip_log, sync_cloud_asset_user_binding
 
@@ -1235,10 +1236,7 @@ class Command(BaseCommand):
                     location = item.get('location') or {}
                     provider_status = '未附加固定IP'
                     discovered_at = timezone.now()
-                    recycle_due_at = _with_runtime_time(
-                        discovered_at + timezone.timedelta(days=max(1, _runtime_int_config('cloud_unattached_ip_delete_after_days', 15))),
-                        'cloud_unattached_ip_delete_time',
-                    )
+                    recycle_due_at = compute_unattached_ip_release_at(discovered_at)
                     note = (
                         f"状态: {provider_status}；公网IP: {public_ip or '缺失'}；固定IP名: {static_ip_name}；"
                         f"发现时间: {discovered_at.isoformat()}；计划删除时间: {recycle_due_at.isoformat()}；最近同步: {discovered_at.isoformat()}"
@@ -1257,7 +1255,7 @@ class Command(BaseCommand):
                             retained_order.status = 'deleted'
                         retained_order.provision_note = append_note(
                             retained_order.provision_note,
-                            f'AWS 同步校正未附加固定 IP 生命周期：实例已提前删除，固定 IP 从发现未附加时间重新计算 {max(1, _runtime_int_config("cloud_unattached_ip_delete_after_days", 15))} 天；计划释放时间={recycle_due_at.isoformat()}。',
+                            f'AWS 同步校正未附加固定 IP 生命周期：实例已提前删除，固定 IP 从发现未附加时间重新计算 {runtime_int_config("cloud_unattached_ip_delete_after_days", 15, minimum=1)} 天；计划释放时间={recycle_due_at.isoformat()}。',
                         )
                         retained_order.save(update_fields=['status', 'ip_recycle_at', 'provision_note', 'updated_at'])
                         status_changed_items.append(f'{retained_order.id}:{public_ip}:unattached_lifecycle_rebased:{recycle_due_at.isoformat()}')

@@ -18,7 +18,8 @@ from django.db.models import Case, IntegerField, Q, Value, When
 from django.utils import timezone
 
 from bot.models import TelegramLoginAccount, TelegramUser
-from cloud.models import CloudAsset, CloudIpLog, CloudServerOrder, CloudServerPlan, Server, ServerPrice, _runtime_int_config, _with_runtime_time
+from cloud.lifecycle_schedule import compute_order_lifecycle_fields, runtime_int_config, with_runtime_time
+from cloud.models import CloudAsset, CloudIpLog, CloudServerOrder, CloudServerPlan, ServerPrice
 from cloud.note_utils import append_note, prepend_note
 from cloud.bootstrap import install_bbr, install_mtproxy
 from cloud.ip_guard import validate_server_connection_ip
@@ -84,6 +85,15 @@ def scoped_server_match_for_asset(asset: CloudAsset | None, *, include_order: bo
     if region_code:
         scope &= Q(region_code=region_code)
     return scope & identity
+
+
+def _asset_update_from_server_fields(updates: dict | None) -> dict:
+    mapped = drop_asset_note_update(updates)
+    if 'server_name' in mapped:
+        mapped['asset_name'] = mapped.pop('server_name')
+    if 'expires_at' in mapped:
+        mapped['actual_expires_at'] = mapped.pop('expires_at')
+    return mapped
 
 
 def _normalize_cloud_order_quantity(quantity: int) -> int:
@@ -159,74 +169,18 @@ def _order_primary_asset(order: CloudServerOrder | None):
     return queryset.order_by('-updated_at', '-id').first()
 
 
-def _order_primary_server(order: CloudServerOrder | None):
-    if not order:
-        return None
-    queryset = Server.objects.filter(order=order)
-    public_ip = str(getattr(order, 'public_ip', None) or '').strip()
-    previous_public_ip = str(getattr(order, 'previous_public_ip', None) or '').strip()
-    instance_id = str(getattr(order, 'instance_id', None) or '').strip()
-    provider_resource_id = str(getattr(order, 'provider_resource_id', None) or '').strip()
-    server_name = str(getattr(order, 'server_name', None) or '').strip()
-    match = Q()
-    if public_ip:
-        match |= Q(public_ip=public_ip) | Q(previous_public_ip=public_ip)
-    if previous_public_ip:
-        match |= Q(public_ip=previous_public_ip) | Q(previous_public_ip=previous_public_ip)
-    if instance_id:
-        match |= Q(instance_id=instance_id)
-    if provider_resource_id:
-        match |= Q(provider_resource_id=provider_resource_id)
-    if server_name:
-        match |= Q(server_name=server_name)
-    ip_match = Q()
-    if public_ip:
-        ip_match |= Q(public_ip=public_ip) | Q(previous_public_ip=public_ip)
-    if previous_public_ip:
-        ip_match |= Q(public_ip=previous_public_ip) | Q(previous_public_ip=previous_public_ip)
-    if ip_match:
-        item = queryset.filter(ip_match).order_by(
-            Case(
-                When(public_ip=public_ip, then=Value(0)) if public_ip else When(pk__isnull=True, then=Value(9)),
-                When(public_ip=previous_public_ip, then=Value(1)) if previous_public_ip else When(pk__isnull=True, then=Value(9)),
-                When(previous_public_ip=public_ip, then=Value(2)) if public_ip else When(pk__isnull=True, then=Value(9)),
-                When(previous_public_ip=previous_public_ip, then=Value(3)) if previous_public_ip else When(pk__isnull=True, then=Value(9)),
-                default=Value(9),
-                output_field=IntegerField(),
-            ),
-            '-updated_at',
-            '-id',
-        ).first()
-        if item:
-            return item
-    fallback_match = Q()
-    if instance_id:
-        fallback_match |= Q(instance_id=instance_id)
-    if provider_resource_id:
-        fallback_match |= Q(provider_resource_id=provider_resource_id)
-    if server_name:
-        fallback_match |= Q(server_name=server_name)
-    if fallback_match:
-        item = queryset.filter(fallback_match).order_by('-updated_at', '-id').first()
-        if item:
-            return item
-    return queryset.order_by('-updated_at', '-id').first()
-
-
 def _update_order_primary_records(order: CloudServerOrder | None, *, asset_updates: dict | None = None, server_updates: dict | None = None, now=None):
     now = now or timezone.now()
     asset = _order_primary_asset(order)
-    server = _order_primary_server(order)
-    if asset and asset_updates:
-        updates = drop_asset_note_update(asset_updates)
+    updates = {}
+    if asset_updates:
+        updates.update(drop_asset_note_update(asset_updates))
+    if server_updates:
+        updates.update(_asset_update_from_server_fields(server_updates))
+    if asset and updates:
         updates.setdefault('updated_at', now)
         CloudAsset.objects.filter(id=asset.id).update(**updates)
-    if server and server_updates:
-        updates = drop_asset_note_update(server_updates)
-        updates.setdefault('updated_at', now)
-        if updates:
-            Server.objects.filter(id=server.id).update(**updates)
-    return asset, server
+    return asset, None
 
 
 def _maybe_tg_user_id(value) -> int | None:
@@ -909,7 +863,7 @@ def build_cloud_server_name(tg_user_id: int | None, amount: Decimal, unique_tag:
 def ensure_unique_cloud_server_name(base_name: str) -> str:
     candidate = (base_name or '')[:255]
     index = 0
-    while Server.objects.filter(instance_id=candidate).exists() or CloudServerOrder.objects.filter(server_name=candidate).exists():
+    while CloudAsset.objects.filter(kind=CloudAsset.KIND_SERVER, instance_id=candidate).exists() or CloudServerOrder.objects.filter(server_name=candidate).exists():
         index += 1
         suffix = f'-{index}'
         candidate = f'{base_name[: max(0, 255 - len(suffix))]}{suffix}'
@@ -1246,7 +1200,7 @@ def _is_manual_authoritative_provider(provider: str | None) -> bool:
     return str(provider or '').strip() == CloudServerPlan.PROVIDER_AWS_LIGHTSAIL
 
 
-def _hydrate_order_from_proxy_asset(order: CloudServerOrder | None, asset: CloudAsset | None = None, server: Server | None = None):
+def _hydrate_order_from_proxy_asset(order: CloudServerOrder | None, asset: CloudAsset | None = None, server=None):
     if not order:
         return order
     if asset is None:
@@ -1262,26 +1216,14 @@ def _hydrate_order_from_proxy_asset(order: CloudServerOrder | None, asset: Cloud
                 .order_by('-updated_at', '-id')
                 .first()
             )
-    if server is None:
-        server = _order_primary_server(order)
-        if server and getattr(server, 'status', None) in _INACTIVE_ASSET_STATUSES:
-            server = None
-        if server is None:
-            server = (
-                Server.objects.filter(order=order)
-                .exclude(status__in=_INACTIVE_ASSET_STATUSES)
-                .order_by('-updated_at', '-id')
-                .first()
-            )
-    public_ip = _first_nonblank(getattr(asset, 'public_ip', None), getattr(server, 'public_ip', None), order.public_ip)
-    previous_ip = _first_nonblank(getattr(asset, 'previous_public_ip', None), getattr(server, 'previous_public_ip', None), order.previous_public_ip)
+    public_ip = _first_nonblank(getattr(asset, 'public_ip', None), order.public_ip)
+    previous_ip = _first_nonblank(getattr(asset, 'previous_public_ip', None), order.previous_public_ip)
     if _is_manual_authoritative_provider(getattr(order, 'provider', None)) and order.service_expires_at:
         expires_at = order.service_expires_at
     else:
         expiry_candidates = [
             item for item in (
                 getattr(asset, 'actual_expires_at', None),
-                getattr(server, 'expires_at', None),
                 order.service_expires_at,
             ) if item
         ]
@@ -1308,12 +1250,6 @@ def _hydrate_order_from_proxy_asset(order: CloudServerOrder | None, asset: Cloud
         if not order.cloud_account_id:
             order.cloud_account = getattr(asset, 'cloud_account', None) or get_cloud_account_from_label(getattr(asset, 'account_label', ''), order.provider)
         order.account_label = order.account_label or getattr(asset, 'account_label', None) or cloud_account_label(getattr(order, 'cloud_account', None))
-    if server:
-        order.login_password = getattr(server, 'login_password', None) or order.login_password
-        order.instance_id = getattr(server, 'instance_id', None) or order.instance_id
-        if not order.cloud_account_id:
-            order.cloud_account = get_cloud_account_from_label(getattr(server, 'account_label', ''), order.provider)
-        order.account_label = order.account_label or getattr(server, 'account_label', None) or cloud_account_label(getattr(order, 'cloud_account', None))
     return order
 
 
@@ -1483,15 +1419,6 @@ def _resolve_cloud_asset_identity_user(asset: CloudAsset | None) -> TelegramUser
     if getattr(order, 'user_id', None):
         return getattr(order, 'user', None) or TelegramUser.objects.filter(id=order.user_id).first()
 
-    server = (
-        Server.objects.select_related('user')
-        .filter(scoped_server_match_for_asset(asset, include_order=True), user__isnull=False)
-        .order_by('-updated_at', '-id')
-        .first()
-    )
-    if server and server.user_id:
-        return server.user
-
     ips = [value for value in [asset.public_ip, asset.previous_public_ip] if value]
     trace_query = Q(asset=asset)
     if ips:
@@ -1539,48 +1466,7 @@ def sync_cloud_asset_user_binding(asset: CloudAsset | None, *, persist: bool = T
         CloudAsset.objects.filter(id=asset.id).update(user=user, updated_at=now)
         asset.user = user
         asset.user_id = user.id
-        Server.objects.filter(scoped_server_match_for_asset(asset, include_order=True), user__isnull=True).update(
-            user=user,
-            updated_at=now,
-        )
     return user
-
-
-def _proxy_server_view(server: Server):
-    return SimpleNamespace(
-        id=server.id,
-        _proxy_item_kind='server',
-        server_id=server.id,
-        order_no=server.server_name or f'SERVER-{server.id}',
-        public_ip=server.public_ip,
-        previous_public_ip=server.previous_public_ip,
-        service_expires_at=server.expires_at,
-        region_name=server.region_name or '-',
-        region_code=server.region_code or '',
-        plan_name=server.server_name or '人工代理',
-        quantity=1,
-        status=server.status,
-        provider=server.provider,
-        account_label=server.account_label,
-        pay_method='manual',
-        pay_amount=None,
-        total_amount=None,
-        currency='USDT',
-        mtproxy_port=None,
-        mtproxy_link=None,
-        proxy_links=[],
-        mtproxy_secret=None,
-        mtproxy_host=None,
-        login_user=server.login_user,
-        login_password=server.login_password,
-        instance_id=server.instance_id,
-        ip_recycle_at=None,
-        auto_renew_enabled=False,
-        cloud_reminder_enabled=True,
-        created_at=server.created_at,
-        note=server.note,
-        get_status_display=lambda: server.get_status_display(),
-    )
 
 
 def _user_bound_group_ids(user_id: int) -> list[int]:
@@ -1695,10 +1581,7 @@ def get_cloud_server_for_admin(order_id: int):
 @sync_to_async
 def get_user_proxy_asset_detail(item_id: int, user_id: int, kind: str):
     active_order_filter = Q(order__isnull=True) | ~Q(order__status__in=_INACTIVE_ORDER_STATUSES)
-    if kind == 'server':
-        server = Server.objects.filter(id=item_id, user_id=user_id).filter(active_order_filter).exclude(status__in=_INACTIVE_ASSET_STATUSES).first()
-        return _proxy_server_view(server) if server else None
-    asset = CloudAsset.objects.filter(id=item_id, user_id=user_id).filter(active_order_filter).exclude(status__in=_INACTIVE_ASSET_STATUSES).first()
+    asset = CloudAsset.objects.filter(id=item_id, kind=CloudAsset.KIND_SERVER, user_id=user_id).filter(active_order_filter).exclude(status__in=_INACTIVE_ASSET_STATUSES).first()
     return _proxy_asset_view(asset) if asset else None
 
 
@@ -1716,10 +1599,7 @@ def get_group_proxy_asset_detail(item_id: int, chat_id: int, kind: str):
 @sync_to_async
 def get_proxy_asset_detail_for_admin(item_id: int, kind: str = 'asset'):
     active_order_filter = Q(order__isnull=True) | ~Q(order__status__in=_INACTIVE_ORDER_STATUSES)
-    if kind == 'server':
-        server = Server.objects.filter(id=item_id).filter(active_order_filter).exclude(status__in=_INACTIVE_ASSET_STATUSES).first()
-        return _proxy_server_view(server) if server else None
-    asset = CloudAsset.objects.filter(id=item_id).filter(active_order_filter).exclude(status__in=_INACTIVE_ASSET_STATUSES).first()
+    asset = CloudAsset.objects.filter(id=item_id, kind=CloudAsset.KIND_SERVER).filter(active_order_filter).exclude(status__in=_INACTIVE_ASSET_STATUSES).first()
     return _proxy_asset_view(asset) if asset else None
 
 
@@ -1767,7 +1647,7 @@ def get_proxy_asset_by_ip_for_user(ip: str, user_id: int):
 def _update_cloud_order_expiry(order: CloudServerOrder, expires_at, *, now=None, note: str = ''):
     now = now or timezone.now()
     order.service_expires_at = expires_at
-    lifecycle = _cloud_order_lifecycle_fields(expires_at)
+    lifecycle = compute_order_lifecycle_fields(expires_at)
     for field, value in lifecycle.items():
         setattr(order, field, value)
     order.renew_notice_sent_at = None
@@ -1809,8 +1689,6 @@ def update_cloud_item_expiry_for_admin(item_id: int, item_kind: str, expires_at)
             return None, '代理记录不存在'
         asset.actual_expires_at = expires_at
         asset.save(update_fields=['actual_expires_at', 'updated_at'])
-        server_updates = {'expires_at': expires_at, 'updated_at': now}
-        Server.objects.filter(scoped_server_match_for_asset(asset, include_order=True)).update(**server_updates)
         if asset.order_id:
             _update_cloud_order_expiry(asset.order, expires_at, now=now, note='管理员通过机器人修改到期时间')
         return _proxy_asset_view(CloudAsset.objects.select_related('order', 'user').get(id=asset.id)), None
@@ -1937,17 +1815,6 @@ def get_cloud_server_by_ip(ip: str):
         order = _hydrate_order_from_proxy_asset(asset.order, asset=asset)
         order.matched_query_ip = normalized_ip
         return order
-    server = (
-        Server.objects.filter(ip_q)
-        .exclude(status__in=_INACTIVE_ASSET_STATUSES)
-        .select_related('order')
-        .order_by('-updated_at', '-id')
-        .first()
-    )
-    if server and server.order_id and server.order and server.order.status not in {'deleted', 'deleting', 'expired', 'cancelled'}:
-        order = _hydrate_order_from_proxy_asset(server.order, server=server)
-        order.matched_query_ip = normalized_ip
-        return order
     for order in CloudServerOrder.objects.filter(ip_q, status__in=_ACTIVE_ORDER_STATUSES).order_by('-created_at')[:10]:
         if not _order_primary_asset_unavailable(order):
             hydrated = _hydrate_order_from_proxy_asset(order)
@@ -1975,17 +1842,6 @@ def get_cloud_server_by_ip_for_user(ip: str, user_id: int):
     asset = next((item for item in assets if not _cloud_asset_deleted_or_missing(item)), None)
     if asset and asset.order_id and asset.order and asset.order.status not in {'deleted', 'deleting', 'expired', 'cancelled'}:
         order = _hydrate_order_from_proxy_asset(asset.order, asset=asset)
-        order.matched_query_ip = normalized_ip
-        return order
-    server = (
-        Server.objects.filter(ip_q, user_id=user_id)
-        .exclude(status__in=_INACTIVE_ASSET_STATUSES)
-        .select_related('order')
-        .order_by('-updated_at', '-id')
-        .first()
-    )
-    if server and server.order_id and server.order and server.order.status not in {'deleted', 'deleting', 'expired', 'cancelled'}:
-        order = _hydrate_order_from_proxy_asset(server.order, server=server)
         order.matched_query_ip = normalized_ip
         return order
     for order in CloudServerOrder.objects.filter(ip_q, user_id=user_id, status__in=_ACTIVE_ORDER_STATUSES).order_by('-created_at')[:10]:
@@ -2277,8 +2133,6 @@ def _cloud_ip_log_chain_candidates(*, order_obj=None, asset_obj=None, server_obj
             getattr(order_obj, 'previous_public_ip', None),
             getattr(asset_obj, 'public_ip', None),
             getattr(asset_obj, 'previous_public_ip', None),
-            getattr(server_obj, 'public_ip', None),
-            getattr(server_obj, 'previous_public_ip', None),
         ]) if value
     ]
 
@@ -2295,8 +2149,6 @@ def _cloud_ip_log_chain_lookup(*, order_obj=None, asset_obj=None, server_obj=Non
     relation_match = Q()
     if asset_obj:
         relation_match |= Q(asset=asset_obj)
-    if server_obj:
-        relation_match |= Q(server=server_obj)
     if order_obj and not is_unattached_static_asset:
         relation_match |= Q(order=order_obj)
     if relation_match:
@@ -2304,8 +2156,8 @@ def _cloud_ip_log_chain_lookup(*, order_obj=None, asset_obj=None, server_obj=Non
         if existing:
             return existing
 
-    asset_name = getattr(asset_obj, 'asset_name', None) or getattr(server_obj, 'server_name', None) or getattr(order_obj, 'server_name', None)
-    instance_id = getattr(asset_obj, 'instance_id', None) or getattr(server_obj, 'instance_id', None) or getattr(order_obj, 'instance_id', None)
+    asset_name = getattr(asset_obj, 'asset_name', None) or getattr(order_obj, 'server_name', None)
+    instance_id = getattr(asset_obj, 'instance_id', None) or getattr(order_obj, 'instance_id', None)
     scoped_match = Q()
     if asset_name:
         scoped_match |= Q(asset_name=asset_name)
@@ -2367,8 +2219,6 @@ def _merge_cloud_ip_log_duplicates(target):
     match = Q()
     if target.asset_id:
         match |= Q(asset_id=target.asset_id)
-    if target.server_id:
-        match |= Q(server_id=target.server_id)
     if target.order_id:
         match |= Q(order_id=target.order_id)
     scoped_name_match = Q()
@@ -2389,7 +2239,6 @@ def _merge_cloud_ip_log_duplicates(target):
     for duplicate in duplicates:
         target.order = target.order or duplicate.order
         target.asset = target.asset or duplicate.asset
-        target.server = target.server or duplicate.server
         target.user = target.user or duplicate.user
         target.provider = target.provider or duplicate.provider
         target.region_code = target.region_code or duplicate.region_code
@@ -2407,7 +2256,7 @@ def _merge_cloud_ip_log_duplicates(target):
         target.note = prepend_note(target.note, duplicate.note or '', unique=True)
         duplicate.delete()
     target.save(update_fields=[
-        'order', 'asset', 'server', 'user', 'provider', 'region_code', 'region_name',
+        'order', 'asset', 'user', 'provider', 'region_code', 'region_name',
         'order_no', 'asset_name', 'instance_id', 'provider_resource_id', 'public_ip',
         'previous_public_ip', 'note',
     ])
@@ -2416,55 +2265,46 @@ def _merge_cloud_ip_log_duplicates(target):
 
 def record_cloud_ip_log(*, event_type, order=None, asset=None, server=None, public_ip=None, previous_public_ip=None, note='', trigger_label: str | None = None):
     asset_obj = asset
-    server_obj = server
-    order_obj = order or getattr(asset_obj, 'order', None) or getattr(server_obj, 'order', None)
+    server_obj = None
+    order_obj = order or getattr(asset_obj, 'order', None)
     user_obj = (
         getattr(order_obj, 'user', None)
         or getattr(asset_obj, 'user', None)
-        or getattr(server_obj, 'user', None)
     )
     provider = (
         getattr(order_obj, 'provider', None)
         or getattr(asset_obj, 'provider', None)
-        or getattr(server_obj, 'provider', None)
     )
     region_code = (
         getattr(order_obj, 'region_code', None)
         or getattr(asset_obj, 'region_code', None)
-        or getattr(server_obj, 'region_code', None)
     )
     region_name = (
         getattr(order_obj, 'region_name', None)
         or getattr(asset_obj, 'region_name', None)
-        or getattr(server_obj, 'region_name', None)
     )
     asset_name = (
         getattr(asset_obj, 'asset_name', None)
-        or getattr(server_obj, 'server_name', None)
         or getattr(order_obj, 'server_name', None)
     )
     instance_id = (
         getattr(asset_obj, 'instance_id', None)
-        or getattr(server_obj, 'instance_id', None)
         or getattr(order_obj, 'instance_id', None)
     )
     provider_resource_id = (
         getattr(asset_obj, 'provider_resource_id', None)
-        or getattr(server_obj, 'provider_resource_id', None)
         or getattr(order_obj, 'provider_resource_id', None)
     )
     current_ip = public_ip
     if current_ip is None:
         current_ip = (
             getattr(asset_obj, 'public_ip', None)
-            or getattr(server_obj, 'public_ip', None)
             or getattr(order_obj, 'public_ip', None)
         )
     previous_ip = previous_public_ip
     if previous_ip is None:
         previous_ip = (
             getattr(asset_obj, 'previous_public_ip', None)
-            or getattr(server_obj, 'previous_public_ip', None)
             or getattr(order_obj, 'previous_public_ip', None)
         )
     executed_at = timezone.now()
@@ -2492,12 +2332,10 @@ def record_cloud_ip_log(*, event_type, order=None, asset=None, server=None, publ
         if _should_rebind_cloud_ip_log(latest_existing, order_obj):
             latest_existing.order = order_obj
             latest_existing.asset = asset_obj or latest_existing.asset
-            latest_existing.server = server_obj or latest_existing.server
             latest_existing.user = user_obj or latest_existing.user
         else:
             latest_existing.order = latest_existing.order or order_obj
             latest_existing.asset = latest_existing.asset or asset_obj
-            latest_existing.server = latest_existing.server or server_obj
             latest_existing.user = latest_existing.user or user_obj
         latest_existing.provider = provider or latest_existing.provider
         latest_existing.region_code = region_code or latest_existing.region_code
@@ -2517,7 +2355,7 @@ def record_cloud_ip_log(*, event_type, order=None, asset=None, server=None, publ
         latest_existing.event_type = event_type
         latest_existing.note = prepend_note(latest_existing.note, final_note, unique=True)
         latest_existing.save(update_fields=[
-            'order', 'asset', 'server', 'user', 'provider', 'region_code', 'region_name',
+            'order', 'asset', 'user', 'provider', 'region_code', 'region_name',
             'order_no', 'asset_name', 'instance_id', 'provider_resource_id', 'public_ip',
             'previous_public_ip', 'event_type', 'note',
         ])
@@ -2526,7 +2364,6 @@ def record_cloud_ip_log(*, event_type, order=None, asset=None, server=None, publ
     created = CloudIpLog.objects.create(
         order=order_obj,
         asset=asset_obj,
-        server=server_obj,
         user=user_obj,
         provider=provider,
         region_code=region_code,
@@ -2621,8 +2458,8 @@ def _cloud_log_execution_plan(order_obj, asset_obj=None):
     if not suspend_at and asset_obj and getattr(asset_obj, 'actual_expires_at', None):
         try:
             expires_at = asset_obj.actual_expires_at
-            suspend_at = _with_runtime_time(expires_at + timezone.timedelta(days=_runtime_int_config('cloud_suspend_after_days', 3)), 'cloud_suspend_time')
-            delete_at = _with_runtime_time(suspend_at + timezone.timedelta(days=_runtime_int_config('cloud_delete_after_days', 0)), 'cloud_delete_time')
+            suspend_at = with_runtime_time(expires_at + timezone.timedelta(days=runtime_int_config('cloud_suspend_after_days', 3)), 'cloud_suspend_time')
+            delete_at = with_runtime_time(suspend_at + timezone.timedelta(days=runtime_int_config('cloud_delete_after_days', 0)), 'cloud_delete_time')
             if delete_at and delete_at < suspend_at:
                 delete_at = suspend_at
         except Exception:
@@ -2701,13 +2538,12 @@ def _set_source_migration_expiry(order: CloudServerOrder, migration_due_at, reas
         provision_note=order.provision_note,
         updated_at=timezone.now(),
     )
-    asset, server = _update_order_primary_records(
+    asset, _ = _update_order_primary_records(
         order,
         asset_updates={'actual_expires_at': migration_due_at},
         server_updates={'expires_at': migration_due_at},
     )
     asset_count = 1 if asset else 0
-    server_count = 1 if server else 0
     after = {
         'service_expires_at': order.service_expires_at,
         'renew_grace_expires_at': order.renew_grace_expires_at,
@@ -2717,7 +2553,7 @@ def _set_source_migration_expiry(order: CloudServerOrder, migration_due_at, reas
         'migration_due_at': order.migration_due_at,
     }
     logger.info(
-        'CLOUD_SOURCE_MIGRATION_EXPIRY_CHANGE reason=%s order_id=%s order_no=%s status=%s public_ip=%s previous_public_ip=%s service_expires_at=%s->%s renew_grace_expires_at=%s->%s suspend_at=%s->%s delete_at=%s->%s ip_recycle_at=%s->%s migration_due_at=%s->%s asset_count=%s server_count=%s',
+        'CLOUD_SOURCE_MIGRATION_EXPIRY_CHANGE reason=%s order_id=%s order_no=%s status=%s public_ip=%s previous_public_ip=%s service_expires_at=%s->%s renew_grace_expires_at=%s->%s suspend_at=%s->%s delete_at=%s->%s ip_recycle_at=%s->%s migration_due_at=%s->%s asset_count=%s',
         reason,
         order.id,
         order.order_no,
@@ -2737,7 +2573,6 @@ def _set_source_migration_expiry(order: CloudServerOrder, migration_due_at, reas
         _fmt_dt(before['migration_due_at']),
         _fmt_dt(after['migration_due_at']),
         asset_count,
-        server_count,
     )
     source_trigger_label = '更换IP' if '更换 IP' in reason or '更换IP' in reason else ('重装' if '重装' in reason or '重建' in reason else None)
     record_cloud_ip_log(
@@ -2754,7 +2589,7 @@ def _set_source_migration_expiry(order: CloudServerOrder, migration_due_at, reas
             f'宽限到期 {_fmt_dt(before["renew_grace_expires_at"])} -> {_fmt_dt(after["renew_grace_expires_at"])}；'
             f'删机时间 {_fmt_dt(before["delete_at"])} -> {_fmt_dt(after["delete_at"])}；'
             f'IP保留到期 {_fmt_dt(before["ip_recycle_at"])} -> {_fmt_dt(after["ip_recycle_at"])}；'
-            f'同步资产 {asset_count} 条、Server {server_count} 条。'
+            f'同步资产 {asset_count} 条。'
         ),
     )
     return order
@@ -2902,7 +2737,7 @@ def replace_cloud_asset_order_by_admin(
         base_amount = asset.price
     total_amount = Decimal(str(base_amount)).quantize(Decimal('0.01')) if base_amount not in (None, '') else Decimal('0.00')
     pay_amount = total_amount
-    lifecycle = _cloud_order_lifecycle_fields(target_expires_at)
+    lifecycle = compute_order_lifecycle_fields(target_expires_at)
     old_user = previous_user if previous_user is not None else getattr(base_order, 'user', None)
     old_expires = previous_expires_at if previous_expires_at is not None else getattr(base_order, 'service_expires_at', None)
     old_user_label = getattr(old_user, 'tg_user_id', None) or getattr(old_user, 'username', None) or '-'
@@ -2968,17 +2803,10 @@ def replace_cloud_asset_order_by_admin(
             f'来源资产 #{asset.id}；来源订单 #{base_order.id}。',
         ])),
     )
-    server_match = scoped_server_match_for_asset(asset, include_order=True)
     asset.order = new_order
     asset.user = target_user
     asset.actual_expires_at = target_expires_at
     asset.save(update_fields=['order', 'user', 'actual_expires_at', 'updated_at'])
-    Server.objects.filter(server_match).update(
-        order=new_order,
-        user=target_user,
-        expires_at=target_expires_at,
-        updated_at=timezone.now(),
-    )
     _mark_manual_replaced_order_inactive(base_order, actor, note)
     logger.info('CLOUD_MANUAL_REPLACE_ORDER old_order_id=%s new_order_id=%s asset_id=%s public_ip=%s actor=%s note=%s', base_order.id, new_order.id, asset.id, asset.public_ip, actor, note)
     record_cloud_ip_log(
@@ -2996,13 +2824,11 @@ def ensure_manual_owner_operation_order(asset: CloudAsset, new_user: TelegramUse
     old_user = previous_user if previous_user is not None else asset.user
     if not new_user:
         old_label = getattr(old_user, 'tg_user_id', None) or getattr(old_user, 'username', None) or '-'
-        server_match = scoped_server_match_for_asset(asset, include_order=True)
         asset.user = None
         asset.order = None
         asset.save(update_fields=['user', 'order', 'updated_at'])
-        server_count = Server.objects.filter(server_match).update(user=None, updated_at=timezone.now())
-        logger.info('CLOUD_MANUAL_OWNER_UNBIND asset_id=%s public_ip=%s old_user=%s server_count=%s actor=%s', asset.id, asset.public_ip, old_label, server_count, actor)
-        record_cloud_ip_log(event_type='changed', asset=asset, public_ip=asset.public_ip, previous_public_ip=asset.previous_public_ip, note=f'{actor}: 人工清空所属人；原所属人 {old_label}；同步 Server {server_count} 条。')
+        logger.info('CLOUD_MANUAL_OWNER_UNBIND asset_id=%s public_ip=%s old_user=%s actor=%s', asset.id, asset.public_ip, old_label, actor)
+        record_cloud_ip_log(event_type='changed', asset=asset, public_ip=asset.public_ip, previous_public_ip=asset.previous_public_ip, note=f'{actor}: 人工清空所属人；原所属人 {old_label}。')
         return None, None
     old_label = getattr(old_user, 'tg_user_id', None) or getattr(old_user, 'username', None) or '-'
     new_label = getattr(new_user, 'tg_user_id', None) or getattr(new_user, 'username', None) or new_user.id
@@ -3018,10 +2844,8 @@ def ensure_manual_owner_operation_order(asset: CloudAsset, new_user: TelegramUse
         return None, None
     order.provision_note = '\n'.join(filter(None, [order.provision_note, f'{actor}: 人工编辑所属人 {old_label} -> {new_label}，生成独立操作订单用于审计，不改写资产原订单绑定。']))
     order.save(update_fields=['provision_note', 'updated_at'])
-    server_match = scoped_server_match_for_asset(asset, include_order=True)
-    server_count = Server.objects.filter(server_match).update(user=new_user, updated_at=timezone.now())
-    logger.info('CLOUD_MANUAL_OWNER_ORDER order_id=%s order_no=%s asset_id=%s public_ip=%s old_user=%s new_user=%s server_count=%s actor=%s', order.id, order.order_no, asset.id, asset.public_ip, old_label, new_label, server_count, actor)
-    record_cloud_ip_log(event_type='changed', order=order, asset=asset, public_ip=asset.public_ip, previous_public_ip=asset.previous_public_ip, note=f'{actor}: 人工编辑所属人 {old_label} -> {new_label}；操作订单 {order.order_no}；同步 Server {server_count} 条。')
+    logger.info('CLOUD_MANUAL_OWNER_ORDER order_id=%s order_no=%s asset_id=%s public_ip=%s old_user=%s new_user=%s actor=%s', order.id, order.order_no, asset.id, asset.public_ip, old_label, new_label, actor)
+    record_cloud_ip_log(event_type='changed', order=order, asset=asset, public_ip=asset.public_ip, previous_public_ip=asset.previous_public_ip, note=f'{actor}: 人工编辑所属人 {old_label} -> {new_label}；操作订单 {order.order_no}。')
     return order, None
 
 
@@ -3064,17 +2888,14 @@ def ensure_manual_expiry_operation_order(asset: CloudAsset, new_expires_at, acto
     order.save(update_fields=['provision_note', 'updated_at'])
     asset.actual_expires_at = new_expires_at
     asset.save(update_fields=['actual_expires_at', 'updated_at'])
-    server_match = scoped_server_match_for_asset(asset, include_order=True)
-    server_count = Server.objects.filter(server_match).update(expires_at=new_expires_at, updated_at=timezone.now())
     logger.info(
-        'CLOUD_MANUAL_EXPIRY_ORDER order_id=%s order_no=%s asset_id=%s public_ip=%s old_expires_at=%s new_expires_at=%s server_count=%s actor=%s',
+        'CLOUD_MANUAL_EXPIRY_ORDER order_id=%s order_no=%s asset_id=%s public_ip=%s old_expires_at=%s new_expires_at=%s actor=%s',
         order.id,
         order.order_no,
         asset.id,
         asset.public_ip,
         _fmt_dt(old_expires_at),
         _fmt_dt(new_expires_at),
-        server_count,
         actor,
     )
     record_cloud_ip_log(
@@ -3083,7 +2904,7 @@ def ensure_manual_expiry_operation_order(asset: CloudAsset, new_expires_at, acto
         asset=asset,
         public_ip=asset.public_ip,
         previous_public_ip=asset.previous_public_ip,
-        note=f'{actor}: 人工编辑到期时间 {_fmt_dt(old_expires_at)} -> {_fmt_dt(new_expires_at)}；操作订单 {order.order_no}；同步 Server {server_count} 条。',
+        note=f'{actor}: 人工编辑到期时间 {_fmt_dt(old_expires_at)} -> {_fmt_dt(new_expires_at)}；操作订单 {order.order_no}。',
     )
     return order, None
 
@@ -3855,8 +3676,6 @@ def run_cloud_server_renewal_postcheck(order_id: int):
             return order, recovery_err
         return recovery_order or order, '固定 IP 保留期续费，已进入自动恢复流程。'
     primary_asset = _order_primary_asset(order)
-    primary_server = _order_primary_server(order)
-
     def _record_is_running(record) -> bool:
         if not record:
             return False
@@ -3866,7 +3685,7 @@ def run_cloud_server_renewal_postcheck(order_id: int):
         provider_status = str(getattr(record, 'provider_status', '') or '').lower()
         return status == CloudAsset.STATUS_RUNNING or provider_status == 'running'
 
-    if _record_is_running(primary_asset) or _record_is_running(primary_server):
+    if _record_is_running(primary_asset):
         note = '续费后自动巡检：本地记录为正在运行，已跳过开机和 MTProxy 巡检。'
         _update_order_primary_records(
             order,
@@ -3899,7 +3718,7 @@ def rebind_cloud_server_user(order_id: int, new_user_id: int):
         order.user = new_user
         order.last_user_id = getattr(new_user, 'tg_user_id', None) or new_user.id
         order.save(update_fields=['user', 'last_user_id', 'updated_at'])
-        asset, server = _update_order_primary_records(
+        asset, _ = _update_order_primary_records(
             order,
             asset_updates={'user': new_user},
             server_updates={'user': new_user},
@@ -3909,7 +3728,6 @@ def rebind_cloud_server_user(order_id: int, new_user_id: int):
             event_type='changed',
             order=order,
             asset=asset,
-            server=server,
             public_ip=order.public_ip,
             previous_public_ip=order.previous_public_ip,
             note=f'服务器所属用户已更新：{old_user_id or "-"} -> {new_user.id}',
@@ -4194,23 +4012,6 @@ def _cloud_config_effective_current_price(current_price: Decimal, plans: list[Cl
     return current_price
 
 
-def _cloud_order_lifecycle_fields(expires_at) -> dict:
-    if not expires_at:
-        return {}
-    suspend_days = _runtime_int_config('cloud_suspend_after_days', 3)
-    delete_days = _runtime_int_config('cloud_delete_after_days', 0)
-    suspend_at = _with_runtime_time(expires_at + timezone.timedelta(days=suspend_days), 'cloud_suspend_time')
-    delete_at = _with_runtime_time(suspend_at + timezone.timedelta(days=delete_days), 'cloud_delete_time')
-    if delete_at < suspend_at:
-        delete_at = suspend_at
-    return {
-        'renew_grace_expires_at': suspend_at,
-        'suspend_at': suspend_at,
-        'delete_at': delete_at,
-        'ip_recycle_at': delete_at + timezone.timedelta(days=_runtime_int_config('cloud_unattached_ip_delete_after_days', 15)),
-    }
-
-
 @sync_to_async
 def list_cloud_server_upgrade_plans(order_id: int, user_id: int, admin: bool = False):
     queryset = CloudServerOrder.objects.select_related('plan', 'user').filter(id=order_id)
@@ -4293,7 +4094,7 @@ def create_cloud_server_upgrade_order(order_id: int, user_id: int, target_plan_i
     old_port = order.mtproxy_port or 9528
     old_secret = order.mtproxy_secret or ''
     new_order_no = _trim_operation_order_no(order, operation_code, suffix)
-    lifecycle_fields = _cloud_order_lifecycle_fields(target_expiry)
+    lifecycle_fields = compute_order_lifecycle_fields(target_expiry)
     old_trace_note = (
         f'{action_label}追溯：来源订单 {order.order_no}；旧IP={old_public_ip or "-"}；旧端口={old_port or "-"}；'
         f'旧secret={old_secret or "-"}；固定IP={order.static_ip_name or "-"}；'

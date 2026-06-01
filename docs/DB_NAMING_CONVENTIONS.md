@@ -42,6 +42,11 @@
 - `cloud_account_configs`
 - `external_sync_logs`
 
+当前云资源结构：
+- `cloud_asset` 是唯一云资源事实表
+- 历史 `cloud_server` 表已拆除
+- 代码中的 `Server` 模型仅作为兼容投影映射到 `cloud_asset`
+
 当前项目中历史遗留但暂不建议强改的表：
 - `users`
 - `orders`

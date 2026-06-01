@@ -50,7 +50,7 @@
 - `server_prices` → `cloud_price`
 - `cloud_server_orders` → `cloud_order`
 - `cloud_assets` → `cloud_asset`
-- `servers` → `cloud_server`
+- `servers` → `cloud_asset`（`Server` 只作为兼容投影，不再拥有独立表）
 
 原因：
 - `cloud.models` 已经作为统一出口
