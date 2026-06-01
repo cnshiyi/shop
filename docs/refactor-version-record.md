@@ -235,3 +235,27 @@ Passed locally:
 uv run python -m py_compile bot/api.py bot/api_site_configs.py
 uv run python manage.py check
 ```
+
+## 2026-06-01 bot-cloud-account-api-split
+
+### Scope
+
+Seventh refactor pass moved cloud account dashboard management out of `bot/api.py`.
+
+### Runtime Changes
+
+- Added `bot/api_cloud_accounts.py` for:
+  - cloud account list/detail
+  - create/update/delete
+  - AWS and Alibaba Cloud account verification
+  - cloud account payloads, duplicate detection, external sync log payloads
+- Preserved compatibility exports from `bot/api.py` for moved public views and private helper names.
+
+### Verification
+
+Passed locally:
+
+```bash
+uv run python -m py_compile bot/api.py bot/api_cloud_accounts.py bot/api_site_configs.py
+uv run python manage.py check
+```
