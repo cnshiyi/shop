@@ -488,6 +488,7 @@ class CloudServerServicesTestCase(TestCase):
     def test_manual_unattached_ip_delete_writes_log_and_history_item(self):
         from bot.api import _run_unattached_ip_delete_sync
 
+        SiteConfig.set('cloud_ip_delete_enabled', '1')
         account = self._aws_test_account()
         account.shutdown_enabled = False
         account.save(update_fields=['shutdown_enabled', 'updated_at'])
@@ -520,6 +521,71 @@ class CloudServerServicesTestCase(TestCase):
         self.assertTrue(history)
         self.assertIn('manual release ok', history[0]['note'])
         self.assertEqual(history[0]['deletion_source_label'], '人工手动删除')
+
+    # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
+    def test_manual_unattached_ip_delete_clears_retained_order_after_successful_release(self):
+        from bot.api import _run_unattached_ip_delete_sync
+
+        SiteConfig.set('cloud_ip_delete_enabled', '1')
+        account = self._aws_test_account()
+        recycle_at = timezone.now() + timezone.timedelta(days=3)
+        order = CloudServerOrder.objects.create(
+            order_no='HB-TEST-MANUAL-IP-RELEASE-CLEARS-ORDER',
+            user=self.user,
+            plan=self.plan,
+            provider=self.plan.provider,
+            cloud_account=account,
+            account_label=cloud_account_label(account),
+            region_code=self.plan.region_code,
+            region_name=self.plan.region_name,
+            plan_name=self.plan.plan_name,
+            quantity=1,
+            currency='USDT',
+            total_amount='19.00',
+            pay_amount='19.00',
+            status='deleted',
+            public_ip='52.77.18.251',
+            previous_public_ip='52.77.18.251',
+            static_ip_name='manual-clear-retained-order-ip',
+            mtproxy_host='52.77.18.251',
+            ip_recycle_at=recycle_at,
+            ip_recycle_reminder_enabled=True,
+            instance_id='',
+        )
+        asset = CloudAsset.objects.create(
+            kind=CloudAsset.KIND_SERVER,
+            source=CloudAsset.SOURCE_AWS_SYNC,
+            order=order,
+            user=self.user,
+            provider='aws_lightsail',
+            cloud_account=account,
+            account_label=cloud_account_label(account),
+            region_code=self.plan.region_code,
+            region_name=self.plan.region_name,
+            asset_name='manual-clear-retained-order-ip',
+            provider_resource_id='arn:aws:lightsail:ap-southeast-1:123456789012:StaticIp/manual-clear-retained-order-ip',
+            public_ip='52.77.18.251',
+            previous_public_ip='52.77.18.251',
+            actual_expires_at=recycle_at,
+            status=CloudAsset.STATUS_UNKNOWN,
+            provider_status='未附加固定IP',
+            is_active=False,
+        )
+        with patch('cloud.lifecycle._release_unattached_static_ip', new=AsyncMock(return_value=(True, 'manual retained release ok'))):
+            result = _run_unattached_ip_delete_sync(asset.id, enforce_schedule=False)
+
+        asset.refresh_from_db()
+        order.refresh_from_db()
+        self.assertTrue(result['ok'])
+        self.assertEqual(asset.status, CloudAsset.STATUS_DELETED)
+        self.assertEqual(order.public_ip, '')
+        self.assertEqual(order.previous_public_ip, '52.77.18.251')
+        self.assertEqual(order.static_ip_name, '')
+        self.assertEqual(order.mtproxy_host, '')
+        self.assertIsNone(order.ip_recycle_at)
+        self.assertIsNotNone(order.recycle_notice_sent_at)
+        self.assertFalse(order.ip_recycle_reminder_enabled)
+        self.assertTrue(CloudIpLog.objects.filter(order=order, asset=asset, event_type=CloudIpLog.EVENT_RECYCLED).exists())
 
     # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
     def test_legacy_unattached_ip_delete_log_without_known_note_shows_history(self):

@@ -1960,13 +1960,28 @@ def _mark_unattached_static_ip_deleted(asset_id: int, note: str):
     now = timezone.now()
     asset = CloudAsset.objects.get(id=asset_id)
     previous_public_ip = asset.public_ip or asset.previous_public_ip
+    order = asset.order if asset.order_id else None
     asset.previous_public_ip = previous_public_ip
     asset.public_ip = None
     asset.status = CloudAsset.STATUS_DELETED
     asset.provider_status = '未附加固定IP-已到期删除'
     asset.is_active = False
     asset.save(update_fields=['previous_public_ip', 'public_ip', 'status', 'provider_status', 'is_active', 'updated_at'])
-    record_cloud_ip_log(event_type='recycled', asset=asset, previous_public_ip=previous_public_ip, public_ip=None, note=note or '未附加固定IP已到期删除')
+    if order and order.status == 'deleted':
+        order.previous_public_ip = previous_public_ip
+        order.public_ip = ''
+        order.static_ip_name = ''
+        order.mtproxy_host = ''
+        order.ip_recycle_at = None
+        order.recycle_notice_sent_at = now
+        order.ip_recycle_reminder_enabled = False
+        order.provision_note = prepend_note(order.provision_note, note)
+        order.save(update_fields=[
+            'previous_public_ip', 'public_ip', 'static_ip_name', 'mtproxy_host',
+            'ip_recycle_at', 'recycle_notice_sent_at', 'ip_recycle_reminder_enabled',
+            'provision_note', 'updated_at',
+        ])
+    record_cloud_ip_log(event_type='recycled', order=order, asset=asset, previous_public_ip=previous_public_ip, public_ip=None, note=note or '未附加固定IP已到期删除')
     return asset
 
 

@@ -1,5 +1,28 @@
 # Refactor Version Record
 
+## 2026-06-02 unattached-ip-release-order-cleanup
+
+### Scope
+
+Small retained static IP cleanup fix for manual/dashboard asset-level releases.
+
+### Runtime Changes
+
+- Successful unattached static IP release now also clears a linked deleted retained order's `public_ip`, `static_ip_name`, `mtproxy_host`, and `ip_recycle_at`.
+- The linked order is marked as recycle-notified and has IP recycle reminders disabled after the IP is actually released.
+- Recycle history logs now keep both the released `CloudAsset` and linked `CloudServerOrder`, preventing stale renewal/recycle state from remaining visible.
+- Added focused regression coverage for manual retained-IP release through the dashboard helper path.
+
+### Verification
+
+Passed locally with `PYTHONDONTWRITEBYTECODE=1 DJANGO_TEST_SQLITE=1`:
+
+```bash
+uv run python -m py_compile cloud/lifecycle.py cloud/tests.py
+uv run python manage.py check
+uv run python manage.py test cloud.tests.CloudServerServicesTestCase.test_manual_unattached_ip_delete_clears_retained_order_after_successful_release cloud.tests.CloudServerServicesTestCase.test_manual_unattached_ip_delete_writes_log_and_history_item --noinput --verbosity 1
+```
+
 ## 2026-06-02 retained-ip-real-release-history
 
 ### Scope
