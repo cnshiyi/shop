@@ -10456,6 +10456,32 @@ class CloudServerServicesTestCase(TestCase):
         self.assertEqual(asset.user_id, user.id)
 
     # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
+    def test_sync_cloud_asset_user_binding_persist_false_sets_in_memory_user(self):
+        user = TelegramUser.objects.create(
+            tg_user_id=21989080,
+            username='sync_memory_user',
+            first_name='同步内存用户',
+        )
+        asset = CloudAsset.objects.create(
+            kind=CloudAsset.KIND_SERVER,
+            source=CloudAsset.SOURCE_AWS_SYNC,
+            provider='aws_lightsail',
+            region_code=self.plan.region_code,
+            region_name=self.plan.region_name,
+            asset_name='20260522-21989080-15-o880',
+            public_ip='10.9.9.13',
+            status=CloudAsset.STATUS_RUNNING,
+            is_active=True,
+        )
+
+        resolved = sync_cloud_asset_user_binding(asset, persist=False)
+
+        self.assertEqual(resolved.id, user.id)
+        self.assertEqual(asset.user_id, user.id)
+        self.assertEqual(asset.user.id, user.id)
+        self.assertIsNone(CloudAsset.objects.get(id=asset.id).user_id)
+
+    # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
     def test_cloud_asset_get_payload_does_not_mutate_manual_asset_fields(self):
         TelegramUser.objects.create(
             tg_user_id=21989079,

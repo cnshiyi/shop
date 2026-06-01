@@ -1469,11 +1469,12 @@ def sync_cloud_asset_user_binding(asset: CloudAsset | None, *, persist: bool = T
     user = _resolve_cloud_asset_identity_user(asset)
     if not asset or not user:
         return user
-    if persist and getattr(asset, 'user_id', None) != user.id:
-        now = timezone.now()
-        CloudAsset.objects.filter(id=asset.id).update(user=user, updated_at=now)
+    if getattr(asset, 'user_id', None) != user.id:
         asset.user = user
         asset.user_id = user.id
+        if persist:
+            now = timezone.now()
+            CloudAsset.objects.filter(id=asset.id).update(user=user, updated_at=now)
     return user
 
 

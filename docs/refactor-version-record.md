@@ -1,5 +1,27 @@
 # Refactor Version Record
 
+## 2026-06-02 sync-user-binding-persist-false
+
+### Scope
+
+Small cloud sync ownership binding fix.
+
+### Runtime Changes
+
+- `sync_cloud_asset_user_binding(..., persist=False)` now updates the in-memory `CloudAsset.user` / `user_id` fields without issuing its own database write.
+- AWS and Aliyun sync paths that call the helper before `asset.save()` can now fill blank asset owners while still preserving existing owners.
+- Added focused regression coverage that `persist=False` mutates only the Python object until the caller saves.
+
+### Verification
+
+Passed locally with `PYTHONDONTWRITEBYTECODE=1 DJANGO_TEST_SQLITE=1`:
+
+```bash
+uv run python -m py_compile cloud/services.py cloud/tests.py
+uv run python manage.py check
+uv run python manage.py test cloud.tests.CloudServerServicesTestCase.test_sync_cloud_asset_user_binding_uses_asset_name_tg_id cloud.tests.CloudServerServicesTestCase.test_sync_cloud_asset_user_binding_persist_false_sets_in_memory_user cloud.tests.CloudServerServicesTestCase.test_sync_aliyun_assets_preserves_existing_asset_expiry --noinput --verbosity 1
+```
+
 ## 2026-06-02 early-provisioning-asset-field-preservation
 
 ### Scope
