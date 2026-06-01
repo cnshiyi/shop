@@ -310,3 +310,24 @@ Passed locally:
 uv run python -m py_compile bot/api.py bot/api_users.py
 uv run python manage.py check
 ```
+
+## 2026-06-01 bot-operation-log-api-split
+
+### Scope
+
+Tenth refactor pass moved bot operation log dashboard endpoints out of `bot/api.py`.
+
+### Runtime Changes
+
+- Added `bot/api_operation_logs.py` for operation log payloads and search/list view.
+- Preserved compatibility exports from `bot/api.py`.
+- Removed the now-unused `BotOperationLog` import from `bot/api.py`.
+
+### Verification
+
+Passed locally:
+
+```bash
+uv run python -m py_compile bot/api.py bot/api_operation_logs.py
+uv run python manage.py check
+```
