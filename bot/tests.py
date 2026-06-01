@@ -91,6 +91,27 @@ class DashboardAuthSurfaceTestCase(TestCase):
         self.assertEqual(SiteConfig.get('bot_token'), '123456789:existing-token')
         self.assertNotIn(b'123456789:existing-token', response.content)
 
+    # 功能：验证相关业务场景和回归行为；当前函数属于 Telegram Bot 和后台用户能力。
+    def test_trongrid_api_key_blank_value_preserves_and_masks_existing_secret(self):
+        root = get_user_model().objects.create_user(username='root_preserve_trongrid_key', password='pass', is_staff=True, is_superuser=True)
+        config = SiteConfig.set('trongrid_api_key', 'tg-test-key-one\ntg-test-key-two', sensitive=True)
+        request = RequestFactory().post(
+            f'/api/admin/settings/site-configs/{config.id}/',
+            data=json.dumps({'value': ''}),
+            content_type='application/json',
+        )
+        self._attach_bearer_session(request, root)
+
+        response = update_site_config(request, config.id)
+        payload = json.loads(response.content.decode('utf-8'))['data']
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(SiteConfig.get('trongrid_api_key'), 'tg-test-key-one\ntg-test-key-two')
+        self.assertEqual(payload['value'], '')
+        self.assertNotEqual(payload['value_preview'], 'tg-test-key-one\ntg-test-key-two')
+        self.assertNotIn(b'tg-test-key-one', response.content)
+        self.assertNotIn(b'tg-test-key-two', response.content)
+
     def test_dashboard_me_accepts_bearer_session(self):
         user = get_user_model().objects.create_user(username='dashboard_me_staff', password='pass', is_staff=True)
         request = self._authorized_get('/api/dashboard/me/', user)

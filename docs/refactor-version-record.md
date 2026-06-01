@@ -1,5 +1,28 @@
 # Refactor Version Record
 
+## 2026-06-02 trongrid-api-key-secret-preservation
+
+### Scope
+
+Small sensitive-config hardening pass after the runtime-field preservation guard.
+
+### Runtime Changes
+
+- Treat `trongrid_api_key` as a sensitive site config key.
+- Blank dashboard saves for `trongrid_api_key` now preserve the existing API keys instead of clearing them.
+- Dashboard config responses no longer return the full TRON API key list in `value_preview`.
+- Added focused regression coverage for blank TRON API key saves and response masking.
+
+### Verification
+
+Passed locally with `UV_CACHE_DIR=/private/tmp/shop-uv-cache`:
+
+```bash
+uv run python manage.py check
+uv run python -m py_compile core/runtime_config.py bot/api_site_configs.py bot/tests.py
+DJANGO_TEST_SQLITE=1 uv run python manage.py test bot.tests.DashboardAuthSurfaceTestCase.test_sensitive_site_config_blank_value_preserves_existing_secret bot.tests.DashboardAuthSurfaceTestCase.test_trongrid_api_key_blank_value_preserves_and_masks_existing_secret --noinput --verbosity 1
+```
+
 ## 2026-06-02 runtime-field-preservation-guard
 
 ### Scope

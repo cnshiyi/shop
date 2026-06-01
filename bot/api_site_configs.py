@@ -37,8 +37,6 @@ def _site_config_payload(item):
     if item.key == 'trongrid_api_key':
         value = decrypt_text(item.value or '')
     value_preview = _masked_sensitive_preview(value) if is_sensitive else (item.value or '')
-    if item.key == 'trongrid_api_key':
-        value_preview = value
     return {
         'id': item.id,
         'key': item.key,

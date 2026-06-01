@@ -87,6 +87,7 @@ CONFIG_DEFAULTS = {
 
 SENSITIVE_CONFIG_KEYS = {
     'bot_token',
+    'trongrid_api_key',
     'telegram_api_hash',
     'dashboard_totp_secret',
     'mysql_password',
