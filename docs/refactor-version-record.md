@@ -259,3 +259,28 @@ Passed locally:
 uv run python -m py_compile bot/api.py bot/api_cloud_accounts.py bot/api_site_configs.py
 uv run python manage.py check
 ```
+
+## 2026-06-01 bot-auth-api-split
+
+### Scope
+
+Eighth refactor pass moved dashboard authentication and current-user endpoints out of `bot/api.py`.
+
+### Runtime Changes
+
+- Added `bot/api_auth.py` for:
+  - login/logout/refresh
+  - auth code list
+  - TOTP start/bind
+  - user info and current user metadata
+- Preserved compatibility exports from `bot/api.py` for all moved auth view names.
+- Removed unused `authenticate`, `login`, and `logout` imports from `bot/api.py`.
+
+### Verification
+
+Passed locally:
+
+```bash
+uv run python -m py_compile bot/api.py bot/api_auth.py bot/api_cloud_accounts.py bot/api_site_configs.py
+uv run python manage.py check
+```
