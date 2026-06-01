@@ -103,10 +103,14 @@ class Command(BaseCommand):
 
     @staticmethod
     def _cloud_order_cleanup_filter(cutoff):
-        terminal_statuses = {'deleted', 'cancelled', 'expired', 'failed'}
+        terminal_statuses = {'cancelled', 'expired', 'failed'}
+        deleted_retained_done = Q(status='deleted') & (
+            Q(ip_recycle_at__isnull=True)
+            | Q(ip_recycle_at__lt=cutoff)
+        )
         expired_inactive = (
             Q(status__in={'completed', 'expiring', 'renew_pending', 'suspended', 'deleting'})
             & Q(service_expires_at__lt=cutoff)
             & (Q(ip_recycle_at__isnull=True) | Q(ip_recycle_at__lt=cutoff))
         )
-        return Q(status__in=terminal_statuses) | expired_inactive
+        return Q(status__in=terminal_statuses) | deleted_retained_done | expired_inactive

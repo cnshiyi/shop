@@ -1,5 +1,28 @@
 # Refactor Version Record
 
+## 2026-06-02 cleanup-keeps-retained-ip-orders
+
+### Scope
+
+Small cleanup safety fix for retained static IP order history.
+
+### Runtime Changes
+
+- `cleanup_old_records` no longer treats every `deleted` cloud order as immediately cleanup-eligible.
+- Deleted cloud orders with a future retained-IP `ip_recycle_at` are preserved until the configured retention cutoff has passed their IP recycle time.
+- This keeps retained-IP renewal context and linked `CloudIpLog` history available while the static IP is still recoverable.
+- Added focused regression coverage for the cleanup filter.
+
+### Verification
+
+Passed locally with `PYTHONDONTWRITEBYTECODE=1 DJANGO_TEST_SQLITE=1`:
+
+```bash
+uv run python -m py_compile core/management/commands/cleanup_old_records.py cloud/tests.py
+uv run python manage.py check
+uv run python manage.py test cloud.tests.CloudServerServicesTestCase.test_cleanup_old_records_keeps_deleted_order_until_retained_ip_window_ends --noinput --verbosity 1
+```
+
 ## 2026-06-02 unattached-ip-release-order-cleanup
 
 ### Scope

@@ -13483,6 +13483,38 @@ class CloudServerServicesTestCase(TestCase):
         self.assertEqual(CloudServerOrder.objects.filter(replacement_for=source).count(), 1)
 
     # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
+    def test_cleanup_old_records_keeps_deleted_order_until_retained_ip_window_ends(self):
+        from core.management.commands.cleanup_old_records import Command
+
+        cutoff = timezone.now() - timezone.timedelta(days=100)
+        order = CloudServerOrder.objects.create(
+            order_no='HB-TEST-CLEANUP-KEEPS-RETAINED-IP',
+            user=self.user,
+            plan=self.plan,
+            provider=self.plan.provider,
+            region_code=self.plan.region_code,
+            region_name=self.plan.region_name,
+            plan_name=self.plan.plan_name,
+            quantity=1,
+            currency='USDT',
+            total_amount='19.00',
+            pay_amount='19.00',
+            status='deleted',
+            public_ip='20.20.20.36',
+            previous_public_ip='20.20.20.36',
+            static_ip_name='StaticIp-cleanup-retained-window',
+            ip_recycle_at=timezone.now() + timezone.timedelta(days=7),
+            instance_id='',
+        )
+        CloudServerOrder.objects.filter(id=order.id).update(created_at=cutoff - timezone.timedelta(days=1))
+
+        cleanup_qs = CloudServerOrder.objects.filter(created_at__lt=cutoff).filter(Command._cloud_order_cleanup_filter(cutoff))
+        self.assertFalse(cleanup_qs.filter(id=order.id).exists())
+
+        CloudServerOrder.objects.filter(id=order.id).update(ip_recycle_at=cutoff - timezone.timedelta(days=1))
+        self.assertTrue(cleanup_qs.filter(id=order.id).exists())
+
+    # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
     def test_lifecycle_tick_releases_retained_static_ip_after_recycle_due(self):
         recycle_due_at = timezone.now() - timezone.timedelta(days=2)
         order = CloudServerOrder.objects.create(
