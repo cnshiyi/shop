@@ -5,7 +5,8 @@ from django.db.models import Q
 from django.utils.dateparse import parse_datetime
 
 from bot.models import TelegramUser
-from cloud.models import CloudAsset, Server
+from cloud.models import CloudAsset
+from cloud.server_records import Server
 from core.cloud_accounts import cloud_account_label, get_cloud_account_from_label
 
 

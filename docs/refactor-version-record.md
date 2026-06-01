@@ -85,3 +85,45 @@ Local database probe after migration:
 GRANT ALL PRIVILEGES ON test_a.* TO 'a'@'localhost';
 FLUSH PRIVILEGES;
 ```
+
+## 2026-06-01 cloud-asset-runtime-cleanup
+
+### Scope
+
+Second refactor pass after the table migration. This pass removes the `Server` compatibility facade from `cloud.models`, moves old command/test compatibility to an explicit command-side wrapper, and adds indexes/state helpers.
+
+### Runtime Changes
+
+- Removed `Server` from `cloud.models` and `__all__`.
+- Added `cloud/server_records.py` as an explicit compatibility wrapper over `CloudAsset(kind='server')` for legacy commands and tests.
+- Updated sync and maintenance commands to import `Server` from `cloud.server_records`, not from `cloud.models`.
+- Added `cloud/lifecycle_state.py` for order-status to asset-status mapping.
+- `cloud/api.py` now uses `primary_record_updates_for_order_status` from `cloud.lifecycle_state`.
+
+### Database Changes
+
+- Added `0039_cloud_asset_indexes`:
+  - `ca_kind_status_active_idx`
+  - `ca_provider_acct_inst_idx`
+  - `ca_provider_acct_ip_idx`
+  - `ca_order_status_idx`
+  - `ca_kind_user_status_idx`
+
+### Verification
+
+Passed locally:
+
+```bash
+uv run python -m py_compile cloud/lifecycle_state.py cloud/models.py cloud/api.py cloud/server_records.py
+uv run python -m py_compile cloud/management/commands/sync_aws_assets.py cloud/management/commands/sync_aliyun_assets.py cloud/management/commands/upsert_cloud_asset.py cloud/management/commands/dedupe_servers.py cloud/management/commands/reconcile_cloud_assets_from_servers.py
+uv run python manage.py check
+uv run python manage.py makemigrations cloud --dry-run --check --verbosity 2
+uv run python manage.py migrate cloud 0039
+uv run python manage.py migrate --plan
+```
+
+### Remaining Big Refactors
+
+- Physically split `cloud/api.py`.
+- Physically split `bot/api.py`.
+- Rename legacy server wording inside sync commands and tests from `Server` to `CloudAsset` once test coverage is adjusted.

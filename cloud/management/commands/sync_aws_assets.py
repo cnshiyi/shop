@@ -8,7 +8,8 @@ from bot.api import _provider_status_label
 from core.cloud_accounts import cloud_account_label, cloud_account_label_variants, list_active_cloud_accounts
 from core.persistence import record_external_sync_log
 from cloud.lifecycle_schedule import compute_unattached_ip_release_at, runtime_int_config
-from cloud.models import CloudAsset, CloudServerOrder, Server
+from cloud.models import CloudAsset, CloudServerOrder
+from cloud.server_records import Server
 from cloud.note_utils import append_note
 from cloud.services import record_cloud_ip_log, sync_cloud_asset_user_binding
 

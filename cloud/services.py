@@ -169,6 +169,10 @@ def _order_primary_asset(order: CloudServerOrder | None):
     return queryset.order_by('-updated_at', '-id').first()
 
 
+def _order_primary_server(order: CloudServerOrder | None):
+    return _order_primary_asset(order)
+
+
 def _update_order_primary_records(order: CloudServerOrder | None, *, asset_updates: dict | None = None, server_updates: dict | None = None, now=None):
     now = now or timezone.now()
     asset = _order_primary_asset(order)

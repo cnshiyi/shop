@@ -52,6 +52,7 @@ from bot.api import (
 from bot.models import TelegramGroupFilter, TelegramLoginAccount, TelegramUser
 from cloud.lifecycle import NOTICE_TYPE_SWITCH_CONFIG, _auto_renew_notice_batch_payload, _notice_effective_delivered, _get_due_orders, _get_notice_text_override, _lifecycle_notice_batch_payload, _notice_payload_for_order, _notice_override_key, _record_auto_renew_patrol_log, _renew_notice_batch_payload, _run_auto_renew, _set_notice_text_override, cloud_notice_type_enabled
 from cloud.lifecycle_schedule import compute_order_lifecycle_fields, compute_unattached_ip_release_at
+from cloud.lifecycle_state import primary_record_updates_for_order_status
 from cloud.services import AWS_REGION_NAMES, RenewalPriceMissingError, _renewal_price, _update_order_primary_records, create_cloud_server_rebuild_order, drop_asset_note_update, ensure_cloud_asset_operation_order, ensure_cloud_server_pricing, ensure_manual_expiry_operation_order, ensure_manual_owner_operation_order, ensure_manual_price_operation_order, record_cloud_ip_log, refresh_custom_plan_cache, replace_cloud_asset_order_by_admin, set_cloud_server_auto_renew_admin, sync_cloud_asset_user_binding
 from cloud.models import AddressMonitor, CloudAsset, CloudAutoRenewPatrolLog, CloudAutoRenewPlan, CloudIpLog, CloudNoticePlan, CloudServerOrder, CloudServerPlan, CloudUserNoticeLog, ServerPrice
 from cloud.note_utils import append_note, prepend_note
@@ -3558,32 +3559,7 @@ def _append_provision_note(order, note):
 
 
 def _primary_record_updates_for_order_status(order_status: str, note: str | None = None):
-    active_statuses = {'completed', 'renew_pending', 'expiring'}
-    inactive_statuses = {'failed', 'cancelled', 'expired', 'deleted', 'suspended', 'deleting', 'pending'}
-    if order_status in active_statuses:
-        asset_updates = {
-            'is_active': True,
-            'status': CloudAsset.STATUS_RUNNING,
-        }
-        server_updates = dict(asset_updates)
-    elif order_status in inactive_statuses:
-        asset_status_map = {
-            'deleted': CloudAsset.STATUS_DELETED,
-            'deleting': CloudAsset.STATUS_DELETING,
-            'expired': CloudAsset.STATUS_EXPIRED,
-            'suspended': CloudAsset.STATUS_STOPPED,
-            'failed': CloudAsset.STATUS_UNKNOWN,
-            'cancelled': CloudAsset.STATUS_UNKNOWN,
-            'pending': CloudAsset.STATUS_PENDING,
-        }
-        asset_updates = {
-            'is_active': False,
-            'status': asset_status_map.get(order_status, CloudAsset.STATUS_UNKNOWN),
-        }
-        server_updates = dict(asset_updates)
-    else:
-        return {}, {}
-    return asset_updates, server_updates
+    return primary_record_updates_for_order_status(order_status)
 
 
 @transaction.atomic

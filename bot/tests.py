@@ -19,7 +19,8 @@ from bot.keyboards import balance_details_list, cloud_ip_query_result, cloud_ord
 from bot.models import TelegramChatArchive, TelegramChatMessage, TelegramLoginAccount, TelegramUser
 from bot.services import record_telegram_message
 from bot.telegram_listener import _build_bark_request, _build_push_payload, _is_self_sender, _sync_account_profile
-from cloud.models import CloudAsset, CloudServerOrder, CloudServerPlan, Server
+from cloud.models import CloudAsset, CloudServerOrder, CloudServerPlan
+from cloud.server_records import Server
 from cloud.services import update_cloud_item_expiry_for_admin
 from core.models import CloudAccountConfig, SiteConfig
 from core.texts import BOT_TEXTS

@@ -1,12 +1,10 @@
 """cloud 域模型。"""
 
 import uuid
-from copy import copy
 from decimal import Decimal
 
 from django.conf import settings
 from django.db import models
-from django.db.models import Q
 from django.utils import timezone
 
 from cloud.lifecycle_schedule import compute_order_lifecycle_schedule, normalize_service_expiry
@@ -317,6 +315,13 @@ class CloudAsset(models.Model):
         verbose_name = '云资产'
         verbose_name_plural = '云资产'
         ordering = ['-updated_at', '-id']
+        indexes = [
+            models.Index(fields=['kind', 'status', 'is_active'], name='ca_kind_status_active_idx'),
+            models.Index(fields=['provider', 'account_label', 'region_code', 'instance_id'], name='ca_provider_acct_inst_idx'),
+            models.Index(fields=['provider', 'account_label', 'region_code', 'public_ip'], name='ca_provider_acct_ip_idx'),
+            models.Index(fields=['order', 'status'], name='ca_order_status_idx'),
+            models.Index(fields=['kind', 'user', 'status'], name='ca_kind_user_status_idx'),
+        ]
 
     def __str__(self):
         return self.asset_name or self.instance_id or self.public_ip or f'asset-{self.pk}'
@@ -336,117 +341,6 @@ class CloudAsset(models.Model):
     @expires_at.setter
     def expires_at(self, value):
         self.actual_expires_at = value
-
-
-def _server_lookup_key(key: str) -> str:
-    if key == 'server_name' or key.startswith('server_name__'):
-        return 'asset_name' + key[len('server_name'):]
-    if key == 'expires_at' or key.startswith('expires_at__'):
-        return 'actual_expires_at' + key[len('expires_at'):]
-    return key
-
-
-def _server_payload_kwargs(kwargs: dict | None) -> dict:
-    return {_server_lookup_key(key): value for key, value in dict(kwargs or {}).items()}
-
-
-def _server_payload_ordering(fields):
-    result = []
-    for field in fields:
-        prefix = '-' if str(field).startswith('-') else ''
-        name = str(field)[1:] if prefix else str(field)
-        result.append(prefix + _server_lookup_key(name))
-    return result
-
-
-def _server_payload_q(node):
-    mapped = copy(node)
-    children = []
-    for child in node.children:
-        if isinstance(child, Q):
-            children.append(_server_payload_q(child))
-        elif isinstance(child, tuple) and len(child) == 2:
-            children.append((_server_lookup_key(child[0]), child[1]))
-        else:
-            children.append(child)
-    mapped.children = children
-    return mapped
-
-
-class _ServerCompatManager:
-    def _queryset(self):
-        return CloudAsset.objects.filter(kind=CloudAsset.KIND_SERVER)
-
-    def _args(self, args):
-        return [_server_payload_q(arg) if isinstance(arg, Q) else arg for arg in args]
-
-    def all(self):
-        return self._queryset()
-
-    def filter(self, *args, **kwargs):
-        return self._queryset().filter(*self._args(args), **_server_payload_kwargs(kwargs))
-
-    def exclude(self, *args, **kwargs):
-        return self._queryset().exclude(*self._args(args), **_server_payload_kwargs(kwargs))
-
-    def order_by(self, *fields):
-        return self._queryset().order_by(*_server_payload_ordering(fields))
-
-    def select_related(self, *fields):
-        return self._queryset().select_related(*fields)
-
-    def count(self):
-        return self._queryset().count()
-
-    def get(self, *args, **kwargs):
-        return self.filter(*args, **kwargs).get()
-
-    def create(self, **kwargs):
-        data = _server_payload_kwargs(kwargs)
-        data.setdefault('kind', CloudAsset.KIND_SERVER)
-        data.setdefault('currency', 'USDT')
-        return CloudAsset.objects.create(**data)
-
-    def update_or_create(self, defaults=None, **kwargs):
-        return CloudAsset.objects.update_or_create(
-            defaults=_server_payload_kwargs(defaults or {}),
-            **_server_payload_kwargs(kwargs),
-        )
-
-    def __getattr__(self, name):
-        return getattr(self._queryset(), name)
-
-
-class Server:
-    STATUS_RUNNING = CloudAsset.STATUS_RUNNING
-    STATUS_PENDING = CloudAsset.STATUS_PENDING
-    STATUS_STARTING = CloudAsset.STATUS_STARTING
-    STATUS_STOPPING = CloudAsset.STATUS_STOPPING
-    STATUS_STOPPED = CloudAsset.STATUS_STOPPED
-    STATUS_SUSPENDED = CloudAsset.STATUS_SUSPENDED
-    STATUS_TERMINATING = CloudAsset.STATUS_TERMINATING
-    STATUS_TERMINATED = CloudAsset.STATUS_TERMINATED
-    STATUS_DELETING = CloudAsset.STATUS_DELETING
-    STATUS_DELETED = CloudAsset.STATUS_DELETED
-    STATUS_EXPIRED = CloudAsset.STATUS_EXPIRED
-    STATUS_EXPIRED_GRACE = CloudAsset.STATUS_EXPIRED_GRACE
-    STATUS_UNKNOWN = CloudAsset.STATUS_UNKNOWN
-    STATUS_CHOICES = CloudAsset.STATUS_CHOICES
-    ACTIVE_STATUSES = CloudAsset.ACTIVE_STATUSES
-
-    SOURCE_ALIYUN = 'aliyun'
-    SOURCE_AWS_MANUAL = 'aws_manual'
-    SOURCE_AWS_SYNC = 'aws_sync'
-    SOURCE_ORDER = 'order'
-    SOURCE_CHOICES = (
-        (SOURCE_ALIYUN, '阿里云自动同步'),
-        (SOURCE_AWS_MANUAL, 'AWS手工录入'),
-        (SOURCE_AWS_SYNC, 'AWS脚本同步'),
-        (SOURCE_ORDER, '订单创建'),
-    )
-
-    objects = _ServerCompatManager()
-
 
 class CloudIpLog(models.Model):
     EVENT_CREATED = 'created'
@@ -920,6 +814,5 @@ __all__ = [
     'CloudServerPlan',
     'DailyAddressStat',
     'ResourceSnapshot',
-    'Server',
     'ServerPrice',
 ]

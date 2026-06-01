@@ -6,7 +6,8 @@ from django.utils import timezone
 from django.utils.dateparse import parse_datetime
 
 from bot.api import _provider_status_label
-from cloud.models import CloudAsset, CloudServerOrder, Server
+from cloud.models import CloudAsset, CloudServerOrder
+from cloud.server_records import Server
 from cloud.aliyun_simple import _build_client, _region_endpoint, _runtime_options
 from core.cloud_accounts import cloud_account_label, cloud_account_label_variants, list_active_cloud_accounts
 from core.persistence import record_external_sync_log
