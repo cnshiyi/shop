@@ -314,8 +314,8 @@ def update_site_config(request, config_id: int):
         item.save(update_fields=['sort_order'])
     SiteConfig.set(item.key, plain_value, sensitive=is_sensitive)
     try:
-        from core.cache import _cached_config
-        _cached_config[item.key] = plain_value
+        from core.cache import cache_config_value
+        cache_config_value(item.key, plain_value)
     except Exception:
         pass
     item = SiteConfig.objects.get(id=item.id)

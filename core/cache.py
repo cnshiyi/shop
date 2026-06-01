@@ -43,6 +43,29 @@ CONFIG_KEY_PREFIX = 'site_config:'
 _redis: redis.Redis | None = None
 
 
+def get_cached_config_value(key: str, default: str = '') -> str:
+    return _cached_config.get(key, default)
+
+
+def cache_config_value(key: str, value: str):
+    if value != '':
+        _cached_config[key] = value
+    else:
+        _cached_config.pop(key, None)
+
+
+def invalidate_config_cache(keys: list[str] | tuple[str, ...] | set[str] | str | None = None):
+    if keys is None:
+        _cached_config.clear()
+        return
+    if isinstance(keys, str):
+        selected = [keys]
+    else:
+        selected = list(keys)
+    for key in selected:
+        _cached_config.pop(key, None)
+
+
 async def refresh_config(keys: list[str] | None = None):
     global _cached_config
     selected = keys or list(_cached_config.keys())
@@ -55,17 +78,17 @@ async def refresh_config(keys: list[str] | None = None):
         )
         for key in selected:
             if key in values:
-                _cached_config[key] = values[key]
+                cache_config_value(key, values[key])
             else:
-                _cached_config.pop(key, None)
+                invalidate_config_cache(key)
 
 
 async def get_config(key: str, default: str = '') -> str:
-    if key in _cached_config and _cached_config[key] != '':
-        return _cached_config[key]
+    cached = get_cached_config_value(key, '')
+    if cached != '':
+        return cached
     value = await asyncio.to_thread(_site_config_get_with_runtime_default, key, default)
-    if value != '':
-        _cached_config[key] = value
+    cache_config_value(key, value)
     return value
 
 

@@ -59,6 +59,11 @@ class SiteConfig(models.Model):
                 cls._plain_value_cache.clear()
             else:
                 cls._plain_value_cache.pop(key, None)
+        try:
+            from core.cache import invalidate_config_cache
+            invalidate_config_cache(key)
+        except Exception:
+            pass
 
     @classmethod
     def get(cls, key: str, default: str = '') -> str:

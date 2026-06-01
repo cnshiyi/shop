@@ -2745,8 +2745,8 @@ async def _send_cloud_renewal_payment_prompt(message: Message, order, user, *, e
 
 
 def _receive_address() -> str:
-    from core.cache import _cached_config
-    return _cached_config.get('receive_address', '')
+    from core.cache import get_cached_config_value
+    return get_cached_config_value('receive_address', '')
 
 
 def _bot_text(key: str, default: str) -> str:

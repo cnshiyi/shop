@@ -146,10 +146,10 @@ def _threaded_site_config_get(key: str, fallback: str) -> str:
 
 
 def site_text(key: str, default: str = '') -> str:
-    from core.cache import _cached_config
+    from core.cache import cache_config_value, get_cached_config_value
 
     fallback = text_default(key, default)
-    cached = _cached_config.get(key, '')
+    cached = get_cached_config_value(key, '')
     if cached and key not in BOT_TEXTS:
         return cached
     try:
@@ -159,8 +159,7 @@ def site_text(key: str, default: str = '') -> str:
         value = SiteConfig.get(key, fallback)
     else:
         value = _threaded_site_config_get(key, fallback)
-    if value:
-        _cached_config[key] = value
+    cache_config_value(key, value)
     return value if value else fallback
 
 

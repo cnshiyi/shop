@@ -2,6 +2,7 @@ import json
 import os
 from unittest.mock import patch
 
+from asgiref.sync import async_to_sync
 from django.test import SimpleTestCase, TestCase
 from django.contrib.auth import get_user_model
 from django.core.management import call_command
@@ -46,6 +47,16 @@ class SiteConfigCacheTestCase(TestCase):
             self.assertEqual(SiteConfig.get('cache_ttl_test'), 'new')
         finally:
             SiteConfig._CACHE_TTL_SECONDS = original_ttl
+
+    def test_set_invalidates_async_config_cache(self):
+        from core.cache import cache_config_value, get_cached_config_value, get_config
+
+        cache_config_value('cache_invalidate_test', 'old')
+
+        SiteConfig.set('cache_invalidate_test', 'new')
+
+        self.assertEqual(get_cached_config_value('cache_invalidate_test', ''), '')
+        self.assertEqual(async_to_sync(get_config)('cache_invalidate_test', ''), 'new')
 
 
 class ExternalSyncLogSanitizeTestCase(TestCase):

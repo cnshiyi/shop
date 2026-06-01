@@ -542,3 +542,40 @@ uv run python -m py_compile core/crypto.py core/tests.py core/models.py bot/mode
 uv run python manage.py test core.tests.CryptoDecryptTestCase --keepdb
 uv run python manage.py check
 ```
+
+## 2026-06-01 site-config-cache-invalidation
+
+### Scope
+
+Nineteenth refactor pass reduced configuration cache split-brain between `SiteConfig` local cache and `core.cache` async config cache.
+
+### Runtime Changes
+
+- Added explicit `core.cache` helpers:
+  - `get_cached_config_value()`
+  - `cache_config_value()`
+  - `invalidate_config_cache()`
+- `SiteConfig.clear_cache()` now invalidates the async config cache as well as the model-local 30-second cache.
+- Replaced direct `_cached_config` writes/reads in bot text/config paths with helper functions.
+- Added a focused regression test for `SiteConfig.set()` invalidating the async config cache.
+
+### Verification
+
+Passed locally:
+
+```bash
+uv run python -m py_compile core/cache.py core/models.py core/texts.py core/tests.py bot/api_site_configs.py bot/handlers.py
+uv run python manage.py check
+```
+
+Blocked locally:
+
+```bash
+uv run python manage.py test core.tests.SiteConfigCacheTestCase --keepdb
+```
+
+The focused DB test run is blocked by local MySQL test database permissions:
+
+```text
+Access denied for user 'a'@'localhost' to database 'test_a'
+```
