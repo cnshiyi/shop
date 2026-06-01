@@ -5,14 +5,27 @@ from django.contrib.auth.password_validation import validate_password
 from django.views.decorators.csrf import csrf_exempt
 from django.views.decorators.http import require_GET, require_POST
 
-from bot.api import (
-    _admin_user_payload,
+from core.dashboard_api import (
     _error,
+    _iso,
     _ok,
     _read_payload,
     dashboard_login_required,
     dashboard_superuser_required,
 )
+
+
+def _admin_user_payload(user):
+    return {
+        'id': user.id,
+        'username': user.username,
+        'email': user.email or '',
+        'is_active': bool(user.is_active),
+        'is_staff': bool(user.is_staff),
+        'is_superuser': bool(user.is_superuser),
+        'date_joined': _iso(getattr(user, 'date_joined', None)),
+        'last_login': _iso(getattr(user, 'last_login', None)),
+    }
 
 
 @dashboard_superuser_required

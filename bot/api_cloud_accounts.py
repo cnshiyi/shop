@@ -3,7 +3,7 @@
 from django.views.decorators.csrf import csrf_exempt
 from django.views.decorators.http import require_GET, require_POST
 
-from bot.api import (
+from core.dashboard_api import (
     _error,
     _iso,
     _ok,

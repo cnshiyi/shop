@@ -1,17 +1,9 @@
 """bot 域后台 API。"""
 
-import base64
-import binascii
-import hashlib
-import hmac
-import json
 import re
 import secrets
-import struct
-import time
 from datetime import datetime, timezone as dt_timezone
 from decimal import Decimal
-from urllib.parse import quote
 
 from django.db.models import Q, Count, Max, Sum
 from django.utils import timezone
@@ -20,13 +12,15 @@ from django.views.decorators.csrf import csrf_exempt, ensure_csrf_cookie
 from django.views.decorators.http import require_GET, require_POST
 
 from bot.models import TelegramUser
+from bot.user_stats import active_cloud_asset_queryset as _active_cloud_asset_queryset, active_proxy_counts_by_user as _active_proxy_counts_by_user
 from cloud.lifecycle import _shutdown_enabled_for_order
 from cloud.lifecycle_execution import run_orphan_asset_delete, run_shutdown_order_delete, run_unattached_ip_release
 from cloud.lifecycle_schedule import compute_order_lifecycle_schedule, compute_unattached_ip_release_at
 from cloud.models import AddressMonitor, CloudAsset, CloudIpLog, CloudLifecyclePlan, CloudLifecyclePlanNote, CloudServerOrder
 from cloud.sync_safety import missing_confirmation_state
 from core.cloud_accounts import cloud_account_label, cloud_account_label_variants
-from core.dashboard_api import DASHBOARD_SESSION_IDLE_SECONDS, _apply_keyword_filter, _authenticate_dashboard_request, _countdown_label, _dashboard_session_payload, _days_left, _decimal_to_str, _error, _get_keyword, _iso, _ok, _parse_decimal, _provider_label, _provider_status_label, _read_payload, _region_label, _server_source_label, _session_token_for_request, _split_usernames, _staff_required, _status_label, _user_payload, _user_from_bearer_session, dashboard_login_required, dashboard_superuser_required
+from core.dashboard_api import DASHBOARD_SESSION_IDLE_SECONDS, _apply_keyword_filter, _authenticate_dashboard_request, _countdown_label, _dashboard_session_payload, _days_left, _decimal_to_str, _error, _get_keyword, _iso, _json_payload, _ok, _parse_decimal, _parse_runtime_time_point, _payload_bool, _provider_label, _provider_status_label, _read_payload, _region_label, _server_source_label, _session_token_for_request, _split_usernames, _staff_required, _status_label, _user_payload, _user_from_bearer_session, dashboard_login_required, dashboard_superuser_required
+from core.dashboard_totp import dashboard_totp_secret as _totp_secret, generate_totp_secret as _generate_totp_secret, normalize_totp_secret as _normalize_totp_secret, totp_otpauth_url as _totp_otpauth_url, verify_totp_token as _verify_totp_token
 from core.models import CloudAccountConfig
 from core.runtime_config import get_runtime_config
 from orders.models import Order, Product, Recharge
@@ -38,76 +32,11 @@ def csrf(request):
     return _ok({'csrf': True})
 
 
-def _json_payload(request):
-    try:
-        return json.loads(request.body.decode('utf-8') or '{}')
-    except Exception:
-        return {}
-
-
-def _normalize_totp_secret(secret: str) -> str:
-    return ''.join(ch for ch in str(secret or '').upper() if ch.isalnum()).rstrip('=')
-
-
-def _totp_secret():
-    return _normalize_totp_secret(get_runtime_config('dashboard_totp_secret', ''))
-
-
-def _generate_totp_secret():
-    alphabet = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ234567'
-    return ''.join(secrets.choice(alphabet) for _ in range(32))
-
-
-def _totp_otpauth_url(secret: str, username: str = 'admin'):
-    issuer = 'Shop Admin'
-    account = username or 'admin'
-    label = f'{quote(issuer, safe="")}:{quote(account, safe="")}'
-    normalized_secret = _normalize_totp_secret(secret)
-    return (
-        'otpauth://totp/'
-        f'{label}?secret={quote(normalized_secret, safe="")}&issuer={quote(issuer, safe="")}&algorithm=SHA1&digits=6&period=30'
-    )
-
-
-def _totp_code(secret: str, counter: int) -> str:
-    secret = _normalize_totp_secret(secret)
-    padding = '=' * ((8 - len(secret) % 8) % 8)
-    key = base64.b32decode((secret + padding).upper(), casefold=True)
-    digest = hmac.new(key, struct.pack('>Q', counter), hashlib.sha1).digest()
-    offset = digest[-1] & 0x0F
-    value = struct.unpack('>I', digest[offset:offset + 4])[0] & 0x7FFFFFFF
-    return f'{value % 1_000_000:06d}'
-
-
-def _verify_totp_token(token: str, secret: str) -> bool:
-    token = ''.join(ch for ch in str(token or '') if ch.isdigit())
-    secret = _normalize_totp_secret(secret)
-    if len(token) != 6 or not secret:
-        return False
-    try:
-        current_counter = int(time.time()) // 30
-        for drift in (-1, 0, 1):
-            if hmac.compare_digest(_totp_code(secret, current_counter + drift), token):
-                return True
-    except (binascii.Error, ValueError):
-        return False
-    return False
-
-
 def _runtime_int(key: str, default: int) -> int:
     try:
         return max(int(str(get_runtime_config(key, str(default)) or default).strip()), 0)
     except (TypeError, ValueError):
         return default
-
-
-def _parse_runtime_time_point(raw: str, fallback: str = '15:00') -> tuple[int, int]:
-    try:
-        hour_text, minute_text = str(raw or fallback).strip().split(':', 1)
-        return min(max(int(hour_text), 0), 23), min(max(int(minute_text), 0), 59)
-    except Exception:
-        hour_text, minute_text = fallback.split(':', 1)
-        return int(hour_text), int(minute_text)
 
 
 def _runtime_time(key: str, default: str = '15:00') -> tuple[int, int]:
@@ -299,39 +228,6 @@ def _visible_lifecycle_plan_stats(shutdown_items: list[dict] | None = None, ip_d
         'missing_expiry_count': len(missing_expiry),
         'unattached_ip_count': len(pending_ip_delete),
     }
-
-
-def _active_cloud_asset_queryset():
-    active_account_ids = list(CloudAccountConfig.objects.filter(is_active=True).values_list('id', flat=True))
-    active_account_labels = [
-        label
-        for account in CloudAccountConfig.objects.filter(is_active=True)
-        for label in cloud_account_label_variants(account)
-    ]
-    inactive_account_labels = [
-        label
-        for account in CloudAccountConfig.objects.filter(is_active=False)
-        for label in cloud_account_label_variants(account)
-    ]
-    return (
-        CloudAsset.objects.select_related('order', 'user', 'cloud_account', 'order__cloud_account')
-        .filter(kind=CloudAsset.KIND_SERVER, is_active=True)
-        .exclude(status__in=[
-            CloudAsset.STATUS_DELETED,
-            CloudAsset.STATUS_DELETING,
-            CloudAsset.STATUS_TERMINATED,
-            CloudAsset.STATUS_TERMINATING,
-        ])
-        .exclude(Q(cloud_account__is_active=False) | Q(account_label__in=inactive_account_labels))
-        .filter(
-            Q(cloud_account_id__in=active_account_ids)
-            | Q(account_label__in=active_account_labels)
-            | Q(cloud_account__isnull=True, account_label__isnull=True)
-            | Q(cloud_account__isnull=True, account_label='')
-            | Q(cloud_account__isnull=True, account_label__in=active_account_labels)
-            | Q(cloud_account_id__isnull=False, cloud_account__is_active=True)
-        )
-    )
 
 
 def _cloud_asset_display_ip(asset):
@@ -1591,50 +1487,6 @@ def _unattached_ip_delete_items(limit=50, assets=None):
 
     items = _dedupe_ip_delete_items_by_ip(items)
     return sorted(items, key=sort_key)[:limit]
-
-
-def _admin_user_payload(user):
-    return {
-        'id': user.id,
-        'username': user.username,
-        'email': user.email or '',
-        'is_active': bool(user.is_active),
-        'is_staff': bool(user.is_staff),
-        'is_superuser': bool(user.is_superuser),
-        'date_joined': _iso(getattr(user, 'date_joined', None)),
-        'last_login': _iso(getattr(user, 'last_login', None)),
-    }
-
-
-def _payload_bool(payload, key, default=False):
-    if key not in payload:
-        return default
-    value = payload.get(key)
-    if isinstance(value, bool):
-        return value
-    if isinstance(value, (int, float)):
-        return bool(value)
-    return str(value).strip().lower() in {'1', 'true', 'yes', 'on'}
-
-
-def _proxy_asset_count(asset):
-    return 1 if asset.kind == CloudAsset.KIND_SERVER else 0
-
-
-def _active_proxy_counts_by_user(user_ids=None):
-    qs = _active_cloud_asset_queryset().filter(
-        Q(user_id__isnull=False) | Q(order__user_id__isnull=False)
-    ).select_related('order')
-    if user_ids is not None:
-        user_ids = set(user_ids)
-        qs = qs.filter(Q(user_id__in=user_ids) | Q(order__user_id__in=user_ids))
-    counts = {}
-    for asset in qs:
-        user_id = asset.user_id or (asset.order.user_id if asset.order_id and asset.order else None)
-        if not user_id:
-            continue
-        counts[user_id] = counts.get(user_id, 0) + _proxy_asset_count(asset)
-    return counts
 
 
 @dashboard_login_required

@@ -4,22 +4,18 @@ from django.contrib.auth import authenticate, login, logout
 from django.views.decorators.csrf import csrf_exempt
 from django.views.decorators.http import require_GET, require_POST
 
-from bot.api import (
+from core.dashboard_api import (
     DASHBOARD_SESSION_IDLE_SECONDS,
     _dashboard_session_payload,
     _error,
-    _generate_totp_secret,
     _json_payload,
-    _normalize_totp_secret,
     _ok,
     _session_token_for_request,
     _staff_required,
-    _totp_otpauth_url,
-    _totp_secret,
-    _verify_totp_token,
     dashboard_login_required,
     dashboard_superuser_required,
 )
+from core.dashboard_totp import dashboard_totp_secret, generate_totp_secret, normalize_totp_secret, totp_otpauth_url, verify_totp_token
 from core.models import SiteConfig
 
 
@@ -39,8 +35,8 @@ def auth_login(request):
     if not _staff_required(user):
         return _error('没有后台权限', status=403)
 
-    totp_secret = _totp_secret()
-    if totp_secret and not _verify_totp_token(otp_token, totp_secret):
+    totp_secret = dashboard_totp_secret()
+    if totp_secret and not verify_totp_token(otp_token, totp_secret):
         return _error('Google 验证码错误或已过期', status=401)
 
     login(request, user)
@@ -84,20 +80,20 @@ def auth_codes(request):
 @require_POST
 def auth_totp_start(request):
     payload = _json_payload(request)
-    current_secret = _totp_secret()
+    current_secret = dashboard_totp_secret()
     replacing_existing = bool(current_secret)
     if replacing_existing:
         old_token = payload.get('old_otp_token') or payload.get('oldOtpToken')
-        if not _verify_totp_token(old_token, current_secret):
+        if not verify_totp_token(old_token, current_secret):
             return _error('更换 TOTP 密钥前，请先输入当前 Google Authenticator 的 6 位动态码', status=400)
-    secret = _normalize_totp_secret(_generate_totp_secret())
+    secret = normalize_totp_secret(generate_totp_secret())
     request.session['dashboard_totp_pending_secret'] = secret
     request.session['dashboard_totp_replacing_existing'] = replacing_existing
     request.session.set_expiry(10 * 60)
     username = request.user.get_username() or 'admin'
     return _ok({
         'enabled': replacing_existing,
-        'otpauthUrl': _totp_otpauth_url(secret, username),
+        'otpauthUrl': totp_otpauth_url(secret, username),
         'secret': secret,
     })
 
@@ -111,9 +107,9 @@ def auth_totp_bind(request):
     secret = request.session.get('dashboard_totp_pending_secret')
     if not secret:
         return _error('请先生成 Google 验证器二维码', status=400)
-    if _totp_secret() and not request.session.get('dashboard_totp_replacing_existing'):
+    if dashboard_totp_secret() and not request.session.get('dashboard_totp_replacing_existing'):
         return _error('更换 TOTP 密钥前，请先验证当前 Google Authenticator 动态码并重新生成二维码', status=400)
-    if not _verify_totp_token(token, secret):
+    if not verify_totp_token(token, secret):
         return _error('新 Google 验证码错误或已过期', status=400)
     SiteConfig.set('dashboard_totp_secret', secret, sensitive=True)
     request.session.pop('dashboard_totp_pending_secret', None)

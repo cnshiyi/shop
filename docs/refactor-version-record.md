@@ -553,6 +553,30 @@ uv run python -m py_compile cloud/aws_lightsail.py
 uv run python manage.py check
 ```
 
+## 2026-06-01 dashboard-api-helper-extraction
+
+### Scope
+
+Twenty-third refactor pass removed the dashboard API submodules' reverse dependency on the `bot.api` aggregation module.
+
+### Runtime Changes
+
+- Added `core/dashboard_totp.py` for dashboard TOTP secret normalization, generation, otpauth URL building, and token verification.
+- Added `bot/user_stats.py` for active cloud asset and per-user proxy count queries.
+- Moved generic dashboard payload helpers (`_json_payload`, `_payload_bool`, `_parse_runtime_time_point`) into `core/dashboard_api.py`.
+- `bot/api_auth.py`, `bot/api_admin_users.py`, `bot/api_cloud_accounts.py`, `bot/api_operation_logs.py`, `bot/api_products.py`, `bot/api_site_configs.py`, `bot/api_telegram.py`, and `bot/api_users.py` no longer import from `bot.api`.
+- `bot/api.py` now consumes the extracted helpers and remains a route/export aggregation point.
+
+### Verification
+
+Passed locally:
+
+```bash
+uv run python -m py_compile core/dashboard_api.py core/dashboard_totp.py bot/user_stats.py bot/api.py bot/api_auth.py bot/api_admin_users.py bot/api_cloud_accounts.py bot/api_operation_logs.py bot/api_products.py bot/api_site_configs.py bot/api_telegram.py bot/api_users.py
+uv run python manage.py check
+git diff --check
+```
+
 ## 2026-06-01 cloud-asset-query-helper
 
 ### Scope

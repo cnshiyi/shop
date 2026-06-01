@@ -3,7 +3,7 @@
 from django.db.models import Q
 from django.views.decorators.http import require_GET
 
-from bot.api import (
+from core.dashboard_api import (
     _get_keyword,
     _iso,
     _ok,

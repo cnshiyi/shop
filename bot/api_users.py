@@ -8,8 +8,8 @@ from django.db.models.functions import Cast
 from django.views.decorators.csrf import csrf_exempt
 from django.views.decorators.http import require_GET, require_POST
 
-from bot.api import (
-    _active_proxy_counts_by_user,
+from bot.user_stats import active_proxy_counts_by_user as _active_proxy_counts_by_user
+from core.dashboard_api import (
     _apply_keyword_filter,
     _decimal_to_str,
     _error,

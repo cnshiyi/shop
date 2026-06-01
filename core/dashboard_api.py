@@ -254,6 +254,33 @@ def _read_payload(request):
     return request.POST.dict() if hasattr(request.POST, 'dict') else request.POST
 
 
+def _json_payload(request):
+    try:
+        return json.loads(request.body.decode('utf-8') or '{}')
+    except Exception:
+        return {}
+
+
+def _payload_bool(payload, key, default=False):
+    if key not in payload:
+        return default
+    value = payload.get(key)
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return bool(value)
+    return str(value).strip().lower() in {'1', 'true', 'yes', 'on'}
+
+
+def _parse_runtime_time_point(raw: str, fallback: str = '15:00') -> tuple[int, int]:
+    try:
+        hour_text, minute_text = str(raw or fallback).strip().split(':', 1)
+        return min(max(int(hour_text), 0), 23), min(max(int(minute_text), 0), 59)
+    except Exception:
+        hour_text, minute_text = fallback.split(':', 1)
+        return int(hour_text), int(minute_text)
+
+
 def _get_keyword(request):
     return (request.GET.get('keyword') or request.GET.get('q') or request.GET.get('search') or '').strip()
 
