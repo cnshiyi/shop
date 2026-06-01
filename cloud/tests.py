@@ -10281,6 +10281,40 @@ class CloudServerServicesTestCase(TestCase):
         self.assertEqual(asset.user_id, user.id)
 
     # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
+    def test_cloud_asset_get_payload_does_not_mutate_manual_asset_fields(self):
+        TelegramUser.objects.create(
+            tg_user_id=21989079,
+            username='payload_get_user',
+            first_name='只读详情用户',
+        )
+        asset = CloudAsset.objects.create(
+            kind=CloudAsset.KIND_SERVER,
+            source=CloudAsset.SOURCE_AWS_SYNC,
+            provider='aws_lightsail',
+            region_code=self.plan.region_code,
+            region_name=self.plan.region_name,
+            asset_name='20260522-21989079-15-o879',
+            public_ip='10.9.9.12',
+            status=CloudAsset.STATUS_UNKNOWN,
+            provider_status='未附加固定IP',
+            is_active=False,
+        )
+        staff_user = get_user_model().objects.create_user(username='staff_asset_get_readonly', password='x', is_staff=True)
+        request = self._attach_bearer_session(
+            self.factory.get(f'/api/dashboard/cloud-assets/{asset.id}/'),
+            staff_user,
+        )
+
+        response = update_cloud_asset(request, asset.id)
+        payload = json.loads(response.content.decode('utf-8'))['data']
+
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(payload['actual_expires_at'])
+        asset.refresh_from_db()
+        self.assertIsNone(asset.user_id)
+        self.assertIsNone(asset.actual_expires_at)
+
+    # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
     def test_toggle_auto_renew_creates_operation_order_for_bound_asset_without_order(self):
         user = TelegramUser.objects.create(
             tg_user_id=21989078,

@@ -1,5 +1,27 @@
 # Refactor Version Record
 
+## 2026-06-02 cloud-asset-payload-readonly-guard
+
+### Scope
+
+Removed a read-path side effect from cloud asset payload building.
+
+### Runtime Changes
+
+- `CloudAssetPayloadContext` now defaults to read-only payload rendering.
+- Cloud asset GET/detail payloads no longer auto-write `CloudAsset.user` or `CloudAsset.actual_expires_at` while computing display data.
+- Added a regression test covering the read-only asset payload path.
+
+### Verification
+
+Passed locally with `UV_CACHE_DIR=/private/tmp/shop-uv-cache`:
+
+```bash
+uv run python manage.py check
+uv run python -m py_compile cloud/api_assets.py cloud/tests.py
+DJANGO_TEST_SQLITE=1 uv run python manage.py test cloud.tests.CloudServerServicesTestCase.test_cloud_asset_get_payload_does_not_mutate_manual_asset_fields cloud.tests.CloudServerServicesTestCase.test_sync_cloud_asset_user_binding_uses_asset_name_tg_id --noinput --verbosity 1
+```
+
 ## 2026-06-02 trongrid-api-key-secret-preservation
 
 ### Scope

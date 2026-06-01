@@ -222,7 +222,7 @@ def _infer_asset_order(asset):
 # 类型说明：封装 后台 API 接口 中 CloudAssetPayloadContext 相关的数据和行为。
 class CloudAssetPayloadContext:
     # 功能：初始化对象状态和依赖。
-    def __init__(self, *, active_account_labels=None, inferred_orders=None, allow_mutation=True, now=None):
+    def __init__(self, *, active_account_labels=None, inferred_orders=None, allow_mutation=False, now=None):
         self.active_account_labels = set(active_account_labels or [])
         self.inferred_orders = inferred_orders or {}
         self.allow_mutation = allow_mutation
