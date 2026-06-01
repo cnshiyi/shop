@@ -1253,6 +1253,8 @@ def _unattached_ip_delete_history_q():
         | Q(note__icontains='AWS 同步删除未附加固定 IP')
         | Q(note__icontains='IP校验发现云上不存在，已标记删除')
         | Q(note__icontains='固定 IP 已释放')
+        | Q(note__icontains='固定 IP 已真实释放')
+        | Q(note__icontains='固定IP已真实释放')
         | Q(note__icontains='固定 IP 云端已不存在')
         | Q(note__icontains='release_static_ip')
         | Q(note__icontains='真机测试：未附加IP删除')

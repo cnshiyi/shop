@@ -1,5 +1,27 @@
 # Refactor Version Record
 
+## 2026-06-02 retained-ip-real-release-history
+
+### Scope
+
+Small lifecycle-plan history display fix for AWS retained static IP releases.
+
+### Runtime Changes
+
+- Lifecycle IP-delete history now recognizes `AWS 固定 IP 已真实释放` log notes as completed retained-IP release records.
+- Released retained static IPs can appear in lifecycle plan history even when no active lifecycle-plan row existed before the release.
+- Added focused regression coverage for a real-release history row rebuilt from `CloudIpLog`.
+
+### Verification
+
+Passed locally with `PYTHONDONTWRITEBYTECODE=1 DJANGO_TEST_SQLITE=1`:
+
+```bash
+uv run python -m py_compile bot/api.py cloud/tests.py
+uv run python manage.py check
+uv run python manage.py test cloud.tests.CloudServerServicesTestCase.test_lifecycle_plans_include_real_released_retained_ip_history_without_active_row cloud.tests.CloudServerServicesTestCase.test_lifecycle_plans_include_ip_delete_history_item cloud.tests.CloudServerServicesTestCase.test_lifecycle_plans_move_deleted_unattached_ip_active_row_to_history --noinput --verbosity 1
+```
+
 ## 2026-06-02 aws-retained-ip-missing-skip
 
 ### Scope

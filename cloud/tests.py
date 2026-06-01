@@ -7853,6 +7853,39 @@ class CloudServerServicesTestCase(TestCase):
         self.assertEqual(rows[0]['deletion_source_label'], '人工手动删除')
 
     # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
+    def test_lifecycle_plans_include_real_released_retained_ip_history_without_active_row(self):
+        asset = CloudAsset.objects.create(
+            kind=CloudAsset.KIND_SERVER,
+            source=CloudAsset.SOURCE_AWS_SYNC,
+            user=self.user,
+            provider='aws_lightsail',
+            region_code=self.plan.region_code,
+            region_name=self.plan.region_name,
+            asset_name='lifecycle-retained-ip-real-release-history',
+            previous_public_ip='52.77.18.249',
+            status=CloudAsset.STATUS_DELETED,
+            provider_status='已删除',
+            is_active=False,
+        )
+        record_cloud_ip_log(
+            event_type=CloudIpLog.EVENT_RECYCLED,
+            asset=asset,
+            previous_public_ip='52.77.18.249',
+            public_ip=None,
+            note='固定 IP 保留期结束，AWS 固定 IP 已真实释放：StaticIp-real-release-history',
+        )
+        staff_user = get_user_model().objects.create_user(username='staff_lifecycle_ip_real_release_history', password='x', is_staff=True)
+        request = self.factory.get('/api/admin/tasks/plans/', {'refresh': 1, 'limit': 1000})
+        request.user = staff_user
+
+        response = lifecycle_plans(request)
+        data = json.loads(response.content)['data']
+        rows = [item for item in data['ip_delete_items'] if item.get('is_history') and item.get('public_ip') == '52.77.18.249']
+
+        self.assertTrue(rows)
+        self.assertGreaterEqual(data['ip_delete_history_count'], 1)
+
+    # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
     def test_lifecycle_plans_sort_shutdown_items_by_delete_time(self):
         later_asset = CloudAsset.objects.create(
             kind=CloudAsset.KIND_SERVER,
