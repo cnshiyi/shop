@@ -605,6 +605,37 @@ The focused DB test run is blocked by local MySQL test database permissions:
 Access denied for user 'a'@'localhost' to database 'test_a'
 ```
 
+## 2026-06-02 cloud-dashboard-api-domain-split
+
+### Scope
+
+Twenty-second refactor pass split the remaining cloud dashboard API monolith into asset, order, and task modules while preserving `cloud.api` as the URL compatibility facade.
+
+### Runtime Changes
+
+- Added `cloud/api_assets.py` for proxy/asset list payloads, asset risk summaries, asset editing, auto-renew toggles, and dashboard snapshot refreshes.
+- Added `cloud/api_orders.py` for cloud order list/detail payloads, order status updates, order detail saves, and protected order deletion.
+- Added `cloud/api_tasks.py` for legacy task overview, notice plan detail/refresh, notice switch/text APIs, auto-renew detail, and manual auto-renew execution.
+- Reduced `cloud/api.py` from 4249 lines to 460 lines; it now keeps compatibility imports plus single-asset status sync, server sync, cloud plan sync, and delete-asset handling.
+- Kept legacy `cloud.api.*` patch/import points for existing tests and operators by routing patched symbols back into the new modules.
+- Added structured logs for cloud order status application, order detail updates, cloud asset deletion, and server sync start/finish.
+- Fixed a latent `sync_servers()` `cancelled` local variable error by explicitly initializing the flag.
+
+### Verification
+
+Passed locally:
+
+```bash
+uv run python -m py_compile cloud/api.py cloud/api_assets.py cloud/api_orders.py cloud/api_tasks.py
+uv run python manage.py check
+git diff --check
+DJANGO_TEST_REUSE_DB=1 uv run python manage.py test cloud.tests.CloudServerServicesTestCase.test_cloud_orders_list_exposes_auto_renew_enabled cloud.tests.CloudServerServicesTestCase.test_sync_servers_missing_state_does_not_bypass_provider_confirmation cloud.tests.CloudServerServicesTestCase.test_cloud_assets_list_uses_bulk_order_inference_without_per_asset_fallback cloud.tests.CloudServerServicesTestCase.test_sync_cloud_asset_status_uses_asset_scope cloud.tests.CloudServerServicesTestCase.test_notice_task_detail_uses_cloud_notice_plan_table cloud.tests.CloudServerServicesTestCase.test_auto_renew_task_detail_includes_due_retry_and_fallback_items cloud.tests_task_center.CloudTaskCenterApiTestCase --keepdb --noinput --verbosity 1
+```
+
+Notes:
+
+- The older direct `RequestFactory` POST tests that do not attach dashboard Bearer credentials still return 401 under the current dashboard write-auth policy; they were not used as pass/fail gates for this split.
+
 ## 2026-06-01 cloud-sync-worker-and-status-tracking
 
 ### Scope
