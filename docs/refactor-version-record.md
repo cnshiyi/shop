@@ -210,3 +210,28 @@ Passed locally:
 uv run python -m py_compile bot/api.py bot/api_admin_users.py bot/api_products.py
 uv run python manage.py check
 ```
+
+## 2026-06-01 bot-site-config-api-split
+
+### Scope
+
+Sixth refactor pass moved site configuration and button/text configuration dashboard endpoints out of `bot/api.py`.
+
+### Runtime Changes
+
+- Added `bot/api_site_configs.py` for:
+  - site config list/group/update/init
+  - text config initialization
+  - button config read/update/init
+  - daily expiry summary notification test
+- Preserved compatibility exports from `bot/api.py` for the moved view names and private payload helpers.
+- Removed now-unused config/text/button imports from `bot/api.py`.
+
+### Verification
+
+Passed locally:
+
+```bash
+uv run python -m py_compile bot/api.py bot/api_site_configs.py
+uv run python manage.py check
+```
