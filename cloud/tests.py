@@ -5485,6 +5485,59 @@ class CloudServerServicesTestCase(TestCase):
         self.assertEqual(asset.mtproxy_port, 8443)
 
     # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
+    def test_mark_success_preserves_existing_manual_asset_fields_on_update(self):
+        existing_owner = TelegramUser.objects.create(tg_user_id=21989111, username='manual_asset_owner')
+        old_expiry = timezone.now() + timezone.timedelta(days=13)
+        old_link = 'tg://proxy?server=1.2.3.5&port=8443&secret=old-secret'
+        order = CloudServerOrder.objects.create(
+            order_no='HB-TEST-PROVISION-MANUAL-ASSET',
+            user=self.user,
+            plan=self.plan,
+            provider=self.plan.provider,
+            region_code=self.plan.region_code,
+            region_name=self.plan.region_name,
+            plan_name=self.plan.plan_name,
+            quantity=1,
+            currency='USDT',
+            total_amount='19.00',
+            pay_amount='19.00',
+            pay_method='balance',
+            status='paid',
+            mtproxy_port=8443,
+        )
+
+        async_to_sync(_mark_provisioning_start)(order.id, 'sg-test-node-02')
+        asset = CloudAsset.objects.get(order=order, kind=CloudAsset.KIND_SERVER)
+        asset.user = existing_owner
+        asset.actual_expires_at = old_expiry
+        asset.mtproxy_host = '1.2.3.5'
+        asset.mtproxy_port = 8443
+        asset.mtproxy_secret = 'old-secret'
+        asset.mtproxy_link = old_link
+        asset.proxy_links = [{'name': '主代理 mtg', 'server': '1.2.3.5', 'port': '8443', 'secret': 'old-secret', 'url': old_link}]
+        asset.save(update_fields=['user', 'actual_expires_at', 'mtproxy_host', 'mtproxy_port', 'mtproxy_secret', 'mtproxy_link', 'proxy_links', 'updated_at'])
+
+        async_to_sync(_mark_success)(
+            order.id,
+            'sg-test-node-02',
+            'ins-002',
+            '1.2.3.5',
+            'root',
+            'pass',
+            'MTProxy 安装完成\n状态: 运行正常\n端口: 8443',
+            '',
+        )
+
+        self.assertEqual(CloudAsset.objects.filter(order=order, kind=CloudAsset.KIND_SERVER).count(), 1)
+        asset.refresh_from_db()
+        self.assertEqual(asset.user_id, existing_owner.id)
+        self.assertEqual(asset.actual_expires_at, old_expiry)
+        self.assertEqual(asset.mtproxy_link, old_link)
+        self.assertEqual(asset.mtproxy_secret, 'old-secret')
+        self.assertEqual(asset.mtproxy_port, 8443)
+        self.assertEqual(asset.proxy_links[0]['url'], old_link)
+
+    # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
     def test_sync_aws_assets_requires_database_cloud_account(self):
         with self.assertRaisesMessage(CommandError, '未添加启用的 AWS 云账号'):
             call_command('sync_aws_assets', region='ap-southeast-1')

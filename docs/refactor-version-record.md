@@ -1,5 +1,28 @@
 # Refactor Version Record
 
+## 2026-06-02 provisioning-asset-field-preservation
+
+### Scope
+
+Small provisioning write-path safety pass for existing cloud assets.
+
+### Runtime Changes
+
+- `_mark_success` no longer runs a duplicate `CloudAsset.update_or_create()` before the shared asset upsert helper.
+- `_upsert_server_asset()` now preserves existing asset owner, expiry, MTProxy link, secret, host, port, and proxy-link list when updating an existing asset, while still filling blank fields from the order.
+- New asset creation still receives order runtime fields including MTProxy data, price, and currency.
+- Added focused regression coverage that provisioning success does not duplicate assets or overwrite existing manual asset fields.
+
+### Verification
+
+Passed locally with `PYTHONDONTWRITEBYTECODE=1 DJANGO_TEST_SQLITE=1`:
+
+```bash
+uv run python -m py_compile cloud/provisioning.py cloud/tests.py
+uv run python manage.py check
+uv run python manage.py test cloud.tests.CloudServerServicesTestCase.test_mark_success_updates_existing_server_asset_instead_of_creating_duplicate cloud.tests.CloudServerServicesTestCase.test_mark_success_preserves_existing_manual_asset_fields_on_update cloud.tests.CloudServerServicesTestCase.test_asset_renewal_mark_success_starts_new_service_period --noinput --verbosity 1
+```
+
 ## 2026-06-02 mtproxy-link-write-consistency
 
 ### Scope
