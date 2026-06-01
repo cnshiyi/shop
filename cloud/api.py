@@ -958,8 +958,6 @@ def update_cloud_asset(request, asset_id):
                 if asset.order_id and not is_unattached_ip:
                     pending_order_updates['user_id'] = owner_target.id
                     pending_order_updates['last_user_id'] = getattr(owner_target, 'tg_user_id', None)
-                if server:
-                    server.user = owner_target
 
             group_lookup_provided = 'telegram_group_query' in payload or 'telegram_group_id' in payload
             if group_lookup_provided:
@@ -1004,9 +1002,6 @@ def update_cloud_asset(request, asset_id):
                 if asset.order_id and asset.order.currency != asset.currency:
                     pending_order_updates['currency'] = asset.currency
 
-            if server and 'account_label' in payload:
-                server.account_label = payload.get('account_label') or None
-
             manual_expires_at = None
             if 'actual_expires_at' in payload:
                 try:
@@ -1014,8 +1009,6 @@ def update_cloud_asset(request, asset_id):
                     asset.actual_expires_at = manual_expires_at
                 except ValueError as exc:
                     return _error(str(exc), status=400)
-                if server:
-                    server.expires_at = asset.actual_expires_at
                 if asset.order_id and not is_unattached_ip:
                     refresh_snapshots_needed = True
                     same_order_active_assets = CloudAsset.objects.filter(
@@ -1075,31 +1068,9 @@ def update_cloud_asset(request, asset_id):
             for field in ('provider', 'region_name', 'region_code'):
                 if field in payload:
                     setattr(asset, field, payload.get(field) or None)
-            if server:
-                if 'asset_name' in payload:
-                    server.server_name = payload.get('asset_name') or None
-                if 'public_ip' in payload:
-                    old_server_public_ip = server.public_ip
-                    server.public_ip = payload.get('public_ip') or None
-                    if old_server_public_ip and old_server_public_ip != server.public_ip:
-                        server.previous_public_ip = old_server_public_ip
-                if 'provider_resource_id' in payload:
-                    server.provider_resource_id = payload.get('provider_resource_id') or None
-                if 'instance_id' in payload:
-                    server.instance_id = payload.get('instance_id') or None
-                if 'provider' in payload:
-                    server.provider = payload.get('provider') or None
-                if 'region_name' in payload:
-                    server.region_name = payload.get('region_name') or None
-                if 'region_code' in payload:
-                    server.region_code = payload.get('region_code') or None
-                if 'note' in payload:
-                    server.note = payload.get('note') or None
             if 'is_active' in payload:
                 refresh_snapshots_needed = True
                 asset.is_active = str(payload.get('is_active')).lower() in {'1', 'true', 'yes', 'on'}
-                if server:
-                    server.is_active = asset.is_active
 
             if 'sort_order' in payload:
                 sort_order = payload.get('sort_order')
@@ -1415,7 +1386,6 @@ def _apply_cloud_assets_keyword(queryset, keyword):
         'order__region_name', 'order__instance_id', 'order__provider_resource_id',
         'order__static_ip_name', 'order__public_ip', 'order__previous_public_ip',
         'order__mtproxy_host', 'order__mtproxy_link', 'order__provision_note',
-        'order__server__server_name', 'order__server__note',
     ]
     direct_condition = Q()
     for field in direct_fields:
@@ -1456,7 +1426,6 @@ def _apply_cloud_assets_direct_keyword(queryset, keyword):
             'order__region_name', 'order__instance_id', 'order__provider_resource_id',
             'order__static_ip_name', 'order__public_ip', 'order__previous_public_ip',
             'order__mtproxy_host', 'order__mtproxy_link', 'order__provision_note',
-            'order__server__server_name', 'order__server__note',
         ],
     )
 
@@ -3461,97 +3430,6 @@ def delete_cloud_order(request, order_id):
     return _ok(True)
 
 
-def _server_payload(asset):
-    user = asset.user
-    user_payload = None
-    if user:
-        usernames = user.usernames
-        user_payload = _user_payload({
-            'id': user.id,
-            'tg_user_id': user.tg_user_id,
-            'username': user.username,
-            'first_name': user.first_name,
-            'usernames': usernames,
-            'primary_username': usernames[0] if usernames else '',
-        })
-    order = asset.order
-    return {
-        'id': asset.id,
-        'status': asset.status,
-        'status_label': '旧机保留中' if asset.status == CloudAsset.STATUS_DELETING and '旧机保留期' in str(asset.provider_status or '') else _status_label(asset.status, CloudAsset.STATUS_CHOICES),
-        'source': asset.source,
-        'source_label': _server_source_label(asset.source),
-        'provider': asset.provider,
-        'provider_label': _provider_label(asset.provider),
-        'account_label': asset.account_label,
-        'region_label': _region_label(asset.region_code, asset.region_name),
-        'region_name': asset.region_name,
-        'server_name': asset.asset_name,
-        'instance_id': asset.instance_id,
-        'provider_resource_id': asset.provider_resource_id,
-        'public_ip': asset.public_ip,
-        'login_user': asset.login_user,
-        'expires_at': _iso(asset.actual_expires_at),
-        'days_left': _days_left(asset.actual_expires_at),
-        'status_countdown': _countdown_label(asset.actual_expires_at),
-        'user_id': user.id if user else None,
-        'tg_user_id': user.tg_user_id if user else None,
-        'user_display_name': user_payload['display_name'] if user_payload else '未绑定用户',
-        'username_label': user_payload['username_label'] if user_payload else '-',
-        'order_id': order.id if order else None,
-        'order_no': order.order_no if order else '',
-        'order_detail_path': f'/admin/cloud-orders/{order.id}' if order else '',
-        'provider_status': '已删除' if asset.status == CloudAsset.STATUS_DELETED else _provider_status_label(asset.provider_status),
-        'preserve_link_status': _preserve_link_status_with_countdown(
-            _preserve_link_status_label(asset.note, getattr(order, 'provision_note', None)),
-            _countdown_label(asset.actual_expires_at),
-        ),
-        'is_active': asset.is_active,
-        'updated_at': _iso(asset.updated_at),
-    }
-
-
-@dashboard_login_required
-@require_GET
-def servers_list(request):
-    keyword = _get_keyword(request)
-    dedup_raw = (request.GET.get('dedup') or '').lower()
-    dedup = dedup_raw not in {'0', 'false', 'no', 'off'}
-    sort_by = (request.GET.get('sort_by') or '').strip().lower()
-    sort_direction = _dashboard_sort_direction(request)
-    ordering = ['actual_expires_at', '-updated_at', '-id']
-    if sort_by in {'expires_at', 'days_left', 'remaining_days'}:
-        ordering = _dashboard_expiry_ordering('actual_expires_at', sort_direction)
-    unattached_ip_q = (
-        (Q(provider_status__icontains='未附加') | Q(note__icontains='未附加IP') | Q(note__icontains='未附加固定IP'))
-        & (Q(instance_id__isnull=True) | Q(instance_id=''))
-    )
-    queryset = CloudAsset.objects.select_related('user', 'order').filter(kind=CloudAsset.KIND_SERVER).exclude(status=CloudAsset.STATUS_DELETED).exclude(public_ip__isnull=True).exclude(public_ip='').exclude(unattached_ip_q).order_by(*ordering)
-    queryset = _apply_keyword_filter(
-        queryset,
-        keyword,
-        ['asset_name', 'instance_id', 'public_ip', 'account_label', 'provider', 'region_name', 'user__tg_user_id', 'user__username', 'order__order_no'],
-    )
-    provider = (request.GET.get('provider') or '').strip()
-    region_code = (request.GET.get('region_code') or '').strip()
-    if provider:
-        queryset = queryset.filter(provider=provider)
-    if region_code:
-        queryset = queryset.filter(region_code=region_code)
-    items = [_server_payload(server) for server in queryset[:500]]
-    if dedup:
-        seen = set()
-        deduped = []
-        for item in items:
-            dedup_key = (item.get('provider') or '', item.get('instance_id') or '', item.get('public_ip') or '', item.get('server_name') or '')
-            if dedup_key in seen:
-                continue
-            seen.add(dedup_key)
-            deduped.append(item)
-        items = deduped
-    return _ok(items)
-
-
 def _append_provision_note(order, note):
     if not note:
         return order.provision_note
@@ -3807,27 +3685,6 @@ def _run_rebuild_job(new_order_id: int):
 
 @csrf_exempt
 @dashboard_superuser_required
-@require_POST
-def rebuild_server_preserve_link(request, server_id: int):
-    asset = CloudAsset.objects.select_related('order').filter(id=server_id, kind=CloudAsset.KIND_SERVER).first()
-    if not asset or not asset.order_id:
-        return _error('服务器不存在或未关联订单', status=404)
-    order, error = create_cloud_server_rebuild_order(asset.order_id)
-    if error:
-        return _error(error, status=400)
-    thread = threading.Thread(target=_run_rebuild_job, args=(order.id,), daemon=True)
-    thread.start()
-    return _ok({
-        'accepted': True,
-        'message': '已发起 AWS 重装迁移，后台失败会自动重试（最多 3 次），成功后旧实例保留 3 天再删除。',
-        'order_id': order.id,
-        'order_no': order.order_no,
-        'replacement_for_id': order.replacement_for_id,
-    })
-
-
-@csrf_exempt
-@dashboard_superuser_required
 @require_http_methods(['POST', 'DELETE'])
 def delete_cloud_asset(request, asset_id: int):
     asset = CloudAsset.objects.select_related('order').filter(id=asset_id).first()
@@ -3906,315 +3763,6 @@ def delete_cloud_asset(request, asset_id: int):
         'removed_server_ids': [],
         'order_status_changed': order_status_changed,
     })
-
-
-@csrf_exempt
-@dashboard_superuser_required
-@require_http_methods(['POST', 'DELETE'])
-def delete_server(request, server_id: int):
-    asset = CloudAsset.objects.select_related('order').filter(id=server_id, kind=CloudAsset.KIND_SERVER).first()
-    if not asset:
-        return _error('服务器不存在', status=404)
-    now = timezone.now()
-    before_status = asset.status
-    note = f'后台手动删除服务器列表记录；时间: {now.isoformat()}'
-    previous_public_ip = asset.public_ip or asset.previous_public_ip
-    order = asset.order
-
-    record_cloud_ip_log(event_type='deleted', order=order, asset=asset, previous_public_ip=previous_public_ip, public_ip=None, note=note)
-    asset.delete()
-    return _ok({
-        'target_type': 'cloud_asset',
-        'target_id': server_id,
-        'before_status': before_status,
-        'after_status': None,
-        'hard_deleted': True,
-        'exists_after': CloudAsset.objects.filter(id=server_id, kind=CloudAsset.KIND_SERVER).exists(),
-        'removed_assets': 0,
-        'order_status_changed': False,
-    })
-
-
-def _statistics_account_label(account) -> str:
-    return cloud_account_label(account)
-
-
-def _cloud_account_labels_queryset(is_active: bool | None = None):
-    queryset = CloudAccountConfig.objects.filter(
-        provider__in=[CloudAccountConfig.PROVIDER_AWS, CloudAccountConfig.PROVIDER_ALIYUN],
-    )
-    if is_active is not None:
-        queryset = queryset.filter(is_active=is_active)
-    labels = []
-    for account in queryset:
-        labels.extend(cloud_account_label_variants(account))
-    return list(dict.fromkeys(labels))
-
-
-@dashboard_login_required
-@require_GET
-def servers_statistics(request):
-    keyword = _get_keyword(request)
-    aws_regions = [{'region_code': code, 'region_label': label} for code, label in AWS_REGION_NAMES.items()]
-    region_pairs = [*aws_regions, {'region_code': 'cn-hongkong', 'region_label': '香港'}]
-    region_codes = [item['region_code'] for item in region_pairs]
-
-    active_statuses = [
-        CloudAsset.STATUS_RUNNING,
-        CloudAsset.STATUS_PENDING,
-        CloudAsset.STATUS_STARTING,
-        CloudAsset.STATUS_STOPPED,
-        CloudAsset.STATUS_SUSPENDED,
-        CloudAsset.STATUS_EXPIRED_GRACE,
-    ]
-    active_account_labels = _cloud_account_labels_queryset(True)
-    inactive_account_labels = _cloud_account_labels_queryset(False)
-    queryset = CloudAsset.objects.select_related('order', 'order__cloud_account').filter(kind=CloudAsset.KIND_SERVER, status__in=active_statuses).exclude(
-        account_label__in=inactive_account_labels,
-    ).filter(
-        Q(account_label__in=active_account_labels)
-        | Q(account_label__isnull=True)
-        | Q(account_label='')
-        | Q(order__cloud_account__is_active=True)
-    )
-    if keyword:
-        queryset = _apply_keyword_filter(
-            queryset,
-            keyword,
-            ['region_code', 'region_name', 'provider', 'account_label', 'asset_name', 'instance_id', 'public_ip'],
-        )
-    rows = list(
-        queryset
-        .values('provider', 'region_code', 'region_name', 'account_label')
-        .annotate(total_count=Count('id'))
-        .order_by('account_label', 'provider', 'region_name')
-    )
-
-    account_map = {}
-    active_accounts = list(CloudAccountConfig.objects.filter(provider__in=[CloudAccountConfig.PROVIDER_AWS, CloudAccountConfig.PROVIDER_ALIYUN], is_active=True).order_by('provider', 'id'))
-    for account in active_accounts:
-        technical_label = cloud_account_label(account)
-        display_label = _statistics_account_label(account)
-        if keyword and keyword.lower() not in technical_label.lower() and keyword.lower() not in display_label.lower() and keyword.lower() not in account.provider.lower():
-            has_server_match = any((row.get('account_label') or '') == technical_label for row in rows)
-            if not has_server_match:
-                continue
-        account_map[technical_label] = {
-            'account_id': technical_label,
-            'account_label': display_label,
-            'provider_label': 'AWS' if account.provider == CloudAccountConfig.PROVIDER_AWS else '阿里云',
-            'regions': {},
-            'total_count': 0,
-            'sort_key': (account.provider, account.id),
-        }
-
-    for row in rows:
-        technical_label = row['account_label'] or '-'
-        entry = account_map.setdefault(
-            technical_label,
-            {
-                'account_id': technical_label,
-                'account_label': technical_label,
-                'provider_label': _provider_label(row['provider']),
-                'regions': {},
-                'total_count': 0,
-                'sort_key': (row['provider'] or '', 999999, technical_label),
-            },
-        )
-        region_key = row['region_code'] or _region_label(row['region_code'] or '', row['region_name'])
-        if region_key not in region_codes:
-            continue
-        count = row['total_count']
-        entry['regions'][region_key] = entry['regions'].get(region_key, 0) + count
-        entry['total_count'] += count
-
-    items = []
-    totals = {'account_id': '合计', 'account_label': '合计', 'provider_label': '-', 'regions': {}, 'total_count': 0}
-    for technical_label, entry in sorted(account_map.items(), key=lambda item: item[1]['sort_key']):
-        row_payload = {
-            'account_id': entry['account_id'],
-            'account_label': entry['account_label'],
-            'provider_label': entry['provider_label'],
-            'total_count': entry['total_count'],
-        }
-        for region in region_pairs:
-            region_key = region['region_code']
-            value = entry['regions'].get(region_key, 0)
-            row_payload[region_key] = value
-            totals['regions'][region_key] = totals['regions'].get(region_key, 0) + value
-        totals['total_count'] += entry['total_count']
-        items.append(row_payload)
-
-    total_row = {
-        'account_id': totals['account_id'],
-        'account_label': totals['account_label'],
-        'provider_label': totals['provider_label'],
-        'total_count': totals['total_count'],
-    }
-    for region in region_pairs:
-        total_row[region['region_code']] = totals['regions'].get(region['region_code'], 0)
-
-    return _ok({
-        'regions': region_pairs,
-        'items': items,
-        'summary': total_row,
-    })
-
-
-@csrf_exempt
-@dashboard_superuser_required
-@require_http_methods(['POST'])
-def create_cloud_plan(request):
-    data = _read_payload(request)
-    provider = (data.get('provider') or '').strip()
-    region_code = (data.get('region_code') or '').strip()
-    region_name = (data.get('region_name') or '').strip()
-    plan_name = (data.get('plan_name') or '').strip()
-    if not provider or not region_code or not region_name or not plan_name:
-        return _error('云厂商、地区代码、地区名称、套餐名不能为空')
-    provider_plan_id = (data.get('provider_plan_id') or '').strip()
-    resolved_config_id = _resolve_cloud_plan_config_id(
-        provider=provider,
-        region_code=region_code,
-        provider_plan_id=provider_plan_id,
-        config_id=(data.get('config_id') or '').strip(),
-    )
-    try:
-        payload_fields = {
-            'provider': provider,
-            'region_code': region_code,
-            'region_name': region_name,
-            'config_id': resolved_config_id,
-            'provider_plan_id': provider_plan_id,
-            'plan_name': plan_name,
-            'plan_description': ((data.get('plan_description') or data.get('display_description') or '').strip()),
-            'display_plan_name': (data.get('display_plan_name') or '').strip(),
-            'display_cpu': (data.get('display_cpu') or '').strip(),
-            'display_memory': (data.get('display_memory') or '').strip(),
-            'display_storage': (data.get('display_storage') or '').strip(),
-            'display_bandwidth': (data.get('display_bandwidth') or '').strip(),
-            'display_description': (data.get('display_description') or '').strip(),
-            'cpu': (data.get('cpu') or '').strip(),
-            'memory': (data.get('memory') or '').strip(),
-            'storage': (data.get('storage') or '').strip(),
-            'bandwidth': (data.get('bandwidth') or '').strip(),
-            'cost_price': _parse_decimal(data.get('cost_price') or 0, '进货价').quantize(Decimal('0.01')),
-            'price': _parse_decimal(data.get('price') or 0, '出售价').quantize(Decimal('0.01')),
-            'currency': (data.get('currency') or 'USDT').strip() or 'USDT',
-            'sort_order': int(data.get('sort_order') or 0),
-            'is_active': str(data.get('is_active', True)).lower() in {'1', 'true', 'yes', 'on'},
-        }
-        existed = CloudServerPlan.objects.filter(
-            provider=provider,
-            region_code=region_code,
-            config_id=resolved_config_id,
-        ).order_by('-id').first()
-        if existed:
-            for field, value in payload_fields.items():
-                setattr(existed, field, value)
-            existed.is_active = True
-            existed.save()
-            plan = existed
-        else:
-            plan = CloudServerPlan.objects.create(**payload_fields)
-    except IntegrityError:
-        return _error('同地区下已存在同厂商配置ID', status=400)
-    except (InvalidOperation, TypeError, ValueError):
-        return _error('提交的套餐数据格式不正确', status=400)
-    async_to_sync(refresh_custom_plan_cache)()
-    return _ok(_cloud_plan_payload(plan))
-
-
-@csrf_exempt
-@dashboard_superuser_required
-@require_http_methods(['POST'])
-def delete_cloud_plan(request, plan_id: int):
-    plan = CloudServerPlan.objects.filter(id=plan_id).first()
-    if not plan:
-        return _error('套餐不存在', status=404)
-    if CloudServerOrder.objects.filter(plan_id=plan_id).exists():
-        return _error('该套餐已有订单引用，无法删除，请改为停用', status=400)
-    plan.delete()
-    async_to_sync(refresh_custom_plan_cache)()
-    return _ok({'id': plan_id, 'deleted': True})
-
-
-@csrf_exempt
-@dashboard_superuser_required
-@require_http_methods(['POST'])
-def update_cloud_plan(request, plan_id: int):
-    plan = CloudServerPlan.objects.filter(id=plan_id).first()
-    if not plan:
-        return _error('套餐不存在', status=404)
-    data = _read_payload(request)
-    plan_name = (data.get('plan_name') or '').strip()
-    display_description = (data.get('display_description') or '').strip()
-    plan_description = (data.get('plan_description') or display_description).strip()
-    price = data.get('price')
-    cost_price = data.get('cost_price')
-    sort_order = data.get('sort_order')
-    is_active = data.get('is_active')
-    try:
-        config_id = (data.get('config_id') or '').strip()
-        provider_plan_id = (data.get('provider_plan_id') or '').strip()
-        next_provider = (data.get('provider') or '').strip() or plan.provider
-        next_region_code = (data.get('region_code') or '').strip() or plan.region_code
-        next_provider_plan_id = provider_plan_id if 'provider_plan_id' in data else plan.provider_plan_id
-        resolved_config_id = _resolve_cloud_plan_config_id(
-            provider=next_provider,
-            region_code=next_region_code,
-            provider_plan_id=next_provider_plan_id,
-            config_id=config_id if 'config_id' in data else plan.config_id,
-        )
-        plan.config_id = resolved_config_id
-        if 'provider_plan_id' in data:
-            plan.provider_plan_id = provider_plan_id
-        if plan_name:
-            plan.plan_name = plan_name
-        if 'provider' in data:
-            plan.provider = (data.get('provider') or '').strip() or plan.provider
-        if 'region_code' in data:
-            plan.region_code = (data.get('region_code') or '').strip() or plan.region_code
-        if 'region_name' in data:
-            plan.region_name = (data.get('region_name') or '').strip() or plan.region_name
-        if 'display_plan_name' in data:
-            plan.display_plan_name = (data.get('display_plan_name') or '').strip()
-        if 'display_cpu' in data:
-            plan.display_cpu = (data.get('display_cpu') or '').strip()
-        if 'display_memory' in data:
-            plan.display_memory = (data.get('display_memory') or '').strip()
-        if 'display_storage' in data:
-            plan.display_storage = (data.get('display_storage') or '').strip()
-        if 'display_bandwidth' in data:
-            plan.display_bandwidth = (data.get('display_bandwidth') or '').strip()
-        if 'display_description' in data:
-            plan.display_description = display_description
-        if 'cpu' in data:
-            plan.cpu = (data.get('cpu') or '').strip()
-        if 'memory' in data:
-            plan.memory = (data.get('memory') or '').strip()
-        if 'storage' in data:
-            plan.storage = (data.get('storage') or '').strip()
-        if 'bandwidth' in data:
-            plan.bandwidth = (data.get('bandwidth') or '').strip()
-        if 'currency' in data:
-            plan.currency = (data.get('currency') or 'USDT').strip() or 'USDT'
-        plan.plan_description = plan_description
-        if price not in (None, ''):
-            plan.price = Decimal(str(price))
-        if cost_price not in (None, ''):
-            plan.cost_price = Decimal(str(cost_price))
-        if sort_order not in (None, ''):
-            plan.sort_order = int(sort_order)
-        if is_active not in (None, ''):
-            plan.is_active = str(is_active).lower() in {'1', 'true', 'yes', 'on'}
-        plan.save()
-    except IntegrityError:
-        return _error('同地区下已存在同厂商配置ID', status=400)
-    except (InvalidOperation, ValueError):
-        return _error('提交的套餐数据格式不正确')
-    async_to_sync(refresh_custom_plan_cache)()
-    return _ok(_cloud_plan_payload(plan))
 
 
 def _apply_server_missing_state(provider, region, existing_instance_ids, account=None):
@@ -4769,117 +4317,6 @@ def sync_cloud_plans(request):
     })
 
 
-def _resolve_cloud_plan_config_id(provider: str, region_code: str, provider_plan_id: str, config_id: str = '') -> str:
-    explicit = str(config_id or '').strip()
-    if explicit:
-        return explicit
-    bundle_code = str(provider_plan_id or '').strip()
-    if bundle_code:
-        matched_price = ServerPrice.objects.filter(
-            provider=provider,
-            region_code=region_code,
-            bundle_code=bundle_code,
-            is_active=True,
-        ).only('config_id').first()
-        if matched_price and str(matched_price.config_id or '').strip():
-            return matched_price.config_id.strip()
-    return _generate_cloud_plan_config_id()
-
-
-def _cloud_plan_payload(plan):
-    return {
-        'id': plan.id,
-        'provider': plan.provider,
-        'provider_label': _provider_label(plan.provider),
-        'region_code': plan.region_code,
-        'region_name': plan.region_name,
-        'region_label': _region_label(plan.region_code, plan.region_name),
-        'config_id': plan.config_id,
-        'provider_plan_id': plan.provider_plan_id,
-        'plan_name': plan.plan_name,
-        'plan_description': plan.plan_description,
-        'display_plan_name': plan.display_plan_name,
-        'display_cpu': plan.display_cpu,
-        'display_memory': plan.display_memory,
-        'display_storage': plan.display_storage,
-        'display_bandwidth': plan.display_bandwidth,
-        'display_description': plan.display_description,
-        'cpu': plan.cpu,
-        'memory': plan.memory,
-        'storage': plan.storage,
-        'bandwidth': plan.bandwidth,
-        'cost_price': _decimal_to_str(getattr(plan, 'cost_price', 0)),
-        'price': _decimal_to_str(plan.price),
-        'currency': plan.currency,
-        'sort_order': plan.sort_order,
-        'is_active': plan.is_active,
-        'updated_at': _iso(plan.updated_at),
-    }
-
-
-def _server_price_payload(price):
-    return {
-        'id': price.id,
-        'provider': price.provider,
-        'region_code': price.region_code,
-        'region_name': price.region_name,
-        'config_id': price.config_id,
-        'bundle_code': price.bundle_code,
-        'plan_name': price.server_name,
-        'server_name': price.server_name,
-        'plan_description': price.server_description or '',
-        'server_description': price.server_description or '',
-        'cpu': price.cpu,
-        'memory': price.memory,
-        'storage': price.storage,
-        'bandwidth': price.bandwidth,
-        'cost_price': _decimal_to_str(getattr(price, 'cost_price', 0)),
-        'price': _decimal_to_str(price.price),
-        'currency': price.currency,
-        'sort_order': price.sort_order,
-        'is_active': price.is_active,
-        'updated_at': _iso(price.updated_at),
-    }
-
-
-@dashboard_login_required
-@require_GET
-def cloud_pricing_list(request):
-    keyword = _get_keyword(request)
-    queryset = ServerPrice.objects.filter(is_active=True).order_by('provider', 'region_code', '-sort_order', 'id')
-    queryset = _apply_keyword_filter(
-        queryset,
-        keyword,
-        ['provider', 'region_code', 'region_name', 'bundle_code', 'server_name', 'server_description', 'cpu', 'memory', 'storage', 'bandwidth'],
-    )
-    provider = (request.GET.get('provider') or '').strip()
-    region_code = (request.GET.get('region_code') or '').strip()
-    if provider:
-        queryset = queryset.filter(provider=provider)
-    if region_code:
-        queryset = queryset.filter(region_code=region_code)
-    return _ok([_server_price_payload(item) for item in queryset])
-
-
-@dashboard_login_required
-@require_GET
-def cloud_plans_list(request):
-    keyword = _get_keyword(request)
-    queryset = CloudServerPlan.objects.filter(is_active=True).order_by('provider', 'region_code', '-sort_order', 'id')
-    queryset = _apply_keyword_filter(
-        queryset,
-        keyword,
-        ['provider', 'region_code', 'region_name', 'plan_name', 'plan_description', 'cpu', 'memory', 'storage', 'bandwidth'],
-    )
-    provider = (request.GET.get('provider') or '').strip()
-    region_code = (request.GET.get('region_code') or '').strip()
-    if provider:
-        queryset = queryset.filter(provider=provider)
-    if region_code:
-        queryset = queryset.filter(region_code=region_code)
-    return _ok([_cloud_plan_payload(item) for item in queryset])
-
-
 def _cloud_ip_log_note_newest_first(note):
     text = str(note or '').strip()
     if not text:
@@ -5021,7 +4458,7 @@ def cloud_assets_sync_status(request):
 def cloud_ip_logs_list(request):
     keyword = _get_keyword(request)
     log_type = (request.GET.get('log_type') or 'ip').strip()
-    queryset = CloudIpLog.objects.select_related('user', 'order', 'asset', 'server').order_by('-created_at', '-id')
+    queryset = CloudIpLog.objects.select_related('user', 'order', 'asset').order_by('-created_at', '-id')
     queryset = _apply_keyword_filter(
         queryset,
         keyword,
@@ -5030,7 +4467,6 @@ def cloud_ip_logs_list(request):
     if log_type == 'server':
         queryset = queryset.filter(
             Q(order__isnull=False)
-            | Q(server__isnull=False)
             | Q(asset__kind=CloudAsset.KIND_SERVER)
         )
     elif log_type == 'operation':
@@ -5074,6 +4510,24 @@ def monitors_list(request):
             'username': item.pop('user__username', None),
         })
     return _ok(payload)
+
+
+from cloud.api_servers import (  # noqa: E402
+    delete_server,
+    rebuild_server_preserve_link,
+    servers_list,
+    servers_statistics,
+)
+from cloud.api_plans import (  # noqa: E402
+    _cloud_plan_payload,
+    _resolve_cloud_plan_config_id,
+    _server_price_payload,
+    cloud_plans_list,
+    cloud_pricing_list,
+    create_cloud_plan,
+    delete_cloud_plan,
+    update_cloud_plan,
+)
 
 
 __all__ = [

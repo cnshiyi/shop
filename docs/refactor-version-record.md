@@ -127,3 +127,40 @@ uv run python manage.py migrate --plan
 - Physically split `cloud/api.py`.
 - Physically split `bot/api.py`.
 - Rename legacy server wording inside sync commands and tests from `Server` to `CloudAsset` once test coverage is adjusted.
+
+## 2026-06-01 cloud-dashboard-api-split
+
+### Scope
+
+Third refactor pass focused on shrinking the oversized dashboard cloud API module while preserving existing URL imports.
+
+### Runtime Changes
+
+- Added `cloud/api_servers.py` for server-shaped `CloudAsset(kind='server')` dashboard endpoints:
+  - server list payloads
+  - server rebuild preserve-link action
+  - server delete action
+  - server statistics
+- Added `cloud/api_plans.py` for cloud plan/pricing dashboard endpoints:
+  - provider pricing list
+  - custom cloud plan list
+  - plan create/update/delete
+- `cloud/api.py` now imports these endpoint names at the bottom as compatibility exports, so `shop/dashboard_urls.py` can continue using `cloud_api.<view_name>`.
+
+### Cleanup
+
+- Removed remaining runtime writes to the retired `server` variable inside `update_cloud_asset`.
+- Removed removed ORM paths:
+  - `order__server__server_name`
+  - `order__server__note`
+  - `CloudIpLog.select_related('server')`
+  - `Q(server__isnull=False)`
+
+### Verification
+
+Passed locally:
+
+```bash
+uv run python -m py_compile cloud/api.py cloud/api_servers.py cloud/api_plans.py
+uv run python manage.py check
+```
