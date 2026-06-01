@@ -474,6 +474,14 @@ def _delete_asset_missing_in_aws(asset, *, old_public_ip, instance_name, server,
     ))
 
 
+def _copy_missing_confirmation_state(source, target):
+    if not target or getattr(source, 'id', None) == getattr(target, 'id', None):
+        return
+    target.provider_status = source.provider_status
+    target.sync_state = dict(getattr(source, 'sync_state', None) or {})
+    target.updated_at = getattr(source, 'updated_at', None) or timezone.now()
+
+
 def _mark_asset_missing_confirmation_in_aws(asset, *, old_public_ip, now_iso, server=None, stdout=None) -> bool:
     count, threshold = mark_missing_confirmation_pending(
         asset,
@@ -482,17 +490,11 @@ def _mark_asset_missing_confirmation_in_aws(asset, *, old_public_ip, now_iso, se
         provider_status=_MISSING_DELETED_STATUS,
         pending_status=f'{_MISSING_DELETED_STATUS}-待确认',
     )
+    _copy_missing_confirmation_state(asset, server)
     if count >= threshold:
         return True
     asset.save(update_fields=['provider_status', 'sync_state', 'updated_at'])
     if server and getattr(server, 'id', None) != getattr(asset, 'id', None):
-        mark_missing_confirmation_pending(
-            server,
-            old_public_ip=old_public_ip,
-            now_iso=now_iso,
-            provider_status=_MISSING_DELETED_STATUS,
-            pending_status=f'{_MISSING_DELETED_STATUS}-待确认',
-        )
         server.save(update_fields=['provider_status', 'sync_state', 'updated_at'])
     if stdout:
         stdout.stdout.write(stdout.style.WARNING(
@@ -731,7 +733,10 @@ def _mark_deleted_when_missing_in_aws(region, existing_instance_names, existing_
         Q(region_code=region) | Q(region_code='') | Q(region_code__isnull=True)
     ).order_by('-updated_at', '-id')
     now_iso = timezone.now().isoformat()
+    processed_record_ids = set()
     for asset in queryset:
+        if asset.id in processed_record_ids:
+            continue
         instance_name = str(asset.instance_id or '').strip()
         public_ip = str(asset.public_ip or '').strip()
         is_static_ip_asset = (
@@ -764,7 +769,11 @@ def _mark_deleted_when_missing_in_aws(region, existing_instance_names, existing_
                 server_queryset = server_queryset.filter(account_label__in=cloud_account_label_variants(account))
             server = server_queryset.order_by('-updated_at', '-id').first()
         order = getattr(asset, 'order', None) or _resolve_order_for_ip(old_public_ip, account)
+        related_ids = {asset.id}
+        if server and getattr(server, 'id', None):
+            related_ids.add(server.id)
         if not _mark_asset_missing_confirmation_in_aws(asset, old_public_ip=old_public_ip, now_iso=now_iso, server=server, stdout=stdout):
+            processed_record_ids.update(related_ids)
             continue
         _delete_asset_missing_in_aws(
             asset,
@@ -774,6 +783,7 @@ def _mark_deleted_when_missing_in_aws(region, existing_instance_names, existing_
             order=order,
             stdout=stdout,
         )
+        processed_record_ids.update(related_ids)
         verification_deleted_items.append(f'{asset.id}:{old_public_ip or "缺失"}:{instance_name or asset.asset_name or "-"}')
     server_queryset = server_queryset if server_queryset is not None else Server.objects.filter(provider='aws_lightsail')
     server_queryset = server_queryset.exclude(status__in=_SYNC_EXCLUDED_SERVER_STATUSES)
@@ -783,6 +793,8 @@ def _mark_deleted_when_missing_in_aws(region, existing_instance_names, existing_
         Q(region_code=region) | Q(region_code='') | Q(region_code__isnull=True)
     ).order_by('-updated_at', '-id')
     for server in server_queryset:
+        if server.id in processed_record_ids:
+            continue
         instance_name = str(server.instance_id or '').strip()
         public_ip = str(server.public_ip or '').strip()
         is_static_ip_record = not instance_name or server.provider_status == '未附加固定IP' or 'StaticIp' in str(server.provider_resource_id or '')

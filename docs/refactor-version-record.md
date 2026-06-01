@@ -574,6 +574,27 @@ uv run python manage.py check
 git diff --check
 ```
 
+## 2026-06-01 aws-missing-confirmation-duplicate-guard
+
+### Scope
+
+Twenty-fifth refactor pass fixed duplicate confirmation increments when the AWS missing-resource sync sees both a canonical `CloudAsset` row and a legacy `Server` compatibility row for the same cloud resource.
+
+### Runtime Changes
+
+- AWS missing confirmation now copies structured `sync_state` from the primary row to the related compatibility row instead of incrementing both independently.
+- `_mark_deleted_when_missing_in_aws()` tracks rows already handled in the current sync pass and skips duplicate compatibility rows.
+- Local focused tests can run in this aggressive refactor branch with `DJANGO_TEST_REUSE_DB=1`, which reuses the current MySQL database instead of trying to create `test_a`.
+
+### Verification
+
+Passed locally:
+
+```bash
+uv run python -m py_compile cloud/management/commands/sync_aws_assets.py
+DJANGO_TEST_REUSE_DB=1 uv run python manage.py test cloud.tests.CloudServerServicesTestCase.test_sync_missing_confirmation_note_preserves_existing_note cloud.tests.CloudServerServicesTestCase.test_sync_missing_confirmation_requires_interval cloud.tests.CloudServerServicesTestCase.test_unattached_ip_delete_items_expose_missing_confirmation_state cloud.tests.CloudServerServicesTestCase.test_lifecycle_plans_unattached_ip_show_confirmation_progress_in_state_and_note cloud.tests.CloudServerServicesTestCase.test_sync_aws_missing_instance_requires_five_passes_before_delete cloud.tests.CloudServerServicesTestCase.test_sync_aliyun_missing_instance_requires_five_passes_before_delete --keepdb --noinput --verbosity 1
+```
+
 ## 2026-06-01 dashboard-api-helper-extraction
 
 ### Scope
