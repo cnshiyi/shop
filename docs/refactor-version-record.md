@@ -1,5 +1,28 @@
 # Refactor Version Record
 
+## 2026-06-02 mtproxy-link-write-consistency
+
+### Scope
+
+Small dashboard write-path safety pass for MTProxy link edits.
+
+### Runtime Changes
+
+- Dashboard cloud order edits now parse submitted `mtproxy_link` values and keep `mtproxy_secret`, host, port, and `proxy_links` aligned with the main link.
+- Dashboard cloud asset edits now apply the same main-link normalization to both the asset and its linked order.
+- Main-link replacement removes stale `主代理` / `主链路` entries from `proxy_links` so old secrets are not copied after a manual link edit.
+- Added focused regression coverage for order detail edits and asset edits that update MTProxy links.
+
+### Verification
+
+Passed locally with `PYTHONDONTWRITEBYTECODE=1 DJANGO_TEST_SQLITE=1`:
+
+```bash
+uv run python -m py_compile cloud/api_orders.py cloud/api_asset_edit.py cloud/tests.py
+uv run python manage.py check
+uv run python manage.py test cloud.tests.CloudServerServicesTestCase.test_update_cloud_asset_blank_mtproxy_secret_preserves_existing_secret cloud.tests.CloudServerServicesTestCase.test_update_cloud_asset_mtproxy_link_refreshes_secret_and_proxy_links cloud.tests.CloudOrderStatusDashboardSyncTestCase.test_order_detail_manual_edit_syncs_cloud_identity_and_proxy_fields --noinput --verbosity 1
+```
+
 ## 2026-06-02 cloud-sync-manual-field-preservation
 
 ### Scope

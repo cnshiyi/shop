@@ -1,6 +1,7 @@
 """云订单后台 API。"""
 
 import logging
+from urllib.parse import parse_qs, urlparse
 
 from asgiref.sync import async_to_sync
 from django.db import transaction
@@ -46,6 +47,52 @@ def _mask_secret(value, keep=4):
     if len(text) <= keep * 2:
         return '*' * len(text)
     return f'{text[:keep]}***{text[-keep:]}'
+
+
+# 功能：解析代理主链接，供订单和资产编辑保持链路字段一致。
+def _proxy_link_item(mtproxy_link):
+    text = str(mtproxy_link or '').strip()
+    if not text:
+        return None
+    parsed = urlparse(text)
+    query = parse_qs(parsed.query)
+    server = str((query.get('server') or [''])[0] or '').strip() or str(parsed.hostname or '').strip('[]')
+    port = str((query.get('port') or [''])[0] or '').strip()
+    secret = str((query.get('secret') or [''])[0] or '').strip()
+    item = {'name': '主代理 mtg', 'url': text}
+    if server:
+        item['server'] = server
+    if port:
+        item['port'] = port
+    if secret:
+        item['secret'] = secret
+    return item
+
+
+# 功能：把代理链路列表里的主端口替换为当前主链接，避免保留旧 secret/旧链接。
+def _proxy_links_with_main_link(proxy_links, mtproxy_link, mtproxy_port=None):
+    main_item = _proxy_link_item(mtproxy_link)
+    main_port = str(mtproxy_port or (main_item or {}).get('port') or '').strip()
+    filtered = []
+    seen_urls = set()
+    for item in proxy_links or []:
+        if not isinstance(item, dict):
+            continue
+        item_url = str(item.get('url') or '').strip()
+        item_port = str(item.get('port') or '').strip()
+        item_name = str(item.get('name') or item.get('label') or '').strip().lower()
+        if item_url and main_item and item_url == main_item['url']:
+            continue
+        if '主代理' in item_name or '主链路' in item_name or item_name == 'main':
+            continue
+        if main_port and item_port == main_port:
+            continue
+        if item_url and item_url in seen_urls:
+            continue
+        if item_url:
+            seen_urls.add(item_url)
+        filtered.append(item)
+    return ([main_item] if main_item else []) + filtered
 
 
 # 功能：提供 后台 API 接口 的内部辅助逻辑，供同模块流程复用。
@@ -539,7 +586,7 @@ def cloud_order_detail(request, order_id):
                 _sync_telegram_username(user, user_lookup)
 
             original_public_ip = order.public_ip
-            for field in ('server_name', 'public_ip', 'previous_public_ip', 'instance_id', 'provider_resource_id', 'static_ip_name', 'mtproxy_host', 'mtproxy_link', 'provision_note'):
+            for field in ('server_name', 'public_ip', 'previous_public_ip', 'instance_id', 'provider_resource_id', 'static_ip_name', 'mtproxy_host', 'provision_note'):
                 if field in payload:
                     setattr(order, field, payload.get(field) or None)
                     changed_fields.add(field)
@@ -550,6 +597,25 @@ def cloud_order_detail(request, order_id):
                 mtproxy_port = payload.get('mtproxy_port')
                 order.mtproxy_port = int(mtproxy_port) if mtproxy_port not in (None, '') else None
                 changed_fields.add('mtproxy_port')
+            if 'mtproxy_link' in payload:
+                order.mtproxy_link = str(payload.get('mtproxy_link') or '').strip() or None
+                changed_fields.add('mtproxy_link')
+                main_item = _proxy_link_item(order.mtproxy_link)
+                if main_item:
+                    if main_item.get('server'):
+                        order.mtproxy_host = main_item['server']
+                        changed_fields.add('mtproxy_host')
+                    if main_item.get('port'):
+                        try:
+                            order.mtproxy_port = int(main_item['port'])
+                            changed_fields.add('mtproxy_port')
+                        except (TypeError, ValueError):
+                            pass
+                    if main_item.get('secret'):
+                        order.mtproxy_secret = main_item['secret']
+                        changed_fields.add('mtproxy_secret')
+                order.proxy_links = _proxy_links_with_main_link(order.proxy_links or [], order.mtproxy_link, order.mtproxy_port)
+                changed_fields.add('proxy_links')
             if 'total_amount' in payload:
                 order.total_amount = _parse_decimal(payload.get('total_amount'), '总金额')
                 changed_fields.add('total_amount')
@@ -616,7 +682,7 @@ def cloud_order_detail(request, order_id):
                 if 'provider_resource_id' in changed_fields:
                     asset_updates['provider_resource_id'] = order.provider_resource_id
                     server_updates['provider_resource_id'] = order.provider_resource_id
-                for mtproxy_field in ('mtproxy_host', 'mtproxy_link', 'mtproxy_port'):
+                for mtproxy_field in ('mtproxy_host', 'mtproxy_link', 'mtproxy_port', 'mtproxy_secret', 'proxy_links'):
                     if mtproxy_field in changed_fields:
                         asset_updates[mtproxy_field] = getattr(order, mtproxy_field)
                 if 'status' in changed_fields:

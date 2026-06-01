@@ -22,7 +22,7 @@ from cloud.api_assets import (
     _sync_telegram_username,
     _unattached_ip_delete_due_at,
 )
-from cloud.api_orders import _cloud_order_summary_payload, _related_order_history_payload
+from cloud.api_orders import _cloud_order_summary_payload, _proxy_link_item, _proxy_links_with_main_link, _related_order_history_payload
 from cloud.dashboard_snapshots import _refresh_dashboard_plan_snapshots, _refresh_dashboard_plan_snapshots_deferred, _refresh_lifecycle_plan_snapshot
 from cloud.lifecycle_schedule import compute_order_lifecycle_fields
 from cloud.models import CloudAsset, CloudIpLog, CloudServerOrder, CloudServerPlan
@@ -247,7 +247,8 @@ def update_cloud_asset(request, asset_id):
             if asset.order_id:
                 if 'mtproxy_link' in payload:
                     refresh_snapshots_needed = True
-                    pending_order_updates['mtproxy_link'] = payload.get('mtproxy_link') or None
+                    mtproxy_link = str(payload.get('mtproxy_link') or '').strip()
+                    pending_order_updates['mtproxy_link'] = mtproxy_link or None
                 if 'mtproxy_secret' in payload:
                     mtproxy_secret = str(payload.get('mtproxy_secret') or '').strip()
                     if mtproxy_secret:
@@ -256,7 +257,8 @@ def update_cloud_asset(request, asset_id):
                     pending_order_updates['mtproxy_host'] = payload.get('mtproxy_host') or None
                 if 'mtproxy_port' in payload:
                     mtproxy_port = payload.get('mtproxy_port')
-                    pending_order_updates['mtproxy_port'] = int(mtproxy_port) if mtproxy_port not in (None, '') else None
+                    normalized_port = int(mtproxy_port) if mtproxy_port not in (None, '') else None
+                    pending_order_updates['mtproxy_port'] = normalized_port
                 if 'provider_resource_id' in payload:
                     pending_order_updates['provider_resource_id'] = payload.get('provider_resource_id') or None
                 if 'public_ip' in payload:
@@ -284,6 +286,28 @@ def update_cloud_asset(request, asset_id):
             if 'mtproxy_port' in payload:
                 mtproxy_port = payload.get('mtproxy_port')
                 asset.mtproxy_port = int(mtproxy_port) if mtproxy_port not in (None, '') else None
+            if 'mtproxy_link' in payload:
+                main_item = _proxy_link_item(asset.mtproxy_link)
+                if main_item:
+                    if main_item.get('server'):
+                        asset.mtproxy_host = main_item['server']
+                    if main_item.get('port'):
+                        try:
+                            asset.mtproxy_port = int(main_item['port'])
+                        except (TypeError, ValueError):
+                            pass
+                    if main_item.get('secret'):
+                        asset.mtproxy_secret = main_item['secret']
+                asset.proxy_links = _proxy_links_with_main_link(asset.proxy_links or [], asset.mtproxy_link, asset.mtproxy_port)
+                if asset.order_id:
+                    pending_order_updates.update({
+                        'mtproxy_link': asset.mtproxy_link,
+                        'mtproxy_host': asset.mtproxy_host,
+                        'mtproxy_port': asset.mtproxy_port,
+                        'proxy_links': asset.proxy_links,
+                    })
+                    if asset.mtproxy_secret:
+                        pending_order_updates['mtproxy_secret'] = asset.mtproxy_secret
             for field in ('provider', 'region_name', 'region_code'):
                 if field in payload:
                     setattr(asset, field, payload.get(field) or None)

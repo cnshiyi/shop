@@ -1792,6 +1792,71 @@ class CloudServerServicesTestCase(TestCase):
         self.assertEqual(asset.mtproxy_secret, 'asset-secret')
 
     # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
+    def test_update_cloud_asset_mtproxy_link_refreshes_secret_and_proxy_links(self):
+        admin = get_user_model().objects.create_user(username='admin_refresh_asset_link', password='x', is_staff=True, is_superuser=True)
+        old_link = 'tg://proxy?server=11.11.10.13&port=9528&secret=old-secret'
+        new_link = 'tg://proxy?server=11.11.10.13&port=443&secret=new-secret'
+        order = CloudServerOrder.objects.create(
+            order_no='REFRESH-ASSET-LINK-1',
+            user=self.user,
+            plan=self.plan,
+            provider=self.plan.provider,
+            region_code=self.plan.region_code,
+            region_name=self.plan.region_name,
+            plan_name=self.plan.plan_name,
+            quantity=1,
+            currency='USDT',
+            total_amount='19.00',
+            pay_amount='19.00',
+            pay_method='balance',
+            status='completed',
+            mtproxy_host='11.11.10.13',
+            mtproxy_port=9528,
+            mtproxy_secret='old-secret',
+            mtproxy_link=old_link,
+            proxy_links=[{'name': '主代理 mtg', 'server': '11.11.10.13', 'port': '9528', 'secret': 'old-secret', 'url': old_link}],
+        )
+        asset = CloudAsset.objects.create(
+            kind=CloudAsset.KIND_SERVER,
+            source=CloudAsset.SOURCE_AWS_SYNC,
+            order=order,
+            user=self.user,
+            provider='aws_lightsail',
+            region_code=self.plan.region_code,
+            region_name=self.plan.region_name,
+            asset_name='refresh-asset-link',
+            public_ip='11.11.10.13',
+            status=CloudAsset.STATUS_RUNNING,
+            mtproxy_host='11.11.10.13',
+            mtproxy_port=9528,
+            mtproxy_secret='old-secret',
+            mtproxy_link=old_link,
+            proxy_links=[{'name': '主代理 mtg', 'server': '11.11.10.13', 'port': '9528', 'secret': 'old-secret', 'url': old_link}],
+        )
+        request = self.factory.patch(
+            '/api/dashboard/cloud-assets/%s/' % asset.id,
+            data=json.dumps({'mtproxy_link': new_link}),
+            content_type='application/json',
+        )
+        request = self._attach_bearer_session(request, admin)
+
+        response = update_cloud_asset(request, asset.id)
+
+        self.assertEqual(response.status_code, 200)
+        order.refresh_from_db()
+        asset.refresh_from_db()
+        self.assertEqual(order.mtproxy_link, new_link)
+        self.assertEqual(order.mtproxy_secret, 'new-secret')
+        self.assertEqual(order.mtproxy_port, 443)
+        self.assertEqual(order.proxy_links[0]['url'], new_link)
+        self.assertNotIn(old_link, [item.get('url') for item in order.proxy_links])
+        self.assertEqual(asset.mtproxy_link, new_link)
+        self.assertEqual(asset.mtproxy_secret, 'new-secret')
+        self.assertEqual(asset.mtproxy_port, 443)
+        self.assertEqual(asset.proxy_links[0]['url'], new_link)
+        self.assertNotIn(old_link, [item.get('url') for item in asset.proxy_links])
+
+    # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
     def test_update_cloud_asset_rejects_collapsed_telegram_group_binding(self):
         admin = get_user_model().objects.create_user(username='admin_bind_group', password='x', is_staff=True, is_superuser=True)
         asset = CloudAsset.objects.create(
@@ -13787,7 +13852,12 @@ class CloudOrderStatusDashboardSyncTestCase(TestCase):
         self.assertEqual(server.provider_resource_id, 'manual-edited-resource')
         self.assertEqual(asset.mtproxy_host, '203.0.113.88')
         self.assertEqual(asset.mtproxy_link, 'tg://proxy?server=203.0.113.88&port=443&secret=abcdef')
+        self.assertEqual(order.mtproxy_link, 'tg://proxy?server=203.0.113.88&port=443&secret=abcdef')
+        self.assertEqual(order.mtproxy_secret, 'abcdef')
         self.assertEqual(asset.mtproxy_port, 443)
+        self.assertEqual(order.mtproxy_port, 443)
+        self.assertEqual(order.proxy_links[0]['url'], 'tg://proxy?server=203.0.113.88&port=443&secret=abcdef')
+        self.assertEqual(asset.proxy_links[0]['url'], 'tg://proxy?server=203.0.113.88&port=443&secret=abcdef')
         self.assertEqual(asset.actual_expires_at, asset_expiry)
         self.assertEqual(server.expires_at, server_expiry)
 
