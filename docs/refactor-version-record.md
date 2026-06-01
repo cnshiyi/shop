@@ -385,3 +385,25 @@ Passed locally:
 uv run python -m py_compile core/dashboard_api.py bot/api.py bot/api_auth.py bot/api_users.py bot/api_operation_logs.py bot/api_cloud_accounts.py bot/api_site_configs.py bot/api_admin_users.py bot/api_products.py bot/api_telegram.py cloud/api.py cloud/api_servers.py cloud/api_plans.py orders/api.py
 uv run python manage.py check
 ```
+
+## 2026-06-01 provisioning-structured-result-logging
+
+### Scope
+
+Thirteenth refactor pass removed production `print('[PROVISION_RESULT]', ...)` calls from cloud provisioning.
+
+### Runtime Changes
+
+- Added `_log_provision_result()` in `cloud/provisioning.py`.
+- Replaced all provision result `print()` calls with `logger.log(...)`.
+- Provision result logs now include structured `extra={'provision_result': ...}` fields.
+- MTProxy links are logged as masked previews instead of full raw links in the result payload.
+
+### Verification
+
+Passed locally:
+
+```bash
+uv run python -m py_compile cloud/provisioning.py core/dashboard_api.py bot/api.py cloud/api.py cloud/api_servers.py cloud/api_plans.py orders/api.py
+uv run python manage.py check
+```

@@ -23,6 +23,47 @@ logger = logging.getLogger(__name__)
 _PROVISION_PROGRESS: dict[int, dict[str, object]] = {}
 
 
+def _mask_log_value(value, visible=4):
+    text = str(value or '')
+    if not text:
+        return ''
+    if len(text) <= visible * 2:
+        return '*' * len(text)
+    return f'{text[:visible]}****{text[-visible:]}'
+
+
+def _log_provision_result(order, *, level=logging.INFO, **extra):
+    payload = {
+        'order_id': getattr(order, 'id', None),
+        'order_no': getattr(order, 'order_no', ''),
+        'status': getattr(order, 'status', ''),
+        'provider': getattr(order, 'provider', ''),
+        'region': getattr(order, 'region_code', ''),
+        'server_name': getattr(order, 'server_name', ''),
+        'instance_id': getattr(order, 'instance_id', ''),
+        'public_ip': getattr(order, 'public_ip', ''),
+        'mtproxy_port': getattr(order, 'mtproxy_port', None),
+        'mtproxy_host': getattr(order, 'mtproxy_host', ''),
+        'mtproxy_link_preview': _mask_log_value(getattr(order, 'mtproxy_link', ''), visible=12),
+        'service_expires_at': getattr(order, 'service_expires_at', None).isoformat() if getattr(order, 'service_expires_at', None) else None,
+        **extra,
+    }
+    logger.log(
+        level,
+        '[PROVISION_RESULT] order_id=%s order_no=%s status=%s provider=%s region=%s instance_id=%s public_ip=%s mtproxy_port=%s error=%s',
+        payload['order_id'],
+        payload['order_no'],
+        payload['status'],
+        payload['provider'],
+        payload['region'],
+        payload['instance_id'],
+        payload['public_ip'],
+        payload['mtproxy_port'],
+        str(payload.get('error') or '')[:1500],
+        extra={'provision_result': payload},
+    )
+
+
 def _fmt_dt(value):
     return value.isoformat() if value else '-'
 
@@ -709,7 +750,7 @@ async def provision_cloud_server(order_id: int):
                     logger.warning('云服务器重建失败: order=%s reason=static_ip_move_failed cleanup_at=%s note=%s', order.order_no, cleanup_at, move_note)
                     saved = await _mark_failed(order_id, note, cleanup_at=cleanup_at)
                     clear_provision_progress(order_id)
-                    print('[PROVISION_RESULT]', {'order_id': saved.id, 'order_no': saved.order_no, 'status': saved.status, 'error': saved.provision_note})
+                    _log_provision_result(saved, level=logging.WARNING, error=saved.provision_note)
                     return saved
                 final_public_ip = moved_ip or final_public_ip
                 final_static_ip_name = rebuild_context['original_static_ip_name']
@@ -732,7 +773,7 @@ async def provision_cloud_server(order_id: int):
                     saved = await _mark_failed(order_id, note, cleanup_at=cleanup_at)
                     clear_provision_progress(order_id)
                     logger.warning('云服务器开通失败: order=%s reason=expected_ip_not_found cleanup_at=%s note=%s', saved.order_no, cleanup_at, ip_exists_note)
-                    print('[PROVISION_RESULT]', {'order_id': saved.id, 'order_no': saved.order_no, 'status': saved.status, 'error': saved.provision_note})
+                    _log_provision_result(saved, level=logging.WARNING, error=saved.provision_note)
                     return saved
                 logger.info('云服务器预期 IP 云端存在性确认通过: order=%s note=%s', order.order_no, ip_exists_note)
 
@@ -755,7 +796,7 @@ async def provision_cloud_server(order_id: int):
                 saved = await _mark_failed(order_id, note, cleanup_at=cleanup_at)
                 clear_provision_progress(order_id)
                 logger.warning('云服务器开通失败: order=%s reason=connection_ip_guard cleanup_at=%s note=%s', saved.order_no, cleanup_at, guard_note)
-                print('[PROVISION_RESULT]', {'order_id': saved.id, 'order_no': saved.order_no, 'status': saved.status, 'error': saved.provision_note})
+                _log_provision_result(saved, level=logging.WARNING, error=saved.provision_note)
                 return saved
             final_public_ip = guarded_public_ip or final_public_ip
 
@@ -786,7 +827,7 @@ async def provision_cloud_server(order_id: int):
                 saved = await _mark_failed(order_id, note, cleanup_at=cleanup_at)
                 clear_provision_progress(order_id)
                 logger.warning('云服务器开通结束: order=%s status=%s note=%s', saved.order_no, saved.status, (saved.provision_note or '')[:1500])
-                print('[PROVISION_RESULT]', {'order_id': saved.id, 'order_no': saved.order_no, 'status': saved.status, 'error': saved.provision_note})
+                _log_provision_result(saved, level=logging.WARNING, error=saved.provision_note)
                 return saved
 
             set_provision_progress(order.id, '保存开通结果')
@@ -823,22 +864,7 @@ async def provision_cloud_server(order_id: int):
                 (timezone.now() - started_at).total_seconds(),
             )
             clear_provision_progress(order_id)
-            print(
-                '[PROVISION_RESULT]',
-                {
-                    'order_id': saved.id,
-                    'order_no': saved.order_no,
-                    'status': saved.status,
-                    'provider': saved.provider,
-                    'region': saved.region_code,
-                    'server_name': saved.server_name,
-                    'instance_id': saved.instance_id,
-                    'public_ip': saved.public_ip,
-                    'mtproxy_port': saved.mtproxy_port,
-                    'mtproxy_link': saved.mtproxy_link,
-                    'service_expires_at': saved.service_expires_at.isoformat() if saved.service_expires_at else None,
-                },
-            )
+            _log_provision_result(saved)
             return saved
 
         cleanup_at = None
@@ -864,7 +890,7 @@ async def provision_cloud_server(order_id: int):
         saved = await _mark_failed(order_id, note, cleanup_at=cleanup_at)
         clear_provision_progress(order_id)
         logger.warning('云服务器开通结束: order=%s status=%s note=%s', saved.order_no, saved.status, (saved.provision_note or '')[:1500])
-        print('[PROVISION_RESULT]', {'order_id': saved.id, 'order_no': saved.order_no, 'status': saved.status, 'error': saved.provision_note})
+        _log_provision_result(saved, level=logging.WARNING, error=saved.provision_note)
         return saved
     except Exception as exc:
         logger.exception('云服务器开通异常: order_id=%s error=%s', order_id, exc)
@@ -872,7 +898,7 @@ async def provision_cloud_server(order_id: int):
             saved = await _mark_failed(order_id, f'云服务器开通异常: {exc}')
             clear_provision_progress(order_id)
             logger.warning('云服务器开通异常结束: order=%s status=%s note=%s', saved.order_no, saved.status, (saved.provision_note or '')[:1500])
-            print('[PROVISION_RESULT]', {'order_id': saved.id, 'order_no': saved.order_no, 'status': saved.status, 'error': saved.provision_note})
+            _log_provision_result(saved, level=logging.WARNING, error=saved.provision_note)
             return saved
         except Exception:
             logger.exception('云服务器开通异常后回写失败: order_id=%s', order_id)
