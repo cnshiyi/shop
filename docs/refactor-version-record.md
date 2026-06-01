@@ -187,3 +187,26 @@ Passed locally:
 uv run python -m py_compile bot/api.py bot/api_products.py
 uv run python manage.py check
 ```
+
+## 2026-06-01 bot-admin-api-split
+
+### Scope
+
+Fifth refactor pass continued splitting `bot/api.py` by moving admin account management endpoints.
+
+### Runtime Changes
+
+- Added `bot/api_admin_users.py` for dashboard admin account endpoints:
+  - admin user list
+  - admin create/update/delete
+  - current admin password change
+- `bot/api.py` keeps compatibility exports for the moved endpoints, so `shop/dashboard_urls.py` continues resolving the same attributes.
+
+### Verification
+
+Passed locally:
+
+```bash
+uv run python -m py_compile bot/api.py bot/api_admin_users.py bot/api_products.py
+uv run python manage.py check
+```
