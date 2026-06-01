@@ -14,6 +14,7 @@ from django.http import JsonResponse
 from django.utils import timezone
 
 DASHBOARD_SESSION_IDLE_SECONDS = 60 * 60
+DASHBOARD_SAFE_METHODS = {'GET', 'HEAD', 'OPTIONS', 'TRACE'}
 
 
 def _decimal_to_str(value, places=3):
@@ -318,28 +319,39 @@ def _user_and_session_key_from_bearer_session(token: str):
     return user, session_key if user else None
 
 
-def _authenticate_dashboard_request(request):
-    user = getattr(request, 'user', None)
-    if user and user.is_authenticated:
-        if _staff_required(user):
-            _refresh_dashboard_session(request)
-            return user
-        return None
+def _bearer_token_from_request(request) -> str:
     auth_header = request.headers.get('Authorization') or ''
     prefix = 'Bearer '
     if not auth_header.startswith(prefix):
+        return ''
+    return auth_header[len(prefix):].strip()
+
+
+def _dashboard_requires_bearer(request) -> bool:
+    return str(getattr(request, 'method', '') or '').upper() not in DASHBOARD_SAFE_METHODS
+
+
+def _authenticate_dashboard_request(request, *, require_bearer: bool = False):
+    token = _bearer_token_from_request(request)
+    if token:
+        user, session_key = _user_and_session_key_from_bearer_session(token)
+        if user and _staff_required(user):
+            request.user = user
+            _refresh_dashboard_session(request, session_key=session_key)
+            return user
         return None
-    user, session_key = _user_and_session_key_from_bearer_session(auth_header[len(prefix):].strip())
+    if require_bearer:
+        return None
+    user = getattr(request, 'user', None)
     if user and _staff_required(user):
-        request.user = user
-        _refresh_dashboard_session(request, session_key=session_key)
+        _refresh_dashboard_session(request)
         return user
     return None
 
 
 def dashboard_login_required(view_func):
     def wrapped(request, *args, **kwargs):
-        if not _authenticate_dashboard_request(request):
+        if not _authenticate_dashboard_request(request, require_bearer=_dashboard_requires_bearer(request)):
             return _error('请先登录', status=401)
         return view_func(request, *args, **kwargs)
     return wrapped

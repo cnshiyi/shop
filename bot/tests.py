@@ -52,8 +52,7 @@ class DashboardSessionExpiryTestCase(TestCase):
 
 
 class DashboardAuthSurfaceTestCase(TestCase):
-    def _authorized_get(self, path, user):
-        request = RequestFactory().get(path)
+    def _attach_bearer_session(self, request, user):
         SessionMiddleware(lambda req: None).process_request(request)
         request.session['_auth_user_id'] = str(user.pk)
         request.session['_auth_user_backend'] = 'django.contrib.auth.backends.ModelBackend'
@@ -62,6 +61,9 @@ class DashboardAuthSurfaceTestCase(TestCase):
         request.user = AnonymousUser()
         request.META['HTTP_AUTHORIZATION'] = f'Bearer session-{request.session.session_key}'
         return request
+
+    def _authorized_get(self, path, user):
+        return self._attach_bearer_session(RequestFactory().get(path), user)
 
     def test_site_config_groups_requires_dashboard_auth(self):
         SiteConfig.set('bot_token', '123456789:test-token', sensitive=True)
@@ -91,7 +93,7 @@ class DashboardAuthSurfaceTestCase(TestCase):
             data=json.dumps({'username': 'new_root', 'password': 'StrongPass123!', 'is_superuser': True}),
             content_type='application/json',
         )
-        request.user = staff
+        self._attach_bearer_session(request, staff)
 
         response = create_admin_user(request)
         payload = json.loads(response.content.decode('utf-8'))
@@ -114,7 +116,7 @@ class DashboardAuthSurfaceTestCase(TestCase):
         ]
 
         for view_func, request, args in cases:
-            request.user = staff
+            self._attach_bearer_session(request, staff)
             response = view_func(request, *args)
             payload = json.loads(response.content.decode('utf-8'))
             self.assertEqual(response.status_code, 403)
@@ -135,6 +137,25 @@ class DashboardAuthSurfaceTestCase(TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertTrue(any(item['username'] == root.username for item in payload['data']))
 
+    def test_dashboard_write_rejects_cookie_only_session(self):
+        root = get_user_model().objects.create_user(username='root_cookie_only_write', password='pass', is_staff=True, is_superuser=True)
+        request = RequestFactory().post(
+            '/api/admin/admin-users/',
+            data=json.dumps({'username': 'blocked_cookie_only', 'password': 'StrongPass123!', 'is_superuser': True}),
+            content_type='application/json',
+        )
+        SessionMiddleware(lambda req: None).process_request(request)
+        request.session['_auth_user_id'] = str(root.pk)
+        request.session['_auth_user_backend'] = 'django.contrib.auth.backends.ModelBackend'
+        request.session['_auth_user_hash'] = root.get_session_auth_hash()
+        request.session.save()
+        request.user = root
+
+        response = create_admin_user(request)
+
+        self.assertEqual(response.status_code, 401)
+        self.assertFalse(get_user_model().objects.filter(username='blocked_cookie_only').exists())
+
     def test_archive_telegram_chat_parses_string_false_as_unarchive(self):
         user = get_user_model().objects.create_user(username='dashboard_archive_staff', password='pass', is_staff=True, is_superuser=True)
         TelegramChatArchive.objects.create(chat_id=-10012345, title='Archived Group')
@@ -152,7 +173,7 @@ class DashboardAuthSurfaceTestCase(TestCase):
             data=json.dumps({'chat_id': -10012345, 'archived': 'false'}),
             content_type='application/json',
         )
-        request.user = user
+        self._attach_bearer_session(request, user)
 
         response = archive_telegram_chat(request)
 

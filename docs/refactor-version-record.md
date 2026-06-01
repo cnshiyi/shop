@@ -456,3 +456,38 @@ Passed locally:
 uv run python -m py_compile core/cache.py core/runtime_config.py bot/runner.py bot/handlers.py cloud/resource_monitor.py cloud/dashboard_api_helpers.py cloud/dashboard_snapshots.py cloud/api.py cloud/api_servers.py cloud/api_plans.py cloud/services.py cloud/lifecycle.py
 uv run python manage.py check
 ```
+
+## 2026-06-01 dashboard-bearer-write-auth
+
+### Scope
+
+Sixteenth refactor pass addressed the CSRF/auth boundary risk where csrf-exempt dashboard write APIs could still authenticate through cookie session state.
+
+### Runtime Changes
+
+- `core/dashboard_api.py` now treats unsafe dashboard methods (`POST`, `PUT`, `PATCH`, `DELETE`, etc.) as bearer-only.
+- Dashboard write requests must provide `Authorization: Bearer session-...`; cookie-authenticated `request.user` alone is no longer accepted for write views.
+- Safe read methods still support existing cookie/session authentication for compatibility.
+- Updated dashboard auth tests so write tests attach explicit bearer session headers.
+- Added a regression test proving cookie-only dashboard writes are rejected with 401.
+
+### Verification
+
+Passed locally:
+
+```bash
+uv run python -m py_compile core/dashboard_api.py bot/tests.py bot/api_auth.py bot/api.py bot/api_admin_users.py
+uv run python manage.py check
+```
+
+Blocked locally:
+
+```bash
+uv run python manage.py test bot.tests.DashboardSessionExpiryTestCase bot.tests.DashboardAuthSurfaceTestCase --keepdb
+```
+
+The focused test run is blocked by local MySQL test database permissions:
+
+```text
+Access denied for user 'a'@'localhost' to database 'test_a'
+```
