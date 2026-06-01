@@ -20,6 +20,7 @@ from core.texts import TEXT_GROUPS, init_texts, text_default, text_description
 from core.trongrid import parse_trongrid_api_keys
 
 
+# 功能：提供 Telegram Bot 和后台用户能力 的内部辅助逻辑，供同模块流程复用。
 def _masked_sensitive_preview(value):
     plain = str(value or '')
     if not plain:
@@ -29,6 +30,7 @@ def _masked_sensitive_preview(value):
     return f'{plain[:3]}***{plain[-3:]}'
 
 
+# 功能：提供 Telegram Bot 和后台用户能力 的内部辅助逻辑，供同模块流程复用。
 def _site_config_payload(item):
     is_sensitive = item.key in SENSITIVE_CONFIG_KEYS
     value = SiteConfig.get(item.key, '')
@@ -48,6 +50,7 @@ def _site_config_payload(item):
     }
 
 
+# 功能：提供 Telegram Bot 和后台用户能力 的内部辅助逻辑，供同模块流程复用。
 def _site_config_group_map():
     return {
         'database': ['mysql_host', 'mysql_port', 'mysql_database', 'mysql_user', 'mysql_password', 'redis_host', 'redis_port', 'redis_password', 'redis_db'],
@@ -95,6 +98,7 @@ def _site_config_group_map():
     }
 
 
+# 功能：处理 Telegram Bot 和后台用户能力 中的 site configs list 业务流程。
 @dashboard_login_required
 @require_GET
 def site_configs_list(request):
@@ -106,12 +110,14 @@ def site_configs_list(request):
     return _ok([_site_config_payload(item) for item in queryset])
 
 
+# 功能：处理 Telegram Bot 和后台用户能力 中的 button config detail 业务流程。
 @dashboard_login_required
 @require_GET
 def button_config_detail(request):
     return _ok(load_button_config())
 
 
+# 功能：更新相关业务对象；当前函数属于 Telegram Bot 和后台用户能力。
 @csrf_exempt
 @dashboard_superuser_required
 @require_POST
@@ -120,6 +126,7 @@ def update_button_config(request):
     return _ok(save_button_config(payload))
 
 
+# 功能：初始化配置、缓存或默认数据；当前函数属于 Telegram Bot 和后台用户能力。
 @csrf_exempt
 @dashboard_superuser_required
 @require_POST
@@ -127,6 +134,7 @@ def init_button_config_view(request):
     return _ok(init_button_config())
 
 
+# 功能：处理 Telegram Bot 和后台用户能力 中的 site config groups 业务流程。
 @dashboard_login_required
 @require_GET
 def site_config_groups(request):
@@ -169,6 +177,7 @@ def site_config_groups(request):
     return _ok(payload)
 
 
+# 功能：初始化配置、缓存或默认数据；当前函数属于 Telegram Bot 和后台用户能力。
 @csrf_exempt
 @dashboard_superuser_required
 @require_POST
@@ -192,6 +201,7 @@ def init_site_configs(request):
     return _ok({'created': created, 'updated': 0, 'scope': scope})
 
 
+# 功能：初始化配置、缓存或默认数据；当前函数属于 Telegram Bot 和后台用户能力。
 @csrf_exempt
 @dashboard_superuser_required
 @require_POST
@@ -207,6 +217,7 @@ def init_text_site_configs(request):
     return _ok({'mode': mode, **result})
 
 
+# 功能：验证相关业务场景和回归行为；当前函数属于 Telegram Bot 和后台用户能力。
 @csrf_exempt
 @dashboard_superuser_required
 @require_POST
@@ -215,6 +226,7 @@ def test_daily_expiry_summary_notification(request):
     if not str(token or '').strip():
         return _error('测试通知发送失败：未配置 Telegram 机器人 Token', status=400)
 
+    # 功能：提供 Telegram Bot 和后台用户能力 的内部辅助逻辑，供同模块流程复用。
     async def _send():
         from aiogram import Bot
 
@@ -222,6 +234,7 @@ def test_daily_expiry_summary_notification(request):
 
         bot = Bot(str(token).strip())
 
+        # 功能：提供 Telegram Bot 和后台用户能力 的内部辅助逻辑，供同模块流程复用。
         async def _notify_target(chat_id, text: str, reply_markup=None):
             await bot.send_message(chat_id=chat_id, text=text, reply_markup=reply_markup, parse_mode='HTML')
             return True
@@ -244,6 +257,7 @@ def test_daily_expiry_summary_notification(request):
     return _ok(result)
 
 
+# 功能：更新相关业务对象；当前函数属于 Telegram Bot 和后台用户能力。
 @csrf_exempt
 @dashboard_superuser_required
 @require_POST
@@ -259,6 +273,8 @@ def update_site_config(request, config_id: int):
         plain_value = SiteConfig.get(item.key, '')
     else:
         plain_value = '' if value is None else str(value).strip()
+        if is_sensitive and not plain_value:
+            plain_value = SiteConfig.get(item.key, '')
     if item.key == 'trongrid_api_key' and plain_value:
         plain_value = '\n'.join(parse_trongrid_api_keys(plain_value))
         if not plain_value:

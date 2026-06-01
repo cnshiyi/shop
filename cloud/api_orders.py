@@ -600,9 +600,7 @@ def cloud_order_detail(request, order_id):
                 )
                 asset_updates = {}
                 server_updates = {}
-                if 'user' in changed_fields:
-                    asset_updates['user'] = order.user
-                    server_updates['user'] = order.user
+                # CloudAsset.user / actual_expires_at are manual asset fields; order edits must not overwrite them.
                 if 'public_ip' in changed_fields:
                     asset_updates['public_ip'] = order.public_ip
                     server_updates['public_ip'] = order.public_ip
@@ -621,9 +619,6 @@ def cloud_order_detail(request, order_id):
                 for mtproxy_field in ('mtproxy_host', 'mtproxy_link', 'mtproxy_port'):
                     if mtproxy_field in changed_fields:
                         asset_updates[mtproxy_field] = getattr(order, mtproxy_field)
-                if 'service_expires_at' in changed_fields:
-                    asset_updates['actual_expires_at'] = order.service_expires_at
-                    server_updates['expires_at'] = order.service_expires_at
                 if 'status' in changed_fields:
                     status_asset_updates, status_server_updates = _primary_record_updates_for_order_status(order.status, order.provision_note)
                     asset_updates.update(status_asset_updates)

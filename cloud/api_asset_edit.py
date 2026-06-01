@@ -249,7 +249,9 @@ def update_cloud_asset(request, asset_id):
                     refresh_snapshots_needed = True
                     pending_order_updates['mtproxy_link'] = payload.get('mtproxy_link') or None
                 if 'mtproxy_secret' in payload:
-                    pending_order_updates['mtproxy_secret'] = payload.get('mtproxy_secret') or None
+                    mtproxy_secret = str(payload.get('mtproxy_secret') or '').strip()
+                    if mtproxy_secret:
+                        pending_order_updates['mtproxy_secret'] = mtproxy_secret
                 if 'mtproxy_host' in payload:
                     pending_order_updates['mtproxy_host'] = payload.get('mtproxy_host') or None
                 if 'mtproxy_port' in payload:
@@ -272,9 +274,13 @@ def update_cloud_asset(request, asset_id):
                     if asset.order_id and not is_unattached_ip:
                         pending_order_updates['previous_public_ip'] = old_public_ip
 
-            for field in ('asset_name', 'public_ip', 'provider_resource_id', 'instance_id', 'mtproxy_link', 'mtproxy_secret', 'mtproxy_host', 'note'):
+            for field in ('asset_name', 'public_ip', 'provider_resource_id', 'instance_id', 'mtproxy_link', 'mtproxy_host', 'note'):
                 if field in payload:
                     setattr(asset, field, payload.get(field) or None)
+            if 'mtproxy_secret' in payload:
+                mtproxy_secret = str(payload.get('mtproxy_secret') or '').strip()
+                if mtproxy_secret:
+                    asset.mtproxy_secret = mtproxy_secret
             if 'mtproxy_port' in payload:
                 mtproxy_port = payload.get('mtproxy_port')
                 asset.mtproxy_port = int(mtproxy_port) if mtproxy_port not in (None, '') else None
