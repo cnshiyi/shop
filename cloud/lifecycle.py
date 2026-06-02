@@ -412,6 +412,17 @@ def _mark_deleted(order_id: int, note: str):
         asset.is_active = False
         asset.updated_at = now
         asset.save(update_fields=['public_ip', 'previous_public_ip', 'instance_id', 'provider_resource_id', 'actual_expires_at', 'status', 'provider_status', 'is_active', 'updated_at'])
+        CloudAsset.objects.filter(kind=CloudAsset.KIND_SERVER, order=order).exclude(id=asset.id).update(
+            public_ip=previous_public_ip,
+            previous_public_ip=previous_public_ip,
+            instance_id=None,
+            provider_resource_id=None,
+            actual_expires_at=order.ip_recycle_at,
+            status=CloudAsset.STATUS_DELETED,
+            provider_status='固定IP保留中-实例已删除',
+            is_active=False,
+            updated_at=now,
+        )
     record_cloud_ip_log(event_type='deleted', order=order, asset=asset, previous_public_ip=previous_public_ip, public_ip=previous_public_ip, note=retention_note)
     return order
 
