@@ -1,5 +1,48 @@
 # 重构版本记录
 
+## 2026-06-03 00:55 自动监工：压缩订单详情列表回调并补测余额补付
+
+### 范围
+
+本轮从提交 `14354d8 移除旧端口兼容入口` 后继续监工。起始工作树已有 `bot/handlers.py`、`bot/keyboards.py`、`bot/tests.py` 未提交改动，方向为订单列表详情按钮改用统一回调生成函数；本轮保留并补强该方向，没有回滚用户改动。重点复查机器人资产/订单返回链、Telegram `callback_data` 64 字节限制、用户付款成功后默认 443 直接创建、旧端口入口和迁移状态。
+
+### 修改
+
+- `cloud_server_list()` 的普通订单详情按钮统一使用 `cloud_detail_callback()`，不再手拼 `cloud:detail:<id>:<prefix>:<page>` 长回调。
+- `cloud_detail_callback()` 在常规回调超过 64 字节时降级为短订单详情入口 `d:<订单ID>:<短返回来源>`；普通长度仍保持旧 `cloud:detail:*` 形态。
+- `cb_cloud_detail` 注册并解析 `d:` 短入口，短来源 `o:/l:` 会在处理器入口还原为现有返回路径。
+- `cloud_previous_detail_callback()` 遇到过长订单详情返回路径时复用短回调生成逻辑，避免把超长 `cloud:detail:*` 继续传给下一层按钮。
+- 新增聚焦测试锁定 18 位订单 ID、18 位页码和 `profile:orders:cloud:filter:*` 来源组合下订单详情按钮不超过 Telegram 64 字节限制。
+- 补齐余额补付已有云服务器订单的普通购买分支测试：余额付款成功后立即调用 `prepare_cloud_server_order_instances(..., 443)`，并提交 `_provision_cloud_server_and_notify` 创建任务。
+
+### 监工结果
+
+- 发现并修复普通订单列表项在 18 位订单 ID、长筛选名和 18 位页码组合下会生成 67 字节 `cloud:detail:*` callback 的风险。
+- Codex CLI 复核指出 `_pay_cloud_server_order_with_balance_and_notify()` 的普通余额补付分支缺少直接测试；本轮已补测，确认不会回到用户自定义端口流程。
+- 资产详情、续费、续费支付、更换 IP、更多地区、重新安装、修改配置和订单详情返回链继续保持短回调。
+- 旧用户自定义端口入口未发现运行时代码回流；`cloud/ports.py` 中默认端口仍为 `443`，链上付款、钱包直付、余额补付和 IP 变更创建均走默认端口。
+- `makemigrations --check --dry-run` 显示 `No changes detected`，本轮没有表结构变更。
+
+### 验证
+
+已通过：
+
+```bash
+uv run python -m py_compile bot/handlers.py bot/keyboards.py bot/tests.py cloud/services.py orders/payment_scanner.py
+uv run python manage.py check
+rg -n "waiting_port|custom:port:|cloud:ipport:|set_cloud_server_port|MTPROXY_DEFAULT_PORT|用户已确认端口|默认端口" bot cloud orders core shop
+DJANGO_TEST_SQLITE=1 SQLITE_NAME=/private/tmp/shop-monitor-callback-default.sqlite3 uv run python manage.py test bot.tests.RetainedIpRenewalUiTestCase bot.tests.BotOrderAndBalanceFilterTestCase.test_paid_cloud_order_prepare_submits_default_port_directly bot.tests.BotOrderAndBalanceFilterTestCase.test_balance_pay_existing_cloud_order_auto_submits_default_port bot.tests.BotOrderAndBalanceFilterTestCase.test_admin_query_keyboard_includes_reinstall_and_expiry_actions orders.tests.ChainPaymentScannerTestCase.test_cloud_chain_payment_auto_submits_default_port_provision --noinput --verbosity 1
+uv run python manage.py makemigrations --check --dry-run
+git diff --check
+```
+
+结果：机器人返回 UI、默认 443 准备实例、余额补付直达创建、管理员查询按钮和链上付款默认端口创建聚焦测试共 43 条通过；`manage.py check`、关键模块编译、迁移检查和 `git diff --check` 均通过。
+
+### 剩余风险
+
+- 本轮未执行真实 Telegram 点击、真实云资源创建/删除/IP 变更、真实支付、链上广播、生产发布或不可逆操作。
+- 真机测试仍需在用户明确授权真实云资源成本后继续覆盖删除、附加 IP/固定 IP 变化、生命周期通知计划和删除计划执行情况。
+
 ## 2026-06-03 00:42 自动监工：超长返回回调二次压缩
 
 ### 范围

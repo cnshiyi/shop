@@ -46,7 +46,16 @@ def cloud_detail_callback(order_id: int, back_callback: str | None = None) -> st
     back_callback = compact_callback_path(back_callback)
     if not back_callback:
         return f'cloud:detail:{order_id}'
-    return f'cloud:detail:{order_id}:{back_callback}'
+    candidate = f'cloud:detail:{order_id}:{back_callback}'
+    if len(candidate.encode()) <= 64:
+        return candidate
+    compact_back = _compact_back_callback_for_nested_action(back_callback)
+    candidate = f'd:{order_id}:{compact_back}' if compact_back else f'd:{order_id}'
+    if len(candidate.encode()) <= 64:
+        return candidate
+    compact_back = _compact_back_callback_for_nested_action(back_callback, include_page=False)
+    candidate = f'd:{order_id}:{compact_back}' if compact_back else f'd:{order_id}'
+    return candidate if len(candidate.encode()) <= 64 else f'd:{order_id}'
 
 
 def cloud_asset_detail_callback(asset_id: int, back_callback: str | None = None, item_kind: str = 'asset') -> str:
@@ -65,9 +74,12 @@ def cloud_asset_detail_callback(asset_id: int, back_callback: str | None = None,
 
 
 def cloud_previous_detail_callback(order_id: int, back_callback: str | None = None) -> str:
-    back_callback = compact_callback_path(back_callback)
+    raw_back_callback = str(back_callback or '').strip()
+    if raw_back_callback.startswith('d:') and len(raw_back_callback.encode()) <= 64:
+        return raw_back_callback
+    back_callback = compact_callback_path(raw_back_callback)
     if back_callback.startswith(('cloud:detail:', 'cloud:assetdetail:', 'cloud:ad:', 'cad:', 'csd:')):
-        return back_callback
+        return back_callback if len(back_callback.encode()) <= 64 else cloud_detail_callback(order_id, back_callback)
     return cloud_detail_callback(order_id, back_callback)
 
 
@@ -578,7 +590,7 @@ def cloud_server_list(orders, page: int = 1, total_pages: int = 1, prefix: str =
         if item_kind in {'asset', 'server'}:
             callback_data = cloud_asset_detail_callback(order.id, f'{prefix}:{page}', item_kind)
         else:
-            callback_data = f'cloud:detail:{order.id}:{prefix}:{page}'
+            callback_data = cloud_detail_callback(order.id, f'{prefix}:{page}')
         kb.button(text=f'{label} | {status} | {expires}', callback_data=callback_data)
     kb.adjust(1)
     if renew_all and orders:

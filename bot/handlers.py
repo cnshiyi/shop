@@ -1180,6 +1180,7 @@ def _callback_route_label(callback_data: str | None) -> str:
         ('cloud:ad:', 'cloud.ad 人工代理详情'),
         ('cloud:assetdetail:', 'cloud.assetdetail 人工代理详情'),
         ('cloud:detail:', 'cloud.detail 代理详情'),
+        ('d:', 'cloud.detail.compact 代理详情短回调'),
         ('cloud:list:page:', 'cloud.list.page 代理列表分页'),
         ('clp:', 'cloud.list.page 代理列表短分页'),
         ('cloud:autorenewlist:all:', 'cloud.autorenewlist.all 自动续费批量开关'),
@@ -4438,13 +4439,19 @@ def register_handlers(dp: Dispatcher):
         task = asyncio.create_task(_provision_cloud_server_and_notify(bot, callback.from_user.id, rebuild_order.id, rebuild_order.mtproxy_port or MTPROXY_DEFAULT_PORT, retry_only=True))
         task.add_done_callback(lambda _task, _asset_id=asset_id: _ASSET_REINIT_INFLIGHT.discard(_asset_id))
 
+    @dp.callback_query(F.data.startswith('d:'))
     @dp.callback_query(F.data.startswith('cloud:detail:'))
     async def cb_cloud_detail(callback: CallbackQuery):
         await _safe_callback_answer(callback)
         user = await get_or_create_user(callback.from_user.id, callback.from_user.username, callback.from_user.first_name)
-        parts = callback.data.split(':')
-        order_id = int(parts[2])
-        back_callback = ':'.join(parts[3:]) if len(parts) > 3 else 'cloud:list'
+        if callback.data.startswith('d:'):
+            parts = callback.data.split(':', 2)
+            order_id = int(parts[1])
+            back_callback = compact_callback_path(parts[2]) if len(parts) > 2 else 'cloud:list'
+        else:
+            parts = callback.data.split(':')
+            order_id = int(parts[2])
+            back_callback = compact_callback_path(':'.join(parts[3:])) if len(parts) > 3 else 'cloud:list'
         order = await get_user_cloud_server(order_id, user.id)
         if not order:
             logger.warning('CLOUD_DETAIL_DENIED user_id=%s order_id=%s reason=not_found callback_data=%s', user.id, order_id, callback.data)

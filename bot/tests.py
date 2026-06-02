@@ -15,8 +15,8 @@ from django.test import RequestFactory, SimpleTestCase, TestCase
 from django.utils import timezone
 
 from bot.api import DASHBOARD_SESSION_IDLE_SECONDS, _active_proxy_counts_by_user, _authenticate_dashboard_request, admin_users_list, archive_telegram_chat, auth_totp_start, create_admin_user, create_cloud_account, create_product, delete_cloud_account, me, send_daily_expiry_summary_test_notification, send_telegram_chat_message, site_config_groups, telegram_login_start, update_cloud_account, update_site_config, users_list, verify_cloud_account
-from bot.handlers import _asset_reinstall_confirm_keyboard, _asset_renewal_plan_keyboard, _buy_cloud_server_with_balance_and_notify, _cloud_renewal_postcheck_and_notify, _cloud_server_created_text, _fetch_tron_address_summary, _hydrate_order_proxy_links, _install_notice_copy_wrapper, _proxy_links_text, _reinstall_confirm_keyboard, _requires_recovery_provision, _retained_ip_renewal_plan_keyboard, _trongrid_get_with_key_fallback, _trongrid_post_with_key_fallback, _validate_reinstall_proxy_link, register_handlers
-from bot.keyboards import append_back_callback, balance_details_list, cloud_asset_detail_callback, cloud_detail_callback, cloud_previous_detail_callback, compact_callback_path, cloud_ip_query_result, cloud_order_list, cloud_server_change_ip_region_menu, cloud_server_detail, cloud_server_renew_payment
+from bot.handlers import _asset_reinstall_confirm_keyboard, _asset_renewal_plan_keyboard, _buy_cloud_server_with_balance_and_notify, _cloud_renewal_postcheck_and_notify, _cloud_server_created_text, _fetch_tron_address_summary, _hydrate_order_proxy_links, _install_notice_copy_wrapper, _pay_cloud_server_order_with_balance_and_notify, _proxy_links_text, _reinstall_confirm_keyboard, _requires_recovery_provision, _retained_ip_renewal_plan_keyboard, _trongrid_get_with_key_fallback, _trongrid_post_with_key_fallback, _validate_reinstall_proxy_link, register_handlers
+from bot.keyboards import append_back_callback, balance_details_list, cloud_asset_detail_callback, cloud_detail_callback, cloud_previous_detail_callback, compact_callback_path, cloud_ip_query_result, cloud_order_list, cloud_server_change_ip_region_menu, cloud_server_detail, cloud_server_list, cloud_server_renew_payment
 from bot.models import TelegramChatArchive, TelegramChatMessage, TelegramLoginAccount, TelegramUser
 from bot.services import record_telegram_message
 from bot.states import CustomServerStates
@@ -1255,6 +1255,39 @@ class RetainedIpRenewalUiTestCase(SimpleTestCase):
         self.assertIn('cloud:orderdetail:9999999:poc:paid:12345', callbacks)
         self.assertTrue(all(len(item.encode()) <= 64 for item in callbacks if item))
 
+    def test_cloud_server_list_order_detail_uses_short_back_callback(self):
+        item_id = 999999999999999999
+        order = SimpleNamespace(
+            id=item_id,
+            status='completed',
+            public_ip='1.2.3.4',
+            previous_public_ip='',
+            get_status_display=lambda: '已完成',
+        )
+
+        markup = cloud_server_list(
+            [order],
+            page=item_id,
+            total_pages=item_id,
+            prefix='profile:orders:cloud:filter:provisioning:page',
+        )
+        callbacks = [button.callback_data for row in markup.inline_keyboard for button in row if button.callback_data]
+
+        self.assertEqual(
+            cloud_detail_callback(item_id, f'profile:orders:cloud:filter:provisioning:page:{item_id}'),
+            f'd:{item_id}:o:provisioning:{item_id}',
+        )
+        self.assertIn(f'd:{item_id}:o:provisioning:{item_id}', callbacks)
+        self.assertTrue(all(len(item.encode()) <= 64 for item in callbacks))
+
+    def test_cloud_detail_handler_accepts_short_detail_callback(self):
+        source = inspect.getsource(register_handlers)
+        detail_source = source.split('async def cb_cloud_detail', 1)[1].split("@dp.callback_query(F.data.startswith('cloud:mute:'))", 1)[0]
+
+        self.assertIn("@dp.callback_query(F.data.startswith('d:'))", source)
+        self.assertIn("callback.data.startswith('d:')", detail_source)
+        self.assertIn('back_callback = compact_callback_path(parts[2])', detail_source)
+
     def test_cloud_order_detail_handler_accepts_short_back_callback(self):
         source = inspect.getsource(register_handlers)
         order_detail_source = source.split('async def cb_cloud_order_detail', 1)[1].split("@dp.callback_query(F.data.startswith('adminreply:hint:'))", 1)[0]
@@ -1676,6 +1709,32 @@ class BotOrderAndBalanceFilterTestCase(TestCase):
         self.assertEqual(order.mtproxy_port, 443)
         self.assertIn('使用默认端口 443，开始创建服务器。', order.provision_note)
         self.assertNotIn('用户已确认端口', order.provision_note)
+
+    def test_balance_pay_existing_cloud_order_auto_submits_default_port(self):
+        order = self._cloud_order('ORDER-BALANCE-PAY-443', status='pending', paid=False)
+        bot = SimpleNamespace(send_message=AsyncMock())
+        scheduled = []
+
+        def capture_task(coro):
+            scheduled.append(coro.cr_code.co_name)
+            coro.close()
+            return object()
+
+        with patch('bot.handlers.pay_cloud_server_order_with_balance', new=AsyncMock(return_value=(order, None))) as pay_mock, \
+                patch('bot.handlers.is_cloud_asset_renewal_order', return_value=False), \
+                patch('bot.handlers.prepare_cloud_server_order_instances', new=AsyncMock(return_value=[order])) as prepare_mock, \
+                patch('bot.handlers._send_admin_user_action_notice', new=AsyncMock()), \
+                patch('bot.handlers.main_menu', return_value=None), \
+                patch('bot.handlers.asyncio.create_task', side_effect=capture_task):
+            async_to_sync(_pay_cloud_server_order_with_balance_and_notify)(bot, self.user.tg_user_id, self.user.id, order.id, 'USDT')
+
+        pay_mock.assert_awaited_once_with(order.id, self.user.id, 'USDT')
+        prepare_mock.assert_awaited_once_with(order.id, self.user.id, 443)
+        bot.send_message.assert_awaited_once()
+        text = bot.send_message.await_args.kwargs['text']
+        self.assertIn('端口: 443', text)
+        self.assertIn('创建任务已提交', text)
+        self.assertEqual(scheduled, ['_provision_cloud_server_and_notify'])
 
     def test_admin_query_keyboard_includes_reinstall_and_expiry_actions(self):
         markup = cloud_ip_query_result(
