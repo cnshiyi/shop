@@ -18,9 +18,10 @@
 ### 监工结果
 
 - 发现并修复普通订单列表项在 18 位订单 ID、长筛选名和 18 位页码组合下会生成 67 字节 `cloud:detail:*` callback 的风险。
-- Codex CLI 复核指出 `_pay_cloud_server_order_with_balance_and_notify()` 的普通余额补付分支缺少直接测试；本轮已补测，确认不会回到用户自定义端口流程。
+- `_pay_cloud_server_order_with_balance_and_notify()` 的普通余额补付分支已补测，确认不会回到用户自定义端口流程。
 - 资产详情、续费、续费支付、更换 IP、更多地区、重新安装、修改配置和订单详情返回链继续保持短回调。
 - 旧用户自定义端口入口未发现运行时代码回流；`cloud/ports.py` 中默认端口仍为 `443`，链上付款、钱包直付、余额补付和 IP 变更创建均走默认端口。
+- `CloudAsset.actual_expires_at` 仍是唯一结构化资产到期事实；`CloudServerOrder` 未恢复 `service_expires_at` 或 `actual_expires_at` 字段；`CloudAssetDashboardSnapshot` 未恢复到期字段，仅有 `risk_expired` 风险字段。
 - `makemigrations --check --dry-run` 显示 `No changes detected`，本轮没有表结构变更。
 
 ### 验证
@@ -28,15 +29,19 @@
 已通过：
 
 ```bash
-uv run python -m py_compile bot/handlers.py bot/keyboards.py bot/tests.py cloud/services.py orders/payment_scanner.py
-uv run python manage.py check
-rg -n "waiting_port|custom:port:|cloud:ipport:|set_cloud_server_port|MTPROXY_DEFAULT_PORT|用户已确认端口|默认端口" bot cloud orders core shop
-DJANGO_TEST_SQLITE=1 SQLITE_NAME=/private/tmp/shop-monitor-callback-default.sqlite3 uv run python manage.py test bot.tests.RetainedIpRenewalUiTestCase bot.tests.BotOrderAndBalanceFilterTestCase.test_paid_cloud_order_prepare_submits_default_port_directly bot.tests.BotOrderAndBalanceFilterTestCase.test_balance_pay_existing_cloud_order_auto_submits_default_port bot.tests.BotOrderAndBalanceFilterTestCase.test_admin_query_keyboard_includes_reinstall_and_expiry_actions orders.tests.ChainPaymentScannerTestCase.test_cloud_chain_payment_auto_submits_default_port_provision --noinput --verbosity 1
-uv run python manage.py makemigrations --check --dry-run
+UV_CACHE_DIR=/Users/a399/Desktop/data/shop/.uv-cache PYTHONDONTWRITEBYTECODE=1 uv run python manage.py check
+UV_CACHE_DIR=/Users/a399/Desktop/data/shop/.uv-cache PYTHONDONTWRITEBYTECODE=1 uv run python -m py_compile bot/keyboards.py bot/handlers.py bot/tests.py cloud/services.py cloud/provisioning.py cloud/api_orders.py bot/api.py
+UV_CACHE_DIR=/Users/a399/Desktop/data/shop/.uv-cache PYTHONDONTWRITEBYTECODE=1 uv run python manage.py test bot.tests.RetainedIpRenewalUiTestCase --noinput
+DB_ENGINE=sqlite DB_NAME=/private/tmp/shop_monitor_balance_<进程号>.sqlite3 UV_CACHE_DIR=/Users/a399/Desktop/data/shop/.uv-cache PYTHONDONTWRITEBYTECODE=1 uv run python manage.py test bot.tests.BotOrderAndBalanceFilterTestCase.test_balance_pay_existing_cloud_order_auto_submits_default_port bot.tests.BotOrderAndBalanceFilterTestCase.test_paid_cloud_order_prepare_submits_default_port_directly --noinput
+DB_ENGINE=sqlite DB_NAME=/private/tmp/shop_monitor_<进程号>.sqlite3 UV_CACHE_DIR=/Users/a399/Desktop/data/shop/.uv-cache PYTHONDONTWRITEBYTECODE=1 uv run python manage.py test bot.tests.BotAdminExpiryUpdateTestCase cloud.tests.CloudServerServicesTestCase.test_server_compat_create_preserves_manual_asset_owner_and_expiry cloud.tests.CloudServerServicesTestCase.test_prepare_unbound_asset_renewal_creates_pending_payment_order cloud.tests.CloudServerServicesTestCase.test_unbound_asset_renewal_wallet_payment_marks_paid_for_recovery cloud.tests.CloudServerServicesTestCase.test_early_provisioning_steps_preserve_existing_manual_asset_fields --noinput
+UV_CACHE_DIR=/Users/a399/Desktop/data/shop/.uv-cache PYTHONDONTWRITEBYTECODE=1 uv run python manage.py shell -c "from django.conf import settings; retired={'accounts','finance','mall','monitoring','dashboard_api','biz'}; print('retired_apps', [app for app in settings.INSTALLED_APPS if app.split('.')[0] in retired]); from cloud.models import CloudServerOrder, CloudAsset, CloudAssetDashboardSnapshot; print('order_expiry_fields', [f.name for f in CloudServerOrder._meta.fields if f.name in {'service_expires_at','actual_expires_at'}]); print('asset_actual_fields', [f.name for f in CloudAsset._meta.fields if f.name == 'actual_expires_at']); print('snapshot_expiry_fields', [f.name for f in CloudAssetDashboardSnapshot._meta.fields if 'expire' in f.name or 'expiry' in f.name or f.name == 'actual_expires_at']); print('default_port', CloudServerOrder._meta.get_field('mtproxy_port').default)"
+rg -n "service_expires_at__|\bservice_expires_at\b|\bactual_expires_at\s*=\s*models|\bCloudLifecyclePlan\b|\bCloudNoticePlan\b|\bCloudAutoRenewPlan\b|\bnormalize_service_expiry\b|service_expired_at|\brefund_order\b|\bprocess_refund\b|\bcreate_refund\b|\bissue_refund\b|refund_to_balance|refund_balance|STATUS_REFUNDED|status=['\"]refunded|\brefunded\b|set_cloud_server_port|custom:port|cloud:ipport|bot_set_port|waiting_port" bot core orders cloud shop --glob '!**/migrations/**' --glob '!**/tests.py'
+find . -maxdepth 2 -type d \( -name accounts -o -name finance -o -name mall -o -name monitoring -o -name dashboard_api -o -name biz \) -print
+UV_CACHE_DIR=/Users/a399/Desktop/data/shop/.uv-cache PYTHONDONTWRITEBYTECODE=1 uv run python manage.py makemigrations --check --dry-run
 git diff --check
 ```
 
-结果：机器人返回 UI、默认 443 准备实例、余额补付直达创建、管理员查询按钮和链上付款默认端口创建聚焦测试共 43 条通过；`manage.py check`、关键模块编译、迁移检查和 `git diff --check` 均通过。
+结果：机器人返回 UI 聚焦测试 39 条通过；余额补付和默认端口创建聚焦测试 2 条通过；管理员到期修改、兼容入口保留手工到期、无订单资产续费和同步保留聚焦测试 5 条通过；`manage.py check`、关键模块编译和 `git diff --check` 通过；`makemigrations --check --dry-run` 显示 `No changes detected`，但仍因沙箱禁止连接本机 MySQL 输出迁移历史检查警告。
 
 ### 剩余风险
 
