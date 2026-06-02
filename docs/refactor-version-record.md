@@ -1,5 +1,42 @@
 # 重构版本记录
 
+## 2026-06-02 21:10 自动监工：云资产生命周期稳定巡检
+
+### 范围
+
+本轮继续监工 Shop Django 后端仓库，起始工作树干净，最近提交为 `8c47cee 整理记忆文档标题`。重点复查云资产生命周期重构后的冲突逻辑、导入错误、废弃 app 回流、订单旧到期字段、旧计划快照表、旧退款入口，以及 Bot 返回路径和 AWS 固定 IP 释放回归是否稳定。
+
+### 复查结论
+
+- `INSTALLED_APPS` 未出现 `accounts/finance/mall/monitoring/dashboard_api/biz` 废弃 app；仓库根下未发现这些废弃 app 目录恢复。
+- `CloudServerOrder` 模型 introspection 返回空列表，确认没有 `service_expires_at` 或 `actual_expires_at` 字段；`CloudAsset.actual_expires_at` 仍是唯一结构化资产到期事实。
+- 严格运行时代码扫描未发现旧订单到期字段 ORM 查询或写入、`normalize_service_expiry`、`service_expired_at`、旧计划快照模型、旧退款函数名、`STATUS_REFUNDED/refunded` 状态，或云账号级关机计划判断回流。
+- `service_expires_at` 命中仍为兼容展示 payload 或从资产事实派生的接口字段；`CloudLifecyclePlanNote` 仍只是当前删除计划备注表，不是旧派生计划快照表恢复。
+
+### 修复内容
+
+本轮未修改运行时代码，仅补充本次自动监工复查记录。
+
+### 验证
+
+已通过：
+
+```bash
+UV_CACHE_DIR=/private/tmp/uv-cache-shop uv run python manage.py check
+UV_CACHE_DIR=/private/tmp/uv-cache-shop uv run python -m py_compile bot/handlers.py bot/keyboards.py bot/tests.py cloud/management/commands/sync_aws_assets.py cloud/management/commands/sync_aliyun_assets.py cloud/lifecycle.py cloud/lifecycle_execution.py cloud/api.py cloud/api_orders.py cloud/api_tasks.py cloud/services.py core/management/commands/cleanup_old_records.py
+UV_CACHE_DIR=/private/tmp/uv-cache-shop uv run python manage.py shell -c "from django.conf import settings; print([app for app in settings.INSTALLED_APPS if app.split('.')[0] in {'accounts','finance','mall','monitoring','dashboard_api','biz'}]); from cloud.models import CloudServerOrder, CloudAsset; print([f.name for f in CloudServerOrder._meta.fields if f.name in {'service_expires_at','actual_expires_at'}]); print([f.name for f in CloudAsset._meta.fields if f.name == 'actual_expires_at'])"
+UV_CACHE_DIR=/private/tmp/uv-cache-shop uv run python manage.py makemigrations --check --dry-run
+DJANGO_TEST_SQLITE=1 UV_CACHE_DIR=/private/tmp/uv-cache-shop uv run python manage.py test bot.tests.RetainedIpRenewalUiTestCase bot.tests.BotOrderAndBalanceFilterTestCase.test_admin_query_keyboard_includes_reinstall_and_expiry_actions --noinput
+DJANGO_TEST_SQLITE=1 UV_CACHE_DIR=/private/tmp/uv-cache-shop uv run python manage.py test cloud.tests.CloudServerServicesTestCase.test_aws_sync_release_static_ip_respects_asset_shutdown_disabled cloud.tests.CloudServerServicesTestCase.test_aws_sync_release_static_ip_ignores_shutdown_disabled_account cloud.tests.CloudServerServicesTestCase.test_aws_sync_release_static_ip_respects_global_ip_delete_switch cloud.tests.CloudServerServicesTestCase.test_aws_sync_release_static_ip_clears_retained_order_after_successful_release --noinput
+rg -n "service_expires_at__|(filter|exclude|update|order_by|values|values_list)\([^\n)]*service_expires_at|service_expires_at\s*=\s*models|\bnormalize_service_expiry\b|service_expired_at|class Cloud(LifecyclePlan|NoticePlan|AutoRenewPlan)\b|CloudLifecyclePlan\.|CloudNoticePlan\.|CloudAutoRenewPlan\.|\brefund_to_balance\b|\brefund_balance\b|STATUS_REFUNDED|status=['\"]refunded|cloud_account__shutdown_enabled|资产或云账号关机计划|云账号关机计划" cloud orders bot core shop --glob '!**/migrations/**' --glob '!docs/**' --glob '!**/tests.py'
+find . -maxdepth 2 -type d \( -name accounts -o -name finance -o -name mall -o -name monitoring -o -name dashboard_api -o -name biz \) -print
+git diff --check
+```
+
+结果：Django 系统检查、关键模块编译、模型字段 introspection、迁移 dry-run、22 条 Bot UI/返回路径聚焦测试、4 条 AWS 固定 IP 释放回归、旧字段/旧计划/旧退款/废弃 app 扫描和空白检查均通过。`makemigrations --check --dry-run` 无模型变更；默认 MySQL 迁移历史检查因沙箱无法连接 `127.0.0.1` 输出警告。
+
+剩余风险：本轮未跑完整测试套件，未连接真实 MySQL、AWS Lightsail 或阿里云 API，未执行真实 Telegram Bot 回调、钱包扣款、自动续费支付、云端删机、固定 IP 释放或历史数据清理。
+
 ## 2026-06-02 21:04 自动监工：Bot 续费与更换 IP 返回路径收口
 
 ### 范围
