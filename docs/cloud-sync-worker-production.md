@@ -1,16 +1,16 @@
-# Cloud Sync Worker Production Notes
+# 云资产同步 Worker 生产说明
 
-## Process
+## 进程
 
-Run at least one dedicated worker process:
+至少运行一个独立的 worker 进程：
 
 ```bash
 uv run python manage.py process_cloud_asset_sync_jobs --poll-interval 2 --batch-size 1 --stale-running-minutes 90
 ```
 
-The worker claims `queued` `CloudAssetSyncJob` rows, moves them to `running`, updates heartbeat, writes detailed `CloudAssetSyncJobEvent` rows, and exits each job in a terminal state.
+worker 会领取状态为 `queued` 的 `CloudAssetSyncJob` 记录，将其切换为 `running`，持续更新心跳，写入详细的 `CloudAssetSyncJobEvent` 记录，并最终让每个任务进入终态。
 
-## systemd example
+## systemd 示例
 
 ```ini
 [Unit]
@@ -30,19 +30,19 @@ Group=shop
 WantedBy=multi-user.target
 ```
 
-## Event cleanup
+## 事件清理
 
-Run daily:
+每天运行：
 
 ```bash
 uv run python manage.py prune_cloud_sync_job_events --days 90 --keep-per-job 500
 ```
 
-Use `--dry-run` before changing production retention.
+调整生产环境保留策略前，先使用 `--dry-run` 预检。
 
-## Operational checks
+## 运维检查
 
-Useful log keys:
+常用日志 key：
 
 - `CLOUD_SYNC_JOB_QUEUED`
 - `CLOUD_SYNC_JOB_EVENT`
@@ -52,14 +52,14 @@ Useful log keys:
 - `CLOUD_SYNC_REQUEST_DONE`
 - `CLOUD_SYNC_JOB_CANCEL_REQUESTED`
 
-Dashboard checks:
+后台页面检查：
 
-- `/admin/tasks` shows the unified task center.
-- `/admin/cloud-assets` sync drawer shows active jobs, failed jobs, stale running count, and p95 duration.
-- `/admin/cloud-sync-jobs/:id` shows one job timeline, payloads, logs, worker heartbeat, and retry/cancel actions.
+- `/admin/tasks` 显示统一任务中心。
+- `/admin/cloud-assets` 同步抽屉显示活跃任务、失败任务、陈旧运行中任务数量和 p95 耗时。
+- `/admin/cloud-sync-jobs/:id` 显示单个任务的时间线、payload、日志、worker 心跳以及重试/取消操作。
 
-Stale job handling:
+陈旧任务处理：
 
-- `--stale-running-minutes 90` requeues running jobs whose worker heartbeat is missing or too old.
-- A running task with a fresh heartbeat should not be manually reset.
-- A queued task with no worker process is expected to remain visible as `queued`; start the worker rather than editing rows.
+- `--stale-running-minutes 90` 会把缺少 worker 心跳或心跳过旧的运行中任务重新排队。
+- 心跳仍然新鲜的运行中任务不应手动重置。
+- 没有 worker 进程时，排队任务保持显示为 `queued` 是预期行为；应启动 worker，而不是直接改数据库记录。

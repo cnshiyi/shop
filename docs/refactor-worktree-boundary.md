@@ -1,10 +1,10 @@
-# Refactor Worktree Boundary
+# 重构工作区边界
 
-## 2026-06-01 current boundary
+## 2026-06-01 当前边界
 
-This repository currently has many pre-existing tracked modifications outside the cloud sync/task-center refactor commits. They are intentionally left unstaged unless a later pass explicitly owns them.
+当前仓库在云同步/任务中心重构提交之外，已经存在许多早先的已跟踪文件修改。除非后续某一轮明确接管这些修改，否则它们会有意保持未暂存状态。
 
-Current active refactor-owned files for this pass:
+本轮当前由重构接管的文件：
 
 - `cloud/api.py`
 - `cloud/api_monitors.py`
@@ -16,21 +16,21 @@ Current active refactor-owned files for this pass:
 - `docs/refactor-version-record.md`
 - `docs/refactor-worktree-boundary.md`
 
-Pre-existing dirty areas not owned by this pass:
+本轮不接管的既有脏区：
 
 - `app.py`, `manage.py`, `run.py`, `shop/settings.py`
 - broad `bot/*` edits
 - broad `core/*` edits
 - broad `orders/*` edits
-- many cloud provider/lifecycle/service command files outside the API split
+- API 拆分范围之外的许多云厂商、生命周期、服务命令相关文件
 
-Frontend boundary:
+前端边界：
 
-- Refactor-owned frontend files are under `/Users/a399/Desktop/data/vue-shop-admin/apps/web-antd/src`.
-- `pnpm-lock.yaml` is dirty before this pass and remains outside owned changes.
+- 重构接管的前端文件位于 `/Users/a399/Desktop/data/vue-shop-admin/apps/web-antd/src` 下。
+- `pnpm-lock.yaml` 在本轮开始前已经是脏文件，继续保持在本轮接管范围之外。
 
-Commit discipline:
+提交纪律：
 
-- Stage only files listed as refactor-owned for the current pass.
-- Do not revert or normalize the pre-existing dirty files without an explicit cleanup pass.
-- Keep backend and frontend commits separate.
+- 只暂存当前轮次列为重构接管的文件。
+- 没有明确的清理轮次时，不要回退或规整既有脏文件。
+- 后端和前端提交保持分离。

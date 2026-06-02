@@ -1,5 +1,162 @@
 # 重构版本记录
 
+## 2026-06-02 21:04 自动监工：Bot 续费与更换 IP 返回路径收口
+
+### 范围
+
+本轮继续监工 Shop Django 后端仓库，起始最近提交为 `78395ea 记录云资产生命周期稳定复查`，工作树已有 Bot 返回路径和中文文档相关未提交改动。重点复查云资产生命周期旧字段、旧计划、旧退款入口、废弃 app 回流，并收口 Bot 续费、更换 IP、保留 IP 续费套餐和钱包支付链路中的嵌套返回 callback。
+
+### 复查结论
+
+- `INSTALLED_APPS` 未出现 `accounts/finance/mall/monitoring/dashboard_api/biz` 废弃 app；仓库根下也未发现这些废弃 app 目录恢复。
+- `CloudServerOrder` 模型 introspection 继续确认没有 `service_expires_at` 或 `actual_expires_at` 字段；`CloudAsset.actual_expires_at` 仍是唯一结构化资产到期事实。
+- 旧字段扫描命中均为兼容展示 payload、当前 `CloudLifecyclePlanNote` 备注表或当前 `core.dashboard_api` 辅助模块，不是旧订单到期字段、旧计划快照表、旧退款函数名或废弃 app 运行时回流。
+
+### 修复内容
+
+- 修复 `cloud:renewpay:*:*:cloud:querymenu`、`cloud:ipregion:*:*:cloud:querymenu`、`cloud:ipport:*:*:*:cloud:querymenu` 等带冒号来源 callback 的解析，避免普通 `split(':')` 截断或抛出 `ValueError`。
+- 续费、保留 IP 套餐选择、未绑定资产续费、更换 IP 地区/端口选择、钱包支付失败返回和续费成功详情按钮继续透传来源页。
+- IP 查询结果中的订单续费与更换 IP 操作统一带回 `cloud:querymenu`，避免从查询结果进入二级操作后返回默认代理列表。
+- 补充 `RetainedIpRenewalUiTestCase` 键盘回归测试，覆盖续费详情按钮、续费支付按钮、保留 IP 套餐、未绑定资产套餐、更换 IP 地区/端口和 IP 查询操作返回路径。
+
+### 验证
+
+已通过：
+
+```bash
+UV_CACHE_DIR=/private/tmp/uv-cache-shop uv run python -m py_compile bot/handlers.py bot/keyboards.py bot/tests.py
+UV_CACHE_DIR=/private/tmp/uv-cache-shop uv run python manage.py check
+DJANGO_TEST_SQLITE=1 UV_CACHE_DIR=/private/tmp/uv-cache-shop uv run python manage.py test bot.tests.RetainedIpRenewalUiTestCase --noinput
+UV_CACHE_DIR=/private/tmp/uv-cache-shop uv run python manage.py shell -c "from django.conf import settings; print([app for app in settings.INSTALLED_APPS if app.split('.')[0] in {'accounts','finance','mall','monitoring','dashboard_api','biz'}]); from cloud.models import CloudServerOrder, CloudAsset; print([f.name for f in CloudServerOrder._meta.fields if f.name in {'service_expires_at','actual_expires_at'}]); print([f.name for f in CloudAsset._meta.fields if f.name == 'actual_expires_at'])"
+UV_CACHE_DIR=/private/tmp/uv-cache-shop uv run python manage.py makemigrations --check --dry-run
+UV_CACHE_DIR=/private/tmp/uv-cache-shop uv run python - <<'PY'
+from pathlib import Path
+root = Path('.')
+for name in ['accounts','finance','mall','monitoring','dashboard_api','biz']:
+    p = root / name
+    if p.exists():
+        print(f'{name}: exists')
+PY
+git diff --check
+```
+
+结果：Django 系统检查、Bot 模块编译、21 条 Bot 返回路径聚焦测试、模型字段 introspection、废弃 app 目录检查和空白检查均通过。`makemigrations --check --dry-run` 无模型变更；默认 MySQL 迁移历史检查因沙箱无法连接 `127.0.0.1` 输出警告。
+
+剩余风险：本轮未跑完整测试套件，未连接真实 MySQL、AWS Lightsail 或阿里云 API，未执行真实 Telegram Bot 回调、钱包扣款、自动续费支付、云端删机、固定 IP 释放或历史数据清理。
+
+## 2026-06-02 20:52 自动监工：云资产生命周期稳定复查
+
+### 范围
+
+本轮继续监工 Shop Django 后端仓库，起始工作树干净，最近提交为 `e872911 记录云资产生命周期与代理返回复查`。重点复查云资产生命周期重构后的冲突逻辑、导入错误、废弃 app 回流、订单旧到期字段、旧计划快照表、旧退款入口、固定 IP 释放资产级关机开关，以及上一轮 Bot 代理详情返回路径修复是否稳定。
+
+### 复查结论
+
+- `INSTALLED_APPS` 仍只包含 `core`、`bot`、`orders`、`cloud` 当前运行域；仓库根下未发现 `accounts/finance/mall/monitoring/dashboard_api/biz` 废弃 app 目录恢复。
+- `CloudServerOrder` 模型 introspection 返回空列表，确认没有 `service_expires_at` 或 `actual_expires_at` 字段；`CloudAsset.actual_expires_at` 仍是唯一结构化资产到期事实。
+- 严格运行时代码扫描未发现旧订单到期字段 ORM 查询或写入、`normalize_service_expiry`、`service_expired_at`、旧计划快照模型、旧退款函数名、`STATUS_REFUNDED/refunded` 状态，或云账号级关机计划判断回流。
+- `CloudLifecyclePlanNote` 仍只是删除计划备注表，不是旧派生计划快照表恢复；`dashboard_api` 命中仍为当前 `core.dashboard_api` 公共模块和 URL namespace，不是废弃 app 回流。
+- Bot 代理详情、IP 查询、重新安装、修改配置和资产操作按钮继续保留完整来源 callback；AWS 未附加固定 IP 释放仍按资产级 `CloudAsset.shutdown_enabled` 和全局 IP 删除开关执行。
+
+### 修复内容
+
+本轮未修改运行时代码，仅补充本次自动监工复查记录。
+
+### 验证
+
+已通过：
+
+```bash
+UV_CACHE_DIR=/private/tmp/uv-cache-shop uv run python manage.py check
+UV_CACHE_DIR=/private/tmp/uv-cache-shop uv run python -m py_compile bot/handlers.py bot/keyboards.py bot/tests.py cloud/management/commands/sync_aws_assets.py cloud/management/commands/sync_aliyun_assets.py cloud/lifecycle.py cloud/lifecycle_execution.py cloud/api.py cloud/api_orders.py cloud/api_tasks.py cloud/services.py core/management/commands/cleanup_old_records.py
+UV_CACHE_DIR=/private/tmp/uv-cache-shop uv run python manage.py shell -c "from cloud.models import CloudServerOrder; print([f.name for f in CloudServerOrder._meta.fields if f.name in {'service_expires_at','actual_expires_at'}])"
+UV_CACHE_DIR=/private/tmp/uv-cache-shop uv run python manage.py makemigrations --check --dry-run
+DJANGO_TEST_SQLITE=1 UV_CACHE_DIR=/private/tmp/uv-cache-shop uv run python manage.py test bot.tests.RetainedIpRenewalUiTestCase bot.tests.BotOrderAndBalanceFilterTestCase.test_admin_query_keyboard_includes_reinstall_and_expiry_actions --noinput
+DJANGO_TEST_SQLITE=1 UV_CACHE_DIR=/private/tmp/uv-cache-shop uv run python manage.py test cloud.tests.CloudServerServicesTestCase.test_aws_sync_release_static_ip_respects_asset_shutdown_disabled cloud.tests.CloudServerServicesTestCase.test_aws_sync_release_static_ip_ignores_shutdown_disabled_account cloud.tests.CloudServerServicesTestCase.test_aws_sync_release_static_ip_respects_global_ip_delete_switch cloud.tests.CloudServerServicesTestCase.test_aws_sync_release_static_ip_clears_retained_order_after_successful_release --noinput
+rg -n "service_expires_at__|(filter|exclude|update|order_by|values|values_list)\([^\n)]*service_expires_at|service_expires_at\s*=\s*models|\bnormalize_service_expiry\b|service_expired_at|class Cloud(LifecyclePlan|NoticePlan|AutoRenewPlan)\b|CloudLifecyclePlan\.|CloudNoticePlan\.|CloudAutoRenewPlan\.|\brefund_to_balance\b|\brefund_balance\b|STATUS_REFUNDED|status=['\"]refunded|cloud_account__shutdown_enabled|资产或云账号关机计划|云账号关机计划" cloud orders bot core shop --glob '!**/migrations/**' --glob '!docs/**' --glob '!**/tests.py'
+find . -maxdepth 2 -type d \( -name accounts -o -name finance -o -name mall -o -name monitoring -o -name dashboard_api -o -name biz \) -print
+git diff --check
+```
+
+结果：Django 系统检查、关键模块编译、模型字段 introspection、迁移 dry-run、19 条 Bot UI/返回路径聚焦测试、4 条 AWS 固定 IP 释放回归、旧字段/旧计划/旧退款/废弃 app 扫描和空白检查均通过。`makemigrations --check --dry-run` 无模型变更；默认 MySQL 迁移历史检查因沙箱无法连接 `127.0.0.1` 输出警告。
+
+剩余风险：本轮未跑完整测试套件，未连接真实 MySQL、AWS Lightsail 或阿里云 API，未执行真实 Telegram Bot 回调、自动续费支付、云端删机、固定 IP 释放或历史数据清理。
+
+## 2026-06-02 20:44 自动监工：云资产生命周期与代理返回复查
+
+### 范围
+
+本轮继续监工 Shop Django 后端仓库，起始工作树干净，最近提交为 `07ab661 修复代理详情返回路径`。重点复查云资产生命周期重构后的旧到期字段、旧计划快照、旧退款入口、废弃 app 回流、固定 IP 释放资产级关机开关，以及上一笔 Bot 代理详情返回路径修复是否引入新的回调解析或导入问题。
+
+### 复查结论
+
+- `INSTALLED_APPS` 仍只包含 `core`、`bot`、`orders`、`cloud` 当前运行域；仓库根下未发现 `accounts/finance/mall/monitoring/dashboard_api/biz` 废弃 app 目录恢复。
+- `CloudServerOrder` 模型 introspection 返回空列表，确认没有 `service_expires_at` 或 `actual_expires_at` 字段；`CloudAsset.actual_expires_at` 仍是唯一结构化资产到期事实。
+- 运行时代码未发现 `normalize_service_expiry`、`service_expired_at`、旧计划快照模型 `CloudLifecyclePlan/CloudNoticePlan/CloudAutoRenewPlan`、旧退款函数名、`STATUS_REFUNDED` 或 `refunded` 状态回流。
+- Bot 详情、资产详情、资产操作、重新安装和修改配置回调解析继续保留冒号后的完整来源路径，`cloud:querymenu` 与 `profile:orders:cloud:...` 这类返回路径未再被截断。
+- AWS 未附加固定 IP 释放路径仍按资产级 `CloudAsset.shutdown_enabled` 和全局 IP 删除开关执行，未恢复云账号级关机开关阻断条件。
+
+### 修复内容
+
+本轮未修改运行时代码，仅补充本次自动监工复查记录。
+
+### 验证
+
+已通过：
+
+```bash
+UV_CACHE_DIR=/private/tmp/uv-cache-shop uv run python manage.py check
+UV_CACHE_DIR=/private/tmp/uv-cache-shop uv run python -m py_compile bot/handlers.py bot/keyboards.py bot/tests.py cloud/management/commands/sync_aws_assets.py cloud/management/commands/sync_aliyun_assets.py cloud/lifecycle.py cloud/lifecycle_execution.py cloud/api.py cloud/api_orders.py
+UV_CACHE_DIR=/private/tmp/uv-cache-shop uv run python manage.py makemigrations --check --dry-run
+UV_CACHE_DIR=/private/tmp/uv-cache-shop uv run python manage.py shell -c "from cloud.models import CloudServerOrder; print([f.name for f in CloudServerOrder._meta.fields if f.name in {'service_expires_at','actual_expires_at'}])"
+DJANGO_TEST_SQLITE=1 UV_CACHE_DIR=/private/tmp/uv-cache-shop uv run python manage.py test bot.tests.RetainedIpRenewalUiTestCase bot.tests.BotOrderAndBalanceFilterTestCase.test_admin_query_keyboard_includes_reinstall_and_expiry_actions --noinput
+DJANGO_TEST_SQLITE=1 UV_CACHE_DIR=/private/tmp/uv-cache-shop uv run python manage.py test cloud.tests.CloudServerServicesTestCase.test_aws_sync_release_static_ip_respects_asset_shutdown_disabled cloud.tests.CloudServerServicesTestCase.test_aws_sync_release_static_ip_ignores_shutdown_disabled_account cloud.tests.CloudServerServicesTestCase.test_aws_sync_release_static_ip_respects_global_ip_delete_switch cloud.tests.CloudServerServicesTestCase.test_aws_sync_release_static_ip_clears_retained_order_after_successful_release --noinput
+rg -n "service_expires_at|service_expired_at|normalize_service_expiry|CloudLifecyclePlan|CloudNoticePlan|CloudAutoRenewPlan|refund_to_balance|refund_balance|STATUS_REFUNDED|refunded" --glob '!**/migrations/**' --glob '!docs/refactor-version-record.md' .
+find . -maxdepth 2 -type d \( -name accounts -o -name finance -o -name mall -o -name monitoring -o -name dashboard_api -o -name biz \) -print
+git diff --check
+```
+
+结果：Django 系统检查、关键模块编译、迁移 dry-run、19 条 Bot UI/返回路径聚焦测试、4 条 AWS 固定 IP 释放回归、旧字段/旧计划/旧退款/废弃 app 扫描和空白检查均通过。`makemigrations --check --dry-run` 无模型变更；默认 MySQL 迁移历史检查因沙箱无法连接 `127.0.0.1` 输出警告。
+
+剩余风险：本轮未跑完整测试套件，未连接真实 MySQL、AWS Lightsail 或阿里云 API，未执行真实 Telegram Bot 回调、自动续费支付、云端删机、固定 IP 释放或历史数据清理。
+
+## 2026-06-02 20:37 自动监工：代理详情返回路径收口
+
+### 范围
+
+本轮继续监工 Shop Django 后端仓库，起始最近提交为 `7ec48ba 记录云资产生命周期回归复查`，工作树已有 Bot 云代理按钮和固定 IP 资产级关机开关测试相关改动。复查重点仍是云资产生命周期重构后的旧字段、旧计划、旧退款入口、废弃 app 回流和资产级 `CloudAsset.actual_expires_at` 到期事实源，同时检查代理详情、IP 查询和重新安装/修改配置按钮的返回路径是否丢失。
+
+### 复查结论
+
+- `INSTALLED_APPS` 仍只包含 `core`、`bot`、`orders`、`cloud` 当前运行域；仓库根下未发现 `accounts/finance/mall/monitoring/dashboard_api/biz` 废弃 app 目录恢复。
+- `CloudServerOrder` 模型 introspection 确认没有 `service_expires_at` 或 `actual_expires_at` 字段；`service_expires_at` 命中仍为兼容 API 字段、日志字段或从资产到期事实派生的展示值。
+- 未发现 `normalize_service_expiry`、`service_expired_at`、旧计划快照模型 `CloudLifecyclePlan/CloudNoticePlan/CloudAutoRenewPlan`、旧退款函数名、`STATUS_REFUNDED` 或 `refunded` 运行时状态回流。
+- AWS 未附加固定 IP 释放路径仍只检查资产级 `CloudAsset.shutdown_enabled`；云账号级 `shutdown_enabled` 未恢复为释放阻断条件。
+
+### 修复内容
+
+- 修复 `cloud:detail` 和 `cloud:assetdetail` 回调解析：对 `cloud:querymenu`、`profile:orders:cloud:...` 等不带传统页码尾段的来源路径，改为保留完整嵌套返回 callback，避免详情页返回默认云代理列表。
+- 补齐代理详情、IP 查询结果、未绑定资产续费、重新安装确认取消、修改配置返回等按钮的来源透传，避免从 IP 查询或订单列表进入后操作完返回路径丢失。
+- 补充 Bot UI 聚焦测试，覆盖嵌套返回 callback、详情页操作按钮、重新安装取消按钮、资产续费套餐返回按钮和 IP 查询操作按钮。
+
+### 验证
+
+已通过：
+
+```bash
+UV_CACHE_DIR=/private/tmp/uv-cache-shop uv run python manage.py check
+UV_CACHE_DIR=/private/tmp/uv-cache-shop uv run python -m py_compile bot/handlers.py bot/keyboards.py bot/tests.py cloud/management/commands/sync_aws_assets.py cloud/lifecycle.py cloud/api.py
+UV_CACHE_DIR=/private/tmp/uv-cache-shop uv run python manage.py makemigrations --check --dry-run
+DJANGO_TEST_SQLITE=1 UV_CACHE_DIR=/private/tmp/uv-cache-shop uv run python manage.py test bot.tests.RetainedIpRenewalUiTestCase --noinput
+DJANGO_TEST_SQLITE=1 UV_CACHE_DIR=/private/tmp/uv-cache-shop uv run python manage.py test cloud.tests.CloudServerServicesTestCase.test_aws_sync_release_static_ip_respects_asset_shutdown_disabled cloud.tests.CloudServerServicesTestCase.test_aws_sync_release_static_ip_ignores_shutdown_disabled_account cloud.tests.CloudServerServicesTestCase.test_aws_sync_release_static_ip_respects_global_ip_delete_switch --noinput
+rg -n "service_expires_at|service_expired_at|normalize_service_expiry|CloudLifecyclePlan|CloudNoticePlan|CloudAutoRenewPlan|refund_to_balance|refund_balance|STATUS_REFUNDED|refunded" bot orders cloud core shop --glob '!**/migrations/**'
+git diff --check
+```
+
+结果：Django 系统检查、关键模块编译、18 条 Bot UI 测试、3 条 AWS 固定 IP 释放回归、迁移 dry-run 和空白检查通过。`makemigrations --check --dry-run` 无模型变更；默认 MySQL 迁移历史检查因沙箱无法连接 `127.0.0.1` 输出警告。
+
+剩余风险：本轮未跑完整测试套件，未连接真实 MySQL、AWS Lightsail 或阿里云 API，未执行真实 Telegram Bot 回调、自动续费支付、云端删机、固定 IP 释放或历史数据清理。
+
 ## 2026-06-02 20:31 自动监工：固定 IP 资产级关机开关测试收口
 
 ### 范围
@@ -1543,18 +1700,18 @@ uv run python manage.py check
 
 ## 2026-06-02 cloud-order-secret-edit-sync
 
-### Scope
+### 范围
 
-Small dashboard sync fix for manual MTProxy secret edits on cloud orders.
+修复后台手动编辑云订单 MTProxy 密钥后的同步问题。
 
-### Runtime Changes
+### 运行时变化
 
 - `cloud_order_detail` now accepts a standalone non-empty `mtproxy_secret` edit.
-- Manual secret edits are persisted to `CloudServerOrder` and propagated to the linked primary `CloudAsset`.
-- Secret-only saves keep the existing non-empty-only behavior and do not clear stored secrets on blank payloads.
-- Added a focused regression test for secret-only order edits.
+- 手动密钥编辑会保存到 `CloudServerOrder`，并同步到关联的主 `CloudAsset`。
+- 仅保存密钥时继续保持“只接受非空值”的行为，空 payload 不会清空已保存密钥。
+- 新增聚焦回归测试，覆盖只编辑密钥的订单保存。
 
-### Verification
+### 验证
 
 Passed locally with `PYTHONDONTWRITEBYTECODE=1 DJANGO_TEST_SQLITE=1`:
 
@@ -1566,18 +1723,18 @@ uv run python manage.py check
 
 ## 2026-06-02 public-asset-renewal-no-pending-owner-claim
 
-### Scope
+### 范围
 
-Small ownership safety fix for public unbound asset renewal orders.
+修复公共未绑定资产续费订单的归属安全问题。
 
-### Runtime Changes
+### 运行时变化
 
-- Creating a pending public unbound `CloudAsset` renewal order no longer writes the payer onto `CloudAsset.user`.
-- The asset is still linked to the pending renewal order to prevent duplicate checkout attempts, but ownership remains unchanged until successful recovery.
-- Payment-timeout cleanup can now safely unlink the pending order without leaving an unpaid public asset claimed by the attempted payer.
-- Added focused regression coverage for public renewal timeout on an unowned unattached static IP asset.
+- 创建待支付的公共未绑定 `CloudAsset` 续费订单时，不再把付款人写入 `CloudAsset.user`。
+- 资产仍会关联到待支付续费订单，以防止重复下单；但在恢复成功前，资产归属保持不变。
+- 支付超时清理现在可以安全解除待支付订单关联，不会让未支付的公共资产被尝试付款的人占用。
+- 新增聚焦回归覆盖，验证无主未附加固定 IP 资产的公共续费超时场景。
 
-### Verification
+### 验证
 
 Passed locally with `PYTHONDONTWRITEBYTECODE=1 DJANGO_TEST_SQLITE=1`:
 
@@ -1589,17 +1746,17 @@ uv run python manage.py check
 
 ## 2026-06-02 asset-renewal-expiry-retry-note
 
-### Scope
+### 范围
 
-Small payment timeout recovery fix for unbound asset renewal orders.
+修复未绑定资产续费订单的支付超时恢复问题。
 
-### Runtime Changes
+### 运行时变化
 
-- When an unbound `CloudAsset` renewal address-payment order expires, the scanner now unbinds the asset and appends a retry note to the asset.
-- Existing asset notes are preserved, and the retry note is appended uniquely to avoid duplicate timeout text.
-- This makes the existing retry-state expectation explicit after payment-window expiry.
+- 未绑定 `CloudAsset` 的地址支付续费订单过期时，扫描器现在会解除资产绑定，并给资产追加重试备注。
+- 既有资产备注会保留，重试备注会去重追加，避免重复超时文本。
+- 这让支付窗口过期后的重试状态预期变成显式状态。
 
-### Verification
+### 验证
 
 Passed locally with `PYTHONDONTWRITEBYTECODE=1 DJANGO_TEST_SQLITE=1`:
 
@@ -1611,18 +1768,18 @@ uv run python manage.py check
 
 ## 2026-06-02 aws-sync-ip-release-order-cleanup
 
-### Scope
+### 范围
 
-Small retained static IP cleanup fix for AWS sync release handling.
+修复 AWS 同步释放保留固定 IP 后的清理问题。
 
-### Runtime Changes
+### 运行时变化
 
-- Successful AWS sync release of an unattached static IP now reuses the lifecycle cleanup path.
-- Linked deleted retained orders have stale `public_ip`, `static_ip_name`, `mtproxy_host`, and `ip_recycle_at` cleared after the AWS release succeeds.
-- The released asset keeps `previous_public_ip`, clears `public_ip`, and records a single recycled IP history row linked to both the asset and order.
-- Added focused regression coverage for the AWS sync release helper.
+- AWS 同步成功释放未附加固定 IP 后，现在复用生命周期清理路径。
+- AWS 释放成功后，关联的已删除保留订单会清空陈旧的 `public_ip`、`static_ip_name`、`mtproxy_host` 和 `ip_recycle_at`。
+- 被释放资产会保留 `previous_public_ip`，清空 `public_ip`，并记录一条同时关联资产和订单的 IP 回收历史。
+- 新增聚焦回归覆盖 AWS 同步释放辅助函数。
 
-### Verification
+### 验证
 
 Passed locally with `PYTHONDONTWRITEBYTECODE=1 DJANGO_TEST_SQLITE=1`:
 
@@ -1634,18 +1791,18 @@ uv run python manage.py check
 
 ## 2026-06-02 cleanup-keeps-retained-ip-orders
 
-### Scope
+### 范围
 
-Small cleanup safety fix for retained static IP order history.
+修复保留固定 IP 订单历史的清理安全问题。
 
-### Runtime Changes
+### 运行时变化
 
 - `cleanup_old_records` no longer treats every `deleted` cloud order as immediately cleanup-eligible.
-- Deleted cloud orders with a future retained-IP `ip_recycle_at` are preserved until the configured retention cutoff has passed their IP recycle time.
-- This keeps retained-IP renewal context and linked `CloudIpLog` history available while the static IP is still recoverable.
-- Added focused regression coverage for the cleanup filter.
+- 带有未来保留 IP `ip_recycle_at` 的已删除云订单，会保留到配置的清理截止时间超过其 IP 回收时间之后。
+- 这会在固定 IP 仍可恢复期间，保留保留 IP 续费上下文和关联的 `CloudIpLog` 历史。
+- 新增聚焦回归覆盖清理过滤条件。
 
-### Verification
+### 验证
 
 Passed locally with `PYTHONDONTWRITEBYTECODE=1 DJANGO_TEST_SQLITE=1`:
 
@@ -1657,18 +1814,18 @@ uv run python manage.py test cloud.tests.CloudServerServicesTestCase.test_cleanu
 
 ## 2026-06-02 unattached-ip-release-order-cleanup
 
-### Scope
+### 范围
 
-Small retained static IP cleanup fix for manual/dashboard asset-level releases.
+修复手动/后台资产级释放保留固定 IP 后的清理问题。
 
-### Runtime Changes
+### 运行时变化
 
-- Successful unattached static IP release now also clears a linked deleted retained order's `public_ip`, `static_ip_name`, `mtproxy_host`, and `ip_recycle_at`.
-- The linked order is marked as recycle-notified and has IP recycle reminders disabled after the IP is actually released.
-- Recycle history logs now keep both the released `CloudAsset` and linked `CloudServerOrder`, preventing stale renewal/recycle state from remaining visible.
-- Added focused regression coverage for manual retained-IP release through the dashboard helper path.
+- 成功释放未附加固定 IP 后，现在也会清空关联已删除保留订单的 `public_ip`、`static_ip_name`、`mtproxy_host` 和 `ip_recycle_at`。
+- IP 真实释放后，关联订单会标记为已发送回收通知，并关闭 IP 回收提醒。
+- 回收历史日志现在同时保留被释放的 `CloudAsset` 和关联的 `CloudServerOrder`，避免陈旧续费/回收状态继续可见。
+- 新增聚焦回归覆盖后台辅助路径触发的手动保留 IP 释放。
 
-### Verification
+### 验证
 
 Passed locally with `PYTHONDONTWRITEBYTECODE=1 DJANGO_TEST_SQLITE=1`:
 
@@ -1680,17 +1837,17 @@ uv run python manage.py test cloud.tests.CloudServerServicesTestCase.test_manual
 
 ## 2026-06-02 retained-ip-real-release-history
 
-### Scope
+### 范围
 
-Small lifecycle-plan history display fix for AWS retained static IP releases.
+修复 AWS 保留固定 IP 释放在生命周期计划历史中的展示问题。
 
-### Runtime Changes
+### 运行时变化
 
-- Lifecycle IP-delete history now recognizes `AWS 固定 IP 已真实释放` log notes as completed retained-IP release records.
-- Released retained static IPs can appear in lifecycle plan history even when no active lifecycle-plan row existed before the release.
-- Added focused regression coverage for a real-release history row rebuilt from `CloudIpLog`.
+- 生命周期 IP 删除历史现在会把 `AWS 固定 IP 已真实释放` 日志备注识别为已完成的保留 IP 释放记录。
+- 即使释放前没有活跃生命周期计划行，已释放的保留固定 IP 也能出现在生命周期计划历史中。
+- 新增聚焦回归覆盖从 `CloudIpLog` 重建真实释放历史行的场景。
 
-### Verification
+### 验证
 
 Passed locally with `PYTHONDONTWRITEBYTECODE=1 DJANGO_TEST_SQLITE=1`:
 
@@ -1702,17 +1859,17 @@ uv run python manage.py test cloud.tests.CloudServerServicesTestCase.test_lifecy
 
 ## 2026-06-02 aws-retained-ip-missing-skip
 
-### Scope
+### 范围
 
-Small AWS retained static IP sync consistency fix.
+修复 AWS 保留固定 IP 同步一致性问题。
 
-### Runtime Changes
+### 运行时变化
 
-- AWS missing-instance verification now treats `固定IP仍存在但未附加` and `固定IP保留中` provider states as static-IP-backed assets.
-- A retained static IP that still exists remotely will not be moved into missing-confirmation state just because the old instance id no longer appears.
-- Added focused regression coverage for the retained-IP preservation path followed by missing verification in the same sync cycle.
+- AWS 缺失实例校验现在会把 `固定IP仍存在但未附加` 和 `固定IP保留中` 云厂商状态视为固定 IP 支撑的资产。
+- 远端仍存在的保留固定 IP，不会仅因为旧实例 ID 不再出现就进入缺失确认状态。
+- 新增聚焦回归覆盖同一同步周期内先保留 IP、再执行缺失校验的路径。
 
-### Verification
+### 验证
 
 Passed locally with `PYTHONDONTWRITEBYTECODE=1 DJANGO_TEST_SQLITE=1`:
 
@@ -1724,17 +1881,17 @@ uv run python manage.py test cloud.tests.CloudServerServicesTestCase.test_sync_a
 
 ## 2026-06-02 sync-user-binding-persist-false
 
-### Scope
+### 范围
 
-Small cloud sync ownership binding fix.
+修复云同步归属绑定问题。
 
-### Runtime Changes
+### 运行时变化
 
 - `sync_cloud_asset_user_binding(..., persist=False)` now updates the in-memory `CloudAsset.user` / `user_id` fields without issuing its own database write.
-- AWS and Aliyun sync paths that call the helper before `asset.save()` can now fill blank asset owners while still preserving existing owners.
-- Added focused regression coverage that `persist=False` mutates only the Python object until the caller saves.
+- AWS 和阿里云同步路径在 `asset.save()` 前调用该辅助函数时，现在可以填充空资产归属，同时保留既有归属。
+- 新增聚焦回归覆盖，确认 `persist=False` 在调用方保存前只修改 Python 对象。
 
-### Verification
+### 验证
 
 Passed locally with `PYTHONDONTWRITEBYTECODE=1 DJANGO_TEST_SQLITE=1`:
 
@@ -1746,17 +1903,17 @@ uv run python manage.py test cloud.tests.CloudServerServicesTestCase.test_sync_c
 
 ## 2026-06-02 early-provisioning-asset-field-preservation
 
-### Scope
+### 范围
 
-Small follow-up to the provisioning asset preservation pass.
+开通资产保留改造的后续小修。
 
-### Runtime Changes
+### 运行时变化
 
-- Early provisioning asset writes now preserve existing asset owner, expiry, MTProxy link, secret, host, port, proxy-link list, price, and currency when updating an existing asset.
+- 早期开通资产写入在更新已有资产时，现在会保留既有资产归属、到期时间、MTProxy 链接、密钥、host、port、代理链接列表、价格和币种。
 - `_upsert_server_asset()` and early provisioning helpers share the same default-value preservation helper.
-- Added focused regression coverage for `_mark_provisioning_start()` and `_mark_instance_created()` so manual asset fields are not clobbered before final success handling.
+- 新增聚焦回归覆盖 `_mark_provisioning_start()` 和 `_mark_instance_created()`，避免最终成功处理前覆盖手工资产字段。
 
-### Verification
+### 验证
 
 Passed locally with `PYTHONDONTWRITEBYTECODE=1 DJANGO_TEST_SQLITE=1`:
 
@@ -1768,18 +1925,18 @@ uv run python manage.py test cloud.tests.CloudServerServicesTestCase.test_mark_s
 
 ## 2026-06-02 provisioning-asset-field-preservation
 
-### Scope
+### 范围
 
-Small provisioning write-path safety pass for existing cloud assets.
+针对已有云资产的开通写入路径安全修正。
 
-### Runtime Changes
+### 运行时变化
 
 - `_mark_success` no longer runs a duplicate `CloudAsset.update_or_create()` before the shared asset upsert helper.
 - `_upsert_server_asset()` now preserves existing asset owner, expiry, MTProxy link, secret, host, port, and proxy-link list when updating an existing asset, while still filling blank fields from the order.
-- New asset creation still receives order runtime fields including MTProxy data, price, and currency.
-- Added focused regression coverage that provisioning success does not duplicate assets or overwrite existing manual asset fields.
+- 新建资产仍会接收订单运行时字段，包括 MTProxy 数据、价格和币种。
+- 新增聚焦回归覆盖，确认开通成功不会重复创建资产或覆盖已有手工资产字段。
 
-### Verification
+### 验证
 
 Passed locally with `PYTHONDONTWRITEBYTECODE=1 DJANGO_TEST_SQLITE=1`:
 
@@ -1791,18 +1948,18 @@ uv run python manage.py test cloud.tests.CloudServerServicesTestCase.test_mark_s
 
 ## 2026-06-02 mtproxy-link-write-consistency
 
-### Scope
+### 范围
 
-Small dashboard write-path safety pass for MTProxy link edits.
+修复后台 MTProxy 链接编辑写入路径安全问题。
 
-### Runtime Changes
+### 运行时变化
 
-- Dashboard cloud order edits now parse submitted `mtproxy_link` values and keep `mtproxy_secret`, host, port, and `proxy_links` aligned with the main link.
-- Dashboard cloud asset edits now apply the same main-link normalization to both the asset and its linked order.
-- Main-link replacement removes stale `主代理` / `主链路` entries from `proxy_links` so old secrets are not copied after a manual link edit.
-- Added focused regression coverage for order detail edits and asset edits that update MTProxy links.
+- 后台云订单编辑现在会解析提交的 `mtproxy_link`，并让 `mtproxy_secret`、host、port 和 `proxy_links` 与主链接保持一致。
+- 后台云资产编辑现在会对资产及其关联订单应用同一套主链接规范化。
+- 主链接替换会从 `proxy_links` 中移除陈旧的 `主代理` / `主链路` 条目，避免手动编辑链接后复制旧密钥。
+- 新增聚焦回归覆盖更新 MTProxy 链接的订单详情编辑和资产编辑。
 
-### Verification
+### 验证
 
 Passed locally with `PYTHONDONTWRITEBYTECODE=1 DJANGO_TEST_SQLITE=1`:
 
@@ -1814,18 +1971,18 @@ uv run python manage.py test cloud.tests.CloudServerServicesTestCase.test_update
 
 ## 2026-06-02 cloud-sync-manual-field-preservation
 
-### Scope
+### 范围
 
-Small sync safety pass for retained asset ownership and expiry preservation.
+保留资产归属和到期时间的同步安全修正。
 
-### Runtime Changes
+### 运行时变化
 
-- AWS retained-IP sync no longer overwrites an existing `CloudAsset.user` when attaching a retained order to an orderless asset.
-- Aliyun sync no longer overwrites an existing `CloudAsset.actual_expires_at` on already tracked assets.
-- Empty asset owners are still backfilled from the retained order when appropriate.
-- Added focused regression coverage for AWS retained-IP owner preservation and Aliyun retained-asset expiry preservation.
+- AWS 保留 IP 同步在把保留订单挂到无订单资产上时，不再覆盖既有 `CloudAsset.user`。
+- 阿里云同步不再覆盖已跟踪资产的既有 `CloudAsset.actual_expires_at`。
+- 合适时仍会从保留订单回填空资产归属。
+- 新增聚焦回归覆盖 AWS 保留 IP 归属保留和阿里云保留资产到期时间保留。
 
-### Verification
+### 验证
 
 Passed locally with `PYTHONDONTWRITEBYTECODE=1 DJANGO_TEST_SQLITE=1`:
 
@@ -1837,17 +1994,17 @@ uv run python manage.py test cloud.tests.CloudServerServicesTestCase.test_sync_a
 
 ## 2026-06-02 cloud-asset-payload-readonly-guard
 
-### Scope
+### 范围
 
-Removed a read-path side effect from cloud asset payload building.
+移除云资产 payload 构建中的读取路径副作用。
 
-### Runtime Changes
+### 运行时变化
 
 - `CloudAssetPayloadContext` now defaults to read-only payload rendering.
-- Cloud asset GET/detail payloads no longer auto-write `CloudAsset.user` or `CloudAsset.actual_expires_at` while computing display data.
-- Added a regression test covering the read-only asset payload path.
+- 云资产 GET/详情 payload 在计算展示数据时，不再自动写入 `CloudAsset.user` 或 `CloudAsset.actual_expires_at`。
+- 新增回归测试覆盖只读资产 payload 路径。
 
-### Verification
+### 验证
 
 Passed locally with `UV_CACHE_DIR=/private/tmp/shop-uv-cache`:
 
@@ -1859,18 +2016,18 @@ DJANGO_TEST_SQLITE=1 uv run python manage.py test cloud.tests.CloudServerService
 
 ## 2026-06-02 trongrid-api-key-secret-preservation
 
-### Scope
+### 范围
 
-Small sensitive-config hardening pass after the runtime-field preservation guard.
+运行时字段保留保护后的敏感配置加固。
 
-### Runtime Changes
+### 运行时变化
 
-- Treat `trongrid_api_key` as a sensitive site config key.
-- Blank dashboard saves for `trongrid_api_key` now preserve the existing API keys instead of clearing them.
-- Dashboard config responses no longer return the full TRON API key list in `value_preview`.
-- Added focused regression coverage for blank TRON API key saves and response masking.
+- 将 `trongrid_api_key` 作为敏感站点配置 key 处理。
+- 后台对 `trongrid_api_key` 的空值保存现在会保留既有 API key，而不是清空。
+- 后台配置响应不再在 `value_preview` 中返回完整 TRON API key 列表。
+- 新增聚焦回归覆盖空 TRON API key 保存和响应脱敏。
 
-### Verification
+### 验证
 
 Passed locally with `UV_CACHE_DIR=/private/tmp/shop-uv-cache`:
 
@@ -1882,19 +2039,19 @@ DJANGO_TEST_SQLITE=1 uv run python manage.py test bot.tests.DashboardAuthSurface
 
 ## 2026-06-02 runtime-field-preservation-guard
 
-### Scope
+### 范围
 
-Small safety pass after the backend refactor to guard runtime ownership, expiry, and sensitive-field persistence.
+后端重构后的安全修正，用于保护运行时归属、到期时间和敏感字段持久化。
 
-### Runtime Changes
+### 运行时变化
 
-- Dashboard cloud order edits no longer reverse-sync `CloudServerOrder.user` or `service_expires_at` into `CloudAsset.user` / `actual_expires_at`.
-- Dashboard cloud asset edits preserve existing `mtproxy_secret` when the submitted value is blank.
-- Sensitive site config updates preserve the existing value when the submitted value is blank.
-- Order primary-record updates now apply cloud identity, status, and proxy-field changes to all server-like `CloudAsset` records tied to the same order, while still preserving manual owner and expiry fields.
-- Added focused regression coverage for blank sensitive config saves, blank MTProxy secret saves, order expiry edits, and multi-record order detail sync.
+- 后台云订单编辑不再把 `CloudServerOrder.user` 或 `service_expires_at` 反向同步到 `CloudAsset.user` / `actual_expires_at`。
+- 后台云资产编辑在提交值为空时会保留既有 `mtproxy_secret`。
+- 敏感站点配置更新在提交值为空时会保留既有值。
+- 订单主记录更新现在会把云身份、状态和代理字段变更应用到同一订单关联的所有服务器型 `CloudAsset` 记录，同时继续保留手工归属和到期字段。
+- 新增聚焦回归覆盖空敏感配置保存、空 MTProxy 密钥保存、订单到期时间编辑和多记录订单详情同步。
 
-### Verification
+### 验证
 
 Passed locally with `UV_CACHE_DIR=/private/tmp/shop-uv-cache`:
 
@@ -1908,32 +2065,32 @@ DJANGO_TEST_REUSE_DB=1 uv run python manage.py test bot.tests.DashboardAuthSurfa
 
 ## 2026-06-01 task-center-and-monitor-split
 
-### Scope
+### 范围
 
-This pass kept splitting the oversized cloud API surface, added a unified task center API, and moved monitor/IP-log endpoints into a dedicated module.
+本轮继续拆分过大的云 API 面，新增统一任务中心 API，并把监控/IP 日志端点迁入独立模块。
 
-### Runtime Changes
+### 运行时变化
 
-- Added `cloud/api_monitors.py` for cloud IP logs and address monitor APIs.
-- Added `cloud/task_center.py` for a unified backend task center overview.
+- 新增 `cloud/api_monitors.py`，承接云 IP 日志和地址监控 API。
+- 新增 `cloud/task_center.py`，承接统一后台任务中心概览。
 - `cloud/api.py` now re-exports the monitor APIs and task center API for URL compatibility.
-- Added `GET /admin/tasks/center/` and kept `GET /admin/tasks/` as the legacy task list.
-- Added a refactor worktree boundary document so future passes can distinguish owned edits from existing dirty files.
+- 新增 `GET /admin/tasks/center/`，并保留 `GET /admin/tasks/` 作为旧任务列表。
+- 新增重构工作区边界文档，方便后续轮次区分接管修改和既有脏文件。
 
-### Frontend Changes
+### 前端变化
 
-- Upgraded `/admin/tasks` into a task center page with health cards and a searchable task table.
+- 将 `/admin/tasks` 升级为任务中心页面，包含健康卡片和可搜索任务表。
 
-### Verification
+### 验证
 
-Passed locally:
+本地已通过:
 
 ```bash
 uv run python -m py_compile cloud/api.py cloud/api_monitors.py cloud/task_center.py shop/dashboard_urls.py
 DJANGO_TEST_REUSE_DB=1 uv run python manage.py test cloud.tests_task_center.CloudTaskCenterApiTestCase --keepdb --noinput --verbosity 1
 ```
 
-Frontend validation passed in `/Users/a399/Desktop/data/vue-shop-admin`:
+前端验证已通过，目录为 `/Users/a399/Desktop/data/vue-shop-admin`:
 
 ```bash
 ./node_modules/.bin/vue-tsc --noEmit --skipLibCheck -p apps/web-antd/tsconfig.json
@@ -1941,29 +2098,29 @@ Frontend validation passed in `/Users/a399/Desktop/data/vue-shop-admin`:
 
 ## 2026-06-01 cloud-sync-runtime-split
 
-### Scope
+### 范围
 
 This refactor split cloud asset sync execution out of `cloud/api.py` and made sync jobs easier to operate, observe, and clean up.
 
-### Runtime Changes
+### 运行时变化
 
-- Added `cloud/sync_jobs.py` as the cloud asset sync job runtime module.
+- 新增 `cloud/sync_jobs.py` 作为云资产同步任务运行时模块。
 - `cloud/api.py` now keeps cloud asset/order/dashboard API logic and re-exports sync job endpoints for existing dashboard URL aggregation.
 - `process_cloud_asset_sync_jobs` imports execution helpers from `cloud.sync_jobs`, no longer from `cloud.api`.
-- Bulk sync job subtasks now run serially instead of using a thread pool, so progress updates, event ordering, heartbeat, and cancellation are deterministic.
-- Added `cloud_asset_sync_jobs_metrics` API at `cloud-assets/sync-jobs/metrics/`.
+- 批量同步任务子任务现在串行运行，不再使用线程池，因此进度更新、事件顺序、心跳和取消行为更确定。
+- 在 `cloud-assets/sync-jobs/metrics/` 新增 `cloud_asset_sync_jobs_metrics` API。
 - `cloud_assets_sync_status` now embeds the same metrics summary used by the frontend.
-- Added `prune_cloud_sync_job_events` for event-table cleanup by age and per-job retention.
+- 新增 `prune_cloud_sync_job_events`，支持按时间和单任务保留量清理事件表。
 
-### Frontend Changes
+### 前端变化
 
-- Added `/admin/cloud-sync-jobs/:id` as a dedicated sync job detail page in `/Users/a399/Desktop/data/vue-shop-admin/apps/web-antd`.
-- Proxy list sync drawer now shows task metrics and links each job row to the detail page.
-- Frontend API types now include `DashboardCloudAssetSyncJobsMetrics`.
+- 在 `/Users/a399/Desktop/data/vue-shop-admin/apps/web-antd` 新增 `/admin/cloud-sync-jobs/:id` 专用同步任务详情页。
+- 代理列表同步抽屉现在显示任务指标，并把每个任务行链接到详情页。
+- 前端 API 类型现在包含 `DashboardCloudAssetSyncJobsMetrics`。
 
-### Verification
+### 验证
 
-Passed locally:
+本地已通过:
 
 ```bash
 uv run python -m py_compile cloud/api.py cloud/sync_jobs.py cloud/management/commands/process_cloud_asset_sync_jobs.py cloud/management/commands/prune_cloud_sync_job_events.py shop/dashboard_urls.py
@@ -1972,7 +2129,7 @@ uv run python manage.py makemigrations cloud --dry-run --check
 DJANGO_TEST_REUSE_DB=1 uv run python manage.py test cloud.tests.CloudServerServicesTestCase.test_sync_cloud_assets_runs_enabled_accounts_and_merges_results cloud.tests.CloudServerServicesTestCase.test_cloud_asset_sync_jobs_metrics_returns_operational_summary cloud.tests.CloudServerServicesTestCase.test_cancel_queued_cloud_asset_sync_job_marks_terminal_and_events cloud.tests.CloudServerServicesTestCase.test_sync_cloud_assets_with_selected_assets_uses_asset_scoped_tasks cloud.tests.CloudServerServicesTestCase.test_process_cloud_asset_sync_jobs_worker_processes_queued_job --keepdb --noinput --verbosity 1
 ```
 
-Frontend validation passed in `/Users/a399/Desktop/data/vue-shop-admin`:
+前端验证已通过，目录为 `/Users/a399/Desktop/data/vue-shop-admin`:
 
 ```bash
 ./node_modules/.bin/vue-tsc --noEmit --skipLibCheck -p apps/web-antd/tsconfig.json
@@ -1980,35 +2137,35 @@ Frontend validation passed in `/Users/a399/Desktop/data/vue-shop-admin`:
 
 ## 2026-06-01 cloud-asset-lifecycle-refactor
 
-### Scope
+### 范围
 
-This version is an aggressive backend refactor around cloud asset lifecycle, table ownership, and runtime dependency cleanup.
+本版本围绕云资产生命周期、表归属和运行时依赖清理进行了一轮较大后端重构。
 
-### Database Changes
+### 数据库变化
 
 - `cloud_server` physical table was removed.
-- Historical server data was migrated into `cloud_asset`.
+- 历史服务器数据已迁入 `cloud_asset`。
 - `cloud_asset` is now the only cloud resource fact table.
 - `CloudIpLog.server` / `cloud_ip_log.server_id` was removed.
-- Django migration chain:
+- Django migration 链：
   - `0037_server_table_to_cloud_asset`
   - `0038_drop_server_model_and_iplog_server`
 
-### Runtime Model Direction
+### 运行时模型方向
 
 - `CloudAsset(kind='server')` is the canonical server asset record.
 - `CloudServerOrder` is business context for purchase, renewal, migration, rebuild, deletion, and audit.
 - `Server` is no longer a Django model. A small import compatibility facade remains in `cloud.models` so older scripts/tests do not fail immediately on import, but new runtime code should not use it.
 
-### Lifecycle Refactor
+### 生命周期重构
 
-- Added `cloud/lifecycle_schedule.py`:
+- 新增 `cloud/lifecycle_schedule.py`：
   - central lifecycle time calculation
   - order schedule fields
   - orphan asset delete time
   - unattached static IP release time
   - runtime config helpers
-- Added `cloud/lifecycle_execution.py`:
+- 新增 `cloud/lifecycle_execution.py`：
   - scheduled/manual shutdown
   - delete order
   - delete migrated/replaced order
@@ -2018,7 +2175,7 @@ This version is an aggressive backend refactor around cloud asset lifecycle, tab
   - cloud API timeout handling
 - `cloud/lifecycle.py` now scans due work and dispatches to execution helpers.
 
-### Runtime Dependency Cleanup
+### 运行时依赖清理
 
 - `cloud/services.py` now writes primary record updates to `CloudAsset`.
 - `cloud/provisioning.py` no longer creates/upserts `Server` rows; provisioning writes `CloudAsset`.
@@ -2026,7 +2183,7 @@ This version is an aggressive backend refactor around cloud asset lifecycle, tab
 - `bot/api.py` no longer syncs notes to `Server`.
 - `record_cloud_ip_log` records asset/order context only.
 
-### Documentation Updated
+### 已更新文档
 
 - `ARCHITECTURE.md`
 - `docs/DATA_FLOW_AND_PERSISTENCE.md`
@@ -2035,9 +2192,9 @@ This version is an aggressive backend refactor around cloud asset lifecycle, tab
 - `docs/table-rename-plan.md`
 - `docs/project-overview.md`
 
-### Verification
+### 验证
 
-Passed locally:
+本地已通过:
 
 ```bash
 uv run python -m py_compile cloud/models.py cloud/services.py cloud/lifecycle.py cloud/provisioning.py cloud/api.py bot/api.py
@@ -2047,17 +2204,17 @@ uv run python manage.py migrate --plan
 uv run python manage.py migrate cloud 0038
 ```
 
-Local database probe after migration:
+迁移后的本地数据库探查：
 
 - `cloud_server_exists`: `False`
 - `cloud_ip_log.server_id`: removed
-- Django registered `cloud.Server` model: `None`
+- Django 注册的 `cloud.Server` 模型：`None`
 
-### Known Follow-up
+### 已知后续事项
 
-- Some tests and compatibility management commands still reference the `Server` facade.
+- 部分测试和兼容管理命令仍引用 `Server` 门面。
 - `sync_aws_assets.py` and `sync_aliyun_assets.py` still need a deeper pass to rename local variables and remove old wording, although the `Server` facade currently routes writes to `CloudAsset`.
-- Full Django tests are still blocked locally by MySQL test database permission:
+- 完整 Django 测试仍受本地 MySQL 测试库权限阻塞：
 
 ```sql
 GRANT ALL PRIVILEGES ON test_a.* TO 'a'@'localhost';
@@ -2066,30 +2223,30 @@ FLUSH PRIVILEGES;
 
 ## 2026-06-01 cloud-asset-runtime-cleanup
 
-### Scope
+### 范围
 
 Second refactor pass after the table migration. This pass removes the `Server` compatibility facade from `cloud.models`, moves old command/test compatibility to an explicit command-side wrapper, and adds indexes/state helpers.
 
-### Runtime Changes
+### 运行时变化
 
-- Removed `Server` from `cloud.models` and `__all__`.
-- Added `cloud/server_records.py` as an explicit compatibility wrapper over `CloudAsset(kind='server')` for legacy commands and tests.
-- Updated sync and maintenance commands to import `Server` from `cloud.server_records`, not from `cloud.models`.
-- Added `cloud/lifecycle_state.py` for order-status to asset-status mapping.
+- 从 `cloud.models` 和 `__all__` 中移除 `Server`。
+- 新增 `cloud/server_records.py`，作为面向旧命令和测试的显式 `CloudAsset(kind='server')` 兼容包装。
+- 更新同步和维护命令，从 `cloud.server_records` 导入 `Server`，不再从 `cloud.models` 导入。
+- 新增 `cloud/lifecycle_state.py`，承接订单状态到资产状态的映射。
 - `cloud/api.py` now uses `primary_record_updates_for_order_status` from `cloud.lifecycle_state`.
 
-### Database Changes
+### 数据库变化
 
-- Added `0039_cloud_asset_indexes`:
+- 新增 `0039_cloud_asset_indexes`：
   - `ca_kind_status_active_idx`
   - `ca_provider_acct_inst_idx`
   - `ca_provider_acct_ip_idx`
   - `ca_order_status_idx`
   - `ca_kind_user_status_idx`
 
-### Verification
+### 验证
 
-Passed locally:
+本地已通过:
 
 ```bash
 uv run python -m py_compile cloud/lifecycle_state.py cloud/models.py cloud/api.py cloud/server_records.py
@@ -2100,43 +2257,43 @@ uv run python manage.py migrate cloud 0039
 uv run python manage.py migrate --plan
 ```
 
-### Remaining Big Refactors
+### 剩余大型重构
 
-- Physically split `cloud/api.py`.
-- Physically split `bot/api.py`.
-- Rename legacy server wording inside sync commands and tests from `Server` to `CloudAsset` once test coverage is adjusted.
+- 物理拆分 `cloud/api.py`。
+- 物理拆分 `bot/api.py`。
+- 待测试覆盖调整后，把同步命令和测试中的旧服务器措辞从 `Server` 改为 `CloudAsset`。
 
 ## 2026-06-01 cloud-dashboard-api-split
 
-### Scope
+### 范围
 
-Third refactor pass focused on shrinking the oversized dashboard cloud API module while preserving existing URL imports.
+第三轮重构聚焦缩小过大的后台云 API 模块，同时保留现有 URL 导入兼容。
 
-### Runtime Changes
+### 运行时变化
 
-- Added `cloud/api_servers.py` for server-shaped `CloudAsset(kind='server')` dashboard endpoints:
+- 新增 `cloud/api_servers.py`，承接服务器型 `CloudAsset(kind='server')` 后台端点：
   - server list payloads
   - server rebuild preserve-link action
   - server delete action
   - server statistics
-- Added `cloud/api_plans.py` for cloud plan/pricing dashboard endpoints:
+- 新增 `cloud/api_plans.py`，承接云套餐/价格后台端点：
   - provider pricing list
   - custom cloud plan list
   - plan create/update/delete
 - `cloud/api.py` now imports these endpoint names at the bottom as compatibility exports, so `shop/dashboard_urls.py` can continue using `cloud_api.<view_name>`.
 
-### Cleanup
+### 清理
 
-- Removed remaining runtime writes to the retired `server` variable inside `update_cloud_asset`.
-- Removed removed ORM paths:
+- 移除 `update_cloud_asset` 中对已退役 `server` 变量的剩余运行时写入。
+- 移除已删除的 ORM 路径：
   - `order__server__server_name`
   - `order__server__note`
   - `CloudIpLog.select_related('server')`
   - `Q(server__isnull=False)`
 
-### Verification
+### 验证
 
-Passed locally:
+本地已通过:
 
 ```bash
 uv run python -m py_compile cloud/api.py cloud/api_servers.py cloud/api_plans.py
@@ -2145,21 +2302,21 @@ uv run python manage.py check
 
 ## 2026-06-01 bot-product-api-split
 
-### Scope
+### 范围
 
 Fourth refactor pass started splitting the oversized `bot/api.py` dashboard module.
 
-### Runtime Changes
+### 运行时变化
 
-- Added `bot/api_products.py` for product dashboard endpoints:
+- 新增 `bot/api_products.py`，承接商品后台端点：
   - product list
   - product create
   - product update
 - `bot/api.py` keeps compatibility exports for `products_list`, `create_product`, and `update_product`, so existing dashboard URL imports continue to work.
 
-### Verification
+### 验证
 
-Passed locally:
+本地已通过:
 
 ```bash
 uv run python -m py_compile bot/api.py bot/api_products.py
@@ -2168,21 +2325,21 @@ uv run python manage.py check
 
 ## 2026-06-01 bot-admin-api-split
 
-### Scope
+### 范围
 
 Fifth refactor pass continued splitting `bot/api.py` by moving admin account management endpoints.
 
-### Runtime Changes
+### 运行时变化
 
-- Added `bot/api_admin_users.py` for dashboard admin account endpoints:
+- 新增 `bot/api_admin_users.py`，承接后台管理员账号端点：
   - admin user list
   - admin create/update/delete
   - current admin password change
 - `bot/api.py` keeps compatibility exports for the moved endpoints, so `shop/dashboard_urls.py` continues resolving the same attributes.
 
-### Verification
+### 验证
 
-Passed locally:
+本地已通过:
 
 ```bash
 uv run python -m py_compile bot/api.py bot/api_admin_users.py bot/api_products.py
@@ -2191,23 +2348,23 @@ uv run python manage.py check
 
 ## 2026-06-01 bot-site-config-api-split
 
-### Scope
+### 范围
 
 Sixth refactor pass moved site configuration and button/text configuration dashboard endpoints out of `bot/api.py`.
 
-### Runtime Changes
+### 运行时变化
 
-- Added `bot/api_site_configs.py` for:
+- 新增 `bot/api_site_configs.py`，承接：
   - site config list/group/update/init
   - text config initialization
   - button config read/update/init
   - daily expiry summary notification test
-- Preserved compatibility exports from `bot/api.py` for the moved view names and private payload helpers.
-- Removed now-unused config/text/button imports from `bot/api.py`.
+- 在 `bot/api.py` 中保留已迁移 view 名称和私有 payload 辅助函数的兼容导出。
+- 从 `bot/api.py` 移除现已不用的配置/文本/按钮导入。
 
-### Verification
+### 验证
 
-Passed locally:
+本地已通过:
 
 ```bash
 uv run python -m py_compile bot/api.py bot/api_site_configs.py
@@ -2216,22 +2373,22 @@ uv run python manage.py check
 
 ## 2026-06-01 bot-cloud-account-api-split
 
-### Scope
+### 范围
 
 Seventh refactor pass moved cloud account dashboard management out of `bot/api.py`.
 
-### Runtime Changes
+### 运行时变化
 
-- Added `bot/api_cloud_accounts.py` for:
+- 新增 `bot/api_cloud_accounts.py`，承接：
   - cloud account list/detail
   - create/update/delete
   - AWS and Alibaba Cloud account verification
   - cloud account payloads, duplicate detection, external sync log payloads
-- Preserved compatibility exports from `bot/api.py` for moved public views and private helper names.
+- 在 `bot/api.py` 中保留已迁移公共 view 和私有辅助函数名的兼容导出。
 
-### Verification
+### 验证
 
-Passed locally:
+本地已通过:
 
 ```bash
 uv run python -m py_compile bot/api.py bot/api_cloud_accounts.py bot/api_site_configs.py
@@ -2240,23 +2397,23 @@ uv run python manage.py check
 
 ## 2026-06-01 bot-auth-api-split
 
-### Scope
+### 范围
 
 Eighth refactor pass moved dashboard authentication and current-user endpoints out of `bot/api.py`.
 
-### Runtime Changes
+### 运行时变化
 
-- Added `bot/api_auth.py` for:
+- 新增 `bot/api_auth.py`，承接：
   - login/logout/refresh
   - auth code list
   - TOTP start/bind
   - user info and current user metadata
-- Preserved compatibility exports from `bot/api.py` for all moved auth view names.
-- Removed unused `authenticate`, `login`, and `logout` imports from `bot/api.py`.
+- 在 `bot/api.py` 中保留全部已迁移鉴权 view 名称的兼容导出。
+- 从 `bot/api.py` 移除未使用的 `authenticate`、`login` 和 `logout` 导入。
 
-### Verification
+### 验证
 
-Passed locally:
+本地已通过:
 
 ```bash
 uv run python -m py_compile bot/api.py bot/api_auth.py bot/api_cloud_accounts.py bot/api_site_configs.py
@@ -2265,24 +2422,24 @@ uv run python manage.py check
 
 ## 2026-06-01 bot-user-balance-api-split
 
-### Scope
+### 范围
 
 Ninth refactor pass moved Telegram user listing and balance management endpoints out of `bot/api.py`.
 
-### Runtime Changes
+### 运行时变化
 
-- Added `bot/api_users.py` for:
+- 新增 `bot/api_users.py`，承接：
   - user list
   - manual USDT/TRX balance update
   - cloud discount update
   - user balance detail timeline
   - balance ledger payload and manual ledger recording helpers
-- Preserved compatibility exports from `bot/api.py` for moved public views and private ledger helper names.
-- Removed unused balance/query imports from `bot/api.py`.
+- 在 `bot/api.py` 中保留已迁移公共 view 和私有流水辅助函数名的兼容导出。
+- 从 `bot/api.py` 移除未使用的余额/查询导入。
 
-### Verification
+### 验证
 
-Passed locally:
+本地已通过:
 
 ```bash
 uv run python -m py_compile bot/api.py bot/api_users.py
@@ -2291,19 +2448,19 @@ uv run python manage.py check
 
 ## 2026-06-01 bot-operation-log-api-split
 
-### Scope
+### 范围
 
 Tenth refactor pass moved bot operation log dashboard endpoints out of `bot/api.py`.
 
-### Runtime Changes
+### 运行时变化
 
-- Added `bot/api_operation_logs.py` for operation log payloads and search/list view.
-- Preserved compatibility exports from `bot/api.py`.
-- Removed the now-unused `BotOperationLog` import from `bot/api.py`.
+- 新增 `bot/api_operation_logs.py`，承接操作日志 payload 和搜索/列表 view。
+- 在 `bot/api.py` 中保留兼容导出。
+- 从 `bot/api.py` 移除现已不用的 `BotOperationLog` 导入。
 
-### Verification
+### 验证
 
-Passed locally:
+本地已通过:
 
 ```bash
 uv run python -m py_compile bot/api.py bot/api_operation_logs.py
@@ -2312,25 +2469,25 @@ uv run python manage.py check
 
 ## 2026-06-01 bot-telegram-api-split
 
-### Scope
+### 范围
 
 Eleventh refactor pass moved Telegram dashboard login, chat, message, and group-filter endpoints out of `bot/api.py`.
 
-### Runtime Changes
+### 运行时变化
 
-- Added `bot/api_telegram.py` for:
+- 新增 `bot/api_telegram.py`，承接：
   - Telegram account overview
   - personal account login/code/password/status flows
   - account notification toggles
   - group filter list/detail/create/update
   - chat message send/archive/list
   - Telegram payload and validation helpers
-- Preserved compatibility exports from `bot/api.py` for moved public views and private helper names.
-- Removed Telegram-specific model/service imports from `bot/api.py`.
+- 在 `bot/api.py` 中保留已迁移公共 view 和私有辅助函数名的兼容导出。
+- 从 `bot/api.py` 移除 Telegram 专属模型/服务导入。
 
-### Verification
+### 验证
 
-Passed locally:
+本地已通过:
 
 ```bash
 uv run python -m py_compile bot/api.py bot/api_telegram.py
@@ -2339,14 +2496,14 @@ uv run python manage.py check
 
 ## 2026-06-01 dashboard-api-core-extraction
 
-### Scope
+### 范围
 
 Twelfth refactor pass addressed the cross-domain coupling where cloud and orders dashboard APIs imported private helpers from `bot/api.py`.
 
-### Runtime Changes
+### 运行时变化
 
-- Added `core/dashboard_api.py` as the shared dashboard API utility module.
-- Moved generic helpers into core:
+- 新增 `core/dashboard_api.py` 作为共享后台 API 工具模块。
+- 将通用辅助函数迁入 core：
   - response helpers: `_ok`, `_error`
   - formatting helpers: `_iso`, `_decimal_to_str`, `_parse_decimal`
   - request/query helpers: `_read_payload`, `_get_keyword`, `_apply_keyword_filter`
@@ -2355,9 +2512,9 @@ Twelfth refactor pass addressed the cross-domain coupling where cloud and orders
 - `bot/api.py` now re-exports those helpers for compatibility.
 - `cloud/api.py`, `cloud/api_servers.py`, `cloud/api_plans.py`, and `orders/api.py` import shared helpers/decorators from `core.dashboard_api`, removing their `bot.api` helper dependency.
 
-### Verification
+### 验证
 
-Passed locally:
+本地已通过:
 
 ```bash
 uv run python -m py_compile core/dashboard_api.py bot/api.py bot/api_auth.py bot/api_users.py bot/api_operation_logs.py bot/api_cloud_accounts.py bot/api_site_configs.py bot/api_admin_users.py bot/api_products.py bot/api_telegram.py cloud/api.py cloud/api_servers.py cloud/api_plans.py orders/api.py
@@ -2366,20 +2523,20 @@ uv run python manage.py check
 
 ## 2026-06-01 provisioning-structured-result-logging
 
-### Scope
+### 范围
 
 Thirteenth refactor pass removed production `print('[PROVISION_RESULT]', ...)` calls from cloud provisioning.
 
-### Runtime Changes
+### 运行时变化
 
-- Added `_log_provision_result()` in `cloud/provisioning.py`.
-- Replaced all provision result `print()` calls with `logger.log(...)`.
-- Provision result logs now include structured `extra={'provision_result': ...}` fields.
-- MTProxy links are logged as masked previews instead of full raw links in the result payload.
+- 在 `cloud/provisioning.py` 中新增 `_log_provision_result()`。
+- 将所有开通结果 `print()` 调用替换为 `logger.log(...)`。
+- 开通结果日志现在包含结构化 `extra={'provision_result': ...}` 字段。
+- 结果 payload 中的 MTProxy 链接改为记录脱敏预览，不再记录完整原始链接。
 
-### Verification
+### 验证
 
-Passed locally:
+本地已通过:
 
 ```bash
 uv run python -m py_compile cloud/provisioning.py core/dashboard_api.py bot/api.py cloud/api.py cloud/api_servers.py cloud/api_plans.py orders/api.py
@@ -2388,25 +2545,25 @@ uv run python manage.py check
 
 ## 2026-06-01 cloud-dashboard-api-helper-extraction
 
-### Scope
+### 范围
 
 Fourteenth refactor pass reduced reverse dependencies where split cloud dashboard API modules treated `cloud/api.py` as a shared helper library.
 
-### Runtime Changes
+### 运行时变化
 
-- Added `cloud/dashboard_snapshots.py` as the single dashboard snapshot refresh coordinator.
+- 新增 `cloud/dashboard_snapshots.py`，作为唯一后台快照刷新协调器。
 - `cloud/services.py` and `cloud/lifecycle.py` now refresh dashboard snapshots through `cloud.dashboard_snapshots` instead of importing `cloud.api`.
-- Added `cloud/dashboard_api_helpers.py` for cloud dashboard display helpers:
+- 新增 `cloud/dashboard_api_helpers.py`，承接云后台展示辅助函数：
   - cloud plan config id generation
   - preserve-link status labels
   - dashboard sort direction and expiry ordering
 - `cloud/api_servers.py` and `cloud/api_plans.py` no longer import `cloud.api` through `_api_helpers()`.
-- Moved rebuild background retry execution from `cloud/api.py` into `cloud/services.py` as `run_cloud_server_rebuild_job()`.
-- Kept `cloud/api.py` importing the extracted helper names so existing internal references and compatibility imports continue to work.
+- 将重建后台重试执行逻辑从 `cloud/api.py` 迁入 `cloud/services.py`，命名为 `run_cloud_server_rebuild_job()`。
+- 保留 `cloud/api.py` 对已抽取辅助函数名的导入，确保既有内部引用和兼容导入继续可用。
 
-### Verification
+### 验证
 
-Passed locally:
+本地已通过:
 
 ```bash
 uv run python -m py_compile cloud/dashboard_api_helpers.py cloud/dashboard_snapshots.py cloud/api.py cloud/api_servers.py cloud/api_plans.py cloud/services.py cloud/lifecycle.py
@@ -2415,20 +2572,20 @@ uv run python manage.py check
 
 ## 2026-06-01 async-runtime-config-fix
 
-### Scope
+### 范围
 
 Fifteenth refactor pass addressed the P0 issue where `get_runtime_config()` returns env/default values in a running async event loop and can miss updated `SiteConfig` values.
 
-### Runtime Changes
+### 运行时变化
 
-- Replaced async runtime config reads in `bot/runner.py`, `bot/handlers.py`, and `cloud/resource_monitor.py` with `await core.cache.get_config(...)`.
-- Removed `asyncio.to_thread(get_runtime_config, ...)` and `sync_to_async(get_runtime_config, ...)` usage from async runtime paths.
-- Refactored `core/cache.py:get_config()` so sync DB/default fallback happens inside a dedicated thread helper.
-- Verified there are no remaining direct `get_runtime_config()` calls inside `async def` bodies, and no remaining `to_thread/sync_to_async(get_runtime_config)` adapters.
+- 将 `bot/runner.py`、`bot/handlers.py` 和 `cloud/resource_monitor.py` 中的异步运行时配置读取替换为 `await core.cache.get_config(...)`。
+- 从异步运行时路径移除 `asyncio.to_thread(get_runtime_config, ...)` 和 `sync_to_async(get_runtime_config, ...)` 用法。
+- 重构 `core/cache.py:get_config()`，让同步 DB/default 兜底逻辑在专用线程辅助函数中执行。
+- 已确认 `async def` 函数体中没有残留直接 `get_runtime_config()` 调用，也没有残留 `to_thread/sync_to_async(get_runtime_config)` 适配器。
 
-### Verification
+### 验证
 
-Passed locally:
+本地已通过:
 
 ```bash
 uv run python -m py_compile core/cache.py core/runtime_config.py bot/runner.py bot/handlers.py cloud/resource_monitor.py cloud/dashboard_api_helpers.py cloud/dashboard_snapshots.py cloud/api.py cloud/api_servers.py cloud/api_plans.py cloud/services.py cloud/lifecycle.py
@@ -2437,34 +2594,34 @@ uv run python manage.py check
 
 ## 2026-06-01 dashboard-bearer-write-auth
 
-### Scope
+### 范围
 
-Sixteenth refactor pass addressed the CSRF/auth boundary risk where csrf-exempt dashboard write APIs could still authenticate through cookie session state.
+第十六轮重构处理 CSRF/鉴权边界风险：csrf-exempt 后台写 API 仍可能通过 cookie session 状态完成认证。
 
-### Runtime Changes
+### 运行时变化
 
 - `core/dashboard_api.py` now treats unsafe dashboard methods (`POST`, `PUT`, `PATCH`, `DELETE`, etc.) as bearer-only.
-- Dashboard write requests must provide `Authorization: Bearer session-...`; cookie-authenticated `request.user` alone is no longer accepted for write views.
-- Safe read methods still support existing cookie/session authentication for compatibility.
-- Updated dashboard auth tests so write tests attach explicit bearer session headers.
-- Added a regression test proving cookie-only dashboard writes are rejected with 401.
+- 后台写请求必须提供 `Authorization: Bearer session-...`；仅依赖 cookie 认证的 `request.user` 不再被写 view 接受。
+- 安全读方法仍支持既有 cookie/session 认证，以保持兼容。
+- 更新后台鉴权测试，让写测试附带显式 bearer session header。
+- 新增回归测试，证明仅 cookie 的后台写请求会以 401 拒绝。
 
-### Verification
+### 验证
 
-Passed locally:
+本地已通过:
 
 ```bash
 uv run python -m py_compile core/dashboard_api.py bot/tests.py bot/api_auth.py bot/api.py bot/api_admin_users.py
 uv run python manage.py check
 ```
 
-Blocked locally:
+本地受阻:
 
 ```bash
 uv run python manage.py test bot.tests.DashboardSessionExpiryTestCase bot.tests.DashboardAuthSurfaceTestCase --keepdb
 ```
 
-The focused test run is blocked by local MySQL test database permissions:
+聚焦测试受本地 MySQL 测试库权限阻塞:
 
 ```text
 Access denied for user 'a'@'localhost' to database 'test_a'
@@ -2537,26 +2694,26 @@ Access denied for user 'a'@'localhost' to database 'test_a'
 
 ## 2026-06-01 cloud-sync-structured-state
 
-### Scope
+### 范围
 
-Twentieth refactor pass replaced the cloud missing-delete confirmation marker text with structured cloud asset sync state.
+第二十轮重构把云资源缺失删除确认标记文本替换为结构化云资产同步状态。
 
-### Runtime Changes
+### 运行时变化
 
-- Added `CloudAsset.sync_state` JSON field and migration `0040_cloudasset_sync_state`.
+- 新增 `CloudAsset.sync_state` JSON 字段和 migration `0040_cloudasset_sync_state`。
 - `cloud/sync_safety.py` now treats `sync_state['missing_confirmation']` as the source of truth.
-- Removed parsing and writing of legacy `[missing_sync_count:...]` / `[msc_at:...]` provider-status markers.
-- AWS and Alibaba Cloud missing-resource sync now:
+- 移除旧 `[missing_sync_count:...]` / `[msc_at:...]` provider-status 标记的解析和写入。
+- AWS 和阿里云缺失资源同步现在会：
   - increments structured confirmation count on each missing pass
   - keeps the asset/server running while count is below threshold
   - deletes only after the structured count reaches the configured threshold
   - clears missing confirmation state when a later sync sees the resource live again
-- Dashboard lifecycle/delete-plan views now read confirmation progress from item/asset `sync_state`.
-- Updated affected tests to assert structured `sync_state` instead of provider-status marker text.
+- 后台生命周期/删除计划 view 现在从 item/asset 的 `sync_state` 读取确认进度。
+- 更新受影响测试，改为断言结构化 `sync_state`，不再断言 provider-status 标记文本。
 
-### Verification
+### 验证
 
-Passed locally:
+本地已通过:
 
 ```bash
 uv run python -m py_compile cloud/sync_safety.py cloud/models.py cloud/migrations/0040_cloudasset_sync_state.py cloud/server_records.py cloud/management/commands/sync_aws_assets.py cloud/management/commands/sync_aliyun_assets.py bot/api.py cloud/tests.py
@@ -2564,16 +2721,42 @@ uv run python manage.py makemigrations --check --dry-run
 uv run python manage.py check
 ```
 
-Blocked locally:
+本地受阻:
 
 ```bash
 uv run python manage.py test cloud.tests.CloudServerServicesTestCase.test_sync_missing_confirmation_note_preserves_existing_note cloud.tests.CloudServerServicesTestCase.test_sync_missing_confirmation_requires_interval cloud.tests.CloudServerServicesTestCase.test_unattached_ip_delete_items_expose_missing_confirmation_state cloud.tests.CloudServerServicesTestCase.test_lifecycle_plans_unattached_ip_show_confirmation_progress_in_state_and_note cloud.tests.CloudServerServicesTestCase.test_sync_aws_missing_instance_requires_five_passes_before_delete cloud.tests.CloudServerServicesTestCase.test_sync_aliyun_missing_instance_requires_five_passes_before_delete --keepdb
 ```
 
-The focused DB test run is blocked by local MySQL test database permissions:
+聚焦 DB 测试受本地 MySQL 测试库权限阻塞:
 
 ```text
 Access denied for user 'a'@'localhost' to database 'test_a'
+```
+
+## 2026-06-02 机器人返回链路收敛
+
+### 范围
+
+本轮复查代理列表、订单详情、IP 查询结果进入二级操作后的返回逻辑，重点处理带冒号的来源 callback，避免从筛选页或指定页进入详情后被带回默认列表第一页。
+
+### 运行时变化
+
+- 订单详情的重新安装、继续初始化、修改配置按钮会携带原详情页的返回路径。
+- 资产详情的续费、更换 IP、重新安装、修改配置、修改到期时间按钮会携带原列表或查询入口。
+- 重新安装确认页的取消按钮、资产续费套餐页、修改配置页、修改到期时间成功结果会返回原页面。
+- IP 查询结果进入订单或资产操作时统一回到到期时间查询入口，不再回到默认代理列表第一页。
+- 详情 callback 解析改为保留冒号后的完整来源路径，支持 `profile:orders:cloud:filter:...` 这类嵌套路径。
+
+### 验证
+
+已通过：
+
+```bash
+uv run python -m py_compile bot/handlers.py bot/keyboards.py bot/tests.py
+DJANGO_TEST_SQLITE=1 uv run python manage.py test bot.tests.RetainedIpRenewalUiTestCase bot.tests.BotOrderAndBalanceFilterTestCase.test_admin_query_keyboard_includes_reinstall_and_expiry_actions
+uv run python manage.py check
+uv run python manage.py makemigrations --check --dry-run
+git diff --check
 ```
 
 ## 2026-06-02 云订单旧记录清理资产保护
@@ -2797,23 +2980,23 @@ UV_CACHE_DIR=/private/tmp/uv-cache-shop DJANGO_TEST_SQLITE=1 PYTHONDONTWRITEBYTE
 
 ## 2026-06-02 cloud-asset-edit-api-split
 
-### Scope
+### 范围
 
-Twenty-second refactor pass split cloud asset mutation endpoints out of the large asset list API module and tightened status/log behavior around dangerous asset operations.
+第二十二轮重构把云资产变更端点从大型资产列表 API 模块拆出，并收紧危险资产操作周边的状态/日志行为。
 
-### Runtime Changes
+### 运行时变化
 
-- Added `cloud/api_asset_edit.py` for cloud asset detail, manual edit, auto-renew toggle, and dashboard delete endpoints.
-- Kept `cloud/api.py` as a compatibility facade that re-exports old `cloud.api.*` names and patch points for existing imports/tests.
+- 新增 `cloud/api_asset_edit.py`，承接云资产详情、手动编辑、自动续费开关和后台删除端点。
+- 保留 `cloud/api.py` 作为兼容门面，重新导出旧 `cloud.api.*` 名称和既有导入/测试 patch 点。
 - `shop/dashboard_urls.py` now imports cloud dashboard route handlers from domain modules directly instead of routing through `cloud.api`.
 - `cloud/api_assets.py` now owns asset list, risk summary, snapshot refresh, and asset payload helpers only.
-- Manual refresh of unattached static IP delete plans now updates related same-order/same-resource records and logs `CLOUD_UNATTACHED_IP_DELETE_DUE_REFRESHED`.
-- Dashboard asset deletion now deletes same-order/same-resource residual records, clears the order cloud binding, writes `CloudIpLog`, and logs removed residual ids through structured logger fields.
-- Updated legacy direct-view tests to attach the current dashboard bearer session for write endpoints.
+- 手动刷新未附加固定 IP 删除计划时，现在会更新同订单/同资源的相关记录，并记录 `CLOUD_UNATTACHED_IP_DELETE_DUE_REFRESHED`。
+- 后台资产删除现在会删除同订单/同资源残留记录，清空订单云绑定，写入 `CloudIpLog`，并通过结构化 logger 字段记录被删除的残留 id。
+- 更新旧 direct-view 测试，为写端点附带当前后台 bearer session。
 
-### Verification
+### 验证
 
-Passed locally:
+本地已通过:
 
 ```bash
 uv run python -m py_compile cloud/api.py cloud/api_assets.py cloud/api_asset_edit.py shop/dashboard_urls.py cloud/tests.py
@@ -2822,21 +3005,21 @@ DJANGO_TEST_REUSE_DB=1 uv run python manage.py test cloud.tests.CloudServerServi
 
 ## 2026-06-02 cloud-asset-snapshot-api-split
 
-### Scope
+### 范围
 
-Twenty-third refactor pass split cloud asset dashboard snapshot refresh/query/pagination logic out of the cloud asset list endpoint module.
+第二十三轮重构把云资产后台快照刷新/查询/分页逻辑从云资产列表端点模块拆出。
 
-### Runtime Changes
+### 运行时变化
 
-- Added `cloud/api_asset_snapshots.py` for `CloudAssetDashboardSnapshot` refresh, search, risk counts, ordering, pagination, and grouped page construction.
+- 新增 `cloud/api_asset_snapshots.py`，承接 `CloudAssetDashboardSnapshot` 刷新、搜索、风险计数、排序、分页和分组页面构建。
 - `cloud/api_assets.py` now focuses on asset list endpoints and asset payload construction.
-- Removed obsolete in-memory payload pagination/risk filtering helpers that were no longer used after the snapshot-backed list path became the runtime path.
+- 移除过时的内存 payload 分页/风险过滤辅助函数；快照支撑的列表路径成为运行时路径后，这些函数已不再使用。
 - `cloud/api.py` imports snapshot refresh compatibility exports from `cloud/api_asset_snapshots.py` directly.
 - `cloud/api_assets.py` dropped snapshot table imports and no longer owns snapshot persistence logic.
 
-### Verification
+### 验证
 
-Passed locally:
+本地已通过:
 
 ```bash
 uv run python -m py_compile cloud/api.py cloud/api_assets.py cloud/api_asset_snapshots.py cloud/api_asset_edit.py shop/dashboard_urls.py cloud/tests.py
@@ -2845,23 +3028,23 @@ git diff --check
 
 ## 2026-06-02 cloud-dashboard-api-domain-split
 
-### Scope
+### 范围
 
 Twenty-second refactor pass split the remaining cloud dashboard API monolith into asset, order, and task modules while preserving `cloud.api` as the URL compatibility facade.
 
-### Runtime Changes
+### 运行时变化
 
-- Added `cloud/api_assets.py` for proxy/asset list payloads, asset risk summaries, asset editing, auto-renew toggles, and dashboard snapshot refreshes.
-- Added `cloud/api_orders.py` for cloud order list/detail payloads, order status updates, order detail saves, and protected order deletion.
-- Added `cloud/api_tasks.py` for legacy task overview, notice plan detail/refresh, notice switch/text APIs, auto-renew detail, and manual auto-renew execution.
-- Reduced `cloud/api.py` from 4249 lines to 460 lines; it now keeps compatibility imports plus single-asset status sync, server sync, cloud plan sync, and delete-asset handling.
-- Kept legacy `cloud.api.*` patch/import points for existing tests and operators by routing patched symbols back into the new modules.
-- Added structured logs for cloud order status application, order detail updates, cloud asset deletion, and server sync start/finish.
-- Fixed a latent `sync_servers()` `cancelled` local variable error by explicitly initializing the flag.
+- 新增 `cloud/api_assets.py`，承接代理/资产列表 payload、资产风险汇总、资产编辑、自动续费开关和后台快照刷新。
+- 新增 `cloud/api_orders.py`，承接云订单列表/详情 payload、订单状态更新、订单详情保存和受保护订单删除。
+- 新增 `cloud/api_tasks.py`，承接旧任务概览、通知计划详情/刷新、通知开关/文本 API、自动续费详情和手动自动续费执行。
+- 将 `cloud/api.py` 从 4249 行缩减到 460 行；现在只保留兼容导入、单资产状态同步、服务器同步、云套餐同步和删除资产处理。
+- 通过把被 patch 的符号路由回新模块，保留既有测试和运维使用的旧 `cloud.api.*` patch/import 点。
+- 为云订单状态应用、订单详情更新、云资产删除和服务器同步开始/结束新增结构化日志。
+- 显式初始化标志位，修复 `sync_servers()` 潜在的 `cancelled` 局部变量错误。
 
-### Verification
+### 验证
 
-Passed locally:
+本地已通过:
 
 ```bash
 uv run python -m py_compile cloud/api.py cloud/api_assets.py cloud/api_orders.py cloud/api_tasks.py
@@ -2870,33 +3053,33 @@ git diff --check
 DJANGO_TEST_REUSE_DB=1 uv run python manage.py test cloud.tests.CloudServerServicesTestCase.test_cloud_orders_list_exposes_auto_renew_enabled cloud.tests.CloudServerServicesTestCase.test_sync_servers_missing_state_does_not_bypass_provider_confirmation cloud.tests.CloudServerServicesTestCase.test_cloud_assets_list_uses_bulk_order_inference_without_per_asset_fallback cloud.tests.CloudServerServicesTestCase.test_sync_cloud_asset_status_uses_asset_scope cloud.tests.CloudServerServicesTestCase.test_notice_task_detail_uses_cloud_notice_plan_table cloud.tests.CloudServerServicesTestCase.test_auto_renew_task_detail_includes_due_retry_and_fallback_items cloud.tests_task_center.CloudTaskCenterApiTestCase --keepdb --noinput --verbosity 1
 ```
 
-Notes:
+说明:
 
-- The older direct `RequestFactory` POST tests that do not attach dashboard Bearer credentials still return 401 under the current dashboard write-auth policy; they were not used as pass/fail gates for this split.
+- 较旧的 direct `RequestFactory` POST 测试未附带后台 Bearer 凭据，在当前后台写鉴权策略下仍返回 401；这些测试未作为本次拆分的通过/失败门禁。
 
 ## 2026-06-02 cloud-api-sync-facade-split
 
-### Scope
+### 范围
 
-Twenty-third refactor pass removed the remaining real sync/delete implementations from `cloud/api.py`, leaving it as a compatibility facade.
+第二十三轮重构从 `cloud/api.py` 移除剩余真实同步/删除实现，使其只保留兼容门面职责。
 
-### Runtime Changes
+### 运行时变化
 
-- Added `cloud/api_sync.py` for dashboard server sync, single cloud asset status sync, cloud plan/price sync, and missing-state confirmation helpers.
-- Moved `delete_cloud_asset()` into `cloud/api_assets.py` so asset deletion now lives with the rest of the asset dashboard API.
-- Reduced `cloud/api.py` from 460 lines to 148 lines; it now only re-exports domain modules and old private patch/import points.
-- Kept legacy patch compatibility for:
+- 新增 `cloud/api_sync.py`，承接后台服务器同步、单云资产状态同步、云套餐/价格同步和缺失状态确认辅助函数。
+- 将 `delete_cloud_asset()` 迁入 `cloud/api_assets.py`，让资产删除和其余资产后台 API 放在一起。
+- 将 `cloud/api.py` 从 460 行缩减到 148 行；现在只重新导出领域模块和旧私有 patch/import 点。
+- 保留旧 patch 兼容：
   - `cloud.api._call_command_capture`
   - `cloud.api._apply_server_missing_state`
   - `cloud.api._refresh_dashboard_plan_snapshots_deferred`
   - `cloud.api.get_redis`
   - `cloud.api.build_trongrid_headers`
   - `cloud.api.httpx`
-- Added structured logs for cloud plan/price sync start, completion, and failure.
+- 为云套餐/价格同步的开始、完成和失败新增结构化日志。
 
-### Verification
+### 验证
 
-Passed locally:
+本地已通过:
 
 ```bash
 uv run python -m py_compile cloud/api.py cloud/api_assets.py cloud/api_sync.py cloud/api_monitors.py cloud/api_servers.py cloud/api_plans.py
@@ -2907,39 +3090,39 @@ DJANGO_TEST_REUSE_DB=1 uv run python manage.py test cloud.tests.CloudServerServi
 
 ## 2026-06-01 cloud-sync-worker-and-status-tracking
 
-### Scope
+### 范围
 
-Latest refactor pass made dashboard-triggered proxy synchronization durable and explicitly observable.
+最新一轮重构让后台触发的代理同步具备持久化队列，并且状态显式可观测。
 
-### Runtime Changes
+### 运行时变化
 
 - `/admin/cloud-assets/sync/` now only creates a `CloudAssetSyncJob` queue record and returns immediately.
-- Added `process_cloud_asset_sync_jobs` as the persistent DB-backed worker for queued sync jobs.
+- 新增 `process_cloud_asset_sync_jobs`，作为基于数据库的持久化 worker 处理排队同步任务。
 - `run.py worker` starts the sync worker, and `run.py all` now starts web, bot, and the sync worker together.
-- Added sync job list and retry APIs:
+- 新增同步任务列表和重试 API：
   - `/admin/cloud-assets/sync-jobs/`
   - `/admin/cloud-assets/sync-jobs/<id>/retry/`
   - `/admin/cloud-assets/sync-jobs/<id>/cancel/`
-- Sync job status is now the durable status surface:
+- 同步任务状态现在是持久化状态面：
   - `queued`
   - `running`
   - `succeeded`
   - `partial`
   - `failed`
   - `cancelled`
-- Added `cloud_asset_sync_job_event` for detailed sync event timelines:
+- 新增 `cloud_asset_sync_job_event`，记录详细同步事件时间线：
   - queued / claimed / status / task / progress / log / warning / error / cancel / retry / heartbeat
   - the event table stores `job_id` as an indexed scalar instead of a foreign key so detailed logging cannot lock or block the main job status row
-- Worker and sync execution update `worker_id`, `worker_heartbeat_at`, `progress_current`, `progress_total`, `current_task`, `errors`, `warnings`, `logs`, `started_at`, `finished_at`, and cancel request fields throughout execution.
-- Dashboard snapshot refreshes are now scoped:
+- worker 和同步执行过程会持续更新 `worker_id`、`worker_heartbeat_at`、`progress_current`、`progress_total`、`current_task`、`errors`、`warnings`、`logs`、`started_at`、`finished_at` 和取消请求字段。
+- 后台快照刷新现在按范围执行：
   - full cloud sync refreshes the complete `cloud_asset_dashboard_snapshot`
   - selected asset sync and single-asset updates refresh only the affected asset IDs
-- The admin frontend has a sync job drawer for status, progress, worker heartbeat, results, detailed events, logs, cancel, retry, status filters, and failed-only filtering; polling updates the visible job row without blocking the whole proxy list after enqueue.
+- 管理前端新增同步任务抽屉，展示状态、进度、worker 心跳、结果、详细事件、日志、取消、重试、状态过滤和仅失败过滤；入队后轮询只更新可见任务行，不阻塞整个代理列表。
 - `lefthook.yml` no longer hardcodes `/opt/homebrew/bin/pnpm`, so Git hooks can use the current shell `pnpm`.
 
-### Verification
+### 验证
 
-Passed locally:
+本地已通过:
 
 ```bash
 uv run python -m py_compile run.py cloud/api.py cloud/dashboard_snapshots.py cloud/models.py cloud/tests.py cloud/management/commands/process_cloud_asset_sync_jobs.py shop/dashboard_urls.py
@@ -2953,25 +3136,25 @@ git diff --check
 
 ## 2026-06-01 cloud-asset-list-and-sync-performance
 
-### Scope
+### 范围
 
-Twenty-second refactor pass optimized the slow proxy asset list and dashboard-triggered cloud sync path.
+第二十二轮重构优化缓慢的代理资产列表和后台触发云同步路径。
 
-### Runtime Changes
+### 运行时变化
 
-- Added `cloud_asset_dashboard_snapshot` as a materialized dashboard list table for cloud assets.
+- 新增 `cloud_asset_dashboard_snapshot`，作为云资产后台列表的物化表。
 - `cloud_assets_list()` and `cloud_assets_risk_summary()` now read snapshot rows for search, risk filters, grouping, counts, and database pagination instead of rebuilding every row on each request.
-- Added `refresh_cloud_asset_dashboard_snapshots` management command and wired dashboard snapshot refreshes after sync/service changes.
-- Added `cloud_asset_sync_job` to queue dashboard sync requests, track progress/result/log tails, and expose `/admin/cloud-assets/sync-jobs/<id>/`.
+- 新增 `refresh_cloud_asset_dashboard_snapshots` 管理命令，并在同步/服务变更后接入后台快照刷新。
+- 新增 `cloud_asset_sync_job`，用于排队后台同步请求、跟踪进度/结果/日志尾部，并暴露 `/admin/cloud-assets/sync-jobs/<id>/`。
 - `/admin/cloud-assets/sync/` now returns immediately with a queued job; the background thread executes account/asset scoped sync tasks and records the final result.
-- AWS and Alibaba Cloud sync commands no longer maintain the retired `Server` compatibility mirror; `cloud_asset` remains the single cloud resource truth.
-- The admin frontend now uses true server-side pagination in non-grouped proxy list mode and polls cloud sync jobs until terminal status.
-- The "show deleted" toggle is sent to the backend so pagination totals match the visible list.
-- Database naming and data-flow docs now list the new snapshot/job tables.
+- AWS 和阿里云同步命令不再维护已退役的 `Server` 兼容镜像；`cloud_asset` 仍是唯一云资源事实表。
+- 管理前端在非分组代理列表模式下改用真正的服务端分页，并轮询云同步任务直到终态。
+- “显示已删除”开关会发送到后端，让分页总数匹配可见列表。
+- 数据库命名和数据流文档现在列出新的快照/任务表。
 
-### Verification
+### 验证
 
-Passed locally:
+本地已通过:
 
 ```bash
 uv run python -m py_compile cloud/api.py cloud/dashboard_snapshots.py cloud/models.py cloud/tests.py cloud/management/commands/sync_aws_assets.py cloud/management/commands/sync_aliyun_assets.py cloud/management/commands/refresh_cloud_asset_dashboard_snapshots.py shop/dashboard_urls.py
@@ -2980,13 +3163,13 @@ uv run python manage.py makemigrations cloud --dry-run --check
 cd /Users/a399/Desktop/data/vue-shop-admin && ./node_modules/.bin/vue-tsc --noEmit --skipLibCheck -p apps/web-antd/tsconfig.json
 ```
 
-Blocked locally:
+本地受阻:
 
 ```bash
 uv run python manage.py test cloud.tests.CloudServerServicesTestCase.test_cloud_asset_dashboard_snapshot_refresh_materializes_paginated_list ... --keepdb --noinput
 ```
 
-The focused DB test run is still blocked by local MySQL test database permissions:
+聚焦 DB 测试仍受本地 MySQL 测试库权限阻塞：
 
 ```text
 Access denied for user 'a'@'localhost' to database 'test_a'
@@ -2994,29 +3177,29 @@ Access denied for user 'a'@'localhost' to database 'test_a'
 
 ## 2026-06-01 proxy-list-and-sync-performance
 
-### Scope
+### 范围
 
-Twenty-seventh refactor pass optimized dashboard proxy list loading and selected-asset cloud sync.
+第二十七轮重构优化后台代理列表加载和选中资产云同步。
 
-### Runtime Changes
+### 运行时变化
 
-- Added `core.cloud_accounts.list_cloud_account_labels()` so dashboard payload rendering can load active cloud account labels once per request instead of once per asset.
-- Added a `CloudAssetPayloadContext` for proxy list payloads:
+- 新增 `core.cloud_accounts.list_cloud_account_labels()`，让后台 payload 渲染每次请求只加载一次活跃云账号标签，而不是每个资产加载一次。
+- 为代理列表 payload 新增 `CloudAssetPayloadContext`：
   - bulk infers missing `CloudServerOrder` links by IP/name/resource identifiers;
   - disables per-row order fallback queries in list/risk-summary reads;
   - avoids `sync_cloud_asset_user_binding()` writes during list rendering;
   - computes missing unattached-IP expiry for display without saving during a GET.
 - `cloud_assets_list` and `cloud_assets_risk_summary` now build payloads through the shared context.
 - `sync_cloud_assets` now treats selected `asset_ids` as real asset-scoped sync tasks instead of widening to full account sync. Multi-select creates scoped tasks with `asset_id`, `instance_id`, `public_ip`, account, and region.
-- Sync task locks include the scoped asset/resource key, so two selected assets in the same account/region do not skip each other.
-- Removed the runtime reconcile command call from dashboard sync because `CloudAsset(kind='server')` is now canonical.
-- Dashboard sync snapshot refresh now uses the deferred refresh path.
-- AWS/Aliyun sync command visible-count summaries use a cheap active asset count instead of full dashboard dedupe scans.
-- Frontend proxy list load now uses `risk_counts` returned by the list endpoint and avoids the duplicate concurrent risk-summary request.
+- 同步任务锁包含限定范围的资产/资源 key，因此同账号/区域的两个选中资产不会互相跳过。
+- 从后台同步中移除运行时 reconcile 命令调用，因为 `CloudAsset(kind='server')` 已是标准事实。
+- 后台同步快照刷新现在使用延迟刷新路径。
+- AWS/阿里云同步命令的可见数量汇总改用低成本活跃资产计数，不再做完整后台去重扫描。
+- 前端代理列表加载现在使用列表端点返回的 `risk_counts`，避免重复并发请求风险汇总。
 
-### Verification
+### 验证
 
-Passed locally:
+本地已通过:
 
 ```bash
 uv run python -m py_compile core/cloud_accounts.py cloud/api.py cloud/api_servers.py cloud/management/commands/sync_aws_assets.py cloud/management/commands/sync_aliyun_assets.py cloud/management/commands/reconcile_cloud_assets_from_servers.py
@@ -3031,18 +3214,18 @@ Frontend note: `pnpm -F @vben/web-antd typecheck` is blocked by local engine mis
 
 ## 2026-06-01 aws-lightsail-structured-create-log
 
-### Scope
+### 范围
 
 Twenty-second refactor pass removed the remaining runtime `print` from AWS Lightsail provisioning and routed the result through structured logging.
 
-### Runtime Changes
+### 运行时变化
 
-- Replaced the `print('[AWS_CREATE_RESULT]', ...)` stdout dump in `cloud/aws_lightsail.py` with a structured `logger.info(...)` event.
-- The creation log now carries `order_no`, `server_name`, `region`, `bundle_id`, `blueprint_id`, `public_ip`, and `static_ip_name` as log fields.
+- 将 `cloud/aws_lightsail.py` 中的 `print('[AWS_CREATE_RESULT]', ...)` stdout 输出替换为结构化 `logger.info(...)` 事件。
+- 创建日志现在以日志字段携带 `order_no`、`server_name`、`region`、`bundle_id`、`blueprint_id`、`public_ip` 和 `static_ip_name`。
 
-### Verification
+### 验证
 
-Passed locally:
+本地已通过:
 
 ```bash
 uv run python -m py_compile cloud/aws_lightsail.py
@@ -3051,18 +3234,18 @@ uv run python manage.py check
 
 ## 2026-06-01 cache-redis-fallback-observability
 
-### Scope
+### 范围
 
-Twenty-fourth refactor pass made Redis daily-stat fallback paths observable without changing the local fallback behavior.
+第二十四轮重构在不改变本地兜底行为的前提下，让 Redis 日统计兜底路径可观测。
 
-### Runtime Changes
+### 运行时变化
 
 - `core/cache.py` now logs debug entries when Redis daily-stat increment, read, or close operations fail.
-- The in-process fallback counters still run exactly as before when Redis is unavailable.
+- Redis 不可用时，进程内兜底计数器仍按原行为运行。
 
-### Verification
+### 验证
 
-Passed locally:
+本地已通过:
 
 ```bash
 uv run python -m py_compile core/cache.py
@@ -3072,19 +3255,19 @@ git diff --check
 
 ## 2026-06-01 aws-missing-confirmation-duplicate-guard
 
-### Scope
+### 范围
 
 Twenty-fifth refactor pass fixed duplicate confirmation increments when the AWS missing-resource sync sees both a canonical `CloudAsset` row and a legacy `Server` compatibility row for the same cloud resource.
 
-### Runtime Changes
+### 运行时变化
 
-- AWS missing confirmation now copies structured `sync_state` from the primary row to the related compatibility row instead of incrementing both independently.
+- AWS 缺失确认现在会把结构化 `sync_state` 从主记录复制到相关兼容记录，而不是让两边独立递增。
 - `_mark_deleted_when_missing_in_aws()` tracks rows already handled in the current sync pass and skips duplicate compatibility rows.
-- Local focused tests can run in this aggressive refactor branch with `DJANGO_TEST_REUSE_DB=1`, which reuses the current MySQL database instead of trying to create `test_a`.
+- 本地聚焦测试可在这条激进重构分支上使用 `DJANGO_TEST_REUSE_DB=1` 运行，从而复用当前 MySQL 数据库，而不是尝试创建 `test_a`。
 
-### Verification
+### 验证
 
-Passed locally:
+本地已通过:
 
 ```bash
 uv run python -m py_compile cloud/management/commands/sync_aws_assets.py
@@ -3093,21 +3276,21 @@ DJANGO_TEST_REUSE_DB=1 uv run python manage.py test cloud.tests.CloudServerServi
 
 ## 2026-06-01 server-compat-runtime-shrink
 
-### Scope
+### 范围
 
 Twenty-sixth refactor pass removed more runtime dependency on the `cloud.server_records.Server` compatibility wrapper.
 
-### Runtime Changes
+### 运行时变化
 
 - `core.cloud_accounts.list_cloud_accounts_by_server_load()` now counts `CloudAsset(kind='server')` directly.
 - `upsert_cloud_asset` no longer writes a duplicate compatibility `Server` row after creating/updating the canonical asset.
 - `dedupe_servers` now de-duplicates canonical server assets in `cloud_asset`.
 - `reconcile_cloud_assets_from_servers` is now an explicit no-op compatibility command because `cloud_server` has already been removed.
-- Remaining runtime compatibility wrapper imports are limited to AWS/Aliyun sync commands; historical migrations and tests still reference old labels intentionally.
+- 剩余运行时兼容包装导入仅限 AWS/阿里云同步命令；历史 migrations 和测试仍会有意引用旧 label。
 
-### Verification
+### 验证
 
-Passed locally:
+本地已通过:
 
 ```bash
 uv run python -m py_compile core/cloud_accounts.py cloud/management/commands/upsert_cloud_asset.py cloud/management/commands/dedupe_servers.py cloud/management/commands/reconcile_cloud_assets_from_servers.py
@@ -3119,21 +3302,21 @@ DJANGO_TEST_REUSE_DB=1 uv run python manage.py test core.tests.CloudAccountSelec
 
 ## 2026-06-01 dashboard-api-helper-extraction
 
-### Scope
+### 范围
 
 Twenty-third refactor pass removed the dashboard API submodules' reverse dependency on the `bot.api` aggregation module.
 
-### Runtime Changes
+### 运行时变化
 
-- Added `core/dashboard_totp.py` for dashboard TOTP secret normalization, generation, otpauth URL building, and token verification.
-- Added `bot/user_stats.py` for active cloud asset and per-user proxy count queries.
-- Moved generic dashboard payload helpers (`_json_payload`, `_payload_bool`, `_parse_runtime_time_point`) into `core/dashboard_api.py`.
+- 新增 `core/dashboard_totp.py`，承接后台 TOTP 密钥规范化、生成、otpauth URL 构建和 token 校验。
+- 新增 `bot/user_stats.py`，承接活跃云资产和单用户代理数量查询。
+- 将通用后台 payload 辅助函数（`_json_payload`、`_payload_bool`、`_parse_runtime_time_point`）迁入 `core/dashboard_api.py`。
 - `bot/api_auth.py`, `bot/api_admin_users.py`, `bot/api_cloud_accounts.py`, `bot/api_operation_logs.py`, `bot/api_products.py`, `bot/api_site_configs.py`, `bot/api_telegram.py`, and `bot/api_users.py` no longer import from `bot.api`.
 - `bot/api.py` now consumes the extracted helpers and remains a route/export aggregation point.
 
-### Verification
+### 验证
 
-Passed locally:
+本地已通过:
 
 ```bash
 uv run python -m py_compile core/dashboard_api.py core/dashboard_totp.py bot/user_stats.py bot/api.py bot/api_auth.py bot/api_admin_users.py bot/api_cloud_accounts.py bot/api_operation_logs.py bot/api_products.py bot/api_site_configs.py bot/api_telegram.py bot/api_users.py
@@ -3143,20 +3326,20 @@ git diff --check
 
 ## 2026-06-01 cloud-asset-query-helper
 
-### Scope
+### 范围
 
-Twenty-first refactor pass moved shared cloud asset list visibility and de-duplication logic out of dashboard API modules.
+第二十一轮重构把共享云资产列表可见性和去重逻辑从后台 API 模块中移出。
 
-### Runtime Changes
+### 运行时变化
 
-- Added `cloud/asset_queries.py` for canonical `CloudAsset` visible-list and de-duplication helpers.
+- 新增 `cloud/asset_queries.py`，承接标准 `CloudAsset` 可见列表和去重辅助函数。
 - `cloud/api.py` now consumes the shared asset query helpers instead of owning them.
-- AWS sync, Alibaba Cloud sync, and asset reconciliation commands no longer import `cloud.api` just to count visible assets.
-- AWS and Alibaba Cloud sync commands now import `_provider_status_label` from `core.dashboard_api` instead of `bot.api`.
+- AWS 同步、阿里云同步和资产 reconcile 命令不再为了统计可见资产而导入 `cloud.api`。
+- AWS 和阿里云同步命令现在从 `core.dashboard_api` 导入 `_provider_status_label`，不再从 `bot.api` 导入。
 
-### Verification
+### 验证
 
-Passed locally:
+本地已通过:
 
 ```bash
 uv run python -m py_compile cloud/asset_queries.py cloud/api.py cloud/management/commands/sync_aws_assets.py cloud/management/commands/sync_aliyun_assets.py cloud/management/commands/reconcile_cloud_assets_from_servers.py
@@ -3166,25 +3349,25 @@ git diff --check
 
 ## 2026-06-01 db-naming-convention-alignment
 
-### Scope
+### 范围
 
-Seventeenth refactor pass corrected database naming documentation so it matches the actual runtime schema.
+第十七轮重构修正数据库命名文档，使其匹配真实运行时 schema。
 
-### Runtime Changes
+### 运行时变化
 
-- Updated `docs/DB_NAMING_CONVENTIONS.md` from the previous idealized plural-table convention to the real project convention:
+- 将 `docs/DB_NAMING_CONVENTIONS.md` 从之前理想化的复数表约定更新为真实项目约定：
   - `core_*`
   - `bot_*`
   - `order_*`
   - `cloud_*`
-- Documented the current `db_table` inventory for `core`, `bot`, `orders`, and `cloud`.
-- Clarified that new runtime tables should use `域前缀_单数语义名`.
-- Explicitly marked plural alternatives such as `cloud_assets`, `cloud_server_orders`, and `balance_ledgers` as non-default unless part of a planned migration.
-- Reconfirmed `cloud_asset` as the cloud resource source-of-truth table.
+- 记录当前 `core`、`bot`、`orders` 和 `cloud` 的 `db_table` 清单。
+- 明确新增运行时表应使用 `域前缀_单数语义名`。
+- 明确标注 `cloud_assets`、`cloud_server_orders`、`balance_ledgers` 等复数替代名不是默认约定，除非属于计划中的迁移。
+- 重新确认 `cloud_asset` 是云资源事实表。
 
-### Verification
+### 验证
 
-Documentation-only change. Source table list was checked with:
+仅文档变更。源表清单通过以下命令检查:
 
 ```bash
 rg -n "db_table\\s*=|class Meta:" core bot orders cloud -g'*.py'
@@ -3192,22 +3375,22 @@ rg -n "db_table\\s*=|class Meta:" core bot orders cloud -g'*.py'
 
 ## 2026-06-01 encrypted-config-invalid-token-handling
 
-### Scope
+### 范围
 
-Eighteenth refactor pass tightened encrypted configuration handling so broken Fernet-looking ciphertext is not silently treated as plaintext.
+第十八轮重构收紧加密配置处理，避免损坏的 Fernet 形态密文被静默当作明文处理。
 
-### Runtime Changes
+### 运行时变化
 
 - `core/crypto.py:decrypt_text()` still returns legacy plaintext values unchanged when they do not look encrypted.
-- Values starting with the Fernet token prefix `gAAAA` now log `CONFIG_DECRYPT_INVALID_TOKEN` and return an empty string when decryption fails.
-- Added focused tests for:
+- 以 Fernet token 前缀 `gAAAA` 开头的值在解密失败时，现在会记录 `CONFIG_DECRYPT_INVALID_TOKEN` 并返回空字符串。
+- 新增聚焦测试覆盖：
   - legacy plaintext fallback
   - invalid Fernet-like token handling after an encryption key mismatch
-- Fixed `core/tests.py` to import the `Server` compatibility model from `cloud.server_records`, matching the current cloud asset architecture.
+- 修复 `core/tests.py`，改为从 `cloud.server_records` 导入 `Server` 兼容模型，匹配当前云资产架构。
 
-### Verification
+### 验证
 
-Passed locally:
+本地已通过:
 
 ```bash
 uv run python -m py_compile core/crypto.py core/tests.py core/models.py bot/models.py bot/api_site_configs.py
@@ -3217,36 +3400,36 @@ uv run python manage.py check
 
 ## 2026-06-01 site-config-cache-invalidation
 
-### Scope
+### 范围
 
 Nineteenth refactor pass reduced configuration cache split-brain between `SiteConfig` local cache and `core.cache` async config cache.
 
-### Runtime Changes
+### 运行时变化
 
-- Added explicit `core.cache` helpers:
+- 新增显式 `core.cache` 辅助函数：
   - `get_cached_config_value()`
   - `cache_config_value()`
   - `invalidate_config_cache()`
 - `SiteConfig.clear_cache()` now invalidates the async config cache as well as the model-local 30-second cache.
-- Replaced direct `_cached_config` writes/reads in bot text/config paths with helper functions.
-- Added a focused regression test for `SiteConfig.set()` invalidating the async config cache.
+- 将 bot 文本/配置路径中对 `_cached_config` 的直接写读替换为辅助函数。
+- 新增聚焦回归测试，覆盖 `SiteConfig.set()` 使异步配置缓存失效的行为。
 
-### Verification
+### 验证
 
-Passed locally:
+本地已通过:
 
 ```bash
 uv run python -m py_compile core/cache.py core/models.py core/texts.py core/tests.py bot/api_site_configs.py bot/handlers.py
 uv run python manage.py check
 ```
 
-Blocked locally:
+本地受阻:
 
 ```bash
 uv run python manage.py test core.tests.SiteConfigCacheTestCase --keepdb
 ```
 
-The focused DB test run is blocked by local MySQL test database permissions:
+聚焦 DB 测试受本地 MySQL 测试库权限阻塞:
 
 ```text
 Access denied for user 'a'@'localhost' to database 'test_a'
