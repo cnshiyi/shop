@@ -3921,7 +3921,7 @@ Access denied for user 'a'@'localhost' to database 'test_a'
 ### 运行时变化
 
 - 新增 `cloud_previous_detail_callback()`，用于区分“回订单详情”和“回资产详情”。
-- 代理资产详情回调继续兼容旧 `cloud:assetdetail:`，并支持新的短回调 `cloud:ad:`；查询页资产操作支持短回调 `cloud:aa:`。
+- 代理资产详情回调继续兼容旧 `cloud:assetdetail:`，并支持新的短回调 `cloud:ad:`；查询页资产操作支持短回调 `cloud:aa:`，避免资产详情嵌套到支付、更换 IP、修改配置按钮后超过 Telegram 64 字节限制。
 - 从代理资产详情进入续费支付、更换 IP、修改配置、重新安装确认和固定 IP 续费套餐页时，下一层的返回按钮会回到原资产详情。
 - 从订单详情进入同样流程时，仍回订单详情，再由订单详情返回原列表或查询页。
 - 修正资产入口修改配置提交后的“返回原代理”，避免跳到订单详情。
@@ -3938,9 +3938,7 @@ Access denied for user 'a'@'localhost' to database 'test_a'
 
 ```bash
 UV_CACHE_DIR=/private/tmp/uv-cache-shop uv run python manage.py check
-UV_CACHE_DIR=/private/tmp/uv-cache-shop uv run python -m py_compile bot/handlers.py bot/keyboards.py bot/tests.py
-DJANGO_TEST_SQLITE=1 UV_CACHE_DIR=/private/tmp/uv-cache-shop uv run python manage.py test bot.tests.RetainedIpRenewalUiTestCase --keepdb --noinput
-UV_CACHE_DIR=/private/tmp/uv-cache-shop uv run python manage.py makemigrations --check --dry-run
+UV_CACHE_DIR=/private/tmp/uv-cache-shop uv run python manage.py test bot.tests.RetainedIpRenewalUiTestCase --verbosity 1
 git diff --check
 rg -n "service_expires_at|service_expired_at|normalize_service_expiry|CloudLifecyclePlan\\b|CloudNoticePlan\\b|CloudAutoRenewPlan\\b|refund_order|process_refund|create_refund|issue_refund|refund_to_balance|refund_balance|STATUS_REFUNDED|status=['\\\"]refunded['\\\"]" bot core orders cloud shop --glob '!**/migrations/**' --glob '!**/tests.py'
 ```
