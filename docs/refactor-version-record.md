@@ -1,5 +1,40 @@
 # 重构版本记录
 
+## 2026-06-02 18:03 自动监工：生命周期计划视图命名收口
+
+### 范围
+
+本轮继续监工 Shop Django 后端仓库，起始工作树干净，最近提交为 `5e5ab16 记录快照聚合层清理复查`。重点复查云资产到期事实源、订单旧到期字段、旧计划快照表、退款旧入口和废弃 app 回流。
+
+### 修复
+
+- 将内部辅助函数 `_refresh_lifecycle_plan_snapshot` 改名为 `_refresh_lifecycle_plan_view`。
+- 同步后台资产编辑接口的导入和调用；实际行为仍是重建实时生命周期计划 bundle，不写入旧 `cloud_lifecycle_plan`、`cloud_notice_plan` 或 `cloud_auto_renew_plan` 派生快照表。
+- 保留 `CloudAssetDashboardSnapshot` 作为代理列表分页、搜索和风险统计的看板查询快照；它不承载资产到期事实，资产到期仍只读写 `CloudAsset.actual_expires_at`。
+
+### 复查结论
+
+- 未发现 `CloudServerOrder.service_expires_at` 数据库列危险 ORM 查询、写入或创建；订单接口中的 `service_expires_at` 仍是兼容 payload 字段，显式编辑会写入 `CloudAsset.actual_expires_at`。
+- 未发现 `normalize_service_expiry`、`service_expired_at`、`CloudLifecyclePlan`、`CloudNoticePlan`、`CloudAutoRenewPlan`、退款旧函数名或退款旧入口回流。
+- `INSTALLED_APPS` 仍只包含 `core`、`bot`、`orders`、`cloud` 四个当前运行时 app；`dashboard_api` 命中仍只是 `core.dashboard_api` helper 和 URL namespace，不是废弃 app 恢复。
+- 测试代码仅剩一处 `service_expires_at=`，为 `test_order_rejects_removed_service_expiry_field` 的负向测试，用于确认订单旧字段不能再写入。
+
+### 验证
+
+本地已通过：
+
+```bash
+UV_CACHE_DIR=/private/tmp/uv-cache-shop DJANGO_TEST_SQLITE=1 PYTHONDONTWRITEBYTECODE=1 uv run python manage.py check
+UV_CACHE_DIR=/private/tmp/uv-cache-shop DJANGO_TEST_SQLITE=1 PYTHONDONTWRITEBYTECODE=1 uv run python manage.py makemigrations --check --dry-run
+UV_CACHE_DIR=/private/tmp/uv-cache-shop DJANGO_TEST_SQLITE=1 PYTHONDONTWRITEBYTECODE=1 uv run python -m py_compile cloud/dashboard_snapshots.py cloud/api_asset_edit.py cloud/services.py cloud/api.py cloud/api_assets.py cloud/api_tasks.py bot/api.py
+UV_CACHE_DIR=/private/tmp/uv-cache-shop DJANGO_TEST_SQLITE=1 PYTHONDONTWRITEBYTECODE=1 uv run python manage.py test cloud.tests.CloudServerServicesTestCase.test_order_rejects_removed_service_expiry_field cloud.tests.CloudServerServicesTestCase.test_server_compat_create_preserves_manual_asset_owner_and_expiry cloud.tests.CloudServerServicesTestCase.test_update_cloud_asset_expiry_refreshes_order_lifecycle --noinput --verbosity 1
+UV_CACHE_DIR=/private/tmp/uv-cache-shop DJANGO_TEST_SQLITE=1 PYTHONDONTWRITEBYTECODE=1 uv run python manage.py test cloud.tests.CloudServerServicesTestCase.test_lifecycle_delete_task_claim_blocks_same_cycle_duplicate cloud.tests.CloudServerServicesTestCase.test_lifecycle_asset_task_claim_blocks_same_cycle_duplicate cloud.tests.CloudServerServicesTestCase.test_order_static_ip_release_skips_when_lifecycle_task_claimed cloud.tests.CloudServerServicesTestCase.test_send_logged_cloud_notice_deduplicates_same_event_and_order cloud.tests.CloudServerServicesTestCase.test_send_order_notice_batch_allows_new_expiry_cycle --noinput --verbosity 1
+UV_CACHE_DIR=/private/tmp/uv-cache-shop DB_ENGINE=sqlite SQLITE_NAME=/private/tmp/shop-monitor-plan-view-20260602.sqlite3 PYTHONDONTWRITEBYTECODE=1 uv run python manage.py test cloud.tests.CloudServerServicesTestCase.test_refresh_lifecycle_plans_command_builds_lifecycle_plan_view cloud.tests.CloudServerServicesTestCase.test_refresh_lifecycle_plan_view_api_builds_lifecycle_plan_view cloud.tests.CloudServerServicesTestCase.test_refresh_notice_plans_command_builds_notice_plan_view cloud.tests.CloudServerServicesTestCase.test_refresh_notice_plan_view_api_builds_notice_plan_view cloud.tests.CloudServerServicesTestCase.test_notice_task_detail_uses_notice_plan_view --noinput --verbosity 1
+git diff --check
+```
+
+剩余风险：本轮未跑完整测试套件；默认 `uv` 缓存目录仍受沙箱限制，验证继续显式使用 `/private/tmp/uv-cache-shop`。
+
 ## 2026-06-02 17:51 自动监工：快照聚合层清理复查
 
 ### 范围
