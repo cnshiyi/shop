@@ -1,5 +1,41 @@
 # 重构版本记录
 
+## 2026-06-02 21:29 自动监工：机器人修改配置返回来源补漏
+
+### 范围
+
+本轮继续监工 Shop Django 后端仓库，起始后端工作树干净，最近提交为 `f34402d 统一后台到期响应字段`。按要求顺带复查机器人返回逻辑，重点检查代理详情、资产详情、续费、更换 IP、重新安装、修改配置这些链路是否把原始返回来源一路带到后续按钮。
+
+### 复查结论
+
+- 续费、更换 IP、重新安装主链路已使用 `split(':', maxsplit)` 或 `':'.join(...)` 保留嵌套返回来源，未发现再次截断为单段 `profile` 或 `cloud` 的问题。
+- 发现一处可优化漏点：修改配置进入套餐列表后，确认调整按钮 `cloud:upgradepay` 未携带原返回来源；提交成功后只能回到底部主菜单，无法直接回到原代理详情来源。
+- 到期字段命名继续收口：机器人详情展示中的两个局部变量从旧名 `service_expires_at` 改为 `expires_at_label`，展示文案不变。
+
+### 修复内容
+
+- 订单详情和资产详情的“修改配置”套餐按钮统一通过 `append_back_callback()` 携带返回来源。
+- `cloud:upgradepay` handler 改为可解析附带的返回来源；提交成功后如果来源存在，返回按钮指向原代理详情并保留原列表或查询入口。
+- 补充 `RetainedIpRenewalUiTestCase.test_cloud_upgrade_payment_keeps_back_path`，锁住修改配置支付按钮必须继续携带来源、支付 handler 必须继续按 `maxsplit` 解析并生成返回原代理按钮。
+
+### 验证
+
+已通过：
+
+```bash
+uv run python -m py_compile bot/handlers.py bot/tests.py
+DJANGO_TEST_SQLITE=1 uv run python manage.py test bot.tests.RetainedIpRenewalUiTestCase.test_cloud_upgrade_payment_keeps_back_path bot.tests.RetainedIpRenewalUiTestCase.test_cloud_change_ip_keyboards_keep_back_path bot.tests.RetainedIpRenewalUiTestCase.test_cloud_ip_query_actions_return_to_query_menu
+uv run python manage.py check
+uv run python manage.py makemigrations --check --dry-run
+rg -n "service_expires_at" bot/handlers.py bot/tests.py bot/api.py cloud/api_asset_edit.py cloud/api_orders.py cloud/api_tasks.py cloud/tests.py
+rg -n "service_expires_at" /Users/a399/Desktop/data/vue-shop-admin/apps/web-antd/src -g '!**/*.md'
+git diff --check
+```
+
+结果：机器人聚焦测试、Django 系统检查、迁移 dry-run、后端/前端旧字段扫描和空白检查均通过。`rg service_expires_at` 对本轮关注文件无命中，前端运行代码旧字段无命中。
+
+剩余风险：本轮未跑完整测试套件，未执行真实 Telegram 回调、真实修改配置扣款、云端配置调整、钱包支付、云端删机或固定 IP 释放。
+
 ## 2026-06-02 21:24 自动监工：后台到期字段统一巡检
 
 ### 范围
