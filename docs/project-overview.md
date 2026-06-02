@@ -170,7 +170,7 @@ DB_ENGINE=sqlite SQLITE_NAME=local.sqlite3 uv run python run.py web
   - 缺失确认、二次确认、防误删保护
 - `cloud/api.py`
   - 云后台 API 兼容聚合层
-  - re-export 拆分后的域接口给 URL 聚合使用，并保留旧 `cloud.api.*` patch/import 点
+  - 重新导出拆分后的域接口给旧导入使用；运行时路由、管理命令和测试替换目标应直接指向真实域模块
 - `cloud/api_assets.py`
   - 代理列表、风险摘要和资产载荷辅助
 - `cloud/api_asset_snapshots.py`
@@ -215,7 +215,7 @@ DB_ENGINE=sqlite SQLITE_NAME=local.sqlite3 uv run python run.py web
 
 `shop/dashboard_urls.py` 是后台 API 主聚合点，覆盖：
 
-后台云资产路由直接导入 `cloud/api_assets.py`、`cloud/api_asset_edit.py`、`cloud/api_orders.py`、`cloud/api_tasks.py`、`cloud/api_sync.py`、`cloud/api_monitors.py`、`cloud/sync_jobs.py` 和 `cloud/task_center.py`。`cloud/api_asset_snapshots.py` 由列表 API、同步任务和刷新命令调用。`cloud/api.py` 只保留兼容导出和测试 patch 点，不再作为路由运行时入口。
+后台云资产路由直接导入 `cloud/api_assets.py`、`cloud/api_asset_edit.py`、`cloud/api_orders.py`、`cloud/api_tasks.py`、`cloud/api_sync.py`、`cloud/api_monitors.py`、`cloud/sync_jobs.py` 和 `cloud/task_center.py`。`cloud/api_asset_snapshots.py` 由列表 API、同步任务和刷新命令调用。`cloud/api.py` 只保留兼容导出，不再作为路由、管理命令或测试替换入口。
 
 - 认证与会话
 - 用户、余额、折扣
