@@ -416,16 +416,6 @@ def custom_order_wallet_keyboard(order_id: int, usdt_amount, trx_amount):
     return kb.as_markup()
 
 
-def custom_port_keyboard(order_id: int):
-    kb = InlineKeyboardBuilder()
-    kb.row(
-        InlineKeyboardButton(text='✅ 使用默认端口 9528', callback_data=f'custom:port:default:{order_id}'),
-        InlineKeyboardButton(text='✍️ 输入自定义端口', callback_data=f'custom:port:custom:{order_id}'),
-    )
-    kb.row(InlineKeyboardButton(text='🔙 返回主菜单', callback_data='custom:back'))
-    return kb.as_markup()
-
-
 def cart_menu(items, total_amount):
     kb = InlineKeyboardBuilder()
     for item in items:
@@ -461,16 +451,6 @@ def cloud_server_change_ip_region_menu(order_id: int, regions, expanded: bool = 
         kb.button(text='🔙 返回详情', callback_data=cloud_previous_detail_callback(order_id, back_callback))
         rows = [3] * ((len(display_regions) + 2) // 3)
         kb.adjust(*rows, 1)
-    return kb.as_markup()
-
-
-def cloud_server_change_ip_port_keyboard(order_id: int, region_code: str, region_name: str, back_callback: str | None = None):
-    kb = InlineKeyboardBuilder()
-    kb.row(
-        InlineKeyboardButton(text='✅ 使用默认端口 9528', callback_data=append_back_callback(f'cloud:ipport:default:{order_id}:{region_code}', back_callback)),
-        InlineKeyboardButton(text='✍️ 输入自定义端口', callback_data=append_back_callback(f'cloud:ipport:custom:{order_id}:{region_code}', back_callback)),
-    )
-    kb.row(InlineKeyboardButton(text='🔙 返回地区', callback_data=append_back_callback(f'cloud:ip:{order_id}', back_callback)))
     return kb.as_markup()
 
 

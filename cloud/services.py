@@ -25,7 +25,7 @@ from cloud.note_utils import append_note, prepend_note
 from cloud.bootstrap import install_bbr, install_mtproxy
 from cloud.dashboard_snapshots import _refresh_dashboard_plan_snapshots
 from cloud.ip_guard import validate_server_connection_ip
-from cloud.ports import get_mtproxy_public_ports
+from cloud.ports import MTPROXY_DEFAULT_PORT, get_mtproxy_public_ports
 from core.cache import get_redis
 from core.cloud_accounts import choose_cloud_account_for_order, cloud_account_label, cloud_account_label_variants, get_active_cloud_account, get_cloud_account_from_label
 from core.models import CloudAccountConfig
@@ -443,7 +443,7 @@ def _probe_mtproxy_ports(ip: str, username: str, password: str, main_port: int) 
         import paramiko
     except ImportError:
         return False, '缺少 paramiko，无法检查 MTProxy。'
-    ports = [str(port) for port in get_mtproxy_public_ports(main_port or 9528)]
+    ports = [str(port) for port in get_mtproxy_public_ports(main_port or MTPROXY_DEFAULT_PORT)]
     client = paramiko.SSHClient()
     client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
     try:
@@ -504,7 +504,7 @@ def _probe_mtproxy_public_ports(ip: str, main_port: int, timeout: float = 3.0) -
 def _ensure_mtproxy_after_renewal(order: CloudServerOrder) -> tuple[bool, str]:
     if not order.public_ip:
         return True, '缺少公网 IP，跳过 MTProxy 运行检查。'
-    ok, note = _probe_mtproxy_public_ports(order.public_ip, order.mtproxy_port or 9528)
+    ok, note = _probe_mtproxy_public_ports(order.public_ip, order.mtproxy_port or MTPROXY_DEFAULT_PORT)
     if ok:
         return True, note
     logger.warning('CLOUD_MTPROXY_RENEWAL_PROBE_FAILED order=%s ip=%s reason=%s', order.order_no, order.public_ip, note)
@@ -1111,7 +1111,7 @@ def create_cloud_server_order(user_id: int, plan_id: int, currency: str = 'USDT'
         pay_amount=pay_amount,
         pay_method='address',
         status='pending',
-        mtproxy_port=9528,
+        mtproxy_port=MTPROXY_DEFAULT_PORT,
         expired_at=expired_at,
     )
     CartItem.objects.filter(user_id=user_id, item_type='cloud_plan', cloud_plan_id=plan_id).delete()
@@ -1152,7 +1152,7 @@ def buy_cloud_server_with_balance(user_id: int, plan_id: int, currency: str = 'U
             pay_amount=total,
             pay_method='balance',
             status='paid',
-            mtproxy_port=9528,
+            mtproxy_port=MTPROXY_DEFAULT_PORT,
             paid_at=timezone.now(),
         )
         record_balance_ledger(
@@ -1830,7 +1830,7 @@ async def initialize_proxy_asset(asset_id: int, user_id: int):
         return None, '当前资产缺少公网 IP，无法初始化代理'
     username = str(asset.login_user or '').strip() or ('admin' if asset.provider == 'aws_lightsail' else 'root')
     password = _generate_asset_login_password() if asset.provider == 'aws_lightsail' else (str(asset.login_password or '').strip() or _generate_asset_login_password())
-    port = int(asset.mtproxy_port or 9528)
+    port = int(asset.mtproxy_port or MTPROXY_DEFAULT_PORT)
     guard_ok, guard_note = validate_server_connection_ip(public_ip, [asset.public_ip, asset.previous_public_ip, asset.mtproxy_host], context=f'initialize_asset:{asset.id}')
     if not guard_ok:
         return asset, guard_note
@@ -2693,7 +2693,7 @@ def _create_manual_asset_operation_order(asset: CloudAsset, user: TelegramUser, 
         lifecycle_days=getattr(base_order, 'lifecycle_days', 31) or 31,
         service_started_at=getattr(base_order, 'service_started_at', None) or asset.created_at or now,
         server_name=asset.asset_name,
-        mtproxy_port=asset.mtproxy_port or getattr(base_order, 'mtproxy_port', None) or 9528,
+        mtproxy_port=asset.mtproxy_port or getattr(base_order, 'mtproxy_port', None) or MTPROXY_DEFAULT_PORT,
         mtproxy_link=asset.mtproxy_link or getattr(base_order, 'mtproxy_link', None),
         proxy_links=asset.proxy_links or getattr(base_order, 'proxy_links', None) or [],
         mtproxy_secret=asset.mtproxy_secret or getattr(base_order, 'mtproxy_secret', None),
@@ -2842,7 +2842,7 @@ def replace_cloud_asset_order_by_admin(
         ip_recycle_reminder_enabled=getattr(base_order, 'ip_recycle_reminder_enabled', True),
         auto_renew_enabled=getattr(base_order, 'auto_renew_enabled', False),
         last_user_id=getattr(target_user, 'tg_user_id', None),
-        mtproxy_port=asset.mtproxy_port or getattr(base_order, 'mtproxy_port', None) or 9528,
+        mtproxy_port=asset.mtproxy_port or getattr(base_order, 'mtproxy_port', None) or MTPROXY_DEFAULT_PORT,
         mtproxy_link=asset.mtproxy_link or getattr(base_order, 'mtproxy_link', None),
         proxy_links=asset.proxy_links or getattr(base_order, 'proxy_links', None) or [],
         mtproxy_secret=asset.mtproxy_secret or getattr(base_order, 'mtproxy_secret', None),
@@ -3006,7 +3006,7 @@ def _create_asset_operation_order(asset: CloudAsset, user_id: int) -> CloudServe
         service_started_at=asset.created_at or now,
         server_name=asset.asset_name,
         static_ip_name=asset.asset_name if provider == CloudServerPlan.PROVIDER_AWS_LIGHTSAIL else '',
-        mtproxy_port=asset.mtproxy_port or 9528,
+        mtproxy_port=asset.mtproxy_port or MTPROXY_DEFAULT_PORT,
         mtproxy_link=asset.mtproxy_link,
         proxy_links=asset.proxy_links or [],
         mtproxy_secret=asset.mtproxy_secret,
@@ -3069,7 +3069,7 @@ def ensure_cloud_asset_operation_order(asset_id: int, user_id: int, admin: bool 
     order.previous_public_ip = order.previous_public_ip or asset.previous_public_ip
     order.instance_id = order.instance_id or asset.instance_id
     order.provider_resource_id = order.provider_resource_id or asset.provider_resource_id
-    order.mtproxy_port = order.mtproxy_port or asset.mtproxy_port or 9528
+    order.mtproxy_port = order.mtproxy_port or asset.mtproxy_port or MTPROXY_DEFAULT_PORT
     order.mtproxy_link = order.mtproxy_link or asset.mtproxy_link
     order.proxy_links = order.proxy_links or asset.proxy_links or []
     order.mtproxy_secret = order.mtproxy_secret or asset.mtproxy_secret
@@ -3138,7 +3138,7 @@ def _create_retained_ip_recovery_order(order: CloudServerOrder, days: int = 31):
         pay_method=order.pay_method,
         status='paid',
         lifecycle_days=days,
-        mtproxy_port=order.mtproxy_port or 9528,
+        mtproxy_port=order.mtproxy_port or MTPROXY_DEFAULT_PORT,
         mtproxy_secret=order.mtproxy_secret,
         mtproxy_link=order.mtproxy_link,
         proxy_links=order.proxy_links or [],
@@ -3854,7 +3854,7 @@ def mark_cloud_server_ip_change_requested(order_id: int, user_id: int, region_co
             ).order_by('-sort_order', 'id').first()
         if not fallback_plan:
             return False
-        target_port = port or order.mtproxy_port or 9528
+        target_port = port or order.mtproxy_port or MTPROXY_DEFAULT_PORT
         original_asset_expires_at = order_asset_expiry(order)
         remaining_ip_changes -= 1
         now = timezone.now()
@@ -3986,7 +3986,7 @@ def create_cloud_server_rebuild_order(order_id: int):
     suffix = now.strftime('%m%d%H%M%S')
     migration_due_at = now + timezone.timedelta(days=3)
     old_public_ip = order.public_ip or order.previous_public_ip or ''
-    old_port = order.mtproxy_port or 9528
+    old_port = order.mtproxy_port or MTPROXY_DEFAULT_PORT
     old_secret = order.mtproxy_secret or ''
     old_trace_note = (
         f'重装迁移追溯：来源订单 {order.order_no}；旧IP={old_public_ip or "-"}；旧端口={old_port or "-"}；'
@@ -4009,7 +4009,7 @@ def create_cloud_server_rebuild_order(order_id: int):
         pay_method=order.pay_method,
         status='paid',
         lifecycle_days=order.lifecycle_days,
-        mtproxy_port=order.mtproxy_port or 9528,
+        mtproxy_port=order.mtproxy_port or MTPROXY_DEFAULT_PORT,
         mtproxy_secret=order.mtproxy_secret,
         mtproxy_link=order.mtproxy_link,
         proxy_links=order.proxy_links or [],
@@ -4100,7 +4100,7 @@ def _has_main_proxy_link(order: CloudServerOrder) -> bool:
     if getattr(order, 'mtproxy_link', None):
         return True
     for item in getattr(order, 'proxy_links', None) or []:
-        if isinstance(item, dict) and item.get('url') and str(item.get('port') or '') == str(order.mtproxy_port or 9528):
+        if isinstance(item, dict) and item.get('url') and str(item.get('port') or '') == str(order.mtproxy_port or MTPROXY_DEFAULT_PORT):
             return True
     return False
 
@@ -4208,7 +4208,7 @@ def create_cloud_server_upgrade_order(order_id: int, user_id: int, target_plan_i
     now = timezone.now()
     suffix = now.strftime('%m%d%H%M%S')
     old_public_ip = order.public_ip or order.previous_public_ip or ''
-    old_port = order.mtproxy_port or 9528
+    old_port = order.mtproxy_port or MTPROXY_DEFAULT_PORT
     old_secret = order.mtproxy_secret or ''
     new_order_no = _trim_operation_order_no(order, operation_code, suffix)
     lifecycle_fields = compute_order_lifecycle_fields(target_expiry)
@@ -4235,7 +4235,7 @@ def create_cloud_server_upgrade_order(order_id: int, user_id: int, target_plan_i
         pay_method='balance',
         status='paid',
         lifecycle_days=blocks * 31,
-        mtproxy_port=order.mtproxy_port or 9528,
+        mtproxy_port=order.mtproxy_port or MTPROXY_DEFAULT_PORT,
         mtproxy_secret=order.mtproxy_secret,
         mtproxy_link=order.mtproxy_link,
         proxy_links=order.proxy_links or [],

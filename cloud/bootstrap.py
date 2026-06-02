@@ -11,7 +11,7 @@ from urllib.parse import parse_qs, urlparse
 
 from asgiref.sync import sync_to_async
 
-from cloud.ports import get_mtproxy_port_plan
+from cloud.ports import MTPROXY_DEFAULT_PORT, get_mtproxy_port_plan
 
 logger = logging.getLogger(__name__)
 
@@ -32,7 +32,7 @@ def _restore_paramiko_levels(levels: dict[str, int]) -> None:
 
 
 MTPROXY_DIR = '/home/mtproxy'
-MTPROXY_PORT = 9528
+MTPROXY_PORT = MTPROXY_DEFAULT_PORT
 MTPROXY_FAKE_TLS_DOMAIN = 'azure.microsoft.com'
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 PROJECT_SECRETS_DIR = PROJECT_ROOT / '.shop-secrets'

@@ -23,10 +23,10 @@ from cloud.asset_expiry import order_asset_expiry
 from cloud.models import AddressMonitor, CloudAsset, CloudServerOrder
 from orders.models import Order, Product, Recharge
 from orders.services import usdt_to_trx
-from bot.keyboards import custom_port_keyboard
 from cloud.note_utils import append_note
+from cloud.ports import MTPROXY_DEFAULT_PORT
 from cloud.provisioning import provision_cloud_server
-from cloud.services import apply_cloud_server_renewal, is_cloud_asset_renewal_order, run_cloud_server_renewal_postcheck
+from cloud.services import apply_cloud_server_renewal, is_cloud_asset_renewal_order, prepare_cloud_server_order_instances, run_cloud_server_renewal_postcheck
 from core.cache import get_config, get_redis, bump_daily_stats, get_daily_stats
 from core.runtime_config import get_runtime_config
 from core.persistence import bump_daily_address_stat, record_external_sync_log
@@ -458,9 +458,13 @@ def _confirm_cloud_server_order(order_id: int, tx_hash: str, payer_address: str 
                 order.save(update_fields=['tx_hash', 'payer_address', 'receive_address', 'paid_at', 'updated_at'])
                 return apply_cloud_server_renewal.__wrapped__(order.id, order.lifecycle_days or 31, False)
             order.status = 'paid'
-            payment_note = '已收款，正在恢复未绑定代理资产固定 IP。' if asset_recovery_order else '已收款，等待用户确认 MTProxy 端口后进入创建流程。默认端口为 9528。'
+            if not asset_recovery_order:
+                order.mtproxy_port = MTPROXY_DEFAULT_PORT
+            payment_note = f'已收款，使用默认端口 {MTPROXY_DEFAULT_PORT}，正在进入创建流程。' if not asset_recovery_order else '已收款，正在恢复未绑定代理资产固定 IP。'
             order.provision_note = '\n'.join(part for part in [str(order.provision_note or '').strip(), payment_note] if part)
             update_fields = ['status', 'tx_hash', 'payer_address', 'receive_address', 'paid_at', 'provision_note', 'updated_at']
+            if not asset_recovery_order:
+                update_fields.append('mtproxy_port')
             order.save(update_fields=update_fields)
         return order
     except Exception as exc:
@@ -534,6 +538,30 @@ async def _provision_recovered_cloud_order(order: CloudServerOrder):
     except Exception as exc:
         logger.exception('固定 IP 续费恢复任务异常 order=%s error=%s', getattr(order, 'id', None), exc)
         await _notify_user(order.user_id, f'⚠️ 固定 IP 服务器恢复任务异常。\n订单号: {order.order_no}\n请联系人工客服处理。')
+
+
+async def _provision_paid_cloud_order(order: CloudServerOrder):
+    try:
+        orders = await prepare_cloud_server_order_instances(order.id, order.user_id, MTPROXY_DEFAULT_PORT)
+        if not orders:
+            await _notify_user(order.user_id, f'⚠️ 云服务器订单 {order.order_no} 已支付，但创建任务提交失败。\n请在查询中心查看，或联系人工客服。')
+            return
+        await _notify_user(
+            order.user_id,
+            f'✅ 云服务器订单 {order.order_no} 支付成功！\n'
+            f'地区: {order.region_name}\n套餐: {order.plan_name}\n'
+            f'端口: {MTPROXY_DEFAULT_PORT}\n'
+            f'{len(orders)} 台服务器创建任务已提交，完成后会自动同步到代理列表。',
+        )
+        for item in orders:
+            provisioned = await provision_cloud_server(item.id)
+            if provisioned and provisioned.status == 'completed':
+                await _notify_user(provisioned.user_id, f'✅ 云服务器创建完成！\n订单号: {provisioned.order_no}\nIP: {provisioned.public_ip or provisioned.previous_public_ip}\n端口: {provisioned.mtproxy_port or MTPROXY_DEFAULT_PORT}\n新的到期时间: {_format_local_dt(order_asset_expiry(provisioned))}')
+            else:
+                await _notify_user(order.user_id, f'⚠️ 云服务器创建暂未完成。\n订单号: {getattr(provisioned, "order_no", None) or item.order_no}\n请稍后在查询中心查看，或联系人工客服。')
+    except Exception as exc:
+        logger.exception('云服务器支付后自动创建任务异常 order=%s error=%s', getattr(order, 'id', None), exc)
+        await _notify_user(order.user_id, f'⚠️ 云服务器自动创建任务异常。\n订单号: {order.order_no}\n请联系人工客服处理。')
 
 
 async def _copy_notice_to_admins(user, text: str, parse_mode: str | None = None):
@@ -688,13 +716,7 @@ async def _process_payment(transfer: dict) -> bool:
         if is_cloud_asset_renewal_order(confirmed) and confirmed.status in {'paid', 'provisioning', 'failed'}:
             asyncio.create_task(_provision_recovered_cloud_order(confirmed))
             return True
-        await _notify_user(
-            confirmed.user_id,
-            f'✅ 云服务器订单 {confirmed.order_no} 支付成功！\n'
-            f'地区: {confirmed.region_name}\n套餐: {confirmed.plan_name}\n'
-            '请选择 MTProxy 端口：默认端口是 9528，你也可以输入自定义端口。',
-            reply_markup=custom_port_keyboard(confirmed.id),
-        )
+        asyncio.create_task(_provision_paid_cloud_order(confirmed))
         return True
     return False
 

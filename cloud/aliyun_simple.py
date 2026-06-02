@@ -7,7 +7,7 @@ import time
 import uuid
 from pathlib import Path
 
-from cloud.ports import get_mtproxy_public_ports
+from cloud.ports import MTPROXY_DEFAULT_PORT, get_mtproxy_public_ports
 from cloud.schemas import ProvisionResult
 from core.cloud_accounts import get_active_cloud_account
 
@@ -391,7 +391,7 @@ def _create_instance_sync(order, server_name: str):
         if not running_instance:
             return ProvisionResult(ok=False, note=f'阿里云轻量云创建失败：实例未进入 Running，instance_id={instance_id}')
 
-        mtproxy_port = int(getattr(order, 'mtproxy_port', 9528) or 9528)
+        mtproxy_port = int(getattr(order, 'mtproxy_port', MTPROXY_DEFAULT_PORT) or MTPROXY_DEFAULT_PORT)
         _open_instance_port(client, region_code, instance_id, 22)
         for public_port in get_mtproxy_public_ports(mtproxy_port):
             _open_instance_port(client, region_code, instance_id, public_port)

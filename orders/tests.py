@@ -589,6 +589,46 @@ class ChainPaymentScannerTestCase(TestCase):
         self.assertNotIn(order.id, [item.id for item in clouds])
         self.assertIn(trx_order.id, [item.id for item in clouds])
 
+    def test_cloud_chain_payment_auto_submits_default_port_provision(self):
+        order = CloudServerOrder.objects.create(
+            order_no='CHAIN-CLOUD-DEFAULT-PORT',
+            user=self.user,
+            plan=self.plan,
+            provider=self.plan.provider,
+            region_code=self.plan.region_code,
+            region_name=self.plan.region_name,
+            plan_name=self.plan.plan_name,
+            quantity=1,
+            currency='USDT',
+            total_amount=Decimal('19.000000'),
+            pay_amount=Decimal('19.567'),
+            pay_method='address',
+            status='pending',
+            expired_at=timezone.now() + timezone.timedelta(minutes=10),
+        )
+        scheduled = []
+
+        def capture_task(coro):
+            scheduled.append(coro.cr_code.co_name)
+            coro.close()
+            return object()
+
+        with patch('orders.payment_scanner.asyncio.create_task', side_effect=capture_task):
+            matched = async_to_sync(_process_payment)({
+                'amount': Decimal('19.567'),
+                'tx_hash': 'tx-cloud-default-port',
+                'currency': 'USDT',
+                'from': 'payer',
+                'to': 'receiver',
+            })
+
+        self.assertTrue(matched)
+        order.refresh_from_db()
+        self.assertEqual(order.status, 'paid')
+        self.assertEqual(order.mtproxy_port, 443)
+        self.assertIn('使用默认端口 443', order.provision_note)
+        self.assertEqual(scheduled, ['_provision_paid_cloud_order'])
+
     def test_address_balance_query_awaits_trongrid_headers(self):
         captured = {}
 

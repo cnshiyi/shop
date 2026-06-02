@@ -159,7 +159,7 @@ class CloudServerOrder(models.Model):
     ip_recycle_reminder_enabled = models.BooleanField('IP保留期提醒', default=True, db_index=True)
     auto_renew_enabled = models.BooleanField('自动续费', default=False, db_index=True)
     last_user_id = models.BigIntegerField('最近绑定TG用户ID', blank=True, null=True, db_index=True)
-    mtproxy_port = models.IntegerField('MTProxy端口', default=9528)
+    mtproxy_port = models.IntegerField('MTProxy端口', default=443)
     mtproxy_link = models.TextField('MTProxy链接', blank=True, null=True)
     proxy_links = models.JSONField('代理链路', default=list, blank=True)
     mtproxy_secret = models.CharField('MTProxy密钥', max_length=191, blank=True, null=True)

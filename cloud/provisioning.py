@@ -17,7 +17,7 @@ from cloud.aws_lightsail import create_instance as create_aws_instance, get_inst
 from cloud.bootstrap import build_mtproxy_links, install_bbr, install_mtproxy
 from cloud.ip_guard import validate_server_connection_ip, validate_server_connection_ip_with_retry
 from cloud.models import CloudServerOrder
-from cloud.ports import get_mtproxy_port_label, get_mtproxy_port_plan
+from cloud.ports import MTPROXY_DEFAULT_PORT, get_mtproxy_port_label, get_mtproxy_port_plan
 
 logger = logging.getLogger(__name__)
 
@@ -173,7 +173,7 @@ def _filter_duplicate_main_port_links(proxy_links: list[dict[str, str]], mtproxy
 def _extract_backup_secret_from_links(proxy_links, main_port: int | str | None = None) -> str:
     backup_port = ''
     try:
-        backup_port = str(get_mtproxy_port_plan(main_port or 9528)['backup'])
+        backup_port = str(get_mtproxy_port_plan(main_port or MTPROXY_DEFAULT_PORT)['backup'])
     except Exception:
         backup_port = ''
     for item in proxy_links or []:
@@ -1067,19 +1067,19 @@ def _mark_success(order_id: int, server_name: str, instance_id: str, public_ip: 
     mtproxy_secret = mtproxy_secret or existing_mtproxy_secret
     mtproxy_link = mtproxy_link or existing_mtproxy_link
     if not mtproxy_link and mtproxy_secret:
-        mtproxy_link, _ = build_mtproxy_links(public_ip, order.mtproxy_port or 9528, mtproxy_secret)
+        mtproxy_link, _ = build_mtproxy_links(public_ip, order.mtproxy_port or MTPROXY_DEFAULT_PORT, mtproxy_secret)
     if not proxy_links:
         proxy_links = existing_proxy_links
-    proxy_links = _filter_duplicate_main_port_links(proxy_links, mtproxy_link, order.mtproxy_port or 9528)
+    proxy_links = _filter_duplicate_main_port_links(proxy_links, mtproxy_link, order.mtproxy_port or MTPROXY_DEFAULT_PORT)
     if mtproxy_link and not any(isinstance(item, dict) and item.get('url') == mtproxy_link for item in proxy_links):
         proxy_links.insert(0, {
             'name': '主代理 mtg',
             'server': public_ip,
-            'port': str(order.mtproxy_port or 9528),
+            'port': str(order.mtproxy_port or MTPROXY_DEFAULT_PORT),
             'secret': mtproxy_secret or '',
             'url': mtproxy_link,
         })
-    compact_note = _compact_proxy_install_note(note, proxy_links, order.mtproxy_port or 9528)
+    compact_note = _compact_proxy_install_note(note, proxy_links, order.mtproxy_port or MTPROXY_DEFAULT_PORT)
     order.status = 'completed'
     order.server_name = server_name
     order.instance_id = instance_id

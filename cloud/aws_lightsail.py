@@ -8,7 +8,7 @@ from pathlib import Path
 
 from cloud.bootstrap import _derive_public_keys_from_private_keys
 from cloud.ip_guard import normalize_public_ip
-from cloud.ports import get_mtproxy_public_ports
+from cloud.ports import MTPROXY_DEFAULT_PORT, get_mtproxy_public_ports
 from cloud.schemas import ProvisionResult
 from django.apps import apps
 
@@ -206,7 +206,7 @@ def _create_instance_sync(order_data: dict, server_name: str):
     provider = order_data.get('provider')
     region = order_data.get('region_code') or 'ap-southeast-1'
     plan_name = order_data.get('plan_name')
-    mtproxy_port = int(order_data.get('mtproxy_port') or 9528)
+    mtproxy_port = int(order_data.get('mtproxy_port') or MTPROXY_DEFAULT_PORT)
     static_ip_name = str(order_data.get('static_ip_name') or '').strip()
     skip_static_ip = bool(order_data.get('skip_static_ip'))
 

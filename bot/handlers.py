@@ -38,9 +38,9 @@ from bot.keyboards import (
     recharge_currency_menu, product_list, quantity_keyboard,
     pay_method_keyboard, order_list as kb_order_list,
     recharge_list as kb_recharge_list, profile_menu, reminder_list_menu, reminder_ip_detail_menu,
-    custom_region_menu, custom_plan_menu, custom_quantity_keyboard, custom_payment_keyboard, custom_currency_keyboard, custom_wallet_keyboard, custom_order_wallet_keyboard, custom_port_keyboard,
+    custom_region_menu, custom_plan_menu, custom_quantity_keyboard, custom_payment_keyboard, custom_currency_keyboard, custom_wallet_keyboard, custom_order_wallet_keyboard,
     cloud_server_list, cloud_auto_renew_server_list, cloud_server_detail, cloud_order_list, cloud_order_readonly_detail, cloud_expiry_actions, cloud_server_renew_payment, order_query_menu, balance_details_list, support_contact_button, cloud_lifecycle_notice_actions,
-    cloud_server_change_ip_region_menu, cloud_server_change_ip_port_keyboard,
+    cloud_server_change_ip_region_menu,
     cart_menu, wallet_recharge_prompt_menu, cloud_ip_query_result,
     cloud_query_menu, configured_link_for_label, configured_link_menu,
     cloud_detail_callback, cloud_asset_detail_callback, cloud_previous_detail_callback, cloud_asset_action_callback, append_back_callback, compact_callback_path,
@@ -141,7 +141,7 @@ from core.texts import site_text
 from core.trongrid import build_trongrid_headers
 from cloud.provisioning import get_provision_progress, provision_cloud_server, reprovision_cloud_server_bootstrap
 from cloud.bootstrap import _normalize_mtproxy_core_secret, _probe_mtproxy_state, build_mtproxy_links
-from cloud.ports import get_mtproxy_port_plan, is_valid_mtproxy_main_port, mtproxy_port_validation_hint
+from cloud.ports import MTPROXY_DEFAULT_PORT, get_mtproxy_port_plan
 
 logger = logging.getLogger(__name__)
 
@@ -1579,7 +1579,7 @@ def _cloud_server_created_text(order, port: int | None = None, title: str | None
         link = str(link or '').strip().strip('"\'，。')
         if link.startswith('socks5://'):
             link = _telegram_socks_link_from_raw(link)
-        if link.startswith(('tg://proxy?', 'https://t.me/proxy?')) and _link_port(link) == str(get_mtproxy_port_plan(actual_port or 9528)['socks5']):
+        if link.startswith(('tg://proxy?', 'https://t.me/proxy?')) and _link_port(link) == str(get_mtproxy_port_plan(actual_port or MTPROXY_DEFAULT_PORT)['socks5']):
             return
         if link and link not in seen_links:
             extra_links.append(link)
@@ -1609,7 +1609,7 @@ def _cloud_server_created_text(order, port: int | None = None, title: str | None
     has_socks5_link = any(str(link).startswith(('socks5://', 'tg://socks?')) for link in extra_links)
     if not has_socks5_link and 'SOCKS5:' in note and public_ip and raw_secret:
         socks5_secret = _normalize_mtproxy_core_secret(raw_secret) or raw_secret
-        socks5_port = get_mtproxy_port_plan(actual_port or 9528)['socks5']
+        socks5_port = get_mtproxy_port_plan(actual_port or MTPROXY_DEFAULT_PORT)['socks5']
         port_match = re.search(r'SOCKS5:\s*[^\n]*?端口\s*(\d+)', note)
         if port_match:
             socks5_port = int(port_match.group(1))
@@ -1789,7 +1789,7 @@ async def _cloud_renewal_postcheck_and_notify(bot: Bot, chat_id: int, order_id: 
         checked, err = await run_cloud_server_renewal_postcheck(order_id)
         if _requires_recovery_provision(checked):
             await _send_user_notice(bot, chat_id, '🛠 固定 IP 保留期续费已进入自动恢复流程。\n系统会保持旧 IP / 旧端口 / 旧密钥不变，完成后自动发送代理链接。')
-            asyncio.create_task(_provision_cloud_server_and_notify(bot, chat_id, checked.id, checked.mtproxy_port or 9528))
+            asyncio.create_task(_provision_cloud_server_and_notify(bot, chat_id, checked.id, checked.mtproxy_port or MTPROXY_DEFAULT_PORT))
             return
         if err:
             await _send_user_notice(bot, chat_id, f'⚠️ 续费后巡检发现异常，已记录并尝试修复。\n订单号: {getattr(checked, "order_no", "-") or "-"}\n请稍后再查看代理状态，或联系人工客服。')
@@ -1885,6 +1885,8 @@ async def _buy_cloud_server_with_balance_and_notify(bot: Bot, chat_id: int, user
                 reply_markup=wallet_recharge_prompt_menu(f'custom:quantitypage:{plan_id}:{quantity}', '🔙 返回数量'),
             )
             return
+        orders = await prepare_cloud_server_order_instances(order.id, user_id, MTPROXY_DEFAULT_PORT)
+        task_count = len(orders)
         await bot.send_message(
             chat_id=chat_id,
             text=(
@@ -1892,10 +1894,11 @@ async def _buy_cloud_server_with_balance_and_notify(bot: Bot, chat_id: int, user
                 f'{_public_region_line(order.region_name)}'
                 f'套餐: {order.plan_name}\n'
                 f'数量: {order.quantity}\n'
-                f'支付金额: {fmt_pay_amount(order.pay_amount)} {order.currency}\n\n'
-                + _bot_text('bot_custom_port_hint', '请选择 MTProxy 端口：默认端口是 9528，你也可以输入自定义端口。')
+                f'支付金额: {fmt_pay_amount(order.pay_amount)} {order.currency}\n'
+                f'端口: {MTPROXY_DEFAULT_PORT}\n\n'
+                f'{task_count or 1} 台服务器创建任务已提交，完成后会自动发送创建结果。'
             ),
-            reply_markup=custom_port_keyboard(order.id),
+            reply_markup=main_menu(),
         )
         await _send_admin_user_action_notice(bot, type('UserNotice', (), {'tg_user_id': chat_id, 'username': None, 'first_name': ''})(), '购买', [
             ('订单号', order.order_no),
@@ -1905,7 +1908,9 @@ async def _buy_cloud_server_with_balance_and_notify(bot: Bot, chat_id: int, user
             ('金额', f'{fmt_pay_amount(order.pay_amount)} {order.currency}'),
             ('支付方式', '钱包余额'),
         ])
-        logger.info('云服务器后台钱包直付任务完成: chat_id=%s user_id=%s order_id=%s order=%s currency=%s qty=%s pay_amount=%s', chat_id, user_id, order.id, order.order_no, currency, order.quantity, order.pay_amount)
+        for item in orders:
+            asyncio.create_task(_provision_cloud_server_and_notify(bot, chat_id, item.id, item.mtproxy_port or MTPROXY_DEFAULT_PORT))
+        logger.info('云服务器后台钱包直付任务完成: chat_id=%s user_id=%s order_id=%s order=%s currency=%s qty=%s pay_amount=%s tasks=%s', chat_id, user_id, order.id, order.order_no, currency, order.quantity, order.pay_amount, task_count)
     except Exception as exc:
         logger.exception('云服务器后台钱包直付任务异常: chat_id=%s user_id=%s plan_id=%s quantity=%s currency=%s error=%s', chat_id, user_id, plan_id, quantity, currency, exc)
         await bot.send_message(chat_id=chat_id, text=_bot_text_format('bot_wallet_pay_failed', '❌ 钱包支付失败，请稍后重试。\n错误: {error}', error=_public_cloud_error_text(exc)), reply_markup=main_menu())
@@ -1940,8 +1945,10 @@ async def _pay_cloud_server_order_with_balance_and_notify(bot: Bot, chat_id: int
                 ('金额', f'{fmt_pay_amount(order.pay_amount)} {order.currency}'),
                 ('支付方式', '钱包余额'),
             ])
-            asyncio.create_task(_provision_cloud_server_and_notify(bot, chat_id, order.id, order.mtproxy_port or 9528))
+            asyncio.create_task(_provision_cloud_server_and_notify(bot, chat_id, order.id, order.mtproxy_port or MTPROXY_DEFAULT_PORT))
             return
+        orders = await prepare_cloud_server_order_instances(order.id, user_id, MTPROXY_DEFAULT_PORT)
+        task_count = len(orders)
         await bot.send_message(
             chat_id=chat_id,
             text=(
@@ -1949,10 +1956,11 @@ async def _pay_cloud_server_order_with_balance_and_notify(bot: Bot, chat_id: int
                 f'{_public_region_line(order.region_name)}'
                 f'套餐: {order.plan_name}\n'
                 f'数量: {order.quantity}\n'
-                f'支付金额: {fmt_pay_amount(order.pay_amount)} {order.currency}\n\n'
-                + _bot_text('bot_custom_port_hint', '请选择 MTProxy 端口：默认端口是 9528，你也可以输入自定义端口。')
+                f'支付金额: {fmt_pay_amount(order.pay_amount)} {order.currency}\n'
+                f'端口: {MTPROXY_DEFAULT_PORT}\n\n'
+                f'{task_count or 1} 台服务器创建任务已提交，完成后会自动发送创建结果。'
             ),
-            reply_markup=custom_port_keyboard(order.id),
+            reply_markup=main_menu(),
         )
         await _send_admin_user_action_notice(bot, type('UserNotice', (), {'tg_user_id': chat_id, 'username': None, 'first_name': ''})(), '购买', [
             ('订单号', order.order_no),
@@ -1962,7 +1970,9 @@ async def _pay_cloud_server_order_with_balance_and_notify(bot: Bot, chat_id: int
             ('金额', f'{fmt_pay_amount(order.pay_amount)} {order.currency}'),
             ('支付方式', '钱包余额'),
         ])
-        logger.info('云服务器后台钱包补付任务完成: chat_id=%s user_id=%s order_id=%s order=%s currency=%s qty=%s pay_amount=%s', chat_id, user_id, order.id, order.order_no, currency, order.quantity, order.pay_amount)
+        for item in orders:
+            asyncio.create_task(_provision_cloud_server_and_notify(bot, chat_id, item.id, item.mtproxy_port or MTPROXY_DEFAULT_PORT))
+        logger.info('云服务器后台钱包补付任务完成: chat_id=%s user_id=%s order_id=%s order=%s currency=%s qty=%s pay_amount=%s tasks=%s', chat_id, user_id, order.id, order.order_no, currency, order.quantity, order.pay_amount, task_count)
     except Exception as exc:
         logger.exception('云服务器后台钱包补付任务异常: chat_id=%s user_id=%s order_id=%s currency=%s error=%s', chat_id, user_id, order_id, currency, exc)
         await bot.send_message(chat_id=chat_id, text=_bot_text_format('bot_wallet_pay_failed', '❌ 钱包支付失败，请稍后重试。\n错误: {error}', error=_public_cloud_error_text(exc)), reply_markup=main_menu())
@@ -2030,7 +2040,7 @@ def _secret_log_hint(secret: str) -> str:
 
 async def _validate_reinstall_proxy_link(order, link_data: dict[str, str], probe_when_possible: bool = True, allow_client_port: bool = False) -> tuple[bool, str]:
     order_ip = str(order.public_ip or order.previous_public_ip or '').strip()
-    stored_order_port = str(order.mtproxy_port or link_data['port'] or 9528)
+    stored_order_port = str(order.mtproxy_port or link_data['port'] or MTPROXY_DEFAULT_PORT)
     probe_port = str(link_data['port'] if allow_client_port else stored_order_port)
     parsed_secret = _normalize_proxy_secret(link_data.get('secret', ''))
     logger.info(
@@ -3033,20 +3043,12 @@ def register_handlers(dp: Dispatcher):
     async def input_custom_server_port(message: Message, state: FSMContext, bot: Bot):
         if await _handle_menu_interrupt(message, state):
             return
-        logger.info('云服务器自定义端口输入: tg_user_id=%s raw_text=%s', getattr(message.from_user, 'id', None), (message.text or '').strip())
-        try:
-            port = int(message.text.strip())
-        except Exception:
-            await message.answer(_bot_text('bot_custom_port_invalid', mtproxy_port_validation_hint() + '\n\n可随时点击底部菜单打断当前输入。'))
-            return
-        if not is_valid_mtproxy_main_port(port):
-            await message.answer(_bot_text('bot_custom_port_invalid', mtproxy_port_validation_hint() + '\n\n可随时点击底部菜单打断当前输入。'))
-            return
+        port = MTPROXY_DEFAULT_PORT
         data = await state.get_data()
         order_id = data.get('cloud_ip_change_order_id') or data.get('custom_order_id')
         region_code = data.get('cloud_ip_change_region_code')
         region_name = data.get('cloud_ip_change_region_name')
-        logger.info('云服务器自定义端口确认: tg_user_id=%s order_id=%s port=%s state_data=%s', getattr(message.from_user, 'id', None), order_id, port, {k: v for k, v in data.items() if k.startswith('custom_') or k.startswith('cloud_ip_change_')})
+        logger.info('云服务器旧端口输入状态按默认端口继续: tg_user_id=%s order_id=%s port=%s state_data=%s', getattr(message.from_user, 'id', None), order_id, port, {k: v for k, v in data.items() if k.startswith('custom_') or k.startswith('cloud_ip_change_')})
         if not order_id:
             await state.clear()
             await message.answer(_bot_text('bot_custom_context_missing', '订单上下文已失效，请重新下单。'), reply_markup=main_menu())
@@ -3081,13 +3083,13 @@ def register_handlers(dp: Dispatcher):
             asyncio.create_task(_provision_cloud_server_and_notify(bot, message.chat.id, order.id, port))
             return
         orders = await prepare_cloud_server_order_instances(order_id, user.id, port)
-        logger.info('云服务器提交自定义端口: tg_user_id=%s user=%s order_id=%s port=%s orders=%s', getattr(message.from_user, 'id', None), user.id, order_id, port, [getattr(item, 'order_no', None) for item in orders])
+        logger.info('云服务器旧端口输入状态提交默认端口: tg_user_id=%s user=%s order_id=%s port=%s orders=%s', getattr(message.from_user, 'id', None), user.id, order_id, port, [getattr(item, 'order_no', None) for item in orders])
         await state.clear()
         if not orders:
             await message.answer(_bot_text('bot_set_port_failed', '订单不存在，无法设置端口。'), reply_markup=main_menu())
             return
         task_count = len(orders)
-        await message.answer(_bot_text_format('bot_custom_port_success', '✅ 端口设置成功：{port}\n已开始后台创建 {count} 台服务器，我会在完成后主动通知你。', port=port, count=task_count), reply_markup=main_menu())
+        await message.answer(_bot_text_format('bot_custom_port_success', '✅ 已使用默认端口 {port}\n已开始后台创建 {count} 台服务器，我会在完成后主动通知你。', port=port, count=task_count), reply_markup=main_menu())
         for order in orders:
             asyncio.create_task(_provision_cloud_server_and_notify(bot, message.chat.id, order.id, port))
 
@@ -3808,36 +3810,44 @@ def register_handlers(dp: Dispatcher):
 
     @dp.callback_query(F.data.startswith('custom:port:default:'))
     async def cb_custom_port_default(callback: CallbackQuery, state: FSMContext, bot: Bot):
-        await _safe_callback_answer(callback, '默认端口设置成功，已开始后台创建服务器')
+        await _safe_callback_answer(callback, f'已使用默认端口 {MTPROXY_DEFAULT_PORT}，开始后台创建服务器')
         order_id = int(callback.data.split(':')[3])
-        logger.info('云服务器选择默认端口: tg_user_id=%s order_id=%s port=9528 callback=%s', getattr(callback.from_user, 'id', None), order_id, callback.data)
+        logger.info('云服务器旧默认端口按钮兼容: tg_user_id=%s order_id=%s port=%s callback=%s', getattr(callback.from_user, 'id', None), order_id, MTPROXY_DEFAULT_PORT, callback.data)
         await state.clear()
         user = await get_or_create_user(callback.from_user.id, callback.from_user.username, callback.from_user.first_name)
-        orders = await prepare_cloud_server_order_instances(order_id, user.id, 9528)
-        logger.info('云服务器使用默认端口: tg_user_id=%s user=%s order_id=%s port=9528 orders=%s', getattr(callback.from_user, 'id', None), user.id, order_id, [getattr(item, 'order_no', None) for item in orders])
+        orders = await prepare_cloud_server_order_instances(order_id, user.id, MTPROXY_DEFAULT_PORT)
+        logger.info('云服务器旧默认端口按钮提交: tg_user_id=%s user=%s order_id=%s port=%s orders=%s', getattr(callback.from_user, 'id', None), user.id, order_id, MTPROXY_DEFAULT_PORT, [getattr(item, 'order_no', None) for item in orders])
         if not orders:
             await _safe_callback_answer(callback, '订单不存在', show_alert=True)
             return
         task_count = len(orders)
         await bot.send_message(
             chat_id=callback.from_user.id,
-            text=f'✅ 已选择默认端口 9528。\n{task_count} 台服务器创建任务已提交，正在后台处理，完成后会自动发送创建结果。',
+            text=f'✅ 已使用默认端口 {MTPROXY_DEFAULT_PORT}。\n{task_count} 台服务器创建任务已提交，正在后台处理，完成后会自动发送创建结果。',
             reply_markup=main_menu(),
         )
         for order in orders:
-            asyncio.create_task(_provision_cloud_server_and_notify(bot, callback.from_user.id, order.id, 9528))
+            asyncio.create_task(_provision_cloud_server_and_notify(bot, callback.from_user.id, order.id, MTPROXY_DEFAULT_PORT))
 
     @dp.callback_query(F.data.startswith('custom:port:custom:'))
     async def cb_custom_port_custom(callback: CallbackQuery, state: FSMContext, bot: Bot):
-        await _safe_callback_answer(callback, '已选择自定义端口')
+        await _safe_callback_answer(callback, f'自定义端口已取消，使用默认端口 {MTPROXY_DEFAULT_PORT}')
         order_id = int(callback.data.split(':')[3])
-        logger.info('云服务器进入自定义端口输入: tg_user_id=%s order_id=%s callback=%s', getattr(callback.from_user, 'id', None), order_id, callback.data)
-        await state.update_data(custom_order_id=order_id)
-        await state.set_state(CustomServerStates.waiting_port)
+        logger.info('云服务器旧自定义端口按钮兼容为默认端口: tg_user_id=%s order_id=%s port=%s callback=%s', getattr(callback.from_user, 'id', None), order_id, MTPROXY_DEFAULT_PORT, callback.data)
+        await state.clear()
+        user = await get_or_create_user(callback.from_user.id, callback.from_user.username, callback.from_user.first_name)
+        orders = await prepare_cloud_server_order_instances(order_id, user.id, MTPROXY_DEFAULT_PORT)
+        if not orders:
+            await _safe_callback_answer(callback, '订单不存在', show_alert=True)
+            return
+        task_count = len(orders)
         await bot.send_message(
             chat_id=callback.from_user.id,
-            text='✍️ 已选择自定义端口。\n请发送 443 或 1025-65529 之间的端口号，发送后我会立即提交服务器创建任务。',
+            text=f'自定义端口已取消，已使用默认端口 {MTPROXY_DEFAULT_PORT}。\n{task_count} 台服务器创建任务已提交，完成后会自动发送创建结果。',
+            reply_markup=main_menu(),
         )
+        for order in orders:
+            asyncio.create_task(_provision_cloud_server_and_notify(bot, callback.from_user.id, order.id, MTPROXY_DEFAULT_PORT))
 
     def _is_group_chat_message(message) -> bool:
         return int(getattr(getattr(message, 'chat', None), 'id', 0) or 0) < 0
@@ -4025,7 +4035,7 @@ def register_handlers(dp: Dispatcher):
                 continue
             paid.append(paid_order)
             if _requires_recovery_provision(paid_order):
-                asyncio.create_task(_provision_cloud_server_and_notify(callback.bot, callback.from_user.id, paid_order.id, paid_order.mtproxy_port or 9528))
+                asyncio.create_task(_provision_cloud_server_and_notify(callback.bot, callback.from_user.id, paid_order.id, paid_order.mtproxy_port or MTPROXY_DEFAULT_PORT))
             else:
                 asyncio.create_task(_cloud_renewal_postcheck_and_notify(callback.bot, callback.from_user.id, paid_order.id, getattr(paid_order, 'renew_balance_change', None)))
         lines = ['🔄 全部续费结果', '', scope, f'成功: {len(paid)} 台', f'跳过: {len(skipped)} 台', f'失败: {len(failed)} 台']
@@ -4493,7 +4503,7 @@ def register_handlers(dp: Dispatcher):
         _ASSET_REINIT_INFLIGHT.add(asset_id)
         logger.info('CLOUD_ASSET_REINIT_SUBMIT user_id=%s asset_id=%s order_id=%s target_order_id=%s ip=%s', user.id, asset_id, order.id, rebuild_order.id, getattr(item, 'public_ip', None))
         await callback.message.reply('🛠 已确认重新安装：后台只会在当前服务器重新执行 BBR/MTProxy 安装，不会创建新实例，也不会迁移固定 IP。预计约 5 分钟，完成后会自动通知你。\n\n后台处理期间，底部菜单和其它按钮可正常使用。', reply_markup=main_menu())
-        task = asyncio.create_task(_provision_cloud_server_and_notify(bot, callback.from_user.id, rebuild_order.id, rebuild_order.mtproxy_port or 9528, retry_only=True))
+        task = asyncio.create_task(_provision_cloud_server_and_notify(bot, callback.from_user.id, rebuild_order.id, rebuild_order.mtproxy_port or MTPROXY_DEFAULT_PORT, retry_only=True))
         task.add_done_callback(lambda _task, _asset_id=asset_id: _ASSET_REINIT_INFLIGHT.discard(_asset_id))
 
     @dp.callback_query(F.data.startswith('cloud:detail:'))
@@ -4789,7 +4799,7 @@ def register_handlers(dp: Dispatcher):
                 existing = candidate if _requires_recovery_provision(candidate) else None
             if err == '当前订单状态不可钱包支付' and _requires_recovery_provision(existing):
                 await _safe_edit_text(callback.message, '✅ 这笔续费已支付，固定 IP 恢复正在处理中。\n\n系统会保持旧 IP / 旧端口 / 旧密钥不变，完成后自动发送代理链接。')
-                asyncio.create_task(_provision_cloud_server_and_notify(callback.bot, callback.from_user.id, existing.id, existing.mtproxy_port or 9528))
+                asyncio.create_task(_provision_cloud_server_and_notify(callback.bot, callback.from_user.id, existing.id, existing.mtproxy_port or MTPROXY_DEFAULT_PORT))
                 return
             if err == '当前订单状态不可钱包支付' and existing and existing.status == 'completed' and existing.paid_at:
                 missing_recovery = _retained_recovery_missing_payment_text(existing)
@@ -4812,7 +4822,7 @@ def register_handlers(dp: Dispatcher):
                 ('金额', f'{fmt_pay_amount(order.pay_amount)} {order.currency}'),
                 ('支付方式', '钱包自动续费'),
             ])
-            asyncio.create_task(_provision_cloud_server_and_notify(callback.bot, callback.from_user.id, order.id, order.mtproxy_port or 9528))
+            asyncio.create_task(_provision_cloud_server_and_notify(callback.bot, callback.from_user.id, order.id, order.mtproxy_port or MTPROXY_DEFAULT_PORT))
             return
         asyncio.create_task(_cloud_renewal_postcheck_and_notify(callback.bot, callback.from_user.id, order.id, getattr(order, 'renew_balance_change', None)))
         await _safe_edit_text(callback.message, 
@@ -4869,7 +4879,7 @@ def register_handlers(dp: Dispatcher):
                 existing = candidate if _requires_recovery_provision(candidate) else None
             if err == '当前订单状态不可钱包支付' and _requires_recovery_provision(existing):
                 await _safe_edit_text(callback.message, '✅ 这笔续费已支付，固定 IP 恢复正在处理中。\n\n系统会保持旧 IP / 旧端口 / 旧密钥不变，完成后自动发送代理链接。')
-                asyncio.create_task(_provision_cloud_server_and_notify(callback.bot, callback.from_user.id, existing.id, existing.mtproxy_port or 9528))
+                asyncio.create_task(_provision_cloud_server_and_notify(callback.bot, callback.from_user.id, existing.id, existing.mtproxy_port or MTPROXY_DEFAULT_PORT))
                 return
             if err == '当前订单状态不可钱包支付' and existing and existing.status == 'completed' and existing.paid_at:
                 missing_recovery = _retained_recovery_missing_payment_text(existing)
@@ -4889,7 +4899,7 @@ def register_handlers(dp: Dispatcher):
                 ('金额', f'{fmt_pay_amount(order.pay_amount)} {order.currency}'),
                 ('支付币种', currency),
             ])
-            asyncio.create_task(_provision_cloud_server_and_notify(callback.bot, callback.from_user.id, order.id, order.mtproxy_port or 9528))
+            asyncio.create_task(_provision_cloud_server_and_notify(callback.bot, callback.from_user.id, order.id, order.mtproxy_port or MTPROXY_DEFAULT_PORT))
             return
         asyncio.create_task(_cloud_renewal_postcheck_and_notify(callback.bot, callback.from_user.id, order.id, getattr(order, 'renew_balance_change', None)))
         await _safe_edit_text(callback.message, 
@@ -4962,13 +4972,12 @@ def register_handlers(dp: Dispatcher):
         )
 
     @dp.callback_query(F.data.startswith('cloud:ipregion:'))
-    async def cb_cloud_change_ip_region(callback: CallbackQuery, state: FSMContext):
+    async def cb_cloud_change_ip_region(callback: CallbackQuery, state: FSMContext, bot: Bot):
         await _safe_callback_answer(callback)
         if await _deny_group_high_risk_callback(callback, '更换 IP'):
             return
         parts = callback.data.split(':', 4)
         _, _, raw_order_id, region_code = parts[:4]
-        back_callback = parts[4] if len(parts) > 4 else ''
         user = await get_or_create_user(callback.from_user.id, callback.from_user.username, callback.from_user.first_name)
         order_id = int(raw_order_id)
         is_admin = await _is_admin_chat(callback.message)
@@ -4981,23 +4990,7 @@ def register_handlers(dp: Dispatcher):
             return
         regions = [(code, name) for code, name in await _get_cached_custom_regions() if code != 'cn-hongkong']
         region_name = next((name for code, name in regions if code == region_code), region_code)
-        await state.update_data(cloud_ip_change_order_id=order_id, cloud_ip_change_region_code=region_code, cloud_ip_change_region_name=region_name, cloud_ip_change_admin=is_admin, cloud_ip_change_back=back_callback)
-        await _safe_edit_text(callback.message, 
-            f'🌐 更换IP\n\n已选择节点：{_public_region_text(region_name) or "默认节点"}\n请选择端口：',
-            reply_markup=cloud_server_change_ip_port_keyboard(order_id, region_code, region_name, back_callback),
-        )
-
-    @dp.callback_query(F.data.startswith('cloud:ipport:default:'))
-    async def cb_cloud_change_ip_port_default(callback: CallbackQuery, state: FSMContext, bot: Bot):
-        await _safe_callback_answer(callback, '已选择默认端口 9528，正在创建同配置新服务器')
-        if await _deny_group_high_risk_callback(callback, '更换 IP'):
-            return
-        parts = callback.data.split(':', 5)
-        _, _, _, raw_order_id, region_code = parts[:5]
-        order_id = int(raw_order_id)
-        user = await get_or_create_user(callback.from_user.id, callback.from_user.username, callback.from_user.first_name)
-        is_admin = await _is_admin_chat(callback.message)
-        new_order = await mark_cloud_server_ip_change_requested(order_id, user.id, region_code, 9528, admin=is_admin)
+        new_order = await mark_cloud_server_ip_change_requested(order_id, user.id, region_code, MTPROXY_DEFAULT_PORT, admin=is_admin)
         await state.clear()
         if new_order is False:
             await _safe_callback_answer(callback, '当前状态不可更换 IP', show_alert=True)
@@ -5006,24 +4999,52 @@ def register_handlers(dp: Dispatcher):
             await _safe_callback_answer(callback, '创建更换 IP 新服务器失败', show_alert=True)
             return
         await callback.message.reply(
-            f'🌐 已为你创建同配置新服务器\n\n新节点: {_public_region_text(new_order.region_name) or "默认节点"}\n新端口: {new_order.mtproxy_port or 9528}\n系统会重写生成新的 IP，请在 5 天内迁移。',
+            f'🌐 已为你创建同配置新服务器\n\n新节点: {_public_region_text(new_order.region_name or region_name) or "默认节点"}\n新端口: {new_order.mtproxy_port or MTPROXY_DEFAULT_PORT}\n系统会重写生成新的 IP，请在 5 天内迁移。',
+            reply_markup=main_menu(),
+        )
+        await _send_admin_user_action_notice(bot, user, '换IP', [
+            ('新订单号', new_order.order_no),
+            ('新节点', _public_region_text(new_order.region_name or region_name) or '默认节点'),
+            ('新端口', new_order.mtproxy_port or MTPROXY_DEFAULT_PORT),
+        ])
+        asyncio.create_task(_provision_cloud_server_and_notify(bot, callback.from_user.id, new_order.id, new_order.mtproxy_port or MTPROXY_DEFAULT_PORT))
+
+    @dp.callback_query(F.data.startswith('cloud:ipport:default:'))
+    async def cb_cloud_change_ip_port_default(callback: CallbackQuery, state: FSMContext, bot: Bot):
+        await _safe_callback_answer(callback, f'已使用默认端口 {MTPROXY_DEFAULT_PORT}，正在创建同配置新服务器')
+        if await _deny_group_high_risk_callback(callback, '更换 IP'):
+            return
+        parts = callback.data.split(':', 5)
+        _, _, _, raw_order_id, region_code = parts[:5]
+        order_id = int(raw_order_id)
+        user = await get_or_create_user(callback.from_user.id, callback.from_user.username, callback.from_user.first_name)
+        is_admin = await _is_admin_chat(callback.message)
+        new_order = await mark_cloud_server_ip_change_requested(order_id, user.id, region_code, MTPROXY_DEFAULT_PORT, admin=is_admin)
+        await state.clear()
+        if new_order is False:
+            await _safe_callback_answer(callback, '当前状态不可更换 IP', show_alert=True)
+            return
+        if not new_order:
+            await _safe_callback_answer(callback, '创建更换 IP 新服务器失败', show_alert=True)
+            return
+        await callback.message.reply(
+            f'🌐 已为你创建同配置新服务器\n\n新节点: {_public_region_text(new_order.region_name) or "默认节点"}\n新端口: {new_order.mtproxy_port or MTPROXY_DEFAULT_PORT}\n系统会重写生成新的 IP，请在 5 天内迁移。',
             reply_markup=main_menu(),
         )
         await _send_admin_user_action_notice(bot, user, '换IP', [
             ('新订单号', new_order.order_no),
             ('新节点', _public_region_text(new_order.region_name) or '默认节点'),
-            ('新端口', new_order.mtproxy_port or 9528),
+            ('新端口', new_order.mtproxy_port or MTPROXY_DEFAULT_PORT),
         ])
-        asyncio.create_task(_provision_cloud_server_and_notify(bot, callback.from_user.id, new_order.id, new_order.mtproxy_port or 9528))
+        asyncio.create_task(_provision_cloud_server_and_notify(bot, callback.from_user.id, new_order.id, new_order.mtproxy_port or MTPROXY_DEFAULT_PORT))
 
     @dp.callback_query(F.data.startswith('cloud:ipport:custom:'))
-    async def cb_cloud_change_ip_port_custom(callback: CallbackQuery, state: FSMContext):
-        await _safe_callback_answer(callback, '已选择自定义端口')
+    async def cb_cloud_change_ip_port_custom(callback: CallbackQuery, state: FSMContext, bot: Bot):
+        await _safe_callback_answer(callback, f'自定义端口已取消，使用默认端口 {MTPROXY_DEFAULT_PORT}')
         if await _deny_group_high_risk_callback(callback, '更换 IP'):
             return
         parts = callback.data.split(':', 5)
         _, _, _, raw_order_id, region_code = parts[:5]
-        back_callback = parts[5] if len(parts) > 5 else ''
         user = await get_or_create_user(callback.from_user.id, callback.from_user.username, callback.from_user.first_name)
         order_id = int(raw_order_id)
         is_admin = await _is_admin_chat(callback.message)
@@ -5034,13 +5055,24 @@ def register_handlers(dp: Dispatcher):
         if region_code == 'cn-hongkong':
             await _safe_callback_answer(callback, '当前节点暂不支持更换 IP', show_alert=True)
             return
-        regions = [(code, name) for code, name in await _get_cached_custom_regions() if code != 'cn-hongkong']
-        region_name = next((name for code, name in regions if code == region_code), region_code)
-        await state.update_data(cloud_ip_change_order_id=order_id, cloud_ip_change_region_code=region_code, cloud_ip_change_region_name=region_name, cloud_ip_change_admin=is_admin, cloud_ip_change_back=back_callback)
-        await state.set_state(CustomServerStates.waiting_port)
+        new_order = await mark_cloud_server_ip_change_requested(order_id, user.id, region_code, MTPROXY_DEFAULT_PORT, admin=is_admin)
+        await state.clear()
+        if new_order is False:
+            await _safe_callback_answer(callback, '当前状态不可更换 IP', show_alert=True)
+            return
+        if not new_order:
+            await _safe_callback_answer(callback, '创建更换 IP 新服务器失败', show_alert=True)
+            return
         await callback.message.reply(
-            f'✍️ 已选择更换IP自定义端口。\n节点：{_public_region_text(region_name) or "默认节点"}\n请发送 443 或 1025-65529 之间的端口号。'
+            f'🌐 已为你创建同配置新服务器\n\n新节点: {_public_region_text(new_order.region_name) or "默认节点"}\n新端口: {new_order.mtproxy_port or MTPROXY_DEFAULT_PORT}\n系统会重写生成新的 IP，请在 5 天内迁移。',
+            reply_markup=main_menu(),
         )
+        await _send_admin_user_action_notice(bot, user, '换IP', [
+            ('新订单号', new_order.order_no),
+            ('新节点', _public_region_text(new_order.region_name) or '默认节点'),
+            ('新端口', new_order.mtproxy_port or MTPROXY_DEFAULT_PORT),
+        ])
+        asyncio.create_task(_provision_cloud_server_and_notify(bot, callback.from_user.id, new_order.id, new_order.mtproxy_port or MTPROXY_DEFAULT_PORT))
 
 
     @dp.callback_query(F.data.startswith('cloud:upgrade:'))
@@ -5104,7 +5136,7 @@ def register_handlers(dp: Dispatcher):
                 [InlineKeyboardButton(text='🔙 返回原代理', callback_data=cloud_previous_detail_callback(int(raw_order_id), back_callback))],
             ]) if back_callback else main_menu(),
         )
-        asyncio.create_task(_provision_cloud_server_and_notify(bot, callback.from_user.id, new_order.id, new_order.mtproxy_port or 9528))
+        asyncio.create_task(_provision_cloud_server_and_notify(bot, callback.from_user.id, new_order.id, new_order.mtproxy_port or MTPROXY_DEFAULT_PORT))
 
     @dp.callback_query(F.data.startswith('cloud:reinit:'))
     async def cb_cloud_reinit(callback: CallbackQuery, state: FSMContext):
@@ -5125,7 +5157,7 @@ def register_handlers(dp: Dispatcher):
             logger.warning('CLOUD_REINIT_DENIED user_id=%s order_id=%s order_no=%s status=%s public_ip=%s login_password=%s reason=missing_bootstrap_info', user.id, order.id, order.order_no, order.status, order.public_ip, bool(order.login_password))
             await _safe_callback_answer(callback, '当前服务器缺少公网 IP 或登录密码，暂时无法重新安装；请先在后台补齐实例登录信息', show_alert=True)
             return
-        has_main_link = bool(getattr(order, 'mtproxy_link', None) or any(isinstance(item, dict) and item.get('url') and str(item.get('port') or '') == str(order.mtproxy_port or 9528) for item in (getattr(order, 'proxy_links', None) or [])))
+        has_main_link = bool(getattr(order, 'mtproxy_link', None) or any(isinstance(item, dict) and item.get('url') and str(item.get('port') or '') == str(order.mtproxy_port or MTPROXY_DEFAULT_PORT) for item in (getattr(order, 'proxy_links', None) or [])))
         if not is_unfinished and not has_main_link:
             await state.update_data(reinstall_order_id=order.id, reinstall_admin=is_admin, reinstall_back=back_callback)
             await state.set_state(CustomServerStates.waiting_reinstall_link)
@@ -5267,7 +5299,7 @@ def register_handlers(dp: Dispatcher):
             ('IP', getattr(order, 'public_ip', None) or getattr(order, 'previous_public_ip', None) or '-'),
             ('动作', action_text),
         ])
-        asyncio.create_task(_provision_cloud_server_and_notify(bot, callback.from_user.id, order.id, order.mtproxy_port or 9528, retry_only=retry_only))
+        asyncio.create_task(_provision_cloud_server_and_notify(bot, callback.from_user.id, order.id, order.mtproxy_port or MTPROXY_DEFAULT_PORT, retry_only=retry_only))
 
     @dp.callback_query(F.data.startswith('cloud:adminexp:'))
     async def cb_cloud_admin_expiry(callback: CallbackQuery, state: FSMContext):
