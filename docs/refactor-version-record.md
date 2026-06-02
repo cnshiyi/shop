@@ -1,5 +1,32 @@
 # 重构版本记录
 
+## 2026-06-02 自动监工：生命周期唯一事实源复查
+
+### 范围
+
+本轮继续监工云资产生命周期重构后的唯一到期事实源、任务认领冲突保护、废弃 app 回流、计划快照表回流和退款入口回流。重点确认 `CloudAsset.actual_expires_at` 仍是唯一结构化服务到期事实，订单表未恢复旧到期字段，旧计划快照表和退款函数名未恢复。
+
+### 复查结论
+
+- 当前工作树起始干净，最近提交为 `dd87a12 记录旧到期函数测试收口`。
+- 运行时代码未发现对已移除 `CloudServerOrder.service_expires_at` 数据库列的过滤、排序、批量更新或 values 查询；保留命中为日志字段名、API 兼容 payload 字段和测试数据。
+- 模型导出中未恢复 `CloudLifecyclePlan`、`CloudNoticePlan`、`CloudAutoRenewPlan` 旧计划快照模型；当前仅保留 `CloudLifecyclePlanNote` 手工备注模型。
+- 未发现退款入口、退款函数名或 `refunded` 运行时状态筛选重新接入。
+- 废弃 app 未重新加入 `INSTALLED_APPS`；`dashboard_api` 仅作为后台路由 namespace 和 `core.dashboard_api` 公共辅助命名继续存在。
+- 本轮未修改生产代码，只补充监工记录。
+
+### 验证
+
+本地已通过：
+
+```bash
+UV_CACHE_DIR=/private/tmp/uv-cache-shop uv run python manage.py check
+UV_CACHE_DIR=/private/tmp/uv-cache-shop uv run python -m py_compile cloud/models.py cloud/asset_expiry.py cloud/lifecycle.py cloud/lifecycle_execution.py cloud/lifecycle_tasks.py cloud/api_assets.py cloud/api_asset_snapshots.py cloud/api_orders.py cloud/api_asset_edit.py cloud/provisioning.py cloud/services.py bot/api.py bot/handlers.py orders/services.py orders/payment_scanner.py
+PYTHONDONTWRITEBYTECODE=1 DJANGO_TEST_SQLITE=1 UV_CACHE_DIR=/private/tmp/uv-cache-shop uv run python manage.py makemigrations --check --dry-run cloud
+PYTHONDONTWRITEBYTECODE=1 DJANGO_TEST_SQLITE=1 UV_CACHE_DIR=/private/tmp/uv-cache-shop uv run python manage.py test cloud.tests.CloudServerServicesTestCase.test_dashboard_order_expiry_update_syncs_asset_expiry_and_lifecycle_plan cloud.tests.CloudServerServicesTestCase.test_send_order_notice_batch_allows_new_expiry_cycle cloud.tests.CloudServerServicesTestCase.test_apply_cloud_server_renewal_keeps_original_service_started_at cloud.tests.CloudServerServicesTestCase.test_lifecycle_asset_task_claim_blocks_same_cycle_duplicate cloud.tests.CloudServerServicesTestCase.test_order_static_ip_release_skips_when_lifecycle_task_claimed cloud.tests.CloudServerServicesTestCase.test_lifecycle_delete_task_claim_blocks_same_cycle_duplicate --noinput --verbosity 1
+PYTHONDONTWRITEBYTECODE=1 DJANGO_TEST_SQLITE=1 UV_CACHE_DIR=/private/tmp/uv-cache-shop uv run python manage.py test cloud.tests.CloudOrderStatusDashboardSyncTestCase.test_order_detail_manual_edit_syncs_cloud_identity_and_proxy_fields --noinput --verbosity 1
+```
+
 ## 2026-06-02 自动监工：资产生命周期任务认领补齐
 
 ### 范围
