@@ -4120,6 +4120,78 @@ class CloudServerServicesTestCase(TestCase):
         self.assertEqual(old_order.status, 'deleting')
         delete_mock.assert_not_called()
 
+    # 功能：验证生命周期巡检不会因迁移旧机资产已进入删除中而跳过旧机删除。
+    def test_lifecycle_tick_deletes_migration_due_order_with_deleting_asset(self):
+        migration_due_at = timezone.now() - timezone.timedelta(minutes=1)
+        old_order = CloudServerOrder.objects.create(
+            order_no='HB-MIGRATION-LIFECYCLE-OLD',
+            user=self.user,
+            plan=self.plan,
+            provider=self.plan.provider,
+            region_code=self.plan.region_code,
+            region_name=self.plan.region_name,
+            plan_name=self.plan.plan_name,
+            quantity=1,
+            currency='USDT',
+            total_amount='19.00',
+            pay_amount='19.00',
+            pay_method='balance',
+            status='deleting',
+            public_ip='10.0.4.1',
+            previous_public_ip='10.0.4.1',
+            server_name='migration-lifecycle-old',
+            instance_id='migration-lifecycle-old',
+            migration_due_at=migration_due_at,
+            delete_at=timezone.now() + timezone.timedelta(days=3),
+        )
+        CloudServerOrder.objects.create(
+            order_no='HB-MIGRATION-LIFECYCLE-NEW',
+            user=self.user,
+            plan=self.plan,
+            provider=self.plan.provider,
+            region_code=self.plan.region_code,
+            region_name=self.plan.region_name,
+            plan_name=self.plan.plan_name,
+            quantity=1,
+            currency='USDT',
+            total_amount='19.00',
+            pay_amount='19.00',
+            pay_method='balance',
+            status='completed',
+            public_ip='10.0.4.2',
+            replacement_for=old_order,
+        )
+        asset = CloudAsset.objects.create(
+            kind=CloudAsset.KIND_SERVER,
+            source=CloudAsset.SOURCE_ORDER,
+            order=old_order,
+            user=self.user,
+            provider=old_order.provider,
+            region_code=old_order.region_code,
+            region_name=old_order.region_name,
+            asset_name='migration-lifecycle-old',
+            instance_id='migration-lifecycle-old',
+            public_ip='10.0.4.1',
+            actual_expires_at=migration_due_at,
+            status=CloudAsset.STATUS_DELETING,
+            is_active=False,
+        )
+        deleted_orders = []
+
+        # 功能：模拟迁移旧机执行入口，避免 SQLite 内存库跨线程查询。
+        def fake_run_replaced_order_delete(order_id, **kwargs):
+            deleted_orders.append((order_id, kwargs.get('queue_status'), kwargs.get('enforce_schedule')))
+            return {'ok': True, 'error': None}
+
+        with patch('cloud.lifecycle_execution.run_replaced_order_delete', side_effect=fake_run_replaced_order_delete):
+            async_to_sync(lifecycle_tick)()
+
+        old_order.refresh_from_db()
+        asset.refresh_from_db()
+        self.assertEqual(deleted_orders, [(old_order.id, 'scheduled_migration_delete', True)])
+        self.assertEqual(old_order.status, 'deleting')
+        self.assertEqual(asset.status, CloudAsset.STATUS_DELETING)
+
     # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
     def test_mark_failed_schedules_incomplete_instance_cleanup(self):
         order = CloudServerOrder.objects.create(
@@ -10854,6 +10926,8 @@ class CloudServerServicesTestCase(TestCase):
 
     # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
     def test_auto_renew_retry_task_waits_for_recharge_then_retries(self):
+        from cloud.lifecycle import _run_auto_renew_retry_task
+
         expires_at = timezone.now() + timezone.timedelta(hours=8)
         self.user.balance = Decimal('0.00')
         self.user.save(update_fields=['balance', 'updated_at'])
@@ -10891,7 +10965,13 @@ class CloudServerServicesTestCase(TestCase):
         order.refresh_from_db()
         self.assertEqual(retried, 0)
         self.assertEqual(task.status, CloudAutoRenewRetryTask.STATUS_PENDING)
+        self.assertEqual(task.attempts, 1)
         self.assertEqual(order.status, 'renew_pending')
+
+        duplicate_result = async_to_sync(_run_auto_renew_retry_task)(task.id)
+        task.refresh_from_db()
+        self.assertIsNone(duplicate_result)
+        self.assertEqual(task.attempts, 1)
 
         self.user.balance = Decimal('100.00')
         self.user.save(update_fields=['balance', 'updated_at'])
@@ -14853,6 +14933,35 @@ class CloudServerServicesTestCase(TestCase):
 
         self.assertFalse(cleanup_qs.filter(id=order.id).exists())
 
+    # 功能：验证旧记录清理不会删除仍有待运维云资源线索的终态订单。
+    def test_cleanup_old_records_keeps_terminal_cloud_order_with_pending_resource_context(self):
+        from core.management.commands.cleanup_old_records import Command
+
+        cutoff = timezone.now() - timezone.timedelta(days=100)
+        order = CloudServerOrder.objects.create(
+            order_no='HB-TEST-CLEANUP-KEEPS-PENDING-RESOURCE',
+            user=self.user,
+            plan=self.plan,
+            provider=self.plan.provider,
+            region_code=self.plan.region_code,
+            region_name=self.plan.region_name,
+            plan_name=self.plan.plan_name,
+            quantity=1,
+            currency='USDT',
+            total_amount='19.00',
+            pay_amount='19.00',
+            status='failed',
+            public_ip='20.20.22.3',
+            server_name='cleanup-pending-resource',
+            instance_id='cleanup-pending-resource',
+            delete_at=timezone.now() + timezone.timedelta(days=1),
+        )
+        CloudServerOrder.objects.filter(id=order.id).update(created_at=cutoff - timezone.timedelta(days=1))
+
+        cleanup_qs = CloudServerOrder.objects.filter(created_at__lt=cutoff).filter(Command._cloud_order_cleanup_filter(cutoff))
+
+        self.assertFalse(cleanup_qs.filter(id=order.id).exists())
+
     # 功能：验证终态云订单只剩已删除资产时仍可进入旧记录清理候选。
     def test_cleanup_old_records_allows_terminal_cloud_order_with_deleted_asset(self):
         from core.management.commands.cleanup_old_records import Command
@@ -15134,6 +15243,68 @@ class CloudServerServicesTestCase(TestCase):
         release_mock.assert_not_called()
         order.refresh_from_db()
         self.assertGreater(order.ip_recycle_at, old_recycle_at)
+
+    # 功能：验证迁移旧机删机不被通知载荷的资产到期校验误挡。
+    def test_lifecycle_tick_migration_delete_uses_migration_due_without_notice_payload(self):
+        old_order = CloudServerOrder.objects.create(
+            order_no='HB-TEST-MIGRATION-NO-NOTICE-OLD',
+            user=self.user,
+            plan=self.plan,
+            provider=self.plan.provider,
+            region_code=self.plan.region_code,
+            region_name=self.plan.region_name,
+            plan_name=self.plan.plan_name,
+            quantity=1,
+            currency='USDT',
+            total_amount='19.00',
+            pay_amount='19.00',
+            status='deleting',
+            public_ip='20.20.20.26',
+            instance_id='migration-no-notice-old',
+            migration_due_at=timezone.now() - timezone.timedelta(minutes=1),
+        )
+        CloudServerOrder.objects.create(
+            order_no='HB-TEST-MIGRATION-NO-NOTICE-NEW',
+            user=self.user,
+            plan=self.plan,
+            provider=self.plan.provider,
+            region_code=self.plan.region_code,
+            region_name=self.plan.region_name,
+            plan_name=self.plan.plan_name,
+            quantity=1,
+            currency='USDT',
+            total_amount='19.00',
+            pay_amount='19.00',
+            status='completed',
+            public_ip='20.20.20.27',
+            replacement_for=old_order,
+        )
+        due = {
+            'renew_notice': [],
+            'auto_renew_notice': [],
+            'auto_renew': [],
+            'delete_notice': [],
+            'recycle_notice': [],
+            'expire': [],
+            'suspend': [],
+            'delete': [],
+            'recycle': [],
+        }
+
+        with patch('cloud.lifecycle._get_due_orders', new_callable=AsyncMock, return_value=due), \
+            patch('cloud.lifecycle._get_migration_due_orders', new_callable=AsyncMock, return_value=[CloudServerOrder.objects.get(id=old_order.id)]), \
+            patch('cloud.lifecycle._get_orphan_asset_delete_due', new_callable=AsyncMock, return_value=[]), \
+            patch('cloud.lifecycle._get_unattached_static_ip_delete_due', new_callable=AsyncMock, return_value=[]), \
+            patch('cloud.lifecycle._cloud_expiry_notice_payload', new_callable=AsyncMock, return_value={'valid': False}) as notice_mock, \
+            patch('cloud.lifecycle_execution.run_replaced_order_delete', return_value={'ok': True, 'error': None}) as delete_mock:
+            async_to_sync(lifecycle_tick)()
+
+        notice_mock.assert_not_awaited()
+        delete_mock.assert_called_once_with(
+            old_order.id,
+            queue_status='scheduled_migration_delete',
+            enforce_schedule=True,
+        )
 
     # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
     def test_release_order_static_ip_uses_static_ip_asset_name_when_order_name_missing(self):
