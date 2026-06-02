@@ -16,6 +16,7 @@ from cloud.models import CloudAsset, CloudLifecycleTask, CloudNoticeTask, CloudS
 
 
 CLAIM_STALE_AFTER = timezone.timedelta(minutes=30)
+FAILED_RETRY_AFTER = timezone.timedelta(minutes=30)
 
 
 @dataclass(frozen=True)
@@ -53,11 +54,14 @@ def notice_task_source_key(event_type: str, *, user_id: int | None, batch_id: st
 
 def _claim_task(model, *, source_key: str, token: str, now):
     stale_before = now - CLAIM_STALE_AFTER
+    retry_before = now - FAILED_RETRY_AFTER
     updated = (
         model.objects
         .filter(source_key=source_key)
         .filter(
-            Q(status__in=[model.STATUS_PENDING, model.STATUS_FAILED])
+            Q(status=model.STATUS_PENDING)
+            | Q(status=model.STATUS_FAILED, last_run_at__isnull=True)
+            | Q(status=model.STATUS_FAILED, last_run_at__lt=retry_before)
             | Q(status=model.STATUS_CLAIMED, claimed_at__lt=stale_before)
         )
         .update(
@@ -145,6 +149,7 @@ def finish_lifecycle_task(claim: TaskClaim | None, *, ok: bool, error: str = '')
     CloudLifecycleTask.objects.filter(id=claim.id, claim_token=claim.claim_token).update(
         status=CloudLifecycleTask.STATUS_DONE if ok else CloudLifecycleTask.STATUS_FAILED,
         last_error='' if ok else str(error or '')[:4000],
+        last_run_at=now,
         completed_at=now if ok else None,
         updated_at=now,
     )
@@ -203,6 +208,7 @@ def finish_notice_task(claim: TaskClaim | None, *, delivered: bool, error: str =
     CloudNoticeTask.objects.filter(id=claim.id, claim_token=claim.claim_token).update(
         status=CloudNoticeTask.STATUS_SENT if delivered else CloudNoticeTask.STATUS_FAILED,
         last_error='' if delivered else str(error or '')[:4000],
+        last_run_at=now,
         sent_at=now if delivered else None,
         updated_at=now,
     )
