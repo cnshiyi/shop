@@ -3855,6 +3855,15 @@ def register_handlers(dp: Dispatcher):
         existing = await get_cloud_order(order_id, user.id)
         if existing:
             return True, is_admin, group_context
+        if not _is_group_chat_message(callback.message):
+            visible_servers = await list_user_cloud_servers(user.id)
+            for item in visible_servers:
+                try:
+                    visible_order_id = int(getattr(item, 'order_id', None) or 0)
+                except (TypeError, ValueError):
+                    visible_order_id = 0
+                if visible_order_id == int(order_id):
+                    return True, is_admin, group_context
         if await _is_recent_public_query_order(state, order_id):
             return True, is_admin, group_context
         return False, is_admin, group_context

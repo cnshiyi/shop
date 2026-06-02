@@ -2998,7 +2998,7 @@ def ensure_cloud_asset_operation_order(asset_id: int, user_id: int, admin: bool 
         kind=CloudAsset.KIND_SERVER,
     )
     if not admin:
-        asset_qs = asset_qs.filter(user_id=user_id)
+        asset_qs = asset_qs.filter(_user_asset_visibility_filter(user_id))
     asset = asset_qs.exclude(status__in=_INACTIVE_ASSET_STATUSES).first()
     if not asset:
         return None, '代理记录不存在'
@@ -3164,7 +3164,16 @@ def create_cloud_server_renewal_by_public_query(order_id: int, days: int = 31):
 def create_cloud_server_renewal_for_user(order_id: int, user_id: int, days: int = 31):
     order = CloudServerOrder.objects.select_related('user').filter(id=order_id, user_id=user_id).first()
     if not order:
-        return None
+        asset = (
+            _cloud_server_asset_queryset()
+            .filter(order_id=order_id)
+            .filter(_user_asset_visibility_filter(user_id))
+            .order_by('-updated_at', '-id')
+            .first()
+        )
+        order = _hydrate_order_from_proxy_asset(asset.order, asset=asset) if asset and asset.order else None
+        if not order:
+            return None
     renewal_user = TelegramUser.objects.filter(id=user_id).first()
     return _prepare_cloud_server_renewal(order, renewal_user, days)
 
@@ -3176,7 +3185,7 @@ def list_cloud_asset_renewal_plans(asset_id: int, user_id: int, admin: bool = Fa
         kind=CloudAsset.KIND_SERVER,
     ).exclude(status__in=_INACTIVE_ASSET_STATUSES)
     if not admin and not public:
-        asset_qs = asset_qs.filter(user_id=user_id)
+        asset_qs = asset_qs.filter(_user_asset_visibility_filter(user_id))
     asset = asset_qs.first()
     if not asset:
         return None, [], '代理记录不存在'

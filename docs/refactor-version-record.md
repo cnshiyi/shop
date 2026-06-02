@@ -1,5 +1,29 @@
 # Refactor Version Record
 
+## 2026-06-02 私聊同群资产续费链路修复
+
+### 范围
+
+本轮根据 Codex CLI 诊断，修复同一绑定群组内可见代理资产在私聊续费时仍被订单所属人限制的问题。
+
+### 运行变更
+
+- `ensure_cloud_asset_operation_order()` 改为使用用户资产可见性过滤，允许同群可见用户为可见资产取得操作订单。
+- `create_cloud_server_renewal_for_user()` 在找不到本人订单时，会回退到同群可见资产并用该资产关联订单创建续费单。
+- `list_cloud_asset_renewal_plans()` 对未绑定资产续费套餐查询复用同一套资产可见性规则。
+- Bot 钱包续费回调在私聊场景下增加“我的代理”可见订单校验，保证同群可见资产生成的续费按钮可以继续支付。
+- 新增同群可见资产续费回归测试，覆盖操作订单、未绑定资产套餐、订单续费创建和原订单状态变更。
+
+### 验证
+
+本地已通过：
+
+```bash
+PYTHONDONTWRITEBYTECODE=1 DJANGO_TEST_SQLITE=1 uv run python -m py_compile bot/handlers.py cloud/services.py cloud/tests.py
+PYTHONDONTWRITEBYTECODE=1 DJANGO_TEST_SQLITE=1 uv run python manage.py test cloud.tests.CloudServerServicesTestCase.test_same_bound_group_asset_renewal_uses_user_visibility cloud.tests.CloudServerServicesTestCase.test_user_proxy_asset_detail_allows_same_bound_group_visibility cloud.tests.CloudServerServicesTestCase.test_cloud_server_public_renewal_allows_stranger_payment_entry cloud.tests.CloudServerServicesTestCase.test_public_unattached_asset_renewal_plans_are_available --noinput --verbosity 1
+PYTHONDONTWRITEBYTECODE=1 DJANGO_TEST_SQLITE=1 uv run python manage.py check
+```
+
 ## 2026-06-02 私聊同群资产详情可见性修复
 
 ### 范围
