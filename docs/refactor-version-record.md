@@ -1,5 +1,39 @@
 # 重构版本记录
 
+## 2026-06-02 18:58 自动监工：旧记录清理云订单保护
+
+### 范围
+
+本轮继续监工 Shop Django 后端仓库，重点复查废弃 app、旧到期字段、旧计划快照表、退款入口、删除计划和通知计划认领保护、通知计划与关机开关一致性，以及定时任务里可能影响云订单生命周期的数据清理逻辑。
+
+### 复查结论
+
+- `INSTALLED_APPS` 仍只包含 `core`、`bot`、`orders`、`cloud` 当前运行域，未发现旧 `accounts/finance/mall/monitoring/dashboard_api/biz` 运行时 app 回流。
+- 未发现 `CloudServerOrder.service_expires_at` 模型字段恢复；运行代码中的 `service_expires_at` 仍是兼容展示字段或日志字段，真实到期事实读写 `CloudAsset.actual_expires_at`。
+- 未发现旧 `CloudLifecyclePlan`、`CloudNoticePlan`、`CloudAutoRenewPlan` 快照模型或退款运行入口回流。
+- 发现 `cleanup_old_records` 定时清理命令会把 `completed/expiring/renew_pending/suspended/deleting` 等非终态云订单纳入删除候选，只要关联资产到期早于保留期就可能被清理；该命令由 `bot/runner.py` 定时注册，属于生产风险。
+- 终端版 Codex 只读复查指出 `cloud/api_tasks.py` 的通知计划未来计划没有复用运行时同一套 `shutdown_enabled` 过滤，可能展示实际不会发送的删机或固定 IP 回收提醒。
+
+### 功能变更
+
+- `core/management/commands/cleanup_old_records.py` 的云订单清理条件收窄为只清理终态订单：`cancelled/expired/failed`，以及已删除且固定 IP 回收窗口已结束的订单。
+- 非终态云订单不再因为资产 `actual_expires_at` 早于保留期而进入清理候选。
+- 移除该命令里不再需要的 `CloudAsset` 导入。
+- `cloud/api_tasks.py` 的通知计划详情补齐关机计划开关判断：资产或云账号关闭关机计划时，不再展示删机提醒和固定 IP 回收提醒的未来计划项。
+
+### 验证
+
+已通过：
+
+```bash
+uv run python -m py_compile cloud/api_tasks.py core/management/commands/cleanup_old_records.py cloud/tests.py
+DJANGO_TEST_SQLITE=1 uv run python manage.py test cloud.tests.CloudServerServicesTestCase.test_cleanup_old_records_keeps_deleted_order_until_retained_ip_window_ends cloud.tests.CloudServerServicesTestCase.test_cleanup_old_records_keeps_non_terminal_cloud_orders cloud.tests.CloudServerServicesTestCase.test_notice_task_detail_hides_shutdown_disabled_lifecycle_notices --verbosity 1
+uv run python manage.py check
+uv run python manage.py makemigrations --check --dry-run
+```
+
+剩余风险：本轮没有执行真实旧记录清理命令，也没有跑完整测试套件。
+
 ## 2026-06-02 18:52 自动监工：任务失败重试保护
 
 ### 范围
