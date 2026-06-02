@@ -1,10 +1,12 @@
 import json
+from unittest.mock import patch
 
 from django.contrib.auth import get_user_model
 from django.test import RequestFactory, TestCase
+from django.utils import timezone
 
 from cloud.models import CloudAssetSyncJob
-from cloud.task_center import task_center_overview
+from cloud.task_center import _notice_section, task_center_overview
 
 
 class CloudTaskCenterApiTestCase(TestCase):
@@ -33,3 +35,26 @@ class CloudTaskCenterApiTestCase(TestCase):
         self.assertIn('lifecycle', section_keys)
         self.assertIn('notices', section_keys)
         self.assertIn('auto_renew', section_keys)
+
+    def test_notice_section_counts_failed_retry_as_failed(self):
+        now = timezone.now()
+        with patch('cloud.api_tasks._build_notice_plan_bundle', return_value={
+            'active_items': [
+                {
+                    'id': 'renew_notice-1',
+                    'notice_status': 'failed_retry',
+                    'notice_status_label': '通知失败，待重试',
+                    'queue_status': 'due_now',
+                    'queue_status_label': '本轮待通知',
+                    'order_id': 1,
+                    'order_no': 'NOTICE-FAILED-1',
+                    'provider': 'aws_lightsail',
+                    'ip': '1.1.1.1',
+                },
+            ],
+            'history_items': [],
+        }):
+            section = _notice_section(now)
+
+        self.assertEqual(section['failed'], 1)
+        self.assertEqual(section['health'], 'error')

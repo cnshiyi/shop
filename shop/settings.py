@@ -34,6 +34,17 @@ def _split_csv_env(value: str):
     return [item.strip() for item in (value or '').split(',') if item.strip()]
 
 
+def _mysql_sql_mode() -> str:
+    raw = os.getenv('MYSQL_SQL_MODE', 'STRICT_TRANS_TABLES').strip()
+    if not raw:
+        return ''
+    modes = [item.strip().upper() for item in raw.split(',') if item.strip()]
+    for mode in modes:
+        if not mode.replace('_', '').isalnum():
+            raise ImproperlyConfigured(f'MYSQL_SQL_MODE 包含非法模式: {mode}')
+    return ','.join(dict.fromkeys(modes))
+
+
 ALLOWED_HOSTS = _split_csv_env(os.getenv('ALLOWED_HOSTS', '127.0.0.1,localhost,[::1]'))
 ADMIN_FRONTEND_URL = os.getenv('ADMIN_FRONTEND_URL', '/')
 CSRF_TRUSTED_ORIGINS = _split_csv_env(
@@ -82,6 +93,13 @@ if database_engine == 'sqlite':
         }
     }
 else:
+    mysql_options = {
+        'charset': 'utf8mb4',
+    }
+    mysql_sql_mode = _mysql_sql_mode()
+    if mysql_sql_mode:
+        mysql_options['init_command'] = f"SET SESSION sql_mode='{mysql_sql_mode}'"
+
     DATABASES = {
         'default': {
             'ENGINE': 'django.db.backends.mysql',
@@ -90,9 +108,7 @@ else:
             'PASSWORD': get_runtime_config('mysql_password', os.getenv('MYSQL_PASSWORD', '123456')),
             'HOST': get_runtime_config('mysql_host', os.getenv('MYSQL_HOST', '127.0.0.1')),
             'PORT': int(get_runtime_config('mysql_port', os.getenv('MYSQL_PORT', '3306'))),
-            'OPTIONS': {
-                'charset': 'utf8mb4',
-            },
+            'OPTIONS': mysql_options,
             'TEST': {
                 'NAME': os.getenv('MYSQL_TEST_DATABASE') or None,
             },

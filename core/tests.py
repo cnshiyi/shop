@@ -20,6 +20,34 @@ from core.models import SiteConfig
 from core.persistence import record_external_sync_log
 
 
+class MySqlSqlModeSettingsTestCase(SimpleTestCase):
+    def test_mysql_sql_mode_defaults_to_strict_trans_tables(self):
+        with patch.dict(os.environ, {}, clear=True):
+            from shop.settings import _mysql_sql_mode
+
+            self.assertEqual(_mysql_sql_mode(), 'STRICT_TRANS_TABLES')
+
+    def test_mysql_sql_mode_normalizes_and_deduplicates_values(self):
+        with patch.dict(os.environ, {'MYSQL_SQL_MODE': ' strict_trans_tables,ansi,STRICT_TRANS_TABLES '}, clear=False):
+            from shop.settings import _mysql_sql_mode
+
+            self.assertEqual(_mysql_sql_mode(), 'STRICT_TRANS_TABLES,ANSI')
+
+    def test_mysql_sql_mode_can_be_disabled(self):
+        with patch.dict(os.environ, {'MYSQL_SQL_MODE': ' '}, clear=False):
+            from shop.settings import _mysql_sql_mode
+
+            self.assertEqual(_mysql_sql_mode(), '')
+
+    def test_mysql_sql_mode_rejects_unsafe_characters(self):
+        with patch.dict(os.environ, {'MYSQL_SQL_MODE': "STRICT_TRANS_TABLES';DROP"}, clear=False):
+            from django.core.exceptions import ImproperlyConfigured
+            from shop.settings import _mysql_sql_mode
+
+            with self.assertRaises(ImproperlyConfigured):
+                _mysql_sql_mode()
+
+
 class CryptoDecryptTestCase(SimpleTestCase):
     def test_plain_legacy_value_still_returns_as_plaintext(self):
         self.assertEqual(decrypt_text('legacy-plain-value'), 'legacy-plain-value')

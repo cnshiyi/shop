@@ -4863,6 +4863,53 @@ git diff --check
 - 本轮未执行真实 Telegram 点击、真实云资源创建/删除/IP 变更、真实支付、链上广播、生产发布或不可逆操作。
 - 真机测试仍需在用户明确授权真实云资源成本后，单独按中文报告记录云资源 ID 脱敏结果。
 
+## 2026-06-03 任务中心通知失败状态复查
+
+### 范围
+
+本轮继续巡检 Shop Django 后端，重点从云资产同步 worker、后台任务中心入口和数据库连接设置切入，复查同步任务状态、任务中心聚合统计、通知计划失败状态、MySQL 严格模式、旧到期字段、旧计划快照、旧退款入口、旧端口入口和废弃 app 回流情况。
+
+### 运行时变化
+
+- 修复后台任务中心“通知计划”分区失败统计漏报 `failed_retry` 的问题。
+- 通知计划详情中失败发送会以 `notice_status=failed_retry` 表示“通知失败，待重试”，任务中心现在会把它计入 `failed` 并将分区健康状态标记为 `error`。
+- 新增聚焦测试覆盖 `failed_retry` 通知计划项，避免任务中心总览后续再次把失败待重试通知显示为非失败状态。
+- MySQL 连接默认通过 `MYSQL_SQL_MODE` 设置 `STRICT_TRANS_TABLES`，防止 MySQL 在日期、数值等字段上静默截断或降级写入；如需兼容特殊环境，可显式把 `MYSQL_SQL_MODE` 置空关闭。
+- `MYSQL_SQL_MODE` 会去重、大写并拒绝非字母数字下划线字符，避免把未校验内容拼入 `init_command`。
+
+### 监工结果
+
+- 云资产同步任务队列、worker 领取、卡住任务恢复、取消、重试、指标和任务中心入口完成静态复查，未发现新的可复现运行时缺陷。
+- `CloudAsset` 仍以 `actual_expires_at` 作为结构化资产到期事实。
+- `CloudServerOrder` 未恢复 `service_expires_at` 或 `actual_expires_at`。
+- `CloudAssetDashboardSnapshot` 未恢复到期字段。
+- 未发现旧计划快照、旧退款函数名、`allow_client_port`、`set_cloud_server_port`、旧端口 callback 或废弃 app 目录回流。
+
+### 验证
+
+本地已通过:
+
+```bash
+UV_CACHE_DIR=/Users/a399/Desktop/data/shop/.uv-cache DB_ENGINE=sqlite SQLITE_NAME=/private/tmp/shop_task_center_notice_failed_before.sqlite3 PYTHONDONTWRITEBYTECODE=1 uv run python manage.py test cloud.tests_task_center.CloudTaskCenterApiTestCase.test_notice_section_counts_failed_retry_as_failed --noinput --verbosity 1
+UV_CACHE_DIR=/Users/a399/Desktop/data/shop/.uv-cache DB_ENGINE=sqlite SQLITE_NAME=/private/tmp/shop_task_center_notice_check2.sqlite3 PYTHONDONTWRITEBYTECODE=1 uv run python manage.py test cloud.tests_task_center --noinput --verbosity 1
+UV_CACHE_DIR=/Users/a399/Desktop/data/shop/.uv-cache DB_ENGINE=sqlite SQLITE_NAME=/private/tmp/shop_core_mysql_sql_mode.sqlite3 PYTHONDONTWRITEBYTECODE=1 uv run python manage.py test core.tests.MySqlSqlModeSettingsTestCase --noinput --verbosity 1
+UV_CACHE_DIR=/Users/a399/Desktop/data/shop/.uv-cache DB_ENGINE=sqlite SQLITE_NAME=/private/tmp/shop_retained_ui_notice_run.sqlite3 PYTHONDONTWRITEBYTECODE=1 uv run python manage.py test bot.tests.RetainedIpRenewalUiTestCase --noinput --verbosity 1
+UV_CACHE_DIR=/Users/a399/Desktop/data/shop/.uv-cache DB_ENGINE=sqlite SQLITE_NAME=/private/tmp/shop_lifecycle_notice_run.sqlite3 PYTHONDONTWRITEBYTECODE=1 uv run python manage.py test cloud.tests.CloudServerServicesTestCase.test_sync_aliyun_assets_preserves_existing_asset_expiry cloud.tests.CloudServerServicesTestCase.test_sync_aws_assets_rebinds_unattached_ip_when_instance_reappears cloud.tests.CloudServerServicesTestCase.test_sync_aws_assets_preserves_existing_unattached_ip_due_time cloud.tests.CloudServerServicesTestCase.test_update_cloud_asset_refreshes_unattached_ip_delete_plan --noinput --verbosity 1
+UV_CACHE_DIR=/Users/a399/Desktop/data/shop/.uv-cache PYTHONDONTWRITEBYTECODE=1 uv run python manage.py check
+UV_CACHE_DIR=/Users/a399/Desktop/data/shop/.uv-cache PYTHONDONTWRITEBYTECODE=1 uv run python -m py_compile core/tests.py cloud/task_center.py cloud/tests_task_center.py cloud/api_tasks.py cloud/sync_jobs.py cloud/management/commands/process_cloud_asset_sync_jobs.py shop/settings.py
+UV_CACHE_DIR=/Users/a399/Desktop/data/shop/.uv-cache PYTHONDONTWRITEBYTECODE=1 uv run python manage.py makemigrations --check --dry-run
+UV_CACHE_DIR=/Users/a399/Desktop/data/shop/.uv-cache DB_ENGINE=sqlite SQLITE_NAME=/private/tmp/shop_introspection_notice_run.sqlite3 PYTHONDONTWRITEBYTECODE=1 uv run python manage.py shell -c "from cloud.models import CloudAsset, CloudServerOrder, CloudAssetDashboardSnapshot; [print(model.__name__, [f.name for f in model._meta.fields if 'expires' in f.name or 'expiry' in f.name]) for model in (CloudAsset, CloudServerOrder, CloudAssetDashboardSnapshot)]"
+rg -n "service_expires_at\s*=|order\.(service_expires_at|actual_expires_at)|CloudLifecyclePlan\b|CloudNoticePlan\b|CloudAutoRenewPlan\b|refund_order|process_refund|create_refund|issue_refund|refund_to_balance|refund_balance|allow_client_port|set_cloud_server_port|custom:port:|cloud:ipport:" bot core orders cloud shop --glob '!**/migrations/**' --glob '!**/tests.py' --glob '!**/tests_task_center.py'
+```
+
+第一条测试在修复前按预期失败，确认 `failed_retry` 会被漏算为 0 个失败；修复后 `cloud.tests_task_center` 2 条通过。`RetainedIpRenewalUiTestCase` 44 条通过，仍会打印 SimpleTestCase 禁止数据库查询配置的预期日志但不影响结果。生命周期/同步保留 4 条聚焦测试通过，确认阿里云同步不覆盖资产到期、AWS 重新发现资产保留到期、未附加 IP 到期计划刷新仍使用资产字段。模型字段 introspection 显示 `CloudAsset=['actual_expires_at']`、`CloudServerOrder=['renew_grace_expires_at']`、`CloudAssetDashboardSnapshot=[]`。`makemigrations --check --dry-run` 仍出现本地无法连接 `127.0.0.1` MySQL 的迁移历史一致性警告，但最终结果为 `No changes detected`。
+
+### 剩余风险
+
+- 本轮未跑完整测试套件。
+- 本轮未执行真实 Telegram 点击、真实云资源创建/删除/IP 变更、真实支付、链上广播、生产发布或不可逆操作。
+- 真机测试仍需在用户明确授权真实云资源成本后，单独按中文报告记录云资源 ID 脱敏结果。
+
 ## 2026-06-03 生命周期通知文本导入修复
 
 ### 范围

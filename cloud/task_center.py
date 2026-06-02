@@ -11,6 +11,9 @@ from cloud.models import (
 from cloud.sync_jobs import _cloud_asset_sync_job_payload, _cloud_asset_sync_jobs_metrics_payload
 from core.dashboard_api import _iso, _ok, _provider_label, _status_label, dashboard_login_required
 
+_NOTICE_FAILED_STATUSES = {'failed', 'partial_failed', 'failed_retry'}
+_NOTICE_WARNING_QUEUE_STATUSES = {'due_now', 'overdue', 'fallback_notice', 'within_window'}
+
 
 def _status_counts(queryset, field='status') -> dict:
     return {
@@ -214,8 +217,8 @@ def _notice_section(now) -> dict:
 
     bundle = _build_notice_plan_bundle(limit=1000, future_limit=200, history_limit=1000)
     items_source = bundle.get('active_items') or []
-    failed_count = sum(1 for item in items_source if item.get('notice_status') in ['failed', 'partial_failed'])
-    warning_count = sum(1 for item in items_source if item.get('queue_status') in ['due_now', 'overdue', 'fallback_notice', 'within_window'])
+    failed_count = sum(1 for item in items_source if item.get('notice_status') in _NOTICE_FAILED_STATUSES)
+    warning_count = sum(1 for item in items_source if item.get('queue_status') in _NOTICE_WARNING_QUEUE_STATUSES)
     items = [
         _plan_item(row, task_type='notice', task_label='通知计划')
         for row in items_source[:8]
