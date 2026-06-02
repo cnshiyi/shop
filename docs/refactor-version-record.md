@@ -1,5 +1,77 @@
 # 重构版本记录
 
+## 2026-06-02 19:35 自动监工：自动续费窗口复核保护
+
+### 范围
+
+本轮在已删除云订单清理保护提交后，继续处理并验证自动续费执行路径的并发保护改动。重点确认自动续费任务拿到订单后会重新读取当前资产到期事实，避免旧任务或并发任务在资产已续期后仍按过期队列执行续费。
+
+### 复查结论
+
+- 自动续费执行入口继续以 `_notice_payload_for_order()` 读取 `CloudAsset.actual_expires_at` 派生的通知载荷，不恢复订单表到期字段。
+- 新增的到期窗口判断只接受“到期前 1 天内”或“已到期但还在关机前宽限窗口内”的订单执行自动续费；资产到期被推远后会跳过本轮。
+- `_run_auto_renew()` 在事务内使用 `select_for_update()` 重新锁定订单并复核自动续费开关、资产可见性和当前到期窗口，降低旧队列任务重复改写订单状态的风险。
+
+### 功能变更
+
+- 新增 `_auto_renew_notice_due_now()`，集中判断自动续费执行窗口。
+- `_run_auto_renew()` 增加事务锁和执行前窗口复核；未到自动续费时间时返回“未到自动续费时间，跳过本轮自动续费”，不创建续费订单、不扣款、不写余额流水。
+- 补充 `test_run_auto_renew_skips_when_asset_expiry_moved_out_of_due_window`，覆盖资产到期被推远后自动续费跳过且钱包余额不变。
+
+### 验证
+
+已通过：
+
+```bash
+uv run python -m py_compile cloud/lifecycle.py cloud/tests.py
+uv run python manage.py check
+DJANGO_TEST_SQLITE=1 uv run python manage.py test cloud.tests.CloudServerServicesTestCase.test_auto_renew_group_member_can_pay_when_owner_balance_insufficient cloud.tests.CloudServerServicesTestCase.test_run_auto_renew_skips_when_asset_expiry_moved_out_of_due_window cloud.tests.CloudServerServicesTestCase.test_auto_renew_retry_task_waits_for_recharge_then_retries --verbosity 2
+git diff --check
+```
+
+说明：第一次运行这组自动续费用例时，测试文件并发落盘尚未包含 `BalanceLedger` 局部导入，出现一次 `NameError`；复查文件后确认导入已存在，重跑同一命令通过。
+
+剩余风险：未跑完整测试套件，未在真实 MySQL 上验证 `select_for_update()` 锁等待表现，未执行真实自动续费支付。
+
+## 2026-06-02 19:31 自动监工：已删除云订单清理保护复查
+
+### 范围
+
+本轮继续监工 Shop Django 后端仓库，起始工作树干净，最近提交为 `9a94c4a 记录迁移删除和重试认领保护`。重点复查云资产到期事实源、订单旧到期字段、旧计划快照表、退款旧入口、废弃 app 回流，以及迁移旧机删除、自动续费重试认领和旧记录清理保护是否仍符合重构目标。
+
+### 复查结论
+
+- `INSTALLED_APPS` 仍只包含 `core`、`bot`、`orders`、`cloud` 当前运行域；未发现旧 `accounts/finance/mall/monitoring/dashboard_api/biz` 运行时 app 回流。
+- 未发现 `CloudServerOrder.service_expires_at` 模型字段恢复；运行时代码没有对已移除订单到期列做危险 ORM 过滤、排序、批量更新或 values 查询。
+- `CloudAsset.actual_expires_at` 仍是唯一结构化资产到期事实；`service_expires_at` 命中仍是 API 兼容字段、日志字段或从资产事实派生的展示值。
+- 未发现 `normalize_service_expiry`、`service_expired_at`、旧计划快照模型 `CloudLifecyclePlan/CloudNoticePlan/CloudAutoRenewPlan`、退款旧函数名、退款旧入口或 `refunded` 运行时状态回流。
+- 迁移旧机删除仍只以 `CloudServerOrder.migration_due_at` 作为迁移旧机删机事实源，最终执行入口继续由 `run_replaced_order_delete(..., enforce_schedule=True)` 检查删除窗口、关机计划开关和任务认领。
+- 自动续费重试任务仍在执行前用 `status=pending` 和 `next_check_at<=now` 原子认领，避免同一条 pending 任务在同轮或并发场景中重复增加 attempts。
+
+### 功能变更
+
+- `cleanup_old_records` 的已删除云订单清理条件继续收窄：即使 `ip_recycle_at` 已早于保留截止线，只要订单仍有当前 IP、固定 IP 名、实例名、实例 ID、云资源 ID 或代理 host 线索，也不会进入历史清理候选。
+- 补充已删除云订单资源线索回归测试，覆盖 `deleted` 状态订单仍保留云资源上下文时不被清理。
+- 调整固定 IP 保留窗口测试：确认保留窗口结束后仍需清空订单资源线索，才允许已删除订单进入清理候选。
+
+### 验证
+
+已通过：
+
+```bash
+uv run python manage.py check
+uv run python -m py_compile cloud/lifecycle.py cloud/services.py cloud/api_tasks.py core/management/commands/cleanup_old_records.py cloud/tests.py
+uv run python manage.py makemigrations --check --dry-run
+DJANGO_TEST_SQLITE=1 uv run python manage.py test cloud.tests.CloudServerServicesTestCase.test_get_migration_due_orders_is_distinct cloud.tests.CloudServerServicesTestCase.test_get_migration_due_orders_skips_non_deleting_orders cloud.tests.CloudServerServicesTestCase.test_replaced_order_delete_respects_asset_shutdown_switch cloud.tests.CloudServerServicesTestCase.test_lifecycle_tick_deletes_migration_due_order_with_deleting_asset cloud.tests.CloudServerServicesTestCase.test_lifecycle_tick_migration_delete_uses_migration_due_without_notice_payload --verbosity 2
+DJANGO_TEST_SQLITE=1 uv run python manage.py test cloud.tests.CloudServerServicesTestCase.test_auto_renew_retry_task_waits_for_recharge_then_retries --verbosity 2
+DJANGO_TEST_SQLITE=1 uv run python manage.py test cloud.tests.CloudServerServicesTestCase.test_cleanup_old_records_keeps_deleted_order_until_retained_ip_window_ends cloud.tests.CloudServerServicesTestCase.test_cleanup_old_records_keeps_non_terminal_cloud_orders cloud.tests.CloudServerServicesTestCase.test_cleanup_old_records_keeps_terminal_cloud_order_with_live_asset cloud.tests.CloudServerServicesTestCase.test_cleanup_old_records_keeps_terminal_cloud_order_with_pending_resource_context cloud.tests.CloudServerServicesTestCase.test_cleanup_old_records_keeps_deleted_order_with_resource_context cloud.tests.CloudServerServicesTestCase.test_cleanup_old_records_allows_terminal_cloud_order_with_deleted_asset --verbosity 2
+git diff --check
+```
+
+说明：首次聚焦测试命令误用不存在的 `cloud.tests.CloudLifecycleTests` 选择器，已改用 `CloudServerServicesTestCase` 重跑通过。`makemigrations --check --dry-run` 无模型变更，但默认 MySQL 迁移历史检查因沙箱无法连接 `127.0.0.1` 输出警告。
+
+剩余风险：本轮未跑完整测试套件，未连接真实 MySQL、AWS Lightsail 或阿里云 API，未执行真实云端删机、固定 IP 释放或历史数据清理。
+
 ## 2026-06-02 19:22 自动监工：迁移旧机删除与终态订单清理保护
 
 ### 范围
