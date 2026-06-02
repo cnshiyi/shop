@@ -78,7 +78,6 @@ def _cloud_account_payload(item):
         'region_hint': item.region_hint,
         'effective_region': item.region_hint or _default_cloud_account_region(item.provider),
         'is_active': item.is_active,
-        'shutdown_enabled': bool(getattr(item, 'shutdown_enabled', True)),
         'status': item.status,
         'status_label': item.status_label,
         'status_note': item.status_note,
@@ -156,7 +155,6 @@ def create_cloud_account(request):
     external_account_id = (payload.get('external_account_id') or '').strip()
     region_hint = _normalize_cloud_account_region(provider, payload.get('region_hint'))
     is_active = str(payload.get('is_active', 'true')).lower() in {'1', 'true', 'yes', 'on'}
-    shutdown_enabled = str(payload.get('shutdown_enabled', 'true')).lower() in {'1', 'true', 'yes', 'on'}
     if provider not in {CloudAccountConfig.PROVIDER_AWS, CloudAccountConfig.PROVIDER_ALIYUN}:
         return _error('云平台类型不正确', status=400)
     if not name:
@@ -174,7 +172,6 @@ def create_cloud_account(request):
         secret_key=secret_key,
         region_hint=region_hint,
         is_active=is_active,
-        shutdown_enabled=shutdown_enabled,
     )
     return _ok(_cloud_account_payload(item))
 
@@ -199,7 +196,6 @@ def update_cloud_account(request, account_id: int):
     secret_key = payload.get('secret_key')
     region_hint = payload.get('region_hint')
     is_active = payload.get('is_active')
-    shutdown_enabled = payload.get('shutdown_enabled')
     if provider not in {CloudAccountConfig.PROVIDER_AWS, CloudAccountConfig.PROVIDER_ALIYUN}:
         return _error('云平台类型不正确', status=400)
     if not name:
@@ -225,8 +221,6 @@ def update_cloud_account(request, account_id: int):
     item.region_hint = _normalize_cloud_account_region(provider, region_hint)
     if is_active is not None:
         item.is_active = str(is_active).lower() in {'1', 'true', 'yes', 'on'}
-    if shutdown_enabled is not None:
-        item.shutdown_enabled = str(shutdown_enabled).lower() in {'1', 'true', 'yes', 'on'}
     item.save()
     return _ok(_cloud_account_payload(item))
 

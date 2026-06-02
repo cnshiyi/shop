@@ -245,12 +245,9 @@ def _append_due(bucket: dict, key: str, order: CloudServerOrder):
 
 
 def _shutdown_enabled_for_order(order: CloudServerOrder, asset: CloudAsset | None = None) -> bool:
-    if asset is not None and getattr(asset, 'shutdown_enabled', True) is False:
-        return False
-    account = asset.cloud_account if asset and getattr(asset, 'cloud_account_id', None) else getattr(order, 'cloud_account', None)
-    if not account:
+    if asset is None:
         return True
-    return bool(getattr(account, 'shutdown_enabled', True))
+    return getattr(asset, 'shutdown_enabled', True) is not False
 
 
 def _orphan_asset_server_delete_at(asset: CloudAsset):
@@ -1733,7 +1730,7 @@ def _get_orphan_asset_delete_due():
             kind=CloudAsset.KIND_SERVER,
             order__isnull=True,
             actual_expires_at__lte=now,
-        ).exclude(provider='aliyun_simple').exclude(shutdown_enabled=False).exclude(cloud_account__shutdown_enabled=False).exclude(waiting_manual_time_q).exclude(unattached_static_ip_q).exclude(status__in=[CloudAsset.STATUS_DELETED, CloudAsset.STATUS_DELETING, CloudAsset.STATUS_TERMINATED])
+        ).exclude(provider='aliyun_simple').exclude(shutdown_enabled=False).exclude(waiting_manual_time_q).exclude(unattached_static_ip_q).exclude(status__in=[CloudAsset.STATUS_DELETED, CloudAsset.STATUS_DELETING, CloudAsset.STATUS_TERMINATED])
     )
     return [
         asset
@@ -1756,7 +1753,7 @@ def _get_unattached_static_ip_delete_due():
             Q(instance_id__isnull=True) | Q(instance_id='')
         ).filter(
             Q(provider_status__icontains='未附加固定IP') | Q(note__icontains='未附加固定IP') | Q(provider_resource_id__icontains='StaticIp')
-        ).exclude(shutdown_enabled=False).exclude(cloud_account__shutdown_enabled=False).exclude(waiting_manual_time_q).exclude(status__in=[CloudAsset.STATUS_DELETED, CloudAsset.STATUS_DELETING, CloudAsset.STATUS_TERMINATED])
+        ).exclude(shutdown_enabled=False).exclude(waiting_manual_time_q).exclude(status__in=[CloudAsset.STATUS_DELETED, CloudAsset.STATUS_DELETING, CloudAsset.STATUS_TERMINATED])
     )
 
 

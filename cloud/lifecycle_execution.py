@@ -79,7 +79,7 @@ def run_shutdown_order_suspend(order_id: int, *, queue_status='scheduled_suspend
         async_to_sync(_record_lifecycle_action_failed)(order.id, 'suspend_skipped', reason)
         return {'order_id': order.id, 'order_no': order.order_no, 'ip': ip, 'queue_status': queue_status, 'ok': False, 'error': reason}
     if enforce_schedule and not _shutdown_enabled_for_order(order, _order_primary_asset(order)):
-        reason = '云账号关机计划已关闭，跳过真实关机。'
+        reason = '资产关机计划已关闭，跳过真实关机。'
         async_to_sync(_record_lifecycle_action_failed)(order.id, 'suspend_skipped', reason)
         return {'order_id': order.id, 'order_no': order.order_no, 'ip': ip, 'queue_status': queue_status, 'ok': False, 'error': reason}
     if enforce_schedule:
@@ -145,7 +145,7 @@ def run_shutdown_order_delete(order_id: int, *, queue_status='manual_single', en
         async_to_sync(_record_lifecycle_action_failed)(order.id, 'delete_skipped', reason)
         return {'order_id': order.id, 'order_no': order.order_no, 'ip': ip, 'queue_status': queue_status, 'ok': False, 'error': reason}
     if enforce_schedule and not _shutdown_enabled_for_order(order, _order_primary_asset(order)):
-        reason = '云账号关机计划已关闭，跳过真实删机。'
+        reason = '资产关机计划已关闭，跳过真实删机。'
         async_to_sync(_record_lifecycle_action_failed)(order.id, 'delete_skipped', reason)
         return {'order_id': order.id, 'order_no': order.order_no, 'ip': ip, 'queue_status': queue_status, 'ok': False, 'error': reason}
     if enforce_schedule:
@@ -204,7 +204,7 @@ def run_replaced_order_delete(order_id: int, *, queue_status='scheduled_migratio
         async_to_sync(_record_lifecycle_action_failed)(order.id, 'delete_skipped', reason)
         return {'order_id': order.id, 'order_no': order.order_no, 'ip': ip, 'queue_status': queue_status, 'ok': False, 'error': reason}
     if enforce_schedule and not _shutdown_enabled_for_order(order, _order_primary_asset(order)):
-        reason = '资产或云账号关机计划已关闭，跳过迁移旧服务器真实删机。'
+        reason = '资产关机计划已关闭，跳过迁移旧服务器真实删机。'
         async_to_sync(_record_lifecycle_action_failed)(order.id, 'delete_skipped', reason)
         return {'order_id': order.id, 'order_no': order.order_no, 'ip': ip, 'queue_status': queue_status, 'ok': False, 'error': reason}
     if enforce_schedule:
@@ -267,8 +267,6 @@ def run_orphan_asset_delete(asset_id: int, *, enforce_schedule: bool = True) -> 
         return {'asset_id': asset.id, 'ip': ip, 'ok': False, 'error': '删除服务器总开关已关闭，跳过真实删机。'}
     if enforce_schedule and getattr(asset, 'shutdown_enabled', True) is False:
         return {'asset_id': asset.id, 'ip': ip, 'ok': False, 'error': '资产关机计划已关闭，跳过真实删机。'}
-    if enforce_schedule and asset.cloud_account_id and not getattr(asset.cloud_account, 'shutdown_enabled', True):
-        return {'asset_id': asset.id, 'ip': ip, 'ok': False, 'error': '云账号关机计划已关闭，跳过真实删机。'}
     if _asset_is_unattached_ip(asset) or not str(asset.instance_id or asset.provider_resource_id or asset.asset_name or '').strip():
         return {'asset_id': asset.id, 'ip': ip, 'ok': False, 'error': '该资产不是可删服务器，请走未附加 IP 删除'}
     if enforce_schedule:
@@ -329,7 +327,7 @@ def run_order_static_ip_release(order_id: int, *, queue_status='scheduled_recycl
         async_to_sync(_record_lifecycle_action_failed)(order.id, 'recycle_skipped', reason)
         return {'order_id': order.id, 'order_no': order.order_no, 'ip': ip, 'queue_status': queue_status, 'ok': False, 'error': reason}
     if enforce_schedule and not _shutdown_enabled_for_order(order, _order_primary_asset(order)):
-        reason = '资产或云账号关机计划已关闭，跳过真实释放固定 IP。'
+        reason = '资产关机计划已关闭，跳过真实释放固定 IP。'
         async_to_sync(_record_lifecycle_action_failed)(order.id, 'recycle_skipped', reason)
         return {'order_id': order.id, 'order_no': order.order_no, 'ip': ip, 'queue_status': queue_status, 'ok': False, 'error': reason}
     if enforce_schedule:
@@ -386,8 +384,6 @@ def run_unattached_ip_release(asset_id: int, *, enforce_schedule: bool = True) -
         return {'asset_id': asset.id, 'ip': ip, 'ok': False, 'error': '删除IP总开关已关闭，跳过真实释放固定 IP。'}
     if enforce_schedule and getattr(asset, 'shutdown_enabled', True) is False:
         return {'asset_id': asset.id, 'ip': ip, 'ok': False, 'error': '资产关机计划已关闭，跳过真实释放固定 IP。'}
-    if enforce_schedule and asset.cloud_account_id and not getattr(asset.cloud_account, 'shutdown_enabled', True):
-        return {'asset_id': asset.id, 'ip': ip, 'ok': False, 'error': '云账号关机计划已关闭，跳过真实释放固定 IP。'}
     if asset.instance_id:
         return {'asset_id': asset.id, 'ip': ip, 'ok': False, 'error': '该 IP 仍有关联实例，不能按未附加 IP 删除'}
     if enforce_schedule:

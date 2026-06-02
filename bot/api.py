@@ -1537,12 +1537,7 @@ def _orphan_asset_delete_plan_item_payload(asset, *, queue_status='orphan_due', 
 
 
 def _asset_shutdown_enabled(asset):
-    if getattr(asset, 'shutdown_enabled', True) is False:
-        return False
-    account = getattr(asset, 'cloud_account', None)
-    if not account:
-        return True
-    return bool(getattr(account, 'shutdown_enabled', True))
+    return getattr(asset, 'shutdown_enabled', True) is not False
 
 
 def _collect_shutdown_plan_queue(now, limit=100):
