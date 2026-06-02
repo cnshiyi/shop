@@ -892,7 +892,7 @@ class TronGridFallbackTestCase(SimpleTestCase):
                     return FakeResponse({'data': [{'trc20': []}]})
                 return FakeResponse({'data': []})
 
-        with patch('bot.handlers.get_runtime_config', return_value='https://tron.internal.example'), \
+        with patch('bot.handlers.get_config', return_value='https://tron.internal.example'), \
             patch('bot.handlers.build_trongrid_headers', new=AsyncMock(return_value={'accept': 'application/json'})), \
             patch('bot.handlers.httpx.AsyncClient', FakeClient):
             summary = async_to_sync(_fetch_tron_address_summary)('TD7cnQFUwDxPMSxruGELK6hs8YQm83Avco')
@@ -1040,7 +1040,7 @@ class RetainedIpRenewalUiTestCase(SimpleTestCase):
             status='completed',
         )
 
-        with patch('bot.handlers._bot_text', side_effect=lambda _key, default: default), patch('bot.handlers.get_runtime_config', side_effect=lambda _key, default=None: default):
+        with patch('bot.handlers._bot_text', side_effect=lambda _key, default: default), patch('bot.handlers.get_config', side_effect=lambda _key, default=None: default):
             text = _cloud_server_created_text(order, 443)
 
         self.assertIn('SOCKS5:', text)
@@ -1060,7 +1060,7 @@ class RetainedIpRenewalUiTestCase(SimpleTestCase):
             status='completed',
         )
 
-        with patch('bot.handlers._bot_text', side_effect=lambda _key, default: default), patch('bot.handlers.get_runtime_config', side_effect=lambda _key, default=None: default):
+        with patch('bot.handlers._bot_text', side_effect=lambda _key, default: default), patch('bot.handlers.get_config', side_effect=lambda _key, default=None: default):
             text = _cloud_server_created_text(order, 443)
 
         self.assertIn('SOCKS5:', text)
@@ -1083,7 +1083,7 @@ class RetainedIpRenewalUiTestCase(SimpleTestCase):
             status='completed',
         )
 
-        with patch('bot.handlers._bot_text', side_effect=lambda _key, default: default), patch('bot.handlers.get_runtime_config', side_effect=lambda _key, default=None: default):
+        with patch('bot.handlers._bot_text', side_effect=lambda _key, default: default), patch('bot.handlers.get_config', side_effect=lambda _key, default=None: default):
             text = _cloud_server_created_text(order, 9528)
 
         self.assertIn('一键链接: tg://proxy?server=1.2.3.4&amp;port=9528&amp;secret=main', text)
@@ -1105,7 +1105,7 @@ class RetainedIpRenewalUiTestCase(SimpleTestCase):
             status='completed',
         )
 
-        with patch('bot.handlers._bot_text', side_effect=lambda _key, default: default), patch('bot.handlers.get_runtime_config', side_effect=lambda _key, default=None: default):
+        with patch('bot.handlers._bot_text', side_effect=lambda _key, default: default), patch('bot.handlers.get_config', side_effect=lambda _key, default=None: default):
             text = _cloud_server_created_text(order, 443)
 
         self.assertIn('一键链接: -', text)

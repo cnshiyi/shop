@@ -1537,6 +1537,23 @@ def list_group_cloud_servers(chat_id: int):
 
 
 @sync_to_async
+def is_retained_ip_order_visible_in_group(order_id: int, chat_id: int) -> bool:
+    group = _group_filter_for_chat_id(chat_id)
+    if not group:
+        return False
+    asset = (
+        CloudAsset.objects.select_related('order', 'order__user', 'order__plan', 'user', 'cloud_account')
+        .filter(kind=CloudAsset.KIND_SERVER, order_id=order_id, telegram_group=group)
+        .order_by('-updated_at', '-id')
+        .first()
+    )
+    if not asset or not asset.order_id or not _is_retained_static_ip_asset(asset):
+        return False
+    order = _hydrate_order_from_proxy_asset(asset.order)
+    return bool(_is_retained_ip_renewal_candidate(order) and _can_order_be_renewed(order))
+
+
+@sync_to_async
 def list_user_auto_renew_cloud_servers(user_id: int):
     assets = (
         _cloud_server_asset_queryset()
@@ -4597,6 +4614,7 @@ __all__ = [
     'ensure_cloud_asset_operation_order',
     'initialize_proxy_asset',
     'is_cloud_asset_renewal_order',
+    'is_retained_ip_order_visible_in_group',
     'list_custom_regions',
     'list_all_auto_renew_cloud_servers',
     'list_group_auto_renew_cloud_servers',

@@ -71,6 +71,7 @@ from cloud.services import (
     ensure_cloud_asset_operation_order,
     initialize_proxy_asset,
     is_cloud_asset_renewal_order,
+    is_retained_ip_order_visible_in_group,
     list_all_auto_renew_cloud_servers,
     list_group_auto_renew_cloud_servers,
     list_group_cloud_servers,
@@ -3893,7 +3894,7 @@ def register_handlers(dp: Dispatcher):
             visible_order_id = int(getattr(item, 'order_id', None) or 0)
             if visible_order_id == int(order_id):
                 return True
-        return False
+        return await is_retained_ip_order_visible_in_group(order_id, callback.message.chat.id)
 
     def _bulk_renewable_order_ids(items, *, user_id: int, group_context: bool) -> list[int]:
         order_ids = []
