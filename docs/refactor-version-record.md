@@ -1,5 +1,35 @@
 # 重构版本记录
 
+## 2026-06-02 自动监工：群组通知测试到期字段同步
+
+### 范围
+
+本轮继续监工云资产生命周期唯一事实源，重点复查 `CloudAsset.actual_expires_at` 是否仍是唯一到期事实、订单表旧到期字段是否恢复、计划快照表和退款入口是否回流，并抽查上一轮剩余的群组代理、自动续费和通知批量测试。
+
+### 运行变更
+
+- `CloudServerOrder.service_expires_at` 仍未恢复为模型字段；运行代码继续通过 `order_asset_expiry()` 和 `CloudAsset.actual_expires_at` 读取服务到期事实。
+- 旧字段危险 ORM 扫描未发现运行代码继续对订单旧字段做 `filter/update/order_by/values` 查询；命中主要是历史迁移、API payload 键和测试残留。
+- 废弃 app 扫描仍只命中 `core.dashboard_api` 共享工具、后台 URL namespace、权限码和历史文档命名，没有发现重新注册 `accounts`、`finance`、`mall`、`monitoring`、`dashboard_api`、`biz` 运行时 app。
+- 修正 `cloud/tests.py` 中群组代理列表、同群可见性、同群续费、群组批量自动续费、自动续费候选人和通知批量发送用例，不再向 `CloudServerOrder.objects.create()` 传旧 `service_expires_at`，改为显式创建关联 `CloudAsset.actual_expires_at`。
+- 保留并验证订单旧到期字段被拒绝的回归测试，确保测试侧也不再把旧字段当模型字段写入。
+- 当前 `cloud/tests.py` 剩余旧 `service_expires_at=` 测试写法降至 82 处，后续继续分批同步；`actual_expires_at=order.service_expires_at` 形式剩余 18 处。
+- 工作区另有未提交的 `cloud/lifecycle_execution.py` 生命周期动作缓存锁草稿，以及 `cloud/models.py` 生命周期/通知任务模型草稿；本轮未覆盖、未纳入提交。
+
+### 验证
+
+本地已通过：
+
+```bash
+UV_CACHE_DIR=/private/tmp/uv-cache-shop uv run python manage.py check
+UV_CACHE_DIR=/private/tmp/uv-cache-shop uv run python manage.py makemigrations --check --dry-run
+UV_CACHE_DIR=/private/tmp/uv-cache-shop uv run python -m py_compile cloud/models.py cloud/asset_expiry.py cloud/lifecycle.py cloud/lifecycle_execution.py cloud/api_assets.py cloud/api_asset_snapshots.py cloud/api_orders.py cloud/api_asset_edit.py cloud/provisioning.py cloud/services.py bot/api.py bot/handlers.py orders/services.py orders/payment_scanner.py
+UV_CACHE_DIR=/private/tmp/uv-cache-shop DJANGO_TEST_SQLITE=1 uv run python manage.py test cloud.tests.CloudServerServicesTestCase.test_order_rejects_removed_service_expiry_field cloud.tests.CloudServerServicesTestCase.test_group_cloud_server_list_is_scoped_to_current_group cloud.tests.CloudServerServicesTestCase.test_user_proxy_asset_detail_allows_same_bound_group_visibility cloud.tests.CloudServerServicesTestCase.test_same_bound_group_asset_renewal_uses_user_visibility cloud.tests.CloudServerServicesTestCase.test_group_auto_renew_bulk_toggle_is_scoped_to_current_group cloud.tests.CloudServerServicesTestCase.test_auto_renew_candidates_exclude_admin_notice_users cloud.tests.CloudServerServicesTestCase.test_auto_renew_candidates_exclude_primary_admin_user cloud.tests.CloudServerServicesTestCase.test_auto_renew_group_member_can_pay_when_owner_balance_insufficient cloud.tests.CloudServerServicesTestCase.test_send_order_notice_batch_prefers_bound_group_and_skips_private cloud.tests.CloudServerServicesTestCase.test_send_order_notice_batch_falls_back_private_when_group_fails --noinput --verbosity 1
+git diff --check
+```
+
+`makemigrations --check --dry-run` 仍因当前沙箱禁止连接本地 MySQL 输出一致性历史检查警告，但结果为 `No changes detected`。
+
 ## 2026-06-02 自动监工：资产续费完成到期推进修复
 
 ### 范围

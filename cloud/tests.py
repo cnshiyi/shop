@@ -3693,65 +3693,26 @@ class CloudServerServicesTestCase(TestCase):
         self.assertEqual(parse_datetime(delete_item['service_expires_at']), asset_expiry)
         self.assertEqual(parse_datetime(proxy_item['actual_expires_at']), asset_expiry)
 
-    # 功能：验证订单时间保存后只补齐空的资产实际到期时间，不覆盖人工维护的资产时间。
-    def test_order_save_backfills_blank_asset_expiry_only(self):
-        now = timezone.now()
-        old_expiry = now + timezone.timedelta(days=5)
-        new_expiry = now + timezone.timedelta(days=12)
-        manual_expiry = now + timezone.timedelta(days=30)
-        order = CloudServerOrder.objects.create(
-            order_no='ORDER-SAVE-ASSET-EXPIRY-1',
-            user=self.user,
-            plan=self.plan,
-            provider=self.plan.provider,
-            region_code=self.plan.region_code,
-            region_name=self.plan.region_name,
-            plan_name=self.plan.plan_name,
-            quantity=1,
-            currency='USDT',
-            total_amount='19.00',
-            pay_amount='19.00',
-            pay_method='balance',
-            status='completed',
-            public_ip='3.3.3.32',
-            service_expires_at=old_expiry,
-        )
-        blank_asset = CloudAsset.objects.create(
-            kind=CloudAsset.KIND_SERVER,
-            source=CloudAsset.SOURCE_ORDER,
-            order=order,
-            user=self.user,
-            provider=order.provider,
-            region_code=order.region_code,
-            region_name=order.region_name,
-            asset_name='blank-asset-expiry',
-            public_ip='3.3.3.32',
-            actual_expires_at=None,
-            status=CloudAsset.STATUS_RUNNING,
-            is_active=True,
-        )
-        manual_asset = CloudAsset.objects.create(
-            kind=CloudAsset.KIND_SERVER,
-            source=CloudAsset.SOURCE_ORDER,
-            order=order,
-            user=self.user,
-            provider=order.provider,
-            region_code=order.region_code,
-            region_name=order.region_name,
-            asset_name='manual-asset-expiry',
-            public_ip='3.3.3.33',
-            actual_expires_at=manual_expiry,
-            status=CloudAsset.STATUS_RUNNING,
-            is_active=True,
-        )
-
-        order.service_expires_at = new_expiry
-        order.save(update_fields=['service_expires_at'])
-        blank_asset.refresh_from_db()
-        manual_asset.refresh_from_db()
-
-        self.assertEqual(blank_asset.actual_expires_at, CloudServerOrder.normalize_expiry_time(new_expiry))
-        self.assertEqual(manual_asset.actual_expires_at, manual_expiry)
+    # 功能：验证订单旧到期字段已彻底移除，测试和业务不能再把它当模型字段写入。
+    def test_order_rejects_removed_service_expiry_field(self):
+        with self.assertRaises(TypeError):
+            CloudServerOrder.objects.create(
+                order_no='ORDER-REMOVED-ASSET-EXPIRY-1',
+                user=self.user,
+                plan=self.plan,
+                provider=self.plan.provider,
+                region_code=self.plan.region_code,
+                region_name=self.plan.region_name,
+                plan_name=self.plan.plan_name,
+                quantity=1,
+                currency='USDT',
+                total_amount='19.00',
+                pay_amount='19.00',
+                pay_method='balance',
+                status='completed',
+                public_ip='3.3.3.32',
+                service_expires_at=timezone.now() + timezone.timedelta(days=5),
+            )
 
     # 功能：验证旧 Server 兼容入口复用资产时不覆盖手工用户和到期时间。
     def test_server_compat_create_preserves_manual_asset_owner_and_expiry(self):
@@ -9536,10 +9497,12 @@ class CloudServerServicesTestCase(TestCase):
         second_user = TelegramUser.objects.create(tg_user_id=991997002, username='group_scope_second')
         first_group = TelegramGroupFilter.objects.create(chat_id=-1001887001, title='Scope First', enabled=True)
         second_group = TelegramGroupFilter.objects.create(chat_id=-1001887002, title='Scope Second', enabled=True)
-        first_order = CloudServerOrder.objects.create(order_no='GROUP-SCOPE-FIRST-1', user=first_user, plan=self.plan, provider=self.plan.provider, region_code=self.plan.region_code, region_name=self.plan.region_name, plan_name=self.plan.plan_name, quantity=1, currency='USDT', total_amount='19.00', pay_amount='19.00', pay_method='balance', status='completed', public_ip='8.8.8.40', service_expires_at=timezone.now() + timezone.timedelta(days=5))
-        second_order = CloudServerOrder.objects.create(order_no='GROUP-SCOPE-SECOND-1', user=second_user, plan=self.plan, provider=self.plan.provider, region_code=self.plan.region_code, region_name=self.plan.region_name, plan_name=self.plan.plan_name, quantity=1, currency='USDT', total_amount='19.00', pay_amount='19.00', pay_method='balance', status='completed', public_ip='8.8.8.41', service_expires_at=timezone.now() + timezone.timedelta(days=5))
-        first_asset = CloudAsset.objects.create(kind=CloudAsset.KIND_SERVER, source=CloudAsset.SOURCE_ORDER, order=first_order, user=first_user, provider=first_order.provider, region_code=first_order.region_code, region_name=first_order.region_name, asset_name='group-scope-first', public_ip='8.8.8.40', actual_expires_at=first_order.service_expires_at, status=CloudAsset.STATUS_RUNNING, telegram_group=first_group)
-        second_asset = CloudAsset.objects.create(kind=CloudAsset.KIND_SERVER, source=CloudAsset.SOURCE_ORDER, order=second_order, user=second_user, provider=second_order.provider, region_code=second_order.region_code, region_name=second_order.region_name, asset_name='group-scope-second', public_ip='8.8.8.41', actual_expires_at=second_order.service_expires_at, status=CloudAsset.STATUS_RUNNING, telegram_group=second_group)
+        first_expires_at = timezone.now() + timezone.timedelta(days=5)
+        second_expires_at = timezone.now() + timezone.timedelta(days=5)
+        first_order = CloudServerOrder.objects.create(order_no='GROUP-SCOPE-FIRST-1', user=first_user, plan=self.plan, provider=self.plan.provider, region_code=self.plan.region_code, region_name=self.plan.region_name, plan_name=self.plan.plan_name, quantity=1, currency='USDT', total_amount='19.00', pay_amount='19.00', pay_method='balance', status='completed', public_ip='8.8.8.40')
+        second_order = CloudServerOrder.objects.create(order_no='GROUP-SCOPE-SECOND-1', user=second_user, plan=self.plan, provider=self.plan.provider, region_code=self.plan.region_code, region_name=self.plan.region_name, plan_name=self.plan.plan_name, quantity=1, currency='USDT', total_amount='19.00', pay_amount='19.00', pay_method='balance', status='completed', public_ip='8.8.8.41')
+        first_asset = CloudAsset.objects.create(kind=CloudAsset.KIND_SERVER, source=CloudAsset.SOURCE_ORDER, order=first_order, user=first_user, provider=first_order.provider, region_code=first_order.region_code, region_name=first_order.region_name, asset_name='group-scope-first', public_ip='8.8.8.40', actual_expires_at=first_expires_at, status=CloudAsset.STATUS_RUNNING, telegram_group=first_group)
+        second_asset = CloudAsset.objects.create(kind=CloudAsset.KIND_SERVER, source=CloudAsset.SOURCE_ORDER, order=second_order, user=second_user, provider=second_order.provider, region_code=second_order.region_code, region_name=second_order.region_name, asset_name='group-scope-second', public_ip='8.8.8.41', actual_expires_at=second_expires_at, status=CloudAsset.STATUS_RUNNING, telegram_group=second_group)
 
         first_items = async_to_sync(list_group_cloud_servers)(first_group.chat_id)
         second_items = async_to_sync(list_group_cloud_servers)(second_group.chat_id)
@@ -9556,10 +9519,12 @@ class CloudServerServicesTestCase(TestCase):
         owner = TelegramUser.objects.create(tg_user_id=991997011, username='group_detail_owner')
         member = TelegramUser.objects.create(tg_user_id=991997012, username='group_detail_member')
         group = TelegramGroupFilter.objects.create(chat_id=-1001887011, title='Detail Shared Group', enabled=True)
-        owner_order = CloudServerOrder.objects.create(order_no='GROUP-DETAIL-OWNER-1', user=owner, plan=self.plan, provider=self.plan.provider, region_code=self.plan.region_code, region_name=self.plan.region_name, plan_name=self.plan.plan_name, quantity=1, currency='USDT', total_amount='19.00', pay_amount='19.00', pay_method='balance', status='completed', public_ip='8.8.8.44', service_expires_at=timezone.now() + timezone.timedelta(days=5))
-        member_order = CloudServerOrder.objects.create(order_no='GROUP-DETAIL-MEMBER-1', user=member, plan=self.plan, provider=self.plan.provider, region_code=self.plan.region_code, region_name=self.plan.region_name, plan_name=self.plan.plan_name, quantity=1, currency='USDT', total_amount='19.00', pay_amount='19.00', pay_method='balance', status='completed', public_ip='8.8.8.45', service_expires_at=timezone.now() + timezone.timedelta(days=5))
-        owner_asset = CloudAsset.objects.create(kind=CloudAsset.KIND_SERVER, source=CloudAsset.SOURCE_ORDER, order=owner_order, user=owner, provider=owner_order.provider, region_code=owner_order.region_code, region_name=owner_order.region_name, asset_name='group-detail-owner', public_ip='8.8.8.44', actual_expires_at=owner_order.service_expires_at, status=CloudAsset.STATUS_RUNNING, telegram_group=group)
-        CloudAsset.objects.create(kind=CloudAsset.KIND_SERVER, source=CloudAsset.SOURCE_ORDER, order=member_order, user=member, provider=member_order.provider, region_code=member_order.region_code, region_name=member_order.region_name, asset_name='group-detail-member', public_ip='8.8.8.45', actual_expires_at=member_order.service_expires_at, status=CloudAsset.STATUS_RUNNING, telegram_group=group)
+        owner_expires_at = timezone.now() + timezone.timedelta(days=5)
+        member_expires_at = timezone.now() + timezone.timedelta(days=5)
+        owner_order = CloudServerOrder.objects.create(order_no='GROUP-DETAIL-OWNER-1', user=owner, plan=self.plan, provider=self.plan.provider, region_code=self.plan.region_code, region_name=self.plan.region_name, plan_name=self.plan.plan_name, quantity=1, currency='USDT', total_amount='19.00', pay_amount='19.00', pay_method='balance', status='completed', public_ip='8.8.8.44')
+        member_order = CloudServerOrder.objects.create(order_no='GROUP-DETAIL-MEMBER-1', user=member, plan=self.plan, provider=self.plan.provider, region_code=self.plan.region_code, region_name=self.plan.region_name, plan_name=self.plan.plan_name, quantity=1, currency='USDT', total_amount='19.00', pay_amount='19.00', pay_method='balance', status='completed', public_ip='8.8.8.45')
+        owner_asset = CloudAsset.objects.create(kind=CloudAsset.KIND_SERVER, source=CloudAsset.SOURCE_ORDER, order=owner_order, user=owner, provider=owner_order.provider, region_code=owner_order.region_code, region_name=owner_order.region_name, asset_name='group-detail-owner', public_ip='8.8.8.44', actual_expires_at=owner_expires_at, status=CloudAsset.STATUS_RUNNING, telegram_group=group)
+        CloudAsset.objects.create(kind=CloudAsset.KIND_SERVER, source=CloudAsset.SOURCE_ORDER, order=member_order, user=member, provider=member_order.provider, region_code=member_order.region_code, region_name=member_order.region_name, asset_name='group-detail-member', public_ip='8.8.8.45', actual_expires_at=member_expires_at, status=CloudAsset.STATUS_RUNNING, telegram_group=group)
 
         member_items = async_to_sync(list_user_cloud_servers)(member.id)
         owner_detail = async_to_sync(get_user_proxy_asset_detail)(owner_asset.id, member.id, 'asset')
@@ -9573,10 +9538,12 @@ class CloudServerServicesTestCase(TestCase):
         owner = TelegramUser.objects.create(tg_user_id=991997021, username='group_renew_owner')
         member = TelegramUser.objects.create(tg_user_id=991997022, username='group_renew_member')
         group = TelegramGroupFilter.objects.create(chat_id=-1001887021, title='Renew Shared Group', enabled=True)
-        owner_order = CloudServerOrder.objects.create(order_no='GROUP-RENEW-OWNER-1', user=owner, plan=self.plan, provider=self.plan.provider, region_code=self.plan.region_code, region_name=self.plan.region_name, plan_name=self.plan.plan_name, quantity=1, currency='USDT', total_amount='19.00', pay_amount='19.00', pay_method='balance', status='completed', public_ip='8.8.8.46', instance_id='group-renew-owner-instance', service_expires_at=timezone.now() + timezone.timedelta(days=5))
-        member_order = CloudServerOrder.objects.create(order_no='GROUP-RENEW-MEMBER-1', user=member, plan=self.plan, provider=self.plan.provider, region_code=self.plan.region_code, region_name=self.plan.region_name, plan_name=self.plan.plan_name, quantity=1, currency='USDT', total_amount='19.00', pay_amount='19.00', pay_method='balance', status='completed', public_ip='8.8.8.47', service_expires_at=timezone.now() + timezone.timedelta(days=5))
-        owner_asset = CloudAsset.objects.create(kind=CloudAsset.KIND_SERVER, source=CloudAsset.SOURCE_ORDER, order=owner_order, user=owner, provider=owner_order.provider, region_code=owner_order.region_code, region_name=owner_order.region_name, asset_name='group-renew-owner', public_ip='8.8.8.46', instance_id='group-renew-owner-instance', actual_expires_at=owner_order.service_expires_at, status=CloudAsset.STATUS_RUNNING, telegram_group=group)
-        CloudAsset.objects.create(kind=CloudAsset.KIND_SERVER, source=CloudAsset.SOURCE_ORDER, order=member_order, user=member, provider=member_order.provider, region_code=member_order.region_code, region_name=member_order.region_name, asset_name='group-renew-member', public_ip='8.8.8.47', actual_expires_at=member_order.service_expires_at, status=CloudAsset.STATUS_RUNNING, telegram_group=group)
+        owner_expires_at = timezone.now() + timezone.timedelta(days=5)
+        member_expires_at = timezone.now() + timezone.timedelta(days=5)
+        owner_order = CloudServerOrder.objects.create(order_no='GROUP-RENEW-OWNER-1', user=owner, plan=self.plan, provider=self.plan.provider, region_code=self.plan.region_code, region_name=self.plan.region_name, plan_name=self.plan.plan_name, quantity=1, currency='USDT', total_amount='19.00', pay_amount='19.00', pay_method='balance', status='completed', public_ip='8.8.8.46', instance_id='group-renew-owner-instance')
+        member_order = CloudServerOrder.objects.create(order_no='GROUP-RENEW-MEMBER-1', user=member, plan=self.plan, provider=self.plan.provider, region_code=self.plan.region_code, region_name=self.plan.region_name, plan_name=self.plan.plan_name, quantity=1, currency='USDT', total_amount='19.00', pay_amount='19.00', pay_method='balance', status='completed', public_ip='8.8.8.47')
+        owner_asset = CloudAsset.objects.create(kind=CloudAsset.KIND_SERVER, source=CloudAsset.SOURCE_ORDER, order=owner_order, user=owner, provider=owner_order.provider, region_code=owner_order.region_code, region_name=owner_order.region_name, asset_name='group-renew-owner', public_ip='8.8.8.46', instance_id='group-renew-owner-instance', actual_expires_at=owner_expires_at, status=CloudAsset.STATUS_RUNNING, telegram_group=group)
+        CloudAsset.objects.create(kind=CloudAsset.KIND_SERVER, source=CloudAsset.SOURCE_ORDER, order=member_order, user=member, provider=member_order.provider, region_code=member_order.region_code, region_name=member_order.region_name, asset_name='group-renew-member', public_ip='8.8.8.47', actual_expires_at=member_expires_at, status=CloudAsset.STATUS_RUNNING, telegram_group=group)
         unbound_asset = CloudAsset.objects.create(kind=CloudAsset.KIND_SERVER, source=CloudAsset.SOURCE_AWS_SYNC, user=owner, provider='aws_lightsail', region_code=self.plan.region_code, region_name=self.plan.region_name, asset_name='group-renew-unbound', public_ip='8.8.8.48', status=CloudAsset.STATUS_RUNNING, telegram_group=group)
 
         operation_order, operation_err = async_to_sync(ensure_cloud_asset_operation_order)(owner_asset.id, member.id)
@@ -9600,10 +9567,12 @@ class CloudServerServicesTestCase(TestCase):
         second_user = TelegramUser.objects.create(tg_user_id=991997102, username='group_auto_second')
         first_group = TelegramGroupFilter.objects.create(chat_id=-1001887101, title='Auto Scope First', enabled=True)
         second_group = TelegramGroupFilter.objects.create(chat_id=-1001887102, title='Auto Scope Second', enabled=True)
-        first_order = CloudServerOrder.objects.create(order_no='GROUP-AUTO-FIRST-1', user=first_user, plan=self.plan, provider=self.plan.provider, region_code=self.plan.region_code, region_name=self.plan.region_name, plan_name=self.plan.plan_name, quantity=1, currency='USDT', total_amount='19.00', pay_amount='19.00', pay_method='balance', status='completed', public_ip='8.8.8.42', service_expires_at=timezone.now() + timezone.timedelta(days=5), auto_renew_enabled=False)
-        second_order = CloudServerOrder.objects.create(order_no='GROUP-AUTO-SECOND-1', user=second_user, plan=self.plan, provider=self.plan.provider, region_code=self.plan.region_code, region_name=self.plan.region_name, plan_name=self.plan.plan_name, quantity=1, currency='USDT', total_amount='19.00', pay_amount='19.00', pay_method='balance', status='completed', public_ip='8.8.8.43', service_expires_at=timezone.now() + timezone.timedelta(days=5), auto_renew_enabled=False)
-        CloudAsset.objects.create(kind=CloudAsset.KIND_SERVER, source=CloudAsset.SOURCE_ORDER, order=first_order, user=first_user, provider=first_order.provider, region_code=first_order.region_code, region_name=first_order.region_name, asset_name='group-auto-first', public_ip='8.8.8.42', actual_expires_at=first_order.service_expires_at, status=CloudAsset.STATUS_RUNNING, telegram_group=first_group)
-        CloudAsset.objects.create(kind=CloudAsset.KIND_SERVER, source=CloudAsset.SOURCE_ORDER, order=second_order, user=second_user, provider=second_order.provider, region_code=second_order.region_code, region_name=second_order.region_name, asset_name='group-auto-second', public_ip='8.8.8.43', actual_expires_at=second_order.service_expires_at, status=CloudAsset.STATUS_RUNNING, telegram_group=second_group)
+        first_expires_at = timezone.now() + timezone.timedelta(days=5)
+        second_expires_at = timezone.now() + timezone.timedelta(days=5)
+        first_order = CloudServerOrder.objects.create(order_no='GROUP-AUTO-FIRST-1', user=first_user, plan=self.plan, provider=self.plan.provider, region_code=self.plan.region_code, region_name=self.plan.region_name, plan_name=self.plan.plan_name, quantity=1, currency='USDT', total_amount='19.00', pay_amount='19.00', pay_method='balance', status='completed', public_ip='8.8.8.42', auto_renew_enabled=False)
+        second_order = CloudServerOrder.objects.create(order_no='GROUP-AUTO-SECOND-1', user=second_user, plan=self.plan, provider=self.plan.provider, region_code=self.plan.region_code, region_name=self.plan.region_name, plan_name=self.plan.plan_name, quantity=1, currency='USDT', total_amount='19.00', pay_amount='19.00', pay_method='balance', status='completed', public_ip='8.8.8.43', auto_renew_enabled=False)
+        CloudAsset.objects.create(kind=CloudAsset.KIND_SERVER, source=CloudAsset.SOURCE_ORDER, order=first_order, user=first_user, provider=first_order.provider, region_code=first_order.region_code, region_name=first_order.region_name, asset_name='group-auto-first', public_ip='8.8.8.42', actual_expires_at=first_expires_at, status=CloudAsset.STATUS_RUNNING, telegram_group=first_group)
+        CloudAsset.objects.create(kind=CloudAsset.KIND_SERVER, source=CloudAsset.SOURCE_ORDER, order=second_order, user=second_user, provider=second_order.provider, region_code=second_order.region_code, region_name=second_order.region_name, asset_name='group-auto-second', public_ip='8.8.8.43', actual_expires_at=second_expires_at, status=CloudAsset.STATUS_RUNNING, telegram_group=second_group)
 
         result = async_to_sync(set_group_cloud_server_auto_renew)(first_group.chat_id, True)
         first_order.refresh_from_db()
@@ -9637,10 +9606,10 @@ class CloudServerServicesTestCase(TestCase):
             status='completed',
             public_ip='8.8.8.30',
             service_started_at=timezone.now(),
-            service_expires_at=timezone.now() + timezone.timedelta(days=2),
             auto_renew_enabled=True,
         )
-        CloudAsset.objects.create(kind=CloudAsset.KIND_SERVER, source=CloudAsset.SOURCE_ORDER, order=order, user=self.user, provider=order.provider, region_code=order.region_code, region_name=order.region_name, asset_name='auto-renew-owner', public_ip='8.8.8.30', status=CloudAsset.STATUS_RUNNING, telegram_group=group)
+        order_expires_at = timezone.now() + timezone.timedelta(days=2)
+        CloudAsset.objects.create(kind=CloudAsset.KIND_SERVER, source=CloudAsset.SOURCE_ORDER, order=order, user=self.user, provider=order.provider, region_code=order.region_code, region_name=order.region_name, asset_name='auto-renew-owner', public_ip='8.8.8.30', actual_expires_at=order_expires_at, status=CloudAsset.STATUS_RUNNING, telegram_group=group)
         CloudAsset.objects.create(kind=CloudAsset.KIND_SERVER, source=CloudAsset.SOURCE_ORDER, user=admin_user, provider=order.provider, region_code=order.region_code, region_name=order.region_name, asset_name='auto-renew-admin', public_ip='8.8.8.31', status=CloudAsset.STATUS_RUNNING, telegram_group=group)
         CloudAsset.objects.create(kind=CloudAsset.KIND_SERVER, source=CloudAsset.SOURCE_ORDER, user=other_user, provider=order.provider, region_code=order.region_code, region_name=order.region_name, asset_name='auto-renew-member', public_ip='8.8.8.32', status=CloudAsset.STATUS_RUNNING, telegram_group=group)
 
@@ -9677,10 +9646,10 @@ class CloudServerServicesTestCase(TestCase):
             status='completed',
             public_ip='8.8.8.33',
             service_started_at=timezone.now(),
-            service_expires_at=timezone.now() + timezone.timedelta(days=2),
             auto_renew_enabled=True,
         )
-        CloudAsset.objects.create(kind=CloudAsset.KIND_SERVER, source=CloudAsset.SOURCE_ORDER, order=order, user=admin_user, provider=order.provider, region_code=order.region_code, region_name=order.region_name, asset_name='auto-renew-primary-admin', public_ip='8.8.8.33', status=CloudAsset.STATUS_RUNNING, telegram_group=group)
+        order_expires_at = timezone.now() + timezone.timedelta(days=2)
+        CloudAsset.objects.create(kind=CloudAsset.KIND_SERVER, source=CloudAsset.SOURCE_ORDER, order=order, user=admin_user, provider=order.provider, region_code=order.region_code, region_name=order.region_name, asset_name='auto-renew-primary-admin', public_ip='8.8.8.33', actual_expires_at=order_expires_at, status=CloudAsset.STATUS_RUNNING, telegram_group=group)
         CloudAsset.objects.create(kind=CloudAsset.KIND_SERVER, source=CloudAsset.SOURCE_ORDER, user=member_user, provider=order.provider, region_code=order.region_code, region_name=order.region_name, asset_name='auto-renew-primary-member', public_ip='8.8.8.34', status=CloudAsset.STATUS_RUNNING, telegram_group=group)
 
         candidates = _auto_renew_candidate_users(order)
@@ -9712,7 +9681,6 @@ class CloudServerServicesTestCase(TestCase):
             public_ip='8.8.8.35',
             instance_id='auto-renew-group-payer',
             service_started_at=timezone.now() - timezone.timedelta(days=30),
-            service_expires_at=expires_at,
             suspend_at=expires_at + timezone.timedelta(days=1),
             auto_renew_enabled=True,
         )
@@ -9739,6 +9707,7 @@ class CloudServerServicesTestCase(TestCase):
             username='notice_group',
             enabled=True,
         )
+        expires_at = timezone.now() + timezone.timedelta(days=3)
         order = CloudServerOrder.objects.create(
             order_no='NOTICE-GROUP-FIRST-1',
             user=self.user,
@@ -9755,7 +9724,6 @@ class CloudServerServicesTestCase(TestCase):
             status='completed',
             public_ip='8.8.8.10',
             service_started_at=timezone.now(),
-            service_expires_at=timezone.now() + timezone.timedelta(days=3),
         )
         CloudAsset.objects.create(
             kind=CloudAsset.KIND_SERVER,
@@ -9767,6 +9735,7 @@ class CloudServerServicesTestCase(TestCase):
             region_name=order.region_name,
             asset_name='notice-group-first-asset',
             public_ip='8.8.8.10',
+            actual_expires_at=expires_at,
             status=CloudAsset.STATUS_RUNNING,
             telegram_group=group,
         )
@@ -9806,6 +9775,7 @@ class CloudServerServicesTestCase(TestCase):
 
     # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
     def test_send_order_notice_batch_falls_back_private_when_group_fails(self):
+        expires_at = timezone.now() + timezone.timedelta(days=3)
         order = CloudServerOrder.objects.create(
             order_no='NOTICE-GROUP-FALLBACK-1',
             user=self.user,
@@ -9822,7 +9792,19 @@ class CloudServerServicesTestCase(TestCase):
             status='completed',
             public_ip='8.8.8.11',
             service_started_at=timezone.now(),
-            service_expires_at=timezone.now() + timezone.timedelta(days=3),
+        )
+        CloudAsset.objects.create(
+            kind=CloudAsset.KIND_SERVER,
+            source=CloudAsset.SOURCE_ORDER,
+            order=order,
+            user=self.user,
+            provider=order.provider,
+            region_code=order.region_code,
+            region_name=order.region_name,
+            asset_name='notice-group-fallback-asset',
+            public_ip='8.8.8.11',
+            actual_expires_at=expires_at,
+            status=CloudAsset.STATUS_RUNNING,
         )
         private_sent = []
         group_sent = []
