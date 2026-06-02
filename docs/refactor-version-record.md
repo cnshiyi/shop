@@ -2166,6 +2166,43 @@ The focused DB test run is blocked by local MySQL test database permissions:
 Access denied for user 'a'@'localhost' to database 'test_a'
 ```
 
+## 2026-06-02 云订单旧记录清理资产保护
+
+### 范围
+
+本轮继续监工 Shop Django 后端仓库，重点处理 codex-cli 只读审查发现的三个风险：旧记录清理可能断开仍存在的服务器资产、迁移旧服务器自动删机未受同一套关机计划开关保护、通知计划未来队列上限未真正生效。
+
+### 复查结论
+
+- `INSTALLED_APPS` 仍只包含 `core`、`bot`、`orders`、`cloud` 当前运行域，未发现旧 `accounts/finance/mall/monitoring/dashboard_api/biz` 运行时 app 回流。
+- 运行代码未发现 `CloudServerOrder.service_expires_at` 模型字段、危险 ORM 查询或写入恢复；`service_expires_at` 仍只作为兼容接口字段或日志标签存在。
+- 未发现 `normalize_service_expiry`、`service_expired_at`、`CloudLifecyclePlan`、`CloudNoticePlan`、`CloudAutoRenewPlan`、`refund_to_balance`、`refund_balance`、`STATUS_REFUNDED` 或 `refunded` 旧状态回流。
+- `CloudAsset.actual_expires_at` 仍是唯一结构化资产到期事实；本轮新增旧记录清理条件没有引入订单表到期事实。
+
+### 运行变化
+
+- `cleanup_old_records` 清理云订单时，先排除仍有关联服务器资产且资产状态不是删除/终止流程的订单。
+- `failed`、`cancelled`、`expired` 等终态云订单只有在没有运行中、停机中、过期宽限等仍需运维追踪的服务器资产时，才会进入清理候选。
+- 已删除、删除中、终止中、已终止资产不阻止终态订单按原保留规则清理。
+- 迁移旧机自动删机入口也使用同一套资产/云账号关机计划开关；资产或云账号关闭时不会执行真实删机。
+- 通知计划未来队列现在会真正按调用方传入的上限截断，避免订单多时继续扫描并生成过多计划项。
+
+### 验证
+
+已通过：
+
+```bash
+uv run python -m py_compile core/management/commands/cleanup_old_records.py cloud/lifecycle_execution.py cloud/api_tasks.py cloud/tests.py
+uv run python manage.py check
+uv run python manage.py makemigrations --check --dry-run
+DJANGO_TEST_SQLITE=1 uv run python manage.py test cloud.tests.CloudServerServicesTestCase.test_cleanup_old_records_keeps_deleted_order_until_retained_ip_window_ends cloud.tests.CloudServerServicesTestCase.test_cleanup_old_records_keeps_non_terminal_cloud_orders cloud.tests.CloudServerServicesTestCase.test_cleanup_old_records_keeps_terminal_cloud_order_with_live_asset cloud.tests.CloudServerServicesTestCase.test_cleanup_old_records_allows_terminal_cloud_order_with_deleted_asset cloud.tests.CloudServerServicesTestCase.test_replaced_order_delete_respects_asset_shutdown_switch cloud.tests.CloudServerServicesTestCase.test_notice_task_future_items_respects_future_limit --verbosity 1
+git diff --check
+```
+
+说明：`makemigrations --check --dry-run` 输出 `No changes detected`，本轮无模型结构变更。
+
+剩余风险：本轮未跑完整测试套件，未连接真实 MySQL、AWS Lightsail 或阿里云 API，也未执行真实旧记录删除。
+
 ## 2026-06-02 实机开通删除回归修复
 
 ### 范围
