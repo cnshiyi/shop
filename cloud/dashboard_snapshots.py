@@ -42,8 +42,8 @@ def _refresh_dashboard_plan_snapshots(reason: str = '', *, lifecycle_limit: int 
     if full_cloud_assets is None:
         full_cloud_assets = normalized_asset_ids is None
     try:
-        from cloud import api as cloud_api
-        cloud_api.refresh_cloud_asset_dashboard_snapshots(
+        from cloud.api_asset_snapshots import refresh_cloud_asset_dashboard_snapshots
+        refresh_cloud_asset_dashboard_snapshots(
             asset_ids=normalized_asset_ids,
             reason=reason or 'dashboard_snapshot_refresh',
             full=full_cloud_assets,
@@ -61,8 +61,8 @@ def _refresh_dashboard_plan_snapshots(reason: str = '', *, lifecycle_limit: int 
     except Exception:
         logger.exception('DASHBOARD_SNAPSHOT_CLOUD_ASSET_REFRESH_FAILED reason=%s', reason)
     try:
-        from cloud import api as cloud_api
-        cloud_api._build_auto_renew_plan_items(now=timezone.now())
+        from cloud.api_tasks import _build_auto_renew_plan_items
+        _build_auto_renew_plan_items(now=timezone.now())
     except (OperationalError, ProgrammingError) as exc:
         if _is_db_table_not_ready_error(exc):
             logger.debug('DASHBOARD_SNAPSHOT_AUTO_RENEW_REFRESH_SKIPPED reason=%s error=%s', reason, exc)
@@ -76,8 +76,8 @@ def _refresh_dashboard_plan_snapshots(reason: str = '', *, lifecycle_limit: int 
     except Exception:
         logger.exception('DASHBOARD_SNAPSHOT_AUTO_RENEW_REFRESH_FAILED reason=%s', reason)
     try:
-        from cloud import api as cloud_api
-        cloud_api._build_notice_plan_bundle(limit=500, future_limit=200, history_limit=1000)
+        from cloud.api_tasks import _build_notice_plan_bundle
+        _build_notice_plan_bundle(limit=500, future_limit=200, history_limit=1000)
     except (OperationalError, ProgrammingError) as exc:
         if _is_db_table_not_ready_error(exc):
             logger.debug('DASHBOARD_SNAPSHOT_NOTICE_REFRESH_SKIPPED reason=%s error=%s', reason, exc)
