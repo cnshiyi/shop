@@ -1,9 +1,5 @@
 """cloud 域后台 API 兼容聚合层。"""
 
-import logging
-
-from asgiref.sync import async_to_sync
-
 from cloud.api_assets import (
     CloudAssetPayloadContext,
     _asset_payload,
@@ -79,8 +75,6 @@ from cloud.api_tasks import (
     update_notice_switches,
 )
 from cloud.dashboard_snapshots import _refresh_dashboard_plan_snapshots, _refresh_dashboard_plan_snapshots_deferred
-from cloud.lifecycle import _delete_instance, _mark_replaced_order_deleted
-from cloud.provisioning import provision_cloud_server
 from cloud.sync_jobs import (
     _active_sync_accounts,
     _asset_retained_static_ip_sync_scope,
@@ -105,22 +99,6 @@ from cloud.sync_jobs import (
     sync_cloud_assets,
 )
 from cloud.task_center import task_center_overview
-
-logger = logging.getLogger(__name__)
-
-
-def _run_rebuild_job(new_order_id: int):
-    """Compatibility wrapper for older tests/imports that patched cloud.api."""
-    saved = async_to_sync(provision_cloud_server)(new_order_id)
-    if saved and getattr(saved, 'status', '') == 'completed' and getattr(saved, 'replacement_for_id', None):
-        logger.info(
-            'AWS 重装迁移后台任务完成，旧实例进入迁移保留期: new_order_id=%s replacement_for_id=%s',
-            saved.id,
-            saved.replacement_for_id,
-        )
-        return saved
-    from cloud.services import run_cloud_server_rebuild_job
-    return run_cloud_server_rebuild_job(new_order_id)
 
 
 __all__ = [
