@@ -1,5 +1,27 @@
 # Refactor Version Record
 
+## 2026-06-02 asset-renewal-expiry-retry-note
+
+### Scope
+
+Small payment timeout recovery fix for unbound asset renewal orders.
+
+### Runtime Changes
+
+- When an unbound `CloudAsset` renewal address-payment order expires, the scanner now unbinds the asset and appends a retry note to the asset.
+- Existing asset notes are preserved, and the retry note is appended uniquely to avoid duplicate timeout text.
+- This makes the existing retry-state expectation explicit after payment-window expiry.
+
+### Verification
+
+Passed locally with `PYTHONDONTWRITEBYTECODE=1 DJANGO_TEST_SQLITE=1`:
+
+```bash
+uv run python -m py_compile orders/payment_scanner.py orders/tests.py
+uv run python manage.py test orders.tests.ChainPaymentScannerTestCase.test_expired_asset_renewal_payment_unbinds_asset_for_retry orders.tests.ChainPaymentScannerTestCase.test_renew_pending_cloud_with_previous_ip_is_candidate --noinput --verbosity 1
+uv run python manage.py check
+```
+
 ## 2026-06-02 aws-sync-ip-release-order-cleanup
 
 ### Scope

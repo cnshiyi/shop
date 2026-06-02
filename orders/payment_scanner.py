@@ -23,6 +23,7 @@ from cloud.models import AddressMonitor, CloudAsset, CloudServerOrder
 from orders.models import Order, Product, Recharge
 from orders.services import usdt_to_trx
 from bot.keyboards import custom_port_keyboard
+from cloud.note_utils import append_note
 from cloud.provisioning import provision_cloud_server
 from cloud.services import apply_cloud_server_renewal, is_cloud_asset_renewal_order, run_cloud_server_renewal_postcheck
 from core.cache import get_config, get_redis, bump_daily_stats, get_daily_stats
@@ -279,7 +280,8 @@ def _expire_timed_out_payment_orders():
     if expired_asset_renewal_order_ids:
         for asset in CloudAsset.objects.filter(order_id__in=expired_asset_renewal_order_ids).order_by('id'):
             asset.order = None
-            asset.save(update_fields=['order', 'updated_at'])
+            asset.note = append_note(asset.note, '续费支付窗口已超时关闭，可重新发起续费。', unique=True)
+            asset.save(update_fields=['order', 'note', 'updated_at'])
     renewal_expired_count = 0
     renewal_orders = list(CloudServerOrder.objects.filter(
         pay_method='address',
