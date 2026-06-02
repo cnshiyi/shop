@@ -4115,3 +4115,41 @@ git diff --check
 - 未跑完整测试套件。
 - 未连接真实 MySQL、AWS Lightsail、阿里云、TRONGrid 或 Telegram。
 - 未执行真实 Telegram 回调、钱包扣款、自动续费支付、云端删机、固定 IP 释放或历史数据清理。
+
+## 2026-06-02 资产详情短返回回调收口
+
+### 范围
+
+本轮继续用 `codex-cli` 监工机器人返回链。审查发现资产详情作为返回来源时，续费支付、重装、修改配置和更换 IP 地区按钮仍可能超过 Telegram `callback_data` 64 字节限制。
+
+### 运行时变化
+
+- 资产详情新增短回调 `cad:<资产ID>:<返回>`，云服务器资产详情新增短回调 `csd:<资产ID>:<返回>`，并继续兼容旧 `cloud:assetdetail:` 和 `cloud:ad:`。
+- 代理列表分页新增短回调 `clp:<页码>`，并注册到原代理列表分页处理器。
+- 续费钱包支付新增短回调 `cloud:rp:<订单ID>:<币种>:<返回>`，并继续兼容旧 `cloud:renewpay:`。
+- `compact_callback_path()` 会把旧资产详情、旧代理列表分页和旧云订单筛选分页压缩到短格式，避免二级按钮继续嵌套长路径。
+
+### 监工结果
+
+- `codex-cli` 复现了长资产详情返回链下的超限样例：续费支付 72 字节、重装 65 字节、修改配置 66 字节、更换 IP 地区 82 字节。
+- 修复后用 7 位订单 ID、7 位资产 ID、5 位页码复查：续费、换 IP、重装、修改配置、支付和地区选择按钮均不超过 64 字节。
+- 自动化“Shop 自动优化监工”已加入真机测试方向：服务器创建、删除、IP 变更、附加 IP 变更、无订单资产续费、生命周期变化和删除计划执行情况。
+
+### 验证
+
+本地已通过:
+
+```bash
+UV_CACHE_DIR=/private/tmp/uv-cache-shop uv run python -m py_compile bot/handlers.py bot/keyboards.py bot/tests.py
+UV_CACHE_DIR=/private/tmp/uv-cache-shop DB_ENGINE=sqlite SQLITE_NAME=/private/tmp/shop-bot-callback-test.sqlite3 uv run python manage.py test bot.tests.RetainedIpRenewalUiTestCase --verbosity 1 --noinput
+UV_CACHE_DIR=/private/tmp/uv-cache-shop DB_ENGINE=sqlite SQLITE_NAME=/private/tmp/shop-callback-length.sqlite3 uv run python manage.py shell -c "from bot.keyboards import cloud_asset_detail_callback, cloud_server_detail, cloud_server_change_ip_region_menu, cloud_server_renew_payment; from decimal import Decimal; b=cloud_asset_detail_callback(9999999,'cloud:list:page:12345'); samples=[btn.callback_data for row in cloud_server_detail(9999999, True, True, True, b, True).inline_keyboard for btn in row if btn.callback_data]; samples += [btn.callback_data for row in cloud_server_renew_payment(9999999, Decimal('12.3'), Decimal('45.6'), False, b).inline_keyboard for btn in row if btn.callback_data]; samples += [btn.callback_data for row in cloud_server_change_ip_region_menu(9999999, [('ap-southeast-1','新加坡')], back_callback=b).inline_keyboard for btn in row if btn.callback_data]; assert all(len(v.encode()) <= 64 for v in samples)"
+UV_CACHE_DIR=/private/tmp/uv-cache-shop uv run python manage.py check
+UV_CACHE_DIR=/private/tmp/uv-cache-shop uv run python manage.py makemigrations --check --dry-run
+git diff --check
+rg -n "service_expires_at|service_expired_at|normalize_service_expiry|CloudLifecyclePlan\\b|CloudNoticePlan\\b|CloudAutoRenewPlan\\b|refund_order|process_refund|create_refund|issue_refund|refund_to_balance|refund_balance|STATUS_REFUNDED|status=['\\\"]refunded['\\\"]" bot core orders cloud shop --glob '!**/migrations/**' --glob '!**/tests.py'
+```
+
+### 剩余风险
+
+- 本轮仍是本地机器人回调和 SQLite 聚焦测试，尚未执行真实 Telegram 点击。
+- 真机云资源创建、删除、IP 变更、附加 IP 变更和删除计划执行将单独写实测报告，避免和普通单元测试混在一起。

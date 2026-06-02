@@ -52,6 +52,11 @@ def cloud_detail_callback(order_id: int, back_callback: str | None = None) -> st
 def cloud_asset_detail_callback(asset_id: int, back_callback: str | None = None, item_kind: str = 'asset') -> str:
     back_callback = compact_callback_path(back_callback)
     item_kind = str(item_kind or 'asset').strip() or 'asset'
+    compact_prefix = {'asset': 'cad', 'server': 'csd'}.get(item_kind)
+    if compact_prefix:
+        if not back_callback:
+            return f'{compact_prefix}:{asset_id}'
+        return f'{compact_prefix}:{asset_id}:{back_callback}'
     if not back_callback:
         return f'cloud:ad:{item_kind}:{asset_id}'
     return f'cloud:ad:{item_kind}:{asset_id}:{back_callback}'
@@ -59,7 +64,7 @@ def cloud_asset_detail_callback(asset_id: int, back_callback: str | None = None,
 
 def cloud_previous_detail_callback(order_id: int, back_callback: str | None = None) -> str:
     back_callback = compact_callback_path(back_callback)
-    if back_callback.startswith(('cloud:detail:', 'cloud:assetdetail:', 'cloud:ad:')):
+    if back_callback.startswith(('cloud:detail:', 'cloud:assetdetail:', 'cloud:ad:', 'cad:', 'csd:')):
         return back_callback
     return cloud_detail_callback(order_id, back_callback)
 
@@ -75,13 +80,25 @@ def cloud_asset_action_callback(action: str, asset_id: int, back_callback: str |
     return append_back_callback(f'cloud:aa:{action}:{asset_id}', back_callback)
 
 
+def cloud_renew_payment_callback(order_id: int, currency: str, back_callback: str | None = None) -> str:
+    return append_back_callback(f'cloud:rp:{order_id}:{currency}', back_callback)
+
+
 def compact_callback_path(callback_data: str | None) -> str:
     text = str(callback_data or '').strip()
     if not text:
         return ''
     parts = text.split(':')
+    if len(parts) >= 2 and parts[0] in {'cad', 'csd'}:
+        nested = compact_callback_path(':'.join(parts[2:]))
+        return f'{parts[0]}:{parts[1]}:{nested}' if nested else f'{parts[0]}:{parts[1]}'
+    if len(parts) >= 2 and parts[0] == 'clp':
+        return f'clp:{parts[1] or "1"}'
     if len(parts) > 4 and parts[:2] == ['cloud', 'ad']:
         nested = compact_callback_path(':'.join(parts[4:]))
+        if parts[2] in {'asset', 'server'}:
+            prefix = 'cad' if parts[2] == 'asset' else 'csd'
+            return f'{prefix}:{parts[3]}:{nested}' if nested else f'{prefix}:{parts[3]}'
         return f'cloud:ad:{parts[2]}:{parts[3]}:{nested}' if nested else f'cloud:ad:{parts[2]}:{parts[3]}'
     if len(parts) >= 3 and parts[:2] == ['cloud', 'assetdetail']:
         item_kind = 'asset'
@@ -92,10 +109,15 @@ def compact_callback_path(callback_data: str | None) -> str:
             item_id = parts[3]
             nested_parts = parts[4:]
         nested = compact_callback_path(':'.join(nested_parts))
+        if item_kind in {'asset', 'server'}:
+            prefix = 'cad' if item_kind == 'asset' else 'csd'
+            return f'{prefix}:{item_id}:{nested}' if nested else f'{prefix}:{item_id}'
         return f'cloud:ad:{item_kind}:{item_id}:{nested}' if nested else f'cloud:ad:{item_kind}:{item_id}'
     if len(parts) > 3 and parts[:2] == ['cloud', 'detail']:
         nested = compact_callback_path(':'.join(parts[3:]))
         return f'cloud:detail:{parts[2]}:{nested}' if nested else f'cloud:detail:{parts[2]}'
+    if len(parts) >= 4 and parts[:3] == ['cloud', 'list', 'page']:
+        return f'clp:{parts[3] or "1"}'
     if len(parts) >= 7 and parts[:4] == ['profile', 'orders', 'cloud', 'filter'] and parts[5] == 'page':
         return f'poc:{parts[4] or "all"}:{parts[6] or "1"}'
     if len(parts) >= 5 and parts[:3] == ['profile', 'orders', 'cloud'] and parts[3] == 'page':
@@ -600,9 +622,9 @@ def cloud_auto_renew_notice_actions(order_id: int):
 
 def cloud_server_renew_payment(order_id: int, amount, trx_amount, auto_renew_enabled: bool = False, back_callback: str | None = None):
     kb = InlineKeyboardBuilder()
-    kb.row(InlineKeyboardButton(text=f'💳 USDT钱包支付 ({fmt_amount(amount)} U)', callback_data=append_back_callback(f'cloud:renewpay:{order_id}:USDT', back_callback)))
+    kb.row(InlineKeyboardButton(text=f'💳 USDT钱包支付 ({fmt_amount(amount)} U)', callback_data=cloud_renew_payment_callback(order_id, 'USDT', back_callback)))
     if trx_amount is not None:
-        kb.row(InlineKeyboardButton(text=f'💳 TRX钱包支付 ({fmt_amount(trx_amount)} TRX)', callback_data=append_back_callback(f'cloud:renewpay:{order_id}:TRX', back_callback)))
+        kb.row(InlineKeyboardButton(text=f'💳 TRX钱包支付 ({fmt_amount(trx_amount)} TRX)', callback_data=cloud_renew_payment_callback(order_id, 'TRX', back_callback)))
     kb.row(InlineKeyboardButton(text='🔙 返回详情', callback_data=cloud_previous_detail_callback(order_id, back_callback)))
     return _log_inline_keyboard(
         'cloud_server_renew_payment',

@@ -961,27 +961,28 @@ class RetainedIpRenewalUiTestCase(SimpleTestCase):
         )
         self.assertEqual(
             cloud_asset_detail_callback(99, back_callback),
-            'cloud:ad:asset:99:poc:paid:2',
+            'cad:99:poc:paid:2',
         )
         self.assertEqual(
             cloud_previous_detail_callback(88, 'cloud:ad:asset:99:cloud:list:page:3'),
-            'cloud:ad:asset:99:cloud:list:page:3',
+            'cad:99:clp:3',
         )
         self.assertEqual(
             cloud_previous_detail_callback(88, 'cloud:assetdetail:99:profile:orders:cloud:filter:paid:page:2'),
-            'cloud:ad:asset:99:poc:paid:2',
+            'cad:99:poc:paid:2',
         )
         self.assertEqual(
             cloud_previous_detail_callback(88, 'cloud:assetdetail:asset:99:profile:orders:cloud:filter:paid:page:2'),
-            'cloud:ad:asset:99:poc:paid:2',
+            'cad:99:poc:paid:2',
         )
         self.assertEqual(
             cloud_previous_detail_callback(88, back_callback),
             'cloud:detail:88:poc:paid:2',
         )
         self.assertEqual(compact_callback_path(back_callback), 'poc:paid:2')
-        self.assertEqual(compact_callback_path('cloud:assetdetail:99'), 'cloud:ad:asset:99')
-        self.assertEqual(compact_callback_path('cloud:assetdetail:asset:99'), 'cloud:ad:asset:99')
+        self.assertEqual(compact_callback_path('cloud:assetdetail:99'), 'cad:99')
+        self.assertEqual(compact_callback_path('cloud:assetdetail:asset:99'), 'cad:99')
+        self.assertEqual(compact_callback_path('cloud:list:page:12345'), 'clp:12345')
 
     def test_cloud_server_detail_actions_keep_back_path(self):
         markup = cloud_server_detail(
@@ -1001,12 +1002,31 @@ class RetainedIpRenewalUiTestCase(SimpleTestCase):
         self.assertIn('poc:paid:2', callbacks)
         self.assertTrue(all(len(item.encode()) <= 64 for item in callbacks if item))
 
+    def test_cloud_server_detail_actions_from_long_asset_detail_stay_under_callback_limit(self):
+        back_callback = 'cloud:ad:asset:9999999:cloud:list:page:12345'
+        markup = cloud_server_detail(
+            9999999,
+            can_renew=True,
+            can_change_ip=True,
+            can_reinit=True,
+            back_callback=back_callback,
+            can_upgrade=True,
+        )
+        callbacks = [button.callback_data for row in markup.inline_keyboard for button in row]
+
+        self.assertIn('cloud:renew:9999999:cad:9999999:clp:12345', callbacks)
+        self.assertIn('cloud:ip:9999999:cad:9999999:clp:12345', callbacks)
+        self.assertIn('cloud:reinit:9999999:cad:9999999:clp:12345', callbacks)
+        self.assertIn('cloud:upgrade:9999999:cad:9999999:clp:12345', callbacks)
+        self.assertIn('cad:9999999:clp:12345', callbacks)
+        self.assertTrue(all(len(item.encode()) <= 64 for item in callbacks if item))
+
     def test_reinstall_cancel_buttons_keep_back_path(self):
         order_markup = _reinstall_confirm_keyboard(88, 'token', 'cloud:list:page:3')
         asset_markup = _asset_reinstall_confirm_keyboard(99, 'token', 'cloud:querymenu')
 
-        self.assertEqual(order_markup.inline_keyboard[1][0].callback_data, 'cloud:detail:88:cloud:list:page:3')
-        self.assertEqual(asset_markup.inline_keyboard[1][0].callback_data, 'cloud:ad:asset:99:cloud:querymenu')
+        self.assertEqual(order_markup.inline_keyboard[1][0].callback_data, 'cloud:detail:88:clp:3')
+        self.assertEqual(asset_markup.inline_keyboard[1][0].callback_data, 'cad:99:cloud:querymenu')
 
     def test_asset_renewal_plan_keyboard_keeps_back_path(self):
         plans = [SimpleNamespace(id=1)]
@@ -1014,7 +1034,7 @@ class RetainedIpRenewalUiTestCase(SimpleTestCase):
         markup = _asset_renewal_plan_keyboard(99, plans, 'cloud:querymenu')
 
         self.assertEqual(markup.inline_keyboard[0][0].callback_data, 'cloud:assetrenewplan:99:1:cloud:querymenu')
-        self.assertEqual(markup.inline_keyboard[-1][0].callback_data, 'cloud:ad:asset:99:cloud:querymenu')
+        self.assertEqual(markup.inline_keyboard[-1][0].callback_data, 'cad:99:cloud:querymenu')
 
     def test_retained_ip_renewal_plan_keyboard_keeps_back_path(self):
         plans = [SimpleNamespace(id=7)]
@@ -1028,18 +1048,31 @@ class RetainedIpRenewalUiTestCase(SimpleTestCase):
         markup = cloud_server_renew_payment(88, Decimal('12.3'), Decimal('45.6'), back_callback='cloud:querymenu')
         callbacks = [button.callback_data for row in markup.inline_keyboard for button in row]
 
-        self.assertIn('cloud:renewpay:88:USDT:cloud:querymenu', callbacks)
-        self.assertIn('cloud:renewpay:88:TRX:cloud:querymenu', callbacks)
+        self.assertIn('cloud:rp:88:USDT:cloud:querymenu', callbacks)
+        self.assertIn('cloud:rp:88:TRX:cloud:querymenu', callbacks)
         self.assertIn('cloud:detail:88:cloud:querymenu', callbacks)
+        self.assertTrue(all(len(item.encode()) <= 64 for item in callbacks if item))
 
     def test_cloud_renew_payment_from_asset_detail_returns_to_asset_detail(self):
         asset_detail_back = 'cloud:ad:asset:99:cloud:list:page:3'
         markup = cloud_server_renew_payment(88, Decimal('12.3'), Decimal('45.6'), back_callback=asset_detail_back)
         callbacks = [button.callback_data for row in markup.inline_keyboard for button in row]
+        compact_asset_detail_back = 'cad:99:clp:3'
 
-        self.assertIn(f'cloud:renewpay:88:USDT:{asset_detail_back}', callbacks)
-        self.assertIn(asset_detail_back, callbacks)
-        self.assertNotIn(f'cloud:detail:88:{asset_detail_back}', callbacks)
+        self.assertIn(f'cloud:rp:88:USDT:{compact_asset_detail_back}', callbacks)
+        self.assertIn(compact_asset_detail_back, callbacks)
+        self.assertNotIn(f'cloud:detail:88:{compact_asset_detail_back}', callbacks)
+        self.assertTrue(all(len(item.encode()) <= 64 for item in callbacks if item))
+
+    def test_cloud_renew_payment_from_long_asset_detail_stays_under_callback_limit(self):
+        asset_detail_back = 'cloud:ad:asset:9999999:cloud:list:page:12345'
+        markup = cloud_server_renew_payment(9999999, Decimal('12.3'), Decimal('45.6'), back_callback=asset_detail_back)
+        callbacks = [button.callback_data for row in markup.inline_keyboard for button in row]
+
+        self.assertIn('cloud:rp:9999999:USDT:cad:9999999:clp:12345', callbacks)
+        self.assertIn('cloud:rp:9999999:TRX:cad:9999999:clp:12345', callbacks)
+        self.assertIn('cad:9999999:clp:12345', callbacks)
+        self.assertTrue(all(len(item.encode()) <= 64 for item in callbacks if item))
 
     def test_cloud_change_ip_keyboards_keep_back_path(self):
         regions = [
@@ -1067,10 +1100,11 @@ class RetainedIpRenewalUiTestCase(SimpleTestCase):
         asset_detail_back = 'cloud:ad:asset:99:cloud:list:page:3'
         markup = cloud_server_change_ip_region_menu(88, regions, back_callback=asset_detail_back)
         callbacks = [button.callback_data for row in markup.inline_keyboard for button in row]
+        compact_asset_detail_back = 'cad:99:clp:3'
 
-        self.assertIn(f'cloud:ipregion:88:us-east-1:{asset_detail_back}', callbacks)
-        self.assertIn(asset_detail_back, callbacks)
-        self.assertNotIn(f'cloud:detail:88:{asset_detail_back}', callbacks)
+        self.assertIn(f'cloud:ipregion:88:us-east-1:{compact_asset_detail_back}', callbacks)
+        self.assertIn(compact_asset_detail_back, callbacks)
+        self.assertNotIn(f'cloud:detail:88:{compact_asset_detail_back}', callbacks)
 
     def test_asset_change_ip_action_keeps_back_path_when_rendering_regions(self):
         source = inspect.getsource(register_handlers)
@@ -1088,6 +1122,8 @@ class RetainedIpRenewalUiTestCase(SimpleTestCase):
 
         self.assertIn("@dp.callback_query(F.data.startswith('cloud:assetdetail:'))", source)
         self.assertIn("@dp.callback_query(F.data.startswith('cloud:ad:'))", source)
+        self.assertIn("@dp.callback_query(F.data.startswith('cad:'))", source)
+        self.assertIn("@dp.callback_query(F.data.startswith('csd:'))", source)
         self.assertIn("parts[:2] == ['cloud', 'ad']", asset_detail_source)
         self.assertIn("parts[:2] == ['cloud', 'assetdetail']", asset_detail_source)
         self.assertIn("item_id = int(raw_item_id)", asset_detail_source)
@@ -1095,6 +1131,8 @@ class RetainedIpRenewalUiTestCase(SimpleTestCase):
     def test_compact_profile_cloud_order_callback_is_registered(self):
         source = inspect.getsource(register_handlers)
         self.assertIn("@dp.callback_query(F.data.startswith('poc:'))", source)
+        self.assertIn("@dp.callback_query(F.data.startswith('clp:'))", source)
+        self.assertIn("@dp.callback_query(F.data.startswith('cloud:rp:'))", source)
         self.assertIn("await _render_profile_cloud_orders(callback, page=page, order_filter=order_filter)", source)
 
     def test_cloud_order_list_uses_short_back_callback(self):

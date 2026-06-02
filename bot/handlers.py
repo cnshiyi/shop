@@ -1175,16 +1175,20 @@ def _callback_route_label(callback_data: str | None) -> str:
         ('cloud:assetinit:', 'cloud.assetinit 资产重新安装'),
         ('cloud:aa:', 'cloud.aa 资产操作'),
         ('cloud:assetaction:', 'cloud.assetaction 资产操作'),
+        ('cad:', 'cad 人工代理详情短回调'),
+        ('csd:', 'csd 云服务器资产详情短回调'),
         ('cloud:ad:', 'cloud.ad 人工代理详情'),
         ('cloud:assetdetail:', 'cloud.assetdetail 人工代理详情'),
         ('cloud:detail:', 'cloud.detail 代理详情'),
         ('cloud:list:page:', 'cloud.list.page 代理列表分页'),
+        ('clp:', 'cloud.list.page 代理列表短分页'),
         ('cloud:autorenewlist:all:', 'cloud.autorenewlist.all 自动续费批量开关'),
         ('cloud:autorenewlist:page:', 'cloud.autorenewlist.page 自动续费列表分页'),
         ('cloud:autorenewlist:on:', 'cloud.autorenewlist.on 开启自动续费'),
         ('cloud:autorenewlist:off:', 'cloud.autorenewlist.off 关闭自动续费'),
         ('cloud:queryip:page:', 'cloud.queryip.page IP查询分页'),
         ('poc:', 'profile.orders.cloud.compact 云订单短返回'),
+        ('cloud:rp:', 'cloud.rp 续费钱包支付短回调'),
         ('cloud:renewpay:', 'cloud.renewpay 续费钱包支付'),
         ('cloud:renewwallet:', 'cloud.renewwallet 自动续费钱包支付'),
         ('cloud:assetrenewplan:', 'cloud.assetrenewplan 未绑定资产续费选套餐'),
@@ -3938,12 +3942,16 @@ def register_handlers(dp: Dispatcher):
         else:
             await _safe_edit_text(callback.message, f'🔎 代理列表\n\n{scope}\n请选择要查看的代理：', reply_markup=cloud_server_list(page_items, page, total_pages, 'cloud:list:page', renew_all=True))
 
+    @dp.callback_query(F.data.startswith('clp:'))
     @dp.callback_query(F.data.startswith('cloud:list:page:'))
     async def cb_cloud_list_page(callback: CallbackQuery, state: FSMContext):
         await state.clear()
         await _safe_callback_answer(callback)
         user = await get_or_create_user(callback.from_user.id, callback.from_user.username, callback.from_user.first_name)
-        page = max(1, int(callback.data.split(':')[3]))
+        if callback.data.startswith('clp:'):
+            page = max(1, int(callback.data.split(':')[1]))
+        else:
+            page = max(1, int(callback.data.split(':')[3]))
         visible_servers, scope = await _visible_cloud_servers_for_context(callback, user)
         per_page = 8
         total_visible = len(visible_servers)
@@ -4191,11 +4199,17 @@ def register_handlers(dp: Dispatcher):
 
     @dp.callback_query(F.data.startswith('cloud:assetdetail:'))
     @dp.callback_query(F.data.startswith('cloud:ad:'))
+    @dp.callback_query(F.data.startswith('cad:'))
+    @dp.callback_query(F.data.startswith('csd:'))
     async def cb_cloud_asset_detail(callback: CallbackQuery):
         await _safe_callback_answer(callback)
         user = await get_or_create_user(callback.from_user.id, callback.from_user.username, callback.from_user.first_name)
         parts = callback.data.split(':')
-        if len(parts) >= 4 and parts[:2] == ['cloud', 'ad']:
+        if len(parts) >= 2 and parts[0] in {'cad', 'csd'}:
+            item_kind = 'asset' if parts[0] == 'cad' else 'server'
+            raw_item_id = parts[1]
+            back_parts = parts[2:]
+        elif len(parts) >= 4 and parts[:2] == ['cloud', 'ad']:
             item_kind = parts[2] or 'asset'
             raw_item_id = parts[3]
             back_parts = parts[4:]
@@ -4270,7 +4284,7 @@ def register_handlers(dp: Dispatcher):
         parts = callback.data.split(':', 4)
         action = parts[2]
         asset_id = int(parts[3])
-        back_callback = parts[4] if len(parts) > 4 else 'cloud:list:page:1'
+        back_callback = compact_callback_path(parts[4]) if len(parts) > 4 else 'clp:1'
         asset_detail_back = cloud_asset_detail_callback(asset_id, back_callback)
         if action == 'upgrade':
             await _safe_callback_answer(callback, '正在加载修改配置')
@@ -4826,13 +4840,17 @@ def register_handlers(dp: Dispatcher):
             ('支付方式', '钱包自动续费'),
         ])
 
+    @dp.callback_query(F.data.startswith('cloud:rp:'))
     @dp.callback_query(F.data.startswith('cloud:renewpay:'))
     async def cb_cloud_renew_pay(callback: CallbackQuery, state: FSMContext):
         await _safe_callback_answer(callback, '续费钱包支付处理中')
         user = await get_or_create_user(callback.from_user.id, callback.from_user.username, callback.from_user.first_name)
         parts = callback.data.split(':', 4)
-        _, _, order_id_text, currency = parts[:4]
-        back_callback = parts[4] if len(parts) > 4 else ''
+        _, action, order_id_text, currency = parts[:4]
+        back_callback = compact_callback_path(parts[4]) if len(parts) > 4 else ''
+        if action not in {'renewpay', 'rp'}:
+            await _safe_callback_answer(callback, '续费钱包支付参数无效', show_alert=True)
+            return
         currency = str(currency or '').upper()
         if not _is_supported_payment_currency(currency):
             await _safe_callback_answer(callback, '不支持的支付币种', show_alert=True)
