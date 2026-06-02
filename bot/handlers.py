@@ -4350,7 +4350,7 @@ def register_handlers(dp: Dispatcher):
                 return
             regions = [(code, name) for code, name in await _get_cached_custom_regions() if code != 'cn-hongkong']
             text = '🌐 更换IP\n\n请选择新的地区：'
-            markup = cloud_server_change_ip_region_menu(order.id, regions, expanded=False)
+            markup = cloud_server_change_ip_region_menu(order.id, regions, expanded=False, back_callback=back_callback)
             edited = await _safe_edit_text(callback.message, text, reply_markup=markup)
             if edited is None:
                 sent = await callback.message.reply(text, reply_markup=markup)
