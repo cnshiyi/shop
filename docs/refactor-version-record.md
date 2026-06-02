@@ -1861,6 +1861,32 @@ UV_CACHE_DIR=/private/tmp/uv-cache-shop DJANGO_TEST_SQLITE=1 PYTHONDONTWRITEBYTE
 UV_CACHE_DIR=/private/tmp/uv-cache-shop DJANGO_TEST_SQLITE=1 PYTHONDONTWRITEBYTECODE=1 uv run python manage.py makemigrations --check --dry-run
 ```
 
+## 2026-06-02 生产测试覆盖钩子清理
+
+### 范围
+
+继续复查功能代码和测试代码边界，重点处理生产模块中为了兼容测试 patch `cloud.api` 聚合层而保留的 `_cloud_api_override()`。
+
+### 变更
+
+- 移除 `cloud/api_assets.py`、`cloud/api_asset_snapshots.py`、`cloud/api_asset_edit.py`、`cloud/api_sync.py`、`cloud/api_monitors.py`、`cloud/api_tasks.py` 中的 `_cloud_api_override()`。
+- 生产模块改为直接调用真实依赖，不再回看 `cloud.api` 聚合层。
+- 两个管理命令改为从真实模块导入，不再依赖 `cloud.api` 聚合层。
+- 测试文件改为从真实模块导入 API，并将 patch 目标调整到真实模块路径。
+
+### 验证
+
+已通过：
+
+```bash
+rg -n "def _cloud_api_override|_cloud_api_override\\(|from cloud\\.api import|import cloud\\.api|cloud\\.api\\." cloud bot orders core shop --glob '!**/migrations/**' -S
+rg -n "\\b(TestCase|SimpleTestCase|TransactionTestCase|APITestCase|RequestFactory|AsyncMock|MagicMock|Mock|patch\\(|pytest|unittest|def test_|真机测试|测试用例|仅测试|for test|test only|older tests/imports)\\b" cloud bot orders core shop --glob '!**/migrations/**' --glob '!**/tests.py' --glob '!**/tests_*.py' --glob '!**/test_*.py' -S
+UV_CACHE_DIR=/private/tmp/uv-cache-shop DJANGO_TEST_SQLITE=1 PYTHONDONTWRITEBYTECODE=1 uv run python -m py_compile cloud/api_sync.py cloud/api_asset_snapshots.py cloud/api_assets.py cloud/api_asset_edit.py cloud/api_monitors.py cloud/api_tasks.py cloud/tests.py cloud/management/commands/refresh_cloud_asset_dashboard_snapshots.py cloud/management/commands/refresh_notice_plans.py
+UV_CACHE_DIR=/private/tmp/uv-cache-shop DJANGO_TEST_SQLITE=1 PYTHONDONTWRITEBYTECODE=1 uv run python manage.py test cloud.tests.CloudServerServicesTestCase.test_cloud_assets_list_uses_bulk_order_inference_without_per_asset_fallback cloud.tests.CloudServerServicesTestCase.test_cloud_asset_dashboard_snapshot_refresh_materializes_paginated_list cloud.tests.CloudServerServicesTestCase.test_update_cloud_asset_defers_snapshot_refresh cloud.tests.CloudServerServicesTestCase.test_sync_cloud_asset_status_uses_asset_scope cloud.tests.CloudServerServicesTestCase.test_sync_retained_ip_asset_uses_order_account_and_static_ip_scope cloud.tests.CloudServerServicesTestCase.test_auto_renew_task_detail_includes_due_retry_and_fallback_items cloud.tests.CloudServerServicesTestCase.test_auto_renew_detail_keeps_valid_order_without_asset cloud.tests.CloudServerServicesTestCase.test_run_auto_renew_tasks_executes_due_retry_and_fallback_queue cloud.tests.CloudServerServicesTestCase.test_run_auto_renew_order_executes_single_order cloud.tests.CloudServerServicesTestCase.test_dashboard_asset_order_inference_scopes_duplicate_ip_by_account cloud.tests.DashboardTronBalanceQueryTestCase.test_fetch_address_chain_balances_uses_resolved_headers
+UV_CACHE_DIR=/private/tmp/uv-cache-shop DJANGO_TEST_SQLITE=1 PYTHONDONTWRITEBYTECODE=1 uv run python manage.py check
+UV_CACHE_DIR=/private/tmp/uv-cache-shop DJANGO_TEST_SQLITE=1 PYTHONDONTWRITEBYTECODE=1 uv run python manage.py makemigrations --check --dry-run
+```
+
 ## 2026-06-02 生产代码和测试代码边界复查
 
 ### 范围
