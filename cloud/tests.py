@@ -10606,6 +10606,59 @@ class CloudServerServicesTestCase(TestCase):
         self.assertEqual(member.balance, Decimal('81.000000'))
         self.assertEqual(balance_change['payer_user_id'], member.id)
 
+    # 功能：验证自动续费拿到订单锁后会复核到期窗口，避免旧任务把已续期订单改回待续费。
+    def test_run_auto_renew_skips_when_asset_expiry_moved_out_of_due_window(self):
+        from orders.models import BalanceLedger
+
+        self.user.balance = Decimal('100.00')
+        self.user.save(update_fields=['balance', 'updated_at'])
+        expires_at = timezone.now() + timezone.timedelta(days=5)
+        order = CloudServerOrder.objects.create(
+            order_no='AUTO-RENEW-SKIP-FUTURE-EXPIRY-1',
+            user=self.user,
+            plan=self.plan,
+            provider=self.plan.provider,
+            region_code=self.plan.region_code,
+            region_name=self.plan.region_name,
+            plan_name=self.plan.plan_name,
+            quantity=1,
+            currency='USDT',
+            total_amount='19.00',
+            pay_amount='19.00',
+            pay_method='balance',
+            status='completed',
+            public_ip='8.8.8.36',
+            instance_id='auto-renew-skip-future-expiry',
+            service_started_at=timezone.now() - timezone.timedelta(days=30),
+            suspend_at=expires_at + timezone.timedelta(days=1),
+            auto_renew_enabled=True,
+        )
+        CloudAsset.objects.create(
+            kind=CloudAsset.KIND_SERVER,
+            source=CloudAsset.SOURCE_ORDER,
+            order=order,
+            user=self.user,
+            provider=order.provider,
+            region_code=order.region_code,
+            region_name=order.region_name,
+            asset_name='auto-renew-skip-future-expiry',
+            public_ip='8.8.8.36',
+            actual_expires_at=expires_at,
+            status=CloudAsset.STATUS_RUNNING,
+        )
+
+        renewed, err, balance_change = async_to_sync(_run_auto_renew)(order.id)
+
+        order.refresh_from_db()
+        self.user.refresh_from_db()
+        self.assertIsNone(renewed)
+        self.assertEqual(err, '未到自动续费时间，跳过本轮自动续费')
+        self.assertEqual(balance_change, {})
+        self.assertEqual(order.status, 'completed')
+        self.assertEqual(order.pay_method, 'balance')
+        self.assertEqual(self.user.balance, Decimal('100.000000'))
+        self.assertFalse(BalanceLedger.objects.filter(related_type='cloud_order', related_id=order.id, type='cloud_order_balance_pay').exists())
+
     # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
     def test_send_order_notice_batch_prefers_bound_group_and_skips_private(self):
         group = TelegramGroupFilter.objects.create(
@@ -14843,6 +14896,17 @@ class CloudServerServicesTestCase(TestCase):
         self.assertFalse(cleanup_qs.filter(id=order.id).exists())
 
         CloudServerOrder.objects.filter(id=order.id).update(ip_recycle_at=cutoff - timezone.timedelta(days=1))
+        self.assertFalse(cleanup_qs.filter(id=order.id).exists())
+
+        CloudServerOrder.objects.filter(id=order.id).update(
+            public_ip='',
+            previous_public_ip='',
+            static_ip_name='',
+            server_name='',
+            instance_id='',
+            provider_resource_id='',
+            mtproxy_host='',
+        )
         self.assertTrue(cleanup_qs.filter(id=order.id).exists())
 
     # 功能：验证旧记录清理不会把非终态云订单纳入删除候选。
@@ -14955,6 +15019,38 @@ class CloudServerServicesTestCase(TestCase):
             server_name='cleanup-pending-resource',
             instance_id='cleanup-pending-resource',
             delete_at=timezone.now() + timezone.timedelta(days=1),
+        )
+        CloudServerOrder.objects.filter(id=order.id).update(created_at=cutoff - timezone.timedelta(days=1))
+
+        cleanup_qs = CloudServerOrder.objects.filter(created_at__lt=cutoff).filter(Command._cloud_order_cleanup_filter(cutoff))
+
+        self.assertFalse(cleanup_qs.filter(id=order.id).exists())
+
+    # 功能：验证旧记录清理不会删除仍有资源线索的已删机云订单。
+    def test_cleanup_old_records_keeps_deleted_order_with_resource_context(self):
+        from core.management.commands.cleanup_old_records import Command
+
+        cutoff = timezone.now() - timezone.timedelta(days=100)
+        order = CloudServerOrder.objects.create(
+            order_no='HB-TEST-CLEANUP-KEEPS-DELETED-RESOURCE',
+            user=self.user,
+            plan=self.plan,
+            provider=self.plan.provider,
+            region_code=self.plan.region_code,
+            region_name=self.plan.region_name,
+            plan_name=self.plan.plan_name,
+            quantity=1,
+            currency='USDT',
+            total_amount='19.00',
+            pay_amount='19.00',
+            status='deleted',
+            public_ip='20.20.22.4',
+            previous_public_ip='20.20.22.4',
+            static_ip_name='StaticIp-cleanup-deleted-resource',
+            server_name='cleanup-deleted-resource',
+            instance_id='cleanup-deleted-resource',
+            provider_resource_id='cleanup-deleted-resource',
+            ip_recycle_at=cutoff - timezone.timedelta(days=1),
         )
         CloudServerOrder.objects.filter(id=order.id).update(created_at=cutoff - timezone.timedelta(days=1))
 
