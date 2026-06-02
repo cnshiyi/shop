@@ -1074,6 +1074,23 @@ class RetainedIpRenewalUiTestCase(SimpleTestCase):
         self.assertIn('cloud:assetaction:changeip:99:cloud:querymenu', callbacks)
         self.assertIn('cloud:assetaction:upgrade:99:cloud:querymenu', callbacks)
 
+    def test_cloud_upgrade_payment_keeps_back_path(self):
+        source = inspect.getsource(register_handlers)
+        asset_action_source = source.split('async def cb_cloud_asset_action', 1)[1].split("@dp.callback_query(F.data.startswith('cloud:assetinit:'))", 1)[0]
+        order_upgrade_source = source.split('async def cb_cloud_upgrade', 1)[1].split("@dp.callback_query(F.data.startswith('cloud:upgradepay:'))", 1)[0]
+        upgrade_pay_source = source.split('async def cb_cloud_upgrade_pay', 1)[1].split("@dp.callback_query(F.data.startswith('cloud:reinit:'))", 1)[0]
+
+        self.assertIn(
+            "append_back_callback(f\"cloud:upgradepay:{order.id}:{plan['id']}\", back_callback)",
+            asset_action_source,
+        )
+        self.assertIn(
+            "append_back_callback(f\"cloud:upgradepay:{order_id}:{plan['id']}\", back_callback)",
+            order_upgrade_source,
+        )
+        self.assertIn("callback.data.split(':', 4)", upgrade_pay_source)
+        self.assertIn('cloud_detail_callback(int(raw_order_id), back_callback)', upgrade_pay_source)
+
     def test_validate_reinstall_proxy_link_keeps_strict_port_check_by_default(self):
         order = SimpleNamespace(
             id=1,
