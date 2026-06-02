@@ -219,7 +219,7 @@ def _deferred_lifecycle_time(stored_at, computed_at, now=None):
 
 def _notice_schedule(order: CloudServerOrder, asset: CloudAsset) -> dict:
     order = _hydrate_order_from_proxy_asset(order, asset=asset)
-    expires_at = getattr(order, 'service_expires_at', None) or asset.actual_expires_at
+    expires_at = asset.actual_expires_at or getattr(order, 'service_expires_at', None)
     schedule = compute_order_lifecycle_fields(expires_at)
     now = timezone.now()
     suspend_at = _deferred_lifecycle_time(getattr(order, 'suspend_at', None), schedule.get('suspend_at'), now)

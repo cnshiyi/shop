@@ -1,5 +1,28 @@
 # 重构版本记录
 
+## 2026-06-02 通知计划到期时间统一修复
+
+### 范围
+
+本轮按用户要求确认并统一“通知计划、删除计划、代理列表”的到期时间来源，避免同一台代理在不同页面出现不同到期时间。
+
+### 运行变更
+
+- 通知计划对有关联资产的云订单，改为优先读取 `CloudAsset.actual_expires_at`。
+- 删除计划和代理列表原本已经读取 `CloudAsset.actual_expires_at`，本轮保持不变。
+- 当资产实际到期时间缺失时，通知计划仍回退读取订单 `service_expires_at`，避免历史订单没有资产时间时完全丢失通知。
+- 新增回归测试，故意制造订单时间和资产时间不同，断言通知计划、删除计划、代理列表都使用资产实际到期时间。
+
+### 验证
+
+本地已通过：
+
+```bash
+PYTHONDONTWRITEBYTECODE=1 DJANGO_TEST_SQLITE=1 uv run python -m py_compile cloud/lifecycle.py cloud/tests.py bot/api.py cloud/api_assets.py
+PYTHONDONTWRITEBYTECODE=1 DJANGO_TEST_SQLITE=1 uv run python manage.py test cloud.tests.CloudServerServicesTestCase.test_notice_delete_plan_and_proxy_list_use_asset_expiry cloud.tests.CloudServerServicesTestCase.test_notice_plan_text_shows_configured_execution_time cloud.tests.CloudServerServicesTestCase.test_aws_notice_schedule_does_not_override_manual_order_expiry --noinput --verbosity 1
+PYTHONDONTWRITEBYTECODE=1 DJANGO_TEST_SQLITE=1 uv run python manage.py check
+```
+
 ## 2026-06-02 群内保留固定 IP 续费套餐按钮授权修复
 
 ### 范围
