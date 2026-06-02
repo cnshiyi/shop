@@ -1,5 +1,30 @@
 # 重构版本记录
 
+## 2026-06-02 17:11 自动监工：计划刷新接口命名收口
+
+### 范围
+
+本轮继续监工云资产生命周期重构，起始工作树已有计划刷新接口命名调整：生命周期计划和通知计划的后台刷新函数从 `table` 命名收口为 `view` 命名，避免继续暗示旧计划快照表恢复。
+
+### 复查结论
+
+- `refresh_lifecycle_plan_table` 和 `refresh_notice_plan_table` 在运行代码中已改为 `refresh_lifecycle_plan_view`、`refresh_notice_plan_view`；URL 和 API 聚合导出同步更新。
+- 相关测试名称同步改为“构建计划视图”，不再使用“填充计划表/快照表”语义。
+- 未发现 `CloudServerOrder.service_expires_at` 数据库列危险 ORM、`normalize_service_expiry`、`service_expired_at`、旧计划快照模型或退款函数名回流。
+- `CloudAsset.actual_expires_at` 仍是唯一结构化服务到期事实；`service_expires_at` 仍仅作为兼容 payload 字段、日志标签或测试断言中的视图字段名存在。
+- 废弃 app 未回到 `INSTALLED_APPS` 或运行时导入；`dashboard_api` 仍只是现有 URL namespace / helper 命名。
+
+### 验证
+
+本地已通过：
+
+```bash
+UV_CACHE_DIR=/private/tmp/uv-cache-shop DJANGO_TEST_SQLITE=1 PYTHONDONTWRITEBYTECODE=1 uv run python manage.py check
+UV_CACHE_DIR=/private/tmp/uv-cache-shop DJANGO_TEST_SQLITE=1 PYTHONDONTWRITEBYTECODE=1 uv run python -m py_compile bot/api.py cloud/api.py cloud/api_tasks.py shop/dashboard_urls.py cloud/tests.py
+UV_CACHE_DIR=/private/tmp/uv-cache-shop DJANGO_TEST_SQLITE=1 PYTHONDONTWRITEBYTECODE=1 uv run python manage.py makemigrations --check --dry-run
+UV_CACHE_DIR=/private/tmp/uv-cache-shop DB_ENGINE=sqlite SQLITE_NAME=/private/tmp/shop-monitor-plan-view.sqlite3 PYTHONDONTWRITEBYTECODE=1 uv run python manage.py test cloud.tests.CloudServerServicesTestCase.test_refresh_lifecycle_plans_command_builds_lifecycle_plan_view cloud.tests.CloudServerServicesTestCase.test_refresh_lifecycle_plan_view_api_builds_lifecycle_plan_view cloud.tests.CloudServerServicesTestCase.test_refresh_notice_plans_command_builds_notice_plan_view cloud.tests.CloudServerServicesTestCase.test_refresh_notice_plan_view_api_builds_notice_plan_view cloud.tests.CloudServerServicesTestCase.test_notice_task_detail_uses_notice_plan_view --noinput --verbosity 1
+```
+
 ## 2026-06-02 16:52 自动监工：固定 IP 回收回流复查
 
 ### 范围
