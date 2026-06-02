@@ -37,6 +37,7 @@ from cloud.provisioning import (
     _extract_proxy_links,
     _get_aws_create_payload,
     _get_rebuild_static_ip_context,
+    _log_provision_result,
     _mark_failed,
     _mark_instance_created,
     _mark_provisioning_start,
@@ -63,6 +64,50 @@ from orders.payment_scanner import _confirm_cloud_server_order
 
 # 测试类：组织 CloudServerServicesTestCase 相关的回归测试。
 class CloudServerServicesTestCase(TestCase):
+    # 功能：验证开通结果日志在异步开通流程返回后不再隐式查询资产表。
+    def test_provision_result_log_uses_cached_asset_expiry(self):
+        order = CloudServerOrder.objects.create(
+            order_no='PROVISION-LOG-CACHED-EXPIRY',
+            status='completed',
+            provider='aws_lightsail',
+            region_code='ap-southeast-1',
+            server_name='provision-log-cached-expiry',
+            instance_id='provision-log-cached-expiry',
+            public_ip='10.0.0.91',
+            mtproxy_port=9528,
+        )
+        expires_at = timezone.now() + timezone.timedelta(days=31)
+        order._asset_expires_at = expires_at
+
+        with patch('cloud.provisioning.order_asset_expiry', side_effect=AssertionError('不应在日志中查询资产到期时间')):
+            _log_provision_result(order)
+
+    # 功能：验证开通结果日志不会在代理链接预览或错误字段中暴露 secret。
+    def test_provision_result_log_masks_proxy_secrets(self):
+        secret = 'ee0123456789abcdef0123456789abcdef'
+        order = CloudServerOrder.objects.create(
+            order_no='PROVISION-LOG-MASK-SECRET',
+            status='failed',
+            provider='aws_lightsail',
+            region_code='ap-southeast-1',
+            server_name='provision-log-mask-secret',
+            instance_id='provision-log-mask-secret',
+            public_ip='10.0.0.92',
+            mtproxy_port=9528,
+            mtproxy_link=f'tg://proxy?server=10.0.0.92&port=9528&secret={secret}',
+        )
+        order._asset_expires_at = timezone.now() + timezone.timedelta(days=31)
+
+        with patch('cloud.provisioning.logger.log') as mock_log:
+            _log_provision_result(order, error=f'安装失败 secret={secret}')
+
+        _, args, kwargs = mock_log.mock_calls[0]
+        logged_values = ' '.join(str(value) for value in args[2:])
+        payload = kwargs['extra']['provision_result']
+        self.assertNotIn(secret, logged_values)
+        self.assertNotIn(secret, str(payload))
+        self.assertIn('secret=***', payload['error'])
+
     # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
     def test_cloud_account_label_variants_cover_legacy_colon_labels(self):
         account = CloudAccountConfig.objects.create(
