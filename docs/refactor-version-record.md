@@ -1,5 +1,48 @@
 # 重构版本记录
 
+## 2026-06-03 00:15 自动监工：旧端口文案兼容收口
+
+### 范围
+
+本轮从提交 `f00ad77 补充默认端口自动创建复查` 后继续监工。起始工作树干净，重点复查云资产生命周期唯一到期事实、机器人返回链、Telegram `callback_data` 64 字节限制、旧端口选择残留、订单旧到期字段、旧计划快照、退款旧入口和废弃 app 回流。
+
+### 修改
+
+- 将 `core/texts.py` 中旧端口输入相关提示从“输入/设置端口”收口为“旧端口输入流程已取消，按默认 443 继续创建任务”。
+- 将旧 `custom:port:custom:*` 和 `cloud:ipport:custom:*` 兼容入口的用户提示和路由标签改为“旧端口按钮兼容为默认端口 443”，避免运行文本继续表现为自定义端口流程。
+- 保留旧 `custom:port:*` 和 `cloud:ipport:*` callback 兼容入口，不删除用户旧消息上的按钮兼容能力；这些入口仍统一按默认 443 提交创建或换 IP 任务。
+
+### 复查结论
+
+- `CloudServerOrder` 未恢复 `service_expires_at` 或 `actual_expires_at` 字段；`CloudAsset.actual_expires_at` 仍是唯一结构化资产到期事实。
+- `CloudAssetDashboardSnapshot` 未恢复派生到期列，仅保留 `risk_expired` 风险布尔字段。
+- 运行代码扫描旧字段、旧计划、旧退款入口后，仅命中预期的 `CloudAsset.actual_expires_at` 模型字段。
+- 废弃 app 目录 `accounts/finance/mall/monitoring/dashboard_api/biz` 未恢复；`INSTALLED_APPS` 中也未出现这些废弃 app。
+- 机器人返回链聚焦测试确认资产详情、订单详情、续费、更换 IP、重新安装、修改配置等按钮仍保持短回调，并通过 64 字节限制检查。
+- 本轮未执行真实云资源、真实 Telegram 点击、真实支付、链上广播、生产发布或不可逆操作。
+
+### 验证
+
+已通过：
+
+```bash
+UV_CACHE_DIR=/Users/a399/Desktop/data/shop/.uv-cache PYTHONDONTWRITEBYTECODE=1 uv run python manage.py check
+UV_CACHE_DIR=/Users/a399/Desktop/data/shop/.uv-cache PYTHONDONTWRITEBYTECODE=1 uv run python -m py_compile bot/handlers.py core/texts.py bot/tests.py orders/tests.py cloud/tests.py
+DJANGO_TEST_SQLITE=1 SQLITE_NAME=/private/tmp/shop-bot-ui-after-port-text.sqlite3 UV_CACHE_DIR=/Users/a399/Desktop/data/shop/.uv-cache PYTHONDONTWRITEBYTECODE=1 uv run python manage.py test bot.tests.RetainedIpRenewalUiTestCase --noinput --verbosity 1
+DJANGO_TEST_SQLITE=1 SQLITE_NAME=/private/tmp/shop-lifecycle-focus.sqlite3 UV_CACHE_DIR=/Users/a399/Desktop/data/shop/.uv-cache PYTHONDONTWRITEBYTECODE=1 uv run python manage.py test cloud.tests.CloudServerServicesTestCase.test_due_orders_use_asset_expiry_for_lightsail_lifecycle cloud.tests.CloudServerServicesTestCase.test_dashboard_order_expiry_update_syncs_asset_expiry_and_lifecycle_plan cloud.tests.CloudServerServicesTestCase.test_notice_delete_plan_and_proxy_list_use_asset_expiry cloud.tests.CloudServerServicesTestCase.test_update_cloud_asset_expiry_refreshes_delete_plan_view cloud.tests.CloudServerServicesTestCase.test_update_cloud_asset_expiry_refreshes_order_lifecycle cloud.tests.CloudServerServicesTestCase.test_run_auto_renew_skips_when_asset_expiry_moved_out_of_due_window cloud.tests.CloudServerServicesTestCase.test_sync_aws_assets_preserves_existing_unattached_ip_due_time cloud.tests.CloudServerServicesTestCase.test_lifecycle_plans_read_cached_table_after_initial_refresh cloud.tests.CloudServerServicesTestCase.test_lifecycle_tick_rechecks_order_delete_at_before_cloud_delete cloud.tests.CloudServerServicesTestCase.test_lifecycle_tick_rechecks_order_ip_recycle_at_before_release cloud.tests.CloudServerServicesTestCase.test_lifecycle_tick_rechecks_orphan_asset_delete_time_before_cloud_delete cloud.tests.CloudServerServicesTestCase.test_lifecycle_tick_rechecks_unattached_ip_delete_time_before_release cloud.tests.CloudServerServicesTestCase.test_lifecycle_tick_releases_retained_static_ip_after_recycle_due cloud.tests.CloudServerServicesTestCase.test_lifecycle_tick_releases_overdue_unattached_static_ip cloud.tests.CloudServerServicesTestCase.test_unattached_ip_delete_items_use_actual_expiry_as_delete_plan cloud.tests.CloudServerServicesTestCase.test_lifecycle_plans_excludes_cloud_missing_orphan_server --noinput --verbosity 1
+DJANGO_TEST_SQLITE=1 SQLITE_NAME=/private/tmp/shop-payment-focus-current.sqlite3 UV_CACHE_DIR=/Users/a399/Desktop/data/shop/.uv-cache PYTHONDONTWRITEBYTECODE=1 uv run python manage.py test orders.tests.ChainPaymentScannerTestCase.test_chain_payment_conflict_is_not_auto_confirmed orders.tests.ChainPaymentScannerTestCase.test_duplicate_tx_hash_is_not_reused_across_payment_types orders.tests.ChainPaymentScannerTestCase.test_expired_asset_renewal_payment_unbinds_asset_for_retry orders.tests.ChainPaymentScannerTestCase.test_public_asset_renewal_expiry_does_not_claim_unowned_asset orders.tests.ChainPaymentScannerTestCase.test_cloud_chain_payment_auto_submits_default_port_provision cloud.tests.CloudServerServicesTestCase.test_run_auto_renew_skips_when_asset_expiry_moved_out_of_due_window bot.tests.RetainedIpRenewalUiTestCase.test_wallet_balance_purchase_auto_submits_default_port --noinput --verbosity 1
+UV_CACHE_DIR=/Users/a399/Desktop/data/shop/.uv-cache PYTHONDONTWRITEBYTECODE=1 uv run python manage.py makemigrations --check --dry-run
+UV_CACHE_DIR=/Users/a399/Desktop/data/shop/.uv-cache PYTHONDONTWRITEBYTECODE=1 uv run python manage.py shell -c "from django.conf import settings; retired={'accounts','finance','mall','monitoring','dashboard_api','biz'}; print('retired_apps', [app for app in settings.INSTALLED_APPS if app.split('.')[0] in retired]); from cloud.models import CloudServerOrder, CloudAsset, CloudAssetDashboardSnapshot; print('order_expiry_fields', [f.name for f in CloudServerOrder._meta.fields if f.name in {'service_expires_at','actual_expires_at'}]); print('asset_actual_fields', [f.name for f in CloudAsset._meta.fields if f.name == 'actual_expires_at']); print('snapshot_expiry_fields', [f.name for f in CloudAssetDashboardSnapshot._meta.fields if 'expire' in f.name or 'expiry' in f.name or f.name == 'actual_expires_at']); print('default_port', CloudServerOrder._meta.get_field('mtproxy_port').default)"
+rg -n "自定义端口|选择端口|端口格式不正确|无法设置端口|端口选择|custom:port|cloud:ipport|cloud_server_port|set_cloud_server_port\\(" bot cloud orders core shop --glob '!**/migrations/**' --glob '!**/tests.py'
+rg -n "service_expires_at__|\\bservice_expires_at\\b|\\bactual_expires_at\\s*=\\s*models|\\bCloudLifecyclePlan\\b|\\bCloudNoticePlan\\b|\\bCloudAutoRenewPlan\\b|\\bnormalize_service_expiry\\b|service_expired_at|\\brefund_order\\b|\\bprocess_refund\\b|\\bcreate_refund\\b|\\bissue_refund\\b|refund_to_balance|refund_balance|STATUS_REFUNDED|status=['\\\"]refunded|\\brefunded\\b" cloud orders bot core shop --glob '!**/migrations/**' --glob '!**/tests.py' --glob '!docs/**'
+find . -maxdepth 2 -type d \( -name accounts -o -name finance -o -name mall -o -name monitoring -o -name dashboard_api -o -name biz \) -print
+git diff --check
+```
+
+说明：第一次链上/续费聚焦测试使用了旧测试选择器，返回测试类或方法不存在；随后改用当前有效选择器重跑通过。`makemigrations --check --dry-run` 仍因沙箱禁止连接本机 MySQL 输出迁移历史一致性检查警告，但最终显示 `No changes detected`。
+
+剩余风险：本轮未跑完整测试套件，未连接真实 MySQL、AWS Lightsail、阿里云、TRONGrid 或 Telegram，未执行真实 Telegram 回调、真实支付、链上广播、云端删机、固定 IP 释放或生产发布。真机方向仍待用户明确授权真实云资源成本后继续验证无订单资产续费、生命周期变化、通知计划、删除计划执行和资源清理。
+
 ## 2026-06-03 00:02 自动监工：默认 443 自动创建和生命周期复查
 
 ### 范围

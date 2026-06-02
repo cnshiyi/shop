@@ -1198,7 +1198,7 @@ def _callback_route_label(callback_data: str | None) -> str:
         ('cloud:autorenew:', 'cloud.autorenew 自动续费开关'),
         ('cloud:mute:', 'cloud.mute 关闭提醒'),
         ('cloud:ipport:default:', 'cloud.ipport.default 更换IP默认端口'),
-        ('cloud:ipport:custom:', 'cloud.ipport.custom 更换IP自定义端口'),
+        ('cloud:ipport:custom:', 'cloud.ipport.custom 更换IP旧端口按钮'),
         ('cloud:ipregions:more:', 'cloud.ipregions.more 更换IP更多地区'),
         ('cloud:ipregion:', 'cloud.ipregion 更换IP选地区'),
         ('cloud:ip:', 'cloud.ip 更换IP'),
@@ -1229,7 +1229,7 @@ def _callback_route_label(callback_data: str | None) -> str:
         ('custom:currency:', 'custom.currency 支付币种'),
         ('custom:balance:', 'custom.balance 钱包支付'),
         ('custom:port:default:', 'custom.port.default 默认端口'),
-        ('custom:port:custom:', 'custom.port.custom 自定义端口'),
+        ('custom:port:custom:', 'custom.port.custom 旧端口按钮'),
         ('balance:detail:', 'balance.detail 余额明细详情'),
         ('bdpage:', 'balance.page 余额明细分页'),
         ('rcur:', 'recharge.currency 充值币种'),
@@ -3086,7 +3086,7 @@ def register_handlers(dp: Dispatcher):
         logger.info('云服务器旧端口输入状态提交默认端口: tg_user_id=%s user=%s order_id=%s port=%s orders=%s', getattr(message.from_user, 'id', None), user.id, order_id, port, [getattr(item, 'order_no', None) for item in orders])
         await state.clear()
         if not orders:
-            await message.answer(_bot_text('bot_set_port_failed', '订单不存在，无法设置端口。'), reply_markup=main_menu())
+            await message.answer(_bot_text('bot_set_port_failed', '订单不存在，无法提交创建任务。'), reply_markup=main_menu())
             return
         task_count = len(orders)
         await message.answer(_bot_text_format('bot_custom_port_success', '✅ 已使用默认端口 {port}\n已开始后台创建 {count} 台服务器，我会在完成后主动通知你。', port=port, count=task_count), reply_markup=main_menu())
@@ -3831,9 +3831,9 @@ def register_handlers(dp: Dispatcher):
 
     @dp.callback_query(F.data.startswith('custom:port:custom:'))
     async def cb_custom_port_custom(callback: CallbackQuery, state: FSMContext, bot: Bot):
-        await _safe_callback_answer(callback, f'自定义端口已取消，使用默认端口 {MTPROXY_DEFAULT_PORT}')
+        await _safe_callback_answer(callback, f'旧端口按钮已兼容为默认端口 {MTPROXY_DEFAULT_PORT}')
         order_id = int(callback.data.split(':')[3])
-        logger.info('云服务器旧自定义端口按钮兼容为默认端口: tg_user_id=%s order_id=%s port=%s callback=%s', getattr(callback.from_user, 'id', None), order_id, MTPROXY_DEFAULT_PORT, callback.data)
+        logger.info('云服务器旧端口按钮兼容为默认端口: tg_user_id=%s order_id=%s port=%s callback=%s', getattr(callback.from_user, 'id', None), order_id, MTPROXY_DEFAULT_PORT, callback.data)
         await state.clear()
         user = await get_or_create_user(callback.from_user.id, callback.from_user.username, callback.from_user.first_name)
         orders = await prepare_cloud_server_order_instances(order_id, user.id, MTPROXY_DEFAULT_PORT)
@@ -3843,7 +3843,7 @@ def register_handlers(dp: Dispatcher):
         task_count = len(orders)
         await bot.send_message(
             chat_id=callback.from_user.id,
-            text=f'自定义端口已取消，已使用默认端口 {MTPROXY_DEFAULT_PORT}。\n{task_count} 台服务器创建任务已提交，完成后会自动发送创建结果。',
+            text=f'旧端口按钮已兼容为默认端口 {MTPROXY_DEFAULT_PORT}。\n{task_count} 台服务器创建任务已提交，完成后会自动发送创建结果。',
             reply_markup=main_menu(),
         )
         for order in orders:
@@ -5040,7 +5040,7 @@ def register_handlers(dp: Dispatcher):
 
     @dp.callback_query(F.data.startswith('cloud:ipport:custom:'))
     async def cb_cloud_change_ip_port_custom(callback: CallbackQuery, state: FSMContext, bot: Bot):
-        await _safe_callback_answer(callback, f'自定义端口已取消，使用默认端口 {MTPROXY_DEFAULT_PORT}')
+        await _safe_callback_answer(callback, f'旧端口按钮已兼容为默认端口 {MTPROXY_DEFAULT_PORT}')
         if await _deny_group_high_risk_callback(callback, '更换 IP'):
             return
         parts = callback.data.split(':', 5)
