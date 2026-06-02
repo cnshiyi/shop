@@ -1,5 +1,52 @@
 # 重构版本记录
 
+## 2026-06-03 01:23 自动监工：复核嵌套回调和生命周期事实源
+
+### 范围
+
+本轮从提交 `38c6c37 记录嵌套回调监工复查` 后继续监工。起始读取自动化记忆和 git 状态时工作树干净；复查过程中发现 HEAD 已被并行推进到 `c09526c 记录默认端口监工结果`，该提交仅追加中文版本记录、没有运行代码改动，本轮基于该提交继续记录，没有回滚或覆盖。
+
+本轮使用本地命令复查机器人资产详情、订单详情、续费、续费支付、换 IP、重装、修改配置返回链，继续核对 Telegram `callback_data` 64 字节限制、云资产唯一到期事实、订单旧到期字段、旧计划快照、旧退款入口、旧端口入口和废弃 app 回流。
+
+### 修改
+
+- 本轮未修改运行代码。
+- 仅追加本中文版本记录，记录本轮复查、验证结果和并行提交观察。
+
+### 监工结果
+
+- `cloud_detail_callback()`、`cloud_asset_detail_callback()`、`cloud_previous_detail_callback()`、`append_back_callback()` 和短码解析仍有 64 字节兜底；18 位订单 ID、18 位资产 ID、18 位页码和长订单筛选来源组合下，订单详情、资产详情、嵌套资产详情、续费、续费支付、换 IP、重装、修改配置、管理员改到期和返回上一层样本均未超过 64 字节。
+- `RetainedIpRenewalUiTestCase` 41 条继续覆盖资产详情、订单详情、续费支付、换 IP、重装、修改配置、默认端口和重装链接端口校验等返回链场景；测试中的预期异常日志来自 mocked postcheck 失败路径，不是本轮新增 bug。
+- `CloudAsset.actual_expires_at` 仍是唯一结构化资产到期事实；模型 introspection 显示 `CloudServerOrder` 仅有 `renew_grace_expires_at` 流程字段，未恢复 `service_expires_at` 或 `actual_expires_at`；`CloudAssetDashboardSnapshot` 未恢复到期字段。
+- 运行时代码扫描未发现旧计划快照模型、旧退款函数名、旧端口入口或废弃 app 回流；命中 `CloudLifecyclePlanNote` 为当前计划备注模型，不是已删除的计划快照表；旧端口命中仅来自测试断言。
+- `INSTALLED_APPS` 仍只有 `core`、`bot`、`orders`、`cloud` 等当前 app；仓库根目录未恢复 `accounts`、`finance`、`mall`、`monitoring`、`dashboard_api`、`biz`。
+- 真机测试未执行：本轮没有用户新增授权，也没有明确允许真实云资源成本；未触发真实云资源创建、删除、IP 变更、真实支付或链上广播。
+
+### 验证
+
+已通过：
+
+```bash
+UV_CACHE_DIR=/Users/a399/Desktop/data/shop/.uv-cache uv run python manage.py check
+UV_CACHE_DIR=/Users/a399/Desktop/data/shop/.uv-cache uv run python -m py_compile bot/api.py bot/handlers.py bot/keyboards.py cloud/services.py cloud/provisioning.py cloud/lifecycle.py cloud/api_orders.py orders/payment_scanner.py
+UV_CACHE_DIR=/Users/a399/Desktop/data/shop/.uv-cache uv run python manage.py shell -c "<18位ID极端 callback 长度样本验证>"
+DJANGO_TEST_SQLITE=1 SQLITE_NAME=/private/tmp/shop_bot_callbacks_monitor_<进程号>.sqlite3 UV_CACHE_DIR=/Users/a399/Desktop/data/shop/.uv-cache PYTHONDONTWRITEBYTECODE=1 uv run python manage.py test bot.tests.RetainedIpRenewalUiTestCase --noinput
+DJANGO_TEST_SQLITE=1 SQLITE_NAME=/private/tmp/shop_lifecycle_monitor_<进程号>.sqlite3 UV_CACHE_DIR=/Users/a399/Desktop/data/shop/.uv-cache PYTHONDONTWRITEBYTECODE=1 uv run python manage.py test cloud.tests.CloudServerServicesTestCase.test_due_orders_use_asset_expiry_for_lightsail_lifecycle cloud.tests.CloudServerServicesTestCase.test_dashboard_order_expiry_update_syncs_asset_expiry_and_lifecycle_plan cloud.tests.CloudServerServicesTestCase.test_notice_delete_plan_and_proxy_list_use_asset_expiry cloud.tests.CloudServerServicesTestCase.test_update_cloud_asset_expiry_refreshes_delete_plan_view cloud.tests.CloudServerServicesTestCase.test_update_cloud_asset_expiry_refreshes_order_lifecycle cloud.tests.CloudServerServicesTestCase.test_run_auto_renew_skips_when_asset_expiry_moved_out_of_due_window cloud.tests.CloudServerServicesTestCase.test_sync_aws_assets_preserves_existing_unattached_ip_due_time cloud.tests.CloudServerServicesTestCase.test_server_compat_create_preserves_manual_asset_owner_and_expiry cloud.tests.CloudServerServicesTestCase.test_prepare_unbound_asset_renewal_creates_pending_payment_order cloud.tests.CloudServerServicesTestCase.test_unbound_asset_renewal_wallet_payment_marks_paid_for_recovery --noinput
+UV_CACHE_DIR=/Users/a399/Desktop/data/shop/.uv-cache uv run python manage.py shell -c "<模型字段唯一到期事实 introspection>"
+UV_CACHE_DIR=/Users/a399/Desktop/data/shop/.uv-cache uv run python - <<'PY'
+# INSTALLED_APPS 和废弃 app 目录检查
+PY
+UV_CACHE_DIR=/Users/a399/Desktop/data/shop/.uv-cache uv run python manage.py makemigrations --check --dry-run
+git diff --check
+```
+
+结果：`manage.py check`、关键模块编译、极端 callback 样本、机器人返回 UI 聚焦测试 41 条、生命周期/唯一到期事实聚焦测试 10 条、模型字段 introspection、废弃 app 检查和 `git diff --check` 均通过。`makemigrations --check --dry-run` 仍因沙箱禁止连接本机 MySQL 输出迁移历史检查警告，但最终显示 `No changes detected`。
+
+### 剩余风险
+
+- 未执行真实 Telegram 点击、真实云资源、真实支付、链上广播、生产发布或不可逆操作。
+- 后续仍需在用户明确授权真实云资源成本后，单独用中文报告记录服务器创建、删除、IP 变更、附加 IP/固定 IP 变更、人工无订单资产续费、生命周期变化、通知计划和删除计划执行情况，并脱敏云资源 ID。
+
 ## 2026-06-03 01:20 自动监工：默认端口与返回链只读复核
 
 ### 范围
