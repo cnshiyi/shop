@@ -10,7 +10,7 @@
 
 - 新增 `poc:<筛选>:<页码>` 短返回路径，用于压缩 `profile:orders:cloud...` 订单列表来源；机器人处理器注册 `poc:` 回调并恢复到对应云订单列表筛选页。
 - `cloud_detail_callback()`、`cloud_asset_detail_callback()`、`append_back_callback()`、订单详情和只读订单详情键盘统一压缩可识别的返回路径，减少嵌套操作按钮长度。
-- 旧 `cloud:assetdetail:<id>` 返回路径压缩为新 `cloud:ad:asset:<id>` 形态，并修复处理器解析旧格式时的 `kind/id` 兼容分支。
+- 旧 `cloud:assetdetail:<id>` 返回路径压缩为新 `cloud:ad:asset:<id>` 形态；`cloud:ad:`、`cloud:detail:` 和旧资产详情嵌套返回路径会递归压缩，并修复处理器解析旧格式时的 `kind/id` 兼容分支。
 - 补充回归测试，确认订单筛选页来源会压缩为 `poc:`、按钮 callback 长度不超过 64 字节、旧资产详情格式和新短格式都可被处理器识别。
 
 ### 复查结论
