@@ -43,6 +43,7 @@ from bot.keyboards import (
     cloud_server_change_ip_region_menu, cloud_server_change_ip_port_keyboard,
     cart_menu, wallet_recharge_prompt_menu, cloud_ip_query_result,
     cloud_query_menu, configured_link_for_label, configured_link_menu,
+    cloud_detail_callback, cloud_asset_detail_callback, append_back_callback,
 )
 from bot.services import create_admin_reply_link, get_admin_reply_link, get_admin_reply_link_by_id, get_or_create_user, get_admin_forward_mute_status, is_admin_forward_muted, mute_admin_forward_for_days, record_bot_operation_log, record_telegram_message, should_forward_telegram_group
 from cloud.services import (
@@ -2156,17 +2157,17 @@ def _save_user_main_proxy_link(order_id: int, link_data: dict[str, str]):
     return order
 
 
-def _reinstall_confirm_keyboard(order_id: int, token: str):
+def _reinstall_confirm_keyboard(order_id: int, token: str, back_callback: str | None = None):
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text='确认重新安装', callback_data=f'cloud:reinitconfirm:{order_id}:{token}')],
-        [InlineKeyboardButton(text='取消', callback_data=f'cloud:detail:{order_id}')],
+        [InlineKeyboardButton(text='取消', callback_data=cloud_detail_callback(order_id, back_callback))],
     ])
 
 
-def _asset_reinstall_confirm_keyboard(asset_id: int, token: str):
+def _asset_reinstall_confirm_keyboard(asset_id: int, token: str, back_callback: str | None = None):
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text='确认重新安装', callback_data=f'cloud:assetreinitconfirm:{asset_id}:{token}')],
-        [InlineKeyboardButton(text='取消', callback_data=f'cloud:assetdetail:asset:{asset_id}:cloud:list:page:1')],
+        [InlineKeyboardButton(text='取消', callback_data=cloud_asset_detail_callback(asset_id, back_callback))],
     ])
 
 
@@ -2650,14 +2651,14 @@ def _retained_ip_renewal_plan_text(order, plans, user=None) -> str:
     return '\n'.join(lines)
 
 
-def _retained_ip_renewal_plan_keyboard(order_id: int, plans):
+def _retained_ip_renewal_plan_keyboard(order_id: int, plans, back_callback: str | None = None):
     labels = ['套餐一', '套餐二', '套餐三', '套餐四', '套餐五', '套餐六', '套餐七', '套餐八', '套餐九']
     buttons = []
     for idx, plan in enumerate(plans[:9]):
         label = labels[idx] if idx < len(labels) else f'套餐{idx + 1}'
-        buttons.append(InlineKeyboardButton(text=label, callback_data=f'cloud:renewplan:{order_id}:{plan.id}'))
+        buttons.append(InlineKeyboardButton(text=label, callback_data=append_back_callback(f'cloud:renewplan:{order_id}:{plan.id}', back_callback)))
     rows = [buttons[index:index + 3] for index in range(0, len(buttons), 3)]
-    rows.append([InlineKeyboardButton(text='🔙 返回详情', callback_data=f'cloud:detail:{order_id}')])
+    rows.append([InlineKeyboardButton(text='🔙 返回详情', callback_data=cloud_detail_callback(order_id, back_callback))])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
@@ -2684,18 +2685,18 @@ def _asset_renewal_plan_text(asset, plans, user=None) -> str:
     return '\n'.join(lines)
 
 
-def _asset_renewal_plan_keyboard(asset_id: int, plans):
+def _asset_renewal_plan_keyboard(asset_id: int, plans, back_callback: str | None = None):
     labels = ['套餐一', '套餐二', '套餐三', '套餐四', '套餐五', '套餐六', '套餐七', '套餐八', '套餐九']
     buttons = []
     for idx, plan in enumerate(plans[:9]):
         label = labels[idx] if idx < len(labels) else f'套餐{idx + 1}'
-        buttons.append(InlineKeyboardButton(text=label, callback_data=f'cloud:assetrenewplan:{asset_id}:{plan.id}'))
+        buttons.append(InlineKeyboardButton(text=label, callback_data=append_back_callback(f'cloud:assetrenewplan:{asset_id}:{plan.id}', back_callback)))
     rows = [buttons[index:index + 3] for index in range(0, len(buttons), 3)]
-    rows.append([InlineKeyboardButton(text='🔙 返回代理详情', callback_data=f'cloud:assetdetail:asset:{asset_id}:cloud:list:page:1')])
+    rows.append([InlineKeyboardButton(text='🔙 返回代理详情', callback_data=cloud_asset_detail_callback(asset_id, back_callback))])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
-async def _send_cloud_renewal_payment_prompt(message: Message, order, user, *, edit: bool = False):
+async def _send_cloud_renewal_payment_prompt(message: Message, order, user, *, edit: bool = False, back_callback: str | None = None):
     wallet_usdt_amount = Decimal(str(getattr(order, 'total_amount', None) or getattr(order, 'pay_amount', 0) or 0))
     trx_amount = None
     trx_rate_notice = ''
@@ -2722,7 +2723,7 @@ async def _send_cloud_renewal_payment_prompt(message: Message, order, user, *, e
         f'地址支付仅监控 {order.currency or "USDT"} 精确到账；也可使用下方钱包续费。自动续费默认使用钱包余额扣款，请保证余额充足。'
         f'{trx_rate_notice}'
     )
-    markup = cloud_server_renew_payment(order.id, wallet_usdt_amount, trx_amount, bool(auto_renew_enabled))
+    markup = cloud_server_renew_payment(order.id, wallet_usdt_amount, trx_amount, bool(auto_renew_enabled), back_callback)
     bot = getattr(message, 'bot', None)
     if edit:
         result = await _safe_edit_text(message, text, parse_mode='HTML', disable_web_page_preview=True, reply_markup=markup)
@@ -4183,11 +4184,7 @@ def register_handlers(dp: Dispatcher):
         parts = callback.data.split(':')
         item_kind = parts[2]
         item_id = int(parts[3])
-        back_callback = 'cloud:list'
-        if len(parts) >= 7:
-            prefix = ':'.join(parts[4:-1])
-            page = parts[-1]
-            back_callback = f'{prefix}:{page}'
+        back_callback = ':'.join(parts[4:]) if len(parts) > 4 else 'cloud:list'
         if _is_group_chat_message(callback.message):
             item = await get_group_proxy_asset_detail(item_id, callback.message.chat.id, item_kind)
         else:
@@ -4206,11 +4203,11 @@ def register_handlers(dp: Dispatcher):
             rows = []
             if item_order_id:
                 rows.append([
-                    InlineKeyboardButton(text='🔄 续费', callback_data=f'cloud:renew:{item_order_id}'),
+                    InlineKeyboardButton(text='🔄 续费', callback_data=append_back_callback(f'cloud:renew:{item_order_id}', back_callback)),
                     InlineKeyboardButton(text=f'{"⛔ 关闭" if getattr(item, "auto_renew_enabled", False) else "⚡ 开启"}自动续费', callback_data=f'cloud:autorenew:{"off" if getattr(item, "auto_renew_enabled", False) else "on"}:{item_order_id}'),
                 ])
             else:
-                rows.append([InlineKeyboardButton(text='🔄 续费', callback_data=f'cloud:assetaction:renew:{item_id}')])
+                rows.append([InlineKeyboardButton(text='🔄 续费', callback_data=f'cloud:assetaction:renew:{item_id}:{back_callback}')])
         else:
             status = str(getattr(item, 'status', '') or '')
             provider = str(getattr(item, 'provider', '') or '')
@@ -4218,17 +4215,17 @@ def register_handlers(dp: Dispatcher):
             can_change_ip = bool(provider == 'aws_lightsail' and status in {'completed', 'running', 'expiring', 'suspended'} and (is_admin_context or getattr(item, 'order_user_id', None) == user.id))
             can_reinit = bool(provider == 'aws_lightsail' and has_ip and getattr(item, 'login_password', None) and (is_admin_context or status in {'completed', 'running'}))
             can_config = bool(provider == 'aws_lightsail' and status in {'completed', 'running', 'expiring', 'suspended'} and (is_admin_context or getattr(item, 'order_user_id', None) == user.id))
-            rows = [[InlineKeyboardButton(text='🔄 续费', callback_data=f'cloud:assetaction:renew:{item_id}')]]
+            rows = [[InlineKeyboardButton(text='🔄 续费', callback_data=f'cloud:assetaction:renew:{item_id}:{back_callback}')]]
             second_row = []
             if can_change_ip:
-                second_row.append(InlineKeyboardButton(text='🌐 更换IP', callback_data=f'cloud:assetaction:changeip:{item_id}'))
+                second_row.append(InlineKeyboardButton(text='🌐 更换IP', callback_data=f'cloud:assetaction:changeip:{item_id}:{back_callback}'))
             if can_reinit:
                 second_row.append(InlineKeyboardButton(text='🛠 重新安装', callback_data=f'cloud:assetinit:{item_id}:{back_callback}'))
             if second_row:
                 rows.append(second_row)
             third_row = []
             if can_config:
-                third_row.append(InlineKeyboardButton(text='⚙️ 修改配置', callback_data=f'cloud:assetaction:upgrade:{item_id}'))
+                third_row.append(InlineKeyboardButton(text='⚙️ 修改配置', callback_data=f'cloud:assetaction:upgrade:{item_id}:{back_callback}'))
             if is_admin_context:
                 third_row.append(InlineKeyboardButton(text='🕒 修改时间', callback_data=f'cloud:adminexp:asset:{item_id}:{back_callback}'))
             if third_row:
@@ -4239,9 +4236,11 @@ def register_handlers(dp: Dispatcher):
 
     @dp.callback_query(F.data.startswith('cloud:assetaction:'))
     async def cb_cloud_asset_action(callback: CallbackQuery):
-        parts = callback.data.split(':')
+        parts = callback.data.split(':', 4)
         action = parts[2]
         asset_id = int(parts[3])
+        back_callback = parts[4] if len(parts) > 4 else 'cloud:list:page:1'
+        asset_detail_back = cloud_asset_detail_callback(asset_id, back_callback)
         if action == 'upgrade':
             await _safe_callback_answer(callback, '正在加载修改配置')
         user = await get_or_create_user(callback.from_user.id, callback.from_user.username, callback.from_user.first_name)
@@ -4266,7 +4265,7 @@ def register_handlers(dp: Dispatcher):
                 await _safe_edit_text(
                     callback.message,
                     _retained_ip_renewal_plan_text(retained_order, retained_plans, display_user),
-                    reply_markup=_retained_ip_renewal_plan_keyboard(retained_order.id, retained_plans),
+                    reply_markup=_retained_ip_renewal_plan_keyboard(retained_order.id, retained_plans, back_callback),
                 )
                 return
         if item and action == 'renew' and group_context and not is_admin and not getattr(item, 'order_id', None):
@@ -4289,7 +4288,7 @@ def register_handlers(dp: Dispatcher):
                 await _safe_edit_text(
                     callback.message,
                     _asset_renewal_plan_text(asset, plans, display_user),
-                    reply_markup=_asset_renewal_plan_keyboard(asset.id, plans),
+                    reply_markup=_asset_renewal_plan_keyboard(asset.id, plans, back_callback),
                 )
                 return
         order, err = await ensure_cloud_asset_operation_order(asset_id, user.id, admin=is_admin)
@@ -4307,7 +4306,7 @@ def register_handlers(dp: Dispatcher):
                 await _safe_edit_text(
                     callback.message,
                     _retained_ip_renewal_plan_text(retained_order, retained_plans, display_user),
-                    reply_markup=_retained_ip_renewal_plan_keyboard(retained_order.id, retained_plans),
+                    reply_markup=_retained_ip_renewal_plan_keyboard(retained_order.id, retained_plans, back_callback),
                 )
                 return
             try:
@@ -4321,7 +4320,7 @@ def register_handlers(dp: Dispatcher):
             if not renewal:
                 await _safe_callback_answer(callback, '续费订单创建失败', show_alert=True)
                 return
-            await _send_cloud_renewal_payment_prompt(callback.message, renewal, user, edit=True)
+            await _send_cloud_renewal_payment_prompt(callback.message, renewal, user, edit=True, back_callback=back_callback)
             return
         if action == 'changeip':
             if order.provider != 'aws_lightsail':
@@ -4332,7 +4331,7 @@ def register_handlers(dp: Dispatcher):
                     '🌐 更换IP\n\n当前代理暂不支持自助更换 IP。',
                     reply_markup=InlineKeyboardMarkup(inline_keyboard=[
                         [support_contact_button('cloud_asset_changeip_provider', asset_id)],
-                        [InlineKeyboardButton(text='🔙 返回代理详情', callback_data=f'cloud:assetdetail:asset:{asset_id}:cloud:list:page:1')],
+                        [InlineKeyboardButton(text='🔙 返回代理详情', callback_data=asset_detail_back)],
                     ]),
                 )
                 return
@@ -4343,9 +4342,9 @@ def register_handlers(dp: Dispatcher):
                     callback.message,
                     '🌐 更换IP\n\n这台代理当前剩余更换 IP 次数为 0。\n\n请先续费获取新的更换 IP 次数，或联系客服人工处理。',
                     reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-                        [InlineKeyboardButton(text='🔄 去续费', callback_data=f'cloud:assetaction:renew:{asset_id}')],
+                        [InlineKeyboardButton(text='🔄 去续费', callback_data=f'cloud:assetaction:renew:{asset_id}:{back_callback}')],
                         [support_contact_button('cloud_asset_changeip_quota', asset_id)],
-                        [InlineKeyboardButton(text='🔙 返回代理详情', callback_data=f'cloud:assetdetail:asset:{asset_id}:cloud:list:page:1')],
+                        [InlineKeyboardButton(text='🔙 返回代理详情', callback_data=asset_detail_back)],
                     ]),
                 )
                 return
@@ -4378,7 +4377,7 @@ def register_handlers(dp: Dispatcher):
                 charge_text = f"补 {plan['diff']} U" if plan.get('action') == 'upgrade' else '无需补差价'
                 text_lines.append(f"- {plan['name']}：{action_text}，{charge_text}，到期补足 {plan['target_days']} 天")
                 rows.append([InlineKeyboardButton(text=f"{action_text}到 {plan['name']} {charge_text}", callback_data=f"cloud:upgradepay:{order.id}:{plan['id']}")])
-            rows.append([InlineKeyboardButton(text='🔙 返回详情', callback_data=f'cloud:assetdetail:asset:{asset_id}:cloud:list:page:1')])
+            rows.append([InlineKeyboardButton(text='🔙 返回详情', callback_data=asset_detail_back)])
             text = '\n'.join(text_lines)
             markup = InlineKeyboardMarkup(inline_keyboard=rows)
             edited = await _safe_edit_text(callback.message, text, reply_markup=markup)
@@ -4397,14 +4396,15 @@ def register_handlers(dp: Dispatcher):
         if await _deny_group_high_risk_callback(callback, '重新安装'):
             return
         user = await get_or_create_user(callback.from_user.id, callback.from_user.username, callback.from_user.first_name)
-        parts = callback.data.split(':')
+        parts = callback.data.split(':', 3)
         asset_id = int(parts[2])
+        back_callback = parts[3] if len(parts) > 3 else 'cloud:list:page:1'
         is_admin = await _is_admin_chat(callback.message)
         item = await get_proxy_asset_detail_for_admin(asset_id, 'asset') if is_admin else await get_user_proxy_asset_detail(asset_id, user.id, 'asset')
         if not item:
             await _safe_callback_answer(callback, '代理记录不存在', show_alert=True)
             return
-        await state.update_data(reinstall_asset_id=asset_id, reinstall_order_id=0, reinstall_admin=is_admin)
+        await state.update_data(reinstall_asset_id=asset_id, reinstall_order_id=0, reinstall_admin=is_admin, reinstall_back=back_callback)
         await state.set_state(CustomServerStates.waiting_reinstall_link)
         logger.info('CLOUD_ASSET_REINSTALL_LINK_WAIT user_id=%s asset_id=%s ip=%s', user.id, asset_id, getattr(item, 'public_ip', None))
         await callback.message.reply(_bot_text('bot_reinstall_need_main_link', '当前服务器缺少主代理链接。请直接发送这台服务器的主代理链接，我会先校验 IP、端口和服务器实际密钥，再让你确认是否重新安装。'))
@@ -4457,11 +4457,7 @@ def register_handlers(dp: Dispatcher):
         user = await get_or_create_user(callback.from_user.id, callback.from_user.username, callback.from_user.first_name)
         parts = callback.data.split(':')
         order_id = int(parts[2])
-        back_callback = 'cloud:list'
-        if len(parts) >= 6:
-            prefix = ':'.join(parts[3:-1])
-            page = parts[-1]
-            back_callback = f'{prefix}:{page}'
+        back_callback = ':'.join(parts[3:]) if len(parts) > 3 else 'cloud:list'
         order = await get_user_cloud_server(order_id, user.id)
         if not order:
             logger.warning('CLOUD_DETAIL_DENIED user_id=%s order_id=%s reason=not_found callback_data=%s', user.id, order_id, callback.data)
@@ -4531,7 +4527,9 @@ def register_handlers(dp: Dispatcher):
     async def cb_cloud_renew(callback: CallbackQuery, state: FSMContext):
         await _safe_callback_answer(callback)
         user = await get_or_create_user(callback.from_user.id, callback.from_user.username, callback.from_user.first_name)
-        order_id = int(callback.data.split(':')[2])
+        parts = callback.data.split(':', 3)
+        order_id = int(parts[2])
+        back_callback = parts[3] if len(parts) > 3 else ''
         is_admin = await _is_admin_chat(callback.message)
         group_context = await _is_group_visible_order(callback, order_id)
         if _is_group_chat_message(callback.message) and not (is_admin or group_context):
@@ -4545,7 +4543,7 @@ def register_handlers(dp: Dispatcher):
             await _safe_edit_text(
                 callback.message,
                 _retained_ip_renewal_plan_text(retained_order, retained_plans, getattr(retained_order, 'user', None) or user),
-                reply_markup=_retained_ip_renewal_plan_keyboard(retained_order.id, retained_plans),
+                reply_markup=_retained_ip_renewal_plan_keyboard(retained_order.id, retained_plans, back_callback),
             )
             return
         try:
@@ -4568,13 +4566,15 @@ def register_handlers(dp: Dispatcher):
         if not order:
             await _safe_callback_answer(callback, '续费订单创建失败', show_alert=True)
             return
-        await _send_cloud_renewal_payment_prompt(callback.message, order, user, edit=True)
+        await _send_cloud_renewal_payment_prompt(callback.message, order, user, edit=True, back_callback=back_callback)
 
     @dp.callback_query(F.data.startswith('cloud:assetrenewplan:'))
     async def cb_cloud_asset_renew_plan(callback: CallbackQuery, state: FSMContext):
         await _safe_callback_answer(callback)
         user = await get_or_create_user(callback.from_user.id, callback.from_user.username, callback.from_user.first_name)
-        _, _, raw_asset_id, raw_plan_id = callback.data.split(':')
+        parts = callback.data.split(':', 4)
+        _, _, raw_asset_id, raw_plan_id = parts[:4]
+        back_callback = parts[4] if len(parts) > 4 else ''
         asset_id = int(raw_asset_id)
         plan_id = int(raw_plan_id)
         is_admin = await _is_admin_chat(callback.message)
@@ -4586,7 +4586,7 @@ def register_handlers(dp: Dispatcher):
         if not asset or not plan:
             await _safe_callback_answer(callback, '套餐不存在或当前状态已变化，请重新进入详情', show_alert=True)
             return
-        await state.update_data(asset_renewal_asset_id=asset.id, asset_renewal_plan_id=plan.id, asset_renewal_admin=is_admin, asset_renewal_public=not is_admin and getattr(asset, 'user_id', None) != user.id)
+        await state.update_data(asset_renewal_asset_id=asset.id, asset_renewal_plan_id=plan.id, asset_renewal_admin=is_admin, asset_renewal_public=not is_admin and getattr(asset, 'user_id', None) != user.id, asset_renewal_back=back_callback)
         await state.set_state(CustomServerStates.waiting_retained_ip_renewal_link)
         ip = getattr(asset, 'public_ip', None) or getattr(asset, 'previous_public_ip', None) or '-'
         await callback.message.reply(
@@ -4597,7 +4597,9 @@ def register_handlers(dp: Dispatcher):
     async def cb_cloud_retained_ip_renew_plan(callback: CallbackQuery, state: FSMContext):
         await _safe_callback_answer(callback)
         user = await get_or_create_user(callback.from_user.id, callback.from_user.username, callback.from_user.first_name)
-        _, _, raw_order_id, raw_plan_id = callback.data.split(':')
+        parts = callback.data.split(':', 4)
+        _, _, raw_order_id, raw_plan_id = parts[:4]
+        back_callback = parts[4] if len(parts) > 4 else ''
         order_id = int(raw_order_id)
         plan_id = int(raw_plan_id)
         is_admin = await _is_admin_chat(callback.message)
@@ -4618,6 +4620,7 @@ def register_handlers(dp: Dispatcher):
             retained_ip_renewal_plan_id=plan.id,
             retained_ip_renewal_admin=is_admin,
             retained_ip_renewal_group_chat_id=callback.message.chat.id if group_context else None,
+            retained_ip_renewal_back=back_callback,
         )
         await state.set_state(CustomServerStates.waiting_retained_ip_renewal_link)
         ip = getattr(order, 'public_ip', None) or getattr(order, 'previous_public_ip', None) or '-'
@@ -4725,7 +4728,9 @@ def register_handlers(dp: Dispatcher):
     async def cb_cloud_renew_wallet(callback: CallbackQuery, state: FSMContext):
         await _safe_callback_answer(callback, '钱包自动续费处理中')
         user = await get_or_create_user(callback.from_user.id, callback.from_user.username, callback.from_user.first_name)
-        order_id = int(callback.data.split(':')[2])
+        parts = callback.data.split(':', 3)
+        order_id = int(parts[2])
+        back_callback = parts[3] if len(parts) > 3 else ''
         allowed, is_admin, group_context = await _can_use_renewal_payment_callback(callback, state, user, order_id)
         if not allowed:
             logger.warning('CLOUD_RENEWWALLET_DENIED user_id=%s order_id=%s reason=not_owner_group_admin_or_recent_query callback_data=%s', user.id, order_id, callback.data)
@@ -4751,7 +4756,7 @@ def register_handlers(dp: Dispatcher):
                 return
             await _safe_edit_text(callback.message, 
                 f'❌ 钱包自动续费失败：{_public_cloud_error_text(err)}。\n请先充值余额后再试，或使用下方地址支付。',
-                reply_markup=wallet_recharge_prompt_menu(f'cloud:renew:{order_id}', '🔙 返回续费支付'),
+                reply_markup=wallet_recharge_prompt_menu(append_back_callback(f'cloud:renew:{order_id}', back_callback), '🔙 返回续费支付'),
             )
             return
         if _requires_recovery_provision(order):
@@ -4777,7 +4782,7 @@ def register_handlers(dp: Dispatcher):
                 can_renew=True,
                 can_change_ip=bool(order.provider == 'aws_lightsail' and order.public_ip and order.status in {"completed", "expiring", "suspended"} and max(int(getattr(order, 'ip_change_quota', 0) or 0), 0) > 0),
                 can_reinit=bool(order.public_ip and order.login_password and order.status == "completed"),
-                back_callback='cloud:list',
+                back_callback=back_callback or 'cloud:list',
                 can_upgrade=bool(order.provider == 'aws_lightsail' and order.status in {"completed", "expiring", "suspended"}),
                 can_resume_init=bool(order.status in {"paid", "provisioning", "failed"} and (order.public_ip or not order.mtproxy_secret or not order.mtproxy_link or not order.login_password)),
             ),
@@ -4794,7 +4799,9 @@ def register_handlers(dp: Dispatcher):
     async def cb_cloud_renew_pay(callback: CallbackQuery, state: FSMContext):
         await _safe_callback_answer(callback, '续费钱包支付处理中')
         user = await get_or_create_user(callback.from_user.id, callback.from_user.username, callback.from_user.first_name)
-        _, _, order_id_text, currency = callback.data.split(':')
+        parts = callback.data.split(':', 4)
+        _, _, order_id_text, currency = parts[:4]
+        back_callback = parts[4] if len(parts) > 4 else ''
         currency = str(currency or '').upper()
         if not _is_supported_payment_currency(currency):
             await _safe_callback_answer(callback, '不支持的支付币种', show_alert=True)
@@ -4823,7 +4830,7 @@ def register_handlers(dp: Dispatcher):
                 asyncio.create_task(_cloud_renewal_postcheck_and_notify(callback.bot, callback.from_user.id, existing.id))
                 await _safe_edit_text(callback.message, f'✅ 这笔续费已完成。\n\n订单号: {existing.order_no}\n{_cloud_order_plan_text(existing)}\n\n我会继续执行续费后巡检。')
                 return
-            await _safe_edit_text(callback.message, f'❌ {_public_cloud_error_text(err)}。', reply_markup=wallet_recharge_prompt_menu(f'cloud:renew:{order_id}', '🔙 返回续费支付'))
+            await _safe_edit_text(callback.message, f'❌ {_public_cloud_error_text(err)}。', reply_markup=wallet_recharge_prompt_menu(append_back_callback(f'cloud:renew:{order_id}', back_callback), '🔙 返回续费支付'))
             return
         if _requires_recovery_provision(order):
             await _safe_edit_text(callback.message, '✅ 云服务器续费成功，正在自动恢复固定 IP 服务器。\n\n系统会保持旧 IP / 旧端口 / 旧密钥不变，完成后自动发送代理链接。')
@@ -4847,7 +4854,7 @@ def register_handlers(dp: Dispatcher):
                 can_renew=True,
                 can_change_ip=bool(order.provider == 'aws_lightsail' and order.public_ip and order.status in {"completed", "expiring", "suspended"} and max(int(getattr(order, 'ip_change_quota', 0) or 0), 0) > 0),
                 can_reinit=bool(order.public_ip and order.login_password and order.status == "completed"),
-                back_callback='cloud:list',
+                back_callback=back_callback or 'cloud:list',
                 can_upgrade=bool(order.provider == 'aws_lightsail' and order.status in {"completed", "expiring", "suspended"}),
                 can_resume_init=bool(order.status in {"paid", "provisioning", "failed"} and (order.public_ip or not order.mtproxy_secret or not order.mtproxy_link or not order.login_password)),
             ),
@@ -4866,7 +4873,9 @@ def register_handlers(dp: Dispatcher):
         if await _deny_group_high_risk_callback(callback, '更换 IP'):
             return
         user = await get_or_create_user(callback.from_user.id, callback.from_user.username, callback.from_user.first_name)
-        order_id = int(callback.data.split(':')[2])
+        parts = callback.data.split(':', 3)
+        order_id = int(parts[2])
+        back_callback = parts[3] if len(parts) > 3 else ''
         is_admin = await _is_admin_chat(callback.message)
         order = await get_cloud_server_for_admin(order_id) if is_admin else await get_user_cloud_server(order_id, user.id)
         if not order:
@@ -4881,7 +4890,7 @@ def register_handlers(dp: Dispatcher):
         regions = [(code, name) for code, name in await _get_cached_custom_regions() if code != 'cn-hongkong']
         await _safe_edit_text(callback.message, 
             '🌐 更换IP\n\n请选择新的地区：',
-            reply_markup=cloud_server_change_ip_region_menu(order.id, regions, expanded=False),
+            reply_markup=cloud_server_change_ip_region_menu(order.id, regions, expanded=False, back_callback=back_callback),
         )
 
     @dp.callback_query(F.data.startswith('cloud:ipregions:more:'))
@@ -4890,7 +4899,9 @@ def register_handlers(dp: Dispatcher):
         if await _deny_group_high_risk_callback(callback, '更换 IP'):
             return
         user = await get_or_create_user(callback.from_user.id, callback.from_user.username, callback.from_user.first_name)
-        order_id = int(callback.data.split(':')[3])
+        parts = callback.data.split(':', 4)
+        order_id = int(parts[3])
+        back_callback = parts[4] if len(parts) > 4 else ''
         order = await get_cloud_server_for_admin(order_id) if await _is_admin_chat(callback.message) else await get_user_cloud_server(order_id, user.id)
         if not order:
             await _safe_callback_answer(callback, '服务器记录不存在', show_alert=True)
@@ -4898,7 +4909,7 @@ def register_handlers(dp: Dispatcher):
         regions = [(code, name) for code, name in await _get_cached_custom_regions() if code != 'cn-hongkong']
         await _safe_edit_text(callback.message, 
             '🌐 更换IP\n\n请选择新的地区：',
-            reply_markup=cloud_server_change_ip_region_menu(order_id, regions, expanded=True),
+            reply_markup=cloud_server_change_ip_region_menu(order_id, regions, expanded=True, back_callback=back_callback),
         )
 
     @dp.callback_query(F.data.startswith('cloud:ipregion:'))
@@ -4906,7 +4917,9 @@ def register_handlers(dp: Dispatcher):
         await _safe_callback_answer(callback)
         if await _deny_group_high_risk_callback(callback, '更换 IP'):
             return
-        _, _, raw_order_id, region_code = callback.data.split(':')
+        parts = callback.data.split(':', 4)
+        _, _, raw_order_id, region_code = parts[:4]
+        back_callback = parts[4] if len(parts) > 4 else ''
         user = await get_or_create_user(callback.from_user.id, callback.from_user.username, callback.from_user.first_name)
         order_id = int(raw_order_id)
         is_admin = await _is_admin_chat(callback.message)
@@ -4919,10 +4932,10 @@ def register_handlers(dp: Dispatcher):
             return
         regions = [(code, name) for code, name in await _get_cached_custom_regions() if code != 'cn-hongkong']
         region_name = next((name for code, name in regions if code == region_code), region_code)
-        await state.update_data(cloud_ip_change_order_id=order_id, cloud_ip_change_region_code=region_code, cloud_ip_change_region_name=region_name, cloud_ip_change_admin=is_admin)
+        await state.update_data(cloud_ip_change_order_id=order_id, cloud_ip_change_region_code=region_code, cloud_ip_change_region_name=region_name, cloud_ip_change_admin=is_admin, cloud_ip_change_back=back_callback)
         await _safe_edit_text(callback.message, 
             f'🌐 更换IP\n\n已选择节点：{_public_region_text(region_name) or "默认节点"}\n请选择端口：',
-            reply_markup=cloud_server_change_ip_port_keyboard(order_id, region_code, region_name),
+            reply_markup=cloud_server_change_ip_port_keyboard(order_id, region_code, region_name, back_callback),
         )
 
     @dp.callback_query(F.data.startswith('cloud:ipport:default:'))
@@ -4930,7 +4943,8 @@ def register_handlers(dp: Dispatcher):
         await _safe_callback_answer(callback, '已选择默认端口 9528，正在创建同配置新服务器')
         if await _deny_group_high_risk_callback(callback, '更换 IP'):
             return
-        _, _, _, raw_order_id, region_code = callback.data.split(':')
+        parts = callback.data.split(':', 5)
+        _, _, _, raw_order_id, region_code = parts[:5]
         order_id = int(raw_order_id)
         user = await get_or_create_user(callback.from_user.id, callback.from_user.username, callback.from_user.first_name)
         is_admin = await _is_admin_chat(callback.message)
@@ -4958,7 +4972,9 @@ def register_handlers(dp: Dispatcher):
         await _safe_callback_answer(callback, '已选择自定义端口')
         if await _deny_group_high_risk_callback(callback, '更换 IP'):
             return
-        _, _, _, raw_order_id, region_code = callback.data.split(':')
+        parts = callback.data.split(':', 5)
+        _, _, _, raw_order_id, region_code = parts[:5]
+        back_callback = parts[5] if len(parts) > 5 else ''
         user = await get_or_create_user(callback.from_user.id, callback.from_user.username, callback.from_user.first_name)
         order_id = int(raw_order_id)
         is_admin = await _is_admin_chat(callback.message)
@@ -4971,7 +4987,7 @@ def register_handlers(dp: Dispatcher):
             return
         regions = [(code, name) for code, name in await _get_cached_custom_regions() if code != 'cn-hongkong']
         region_name = next((name for code, name in regions if code == region_code), region_code)
-        await state.update_data(cloud_ip_change_order_id=order_id, cloud_ip_change_region_code=region_code, cloud_ip_change_region_name=region_name, cloud_ip_change_admin=is_admin)
+        await state.update_data(cloud_ip_change_order_id=order_id, cloud_ip_change_region_code=region_code, cloud_ip_change_region_name=region_name, cloud_ip_change_admin=is_admin, cloud_ip_change_back=back_callback)
         await state.set_state(CustomServerStates.waiting_port)
         await callback.message.reply(
             f'✍️ 已选择更换IP自定义端口。\n节点：{_public_region_text(region_name) or "默认节点"}\n请发送 443 或 1025-65529 之间的端口号。'
@@ -4984,7 +5000,9 @@ def register_handlers(dp: Dispatcher):
         if await _deny_group_high_risk_callback(callback, '修改配置'):
             return
         user = await get_or_create_user(callback.from_user.id, callback.from_user.username, callback.from_user.first_name)
-        order_id = int(callback.data.split(':')[2])
+        parts = callback.data.split(':', 3)
+        order_id = int(parts[2])
+        back_callback = parts[3] if len(parts) > 3 else ''
         is_admin = await _is_admin_chat(callback.message)
         logger.info('CLOUD_UPGRADE_PLAN_START user_id=%s order_id=%s admin=%s callback_data=%s', user.id, order_id, is_admin, callback.data)
         plans, err = await list_cloud_server_upgrade_plans(order_id, user.id, admin=is_admin)
@@ -5005,7 +5023,7 @@ def register_handlers(dp: Dispatcher):
             charge_text = f"补 {plan['diff']} U" if plan.get('action') == 'upgrade' else '无需补差价'
             text_lines.append(f"- {plan['name']}：{action_text}，{charge_text}，到期补足 {plan['target_days']} 天")
             rows.append([InlineKeyboardButton(text=f"{action_text}到 {plan['name']} {charge_text}", callback_data=f"cloud:upgradepay:{order_id}:{plan['id']}")])
-        rows.append([InlineKeyboardButton(text='🔙 返回详情', callback_data=f'cloud:detail:{order_id}')])
+        rows.append([InlineKeyboardButton(text='🔙 返回详情', callback_data=cloud_detail_callback(order_id, back_callback))])
         text = '\n'.join(text_lines)
         markup = InlineKeyboardMarkup(inline_keyboard=rows)
         edited = await _safe_edit_text(callback.message, text, reply_markup=markup)
@@ -5038,7 +5056,9 @@ def register_handlers(dp: Dispatcher):
         if await _deny_group_high_risk_callback(callback, '重新安装'):
             return
         user = await get_or_create_user(callback.from_user.id, callback.from_user.username, callback.from_user.first_name)
-        order_id = int(callback.data.split(':')[2])
+        parts = callback.data.split(':', 3)
+        order_id = int(parts[2])
+        back_callback = parts[3] if len(parts) > 3 else ''
         is_admin = await _is_admin_chat(callback.message)
         order = await get_cloud_server_for_admin(order_id) if is_admin else await get_user_cloud_server(order_id, user.id)
         if not order:
@@ -5051,16 +5071,18 @@ def register_handlers(dp: Dispatcher):
             return
         has_main_link = bool(getattr(order, 'mtproxy_link', None) or any(isinstance(item, dict) and item.get('url') and str(item.get('port') or '') == str(order.mtproxy_port or 9528) for item in (getattr(order, 'proxy_links', None) or [])))
         if not is_unfinished and not has_main_link:
-            await state.update_data(reinstall_order_id=order.id, reinstall_admin=is_admin)
+            await state.update_data(reinstall_order_id=order.id, reinstall_admin=is_admin, reinstall_back=back_callback)
             await state.set_state(CustomServerStates.waiting_reinstall_link)
             await callback.message.reply(_bot_text('bot_reinstall_need_main_link', '当前服务器缺少主代理链接。请直接发送这台服务器的主代理链接，我会先校验 IP、端口和服务器实际密钥，再让你确认是否重新安装。'))
             return
         if is_unfinished:
             token = await _issue_reinstall_confirm_token(state, kind='order', item_id=order.id)
-            await callback.message.reply(_bot_text('bot_resume_init_confirm', '⚠️ 确认继续初始化？\n\n系统会重新执行 BBR/MTProxy 安装并生成代理链接。'), reply_markup=_reinstall_confirm_keyboard(order.id, token))
+            await state.update_data(reinstall_back=back_callback)
+            await callback.message.reply(_bot_text('bot_resume_init_confirm', '⚠️ 确认继续初始化？\n\n系统会重新执行 BBR/MTProxy 安装并生成代理链接。'), reply_markup=_reinstall_confirm_keyboard(order.id, token, back_callback))
             return
         token = await _issue_reinstall_confirm_token(state, kind='order', item_id=order.id)
-        await callback.message.reply(_bot_text('bot_reinstall_confirm', '⚠️ 确认重新安装？\n\n重新安装大约需要 5 分钟，期间代理可能会断连。系统会保持主/备用链接不变。'), reply_markup=_reinstall_confirm_keyboard(order.id, token))
+        await state.update_data(reinstall_back=back_callback)
+        await callback.message.reply(_bot_text('bot_reinstall_confirm', '⚠️ 确认重新安装？\n\n重新安装大约需要 5 分钟，期间代理可能会断连。系统会保持主/备用链接不变。'), reply_markup=_reinstall_confirm_keyboard(order.id, token, back_callback))
 
     @dp.message(CustomServerStates.waiting_retained_ip_renewal_link)
     async def msg_cloud_retained_ip_renewal_link(message: Message, state: FSMContext):
@@ -5075,6 +5097,7 @@ def register_handlers(dp: Dispatcher):
         is_admin_renewal = bool(data.get('retained_ip_renewal_admin')) and await _is_admin_chat(message)
         group_renewal_chat_id = int(data.get('retained_ip_renewal_group_chat_id') or 0)
         is_group_renewal = bool(group_renewal_chat_id and _is_group_chat_message(message) and int(message.chat.id) == group_renewal_chat_id)
+        back_callback = str(data.get('asset_renewal_back') or data.get('retained_ip_renewal_back') or '').strip()
         user = await get_or_create_user(message.from_user.id, message.from_user.username, message.from_user.first_name)
         if asset_id:
             item = await get_proxy_asset_detail_for_admin(asset_id, 'asset') if (is_admin_asset_renewal or is_public_asset_renewal) else await get_user_proxy_asset_detail(asset_id, user.id, 'asset')
@@ -5105,7 +5128,7 @@ def register_handlers(dp: Dispatcher):
             await message.reply(err or '续费订单创建失败，请重新进入详情后再试。')
             return
         await state.clear()
-        await _send_cloud_renewal_payment_prompt(message, order, user, edit=False)
+        await _send_cloud_renewal_payment_prompt(message, order, user, edit=False, back_callback=back_callback)
 
     @dp.message(CustomServerStates.waiting_reinstall_link)
     async def msg_cloud_reinstall_link(message: Message, state: FSMContext):
@@ -5144,11 +5167,11 @@ def register_handlers(dp: Dispatcher):
         if asset_id:
             saved = await _save_asset_main_proxy_link(asset_id, None if is_admin_reinstall else user.id, link_data)
             token = await _issue_reinstall_confirm_token(state, kind='asset', item_id=saved.id)
-            await message.reply(_bot_text('bot_reinstall_validate_ok', '主代理链接校验通过。\n\n⚠️ 确认重新安装？重新安装大约需要 5 分钟，期间代理可能会断连。'), reply_markup=_asset_reinstall_confirm_keyboard(saved.id, token))
+            await message.reply(_bot_text('bot_reinstall_validate_ok', '主代理链接校验通过。\n\n⚠️ 确认重新安装？重新安装大约需要 5 分钟，期间代理可能会断连。'), reply_markup=_asset_reinstall_confirm_keyboard(saved.id, token, data.get('reinstall_back')))
             return
         saved = await _save_user_main_proxy_link(item.id, link_data)
         token = await _issue_reinstall_confirm_token(state, kind='order', item_id=saved.id)
-        await message.reply(_bot_text('bot_reinstall_validate_ok', '主代理链接校验通过。\n\n⚠️ 确认重新安装？重新安装大约需要 5 分钟，期间代理可能会断连。'), reply_markup=_reinstall_confirm_keyboard(saved.id, token))
+        await message.reply(_bot_text('bot_reinstall_validate_ok', '主代理链接校验通过。\n\n⚠️ 确认重新安装？重新安装大约需要 5 分钟，期间代理可能会断连。'), reply_markup=_reinstall_confirm_keyboard(saved.id, token, data.get('reinstall_back')))
 
     @dp.callback_query(F.data.startswith('cloud:reinitconfirm:'))
     async def cb_cloud_reinit_confirm(callback: CallbackQuery, bot: Bot, state: FSMContext):
@@ -5229,9 +5252,12 @@ def register_handlers(dp: Dispatcher):
             await message.reply(err or '修改失败，请重新查询后再试。', reply_markup=main_menu())
             return
         label = getattr(item, 'public_ip', None) or getattr(item, 'previous_public_ip', None) or getattr(item, 'order_no', None) or f'{item_kind}:{item_id}'
+        back_callback = str(data.get('admin_expiry_back') or 'cloud:querymenu').strip() or 'cloud:querymenu'
         await message.reply(
             f'✅ 已修改到期时间\n\n{label}\n新时间: {_format_local_dt(expires_at)}',
-            reply_markup=main_menu(),
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text='🔙 返回原页面', callback_data=back_callback)],
+            ]),
         )
 
     @dp.callback_query(F.data.startswith('balance:detail:'))

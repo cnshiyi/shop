@@ -42,6 +42,27 @@ def _cloud_item_expiry(item):
     )
 
 
+def cloud_detail_callback(order_id: int, back_callback: str | None = None) -> str:
+    back_callback = str(back_callback or '').strip()
+    if not back_callback:
+        return f'cloud:detail:{order_id}'
+    return f'cloud:detail:{order_id}:{back_callback}'
+
+
+def cloud_asset_detail_callback(asset_id: int, back_callback: str | None = None, item_kind: str = 'asset') -> str:
+    back_callback = str(back_callback or '').strip()
+    if not back_callback:
+        return f'cloud:assetdetail:{item_kind}:{asset_id}'
+    return f'cloud:assetdetail:{item_kind}:{asset_id}:{back_callback}'
+
+
+def append_back_callback(callback_data: str, back_callback: str | None = None) -> str:
+    back_callback = str(back_callback or '').strip()
+    if not back_callback:
+        return callback_data
+    return f'{callback_data}:{back_callback}'
+
+
 def main_menu():
     from core.button_config import load_button_config
 
@@ -359,35 +380,35 @@ def cart_menu(items, total_amount):
     return kb.as_markup()
 
 
-def cloud_server_change_ip_region_menu(order_id: int, regions, expanded: bool = False):
+def cloud_server_change_ip_region_menu(order_id: int, regions, expanded: bool = False, back_callback: str | None = None):
     kb = InlineKeyboardBuilder()
     popular_regions, remaining_regions = _split_custom_regions(regions)
     display_regions = remaining_regions if expanded else popular_regions
     for region_code, region_name in display_regions:
-        kb.button(text=region_name, callback_data=f'cloud:ipregion:{order_id}:{region_code}')
+        kb.button(text=region_name, callback_data=append_back_callback(f'cloud:ipregion:{order_id}:{region_code}', back_callback))
     if not expanded and remaining_regions:
-        kb.button(text='更多', callback_data=f'cloud:ipregions:more:{order_id}')
+        kb.button(text='更多', callback_data=append_back_callback(f'cloud:ipregions:more:{order_id}', back_callback))
         kb.adjust(3, 3)
-        kb.button(text='🔙 返回详情', callback_data=f'cloud:detail:{order_id}')
+        kb.button(text='🔙 返回详情', callback_data=cloud_detail_callback(order_id, back_callback))
         kb.adjust(3, 3, 1)
     elif expanded:
-        kb.button(text='🔙 返回', callback_data=f'cloud:ip:{order_id}')
+        kb.button(text='🔙 返回', callback_data=append_back_callback(f'cloud:ip:{order_id}', back_callback))
         rows = [3] * ((len(display_regions) + 2) // 3)
         kb.adjust(*rows, 1)
     else:
-        kb.button(text='🔙 返回详情', callback_data=f'cloud:detail:{order_id}')
+        kb.button(text='🔙 返回详情', callback_data=cloud_detail_callback(order_id, back_callback))
         rows = [3] * ((len(display_regions) + 2) // 3)
         kb.adjust(*rows, 1)
     return kb.as_markup()
 
 
-def cloud_server_change_ip_port_keyboard(order_id: int, region_code: str, region_name: str):
+def cloud_server_change_ip_port_keyboard(order_id: int, region_code: str, region_name: str, back_callback: str | None = None):
     kb = InlineKeyboardBuilder()
     kb.row(
-        InlineKeyboardButton(text='✅ 使用默认端口 9528', callback_data=f'cloud:ipport:default:{order_id}:{region_code}'),
-        InlineKeyboardButton(text='✍️ 输入自定义端口', callback_data=f'cloud:ipport:custom:{order_id}:{region_code}'),
+        InlineKeyboardButton(text='✅ 使用默认端口 9528', callback_data=append_back_callback(f'cloud:ipport:default:{order_id}:{region_code}', back_callback)),
+        InlineKeyboardButton(text='✍️ 输入自定义端口', callback_data=append_back_callback(f'cloud:ipport:custom:{order_id}:{region_code}', back_callback)),
     )
-    kb.row(InlineKeyboardButton(text='🔙 返回地区', callback_data=f'cloud:ip:{order_id}'))
+    kb.row(InlineKeyboardButton(text='🔙 返回地区', callback_data=append_back_callback(f'cloud:ip:{order_id}', back_callback)))
     return kb.as_markup()
 
 
@@ -537,12 +558,12 @@ def cloud_auto_renew_notice_actions(order_id: int):
     return _log_inline_keyboard('cloud_auto_renew_notice_actions', kb.as_markup(), order_id=order_id)
 
 
-def cloud_server_renew_payment(order_id: int, amount, trx_amount, auto_renew_enabled: bool = False):
+def cloud_server_renew_payment(order_id: int, amount, trx_amount, auto_renew_enabled: bool = False, back_callback: str | None = None):
     kb = InlineKeyboardBuilder()
-    kb.row(InlineKeyboardButton(text=f'💳 USDT钱包支付 ({fmt_amount(amount)} U)', callback_data=f'cloud:renewpay:{order_id}:USDT'))
+    kb.row(InlineKeyboardButton(text=f'💳 USDT钱包支付 ({fmt_amount(amount)} U)', callback_data=append_back_callback(f'cloud:renewpay:{order_id}:USDT', back_callback)))
     if trx_amount is not None:
-        kb.row(InlineKeyboardButton(text=f'💳 TRX钱包支付 ({fmt_amount(trx_amount)} TRX)', callback_data=f'cloud:renewpay:{order_id}:TRX'))
-    kb.row(InlineKeyboardButton(text='🔙 返回详情', callback_data=f'cloud:detail:{order_id}'))
+        kb.row(InlineKeyboardButton(text=f'💳 TRX钱包支付 ({fmt_amount(trx_amount)} TRX)', callback_data=append_back_callback(f'cloud:renewpay:{order_id}:TRX', back_callback)))
+    kb.row(InlineKeyboardButton(text='🔙 返回详情', callback_data=cloud_detail_callback(order_id, back_callback)))
     return _log_inline_keyboard(
         'cloud_server_renew_payment',
         kb.as_markup(),
@@ -550,21 +571,22 @@ def cloud_server_renew_payment(order_id: int, amount, trx_amount, auto_renew_ena
         amount=str(amount),
         trx_amount=str(trx_amount),
         auto_renew_enabled=auto_renew_enabled,
+        back_callback=back_callback,
     )
 
 
 def cloud_server_detail(order_id: int, can_renew: bool, can_change_ip: bool, can_reinit: bool = False, back_callback: str = 'cloud:list', can_upgrade: bool = False, can_resume_init: bool = False):
     kb = InlineKeyboardBuilder()
     if can_renew:
-        kb.button(text='🔄 续费', callback_data=f'cloud:renew:{order_id}')
+        kb.button(text='🔄 续费', callback_data=append_back_callback(f'cloud:renew:{order_id}', back_callback))
     if can_change_ip:
-        kb.button(text='🌐 更换IP', callback_data=f'cloud:ip:{order_id}')
+        kb.button(text='🌐 更换IP', callback_data=append_back_callback(f'cloud:ip:{order_id}', back_callback))
     if can_resume_init:
-        kb.button(text='🛠 继续初始化', callback_data=f'cloud:reinit:{order_id}')
+        kb.button(text='🛠 继续初始化', callback_data=f'cloud:reinit:{order_id}:{back_callback}')
     elif can_reinit:
-        kb.button(text='🛠 重新安装', callback_data=f'cloud:reinit:{order_id}')
+        kb.button(text='🛠 重新安装', callback_data=f'cloud:reinit:{order_id}:{back_callback}')
     if can_upgrade:
-        kb.button(text='⚙️ 修改配置', callback_data=f'cloud:upgrade:{order_id}')
+        kb.button(text='⚙️ 修改配置', callback_data=f'cloud:upgrade:{order_id}:{back_callback}')
     kb.button(text='🔙 返回列表', callback_data=back_callback)
     kb.adjust(2, 2, 2, 1)
     return _log_inline_keyboard(
@@ -781,15 +803,15 @@ def cloud_ip_query_result(result_items, renewable_items, page: int = 1, total_pa
         asset_id = int(item.get('asset_id') or 0)
         action_buttons = []
         if order_id > 0:
-            action_buttons.append(InlineKeyboardButton(text='🔄 续费IP', callback_data=f'cloud:renew:{order_id}'))
+            action_buttons.append(InlineKeyboardButton(text='🔄 续费IP', callback_data=f'cloud:renew:{order_id}:cloud:querymenu'))
             if include_start:
                 action_buttons.append(InlineKeyboardButton(text='▶️ 开机', callback_data=f'cloud:start:{order_id}'))
             if item.get('can_change_ip'):
-                action_buttons.append(InlineKeyboardButton(text='🌐 更换IP', callback_data=f'cloud:ip:{order_id}'))
+                action_buttons.append(InlineKeyboardButton(text='🌐 更换IP', callback_data=f'cloud:ip:{order_id}:cloud:querymenu'))
             if item.get('can_reinit') and (include_reinit or item.get('can_support')):
-                action_buttons.append(InlineKeyboardButton(text='🛠 重新安装', callback_data=f'cloud:reinit:{order_id}'))
+                action_buttons.append(InlineKeyboardButton(text='🛠 重新安装', callback_data=f'cloud:reinit:{order_id}:cloud:querymenu'))
             if item.get('can_config') and (include_reinit or item.get('can_support')):
-                action_buttons.append(InlineKeyboardButton(text='⚙️ 修改配置', callback_data=f'cloud:upgrade:{order_id}'))
+                action_buttons.append(InlineKeyboardButton(text='⚙️ 修改配置', callback_data=f'cloud:upgrade:{order_id}:cloud:querymenu'))
             if include_start:
                 action_buttons.append(InlineKeyboardButton(text='🕒 修改时间', callback_data=f'cloud:adminexp:order:{order_id}:cloud:querymenu'))
             if item.get('can_auto_renew') or include_start:
@@ -798,16 +820,16 @@ def cloud_ip_query_result(result_items, renewable_items, page: int = 1, total_pa
             if item.get('can_support'):
                 action_buttons.append(support_contact_button('cloud_query_ip', order_id))
         elif asset_id > 0:
-            action_buttons.append(InlineKeyboardButton(text='🔄 续费IP', callback_data=f'cloud:assetaction:renew:{asset_id}'))
+            action_buttons.append(InlineKeyboardButton(text='🔄 续费IP', callback_data=f'cloud:assetaction:renew:{asset_id}:cloud:querymenu'))
             start_order_id = int(item.get('start_order_id') or 0)
             if include_start and start_order_id > 0:
                 action_buttons.append(InlineKeyboardButton(text='▶️ 开机', callback_data=f'cloud:start:{start_order_id}'))
             if item.get('can_change_ip'):
-                action_buttons.append(InlineKeyboardButton(text='🌐 更换IP', callback_data=f'cloud:assetaction:changeip:{asset_id}'))
+                action_buttons.append(InlineKeyboardButton(text='🌐 更换IP', callback_data=f'cloud:assetaction:changeip:{asset_id}:cloud:querymenu'))
             if item.get('can_reinit') and (include_reinit or item.get('can_support')):
                 action_buttons.append(InlineKeyboardButton(text='🛠 重新安装', callback_data=f'cloud:assetinit:{asset_id}:cloud:querymenu'))
             if item.get('can_config') and (include_reinit or item.get('can_support')):
-                action_buttons.append(InlineKeyboardButton(text='⚙️ 修改配置', callback_data=f'cloud:assetaction:upgrade:{asset_id}'))
+                action_buttons.append(InlineKeyboardButton(text='⚙️ 修改配置', callback_data=f'cloud:assetaction:upgrade:{asset_id}:cloud:querymenu'))
             if include_start:
                 action_buttons.append(InlineKeyboardButton(text='🕒 修改时间', callback_data=f'cloud:adminexp:asset:{asset_id}:cloud:querymenu'))
             if item.get('can_support'):
