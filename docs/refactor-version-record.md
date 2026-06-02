@@ -1,5 +1,28 @@
 # Refactor Version Record
 
+## 2026-06-02 私聊同群资产详情可见性修复
+
+### 范围
+
+修复 Telegram 私聊代理列表与代理详情之间的同群资产可见性不一致问题。
+
+### 运行时变化
+
+- `get_user_proxy_asset_detail` 改为复用代理列表同一套用户可见性过滤。
+- 用户在私聊代理列表中能看到的同绑定群组资产，现在点击详情时不会再被误判为不存在。
+- 仍然保留现有无效订单、删除资产、停用云账号等基础过滤条件。
+- 新增回归测试覆盖同群资产在私聊列表与详情中的一致性。
+
+### 验证
+
+本地已通过 `PYTHONDONTWRITEBYTECODE=1 DJANGO_TEST_SQLITE=1`：
+
+```bash
+uv run python -m py_compile cloud/services.py cloud/tests.py
+uv run python manage.py test cloud.tests.CloudServerServicesTestCase.test_user_proxy_asset_detail_allows_same_bound_group_visibility cloud.tests.CloudServerServicesTestCase.test_group_cloud_server_list_is_scoped_to_current_group cloud.tests.CloudServerServicesTestCase.test_group_auto_renew_bulk_toggle_is_scoped_to_current_group --noinput --verbosity 1
+uv run python manage.py check
+```
+
 ## 2026-06-02 cloud-order-secret-edit-sync
 
 ### Scope

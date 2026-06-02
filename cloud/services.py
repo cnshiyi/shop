@@ -1589,8 +1589,12 @@ def get_cloud_server_for_admin(order_id: int):
 
 @sync_to_async
 def get_user_proxy_asset_detail(item_id: int, user_id: int, kind: str):
-    active_order_filter = Q(order__isnull=True) | ~Q(order__status__in=_INACTIVE_ORDER_STATUSES)
-    asset = CloudAsset.objects.filter(id=item_id, kind=CloudAsset.KIND_SERVER, user_id=user_id).filter(active_order_filter).exclude(status__in=_INACTIVE_ASSET_STATUSES).first()
+    asset = (
+        _cloud_server_asset_queryset()
+        .filter(id=item_id)
+        .filter(_user_asset_visibility_filter(user_id))
+        .first()
+    )
     return _proxy_asset_view(asset) if asset else None
 
 

@@ -9289,6 +9289,23 @@ class CloudServerServicesTestCase(TestCase):
         self.assertIsNone(denied_detail)
 
     # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
+    def test_user_proxy_asset_detail_allows_same_bound_group_visibility(self):
+        owner = TelegramUser.objects.create(tg_user_id=991997011, username='group_detail_owner')
+        member = TelegramUser.objects.create(tg_user_id=991997012, username='group_detail_member')
+        group = TelegramGroupFilter.objects.create(chat_id=-1001887011, title='Detail Shared Group', enabled=True)
+        owner_order = CloudServerOrder.objects.create(order_no='GROUP-DETAIL-OWNER-1', user=owner, plan=self.plan, provider=self.plan.provider, region_code=self.plan.region_code, region_name=self.plan.region_name, plan_name=self.plan.plan_name, quantity=1, currency='USDT', total_amount='19.00', pay_amount='19.00', pay_method='balance', status='completed', public_ip='8.8.8.44', service_expires_at=timezone.now() + timezone.timedelta(days=5))
+        member_order = CloudServerOrder.objects.create(order_no='GROUP-DETAIL-MEMBER-1', user=member, plan=self.plan, provider=self.plan.provider, region_code=self.plan.region_code, region_name=self.plan.region_name, plan_name=self.plan.plan_name, quantity=1, currency='USDT', total_amount='19.00', pay_amount='19.00', pay_method='balance', status='completed', public_ip='8.8.8.45', service_expires_at=timezone.now() + timezone.timedelta(days=5))
+        owner_asset = CloudAsset.objects.create(kind=CloudAsset.KIND_SERVER, source=CloudAsset.SOURCE_ORDER, order=owner_order, user=owner, provider=owner_order.provider, region_code=owner_order.region_code, region_name=owner_order.region_name, asset_name='group-detail-owner', public_ip='8.8.8.44', actual_expires_at=owner_order.service_expires_at, status=CloudAsset.STATUS_RUNNING, telegram_group=group)
+        CloudAsset.objects.create(kind=CloudAsset.KIND_SERVER, source=CloudAsset.SOURCE_ORDER, order=member_order, user=member, provider=member_order.provider, region_code=member_order.region_code, region_name=member_order.region_name, asset_name='group-detail-member', public_ip='8.8.8.45', actual_expires_at=member_order.service_expires_at, status=CloudAsset.STATUS_RUNNING, telegram_group=group)
+
+        member_items = async_to_sync(list_user_cloud_servers)(member.id)
+        owner_detail = async_to_sync(get_user_proxy_asset_detail)(owner_asset.id, member.id, 'asset')
+
+        self.assertIn(owner_asset.id, [getattr(item, 'asset_id', None) for item in member_items])
+        self.assertIsNotNone(owner_detail)
+        self.assertEqual(owner_detail.asset_id, owner_asset.id)
+
+    # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
     def test_group_auto_renew_bulk_toggle_is_scoped_to_current_group(self):
         first_user = TelegramUser.objects.create(tg_user_id=991997101, username='group_auto_first')
         second_user = TelegramUser.objects.create(tg_user_id=991997102, username='group_auto_second')
