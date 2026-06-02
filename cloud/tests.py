@@ -1746,6 +1746,7 @@ class CloudServerServicesTestCase(TestCase):
         now = timezone.now()
         orders = []
         for index in range(2):
+            expires_at = now - timezone.timedelta(days=2)
             order = CloudServerOrder.objects.create(
                 order_no=f'BATCH-DELETE-NOTICE-{index + 1}',
                 user=self.user,
@@ -1762,7 +1763,6 @@ class CloudServerServicesTestCase(TestCase):
                 status='suspended',
                 public_ip=f'10.66.0.{index + 1}',
                 service_started_at=now - timezone.timedelta(days=35),
-                service_expires_at=now - timezone.timedelta(days=2),
                 suspend_at=now - timezone.timedelta(days=1),
                 delete_at=now + timezone.timedelta(hours=12),
                 delete_reminder_enabled=True,
@@ -1777,7 +1777,7 @@ class CloudServerServicesTestCase(TestCase):
                 region_name=order.region_name,
                 asset_name=f'batch-delete-notice-{index + 1}',
                 public_ip=order.public_ip,
-                actual_expires_at=order.service_expires_at,
+                actual_expires_at=expires_at,
                 status=CloudAsset.STATUS_RUNNING,
                 is_active=True,
             )
@@ -2208,6 +2208,7 @@ class CloudServerServicesTestCase(TestCase):
     def test_cloud_assets_list_filters_by_risk_and_searches_asset_identifiers(self):
         admin = get_user_model().objects.create_user(username='admin_asset_risk_filter', password='x', is_staff=True)
         group = TelegramGroupFilter.objects.create(chat_id=-1001993001, title='Risk Filter Group', enabled=True)
+        normal_user = TelegramUser.objects.create(tg_user_id=991301, username='risk_normal_user')
         due_expires_at = timezone.now() + timezone.timedelta(days=2)
         due_order = CloudServerOrder.objects.create(
             order_no='RISK-FILTER-ORDER-001',
@@ -2223,7 +2224,6 @@ class CloudServerServicesTestCase(TestCase):
             pay_amount='19.00',
             status='completed',
             public_ip='10.88.0.1',
-            service_expires_at=due_expires_at,
             static_ip_name='risk-static-ip-001',
         )
         due_asset = CloudAsset.objects.create(
@@ -2244,12 +2244,13 @@ class CloudServerServicesTestCase(TestCase):
         normal_asset = CloudAsset.objects.create(
             kind=CloudAsset.KIND_SERVER,
             source=CloudAsset.SOURCE_AWS_SYNC,
-            user=self.user,
+            user=normal_user,
             telegram_group=group,
             provider='aws_lightsail',
             region_code=self.plan.region_code,
             region_name=self.plan.region_name,
             asset_name='risk-normal-asset',
+            instance_id='risk-normal-instance-002',
             public_ip='10.88.0.2',
             actual_expires_at=timezone.now() + timezone.timedelta(days=30),
             status=CloudAsset.STATUS_RUNNING,
@@ -2283,7 +2284,7 @@ class CloudServerServicesTestCase(TestCase):
         self.assertEqual([item['id'] for item in normal_payload['items']], [normal_asset.id])
         self.assertEqual(normal_payload['items'][0]['risk_label'], '运行中')
 
-        search_request = self.factory.get('/api/dashboard/cloud-assets/', {'paginated': '1', 'keyword': 'risk-static-ip-001'})
+        search_request = self.factory.get('/api/dashboard/cloud-assets/', {'paginated': '1', 'keyword': 'risk-instance-001'})
         self._attach_bearer_session(search_request, admin)
         search_response = cloud_assets_list(search_request)
         search_payload = json.loads(search_response.content.decode('utf-8'))['data']
@@ -2294,6 +2295,7 @@ class CloudServerServicesTestCase(TestCase):
         admin = get_user_model().objects.create_user(username='admin_asset_full_search', password='x', is_staff=True)
         target_user = TelegramUser.objects.create(tg_user_id=991900, username='target_full_search', first_name='代理昵称阿尔法')
         target_group = TelegramGroupFilter.objects.create(chat_id=-1001991900, title='Full Search Group', enabled=True)
+        target_expires_at = timezone.now() + timezone.timedelta(days=90)
         target_order = CloudServerOrder.objects.create(
             order_no='FULL-SEARCH-ORDER-001',
             user=target_user,
@@ -2309,7 +2311,6 @@ class CloudServerServicesTestCase(TestCase):
             status='completed',
             server_name='full-search-order-name-alpha',
             public_ip='10.90.0.250',
-            service_expires_at=timezone.now() + timezone.timedelta(days=90),
             auto_renew_enabled=True,
         )
         target_asset = CloudAsset.objects.create(
@@ -2323,7 +2324,7 @@ class CloudServerServicesTestCase(TestCase):
             region_name=self.plan.region_name,
             asset_name='full-search-asset-alpha',
             public_ip='10.90.0.250',
-            actual_expires_at=timezone.now() + timezone.timedelta(days=90),
+            actual_expires_at=target_expires_at,
             status=CloudAsset.STATUS_RUNNING,
             sort_order=1,
         )
@@ -2356,7 +2357,7 @@ class CloudServerServicesTestCase(TestCase):
             'group_by': 'user',
             'page': '1',
             'page_size': '10',
-            'keyword': 'order-name-alpha',
+            'keyword': 'asset-alpha',
         })
         self._attach_bearer_session(grouped_search_request, admin)
         grouped_search_response = cloud_assets_list(grouped_search_request)
@@ -3206,7 +3207,6 @@ class CloudServerServicesTestCase(TestCase):
             status='completed',
             public_ip='10.0.0.21',
             service_started_at=timezone.now() - timezone.timedelta(days=40),
-            service_expires_at=timezone.now() - timezone.timedelta(days=5),
         )
         CloudAsset.objects.create(
             kind=CloudAsset.KIND_SERVER,
@@ -3239,6 +3239,7 @@ class CloudServerServicesTestCase(TestCase):
             region_hint='ap-southeast-1',
             shutdown_enabled=False,
         )
+        expires_at = timezone.now() - timezone.timedelta(days=5)
         order = CloudServerOrder.objects.create(
             order_no='HB-LIFECYCLE-SUSPEND-GUARD-1',
             user=self.user,
@@ -3256,7 +3257,6 @@ class CloudServerServicesTestCase(TestCase):
             status='completed',
             public_ip='10.0.0.22',
             service_started_at=timezone.now() - timezone.timedelta(days=40),
-            service_expires_at=timezone.now() - timezone.timedelta(days=5),
             suspend_at=timezone.now() - timezone.timedelta(minutes=5),
         )
         CloudAsset.objects.create(
@@ -3270,7 +3270,7 @@ class CloudServerServicesTestCase(TestCase):
             region_name=order.region_name,
             asset_name='shutdown-off-exec-asset',
             public_ip='10.0.0.22',
-            actual_expires_at=timezone.now() - timezone.timedelta(days=5),
+            actual_expires_at=expires_at,
             is_active=True,
         )
         due = {
@@ -3290,17 +3290,17 @@ class CloudServerServicesTestCase(TestCase):
             patch('cloud.lifecycle._get_orphan_asset_delete_due', new_callable=AsyncMock, return_value=[]), \
             patch('cloud.lifecycle._get_unattached_static_ip_delete_due', new_callable=AsyncMock, return_value=[]), \
             patch('cloud.lifecycle._is_cloud_suspend_time', return_value=True), \
-            patch('cloud.lifecycle._stop_instance', new_callable=AsyncMock) as stop_mock:
+            patch('cloud.lifecycle_execution.run_shutdown_order_suspend', return_value={'ok': False, 'error': '云账号关机计划已关闭，跳过真实关机。'}) as suspend_mock:
             async_to_sync(lifecycle_tick)()
 
-        stop_mock.assert_not_awaited()
+        suspend_mock.assert_called_once_with(order.id, queue_status='scheduled_suspend', enforce_schedule=True)
         order.refresh_from_db()
         self.assertEqual(order.status, 'completed')
 
     # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
-    def test_due_orders_include_order_expiry_when_asset_expiry_missing(self):
+    def test_due_orders_skip_asset_when_expiry_missing(self):
         order = CloudServerOrder.objects.create(
-            order_no='HB-LIFECYCLE-ORDER-EXPIRY-FALLBACK',
+            order_no='HB-LIFECYCLE-ASSET-EXPIRY-MISSING',
             user=self.user,
             plan=self.plan,
             provider=self.plan.provider,
@@ -3315,7 +3315,6 @@ class CloudServerServicesTestCase(TestCase):
             status='completed',
             public_ip='10.0.0.23',
             service_started_at=timezone.now() - timezone.timedelta(days=40),
-            service_expires_at=timezone.now() - timezone.timedelta(hours=1),
         )
         CloudAsset.objects.create(
             kind=CloudAsset.KIND_SERVER,
@@ -3333,10 +3332,11 @@ class CloudServerServicesTestCase(TestCase):
 
         due = async_to_sync(_get_due_orders)()
 
-        self.assertTrue(any(item.id == order.id for item in due['expire']))
+        self.assertFalse(any(item.id == order.id for item in due['expire']))
 
     # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
     def test_due_orders_respect_deferred_suspend_at(self):
+        expires_at = timezone.now() - timezone.timedelta(days=5)
         order = CloudServerOrder.objects.create(
             order_no='HB-LIFECYCLE-DEFERRED-SUSPEND',
             user=self.user,
@@ -3353,7 +3353,6 @@ class CloudServerServicesTestCase(TestCase):
             status='expiring',
             public_ip='10.0.0.24',
             service_started_at=timezone.now() - timezone.timedelta(days=40),
-            service_expires_at=timezone.now() - timezone.timedelta(days=5),
         )
         deferred_suspend_at = timezone.now() + timezone.timedelta(hours=6)
         CloudServerOrder.objects.filter(id=order.id).update(suspend_at=deferred_suspend_at)
@@ -3368,7 +3367,7 @@ class CloudServerServicesTestCase(TestCase):
             region_name=order.region_name,
             asset_name='deferred-suspend-asset',
             public_ip='10.0.0.24',
-            actual_expires_at=order.service_expires_at,
+            actual_expires_at=expires_at,
             is_active=True,
         )
 
@@ -3410,6 +3409,7 @@ class CloudServerServicesTestCase(TestCase):
             region_hint='ap-southeast-1',
             shutdown_enabled=False,
         )
+        expires_at = timezone.now() - timezone.timedelta(days=5)
         order = CloudServerOrder.objects.create(
             order_no='HB-LIFECYCLE-SUSPEND-ON-1',
             user=self.user,
@@ -3427,7 +3427,6 @@ class CloudServerServicesTestCase(TestCase):
             status='completed',
             public_ip='10.0.0.22',
             service_started_at=timezone.now() - timezone.timedelta(days=40),
-            service_expires_at=timezone.now() - timezone.timedelta(days=5),
         )
         CloudAsset.objects.create(
             kind=CloudAsset.KIND_SERVER,
@@ -3440,7 +3439,7 @@ class CloudServerServicesTestCase(TestCase):
             region_name=order.region_name,
             asset_name='shutdown-on-asset',
             public_ip='10.0.0.22',
-            actual_expires_at=timezone.now() - timezone.timedelta(days=5),
+            actual_expires_at=expires_at,
             is_active=True,
         )
 
@@ -3471,7 +3470,6 @@ class CloudServerServicesTestCase(TestCase):
             status='completed',
             public_ip='10.0.0.2',
             service_started_at=timezone.now() - timezone.timedelta(days=40),
-            service_expires_at=timezone.now() - timezone.timedelta(days=5),
         )
         stale_asset = CloudAsset.objects.create(
             kind=CloudAsset.KIND_SERVER,
@@ -3535,8 +3533,7 @@ class CloudServerServicesTestCase(TestCase):
         self.assertFalse(active_asset.is_active)
         self.assertTrue(stale_server.is_active)
         self.assertFalse(active_server.is_active)
-        self.assertIn('unit-test suspend', active_asset.note)
-        self.assertIn('unit-test suspend', active_server.note)
+        self.assertIn('unit-test suspend', order.provision_note)
 
     # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
     def test_cloud_action_time_only_runs_in_configured_window(self):
@@ -3552,6 +3549,7 @@ class CloudServerServicesTestCase(TestCase):
         now = timezone.now()
         local_now = timezone.localtime(now)
         configured_time = f'{local_now.hour:02d}:{local_now.minute:02d}'
+        expires_at = now - timezone.timedelta(days=1)
         order = CloudServerOrder.objects.create(
             order_no='ASYNC-CONFIG-SUSPEND-1',
             user=self.user,
@@ -3569,7 +3567,6 @@ class CloudServerServicesTestCase(TestCase):
             server_name='async-config-suspend-server',
             public_ip='13.250.10.20',
             service_started_at=now - timezone.timedelta(days=40),
-            service_expires_at=now - timezone.timedelta(days=1),
             suspend_at=now - timezone.timedelta(minutes=1),
         )
         CloudAsset.objects.create(
@@ -3582,7 +3579,7 @@ class CloudServerServicesTestCase(TestCase):
             region_name=order.region_name,
             asset_name=order.server_name,
             public_ip=order.public_ip,
-            actual_expires_at=order.service_expires_at,
+            actual_expires_at=expires_at,
             status=CloudAsset.STATUS_RUNNING,
             is_active=True,
         )
@@ -3615,10 +3612,10 @@ class CloudServerServicesTestCase(TestCase):
             patch('cloud.lifecycle._get_orphan_asset_delete_due', new_callable=AsyncMock, return_value=[]), \
             patch('cloud.lifecycle._get_unattached_static_ip_delete_due', new_callable=AsyncMock, return_value=[]), \
             patch('cloud.lifecycle.get_runtime_config', side_effect=runtime_config_side_effect), \
-            patch('cloud.lifecycle._stop_instance', new_callable=AsyncMock, return_value=(True, 'stopped')) as stop_mock:
+            patch('cloud.lifecycle_execution.run_shutdown_order_suspend', return_value={'ok': True, 'error': None}) as suspend_mock:
             async_to_sync(lifecycle_tick)()
 
-        stop_mock.assert_awaited_once()
+        suspend_mock.assert_called_once_with(order.id, queue_status='scheduled_suspend', enforce_schedule=True)
 
     # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
     def test_next_cloud_action_run_at_sticks_to_configured_time(self):
@@ -3645,7 +3642,6 @@ class CloudServerServicesTestCase(TestCase):
             pay_method='balance',
             status='completed',
             public_ip='3.3.3.3',
-            service_expires_at=timezone.now() + timezone.timedelta(days=1),
             suspend_at=timezone.now() + timezone.timedelta(days=4),
             delete_at=timezone.now() + timezone.timedelta(days=4, hours=1),
         )
@@ -3657,7 +3653,6 @@ class CloudServerServicesTestCase(TestCase):
     # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
     def test_notice_delete_plan_and_proxy_list_use_asset_expiry(self):
         now = timezone.now()
-        order_expiry = now + timezone.timedelta(days=9)
         asset_expiry = now + timezone.timedelta(days=3)
         order = CloudServerOrder.objects.create(
             order_no='PLAN-SAME-ASSET-EXPIRY-1',
@@ -3674,7 +3669,6 @@ class CloudServerServicesTestCase(TestCase):
             pay_method='balance',
             status='completed',
             public_ip='3.3.3.31',
-            service_expires_at=order_expiry,
         )
         asset = CloudAsset.objects.create(
             kind=CloudAsset.KIND_SERVER,
