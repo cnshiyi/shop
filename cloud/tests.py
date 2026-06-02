@@ -8516,6 +8516,7 @@ class CloudServerServicesTestCase(TestCase):
 
     # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
     def test_refresh_lifecycle_plans_command_populates_cloud_lifecycle_plan(self):
+        expires_at = timezone.now() - timezone.timedelta(days=2)
         order = CloudServerOrder.objects.create(
             order_no='CMD-LIFECYCLE-PLAN-1',
             user=self.user,
@@ -8530,7 +8531,6 @@ class CloudServerServicesTestCase(TestCase):
             pay_amount='19.00',
             status='suspended',
             public_ip='7.7.7.61',
-            service_expires_at=timezone.now() - timezone.timedelta(days=2),
             suspend_at=timezone.now() - timezone.timedelta(days=1),
             delete_at=timezone.now() + timezone.timedelta(hours=1),
         )
@@ -8545,7 +8545,7 @@ class CloudServerServicesTestCase(TestCase):
             asset_name='cmd-lifecycle-plan-asset',
             instance_id='cmd-lifecycle-plan-asset',
             public_ip=order.public_ip,
-            actual_expires_at=order.service_expires_at,
+            actual_expires_at=expires_at,
             status=CloudAsset.STATUS_RUNNING,
             is_active=True,
         )

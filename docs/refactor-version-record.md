@@ -1,5 +1,40 @@
 # 重构版本记录
 
+## 2026-06-02 自动监工：计划刷新测试旧字段回流修复
+
+### 范围
+
+本轮继续监工云资产生命周期重构后的唯一到期事实源、旧字段回流、旧计划快照表回流、退款入口回流和废弃 app 误用。起始工作树干净，最近提交为 `850590e 补充生命周期回流复查记录`。
+
+### 修复
+
+- 修复 `test_refresh_lifecycle_plans_command_populates_cloud_lifecycle_plan` 的测试数据回流：不再向 `CloudServerOrder.objects.create()` 传入已移除的 `service_expires_at`，改为在测试中保存 `expires_at` 变量并写入关联 `CloudAsset.actual_expires_at`。
+- 本轮未修改生产代码；计划刷新命令和接口仍从实时资产事实源生成结果，不恢复旧计划快照表。
+
+### 复查结论
+
+- 当前运行时代码仍以 `CloudAsset.actual_expires_at` 作为唯一结构化服务到期事实。
+- 未发现 `normalize_service_expiry` 旧符号、`service_expired_at` 拼写残留，未发现运行代码对已移除 `CloudServerOrder.service_expires_at` 数据库列做危险 ORM 查询。
+- 未恢复 `CloudLifecyclePlan`、`CloudNoticePlan`、`CloudAutoRenewPlan` 旧计划快照模型；`refresh_lifecycle_plans` 和 `refresh_notice_plans` 仍生成实时 bundle。
+- 未发现退款函数名、退款入口或 `refunded` 运行时状态筛选回流。
+- 废弃 app 未重新加入 `INSTALLED_APPS`；相关命中仍为现有权限码、路由命名空间、helper 名称或历史迁移上下文。
+
+### 验证
+
+本地已通过：
+
+```bash
+UV_CACHE_DIR=/private/tmp/uv-cache-shop uv run python manage.py check
+UV_CACHE_DIR=/private/tmp/uv-cache-shop uv run python manage.py makemigrations --check --dry-run
+UV_CACHE_DIR=/private/tmp/uv-cache-shop uv run python -m py_compile cloud/asset_expiry.py cloud/lifecycle_schedule.py cloud/lifecycle.py cloud/lifecycle_tasks.py cloud/services.py cloud/api_orders.py cloud/api_tasks.py cloud/api_asset_edit.py cloud/management/commands/refresh_lifecycle_plans.py cloud/management/commands/refresh_notice_plans.py
+DB_ENGINE=sqlite SQLITE_NAME=/private/tmp/shop-monitor-notice-cycle.sqlite3 UV_CACHE_DIR=/private/tmp/uv-cache-shop uv run python manage.py test cloud.tests.CloudServerServicesTestCase.test_send_order_notice_batch_allows_new_expiry_cycle cloud.tests.CloudServerServicesTestCase.test_send_logged_cloud_notice_deduplicates_same_event_and_order cloud.tests.CloudServerServicesTestCase.test_send_order_notice_batch_prefers_bound_group_and_skips_private cloud.tests.CloudServerServicesTestCase.test_send_order_notice_batch_falls_back_private_when_group_fails --noinput
+DB_ENGINE=sqlite SQLITE_NAME=/private/tmp/shop-monitor-startup-defer.sqlite3 UV_CACHE_DIR=/private/tmp/uv-cache-shop uv run python manage.py test cloud.tests.CloudServerServicesTestCase.test_lifecycle_tick_startup_defer_reschedules_static_ip_cleanup_without_release cloud.tests.CloudServerServicesTestCase.test_lifecycle_tick_startup_defer_blocks_order_static_ip_release cloud.tests.CloudServerServicesTestCase.test_lifecycle_tick_startup_defer_blocks_unattached_static_ip_release --noinput
+DB_ENGINE=sqlite SQLITE_NAME=/private/tmp/shop-monitor-plan-refresh.sqlite3 UV_CACHE_DIR=/private/tmp/uv-cache-shop uv run python manage.py test cloud.tests.CloudServerServicesTestCase.test_refresh_lifecycle_plans_command_populates_cloud_lifecycle_plan cloud.tests.CloudServerServicesTestCase.test_refresh_lifecycle_plan_table_api_populates_cloud_lifecycle_plan cloud.tests.CloudServerServicesTestCase.test_refresh_notice_plans_command_populates_cloud_notice_plan cloud.tests.CloudServerServicesTestCase.test_refresh_notice_plan_table_api_populates_cloud_notice_plan --noinput
+git diff --check
+```
+
+默认 MySQL 连接仍被当前沙箱禁止访问 `127.0.0.1:3306`，`makemigrations --check --dry-run` 因此打印迁移历史一致性检查警告，但最终报告 `No changes detected`。启动延迟聚焦测试仍会打印 SQLite 快照刷新锁等待日志，断言通过，属于现有测试环境噪声。
+
 ## 2026-06-02 自动监工：生命周期回流复查补验
 
 ### 范围
