@@ -1,5 +1,42 @@
 # 重构版本记录
 
+## 2026-06-02 23:03 自动监工：压缩机器人订单返回回调
+
+### 范围
+
+本轮接续机器人云代理返回链收口，重点复查嵌套订单列表来源 callback 在续费、更换 IP、重新安装、修改配置等二级按钮中可能接近或超过 Telegram `callback_data` 长度限制的问题，同时确认旧资产详情回调、云资产到期事实源、旧计划快照表、旧退款入口和废弃 app 未回流。
+
+### 修复内容
+
+- 新增 `poc:<筛选>:<页码>` 短返回路径，用于压缩 `profile:orders:cloud...` 订单列表来源；机器人处理器注册 `poc:` 回调并恢复到对应云订单列表筛选页。
+- `cloud_detail_callback()`、`cloud_asset_detail_callback()`、`append_back_callback()`、订单详情和只读订单详情键盘统一压缩可识别的返回路径，减少嵌套操作按钮长度。
+- 旧 `cloud:assetdetail:<id>` 返回路径压缩为新 `cloud:ad:asset:<id>` 形态，并修复处理器解析旧格式时的 `kind/id` 兼容分支。
+- 补充回归测试，确认订单筛选页来源会压缩为 `poc:`、按钮 callback 长度不超过 64 字节、旧资产详情格式和新短格式都可被处理器识别。
+
+### 复查结论
+
+- `CloudAsset.actual_expires_at` 仍是唯一结构化资产到期事实；`CloudServerOrder` 未恢复 `service_expires_at` 或 `actual_expires_at` 服务到期字段。
+- 严格运行时代码扫描未发现旧计划快照模型、旧退款函数名、旧退款状态或旧到期字段命名回流。
+- 仓库根下未发现 `accounts/finance/mall/monitoring/dashboard_api/biz` 废弃 app 目录恢复；当前 `dashboard_api` 命中仍为 `core.dashboard_api` 和 URL namespace。
+
+### 验证
+
+已通过：
+
+```bash
+UV_CACHE_DIR=/private/tmp/uv-cache-shop uv run python manage.py check
+UV_CACHE_DIR=/private/tmp/uv-cache-shop uv run python -m py_compile bot/handlers.py bot/keyboards.py bot/tests.py cloud/services.py cloud/lifecycle.py cloud/lifecycle_execution.py cloud/api_tasks.py
+DJANGO_TEST_SQLITE=1 UV_CACHE_DIR=/private/tmp/uv-cache-shop uv run python manage.py test bot.tests.RetainedIpRenewalUiTestCase --verbosity 2
+UV_CACHE_DIR=/private/tmp/uv-cache-shop uv run python manage.py makemigrations --check --dry-run
+rg -n "service_expires_at|service_expired_at|normalize_service_expiry|CloudLifecyclePlan\\b|CloudNoticePlan\\b|CloudAutoRenewPlan\\b|refund_to_balance|refund_balance|refund_order|process_refund|create_refund|issue_refund|STATUS_REFUNDED|status\\s*=\\s*['\\\"]refunded['\\\"]|STATUS_CHOICES.*refunded" bot orders cloud core shop -g '!**/migrations/**' -g '!**/tests.py'
+find . -maxdepth 2 -type d \( -name accounts -o -name finance -o -name mall -o -name monitoring -o -name dashboard_api -o -name biz \)
+git diff --check
+```
+
+结果：Django 系统检查、关键模块编译、机器人返回 UI 聚焦测试 27 条、迁移 dry-run、旧字段/旧计划/旧退款扫描、废弃 app 目录检查和空白检查均通过。迁移 dry-run 仍因沙箱禁止连接本机 MySQL 输出一致性历史检查警告，但无模型变更。
+
+剩余风险：本轮未跑完整测试套件，未连接真实 MySQL、AWS Lightsail、阿里云、TRONGrid 或 Telegram，未执行真实 Telegram 回调、钱包扣款、自动续费支付、云端删机、固定 IP 释放或历史数据清理。
+
 ## 2026-06-02 22:40 自动监工：本地巡检和 CLI 监工状态
 
 ### 范围

@@ -43,14 +43,14 @@ def _cloud_item_expiry(item):
 
 
 def cloud_detail_callback(order_id: int, back_callback: str | None = None) -> str:
-    back_callback = str(back_callback or '').strip()
+    back_callback = compact_callback_path(back_callback)
     if not back_callback:
         return f'cloud:detail:{order_id}'
     return f'cloud:detail:{order_id}:{back_callback}'
 
 
 def cloud_asset_detail_callback(asset_id: int, back_callback: str | None = None, item_kind: str = 'asset') -> str:
-    back_callback = str(back_callback or '').strip()
+    back_callback = compact_callback_path(back_callback)
     item_kind = str(item_kind or 'asset').strip() or 'asset'
     if not back_callback:
         return f'cloud:ad:{item_kind}:{asset_id}'
@@ -58,14 +58,14 @@ def cloud_asset_detail_callback(asset_id: int, back_callback: str | None = None,
 
 
 def cloud_previous_detail_callback(order_id: int, back_callback: str | None = None) -> str:
-    back_callback = str(back_callback or '').strip()
+    back_callback = compact_callback_path(back_callback)
     if back_callback.startswith(('cloud:detail:', 'cloud:assetdetail:', 'cloud:ad:')):
         return back_callback
     return cloud_detail_callback(order_id, back_callback)
 
 
 def append_back_callback(callback_data: str, back_callback: str | None = None) -> str:
-    back_callback = str(back_callback or '').strip()
+    back_callback = compact_callback_path(back_callback)
     if not back_callback:
         return callback_data
     return f'{callback_data}:{back_callback}'
@@ -73,6 +73,27 @@ def append_back_callback(callback_data: str, back_callback: str | None = None) -
 
 def cloud_asset_action_callback(action: str, asset_id: int, back_callback: str | None = None) -> str:
     return append_back_callback(f'cloud:aa:{action}:{asset_id}', back_callback)
+
+
+def compact_callback_path(callback_data: str | None) -> str:
+    text = str(callback_data or '').strip()
+    if not text:
+        return ''
+    parts = text.split(':')
+    if len(parts) > 4 and parts[:2] == ['cloud', 'ad']:
+        nested = compact_callback_path(':'.join(parts[4:]))
+        return f'cloud:ad:{parts[2]}:{parts[3]}:{nested}' if nested else f'cloud:ad:{parts[2]}:{parts[3]}'
+    if len(parts) >= 3 and parts[:2] == ['cloud', 'assetdetail']:
+        nested = compact_callback_path(':'.join(parts[3:]))
+        return f'cloud:ad:asset:{parts[2]}:{nested}' if nested else f'cloud:ad:asset:{parts[2]}'
+    if len(parts) > 3 and parts[:2] == ['cloud', 'detail']:
+        nested = compact_callback_path(':'.join(parts[3:]))
+        return f'cloud:detail:{parts[2]}:{nested}' if nested else f'cloud:detail:{parts[2]}'
+    if len(parts) >= 7 and parts[:4] == ['profile', 'orders', 'cloud', 'filter'] and parts[5] == 'page':
+        return f'poc:{parts[4] or "all"}:{parts[6] or "1"}'
+    if len(parts) >= 5 and parts[:3] == ['profile', 'orders', 'cloud'] and parts[3] == 'page':
+        return f'poc:all:{parts[4] or "1"}'
+    return text
 
 
 def main_menu():
@@ -589,6 +610,7 @@ def cloud_server_renew_payment(order_id: int, amount, trx_amount, auto_renew_ena
 
 def cloud_server_detail(order_id: int, can_renew: bool, can_change_ip: bool, can_reinit: bool = False, back_callback: str = 'cloud:list', can_upgrade: bool = False, can_resume_init: bool = False):
     kb = InlineKeyboardBuilder()
+    back_callback = compact_callback_path(back_callback)
     if can_renew:
         kb.button(text='🔄 续费', callback_data=append_back_callback(f'cloud:renew:{order_id}', back_callback))
     if can_change_ip:
@@ -678,6 +700,7 @@ def cloud_order_list(orders, page: int = 1, total_pages: int = 1, prefix: str = 
 
 def cloud_order_readonly_detail(order_id: int, back_callback: str = 'profile:orders:cloud:page:1'):
     kb = InlineKeyboardBuilder()
+    back_callback = compact_callback_path(back_callback)
     kb.row(support_contact_button('cloud_order', order_id))
     kb.row(InlineKeyboardButton(text='🔙 返回订单列表', callback_data=back_callback))
     return _log_inline_keyboard('cloud_order_readonly_detail', kb.as_markup(), order_id=order_id, back_callback=back_callback)

@@ -1184,6 +1184,7 @@ def _callback_route_label(callback_data: str | None) -> str:
         ('cloud:autorenewlist:on:', 'cloud.autorenewlist.on 开启自动续费'),
         ('cloud:autorenewlist:off:', 'cloud.autorenewlist.off 关闭自动续费'),
         ('cloud:queryip:page:', 'cloud.queryip.page IP查询分页'),
+        ('poc:', 'profile.orders.cloud.compact 云订单短返回'),
         ('cloud:renewpay:', 'cloud.renewpay 续费钱包支付'),
         ('cloud:renewwallet:', 'cloud.renewwallet 自动续费钱包支付'),
         ('cloud:assetrenewplan:', 'cloud.assetrenewplan 未绑定资产续费选套餐'),
@@ -3221,6 +3222,17 @@ def register_handlers(dp: Dispatcher):
         page = int(parts[6]) if len(parts) > 6 and parts[5] == 'page' else 1
         await _render_profile_cloud_orders(callback, page=page, order_filter=order_filter)
 
+    @dp.callback_query(F.data.startswith('poc:'))
+    async def cb_profile_cloud_orders_compact(callback: CallbackQuery):
+        await _safe_callback_answer(callback)
+        parts = callback.data.split(':')
+        order_filter = parts[1] if len(parts) > 1 and parts[1] else 'all'
+        try:
+            page = max(1, int(parts[2])) if len(parts) > 2 else 1
+        except (TypeError, ValueError):
+            page = 1
+        await _render_profile_cloud_orders(callback, page=page, order_filter=order_filter)
+
     @dp.callback_query(F.data == 'profile:cart')
     async def cb_profile_cart(callback: CallbackQuery):
         await _safe_callback_answer(callback)
@@ -4210,7 +4222,7 @@ def register_handlers(dp: Dispatcher):
                     InlineKeyboardButton(text=f'{"⛔ 关闭" if getattr(item, "auto_renew_enabled", False) else "⚡ 开启"}自动续费', callback_data=f'cloud:autorenew:{"off" if getattr(item, "auto_renew_enabled", False) else "on"}:{item_order_id}'),
                 ])
             else:
-                    rows.append([InlineKeyboardButton(text='🔄 续费', callback_data=cloud_asset_action_callback('renew', item_id, back_callback))])
+                rows.append([InlineKeyboardButton(text='🔄 续费', callback_data=cloud_asset_action_callback('renew', item_id, back_callback))])
         else:
             status = str(getattr(item, 'status', '') or '')
             provider = str(getattr(item, 'provider', '') or '')
