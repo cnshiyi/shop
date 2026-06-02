@@ -23,7 +23,7 @@ from cloud.api_assets import (
 )
 from cloud.api_orders import _cloud_order_summary_payload, _proxy_link_item, _proxy_links_with_main_link, _related_order_history_payload
 from cloud.asset_expiry import order_asset_expiry
-from cloud.dashboard_snapshots import _refresh_dashboard_plan_snapshots, _refresh_dashboard_plan_snapshots_deferred, _refresh_lifecycle_plan_snapshot
+from cloud.dashboard_snapshots import _refresh_dashboard_plan_snapshots, _refresh_dashboard_plan_snapshots_deferred, _refresh_lifecycle_plan_view
 from cloud.lifecycle_schedule import compute_order_lifecycle_fields
 from cloud.models import CloudAsset, CloudIpLog, CloudServerOrder, CloudServerPlan
 from cloud.note_utils import append_note
@@ -458,7 +458,7 @@ def update_cloud_asset(request, asset_id):
             note=f'后台手动更新IP：{changed_public_ip_before or "未分配"} → {changed_public_ip_after or "未分配"}',
         )
     if 'actual_expires_at' in payload:
-        _refresh_lifecycle_plan_snapshot(f'cloud_asset_expiry:{asset_id}', lifecycle_limit=1000)
+        _refresh_lifecycle_plan_view(f'cloud_asset_expiry:{asset_id}', lifecycle_limit=1000)
     if refresh_snapshots_needed:
         _refresh_dashboard_plan_snapshots_deferred(f'cloud_asset:{asset_id}', cloud_asset_ids=[asset_id])
     asset = CloudAsset.objects.select_related('user', 'order', 'cloud_account', 'telegram_group').get(pk=asset_id)

@@ -90,10 +90,10 @@ def _refresh_dashboard_plan_snapshots(reason: str = '', *, lifecycle_limit: int 
             logger.exception('DASHBOARD_SNAPSHOT_NOTICE_REFRESH_FAILED reason=%s', reason)
     except Exception:
         logger.exception('DASHBOARD_SNAPSHOT_NOTICE_REFRESH_FAILED reason=%s', reason)
-    _refresh_lifecycle_plan_snapshot(reason, lifecycle_limit=lifecycle_limit)
+    _refresh_lifecycle_plan_view(reason, lifecycle_limit=lifecycle_limit)
 
 
-def _refresh_lifecycle_plan_snapshot(reason: str = '', *, lifecycle_limit: int = 1000):
+def _refresh_lifecycle_plan_view(reason: str = '', *, lifecycle_limit: int = 1000):
     try:
         from bot import api as bot_api
         bot_api._build_lifecycle_plan_bundle(limit=lifecycle_limit)
