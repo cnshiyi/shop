@@ -23,13 +23,19 @@
 
 ```bash
 UV_CACHE_DIR=/private/tmp/uv-cache-shop uv run python manage.py check
-UV_CACHE_DIR=/private/tmp/uv-cache-shop uv run python -m py_compile cloud/lifecycle.py cloud/tests.py
+UV_CACHE_DIR=/private/tmp/uv-cache-shop uv run python -m py_compile bot/api.py bot/handlers.py bot/keyboards.py cloud/api_asset_edit.py cloud/api_servers.py cloud/lifecycle.py cloud/server_records.py cloud/management/commands/sync_aws_assets.py cloud/management/commands/sync_aliyun_assets.py cloud/management/commands/reconcile_cloud_assets_from_servers.py cloud/management/commands/refresh_lifecycle_plans.py
+UV_CACHE_DIR=/private/tmp/uv-cache-shop uv run python manage.py makemigrations --check --dry-run
 DJANGO_TEST_SQLITE=1 UV_CACHE_DIR=/private/tmp/uv-cache-shop uv run python manage.py test cloud.tests.CloudServerServicesTestCase.test_notice_schedule_preserves_stored_delete_and_recycle_after_status_progress cloud.tests.CloudServerServicesTestCase.test_notice_delete_plan_and_proxy_list_use_asset_expiry cloud.tests.CloudServerServicesTestCase.test_lifecycle_tick_rechecks_order_delete_at_before_cloud_delete cloud.tests.CloudServerServicesTestCase.test_lifecycle_tick_rechecks_order_ip_recycle_at_before_release
+DJANGO_TEST_SQLITE=1 UV_CACHE_DIR=/private/tmp/uv-cache-shop uv run python manage.py test cloud.tests --verbosity 1 --failfast
+DJANGO_TEST_SQLITE=1 UV_CACHE_DIR=/private/tmp/uv-cache-shop uv run python manage.py test bot.tests.RetainedIpRenewalUiTestCase --verbosity 1
+rg -n "service_expires_at|service_expired_at|normalize_service_expiry|CloudLifecyclePlan\\b|CloudNoticePlan\\b|CloudAutoRenewPlan\\b|refund_order|process_refund|create_refund|issue_refund|refund_to_balance|refund_balance|STATUS_REFUNDED|status=['\\\"]refunded['\\\"]" bot core orders cloud shop --glob '!**/migrations/**' --glob '!**/tests.py'
+find . -maxdepth 2 -type d \( -name accounts -o -name finance -o -name mall -o -name monitoring -o -name dashboard_api -o -name biz \) -print
+git diff --check
 ```
 
-结果：Django 系统检查、相关模块编译、通知计划保留已存执行时间、资产到期事实源和生命周期执行前复核 4 条聚焦测试均通过。
+结果：Django 系统检查、关键模块编译、迁移 dry-run、通知计划保留已存执行时间、资产到期事实源和生命周期执行前复核 4 条聚焦测试、`cloud.tests` 全量 360 条、机器人返回 UI 回归 23 条、旧字段/旧计划/旧退款扫描、废弃 app 目录检查和空白检查均通过。
 
-剩余风险：本轮未跑完整测试套件，未连接真实 MySQL、AWS Lightsail、阿里云或 TRONGrid，未执行真实后台编辑、Telegram 回调、钱包扣款、自动续费支付、云端删机或固定 IP 释放。
+剩余风险：本轮未连接真实 MySQL、AWS Lightsail、阿里云或 TRONGrid，未执行真实后台编辑、Telegram 回调、钱包扣款、自动续费支付、云端删机或固定 IP 释放。
 
 ## 2026-06-02 22:26 自动监工：兼容记录创建保护人工备注
 
