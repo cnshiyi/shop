@@ -1,5 +1,42 @@
 # 重构版本记录
 
+## 2026-06-02 18:52 自动监工：任务失败重试保护
+
+### 范围
+
+本轮继续监工 Shop Django 后端仓库，起始工作树干净，最近提交为 `7559bd4 记录CLI只读审查和敏感文本收口`。本轮重点复查云资产到期事实源、订单旧到期字段、旧计划快照表、退款旧入口、废弃 app 回流，以及删除计划和通知计划的数据库任务认领冲突保护。
+
+### 复查结论
+
+- `CloudServerOrder` 仍未恢复 `service_expires_at` 模型字段；生产代码未发现对旧订单到期列的危险 ORM 字段定义、过滤、排序、批量更新或 values 查询。
+- `CloudAsset.actual_expires_at` 仍是唯一结构化资产到期事实；订单接口中的 `service_expires_at` 只作为兼容 payload 字段，显式编辑写入资产事实字段。
+- 未发现 `refund_to_balance`、`refund_balance`、`STATUS_REFUNDED`、`refunded` 旧状态、`CloudLifecyclePlan`、`CloudNoticePlan`、`CloudAutoRenewPlan`、`normalize_service_expiry` 或 `service_expired_at` 回流。
+- `INSTALLED_APPS` 仍只包含 `core`、`bot`、`orders`、`cloud` 四个当前运行时 app；旧 `accounts/finance/mall/monitoring/dashboard_api/biz` 目录未恢复，`dashboard_api` 命中仍只是 URL namespace 和现有 helper 命名。
+- 代理列表详情、删除计划展示和生命周期执行入口仍共同读取 `CloudAsset.shutdown_enabled` 与云账号 `shutdown_enabled`，没有出现两套开关。
+
+### 功能变更
+
+- `cloud/lifecycle_tasks.py` 增加失败任务重试保护窗口。`CloudLifecycleTask` 和 `CloudNoticeTask` 失败后不会被同一轮计划立即再次认领，只有超过保护窗口或旧任务没有运行时间时才允许重试。
+- 完成任务时同步刷新 `last_run_at`，让失败冷却按最后一次实际结束时间计算，而不是只按认领时间计算。
+- `cloud/tests.py` 新增回归用例，覆盖生命周期任务和通知任务失败后保护期内不可重复认领、保护期后可重试。
+
+### 验证
+
+本地已通过：
+
+```bash
+UV_CACHE_DIR=/private/tmp/uv-cache-shop uv run python manage.py check
+UV_CACHE_DIR=/private/tmp/uv-cache-shop DJANGO_TEST_SQLITE=1 PYTHONDONTWRITEBYTECODE=1 uv run python -m py_compile bot/api.py bot/handlers.py cloud/models.py cloud/asset_expiry.py cloud/dashboard_snapshots.py cloud/services.py cloud/provisioning.py cloud/lifecycle.py cloud/lifecycle_execution.py cloud/lifecycle_tasks.py cloud/api.py cloud/api_assets.py cloud/api_asset_edit.py cloud/api_orders.py cloud/api_tasks.py cloud/api_sync.py cloud/api_monitors.py cloud/management/commands/sync_aws_assets.py cloud/management/commands/sync_aliyun_assets.py cloud/management/commands/reconcile_cloud_assets_from_servers.py orders/services.py orders/payment_scanner.py
+UV_CACHE_DIR=/private/tmp/uv-cache-shop DJANGO_TEST_SQLITE=1 uv run python manage.py makemigrations --check --dry-run
+UV_CACHE_DIR=/private/tmp/uv-cache-shop DJANGO_TEST_SQLITE=1 PYTHONDONTWRITEBYTECODE=1 uv run python manage.py test cloud.tests.CloudServerServicesTestCase.test_failed_lifecycle_and_notice_tasks_wait_retry_window cloud.tests.CloudServerServicesTestCase.test_lifecycle_delete_task_claim_blocks_same_cycle_duplicate cloud.tests.CloudServerServicesTestCase.test_lifecycle_asset_task_claim_blocks_same_cycle_duplicate cloud.tests.CloudServerServicesTestCase.test_order_static_ip_release_skips_when_lifecycle_task_claimed --noinput --verbosity 1
+UV_CACHE_DIR=/private/tmp/uv-cache-shop DJANGO_TEST_SQLITE=1 PYTHONDONTWRITEBYTECODE=1 uv run python manage.py test cloud.tests.CloudServerServicesTestCase.test_proxy_log_preview_masks_secret_tail cloud.tests.CloudServerServicesTestCase.test_order_rejects_removed_service_expiry_field cloud.tests.CloudServerServicesTestCase.test_dashboard_order_expiry_update_syncs_asset_expiry_and_lifecycle_plan cloud.tests.CloudServerServicesTestCase.test_update_cloud_asset_expiry_refreshes_order_lifecycle cloud.tests.CloudServerServicesTestCase.test_sync_aliyun_assets_preserves_existing_asset_expiry --noinput --verbosity 1
+UV_CACHE_DIR=/private/tmp/uv-cache-shop DJANGO_TEST_SQLITE=1 PYTHONDONTWRITEBYTECODE=1 uv run python manage.py test orders.tests.ChainPaymentScannerTestCase.test_public_asset_renewal_expiry_does_not_claim_unowned_asset --noinput --verbosity 1
+```
+
+说明：首次聚焦测试命令误把订单续费超时用例挂在不存在的 `orders.tests.PublicAssetRenewalOrderTests` 类下，导致选择器错误；已用正确类 `orders.tests.ChainPaymentScannerTestCase` 单独重跑并通过。
+
+剩余风险：本轮未跑完整测试套件，也未覆盖真实 MySQL、真实 AWS Lightsail 或真实阿里云 API。
+
 ## 2026-06-02 18:41 自动监工：开通日志 secret 尾部脱敏复查
 
 ### 范围
