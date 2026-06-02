@@ -33,7 +33,31 @@ def _mask_log_value(value, visible=4):
     return f'{text[:visible]}****{text[-visible:]}'
 
 
+def _mask_proxy_log_text(value):
+    text = str(value or '')
+    if not text:
+        return ''
+    text = re.sub(r'(secret=)[^&\s]+', r'\1***', text, flags=re.IGNORECASE)
+    text = re.sub(r'(secret\s*[:=]\s*)(ee|dd)?[0-9a-fA-F]{32,}', r'\1***', text, flags=re.IGNORECASE)
+    text = re.sub(r'(旧secret\s*[：:=]?\s*)(ee|dd)?[0-9a-fA-F]{16,}', r'\1***', text, flags=re.IGNORECASE)
+    text = re.sub(r'socks5://[^:@/\s]+:[^@/\s]+@', 'socks5://***:***@', text, flags=re.IGNORECASE)
+    return text
+
+
+def _mask_proxy_log_preview(value, visible=12):
+    return _mask_log_value(_mask_proxy_log_text(value), visible=visible)
+
+
+def _cached_order_asset_expiry(order):
+    return getattr(order, '_asset_expires_at', None)
+
+
 def _log_provision_result(order, *, level=logging.INFO, **extra):
+    safe_extra = {
+        key: _mask_proxy_log_text(value) if isinstance(value, str) else value
+        for key, value in extra.items()
+    }
+    service_expires_at = _cached_order_asset_expiry(order)
     payload = {
         'order_id': getattr(order, 'id', None),
         'order_no': getattr(order, 'order_no', ''),
@@ -45,9 +69,9 @@ def _log_provision_result(order, *, level=logging.INFO, **extra):
         'public_ip': getattr(order, 'public_ip', ''),
         'mtproxy_port': getattr(order, 'mtproxy_port', None),
         'mtproxy_host': getattr(order, 'mtproxy_host', ''),
-        'mtproxy_link_preview': _mask_log_value(getattr(order, 'mtproxy_link', ''), visible=12),
-        'service_expires_at': order_asset_expiry(order).isoformat() if order_asset_expiry(order) else None,
-        **extra,
+        'mtproxy_link_preview': _mask_proxy_log_preview(getattr(order, 'mtproxy_link', ''), visible=12),
+        'service_expires_at': service_expires_at.isoformat() if service_expires_at else None,
+        **safe_extra,
     }
     logger.log(
         level,
@@ -60,7 +84,7 @@ def _log_provision_result(order, *, level=logging.INFO, **extra):
         payload['instance_id'],
         payload['public_ip'],
         payload['mtproxy_port'],
-        str(payload.get('error') or '')[:1500],
+        _mask_proxy_log_text(payload.get('error') or '')[:1500],
         extra={'provision_result': payload},
     )
 
@@ -733,22 +757,22 @@ async def provision_cloud_server(order_id: int):
                     result.instance_id,
                     result.public_ip,
                     result.login_user or login_user,
-                    (result.note or '')[:1000],
+                    _mask_proxy_log_text(result.note or '')[:1000],
                 )
                 if result.ok:
                     break
                 if getattr(result, 'instance_id', ''):
-                    logger.warning('云服务器实例已创建但流程未完成，停止账号轮询并等待失败清理: order=%s account=%s instance_id=%s note=%s', order.order_no, account_label, result.instance_id, (result.note or '')[:1000])
+                    logger.warning('云服务器实例已创建但流程未完成，停止账号轮询并等待失败清理: order=%s account=%s instance_id=%s note=%s', order.order_no, account_label, result.instance_id, _mask_proxy_log_text(result.note or '')[:1000])
                     break
                 if create_attempt < create_attempts and _is_transient_create_failure(result.note):
-                    logger.warning('云服务器创建遇到临时错误，先重试当前账号: order=%s account=%s note=%s', order.order_no, account_label, (result.note or '')[:1000])
+                    logger.warning('云服务器创建遇到临时错误，先重试当前账号: order=%s account=%s note=%s', order.order_no, account_label, _mask_proxy_log_text(result.note or '')[:1000])
                     continue
                 break
             if result.ok or getattr(result, 'instance_id', ''):
                 break
             attempted_notes.append(f'{account_label}: {result.note}')
             if attempt_index < len(account_ids):
-                logger.warning('云服务器创建失败，切换下一个账号重试: order=%s account=%s note=%s', order.order_no, account_label, (result.note or '')[:1000])
+                logger.warning('云服务器创建失败，切换下一个账号重试: order=%s account=%s note=%s', order.order_no, account_label, _mask_proxy_log_text(result.note or '')[:1000])
 
         if result and not result.ok and attempted_notes:
             result.note = '多账号创建均失败：\n' + '\n'.join(attempted_notes)
@@ -782,7 +806,7 @@ async def provision_cloud_server(order_id: int):
                 if not ok_move:
                     cleanup_at = timezone.now() + FAILED_INSTANCE_CLEANUP_DELAY
                     note = '\n'.join(part for part in [result.note, move_note, _failed_instance_cleanup_note(cleanup_at)] if part)
-                    logger.warning('云服务器重建失败: order=%s reason=static_ip_move_failed cleanup_at=%s note=%s', order.order_no, cleanup_at, move_note)
+                    logger.warning('云服务器重建失败: order=%s reason=static_ip_move_failed cleanup_at=%s note=%s', order.order_no, cleanup_at, _mask_proxy_log_text(move_note))
                     saved = await _mark_failed(order_id, note, cleanup_at=cleanup_at)
                     clear_provision_progress(order_id)
                     _log_provision_result(saved, level=logging.WARNING, error=saved.provision_note)
@@ -807,7 +831,7 @@ async def provision_cloud_server(order_id: int):
                     note = '\n'.join(part for part in [ip_exists_note, _failed_instance_cleanup_note(cleanup_at)] if part)
                     saved = await _mark_failed(order_id, note, cleanup_at=cleanup_at)
                     clear_provision_progress(order_id)
-                    logger.warning('云服务器开通失败: order=%s reason=expected_ip_not_found cleanup_at=%s note=%s', saved.order_no, cleanup_at, ip_exists_note)
+                    logger.warning('云服务器开通失败: order=%s reason=expected_ip_not_found cleanup_at=%s note=%s', saved.order_no, cleanup_at, _mask_proxy_log_text(ip_exists_note))
                     _log_provision_result(saved, level=logging.WARNING, error=saved.provision_note)
                     return saved
                 logger.info('云服务器预期 IP 云端存在性确认通过: order=%s note=%s', order.order_no, ip_exists_note)
@@ -830,7 +854,7 @@ async def provision_cloud_server(order_id: int):
                 note = '\n'.join(part for part in [guard_note, _failed_instance_cleanup_note(cleanup_at)] if part)
                 saved = await _mark_failed(order_id, note, cleanup_at=cleanup_at)
                 clear_provision_progress(order_id)
-                logger.warning('云服务器开通失败: order=%s reason=connection_ip_guard cleanup_at=%s note=%s', saved.order_no, cleanup_at, guard_note)
+                logger.warning('云服务器开通失败: order=%s reason=connection_ip_guard cleanup_at=%s note=%s', saved.order_no, cleanup_at, _mask_proxy_log_text(guard_note))
                 _log_provision_result(saved, level=logging.WARNING, error=saved.provision_note)
                 return saved
             final_public_ip = guarded_public_ip or final_public_ip
@@ -839,13 +863,13 @@ async def provision_cloud_server(order_id: int):
             logger.info('开始执行 BBR 初始化: order=%s public_ip=%s user=%s requested_user=%s', order.order_no, final_public_ip, bootstrap_user, bootstrap_user)
             private_key_path = getattr(result, 'private_key_path', '') or ''
             bbr_ok, bbr_note = await install_bbr(final_public_ip, bootstrap_user, result.login_password, private_key_path, use_key_setup=bool(private_key_path) or order.provider == 'aws_lightsail')
-            logger.info('BBR 初始化结果: order=%s ok=%s note=%s', order.order_no, bbr_ok, (bbr_note or '')[:1000])
+            logger.info('BBR 初始化结果: order=%s ok=%s note=%s', order.order_no, bbr_ok, _mask_proxy_log_text(bbr_note or '')[:1000])
 
             set_provision_progress(order.id, '安装 MTProxy 主/备用/Telemt')
             backup_secret = _extract_backup_secret_from_links(getattr(order, 'proxy_links', None), order.mtproxy_port) or order.mtproxy_secret or ''
             logger.info('开始执行 MTProxy 安装: order=%s public_ip=%s user=%s port=%s requested_user=%s preserve_backup_secret=%s', order.order_no, final_public_ip, bootstrap_user, order.mtproxy_port, bootstrap_user, bool(backup_secret and backup_secret != (order.mtproxy_secret or '')))
             mtproxy_ok, mtproxy_note = await install_mtproxy(final_public_ip, bootstrap_user, result.login_password, order.mtproxy_port, order.mtproxy_secret or '', backup_secret)
-            logger.info('MTProxy 安装结果: order=%s ok=%s note=%s', order.order_no, mtproxy_ok, (mtproxy_note or '')[:1000])
+            logger.info('MTProxy 安装结果: order=%s ok=%s note=%s', order.order_no, mtproxy_ok, _mask_proxy_log_text(mtproxy_note or '')[:1000])
 
             bbr_warning = '' if bbr_ok else 'BBR 初始化失败，但 MTProxy 已安装成功，订单按代理可用处理。'
             note = '\n'.join(part for part in [result.note, move_note, bbr_warning, bbr_note, mtproxy_note] if part)
@@ -861,7 +885,7 @@ async def provision_cloud_server(order_id: int):
                 note = '\n'.join(part for part in [note, _failed_instance_cleanup_note(cleanup_at)] if part)
                 saved = await _mark_failed(order_id, note, cleanup_at=cleanup_at)
                 clear_provision_progress(order_id)
-                logger.warning('云服务器开通结束: order=%s status=%s note=%s', saved.order_no, saved.status, (saved.provision_note or '')[:1500])
+                logger.warning('云服务器开通结束: order=%s status=%s note=%s', saved.order_no, saved.status, _mask_proxy_log_text(saved.provision_note or '')[:1500])
                 _log_provision_result(saved, level=logging.WARNING, error=saved.provision_note)
                 return saved
 
@@ -894,8 +918,8 @@ async def provision_cloud_server(order_id: int):
                 saved.public_ip,
                 saved.mtproxy_host,
                 saved.mtproxy_port,
-                saved.mtproxy_link,
-                order_asset_expiry(saved),
+                _mask_log_value(saved.mtproxy_link, visible=12),
+                _cached_order_asset_expiry(saved),
                 (timezone.now() - started_at).total_seconds(),
             )
             clear_provision_progress(order_id)
@@ -919,12 +943,12 @@ async def provision_cloud_server(order_id: int):
             '云服务器开通失败: order=%s reason=create_failed cleanup_at=%s note=%s elapsed_seconds=%s',
             order.order_no,
             cleanup_at,
-            (note or '')[:1500],
+            _mask_proxy_log_text(note or '')[:1500],
             (timezone.now() - started_at).total_seconds(),
         )
         saved = await _mark_failed(order_id, note, cleanup_at=cleanup_at)
         clear_provision_progress(order_id)
-        logger.warning('云服务器开通结束: order=%s status=%s note=%s', saved.order_no, saved.status, (saved.provision_note or '')[:1500])
+        logger.warning('云服务器开通结束: order=%s status=%s note=%s', saved.order_no, saved.status, _mask_proxy_log_text(saved.provision_note or '')[:1500])
         _log_provision_result(saved, level=logging.WARNING, error=saved.provision_note)
         return saved
     except Exception as exc:
@@ -932,7 +956,7 @@ async def provision_cloud_server(order_id: int):
         try:
             saved = await _mark_failed(order_id, f'云服务器开通异常: {exc}')
             clear_provision_progress(order_id)
-            logger.warning('云服务器开通异常结束: order=%s status=%s note=%s', saved.order_no, saved.status, (saved.provision_note or '')[:1500])
+            logger.warning('云服务器开通异常结束: order=%s status=%s note=%s', saved.order_no, saved.status, _mask_proxy_log_text(saved.provision_note or '')[:1500])
             _log_provision_result(saved, level=logging.WARNING, error=saved.provision_note)
             return saved
         except Exception:
@@ -957,10 +981,10 @@ async def reprovision_cloud_server_bootstrap(order_id: int):
     logger.info('[PROVISION][RETRY] start order=%s public_ip=%s user=%s port=%s', order.order_no, order.public_ip, bootstrap_user, order.mtproxy_port)
     set_provision_progress(order.id, '安装 BBR')
     bbr_ok, bbr_note = await install_bbr(order.public_ip, bootstrap_user, order.login_password, use_key_setup=order.provider == 'aws_lightsail')
-    logger.info('[PROVISION][RETRY] bbr_result order=%s ok=%s note=%s', order.order_no, bbr_ok, (bbr_note or '')[:1000])
+    logger.info('[PROVISION][RETRY] bbr_result order=%s ok=%s note=%s', order.order_no, bbr_ok, _mask_proxy_log_text(bbr_note or '')[:1000])
     set_provision_progress(order.id, '安装 MTProxy 主/备用/Telemt')
     mtproxy_ok, mtproxy_note = await install_mtproxy(order.public_ip, bootstrap_user, order.login_password, order.mtproxy_port, order.mtproxy_secret or '', order.mtproxy_secret or '')
-    logger.info('[PROVISION][RETRY] mtproxy_result order=%s ok=%s note=%s', order.order_no, mtproxy_ok, (mtproxy_note or '')[:1000])
+    logger.info('[PROVISION][RETRY] mtproxy_result order=%s ok=%s note=%s', order.order_no, mtproxy_ok, _mask_proxy_log_text(mtproxy_note or '')[:1000])
     bbr_warning = '' if bbr_ok else 'BBR 初始化失败，但 MTProxy 已安装成功，订单按代理可用处理。'
     note = '\n'.join(part for part in ['已执行重试初始化。', bbr_warning, bbr_note, mtproxy_note] if part)
     if not mtproxy_ok:
@@ -1084,7 +1108,8 @@ def _mark_success(order_id: int, server_name: str, instance_id: str, public_ip: 
     except Exception:
         order.last_user_id = order.user_id or 0
     order.save(update_fields=['status', 'server_name', 'instance_id', 'provider_resource_id', 'public_ip', 'mtproxy_host', 'mtproxy_link', 'proxy_links', 'mtproxy_secret', 'static_ip_name', 'login_user', 'login_password', 'provision_note', 'completed_at', 'service_started_at', 'last_user_id', 'updated_at'])
-    logger.info('[PROVISION] order_saved order=%s status=%s service_started_at=%s service_expires_at=%s mtproxy_host=%s mtproxy_link=%s', order.order_no, order.status, order.service_started_at, asset_expires_at, order.mtproxy_host, order.mtproxy_link)
+    order._asset_expires_at = asset_expires_at
+    logger.info('[PROVISION] order_saved order=%s status=%s service_started_at=%s service_expires_at=%s mtproxy_host=%s mtproxy_link=%s', order.order_no, order.status, order.service_started_at, asset_expires_at, order.mtproxy_host, _mask_proxy_log_preview(order.mtproxy_link, visible=12))
 
     try:
         server_asset = _upsert_server_asset(order, compact_note, expires_at=asset_expires_at, preserve_expiry=not asset_renewal_order)
@@ -1095,7 +1120,8 @@ def _mark_success(order_id: int, server_name: str, instance_id: str, public_ip: 
             public_ip=public_ip,
             note=f'服务器创建并分配IP：{public_ip or "未分配"}',
         )
-        logger.info('[PROVISION] server_asset_saved order=%s asset_id=%s expires_at=%s host=%s port=%s link=%s', order.order_no, server_asset.id, asset_expires_at, mtproxy_host or public_ip, order.mtproxy_port, mtproxy_link)
+        order._asset_expires_at = server_asset.actual_expires_at
+        logger.info('[PROVISION] server_asset_saved order=%s asset_id=%s expires_at=%s host=%s port=%s link=%s', order.order_no, server_asset.id, asset_expires_at, mtproxy_host or public_ip, order.mtproxy_port, _mask_proxy_log_preview(mtproxy_link, visible=12))
     except Exception as exc:
         logger.exception('[PROVISION] asset_sync_failed order=%s error=%s', order.order_no, exc)
     return order
@@ -1103,7 +1129,7 @@ def _mark_success(order_id: int, server_name: str, instance_id: str, public_ip: 
 
 @sync_to_async
 def _mark_failed(order_id: int, note: str, cleanup_at=None):
-    logger.info('[PROVISION] mark_failed_start order_id=%s cleanup_at=%s note=%s', order_id, cleanup_at, (note or '')[:1500])
+    logger.info('[PROVISION] mark_failed_start order_id=%s cleanup_at=%s note=%s', order_id, cleanup_at, _mask_proxy_log_text(note or '')[:1500])
     order = CloudServerOrder.objects.get(id=order_id)
     order.status = 'failed'
     order.provision_note = prepend_note(order.provision_note, with_note_time(note))
@@ -1112,6 +1138,7 @@ def _mark_failed(order_id: int, note: str, cleanup_at=None):
         CloudServerOrder.objects.filter(id=order.id).update(delete_at=cleanup_at, updated_at=timezone.now())
         order.delete_at = cleanup_at
     server_asset = _upsert_server_asset(order, note)
+    order._asset_expires_at = getattr(server_asset, 'actual_expires_at', None)
     _update_order_primary_records(
         order,
         asset_updates=drop_asset_note_update({'note': note, 'status': CloudAsset.STATUS_UNKNOWN, 'is_active': False}),
