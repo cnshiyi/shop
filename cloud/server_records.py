@@ -139,9 +139,10 @@ class _ServerObjects:
                 existing = ordered.filter(ip_identity | identity).order_by('-updated_at', '-id').first()
                 if existing:
                     return existing
-            existing = ordered.order_by('-updated_at', '-id').first()
-            if existing:
-                return existing
+            else:
+                existing = ordered.order_by('-updated_at', '-id').first()
+                if existing:
+                    return existing
             if str(payload.get('note') or '').strip():
                 return None
         if ip_identity:

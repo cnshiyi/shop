@@ -48,6 +48,7 @@ DJANGO_TEST_SQLITE=1 UV_CACHE_DIR=/private/tmp/uv-cache-shop uv run python manag
 - 生命周期 tick 在 `DJANGO_TEST_SQLITE=1` 时对同步数据库执行函数启用 `thread_sensitive`，避免 SQLite 聚焦测试在异步线程间复用连接时出现不稳定。
 - 未附加固定 IP 到期候选增加稳定排序，优先处理带 `StaticIp` 资源 ID 的资产，再按资产到期时间和更新时间排序，减少保留期影子资产与普通未附加资产混排。
 - AWS 固定 IP 释放名称回退改为优先从 `CloudAsset.provider_resource_id` 的 `StaticIp/...` 解析，只有无法识别固定 IP 资产时才回退资产名，降低陈旧 `asset_name` 导致真实释放目标错误的风险。
+- 后台资产手工编辑备注时同步关联兼容 server 记录，保持代理资产详情、删除计划备注和兼容服务器列表展示一致。
 - 补充后台资产风险识别测试，锁定原始 `provider_status` 中的“固定IP保留中”能进入未附加固定 IP 风险筛选；补充固定 IP 名称回退测试，锁定资源 ID 优先于陈旧资产名。
 
 ### 验证
@@ -60,12 +61,13 @@ UV_CACHE_DIR=/private/tmp/uv-cache-shop uv run python -m py_compile bot/api.py c
 UV_CACHE_DIR=/private/tmp/uv-cache-shop uv run python manage.py makemigrations --check --dry-run
 DJANGO_TEST_SQLITE=1 UV_CACHE_DIR=/private/tmp/uv-cache-shop uv run python manage.py test cloud.tests.CloudServerServicesTestCase.test_dashboard_unattached_ip_plan_run_uses_ip_delete_time_window cloud.tests.CloudServerServicesTestCase.test_unattached_ip_delete_respects_shutdown_disabled_asset cloud.tests.CloudServerServicesTestCase.test_cloud_asset_unattached_filter_uses_raw_provider_status cloud.tests.CloudServerServicesTestCase.test_lifecycle_aws_resource_resolution_prefers_ip
 DJANGO_TEST_SQLITE=1 UV_CACHE_DIR=/private/tmp/uv-cache-shop uv run python manage.py test cloud.tests.CloudServerServicesTestCase.test_lifecycle_tick_releases_retained_static_ip_after_recycle_due cloud.tests.CloudServerServicesTestCase.test_lifecycle_tick_releases_retained_static_ip_when_asset_already_deleted cloud.tests.CloudServerServicesTestCase.test_lifecycle_tick_releases_overdue_unattached_static_ip cloud.tests.CloudServerServicesTestCase.test_lifecycle_tick_unattached_ip_uses_ip_delete_time_window
+DJANGO_TEST_SQLITE=1 UV_CACHE_DIR=/private/tmp/uv-cache-shop uv run python manage.py test cloud.tests.CloudServerServicesTestCase.test_system_note_updates_preserve_manual_primary_record_notes cloud.tests.CloudServerServicesTestCase.test_manual_cloud_asset_note_edit_still_overwrites cloud.tests.CloudServerServicesTestCase.test_update_cloud_asset_refreshes_unattached_ip_delete_plan cloud.tests.CloudOrderStatusDashboardSyncTestCase.test_order_detail_manual_edit_syncs_cloud_identity_and_proxy_fields
 rg -n "service_expires_at|service_expired_at|normalize_service_expiry|CloudLifecyclePlan\\b|CloudNoticePlan\\b|CloudAutoRenewPlan\\b|refund_order|process_refund|create_refund|issue_refund|refund_to_balance|refund_balance|STATUS_REFUNDED|status=['\\\"]refunded['\\\"]" bot core orders cloud shop --glob '!**/migrations/**' --glob '!**/tests.py'
 find . -maxdepth 2 -type d \( -name accounts -o -name finance -o -name mall -o -name monitoring -o -name dashboard_api -o -name biz \) -print
 git diff --check
 ```
 
-结果：Django 系统检查、关键模块编译、迁移 dry-run、未附加固定 IP 后台执行窗口/关机计划/风险识别和 AWS 资源名称解析 4 条聚焦测试、保留/未附加固定 IP 生命周期释放 4 条聚焦测试、旧字段/旧计划/旧退款扫描、废弃 app 目录检查和空白检查均通过。`makemigrations --check --dry-run` 仍因沙箱无法连接默认 MySQL 输出迁移历史检查警告，但最终无模型变更。
+结果：Django 系统检查、关键模块编译、迁移 dry-run、未附加固定 IP 后台执行窗口/关机计划/风险识别和 AWS 资源名称解析 4 条聚焦测试、保留/未附加固定 IP 生命周期释放 4 条聚焦测试、4 条备注/资产编辑同步测试、旧字段/旧计划/旧退款扫描、废弃 app 目录检查和空白检查均通过。`makemigrations --check --dry-run` 仍因沙箱无法连接默认 MySQL 输出迁移历史检查警告，但最终无模型变更。
 
 剩余风险：本轮未跑完整测试套件，未连接真实 MySQL、AWS Lightsail、阿里云或 TRONGrid，未执行真实 Telegram 回调、钱包扣款、自动续费支付、云端删机、固定 IP 释放或历史数据清理。
 
