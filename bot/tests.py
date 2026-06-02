@@ -1,4 +1,5 @@
 import asyncio
+import inspect
 import json
 import sys
 from decimal import Decimal
@@ -14,7 +15,7 @@ from django.test import RequestFactory, SimpleTestCase, TestCase
 from django.utils import timezone
 
 from bot.api import DASHBOARD_SESSION_IDLE_SECONDS, _active_proxy_counts_by_user, _authenticate_dashboard_request, admin_users_list, archive_telegram_chat, auth_totp_start, create_admin_user, create_cloud_account, create_product, delete_cloud_account, me, send_daily_expiry_summary_test_notification, send_telegram_chat_message, site_config_groups, telegram_login_start, update_cloud_account, update_site_config, users_list, verify_cloud_account
-from bot.handlers import _asset_reinstall_confirm_keyboard, _asset_renewal_plan_keyboard, _cloud_renewal_postcheck_and_notify, _cloud_server_created_text, _fetch_tron_address_summary, _hydrate_order_proxy_links, _install_notice_copy_wrapper, _proxy_links_text, _reinstall_confirm_keyboard, _requires_recovery_provision, _retained_ip_renewal_plan_keyboard, _trongrid_get_with_key_fallback, _trongrid_post_with_key_fallback, _validate_reinstall_proxy_link
+from bot.handlers import _asset_reinstall_confirm_keyboard, _asset_renewal_plan_keyboard, _cloud_renewal_postcheck_and_notify, _cloud_server_created_text, _fetch_tron_address_summary, _hydrate_order_proxy_links, _install_notice_copy_wrapper, _proxy_links_text, _reinstall_confirm_keyboard, _requires_recovery_provision, _retained_ip_renewal_plan_keyboard, _trongrid_get_with_key_fallback, _trongrid_post_with_key_fallback, _validate_reinstall_proxy_link, register_handlers
 from bot.keyboards import balance_details_list, cloud_asset_detail_callback, cloud_detail_callback, cloud_ip_query_result, cloud_order_list, cloud_server_change_ip_port_keyboard, cloud_server_change_ip_region_menu, cloud_server_detail, cloud_server_renew_payment
 from bot.models import TelegramChatArchive, TelegramChatMessage, TelegramLoginAccount, TelegramUser
 from bot.services import record_telegram_message
@@ -1031,6 +1032,15 @@ class RetainedIpRenewalUiTestCase(SimpleTestCase):
         self.assertIn('cloud:ipport:default:88:us-east-1:cloud:querymenu', callbacks)
         self.assertIn('cloud:ipport:custom:88:us-east-1:cloud:querymenu', callbacks)
         self.assertIn('cloud:ip:88:cloud:querymenu', callbacks)
+
+    def test_asset_change_ip_action_keeps_back_path_when_rendering_regions(self):
+        source = inspect.getsource(register_handlers)
+        asset_action_source = source.split('async def cb_cloud_asset_action', 1)[1].split("@dp.callback_query(F.data.startswith('cloud:assetinit:'))", 1)[0]
+
+        self.assertIn(
+            'cloud_server_change_ip_region_menu(order.id, regions, expanded=False, back_callback=back_callback)',
+            asset_action_source,
+        )
 
     def test_cloud_ip_query_actions_return_to_query_menu(self):
         markup = cloud_ip_query_result(
