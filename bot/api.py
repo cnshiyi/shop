@@ -1978,7 +1978,7 @@ def lifecycle_plans(request):
 @csrf_exempt
 @dashboard_login_required
 @require_POST
-def refresh_lifecycle_plan_table(request):
+def refresh_lifecycle_plan_view(request):
     payload = _json_payload(request)
     try:
         limit = int(payload.get('limit') or request.POST.get('limit') or request.GET.get('limit') or 1000)

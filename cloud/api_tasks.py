@@ -1163,7 +1163,7 @@ def _build_notice_plan_bundle(*, limit=1000, future_limit=200, history_limit=100
 @csrf_exempt
 @dashboard_login_required
 @require_POST
-def refresh_notice_plan_table(request):
+def refresh_notice_plan_view(request):
     payload = _request_json_payload(request)
     limit = _request_int_param(request, 'limit', int(payload.get('limit') or 1000), maximum=1000)
     future_limit = _request_int_param(request, 'future_limit', int(payload.get('future_limit') or 200), maximum=2000)
