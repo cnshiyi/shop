@@ -2243,30 +2243,74 @@ def _daily_expiry_summary_items() -> dict:
     today = timezone.localdate(now)
     today_start = timezone.make_aware(timezone.datetime.combine(today, timezone.datetime.min.time()), timezone.get_current_timezone())
     today_end = timezone.make_aware(timezone.datetime.combine(today, timezone.datetime.max.time()), timezone.get_current_timezone())
-    queryset = (
+    asset_queryset = (
+        CloudAsset.objects.select_related('order', 'order__user', 'order__cloud_account', 'user')
+        .filter(kind=CloudAsset.KIND_SERVER)
+        .filter(
+            Q(actual_expires_at__isnull=False, actual_expires_at__lte=today_end)
+            | Q(actual_expires_at__isnull=True, order__service_expires_at__isnull=False, order__service_expires_at__lte=today_end)
+        )
+        .exclude(order__status__in=_DAILY_EXPIRY_EXCLUDED_ORDER_STATUSES)
+        .order_by('actual_expires_at', 'order__service_expires_at', 'id')
+    )
+    items = []
+    seen_order_ids = set()
+    for asset in asset_queryset:
+        order = asset.order if asset.order_id and asset.order else None
+        if order:
+            seen_order_ids.add(order.id)
+        if asset.status in _DAILY_EXPIRY_TERMINAL_STATUSES and (not order or order.status in {'deleted', 'deleting'}):
+            continue
+        expires_at = asset.actual_expires_at or getattr(order, 'service_expires_at', None)
+        if not expires_at:
+            continue
+        ip = (asset.public_ip or asset.previous_public_ip or getattr(order, 'public_ip', '') or getattr(order, 'previous_public_ip', '') or '').strip()
+        if not ip:
+            continue
+        status = asset.status or CloudAsset.STATUS_UNKNOWN
+        provider_status = asset.provider_status or ''
+        user = asset.user or getattr(order, 'user', None)
+        items.append({
+            'order_id': getattr(order, 'id', None),
+            'order_no': getattr(order, 'order_no', '') or asset.asset_name or asset.instance_id or f'asset-{asset.id}',
+            'ip': ip,
+            'expires_at': expires_at,
+            'status': status,
+            'status_label': _cloud_runtime_status_label(status, provider_status),
+            'provider_status': provider_status,
+            'region_code': getattr(order, 'region_code', '') or asset.region_code,
+            'region_name': getattr(order, 'region_name', '') or asset.region_name,
+            'tg_user_id': getattr(user, 'tg_user_id', None),
+            'username': getattr(user, 'primary_username', '') or '',
+            'first_name': getattr(user, 'first_name', '') or '',
+        })
+
+    order_queryset = (
         CloudServerOrder.objects.select_related('user', 'cloud_account')
         .filter(service_expires_at__isnull=False, service_expires_at__lte=today_end)
         .exclude(status__in=_DAILY_EXPIRY_EXCLUDED_ORDER_STATUSES)
+        .exclude(id__in=CloudAsset.objects.filter(kind=CloudAsset.KIND_SERVER, actual_expires_at__isnull=False, order_id__isnull=False).values('order_id'))
+        .exclude(id__in=seen_order_ids)
         .order_by('service_expires_at', 'id')
     )
-    today_items = []
-    expired_items = []
-    for order in queryset:
+    for order in order_queryset:
         asset = _order_primary_asset(order)
-        source = asset
-        if source and getattr(source, 'status', '') in _DAILY_EXPIRY_TERMINAL_STATUSES and order.status in {'deleted', 'deleting'}:
+        if asset and getattr(asset, 'status', '') in _DAILY_EXPIRY_TERMINAL_STATUSES and order.status in {'deleted', 'deleting'}:
             continue
-        ip = (getattr(source, 'public_ip', None) or order.public_ip or order.previous_public_ip or '').strip()
+        expires_at = getattr(asset, 'actual_expires_at', None) or order.service_expires_at
+        if not expires_at:
+            continue
+        ip = (getattr(asset, 'public_ip', '') or order.public_ip or order.previous_public_ip or '').strip()
         if not ip:
             continue
-        status = getattr(source, 'status', '') or CloudAsset.STATUS_UNKNOWN
-        provider_status = getattr(source, 'provider_status', '') or ''
-        user = getattr(order, 'user', None)
-        item = {
+        status = getattr(asset, 'status', '') or CloudAsset.STATUS_UNKNOWN
+        provider_status = getattr(asset, 'provider_status', '') or ''
+        user = getattr(asset, 'user', None) or getattr(order, 'user', None)
+        items.append({
             'order_id': order.id,
             'order_no': order.order_no,
             'ip': ip,
-            'expires_at': order.service_expires_at,
+            'expires_at': expires_at,
             'status': status,
             'status_label': _cloud_runtime_status_label(status, provider_status),
             'provider_status': provider_status,
@@ -2275,8 +2319,12 @@ def _daily_expiry_summary_items() -> dict:
             'tg_user_id': getattr(user, 'tg_user_id', None),
             'username': getattr(user, 'primary_username', '') or '',
             'first_name': getattr(user, 'first_name', '') or '',
-        }
-        if order.service_expires_at >= today_start:
+        })
+
+    today_items = []
+    expired_items = []
+    for item in sorted(items, key=lambda row: (row['expires_at'], row['order_id'] or 0, row['ip'])):
+        if item['expires_at'] >= today_start:
             today_items.append(item)
         else:
             expired_items.append(item)

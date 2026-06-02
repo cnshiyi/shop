@@ -920,7 +920,7 @@ def _shutdown_log_items(limit=100):
             continue
         order = asset.order if asset.order_id and asset.order else None
         trace = _cloud_ip_trace_from_maps(asset, trace_maps)
-        expires_at = getattr(order, 'service_expires_at', None) or asset.actual_expires_at
+        expires_at = asset.actual_expires_at or getattr(order, 'service_expires_at', None)
         user_display_name, username_label = _telegram_user_labels(asset.user or (order.user if order else None))
         account_name, external_account_id = _cloud_account_labels(asset)
         if not external_account_id and asset.order_id and asset.order:
@@ -1006,7 +1006,7 @@ def _shutdown_log_items(limit=100):
         account_name, external_account_id = _cloud_account_labels(asset or order or trace)
         suspend_at = getattr(order, 'suspend_at', None)
         delete_at = getattr(order, 'delete_at', None)
-        expires_at = getattr(order, 'service_expires_at', None) or getattr(asset, 'actual_expires_at', None)
+        expires_at = getattr(asset, 'actual_expires_at', None) or getattr(order, 'service_expires_at', None)
         note = _cloud_ip_trace_note_newest_first(trace.note)
         logged_at = _cloud_ip_trace_logged_at(trace.note, trace.created_at)
         items.append({

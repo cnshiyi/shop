@@ -370,6 +370,9 @@ def _resolve_asset(instance_name, instance_arn, public_ip, order, account=None, 
     return None
 
 
+_resolve_server = _resolve_asset
+
+
 # 功能：提供 AWS 资产同步 的内部辅助逻辑，供同模块流程复用。
 def _append_unique_line(text: str | None, line: str) -> str:
     current = str(text or '')

@@ -1,5 +1,33 @@
 # 重构版本记录
 
+## 2026-06-02 自动监工：资产到期与 Server 兼容层收口
+
+### 范围
+
+本轮继续检查云资产生命周期重构后的测试失败、导入断点和到期时间来源不一致问题。
+
+### 运行变更
+
+- `CloudServerOrder.save()` 在订单到期时间变更后，只回填仍为空的关联 `CloudAsset.actual_expires_at`，不覆盖已有手工资产到期时间。
+- 新增数据迁移 `cloud.0043_backfill_cloud_asset_expiry`，为历史上资产到期为空但订单到期存在的 server 资产补齐 `actual_expires_at`。
+- 关机日志和每日到期汇总继续统一优先读取 `CloudAsset.actual_expires_at`，订单时间仅作为资产时间缺失时的兜底。
+- AWS/Aliyun 同步命令恢复 `_resolve_server` 薄兼容别名，指向当前 `_resolve_asset`，避免旧测试/兼容导入失败。
+- `cloud.server_records.Server.objects.create()` 改为按订单、IP、实例名或云资源 ID 复用现有 `CloudAsset`，避免旧 `Server` 入口在同一资源上制造重复资产。
+- `cloud.tests` 中后台 RequestFactory 调用改用已有 bearer session helper，匹配当前写请求必须带 dashboard bearer session 的鉴权规则。
+
+### 验证
+
+本地已通过：
+
+```bash
+UV_CACHE_DIR=/private/tmp/uv-cache-shop uv run python manage.py check
+UV_CACHE_DIR=/private/tmp/uv-cache-shop uv run python manage.py makemigrations --check --dry-run
+UV_CACHE_DIR=/private/tmp/uv-cache-shop uv run python -m py_compile bot/api.py cloud/lifecycle.py cloud/models.py cloud/server_records.py cloud/management/commands/sync_aws_assets.py cloud/management/commands/sync_aliyun_assets.py cloud/tests.py
+UV_CACHE_DIR=/private/tmp/uv-cache-shop DJANGO_TEST_SQLITE=1 uv run python manage.py test cloud.tests.CloudServerServicesTestCase.test_order_save_backfills_blank_asset_expiry_only cloud.tests.CloudServerServicesTestCase.test_notice_delete_plan_and_proxy_list_use_asset_expiry cloud.tests.CloudServerServicesTestCase.test_shutdown_log_items_prefer_order_lifecycle_schedule cloud.tests.CloudServerServicesTestCase.test_daily_expiry_summary_uses_real_cloud_status_and_target_config cloud.tests.CloudServerServicesTestCase.test_aws_sync_server_resolution_accepts_legacy_account_label cloud.tests.CloudServerServicesTestCase.test_aws_sync_resolver_prefers_ip_over_changed_instance_name cloud.tests.CloudServerServicesTestCase.test_update_cloud_asset_write_requires_superuser cloud.tests.CloudServerServicesTestCase.test_dashboard_order_ip_and_name_update_syncs_asset_server --noinput --verbosity 1
+```
+
+全量 `cloud.tests` 已从本轮开始时的 `failures=51, errors=26` 收敛到 `failures=28, errors=18`，但仍未全绿；剩余集中在旧 patch 目标、生命周期云操作测试和部分同步/删除历史语义。
+
 ## 2026-06-02 通知计划到期时间统一修复
 
 ### 范围

@@ -78,9 +78,60 @@ class _ServerObjects:
     def count(self):
         return self._qs().count()
 
+    def _identity_scope(self, payload):
+        queryset = self._qs()
+        if payload.get('provider'):
+            queryset = queryset.filter(provider=payload.get('provider'))
+        if payload.get('cloud_account_id'):
+            queryset = queryset.filter(cloud_account_id=payload.get('cloud_account_id'))
+        elif payload.get('cloud_account'):
+            queryset = queryset.filter(cloud_account=payload.get('cloud_account'))
+        if payload.get('account_label'):
+            queryset = queryset.filter(account_label=payload.get('account_label'))
+        if payload.get('region_code'):
+            queryset = queryset.filter(region_code=payload.get('region_code'))
+        return queryset
+
+    def _find_existing_for_create(self, payload):
+        order_id = payload.get('order_id') or getattr(payload.get('order'), 'pk', None)
+        public_ip = str(payload.get('public_ip') or '').strip()
+        previous_public_ip = str(payload.get('previous_public_ip') or '').strip()
+        instance_id = str(payload.get('instance_id') or '').strip()
+        provider_resource_id = str(payload.get('provider_resource_id') or '').strip()
+        asset_name = str(payload.get('asset_name') or '').strip()
+        identity = Q()
+        if public_ip:
+            identity |= Q(public_ip=public_ip) | Q(previous_public_ip=public_ip)
+        if previous_public_ip:
+            identity |= Q(public_ip=previous_public_ip) | Q(previous_public_ip=previous_public_ip)
+        if instance_id:
+            identity |= Q(instance_id=instance_id) | Q(asset_name=instance_id)
+        if provider_resource_id:
+            identity |= Q(provider_resource_id=provider_resource_id)
+        if asset_name:
+            identity |= Q(asset_name=asset_name) | Q(instance_id=asset_name)
+        if order_id:
+            ordered = self._qs().filter(order_id=order_id)
+            if identity:
+                existing = ordered.filter(identity).order_by('-updated_at', '-id').first()
+                if existing:
+                    return existing
+            existing = ordered.order_by('-updated_at', '-id').first()
+            if existing:
+                return existing
+        if identity:
+            return self._identity_scope(payload).filter(identity).order_by('-updated_at', '-id').first()
+        return None
+
     def create(self, **kwargs):
         kwargs = _payload_kwargs(kwargs)
         kwargs.setdefault('kind', CloudAsset.KIND_SERVER)
+        existing = self._find_existing_for_create(kwargs)
+        if existing:
+            for key, value in kwargs.items():
+                setattr(existing, key, value)
+            existing.save(update_fields=list(kwargs.keys()))
+            return existing
         return CloudAsset.objects.create(**kwargs)
 
     def update_or_create(self, defaults=None, **kwargs):

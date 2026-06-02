@@ -332,7 +332,7 @@ class CloudServerServicesTestCase(TestCase):
         )
         staff_user = get_user_model().objects.create_user(username='staff_order_list_auto_renew', password='x', is_staff=True)
         request = self.factory.get('/api/admin/cloud-orders/')
-        request.user = staff_user
+        self._attach_bearer_session(request, staff_user)
 
         response = cloud_orders_list(request)
 
@@ -758,7 +758,7 @@ class CloudServerServicesTestCase(TestCase):
             is_superuser=True,
         )
         request = self.factory.post(f'/api/admin/tasks/plans/orders/{order.id}/run/')
-        request.user = staff_user
+        self._attach_bearer_session(request, staff_user)
 
         with patch('cloud.lifecycle._delete_instance', new=AsyncMock()) as delete_mock:
             response = run_shutdown_plan_order(request, order.id)
@@ -799,7 +799,7 @@ class CloudServerServicesTestCase(TestCase):
             is_superuser=True,
         )
         request = self.factory.post(f'/api/admin/tasks/plans/orphan-assets/{asset.id}/run/')
-        request.user = staff_user
+        self._attach_bearer_session(request, staff_user)
 
         with patch('cloud.lifecycle._delete_orphan_asset_instance', new=AsyncMock()) as delete_mock:
             response = run_orphan_asset_delete_plan(request, asset.id)
@@ -837,7 +837,7 @@ class CloudServerServicesTestCase(TestCase):
             is_superuser=True,
         )
         request = self.factory.post(f'/api/admin/tasks/plans/unattached-ips/{asset.id}/run/')
-        request.user = staff_user
+        self._attach_bearer_session(request, staff_user)
 
         with patch('cloud.lifecycle._release_unattached_static_ip', new=AsyncMock()) as release_mock:
             response = run_unattached_ip_delete_plan(request, asset.id)
@@ -875,7 +875,7 @@ class CloudServerServicesTestCase(TestCase):
             is_superuser=True,
         )
         request = self.factory.post(f'/api/admin/tasks/plans/unattached-ips/{asset.id}/run/')
-        request.user = staff_user
+        self._attach_bearer_session(request, staff_user)
 
         with patch('bot.api._is_cloud_unattached_ip_delete_time', return_value=False) as safe_time, \
             patch('cloud.lifecycle._release_unattached_static_ip', new=AsyncMock()) as release_mock:
@@ -1225,7 +1225,7 @@ class CloudServerServicesTestCase(TestCase):
         )
         admin = get_user_model().objects.create_user(username='ui_dedupe_admin', password='x', is_staff=True)
         request = self.factory.get('/api/dashboard/cloud-assets/', {'paginated': '1'})
-        request.user = admin
+        self._attach_bearer_session(request, admin)
 
         response = cloud_assets_list(request)
         payload = json.loads(response.content.decode('utf-8'))['data']
@@ -1265,7 +1265,7 @@ class CloudServerServicesTestCase(TestCase):
         )
         admin = get_user_model().objects.create_user(username='bulk_list_infer_admin', password='x', is_staff=True)
         request = self.factory.get('/api/dashboard/cloud-assets/', {'paginated': '1'})
-        request.user = admin
+        self._attach_bearer_session(request, admin)
 
         with patch('cloud.api._infer_asset_order', side_effect=AssertionError('per-asset order inference should not run')):
             response = cloud_assets_list(request)
@@ -1292,7 +1292,7 @@ class CloudServerServicesTestCase(TestCase):
         )
         admin = get_user_model().objects.create_user(username='list_unattached_no_write_admin', password='x', is_staff=True)
         request = self.factory.get('/api/dashboard/cloud-assets/', {'paginated': '1', 'risk_status': 'unattached_ip'})
-        request.user = admin
+        self._attach_bearer_session(request, admin)
 
         response = cloud_assets_list(request)
         payload = json.loads(response.content.decode('utf-8'))['data']
@@ -1323,7 +1323,7 @@ class CloudServerServicesTestCase(TestCase):
 
         admin = get_user_model().objects.create_user(username='snapshot_list_admin', password='x', is_staff=True)
         request = self.factory.get('/api/dashboard/cloud-assets/', {'paginated': '1', 'keyword': 'snapshot-list-asset'})
-        request.user = admin
+        self._attach_bearer_session(request, admin)
         with patch('cloud.api._cloud_asset_payloads', side_effect=AssertionError('list should read dashboard snapshots')):
             response = cloud_assets_list(request)
         payload = json.loads(response.content.decode('utf-8'))['data']
@@ -1802,7 +1802,7 @@ class CloudServerServicesTestCase(TestCase):
             }),
             content_type='application/json',
         )
-        request.user = staff
+        self._attach_bearer_session(request, staff)
 
         response = update_cloud_asset(request, asset.id)
 
@@ -1959,7 +1959,7 @@ class CloudServerServicesTestCase(TestCase):
             data=json.dumps({'telegram_group_query': hidden_group.chat_id}),
             content_type='application/json',
         )
-        request.user = admin
+        self._attach_bearer_session(request, admin)
         response = update_cloud_asset(request, asset.id)
         self.assertEqual(response.status_code, 404)
         self.assertIn('绑定页隐藏', json.loads(response.content.decode('utf-8'))['message'])
@@ -1969,7 +1969,7 @@ class CloudServerServicesTestCase(TestCase):
             data=json.dumps({'telegram_group_query': visible_group.chat_id}),
             content_type='application/json',
         )
-        request2.user = admin
+        self._attach_bearer_session(request2, admin)
         response2 = update_cloud_asset(request2, asset.id)
         self.assertEqual(response2.status_code, 200)
         asset.refresh_from_db()
@@ -2003,7 +2003,7 @@ class CloudServerServicesTestCase(TestCase):
             data=json.dumps({'telegram_group_id': None}),
             content_type='application/json',
         )
-        request.user = admin
+        self._attach_bearer_session(request, admin)
         response = update_cloud_asset(request, asset.id)
 
         self.assertEqual(response.status_code, 200)
@@ -2068,7 +2068,7 @@ class CloudServerServicesTestCase(TestCase):
         create_asset(tail_user, 52, 10)
 
         page1 = self.factory.get('/api/dashboard/cloud-assets/', {'paginated': '1', 'page': '1', 'page_size': '50'})
-        page1.user = admin
+        self._attach_bearer_session(page1, admin)
         response1 = cloud_assets_list(page1)
         payload1 = json.loads(response1.content.decode('utf-8'))['data']
         self.assertEqual(response1.status_code, 200)
@@ -2078,7 +2078,7 @@ class CloudServerServicesTestCase(TestCase):
         self.assertEqual([item['user_id'] for item in payload1['items'] if item['user_id'] == boundary_user.id], [boundary_user.id])
 
         page2 = self.factory.get('/api/dashboard/cloud-assets/', {'paginated': '1', 'page': '2', 'page_size': '50'})
-        page2.user = admin
+        self._attach_bearer_session(page2, admin)
         response2 = cloud_assets_list(page2)
         payload2 = json.loads(response2.content.decode('utf-8'))['data']
         boundary_ids = {asset.id for asset in boundary_assets}
@@ -2115,7 +2115,7 @@ class CloudServerServicesTestCase(TestCase):
         create_asset(tail_group, 22, 10)
 
         page1 = self.factory.get('/api/dashboard/cloud-assets/', {'paginated': '1', 'group_by': 'telegram_group', 'page': '1', 'page_size': '20'})
-        page1.user = admin
+        self._attach_bearer_session(page1, admin)
         response1 = cloud_assets_list(page1)
         payload1 = json.loads(response1.content.decode('utf-8'))['data']
         self.assertEqual(response1.status_code, 200)
@@ -2125,7 +2125,7 @@ class CloudServerServicesTestCase(TestCase):
         self.assertEqual([item['telegram_group_id'] for item in payload1['items'] if item['telegram_group_id'] == boundary_group.id], [boundary_group.id])
 
         page2 = self.factory.get('/api/dashboard/cloud-assets/', {'paginated': '1', 'group_by': 'telegram_group', 'page': '2', 'page_size': '20'})
-        page2.user = admin
+        self._attach_bearer_session(page2, admin)
         response2 = cloud_assets_list(page2)
         payload2 = json.loads(response2.content.decode('utf-8'))['data']
         boundary_ids = {asset.id for asset in boundary_assets}
@@ -2152,7 +2152,7 @@ class CloudServerServicesTestCase(TestCase):
             )
 
         page1 = self.factory.get('/api/dashboard/cloud-assets/', {'grouped': '1', 'paginated': '1', 'group_by': 'user', 'page': '1', 'page_size': '20'})
-        page1.user = admin
+        self._attach_bearer_session(page1, admin)
         response1 = cloud_assets_list(page1)
         payload1 = json.loads(response1.content.decode('utf-8'))['data']
 
@@ -2164,7 +2164,7 @@ class CloudServerServicesTestCase(TestCase):
         self.assertEqual(len(payload1['items']), 20)
 
         page2 = self.factory.get('/api/dashboard/cloud-assets/', {'grouped': '1', 'paginated': '1', 'group_by': 'user', 'page': '2', 'page_size': '20'})
-        page2.user = admin
+        self._attach_bearer_session(page2, admin)
         response2 = cloud_assets_list(page2)
         payload2 = json.loads(response2.content.decode('utf-8'))['data']
         self.assertEqual(len(payload2['groups']), 2)
@@ -2222,7 +2222,7 @@ class CloudServerServicesTestCase(TestCase):
         )
 
         request = self.factory.get('/api/dashboard/cloud-assets/', {'paginated': '1', 'risk_status': 'due_soon'})
-        request.user = admin
+        self._attach_bearer_session(request, admin)
         response = cloud_assets_list(request)
         payload = json.loads(response.content.decode('utf-8'))['data']
 
@@ -2237,20 +2237,20 @@ class CloudServerServicesTestCase(TestCase):
         self.assertEqual(payload['risk_counts']['normal'], 1)
 
         secondary_request = self.factory.get('/api/dashboard/cloud-assets/', {'paginated': '1', 'risk_status': 'auto_renew_off'})
-        secondary_request.user = admin
+        self._attach_bearer_session(secondary_request, admin)
         secondary_response = cloud_assets_list(secondary_request)
         secondary_payload = json.loads(secondary_response.content.decode('utf-8'))['data']
         self.assertEqual([item['id'] for item in secondary_payload['items']], [due_asset.id])
 
         normal_request = self.factory.get('/api/dashboard/cloud-assets/', {'paginated': '1', 'risk_status': 'normal'})
-        normal_request.user = admin
+        self._attach_bearer_session(normal_request, admin)
         normal_response = cloud_assets_list(normal_request)
         normal_payload = json.loads(normal_response.content.decode('utf-8'))['data']
         self.assertEqual([item['id'] for item in normal_payload['items']], [normal_asset.id])
         self.assertEqual(normal_payload['items'][0]['risk_label'], '运行中')
 
         search_request = self.factory.get('/api/dashboard/cloud-assets/', {'paginated': '1', 'keyword': 'risk-static-ip-001'})
-        search_request.user = admin
+        self._attach_bearer_session(search_request, admin)
         search_response = cloud_assets_list(search_request)
         search_payload = json.loads(search_response.content.decode('utf-8'))['data']
         self.assertEqual([item['id'] for item in search_payload['items']], [due_asset.id])
@@ -2310,7 +2310,7 @@ class CloudServerServicesTestCase(TestCase):
             )
 
         first_page_request = self.factory.get('/api/dashboard/cloud-assets/', {'paginated': '1', 'page': '1', 'page_size': '10'})
-        first_page_request.user = admin
+        self._attach_bearer_session(first_page_request, admin)
         first_page_response = cloud_assets_list(first_page_request)
         first_page_payload = json.loads(first_page_response.content.decode('utf-8'))['data']
         self.assertGreater(first_page_payload['total'], 10)
@@ -2324,7 +2324,7 @@ class CloudServerServicesTestCase(TestCase):
             'page_size': '10',
             'keyword': 'order-name-alpha',
         })
-        grouped_search_request.user = admin
+        self._attach_bearer_session(grouped_search_request, admin)
         grouped_search_response = cloud_assets_list(grouped_search_request)
         grouped_search_payload = json.loads(grouped_search_response.content.decode('utf-8'))['data']
         self.assertEqual(grouped_search_response.status_code, 200)
@@ -2337,7 +2337,7 @@ class CloudServerServicesTestCase(TestCase):
             'page_size': '10',
             'keyword': '昵称阿尔法',
         })
-        nickname_search_request.user = admin
+        self._attach_bearer_session(nickname_search_request, admin)
         nickname_search_response = cloud_assets_list(nickname_search_request)
         nickname_search_payload = json.loads(nickname_search_response.content.decode('utf-8'))['data']
         self.assertEqual([item['id'] for item in nickname_search_payload['items']], [target_asset.id])
@@ -2400,7 +2400,7 @@ class CloudServerServicesTestCase(TestCase):
                 'page_size': '10',
                 'keyword': keyword,
             })
-            request.user = admin
+            self._attach_bearer_session(request, admin)
             response = cloud_assets_list(request)
             payload = json.loads(response.content.decode('utf-8'))['data']
             result_ids = {item['id'] for item in payload['items']}
@@ -2443,7 +2443,7 @@ class CloudServerServicesTestCase(TestCase):
         )
 
         expired_request = self.factory.get('/api/dashboard/cloud-assets/', {'paginated': '1', 'risk_status': 'expired'})
-        expired_request.user = admin
+        self._attach_bearer_session(expired_request, admin)
         expired_response = cloud_assets_list(expired_request)
         expired_payload = json.loads(expired_response.content.decode('utf-8'))['data']
 
@@ -2453,7 +2453,7 @@ class CloudServerServicesTestCase(TestCase):
         self.assertEqual(expired_payload['risk_counts']['unattached_ip'], 1)
 
         unattached_request = self.factory.get('/api/dashboard/cloud-assets/', {'paginated': '1', 'risk_status': 'unattached_ip'})
-        unattached_request.user = admin
+        self._attach_bearer_session(unattached_request, admin)
         unattached_response = cloud_assets_list(unattached_request)
         unattached_payload = json.loads(unattached_response.content.decode('utf-8'))['data']
 
@@ -3665,6 +3665,66 @@ class CloudServerServicesTestCase(TestCase):
         self.assertEqual(parse_datetime(delete_item['service_expires_at']), asset_expiry)
         self.assertEqual(parse_datetime(proxy_item['actual_expires_at']), asset_expiry)
 
+    # 功能：验证订单时间保存后只补齐空的资产实际到期时间，不覆盖人工维护的资产时间。
+    def test_order_save_backfills_blank_asset_expiry_only(self):
+        now = timezone.now()
+        old_expiry = now + timezone.timedelta(days=5)
+        new_expiry = now + timezone.timedelta(days=12)
+        manual_expiry = now + timezone.timedelta(days=30)
+        order = CloudServerOrder.objects.create(
+            order_no='ORDER-SAVE-ASSET-EXPIRY-1',
+            user=self.user,
+            plan=self.plan,
+            provider=self.plan.provider,
+            region_code=self.plan.region_code,
+            region_name=self.plan.region_name,
+            plan_name=self.plan.plan_name,
+            quantity=1,
+            currency='USDT',
+            total_amount='19.00',
+            pay_amount='19.00',
+            pay_method='balance',
+            status='completed',
+            public_ip='3.3.3.32',
+            service_expires_at=old_expiry,
+        )
+        blank_asset = CloudAsset.objects.create(
+            kind=CloudAsset.KIND_SERVER,
+            source=CloudAsset.SOURCE_ORDER,
+            order=order,
+            user=self.user,
+            provider=order.provider,
+            region_code=order.region_code,
+            region_name=order.region_name,
+            asset_name='blank-asset-expiry',
+            public_ip='3.3.3.32',
+            actual_expires_at=None,
+            status=CloudAsset.STATUS_RUNNING,
+            is_active=True,
+        )
+        manual_asset = CloudAsset.objects.create(
+            kind=CloudAsset.KIND_SERVER,
+            source=CloudAsset.SOURCE_ORDER,
+            order=order,
+            user=self.user,
+            provider=order.provider,
+            region_code=order.region_code,
+            region_name=order.region_name,
+            asset_name='manual-asset-expiry',
+            public_ip='3.3.3.33',
+            actual_expires_at=manual_expiry,
+            status=CloudAsset.STATUS_RUNNING,
+            is_active=True,
+        )
+
+        order.service_expires_at = new_expiry
+        order.save(update_fields=['service_expires_at'])
+        blank_asset.refresh_from_db()
+        manual_asset.refresh_from_db()
+
+        self.assertEqual(blank_asset.actual_expires_at, CloudServerOrder.normalize_expiry_time(new_expiry))
+        self.assertEqual(manual_asset.actual_expires_at, manual_expiry)
+
     # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
     def test_get_migration_due_orders_is_distinct(self):
         old_order = CloudServerOrder.objects.create(
@@ -4447,7 +4507,7 @@ class CloudServerServicesTestCase(TestCase):
             content_type='application/json',
             HTTP_AUTHORIZATION='',
         )
-        request.user = staff_user
+        self._attach_bearer_session(request, staff_user)
 
         response = update_cloud_asset(request, asset.id)
 
@@ -4593,7 +4653,7 @@ class CloudServerServicesTestCase(TestCase):
             content_type='application/json',
             HTTP_AUTHORIZATION='',
         )
-        request.user = staff_user
+        self._attach_bearer_session(request, staff_user)
 
         response = cloud_order_detail(request, order.id)
 
@@ -4662,7 +4722,7 @@ class CloudServerServicesTestCase(TestCase):
             content_type='application/json',
             HTTP_AUTHORIZATION='',
         )
-        request.user = staff_user
+        self._attach_bearer_session(request, staff_user)
 
         response = update_cloud_asset(request, asset.id)
 
@@ -4728,7 +4788,7 @@ class CloudServerServicesTestCase(TestCase):
             content_type='application/json',
             HTTP_AUTHORIZATION='',
         )
-        request.user = staff_user
+        self._attach_bearer_session(request, staff_user)
 
         response = update_cloud_asset(request, asset.id)
 
@@ -4814,7 +4874,7 @@ class CloudServerServicesTestCase(TestCase):
             content_type='application/json',
             HTTP_AUTHORIZATION='',
         )
-        request.user = staff_user
+        self._attach_bearer_session(request, staff_user)
 
         response = update_cloud_asset(request, asset.id)
 
@@ -4861,7 +4921,7 @@ class CloudServerServicesTestCase(TestCase):
             content_type='application/json',
             HTTP_AUTHORIZATION='',
         )
-        request.user = staff_user
+        self._attach_bearer_session(request, staff_user)
 
         response = update_cloud_asset(request, asset.id)
 
@@ -4895,7 +4955,7 @@ class CloudServerServicesTestCase(TestCase):
             content_type='application/json',
             HTTP_AUTHORIZATION='',
         )
-        request.user = staff_user
+        self._attach_bearer_session(request, staff_user)
 
         response = update_cloud_asset(request, asset.id)
 
@@ -5914,7 +5974,7 @@ class CloudServerServicesTestCase(TestCase):
             content_type='application/json',
             HTTP_AUTHORIZATION='',
         )
-        request.user = staff_user
+        self._attach_bearer_session(request, staff_user)
 
         response = update_cloud_asset(request, asset.id)
 
@@ -6020,6 +6080,7 @@ class CloudServerServicesTestCase(TestCase):
     # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
     def test_shutdown_log_items_prefer_order_lifecycle_schedule(self):
         expires_at = timezone.now() + timezone.timedelta(days=1)
+        asset_expires_at = timezone.now() + timezone.timedelta(days=3)
         order = CloudServerOrder.objects.create(
             order_no='SHUTDOWN-SCHEDULE-ORDER-1',
             user=self.user,
@@ -6052,7 +6113,7 @@ class CloudServerServicesTestCase(TestCase):
             region_name=self.plan.region_name,
             asset_name='shutdown-schedule-asset',
             public_ip='6.6.6.8',
-            actual_expires_at=expires_at,
+            actual_expires_at=asset_expires_at,
             status=CloudAsset.STATUS_RUNNING,
             is_active=True,
         )
@@ -6060,6 +6121,7 @@ class CloudServerServicesTestCase(TestCase):
         items = _shutdown_log_items(limit=20)
         row = next(item for item in items if item.get('order_id') == order.id)
 
+        self.assertEqual(parse_datetime(row['service_expires_at']), asset_expires_at)
         self.assertEqual(parse_datetime(row['suspend_at']), order.suspend_at)
         self.assertEqual(parse_datetime(row['delete_at']), order.delete_at)
 
@@ -6312,7 +6374,7 @@ class CloudServerServicesTestCase(TestCase):
 
         staff_user = get_user_model().objects.create_user(username='staff_plan_table_ip', password='x', is_staff=True)
         request = RequestFactory().get('/api/admin/tasks/plans/', {'limit': 20, 'refresh': 1})
-        request.user = staff_user
+        self._attach_bearer_session(request, staff_user)
         response = lifecycle_plans(request)
         self.assertEqual(response.status_code, 200)
         self.assertTrue(CloudLifecyclePlan.objects.filter(plan_kind=CloudLifecyclePlan.PLAN_KIND_UNATTACHED_IP_DELETE, asset=asset, data_group='active').exists())
@@ -6336,7 +6398,7 @@ class CloudServerServicesTestCase(TestCase):
         )
         staff_user = get_user_model().objects.create_user(username='staff_plan_note_asset', password='x', is_staff=True)
         sync_request = self.factory.get('/api/admin/tasks/plans/', {'limit': 20, 'refresh': 1})
-        sync_request.user = staff_user
+        self._attach_bearer_session(sync_request, staff_user)
         sync_response = lifecycle_plans(sync_request)
         self.assertEqual(sync_response.status_code, 200)
 
@@ -6345,7 +6407,7 @@ class CloudServerServicesTestCase(TestCase):
             data=json.dumps({'asset_id': asset.id, 'item_type': 'asset', 'note': '删除计划新备注'}),
             content_type='application/json',
         )
-        request.user = staff_user
+        self._attach_bearer_session(request, staff_user)
 
         response = update_lifecycle_plan_note(request)
 
@@ -6393,7 +6455,7 @@ class CloudServerServicesTestCase(TestCase):
         )
         staff_user = get_user_model().objects.create_user(username='staff_plan_note_order', password='x', is_staff=True)
         request = RequestFactory().get('/api/admin/tasks/plans/', {'limit': 20, 'refresh': 1})
-        request.user = staff_user
+        self._attach_bearer_session(request, staff_user)
 
         response = lifecycle_plans(request)
 
@@ -6453,7 +6515,7 @@ class CloudServerServicesTestCase(TestCase):
         )
         staff_user = get_user_model().objects.create_user(username='staff_cloud_order_list', password='x', is_staff=True)
         request = RequestFactory().get('/api/dashboard/cloud-orders/')
-        request.user = staff_user
+        self._attach_bearer_session(request, staff_user)
 
         response = cloud_orders_list(request)
         payload = json.loads(response.content)
@@ -6913,7 +6975,7 @@ class CloudServerServicesTestCase(TestCase):
         self.assertIn(('sync_aws_assets', {'region': '', 'account_id': str(aws_account.id)}), calls)
 
         detail_request = RequestFactory().get(f'/api/dashboard/cloud-assets/sync-jobs/{job.id}/')
-        detail_request.user = staff_user
+        self._attach_bearer_session(detail_request, staff_user)
         detail_response = cloud_asset_sync_job_detail(detail_request, job.id)
         detail_payload = json.loads(detail_response.content)['data']
         self.assertEqual(detail_payload['status'], CloudAssetSyncJob.STATUS_SUCCEEDED)
@@ -6923,7 +6985,7 @@ class CloudServerServicesTestCase(TestCase):
         self.assertEqual({task['provider'] for task in detail_payload['tasks']}, {'aliyun', 'aws'})
 
         list_request = RequestFactory().get('/api/dashboard/cloud-assets/sync-jobs/')
-        list_request.user = staff_user
+        self._attach_bearer_session(list_request, staff_user)
         list_response = cloud_asset_sync_jobs_list(list_request)
         list_payload = json.loads(list_response.content)['data']
         self.assertEqual(list_response.status_code, 200)
@@ -6961,7 +7023,7 @@ class CloudServerServicesTestCase(TestCase):
         CloudAssetSyncJobEvent.objects.create(job_id=failed_job.id, event_type=CloudAssetSyncJobEvent.TYPE_ERROR, message='failed')
 
         request = RequestFactory().get('/api/dashboard/cloud-assets/sync-jobs/metrics/?window_hours=24')
-        request.user = staff_user
+        self._attach_bearer_session(request, staff_user)
         response = cloud_asset_sync_jobs_metrics(request)
         payload = json.loads(response.content)['data']
 
@@ -7787,7 +7849,7 @@ class CloudServerServicesTestCase(TestCase):
         )
         staff_user = get_user_model().objects.create_user(username='staff_lifecycle_plan_missing', password='x', is_staff=True)
         request = self.factory.get('/api/admin/tasks/plans/', {'limit': 1000, 'refresh': 1})
-        request.user = staff_user
+        self._attach_bearer_session(request, staff_user)
 
         response = lifecycle_plans(request)
         data = json.loads(response.content)['data']
@@ -7818,7 +7880,7 @@ class CloudServerServicesTestCase(TestCase):
         )
         staff_user = get_user_model().objects.create_user(username='staff_lifecycle_plan_columns', password='x', is_staff=True)
         request = self.factory.get('/api/admin/tasks/plans/', {'limit': 1000, 'refresh': 1})
-        request.user = staff_user
+        self._attach_bearer_session(request, staff_user)
 
         response = lifecycle_plans(request)
         data = json.loads(response.content)['data']
@@ -7882,7 +7944,7 @@ class CloudServerServicesTestCase(TestCase):
         )
         staff_user = get_user_model().objects.create_user(username='staff_lifecycle_shutdown_disabled_state', password='x', is_staff=True)
         request = self.factory.get('/api/admin/tasks/plans/', {'limit': 1000, 'refresh': '1'})
-        request.user = staff_user
+        self._attach_bearer_session(request, staff_user)
 
         response = lifecycle_plans(request)
         data = json.loads(response.content)['data']
@@ -7914,7 +7976,7 @@ class CloudServerServicesTestCase(TestCase):
         )
         staff_user = get_user_model().objects.create_user(username='staff_lifecycle_plan_deleted_orphan', password='x', is_staff=True)
         request = self.factory.get('/api/admin/tasks/plans/', {'limit': 1000, 'refresh': '1'})
-        request.user = staff_user
+        self._attach_bearer_session(request, staff_user)
 
         response = lifecycle_plans(request)
         data = json.loads(response.content)['data']
@@ -7968,7 +8030,7 @@ class CloudServerServicesTestCase(TestCase):
         self.assertTrue(result['ok'])
         staff_user = get_user_model().objects.create_user(username='staff_manual_delete_lifecycle_history', password='x', is_staff=True)
         request = self.factory.get('/api/admin/tasks/plans/', {'limit': 1000})
-        request.user = staff_user
+        self._attach_bearer_session(request, staff_user)
 
         response = lifecycle_plans(request)
         data = json.loads(response.content)['data']
@@ -8025,7 +8087,7 @@ class CloudServerServicesTestCase(TestCase):
         )
         staff_user = get_user_model().objects.create_user(username='staff_lifecycle_ip_history_compact', password='x', is_staff=True)
         request = self.factory.get('/api/admin/tasks/plans/', {'compact': 1, 'limit': 50})
-        request.user = staff_user
+        self._attach_bearer_session(request, staff_user)
 
         response = lifecycle_plans(request)
         data = json.loads(response.content)['data']
@@ -8057,7 +8119,7 @@ class CloudServerServicesTestCase(TestCase):
         )
         staff_user = get_user_model().objects.create_user(username='staff_lifecycle_ip_history_visible', password='x', is_staff=True)
         request = self.factory.get('/api/admin/tasks/plans/', {'limit': 1000})
-        request.user = staff_user
+        self._attach_bearer_session(request, staff_user)
 
         response = lifecycle_plans(request)
         data = json.loads(response.content)['data']
@@ -8091,7 +8153,7 @@ class CloudServerServicesTestCase(TestCase):
         )
         staff_user = get_user_model().objects.create_user(username='staff_lifecycle_ip_real_release_history', password='x', is_staff=True)
         request = self.factory.get('/api/admin/tasks/plans/', {'refresh': 1, 'limit': 1000})
-        request.user = staff_user
+        self._attach_bearer_session(request, staff_user)
 
         response = lifecycle_plans(request)
         data = json.loads(response.content)['data']
@@ -8146,7 +8208,7 @@ class CloudServerServicesTestCase(TestCase):
         )
         staff_user = get_user_model().objects.create_user(username='staff_lifecycle_sort_delete_time', password='x', is_staff=True)
         request = self.factory.get('/api/admin/tasks/plans/', {'limit': 1000, 'refresh': 1})
-        request.user = staff_user
+        self._attach_bearer_session(request, staff_user)
 
         response = lifecycle_plans(request)
         data = json.loads(response.content)['data']
@@ -8186,7 +8248,7 @@ class CloudServerServicesTestCase(TestCase):
             ))
         staff_user = get_user_model().objects.create_user(username='staff_lifecycle_sort_user_group', password='x', is_staff=True)
         request = self.factory.get('/api/admin/tasks/plans/', {'limit': 1000, 'refresh': 1})
-        request.user = staff_user
+        self._attach_bearer_session(request, staff_user)
 
         response = lifecycle_plans(request)
         data = json.loads(response.content)['data']
@@ -8245,7 +8307,7 @@ class CloudServerServicesTestCase(TestCase):
 
         staff_user = get_user_model().objects.create_user(username='staff_lifecycle_ip_active_to_history', password='x', is_staff=True)
         request = self.factory.get('/api/admin/tasks/plans/', {'limit': 1000})
-        request.user = staff_user
+        self._attach_bearer_session(request, staff_user)
 
         response = lifecycle_plans(request)
         data = json.loads(response.content)['data']
@@ -8295,7 +8357,7 @@ class CloudServerServicesTestCase(TestCase):
         )
         staff_user = get_user_model().objects.create_user(username='staff_lifecycle_future_server_visible', password='x', is_staff=True)
         request = self.factory.get('/api/admin/tasks/plans/', {'limit': 1000})
-        request.user = staff_user
+        self._attach_bearer_session(request, staff_user)
 
         response = lifecycle_plans(request)
         data = json.loads(response.content)['data']
@@ -8330,7 +8392,7 @@ class CloudServerServicesTestCase(TestCase):
         )
         staff_user = get_user_model().objects.create_user(username='staff_orphan_lifecycle_offset', password='x', is_staff=True)
         request = self.factory.get('/api/admin/tasks/plans/', {'limit': 1000})
-        request.user = staff_user
+        self._attach_bearer_session(request, staff_user)
 
         response = lifecycle_plans(request)
         data = json.loads(response.content)['data']
@@ -8450,7 +8512,7 @@ class CloudServerServicesTestCase(TestCase):
         )
         staff_user = get_user_model().objects.create_user(username='staff_api_lifecycle_refresh', password='x', is_staff=True)
         request = self.factory.post('/api/admin/tasks/plans/refresh/', data=json.dumps({'limit': 20}), content_type='application/json')
-        request.user = staff_user
+        self._attach_bearer_session(request, staff_user)
 
         response = refresh_lifecycle_plan_table(request)
 
@@ -8488,7 +8550,7 @@ class CloudServerServicesTestCase(TestCase):
             data=json.dumps({'actual_expires_at': new_expiry.isoformat()}),
             content_type='application/json',
         )
-        request.user = staff_user
+        self._attach_bearer_session(request, staff_user)
 
         response = update_cloud_asset(request, asset.id)
 
@@ -8527,7 +8589,7 @@ class CloudServerServicesTestCase(TestCase):
             data=json.dumps({'actual_expires_at': new_release_at.isoformat()}),
             content_type='application/json',
         )
-        request.user = staff_user
+        self._attach_bearer_session(request, staff_user)
 
         response = update_cloud_asset(request, asset.id)
 
@@ -8587,7 +8649,7 @@ class CloudServerServicesTestCase(TestCase):
         self._create_auto_renew_asset(order)
         staff_user = get_user_model().objects.create_user(username='staff_api_notice_refresh', password='x', is_staff=True)
         request = self.factory.post('/api/admin/tasks/notices/refresh/', data=json.dumps({'limit': 20, 'future_limit': 20, 'history_limit': 20}), content_type='application/json')
-        request.user = staff_user
+        self._attach_bearer_session(request, staff_user)
 
         response = refresh_notice_plan_table(request)
 
@@ -8617,7 +8679,7 @@ class CloudServerServicesTestCase(TestCase):
         self._create_auto_renew_asset(order)
         staff_user = get_user_model().objects.create_user(username='staff_notice_plan_table', password='x', is_staff=True)
         request = self.factory.get('/api/admin/tasks/notices/', {'limit': 20, 'future_limit': 20, 'history_limit': 20})
-        request.user = staff_user
+        self._attach_bearer_session(request, staff_user)
 
         response = notice_task_detail(request)
 
@@ -8664,7 +8726,7 @@ class CloudServerServicesTestCase(TestCase):
             data=json.dumps({'switches': [{'key': 'cloud_daily_expiry_summary_enabled', 'enabled': False}]}),
             content_type='application/json',
         )
-        switch_request.user = staff_user
+        self._attach_bearer_session(switch_request, staff_user)
         self.assertEqual(update_notice_switches(switch_request).status_code, 403)
 
         text_request = self.factory.post(
@@ -8672,11 +8734,11 @@ class CloudServerServicesTestCase(TestCase):
             data=json.dumps({'notice_event': 'renew_notice', 'order_ids': [order.id], 'notice_text': 'blocked'}),
             content_type='application/json',
         )
-        text_request.user = staff_user
+        self._attach_bearer_session(text_request, staff_user)
         self.assertEqual(update_notice_plan_text(text_request).status_code, 403)
 
         delete_request = self.factory.post(f'/api/admin/tasks/notices/history/{log.id}/delete/')
-        delete_request.user = staff_user
+        self._attach_bearer_session(delete_request, staff_user)
         self.assertEqual(delete_notice_history(delete_request, str(log.id)).status_code, 403)
         self.assertTrue(CloudUserNoticeLog.objects.filter(id=log.id).exists())
 
@@ -8712,13 +8774,13 @@ class CloudServerServicesTestCase(TestCase):
         )
         staff_user = get_user_model().objects.create_user(username='staff_notice_plan_history_delete', password='x', is_staff=True, is_superuser=True)
         sync_request = self.factory.get('/api/admin/tasks/notices/', {'limit': 20, 'future_limit': 20, 'history_limit': 20})
-        sync_request.user = staff_user
+        self._attach_bearer_session(sync_request, staff_user)
         sync_response = notice_task_detail(sync_request)
         self.assertEqual(sync_response.status_code, 200)
         self.assertTrue(CloudNoticePlan.objects.filter(notice_type='renew_notice', data_group=CloudNoticePlan.DATA_GROUP_HISTORY, log_id=log.id).exists())
 
         request = self.factory.post(f'/api/admin/tasks/notices/history/{log.id}/delete/')
-        request.user = staff_user
+        self._attach_bearer_session(request, staff_user)
         response = delete_notice_history(request, str(log.id))
 
         self.assertEqual(response.status_code, 200)
@@ -9295,7 +9357,7 @@ class CloudServerServicesTestCase(TestCase):
         )
         staff_user = get_user_model().objects.create_user(username='staff_server_delete_only', password='x', is_staff=True, is_superuser=True)
         request = RequestFactory().post(f'/api/dashboard/servers/{server.id}/delete/')
-        request.user = staff_user
+        self._attach_bearer_session(request, staff_user)
 
         response = delete_server(request, server.id)
 
@@ -9338,7 +9400,7 @@ class CloudServerServicesTestCase(TestCase):
         )
         staff_user = get_user_model().objects.create_user(username='staff_server_delete_no_fallback', password='x', is_staff=True, is_superuser=True)
         request = RequestFactory().post(f'/api/dashboard/servers/{asset.id}/delete/')
-        request.user = staff_user
+        self._attach_bearer_session(request, staff_user)
 
         response = delete_server(request, asset.id)
 
@@ -9372,7 +9434,7 @@ class CloudServerServicesTestCase(TestCase):
         )
         staff_user = get_user_model().objects.create_user(username='staff_servers_list_unattached', password='x', is_staff=True)
         request = RequestFactory().get('/api/dashboard/servers/')
-        request.user = staff_user
+        self._attach_bearer_session(request, staff_user)
 
         response = servers_list(request)
         data = json.loads(response.content)['data']
@@ -9756,6 +9818,7 @@ class CloudServerServicesTestCase(TestCase):
             timezone.datetime.combine(timezone.localdate(now), timezone.datetime.min.time().replace(hour=9)),
             timezone.get_current_timezone(),
         )
+        order_future_expires_at = now + timezone.timedelta(days=9)
         today_order = CloudServerOrder.objects.create(
             order_no='DAILY-EXPIRY-TODAY-1',
             user=self.user,
@@ -9772,7 +9835,7 @@ class CloudServerServicesTestCase(TestCase):
             status='completed',
             public_ip='10.10.10.10',
             service_started_at=now - timezone.timedelta(days=30),
-            service_expires_at=today_expires_at,
+            service_expires_at=order_future_expires_at,
         )
         today_asset = CloudAsset.objects.create(
             kind=CloudAsset.KIND_SERVER,
@@ -9784,7 +9847,39 @@ class CloudServerServicesTestCase(TestCase):
             region_name=today_order.region_name,
             asset_name='daily-expiry-today',
             public_ip='10.10.10.10',
-            actual_expires_at=today_order.service_expires_at,
+            actual_expires_at=today_expires_at,
+            status=CloudAsset.STATUS_RUNNING,
+            provider_status='running',
+        )
+        future_asset_order = CloudServerOrder.objects.create(
+            order_no='DAILY-EXPIRY-FUTURE-ASSET-1',
+            user=self.user,
+            plan=self.plan,
+            provider=self.plan.provider,
+            region_code=self.plan.region_code,
+            region_name=self.plan.region_name,
+            plan_name=self.plan.plan_name,
+            quantity=1,
+            currency='USDT',
+            total_amount='19.00',
+            pay_amount='19.00',
+            pay_method='balance',
+            status='completed',
+            public_ip='10.10.10.12',
+            service_started_at=now - timezone.timedelta(days=30),
+            service_expires_at=today_expires_at,
+        )
+        CloudAsset.objects.create(
+            kind=CloudAsset.KIND_SERVER,
+            source=CloudAsset.SOURCE_ORDER,
+            order=future_asset_order,
+            user=self.user,
+            provider=future_asset_order.provider,
+            region_code=future_asset_order.region_code,
+            region_name=future_asset_order.region_name,
+            asset_name='daily-expiry-future-asset',
+            public_ip='10.10.10.12',
+            actual_expires_at=order_future_expires_at,
             status=CloudAsset.STATUS_RUNNING,
             provider_status='running',
         )
@@ -9804,7 +9899,7 @@ class CloudServerServicesTestCase(TestCase):
             status='completed',
             public_ip='10.10.10.11',
             service_started_at=now - timezone.timedelta(days=60),
-            service_expires_at=now - timezone.timedelta(days=1),
+            service_expires_at=order_future_expires_at,
         )
         expired_asset = CloudAsset.objects.create(
             kind=CloudAsset.KIND_SERVER,
@@ -9816,7 +9911,7 @@ class CloudServerServicesTestCase(TestCase):
             region_name=expired_order.region_name,
             asset_name='daily-expiry-expired',
             public_ip='10.10.10.11',
-            actual_expires_at=expired_order.service_expires_at,
+            actual_expires_at=now - timezone.timedelta(days=1),
             status=CloudAsset.STATUS_STOPPED,
             provider_status='stopped',
         )
@@ -9845,6 +9940,7 @@ class CloudServerServicesTestCase(TestCase):
         self.assertIn('所属用户: svc_test｜姓名: 张三', sent[1][1])
         self.assertIn('IP: <code>10.10.10.11</code>', sent[1][1])
         self.assertIn('状态: 已关机', sent[1][1])
+        self.assertNotIn('10.10.10.12', '\n'.join(text for _, text in sent))
         self.assertNotIn('已截断', '\n'.join(text for _, text in sent))
         log = CloudUserNoticeLog.objects.get(event_type='daily_expiry_summary')
         self.assertTrue(log.delivered)
@@ -9875,7 +9971,7 @@ class CloudServerServicesTestCase(TestCase):
         )
         staff_user = get_user_model().objects.create_user(username='staff_api_2', password='x', is_staff=True)
         request = RequestFactory().get('/api/dashboard/tasks/')
-        request.user = staff_user
+        self._attach_bearer_session(request, staff_user)
 
         response = tasks_overview(request)
         payload = json.loads(response.content)
@@ -9998,7 +10094,7 @@ class CloudServerServicesTestCase(TestCase):
         )
         staff_user = get_user_model().objects.create_user(username='staff_auto_renew_price_fix', password='x', is_staff=True, is_superuser=True)
         before_request = RequestFactory().get('/api/dashboard/tasks/')
-        before_request.user = staff_user
+        self._attach_bearer_session(before_request, staff_user)
         before_payload = json.loads(tasks_overview(before_request).content)
         before_pinned = next(item for item in (before_payload.get('data') or before_payload) if item['id'] == -10001)
         self.assertEqual(before_pinned['execution_status'], 'auto_renew_failed')
@@ -10009,7 +10105,7 @@ class CloudServerServicesTestCase(TestCase):
             content_type='application/json',
             HTTP_AUTHORIZATION='',
         )
-        request.user = staff_user
+        self._attach_bearer_session(request, staff_user)
         response = update_cloud_asset(request, asset.id)
 
         self.assertEqual(response.status_code, 200)
@@ -10018,7 +10114,7 @@ class CloudServerServicesTestCase(TestCase):
         self.assertEqual(order.pay_amount, Decimal('29.00'))
         self.assertIsNone(order.auto_renew_failure_notice_sent_at)
         after_request = RequestFactory().get('/api/dashboard/tasks/')
-        after_request.user = staff_user
+        self._attach_bearer_session(after_request, staff_user)
         after_payload = json.loads(tasks_overview(after_request).content)
         after_pinned = next(item for item in (after_payload.get('data') or after_payload) if item['id'] == -10001)
         self.assertEqual(after_pinned['execution_status'], 'auto_renew_pending')
@@ -10109,7 +10205,7 @@ class CloudServerServicesTestCase(TestCase):
         )
         staff_user = get_user_model().objects.create_user(username='staff_api_3', password='x', is_staff=True)
         request = RequestFactory().get(f'/api/dashboard/cloud-assets/{asset.id}/')
-        request.user = staff_user
+        self._attach_bearer_session(request, staff_user)
 
         response = update_cloud_asset(request, asset.id)
         payload = json.loads(response.content)
@@ -10173,7 +10269,7 @@ class CloudServerServicesTestCase(TestCase):
         )
         staff_user = get_user_model().objects.create_user(username='staff_api_4', password='x', is_staff=True)
         request = RequestFactory().get(f'/api/dashboard/cloud-assets/{asset.id}/')
-        request.user = staff_user
+        self._attach_bearer_session(request, staff_user)
 
         response = update_cloud_asset(request, asset.id)
         payload = json.loads(response.content)
@@ -10327,7 +10423,7 @@ class CloudServerServicesTestCase(TestCase):
         )
         staff_user = get_user_model().objects.create_user(username='staff_auto_renew_detail', password='x', is_staff=True)
         request = RequestFactory().get('/api/dashboard/tasks/auto-renew/')
-        request.user = staff_user
+        self._attach_bearer_session(request, staff_user)
 
         # 功能：处理 云资产、云订单和生命周期 中的 fake get due orders 业务流程。
         async def fake_get_due_orders():
@@ -10373,7 +10469,7 @@ class CloudServerServicesTestCase(TestCase):
         )
         staff_user = get_user_model().objects.create_user(username='staff_auto_renew_no_asset', password='x', is_staff=True)
         request = RequestFactory().get('/api/dashboard/tasks/auto-renew/')
-        request.user = staff_user
+        self._attach_bearer_session(request, staff_user)
 
         # 功能：处理 云资产、云订单和生命周期 中的 fake get due orders 业务流程。
         async def fake_get_due_orders():
@@ -10465,7 +10561,7 @@ class CloudServerServicesTestCase(TestCase):
         )
         staff_user = get_user_model().objects.create_user(username='staff_auto_renew_run', password='x', is_staff=True, is_superuser=True)
         request = RequestFactory().post('/api/dashboard/tasks/auto-renew/run/', data='{}', content_type='application/json')
-        request.user = staff_user
+        self._attach_bearer_session(request, staff_user)
 
         # 功能：处理 云资产、云订单和生命周期 中的 fake get due orders 业务流程。
         async def fake_get_due_orders():
@@ -10520,7 +10616,7 @@ class CloudServerServicesTestCase(TestCase):
         self._create_auto_renew_asset(order)
         staff_user = get_user_model().objects.create_user(username='staff_auto_renew_single', password='x', is_staff=True, is_superuser=True)
         request = RequestFactory().post(f'/api/dashboard/tasks/auto-renew/orders/{order.id}/run/', data='{}', content_type='application/json')
-        request.user = staff_user
+        self._attach_bearer_session(request, staff_user)
 
         # 功能：处理 云资产、云订单和生命周期 中的 fake run auto renew 业务流程。
         def fake_run_auto_renew(order_id):
@@ -10656,7 +10752,7 @@ class CloudServerServicesTestCase(TestCase):
             content_type='application/json',
             HTTP_AUTHORIZATION='',
         )
-        request.user = staff_user
+        self._attach_bearer_session(request, staff_user)
 
         response = update_cloud_asset(request, asset.id)
 
@@ -10889,7 +10985,7 @@ class CloudServerServicesTestCase(TestCase):
             content_type='application/json',
             HTTP_AUTHORIZATION='',
         )
-        request.user = staff_user
+        self._attach_bearer_session(request, staff_user)
 
         response = update_cloud_asset(request, asset.id)
 
@@ -11041,7 +11137,7 @@ class CloudServerServicesTestCase(TestCase):
 
         staff_user = get_user_model().objects.create_user(username='staff_lifecycle_unattached_confirm_progress', password='x', is_staff=True)
         request = self.factory.get('/api/admin/tasks/plans/', {'limit': 1000, 'refresh': '1'})
-        request.user = staff_user
+        self._attach_bearer_session(request, staff_user)
 
         response = lifecycle_plans(request)
         data = json.loads(response.content)['data']
@@ -11081,7 +11177,7 @@ class CloudServerServicesTestCase(TestCase):
 
         staff_user = get_user_model().objects.create_user(username='staff_lifecycle_unattached_delete_attempt', password='x', is_staff=True)
         request = self.factory.get('/api/admin/tasks/plans/', {'limit': 1000})
-        request.user = staff_user
+        self._attach_bearer_session(request, staff_user)
 
         response = lifecycle_plans(request)
         data = json.loads(response.content)['data']
@@ -11109,13 +11205,13 @@ class CloudServerServicesTestCase(TestCase):
         )
         staff_user = get_user_model().objects.create_user(username='staff_lifecycle_cached_table', password='x', is_staff=True)
         request = self.factory.get('/api/admin/tasks/plans/', {'limit': 1000})
-        request.user = staff_user
+        self._attach_bearer_session(request, staff_user)
         first_response = lifecycle_plans(request)
         self.assertEqual(json.loads(first_response.content)['data']['cache_mode'], 'refreshed')
 
         with patch('bot.api._sync_lifecycle_plan_table') as sync_mock:
             second_request = self.factory.get('/api/admin/tasks/plans/', {'limit': 1000})
-            second_request.user = staff_user
+            self._attach_bearer_session(second_request, staff_user)
             second_response = lifecycle_plans(second_request)
 
         sync_mock.assert_not_called()
@@ -11204,11 +11300,11 @@ class CloudServerServicesTestCase(TestCase):
         )
         staff_user = get_user_model().objects.create_user(username='staff_lifecycle_visible_counts', password='x', is_staff=True)
         list_request = self.factory.get('/api/dashboard/cloud-assets/', {'paginated': '1', 'page_size': '100', 'risk_status': 'all'})
-        list_request.user = staff_user
+        self._attach_bearer_session(list_request, staff_user)
         list_response = cloud_assets_list(list_request)
         list_payload = json.loads(list_response.content.decode('utf-8'))['data']
         request = self.factory.get('/api/admin/tasks/plans/', {'limit': 1000, 'refresh': 1})
-        request.user = staff_user
+        self._attach_bearer_session(request, staff_user)
 
         response = lifecycle_plans(request)
         data = json.loads(response.content)['data']
@@ -13468,7 +13564,7 @@ class CloudServerServicesTestCase(TestCase):
         self.assertFalse(any(getattr(item, 'asset_id', None) == asset.id for item in async_to_sync(list_user_cloud_servers)(self.user.id)))
         admin = get_user_model().objects.create_user(username='admin_retained_ip_asset_filter', password='x', is_staff=True)
         request = self.factory.get('/api/dashboard/cloud-assets/', {'paginated': '1', 'risk_status': 'unattached_ip'})
-        request.user = admin
+        self._attach_bearer_session(request, admin)
         response = cloud_assets_list(request)
         payload = json.loads(response.content.decode('utf-8'))['data']
         retained_row = next(item for item in payload['items'] if item['id'] == asset.id)

@@ -161,6 +161,9 @@ def _resolve_asset(instance_id, public_ip, account=None, region_code=''):
     return None
 
 
+_resolve_server = _resolve_asset
+
+
 # 功能：提供 阿里云资产同步 的内部辅助逻辑，供同模块流程复用。
 def _asset_resolve_ordering(public_ip=''):
     ordering = []

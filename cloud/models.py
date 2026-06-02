@@ -196,6 +196,9 @@ class CloudServerOrder(models.Model):
     def save(self, *args, **kwargs):
         requested_update_fields = kwargs.get('update_fields')
         requested_field_set = set(requested_update_fields or [])
+        should_backfill_asset_expiry = requested_update_fields is None or bool(
+            requested_field_set & {'completed_at', 'service_started_at', 'service_expires_at', 'lifecycle_days'}
+        )
         preserve_unattached_ip_recycle_at = (
             self.status == 'deleted'
             and not str(self.instance_id or '').strip()
@@ -223,6 +226,12 @@ class CloudServerOrder(models.Model):
                     update_fields.update({'service_expires_at', 'renew_grace_expires_at', 'suspend_at', 'delete_at', 'ip_recycle_at'})
             kwargs['update_fields'] = list(update_fields)
         super().save(*args, **kwargs)
+        if should_backfill_asset_expiry and self.pk and self.service_expires_at:
+            CloudAsset.objects.filter(
+                order_id=self.pk,
+                kind=CloudAsset.KIND_SERVER,
+                actual_expires_at__isnull=True,
+            ).update(actual_expires_at=self.service_expires_at, updated_at=timezone.now())
 
     def __str__(self):
         return self.order_no
