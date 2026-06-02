@@ -15894,17 +15894,16 @@ class CloudServerServicesTestCase(TestCase):
         self.assertEqual(asset.public_ip, '21.21.21.23')
 
     # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
-    def test_aws_sync_release_static_ip_respects_shutdown_disabled_account(self):
+    def test_aws_sync_release_static_ip_respects_asset_shutdown_disabled(self):
         from cloud.management.commands.sync_aws_assets import _release_static_ip_if_due
 
         account = CloudAccountConfig.objects.create(
             provider=CloudAccountConfig.PROVIDER_AWS,
-            name='aws-sync-release-disabled',
+            name='aws-sync-release-asset-disabled',
             region_hint=self.plan.region_code,
             access_key='A' * 20,
             secret_key='B' * 40,
             is_active=True,
-            shutdown_enabled=False,
         )
         asset = CloudAsset.objects.create(
             kind=CloudAsset.KIND_SERVER,
@@ -15919,6 +15918,7 @@ class CloudServerServicesTestCase(TestCase):
             status=CloudAsset.STATUS_UNKNOWN,
             provider_status='未附加固定IP',
             note='未附加固定IP',
+            shutdown_enabled=False,
             is_active=False,
         )
         released = []
@@ -15952,6 +15952,67 @@ class CloudServerServicesTestCase(TestCase):
         self.assertEqual(released, [])
         self.assertEqual(asset.status, CloudAsset.STATUS_UNKNOWN)
         self.assertEqual(asset.provider_status, '未附加固定IP-关机计划关闭')
+
+    # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
+    def test_aws_sync_release_static_ip_ignores_shutdown_disabled_account(self):
+        from cloud.management.commands.sync_aws_assets import _release_static_ip_if_due
+
+        account = CloudAccountConfig.objects.create(
+            provider=CloudAccountConfig.PROVIDER_AWS,
+            name='aws-sync-release-account-disabled',
+            region_hint=self.plan.region_code,
+            access_key='A' * 20,
+            secret_key='B' * 40,
+            is_active=True,
+            shutdown_enabled=False,
+        )
+        asset = CloudAsset.objects.create(
+            kind=CloudAsset.KIND_SERVER,
+            source=CloudAsset.SOURCE_AWS_SYNC,
+            user=self.user,
+            provider='aws_lightsail',
+            cloud_account=account,
+            region_code=self.plan.region_code,
+            asset_name='StaticIp-sync-account-disabled',
+            public_ip='21.21.21.87',
+            actual_expires_at=timezone.now() - timezone.timedelta(days=1),
+            status=CloudAsset.STATUS_UNKNOWN,
+            provider_status='未附加固定IP',
+            note='未附加固定IP',
+            is_active=False,
+        )
+        released = []
+
+        # 测试类：组织 FakeClient 相关的回归测试。
+        class FakeClient:
+            # 功能：处理 云资产、云订单和生命周期 中的 release static ip 业务流程。
+            def release_static_ip(self, staticIpName):
+                released.append(staticIpName)
+                return {'operations': [{'id': 'op-account-disabled'}]}
+
+        # 测试类：组织 FakeStyle 相关的回归测试。
+        class FakeStyle:
+            # 功能：处理 云资产、云订单和生命周期 中的 WARNING 业务流程。
+            def WARNING(self, text):
+                return text
+
+        # 测试类：组织 FakeStdout 相关的回归测试。
+        class FakeStdout:
+            style = FakeStyle()
+
+            # 功能：处理 云资产、云订单和生命周期 中的 write 业务流程。
+            def write(self, text):
+                return None
+
+        with patch('cloud.lifecycle.cloud_ip_delete_enabled', return_value=True):
+            ok = _release_static_ip_if_due(FakeClient(), self.plan.region_code, asset, 'StaticIp-sync-account-disabled', '', '21.21.21.87', FakeStdout())
+
+        asset.refresh_from_db()
+        self.assertTrue(ok)
+        self.assertEqual(released, ['StaticIp-sync-account-disabled'])
+        self.assertEqual(asset.status, CloudAsset.STATUS_DELETED)
+        self.assertIsNone(asset.public_ip)
+        self.assertEqual(asset.previous_public_ip, '21.21.21.87')
 
     # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
     def test_aws_sync_release_static_ip_respects_global_ip_delete_switch(self):

@@ -1,5 +1,43 @@
 # 重构版本记录
 
+## 2026-06-02 20:31 自动监工：固定 IP 资产级关机开关测试收口
+
+### 范围
+
+本轮继续监工 Shop Django 后端仓库，起始工作树干净，最近提交为 `7ec48ba 记录云资产生命周期回归复查`。重点复查云资产生命周期重构后的冲突逻辑、导入错误、废弃 app 回流、订单旧到期字段、旧计划快照表、旧退款入口、AWS/阿里云同步保留手工到期，以及 AWS 未附加固定 IP 释放是否仍只使用资产级 `CloudAsset.shutdown_enabled`。
+
+### 复查结论
+
+- `INSTALLED_APPS` 仍只包含 `core`、`bot`、`orders`、`cloud` 当前运行域；仓库根下未发现 `accounts/finance/mall/monitoring/dashboard_api/biz` 废弃 app 目录恢复。
+- 运行时代码未发现 `CloudServerOrder.service_expires_at` 模型字段、危险 ORM 查询或写入恢复；`service_expires_at` 命中仍为兼容 API 字段、日志字段或从 `CloudAsset.actual_expires_at` 派生的展示值。
+- `CloudAsset.actual_expires_at` 仍是唯一结构化资产到期事实；AWS/阿里云同步已有资产路径继续保留现有 `CloudAsset.user` 和 `CloudAsset.actual_expires_at`。
+- 未发现 `normalize_service_expiry`、`service_expired_at`、旧计划快照模型 `CloudLifecyclePlan/CloudNoticePlan/CloudAutoRenewPlan`、退款旧函数名、退款旧入口、`STATUS_REFUNDED` 或 `refunded` 运行时状态回流。
+- 严格扫描未发现 `cloud_account__shutdown_enabled`、`云账号关机计划` 或 `资产或云账号关机计划` 运行时代码命中；生命周期仍按资产级开关执行。
+
+### 修复内容
+
+- 修正 `cloud/tests.py` 中 AWS 未附加固定 IP 释放的旧测试断言：原测试仍期待云账号级 `shutdown_enabled=False` 阻止释放，这与当前只看资产级 `CloudAsset.shutdown_enabled` 的规则冲突。
+- 将该用例收口为资产级开关关闭时阻止释放，并补充“云账号级关机开关关闭但资产开关开启时仍可释放”的回归测试，防止后续把云账号级判断误接回 AWS 同步释放路径。
+
+### 验证
+
+已通过：
+
+```bash
+UV_CACHE_DIR=/private/tmp/uv-cache-shop uv run python manage.py check
+UV_CACHE_DIR=/private/tmp/uv-cache-shop uv run python -m py_compile cloud/tests.py cloud/management/commands/sync_aws_assets.py cloud/lifecycle.py cloud/lifecycle_execution.py
+UV_CACHE_DIR=/private/tmp/uv-cache-shop uv run python -m py_compile cloud/management/commands/sync_aws_assets.py cloud/management/commands/sync_aliyun_assets.py cloud/lifecycle.py cloud/lifecycle_execution.py cloud/api_tasks.py cloud/services.py
+UV_CACHE_DIR=/private/tmp/uv-cache-shop uv run python manage.py makemigrations --check --dry-run
+DJANGO_TEST_SQLITE=1 UV_CACHE_DIR=/private/tmp/uv-cache-shop uv run python manage.py test cloud.tests.CloudServerServicesTestCase.test_aws_sync_release_static_ip_respects_asset_shutdown_disabled cloud.tests.CloudServerServicesTestCase.test_aws_sync_release_static_ip_ignores_shutdown_disabled_account cloud.tests.CloudServerServicesTestCase.test_aws_sync_release_static_ip_respects_global_ip_delete_switch cloud.tests.CloudServerServicesTestCase.test_due_orders_ignore_account_shutdown_disabled cloud.tests.CloudServerServicesTestCase.test_due_orders_skip_suspend_when_asset_shutdown_disabled cloud.tests.CloudServerServicesTestCase.test_due_orders_skip_order_static_ip_recycle_when_asset_shutdown_disabled cloud.tests.CloudServerServicesTestCase.test_lifecycle_suspend_execution_guard_respects_asset_shutdown_disabled cloud.tests.CloudServerServicesTestCase.test_order_static_ip_release_respects_asset_shutdown_disabled --noinput
+DJANGO_TEST_SQLITE=1 UV_CACHE_DIR=/private/tmp/uv-cache-shop uv run python manage.py test cloud.tests.CloudServerServicesTestCase.test_sync_aws_assets_rebinds_unattached_ip_when_instance_reappears cloud.tests.CloudServerServicesTestCase.test_sync_aws_assets_updates_retained_asset_after_renewal_recovery cloud.tests.CloudServerServicesTestCase.test_sync_aws_retained_ip_preserves_existing_asset_user cloud.tests.CloudServerServicesTestCase.test_sync_aws_assets_preserves_existing_unattached_ip_due_time cloud.tests.CloudServerServicesTestCase.test_sync_aws_assets_preserves_existing_manual_asset_note cloud.tests.CloudServerServicesTestCase.test_aws_sync_release_static_ip_respects_asset_shutdown_disabled cloud.tests.CloudServerServicesTestCase.test_aws_sync_release_static_ip_ignores_shutdown_disabled_account --noinput
+rg -n "service_expires_at__|(filter|exclude|update|order_by|values|values_list)\([^\n)]*service_expires_at|service_expires_at\s*=\s*models|\bnormalize_service_expiry\b|service_expired_at|class Cloud(LifecyclePlan|NoticePlan|AutoRenewPlan)\b|CloudLifecyclePlan\.|CloudNoticePlan\.|CloudAutoRenewPlan\.|\brefund_to_balance\b|\brefund_balance\b|STATUS_REFUNDED|status=['\"]refunded|cloud_account__shutdown_enabled|资产或云账号关机计划|云账号关机计划" cloud orders bot core shop --glob '!**/migrations/**' --glob '!**/tests.py'
+git diff --check
+```
+
+结果：Django 系统检查、关键模块编译、迁移 dry-run、8 条资产级关机计划回归、7 条 AWS 同步/固定 IP 释放回归和严格回流扫描均通过。`makemigrations --check --dry-run` 无模型变更；默认 MySQL 迁移历史检查因沙箱无法连接 `127.0.0.1` 输出警告。
+
+剩余风险：本轮未跑完整测试套件，未连接真实 MySQL、AWS Lightsail 或阿里云 API，未执行真实自动续费支付、云端删机、固定 IP 释放或历史数据清理。
+
 ## 2026-06-02 20:11 自动监工：云资产生命周期回归复查
 
 ### 范围
