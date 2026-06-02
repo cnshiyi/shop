@@ -15,7 +15,7 @@ from django.views.decorators.http import require_GET, require_POST
 from bot.models import TelegramUser
 from bot.user_stats import active_cloud_asset_queryset as _active_cloud_asset_queryset, active_proxy_counts_by_user as _active_proxy_counts_by_user
 from cloud.asset_expiry import order_asset_expiry
-from cloud.lifecycle import _shutdown_enabled_for_order
+from cloud.lifecycle import _is_cloud_unattached_ip_delete_time as _lifecycle_unattached_ip_delete_time, _shutdown_enabled_for_order
 from cloud.lifecycle_execution import run_orphan_asset_delete, run_shutdown_order_delete, run_unattached_ip_release
 from cloud.lifecycle_schedule import compute_order_lifecycle_schedule, compute_unattached_ip_release_at
 from cloud.models import AddressMonitor, CloudAsset, CloudIpLog, CloudLifecyclePlanNote, CloudServerOrder
@@ -411,6 +411,10 @@ def _asset_display_note(asset, *, fallback: str = '', max_chars: int = 500) -> s
 
 def _sync_asset_note_to_server(asset):
     return 0
+
+
+def _is_cloud_unattached_ip_delete_time(now=None):
+    return _lifecycle_unattached_ip_delete_time(now)
 
 
 def _lifecycle_plan_note_scope(item_type='', *, order_id=None, asset_id=None):
@@ -2220,6 +2224,18 @@ def run_orphan_asset_delete_plan(request, asset_id):
 
 
 def _run_unattached_ip_delete_sync(asset_id: int, enforce_schedule: bool = True):
+    now = timezone.now()
+    asset = CloudAsset.objects.filter(id=asset_id, kind=CloudAsset.KIND_SERVER).first()
+    should_check_window = bool(
+        enforce_schedule
+        and asset
+        and getattr(asset, 'shutdown_enabled', True) is not False
+        and not getattr(asset, 'instance_id', None)
+        and asset.actual_expires_at
+        and asset.actual_expires_at <= now
+    )
+    if should_check_window and not _is_cloud_unattached_ip_delete_time(now):
+        return {'ok': False, 'error': '未到 IP 删除时间，不在 IP 删除执行时间窗口', 'asset_id': asset_id}
     return run_unattached_ip_release(asset_id, enforce_schedule=enforce_schedule)
 
 

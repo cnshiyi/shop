@@ -443,15 +443,17 @@ def _cloud_asset_risk_state(asset, order, expires_at, provider_status_label, dis
     risk_status = 'other'
     risk_label = '其他'
     risk_rank = 99
-    provider_text = str(provider_status_label or asset.provider_status or '')
+    raw_provider_text = str(asset.provider_status or '')
+    provider_text = str(provider_status_label or raw_provider_text or '')
+    provider_match_text = '\n'.join(filter(None, [provider_text, raw_provider_text]))
     status_text = str(display_status or asset.status or '')
     note_text = str(asset.note or '')
     days_left = _days_left(expires_at)
     shutdown_enabled = _cloud_asset_shutdown_enabled(asset, order)
     is_unattached_ip = (
-        '未附加' in provider_text
-        or '固定IP保留中' in provider_text
-        or '固定 IP 保留中' in provider_text
+        '未附加' in provider_match_text
+        or '固定IP保留中' in provider_match_text
+        or '固定 IP 保留中' in provider_match_text
         or '未附加IP' in note_text
         or '未附加 IP' in note_text
         or '未附加固定IP' in note_text
