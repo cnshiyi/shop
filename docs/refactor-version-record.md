@@ -1,5 +1,36 @@
 # 重构版本记录
 
+## 2026-06-02 22:25 自动监工：手工备注同步兼容记录
+
+### 范围
+
+本轮在 `d1f8b53 补充生命周期验证记录` 后继续收口后台资产编辑路径；期间代码改动已由外部提交为 `dbb87d9 同步资产编辑备注到兼容记录`，本条记录补齐对应中文版本说明。重点确认人工备注编辑、系统备注更新、AWS 同步保留人工备注、旧到期字段、旧计划快照表、旧退款入口和废弃 app 回流。
+
+### 复查结论
+
+- `CloudAsset.actual_expires_at` 仍是唯一结构化资产到期事实；本轮未修改订单到期字段、计划快照表或退款逻辑。
+- 后台人工编辑资产 `note` 属于显式人工保存，应同步到关联兼容 `Server` 记录；系统备注和云同步路径仍保留既有人工备注，不覆盖 `CloudAsset.note` 或兼容记录备注。
+- 严格运行时代码扫描未发现旧字段、旧计划、旧退款入口回流；废弃 app 目录未恢复。
+
+### 修复内容
+
+- 后台资产编辑在 payload 显式包含 `note` 时，将备注加入关联兼容 `Server` 记录同步字段，和资产名、IP、实例 ID、资源 ID 保持一致。
+- 复用已有聚焦测试确认人工备注编辑会覆盖资产与兼容记录备注，同时系统备注更新和 AWS 同步仍不覆盖人工备注。
+
+### 验证
+
+已通过：
+
+```bash
+UV_CACHE_DIR=/private/tmp/uv-cache-shop uv run python manage.py check
+UV_CACHE_DIR=/private/tmp/uv-cache-shop uv run python -m py_compile cloud/api_asset_edit.py cloud/tests.py
+DJANGO_TEST_SQLITE=1 UV_CACHE_DIR=/private/tmp/uv-cache-shop uv run python manage.py test cloud.tests.CloudServerServicesTestCase.test_manual_cloud_asset_note_edit_still_overwrites cloud.tests.CloudServerServicesTestCase.test_system_note_updates_preserve_manual_primary_record_notes cloud.tests.CloudServerServicesTestCase.test_sync_aws_assets_preserves_existing_manual_asset_note
+```
+
+结果：Django 系统检查、相关模块编译、人工备注覆盖/系统备注保留/AWS 同步保留人工备注 3 条聚焦测试均通过。
+
+剩余风险：本轮未跑完整测试套件，未连接真实 MySQL、AWS Lightsail、阿里云或 TRONGrid，未执行真实后台编辑、Telegram 回调、钱包扣款、自动续费支付、云端删机或固定 IP 释放。
+
 ## 2026-06-02 22:22 自动监工：生命周期执行线程和固定 IP 名称回退
 
 ### 范围
