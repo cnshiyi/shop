@@ -1,5 +1,28 @@
 # Refactor Version Record
 
+## 2026-06-02 cloud-order-secret-edit-sync
+
+### Scope
+
+Small dashboard sync fix for manual MTProxy secret edits on cloud orders.
+
+### Runtime Changes
+
+- `cloud_order_detail` now accepts a standalone non-empty `mtproxy_secret` edit.
+- Manual secret edits are persisted to `CloudServerOrder` and propagated to the linked primary `CloudAsset`.
+- Secret-only saves keep the existing non-empty-only behavior and do not clear stored secrets on blank payloads.
+- Added a focused regression test for secret-only order edits.
+
+### Verification
+
+Passed locally with `PYTHONDONTWRITEBYTECODE=1 DJANGO_TEST_SQLITE=1`:
+
+```bash
+uv run python -m py_compile cloud/api_orders.py cloud/tests.py
+uv run python manage.py test cloud.tests.CloudOrderStatusDashboardSyncTestCase.test_order_detail_manual_secret_edit_syncs_primary_asset cloud.tests.CloudOrderStatusDashboardSyncTestCase.test_order_detail_manual_edit_syncs_cloud_identity_and_proxy_fields cloud.tests.CloudOrderStatusDashboardSyncTestCase.test_order_detail_manual_previous_ip_edit_syncs_primary_records --noinput --verbosity 1
+uv run python manage.py check
+```
+
 ## 2026-06-02 public-asset-renewal-no-pending-owner-claim
 
 ### Scope

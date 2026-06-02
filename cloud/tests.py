@@ -14321,6 +14321,24 @@ class CloudOrderStatusDashboardSyncTestCase(TestCase):
         self.assertEqual(server.expires_at, server_expiry)
 
     # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
+    def test_order_detail_manual_secret_edit_syncs_primary_asset(self):
+        order, asset, _server = self._create_order_with_primary_records()
+        order.mtproxy_secret = 'old-secret'
+        order.save(update_fields=['mtproxy_secret'])
+        asset.mtproxy_secret = 'old-secret'
+        asset.save(update_fields=['mtproxy_secret'])
+
+        response = self._post_json(cloud_order_detail, f'/admin/cloud-orders/{order.id}/', {
+            'mtproxy_secret': 'new-secret',
+        }, order.id)
+
+        self.assertEqual(response.status_code, 200)
+        order.refresh_from_db()
+        asset.refresh_from_db()
+        self.assertEqual(order.mtproxy_secret, 'new-secret')
+        self.assertEqual(asset.mtproxy_secret, 'new-secret')
+
+    # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
     def test_order_detail_manual_previous_ip_edit_syncs_primary_records(self):
         order, asset, server = self._create_order_with_primary_records()
 

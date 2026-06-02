@@ -597,6 +597,11 @@ def cloud_order_detail(request, order_id):
                 mtproxy_port = payload.get('mtproxy_port')
                 order.mtproxy_port = int(mtproxy_port) if mtproxy_port not in (None, '') else None
                 changed_fields.add('mtproxy_port')
+            if 'mtproxy_secret' in payload:
+                mtproxy_secret = str(payload.get('mtproxy_secret') or '').strip()
+                if mtproxy_secret:
+                    order.mtproxy_secret = mtproxy_secret
+                    changed_fields.add('mtproxy_secret')
             if 'mtproxy_link' in payload:
                 order.mtproxy_link = str(payload.get('mtproxy_link') or '').strip() or None
                 changed_fields.add('mtproxy_link')
