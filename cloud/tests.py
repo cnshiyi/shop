@@ -11718,6 +11718,65 @@ class CloudServerServicesTestCase(TestCase):
         self.assertEqual(data['order_link_path'], f'/admin/cloud-orders/{order.id}')
         self.assertEqual(data['related_order']['order_link_path'], f'/admin/cloud-orders/{order.id}')
 
+    # 功能：验证后台资产详情只展示资产自己的到期事实，不从同订单其他资产兜底。
+    def test_cloud_asset_detail_does_not_fallback_to_order_asset_expiry(self):
+        primary_expires_at = timezone.now() + timezone.timedelta(days=8)
+        order = CloudServerOrder.objects.create(
+            order_no='ASSET-DETAIL-NO-ORDER-EXPIRY',
+            user=self.user,
+            plan=self.plan,
+            provider=self.plan.provider,
+            region_code=self.plan.region_code,
+            region_name=self.plan.region_name,
+            plan_name=self.plan.plan_name,
+            quantity=1,
+            currency='USDT',
+            total_amount='19.00',
+            pay_amount='19.00',
+            pay_method='balance',
+            status='completed',
+            public_ip='2.2.2.20',
+            service_started_at=timezone.now(),
+        )
+        CloudAsset.objects.create(
+            kind=CloudAsset.KIND_SERVER,
+            source=CloudAsset.SOURCE_ORDER,
+            order=order,
+            user=self.user,
+            provider=self.plan.provider,
+            region_code=self.plan.region_code,
+            region_name=self.plan.region_name,
+            asset_name='asset-detail-primary-expiry',
+            public_ip='2.2.2.20',
+            actual_expires_at=primary_expires_at,
+            sort_order=10,
+        )
+        detail_asset = CloudAsset.objects.create(
+            kind=CloudAsset.KIND_SERVER,
+            source=CloudAsset.SOURCE_ORDER,
+            order=order,
+            user=self.user,
+            provider=self.plan.provider,
+            region_code=self.plan.region_code,
+            region_name=self.plan.region_name,
+            asset_name='asset-detail-empty-expiry',
+            public_ip='2.2.2.21',
+            actual_expires_at=None,
+            sort_order=0,
+        )
+        staff_user = get_user_model().objects.create_user(username='staff_api_asset_expiry_fact', password='x', is_staff=True)
+        request = RequestFactory().get(f'/api/dashboard/cloud-assets/{detail_asset.id}/')
+        self._attach_bearer_session(request, staff_user)
+
+        response = update_cloud_asset(request, detail_asset.id)
+        payload = json.loads(response.content)
+        data = payload.get('data') or payload
+
+        self.assertEqual(response.status_code, 200)
+        self.assertIsNone(data['actual_expires_at'])
+        detail_asset.refresh_from_db()
+        self.assertIsNone(detail_asset.actual_expires_at)
+
     # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
     def test_cloud_asset_detail_exposes_history_orders_with_click_paths(self):
         newer_expires_at = timezone.now() + timezone.timedelta(days=20)

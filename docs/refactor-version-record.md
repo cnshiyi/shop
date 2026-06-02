@@ -1,5 +1,56 @@
 # 重构版本记录
 
+## 2026-06-03 07:34 自动监工：收紧资产详情到期事实展示
+
+### 范围
+
+本轮从提交 `bb1fb2e 记录回调边界生命周期复查` 后继续监工。起始读取 git 状态时工作树干净，分支为 `codex/cloud-asset-lifecycle-refactor`。
+
+重点复查云资产生命周期是否仍只以 `CloudAsset.actual_expires_at` 作为唯一结构化到期事实，订单表是否恢复旧到期字段，计划快照表是否恢复，退款逻辑和旧退款函数名是否回流，废弃 app 是否误用，以及机器人返回链和 Telegram `callback_data` 64 字节限制。
+
+### 修改
+
+- `cloud/api_asset_edit.py` 移除后台资产详情 GET 中对 `order_asset_expiry(order)` 的展示兜底，避免当前资产 `actual_expires_at` 为空时从同订单其他资产推导出到期值。
+- 资产详情仍沿用 `_asset_payload()` 的资产自身到期展示；未附加固定 IP 的只读计算展示继续保留，且不会写回资产字段。
+- `cloud/tests.py` 新增 `test_cloud_asset_detail_does_not_fallback_to_order_asset_expiry`，覆盖同一订单下其他资产有到期、当前资产无到期时，后台详情仍返回空到期事实。
+
+### 监工结果
+
+- `CloudAsset` 仍只有 `actual_expires_at` 作为结构化资产到期字段。
+- `CloudServerOrder` 未恢复 `service_expires_at` 或 `actual_expires_at`，仅保留 `renew_grace_expires_at` 作为流程时间字段。
+- `CloudAssetDashboardSnapshot` 未恢复到期字段。
+- 运行代码扫描未发现旧计划模型、旧计划快照表、旧退款函数名、旧端口入口 `allow_client_port` / `set_cloud_server_port` / `custom:port:` / `cloud:ipport:` 回流。
+- 仓库根目录未发现废弃 app 目录 `accounts`、`finance`、`mall`、`monitoring`、`dashboard_api`、`biz`。
+- 机器人返回链聚焦测试继续通过，覆盖资产详情、订单详情、续费、换 IP、重装、修改配置等短 callback 边界。
+- 真机测试未执行：本轮未执行真实 Telegram 点击、真实云资源创建/删除/IP 变更、真实支付、链上广播、生产发布或不可逆操作。
+
+### 验证
+
+本地已通过：
+
+```bash
+UV_CACHE_DIR=/private/tmp/uv-cache-shop PYTHONDONTWRITEBYTECODE=1 uv run python manage.py check
+UV_CACHE_DIR=/private/tmp/uv-cache-shop PYTHONDONTWRITEBYTECODE=1 uv run python -m py_compile cloud/api_asset_edit.py cloud/tests.py cloud/api_assets.py cloud/asset_expiry.py bot/handlers.py bot/keyboards.py orders/payment_scanner.py
+DB_ENGINE=sqlite SQLITE_NAME=/private/tmp/shop_asset_detail_expiry_fact_retry_<进程>.sqlite3 UV_CACHE_DIR=/private/tmp/uv-cache-shop PYTHONDONTWRITEBYTECODE=1 uv run python manage.py test cloud.tests.CloudServerServicesTestCase.test_cloud_asset_detail_does_not_fallback_to_order_asset_expiry cloud.tests.CloudServerServicesTestCase.test_cloud_asset_detail_exposes_related_order_click_path cloud.tests.CloudServerServicesTestCase.test_cloud_asset_get_payload_does_not_mutate_manual_asset_fields --noinput --verbosity 1
+DB_ENGINE=sqlite SQLITE_NAME=/private/tmp/shop_lifecycle_fact_<进程>.sqlite3 UV_CACHE_DIR=/private/tmp/uv-cache-shop PYTHONDONTWRITEBYTECODE=1 uv run python manage.py test cloud.tests.CloudServerServicesTestCase.test_order_rejects_removed_service_expiry_field cloud.tests.CloudServerServicesTestCase.test_update_cloud_asset_expiry_refreshes_order_lifecycle cloud.tests.CloudServerServicesTestCase.test_update_cloud_asset_expiry_refreshes_delete_plan_view cloud.tests.CloudServerServicesTestCase.test_unbound_asset_renewal_lists_plans_without_creating_order cloud.tests.CloudServerServicesTestCase.test_prepare_unbound_asset_renewal_creates_pending_payment_order cloud.tests.CloudServerServicesTestCase.test_completed_asset_recovery_order_renews_without_reprovisioning --noinput --verbosity 1
+DB_ENGINE=sqlite SQLITE_NAME=/private/tmp/shop_bot_callback_fact_<进程>.sqlite3 UV_CACHE_DIR=/private/tmp/uv-cache-shop PYTHONDONTWRITEBYTECODE=1 uv run python manage.py test bot.tests.RetainedIpRenewalUiTestCase --noinput --verbosity 1
+DJANGO_SETTINGS_MODULE=shop.settings DB_ENGINE=sqlite SQLITE_NAME=/private/tmp/shop_introspect_fact_<进程>.sqlite3 UV_CACHE_DIR=/private/tmp/uv-cache-shop PYTHONDONTWRITEBYTECODE=1 uv run python - <<'PY'
+# 模型字段 introspection：CloudAsset=['actual_expires_at']；CloudServerOrder=['renew_grace_expires_at']；CloudAssetDashboardSnapshot=[]
+PY
+UV_CACHE_DIR=/private/tmp/uv-cache-shop PYTHONDONTWRITEBYTECODE=1 uv run python manage.py makemigrations --check --dry-run
+rg -n "service_expires_at\\s*=|order\\.(service_expires_at|actual_expires_at)|CloudServerOrder\\([^\\n]*(service_expires_at|actual_expires_at)|CloudLifecyclePlan\\b|CloudNoticePlan\\b|CloudAutoRenewPlan\\b|CloudAssetPlanSnapshot|CloudOrderPlanSnapshot|refund_cloud_server_order|refund_cloud_order|refund_order|process_refund|create_refund|issue_refund|refund_to_balance|refund_balance|STATUS_REFUNDED|status=['\\\"]refunded['\\\"]|normalize_service_expiry|service_expired_at|allow_client_port|set_cloud_server_port|custom:port:|cloud:ipport:" bot core orders cloud shop --glob '!**/migrations/**' --glob '!**/tests.py' --glob '!**/tests_*.py'
+find . -maxdepth 2 -type d \( -name accounts -o -name finance -o -name mall -o -name monitoring -o -name dashboard_api -o -name biz \) -print
+git diff --check
+```
+
+`makemigrations --check --dry-run` 仍出现本地沙箱无法连接 `127.0.0.1` MySQL 的迁移历史一致性警告，但最终结果为 `No changes detected`。`RetainedIpRenewalUiTestCase` 仍会打印 `SimpleTestCase` 禁止数据库查询配置的预期日志，最终 44 条通过。
+
+### 剩余风险
+
+- 本轮未跑完整测试套件。
+- 本轮未执行真实 Telegram 点击、真实云资源创建/删除/IP 变更、真实支付、链上广播、生产发布或不可逆操作。
+- 真机测试仍需在用户明确授权真实云资源成本后单独执行，并写中文报告，云资源 ID 需脱敏。
+
 ## 2026-06-03 07:23 自动监工：复查回调边界和生命周期事实
 
 ### 范围

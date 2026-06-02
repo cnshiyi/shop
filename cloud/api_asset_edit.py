@@ -22,7 +22,6 @@ from cloud.api_assets import (
     _unattached_ip_delete_due_at,
 )
 from cloud.api_orders import _cloud_order_summary_payload, _proxy_link_item, _proxy_links_with_main_link, _related_order_history_payload
-from cloud.asset_expiry import order_asset_expiry
 from cloud.dashboard_snapshots import _refresh_dashboard_plan_snapshots, _refresh_dashboard_plan_snapshots_deferred, _refresh_lifecycle_plan_view
 from cloud.lifecycle_schedule import compute_order_lifecycle_fields
 from cloud.models import CloudAsset, CloudIpLog, CloudServerOrder, CloudServerPlan
@@ -94,7 +93,6 @@ def update_cloud_asset(request, asset_id):
             'order_status': getattr(order, 'status', '') or '',
             'order_status_label': _status_label(getattr(order, 'status', ''), CloudServerOrder.STATUS_CHOICES) if order else '',
             'service_started_at': _iso(getattr(order, 'service_started_at', None)),
-            'actual_expires_at': _iso(asset.actual_expires_at or order_asset_expiry(order)) or payload.get('actual_expires_at'),
             'renew_grace_expires_at': _iso(getattr(order, 'renew_grace_expires_at', None)),
             'suspend_at': _iso(getattr(order, 'suspend_at', None)),
             'delete_at': _iso(getattr(order, 'delete_at', None)),
