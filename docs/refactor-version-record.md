@@ -1989,6 +1989,37 @@ The focused test run is blocked by local MySQL test database permissions:
 Access denied for user 'a'@'localhost' to database 'test_a'
 ```
 
+## 2026-06-02 CLI 只读审查与敏感搜索文本收口
+
+### 范围
+
+第二十二轮监工使用终端版 `codex exec` 以只读沙箱复查重构回流风险，并结合本地扫描处理两个最小安全修复点。
+
+### 功能变更
+
+- `cloud/provisioning.py` 的开通成功日志改用代理链接专用脱敏预览，避免普通预览保留 `secret` 尾部。
+- `cloud/api_asset_snapshots.py` 的云资产列表快照搜索文本不再持久化完整 `mtproxy_link` 或 `proxy_links`，仅保留代理链路名称、模式、server 和 port 等非敏感搜索词。
+- `cloud/cache.py` 的监控缓存初始化把 QuerySet 构造和求值完整包进 `sync_to_async` 线程，避免 async 函数体里残留同步 ORM 构造风险。
+
+### CLI 复查结论
+
+- 终端版 Codex：`codex-cli 0.135.0-alpha.1`。
+- 自动化仍为 `ACTIVE`，10 分钟周期，模型 `gpt-5.5`。
+- CLI 只读复查未发现废弃 app 恢复、旧到期字段危险 ORM、旧计划快照模型恢复、退款逻辑恢复或 `cloud.api` patch 目标回流。
+- CLI 指出的快照搜索文本敏感副本风险和 `cloud/cache.py` async ORM 包裹建议已在本轮处理。
+
+### 验证命令
+
+已通过：
+
+```bash
+uv run python -m py_compile cloud/api_asset_snapshots.py cloud/cache.py cloud/provisioning.py cloud/tests.py
+uv run python manage.py check
+uv run python manage.py makemigrations --check --dry-run
+uv run python manage.py shell -c "from cloud.provisioning import _mask_proxy_log_preview; secret='ee0123456789abcdef0123456789abcdef'; link=f'tg://proxy?server=10.0.0.93&port=9528&secret={secret}'; preview=_mask_proxy_log_preview(link, visible=12); assert secret not in preview; assert secret[-12:] not in preview; assert 'secret=***' in preview; print({'ok': True, 'preview': preview})"
+DJANGO_TEST_SQLITE=1 uv run python manage.py test cloud.tests.CloudServerServicesTestCase.test_proxy_log_preview_masks_secret_tail cloud.tests.CloudServerServicesTestCase.test_cloud_asset_dashboard_snapshot_search_text_masks_proxy_secret --verbosity 1
+```
+
 ## 2026-06-02 开通日志测试夹具补强
 
 ### 范围
