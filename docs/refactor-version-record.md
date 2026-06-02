@@ -52,7 +52,7 @@ git diff --check
 
 - `bot/api.py` 的资产删除计划载荷在资产仍关联有效订单时，改为复用订单删机计划 payload，并保留资产 ID、资产名称、云账号 ID 和资产详情入口；计划队列按关联订单去重，避免同一订单多资产重复展示。
 - `cloud/lifecycle_execution.py` 的 `run_orphan_asset_delete(..., enforce_schedule=True)` 增加关联有效订单保护：资产仍有关联订单且订单未结束时，拒绝走孤立资产删机入口，提示改走订单删机计划。
-- `cloud/tests.py` 补充两条回归测试，覆盖有关联有效订单的资产计划展示回到订单 payload，以及强制计划模式下孤立资产删机入口拒绝绕过订单。
+- `cloud/tests.py` 补充四条回归测试，覆盖有关联有效订单的资产计划展示回到订单 payload、计划列表回到订单项、后台计划运行入口拒绝误删，以及强制计划模式下孤立资产删机入口拒绝绕过订单。
 
 ### 验证
 
@@ -64,7 +64,7 @@ UV_CACHE_DIR=/private/tmp/uv-cache-shop uv run python -m py_compile cloud/manage
 UV_CACHE_DIR=/private/tmp/uv-cache-shop uv run python -m py_compile bot/api.py cloud/lifecycle_execution.py cloud/tests.py
 UV_CACHE_DIR=/private/tmp/uv-cache-shop uv run python manage.py makemigrations --check --dry-run
 DJANGO_TEST_SQLITE=1 UV_CACHE_DIR=/private/tmp/uv-cache-shop uv run python manage.py test cloud.tests.CloudServerServicesTestCase.test_order_rejects_removed_service_expiry_field cloud.tests.CloudServerServicesTestCase.test_server_compat_create_preserves_manual_asset_owner_and_expiry cloud.tests.CloudServerServicesTestCase.test_mark_success_preserves_existing_manual_asset_fields_on_update cloud.tests.CloudServerServicesTestCase.test_early_provisioning_steps_preserve_existing_manual_asset_fields --verbosity 1
-DJANGO_TEST_SQLITE=1 UV_CACHE_DIR=/private/tmp/uv-cache-shop uv run python manage.py test cloud.tests.CloudServerServicesTestCase.test_linked_active_order_asset_delete_plan_uses_order_payload cloud.tests.CloudServerServicesTestCase.test_orphan_asset_delete_refuses_linked_active_order_when_enforced cloud.tests.CloudServerServicesTestCase.test_order_rejects_removed_service_expiry_field cloud.tests.CloudServerServicesTestCase.test_server_compat_create_preserves_manual_asset_owner_and_expiry --verbosity 1
+DJANGO_TEST_SQLITE=1 UV_CACHE_DIR=/private/tmp/uv-cache-shop uv run python manage.py test cloud.tests.CloudServerServicesTestCase.test_orphan_asset_plan_run_rejects_active_linked_order_asset cloud.tests.CloudServerServicesTestCase.test_lifecycle_plans_route_linked_asset_delete_to_order_item cloud.tests.CloudServerServicesTestCase.test_linked_active_order_asset_delete_plan_uses_order_payload cloud.tests.CloudServerServicesTestCase.test_orphan_asset_delete_refuses_linked_active_order_when_enforced --verbosity 1
 DJANGO_TEST_SQLITE=1 UV_CACHE_DIR=/private/tmp/uv-cache-shop uv run python manage.py test cloud.tests.CloudServerServicesTestCase.test_sync_aws_missing_instance_requires_five_passes_before_delete cloud.tests.CloudServerServicesTestCase.test_sync_aws_missing_check_uses_previous_public_ip_before_delete cloud.tests.CloudServerServicesTestCase.test_sync_aws_missing_blank_asset_does_not_delete_unrelated_blank_server --verbosity 1
 DB_ENGINE=sqlite SQLITE_NAME=/private/tmp/shop-lifecycle-test.sqlite3 UV_CACHE_DIR=/private/tmp/uv-cache-shop uv run python manage.py test cloud.tests.CloudServerServicesTestCase.test_dashboard_orphan_asset_plan_run_respects_computed_delete_time cloud.tests.CloudServerServicesTestCase.test_lifecycle_tick_rechecks_orphan_asset_delete_time_before_cloud_delete cloud.tests.CloudServerServicesTestCase.test_update_cloud_asset_expiry_refreshes_delete_plan_view --verbosity 1 --noinput
 git diff --check
