@@ -1,5 +1,43 @@
 # 重构版本记录
 
+## 2026-06-02 19:41 自动监工：云资产到期事实源回归复查
+
+### 范围
+
+本轮继续监工 Shop Django 后端仓库，起始工作树干净，最近提交为 `a1399a5 记录云订单清理和自动续费保护`。重点复查云资产生命周期到期事实源、订单旧到期字段、旧计划快照表、退款旧入口、废弃 app 回流，以及上一轮迁移旧机删除、旧记录清理和自动续费窗口复核保护是否仍稳定。
+
+### 复查结论
+
+- `INSTALLED_APPS` 仍只包含 `core`、`bot`、`orders`、`cloud` 当前运行域；未发现旧 `accounts/finance/mall/monitoring/dashboard_api/biz` 运行时 app 回流。
+- 运行时代码未发现 `CloudServerOrder.service_expires_at` 模型字段恢复，也未发现对已移除订单到期列的危险 ORM 过滤、排序、批量更新或 values 查询。
+- `CloudAsset.actual_expires_at` 仍是唯一结构化云资产到期事实；`service_expires_at` 命中仍是兼容 API 字段、日志字段或从资产事实派生的展示值。
+- 未发现 `normalize_service_expiry`、`service_expired_at`、旧计划快照模型 `CloudLifecyclePlan/CloudNoticePlan/CloudAutoRenewPlan`、退款旧函数名、退款旧入口或 `refunded` 运行时状态回流。
+- 自动续费手动执行、批量执行和重试路径最终仍落到 `_run_auto_renew()`，事务内会重新锁定订单并复核当前资产到期窗口；资产到期被推远时不会扣款或创建续费订单。
+- 迁移旧机删除仍以 `CloudServerOrder.migration_due_at` 作为事实源，并由 `run_replaced_order_delete(..., enforce_schedule=True)` 做最终执行保护。
+- 旧记录清理仍会保留带有当前 IP、固定 IP 名、实例名、实例 ID、云资源 ID、代理 host 或未完成资源上下文的云订单。
+
+### 功能变更
+
+本轮未修改运行时代码；仅补充本次中文版本记录。
+
+### 验证
+
+已通过：
+
+```bash
+UV_CACHE_DIR=/private/tmp/uv-cache-shop uv run python manage.py check
+UV_CACHE_DIR=/private/tmp/uv-cache-shop uv run python -m py_compile cloud/lifecycle.py cloud/services.py cloud/api_tasks.py cloud/api_orders.py cloud/provisioning.py core/management/commands/cleanup_old_records.py cloud/management/commands/sync_aws_assets.py cloud/management/commands/sync_aliyun_assets.py
+UV_CACHE_DIR=/private/tmp/uv-cache-shop uv run python manage.py makemigrations --check --dry-run
+DJANGO_TEST_SQLITE=1 UV_CACHE_DIR=/private/tmp/uv-cache-shop uv run python manage.py test cloud.tests.CloudServerServicesTestCase.test_auto_renew_group_member_can_pay_when_owner_balance_insufficient cloud.tests.CloudServerServicesTestCase.test_run_auto_renew_skips_when_asset_expiry_moved_out_of_due_window cloud.tests.CloudServerServicesTestCase.test_auto_renew_retry_task_waits_for_recharge_then_retries --verbosity 2
+DJANGO_TEST_SQLITE=1 UV_CACHE_DIR=/private/tmp/uv-cache-shop uv run python manage.py test cloud.tests.CloudServerServicesTestCase.test_get_migration_due_orders_is_distinct cloud.tests.CloudServerServicesTestCase.test_get_migration_due_orders_skips_non_deleting_orders cloud.tests.CloudServerServicesTestCase.test_replaced_order_delete_respects_asset_shutdown_switch cloud.tests.CloudServerServicesTestCase.test_lifecycle_tick_deletes_migration_due_order_with_deleting_asset cloud.tests.CloudServerServicesTestCase.test_lifecycle_tick_migration_delete_uses_migration_due_without_notice_payload --verbosity 1
+DJANGO_TEST_SQLITE=1 UV_CACHE_DIR=/private/tmp/uv-cache-shop uv run python manage.py test cloud.tests.CloudServerServicesTestCase.test_cleanup_old_records_keeps_deleted_order_until_retained_ip_window_ends cloud.tests.CloudServerServicesTestCase.test_cleanup_old_records_keeps_non_terminal_cloud_orders cloud.tests.CloudServerServicesTestCase.test_cleanup_old_records_keeps_terminal_cloud_order_with_live_asset cloud.tests.CloudServerServicesTestCase.test_cleanup_old_records_keeps_terminal_cloud_order_with_pending_resource_context cloud.tests.CloudServerServicesTestCase.test_cleanup_old_records_keeps_deleted_order_with_resource_context cloud.tests.CloudServerServicesTestCase.test_cleanup_old_records_allows_terminal_cloud_order_with_deleted_asset --verbosity 1
+git diff --check
+```
+
+说明：首次编译命令漏带 `UV_CACHE_DIR`，`uv` 试图访问用户缓存目录导致沙箱权限错误；已使用 `/private/tmp/uv-cache-shop` 重跑通过。`makemigrations --check --dry-run` 无模型变更，但默认 MySQL 迁移历史检查因沙箱无法连接 `127.0.0.1` 输出警告。
+
+剩余风险：本轮未跑完整测试套件，未连接真实 MySQL、AWS Lightsail 或阿里云 API，未执行真实自动续费支付、云端删机、固定 IP 释放或历史数据清理。
+
 ## 2026-06-02 19:35 自动监工：自动续费窗口复核保护
 
 ### 范围
