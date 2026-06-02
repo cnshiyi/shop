@@ -888,6 +888,53 @@ class CloudServerServicesTestCase(TestCase):
         self.assertIn('未到服务器删除时间', data['message'])
 
     # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
+    def test_orphan_asset_plan_run_rejects_active_linked_order_asset(self):
+        from bot.api import _run_orphan_asset_delete_sync
+
+        order = CloudServerOrder.objects.create(
+            order_no='ORPHAN-RUN-LINKED-ORDER-GUARD-1',
+            user=self.user,
+            plan=self.plan,
+            provider=self.plan.provider,
+            region_code=self.plan.region_code,
+            region_name=self.plan.region_name,
+            plan_name=self.plan.plan_name,
+            quantity=1,
+            currency='USDT',
+            total_amount='19.00',
+            pay_amount='19.00',
+            status='deleting',
+            public_ip='52.77.18.252',
+            delete_at=timezone.now() - timezone.timedelta(hours=1),
+        )
+        asset = CloudAsset.objects.create(
+            kind=CloudAsset.KIND_SERVER,
+            source=CloudAsset.SOURCE_ORDER,
+            order=order,
+            user=self.user,
+            provider='aws_lightsail',
+            region_code=self.plan.region_code,
+            region_name=self.plan.region_name,
+            asset_name='linked-order-guard-asset',
+            instance_id='linked-order-guard-asset',
+            public_ip=order.public_ip,
+            actual_expires_at=timezone.now() - timezone.timedelta(days=5),
+            status=CloudAsset.STATUS_RUNNING,
+            is_active=True,
+        )
+
+        with patch('cloud.lifecycle._delete_orphan_asset_instance', new=AsyncMock()) as delete_mock:
+            result = _run_orphan_asset_delete_sync(asset.id, enforce_schedule=True)
+
+        delete_mock.assert_not_awaited()
+        self.assertFalse(result['ok'])
+        self.assertIn('关联订单', result['error'])
+        order.refresh_from_db()
+        asset.refresh_from_db()
+        self.assertEqual(order.status, 'deleting')
+        self.assertEqual(asset.status, CloudAsset.STATUS_RUNNING)
+
+    # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
     def test_dashboard_unattached_ip_plan_run_respects_delete_time(self):
         from bot.api import run_unattached_ip_delete_plan
 
@@ -3913,6 +3960,96 @@ class CloudServerServicesTestCase(TestCase):
                 public_ip='3.3.3.32',
                 service_expires_at=timezone.now() + timezone.timedelta(days=5),
             )
+
+    # 功能：验证有关联有效订单的资产删除计划回到订单计划展示，避免作为孤立资产执行。
+    def test_linked_active_order_asset_delete_plan_uses_order_payload(self):
+        expires_at = timezone.now() - timezone.timedelta(days=10)
+        delete_at = timezone.now() - timezone.timedelta(days=1)
+        order = CloudServerOrder.objects.create(
+            order_no='ORDER-LINKED-ASSET-PLAN-1',
+            user=self.user,
+            plan=self.plan,
+            provider=self.plan.provider,
+            region_code=self.plan.region_code,
+            region_name=self.plan.region_name,
+            plan_name=self.plan.plan_name,
+            quantity=1,
+            currency='USDT',
+            total_amount='19.00',
+            pay_amount='19.00',
+            pay_method='balance',
+            status='completed',
+            public_ip='3.3.3.35',
+            delete_at=delete_at,
+        )
+        asset = CloudAsset.objects.create(
+            kind=CloudAsset.KIND_SERVER,
+            source=CloudAsset.SOURCE_AWS_SYNC,
+            order=order,
+            user=self.user,
+            provider=order.provider,
+            region_code=order.region_code,
+            region_name=order.region_name,
+            asset_name='linked-active-order-plan-asset',
+            instance_id='linked-active-order-plan-asset',
+            public_ip=order.public_ip,
+            actual_expires_at=expires_at,
+            status=CloudAsset.STATUS_RUNNING,
+            is_active=True,
+        )
+
+        item = _asset_delete_plan_item_payload(asset, queue_status='due_now', queue_status_label='待执行')
+
+        self.assertEqual(item['item_type'], 'order')
+        self.assertEqual(item['order_id'], order.id)
+        self.assertEqual(item['asset_id'], asset.id)
+        self.assertEqual(item['detail_path'], f'/admin/cloud-orders/{order.id}')
+        self.assertEqual(item['asset_detail_path'], f'/admin/cloud-assets/{asset.id}')
+        self.assertEqual(parse_datetime(item['service_expires_at']), expires_at)
+
+    # 功能：验证孤立资产删机入口不能绕过仍有效的关联订单，避免订单和资产状态分叉。
+    def test_orphan_asset_delete_refuses_linked_active_order_when_enforced(self):
+        from cloud.lifecycle_execution import run_orphan_asset_delete
+
+        order = CloudServerOrder.objects.create(
+            order_no='ORDER-LINKED-ASSET-RUN-1',
+            user=self.user,
+            plan=self.plan,
+            provider=self.plan.provider,
+            region_code=self.plan.region_code,
+            region_name=self.plan.region_name,
+            plan_name=self.plan.plan_name,
+            quantity=1,
+            currency='USDT',
+            total_amount='19.00',
+            pay_amount='19.00',
+            pay_method='balance',
+            status='completed',
+            public_ip='3.3.3.36',
+            delete_at=timezone.now() - timezone.timedelta(days=1),
+        )
+        asset = CloudAsset.objects.create(
+            kind=CloudAsset.KIND_SERVER,
+            source=CloudAsset.SOURCE_AWS_SYNC,
+            order=order,
+            user=self.user,
+            provider=order.provider,
+            region_code=order.region_code,
+            region_name=order.region_name,
+            asset_name='linked-active-order-run-asset',
+            instance_id='linked-active-order-run-asset',
+            public_ip=order.public_ip,
+            actual_expires_at=timezone.now() - timezone.timedelta(days=10),
+            status=CloudAsset.STATUS_RUNNING,
+            is_active=True,
+        )
+
+        with patch('cloud.lifecycle._delete_orphan_asset_instance', new=AsyncMock()) as delete_mock:
+            result = run_orphan_asset_delete(asset.id, enforce_schedule=True)
+
+        delete_mock.assert_not_called()
+        self.assertFalse(result['ok'])
+        self.assertIn('请走订单删机计划', result['error'])
 
     # 功能：验证旧 Server 兼容入口复用资产时不覆盖手工用户和到期时间。
     def test_server_compat_create_preserves_manual_asset_owner_and_expiry(self):
@@ -8472,6 +8609,56 @@ class CloudServerServicesTestCase(TestCase):
         self.assertEqual(row['plan_state_label'], '关机计划关闭')
         self.assertFalse(row['should_execute'])
         self.assertIn('关机计划关闭', row['blocked_reason'])
+
+    # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
+    def test_lifecycle_plans_route_linked_asset_delete_to_order_item(self):
+        expires_at = timezone.now() - timezone.timedelta(days=5)
+        order = CloudServerOrder.objects.create(
+            order_no='LIFECYCLE-LINKED-ASSET-ORDER-ROUTE-1',
+            user=self.user,
+            plan=self.plan,
+            provider=self.plan.provider,
+            region_code=self.plan.region_code,
+            region_name=self.plan.region_name,
+            plan_name=self.plan.plan_name,
+            quantity=1,
+            currency='USDT',
+            total_amount='19.00',
+            pay_amount='19.00',
+            status='deleting',
+            public_ip='3.3.3.41',
+            suspend_at=timezone.now() - timezone.timedelta(days=2),
+            delete_at=timezone.now() - timezone.timedelta(hours=1),
+        )
+        asset = CloudAsset.objects.create(
+            kind=CloudAsset.KIND_SERVER,
+            source=CloudAsset.SOURCE_ORDER,
+            order=order,
+            user=self.user,
+            provider=order.provider,
+            region_code=order.region_code,
+            region_name=order.region_name,
+            asset_name='linked-asset-order-route',
+            instance_id='linked-asset-order-route',
+            public_ip=order.public_ip,
+            actual_expires_at=expires_at,
+            status=CloudAsset.STATUS_RUNNING,
+            is_active=True,
+        )
+        staff_user = get_user_model().objects.create_user(username='staff_linked_asset_order_route', password='x', is_staff=True)
+        request = self.factory.get('/api/admin/tasks/plans/', {'limit': 1000, 'refresh': '1'})
+        self._attach_bearer_session(request, staff_user)
+
+        response = lifecycle_plans(request)
+        data = json.loads(response.content)['data']
+        row = next(item for item in data['due_items'] if item.get('asset_id') == asset.id)
+
+        self.assertEqual(row['item_type'], 'order')
+        self.assertEqual(row['order_id'], order.id)
+        self.assertEqual(row['asset_id'], asset.id)
+        self.assertTrue(row['shutdown_enabled'])
+        self.assertEqual(row['order_detail_path'], f'/admin/cloud-orders/{order.id}')
+        self.assertEqual(row['asset_detail_path'], f'/admin/cloud-assets/{asset.id}')
 
     # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
     def test_lifecycle_plans_move_deleted_orphan_server_out_of_future(self):
