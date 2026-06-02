@@ -5,7 +5,7 @@ from django.db.models import Count, Q
 from django.utils import timezone
 
 from bot.models import AdminReplyLink, TelegramChatMessage
-from cloud.models import CloudServerOrder
+from cloud.models import CloudAsset, CloudServerOrder
 from core.models import SiteConfig
 from orders.models import Order, Recharge
 
@@ -82,7 +82,7 @@ class Command(BaseCommand):
         field_map = {
             'orders': ['order_no', 'user_id', 'status', 'pay_method', 'currency', 'total_amount', 'paid_at', 'expired_at'],
             'recharges': ['user_id', 'status', 'currency', 'amount', 'pay_amount', 'completed_at', 'expired_at'],
-            'cloud_orders': ['order_no', 'user_id', 'status', 'provider', 'public_ip', 'previous_public_ip', 'service_expires_at', 'ip_recycle_at'],
+            'cloud_orders': ['order_no', 'user_id', 'status', 'provider', 'public_ip', 'previous_public_ip', 'ip_recycle_at'],
             'telegram_chat_messages': ['tg_user_id', 'chat_id', 'message_id', 'direction', 'content_type'],
             'admin_reply_links': ['admin_chat_id', 'admin_message_id', 'user_id', 'user_chat_id', 'user_message_id', 'source_content_type'],
         }
@@ -110,7 +110,7 @@ class Command(BaseCommand):
         )
         expired_inactive = (
             Q(status__in={'completed', 'expiring', 'renew_pending', 'suspended', 'deleting'})
-            & Q(service_expires_at__lt=cutoff)
+            & Q(id__in=CloudAsset.objects.filter(kind=CloudAsset.KIND_SERVER, actual_expires_at__lt=cutoff).values('order_id'))
             & (Q(ip_recycle_at__isnull=True) | Q(ip_recycle_at__lt=cutoff))
         )
         return Q(status__in=terminal_statuses) | deleted_retained_done | expired_inactive

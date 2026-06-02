@@ -7,6 +7,7 @@ from django.utils import timezone
 
 from django.db.models import Q
 
+from cloud.asset_expiry import order_asset_expiry
 from cloud.models import CloudAsset
 from cloud.note_utils import append_note, prepend_note, with_note_time
 from cloud.services import _cloud_log_trigger_label, _resolve_aws_static_ip_name_for_order, _update_order_primary_records, build_cloud_server_name, drop_asset_note_update, ensure_unique_cloud_server_name, is_cloud_asset_renewal_order, record_cloud_ip_log
@@ -45,7 +46,7 @@ def _log_provision_result(order, *, level=logging.INFO, **extra):
         'mtproxy_port': getattr(order, 'mtproxy_port', None),
         'mtproxy_host': getattr(order, 'mtproxy_host', ''),
         'mtproxy_link_preview': _mask_log_value(getattr(order, 'mtproxy_link', ''), visible=12),
-        'service_expires_at': getattr(order, 'service_expires_at', None).isoformat() if getattr(order, 'service_expires_at', None) else None,
+        'service_expires_at': order_asset_expiry(order).isoformat() if order_asset_expiry(order) else None,
         **extra,
     }
     logger.log(
@@ -257,7 +258,7 @@ def _preserve_existing_asset_defaults(defaults: dict, asset: CloudAsset | None) 
     return defaults
 
 
-def _upsert_server_asset(order: CloudServerOrder, note: str):
+def _upsert_server_asset(order: CloudServerOrder, note: str, *, expires_at=None):
     try:
         order_user = order.user
     except Exception:
@@ -304,7 +305,7 @@ def _upsert_server_asset(order: CloudServerOrder, note: str):
             'proxy_links': order.proxy_links or [],
             'mtproxy_secret': order.mtproxy_secret,
             'mtproxy_host': order.mtproxy_host,
-            'actual_expires_at': order.service_expires_at,
+            'actual_expires_at': expires_at or order_asset_expiry(order),
             'price': order.total_amount,
             'currency': order.currency,
             'order': order,
@@ -430,7 +431,7 @@ def _mark_rebuild_source_pending_deletion(order_id: int, replacement_order_id: i
         record_cloud_ip_log(event_type='renewed', order=source, previous_public_ip=previous_public_ip, public_ip=previous_public_ip, note=f'固定 IP 保留期恢复完成，新实例订单: {replacement.order_no}')
         return source
     before_dates = {
-        'service_expires_at': source.service_expires_at,
+        'service_expires_at': order_asset_expiry(source),
         'renew_grace_expires_at': source.renew_grace_expires_at,
         'suspend_at': source.suspend_at,
         'delete_at': source.delete_at,
@@ -443,7 +444,6 @@ def _mark_rebuild_source_pending_deletion(order_id: int, replacement_order_id: i
     source.public_ip = source_temp_public_ip
     source.mtproxy_host = ''
     source.migration_due_at = migration_due_at
-    source.service_expires_at = migration_due_at
     source.renew_grace_expires_at = delete_at
     source.suspend_at = delete_at
     source.delete_at = delete_at
@@ -455,7 +455,6 @@ def _mark_rebuild_source_pending_deletion(order_id: int, replacement_order_id: i
         public_ip=source.public_ip,
         mtproxy_host=source.mtproxy_host,
         migration_due_at=source.migration_due_at,
-        service_expires_at=source.service_expires_at,
         renew_grace_expires_at=source.renew_grace_expires_at,
         suspend_at=source.suspend_at,
         delete_at=source.delete_at,
@@ -463,8 +462,9 @@ def _mark_rebuild_source_pending_deletion(order_id: int, replacement_order_id: i
         provision_note=source.provision_note,
         updated_at=now,
     )
+    CloudAsset.objects.filter(order=source, kind=CloudAsset.KIND_SERVER).update(actual_expires_at=migration_due_at, updated_at=now)
     after_dates = {
-        'service_expires_at': source.service_expires_at,
+        'service_expires_at': migration_due_at,
         'renew_grace_expires_at': source.renew_grace_expires_at,
         'suspend_at': source.suspend_at,
         'delete_at': source.delete_at,
@@ -560,7 +560,7 @@ def _mark_instance_created(order_id: int, server_name: str, instance_id: str, pu
         'login_user': order.login_user,
         'login_password': order.login_password,
         'mtproxy_port': order.mtproxy_port,
-        'actual_expires_at': order.service_expires_at,
+        'actual_expires_at': order_asset_expiry(order),
         'price': order.total_amount,
         'currency': order.currency,
         'order': order,
@@ -608,7 +608,7 @@ def _mark_provisioning_start(order_id: int, server_name: str):
         'proxy_links': order.proxy_links or [],
         'mtproxy_secret': order.mtproxy_secret,
         'mtproxy_host': order.mtproxy_host,
-        'actual_expires_at': order.service_expires_at,
+        'actual_expires_at': order_asset_expiry(order),
         'price': order.total_amount,
         'currency': order.currency,
         'order': order,
@@ -894,7 +894,7 @@ async def provision_cloud_server(order_id: int):
                 saved.mtproxy_host,
                 saved.mtproxy_port,
                 saved.mtproxy_link,
-                saved.service_expires_at,
+                order_asset_expiry(saved),
                 (timezone.now() - started_at).total_seconds(),
             )
             clear_provision_progress(order_id)
@@ -1068,23 +1068,24 @@ def _mark_success(order_id: int, server_name: str, instance_id: str, public_ip: 
     order.provision_note = prepend_note(order.provision_note, with_note_time(compact_note))
     order.static_ip_name = static_ip_name or order.static_ip_name
     order.completed_at = timezone.now()
+    asset_expires_at = order_asset_expiry(order)
     if is_cloud_asset_renewal_order(order):
         order.service_started_at = order.completed_at
-        order.service_expires_at = order.completed_at + timezone.timedelta(days=order.lifecycle_days or 31)
+        asset_expires_at = order.completed_at + timezone.timedelta(days=order.lifecycle_days or 31)
     else:
         if not order.service_started_at:
             order.service_started_at = order.completed_at
-        if not order.service_expires_at:
-            order.service_expires_at = order.completed_at + timezone.timedelta(days=order.lifecycle_days or 31)
+        if not asset_expires_at:
+            asset_expires_at = order.completed_at + timezone.timedelta(days=order.lifecycle_days or 31)
     try:
         order.last_user_id = order.user.tg_user_id
     except Exception:
         order.last_user_id = order.user_id or 0
-    order.save(update_fields=['status', 'server_name', 'instance_id', 'provider_resource_id', 'public_ip', 'mtproxy_host', 'mtproxy_link', 'proxy_links', 'mtproxy_secret', 'static_ip_name', 'login_user', 'login_password', 'provision_note', 'completed_at', 'service_started_at', 'service_expires_at', 'last_user_id', 'updated_at'])
-    logger.info('[PROVISION] order_saved order=%s status=%s service_started_at=%s service_expires_at=%s mtproxy_host=%s mtproxy_link=%s', order.order_no, order.status, order.service_started_at, order.service_expires_at, order.mtproxy_host, order.mtproxy_link)
+    order.save(update_fields=['status', 'server_name', 'instance_id', 'provider_resource_id', 'public_ip', 'mtproxy_host', 'mtproxy_link', 'proxy_links', 'mtproxy_secret', 'static_ip_name', 'login_user', 'login_password', 'provision_note', 'completed_at', 'service_started_at', 'last_user_id', 'updated_at'])
+    logger.info('[PROVISION] order_saved order=%s status=%s service_started_at=%s service_expires_at=%s mtproxy_host=%s mtproxy_link=%s', order.order_no, order.status, order.service_started_at, asset_expires_at, order.mtproxy_host, order.mtproxy_link)
 
     try:
-        server_asset = _upsert_server_asset(order, compact_note)
+        server_asset = _upsert_server_asset(order, compact_note, expires_at=asset_expires_at)
         record_cloud_ip_log(
             event_type='created',
             order=order,
@@ -1092,7 +1093,7 @@ def _mark_success(order_id: int, server_name: str, instance_id: str, public_ip: 
             public_ip=public_ip,
             note=f'服务器创建并分配IP：{public_ip or "未分配"}',
         )
-        logger.info('[PROVISION] server_asset_saved order=%s asset_id=%s expires_at=%s host=%s port=%s link=%s', order.order_no, server_asset.id, order.service_expires_at, mtproxy_host or public_ip, order.mtproxy_port, mtproxy_link)
+        logger.info('[PROVISION] server_asset_saved order=%s asset_id=%s expires_at=%s host=%s port=%s link=%s', order.order_no, server_asset.id, asset_expires_at, mtproxy_host or public_ip, order.mtproxy_port, mtproxy_link)
     except Exception as exc:
         logger.exception('[PROVISION] asset_sync_failed order=%s error=%s', order.order_no, exc)
     return order

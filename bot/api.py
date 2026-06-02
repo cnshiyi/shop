@@ -13,6 +13,7 @@ from django.views.decorators.http import require_GET, require_POST
 
 from bot.models import TelegramUser
 from bot.user_stats import active_cloud_asset_queryset as _active_cloud_asset_queryset, active_proxy_counts_by_user as _active_proxy_counts_by_user
+from cloud.asset_expiry import order_asset_expiry
 from cloud.lifecycle import _shutdown_enabled_for_order
 from cloud.lifecycle_execution import run_orphan_asset_delete, run_shutdown_order_delete, run_unattached_ip_release
 from cloud.lifecycle_schedule import compute_order_lifecycle_schedule, compute_unattached_ip_release_at
@@ -910,7 +911,7 @@ def _shutdown_log_items(limit=100):
     items = []
     assets = list(
         _active_cloud_asset_queryset()
-        .filter(Q(actual_expires_at__isnull=False) | Q(order__service_expires_at__isnull=False))
+        .filter(actual_expires_at__isnull=False)
         .order_by('actual_expires_at', '-updated_at')[:500]
     )
     trace_maps = _cloud_ip_trace_maps_for_assets(assets)
@@ -920,7 +921,7 @@ def _shutdown_log_items(limit=100):
             continue
         order = asset.order if asset.order_id and asset.order else None
         trace = _cloud_ip_trace_from_maps(asset, trace_maps)
-        expires_at = asset.actual_expires_at or getattr(order, 'service_expires_at', None)
+        expires_at = asset.actual_expires_at
         user_display_name, username_label = _telegram_user_labels(asset.user or (order.user if order else None))
         account_name, external_account_id = _cloud_account_labels(asset)
         if not external_account_id and asset.order_id and asset.order:
@@ -1006,7 +1007,7 @@ def _shutdown_log_items(limit=100):
         account_name, external_account_id = _cloud_account_labels(asset or order or trace)
         suspend_at = getattr(order, 'suspend_at', None)
         delete_at = getattr(order, 'delete_at', None)
-        expires_at = getattr(asset, 'actual_expires_at', None) or getattr(order, 'service_expires_at', None)
+        expires_at = getattr(asset, 'actual_expires_at', None)
         note = _cloud_ip_trace_note_newest_first(trace.note)
         logged_at = _cloud_ip_trace_logged_at(trace.note, trace.created_at)
         items.append({
@@ -1469,7 +1470,7 @@ def _unattached_ip_delete_items(limit=50, assets=None):
             'public_ip': trace.public_ip or trace.previous_public_ip or '',
             'provider_status': _status_label(trace.event_type, CloudIpLog.EVENT_CHOICES),
             'deletion_source_label': _delete_source_label(trace.note),
-            'service_expires_at': _iso(getattr(asset, 'actual_expires_at', None) or getattr(order, 'service_expires_at', None)),
+            'service_expires_at': _iso(getattr(asset, 'actual_expires_at', None)),
             'delete_at': _iso(delete_at),
             'logged_at': _iso(logged_at),
             'source_note': _cloud_ip_trace_note_newest_first(trace.note),
@@ -1518,13 +1519,13 @@ def overview(request):
     new_orders_today = CloudServerOrder.objects.filter(created_at__gte=today_start).count()
     active_server_assets = CloudAsset.objects.filter(kind=CloudAsset.KIND_SERVER, status__in=[CloudAsset.STATUS_RUNNING, CloudAsset.STATUS_UNKNOWN])
     due_today = active_server_assets.filter(
-        (Q(actual_expires_at__gte=today_start, actual_expires_at__lt=today_end))
-        | (Q(actual_expires_at__isnull=True) & Q(order__service_expires_at__gte=today_start, order__service_expires_at__lt=today_end))
+        actual_expires_at__gte=today_start,
+        actual_expires_at__lt=today_end,
     ).count()
     renew_due = active_server_assets.filter(
-        Q(actual_expires_at__lte=renew_before)
-        | (Q(actual_expires_at__isnull=True) & Q(order__service_expires_at__lte=renew_before))
-    ).exclude(Q(actual_expires_at__isnull=True) & Q(order__service_expires_at__isnull=True)).count()
+        actual_expires_at__isnull=False,
+        actual_expires_at__lte=renew_before,
+    ).count()
     paid_orders = CloudServerOrder.objects.filter(status__in=['paid', 'completed'])
     revenue = paid_orders.aggregate(total=Sum('pay_amount'))['total'] or Decimal('0')
     cost = Decimal('0')
@@ -1565,9 +1566,9 @@ def overview(request):
     for created_at in CloudAsset.objects.filter(kind=CloudAsset.KIND_SERVER, created_at__gte=trend_start, created_at__lt=trend_end).values_list('created_at', flat=True):
         day = timezone.localtime(created_at).day if timezone.is_aware(created_at) else created_at.day
         servers_growth[day - 1] += 1
-    trend_assets = CloudAsset.objects.filter(kind=CloudAsset.KIND_SERVER).select_related('order').only('actual_expires_at', 'order__service_expires_at')
+    trend_assets = CloudAsset.objects.filter(kind=CloudAsset.KIND_SERVER, actual_expires_at__isnull=False).only('actual_expires_at')
     for asset in trend_assets:
-        expires_at = asset.actual_expires_at or getattr(asset.order, 'service_expires_at', None)
+        expires_at = asset.actual_expires_at
         if not expires_at or expires_at < trend_start or expires_at >= trend_end:
             continue
         day = timezone.localtime(expires_at).day if timezone.is_aware(expires_at) else expires_at.day
@@ -1688,7 +1689,7 @@ def _shutdown_plan_item_payload(order, *, queue_status='scheduled_future', queue
         'tg_user_id': getattr(order.user, 'tg_user_id', None) if order.user else None,
         'user_display_name': user_display_name,
         'username_label': username_label,
-        'service_expires_at': _iso(order.service_expires_at),
+        'service_expires_at': _iso(order_asset_expiry(order)),
         'suspend_at': _iso(order.suspend_at),
         'delete_at': _iso(order.delete_at),
         'ip_recycle_at': _iso(order.ip_recycle_at),
@@ -1868,7 +1869,7 @@ def _shutdown_history_item_payload(log):
         'note': log.note or '',
         'display_note': _compact_dashboard_note(log.note or '', max_chars=500),
         'executed_at': _iso(log.created_at),
-        'service_expires_at': _iso(getattr(order, 'service_expires_at', None)),
+        'service_expires_at': _iso(order_asset_expiry(order)),
         'suspend_at': _iso(getattr(order, 'suspend_at', None)),
         'delete_at': _iso(getattr(order, 'delete_at', None)),
         'related_path': f'/admin/cloud-orders/{log.order_id}' if log.order_id else '',
@@ -1902,7 +1903,7 @@ def _shutdown_history_order_payload(order):
         'note': order.provision_note or '',
         'display_note': _compact_dashboard_note(order.provision_note or '', max_chars=500),
         'executed_at': _iso(executed_at),
-        'service_expires_at': _iso(order.service_expires_at),
+        'service_expires_at': _iso(order_asset_expiry(order)),
         'suspend_at': _iso(order.suspend_at),
         'delete_at': _iso(order.delete_at),
         'related_path': f'/admin/cloud-orders/{order.id}',

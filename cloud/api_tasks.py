@@ -14,6 +14,7 @@ from django.views.decorators.csrf import csrf_exempt
 from django.views.decorators.http import require_GET, require_POST
 
 from bot.models import TelegramLoginAccount
+from cloud.asset_expiry import order_asset_expiry
 from cloud.dashboard_snapshots import _refresh_dashboard_plan_snapshots
 from cloud.lifecycle import NOTICE_TYPE_SWITCH_CONFIG, _auto_renew_notice_batch_payload, _notice_effective_delivered, _get_due_orders, _get_notice_text_override, _lifecycle_notice_batch_payload, _notice_payload_for_order, _notice_override_key, _record_auto_renew_patrol_log, _renew_notice_batch_payload, _run_auto_renew, _set_notice_text_override, cloud_notice_type_enabled
 from cloud.models import CloudAsset, CloudAutoRenewPatrolLog, CloudAutoRenewPlan, CloudNoticePlan, CloudServerOrder, CloudUserNoticeLog
@@ -53,7 +54,7 @@ def _auto_renew_task_status(order, now, *, latest_failure_reason: str | None = N
     last_renewed_at = getattr(order, 'last_renewed_at', None)
     if last_renewed_at and last_renewed_at >= now - timezone.timedelta(days=1):
         return 'auto_renew_success', '自动续费成功'
-    expires_at = getattr(order, 'service_expires_at', None)
+    expires_at = order_asset_expiry(order)
     suspend_at = getattr(order, 'suspend_at', None)
     in_renew_window = bool(expires_at and expires_at <= now + timezone.timedelta(days=1) and expires_at > now)
     in_shutdown_fallback = bool(expires_at and expires_at <= now and suspend_at and suspend_at > now)
@@ -181,7 +182,7 @@ def _auto_renew_due_item_payload(order, *, queue_status: str = 'due_now', queue_
     latest_log = None
     sent_at = getattr(order, 'auto_renew_notice_sent_at', None)
     notice = _notice_payload_for_order(order) or {}
-    expires_at = notice.get('expires_at') or getattr(order, 'service_expires_at', None)
+    expires_at = notice.get('expires_at') or order_asset_expiry(order)
     auto_renew_at = expires_at - timezone.timedelta(days=1) if expires_at else None
     return {
         'id': order.id,
@@ -247,13 +248,27 @@ def _auto_renew_future_plan_items(now, next_run_at, due_orders: list):
             continue
         seen.add(order.id)
         plan_items.append(_auto_renew_due_item_payload(order, queue_status='due_now', queue_status_label='本轮待执行', next_run_at=next_run_at))
-    future_qs = CloudServerOrder.objects.select_related('user').filter(auto_renew_enabled=True, status__in=['completed', 'expiring', 'renew_pending']).exclude(id__in=list(seen)).order_by('service_expires_at', 'id')[:50]
-    for order in future_qs:
+    future_assets = (
+        CloudAsset.objects.select_related('order', 'order__user')
+        .filter(
+            kind=CloudAsset.KIND_SERVER,
+            actual_expires_at__isnull=False,
+            order__auto_renew_enabled=True,
+            order__status__in=['completed', 'expiring', 'renew_pending'],
+        )
+        .exclude(order_id__in=list(seen))
+        .order_by('actual_expires_at', 'order_id', 'id')[:100]
+    )
+    for asset in future_assets:
+        order = asset.order
+        if not order or order.id in seen:
+            continue
         if not _auto_renew_order_has_active_notice(order):
             continue
-        expires_at = getattr(order, 'service_expires_at', None)
+        expires_at = asset.actual_expires_at
         if not expires_at:
             continue
+        seen.add(order.id)
         if expires_at <= now:
             queue_status = 'fallback_retry'
             queue_status_label = '过期后兜底重试'
@@ -296,13 +311,21 @@ def _collect_auto_renew_due_orders(now):
         retry_orders.append((order, 'retry_failed', '失败待重试', log.failure_reason))
 
     fallback_orders = []
-    fallback_qs = CloudServerOrder.objects.select_related('user').filter(
-        auto_renew_enabled=True,
-        status__in=['completed', 'expiring', 'renew_pending'],
-        service_expires_at__isnull=False,
-        service_expires_at__lte=now,
-    ).exclude(id__in=list(due_ids)).order_by('service_expires_at', 'id')[:50]
-    for order in fallback_qs:
+    fallback_assets = (
+        CloudAsset.objects.select_related('order', 'order__user')
+        .filter(
+            kind=CloudAsset.KIND_SERVER,
+            actual_expires_at__lte=now,
+            order__auto_renew_enabled=True,
+            order__status__in=['completed', 'expiring', 'renew_pending'],
+        )
+        .exclude(order_id__in=list(due_ids))
+        .order_by('actual_expires_at', 'order_id', 'id')[:100]
+    )
+    for asset in fallback_assets:
+        order = asset.order
+        if not order or order.id in due_ids:
+            continue
         if not _auto_renew_order_has_active_notice(order):
             continue
         due_ids.add(order.id)
@@ -631,14 +654,14 @@ _NOTICE_HISTORY_LABELS = {
 def _notice_task_time(order, notice_type: str, notice: dict | None = None):
     notice = notice or _notice_payload_for_order(order) or {}
     if notice_type == 'renew_notice':
-        expires_at = notice.get('expires_at') or getattr(order, 'service_expires_at', None)
+        expires_at = notice.get('expires_at') or order_asset_expiry(order)
         try:
             notice_days = max(1, int(get_runtime_config('cloud_renew_notice_days', 5) or 5))
         except Exception:
             notice_days = 5
         return expires_at - timezone.timedelta(days=notice_days) if expires_at else None
     if notice_type == 'auto_renew_notice':
-        expires_at = notice.get('expires_at') or getattr(order, 'service_expires_at', None)
+        expires_at = notice.get('expires_at') or order_asset_expiry(order)
         return expires_at - timezone.timedelta(days=2) if expires_at else None
     if notice_type == 'delete_notice':
         delete_at = notice.get('delete_at') or getattr(order, 'delete_at', None)
@@ -653,7 +676,7 @@ def _notice_task_time(order, notice_type: str, notice: dict | None = None):
 def _notice_task_text_preview(order, notice_type: str, notice: dict | None = None) -> str:
     notice = notice or _notice_payload_for_order(order) or {}
     ip = notice.get('ip') or getattr(order, 'public_ip', None) or getattr(order, 'previous_public_ip', None) or '未分配'
-    expires_at = notice.get('expires_at') or getattr(order, 'service_expires_at', None)
+    expires_at = notice.get('expires_at') or order_asset_expiry(order)
     if notice_type == 'renew_notice':
         return f'到期提醒：IP {ip} 将于 {_iso(expires_at) or "-"} 到期，请及时续费或确认自动续费状态。'
     if notice_type == 'auto_renew_notice':
@@ -783,7 +806,7 @@ def _notice_task_item_payload(order, notice_type: str, *, queue_status='schedule
         'primary_username': usernames[0] if usernames else '',
     }) if user else None
     notice = notice or _notice_payload_for_order(order) or {}
-    expires_at = notice.get('expires_at') or getattr(order, 'service_expires_at', None)
+    expires_at = notice.get('expires_at') or order_asset_expiry(order)
     sent_at = getattr(order, _NOTICE_TASK_TYPES.get(notice_type, {}).get('field', ''), None)
     return {
         'id': f'{notice_type}-{order.id}',
@@ -878,7 +901,7 @@ def _notice_task_future_items(now, next_run_at, seen_keys: set[tuple[str, int]],
     items = []
     qs = CloudServerOrder.objects.select_related('user').filter(
         status__in=['completed', 'expiring', 'renew_pending', 'suspended', 'deleting', 'deleted'],
-    ).order_by('service_expires_at', 'delete_at', 'ip_recycle_at', 'id')[:1000]
+    ).order_by('delete_at', 'ip_recycle_at', 'id')[:1000]
     for order in qs:
         if notice_cache is not None and order.id in notice_cache:
             notice = notice_cache[order.id]

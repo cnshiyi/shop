@@ -12,6 +12,7 @@ from django.views.decorators.csrf import csrf_exempt
 from django.views.decorators.http import require_GET, require_POST, require_http_methods
 
 from cloud.api_assets import _parse_iso_datetime, _resolve_telegram_user, _sync_telegram_username
+from cloud.asset_expiry import order_asset_expiry
 from cloud.lifecycle_schedule import compute_order_lifecycle_fields
 from cloud.lifecycle_state import primary_record_updates_for_order_status
 from cloud.models import CloudAsset, CloudIpLog, CloudServerOrder
@@ -168,7 +169,7 @@ def _cloud_order_summary_payload(order):
         'public_ip': order.public_ip,
         'previous_public_ip': order.previous_public_ip,
         'service_started_at': _iso(order.service_started_at),
-        'service_expires_at': _iso(order.service_expires_at),
+        'service_expires_at': _iso(order_asset_expiry(order)),
         'created_at': _iso(order.created_at),
         'updated_at': _iso(order.updated_at),
         'replacement_for_id': order.replacement_for_id,
@@ -309,7 +310,7 @@ def _cloud_order_detail_payload(order):
         'server_name': order.server_name,
         'lifecycle_days': order.lifecycle_days,
         'service_started_at': _iso(order.service_started_at),
-        'service_expires_at': _iso(order.service_expires_at),
+        'service_expires_at': _iso(order_asset_expiry(order)),
         'renew_grace_expires_at': _iso(order.renew_grace_expires_at),
         'suspend_at': _iso(order.suspend_at),
         'delete_at': _iso(order.delete_at),
@@ -527,7 +528,7 @@ def _apply_cloud_order_status(order, new_status):
             trigger_provision = True
     elif new_status == 'renew_pending':
         order.completed_at = None
-        if order.service_expires_at and order.service_expires_at > now:
+        if order_asset_expiry(order) and order_asset_expiry(order) > now:
             order.last_renewed_at = order.last_renewed_at or now
         note = '后台手动改状态为待续费。'
     elif new_status == 'expiring':
@@ -652,9 +653,10 @@ def cloud_order_detail(request, order_id):
                 if status:
                     order.status = status
                     changed_fields.add('status')
+            asset_expiry_change_requested = False
+            asset_expires_at = None
             for field, label in (
                 ('service_started_at', '服务开始时间'),
-                ('service_expires_at', '服务到期时间'),
                 ('renew_grace_expires_at', '续费宽限到期'),
                 ('suspend_at', '计划关机时间'),
                 ('delete_at', '计划删机时间'),
@@ -663,8 +665,11 @@ def cloud_order_detail(request, order_id):
                 if field in payload:
                     setattr(order, field, _parse_iso_datetime(payload.get(field), label) if payload.get(field) else None)
                     changed_fields.add(field)
-            if 'service_expires_at' in changed_fields and 'service_expires_at' in payload:
-                lifecycle_updates = compute_order_lifecycle_fields(order.service_expires_at) if order.service_expires_at else {
+            if 'service_expires_at' in payload:
+                asset_expiry_change_requested = True
+                asset_expires_at = _parse_iso_datetime(payload.get('service_expires_at'), '服务到期时间') if payload.get('service_expires_at') else None
+                changed_fields.add('service_expires_at')
+                lifecycle_updates = compute_order_lifecycle_fields(asset_expires_at) if asset_expires_at else {
                     'renew_grace_expires_at': None,
                     'suspend_at': None,
                     'delete_at': None,
@@ -675,10 +680,19 @@ def cloud_order_detail(request, order_id):
                         setattr(order, field, value)
                         changed_fields.add(field)
             if changed_fields:
-                update_values = {field: getattr(order, field) for field in changed_fields}
+                order_update_fields = set(changed_fields)
+                order_update_fields.discard('service_expires_at')
+                update_values = {field: getattr(order, field) for field in order_update_fields}
                 update_values['updated_at'] = timezone.now()
-                CloudServerOrder.objects.filter(pk=order.pk).update(**update_values)
-                order.refresh_from_db()
+                if order_update_fields:
+                    CloudServerOrder.objects.filter(pk=order.pk).update(**update_values)
+                    order.refresh_from_db()
+                if asset_expiry_change_requested and asset_expires_at:
+                    CloudAsset.objects.filter(
+                        order=order,
+                        kind=CloudAsset.KIND_SERVER,
+                        actual_expires_at__isnull=True,
+                    ).update(actual_expires_at=asset_expires_at, updated_at=timezone.now())
                 logger.info(
                     'DASHBOARD_CLOUD_ORDER_DETAIL_UPDATED order_id=%s order_no=%s changed_fields=%s user_id=%s',
                     order.id,

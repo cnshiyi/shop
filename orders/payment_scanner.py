@@ -19,6 +19,7 @@ from django.utils import timezone
 
 from orders.ledger import record_balance_ledger
 from bot.models import TelegramUser
+from cloud.asset_expiry import order_asset_expiry
 from cloud.models import AddressMonitor, CloudAsset, CloudServerOrder
 from orders.models import Order, Product, Recharge
 from orders.services import usdt_to_trx
@@ -247,7 +248,8 @@ def _cloud_status_after_renewal_payment_expired(order: CloudServerOrder, now=Non
         return 'deleting'
     if order.suspend_at and order.suspend_at <= now:
         return 'suspended'
-    if order.service_expires_at and order.service_expires_at <= now:
+    expires_at = order_asset_expiry(order)
+    if expires_at and expires_at <= now:
         return 'expiring'
     return 'completed'
 
@@ -456,13 +458,9 @@ def _confirm_cloud_server_order(order_id: int, tx_hash: str, payer_address: str 
                 order.save(update_fields=['tx_hash', 'payer_address', 'receive_address', 'paid_at', 'updated_at'])
                 return apply_cloud_server_renewal.__wrapped__(order.id, order.lifecycle_days or 31, False)
             order.status = 'paid'
-            if asset_recovery_order:
-                order.service_expires_at = None
             payment_note = '已收款，正在恢复未绑定代理资产固定 IP。' if asset_recovery_order else '已收款，等待用户确认 MTProxy 端口后进入创建流程。默认端口为 9528。'
             order.provision_note = '\n'.join(part for part in [str(order.provision_note or '').strip(), payment_note] if part)
             update_fields = ['status', 'tx_hash', 'payer_address', 'receive_address', 'paid_at', 'provision_note', 'updated_at']
-            if asset_recovery_order:
-                update_fields.append('service_expires_at')
             order.save(update_fields=update_fields)
         return order
     except Exception as exc:
@@ -496,7 +494,7 @@ def _cloud_order_ip_text(order) -> str:
 
 
 def _cloud_order_plan_text(order) -> str:
-    expires_at = getattr(order, 'service_expires_at', None)
+    expires_at = order_asset_expiry(order)
     suspend_at = getattr(order, 'suspend_at', None)
     delete_at = getattr(order, 'delete_at', None)
     auto_renew_enabled = bool(getattr(order, 'auto_renew_enabled', False))
@@ -530,7 +528,7 @@ async def _provision_recovered_cloud_order(order: CloudServerOrder):
         await _notify_user(order.user_id, f'✅ 云服务器续费成功，正在恢复固定 IP 服务器。\n订单号: {order.order_no}\n系统会保持旧 IP / 旧端口 / 旧密钥不变，完成后自动发送代理链接。')
         provisioned = await provision_cloud_server(order.id)
         if provisioned and provisioned.status == 'completed':
-            await _notify_user(provisioned.user_id, f'✅ 固定 IP 服务器恢复完成！\n订单号: {provisioned.order_no}\nIP: {provisioned.public_ip or provisioned.previous_public_ip}\n新的到期时间: {_format_local_dt(provisioned.service_expires_at)}')
+            await _notify_user(provisioned.user_id, f'✅ 固定 IP 服务器恢复完成！\n订单号: {provisioned.order_no}\nIP: {provisioned.public_ip or provisioned.previous_public_ip}\n新的到期时间: {_format_local_dt(order_asset_expiry(provisioned))}')
         else:
             await _notify_user(order.user_id, f'⚠️ 固定 IP 服务器恢复暂未完成。\n订单号: {order.order_no}\n请稍后在查询中心查看，或联系人工客服。')
     except Exception as exc:
@@ -680,7 +678,7 @@ async def _process_payment(transfer: dict) -> bool:
         if confirmed.status == 'completed':
             await _notify_user(
                 confirmed.user_id,
-                f'✅ 云服务器订单 {confirmed.order_no} 续费成功！\n新的到期时间: {_format_local_dt(confirmed.service_expires_at)}',
+                f'✅ 云服务器订单 {confirmed.order_no} 续费成功！\n新的到期时间: {_format_local_dt(order_asset_expiry(confirmed))}',
             )
             asyncio.create_task(_cloud_renewal_postcheck_and_notify(confirmed))
             return True

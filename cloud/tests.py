@@ -22,6 +22,7 @@ from cloud.bootstrap import _build_mtproxy_script, _extract_tg_links
 from cloud.models import CloudAsset, CloudAssetDashboardSnapshot, CloudAssetSyncJob, CloudAssetSyncJobEvent, CloudAutoRenewPatrolLog, CloudAutoRenewRetryTask, CloudIpLog, CloudLifecyclePlan, CloudLifecyclePlanNote, CloudNoticePlan, CloudServerOrder, CloudServerPlan, CloudUserNoticeLog, DailyAddressStat
 from cloud.server_records import Server
 from cloud.lifecycle import _apply_notice_schedule_to_order, _auto_renew_candidate_users, _enqueue_auto_renew_retry, _get_due_orders, _get_migration_due_orders, _get_orphan_asset_delete_due, _get_unattached_static_ip_delete_due, _group_balance_lines_for_orders, _is_cloud_delete_safe_time, _is_cloud_suspend_time, _mark_deleted, _mark_suspended, _next_cloud_action_run_at, _notice_payload_for_order, _notice_plan_text, _process_auto_renew_retry_tasks, _run_auto_renew, _send_logged_cloud_notice, _send_order_notice_batch, auto_renew_patrol_tick, daily_expiry_summary_tick, lifecycle_tick, sync_server_status_tick
+from cloud.lifecycle_schedule import compute_order_lifecycle_fields
 from cloud.note_utils import append_status_note
 from cloud.ports import get_mtproxy_port_label, get_mtproxy_public_ports, is_valid_mtproxy_main_port
 from cloud.aws_lightsail import _public_ip_exists_sync, _resolve_static_ip_name_for_move
@@ -5335,7 +5336,7 @@ class CloudServerServicesTestCase(TestCase):
         self.assertEqual(paid_order.status, 'paid')
         self.assertEqual(paid_order.pay_method, 'balance')
         self.assertIsNotNone(paid_order.paid_at)
-        self.assertIsNone(paid_order.service_expires_at)
+        self.assertEqual(paid_order.service_expires_at, due_at)
         self.assertEqual(paid_order.ip_recycle_at, due_at)
         self.assertIn('正在恢复未绑定代理资产固定 IP', paid_order.provision_note)
 
@@ -5370,14 +5371,14 @@ class CloudServerServicesTestCase(TestCase):
             'secret': 'eed5c148e2922f6c49611e7d53fe432a94617a7572652e6d6963726f736f66742e636f6d',
         }
         order, _ = async_to_sync(prepare_cloud_asset_renewal_with_link)(asset.id, self.user.id, self.plan.id, link)
-        CloudServerOrder.objects.filter(id=order.id).update(status='completed', paid_at=None, instance_id='', service_expires_at=due_at)
+        CloudServerOrder.objects.filter(id=order.id).update(status='completed', paid_at=None, instance_id='')
 
         paid_order, pay_error = async_to_sync(pay_cloud_server_renewal_with_balance)(order.id, self.user.id, 'USDT', 31)
 
         self.assertIsNone(pay_error)
         self.assertEqual(paid_order.status, 'paid')
         self.assertIsNotNone(paid_order.paid_at)
-        self.assertIsNone(paid_order.service_expires_at)
+        self.assertEqual(paid_order.service_expires_at, due_at)
         self.assertEqual(paid_order.ip_recycle_at, due_at)
 
     # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
@@ -10161,6 +10162,81 @@ class CloudServerServicesTestCase(TestCase):
         after_payload = json.loads(tasks_overview(after_request).content)
         after_pinned = next(item for item in (after_payload.get('data') or after_payload) if item['id'] == -10001)
         self.assertEqual(after_pinned['execution_status'], 'auto_renew_pending')
+
+    # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
+    def test_update_cloud_asset_expiry_refreshes_order_lifecycle(self):
+        old_expires_at = timezone.now() + timezone.timedelta(days=8)
+        new_expires_at = timezone.now() + timezone.timedelta(days=40)
+        plan = CloudServerPlan.objects.create(
+            provider=CloudServerPlan.PROVIDER_ALIYUN_ECS,
+            region_code='cn-hongkong',
+            region_name='香港',
+            plan_name='Aliyun Lifecycle Test',
+            price='19.00',
+            currency='USDT',
+            is_active=True,
+        )
+        order = CloudServerOrder.objects.create(
+            order_no='ASSET-EXPIRY-LIFECYCLE-FIX-1',
+            user=self.user,
+            plan=plan,
+            provider=plan.provider,
+            region_code=plan.region_code,
+            region_name=plan.region_name,
+            plan_name=plan.plan_name,
+            quantity=1,
+            currency='USDT',
+            total_amount='19.00',
+            pay_amount='19.00',
+            pay_method='balance',
+            status='completed',
+            public_ip='6.6.6.12',
+            service_started_at=timezone.now() - timezone.timedelta(days=20),
+            service_expires_at=old_expires_at,
+            renew_notice_sent_at=timezone.now(),
+            auto_renew_notice_sent_at=timezone.now(),
+            auto_renew_failure_notice_sent_at=timezone.now(),
+            delete_notice_sent_at=timezone.now(),
+            recycle_notice_sent_at=timezone.now(),
+        )
+        asset = CloudAsset.objects.create(
+            kind=CloudAsset.KIND_SERVER,
+            source=CloudAsset.SOURCE_ORDER,
+            order=order,
+            user=self.user,
+            provider=plan.provider,
+            region_code=plan.region_code,
+            region_name=plan.region_name,
+            asset_name='asset-expiry-lifecycle-fix',
+            public_ip=order.public_ip,
+            actual_expires_at=old_expires_at,
+            status=CloudAsset.STATUS_RUNNING,
+        )
+        staff_user = get_user_model().objects.create_user(username='staff_asset_expiry_lifecycle', password='x', is_staff=True, is_superuser=True)
+        request = RequestFactory().patch(
+            f'/api/dashboard/cloud-assets/{asset.id}/',
+            data=json.dumps({'actual_expires_at': new_expires_at.isoformat()}),
+            content_type='application/json',
+            HTTP_AUTHORIZATION='',
+        )
+        self._attach_bearer_session(request, staff_user)
+
+        response = update_cloud_asset(request, asset.id)
+
+        self.assertEqual(response.status_code, 200)
+        order.refresh_from_db()
+        asset.refresh_from_db()
+        expected_lifecycle = compute_order_lifecycle_fields(new_expires_at)
+        self.assertEqual(asset.actual_expires_at, new_expires_at)
+        self.assertEqual(order.renew_grace_expires_at, expected_lifecycle['renew_grace_expires_at'])
+        self.assertEqual(order.suspend_at, expected_lifecycle['suspend_at'])
+        self.assertEqual(order.delete_at, expected_lifecycle['delete_at'])
+        self.assertEqual(order.ip_recycle_at, expected_lifecycle['ip_recycle_at'])
+        self.assertIsNone(order.renew_notice_sent_at)
+        self.assertIsNone(order.auto_renew_notice_sent_at)
+        self.assertIsNone(order.auto_renew_failure_notice_sent_at)
+        self.assertIsNone(order.delete_notice_sent_at)
+        self.assertIsNone(order.recycle_notice_sent_at)
 
     # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
     def test_renewal_balance_payment_uses_latest_proxy_price(self):

@@ -22,6 +22,7 @@ from core.texts import site_text
 from orders.models import BalanceLedger
 from orders.services import usdt_to_trx
 from bot.models import TelegramUser
+from cloud.asset_expiry import order_asset_expiry
 from cloud.lifecycle_schedule import compute_order_lifecycle_fields, compute_orphan_asset_delete_at, compute_unattached_ip_release_at
 from cloud.dashboard_snapshots import _refresh_dashboard_plan_snapshots
 from cloud.models import CloudAsset, CloudAutoRenewPatrolLog, CloudAutoRenewRetryTask, CloudServerOrder, CloudUserNoticeLog
@@ -202,7 +203,7 @@ def _notice_asset_queryset():
     return (
         CloudAsset.objects.select_related('order', 'order__user', 'cloud_account', 'order__cloud_account')
         .filter(kind=CloudAsset.KIND_SERVER, order__isnull=False)
-        .filter(Q(actual_expires_at__isnull=False) | Q(order__service_expires_at__isnull=False))
+        .filter(actual_expires_at__isnull=False)
         .exclude(public_ip__isnull=True)
         .exclude(public_ip='')
         .exclude(status__in=_NOTICE_ASSET_EXCLUDED_STATUSES)
@@ -219,7 +220,7 @@ def _deferred_lifecycle_time(stored_at, computed_at, now=None):
 
 def _notice_schedule(order: CloudServerOrder, asset: CloudAsset) -> dict:
     order = _hydrate_order_from_proxy_asset(order, asset=asset)
-    expires_at = asset.actual_expires_at or getattr(order, 'service_expires_at', None)
+    expires_at = asset.actual_expires_at
     schedule = compute_order_lifecycle_fields(expires_at)
     now = timezone.now()
     suspend_at = _deferred_lifecycle_time(getattr(order, 'suspend_at', None), schedule.get('suspend_at'), now)
@@ -483,7 +484,7 @@ def _secret_notice_hint(secret: str | None) -> str:
 def _retained_static_ip_note(order: CloudServerOrder, ip: str, action_note: str = '') -> str:
     return (
         f'实例已删除，固定 IP 保留中；IP={ip or "缺失"}；固定IP名={order.static_ip_name or "-"}；端口={order.mtproxy_port or "-"}；'
-        f'secret={_secret_notice_hint(order.mtproxy_secret)}；服务到期={_format_notice_dt(order.service_expires_at)}；'
+        f'secret={_secret_notice_hint(order.mtproxy_secret)}；服务到期={_format_notice_dt(order_asset_expiry(order))}；'
         f'宽限删机={_format_notice_dt(order.delete_at)}；未附加 IP 计划回收={_format_notice_dt(order.ip_recycle_at)}；'
         f'用户续费/重装时必须用旧 IP、旧端口、旧 secret 与用户提供链接逐项对照。{("；" + action_note) if action_note else ""}'
     )
@@ -533,7 +534,7 @@ def _code_text(value) -> str:
 
 def _notice_plan_text(order, notice: dict | None = None, *, include_expiry: bool = True, include_renewal_amount: bool = True) -> str:
     notice = notice or {}
-    expires_at = notice.get('expires_at') or getattr(order, 'service_expires_at', None)
+    expires_at = notice.get('expires_at') or order_asset_expiry(order)
     auto_renew_enabled = bool(notice.get('auto_renew_enabled') if 'auto_renew_enabled' in notice else getattr(order, 'auto_renew_enabled', False))
     auto_renew_at = expires_at - timezone.timedelta(days=1) if expires_at else None
     lines = []
@@ -557,7 +558,7 @@ def _notice_plan_text(order, notice: dict | None = None, *, include_expiry: bool
 
 def _renew_notice_plan_text(order, notice: dict | None = None) -> str:
     notice = notice or {}
-    expires_at = notice.get('expires_at') or getattr(order, 'service_expires_at', None)
+    expires_at = notice.get('expires_at') or order_asset_expiry(order)
     suspend_at = notice.get('suspend_at') or getattr(order, 'suspend_at', None)
     try:
         amount_text = f'{_renewal_price(order, getattr(order, "user", None)):.2f}'
@@ -679,7 +680,7 @@ def _active_notice_asset_for_order(order) -> CloudAsset | None:
     return (
         CloudAsset.objects.select_related('order', 'order__user')
         .filter(kind=CloudAsset.KIND_SERVER, order=order)
-        .filter(Q(actual_expires_at__isnull=False) | Q(order__service_expires_at__isnull=False))
+        .filter(actual_expires_at__isnull=False)
         .exclude(public_ip__isnull=True)
         .exclude(public_ip='')
         .exclude(status__in=_NOTICE_ASSET_EXCLUDED_STATUSES)
@@ -727,7 +728,7 @@ def _bulk_notice_payload_map(orders: list[CloudServerOrder]) -> dict[int, dict |
     for asset in asset_rows:
         assets_by_order.setdefault(asset.order_id, []).append(asset)
         if (
-            (getattr(asset, 'actual_expires_at', None) or getattr(getattr(asset, 'order', None), 'service_expires_at', None))
+            getattr(asset, 'actual_expires_at', None)
             and str(getattr(asset, 'public_ip', None) or '').strip()
             and getattr(asset, 'status', None) not in _NOTICE_ASSET_EXCLUDED_STATUSES
         ):
@@ -742,7 +743,7 @@ def _bulk_notice_payload_map(orders: list[CloudServerOrder]) -> dict[int, dict |
             payload_map[order.id] = None
             continue
         asset = _match_order_primary_asset_from_candidates(order, assets_by_order.get(order.id) or [])
-        expires_at = getattr(order, 'service_expires_at', None) or getattr(asset, 'actual_expires_at', None)
+        expires_at = getattr(asset, 'actual_expires_at', None)
         ip_value = (
             getattr(order, 'public_ip', None)
             or getattr(order, 'previous_public_ip', None)
@@ -766,7 +767,7 @@ def _bulk_notice_payload_map(orders: list[CloudServerOrder]) -> dict[int, dict |
 
 def _retained_notice_payload_for_order(order) -> dict | None:
     asset = _order_primary_asset(order)
-    expires_at = getattr(order, 'service_expires_at', None) or getattr(asset, 'actual_expires_at', None)
+    expires_at = getattr(asset, 'actual_expires_at', None)
     ip_value = (
         getattr(order, 'public_ip', None)
         or getattr(order, 'previous_public_ip', None)
@@ -803,13 +804,13 @@ def _apply_notice_schedule_to_order(order: CloudServerOrder, notice: dict) -> Cl
         'ip_recycle_at': notice.get('ip_recycle_at'),
         'updated_at': timezone.now(),
     }
-    if getattr(order, 'provider', None) != 'aws_lightsail':
-        updates['service_expires_at'] = notice.get('expires_at')
     updates = {key: value for key, value in updates.items() if value is not None}
     if updates:
         CloudServerOrder.objects.filter(id=order.id).update(**updates)
         for key, value in updates.items():
             setattr(order, key, value)
+    if notice.get('expires_at') and getattr(order, 'provider', None) != 'aws_lightsail':
+        CloudAsset.objects.filter(order=order, kind=CloudAsset.KIND_SERVER).update(actual_expires_at=notice.get('expires_at'), updated_at=timezone.now())
     return order
 
 
@@ -819,7 +820,7 @@ def _order_notice_ip(order, notice: dict | None = None) -> str:
 
 
 def _renew_notice_ip_summary(order, notice: dict) -> str:
-    expires_at = notice.get('expires_at') or getattr(order, 'service_expires_at', None)
+    expires_at = notice.get('expires_at') or order_asset_expiry(order)
     auto_renew_enabled = bool(notice.get('auto_renew_enabled') if 'auto_renew_enabled' in notice else getattr(order, 'auto_renew_enabled', False))
     auto_renew_at = expires_at - timezone.timedelta(days=1) if expires_at else None
     auto_renew_text = f'已开启，预计 {_code_text(_format_notice_dt(auto_renew_at))} 自动续费' if auto_renew_enabled else '未开启'
@@ -840,7 +841,7 @@ def _total_charge_line(total: Decimal) -> tuple[str, Decimal | None]:
 
 @sync_to_async
 def _renew_notice_batch_payload(order_ids: list[int]) -> dict:
-    orders = list(CloudServerOrder.objects.select_related('user').filter(id__in=order_ids).order_by('service_expires_at', 'id'))
+    orders = list(CloudServerOrder.objects.select_related('user').filter(id__in=order_ids).order_by('id'))
     if not orders:
         return {'text': '', 'order_ids': [], 'first_order_id': None, 'count': 0}
     notice_map = _bulk_notice_payload_map(orders)
@@ -904,7 +905,7 @@ def _renew_notice_batch_payload(order_ids: list[int]) -> dict:
 
 @sync_to_async
 def _auto_renew_notice_batch_payload(order_ids: list[int]) -> dict:
-    orders = list(CloudServerOrder.objects.select_related('user').filter(id__in=order_ids).order_by('service_expires_at', 'id'))
+    orders = list(CloudServerOrder.objects.select_related('user').filter(id__in=order_ids).order_by('id'))
     if not orders:
         return {'text': '', 'order_ids': [], 'first_order_id': None, 'count': 0}
     notice_map = _bulk_notice_payload_map(orders)
@@ -995,7 +996,7 @@ async def _send_order_notice_batch(*, event: str, field_name: str, notify, user_
 
 @sync_to_async
 def _lifecycle_notice_batch_payload(title: str, order_ids: list[int], closing: str) -> dict:
-    orders = list(CloudServerOrder.objects.filter(id__in=order_ids).order_by('service_expires_at', 'delete_at', 'ip_recycle_at', 'id'))
+    orders = list(CloudServerOrder.objects.filter(id__in=order_ids).order_by('delete_at', 'ip_recycle_at', 'id'))
     if not orders:
         return {'text': '', 'order_ids': [], 'first_order_id': None, 'count': 0}
     notice_map = _bulk_notice_payload_map(orders)
@@ -1047,7 +1048,7 @@ def _auto_renew_result_batch_text(results: list[dict]) -> str:
         ip = item.get('ip') or _order_notice_ip(order)
         if item.get('ok'):
             executed.append(ip)
-            successes.append((ip, _format_notice_dt(order.service_expires_at), item.get('balance_change')))
+            successes.append((ip, _format_notice_dt(order_asset_expiry(order)), item.get('balance_change')))
             continue
         fallback_retry = bool(item.get('fallback_retry'))
         if not _auto_renew_failure_notice_due(order):
@@ -1242,7 +1243,7 @@ def _auto_renew_success_batch_text(results: list[dict], title: str = '✅ 自动
         lines.append(f'IP: {_code_text(ip)}')
         if payer_label:
             lines.append(f'扣款用户: {payer_label}')
-        lines.append(f'新的到期时间: {_code_text(_format_notice_dt(order.service_expires_at))}')
+        lines.append(f'新的到期时间: {_code_text(_format_notice_dt(order_asset_expiry(order)))}')
         lines.extend(_balance_change_lines(balance_change))
         lines.append('')
     return '\n'.join(lines).strip()
@@ -1604,12 +1605,12 @@ def _record_auto_renew_patrol_log(order_id: int, *, batch_id: str, ip: str, ok: 
     primary_username = usernames[0] if usernames else (getattr(user, 'username', None) or '')
     display_name = getattr(user, 'display_name', None) or getattr(user, 'first_name', None) or primary_username or '未绑定用户'
     ledger_amount = (balance_change or {}).get('amount')
-    expires_at = getattr(order, 'service_expires_at', None)
+    expires_at = order_asset_expiry(order)
     completed_order_no = order.order_no
     if renewed_order_id and renewed_order_id != order.id:
-        renewed = CloudServerOrder.objects.filter(id=renewed_order_id).first()
-        if renewed:
-            expires_at = getattr(renewed, 'service_expires_at', None) or expires_at
+            renewed = CloudServerOrder.objects.filter(id=renewed_order_id).first()
+            if renewed:
+                expires_at = order_asset_expiry(renewed) or expires_at
             completed_order_no = renewed.order_no or completed_order_no
     return CloudAutoRenewPatrolLog.objects.create(
         order=order,
@@ -2247,11 +2248,11 @@ def _daily_expiry_summary_items() -> dict:
         CloudAsset.objects.select_related('order', 'order__user', 'order__cloud_account', 'user')
         .filter(kind=CloudAsset.KIND_SERVER)
         .filter(
-            Q(actual_expires_at__isnull=False, actual_expires_at__lte=today_end)
-            | Q(actual_expires_at__isnull=True, order__service_expires_at__isnull=False, order__service_expires_at__lte=today_end)
+            actual_expires_at__isnull=False,
+            actual_expires_at__lte=today_end,
         )
         .exclude(order__status__in=_DAILY_EXPIRY_EXCLUDED_ORDER_STATUSES)
-        .order_by('actual_expires_at', 'order__service_expires_at', 'id')
+        .order_by('actual_expires_at', 'id')
     )
     items = []
     seen_order_ids = set()
@@ -2261,7 +2262,7 @@ def _daily_expiry_summary_items() -> dict:
             seen_order_ids.add(order.id)
         if asset.status in _DAILY_EXPIRY_TERMINAL_STATUSES and (not order or order.status in {'deleted', 'deleting'}):
             continue
-        expires_at = asset.actual_expires_at or getattr(order, 'service_expires_at', None)
+        expires_at = asset.actual_expires_at
         if not expires_at:
             continue
         ip = (asset.public_ip or asset.previous_public_ip or getattr(order, 'public_ip', '') or getattr(order, 'previous_public_ip', '') or '').strip()
@@ -2280,42 +2281,6 @@ def _daily_expiry_summary_items() -> dict:
             'provider_status': provider_status,
             'region_code': getattr(order, 'region_code', '') or asset.region_code,
             'region_name': getattr(order, 'region_name', '') or asset.region_name,
-            'tg_user_id': getattr(user, 'tg_user_id', None),
-            'username': getattr(user, 'primary_username', '') or '',
-            'first_name': getattr(user, 'first_name', '') or '',
-        })
-
-    order_queryset = (
-        CloudServerOrder.objects.select_related('user', 'cloud_account')
-        .filter(service_expires_at__isnull=False, service_expires_at__lte=today_end)
-        .exclude(status__in=_DAILY_EXPIRY_EXCLUDED_ORDER_STATUSES)
-        .exclude(id__in=CloudAsset.objects.filter(kind=CloudAsset.KIND_SERVER, actual_expires_at__isnull=False, order_id__isnull=False).values('order_id'))
-        .exclude(id__in=seen_order_ids)
-        .order_by('service_expires_at', 'id')
-    )
-    for order in order_queryset:
-        asset = _order_primary_asset(order)
-        if asset and getattr(asset, 'status', '') in _DAILY_EXPIRY_TERMINAL_STATUSES and order.status in {'deleted', 'deleting'}:
-            continue
-        expires_at = getattr(asset, 'actual_expires_at', None) or order.service_expires_at
-        if not expires_at:
-            continue
-        ip = (getattr(asset, 'public_ip', '') or order.public_ip or order.previous_public_ip or '').strip()
-        if not ip:
-            continue
-        status = getattr(asset, 'status', '') or CloudAsset.STATUS_UNKNOWN
-        provider_status = getattr(asset, 'provider_status', '') or ''
-        user = getattr(asset, 'user', None) or getattr(order, 'user', None)
-        items.append({
-            'order_id': order.id,
-            'order_no': order.order_no,
-            'ip': ip,
-            'expires_at': expires_at,
-            'status': status,
-            'status_label': _cloud_runtime_status_label(status, provider_status),
-            'provider_status': provider_status,
-            'region_code': order.region_code,
-            'region_name': order.region_name,
             'tg_user_id': getattr(user, 'tg_user_id', None),
             'username': getattr(user, 'primary_username', '') or '',
             'first_name': getattr(user, 'first_name', '') or '',

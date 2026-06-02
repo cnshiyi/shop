@@ -275,7 +275,7 @@ def list_cloud_orders(user_id: int, page: int = 1, per_page: int = 8, order_filt
         CloudServerOrder.objects
         .filter(user_id=user_id)
         .exclude(status__in={'deleted'})
-        .order_by('service_expires_at', '-created_at', '-id')
+        .order_by('-created_at', '-id')
     )
     queryset = _cloud_order_filter_queryset(queryset, order_filter)
     total = queryset.count()

@@ -5,6 +5,7 @@ from django.db.models import Case, IntegerField, Q, Value, When
 from django.utils import timezone
 from django.utils.dateparse import parse_datetime
 
+from cloud.asset_expiry import apply_order_lifecycle_from_asset_expiry, order_asset_expiry
 from cloud.models import CloudAsset, CloudServerOrder
 from cloud.aliyun_simple import _build_client, _region_endpoint, _runtime_options
 from core.cloud_accounts import cloud_account_label, cloud_account_label_variants, list_active_cloud_accounts
@@ -134,7 +135,7 @@ def _order_status_from_cloud_sync(order, status, expires_at=None):
     cloud_status = _order_status_from_cloud_status(status)
     if cloud_status in {'deleted', 'expired', 'provisioning'} or not order:
         return cloud_status
-    effective_expires_at = expires_at or getattr(order, 'service_expires_at', None)
+    effective_expires_at = expires_at or order_asset_expiry(order)
     if cloud_status == 'completed' and effective_expires_at and effective_expires_at <= timezone.now():
         return 'expiring'
     return cloud_status
@@ -198,9 +199,10 @@ def _aliyun_order_updates_from_sync(linked_order, *, normalized_status, expires_
         'updated_at': timezone.now(),
     }
     if expires_at:
-        expiry_changed = linked_order.service_expires_at != expires_at
-        order_updates['service_expires_at'] = expires_at
-        order_updates.update(compute_order_lifecycle_fields(expires_at))
+        expiry_changed = order_asset_expiry(linked_order) != expires_at
+        lifecycle_fields = compute_order_lifecycle_fields(expires_at)
+        order_updates.update(lifecycle_fields)
+        apply_order_lifecycle_from_asset_expiry(linked_order, expires_at, save=False)
         if expiry_changed:
             order_updates.update({
                 'renew_notice_sent_at': None,
@@ -479,7 +481,7 @@ class Command(BaseCommand):
                     asset_defaults['order'] = linked_order
                     if not asset:
                         asset_defaults['user'] = linked_order.user
-                    asset_defaults['actual_expires_at'] = expires_at or linked_order.service_expires_at
+                    asset_defaults['actual_expires_at'] = expires_at or order_asset_expiry(linked_order)
                 if asset:
                     asset_defaults['user'] = asset.user
                     asset_defaults['actual_expires_at'] = asset.actual_expires_at

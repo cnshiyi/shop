@@ -25,6 +25,7 @@ from django.utils import timezone
 from django.utils.dateparse import parse_date, parse_datetime
 
 from core.cache import get_config
+from cloud.asset_expiry import order_asset_expiry
 from cloud.note_utils import append_note
 from cloud.ip_guard import validate_server_connection_ip
 from bot.config import BOT_TOKEN
@@ -510,7 +511,7 @@ async def _reply_cloud_query_results(message: Message, raw_text: str, state: FSM
                 asset = await get_proxy_asset_by_ip_for_admin(ip)
         if asset:
             display_ip = str(getattr(asset, 'matched_query_ip', None) or asset.public_ip or asset.previous_public_ip or ip).strip()
-            expires_at = getattr(asset, 'actual_expires_at', None) or getattr(asset, 'service_expires_at', None)
+            expires_at = getattr(asset, 'actual_expires_at', None)
             expires_text = _format_local_dt(expires_at).split(' ', 1)[0] if expires_at else '未设置'
             provider_status_text = str(getattr(asset, 'provider_status', '') or '').strip()
             if '未附加固定IP' in provider_status_text or '未附加IP' in provider_status_text:
@@ -602,7 +603,7 @@ async def _reply_cloud_query_results(message: Message, raw_text: str, state: FSM
         is_deleted = order.status in {'deleted', 'deleting', 'expired'} or not display_ip
         if is_deleted and not is_retained_ip:
             continue
-        expires_at = getattr(order, 'service_expires_at', None)
+        expires_at = order_asset_expiry(order)
         expires_text = _format_local_dt(expires_at).split(' ', 1)[0] if expires_at else '今天到期'
         status_text = '固定 IP 保留中，可续费恢复' if is_retained_ip else '可续费'
         auto_renew_text = '已开启' if getattr(order, 'auto_renew_enabled', False) else '未开启'
@@ -1195,8 +1196,6 @@ def _callback_route_label(callback_data: str | None) -> str:
         ('cloud:ip:', 'cloud.ip 更换IP'),
         ('cloud:upgradepay:', 'cloud.upgradepay 修改配置支付'),
         ('cloud:upgrade:', 'cloud.upgrade 修改配置'),
-        ('cloud:refundyes:', 'cloud.refundyes 确认退款'),
-        ('cloud:refund:', 'cloud.refund 退款确认'),
         ('cloud:reinitconfirm:', 'cloud.reinitconfirm 确认重新初始化'),
         ('cloud:reinit:', 'cloud.reinit 重新安装/继续初始化'),
         ('cloud:adminexp:', 'cloud.adminexp 修改到期时间'),
@@ -2206,15 +2205,6 @@ async def _consume_reinstall_confirm_token(state: FSMContext, *, kind: str, item
     return is_valid
 
 
-def _cloud_can_refund(order, now=None) -> bool:
-    if order.status not in {'paid', 'provisioning', 'failed', 'completed', 'expiring', 'suspended'}:
-        return False
-    expires_at = getattr(order, 'service_expires_at', None)
-    if expires_at and expires_at < (now or timezone.now()) + timezone.timedelta(days=10):
-        return False
-    return True
-
-
 def _cloud_order_status_hint(order) -> str:
     has_ip = bool(order.public_ip or order.previous_public_ip)
     if has_ip:
@@ -2298,7 +2288,7 @@ def _cloud_order_ip_text(order) -> str:
 
 
 def _cloud_order_plan_text(order, include_warnings: bool = True) -> str:
-    expires_at = getattr(order, 'service_expires_at', None)
+    expires_at = order_asset_expiry(order)
     suspend_at = getattr(order, 'suspend_at', None)
     delete_at = getattr(order, 'delete_at', None)
     auto_renew_enabled = bool(getattr(order, 'auto_renew_enabled', False))
@@ -2336,7 +2326,7 @@ def _reminder_list_text(summary: dict, page: int = 1, per_page: int = 5) -> str:
             ip = order.public_ip or order.previous_public_ip or order.order_no
             reminder_count = sum(1 for field in ('cloud_reminder_enabled', 'suspend_reminder_enabled', 'delete_reminder_enabled', 'ip_recycle_reminder_enabled') if getattr(order, field, True))
             auto = '自动续费开' if order.auto_renew_enabled else '自动续费关'
-            lines.append(f'- {escape(str(ip))} | 到期 {_format_local_dt(order.service_expires_at)} | 提醒 {reminder_count}/4 | {auto}')
+            lines.append(f'- {escape(str(ip))} | 到期 {_format_local_dt(order_asset_expiry(order))} | 提醒 {reminder_count}/4 | {auto}')
     else:
         lines.append('- 暂无云服务器提醒')
     lines.extend(['', '这里只管理 IP 到期提醒和自动续费提醒。'])
@@ -2369,7 +2359,7 @@ def _reminder_ip_detail_text(order, page: int = 1) -> str:
         '',
         f'IP: <code>{escape(str(ip))}</code>',
         f'订单号: {escape(str(order.order_no))}',
-        f'到期时间: {_format_local_dt(order.service_expires_at)}',
+        f'到期时间: {_format_local_dt(order_asset_expiry(order))}',
         f'到期提醒: {expiry}',
         f'停机提醒: {suspend}',
         f'删机提醒: {delete}',
@@ -2391,14 +2381,15 @@ def _cloud_asset_detail_text(item) -> str:
         f'端口: <code>{escape(str(getattr(item, "mtproxy_port", None) or "未设置"))}</code>\n'
         f'密钥: <code>{escape(str(getattr(item, "mtproxy_secret", None) or "尚未生成"))}</code>\n'
         f'{proxy_links_text}\n'
-        f'到期时间: {_format_local_dt(getattr(item, "service_expires_at", None))}\n'
+        f'到期时间: {_format_local_dt(getattr(item, "actual_expires_at", None))}\n'
         f'创建时间: {_format_local_dt(getattr(item, "created_at", None))}'
     )
 
 
 def _cloud_server_detail_text(order) -> str:
     status_hint = _cloud_order_status_hint(order)
-    service_expires_at = _format_local_dt(order.service_expires_at) if order.service_expires_at else '今天到期'
+    expires_at = order_asset_expiry(order)
+    service_expires_at = _format_local_dt(expires_at) if expires_at else '今天到期'
     renew_price = getattr(order, 'renewal_price', None) or order.pay_amount or order.total_amount
     auto_renew_status = '已开启' if getattr(order, 'auto_renew_enabled', False) else '已关闭'
     proxy_links_text = _proxy_links_text(order)
@@ -2514,7 +2505,8 @@ def _chain_trace_text(item) -> str:
 
 def _cloud_order_readonly_text(order) -> str:
     status_hint = _cloud_order_status_hint(order)
-    service_expires_at = _format_local_dt(order.service_expires_at) if order.service_expires_at else '未设置'
+    expires_at = order_asset_expiry(order)
+    service_expires_at = _format_local_dt(expires_at) if expires_at else '未设置'
     paid_at = getattr(order, 'paid_at', None) or getattr(order, 'completed_at', None)
     paid_at_text = f'{paid_at:%Y-%m-%d %H:%M:%S}' if paid_at else '未支付'
     proxy_links_text = _proxy_links_text(order)
@@ -4492,9 +4484,8 @@ def register_handlers(dp: Dispatcher):
         can_resume_init = bool(not group_limited and order.status in {'paid', 'provisioning', 'failed'} and (order.public_ip or not order.mtproxy_secret or not order.mtproxy_link or not order.login_password))
         can_reinit = bool(not group_limited and order.public_ip and order.login_password and order.status == 'completed')
         can_upgrade = bool(not group_limited and order.provider == 'aws_lightsail' and order.status in {'completed', 'expiring', 'suspended'})
-        can_refund = bool(not group_limited and _cloud_can_refund(order, now))
         logger.info(
-            'CLOUD_DETAIL_RENDER user_id=%s order_id=%s order_no=%s status=%s provider=%s public_ip=%s login_password=%s mtproxy_secret=%s mtproxy_link=%s buttons={renew:%s,change_ip:%s,resume_init:%s,reinit:%s,config:%s,refund:%s} back=%s',
+            'CLOUD_DETAIL_RENDER user_id=%s order_id=%s order_no=%s status=%s provider=%s public_ip=%s login_password=%s mtproxy_secret=%s mtproxy_link=%s buttons={renew:%s,change_ip:%s,resume_init:%s,reinit:%s,config:%s} back=%s',
             user.id,
             order.id,
             order.order_no,
@@ -4509,13 +4500,12 @@ def register_handlers(dp: Dispatcher):
             can_resume_init,
             can_reinit,
             can_upgrade,
-            can_refund,
             back_callback,
         )
         await _safe_edit_text(
             callback.message,
             _cloud_server_detail_text(order),
-            reply_markup=cloud_server_detail(order.id, can_renew, can_change_ip, can_reinit, back_callback, can_upgrade, can_refund, can_resume_init),
+            reply_markup=cloud_server_detail(order.id, can_renew, can_change_ip, can_reinit, back_callback, can_upgrade, can_resume_init),
             parse_mode='HTML',
         )
 
@@ -4789,7 +4779,6 @@ def register_handlers(dp: Dispatcher):
                 can_reinit=bool(order.public_ip and order.login_password and order.status == "completed"),
                 back_callback='cloud:list',
                 can_upgrade=bool(order.provider == 'aws_lightsail' and order.status in {"completed", "expiring", "suspended"}),
-                can_refund=_cloud_can_refund(order),
                 can_resume_init=bool(order.status in {"paid", "provisioning", "failed"} and (order.public_ip or not order.mtproxy_secret or not order.mtproxy_link or not order.login_password)),
             ),
         )
@@ -4860,7 +4849,6 @@ def register_handlers(dp: Dispatcher):
                 can_reinit=bool(order.public_ip and order.login_password and order.status == "completed"),
                 back_callback='cloud:list',
                 can_upgrade=bool(order.provider == 'aws_lightsail' and order.status in {"completed", "expiring", "suspended"}),
-                can_refund=_cloud_can_refund(order),
                 can_resume_init=bool(order.status in {"paid", "provisioning", "failed"} and (order.public_ip or not order.mtproxy_secret or not order.mtproxy_link or not order.login_password)),
             ),
         )
@@ -5043,14 +5031,6 @@ def register_handlers(dp: Dispatcher):
             return
         await callback.message.reply(_bot_text_format('bot_cloud_upgrade_submitted', '⚙️ 已提交配置调整任务。\n新订单: {order_no}\n完成后会自动发送新的服务器信息，代理链接保持不变。\n\n后台处理期间，底部菜单和其它按钮可正常使用。', order_no=new_order.order_no), reply_markup=main_menu())
         asyncio.create_task(_provision_cloud_server_and_notify(bot, callback.from_user.id, new_order.id, new_order.mtproxy_port or 9528))
-
-    @dp.callback_query(F.data.startswith('cloud:refund:'))
-    async def cb_cloud_refund(callback: CallbackQuery):
-        await _safe_callback_answer(callback, '自助退款入口已关闭，请联系人工客服处理', show_alert=True)
-
-    @dp.callback_query(F.data.startswith('cloud:refundyes:'))
-    async def cb_cloud_refund_yes(callback: CallbackQuery):
-        await _safe_callback_answer(callback, '自助退款入口已关闭，请联系人工客服处理', show_alert=True)
 
     @dp.callback_query(F.data.startswith('cloud:reinit:'))
     async def cb_cloud_reinit(callback: CallbackQuery, state: FSMContext):

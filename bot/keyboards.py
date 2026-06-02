@@ -4,6 +4,7 @@ from django.utils import timezone
 from aiogram.types import InlineKeyboardButton, KeyboardButton
 from aiogram.utils.keyboard import InlineKeyboardBuilder, ReplyKeyboardBuilder
 
+from cloud.asset_expiry import order_asset_expiry
 from core.formatters import fmt_amount
 
 logger = logging.getLogger(__name__)
@@ -31,6 +32,14 @@ def _format_local_date(value):
         return timezone.localtime(value).strftime('%Y-%m-%d')
     except Exception:
         return str(value)
+
+
+def _cloud_item_expiry(item):
+    return (
+        getattr(item, 'actual_expires_at', None)
+        or getattr(item, 'expires_at', None)
+        or order_asset_expiry(item)
+    )
 
 
 def main_menu():
@@ -388,7 +397,7 @@ def cloud_server_list(orders, page: int = 1, total_pages: int = 1, prefix: str =
         ip = order.public_ip or order.previous_public_ip
         label = ip or getattr(order, 'order_no', None) or f'订单 {order.id}'
         status = order.get_status_display() if hasattr(order, 'get_status_display') else (getattr(order, 'status', None) or '-')
-        expires_at = getattr(order, 'service_expires_at', None) or getattr(order, 'actual_expires_at', None) or getattr(order, 'expires_at', None)
+        expires_at = _cloud_item_expiry(order)
         expires = _format_local_date(expires_at)
         item_kind = getattr(order, '_proxy_item_kind', '')
         if item_kind in {'asset', 'server'}:
@@ -445,7 +454,7 @@ def cloud_auto_renew_server_list(orders, page: int = 1, total_pages: int = 1, *,
             tg_user_id = getattr(order, 'user_tg_id', None)
             user_label = username and f' @{username}' or first_name or (str(tg_user_id) if tg_user_id else '')
             user_label = f' | {user_label}' if user_label else ''
-        expires_at = getattr(order, 'service_expires_at', None) or getattr(order, 'actual_expires_at', None) or getattr(order, 'expires_at', None)
+        expires_at = _cloud_item_expiry(order)
         expires = _format_local_date(expires_at)
         enabled = bool(getattr(order, 'auto_renew_enabled', False))
         bell = '🔔' if enabled else '🔕'
@@ -544,7 +553,7 @@ def cloud_server_renew_payment(order_id: int, amount, trx_amount, auto_renew_ena
     )
 
 
-def cloud_server_detail(order_id: int, can_renew: bool, can_change_ip: bool, can_reinit: bool = False, back_callback: str = 'cloud:list', can_upgrade: bool = False, can_refund: bool = False, can_resume_init: bool = False):
+def cloud_server_detail(order_id: int, can_renew: bool, can_change_ip: bool, can_reinit: bool = False, back_callback: str = 'cloud:list', can_upgrade: bool = False, can_resume_init: bool = False):
     kb = InlineKeyboardBuilder()
     if can_renew:
         kb.button(text='🔄 续费', callback_data=f'cloud:renew:{order_id}')
@@ -566,7 +575,6 @@ def cloud_server_detail(order_id: int, can_renew: bool, can_change_ip: bool, can
         can_change_ip=can_change_ip,
         can_reinit=can_reinit,
         can_upgrade=can_upgrade,
-        can_refund=can_refund,
         can_resume_init=can_resume_init,
         back_callback=back_callback,
     )

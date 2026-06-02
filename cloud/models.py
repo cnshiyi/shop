@@ -142,7 +142,6 @@ class CloudServerOrder(models.Model):
     server_name = models.CharField('服务器名', max_length=191, blank=True, null=True, db_index=True)
     lifecycle_days = models.IntegerField('有效期天数', default=31)
     service_started_at = models.DateTimeField('服务开始时间', blank=True, null=True)
-    service_expires_at = models.DateTimeField('服务到期时间', blank=True, null=True, db_index=True)
     renew_grace_expires_at = models.DateTimeField('续费宽限到期时间', blank=True, null=True)
     suspend_at = models.DateTimeField('计划关机时间', blank=True, null=True)
     delete_at = models.DateTimeField('计划删机时间', blank=True, null=True)
@@ -193,45 +192,68 @@ class CloudServerOrder(models.Model):
     def normalize_expiry_time(value):
         return normalize_service_expiry(value)
 
+    @property
+    def service_expires_at(self):
+        if hasattr(self, '_service_expires_at'):
+            return self._service_expires_at
+        if not self.pk:
+            return None
+        asset = (
+            CloudAsset.objects.filter(order_id=self.pk, kind=CloudAsset.KIND_SERVER, actual_expires_at__isnull=False)
+            .order_by('-sort_order', 'actual_expires_at', '-updated_at', '-id')
+            .only('actual_expires_at')
+            .first()
+        )
+        return asset.actual_expires_at if asset else None
+
+    @service_expires_at.setter
+    def service_expires_at(self, value):
+        self._service_expires_at_set = True
+        self._service_expires_at = normalize_service_expiry(value)
+
     def save(self, *args, **kwargs):
         requested_update_fields = kwargs.get('update_fields')
         requested_field_set = set(requested_update_fields or [])
-        should_backfill_asset_expiry = requested_update_fields is None or bool(
-            requested_field_set & {'completed_at', 'service_started_at', 'service_expires_at', 'lifecycle_days'}
-        )
+        pending_expiry_set = bool(getattr(self, '_service_expires_at_set', False))
+        pending_expiry = getattr(self, '_service_expires_at', None)
         preserve_unattached_ip_recycle_at = (
             self.status == 'deleted'
             and not str(self.instance_id or '').strip()
             and self.ip_recycle_at
-            and not (requested_field_set & {'service_started_at', 'service_expires_at', 'lifecycle_days'})
+            and not (requested_field_set & {'service_started_at', 'lifecycle_days'})
         )
         if self.completed_at and not self.service_started_at:
             self.service_started_at = self.completed_at
-        if self.service_started_at and not self.service_expires_at:
-            self.service_expires_at = self.service_started_at + timezone.timedelta(days=self.lifecycle_days)
-        self.service_expires_at = self.normalize_expiry_time(self.service_expires_at)
-        if self.service_expires_at:
-            schedule = compute_order_lifecycle_schedule(self.service_expires_at)
-            self.suspend_at = schedule.suspend_at
+        if pending_expiry:
+            schedule = compute_order_lifecycle_schedule(pending_expiry)
             self.renew_grace_expires_at = schedule.renew_grace_expires_at
+            self.suspend_at = schedule.suspend_at
             self.delete_at = schedule.delete_at
             if not preserve_unattached_ip_recycle_at:
                 self.ip_recycle_at = schedule.ip_recycle_at
         if requested_update_fields is not None:
             update_fields = set(requested_update_fields)
+            update_fields.discard('service_expires_at')
             if self.completed_at and 'completed_at' in update_fields:
                 update_fields.add('service_started_at')
-            if update_fields & {'service_started_at', 'service_expires_at', 'lifecycle_days'}:
-                if self.service_expires_at:
-                    update_fields.update({'service_expires_at', 'renew_grace_expires_at', 'suspend_at', 'delete_at', 'ip_recycle_at'})
-            kwargs['update_fields'] = list(update_fields)
+            if pending_expiry_set and pending_expiry:
+                update_fields.update({'renew_grace_expires_at', 'suspend_at', 'delete_at', 'ip_recycle_at'})
+            if pending_expiry_set and not update_fields:
+                update_fields.add('updated_at')
+            if update_fields:
+                kwargs['update_fields'] = list(update_fields)
+            else:
+                kwargs.pop('update_fields', None)
         super().save(*args, **kwargs)
-        if should_backfill_asset_expiry and self.pk and self.service_expires_at:
+        if pending_expiry_set and pending_expiry and self.pk:
             CloudAsset.objects.filter(
                 order_id=self.pk,
                 kind=CloudAsset.KIND_SERVER,
                 actual_expires_at__isnull=True,
-            ).update(actual_expires_at=self.service_expires_at, updated_at=timezone.now())
+            ).update(
+                actual_expires_at=pending_expiry,
+                updated_at=timezone.now(),
+            )
 
     def __str__(self):
         return self.order_no
