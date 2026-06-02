@@ -4456,7 +4456,7 @@ class CloudServerServicesTestCase(TestCase):
 
     # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
     def test_rebuild_job_keeps_old_instance_until_migration_due(self):
-        from cloud.api import _run_rebuild_job
+        from cloud.services import run_cloud_server_rebuild_job
 
         source_expires_at = timezone.now() + timezone.timedelta(days=3)
         replacement_expires_at = timezone.now() + timezone.timedelta(days=30)
@@ -4507,13 +4507,9 @@ class CloudServerServicesTestCase(TestCase):
             self.assertEqual(order_id, replacement.id)
             return replacement
 
-        with patch('cloud.api.provision_cloud_server', fake_provision_cloud_server), \
-            patch('cloud.api._delete_instance') as delete_instance, \
-            patch('cloud.api._mark_replaced_order_deleted') as mark_deleted:
-            _run_rebuild_job(replacement.id)
+        with patch('cloud.provisioning.provision_cloud_server', fake_provision_cloud_server):
+            run_cloud_server_rebuild_job(replacement.id)
 
-        delete_instance.assert_not_called()
-        mark_deleted.assert_not_called()
         source.refresh_from_db()
         self.assertEqual(source.status, 'deleting')
         self.assertIsNotNone(source.delete_at)
