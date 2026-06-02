@@ -18,7 +18,7 @@ from cloud.services import ensure_cloud_server_pricing
 from cloud.sync_jobs import (
     _active_sync_accounts,
     _asset_retained_static_ip_sync_scope,
-    _call_command_capture as _sync_job_call_command_capture,
+    _call_command_capture,
     _log_sync_command_output,
     _record_dashboard_sync_log,
     _resolve_sync_account_for_asset,
@@ -32,14 +32,6 @@ from core.dashboard_api import _error, _ok, _read_payload, dashboard_superuser_r
 from core.models import CloudAccountConfig
 
 logger = logging.getLogger(__name__)
-
-
-def _cloud_api_override(name: str, fallback):
-    try:
-        from cloud import api as cloud_api
-    except Exception:
-        return fallback
-    return getattr(cloud_api, name, fallback)
 
 
 # 功能：提供 云同步后台 API 的内部辅助逻辑，供同模块流程复用。
@@ -91,8 +83,6 @@ def sync_servers(request):
     aws_accounts = _active_sync_accounts(CloudAccountConfig.PROVIDER_AWS)
     aws_command = None
     warnings = []
-    call_command_capture = _cloud_api_override('_call_command_capture', _sync_job_call_command_capture)
-    apply_missing_state = _cloud_api_override('_apply_server_missing_state', _apply_server_missing_state)
     logger.info(
         'DASHBOARD_SYNC_SERVERS_START aliyun_region=%s aws_region=%s aliyun_account_count=%s aws_account_count=%s actor_id=%s',
         aliyun_region,
@@ -103,9 +93,9 @@ def sync_servers(request):
     )
     for aliyun_account in aliyun_accounts:
         try:
-            aliyun_command, _ = call_command_capture('sync_aliyun_assets', region=aliyun_region, account_id=str(aliyun_account.id), stdout=command_output)
+            aliyun_command, _ = _call_command_capture('sync_aliyun_assets', region=aliyun_region, account_id=str(aliyun_account.id), stdout=command_output)
             synced['aliyun'] = True
-            missing['aliyun'] += apply_missing_state('aliyun_simple', aliyun_region, getattr(aliyun_command, 'synced_instance_ids', None) or [], aliyun_account)
+            missing['aliyun'] += _apply_server_missing_state('aliyun_simple', aliyun_region, getattr(aliyun_command, 'synced_instance_ids', None) or [], aliyun_account)
         except Exception as exc:
             message = f'阿里云账号#{getattr(aliyun_account, "id", "-")}同步失败: {exc}'
             errors.append(message)
@@ -113,17 +103,17 @@ def sync_servers(request):
     for aws_account in aws_accounts:
         try:
             if aws_region:
-                aws_command, _ = call_command_capture('sync_aws_assets', region=aws_region, account_id=str(aws_account.id), stdout=command_output)
+                aws_command, _ = _call_command_capture('sync_aws_assets', region=aws_region, account_id=str(aws_account.id), stdout=command_output)
                 account_regions = [aws_region]
             else:
-                aws_command, _ = call_command_capture('sync_aws_assets', account_id=str(aws_account.id), stdout=command_output)
+                aws_command, _ = _call_command_capture('sync_aws_assets', account_id=str(aws_account.id), stdout=command_output)
                 account_regions = getattr(aws_command, 'synced_regions', None) or []
             aws_regions.extend(region for region in account_regions if region not in aws_regions)
             synced['aws'] = True
             warnings.extend(getattr(aws_command, 'sync_errors', []) or [])
             synced_map = getattr(aws_command, 'synced_instance_ids_by_region', None) or {}
             missing['aws'] += sum(
-                apply_missing_state('aws_lightsail', region, synced_map.get(region, []), aws_account)
+                _apply_server_missing_state('aws_lightsail', region, synced_map.get(region, []), aws_account)
                 for region in account_regions
             )
         except Exception as exc:
@@ -190,7 +180,6 @@ def sync_cloud_asset_status(request, asset_id):
         'public_ip': scope_public_ip,
     }
     logger.info('CLOUD_SYNC_SINGLE_REQUEST_START run_id=%s payload=%s', sync_run_id, request_payload)
-    call_command_capture = _cloud_api_override('_call_command_capture', _sync_job_call_command_capture)
     try:
         command_kwargs = {'account_id': str(account.id), 'stdout': command_output}
         if region_code:
@@ -200,7 +189,7 @@ def sync_cloud_asset_status(request, asset_id):
             'instance_id': scope_instance_id,
             'public_ip': scope_public_ip,
         })
-        call_command_capture(command_name, **command_kwargs)
+        _call_command_capture(command_name, **command_kwargs)
         logger.info('CLOUD_SYNC_SINGLE_REQUEST_DONE run_id=%s asset_id=%s command=%s kwargs=%s', sync_run_id, asset.id, command_name, {key: value for key, value in command_kwargs.items() if key != 'stdout'})
     except Exception as exc:
         errors.append(str(exc))
@@ -218,7 +207,7 @@ def sync_cloud_asset_status(request, asset_id):
     refreshed = CloudAsset.objects.select_related('order', 'user', 'cloud_account', 'telegram_group').filter(pk=asset_id).first()
     response_payload = {
         'ok': not errors,
-        'asset': _cloud_api_override('_asset_payload', _asset_payload)(refreshed) if refreshed else None,
+        'asset': _asset_payload(refreshed) if refreshed else None,
         'provider': provider,
         'region_code': region_code or 'all',
         'account': _sync_account_payload(account),
@@ -231,7 +220,7 @@ def sync_cloud_asset_status(request, asset_id):
         },
     }
     if not errors:
-        _cloud_api_override('_refresh_dashboard_plan_snapshots_deferred', _refresh_dashboard_plan_snapshots_deferred)(f'cloud_asset_sync:{asset.id}', cloud_asset_ids=[asset.id])
+        _refresh_dashboard_plan_snapshots_deferred(f'cloud_asset_sync:{asset.id}', cloud_asset_ids=[asset.id])
     _log_sync_command_output(f'CLOUD_SYNC_SINGLE_REQUEST_LOG run_id={sync_run_id} command={command_name}', _sync_log_text(command_output))
     _record_dashboard_sync_log(
         action='sync_cloud_asset_status',

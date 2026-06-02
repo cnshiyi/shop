@@ -13,14 +13,6 @@ from cloud.models import CloudAsset, CloudAssetDashboardSnapshot
 logger = logging.getLogger(__name__)
 
 
-def _cloud_api_override(name: str, fallback):
-    try:
-        from cloud import api as cloud_api
-    except Exception:
-        return fallback
-    return getattr(cloud_api, name, fallback)
-
-
 def _default_cloud_asset_payloads(assets, *, allow_mutation=False):
     from cloud.api_assets import _cloud_asset_payloads
 
@@ -118,8 +110,7 @@ def refresh_cloud_asset_dashboard_snapshots(asset_ids=None, *, reason: str = '',
     if asset_ids:
         queryset = queryset.filter(id__in=list(asset_ids))
     assets = dedupe_cloud_asset_rows(list(queryset.order_by('-sort_order', F('actual_expires_at').asc(nulls_last=True), '-updated_at', '-id')))
-    payload_builder = _cloud_api_override('_cloud_asset_payloads', _default_cloud_asset_payloads)
-    payloads = payload_builder(assets, allow_mutation=False)
+    payloads = _default_cloud_asset_payloads(assets, allow_mutation=False)
     existing = {
         row.asset_id: row
         for row in CloudAssetDashboardSnapshot.objects.filter(asset_id__in=[item['id'] for item in payloads])

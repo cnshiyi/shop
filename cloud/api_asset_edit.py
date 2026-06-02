@@ -14,7 +14,6 @@ from django.views.decorators.http import require_POST, require_http_methods
 from bot.models import TelegramGroupFilter
 from cloud.api_assets import (
     _asset_payload,
-    _cloud_api_override,
     _infer_asset_order,
     _is_unattached_ip_asset,
     _parse_iso_datetime,
@@ -461,7 +460,7 @@ def update_cloud_asset(request, asset_id):
     if 'actual_expires_at' in payload:
         _refresh_lifecycle_plan_snapshot(f'cloud_asset_expiry:{asset_id}', lifecycle_limit=1000)
     if refresh_snapshots_needed:
-        _cloud_api_override('_refresh_dashboard_plan_snapshots_deferred', _refresh_dashboard_plan_snapshots_deferred)(f'cloud_asset:{asset_id}', cloud_asset_ids=[asset_id])
+        _refresh_dashboard_plan_snapshots_deferred(f'cloud_asset:{asset_id}', cloud_asset_ids=[asset_id])
     asset = CloudAsset.objects.select_related('user', 'order', 'cloud_account', 'telegram_group').get(pk=asset_id)
     return _ok(_asset_payload(asset))
 
@@ -493,7 +492,7 @@ def toggle_cloud_asset_auto_renew(request, asset_id):
         return _error('当前状态不可开启自动续费', status=400)
     if not order:
         return _error('订单不存在', status=404)
-    _cloud_api_override('_refresh_dashboard_plan_snapshots', _refresh_dashboard_plan_snapshots)(f'cloud_asset_auto_renew:{asset_id}')
+    _refresh_dashboard_plan_snapshots(f'cloud_asset_auto_renew:{asset_id}')
     asset = CloudAsset.objects.select_related('user', 'order', 'cloud_account', 'telegram_group').get(pk=asset_id)
     return _ok(_asset_payload(asset))
 

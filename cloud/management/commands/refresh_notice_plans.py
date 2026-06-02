@@ -1,6 +1,6 @@
 from django.core.management.base import BaseCommand
 
-from cloud.api import _build_notice_plan_bundle
+from cloud.api_tasks import _build_notice_plan_bundle
 
 
 class Command(BaseCommand):

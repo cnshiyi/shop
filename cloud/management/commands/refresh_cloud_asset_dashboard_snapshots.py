@@ -1,6 +1,6 @@
 from django.core.management.base import BaseCommand
 
-from cloud.api import refresh_cloud_asset_dashboard_snapshots
+from cloud.api_asset_snapshots import refresh_cloud_asset_dashboard_snapshots
 
 
 class Command(BaseCommand):

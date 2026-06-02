@@ -26,14 +26,6 @@ from core.runtime_config import get_runtime_config
 logger = logging.getLogger(__name__)
 
 
-def _cloud_api_override(name: str, fallback):
-    try:
-        from cloud import api as cloud_api
-    except Exception:
-        return fallback
-    return getattr(cloud_api, name, fallback)
-
-
 def _auto_renew_failure_was_price_missing(reason: str | None) -> bool:
     return '缺少续费价格' in str(reason or '') or '缺少价格' in str(reason or '')
 
@@ -279,7 +271,7 @@ def _auto_renew_future_plan_items(now, next_run_at, due_orders: list):
 
 # 功能：提供 后台 API 接口 的内部辅助逻辑，供同模块流程复用。
 def _collect_auto_renew_due_orders(now):
-    due = async_to_sync(_cloud_api_override('_get_due_orders', _get_due_orders))()
+    due = async_to_sync(_get_due_orders)()
     due_orders = [order for order in list(due.get('auto_renew') or []) if _auto_renew_order_has_active_notice(order)]
     due_ids = {order.id for order in due_orders}
     history_qs = CloudAutoRenewPatrolLog.objects.select_related('order', 'user').order_by('-executed_at', '-id')
@@ -342,7 +334,7 @@ async def _await_result(awaitable):
 
 # 功能：提供 后台 API 接口 的内部辅助逻辑，供同模块流程复用。
 def _run_auto_renew_sync(order_id: int):
-    result = _cloud_api_override('_run_auto_renew', _run_auto_renew)(order_id)
+    result = _run_auto_renew(order_id)
     if inspect.isawaitable(result):
         return async_to_sync(_await_result)(result)
     return result
@@ -1114,7 +1106,7 @@ def _compact_notice_items(items: list[dict], *, text_limit: int = 1200, ip_limit
 # 功能：提供 后台 API 接口 的内部辅助逻辑，供同模块流程复用。
 def _build_notice_plan_bundle(*, limit=1000, future_limit=200, history_limit=1000):
     now = timezone.now()
-    due = async_to_sync(_cloud_api_override('_get_due_orders', _get_due_orders))()
+    due = async_to_sync(_get_due_orders)()
     next_run_at = now + timezone.timedelta(minutes=10)
     latest_logs = _notice_latest_log_map()
     account_attempts = _planned_notice_account_attempts()
@@ -1318,7 +1310,7 @@ def run_auto_renew_tasks(request):
     orders.extend((order, queue_status) for order, queue_status, _, _ in queue['retry_orders'])
     orders.extend((order, queue_status) for order, queue_status, _, _ in queue['fallback_orders'])
     if not orders:
-        _cloud_api_override('_refresh_dashboard_plan_snapshots', _refresh_dashboard_plan_snapshots)('auto_renew_run_empty')
+        _refresh_dashboard_plan_snapshots('auto_renew_run_empty')
         return _ok({
             'batch_id': '',
             'items': [],
@@ -1328,7 +1320,7 @@ def run_auto_renew_tasks(request):
             'message': '当前没有可执行的续费任务',
         })
     result = _manual_run_auto_renew_queue(orders)
-    _cloud_api_override('_refresh_dashboard_plan_snapshots', _refresh_dashboard_plan_snapshots)('auto_renew_run_all')
+    _refresh_dashboard_plan_snapshots('auto_renew_run_all')
     result['message'] = f"本次共执行 {result['total']} 条续费任务"
     return _ok(result)
 
@@ -1346,6 +1338,6 @@ def run_auto_renew_order(request, order_id):
     if order.status not in {'completed', 'expiring', 'renew_pending'}:
         return _error('当前订单状态不可执行续费', status=400)
     result = _manual_run_auto_renew_queue([(order, 'manual_single')])
-    _cloud_api_override('_refresh_dashboard_plan_snapshots', _refresh_dashboard_plan_snapshots)(f'auto_renew_run_order:{order_id}')
+    _refresh_dashboard_plan_snapshots(f'auto_renew_run_order:{order_id}')
     result['message'] = '续费任务已执行'
     return _ok(result)

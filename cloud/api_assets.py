@@ -29,14 +29,6 @@ from core.cloud_accounts import cloud_account_label, cloud_account_label_variant
 from core.dashboard_api import _countdown_label, _days_left, _decimal_to_str, _get_keyword, _iso, _ok, _provider_label, _provider_status_label, _region_label, _server_source_label, _split_usernames, _status_label, _user_payload, dashboard_login_required
 
 
-def _cloud_api_override(name: str, fallback):
-    try:
-        from cloud import api as cloud_api
-    except Exception:
-        return fallback
-    return getattr(cloud_api, name, fallback)
-
-
 def _mask_secret(value, keep=4):
     text = str(value or '')
     if not text:
@@ -532,7 +524,7 @@ def _asset_payload(asset, *, context: CloudAssetPayloadContext | None = None):
     context = context or CloudAssetPayloadContext(active_account_labels=list_cloud_account_labels(True))
     order = getattr(asset, 'order', None) or context.inferred_orders.get(getattr(asset, 'id', None))
     if not order and context.allow_mutation:
-        order = _cloud_api_override('_infer_asset_order', _infer_asset_order)(asset)
+        order = _infer_asset_order(asset)
     if context.allow_mutation and order and not getattr(asset, 'order_id', None):
         asset.order = order
         asset.order_id = order.id
