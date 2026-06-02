@@ -1,5 +1,41 @@
 # 重构版本记录
 
+## 2026-06-02 21:42 自动监工：旧到期命名清零复验
+
+### 范围
+
+本轮继续监工 Shop Django 后端仓库。起始读取状态时捕捉到同主题外部改动，刷新后工作树已由 `bd4fec6 记录运行时旧到期命名清零` 收口并保持干净；本轮以当前 HEAD 为基线，复查旧到期字段命名、订单表到期字段、旧计划快照表、旧退款入口、废弃 app 回流、Bot 返回路径和 AWS 固定 IP 释放回归。
+
+### 复查结论
+
+- 非迁移、非测试运行时代码中 `service_expires_at` 已无命中；严格旧字段/旧计划/旧退款扫描无命中。
+- 模型 introspection 确认 `CloudAsset` 只有 `actual_expires_at` 作为资产到期字段，`CloudServerOrder` 未恢复 `service_expires_at` 或 `actual_expires_at` 服务到期字段，订单侧仅保留 `renew_grace_expires_at`、`expired_at` 等状态/流程时间。
+- 仓库根下未发现 `accounts/finance/mall/monitoring/dashboard_api/biz` 废弃 app 目录恢复；运行代码中的 `core.dashboard_api`、`core.cloud_accounts` 属于当前共享 helper 和路由命名空间。
+- 最新代码变更只清理日志、临时 payload 和代理视图兼容属性中的旧键名，未修改迁移历史和数据库结构。
+
+### 修复内容
+
+本轮未修改运行时代码；仅追加本条中文版本记录。
+
+### 验证
+
+已通过：
+
+```bash
+UV_CACHE_DIR=/private/tmp/uv-cache-shop uv run python manage.py check
+UV_CACHE_DIR=/private/tmp/uv-cache-shop uv run python -m py_compile cloud/provisioning.py cloud/services.py cloud/management/commands/sync_aws_assets.py cloud/lifecycle.py cloud/api_tasks.py cloud/tests.py bot/handlers.py bot/keyboards.py bot/tests.py
+UV_CACHE_DIR=/private/tmp/uv-cache-shop uv run python manage.py makemigrations --check --dry-run
+DJANGO_TEST_SQLITE=1 UV_CACHE_DIR=/private/tmp/uv-cache-shop uv run python manage.py test bot.tests.RetainedIpRenewalUiTestCase --verbosity 1
+DJANGO_TEST_SQLITE=1 UV_CACHE_DIR=/private/tmp/uv-cache-shop uv run python manage.py test cloud.tests.CloudServerServicesTestCase.test_notice_delete_plan_and_proxy_list_use_asset_expiry cloud.tests.CloudServerServicesTestCase.test_aws_sync_release_static_ip_respects_asset_shutdown_disabled cloud.tests.CloudServerServicesTestCase.test_aws_sync_release_static_ip_ignores_shutdown_disabled_account cloud.tests.CloudServerServicesTestCase.test_aws_sync_release_static_ip_respects_global_ip_delete_switch cloud.tests.CloudServerServicesTestCase.test_aws_sync_release_static_ip_clears_retained_order_after_successful_release --verbosity 1
+UV_CACHE_DIR=/private/tmp/uv-cache-shop uv run python manage.py shell -c "from cloud.models import CloudAsset, CloudServerOrder; print([f.name for f in CloudAsset._meta.fields if 'expire' in f.name or 'expiry' in f.name or 'expires' in f.name]); print([f.name for f in CloudServerOrder._meta.fields if 'expire' in f.name or 'expiry' in f.name or 'expires' in f.name])"
+rg -n "service_expires_at__|\bservice_expires_at\b|\bCloudLifecyclePlan\b|\bCloudNoticePlan\b|\bCloudAutoRenewPlan\b|\brefund_order\b|\bprocess_refund\b|\bcreate_refund\b|\bissue_refund\b|refund_to_balance|refund_balance|STATUS_REFUNDED|status=['\"]refunded|\brefunded\b" cloud orders bot core shop --glob '!**/migrations/**' --glob '!**/tests.py' --glob '!docs/**'
+git diff --check
+```
+
+结果：Django 系统检查、关键模块编译、迁移 dry-run、23 条 Bot 返回路径测试、5 条云生命周期/AWS 固定 IP 回归、模型字段 introspection、废弃 app 目录检查、旧字段/旧计划/旧退款扫描和空白检查均通过。`makemigrations --check --dry-run` 仍因沙箱无法连接默认 MySQL 输出迁移历史检查警告，但最终无模型变更；Bot 测试中的巡检异常日志是测试用例故意模拟失败路径，结果为 OK。
+
+剩余风险：本轮未跑完整测试套件，未连接真实 MySQL、AWS Lightsail 或阿里云 API，未执行真实 Telegram 回调、钱包扣款、自动续费支付、云端删机、固定 IP 释放或历史数据清理。
+
 ## 2026-06-02 21:39 自动监工：运行时旧到期命名清零
 
 ### 范围
