@@ -1142,6 +1142,7 @@ def _unattached_ip_delete_items(limit=50, assets=None):
         note = _asset_note_text(asset)
         source_note = trace_note or note
         asset_name = asset.asset_name or getattr(asset, 'static_ip_name', '') or asset.instance_id or f'asset-{asset.id}'
+        shutdown_enabled = _asset_shutdown_enabled(asset)
         item = {
             'id': asset.id,
             'asset_id': asset.id,
@@ -1162,8 +1163,9 @@ def _unattached_ip_delete_items(limit=50, assets=None):
             'sync_state': getattr(asset, 'sync_state', {}) or {},
             'is_overdue': bool(delete_at and delete_at <= now),
             'is_history': False,
+            'shutdown_enabled': shutdown_enabled,
         }
-        if not _asset_shutdown_enabled(asset):
+        if not shutdown_enabled:
             item['queue_status'] = 'shutdown_disabled'
             item['queue_status_label'] = '关机计划关闭'
             item['execution_status'] = '关机计划关闭，禁止真实释放固定 IP'
@@ -1492,6 +1494,7 @@ def _asset_delete_plan_item_payload(asset, *, queue_status='scheduled_future', q
         'source_note': _asset_note_text(asset) or str(getattr(linked_order, 'provision_note', '') or '').strip(),
         'note': note,
         'display_note': _asset_display_note(asset, fallback=note, max_chars=500),
+        'shutdown_enabled': shutdown_enabled,
         'cloud_account_id': asset.cloud_account_id,
         'cloud_account_name': account_name,
         'external_account_id': external_account_id,
@@ -1509,6 +1512,8 @@ def _orphan_asset_delete_plan_item_payload(asset, *, queue_status='orphan_due', 
 
 
 def _asset_shutdown_enabled(asset):
+    if getattr(asset, 'shutdown_enabled', True) is False:
+        return False
     account = getattr(asset, 'cloud_account', None)
     if not account:
         return True

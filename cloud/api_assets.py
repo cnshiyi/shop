@@ -385,6 +385,8 @@ def _display_cloud_asset_note(note: str | None) -> str:
 
 # 功能：提供 后台 API 接口 的内部辅助逻辑，供同模块流程复用。
 def _cloud_asset_shutdown_enabled(asset, order=None) -> bool:
+    if getattr(asset, 'shutdown_enabled', True) is False:
+        return False
     account = getattr(asset, 'cloud_account', None) or getattr(order, 'cloud_account', None)
     if account is not None:
         return bool(getattr(account, 'shutdown_enabled', True))
@@ -492,7 +494,8 @@ def _cloud_asset_risk_state(asset, order, expires_at, provider_status_label, dis
     if order and not getattr(order, 'auto_renew_enabled', False):
         set_risk('auto_renew_off', '续费关闭', 13, '自动续费关闭')
     if not shutdown_enabled:
-        set_risk('shutdown_disabled', '关机计划关闭', 4, '云账号已关闭关机计划')
+        reason = '本资产已关闭关机计划' if getattr(asset, 'shutdown_enabled', True) is False else '云账号已关闭关机计划'
+        set_risk('shutdown_disabled', '关机计划关闭', 4, reason)
     if is_unattached_ip:
         set_risk('unattached_ip', '未附加固定IP', 3, '固定IP未附加实例')
     if not is_unattached_ip and expires_at and expires_at <= now:

@@ -1,5 +1,39 @@
 # 重构版本记录
 
+## 2026-06-02 16:29 自动监工：资产关机开关和旧到期字段继续收口
+
+### 范围
+
+本轮继续监工 Shop Django 后端云资产生命周期重构状态。起始最近提交为 `6d1bd09 收口未绑定资产续费测试旧字段`，工作树已有 `cloud/tests.py` 未提交改动；运行期间同时发现资产级关机计划开关相关改动进入工作树，因此一并做导入错误修复和聚焦验证。
+
+### 修复
+
+- 继续收口 `cloud/tests.py` 中一批旧 `service_expires_at` 测试写法，不再向 `CloudServerOrder.objects.create()` 传已移除字段，改用 `CloudAsset.actual_expires_at` 或 `order_asset_expiry(order)`。
+- 修复后台资产编辑接口从 `cloud.models` 导入 `Server` 的错误，改为从 `cloud.server_records` 兼容入口导入，避免 `manage.py check` 在 URL 导入阶段失败。
+- 接入并验证 `CloudAsset.shutdown_enabled` 资产级关机计划开关：生命周期候选查询、计划 payload、执行保护、资产风险原因和 AWS 未附加固定 IP 释放保护均识别资产级关闭状态。
+- 修正相关测试 patch 目标，删除执行逻辑已从 `cloud.lifecycle` 动态导入安全窗口函数，测试不再 patch 已不存在的 `bot.api._is_cloud_delete_safe_time`。
+
+### 复查结论
+
+- 当前运行时代码未发现恢复 `CloudServerOrder.service_expires_at` 数据库列写入或查询；剩余 `service_expires_at` 命中为兼容 API 字段名、日志标签或资产视图别名。
+- 未发现 `normalize_service_expiry`、`service_expired_at`、旧计划快照模型、退款函数名/入口或废弃 app 运行时回流。
+- `cloud/tests.py` 中旧 `service_expires_at=` / `.service_expires_at` 测试命中降至 53 处，仍需后续分批收口。
+
+### 验证
+
+本地已通过：
+
+```bash
+UV_CACHE_DIR=/private/tmp/uv-cache-shop uv run python manage.py check
+DB_ENGINE=sqlite SQLITE_NAME=:memory: UV_CACHE_DIR=/private/tmp/uv-cache-shop uv run python manage.py makemigrations --check --dry-run
+UV_CACHE_DIR=/private/tmp/uv-cache-shop uv run python -m py_compile cloud/tests.py cloud/api_asset_edit.py cloud/lifecycle.py cloud/lifecycle_execution.py bot/api.py cloud/api_assets.py
+DJANGO_TEST_SQLITE=1 UV_CACHE_DIR=/private/tmp/uv-cache-shop uv run python manage.py test cloud.tests.CloudServerServicesTestCase.test_cloud_server_ip_query_requires_owner_identity cloud.tests.CloudServerServicesTestCase.test_cloud_server_public_renewal_allows_stranger_payment_entry cloud.tests.CloudServerServicesTestCase.test_retained_deleted_asset_renewal_plans_are_available_by_asset_button cloud.tests.CloudServerServicesTestCase.test_retained_deleted_asset_renewal_plans_allow_same_group_visibility cloud.tests.CloudServerServicesTestCase.test_ip_query_displays_matched_asset_ip_not_order_ip cloud.tests.CloudServerServicesTestCase.test_ip_query_displays_matched_previous_ip_not_order_ip cloud.tests.CloudServerServicesTestCase.test_cloud_server_ip_change_requires_owner_identity cloud.tests.CloudServerServicesTestCase.test_lifecycle_plans_show_shutdown_disabled_plan_state cloud.tests.CloudServerServicesTestCase.test_manual_order_delete_enters_lifecycle_success_history cloud.tests.CloudServerServicesTestCase.test_lifecycle_plans_include_future_server_plan_item --keepdb --noinput --verbosity 1
+DJANGO_TEST_SQLITE=1 UV_CACHE_DIR=/private/tmp/uv-cache-shop uv run python manage.py test cloud.tests.CloudServerServicesTestCase.test_manual_order_delete_bypasses_schedule_limits cloud.tests.CloudServerServicesTestCase.test_manual_orphan_asset_delete_bypasses_schedule_limits cloud.tests.CloudServerServicesTestCase.test_unattached_ip_delete_respects_shutdown_disabled_account cloud.tests.CloudServerServicesTestCase.test_due_orders_skip_suspend_when_account_shutdown_disabled cloud.tests.CloudServerServicesTestCase.test_lifecycle_suspend_execution_guard_respects_account_shutdown_disabled cloud.tests.CloudServerServicesTestCase.test_lifecycle_plans_show_shutdown_disabled_plan_state cloud.tests.CloudServerServicesTestCase.test_aws_sync_release_static_ip_respects_shutdown_disabled_account --keepdb --noinput --verbosity 1
+git diff --check
+```
+
+默认 MySQL 连接在沙箱中仍不能访问 `127.0.0.1:3306`；使用 SQLite 迁移检查确认无待生成迁移。
+
 ## 2026-06-02 16:14 自动监工：未绑定资产续费测试旧字段收口
 
 ### 范围

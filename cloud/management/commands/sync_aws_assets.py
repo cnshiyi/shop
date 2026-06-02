@@ -185,7 +185,7 @@ def _release_static_ip_if_due(client, region, asset, static_ip_name, static_ip_a
             f'跳过 AWS {region} 未附加IP释放：{reason} 资产#{asset.id} IP={public_ip or "缺失"}'
         ))
         return False
-    if getattr(getattr(asset, 'cloud_account', None), 'shutdown_enabled', True) is False:
+    if getattr(asset, 'shutdown_enabled', True) is False or getattr(getattr(asset, 'cloud_account', None), 'shutdown_enabled', True) is False:
         reason = '关机/删机计划已关闭，AWS 同步拒绝真实释放未附加固定 IP'
         record_external_sync_log(
             source='aws_lightsail',
