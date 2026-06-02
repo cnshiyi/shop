@@ -1013,13 +1013,11 @@ class CloudServerServicesTestCase(TestCase):
         self.assertIn('IP 删除执行时间窗口', data['message'])
 
     # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
-    def test_unattached_ip_delete_respects_shutdown_disabled_account(self):
+    def test_unattached_ip_delete_respects_shutdown_disabled_asset(self):
         from bot.api import _run_unattached_ip_delete_sync, _unattached_ip_delete_items
 
         SiteConfig.set('cloud_ip_delete_enabled', '1')
         account = self._aws_test_account()
-        account.shutdown_enabled = False
-        account.save(update_fields=['shutdown_enabled', 'updated_at'])
         asset = CloudAsset.objects.create(
             kind=CloudAsset.KIND_SERVER,
             source=CloudAsset.SOURCE_AWS_SYNC,
@@ -1034,6 +1032,7 @@ class CloudServerServicesTestCase(TestCase):
             provider_status='未附加固定IP',
             actual_expires_at=timezone.now() - timezone.timedelta(days=1),
             status=CloudAsset.STATUS_RUNNING,
+            shutdown_enabled=False,
             is_active=True,
         )
 
@@ -3343,7 +3342,7 @@ class CloudServerServicesTestCase(TestCase):
         self.assertFalse(any(item.id == order.id for item in due['delete']))
 
     # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
-    def test_due_orders_skip_suspend_when_account_shutdown_disabled(self):
+    def test_due_orders_ignore_account_shutdown_disabled(self):
         account = CloudAccountConfig.objects.create(
             provider=CloudAccountConfig.PROVIDER_AWS,
             name='shutdown-off',
@@ -3388,7 +3387,7 @@ class CloudServerServicesTestCase(TestCase):
 
         due = async_to_sync(_get_due_orders)()
 
-        self.assertFalse(any(item.id == order.id for item in due['suspend']))
+        self.assertTrue(any(item.id == order.id for item in due['suspend']))
         self.assertTrue(any(item.id == order.id for item in due['expire']))
 
     # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
@@ -3476,7 +3475,7 @@ class CloudServerServicesTestCase(TestCase):
         self.assertFalse(any(item.id == order.id for item in due['recycle']))
 
     # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
-    def test_lifecycle_suspend_execution_guard_respects_account_shutdown_disabled(self):
+    def test_lifecycle_suspend_execution_guard_respects_asset_shutdown_disabled(self):
         account = CloudAccountConfig.objects.create(
             provider=CloudAccountConfig.PROVIDER_AWS,
             name='shutdown-off-exec',
@@ -3518,6 +3517,7 @@ class CloudServerServicesTestCase(TestCase):
             asset_name='shutdown-off-exec-asset',
             public_ip='10.0.0.22',
             actual_expires_at=expires_at,
+            shutdown_enabled=False,
             is_active=True,
         )
         due = {
@@ -3537,7 +3537,7 @@ class CloudServerServicesTestCase(TestCase):
             patch('cloud.lifecycle._get_orphan_asset_delete_due', new_callable=AsyncMock, return_value=[]), \
             patch('cloud.lifecycle._get_unattached_static_ip_delete_due', new_callable=AsyncMock, return_value=[]), \
             patch('cloud.lifecycle._is_cloud_suspend_time', return_value=True), \
-            patch('cloud.lifecycle_execution.run_shutdown_order_suspend', return_value={'ok': False, 'error': '云账号关机计划已关闭，跳过真实关机。'}) as suspend_mock:
+            patch('cloud.lifecycle_execution.run_shutdown_order_suspend', return_value={'ok': False, 'error': '资产关机计划已关闭，跳过真实关机。'}) as suspend_mock:
             async_to_sync(lifecycle_tick)()
 
         suspend_mock.assert_called_once_with(order.id, queue_status='scheduled_suspend', enforce_schedule=True)
@@ -3646,7 +3646,7 @@ class CloudServerServicesTestCase(TestCase):
         self.assertFalse(any(item.id == asset.id for item in due))
 
     # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
-    def test_due_orders_restore_suspend_after_account_shutdown_reenabled(self):
+    def test_due_orders_restore_suspend_after_asset_shutdown_reenabled(self):
         account = CloudAccountConfig.objects.create(
             provider=CloudAccountConfig.PROVIDER_AWS,
             name='shutdown-on',
@@ -3688,12 +3688,12 @@ class CloudServerServicesTestCase(TestCase):
             public_ip='10.0.0.22',
             actual_expires_at=expires_at,
             is_active=True,
+            shutdown_enabled=False,
         )
 
         self.assertFalse(any(item.id == order.id for item in async_to_sync(_get_due_orders)()['suspend']))
 
-        account.shutdown_enabled = True
-        account.save(update_fields=['shutdown_enabled', 'updated_at'])
+        CloudAsset.objects.filter(order=order, kind=CloudAsset.KIND_SERVER).update(shutdown_enabled=True)
 
         due = async_to_sync(_get_due_orders)()
 
@@ -8499,7 +8499,7 @@ class CloudServerServicesTestCase(TestCase):
         self.assertNotIn('Get:', row['display_note'])
 
     # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
-    def test_lifecycle_plans_show_shutdown_disabled_plan_state(self):
+    def test_lifecycle_plans_ignore_account_shutdown_disabled_plan_state(self):
         account = CloudAccountConfig.objects.create(
             provider=CloudAccountConfig.PROVIDER_AWS,
             name='shutdown-disabled-plan-state',
@@ -8553,11 +8553,10 @@ class CloudServerServicesTestCase(TestCase):
         data = json.loads(response.content)['data']
         row = next(item for item in data['due_items'] if item.get('order_id') == order.id)
 
-        self.assertEqual(row['queue_status'], 'shutdown_disabled')
-        self.assertEqual(row['plan_state'], 'shutdown_disabled')
-        self.assertEqual(row['plan_state_label'], '关机计划关闭')
-        self.assertFalse(row['should_execute'])
-        self.assertIn('关机计划关闭', row['blocked_reason'])
+        self.assertTrue(row['shutdown_enabled'])
+        self.assertNotEqual(row['queue_status'], 'shutdown_disabled')
+        self.assertNotEqual(row['plan_state'], 'shutdown_disabled')
+        self.assertTrue(row['should_execute'])
 
     # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
     def test_lifecycle_plans_show_asset_shutdown_disabled_plan_state(self):
