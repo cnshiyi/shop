@@ -4518,3 +4518,63 @@ git diff --check
 - 本轮未跑完整测试套件。
 - 本轮未执行真实 Telegram 点击、真实云资源创建/删除/IP 变更、真实支付、链上广播、生产发布或不可逆操作。
 - 真机测试仍需在用户明确授权真实云资源成本后，单独按中文报告记录云资源 ID 脱敏结果。
+
+## 2026-06-03 嵌套资产详情返回链二次压缩
+
+### 范围
+
+本轮继续巡检 Shop Django 后端的机器人返回链、Telegram `callback_data` 64 字节限制、云资产生命周期唯一到期事实、废弃 app 回流、旧计划快照和旧退款入口。
+
+### 运行时变化
+
+- `cloud_asset_detail_callback()` 在收到已经压缩过的资产详情返回路径时，会先判断是否仍超过 64 字节；若超限则继续把内部返回来源压缩为短动作码。
+- 极端 18 位资产 ID、18 位订单 ID、长订单筛选来源和 18 位页码组合下，资产详情返回资产详情不再保留超长嵌套路径，而是降级为 `cad:<资产ID>:d:<订单ID>`。
+- 新增聚焦测试覆盖 `cad:<资产ID>:d:<订单ID>:o:<筛选>:<页码>` 再次进入资产详情时的二次压缩，防止后续恢复超长回调。
+
+### 监工结果
+
+- 18 位 ID 边界样本验证：资产详情回调压缩后为 43 字节，详情页续费、换 IP、重装、修改配置和返回按钮最大 54 字节。
+- `CloudAsset` 仍只有 `actual_expires_at` 作为结构化资产到期字段。
+- `CloudServerOrder` 未恢复 `service_expires_at` 或 `actual_expires_at`，仅保留 `renew_grace_expires_at` 等流程时间字段。
+- `CloudAssetDashboardSnapshot` 未恢复派生到期字段。
+- 未发现旧计划快照、旧退款函数名或废弃 app 目录回流；扫描命中的 `ip_recycle_at=asset.actual_expires_at` 仍是固定 IP 回收计划派生时间，不是订单服务到期字段恢复。
+
+### 验证
+
+本地已通过:
+
+```bash
+UV_CACHE_DIR=/Users/a399/Desktop/data/shop/.uv-cache PYTHONDONTWRITEBYTECODE=1 uv run python manage.py check
+UV_CACHE_DIR=/Users/a399/Desktop/data/shop/.uv-cache PYTHONDONTWRITEBYTECODE=1 uv run python -m py_compile bot/handlers.py bot/keyboards.py bot/tests.py cloud/services.py cloud/provisioning.py cloud/api_orders.py cloud/api_assets.py cloud/api_asset_edit.py cloud/lifecycle.py cloud/lifecycle_tasks.py
+UV_CACHE_DIR=/Users/a399/Desktop/data/shop/.uv-cache DB_ENGINE=sqlite DB_NAME=/private/tmp/shop_bot_callbacks_nested_20260603.sqlite3 PYTHONDONTWRITEBYTECODE=1 uv run python manage.py test bot.tests.RetainedIpRenewalUiTestCase --noinput --verbosity 1
+UV_CACHE_DIR=/Users/a399/Desktop/data/shop/.uv-cache DB_ENGINE=sqlite DB_NAME=/private/tmp/shop_lifecycle_nested_20260603.sqlite3 PYTHONDONTWRITEBYTECODE=1 uv run python manage.py test cloud.tests.CloudServerServicesTestCase.test_order_rejects_removed_service_expiry_field cloud.tests.CloudServerServicesTestCase.test_update_cloud_asset_expiry_refreshes_delete_plan_view cloud.tests.CloudServerServicesTestCase.test_update_cloud_asset_expiry_refreshes_order_lifecycle cloud.tests.CloudServerServicesTestCase.test_unbound_asset_renewal_lists_plans_without_creating_order cloud.tests.CloudServerServicesTestCase.test_prepare_unbound_asset_renewal_creates_pending_payment_order cloud.tests.CloudServerServicesTestCase.test_completed_asset_recovery_order_renews_without_reprovisioning --noinput --verbosity 1
+UV_CACHE_DIR=/Users/a399/Desktop/data/shop/.uv-cache PYTHONDONTWRITEBYTECODE=1 uv run python manage.py shell -c "from cloud.models import CloudAsset, CloudServerOrder, CloudAssetDashboardSnapshot; print([f.name for f in CloudAsset._meta.fields if 'expires' in f.name or 'expiry' in f.name]); print([f.name for f in CloudServerOrder._meta.fields if 'expires' in f.name or 'expiry' in f.name]); print([f.name for f in CloudAssetDashboardSnapshot._meta.fields if 'expires' in f.name or 'expiry' in f.name])"
+UV_CACHE_DIR=/Users/a399/Desktop/data/shop/.uv-cache PYTHONDONTWRITEBYTECODE=1 uv run python manage.py makemigrations --check --dry-run
+DJANGO_SETTINGS_MODULE=shop.settings UV_CACHE_DIR=/Users/a399/Desktop/data/shop/.uv-cache PYTHONDONTWRITEBYTECODE=1 uv run python - <<'PY'
+import django
+django.setup()
+from bot.keyboards import cloud_asset_detail_callback, cloud_server_detail
+item_id = 999999999999999999
+backs = [
+    f'cloud:detail:{item_id}:profile:orders:cloud:filter:provisioning:page:{item_id}',
+    f'cad:{item_id}:cloud:detail:{item_id}:profile:orders:cloud:filter:provisioning:page:{item_id}',
+    f'cad:{item_id}:d:{item_id}:o:provisioning:{item_id}',
+]
+for back in backs:
+    callback = cloud_asset_detail_callback(item_id, back)
+    callbacks = [button.callback_data for row in cloud_server_detail(item_id, True, True, True, callback, True).inline_keyboard for button in row if button.callback_data]
+    assert len(callback.encode()) <= 64
+    assert all(len(value.encode()) <= 64 for value in callbacks)
+PY
+rg -n "service_expires_at\\s*=|actual_expires_at\\s*=.*order\\.|order\\..*actual_expires_at|CloudLifecyclePlan\\b|CloudNoticePlan\\b|CloudAutoRenewPlan\\b|refund_order|process_refund|create_refund|issue_refund|refund_to_balance|refund_balance|STATUS_REFUNDED|status=['\\\"]refunded['\\\"]|normalize_service_expiry|service_expired_at" bot core orders cloud shop --glob '!**/migrations/**' --glob '!**/tests.py'
+find . -maxdepth 2 -type d \( -name accounts -o -name finance -o -name mall -o -name monitoring -o -name dashboard_api -o -name biz \) -print
+git diff --check
+```
+
+`makemigrations --check --dry-run` 仍出现本地沙箱无法连接 `127.0.0.1` MySQL 的迁移历史一致性警告，但最终结果为 `No changes detected`。
+
+### 剩余风险
+
+- 本轮未跑完整测试套件。
+- 本轮未执行真实 Telegram 点击、真实云资源创建/删除/IP 变更、真实支付、链上广播、生产发布或不可逆操作。
+- 真机测试仍需在用户明确授权真实云资源成本后，单独按中文报告记录云资源 ID 脱敏结果。

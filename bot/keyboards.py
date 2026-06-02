@@ -63,14 +63,40 @@ def cloud_asset_detail_callback(asset_id: int, back_callback: str | None = None,
     item_kind = str(item_kind or 'asset').strip() or 'asset'
     compact_prefix = {'asset': 'cad', 'server': 'csd'}.get(item_kind)
     if compact_prefix:
-        if back_callback.startswith(f'{compact_prefix}:{asset_id}:') or back_callback == f'{compact_prefix}:{asset_id}':
-            return back_callback
+        base = f'{compact_prefix}:{asset_id}'
+        if back_callback.startswith(f'{base}:') or back_callback == base:
+            if len(back_callback.encode()) <= 64:
+                return back_callback
+            nested = ':'.join(back_callback.split(':')[2:])
+            compact_back = _compact_back_callback_for_nested_action(nested)
+            candidate = f'{base}:{compact_back}' if compact_back else base
+            if len(candidate.encode()) <= 64:
+                return candidate
+            compact_back = _compact_back_callback_for_nested_action(nested, include_page=False)
+            candidate = f'{base}:{compact_back}' if compact_back else base
+            return candidate if len(candidate.encode()) <= 64 else base
         if not back_callback:
-            return f'{compact_prefix}:{asset_id}'
-        return f'{compact_prefix}:{asset_id}:{back_callback}'
+            return base
+        candidate = f'{base}:{back_callback}'
+        if len(candidate.encode()) <= 64:
+            return candidate
+        compact_back = _compact_back_callback_for_nested_action(back_callback)
+        candidate = f'{base}:{compact_back}' if compact_back else base
+        if len(candidate.encode()) <= 64:
+            return candidate
+        compact_back = _compact_back_callback_for_nested_action(back_callback, include_page=False)
+        candidate = f'{base}:{compact_back}' if compact_back else base
+        return candidate if len(candidate.encode()) <= 64 else base
     if not back_callback:
         return f'cloud:ad:{item_kind}:{asset_id}'
-    return f'cloud:ad:{item_kind}:{asset_id}:{back_callback}'
+    candidate = f'cloud:ad:{item_kind}:{asset_id}:{back_callback}'
+    if len(candidate.encode()) <= 64:
+        return candidate
+    compact_back = _compact_back_callback_for_nested_action(back_callback)
+    candidate = f'cloud:ad:{item_kind}:{asset_id}:{compact_back}' if compact_back else f'cloud:ad:{item_kind}:{asset_id}'
+    if len(candidate.encode()) <= 64:
+        return candidate
+    return f'cloud:ad:{item_kind}:{asset_id}'
 
 
 def cloud_previous_detail_callback(order_id: int, back_callback: str | None = None) -> str:
@@ -182,6 +208,8 @@ def _compact_back_callback_for_nested_action(callback_data: str | None, *, inclu
             if not include_page:
                 return f'd:{parts[2]}'
             return f'd:{parts[2]}:{parts[4] or "1"}'
+        if len(parts) > 3:
+            return f'd:{parts[2]}'
         if len(parts) == 3:
             return f'd:{parts[2]}'
     if len(parts) >= 2 and parts[0] == 'clp':

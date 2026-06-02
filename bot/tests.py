@@ -1280,6 +1280,24 @@ class RetainedIpRenewalUiTestCase(SimpleTestCase):
         self.assertIn(f'd:{item_id}:o:provisioning:{item_id}', callbacks)
         self.assertTrue(all(len(item.encode()) <= 64 for item in callbacks))
 
+    def test_asset_detail_callback_from_extreme_order_detail_stays_under_limit(self):
+        item_id = 999999999999999999
+        back_callback = f'cloud:detail:{item_id}:profile:orders:cloud:filter:provisioning:page:{item_id}'
+
+        callback_data = cloud_asset_detail_callback(item_id, back_callback)
+
+        self.assertEqual(callback_data, f'cad:{item_id}:d:{item_id}')
+        self.assertLessEqual(len(callback_data.encode()), 64)
+
+    def test_asset_detail_callback_recompacts_nested_asset_detail_back_path(self):
+        item_id = 999999999999999999
+        back_callback = f'cad:{item_id}:d:{item_id}:o:provisioning:{item_id}'
+
+        callback_data = cloud_asset_detail_callback(item_id, back_callback)
+
+        self.assertEqual(callback_data, f'cad:{item_id}:d:{item_id}')
+        self.assertLessEqual(len(callback_data.encode()), 64)
+
     def test_cloud_detail_handler_accepts_short_detail_callback(self):
         source = inspect.getsource(register_handlers)
         detail_source = source.split('async def cb_cloud_detail', 1)[1].split("@dp.callback_query(F.data.startswith('cloud:mute:'))", 1)[0]
