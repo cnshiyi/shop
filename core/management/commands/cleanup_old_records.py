@@ -5,7 +5,7 @@ from django.db.models import Count, Q
 from django.utils import timezone
 
 from bot.models import AdminReplyLink, TelegramChatMessage
-from cloud.models import CloudAsset, CloudServerOrder
+from cloud.models import CloudServerOrder
 from core.models import SiteConfig
 from orders.models import Order, Recharge
 
@@ -108,9 +108,4 @@ class Command(BaseCommand):
             Q(ip_recycle_at__isnull=True)
             | Q(ip_recycle_at__lt=cutoff)
         )
-        expired_inactive = (
-            Q(status__in={'completed', 'expiring', 'renew_pending', 'suspended', 'deleting'})
-            & Q(id__in=CloudAsset.objects.filter(kind=CloudAsset.KIND_SERVER, actual_expires_at__lt=cutoff).values('order_id'))
-            & (Q(ip_recycle_at__isnull=True) | Q(ip_recycle_at__lt=cutoff))
-        )
-        return Q(status__in=terminal_statuses) | deleted_retained_done | expired_inactive
+        return Q(status__in=terminal_statuses) | deleted_retained_done
