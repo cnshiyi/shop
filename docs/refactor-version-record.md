@@ -1,5 +1,43 @@
 # 重构版本记录
 
+## 2026-06-02 21:15 自动监工：资产更换 IP 返回来源补漏
+
+### 范围
+
+本轮继续监工 Shop Django 后端仓库，起始工作树干净，最近提交为 `8c47cee 整理记忆文档标题`。使用终端版 codex-cli `0.135.0-alpha.1`、模型 `gpt-5.5` 做只读复核，重点检查废弃 app 回流、订单旧到期字段、旧计划快照、退款状态/函数、Bot 代理详情/续费/更换 IP/支付后的返回路径。
+
+### 复查结论
+
+- codex-cli 和本地扫描一致确认：`INSTALLED_APPS` 未恢复 `accounts/finance/mall/monitoring/dashboard_api/biz`，运行时旧 app 目录未恢复。
+- 模型 introspection 确认 `CloudServerOrder` 没有 `service_expires_at` 或 `actual_expires_at` 字段，`CloudAsset.actual_expires_at` 仍是唯一结构化资产到期事实。
+- 严格排除迁移和测试后的旧字段/旧计划/旧退款扫描未命中运行时代码；旧 app 导入扫描只剩 `cloud/services.py` 注释提到旧兼容壳。
+- codex-cli 发现一处中风险 Bot 返回路径漏点：从代理资产详情点击“更换IP”时，`cb_cloud_asset_action` 已解析 `back_callback`，但打开地区菜单时未传给 `cloud_server_change_ip_region_menu()`，会导致后续地区/端口页丢失 `cloud:querymenu` 或 `profile:orders:...` 来源。
+
+### 修复内容
+
+- 修复资产详情“更换IP”进入地区菜单时漏传 `back_callback` 的问题，确保资产操作链路和订单详情链路使用同一套返回来源逻辑。
+- 补充 `RetainedIpRenewalUiTestCase` 回归守卫，锁住 `cb_cloud_asset_action` 的资产更换 IP 地区菜单必须继续透传来源。
+
+### 验证
+
+已通过：
+
+```bash
+/Applications/Codex.app/Contents/Resources/codex exec --sandbox read-only --model gpt-5.5 -C /Users/a399/Desktop/data/shop ...
+uv run python -m py_compile bot/handlers.py bot/tests.py
+DJANGO_TEST_SQLITE=1 uv run python manage.py test bot.tests.RetainedIpRenewalUiTestCase
+uv run python manage.py check
+uv run python manage.py makemigrations --check --dry-run
+PYTHONDONTWRITEBYTECODE=1 uv run python manage.py shell -c "from django.conf import settings; retired={'accounts','finance','mall','monitoring','dashboard_api','biz'}; print([app for app in settings.INSTALLED_APPS if app.split('.')[0] in retired]); from cloud.models import CloudServerOrder, CloudAsset; print([f.name for f in CloudServerOrder._meta.fields if f.name in {'service_expires_at','actual_expires_at'}]); print([f.name for f in CloudAsset._meta.fields if f.name == 'actual_expires_at'])"
+rg -n "service_expires_at\s*=\s*models|service_expires_at__|\bCloudLifecyclePlan\b|\bCloudNoticePlan\b|\bCloudAutoRenewPlan\b|refund_to_balance|refund_balance|STATUS_REFUNDED|status=['\"]refunded|\brefunded\b" cloud orders bot core shop -g '!**/migrations/**' -g '!**/tests.py' -g '!*.pyc'
+rg -n "accounts\.models|finance\.models|mall\.models|monitoring\.models|dashboard_api\.|biz\." cloud orders bot core shop -g '!**/migrations/**' -g '!*.pyc'
+git diff --check
+```
+
+结果：codex-cli 只读复核完成；Django 系统检查、迁移 dry-run、Bot 返回路径聚焦测试、模型字段 introspection、旧字段/旧计划/旧退款扫描和空白检查均通过。Bot 测试中的巡检异常日志为用例故意模拟失败路径，不是测试失败。
+
+剩余风险：本轮未跑完整测试套件，未执行真实 Telegram 回调、真实钱包扣款、云端换 IP 创建、云端删机或固定 IP 释放。
+
 ## 2026-06-02 21:10 自动监工：云资产生命周期稳定巡检
 
 ### 范围
