@@ -1,5 +1,32 @@
 # 重构版本记录
 
+## 2026-06-02 17:51 自动监工：快照聚合层清理复查
+
+### 范围
+
+本轮继续监工 Shop Django 后端仓库，起始工作树干净，最近提交为 `13ee1ce 记录快照刷新聚合层清理`。重点复查快照刷新不再依赖 `cloud.api` 聚合层，以及云资产生命周期重构中旧到期字段、旧计划快照、退款旧入口和废弃 app 是否回流。
+
+### 复查结论
+
+- `cloud/dashboard_snapshots.py` 仍通过真实模块局部导入快照刷新、自动续费计划和通知计划构建逻辑，未发现生产代码重新依赖 `cloud.api` 聚合层。
+- 未发现 `CloudServerOrder.service_expires_at` 数据库列危险查询、写入或创建；订单接口中的 `service_expires_at` 仍是兼容展示字段，资产到期事实继续由 `CloudAsset.actual_expires_at` 承载。
+- 未发现 `normalize_service_expiry`、`service_expired_at`、旧计划快照模型、退款旧函数名或退款旧入口回流。
+- `INSTALLED_APPS` 仍只包含 `core`、`bot`、`orders`、`cloud` 四个当前运行时 app；废弃 app 未恢复。
+
+### 验证
+
+本地已通过：
+
+```bash
+UV_CACHE_DIR=/private/tmp/uv-cache-shop DJANGO_TEST_SQLITE=1 PYTHONDONTWRITEBYTECODE=1 uv run python manage.py check
+UV_CACHE_DIR=/private/tmp/uv-cache-shop DJANGO_TEST_SQLITE=1 PYTHONDONTWRITEBYTECODE=1 uv run python manage.py makemigrations --check --dry-run
+UV_CACHE_DIR=/private/tmp/uv-cache-shop DJANGO_TEST_SQLITE=1 PYTHONDONTWRITEBYTECODE=1 uv run python -m py_compile bot/api.py bot/handlers.py cloud/services.py cloud/lifecycle.py cloud/lifecycle_execution.py cloud/lifecycle_tasks.py cloud/api.py cloud/api_assets.py cloud/api_asset_edit.py cloud/api_orders.py cloud/api_tasks.py cloud/api_sync.py cloud/api_monitors.py cloud/management/commands/sync_aws_assets.py cloud/management/commands/sync_aliyun_assets.py cloud/management/commands/reconcile_cloud_assets_from_servers.py orders/services.py orders/payment_scanner.py
+UV_CACHE_DIR=/private/tmp/uv-cache-shop DJANGO_TEST_SQLITE=1 PYTHONDONTWRITEBYTECODE=1 uv run python -m py_compile cloud/dashboard_snapshots.py cloud/api_asset_snapshots.py cloud/api_tasks.py
+UV_CACHE_DIR=/private/tmp/uv-cache-shop DJANGO_TEST_SQLITE=1 PYTHONDONTWRITEBYTECODE=1 uv run python manage.py test cloud.tests.CloudServerServicesTestCase.test_update_cloud_asset_defers_snapshot_refresh cloud.tests.CloudServerServicesTestCase.test_run_auto_renew_tasks_executes_due_retry_and_fallback_queue cloud.tests.CloudServerServicesTestCase.test_refresh_notice_plan_view_api_builds_notice_plan_view --noinput --verbosity 1
+```
+
+剩余风险：本轮未跑完整测试套件；默认 MySQL 未覆盖，继续使用 SQLite 聚焦测试和静态扫描兜底。
+
 ## 2026-06-02 17:18 自动监工：生产历史匹配移除测试标记
 
 ### 范围
