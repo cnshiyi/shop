@@ -1,5 +1,32 @@
 # 重构版本记录
 
+## 2026-06-02 自动监工：订单到期兼容缓存清理
+
+### 范围
+
+本轮继续复查 `CloudServerOrder.service_expires_at` 移除后的兼容属性路径，重点覆盖 Bot 管理员修改代理到期时间后的订单、资产和 Server 兼容视图一致性。
+
+### 运行变更
+
+- `CloudServerOrder.save()` 处理过兼容 `service_expires_at` 输入后，会清掉“待写入”标记，避免后续普通保存继续把旧兼容值当成新输入重新计算生命周期。
+- `CloudServerOrder.refresh_from_db()` 会清理兼容到期时间缓存，确保刷新后的 `order.service_expires_at` 重新读取 `CloudAsset.actual_expires_at`，不再返回实例上残留的旧值。
+- 修复 Bot 管理员修改订单到期时间后，同一个订单实例刷新仍显示旧到期时间的断点；资产和 Server 兼容入口继续以 `CloudAsset.actual_expires_at` 为事实源。
+
+### 验证
+
+本地已通过：
+
+```bash
+UV_CACHE_DIR=/private/tmp/uv-cache-shop uv run python -m py_compile cloud/models.py bot/tests.py
+UV_CACHE_DIR=/private/tmp/uv-cache-shop DJANGO_TEST_SQLITE=1 uv run python manage.py test bot.tests.BotOrderAndBalanceFilterTestCase bot.tests.BotAdminExpiryUpdateTestCase --noinput --verbosity 1
+UV_CACHE_DIR=/private/tmp/uv-cache-shop DJANGO_TEST_SQLITE=1 uv run python manage.py test cloud.tests.CloudServerServicesTestCase.test_order_save_backfills_blank_asset_expiry_only cloud.tests.CloudServerServicesTestCase.test_update_cloud_asset_expiry_refreshes_order_lifecycle bot.tests.BotAdminExpiryUpdateTestCase.test_admin_expiry_update_syncs_order_asset_and_server --noinput --verbosity 1
+UV_CACHE_DIR=/private/tmp/uv-cache-shop uv run python manage.py check
+UV_CACHE_DIR=/private/tmp/uv-cache-shop uv run python manage.py makemigrations --check --dry-run
+git diff --check
+```
+
+`makemigrations --check --dry-run` 仍因当前沙箱禁止连接本地 MySQL 输出一致性历史检查警告，但结果为 `No changes detected`。
+
 ## 2026-06-02 自动监工：资产到期兼容测试收口
 
 ### 范围

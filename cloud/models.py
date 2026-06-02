@@ -254,6 +254,15 @@ class CloudServerOrder(models.Model):
                 actual_expires_at=pending_expiry,
                 updated_at=timezone.now(),
             )
+        if pending_expiry_set:
+            self._service_expires_at_set = False
+            self._service_expires_at = pending_expiry
+
+    def refresh_from_db(self, using=None, fields=None, from_queryset=None):
+        super().refresh_from_db(using=using, fields=fields, from_queryset=from_queryset)
+        if fields is None or 'service_expires_at' in fields:
+            self.__dict__.pop('_service_expires_at', None)
+            self.__dict__.pop('_service_expires_at_set', None)
 
     def __str__(self):
         return self.order_no
