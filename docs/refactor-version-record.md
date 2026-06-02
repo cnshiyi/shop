@@ -1,5 +1,41 @@
 # 重构版本记录
 
+## 2026-06-02 23:43 自动监工：复查短回调返回链和生命周期事实
+
+### 范围
+
+本轮继续监工 Shop Django 后端仓库。起始最近提交为 `79584b7 压缩资产详情返回回调`；工作树中已有未跟踪文件 `docs/real-machine-test-report.md`，按用户真机测试报告改动处理，本轮未纳入提交。重点复查机器人资产详情、订单详情、续费、更换 IP、重新安装、修改配置等返回链，Telegram `callback_data` 64 字节限制，云资产生命周期唯一到期事实、订单旧到期字段、计划快照表、退款旧入口和废弃 app 回流。
+
+### 复查结论
+
+- 机器人 UI 聚焦测试显示长资产详情来源会压缩为 `cad:<资产ID>:clp:<页码>`，续费、换 IP、重装、修改配置、订单详情等按钮均保持在 Telegram `callback_data` 64 字节限制内。
+- 复核 `split(':', N)` 解析后确认当前处理器会把短返回链作为最后一段保留，未发现需要改动的运行代码。
+- `CloudServerOrder` 未恢复 `service_expires_at` 或 `actual_expires_at` 字段；`CloudAsset.actual_expires_at` 仍是唯一结构化资产到期事实。
+- `CloudAssetDashboardSnapshot` 未恢复派生到期列，仅保留 `risk_expired` 风险布尔字段。
+- 严格排除迁移、测试和文档后，运行时代码未发现旧计划快照模型、旧退款函数名、旧退款状态或旧订单到期字段 ORM 回流。
+- 仓库根下未发现 `accounts/finance/mall/monitoring/dashboard_api/biz` 废弃 app 目录恢复；`INSTALLED_APPS` 中也未出现这些废弃 app。
+- 本轮未执行真实云资源、真实 Telegram 点击、真实支付或链上广播。
+
+### 验证
+
+已通过：
+
+```bash
+UV_CACHE_DIR=/Users/a399/Desktop/data/shop/.uv-cache PYTHONDONTWRITEBYTECODE=1 uv run python manage.py check
+UV_CACHE_DIR=/Users/a399/Desktop/data/shop/.uv-cache PYTHONDONTWRITEBYTECODE=1 uv run python -m py_compile bot/handlers.py bot/keyboards.py bot/tests.py cloud/services.py cloud/lifecycle.py cloud/lifecycle_execution.py cloud/api_tasks.py cloud/api_asset_edit.py cloud/api_orders.py orders/payment_scanner.py
+UV_CACHE_DIR=/Users/a399/Desktop/data/shop/.uv-cache DJANGO_TEST_SQLITE=1 PYTHONDONTWRITEBYTECODE=1 uv run python manage.py test bot.tests.RetainedIpRenewalUiTestCase --keepdb --noinput --verbosity 1
+UV_CACHE_DIR=/Users/a399/Desktop/data/shop/.uv-cache DJANGO_TEST_SQLITE=1 PYTHONDONTWRITEBYTECODE=1 uv run python manage.py test cloud.tests.CloudServerServicesTestCase.test_order_rejects_removed_service_expiry_field cloud.tests.CloudServerServicesTestCase.test_due_orders_use_asset_expiry_for_lightsail_lifecycle cloud.tests.CloudServerServicesTestCase.test_mark_success_preserves_existing_manual_asset_fields_on_update cloud.tests.CloudServerServicesTestCase.test_sync_aliyun_assets_preserves_existing_asset_expiry cloud.tests.CloudServerServicesTestCase.test_sync_aws_assets_preserves_existing_unattached_ip_due_time cloud.tests.CloudServerServicesTestCase.test_sync_aws_retained_ip_preserves_existing_asset_user orders.tests.ChainPaymentScannerTestCase.test_expired_asset_renewal_payment_unbinds_asset_for_retry orders.tests.ChainPaymentScannerTestCase.test_public_asset_renewal_expiry_does_not_claim_unowned_asset --keepdb --noinput --verbosity 1
+UV_CACHE_DIR=/Users/a399/Desktop/data/shop/.uv-cache PYTHONDONTWRITEBYTECODE=1 uv run python manage.py makemigrations --check --dry-run
+UV_CACHE_DIR=/Users/a399/Desktop/data/shop/.uv-cache PYTHONDONTWRITEBYTECODE=1 uv run python manage.py shell -c "from django.conf import settings; retired={'accounts','finance','mall','monitoring','dashboard_api','biz'}; print('retired_apps', [app for app in settings.INSTALLED_APPS if app.split('.')[0] in retired]); from cloud.models import CloudServerOrder, CloudAsset, CloudAssetDashboardSnapshot; print('order_expiry_fields', [f.name for f in CloudServerOrder._meta.fields if f.name in {'service_expires_at','actual_expires_at'}]); print('asset_actual_fields', [f.name for f in CloudAsset._meta.fields if f.name == 'actual_expires_at']); print('snapshot_expiry_fields', [f.name for f in CloudAssetDashboardSnapshot._meta.fields if 'expire' in f.name or 'expiry' in f.name or f.name == 'actual_expires_at'])"
+rg -n "service_expires_at|service_expired_at|normalize_service_expiry|CloudLifecyclePlan\\b|CloudNoticePlan\\b|CloudAutoRenewPlan\\b|refund_order|process_refund|create_refund|issue_refund|refund_to_balance|refund_balance|STATUS_REFUNDED|status=['\\\"]refunded['\\\"]" bot core orders cloud shop --glob '!**/migrations/**' --glob '!**/tests.py'
+find . -maxdepth 2 -type d \( -name accounts -o -name finance -o -name mall -o -name monitoring -o -name dashboard_api -o -name biz \) -print
+git diff --check
+```
+
+结果：Django 系统检查、关键模块编译、机器人返回 UI 聚焦测试 31 条、生命周期/同步/支付聚焦测试 8 条、迁移 dry-run、模型字段 introspection、旧字段/旧计划/旧退款扫描、废弃 app 目录检查和空白检查均通过。`makemigrations --check --dry-run` 仍因沙箱禁止连接本机 MySQL 输出迁移历史检查警告，但最终显示 `No changes detected`。
+
+剩余风险：本轮未跑完整测试套件，未连接真实 MySQL、真实 AWS Lightsail、阿里云、TRONGrid 或 Telegram，未执行真实 Telegram 点击、真实支付、链上广播、云端删除、固定 IP 释放或生产发布。`docs/real-machine-test-report.md` 仍为进入本轮前已有未跟踪文件，需真机测试流程单独确认和提交。
+
 ## 2026-06-02 23:22 自动监工：复查生命周期唯一到期事实
 
 ### 范围
