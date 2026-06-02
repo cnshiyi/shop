@@ -5074,6 +5074,7 @@ class CloudServerServicesTestCase(TestCase):
 
     # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
     def test_aws_notice_schedule_does_not_override_manual_order_expiry(self):
+        manual_expiry = timezone.now() + timezone.timedelta(days=15)
         order = CloudServerOrder.objects.create(
             order_no='MANUAL-NOTICE-OLD-1',
             user=self.user,
@@ -5090,9 +5091,20 @@ class CloudServerServicesTestCase(TestCase):
             status='completed',
             public_ip='8.8.4.4',
             service_started_at=timezone.now(),
-            service_expires_at=timezone.now() + timezone.timedelta(days=15),
         )
-        manual_expiry = order.service_expires_at
+        CloudAsset.objects.create(
+            order=order,
+            kind=CloudAsset.KIND_SERVER,
+            source=CloudAsset.SOURCE_ORDER,
+            user=self.user,
+            provider=order.provider,
+            region_code=order.region_code,
+            region_name=order.region_name,
+            public_ip=order.public_ip,
+            actual_expires_at=manual_expiry,
+            status=CloudAsset.STATUS_RUNNING,
+            is_active=True,
+        )
         notice_expiry = timezone.now() + timezone.timedelta(days=5)
 
         _apply_notice_schedule_to_order(order, {
@@ -5103,7 +5115,7 @@ class CloudServerServicesTestCase(TestCase):
         })
 
         order.refresh_from_db()
-        self.assertEqual(order.service_expires_at, manual_expiry)
+        self.assertEqual(order_asset_expiry(order), manual_expiry)
         self.assertEqual(order.suspend_at, notice_expiry)
 
     # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
@@ -5354,7 +5366,7 @@ class CloudServerServicesTestCase(TestCase):
         self.assertEqual(order.status, 'pending')
         self.assertEqual(order.plan_id, self.plan.id)
         self.assertEqual(order.pay_method, 'address')
-        self.assertIsNone(order.service_expires_at)
+        self.assertEqual(order_asset_expiry(order), due_at)
         self.assertEqual(order.ip_recycle_at, due_at)
         self.assertEqual(order.mtproxy_link, link['url'])
         self.assertEqual(asset.order_id, order.id)
@@ -5399,7 +5411,7 @@ class CloudServerServicesTestCase(TestCase):
         self.assertEqual(paid_order.status, 'paid')
         self.assertEqual(paid_order.pay_method, 'balance')
         self.assertIsNotNone(paid_order.paid_at)
-        self.assertEqual(paid_order.service_expires_at, due_at)
+        self.assertEqual(order_asset_expiry(paid_order), due_at)
         self.assertEqual(paid_order.ip_recycle_at, due_at)
         self.assertIn('正在恢复未绑定代理资产固定 IP', paid_order.provision_note)
 
@@ -5441,7 +5453,7 @@ class CloudServerServicesTestCase(TestCase):
         self.assertIsNone(pay_error)
         self.assertEqual(paid_order.status, 'paid')
         self.assertIsNotNone(paid_order.paid_at)
-        self.assertEqual(paid_order.service_expires_at, due_at)
+        self.assertEqual(order_asset_expiry(paid_order), due_at)
         self.assertEqual(paid_order.ip_recycle_at, due_at)
 
     # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
@@ -5470,8 +5482,23 @@ class CloudServerServicesTestCase(TestCase):
             mtproxy_port=443,
             mtproxy_secret='secret',
             service_started_at=completed_at,
-            service_expires_at=old_expiry,
             provision_note='未绑定代理资产续费：来源资产 #999；恢复完成。',
+        )
+        CloudAsset.objects.create(
+            order=order,
+            kind=CloudAsset.KIND_SERVER,
+            source=CloudAsset.SOURCE_AWS_SYNC,
+            user=self.user,
+            provider=order.provider,
+            region_code=order.region_code,
+            region_name=order.region_name,
+            asset_name=order.server_name,
+            instance_id=order.instance_id,
+            public_ip=order.public_ip,
+            previous_public_ip=order.previous_public_ip,
+            actual_expires_at=old_expiry,
+            status=CloudAsset.STATUS_RUNNING,
+            is_active=True,
         )
 
         renewed, pay_error = async_to_sync(pay_cloud_server_renewal_with_balance)(order.id, self.user.id, 'USDT', 31)
@@ -5479,7 +5506,7 @@ class CloudServerServicesTestCase(TestCase):
         self.assertIsNone(pay_error)
         self.assertEqual(renewed.status, 'completed')
         self.assertEqual(renewed.instance_id, 'recovered-instance-36')
-        self.assertGreater(renewed.service_expires_at, old_expiry)
+        self.assertGreater(order_asset_expiry(renewed), old_expiry)
         self.assertIsNotNone(renewed.paid_at)
 
     # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
@@ -5518,7 +5545,7 @@ class CloudServerServicesTestCase(TestCase):
         self.assertIsNotNone(confirmed)
         self.assertEqual(confirmed.status, 'paid')
         self.assertIsNotNone(confirmed.paid_at)
-        self.assertIsNone(confirmed.service_expires_at)
+        self.assertEqual(order_asset_expiry(confirmed), due_at)
         self.assertEqual(confirmed.ip_recycle_at, due_at)
         self.assertIn('正在恢复未绑定代理资产固定 IP', confirmed.provision_note)
 
@@ -5627,7 +5654,19 @@ class CloudServerServicesTestCase(TestCase):
             status='completed',
             public_ip='1.2.3.4',
             service_started_at=timezone.now(),
-            service_expires_at=original_expires_at,
+        )
+        CloudAsset.objects.create(
+            order=source_order,
+            kind=CloudAsset.KIND_SERVER,
+            source=CloudAsset.SOURCE_ORDER,
+            user=self.user,
+            provider=source_order.provider,
+            region_code=source_order.region_code,
+            region_name=source_order.region_name,
+            public_ip=source_order.public_ip,
+            actual_expires_at=original_expires_at,
+            status=CloudAsset.STATUS_RUNNING,
+            is_active=True,
         )
 
         new_order = async_to_sync(mark_cloud_server_ip_change_requested)(source_order.id, self.user.id)
@@ -5636,9 +5675,9 @@ class CloudServerServicesTestCase(TestCase):
         self.assertTrue(new_order)
         self.assertEqual(new_order.plan_id, self.plan.id)
         self.assertEqual(new_order.replacement_for_id, source_order.id)
-        self.assertEqual(new_order.service_expires_at, original_expires_at)
+        self.assertEqual(order_asset_expiry(new_order), original_expires_at)
         self.assertIsNotNone(source_order.migration_due_at)
-        self.assertEqual(source_order.service_expires_at, source_order.migration_due_at)
+        self.assertEqual(order_asset_expiry(source_order), source_order.migration_due_at)
         self.assertEqual(source_order.suspend_at, source_order.migration_due_at + timezone.timedelta(days=3))
         self.assertEqual(source_order.delete_at, source_order.migration_due_at + timezone.timedelta(days=3))
         self.assertEqual(source_order.renew_grace_expires_at, source_order.migration_due_at + timezone.timedelta(days=3))
@@ -7442,8 +7481,8 @@ class CloudServerServicesTestCase(TestCase):
 
         self.assertEqual(admin_asset.id, visible_asset.id)
         self.assertEqual(user_asset.id, visible_asset.id)
-        self.assertEqual(admin_asset.service_expires_at, expires_at)
-        self.assertEqual(user_asset.service_expires_at, expires_at)
+        self.assertEqual(admin_asset.actual_expires_at, expires_at)
+        self.assertEqual(user_asset.actual_expires_at, expires_at)
         self.assertIsNone(hidden_asset)
 
     # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。

@@ -1,5 +1,50 @@
 # 重构版本记录
 
+## 2026-06-02 16:14 自动监工：未绑定资产续费测试旧字段收口
+
+### 范围
+
+本轮继续监工 Shop Django 后端云资产生命周期重构状态。起始工作树干净，最近提交为 `b1f281d 记录codex生命周期只读复查`；本轮聚焦云资产到期唯一事实源、订单旧到期字段测试回流、旧计划快照表回流、退款入口回流和废弃 app 误用。
+
+### 修复
+
+- 修复 `cloud/tests.py` 中 8 条会真实失败或继续误导到期事实源的测试：
+  - `test_aws_notice_schedule_does_not_override_manual_order_expiry`
+  - `test_prepare_unbound_asset_renewal_creates_pending_payment_order`
+  - `test_unbound_asset_renewal_wallet_payment_marks_paid_for_recovery`
+  - `test_unbound_asset_renewal_wallet_payment_repairs_completed_unpaid_state`
+  - `test_completed_asset_recovery_order_renews_without_reprovisioning`
+  - `test_unbound_asset_renewal_chain_payment_marks_paid_for_recovery`
+  - `test_mark_cloud_server_ip_change_requested_falls_back_when_plan_missing`
+  - `test_proxy_asset_ip_query_exposes_manual_expiry_for_admin_and_user`
+- 这些用例不再向 `CloudServerOrder.objects.create()` 传入已移除的 `service_expires_at`，改为显式创建或读取关联 `CloudAsset.actual_expires_at`。
+- 相关断言改为使用 `order_asset_expiry(order)` 或视图对象的 `actual_expires_at`，避免把订单表旧字段当成事实源。
+- 本轮未修改生产代码；运行时代码仍通过 `CloudAsset.actual_expires_at` 和 `order_asset_expiry()` 读取服务到期事实。
+
+### 复查结论
+
+- 当前运行时代码未发现对已移除 `CloudServerOrder.service_expires_at` 数据库列的危险 ORM 查询。
+- 未恢复 `normalize_service_expiry`、`service_expired_at`、旧计划快照模型 `CloudLifecyclePlan` / `CloudNoticePlan` / `CloudAutoRenewPlan`。
+- 未发现退款函数名、退款入口或 `refunded` 运行时状态筛选回流。
+- `CloudLifecyclePlanNote` 仍只是现有备注模型，不是旧计划快照表恢复。
+- `cloud/tests.py` 仍有旧 `service_expires_at=` 测试构造约 75 处，后续应继续分批收口到 `CloudAsset.actual_expires_at` 或 `order_asset_expiry(order)`。
+
+### 验证
+
+本地已通过：
+
+```bash
+UV_CACHE_DIR=/private/tmp/uv-cache-shop uv run python manage.py check
+UV_CACHE_DIR=/private/tmp/uv-cache-shop uv run python manage.py makemigrations --check --dry-run
+PYTHONDONTWRITEBYTECODE=1 DJANGO_TEST_SQLITE=1 UV_CACHE_DIR=/private/tmp/uv-cache-shop uv run python -m py_compile cloud/tests.py cloud/models.py cloud/asset_expiry.py cloud/lifecycle.py cloud/services.py
+PYTHONDONTWRITEBYTECODE=1 DJANGO_TEST_SQLITE=1 UV_CACHE_DIR=/private/tmp/uv-cache-shop uv run python manage.py test cloud.tests.CloudServerServicesTestCase.test_aws_notice_schedule_does_not_override_manual_order_expiry cloud.tests.CloudServerServicesTestCase.test_prepare_unbound_asset_renewal_creates_pending_payment_order cloud.tests.CloudServerServicesTestCase.test_unbound_asset_renewal_wallet_payment_marks_paid_for_recovery cloud.tests.CloudServerServicesTestCase.test_unbound_asset_renewal_wallet_payment_repairs_completed_unpaid_state cloud.tests.CloudServerServicesTestCase.test_completed_asset_recovery_order_renews_without_reprovisioning cloud.tests.CloudServerServicesTestCase.test_unbound_asset_renewal_chain_payment_marks_paid_for_recovery cloud.tests.CloudServerServicesTestCase.test_mark_cloud_server_ip_change_requested_falls_back_when_plan_missing cloud.tests.CloudServerServicesTestCase.test_proxy_asset_ip_query_exposes_manual_expiry_for_admin_and_user --noinput --verbosity 1
+rg -n "service_expires_at__|(filter|exclude|update|order_by|values|values_list)\([^\n)]*service_expires_at|CloudServerOrder\([^\n)]*service_expires_at|CloudServerOrder\.objects\.create\([^\n)]*service_expires_at|CloudServerOrder\.objects\.filter\([^\n)]*service_expires_at" --glob '!cloud/migrations/**' --glob '!docs/**' --glob '!CHANGELOG.md' --glob '!cloud/tests.py' --glob '!bot/tests.py' --glob '!orders/tests.py' .
+rg -n "class Cloud(LifecyclePlan|NoticePlan|AutoRenewPlan)|service_expires_at\s*=\s*models|service_expired_at|normalize_service_expiry|refunded|refund_" cloud orders bot core shop --glob '!**/migrations/**'
+git diff --check
+```
+
+`makemigrations --check --dry-run` 仍因当前沙箱禁止连接默认 MySQL `127.0.0.1:3306` 打印迁移历史一致性检查警告，但最终报告 `No changes detected`。
+
 ## 2026-06-02 16:07 自动监工：codex-cli 生命周期只读复查
 
 ### 范围
