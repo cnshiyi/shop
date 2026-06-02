@@ -6,6 +6,9 @@ from django.test import TestCase
 from django.utils import timezone
 
 from bot.models import TelegramUser
+from cloud.services import prepare_cloud_asset_renewal_with_link
+from core.cloud_accounts import cloud_account_label
+from core.models import CloudAccountConfig
 from cloud.models import AddressMonitor, CloudAsset, CloudServerOrder, CloudServerPlan, DailyAddressStat
 from orders.models import BalanceLedger, CartItem, Order, Product, Recharge
 from orders.payment_scanner import _cache_tx_detail, _confirm_order_paid, _copy_notice_to_admins, _expire_timed_out_payment_orders, _get_address_chain_balances, _get_pending_address_orders, _get_pending_cloud_server_orders, _process_payment, _record_daily_stats_for_monitors, get_tx_detail, set_bot
@@ -439,6 +442,57 @@ class ChainPaymentScannerTestCase(TestCase):
         asset.refresh_from_db()
         self.assertEqual(renewal.status, 'expired')
         self.assertIsNone(asset.order_id)
+        self.assertIn('可重新发起续费', asset.note)
+
+    # 功能：验证相关业务场景和回归行为；当前函数属于 订单、充值和余额。
+    def test_public_asset_renewal_expiry_does_not_claim_unowned_asset(self):
+        account = CloudAccountConfig.objects.create(
+            provider=CloudAccountConfig.PROVIDER_AWS,
+            name='chain-public-asset-renewal',
+            region_hint=self.plan.region_code,
+            access_key='A' * 20,
+            secret_key='B' * 40,
+            is_active=True,
+        )
+        asset = CloudAsset.objects.create(
+            kind=CloudAsset.KIND_SERVER,
+            source=CloudAsset.SOURCE_AWS_SYNC,
+            provider='aws_lightsail',
+            cloud_account=account,
+            account_label=cloud_account_label(account),
+            region_code=self.plan.region_code,
+            region_name=self.plan.region_name,
+            asset_name='StaticIp-public-renewal-timeout',
+            provider_resource_id='arn:aws:lightsail:ap-southeast-1:123456789012:StaticIp/StaticIp-public-renewal-timeout',
+            public_ip='31.31.31.100',
+            previous_public_ip='31.31.31.100',
+            actual_expires_at=timezone.now() + timezone.timedelta(days=7),
+            status=CloudAsset.STATUS_UNKNOWN,
+            provider_status='未附加固定IP',
+            note='未附加固定IP',
+            is_active=False,
+        )
+        link = {
+            'url': 'tg://proxy?server=31.31.31.100&port=9528&secret=eeeeeeeeeeeeeeee',
+            'server': '31.31.31.100',
+            'port': '9528',
+            'secret': 'eeeeeeeeeeeeeeee',
+        }
+
+        renewal, error = async_to_sync(prepare_cloud_asset_renewal_with_link)(asset.id, self.user.id, self.plan.id, link, public=True)
+        asset.refresh_from_db()
+        self.assertIsNone(error)
+        self.assertEqual(asset.order_id, renewal.id)
+        self.assertIsNone(asset.user_id)
+
+        CloudServerOrder.objects.filter(id=renewal.id).update(expired_at=timezone.now() - timezone.timedelta(minutes=1))
+        async_to_sync(_expire_timed_out_payment_orders)()
+
+        asset.refresh_from_db()
+        renewal.refresh_from_db()
+        self.assertEqual(renewal.status, 'expired')
+        self.assertIsNone(asset.order_id)
+        self.assertIsNone(asset.user_id)
         self.assertIn('可重新发起续费', asset.note)
 
     def test_duplicate_tx_hash_is_not_reused_across_payment_types(self):

@@ -3318,14 +3318,13 @@ def prepare_cloud_asset_renewal_with_link(asset_id: int, user_id: int, plan_id: 
             CloudServerOrder.objects.filter(id=order.id).update(ip_recycle_at=asset.actual_expires_at, updated_at=timezone.now())
             order.ip_recycle_at = asset.actual_expires_at
         asset.order = order
-        asset.user = renewal_user
         asset.price = discounted_total
         asset.mtproxy_link = order.mtproxy_link
         asset.mtproxy_secret = order.mtproxy_secret
         asset.mtproxy_host = order.mtproxy_host
         asset.mtproxy_port = order.mtproxy_port
         asset.proxy_links = order.proxy_links
-        asset.save(update_fields=['order', 'user', 'price', 'mtproxy_link', 'mtproxy_secret', 'mtproxy_host', 'mtproxy_port', 'proxy_links', 'updated_at'])
+        asset.save(update_fields=['order', 'price', 'mtproxy_link', 'mtproxy_secret', 'mtproxy_host', 'mtproxy_port', 'proxy_links', 'updated_at'])
         record_cloud_ip_log(
             event_type=CloudIpLog.EVENT_CREATED,
             order=order,

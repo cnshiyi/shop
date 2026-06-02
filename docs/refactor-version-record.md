@@ -1,5 +1,28 @@
 # Refactor Version Record
 
+## 2026-06-02 public-asset-renewal-no-pending-owner-claim
+
+### Scope
+
+Small ownership safety fix for public unbound asset renewal orders.
+
+### Runtime Changes
+
+- Creating a pending public unbound `CloudAsset` renewal order no longer writes the payer onto `CloudAsset.user`.
+- The asset is still linked to the pending renewal order to prevent duplicate checkout attempts, but ownership remains unchanged until successful recovery.
+- Payment-timeout cleanup can now safely unlink the pending order without leaving an unpaid public asset claimed by the attempted payer.
+- Added focused regression coverage for public renewal timeout on an unowned unattached static IP asset.
+
+### Verification
+
+Passed locally with `PYTHONDONTWRITEBYTECODE=1 DJANGO_TEST_SQLITE=1`:
+
+```bash
+uv run python -m py_compile cloud/services.py orders/tests.py
+uv run python manage.py test orders.tests.ChainPaymentScannerTestCase.test_public_asset_renewal_expiry_does_not_claim_unowned_asset orders.tests.ChainPaymentScannerTestCase.test_expired_asset_renewal_payment_unbinds_asset_for_retry cloud.tests.CloudServerServicesTestCase.test_unbound_asset_renewal_wallet_payment_marks_paid_for_recovery cloud.tests.CloudServerServicesTestCase.test_unbound_asset_renewal_address_order_forces_usdt_from_trx_source --noinput --verbosity 1
+uv run python manage.py check
+```
+
 ## 2026-06-02 asset-renewal-expiry-retry-note
 
 ### Scope
