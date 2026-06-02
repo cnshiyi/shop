@@ -215,11 +215,11 @@ def init_text_site_configs(request):
     return _ok({'mode': mode, **result})
 
 
-# 功能：验证相关业务场景和回归行为；当前函数属于 Telegram Bot 和后台用户能力。
+# 功能：手动发送每日到期汇总的测试通知；当前函数属于 Telegram Bot 和后台用户能力。
 @csrf_exempt
 @dashboard_superuser_required
 @require_POST
-def test_daily_expiry_summary_notification(request):
+def send_daily_expiry_summary_test_notification(request):
     token = SiteConfig.get('bot_token', '') or get_runtime_config('bot_token', '')
     if not str(token or '').strip():
         return _error('测试通知发送失败：未配置 Telegram 机器人 Token', status=400)

@@ -2122,7 +2122,7 @@ from bot.api_site_configs import (  # noqa: E402
     init_text_site_configs,
     site_config_groups,
     site_configs_list,
-    test_daily_expiry_summary_notification,
+    send_daily_expiry_summary_test_notification,
     update_button_config,
     update_site_config,
 )
@@ -2239,7 +2239,7 @@ __all__ = [
     'products_list',
     'site_config_groups',
     'site_configs_list',
-    'test_daily_expiry_summary_notification',
+    'send_daily_expiry_summary_test_notification',
     'update_cloud_account',
     'update_product',
     'update_site_config',
