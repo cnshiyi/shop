@@ -1,5 +1,28 @@
 # 重构版本记录
 
+## 2026-06-02 17:18 自动监工：生产历史匹配移除测试标记
+
+### 范围
+
+本轮继续用 `codex-cli` 和本地命令复查最新 `HEAD`。CLI 只读复查发现生产历史分类条件中仍有 `真机测试：未附加IP删除` 文本，属于测试/演练标记混入生产匹配逻辑。
+
+### 修复
+
+- 从未附加固定 IP 删除历史分类条件中移除 `真机测试：未附加IP删除`。
+- 保留通用 `未附加IP`、`未附加固定IP` 和真实释放/云端不存在等生产语义匹配；被移除文本已经被通用条件覆盖，不影响现有历史归类。
+
+### 验证
+
+本地已通过：
+
+```bash
+UV_CACHE_DIR=/private/tmp/uv-cache-shop DJANGO_TEST_SQLITE=1 PYTHONDONTWRITEBYTECODE=1 uv run python -m py_compile bot/api.py
+UV_CACHE_DIR=/private/tmp/uv-cache-shop DJANGO_TEST_SQLITE=1 PYTHONDONTWRITEBYTECODE=1 uv run python manage.py check
+UV_CACHE_DIR=/private/tmp/uv-cache-shop DJANGO_TEST_SQLITE=1 PYTHONDONTWRITEBYTECODE=1 uv run python manage.py test cloud.tests.CloudServerServicesTestCase.test_manual_unattached_ip_delete_writes_log_and_history_item cloud.tests.CloudServerServicesTestCase.test_legacy_unattached_ip_delete_log_without_known_note_shows_history cloud.tests.CloudServerServicesTestCase.test_lifecycle_plans_include_ip_delete_history_item --noinput --verbosity 1
+```
+
+`codex-cli` 只读复查 session：`019e879e-8aca-71e1-bad5-fb8fdd9fde3b`。
+
 ## 2026-06-02 17:11 自动监工：计划刷新接口命名收口
 
 ### 范围
