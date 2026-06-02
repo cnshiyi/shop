@@ -396,7 +396,7 @@ def _drop_stale_deleted_note_lines(text: str | None) -> str:
 def _sync_order_deleted_from_cloud(order, old_public_ip, *, source: str = 'AWS 同步校验', asset=None):
     before = {
         'status': order.status,
-        'service_expires_at': order_asset_expiry(order),
+        'actual_expires_at': order_asset_expiry(order),
         'renew_grace_expires_at': order.renew_grace_expires_at,
         'suspend_at': order.suspend_at,
         'delete_at': order.delete_at,
@@ -420,13 +420,13 @@ def _sync_order_deleted_from_cloud(order, old_public_ip, *, source: str = 'AWS �
         update_fields.extend(['renew_grace_expires_at', 'suspend_at', 'delete_at', 'ip_recycle_at'])
     order.save(update_fields=update_fields)
     logger.info(
-        'AWS_SYNC_ORDER_DELETED_DATE_CHANGE order_id=%s order_no=%s old_public_ip=%s status=%s->%s service_expires_at=%s->%s renew_grace_expires_at=%s->%s suspend_at=%s->%s delete_at=%s->%s ip_recycle_at=%s->%s migration_due_at=%s->%s note=%s',
+        'AWS_SYNC_ORDER_DELETED_DATE_CHANGE order_id=%s order_no=%s old_public_ip=%s status=%s->%s actual_expires_at=%s->%s renew_grace_expires_at=%s->%s suspend_at=%s->%s delete_at=%s->%s ip_recycle_at=%s->%s migration_due_at=%s->%s note=%s',
         order.id,
         order.order_no,
         old_public_ip,
         before['status'],
         order.status,
-        _fmt_dt(before['service_expires_at']),
+        _fmt_dt(before['actual_expires_at']),
         _fmt_dt(order.migration_due_at or order_asset_expiry(order)),
         _fmt_dt(before['renew_grace_expires_at']),
         _fmt_dt(order.renew_grace_expires_at),

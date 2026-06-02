@@ -1306,7 +1306,6 @@ def _proxy_asset_view(asset: CloudAsset):
         order_no=asset.asset_name or getattr(order, 'server_name', None) or getattr(order, 'order_no', None) or f'ASSET-{asset.id}',
         public_ip=asset.public_ip,
         previous_public_ip=asset.previous_public_ip,
-        service_expires_at=asset.actual_expires_at,
         region_name=asset.region_name or getattr(order, 'region_name', None) or '-',
         region_code=asset.region_code or getattr(order, 'region_code', None) or '',
         plan_name=asset.asset_name or getattr(order, 'plan_name', None) or '人工代理',
@@ -2576,7 +2575,7 @@ def _trim_operation_order_no(source_order: CloudServerOrder | None, operation: s
 
 def _set_source_migration_expiry(order: CloudServerOrder, migration_due_at, reason: str, note: str = ''):
     before = {
-        'service_expires_at': order_asset_expiry(order),
+        'actual_expires_at': order_asset_expiry(order),
         'renew_grace_expires_at': order.renew_grace_expires_at,
         'suspend_at': order.suspend_at,
         'delete_at': order.delete_at,
@@ -2606,7 +2605,7 @@ def _set_source_migration_expiry(order: CloudServerOrder, migration_due_at, reas
     )
     asset_count = 1 if asset else 0
     after = {
-        'service_expires_at': migration_due_at,
+        'actual_expires_at': migration_due_at,
         'renew_grace_expires_at': order.renew_grace_expires_at,
         'suspend_at': order.suspend_at,
         'delete_at': order.delete_at,
@@ -2614,15 +2613,15 @@ def _set_source_migration_expiry(order: CloudServerOrder, migration_due_at, reas
         'migration_due_at': order.migration_due_at,
     }
     logger.info(
-        'CLOUD_SOURCE_MIGRATION_EXPIRY_CHANGE reason=%s order_id=%s order_no=%s status=%s public_ip=%s previous_public_ip=%s service_expires_at=%s->%s renew_grace_expires_at=%s->%s suspend_at=%s->%s delete_at=%s->%s ip_recycle_at=%s->%s migration_due_at=%s->%s asset_count=%s',
+        'CLOUD_SOURCE_MIGRATION_EXPIRY_CHANGE reason=%s order_id=%s order_no=%s status=%s public_ip=%s previous_public_ip=%s actual_expires_at=%s->%s renew_grace_expires_at=%s->%s suspend_at=%s->%s delete_at=%s->%s ip_recycle_at=%s->%s migration_due_at=%s->%s asset_count=%s',
         reason,
         order.id,
         order.order_no,
         order.status,
         order.public_ip,
         order.previous_public_ip,
-        _fmt_dt(before['service_expires_at']),
-        _fmt_dt(after['service_expires_at']),
+        _fmt_dt(before['actual_expires_at']),
+        _fmt_dt(after['actual_expires_at']),
         _fmt_dt(before['renew_grace_expires_at']),
         _fmt_dt(after['renew_grace_expires_at']),
         _fmt_dt(before['suspend_at']),
@@ -2646,7 +2645,7 @@ def _set_source_migration_expiry(order: CloudServerOrder, migration_due_at, reas
             f'{reason}: 旧服务器生命周期已更新；'
             f'旧机订单 {order.order_no}；旧机IP {order.public_ip or order.previous_public_ip or "-"}；'
             f'状态：旧服务器继续保留到迁移到期时间，之后进入宽限/删机/IP保留流程；'
-            f'服务到期 {_fmt_dt(before["service_expires_at"])} -> {_fmt_dt(after["service_expires_at"])}；'
+            f'服务到期 {_fmt_dt(before["actual_expires_at"])} -> {_fmt_dt(after["actual_expires_at"])}；'
             f'宽限到期 {_fmt_dt(before["renew_grace_expires_at"])} -> {_fmt_dt(after["renew_grace_expires_at"])}；'
             f'删机时间 {_fmt_dt(before["delete_at"])} -> {_fmt_dt(after["delete_at"])}；'
             f'IP保留到期 {_fmt_dt(before["ip_recycle_at"])} -> {_fmt_dt(after["ip_recycle_at"])}；'

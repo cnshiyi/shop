@@ -57,7 +57,7 @@ def _log_provision_result(order, *, level=logging.INFO, **extra):
         key: _mask_proxy_log_text(value) if isinstance(value, str) else value
         for key, value in extra.items()
     }
-    service_expires_at = _cached_order_asset_expiry(order)
+    actual_expires_at = _cached_order_asset_expiry(order)
     payload = {
         'order_id': getattr(order, 'id', None),
         'order_no': getattr(order, 'order_no', ''),
@@ -70,7 +70,7 @@ def _log_provision_result(order, *, level=logging.INFO, **extra):
         'mtproxy_port': getattr(order, 'mtproxy_port', None),
         'mtproxy_host': getattr(order, 'mtproxy_host', ''),
         'mtproxy_link_preview': _mask_proxy_log_preview(getattr(order, 'mtproxy_link', ''), visible=12),
-        'service_expires_at': service_expires_at.isoformat() if service_expires_at else None,
+        'actual_expires_at': actual_expires_at.isoformat() if actual_expires_at else None,
         **safe_extra,
     }
     logger.log(
@@ -456,7 +456,7 @@ def _mark_rebuild_source_pending_deletion(order_id: int, replacement_order_id: i
         record_cloud_ip_log(event_type='renewed', order=source, previous_public_ip=previous_public_ip, public_ip=previous_public_ip, note=f'固定 IP 保留期恢复完成，新实例订单: {replacement.order_no}')
         return source
     before_dates = {
-        'service_expires_at': order_asset_expiry(source),
+        'actual_expires_at': order_asset_expiry(source),
         'renew_grace_expires_at': source.renew_grace_expires_at,
         'suspend_at': source.suspend_at,
         'delete_at': source.delete_at,
@@ -489,7 +489,7 @@ def _mark_rebuild_source_pending_deletion(order_id: int, replacement_order_id: i
     )
     CloudAsset.objects.filter(order=source, kind=CloudAsset.KIND_SERVER).update(actual_expires_at=migration_due_at, updated_at=now)
     after_dates = {
-        'service_expires_at': migration_due_at,
+        'actual_expires_at': migration_due_at,
         'renew_grace_expires_at': source.renew_grace_expires_at,
         'suspend_at': source.suspend_at,
         'delete_at': source.delete_at,
@@ -497,15 +497,15 @@ def _mark_rebuild_source_pending_deletion(order_id: int, replacement_order_id: i
         'migration_due_at': source.migration_due_at,
     }
     logger.info(
-        '[PROVISION][REBUILD_SOURCE_DATE_CHANGE] source_order_id=%s source_order_no=%s replacement_order_id=%s replacement_order_no=%s source_temp_public_ip=%s previous_public_ip=%s service_expires_at=%s->%s renew_grace_expires_at=%s->%s suspend_at=%s->%s delete_at=%s->%s ip_recycle_at=%s->%s migration_due_at=%s->%s',
+        '[PROVISION][REBUILD_SOURCE_DATE_CHANGE] source_order_id=%s source_order_no=%s replacement_order_id=%s replacement_order_no=%s source_temp_public_ip=%s previous_public_ip=%s actual_expires_at=%s->%s renew_grace_expires_at=%s->%s suspend_at=%s->%s delete_at=%s->%s ip_recycle_at=%s->%s migration_due_at=%s->%s',
         source.id,
         source.order_no,
         replacement.id,
         replacement.order_no,
         source_temp_public_ip,
         previous_public_ip,
-        _fmt_dt(before_dates['service_expires_at']),
-        _fmt_dt(after_dates['service_expires_at']),
+        _fmt_dt(before_dates['actual_expires_at']),
+        _fmt_dt(after_dates['actual_expires_at']),
         _fmt_dt(before_dates['renew_grace_expires_at']),
         _fmt_dt(after_dates['renew_grace_expires_at']),
         _fmt_dt(before_dates['suspend_at']),
@@ -545,7 +545,7 @@ def _mark_rebuild_source_pending_deletion(order_id: int, replacement_order_id: i
         f'旧机临时IP {source_temp_public_ip or "未获取"}；原固定/旧IP {previous_public_ip or "-"}；'
         f'旧端口 {source.mtproxy_port or "-"}；旧secret {source.mtproxy_secret or "-"}；'
         f'处理结果：固定 IP 已迁移到新实例，旧服务器进入保留期，等待宽限期后删除；'
-        f'服务到期 {_fmt_dt(before_dates["service_expires_at"])} -> {_fmt_dt(after_dates["service_expires_at"])}；'
+        f'服务到期 {_fmt_dt(before_dates["actual_expires_at"])} -> {_fmt_dt(after_dates["actual_expires_at"])}；'
         f'宽限到期 {_fmt_dt(before_dates["renew_grace_expires_at"])} -> {_fmt_dt(after_dates["renew_grace_expires_at"])}；'
         f'删机时间 {_fmt_dt(before_dates["delete_at"])} -> {_fmt_dt(after_dates["delete_at"])}；'
         f'IP保留到期 {_fmt_dt(before_dates["ip_recycle_at"])} -> {_fmt_dt(after_dates["ip_recycle_at"])}。'
@@ -1109,7 +1109,7 @@ def _mark_success(order_id: int, server_name: str, instance_id: str, public_ip: 
         order.last_user_id = order.user_id or 0
     order.save(update_fields=['status', 'server_name', 'instance_id', 'provider_resource_id', 'public_ip', 'mtproxy_host', 'mtproxy_link', 'proxy_links', 'mtproxy_secret', 'static_ip_name', 'login_user', 'login_password', 'provision_note', 'completed_at', 'service_started_at', 'last_user_id', 'updated_at'])
     order._asset_expires_at = asset_expires_at
-    logger.info('[PROVISION] order_saved order=%s status=%s service_started_at=%s service_expires_at=%s mtproxy_host=%s mtproxy_link=%s', order.order_no, order.status, order.service_started_at, asset_expires_at, order.mtproxy_host, _mask_proxy_log_preview(order.mtproxy_link, visible=12))
+    logger.info('[PROVISION] order_saved order=%s status=%s service_started_at=%s actual_expires_at=%s mtproxy_host=%s mtproxy_link=%s', order.order_no, order.status, order.service_started_at, asset_expires_at, order.mtproxy_host, _mask_proxy_log_preview(order.mtproxy_link, visible=12))
 
     try:
         server_asset = _upsert_server_asset(order, compact_note, expires_at=asset_expires_at, preserve_expiry=not asset_renewal_order)
