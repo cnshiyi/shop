@@ -1,5 +1,38 @@
 # 重构版本记录
 
+## 2026-06-02 18:22 自动监工：到期事实与生命周期复查通过
+
+### 范围
+
+本轮继续监工 Shop Django 后端仓库，起始工作树干净，最近提交为 `ec33fc4 记录生命周期回归复查通过`。重点复查云资产到期事实源、订单旧到期字段、旧计划快照表、退款旧入口、废弃 app 回流、云同步保留人工到期时间和生命周期任务认领冲突保护。
+
+### 复查结论
+
+- 本轮未修改生产代码；未发现需要最小修复的新增缺陷。
+- `CloudServerOrder` 仍未恢复 `service_expires_at` 模型字段；生产代码未发现对旧订单到期列的危险 ORM 字段定义、查询或写入。
+- `CloudAsset.actual_expires_at` 仍是唯一结构化资产到期事实；订单详情接口中的 `service_expires_at` 只是前端兼容 payload 字段，显式编辑会写入资产事实字段并同步兼容 server 记录。
+- 阿里云同步回归测试确认云端过期时间不会覆盖已有 `CloudAsset.actual_expires_at` 手工值。
+- 未发现 `refund_to_balance`、`refund_balance`、`STATUS_REFUNDED`、`refunded` 旧状态、旧退款函数、`CloudLifecyclePlan`、`CloudNoticePlan`、`CloudAutoRenewPlan` 或旧生命周期 plan snapshot 函数回流。
+- `CloudLifecyclePlanNote` 仍只是删除计划备注表，不是旧派生计划快照表恢复；`_refresh_dashboard_plan_snapshots` 是当前仪表盘缓存刷新入口，不承载旧计划快照表。
+- `INSTALLED_APPS` 仍只包含 `core`、`bot`、`orders`、`cloud` 四个当前运行时 app；旧 `accounts/finance/mall/monitoring/dashboard_api/biz` 目录未恢复，`dashboard_api` 命中仅为 URL namespace。
+
+### 验证
+
+本地已通过：
+
+```bash
+UV_CACHE_DIR=/private/tmp/uv-cache-shop uv run python manage.py check
+UV_CACHE_DIR=/private/tmp/uv-cache-shop uv run python manage.py makemigrations --check --dry-run
+UV_CACHE_DIR=/private/tmp/uv-cache-shop uv run python -m py_compile cloud/models.py cloud/lifecycle.py cloud/dashboard_snapshots.py cloud/api_asset_edit.py cloud/api_orders.py cloud/sync_jobs.py orders/payment_scanner.py orders/services.py bot/api.py
+UV_CACHE_DIR=/private/tmp/uv-cache-shop DJANGO_TEST_SQLITE=1 uv run python manage.py test cloud.tests.CloudServerServicesTestCase.test_update_cloud_asset_for_aws_creates_single_replace_order_for_expiry_and_price cloud.tests.CloudServerServicesTestCase.test_refresh_lifecycle_plans_command_builds_lifecycle_plan_view cloud.tests.CloudServerServicesTestCase.test_refresh_lifecycle_plan_view_api_builds_lifecycle_plan_view cloud.tests.CloudServerServicesTestCase.test_update_cloud_asset_expiry_refreshes_delete_plan_view cloud.tests.CloudServerServicesTestCase.test_update_unattached_ip_release_time_refreshes_delete_plan_view cloud.tests.CloudServerServicesTestCase.test_lifecycle_delete_task_claim_blocks_same_cycle_duplicate cloud.tests.CloudServerServicesTestCase.test_lifecycle_asset_task_claim_blocks_same_cycle_duplicate cloud.tests.CloudServerServicesTestCase.test_order_static_ip_release_skips_when_lifecycle_task_claimed --verbosity 2
+UV_CACHE_DIR=/private/tmp/uv-cache-shop DJANGO_TEST_SQLITE=1 uv run python manage.py test cloud.tests.CloudOrderStatusDashboardSyncTestCase.test_order_detail_manual_edit_syncs_cloud_identity_and_proxy_fields --verbosity 2
+UV_CACHE_DIR=/private/tmp/uv-cache-shop DJANGO_TEST_SQLITE=1 uv run python manage.py test cloud.tests.CloudServerServicesTestCase.test_sync_aliyun_assets_preserves_existing_asset_expiry --verbosity 2
+```
+
+说明：`makemigrations --check --dry-run` 在沙箱内因无法连接本地 MySQL 打印一致性历史检查警告，但命令退出成功且显示 `No changes detected`。首次聚焦测试命令曾误把 `CloudOrderStatusDashboardSyncTestCase.test_order_detail_manual_edit_syncs_cloud_identity_and_proxy_fields` 写到 `CloudServerServicesTestCase` 下，导致测试选择器错误；已用正确测试类单独重跑并通过。
+
+剩余风险：本轮未跑完整测试套件，也未覆盖真实 MySQL、真实 AWS Lightsail 或真实阿里云 API；继续依赖 SQLite 聚焦测试、静态扫描和后续自动监工增量复查。
+
 ## 2026-06-02 18:11 自动监工：生命周期回归复查通过
 
 ### 范围
