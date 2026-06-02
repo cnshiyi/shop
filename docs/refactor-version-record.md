@@ -1,5 +1,41 @@
 # 重构版本记录
 
+## 2026-06-02 20:11 自动监工：云资产生命周期回归复查
+
+### 范围
+
+本轮继续监工 Shop Django 后端仓库，起始工作树干净，最近提交为 `e343109 记录资产级关机开关收敛`。重点复查云资产生命周期重构后的到期事实源、订单旧到期字段、旧计划快照表、退款旧入口、废弃 app 回流、云同步保留手工到期，以及上一轮资产级关机开关收敛是否稳定。
+
+### 复查结论
+
+- `INSTALLED_APPS` 仍只包含 `core`、`bot`、`orders`、`cloud` 当前运行域；仓库根下未发现 `accounts/finance/mall/monitoring/dashboard_api/biz` 废弃 app 目录恢复。
+- 运行时代码未发现 `CloudServerOrder.service_expires_at` 模型字段、危险 ORM 查询或写入恢复；`service_expires_at` 命中仍为兼容 API 字段、日志字段或从 `CloudAsset.actual_expires_at` 派生的展示值。
+- `CloudAsset.actual_expires_at` 仍是唯一结构化资产到期事实；AWS/阿里云同步已有资产路径继续保留现有 `CloudAsset.user` 和 `CloudAsset.actual_expires_at`，不会用云端或订单派生时间覆盖手工事实。
+- 未发现 `normalize_service_expiry`、`service_expired_at`、旧计划快照模型 `CloudLifecyclePlan/CloudNoticePlan/CloudAutoRenewPlan`、退款旧函数名、退款旧入口、`STATUS_REFUNDED` 或 `refunded` 运行时状态回流。
+- `CloudLifecyclePlanNote` 仍只是删除计划备注表，不是旧派生计划快照表恢复；`dashboard_api` 命中为当前 `core.dashboard_api` 公共模块和 URL namespace，不是废弃 Django app 回流。
+- 删除计划、通知计划、生命周期执行和 AWS 未附加固定 IP 释放继续使用资产级 `CloudAsset.shutdown_enabled`；云账号级关机开关未恢复到运行时判断。
+
+### 功能变更
+
+本轮未修改运行时代码；仅补充本次中文版本记录。
+
+### 验证
+
+已通过：
+
+```bash
+UV_CACHE_DIR=/private/tmp/uv-cache-shop uv run python manage.py check
+UV_CACHE_DIR=/private/tmp/uv-cache-shop uv run python -m py_compile bot/api.py bot/api_cloud_accounts.py cloud/api_assets.py cloud/lifecycle.py cloud/lifecycle_execution.py cloud/management/commands/sync_aws_assets.py cloud/management/commands/sync_aliyun_assets.py cloud/services.py cloud/api_orders.py cloud/api_tasks.py core/management/commands/cleanup_old_records.py cloud/tests.py
+UV_CACHE_DIR=/private/tmp/uv-cache-shop uv run python manage.py makemigrations --check --dry-run
+DJANGO_TEST_SQLITE=1 UV_CACHE_DIR=/private/tmp/uv-cache-shop uv run python manage.py test cloud.tests.CloudServerServicesTestCase.test_order_rejects_removed_service_expiry_field cloud.tests.CloudServerServicesTestCase.test_server_compat_create_preserves_manual_asset_owner_and_expiry cloud.tests.CloudServerServicesTestCase.test_mark_success_preserves_existing_manual_asset_fields_on_update cloud.tests.CloudServerServicesTestCase.test_early_provisioning_steps_preserve_existing_manual_asset_fields cloud.tests.CloudServerServicesTestCase.test_sync_aws_missing_instance_requires_five_passes_before_delete cloud.tests.CloudServerServicesTestCase.test_sync_aws_missing_check_uses_previous_public_ip_before_delete cloud.tests.CloudServerServicesTestCase.test_sync_aws_missing_blank_asset_does_not_delete_unrelated_blank_server cloud.tests.CloudServerServicesTestCase.test_lifecycle_plans_route_linked_asset_delete_to_order_item cloud.tests.CloudServerServicesTestCase.test_linked_active_order_asset_delete_plan_uses_order_payload cloud.tests.CloudServerServicesTestCase.test_orphan_asset_delete_refuses_linked_active_order_when_enforced cloud.tests.CloudServerServicesTestCase.test_unattached_ip_delete_respects_shutdown_disabled_asset cloud.tests.CloudServerServicesTestCase.test_due_orders_ignore_account_shutdown_disabled cloud.tests.CloudServerServicesTestCase.test_due_orders_skip_suspend_when_asset_shutdown_disabled cloud.tests.CloudServerServicesTestCase.test_lifecycle_suspend_execution_guard_respects_asset_shutdown_disabled cloud.tests.CloudServerServicesTestCase.test_due_orders_restore_suspend_after_asset_shutdown_reenabled cloud.tests.CloudServerServicesTestCase.test_lifecycle_plans_ignore_account_shutdown_disabled_plan_state cloud.tests.CloudServerServicesTestCase.test_lifecycle_plans_show_asset_shutdown_disabled_plan_state --verbosity 1
+rg -n "cloud_account__shutdown_enabled|云账号关机计划|资产或云账号关机计划|CloudLifecyclePlan\.|CloudNoticePlan\.|CloudAutoRenewPlan\.|refunded|refund_to_balance|refund_balance|service_expires_at\s*=\s*models|service_expired_at|normalize_service_expiry|STATUS_REFUNDED" cloud orders bot core shop --glob '!**/migrations/**'
+git diff --check
+```
+
+结果：Django 系统检查、关键模块编译、17 条聚焦回归、迁移检查和空白检查均通过；旧字段/旧模型/旧退款/云账号关机开关回流扫描无命中。`makemigrations --check --dry-run` 无模型变更；默认 MySQL 迁移历史检查因沙箱无法连接 `127.0.0.1` 输出警告。
+
+剩余风险：本轮未跑完整测试套件，未连接真实 MySQL、AWS Lightsail 或阿里云 API，未执行真实自动续费支付、云端删机、固定 IP 释放或历史数据清理。
+
 ## 2026-06-02 20:09 自动监工：收敛资产级关机开关
 
 ### 范围
