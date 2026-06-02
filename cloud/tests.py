@@ -9052,6 +9052,89 @@ class CloudServerServicesTestCase(TestCase):
         row = next(item for item in data['due_items'] if item.get('order_id') == order.id and item.get('notice_type') == 'renew_notice')
         self.assertEqual(row['ip'], '7.7.7.71')
 
+    # 功能：验证通知计划详情不会展示关机计划关闭的删机提醒。
+    def test_notice_task_detail_hides_shutdown_disabled_lifecycle_notices(self):
+        now = timezone.now()
+        delete_at = now + timezone.timedelta(days=2)
+        order = CloudServerOrder.objects.create(
+            order_no='NOTICE-SHUTDOWN-OFF-DELETE-1',
+            user=self.user,
+            plan=self.plan,
+            provider=self.plan.provider,
+            region_code=self.plan.region_code,
+            region_name=self.plan.region_name,
+            plan_name=self.plan.plan_name,
+            quantity=1,
+            currency='USDT',
+            total_amount='19.00',
+            pay_amount='19.00',
+            status='suspended',
+            public_ip='7.7.7.72',
+            delete_at=delete_at,
+            delete_reminder_enabled=True,
+        )
+        CloudAsset.objects.create(
+            kind=CloudAsset.KIND_SERVER,
+            source=CloudAsset.SOURCE_ORDER,
+            order=order,
+            user=self.user,
+            provider=order.provider,
+            region_code=order.region_code,
+            region_name=order.region_name,
+            asset_name='notice-shutdown-off-delete',
+            public_ip=order.public_ip,
+            actual_expires_at=now - timezone.timedelta(days=5),
+            status=CloudAsset.STATUS_RUNNING,
+            shutdown_enabled=False,
+            is_active=True,
+        )
+        recycle_order = CloudServerOrder.objects.create(
+            order_no='NOTICE-SHUTDOWN-OFF-RECYCLE-1',
+            user=self.user,
+            plan=self.plan,
+            provider=self.plan.provider,
+            region_code=self.plan.region_code,
+            region_name=self.plan.region_name,
+            plan_name=self.plan.plan_name,
+            quantity=1,
+            currency='USDT',
+            total_amount='19.00',
+            pay_amount='19.00',
+            status='deleted',
+            previous_public_ip='7.7.7.73',
+            static_ip_name='StaticIp-notice-shutdown-off',
+            ip_recycle_at=now + timezone.timedelta(days=2),
+            ip_recycle_reminder_enabled=True,
+        )
+        CloudAsset.objects.create(
+            kind=CloudAsset.KIND_SERVER,
+            source=CloudAsset.SOURCE_AWS_SYNC,
+            order=recycle_order,
+            user=self.user,
+            provider=recycle_order.provider,
+            region_code=recycle_order.region_code,
+            region_name=recycle_order.region_name,
+            asset_name='StaticIp-notice-shutdown-off',
+            public_ip='7.7.7.73',
+            previous_public_ip='7.7.7.73',
+            actual_expires_at=now - timezone.timedelta(days=5),
+            status=CloudAsset.STATUS_DELETED,
+            provider_status='固定IP保留中-实例已删除',
+            shutdown_enabled=False,
+            is_active=False,
+        )
+        staff_user = get_user_model().objects.create_user(username='staff_notice_shutdown_off', password='x', is_staff=True)
+        request = self.factory.get('/api/admin/tasks/notices/', {'limit': 20, 'future_limit': 20, 'history_limit': 20})
+        self._attach_bearer_session(request, staff_user)
+
+        response = notice_task_detail(request)
+
+        self.assertEqual(response.status_code, 200)
+        data = json.loads(response.content)['data']
+        visible_items = [*data['due_items'], *data['future_plan_items']]
+        self.assertFalse(any(item.get('order_id') == order.id and item.get('notice_type') == 'delete_notice' for item in visible_items))
+        self.assertFalse(any(item.get('order_id') == recycle_order.id and item.get('notice_type') == 'recycle_notice' for item in visible_items))
+
     # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
     def test_notice_write_actions_require_superuser(self):
         staff_user = get_user_model().objects.create_user(username='staff_notice_write_blocked', password='x', is_staff=True)
@@ -14581,6 +14664,52 @@ class CloudServerServicesTestCase(TestCase):
 
         CloudServerOrder.objects.filter(id=order.id).update(ip_recycle_at=cutoff - timezone.timedelta(days=1))
         self.assertTrue(cleanup_qs.filter(id=order.id).exists())
+
+    # 功能：验证旧记录清理不会把非终态云订单纳入删除候选。
+    def test_cleanup_old_records_keeps_non_terminal_cloud_orders(self):
+        from core.management.commands.cleanup_old_records import Command
+
+        cutoff = timezone.now() - timezone.timedelta(days=100)
+        old_expiry = cutoff - timezone.timedelta(days=30)
+        statuses = ['completed', 'expiring', 'renew_pending', 'suspended', 'deleting']
+        for index, status in enumerate(statuses):
+            order = CloudServerOrder.objects.create(
+                order_no=f'HB-TEST-CLEANUP-KEEPS-ACTIVE-{index}',
+                user=self.user,
+                plan=self.plan,
+                provider=self.plan.provider,
+                region_code=self.plan.region_code,
+                region_name=self.plan.region_name,
+                plan_name=self.plan.plan_name,
+                quantity=1,
+                currency='USDT',
+                total_amount='19.00',
+                pay_amount='19.00',
+                status=status,
+                public_ip=f'20.20.21.{index + 1}',
+                previous_public_ip=f'20.20.21.{index + 1}',
+                ip_recycle_at=cutoff - timezone.timedelta(days=1),
+                instance_id=f'cleanup-active-instance-{index}',
+            )
+            CloudServerOrder.objects.filter(id=order.id).update(created_at=cutoff - timezone.timedelta(days=1))
+            CloudAsset.objects.create(
+                kind=CloudAsset.KIND_SERVER,
+                source=CloudAsset.SOURCE_ORDER,
+                order=order,
+                user=self.user,
+                provider=order.provider,
+                region_code=order.region_code,
+                region_name=order.region_name,
+                asset_name=f'cleanup-active-asset-{index}',
+                public_ip=order.public_ip,
+                actual_expires_at=old_expiry,
+                status=CloudAsset.STATUS_RUNNING,
+                is_active=True,
+            )
+
+        cleanup_qs = CloudServerOrder.objects.filter(created_at__lt=cutoff).filter(Command._cloud_order_cleanup_filter(cutoff))
+
+        self.assertFalse(cleanup_qs.filter(status__in=statuses).exists())
 
     # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
     def test_lifecycle_tick_releases_retained_static_ip_after_recycle_due(self):
