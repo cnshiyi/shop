@@ -1647,6 +1647,54 @@ class CloudServerServicesTestCase(TestCase):
         self.assertTrue(Server.objects.filter(instance_id='manual-same-instance-different-ip', public_ip='13.250.31.19').exists())
         self.assertTrue(Server.objects.filter(instance_id='manual-same-instance-different-ip', public_ip='13.250.31.20').exists())
 
+    # 功能：验证同订单新身份的兼容服务器创建不会覆盖已有人工备注记录。
+    def test_server_create_with_new_identity_does_not_overwrite_same_order_note(self):
+        order = CloudServerOrder.objects.create(
+            order_no='SERVER-CREATE-NEW-IDENTITY-NOTE',
+            user=self.user,
+            plan=self.plan,
+            provider=self.plan.provider,
+            region_code=self.plan.region_code,
+            region_name=self.plan.region_name,
+            plan_name=self.plan.plan_name,
+            quantity=1,
+            currency='USDT',
+            total_amount='19.00',
+            pay_amount='19.00',
+            status='completed',
+        )
+        existing = Server.objects.create(
+            source=Server.SOURCE_AWS_SYNC,
+            order=order,
+            user=self.user,
+            provider='aws_lightsail',
+            region_code='ap-southeast-1',
+            server_name='existing-note-server',
+            instance_id='existing-note-instance',
+            public_ip='13.250.31.21',
+            note='已有人工备注',
+        )
+
+        created = Server.objects.create(
+            source=Server.SOURCE_AWS_SYNC,
+            order=order,
+            user=self.user,
+            provider='aws_lightsail',
+            region_code='ap-southeast-1',
+            server_name='created-note-server',
+            instance_id='created-note-instance',
+            public_ip='13.250.31.22',
+            note='新兼容记录备注',
+        )
+
+        existing.refresh_from_db()
+        self.assertNotEqual(existing.id, created.id)
+        self.assertEqual(Server.objects.filter(order=order).count(), 2)
+        self.assertEqual(existing.instance_id, 'existing-note-instance')
+        self.assertEqual(existing.public_ip, '13.250.31.21')
+        self.assertEqual(existing.note, '已有人工备注')
+        self.assertEqual(created.note, '新兼容记录备注')
+
     # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
     def test_rebind_cloud_server_user_syncs_order_asset_and_server(self):
         new_user = TelegramUser.objects.create(tg_user_id=990002, username='svc_rebind_new')
