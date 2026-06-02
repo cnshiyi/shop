@@ -918,7 +918,7 @@ async def provision_cloud_server(order_id: int):
                 saved.public_ip,
                 saved.mtproxy_host,
                 saved.mtproxy_port,
-                _mask_log_value(saved.mtproxy_link, visible=12),
+                _mask_proxy_log_preview(saved.mtproxy_link, visible=12),
                 _cached_order_asset_expiry(saved),
                 (timezone.now() - started_at).total_seconds(),
             )

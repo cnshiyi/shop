@@ -43,6 +43,7 @@ from cloud.provisioning import (
     _mark_provisioning_start,
     _mark_rebuild_source_pending_deletion,
     _mark_success,
+    _mask_proxy_log_preview,
     provision_cloud_server,
 )
 from cloud.services import _cloud_asset_deleted_or_missing, apply_cloud_server_renewal, create_cloud_server_order, create_cloud_server_rebuild_order, create_cloud_server_renewal, create_cloud_server_renewal_by_public_query, create_cloud_server_renewal_for_user, create_cloud_server_upgrade_order, ensure_cloud_asset_operation_order, get_cloud_server_by_ip, get_cloud_server_by_ip_for_user, get_group_proxy_asset_detail, get_proxy_asset_by_ip_for_admin, get_proxy_asset_by_ip_for_user, get_user_proxy_asset_detail, is_retained_ip_order_visible_in_group, list_all_auto_renew_cloud_servers, list_cloud_asset_renewal_plans, list_cloud_server_upgrade_plans, list_group_cloud_servers, list_retained_ip_renewal_plans, list_retained_ip_renewal_plans_by_asset, list_user_cloud_servers, mark_cloud_server_ip_change_requested, mark_cloud_server_reinit_requested, pay_cloud_server_order_with_balance, pay_cloud_server_renewal_with_balance, prepare_cloud_asset_renewal_with_link, prepare_retained_ip_renewal_with_link, rebind_cloud_server_user, record_cloud_ip_log, replace_cloud_asset_order_by_admin, run_cloud_server_renewal_postcheck, set_cloud_server_auto_renew_admin, set_group_cloud_server_auto_renew, sync_cloud_asset_user_binding
@@ -113,6 +114,17 @@ class CloudServerServicesTestCase(TestCase):
         self.assertNotIn(secret, logged_values)
         self.assertNotIn(secret, str(payload))
         self.assertIn('secret=***', payload['error'])
+
+    # 功能：验证代理链接日志预览不会保留 secret 尾部。
+    def test_proxy_log_preview_masks_secret_tail(self):
+        secret = 'ee0123456789abcdef0123456789abcdef'
+        link = f'tg://proxy?server=10.0.0.93&port=9528&secret={secret}'
+
+        preview = _mask_proxy_log_preview(link, visible=12)
+
+        self.assertNotIn(secret, preview)
+        self.assertNotIn(secret[-12:], preview)
+        self.assertIn('secret=***', preview)
 
     # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
     def test_cloud_account_label_variants_cover_legacy_colon_labels(self):

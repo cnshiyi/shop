@@ -1,5 +1,38 @@
 # 重构版本记录
 
+## 2026-06-02 18:41 自动监工：开通日志 secret 尾部脱敏复查
+
+### 范围
+
+本轮继续监工 Shop Django 后端仓库，起始时工作树已有 `cloud/provisioning.py` 和 `cloud/tests.py` 的开通日志脱敏相关改动，最近提交为 `a329b0d 记录开通日志测试夹具补强`。本轮在不覆盖现有改动的前提下，继续复查云资产到期事实源、订单旧到期字段、旧计划快照表、退款旧入口、废弃 app 回流和生命周期任务认领冲突保护。
+
+### 修复
+
+- 将异步开通成功日志中的 `mtproxy_link` 预览从通用 `_mask_log_value()` 改为 `_mask_proxy_log_preview()`，避免整串裁剪时保留代理 `secret` 尾部。
+- 新增 `test_proxy_log_preview_masks_secret_tail`，确认完整 secret 和末尾 12 位都不会出现在日志预览中，同时保留 `secret=***` 的可诊断占位。
+
+### 复查结论
+
+- `CloudServerOrder` 仍未恢复 `service_expires_at` 模型字段；生产代码未发现对旧订单到期列的危险 ORM 字段定义、查询或写入。
+- `CloudAsset.actual_expires_at` 仍是唯一结构化资产到期事实；订单接口中的 `service_expires_at` 只作为兼容 payload 字段，显式编辑写入资产事实字段。
+- 未发现 `refund_to_balance`、`refund_balance`、`STATUS_REFUNDED`、`refunded` 旧状态、`CloudLifecyclePlan`、`CloudNoticePlan`、`CloudAutoRenewPlan` 或旧生命周期 plan snapshot 函数回流。
+- `INSTALLED_APPS` 仍只包含 `core`、`bot`、`orders`、`cloud` 四个当前运行时 app；旧 `accounts/finance/mall/monitoring/dashboard_api/biz` 目录未恢复，`dashboard_api` 命中仅为 URL namespace。
+
+### 验证
+
+本地已通过：
+
+```bash
+UV_CACHE_DIR=/private/tmp/uv-cache-shop DJANGO_TEST_SQLITE=1 PYTHONDONTWRITEBYTECODE=1 uv run python manage.py check
+UV_CACHE_DIR=/private/tmp/uv-cache-shop DJANGO_TEST_SQLITE=1 PYTHONDONTWRITEBYTECODE=1 uv run python -m py_compile cloud/provisioning.py cloud/tests.py cloud/asset_expiry.py cloud/api_orders.py cloud/lifecycle.py cloud/services.py
+UV_CACHE_DIR=/private/tmp/uv-cache-shop DJANGO_TEST_SQLITE=1 PYTHONDONTWRITEBYTECODE=1 uv run python manage.py makemigrations --check --dry-run
+UV_CACHE_DIR=/private/tmp/uv-cache-shop DJANGO_TEST_SQLITE=1 PYTHONDONTWRITEBYTECODE=1 uv run python manage.py test cloud.tests.CloudServerServicesTestCase.test_provision_result_log_uses_cached_asset_expiry cloud.tests.CloudServerServicesTestCase.test_provision_result_log_masks_proxy_secrets cloud.tests.CloudServerServicesTestCase.test_proxy_log_preview_masks_secret_tail --noinput --verbosity 1
+UV_CACHE_DIR=/private/tmp/uv-cache-shop DJANGO_TEST_SQLITE=1 PYTHONDONTWRITEBYTECODE=1 uv run python manage.py test cloud.tests.CloudServerServicesTestCase.test_order_rejects_removed_service_expiry_field cloud.tests.CloudServerServicesTestCase.test_server_compat_create_preserves_manual_asset_owner_and_expiry cloud.tests.CloudServerServicesTestCase.test_update_cloud_asset_expiry_refreshes_order_lifecycle cloud.tests.CloudServerServicesTestCase.test_sync_aliyun_assets_preserves_existing_asset_expiry --noinput --verbosity 1
+UV_CACHE_DIR=/private/tmp/uv-cache-shop DJANGO_TEST_SQLITE=1 PYTHONDONTWRITEBYTECODE=1 uv run python manage.py test cloud.tests.CloudServerServicesTestCase.test_lifecycle_delete_task_claim_blocks_same_cycle_duplicate cloud.tests.CloudServerServicesTestCase.test_lifecycle_asset_task_claim_blocks_same_cycle_duplicate cloud.tests.CloudServerServicesTestCase.test_order_static_ip_release_skips_when_lifecycle_task_claimed --noinput --verbosity 1
+```
+
+剩余风险：本轮未跑完整测试套件，也未覆盖真实 MySQL、真实 AWS Lightsail 或真实阿里云 API。
+
 ## 2026-06-02 18:34 自动监工：开通日志测试夹具补齐
 
 ### 范围
