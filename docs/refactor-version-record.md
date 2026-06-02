@@ -1,5 +1,45 @@
 # 重构版本记录
 
+## 2026-06-02 20:09 自动监工：收敛资产级关机开关
+
+### 范围
+
+本轮继续使用终端版 `codex` 做只读复审，并人工复核删除计划、通知计划、代理详情、云账号配置和生命周期执行入口。CLI 复审结论指出：上一轮关联资产删机入口已稳定，但关机计划仍同时读取云账号级 `shutdown_enabled` 和资产级 `CloudAsset.shutdown_enabled`，不符合“删除计划和代理详情使用同一套开关”的目标。
+
+### 修复内容
+
+- 删除计划、通知计划、代理详情风险态、订单关机/删机、迁移旧机删除、订单固定 IP 回收、孤立服务器删除、未附加固定 IP 释放，现在只以 `CloudAsset.shutdown_enabled` 作为单条资产关机计划开关。
+- 保留“删除服务器总开关”和“删除 IP 总开关”作为危险动作总闸；它们不是单条资产开关。
+- 云账号接口不再读写或返回 `shutdown_enabled`，避免前端或后续代码再次把云账号开关接入生命周期判断。
+- AWS 同步释放未附加固定 IP 时，不再用云账号级关机开关拦截，只检查资产自身开关和删除 IP 总开关。
+- 前端云账号 API 类型移除 `DashboardCloudAccountConfigItem.shutdown_enabled` 和创建 payload 里的云账号关机字段；代理详情和删除计划仍使用资产级字段。
+
+### 验证
+
+已通过：
+
+```bash
+uv run python -m py_compile bot/api.py bot/api_cloud_accounts.py cloud/api_assets.py cloud/lifecycle.py cloud/lifecycle_execution.py cloud/management/commands/sync_aws_assets.py cloud/tests.py
+uv run python manage.py check
+DJANGO_TEST_SQLITE=1 uv run python manage.py test cloud.tests.CloudServerServicesTestCase.test_unattached_ip_delete_respects_shutdown_disabled_asset cloud.tests.CloudServerServicesTestCase.test_due_orders_ignore_account_shutdown_disabled cloud.tests.CloudServerServicesTestCase.test_due_orders_skip_suspend_when_asset_shutdown_disabled cloud.tests.CloudServerServicesTestCase.test_lifecycle_suspend_execution_guard_respects_asset_shutdown_disabled cloud.tests.CloudServerServicesTestCase.test_due_orders_restore_suspend_after_asset_shutdown_reenabled cloud.tests.CloudServerServicesTestCase.test_lifecycle_plans_ignore_account_shutdown_disabled_plan_state cloud.tests.CloudServerServicesTestCase.test_lifecycle_plans_show_asset_shutdown_disabled_plan_state --verbosity 2
+DJANGO_TEST_SQLITE=1 uv run python manage.py test cloud.tests.CloudServerServicesTestCase.test_notice_task_detail_hides_shutdown_disabled_lifecycle_notices cloud.tests.CloudServerServicesTestCase.test_dashboard_shutdown_plan_run_respects_delete_at cloud.tests.CloudServerServicesTestCase.test_dashboard_orphan_asset_plan_run_respects_computed_delete_time cloud.tests.CloudServerServicesTestCase.test_linked_active_order_asset_delete_plan_uses_order_payload cloud.tests.CloudServerServicesTestCase.test_orphan_asset_delete_refuses_linked_active_order_when_enforced cloud.tests.CloudServerServicesTestCase.test_lifecycle_plans_route_linked_asset_delete_to_order_item cloud.tests.CloudServerServicesTestCase.test_unattached_ip_delete_respects_shutdown_disabled_asset --verbosity 2
+uv run python manage.py makemigrations --check --dry-run
+rg -n "cloud_account__shutdown_enabled|云账号关机计划|资产或云账号关机计划|CloudLifecyclePlan\.|CloudNoticePlan\.|CloudAutoRenewPlan\.|refunded|refund_to_balance|refund_balance|service_expires_at\s*=\s*models|service_expired_at|normalize_service_expiry" cloud orders bot core shop --glob '!**/migrations/**'
+git diff --check
+```
+
+结果：后端编译、系统检查、两组聚焦回归、迁移检查和空白检查均通过；旧字段/旧模型/退款回流扫描无命中。
+
+前端类型检查受本机工具链版本阻断，未执行成功：
+
+```bash
+pnpm -F @vben/web-antd run typecheck
+```
+
+阻断原因：当前全局 `pnpm` 为 `9.15.9`、Node 为 `v26.0.0`；前端仓库要求 `pnpm >=10.0.0` 且 Node `^20.19.0 || ^22.18.0 || ^24.0.0`。本轮未修改全局工具链，也未触碰前端仓库已有的 `pnpm-lock.yaml` 脏改动。
+
+剩余风险：本轮未跑完整测试套件，未执行真实云端删机、固定 IP 释放、支付或生产清理；真实危险动作仍受总开关、计划时间窗口、任务认领和资产级关机开关保护。
+
 ## 2026-06-02 20:01 自动监工：云资产生命周期回归复查
 
 ### 范围
