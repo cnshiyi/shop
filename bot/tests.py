@@ -1021,6 +1021,17 @@ class RetainedIpRenewalUiTestCase(SimpleTestCase):
         self.assertIn('cad:9999999:clp:12345', callbacks)
         self.assertTrue(all(len(item.encode()) <= 64 for item in callbacks if item))
 
+    def test_asset_detail_direct_action_buttons_compact_back_callback(self):
+        source = inspect.getsource(register_handlers)
+        asset_detail_source = source.split('async def cb_cloud_asset_detail', 1)[1].split("@dp.callback_query(F.data.startswith('cloud:assetinit:'))", 1)[0]
+
+        self.assertIn("append_back_callback(f'cloud:assetinit:{item_id}', back_callback)", asset_detail_source)
+        self.assertIn("append_back_callback(f'cloud:adminexp:asset:{item_id}', back_callback)", asset_detail_source)
+        reinstall_callback = f'cloud:assetinit:9999999:{compact_callback_path("cloud:ad:asset:9999999:cloud:list:page:12345")}'
+        admin_expiry_callback = f'cloud:adminexp:asset:9999999:{compact_callback_path("cloud:ad:asset:9999999:cloud:list:page:12345")}'
+        self.assertLessEqual(len(reinstall_callback.encode()), 64)
+        self.assertLessEqual(len(admin_expiry_callback.encode()), 64)
+
     def test_reinstall_cancel_buttons_keep_back_path(self):
         order_markup = _reinstall_confirm_keyboard(88, 'token', 'cloud:list:page:3')
         asset_markup = _asset_reinstall_confirm_keyboard(99, 'token', 'cloud:querymenu')

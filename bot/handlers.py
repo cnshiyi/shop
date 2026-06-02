@@ -4274,14 +4274,14 @@ def register_handlers(dp: Dispatcher):
             if can_change_ip:
                 second_row.append(InlineKeyboardButton(text='🌐 更换IP', callback_data=cloud_asset_action_callback('changeip', item_id, back_callback)))
             if can_reinit:
-                second_row.append(InlineKeyboardButton(text='🛠 重新安装', callback_data=f'cloud:assetinit:{item_id}:{back_callback}'))
+                second_row.append(InlineKeyboardButton(text='🛠 重新安装', callback_data=append_back_callback(f'cloud:assetinit:{item_id}', back_callback)))
             if second_row:
                 rows.append(second_row)
             third_row = []
             if can_config:
                 third_row.append(InlineKeyboardButton(text='⚙️ 修改配置', callback_data=cloud_asset_action_callback('upgrade', item_id, back_callback)))
             if is_admin_context:
-                third_row.append(InlineKeyboardButton(text='🕒 修改时间', callback_data=f'cloud:adminexp:asset:{item_id}:{back_callback}'))
+                third_row.append(InlineKeyboardButton(text='🕒 修改时间', callback_data=append_back_callback(f'cloud:adminexp:asset:{item_id}', back_callback)))
             if third_row:
                 rows.append(third_row)
         rows.append([support_contact_button('cloud_asset', item_id)])

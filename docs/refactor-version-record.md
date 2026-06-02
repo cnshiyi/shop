@@ -4338,3 +4338,45 @@ rg -n "service_expires_at|service_expired_at|normalize_service_expiry|CloudLifec
 
 - 本轮仍是本地机器人回调和 SQLite 聚焦测试，尚未执行真实 Telegram 点击。
 - 真机云资源创建、删除、IP 变更、附加 IP 变更和删除计划执行将单独写实测报告，避免和普通单元测试混在一起。
+
+## 2026-06-03 资产详情直接操作按钮返回链收口
+
+### 范围
+
+本轮继续巡检 Shop Django 后端的机器人返回链、Telegram `callback_data` 64 字节限制、云资产生命周期唯一到期事实、废弃 app 回流、旧计划快照和旧退款入口。
+
+### 运行时变化
+
+- 资产详情页里的“重新安装”和管理员“修改时间”按钮不再直接拼接 `back_callback`，统一改用 `append_back_callback()`。
+- 该入口会先通过 `compact_callback_path()` 压缩嵌套来源，再生成下一层回调，避免从长资产详情路径进入重装或修改时间时接近 Telegram 64 字节限制。
+- 新增聚焦测试锁定资产详情直接操作按钮使用压缩辅助函数，并校验 7 位资产 ID、5 位页码场景下仍不超过 64 字节。
+
+### 监工结果
+
+- `CloudAsset` 仍只有 `actual_expires_at` 作为结构化资产到期字段。
+- `CloudServerOrder` 未恢复 `service_expires_at` 或 `actual_expires_at`，仅保留 `renew_grace_expires_at` 等流程时间字段。
+- `CloudAssetDashboardSnapshot` 未恢复派生到期字段。
+- 旧计划快照、旧退款函数名和废弃 app 未在运行时代码中回流；扫描命中的 `ip_recycle_at=asset.actual_expires_at` 是固定 IP 回收计划派生时间，不是订单服务到期字段恢复。
+
+### 验证
+
+本地已通过:
+
+```bash
+UV_CACHE_DIR=/Users/a399/Desktop/data/shop/.uv-cache uv run python manage.py check
+UV_CACHE_DIR=/Users/a399/Desktop/data/shop/.uv-cache uv run python -m py_compile bot/handlers.py bot/tests.py bot/keyboards.py cloud/services.py cloud/provisioning.py cloud/api_orders.py cloud/api_assets.py cloud/api_asset_edit.py cloud/lifecycle.py cloud/lifecycle_execution.py
+UV_CACHE_DIR=/Users/a399/Desktop/data/shop/.uv-cache DB_ENGINE=sqlite DB_NAME=/private/tmp/shop_bot_callbacks_after_patch.sqlite3 uv run python manage.py test bot.tests.RetainedIpRenewalUiTestCase --noinput --verbosity 1
+UV_CACHE_DIR=/Users/a399/Desktop/data/shop/.uv-cache DB_ENGINE=sqlite DB_NAME=/private/tmp/shop_lifecycle_focus.sqlite3 uv run python manage.py test cloud.tests.CloudServerServicesTestCase.test_order_rejects_removed_service_expiry_field cloud.tests.CloudServerServicesTestCase.test_lifecycle_plans_use_separate_order_plan_note cloud.tests.CloudServerServicesTestCase.test_lifecycle_plans_read_cached_table_after_initial_refresh cloud.tests.CloudServerServicesTestCase.test_lifecycle_plan_counts_match_proxy_list_assets cloud.tests.CloudServerServicesTestCase.test_update_cloud_asset_expiry_refreshes_delete_plan_view cloud.tests.CloudServerServicesTestCase.test_update_cloud_asset_expiry_refreshes_order_lifecycle --noinput --verbosity 1
+UV_CACHE_DIR=/Users/a399/Desktop/data/shop/.uv-cache DB_ENGINE=sqlite DB_NAME=/private/tmp/shop_asset_renewal_after_patch_<时间戳>.sqlite3 uv run python manage.py test cloud.tests.CloudServerServicesTestCase.test_unbound_asset_renewal_lists_plans_without_creating_order cloud.tests.CloudServerServicesTestCase.test_prepare_unbound_asset_renewal_creates_pending_payment_order cloud.tests.CloudServerServicesTestCase.test_unbound_asset_renewal_wallet_payment_marks_paid_for_recovery cloud.tests.CloudServerServicesTestCase.test_completed_asset_recovery_order_renews_without_reprovisioning cloud.tests.CloudServerServicesTestCase.test_sync_aws_assets_preserves_existing_manual_asset_note cloud.tests.CloudServerServicesTestCase.test_sync_aliyun_assets_preserves_existing_asset_expiry --noinput --verbosity 1
+UV_CACHE_DIR=/Users/a399/Desktop/data/shop/.uv-cache PYTHONDONTWRITEBYTECODE=1 uv run python manage.py makemigrations --check --dry-run
+UV_CACHE_DIR=/Users/a399/Desktop/data/shop/.uv-cache PYTHONDONTWRITEBYTECODE=1 uv run python manage.py shell -c "from cloud.models import CloudAsset, CloudServerOrder, CloudAssetDashboardSnapshot; print([f.name for f in CloudAsset._meta.fields if 'expires' in f.name or 'expiry' in f.name]); print([f.name for f in CloudServerOrder._meta.fields if 'expires' in f.name or 'expiry' in f.name]); print([f.name for f in CloudAssetDashboardSnapshot._meta.fields if 'expires' in f.name or 'expiry' in f.name])"
+git diff --check
+```
+
+`makemigrations --check --dry-run` 仍出现本地沙箱无法连接 `127.0.0.1` MySQL 的迁移历史一致性警告，但最终结果为 `No changes detected`。
+
+### 剩余风险
+
+- 本轮未跑完整测试套件。
+- 本轮未执行真实 Telegram 点击、真实云资源创建/删除/IP 变更、真实支付、链上广播、生产发布或不可逆操作。
+- 真机测试仍需在用户明确授权真实云资源成本后，单独按中文报告记录云资源 ID 脱敏结果。
