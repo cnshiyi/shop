@@ -1960,6 +1960,49 @@ The focused DB test run is blocked by local MySQL test database permissions:
 Access denied for user 'a'@'localhost' to database 'test_a'
 ```
 
+## 2026-06-02 实机开通删除回归修复
+
+### 范围
+
+第二十轮重构验证使用后台新增的 AWS 云账号执行真实创建、初始化、删机和固定 IP 释放。实机过程中发现开通保存成功后，结果日志在异步上下文里再次同步查询资产到期时间，导致订单被错误标记为失败。
+
+### 运行变更
+
+- `cloud/provisioning.py` 的开通结果日志改为读取同步保存阶段写入的 `_asset_expires_at` 缓存，不再在异步开通流程返回后隐式查询 `CloudAsset`。
+- `_mark_success()` 和 `_mark_failed()` 返回订单前都会附带资产到期时间缓存，成功、失败日志统一使用这一份缓存值。
+- 开通、重试初始化和失败日志里的代理链接、`secret`、SOCKS5 凭据统一脱敏，避免实机输出泄漏代理密钥。
+- 新增聚焦回归测试，确保开通结果日志不会再次调用资产到期时间查询函数。
+
+### 实机验证
+
+- AWS Lightsail 新加坡区真实创建测试实例成功，订单号 `SRV20260602101856384117`，实例名 `20260602-990000000001-5-o75`。
+- 复用同一台测试实例执行重试初始化，订单成功回写为 `completed`，资产到期时间保持为 `2026-07-03 10:22:05 UTC`。
+- 手动打开本地删除开关后，业务删机入口真实删除实例成功。
+- 固定 IP 释放入口真实释放固定 IP 成功。
+- AWS 端复查实例和固定 IP 均返回不存在，本地订单和资产均已进入删除/回收完成状态。
+
+### 验证命令
+
+已通过：
+
+```bash
+uv run python -m py_compile cloud/provisioning.py cloud/tests.py
+uv run python manage.py check
+uv run python manage.py makemigrations --check --dry-run
+```
+
+受本地 MySQL 权限阻塞：
+
+```bash
+uv run python manage.py test cloud.tests.CloudServerServicesTestCase.test_provision_result_log_uses_cached_asset_expiry
+```
+
+阻塞原因：
+
+```text
+Access denied for user 'a'@'localhost' to database 'test_a'
+```
+
 ## 2026-06-02 生产测试边界清理
 
 ### 范围
