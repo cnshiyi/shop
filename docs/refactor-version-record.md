@@ -1,5 +1,29 @@
 # Refactor Version Record
 
+## 2026-06-02 同群保留固定 IP 资产续费入口修复
+
+### 范围
+
+本轮根据上一轮 Codex CLI 诊断候选，修复保留固定 IP 资产按资产按钮进入续费时仍只按资产所属人过滤的问题。
+
+### 运行变更
+
+- `list_retained_ip_renewal_plans_by_asset()` 增加群聊上下文参数。
+- 私聊场景复用用户资产可见性，同一绑定群组内可见用户可以取到保留固定 IP 续费套餐。
+- 群聊场景只允许当前启用绑定群内的资产通过，不使用宽泛管理员绕过。
+- Bot 的 `cloud:assetaction:renew` 兜底调用会传入当前群 ID，避免同群保留固定 IP 资产看得到入口却取不到套餐。
+- 新增回归测试覆盖 owner 原路径、同群私聊可见路径、群聊路径、无关用户和错误群拒绝路径。
+
+### 验证
+
+本地已通过：
+
+```bash
+PYTHONDONTWRITEBYTECODE=1 DJANGO_TEST_SQLITE=1 uv run python -m py_compile bot/handlers.py cloud/services.py cloud/tests.py
+PYTHONDONTWRITEBYTECODE=1 DJANGO_TEST_SQLITE=1 uv run python manage.py test cloud.tests.CloudServerServicesTestCase.test_retained_deleted_asset_renewal_plans_are_available_by_asset_button cloud.tests.CloudServerServicesTestCase.test_retained_deleted_asset_renewal_plans_allow_same_group_visibility --noinput --verbosity 1
+PYTHONDONTWRITEBYTECODE=1 DJANGO_TEST_SQLITE=1 uv run python manage.py check
+```
+
 ## 2026-06-02 后台手工密钥编辑同步主链接修复
 
 ### 范围

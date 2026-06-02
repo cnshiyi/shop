@@ -4263,7 +4263,8 @@ def register_handlers(dp: Dispatcher):
             item = await get_proxy_asset_detail_for_admin(asset_id, 'asset') if is_admin else await get_user_proxy_asset_detail(asset_id, user.id, 'asset')
         public_asset_renewal = False
         if not item and action == 'renew':
-            retained_order, retained_plans, retained_err = await list_retained_ip_renewal_plans_by_asset(asset_id, user.id, admin=is_admin)
+            retained_group_chat_id = callback.message.chat.id if group_context and not is_admin else None
+            retained_order, retained_plans, retained_err = await list_retained_ip_renewal_plans_by_asset(asset_id, user.id, admin=is_admin, group_chat_id=retained_group_chat_id)
             if retained_err:
                 await _safe_callback_answer(callback, retained_err, show_alert=True)
                 return

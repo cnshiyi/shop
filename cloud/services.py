@@ -3237,13 +3237,19 @@ def list_retained_ip_renewal_plans(order_id: int, user_id: int, admin: bool = Fa
 
 
 @sync_to_async
-def list_retained_ip_renewal_plans_by_asset(asset_id: int, user_id: int, admin: bool = False):
+def list_retained_ip_renewal_plans_by_asset(asset_id: int, user_id: int, admin: bool = False, group_chat_id: int | None = None):
     asset_qs = CloudAsset.objects.select_related('order', 'order__user', 'order__plan', 'user', 'cloud_account').filter(
         id=asset_id,
         kind=CloudAsset.KIND_SERVER,
     )
     if not admin:
-        asset_qs = asset_qs.filter(user_id=user_id)
+        if group_chat_id is not None:
+            group = _group_filter_for_chat_id(group_chat_id)
+            if not group:
+                return None, [], None
+            asset_qs = asset_qs.filter(telegram_group=group)
+        else:
+            asset_qs = asset_qs.filter(_user_asset_visibility_filter(user_id))
     asset = asset_qs.first()
     if not asset or not asset.order_id or not _is_retained_static_ip_asset(asset):
         return None, [], None

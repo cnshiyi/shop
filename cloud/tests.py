@@ -7411,6 +7411,103 @@ class CloudServerServicesTestCase(TestCase):
         self.assertIsNone(err)
 
     # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
+    def test_retained_deleted_asset_renewal_plans_allow_same_group_visibility(self):
+        now = timezone.now()
+        member = TelegramUser.objects.create(tg_user_id=990021, username='retained_group_member')
+        stranger = TelegramUser.objects.create(tg_user_id=990022, username='retained_group_stranger')
+        group = TelegramGroupFilter.objects.create(chat_id=-1001887421, title='Retained Shared Group', enabled=True)
+        other_group = TelegramGroupFilter.objects.create(chat_id=-1001887422, title='Retained Other Group', enabled=True)
+        retained_order = CloudServerOrder.objects.create(
+            order_no='RETAINED-GROUP-ASSET-1',
+            user=self.user,
+            plan=self.plan,
+            provider=self.plan.provider,
+            region_code=self.plan.region_code,
+            region_name=self.plan.region_name,
+            plan_name=self.plan.plan_name,
+            quantity=1,
+            currency='USDT',
+            total_amount='19.00',
+            pay_amount='19.00',
+            pay_method='balance',
+            status='deleted',
+            public_ip='4.4.4.59',
+            previous_public_ip='4.4.4.59',
+            instance_id='',
+            static_ip_name='retained-group-asset-ip',
+            ip_recycle_at=now + timezone.timedelta(days=10),
+            service_started_at=now - timezone.timedelta(days=40),
+            service_expires_at=now - timezone.timedelta(days=5),
+        )
+        retained_asset = CloudAsset.objects.create(
+            kind=CloudAsset.KIND_SERVER,
+            source=CloudAsset.SOURCE_AWS_SYNC,
+            order=retained_order,
+            user=self.user,
+            provider='aws_lightsail',
+            region_code=self.plan.region_code,
+            region_name=self.plan.region_name,
+            asset_name='retained-group-asset-ip',
+            public_ip='4.4.4.59',
+            previous_public_ip='4.4.4.59',
+            actual_expires_at=retained_order.ip_recycle_at,
+            status=CloudAsset.STATUS_DELETED,
+            is_active=False,
+            provider_status='固定IP保留中-实例已删除',
+            note='实例删除后固定IP保留中',
+            telegram_group=group,
+        )
+        member_order = CloudServerOrder.objects.create(
+            order_no='RETAINED-GROUP-MEMBER-1',
+            user=member,
+            plan=self.plan,
+            provider=self.plan.provider,
+            region_code=self.plan.region_code,
+            region_name=self.plan.region_name,
+            plan_name=self.plan.plan_name,
+            quantity=1,
+            currency='USDT',
+            total_amount='19.00',
+            pay_amount='19.00',
+            pay_method='balance',
+            status='completed',
+            public_ip='4.4.4.60',
+            service_expires_at=now + timezone.timedelta(days=5),
+        )
+        CloudAsset.objects.create(
+            kind=CloudAsset.KIND_SERVER,
+            source=CloudAsset.SOURCE_ORDER,
+            order=member_order,
+            user=member,
+            provider=member_order.provider,
+            region_code=member_order.region_code,
+            region_name=member_order.region_name,
+            asset_name='retained-group-member',
+            public_ip='4.4.4.60',
+            actual_expires_at=member_order.service_expires_at,
+            status=CloudAsset.STATUS_RUNNING,
+            telegram_group=group,
+        )
+
+        private_order, private_plans, private_err = async_to_sync(list_retained_ip_renewal_plans_by_asset)(retained_asset.id, member.id)
+        group_order, group_plans, group_err = async_to_sync(list_retained_ip_renewal_plans_by_asset)(retained_asset.id, stranger.id, group_chat_id=group.chat_id)
+        stranger_order, stranger_plans, stranger_err = async_to_sync(list_retained_ip_renewal_plans_by_asset)(retained_asset.id, stranger.id)
+        wrong_group_order, wrong_group_plans, wrong_group_err = async_to_sync(list_retained_ip_renewal_plans_by_asset)(retained_asset.id, stranger.id, group_chat_id=other_group.chat_id)
+
+        self.assertEqual(private_order.id, retained_order.id)
+        self.assertGreaterEqual(len(private_plans), 1)
+        self.assertIsNone(private_err)
+        self.assertEqual(group_order.id, retained_order.id)
+        self.assertGreaterEqual(len(group_plans), 1)
+        self.assertIsNone(group_err)
+        self.assertIsNone(stranger_order)
+        self.assertEqual(stranger_plans, [])
+        self.assertIsNone(stranger_err)
+        self.assertIsNone(wrong_group_order)
+        self.assertEqual(wrong_group_plans, [])
+        self.assertIsNone(wrong_group_err)
+
+    # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
     def test_public_unattached_asset_renewal_requires_original_account(self):
         other_user = TelegramUser.objects.create(tg_user_id=990007, username='other_unattached_asset_no_account')
         asset = CloudAsset.objects.create(
