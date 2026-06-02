@@ -13,7 +13,7 @@ from django.contrib.sessions.models import Session
 from django.test import RequestFactory, SimpleTestCase, TestCase
 from django.utils import timezone
 
-from bot.api import DASHBOARD_SESSION_IDLE_SECONDS, _active_proxy_counts_by_user, _authenticate_dashboard_request, admin_users_list, archive_telegram_chat, auth_totp_start, create_admin_user, create_cloud_account, create_product, delete_cloud_account, me, send_telegram_chat_message, site_config_groups, telegram_login_start, test_daily_expiry_summary_notification, update_cloud_account, update_site_config, users_list, verify_cloud_account
+from bot.api import DASHBOARD_SESSION_IDLE_SECONDS, _active_proxy_counts_by_user, _authenticate_dashboard_request, admin_users_list, archive_telegram_chat, auth_totp_start, create_admin_user, create_cloud_account, create_product, delete_cloud_account, me, send_daily_expiry_summary_test_notification, send_telegram_chat_message, site_config_groups, telegram_login_start, update_cloud_account, update_site_config, users_list, verify_cloud_account
 from bot.handlers import _cloud_renewal_postcheck_and_notify, _cloud_server_created_text, _fetch_tron_address_summary, _hydrate_order_proxy_links, _install_notice_copy_wrapper, _proxy_links_text, _requires_recovery_provision, _retained_ip_renewal_plan_keyboard, _trongrid_get_with_key_fallback, _trongrid_post_with_key_fallback, _validate_reinstall_proxy_link
 from bot.keyboards import balance_details_list, cloud_ip_query_result, cloud_order_list
 from bot.models import TelegramChatArchive, TelegramChatMessage, TelegramLoginAccount, TelegramUser
@@ -671,15 +671,21 @@ class DashboardNotificationTestCase(TestCase):
     def test_daily_expiry_summary_test_endpoint_forces_send(self):
         staff = get_user_model().objects.create_user(username='daily_expiry_staff', password='pass', is_staff=True, is_superuser=True)
         request = RequestFactory().post('/api/admin/settings/site-configs/daily-expiry-summary/test/')
+        SessionMiddleware(lambda req: None).process_request(request)
+        request.session['_auth_user_id'] = str(staff.pk)
+        request.session['_auth_user_backend'] = 'django.contrib.auth.backends.ModelBackend'
+        request.session['_auth_user_hash'] = staff.get_session_auth_hash()
+        request.session.save()
         request.user = staff
+        request.META['HTTP_AUTHORIZATION'] = f'Bearer session-{request.session.session_key}'
         bot = MagicMock()
         bot.session.close = AsyncMock()
 
-        with patch('bot.api.get_runtime_config', return_value='123:test-token'):
+        with patch('bot.api_site_configs.get_runtime_config', return_value='123:test-token'):
             with patch('aiogram.Bot', return_value=bot):
                 with patch('cloud.lifecycle.daily_expiry_summary_tick', new_callable=AsyncMock) as tick:
                     tick.return_value = {'sent': 1, 'today': 2, 'expired': 3}
-                    response = test_daily_expiry_summary_notification(request)
+                    response = send_daily_expiry_summary_test_notification(request)
 
         self.assertEqual(response.status_code, 200)
         tick.assert_awaited_once()
