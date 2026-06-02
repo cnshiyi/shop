@@ -4771,6 +4771,58 @@ git diff --check
 - 本轮未跑完整测试套件。
 - 本轮未执行真实 Telegram 点击、真实云资源创建/删除/IP 变更、真实支付、链上广播、生产发布或不可逆操作。
 
+### 补充监工验证
+
+本轮在提交 `556e02f` 后继续补验机器人返回链、生命周期唯一到期事实和旧入口回流，未发现需要追加运行时代码修复的问题。
+
+补充确认:
+
+- `RetainedIpRenewalUiTestCase` 43 条通过，资产详情、订单详情、续费支付、换 IP、重装和修改配置相关按钮仍未生成超过 Telegram 64 字节限制的 `callback_data`。
+- 生命周期抽样测试 5 条通过，AWS 同步仍保留人工 `CloudAsset.actual_expires_at`，订单生命周期刷新仍从资产到期事实派生。
+- 模型 introspection 显示 `CloudServerOrder` 未恢复 `service_expires_at` 或 `actual_expires_at` 字段，`CloudAsset` 到期字段仍仅有 `actual_expires_at`，`CloudAssetDashboardSnapshot` 仅有 `risk_expired` 风险字段。
+- 运行代码扫描未发现 `allow_client_port`、`set_cloud_server_port`、旧端口 callback、旧计划模型、旧退款函数名或废弃 app 目录回流。
+- 极端 18 位订单/资产 ID、18 位页码和长订单筛选来源组合下，机器人按钮样本无超过 64 字节的 callback。
+
+补充验证命令:
+
+```bash
+DB_ENGINE=sqlite SQLITE_NAME=/private/tmp/shop_bot_ui_text_<进程>.sqlite3 UV_CACHE_DIR=/Users/a399/Desktop/data/shop/.uv-cache PYTHONDONTWRITEBYTECODE=1 uv run python manage.py test bot.tests.RetainedIpRenewalUiTestCase --noinput --verbosity 1
+DB_ENGINE=sqlite SQLITE_NAME=/private/tmp/shop_lifecycle_text_<进程>.sqlite3 UV_CACHE_DIR=/Users/a399/Desktop/data/shop/.uv-cache PYTHONDONTWRITEBYTECODE=1 uv run python manage.py test cloud.tests.CloudServerServicesTestCase.test_order_rejects_removed_service_expiry_field cloud.tests.CloudServerServicesTestCase.test_update_cloud_asset_expiry_refreshes_order_lifecycle cloud.tests.CloudServerServicesTestCase.test_sync_aws_assets_preserves_existing_manual_asset_note cloud.tests.CloudServerServicesTestCase.test_sync_aws_assets_preserves_existing_unattached_ip_due_time orders.tests.ChainPaymentScannerTestCase.test_expired_asset_renewal_payment_unbinds_asset_for_retry --noinput --verbosity 1
+DB_ENGINE=sqlite SQLITE_NAME=/private/tmp/shop_introspect_text_<进程>.sqlite3 UV_CACHE_DIR=/Users/a399/Desktop/data/shop/.uv-cache PYTHONDONTWRITEBYTECODE=1 uv run python manage.py shell -c "from django.conf import settings; retired={'accounts','finance','mall','monitoring','dashboard_api','biz'}; print('retired_apps', [app for app in settings.INSTALLED_APPS if app.split('.')[0] in retired]); from cloud.models import CloudAsset, CloudServerOrder, CloudAssetDashboardSnapshot; print('order_expiry_fields', [f.name for f in CloudServerOrder._meta.fields if f.name in {'service_expires_at','actual_expires_at'}]); print('asset_actual_fields', [f.name for f in CloudAsset._meta.fields if f.name == 'actual_expires_at']); print('snapshot_expiry_fields', [f.name for f in CloudAssetDashboardSnapshot._meta.fields if 'expire' in f.name or 'expiry' in f.name or f.name == 'actual_expires_at']); print('default_port', CloudServerOrder._meta.get_field('mtproxy_port').default)"
+DJANGO_SETTINGS_MODULE=shop.settings UV_CACHE_DIR=/Users/a399/Desktop/data/shop/.uv-cache PYTHONDONTWRITEBYTECODE=1 uv run python - <<'PY'
+import django
+from decimal import Decimal
+from types import SimpleNamespace
+
+django.setup()
+from bot.keyboards import cloud_server_detail, cloud_server_renew_payment, cloud_server_change_ip_region_menu, cloud_order_list, cloud_server_list, cloud_ip_query_result
+item_id = 999999999999999999
+regions = [('ap-southeast-1', '新加坡'), ('ap-northeast-1', '日本'), ('eu-central-1', '德国'), ('ap-northeast-3', '大阪'), ('me-central-1', '阿联酋')]
+long_back = f'cloud:detail:{item_id}:profile:orders:cloud:filter:provisioning:page:{item_id}'
+order = SimpleNamespace(id=item_id, status='completed', public_ip='1.1.1.1', previous_public_ip='', pay_amount=Decimal('1'), total_amount=Decimal('1'), currency='USDT', get_status_display=lambda: '已完成')
+markups = [
+    cloud_server_detail(item_id, True, True, True, long_back, True),
+    cloud_server_renew_payment(item_id, Decimal('1'), Decimal('2'), back_callback=long_back),
+    cloud_server_change_ip_region_menu(item_id, regions, expanded=True, back_callback=long_back),
+    cloud_order_list([order], page=item_id, total_pages=item_id, prefix='profile:orders:cloud:filter:provisioning:page', order_filter='paid'),
+    cloud_server_list([order], page=item_id, total_pages=item_id, prefix='profile:orders:cloud:filter:provisioning:page'),
+    cloud_ip_query_result([], [{'order_id': item_id, 'asset_id': 0, 'can_change_ip': True, 'can_reinit': True, 'can_config': True, 'can_auto_renew': True, 'can_support': True}], include_reinit=True),
+]
+violations = []
+for markup in markups:
+    for row in markup.inline_keyboard:
+        for button in row:
+            data = getattr(button, 'callback_data', None)
+            if data and len(data.encode()) > 64:
+                violations.append((len(data.encode()), data))
+assert not violations, violations
+PY
+rg -n "service_expires_at\\s*=|actual_expires_at\\s*=.*order\\.|order\\..*actual_expires_at|CloudLifecyclePlan\\b|CloudNoticePlan\\b|CloudAutoRenewPlan\\b|refund_order|process_refund|create_refund|issue_refund|refund_to_balance|refund_balance|STATUS_REFUNDED|status=['\\\"]refunded['\\\"]|normalize_service_expiry|service_expired_at|allow_client_port|set_cloud_server_port" bot core orders cloud shop --glob '!**/migrations/**' --glob '!**/tests.py'
+find . -maxdepth 2 -type d \( -name accounts -o -name finance -o -name mall -o -name monitoring -o -name dashboard_api -o -name biz \) -print
+```
+
+极端回调脚本读取客服按钮配置时仍会触发本机 MySQL 沙箱拒绝日志，但脚本最终确认违规列表为空。
+
 ## 2026-06-03 详情页返回按钮极端回调压缩
 
 ### 范围
