@@ -1882,6 +1882,7 @@ class CloudServerServicesTestCase(TestCase):
             status=CloudAsset.STATUS_UNKNOWN,
             provider_status='未附加固定IP',
             note='未附加固定IP',
+            mtproxy_port=9528,
             is_active=False,
         )
         link = {
@@ -1898,6 +1899,40 @@ class CloudServerServicesTestCase(TestCase):
         self.assertEqual(order.total_amount, Decimal('19.00'))
         self.assertGreaterEqual(order.pay_amount, Decimal('19.001000000'))
         self.assertLess(order.pay_amount, Decimal('20.000000000'))
+
+    # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
+    def test_unbound_asset_renewal_rejects_link_port_override(self):
+        due_at = timezone.now() + timezone.timedelta(days=9)
+        account = self._aws_test_account()
+        asset = CloudAsset.objects.create(
+            kind=CloudAsset.KIND_SERVER,
+            source=CloudAsset.SOURCE_AWS_SYNC,
+            user=self.user,
+            provider='aws_lightsail',
+            cloud_account=account,
+            account_label=cloud_account_label(account),
+            region_code=self.plan.region_code,
+            region_name=self.plan.region_name,
+            asset_name='unbound-renewal-port-override',
+            public_ip='31.31.31.40',
+            previous_public_ip='31.31.31.40',
+            actual_expires_at=due_at,
+            status=CloudAsset.STATUS_UNKNOWN,
+            provider_status='未附加固定IP',
+            note='未附加固定IP',
+            is_active=False,
+        )
+        link = {
+            'url': 'tg://proxy?server=31.31.31.40&port=9528&secret=eeeeeeeeeeeeeeee',
+            'server': '31.31.31.40',
+            'port': '9528',
+            'secret': 'eeeeeeeeeeeeeeee',
+        }
+
+        order, error = async_to_sync(prepare_cloud_asset_renewal_with_link)(asset.id, self.user.id, self.plan.id, link)
+
+        self.assertIsNone(order)
+        self.assertIn('当前主代理端口是 443', error)
 
     # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
     def test_retained_ip_renewal_address_order_forces_usdt_from_trx_order(self):
@@ -1940,6 +1975,43 @@ class CloudServerServicesTestCase(TestCase):
         self.assertEqual(renewal.total_amount, Decimal('19.00'))
         self.assertGreaterEqual(renewal.pay_amount, Decimal('19.001000000'))
         self.assertLess(renewal.pay_amount, Decimal('20.000000000'))
+
+    # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
+    def test_retained_ip_renewal_rejects_link_port_override(self):
+        recycle_at = timezone.now() + timezone.timedelta(days=9)
+        order = CloudServerOrder.objects.create(
+            order_no='RETAINED-IP-PORT-OVERRIDE-1',
+            user=self.user,
+            plan=self.plan,
+            provider='aws_lightsail',
+            region_code=self.plan.region_code,
+            region_name=self.plan.region_name,
+            plan_name=self.plan.plan_name,
+            quantity=1,
+            currency='USDT',
+            total_amount='19.00',
+            pay_amount='19.00',
+            pay_method='balance',
+            status='deleted',
+            public_ip='31.31.31.41',
+            previous_public_ip='31.31.31.41',
+            instance_id='',
+            static_ip_name='StaticIp-retained-port-override',
+            ip_recycle_at=recycle_at,
+            mtproxy_secret='eeeeeeeeeeeeeeee',
+            mtproxy_port=443,
+        )
+        link = {
+            'url': 'tg://proxy?server=31.31.31.41&port=9528&secret=eeeeeeeeeeeeeeee',
+            'server': '31.31.31.41',
+            'port': '9528',
+            'secret': 'eeeeeeeeeeeeeeee',
+        }
+
+        renewal, error = async_to_sync(prepare_retained_ip_renewal_with_link)(order.id, self.user.id, self.plan.id, link)
+
+        self.assertIsNone(renewal)
+        self.assertIn('当前主代理端口是 443', error)
 
     # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
     def test_lifecycle_delete_notice_batches_multiple_ips_for_same_user(self):
@@ -5961,6 +6033,7 @@ class CloudServerServicesTestCase(TestCase):
             status=CloudAsset.STATUS_UNKNOWN,
             provider_status='未附加固定IP',
             note='未附加固定IP',
+            mtproxy_port=9528,
             is_active=False,
         )
         link = {

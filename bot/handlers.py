@@ -2050,13 +2050,13 @@ def _secret_log_hint(secret: str) -> str:
     return f'{value[:6]}***{value[-6:]}({len(value)})'
 
 
-async def _validate_reinstall_proxy_link(order, link_data: dict[str, str], probe_when_possible: bool = True, allow_client_port: bool = False) -> tuple[bool, str]:
+async def _validate_reinstall_proxy_link(order, link_data: dict[str, str], probe_when_possible: bool = True) -> tuple[bool, str]:
     order_ip = str(order.public_ip or order.previous_public_ip or '').strip()
-    stored_order_port = str(order.mtproxy_port or link_data['port'] or MTPROXY_DEFAULT_PORT)
-    probe_port = str(link_data['port'] if allow_client_port else stored_order_port)
+    stored_order_port = str(order.mtproxy_port or MTPROXY_DEFAULT_PORT)
+    probe_port = stored_order_port
     parsed_secret = _normalize_proxy_secret(link_data.get('secret', ''))
     logger.info(
-        'CLOUD_REINSTALL_LINK_PARSED item_id=%s ip_expected=%s stored_port=%s probe_port=%s parsed_server=%s parsed_port=%s parsed_secret=%s probe_when_possible=%s has_login_password=%s allow_client_port=%s',
+        'CLOUD_REINSTALL_LINK_PARSED item_id=%s ip_expected=%s stored_port=%s probe_port=%s parsed_server=%s parsed_port=%s parsed_secret=%s probe_when_possible=%s has_login_password=%s',
         getattr(order, 'id', None),
         order_ip,
         stored_order_port,
@@ -2066,17 +2066,14 @@ async def _validate_reinstall_proxy_link(order, link_data: dict[str, str], probe
         _secret_log_hint(link_data.get('secret', '')),
         probe_when_possible,
         bool(getattr(order, 'login_password', None)),
-        allow_client_port,
     )
     guard_ok, guard_note = validate_server_connection_ip(link_data.get('server'), [order_ip], context=f'reinstall_link:{getattr(order, "id", None)}')
     if not guard_ok:
         logger.warning('CLOUD_REINSTALL_LINK_COMPARE_FAIL reason=ip_guard item_id=%s expected_ip=%s parsed_ip=%s note=%s', getattr(order, 'id', None), order_ip, link_data.get('server'), guard_note)
         return False, f'链接 IP 不匹配。当前服务器 IP 是 {order_ip or "未记录"}，你发的是 {link_data["server"]}'
-    if not allow_client_port and link_data['port'] != stored_order_port:
+    if link_data['port'] != stored_order_port:
         logger.warning('CLOUD_REINSTALL_LINK_COMPARE_FAIL reason=port item_id=%s expected_port=%s parsed_port=%s', getattr(order, 'id', None), stored_order_port, link_data['port'])
         return False, f'链接端口不匹配。当前主代理端口是 {stored_order_port}，你发的是 {link_data["port"]}'
-    if allow_client_port and link_data['port'] != stored_order_port:
-        logger.info('CLOUD_REINSTALL_LINK_PORT_OVERRIDE item_id=%s stored_port=%s parsed_port=%s', getattr(order, 'id', None), stored_order_port, link_data['port'])
     if not probe_when_possible or not getattr(order, 'login_password', None):
         logger.info('CLOUD_REINSTALL_LINK_COMPARE_SKIP_PROBE item_id=%s parsed_secret=%s reason=%s', getattr(order, 'id', None), _secret_log_hint(parsed_secret), 'disabled' if not probe_when_possible else 'missing_login_password')
         return True, '主链接格式和 IP 校验通过'
@@ -4639,7 +4636,7 @@ def register_handlers(dp: Dispatcher):
         await callback.message.reply(
             _bot_text_format(
                 'bot_retained_ip_renewal_link_prompt',
-                '🔄 未附加固定 IP 续费\n\n已选择套餐: {plan_name}\n保留 IP: {ip}\n\n请直接发送这台服务器旧的主代理链接（tg://proxy?... 或 https://t.me/proxy?...）。\n我会校验 IP、端口和密钥；如果系统记录的主端口不对，会以你发送的主链接端口为准；校验通过后再生成续费支付订单。',
+                '🔄 未附加固定 IP 续费\n\n已选择套餐: {plan_name}\n保留 IP: {ip}\n\n请直接发送这台服务器旧的主代理链接（tg://proxy?... 或 https://t.me/proxy?...）。\n我会校验 IP、端口和密钥；端口必须与系统记录一致，校验通过后再生成续费支付订单。',
                 plan_name=_plan_display_name(plan),
                 ip=ip,
             )
@@ -5137,7 +5134,6 @@ def register_handlers(dp: Dispatcher):
             item,
             link_data,
             probe_when_possible=False,
-            allow_client_port=True,
         )
         if not ok:
             await message.reply(_bot_text_format('bot_reinstall_validate_failed', '校验失败：{reason}', reason=reason))
@@ -5182,7 +5178,6 @@ def register_handlers(dp: Dispatcher):
             item,
             link_data,
             probe_when_possible=bool(getattr(item, 'login_password', None)),
-            allow_client_port=True,
         )
         if not ok:
             await message.reply(_bot_text_format('bot_reinstall_validate_failed', '校验失败：{reason}', reason=reason))

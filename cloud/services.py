@@ -3312,6 +3312,9 @@ def prepare_cloud_asset_renewal_with_link(asset_id: int, user_id: int, plan_id: 
         original_account = _resolve_asset_original_cloud_account(asset)
         if _is_unattached_static_ip_asset(asset) and not original_account:
             return None, '原固定 IP 所属云账号不可用，暂时无法自助续费，请联系人工客服。'
+        expected_port = int(asset.mtproxy_port or MTPROXY_DEFAULT_PORT)
+        if str(link_data.get('port') or '').strip() != str(expected_port):
+            return None, f'链接端口不匹配。当前主代理端口是 {expected_port}，你发的是 {link_data.get("port") or "-"}'
         target_plan = CloudServerPlan.objects.filter(
             id=plan_id,
             provider=asset.provider or CloudServerPlan.PROVIDER_AWS_LIGHTSAIL,
@@ -3354,7 +3357,7 @@ def prepare_cloud_asset_renewal_with_link(asset_id: int, user_id: int, plan_id: 
             mtproxy_link=link_data['url'],
             mtproxy_secret=link_data['secret'],
             mtproxy_host=link_data['server'],
-            mtproxy_port=int(link_data['port']),
+            mtproxy_port=expected_port,
             proxy_links=[{'name': '主代理 mtg', 'server': link_data['server'], 'port': link_data['port'], 'secret': link_data['secret'], 'url': link_data['url']}],
             login_user=asset.login_user,
             login_password=asset.login_password,
@@ -3362,7 +3365,7 @@ def prepare_cloud_asset_renewal_with_link(asset_id: int, user_id: int, plan_id: 
             expired_at=now + timezone.timedelta(minutes=30),
             provision_note='\n'.join(filter(None, [
                 str(asset.note or '').strip(),
-                f'{_ASSET_RENEWAL_MARKER}：来源资产 #{asset.id}；已选择套餐 {target_plan.plan_name}；旧IP={public_ip}；旧端口={link_data["port"]}；旧secret={link_data["secret"]}。支付完成后自动创建服务器并绑定该固定 IP，继续使用旧主代理链接。',
+                f'{_ASSET_RENEWAL_MARKER}：来源资产 #{asset.id}；已选择套餐 {target_plan.plan_name}；旧IP={public_ip}；旧端口={expected_port}；旧secret={link_data["secret"]}。支付完成后自动创建服务器并绑定该固定 IP，继续使用旧主代理链接。',
                 f'灰区续费：AWS 实时确认固定 IP 未附加，固定IP名={unattached_static_ip_name}。' if unattached_static_ip_name and not _is_unattached_static_ip_asset(asset) else '',
             ])),
         )
@@ -3402,6 +3405,9 @@ def prepare_retained_ip_renewal_with_link(order_id: int, user_id: int, plan_id: 
             return None, '当前服务器不是未附加固定 IP 保留期状态'
         if not _can_order_be_renewed(order):
             return None, '该服务器IP已删除，禁止续费'
+        expected_port = int(order.mtproxy_port or MTPROXY_DEFAULT_PORT)
+        if str(link_data.get('port') or '').strip() != str(expected_port):
+            return None, f'链接端口不匹配。当前主代理端口是 {expected_port}，你发的是 {link_data.get("port") or "-"}'
         target_plan = CloudServerPlan.objects.filter(
             id=plan_id,
             provider=order.provider,
@@ -3433,7 +3439,7 @@ def prepare_retained_ip_renewal_with_link(order_id: int, user_id: int, plan_id: 
         order.mtproxy_link = link_data['url']
         order.mtproxy_secret = link_data['secret']
         order.mtproxy_host = link_data['server']
-        order.mtproxy_port = int(link_data['port'])
+        order.mtproxy_port = expected_port
         links = list(order.proxy_links or [])
         links = [item for item in links if not (isinstance(item, dict) and str(item.get('port') or '') == str(order.mtproxy_port))]
         links.insert(0, {'name': '主代理 mtg', 'server': link_data['server'], 'port': link_data['port'], 'secret': link_data['secret'], 'url': link_data['url']})

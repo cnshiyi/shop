@@ -470,6 +470,7 @@ class ChainPaymentScannerTestCase(TestCase):
             status=CloudAsset.STATUS_UNKNOWN,
             provider_status='未附加固定IP',
             note='未附加固定IP',
+            mtproxy_port=9528,
             is_active=False,
         )
         link = {

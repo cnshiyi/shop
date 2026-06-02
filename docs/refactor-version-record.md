@@ -4686,6 +4686,52 @@ git diff --check
 - 本轮未执行真实 Telegram 点击、真实云资源创建/删除/IP 变更、真实支付、链上广播、生产发布或不可逆操作。
 - 真机测试仍需在用户明确授权真实云资源成本后，单独按中文报告记录云资源 ID 脱敏结果。
 
+## 2026-06-03 旧主代理链接端口一致性收口
+
+### 范围
+
+本轮继续巡检 Shop Django 后端的机器人返回链、Telegram `callback_data` 64 字节限制、云资产生命周期唯一到期事实、废弃 app 回流、旧计划快照、旧退款入口，以及未附加固定 IP 续费和重装时旧主代理链接校验逻辑。
+
+### 运行时变化
+
+- `_validate_reinstall_proxy_link()` 不再支持 `allow_client_port`，重装和未附加固定 IP 续费统一要求用户发送的主代理链接端口与系统记录端口一致。
+- 未附加固定 IP 续费提示文案从“系统记录不对时以用户链接端口为准”改为“端口必须与系统记录一致”。
+- `prepare_cloud_asset_renewal_with_link()` 和 `prepare_retained_ip_renewal_with_link()` 在生成续费支付订单前校验链接端口；不再把用户链接端口写回订单或资产主端口。
+- 保留已有成功路径：历史记录端口为 9528 的无订单资产、公开资产续费和链上支付超时解绑测试继续显式记录 9528，避免把端口一致性收口误判为默认 443 业务失败。
+
+### 监工结果
+
+- 机器人返回链聚焦测试仍通过，未发现本轮端口收口影响资产详情、订单详情、续费、换 IP、重装、修改配置的返回上一层逻辑。
+- `CloudAsset` 仍只有 `actual_expires_at` 作为结构化资产到期字段。
+- `CloudServerOrder` 未恢复 `service_expires_at` 或 `actual_expires_at`，仅保留 `renew_grace_expires_at` 等流程时间字段。
+- `CloudAssetDashboardSnapshot` 未恢复派生到期字段。
+- 未发现旧计划快照、旧退款函数名、`allow_client_port` 或废弃 app 目录回流。
+
+### 验证
+
+本地已通过:
+
+```bash
+UV_CACHE_DIR=/Users/a399/Desktop/data/shop/.uv-cache PYTHONDONTWRITEBYTECODE=1 uv run python manage.py check
+UV_CACHE_DIR=/Users/a399/Desktop/data/shop/.uv-cache PYTHONDONTWRITEBYTECODE=1 uv run python -m py_compile bot/handlers.py bot/tests.py bot/keyboards.py cloud/services.py cloud/tests.py orders/tests.py
+UV_CACHE_DIR=/Users/a399/Desktop/data/shop/.uv-cache PYTHONDONTWRITEBYTECODE=1 uv run python manage.py shell -c "from cloud.models import CloudAsset, CloudServerOrder, CloudAssetDashboardSnapshot; print([f.name for f in CloudAsset._meta.fields if 'expires' in f.name or 'expiry' in f.name]); print([f.name for f in CloudServerOrder._meta.fields if 'expires' in f.name or 'expiry' in f.name]); print([f.name for f in CloudAssetDashboardSnapshot._meta.fields if 'expires' in f.name or 'expiry' in f.name])"
+UV_CACHE_DIR=/Users/a399/Desktop/data/shop/.uv-cache DB_ENGINE=sqlite DB_NAME=/private/tmp/shop_bot_port_strict_20260603.sqlite3 PYTHONDONTWRITEBYTECODE=1 uv run python manage.py test bot.tests.RetainedIpRenewalUiTestCase --noinput --verbosity 1
+UV_CACHE_DIR=/Users/a399/Desktop/data/shop/.uv-cache DB_ENGINE=sqlite SQLITE_NAME=/private/tmp/shop_cloud_port_strict_pass_<时间戳>.sqlite3 PYTHONDONTWRITEBYTECODE=1 uv run python manage.py test cloud.tests.CloudServerServicesTestCase.test_unbound_asset_renewal_address_order_forces_usdt_from_trx_source cloud.tests.CloudServerServicesTestCase.test_unbound_asset_renewal_rejects_link_port_override cloud.tests.CloudServerServicesTestCase.test_retained_ip_renewal_address_order_forces_usdt_from_trx_order cloud.tests.CloudServerServicesTestCase.test_retained_ip_renewal_rejects_link_port_override cloud.tests.CloudServerServicesTestCase.test_prepare_unbound_asset_renewal_creates_pending_payment_order cloud.tests.CloudServerServicesTestCase.test_order_rejects_removed_service_expiry_field cloud.tests.CloudServerServicesTestCase.test_update_cloud_asset_expiry_refreshes_order_lifecycle --noinput --verbosity 1
+UV_CACHE_DIR=/Users/a399/Desktop/data/shop/.uv-cache DB_ENGINE=sqlite SQLITE_NAME=/private/tmp/shop_orders_port_strict_ok_<时间戳>.sqlite3 PYTHONDONTWRITEBYTECODE=1 uv run python manage.py test orders.tests.ChainPaymentScannerTestCase.test_public_asset_renewal_expiry_does_not_claim_unowned_asset --noinput --verbosity 1
+UV_CACHE_DIR=/Users/a399/Desktop/data/shop/.uv-cache PYTHONDONTWRITEBYTECODE=1 uv run python manage.py makemigrations --check --dry-run
+rg -n "service_expires_at\\s*=|order\\.(service_expires_at|actual_expires_at)|CloudServerOrder\\([^\\n]*(service_expires_at|actual_expires_at)|CloudLifecyclePlan\\b|CloudNoticePlan\\b|CloudAutoRenewPlan\\b|refund_order|process_refund|create_refund|issue_refund|refund_to_balance|refund_balance|allow_client_port" bot core orders cloud shop --glob '!**/migrations/**'
+find . -maxdepth 2 -type d \( -name accounts -o -name finance -o -name mall -o -name monitoring -o -name dashboard_api -o -name biz \) -print
+git diff --check
+```
+
+`makemigrations --check --dry-run` 仍出现本地沙箱无法连接 `127.0.0.1` MySQL 的迁移历史一致性警告，但最终结果为 `No changes detected`。本轮还确认数据库测试临时库应使用 `SQLITE_NAME`，使用 `DB_NAME` 会落回默认 SQLite 测试库并可能遇到只读库残留。
+
+### 剩余风险
+
+- 本轮未跑完整测试套件。
+- 本轮未执行真实 Telegram 点击、真实云资源创建/删除/IP 变更、真实支付、链上广播、生产发布或不可逆操作。
+- 真机测试仍需在用户明确授权真实云资源成本后，单独按中文报告记录云资源 ID 脱敏结果。
+
 ## 2026-06-03 嵌套资产详情返回链二次压缩
 
 ### 范围

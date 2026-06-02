@@ -1429,7 +1429,7 @@ class RetainedIpRenewalUiTestCase(SimpleTestCase):
         self.assertIn('链接 IP 不匹配', reason)
         self.assertIn('13.228.232.184', reason)
 
-    def test_validate_reinstall_proxy_link_allows_client_port_override_for_reinstall(self):
+    def test_validate_reinstall_proxy_link_rejects_client_port_override_for_reinstall(self):
         order = SimpleNamespace(
             id=1,
             public_ip='1.2.3.4',
@@ -1450,11 +1450,11 @@ class RetainedIpRenewalUiTestCase(SimpleTestCase):
             order,
             link_data,
             probe_when_possible=False,
-            allow_client_port=True,
         )
 
-        self.assertTrue(ok)
-        self.assertEqual(reason, '主链接格式和 IP 校验通过')
+        self.assertFalse(ok)
+        self.assertIn('链接端口不匹配', reason)
+        self.assertIn('当前主代理端口是 9528', reason)
 
     def test_cloud_server_created_text_includes_socks5_proxy_link(self):
         order = SimpleNamespace(
