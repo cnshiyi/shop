@@ -43,7 +43,7 @@ from bot.keyboards import (
     cloud_server_change_ip_region_menu,
     cart_menu, wallet_recharge_prompt_menu, cloud_ip_query_result,
     cloud_query_menu, configured_link_for_label, configured_link_menu,
-    cloud_detail_callback, cloud_asset_detail_callback, cloud_previous_detail_callback, cloud_asset_action_callback, append_back_callback, compact_callback_path,
+    cloud_detail_callback, cloud_asset_detail_callback, cloud_previous_detail_callback, cloud_asset_action_callback, append_back_callback, compact_callback_path, expand_compact_region_code,
 )
 from bot.services import create_admin_reply_link, get_admin_reply_link, get_admin_reply_link_by_id, get_or_create_user, get_admin_forward_mute_status, is_admin_forward_muted, mute_admin_forward_for_days, record_bot_operation_log, record_telegram_message, should_forward_telegram_group
 from cloud.services import (
@@ -1191,19 +1191,34 @@ def _callback_route_label(callback_data: str | None) -> str:
         ('cloud:rp:', 'cloud.rp 续费钱包支付短回调'),
         ('cloud:renewpay:', 'cloud.renewpay 续费钱包支付'),
         ('cloud:renewwallet:', 'cloud.renewwallet 自动续费钱包支付'),
+        ('ar:', 'ar 资产续费短回调'),
+        ('ac:', 'ac 资产更换IP短回调'),
+        ('au:', 'au 资产修改配置短回调'),
+        ('ai:', 'ai 资产重新安装短回调'),
+        ('arp:', 'arp 未绑定资产续费选套餐短回调'),
         ('cloud:assetrenewplan:', 'cloud.assetrenewplan 未绑定资产续费选套餐'),
+        ('rnp:', 'rnp 保留IP续费选套餐短回调'),
         ('cloud:renewplan:', 'cloud.renewplan 保留IP续费选套餐'),
+        ('r:', 'r 续费短回调'),
         ('cloud:renew:', 'cloud.renew 续费'),
         ('cloud:start:', 'cloud.start 管理员开机'),
         ('cloud:autorenew:', 'cloud.autorenew 自动续费开关'),
         ('cloud:mute:', 'cloud.mute 关闭提醒'),
+        ('im:', 'im 更换IP更多地区短回调'),
+        ('ir:', 'ir 更换IP选地区短回调'),
+        ('i:', 'i 更换IP短回调'),
         ('cloud:ipregions:more:', 'cloud.ipregions.more 更换IP更多地区'),
         ('cloud:ipregion:', 'cloud.ipregion 更换IP选地区'),
         ('cloud:ip:', 'cloud.ip 更换IP'),
+        ('p:', 'p 续费钱包支付超短回调'),
+        ('upp:', 'upp 修改配置支付短回调'),
         ('cloud:upgradepay:', 'cloud.upgradepay 修改配置支付'),
+        ('u:', 'u 修改配置短回调'),
         ('cloud:upgrade:', 'cloud.upgrade 修改配置'),
+        ('ri:', 'ri 重新安装短回调'),
         ('cloud:reinitconfirm:', 'cloud.reinitconfirm 确认重新初始化'),
         ('cloud:reinit:', 'cloud.reinit 重新安装/继续初始化'),
+        ('exp:', 'exp 修改到期时间短回调'),
         ('cloud:adminexp:', 'cloud.adminexp 修改到期时间'),
         ('profile:orders:cloud:page:', 'profile.orders.cloud.page 云服务器订单分页'),
         ('profile:orders:cloud:filter:', 'profile.orders.cloud.filter 云服务器订单筛选'),
@@ -2669,7 +2684,7 @@ def _retained_ip_renewal_plan_keyboard(order_id: int, plans, back_callback: str 
     buttons = []
     for idx, plan in enumerate(plans[:9]):
         label = labels[idx] if idx < len(labels) else f'套餐{idx + 1}'
-        buttons.append(InlineKeyboardButton(text=label, callback_data=append_back_callback(f'cloud:renewplan:{order_id}:{plan.id}', back_callback)))
+        buttons.append(InlineKeyboardButton(text=label, callback_data=append_back_callback(f'rnp:{order_id}:{plan.id}', back_callback)))
     rows = [buttons[index:index + 3] for index in range(0, len(buttons), 3)]
     rows.append([InlineKeyboardButton(text='🔙 返回详情', callback_data=cloud_previous_detail_callback(order_id, back_callback))])
     return InlineKeyboardMarkup(inline_keyboard=rows)
@@ -2703,7 +2718,7 @@ def _asset_renewal_plan_keyboard(asset_id: int, plans, back_callback: str | None
     buttons = []
     for idx, plan in enumerate(plans[:9]):
         label = labels[idx] if idx < len(labels) else f'套餐{idx + 1}'
-        buttons.append(InlineKeyboardButton(text=label, callback_data=append_back_callback(f'cloud:assetrenewplan:{asset_id}:{plan.id}', back_callback)))
+        buttons.append(InlineKeyboardButton(text=label, callback_data=append_back_callback(f'arp:{asset_id}:{plan.id}', back_callback)))
     rows = [buttons[index:index + 3] for index in range(0, len(buttons), 3)]
     rows.append([InlineKeyboardButton(text='🔙 返回代理详情', callback_data=cloud_asset_detail_callback(asset_id, back_callback))])
     return InlineKeyboardMarkup(inline_keyboard=rows)
@@ -4182,7 +4197,7 @@ def register_handlers(dp: Dispatcher):
             if can_config:
                 third_row.append(InlineKeyboardButton(text='⚙️ 修改配置', callback_data=cloud_asset_action_callback('upgrade', item_id, back_callback)))
             if is_admin_context:
-                third_row.append(InlineKeyboardButton(text='🕒 修改时间', callback_data=append_back_callback(f'cloud:adminexp:asset:{item_id}', back_callback)))
+                third_row.append(InlineKeyboardButton(text='🕒 修改时间', callback_data=append_back_callback(f'exp:a:{item_id}', back_callback)))
             if third_row:
                 rows.append(third_row)
         rows.append([support_contact_button('cloud_asset', item_id)])
@@ -4191,11 +4206,21 @@ def register_handlers(dp: Dispatcher):
 
     @dp.callback_query(F.data.startswith('cloud:assetaction:'))
     @dp.callback_query(F.data.startswith('cloud:aa:'))
+    @dp.callback_query(F.data.startswith('ar:'))
+    @dp.callback_query(F.data.startswith('ac:'))
+    @dp.callback_query(F.data.startswith('au:'))
     async def cb_cloud_asset_action(callback: CallbackQuery):
-        parts = callback.data.split(':', 4)
-        action = parts[2]
-        asset_id = int(parts[3])
-        back_callback = compact_callback_path(parts[4]) if len(parts) > 4 else 'clp:1'
+        if callback.data.startswith(('ar:', 'ac:', 'au:')):
+            action_prefix = callback.data.split(':', 1)[0]
+            action = {'ar': 'renew', 'ac': 'changeip', 'au': 'upgrade'}[action_prefix]
+            parts = callback.data.split(':', 2)
+            asset_id = int(parts[1])
+            back_callback = compact_callback_path(parts[2]) if len(parts) > 2 else 'clp:1'
+        else:
+            parts = callback.data.split(':', 4)
+            action = parts[2]
+            asset_id = int(parts[3])
+            back_callback = compact_callback_path(parts[4]) if len(parts) > 4 else 'clp:1'
         asset_detail_back = cloud_asset_detail_callback(asset_id, back_callback)
         if action == 'upgrade':
             await _safe_callback_answer(callback, '正在加载修改配置')
@@ -4332,7 +4357,7 @@ def register_handlers(dp: Dispatcher):
                 action_text = '升级' if plan.get('action') == 'upgrade' else '降级'
                 charge_text = f"补 {plan['diff']} U" if plan.get('action') == 'upgrade' else '无需补差价'
                 text_lines.append(f"- {plan['name']}：{action_text}，{charge_text}，到期补足 {plan['target_days']} 天")
-                rows.append([InlineKeyboardButton(text=f"{action_text}到 {plan['name']} {charge_text}", callback_data=append_back_callback(f"cloud:upgradepay:{order.id}:{plan['id']}", asset_detail_back))])
+                rows.append([InlineKeyboardButton(text=f"{action_text}到 {plan['name']} {charge_text}", callback_data=append_back_callback(f"upp:{order.id}:{plan['id']}", asset_detail_back))])
             rows.append([InlineKeyboardButton(text='🔙 返回详情', callback_data=asset_detail_back)])
             text = '\n'.join(text_lines)
             markup = InlineKeyboardMarkup(inline_keyboard=rows)
@@ -4346,15 +4371,21 @@ def register_handlers(dp: Dispatcher):
             return
         await _safe_callback_answer(callback, '未知操作', show_alert=True)
 
+    @dp.callback_query(F.data.startswith('ai:'))
     @dp.callback_query(F.data.startswith('cloud:assetinit:'))
     async def cb_cloud_asset_init(callback: CallbackQuery, state: FSMContext):
         await _safe_callback_answer(callback)
         if await _deny_group_high_risk_callback(callback, '重新安装'):
             return
         user = await get_or_create_user(callback.from_user.id, callback.from_user.username, callback.from_user.first_name)
-        parts = callback.data.split(':', 3)
-        asset_id = int(parts[2])
-        back_callback = compact_callback_path(parts[3]) if len(parts) > 3 else 'cloud:list:page:1'
+        if callback.data.startswith('ai:'):
+            parts = callback.data.split(':', 2)
+            asset_id = int(parts[1])
+            back_callback = compact_callback_path(parts[2]) if len(parts) > 2 else 'cloud:list:page:1'
+        else:
+            parts = callback.data.split(':', 3)
+            asset_id = int(parts[2])
+            back_callback = compact_callback_path(parts[3]) if len(parts) > 3 else 'cloud:list:page:1'
         is_admin = await _is_admin_chat(callback.message)
         item = await get_proxy_asset_detail_for_admin(asset_id, 'asset') if is_admin else await get_user_proxy_asset_detail(asset_id, user.id, 'asset')
         if not item:
@@ -4479,13 +4510,19 @@ def register_handlers(dp: Dispatcher):
         await _safe_callback_answer(callback, '已关闭该订单提醒')
         await _safe_remove_inline_keyboard(callback.message)
 
+    @dp.callback_query(F.data.startswith('r:'))
     @dp.callback_query(F.data.startswith('cloud:renew:'))
     async def cb_cloud_renew(callback: CallbackQuery, state: FSMContext):
         await _safe_callback_answer(callback)
         user = await get_or_create_user(callback.from_user.id, callback.from_user.username, callback.from_user.first_name)
-        parts = callback.data.split(':', 3)
-        order_id = int(parts[2])
-        back_callback = compact_callback_path(parts[3]) if len(parts) > 3 else ''
+        if callback.data.startswith('r:'):
+            parts = callback.data.split(':', 2)
+            order_id = int(parts[1])
+            back_callback = compact_callback_path(parts[2]) if len(parts) > 2 else ''
+        else:
+            parts = callback.data.split(':', 3)
+            order_id = int(parts[2])
+            back_callback = compact_callback_path(parts[3]) if len(parts) > 3 else ''
         is_admin = await _is_admin_chat(callback.message)
         group_context = await _is_group_visible_order(callback, order_id)
         if _is_group_chat_message(callback.message) and not (is_admin or group_context):
@@ -4524,13 +4561,19 @@ def register_handlers(dp: Dispatcher):
             return
         await _send_cloud_renewal_payment_prompt(callback.message, order, user, edit=True, back_callback=back_callback)
 
+    @dp.callback_query(F.data.startswith('arp:'))
     @dp.callback_query(F.data.startswith('cloud:assetrenewplan:'))
     async def cb_cloud_asset_renew_plan(callback: CallbackQuery, state: FSMContext):
         await _safe_callback_answer(callback)
         user = await get_or_create_user(callback.from_user.id, callback.from_user.username, callback.from_user.first_name)
-        parts = callback.data.split(':', 4)
-        _, _, raw_asset_id, raw_plan_id = parts[:4]
-        back_callback = compact_callback_path(parts[4]) if len(parts) > 4 else ''
+        if callback.data.startswith('arp:'):
+            parts = callback.data.split(':', 3)
+            _, raw_asset_id, raw_plan_id = parts[:3]
+            back_callback = compact_callback_path(parts[3]) if len(parts) > 3 else ''
+        else:
+            parts = callback.data.split(':', 4)
+            _, _, raw_asset_id, raw_plan_id = parts[:4]
+            back_callback = compact_callback_path(parts[4]) if len(parts) > 4 else ''
         asset_id = int(raw_asset_id)
         plan_id = int(raw_plan_id)
         is_admin = await _is_admin_chat(callback.message)
@@ -4549,13 +4592,19 @@ def register_handlers(dp: Dispatcher):
             f'🔄 未绑定代理资产续费\n\n已选择套餐: {_plan_display_name(plan)}\nIP: {ip}\n\n请直接发送这台代理旧的主代理链接（tg://proxy?... 或 https://t.me/proxy?...）。\n校验通过后生成支付订单，支付完成后系统会自动创建服务器并绑定旧 IP。'
         )
 
+    @dp.callback_query(F.data.startswith('rnp:'))
     @dp.callback_query(F.data.startswith('cloud:renewplan:'))
     async def cb_cloud_retained_ip_renew_plan(callback: CallbackQuery, state: FSMContext):
         await _safe_callback_answer(callback)
         user = await get_or_create_user(callback.from_user.id, callback.from_user.username, callback.from_user.first_name)
-        parts = callback.data.split(':', 4)
-        _, _, raw_order_id, raw_plan_id = parts[:4]
-        back_callback = compact_callback_path(parts[4]) if len(parts) > 4 else ''
+        if callback.data.startswith('rnp:'):
+            parts = callback.data.split(':', 3)
+            _, raw_order_id, raw_plan_id = parts[:3]
+            back_callback = compact_callback_path(parts[3]) if len(parts) > 3 else ''
+        else:
+            parts = callback.data.split(':', 4)
+            _, _, raw_order_id, raw_plan_id = parts[:4]
+            back_callback = compact_callback_path(parts[4]) if len(parts) > 4 else ''
         order_id = int(raw_order_id)
         plan_id = int(raw_plan_id)
         is_admin = await _is_admin_chat(callback.message)
@@ -4751,17 +4800,24 @@ def register_handlers(dp: Dispatcher):
             ('支付方式', '钱包自动续费'),
         ])
 
+    @dp.callback_query(F.data.startswith('p:'))
     @dp.callback_query(F.data.startswith('cloud:rp:'))
     @dp.callback_query(F.data.startswith('cloud:renewpay:'))
     async def cb_cloud_renew_pay(callback: CallbackQuery, state: FSMContext):
         await _safe_callback_answer(callback, '续费钱包支付处理中')
         user = await get_or_create_user(callback.from_user.id, callback.from_user.username, callback.from_user.first_name)
-        parts = callback.data.split(':', 4)
-        _, action, order_id_text, currency = parts[:4]
-        back_callback = compact_callback_path(parts[4]) if len(parts) > 4 else ''
-        if action not in {'renewpay', 'rp'}:
-            await _safe_callback_answer(callback, '续费钱包支付参数无效', show_alert=True)
-            return
+        if callback.data.startswith('p:'):
+            parts = callback.data.split(':', 3)
+            _, order_id_text, currency = parts[:3]
+            back_callback = compact_callback_path(parts[3]) if len(parts) > 3 else ''
+            currency = {'U': 'USDT', 'T': 'TRX'}.get(str(currency or '').upper(), currency)
+        else:
+            parts = callback.data.split(':', 4)
+            _, action, order_id_text, currency = parts[:4]
+            back_callback = compact_callback_path(parts[4]) if len(parts) > 4 else ''
+            if action not in {'renewpay', 'rp'}:
+                await _safe_callback_answer(callback, '续费钱包支付参数无效', show_alert=True)
+                return
         currency = str(currency or '').upper()
         if not _is_supported_payment_currency(currency):
             await _safe_callback_answer(callback, '不支持的支付币种', show_alert=True)
@@ -4827,15 +4883,21 @@ def register_handlers(dp: Dispatcher):
             ('支付币种', currency),
         ])
 
+    @dp.callback_query(F.data.startswith('i:'))
     @dp.callback_query(F.data.startswith('cloud:ip:'))
     async def cb_cloud_change_ip(callback: CallbackQuery):
         await _safe_callback_answer(callback)
         if await _deny_group_high_risk_callback(callback, '更换 IP'):
             return
         user = await get_or_create_user(callback.from_user.id, callback.from_user.username, callback.from_user.first_name)
-        parts = callback.data.split(':', 3)
-        order_id = int(parts[2])
-        back_callback = compact_callback_path(parts[3]) if len(parts) > 3 else ''
+        if callback.data.startswith('i:'):
+            parts = callback.data.split(':', 2)
+            order_id = int(parts[1])
+            back_callback = compact_callback_path(parts[2]) if len(parts) > 2 else ''
+        else:
+            parts = callback.data.split(':', 3)
+            order_id = int(parts[2])
+            back_callback = compact_callback_path(parts[3]) if len(parts) > 3 else ''
         is_admin = await _is_admin_chat(callback.message)
         order = await get_cloud_server_for_admin(order_id) if is_admin else await get_user_cloud_server(order_id, user.id)
         if not order:
@@ -4853,15 +4915,21 @@ def register_handlers(dp: Dispatcher):
             reply_markup=cloud_server_change_ip_region_menu(order.id, regions, expanded=False, back_callback=back_callback),
         )
 
+    @dp.callback_query(F.data.startswith('im:'))
     @dp.callback_query(F.data.startswith('cloud:ipregions:more:'))
     async def cb_cloud_change_ip_regions_more(callback: CallbackQuery):
         await _safe_callback_answer(callback)
         if await _deny_group_high_risk_callback(callback, '更换 IP'):
             return
         user = await get_or_create_user(callback.from_user.id, callback.from_user.username, callback.from_user.first_name)
-        parts = callback.data.split(':', 4)
-        order_id = int(parts[3])
-        back_callback = compact_callback_path(parts[4]) if len(parts) > 4 else ''
+        if callback.data.startswith('im:'):
+            parts = callback.data.split(':', 2)
+            order_id = int(parts[1])
+            back_callback = compact_callback_path(parts[2]) if len(parts) > 2 else ''
+        else:
+            parts = callback.data.split(':', 4)
+            order_id = int(parts[3])
+            back_callback = compact_callback_path(parts[4]) if len(parts) > 4 else ''
         order = await get_cloud_server_for_admin(order_id) if await _is_admin_chat(callback.message) else await get_user_cloud_server(order_id, user.id)
         if not order:
             await _safe_callback_answer(callback, '服务器记录不存在', show_alert=True)
@@ -4872,13 +4940,19 @@ def register_handlers(dp: Dispatcher):
             reply_markup=cloud_server_change_ip_region_menu(order_id, regions, expanded=True, back_callback=back_callback),
         )
 
+    @dp.callback_query(F.data.startswith('ir:'))
     @dp.callback_query(F.data.startswith('cloud:ipregion:'))
     async def cb_cloud_change_ip_region(callback: CallbackQuery, state: FSMContext, bot: Bot):
         await _safe_callback_answer(callback)
         if await _deny_group_high_risk_callback(callback, '更换 IP'):
             return
-        parts = callback.data.split(':', 4)
-        _, _, raw_order_id, region_code = parts[:4]
+        if callback.data.startswith('ir:'):
+            parts = callback.data.split(':', 3)
+            _, raw_order_id, region_code = parts[:3]
+            region_code = expand_compact_region_code(region_code)
+        else:
+            parts = callback.data.split(':', 4)
+            _, _, raw_order_id, region_code = parts[:4]
         user = await get_or_create_user(callback.from_user.id, callback.from_user.username, callback.from_user.first_name)
         order_id = int(raw_order_id)
         is_admin = await _is_admin_chat(callback.message)
@@ -4910,15 +4984,21 @@ def register_handlers(dp: Dispatcher):
         ])
         asyncio.create_task(_provision_cloud_server_and_notify(bot, callback.from_user.id, new_order.id, new_order.mtproxy_port or MTPROXY_DEFAULT_PORT))
 
+    @dp.callback_query(F.data.startswith('u:'))
     @dp.callback_query(F.data.startswith('cloud:upgrade:'))
     async def cb_cloud_upgrade(callback: CallbackQuery):
         await _safe_callback_answer(callback, '正在加载修改配置')
         if await _deny_group_high_risk_callback(callback, '修改配置'):
             return
         user = await get_or_create_user(callback.from_user.id, callback.from_user.username, callback.from_user.first_name)
-        parts = callback.data.split(':', 3)
-        order_id = int(parts[2])
-        back_callback = compact_callback_path(parts[3]) if len(parts) > 3 else ''
+        if callback.data.startswith('u:'):
+            parts = callback.data.split(':', 2)
+            order_id = int(parts[1])
+            back_callback = compact_callback_path(parts[2]) if len(parts) > 2 else ''
+        else:
+            parts = callback.data.split(':', 3)
+            order_id = int(parts[2])
+            back_callback = compact_callback_path(parts[3]) if len(parts) > 3 else ''
         is_admin = await _is_admin_chat(callback.message)
         logger.info('CLOUD_UPGRADE_PLAN_START user_id=%s order_id=%s admin=%s callback_data=%s', user.id, order_id, is_admin, callback.data)
         plans, err = await list_cloud_server_upgrade_plans(order_id, user.id, admin=is_admin)
@@ -4938,7 +5018,7 @@ def register_handlers(dp: Dispatcher):
             action_text = '升级' if plan.get('action') == 'upgrade' else '降级'
             charge_text = f"补 {plan['diff']} U" if plan.get('action') == 'upgrade' else '无需补差价'
             text_lines.append(f"- {plan['name']}：{action_text}，{charge_text}，到期补足 {plan['target_days']} 天")
-            rows.append([InlineKeyboardButton(text=f"{action_text}到 {plan['name']} {charge_text}", callback_data=append_back_callback(f"cloud:upgradepay:{order_id}:{plan['id']}", back_callback))])
+            rows.append([InlineKeyboardButton(text=f"{action_text}到 {plan['name']} {charge_text}", callback_data=append_back_callback(f"upp:{order_id}:{plan['id']}", back_callback))])
         rows.append([InlineKeyboardButton(text='🔙 返回详情', callback_data=cloud_detail_callback(order_id, back_callback))])
         text = '\n'.join(text_lines)
         markup = InlineKeyboardMarkup(inline_keyboard=rows)
@@ -4950,6 +5030,7 @@ def register_handlers(dp: Dispatcher):
             logger.info('BOT_MESSAGE_EDIT route=upgrade_plans user_id=%s order_id=%s chat_id=%s message_id=%s plans=%s', user.id, order_id, callback.message.chat.id, callback.message.message_id, len(plans))
         await _safe_callback_answer(callback)
 
+    @dp.callback_query(F.data.startswith('upp:'))
     @dp.callback_query(F.data.startswith('cloud:upgradepay:'))
     async def cb_cloud_upgrade_pay(callback: CallbackQuery, bot: Bot, state: FSMContext):
         await _safe_callback_answer(callback)
@@ -4957,9 +5038,14 @@ def register_handlers(dp: Dispatcher):
             return
         await state.clear()
         user = await get_or_create_user(callback.from_user.id, callback.from_user.username, callback.from_user.first_name)
-        parts = callback.data.split(':', 4)
-        _, _, raw_order_id, raw_plan_id = parts[:4]
-        back_callback = compact_callback_path(parts[4]) if len(parts) > 4 else ''
+        if callback.data.startswith('upp:'):
+            parts = callback.data.split(':', 3)
+            _, raw_order_id, raw_plan_id = parts[:3]
+            back_callback = compact_callback_path(parts[3]) if len(parts) > 3 else ''
+        else:
+            parts = callback.data.split(':', 4)
+            _, _, raw_order_id, raw_plan_id = parts[:4]
+            back_callback = compact_callback_path(parts[4]) if len(parts) > 4 else ''
         is_admin = await _is_admin_chat(callback.message)
         new_order, err = await create_cloud_server_upgrade_order(int(raw_order_id), user.id, int(raw_plan_id), admin=is_admin)
         if err:
@@ -4973,15 +5059,21 @@ def register_handlers(dp: Dispatcher):
         )
         asyncio.create_task(_provision_cloud_server_and_notify(bot, callback.from_user.id, new_order.id, new_order.mtproxy_port or MTPROXY_DEFAULT_PORT))
 
+    @dp.callback_query(F.data.startswith('ri:'))
     @dp.callback_query(F.data.startswith('cloud:reinit:'))
     async def cb_cloud_reinit(callback: CallbackQuery, state: FSMContext):
         await _safe_callback_answer(callback)
         if await _deny_group_high_risk_callback(callback, '重新安装'):
             return
         user = await get_or_create_user(callback.from_user.id, callback.from_user.username, callback.from_user.first_name)
-        parts = callback.data.split(':', 3)
-        order_id = int(parts[2])
-        back_callback = compact_callback_path(parts[3]) if len(parts) > 3 else ''
+        if callback.data.startswith('ri:'):
+            parts = callback.data.split(':', 2)
+            order_id = int(parts[1])
+            back_callback = compact_callback_path(parts[2]) if len(parts) > 2 else ''
+        else:
+            parts = callback.data.split(':', 3)
+            order_id = int(parts[2])
+            back_callback = compact_callback_path(parts[3]) if len(parts) > 3 else ''
         is_admin = await _is_admin_chat(callback.message)
         order = await get_cloud_server_for_admin(order_id) if is_admin else await get_user_cloud_server(order_id, user.id)
         if not order:
@@ -5136,18 +5228,28 @@ def register_handlers(dp: Dispatcher):
         ])
         asyncio.create_task(_provision_cloud_server_and_notify(bot, callback.from_user.id, order.id, order.mtproxy_port or MTPROXY_DEFAULT_PORT, retry_only=retry_only))
 
+    @dp.callback_query(F.data.startswith('exp:'))
     @dp.callback_query(F.data.startswith('cloud:adminexp:'))
     async def cb_cloud_admin_expiry(callback: CallbackQuery, state: FSMContext):
         if not await _is_admin_chat(callback.message):
             await _safe_callback_answer(callback, '仅管理员可使用', show_alert=True)
             return
-        parts = callback.data.split(':', 4)
-        if len(parts) < 4:
-            await _safe_callback_answer(callback, '参数无效', show_alert=True)
-            return
-        item_kind = parts[2]
-        item_id = int(parts[3])
-        back_callback = compact_callback_path(parts[4]) if len(parts) > 4 else 'cloud:querymenu'
+        if callback.data.startswith('exp:'):
+            parts = callback.data.split(':', 3)
+            if len(parts) < 3:
+                await _safe_callback_answer(callback, '参数无效', show_alert=True)
+                return
+            item_kind = {'a': 'asset', 'o': 'order'}.get(parts[1], parts[1])
+            item_id = int(parts[2])
+            back_callback = compact_callback_path(parts[3]) if len(parts) > 3 else 'cloud:querymenu'
+        else:
+            parts = callback.data.split(':', 4)
+            if len(parts) < 4:
+                await _safe_callback_answer(callback, '参数无效', show_alert=True)
+                return
+            item_kind = parts[2]
+            item_id = int(parts[3])
+            back_callback = compact_callback_path(parts[4]) if len(parts) > 4 else 'cloud:querymenu'
         await state.update_data(admin_expiry_kind=item_kind, admin_expiry_item_id=item_id, admin_expiry_back=back_callback)
         await state.set_state(CustomServerStates.waiting_admin_expiry_time)
         await _safe_callback_answer(callback, '请输入新的到期时间')

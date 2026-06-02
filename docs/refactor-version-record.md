@@ -1,5 +1,50 @@
 # 重构版本记录
 
+## 2026-06-03 00:42 自动监工：超长返回回调二次压缩
+
+### 范围
+
+本轮从提交 `14354d8 移除旧端口兼容入口` 后继续监工。起始工作树干净，但巡检过程中工作树出现同方向的旧端口清理改动；本轮按相关改动处理，没有回滚。重点复查机器人返回链、Telegram `callback_data` 64 字节限制、默认端口创建、云资产唯一到期事实、旧计划快照、旧退款入口和废弃 app 回流。
+
+### 修改
+
+- `append_back_callback()` 增加超长保护：常规 callback 保持原格式，只有超过 64 字节时才降级为短动作码和短来源码。
+- 新增并注册短动作码：续费 `r:`、更换 IP `i:`、重新安装 `ri:`、修改配置 `u:`、续费支付 `p:`、地区选择 `ir:`、更多地区 `im:`、资产续费/换 IP/改配置 `ar:/ac:/au:`、资产重装 `ai:`。
+- 新增短来源码：资产详情 `a:`、云服务器资产详情 `s:`、订单详情 `d:`、代理列表 `l:`、云订单列表 `o:`；短来源会在处理器入口还原为现有详情/列表 callback。
+- AWS 常见 region 在超长更换 IP callback 中压缩为短码，处理器收到后还原为原 region code。
+- 未绑定资产续费、保留 IP 续费、修改配置支付、修改到期时间继续使用短入口 `arp:`、`rnp:`、`upp:`、`exp:`，并补齐旧入口兼容解析。
+- 删除旧 `set_cloud_server_port()` 导出和运行函数，默认端口创建备注统一改为“使用默认端口 443”语义。
+
+### 监工结果
+
+- 18 位订单 ID、18 位资产 ID、18 位列表页码和嵌套资产详情来源组合下，续费、续费支付、更换 IP、更多地区、地区选择、重新安装、修改配置、套餐选择、修改到期时间 callback 均保持不超过 64 字节。
+- 普通长度 callback 仍保持原有 `cloud:*` 形态，避免无必要改变旧消息和现有测试预期。
+- `CloudAsset.actual_expires_at` 仍是唯一结构化资产到期事实；`CloudServerOrder` 未恢复 `service_expires_at` 或 `actual_expires_at` 字段；`CloudAssetDashboardSnapshot` 未恢复到期字段。
+- 旧计划快照模型、旧退款入口、退款函数名、旧端口 callback、旧端口状态和废弃 app 未发现运行时代码回流。
+
+### 验证
+
+已通过：
+
+```bash
+uv run python -m py_compile bot/handlers.py bot/keyboards.py bot/tests.py cloud/services.py core/texts.py
+uv run python manage.py check
+DB_ENGINE=sqlite SQLITE_NAME=/private/tmp/shop-bot-callback-focus-2.sqlite3 uv run python manage.py test bot.tests.RetainedIpRenewalUiTestCase --noinput --verbosity 1
+DB_ENGINE=sqlite SQLITE_NAME=/private/tmp/shop-default-port-focus-2.sqlite3 uv run python manage.py test bot.tests.RetainedIpRenewalUiTestCase.test_legacy_custom_port_flow_is_removed bot.tests.BotOrderAndBalanceFilterTestCase.test_paid_cloud_order_prepare_submits_default_port_directly orders.tests.ChainPaymentScannerTestCase.test_cloud_chain_payment_auto_submits_default_port_provision --noinput --verbosity 1
+uv run python manage.py makemigrations --check --dry-run
+uv run python manage.py shell -c "from django.conf import settings; retired={'accounts','finance','mall','monitoring','dashboard_api','biz'}; print('retired_apps', [app for app in settings.INSTALLED_APPS if app.split('.')[0] in retired]); from cloud.models import CloudServerOrder, CloudAsset, CloudAssetDashboardSnapshot; print('order_expiry_fields', [f.name for f in CloudServerOrder._meta.fields if f.name in {'service_expires_at','actual_expires_at'}]); print('asset_actual_fields', [f.name for f in CloudAsset._meta.fields if f.name == 'actual_expires_at']); print('snapshot_expiry_fields', [f.name for f in CloudAssetDashboardSnapshot._meta.fields if 'expire' in f.name or 'expiry' in f.name or f.name == 'actual_expires_at'])"
+rg -n "service_expires_at__|\bservice_expires_at\b|\bactual_expires_at\s*=\s*models|\bCloudLifecyclePlan\b|\bCloudNoticePlan\b|\bCloudAutoRenewPlan\b|\bnormalize_service_expiry\b|service_expired_at|\brefund_order\b|\bprocess_refund\b|\bcreate_refund\b|\bissue_refund\b|refund_to_balance|refund_balance|STATUS_REFUNDED|status=['\"]refunded|\brefunded\b|custom:port|cloud:ipport|waiting_port|set_cloud_server_port\(" cloud orders bot core shop --glob '!**/migrations/**' --glob '!docs/**'
+find . -maxdepth 2 -type d \( -name accounts -o -name finance -o -name mall -o -name monitoring -o -name dashboard_api -o -name biz \) -print
+git diff --check
+```
+
+结果：机器人返回 UI 聚焦测试 37 条通过；默认端口/旧端口删除聚焦测试 3 条通过；`manage.py check` 通过；`makemigrations --check --dry-run` 显示 `No changes detected`，但仍因沙箱禁止连接本机 MySQL 输出迁移历史检查警告。
+
+### 剩余风险
+
+- 本轮未执行真实 Telegram 点击、真实云资源创建/删除/IP 变更、真实支付、链上广播、生产发布或不可逆操作。
+- 极端超长 callback 采用短来源码时，部分场景为满足 64 字节会只保留“返回详情”，不再保留原列表页码；这是 Telegram 硬限制下的有意降级。
+
 ## 2026-06-03 00:28 自动监工：移除旧端口兼容入口
 
 ### 范围

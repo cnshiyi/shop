@@ -16,15 +16,16 @@ from django.utils import timezone
 
 from bot.api import DASHBOARD_SESSION_IDLE_SECONDS, _active_proxy_counts_by_user, _authenticate_dashboard_request, admin_users_list, archive_telegram_chat, auth_totp_start, create_admin_user, create_cloud_account, create_product, delete_cloud_account, me, send_daily_expiry_summary_test_notification, send_telegram_chat_message, site_config_groups, telegram_login_start, update_cloud_account, update_site_config, users_list, verify_cloud_account
 from bot.handlers import _asset_reinstall_confirm_keyboard, _asset_renewal_plan_keyboard, _buy_cloud_server_with_balance_and_notify, _cloud_renewal_postcheck_and_notify, _cloud_server_created_text, _fetch_tron_address_summary, _hydrate_order_proxy_links, _install_notice_copy_wrapper, _proxy_links_text, _reinstall_confirm_keyboard, _requires_recovery_provision, _retained_ip_renewal_plan_keyboard, _trongrid_get_with_key_fallback, _trongrid_post_with_key_fallback, _validate_reinstall_proxy_link, register_handlers
-from bot.keyboards import balance_details_list, cloud_asset_detail_callback, cloud_detail_callback, cloud_previous_detail_callback, compact_callback_path, cloud_ip_query_result, cloud_order_list, cloud_server_change_ip_region_menu, cloud_server_detail, cloud_server_renew_payment
+from bot.keyboards import append_back_callback, balance_details_list, cloud_asset_detail_callback, cloud_detail_callback, cloud_previous_detail_callback, compact_callback_path, cloud_ip_query_result, cloud_order_list, cloud_server_change_ip_region_menu, cloud_server_detail, cloud_server_renew_payment
 from bot.models import TelegramChatArchive, TelegramChatMessage, TelegramLoginAccount, TelegramUser
 from bot.services import record_telegram_message
 from bot.states import CustomServerStates
 from bot.telegram_listener import _build_bark_request, _build_push_payload, _is_self_sender, _sync_account_profile
+from cloud import services as cloud_services
 from cloud.asset_expiry import order_asset_expiry
 from cloud.models import CloudAsset, CloudServerOrder, CloudServerPlan
 from cloud.server_records import Server
-from cloud.services import update_cloud_item_expiry_for_admin
+from cloud.services import prepare_cloud_server_order_instances, update_cloud_item_expiry_for_admin
 from core.models import CloudAccountConfig, SiteConfig
 from core.texts import BOT_TEXTS
 from orders.ledger import record_balance_ledger
@@ -1027,9 +1028,9 @@ class RetainedIpRenewalUiTestCase(SimpleTestCase):
         asset_detail_source = source.split('async def cb_cloud_asset_detail', 1)[1].split("@dp.callback_query(F.data.startswith('cloud:assetinit:'))", 1)[0]
 
         self.assertIn("append_back_callback(f'cloud:assetinit:{item_id}', back_callback)", asset_detail_source)
-        self.assertIn("append_back_callback(f'cloud:adminexp:asset:{item_id}', back_callback)", asset_detail_source)
+        self.assertIn("append_back_callback(f'exp:a:{item_id}', back_callback)", asset_detail_source)
         reinstall_callback = f'cloud:assetinit:9999999:{compact_callback_path("cloud:ad:asset:9999999:cloud:list:page:12345")}'
-        admin_expiry_callback = f'cloud:adminexp:asset:9999999:{compact_callback_path("cloud:ad:asset:9999999:cloud:list:page:12345")}'
+        admin_expiry_callback = f'exp:a:9999999:{compact_callback_path("cloud:ad:asset:9999999:cloud:list:page:12345")}'
         self.assertLessEqual(len(reinstall_callback.encode()), 64)
         self.assertLessEqual(len(admin_expiry_callback.encode()), 64)
 
@@ -1045,7 +1046,7 @@ class RetainedIpRenewalUiTestCase(SimpleTestCase):
 
         markup = _asset_renewal_plan_keyboard(99, plans, 'cloud:querymenu')
 
-        self.assertEqual(markup.inline_keyboard[0][0].callback_data, 'cloud:assetrenewplan:99:1:cloud:querymenu')
+        self.assertEqual(markup.inline_keyboard[0][0].callback_data, 'arp:99:1:cloud:querymenu')
         self.assertEqual(markup.inline_keyboard[-1][0].callback_data, 'cad:99:cloud:querymenu')
 
     def test_retained_ip_renewal_plan_keyboard_keeps_back_path(self):
@@ -1053,8 +1054,49 @@ class RetainedIpRenewalUiTestCase(SimpleTestCase):
 
         markup = _retained_ip_renewal_plan_keyboard(88, plans, 'cloud:querymenu')
 
-        self.assertEqual(markup.inline_keyboard[0][0].callback_data, 'cloud:renewplan:88:7:cloud:querymenu')
+        self.assertEqual(markup.inline_keyboard[0][0].callback_data, 'rnp:88:7:cloud:querymenu')
         self.assertEqual(markup.inline_keyboard[-1][0].callback_data, 'cloud:detail:88:cloud:querymenu')
+
+    def test_second_level_cloud_actions_with_large_ids_stay_under_callback_limit(self):
+        back_callback = compact_callback_path('cloud:ad:asset:1234567890:profile:orders:cloud:filter:renew:page:1234567890')
+        plans = [SimpleNamespace(id=1234567890)]
+        callbacks = [
+            _asset_renewal_plan_keyboard(1234567890, plans, back_callback).inline_keyboard[0][0].callback_data,
+            _retained_ip_renewal_plan_keyboard(1234567890, plans, back_callback).inline_keyboard[0][0].callback_data,
+            append_back_callback('upp:1234567890:1234567890', back_callback),
+            append_back_callback('exp:a:1234567890', back_callback),
+        ]
+
+        self.assertEqual(callbacks[0], 'arp:1234567890:1234567890:cad:1234567890:poc:renew:1234567890')
+        self.assertEqual(callbacks[1], 'rnp:1234567890:1234567890:cad:1234567890:poc:renew:1234567890')
+        self.assertTrue(all(len(item.encode()) <= 64 for item in callbacks if item))
+
+    def test_extreme_nested_cloud_callbacks_stay_under_telegram_limit(self):
+        item_id = 999999999999999999
+        back_callback = f'cloud:ad:asset:{item_id}:cloud:list:page:{item_id}'
+        regions = [
+            ('ap-southeast-1', '新加坡'),
+            ('ap-northeast-1', '日本'),
+            ('us-east-1', '美国'),
+            ('eu-west-2', '英国'),
+            ('ap-south-1', '印度'),
+            ('ca-central-1', '加拿大'),
+        ]
+        plans = [SimpleNamespace(id=item_id)]
+        markups = [
+            cloud_server_detail(item_id, True, True, True, back_callback, True),
+            cloud_server_renew_payment(item_id, Decimal('12.3'), Decimal('45.6'), back_callback=back_callback),
+            cloud_server_change_ip_region_menu(item_id, regions, back_callback=back_callback),
+            _asset_renewal_plan_keyboard(item_id, plans, back_callback),
+            _retained_ip_renewal_plan_keyboard(item_id, plans, back_callback),
+        ]
+        callbacks = [button.callback_data for markup in markups for row in markup.inline_keyboard for button in row if button.callback_data]
+
+        self.assertIn(f'r:{item_id}:a:{item_id}:{item_id}', callbacks)
+        self.assertIn(f'ir:{item_id}:as1:a:{item_id}', callbacks)
+        self.assertIn(f'arp:{item_id}:{item_id}:a:{item_id}', callbacks)
+        self.assertEqual(compact_callback_path(f'a:{item_id}:{item_id}'), f'cad:{item_id}:clp:{item_id}')
+        self.assertTrue(all(len(item.encode()) <= 64 for item in callbacks))
 
     def test_cloud_renew_payment_keyboard_keeps_back_path(self):
         markup = cloud_server_renew_payment(88, Decimal('12.3'), Decimal('45.6'), back_callback='cloud:querymenu')
@@ -1130,6 +1172,8 @@ class RetainedIpRenewalUiTestCase(SimpleTestCase):
         self.assertNotIn('bot_set_port_failed', BOT_TEXTS)
         self.assertNotIn('bot_custom_port_hint', BOT_TEXTS)
         self.assertNotIn('bot_custom_port_success', BOT_TEXTS)
+        self.assertFalse(hasattr(cloud_services, 'set_cloud_server_port'))
+        self.assertNotIn('set_cloud_server_port', getattr(cloud_services, '__all__', []))
 
     def test_cloud_change_ip_keyboards_keep_back_path(self):
         regions = [
@@ -1256,11 +1300,11 @@ class RetainedIpRenewalUiTestCase(SimpleTestCase):
         upgrade_pay_source = source.split('async def cb_cloud_upgrade_pay', 1)[1].split("@dp.callback_query(F.data.startswith('cloud:reinit:'))", 1)[0]
 
         self.assertIn(
-            "append_back_callback(f\"cloud:upgradepay:{order.id}:{plan['id']}\", asset_detail_back)",
+            "append_back_callback(f\"upp:{order.id}:{plan['id']}\", asset_detail_back)",
             asset_action_source,
         )
         self.assertIn(
-            "append_back_callback(f\"cloud:upgradepay:{order_id}:{plan['id']}\", back_callback)",
+            "append_back_callback(f\"upp:{order_id}:{plan['id']}\", back_callback)",
             order_upgrade_source,
         )
         self.assertIn("callback.data.split(':', 4)", upgrade_pay_source)
@@ -1622,6 +1666,17 @@ class BotOrderAndBalanceFilterTestCase(TestCase):
         self.assertIn('bdpage:pay:1', callback_data)
         self.assertIn('bdpage:pay:3', callback_data)
 
+    def test_paid_cloud_order_prepare_submits_default_port_directly(self):
+        order = self._cloud_order('ORDER-DEFAULT-PORT-PREPARE', status='paid', paid=True)
+
+        orders = async_to_sync(prepare_cloud_server_order_instances)(order.id, self.user.id, 443)
+
+        self.assertEqual([item.id for item in orders], [order.id])
+        order.refresh_from_db()
+        self.assertEqual(order.mtproxy_port, 443)
+        self.assertIn('使用默认端口 443，开始创建服务器。', order.provision_note)
+        self.assertNotIn('用户已确认端口', order.provision_note)
+
     def test_admin_query_keyboard_includes_reinstall_and_expiry_actions(self):
         markup = cloud_ip_query_result(
             [],
@@ -1642,7 +1697,7 @@ class BotOrderAndBalanceFilterTestCase(TestCase):
 
         self.assertIn('🛠 重新安装', texts)
         self.assertIn('🕒 修改时间', texts)
-        self.assertIn('cloud:adminexp:order:123:cloud:querymenu', callbacks)
+        self.assertIn('exp:o:123:cloud:querymenu', callbacks)
 
 
 class BotAdminExpiryUpdateTestCase(TestCase):

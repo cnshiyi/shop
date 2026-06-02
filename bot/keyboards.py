@@ -54,6 +54,8 @@ def cloud_asset_detail_callback(asset_id: int, back_callback: str | None = None,
     item_kind = str(item_kind or 'asset').strip() or 'asset'
     compact_prefix = {'asset': 'cad', 'server': 'csd'}.get(item_kind)
     if compact_prefix:
+        if back_callback.startswith(f'{compact_prefix}:{asset_id}:') or back_callback == f'{compact_prefix}:{asset_id}':
+            return back_callback
         if not back_callback:
             return f'{compact_prefix}:{asset_id}'
         return f'{compact_prefix}:{asset_id}:{back_callback}'
@@ -73,7 +75,17 @@ def append_back_callback(callback_data: str, back_callback: str | None = None) -
     back_callback = compact_callback_path(back_callback)
     if not back_callback:
         return callback_data
-    return f'{callback_data}:{back_callback}'
+    candidate = f'{callback_data}:{back_callback}'
+    if len(candidate.encode()) <= 64:
+        return candidate
+    compact_back = _compact_back_callback_for_nested_action(back_callback)
+    callback_data = _shorten_callback_base(callback_data)
+    candidate = f'{callback_data}:{compact_back}' if compact_back else callback_data
+    if len(candidate.encode()) <= 64:
+        return candidate
+    compact_back = _compact_back_callback_for_nested_action(back_callback, include_page=False)
+    candidate = f'{callback_data}:{compact_back}' if compact_back else callback_data
+    return candidate if len(candidate.encode()) <= 64 else callback_data
 
 
 def cloud_asset_action_callback(action: str, asset_id: int, back_callback: str | None = None) -> str:
@@ -89,6 +101,21 @@ def compact_callback_path(callback_data: str | None) -> str:
     if not text:
         return ''
     parts = text.split(':')
+    if len(parts) >= 2 and parts[0] in {'a', 's'}:
+        prefix = 'cad' if parts[0] == 'a' else 'csd'
+        if len(parts) >= 3 and str(parts[2]).isdigit():
+            return f'{prefix}:{parts[1]}:clp:{parts[2]}'
+        nested = compact_callback_path(':'.join(parts[2:]))
+        return f'{prefix}:{parts[1]}:{nested}' if nested else f'{prefix}:{parts[1]}'
+    if len(parts) >= 2 and parts[0] == 'd':
+        if len(parts) >= 3 and str(parts[2]).isdigit():
+            return f'cloud:detail:{parts[1]}:clp:{parts[2]}'
+        nested = compact_callback_path(':'.join(parts[2:]))
+        return f'cloud:detail:{parts[1]}:{nested}' if nested else f'cloud:detail:{parts[1]}'
+    if len(parts) >= 2 and parts[0] == 'l':
+        return f'clp:{parts[1] or "1"}'
+    if len(parts) >= 3 and parts[0] == 'o':
+        return f'poc:{parts[1] or "all"}:{parts[2] or "1"}'
     if len(parts) >= 2 and parts[0] in {'cad', 'csd'}:
         nested = compact_callback_path(':'.join(parts[2:]))
         return f'{parts[0]}:{parts[1]}:{nested}' if nested else f'{parts[0]}:{parts[1]}'
@@ -123,6 +150,91 @@ def compact_callback_path(callback_data: str | None) -> str:
     if len(parts) >= 5 and parts[:3] == ['profile', 'orders', 'cloud'] and parts[3] == 'page':
         return f'poc:all:{parts[4] or "1"}'
     return text
+
+
+def _compact_back_callback_for_nested_action(callback_data: str | None, *, include_page: bool = True) -> str:
+    text = compact_callback_path(callback_data)
+    if not text:
+        return ''
+    parts = text.split(':')
+    if len(parts) >= 2 and parts[0] in {'cad', 'csd'}:
+        prefix = 'a' if parts[0] == 'cad' else 's'
+        if len(parts) >= 4 and parts[2] == 'clp':
+            if not include_page:
+                return f'{prefix}:{parts[1]}'
+            return f'{prefix}:{parts[1]}:{parts[3] or "1"}'
+        if len(parts) == 2:
+            return f'{prefix}:{parts[1]}'
+    if len(parts) >= 3 and parts[:2] == ['cloud', 'detail']:
+        if len(parts) >= 5 and parts[3] == 'clp':
+            if not include_page:
+                return f'd:{parts[2]}'
+            return f'd:{parts[2]}:{parts[4] or "1"}'
+        if len(parts) == 3:
+            return f'd:{parts[2]}'
+    if len(parts) >= 2 and parts[0] == 'clp':
+        return f'l:{parts[1] or "1"}'
+    if len(parts) >= 3 and parts[0] == 'poc':
+        return f'o:{parts[1] or "all"}:{parts[2] or "1"}'
+    return text
+
+
+def _shorten_callback_base(callback_data: str) -> str:
+    text = str(callback_data or '').strip()
+    parts = text.split(':')
+    if len(parts) >= 3 and parts[:2] == ['cloud', 'renew']:
+        return f'r:{parts[2]}'
+    if len(parts) >= 3 and parts[:2] == ['cloud', 'ip']:
+        return f'i:{parts[2]}'
+    if len(parts) >= 3 and parts[:2] == ['cloud', 'reinit']:
+        return f'ri:{parts[2]}'
+    if len(parts) >= 3 and parts[:2] == ['cloud', 'upgrade']:
+        return f'u:{parts[2]}'
+    if len(parts) >= 4 and parts[:2] == ['cloud', 'rp']:
+        currency = str(parts[3] or '').upper()
+        currency_code = {'USDT': 'U', 'TRX': 'T'}.get(currency, currency)
+        return f'p:{parts[2]}:{currency_code}'
+    if len(parts) >= 4 and parts[:3] == ['cloud', 'ipregions', 'more']:
+        return f'im:{parts[3]}'
+    if len(parts) >= 4 and parts[:2] == ['cloud', 'ipregion']:
+        return f'ir:{parts[2]}:{compact_region_code(parts[3])}'
+    if len(parts) >= 3 and parts[:2] == ['cloud', 'assetinit']:
+        return f'ai:{parts[2]}'
+    if len(parts) >= 4 and parts[:2] == ['cloud', 'aa']:
+        action_code = {'renew': 'ar', 'changeip': 'ac', 'upgrade': 'au'}.get(parts[2])
+        if action_code:
+            return f'{action_code}:{parts[3]}'
+    return text
+
+
+_COMPACT_REGION_CODES = {
+    'us-east-1': 'ue1',
+    'us-east-2': 'ue2',
+    'us-west-1': 'uw1',
+    'us-west-2': 'uw2',
+    'ap-southeast-1': 'as1',
+    'ap-southeast-2': 'as2',
+    'ap-southeast-3': 'as3',
+    'ap-northeast-1': 'an1',
+    'ap-northeast-2': 'an2',
+    'ap-south-1': 'ap1',
+    'ca-central-1': 'cc1',
+    'eu-west-1': 'ew1',
+    'eu-west-2': 'ew2',
+    'eu-west-3': 'ew3',
+    'eu-central-1': 'ec1',
+}
+_REGION_CODES_BY_COMPACT = {value: key for key, value in _COMPACT_REGION_CODES.items()}
+
+
+def compact_region_code(region_code: str | None) -> str:
+    text = str(region_code or '').strip()
+    return _COMPACT_REGION_CODES.get(text, text)
+
+
+def expand_compact_region_code(region_code: str | None) -> str:
+    text = str(region_code or '').strip()
+    return _REGION_CODES_BY_COMPACT.get(text, text)
 
 
 def main_menu():
@@ -857,7 +969,7 @@ def cloud_ip_query_result(result_items, renewable_items, page: int = 1, total_pa
             if item.get('can_config') and (include_reinit or item.get('can_support')):
                 action_buttons.append(InlineKeyboardButton(text='⚙️ 修改配置', callback_data=f'cloud:upgrade:{order_id}:cloud:querymenu'))
             if include_start:
-                action_buttons.append(InlineKeyboardButton(text='🕒 修改时间', callback_data=f'cloud:adminexp:order:{order_id}:cloud:querymenu'))
+                action_buttons.append(InlineKeyboardButton(text='🕒 修改时间', callback_data=f'exp:o:{order_id}:cloud:querymenu'))
             if item.get('can_auto_renew') or include_start:
                 auto_enabled = bool(item.get('auto_renew_enabled'))
                 action_buttons.append(InlineKeyboardButton(text=f'{"⛔ 关闭" if auto_enabled else "⚡ 开启"}自动续费', callback_data=f'cloud:autorenew:{"off" if auto_enabled else "on"}:{order_id}'))
@@ -875,7 +987,7 @@ def cloud_ip_query_result(result_items, renewable_items, page: int = 1, total_pa
             if item.get('can_config') and (include_reinit or item.get('can_support')):
                 action_buttons.append(InlineKeyboardButton(text='⚙️ 修改配置', callback_data=cloud_asset_action_callback('upgrade', asset_id, 'cloud:querymenu')))
             if include_start:
-                action_buttons.append(InlineKeyboardButton(text='🕒 修改时间', callback_data=f'cloud:adminexp:asset:{asset_id}:cloud:querymenu'))
+                action_buttons.append(InlineKeyboardButton(text='🕒 修改时间', callback_data=f'exp:a:{asset_id}:cloud:querymenu'))
             if item.get('can_support'):
                 action_buttons.append(support_contact_button('cloud_asset', asset_id))
         for start in range(0, len(action_buttons), 2):

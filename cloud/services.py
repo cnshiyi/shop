@@ -1000,32 +1000,20 @@ def get_cloud_plan(plan_id: int):
 
 
 @sync_to_async
-def set_cloud_server_port(order_id: int, user_id: int, port: int):
-    order = CloudServerOrder.objects.filter(id=order_id, user_id=user_id).first()
-    if not order:
-        return None
-    order.mtproxy_port = port
-    order.provision_note = append_note(order.provision_note, f'用户已确认端口 {port}，开始创建服务器。')
-    order.save(update_fields=['mtproxy_port', 'provision_note', 'updated_at'])
-    logger.info('云服务器端口确认: order=%s user=%s port=%s', order.order_no, user_id, port)
-    return order
-
-
-@sync_to_async
 def prepare_cloud_server_order_instances(order_id: int, user_id: int, port: int):
     with transaction.atomic():
         order = CloudServerOrder.objects.select_for_update().filter(id=order_id, user_id=user_id).first()
         if not order:
             return []
         if order.status not in ['paid']:
-            logger.warning('云服务器端口确认被拒绝: order=%s user=%s port=%s status=%s', order.order_no, user_id, port, order.status)
+            logger.warning('云服务器默认端口创建被拒绝: order=%s user=%s port=%s status=%s', order.order_no, user_id, port, order.status)
             return []
         quantity = max(1, int(order.quantity or 1))
         order.mtproxy_port = port
         if quantity <= 1:
-            order.provision_note = append_note(order.provision_note, f'用户已确认端口 {port}，开始创建服务器。')
+            order.provision_note = append_note(order.provision_note, f'使用默认端口 {port}，开始创建服务器。')
             order.save(update_fields=['mtproxy_port', 'provision_note', 'updated_at'])
-            logger.info('云服务器端口确认: order=%s user=%s port=%s quantity=1', order.order_no, user_id, port)
+            logger.info('云服务器默认端口创建提交: order=%s user=%s port=%s quantity=1', order.order_no, user_id, port)
             return [order]
 
         per_total = (Decimal(order.total_amount or 0) / Decimal(quantity)).quantize(Decimal('0.000001'))
@@ -1035,7 +1023,7 @@ def prepare_cloud_server_order_instances(order_id: int, user_id: int, port: int)
         order.quantity = 1
         order.total_amount = per_total
         order.pay_amount = per_pay
-        order.provision_note = append_note(order.provision_note, f'批量订单 {original_order_no} 已拆分：第 1/{quantity} 台，端口 {port}，开始创建服务器。')
+        order.provision_note = append_note(order.provision_note, f'批量订单 {original_order_no} 已拆分：第 1/{quantity} 台，默认端口 {port}，开始创建服务器。')
         order.save(update_fields=['quantity', 'total_amount', 'pay_amount', 'mtproxy_port', 'provision_note', 'updated_at'])
         for index in range(2, quantity + 1):
             clone = CloudServerOrder.objects.create(
@@ -1063,10 +1051,10 @@ def prepare_cloud_server_order_instances(order_id: int, user_id: int, port: int)
                 expired_at=order.expired_at,
                 mtproxy_port=port,
                 last_user_id=order.last_user_id,
-                provision_note=f'批量订单 {original_order_no} 已拆分：第 {index}/{quantity} 台，端口 {port}，开始创建服务器。',
+                provision_note=f'批量订单 {original_order_no} 已拆分：第 {index}/{quantity} 台，默认端口 {port}，开始创建服务器。',
             )
             created_orders.append(clone)
-        logger.info('云服务器批量订单拆分完成: original_order=%s user=%s quantity=%s port=%s child_orders=%s', original_order_no, user_id, quantity, port, [item.order_no for item in created_orders])
+        logger.info('云服务器批量订单默认端口拆分完成: original_order=%s user=%s quantity=%s port=%s child_orders=%s', original_order_no, user_id, quantity, port, [item.order_no for item in created_orders])
         return created_orders
 
 
@@ -4624,7 +4612,6 @@ __all__ = [
     'set_group_cloud_server_auto_renew',
     'set_cloud_server_auto_renew',
     'set_cloud_server_auto_renew_admin',
-    'set_cloud_server_port',
     'start_cloud_server_from_admin',
     'sync_cloud_asset_user_binding',
     'unmute_all_user_reminders',
