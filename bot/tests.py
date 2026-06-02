@@ -1036,7 +1036,6 @@ class RetainedIpRenewalUiTestCase(SimpleTestCase):
                 {'name': 'SOCKS5', 'url': 'socks5://abcdefabcdefabcdefabcdefabcdefab:abcdefabcdefabcdefabcdefabcdefab@1.2.3.4:9534', 'port': '9534'},
             ],
             provision_note='',
-            service_expires_at=None,
             auto_renew_enabled=False,
             status='completed',
         )
@@ -1056,7 +1055,6 @@ class RetainedIpRenewalUiTestCase(SimpleTestCase):
             mtproxy_link='tg://proxy?server=1.2.3.4&port=443&secret=eeabcdefabcdefabcdefabcdefabcdefab617a7572652e6d6963726f736f66742e636f6d',
             proxy_links=[],
             provision_note='MTProxy 安装完成\nSOCKS5: OK 端口 9534',
-            service_expires_at=None,
             auto_renew_enabled=False,
             status='completed',
         )
@@ -1079,7 +1077,6 @@ class RetainedIpRenewalUiTestCase(SimpleTestCase):
                 {'name': 'SOCKS5', 'url': 'socks5://abcdefabcdefabcdefabcdefabcdefab:abcdefabcdefabcdefabcdefabcdefab@1.2.3.4:9534', 'port': '9534'},
             ],
             provision_note='分享链接: https://t.me/proxy?server=1.2.3.4&port=9534&secret=wrong',
-            service_expires_at=None,
             auto_renew_enabled=False,
             status='completed',
         )
@@ -1101,7 +1098,6 @@ class RetainedIpRenewalUiTestCase(SimpleTestCase):
                 {'name': 'SOCKS5', 'url': 'socks5://abcdefabcdefabcdefabcdefabcdefab:abcdefabcdefabcdefabcdefabcdefab@1.2.3.4:9534', 'port': '9534'},
             ],
             provision_note='',
-            service_expires_at=None,
             auto_renew_enabled=False,
             status='completed',
         )
@@ -1146,7 +1142,6 @@ class RetainedIpRenewalUiTestCase(SimpleTestCase):
             provision_note='未绑定代理资产续费：来源资产 #123；支付完成后自动创建服务器。',
             instance_id='',
             service_started_at=None,
-            service_expires_at=None,
         )
 
         self.assertTrue(_requires_recovery_provision(order))
@@ -1158,7 +1153,6 @@ class RetainedIpRenewalUiTestCase(SimpleTestCase):
             provision_note='未绑定代理资产续费：来源资产 #123；恢复完成。',
             instance_id='i-abc',
             service_started_at=timezone.now(),
-            service_expires_at=timezone.now() + timezone.timedelta(days=30),
         )
 
         self.assertFalse(_requires_recovery_provision(order))

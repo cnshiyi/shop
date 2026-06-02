@@ -2538,14 +2538,14 @@ class CloudServerServicesTestCase(TestCase):
             status='completed',
             public_ip='8.8.4.8',
             service_started_at=original_started_at,
-            service_expires_at=original_expiry,
         )
+        self._attach_order_expiry_asset(order, original_expiry)
         with patch('cloud.services._renew_aliyun_instance', return_value=(True, 'ok')), patch('cloud.services._ensure_aws_instance_running', return_value=(False, 'skip start')):
             renewed = async_to_sync(apply_cloud_server_renewal)(order.id, 31, False)
 
         renewed.refresh_from_db()
         self.assertEqual(renewed.service_started_at, original_started_at)
-        self.assertGreater(renewed.service_expires_at, original_expiry)
+        self.assertGreater(order_asset_expiry(renewed), original_expiry)
 
     # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
     def test_renewal_postcheck_skips_running_records(self):
@@ -2568,7 +2568,6 @@ class CloudServerServicesTestCase(TestCase):
             server_name='renew-postcheck-running',
             instance_id='renew-postcheck-running',
             public_ip='8.8.4.9',
-            service_expires_at=new_expiry,
         )
         asset = CloudAsset.objects.create(
             kind=CloudAsset.KIND_SERVER,
@@ -2586,6 +2585,7 @@ class CloudServerServicesTestCase(TestCase):
             provider_status='running',
             is_active=True,
         )
+        self._attach_order_expiry_asset(order, new_expiry)
         server = Server.objects.create(
             source=Server.SOURCE_ORDER,
             order=order,
@@ -2614,8 +2614,8 @@ class CloudServerServicesTestCase(TestCase):
         asset.refresh_from_db()
         server.refresh_from_db()
         self.assertIn('已跳过开机和 MTProxy 巡检', order.provision_note)
-        self.assertEqual(asset.actual_expires_at, order.service_expires_at)
-        self.assertEqual(server.expires_at, order.service_expires_at)
+        self.assertEqual(asset.actual_expires_at, new_expiry)
+        self.assertEqual(server.expires_at, new_expiry)
 
     # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
     def test_address_renewal_failure_rolls_back_paid_fields(self):
@@ -2690,8 +2690,8 @@ class CloudServerServicesTestCase(TestCase):
             mtproxy_link='tg://proxy?server=8.8.4.4&port=9528&secret=0123456789abcdef0123456789abcdef',
             proxy_links=[{'label': '主链路', 'url': 'tg://proxy?server=8.8.4.4&port=9528&secret=0123456789abcdef0123456789abcdef'}],
             service_started_at=timezone.now() - timezone.timedelta(days=1),
-            service_expires_at=timezone.now() + timezone.timedelta(days=1),
         )
+        self._attach_order_expiry_asset(source, timezone.now() + timezone.timedelta(days=1))
 
         first_order, first_err = async_to_sync(create_cloud_server_upgrade_order)(source.id, self.user.id, target_plan.id)
         balance_after_first = TelegramUser.objects.get(id=self.user.id).balance
@@ -2729,8 +2729,9 @@ class CloudServerServicesTestCase(TestCase):
             mtproxy_port=9528,
             mtproxy_secret='0123456789abcdef0123456789abcdef',
             service_started_at=timezone.now() - timezone.timedelta(days=1),
-            service_expires_at=timezone.now() + timezone.timedelta(days=20),
         )
+        source_expiry = timezone.now() + timezone.timedelta(days=20)
+        self._attach_order_expiry_asset(source, source_expiry)
         old_server = Server.objects.create(
             order=source,
             user=self.user,
@@ -2742,7 +2743,7 @@ class CloudServerServicesTestCase(TestCase):
             instance_id=source.instance_id,
             provider_resource_id=source.provider_resource_id,
             public_ip=source.public_ip,
-            expires_at=source.service_expires_at,
+            expires_at=source_expiry,
             status=Server.STATUS_RUNNING,
             is_active=True,
         )
@@ -2766,8 +2767,8 @@ class CloudServerServicesTestCase(TestCase):
             mtproxy_port=source.mtproxy_port,
             mtproxy_secret=source.mtproxy_secret,
             service_started_at=source.service_started_at,
-            service_expires_at=source.service_expires_at,
         )
+        self._attach_order_expiry_asset(replacement, source_expiry)
 
         async_to_sync(_mark_success)(
             replacement.id,
@@ -2788,7 +2789,7 @@ class CloudServerServicesTestCase(TestCase):
         self.assertIsNotNone(new_server)
         self.assertNotEqual(new_server.id, old_server.id)
         self.assertEqual(new_server.public_ip, source.public_ip)
-        self.assertEqual(new_server.expires_at, replacement.service_expires_at)
+        self.assertEqual(new_server.expires_at, source_expiry)
 
     # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
     def test_asset_renewal_mark_success_starts_new_service_period(self):
@@ -2813,10 +2814,10 @@ class CloudServerServicesTestCase(TestCase):
             mtproxy_port=443,
             mtproxy_secret='secret',
             lifecycle_days=31,
-            service_expires_at=old_release_at,
             ip_recycle_at=old_release_at,
             provision_note='未绑定代理资产续费：来源资产 #999；旧IP=10.0.0.90。',
         )
+        self._attach_order_expiry_asset(order, old_release_at)
 
         async_to_sync(_mark_success)(
             order.id,
@@ -2832,9 +2833,8 @@ class CloudServerServicesTestCase(TestCase):
         order.refresh_from_db()
         asset = CloudAsset.objects.get(order=order, kind=CloudAsset.KIND_SERVER)
         self.assertEqual(order.status, 'completed')
-        self.assertGreater(order.service_expires_at, old_release_at)
-        self.assertEqual(order.service_expires_at.date(), (order.completed_at + timezone.timedelta(days=31)).date())
-        self.assertEqual(asset.actual_expires_at, order.service_expires_at)
+        self.assertGreater(asset.actual_expires_at, old_release_at)
+        self.assertEqual(asset.actual_expires_at.date(), (order.completed_at + timezone.timedelta(days=31)).date())
 
     # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
     def test_aws_sync_resolver_does_not_match_replacement_by_old_ip(self):
@@ -2859,8 +2859,9 @@ class CloudServerServicesTestCase(TestCase):
             server_name='old-sync-instance',
             instance_id='old-sync-instance',
             provider_resource_id='old-sync-instance',
-            service_expires_at=timezone.now() + timezone.timedelta(days=20),
         )
+        source_expiry = timezone.now() + timezone.timedelta(days=20)
+        self._attach_order_expiry_asset(source, source_expiry)
         replacement = CloudServerOrder.objects.create(
             order_no='HB-TEST-AWS-SYNC-NEW-IP',
             user=self.user,
@@ -2880,7 +2881,6 @@ class CloudServerServicesTestCase(TestCase):
             server_name='new-sync-instance',
             instance_id='new-sync-instance',
             provider_resource_id='new-sync-instance',
-            service_expires_at=source.service_expires_at,
         )
         old_server = Server.objects.create(
             order=source,
@@ -2893,7 +2893,7 @@ class CloudServerServicesTestCase(TestCase):
             instance_id=source.instance_id,
             provider_resource_id=source.provider_resource_id,
             public_ip=source.public_ip,
-            expires_at=source.service_expires_at,
+            expires_at=source_expiry,
             status=Server.STATUS_RUNNING,
             is_active=True,
         )
@@ -2927,8 +2927,9 @@ class CloudServerServicesTestCase(TestCase):
             server_name='old-instance-name',
             instance_id='old-instance-name',
             provider_resource_id='old-instance-arn',
-            service_expires_at=timezone.now() + timezone.timedelta(days=20),
         )
+        stable_ip_expiry = timezone.now() + timezone.timedelta(days=20)
+        self._attach_order_expiry_asset(stable_ip_order, stable_ip_expiry)
         dirty_name_order = CloudServerOrder.objects.create(
             order_no='HB-TEST-AWS-SYNC-DIRTY-NAME',
             user=self.user,
@@ -2947,8 +2948,8 @@ class CloudServerServicesTestCase(TestCase):
             server_name='new-instance-name',
             instance_id='new-instance-name',
             provider_resource_id='new-instance-arn',
-            service_expires_at=stable_ip_order.service_expires_at,
         )
+        self._attach_order_expiry_asset(dirty_name_order, stable_ip_expiry)
         ip_asset = CloudAsset.objects.create(
             kind=CloudAsset.KIND_SERVER,
             source=CloudAsset.SOURCE_AWS_SYNC,
@@ -3054,8 +3055,8 @@ class CloudServerServicesTestCase(TestCase):
             mtproxy_link='tg://proxy?server=8.8.4.5&port=9528&secret=0123456789abcdef0123456789abcdef',
             proxy_links=[{'label': '主链路', 'url': 'tg://proxy?server=8.8.4.5&port=9528&secret=0123456789abcdef0123456789abcdef'}],
             service_started_at=timezone.now() - timezone.timedelta(days=1),
-            service_expires_at=timezone.now() + timezone.timedelta(days=1),
         )
+        self._attach_order_expiry_asset(source, timezone.now() + timezone.timedelta(days=1))
 
         plans, err = async_to_sync(list_cloud_server_upgrade_plans)(source.id, self.user.id)
         new_order, create_err = async_to_sync(create_cloud_server_upgrade_order)(source.id, self.user.id, small_plan.id)
@@ -3123,8 +3124,8 @@ class CloudServerServicesTestCase(TestCase):
             mtproxy_link='tg://proxy?server=8.8.4.6&port=9528&secret=0123456789abcdef0123456789abcdef',
             proxy_links=[{'label': '主链路', 'url': 'tg://proxy?server=8.8.4.6&port=9528&secret=0123456789abcdef0123456789abcdef'}],
             service_started_at=timezone.now() - timezone.timedelta(days=1),
-            service_expires_at=timezone.now() + timezone.timedelta(days=1),
         )
+        self._attach_order_expiry_asset(source, timezone.now() + timezone.timedelta(days=1))
 
         plans, err = async_to_sync(list_cloud_server_upgrade_plans)(source.id, self.user.id)
         large = next(plan for plan in plans if plan['id'] == large_plan.id)
@@ -3140,7 +3141,7 @@ class CloudServerServicesTestCase(TestCase):
         self.assertEqual(large_order.pay_amount, Decimal('10.000000000'))
 
     # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
-    def test_due_orders_use_order_expiry_for_lightsail_instead_of_stale_asset_expiry(self):
+    def test_due_orders_use_asset_expiry_for_lightsail_lifecycle(self):
         order = CloudServerOrder.objects.create(
             order_no='HB-LIFECYCLE-DUE-1',
             user=self.user,
@@ -3157,7 +3158,6 @@ class CloudServerServicesTestCase(TestCase):
             status='completed',
             public_ip='10.0.0.1',
             service_started_at=timezone.now() - timezone.timedelta(days=1),
-            service_expires_at=timezone.now() + timezone.timedelta(days=10),
         )
         CloudAsset.objects.create(
             kind=CloudAsset.KIND_SERVER,
@@ -3167,9 +3167,9 @@ class CloudServerServicesTestCase(TestCase):
             provider=order.provider,
             region_code=order.region_code,
             region_name=order.region_name,
-            asset_name='stale-expired-asset',
+            asset_name='future-expiry-asset',
             public_ip='10.0.0.9',
-            actual_expires_at=timezone.now() - timezone.timedelta(days=1),
+            actual_expires_at=timezone.now() + timezone.timedelta(days=10),
         )
 
         due = async_to_sync(_get_due_orders)()

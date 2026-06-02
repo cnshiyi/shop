@@ -238,12 +238,11 @@ def _append_cloud_asset_note(existing: str | None, addition: str | None, proxy_l
     return append_note(existing, clean_addition)
 
 
-def _preserve_existing_asset_defaults(defaults: dict, asset: CloudAsset | None) -> dict:
+def _preserve_existing_asset_defaults(defaults: dict, asset: CloudAsset | None, *, preserve_expiry: bool = True) -> dict:
     if not asset:
         return defaults
     preserved_values = {
         'user': asset.user if asset.user_id else defaults.get('user'),
-        'actual_expires_at': asset.actual_expires_at or defaults.get('actual_expires_at'),
         'mtproxy_link': asset.mtproxy_link or defaults.get('mtproxy_link'),
         'proxy_links': asset.proxy_links or defaults.get('proxy_links'),
         'mtproxy_secret': asset.mtproxy_secret or defaults.get('mtproxy_secret'),
@@ -252,13 +251,15 @@ def _preserve_existing_asset_defaults(defaults: dict, asset: CloudAsset | None) 
         'price': asset.price if asset.price is not None else defaults.get('price'),
         'currency': asset.currency or defaults.get('currency'),
     }
+    if preserve_expiry:
+        preserved_values['actual_expires_at'] = asset.actual_expires_at or defaults.get('actual_expires_at')
     for key, value in preserved_values.items():
         if key in defaults:
             defaults[key] = value
     return defaults
 
 
-def _upsert_server_asset(order: CloudServerOrder, note: str, *, expires_at=None):
+def _upsert_server_asset(order: CloudServerOrder, note: str, *, expires_at=None, preserve_expiry: bool = True):
     try:
         order_user = order.user
     except Exception:
@@ -314,7 +315,7 @@ def _upsert_server_asset(order: CloudServerOrder, note: str, *, expires_at=None)
             'is_active': order.status in {'provisioning', 'completed', 'expiring', 'renew_pending', 'suspended'},
         }
     if server_asset:
-        _preserve_existing_asset_defaults(defaults, server_asset)
+        _preserve_existing_asset_defaults(defaults, server_asset, preserve_expiry=preserve_expiry)
         for key, value in defaults.items():
             setattr(server_asset, key, value)
         server_asset.save()
@@ -569,7 +570,7 @@ def _mark_instance_created(order_id: int, server_name: str, instance_id: str, pu
         'is_active': True,
     }
     existing_asset = CloudAsset.objects.filter(order=order, kind=CloudAsset.KIND_SERVER).order_by('-updated_at', '-id').first()
-    _preserve_existing_asset_defaults(asset_defaults, existing_asset)
+    _preserve_existing_asset_defaults(asset_defaults, existing_asset, preserve_expiry=not is_cloud_asset_renewal_order(order))
     server_asset, _ = CloudAsset.objects.update_or_create(
         order=order,
         kind=CloudAsset.KIND_SERVER,
@@ -1036,6 +1037,7 @@ def _mark_success(order_id: int, server_name: str, instance_id: str, public_ip: 
     existing_mtproxy_link = order.mtproxy_link
     existing_mtproxy_secret = order.mtproxy_secret
     existing_proxy_links = list(order.proxy_links or [])
+    asset_renewal_order = is_cloud_asset_renewal_order(order)
     mtproxy_link, mtproxy_secret, mtproxy_host = _extract_mtproxy_fields(note)
     proxy_links = _extract_proxy_links(note)
     mtproxy_secret = mtproxy_secret or existing_mtproxy_secret
@@ -1069,7 +1071,7 @@ def _mark_success(order_id: int, server_name: str, instance_id: str, public_ip: 
     order.static_ip_name = static_ip_name or order.static_ip_name
     order.completed_at = timezone.now()
     asset_expires_at = order_asset_expiry(order)
-    if is_cloud_asset_renewal_order(order):
+    if asset_renewal_order:
         order.service_started_at = order.completed_at
         asset_expires_at = order.completed_at + timezone.timedelta(days=order.lifecycle_days or 31)
     else:
@@ -1085,7 +1087,7 @@ def _mark_success(order_id: int, server_name: str, instance_id: str, public_ip: 
     logger.info('[PROVISION] order_saved order=%s status=%s service_started_at=%s service_expires_at=%s mtproxy_host=%s mtproxy_link=%s', order.order_no, order.status, order.service_started_at, asset_expires_at, order.mtproxy_host, order.mtproxy_link)
 
     try:
-        server_asset = _upsert_server_asset(order, compact_note, expires_at=asset_expires_at)
+        server_asset = _upsert_server_asset(order, compact_note, expires_at=asset_expires_at, preserve_expiry=not asset_renewal_order)
         record_cloud_ip_log(
             event_type='created',
             order=order,

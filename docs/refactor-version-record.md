@@ -1,5 +1,34 @@
 # 重构版本记录
 
+## 2026-06-02 自动监工：资产续费完成到期推进修复
+
+### 范围
+
+本轮继续监工云资产生命周期唯一事实源，重点复查 `CloudAsset.actual_expires_at` 是否仍是唯一到期事实、订单表旧到期字段是否被恢复、计划快照表和退款入口是否回流，以及当前测试草稿在未绑定代理资产续费完成后的到期推进语义。
+
+### 运行变更
+
+- `CloudServerOrder.service_expires_at` 未恢复为模型字段；运行代码继续通过 `order_asset_expiry()` / `CloudAsset.actual_expires_at` 读取到期事实。
+- `cloud/provisioning.py` 在 `_mark_success()` 开始时固定“未绑定代理资产续费”判定，避免保存完成状态、实例 ID 和开始时间后再次判定变成普通订单。
+- 未绑定代理资产续费完成时，`_upsert_server_asset()` 不再保留旧资产到期时间，而是写入以本次完成时间和 `lifecycle_days` 计算的新 `CloudAsset.actual_expires_at`。
+- 同步当前测试草稿中一组续费、配置调整、AWS 同步解析和生命周期到期用例，测试数据不再向订单创建参数传入旧 `service_expires_at`，改为显式创建或更新关联 `CloudAsset.actual_expires_at`。
+- 废弃 app 扫描命中主要为 `core.dashboard_api` 共享工具、后台 URL namespace、权限码和历史迁移命名，没有发现重新注册 `accounts`、`finance`、`mall`、`monitoring`、`dashboard_api`、`biz` 运行时 app。
+- 旧字段危险 ORM 扫描只命中历史迁移 `0043_backfill_cloud_asset_expiry`，运行代码未发现对订单旧字段做 `filter/update/order_by/values` 查询。
+
+### 验证
+
+本地已通过：
+
+```bash
+UV_CACHE_DIR=/private/tmp/uv-cache-shop uv run python manage.py check
+UV_CACHE_DIR=/private/tmp/uv-cache-shop uv run python manage.py makemigrations --check --dry-run
+UV_CACHE_DIR=/private/tmp/uv-cache-shop uv run python -m py_compile cloud/provisioning.py cloud/services.py cloud/asset_expiry.py cloud/models.py cloud/api_orders.py cloud/api_asset_edit.py cloud/lifecycle.py bot/api.py bot/handlers.py bot/tests.py cloud/tests.py
+UV_CACHE_DIR=/private/tmp/uv-cache-shop DJANGO_TEST_SQLITE=1 uv run python manage.py test cloud.tests.CloudServerServicesTestCase.test_apply_cloud_server_renewal_keeps_original_service_started_at cloud.tests.CloudServerServicesTestCase.test_renewal_postcheck_skips_running_records cloud.tests.CloudServerServicesTestCase.test_cloud_upgrade_wallet_payment_is_idempotent cloud.tests.CloudServerServicesTestCase.test_config_change_success_does_not_steal_old_server_record cloud.tests.CloudServerServicesTestCase.test_asset_renewal_mark_success_starts_new_service_period cloud.tests.CloudServerServicesTestCase.test_aws_sync_resolver_does_not_match_replacement_by_old_ip cloud.tests.CloudServerServicesTestCase.test_aws_sync_resolver_prefers_ip_over_changed_instance_name cloud.tests.CloudServerServicesTestCase.test_cloud_config_change_lists_and_creates_downgrade_order cloud.tests.CloudServerServicesTestCase.test_cloud_config_change_ceil_custom_price_to_plan_tier cloud.tests.CloudServerServicesTestCase.test_due_orders_use_asset_expiry_for_lightsail_lifecycle bot.tests.RetainedIpRenewalUiTestCase --noinput --verbosity 1
+git diff --check
+```
+
+`makemigrations --check --dry-run` 仍因当前沙箱禁止连接本地 MySQL 输出一致性历史检查警告，但结果为 `No changes detected`。
+
 ## 2026-06-02 手动监工：资产到期唯一化与计划快照表移除
 
 ### 范围
