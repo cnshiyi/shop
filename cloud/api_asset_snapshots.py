@@ -52,19 +52,31 @@ def _snapshot_group_label(item: dict, group_by='user') -> str:
     return str(item.get('user_display_name') or item.get('username_label') or item.get('tg_user_id') or '未绑定用户')
 
 
+def _proxy_link_search_terms(proxy_links) -> list[str]:
+    values = []
+    if not isinstance(proxy_links, list):
+        return values
+    for item in proxy_links:
+        if not isinstance(item, dict):
+            continue
+        for key in ('name', 'label', 'mode', 'server', 'port'):
+            value = item.get(key)
+            if value not in {None, ''}:
+                values.append(str(value))
+    return values
+
+
 def _snapshot_search_text(item: dict) -> str:
     values = [
         item.get('asset_name'), item.get('instance_id'), item.get('provider_resource_id'),
         item.get('public_ip'), item.get('previous_public_ip'), item.get('mtproxy_host'),
-        item.get('mtproxy_link'), item.get('note'), item.get('provider_status'),
+        item.get('note'), item.get('provider_status'),
         item.get('region_code'), item.get('region_name'), item.get('region_label'),
         item.get('account_label'), item.get('user_display_name'), item.get('username_label'),
         item.get('tg_user_id'), item.get('telegram_group_title'), item.get('telegram_group_username'),
         item.get('telegram_group_chat_id'), item.get('order_no'),
     ]
-    proxy_links = item.get('proxy_links') or []
-    if isinstance(proxy_links, list):
-        values.extend(proxy_links)
+    values.extend(_proxy_link_search_terms(item.get('proxy_links') or []))
     return '\n'.join(str(value) for value in values if value not in {None, ''})
 
 

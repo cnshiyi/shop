@@ -26,14 +26,16 @@ async def init_monitor_cache(force_log: bool = False):
         return
 
     await r.delete(MONITORS_KEY)
-    monitors = await sync_to_async(list)(
-        AddressMonitor.objects.filter(is_active=True)
-        .values(
-            'id', 'user_id', 'address', 'remark', 'monitor_transfers', 'monitor_resources',
-            'last_energy', 'last_bandwidth', 'usdt_threshold', 'trx_threshold',
-            'energy_threshold', 'bandwidth_threshold'
+    monitors = await sync_to_async(
+        lambda: list(
+            AddressMonitor.objects.filter(is_active=True)
+            .values(
+                'id', 'user_id', 'address', 'remark', 'monitor_transfers', 'monitor_resources',
+                'last_energy', 'last_bandwidth', 'usdt_threshold', 'trx_threshold',
+                'energy_threshold', 'bandwidth_threshold'
+            )
         )
-    )
+    )()
     pipe = r.pipeline()
     grouped: dict[str, list[dict]] = {}
     for mon in monitors:
