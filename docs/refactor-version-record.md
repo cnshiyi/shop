@@ -1,5 +1,39 @@
 # 重构版本记录
 
+## 2026-06-02 22:40 自动监工：本地巡检和 CLI 监工状态
+
+### 范围
+
+本轮继续执行自动优化监工目标，重点确认当前仓库状态、10 分钟自动化配置、终端版 Codex 可用性、生命周期计划修复后的聚焦测试、机器人返回 UI 回归、旧到期字段/旧计划/旧退款入口回流情况。
+
+### 复查结论
+
+- 当前分支工作区起始状态干净，最近提交停在 `ed4d8f3 补充流程时间验证记录`。
+- `Shop 自动优化监工` 自动化仍为 `ACTIVE`，运行目录为 `/Users/a399/Desktop/data/shop`，计划为每 10 分钟一次。
+- 终端版 Codex 可用，版本为 `codex-cli 0.135.0-alpha.1`，默认 review 使用配置模型 `gpt-5.5`。
+- 本地验证未发现新的明确代码缺陷；旧字段、旧计划快照表和旧退款入口扫描无命中。
+- `codex exec review --base HEAD~3` 已启动并读取了最近三次提交和生命周期相关代码，但最终因服务端 `525` 中断，未产出完整 review 结论；该问题属于外部 CLI/API 连接失败，本轮不基于不完整结论改代码。
+
+### 验证
+
+已通过：
+
+```bash
+UV_CACHE_DIR=/private/tmp/uv-cache-shop uv run python manage.py check
+DJANGO_TEST_SQLITE=1 UV_CACHE_DIR=/private/tmp/uv-cache-shop uv run python manage.py test cloud.tests.CloudServerServicesTestCase.test_notice_schedule_preserves_stored_delete_and_recycle_after_status_progress cloud.tests.CloudServerServicesTestCase.test_sync_aws_assets_revives_deleted_order_when_instance_exists bot.tests.RetainedIpRenewalUiTestCase --verbosity 1
+rg -n "service_expires_at|service_expired_at|normalize_service_expiry|CloudLifecyclePlan\\b|CloudNoticePlan\\b|CloudAutoRenewPlan\\b|refund_order|process_refund|create_refund|issue_refund|refund_to_balance|refund_balance|STATUS_REFUNDED|status=['\\\"]refunded['\\\"]" bot core orders cloud shop --glob '!**/migrations/**' --glob '!**/tests.py'
+```
+
+未完成：
+
+```bash
+codex exec review --base HEAD~3
+```
+
+结果：Django 系统检查、生命周期/AWS 恢复已删除订单/机器人返回 UI 聚焦测试 25 条、旧字段/旧计划/旧退款扫描均通过。Codex CLI 独立 review 因上游 `525` 中断，等待下一轮自动化继续复查。
+
+剩余风险：本轮未连接真实 MySQL、AWS Lightsail、阿里云或 TRONGrid，未执行真实后台编辑、Telegram 回调、钱包扣款、自动续费支付、云端删机或固定 IP 释放；CLI review 未拿到完整结论。
+
 ## 2026-06-02 22:31 自动监工：保留已进入流程的生命周期时间
 
 ### 范围
