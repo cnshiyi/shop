@@ -28,7 +28,7 @@ from cloud.lifecycle_schedule import compute_order_lifecycle_fields
 from cloud.models import CloudAsset, CloudIpLog, CloudServerOrder, CloudServerPlan
 from cloud.note_utils import append_note
 from cloud.server_records import Server
-from cloud.services import ensure_cloud_asset_operation_order, ensure_manual_expiry_operation_order, ensure_manual_owner_operation_order, ensure_manual_price_operation_order, record_cloud_ip_log, replace_cloud_asset_order_by_admin, set_cloud_server_auto_renew_admin, sync_cloud_asset_user_binding
+from cloud.services import ensure_cloud_asset_operation_order, ensure_manual_expiry_operation_order, ensure_manual_owner_operation_order, ensure_manual_price_operation_order, record_cloud_ip_log, replace_cloud_asset_order_by_admin, scoped_server_match_for_asset, set_cloud_server_auto_renew_admin, sync_cloud_asset_user_binding
 from core.dashboard_api import _error, _iso, _ok, _parse_decimal, _read_payload, _status_label, dashboard_login_required, dashboard_superuser_required
 
 logger = logging.getLogger(__name__)
@@ -94,7 +94,7 @@ def update_cloud_asset(request, asset_id):
             'order_status': getattr(order, 'status', '') or '',
             'order_status_label': _status_label(getattr(order, 'status', ''), CloudServerOrder.STATUS_CHOICES) if order else '',
             'service_started_at': _iso(getattr(order, 'service_started_at', None)),
-            'actual_expires_at': _iso(asset.actual_expires_at or order_asset_expiry(order)),
+            'actual_expires_at': _iso(asset.actual_expires_at or order_asset_expiry(order)) or payload.get('actual_expires_at'),
             'renew_grace_expires_at': _iso(getattr(order, 'renew_grace_expires_at', None)),
             'suspend_at': _iso(getattr(order, 'suspend_at', None)),
             'delete_at': _iso(getattr(order, 'delete_at', None)),
@@ -142,6 +142,7 @@ def update_cloud_asset(request, asset_id):
     refresh_snapshots_needed = False
     refresh_unattached_delete_due = False
     refreshed_due_at = None
+    related_server_sync_updates = {}
     try:
         with transaction.atomic():
             asset = CloudAsset.objects.select_for_update().select_related('order', 'user', 'cloud_account', 'telegram_group').get(pk=asset_id)
@@ -292,6 +293,8 @@ def update_cloud_asset(request, asset_id):
             for field in ('asset_name', 'public_ip', 'provider_resource_id', 'instance_id', 'mtproxy_link', 'mtproxy_host', 'note'):
                 if field in payload:
                     setattr(asset, field, payload.get(field) or None)
+                    if field in {'asset_name', 'public_ip', 'provider_resource_id', 'instance_id'}:
+                        related_server_sync_updates[field] = getattr(asset, field)
             if 'mtproxy_secret' in payload:
                 mtproxy_secret = str(payload.get('mtproxy_secret') or '').strip()
                 if mtproxy_secret:
@@ -385,6 +388,17 @@ def update_cloud_asset(request, asset_id):
             logger.warning('CLOUD_ASSET_MANUAL_ORDER_SYNC_SKIPPED asset_id=%s order_id=%s fields=%s error=%s', asset_id, linked_order_id, sorted(pending_order_updates), exc)
 
     asset = CloudAsset.objects.select_related('user', 'order', 'cloud_account', 'telegram_group').get(pk=asset_id)
+    if related_server_sync_updates:
+        server_updates = dict(related_server_sync_updates)
+        if 'public_ip' in payload and changed_public_ip_before:
+            server_updates['previous_public_ip'] = changed_public_ip_before
+        try:
+            Server.objects.filter(
+                scoped_server_match_for_asset(asset, include_order=False, include_ip=True),
+                sync_state__compat_server_record=True,
+            ).exclude(id=asset.id).update(**server_updates, updated_at=timezone.now())
+        except Exception as exc:
+            logger.warning('CLOUD_ASSET_RELATED_SERVER_SYNC_SKIPPED asset_id=%s fields=%s error=%s', asset_id, sorted(server_updates), exc)
     if refresh_unattached_delete_due and refreshed_due_at:
         related_ids = list(
             _related_cloud_asset_records(asset, order=asset.order, previous_public_ip=changed_public_ip_before)

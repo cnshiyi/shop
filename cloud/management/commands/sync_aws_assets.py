@@ -324,8 +324,21 @@ def _asset_resolve_ordering(public_ip=''):
     return ordering
 
 
+def _first_resolved_asset(queryset, ordering, *, prefer_server_record=False):
+    candidates = list(queryset.order_by(*ordering)[:50])
+    if prefer_server_record is True:
+        for item in candidates:
+            if (item.sync_state or {}).get('compat_server_record'):
+                return item
+    if prefer_server_record is False:
+        for item in candidates:
+            if not (item.sync_state or {}).get('compat_server_record'):
+                return item
+    return candidates[0] if candidates else None
+
+
 # 功能：提供 AWS 资产同步 的内部辅助逻辑，供同模块流程复用。
-def _resolve_asset(instance_name, instance_arn, public_ip, order, account=None, region_code=''):
+def _resolve_asset(instance_name, instance_arn, public_ip, order, account=None, region_code='', *, prefer_server_record=False):
     lookup = Q(kind=CloudAsset.KIND_SERVER)
     if account:
         labels = cloud_account_label_variants(account)
@@ -340,13 +353,13 @@ def _resolve_asset(instance_name, instance_arn, public_ip, order, account=None, 
             order_asset_queryset = CloudAsset.objects.filter(kind=CloudAsset.KIND_SERVER, order=order)
             if region_code:
                 order_asset_queryset = order_asset_queryset.filter(region_code=region_code)
-            order_ip_asset = order_asset_queryset.filter(ip_q).order_by(*_asset_resolve_ordering(public_ip)).first()
+            order_ip_asset = _first_resolved_asset(order_asset_queryset.filter(ip_q), _asset_resolve_ordering(public_ip), prefer_server_record=prefer_server_record)
             if order_ip_asset:
                 return order_ip_asset
         public_ip_queryset = base_queryset.filter(ip_q)
         if order:
             public_ip_queryset = public_ip_queryset.filter(Q(order__isnull=True) | Q(order=order))
-        asset = public_ip_queryset.order_by(*_asset_resolve_ordering(public_ip)).first()
+        asset = _first_resolved_asset(public_ip_queryset, _asset_resolve_ordering(public_ip), prefer_server_record=prefer_server_record)
         if asset:
             return asset
     direct_candidates = Q()
@@ -358,21 +371,22 @@ def _resolve_asset(instance_name, instance_arn, public_ip, order, account=None, 
         order_asset_queryset = CloudAsset.objects.filter(kind=CloudAsset.KIND_SERVER, order=order)
         if region_code:
             order_asset_queryset = order_asset_queryset.filter(region_code=region_code)
-        order_asset = order_asset_queryset.filter(direct_candidates).order_by(*_asset_resolve_ordering()).first()
+        order_asset = _first_resolved_asset(order_asset_queryset.filter(direct_candidates), _asset_resolve_ordering(), prefer_server_record=prefer_server_record)
         if order_asset:
             return order_asset
     if direct_candidates:
-        asset = base_queryset.filter(direct_candidates).order_by(*_asset_resolve_ordering()).first()
+        asset = _first_resolved_asset(base_queryset.filter(direct_candidates), _asset_resolve_ordering(), prefer_server_record=prefer_server_record)
         if asset:
             return asset
         if account:
-            deleted_asset = CloudAsset.objects.filter(lookup).filter(direct_candidates).filter(status__in=_SYNC_EXCLUDED_ASSET_STATUSES).order_by('-updated_at', '-id').first()
+            deleted_asset = _first_resolved_asset(CloudAsset.objects.filter(lookup).filter(direct_candidates).filter(status__in=_SYNC_EXCLUDED_ASSET_STATUSES), ['-updated_at', '-id'], prefer_server_record=prefer_server_record)
             if deleted_asset:
                 return deleted_asset
     return None
 
 
-_resolve_server = _resolve_asset
+def _resolve_server(instance_name, instance_arn, public_ip, order, account=None, region_code=''):
+    return _resolve_asset(instance_name, instance_arn, public_ip, order, account, region_code, prefer_server_record=True)
 
 
 # 功能：提供 AWS 资产同步 的内部辅助逻辑，供同模块流程复用。
@@ -989,7 +1003,43 @@ class Command(BaseCommand):
                                     manual_expiry_preserved_items.append(f'{asset.id}:{public_ip or "缺失"}:{instance_name or instance_arn}:{original_due_at}')
                                 if normalized_status not in {CloudAsset.STATUS_DELETED, CloudAsset.STATUS_TERMINATED}:
                                     clear_missing_confirmation_state(asset)
+                                    cleaned_note = _drop_stale_deleted_note_lines(asset.note)
+                                    if cleaned_note != str(asset.note or '').strip():
+                                        asset.note = cleaned_note or None
                                 asset.save()
+                                if (
+                                    normalized_status not in {CloudAsset.STATUS_DELETED, CloudAsset.STATUS_TERMINATED}
+                                    and not (asset.sync_state or {}).get('compat_server_record')
+                                ):
+                                    related_q = Q()
+                                    for related_value in [instance_name, instance_arn, public_ip]:
+                                        related_value = str(related_value or '').strip()
+                                        if not related_value:
+                                            continue
+                                        related_q |= Q(instance_id=related_value) | Q(provider_resource_id=related_value) | Q(public_ip=related_value) | Q(previous_public_ip=related_value)
+                                    if related_q:
+                                        related_queryset = CloudAsset.objects.filter(
+                                            kind=CloudAsset.KIND_SERVER,
+                                            provider='aws_lightsail',
+                                            region_code=region,
+                                            sync_state__compat_server_record=True,
+                                        ).filter(
+                                            Q(cloud_account=account) | Q(account_label__in=cloud_account_label_variants(account))
+                                        ).filter(related_q).exclude(id=asset.id)
+                                        for related in related_queryset:
+                                            related.status = asset.status
+                                            related.is_active = asset.is_active
+                                            related.provider_status = asset.provider_status
+                                            related.public_ip = asset.public_ip
+                                            related.previous_public_ip = asset.previous_public_ip
+                                            related.instance_id = asset.instance_id
+                                            related.provider_resource_id = asset.provider_resource_id
+                                            related.note = _drop_stale_deleted_note_lines(related.note) or None
+                                            related.save(update_fields=[
+                                                'status', 'is_active', 'provider_status', 'public_ip',
+                                                'previous_public_ip', 'instance_id', 'provider_resource_id',
+                                                'note', 'updated_at',
+                                            ])
                                 updated_count += 1
                                 account_stats['updated'] += 1
                                 updated_asset_ids.append(f'{asset.id}:{public_ip or "缺失"}:{instance_name or asset.asset_name}')

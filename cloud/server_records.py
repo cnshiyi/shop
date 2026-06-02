@@ -59,6 +59,16 @@ def _preserve_existing_manual_fields(payload: dict, asset: CloudAsset) -> dict:
             payload['user_id'] = asset.user_id
     if asset.actual_expires_at and 'actual_expires_at' in payload:
         payload['actual_expires_at'] = asset.actual_expires_at
+    if asset.note and 'note' in payload:
+        payload['note'] = asset.note
+    return payload
+
+
+def _mark_server_record_payload(payload: dict) -> dict:
+    payload = dict(payload)
+    sync_state = dict(payload.get('sync_state') or {})
+    sync_state['compat_server_record'] = True
+    payload['sync_state'] = sync_state
     return payload
 
 
@@ -111,11 +121,12 @@ class _ServerObjects:
         instance_id = str(payload.get('instance_id') or '').strip()
         provider_resource_id = str(payload.get('provider_resource_id') or '').strip()
         asset_name = str(payload.get('asset_name') or '').strip()
-        identity = Q()
+        ip_identity = Q()
         if public_ip:
-            identity |= Q(public_ip=public_ip) | Q(previous_public_ip=public_ip)
+            ip_identity |= Q(public_ip=public_ip) | Q(previous_public_ip=public_ip)
         if previous_public_ip:
-            identity |= Q(public_ip=previous_public_ip) | Q(previous_public_ip=previous_public_ip)
+            ip_identity |= Q(public_ip=previous_public_ip) | Q(previous_public_ip=previous_public_ip)
+        identity = Q()
         if instance_id:
             identity |= Q(instance_id=instance_id) | Q(asset_name=instance_id)
         if provider_resource_id:
@@ -123,14 +134,17 @@ class _ServerObjects:
         if asset_name:
             identity |= Q(asset_name=asset_name) | Q(instance_id=asset_name)
         if order_id:
-            ordered = self._qs().filter(order_id=order_id)
-            if identity:
-                existing = ordered.filter(identity).order_by('-updated_at', '-id').first()
+            ordered = self._qs().filter(order_id=order_id, sync_state__compat_server_record=True)
+            if ip_identity or identity:
+                existing = ordered.filter(ip_identity | identity).order_by('-updated_at', '-id').first()
                 if existing:
                     return existing
             existing = ordered.order_by('-updated_at', '-id').first()
             if existing:
                 return existing
+            return None
+        if ip_identity:
+            return self._identity_scope(payload).filter(ip_identity).order_by('-updated_at', '-id').first()
         if identity:
             return self._identity_scope(payload).filter(identity).order_by('-updated_at', '-id').first()
         return None
@@ -138,6 +152,7 @@ class _ServerObjects:
     def create(self, **kwargs):
         kwargs = _payload_kwargs(kwargs)
         kwargs.setdefault('kind', CloudAsset.KIND_SERVER)
+        kwargs = _mark_server_record_payload(kwargs)
         existing = self._find_existing_for_create(kwargs)
         if existing:
             kwargs = _preserve_existing_manual_fields(kwargs, existing)
@@ -152,6 +167,7 @@ class _ServerObjects:
         kwargs.setdefault('kind', CloudAsset.KIND_SERVER)
         defaults = _payload_kwargs(defaults or {})
         defaults.setdefault('kind', CloudAsset.KIND_SERVER)
+        defaults = _mark_server_record_payload(defaults)
         return CloudAsset.objects.update_or_create(defaults=defaults, **kwargs)
 
     def get(self, *args, **kwargs):

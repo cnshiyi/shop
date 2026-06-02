@@ -15,6 +15,26 @@ from core.dashboard_api import _apply_keyword_filter, _countdown_label, _days_le
 from core.models import CloudAccountConfig
 
 
+def _related_asset_records(asset):
+    query = Q()
+    if asset.order_id:
+        query |= Q(order_id=asset.order_id)
+    for field in ['instance_id', 'provider_resource_id', 'asset_name']:
+        value = str(getattr(asset, field, '') or '').strip()
+        if value:
+            query |= Q(**{field: value})
+    ip_values = {
+        str(asset.public_ip or '').strip(),
+        str(asset.previous_public_ip or '').strip(),
+    }
+    ip_values.discard('')
+    if ip_values:
+        query |= Q(public_ip__in=ip_values) | Q(previous_public_ip__in=ip_values)
+    if not query:
+        return CloudAsset.objects.none()
+    return CloudAsset.objects.filter(kind=CloudAsset.KIND_SERVER).filter(query).exclude(id=asset.id)
+
+
 def _server_payload(asset):
     user = asset.user
     user_payload = None
@@ -131,7 +151,7 @@ def rebuild_server_preserve_link(request, server_id: int):
 @dashboard_superuser_required
 @require_http_methods(['POST', 'DELETE'])
 def delete_server(request, server_id: int):
-    asset = CloudAsset.objects.select_related('order').filter(id=server_id, kind=CloudAsset.KIND_SERVER).first()
+    asset = CloudAsset.objects.select_related('order').filter(id=server_id, kind=CloudAsset.KIND_SERVER, sync_state__compat_server_record=True).first()
     if not asset:
         return _error('服务器不存在', status=404)
     now = timezone.now()
@@ -141,6 +161,9 @@ def delete_server(request, server_id: int):
     order = asset.order
 
     record_cloud_ip_log(event_type='deleted', order=order, asset=asset, previous_public_ip=previous_public_ip, public_ip=None, note=note)
+    related_ids = list(_related_asset_records(asset).order_by('id').values_list('id', flat=True))
+    if related_ids:
+        CloudAsset.objects.filter(id__in=related_ids).delete()
     asset.delete()
     return _ok({
         'target_type': 'cloud_asset',
@@ -149,7 +172,8 @@ def delete_server(request, server_id: int):
         'after_status': None,
         'hard_deleted': True,
         'exists_after': CloudAsset.objects.filter(id=server_id, kind=CloudAsset.KIND_SERVER).exists(),
-        'removed_assets': 0,
+        'removed_assets': len(related_ids),
+        'removed_asset_ids': related_ids,
         'order_status_changed': False,
     })
 

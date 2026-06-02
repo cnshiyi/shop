@@ -1,5 +1,48 @@
 # 重构版本记录
 
+## 2026-06-02 22:00 自动监工：兼容服务器记录和生命周期计划收口
+
+### 范围
+
+本轮继续监工 Shop Django 后端仓库。起始工作树已有同主题未提交改动，最近提交为 `5a5bc33 记录旧到期命名清零复验`；本轮在不回滚外部改动的前提下，重点复查云资产生命周期计划缓存、未附加固定 IP 删除历史、Server 兼容记录、AWS/阿里云同步缺失确认、废弃 app 回流、旧到期字段、旧计划快照表和旧退款入口。
+
+### 复查结论
+
+- `CloudAsset.actual_expires_at` 仍是唯一结构化资产到期事实；`CloudServerOrder` 未恢复 `service_expires_at` 或 `actual_expires_at` 服务到期字段。
+- 严格运行时代码扫描未发现旧订单到期字段 ORM 查询或写入、旧计划快照模型、旧退款函数名、`STATUS_REFUNDED/refunded` 状态，或云账号级关机计划判断回流。
+- `INSTALLED_APPS` 未出现 `accounts/finance/mall/monitoring/dashboard_api/biz` 废弃 app；本轮新增的 `Server` 兼容标记只用于当前 `CloudAsset` 表内的历史兼容记录识别，不恢复旧 app 或旧表。
+
+### 修复内容
+
+- 生命周期计划接口增加进程内缓存和按 `CloudAsset.updated_at`、`CloudIpLog.created_at` 的失效判断；刷新命令改为写入同一缓存路径，避免重复构建计划。
+- 未附加固定 IP 删除项改为直接从 `CloudAsset` 查询，补齐非活跃、已释放和历史删除记录，并给删除项补充 `PLAN_KIND_UNATTACHED_IP_DELETE`，避免删除尝试次数在接口装饰时丢失。
+- `Server` 兼容写入统一打 `sync_state.compat_server_record` 标记；后台删除服务器列表记录只允许删除兼容记录，并按订单、实例、资源 ID 或 IP 清理关联兼容记录，不把真实资产误当旧服务器入口。
+- 资产后台编辑同步关联兼容记录的名称、IP、实例 ID 和资源 ID；手工用户、手工到期和人工备注继续保留，不覆盖 `CloudAsset.actual_expires_at`。
+- 归一命令可合并重复兼容记录、解析云账号标签并清理活跃但无效的兼容记录；已终态 deleted/terminated 的残留记录保留为历史状态，不硬删。
+- AWS 同步解析真实资产时优先非兼容 `CloudAsset`，云端实例恢复后清理旧“已标记删除”备注，并只从真实资产向兼容记录传播状态；阿里云缺失确认继续处理有订单绑定的兼容记录，但跳过无订单的空白兼容记录。
+- TRON 资源监控的 `trongrid_base_url` 优先读取运行时配置，未配置时再回退原异步配置。
+
+### 验证
+
+已通过：
+
+```bash
+UV_CACHE_DIR=/private/tmp/uv-cache-shop uv run python manage.py check
+UV_CACHE_DIR=/private/tmp/uv-cache-shop uv run python -m py_compile bot/api.py cloud/api_asset_edit.py cloud/api_servers.py cloud/management/commands/reconcile_cloud_assets_from_servers.py cloud/management/commands/refresh_lifecycle_plans.py cloud/management/commands/sync_aliyun_assets.py cloud/management/commands/sync_aws_assets.py cloud/resource_monitor.py cloud/server_records.py
+UV_CACHE_DIR=/private/tmp/uv-cache-shop uv run python manage.py makemigrations --check --dry-run
+DJANGO_TEST_SQLITE=1 UV_CACHE_DIR=/private/tmp/uv-cache-shop uv run python manage.py test cloud.tests.CloudServerServicesTestCase.test_lifecycle_plans_use_separate_order_plan_note cloud.tests.CloudServerServicesTestCase.test_lifecycle_plans_excludes_cloud_missing_orphan_server cloud.tests.CloudServerServicesTestCase.test_lifecycle_plans_keeps_asset_remarks_out_of_execution_status cloud.tests.CloudServerServicesTestCase.test_lifecycle_plans_ignore_account_shutdown_disabled_plan_state cloud.tests.CloudServerServicesTestCase.test_lifecycle_plans_show_asset_shutdown_disabled_plan_state cloud.tests.CloudServerServicesTestCase.test_lifecycle_plans_route_linked_asset_delete_to_order_item cloud.tests.CloudServerServicesTestCase.test_lifecycle_plans_move_deleted_orphan_server_out_of_future cloud.tests.CloudServerServicesTestCase.test_lifecycle_plans_compact_request_keeps_ip_delete_history_item cloud.tests.CloudServerServicesTestCase.test_lifecycle_plans_include_ip_delete_history_item cloud.tests.CloudServerServicesTestCase.test_lifecycle_plans_include_real_released_retained_ip_history_without_active_row cloud.tests.CloudServerServicesTestCase.test_lifecycle_plans_sort_shutdown_items_by_delete_time cloud.tests.CloudServerServicesTestCase.test_lifecycle_plans_group_same_delete_time_by_user cloud.tests.CloudServerServicesTestCase.test_lifecycle_plans_move_deleted_unattached_ip_active_row_to_history cloud.tests.CloudServerServicesTestCase.test_lifecycle_plans_include_future_server_plan_item cloud.tests.CloudServerServicesTestCase.test_lifecycle_plans_compute_orphan_server_delete_after_suspend_window cloud.tests.CloudServerServicesTestCase.test_lifecycle_plans_unattached_ip_show_confirmation_progress_in_state_and_note cloud.tests.CloudServerServicesTestCase.test_lifecycle_plans_unattached_ip_show_delete_attempt_in_state_and_note cloud.tests.CloudServerServicesTestCase.test_lifecycle_plans_read_cached_table_after_initial_refresh cloud.tests.CloudServerServicesTestCase.test_lifecycle_plan_counts_match_proxy_list_assets --noinput
+DJANGO_TEST_SQLITE=1 UV_CACHE_DIR=/private/tmp/uv-cache-shop uv run python manage.py test cloud.tests.CloudServerServicesTestCase.test_delete_server_only_removes_server_record cloud.tests.CloudServerServicesTestCase.test_delete_server_does_not_fallback_to_asset_id cloud.tests.CloudServerServicesTestCase.test_reconcile_cloud_assets_skips_deleted_server_residual cloud.tests.CloudServerServicesTestCase.test_reconcile_cloud_assets_does_not_match_cross_provider_instance_id cloud.tests.CloudServerServicesTestCase.test_reconcile_cloud_assets_preserves_server_account_label cloud.tests.CloudServerServicesTestCase.test_reconcile_cloud_assets_skips_inactive_cloud_account_server cloud.tests.CloudServerServicesTestCase.test_reconcile_cloud_assets_skips_server_marked_cloud_missing cloud.tests.CloudServerServicesTestCase.test_reconcile_cloud_assets_matches_legacy_account_label_variants cloud.tests.CloudServerServicesTestCase.test_reconcile_cloud_assets_does_not_match_cross_region_same_instance_without_ip cloud.tests.CloudServerServicesTestCase.test_sync_aws_assets_preserves_existing_unattached_ip_due_time cloud.tests.CloudServerServicesTestCase.test_sync_aliyun_assets_preserves_existing_asset_expiry --noinput
+DJANGO_TEST_SQLITE=1 UV_CACHE_DIR=/private/tmp/uv-cache-shop uv run python manage.py test cloud.tests.CloudServerServicesTestCase.test_sync_aws_assets_rebinds_unattached_ip_when_instance_reappears cloud.tests.CloudServerServicesTestCase.test_sync_aws_assets_updates_retained_asset_after_renewal_recovery cloud.tests.CloudServerServicesTestCase.test_sync_aws_retained_ip_preserves_existing_asset_user cloud.tests.CloudServerServicesTestCase.test_sync_aws_assets_preserves_existing_unattached_ip_due_time cloud.tests.CloudServerServicesTestCase.test_sync_aws_unattached_ip_duplicate_cleanup_is_account_scoped cloud.tests.CloudServerServicesTestCase.test_sync_aws_assets_preserves_existing_manual_asset_note cloud.tests.CloudServerServicesTestCase.test_sync_aws_assets_keeps_runtime_running_when_order_is_suspended cloud.tests.CloudServerServicesTestCase.test_sync_aws_assets_revives_dirty_deleted_asset_when_instance_exists cloud.tests.CloudServerServicesTestCase.test_sync_aws_assets_revives_deleted_order_when_instance_exists cloud.tests.CloudServerServicesTestCase.test_sync_aliyun_assets_preserves_existing_asset_expiry --noinput
+DJANGO_TEST_SQLITE=1 UV_CACHE_DIR=/private/tmp/uv-cache-shop uv run python manage.py test cloud.tests.CloudServerServicesTestCase.test_sync_aws_missing_instance_requires_five_passes_before_delete cloud.tests.CloudServerServicesTestCase.test_sync_aws_missing_check_uses_previous_public_ip_before_delete cloud.tests.CloudServerServicesTestCase.test_sync_aws_missing_blank_asset_does_not_delete_unrelated_blank_server cloud.tests.CloudServerServicesTestCase.test_sync_aliyun_missing_instance_requires_five_passes_before_delete cloud.tests.CloudServerServicesTestCase.test_sync_aliyun_missing_blank_asset_does_not_delete_unrelated_blank_server --noinput
+UV_CACHE_DIR=/private/tmp/uv-cache-shop uv run python manage.py shell -c "from django.conf import settings; retired={'accounts','finance','mall','monitoring','dashboard_api','biz'}; print([app for app in settings.INSTALLED_APPS if app.split('.')[0] in retired]); from cloud.models import CloudServerOrder, CloudAsset; print([f.name for f in CloudServerOrder._meta.fields if f.name in {'service_expires_at','actual_expires_at'}]); print([f.name for f in CloudAsset._meta.fields if f.name == 'actual_expires_at'])"
+rg -n "service_expires_at__|(filter|exclude|update|order_by|values|values_list)\([^\n)]*service_expires_at|service_expires_at\s*=\s*models|\bnormalize_service_expiry\b|service_expired_at|class Cloud(LifecyclePlan|NoticePlan|AutoRenewPlan)\b|CloudLifecyclePlan\.|CloudNoticePlan\.|CloudAutoRenewPlan\.|\brefund_order\b|\bprocess_refund\b|\bcreate_refund\b|\bissue_refund\b|\brefund_to_balance\b|\brefund_balance\b|STATUS_REFUNDED|status=['\"]refunded|cloud_account__shutdown_enabled|CloudAccountConfig\.shutdown_enabled" cloud orders bot core shop --glob '!**/migrations/**' --glob '!**/tests.py' --glob '!docs/**'
+git diff --check
+```
+
+结果：Django 系统检查、关键模块编译、迁移 dry-run、19 条生命周期计划测试、11 条兼容 Server/归一/手工到期测试、10 条 AWS/阿里云同步恢复与保留测试、5 条缺失确认测试、模型字段 introspection、旧字段/旧计划/旧退款扫描和空白检查均通过。`makemigrations --check --dry-run` 仍因沙箱无法连接默认 MySQL 输出迁移历史检查警告，但最终无模型变更。
+
+剩余风险：本轮未跑完整测试套件，未连接真实 MySQL、AWS Lightsail、阿里云或 TRONGrid，未执行真实 Telegram 回调、钱包扣款、自动续费支付、云端删机、固定 IP 释放或历史数据清理。
+
 ## 2026-06-02 21:42 自动监工：旧到期命名清零复验
 
 ### 范围

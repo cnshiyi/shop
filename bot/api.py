@@ -2,6 +2,7 @@
 
 import re
 import secrets
+from copy import deepcopy
 from datetime import datetime, timezone as dt_timezone
 from decimal import Decimal
 
@@ -29,6 +30,12 @@ from orders.models import Order, Product, Recharge
 PLAN_KIND_SHUTDOWN_ORDER = CloudLifecyclePlanNote.PLAN_KIND_SHUTDOWN_ORDER
 PLAN_KIND_ORPHAN_ASSET_DELETE = CloudLifecyclePlanNote.PLAN_KIND_ORPHAN_ASSET_DELETE
 PLAN_KIND_UNATTACHED_IP_DELETE = CloudLifecyclePlanNote.PLAN_KIND_UNATTACHED_IP_DELETE
+
+_LIFECYCLE_PLAN_CACHE = {
+    'bundle': None,
+    'generated_at': None,
+    'limit': 0,
+}
 
 
 @ensure_csrf_cookie
@@ -567,7 +574,7 @@ def _collect_lifecycle_plan_rows(*, limit=1000):
     fallback_deleted_orders = CloudServerOrder.objects.select_related('user').filter(status='deleted').exclude(id__in=list(history_order_ids)).order_by('-updated_at', '-id')[:limit]
     shutdown_history_items.extend(_shutdown_history_order_payload(order) for order in fallback_deleted_orders)
     source_assets = shutdown_queue.get('source_assets') or []
-    ip_delete_items = _unattached_ip_delete_items(limit=limit, assets=source_assets)
+    ip_delete_items = _unattached_ip_delete_items(limit=limit)
     return {'due_items': shutdown_queue['due_items'], 'future_plan_items': shutdown_queue['future_plan_items'], 'history_items': shutdown_history_items, 'shutdown_items': [*shutdown_queue['due_items'], *shutdown_queue['future_plan_items']], 'ip_delete_items': ip_delete_items}
 
 
@@ -579,6 +586,29 @@ def _build_lifecycle_plan_bundle(*, limit=1000):
     ]
     bundle['ip_delete_items'] = [*ip_delete_active, *ip_delete_history]
     return bundle
+
+
+def _sync_lifecycle_plan_table(*, limit=1000):
+    bundle = _build_lifecycle_plan_bundle(limit=limit)
+    _LIFECYCLE_PLAN_CACHE.update({
+        'bundle': deepcopy(bundle),
+        'generated_at': timezone.now(),
+        'limit': limit,
+    })
+    return deepcopy(bundle)
+
+
+def _cached_lifecycle_plan_bundle(*, limit=1000, force_refresh=False):
+    cached = _LIFECYCLE_PLAN_CACHE.get('bundle')
+    cached_limit = int(_LIFECYCLE_PLAN_CACHE.get('limit') or 0)
+    generated_at = _LIFECYCLE_PLAN_CACHE.get('generated_at')
+    latest_asset_at = CloudAsset.objects.aggregate(value=Max('updated_at')).get('value')
+    latest_log_at = CloudIpLog.objects.aggregate(value=Max('created_at')).get('value')
+    latest_source_at = max([item for item in [latest_asset_at, latest_log_at] if item], default=None)
+    stale = bool(generated_at and latest_source_at and latest_source_at > generated_at)
+    if force_refresh or cached is None or cached_limit < limit or stale:
+        return _sync_lifecycle_plan_table(limit=limit), True
+    return deepcopy(cached), False
 
 
 def _plan_item_dt(item: dict, *keys: str, default=None):
@@ -618,7 +648,7 @@ def _sort_lifecycle_history_items(items: list[dict]) -> list[dict]:
 
 
 def _lifecycle_plan_generated_at():
-    return timezone.now()
+    return _LIFECYCLE_PLAN_CACHE.get('generated_at') or timezone.now()
 
 
 def _cloud_ip_trace_logged_at(note, fallback=None):
@@ -1103,19 +1133,68 @@ def _dedupe_ip_delete_items_by_ip(items: list[dict]) -> list[dict]:
 def _unattached_ip_delete_items(limit=50, assets=None):
     now = timezone.now()
     limit = max(1, min(int(limit or 50), 1000))
+    unattached_q = (
+        Q(provider_status__icontains='未附加')
+        | Q(note__icontains='未附加IP')
+        | Q(note__icontains='未附加固定IP')
+        | Q(note__icontains='固定 IP 已释放')
+        | Q(note__icontains='固定IP已释放')
+        | Q(note__icontains='固定 IP 云端已不存在')
+        | Q(note__icontains='固定IP云端已不存在')
+        | Q(provider_resource_id__icontains='StaticIp')
+    )
+    blank_instance_q = Q(instance_id__isnull=True) | Q(instance_id='')
+    active_account_labels = _active_cloud_account_labels()
+    inactive_account_labels = [
+        label
+        for account in CloudAccountConfig.objects.filter(
+            provider__in=[CloudAccountConfig.PROVIDER_AWS, CloudAccountConfig.PROVIDER_ALIYUN],
+            is_active=False,
+        )
+        for label in cloud_account_label_variants(account)
+    ]
+    active_account_q = (
+        Q(cloud_account__isnull=True, account_label__isnull=True)
+        | Q(cloud_account__isnull=True, account_label='')
+        | Q(cloud_account__is_active=True)
+        | Q(account_label__in=active_account_labels)
+    )
+    deleted_assets_for_history = []
     if assets is None:
         assets = list(
-            _active_cloud_asset_queryset()
-            .filter(Q(provider_status__icontains='未附加') | Q(note__icontains='未附加IP') | Q(note__icontains='未附加固定IP') | Q(provider_resource_id__icontains='StaticIp'))
-            .filter(Q(instance_id__isnull=True) | Q(instance_id=''))
+            CloudAsset.objects.select_related('order', 'user', 'cloud_account', 'order__cloud_account')
+            .filter(kind=CloudAsset.KIND_SERVER)
+            .filter(unattached_q)
+            .filter(blank_instance_q)
+            .filter(active_account_q)
+            .exclude(Q(cloud_account__is_active=False) | Q(account_label__in=inactive_account_labels))
             .exclude(_unattached_ip_deleted_or_missing_q())
             .order_by('actual_expires_at', 'created_at', '-updated_at')[:limit]
+        )
+        deleted_assets_for_history = list(
+            CloudAsset.objects.select_related('order', 'user', 'cloud_account', 'order__cloud_account')
+            .filter(kind=CloudAsset.KIND_SERVER)
+            .filter(unattached_q)
+            .filter(blank_instance_q)
+            .filter(_unattached_ip_deleted_or_missing_q())
+            .order_by('-updated_at', '-id')[:limit]
         )
     else:
         assets = [
             asset for asset in assets
             if _asset_is_unattached_ip(asset) or 'StaticIp' in str(getattr(asset, 'provider_resource_id', '') or '')
-        ][:limit]
+        ]
+        seen_asset_ids = {asset.id for asset in assets}
+        extra_assets = list(
+            CloudAsset.objects.select_related('order', 'user', 'cloud_account', 'order__cloud_account')
+            .filter(kind=CloudAsset.KIND_SERVER)
+            .filter(unattached_q)
+            .filter(blank_instance_q)
+            .exclude(id__in=seen_asset_ids)
+            .exclude(_unattached_ip_deleted_or_missing_q())
+            .order_by('actual_expires_at', 'created_at', '-updated_at')[:limit]
+        )
+        assets = [*assets, *extra_assets][:limit]
     trace_maps = _cloud_ip_trace_maps_for_assets(assets)
     items = []
     seen_trace_ids = set()
@@ -1144,6 +1223,7 @@ def _unattached_ip_delete_items(limit=50, assets=None):
         shutdown_enabled = _asset_shutdown_enabled(asset)
         item = {
             'id': asset.id,
+            'plan_kind': PLAN_KIND_UNATTACHED_IP_DELETE,
             'asset_id': asset.id,
             'asset_name': asset_name,
             'asset_detail_path': f'/admin/cloud-assets/{asset.id}',
@@ -1188,6 +1268,7 @@ def _unattached_ip_delete_items(limit=50, assets=None):
         delete_at = logged_at or getattr(order, 'ip_recycle_at', None) or getattr(asset, 'actual_expires_at', None)
         item = {
             'id': trace.id,
+            'plan_kind': PLAN_KIND_UNATTACHED_IP_DELETE,
             'asset_id': trace.asset_id,
             'asset_name': asset_name,
             'asset_detail_path': f'/admin/cloud-assets/{trace.asset_id}' if trace.asset_id else '',
@@ -1203,6 +1284,38 @@ def _unattached_ip_delete_items(limit=50, assets=None):
             'source_note': _cloud_ip_trace_note_newest_first(trace.note),
             'note': _cloud_ip_trace_note_newest_first(trace.note),
             'display_note': _compact_dashboard_note(trace.note, max_chars=500),
+            'is_overdue': True,
+            'is_history': True,
+        }
+        item.update(_unattached_ip_delete_attempt_state(item, is_history=True))
+        items.append(item)
+    for asset in deleted_assets_for_history:
+        asset_ip = str(asset.public_ip or asset.previous_public_ip or '').strip()
+        if asset_ip and asset_ip in active_unattached_ips:
+            continue
+        if asset.id in {item.get('asset_id') for item in items if item.get('is_history')}:
+            continue
+        user_display_name, username_label = _telegram_user_labels(asset.user)
+        executed_at = asset.updated_at or asset.actual_expires_at or now
+        source_note = _asset_note_text(asset) or asset.provider_status or '固定 IP 已删除'
+        item = {
+            'id': asset.id,
+            'plan_kind': PLAN_KIND_UNATTACHED_IP_DELETE,
+            'asset_id': asset.id,
+            'asset_name': asset.asset_name or asset.instance_id or f'asset-{asset.id}',
+            'asset_detail_path': f'/admin/cloud-assets/{asset.id}',
+            'detail_path': f'/admin/cloud-assets/{asset.id}',
+            'user_display_name': user_display_name,
+            'username_label': username_label,
+            'public_ip': asset_ip,
+            'provider_status': asset.provider_status or '已删除',
+            'deletion_source_label': _delete_source_label(source_note),
+            'actual_expires_at': _iso(asset.actual_expires_at),
+            'delete_at': _iso(executed_at),
+            'logged_at': _iso(executed_at),
+            'source_note': source_note,
+            'note': source_note,
+            'display_note': _asset_display_note(asset, fallback=source_note, max_chars=500),
             'is_overdue': True,
             'is_history': True,
         }
@@ -1893,8 +2006,7 @@ def lifecycle_plans(request):
     compact = str(request.GET.get('compact') or '').strip().lower() in {'1', 'true', 'yes', 'on'}
     force_refresh = str(request.GET.get('refresh') or request.GET.get('sync') or '').strip().lower() in {'1', 'true', 'yes', 'on'}
     sync_limit = max(limit, 1000)
-    bundle = _build_lifecycle_plan_bundle(limit=sync_limit)
-    did_refresh = bool(force_refresh)
+    bundle, did_refresh = _cached_lifecycle_plan_bundle(limit=sync_limit, force_refresh=force_refresh)
     shutdown_active_items = [
         item for item in [*bundle.get('due_items', []), *bundle.get('future_plan_items', [])]
         if item.get('item_type') in {'order', 'orphan_asset'}

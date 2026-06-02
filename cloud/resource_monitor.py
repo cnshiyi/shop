@@ -13,6 +13,7 @@ from django.utils import timezone
 
 from core.persistence import record_external_sync_log, save_resource_snapshot
 from core.cache import get_config
+from core.runtime_config import get_runtime_config
 from core.trongrid import build_trongrid_headers
 from cloud.cache import get_monitor_addresses
 
@@ -97,7 +98,9 @@ async def _notify(user_id: int, text: str, reply_markup=None):
 
 async def _fetch_account_resource(address: str) -> tuple[int, int]:
     headers = await build_trongrid_headers()
-    base_url = await get_config('trongrid_base_url', TRONGRID_BASE_URL)
+    base_url = get_runtime_config('trongrid_base_url', '')
+    if not base_url:
+        base_url = await get_config('trongrid_base_url', TRONGRID_BASE_URL)
     base_url = str(base_url or TRONGRID_BASE_URL).rstrip('/')
     async with httpx.AsyncClient(timeout=10) as client:
         resp = await _trongrid_post_with_key_fallback(client, f'{base_url}/wallet/getaccountresource', {'address': address, 'visible': True}, headers)
