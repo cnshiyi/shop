@@ -1,12 +1,15 @@
 import json
+import importlib
 import os
 from unittest.mock import patch
 
 from asgiref.sync import async_to_sync
+from django.apps import apps as django_apps
 from django.test import SimpleTestCase, TestCase
 from django.contrib.auth import get_user_model
 from django.core.management import call_command
 from django.core.management.base import CommandError
+from django.db import migrations
 from django.test import override_settings
 
 from cloud.server_records import Server
@@ -57,6 +60,25 @@ class SiteConfigCacheTestCase(TestCase):
 
         self.assertEqual(get_cached_config_value('cache_invalidate_test', ''), '')
         self.assertEqual(async_to_sync(get_config)('cache_invalidate_test', ''), 'new')
+
+
+class PortOverrideTextMigrationTestCase(TestCase):
+    def test_port_override_text_migration_does_not_restore_removed_copy(self):
+        migration = importlib.import_module('core.migrations.0012_remove_user_port_override_texts')
+        reinstall_values = migration.TEXT_UPDATES['bot_reinstall_need_main_link']
+        retained_values = migration.TEXT_UPDATES['bot_retained_ip_renewal_link_prompt']
+        custom_value = '自定义保留文案：不要自动覆盖'
+
+        SiteConfig.objects.create(key='bot_reinstall_need_main_link', value=reinstall_values['old'])
+        SiteConfig.objects.create(key='bot_retained_ip_renewal_link_prompt', value=custom_value)
+
+        migration.update_port_override_texts(django_apps, None)
+
+        self.assertEqual(SiteConfig.objects.get(key='bot_reinstall_need_main_link').value, reinstall_values['new'])
+        self.assertEqual(SiteConfig.objects.get(key='bot_retained_ip_renewal_link_prompt').value, custom_value)
+        self.assertNotIn('以你发送的主链接端口为准', reinstall_values['new'])
+        self.assertNotIn('系统记录的主端口不对', retained_values['new'])
+        self.assertIs(migration.Migration.operations[0].reverse_code, migrations.RunPython.noop)
 
 
 class ExternalSyncLogSanitizeTestCase(TestCase):

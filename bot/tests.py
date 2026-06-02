@@ -1196,6 +1196,7 @@ class RetainedIpRenewalUiTestCase(SimpleTestCase):
 
     def test_legacy_custom_port_flow_is_removed(self):
         source = inspect.getsource(register_handlers)
+        all_bot_texts = '\n'.join(value for value, _ in BOT_TEXTS.values())
 
         self.assertNotIn('waiting_port', {state.state.split(':')[-1] for state in CustomServerStates.__all_states__})
         self.assertNotIn('custom:port:', source)
@@ -1204,6 +1205,10 @@ class RetainedIpRenewalUiTestCase(SimpleTestCase):
         self.assertNotIn('bot_set_port_failed', BOT_TEXTS)
         self.assertNotIn('bot_custom_port_hint', BOT_TEXTS)
         self.assertNotIn('bot_custom_port_success', BOT_TEXTS)
+        self.assertNotIn('以你发送的主链接端口为准', all_bot_texts)
+        self.assertNotIn('系统记录的主端口不对', all_bot_texts)
+        self.assertIn('未记录时使用默认端口 443', BOT_TEXTS['bot_reinstall_need_main_link'][0])
+        self.assertIn('未记录时使用默认端口 443', BOT_TEXTS['bot_retained_ip_renewal_link_prompt'][0])
         self.assertFalse(hasattr(cloud_services, 'set_cloud_server_port'))
         self.assertNotIn('set_cloud_server_port', getattr(cloud_services, '__all__', []))
 

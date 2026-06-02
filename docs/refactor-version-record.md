@@ -4729,6 +4729,48 @@ git diff --check
 - 本轮未执行真实 Telegram 点击、真实云资源创建/删除/IP 变更、真实支付、链上广播、生产发布或不可逆操作。
 - 真机测试仍需在用户明确授权真实云资源成本后，单独按中文报告记录云资源 ID 脱敏结果。
 
+## 2026-06-03 机器人端口流程最终收口
+
+### 范围
+
+本轮按“机器人移除用户自己设置端口逻辑，默认端口改为 443，其他端口不变，用户付款成功后直接进入创建流程”继续检查运行路径。
+
+### 运行时变化
+
+- `CloudServerOrder.mtproxy_port` 和 `MTPROXY_DEFAULT_PORT` 已保持为 443。
+- 备用、Telemt 和 SOCKS5 端口保持 9529-9534 不变。
+- 机器人状态机继续保持无 `waiting_port`，运行代码无 `custom:port:*`、`cloud:ipport:*` 或 `set_cloud_server_port()` 用户端口设置入口。
+- 修正重装主链接、未附加固定 IP 续费旧链接两条默认文案，不再提示“以用户发送的主链接端口为准”，统一表达为端口必须与系统记录一致，未记录时使用默认 443。
+- 新增 `core.0012_remove_user_port_override_texts` 数据迁移，只替换数据库中仍等于旧默认值的两条站点文案，不覆盖后台自定义文案，也不在反向迁移里恢复旧端口覆盖话术。
+
+### 付款后创建流程确认
+
+- 余额支付路径继续在付款成功后按默认 443 调用 `prepare_cloud_server_order_instances()`，并立即调度 `_provision_cloud_server_and_notify()`。
+- 链上地址支付路径继续在确认付款后把订单端口写为 443，备注“使用默认端口 443”，并立即调度 `_provision_paid_cloud_order()` 进入创建流程。
+
+### 验证
+
+本地已通过:
+
+```bash
+UV_CACHE_DIR=/Users/a399/Desktop/data/shop/.uv-cache PYTHONDONTWRITEBYTECODE=1 uv run python manage.py check
+UV_CACHE_DIR=/Users/a399/Desktop/data/shop/.uv-cache PYTHONDONTWRITEBYTECODE=1 uv run python -m py_compile core/texts.py core/tests.py bot/tests.py core/migrations/0012_remove_user_port_override_texts.py orders/payment_scanner.py
+UV_CACHE_DIR=/Users/a399/Desktop/data/shop/.uv-cache DB_ENGINE=sqlite SQLITE_NAME=/private/tmp/shop_bot_port_flow_20260603.sqlite3 PYTHONDONTWRITEBYTECODE=1 uv run python manage.py test bot.tests.RetainedIpRenewalUiTestCase.test_legacy_custom_port_flow_is_removed bot.tests.RetainedIpRenewalUiTestCase.test_wallet_balance_purchase_auto_submits_default_port --noinput --verbosity 1
+UV_CACHE_DIR=/Users/a399/Desktop/data/shop/.uv-cache DB_ENGINE=sqlite SQLITE_NAME=/private/tmp/shop_order_chain_default_port_20260603.sqlite3 PYTHONDONTWRITEBYTECODE=1 uv run python manage.py test orders.tests.ChainPaymentScannerTestCase.test_cloud_chain_payment_auto_submits_default_port_provision --noinput --verbosity 1
+UV_CACHE_DIR=/Users/a399/Desktop/data/shop/.uv-cache DB_ENGINE=sqlite SQLITE_NAME=/private/tmp/shop_core_port_text_migration_20260603.sqlite3 PYTHONDONTWRITEBYTECODE=1 uv run python manage.py test core.tests.PortOverrideTextMigrationTestCase --noinput --verbosity 1
+UV_CACHE_DIR=/Users/a399/Desktop/data/shop/.uv-cache DB_ENGINE=sqlite SQLITE_NAME=/private/tmp/shop_migration_check_20260603.sqlite3 PYTHONDONTWRITEBYTECODE=1 uv run python manage.py makemigrations --check --dry-run
+UV_CACHE_DIR=/Users/a399/Desktop/data/shop/.uv-cache DB_ENGINE=sqlite SQLITE_NAME=/private/tmp/shop_migrate_plan_20260603.sqlite3 PYTHONDONTWRITEBYTECODE=1 uv run python manage.py migrate --plan core
+rg -n "以你发送的主链接端口为准|系统记录的主端口不对|waiting_port|custom:port:|cloud:ipport:|bot_custom_port_invalid|bot_set_port_failed|bot_custom_port_hint|bot_custom_port_success|set_cloud_server_port" bot core cloud orders shop --glob '!**/migrations/**' --glob '!**/tests.py'
+git diff --check
+```
+
+`rg` 残留扫描在运行代码中无命中。期间曾误跑不存在的测试名 `test_cloud_chain_payment_auto_submits_default_port`，随后已用真实测试名 `test_cloud_chain_payment_auto_submits_default_port_provision` 重跑通过。
+
+### 剩余风险
+
+- 本轮未跑完整测试套件。
+- 本轮未执行真实 Telegram 点击、真实云资源创建/删除/IP 变更、真实支付、链上广播、生产发布或不可逆操作。
+
 ## 2026-06-03 详情页返回按钮极端回调压缩
 
 ### 范围
