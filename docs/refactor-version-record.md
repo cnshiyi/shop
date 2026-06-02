@@ -1,5 +1,44 @@
 # 重构版本记录
 
+## 2026-06-02 21:39 自动监工：运行时旧到期命名清零
+
+### 范围
+
+本轮继续监工 Shop Django 后端仓库，起始后端工作树干净，最近提交为 `798b8db 记录机器人修改配置返回来源复查`。先确认自动化和终端版 codex 状态，再用本地命令与 codex-cli `0.135.0-alpha.1`、模型 `gpt-5.5` 做只读复核，重点检查到期事实源、删除/通知计划防重复、废弃 app、旧计划快照表、退款逻辑和机器人返回路径。
+
+### 复查结论
+
+- 自动化 `/Users/a399/.codex/automations/shop/automation.toml` 仍为 `ACTIVE`，10 分钟一次，模型为 `gpt-5.5`。
+- codex-cli 未发现高/中风险回流：`CloudServerOrder` 未恢复 `service_expires_at`，旧 `CloudLifecyclePlan/CloudNoticePlan/CloudAutoRenewPlan`、退款/refunded 逻辑和废弃 app 未回流。
+- 删除计划、通知计划和代理列表继续以 `CloudAsset.actual_expires_at` 或 `order_asset_expiry()` 为到期来源；执行侧通过 `CloudLifecycleTask.source_key` 和 `CloudNoticeTask.source_key` 认领，并配合已送达通知日志避免重复执行。
+- codex-cli 只指出信息级残留：运行时代码里还有 `service_expires_at` 作为日志/payload 键名或兼容属性。该值来自资产事实，不构成数据库字段回流，但会继续造成误审。
+
+### 修复内容
+
+- 将 `cloud/provisioning.py`、`cloud/services.py`、`cloud/management/commands/sync_aws_assets.py` 中运行时日志、临时 dict key 和 structured payload 的旧键名从 `service_expires_at` 改为 `actual_expires_at`。
+- 删除 `_proxy_asset_view()` 上的 `service_expires_at=asset.actual_expires_at` 兼容属性，只保留 `actual_expires_at`。
+- 不修改历史迁移；迁移历史仍保留旧字段的删除过程。
+
+### 验证
+
+已通过：
+
+```bash
+/Applications/Codex.app/Contents/Resources/codex exec --sandbox read-only --model gpt-5.5 -C /Users/a399/Desktop/data/shop ...
+uv run python -m py_compile cloud/provisioning.py cloud/services.py cloud/management/commands/sync_aws_assets.py
+uv run python manage.py check
+uv run python manage.py makemigrations --check --dry-run
+DJANGO_TEST_SQLITE=1 uv run python manage.py test bot.tests.RetainedIpRenewalUiTestCase --verbosity 1
+DJANGO_TEST_SQLITE=1 uv run python manage.py test cloud.tests.CloudServerServicesTestCase.test_notice_delete_plan_and_proxy_list_use_asset_expiry cloud.tests.CloudServerServicesTestCase.test_aws_sync_release_static_ip_respects_asset_shutdown_disabled cloud.tests.CloudServerServicesTestCase.test_aws_sync_release_static_ip_ignores_shutdown_disabled_account cloud.tests.CloudServerServicesTestCase.test_aws_sync_release_static_ip_respects_global_ip_delete_switch cloud.tests.CloudServerServicesTestCase.test_aws_sync_release_static_ip_clears_retained_order_after_successful_release --verbosity 1
+rg -n "service_expires_at" cloud bot orders core shop -g '*.py' -g '!**/migrations/**' -g '!**/tests.py'
+rg -n "service_expires_at__|(filter|exclude|update|order_by|values|values_list)\([^\n)]*service_expires_at|service_expires_at\s*=\s*models|\bCloudLifecyclePlan\b|\bCloudNoticePlan\b|\bCloudAutoRenewPlan\b|refund_to_balance|refund_balance|STATUS_REFUNDED|status=['\"]refunded|\brefunded\b" cloud orders bot core shop --glob '!**/migrations/**' --glob '!**/tests.py' --glob '!docs/**'
+git diff --check
+```
+
+结果：codex-cli 只读复核完成；关键模块编译、Django 系统检查、迁移 dry-run、23 条机器人返回路径测试、5 条云生命周期聚焦回归、运行时旧字段扫描、旧字段/旧计划/旧退款扫描和空白检查均通过。Bot 测试中的巡检异常日志是测试用例故意模拟失败路径，测试结果为 OK。
+
+剩余风险：本轮未跑完整测试套件，未连接真实 MySQL、AWS Lightsail 或阿里云 API，未执行真实 Telegram 回调、钱包扣款、自动续费支付、云端删机、固定 IP 释放或历史数据清理。
+
 ## 2026-06-02 21:29 自动监工：机器人修改配置返回来源补漏
 
 ### 范围
