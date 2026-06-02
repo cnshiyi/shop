@@ -3911,3 +3911,35 @@ uv run python manage.py test core.tests.SiteConfigCacheTestCase --keepdb
 ```text
 Access denied for user 'a'@'localhost' to database 'test_a'
 ```
+
+## 2026-06-02 机器人返回链修复
+
+### 范围
+
+本轮巡检查了一次机器人代理列表、代理详情、续费支付、更换 IP、修改配置和未附加固定 IP 续费相关返回链。
+
+### 运行时变化
+
+- 新增 `cloud_previous_detail_callback()`，用于区分“回订单详情”和“回资产详情”。
+- 从代理资产详情进入续费支付、更换 IP、修改配置、重新安装确认和固定 IP 续费套餐页时，下一层的返回按钮会回到原资产详情。
+- 从订单详情进入同样流程时，仍回订单详情，再由订单详情返回原列表或查询页。
+- 修正资产入口修改配置提交后的“返回原代理”，避免跳到订单详情。
+
+### 监工结果
+
+- 本轮使用本地命令复查机器人返回链、云资产到期事实源、旧计划模型、旧退款入口和废弃 app 回流。
+- `CloudAsset` 仍只有 `actual_expires_at` 作为结构化资产到期字段，`CloudServerOrder` 未恢复服务到期字段。
+- 未发现旧订单到期字段、旧计划快照模型、旧退款函数名、`refunded` 状态或废弃 app 目录回流。
+
+### 验证
+
+本地已通过:
+
+```bash
+UV_CACHE_DIR=/private/tmp/uv-cache-shop uv run python manage.py check
+UV_CACHE_DIR=/private/tmp/uv-cache-shop uv run python -m py_compile bot/handlers.py bot/keyboards.py bot/tests.py
+DJANGO_TEST_SQLITE=1 UV_CACHE_DIR=/private/tmp/uv-cache-shop uv run python manage.py test bot.tests.RetainedIpRenewalUiTestCase --keepdb --noinput
+UV_CACHE_DIR=/private/tmp/uv-cache-shop uv run python manage.py makemigrations --check --dry-run
+git diff --check
+rg -n "service_expires_at|service_expired_at|normalize_service_expiry|CloudLifecyclePlan\\b|CloudNoticePlan\\b|CloudAutoRenewPlan\\b|refund_order|process_refund|create_refund|issue_refund|refund_to_balance|refund_balance|STATUS_REFUNDED|status=['\\\"]refunded['\\\"]" bot core orders cloud shop --glob '!**/migrations/**' --glob '!**/tests.py'
+```

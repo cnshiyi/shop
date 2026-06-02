@@ -43,7 +43,7 @@ from bot.keyboards import (
     cloud_server_change_ip_region_menu, cloud_server_change_ip_port_keyboard,
     cart_menu, wallet_recharge_prompt_menu, cloud_ip_query_result,
     cloud_query_menu, configured_link_for_label, configured_link_menu,
-    cloud_detail_callback, cloud_asset_detail_callback, append_back_callback,
+    cloud_detail_callback, cloud_asset_detail_callback, cloud_previous_detail_callback, append_back_callback,
 )
 from bot.services import create_admin_reply_link, get_admin_reply_link, get_admin_reply_link_by_id, get_or_create_user, get_admin_forward_mute_status, is_admin_forward_muted, mute_admin_forward_for_days, record_bot_operation_log, record_telegram_message, should_forward_telegram_group
 from cloud.services import (
@@ -2160,7 +2160,7 @@ def _save_user_main_proxy_link(order_id: int, link_data: dict[str, str]):
 def _reinstall_confirm_keyboard(order_id: int, token: str, back_callback: str | None = None):
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text='确认重新安装', callback_data=f'cloud:reinitconfirm:{order_id}:{token}')],
-        [InlineKeyboardButton(text='取消', callback_data=cloud_detail_callback(order_id, back_callback))],
+        [InlineKeyboardButton(text='取消', callback_data=cloud_previous_detail_callback(order_id, back_callback))],
     ])
 
 
@@ -2658,7 +2658,7 @@ def _retained_ip_renewal_plan_keyboard(order_id: int, plans, back_callback: str 
         label = labels[idx] if idx < len(labels) else f'套餐{idx + 1}'
         buttons.append(InlineKeyboardButton(text=label, callback_data=append_back_callback(f'cloud:renewplan:{order_id}:{plan.id}', back_callback)))
     rows = [buttons[index:index + 3] for index in range(0, len(buttons), 3)]
-    rows.append([InlineKeyboardButton(text='🔙 返回详情', callback_data=cloud_detail_callback(order_id, back_callback))])
+    rows.append([InlineKeyboardButton(text='🔙 返回详情', callback_data=cloud_previous_detail_callback(order_id, back_callback))])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
@@ -4265,7 +4265,7 @@ def register_handlers(dp: Dispatcher):
                 await _safe_edit_text(
                     callback.message,
                     _retained_ip_renewal_plan_text(retained_order, retained_plans, display_user),
-                    reply_markup=_retained_ip_renewal_plan_keyboard(retained_order.id, retained_plans, back_callback),
+                    reply_markup=_retained_ip_renewal_plan_keyboard(retained_order.id, retained_plans, asset_detail_back),
                 )
                 return
         if item and action == 'renew' and group_context and not is_admin and not getattr(item, 'order_id', None):
@@ -4306,7 +4306,7 @@ def register_handlers(dp: Dispatcher):
                 await _safe_edit_text(
                     callback.message,
                     _retained_ip_renewal_plan_text(retained_order, retained_plans, display_user),
-                    reply_markup=_retained_ip_renewal_plan_keyboard(retained_order.id, retained_plans, back_callback),
+                    reply_markup=_retained_ip_renewal_plan_keyboard(retained_order.id, retained_plans, asset_detail_back),
                 )
                 return
             try:
@@ -4320,7 +4320,7 @@ def register_handlers(dp: Dispatcher):
             if not renewal:
                 await _safe_callback_answer(callback, '续费订单创建失败', show_alert=True)
                 return
-            await _send_cloud_renewal_payment_prompt(callback.message, renewal, user, edit=True, back_callback=back_callback)
+            await _send_cloud_renewal_payment_prompt(callback.message, renewal, user, edit=True, back_callback=asset_detail_back)
             return
         if action == 'changeip':
             if order.provider != 'aws_lightsail':
@@ -4350,7 +4350,7 @@ def register_handlers(dp: Dispatcher):
                 return
             regions = [(code, name) for code, name in await _get_cached_custom_regions() if code != 'cn-hongkong']
             text = '🌐 更换IP\n\n请选择新的地区：'
-            markup = cloud_server_change_ip_region_menu(order.id, regions, expanded=False, back_callback=back_callback)
+            markup = cloud_server_change_ip_region_menu(order.id, regions, expanded=False, back_callback=asset_detail_back)
             edited = await _safe_edit_text(callback.message, text, reply_markup=markup)
             if edited is None:
                 sent = await callback.message.reply(text, reply_markup=markup)
@@ -4376,7 +4376,7 @@ def register_handlers(dp: Dispatcher):
                 action_text = '升级' if plan.get('action') == 'upgrade' else '降级'
                 charge_text = f"补 {plan['diff']} U" if plan.get('action') == 'upgrade' else '无需补差价'
                 text_lines.append(f"- {plan['name']}：{action_text}，{charge_text}，到期补足 {plan['target_days']} 天")
-                rows.append([InlineKeyboardButton(text=f"{action_text}到 {plan['name']} {charge_text}", callback_data=append_back_callback(f"cloud:upgradepay:{order.id}:{plan['id']}", back_callback))])
+                rows.append([InlineKeyboardButton(text=f"{action_text}到 {plan['name']} {charge_text}", callback_data=append_back_callback(f"cloud:upgradepay:{order.id}:{plan['id']}", asset_detail_back))])
             rows.append([InlineKeyboardButton(text='🔙 返回详情', callback_data=asset_detail_back)])
             text = '\n'.join(text_lines)
             markup = InlineKeyboardMarkup(inline_keyboard=rows)
@@ -5052,7 +5052,7 @@ def register_handlers(dp: Dispatcher):
         await callback.message.reply(
             _bot_text_format('bot_cloud_upgrade_submitted', '⚙️ 已提交配置调整任务。\n新订单: {order_no}\n完成后会自动发送新的服务器信息，代理链接保持不变。\n\n后台处理期间，底部菜单和其它按钮可正常使用。', order_no=new_order.order_no),
             reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-                [InlineKeyboardButton(text='🔙 返回原代理', callback_data=cloud_detail_callback(int(raw_order_id), back_callback))],
+                [InlineKeyboardButton(text='🔙 返回原代理', callback_data=cloud_previous_detail_callback(int(raw_order_id), back_callback))],
             ]) if back_callback else main_menu(),
         )
         asyncio.create_task(_provision_cloud_server_and_notify(bot, callback.from_user.id, new_order.id, new_order.mtproxy_port or 9528))
@@ -5135,7 +5135,8 @@ def register_handlers(dp: Dispatcher):
             await message.reply(err or '续费订单创建失败，请重新进入详情后再试。')
             return
         await state.clear()
-        await _send_cloud_renewal_payment_prompt(message, order, user, edit=False, back_callback=back_callback)
+        payment_back_callback = cloud_asset_detail_callback(asset_id, back_callback) if asset_id else back_callback
+        await _send_cloud_renewal_payment_prompt(message, order, user, edit=False, back_callback=payment_back_callback)
 
     @dp.message(CustomServerStates.waiting_reinstall_link)
     async def msg_cloud_reinstall_link(message: Message, state: FSMContext):

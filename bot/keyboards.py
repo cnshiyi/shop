@@ -51,9 +51,17 @@ def cloud_detail_callback(order_id: int, back_callback: str | None = None) -> st
 
 def cloud_asset_detail_callback(asset_id: int, back_callback: str | None = None, item_kind: str = 'asset') -> str:
     back_callback = str(back_callback or '').strip()
+    item_kind = str(item_kind or 'asset').strip() or 'asset'
     if not back_callback:
-        return f'cloud:assetdetail:{item_kind}:{asset_id}'
-    return f'cloud:assetdetail:{item_kind}:{asset_id}:{back_callback}'
+        return f'cloud:ad:{item_kind}:{asset_id}'
+    return f'cloud:ad:{item_kind}:{asset_id}:{back_callback}'
+
+
+def cloud_previous_detail_callback(order_id: int, back_callback: str | None = None) -> str:
+    back_callback = str(back_callback or '').strip()
+    if back_callback.startswith(('cloud:detail:', 'cloud:assetdetail:', 'cloud:ad:')):
+        return back_callback
+    return cloud_detail_callback(order_id, back_callback)
 
 
 def append_back_callback(callback_data: str, back_callback: str | None = None) -> str:
@@ -389,14 +397,14 @@ def cloud_server_change_ip_region_menu(order_id: int, regions, expanded: bool = 
     if not expanded and remaining_regions:
         kb.button(text='更多', callback_data=append_back_callback(f'cloud:ipregions:more:{order_id}', back_callback))
         kb.adjust(3, 3)
-        kb.button(text='🔙 返回详情', callback_data=cloud_detail_callback(order_id, back_callback))
+        kb.button(text='🔙 返回详情', callback_data=cloud_previous_detail_callback(order_id, back_callback))
         kb.adjust(3, 3, 1)
     elif expanded:
         kb.button(text='🔙 返回', callback_data=append_back_callback(f'cloud:ip:{order_id}', back_callback))
         rows = [3] * ((len(display_regions) + 2) // 3)
         kb.adjust(*rows, 1)
     else:
-        kb.button(text='🔙 返回详情', callback_data=cloud_detail_callback(order_id, back_callback))
+        kb.button(text='🔙 返回详情', callback_data=cloud_previous_detail_callback(order_id, back_callback))
         rows = [3] * ((len(display_regions) + 2) // 3)
         kb.adjust(*rows, 1)
     return kb.as_markup()
@@ -422,7 +430,7 @@ def cloud_server_list(orders, page: int = 1, total_pages: int = 1, prefix: str =
         expires = _format_local_date(expires_at)
         item_kind = getattr(order, '_proxy_item_kind', '')
         if item_kind in {'asset', 'server'}:
-            callback_data = f'cloud:assetdetail:{item_kind}:{order.id}:{prefix}:{page}'
+            callback_data = cloud_asset_detail_callback(order.id, f'{prefix}:{page}', item_kind)
         else:
             callback_data = f'cloud:detail:{order.id}:{prefix}:{page}'
         kb.button(text=f'{label} | {status} | {expires}', callback_data=callback_data)
@@ -563,7 +571,7 @@ def cloud_server_renew_payment(order_id: int, amount, trx_amount, auto_renew_ena
     kb.row(InlineKeyboardButton(text=f'💳 USDT钱包支付 ({fmt_amount(amount)} U)', callback_data=append_back_callback(f'cloud:renewpay:{order_id}:USDT', back_callback)))
     if trx_amount is not None:
         kb.row(InlineKeyboardButton(text=f'💳 TRX钱包支付 ({fmt_amount(trx_amount)} TRX)', callback_data=append_back_callback(f'cloud:renewpay:{order_id}:TRX', back_callback)))
-    kb.row(InlineKeyboardButton(text='🔙 返回详情', callback_data=cloud_detail_callback(order_id, back_callback)))
+    kb.row(InlineKeyboardButton(text='🔙 返回详情', callback_data=cloud_previous_detail_callback(order_id, back_callback)))
     return _log_inline_keyboard(
         'cloud_server_renew_payment',
         kb.as_markup(),

@@ -16,7 +16,7 @@ from django.utils import timezone
 
 from bot.api import DASHBOARD_SESSION_IDLE_SECONDS, _active_proxy_counts_by_user, _authenticate_dashboard_request, admin_users_list, archive_telegram_chat, auth_totp_start, create_admin_user, create_cloud_account, create_product, delete_cloud_account, me, send_daily_expiry_summary_test_notification, send_telegram_chat_message, site_config_groups, telegram_login_start, update_cloud_account, update_site_config, users_list, verify_cloud_account
 from bot.handlers import _asset_reinstall_confirm_keyboard, _asset_renewal_plan_keyboard, _cloud_renewal_postcheck_and_notify, _cloud_server_created_text, _fetch_tron_address_summary, _hydrate_order_proxy_links, _install_notice_copy_wrapper, _proxy_links_text, _reinstall_confirm_keyboard, _requires_recovery_provision, _retained_ip_renewal_plan_keyboard, _trongrid_get_with_key_fallback, _trongrid_post_with_key_fallback, _validate_reinstall_proxy_link, register_handlers
-from bot.keyboards import balance_details_list, cloud_asset_detail_callback, cloud_detail_callback, cloud_ip_query_result, cloud_order_list, cloud_server_change_ip_port_keyboard, cloud_server_change_ip_region_menu, cloud_server_detail, cloud_server_renew_payment
+from bot.keyboards import balance_details_list, cloud_asset_detail_callback, cloud_detail_callback, cloud_previous_detail_callback, cloud_ip_query_result, cloud_order_list, cloud_server_change_ip_port_keyboard, cloud_server_change_ip_region_menu, cloud_server_detail, cloud_server_renew_payment
 from bot.models import TelegramChatArchive, TelegramChatMessage, TelegramLoginAccount, TelegramUser
 from bot.services import record_telegram_message
 from bot.telegram_listener import _build_bark_request, _build_push_payload, _is_self_sender, _sync_account_profile
@@ -963,6 +963,14 @@ class RetainedIpRenewalUiTestCase(SimpleTestCase):
             cloud_asset_detail_callback(99, back_callback),
             'cloud:assetdetail:asset:99:profile:orders:cloud:filter:paid:page:2',
         )
+        self.assertEqual(
+            cloud_previous_detail_callback(88, 'cloud:assetdetail:asset:99:cloud:list:page:3'),
+            'cloud:assetdetail:asset:99:cloud:list:page:3',
+        )
+        self.assertEqual(
+            cloud_previous_detail_callback(88, back_callback),
+            'cloud:detail:88:profile:orders:cloud:filter:paid:page:2',
+        )
 
     def test_cloud_server_detail_actions_keep_back_path(self):
         markup = cloud_server_detail(
@@ -1012,6 +1020,15 @@ class RetainedIpRenewalUiTestCase(SimpleTestCase):
         self.assertIn('cloud:renewpay:88:TRX:cloud:querymenu', callbacks)
         self.assertIn('cloud:detail:88:cloud:querymenu', callbacks)
 
+    def test_cloud_renew_payment_from_asset_detail_returns_to_asset_detail(self):
+        asset_detail_back = 'cloud:assetdetail:asset:99:cloud:list:page:3'
+        markup = cloud_server_renew_payment(88, Decimal('12.3'), Decimal('45.6'), back_callback=asset_detail_back)
+        callbacks = [button.callback_data for row in markup.inline_keyboard for button in row]
+
+        self.assertIn(f'cloud:renewpay:88:USDT:{asset_detail_back}', callbacks)
+        self.assertIn(asset_detail_back, callbacks)
+        self.assertNotIn(f'cloud:detail:88:{asset_detail_back}', callbacks)
+
     def test_cloud_change_ip_keyboards_keep_back_path(self):
         regions = [
             ('us-east-1', '美国'),
@@ -1033,12 +1050,22 @@ class RetainedIpRenewalUiTestCase(SimpleTestCase):
         self.assertIn('cloud:ipport:custom:88:us-east-1:cloud:querymenu', callbacks)
         self.assertIn('cloud:ip:88:cloud:querymenu', callbacks)
 
+    def test_cloud_change_ip_from_asset_detail_returns_to_asset_detail(self):
+        regions = [('us-east-1', '美国')]
+        asset_detail_back = 'cloud:assetdetail:asset:99:cloud:list:page:3'
+        markup = cloud_server_change_ip_region_menu(88, regions, back_callback=asset_detail_back)
+        callbacks = [button.callback_data for row in markup.inline_keyboard for button in row]
+
+        self.assertIn(f'cloud:ipregion:88:us-east-1:{asset_detail_back}', callbacks)
+        self.assertIn(asset_detail_back, callbacks)
+        self.assertNotIn(f'cloud:detail:88:{asset_detail_back}', callbacks)
+
     def test_asset_change_ip_action_keeps_back_path_when_rendering_regions(self):
         source = inspect.getsource(register_handlers)
         asset_action_source = source.split('async def cb_cloud_asset_action', 1)[1].split("@dp.callback_query(F.data.startswith('cloud:assetinit:'))", 1)[0]
 
         self.assertIn(
-            'cloud_server_change_ip_region_menu(order.id, regions, expanded=False, back_callback=back_callback)',
+            'cloud_server_change_ip_region_menu(order.id, regions, expanded=False, back_callback=asset_detail_back)',
             asset_action_source,
         )
 
@@ -1081,7 +1108,7 @@ class RetainedIpRenewalUiTestCase(SimpleTestCase):
         upgrade_pay_source = source.split('async def cb_cloud_upgrade_pay', 1)[1].split("@dp.callback_query(F.data.startswith('cloud:reinit:'))", 1)[0]
 
         self.assertIn(
-            "append_back_callback(f\"cloud:upgradepay:{order.id}:{plan['id']}\", back_callback)",
+            "append_back_callback(f\"cloud:upgradepay:{order.id}:{plan['id']}\", asset_detail_back)",
             asset_action_source,
         )
         self.assertIn(
@@ -1089,7 +1116,7 @@ class RetainedIpRenewalUiTestCase(SimpleTestCase):
             order_upgrade_source,
         )
         self.assertIn("callback.data.split(':', 4)", upgrade_pay_source)
-        self.assertIn('cloud_detail_callback(int(raw_order_id), back_callback)', upgrade_pay_source)
+        self.assertIn('cloud_previous_detail_callback(int(raw_order_id), back_callback)', upgrade_pay_source)
 
     def test_validate_reinstall_proxy_link_keeps_strict_port_check_by_default(self):
         order = SimpleNamespace(
