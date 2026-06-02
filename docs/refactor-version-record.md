@@ -1835,6 +1835,32 @@ The focused DB test run is blocked by local MySQL test database permissions:
 Access denied for user 'a'@'localhost' to database 'test_a'
 ```
 
+## 2026-06-02 生产测试边界清理
+
+### 范围
+
+本轮复查功能代码和测试代码是否混在一起，重点检查生产模块中是否存在测试类、测试函数、Mock、patch、RequestFactory、TestCase、真机测试标记，以及测试文件是否通过生产聚合层保留旧测试入口。
+
+### 变更
+
+- 删除 `cloud/api.py` 中只被旧测试引用的 `_run_rebuild_job` 兼容函数。
+- 移除该兼容函数带来的 `logging`、`async_to_sync`、`cloud.lifecycle`、`cloud.provisioning` 冗余导入。
+- `cloud/tests.py` 中的重建任务测试改为直接调用 `cloud.services.run_cloud_server_rebuild_job`，并将 patch 目标改为真实服务函数实际导入的 `cloud.provisioning.provision_cloud_server`。
+- 保留后台“每日到期汇总测试通知”接口；该处是人工触发通知发送的真实功能，不属于测试代码混入生产模块。
+
+### 验证
+
+已通过：
+
+```bash
+rg -n "\\b(TestCase|SimpleTestCase|TransactionTestCase|APITestCase|RequestFactory|AsyncMock|MagicMock|Mock|patch\\(|pytest|unittest|def test_|class (Fake|Dummy|Stub)|真机测试|测试用例|仅测试|for test|test only|older tests/imports)\\b" cloud bot orders core shop --glob '!**/migrations/**' --glob '!**/tests.py' --glob '!**/tests_*.py' --glob '!**/test_*.py' -S
+rg -n "_run_rebuild_job|older tests/imports|cloud\\.api\\.provision_cloud_server|cloud\\.api\\._delete_instance|cloud\\.api\\._mark_replaced_order_deleted" cloud bot orders core shop --glob '!**/migrations/**' -S
+UV_CACHE_DIR=/private/tmp/uv-cache-shop DJANGO_TEST_SQLITE=1 PYTHONDONTWRITEBYTECODE=1 uv run python -m py_compile cloud/api.py cloud/tests.py cloud/services.py
+UV_CACHE_DIR=/private/tmp/uv-cache-shop DJANGO_TEST_SQLITE=1 PYTHONDONTWRITEBYTECODE=1 uv run python manage.py test cloud.tests.CloudServerServicesTestCase.test_rebuild_job_keeps_old_instance_until_migration_due
+UV_CACHE_DIR=/private/tmp/uv-cache-shop DJANGO_TEST_SQLITE=1 PYTHONDONTWRITEBYTECODE=1 uv run python manage.py check
+UV_CACHE_DIR=/private/tmp/uv-cache-shop DJANGO_TEST_SQLITE=1 PYTHONDONTWRITEBYTECODE=1 uv run python manage.py makemigrations --check --dry-run
+```
+
 ## 2026-06-02 生产代码和测试代码边界复查
 
 ### 范围
