@@ -218,8 +218,10 @@ def _notice_asset_queryset():
     )
 
 
-def _deferred_lifecycle_time(stored_at, computed_at, now=None):
+def _deferred_lifecycle_time(stored_at, computed_at, now=None, *, prefer_stored=False):
     now = now or timezone.now()
+    if prefer_stored and stored_at:
+        return stored_at
     if stored_at and stored_at > now and (not computed_at or computed_at <= now):
         return stored_at
     return computed_at or stored_at
@@ -230,9 +232,20 @@ def _notice_schedule(order: CloudServerOrder, asset: CloudAsset) -> dict:
     expires_at = asset.actual_expires_at
     schedule = compute_order_lifecycle_fields(expires_at)
     now = timezone.now()
+    status = getattr(order, 'status', '')
     suspend_at = _deferred_lifecycle_time(getattr(order, 'suspend_at', None), schedule.get('suspend_at'), now)
-    delete_at = _deferred_lifecycle_time(getattr(order, 'delete_at', None), schedule.get('delete_at'), now)
-    ip_recycle_at = _deferred_lifecycle_time(getattr(order, 'ip_recycle_at', None), schedule.get('ip_recycle_at'), now)
+    delete_at = _deferred_lifecycle_time(
+        getattr(order, 'delete_at', None),
+        schedule.get('delete_at'),
+        now,
+        prefer_stored=status in {'suspended', 'deleting'},
+    )
+    ip_recycle_at = _deferred_lifecycle_time(
+        getattr(order, 'ip_recycle_at', None),
+        schedule.get('ip_recycle_at'),
+        now,
+        prefer_stored=status == 'deleted',
+    )
     return {
         'ip': getattr(order, 'public_ip', None) or asset.public_ip,
         'expires_at': expires_at,

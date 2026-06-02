@@ -1,5 +1,36 @@
 # 重构版本记录
 
+## 2026-06-02 22:31 自动监工：保留已进入流程的生命周期时间
+
+### 范围
+
+本轮在 `2c159ab 记录兼容备注匹配测试` 后继续处理新出现的 `cloud/lifecycle.py` 同主题改动，重点确认已进入关机、删机或固定 IP 回收流程的订单不会因为资产侧到期时间变化而让展示/通知计划重新漂移，同时复查旧到期字段、旧计划快照表、旧退款入口和废弃 app 回流。
+
+### 复查结论
+
+- `CloudAsset.actual_expires_at` 仍是唯一结构化资产到期事实；本轮只是控制从资产事实派生出的流程时间展示优先级，未恢复订单到期字段。
+- 订单状态已进入 `suspended/deleting/deleted` 后，已写入的 `delete_at` 或 `ip_recycle_at` 是当前流程执行计划，应优先于重新按资产到期时间派生出的未来时间。
+- 严格运行时代码扫描未发现旧字段、旧计划、旧退款入口回流；废弃 app 目录未恢复。
+
+### 修复内容
+
+- `_deferred_lifecycle_time()` 增加 `prefer_stored` 参数；`_notice_schedule()` 对 `suspended/deleting` 订单优先保留 `delete_at`，对 `deleted` 订单优先保留 `ip_recycle_at`。
+- 补充聚焦测试，确认资产到期时间被推远后，已进入流程的删机和 IP 回收计划仍保留订单侧已存执行时间。
+
+### 验证
+
+已通过：
+
+```bash
+UV_CACHE_DIR=/private/tmp/uv-cache-shop uv run python manage.py check
+UV_CACHE_DIR=/private/tmp/uv-cache-shop uv run python -m py_compile cloud/lifecycle.py cloud/tests.py
+DJANGO_TEST_SQLITE=1 UV_CACHE_DIR=/private/tmp/uv-cache-shop uv run python manage.py test cloud.tests.CloudServerServicesTestCase.test_notice_schedule_preserves_stored_delete_and_recycle_after_status_progress cloud.tests.CloudServerServicesTestCase.test_notice_delete_plan_and_proxy_list_use_asset_expiry cloud.tests.CloudServerServicesTestCase.test_lifecycle_tick_rechecks_order_delete_at_before_cloud_delete cloud.tests.CloudServerServicesTestCase.test_lifecycle_tick_rechecks_order_ip_recycle_at_before_release
+```
+
+结果：Django 系统检查、相关模块编译、通知计划保留已存执行时间、资产到期事实源和生命周期执行前复核 4 条聚焦测试均通过。
+
+剩余风险：本轮未跑完整测试套件，未连接真实 MySQL、AWS Lightsail、阿里云或 TRONGrid，未执行真实后台编辑、Telegram 回调、钱包扣款、自动续费支付、云端删机或固定 IP 释放。
+
 ## 2026-06-02 22:26 自动监工：兼容记录创建保护人工备注
 
 ### 范围
@@ -30,6 +61,34 @@ DJANGO_TEST_SQLITE=1 UV_CACHE_DIR=/private/tmp/uv-cache-shop uv run python manag
 结果：Django 系统检查、相关模块编译、同订单新身份兼容记录保护、同实例不同 IP 分离和人工备注同步 3 条聚焦测试均通过。
 
 剩余风险：本轮未跑完整测试套件，未连接真实 MySQL、AWS Lightsail、阿里云或 TRONGrid，未执行真实后台编辑、Telegram 回调、钱包扣款、自动续费支付、云端删机或固定 IP 释放。
+
+## 2026-06-02 22:30 自动监工：保留订单流程时间优先级
+
+### 范围
+
+本轮继续处理新出现的 `cloud/lifecycle.py` 同主题改动，重点确认 suspended/deleting/deleted 订单的已存删机时间和 IP 回收时间不会被资产到期重新计算覆盖，同时复查旧到期字段、旧计划快照表、旧退款入口和废弃 app 回流。
+
+### 复查结论
+
+- `CloudAsset.actual_expires_at` 仍是唯一结构化资产到期事实；本轮只调整订单流程时间在通知计划中的选择优先级，不恢复订单服务到期字段。
+- suspended/deleting 订单的 `delete_at`、deleted 订单的 `ip_recycle_at` 属于已进入流程后的事实时间，通知计划应优先展示这些已存值。
+
+### 修复内容
+
+- `_deferred_lifecycle_time()` 增加 `prefer_stored` 参数；`_notice_schedule()` 对 suspended/deleting 的 `delete_at` 和 deleted 的 `ip_recycle_at` 优先使用订单已存值。
+
+### 验证
+
+已通过：
+
+```bash
+UV_CACHE_DIR=/private/tmp/uv-cache-shop uv run python -m py_compile cloud/lifecycle.py
+DJANGO_TEST_SQLITE=1 UV_CACHE_DIR=/private/tmp/uv-cache-shop uv run python manage.py test cloud.tests.CloudServerServicesTestCase.test_notice_plan_text_shows_configured_execution_time cloud.tests.CloudServerServicesTestCase.test_notice_delete_plan_and_proxy_list_use_asset_expiry cloud.tests.CloudServerServicesTestCase.test_shutdown_log_items_prefer_order_lifecycle_schedule cloud.tests.CloudServerServicesTestCase.test_lifecycle_plans_use_separate_order_plan_note cloud.tests.CloudServerServicesTestCase.test_lifecycle_tick_rechecks_order_delete_at_before_cloud_delete cloud.tests.CloudServerServicesTestCase.test_lifecycle_tick_rechecks_order_ip_recycle_at_before_release
+```
+
+结果：生命周期编译、通知文本/资产到期计划/自定义流程时间/独立计划备注/执行前复核 6 条聚焦测试均通过。
+
+剩余风险：本轮未跑完整测试套件，未连接真实 MySQL、AWS Lightsail、阿里云或 TRONGrid，未执行真实通知发送、云端删机或固定 IP 释放。
 
 ## 2026-06-02 22:25 自动监工：手工备注同步兼容记录
 
