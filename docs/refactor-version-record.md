@@ -1,5 +1,52 @@
 # 重构版本记录
 
+## 2026-06-03 07:44 当前会话自动监工：收窄主资产更新范围
+
+### 范围
+
+本轮按用户要求在当前会话持续执行自动优化任务。起始工作树干净，最新提交为 `9f47e47 修正资产详情到期事实兜底`。
+
+重点继续复查云资产生命周期唯一到期事实、后台资产详情只读展示、订单详情同步主资产、兼容 `Server` 包装、旧到期字段、旧计划快照、旧退款入口、旧端口入口和废弃 app 回流。
+
+### 修改
+
+- 修复 `_update_order_primary_records()` 批量更新同订单所有云资产的问题。
+- 主记录同步现在只更新 `_order_primary_asset(order)` 选出的当前主资产，避免后台订单状态/详情编辑把同订单下历史资产或非主资产的到期时间、代理字段一起覆盖。
+- 新增 `test_order_primary_record_update_does_not_mutate_stale_same_order_assets`，复现并锁定“同订单历史资产不应被主记录更新误写”的边界。
+
+### 监工结果
+
+- 修复前新增测试会失败：同订单历史资产的 `actual_expires_at` 被主资产新到期时间覆盖。
+- 修复后当前主资产会正确同步新到期和代理字段，历史资产保留自己的到期事实和代理字段。
+- 订单状态同步、订单详情手工编辑、主代理密钥同步、历史 IP 同步等周边路径继续通过。
+- `CloudAsset` 仍只有 `actual_expires_at` 作为结构化资产到期字段。
+- `CloudServerOrder` 未恢复 `service_expires_at` 或 `actual_expires_at`，仅保留 `renew_grace_expires_at` 作为流程时间字段。
+- 运行代码扫描未发现旧计划模型、旧退款函数名、旧端口入口或废弃 app 目录回流。
+
+### 验证
+
+本地已通过：
+
+```bash
+UV_CACHE_DIR=/Users/a399/Desktop/data/shop/.uv-cache DB_ENGINE=sqlite SQLITE_NAME=/private/tmp/shop_primary_update_scope_before.sqlite3 PYTHONDONTWRITEBYTECODE=1 uv run python manage.py test cloud.tests.CloudServerServicesTestCase.test_order_primary_record_update_does_not_mutate_stale_same_order_assets --noinput --verbosity 1
+UV_CACHE_DIR=/Users/a399/Desktop/data/shop/.uv-cache DB_ENGINE=sqlite SQLITE_NAME=/private/tmp/shop_primary_update_scope_after.sqlite3 PYTHONDONTWRITEBYTECODE=1 uv run python manage.py test cloud.tests.CloudServerServicesTestCase.test_order_primary_record_update_does_not_mutate_stale_same_order_assets cloud.tests.CloudServerServicesTestCase.test_order_primary_records_prefer_ip_over_stale_names --noinput --verbosity 1
+UV_CACHE_DIR=/Users/a399/Desktop/data/shop/.uv-cache DB_ENGINE=sqlite SQLITE_NAME=/private/tmp/shop_order_status_sync_after.sqlite3 PYTHONDONTWRITEBYTECODE=1 uv run python manage.py test cloud.tests.CloudOrderStatusDashboardSyncTestCase.test_status_endpoint_syncs_primary_asset_and_server_status cloud.tests.CloudOrderStatusDashboardSyncTestCase.test_order_detail_status_edit_syncs_primary_asset_and_server_status cloud.tests.CloudOrderStatusDashboardSyncTestCase.test_order_detail_manual_edit_syncs_cloud_identity_and_proxy_fields cloud.tests.CloudOrderStatusDashboardSyncTestCase.test_order_detail_manual_secret_edit_syncs_primary_asset cloud.tests.CloudOrderStatusDashboardSyncTestCase.test_order_detail_manual_previous_ip_edit_syncs_primary_records --noinput --verbosity 1
+UV_CACHE_DIR=/Users/a399/Desktop/data/shop/.uv-cache DB_ENGINE=sqlite SQLITE_NAME=/private/tmp/shop_asset_payload_fact_session_final.sqlite3 PYTHONDONTWRITEBYTECODE=1 uv run python manage.py test cloud.tests.CloudServerServicesTestCase.test_cloud_asset_detail_does_not_fallback_to_order_asset_expiry cloud.tests.CloudServerServicesTestCase.test_cloud_asset_detail_exposes_related_order_click_path cloud.tests.CloudServerServicesTestCase.test_cloud_asset_get_payload_does_not_mutate_manual_asset_fields --noinput --verbosity 1
+UV_CACHE_DIR=/Users/a399/Desktop/data/shop/.uv-cache PYTHONDONTWRITEBYTECODE=1 uv run python manage.py check
+UV_CACHE_DIR=/Users/a399/Desktop/data/shop/.uv-cache PYTHONDONTWRITEBYTECODE=1 uv run python -m py_compile cloud/services.py cloud/tests.py cloud/api_orders.py
+UV_CACHE_DIR=/Users/a399/Desktop/data/shop/.uv-cache PYTHONDONTWRITEBYTECODE=1 uv run python manage.py makemigrations --check --dry-run
+rg -n "service_expires_at\s*=|order\.(service_expires_at|actual_expires_at)|CloudServerOrder\([^\n]*(service_expires_at|actual_expires_at)|CloudLifecyclePlan\b|CloudNoticePlan\b|CloudAutoRenewPlan\b|CloudAssetPlanSnapshot|CloudOrderPlanSnapshot|refund_cloud_server_order|refund_cloud_order|refund_order|process_refund|create_refund|issue_refund|refund_to_balance|refund_balance|STATUS_REFUNDED|status=['\"]refunded['\"]|normalize_service_expiry|service_expired_at|allow_client_port|set_cloud_server_port|custom:port:|cloud:ipport:" bot core orders cloud shop --glob '!**/migrations/**' --glob '!**/tests.py' --glob '!**/tests_*.py'
+find . -maxdepth 2 -type d \( -name accounts -o -name finance -o -name mall -o -name monitoring -o -name dashboard_api -o -name biz \) -print
+```
+
+第一条测试是修复前复现用例，按预期失败；修复后相关聚焦测试全部通过。`makemigrations --check --dry-run` 仍出现本机无法连接 `127.0.0.1` MySQL 的迁移历史一致性警告，但最终结果为 `No changes detected`。
+
+### 剩余风险
+
+- 本轮未跑完整测试套件。
+- 本轮未执行真实 Telegram 点击、真实云资源创建/删除/IP 变更、真实支付、链上广播、生产发布或不可逆操作。
+- 真机测试仍需在用户明确授权真实云资源成本后单独执行，并写中文报告，云资源 ID 需脱敏。
+
 ## 2026-06-03 07:34 自动监工：收紧资产详情到期事实展示
 
 ### 范围

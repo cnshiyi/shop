@@ -13090,6 +13090,71 @@ class CloudServerServicesTestCase(TestCase):
         self.assertNotEqual(_order_primary_asset(order).id, stale_asset.id)
         self.assertNotEqual(_order_primary_server(order).id, stale_server.id)
 
+    # 功能：验证主记录更新只修改当前主资产，不误写同订单历史资产。
+    def test_order_primary_record_update_does_not_mutate_stale_same_order_assets(self):
+        from cloud.services import _update_order_primary_records
+
+        order = CloudServerOrder.objects.create(
+            order_no='PRIMARY-UPDATE-CURRENT-ONLY',
+            user=self.user,
+            plan=self.plan,
+            provider=self.plan.provider,
+            region_code=self.plan.region_code,
+            region_name=self.plan.region_name,
+            plan_name=self.plan.plan_name,
+            quantity=1,
+            currency='USDT',
+            total_amount='19.00',
+            pay_amount='19.00',
+            pay_method='balance',
+            status='completed',
+            public_ip='9.9.9.40',
+            previous_public_ip='9.9.9.39',
+            service_started_at=timezone.now(),
+        )
+        stale_expiry = timezone.now() + timezone.timedelta(days=3)
+        current_expiry = timezone.now() + timezone.timedelta(days=30)
+        stale_asset = CloudAsset.objects.create(
+            kind=CloudAsset.KIND_SERVER,
+            order=order,
+            user=self.user,
+            provider='aws_lightsail',
+            region_code=self.plan.region_code,
+            asset_name='stale-primary-update',
+            public_ip='8.8.8.40',
+            previous_public_ip='9.9.9.39',
+            actual_expires_at=stale_expiry,
+            mtproxy_host='8.8.8.40',
+            status=CloudAsset.STATUS_RUNNING,
+        )
+        current_asset = CloudAsset.objects.create(
+            kind=CloudAsset.KIND_SERVER,
+            order=order,
+            user=self.user,
+            provider='aws_lightsail',
+            region_code=self.plan.region_code,
+            asset_name='current-primary-update',
+            public_ip='9.9.9.40',
+            actual_expires_at=current_expiry,
+            mtproxy_host='9.9.9.40',
+            status=CloudAsset.STATUS_RUNNING,
+        )
+        new_expiry = timezone.now() + timezone.timedelta(days=45)
+
+        selected, _ = _update_order_primary_records(
+            order,
+            asset_updates={'actual_expires_at': new_expiry, 'mtproxy_host': '9.9.9.99'},
+            server_updates={'expires_at': new_expiry},
+        )
+
+        stale_asset.refresh_from_db()
+        current_asset.refresh_from_db()
+        self.assertEqual(selected.id, current_asset.id)
+        self.assertEqual(current_asset.actual_expires_at, new_expiry)
+        self.assertEqual(current_asset.mtproxy_host, '9.9.9.99')
+        self.assertEqual(stale_asset.actual_expires_at, stale_expiry)
+        self.assertEqual(stale_asset.mtproxy_host, '8.8.8.40')
+
     # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
     def test_lifecycle_aws_resource_resolution_prefers_ip(self):
         from cloud.lifecycle import _aws_instance_name_for_order, _aws_static_ip_name_for_asset, _delete_instance_sync, _delete_orphan_asset_instance_sync
