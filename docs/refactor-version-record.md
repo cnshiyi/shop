@@ -21,20 +21,29 @@
 - 未发现旧计划快照表模型恢复；当前命中均为现有 dashboard/lifecycle 刷新函数或测试名。
 - 未发现退款函数名和退款运行时入口恢复。
 - 废弃 app 未重新加入 `INSTALLED_APPS`；`dashboard_api` 仅作为现有后台路由命名空间和 `core.dashboard_api` helper 名称存在。
+- 补充抽查 `refresh_lifecycle_plans` / `refresh_notice_plans` 管理命令，确认仍生成实时 bundle，不恢复旧计划快照表；`CloudLifecycleTask` / `CloudNoticeTask` 的 `basis_actual_expires_at` 仍只作审计字段。
 
 ### 验证
 
 本地已通过：
 
 ```bash
-PYTHONDONTWRITEBYTECODE=1 DJANGO_TEST_SQLITE=1 uv run python -m py_compile cloud/lifecycle_schedule.py cloud/asset_expiry.py cloud/lifecycle.py cloud/tests.py
-PYTHONDONTWRITEBYTECODE=1 DJANGO_TEST_SQLITE=1 uv run python manage.py check
-PYTHONDONTWRITEBYTECODE=1 DJANGO_TEST_SQLITE=1 uv run python manage.py makemigrations --check --dry-run
-PYTHONDONTWRITEBYTECODE=1 DJANGO_TEST_SQLITE=1 uv run python manage.py test cloud.tests.CloudServerServicesTestCase.test_send_order_notice_batch_allows_new_expiry_cycle cloud.tests.CloudServerServicesTestCase.test_send_order_notice_batch_prefers_bound_group_and_skips_private cloud.tests.CloudServerServicesTestCase.test_send_order_notice_batch_falls_back_private_when_group_fails cloud.tests.CloudServerServicesTestCase.test_lifecycle_tick_startup_defer_blocks_order_static_ip_release cloud.tests.CloudServerServicesTestCase.test_lifecycle_tick_startup_defer_blocks_unattached_static_ip_release --noinput --verbosity 1
-rg -n "\bnormalize_service_expiry\b|service_expired_at|class (CloudLifecyclePlan|CloudNoticePlan|CloudAutoRenewPlan)\b|CloudLifecyclePlan\.|CloudNoticePlan\.|CloudAutoRenewPlan\.|refunded|refund|退款" --glob '!cloud/migrations/**' --glob '!docs/**' .
-rg -n "service_expires_at__|(filter|exclude|update|order_by|values|values_list)\([^\n)]*service_expires_at" --glob '!cloud/migrations/**' --glob '!docs/**' --glob '!cloud/tests.py' --glob '!bot/tests.py' --glob '!orders/tests.py' .
+UV_CACHE_DIR=/private/tmp/uv-cache-shop uv run python manage.py check
+UV_CACHE_DIR=/private/tmp/uv-cache-shop uv run python -m py_compile cloud/asset_expiry.py cloud/lifecycle_schedule.py cloud/lifecycle.py cloud/services.py cloud/api_orders.py cloud/api_asset_edit.py cloud/management/commands/sync_aws_assets.py cloud/management/commands/sync_aliyun_assets.py
+UV_CACHE_DIR=/private/tmp/uv-cache-shop uv run python -m py_compile cloud/asset_expiry.py cloud/lifecycle_schedule.py cloud/lifecycle.py cloud/services.py cloud/api_orders.py cloud/api_tasks.py cloud/management/commands/sync_aws_assets.py cloud/management/commands/sync_aliyun_assets.py
+PYTHONDONTWRITEBYTECODE=1 DJANGO_TEST_SQLITE=1 UV_CACHE_DIR=/private/tmp/uv-cache-shop uv run python manage.py check
+PYTHONDONTWRITEBYTECODE=1 DJANGO_TEST_SQLITE=1 UV_CACHE_DIR=/private/tmp/uv-cache-shop uv run python manage.py makemigrations --check --dry-run
+PYTHONDONTWRITEBYTECODE=1 DJANGO_TEST_SQLITE=1 UV_CACHE_DIR=/private/tmp/uv-cache-shop uv run python manage.py makemigrations --check --dry-run cloud
+PYTHONDONTWRITEBYTECODE=1 DJANGO_TEST_SQLITE=1 UV_CACHE_DIR=/private/tmp/uv-cache-shop uv run python manage.py test cloud.tests.CloudServerServicesTestCase.test_send_order_notice_batch_allows_new_expiry_cycle cloud.tests.CloudServerServicesTestCase.test_startup_defer_reschedules_static_ip_cleanup_without_touching_asset_expiry --noinput --verbosity 1
+PYTHONDONTWRITEBYTECODE=1 DJANGO_TEST_SQLITE=1 UV_CACHE_DIR=/private/tmp/uv-cache-shop uv run python manage.py test cloud.tests.CloudServerServicesTestCase.test_send_logged_cloud_notice_deduplicates_same_event_and_order cloud.tests.CloudServerServicesTestCase.test_send_order_notice_batch_prefers_bound_group_and_skips_private cloud.tests.CloudServerServicesTestCase.test_send_order_notice_batch_falls_back_private_when_group_fails --noinput --verbosity 1
+UV_CACHE_DIR=/private/tmp/uv-cache-shop DB_ENGINE=sqlite SQLITE_NAME=/private/tmp/shop-notice-cycle-test.sqlite3 uv run python manage.py test cloud.tests.CloudServerServicesTestCase.test_send_order_notice_batch_allows_new_expiry_cycle cloud.tests.CloudServerServicesTestCase.test_send_logged_cloud_notice_deduplicates_same_event_and_order cloud.tests.CloudServerServicesTestCase.test_send_order_notice_batch_prefers_bound_group_and_skips_private cloud.tests.CloudServerServicesTestCase.test_send_order_notice_batch_falls_back_private_when_group_fails --noinput
+UV_CACHE_DIR=/private/tmp/uv-cache-shop DB_ENGINE=sqlite SQLITE_NAME=/private/tmp/shop-startup-defer-test.sqlite3 uv run python manage.py test cloud.tests.CloudServerServicesTestCase.test_lifecycle_tick_startup_defer_reschedules_static_ip_cleanup_without_release cloud.tests.CloudServerServicesTestCase.test_lifecycle_tick_startup_defer_blocks_order_static_ip_release cloud.tests.CloudServerServicesTestCase.test_lifecycle_tick_startup_defer_blocks_unattached_static_ip_release --noinput
+! rg -n "\bnormalize_service_expiry\b|service_expired_at|class (CloudLifecyclePlan|CloudNoticePlan|CloudAutoRenewPlan)\b|CloudLifecyclePlan\.|CloudNoticePlan\.|CloudAutoRenewPlan\.|refunded|refund|退款" --glob '!cloud/migrations/**' --glob '!docs/**' .
+! rg -n "service_expires_at__|(filter|exclude|update|order_by|values|values_list)\([^\n)]*service_expires_at" --glob '!cloud/migrations/**' --glob '!docs/**' --glob '!cloud/tests.py' --glob '!bot/tests.py' --glob '!orders/tests.py' .
 git diff --check
 ```
+
+文件 SQLite 启动延迟用例会打印现有 dashboard snapshot 后台刷新锁等待日志，但测试断言通过；两条 `rg` 复查无命中，`! rg` 表示以无匹配为通过。
 
 ## 2026-06-02 自动监工：生命周期唯一事实源复查
 
