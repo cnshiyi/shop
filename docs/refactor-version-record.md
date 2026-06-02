@@ -1,5 +1,39 @@
 # 重构版本记录
 
+## 2026-06-02 16:07 自动监工：codex-cli 生命周期只读复查
+
+### 范围
+
+本轮继续监工 Shop Django 后端云资产生命周期重构状态。起始工作树干净，最近提交为 `39d5769 修复生命周期计划刷新测试旧字段`；自动化 `shop` 仍为 ACTIVE，每 10 分钟运行一次，模型为 `gpt-5.5`。终端版 codex 为 `codex-cli 0.135.0-alpha.1`，本轮用只读沙箱调用 codex-cli 复查，没有让 CLI 修改文件或提交。
+
+### 复查结论
+
+- codex-cli 未发现真实运行时 bug。
+- 当前运行时代码仍以 `CloudAsset.actual_expires_at` 作为唯一结构化到期事实；订单接口里的 `service_expires_at` 仅作为兼容 payload 字段，取值来自 `order_asset_expiry()` 或资产事实字段。
+- 删除计划、通知计划、代理列表仍读同一到期事实：订单路径经 `order_asset_expiry(order)`，资产路径直接读 `CloudAsset.actual_expires_at`。
+- `CloudLifecycleTask` 的生命周期任务 key 包含任务类型、来源和计划时间；`CloudNoticeTask` 的通知 key 经 batch id 纳入订单当前到期周期，未发现同一周期重复执行或续费后跨周期污染的运行时问题。
+- 启动延迟保护已覆盖关机、删机、迁移旧机删除、无订单资产删除、订单固定 IP 回收、未附加固定 IP 删除，并会清空本轮待执行列表，避免启动检查继续执行破坏性动作。
+- 未恢复 `CloudLifecyclePlan`、`CloudNoticePlan`、`CloudAutoRenewPlan` 旧计划快照模型，未恢复 `CloudServerOrder.service_expires_at` 数据库字段或危险 ORM 查询，未恢复退款函数名、退款入口或 `refunded` 状态。
+
+### 剩余风险
+
+- 测试文件仍有大量旧 `service_expires_at` 构造和断言，属于测试债；自动化已在 `39d5769` 收口其中一处计划刷新测试，后续应继续按用例改为 `CloudAsset.actual_expires_at` 或 `order_asset_expiry(order)`。
+- 本轮没有运行完整测试套件，只做了聚焦复查和基础验证。
+
+### 验证
+
+本地已通过：
+
+```bash
+/Applications/Codex.app/Contents/Resources/codex --version
+/Applications/Codex.app/Contents/Resources/codex exec --cd /Users/a399/Desktop/data/shop --sandbox read-only -m gpt-5.5 -o /tmp/shop-codex-review-latest.txt '<只读生命周期复查提示>'
+PYTHONDONTWRITEBYTECODE=1 DJANGO_TEST_SQLITE=1 uv run python manage.py check
+PYTHONDONTWRITEBYTECODE=1 DJANGO_TEST_SQLITE=1 uv run python manage.py makemigrations --check --dry-run
+rg -n "\bnormalize_service_expiry\b|service_expired_at|class (CloudLifecyclePlan|CloudNoticePlan|CloudAutoRenewPlan)\b|CloudLifecyclePlan\.|CloudNoticePlan\.|CloudAutoRenewPlan\.|refunded|refund|退款" --glob '!cloud/migrations/**' --glob '!docs/**' .
+rg -n "service_expires_at__|(filter|exclude|update|order_by|values|values_list)\([^\n)]*service_expires_at" --glob '!cloud/migrations/**' --glob '!docs/**' --glob '!cloud/tests.py' --glob '!bot/tests.py' --glob '!orders/tests.py' .
+git diff --check
+```
+
 ## 2026-06-02 自动监工：计划刷新测试旧字段回流修复
 
 ### 范围
