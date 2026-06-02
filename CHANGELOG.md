@@ -1,5 +1,17 @@
 # 版本记录
 
+## v0.5.98 - 2026-06-02
+- 继续监工云资产生命周期重构：确认运行时模型未恢复云订单 `service_expires_at`，订单表未新增云服务到期字段，计划快照表未恢复。
+- 复查到期事实口径：资产列表、生命周期、订单详情、支付续费和云同步路径继续以 `CloudAsset.actual_expires_at` / `order_asset_expiry` 为到期依据；`CloudServerOrder` 仅保留支付过期 `expired_at` 与派生生命周期时间。
+- 复查旧退款入口：运行代码未命中 `refund_order`、`process_refund`、`create_refund` 等旧退款函数名，本轮未做代码修复。
+
+### 验证
+- `UV_CACHE_DIR=/private/tmp/uv-cache-shop uv run python manage.py check`
+- `UV_CACHE_DIR=/private/tmp/uv-cache-shop uv run python -m py_compile bot/api.py bot/handlers.py cloud/services.py cloud/bootstrap.py cloud/api.py cloud/api_orders.py cloud/api_assets.py cloud/api_asset_snapshots.py cloud/server_records.py`
+- `UV_CACHE_DIR=/private/tmp/uv-cache-shop uv run python -m py_compile cloud/management/commands/sync_aws_assets.py cloud/management/commands/sync_aliyun_assets.py cloud/management/commands/reconcile_cloud_assets_from_servers.py cloud/management/commands/refresh_cloud_asset_dashboard_snapshots.py`
+- `UV_CACHE_DIR=/private/tmp/uv-cache-shop DJANGO_TEST_SQLITE=1 uv run python manage.py test cloud.tests.CloudServerServicesTestCase.test_order_rejects_removed_service_expiry_field cloud.tests.CloudServerServicesTestCase.test_dashboard_order_expiry_update_syncs_asset_expiry_and_lifecycle_plan cloud.tests.CloudServerServicesTestCase.test_sync_aliyun_assets_preserves_existing_asset_expiry cloud.tests.CloudServerServicesTestCase.test_sync_aws_assets_preserves_existing_unattached_ip_due_time cloud.tests.CloudOrderStatusDashboardSyncTestCase.test_order_detail_manual_edit_syncs_cloud_identity_and_proxy_fields`
+- `UV_CACHE_DIR=/private/tmp/uv-cache-shop DJANGO_TEST_SQLITE=1 uv run python manage.py test bot.tests.BotAdminExpiryUpdateTestCase.test_admin_expiry_update_syncs_order_asset_and_server orders.tests.ChainPaymentScannerTestCase.test_public_asset_renewal_expiry_does_not_claim_unowned_asset`
+
 ## v0.5.97 - 2026-04-25
 - 继续清理辅助目录：已删除 `biz/`、`dashboard_web/`、`tools/monitoring/`，并把原 `biz/tests.py` 迁入 `cloud/tests.py`。
 - `secrets/` 未动，继续保留为本地敏感材料目录，避免误删密钥。
