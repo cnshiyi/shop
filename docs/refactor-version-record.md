@@ -1,5 +1,32 @@
 # 重构版本记录
 
+## 2026-06-02 16:36 自动监工：删除计划关机开关与资产编辑收口
+
+### 范围
+
+本轮按最新要求调整关机计划入口：不在代理列表每行新增开关，改为放在删除计划表和代理详情页，并且两处都走同一个资产级字段 `CloudAsset.shutdown_enabled` 和同一个后台资产编辑接口。同步处理后端遗留脏改动，把旧 `service_expires_at` 测试构造继续收口到资产到期事实。
+
+### 修复
+
+- 后台资产编辑接口在更新公网 IP 时，旧 IP 来源改为依次读取资产当前 IP、资产历史 IP、订单当前 IP，避免 `Server` 兼容层预同步后订单 `previous_public_ip` 无法回填。
+- 删除计划和代理详情页使用同一套资产关机计划开关，后端 payload 均返回 `shutdown_enabled`，执行逻辑和计划候选查询均识别资产级关闭状态。
+- 测试继续移除多处对已删除订单到期字段的构造，改为使用 `CloudAsset.actual_expires_at`。
+- 调整旧 `Server` 独立表语义下的测试断言：当前 `Server.objects` 已是 `CloudAsset` 兼容入口，删除兼容服务器记录就是删除对应资产记录，不再假设存在另一张运行时服务器表。
+
+### 验证
+
+本地已通过：
+
+```bash
+PYTHONDONTWRITEBYTECODE=1 DJANGO_TEST_SQLITE=1 uv run python manage.py test cloud.tests.CloudServerServicesTestCase.test_dashboard_asset_ip_update_uses_asset_old_ip_when_server_was_pre_synced cloud.tests.CloudServerServicesTestCase.test_due_orders_skip_suspend_when_asset_shutdown_disabled cloud.tests.CloudServerServicesTestCase.test_lifecycle_plans_show_asset_shutdown_disabled_plan_state cloud.tests.CloudServerServicesTestCase.test_delete_cloud_asset_only_removes_asset_record cloud.tests.CloudServerServicesTestCase.test_delete_cloud_asset_also_removes_residual_server_record cloud.tests.CloudServerServicesTestCase.test_reconcile_cloud_assets_skips_deleted_server_residual cloud.tests.CloudServerServicesTestCase.test_delete_server_only_removes_server_record cloud.tests.CloudServerServicesTestCase.test_sync_aws_missing_instance_requires_five_passes_before_delete cloud.tests.CloudServerServicesTestCase.test_sync_aws_missing_check_uses_previous_public_ip_before_delete cloud.tests.CloudServerServicesTestCase.test_sync_aliyun_missing_instance_requires_five_passes_before_delete cloud.tests.CloudServerServicesTestCase.test_sync_aws_assets_keeps_runtime_running_when_order_is_suspended cloud.tests.CloudServerServicesTestCase.test_sync_aws_assets_revives_deleted_order_when_instance_exists --noinput --verbosity 1
+PYTHONDONTWRITEBYTECODE=1 DJANGO_TEST_SQLITE=1 uv run python manage.py check
+PYTHONDONTWRITEBYTECODE=1 DJANGO_TEST_SQLITE=1 uv run python manage.py makemigrations --check --dry-run
+git diff --check
+rg -n "service_expires_at__|(filter|exclude|update|order_by|values|values_list)\([^\n)]*service_expires_at" --glob '!cloud/migrations/**' --glob '!docs/**' --glob '!cloud/tests.py' --glob '!bot/tests.py' --glob '!orders/tests.py' .
+```
+
+前端 `@vben/web-antd` 类型检查未能运行，原因是当前终端为 Node `v26.0.0`、pnpm `9.15.9`，而前端仓库要求 Node `^20.19.0 || ^22.18.0 || ^24.0.0` 和 pnpm `>=10.0.0`。
+
 ## 2026-06-02 16:29 自动监工：资产关机开关和旧到期字段继续收口
 
 ### 范围

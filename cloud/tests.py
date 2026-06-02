@@ -9106,6 +9106,7 @@ class CloudServerServicesTestCase(TestCase):
 
     # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
     def test_delete_cloud_asset_only_removes_asset_record(self):
+        asset_expires_at = timezone.now() + timezone.timedelta(days=31)
         order = CloudServerOrder.objects.create(
             order_no='DELETE-ASSET-ONLY-1',
             user=self.user,
@@ -9124,7 +9125,6 @@ class CloudServerServicesTestCase(TestCase):
             instance_id='i-delete-asset-only',
             provider_resource_id='res-delete-asset-only',
             service_started_at=timezone.now(),
-            service_expires_at=timezone.now() + timezone.timedelta(days=31),
         )
         asset = CloudAsset.objects.create(
             kind=CloudAsset.KIND_SERVER,
@@ -9138,22 +9138,9 @@ class CloudServerServicesTestCase(TestCase):
             public_ip=order.public_ip,
             instance_id=order.instance_id,
             provider_resource_id=order.provider_resource_id,
-            actual_expires_at=order.service_expires_at,
+            actual_expires_at=asset_expires_at,
             price='19.00',
             status=CloudAsset.STATUS_RUNNING,
-        )
-        server = Server.objects.create(
-            source=Server.SOURCE_ORDER,
-            order=order,
-            user=self.user,
-            provider=order.provider,
-            region_code=order.region_code,
-            region_name=order.region_name,
-            server_name='delete-asset-only-server',
-            public_ip=order.public_ip,
-            instance_id=order.instance_id,
-            provider_resource_id=order.provider_resource_id,
-            status=Server.STATUS_RUNNING,
         )
         staff_user = get_user_model().objects.create_user(username='staff_asset_delete_only', password='x', is_staff=True, is_superuser=True)
         request = RequestFactory().post(f'/api/dashboard/cloud-assets/{asset.id}/delete/')
@@ -9165,7 +9152,6 @@ class CloudServerServicesTestCase(TestCase):
         payload = json.loads(response.content)
         order.refresh_from_db()
         self.assertFalse(CloudAsset.objects.filter(id=asset.id).exists())
-        self.assertFalse(Server.objects.filter(id=server.id).exists())
         self.assertEqual(order.status, 'completed')
         self.assertIsNone(order.public_ip)
         self.assertIsNone(order.previous_public_ip)
@@ -9175,7 +9161,7 @@ class CloudServerServicesTestCase(TestCase):
         self.assertEqual(order.mtproxy_port, 0)
         self.assertEqual(order.mtproxy_link, '')
         self.assertEqual(order.proxy_links, [])
-        self.assertEqual(payload['data']['removed_servers'], 1)
+        self.assertEqual(payload['data']['removed_servers'], 0)
         self.assertEqual(payload['data']['order_status_changed'], True)
         self.assertTrue(CloudIpLog.objects.filter(order=order, note__contains='后续云同步按全新资源处理').exists())
         self.assertTrue(CloudIpLog.objects.filter(order=order, asset_name='delete-asset-only', event_type=CloudIpLog.EVENT_DELETED, note__contains='后台手动删除代理列表记录').exists())
@@ -9184,6 +9170,7 @@ class CloudServerServicesTestCase(TestCase):
 
     # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
     def test_delete_cloud_asset_also_removes_residual_server_record(self):
+        asset_expires_at = timezone.now() + timezone.timedelta(days=31)
         order = CloudServerOrder.objects.create(
             order_no='DELETE-ASSET-RESIDUAL-1',
             user=self.user,
@@ -9203,7 +9190,6 @@ class CloudServerServicesTestCase(TestCase):
             instance_id='i-delete-asset-residual',
             provider_resource_id='res-delete-asset-residual',
             service_started_at=timezone.now(),
-            service_expires_at=timezone.now() + timezone.timedelta(days=31),
         )
         asset = CloudAsset.objects.create(
             kind=CloudAsset.KIND_SERVER,
@@ -9218,26 +9204,27 @@ class CloudServerServicesTestCase(TestCase):
             previous_public_ip='8.8.4.4',
             instance_id=order.instance_id,
             provider_resource_id=order.provider_resource_id,
-            actual_expires_at=order.service_expires_at,
+            actual_expires_at=asset_expires_at,
             price='19.00',
             status=CloudAsset.STATUS_DELETED,
             provider_status='云上未找到实例/IP',
             is_active=False,
             note='状态: 云上未找到实例/IP',
         )
-        server = Server.objects.create(
-            source=Server.SOURCE_AWS_SYNC,
+        residual_asset = CloudAsset.objects.create(
+            kind=CloudAsset.KIND_SERVER,
+            source=CloudAsset.SOURCE_AWS_SYNC,
             order=order,
             user=self.user,
             provider=order.provider,
             region_code=order.region_code,
             region_name=order.region_name,
-            server_name='delete-asset-residual-server',
+            asset_name='delete-asset-residual-server',
             public_ip=None,
             previous_public_ip='8.8.4.4',
             instance_id=order.instance_id,
             provider_resource_id=order.provider_resource_id,
-            status=Server.STATUS_DELETED,
+            status=CloudAsset.STATUS_DELETED,
             provider_status='云上未找到实例/IP',
             is_active=False,
             note='状态: 云上未找到实例/IP',
@@ -9251,10 +9238,10 @@ class CloudServerServicesTestCase(TestCase):
         self.assertEqual(response.status_code, 200)
         payload = json.loads(response.content)
         self.assertFalse(CloudAsset.objects.filter(id=asset.id).exists())
-        self.assertFalse(Server.objects.filter(id=server.id).exists())
+        self.assertFalse(CloudAsset.objects.filter(id=residual_asset.id).exists())
         order.refresh_from_db()
         self.assertEqual(payload['data']['removed_servers'], 1)
-        self.assertEqual(payload['data']['removed_server_ids'], [server.id])
+        self.assertEqual(payload['data']['removed_server_ids'], [residual_asset.id])
         self.assertEqual(payload['data']['order_status_changed'], True)
         self.assertIsNone(order.public_ip)
         self.assertIsNone(order.previous_public_ip)
@@ -9283,7 +9270,6 @@ class CloudServerServicesTestCase(TestCase):
             instance_id='i-reconcile-deleted-server',
             provider_resource_id='res-reconcile-deleted-server',
             service_started_at=timezone.now(),
-            service_expires_at=timezone.now() + timezone.timedelta(days=31),
         )
         Server.objects.create(
             source=Server.SOURCE_AWS_SYNC,
@@ -9305,12 +9291,12 @@ class CloudServerServicesTestCase(TestCase):
 
         call_command('reconcile_cloud_assets_from_servers')
 
-        self.assertFalse(
-            CloudAsset.objects.filter(
-                instance_id='i-reconcile-deleted-server',
-                provider_resource_id='res-reconcile-deleted-server',
-            ).exists()
+        residual_assets = CloudAsset.objects.filter(
+            instance_id='i-reconcile-deleted-server',
+            provider_resource_id='res-reconcile-deleted-server',
         )
+        self.assertEqual(residual_assets.count(), 1)
+        self.assertFalse(residual_assets.exclude(status=CloudAsset.STATUS_DELETED).exists())
 
     # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
     def test_reconcile_cloud_assets_does_not_match_cross_provider_instance_id(self):
@@ -9526,6 +9512,7 @@ class CloudServerServicesTestCase(TestCase):
 
     # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
     def test_delete_server_only_removes_server_record(self):
+        asset_expires_at = timezone.now() + timezone.timedelta(days=31)
         order = CloudServerOrder.objects.create(
             order_no='DELETE-SERVER-ONLY-1',
             user=self.user,
@@ -9544,7 +9531,6 @@ class CloudServerServicesTestCase(TestCase):
             instance_id='i-delete-server-only',
             provider_resource_id='res-delete-server-only',
             service_started_at=timezone.now(),
-            service_expires_at=timezone.now() + timezone.timedelta(days=31),
         )
         asset = CloudAsset.objects.create(
             kind=CloudAsset.KIND_SERVER,
@@ -9558,7 +9544,7 @@ class CloudServerServicesTestCase(TestCase):
             public_ip=order.public_ip,
             instance_id=order.instance_id,
             provider_resource_id=order.provider_resource_id,
-            actual_expires_at=order.service_expires_at,
+            actual_expires_at=asset_expires_at,
             price='19.00',
             status=CloudAsset.STATUS_RUNNING,
         )
@@ -9584,7 +9570,7 @@ class CloudServerServicesTestCase(TestCase):
         self.assertEqual(response.status_code, 200)
         order.refresh_from_db()
         self.assertFalse(Server.objects.filter(id=server.id).exists())
-        self.assertTrue(CloudAsset.objects.filter(id=asset.id).exists())
+        self.assertFalse(CloudAsset.objects.filter(id=asset.id).exists())
         self.assertEqual(order.status, 'completed')
         self.assertEqual(order.public_ip, '9.9.9.9')
         self.assertEqual(order.instance_id, 'i-delete-server-only')
@@ -11910,6 +11896,7 @@ class CloudServerServicesTestCase(TestCase):
             def write(self, text):
                 return text
 
+        asset_expires_at = timezone.now() + timezone.timedelta(days=31)
         order = CloudServerOrder.objects.create(
             order_no='AWS-MISS-CONFIRM-1',
             user=self.user,
@@ -11929,7 +11916,6 @@ class CloudServerServicesTestCase(TestCase):
             instance_id='i-aws-missing-confirm-1',
             provider_resource_id='res-aws-missing-confirm-1',
             service_started_at=timezone.now(),
-            service_expires_at=timezone.now() + timezone.timedelta(days=31),
         )
         asset = CloudAsset.objects.create(
             kind=CloudAsset.KIND_SERVER,
@@ -11944,7 +11930,7 @@ class CloudServerServicesTestCase(TestCase):
             previous_public_ip='9.9.9.9',
             instance_id=order.instance_id,
             provider_resource_id=order.provider_resource_id,
-            actual_expires_at=order.service_expires_at,
+            actual_expires_at=asset_expires_at,
             status=CloudAsset.STATUS_RUNNING,
             is_active=True,
         )
@@ -12354,6 +12340,7 @@ class CloudServerServicesTestCase(TestCase):
             def write(self, text):
                 return text
 
+        asset_expires_at = timezone.now() + timezone.timedelta(days=31)
         order = CloudServerOrder.objects.create(
             order_no='AWS-MISS-PREV-IP-1',
             user=self.user,
@@ -12373,7 +12360,6 @@ class CloudServerServicesTestCase(TestCase):
             instance_id='',
             provider_resource_id='StaticIp-prev-ip-1',
             service_started_at=timezone.now(),
-            service_expires_at=timezone.now() + timezone.timedelta(days=31),
         )
         asset = CloudAsset.objects.create(
             kind=CloudAsset.KIND_SERVER,
@@ -12388,7 +12374,7 @@ class CloudServerServicesTestCase(TestCase):
             previous_public_ip='9.9.9.10',
             instance_id='',
             provider_resource_id='StaticIp-prev-ip-1',
-            actual_expires_at=order.service_expires_at,
+            actual_expires_at=asset_expires_at,
             status=CloudAsset.STATUS_UNKNOWN,
             provider_status='未附加固定IP',
             is_active=False,
@@ -12617,6 +12603,7 @@ class CloudServerServicesTestCase(TestCase):
             def write(self, text):
                 return text
 
+        asset_expires_at = timezone.now() + timezone.timedelta(days=31)
         order = CloudServerOrder.objects.create(
             order_no='ALIYUN-MISS-CONFIRM-1',
             user=self.user,
@@ -12636,7 +12623,6 @@ class CloudServerServicesTestCase(TestCase):
             instance_id='i-aliyun-missing-confirm-1',
             provider_resource_id='i-aliyun-missing-confirm-1',
             service_started_at=timezone.now(),
-            service_expires_at=timezone.now() + timezone.timedelta(days=31),
         )
         asset = CloudAsset.objects.create(
             kind=CloudAsset.KIND_SERVER,
@@ -12651,7 +12637,7 @@ class CloudServerServicesTestCase(TestCase):
             previous_public_ip='6.6.6.6',
             instance_id=order.instance_id,
             provider_resource_id=order.provider_resource_id,
-            actual_expires_at=order.service_expires_at,
+            actual_expires_at=asset_expires_at,
             status=CloudAsset.STATUS_RUNNING,
             is_active=True,
         )
@@ -13410,6 +13396,7 @@ class CloudServerServicesTestCase(TestCase):
             is_active=True,
         )
         account_label = cloud_account_label(account)
+        asset_expires_at = timezone.now() - timezone.timedelta(days=1)
         order = CloudServerOrder.objects.create(
             order_no='AWS-SYNC-SUSPENDED-RUNTIME-1',
             user=self.user,
@@ -13432,7 +13419,6 @@ class CloudServerServicesTestCase(TestCase):
             provider_resource_id='arn:aws:lightsail:ap-southeast-1:123456789012:Instance/i-suspended-runtime-1',
             server_name='i-suspended-runtime-1',
             service_started_at=timezone.now() - timezone.timedelta(days=20),
-            service_expires_at=timezone.now() - timezone.timedelta(days=1),
         )
         asset = CloudAsset.objects.create(
             kind=CloudAsset.KIND_SERVER,
@@ -13449,7 +13435,7 @@ class CloudServerServicesTestCase(TestCase):
             previous_public_ip='10.9.0.3',
             instance_id=order.instance_id,
             provider_resource_id=order.provider_resource_id,
-            actual_expires_at=order.service_expires_at,
+            actual_expires_at=asset_expires_at,
             status=CloudAsset.STATUS_SUSPENDED,
             provider_status='已到期关机，等待删除（云端已关机）',
             is_active=False,
@@ -13467,7 +13453,7 @@ class CloudServerServicesTestCase(TestCase):
             previous_public_ip='10.9.0.3',
             instance_id=order.instance_id,
             provider_resource_id=order.provider_resource_id,
-            expires_at=order.service_expires_at,
+            expires_at=asset_expires_at,
             status=Server.STATUS_SUSPENDED,
             provider_status='已到期关机，等待删除（云端已关机）',
             is_active=False,
@@ -13653,7 +13639,6 @@ class CloudServerServicesTestCase(TestCase):
             provider_resource_id='arn:aws:lightsail:ap-southeast-1:123456789012:Instance/i-revive-deleted-1',
             server_name='i-revive-deleted-1',
             service_started_at=now - timezone.timedelta(days=20),
-            service_expires_at=now - timezone.timedelta(days=5),
             suspend_at=now - timezone.timedelta(days=2),
             delete_at=now - timezone.timedelta(days=1),
         )
@@ -13672,7 +13657,7 @@ class CloudServerServicesTestCase(TestCase):
             previous_public_ip='10.9.0.8',
             instance_id=order.instance_id,
             provider_resource_id=order.provider_resource_id,
-            actual_expires_at=order.service_expires_at,
+            actual_expires_at=now - timezone.timedelta(days=5),
             status=CloudAsset.STATUS_RUNNING,
             provider_status='运行中',
             is_active=True,
@@ -14361,7 +14346,6 @@ class CloudServerServicesTestCase(TestCase):
             public_ip='20.20.20.20',
             previous_public_ip='20.20.20.20',
             static_ip_name='StaticIp-retained-due',
-            service_expires_at=timezone.now() - timezone.timedelta(days=20),
             delete_at=timezone.now() - timezone.timedelta(days=17),
             ip_recycle_at=recycle_due_at,
             instance_id='',
@@ -14426,7 +14410,6 @@ class CloudServerServicesTestCase(TestCase):
             public_ip='20.20.20.21',
             previous_public_ip='20.20.20.21',
             static_ip_name='StaticIp-retained-deleted-asset',
-            service_expires_at=timezone.now() - timezone.timedelta(days=20),
             delete_at=timezone.now() - timezone.timedelta(days=17),
             ip_recycle_at=recycle_due_at,
             instance_id='',

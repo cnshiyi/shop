@@ -275,13 +275,20 @@ def update_cloud_asset(request, asset_id):
                     pending_order_updates['server_name'] = payload.get('asset_name') or None
 
             old_public_ip = asset.public_ip
+            old_order_public_ip = getattr(asset.order, 'public_ip', None)
             old_provider_status = str(asset.provider_status or '')
             new_public_ip = payload.get('public_ip') or None if 'public_ip' in payload else asset.public_ip
+            public_ip_previous_value = None
             if 'public_ip' in payload:
-                if old_public_ip and old_public_ip != new_public_ip:
-                    asset.previous_public_ip = old_public_ip
+                for candidate in (old_public_ip, asset.previous_public_ip, old_order_public_ip):
+                    candidate = str(candidate or '').strip() or None
+                    if candidate and candidate != new_public_ip:
+                        public_ip_previous_value = candidate
+                        break
+                if public_ip_previous_value:
+                    asset.previous_public_ip = public_ip_previous_value
                     if asset.order_id and not is_unattached_ip:
-                        pending_order_updates['previous_public_ip'] = old_public_ip
+                        pending_order_updates['previous_public_ip'] = public_ip_previous_value
 
             for field in ('asset_name', 'public_ip', 'provider_resource_id', 'instance_id', 'mtproxy_link', 'mtproxy_host', 'note'):
                 if field in payload:
@@ -353,9 +360,9 @@ def update_cloud_asset(request, asset_id):
             owner_target_after_commit = owner_target
             expiry_change_requested = manual_expires_at is not None and not is_unattached_ip
             refresh_snapshots_needed = refresh_snapshots_needed or owner_change_requested or expiry_change_requested
-            public_ip_changed = 'public_ip' in payload and str(old_public_ip or '') != str(new_public_ip or '')
+            public_ip_changed = 'public_ip' in payload and bool(public_ip_previous_value)
             refresh_snapshots_needed = refresh_snapshots_needed or public_ip_changed or bool(pending_order_updates)
-            changed_public_ip_before = old_public_ip
+            changed_public_ip_before = public_ip_previous_value
             changed_public_ip_after = new_public_ip
     except CloudAsset.DoesNotExist:
         return _error('云资产不存在', status=404)
