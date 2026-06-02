@@ -104,6 +104,19 @@ class Command(BaseCommand):
     @staticmethod
     def _cloud_order_cleanup_filter(cutoff):
         terminal_statuses = {'cancelled', 'expired', 'failed'}
+        no_current_resource = (
+            (Q(public_ip__isnull=True) | Q(public_ip=''))
+            & (Q(static_ip_name__isnull=True) | Q(static_ip_name=''))
+            & (Q(server_name__isnull=True) | Q(server_name=''))
+            & (Q(instance_id__isnull=True) | Q(instance_id=''))
+            & (Q(provider_resource_id__isnull=True) | Q(provider_resource_id=''))
+            & (Q(mtproxy_host__isnull=True) | Q(mtproxy_host=''))
+        )
+        terminal_done = (
+            Q(status__in=terminal_statuses)
+            & no_current_resource
+            & (Q(delete_at__isnull=True) | Q(delete_at__lt=cutoff))
+        )
         removed_asset_statuses = {
             CloudAsset.STATUS_TERMINATING,
             CloudAsset.STATUS_TERMINATED,
@@ -120,4 +133,4 @@ class Command(BaseCommand):
             Q(ip_recycle_at__isnull=True)
             | Q(ip_recycle_at__lt=cutoff)
         )
-        return (Q(status__in=terminal_statuses) | deleted_retained_done) & ~Q(id__in=live_asset_order_ids)
+        return (terminal_done | deleted_retained_done) & ~Q(id__in=live_asset_order_ids)

@@ -36,6 +36,7 @@ logger = logging.getLogger(__name__)
 AUTO_RENEW_BEFORE_EXPIRY_WINDOW = timezone.timedelta(days=1)
 AUTO_RENEW_FAILURE_NOTICE_COOLDOWN = timezone.timedelta(hours=1)
 AUTO_RENEW_RETRY_CHECK_INTERVAL = timezone.timedelta(minutes=10)
+AUTO_RENEW_RETRY_CLAIM_TTL = timezone.timedelta(minutes=30)
 AUTO_RENEW_RETRY_MAX_ATTEMPTS = 144
 NOTICE_TEXT_OVERRIDES_CONFIG_KEY = 'cloud_notice_text_overrides'
 
@@ -1142,10 +1143,21 @@ def _due_auto_renew_retry_tasks(limit: int = 50) -> list[int]:
 
 @sync_to_async
 def _run_auto_renew_retry_task(task_id: int) -> dict | None:
+    now = timezone.now()
+    claimed = CloudAutoRenewRetryTask.objects.filter(
+        id=task_id,
+        status=CloudAutoRenewRetryTask.STATUS_PENDING,
+        next_check_at__lte=now,
+    ).update(
+        last_checked_at=now,
+        next_check_at=now + AUTO_RENEW_RETRY_CLAIM_TTL,
+        updated_at=now,
+    )
+    if not claimed:
+        return None
     task = CloudAutoRenewRetryTask.objects.select_related('order', 'order__user').filter(id=task_id).first()
     if not task or task.status != CloudAutoRenewRetryTask.STATUS_PENDING:
         return None
-    now = timezone.now()
     order = task.order
     if not order or not order.auto_renew_enabled:
         task.status = CloudAutoRenewRetryTask.STATUS_CANCELLED
@@ -2687,9 +2699,6 @@ async def lifecycle_tick(notify=None, notify_target=None, defer_destructive_seco
             logger.warning('订单固定IP释放失败或跳过：订单ID=%s 订单号=%s IP=%s 原因=%s', order.id, order.order_no, order.public_ip or order.previous_public_ip, result.get('error'))
 
     for order in migration_due_orders:
-        notice = await _cloud_expiry_notice_payload(order.id)
-        if not notice.get('valid'):
-            continue
         logger.info('开始删除迁移旧服务器：订单ID=%s 订单号=%s IP=%s 云厂商=%s 地区=%s', order.id, order.order_no, order.public_ip or order.previous_public_ip, order.provider, order.region_code)
         result = await sync_to_async(run_replaced_order_delete, thread_sensitive=False)(
             order.id,
