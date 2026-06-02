@@ -1,5 +1,31 @@
 # 重构版本记录
 
+## 2026-06-02 自动监工：订单到期兼容复查
+
+### 范围
+
+本轮继续复查 `CloudServerOrder.service_expires_at` 移除后的运行状态，重点覆盖废弃 app 误用、旧字段危险 ORM 模式、订单/资产到期清空语义和上一轮兼容缓存修复后的聚焦回归。
+
+### 运行变更
+
+- 未修改生产代码；本轮只补充监工记录。
+- 废弃 app 扫描命中主要为文档、后台 URL namespace、权限码和 `core.dashboard_api` 共享工具，不是重新注册或恢复旧 `accounts/finance/mall/monitoring/dashboard_api/biz` 运行时 app。
+- 旧 `service_expires_at` 危险 ORM 模式扫描未发现运行代码继续对 `CloudServerOrder` 已移除字段做 `filter/update/order_by/values` 等查询；测试中的旧字段创建参数仍属于兼容属性覆盖。
+- 复核订单详情和资产编辑的清空到期路径：订单生命周期会在空到期时清空；订单编辑按当前语义不反向覆盖 `CloudAsset.actual_expires_at` 手工字段。
+
+### 验证
+
+本地已通过：
+
+```bash
+UV_CACHE_DIR=/private/tmp/uv-cache-shop uv run python manage.py check
+UV_CACHE_DIR=/private/tmp/uv-cache-shop uv run python -m py_compile cloud/models.py cloud/api_orders.py cloud/api_asset_edit.py cloud/services.py cloud/provisioning.py bot/api.py bot/handlers.py
+UV_CACHE_DIR=/private/tmp/uv-cache-shop DJANGO_TEST_SQLITE=1 uv run python manage.py test bot.tests.BotAdminExpiryUpdateTestCase cloud.tests.CloudServerServicesTestCase.test_order_save_backfills_blank_asset_expiry_only cloud.tests.CloudServerServicesTestCase.test_update_cloud_asset_expiry_refreshes_order_lifecycle --noinput --verbosity 1
+UV_CACHE_DIR=/private/tmp/uv-cache-shop uv run python manage.py makemigrations --check --dry-run
+```
+
+`makemigrations --check --dry-run` 仍因当前沙箱禁止连接本地 MySQL 输出一致性历史检查警告，但结果为 `No changes detected`。
+
 ## 2026-06-02 自动监工：订单到期兼容缓存清理
 
 ### 范围
