@@ -1,5 +1,33 @@
 # 重构版本记录
 
+## 2026-06-02 16:52 自动监工：固定 IP 回收回流复查
+
+### 范围
+
+本轮继续监工云资产生命周期重构后的固定 IP 回收、旧订单到期字段、旧计划快照表、退款入口和废弃 app 回流。运行中确认当前分支已推进到 `64c3180 补充固定IP回收测试和旧字段收口记录`，固定 IP 回收候选和执行入口已补齐资产级/云账号级关机计划开关保护。
+
+### 复查结论
+
+- 当前运行时代码仍以 `CloudAsset.actual_expires_at` 作为唯一结构化服务到期事实；订单接口里的 `service_expires_at` 仍只是兼容 payload 字段。
+- 未发现 `CloudServerOrder.service_expires_at` 数据库列、`normalize_service_expiry`、`service_expired_at` 或旧计划快照模型回流。
+- 未发现退款函数名、退款入口或 `refunded` 运行时状态筛选回流。
+- `cloud/tests.py` 仅剩 1 处 `service_expires_at=`，为旧字段删除的负向测试；`.service_expires_at` 测试命中为 0。
+- 废弃 app 未回到 `INSTALLED_APPS` 或运行时导入；`dashboard_api` 仅作为现有 URL namespace / helper 命名保留。
+
+### 验证
+
+本地已通过：
+
+```bash
+UV_CACHE_DIR=/private/tmp/uv-cache-shop uv run python manage.py check
+UV_CACHE_DIR=/private/tmp/uv-cache-shop DJANGO_TEST_SQLITE=1 uv run python manage.py makemigrations --check --dry-run
+UV_CACHE_DIR=/private/tmp/uv-cache-shop DJANGO_TEST_SQLITE=1 uv run python -m py_compile cloud/lifecycle.py cloud/lifecycle_execution.py cloud/services.py cloud/api_asset_edit.py cloud/management/commands/sync_aws_assets.py cloud/management/commands/sync_aliyun_assets.py cloud/management/commands/reconcile_cloud_assets_from_servers.py
+UV_CACHE_DIR=/private/tmp/uv-cache-shop DJANGO_TEST_SQLITE=1 uv run python manage.py test cloud.tests.CloudServerServicesTestCase.test_due_orders_skip_order_static_ip_recycle_when_asset_shutdown_disabled cloud.tests.CloudServerServicesTestCase.test_order_static_ip_release_respects_asset_shutdown_disabled cloud.tests.CloudServerServicesTestCase.test_order_rejects_removed_service_expiry_field cloud.tests.CloudServerServicesTestCase.test_server_compat_create_preserves_manual_asset_owner_and_expiry --noinput --verbosity 1
+git diff --check
+```
+
+因默认 `uv` 缓存目录受沙箱限制，后续命令继续显式使用 `UV_CACHE_DIR=/private/tmp/uv-cache-shop`。
+
 ## 2026-06-02 16:36 自动监工：删除计划关机开关与资产编辑收口
 
 ### 范围
