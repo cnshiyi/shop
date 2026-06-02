@@ -77,6 +77,7 @@ class CloudServerServicesTestCase(TestCase):
             mtproxy_port=9528,
             total_amount=Decimal('0'),
             user=self.user,
+            plan=self.plan,
         )
         expires_at = timezone.now() + timezone.timedelta(days=31)
         order._asset_expires_at = expires_at
@@ -99,6 +100,7 @@ class CloudServerServicesTestCase(TestCase):
             mtproxy_link=f'tg://proxy?server=10.0.0.92&port=9528&secret={secret}',
             total_amount=Decimal('0'),
             user=self.user,
+            plan=self.plan,
         )
         order._asset_expires_at = timezone.now() + timezone.timedelta(days=31)
 
