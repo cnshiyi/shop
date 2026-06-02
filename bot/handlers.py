@@ -2390,7 +2390,7 @@ def _cloud_asset_detail_text(item) -> str:
 def _cloud_server_detail_text(order) -> str:
     status_hint = _cloud_order_status_hint(order)
     expires_at = order_asset_expiry(order)
-    service_expires_at = _format_local_dt(expires_at) if expires_at else '今天到期'
+    expires_at_label = _format_local_dt(expires_at) if expires_at else '今天到期'
     renew_price = getattr(order, 'renewal_price', None) or order.pay_amount or order.total_amount
     auto_renew_status = '已开启' if getattr(order, 'auto_renew_enabled', False) else '已关闭'
     proxy_links_text = _proxy_links_text(order)
@@ -2407,7 +2407,7 @@ def _cloud_server_detail_text(order) -> str:
         f'端口: <code>{escape(str(order.mtproxy_port or "未设置"))}</code>\n'
         f'密钥: <code>{escape(str(order.mtproxy_secret or "尚未生成"))}</code>\n'
         f'{proxy_links_text}\n'
-        f'到期时间: {service_expires_at}\n'
+        f'到期时间: {expires_at_label}\n'
         f'续费价格: {fmt_pay_amount(renew_price)} {escape(str(order.currency or ""))}\n'
         f'自动续费: {auto_renew_status}\n'
         f'IP保留到期: {order.ip_recycle_at or "未设置"}\n'
@@ -2507,7 +2507,7 @@ def _chain_trace_text(item) -> str:
 def _cloud_order_readonly_text(order) -> str:
     status_hint = _cloud_order_status_hint(order)
     expires_at = order_asset_expiry(order)
-    service_expires_at = _format_local_dt(expires_at) if expires_at else '未设置'
+    expires_at_label = _format_local_dt(expires_at) if expires_at else '未设置'
     paid_at = getattr(order, 'paid_at', None) or getattr(order, 'completed_at', None)
     paid_at_text = f'{paid_at:%Y-%m-%d %H:%M:%S}' if paid_at else '未支付'
     proxy_links_text = _proxy_links_text(order)
@@ -2525,7 +2525,7 @@ def _cloud_order_readonly_text(order) -> str:
         f'端口: <code>{escape(str(order.mtproxy_port or "未设置"))}</code>\n'
         f'密钥: <code>{escape(str(order.mtproxy_secret or "尚未生成"))}</code>\n'
         f'{proxy_links_text}\n'
-        f'到期时间: {service_expires_at}\n'
+        f'到期时间: {expires_at_label}\n'
         f'支付时间: {paid_at_text}'
     )
     if chain_trace:
@@ -4376,7 +4376,7 @@ def register_handlers(dp: Dispatcher):
                 action_text = '升级' if plan.get('action') == 'upgrade' else '降级'
                 charge_text = f"补 {plan['diff']} U" if plan.get('action') == 'upgrade' else '无需补差价'
                 text_lines.append(f"- {plan['name']}：{action_text}，{charge_text}，到期补足 {plan['target_days']} 天")
-                rows.append([InlineKeyboardButton(text=f"{action_text}到 {plan['name']} {charge_text}", callback_data=f"cloud:upgradepay:{order.id}:{plan['id']}")])
+                rows.append([InlineKeyboardButton(text=f"{action_text}到 {plan['name']} {charge_text}", callback_data=append_back_callback(f"cloud:upgradepay:{order.id}:{plan['id']}", back_callback))])
             rows.append([InlineKeyboardButton(text='🔙 返回详情', callback_data=asset_detail_back)])
             text = '\n'.join(text_lines)
             markup = InlineKeyboardMarkup(inline_keyboard=rows)
@@ -5022,7 +5022,7 @@ def register_handlers(dp: Dispatcher):
             action_text = '升级' if plan.get('action') == 'upgrade' else '降级'
             charge_text = f"补 {plan['diff']} U" if plan.get('action') == 'upgrade' else '无需补差价'
             text_lines.append(f"- {plan['name']}：{action_text}，{charge_text}，到期补足 {plan['target_days']} 天")
-            rows.append([InlineKeyboardButton(text=f"{action_text}到 {plan['name']} {charge_text}", callback_data=f"cloud:upgradepay:{order_id}:{plan['id']}")])
+            rows.append([InlineKeyboardButton(text=f"{action_text}到 {plan['name']} {charge_text}", callback_data=append_back_callback(f"cloud:upgradepay:{order_id}:{plan['id']}", back_callback))])
         rows.append([InlineKeyboardButton(text='🔙 返回详情', callback_data=cloud_detail_callback(order_id, back_callback))])
         text = '\n'.join(text_lines)
         markup = InlineKeyboardMarkup(inline_keyboard=rows)
@@ -5041,13 +5041,20 @@ def register_handlers(dp: Dispatcher):
             return
         await state.clear()
         user = await get_or_create_user(callback.from_user.id, callback.from_user.username, callback.from_user.first_name)
-        _, _, raw_order_id, raw_plan_id = callback.data.split(':')
+        parts = callback.data.split(':', 4)
+        _, _, raw_order_id, raw_plan_id = parts[:4]
+        back_callback = parts[4] if len(parts) > 4 else ''
         is_admin = await _is_admin_chat(callback.message)
         new_order, err = await create_cloud_server_upgrade_order(int(raw_order_id), user.id, int(raw_plan_id), admin=is_admin)
         if err:
             await _safe_callback_answer(callback, err, show_alert=True)
             return
-        await callback.message.reply(_bot_text_format('bot_cloud_upgrade_submitted', '⚙️ 已提交配置调整任务。\n新订单: {order_no}\n完成后会自动发送新的服务器信息，代理链接保持不变。\n\n后台处理期间，底部菜单和其它按钮可正常使用。', order_no=new_order.order_no), reply_markup=main_menu())
+        await callback.message.reply(
+            _bot_text_format('bot_cloud_upgrade_submitted', '⚙️ 已提交配置调整任务。\n新订单: {order_no}\n完成后会自动发送新的服务器信息，代理链接保持不变。\n\n后台处理期间，底部菜单和其它按钮可正常使用。', order_no=new_order.order_no),
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text='🔙 返回原代理', callback_data=cloud_detail_callback(int(raw_order_id), back_callback))],
+            ]) if back_callback else main_menu(),
+        )
         asyncio.create_task(_provision_cloud_server_and_notify(bot, callback.from_user.id, new_order.id, new_order.mtproxy_port or 9528))
 
     @dp.callback_query(F.data.startswith('cloud:reinit:'))
