@@ -1375,11 +1375,11 @@ def ip_delete_logs(request):
     return _ok(_unattached_ip_delete_items(limit=limit))
 
 
-def _shutdown_plan_item_payload(order, *, queue_status='scheduled_future', queue_status_label='计划中', next_run_at=None, last_failure_reason=None, note=''):
+def _shutdown_plan_item_payload(order, *, queue_status='scheduled_future', queue_status_label='计划中', next_run_at=None, last_failure_reason=None, note='', asset=None):
     user_display_name, username_label = _telegram_user_labels(order.user)
     notice_ip = order.public_ip or order.previous_public_ip or '未分配'
     plan_at = next_run_at or order.delete_at
-    shutdown_enabled = _shutdown_enabled_for_order(order)
+    shutdown_enabled = _shutdown_enabled_for_order(order, asset)
     if not shutdown_enabled:
         execution_status = '关机计划关闭，禁止真实关机和删机'
         queue_status = 'shutdown_disabled'
@@ -1424,6 +1424,7 @@ def _shutdown_plan_item_payload(order, *, queue_status='scheduled_future', queue
         'last_failure_reason': last_failure_reason,
         'execution_status': execution_status,
         'execution_plan': execution_plan,
+        'shutdown_enabled': shutdown_enabled,
         'source_note': str(getattr(order, 'provision_note', '') or '').strip(),
         'note': note,
         'display_note': _compact_dashboard_note(note, max_chars=500),
@@ -1432,6 +1433,23 @@ def _shutdown_plan_item_payload(order, *, queue_status='scheduled_future', queue
         'order_detail_path': f'/admin/cloud-orders/{order.id}',
         'order_link_path': f'/admin/cloud-orders/{order.id}',
     }
+
+
+def _linked_order_asset_delete_plan_item_payload(asset, linked_order, *, queue_status='scheduled_future', queue_status_label='计划中', note=''):
+    item = _shutdown_plan_item_payload(
+        linked_order,
+        queue_status=queue_status,
+        queue_status_label=queue_status_label,
+        note=note,
+        asset=asset,
+    )
+    item.update({
+        'asset_id': asset.id,
+        'asset_name': asset.asset_name,
+        'cloud_account_id': asset.cloud_account_id or getattr(linked_order, 'cloud_account_id', None),
+        'asset_detail_path': f'/admin/cloud-assets/{asset.id}',
+    })
+    return item
 
 
 def _asset_delete_plan_item_payload(asset, *, queue_status='scheduled_future', queue_status_label='计划中', note=''):
@@ -1448,6 +1466,14 @@ def _asset_delete_plan_item_payload(asset, *, queue_status='scheduled_future', q
         queue_status = 'sync_only'
         queue_status_label = '只同步/自然释放'
         execution_status = '阿里云只同步状态，按云厂商自然释放；本系统不执行真实关机和删机'
+    elif linked_order and getattr(linked_order, 'status', '') not in {'deleted', 'cancelled', 'expired'}:
+        return _linked_order_asset_delete_plan_item_payload(
+            asset,
+            linked_order,
+            queue_status=queue_status,
+            queue_status_label=queue_status_label,
+            note=note,
+        )
     elif linked_order and getattr(linked_order, 'status', '') in {'deleted', 'cancelled', 'expired'}:
         queue_status_label = '待处理'
         execution_status = '关联订单已结束，服务器仍存在，待执行删除服务器'
@@ -1524,6 +1550,7 @@ def _collect_shutdown_plan_queue(now, limit=100):
     plan_assets = _active_cloud_asset_plan_rows()
     server_assets = [asset for asset in plan_assets if not _asset_is_unattached_ip(asset) and 'StaticIp' not in str(asset.provider_resource_id or '')]
     next_run_at = None
+    seen_linked_order_ids = set()
     due_items = []
     future_items = []
     for asset in server_assets[:limit]:
@@ -1531,6 +1558,12 @@ def _collect_shutdown_plan_queue(now, limit=100):
             continue
         if _asset_deleted_or_missing(asset):
             continue
+        linked_order_id = getattr(asset, 'order_id', None)
+        linked_order = getattr(asset, 'order', None)
+        if linked_order_id and linked_order and getattr(linked_order, 'status', '') not in {'deleted', 'cancelled', 'expired'}:
+            if linked_order_id in seen_linked_order_ids:
+                continue
+            seen_linked_order_ids.add(linked_order_id)
         if _asset_is_sync_only_lifecycle(asset):
             future_items.append(
                 _asset_delete_plan_item_payload(

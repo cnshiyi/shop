@@ -260,6 +260,9 @@ def run_orphan_asset_delete(asset_id: int, *, enforce_schedule: bool = True) -> 
         return {'asset_id': asset.id, 'ip': ip, 'ok': False, 'error': '该服务器资产已删除，不需要重复执行'}
     if asset.provider == 'aliyun_simple':
         return {'asset_id': asset.id, 'ip': ip, 'ok': False, 'error': '阿里云轻量服务器当前未接入删除 API，本系统不会执行真实删机。'}
+    linked_order = getattr(asset, 'order', None)
+    if enforce_schedule and linked_order and getattr(linked_order, 'status', '') not in {'deleted', 'cancelled', 'expired'}:
+        return {'asset_id': asset.id, 'ip': ip, 'ok': False, 'error': '该资产有关联订单，请走订单删机计划，避免资产和订单状态不一致。'}
     if not cloud_server_delete_enabled():
         return {'asset_id': asset.id, 'ip': ip, 'ok': False, 'error': '删除服务器总开关已关闭，跳过真实删机。'}
     if enforce_schedule and getattr(asset, 'shutdown_enabled', True) is False:
