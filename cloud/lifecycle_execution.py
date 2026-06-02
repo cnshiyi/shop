@@ -8,7 +8,8 @@ from asgiref.sync import async_to_sync
 from django.utils import timezone
 
 from core.runtime_config import get_runtime_config
-from cloud.models import CloudAsset, CloudServerOrder
+from cloud.lifecycle_tasks import claim_lifecycle_task_for_order, finish_lifecycle_task
+from cloud.models import CloudAsset, CloudLifecycleTask, CloudServerOrder
 
 
 def _asset_is_unattached_ip(asset: CloudAsset | None) -> bool:
@@ -94,12 +95,25 @@ def run_shutdown_order_suspend(order_id: int, *, queue_status='scheduled_suspend
             reason = '当前不在后台配置的服务器关机执行时间窗口'
             async_to_sync(_record_lifecycle_action_failed)(order.id, 'suspend_skipped', reason)
             return {'order_id': order.id, 'order_no': order.order_no, 'ip': ip, 'queue_status': queue_status, 'ok': False, 'error': reason}
-    ok, note = _run_cloud_action(_stop_instance(order), action='AWS 实例关机', target=order.order_no)
-    if ok:
-        async_to_sync(_mark_suspended)(order.id, note)
-        return {'order_id': order.id, 'order_no': order.order_no, 'ip': ip, 'queue_status': queue_status, 'ok': True, 'error': None}
-    async_to_sync(_record_lifecycle_action_failed)(order.id, 'suspend_failed', note)
-    return {'order_id': order.id, 'order_no': order.order_no, 'ip': ip, 'queue_status': queue_status, 'ok': False, 'error': note}
+    task_claim = None
+    if enforce_schedule:
+        task_claim = claim_lifecycle_task_for_order(CloudLifecycleTask.TASK_SUSPEND, order, scheduled_at=order.suspend_at, queue_status=queue_status)
+        if not task_claim:
+            reason = '本轮关机计划已被其他进程认领、已完成或正在重试保护期内，跳过重复触发。'
+            async_to_sync(_record_lifecycle_action_failed)(order.id, 'suspend_skipped', reason)
+            return {'order_id': order.id, 'order_no': order.order_no, 'ip': ip, 'queue_status': queue_status, 'ok': False, 'error': reason}
+    try:
+        ok, note = _run_cloud_action(_stop_instance(order), action='AWS 实例关机', target=order.order_no)
+        if ok:
+            async_to_sync(_mark_suspended)(order.id, note)
+            finish_lifecycle_task(task_claim, ok=True)
+            return {'order_id': order.id, 'order_no': order.order_no, 'ip': ip, 'queue_status': queue_status, 'ok': True, 'error': None}
+        async_to_sync(_record_lifecycle_action_failed)(order.id, 'suspend_failed', note)
+        finish_lifecycle_task(task_claim, ok=False, error=note)
+        return {'order_id': order.id, 'order_no': order.order_no, 'ip': ip, 'queue_status': queue_status, 'ok': False, 'error': note}
+    except Exception as exc:
+        finish_lifecycle_task(task_claim, ok=False, error=str(exc))
+        raise
 
 
 def run_shutdown_order_delete(order_id: int, *, queue_status='manual_single', enforce_schedule: bool = True) -> dict:
@@ -146,13 +160,26 @@ def run_shutdown_order_delete(order_id: int, *, queue_status='manual_single', en
             reason = '当前不在后台配置的服务器删除执行时间窗口'
             async_to_sync(_record_lifecycle_action_failed)(order.id, 'delete_skipped', reason)
             return {'order_id': order.id, 'order_no': order.order_no, 'ip': ip, 'queue_status': queue_status, 'ok': False, 'error': reason}
-    ok, note = _run_cloud_action(_delete_instance(order), action='AWS 实例删除', target=order.order_no)
-    if ok:
-        source = '人工手动删除' if not enforce_schedule or str(queue_status or '').startswith('manual') else '到期自动删除'
-        async_to_sync(_mark_deleted)(order.id, with_delete_source(note, source))
-        return {'order_id': order.id, 'order_no': order.order_no, 'ip': ip, 'queue_status': queue_status, 'ok': True, 'error': None}
-    async_to_sync(_record_lifecycle_action_failed)(order.id, 'delete_failed', note)
-    return {'order_id': order.id, 'order_no': order.order_no, 'ip': ip, 'queue_status': queue_status, 'ok': False, 'error': note}
+    task_claim = None
+    if enforce_schedule:
+        task_claim = claim_lifecycle_task_for_order(CloudLifecycleTask.TASK_DELETE, order, scheduled_at=order.delete_at, queue_status=queue_status)
+        if not task_claim:
+            reason = '本轮删机计划已被其他进程认领、已完成或正在重试保护期内，跳过重复触发。'
+            async_to_sync(_record_lifecycle_action_failed)(order.id, 'delete_skipped', reason)
+            return {'order_id': order.id, 'order_no': order.order_no, 'ip': ip, 'queue_status': queue_status, 'ok': False, 'error': reason}
+    try:
+        ok, note = _run_cloud_action(_delete_instance(order), action='AWS 实例删除', target=order.order_no)
+        if ok:
+            source = '人工手动删除' if not enforce_schedule or str(queue_status or '').startswith('manual') else '到期自动删除'
+            async_to_sync(_mark_deleted)(order.id, with_delete_source(note, source))
+            finish_lifecycle_task(task_claim, ok=True)
+            return {'order_id': order.id, 'order_no': order.order_no, 'ip': ip, 'queue_status': queue_status, 'ok': True, 'error': None}
+        async_to_sync(_record_lifecycle_action_failed)(order.id, 'delete_failed', note)
+        finish_lifecycle_task(task_claim, ok=False, error=note)
+        return {'order_id': order.id, 'order_no': order.order_no, 'ip': ip, 'queue_status': queue_status, 'ok': False, 'error': note}
+    except Exception as exc:
+        finish_lifecycle_task(task_claim, ok=False, error=str(exc))
+        raise
 
 
 def run_replaced_order_delete(order_id: int, *, queue_status='scheduled_migration_delete', enforce_schedule: bool = True) -> dict:
@@ -186,12 +213,25 @@ def run_replaced_order_delete(order_id: int, *, queue_status='scheduled_migratio
             reason = '当前不在后台配置的服务器删除执行时间窗口'
             async_to_sync(_record_lifecycle_action_failed)(order.id, 'delete_skipped', reason)
             return {'order_id': order.id, 'order_no': order.order_no, 'ip': ip, 'queue_status': queue_status, 'ok': False, 'error': reason}
-    ok, note = _run_cloud_action(_delete_replaced_server(order), action='AWS 迁移旧实例删除', target=order.order_no)
-    if ok:
-        async_to_sync(_mark_replaced_order_deleted)(order.id, note)
-        return {'order_id': order.id, 'order_no': order.order_no, 'ip': ip, 'queue_status': queue_status, 'ok': True, 'error': None}
-    async_to_sync(_record_lifecycle_action_failed)(order.id, 'delete_failed', note)
-    return {'order_id': order.id, 'order_no': order.order_no, 'ip': ip, 'queue_status': queue_status, 'ok': False, 'error': note}
+    task_claim = None
+    if enforce_schedule:
+        task_claim = claim_lifecycle_task_for_order(CloudLifecycleTask.TASK_MIGRATION_DELETE, order, scheduled_at=order.migration_due_at, queue_status=queue_status)
+        if not task_claim:
+            reason = '本轮迁移旧机删除计划已被其他进程认领、已完成或正在重试保护期内，跳过重复触发。'
+            async_to_sync(_record_lifecycle_action_failed)(order.id, 'delete_skipped', reason)
+            return {'order_id': order.id, 'order_no': order.order_no, 'ip': ip, 'queue_status': queue_status, 'ok': False, 'error': reason}
+    try:
+        ok, note = _run_cloud_action(_delete_replaced_server(order), action='AWS 迁移旧实例删除', target=order.order_no)
+        if ok:
+            async_to_sync(_mark_replaced_order_deleted)(order.id, note)
+            finish_lifecycle_task(task_claim, ok=True)
+            return {'order_id': order.id, 'order_no': order.order_no, 'ip': ip, 'queue_status': queue_status, 'ok': True, 'error': None}
+        async_to_sync(_record_lifecycle_action_failed)(order.id, 'delete_failed', note)
+        finish_lifecycle_task(task_claim, ok=False, error=note)
+        return {'order_id': order.id, 'order_no': order.order_no, 'ip': ip, 'queue_status': queue_status, 'ok': False, 'error': note}
+    except Exception as exc:
+        finish_lifecycle_task(task_claim, ok=False, error=str(exc))
+        raise
 
 
 def run_orphan_asset_delete(asset_id: int, *, enforce_schedule: bool = True) -> dict:

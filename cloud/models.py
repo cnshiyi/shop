@@ -562,6 +562,140 @@ class CloudLifecyclePlanNote(models.Model):
         return f'{self.plan_kind}:{target}'
 
 
+class CloudLifecycleTask(models.Model):
+    TASK_SUSPEND = 'suspend'
+    TASK_DELETE = 'delete'
+    TASK_RECYCLE = 'recycle'
+    TASK_MIGRATION_DELETE = 'migration_delete'
+    TASK_ORPHAN_ASSET_DELETE = 'orphan_asset_delete'
+    TASK_UNATTACHED_IP_DELETE = 'unattached_ip_delete'
+    TASK_TYPE_CHOICES = (
+        (TASK_SUSPEND, '计划关机'),
+        (TASK_DELETE, '计划删机'),
+        (TASK_RECYCLE, '固定IP回收'),
+        (TASK_MIGRATION_DELETE, '迁移旧机删除'),
+        (TASK_ORPHAN_ASSET_DELETE, '无订单资产删除'),
+        (TASK_UNATTACHED_IP_DELETE, '未附加固定IP删除'),
+    )
+
+    SOURCE_ORDER = 'order'
+    SOURCE_ASSET = 'asset'
+    SOURCE_KIND_CHOICES = (
+        (SOURCE_ORDER, '订单'),
+        (SOURCE_ASSET, '资产'),
+    )
+
+    STATUS_PENDING = 'pending'
+    STATUS_CLAIMED = 'claimed'
+    STATUS_DONE = 'done'
+    STATUS_SKIPPED = 'skipped'
+    STATUS_FAILED = 'failed'
+    STATUS_CANCELLED = 'cancelled'
+    STATUS_CHOICES = (
+        (STATUS_PENDING, '待执行'),
+        (STATUS_CLAIMED, '执行中'),
+        (STATUS_DONE, '已完成'),
+        (STATUS_SKIPPED, '已跳过'),
+        (STATUS_FAILED, '执行失败'),
+        (STATUS_CANCELLED, '已取消'),
+    )
+
+    source_key = models.CharField('来源唯一键', max_length=191, unique=True)
+    task_type = models.CharField('任务类型', max_length=64, choices=TASK_TYPE_CHOICES, db_index=True)
+    source_kind = models.CharField('来源类型', max_length=32, choices=SOURCE_KIND_CHOICES, db_index=True)
+    order = models.ForeignKey('cloud.CloudServerOrder', verbose_name='关联订单', on_delete=models.SET_NULL, blank=True, null=True, related_name='lifecycle_tasks')
+    asset = models.ForeignKey('cloud.CloudAsset', verbose_name='关联资产', on_delete=models.SET_NULL, blank=True, null=True, related_name='lifecycle_tasks')
+    user = models.ForeignKey('bot.TelegramUser', verbose_name='关联用户', on_delete=models.SET_NULL, blank=True, null=True, related_name='cloud_lifecycle_tasks')
+    scheduled_at = models.DateTimeField('计划执行时间', db_index=True)
+    basis_actual_expires_at = models.DateTimeField('依据资产到期时间', blank=True, null=True)
+    status = models.CharField('状态', max_length=32, choices=STATUS_CHOICES, default=STATUS_PENDING, db_index=True)
+    claim_token = models.CharField('认领令牌', max_length=64, blank=True, db_index=True)
+    claimed_at = models.DateTimeField('认领时间', blank=True, null=True, db_index=True)
+    attempt_count = models.PositiveIntegerField('尝试次数', default=0)
+    last_error = models.TextField('最后错误', blank=True)
+    last_run_at = models.DateTimeField('最后执行时间', blank=True, null=True)
+    completed_at = models.DateTimeField('完成时间', blank=True, null=True)
+    payload = models.JSONField('计划载荷', default=dict, blank=True)
+    created_at = models.DateTimeField('创建时间', auto_now_add=True, db_index=True)
+    updated_at = models.DateTimeField('更新时间', auto_now=True)
+
+    class Meta:
+        db_table = 'cloud_lifecycle_task'
+        verbose_name = '生命周期任务'
+        verbose_name_plural = '生命周期任务'
+        ordering = ['scheduled_at', 'id']
+        indexes = [
+            models.Index(fields=['status', 'scheduled_at'], name='clt_status_due_idx'),
+            models.Index(fields=['task_type', 'status', 'scheduled_at'], name='clt_type_status_due_idx'),
+            models.Index(fields=['source_kind', 'order', 'task_type'], name='clt_order_task_idx'),
+            models.Index(fields=['source_kind', 'asset', 'task_type'], name='clt_asset_task_idx'),
+        ]
+
+    def __str__(self):
+        return f'{self.task_type}:{self.source_key}:{self.status}'
+
+
+class CloudNoticeTask(models.Model):
+    NOTICE_RENEW = 'renew_notice'
+    NOTICE_AUTO_RENEW = 'auto_renew_notice'
+    NOTICE_DELETE = 'delete_notice'
+    NOTICE_RECYCLE = 'recycle_notice'
+    NOTICE_TYPE_CHOICES = (
+        (NOTICE_RENEW, '到期提醒'),
+        (NOTICE_AUTO_RENEW, '自动续费预提醒'),
+        (NOTICE_DELETE, '删机提醒'),
+        (NOTICE_RECYCLE, 'IP回收提醒'),
+    )
+
+    STATUS_PENDING = 'pending'
+    STATUS_CLAIMED = 'claimed'
+    STATUS_SENT = 'sent'
+    STATUS_FAILED = 'failed'
+    STATUS_CANCELLED = 'cancelled'
+    STATUS_CHOICES = (
+        (STATUS_PENDING, '待通知'),
+        (STATUS_CLAIMED, '通知中'),
+        (STATUS_SENT, '已通知'),
+        (STATUS_FAILED, '通知失败'),
+        (STATUS_CANCELLED, '已取消'),
+    )
+
+    source_key = models.CharField('来源唯一键', max_length=191, unique=True)
+    notice_type = models.CharField('通知类型', max_length=64, choices=NOTICE_TYPE_CHOICES, db_index=True)
+    order = models.ForeignKey('cloud.CloudServerOrder', verbose_name='关联订单', on_delete=models.SET_NULL, blank=True, null=True, related_name='notice_tasks')
+    asset = models.ForeignKey('cloud.CloudAsset', verbose_name='关联资产', on_delete=models.SET_NULL, blank=True, null=True, related_name='notice_tasks')
+    user = models.ForeignKey('bot.TelegramUser', verbose_name='关联用户', on_delete=models.SET_NULL, blank=True, null=True, related_name='cloud_notice_tasks')
+    target_chat_id = models.BigIntegerField('目标群组/会话ID', blank=True, null=True, db_index=True)
+    notice_at = models.DateTimeField('计划通知时间', db_index=True)
+    basis_actual_expires_at = models.DateTimeField('依据资产到期时间', blank=True, null=True)
+    batch_id = models.CharField('通知批次', max_length=191, blank=True, db_index=True)
+    status = models.CharField('状态', max_length=32, choices=STATUS_CHOICES, default=STATUS_PENDING, db_index=True)
+    claim_token = models.CharField('认领令牌', max_length=64, blank=True, db_index=True)
+    claimed_at = models.DateTimeField('认领时间', blank=True, null=True, db_index=True)
+    attempt_count = models.PositiveIntegerField('尝试次数', default=0)
+    last_error = models.TextField('最后错误', blank=True)
+    last_run_at = models.DateTimeField('最后执行时间', blank=True, null=True)
+    sent_at = models.DateTimeField('通知成功时间', blank=True, null=True)
+    payload = models.JSONField('计划载荷', default=dict, blank=True)
+    created_at = models.DateTimeField('创建时间', auto_now_add=True, db_index=True)
+    updated_at = models.DateTimeField('更新时间', auto_now=True)
+
+    class Meta:
+        db_table = 'cloud_notice_task'
+        verbose_name = '通知任务'
+        verbose_name_plural = '通知任务'
+        ordering = ['notice_at', 'id']
+        indexes = [
+            models.Index(fields=['status', 'notice_at'], name='cnt_status_due_idx'),
+            models.Index(fields=['notice_type', 'status', 'notice_at'], name='cnt_type_status_due_idx'),
+            models.Index(fields=['order', 'notice_type'], name='cnt_order_type_idx'),
+            models.Index(fields=['user', 'notice_type', 'status'], name='cnt_user_type_status_idx'),
+        ]
+
+    def __str__(self):
+        return f'{self.notice_type}:{self.source_key}:{self.status}'
+
+
 class CloudAutoRenewRetryTask(models.Model):
     STATUS_PENDING = 'pending'
     STATUS_SUCCEEDED = 'succeeded'
@@ -770,6 +904,8 @@ __all__ = [
     'CloudAsset',
     'CloudIpLog',
     'CloudLifecyclePlanNote',
+    'CloudLifecycleTask',
+    'CloudNoticeTask',
     'CloudUserNoticeLog',
     'CloudServerOrder',
     'CloudAutoRenewPatrolLog',

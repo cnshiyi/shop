@@ -19,7 +19,7 @@ from django.utils.dateparse import parse_datetime
 from bot.api import _asset_delete_plan_item_payload, _shutdown_log_items, _unattached_ip_delete_items, lifecycle_plans, refresh_lifecycle_plan_table, update_lifecycle_plan_note
 from bot.models import TelegramGroupFilter, TelegramUser
 from cloud.bootstrap import _build_mtproxy_script, _extract_tg_links
-from cloud.models import CloudAsset, CloudAssetDashboardSnapshot, CloudAssetSyncJob, CloudAssetSyncJobEvent, CloudAutoRenewPatrolLog, CloudAutoRenewRetryTask, CloudIpLog, CloudLifecyclePlanNote, CloudServerOrder, CloudServerPlan, CloudUserNoticeLog, DailyAddressStat
+from cloud.models import CloudAsset, CloudAssetDashboardSnapshot, CloudAssetSyncJob, CloudAssetSyncJobEvent, CloudAutoRenewPatrolLog, CloudAutoRenewRetryTask, CloudIpLog, CloudLifecyclePlanNote, CloudLifecycleTask, CloudNoticeTask, CloudServerOrder, CloudServerPlan, CloudUserNoticeLog, DailyAddressStat
 from cloud.server_records import Server
 from cloud.lifecycle import _apply_notice_schedule_to_order, _auto_renew_candidate_users, _enqueue_auto_renew_retry, _get_due_orders, _get_migration_due_orders, _get_orphan_asset_delete_due, _get_unattached_static_ip_delete_due, _group_balance_lines_for_orders, _is_cloud_delete_safe_time, _is_cloud_suspend_time, _mark_deleted, _mark_suspended, _next_cloud_action_run_at, _notice_payload_for_order, _notice_plan_text, _process_auto_renew_retry_tasks, _run_auto_renew, _send_logged_cloud_notice, _send_order_notice_batch, auto_renew_patrol_tick, daily_expiry_summary_tick, lifecycle_tick, sync_server_status_tick
 from cloud.lifecycle_schedule import compute_order_lifecycle_fields
@@ -9458,6 +9458,7 @@ class CloudServerServicesTestCase(TestCase):
 
     # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
     def test_send_logged_cloud_notice_deduplicates_same_event_and_order(self):
+        expires_at = timezone.now() + timezone.timedelta(days=12)
         order = CloudServerOrder.objects.create(
             order_no='NOTICE-DEDUPE-1',
             user=self.user,
@@ -9474,7 +9475,20 @@ class CloudServerServicesTestCase(TestCase):
             status='completed',
             public_ip='8.8.8.9',
             service_started_at=timezone.now(),
-            service_expires_at=timezone.now() + timezone.timedelta(days=12),
+        )
+        CloudAsset.objects.create(
+            kind=CloudAsset.KIND_SERVER,
+            source=CloudAsset.SOURCE_ORDER,
+            order=order,
+            user=self.user,
+            provider=order.provider,
+            region_code=order.region_code,
+            region_name=order.region_name,
+            asset_name='notice-dedupe-asset',
+            public_ip=order.public_ip,
+            actual_expires_at=expires_at,
+            status=CloudAsset.STATUS_RUNNING,
+            is_active=True,
         )
         sent = []
 
@@ -9490,6 +9504,57 @@ class CloudServerServicesTestCase(TestCase):
         self.assertFalse(result2)
         self.assertEqual(len(sent), 1)
         self.assertEqual(CloudUserNoticeLog.objects.filter(event_type='renew_notice', user=self.user, order=order, delivered=True).count(), 1)
+        self.assertEqual(CloudNoticeTask.objects.filter(notice_type=CloudNoticeTask.NOTICE_RENEW, status=CloudNoticeTask.STATUS_SENT).count(), 1)
+
+    # 功能：验证数据库生命周期任务能挡住同一轮计划删机重复认领。
+    def test_lifecycle_delete_task_claim_blocks_same_cycle_duplicate(self):
+        from cloud.lifecycle_tasks import claim_lifecycle_task_for_order, finish_lifecycle_task
+
+        now = timezone.now()
+        delete_at = now - timezone.timedelta(minutes=1)
+        order = CloudServerOrder.objects.create(
+            order_no='LIFECYCLE-CLAIM-DELETE-1',
+            user=self.user,
+            plan=self.plan,
+            provider='aws_lightsail',
+            region_code='ap-southeast-1',
+            region_name='Singapore',
+            plan_name=self.plan.plan_name,
+            quantity=1,
+            currency='USDT',
+            total_amount='19.00',
+            pay_amount='19.00',
+            pay_method='balance',
+            status='suspended',
+            public_ip='8.8.8.91',
+            service_started_at=now - timezone.timedelta(days=35),
+            suspend_at=now - timezone.timedelta(days=1),
+            delete_at=delete_at,
+        )
+        CloudAsset.objects.create(
+            kind=CloudAsset.KIND_SERVER,
+            source=CloudAsset.SOURCE_ORDER,
+            order=order,
+            user=self.user,
+            provider=order.provider,
+            region_code=order.region_code,
+            region_name=order.region_name,
+            asset_name='lifecycle-claim-delete-asset',
+            public_ip=order.public_ip,
+            actual_expires_at=now - timezone.timedelta(days=5),
+            status=CloudAsset.STATUS_RUNNING,
+            is_active=True,
+        )
+
+        first_claim = claim_lifecycle_task_for_order(CloudLifecycleTask.TASK_DELETE, order, scheduled_at=delete_at, queue_status='scheduled_delete')
+        second_claim = claim_lifecycle_task_for_order(CloudLifecycleTask.TASK_DELETE, order, scheduled_at=delete_at, queue_status='scheduled_delete')
+        finish_lifecycle_task(first_claim, ok=True)
+        third_claim = claim_lifecycle_task_for_order(CloudLifecycleTask.TASK_DELETE, order, scheduled_at=delete_at, queue_status='scheduled_delete')
+
+        self.assertIsNotNone(first_claim)
+        self.assertIsNone(second_claim)
+        self.assertIsNone(third_claim)
+        self.assertEqual(CloudLifecycleTask.objects.filter(task_type=CloudLifecycleTask.TASK_DELETE, status=CloudLifecycleTask.STATUS_DONE).count(), 1)
 
     # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
     def test_group_cloud_server_list_is_scoped_to_current_group(self):

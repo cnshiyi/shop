@@ -25,6 +25,7 @@ from bot.models import TelegramUser
 from cloud.asset_expiry import order_asset_expiry
 from cloud.lifecycle_schedule import compute_order_lifecycle_fields, compute_orphan_asset_delete_at, compute_unattached_ip_release_at
 from cloud.dashboard_snapshots import _refresh_dashboard_plan_snapshots
+from cloud.lifecycle_tasks import cancel_notice_task, claim_notice_task, finish_notice_task
 from cloud.models import CloudAsset, CloudAutoRenewPatrolLog, CloudAutoRenewRetryTask, CloudServerOrder, CloudUserNoticeLog
 from cloud.note_utils import prepend_note
 from cloud.services import RenewalPriceMissingError, _hydrate_order_from_proxy_asset, _order_primary_asset, _prepare_cloud_server_renewal, _renewal_price, _resolve_aws_static_ip_name_for_order, pay_cloud_server_renewal_with_balance, record_cloud_ip_log
@@ -1288,29 +1289,50 @@ async def _send_cloud_notice(notify, user_id: int, text: str, reply_markup=None)
 
 async def _send_logged_cloud_notice(event: str, notify, user_id: int, text: str, reply_markup=None, *, order=None, notice: dict | None = None, batch_id: str = '', is_batch: bool = False, target_chat_id: int | None = None, extra: dict | None = None) -> bool:
     order_id = getattr(order, 'id', None)
-    if await _cloud_notice_already_delivered(event, user_id=user_id, order_id=order_id, batch_id=batch_id):
-        logger.info('CLOUD_NOTICE_SKIP_DUPLICATE event=%s user_id=%s order_id=%s batch_id=%s', event, user_id, order_id, batch_id)
-        return False
-    if target_chat_id:
-        send_result = await _send_cloud_target_notice_result(notify, target_chat_id, text, reply_markup)
-    else:
-        send_result = await _send_cloud_notice_result(notify, user_id, text, reply_markup)
-    delivered = bool(send_result.get('ok'))
-    log_extra = {**(extra or {}), 'send_attempts': send_result.get('attempts') or []}
-    await _record_cloud_user_notice_log(
-        event_type=event,
+    task_claim = await sync_to_async(claim_notice_task, thread_sensitive=True)(
+        event,
         user_id=user_id,
-        order_id=order_id,
-        order_no=getattr(order, 'order_no', None),
-        ip=(notice or {}).get('ip') or getattr(order, 'public_ip', None) or getattr(order, 'previous_public_ip', None),
+        order=order,
         batch_id=batch_id,
         target_chat_id=target_chat_id,
-        delivered=delivered,
-        text=text,
-        is_batch=is_batch,
-        extra=log_extra,
+        payload={**(extra or {}), 'is_batch': is_batch},
     )
-    return delivered
+    if not task_claim and event in {'renew_notice', 'renew_notice_batch', 'auto_renew_notice', 'delete_notice', 'recycle_notice'}:
+        logger.info('CLOUD_NOTICE_SKIP_TASK_CLAIMED event=%s user_id=%s order_id=%s batch_id=%s target_chat_id=%s', event, user_id, order_id, batch_id, target_chat_id)
+        return False
+    if await _cloud_notice_already_delivered(event, user_id=user_id, order_id=order_id, batch_id=batch_id):
+        logger.info('CLOUD_NOTICE_SKIP_DUPLICATE event=%s user_id=%s order_id=%s batch_id=%s', event, user_id, order_id, batch_id)
+        await sync_to_async(cancel_notice_task, thread_sensitive=True)(task_claim, reason='通知日志已送达，取消重复任务。')
+        return False
+    try:
+        if target_chat_id:
+            send_result = await _send_cloud_target_notice_result(notify, target_chat_id, text, reply_markup)
+        else:
+            send_result = await _send_cloud_notice_result(notify, user_id, text, reply_markup)
+        delivered = bool(send_result.get('ok'))
+        log_extra = {**(extra or {}), 'send_attempts': send_result.get('attempts') or []}
+        await _record_cloud_user_notice_log(
+            event_type=event,
+            user_id=user_id,
+            order_id=order_id,
+            order_no=getattr(order, 'order_no', None),
+            ip=(notice or {}).get('ip') or getattr(order, 'public_ip', None) or getattr(order, 'previous_public_ip', None),
+            batch_id=batch_id,
+            target_chat_id=target_chat_id,
+            delivered=delivered,
+            text=text,
+            is_batch=is_batch,
+            extra=log_extra,
+        )
+        await sync_to_async(finish_notice_task, thread_sensitive=True)(
+            task_claim,
+            delivered=delivered,
+            error='' if delivered else '通知发送器返回失败。',
+        )
+        return delivered
+    except Exception as exc:
+        await sync_to_async(finish_notice_task, thread_sensitive=True)(task_claim, delivered=False, error=str(exc))
+        raise
 
 
 async def _send_auto_renew_execution_target_notices(notify_target, results_by_user: dict) -> dict:

@@ -1,5 +1,34 @@
 # 重构版本记录
 
+## 2026-06-02 手动重构：生命周期和通知任务表支撑
+
+### 范围
+
+本轮按“删除计划和通知计划要有数据库支撑”的方向收口生命周期并发风险，重点处理实时计算结果直接执行时可能出现的重复删机、重复关机和重复通知问题。
+
+### 运行变更
+
+- 新增 `CloudLifecycleTask` 任务表，表名 `cloud_lifecycle_task`，用于记录计划关机、计划删机、迁移旧机删除等生命周期动作的计划时间、认领状态、尝试次数、错误原因和完成时间。
+- 新增 `CloudNoticeTask` 任务表，表名 `cloud_notice_task`，用于记录到期提醒、自动续费预提醒、删机提醒和 IP 回收提醒的发送认领状态、目标会话、批次、尝试次数和发送结果。
+- 新增 `cloud/lifecycle_tasks.py` 统一处理任务 `source_key`、数据库认领、失败重试和完成状态写入；同一轮计划按“动作 + 资源 + 计划时间”生成唯一键，续费后新的计划时间会形成新一轮任务。
+- 计划触发的关机、删机和迁移旧机删除在执行云 API 前必须先认领 `CloudLifecycleTask`；同一轮任务已被认领或已完成时，本轮重复触发会跳过。
+- 通知发送入口在真正发送前先认领 `CloudNoticeTask`，再检查历史送达日志；这样避免两个进程同时“查不到日志”后双发。
+- 群组通知和私聊 fallback 使用不同任务来源键：群组失败后仍允许私聊兜底，群组成功后仍由历史送达日志阻止私聊重复发送。
+- `CloudAsset.actual_expires_at` 仍是唯一结构化服务到期事实；两个新任务表的 `basis_actual_expires_at` 只用于审计和排查，不作为第二套到期事实。
+- 本轮没有恢复 `CloudLifecyclePlan`、`CloudNoticePlan`、`CloudAutoRenewPlan` 旧快照表，也没有恢复 `CloudServerOrder.service_expires_at` 字段或退款逻辑。
+
+### 验证
+
+本地已通过：
+
+```bash
+PYTHONDONTWRITEBYTECODE=1 DJANGO_TEST_SQLITE=1 uv run python -m py_compile cloud/models.py cloud/lifecycle_tasks.py cloud/lifecycle.py cloud/lifecycle_execution.py cloud/tests.py
+PYTHONDONTWRITEBYTECODE=1 DJANGO_TEST_SQLITE=1 uv run python manage.py check
+PYTHONDONTWRITEBYTECODE=1 DJANGO_TEST_SQLITE=1 uv run python manage.py makemigrations --check --dry-run
+PYTHONDONTWRITEBYTECODE=1 DJANGO_TEST_SQLITE=1 uv run python manage.py test cloud.tests.CloudServerServicesTestCase.test_send_logged_cloud_notice_deduplicates_same_event_and_order cloud.tests.CloudServerServicesTestCase.test_lifecycle_delete_task_claim_blocks_same_cycle_duplicate cloud.tests.CloudServerServicesTestCase.test_lifecycle_tick_reads_suspend_time_config_outside_async_loop --noinput --verbosity 1
+PYTHONDONTWRITEBYTECODE=1 DJANGO_TEST_SQLITE=1 uv run python manage.py test cloud.tests.CloudServerServicesTestCase.test_lifecycle_delete_notice_batches_multiple_ips_for_same_user cloud.tests.CloudServerServicesTestCase.test_send_order_notice_batch_prefers_bound_group_and_skips_private cloud.tests.CloudServerServicesTestCase.test_send_order_notice_batch_falls_back_private_when_group_fails --noinput --verbosity 1
+```
+
 ## 2026-06-02 自动监工：群组通知测试到期字段同步
 
 ### 范围
