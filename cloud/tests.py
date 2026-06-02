@@ -9995,6 +9995,64 @@ class CloudServerServicesTestCase(TestCase):
         self.assertIsNone(third_claim)
         self.assertEqual(CloudLifecycleTask.objects.filter(task_type=CloudLifecycleTask.TASK_UNATTACHED_IP_DELETE, status=CloudLifecycleTask.STATUS_DONE).count(), 1)
 
+    # 功能：验证失败任务不会在保护期内被同一轮计划立即重复认领。
+    def test_failed_lifecycle_and_notice_tasks_wait_retry_window(self):
+        from cloud.lifecycle_tasks import FAILED_RETRY_AFTER, claim_lifecycle_task_for_order, claim_notice_task, finish_lifecycle_task, finish_notice_task
+
+        now = timezone.now()
+        delete_at = now - timezone.timedelta(minutes=1)
+        order = CloudServerOrder.objects.create(
+            order_no='LIFECYCLE-FAILED-RETRY-1',
+            user=self.user,
+            plan=self.plan,
+            provider='aws_lightsail',
+            region_code='ap-southeast-1',
+            region_name='Singapore',
+            plan_name=self.plan.plan_name,
+            quantity=1,
+            currency='USDT',
+            total_amount='19.00',
+            pay_amount='19.00',
+            pay_method='balance',
+            status='suspended',
+            public_ip='8.8.8.95',
+            service_started_at=now - timezone.timedelta(days=35),
+            delete_at=delete_at,
+        )
+        CloudAsset.objects.create(
+            kind=CloudAsset.KIND_SERVER,
+            source=CloudAsset.SOURCE_ORDER,
+            order=order,
+            user=self.user,
+            provider=order.provider,
+            region_code=order.region_code,
+            region_name=order.region_name,
+            asset_name='lifecycle-failed-retry-asset',
+            public_ip=order.public_ip,
+            actual_expires_at=now - timezone.timedelta(days=5),
+            status=CloudAsset.STATUS_RUNNING,
+            is_active=True,
+        )
+
+        first_lifecycle_claim = claim_lifecycle_task_for_order(CloudLifecycleTask.TASK_DELETE, order, scheduled_at=delete_at, queue_status='scheduled_delete')
+        finish_lifecycle_task(first_lifecycle_claim, ok=False, error='云 API 临时失败')
+        blocked_lifecycle_claim = claim_lifecycle_task_for_order(CloudLifecycleTask.TASK_DELETE, order, scheduled_at=delete_at, queue_status='scheduled_delete')
+        CloudLifecycleTask.objects.filter(id=first_lifecycle_claim.id).update(last_run_at=now - FAILED_RETRY_AFTER - timezone.timedelta(seconds=1))
+        retry_lifecycle_claim = claim_lifecycle_task_for_order(CloudLifecycleTask.TASK_DELETE, order, scheduled_at=delete_at, queue_status='scheduled_delete')
+
+        first_notice_claim = claim_notice_task('delete_notice', user_id=self.user.id, order=order, batch_id='retry-window')
+        finish_notice_task(first_notice_claim, delivered=False, error='通知发送器临时失败')
+        blocked_notice_claim = claim_notice_task('delete_notice', user_id=self.user.id, order=order, batch_id='retry-window')
+        CloudNoticeTask.objects.filter(id=first_notice_claim.id).update(last_run_at=now - FAILED_RETRY_AFTER - timezone.timedelta(seconds=1))
+        retry_notice_claim = claim_notice_task('delete_notice', user_id=self.user.id, order=order, batch_id='retry-window')
+
+        self.assertIsNotNone(first_lifecycle_claim)
+        self.assertIsNone(blocked_lifecycle_claim)
+        self.assertIsNotNone(retry_lifecycle_claim)
+        self.assertIsNotNone(first_notice_claim)
+        self.assertIsNone(blocked_notice_claim)
+        self.assertIsNotNone(retry_notice_claim)
+
     # 功能：验证订单固定 IP 回收入口会尊重数据库任务认领状态。
     def test_order_static_ip_release_skips_when_lifecycle_task_claimed(self):
         from cloud.lifecycle_execution import run_order_static_ip_release
