@@ -14,8 +14,8 @@ from django.test import RequestFactory, SimpleTestCase, TestCase
 from django.utils import timezone
 
 from bot.api import DASHBOARD_SESSION_IDLE_SECONDS, _active_proxy_counts_by_user, _authenticate_dashboard_request, admin_users_list, archive_telegram_chat, auth_totp_start, create_admin_user, create_cloud_account, create_product, delete_cloud_account, me, send_daily_expiry_summary_test_notification, send_telegram_chat_message, site_config_groups, telegram_login_start, update_cloud_account, update_site_config, users_list, verify_cloud_account
-from bot.handlers import _cloud_renewal_postcheck_and_notify, _cloud_server_created_text, _fetch_tron_address_summary, _hydrate_order_proxy_links, _install_notice_copy_wrapper, _proxy_links_text, _requires_recovery_provision, _retained_ip_renewal_plan_keyboard, _trongrid_get_with_key_fallback, _trongrid_post_with_key_fallback, _validate_reinstall_proxy_link
-from bot.keyboards import balance_details_list, cloud_ip_query_result, cloud_order_list
+from bot.handlers import _asset_reinstall_confirm_keyboard, _asset_renewal_plan_keyboard, _cloud_renewal_postcheck_and_notify, _cloud_server_created_text, _fetch_tron_address_summary, _hydrate_order_proxy_links, _install_notice_copy_wrapper, _proxy_links_text, _reinstall_confirm_keyboard, _requires_recovery_provision, _retained_ip_renewal_plan_keyboard, _trongrid_get_with_key_fallback, _trongrid_post_with_key_fallback, _validate_reinstall_proxy_link
+from bot.keyboards import balance_details_list, cloud_asset_detail_callback, cloud_detail_callback, cloud_ip_query_result, cloud_order_list, cloud_server_change_ip_port_keyboard, cloud_server_change_ip_region_menu, cloud_server_detail, cloud_server_renew_payment
 from bot.models import TelegramChatArchive, TelegramChatMessage, TelegramLoginAccount, TelegramUser
 from bot.services import record_telegram_message
 from bot.telegram_listener import _build_bark_request, _build_push_payload, _is_self_sender, _sync_account_profile
@@ -951,6 +951,119 @@ class TronGridFallbackTestCase(SimpleTestCase):
 
 
 class RetainedIpRenewalUiTestCase(SimpleTestCase):
+    def test_cloud_detail_callbacks_keep_nested_back_path(self):
+        back_callback = 'profile:orders:cloud:filter:paid:page:2'
+
+        self.assertEqual(
+            cloud_detail_callback(88, back_callback),
+            'cloud:detail:88:profile:orders:cloud:filter:paid:page:2',
+        )
+        self.assertEqual(
+            cloud_asset_detail_callback(99, back_callback),
+            'cloud:assetdetail:asset:99:profile:orders:cloud:filter:paid:page:2',
+        )
+
+    def test_cloud_server_detail_actions_keep_back_path(self):
+        markup = cloud_server_detail(
+            88,
+            can_renew=True,
+            can_change_ip=True,
+            can_reinit=True,
+            back_callback='profile:orders:cloud:filter:paid:page:2',
+            can_upgrade=True,
+        )
+        callbacks = [button.callback_data for row in markup.inline_keyboard for button in row]
+
+        self.assertIn('cloud:renew:88:profile:orders:cloud:filter:paid:page:2', callbacks)
+        self.assertIn('cloud:ip:88:profile:orders:cloud:filter:paid:page:2', callbacks)
+        self.assertIn('cloud:reinit:88:profile:orders:cloud:filter:paid:page:2', callbacks)
+        self.assertIn('cloud:upgrade:88:profile:orders:cloud:filter:paid:page:2', callbacks)
+        self.assertIn('profile:orders:cloud:filter:paid:page:2', callbacks)
+
+    def test_reinstall_cancel_buttons_keep_back_path(self):
+        order_markup = _reinstall_confirm_keyboard(88, 'token', 'cloud:list:page:3')
+        asset_markup = _asset_reinstall_confirm_keyboard(99, 'token', 'cloud:querymenu')
+
+        self.assertEqual(order_markup.inline_keyboard[1][0].callback_data, 'cloud:detail:88:cloud:list:page:3')
+        self.assertEqual(asset_markup.inline_keyboard[1][0].callback_data, 'cloud:assetdetail:asset:99:cloud:querymenu')
+
+    def test_asset_renewal_plan_keyboard_keeps_back_path(self):
+        plans = [SimpleNamespace(id=1)]
+
+        markup = _asset_renewal_plan_keyboard(99, plans, 'cloud:querymenu')
+
+        self.assertEqual(markup.inline_keyboard[0][0].callback_data, 'cloud:assetrenewplan:99:1:cloud:querymenu')
+        self.assertEqual(markup.inline_keyboard[-1][0].callback_data, 'cloud:assetdetail:asset:99:cloud:querymenu')
+
+    def test_retained_ip_renewal_plan_keyboard_keeps_back_path(self):
+        plans = [SimpleNamespace(id=7)]
+
+        markup = _retained_ip_renewal_plan_keyboard(88, plans, 'cloud:querymenu')
+
+        self.assertEqual(markup.inline_keyboard[0][0].callback_data, 'cloud:renewplan:88:7:cloud:querymenu')
+        self.assertEqual(markup.inline_keyboard[-1][0].callback_data, 'cloud:detail:88:cloud:querymenu')
+
+    def test_cloud_renew_payment_keyboard_keeps_back_path(self):
+        markup = cloud_server_renew_payment(88, Decimal('12.3'), Decimal('45.6'), back_callback='cloud:querymenu')
+        callbacks = [button.callback_data for row in markup.inline_keyboard for button in row]
+
+        self.assertIn('cloud:renewpay:88:USDT:cloud:querymenu', callbacks)
+        self.assertIn('cloud:renewpay:88:TRX:cloud:querymenu', callbacks)
+        self.assertIn('cloud:detail:88:cloud:querymenu', callbacks)
+
+    def test_cloud_change_ip_keyboards_keep_back_path(self):
+        regions = [
+            ('us-east-1', '美国'),
+            ('ap-northeast-1', '日本'),
+            ('eu-west-2', '英国'),
+            ('ap-south-1', '印度'),
+            ('ap-southeast-1', '新加坡'),
+            ('ca-central-1', '加拿大'),
+        ]
+
+        region_markup = cloud_server_change_ip_region_menu(88, regions, back_callback='cloud:querymenu')
+        port_markup = cloud_server_change_ip_port_keyboard(88, 'us-east-1', '美国', back_callback='cloud:querymenu')
+        callbacks = [button.callback_data for row in region_markup.inline_keyboard for button in row]
+        callbacks += [button.callback_data for row in port_markup.inline_keyboard for button in row]
+
+        self.assertIn('cloud:ipregion:88:us-east-1:cloud:querymenu', callbacks)
+        self.assertIn('cloud:ipregions:more:88:cloud:querymenu', callbacks)
+        self.assertIn('cloud:ipport:default:88:us-east-1:cloud:querymenu', callbacks)
+        self.assertIn('cloud:ipport:custom:88:us-east-1:cloud:querymenu', callbacks)
+        self.assertIn('cloud:ip:88:cloud:querymenu', callbacks)
+
+    def test_cloud_ip_query_actions_return_to_query_menu(self):
+        markup = cloud_ip_query_result(
+            [],
+            [
+                {
+                    'ip': '1.2.3.4',
+                    'order_id': 88,
+                    'asset_id': 0,
+                    'can_change_ip': True,
+                    'can_reinit': True,
+                    'can_config': True,
+                    'can_auto_renew': False,
+                },
+                {
+                    'ip': '5.6.7.8',
+                    'order_id': 0,
+                    'asset_id': 99,
+                    'can_change_ip': True,
+                    'can_config': True,
+                },
+            ],
+            include_reinit=True,
+        )
+        callbacks = [button.callback_data for row in markup.inline_keyboard for button in row]
+
+        self.assertIn('cloud:renew:88:cloud:querymenu', callbacks)
+        self.assertIn('cloud:ip:88:cloud:querymenu', callbacks)
+        self.assertIn('cloud:reinit:88:cloud:querymenu', callbacks)
+        self.assertIn('cloud:upgrade:88:cloud:querymenu', callbacks)
+        self.assertIn('cloud:assetaction:changeip:99:cloud:querymenu', callbacks)
+        self.assertIn('cloud:assetaction:upgrade:99:cloud:querymenu', callbacks)
+
     def test_validate_reinstall_proxy_link_keeps_strict_port_check_by_default(self):
         order = SimpleNamespace(
             id=1,
