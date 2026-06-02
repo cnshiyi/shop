@@ -1,5 +1,48 @@
 # 重构版本记录
 
+## 2026-06-03 01:45 自动监工：收紧主代理链接保存端口校验
+
+### 范围
+
+本轮从提交 `814c1a1 收口旧主代理端口校验` 后继续监工。起始读取 git 状态时工作树干净；随后复查机器人返回链、Telegram `callback_data` 64 字节限制、云资产唯一到期事实、订单旧到期字段、旧计划快照、旧退款入口、旧端口入口和废弃 app 回流。
+
+### 修改
+
+- `bot/handlers.py` 新增主代理链接保存前的记录端口校验：资产和订单补充主代理链接时，必须匹配当前记录的 `mtproxy_port`；缺省端口按默认 `443` 处理，避免用户通过查询/重装补链路把旧 `9528` 或其它客户端端口重新写回。
+- 保存资产主链接和订单主链接时使用已记录端口写入 `mtproxy_port`，不再信任客户端链接中的端口覆盖记录值。
+- `bot/tests.py` 新增保存路径数据库测试，覆盖资产/订单未记录旧端口时拒绝 `9528`，以及已有记录旧端口时继续允许，避免破坏历史真实旧端口资产。
+
+### 监工结果
+
+- 机器人返回链复查通过：`r/i/ri/u/p/ir/im/ar/ac/au/ai` 等短回调入口均已注册，极端 18 位订单 ID、18 位资产 ID、18 位页码下换 IP地区按钮最长样本 61 字节，未超过 Telegram 64 字节限制。
+- `CloudAsset.actual_expires_at` 仍是唯一结构化资产到期事实；模型 introspection 显示 `CloudServerOrder` 未恢复 `service_expires_at` 或 `actual_expires_at` 字段，`CloudAssetDashboardSnapshot` 未恢复到期字段。
+- 运行时代码扫描未发现旧计划快照模型、旧退款函数名、旧端口入口或废弃 app 回流；仓库根目录也未恢复 `accounts`、`finance`、`mall`、`monitoring`、`dashboard_api`、`biz`。
+- 真机测试未执行：本轮没有新增用户授权真实云资源成本；未执行真实云资源创建、删除、IP 变更、真实支付或链上广播。
+
+### 验证
+
+已通过：
+
+```bash
+UV_CACHE_DIR=/Users/a399/Desktop/data/shop/.uv-cache PYTHONDONTWRITEBYTECODE=1 uv run python manage.py check
+UV_CACHE_DIR=/Users/a399/Desktop/data/shop/.uv-cache PYTHONDONTWRITEBYTECODE=1 uv run python -m py_compile bot/handlers.py bot/tests.py
+UV_CACHE_DIR=/Users/a399/Desktop/data/shop/.uv-cache PYTHONDONTWRITEBYTECODE=1 uv run python -m py_compile bot/handlers.py bot/keyboards.py cloud/services.py cloud/provisioning.py cloud/lifecycle.py cloud/api_orders.py orders/payment_scanner.py
+DB_ENGINE=sqlite SQLITE_NAME=/private/tmp/shop_monitor_callbacks_<进程号>.sqlite3 UV_CACHE_DIR=/Users/a399/Desktop/data/shop/.uv-cache PYTHONDONTWRITEBYTECODE=1 uv run python manage.py test bot.tests.RetainedIpRenewalUiTestCase --noinput --verbosity 1
+DB_ENGINE=sqlite SQLITE_NAME=/private/tmp/shop_monitor_bot_order_<进程号>.sqlite3 UV_CACHE_DIR=/Users/a399/Desktop/data/shop/.uv-cache PYTHONDONTWRITEBYTECODE=1 uv run python manage.py test bot.tests.BotOrderAndBalanceFilterTestCase --noinput --verbosity 1
+DB_ENGINE=sqlite SQLITE_NAME=/private/tmp/shop_monitor_lifecycle_<进程号>.sqlite3 UV_CACHE_DIR=/Users/a399/Desktop/data/shop/.uv-cache PYTHONDONTWRITEBYTECODE=1 uv run python manage.py test cloud.tests.CloudServerServicesTestCase.test_due_orders_use_asset_expiry_for_lightsail_lifecycle cloud.tests.CloudServerServicesTestCase.test_dashboard_order_expiry_update_syncs_asset_expiry_and_lifecycle_plan cloud.tests.CloudServerServicesTestCase.test_notice_delete_plan_and_proxy_list_use_asset_expiry cloud.tests.CloudServerServicesTestCase.test_update_cloud_asset_expiry_refreshes_delete_plan_view cloud.tests.CloudServerServicesTestCase.test_update_cloud_asset_expiry_refreshes_order_lifecycle cloud.tests.CloudServerServicesTestCase.test_run_auto_renew_skips_when_asset_expiry_moved_out_of_due_window cloud.tests.CloudServerServicesTestCase.test_sync_aws_assets_preserves_existing_unattached_ip_due_time cloud.tests.CloudServerServicesTestCase.test_server_compat_create_preserves_manual_asset_owner_and_expiry cloud.tests.CloudServerServicesTestCase.test_prepare_unbound_asset_renewal_creates_pending_payment_order cloud.tests.CloudServerServicesTestCase.test_unbound_asset_renewal_wallet_payment_marks_paid_for_recovery --noinput --verbosity 1
+UV_CACHE_DIR=/Users/a399/Desktop/data/shop/.uv-cache PYTHONDONTWRITEBYTECODE=1 uv run python manage.py shell -c "<模型字段唯一到期事实 introspection>"
+UV_CACHE_DIR=/Users/a399/Desktop/data/shop/.uv-cache PYTHONDONTWRITEBYTECODE=1 uv run python manage.py shell -c "<极端 callback 长度样本验证>"
+UV_CACHE_DIR=/Users/a399/Desktop/data/shop/.uv-cache PYTHONDONTWRITEBYTECODE=1 uv run python manage.py makemigrations --check --dry-run
+git diff --check
+```
+
+结果：`manage.py check`、关键模块编译、机器人返回 UI 聚焦测试 41 条、订单/余额/主链接保存聚焦测试 9 条、生命周期/唯一到期事实聚焦测试 10 条、模型字段 introspection、旧字段/旧计划/旧退款/旧端口/废弃 app 扫描、`makemigrations --check --dry-run` 和 `git diff --check` 均通过。`makemigrations --check --dry-run` 仍因沙箱禁止连接本机 MySQL 输出迁移历史检查警告，但最终显示 `No changes detected`。
+
+### 剩余风险
+
+- 本轮未执行真实 Telegram 点击、真实云资源创建/删除/IP 变更、真实支付、链上广播、生产发布或不可逆操作。
+- 后续若要继续真机验证，需要用户再次明确授权真实云资源成本，并单独写中文报告，脱敏记录云资源 ID。
+
 ## 2026-06-03 01:23 自动监工：复核嵌套回调和生命周期事实源
 
 ### 范围

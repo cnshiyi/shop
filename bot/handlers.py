@@ -2050,9 +2050,21 @@ def _secret_log_hint(secret: str) -> str:
     return f'{value[:6]}***{value[-6:]}({len(value)})'
 
 
+def _expected_main_proxy_port(item) -> str:
+    return str(getattr(item, 'mtproxy_port', None) or MTPROXY_DEFAULT_PORT)
+
+
+def _ensure_proxy_link_matches_recorded_port(item, link_data: dict[str, str]):
+    expected_port = _expected_main_proxy_port(item)
+    parsed_port = str(link_data.get('port') or '').strip()
+    if parsed_port != expected_port:
+        raise ValueError(f'链接端口不匹配。当前主代理端口是 {expected_port}，你发的是 {parsed_port or "-"}')
+    return expected_port
+
+
 async def _validate_reinstall_proxy_link(order, link_data: dict[str, str], probe_when_possible: bool = True) -> tuple[bool, str]:
     order_ip = str(order.public_ip or order.previous_public_ip or '').strip()
-    stored_order_port = str(order.mtproxy_port or MTPROXY_DEFAULT_PORT)
+    stored_order_port = _expected_main_proxy_port(order)
     probe_port = stored_order_port
     parsed_secret = _normalize_proxy_secret(link_data.get('secret', ''))
     logger.info(
@@ -2142,10 +2154,11 @@ def _save_asset_main_proxy_link(asset_id: int, user_id: int | None, link_data: d
     if user_id is not None:
         qs = qs.filter(user_id=user_id)
     asset = qs.get()
+    expected_port = _ensure_proxy_link_matches_recorded_port(asset, link_data)
     asset.mtproxy_link = link_data['url']
     asset.mtproxy_secret = link_data['secret']
     asset.mtproxy_host = link_data['server']
-    asset.mtproxy_port = int(link_data['port'])
+    asset.mtproxy_port = int(expected_port)
     links = list(asset.proxy_links or [])
     links = [item for item in links if not (isinstance(item, dict) and str(item.get('port') or '') == str(asset.mtproxy_port))]
     links.insert(0, {'name': '主代理 mtg', 'server': link_data['server'], 'port': link_data['port'], 'secret': link_data['secret'], 'url': link_data['url']})
@@ -2159,10 +2172,11 @@ def _save_user_main_proxy_link(order_id: int, link_data: dict[str, str]):
     from cloud.models import CloudAsset, CloudServerOrder
     from cloud.services import _update_order_primary_records
     order = CloudServerOrder.objects.get(id=order_id)
+    expected_port = _ensure_proxy_link_matches_recorded_port(order, link_data)
     order.mtproxy_link = link_data['url']
     order.mtproxy_secret = link_data['secret']
     order.mtproxy_host = link_data['server']
-    order.mtproxy_port = int(link_data['port'])
+    order.mtproxy_port = int(expected_port)
     links = list(order.proxy_links or [])
     links = [item for item in links if not (isinstance(item, dict) and str(item.get('port') or '') == str(order.mtproxy_port))]
     links.insert(0, {'name': '主代理 mtg', 'server': link_data['server'], 'port': link_data['port'], 'secret': link_data['secret'], 'url': link_data['url']})

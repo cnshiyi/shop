@@ -15,7 +15,7 @@ from django.test import RequestFactory, SimpleTestCase, TestCase
 from django.utils import timezone
 
 from bot.api import DASHBOARD_SESSION_IDLE_SECONDS, _active_proxy_counts_by_user, _authenticate_dashboard_request, admin_users_list, archive_telegram_chat, auth_totp_start, create_admin_user, create_cloud_account, create_product, delete_cloud_account, me, send_daily_expiry_summary_test_notification, send_telegram_chat_message, site_config_groups, telegram_login_start, update_cloud_account, update_site_config, users_list, verify_cloud_account
-from bot.handlers import _asset_reinstall_confirm_keyboard, _asset_renewal_plan_keyboard, _buy_cloud_server_with_balance_and_notify, _cloud_renewal_postcheck_and_notify, _cloud_server_created_text, _fetch_tron_address_summary, _hydrate_order_proxy_links, _install_notice_copy_wrapper, _pay_cloud_server_order_with_balance_and_notify, _proxy_links_text, _reinstall_confirm_keyboard, _requires_recovery_provision, _retained_ip_renewal_plan_keyboard, _trongrid_get_with_key_fallback, _trongrid_post_with_key_fallback, _validate_reinstall_proxy_link, register_handlers
+from bot.handlers import _asset_reinstall_confirm_keyboard, _asset_renewal_plan_keyboard, _buy_cloud_server_with_balance_and_notify, _cloud_renewal_postcheck_and_notify, _cloud_server_created_text, _fetch_tron_address_summary, _hydrate_order_proxy_links, _install_notice_copy_wrapper, _pay_cloud_server_order_with_balance_and_notify, _proxy_links_text, _reinstall_confirm_keyboard, _requires_recovery_provision, _retained_ip_renewal_plan_keyboard, _save_asset_main_proxy_link, _save_user_main_proxy_link, _trongrid_get_with_key_fallback, _trongrid_post_with_key_fallback, _validate_reinstall_proxy_link, register_handlers
 from bot.keyboards import append_back_callback, balance_details_list, cloud_asset_detail_callback, cloud_detail_callback, cloud_previous_detail_callback, compact_callback_path, cloud_ip_query_result, cloud_order_list, cloud_server_change_ip_region_menu, cloud_server_detail, cloud_server_list, cloud_server_renew_payment
 from bot.models import TelegramChatArchive, TelegramChatMessage, TelegramLoginAccount, TelegramUser
 from bot.services import record_telegram_message
@@ -1678,6 +1678,89 @@ class BotOrderAndBalanceFilterTestCase(TestCase):
         button_texts = [button.text for row in markup.inline_keyboard for button in row]
         self.assertTrue(any(text.startswith('1.2.3.4 | 已完成') for text in button_texts))
         self.assertTrue(any(text == '• 已支付' for text in button_texts))
+
+    def test_query_link_save_rejects_asset_port_override(self):
+        asset = CloudAsset.objects.create(
+            kind=CloudAsset.KIND_SERVER,
+            source=CloudAsset.SOURCE_AWS_SYNC,
+            user=self.user,
+            provider='aws_lightsail',
+            region_code=self.plan.region_code,
+            region_name=self.plan.region_name,
+            asset_name='query-link-asset-port-override',
+            public_ip='31.31.32.10',
+            status=CloudAsset.STATUS_RUNNING,
+        )
+        link_data = {
+            'url': 'tg://proxy?server=31.31.32.10&port=9528&secret=eeeeeeeeeeeeeeee',
+            'server': '31.31.32.10',
+            'port': '9528',
+            'secret': 'eeeeeeeeeeeeeeee',
+        }
+
+        with self.assertRaisesMessage(ValueError, '当前主代理端口是 443'):
+            async_to_sync(_save_asset_main_proxy_link)(asset.id, self.user.id, link_data)
+
+        asset.refresh_from_db()
+        self.assertIsNone(asset.mtproxy_link)
+        self.assertIsNone(asset.mtproxy_port)
+
+    def test_query_link_save_allows_asset_recorded_legacy_port(self):
+        asset = CloudAsset.objects.create(
+            kind=CloudAsset.KIND_SERVER,
+            source=CloudAsset.SOURCE_AWS_SYNC,
+            user=self.user,
+            provider='aws_lightsail',
+            region_code=self.plan.region_code,
+            region_name=self.plan.region_name,
+            asset_name='query-link-asset-legacy-port',
+            public_ip='31.31.32.11',
+            mtproxy_port=9528,
+            status=CloudAsset.STATUS_RUNNING,
+        )
+        link_data = {
+            'url': 'tg://proxy?server=31.31.32.11&port=9528&secret=eeeeeeeeeeeeeeee',
+            'server': '31.31.32.11',
+            'port': '9528',
+            'secret': 'eeeeeeeeeeeeeeee',
+        }
+
+        saved = async_to_sync(_save_asset_main_proxy_link)(asset.id, self.user.id, link_data)
+
+        self.assertEqual(saved.mtproxy_port, 9528)
+        self.assertEqual(saved.mtproxy_link, link_data['url'])
+
+    def test_query_link_save_rejects_order_port_override(self):
+        order = self._cloud_order('ORDER-QUERY-LINK-PORT-OVERRIDE', status='completed', public_ip='31.31.32.12', paid=True)
+        link_data = {
+            'url': 'tg://proxy?server=31.31.32.12&port=9528&secret=eeeeeeeeeeeeeeee',
+            'server': '31.31.32.12',
+            'port': '9528',
+            'secret': 'eeeeeeeeeeeeeeee',
+        }
+
+        with self.assertRaisesMessage(ValueError, '当前主代理端口是 443'):
+            async_to_sync(_save_user_main_proxy_link)(order.id, link_data)
+
+        order.refresh_from_db()
+        self.assertFalse(order.mtproxy_link)
+        self.assertEqual(order.mtproxy_port, 443)
+
+    def test_query_link_save_allows_order_recorded_legacy_port(self):
+        order = self._cloud_order('ORDER-QUERY-LINK-LEGACY-PORT', status='completed', public_ip='31.31.32.13', paid=True)
+        order.mtproxy_port = 9528
+        order.save(update_fields=['mtproxy_port', 'updated_at'])
+        link_data = {
+            'url': 'tg://proxy?server=31.31.32.13&port=9528&secret=eeeeeeeeeeeeeeee',
+            'server': '31.31.32.13',
+            'port': '9528',
+            'secret': 'eeeeeeeeeeeeeeee',
+        }
+
+        saved = async_to_sync(_save_user_main_proxy_link)(order.id, link_data)
+
+        self.assertEqual(saved.mtproxy_port, 9528)
+        self.assertEqual(saved.mtproxy_link, link_data['url'])
 
     def test_balance_detail_filters_and_pagination_callbacks_keep_filter(self):
         old_balance = self.user.balance
