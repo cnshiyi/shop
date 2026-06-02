@@ -11,6 +11,7 @@ from html import escape
 from aiogram.types import InlineKeyboardMarkup
 from asgiref.sync import async_to_sync, sync_to_async
 from django.core.management import call_command
+from django.db import transaction
 from django.db.models import Q
 from django.utils import timezone
 
@@ -1085,6 +1086,18 @@ def _auto_renew_failure_notice_due(order) -> bool:
     return not failure_sent_at or timezone.now() - failure_sent_at >= AUTO_RENEW_FAILURE_NOTICE_COOLDOWN
 
 
+def _auto_renew_notice_due_now(notice: dict | None, now=None) -> bool:
+    notice = notice or {}
+    expires_at = notice.get('expires_at')
+    if not expires_at:
+        return False
+    now = now or timezone.now()
+    suspend_at = notice.get('suspend_at')
+    before_expiry = expires_at <= now + AUTO_RENEW_BEFORE_EXPIRY_WINDOW and expires_at > now
+    shutdown_fallback = expires_at <= now and suspend_at and suspend_at > now
+    return bool(before_expiry or shutdown_fallback)
+
+
 def _auto_renew_retry_should_wait_for_recharge(error: str | None, balance_change: dict | None = None) -> bool:
     text = str(error or '')
     return any(keyword in text for keyword in ('余额不足', '余额不够', '请充值', 'insufficient'))
@@ -1611,51 +1624,54 @@ def _cloud_expiry_notice_payload(order_id: int) -> dict:
 
 @sync_to_async
 def _run_auto_renew(order_id: int) -> tuple[CloudServerOrder | None, str | None, dict]:
-    order = CloudServerOrder.objects.select_related('user').filter(id=order_id).first()
-    if not order:
-        return None, '订单不存在', {}
-    if not order.auto_renew_enabled:
-        return None, '自动续费已关闭', {}
-    notice = _notice_payload_for_order(order)
-    if not notice:
-        return None, 'IP已删除或不在代理列表，跳过自动续费', {}
-    order = _apply_notice_schedule_to_order(order, notice)
-    candidates = _auto_renew_candidate_users(order)
-    if not candidates:
-        return None, '未找到可用于自动续费的绑定用户', {}
-    errors = []
-    for candidate in candidates:
-        working_order = CloudServerOrder.objects.select_related('user').filter(id=order.id).first()
-        if not working_order:
+    with transaction.atomic():
+        order = CloudServerOrder.objects.select_related('user').select_for_update().filter(id=order_id).first()
+        if not order:
             return None, '订单不存在', {}
-        if working_order.status != 'renew_pending':
-            try:
-                renewal = _prepare_auto_renew_for_candidate(working_order, candidate, 31)
-            except RenewalPriceMissingError as exc:
-                return None, str(exc), {}
-            if not renewal:
-                errors.append(f'{_user_display_label(candidate)}: 订单当前不可续费')
-                continue
-        renewed, err = pay_cloud_server_renewal_with_balance.__wrapped__(working_order.id, candidate.id, 'USDT', 31)
-        if renewed and not err:
-            ledger = BalanceLedger.objects.filter(
-                user_id=candidate.id,
-                related_type='cloud_order',
-                related_id=working_order.id,
-                type='cloud_order_balance_pay',
-                currency='USDT',
-            ).order_by('-created_at', '-id').first()
-            balance_change = {
-                'currency': getattr(ledger, 'currency', 'USDT') if ledger else 'USDT',
-                'amount': getattr(ledger, 'amount', None) if ledger else None,
-                'before': getattr(ledger, 'before_balance', None) if ledger else None,
-                'after': getattr(ledger, 'after_balance', None) if ledger else None,
-                'payer_user_id': candidate.id,
-                'payer_label': _user_display_label(candidate),
-            }
-            return renewed, None, balance_change
-        errors.append(f'{_user_display_label(candidate)}: {err or "续费失败"}')
-    return None, '；'.join(errors) or 'USDT 余额不足', {'candidate_count': len(candidates)}
+        if not order.auto_renew_enabled:
+            return None, '自动续费已关闭', {}
+        notice = _notice_payload_for_order(order)
+        if not notice:
+            return None, 'IP已删除或不在代理列表，跳过自动续费', {}
+        if not _auto_renew_notice_due_now(notice):
+            return None, '未到自动续费时间，跳过本轮自动续费', {}
+        order = _apply_notice_schedule_to_order(order, notice)
+        candidates = _auto_renew_candidate_users(order)
+        if not candidates:
+            return None, '未找到可用于自动续费的绑定用户', {}
+        errors = []
+        for candidate in candidates:
+            working_order = CloudServerOrder.objects.select_related('user').filter(id=order.id).first()
+            if not working_order:
+                return None, '订单不存在', {}
+            if working_order.status != 'renew_pending':
+                try:
+                    renewal = _prepare_auto_renew_for_candidate(working_order, candidate, 31)
+                except RenewalPriceMissingError as exc:
+                    return None, str(exc), {}
+                if not renewal:
+                    errors.append(f'{_user_display_label(candidate)}: 订单当前不可续费')
+                    continue
+            renewed, err = pay_cloud_server_renewal_with_balance.__wrapped__(working_order.id, candidate.id, 'USDT', 31)
+            if renewed and not err:
+                ledger = BalanceLedger.objects.filter(
+                    user_id=candidate.id,
+                    related_type='cloud_order',
+                    related_id=working_order.id,
+                    type='cloud_order_balance_pay',
+                    currency='USDT',
+                ).order_by('-created_at', '-id').first()
+                balance_change = {
+                    'currency': getattr(ledger, 'currency', 'USDT') if ledger else 'USDT',
+                    'amount': getattr(ledger, 'amount', None) if ledger else None,
+                    'before': getattr(ledger, 'before_balance', None) if ledger else None,
+                    'after': getattr(ledger, 'after_balance', None) if ledger else None,
+                    'payer_user_id': candidate.id,
+                    'payer_label': _user_display_label(candidate),
+                }
+                return renewed, None, balance_change
+            errors.append(f'{_user_display_label(candidate)}: {err or "续费失败"}')
+        return None, '；'.join(errors) or 'USDT 余额不足', {'candidate_count': len(candidates)}
 
 
 @sync_to_async
