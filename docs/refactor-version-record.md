@@ -1,5 +1,36 @@
 # 重构版本记录
 
+## 2026-06-02 23:14 自动监工：修复机器人详情返回链
+
+### 范围
+
+本轮针对机器人“有的返回没有正确返回上一层”的问题，继续复查云代理详情、订单详情、续费、更换 IP、重新安装、修改配置、管理员改时间等按钮链路，重点处理旧回调格式和 Telegram `callback_data` 64 字节限制导致的返回失败。
+
+### 修复内容
+
+- 资产详情入口同时兼容 `cloud:ad:<kind>:<id>`、旧 `cloud:assetdetail:<id>`、旧 `cloud:assetdetail:<kind>:<id>` 三种格式，参数错误时直接提示，不再让旧按钮触发异常。
+- 旧资产详情返回路径进入详情后立即压缩，子按钮继续沿用同一条短返回链，避免续费、重装、修改配置、管理员改时间回到错误页面。
+- 订单详情列表按钮改为 `cloud:orderdetail:<id>:poc:<筛选>:<页码>`，详情处理器直接压缩后缀返回路径，避免订单 ID 较长时超过 Telegram 限制。
+- 资产续费套餐、保留 IP 续费套餐、等待用户补充代理链接、资产重装、管理员改时间等状态流转都会重新压缩已保存的返回路径。
+- 补充回归测试，覆盖订单详情短回调、旧资产详情双格式、短返回处理器和按钮长度限制。
+
+### 验证
+
+已通过：
+
+```bash
+UV_CACHE_DIR=/private/tmp/uv-cache-shop uv run python manage.py test bot.tests.RetainedIpRenewalUiTestCase --verbosity 1
+UV_CACHE_DIR=/private/tmp/uv-cache-shop uv run python manage.py check
+UV_CACHE_DIR=/private/tmp/uv-cache-shop uv run python -m py_compile bot/handlers.py bot/keyboards.py bot/tests.py
+git diff --check
+rg -n "service_expires_at|service_expired_at|normalize_service_expiry|CloudLifecyclePlan\\b|CloudNoticePlan\\b|CloudAutoRenewPlan\\b|refund_order|process_refund|create_refund|issue_refund|refund_to_balance|refund_balance|STATUS_REFUNDED|status=['\\\"]refunded['\\\"]" bot core orders cloud shop --glob '!**/migrations/**' --glob '!**/tests.py'
+find . -maxdepth 2 -type d \( -name accounts -o -name finance -o -name mall -o -name monitoring -o -name dashboard_api -o -name biz \) -print
+```
+
+结果：机器人返回 UI 聚焦测试 29 条、Django 系统检查、关键文件编译、空白检查、旧字段/旧计划/旧退款扫描、废弃 app 目录检查均通过。
+
+剩余风险：本轮未执行真实 Telegram 点击、钱包扣款、云端删机、固定 IP 释放或真实云账号创建删除。
+
 ## 2026-06-02 23:03 自动监工：压缩机器人订单返回回调
 
 ### 范围
