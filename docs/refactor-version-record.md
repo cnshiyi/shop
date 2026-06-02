@@ -1,5 +1,44 @@
 # 重构版本记录
 
+## 2026-06-03 01:02 自动监工：兜底压缩资产详情返回回调
+
+### 范围
+
+本轮接续提交 `60e3173 压缩订单详情列表回调` 后继续监工。先确认自动化仍为 ACTIVE、10 分钟一次、模型 `gpt-5.5`，本地后端 `runserver` 仍在 `127.0.0.1:8000`，未发现 `run.py all` 或 `bot.runner` 常驻。随后调用终端版 `codex exec` 只读复核机器人返回链、默认 443 创建、唯一到期事实、旧端口入口、旧计划和退款回流。
+
+### 修改
+
+- `cloud_asset_detail_callback()` 增加最终 64 字节兜底：普通 `cad:/csd:` 形态不变，遇到资产详情嵌套订单详情、长筛选页码等极端来源时继续压缩来源；仍超长时保留资产详情本身。
+- `_compact_back_callback_for_nested_action()` 对深层订单详情来源增加降级：无法完整保留列表页来源时降级为 `d:<订单ID>`，确保后续按钮不超过 Telegram `callback_data` 限制。
+- 新增测试覆盖 18 位资产 ID、18 位订单 ID、长订单列表来源组合，确认资产详情返回按钮压缩为 `cad:<资产ID>:d:<订单ID>` 且不超过 64 字节。
+
+### 监工结果
+
+- codex-cli 只读复核指出：`cloud_asset_detail_callback()` 在接收“订单详情 + 长订单列表来源”作为返回路径时，可能生成 90 字节 callback。已在提交 `6bbd550 压缩嵌套资产详情回调` 中修复并补测。
+- 旧用户自定义端口入口未发现运行时代码回流；默认端口仍为 `443`，钱包直付、余额补付、链上付款和换 IP 创建仍直接进入创建流程。
+- 运行时代码扫描旧到期字段、旧计划模型、退款函数名和废弃 app，未发现回流；`CloudAsset.actual_expires_at` 仍是唯一结构化资产到期事实。
+- `makemigrations --check --dry-run` 显示 `No changes detected`，本轮没有表结构变更。
+
+### 验证
+
+已通过：
+
+```bash
+uv run python -m py_compile bot/keyboards.py bot/tests.py bot/handlers.py
+DJANGO_TEST_SQLITE=1 SQLITE_NAME=/private/tmp/shop-monitor-asset-callback.sqlite3 uv run python manage.py test bot.tests.RetainedIpRenewalUiTestCase --noinput --verbosity 1
+DJANGO_SETTINGS_MODULE=shop.settings PYTHONDONTWRITEBYTECODE=1 uv run python <极端回调样本检查>
+uv run python manage.py check
+uv run python manage.py makemigrations --check --dry-run
+git diff --check
+```
+
+结果：机器人返回 UI 聚焦测试 40 条通过；极端样本检查 57 个 callback 无超过 64 字节项，最大 64 字节；`manage.py check`、迁移检查和 diff 空白检查均通过。codex-cli 最终只读复核未发现新的明确运行时 bug。
+
+### 剩余风险
+
+- 本轮未执行真实 Telegram 点击、真实云资源创建/删除/IP 变更、真实支付、链上广播、生产发布或不可逆操作。
+- 极端超长返回来源为满足 Telegram 限制，会保留“返回详情”核心路径并丢弃更深层列表页来源，这是有意降级。
+
 ## 2026-06-03 00:55 自动监工：压缩订单详情列表回调并补测余额补付
 
 ### 范围
