@@ -4043,6 +4043,7 @@ class CloudServerServicesTestCase(TestCase):
         with patch('cloud.lifecycle._config_time', side_effect=[(15, 30), (16, 45)]):
             text = _notice_plan_text(order)
         self.assertIn('关机计划:', text)
+        self.assertIn('价格: <code>19.00</code> USDT', text)
         self.assertNotIn('后台执行时间', text)
 
     # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
