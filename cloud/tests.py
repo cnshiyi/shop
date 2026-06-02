@@ -3280,6 +3280,50 @@ class CloudServerServicesTestCase(TestCase):
         self.assertFalse(any(item.id == order.id for item in due['suspend']))
         self.assertTrue(any(item.id == order.id for item in due['expire']))
 
+    # 功能：验证资产关机计划关闭时，订单固定 IP 回收也不会进入自动执行队列。
+    def test_due_orders_skip_order_static_ip_recycle_when_asset_shutdown_disabled(self):
+        recycle_at = timezone.now() - timezone.timedelta(minutes=1)
+        order = CloudServerOrder.objects.create(
+            order_no='HB-LIFECYCLE-ASSET-RECYCLE-OFF-1',
+            user=self.user,
+            plan=self.plan,
+            provider=self.plan.provider,
+            region_code=self.plan.region_code,
+            region_name=self.plan.region_name,
+            plan_name=self.plan.plan_name,
+            quantity=1,
+            currency='USDT',
+            total_amount='19.00',
+            pay_amount='19.00',
+            pay_method='balance',
+            status='deleted',
+            previous_public_ip='10.0.0.24',
+            static_ip_name='StaticIp-asset-recycle-off',
+            service_started_at=timezone.now() - timezone.timedelta(days=40),
+            ip_recycle_at=recycle_at,
+        )
+        CloudAsset.objects.create(
+            kind=CloudAsset.KIND_SERVER,
+            source=CloudAsset.SOURCE_AWS_SYNC,
+            order=order,
+            user=self.user,
+            provider=order.provider,
+            region_code=order.region_code,
+            region_name=order.region_name,
+            asset_name='StaticIp-asset-recycle-off',
+            public_ip='10.0.0.24',
+            previous_public_ip='10.0.0.24',
+            actual_expires_at=recycle_at,
+            status=CloudAsset.STATUS_DELETED,
+            provider_status='固定IP保留中-实例已删除',
+            shutdown_enabled=False,
+            is_active=False,
+        )
+
+        due = async_to_sync(_get_due_orders)()
+
+        self.assertFalse(any(item.id == order.id for item in due['recycle']))
+
     # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
     def test_lifecycle_suspend_execution_guard_respects_account_shutdown_disabled(self):
         account = CloudAccountConfig.objects.create(
@@ -9889,6 +9933,58 @@ class CloudServerServicesTestCase(TestCase):
         self.assertIn('已被其他进程认领', result['error'])
         release_mock.assert_not_called()
 
+    # 功能：验证订单固定 IP 回收入口会尊重资产级关机计划开关。
+    def test_order_static_ip_release_respects_asset_shutdown_disabled(self):
+        from cloud.lifecycle_execution import run_order_static_ip_release
+
+        now = timezone.now()
+        recycle_at = now - timezone.timedelta(minutes=1)
+        order = CloudServerOrder.objects.create(
+            order_no='LIFECYCLE-RECYCLE-ASSET-OFF-1',
+            user=self.user,
+            plan=self.plan,
+            provider='aws_lightsail',
+            region_code='ap-southeast-1',
+            region_name='Singapore',
+            plan_name=self.plan.plan_name,
+            quantity=1,
+            currency='USDT',
+            total_amount='19.00',
+            pay_amount='19.00',
+            pay_method='balance',
+            status='deleted',
+            previous_public_ip='8.8.8.94',
+            static_ip_name='recycle-asset-off-ip',
+            service_started_at=now - timezone.timedelta(days=35),
+            ip_recycle_at=recycle_at,
+        )
+        CloudAsset.objects.create(
+            kind=CloudAsset.KIND_SERVER,
+            source=CloudAsset.SOURCE_AWS_SYNC,
+            order=order,
+            user=self.user,
+            provider='aws_lightsail',
+            region_code='ap-southeast-1',
+            region_name='Singapore',
+            asset_name='recycle-asset-off-ip',
+            public_ip='8.8.8.94',
+            previous_public_ip='8.8.8.94',
+            actual_expires_at=recycle_at,
+            status=CloudAsset.STATUS_DELETED,
+            provider_status='固定IP保留中-实例已删除',
+            shutdown_enabled=False,
+            is_active=False,
+        )
+
+        with patch('cloud.lifecycle.cloud_ip_delete_enabled', return_value=True), \
+            patch('cloud.lifecycle._is_cloud_unattached_ip_delete_time', return_value=True), \
+            patch('cloud.lifecycle._release_order_static_ip') as release_mock:
+            result = run_order_static_ip_release(order.id, queue_status='scheduled_recycle', enforce_schedule=True)
+
+        self.assertFalse(result['ok'])
+        self.assertIn('关机计划已关闭', result['error'])
+        release_mock.assert_not_called()
+
     # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
     def test_group_cloud_server_list_is_scoped_to_current_group(self):
         first_user = TelegramUser.objects.create(tg_user_id=991997001, username='group_scope_first')
@@ -10267,7 +10363,6 @@ class CloudServerServicesTestCase(TestCase):
             status='completed',
             public_ip='10.10.10.10',
             service_started_at=now - timezone.timedelta(days=30),
-            service_expires_at=order_future_expires_at,
         )
         today_asset = CloudAsset.objects.create(
             kind=CloudAsset.KIND_SERVER,
@@ -10299,7 +10394,6 @@ class CloudServerServicesTestCase(TestCase):
             status='completed',
             public_ip='10.10.10.12',
             service_started_at=now - timezone.timedelta(days=30),
-            service_expires_at=today_expires_at,
         )
         CloudAsset.objects.create(
             kind=CloudAsset.KIND_SERVER,
@@ -10331,7 +10425,6 @@ class CloudServerServicesTestCase(TestCase):
             status='completed',
             public_ip='10.10.10.11',
             service_started_at=now - timezone.timedelta(days=60),
-            service_expires_at=order_future_expires_at,
         )
         expired_asset = CloudAsset.objects.create(
             kind=CloudAsset.KIND_SERVER,
@@ -10382,6 +10475,7 @@ class CloudServerServicesTestCase(TestCase):
 
     # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
     def test_tasks_overview_exposes_click_paths_for_entry_and_order_number(self):
+        expires_at = timezone.now() + timezone.timedelta(days=5)
         order = CloudServerOrder.objects.create(
             order_no='TASK-LINK-1',
             user=self.user,
@@ -10398,9 +10492,9 @@ class CloudServerServicesTestCase(TestCase):
             status='provisioning',
             public_ip='1.1.1.1',
             service_started_at=timezone.now(),
-            service_expires_at=timezone.now() + timezone.timedelta(days=5),
             auto_renew_enabled=True,
         )
+        self._create_auto_renew_asset(order, expires_at=expires_at)
         staff_user = get_user_model().objects.create_user(username='staff_api_2', password='x', is_staff=True)
         request = RequestFactory().get('/api/dashboard/tasks/')
         self._attach_bearer_session(request, staff_user)
@@ -10439,12 +10533,11 @@ class CloudServerServicesTestCase(TestCase):
             public_ip='6.6.6.20',
             instance_id='auto-renew-retry-instance',
             service_started_at=timezone.now() - timezone.timedelta(days=30),
-            service_expires_at=expires_at,
             suspend_at=expires_at + timezone.timedelta(days=1),
             expired_at=timezone.now() + timezone.timedelta(minutes=30),
             auto_renew_enabled=True,
         )
-        self._create_auto_renew_asset(order)
+        self._create_auto_renew_asset(order, expires_at=expires_at)
 
         enqueued = async_to_sync(_enqueue_auto_renew_retry)(order.id, ip=order.public_ip, error='USDT 余额不足', balance_change={'candidate_count': 1})
         self.assertTrue(enqueued)
@@ -10493,7 +10586,6 @@ class CloudServerServicesTestCase(TestCase):
             status='renew_pending',
             public_ip='6.6.6.10',
             service_started_at=timezone.now() - timezone.timedelta(days=30),
-            service_expires_at=expires_at,
             suspend_at=expires_at + timezone.timedelta(days=1),
             expired_at=timezone.now() + timezone.timedelta(minutes=30),
             auto_renew_enabled=True,
@@ -10580,7 +10672,6 @@ class CloudServerServicesTestCase(TestCase):
             status='completed',
             public_ip='6.6.6.12',
             service_started_at=timezone.now() - timezone.timedelta(days=20),
-            service_expires_at=old_expires_at,
             renew_notice_sent_at=timezone.now(),
             auto_renew_notice_sent_at=timezone.now(),
             auto_renew_failure_notice_sent_at=timezone.now(),
@@ -10667,7 +10758,6 @@ class CloudServerServicesTestCase(TestCase):
             public_ip='6.6.6.11',
             instance_id='i-renew-latest-price',
             service_started_at=timezone.now() - timezone.timedelta(days=30),
-            service_expires_at=expires_at,
             suspend_at=expires_at + timezone.timedelta(days=1),
             expired_at=timezone.now() + timezone.timedelta(minutes=30),
             auto_renew_enabled=True,
@@ -10699,6 +10789,7 @@ class CloudServerServicesTestCase(TestCase):
 
     # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
     def test_cloud_asset_detail_exposes_related_order_click_path(self):
+        expires_at = timezone.now() + timezone.timedelta(days=8)
         order = CloudServerOrder.objects.create(
             order_no='ASSET-DETAIL-ORDER-1',
             user=self.user,
@@ -10715,7 +10806,6 @@ class CloudServerServicesTestCase(TestCase):
             status='completed',
             public_ip='2.2.2.2',
             service_started_at=timezone.now(),
-            service_expires_at=timezone.now() + timezone.timedelta(days=8),
         )
         asset = CloudAsset.objects.create(
             kind=CloudAsset.KIND_SERVER,
@@ -10727,7 +10817,7 @@ class CloudServerServicesTestCase(TestCase):
             region_name=self.plan.region_name,
             asset_name='asset-detail-proxy',
             public_ip='2.2.2.2',
-            actual_expires_at=order.service_expires_at,
+            actual_expires_at=expires_at,
         )
         staff_user = get_user_model().objects.create_user(username='staff_api_3', password='x', is_staff=True)
         request = RequestFactory().get(f'/api/dashboard/cloud-assets/{asset.id}/')
@@ -10744,6 +10834,7 @@ class CloudServerServicesTestCase(TestCase):
 
     # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
     def test_cloud_asset_detail_exposes_history_orders_with_click_paths(self):
+        newer_expires_at = timezone.now() + timezone.timedelta(days=20)
         root_order = CloudServerOrder.objects.create(
             order_no='ASSET-HISTORY-ROOT-1',
             user=self.user,
@@ -10760,7 +10851,6 @@ class CloudServerServicesTestCase(TestCase):
             status='cancelled',
             public_ip='3.3.3.3',
             service_started_at=timezone.now() - timezone.timedelta(days=20),
-            service_expires_at=timezone.now() - timezone.timedelta(days=5),
         )
         newer_order = CloudServerOrder.objects.create(
             order_no='ASSET-HISTORY-NEW-1',
@@ -10778,7 +10868,6 @@ class CloudServerServicesTestCase(TestCase):
             status='completed',
             public_ip='3.3.3.3',
             service_started_at=timezone.now() - timezone.timedelta(days=4),
-            service_expires_at=timezone.now() + timezone.timedelta(days=20),
             replacement_for=root_order,
         )
         asset = CloudAsset.objects.create(
@@ -10791,7 +10880,7 @@ class CloudServerServicesTestCase(TestCase):
             region_name=self.plan.region_name,
             asset_name='asset-history-proxy',
             public_ip='3.3.3.3',
-            actual_expires_at=newer_order.service_expires_at,
+            actual_expires_at=newer_expires_at,
         )
         staff_user = get_user_model().objects.create_user(username='staff_api_4', password='x', is_staff=True)
         request = RequestFactory().get(f'/api/dashboard/cloud-assets/{asset.id}/')
@@ -10811,6 +10900,11 @@ class CloudServerServicesTestCase(TestCase):
 
     # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
     def test_auto_renew_task_detail_includes_due_retry_and_fallback_items(self):
+        due_expires_at = timezone.now() + timezone.timedelta(hours=12)
+        retry_expires_at = timezone.now() + timezone.timedelta(days=2)
+        fallback_expires_at = timezone.now() - timezone.timedelta(hours=1)
+        resolved_expires_at = timezone.now() + timezone.timedelta(days=20)
+        deleted_expires_at = timezone.now() - timezone.timedelta(hours=3)
         due_order = CloudServerOrder.objects.create(
             order_no='AUTO-RENEW-DUE-1',
             user=self.user,
@@ -10827,7 +10921,6 @@ class CloudServerServicesTestCase(TestCase):
             status='completed',
             public_ip='10.0.0.1',
             service_started_at=timezone.now() - timezone.timedelta(days=30),
-            service_expires_at=timezone.now() + timezone.timedelta(hours=12),
             auto_renew_enabled=True,
         )
         retry_order = CloudServerOrder.objects.create(
@@ -10846,7 +10939,6 @@ class CloudServerServicesTestCase(TestCase):
             status='completed',
             public_ip='10.0.0.2',
             service_started_at=timezone.now() - timezone.timedelta(days=30),
-            service_expires_at=timezone.now() + timezone.timedelta(days=2),
             auto_renew_enabled=True,
         )
         fallback_order = CloudServerOrder.objects.create(
@@ -10865,7 +10957,6 @@ class CloudServerServicesTestCase(TestCase):
             status='completed',
             public_ip='10.0.0.3',
             service_started_at=timezone.now() - timezone.timedelta(days=40),
-            service_expires_at=timezone.now() - timezone.timedelta(hours=1),
             auto_renew_enabled=True,
         )
         resolved_order = CloudServerOrder.objects.create(
@@ -10884,7 +10975,6 @@ class CloudServerServicesTestCase(TestCase):
             status='completed',
             public_ip='10.0.0.4',
             service_started_at=timezone.now() - timezone.timedelta(days=30),
-            service_expires_at=timezone.now() + timezone.timedelta(days=20),
             auto_renew_enabled=True,
         )
         deleted_asset_order = CloudServerOrder.objects.create(
@@ -10903,12 +10993,13 @@ class CloudServerServicesTestCase(TestCase):
             status='completed',
             public_ip='10.0.0.5',
             service_started_at=timezone.now() - timezone.timedelta(days=40),
-            service_expires_at=timezone.now() - timezone.timedelta(hours=3),
             auto_renew_enabled=True,
         )
-        for order in [due_order, retry_order, fallback_order, resolved_order]:
-            self._create_auto_renew_asset(order)
-        self._create_auto_renew_asset(deleted_asset_order, status=CloudAsset.STATUS_DELETED)
+        self._create_auto_renew_asset(due_order, expires_at=due_expires_at)
+        self._create_auto_renew_asset(retry_order, expires_at=retry_expires_at)
+        self._create_auto_renew_asset(fallback_order, expires_at=fallback_expires_at)
+        self._create_auto_renew_asset(resolved_order, expires_at=resolved_expires_at)
+        self._create_auto_renew_asset(deleted_asset_order, status=CloudAsset.STATUS_DELETED, expires_at=deleted_expires_at)
         CloudAutoRenewPatrolLog.objects.create(
             order=retry_order,
             user=self.user,
@@ -10990,7 +11081,6 @@ class CloudServerServicesTestCase(TestCase):
             status='completed',
             public_ip='10.0.9.1',
             service_started_at=timezone.now() - timezone.timedelta(days=30),
-            service_expires_at=timezone.now() + timezone.timedelta(hours=12),
             auto_renew_enabled=True,
         )
         staff_user = get_user_model().objects.create_user(username='staff_auto_renew_no_asset', password='x', is_staff=True)
@@ -11013,6 +11103,9 @@ class CloudServerServicesTestCase(TestCase):
 
     # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
     def test_run_auto_renew_tasks_executes_due_retry_and_fallback_queue(self):
+        due_expires_at = timezone.now() + timezone.timedelta(hours=8)
+        retry_expires_at = timezone.now() + timezone.timedelta(days=1)
+        fallback_expires_at = timezone.now() - timezone.timedelta(hours=2)
         due_order = CloudServerOrder.objects.create(
             order_no='AUTO-RENEW-RUN-DUE-1',
             user=self.user,
@@ -11029,7 +11122,6 @@ class CloudServerServicesTestCase(TestCase):
             status='completed',
             public_ip='10.0.1.1',
             service_started_at=timezone.now() - timezone.timedelta(days=30),
-            service_expires_at=timezone.now() + timezone.timedelta(hours=8),
             auto_renew_enabled=True,
         )
         retry_order = CloudServerOrder.objects.create(
@@ -11048,7 +11140,6 @@ class CloudServerServicesTestCase(TestCase):
             status='completed',
             public_ip='10.0.1.2',
             service_started_at=timezone.now() - timezone.timedelta(days=30),
-            service_expires_at=timezone.now() + timezone.timedelta(days=1),
             auto_renew_enabled=True,
         )
         fallback_order = CloudServerOrder.objects.create(
@@ -11067,11 +11158,11 @@ class CloudServerServicesTestCase(TestCase):
             status='completed',
             public_ip='10.0.1.3',
             service_started_at=timezone.now() - timezone.timedelta(days=40),
-            service_expires_at=timezone.now() - timezone.timedelta(hours=2),
             auto_renew_enabled=True,
         )
-        for order in [due_order, retry_order, fallback_order]:
-            self._create_auto_renew_asset(order)
+        self._create_auto_renew_asset(due_order, expires_at=due_expires_at)
+        self._create_auto_renew_asset(retry_order, expires_at=retry_expires_at)
+        self._create_auto_renew_asset(fallback_order, expires_at=fallback_expires_at)
         CloudAutoRenewPatrolLog.objects.create(
             order=retry_order,
             user=self.user,
@@ -11120,6 +11211,7 @@ class CloudServerServicesTestCase(TestCase):
 
     # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
     def test_run_auto_renew_order_executes_single_order(self):
+        expires_at = timezone.now() + timezone.timedelta(hours=4)
         order = CloudServerOrder.objects.create(
             order_no='AUTO-RENEW-SINGLE-1',
             user=self.user,
@@ -11136,10 +11228,9 @@ class CloudServerServicesTestCase(TestCase):
             status='completed',
             public_ip='10.0.2.1',
             service_started_at=timezone.now() - timezone.timedelta(days=30),
-            service_expires_at=timezone.now() + timezone.timedelta(hours=4),
             auto_renew_enabled=True,
         )
-        self._create_auto_renew_asset(order)
+        self._create_auto_renew_asset(order, expires_at=expires_at)
         staff_user = get_user_model().objects.create_user(username='staff_auto_renew_single', password='x', is_staff=True, is_superuser=True)
         request = RequestFactory().post(f'/api/dashboard/tasks/auto-renew/orders/{order.id}/run/', data='{}', content_type='application/json')
         self._attach_bearer_session(request, staff_user)
@@ -11182,7 +11273,6 @@ class CloudServerServicesTestCase(TestCase):
             public_ip='10.9.0.9',
             previous_public_ip='10.9.0.9',
             service_started_at=timezone.now() - timezone.timedelta(days=40),
-            service_expires_at=timezone.now() - timezone.timedelta(days=10),
             delete_at=timezone.now() - timezone.timedelta(days=7),
             ip_recycle_at=old_ip_recycle_at,
         )
@@ -12000,7 +12090,6 @@ class CloudServerServicesTestCase(TestCase):
             instance_id='stale-instance-id',
             provider_resource_id='stale-resource-id',
             service_started_at=timezone.now(),
-            service_expires_at=timezone.now() + timezone.timedelta(days=31),
         )
         stale_asset = CloudAsset.objects.create(
             kind=CloudAsset.KIND_SERVER,
@@ -12188,7 +12277,6 @@ class CloudServerServicesTestCase(TestCase):
             public_ip='9.9.9.41',
             previous_public_ip='9.9.9.41',
             service_started_at=timezone.now() - timezone.timedelta(days=10),
-            service_expires_at=timezone.now() + timezone.timedelta(days=20),
         )
         asset = CloudAsset.objects.create(
             kind=CloudAsset.KIND_SERVER,
@@ -12495,12 +12583,28 @@ class CloudServerServicesTestCase(TestCase):
             instance_id='i-aliyun-expiry-sync',
             provider_resource_id='i-aliyun-expiry-sync',
             service_started_at=timezone.now() - timezone.timedelta(days=10),
-            service_expires_at=old_expires_at,
             renew_notice_sent_at=timezone.now(),
             auto_renew_notice_sent_at=timezone.now(),
             auto_renew_failure_notice_sent_at=timezone.now(),
             delete_notice_sent_at=timezone.now(),
             recycle_notice_sent_at=timezone.now(),
+        )
+        CloudAsset.objects.create(
+            kind=CloudAsset.KIND_SERVER,
+            source=CloudAsset.SOURCE_ALIYUN,
+            order=order,
+            user=self.user,
+            provider='aliyun_simple',
+            cloud_account=account,
+            account_label=cloud_account_label(account),
+            region_code='cn-hongkong',
+            region_name='中国香港',
+            asset_name='aliyun-expiry-sync',
+            instance_id='i-aliyun-expiry-sync',
+            provider_resource_id='i-aliyun-expiry-sync',
+            public_ip='6.6.6.70',
+            actual_expires_at=old_expires_at,
+            status=CloudAsset.STATUS_RUNNING,
         )
 
         updates = _aliyun_order_updates_from_sync(
@@ -12516,7 +12620,7 @@ class CloudServerServicesTestCase(TestCase):
             public_ip='6.6.6.70',
         )
 
-        self.assertEqual(updates['service_expires_at'], new_expires_at)
+        self.assertNotIn('service_expires_at', updates)
         self.assertGreater(updates['suspend_at'], new_expires_at)
         self.assertGreaterEqual(updates['delete_at'], updates['suspend_at'])
         self.assertGreater(updates['ip_recycle_at'], updates['delete_at'])
@@ -12761,7 +12865,6 @@ class CloudServerServicesTestCase(TestCase):
             instance_id='i-aliyun-no-delete-plan-1',
             provider_resource_id='i-aliyun-no-delete-plan-1',
             service_started_at=timezone.now() - timezone.timedelta(days=40),
-            service_expires_at=timezone.now() - timezone.timedelta(days=5),
             delete_at=timezone.now() - timezone.timedelta(days=1),
         )
 
@@ -12793,7 +12896,6 @@ class CloudServerServicesTestCase(TestCase):
             instance_id='i-aliyun-no-delete-run-1',
             provider_resource_id='i-aliyun-no-delete-run-1',
             service_started_at=timezone.now() - timezone.timedelta(days=40),
-            service_expires_at=timezone.now() - timezone.timedelta(days=5),
             delete_at=timezone.now() - timezone.timedelta(days=1),
         )
 
@@ -12825,7 +12927,6 @@ class CloudServerServicesTestCase(TestCase):
             instance_id='i-aliyun-failed-no-delete-1',
             provider_resource_id='i-aliyun-failed-no-delete-1',
             service_started_at=timezone.now() - timezone.timedelta(days=40),
-            service_expires_at=timezone.now() - timezone.timedelta(days=5),
             delete_at=timezone.now() - timezone.timedelta(days=1),
         )
 
@@ -12969,14 +13070,13 @@ class CloudServerServicesTestCase(TestCase):
             instance_id='i-recovered-sync-1',
             server_name='i-recovered-sync-1',
             static_ip_name='recovered-static-ip',
-            service_expires_at=recovery_expires_at,
             cloud_account=account,
             account_label=account_label,
         )
         asset = CloudAsset.objects.create(
             kind=CloudAsset.KIND_SERVER,
             source=CloudAsset.SOURCE_AWS_SYNC,
-            order=old_order,
+            order=recovery_order,
             user=self.user,
             provider='aws_lightsail',
             cloud_account=account,
@@ -12987,7 +13087,7 @@ class CloudServerServicesTestCase(TestCase):
             provider_resource_id='arn:aws:lightsail:ap-southeast-1:123456789012:StaticIp/recovered-static-ip',
             public_ip='10.9.0.3',
             previous_public_ip='10.9.0.3',
-            actual_expires_at=old_order.ip_recycle_at,
+            actual_expires_at=recovery_expires_at,
             status=CloudAsset.STATUS_DELETED,
             provider_status='固定IP保留中-实例已删除',
             note='固定IP保留中-实例已删除',
@@ -14115,7 +14215,6 @@ class CloudServerServicesTestCase(TestCase):
             public_ip='20.20.20.34',
             previous_public_ip='20.20.20.34',
             static_ip_name='StaticIp-unattached-no-auto-renew',
-            service_expires_at=expires_at,
             auto_renew_enabled=True,
         )
         asset = CloudAsset.objects.create(
