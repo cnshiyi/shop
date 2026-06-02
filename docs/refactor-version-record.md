@@ -1,5 +1,44 @@
 # 重构版本记录
 
+## 2026-06-02 自动监工：生命周期任务表迁移补齐
+
+### 范围
+
+本轮继续检查云资产生命周期重构后的并发认领、通知去重、到期事实源和迁移完整性，重点确认新增任务表不会绕回旧计划快照表，也不会恢复订单到期字段。
+
+### 运行变更
+
+- 补齐 `CloudLifecycleTask` 和 `CloudNoticeTask` 的迁移 `cloud/migrations/0047_lifecycle_task_notice_task.py`，避免模型已加入但测试库或部署库缺表。
+- 复查生命周期动作和通知发送入口：计划关机、计划删机、迁移旧机删除会先认领生命周期任务；通知发送会先认领通知任务，再检查历史送达日志。
+- 复查到期事实源：运行时代码仍以 `CloudAsset.actual_expires_at` 作为结构化服务到期事实；新增任务表里的 `basis_actual_expires_at` 仅用于审计排查。
+- 未恢复 `CloudServerOrder.service_expires_at` 字段，未恢复 `CloudLifecyclePlan`、`CloudNoticePlan`、`CloudAutoRenewPlan` 旧快照表，未恢复退款逻辑或退款函数名。
+
+### 验证
+
+本地已通过：
+
+```bash
+UV_CACHE_DIR=/Users/a399/Desktop/data/shop/.uv-cache uv run python manage.py check
+UV_CACHE_DIR=/Users/a399/Desktop/data/shop/.uv-cache uv run python -m py_compile cloud/lifecycle.py cloud/lifecycle_execution.py cloud/lifecycle_tasks.py cloud/models.py cloud/tests.py
+UV_CACHE_DIR=/Users/a399/Desktop/data/shop/.uv-cache uv run python manage.py makemigrations --check --dry-run cloud
+DB_ENGINE=sqlite SQLITE_NAME=/private/tmp/shop-lifecycle-new-tests.sqlite UV_CACHE_DIR=/Users/a399/Desktop/data/shop/.uv-cache uv run python manage.py test cloud.tests.CloudServerServicesTestCase.test_send_logged_cloud_notice_deduplicates_same_event_and_order cloud.tests.CloudServerServicesTestCase.test_lifecycle_delete_task_claim_blocks_same_cycle_duplicate -v 2 --noinput
+git diff --check
+```
+
+受限但已定位：
+
+```bash
+UV_CACHE_DIR=/Users/a399/Desktop/data/shop/.uv-cache uv run python manage.py test cloud.tests.CloudServerServicesTestCase.test_send_logged_cloud_notice_deduplicates_same_event_and_order cloud.tests.CloudServerServicesTestCase.test_lifecycle_delete_task_claim_blocks_same_cycle_duplicate -v 2
+```
+
+默认 MySQL 测试库连接被当前沙箱禁止访问 `127.0.0.1:3306`，需用 sqlite 测试开关或可访问的 MySQL 测试库运行。
+
+```bash
+DJANGO_TEST_SQLITE=1 UV_CACHE_DIR=/Users/a399/Desktop/data/shop/.uv-cache uv run python manage.py test cloud.tests.CloudServerServicesTestCase.test_lifecycle_tick_rechecks_order_delete_at_before_cloud_delete cloud.tests.CloudServerServicesTestCase.test_lifecycle_tick_rechecks_order_ip_recycle_at_before_release cloud.tests.CloudServerServicesTestCase.test_lifecycle_tick_unattached_ip_uses_ip_delete_time_window -v 2
+```
+
+内存 sqlite 下现有 `thread_sensitive=False` 生命周期执行路径会跨线程打开新连接，导致测试线程内未提交表不可见；文件 sqlite 下同组用例又受 `TestCase` 事务和 sqlite 写锁影响，不作为本轮新增任务表回归失败处理。
+
 ## 2026-06-02 手动重构：生命周期和通知任务表支撑
 
 ### 范围
