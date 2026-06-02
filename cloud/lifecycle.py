@@ -574,7 +574,8 @@ def _notice_plan_text(order, notice: dict | None = None, *, include_expiry: bool
         lines.append(f'到期时间: {_code_text(_format_notice_dt(expires_at))}')
     if include_renewal_amount:
         try:
-            lines.append(f'价格: {_code_text(f"{_renewal_price(order, getattr(order, "user", None)):.2f}")} USDT')
+            renewal_price_text = f'{_renewal_price(order, getattr(order, "user", None)):.2f}'
+            lines.append(f'价格: {_code_text(renewal_price_text)} USDT')
         except RenewalPriceMissingError:
             lines.append(f'价格: {_code_text("未设置")}，请联系客服确认')
     auto_renew_text = f'已开启，预计 {_code_text(_format_notice_dt(auto_renew_at))} 自动续费' if auto_renew_enabled else '未开启'

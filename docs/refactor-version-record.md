@@ -4813,6 +4813,43 @@ git diff --check
 - 本轮未执行真实 Telegram 点击、真实云资源创建/删除/IP 变更、真实支付、链上广播、生产发布或不可逆操作。
 - 真机测试仍需在用户明确授权真实云资源成本后，单独按中文报告记录云资源 ID 脱敏结果。
 
+## 2026-06-03 生命周期通知文本导入修复
+
+### 范围
+
+本轮按 10 分钟监工任务继续调用 `codex-cli` 巡检 Shop 后端，重点复查机器人默认端口创建流程、付款后直接创建、返回按钮短回调、生命周期计划和唯一到期字段。
+
+### 运行时变化
+
+- 修复 `cloud.lifecycle._notice_plan_text()` 中续费价格展示的嵌套 f-string 引号冲突。
+- 续费价格先格式化为局部变量，再传入 HTML code 包装函数，避免 `cloud.lifecycle` 因语法错误无法导入。
+- 默认端口流程继续保持 `MTPROXY_DEFAULT_PORT = 443`，机器人新购和付款成功后的创建路径仍直接提交默认端口。
+
+### 监工结果
+
+- `codex-cli` 报告路径：`/private/tmp/shop_codex_review_20260603_0227.md`。
+- 本轮发现 1 个高置信运行级问题：`cloud.lifecycle` 语法错误会影响 `bot.runner`、`cloud.api_tasks` 和后台任务 URL 导入。
+- 只读巡检未发现旧用户自定义端口入口、旧计划快照、退款函数名或废弃 app 回流。
+- 端口扫描未发现 `waiting_port`、`custom:port:`、`cloud:ipport:` 或 `allow_client_port` 回流。
+
+### 验证
+
+本地已通过:
+
+```bash
+PYTHONDONTWRITEBYTECODE=1 python3 -B -c "import ast, pathlib; ast.parse(pathlib.Path('cloud/lifecycle.py').read_text(), filename='cloud/lifecycle.py'); print('AST_OK')"
+UV_CACHE_DIR=/Users/a399/Desktop/data/shop/.uv-cache PYTHONDONTWRITEBYTECODE=1 uv run python manage.py check
+UV_CACHE_DIR=/Users/a399/Desktop/data/shop/.uv-cache PYTHONDONTWRITEBYTECODE=1 uv run python -m py_compile bot/handlers.py bot/keyboards.py bot/tests.py cloud/lifecycle.py cloud/lifecycle_tasks.py cloud/lifecycle_execution.py cloud/api_tasks.py orders/payment_scanner.py
+UV_CACHE_DIR=/Users/a399/Desktop/data/shop/.uv-cache DB_ENGINE=sqlite SQLITE_NAME=/private/tmp/shop_default_port_fix_20260603_b.sqlite3 PYTHONDONTWRITEBYTECODE=1 uv run python manage.py test orders.tests.ChainPaymentScannerTestCase.test_cloud_chain_payment_auto_submits_default_port_provision bot.tests.RetainedIpRenewalUiTestCase.test_wallet_balance_purchase_auto_submits_default_port bot.tests.BotOrderAndBalanceFilterTestCase.test_paid_cloud_order_prepare_submits_default_port_directly bot.tests.BotOrderAndBalanceFilterTestCase.test_balance_pay_existing_cloud_order_auto_submits_default_port --noinput --verbosity 1
+UV_CACHE_DIR=/Users/a399/Desktop/data/shop/.uv-cache DB_ENGINE=sqlite SQLITE_NAME=/private/tmp/shop_lifecycle_ast_fix_20260603.sqlite3 PYTHONDONTWRITEBYTECODE=1 uv run python manage.py test cloud.tests.CloudServerServicesTestCase.test_update_cloud_asset_expiry_refreshes_order_lifecycle --noinput --verbosity 1
+git diff --check
+```
+
+### 剩余风险
+
+- 本轮未跑完整测试套件。
+- 本轮未执行真实 Telegram 点击、真实云资源创建/删除/IP 变更、真实支付、链上广播、生产发布或不可逆操作。
+
 ## 2026-06-03 详情返回按钮超长来源兜底
 
 ### 范围
