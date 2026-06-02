@@ -1,5 +1,43 @@
 # 重构版本记录
 
+## 2026-06-03 01:20 自动监工：默认端口与返回链只读复核
+
+### 范围
+
+本轮接续长期自动优化目标，先确认自动化仍为 `ACTIVE`、10 分钟一次、模型 `gpt-5.5`，终端版 `codex-cli` 版本为 `0.135.0-alpha.1`，当前分支为 `codex/cloud-asset-lifecycle-refactor`，工作树起始干净。随后启动终端版 `codex exec` 只读复核机器人返回链、默认端口创建、旧端口入口、旧到期字段、旧计划快照、退款逻辑、废弃 app 回流和测试代码混放。
+
+### 修改
+
+- 本轮未修改运行代码。
+- 仅追加本中文版本记录，记录本轮复查、验证结果和 `codex-cli` 监工状态。
+
+### 监工结果
+
+- 本地扫描未发现运行时代码中的旧用户自定义端口入口；默认端口仍为 `443`，钱包直付、余额补付、链上付款确认和换 IP 创建仍走默认端口并直接进入创建流程。
+- 本地扫描未发现运行时代码中的旧退款函数、旧到期字段、旧计划模型或废弃 app 目录回流；`CloudAsset.actual_expires_at` 仍是结构化资产到期事实。
+- `CloudAssetDashboardSnapshot` 判定为当前代理列表查询快照，不是已移除的计划快照表；真正的 `PlanSnapshot` 运行时代码未发现回流。
+- 功能代码与测试代码混放扫描未发现运行时代码中的测试类；`cloud/tests_task_center.py` 是测试文件命名噪音，不属于功能代码混入测试。
+- `codex-cli` 中途重点复核短回调、确认按钮、订单列表返回、资产列表返回和手写 callback。中间怀疑“短回调只取单段返回路径”，经源码复核和本地样本验证，相关入口大多使用带上限的 `split(':', N)` 保留完整返回路径，未形成明确可复现 bug。
+- 本轮 `codex-cli` 只读会话长时间继续扩展源码阅读但未输出最终 bug 列表；为避免后台残留，已终止该只读进程。终止前未看到明确可复现运行时 bug。
+
+### 验证
+
+已通过：
+
+```bash
+uv run python manage.py check
+uv run python -m py_compile bot/handlers.py bot/keyboards.py cloud/services.py cloud/provisioning.py orders/payment_scanner.py cloud/api_orders.py
+DJANGO_TEST_SQLITE=1 SQLITE_NAME=/private/tmp/shop-monitor-goal-continuation.sqlite3 uv run python manage.py test bot.tests.RetainedIpRenewalUiTestCase bot.tests.BotOrderAndBalanceFilterTestCase.test_balance_pay_existing_cloud_order_auto_submits_default_port bot.tests.BotOrderAndBalanceFilterTestCase.test_paid_cloud_order_prepare_submits_default_port_directly orders.tests.ChainPaymentScannerTestCase.test_cloud_chain_payment_auto_submits_default_port_provision cloud.tests.CloudServerServicesTestCase.test_server_compat_create_preserves_manual_asset_owner_and_expiry cloud.tests.CloudServerServicesTestCase.test_early_provisioning_steps_preserve_existing_manual_asset_fields --noinput --verbosity 1
+DJANGO_SETTINGS_MODULE=shop.settings PYTHONDONTWRITEBYTECODE=1 uv run python -c "<极端 callback 长度样本验证>"
+```
+
+结果：`manage.py check` 和关键模块编译通过；聚焦测试 46 条通过；极端 callback 样本均不超过 Telegram 64 字节限制，最长样本为 63 字节。工作树除本版本记录外未产生运行代码改动。
+
+### 剩余风险
+
+- 本轮未执行真实 Telegram 点击、真实云资源创建/删除/IP 变更、真实支付、链上广播、生产发布或不可逆操作。
+- `codex-cli` 本轮未自然输出最终报告，而是在长时间只读源码阅读后被手动终止；后续自动化应继续用新的只读会话复核。
+
 ## 2026-06-03 01:12 自动监工：复查嵌套回调和唯一到期事实
 
 ### 范围
