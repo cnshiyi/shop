@@ -129,7 +129,7 @@
 - `created_at`
 - `updated_at`
 - `completed_at`
-- `service_expires_at`
+- `actual_expires_at`
 - `is_active`
 - `is_sensitive`
 - `provider_resource_id`

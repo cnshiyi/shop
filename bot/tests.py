@@ -19,6 +19,7 @@ from bot.keyboards import balance_details_list, cloud_ip_query_result, cloud_ord
 from bot.models import TelegramChatArchive, TelegramChatMessage, TelegramLoginAccount, TelegramUser
 from bot.services import record_telegram_message
 from bot.telegram_listener import _build_bark_request, _build_push_payload, _is_self_sender, _sync_account_profile
+from cloud.asset_expiry import order_asset_expiry
 from cloud.models import CloudAsset, CloudServerOrder, CloudServerPlan
 from cloud.server_records import Server
 from cloud.services import update_cloud_item_expiry_for_admin
@@ -1198,7 +1199,8 @@ class BotOrderAndBalanceFilterTestCase(TestCase):
         )
 
     def _cloud_order(self, order_no, status='pending', public_ip='', paid=False, note=''):
-        return CloudServerOrder.objects.create(
+        expires_at = timezone.now() + timezone.timedelta(days=30)
+        order = CloudServerOrder.objects.create(
             order_no=order_no,
             user=self.user,
             plan=self.plan,
@@ -1214,9 +1216,22 @@ class BotOrderAndBalanceFilterTestCase(TestCase):
             status=status,
             public_ip=public_ip,
             paid_at=timezone.now() if paid else None,
-            service_expires_at=timezone.now() + timezone.timedelta(days=30),
             provision_note=note,
         )
+        CloudAsset.objects.create(
+            kind=CloudAsset.KIND_SERVER,
+            source=CloudAsset.SOURCE_ORDER,
+            order=order,
+            user=self.user,
+            provider=order.provider,
+            region_code=order.region_code,
+            region_name=order.region_name,
+            asset_name=f'{order_no}-asset',
+            public_ip=public_ip,
+            status=CloudAsset.STATUS_RUNNING,
+            actual_expires_at=expires_at,
+        )
+        return order
 
     def test_cloud_order_filters_and_button_label_prefer_ip(self):
         paid_order = self._cloud_order('ORDER-PAID-1', status='completed', public_ip='1.2.3.4', paid=True)
@@ -1331,7 +1346,6 @@ class BotAdminExpiryUpdateTestCase(TestCase):
             pay_method='balance',
             status='completed',
             public_ip='8.8.8.8',
-            service_expires_at=old_expiry,
         )
         asset = CloudAsset.objects.create(
             kind=CloudAsset.KIND_SERVER,
@@ -1367,7 +1381,7 @@ class BotAdminExpiryUpdateTestCase(TestCase):
         order.refresh_from_db()
         asset.refresh_from_db()
         server.refresh_from_db()
-        self.assertEqual(order.service_expires_at, new_expiry)
+        self.assertEqual(order_asset_expiry(order), new_expiry)
         self.assertEqual(asset.actual_expires_at, new_expiry)
         self.assertEqual(server.expires_at, new_expiry)
         self.assertIsNone(order.renew_notice_sent_at)

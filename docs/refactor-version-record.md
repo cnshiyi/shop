@@ -17,6 +17,8 @@
 - 删除自助退款函数入口、Bot 退款回调、退款按钮参数和退款测试；退款逻辑不再保留函数名。
 - 删除计划、通知计划、自动续费计划和任务中心改为实时从订单、资产、通知日志和自动续费巡检日志生成，不再依赖快照表。
 - 删除旧快照表相关的 `_sync_*_plan_table`、`*_plan_row_*`、`_upsert_*_plan_rows`、`_cloud_*_plan_items` 空壳函数名；后台任务中心、快照协调和刷新命令改为调用实时生成函数。
+- 同步 `bot/tests.py` 中订单列表和管理员改到期测试，测试数据改为通过 `CloudAsset.actual_expires_at` 承载到期时间，不再向 `CloudServerOrder.objects.create()` 传旧字段。
+- 终端版 `codex exec` 已按只读模式启动检查；本地检查确认 CLI 版本为 `codex-cli 0.135.0-alpha.1`，模型参数为 `gpt-5.5`。本次 CLI 过程因远端 429 未给最终总结，但搜索输出命中了 Bot 测试旧字段和命名文档残留，已据此处理。
 - 已更新 Codex App 自动化 `Shop 自动优化监工`，保持 10 分钟一次，并补充本轮数据库重构重点和“只写中文记录”的要求。
 
 ### 验证
@@ -30,10 +32,11 @@ PYTHONDONTWRITEBYTECODE=1 DJANGO_TEST_SQLITE=1 uv run python manage.py check
 PYTHONDONTWRITEBYTECODE=1 DJANGO_TEST_SQLITE=1 uv run python manage.py migrate --plan
 PYTHONDONTWRITEBYTECODE=1 DJANGO_TEST_SQLITE=1 uv run python manage.py test cloud.tests.CloudServerServicesTestCase.test_refresh_lifecycle_plan_table_api_populates_cloud_lifecycle_plan cloud.tests.CloudServerServicesTestCase.test_refresh_notice_plan_table_api_populates_cloud_notice_plan cloud.tests.CloudServerServicesTestCase.test_update_cloud_asset_expiry_refreshes_delete_plan_snapshot cloud.tests.CloudServerServicesTestCase.test_update_unattached_ip_release_time_refreshes_delete_plan_snapshot cloud.tests.CloudServerServicesTestCase.test_notice_task_detail_uses_cloud_notice_plan_table --noinput --verbosity 1
 PYTHONDONTWRITEBYTECODE=1 DJANGO_TEST_SQLITE=1 uv run python manage.py test cloud.tests.CloudServerServicesTestCase.test_cloud_asset_dashboard_snapshot_refresh_materializes_paginated_list --noinput --verbosity 1
+PYTHONDONTWRITEBYTECODE=1 DJANGO_TEST_SQLITE=1 uv run python manage.py test bot.tests.BotOrderAndBalanceFilterTestCase bot.tests.BotAdminExpiryUpdateTestCase --noinput --verbosity 1
 git diff --check
 ```
 
-说明：完整测试文件仍有 197 处旧 `service_expires_at` 测试写法需要下一轮集中同步；本轮先确保运行代码、模型状态、迁移检测、Django 系统检查和本轮触碰的计划/通知回归通过。
+说明：完整测试文件仍有 194 处旧 `service_expires_at` 测试写法需要下一轮集中同步；本轮先确保运行代码、模型状态、迁移检测、Django 系统检查和本轮触碰的计划/通知/Bot 回归通过。
 
 ## 2026-06-02 自动监工：订单到期兼容复查
 
