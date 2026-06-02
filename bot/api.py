@@ -984,7 +984,6 @@ def _unattached_ip_delete_history_q():
         | Q(note__icontains='固定IP已真实释放')
         | Q(note__icontains='固定 IP 云端已不存在')
         | Q(note__icontains='release_static_ip')
-        | Q(note__icontains='真机测试：未附加IP删除')
     )
     asset_q = (
         Q(asset__provider_status__icontains='未附加')
