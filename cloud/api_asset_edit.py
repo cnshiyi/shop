@@ -293,7 +293,7 @@ def update_cloud_asset(request, asset_id):
             for field in ('asset_name', 'public_ip', 'provider_resource_id', 'instance_id', 'mtproxy_link', 'mtproxy_host', 'note'):
                 if field in payload:
                     setattr(asset, field, payload.get(field) or None)
-                    if field in {'asset_name', 'public_ip', 'provider_resource_id', 'instance_id'}:
+                    if field in {'asset_name', 'public_ip', 'provider_resource_id', 'instance_id', 'note'}:
                         related_server_sync_updates[field] = getattr(asset, field)
             if 'mtproxy_secret' in payload:
                 mtproxy_secret = str(payload.get('mtproxy_secret') or '').strip()
