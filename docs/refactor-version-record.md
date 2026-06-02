@@ -1,5 +1,46 @@
 # 重构版本记录
 
+## 2026-06-03 02:16 自动监工：复核默认端口和生命周期任务
+
+### 范围
+
+本轮从提交 `2c8abd1 补充端口收口监工验证记录` 后继续监工。起始读取 git 状态时工作树干净；自动化配置仍为 `ACTIVE`，`rrule` 为每 10 分钟一次，模型为 `gpt-5.5`。后端 runserver 仍在 `127.0.0.1:8000` 运行。
+
+本轮启动终端版 `codex-cli 0.135.0-alpha.1` 只读巡检，报告保存到 `/private/tmp/shop_codex_review_20260603_0213.md`，重点复查云资产唯一到期事实、通知/生命周期任务数据库支撑、防重复执行、旧计划快照和退款逻辑回流、机器人返回链、Telegram `callback_data` 64 字节限制，以及新购默认端口 443 和付款后直接创建流程。
+
+### 修改
+
+- 本轮未修改运行代码。
+- 仅追加本中文版本记录，记录本轮 `codex-cli` 监工结论、本地验证结果和只读沙箱限制。
+
+### 监工结果
+
+- `codex-cli` 结论：未发现高置信、可复现、会影响运行的 bug。
+- `CloudAsset.actual_expires_at` 仍是唯一结构化资产到期事实；`CloudServerOrder` 当前模型没有 `service_expires_at` 或 `actual_expires_at`，订单编辑收到 `actual_expires_at` 时会从订单更新字段剔除并写回资产表。
+- `CloudLifecycleTask` 和 `CloudNoticeTask` 仍有 `source_key` 唯一键、认领 token、状态和重试字段；认领逻辑使用唯一 key 加条件 update 防重复。
+- 当前运行代码未发现 `CloudLifecyclePlan`、`CloudNoticePlan`、`CloudAutoRenewPlan` 旧计划快照模型回流；`INSTALLED_APPS` 仍只保留当前核心 app。
+- 机器人短回调 `ar/ac/au/r/i/ri/u/p/im/ir/ai` 均有 handler；生成侧仍有 64 字节压缩保护。
+- 新购默认端口仍为 `443`；链上支付确认后会写入默认端口并进入创建流程。
+- 真机测试未执行：本轮未执行真实云资源创建、删除、IP 变更、真实支付、链上广播、生产发布或不可逆操作。
+
+### 验证
+
+本地已通过：
+
+```bash
+UV_CACHE_DIR=/Users/a399/Desktop/data/shop/.uv-cache PYTHONDONTWRITEBYTECODE=1 uv run python manage.py check
+UV_CACHE_DIR=/Users/a399/Desktop/data/shop/.uv-cache PYTHONDONTWRITEBYTECODE=1 uv run python -m py_compile bot/handlers.py bot/keyboards.py bot/tests.py core/texts.py core/tests.py cloud/lifecycle.py cloud/lifecycle_execution.py cloud/lifecycle_tasks.py cloud/api_asset_edit.py cloud/api_orders.py cloud/services.py orders/payment_scanner.py
+git diff --check
+```
+
+只读 `codex-cli` 沙箱内无法初始化 `uv` 缓存，因此它没有实际运行 Django 命令；上述验证已在当前可写开发环境完成。
+
+### 剩余风险
+
+- 本轮未跑完整测试套件。
+- 本轮未执行真实 Telegram 点击、真实云资源创建/删除/IP 变更、真实支付、链上广播、生产发布或不可逆操作。
+- 真机测试仍需在用户明确授权真实云资源成本后单独执行，并写中文报告，云资源 ID 需脱敏。
+
 ## 2026-06-03 01:45 自动监工：收紧主代理链接保存端口校验
 
 ### 范围
