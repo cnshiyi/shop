@@ -1,5 +1,79 @@
 # 重构版本记录
 
+## 2026-06-03 00:02 自动监工：默认 443 自动创建和生命周期复查
+
+### 范围
+
+本轮继续监工 Shop Django 后端仓库。起始最近提交为 `4441bde 记录短回调返回链复查`，端口策略、链上支付自动创建、默认端口迁移和真机测试报告已在后续提交 `69aeef6 移除机器人自定义端口流程` 中落地。本轮继续复查云服务器购买、链上支付、更换 IP 不再回到端口选择，默认使用 443 自动提交创建；同时复查机器人返回链、Telegram `callback_data` 长度、云资产唯一到期事实、旧到期字段、旧计划快照表、退款旧入口和废弃 app 回流。
+
+### 修改
+
+- 将 `MTPROXY_DEFAULT_PORT` 改为 443，并补充 `CloudServerOrder.mtproxy_port` 默认值迁移。
+- 钱包直付、钱包补付、链上云服务器订单支付成功后，直接用默认 443 拆分并提交创建任务，不再要求用户选择 MTProxy 端口。
+- 更换 IP 选择地区后直接按默认 443 创建同配置新服务器；旧 `custom:port:*` 和 `cloud:ipport:*` 回调仍兼容，但统一按默认 443 执行。
+- 删除已不再使用的端口选择键盘引用，清理运行代码中把缺省端口写死为 9528 的 fallback；已有订单或资产自身保存的旧端口仍优先保留。
+- 新增链上云服务器支付聚焦测试，锁定“到账后默认 443 自动提交创建任务”的行为。
+- 新增钱包余额直付聚焦测试，锁定“余额支付成功后默认 443 自动提交创建任务”的行为。
+- 真机测试报告已纳入仓库，本轮继续对云实例名、固定 IP 名称和公网 IP 做脱敏修正。
+
+### 复查结论
+
+- `CloudServerOrder` 未恢复 `service_expires_at` 或 `actual_expires_at` 字段；`CloudAsset.actual_expires_at` 仍是唯一结构化资产到期事实。
+- `CloudAssetDashboardSnapshot` 未恢复派生到期列，仅保留 `risk_expired` 风险布尔字段。
+- 运行代码扫描未发现旧端口选择文案、旧端口选择键盘引用、旧退款函数名、旧退款状态、旧计划快照模型或旧订单到期字段回流。
+- 仓库根下未发现 `accounts/finance/mall/monitoring/dashboard_api/biz` 废弃 app 目录恢复；`INSTALLED_APPS` 中也未出现这些废弃 app。
+- 本轮未执行真实云资源、真实 Telegram 点击、真实支付或链上广播。
+
+### 验证
+
+已通过：
+
+```bash
+UV_CACHE_DIR=/Users/a399/Desktop/data/shop/.uv-cache PYTHONDONTWRITEBYTECODE=1 uv run python manage.py check
+UV_CACHE_DIR=/Users/a399/Desktop/data/shop/.uv-cache PYTHONDONTWRITEBYTECODE=1 uv run python -m py_compile bot/handlers.py bot/keyboards.py orders/payment_scanner.py orders/tests.py cloud/services.py cloud/provisioning.py cloud/bootstrap.py cloud/aws_lightsail.py cloud/aliyun_simple.py cloud/ports.py
+UV_CACHE_DIR=/Users/a399/Desktop/data/shop/.uv-cache PYTHONDONTWRITEBYTECODE=1 DB_ENGINE=sqlite SQLITE_NAME=/private/tmp/shop_test_bot.sqlite3 uv run python manage.py test bot.tests.RetainedIpRenewalUiTestCase --keepdb
+UV_CACHE_DIR=/Users/a399/Desktop/data/shop/.uv-cache PYTHONDONTWRITEBYTECODE=1 DB_ENGINE=sqlite SQLITE_NAME=/private/tmp/shop_test_orders.sqlite3 uv run python manage.py test orders.tests.ChainPaymentScannerTestCase.test_cloud_chain_payment_auto_submits_default_port_provision orders.tests.ChainPaymentScannerTestCase.test_expired_address_payments_are_not_candidates_and_renewal_status_restores orders.tests.ChainPaymentScannerTestCase.test_expired_asset_renewal_payment_unbinds_asset_for_retry orders.tests.ChainPaymentScannerTestCase.test_public_asset_renewal_expiry_does_not_claim_unowned_asset orders.tests.ChainPaymentScannerTestCase.test_renew_pending_cloud_with_previous_ip_is_candidate --keepdb
+UV_CACHE_DIR=/Users/a399/Desktop/data/shop/.uv-cache PYTHONDONTWRITEBYTECODE=1 DB_ENGINE=sqlite SQLITE_NAME=/private/tmp/shop_test_cloud.sqlite3 uv run python manage.py test cloud.tests.CloudServerServicesTestCase.test_order_rejects_removed_service_expiry_field cloud.tests.CloudServerServicesTestCase.test_server_compat_create_preserves_manual_asset_owner_and_expiry cloud.tests.CloudServerServicesTestCase.test_mark_success_preserves_existing_manual_asset_fields_on_update cloud.tests.CloudServerServicesTestCase.test_early_provisioning_steps_preserve_existing_manual_asset_fields cloud.tests.CloudServerServicesTestCase.test_unbound_asset_renewal_wallet_payment_marks_paid_for_recovery cloud.tests.CloudServerServicesTestCase.test_unbound_asset_renewal_chain_payment_marks_paid_for_recovery --keepdb
+UV_CACHE_DIR=/Users/a399/Desktop/data/shop/.uv-cache PYTHONDONTWRITEBYTECODE=1 uv run python manage.py makemigrations --check --dry-run
+UV_CACHE_DIR=/Users/a399/Desktop/data/shop/.uv-cache PYTHONDONTWRITEBYTECODE=1 uv run python manage.py shell -c "from django.conf import settings; retired={'accounts','finance','mall','monitoring','dashboard_api','biz'}; print('retired_apps', [app for app in settings.INSTALLED_APPS if app.split('.')[0] in retired]); from cloud.models import CloudServerOrder, CloudAsset, CloudAssetDashboardSnapshot; print('order_expiry_fields', [f.name for f in CloudServerOrder._meta.fields if f.name in {'service_expires_at','actual_expires_at'}]); print('asset_actual_fields', [f.name for f in CloudAsset._meta.fields if f.name == 'actual_expires_at']); print('snapshot_expiry_fields', [f.name for f in CloudAssetDashboardSnapshot._meta.fields if 'expire' in f.name or 'expiry' in f.name or f.name == 'actual_expires_at']); print('default_port', CloudServerOrder._meta.get_field('mtproxy_port').default)"
+rg -n "or 9528|main_port or 9528|mtproxy_port or 9528|默认端口 9528|默认端口为 9528|默认端口是 9528|等待用户确认 MTProxy 端口|请选择 MTProxy 端口|custom_port_keyboard|cloud_server_change_ip_port_keyboard" bot/handlers.py bot/keyboards.py orders/payment_scanner.py orders/tests.py cloud/services.py cloud/provisioning.py cloud/bootstrap.py cloud/ports.py core/texts.py
+rg -n "service_expires_at__|\\bservice_expires_at\\b|\\bactual_expires_at\\s*=\\s*models|\\bCloudLifecyclePlan\\b|\\bCloudNoticePlan\\b|\\bCloudAutoRenewPlan\\b|\\bnormalize_service_expiry\\b|service_expired_at|\\brefund_order\\b|\\bprocess_refund\\b|\\bcreate_refund\\b|\\bissue_refund\\b|refund_to_balance|refund_balance|STATUS_REFUNDED|status=['\\\"]refunded|\\brefunded\\b" cloud orders bot core shop --glob '!**/migrations/**' --glob '!**/tests.py' --glob '!docs/**'
+find . -maxdepth 2 -type d \( -name accounts -o -name finance -o -name mall -o -name monitoring -o -name dashboard_api -o -name biz \) -print
+git diff --check
+```
+
+结果：Django 系统检查、关键模块编译、机器人返回 UI 聚焦测试 32 条、链上支付/续费过期聚焦测试 5 条、生命周期/人工字段保留聚焦测试 6 条、迁移 dry-run、模型字段 introspection、端口旧文案/旧键盘扫描、旧计划/旧退款扫描、废弃 app 目录检查和空白检查均通过。旧字段扫描仅命中 `CloudAsset.actual_expires_at` 这个预期唯一资产到期事实字段。`makemigrations --check --dry-run` 仍因沙箱禁止连接本机 MySQL 输出迁移历史检查警告，但最终显示 `No changes detected`。
+
+剩余风险：本轮未跑完整测试套件，未连接真实 MySQL、阿里云、TRONGrid 或 Telegram，未执行真实 Telegram 点击、真实支付、链上广播、云端删除、固定 IP 释放或生产发布。`docs/real-machine-test-report.md` 已在提交 `69aeef6` 中纳入版本记录并在本轮补充脱敏；后续仍需继续完成无订单资产、灰色地带续费、通知计划、删除计划执行和真实资源清理验证。
+
+## 2026-06-03 00:10 自动监工：端口提交后状态复核
+
+### 范围
+
+本轮从提交 `69aeef6 移除机器人自定义端口流程` 后继续监工。重点确认终端版 Codex、自动化监工配置、工作区脏改动和端口重构后的残留冲突。
+
+### 复查结论
+
+- 终端版 Codex 可执行，版本为 `codex-cli 0.135.0-alpha.1`。
+- 自动化 `Shop 自动优化监工` 状态为 `ACTIVE`，工作目录为 `/Users/a399/Desktop/data/shop`，配置为每 10 分钟运行一次。
+- 当前运行服务中只看到后端 `manage.py runserver 127.0.0.1:8000 --noreload`，未发现新的 `run.py all` 或 `bot.runner` 常驻进程。
+- 运行代码扫描未发现端口选择键盘函数、旧端口选择文案、`custom_port_keyboard` 或 `cloud_server_change_ip_port_keyboard` 回流。
+- 测试代码和历史迁移中仍保留 9528 用例，用于验证历史端口兼容；运行代码中旧 `custom:port:*` 和 `cloud:ipport:*` callback 仅作为旧消息兼容入口保留。
+- 本轮未执行真实云资源删除、真实支付、链上广播、生产发布或不可逆操作。
+
+### 验证
+
+已通过：
+
+```bash
+command -v codex && codex --version
+git status --short && git log --oneline -5
+rg -n "custom_port_keyboard|cloud_server_change_ip_port_keyboard|默认端口是 9528|等待用户确认 MTProxy|请选择 MTProxy 端口|使用默认端口 9528|输入自定义端口" bot orders cloud core -S
+git diff --check
+```
+
+结果：自动化配置和终端版 Codex 状态可确认；端口选择旧入口未回流到新机器人流程；当前收尾改动为余额支付默认 443 聚焦测试、真机报告脱敏和本文档版本记录。
+
 ## 2026-06-02 23:43 自动监工：复查短回调返回链和生命周期事实
 
 ### 范围
@@ -1038,8 +1112,8 @@ git diff --check
 ### 实测结果
 
 - 创建真实测试订单 `LIVE-CODEX-20260602113912-9317`，订单 ID 为 `76`。
-- AWS Lightsail 实例开通成功，实例名为 `20260602-990000000001-5-o76`。
-- 固定 IP 分配成功，固定 IP 名为 `20260602-990000000001-5-o76-ip`。
+- AWS Lightsail 实例开通成功，实例名为 `20260602-************-*-o76`。
+- 固定 IP 分配成功，固定 IP 名为 `20260602-************-*-o76-ip`。
 - 服务器初始化链路通过：系统初始化、BBR、主代理、备用代理、Telemt、SOCKS5 均完成。
 - 已定向删除真实实例并释放固定 IP。
 - 删除后运行 AWS 同步，云端实例数为 0，未附加固定 IP 数为 0。
@@ -3458,7 +3532,7 @@ git diff --check
 
 ### 实机验证
 
-- AWS Lightsail 新加坡区真实创建测试实例成功，订单号 `SRV20260602101856384117`，实例名 `20260602-990000000001-5-o75`。
+- AWS Lightsail 新加坡区真实创建测试实例成功，订单号 `SRV20260602101856384117`，实例名 `20260602-************-*-o75`。
 - 复用同一台测试实例执行重试初始化，订单成功回写为 `completed`，资产到期时间保持为 `2026-07-03 10:22:05 UTC`。
 - 手动打开本地删除开关后，业务删机入口真实删除实例成功。
 - 固定 IP 释放入口真实释放固定 IP 成功。

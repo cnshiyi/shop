@@ -15,7 +15,7 @@ from django.test import RequestFactory, SimpleTestCase, TestCase
 from django.utils import timezone
 
 from bot.api import DASHBOARD_SESSION_IDLE_SECONDS, _active_proxy_counts_by_user, _authenticate_dashboard_request, admin_users_list, archive_telegram_chat, auth_totp_start, create_admin_user, create_cloud_account, create_product, delete_cloud_account, me, send_daily_expiry_summary_test_notification, send_telegram_chat_message, site_config_groups, telegram_login_start, update_cloud_account, update_site_config, users_list, verify_cloud_account
-from bot.handlers import _asset_reinstall_confirm_keyboard, _asset_renewal_plan_keyboard, _cloud_renewal_postcheck_and_notify, _cloud_server_created_text, _fetch_tron_address_summary, _hydrate_order_proxy_links, _install_notice_copy_wrapper, _proxy_links_text, _reinstall_confirm_keyboard, _requires_recovery_provision, _retained_ip_renewal_plan_keyboard, _trongrid_get_with_key_fallback, _trongrid_post_with_key_fallback, _validate_reinstall_proxy_link, register_handlers
+from bot.handlers import _asset_reinstall_confirm_keyboard, _asset_renewal_plan_keyboard, _buy_cloud_server_with_balance_and_notify, _cloud_renewal_postcheck_and_notify, _cloud_server_created_text, _fetch_tron_address_summary, _hydrate_order_proxy_links, _install_notice_copy_wrapper, _proxy_links_text, _reinstall_confirm_keyboard, _requires_recovery_provision, _retained_ip_renewal_plan_keyboard, _trongrid_get_with_key_fallback, _trongrid_post_with_key_fallback, _validate_reinstall_proxy_link, register_handlers
 from bot.keyboards import balance_details_list, cloud_asset_detail_callback, cloud_detail_callback, cloud_previous_detail_callback, compact_callback_path, cloud_ip_query_result, cloud_order_list, cloud_server_change_ip_region_menu, cloud_server_detail, cloud_server_renew_payment
 from bot.models import TelegramChatArchive, TelegramChatMessage, TelegramLoginAccount, TelegramUser
 from bot.services import record_telegram_message
@@ -1073,6 +1073,40 @@ class RetainedIpRenewalUiTestCase(SimpleTestCase):
         self.assertIn('cloud:rp:9999999:TRX:cad:9999999:clp:12345', callbacks)
         self.assertIn('cad:9999999:clp:12345', callbacks)
         self.assertTrue(all(len(item.encode()) <= 64 for item in callbacks if item))
+
+    def test_wallet_balance_purchase_auto_submits_default_port(self):
+        order = SimpleNamespace(
+            id=88,
+            order_no='SRV-BALANCE-443',
+            region_name='新加坡',
+            plan_name='nano',
+            quantity=1,
+            pay_amount=Decimal('19.00'),
+            currency='USDT',
+            mtproxy_port=443,
+        )
+        bot = SimpleNamespace(send_message=AsyncMock())
+        scheduled = []
+
+        def capture_task(coro):
+            scheduled.append(coro.cr_code.co_name)
+            coro.close()
+            return object()
+
+        with patch('bot.handlers.buy_cloud_server_with_balance', new=AsyncMock(return_value=(order, None))) as buy_mock, \
+                patch('bot.handlers.prepare_cloud_server_order_instances', new=AsyncMock(return_value=[order])) as prepare_mock, \
+                patch('bot.handlers._send_admin_user_action_notice', new=AsyncMock()), \
+                patch('bot.handlers.main_menu', return_value=None), \
+                patch('bot.handlers.asyncio.create_task', side_effect=capture_task):
+            async_to_sync(_buy_cloud_server_with_balance_and_notify)(bot, 12345, 7, 55, 1, 'USDT')
+
+        buy_mock.assert_awaited_once_with(7, 55, 'USDT', 1)
+        prepare_mock.assert_awaited_once_with(88, 7, 443)
+        bot.send_message.assert_awaited_once()
+        text = bot.send_message.await_args.kwargs['text']
+        self.assertIn('端口: 443', text)
+        self.assertIn('创建任务已提交', text)
+        self.assertEqual(scheduled, ['_provision_cloud_server_and_notify'])
 
     def test_cloud_change_ip_keyboards_keep_back_path(self):
         regions = [
