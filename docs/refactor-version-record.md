@@ -1,5 +1,41 @@
 # 重构版本记录
 
+## 2026-06-02 自动监工：通知覆盖与启动延迟保护收口
+
+### 范围
+
+本轮继续监工云资产生命周期唯一事实源、通知批次冲突、旧字段回流、旧计划快照表回流和退款入口回流。起始工作树已有 `cloud/asset_expiry.py`、`cloud/lifecycle.py`、`cloud/lifecycle_schedule.py`、`cloud/tests.py` 未提交改动，最近提交为 `7ef9df6 记录生命周期唯一事实源监工结果`；本轮在理解这些改动后继续收口，没有覆盖其他用户改动。
+
+### 运行变更
+
+- 将到期归一化函数命名从 `normalize_service_expiry` 收口为 `normalize_asset_expiry`，避免代码语义继续暗示订单表服务到期字段。
+- 通知批次手工文案覆盖 key 改为按“事件 + 用户 + 订单 + 当前 `CloudAsset.actual_expires_at` 到期周期”生成；同一订单续费进入新到期周期后，旧周期手工文案不会挡住新周期默认提醒。
+- 通知批次订单列表排序后再生成批次号，避免同一批订单因列表顺序不同产生不同任务键。
+- 启动破坏性动作延迟保护补齐固定 IP 回收和未附加固定 IP 删除：服务启动检查命中这些动作时，本轮不释放真实云资源；固定 IP 回收只顺延 `CloudServerOrder.ip_recycle_at`，未附加固定 IP 不改写 `CloudAsset.actual_expires_at`。
+- 补充回归测试，验证首个到期周期可使用手工文案，新到期周期仍会正常发送新文案，并覆盖启动延迟保护下固定 IP 回收、未附加固定 IP 删除不会立即执行真实释放。
+
+### 复查结论
+
+- 未发现 `normalize_service_expiry` 旧符号残留。
+- 未发现 `CloudServerOrder.service_expires_at`、`service_expired_at` 等订单表到期字段恢复。
+- 未发现旧计划快照表模型恢复；当前命中均为现有 dashboard/lifecycle 刷新函数或测试名。
+- 未发现退款函数名和退款运行时入口恢复。
+- 废弃 app 未重新加入 `INSTALLED_APPS`；`dashboard_api` 仅作为现有后台路由命名空间和 `core.dashboard_api` helper 名称存在。
+
+### 验证
+
+本地已通过：
+
+```bash
+PYTHONDONTWRITEBYTECODE=1 DJANGO_TEST_SQLITE=1 uv run python -m py_compile cloud/lifecycle_schedule.py cloud/asset_expiry.py cloud/lifecycle.py cloud/tests.py
+PYTHONDONTWRITEBYTECODE=1 DJANGO_TEST_SQLITE=1 uv run python manage.py check
+PYTHONDONTWRITEBYTECODE=1 DJANGO_TEST_SQLITE=1 uv run python manage.py makemigrations --check --dry-run
+PYTHONDONTWRITEBYTECODE=1 DJANGO_TEST_SQLITE=1 uv run python manage.py test cloud.tests.CloudServerServicesTestCase.test_send_order_notice_batch_allows_new_expiry_cycle cloud.tests.CloudServerServicesTestCase.test_send_order_notice_batch_prefers_bound_group_and_skips_private cloud.tests.CloudServerServicesTestCase.test_send_order_notice_batch_falls_back_private_when_group_fails cloud.tests.CloudServerServicesTestCase.test_lifecycle_tick_startup_defer_blocks_order_static_ip_release cloud.tests.CloudServerServicesTestCase.test_lifecycle_tick_startup_defer_blocks_unattached_static_ip_release --noinput --verbosity 1
+rg -n "\bnormalize_service_expiry\b|service_expired_at|class (CloudLifecyclePlan|CloudNoticePlan|CloudAutoRenewPlan)\b|CloudLifecyclePlan\.|CloudNoticePlan\.|CloudAutoRenewPlan\.|refunded|refund|退款" --glob '!cloud/migrations/**' --glob '!docs/**' .
+rg -n "service_expires_at__|(filter|exclude|update|order_by|values|values_list)\([^\n)]*service_expires_at" --glob '!cloud/migrations/**' --glob '!docs/**' --glob '!cloud/tests.py' --glob '!bot/tests.py' --glob '!orders/tests.py' .
+git diff --check
+```
+
 ## 2026-06-02 自动监工：生命周期唯一事实源复查
 
 ### 范围

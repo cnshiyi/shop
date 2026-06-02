@@ -1371,7 +1371,20 @@ def _notice_expiry_cycle_key(value) -> str:
 
 
 def _notice_batch_id_for_orders(event: str, orders: list[CloudServerOrder] | tuple[CloudServerOrder, ...]) -> str:
-    cycle_keys = [f'{order.id}@{_notice_expiry_cycle_key(order_asset_expiry(order))}' for order in orders]
+    cycle_keys = [f'{order.id}@{_notice_expiry_cycle_key(order_asset_expiry(order))}' for order in sorted(orders, key=lambda item: item.id)]
+    return _notice_batch_id(event, *cycle_keys)
+
+
+def _notice_batch_id_for_order_ids(event: str, order_ids: list[int] | tuple[int, ...]) -> str:
+    ordered_ids = sorted(int(item) for item in (order_ids or []) if item)
+    order_map = CloudServerOrder.objects.filter(id__in=ordered_ids).in_bulk()
+    cycle_keys = []
+    for order_id in ordered_ids:
+        order = order_map.get(order_id)
+        if order:
+            cycle_keys.append(f'{order.id}@{_notice_expiry_cycle_key(order_asset_expiry(order))}')
+        else:
+            cycle_keys.append(f'{order_id}@missing')
     return _notice_batch_id(event, *cycle_keys)
 
 
@@ -1382,7 +1395,7 @@ def _notice_batch_id(event: str, *order_ids) -> str:
 
 def _notice_override_key(event: str, user_id: int | None, order_ids: list[int] | tuple[int, ...]) -> str:
     ordered_ids = sorted(int(item) for item in (order_ids or []) if item)
-    return f'{event}:{user_id or 0}:{_notice_batch_id(event, *ordered_ids)}'
+    return f'{event}:{user_id or 0}:{_notice_batch_id_for_order_ids(event, ordered_ids)}'
 
 
 def _notice_text_overrides() -> dict:
@@ -2418,10 +2431,12 @@ def _order_action_ip(order) -> str:
 
 
 @sync_to_async
-def _defer_startup_lifecycle_actions(due, migration_due_orders, orphan_asset_delete_due, delay_seconds: int):
+def _defer_startup_lifecycle_actions(due, migration_due_orders, orphan_asset_delete_due, unattached_static_ip_delete_due, delay_seconds: int):
     suspend_run_at = _next_cloud_action_run_at('cloud_suspend_time', '15:00', min_delay_seconds=delay_seconds)
     delete_run_at = _next_cloud_action_run_at('cloud_delete_time', '15:00', min_delay_seconds=delay_seconds)
+    ip_delete_run_at = _next_cloud_action_run_at('cloud_unattached_ip_delete_time', '15:00', min_delay_seconds=delay_seconds)
     can_defer_delete = cloud_server_delete_enabled()
+    can_defer_ip_delete = cloud_ip_delete_enabled()
     for order in due.get('suspend') or []:
         CloudServerOrder.objects.filter(id=order.id).update(suspend_at=suspend_run_at, updated_at=timezone.now())
         logger.warning(
@@ -2445,7 +2460,18 @@ def _defer_startup_lifecycle_actions(due, migration_due_orders, orphan_asset_del
             'CLOUD_STARTUP_DEFER_ORPHAN_ASSET_DELETE asset_id=%s ip=%s actual_expires_at=%s deferred_until=%s message="启动检查命中无订单资产删机，IP %s 本轮跳过真实删机，不改写真正到期时间"',
             asset.id, asset.public_ip or asset.previous_public_ip or '未分配', asset.actual_expires_at, delete_run_at, asset.public_ip or asset.previous_public_ip or '未分配',
         )
-    return {'suspend': suspend_run_at, 'delete': delete_run_at}
+    for order in (due.get('recycle') or []) if can_defer_ip_delete else []:
+        CloudServerOrder.objects.filter(id=order.id).update(ip_recycle_at=ip_delete_run_at, updated_at=timezone.now())
+        logger.warning(
+            'CLOUD_STARTUP_DEFER_RECYCLE order_id=%s order_no=%s ip=%s old_ip_recycle_at=%s deferred_until=%s message="启动检查命中固定IP回收，IP %s 将顺延到后台设定IP删除时间执行"',
+            order.id, order.order_no, _order_action_ip(order), order.ip_recycle_at, ip_delete_run_at, _order_action_ip(order),
+        )
+    for asset in (unattached_static_ip_delete_due or []) if can_defer_ip_delete else []:
+        logger.warning(
+            'CLOUD_STARTUP_DEFER_UNATTACHED_IP_DELETE asset_id=%s ip=%s actual_expires_at=%s deferred_until=%s message="启动检查命中未附加固定IP删除，IP %s 本轮跳过真实释放，不改写真正到期时间"',
+            asset.id, asset.public_ip or asset.previous_public_ip or '未分配', asset.actual_expires_at, ip_delete_run_at, asset.public_ip or asset.previous_public_ip or '未分配',
+        )
+    return {'suspend': suspend_run_at, 'delete': delete_run_at, 'ip_delete': ip_delete_run_at}
 
 
 async def auto_renew_patrol_tick(notify=None, notify_target=None):
@@ -2530,16 +2556,18 @@ async def lifecycle_tick(notify=None, notify_target=None, defer_destructive_seco
 
     await _process_auto_renew_retry_tasks(notify_target)
 
-    if defer_destructive_seconds and (due['suspend'] or due['delete'] or migration_due_orders or orphan_asset_delete_due):
-        deferred_at = await _defer_startup_lifecycle_actions(due, migration_due_orders, orphan_asset_delete_due, defer_destructive_seconds)
+    if defer_destructive_seconds and (due['suspend'] or due['delete'] or due['recycle'] or migration_due_orders or orphan_asset_delete_due or unattached_static_ip_delete_due):
+        deferred_at = await _defer_startup_lifecycle_actions(due, migration_due_orders, orphan_asset_delete_due, unattached_static_ip_delete_due, defer_destructive_seconds)
         logger.warning(
-            'CLOUD_STARTUP_DEFER_DONE suspend=%s delete=%s migration_delete=%s orphan_asset_delete=%s deferred_suspend_until=%s deferred_delete_until=%s',
-            len(due['suspend']), len(due['delete']), len(migration_due_orders), len(orphan_asset_delete_due), deferred_at['suspend'], deferred_at['delete'],
+            'CLOUD_STARTUP_DEFER_DONE suspend=%s delete=%s recycle=%s migration_delete=%s orphan_asset_delete=%s unattached_ip_delete=%s deferred_suspend_until=%s deferred_delete_until=%s deferred_ip_delete_until=%s',
+            len(due['suspend']), len(due['delete']), len(due['recycle']), len(migration_due_orders), len(orphan_asset_delete_due), len(unattached_static_ip_delete_due), deferred_at['suspend'], deferred_at['delete'], deferred_at['ip_delete'],
         )
         due['suspend'] = []
         due['delete'] = []
+        due['recycle'] = []
         migration_due_orders = []
         orphan_asset_delete_due = []
+        unattached_static_ip_delete_due = []
 
     for (target_kind, target_chat_id, user_id), orders in await sync_to_async(_group_orders_by_notice_target)(due['renew_notice']):
         payload = await _renew_notice_batch_payload([order.id for order in orders])

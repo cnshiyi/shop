@@ -4030,6 +4030,72 @@ class CloudServerServicesTestCase(TestCase):
         self.assertEqual(order.status, 'deleted')
         self.assertIsNotNone(order.ip_recycle_at)
 
+    # 功能：验证启动延迟保护会顺延固定 IP 回收，但不触发真实释放或改写资产真实到期事实。
+    def test_lifecycle_tick_startup_defer_reschedules_static_ip_cleanup_without_release(self):
+        original_expiry = timezone.now() - timezone.timedelta(days=2)
+        old_recycle_at = timezone.now() - timezone.timedelta(minutes=5)
+        order = CloudServerOrder.objects.create(
+            order_no='LIFECYCLE-DEFER-RECYCLE-1',
+            user=self.user,
+            plan=self.plan,
+            provider=self.plan.provider,
+            region_code=self.plan.region_code,
+            region_name=self.plan.region_name,
+            plan_name=self.plan.plan_name,
+            quantity=1,
+            currency='USDT',
+            total_amount='19.00',
+            pay_amount='19.00',
+            status='deleted',
+            public_ip='13.229.249.60',
+            previous_public_ip='13.229.249.60',
+            static_ip_name='StaticIp-defer-recycle',
+            ip_recycle_at=old_recycle_at,
+        )
+        asset = CloudAsset.objects.create(
+            kind=CloudAsset.KIND_SERVER,
+            source=CloudAsset.SOURCE_AWS_SYNC,
+            user=self.user,
+            provider='aws_lightsail',
+            region_code=self.plan.region_code,
+            region_name=self.plan.region_name,
+            asset_name='StaticIp-defer-unattached',
+            provider_resource_id='arn:aws:lightsail:ap-southeast-1:123456789012:StaticIp/StaticIp-defer-unattached',
+            public_ip='21.21.21.25',
+            actual_expires_at=original_expiry,
+            status=CloudAsset.STATUS_UNKNOWN,
+            provider_status='未附加固定IP',
+            is_active=False,
+        )
+        due = {
+            'renew_notice': [],
+            'auto_renew_notice': [],
+            'auto_renew': [],
+            'delete_notice': [],
+            'recycle_notice': [],
+            'expire': [],
+            'suspend': [],
+            'delete': [],
+            'recycle': [order],
+        }
+
+        with patch('cloud.lifecycle._get_due_orders', new_callable=AsyncMock, return_value=due), \
+            patch('cloud.lifecycle._get_migration_due_orders', new_callable=AsyncMock, return_value=[]), \
+            patch('cloud.lifecycle._get_orphan_asset_delete_due', new_callable=AsyncMock, return_value=[]), \
+            patch('cloud.lifecycle._get_unattached_static_ip_delete_due', new_callable=AsyncMock, return_value=[asset]), \
+            patch('cloud.lifecycle.cloud_ip_delete_enabled', return_value=True), \
+            patch('cloud.lifecycle_execution.run_order_static_ip_release') as order_release, \
+            patch('cloud.lifecycle_execution.run_unattached_ip_release') as unattached_release:
+            async_to_sync(lifecycle_tick)(defer_destructive_seconds=300)
+
+        order.refresh_from_db()
+        asset.refresh_from_db()
+        self.assertGreater(order.ip_recycle_at, old_recycle_at)
+        self.assertEqual(asset.actual_expires_at, original_expiry)
+        self.assertEqual(asset.public_ip, '21.21.21.25')
+        order_release.assert_not_called()
+        unattached_release.assert_not_called()
+
     # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
     def test_create_cloud_server_rebuild_order_reuses_original_static_ip_without_temp(self):
         source_order = CloudServerOrder.objects.create(
@@ -9517,6 +9583,10 @@ class CloudServerServicesTestCase(TestCase):
 
     # 功能：验证同一订单续费进入新到期周期后，通知批次不会被上一周期挡住。
     def test_send_order_notice_batch_allows_new_expiry_cycle(self):
+        from cloud.lifecycle import NOTICE_TEXT_OVERRIDES_CONFIG_KEY, _set_notice_text_override
+
+        self.addCleanup(SiteConfig.clear_cache, NOTICE_TEXT_OVERRIDES_CONFIG_KEY)
+
         first_expires_at = timezone.now() + timezone.timedelta(days=3)
         second_expires_at = timezone.now() + timezone.timedelta(days=34)
         order = CloudServerOrder.objects.create(
@@ -9550,6 +9620,7 @@ class CloudServerServicesTestCase(TestCase):
             status=CloudAsset.STATUS_RUNNING,
             is_active=True,
         )
+        _set_notice_text_override('renew_notice_batch', self.user.id, [order.id], 'manual first cycle')
         sent = []
 
         async def fake_notify(user_id, text, reply_markup=None):
@@ -9579,7 +9650,7 @@ class CloudServerServicesTestCase(TestCase):
 
         self.assertTrue(first_result)
         self.assertTrue(second_result)
-        self.assertEqual(sent, [(self.user.id, 'first cycle'), (self.user.id, 'second cycle')])
+        self.assertEqual(sent, [(self.user.id, 'manual first cycle'), (self.user.id, 'second cycle')])
         self.assertEqual(CloudUserNoticeLog.objects.filter(event_type='renew_notice_batch', order=order, delivered=True).count(), 2)
         self.assertEqual(CloudNoticeTask.objects.filter(notice_type=CloudNoticeTask.NOTICE_RENEW, status=CloudNoticeTask.STATUS_SENT).count(), 2)
 
@@ -14318,6 +14389,69 @@ class CloudServerServicesTestCase(TestCase):
         self.assertEqual(order.status, 'deleted')
         self.assertIsNotNone(order.ip_recycle_at)
 
+    # 功能：验证启动延迟保护固定IP回收，避免服务启动检查立即执行破坏性动作。
+    def test_lifecycle_tick_startup_defer_blocks_order_static_ip_release(self):
+        old_recycle_at = timezone.now() - timezone.timedelta(minutes=1)
+        order = CloudServerOrder.objects.create(
+            order_no='HB-TEST-STARTUP-DEFER-RECYCLE',
+            user=self.user,
+            plan=self.plan,
+            provider=self.plan.provider,
+            region_code=self.plan.region_code,
+            region_name=self.plan.region_name,
+            plan_name=self.plan.plan_name,
+            quantity=1,
+            currency='USDT',
+            total_amount='19.00',
+            pay_amount='19.00',
+            status='deleted',
+            public_ip='20.20.20.25',
+            previous_public_ip='20.20.20.25',
+            static_ip_name='StaticIp-startup-defer-recycle',
+            ip_recycle_at=old_recycle_at,
+            instance_id='',
+        )
+        CloudAsset.objects.create(
+            kind=CloudAsset.KIND_SERVER,
+            order=order,
+            user=self.user,
+            provider=order.provider,
+            region_code=order.region_code,
+            region_name=order.region_name,
+            asset_name='StaticIp-startup-defer-recycle',
+            provider_resource_id='arn:aws:lightsail:ap-southeast-1:123456789012:StaticIp/StaticIp-startup-defer-recycle',
+            public_ip='20.20.20.25',
+            previous_public_ip='20.20.20.25',
+            actual_expires_at=old_recycle_at,
+            status=CloudAsset.STATUS_UNKNOWN,
+            provider_status='固定IP仍存在但未附加',
+            is_active=False,
+        )
+        due = {
+            'renew_notice': [],
+            'auto_renew_notice': [],
+            'auto_renew': [],
+            'delete_notice': [],
+            'recycle_notice': [],
+            'expire': [],
+            'suspend': [],
+            'delete': [],
+            'recycle': [CloudServerOrder.objects.get(id=order.id)],
+        }
+
+        with patch('cloud.lifecycle._get_due_orders', new_callable=AsyncMock, return_value=due), \
+            patch('cloud.lifecycle._get_migration_due_orders', new_callable=AsyncMock, return_value=[]), \
+            patch('cloud.lifecycle._get_orphan_asset_delete_due', new_callable=AsyncMock, return_value=[]), \
+            patch('cloud.lifecycle._get_unattached_static_ip_delete_due', new_callable=AsyncMock, return_value=[]), \
+            patch('cloud.lifecycle.cloud_ip_delete_enabled', return_value=True), \
+            patch('cloud.lifecycle._cloud_expiry_notice_payload', new_callable=AsyncMock, return_value={'valid': True}), \
+            patch('cloud.lifecycle_execution.run_order_static_ip_release', return_value={'ok': True, 'error': None}) as release_mock:
+            async_to_sync(lifecycle_tick)(defer_destructive_seconds=600)
+
+        release_mock.assert_not_called()
+        order.refresh_from_db()
+        self.assertGreater(order.ip_recycle_at, old_recycle_at)
+
     # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
     def test_release_order_static_ip_uses_static_ip_asset_name_when_order_name_missing(self):
         from cloud.lifecycle import _release_order_static_ip_sync
@@ -14486,6 +14620,50 @@ class CloudServerServicesTestCase(TestCase):
         asset.refresh_from_db()
         self.assertNotEqual(asset.status, CloudAsset.STATUS_DELETED)
         self.assertEqual(asset.public_ip, '21.21.21.24')
+
+    # 功能：验证启动延迟保护未附加固定IP删除，避免启动检查立即释放云资源。
+    def test_lifecycle_tick_startup_defer_blocks_unattached_static_ip_release(self):
+        due_at = timezone.now() - timezone.timedelta(days=1)
+        asset = CloudAsset.objects.create(
+            kind=CloudAsset.KIND_SERVER,
+            source=CloudAsset.SOURCE_AWS_SYNC,
+            user=self.user,
+            provider='aws_lightsail',
+            region_code=self.plan.region_code,
+            region_name=self.plan.region_name,
+            asset_name='StaticIp-unattached-startup-defer',
+            provider_resource_id='arn:aws:lightsail:ap-southeast-1:123456789012:StaticIp/StaticIp-unattached-startup-defer',
+            public_ip='21.21.21.25',
+            actual_expires_at=due_at,
+            status=CloudAsset.STATUS_UNKNOWN,
+            provider_status='未附加固定IP',
+            is_active=False,
+        )
+        due = {
+            'renew_notice': [],
+            'auto_renew_notice': [],
+            'auto_renew': [],
+            'delete_notice': [],
+            'recycle_notice': [],
+            'expire': [],
+            'suspend': [],
+            'delete': [],
+            'recycle': [],
+        }
+
+        with patch('cloud.lifecycle._get_due_orders', new_callable=AsyncMock, return_value=due), \
+            patch('cloud.lifecycle._get_migration_due_orders', new_callable=AsyncMock, return_value=[]), \
+            patch('cloud.lifecycle._get_orphan_asset_delete_due', new_callable=AsyncMock, return_value=[]), \
+            patch('cloud.lifecycle._get_unattached_static_ip_delete_due', new_callable=AsyncMock, return_value=[asset]), \
+            patch('cloud.lifecycle.cloud_ip_delete_enabled', return_value=True), \
+            patch('cloud.lifecycle_execution.run_unattached_ip_release', return_value={'ok': True, 'error': None}) as release_mock:
+            async_to_sync(lifecycle_tick)(defer_destructive_seconds=600)
+
+        release_mock.assert_not_called()
+        asset.refresh_from_db()
+        self.assertEqual(asset.status, CloudAsset.STATUS_UNKNOWN)
+        self.assertEqual(asset.actual_expires_at, due_at)
+        self.assertEqual(asset.public_ip, '21.21.21.25')
 
     # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
     def test_lifecycle_tick_rechecks_orphan_asset_delete_time_before_cloud_delete(self):

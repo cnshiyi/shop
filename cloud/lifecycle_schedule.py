@@ -59,7 +59,7 @@ def with_runtime_time(value, key: str, default: str = '15:00'):
     return local_value
 
 
-def normalize_service_expiry(value):
+def normalize_asset_expiry(value):
     if not value:
         return value
     local_value = timezone.localtime(value) if timezone.is_aware(value) else value
