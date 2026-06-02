@@ -744,10 +744,18 @@ def _notice_latest_log_map():
 # 功能：提供 后台 API 接口 的内部辅助逻辑，供同模块流程复用。
 def _notice_task_future_items(now, next_run_at, seen_keys: set[tuple[str, int]], latest_logs: dict, *, due_window_days=3, future_limit=10, account_attempts: list[dict] | None = None, notice_cache: dict[int, dict | None] | None = None):
     items = []
+    try:
+        max_items = max(int(future_limit or 0), 0)
+    except (TypeError, ValueError):
+        max_items = 10
+    if max_items <= 0:
+        return [], []
     qs = CloudServerOrder.objects.select_related('user', 'cloud_account').filter(
         status__in=['completed', 'expiring', 'renew_pending', 'suspended', 'deleting', 'deleted'],
     ).order_by('delete_at', 'ip_recycle_at', 'id')[:1000]
     for order in qs:
+        if len(items) >= max_items:
+            break
         if notice_cache is not None and order.id in notice_cache:
             notice = notice_cache[order.id]
         else:
@@ -797,7 +805,7 @@ def _notice_task_future_items(now, next_run_at, seen_keys: set[tuple[str, int]],
                 notice=notice,
             ))
             seen_keys.add((notice_type, order.id))
-            if len(items) >= 200:
+            if len(items) >= max_items:
                 break
     items.sort(key=lambda item: parse_datetime(item.get('notice_at') or '') or timezone.datetime.max.replace(tzinfo=dt_timezone.utc))
     due_items = [item for item in items if item.get('queue_status') in {'fallback_notice', 'within_window'}]

@@ -5,7 +5,7 @@ from django.db.models import Count, Q
 from django.utils import timezone
 
 from bot.models import AdminReplyLink, TelegramChatMessage
-from cloud.models import CloudServerOrder
+from cloud.models import CloudAsset, CloudServerOrder
 from core.models import SiteConfig
 from orders.models import Order, Recharge
 
@@ -104,8 +104,20 @@ class Command(BaseCommand):
     @staticmethod
     def _cloud_order_cleanup_filter(cutoff):
         terminal_statuses = {'cancelled', 'expired', 'failed'}
+        removed_asset_statuses = {
+            CloudAsset.STATUS_TERMINATING,
+            CloudAsset.STATUS_TERMINATED,
+            CloudAsset.STATUS_DELETING,
+            CloudAsset.STATUS_DELETED,
+        }
+        live_asset_order_ids = (
+            CloudAsset.objects
+            .filter(kind=CloudAsset.KIND_SERVER, order_id__isnull=False)
+            .exclude(status__in=removed_asset_statuses)
+            .values('order_id')
+        )
         deleted_retained_done = Q(status='deleted') & (
             Q(ip_recycle_at__isnull=True)
             | Q(ip_recycle_at__lt=cutoff)
         )
-        return Q(status__in=terminal_statuses) | deleted_retained_done
+        return (Q(status__in=terminal_statuses) | deleted_retained_done) & ~Q(id__in=live_asset_order_ids)

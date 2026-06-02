@@ -189,8 +189,10 @@ def run_replaced_order_delete(order_id: int, *, queue_status='scheduled_migratio
         _is_cloud_delete_safe_time,
         _mark_replaced_order_deleted,
         _record_lifecycle_action_failed,
+        _shutdown_enabled_for_order,
         cloud_server_delete_enabled,
     )
+    from cloud.services import _order_primary_asset
 
     order = CloudServerOrder.objects.select_related('user', 'cloud_account').filter(id=order_id).first()
     if not order:
@@ -199,6 +201,10 @@ def run_replaced_order_delete(order_id: int, *, queue_status='scheduled_migratio
     now = timezone.now()
     if not cloud_server_delete_enabled():
         reason = '删除服务器总开关已关闭，跳过真实删机。'
+        async_to_sync(_record_lifecycle_action_failed)(order.id, 'delete_skipped', reason)
+        return {'order_id': order.id, 'order_no': order.order_no, 'ip': ip, 'queue_status': queue_status, 'ok': False, 'error': reason}
+    if enforce_schedule and not _shutdown_enabled_for_order(order, _order_primary_asset(order)):
+        reason = '资产或云账号关机计划已关闭，跳过迁移旧服务器真实删机。'
         async_to_sync(_record_lifecycle_action_failed)(order.id, 'delete_skipped', reason)
         return {'order_id': order.id, 'order_no': order.order_no, 'ip': ip, 'queue_status': queue_status, 'ok': False, 'error': reason}
     if enforce_schedule:
