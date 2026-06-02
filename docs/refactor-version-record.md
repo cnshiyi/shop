@@ -1,5 +1,28 @@
 # Refactor Version Record
 
+## 2026-06-02 后台手工密钥编辑同步主链接修复
+
+### 范围
+
+本轮根据 Codex CLI 只读诊断，修复后台云订单只修改 `mtproxy_secret` 时，主代理链接和代理链路列表仍保留旧密钥的问题。
+
+### 运行变更
+
+- 后台云订单保存新密钥时，会同步重写 `mtproxy_link` 里的 `secret` 参数。
+- 同步重建 `proxy_links` 的主代理项，避免 Bot 详情显示“新密钥、旧链接”的不一致状态。
+- 继续复用已有主记录同步逻辑，把新主链接、新密钥和代理链路同步到关联 `CloudAsset`。
+- 新增回归测试覆盖 secret-only 后台保存时订单与资产主链接、主代理链路、备用链路的同步行为。
+
+### 验证
+
+本地已通过：
+
+```bash
+PYTHONDONTWRITEBYTECODE=1 DJANGO_TEST_SQLITE=1 uv run python -m py_compile cloud/api_orders.py cloud/tests.py
+PYTHONDONTWRITEBYTECODE=1 DJANGO_TEST_SQLITE=1 uv run python manage.py test cloud.tests.CloudOrderStatusDashboardSyncTestCase.test_order_detail_manual_secret_edit_syncs_primary_asset cloud.tests.CloudOrderStatusDashboardSyncTestCase.test_order_detail_manual_secret_edit_updates_main_link_and_proxy_links --noinput --verbosity 1
+PYTHONDONTWRITEBYTECODE=1 DJANGO_TEST_SQLITE=1 uv run python manage.py check
+```
+
 ## 2026-06-02 私聊同群资产续费链路修复
 
 ### 范围

@@ -1,7 +1,7 @@
 """云订单后台 API。"""
 
 import logging
-from urllib.parse import parse_qs, urlparse
+from urllib.parse import parse_qs, parse_qsl, urlencode, urlparse
 
 from asgiref.sync import async_to_sync
 from django.db import transaction
@@ -67,6 +67,18 @@ def _proxy_link_item(mtproxy_link):
     if secret:
         item['secret'] = secret
     return item
+
+
+# 功能：更新主代理链接中的 secret，供后台手工改密钥时保持链接一致。
+def _mtproxy_link_with_secret(mtproxy_link, secret):
+    text = str(mtproxy_link or '').strip()
+    secret = str(secret or '').strip()
+    if not text or not secret:
+        return text
+    parsed = urlparse(text)
+    query_items = [(key, value) for key, value in parse_qsl(parsed.query, keep_blank_values=True) if key != 'secret']
+    query_items.append(('secret', secret))
+    return parsed._replace(query=urlencode(query_items)).geturl()
 
 
 # 功能：把代理链路列表里的主端口替换为当前主链接，避免保留旧 secret/旧链接。
@@ -602,6 +614,11 @@ def cloud_order_detail(request, order_id):
                 if mtproxy_secret:
                     order.mtproxy_secret = mtproxy_secret
                     changed_fields.add('mtproxy_secret')
+                    if order.mtproxy_link:
+                        order.mtproxy_link = _mtproxy_link_with_secret(order.mtproxy_link, mtproxy_secret)
+                        changed_fields.add('mtproxy_link')
+                        order.proxy_links = _proxy_links_with_main_link(order.proxy_links or [], order.mtproxy_link, order.mtproxy_port)
+                        changed_fields.add('proxy_links')
             if 'mtproxy_link' in payload:
                 order.mtproxy_link = str(payload.get('mtproxy_link') or '').strip() or None
                 changed_fields.add('mtproxy_link')

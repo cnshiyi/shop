@@ -14382,6 +14382,41 @@ class CloudOrderStatusDashboardSyncTestCase(TestCase):
         self.assertEqual(asset.mtproxy_secret, 'new-secret')
 
     # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
+    def test_order_detail_manual_secret_edit_updates_main_link_and_proxy_links(self):
+        order, asset, _server = self._create_order_with_primary_records()
+        old_link = 'tg://proxy?server=203.0.113.10&port=443&secret=old-secret&tag=keep'
+        backup_link = 'tg://proxy?server=203.0.113.10&port=8443&secret=backup-secret'
+        order.mtproxy_link = old_link
+        order.mtproxy_secret = 'old-secret'
+        order.mtproxy_port = 443
+        order.proxy_links = [
+            {'name': '主代理 mtg', 'url': old_link, 'server': '203.0.113.10', 'port': '443', 'secret': 'old-secret'},
+            {'name': '备用代理', 'url': backup_link, 'server': '203.0.113.10', 'port': '8443', 'secret': 'backup-secret'},
+        ]
+        order.save(update_fields=['mtproxy_link', 'mtproxy_secret', 'mtproxy_port', 'proxy_links'])
+        asset.mtproxy_link = old_link
+        asset.mtproxy_secret = 'old-secret'
+        asset.mtproxy_port = 443
+        asset.proxy_links = list(order.proxy_links)
+        asset.save(update_fields=['mtproxy_link', 'mtproxy_secret', 'mtproxy_port', 'proxy_links'])
+
+        response = self._post_json(cloud_order_detail, f'/admin/cloud-orders/{order.id}/', {
+            'mtproxy_secret': 'new-secret',
+        }, order.id)
+
+        self.assertEqual(response.status_code, 200)
+        order.refresh_from_db()
+        asset.refresh_from_db()
+        self.assertIn('secret=new-secret', order.mtproxy_link)
+        self.assertNotIn('secret=old-secret', order.mtproxy_link)
+        self.assertEqual(order.proxy_links[0]['secret'], 'new-secret')
+        self.assertIn('secret=new-secret', order.proxy_links[0]['url'])
+        self.assertIn(backup_link, [item.get('url') for item in order.proxy_links])
+        self.assertEqual(asset.mtproxy_link, order.mtproxy_link)
+        self.assertEqual(asset.proxy_links[0]['secret'], 'new-secret')
+        self.assertIn('secret=new-secret', asset.proxy_links[0]['url'])
+
+    # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
     def test_order_detail_manual_previous_ip_edit_syncs_primary_records(self):
         order, asset, server = self._create_order_with_primary_records()
 
