@@ -301,8 +301,10 @@ def run_order_static_ip_release(order_id: int, *, queue_status='scheduled_recycl
         _mark_recycled,
         _record_lifecycle_action_failed,
         _release_order_static_ip,
+        _shutdown_enabled_for_order,
         cloud_ip_delete_enabled,
     )
+    from cloud.services import _order_primary_asset
 
     order = CloudServerOrder.objects.select_related('user', 'cloud_account').filter(id=order_id).first()
     if not order:
@@ -315,6 +317,10 @@ def run_order_static_ip_release(order_id: int, *, queue_status='scheduled_recycl
         return {'order_id': order.id, 'order_no': order.order_no, 'ip': ip, 'queue_status': queue_status, 'ok': False, 'error': reason}
     if not cloud_ip_delete_enabled():
         reason = '删除IP总开关已关闭，跳过真实释放固定 IP。'
+        async_to_sync(_record_lifecycle_action_failed)(order.id, 'recycle_skipped', reason)
+        return {'order_id': order.id, 'order_no': order.order_no, 'ip': ip, 'queue_status': queue_status, 'ok': False, 'error': reason}
+    if enforce_schedule and not _shutdown_enabled_for_order(order, _order_primary_asset(order)):
+        reason = '资产或云账号关机计划已关闭，跳过真实释放固定 IP。'
         async_to_sync(_record_lifecycle_action_failed)(order.id, 'recycle_skipped', reason)
         return {'order_id': order.id, 'order_no': order.order_no, 'ip': ip, 'queue_status': queue_status, 'ok': False, 'error': reason}
     if enforce_schedule:
