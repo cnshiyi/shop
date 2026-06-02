@@ -1,5 +1,55 @@
 # 重构版本记录
 
+## 2026-06-03 02:43 自动监工：复查生命周期事实和极端回调
+
+### 范围
+
+本轮从提交 `4839cf1 记录通知价格返回链复查` 后继续监工。起始读取 git 状态时工作树干净，分支为 `codex/cloud-asset-lifecycle-refactor`。
+
+重点复查云资产生命周期是否仍只以 `CloudAsset.actual_expires_at` 作为唯一结构化到期事实，订单表是否恢复旧到期字段，计划快照表是否恢复，退款逻辑和旧退款函数名是否回流，废弃 app 是否误用，以及机器人资产详情、订单详情、续费、换 IP、重装、修改配置等返回链是否仍满足 Telegram `callback_data` 64 字节限制。
+
+### 修改
+
+- 本轮未修改运行代码。
+- 仅追加本中文版本记录，记录本轮静态扫描、字段 introspection、极端 callback 探针和聚焦测试结果。
+
+### 监工结果
+
+- `CloudAsset` 仍只有 `actual_expires_at` 作为结构化资产到期字段。
+- `CloudServerOrder` 未恢复 `service_expires_at` 或 `actual_expires_at`，仅保留 `renew_grace_expires_at` 作为流程时间字段。
+- `CloudAssetDashboardSnapshot` 未恢复到期字段。
+- 运行代码扫描未发现旧计划模型、旧计划快照表、旧退款函数名、旧端口入口 `allow_client_port` / `set_cloud_server_port` / `custom:port:` / `cloud:ipport:` 回流。
+- 仓库根目录未发现废弃 app 目录 `accounts`、`finance`、`mall`、`monitoring`、`dashboard_api`、`biz`；`dashboard_api` 仅作为当前路由 namespace 使用。
+- 极端 18 位订单 ID、18 位资产 ID、18 位页码、嵌套订单详情、嵌套资产详情和未知超长来源共 128 个 callback 样本无超限，最大 64 字节。
+- 真机测试未执行：本轮未执行真实 Telegram 点击、真实云资源创建/删除/IP 变更、真实支付、链上广播、生产发布或不可逆操作。
+
+### 验证
+
+本地已通过：
+
+```bash
+UV_CACHE_DIR=/Users/a399/Desktop/data/shop/.uv-cache PYTHONDONTWRITEBYTECODE=1 uv run python manage.py check
+UV_CACHE_DIR=/Users/a399/Desktop/data/shop/.uv-cache PYTHONDONTWRITEBYTECODE=1 uv run python -m py_compile bot/handlers.py bot/keyboards.py bot/tests.py cloud/services.py cloud/provisioning.py cloud/api_orders.py cloud/api_servers.py cloud/lifecycle.py cloud/api_tasks.py orders/payment_scanner.py
+UV_CACHE_DIR=/Users/a399/Desktop/data/shop/.uv-cache PYTHONDONTWRITEBYTECODE=1 uv run python manage.py shell -c "from cloud.models import CloudAsset, CloudServerOrder, CloudAssetDashboardSnapshot; print([f.name for f in CloudAsset._meta.fields if 'expires' in f.name or 'expiry' in f.name]); print([f.name for f in CloudServerOrder._meta.fields if 'expires' in f.name or 'expiry' in f.name]); print([f.name for f in CloudAssetDashboardSnapshot._meta.fields if 'expires' in f.name or 'expiry' in f.name])"
+UV_CACHE_DIR=/Users/a399/Desktop/data/shop/.uv-cache DB_ENGINE=sqlite SQLITE_NAME=/private/tmp/shop_bot_callbacks_watch_20260603_<进程>.sqlite3 PYTHONDONTWRITEBYTECODE=1 uv run python manage.py test bot.tests.RetainedIpRenewalUiTestCase --noinput --verbosity 1
+UV_CACHE_DIR=/Users/a399/Desktop/data/shop/.uv-cache DB_ENGINE=sqlite SQLITE_NAME=/private/tmp/shop_lifecycle_watch_20260603_<进程>.sqlite3 PYTHONDONTWRITEBYTECODE=1 uv run python manage.py test cloud.tests.CloudServerServicesTestCase.test_order_rejects_removed_service_expiry_field cloud.tests.CloudServerServicesTestCase.test_update_cloud_asset_expiry_refreshes_order_lifecycle cloud.tests.CloudServerServicesTestCase.test_update_cloud_asset_expiry_refreshes_delete_plan_view cloud.tests.CloudServerServicesTestCase.test_unbound_asset_renewal_lists_plans_without_creating_order cloud.tests.CloudServerServicesTestCase.test_prepare_unbound_asset_renewal_creates_pending_payment_order cloud.tests.CloudServerServicesTestCase.test_completed_asset_recovery_order_renews_without_reprovisioning --noinput --verbosity 1
+DJANGO_SETTINGS_MODULE=shop.settings UV_CACHE_DIR=/Users/a399/Desktop/data/shop/.uv-cache DB_ENGINE=sqlite SQLITE_NAME=/private/tmp/shop_callback_probe_20260603_retry_<进程>.sqlite3 PYTHONDONTWRITEBYTECODE=1 uv run python - <<'PY'
+# 极端 callback 样本探针，覆盖资产详情、订单详情、续费支付、换 IP、重装、修改配置、只读订单详情和列表入口。
+PY
+UV_CACHE_DIR=/Users/a399/Desktop/data/shop/.uv-cache PYTHONDONTWRITEBYTECODE=1 uv run python manage.py makemigrations --check --dry-run
+rg -n "service_expires_at\\s*=|order\\.(service_expires_at|actual_expires_at)|CloudServerOrder\\([^\\n]*(service_expires_at|actual_expires_at)|CloudLifecyclePlan\\b|CloudNoticePlan\\b|CloudAutoRenewPlan\\b|CloudAssetPlanSnapshot|CloudOrderPlanSnapshot|refund_order|process_refund|create_refund|issue_refund|refund_to_balance|refund_balance|STATUS_REFUNDED|status=['\\\"]refunded['\\\"]|normalize_service_expiry|service_expired_at|allow_client_port|set_cloud_server_port|custom:port:|cloud:ipport:" bot core orders cloud shop --glob '!**/migrations/**' --glob '!**/tests.py' --glob '!**/__pycache__/**'
+find . -maxdepth 2 -type d \( -name accounts -o -name finance -o -name mall -o -name monitoring -o -name dashboard_api -o -name biz \) -print
+git diff --check
+```
+
+`makemigrations --check --dry-run` 仍出现本地沙箱无法连接 `127.0.0.1` MySQL 的迁移历史一致性警告，但最终结果为 `No changes detected`。`RetainedIpRenewalUiTestCase` 仍会打印 `SimpleTestCase` 禁止数据库查询配置的预期日志，最终 44 条通过。极端 callback 探针第一次误从 `bot.keyboards` 导入续费套餐键盘失败，确认该键盘定义在 `bot.handlers` 后已用正确导入重跑通过。
+
+### 剩余风险
+
+- 本轮未跑完整测试套件。
+- 本轮未执行真实 Telegram 点击、真实云资源创建/删除/IP 变更、真实支付、链上广播、生产发布或不可逆操作。
+- 真机测试仍需在用户明确授权真实云资源成本后单独执行，并写中文报告，云资源 ID 需脱敏。
+
 ## 2026-06-03 02:25 自动监工：收紧详情返回按钮兜底压缩
 
 ### 范围
