@@ -1,4 +1,4 @@
-# Memory
+# 记忆
 
 - 2026-04-24：`C:\Users\Administrator\Desktop\shop` 仅为 Django 后端仓库，不承载真实前端源码。
 - 2026-04-24：真实前端仓库位置为 `C:\Users\Administrator\Desktop\vue-vben-admin`。
