@@ -19,6 +19,7 @@ from bot.handlers import _asset_reinstall_confirm_keyboard, _asset_renewal_plan_
 from bot.keyboards import balance_details_list, cloud_asset_detail_callback, cloud_detail_callback, cloud_previous_detail_callback, compact_callback_path, cloud_ip_query_result, cloud_order_list, cloud_server_change_ip_region_menu, cloud_server_detail, cloud_server_renew_payment
 from bot.models import TelegramChatArchive, TelegramChatMessage, TelegramLoginAccount, TelegramUser
 from bot.services import record_telegram_message
+from bot.states import CustomServerStates
 from bot.telegram_listener import _build_bark_request, _build_push_payload, _is_self_sender, _sync_account_profile
 from cloud.asset_expiry import order_asset_expiry
 from cloud.models import CloudAsset, CloudServerOrder, CloudServerPlan
@@ -1118,6 +1119,17 @@ class RetainedIpRenewalUiTestCase(SimpleTestCase):
         self.assertIn('端口: 443', text)
         self.assertIn('创建任务已提交', text)
         self.assertEqual(scheduled, ['_provision_cloud_server_and_notify'])
+
+    def test_legacy_custom_port_flow_is_removed(self):
+        source = inspect.getsource(register_handlers)
+
+        self.assertNotIn('waiting_port', {state.state.split(':')[-1] for state in CustomServerStates.__all_states__})
+        self.assertNotIn('custom:port:', source)
+        self.assertNotIn('cloud:ipport:', source)
+        self.assertNotIn('bot_custom_port_invalid', BOT_TEXTS)
+        self.assertNotIn('bot_set_port_failed', BOT_TEXTS)
+        self.assertNotIn('bot_custom_port_hint', BOT_TEXTS)
+        self.assertNotIn('bot_custom_port_success', BOT_TEXTS)
 
     def test_cloud_change_ip_keyboards_keep_back_path(self):
         regions = [

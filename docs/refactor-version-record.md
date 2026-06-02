@@ -1,5 +1,47 @@
 # 重构版本记录
 
+## 2026-06-03 00:28 自动监工：移除旧端口兼容入口
+
+### 范围
+
+本轮继续用 `codex-cli` 只读复查机器人端口流程、生命周期到期事实、计划任务防重复、旧计划快照、退款逻辑、废弃 app 和返回链风险。复查结果里旧端口 callback 仍被识别为兼容入口；结合“不用兼容、直接大改”的目标，本轮彻底移除旧端口入口。
+
+### 修改
+
+- 删除 `CustomServerStates.waiting_port`，机器人不再存在用户端口输入状态。
+- 删除旧 `custom:port:default:*`、`custom:port:custom:*`、`cloud:ipport:default:*`、`cloud:ipport:custom:*` callback handler。
+- 删除旧端口输入、旧端口兼容相关 Bot 文案键，避免后台文案配置继续出现旧端口流程概念。
+- 新增回归测试，锁定旧端口状态、旧端口 callback 和旧端口文案键不得回流。
+
+### 监工结果
+
+- 当前新购、余额支付、链上支付和换 IP 路径均直接使用默认端口 `443`，付款成功后进入创建或恢复流程。
+- 精确扫描运行时代码未发现 `waiting_port`、`custom:port:*`、`cloud:ipport:*`、旧端口输入、旧端口按钮或用户自定义端口入口残留。
+- `CloudAsset.actual_expires_at` 仍是资产唯一结构化到期事实；`CloudServerOrder.expired_at` 仅用于未付款订单超时，不是服务到期字段。
+- 删除/通知执行层已有 `CloudLifecycleTask`、`CloudNoticeTask` 数据库任务支撑和认领去重；后台计划展示仍是实时构建加缓存，不承担防重复。
+- 旧计划快照模型、退款入口、退款函数名和废弃 app 未发现运行时代码回流。
+- `codex-cli` 仍提示深层二级动作 callback 在超长 ID 下可能逼近 64 字节限制，后续继续收口为短来源码或短 token。
+
+### 验证
+
+本地已通过：
+
+```bash
+uv run python -m py_compile bot/handlers.py bot/keyboards.py bot/states/custom.py bot/tests.py core/texts.py
+uv run python manage.py test bot.tests.RetainedIpRenewalUiTestCase --keepdb
+uv run python manage.py check
+uv run python manage.py makemigrations --check --dry-run
+git diff --check
+rg -n "waiting_port|custom:port|cloud:ipport|bot_custom_port_invalid|bot_set_port_failed|bot_custom_port_hint|bot_custom_port_success|旧端口输入|旧端口按钮|自定义端口" bot core cloud orders --glob '!**/migrations/**' --glob '!**/tests.py'
+```
+
+结果：机器人返回 UI 聚焦测试 35 条通过；运行时代码未发现旧端口状态、旧端口按钮或用户自定义端口入口残留。
+
+### 剩余风险
+
+- 本轮未执行真实 Telegram 点击、真实云资源创建/删除/IP 变更、真实支付、链上广播、生产发布或不可逆操作。
+- 深层 callback 长度边界仍需下一轮继续压缩。
+
 ## 2026-06-03 00:18 自动监工：返回来源二次压缩
 
 ### 范围
