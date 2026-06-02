@@ -17,6 +17,7 @@
 - 生命周期计划接口增加进程内缓存和按 `CloudAsset.updated_at`、`CloudIpLog.created_at` 的失效判断；刷新命令改为写入同一缓存路径，避免重复构建计划。
 - 未附加固定 IP 删除项改为直接从 `CloudAsset` 查询，补齐非活跃、已释放和历史删除记录，并给删除项补充 `PLAN_KIND_UNATTACHED_IP_DELETE`，避免删除尝试次数在接口装饰时丢失。
 - `Server` 兼容写入统一打 `sync_state.compat_server_record` 标记；后台删除服务器列表记录只允许删除兼容记录，并按订单、实例、资源 ID 或 IP 清理关联兼容记录，不把真实资产误当旧服务器入口。
+- `Server.objects.get()` 在历史重复兼容记录未归一前增加容错选择，优先返回唯一兼容记录或最新候选，避免兼容壳因重复记录直接抛出 `MultipleObjectsReturned`。
 - 资产后台编辑同步关联兼容记录的名称、IP、实例 ID 和资源 ID；手工用户、手工到期和人工备注继续保留，不覆盖 `CloudAsset.actual_expires_at`。
 - 归一命令可合并重复兼容记录、解析云账号标签并清理活跃但无效的兼容记录；已终态 deleted/terminated 的残留记录保留为历史状态，不硬删。
 - AWS 同步解析真实资产时优先非兼容 `CloudAsset`，云端实例恢复后清理旧“已标记删除”备注，并只从真实资产向兼容记录传播状态；阿里云缺失确认继续处理有订单绑定的兼容记录，但跳过无订单的空白兼容记录。

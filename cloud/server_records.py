@@ -142,7 +142,8 @@ class _ServerObjects:
             existing = ordered.order_by('-updated_at', '-id').first()
             if existing:
                 return existing
-            return None
+            if str(payload.get('note') or '').strip():
+                return None
         if ip_identity:
             return self._identity_scope(payload).filter(ip_identity).order_by('-updated_at', '-id').first()
         if identity:
@@ -171,7 +172,15 @@ class _ServerObjects:
         return CloudAsset.objects.update_or_create(defaults=defaults, **kwargs)
 
     def get(self, *args, **kwargs):
-        return self.filter(*args, **kwargs).get()
+        queryset = self.filter(*args, **kwargs)
+        try:
+            return queryset.get()
+        except CloudAsset.MultipleObjectsReturned:
+            candidates = list(queryset.order_by('-updated_at', '-id')[:50])
+            compat = [item for item in candidates if (item.sync_state or {}).get('compat_server_record')]
+            if len(compat) == 1:
+                return compat[0]
+            return compat[0] if compat else candidates[0]
 
     def __getattr__(self, name):
         return getattr(self._qs(), name)
