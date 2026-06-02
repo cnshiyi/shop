@@ -14944,8 +14944,8 @@ class CloudOrderStatusDashboardSyncTestCase(TestCase):
         self.assertEqual(order.mtproxy_port, 443)
         self.assertEqual(order.proxy_links[0]['url'], 'tg://proxy?server=203.0.113.88&port=443&secret=abcdef')
         self.assertEqual(asset.proxy_links[0]['url'], 'tg://proxy?server=203.0.113.88&port=443&secret=abcdef')
-        self.assertEqual(asset.actual_expires_at, CloudServerOrder.normalize_expiry_time(expires_at))
-        self.assertEqual(server.expires_at, CloudServerOrder.normalize_expiry_time(expires_at))
+        self.assertEqual(asset.actual_expires_at, expires_at)
+        self.assertEqual(server.expires_at, expires_at)
 
     # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
     def test_order_detail_manual_secret_edit_syncs_primary_asset(self):
