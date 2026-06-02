@@ -46,8 +46,15 @@ from cloud.provisioning import (
 )
 from cloud.services import _cloud_asset_deleted_or_missing, apply_cloud_server_renewal, create_cloud_server_order, create_cloud_server_rebuild_order, create_cloud_server_renewal, create_cloud_server_renewal_by_public_query, create_cloud_server_renewal_for_user, create_cloud_server_upgrade_order, ensure_cloud_asset_operation_order, get_cloud_server_by_ip, get_cloud_server_by_ip_for_user, get_group_proxy_asset_detail, get_proxy_asset_by_ip_for_admin, get_proxy_asset_by_ip_for_user, get_user_proxy_asset_detail, is_retained_ip_order_visible_in_group, list_all_auto_renew_cloud_servers, list_cloud_asset_renewal_plans, list_cloud_server_upgrade_plans, list_group_cloud_servers, list_retained_ip_renewal_plans, list_retained_ip_renewal_plans_by_asset, list_user_cloud_servers, mark_cloud_server_ip_change_requested, mark_cloud_server_reinit_requested, pay_cloud_server_order_with_balance, pay_cloud_server_renewal_with_balance, prepare_cloud_asset_renewal_with_link, prepare_retained_ip_renewal_with_link, rebind_cloud_server_user, record_cloud_ip_log, replace_cloud_asset_order_by_admin, run_cloud_server_renewal_postcheck, set_cloud_server_auto_renew_admin, set_group_cloud_server_auto_renew, sync_cloud_asset_user_binding
 from cloud.sync_safety import get_missing_confirmation_threshold
-from cloud.api import _apply_server_missing_state, _cloud_order_source_tags, _display_cloud_asset_note, _execute_cloud_asset_sync_job, _fetch_address_chain_balances, auto_renew_task_detail, cancel_cloud_asset_sync_job, cloud_asset_sync_job_detail, cloud_asset_sync_jobs_list, cloud_asset_sync_jobs_metrics, cloud_assets_list, cloud_order_detail, cloud_orders_list, delete_cloud_asset, delete_cloud_order, delete_notice_history, delete_server, notice_task_detail, refresh_cloud_asset_dashboard_snapshots, refresh_notice_plan_view, retry_cloud_asset_sync_job, run_auto_renew_order, run_auto_renew_tasks, servers_list, sync_cloud_asset_status, sync_cloud_assets, tasks_overview, update_cloud_asset, update_cloud_order_status, update_notice_plan_text, update_notice_switches
-from cloud.api_assets import _asset_payload
+from cloud.api_asset_edit import delete_cloud_asset, update_cloud_asset
+from cloud.api_asset_snapshots import refresh_cloud_asset_dashboard_snapshots
+from cloud.api_assets import _asset_payload, _display_cloud_asset_note, _infer_asset_order, cloud_assets_list
+from cloud.api_monitors import _fetch_address_chain_balances
+from cloud.api_orders import _cloud_order_source_tags, cloud_order_detail, cloud_orders_list, delete_cloud_order, update_cloud_order_status
+from cloud.api_servers import delete_server, servers_list
+from cloud.api_sync import _apply_server_missing_state, sync_cloud_asset_status
+from cloud.api_tasks import auto_renew_task_detail, delete_notice_history, notice_task_detail, refresh_notice_plan_view, run_auto_renew_order, run_auto_renew_tasks, tasks_overview, update_notice_plan_text, update_notice_switches
+from cloud.sync_jobs import _execute_cloud_asset_sync_job, cancel_cloud_asset_sync_job, cloud_asset_sync_job_detail, cloud_asset_sync_jobs_list, cloud_asset_sync_jobs_metrics, retry_cloud_asset_sync_job, sync_cloud_assets
 from core.cloud_accounts import cloud_account_label, cloud_account_label_variants, list_cloud_accounts_by_server_load
 from core.models import CloudAccountConfig, SiteConfig
 from core.persistence import bump_daily_address_stat
@@ -1301,7 +1308,7 @@ class CloudServerServicesTestCase(TestCase):
         request = self.factory.get('/api/dashboard/cloud-assets/', {'paginated': '1'})
         self._attach_bearer_session(request, admin)
 
-        with patch('cloud.api._infer_asset_order', side_effect=AssertionError('per-asset order inference should not run')):
+        with patch('cloud.api_assets._infer_asset_order', side_effect=AssertionError('per-asset order inference should not run')):
             response = cloud_assets_list(request)
         payload = json.loads(response.content.decode('utf-8'))['data']
 
@@ -1358,7 +1365,7 @@ class CloudServerServicesTestCase(TestCase):
         admin = get_user_model().objects.create_user(username='snapshot_list_admin', password='x', is_staff=True)
         request = self.factory.get('/api/dashboard/cloud-assets/', {'paginated': '1', 'keyword': 'snapshot-list-asset'})
         self._attach_bearer_session(request, admin)
-        with patch('cloud.api._cloud_asset_payloads', side_effect=AssertionError('list should read dashboard snapshots')):
+        with patch('cloud.api_assets._cloud_asset_payloads', side_effect=AssertionError('list should read dashboard snapshots')):
             response = cloud_assets_list(request)
         payload = json.loads(response.content.decode('utf-8'))['data']
 
@@ -2068,8 +2075,8 @@ class CloudServerServicesTestCase(TestCase):
         )
         request = self._attach_bearer_session(request, admin)
 
-        with patch('cloud.api._refresh_dashboard_plan_snapshots') as direct_refresh, \
-            patch('cloud.api._refresh_dashboard_plan_snapshots_deferred') as deferred_refresh:
+        with patch('cloud.api_asset_edit._refresh_dashboard_plan_snapshots') as direct_refresh, \
+            patch('cloud.api_asset_edit._refresh_dashboard_plan_snapshots_deferred') as deferred_refresh:
             response = update_cloud_asset(request, asset.id)
 
         self.assertEqual(response.status_code, 200)
@@ -7455,7 +7462,7 @@ class CloudServerServicesTestCase(TestCase):
             provider_status='运行中',
         )
         staff_user = get_user_model().objects.create_user(username='staff_asset_sync_one', password='x', is_staff=True, is_superuser=True)
-        with patch('cloud.api._call_command_capture', return_value=(object(), None)) as mocked:
+        with patch('cloud.api_sync._call_command_capture', return_value=(object(), None)) as mocked:
             request = RequestFactory().post(f'/api/dashboard/cloud-assets/{asset.id}/sync/', data='{}', content_type='application/json')
             request = self._attach_bearer_session(request, staff_user)
             response = sync_cloud_asset_status(request, asset.id)
@@ -7517,7 +7524,7 @@ class CloudServerServicesTestCase(TestCase):
             is_active=False,
         )
         staff_user = get_user_model().objects.create_user(username='staff_retained_asset_sync_one', password='x', is_staff=True, is_superuser=True)
-        with patch('cloud.api._call_command_capture', return_value=(object(), None)) as mocked:
+        with patch('cloud.api_sync._call_command_capture', return_value=(object(), None)) as mocked:
             request = RequestFactory().post(f'/api/dashboard/cloud-assets/{asset.id}/sync/', data='{}', content_type='application/json')
             request = self._attach_bearer_session(request, staff_user)
             response = sync_cloud_asset_status(request, asset.id)
@@ -11042,7 +11049,7 @@ class CloudServerServicesTestCase(TestCase):
         async def fake_get_due_orders():
             return {'auto_renew': [due_order]}
 
-        with patch('cloud.api._get_due_orders', side_effect=fake_get_due_orders):
+        with patch('cloud.api_tasks._get_due_orders', side_effect=fake_get_due_orders):
             response = auto_renew_task_detail(request)
 
         payload = json.loads(response.content)
@@ -11087,7 +11094,7 @@ class CloudServerServicesTestCase(TestCase):
         async def fake_get_due_orders():
             return {'auto_renew': [due_order]}
 
-        with patch('cloud.api._get_due_orders', side_effect=fake_get_due_orders):
+        with patch('cloud.api_tasks._get_due_orders', side_effect=fake_get_due_orders):
             response = auto_renew_task_detail(request)
 
         payload = json.loads(response.content)
@@ -11187,7 +11194,7 @@ class CloudServerServicesTestCase(TestCase):
                 return None, '余额不足', {'currency': 'USDT', 'amount': None}
             return order, None, {'currency': 'USDT', 'amount': Decimal('19.00'), 'before': Decimal('100.00'), 'after': Decimal('81.00'), 'payer_user_id': self.user.id}
 
-        with patch('cloud.api._get_due_orders', side_effect=fake_get_due_orders), patch('cloud.api._run_auto_renew', new=fake_run_auto_renew):
+        with patch('cloud.api_tasks._get_due_orders', side_effect=fake_get_due_orders), patch('cloud.api_tasks._run_auto_renew', new=fake_run_auto_renew):
             response = run_auto_renew_tasks(request)
 
         payload = json.loads(response.content)
@@ -11236,7 +11243,7 @@ class CloudServerServicesTestCase(TestCase):
             renewed = CloudServerOrder.objects.get(id=order_id)
             return renewed, None, {'currency': 'USDT', 'amount': Decimal('19.00'), 'before': Decimal('50.00'), 'after': Decimal('31.00'), 'payer_user_id': self.user.id}
 
-        with patch('cloud.api._run_auto_renew', new=fake_run_auto_renew):
+        with patch('cloud.api_tasks._run_auto_renew', new=fake_run_auto_renew):
             response = run_auto_renew_order(request, order.id)
 
         payload = json.loads(response.content)
@@ -12332,8 +12339,6 @@ class CloudServerServicesTestCase(TestCase):
 
     # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
     def test_dashboard_asset_order_inference_scopes_duplicate_ip_by_account(self):
-        from cloud.api import _infer_asset_order
-
         first_account = CloudAccountConfig.objects.create(
             provider=CloudAccountConfig.PROVIDER_AWS,
             name='infer-account-a',
@@ -15561,9 +15566,9 @@ class DashboardTronBalanceQueryTestCase(TestCase):
             return {'TRON-PRO-API-KEY': 'dashboard-key'}
 
         with (
-            patch('cloud.api.get_redis', new=fake_get_redis),
-            patch('cloud.api.build_trongrid_headers', new=fake_build_headers),
-            patch('cloud.api.httpx.Client', new=FakeClient),
+            patch('cloud.api_monitors.get_redis', new=fake_get_redis),
+            patch('cloud.api_monitors.build_trongrid_headers', new=fake_build_headers),
+            patch('cloud.api_monitors.httpx.Client', new=FakeClient),
         ):
             usdt_balance, trx_balance, error = _fetch_address_chain_balances('TDashboardBalanceAddress')
 
