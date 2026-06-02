@@ -10238,6 +10238,25 @@ class CloudServerServicesTestCase(TestCase):
         self.assertIsNone(order.delete_notice_sent_at)
         self.assertIsNone(order.recycle_notice_sent_at)
 
+        clear_request = RequestFactory().patch(
+            f'/api/dashboard/cloud-assets/{asset.id}/',
+            data=json.dumps({'actual_expires_at': None}),
+            content_type='application/json',
+            HTTP_AUTHORIZATION='',
+        )
+        self._attach_bearer_session(clear_request, staff_user)
+
+        clear_response = update_cloud_asset(clear_request, asset.id)
+
+        self.assertEqual(clear_response.status_code, 200)
+        order.refresh_from_db()
+        asset.refresh_from_db()
+        self.assertIsNone(asset.actual_expires_at)
+        self.assertIsNone(order.renew_grace_expires_at)
+        self.assertIsNone(order.suspend_at)
+        self.assertIsNone(order.delete_at)
+        self.assertIsNone(order.ip_recycle_at)
+
     # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
     def test_renewal_balance_payment_uses_latest_proxy_price(self):
         self.user.balance = Decimal('100.000000')

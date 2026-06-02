@@ -235,13 +235,19 @@ def update_cloud_asset(request, asset_id):
                         CloudAsset.STATUS_TERMINATING,
                     ]).count()
                     if same_order_active_assets <= 1:
+                        lifecycle_updates = compute_order_lifecycle_fields(manual_expires_at) if manual_expires_at else {
+                            'renew_grace_expires_at': None,
+                            'suspend_at': None,
+                            'delete_at': None,
+                            'ip_recycle_at': None,
+                        }
                         pending_order_updates.update({
                             'renew_notice_sent_at': None,
                             'auto_renew_notice_sent_at': None,
                             'auto_renew_failure_notice_sent_at': None,
                             'delete_notice_sent_at': None,
                             'recycle_notice_sent_at': None,
-                            **compute_order_lifecycle_fields(manual_expires_at),
+                            **lifecycle_updates,
                         })
 
             if asset.order_id:

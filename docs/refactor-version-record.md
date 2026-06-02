@@ -10,6 +10,7 @@
 
 - 未绑定固定 IP 续费钱包支付测试不再通过 `CloudServerOrder.objects.update(service_expires_at=...)` 写已移除字段。
 - 相关断言改为确认 `service_expires_at` 兼容属性读取关联 `CloudAsset.actual_expires_at`，匹配当前资产事实源。
+- 后台云资产编辑清空 `actual_expires_at` 时，同步清空关联订单生命周期字段，避免旧关机、删机、IP 回收计划残留。
 - 字段引用扫描确认当前运行代码不再对订单旧字段做 ORM `filter/update/order_by/values` 操作；仅 `0043` 历史迁移在 `0044` 删除字段前读取旧列用于回填资产到期。
 
 ### 验证
@@ -19,9 +20,10 @@
 ```bash
 UV_CACHE_DIR=/private/tmp/uv-cache-shop uv run python manage.py check
 UV_CACHE_DIR=/private/tmp/uv-cache-shop uv run python manage.py makemigrations --check --dry-run
-UV_CACHE_DIR=/private/tmp/uv-cache-shop uv run python -m py_compile bot/api.py bot/handlers.py bot/keyboards.py cloud/api_orders.py cloud/api_tasks.py cloud/api_asset_edit.py cloud/lifecycle.py cloud/provisioning.py cloud/services.py cloud/models.py cloud/asset_expiry.py cloud/tests.py cloud/management/commands/sync_aws_assets.py cloud/management/commands/sync_aliyun_assets.py orders/payment_scanner.py orders/services.py core/management/commands/cleanup_old_records.py
+UV_CACHE_DIR=/private/tmp/uv-cache-shop uv run python -m py_compile bot/api.py bot/handlers.py bot/keyboards.py cloud/api_orders.py cloud/api_tasks.py cloud/api_asset_edit.py cloud/lifecycle.py cloud/provisioning.py cloud/services.py cloud/models.py cloud/asset_expiry.py cloud/tests.py cloud/management/commands/sync_aws_assets.py cloud/management/commands/sync_aliyun_assets.py orders/payment_scanner.py orders/services.py core/management/commands/cleanup_old_records.py orders/tests.py
 UV_CACHE_DIR=/private/tmp/uv-cache-shop DJANGO_TEST_SQLITE=1 uv run python manage.py test cloud.tests.CloudServerServicesTestCase.test_order_save_backfills_blank_asset_expiry_only cloud.tests.CloudServerServicesTestCase.test_server_compat_create_preserves_manual_asset_owner_and_expiry cloud.tests.CloudServerServicesTestCase.test_unbound_asset_renewal_wallet_payment_marks_paid_for_recovery cloud.tests.CloudServerServicesTestCase.test_unbound_asset_renewal_wallet_payment_repairs_completed_unpaid_state --noinput --verbosity 1
 UV_CACHE_DIR=/private/tmp/uv-cache-shop DJANGO_TEST_SQLITE=1 uv run python manage.py test cloud.tests.CloudServerServicesTestCase.test_order_save_backfills_blank_asset_expiry_only cloud.tests.CloudServerServicesTestCase.test_server_compat_create_preserves_manual_asset_owner_and_expiry cloud.tests.CloudServerServicesTestCase.test_notice_delete_plan_and_proxy_list_use_asset_expiry cloud.tests.CloudServerServicesTestCase.test_shutdown_log_items_prefer_order_lifecycle_schedule cloud.tests.CloudServerServicesTestCase.test_daily_expiry_summary_uses_real_cloud_status_and_target_config cloud.tests.CloudServerServicesTestCase.test_aws_sync_server_resolution_accepts_legacy_account_label cloud.tests.CloudServerServicesTestCase.test_aws_sync_resolver_prefers_ip_over_changed_instance_name cloud.tests.CloudServerServicesTestCase.test_update_cloud_asset_write_requires_superuser cloud.tests.CloudServerServicesTestCase.test_dashboard_order_ip_and_name_update_syncs_asset_server --noinput --verbosity 1
+UV_CACHE_DIR=/private/tmp/uv-cache-shop DJANGO_TEST_SQLITE=1 uv run python manage.py test cloud.tests.CloudServerServicesTestCase.test_update_cloud_asset_expiry_refreshes_order_lifecycle cloud.tests.CloudServerServicesTestCase.test_update_cloud_asset_price_restores_auto_renew_pending_state cloud.tests.CloudServerServicesTestCase.test_update_cloud_asset_refreshes_unattached_ip_delete_plan cloud.tests.CloudServerServicesTestCase.test_update_cloud_asset_rebinds_unattached_ip_to_instance --noinput --verbosity 1
 git diff --check
 ```
 
