@@ -1,5 +1,79 @@
 # 重构版本记录
 
+## 2026-06-02 19:55 自动监工：修复关联订单资产误走孤立删机
+
+### 范围
+
+本轮继续使用终端版 `codex` 做只读复审，并人工复核删除计划、代理列表详情、生命周期任务认领和删机执行入口。CLI 明确指出：删除计划按资产生成时，仍有关联有效订单的资产会被标成孤立资产执行项，存在绕过订单删机语义的风险。
+
+### 修复内容
+
+- 删除计划中，仍有关联有效订单的资产现在返回 `item_type=order`，执行入口应走订单删机计划。
+- 订单删除计划 payload 透出资产级 `shutdown_enabled`，继续和代理详情、删除计划使用同一套关机开关逻辑。
+- 有关联有效订单的资产如果误调用孤立资产删机执行器，会被直接拒绝，避免只标记资产删除而留下订单状态不同步。
+- 删除计划队列对同一有效订单做去重，避免多资产行重复生成同一个订单删除计划。
+- 阿里云只同步资产仍保持 `sync_only` 展示，不接入真实删机。
+
+### 验证
+
+已通过：
+
+```bash
+uv run python -m py_compile bot/api.py cloud/lifecycle_execution.py cloud/tests.py
+DJANGO_TEST_SQLITE=1 uv run python manage.py test cloud.tests.CloudServerServicesTestCase.test_lifecycle_plans_route_linked_asset_delete_to_order_item cloud.tests.CloudServerServicesTestCase.test_orphan_asset_plan_run_rejects_active_linked_order_asset --verbosity 2
+DJANGO_TEST_SQLITE=1 uv run python manage.py test cloud.tests.CloudServerServicesTestCase.test_linked_active_order_asset_delete_plan_uses_order_payload cloud.tests.CloudServerServicesTestCase.test_orphan_asset_delete_refuses_linked_active_order_when_enforced --verbosity 1
+DJANGO_TEST_SQLITE=1 uv run python manage.py test cloud.tests.CloudServerServicesTestCase.test_dashboard_shutdown_plan_run_respects_delete_at cloud.tests.CloudServerServicesTestCase.test_dashboard_orphan_asset_plan_run_respects_computed_delete_time cloud.tests.CloudServerServicesTestCase.test_lifecycle_plans_show_asset_shutdown_disabled_plan_state cloud.tests.CloudServerServicesTestCase.test_lifecycle_plans_include_future_server_plan_item --verbosity 1
+uv run python manage.py check
+uv run python manage.py makemigrations --check --dry-run
+git diff --check
+```
+
+结果：新增和相关旧测试均通过；Django 系统检查通过；无模型迁移；diff 空白检查通过。
+
+剩余风险：本轮未跑完整测试套件，未执行真实云端删机；真实删除仍受总开关、计划时间窗口、任务认领和云账号/资产关机开关保护。
+
+## 2026-06-02 19:52 自动监工：AWS 同步收敛后回归复查
+
+### 范围
+
+本轮继续监工 Shop Django 后端仓库，起始工作树干净，最近提交为 `7b4cd58 记录AWS实机测试同步收敛`。重点复查实机测试记录之后，云资产到期事实源、同步收敛保护、订单旧到期字段、旧计划快照表、退款旧入口、废弃 app 是否出现回流，以及有关联订单的资产是否可能绕过订单删机计划进入孤立资产删机。
+
+### 复查结论
+
+- `INSTALLED_APPS` 仍只包含 `core`、`bot`、`orders`、`cloud` 当前运行域；未发现旧 `accounts/finance/mall/monitoring/dashboard_api/biz` 运行时 import 或 include 回流。
+- 未发现 `CloudServerOrder.service_expires_at` 模型字段恢复，也未发现对已移除订单到期列的危险 ORM 过滤、排序、批量更新、values 或 values_list 查询。
+- `CloudAsset.actual_expires_at` 仍是唯一结构化云资产到期事实；`service_expires_at` 命中仍为兼容 payload、日志字段或从资产事实派生的展示值。
+- AWS 同步已有资产路径继续保留既有 `CloudAsset.user` 和 `CloudAsset.actual_expires_at`；阿里云同步已有资产路径也继续沿用资产自身 `actual_expires_at`，不会用云端或订单派生时间覆盖手工事实。
+- AWS 缺失确认保护仍要求连续确认达到阈值后才把资产、兼容 Server 和订单收敛到删除状态；历史 IP 命中时不会误删未附加固定 IP 资产。
+- 发现并收口一类计划口径风险：有关联有效订单的资产不应作为孤立资产删机执行，否则可能让资产删除和订单生命周期状态分叉；这类资产现在回到订单删机计划展示，执行入口也会拒绝强制计划模式下绕过订单。
+- 未发现 `normalize_service_expiry`、`service_expired_at`、旧计划快照模型 `CloudLifecyclePlan/CloudNoticePlan/CloudAutoRenewPlan`、退款旧函数名、退款旧入口或 `refunded` 运行时状态回流。
+
+### 功能变更
+
+- `bot/api.py` 的资产删除计划载荷在资产仍关联有效订单时，改为复用订单删机计划 payload，并保留资产 ID、资产名称、云账号 ID 和资产详情入口；计划队列按关联订单去重，避免同一订单多资产重复展示。
+- `cloud/lifecycle_execution.py` 的 `run_orphan_asset_delete(..., enforce_schedule=True)` 增加关联有效订单保护：资产仍有关联订单且订单未结束时，拒绝走孤立资产删机入口，提示改走订单删机计划。
+- `cloud/tests.py` 补充两条回归测试，覆盖有关联有效订单的资产计划展示回到订单 payload，以及强制计划模式下孤立资产删机入口拒绝绕过订单。
+
+### 验证
+
+已通过：
+
+```bash
+UV_CACHE_DIR=/private/tmp/uv-cache-shop uv run python manage.py check
+UV_CACHE_DIR=/private/tmp/uv-cache-shop uv run python -m py_compile cloud/management/commands/sync_aws_assets.py cloud/management/commands/sync_aliyun_assets.py cloud/lifecycle.py cloud/services.py cloud/api_orders.py cloud/api_tasks.py core/management/commands/cleanup_old_records.py
+UV_CACHE_DIR=/private/tmp/uv-cache-shop uv run python -m py_compile bot/api.py cloud/lifecycle_execution.py cloud/tests.py
+UV_CACHE_DIR=/private/tmp/uv-cache-shop uv run python manage.py makemigrations --check --dry-run
+DJANGO_TEST_SQLITE=1 UV_CACHE_DIR=/private/tmp/uv-cache-shop uv run python manage.py test cloud.tests.CloudServerServicesTestCase.test_order_rejects_removed_service_expiry_field cloud.tests.CloudServerServicesTestCase.test_server_compat_create_preserves_manual_asset_owner_and_expiry cloud.tests.CloudServerServicesTestCase.test_mark_success_preserves_existing_manual_asset_fields_on_update cloud.tests.CloudServerServicesTestCase.test_early_provisioning_steps_preserve_existing_manual_asset_fields --verbosity 1
+DJANGO_TEST_SQLITE=1 UV_CACHE_DIR=/private/tmp/uv-cache-shop uv run python manage.py test cloud.tests.CloudServerServicesTestCase.test_linked_active_order_asset_delete_plan_uses_order_payload cloud.tests.CloudServerServicesTestCase.test_orphan_asset_delete_refuses_linked_active_order_when_enforced cloud.tests.CloudServerServicesTestCase.test_order_rejects_removed_service_expiry_field cloud.tests.CloudServerServicesTestCase.test_server_compat_create_preserves_manual_asset_owner_and_expiry --verbosity 1
+DJANGO_TEST_SQLITE=1 UV_CACHE_DIR=/private/tmp/uv-cache-shop uv run python manage.py test cloud.tests.CloudServerServicesTestCase.test_sync_aws_missing_instance_requires_five_passes_before_delete cloud.tests.CloudServerServicesTestCase.test_sync_aws_missing_check_uses_previous_public_ip_before_delete cloud.tests.CloudServerServicesTestCase.test_sync_aws_missing_blank_asset_does_not_delete_unrelated_blank_server --verbosity 1
+DB_ENGINE=sqlite SQLITE_NAME=/private/tmp/shop-lifecycle-test.sqlite3 UV_CACHE_DIR=/private/tmp/uv-cache-shop uv run python manage.py test cloud.tests.CloudServerServicesTestCase.test_dashboard_orphan_asset_plan_run_respects_computed_delete_time cloud.tests.CloudServerServicesTestCase.test_lifecycle_tick_rechecks_orphan_asset_delete_time_before_cloud_delete cloud.tests.CloudServerServicesTestCase.test_update_cloud_asset_expiry_refreshes_delete_plan_view --verbosity 1 --noinput
+git diff --check
+```
+
+说明：`makemigrations --check --dry-run` 无模型变更；默认 MySQL 迁移历史检查因沙箱无法连接 `127.0.0.1` 输出警告。首次用 `DJANGO_TEST_SQLITE=1` 跑包含 `lifecycle_tick()` 的线程型测试时，SQLite 内存库在新线程连接中没有测试表，已改用 `/private/tmp/shop-lifecycle-test.sqlite3` 文件型 SQLite 重跑通过；该组测试期间出现一次快照刷新 `database is locked` 日志，但测试结果为 OK。
+
+剩余风险：本轮未跑完整测试套件，未连接真实 MySQL、AWS Lightsail 或阿里云 API，未执行真实自动续费支付、云端删机、固定 IP 释放或历史数据清理。
+
 ## 2026-06-02 19:47 实机测试：AWS 开通删除与同步收敛
 
 ### 范围
