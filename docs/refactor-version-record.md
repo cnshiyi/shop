@@ -1783,6 +1783,36 @@ The focused DB test run is blocked by local MySQL test database permissions:
 Access denied for user 'a'@'localhost' to database 'test_a'
 ```
 
+## 2026-06-02 生产代码和测试代码边界复查
+
+### 范围
+
+本轮复查后台生产代码和测试代码的边界，避免业务接口使用测试命名，导致生产代码被误判为测试代码。
+
+### 调整
+
+- 将后台“每日到期汇总测试通知”接口函数从 `test_daily_expiry_summary_notification` 改为 `send_daily_expiry_summary_test_notification`。
+- 保留原后台接口路径 `/settings/site-configs/daily-expiry-summary/test/` 和路由名不变，前端调用地址不受影响。
+- 测试文件只保留测试用例和测试辅助构造，生产接口实现继续留在 `bot/api_site_configs.py`。
+- 对应测试改为按当前后台写接口鉴权规则构造 bearer session，避免测试绕过真实鉴权行为。
+
+### 验证
+
+已通过：
+
+```bash
+UV_CACHE_DIR=/private/tmp/uv-cache-shop DJANGO_TEST_SQLITE=1 PYTHONDONTWRITEBYTECODE=1 uv run python manage.py check
+UV_CACHE_DIR=/private/tmp/uv-cache-shop DJANGO_TEST_SQLITE=1 PYTHONDONTWRITEBYTECODE=1 uv run python -m py_compile bot/api_site_configs.py bot/api.py shop/dashboard_urls.py bot/tests.py
+UV_CACHE_DIR=/private/tmp/uv-cache-shop DJANGO_TEST_SQLITE=1 PYTHONDONTWRITEBYTECODE=1 uv run python manage.py test bot.tests.DashboardNotificationTestCase.test_daily_expiry_summary_test_endpoint_forces_send --noinput --verbosity 1
+```
+
+边界扫描结果：
+
+```text
+非测试文件测试混入数量: 0
+测试文件非测试顶层类数量: 0
+```
+
 ## 2026-06-02 cloud-asset-edit-api-split
 
 ### Scope
