@@ -961,11 +961,11 @@ class RetainedIpRenewalUiTestCase(SimpleTestCase):
         )
         self.assertEqual(
             cloud_asset_detail_callback(99, back_callback),
-            'cloud:assetdetail:asset:99:profile:orders:cloud:filter:paid:page:2',
+            'cloud:ad:asset:99:profile:orders:cloud:filter:paid:page:2',
         )
         self.assertEqual(
-            cloud_previous_detail_callback(88, 'cloud:assetdetail:asset:99:cloud:list:page:3'),
-            'cloud:assetdetail:asset:99:cloud:list:page:3',
+            cloud_previous_detail_callback(88, 'cloud:ad:asset:99:cloud:list:page:3'),
+            'cloud:ad:asset:99:cloud:list:page:3',
         )
         self.assertEqual(
             cloud_previous_detail_callback(88, back_callback),
@@ -994,7 +994,7 @@ class RetainedIpRenewalUiTestCase(SimpleTestCase):
         asset_markup = _asset_reinstall_confirm_keyboard(99, 'token', 'cloud:querymenu')
 
         self.assertEqual(order_markup.inline_keyboard[1][0].callback_data, 'cloud:detail:88:cloud:list:page:3')
-        self.assertEqual(asset_markup.inline_keyboard[1][0].callback_data, 'cloud:assetdetail:asset:99:cloud:querymenu')
+        self.assertEqual(asset_markup.inline_keyboard[1][0].callback_data, 'cloud:ad:asset:99:cloud:querymenu')
 
     def test_asset_renewal_plan_keyboard_keeps_back_path(self):
         plans = [SimpleNamespace(id=1)]
@@ -1002,7 +1002,7 @@ class RetainedIpRenewalUiTestCase(SimpleTestCase):
         markup = _asset_renewal_plan_keyboard(99, plans, 'cloud:querymenu')
 
         self.assertEqual(markup.inline_keyboard[0][0].callback_data, 'cloud:assetrenewplan:99:1:cloud:querymenu')
-        self.assertEqual(markup.inline_keyboard[-1][0].callback_data, 'cloud:assetdetail:asset:99:cloud:querymenu')
+        self.assertEqual(markup.inline_keyboard[-1][0].callback_data, 'cloud:ad:asset:99:cloud:querymenu')
 
     def test_retained_ip_renewal_plan_keyboard_keeps_back_path(self):
         plans = [SimpleNamespace(id=7)]
@@ -1021,7 +1021,7 @@ class RetainedIpRenewalUiTestCase(SimpleTestCase):
         self.assertIn('cloud:detail:88:cloud:querymenu', callbacks)
 
     def test_cloud_renew_payment_from_asset_detail_returns_to_asset_detail(self):
-        asset_detail_back = 'cloud:assetdetail:asset:99:cloud:list:page:3'
+        asset_detail_back = 'cloud:ad:asset:99:cloud:list:page:3'
         markup = cloud_server_renew_payment(88, Decimal('12.3'), Decimal('45.6'), back_callback=asset_detail_back)
         callbacks = [button.callback_data for row in markup.inline_keyboard for button in row]
 
@@ -1052,7 +1052,7 @@ class RetainedIpRenewalUiTestCase(SimpleTestCase):
 
     def test_cloud_change_ip_from_asset_detail_returns_to_asset_detail(self):
         regions = [('us-east-1', '美国')]
-        asset_detail_back = 'cloud:assetdetail:asset:99:cloud:list:page:3'
+        asset_detail_back = 'cloud:ad:asset:99:cloud:list:page:3'
         markup = cloud_server_change_ip_region_menu(88, regions, back_callback=asset_detail_back)
         callbacks = [button.callback_data for row in markup.inline_keyboard for button in row]
 
@@ -1064,6 +1064,7 @@ class RetainedIpRenewalUiTestCase(SimpleTestCase):
         source = inspect.getsource(register_handlers)
         asset_action_source = source.split('async def cb_cloud_asset_action', 1)[1].split("@dp.callback_query(F.data.startswith('cloud:assetinit:'))", 1)[0]
 
+        self.assertIn("@dp.callback_query(F.data.startswith('cloud:aa:'))", source)
         self.assertIn(
             'cloud_server_change_ip_region_menu(order.id, regions, expanded=False, back_callback=asset_detail_back)',
             asset_action_source,
@@ -1098,8 +1099,8 @@ class RetainedIpRenewalUiTestCase(SimpleTestCase):
         self.assertIn('cloud:ip:88:cloud:querymenu', callbacks)
         self.assertIn('cloud:reinit:88:cloud:querymenu', callbacks)
         self.assertIn('cloud:upgrade:88:cloud:querymenu', callbacks)
-        self.assertIn('cloud:assetaction:changeip:99:cloud:querymenu', callbacks)
-        self.assertIn('cloud:assetaction:upgrade:99:cloud:querymenu', callbacks)
+        self.assertIn('cloud:aa:changeip:99:cloud:querymenu', callbacks)
+        self.assertIn('cloud:aa:upgrade:99:cloud:querymenu', callbacks)
 
     def test_cloud_upgrade_payment_keeps_back_path(self):
         source = inspect.getsource(register_handlers)

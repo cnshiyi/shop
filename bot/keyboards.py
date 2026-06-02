@@ -71,6 +71,10 @@ def append_back_callback(callback_data: str, back_callback: str | None = None) -
     return f'{callback_data}:{back_callback}'
 
 
+def cloud_asset_action_callback(action: str, asset_id: int, back_callback: str | None = None) -> str:
+    return append_back_callback(f'cloud:aa:{action}:{asset_id}', back_callback)
+
+
 def main_menu():
     from core.button_config import load_button_config
 
@@ -828,16 +832,16 @@ def cloud_ip_query_result(result_items, renewable_items, page: int = 1, total_pa
             if item.get('can_support'):
                 action_buttons.append(support_contact_button('cloud_query_ip', order_id))
         elif asset_id > 0:
-            action_buttons.append(InlineKeyboardButton(text='🔄 续费IP', callback_data=f'cloud:assetaction:renew:{asset_id}:cloud:querymenu'))
+            action_buttons.append(InlineKeyboardButton(text='🔄 续费IP', callback_data=cloud_asset_action_callback('renew', asset_id, 'cloud:querymenu')))
             start_order_id = int(item.get('start_order_id') or 0)
             if include_start and start_order_id > 0:
                 action_buttons.append(InlineKeyboardButton(text='▶️ 开机', callback_data=f'cloud:start:{start_order_id}'))
             if item.get('can_change_ip'):
-                action_buttons.append(InlineKeyboardButton(text='🌐 更换IP', callback_data=f'cloud:assetaction:changeip:{asset_id}:cloud:querymenu'))
+                action_buttons.append(InlineKeyboardButton(text='🌐 更换IP', callback_data=cloud_asset_action_callback('changeip', asset_id, 'cloud:querymenu')))
             if item.get('can_reinit') and (include_reinit or item.get('can_support')):
                 action_buttons.append(InlineKeyboardButton(text='🛠 重新安装', callback_data=f'cloud:assetinit:{asset_id}:cloud:querymenu'))
             if item.get('can_config') and (include_reinit or item.get('can_support')):
-                action_buttons.append(InlineKeyboardButton(text='⚙️ 修改配置', callback_data=f'cloud:assetaction:upgrade:{asset_id}:cloud:querymenu'))
+                action_buttons.append(InlineKeyboardButton(text='⚙️ 修改配置', callback_data=cloud_asset_action_callback('upgrade', asset_id, 'cloud:querymenu')))
             if include_start:
                 action_buttons.append(InlineKeyboardButton(text='🕒 修改时间', callback_data=f'cloud:adminexp:asset:{asset_id}:cloud:querymenu'))
             if item.get('can_support'):

@@ -43,7 +43,7 @@ from bot.keyboards import (
     cloud_server_change_ip_region_menu, cloud_server_change_ip_port_keyboard,
     cart_menu, wallet_recharge_prompt_menu, cloud_ip_query_result,
     cloud_query_menu, configured_link_for_label, configured_link_menu,
-    cloud_detail_callback, cloud_asset_detail_callback, cloud_previous_detail_callback, append_back_callback,
+    cloud_detail_callback, cloud_asset_detail_callback, cloud_previous_detail_callback, cloud_asset_action_callback, append_back_callback,
 )
 from bot.services import create_admin_reply_link, get_admin_reply_link, get_admin_reply_link_by_id, get_or_create_user, get_admin_forward_mute_status, is_admin_forward_muted, mute_admin_forward_for_days, record_bot_operation_log, record_telegram_message, should_forward_telegram_group
 from cloud.services import (
@@ -1173,7 +1173,9 @@ def _callback_route_label(callback_data: str | None) -> str:
         ('cloud:orderdetail:', 'cloud.orderdetail 云订单详情'),
         ('cloud:assetreinitconfirm:', 'cloud.assetreinitconfirm 确认资产重建'),
         ('cloud:assetinit:', 'cloud.assetinit 资产重新安装'),
+        ('cloud:aa:', 'cloud.aa 资产操作'),
         ('cloud:assetaction:', 'cloud.assetaction 资产操作'),
+        ('cloud:ad:', 'cloud.ad 人工代理详情'),
         ('cloud:assetdetail:', 'cloud.assetdetail 人工代理详情'),
         ('cloud:detail:', 'cloud.detail 代理详情'),
         ('cloud:list:page:', 'cloud.list.page 代理列表分页'),
@@ -4178,6 +4180,7 @@ def register_handlers(dp: Dispatcher):
         )
 
     @dp.callback_query(F.data.startswith('cloud:assetdetail:'))
+    @dp.callback_query(F.data.startswith('cloud:ad:'))
     async def cb_cloud_asset_detail(callback: CallbackQuery):
         await _safe_callback_answer(callback)
         user = await get_or_create_user(callback.from_user.id, callback.from_user.username, callback.from_user.first_name)
@@ -4207,7 +4210,7 @@ def register_handlers(dp: Dispatcher):
                     InlineKeyboardButton(text=f'{"⛔ 关闭" if getattr(item, "auto_renew_enabled", False) else "⚡ 开启"}自动续费', callback_data=f'cloud:autorenew:{"off" if getattr(item, "auto_renew_enabled", False) else "on"}:{item_order_id}'),
                 ])
             else:
-                rows.append([InlineKeyboardButton(text='🔄 续费', callback_data=f'cloud:assetaction:renew:{item_id}:{back_callback}')])
+                    rows.append([InlineKeyboardButton(text='🔄 续费', callback_data=cloud_asset_action_callback('renew', item_id, back_callback))])
         else:
             status = str(getattr(item, 'status', '') or '')
             provider = str(getattr(item, 'provider', '') or '')
@@ -4215,17 +4218,17 @@ def register_handlers(dp: Dispatcher):
             can_change_ip = bool(provider == 'aws_lightsail' and status in {'completed', 'running', 'expiring', 'suspended'} and (is_admin_context or getattr(item, 'order_user_id', None) == user.id))
             can_reinit = bool(provider == 'aws_lightsail' and has_ip and getattr(item, 'login_password', None) and (is_admin_context or status in {'completed', 'running'}))
             can_config = bool(provider == 'aws_lightsail' and status in {'completed', 'running', 'expiring', 'suspended'} and (is_admin_context or getattr(item, 'order_user_id', None) == user.id))
-            rows = [[InlineKeyboardButton(text='🔄 续费', callback_data=f'cloud:assetaction:renew:{item_id}:{back_callback}')]]
+            rows = [[InlineKeyboardButton(text='🔄 续费', callback_data=cloud_asset_action_callback('renew', item_id, back_callback))]]
             second_row = []
             if can_change_ip:
-                second_row.append(InlineKeyboardButton(text='🌐 更换IP', callback_data=f'cloud:assetaction:changeip:{item_id}:{back_callback}'))
+                second_row.append(InlineKeyboardButton(text='🌐 更换IP', callback_data=cloud_asset_action_callback('changeip', item_id, back_callback)))
             if can_reinit:
                 second_row.append(InlineKeyboardButton(text='🛠 重新安装', callback_data=f'cloud:assetinit:{item_id}:{back_callback}'))
             if second_row:
                 rows.append(second_row)
             third_row = []
             if can_config:
-                third_row.append(InlineKeyboardButton(text='⚙️ 修改配置', callback_data=f'cloud:assetaction:upgrade:{item_id}:{back_callback}'))
+                third_row.append(InlineKeyboardButton(text='⚙️ 修改配置', callback_data=cloud_asset_action_callback('upgrade', item_id, back_callback)))
             if is_admin_context:
                 third_row.append(InlineKeyboardButton(text='🕒 修改时间', callback_data=f'cloud:adminexp:asset:{item_id}:{back_callback}'))
             if third_row:
@@ -4235,6 +4238,7 @@ def register_handlers(dp: Dispatcher):
         await _safe_edit_text(callback.message, _cloud_asset_detail_text(item), reply_markup=InlineKeyboardMarkup(inline_keyboard=rows), parse_mode='HTML')
 
     @dp.callback_query(F.data.startswith('cloud:assetaction:'))
+    @dp.callback_query(F.data.startswith('cloud:aa:'))
     async def cb_cloud_asset_action(callback: CallbackQuery):
         parts = callback.data.split(':', 4)
         action = parts[2]
@@ -4342,7 +4346,7 @@ def register_handlers(dp: Dispatcher):
                     callback.message,
                     '🌐 更换IP\n\n这台代理当前剩余更换 IP 次数为 0。\n\n请先续费获取新的更换 IP 次数，或联系客服人工处理。',
                     reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-                        [InlineKeyboardButton(text='🔄 去续费', callback_data=f'cloud:assetaction:renew:{asset_id}:{back_callback}')],
+                        [InlineKeyboardButton(text='🔄 去续费', callback_data=cloud_asset_action_callback('renew', asset_id, back_callback))],
                         [support_contact_button('cloud_asset_changeip_quota', asset_id)],
                         [InlineKeyboardButton(text='🔙 返回代理详情', callback_data=asset_detail_back)],
                     ]),

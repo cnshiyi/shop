@@ -3921,6 +3921,7 @@ Access denied for user 'a'@'localhost' to database 'test_a'
 ### 运行时变化
 
 - 新增 `cloud_previous_detail_callback()`，用于区分“回订单详情”和“回资产详情”。
+- 代理资产详情回调继续兼容旧 `cloud:assetdetail:`，并支持新的短回调 `cloud:ad:`；查询页资产操作支持短回调 `cloud:aa:`。
 - 从代理资产详情进入续费支付、更换 IP、修改配置、重新安装确认和固定 IP 续费套餐页时，下一层的返回按钮会回到原资产详情。
 - 从订单详情进入同样流程时，仍回订单详情，再由订单详情返回原列表或查询页。
 - 修正资产入口修改配置提交后的“返回原代理”，避免跳到订单详情。
