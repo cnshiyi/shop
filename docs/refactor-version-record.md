@@ -1,5 +1,42 @@
 # 重构版本记录
 
+## 2026-06-02 20:01 自动监工：云资产生命周期回归复查
+
+### 范围
+
+本轮继续监工 Shop Django 后端仓库，起始工作树干净，最近提交为 `f225f56 校正关联资产删机计划记录`。重点复查云资产到期事实源、订单旧到期字段、旧计划快照表、退款旧入口、废弃 app 回流，以及上一轮关联订单资产删机计划修复是否保持稳定。
+
+### 复查结论
+
+- `INSTALLED_APPS` 仍只包含 `core`、`bot`、`orders`、`cloud` 当前运行域；仓库根下未发现 `accounts/finance/mall/monitoring/dashboard_api/biz` 废弃 app 目录恢复。
+- 运行时代码未发现 `CloudServerOrder.service_expires_at` 模型字段、危险 ORM 查询或写入恢复；`service_expires_at` 命中仍为兼容 API 字段、日志字段或从 `CloudAsset.actual_expires_at` 派生的展示值。
+- `CloudAsset.actual_expires_at` 仍是唯一结构化资产到期事实；AWS/阿里云同步已有资产路径继续保留现有 `CloudAsset.actual_expires_at`，不会用云端或订单派生时间覆盖手工到期。
+- 未发现 `normalize_service_expiry`、`service_expired_at`、旧计划快照模型 `CloudLifecyclePlan/CloudNoticePlan/CloudAutoRenewPlan`、`refund_to_balance/refund_balance`、`STATUS_REFUNDED` 或 `refunded` 运行时状态回流。
+- `CloudLifecyclePlanNote` 仍只是删除计划备注表，不是旧派生计划快照表恢复；`dashboard_api` 命中为当前 `core.dashboard_api` 公共模块和 URL namespace，不是废弃 Django app 回流。
+- 上一轮有关联有效订单的资产删机保护继续通过聚焦回归：计划展示回到订单 payload，孤立资产删机执行入口在强制计划模式下拒绝绕过订单。
+
+### 功能变更
+
+本轮未修改运行时代码；仅补充本次中文版本记录。
+
+### 验证
+
+已通过：
+
+```bash
+UV_CACHE_DIR=/private/tmp/uv-cache-shop uv run python manage.py check
+UV_CACHE_DIR=/private/tmp/uv-cache-shop uv run python -m py_compile cloud/management/commands/sync_aws_assets.py cloud/management/commands/sync_aliyun_assets.py cloud/lifecycle.py cloud/services.py cloud/api_orders.py cloud/api_tasks.py bot/api.py cloud/lifecycle_execution.py core/management/commands/cleanup_old_records.py
+UV_CACHE_DIR=/private/tmp/uv-cache-shop uv run python manage.py makemigrations --check --dry-run
+DJANGO_TEST_SQLITE=1 UV_CACHE_DIR=/private/tmp/uv-cache-shop uv run python manage.py test cloud.tests.CloudServerServicesTestCase.test_order_rejects_removed_service_expiry_field cloud.tests.CloudServerServicesTestCase.test_server_compat_create_preserves_manual_asset_owner_and_expiry cloud.tests.CloudServerServicesTestCase.test_mark_success_preserves_existing_manual_asset_fields_on_update cloud.tests.CloudServerServicesTestCase.test_early_provisioning_steps_preserve_existing_manual_asset_fields --verbosity 1
+DJANGO_TEST_SQLITE=1 UV_CACHE_DIR=/private/tmp/uv-cache-shop uv run python manage.py test cloud.tests.CloudServerServicesTestCase.test_sync_aws_missing_instance_requires_five_passes_before_delete cloud.tests.CloudServerServicesTestCase.test_sync_aws_missing_check_uses_previous_public_ip_before_delete cloud.tests.CloudServerServicesTestCase.test_sync_aws_missing_blank_asset_does_not_delete_unrelated_blank_server --verbosity 1
+DJANGO_TEST_SQLITE=1 UV_CACHE_DIR=/private/tmp/uv-cache-shop uv run python manage.py test cloud.tests.CloudServerServicesTestCase.test_orphan_asset_plan_run_rejects_active_linked_order_asset cloud.tests.CloudServerServicesTestCase.test_lifecycle_plans_route_linked_asset_delete_to_order_item cloud.tests.CloudServerServicesTestCase.test_linked_active_order_asset_delete_plan_uses_order_payload cloud.tests.CloudServerServicesTestCase.test_orphan_asset_delete_refuses_linked_active_order_when_enforced --verbosity 1
+git diff --check
+```
+
+说明：`makemigrations --check --dry-run` 无模型变更；默认 MySQL 迁移历史检查因沙箱无法连接 `127.0.0.1` 输出警告。
+
+剩余风险：本轮未跑完整测试套件，未连接真实 MySQL、AWS Lightsail 或阿里云 API，未执行真实自动续费支付、云端删机、固定 IP 释放或历史数据清理。
+
 ## 2026-06-02 19:55 自动监工：修复关联订单资产误走孤立删机
 
 ### 范围
