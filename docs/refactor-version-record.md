@@ -1,5 +1,28 @@
 # Refactor Version Record
 
+## 2026-06-02 aws-sync-ip-release-order-cleanup
+
+### Scope
+
+Small retained static IP cleanup fix for AWS sync release handling.
+
+### Runtime Changes
+
+- Successful AWS sync release of an unattached static IP now reuses the lifecycle cleanup path.
+- Linked deleted retained orders have stale `public_ip`, `static_ip_name`, `mtproxy_host`, and `ip_recycle_at` cleared after the AWS release succeeds.
+- The released asset keeps `previous_public_ip`, clears `public_ip`, and records a single recycled IP history row linked to both the asset and order.
+- Added focused regression coverage for the AWS sync release helper.
+
+### Verification
+
+Passed locally with `PYTHONDONTWRITEBYTECODE=1 DJANGO_TEST_SQLITE=1`:
+
+```bash
+uv run python -m py_compile cloud/management/commands/sync_aws_assets.py cloud/tests.py
+uv run python manage.py test cloud.tests.CloudServerServicesTestCase.test_aws_sync_release_static_ip_clears_retained_order_after_successful_release cloud.tests.CloudServerServicesTestCase.test_aws_sync_release_static_ip_respects_shutdown_disabled_account cloud.tests.CloudServerServicesTestCase.test_aws_sync_release_static_ip_respects_global_ip_delete_switch --noinput --verbosity 1
+uv run python manage.py check
+```
+
 ## 2026-06-02 cleanup-keeps-retained-ip-orders
 
 ### Scope

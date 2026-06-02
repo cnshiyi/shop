@@ -1,5 +1,6 @@
 import logging
 
+from asgiref.sync import async_to_sync
 from django.core.management.base import BaseCommand, CommandError
 from django.db.models import Case, IntegerField, Q, Value, When
 from django.utils import timezone
@@ -214,18 +215,9 @@ def _release_static_ip_if_due(client, region, asset, static_ip_name, static_ip_a
             is_success=True,
             account=asset.cloud_account,
         )
-        asset.status = CloudAsset.STATUS_DELETED
-        asset.provider_status = '未附加固定IP-已到期删除'
-        asset.is_active = False
-        asset.save(update_fields=['status', 'provider_status', 'is_active', 'updated_at'])
-        record_cloud_ip_log(
-            event_type='recycled',
-            order=getattr(asset, 'order', None),
-            asset=asset,
-            previous_public_ip=public_ip or None,
-            public_ip=None,
-            note=f'AWS 同步删除未附加固定 IP：IP={public_ip or "缺失"}；固定IP名={release_name}；资产#{asset.id}；已调用 AWS release_static_ip。',
-        )
+        note = f'AWS 同步删除未附加固定 IP：IP={public_ip or "缺失"}；固定IP名={release_name}；资产#{asset.id}；已调用 AWS release_static_ip。'
+        from cloud.lifecycle import _mark_unattached_static_ip_deleted
+        async_to_sync(_mark_unattached_static_ip_deleted)(asset.id, note)
         stdout.write(stdout.style.WARNING(
             f'已删除 AWS {region} 未附加IP={public_ip or "缺失"} 名称={release_name} 资产#{asset.id}'
         ))

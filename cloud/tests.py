@@ -14005,7 +14005,8 @@ class CloudServerServicesTestCase(TestCase):
             def write(self, text):
                 return None
 
-        ok = _release_static_ip_if_due(FakeClient(), self.plan.region_code, asset, 'StaticIp-sync-disabled', '', '21.21.21.88', FakeStdout())
+        with patch('cloud.lifecycle.cloud_ip_delete_enabled', return_value=True):
+            ok = _release_static_ip_if_due(FakeClient(), self.plan.region_code, asset, 'StaticIp-sync-disabled', '', '21.21.21.88', FakeStdout())
 
         asset.refresh_from_db()
         self.assertFalse(ok)
@@ -14062,6 +14063,106 @@ class CloudServerServicesTestCase(TestCase):
         self.assertEqual(released, [])
         self.assertEqual(asset.status, CloudAsset.STATUS_UNKNOWN)
         self.assertEqual(asset.provider_status, '未附加固定IP-删除IP总开关关闭')
+
+    # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
+    def test_aws_sync_release_static_ip_clears_retained_order_after_successful_release(self):
+        from cloud.management.commands.sync_aws_assets import _release_static_ip_if_due
+
+        account = self._aws_test_account()
+        recycle_due_at = timezone.now() - timezone.timedelta(minutes=5)
+        order = CloudServerOrder.objects.create(
+            order_no='HB-TEST-AWS-SYNC-IP-RELEASE-CLEARS-ORDER',
+            user=self.user,
+            plan=self.plan,
+            provider=self.plan.provider,
+            cloud_account=account,
+            account_label=cloud_account_label(account),
+            region_code=self.plan.region_code,
+            region_name=self.plan.region_name,
+            plan_name=self.plan.plan_name,
+            quantity=1,
+            currency='USDT',
+            total_amount='19.00',
+            pay_amount='19.00',
+            status='deleted',
+            public_ip='21.21.21.90',
+            previous_public_ip='21.21.21.90',
+            static_ip_name='StaticIp-sync-clear-retained-order',
+            mtproxy_host='21.21.21.90',
+            ip_recycle_at=recycle_due_at,
+            ip_recycle_reminder_enabled=True,
+            instance_id='',
+        )
+        asset = CloudAsset.objects.create(
+            kind=CloudAsset.KIND_SERVER,
+            source=CloudAsset.SOURCE_AWS_SYNC,
+            order=order,
+            user=self.user,
+            provider='aws_lightsail',
+            cloud_account=account,
+            account_label=cloud_account_label(account),
+            region_code=self.plan.region_code,
+            region_name=self.plan.region_name,
+            asset_name='StaticIp-sync-clear-retained-order',
+            provider_resource_id='arn:aws:lightsail:ap-southeast-1:123456789012:StaticIp/StaticIp-sync-clear-retained-order',
+            public_ip='21.21.21.90',
+            previous_public_ip='21.21.21.90',
+            actual_expires_at=recycle_due_at,
+            status=CloudAsset.STATUS_UNKNOWN,
+            provider_status='未附加固定IP',
+            note='未附加固定IP',
+            is_active=False,
+        )
+        released = []
+
+        # 测试类：组织 FakeClient 相关的回归测试。
+        class FakeClient:
+            # 功能：处理 云资产、云订单和生命周期 中的 release static ip 业务流程。
+            def release_static_ip(self, staticIpName):
+                released.append(staticIpName)
+                return {'operations': [{'id': 'op-aws-sync-retained-clear'}]}
+
+        # 测试类：组织 FakeStyle 相关的回归测试。
+        class FakeStyle:
+            # 功能：处理 云资产、云订单和生命周期 中的 WARNING 业务流程。
+            def WARNING(self, text):
+                return text
+
+        # 测试类：组织 FakeStdout 相关的回归测试。
+        class FakeStdout:
+            style = FakeStyle()
+
+            # 功能：处理 云资产、云订单和生命周期 中的 write 业务流程。
+            def write(self, text):
+                return None
+
+        with patch('cloud.lifecycle.cloud_ip_delete_enabled', return_value=True):
+            ok = _release_static_ip_if_due(
+                FakeClient(),
+                self.plan.region_code,
+                asset,
+                'StaticIp-sync-clear-retained-order',
+                '',
+                '21.21.21.90',
+                FakeStdout(),
+            )
+
+        asset.refresh_from_db()
+        order.refresh_from_db()
+        self.assertTrue(ok)
+        self.assertEqual(released, ['StaticIp-sync-clear-retained-order'])
+        self.assertEqual(asset.status, CloudAsset.STATUS_DELETED)
+        self.assertIsNone(asset.public_ip)
+        self.assertEqual(asset.previous_public_ip, '21.21.21.90')
+        self.assertEqual(order.public_ip, '')
+        self.assertEqual(order.previous_public_ip, '21.21.21.90')
+        self.assertEqual(order.static_ip_name, '')
+        self.assertEqual(order.mtproxy_host, '')
+        self.assertIsNone(order.ip_recycle_at)
+        self.assertIsNotNone(order.recycle_notice_sent_at)
+        self.assertFalse(order.ip_recycle_reminder_enabled)
+        self.assertIn('AWS 同步删除未附加固定 IP', order.provision_note or '')
+        self.assertTrue(CloudIpLog.objects.filter(order=order, asset=asset, event_type=CloudIpLog.EVENT_RECYCLED).exists())
 
 
 # 测试类：组织 CloudOrderStatusDashboardSyncTestCase 相关的回归测试。
