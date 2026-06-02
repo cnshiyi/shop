@@ -1,5 +1,40 @@
 # 重构版本记录
 
+## 2026-06-02 手动监工：资产到期唯一化与计划快照表移除
+
+### 范围
+
+本轮按“大改、不兼容旧字段”的方向继续收口云资产生命周期重构，重点处理订单到期字段残留、计划快照表、自助退款逻辑和派生到期列。
+
+### 运行变更
+
+- `CloudServerOrder` 不再暴露 `service_expires_at` 兼容 property/setter，订单表层面不再承载服务到期事实。
+- 删除 `CloudServerOrder.normalize_expiry_time()` 和 `save()/refresh_from_db()` 中旧到期兼容分支；运行代码再次传入订单旧到期字段会直接暴露错误。
+- 当前服务到期事实只读取和写入 `CloudAsset.actual_expires_at`；迁移、续费、重装、修改配置等新订单如果需要预置到期，会创建或更新关联资产记录承载到期时间。
+- 删除 `CloudLifecyclePlan`、`CloudNoticePlan`、`CloudAutoRenewPlan` 三个派生快照模型，并新增 `0045_delete_plan_snapshot_tables` 迁移删除对应表。
+- 新增 `0046_remove_derived_expiry_columns` 迁移，删除 `CloudAssetDashboardSnapshot.actual_expires_at` 和 `CloudAutoRenewPatrolLog.service_expires_at` 两个派生到期列；结构化到期事实只保留 `CloudAsset.actual_expires_at`。
+- 代理列表快照的排序、分组改为通过关联资产读取 `CloudAsset.actual_expires_at`，快照表不再复制到期列。
+- 删除自助退款函数入口、Bot 退款回调、退款按钮参数和退款测试；退款逻辑不再保留函数名。
+- 删除计划、通知计划、自动续费计划和任务中心改为实时从订单、资产、通知日志和自动续费巡检日志生成，不再依赖快照表。
+- 删除旧快照表相关的 `_sync_*_plan_table`、`*_plan_row_*`、`_upsert_*_plan_rows`、`_cloud_*_plan_items` 空壳函数名；后台任务中心、快照协调和刷新命令改为调用实时生成函数。
+- 已更新 Codex App 自动化 `Shop 自动优化监工`，保持 10 分钟一次，并补充本轮数据库重构重点和“只写中文记录”的要求。
+
+### 验证
+
+本地已通过：
+
+```bash
+PYTHONDONTWRITEBYTECODE=1 DJANGO_TEST_SQLITE=1 uv run python -m py_compile cloud/models.py cloud/asset_expiry.py cloud/services.py cloud/provisioning.py cloud/lifecycle.py bot/api.py bot/handlers.py bot/keyboards.py cloud/api_tasks.py cloud/task_center.py cloud/api_asset_edit.py cloud/api_asset_snapshots.py cloud/management/commands/sync_aws_assets.py cloud/management/commands/sync_aliyun_assets.py orders/payment_scanner.py orders/tests.py
+PYTHONDONTWRITEBYTECODE=1 DJANGO_TEST_SQLITE=1 uv run python manage.py makemigrations --check --dry-run
+PYTHONDONTWRITEBYTECODE=1 DJANGO_TEST_SQLITE=1 uv run python manage.py check
+PYTHONDONTWRITEBYTECODE=1 DJANGO_TEST_SQLITE=1 uv run python manage.py migrate --plan
+PYTHONDONTWRITEBYTECODE=1 DJANGO_TEST_SQLITE=1 uv run python manage.py test cloud.tests.CloudServerServicesTestCase.test_refresh_lifecycle_plan_table_api_populates_cloud_lifecycle_plan cloud.tests.CloudServerServicesTestCase.test_refresh_notice_plan_table_api_populates_cloud_notice_plan cloud.tests.CloudServerServicesTestCase.test_update_cloud_asset_expiry_refreshes_delete_plan_snapshot cloud.tests.CloudServerServicesTestCase.test_update_unattached_ip_release_time_refreshes_delete_plan_snapshot cloud.tests.CloudServerServicesTestCase.test_notice_task_detail_uses_cloud_notice_plan_table --noinput --verbosity 1
+PYTHONDONTWRITEBYTECODE=1 DJANGO_TEST_SQLITE=1 uv run python manage.py test cloud.tests.CloudServerServicesTestCase.test_cloud_asset_dashboard_snapshot_refresh_materializes_paginated_list --noinput --verbosity 1
+git diff --check
+```
+
+说明：完整测试文件仍有 197 处旧 `service_expires_at` 测试写法需要下一轮集中同步；本轮先确保运行代码、模型状态、迁移检测、Django 系统检查和本轮触碰的计划/通知回归通过。
+
 ## 2026-06-02 自动监工：订单到期兼容复查
 
 ### 范围

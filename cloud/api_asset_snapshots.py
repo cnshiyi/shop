@@ -94,7 +94,6 @@ def _snapshot_defaults_from_payload(item: dict) -> dict:
         'public_ip': item.get('public_ip') or '',
         'status': item.get('status') or '',
         'is_active': bool(item.get('is_active')),
-        'actual_expires_at': parse_datetime(item.get('actual_expires_at')) if item.get('actual_expires_at') else None,
         'sort_order': int(item.get('sort_order') or 99),
         'user_id': item.get('user_id'),
         'tg_user_id': item.get('tg_user_id'),
@@ -129,7 +128,7 @@ def refresh_cloud_asset_dashboard_snapshots(asset_ids=None, *, reason: str = '',
     update_rows = []
     update_fields = [
         'payload', 'search_text', 'provider', 'cloud_account_id', 'account_label', 'region_code',
-        'public_ip', 'status', 'is_active', 'actual_expires_at', 'sort_order', 'user_id', 'tg_user_id',
+        'public_ip', 'status', 'is_active', 'sort_order', 'user_id', 'tg_user_id',
         'telegram_group_id', 'group_user_key', 'group_user_label', 'group_telegram_key',
         'group_telegram_label', 'risk_status', 'risk_rank', 'risk_statuses', 'risk_normal',
         'risk_due_soon', 'risk_expired', 'risk_unattached_ip', 'risk_abnormal',
@@ -241,9 +240,9 @@ def _dashboard_snapshot_risk_counts(queryset) -> dict:
 
 def _dashboard_snapshot_ordering(sort_by: str, sort_direction: str):
     if sort_by in {'actual_expires_at', 'expires_at', 'days_left', 'remaining_days'}:
-        expires = F('actual_expires_at').desc(nulls_last=True) if sort_direction == 'desc' else F('actual_expires_at').asc(nulls_last=True)
+        expires = F('asset__actual_expires_at').desc(nulls_last=True) if sort_direction == 'desc' else F('asset__actual_expires_at').asc(nulls_last=True)
         return [expires, 'risk_rank', '-sort_order', '-asset_id']
-    return ['risk_rank', F('actual_expires_at').asc(nulls_last=True), '-sort_order', '-asset_id']
+    return ['risk_rank', F('asset__actual_expires_at').asc(nulls_last=True), '-sort_order', '-asset_id']
 
 
 def _snapshot_payloads(rows):
@@ -339,7 +338,7 @@ def _dashboard_snapshot_group_page(queryset, request, *, group_by='user', sort_b
     group_label = 'group_telegram_label' if group_by == 'telegram_group' else 'group_user_label'
     grouped = list(
         queryset.values(group_field)
-        .annotate(group_expires=Min('actual_expires_at'), group_name=Min(group_label), min_risk=Min('risk_rank'))
+        .annotate(group_expires=Min('asset__actual_expires_at'), group_name=Min(group_label), min_risk=Min('risk_rank'))
         .order_by(F('group_expires').asc(nulls_last=True), 'group_name', group_field)
     )
     total = len(grouped)

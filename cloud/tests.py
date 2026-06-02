@@ -19,10 +19,11 @@ from django.utils.dateparse import parse_datetime
 from bot.api import _asset_delete_plan_item_payload, _shutdown_log_items, _unattached_ip_delete_items, lifecycle_plans, refresh_lifecycle_plan_table, update_lifecycle_plan_note
 from bot.models import TelegramGroupFilter, TelegramUser
 from cloud.bootstrap import _build_mtproxy_script, _extract_tg_links
-from cloud.models import CloudAsset, CloudAssetDashboardSnapshot, CloudAssetSyncJob, CloudAssetSyncJobEvent, CloudAutoRenewPatrolLog, CloudAutoRenewRetryTask, CloudIpLog, CloudLifecyclePlan, CloudLifecyclePlanNote, CloudNoticePlan, CloudServerOrder, CloudServerPlan, CloudUserNoticeLog, DailyAddressStat
+from cloud.models import CloudAsset, CloudAssetDashboardSnapshot, CloudAssetSyncJob, CloudAssetSyncJobEvent, CloudAutoRenewPatrolLog, CloudAutoRenewRetryTask, CloudIpLog, CloudLifecyclePlanNote, CloudServerOrder, CloudServerPlan, CloudUserNoticeLog, DailyAddressStat
 from cloud.server_records import Server
 from cloud.lifecycle import _apply_notice_schedule_to_order, _auto_renew_candidate_users, _enqueue_auto_renew_retry, _get_due_orders, _get_migration_due_orders, _get_orphan_asset_delete_due, _get_unattached_static_ip_delete_due, _group_balance_lines_for_orders, _is_cloud_delete_safe_time, _is_cloud_suspend_time, _mark_deleted, _mark_suspended, _next_cloud_action_run_at, _notice_payload_for_order, _notice_plan_text, _process_auto_renew_retry_tasks, _run_auto_renew, _send_logged_cloud_notice, _send_order_notice_batch, auto_renew_patrol_tick, daily_expiry_summary_tick, lifecycle_tick, sync_server_status_tick
 from cloud.lifecycle_schedule import compute_order_lifecycle_fields
+from cloud.asset_expiry import order_asset_expiry
 from cloud.note_utils import append_status_note
 from cloud.ports import get_mtproxy_port_label, get_mtproxy_public_ports, is_valid_mtproxy_main_port
 from cloud.aws_lightsail import _public_ip_exists_sync, _resolve_static_ip_name_for_move
@@ -1102,7 +1103,7 @@ class CloudServerServicesTestCase(TestCase):
         self.assertEqual(server.status, Server.STATUS_RUNNING)
 
     # 功能：提供 云资产、云订单和生命周期 的内部辅助逻辑，供同模块流程复用。
-    def _create_auto_renew_asset(self, order, *, status=None, asset_name=None):
+    def _create_auto_renew_asset(self, order, *, status=None, asset_name=None, expires_at=None):
         return CloudAsset.objects.create(
             kind=CloudAsset.KIND_SERVER,
             source=CloudAsset.SOURCE_ORDER,
@@ -1113,7 +1114,7 @@ class CloudServerServicesTestCase(TestCase):
             region_name=order.region_name,
             asset_name=asset_name or f'{order.order_no}-asset',
             public_ip=order.public_ip,
-            actual_expires_at=order.service_expires_at,
+            actual_expires_at=expires_at if expires_at is not None else order_asset_expiry(order),
             status=status or CloudAsset.STATUS_RUNNING,
         )
 
@@ -6421,7 +6422,11 @@ class CloudServerServicesTestCase(TestCase):
         self._attach_bearer_session(request, staff_user)
         response = lifecycle_plans(request)
         self.assertEqual(response.status_code, 200)
-        self.assertTrue(CloudLifecyclePlan.objects.filter(plan_kind=CloudLifecyclePlan.PLAN_KIND_UNATTACHED_IP_DELETE, asset=asset, data_group='active').exists())
+        data = json.loads(response.content)['data']
+        self.assertTrue(any(
+            item.get('asset_id') == asset.id and item.get('plan_kind') == CloudLifecyclePlanNote.PLAN_KIND_UNATTACHED_IP_DELETE
+            for item in data['ip_delete_items']
+        ))
 
     # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
     def test_update_lifecycle_plan_note_updates_asset_note(self):
@@ -6462,12 +6467,10 @@ class CloudServerServicesTestCase(TestCase):
             plan_kind=CloudLifecyclePlanNote.PLAN_KIND_UNATTACHED_IP_DELETE,
             asset=asset,
         ).exists())
-        plan_row = CloudLifecyclePlan.objects.get(
-            plan_kind=CloudLifecyclePlan.PLAN_KIND_UNATTACHED_IP_DELETE,
-            asset=asset,
-            data_group='active',
-        )
-        self.assertEqual(plan_row.note, '删除计划新备注')
+        sync_response = lifecycle_plans(sync_request)
+        data = json.loads(sync_response.content)['data']
+        plan_row = next(item for item in data['ip_delete_items'] if item.get('asset_id') == asset.id)
+        self.assertEqual(plan_row['note'], '删除计划新备注')
 
     # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
     def test_lifecycle_plans_use_separate_order_plan_note(self):
@@ -7901,8 +7904,6 @@ class CloudServerServicesTestCase(TestCase):
 
         self.assertNotIn(missing_asset.id, due_ids)
         self.assertIn(visible_asset.id, due_ids)
-        self.assertFalse(CloudLifecyclePlan.objects.filter(plan_kind=CloudLifecyclePlan.PLAN_KIND_ORPHAN_ASSET_DELETE, asset=missing_asset, data_group='active').exists())
-        self.assertTrue(CloudLifecyclePlan.objects.filter(plan_kind=CloudLifecyclePlan.PLAN_KIND_ORPHAN_ASSET_DELETE, asset=visible_asset, data_group='active').exists())
 
     # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
     def test_lifecycle_plans_keeps_asset_remarks_out_of_execution_status(self):
@@ -8326,28 +8327,14 @@ class CloudServerServicesTestCase(TestCase):
             actual_expires_at=timezone.now() - timezone.timedelta(days=1),
         )
         call_command('refresh_lifecycle_plans', limit=20)
-        self.assertTrue(CloudLifecyclePlan.objects.filter(
-            plan_kind=CloudLifecyclePlan.PLAN_KIND_UNATTACHED_IP_DELETE,
-            asset=asset,
-            data_group='active',
-        ).exists())
+        active_items = [item for item in _unattached_ip_delete_items(limit=20) if not item.get('is_history')]
+        self.assertTrue(any(item.get('asset_id') == asset.id for item in active_items))
         asset.status = CloudAsset.STATUS_DELETED
         asset.is_active = False
         asset.provider_status = '已删除'
         asset.note = '固定 IP 已释放'
         asset.save(update_fields=['status', 'is_active', 'provider_status', 'note', 'updated_at'])
         call_command('refresh_lifecycle_plans', limit=20)
-
-        self.assertTrue(CloudLifecyclePlan.objects.filter(
-            plan_kind=CloudLifecyclePlan.PLAN_KIND_UNATTACHED_IP_DELETE,
-            asset=asset,
-            data_group='history',
-        ).exists())
-        self.assertFalse(CloudLifecyclePlan.objects.filter(
-            plan_kind=CloudLifecyclePlan.PLAN_KIND_UNATTACHED_IP_DELETE,
-            asset=asset,
-            data_group='active',
-        ).exists())
 
         staff_user = get_user_model().objects.create_user(username='staff_lifecycle_ip_active_to_history', password='x', is_staff=True)
         request = self.factory.get('/api/admin/tasks/plans/', {'limit': 1000})
@@ -8366,16 +8353,6 @@ class CloudServerServicesTestCase(TestCase):
 
         self.assertFalse(active_rows)
         self.assertTrue(history_rows)
-        self.assertFalse(CloudLifecyclePlan.objects.filter(
-            plan_kind=CloudLifecyclePlan.PLAN_KIND_UNATTACHED_IP_DELETE,
-            asset=asset,
-            data_group='active',
-        ).exists())
-        self.assertTrue(CloudLifecyclePlan.objects.filter(
-            plan_kind=CloudLifecyclePlan.PLAN_KIND_UNATTACHED_IP_DELETE,
-            asset=asset,
-            data_group='history',
-        ).exists())
         self.assertGreaterEqual(data['ip_delete_history_count'], 1)
 
     # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
@@ -8513,14 +8490,18 @@ class CloudServerServicesTestCase(TestCase):
 
         call_command('refresh_lifecycle_plans', limit=20)
 
-        self.assertTrue(CloudLifecyclePlan.objects.filter(
-            plan_kind=CloudLifecyclePlan.PLAN_KIND_ORPHAN_ASSET_DELETE,
-            asset__order=order,
-            data_group='active',
-        ).exists())
+        request = self.factory.get('/api/admin/tasks/plans/', {'limit': 20})
+        self._attach_bearer_session(request, get_user_model().objects.create_user(username='staff_cmd_lifecycle_plan', password='x', is_staff=True))
+        response = lifecycle_plans(request)
+        data = json.loads(response.content)['data']
+        self.assertTrue(any(
+            item.get('asset_id') and item.get('order_id') == order.id
+            for item in [*data['due_items'], *data['future_plan_items']]
+        ))
 
     # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
     def test_refresh_lifecycle_plan_table_api_populates_cloud_lifecycle_plan(self):
+        expires_at = timezone.now() - timezone.timedelta(days=2)
         order = CloudServerOrder.objects.create(
             order_no='API-LIFECYCLE-REFRESH-1',
             user=self.user,
@@ -8535,7 +8516,6 @@ class CloudServerServicesTestCase(TestCase):
             pay_amount='19.00',
             status='suspended',
             public_ip='7.7.7.63',
-            service_expires_at=timezone.now() - timezone.timedelta(days=2),
             suspend_at=timezone.now() - timezone.timedelta(days=1),
             delete_at=timezone.now() + timezone.timedelta(hours=1),
         )
@@ -8550,7 +8530,7 @@ class CloudServerServicesTestCase(TestCase):
             asset_name='api-lifecycle-refresh-asset',
             instance_id='api-lifecycle-refresh-asset',
             public_ip=order.public_ip,
-            actual_expires_at=order.service_expires_at,
+            actual_expires_at=expires_at,
             status=CloudAsset.STATUS_RUNNING,
             is_active=True,
         )
@@ -8561,11 +8541,8 @@ class CloudServerServicesTestCase(TestCase):
         response = refresh_lifecycle_plan_table(request)
 
         self.assertEqual(response.status_code, 200)
-        self.assertTrue(CloudLifecyclePlan.objects.filter(
-            plan_kind=CloudLifecyclePlan.PLAN_KIND_ORPHAN_ASSET_DELETE,
-            asset__order=order,
-            data_group='active',
-        ).exists())
+        data = json.loads(response.content)['data']
+        self.assertGreaterEqual(data['shutdown_count'], 1)
 
     # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
     def test_update_cloud_asset_expiry_refreshes_delete_plan_snapshot(self):
@@ -8585,9 +8562,8 @@ class CloudServerServicesTestCase(TestCase):
             status=CloudAsset.STATUS_RUNNING,
             is_active=True,
         )
-        call_command('refresh_lifecycle_plans', limit=20)
-        row = CloudLifecyclePlan.objects.get(plan_kind=CloudLifecyclePlan.PLAN_KIND_ORPHAN_ASSET_DELETE, asset=asset, data_group='active')
-        old_delete_at = row.delete_at
+        old_row = _asset_delete_plan_item_payload(asset)
+        old_delete_at = parse_datetime(old_row['delete_at'])
         staff_user = get_user_model().objects.create_user(username='staff_asset_expiry_refresh_plan', password='x', is_staff=True, is_superuser=True)
         request = self.factory.patch(
             f'/api/dashboard/cloud-assets/{asset.id}/',
@@ -8599,11 +8575,14 @@ class CloudServerServicesTestCase(TestCase):
         response = update_cloud_asset(request, asset.id)
 
         self.assertEqual(response.status_code, 200)
-        row.refresh_from_db()
         asset.refresh_from_db()
+        request = self.factory.get('/api/admin/tasks/plans/', {'limit': 20})
+        self._attach_bearer_session(request, staff_user)
+        data = json.loads(lifecycle_plans(request).content)['data']
+        row = next(item for item in data['due_items'] if item.get('asset_id') == asset.id)
         self.assertEqual(asset.actual_expires_at, new_expiry)
-        self.assertNotEqual(row.delete_at, old_delete_at)
-        self.assertEqual(row.service_expires_at, new_expiry)
+        self.assertNotEqual(parse_datetime(row['delete_at']), old_delete_at)
+        self.assertEqual(parse_datetime(row['service_expires_at']), new_expiry)
 
     # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
     def test_update_unattached_ip_release_time_refreshes_delete_plan_snapshot(self):
@@ -8624,9 +8603,8 @@ class CloudServerServicesTestCase(TestCase):
             note='未附加固定IP',
             is_active=True,
         )
-        call_command('refresh_lifecycle_plans', limit=20)
-        row = CloudLifecyclePlan.objects.get(plan_kind=CloudLifecyclePlan.PLAN_KIND_UNATTACHED_IP_DELETE, asset=asset, data_group='active')
-        self.assertEqual(row.delete_at, old_release_at)
+        row = next(item for item in _unattached_ip_delete_items(limit=20) if item.get('asset_id') == asset.id)
+        self.assertEqual(parse_datetime(row['delete_at']), old_release_at)
         staff_user = get_user_model().objects.create_user(username='staff_ip_expiry_refresh_plan', password='x', is_staff=True, is_superuser=True)
         request = self.factory.patch(
             f'/api/dashboard/cloud-assets/{asset.id}/',
@@ -8638,15 +8616,15 @@ class CloudServerServicesTestCase(TestCase):
         response = update_cloud_asset(request, asset.id)
 
         self.assertEqual(response.status_code, 200)
-        row.refresh_from_db()
         asset.refresh_from_db()
+        row = next(item for item in _unattached_ip_delete_items(limit=20) if item.get('asset_id') == asset.id)
         self.assertEqual(asset.actual_expires_at, new_release_at)
-        self.assertEqual(row.delete_at, new_release_at)
-        self.assertEqual(row.next_run_at, new_release_at)
+        self.assertEqual(parse_datetime(row['delete_at']), new_release_at)
 
     # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
     def test_refresh_notice_plans_command_populates_cloud_notice_plan(self):
         now = timezone.now()
+        expires_at = now + timezone.timedelta(days=1)
         order = CloudServerOrder.objects.create(
             order_no='CMD-NOTICE-PLAN-1',
             user=self.user,
@@ -8661,18 +8639,22 @@ class CloudServerServicesTestCase(TestCase):
             pay_amount='19.00',
             status='completed',
             public_ip='7.7.7.62',
-            service_expires_at=now + timezone.timedelta(days=1),
             cloud_reminder_enabled=True,
         )
-        self._create_auto_renew_asset(order)
+        self._create_auto_renew_asset(order, expires_at=expires_at)
 
         call_command('refresh_notice_plans', limit=20, future_limit=20, history_limit=20)
 
-        self.assertTrue(CloudNoticePlan.objects.filter(notice_type='renew_notice', order=order, data_group='active').exists())
+        staff_user = get_user_model().objects.create_user(username='staff_cmd_notice_plan', password='x', is_staff=True)
+        request = self.factory.get('/api/admin/tasks/notices/', {'limit': 20, 'future_limit': 20, 'history_limit': 20})
+        self._attach_bearer_session(request, staff_user)
+        data = json.loads(notice_task_detail(request).content)['data']
+        self.assertTrue(any(item.get('order_id') == order.id and item.get('notice_type') == 'renew_notice' for item in data['due_items']))
 
     # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
     def test_refresh_notice_plan_table_api_populates_cloud_notice_plan(self):
         now = timezone.now()
+        expires_at = now + timezone.timedelta(days=1)
         order = CloudServerOrder.objects.create(
             order_no='API-NOTICE-REFRESH-1',
             user=self.user,
@@ -8687,10 +8669,9 @@ class CloudServerServicesTestCase(TestCase):
             pay_amount='19.00',
             status='completed',
             public_ip='7.7.7.64',
-            service_expires_at=now + timezone.timedelta(days=1),
             cloud_reminder_enabled=True,
         )
-        self._create_auto_renew_asset(order)
+        self._create_auto_renew_asset(order, expires_at=expires_at)
         staff_user = get_user_model().objects.create_user(username='staff_api_notice_refresh', password='x', is_staff=True)
         request = self.factory.post('/api/admin/tasks/notices/refresh/', data=json.dumps({'limit': 20, 'future_limit': 20, 'history_limit': 20}), content_type='application/json')
         self._attach_bearer_session(request, staff_user)
@@ -8698,11 +8679,13 @@ class CloudServerServicesTestCase(TestCase):
         response = refresh_notice_plan_table(request)
 
         self.assertEqual(response.status_code, 200)
-        self.assertTrue(CloudNoticePlan.objects.filter(notice_type='renew_notice', order=order, data_group='active').exists())
+        data = json.loads(response.content)['data']
+        self.assertGreaterEqual(data['due_count'], 1)
 
     # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
     def test_notice_task_detail_uses_cloud_notice_plan_table(self):
         now = timezone.now()
+        expires_at = now + timezone.timedelta(days=1)
         order = CloudServerOrder.objects.create(
             order_no='NOTICE-PLAN-TABLE-RENEW-1',
             user=self.user,
@@ -8717,10 +8700,9 @@ class CloudServerServicesTestCase(TestCase):
             pay_amount='19.00',
             status='completed',
             public_ip='7.7.7.71',
-            service_expires_at=now + timezone.timedelta(days=1),
             cloud_reminder_enabled=True,
         )
-        self._create_auto_renew_asset(order)
+        self._create_auto_renew_asset(order, expires_at=expires_at)
         staff_user = get_user_model().objects.create_user(username='staff_notice_plan_table', password='x', is_staff=True)
         request = self.factory.get('/api/admin/tasks/notices/', {'limit': 20, 'future_limit': 20, 'history_limit': 20})
         self._attach_bearer_session(request, staff_user)
@@ -8731,7 +8713,6 @@ class CloudServerServicesTestCase(TestCase):
         data = json.loads(response.content)['data']
         row = next(item for item in data['due_items'] if item.get('order_id') == order.id and item.get('notice_type') == 'renew_notice')
         self.assertEqual(row['ip'], '7.7.7.71')
-        self.assertTrue(CloudNoticePlan.objects.filter(notice_type='renew_notice', order=order, data_group=CloudNoticePlan.DATA_GROUP_ACTIVE).exists())
 
     # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
     def test_notice_write_actions_require_superuser(self):
@@ -8821,14 +8802,15 @@ class CloudServerServicesTestCase(TestCase):
         self._attach_bearer_session(sync_request, staff_user)
         sync_response = notice_task_detail(sync_request)
         self.assertEqual(sync_response.status_code, 200)
-        self.assertTrue(CloudNoticePlan.objects.filter(notice_type='renew_notice', data_group=CloudNoticePlan.DATA_GROUP_HISTORY, log_id=log.id).exists())
+        sync_data = json.loads(sync_response.content)['data']
+        self.assertTrue(any(item.get('log_id') == log.id for item in sync_data['history_items']))
 
         request = self.factory.post(f'/api/admin/tasks/notices/history/{log.id}/delete/')
         self._attach_bearer_session(request, staff_user)
         response = delete_notice_history(request, str(log.id))
 
         self.assertEqual(response.status_code, 200)
-        self.assertFalse(CloudNoticePlan.objects.filter(notice_type='renew_notice', data_group=CloudNoticePlan.DATA_GROUP_HISTORY, log_id=log.id).exists())
+        self.assertFalse(CloudUserNoticeLog.objects.filter(id=log.id).exists())
 
     # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
     def test_cloud_ip_query_keyboard_limits_non_owner_to_renewal(self):

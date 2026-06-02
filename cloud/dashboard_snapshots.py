@@ -62,7 +62,7 @@ def _refresh_dashboard_plan_snapshots(reason: str = '', *, lifecycle_limit: int 
         logger.exception('DASHBOARD_SNAPSHOT_CLOUD_ASSET_REFRESH_FAILED reason=%s', reason)
     try:
         from cloud import api as cloud_api
-        cloud_api._sync_auto_renew_plan_table(now=timezone.now())
+        cloud_api._build_auto_renew_plan_items(now=timezone.now())
     except (OperationalError, ProgrammingError) as exc:
         if _is_db_table_not_ready_error(exc):
             logger.debug('DASHBOARD_SNAPSHOT_AUTO_RENEW_REFRESH_SKIPPED reason=%s error=%s', reason, exc)
@@ -77,7 +77,7 @@ def _refresh_dashboard_plan_snapshots(reason: str = '', *, lifecycle_limit: int 
         logger.exception('DASHBOARD_SNAPSHOT_AUTO_RENEW_REFRESH_FAILED reason=%s', reason)
     try:
         from cloud import api as cloud_api
-        cloud_api._sync_notice_plan_table(limit=500, future_limit=200, history_limit=1000)
+        cloud_api._build_notice_plan_bundle(limit=500, future_limit=200, history_limit=1000)
     except (OperationalError, ProgrammingError) as exc:
         if _is_db_table_not_ready_error(exc):
             logger.debug('DASHBOARD_SNAPSHOT_NOTICE_REFRESH_SKIPPED reason=%s error=%s', reason, exc)
@@ -96,7 +96,7 @@ def _refresh_dashboard_plan_snapshots(reason: str = '', *, lifecycle_limit: int 
 def _refresh_lifecycle_plan_snapshot(reason: str = '', *, lifecycle_limit: int = 1000):
     try:
         from bot import api as bot_api
-        bot_api._sync_lifecycle_plan_table(limit=lifecycle_limit)
+        bot_api._build_lifecycle_plan_bundle(limit=lifecycle_limit)
     except (OperationalError, ProgrammingError) as exc:
         if _is_db_table_not_ready_error(exc):
             logger.debug('DASHBOARD_SNAPSHOT_LIFECYCLE_REFRESH_SKIPPED reason=%s error=%s', reason, exc)

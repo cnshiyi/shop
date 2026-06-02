@@ -1605,12 +1605,10 @@ def _record_auto_renew_patrol_log(order_id: int, *, batch_id: str, ip: str, ok: 
     primary_username = usernames[0] if usernames else (getattr(user, 'username', None) or '')
     display_name = getattr(user, 'display_name', None) or getattr(user, 'first_name', None) or primary_username or '未绑定用户'
     ledger_amount = (balance_change or {}).get('amount')
-    expires_at = order_asset_expiry(order)
     completed_order_no = order.order_no
     if renewed_order_id and renewed_order_id != order.id:
-            renewed = CloudServerOrder.objects.filter(id=renewed_order_id).first()
-            if renewed:
-                expires_at = order_asset_expiry(renewed) or expires_at
+        renewed = CloudServerOrder.objects.filter(id=renewed_order_id).first()
+        if renewed:
             completed_order_no = renewed.order_no or completed_order_no
     return CloudAutoRenewPatrolLog.objects.create(
         order=order,
@@ -1628,7 +1626,6 @@ def _record_auto_renew_patrol_log(order_id: int, *, batch_id: str, ip: str, ok: 
         balance_before=(balance_change or {}).get('before'),
         balance_after=(balance_change or {}).get('after'),
         balance_change=ledger_amount,
-        service_expires_at=expires_at,
         completed_order_id=renewed_order_id or order.id,
         completed_order_no=completed_order_no,
     )

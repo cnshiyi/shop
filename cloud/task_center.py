@@ -6,9 +6,6 @@ from django.views.decorators.http import require_GET
 
 from cloud.models import (
     CloudAssetSyncJob,
-    CloudAutoRenewPlan,
-    CloudLifecyclePlan,
-    CloudNoticePlan,
     CloudServerOrder,
 )
 from cloud.sync_jobs import _cloud_asset_sync_job_payload, _cloud_asset_sync_jobs_metrics_payload
@@ -20,6 +17,14 @@ def _status_counts(queryset, field='status') -> dict:
         str(row[field] or ''): int(row['count'] or 0)
         for row in queryset.values(field).annotate(count=Count('id'))
     }
+
+
+def _status_counts_from_items(items, field='queue_status') -> dict:
+    counts = {}
+    for item in items:
+        value = str(item.get(field) or item.get('status') or '')
+        counts[value] = counts.get(value, 0) + 1
+    return counts
 
 
 def _task_section_payload(
@@ -81,6 +86,31 @@ def _cloud_order_task_item(order) -> dict:
 
 
 def _plan_item(row, *, task_type: str, task_label: str) -> dict:
+    if isinstance(row, dict):
+        order_id = row.get('order_id')
+        asset_id = row.get('asset_id')
+        row_id = row.get('id') or order_id or asset_id or ''
+        return {
+            'id': f'{task_type}:{row_id}',
+            'task_type': task_type,
+            'task_label': task_label,
+            'status': row.get('queue_status') or row.get('status') or '',
+            'status_label': row.get('queue_status_label') or row.get('status_label') or row.get('queue_status') or row.get('status') or '',
+            'execution_status': row.get('queue_status') or row.get('status') or '',
+            'execution_status_label': row.get('queue_status_label') or row.get('status_label') or '',
+            'provider': row.get('provider') or '',
+            'provider_label': row.get('provider_label') or _provider_label(row.get('provider') or ''),
+            'order_id': order_id,
+            'order_no': row.get('order_no') or '',
+            'asset_id': asset_id,
+            'public_ip': row.get('ip') or row.get('public_ip') or '',
+            'note': row.get('last_failure_reason') or row.get('execution_status') or row.get('notice_status_label') or '',
+            'created_at': row.get('created_at'),
+            'updated_at': row.get('updated_at'),
+            'next_run_at': row.get('next_run_at'),
+            'related_path': row.get('related_path') or row.get('detail_path') or row.get('order_detail_path') or '',
+            'detail_path': row.get('detail_path') or row.get('related_path') or '',
+        }
     order_id = getattr(row, 'order_id', None)
     asset_id = getattr(row, 'asset_id', None)
     return {
@@ -151,66 +181,79 @@ def _cloud_orders_section(now) -> dict:
 
 
 def _lifecycle_section(now) -> dict:
-    queryset = CloudLifecyclePlan.objects.filter(data_group='active')
-    failed_count = queryset.exclude(last_failure_reason__isnull=True).exclude(last_failure_reason='').count()
-    warning_count = queryset.filter(queue_status__in=['overdue', 'due_now', 'blocked']).count()
+    from bot.api import _build_lifecycle_plan_bundle
+
+    bundle = _build_lifecycle_plan_bundle(limit=1000)
+    items_source = [
+        *bundle.get('due_items', []),
+        *bundle.get('future_plan_items', []),
+        *[item for item in bundle.get('ip_delete_items', []) if not item.get('is_history')],
+    ]
+    failed_count = sum(1 for item in items_source if item.get('last_failure_reason') or item.get('failure_reason'))
+    warning_count = sum(1 for item in items_source if item.get('queue_status') in ['overdue', 'due_now', 'blocked'])
     items = [
         _plan_item(row, task_type='lifecycle', task_label='生命周期计划')
-        for row in queryset.order_by('next_run_at', 'delete_at', '-updated_at')[:8]
+        for row in items_source[:8]
     ]
     return _task_section_payload(
         key='lifecycle',
         title='生命周期计划',
         path='/admin/tasks/plans',
-        total=queryset.count(),
-        active=queryset.filter(queue_status__in=['due_now', 'scheduled_future', 'overdue']).count(),
+        total=len(items_source),
+        active=sum(1 for item in items_source if item.get('queue_status') in ['due_now', 'scheduled_future', 'overdue', 'within_window']),
         failed=failed_count,
         warning=warning_count,
-        status_counts=_status_counts(queryset, 'queue_status'),
+        status_counts=_status_counts_from_items(items_source, 'queue_status'),
         items=items,
         generated_at=now,
     )
 
 
 def _notice_section(now) -> dict:
-    queryset = CloudNoticePlan.objects.filter(data_group='active')
-    failed_count = queryset.filter(notice_status__in=['failed', 'partial_failed']).count()
-    warning_count = queryset.filter(queue_status__in=['due_now', 'overdue']).count()
+    from cloud.api_tasks import _build_notice_plan_bundle
+
+    bundle = _build_notice_plan_bundle(limit=1000, future_limit=200, history_limit=1000)
+    items_source = bundle.get('active_items') or []
+    failed_count = sum(1 for item in items_source if item.get('notice_status') in ['failed', 'partial_failed'])
+    warning_count = sum(1 for item in items_source if item.get('queue_status') in ['due_now', 'overdue', 'fallback_notice', 'within_window'])
     items = [
         _plan_item(row, task_type='notice', task_label='通知计划')
-        for row in queryset.order_by('next_run_at', 'notice_at', '-updated_at')[:8]
+        for row in items_source[:8]
     ]
     return _task_section_payload(
         key='notices',
         title='通知计划',
         path='/admin/tasks/notices',
-        total=queryset.count(),
-        active=queryset.filter(queue_status__in=['due_now', 'scheduled_future', 'overdue']).count(),
+        total=len(items_source),
+        active=sum(1 for item in items_source if item.get('queue_status') in ['due_now', 'scheduled_future', 'overdue', 'fallback_notice', 'within_window']),
         failed=failed_count,
         warning=warning_count,
-        status_counts=_status_counts(queryset, 'queue_status'),
+        status_counts=_status_counts_from_items(items_source, 'queue_status'),
         items=items,
         generated_at=now,
     )
 
 
 def _auto_renew_section(now) -> dict:
-    queryset = CloudAutoRenewPlan.objects.filter(data_group='active')
-    failed_count = queryset.exclude(last_failure_reason__isnull=True).exclude(last_failure_reason='').count()
-    warning_count = queryset.filter(queue_status__in=['due_now', 'overdue', 'balance_insufficient']).count()
+    from cloud.api_tasks import _build_auto_renew_plan_items
+
+    bundle = _build_auto_renew_plan_items(now=now)
+    items_source = [*bundle.get('due_items', []), *bundle.get('future_plan_items', [])]
+    failed_count = sum(1 for item in items_source if item.get('last_failure_reason'))
+    warning_count = sum(1 for item in items_source if item.get('queue_status') in ['due_now', 'overdue', 'balance_insufficient', 'retry_failed', 'fallback_retry'])
     items = [
         _plan_item(row, task_type='auto_renew', task_label='自动续费')
-        for row in queryset.order_by('auto_renew_at', 'next_run_at', '-updated_at')[:8]
+        for row in items_source[:8]
     ]
     return _task_section_payload(
         key='auto_renew',
         title='自动续费',
         path='/admin/tasks/auto-renew',
-        total=queryset.count(),
-        active=queryset.filter(queue_status__in=['due_now', 'scheduled_future', 'overdue']).count(),
+        total=len(items_source),
+        active=sum(1 for item in items_source if item.get('queue_status') in ['due_now', 'scheduled_future', 'overdue', 'within_window', 'retry_failed', 'fallback_retry']),
         failed=failed_count,
         warning=warning_count,
-        status_counts=_status_counts(queryset, 'queue_status'),
+        status_counts=_status_counts_from_items(items_source, 'queue_status'),
         items=items,
         generated_at=now,
     )

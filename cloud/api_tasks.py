@@ -17,7 +17,7 @@ from bot.models import TelegramLoginAccount
 from cloud.asset_expiry import order_asset_expiry
 from cloud.dashboard_snapshots import _refresh_dashboard_plan_snapshots
 from cloud.lifecycle import NOTICE_TYPE_SWITCH_CONFIG, _auto_renew_notice_batch_payload, _notice_effective_delivered, _get_due_orders, _get_notice_text_override, _lifecycle_notice_batch_payload, _notice_payload_for_order, _notice_override_key, _record_auto_renew_patrol_log, _renew_notice_batch_payload, _run_auto_renew, _set_notice_text_override, cloud_notice_type_enabled
-from cloud.models import CloudAsset, CloudAutoRenewPatrolLog, CloudAutoRenewPlan, CloudNoticePlan, CloudServerOrder, CloudUserNoticeLog
+from cloud.models import CloudAsset, CloudAutoRenewPatrolLog, CloudServerOrder, CloudUserNoticeLog
 from cloud.services import RenewalPriceMissingError, _renewal_price
 from core.dashboard_api import _decimal_to_str, _error, _iso, _ok, _provider_label, _read_payload, _status_label, _user_payload, dashboard_login_required, dashboard_superuser_required
 from core.models import SiteConfig
@@ -76,19 +76,14 @@ def _auto_renew_task_status(order, now, *, latest_failure_reason: str | None = N
 
 # 功能：提供 后台 API 接口 的内部辅助逻辑，供同模块流程复用。
 def _auto_renew_pinned_task(now):
-    if _auto_renew_plan_table_stale(max_age_seconds=300):
-        _sync_auto_renew_plan_table(now=now)
-    plan_qs = CloudAutoRenewPlan.objects.filter(data_group=CloudAutoRenewPlan.DATA_GROUP_ACTIVE)
+    bundle = _build_auto_renew_plan_items(now=now)
+    plan_items = [*bundle.get('due_items', []), *bundle.get('future_plan_items', [])]
     total_enabled = CloudServerOrder.objects.filter(auto_renew_enabled=True).count()
-    failed_count = plan_qs.filter(queue_status='retry_failed').count()
-    if failed_count:
-        _sync_auto_renew_plan_table(now=now)
-        plan_qs = CloudAutoRenewPlan.objects.filter(data_group=CloudAutoRenewPlan.DATA_GROUP_ACTIVE)
-        failed_count = plan_qs.filter(queue_status='retry_failed').count()
-    pending_count = plan_qs.filter(queue_status__in=list(_AUTO_RENEW_PLAN_DUE_STATUSES)).count()
+    failed_count = sum(1 for item in plan_items if item.get('queue_status') == 'retry_failed')
+    pending_count = sum(1 for item in plan_items if item.get('queue_status') in _AUTO_RENEW_PLAN_DUE_STATUSES)
     success_count = CloudAutoRenewPatrolLog.objects.filter(is_success=True, executed_at__gte=now - timezone.timedelta(days=1)).count()
     latest_time = (
-        plan_qs.order_by('-updated_at').values_list('updated_at', flat=True).first()
+        bundle.get('last_run_at')
         or CloudAutoRenewPatrolLog.objects.order_by('-executed_at').values_list('executed_at', flat=True).first()
         or now
     )
@@ -412,7 +407,7 @@ def _auto_renew_history_item_payload(log):
         'balance_before': _decimal_to_str(log.balance_before) if log.balance_before is not None else None,
         'balance_after': _decimal_to_str(log.balance_after) if log.balance_after is not None else None,
         'balance_change': _decimal_to_str(log.balance_change) if log.balance_change is not None else None,
-        'service_expires_at': _iso(log.service_expires_at),
+        'service_expires_at': _iso(order_asset_expiry(log.order)),
         'executed_at': _iso(log.executed_at),
         'related_path': f'/admin/cloud-orders/{order_id}' if order_id else '',
         'detail_path': f'/admin/cloud-orders/{order_id}' if order_id else '',
@@ -422,127 +417,6 @@ def _auto_renew_history_item_payload(log):
 
 
 _AUTO_RENEW_PLAN_DUE_STATUSES = {'due_now', 'retry_failed', 'fallback_retry'}
-
-
-# 功能：提供 后台 API 接口 的内部辅助逻辑，供同模块流程复用。
-def _parse_api_datetime(value):
-    if not value:
-        return None
-    parsed = parse_datetime(value) if isinstance(value, str) else value
-    if not parsed:
-        return None
-    if timezone.is_naive(parsed):
-        parsed = timezone.make_aware(parsed, timezone.get_current_timezone())
-    return parsed
-
-
-# 功能：提供 后台 API 接口 的内部辅助逻辑，供同模块流程复用。
-def _auto_renew_plan_source_key(item: dict) -> str:
-    return f"order:{item.get('order_id') or item.get('id')}"
-
-
-# 功能：提供 后台 API 接口 的内部辅助逻辑，供同模块流程复用。
-def _auto_renew_plan_row_defaults(item: dict) -> dict:
-    return {
-        'source_key': _auto_renew_plan_source_key(item),
-        'data_group': CloudAutoRenewPlan.DATA_GROUP_ACTIVE,
-        'queue_status': item.get('queue_status') or '',
-        'queue_status_label': item.get('queue_status_label') or '',
-        'order_id': item.get('order_id') or None,
-        'user_id': item.get('user_id') or None,
-        'order_no': item.get('order_no') or '',
-        'ip': item.get('ip') or '',
-        'provider': item.get('provider') or '',
-        'provider_label': item.get('provider_label') or '',
-        'status': item.get('status') or '',
-        'status_label': item.get('status_label') or '',
-        'user_display_name': item.get('user_display_name') or '',
-        'username_label': item.get('username_label') or '',
-        'balance': item.get('balance') or '',
-        'service_expires_at': _parse_api_datetime(item.get('service_expires_at')),
-        'auto_renew_at': _parse_api_datetime(item.get('auto_renew_at')),
-        'next_run_at': _parse_api_datetime(item.get('next_run_at')),
-        'suspend_at': _parse_api_datetime(item.get('suspend_at')),
-        'delete_at': _parse_api_datetime(item.get('delete_at')),
-        'ip_recycle_at': _parse_api_datetime(item.get('ip_recycle_at')),
-        'last_failure_reason': item.get('last_failure_reason') or '',
-        'related_path': item.get('related_path') or '',
-        'detail_path': item.get('detail_path') or '',
-        'order_detail_path': item.get('order_detail_path') or '',
-        'order_link_path': item.get('order_link_path') or '',
-        'source_snapshot': item,
-    }
-
-
-# 功能：提供 后台 API 接口 的内部辅助逻辑，供同模块流程复用。
-def _auto_renew_plan_row_payload(row) -> dict:
-    snapshot = dict(row.source_snapshot or {})
-    snapshot.update({
-        'id': row.id,
-        'order_id': row.order_id,
-        'order_no': row.order_no or '',
-        'ip': row.ip or '',
-        'provider': row.provider or '',
-        'provider_label': row.provider_label or '',
-        'status': row.status or '',
-        'status_label': row.status_label or '',
-        'queue_status': row.queue_status or '',
-        'queue_status_label': row.queue_status_label or '',
-        'user_id': row.user_id,
-        'tg_user_id': snapshot.get('tg_user_id'),
-        'user_display_name': row.user_display_name or '未绑定用户',
-        'username_label': row.username_label or '-',
-        'balance': row.balance or None,
-        'service_expires_at': _iso(row.service_expires_at),
-        'auto_renew_at': _iso(row.auto_renew_at),
-        'next_run_at': _iso(row.next_run_at),
-        'last_failure_reason': row.last_failure_reason or None,
-        'suspend_at': _iso(row.suspend_at),
-        'delete_at': _iso(row.delete_at),
-        'ip_recycle_at': _iso(row.ip_recycle_at),
-        'related_path': row.related_path or '',
-        'detail_path': row.detail_path or row.related_path or '',
-        'order_detail_path': row.order_detail_path or row.related_path or '',
-        'order_link_path': row.order_link_path or row.related_path or '',
-    })
-    return snapshot
-
-
-# 功能：提供 后台 API 接口 的内部辅助逻辑，供同模块流程复用。
-def _upsert_auto_renew_plan_rows(items: list[dict]):
-    payloads = {
-        _auto_renew_plan_source_key(item): _auto_renew_plan_row_defaults(item)
-        for item in items
-        if item.get('order_id') or item.get('id')
-    }
-    source_keys = list(payloads)
-    existing_rows = {row.source_key: row for row in CloudAutoRenewPlan.objects.filter(source_key__in=source_keys)}
-    update_fields = [
-        'data_group', 'queue_status', 'queue_status_label', 'order_id', 'user_id', 'order_no', 'ip', 'provider',
-        'provider_label', 'status', 'status_label', 'user_display_name', 'username_label', 'balance',
-        'service_expires_at', 'auto_renew_at', 'next_run_at', 'suspend_at', 'delete_at', 'ip_recycle_at',
-        'last_failure_reason', 'related_path', 'detail_path', 'order_detail_path', 'order_link_path',
-        'source_snapshot', 'updated_at',
-    ]
-    create_rows = []
-    update_rows = []
-    for source_key, defaults in payloads.items():
-        row = existing_rows.get(source_key)
-        if not row:
-            create_rows.append(CloudAutoRenewPlan(**defaults))
-            continue
-        for field, value in defaults.items():
-            setattr(row, field, value)
-        update_rows.append(row)
-    if create_rows:
-        CloudAutoRenewPlan.objects.bulk_create(create_rows, batch_size=500)
-    if update_rows:
-        CloudAutoRenewPlan.objects.bulk_update(update_rows, update_fields, batch_size=500)
-    qs = CloudAutoRenewPlan.objects.filter(data_group=CloudAutoRenewPlan.DATA_GROUP_ACTIVE)
-    if source_keys:
-        qs.exclude(source_key__in=source_keys).delete()
-    else:
-        qs.delete()
 
 
 # 功能：提供 后台 API 接口 的内部辅助逻辑，供同模块流程复用。
@@ -614,27 +488,6 @@ def _build_auto_renew_plan_items(now=None):
         'last_run_at': last_run_at,
         'next_run_at': next_run_at,
     }
-
-
-# 功能：提供 后台 API 接口 的内部辅助逻辑，供同模块流程复用。
-def _sync_auto_renew_plan_table(now=None):
-    bundle = _build_auto_renew_plan_items(now=now)
-    _upsert_auto_renew_plan_rows([*bundle['due_items'], *bundle['future_plan_items']])
-    return bundle
-
-
-# 功能：提供 后台 API 接口 的内部辅助逻辑，供同模块流程复用。
-def _auto_renew_plan_table_stale(max_age_seconds: int = 300) -> bool:
-    latest_updated_at = CloudAutoRenewPlan.objects.order_by('-updated_at').values_list('updated_at', flat=True).first()
-    if not latest_updated_at:
-        return True
-    return latest_updated_at < timezone.now() - timezone.timedelta(seconds=max_age_seconds)
-
-
-# 功能：提供 后台 API 接口 的内部辅助逻辑，供同模块流程复用。
-def _cloud_auto_renew_plan_items():
-    rows = CloudAutoRenewPlan.objects.filter(data_group=CloudAutoRenewPlan.DATA_GROUP_ACTIVE).order_by('auto_renew_at', 'next_run_at', '-updated_at', '-id')
-    return [_auto_renew_plan_row_payload(row) for row in rows]
 
 
 _NOTICE_TASK_TYPES = {
@@ -1187,12 +1040,6 @@ def delete_notice_history(request, identifier):
     for field_name, order_ids in field_order_ids.items():
         if order_ids:
             reset_count += CloudServerOrder.objects.filter(id__in=order_ids).update(**{field_name: None})
-    plan_history_qs = CloudNoticePlan.objects.filter(data_group=CloudNoticePlan.DATA_GROUP_HISTORY)
-    if identifier.isdigit():
-        plan_history_qs = plan_history_qs.filter(Q(log_id=int(identifier)) | Q(batch_id=identifier))
-    else:
-        plan_history_qs = plan_history_qs.filter(batch_id=identifier)
-    plan_history_qs.delete()
     deleted_count, _ = queryset.delete()
     return _ok({'deleted': True, 'deleted_count': deleted_count, 'reset_count': reset_count})
 
@@ -1265,144 +1112,7 @@ def _compact_notice_items(items: list[dict], *, text_limit: int = 1200, ip_limit
 
 
 # 功能：提供 后台 API 接口 的内部辅助逻辑，供同模块流程复用。
-def _notice_plan_row_source_key(item: dict, *, data_group: str) -> str:
-    notice_type = str(item.get('notice_type') or '').strip()
-    if not notice_type:
-        return ''
-    if data_group == 'history':
-        source_id = item.get('log_id') or item.get('batch_id') or item.get('id')
-        return f'{data_group}:{notice_type}:{source_id}' if source_id is not None else ''
-    source_id = item.get('order_id') or item.get('id')
-    return f'{data_group}:{notice_type}:{source_id}' if source_id is not None else ''
-
-
-# 功能：提供 后台 API 接口 的内部辅助逻辑，供同模块流程复用。
-def _notice_plan_row_defaults(item: dict, *, data_group: str, source_key: str) -> dict:
-    return {
-        'source_key': source_key,
-        'notice_type': str(item.get('notice_type') or '').strip(),
-        'data_group': data_group,
-        'queue_status': item.get('queue_status'),
-        'queue_status_label': item.get('queue_status_label'),
-        'order_id': item.get('order_id'),
-        'user_id': item.get('user_id'),
-        'order_no': item.get('order_no'),
-        'ip': item.get('ip'),
-        'provider': item.get('provider'),
-        'provider_label': item.get('provider_label'),
-        'status': item.get('status'),
-        'status_label': item.get('status_label'),
-        'user_display_name': item.get('user_display_name'),
-        'username_label': item.get('username_label'),
-        'notice_channel': item.get('notice_channel'),
-        'notice_channel_label': item.get('notice_channel_label'),
-        'notice_channel_attempts': item.get('notice_channel_attempts') or [],
-        'notice_status': item.get('notice_status'),
-        'notice_status_label': item.get('notice_status_label'),
-        'retry_label': item.get('retry_label'),
-        'notice_text_preview': item.get('notice_text_preview'),
-        'notice_at': parse_datetime(item['notice_at']) if item.get('notice_at') else None,
-        'next_run_at': parse_datetime(item['next_run_at']) if item.get('next_run_at') else None,
-        'sent_at': parse_datetime(item['sent_at']) if item.get('sent_at') else None,
-        'logged_at': parse_datetime(item['created_at']) if item.get('created_at') else (parse_datetime(item['logged_at']) if item.get('logged_at') else None),
-        'delivered': bool(item.get('delivered')),
-        'batch_id': item.get('batch_id'),
-        'log_id': item.get('log_id'),
-        'related_path': item.get('related_path'),
-        'detail_path': item.get('detail_path'),
-        'order_detail_path': item.get('order_detail_path'),
-        'order_link_path': item.get('order_link_path'),
-        'source_snapshot': dict(item),
-    }
-
-
-# 功能：提供 后台 API 接口 的内部辅助逻辑，供同模块流程复用。
-def _notice_plan_row_payload(row) -> dict:
-    payload = dict(row.source_snapshot or {})
-    payload.update({
-        'id': row.id,
-        'source_key': row.source_key,
-        'notice_type': row.notice_type,
-        'data_group': row.data_group,
-        'queue_status': row.queue_status,
-        'queue_status_label': row.queue_status_label,
-        'order_id': row.order_id or payload.get('order_id'),
-        'user_id': row.user_id or payload.get('user_id'),
-        'order_no': row.order_no or payload.get('order_no') or '-',
-        'ip': row.ip or payload.get('ip') or '未分配',
-        'provider': row.provider or payload.get('provider'),
-        'provider_label': row.provider_label or payload.get('provider_label'),
-        'status': row.status or payload.get('status'),
-        'status_label': row.status_label or payload.get('status_label'),
-        'user_display_name': row.user_display_name or payload.get('user_display_name') or '未绑定用户',
-        'username_label': row.username_label or payload.get('username_label') or '-',
-        'notice_channel': row.notice_channel or payload.get('notice_channel') or 'unbound',
-        'notice_channel_label': row.notice_channel_label or payload.get('notice_channel_label') or '未绑定通知渠道',
-        'notice_channel_attempts': row.notice_channel_attempts or payload.get('notice_channel_attempts') or [],
-        'notice_status': row.notice_status or payload.get('notice_status') or 'pending',
-        'notice_status_label': row.notice_status_label or payload.get('notice_status_label') or '未来计划',
-        'retry_label': row.retry_label or payload.get('retry_label') or '-',
-        'notice_text_preview': row.notice_text_preview or payload.get('notice_text_preview') or payload.get('text_preview') or '',
-        'notice_at': _iso(row.notice_at) or payload.get('notice_at'),
-        'next_run_at': _iso(row.next_run_at) or payload.get('next_run_at'),
-        'sent_at': _iso(row.sent_at) or payload.get('sent_at'),
-        'logged_at': _iso(row.logged_at) or payload.get('created_at') or payload.get('logged_at'),
-        'delivered': bool(row.delivered),
-        'batch_id': row.batch_id or payload.get('batch_id') or '',
-        'log_id': row.log_id or payload.get('log_id'),
-        'related_path': row.related_path or payload.get('related_path') or '',
-        'detail_path': row.detail_path or payload.get('detail_path') or '',
-        'order_detail_path': row.order_detail_path or payload.get('order_detail_path') or '',
-        'order_link_path': row.order_link_path or payload.get('order_link_path') or '',
-    })
-    return payload
-
-
-# 功能：提供 后台 API 接口 的内部辅助逻辑，供同模块流程复用。
-def _upsert_notice_plan_rows(items: list[dict], *, data_group: str):
-    source_keys = []
-    payload_map = {}
-    for item in items:
-        source_key = _notice_plan_row_source_key(item, data_group=data_group)
-        if not source_key:
-            continue
-        source_keys.append(source_key)
-        payload_map[source_key] = _notice_plan_row_defaults(item, data_group=data_group, source_key=source_key)
-    existing_rows = {row.source_key: row for row in CloudNoticePlan.objects.filter(source_key__in=source_keys, notice_type__in=[item.get('notice_type') for item in items if item.get('notice_type')], data_group=data_group)}
-    create_rows = []
-    update_rows = []
-    update_fields = ['queue_status', 'queue_status_label', 'order', 'user', 'order_no', 'ip', 'provider', 'provider_label', 'status', 'status_label', 'user_display_name', 'username_label', 'notice_channel', 'notice_channel_label', 'notice_channel_attempts', 'notice_status', 'notice_status_label', 'retry_label', 'notice_text_preview', 'notice_at', 'next_run_at', 'sent_at', 'logged_at', 'delivered', 'batch_id', 'log_id', 'related_path', 'detail_path', 'order_detail_path', 'order_link_path', 'source_snapshot', 'updated_at']
-    for source_key, defaults in payload_map.items():
-        notice_type = defaults['notice_type']
-        row = existing_rows.get(source_key)
-        if row:
-            changed = False
-            for field, value in defaults.items():
-                if getattr(row, field) != value:
-                    setattr(row, field, value)
-                    changed = True
-            if changed:
-                update_rows.append(row)
-        else:
-            row = CloudNoticePlan(**{key: value for key, value in defaults.items() if key not in {'order_id', 'user_id'}})
-            if defaults.get('order_id'):
-                row.order_id = defaults['order_id']
-            if defaults.get('user_id'):
-                row.user_id = defaults['user_id']
-            create_rows.append(row)
-    if create_rows:
-        CloudNoticePlan.objects.bulk_create(create_rows, batch_size=500)
-    if update_rows:
-        CloudNoticePlan.objects.bulk_update(update_rows, update_fields, batch_size=500)
-    qs = CloudNoticePlan.objects.filter(data_group=data_group)
-    if source_keys:
-        qs.exclude(source_key__in=source_keys).delete()
-    else:
-        qs.delete()
-
-
-# 功能：提供 后台 API 接口 的内部辅助逻辑，供同模块流程复用。
-def _sync_notice_plan_table(*, limit=1000, future_limit=200, history_limit=1000):
+def _build_notice_plan_bundle(*, limit=1000, future_limit=200, history_limit=1000):
     now = timezone.now()
     due = async_to_sync(_cloud_api_override('_get_due_orders', _get_due_orders))()
     next_run_at = now + timezone.timedelta(minutes=10)
@@ -1445,17 +1155,10 @@ def _sync_notice_plan_table(*, limit=1000, future_limit=200, history_limit=1000)
     active_items = [*due_items, *future_plan_items]
     history_qs = CloudUserNoticeLog.objects.select_related('order', 'user').filter(event_type__in=list(_NOTICE_HISTORY_LABELS)).order_by('-created_at', '-id')
     history_rows = _notice_history_group_items(history_qs[:max(history_limit, 1000)], account_attempts=account_attempts)
-    _upsert_notice_plan_rows(active_items, data_group='active')
-    _upsert_notice_plan_rows(history_rows, data_group='history')
     return {'active_items': active_items, 'history_items': history_rows}
 
 
 # 功能：提供 后台 API 接口 的内部辅助逻辑，供同模块流程复用。
-def _cloud_notice_plan_items(*, data_group: str):
-    rows = CloudNoticePlan.objects.filter(data_group=data_group).order_by('notice_at', 'next_run_at', '-logged_at', '-updated_at', '-id')
-    return [_notice_plan_row_payload(row) for row in rows]
-
-
 # 功能：刷新缓存、快照或派生数据；当前函数属于 后台 API 接口。
 @csrf_exempt
 @dashboard_login_required
@@ -1465,7 +1168,7 @@ def refresh_notice_plan_table(request):
     limit = _request_int_param(request, 'limit', int(payload.get('limit') or 1000), maximum=1000)
     future_limit = _request_int_param(request, 'future_limit', int(payload.get('future_limit') or 200), maximum=2000)
     history_limit = _request_int_param(request, 'history_limit', int(payload.get('history_limit') or 1000), maximum=5000)
-    bundle = _sync_notice_plan_table(limit=limit, future_limit=future_limit, history_limit=history_limit)
+    bundle = _build_notice_plan_bundle(limit=limit, future_limit=future_limit, history_limit=history_limit)
     active_items = bundle.get('active_items') or []
     due_items = [item for item in active_items if item.get('queue_status') in {'due_now', 'fallback_notice', 'within_window'}]
     future_items = [item for item in active_items if item.get('queue_status') == 'scheduled_future']
@@ -1492,9 +1195,9 @@ def notice_task_detail(request):
     compact = str(request.GET.get('compact') or '').strip().lower() in {'1', 'true', 'yes', 'on'}
 
     next_run_at = now + timezone.timedelta(minutes=10)
-    _sync_notice_plan_table(limit=max(limit, 200), future_limit=max(future_limit, 200), history_limit=max(history_limit, 200))
+    bundle = _build_notice_plan_bundle(limit=max(limit, 200), future_limit=max(future_limit, 200), history_limit=max(history_limit, 200))
 
-    active_items = _cloud_notice_plan_items(data_group='active')
+    active_items = bundle.get('active_items') or []
     due_items = [item for item in active_items if item.get('queue_status') in {'due_now', 'fallback_notice', 'within_window'}]
     future_plan_items = [item for item in active_items if item.get('queue_status') == 'scheduled_future']
     due_items.sort(key=lambda item: parse_datetime(item.get('notice_at') or '') or timezone.datetime.max.replace(tzinfo=dt_timezone.utc))
@@ -1510,7 +1213,7 @@ def notice_task_detail(request):
     visible_due_items = due_items[offset:offset + limit]
     visible_future_plan_items = future_plan_items[future_offset:future_offset + future_limit]
 
-    history_all_items = _cloud_notice_plan_items(data_group='history')
+    history_all_items = bundle.get('history_items') or []
     history_all_items.sort(key=lambda item: parse_datetime(item.get('created_at') or item.get('logged_at') or '') or timezone.datetime.min.replace(tzinfo=dt_timezone.utc), reverse=True)
     visible_history_items = history_all_items[history_offset:history_offset + history_limit]
     recent_since = now - timezone.timedelta(days=1)
@@ -1524,7 +1227,7 @@ def notice_task_detail(request):
     recent_failure_count = sum(1 for item in recent_history_items if not item.get('delivered'))
     recent_success_user_count = len({item.get('user_id') for item in recent_history_items if item.get('delivered') and item.get('user_id')})
     recent_failure_user_count = len({item.get('user_id') for item in recent_history_items if not item.get('delivered') and item.get('user_id')})
-    last_refresh_at = CloudNoticePlan.objects.order_by('-updated_at').values_list('updated_at', flat=True).first()
+    last_refresh_at = now
 
     return _ok({
         'task_key': 'cloud_notice_plan',
@@ -1561,12 +1264,8 @@ def notice_task_detail(request):
 def auto_renew_task_detail(request):
     now = timezone.now()
     force_refresh = str(request.GET.get('refresh') or request.GET.get('sync') or '').strip().lower() in {'1', 'true', 'yes', 'on'}
-    did_refresh = False
-    if force_refresh or _auto_renew_plan_table_stale():
-        bundle = _sync_auto_renew_plan_table(now=now)
-        did_refresh = True
-    else:
-        bundle = {}
+    bundle = _build_auto_renew_plan_items(now=now)
+    did_refresh = bool(force_refresh)
     history_qs = bundle.get('history_qs') or CloudAutoRenewPatrolLog.objects.select_related('order', 'user').order_by('-executed_at', '-id')
     history_items = [_auto_renew_history_item_payload(item) for item in history_qs[:200]]
     latest_log = history_qs.first()
@@ -1580,10 +1279,10 @@ def auto_renew_task_detail(request):
     latest_batch_success_count = latest_batch_qs.filter(is_success=True).count() if latest_batch_id else 0
     latest_batch_failure_count = latest_batch_qs.filter(is_success=False).count() if latest_batch_id else 0
     latest_failed_ips = list(latest_batch_qs.filter(is_success=False).values_list('ip', flat=True)[:20]) if latest_batch_id else []
-    plan_items = _cloud_auto_renew_plan_items()
+    plan_items = [*bundle.get('due_items', []), *bundle.get('future_plan_items', [])]
     due_items = [item for item in plan_items if item.get('queue_status') in _AUTO_RENEW_PLAN_DUE_STATUSES]
     future_plan_items = [item for item in plan_items if item.get('queue_status') not in _AUTO_RENEW_PLAN_DUE_STATUSES]
-    last_refresh_at = CloudAutoRenewPlan.objects.order_by('-updated_at').values_list('updated_at', flat=True).first()
+    last_refresh_at = now
     return _ok({
         'task_key': 'auto_renew_patrol',
         'task_label': '自动续费巡检',

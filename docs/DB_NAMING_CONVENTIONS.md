@@ -39,8 +39,6 @@
 - `order_product`
 - `order_balance_ledger`
 - `cloud_asset`
-- `cloud_notice_plan`
-- `cloud_auto_renew_plan`
 
 不要在同一业务域里新建另一套复数表名，例如不要再新增：
 
@@ -87,13 +85,16 @@
 - `cloud_asset_sync_job`
 - `cloud_ip_log`
 - `cloud_lifecycle_plan_note`
-- `cloud_lifecycle_plan`
-- `cloud_notice_plan`
-- `cloud_auto_renew_plan`
 - `cloud_auto_renew_retry_task`
 - `cloud_auto_renew_patrol_log`
 - `cloud_user_notice_log`
 - `cloud_address_monitor`
+
+已删除的派生快照表不要恢复：
+
+- `cloud_lifecycle_plan`
+- `cloud_notice_plan`
+- `cloud_auto_renew_plan`
 - `cloud_address_stat_daily`
 - `cloud_resource_snapshot`
 

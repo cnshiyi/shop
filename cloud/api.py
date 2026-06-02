@@ -64,10 +64,10 @@ from cloud.api_sync import (
     sync_servers,
 )
 from cloud.api_tasks import (
+    _build_auto_renew_plan_items,
+    _build_notice_plan_bundle,
     _get_due_orders,
     _run_auto_renew,
-    _sync_auto_renew_plan_table,
-    _sync_notice_plan_table,
     auto_renew_task_detail,
     delete_notice_history,
     notice_task_detail,

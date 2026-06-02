@@ -5,10 +5,6 @@ from decimal import Decimal
 
 from django.conf import settings
 from django.db import models
-from django.utils import timezone
-
-from cloud.lifecycle_schedule import compute_order_lifecycle_schedule, normalize_service_expiry
-
 
 class CloudServerPlan(models.Model):
     PROVIDER_AWS_LIGHTSAIL = 'aws_lightsail'
@@ -188,81 +184,19 @@ class CloudServerOrder(models.Model):
         verbose_name_plural = '云服务器订单'
         ordering = ['-created_at']
 
-    @staticmethod
-    def normalize_expiry_time(value):
-        return normalize_service_expiry(value)
-
-    @property
-    def service_expires_at(self):
-        if hasattr(self, '_service_expires_at'):
-            return self._service_expires_at
-        if not self.pk:
-            return None
-        asset = (
-            CloudAsset.objects.filter(order_id=self.pk, kind=CloudAsset.KIND_SERVER, actual_expires_at__isnull=False)
-            .order_by('-sort_order', 'actual_expires_at', '-updated_at', '-id')
-            .only('actual_expires_at')
-            .first()
-        )
-        return asset.actual_expires_at if asset else None
-
-    @service_expires_at.setter
-    def service_expires_at(self, value):
-        self._service_expires_at_set = True
-        self._service_expires_at = normalize_service_expiry(value)
-
     def save(self, *args, **kwargs):
         requested_update_fields = kwargs.get('update_fields')
-        requested_field_set = set(requested_update_fields or [])
-        pending_expiry_set = bool(getattr(self, '_service_expires_at_set', False))
-        pending_expiry = getattr(self, '_service_expires_at', None)
-        preserve_unattached_ip_recycle_at = (
-            self.status == 'deleted'
-            and not str(self.instance_id or '').strip()
-            and self.ip_recycle_at
-            and not (requested_field_set & {'service_started_at', 'lifecycle_days'})
-        )
+        update_fields = set(requested_update_fields or [])
         if self.completed_at and not self.service_started_at:
             self.service_started_at = self.completed_at
-        if pending_expiry:
-            schedule = compute_order_lifecycle_schedule(pending_expiry)
-            self.renew_grace_expires_at = schedule.renew_grace_expires_at
-            self.suspend_at = schedule.suspend_at
-            self.delete_at = schedule.delete_at
-            if not preserve_unattached_ip_recycle_at:
-                self.ip_recycle_at = schedule.ip_recycle_at
-        if requested_update_fields is not None:
-            update_fields = set(requested_update_fields)
-            update_fields.discard('service_expires_at')
-            if self.completed_at and 'completed_at' in update_fields:
+            if requested_update_fields is not None:
                 update_fields.add('service_started_at')
-            if pending_expiry_set and pending_expiry:
-                update_fields.update({'renew_grace_expires_at', 'suspend_at', 'delete_at', 'ip_recycle_at'})
-            if pending_expiry_set and not update_fields:
-                update_fields.add('updated_at')
+        if requested_update_fields is not None:
             if update_fields:
                 kwargs['update_fields'] = list(update_fields)
             else:
                 kwargs.pop('update_fields', None)
         super().save(*args, **kwargs)
-        if pending_expiry_set and pending_expiry and self.pk:
-            CloudAsset.objects.filter(
-                order_id=self.pk,
-                kind=CloudAsset.KIND_SERVER,
-                actual_expires_at__isnull=True,
-            ).update(
-                actual_expires_at=pending_expiry,
-                updated_at=timezone.now(),
-            )
-        if pending_expiry_set:
-            self._service_expires_at_set = False
-            self._service_expires_at = pending_expiry
-
-    def refresh_from_db(self, using=None, fields=None, from_queryset=None):
-        super().refresh_from_db(using=using, fields=fields, from_queryset=from_queryset)
-        if fields is None or 'service_expires_at' in fields:
-            self.__dict__.pop('_service_expires_at', None)
-            self.__dict__.pop('_service_expires_at_set', None)
 
     def __str__(self):
         return self.order_no
@@ -395,7 +329,6 @@ class CloudAssetDashboardSnapshot(models.Model):
     public_ip = models.CharField('公网IP', max_length=128, blank=True, null=True, db_index=True)
     status = models.CharField('状态', max_length=32, blank=True, null=True, db_index=True)
     is_active = models.BooleanField('是否活跃', default=True, db_index=True)
-    actual_expires_at = models.DateTimeField('实际到期时间', blank=True, null=True, db_index=True)
     sort_order = models.IntegerField('排序', default=99, db_index=True)
     user = models.ForeignKey('bot.TelegramUser', verbose_name='绑定用户', on_delete=models.SET_NULL, blank=True, null=True, related_name='cloud_asset_dashboard_snapshots')
     tg_user_id = models.BigIntegerField('Telegram 用户ID', blank=True, null=True, db_index=True)
@@ -426,11 +359,11 @@ class CloudAssetDashboardSnapshot(models.Model):
         db_table = 'cloud_asset_dashboard_snapshot'
         verbose_name = '云资产列表快照'
         verbose_name_plural = '云资产列表快照'
-        ordering = ['risk_rank', 'actual_expires_at', '-sort_order', '-asset_id']
+        ordering = ['risk_rank', '-sort_order', '-asset_id']
         indexes = [
-            models.Index(fields=['risk_account_disabled', 'risk_rank', 'actual_expires_at'], name='cad_risk_display_idx'),
-            models.Index(fields=['group_user_key', 'risk_rank', 'actual_expires_at'], name='cad_group_user_idx'),
-            models.Index(fields=['group_telegram_key', 'risk_rank', 'actual_expires_at'], name='cad_group_tg_idx'),
+            models.Index(fields=['risk_account_disabled', 'risk_rank', '-sort_order'], name='cad_risk_display_idx'),
+            models.Index(fields=['group_user_key', 'risk_rank', '-sort_order'], name='cad_group_user_idx'),
+            models.Index(fields=['group_telegram_key', 'risk_rank', '-sort_order'], name='cad_group_tg_idx'),
             models.Index(fields=['provider', 'cloud_account', 'region_code', 'status'], name='cad_provider_scope_idx'),
             models.Index(fields=['risk_unattached_ip', 'is_active', 'status'], name='idx_cad_display_state'),
         ]
@@ -629,180 +562,6 @@ class CloudLifecyclePlanNote(models.Model):
         return f'{self.plan_kind}:{target}'
 
 
-class CloudLifecyclePlan(models.Model):
-    PLAN_KIND_SHUTDOWN_ORDER = 'shutdown_order'
-    PLAN_KIND_ORPHAN_ASSET_DELETE = 'orphan_asset_delete'
-    PLAN_KIND_UNATTACHED_IP_DELETE = 'unattached_ip_delete'
-    PLAN_KIND_CHOICES = CloudLifecyclePlanNote.PLAN_KIND_CHOICES
-
-    source_key = models.CharField('来源键', max_length=191, db_index=True)
-    plan_kind = models.CharField('计划类型', max_length=64, choices=PLAN_KIND_CHOICES, db_index=True)
-    data_group = models.CharField('数据分组', max_length=64, blank=True, null=True, db_index=True)
-    queue_status = models.CharField('队列状态', max_length=64, blank=True, null=True, db_index=True)
-    queue_status_label = models.CharField('队列状态标签', max_length=128, blank=True, null=True)
-    order = models.ForeignKey('cloud.CloudServerOrder', verbose_name='关联订单', on_delete=models.SET_NULL, blank=True, null=True, related_name='lifecycle_plans')
-    asset = models.ForeignKey('cloud.CloudAsset', verbose_name='关联资产', on_delete=models.SET_NULL, blank=True, null=True, related_name='lifecycle_plans')
-    user = models.ForeignKey('bot.TelegramUser', verbose_name='关联用户', on_delete=models.SET_NULL, blank=True, null=True, related_name='cloud_lifecycle_plans')
-    user_display_name = models.CharField('用户显示名', max_length=191, blank=True, null=True)
-    username_label = models.CharField('用户名标签', max_length=191, blank=True, null=True)
-    ip = models.CharField('IP', max_length=128, blank=True, null=True, db_index=True)
-    provider = models.CharField('云厂商', max_length=32, blank=True, null=True, db_index=True)
-    provider_label = models.CharField('云厂商标签', max_length=128, blank=True, null=True)
-    status = models.CharField('状态', max_length=64, blank=True, null=True, db_index=True)
-    status_label = models.CharField('状态标签', max_length=128, blank=True, null=True)
-    service_expires_at = models.DateTimeField('服务到期时间', blank=True, null=True, db_index=True)
-    suspend_at = models.DateTimeField('关机时间', blank=True, null=True, db_index=True)
-    delete_at = models.DateTimeField('删机时间', blank=True, null=True, db_index=True)
-    ip_recycle_at = models.DateTimeField('IP回收时间', blank=True, null=True, db_index=True)
-    next_run_at = models.DateTimeField('下次执行时间', blank=True, null=True, db_index=True)
-    logged_at = models.DateTimeField('记录时间', blank=True, null=True, db_index=True)
-    last_failure_reason = models.TextField('失败原因', blank=True, null=True)
-    execution_status = models.TextField('执行状态', blank=True, null=True)
-    execution_plan = models.TextField('执行计划', blank=True, null=True)
-    note = models.TextField('备注', blank=True, null=True)
-    display_note = models.TextField('备注预览', blank=True, null=True)
-    deletion_source_label = models.CharField('删除来源', max_length=128, blank=True, null=True)
-    related_path = models.CharField('关联路径', max_length=255, blank=True, null=True)
-    detail_path = models.CharField('详情路径', max_length=255, blank=True, null=True)
-    order_detail_path = models.CharField('订单详情路径', max_length=255, blank=True, null=True)
-    order_link_path = models.CharField('订单链接路径', max_length=255, blank=True, null=True)
-    asset_detail_path = models.CharField('资产详情路径', max_length=255, blank=True, null=True)
-    source_snapshot = models.JSONField('来源快照', default=dict, blank=True)
-    created_at = models.DateTimeField('创建时间', auto_now_add=True, db_index=True)
-    updated_at = models.DateTimeField('更新时间', auto_now=True)
-
-    class Meta:
-        db_table = 'cloud_lifecycle_plan'
-        verbose_name = '删除计划'
-        verbose_name_plural = '删除计划'
-        ordering = ['-next_run_at', 'delete_at', '-updated_at', '-id']
-        constraints = [
-            models.UniqueConstraint(fields=['plan_kind', 'source_key'], name='uniq_cloud_lifecycle_plan_source'),
-        ]
-        indexes = [
-            models.Index(fields=['plan_kind', 'data_group'], name='idx_lifecycle_plan_kind_group'),
-            models.Index(fields=['plan_kind', 'queue_status'], name='idx_lifecycle_plan_kind_queue'),
-            models.Index(fields=['plan_kind', 'delete_at'], name='idx_lifecycle_plan_kind_delete'),
-            models.Index(fields=['plan_kind', 'next_run_at'], name='idx_lifecycle_plan_kind_next'),
-        ]
-
-    def __str__(self):
-        return f'{self.plan_kind}:{self.source_key}'
-
-
-class CloudNoticePlan(models.Model):
-    NOTICE_TYPE_RENEW = 'renew_notice'
-    NOTICE_TYPE_AUTO_RENEW = 'auto_renew_notice'
-    NOTICE_TYPE_DELETE = 'delete_notice'
-    NOTICE_TYPE_RECYCLE = 'recycle_notice'
-
-    DATA_GROUP_ACTIVE = 'active'
-    DATA_GROUP_HISTORY = 'history'
-
-    source_key = models.CharField('来源键', max_length=191, db_index=True)
-    notice_type = models.CharField('通知类型', max_length=64, db_index=True)
-    data_group = models.CharField('数据分组', max_length=64, blank=True, null=True, db_index=True)
-    queue_status = models.CharField('队列状态', max_length=64, blank=True, null=True, db_index=True)
-    queue_status_label = models.CharField('队列状态标签', max_length=128, blank=True, null=True)
-    order = models.ForeignKey('cloud.CloudServerOrder', verbose_name='关联订单', on_delete=models.SET_NULL, blank=True, null=True, related_name='notice_plans')
-    user = models.ForeignKey('bot.TelegramUser', verbose_name='关联用户', on_delete=models.SET_NULL, blank=True, null=True, related_name='cloud_notice_plans')
-    order_no = models.CharField('订单号', max_length=191, blank=True, null=True, db_index=True)
-    ip = models.CharField('IP', max_length=128, blank=True, null=True, db_index=True)
-    provider = models.CharField('云厂商', max_length=32, blank=True, null=True, db_index=True)
-    provider_label = models.CharField('云厂商标签', max_length=128, blank=True, null=True)
-    status = models.CharField('状态', max_length=64, blank=True, null=True, db_index=True)
-    status_label = models.CharField('状态标签', max_length=128, blank=True, null=True)
-    user_display_name = models.CharField('用户显示名', max_length=191, blank=True, null=True)
-    username_label = models.CharField('用户名标签', max_length=191, blank=True, null=True)
-    notice_channel = models.CharField('通知渠道', max_length=64, blank=True, null=True, db_index=True)
-    notice_channel_label = models.CharField('通知渠道标签', max_length=191, blank=True, null=True)
-    notice_channel_attempts = models.JSONField('通知渠道尝试', default=list, blank=True)
-    notice_status = models.CharField('通知状态', max_length=64, blank=True, null=True, db_index=True)
-    notice_status_label = models.CharField('通知状态标签', max_length=191, blank=True, null=True)
-    retry_label = models.TextField('重试说明', blank=True, null=True)
-    notice_text_preview = models.TextField('通知文案预览', blank=True, null=True)
-    notice_at = models.DateTimeField('通知时间', blank=True, null=True, db_index=True)
-    next_run_at = models.DateTimeField('下次执行时间', blank=True, null=True, db_index=True)
-    sent_at = models.DateTimeField('发送时间', blank=True, null=True, db_index=True)
-    logged_at = models.DateTimeField('记录时间', blank=True, null=True, db_index=True)
-    delivered = models.BooleanField('是否送达', default=False, db_index=True)
-    batch_id = models.CharField('批次ID', max_length=191, blank=True, null=True, db_index=True)
-    log_id = models.BigIntegerField('日志ID', blank=True, null=True, db_index=True)
-    related_path = models.CharField('关联路径', max_length=255, blank=True, null=True)
-    detail_path = models.CharField('详情路径', max_length=255, blank=True, null=True)
-    order_detail_path = models.CharField('订单详情路径', max_length=255, blank=True, null=True)
-    order_link_path = models.CharField('订单链接路径', max_length=255, blank=True, null=True)
-    source_snapshot = models.JSONField('来源快照', default=dict, blank=True)
-    created_at = models.DateTimeField('创建时间', auto_now_add=True, db_index=True)
-    updated_at = models.DateTimeField('更新时间', auto_now=True)
-
-    class Meta:
-        db_table = 'cloud_notice_plan'
-        verbose_name = '通知计划'
-        verbose_name_plural = '通知计划'
-        ordering = ['-next_run_at', '-logged_at', '-updated_at', '-id']
-        constraints = [
-            models.UniqueConstraint(fields=['notice_type', 'source_key'], name='uniq_cloud_notice_plan_source'),
-        ]
-        indexes = [
-            models.Index(fields=['notice_type', 'data_group'], name='idx_notice_plan_type_group'),
-            models.Index(fields=['notice_type', 'queue_status'], name='idx_notice_plan_type_queue'),
-            models.Index(fields=['notice_type', 'notice_at'], name='idx_notice_plan_type_notice'),
-            models.Index(fields=['notice_type', 'sent_at'], name='idx_notice_plan_type_sent'),
-        ]
-
-    def __str__(self):
-        return f'{self.notice_type}:{self.source_key}'
-
-
-class CloudAutoRenewPlan(models.Model):
-    DATA_GROUP_ACTIVE = 'active'
-
-    source_key = models.CharField('来源键', max_length=191, unique=True, db_index=True)
-    data_group = models.CharField('数据分组', max_length=64, default=DATA_GROUP_ACTIVE, db_index=True)
-    queue_status = models.CharField('队列状态', max_length=64, blank=True, null=True, db_index=True)
-    queue_status_label = models.CharField('队列状态标签', max_length=128, blank=True, null=True)
-    order = models.ForeignKey('cloud.CloudServerOrder', verbose_name='关联订单', on_delete=models.SET_NULL, blank=True, null=True, related_name='auto_renew_plans')
-    user = models.ForeignKey('bot.TelegramUser', verbose_name='关联用户', on_delete=models.SET_NULL, blank=True, null=True, related_name='cloud_auto_renew_plans')
-    order_no = models.CharField('订单号', max_length=191, blank=True, null=True, db_index=True)
-    ip = models.CharField('IP', max_length=128, blank=True, null=True, db_index=True)
-    provider = models.CharField('云厂商', max_length=32, blank=True, null=True, db_index=True)
-    provider_label = models.CharField('云厂商标签', max_length=128, blank=True, null=True)
-    status = models.CharField('状态', max_length=64, blank=True, null=True, db_index=True)
-    status_label = models.CharField('状态标签', max_length=128, blank=True, null=True)
-    user_display_name = models.CharField('用户显示名', max_length=191, blank=True, null=True)
-    username_label = models.CharField('用户名标签', max_length=191, blank=True, null=True)
-    balance = models.CharField('余额', max_length=64, blank=True, null=True)
-    service_expires_at = models.DateTimeField('服务到期时间', blank=True, null=True, db_index=True)
-    auto_renew_at = models.DateTimeField('自动续费时间', blank=True, null=True, db_index=True)
-    next_run_at = models.DateTimeField('下次巡检时间', blank=True, null=True, db_index=True)
-    suspend_at = models.DateTimeField('关机时间', blank=True, null=True)
-    delete_at = models.DateTimeField('删机时间', blank=True, null=True)
-    ip_recycle_at = models.DateTimeField('IP回收时间', blank=True, null=True)
-    last_failure_reason = models.TextField('最近失败原因', blank=True, null=True)
-    related_path = models.CharField('关联路径', max_length=255, blank=True, null=True)
-    detail_path = models.CharField('详情路径', max_length=255, blank=True, null=True)
-    order_detail_path = models.CharField('订单详情路径', max_length=255, blank=True, null=True)
-    order_link_path = models.CharField('订单链接路径', max_length=255, blank=True, null=True)
-    source_snapshot = models.JSONField('来源快照', default=dict, blank=True)
-    created_at = models.DateTimeField('创建时间', auto_now_add=True, db_index=True)
-    updated_at = models.DateTimeField('更新时间', auto_now=True)
-
-    class Meta:
-        db_table = 'cloud_auto_renew_plan'
-        verbose_name = '自动续费计划'
-        verbose_name_plural = '自动续费计划'
-        ordering = ['auto_renew_at', 'next_run_at', '-updated_at', '-id']
-        indexes = [
-            models.Index(fields=['data_group', 'queue_status'], name='idx_auto_renew_plan_queue'),
-            models.Index(fields=['data_group', 'auto_renew_at'], name='idx_auto_renew_plan_time'),
-            models.Index(fields=['order', 'queue_status'], name='idx_auto_renew_plan_order'),
-        ]
-
-    def __str__(self):
-        return f'{self.source_key} {self.queue_status or "-"}'
-
-
 class CloudAutoRenewRetryTask(models.Model):
     STATUS_PENDING = 'pending'
     STATUS_SUCCEEDED = 'succeeded'
@@ -860,7 +619,6 @@ class CloudAutoRenewPatrolLog(models.Model):
     balance_before = models.DecimalField('余额变更前', max_digits=18, decimal_places=6, blank=True, null=True)
     balance_after = models.DecimalField('余额变更后', max_digits=18, decimal_places=6, blank=True, null=True)
     balance_change = models.DecimalField('余额变化', max_digits=18, decimal_places=6, blank=True, null=True)
-    service_expires_at = models.DateTimeField('续费后到期时间', blank=True, null=True)
     completed_order_id = models.BigIntegerField('续费后订单ID', blank=True, null=True, db_index=True)
     completed_order_no = models.CharField('续费后订单号', max_length=191, blank=True, null=True, db_index=True)
     executed_at = models.DateTimeField('执行时间', auto_now_add=True, db_index=True)
@@ -1010,11 +768,8 @@ class ResourceSnapshot(models.Model):
 __all__ = [
     'AddressMonitor',
     'CloudAsset',
-    'CloudAutoRenewPlan',
     'CloudIpLog',
-    'CloudLifecyclePlan',
     'CloudLifecyclePlanNote',
-    'CloudNoticePlan',
     'CloudUserNoticeLog',
     'CloudServerOrder',
     'CloudAutoRenewPatrolLog',
