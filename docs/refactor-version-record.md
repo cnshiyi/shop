@@ -1,5 +1,46 @@
 # 重构版本记录
 
+## 2026-06-02 19:22 自动监工：迁移旧机删除与终态订单清理保护
+
+### 范围
+
+本轮继续监工 Shop Django 后端仓库，起始最近提交为 `1131f74 记录云订单清理和计划保护优化`。重点复查云资产到期事实源、订单旧到期字段、旧计划快照表、退款旧入口、废弃 app 回流、迁移旧机删除是否被普通通知 payload 的资产可见性校验误挡、旧记录清理是否会误删仍保留云资源线索的终态订单，以及自动续费重试任务是否可能被重复执行。
+
+### 复查结论
+
+- `INSTALLED_APPS` 仍只包含 `core`、`bot`、`orders`、`cloud` 当前运行域，未发现旧 `accounts/finance/mall/monitoring/dashboard_api/biz` 运行时 app 回流。
+- 未发现 `CloudServerOrder.service_expires_at` 模型字段恢复；运行代码没有对已移除订单到期列做危险 ORM 过滤、排序、批量更新或 values 查询。
+- `CloudAsset.actual_expires_at` 仍是唯一结构化资产到期事实；`service_expires_at` 命中仍是 API 兼容字段、日志字段或从资产事实派生的展示值。
+- 未发现 `normalize_service_expiry`、`service_expired_at`、旧计划快照模型 `CloudLifecyclePlan/CloudNoticePlan/CloudAutoRenewPlan`、退款旧函数名、退款旧入口或 `refunded` 运行时状态回流。
+- 迁移旧机删除的事实源是迁移流程写入的 `CloudServerOrder.migration_due_at`，不是普通服务到期通知 payload；执行入口 `run_replaced_order_delete(..., enforce_schedule=True)` 仍会二次检查迁移时间、删除时间窗口、关机计划开关和任务认领。
+- 旧记录清理对 `cancelled/expired/failed` 终态云订单仍需确认没有当前 IP、实例名、实例 ID、云资源 ID 或代理 host 线索，避免失败开通、取消或过期订单仍待云端清理时被本地历史清理提前删掉。
+- 自动续费重试任务在执行前需要先原子认领，否则同一轮或并发调用可能重复检查同一条 pending 任务并重复增加 attempts。
+
+### 功能变更
+
+- `lifecycle_tick()` 执行 `migration_due_orders` 时不再先调用 `_cloud_expiry_notice_payload()` 判断 `valid`，避免旧机资产已经进入删除中、不可出现在普通代理通知列表时，迁移旧机删机计划被错误跳过。
+- `_run_auto_renew_retry_task()` 执行前用 `status=pending` 和 `next_check_at<=now` 原子更新认领任务，并把 `next_check_at` 临时推进 30 分钟；未认领成功时直接返回，避免重复执行同一条自动续费重试任务。
+- `cleanup_old_records` 的云订单清理过滤进一步收窄：`cancelled/expired/failed` 终态订单只有在没有当前云资源线索，且没有待执行删机时间或删机时间已早于保留截止线时，才进入清理候选。
+- 补充迁移旧机生命周期回归测试：覆盖资产状态为删除中时仍会按迁移计划调用旧机删除入口。
+- 补充迁移旧机入口单元回归测试：覆盖通知 payload 返回 `valid=False` 时，迁移旧机删除仍按 `migration_due_at` 进入 `run_replaced_order_delete(enforce_schedule=True)`，且不再调用通知载荷校验。
+- 补充旧记录清理回归测试：覆盖终态订单仍有 IP、server name、instance ID 和未来删机时间时不会被清理。
+- 补强自动续费重试回归测试：覆盖余额仍不足后的重复调用不会在认领 TTL 内再次增加 attempts，充值后仍可按下一次检查时间继续重试成功。
+
+### 验证
+
+已通过：
+
+```bash
+uv run python -m py_compile cloud/lifecycle.py cloud/tests.py core/management/commands/cleanup_old_records.py
+uv run python manage.py check
+uv run python manage.py makemigrations --check --dry-run
+DJANGO_TEST_SQLITE=1 uv run python manage.py test cloud.tests.CloudServerServicesTestCase.test_lifecycle_tick_deletes_migration_due_order_with_deleting_asset cloud.tests.CloudServerServicesTestCase.test_cleanup_old_records_keeps_terminal_cloud_order_with_pending_resource_context cloud.tests.CloudServerServicesTestCase.test_cleanup_old_records_keeps_terminal_cloud_order_with_live_asset cloud.tests.CloudServerServicesTestCase.test_cleanup_old_records_allows_terminal_cloud_order_with_deleted_asset cloud.tests.CloudServerServicesTestCase.test_auto_renew_retry_task_waits_for_recharge_then_retries --verbosity 1
+DJANGO_TEST_SQLITE=1 uv run python manage.py test cloud.tests.CloudServerServicesTestCase.test_lifecycle_tick_migration_delete_uses_migration_due_without_notice_payload cloud.tests.CloudServerServicesTestCase.test_lifecycle_tick_deletes_migration_due_order_with_deleting_asset cloud.tests.CloudServerServicesTestCase.test_replaced_order_delete_respects_asset_shutdown_switch cloud.tests.CloudServerServicesTestCase.test_cleanup_old_records_keeps_terminal_cloud_order_with_pending_resource_context cloud.tests.CloudServerServicesTestCase.test_auto_renew_retry_task_waits_for_recharge_then_retries --verbosity 1
+git diff --check
+```
+
+剩余风险：本轮未跑完整测试套件，未连接真实 MySQL、AWS Lightsail 或阿里云 API，未执行真实云端删机。
+
 ## 2026-06-02 18:58 自动监工：旧记录清理云订单保护
 
 ### 范围
