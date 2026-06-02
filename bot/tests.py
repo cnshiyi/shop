@@ -972,11 +972,16 @@ class RetainedIpRenewalUiTestCase(SimpleTestCase):
             'cloud:ad:asset:99:poc:paid:2',
         )
         self.assertEqual(
+            cloud_previous_detail_callback(88, 'cloud:assetdetail:asset:99:profile:orders:cloud:filter:paid:page:2'),
+            'cloud:ad:asset:99:poc:paid:2',
+        )
+        self.assertEqual(
             cloud_previous_detail_callback(88, back_callback),
             'cloud:detail:88:poc:paid:2',
         )
         self.assertEqual(compact_callback_path(back_callback), 'poc:paid:2')
         self.assertEqual(compact_callback_path('cloud:assetdetail:99'), 'cloud:ad:asset:99')
+        self.assertEqual(compact_callback_path('cloud:assetdetail:asset:99'), 'cloud:ad:asset:99')
 
     def test_cloud_server_detail_actions_keep_back_path(self):
         markup = cloud_server_detail(
@@ -1083,13 +1088,43 @@ class RetainedIpRenewalUiTestCase(SimpleTestCase):
 
         self.assertIn("@dp.callback_query(F.data.startswith('cloud:assetdetail:'))", source)
         self.assertIn("@dp.callback_query(F.data.startswith('cloud:ad:'))", source)
-        self.assertIn("item_kind = parts[2]", asset_detail_source)
-        self.assertIn("item_id = int(parts[3])", asset_detail_source)
+        self.assertIn("parts[:2] == ['cloud', 'ad']", asset_detail_source)
+        self.assertIn("parts[:2] == ['cloud', 'assetdetail']", asset_detail_source)
+        self.assertIn("item_id = int(raw_item_id)", asset_detail_source)
 
     def test_compact_profile_cloud_order_callback_is_registered(self):
         source = inspect.getsource(register_handlers)
         self.assertIn("@dp.callback_query(F.data.startswith('poc:'))", source)
         self.assertIn("await _render_profile_cloud_orders(callback, page=page, order_filter=order_filter)", source)
+
+    def test_cloud_order_list_uses_short_back_callback(self):
+        order = SimpleNamespace(
+            id=9999999,
+            status='paid',
+            public_ip='1.2.3.4',
+            previous_public_ip='',
+            pay_amount=Decimal('12.3'),
+            total_amount=Decimal('12.3'),
+            currency='USDT',
+        )
+
+        markup = cloud_order_list(
+            [order],
+            page=12345,
+            total_pages=12345,
+            prefix='profile:orders:cloud:filter:paid:page',
+            order_filter='paid',
+        )
+        callbacks = [button.callback_data for row in markup.inline_keyboard for button in row]
+
+        self.assertIn('cloud:orderdetail:9999999:poc:paid:12345', callbacks)
+        self.assertTrue(all(len(item.encode()) <= 64 for item in callbacks if item))
+
+    def test_cloud_order_detail_handler_accepts_short_back_callback(self):
+        source = inspect.getsource(register_handlers)
+        order_detail_source = source.split('async def cb_cloud_order_detail', 1)[1].split("@dp.callback_query(F.data.startswith('adminreply:hint:'))", 1)[0]
+
+        self.assertIn("compact_callback_path(':'.join(parts[3:]))", order_detail_source)
 
     def test_cloud_ip_query_actions_return_to_query_menu(self):
         markup = cloud_ip_query_result(

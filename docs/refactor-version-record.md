@@ -3979,3 +3979,42 @@ UV_CACHE_DIR=/private/tmp/uv-cache-shop uv run python manage.py test bot.tests.R
 git diff --check
 rg -n "service_expires_at|service_expired_at|normalize_service_expiry|CloudLifecyclePlan\\b|CloudNoticePlan\\b|CloudAutoRenewPlan\\b|refund_order|process_refund|create_refund|issue_refund|refund_to_balance|refund_balance|STATUS_REFUNDED|status=['\\\"]refunded['\\\"]" bot core orders cloud shop --glob '!**/migrations/**' --glob '!**/tests.py'
 ```
+
+## 2026-06-02 订单详情短返回回调收口
+
+### 范围
+
+本轮继续巡检机器人订单返回链、云资产生命周期事实源、旧计划快照、旧退款入口和废弃 app 回流。
+
+### 运行时变化
+
+- 订单列表进入订单详情时，返回来源通过 `append_back_callback()` 压缩，避免 `profile:orders:cloud:filter:*:page:*` 嵌套后超过 Telegram 64 字节限制。
+- 订单详情处理器对嵌套来源再次执行 `compact_callback_path()`，让短回调 `poc:<筛选>:<页码>` 能稳定返回原云订单列表。
+- 资产详情回调兼容 `cloud:assetdetail:<id>`、`cloud:assetdetail:asset:<id>` 和 `cloud:ad:asset:<id>`，避免旧按钮或外部入口传入显式类型时解析失败。
+
+### 监工结果
+
+- `CloudAsset` 仍只有 `actual_expires_at` 作为结构化资产到期字段。
+- `CloudServerOrder` 未恢复 `service_expires_at` 或 `actual_expires_at` 服务到期字段，仅保留 `renew_grace_expires_at` 等流程时间字段。
+- 非迁移运行时代码未发现旧计划快照模型、旧退款函数名、旧退款状态或废弃 app 目录回流。
+
+### 验证
+
+本地已通过:
+
+```bash
+UV_CACHE_DIR=/private/tmp/uv-cache-shop uv run python manage.py check
+UV_CACHE_DIR=/private/tmp/uv-cache-shop uv run python -m py_compile bot/api.py bot/handlers.py bot/keyboards.py cloud/services.py cloud/lifecycle.py cloud/lifecycle_tasks.py cloud/lifecycle_execution.py cloud/api.py cloud/api_assets.py cloud/api_orders.py cloud/api_asset_edit.py cloud/management/commands/sync_aws_assets.py cloud/management/commands/sync_aliyun_assets.py cloud/management/commands/reconcile_cloud_assets_from_servers.py
+DJANGO_TEST_SQLITE=1 UV_CACHE_DIR=/private/tmp/uv-cache-shop uv run python manage.py test bot.tests.RetainedIpRenewalUiTestCase --noinput
+DJANGO_TEST_SQLITE=1 UV_CACHE_DIR=/private/tmp/uv-cache-shop uv run python manage.py test cloud.tests.CloudServerServicesTestCase.test_due_orders_use_asset_expiry_for_lightsail_lifecycle cloud.tests.CloudServerServicesTestCase.test_dashboard_order_expiry_update_syncs_asset_expiry_and_lifecycle_plan cloud.tests.CloudServerServicesTestCase.test_notice_delete_plan_and_proxy_list_use_asset_expiry cloud.tests.CloudServerServicesTestCase.test_update_cloud_asset_expiry_refreshes_delete_plan_view cloud.tests.CloudServerServicesTestCase.test_update_cloud_asset_expiry_refreshes_order_lifecycle cloud.tests.CloudServerServicesTestCase.test_run_auto_renew_skips_when_asset_expiry_moved_out_of_due_window cloud.tests.CloudServerServicesTestCase.test_sync_aws_assets_preserves_existing_unattached_ip_due_time cloud.tests.CloudServerServicesTestCase.test_lifecycle_plans_read_cached_table_after_initial_refresh cloud.tests.CloudServerServicesTestCase.test_lifecycle_tick_rechecks_order_delete_at_before_cloud_delete cloud.tests.CloudServerServicesTestCase.test_lifecycle_tick_rechecks_order_ip_recycle_at_before_release cloud.tests.CloudServerServicesTestCase.test_lifecycle_tick_rechecks_orphan_asset_delete_time_before_cloud_delete cloud.tests.CloudServerServicesTestCase.test_lifecycle_tick_rechecks_unattached_ip_delete_time_before_release cloud.tests.CloudServerServicesTestCase.test_lifecycle_tick_releases_retained_static_ip_after_recycle_due cloud.tests.CloudServerServicesTestCase.test_lifecycle_tick_releases_overdue_unattached_static_ip cloud.tests.CloudServerServicesTestCase.test_unattached_ip_delete_items_use_actual_expiry_as_delete_plan cloud.tests.CloudServerServicesTestCase.test_lifecycle_plans_excludes_cloud_missing_orphan_server --noinput
+UV_CACHE_DIR=/private/tmp/uv-cache-shop uv run python manage.py makemigrations --check --dry-run
+git diff --check
+```
+
+迁移检查仍出现本地沙箱无法连接 `127.0.0.1` MySQL 的历史一致性警告，但结果为无模型变更。
+
+### 剩余风险
+
+- 未跑完整测试套件。
+- 未连接真实 MySQL、AWS Lightsail、阿里云、TRONGrid 或 Telegram。
+- 未执行真实 Telegram 回调、钱包扣款、自动续费支付、云端删机、固定 IP 释放或历史数据清理。

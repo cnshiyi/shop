@@ -84,8 +84,15 @@ def compact_callback_path(callback_data: str | None) -> str:
         nested = compact_callback_path(':'.join(parts[4:]))
         return f'cloud:ad:{parts[2]}:{parts[3]}:{nested}' if nested else f'cloud:ad:{parts[2]}:{parts[3]}'
     if len(parts) >= 3 and parts[:2] == ['cloud', 'assetdetail']:
-        nested = compact_callback_path(':'.join(parts[3:]))
-        return f'cloud:ad:asset:{parts[2]}:{nested}' if nested else f'cloud:ad:asset:{parts[2]}'
+        item_kind = 'asset'
+        item_id = parts[2]
+        nested_parts = parts[3:]
+        if len(parts) >= 4 and not str(parts[2]).isdigit():
+            item_kind = parts[2] or 'asset'
+            item_id = parts[3]
+            nested_parts = parts[4:]
+        nested = compact_callback_path(':'.join(nested_parts))
+        return f'cloud:ad:{item_kind}:{item_id}:{nested}' if nested else f'cloud:ad:{item_kind}:{item_id}'
     if len(parts) > 3 and parts[:2] == ['cloud', 'detail']:
         nested = compact_callback_path(':'.join(parts[3:]))
         return f'cloud:detail:{parts[2]}:{nested}' if nested else f'cloud:detail:{parts[2]}'
@@ -677,7 +684,7 @@ def cloud_order_list(orders, page: int = 1, total_pages: int = 1, prefix: str = 
     for order in orders:
         kb.row(InlineKeyboardButton(
             text=_cloud_order_button_label(order),
-            callback_data=f'cloud:orderdetail:{order.id}:{prefix}:{page}',
+            callback_data=append_back_callback(f'cloud:orderdetail:{order.id}', f'{prefix}:{page}'),
         ))
     nav = []
     if page > 1:

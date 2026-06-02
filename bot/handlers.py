@@ -43,7 +43,7 @@ from bot.keyboards import (
     cloud_server_change_ip_region_menu, cloud_server_change_ip_port_keyboard,
     cart_menu, wallet_recharge_prompt_menu, cloud_ip_query_result,
     cloud_query_menu, configured_link_for_label, configured_link_menu,
-    cloud_detail_callback, cloud_asset_detail_callback, cloud_previous_detail_callback, cloud_asset_action_callback, append_back_callback,
+    cloud_detail_callback, cloud_asset_detail_callback, cloud_previous_detail_callback, cloud_asset_action_callback, append_back_callback, compact_callback_path,
 )
 from bot.services import create_admin_reply_link, get_admin_reply_link, get_admin_reply_link_by_id, get_or_create_user, get_admin_forward_mute_status, is_admin_forward_muted, mute_admin_forward_for_days, record_bot_operation_log, record_telegram_message, should_forward_telegram_group
 from cloud.services import (
@@ -4133,10 +4133,8 @@ def register_handlers(dp: Dispatcher):
         parts = callback.data.split(':')
         order_id = int(parts[2])
         back_callback = 'profile:orders:cloud:page:1'
-        if len(parts) >= 6:
-            prefix = ':'.join(parts[3:-1])
-            page = parts[-1]
-            back_callback = f'{prefix}:{page}'
+        if len(parts) > 3:
+            back_callback = compact_callback_path(':'.join(parts[3:]))
         order = await get_cloud_order(order_id, user.id)
         if not order:
             await _safe_callback_answer(callback, '订单不存在', show_alert=True)
@@ -4197,9 +4195,26 @@ def register_handlers(dp: Dispatcher):
         await _safe_callback_answer(callback)
         user = await get_or_create_user(callback.from_user.id, callback.from_user.username, callback.from_user.first_name)
         parts = callback.data.split(':')
-        item_kind = parts[2]
-        item_id = int(parts[3])
-        back_callback = ':'.join(parts[4:]) if len(parts) > 4 else 'cloud:list'
+        if len(parts) >= 4 and parts[:2] == ['cloud', 'ad']:
+            item_kind = parts[2] or 'asset'
+            raw_item_id = parts[3]
+            back_parts = parts[4:]
+        elif len(parts) >= 4 and parts[:2] == ['cloud', 'assetdetail'] and not str(parts[2]).isdigit():
+            item_kind = parts[2] or 'asset'
+            raw_item_id = parts[3]
+            back_parts = parts[4:]
+        elif len(parts) >= 3 and parts[:2] == ['cloud', 'assetdetail']:
+            item_kind = 'asset'
+            raw_item_id = parts[2]
+            back_parts = parts[3:]
+        else:
+            await _safe_callback_answer(callback, '代理详情参数无效', show_alert=True)
+            return
+        if not str(raw_item_id).isdigit():
+            await _safe_callback_answer(callback, '代理详情参数无效', show_alert=True)
+            return
+        item_id = int(raw_item_id)
+        back_callback = compact_callback_path(':'.join(back_parts)) if back_parts else 'cloud:list'
         if _is_group_chat_message(callback.message):
             item = await get_group_proxy_asset_detail(item_id, callback.message.chat.id, item_kind)
         else:
@@ -4414,7 +4429,7 @@ def register_handlers(dp: Dispatcher):
         user = await get_or_create_user(callback.from_user.id, callback.from_user.username, callback.from_user.first_name)
         parts = callback.data.split(':', 3)
         asset_id = int(parts[2])
-        back_callback = parts[3] if len(parts) > 3 else 'cloud:list:page:1'
+        back_callback = compact_callback_path(parts[3]) if len(parts) > 3 else 'cloud:list:page:1'
         is_admin = await _is_admin_chat(callback.message)
         item = await get_proxy_asset_detail_for_admin(asset_id, 'asset') if is_admin else await get_user_proxy_asset_detail(asset_id, user.id, 'asset')
         if not item:
@@ -4590,7 +4605,7 @@ def register_handlers(dp: Dispatcher):
         user = await get_or_create_user(callback.from_user.id, callback.from_user.username, callback.from_user.first_name)
         parts = callback.data.split(':', 4)
         _, _, raw_asset_id, raw_plan_id = parts[:4]
-        back_callback = parts[4] if len(parts) > 4 else ''
+        back_callback = compact_callback_path(parts[4]) if len(parts) > 4 else ''
         asset_id = int(raw_asset_id)
         plan_id = int(raw_plan_id)
         is_admin = await _is_admin_chat(callback.message)
@@ -4615,7 +4630,7 @@ def register_handlers(dp: Dispatcher):
         user = await get_or_create_user(callback.from_user.id, callback.from_user.username, callback.from_user.first_name)
         parts = callback.data.split(':', 4)
         _, _, raw_order_id, raw_plan_id = parts[:4]
-        back_callback = parts[4] if len(parts) > 4 else ''
+        back_callback = compact_callback_path(parts[4]) if len(parts) > 4 else ''
         order_id = int(raw_order_id)
         plan_id = int(raw_plan_id)
         is_admin = await _is_admin_chat(callback.message)
@@ -5120,7 +5135,7 @@ def register_handlers(dp: Dispatcher):
         is_admin_renewal = bool(data.get('retained_ip_renewal_admin')) and await _is_admin_chat(message)
         group_renewal_chat_id = int(data.get('retained_ip_renewal_group_chat_id') or 0)
         is_group_renewal = bool(group_renewal_chat_id and _is_group_chat_message(message) and int(message.chat.id) == group_renewal_chat_id)
-        back_callback = str(data.get('asset_renewal_back') or data.get('retained_ip_renewal_back') or '').strip()
+        back_callback = compact_callback_path(data.get('asset_renewal_back') or data.get('retained_ip_renewal_back'))
         user = await get_or_create_user(message.from_user.id, message.from_user.username, message.from_user.first_name)
         if asset_id:
             item = await get_proxy_asset_detail_for_admin(asset_id, 'asset') if (is_admin_asset_renewal or is_public_asset_renewal) else await get_user_proxy_asset_detail(asset_id, user.id, 'asset')
@@ -5247,7 +5262,7 @@ def register_handlers(dp: Dispatcher):
             return
         item_kind = parts[2]
         item_id = int(parts[3])
-        back_callback = parts[4] if len(parts) > 4 else 'cloud:querymenu'
+        back_callback = compact_callback_path(parts[4]) if len(parts) > 4 else 'cloud:querymenu'
         await state.update_data(admin_expiry_kind=item_kind, admin_expiry_item_id=item_id, admin_expiry_back=back_callback)
         await state.set_state(CustomServerStates.waiting_admin_expiry_time)
         await _safe_callback_answer(callback, '请输入新的到期时间')
