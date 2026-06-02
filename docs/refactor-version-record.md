@@ -1,5 +1,48 @@
 # 重构版本记录
 
+## 2026-06-03 01:12 自动监工：复查嵌套回调和唯一到期事实
+
+### 范围
+
+本轮从提交 `5bb3799 整理嵌套回调监工记录` 后继续监工。起始工作树干净；先读取自动化记忆、当前 git 状态和最近提交，再复查机器人返回链、Telegram `callback_data` 64 字节限制、云资产唯一到期事实、订单旧到期字段、旧计划、旧退款入口和废弃 app 回流。
+
+### 修改
+
+- 本轮未修改运行代码。
+- 仅追加本中文版本记录，记录本轮复查和验证结果。
+
+### 监工结果
+
+- `cloud_asset_detail_callback()`、`cloud_detail_callback()`、`append_back_callback()` 和短码解析仍覆盖资产详情、订单详情、续费、续费支付、换 IP、重装、修改配置等返回链；18 位 ID 极端样本仍在测试中保持 64 字节以内。
+- 确认重新安装按钮使用 `token_urlsafe(6)`，确认 callback 不携带返回链；18 位 ID 下仍低于 Telegram 64 字节限制。
+- `CloudServerOrder` 未恢复 `service_expires_at` 或 `actual_expires_at` 字段；`CloudAsset.actual_expires_at` 仍是唯一结构化资产到期事实；`CloudAssetDashboardSnapshot` 仅有 `risk_expired` 风险字段。
+- 运行时代码扫描旧计划模型、旧退款函数名、旧端口入口和废弃 app，未发现回流；废弃 app 目录也未恢复。
+- `makemigrations --check --dry-run` 显示 `No changes detected`，本轮没有表结构变更。
+
+### 验证
+
+已通过：
+
+```bash
+UV_CACHE_DIR=/Users/a399/Desktop/data/shop/.uv-cache PYTHONDONTWRITEBYTECODE=1 uv run python manage.py check
+UV_CACHE_DIR=/Users/a399/Desktop/data/shop/.uv-cache PYTHONDONTWRITEBYTECODE=1 uv run python -m py_compile bot/handlers.py bot/keyboards.py cloud/services.py cloud/provisioning.py cloud/api_orders.py
+DB_ENGINE=sqlite SQLITE_NAME=/private/tmp/shop_monitor_bot.sqlite UV_CACHE_DIR=/Users/a399/Desktop/data/shop/.uv-cache PYTHONDONTWRITEBYTECODE=1 uv run python manage.py test bot.tests.RetainedIpRenewalUiTestCase --noinput --verbosity 1
+DB_ENGINE=sqlite SQLITE_NAME=/private/tmp/shop_monitor_lifecycle.sqlite UV_CACHE_DIR=/Users/a399/Desktop/data/shop/.uv-cache PYTHONDONTWRITEBYTECODE=1 uv run python manage.py test cloud.tests.CloudServerServicesTestCase.test_mark_success_preserves_existing_manual_asset_fields_on_update cloud.tests.CloudServerServicesTestCase.test_early_provisioning_steps_preserve_existing_manual_asset_fields cloud.tests.CloudServerServicesTestCase.test_sync_aliyun_assets_preserves_existing_asset_expiry cloud.tests.CloudServerServicesTestCase.test_dashboard_order_expiry_update_syncs_asset_expiry_and_lifecycle_plan --noinput --verbosity 1
+DB_ENGINE=sqlite SQLITE_NAME=/private/tmp/shop_monitor_asset_api.sqlite UV_CACHE_DIR=/Users/a399/Desktop/data/shop/.uv-cache PYTHONDONTWRITEBYTECODE=1 uv run python manage.py test cloud.tests.CloudServerServicesTestCase.test_server_compat_create_preserves_manual_asset_owner_and_expiry cloud.tests.CloudServerServicesTestCase.test_proxy_asset_ip_query_exposes_manual_expiry_for_admin_and_user --noinput --verbosity 1
+UV_CACHE_DIR=/Users/a399/Desktop/data/shop/.uv-cache PYTHONDONTWRITEBYTECODE=1 uv run python manage.py shell -c "from django.conf import settings; retired={'accounts','finance','mall','monitoring','dashboard_api','biz'}; print('retired_apps', [app for app in settings.INSTALLED_APPS if app.split('.')[0] in retired]); from cloud.models import CloudServerOrder, CloudAsset, CloudAssetDashboardSnapshot; print('order_expiry_fields', [f.name for f in CloudServerOrder._meta.fields if f.name in {'service_expires_at','actual_expires_at'}]); print('asset_actual_fields', [f.name for f in CloudAsset._meta.fields if f.name == 'actual_expires_at']); print('snapshot_expiry_fields', [f.name for f in CloudAssetDashboardSnapshot._meta.fields if 'expire' in f.name or 'expiry' in f.name or f.name == 'actual_expires_at']); print('default_port', CloudServerOrder._meta.get_field('mtproxy_port').default)"
+rg -n "service_expires_at__|\bservice_expires_at\b|\bactual_expires_at\s*=\s*models|\bCloudLifecyclePlan\b|\bCloudNoticePlan\b|\bCloudAutoRenewPlan\b|\bnormalize_service_expiry\b|service_expired_at|\brefund_order\b|\bprocess_refund\b|\bcreate_refund\b|\bissue_refund\b|refund_to_balance|refund_balance|STATUS_REFUNDED|status=['\"]refunded|\brefunded\b|set_cloud_server_port|custom:port|cloud:ipport|bot_set_port|waiting_port" bot core orders cloud shop --glob '!**/migrations/**' --glob '!**/tests.py'
+find . -maxdepth 2 -type d \( -name accounts -o -name finance -o -name mall -o -name monitoring -o -name dashboard_api -o -name biz \) -print
+UV_CACHE_DIR=/Users/a399/Desktop/data/shop/.uv-cache PYTHONDONTWRITEBYTECODE=1 uv run python manage.py makemigrations --check --dry-run
+```
+
+结果：机器人返回 UI 聚焦测试 41 条通过；生命周期/唯一到期事实聚焦测试 6 条通过；模型字段 introspection 显示 `retired_apps=[]`、订单旧到期字段为空、资产到期字段仅 `actual_expires_at`、默认端口 `443`。旧字段扫描仅命中预期的 `cloud/models.py` 中 `CloudAsset.actual_expires_at` 模型字段。迁移 dry-run 仍因沙箱禁止连接本机 MySQL 输出迁移历史检查警告，但最终显示 `No changes detected`。
+
+### 备注
+
+- 首次运行机器人 SimpleTestCase 未指定 SQLite，导入期配置读取尝试连接本机 MySQL 并输出沙箱拒绝日志，测试最终通过；随后用 SQLite 环境重跑 41 条通过。
+- 两组生命周期测试第一次使用了已失效选择器或错误环境变量；已改用当前有效测试名和 `SQLITE_NAME` 临时库重跑通过。
+- 本轮未执行真实云资源、真实 Telegram 点击、真实支付、链上广播、生产发布或不可逆操作。
+
 ## 2026-06-03 01:02 自动监工：兜底压缩资产详情返回回调
 
 ### 范围
