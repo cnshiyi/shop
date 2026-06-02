@@ -1436,6 +1436,40 @@ class CloudServerServicesTestCase(TestCase):
         self.assertEqual(payload['total'], 1)
         self.assertEqual(payload['items'][0]['id'], asset.id)
 
+    # 功能：验证云资产列表快照搜索文本不会持久化代理密钥。
+    def test_cloud_asset_dashboard_snapshot_search_text_masks_proxy_secret(self):
+        secret = 'ee0123456789abcdef0123456789abcdef'
+        asset = CloudAsset.objects.create(
+            kind=CloudAsset.KIND_SERVER,
+            source=CloudAsset.SOURCE_AWS_SYNC,
+            user=self.user,
+            provider='aws_lightsail',
+            region_code=self.plan.region_code,
+            region_name=self.plan.region_name,
+            asset_name='snapshot-secret-asset',
+            public_ip='10.77.88.4',
+            mtproxy_host='10.77.88.4',
+            mtproxy_link=f'tg://proxy?server=10.77.88.4&port=9528&secret={secret}',
+            proxy_links=[{
+                'name': '主代理 mtg',
+                'server': '10.77.88.4',
+                'port': '9528',
+                'secret': secret,
+                'url': f'tg://proxy?server=10.77.88.4&port=9528&secret={secret}',
+            }],
+            status=CloudAsset.STATUS_RUNNING,
+            actual_expires_at=timezone.now() + timezone.timedelta(days=30),
+        )
+
+        refresh_cloud_asset_dashboard_snapshots(asset_ids=[asset.id], reason='test', full=False)
+        snapshot = CloudAssetDashboardSnapshot.objects.get(asset=asset)
+
+        self.assertIn('snapshot-secret-asset', snapshot.search_text)
+        self.assertIn('10.77.88.4', snapshot.search_text)
+        self.assertIn('9528', snapshot.search_text)
+        self.assertNotIn(secret, snapshot.search_text)
+        self.assertNotIn('secret=', snapshot.search_text)
+
     # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
     def test_dedupe_cloud_assets_does_not_merge_cross_region_same_instance(self):
         for region, public_ip in [('ap-southeast-1', '13.250.30.15'), ('ap-northeast-1', '13.250.30.16')]:
