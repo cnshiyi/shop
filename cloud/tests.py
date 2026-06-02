@@ -4016,6 +4016,82 @@ class CloudServerServicesTestCase(TestCase):
         self.assertEqual(parse_datetime(delete_item['actual_expires_at']), asset_expiry)
         self.assertEqual(parse_datetime(proxy_item['actual_expires_at']), asset_expiry)
 
+    # 功能：验证已进入关机/删除流程的订单计划优先保留已存执行时间，避免资产到期变化导致计划漂移。
+    def test_notice_schedule_preserves_stored_delete_and_recycle_after_status_progress(self):
+        now = timezone.now()
+        future_asset_expiry = now + timezone.timedelta(days=30)
+        stored_delete_at = now + timezone.timedelta(hours=6)
+        suspended_order = CloudServerOrder.objects.create(
+            order_no='PLAN-PRESERVE-SUSPENDED-DELETE',
+            user=self.user,
+            plan=self.plan,
+            provider=self.plan.provider,
+            region_code=self.plan.region_code,
+            region_name=self.plan.region_name,
+            plan_name=self.plan.plan_name,
+            quantity=1,
+            currency='USDT',
+            total_amount='19.00',
+            pay_amount='19.00',
+            pay_method='balance',
+            status='suspended',
+            public_ip='3.3.3.41',
+            delete_at=stored_delete_at,
+        )
+        CloudAsset.objects.create(
+            kind=CloudAsset.KIND_SERVER,
+            source=CloudAsset.SOURCE_ORDER,
+            order=suspended_order,
+            user=self.user,
+            provider=suspended_order.provider,
+            region_code=suspended_order.region_code,
+            region_name=suspended_order.region_name,
+            asset_name='plan-preserve-suspended-delete',
+            public_ip='3.3.3.41',
+            actual_expires_at=future_asset_expiry,
+            status=CloudAsset.STATUS_STOPPED,
+            is_active=False,
+        )
+        stored_recycle_at = now + timezone.timedelta(hours=8)
+        deleted_order = CloudServerOrder.objects.create(
+            order_no='PLAN-PRESERVE-DELETED-RECYCLE',
+            user=self.user,
+            plan=self.plan,
+            provider=self.plan.provider,
+            region_code=self.plan.region_code,
+            region_name=self.plan.region_name,
+            plan_name=self.plan.plan_name,
+            quantity=1,
+            currency='USDT',
+            total_amount='19.00',
+            pay_amount='19.00',
+            pay_method='balance',
+            status='deleted',
+            public_ip='3.3.3.42',
+            ip_recycle_at=stored_recycle_at,
+        )
+        CloudAsset.objects.create(
+            kind=CloudAsset.KIND_SERVER,
+            source=CloudAsset.SOURCE_ORDER,
+            order=deleted_order,
+            user=self.user,
+            provider=deleted_order.provider,
+            region_code=deleted_order.region_code,
+            region_name=deleted_order.region_name,
+            asset_name='plan-preserve-deleted-recycle',
+            public_ip='3.3.3.42',
+            actual_expires_at=future_asset_expiry,
+            status=CloudAsset.STATUS_DELETED,
+            provider_status='固定IP保留中-实例已删除',
+            is_active=False,
+        )
+
+        suspended_notice = _notice_payload_for_order(suspended_order)
+        deleted_notice = _notice_payload_for_order(deleted_order)
+
+        self.assertEqual(suspended_notice['delete_at'], stored_delete_at)
+        self.assertEqual(deleted_notice['ip_recycle_at'], stored_recycle_at)
+
     # 功能：验证订单旧到期字段已彻底移除，测试和业务不能再把它当模型字段写入。
     def test_order_rejects_removed_service_expiry_field(self):
         with self.assertRaises(TypeError):
