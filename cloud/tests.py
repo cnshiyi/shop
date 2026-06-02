@@ -2649,6 +2649,34 @@ class CloudServerServicesTestCase(TestCase):
         self.assertEqual(unattached_payload['items'][0]['risk_status'], 'unattached_ip')
         self.assertNotIn('expired', unattached_payload['items'][0]['risk_statuses'])
 
+    # 功能：验证后台资产风险识别使用原始云状态，避免展示态标签折叠后漏掉未附加固定IP。
+    def test_cloud_asset_unattached_filter_uses_raw_provider_status(self):
+        admin = get_user_model().objects.create_user(username='admin_asset_raw_unattached_filter', password='x', is_staff=True)
+        asset = CloudAsset.objects.create(
+            kind=CloudAsset.KIND_SERVER,
+            source=CloudAsset.SOURCE_AWS_SYNC,
+            user=self.user,
+            provider='aws_lightsail',
+            region_code=self.plan.region_code,
+            region_name=self.plan.region_name,
+            asset_name='raw-provider-unattached-ip-asset',
+            public_ip='10.88.0.12',
+            actual_expires_at=timezone.now() - timezone.timedelta(days=1),
+            status=CloudAsset.STATUS_DELETED,
+            provider_status='固定IP保留中-实例已删除',
+            is_active=False,
+        )
+
+        request = self.factory.get('/api/dashboard/cloud-assets/', {'paginated': '1', 'risk_status': 'unattached_ip'})
+        self._attach_bearer_session(request, admin)
+        response = cloud_assets_list(request)
+        payload = json.loads(response.content.decode('utf-8'))['data']
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual([item['id'] for item in payload['items']], [asset.id])
+        self.assertEqual(payload['items'][0]['risk_status'], 'unattached_ip')
+        self.assertIn('unattached_ip', payload['items'][0]['risk_statuses'])
+
     # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
     def test_create_cloud_server_renewal_rejects_deleted_or_ipless_order(self):
         order = CloudServerOrder.objects.create(
@@ -12844,6 +12872,15 @@ class CloudServerServicesTestCase(TestCase):
 
         self.assertEqual(_aws_instance_name_for_order(order, FakeClient()), 'current-ip-instance')
         self.assertEqual(_aws_static_ip_name_for_asset(asset, FakeClient()), 'current-static-ip-name')
+        fallback_asset = CloudAsset(
+            provider='aws_lightsail',
+            region_code=self.plan.region_code,
+            asset_name='stale-static-ip-name',
+            provider_resource_id='arn:aws:lightsail:ap-southeast-1:123456789012:StaticIp/current-resource-static-ip-name',
+            public_ip='',
+            previous_public_ip='9.9.9.99',
+        )
+        self.assertEqual(_aws_static_ip_name_for_asset(fallback_asset, FakeClient()), 'current-resource-static-ip-name')
 
         delete_client = FakeClient()
         with patch('cloud.lifecycle._aws_client', return_value=delete_client):
@@ -15288,6 +15325,7 @@ class CloudServerServicesTestCase(TestCase):
 
     # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
     def test_lifecycle_tick_releases_retained_static_ip_after_recycle_due(self):
+        SiteConfig.set('cloud_ip_delete_enabled', '1')
         recycle_due_at = timezone.now() - timezone.timedelta(days=2)
         order = CloudServerOrder.objects.create(
             order_no='HB-TEST-RECYCLE-DUE',
@@ -15352,6 +15390,7 @@ class CloudServerServicesTestCase(TestCase):
 
     # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
     def test_lifecycle_tick_releases_retained_static_ip_when_asset_already_deleted(self):
+        SiteConfig.set('cloud_ip_delete_enabled', '1')
         recycle_due_at = timezone.now() - timezone.timedelta(days=2)
         order = CloudServerOrder.objects.create(
             order_no='HB-TEST-RECYCLE-DELETED-ASSET',

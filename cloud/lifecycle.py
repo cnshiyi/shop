@@ -12,7 +12,7 @@ from aiogram.types import InlineKeyboardMarkup
 from asgiref.sync import async_to_sync, sync_to_async
 from django.core.management import call_command
 from django.db import transaction
-from django.db.models import Q
+from django.db.models import Case, IntegerField, Q, Value, When
 from django.utils import timezone
 
 from core.models import CloudAccountConfig, SiteConfig
@@ -33,6 +33,10 @@ from cloud.services import RenewalPriceMissingError, _hydrate_order_from_proxy_a
 from bot.keyboards import cloud_expiry_actions
 
 logger = logging.getLogger(__name__)
+
+
+def _db_thread_sensitive():
+    return os.environ.get('DJANGO_TEST_SQLITE') == '1'
 
 AUTO_RENEW_BEFORE_EXPIRY_WINDOW = timezone.timedelta(days=1)
 AUTO_RENEW_FAILURE_NOTICE_COOLDOWN = timezone.timedelta(hours=1)
@@ -1764,7 +1768,16 @@ def _get_unattached_static_ip_delete_due():
             Q(instance_id__isnull=True) | Q(instance_id='')
         ).filter(
             Q(provider_status__icontains='未附加固定IP') | Q(note__icontains='未附加固定IP') | Q(provider_resource_id__icontains='StaticIp')
-        ).exclude(shutdown_enabled=False).exclude(waiting_manual_time_q).exclude(status__in=[CloudAsset.STATUS_DELETED, CloudAsset.STATUS_DELETING, CloudAsset.STATUS_TERMINATED])
+        ).exclude(shutdown_enabled=False).exclude(waiting_manual_time_q).exclude(status__in=[CloudAsset.STATUS_DELETED, CloudAsset.STATUS_DELETING, CloudAsset.STATUS_TERMINATED]).order_by(
+            Case(
+                When(provider_resource_id__icontains='StaticIp', then=Value(0)),
+                default=Value(1),
+                output_field=IntegerField(),
+            ),
+            'actual_expires_at',
+            '-updated_at',
+            '-id',
+        )
     )
 
 
@@ -1891,10 +1904,7 @@ def _aws_static_ip_name_for_asset(asset: CloudAsset, client=None) -> str:
                     break
         except Exception as exc:
             logger.warning('AWS 固定 IP 名称按 IP 反查失败，回退资产固定 IP 名: asset=%s ip=%s error=%s', getattr(asset, 'id', None), public_ip, exc)
-    release_name = str(asset.asset_name or '').strip()
-    if not release_name:
-        release_name = str(asset.provider_resource_id or '').rsplit('/', 1)[-1].strip()
-    return release_name
+    return _static_ip_name_from_asset(asset) or str(asset.asset_name or '').strip()
 
 
 def _stop_instance_sync(order: CloudServerOrder) -> tuple[bool, str]:
@@ -2681,7 +2691,7 @@ async def lifecycle_tick(notify=None, notify_target=None, defer_destructive_seco
         if not notice.get('valid'):
             continue
         logger.info('开始执行云服务器关机：订单ID=%s 订单号=%s IP=%s 云厂商=%s 地区=%s', order.id, order.order_no, order.public_ip or order.previous_public_ip, order.provider, order.region_code)
-        result = await sync_to_async(run_shutdown_order_suspend, thread_sensitive=False)(
+        result = await sync_to_async(run_shutdown_order_suspend, thread_sensitive=_db_thread_sensitive())(
             order.id,
             queue_status='scheduled_suspend',
             enforce_schedule=True,
@@ -2697,7 +2707,7 @@ async def lifecycle_tick(notify=None, notify_target=None, defer_destructive_seco
             if not notice.get('valid'):
                 continue
         logger.info('开始执行云服务器删机：订单ID=%s 订单号=%s IP=%s 云厂商=%s 地区=%s', order.id, order.order_no, order.public_ip or order.previous_public_ip, order.provider, order.region_code)
-        result = await sync_to_async(run_shutdown_order_delete, thread_sensitive=False)(
+        result = await sync_to_async(run_shutdown_order_delete, thread_sensitive=_db_thread_sensitive())(
             order.id,
             queue_status='scheduled_delete',
             enforce_schedule=True,
@@ -2712,7 +2722,7 @@ async def lifecycle_tick(notify=None, notify_target=None, defer_destructive_seco
         if not notice.get('valid'):
             continue
         logger.info('开始释放订单固定IP：订单ID=%s 订单号=%s IP=%s 云厂商=%s 地区=%s', order.id, order.order_no, order.public_ip or order.previous_public_ip, order.provider, order.region_code)
-        result = await sync_to_async(run_order_static_ip_release, thread_sensitive=False)(
+        result = await sync_to_async(run_order_static_ip_release, thread_sensitive=_db_thread_sensitive())(
             order.id,
             queue_status='scheduled_recycle',
             enforce_schedule=True,
@@ -2724,7 +2734,7 @@ async def lifecycle_tick(notify=None, notify_target=None, defer_destructive_seco
 
     for order in migration_due_orders:
         logger.info('开始删除迁移旧服务器：订单ID=%s 订单号=%s IP=%s 云厂商=%s 地区=%s', order.id, order.order_no, order.public_ip or order.previous_public_ip, order.provider, order.region_code)
-        result = await sync_to_async(run_replaced_order_delete, thread_sensitive=False)(
+        result = await sync_to_async(run_replaced_order_delete, thread_sensitive=_db_thread_sensitive())(
             order.id,
             queue_status='scheduled_migration_delete',
             enforce_schedule=True,
@@ -2736,7 +2746,7 @@ async def lifecycle_tick(notify=None, notify_target=None, defer_destructive_seco
 
     for asset in orphan_asset_delete_due:
         logger.info('开始删除孤儿云资源：资源ID=%s IP=%s 云厂商=%s 地区=%s', asset.id, asset.public_ip, asset.provider, asset.region_code)
-        result = await sync_to_async(run_orphan_asset_delete, thread_sensitive=False)(asset.id, enforce_schedule=True)
+        result = await sync_to_async(run_orphan_asset_delete, thread_sensitive=_db_thread_sensitive())(asset.id, enforce_schedule=True)
         if result.get('ok'):
             logger.info('孤儿云资源已删除：资源ID=%s IP=%s 云厂商=%s 地区=%s', asset.id, asset.public_ip, asset.provider, asset.region_code)
         else:
@@ -2744,12 +2754,12 @@ async def lifecycle_tick(notify=None, notify_target=None, defer_destructive_seco
 
     for asset in unattached_static_ip_delete_due:
         logger.info('开始释放未附加固定IP：资源ID=%s IP=%s 云厂商=%s 地区=%s', asset.id, asset.public_ip, asset.provider, asset.region_code)
-        result = await sync_to_async(run_unattached_ip_release, thread_sensitive=False)(asset.id, enforce_schedule=True)
+        result = await sync_to_async(run_unattached_ip_release, thread_sensitive=_db_thread_sensitive())(asset.id, enforce_schedule=True)
         if result.get('ok'):
             logger.info('未附加固定IP已释放：资源ID=%s IP=%s 云厂商=%s 地区=%s', asset.id, asset.public_ip, asset.provider, asset.region_code)
         else:
             logger.warning('未附加固定IP释放失败或跳过：资源ID=%s IP=%s 云厂商=%s 地区=%s 原因=%s', asset.id, asset.public_ip, asset.provider, asset.region_code, result.get('error'))
-    await sync_to_async(_refresh_dashboard_snapshots_from_lifecycle, thread_sensitive=False)(
+    await sync_to_async(_refresh_dashboard_snapshots_from_lifecycle, thread_sensitive=_db_thread_sensitive())(
         'lifecycle_tick',
         lifecycle_limit=1000,
     )

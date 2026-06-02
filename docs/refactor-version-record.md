@@ -1,5 +1,41 @@
 # 重构版本记录
 
+## 2026-06-02 22:22 自动监工：生命周期执行线程和固定 IP 名称回退
+
+### 范围
+
+本轮继续监工 Shop Django 后端仓库。起始工作树已有同主题未提交改动，最近提交先后从 `d1e8f44 同步固定IP保留期关联资产状态` 前移到外部提交 `fbe4136 收口未附加IP执行窗口和风险识别`；本轮在不回滚外部改动的前提下，重点复查未附加固定 IP 删除窗口、生命周期异步执行、固定 IP 名称解析、旧到期字段、旧计划快照表、旧退款入口和废弃 app 回流。
+
+### 复查结论
+
+- `CloudAsset.actual_expires_at` 仍是唯一结构化资产到期事实；`CloudServerOrder` 未恢复 `service_expires_at` 或 `actual_expires_at` 服务到期字段。
+- 严格运行时代码扫描未发现旧订单到期字段 ORM 查询或写入、旧计划快照模型、旧退款函数名、`STATUS_REFUNDED/refunded` 状态回流。
+- 仓库根下未发现 `accounts/finance/mall/monitoring/dashboard_api/biz` 废弃 app 目录恢复；当前 `core.dashboard_api` 和 `core.cloud_accounts` 命中仍属于共享 helper。
+
+### 修复内容
+
+- 生命周期 tick 在 `DJANGO_TEST_SQLITE=1` 时对同步数据库执行函数启用 `thread_sensitive`，避免 SQLite 聚焦测试在异步线程间复用连接时出现不稳定。
+- AWS 固定 IP 释放名称回退改为优先从 `CloudAsset.provider_resource_id` 的 `StaticIp/...` 解析，只有无法识别固定 IP 资产时才回退资产名，降低陈旧 `asset_name` 导致真实释放目标错误的风险。
+- 补充后台资产风险识别测试，锁定原始 `provider_status` 中的“固定IP保留中”能进入未附加固定 IP 风险筛选；补充固定 IP 名称回退测试，锁定资源 ID 优先于陈旧资产名。
+
+### 验证
+
+已通过：
+
+```bash
+UV_CACHE_DIR=/private/tmp/uv-cache-shop uv run python manage.py check
+UV_CACHE_DIR=/private/tmp/uv-cache-shop uv run python -m py_compile bot/api.py cloud/api_assets.py cloud/lifecycle.py cloud/lifecycle_execution.py cloud/tests.py
+UV_CACHE_DIR=/private/tmp/uv-cache-shop uv run python manage.py makemigrations --check --dry-run
+DJANGO_TEST_SQLITE=1 UV_CACHE_DIR=/private/tmp/uv-cache-shop uv run python manage.py test cloud.tests.CloudServerServicesTestCase.test_dashboard_unattached_ip_plan_run_uses_ip_delete_time_window cloud.tests.CloudServerServicesTestCase.test_unattached_ip_delete_respects_shutdown_disabled_asset cloud.tests.CloudServerServicesTestCase.test_cloud_asset_unattached_filter_uses_raw_provider_status
+rg -n "service_expires_at|service_expired_at|normalize_service_expiry|CloudLifecyclePlan\\b|CloudNoticePlan\\b|CloudAutoRenewPlan\\b|refund_order|process_refund|create_refund|issue_refund|refund_to_balance|refund_balance|STATUS_REFUNDED|status=['\\\"]refunded['\\\"]" bot core orders cloud shop --glob '!**/migrations/**' --glob '!**/tests.py'
+find . -maxdepth 2 -type d \( -name accounts -o -name finance -o -name mall -o -name monitoring -o -name dashboard_api -o -name biz \) -print
+git diff --check
+```
+
+结果：Django 系统检查、关键模块编译、迁移 dry-run、未附加固定 IP 后台执行窗口/关机计划/风险识别 3 条聚焦测试、旧字段/旧计划/旧退款扫描、废弃 app 目录检查和空白检查均通过。`makemigrations --check --dry-run` 仍因沙箱无法连接默认 MySQL 输出迁移历史检查警告，但最终无模型变更。
+
+剩余风险：本轮未跑完整测试套件，未连接真实 MySQL、AWS Lightsail、阿里云或 TRONGrid，未执行真实 Telegram 回调、钱包扣款、自动续费支付、云端删机、固定 IP 释放或历史数据清理。
+
 ## 2026-06-02 22:00 自动监工：兼容服务器记录和生命周期计划收口
 
 ### 范围
@@ -22,6 +58,7 @@
 - 归一命令可合并重复兼容记录、解析云账号标签并清理活跃但无效的兼容记录；已终态 deleted/terminated 的残留记录保留为历史状态，不硬删。
 - AWS 同步解析真实资产时优先非兼容 `CloudAsset`，云端实例恢复后清理旧“已标记删除”备注，并只从真实资产向兼容记录传播状态；阿里云缺失确认继续处理有订单绑定的兼容记录，但跳过无订单的空白兼容记录。
 - 实例删除进入固定 IP 保留期时，同订单的其他服务器资产同步标记为 deleted、清空实例标识，并以 `order.ip_recycle_at` 写入资产侧 `actual_expires_at`，避免订单主资产与兼容资产在保留期内状态分叉。
+- 生命周期 tick 在 `DJANGO_TEST_SQLITE=1` 下使用 thread-sensitive DB 调用，避免 SQLite 测试线程新连接看不到表；AWS 固定 IP 名称回退复用资产资源 ID 解析，减少固定 IP 释放时使用过期资产名。
 - 后台手动执行未附加固定 IP 删除时复用生命周期 IP 删除时间窗口，但仅在资产已到删除时间且关机计划允许时拦截，保留“未到 IP 删除时间”和“关机计划已关闭”的具体错误。
 - 后台资产风险识别同时读取展示态和原始 `provider_status`，避免状态标签折叠后漏掉“固定IP保留中”等未附加固定 IP 资产。
 - TRON 资源监控的 `trongrid_base_url` 优先读取运行时配置，未配置时再回退原异步配置。
