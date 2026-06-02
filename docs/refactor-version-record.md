@@ -1,5 +1,37 @@
 # 重构版本记录
 
+## 2026-06-02 23:18 自动监工：复查机器人返回链和自动化状态
+
+### 范围
+
+本轮继续执行 10 分钟自动优化监工，重点确认最新机器人详情返回链修复没有引入新回归，同时复核自动化配置、前后端本地服务、废弃 app、旧到期字段、旧计划快照表和退款逻辑未回流。
+
+### 复查结论
+
+- 当前分支为 `codex/cloud-asset-lifecycle-refactor`，本轮开始和结束工作区均为干净状态。
+- `Shop 自动优化监工` 自动化仍为 `ACTIVE`，计划为 `FREQ=MINUTELY;INTERVAL=10`，运行目录为 `/Users/a399/Desktop/data/shop`。
+- 后端 `manage.py runserver 127.0.0.1:8000 --noreload` 和前端 Vite 开发服务仍在运行。
+- 终端版 `codex-cli` 使用模型 `gpt-5.5` 对 `HEAD~2` 之后的机器人返回链改动完成 review，结论为未发现引入的正确性问题。
+- 本轮未发现需要修改的运行代码；未恢复旧 app、旧到期字段、旧计划快照表或退款逻辑。
+
+### 验证
+
+已通过：
+
+```bash
+UV_CACHE_DIR=/private/tmp/uv-cache-shop uv run python manage.py check
+UV_CACHE_DIR=/private/tmp/uv-cache-shop uv run python -m py_compile bot/handlers.py bot/keyboards.py bot/tests.py cloud/services.py cloud/lifecycle.py cloud/lifecycle_execution.py cloud/api_tasks.py
+UV_CACHE_DIR=/private/tmp/uv-cache-shop uv run python manage.py test bot.tests.RetainedIpRenewalUiTestCase --verbosity 1
+UV_CACHE_DIR=/private/tmp/uv-cache-shop uv run python manage.py makemigrations --check --dry-run
+rg -n "service_expires_at|service_expired_at|normalize_service_expiry|CloudLifecyclePlan\\b|CloudNoticePlan\\b|CloudAutoRenewPlan\\b|refund_order|process_refund|create_refund|issue_refund|refund_to_balance|refund_balance|STATUS_REFUNDED|status=['\\\"]refunded['\\\"]" bot core orders cloud shop --glob '!**/migrations/**' --glob '!**/tests.py'
+find . -maxdepth 2 -type d \( -name accounts -o -name finance -o -name mall -o -name monitoring -o -name dashboard_api -o -name biz \) -print
+git diff --check
+```
+
+结果：Django 系统检查、关键模块编译、机器人返回 UI 聚焦测试 29 条、迁移 dry-run、旧字段/旧计划/旧退款扫描、废弃 app 目录检查和空白检查均通过。
+
+剩余风险：本轮未执行真实 Telegram 点击、钱包扣款、云端创建删除、固定 IP 释放、生产发布、合并或不可逆操作。
+
 ## 2026-06-02 23:14 自动监工：修复机器人详情返回链
 
 ### 范围
