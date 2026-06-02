@@ -881,7 +881,7 @@ def cloud_order_list(orders, page: int = 1, total_pages: int = 1, prefix: str = 
 
 def cloud_order_readonly_detail(order_id: int, back_callback: str = 'profile:orders:cloud:page:1'):
     kb = InlineKeyboardBuilder()
-    back_callback = compact_callback_path(back_callback)
+    back_callback = _compact_back_button_callback(back_callback)
     kb.row(support_contact_button('cloud_order', order_id))
     kb.row(InlineKeyboardButton(text='🔙 返回订单列表', callback_data=back_callback))
     return _log_inline_keyboard('cloud_order_readonly_detail', kb.as_markup(), order_id=order_id, back_callback=back_callback)

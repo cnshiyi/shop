@@ -44,6 +44,7 @@ from bot.keyboards import (
     cart_menu, wallet_recharge_prompt_menu, cloud_ip_query_result,
     cloud_query_menu, configured_link_for_label, configured_link_menu,
     cloud_detail_callback, cloud_asset_detail_callback, cloud_previous_detail_callback, cloud_asset_action_callback, append_back_callback, compact_callback_path, expand_compact_region_code,
+    _compact_back_button_callback,
 )
 from bot.services import create_admin_reply_link, get_admin_reply_link, get_admin_reply_link_by_id, get_or_create_user, get_admin_forward_mute_status, is_admin_forward_muted, mute_admin_forward_for_days, record_bot_operation_log, record_telegram_message, should_forward_telegram_group
 from cloud.services import (
@@ -4166,7 +4167,7 @@ def register_handlers(dp: Dispatcher):
             await _safe_callback_answer(callback, '代理详情参数无效', show_alert=True)
             return
         item_id = int(raw_item_id)
-        back_callback = compact_callback_path(':'.join(back_parts)) if back_parts else 'cloud:list'
+        back_callback = _compact_back_button_callback(':'.join(back_parts)) if back_parts else 'cloud:list'
         if _is_group_chat_message(callback.message):
             item = await get_group_proxy_asset_detail(item_id, callback.message.chat.id, item_kind)
         else:
@@ -5294,7 +5295,7 @@ def register_handlers(dp: Dispatcher):
             await message.reply(err or '修改失败，请重新查询后再试。', reply_markup=main_menu())
             return
         label = getattr(item, 'public_ip', None) or getattr(item, 'previous_public_ip', None) or getattr(item, 'order_no', None) or f'{item_kind}:{item_id}'
-        back_callback = str(data.get('admin_expiry_back') or 'cloud:querymenu').strip() or 'cloud:querymenu'
+        back_callback = _compact_back_button_callback(data.get('admin_expiry_back') or 'cloud:querymenu')
         await message.reply(
             f'✅ 已修改到期时间\n\n{label}\n新时间: {_format_local_dt(expires_at)}',
             reply_markup=InlineKeyboardMarkup(inline_keyboard=[

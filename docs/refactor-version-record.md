@@ -1,5 +1,48 @@
 # 重构版本记录
 
+## 2026-06-03 02:25 自动监工：收紧详情返回按钮兜底压缩
+
+### 范围
+
+本轮从提交 `b56d3bd 记录默认端口生命周期监工` 后继续监工。起始读取 git 状态时工作树干净；自动化配置仍为 `ACTIVE`，`rrule` 为每 10 分钟一次，模型为 `gpt-5.5`，后端 runserver 仍在 `127.0.0.1:8000` 运行。
+
+本轮启动终端版 `codex-cli 0.135.0-alpha.1` 只读巡检，报告保存到 `/private/tmp/shop_codex_review_20260603_0219.md`。巡检结论为未发现高置信、可复现、会影响运行的 bug；同时工作树出现机器人返回链相关脏改动，本轮已复查并保留为有效修复。
+
+### 修改
+
+- `bot/handlers.py` 中资产详情返回来源和管理员修改到期时间后的“返回原页面”统一走 `_compact_back_button_callback()`，避免超长来源直接进入返回按钮。
+- `bot/keyboards.py` 中只读订单详情返回按钮也统一走 `_compact_back_button_callback()`，超长未知来源回退到 `cloud:list`。
+- `bot/tests.py` 新增聚焦断言，覆盖资产详情、管理员改到期和只读订单详情的超长来源兜底，确保返回按钮不超过 Telegram `callback_data` 64 字节限制。
+
+### 监工结果
+
+- `codex-cli` 确认旧 app 未回流，仓库根目录无 `accounts`、`finance`、`mall`、`monitoring`、`dashboard_api`、`biz`。
+- `CloudAsset.actual_expires_at` 仍是唯一结构化资产到期事实；`CloudServerOrder` 未恢复 `service_expires_at` 或 `actual_expires_at`。
+- `CloudLifecycleTask` 和 `CloudNoticeTask` 仍有数据库任务支撑和 `source_key` 唯一认领保护。
+- 机器人短回调 `cad/csd/ar/ac/au/ai/r/rnp/arp/p/upp/ri/exp/clp/poc` 均有 handler 覆盖；本轮额外收紧返回按钮兜底压缩。
+- 新购端口仍固定为 `443`，付款成功后会提交默认端口创建流程。
+- 运行代码未发现退款逻辑或旧退款函数名回流。
+- 真机测试未执行：本轮未执行真实云资源创建、删除、IP 变更、真实支付、链上广播、生产发布或不可逆操作。
+
+### 验证
+
+本地已通过：
+
+```bash
+UV_CACHE_DIR=/Users/a399/Desktop/data/shop/.uv-cache PYTHONDONTWRITEBYTECODE=1 uv run python manage.py check
+UV_CACHE_DIR=/Users/a399/Desktop/data/shop/.uv-cache PYTHONDONTWRITEBYTECODE=1 uv run python -m py_compile bot/handlers.py bot/keyboards.py bot/tests.py cloud/lifecycle_tasks.py cloud/lifecycle_execution.py orders/payment_scanner.py
+DB_ENGINE=sqlite SQLITE_NAME=/private/tmp/shop_bot_back_compact_<时间戳>.sqlite3 UV_CACHE_DIR=/Users/a399/Desktop/data/shop/.uv-cache PYTHONDONTWRITEBYTECODE=1 uv run python manage.py test bot.tests.RetainedIpRenewalUiTestCase --noinput --verbosity 1
+git diff --check
+```
+
+`RetainedIpRenewalUiTestCase` 共 44 条通过。测试日志中 `SiteConfig.get` 的 `DatabaseOperationForbidden` 来自 `SimpleTestCase` 内读取按钮配置时的兜底路径，测试最终为 `OK`，不是失败。
+
+### 剩余风险
+
+- 本轮未跑完整测试套件。
+- 本轮未执行真实 Telegram 点击、真实云资源创建/删除/IP 变更、真实支付、链上广播、生产发布或不可逆操作。
+- 真机测试仍需在用户明确授权真实云资源成本后单独执行，并写中文报告，云资源 ID 需脱敏。
+
 ## 2026-06-03 02:16 自动监工：复核默认端口和生命周期任务
 
 ### 范围
@@ -4763,6 +4806,87 @@ git diff --check
 ```
 
 `makemigrations --check --dry-run` 仍出现本地沙箱无法连接 `127.0.0.1` MySQL 的迁移历史一致性警告，但最终结果为 `No changes detected`。
+
+### 剩余风险
+
+- 本轮未跑完整测试套件。
+- 本轮未执行真实 Telegram 点击、真实云资源创建/删除/IP 变更、真实支付、链上广播、生产发布或不可逆操作。
+- 真机测试仍需在用户明确授权真实云资源成本后，单独按中文报告记录云资源 ID 脱敏结果。
+
+## 2026-06-03 详情返回按钮超长来源兜底
+
+### 范围
+
+本轮继续巡检 Shop Django 后端的机器人返回链、Telegram `callback_data` 64 字节限制、云资产生命周期唯一到期事实、订单旧到期字段、旧计划快照表、旧退款入口和废弃 app 回流。
+
+### 运行时变化
+
+- 资产详情处理器收到未知超长返回来源时，不再把原始来源直接放进“返回代理列表”按钮，而是复用现有返回按钮兜底压缩，无法识别时回落到 `cloud:list`。
+- 管理员“修改到期时间”完成后的“返回原页面”按钮同样接入返回按钮兜底压缩，避免 FSM 中保存的异常长来源恢复为超长 `callback_data`。
+- 只读订单详情 `cloud_order_readonly_detail()` 的“返回订单列表”按钮从普通路径压缩改为返回按钮兜底压缩；未知超长来源回落到 `cloud:list`。
+- 补充聚焦测试，锁定资产详情处理器、管理员修改到期处理器和只读订单详情返回按钮都不会恢复未知超长来源。
+
+### 监工结果
+
+- 极端 18 位订单 ID、18 位资产 ID、18 位页码、嵌套资产详情来源、订单详情来源和未知 120 字符来源共 96 个回调样本无超过 64 字节。
+- 运行时代码扫描未发现 `service_expires_at`、旧计划快照类、旧退款函数名、`allow_client_port`、`set_cloud_server_port`、旧 `custom:port` 或 `cloud:ipport` 入口回流。
+- 模型字段 introspection 确认 `CloudAsset` 仍只有 `actual_expires_at` 到期字段；`CloudServerOrder` 仍仅有 `renew_grace_expires_at` 流程到期字段；`CloudAssetDashboardSnapshot` 无到期字段。
+- 废弃 app 未恢复到运行时代码扫描范围；`dashboard_api` 仍仅作为当前路由 namespace/公共 helper 命名存在。
+
+### 验证
+
+本地已通过:
+
+```bash
+UV_CACHE_DIR=/Users/a399/Desktop/data/shop/.uv-cache uv run python -m py_compile bot/keyboards.py bot/handlers.py bot/tests.py
+UV_CACHE_DIR=/Users/a399/Desktop/data/shop/.uv-cache uv run python manage.py check
+UV_CACHE_DIR=/Users/a399/Desktop/data/shop/.uv-cache uv run python manage.py test bot.tests.RetainedIpRenewalUiTestCase --verbosity=2
+DJANGO_TEST_SQLITE=1 UV_CACHE_DIR=/Users/a399/Desktop/data/shop/.uv-cache uv run python manage.py test cloud.tests.CloudServerServicesTestCase.test_update_cloud_asset_expiry_refreshes_order_lifecycle cloud.tests.CloudServerServicesTestCase.test_sync_aws_assets_preserves_existing_unattached_ip_due_time cloud.tests.CloudServerServicesTestCase.test_sync_aws_retained_ip_preserves_existing_asset_user cloud.tests.CloudServerServicesTestCase.test_lifecycle_delete_task_claim_blocks_same_cycle_duplicate cloud.tests.CloudServerServicesTestCase.test_lifecycle_asset_task_claim_blocks_same_cycle_duplicate --verbosity=2
+UV_CACHE_DIR=/Users/a399/Desktop/data/shop/.uv-cache uv run python manage.py makemigrations --check --dry-run
+UV_CACHE_DIR=/Users/a399/Desktop/data/shop/.uv-cache uv run python manage.py shell -c "from cloud.models import CloudAsset, CloudServerOrder, CloudAssetDashboardSnapshot; print('CloudAsset expiry fields', [f.name for f in CloudAsset._meta.fields if 'expires' in f.name or 'expiry' in f.name]); print('CloudServerOrder expiry fields', [f.name for f in CloudServerOrder._meta.fields if 'expires' in f.name or 'expiry' in f.name]); print('Snapshot expiry fields', [f.name for f in CloudAssetDashboardSnapshot._meta.fields if 'expires' in f.name or 'expiry' in f.name])"
+UV_CACHE_DIR=/Users/a399/Desktop/data/shop/.uv-cache uv run python manage.py shell <<'PY'
+from decimal import Decimal
+from types import SimpleNamespace
+from bot.keyboards import append_back_callback, cloud_asset_detail_callback, cloud_detail_callback, cloud_previous_detail_callback, cloud_server_change_ip_region_menu, cloud_server_detail, cloud_server_renew_payment
+from bot.handlers import _asset_renewal_plan_keyboard, _retained_ip_renewal_plan_keyboard
+item_id = 999999999999999999
+sources = [
+    f'cloud:detail:{item_id}:profile:orders:cloud:filter:provisioning:page:{item_id}',
+    f'cloud:ad:asset:{item_id}:cloud:list:page:{item_id}',
+    f'cad:{item_id}:d:{item_id}:o:provisioning:{item_id}',
+    'x' * 120,
+]
+regions = [('ap-southeast-1', 'Singapore'), ('us-east-1', 'N. Virginia'), ('eu-central-1', 'Frankfurt')]
+plans = [SimpleNamespace(id=item_id, name='Large')]
+callbacks = []
+for source in sources:
+    callbacks.extend([
+        cloud_detail_callback(item_id, source),
+        cloud_asset_detail_callback(item_id, source),
+        cloud_previous_detail_callback(item_id, source),
+        append_back_callback(f'cloud:renew:{item_id}', source),
+        append_back_callback(f'cloud:ip:{item_id}', source),
+        append_back_callback(f'cloud:reinit:{item_id}', source),
+        append_back_callback(f'cloud:upgrade:{item_id}', source),
+        append_back_callback(f'exp:a:{item_id}', source),
+    ])
+    for markup in [
+        cloud_server_detail(item_id, True, True, True, source, True),
+        cloud_server_renew_payment(item_id, Decimal('12.3'), Decimal('45.6'), back_callback=source),
+        cloud_server_change_ip_region_menu(item_id, regions, back_callback=source),
+        _asset_renewal_plan_keyboard(item_id, plans, source),
+        _retained_ip_renewal_plan_keyboard(item_id, plans, source),
+    ]:
+        callbacks.extend(button.callback_data for row in markup.inline_keyboard for button in row if button.callback_data)
+violations = sorted({cb for cb in callbacks if cb and len(cb.encode()) > 64})
+print('callback_count', len(callbacks))
+print('violations', violations)
+PY
+rg -n "service_expires_at|CloudAssetPlanSnapshot|CloudOrderPlanSnapshot|refund_order|process_refund|create_refund|allow_client_port|set_cloud_server_port|custom:port|cloud:ipport" bot cloud core orders shop -S --glob '*.py' --glob '!*/migrations/*' --glob '!*tests.py' && exit 1 || exit 0
+git diff --check
+```
+
+`manage.py test bot.tests.RetainedIpRenewalUiTestCase` 和极端 callback shell 脚本导入处理器时仍会触发本机 MySQL 沙箱拒绝日志，这是导入期读取 `SiteConfig` 的既有现象；最终测试通过且极端脚本输出 `violations []`。`makemigrations --check --dry-run` 仍有本机 MySQL 迁移历史检查警告，但最终结果为 `No changes detected`。
 
 ### 剩余风险
 
