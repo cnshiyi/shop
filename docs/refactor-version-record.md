@@ -4,7 +4,7 @@
 
 ### 范围
 
-本轮从提交 `14354d8 移除旧端口兼容入口` 后继续监工。起始工作树干净，但巡检过程中工作树出现同方向的旧端口清理改动；本轮按相关改动处理，没有回滚。重点复查机器人返回链、Telegram `callback_data` 64 字节限制、默认端口创建、云资产唯一到期事实、旧计划快照、旧退款入口和废弃 app 回流。
+本轮从提交 `14354d8 移除旧端口兼容入口` 后继续监工。起始工作树已有 `bot/handlers.py`、`bot/keyboards.py`、`bot/tests.py`、`cloud/services.py` 同方向未提交改动；本轮先核对 diff，再按相关改动继续验证和记录，没有回滚。重点复查机器人返回链、Telegram `callback_data` 64 字节限制、默认端口创建、云资产唯一到期事实、旧计划快照、旧退款入口和废弃 app 回流。
 
 ### 修改
 
@@ -27,18 +27,21 @@
 已通过：
 
 ```bash
-uv run python -m py_compile bot/handlers.py bot/keyboards.py bot/tests.py cloud/services.py core/texts.py
-uv run python manage.py check
-DB_ENGINE=sqlite SQLITE_NAME=/private/tmp/shop-bot-callback-focus-2.sqlite3 uv run python manage.py test bot.tests.RetainedIpRenewalUiTestCase --noinput --verbosity 1
-DB_ENGINE=sqlite SQLITE_NAME=/private/tmp/shop-default-port-focus-2.sqlite3 uv run python manage.py test bot.tests.RetainedIpRenewalUiTestCase.test_legacy_custom_port_flow_is_removed bot.tests.BotOrderAndBalanceFilterTestCase.test_paid_cloud_order_prepare_submits_default_port_directly orders.tests.ChainPaymentScannerTestCase.test_cloud_chain_payment_auto_submits_default_port_provision --noinput --verbosity 1
-uv run python manage.py makemigrations --check --dry-run
-uv run python manage.py shell -c "from django.conf import settings; retired={'accounts','finance','mall','monitoring','dashboard_api','biz'}; print('retired_apps', [app for app in settings.INSTALLED_APPS if app.split('.')[0] in retired]); from cloud.models import CloudServerOrder, CloudAsset, CloudAssetDashboardSnapshot; print('order_expiry_fields', [f.name for f in CloudServerOrder._meta.fields if f.name in {'service_expires_at','actual_expires_at'}]); print('asset_actual_fields', [f.name for f in CloudAsset._meta.fields if f.name == 'actual_expires_at']); print('snapshot_expiry_fields', [f.name for f in CloudAssetDashboardSnapshot._meta.fields if 'expire' in f.name or 'expiry' in f.name or f.name == 'actual_expires_at'])"
-rg -n "service_expires_at__|\bservice_expires_at\b|\bactual_expires_at\s*=\s*models|\bCloudLifecyclePlan\b|\bCloudNoticePlan\b|\bCloudAutoRenewPlan\b|\bnormalize_service_expiry\b|service_expired_at|\brefund_order\b|\bprocess_refund\b|\bcreate_refund\b|\bissue_refund\b|refund_to_balance|refund_balance|STATUS_REFUNDED|status=['\"]refunded|\brefunded\b|custom:port|cloud:ipport|waiting_port|set_cloud_server_port\(" cloud orders bot core shop --glob '!**/migrations/**' --glob '!docs/**'
+UV_CACHE_DIR=/Users/a399/Desktop/data/shop/.uv-cache uv run python -m py_compile bot/handlers.py bot/keyboards.py bot/tests.py cloud/services.py core/texts.py
+UV_CACHE_DIR=/Users/a399/Desktop/data/shop/.uv-cache uv run python manage.py check
+UV_CACHE_DIR=/Users/a399/Desktop/data/shop/.uv-cache DB_ENGINE=sqlite DB_NAME=/private/tmp/shop_bot_ui_<时间戳>.sqlite3 uv run python manage.py test bot.tests.RetainedIpRenewalUiTestCase --keepdb --noinput
+UV_CACHE_DIR=/Users/a399/Desktop/data/shop/.uv-cache DB_ENGINE=sqlite DB_NAME=/private/tmp/shop_default_port_<时间戳>.sqlite3 uv run python manage.py test bot.tests.BotOrderAndBalanceFilterTestCase.test_paid_cloud_order_prepare_submits_default_port_directly bot.tests.BotOrderAndBalanceFilterTestCase.test_admin_query_keyboard_includes_reinstall_and_expiry_actions --keepdb --noinput
+UV_CACHE_DIR=/Users/a399/Desktop/data/shop/.uv-cache DB_ENGINE=sqlite DB_NAME=/private/tmp/shop_chain_port_<时间戳>.sqlite3 uv run python manage.py test orders.tests.ChainPaymentScannerTestCase.test_cloud_chain_payment_auto_submits_default_port_provision --keepdb --noinput
+UV_CACHE_DIR=/Users/a399/Desktop/data/shop/.uv-cache DB_ENGINE=sqlite DB_NAME=/private/tmp/shop_sync_<时间戳>.sqlite3 uv run python manage.py test cloud.tests.CloudOrderStatusDashboardSyncTestCase --keepdb --noinput
+UV_CACHE_DIR=/Users/a399/Desktop/data/shop/.uv-cache DB_ENGINE=sqlite DB_NAME=/private/tmp/shop_cloud_services_<时间戳>.sqlite3 uv run python manage.py test cloud.tests.CloudServerServicesTestCase.test_server_compat_create_preserves_manual_asset_owner_and_expiry cloud.tests.CloudServerServicesTestCase.test_aws_notice_schedule_does_not_override_manual_order_expiry cloud.tests.CloudServerServicesTestCase.test_unattached_asset_operation_order_enters_retained_renewal_flow cloud.tests.CloudServerServicesTestCase.test_mark_success_preserves_existing_manual_asset_fields_on_update --keepdb --noinput
+UV_CACHE_DIR=/Users/a399/Desktop/data/shop/.uv-cache uv run python manage.py makemigrations --check --dry-run
+UV_CACHE_DIR=/Users/a399/Desktop/data/shop/.uv-cache PYTHONDONTWRITEBYTECODE=1 uv run python manage.py shell -c "from django.conf import settings; retired={'accounts','finance','mall','monitoring','dashboard_api','biz'}; print('retired_apps', [app for app in settings.INSTALLED_APPS if app.split('.')[0] in retired]); from cloud.models import CloudServerOrder, CloudAsset, CloudAssetDashboardSnapshot; print('CloudAsset expiry fields:', [f.name for f in CloudAsset._meta.fields if 'expires' in f.name or 'expiry' in f.name]); print('CloudServerOrder expiry fields:', [f.name for f in CloudServerOrder._meta.fields if 'expires' in f.name or 'expiry' in f.name]); print('Snapshot expiry fields:', [f.name for f in CloudAssetDashboardSnapshot._meta.fields if 'expires' in f.name or 'expiry' in f.name])"
+rg -n "service_expires_at|service_expired_at|normalize_service_expiry|CloudLifecyclePlan\b|CloudNoticePlan\b|CloudAutoRenewPlan\b|refund_order|process_refund|create_refund|issue_refund|refund_to_balance|refund_balance|STATUS_REFUNDED|status=['\"]refunded['\"]|set_cloud_server_port|custom:port|cloud:ipport|bot_set_port|bot_custom_port" bot core orders cloud shop --glob '!**/migrations/**' --glob '!**/tests.py'
 find . -maxdepth 2 -type d \( -name accounts -o -name finance -o -name mall -o -name monitoring -o -name dashboard_api -o -name biz \) -print
 git diff --check
 ```
 
-结果：机器人返回 UI 聚焦测试 37 条通过；默认端口/旧端口删除聚焦测试 3 条通过；`manage.py check` 通过；`makemigrations --check --dry-run` 显示 `No changes detected`，但仍因沙箱禁止连接本机 MySQL 输出迁移历史检查警告。
+结果：机器人返回 UI 聚焦测试 37 条通过；默认端口和管理员查询聚焦测试 2 条通过；链上支付默认端口聚焦测试 1 条通过；订单状态同步聚焦测试 8 条通过；手工资产到期保留、无订单资产续费和同步保留聚焦测试 4 条通过；`manage.py check` 通过；`makemigrations --check --dry-run` 显示 `No changes detected`，但仍因沙箱禁止连接本机 MySQL 输出迁移历史检查警告。一次生命周期测试误用旧类名 `CloudAssetManualExpiryPreservationTestCase`，已换当前有效选择器重跑通过。
 
 ### 剩余风险
 
