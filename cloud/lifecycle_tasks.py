@@ -107,6 +107,37 @@ def claim_lifecycle_task_for_order(task_type: str, order: CloudServerOrder, *, s
     return _claim_task(CloudLifecycleTask, source_key=source_key, token=uuid.uuid4().hex, now=now)
 
 
+def claim_lifecycle_task_for_asset(task_type: str, asset: CloudAsset, *, scheduled_at, queue_status: str = '') -> TaskClaim | None:
+    now = timezone.now()
+    source_key = lifecycle_task_source_key(
+        task_type,
+        source_kind=CloudLifecycleTask.SOURCE_ASSET,
+        source_id=asset.id,
+        scheduled_at=scheduled_at,
+    )
+    order = asset.order if getattr(asset, 'order_id', None) else None
+    defaults = {
+        'task_type': task_type,
+        'source_kind': CloudLifecycleTask.SOURCE_ASSET,
+        'order': order,
+        'asset': asset,
+        'user_id': asset.user_id or getattr(order, 'user_id', None),
+        'scheduled_at': scheduled_at or now,
+        'basis_actual_expires_at': asset.actual_expires_at,
+        'payload': {'queue_status': queue_status or ''},
+    }
+    try:
+        with transaction.atomic():
+            task, created = CloudLifecycleTask.objects.get_or_create(source_key=source_key, defaults=defaults)
+            if not created and task.status in {CloudLifecycleTask.STATUS_PENDING, CloudLifecycleTask.STATUS_FAILED}:
+                for field, value in defaults.items():
+                    setattr(task, field, value)
+                task.save(update_fields=[*defaults.keys(), 'updated_at'])
+    except IntegrityError:
+        pass
+    return _claim_task(CloudLifecycleTask, source_key=source_key, token=uuid.uuid4().hex, now=now)
+
+
 def finish_lifecycle_task(claim: TaskClaim | None, *, ok: bool, error: str = ''):
     if not claim:
         return

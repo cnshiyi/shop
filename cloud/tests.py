@@ -2539,6 +2539,11 @@ class CloudServerServicesTestCase(TestCase):
             status='completed',
             public_ip='8.8.4.8',
             service_started_at=original_started_at,
+            renew_notice_sent_at=timezone.now(),
+            auto_renew_notice_sent_at=timezone.now(),
+            auto_renew_failure_notice_sent_at=timezone.now(),
+            delete_notice_sent_at=timezone.now(),
+            recycle_notice_sent_at=timezone.now(),
         )
         self._attach_order_expiry_asset(order, original_expiry)
         with patch('cloud.services._renew_aliyun_instance', return_value=(True, 'ok')), patch('cloud.services._ensure_aws_instance_running', return_value=(False, 'skip start')):
@@ -2547,6 +2552,11 @@ class CloudServerServicesTestCase(TestCase):
         renewed.refresh_from_db()
         self.assertEqual(renewed.service_started_at, original_started_at)
         self.assertGreater(order_asset_expiry(renewed), original_expiry)
+        self.assertIsNone(renewed.renew_notice_sent_at)
+        self.assertIsNone(renewed.auto_renew_notice_sent_at)
+        self.assertIsNone(renewed.auto_renew_failure_notice_sent_at)
+        self.assertIsNone(renewed.delete_notice_sent_at)
+        self.assertIsNone(renewed.recycle_notice_sent_at)
 
     # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
     def test_renewal_postcheck_skips_running_records(self):
@@ -4562,9 +4572,10 @@ class CloudServerServicesTestCase(TestCase):
         )
 
     # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
-    def test_dashboard_order_expiry_update_recomputes_lifecycle_plan(self):
+    def test_dashboard_order_expiry_update_syncs_asset_expiry_and_lifecycle_plan(self):
         old_expiry = timezone.now() + timezone.timedelta(days=1)
         new_expiry = timezone.now() + timezone.timedelta(days=20)
+        old_lifecycle = compute_order_lifecycle_fields(old_expiry)
         order = CloudServerOrder.objects.create(
             order_no='DASH-ORDER-EXPIRY-UPDATE-1',
             user=self.user,
@@ -4581,7 +4592,7 @@ class CloudServerServicesTestCase(TestCase):
             status='completed',
             public_ip='4.4.4.5',
             service_started_at=timezone.now(),
-            service_expires_at=old_expiry,
+            **old_lifecycle,
         )
         old_suspend_at = order.suspend_at
         asset = CloudAsset.objects.create(
@@ -4609,8 +4620,6 @@ class CloudServerServicesTestCase(TestCase):
         )
         asset.refresh_from_db()
         server.refresh_from_db()
-        old_asset_expiry = asset.actual_expires_at
-        old_server_expiry = server.expires_at
         staff_user = get_user_model().objects.create_user(username='staff_order_expiry_update', password='x', is_staff=True, is_superuser=True)
         request = RequestFactory().patch(
             f'/api/dashboard/cloud-orders/{order.id}/',
@@ -4626,13 +4635,13 @@ class CloudServerServicesTestCase(TestCase):
         order.refresh_from_db()
         asset.refresh_from_db()
         server.refresh_from_db()
-        self.assertEqual(order.service_expires_at, CloudServerOrder.normalize_expiry_time(new_expiry))
+        self.assertEqual(order_asset_expiry(order), new_expiry)
         self.assertGreater(order.suspend_at, old_suspend_at)
         self.assertEqual(order.renew_grace_expires_at, order.suspend_at)
         self.assertGreaterEqual(order.delete_at, order.suspend_at)
         self.assertGreater(order.ip_recycle_at, order.delete_at)
-        self.assertEqual(asset.actual_expires_at, old_asset_expiry)
-        self.assertEqual(server.expires_at, old_server_expiry)
+        self.assertEqual(asset.actual_expires_at, new_expiry)
+        self.assertEqual(server.expires_at, new_expiry)
 
     # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
     def test_dashboard_order_ip_and_name_update_syncs_asset_server(self):
@@ -9506,6 +9515,74 @@ class CloudServerServicesTestCase(TestCase):
         self.assertEqual(CloudUserNoticeLog.objects.filter(event_type='renew_notice', user=self.user, order=order, delivered=True).count(), 1)
         self.assertEqual(CloudNoticeTask.objects.filter(notice_type=CloudNoticeTask.NOTICE_RENEW, status=CloudNoticeTask.STATUS_SENT).count(), 1)
 
+    # 功能：验证同一订单续费进入新到期周期后，通知批次不会被上一周期挡住。
+    def test_send_order_notice_batch_allows_new_expiry_cycle(self):
+        first_expires_at = timezone.now() + timezone.timedelta(days=3)
+        second_expires_at = timezone.now() + timezone.timedelta(days=34)
+        order = CloudServerOrder.objects.create(
+            order_no='NOTICE-CYCLE-RENEW-1',
+            user=self.user,
+            plan=self.plan,
+            provider=self.plan.provider,
+            region_code=self.plan.region_code,
+            region_name=self.plan.region_name,
+            plan_name=self.plan.plan_name,
+            quantity=1,
+            currency='USDT',
+            total_amount='19.00',
+            pay_amount='19.00',
+            pay_method='balance',
+            status='completed',
+            public_ip='8.8.8.94',
+            service_started_at=timezone.now(),
+        )
+        asset = CloudAsset.objects.create(
+            kind=CloudAsset.KIND_SERVER,
+            source=CloudAsset.SOURCE_ORDER,
+            order=order,
+            user=self.user,
+            provider=order.provider,
+            region_code=order.region_code,
+            region_name=order.region_name,
+            asset_name='notice-cycle-renew-asset',
+            public_ip=order.public_ip,
+            actual_expires_at=first_expires_at,
+            status=CloudAsset.STATUS_RUNNING,
+            is_active=True,
+        )
+        sent = []
+
+        async def fake_notify(user_id, text, reply_markup=None):
+            sent.append((user_id, text))
+            return True
+
+        first_result = async_to_sync(_send_order_notice_batch)(
+            event='renew_notice_batch',
+            field_name='renew_notice_sent_at',
+            notify=fake_notify,
+            user_id=self.user.id,
+            orders=[order],
+            payload={'text': 'first cycle', 'order_ids': [order.id], 'first_order_id': order.id, 'count': 1},
+        )
+        CloudServerOrder.objects.filter(id=order.id).update(renew_notice_sent_at=None)
+        asset.actual_expires_at = second_expires_at
+        asset.save(update_fields=['actual_expires_at', 'updated_at'])
+        order.refresh_from_db()
+        second_result = async_to_sync(_send_order_notice_batch)(
+            event='renew_notice_batch',
+            field_name='renew_notice_sent_at',
+            notify=fake_notify,
+            user_id=self.user.id,
+            orders=[order],
+            payload={'text': 'second cycle', 'order_ids': [order.id], 'first_order_id': order.id, 'count': 1},
+        )
+
+        self.assertTrue(first_result)
+        self.assertTrue(second_result)
+        self.assertEqual(sent, [(self.user.id, 'first cycle'), (self.user.id, 'second cycle')])
+        self.assertEqual(CloudUserNoticeLog.objects.filter(event_type='renew_notice_batch', order=order, delivered=True).count(), 2)
+        self.assertEqual(CloudNoticeTask.objects.filter(notice_type=CloudNoticeTask.NOTICE_RENEW, status=CloudNoticeTask.STATUS_SENT).count(), 2)
+
     # 功能：验证数据库生命周期任务能挡住同一轮计划删机重复认领。
     def test_lifecycle_delete_task_claim_blocks_same_cycle_duplicate(self):
         from cloud.lifecycle_tasks import claim_lifecycle_task_for_order, finish_lifecycle_task
@@ -9555,6 +9632,73 @@ class CloudServerServicesTestCase(TestCase):
         self.assertIsNone(second_claim)
         self.assertIsNone(third_claim)
         self.assertEqual(CloudLifecycleTask.objects.filter(task_type=CloudLifecycleTask.TASK_DELETE, status=CloudLifecycleTask.STATUS_DONE).count(), 1)
+
+    # 功能：验证资产类生命周期任务同一轮计划只允许一个执行者认领。
+    def test_lifecycle_asset_task_claim_blocks_same_cycle_duplicate(self):
+        from cloud.lifecycle_tasks import claim_lifecycle_task_for_asset, finish_lifecycle_task
+
+        due_at = timezone.now() - timezone.timedelta(minutes=1)
+        asset = CloudAsset.objects.create(
+            kind=CloudAsset.KIND_SERVER,
+            source=CloudAsset.SOURCE_AWS_SYNC,
+            user=self.user,
+            provider='aws_lightsail',
+            region_code='ap-southeast-1',
+            region_name='Singapore',
+            asset_name='asset-claim-unattached-ip',
+            public_ip='8.8.8.92',
+            actual_expires_at=due_at,
+            status=CloudAsset.STATUS_UNKNOWN,
+            is_active=True,
+        )
+
+        first_claim = claim_lifecycle_task_for_asset(CloudLifecycleTask.TASK_UNATTACHED_IP_DELETE, asset, scheduled_at=due_at, queue_status='scheduled_unattached_ip_delete')
+        second_claim = claim_lifecycle_task_for_asset(CloudLifecycleTask.TASK_UNATTACHED_IP_DELETE, asset, scheduled_at=due_at, queue_status='scheduled_unattached_ip_delete')
+        finish_lifecycle_task(first_claim, ok=True)
+        third_claim = claim_lifecycle_task_for_asset(CloudLifecycleTask.TASK_UNATTACHED_IP_DELETE, asset, scheduled_at=due_at, queue_status='scheduled_unattached_ip_delete')
+
+        self.assertIsNotNone(first_claim)
+        self.assertIsNone(second_claim)
+        self.assertIsNone(third_claim)
+        self.assertEqual(CloudLifecycleTask.objects.filter(task_type=CloudLifecycleTask.TASK_UNATTACHED_IP_DELETE, status=CloudLifecycleTask.STATUS_DONE).count(), 1)
+
+    # 功能：验证订单固定 IP 回收入口会尊重数据库任务认领状态。
+    def test_order_static_ip_release_skips_when_lifecycle_task_claimed(self):
+        from cloud.lifecycle_execution import run_order_static_ip_release
+        from cloud.lifecycle_tasks import claim_lifecycle_task_for_order
+
+        now = timezone.now()
+        recycle_at = now - timezone.timedelta(minutes=1)
+        order = CloudServerOrder.objects.create(
+            order_no='LIFECYCLE-CLAIM-RECYCLE-1',
+            user=self.user,
+            plan=self.plan,
+            provider='aws_lightsail',
+            region_code='ap-southeast-1',
+            region_name='Singapore',
+            plan_name=self.plan.plan_name,
+            quantity=1,
+            currency='USDT',
+            total_amount='19.00',
+            pay_amount='19.00',
+            pay_method='balance',
+            status='deleted',
+            previous_public_ip='8.8.8.93',
+            static_ip_name='recycle-claimed-ip',
+            service_started_at=now - timezone.timedelta(days=35),
+            ip_recycle_at=recycle_at,
+        )
+        task_claim = claim_lifecycle_task_for_order(CloudLifecycleTask.TASK_RECYCLE, order, scheduled_at=recycle_at, queue_status='scheduled_recycle')
+
+        with patch('cloud.lifecycle.cloud_ip_delete_enabled', return_value=True), \
+            patch('cloud.lifecycle._is_cloud_unattached_ip_delete_time', return_value=True), \
+            patch('cloud.lifecycle._release_order_static_ip') as release_mock:
+            result = run_order_static_ip_release(order.id, queue_status='scheduled_recycle', enforce_schedule=True)
+
+        self.assertIsNotNone(task_claim)
+        self.assertFalse(result['ok'])
+        self.assertIn('已被其他进程认领', result['error'])
+        release_mock.assert_not_called()
 
     # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
     def test_group_cloud_server_list_is_scoped_to_current_group(self):
@@ -14665,6 +14809,7 @@ class CloudOrderStatusDashboardSyncTestCase(TestCase):
 
     # 功能：提供 云资产、云订单和生命周期 的内部辅助逻辑，供同模块流程复用。
     def _create_order_with_primary_records(self):
+        expires_at = timezone.now() + timezone.timedelta(days=20)
         order = CloudServerOrder.objects.create(
             order_no='STATUS-SYNC-ORDER',
             user=self.user,
@@ -14680,7 +14825,6 @@ class CloudOrderStatusDashboardSyncTestCase(TestCase):
             pay_method='balance',
             status='completed',
             public_ip='203.0.113.10',
-            service_expires_at=timezone.now() + timezone.timedelta(days=20),
         )
         asset = CloudAsset.objects.create(
             kind=CloudAsset.KIND_SERVER,
@@ -14692,6 +14836,7 @@ class CloudOrderStatusDashboardSyncTestCase(TestCase):
             region_name=order.region_name,
             asset_name='status-sync-asset',
             public_ip=order.public_ip,
+            actual_expires_at=expires_at,
             status=CloudAsset.STATUS_RUNNING,
             is_active=True,
         )
@@ -14704,6 +14849,7 @@ class CloudOrderStatusDashboardSyncTestCase(TestCase):
             region_name=order.region_name,
             server_name='status-sync-server',
             public_ip=order.public_ip,
+            expires_at=expires_at,
             status=Server.STATUS_RUNNING,
             is_active=True,
         )
@@ -14798,8 +14944,8 @@ class CloudOrderStatusDashboardSyncTestCase(TestCase):
         self.assertEqual(order.mtproxy_port, 443)
         self.assertEqual(order.proxy_links[0]['url'], 'tg://proxy?server=203.0.113.88&port=443&secret=abcdef')
         self.assertEqual(asset.proxy_links[0]['url'], 'tg://proxy?server=203.0.113.88&port=443&secret=abcdef')
-        self.assertEqual(asset.actual_expires_at, asset_expiry)
-        self.assertEqual(server.expires_at, server_expiry)
+        self.assertEqual(asset.actual_expires_at, CloudServerOrder.normalize_expiry_time(expires_at))
+        self.assertEqual(server.expires_at, CloudServerOrder.normalize_expiry_time(expires_at))
 
     # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
     def test_order_detail_manual_secret_edit_syncs_primary_asset(self):

@@ -687,12 +687,6 @@ def cloud_order_detail(request, order_id):
                 if order_update_fields:
                     CloudServerOrder.objects.filter(pk=order.pk).update(**update_values)
                     order.refresh_from_db()
-                if asset_expiry_change_requested and asset_expires_at:
-                    CloudAsset.objects.filter(
-                        order=order,
-                        kind=CloudAsset.KIND_SERVER,
-                        actual_expires_at__isnull=True,
-                    ).update(actual_expires_at=asset_expires_at, updated_at=timezone.now())
                 logger.info(
                     'DASHBOARD_CLOUD_ORDER_DETAIL_UPDATED order_id=%s order_no=%s changed_fields=%s user_id=%s',
                     order.id,
@@ -702,7 +696,10 @@ def cloud_order_detail(request, order_id):
                 )
                 asset_updates = {}
                 server_updates = {}
-                # CloudAsset.user / actual_expires_at are manual asset fields; order edits must not overwrite them.
+                if asset_expiry_change_requested:
+                    asset_updates['actual_expires_at'] = asset_expires_at
+                    server_updates['expires_at'] = asset_expires_at
+                # CloudAsset.user remains manual; explicit service_expires_at edits write the single asset expiry fact.
                 if 'public_ip' in changed_fields:
                     asset_updates['public_ip'] = order.public_ip
                     server_updates['public_ip'] = order.public_ip

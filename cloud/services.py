@@ -3599,10 +3599,13 @@ def apply_cloud_server_renewal(order_id: int, days: int = 31, run_post_checks: b
     new_expires_at = renew_base_at + timezone.timedelta(days=days)
     apply_order_lifecycle_from_asset_expiry(order, new_expires_at, save=False)
     order.last_renewed_at = now
+    order.renew_notice_sent_at = None
     if hasattr(order, 'auto_renew_notice_sent_at'):
         order.auto_renew_notice_sent_at = None
     if hasattr(order, 'auto_renew_failure_notice_sent_at'):
         order.auto_renew_failure_notice_sent_at = None
+    order.delete_notice_sent_at = None
+    order.recycle_notice_sent_at = None
     order.ip_change_quota = max(int(getattr(order, 'ip_change_quota', 0) or 0), 0) + 1
     retained_ip = bool(order.status in {'deleted', 'renew_pending'} and order.ip_recycle_at and (order.public_ip or order.previous_public_ip) and not order.instance_id)
     order.status = 'completed'
@@ -3626,7 +3629,12 @@ def apply_cloud_server_renewal(order_id: int, days: int = 31, run_post_checks: b
         order.provision_note,
         '\n'.join(filter(None, [renew_note or f'续费成功，{base_note} {days} 天。', retention_note, *post_notes])),
     )
-    order.save(update_fields=['service_started_at', 'renew_grace_expires_at', 'suspend_at', 'delete_at', 'ip_recycle_at', 'last_renewed_at', 'auto_renew_notice_sent_at', 'auto_renew_failure_notice_sent_at', 'ip_change_quota', 'status', 'provision_note', 'updated_at'])
+    order.save(update_fields=[
+        'service_started_at', 'renew_grace_expires_at', 'suspend_at', 'delete_at', 'ip_recycle_at',
+        'last_renewed_at', 'renew_notice_sent_at', 'auto_renew_notice_sent_at',
+        'auto_renew_failure_notice_sent_at', 'delete_notice_sent_at', 'recycle_notice_sent_at',
+        'ip_change_quota', 'status', 'provision_note', 'updated_at',
+    ])
     if retained_ip:
         recovery_order, recovery_err = _create_retained_ip_recovery_order(order, days)
         if recovery_err:
@@ -4332,7 +4340,7 @@ def get_user_reminder_summary(user_id: int):
     reminder_assets = (
         CloudAsset.objects.select_related('order')
         .filter(kind=CloudAsset.KIND_SERVER, order__user_id=user_id, actual_expires_at__isnull=False)
-        .exclude(order__status__in=['cancelled', 'refunded', 'deleted'])
+        .exclude(order__status__in=['cancelled', 'deleted'])
         .order_by('actual_expires_at', '-order_id', '-id')
     )
     for asset in reminder_assets:
@@ -4392,7 +4400,7 @@ def unmute_all_user_reminders(user_id: int):
         return None
     user.cloud_reminder_muted_until = None
     user.save(update_fields=['cloud_reminder_muted_until', 'updated_at'])
-    cloud_orders = CloudServerOrder.objects.filter(user_id=user_id).exclude(status__in=['cancelled', 'refunded', 'deleted'])
+    cloud_orders = CloudServerOrder.objects.filter(user_id=user_id).exclude(status__in=['cancelled', 'deleted'])
     cloud_reminder_updated = cloud_orders.update(
         cloud_reminder_enabled=True,
         suspend_reminder_enabled=True,

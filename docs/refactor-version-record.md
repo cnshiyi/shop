@@ -1,5 +1,33 @@
 # 重构版本记录
 
+## 2026-06-02 自动监工：资产生命周期任务认领补齐
+
+### 范围
+
+本轮继续检查云资产生命周期重构后的冲突逻辑、通知去重、到期事实源和废弃字段回流，重点确认无订单资产删除、未附加 IP 删除、固定 IP 回收、后台订单到期编辑和续费后新通知周期不会绕开唯一到期事实或数据库任务认领。
+
+### 运行变更
+
+- 新增资产维度生命周期任务认领入口，按“动作 + 资产 + 计划时间”生成唯一任务键；无订单服务器删除和未附加固定 IP 删除在执行云 API 前先认领 `CloudLifecycleTask`。
+- 固定 IP 回收入口在真实释放前认领 `CloudLifecycleTask`，同一轮计划已认领、已完成或处于失败重试保护期时直接跳过，避免多进程重复释放。
+- 通知批次键加入订单当前 `CloudAsset.actual_expires_at` 到期周期；同一订单续费进入新周期后允许重新发送提醒，不被上一周期的通知任务挡住。
+- 续费成功后清空续费、自动续费预提醒、自动续费失败、删机和 IP 回收提醒发送时间，避免旧周期状态影响新周期提醒。
+- 后台订单详情显式修改服务到期时间时，直接同步主资产 `CloudAsset.actual_expires_at` 和 Server 兼容记录，再按同一到期事实重算订单生命周期字段，避免订单计划字段和资产事实字段打架。
+- 移除提醒汇总里已废弃的 `refunded` 状态残留，退款语义不再参与运行时筛选。
+- 复查运行模型和迁移：未恢复 `CloudServerOrder.service_expires_at` 字段，未恢复旧计划快照表，未恢复退款逻辑或退款函数名；`CloudAsset.actual_expires_at` 仍是唯一结构化到期事实。
+
+### 验证
+
+本地已通过：
+
+```bash
+PYTHONDONTWRITEBYTECODE=1 DJANGO_TEST_SQLITE=1 uv run python -m py_compile cloud/models.py cloud/lifecycle_tasks.py cloud/lifecycle.py cloud/lifecycle_execution.py cloud/services.py cloud/api_orders.py cloud/tests.py
+PYTHONDONTWRITEBYTECODE=1 DJANGO_TEST_SQLITE=1 uv run python manage.py check
+PYTHONDONTWRITEBYTECODE=1 DJANGO_TEST_SQLITE=1 uv run python manage.py makemigrations --check --dry-run
+PYTHONDONTWRITEBYTECODE=1 DJANGO_TEST_SQLITE=1 uv run python manage.py test cloud.tests.CloudServerServicesTestCase.test_dashboard_order_expiry_update_syncs_asset_expiry_and_lifecycle_plan cloud.tests.CloudServerServicesTestCase.test_send_order_notice_batch_allows_new_expiry_cycle cloud.tests.CloudServerServicesTestCase.test_apply_cloud_server_renewal_keeps_original_service_started_at cloud.tests.CloudServerServicesTestCase.test_lifecycle_asset_task_claim_blocks_same_cycle_duplicate cloud.tests.CloudServerServicesTestCase.test_order_static_ip_release_skips_when_lifecycle_task_claimed cloud.tests.CloudServerServicesTestCase.test_lifecycle_delete_task_claim_blocks_same_cycle_duplicate --noinput --verbosity 1
+PYTHONDONTWRITEBYTECODE=1 DJANGO_TEST_SQLITE=1 uv run python manage.py test cloud.tests.CloudServerServicesTestCase.test_lifecycle_delete_notice_batches_multiple_ips_for_same_user cloud.tests.CloudServerServicesTestCase.test_send_order_notice_batch_prefers_bound_group_and_skips_private cloud.tests.CloudServerServicesTestCase.test_send_order_notice_batch_falls_back_private_when_group_fails --noinput --verbosity 1
+```
+
 ## 2026-06-02 自动监工：生命周期任务表迁移补齐
 
 ### 范围

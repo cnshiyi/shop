@@ -954,7 +954,7 @@ async def _send_order_notice_batch(*, event: str, field_name: str, notify, user_
     order_ids = payload.get('order_ids') or []
     manual_text = await sync_to_async(_get_notice_text_override)(event, user_id, order_ids)
     text = manual_text or payload['text']
-    batch_id = _notice_batch_id(event, *order_ids)
+    batch_id = await sync_to_async(_notice_batch_id_for_orders)(event, orders)
     notice_ip = f'{count} 个IP' if count > 1 else await sync_to_async(_order_notice_ip)(first_order)
     _log_cloud_notice(event, first_order, {'ip': notice_ip}, text, 'batch' if count > 1 else 'single')
     base_extra = {'order_ids': order_ids, 'manual_override': bool(manual_text)}
@@ -1362,7 +1362,20 @@ async def _send_auto_renew_execution_target_notices(notify_target, results_by_us
     return {'sent': sent_count, 'failure_order_ids': failure_order_ids}
 
 
-def _notice_batch_id(event: str, *order_ids: int) -> str:
+def _notice_expiry_cycle_key(value) -> str:
+    if not value:
+        return 'none'
+    if timezone.is_naive(value):
+        value = timezone.make_aware(value, timezone.get_current_timezone())
+    return timezone.localtime(value).strftime('%Y%m%dT%H%M%S%z')
+
+
+def _notice_batch_id_for_orders(event: str, orders: list[CloudServerOrder] | tuple[CloudServerOrder, ...]) -> str:
+    cycle_keys = [f'{order.id}@{_notice_expiry_cycle_key(order_asset_expiry(order))}' for order in orders]
+    return _notice_batch_id(event, *cycle_keys)
+
+
+def _notice_batch_id(event: str, *order_ids) -> str:
     key = ':'.join([event, *[str(item) for item in order_ids]])
     return uuid.uuid5(uuid.NAMESPACE_URL, key).hex[:16]
 

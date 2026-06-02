@@ -8,7 +8,7 @@ from asgiref.sync import async_to_sync
 from django.utils import timezone
 
 from core.runtime_config import get_runtime_config
-from cloud.lifecycle_tasks import claim_lifecycle_task_for_order, finish_lifecycle_task
+from cloud.lifecycle_tasks import claim_lifecycle_task_for_asset, claim_lifecycle_task_for_order, finish_lifecycle_task
 from cloud.models import CloudAsset, CloudLifecycleTask, CloudServerOrder
 
 
@@ -239,6 +239,7 @@ def run_orphan_asset_delete(asset_id: int, *, enforce_schedule: bool = True) -> 
         _delete_orphan_asset_instance,
         _is_cloud_delete_safe_time,
         _mark_orphan_asset_deleted,
+        _orphan_asset_server_delete_at,
         _orphan_asset_server_delete_blocked_until,
         cloud_server_delete_enabled,
     )
@@ -266,16 +267,29 @@ def run_orphan_asset_delete(asset_id: int, *, enforce_schedule: bool = True) -> 
             return {'asset_id': asset.id, 'ip': ip, 'ok': False, 'error': f'未到服务器删除时间：{timezone.localtime(blocked_until).strftime("%Y-%m-%d %H:%M:%S")}'}
         if not _is_cloud_delete_safe_time(now):
             return {'asset_id': asset.id, 'ip': ip, 'ok': False, 'error': '当前不在后台配置的服务器删除执行时间窗口'}
-    ok, note = _run_cloud_action(_delete_orphan_asset_instance(asset), action='AWS 无订单实例删除', target=str(asset.id))
-    if ok:
-        source = '人工手动删除' if not enforce_schedule else '到期自动删除'
-        async_to_sync(_mark_orphan_asset_deleted)(asset.id, with_delete_source(note, source))
-        return {'asset_id': asset.id, 'ip': ip, 'ok': True, 'error': None}
-    if asset.provider != 'aws_lightsail':
-        source = '人工手动清理' if not enforce_schedule else '到期自动清理'
-        async_to_sync(_mark_orphan_asset_deleted)(asset.id, with_delete_source(note, source))
-        return {'asset_id': asset.id, 'ip': ip, 'ok': True, 'error': None}
-    return {'asset_id': asset.id, 'ip': ip, 'ok': False, 'error': note}
+    task_claim = None
+    if enforce_schedule:
+        scheduled_at = _orphan_asset_server_delete_at(asset) or asset.actual_expires_at
+        task_claim = claim_lifecycle_task_for_asset(CloudLifecycleTask.TASK_ORPHAN_ASSET_DELETE, asset, scheduled_at=scheduled_at, queue_status='scheduled_orphan_asset_delete')
+        if not task_claim:
+            return {'asset_id': asset.id, 'ip': ip, 'ok': False, 'error': '本轮无订单资产删除计划已被其他进程认领、已完成或正在重试保护期内，跳过重复触发。'}
+    try:
+        ok, note = _run_cloud_action(_delete_orphan_asset_instance(asset), action='AWS 无订单实例删除', target=str(asset.id))
+        if ok:
+            source = '人工手动删除' if not enforce_schedule else '到期自动删除'
+            async_to_sync(_mark_orphan_asset_deleted)(asset.id, with_delete_source(note, source))
+            finish_lifecycle_task(task_claim, ok=True)
+            return {'asset_id': asset.id, 'ip': ip, 'ok': True, 'error': None}
+        if asset.provider != 'aws_lightsail':
+            source = '人工手动清理' if not enforce_schedule else '到期自动清理'
+            async_to_sync(_mark_orphan_asset_deleted)(asset.id, with_delete_source(note, source))
+            finish_lifecycle_task(task_claim, ok=True)
+            return {'asset_id': asset.id, 'ip': ip, 'ok': True, 'error': None}
+        finish_lifecycle_task(task_claim, ok=False, error=note)
+        return {'asset_id': asset.id, 'ip': ip, 'ok': False, 'error': note}
+    except Exception as exc:
+        finish_lifecycle_task(task_claim, ok=False, error=str(exc))
+        raise
 
 
 def run_order_static_ip_release(order_id: int, *, queue_status='scheduled_recycle', enforce_schedule: bool = True) -> dict:
@@ -313,13 +327,26 @@ def run_order_static_ip_release(order_id: int, *, queue_status='scheduled_recycl
             reason = '当前不在后台配置的 IP 删除执行时间窗口'
             async_to_sync(_record_lifecycle_action_failed)(order.id, 'recycle_skipped', reason)
             return {'order_id': order.id, 'order_no': order.order_no, 'ip': ip, 'queue_status': queue_status, 'ok': False, 'error': reason}
-    ok, note = _run_cloud_action(_release_order_static_ip(order), action='AWS 固定 IP 释放', target=order.order_no)
-    if ok:
-        source = '人工手动释放' if not enforce_schedule or str(queue_status or '').startswith('manual') else '到期自动释放'
-        async_to_sync(_mark_recycled)(order.id, with_delete_source(note, source))
-        return {'order_id': order.id, 'order_no': order.order_no, 'ip': ip, 'queue_status': queue_status, 'ok': True, 'error': None}
-    async_to_sync(_record_lifecycle_action_failed)(order.id, 'recycle_failed', note)
-    return {'order_id': order.id, 'order_no': order.order_no, 'ip': ip, 'queue_status': queue_status, 'ok': False, 'error': note}
+    task_claim = None
+    if enforce_schedule:
+        task_claim = claim_lifecycle_task_for_order(CloudLifecycleTask.TASK_RECYCLE, order, scheduled_at=order.ip_recycle_at, queue_status=queue_status)
+        if not task_claim:
+            reason = '本轮固定 IP 回收计划已被其他进程认领、已完成或正在重试保护期内，跳过重复触发。'
+            async_to_sync(_record_lifecycle_action_failed)(order.id, 'recycle_skipped', reason)
+            return {'order_id': order.id, 'order_no': order.order_no, 'ip': ip, 'queue_status': queue_status, 'ok': False, 'error': reason}
+    try:
+        ok, note = _run_cloud_action(_release_order_static_ip(order), action='AWS 固定 IP 释放', target=order.order_no)
+        if ok:
+            source = '人工手动释放' if not enforce_schedule or str(queue_status or '').startswith('manual') else '到期自动释放'
+            async_to_sync(_mark_recycled)(order.id, with_delete_source(note, source))
+            finish_lifecycle_task(task_claim, ok=True)
+            return {'order_id': order.id, 'order_no': order.order_no, 'ip': ip, 'queue_status': queue_status, 'ok': True, 'error': None}
+        async_to_sync(_record_lifecycle_action_failed)(order.id, 'recycle_failed', note)
+        finish_lifecycle_task(task_claim, ok=False, error=note)
+        return {'order_id': order.id, 'order_no': order.order_no, 'ip': ip, 'queue_status': queue_status, 'ok': False, 'error': note}
+    except Exception as exc:
+        finish_lifecycle_task(task_claim, ok=False, error=str(exc))
+        raise
 
 
 def run_unattached_ip_release(asset_id: int, *, enforce_schedule: bool = True) -> dict:
@@ -350,9 +377,20 @@ def run_unattached_ip_release(asset_id: int, *, enforce_schedule: bool = True) -
             return {'asset_id': asset.id, 'ip': ip, 'ok': False, 'error': f'未到 IP 删除时间：{timezone.localtime(asset.actual_expires_at).strftime("%Y-%m-%d %H:%M:%S")}'}
         if not _is_cloud_unattached_ip_delete_time(now):
             return {'asset_id': asset.id, 'ip': ip, 'ok': False, 'error': '当前不在后台配置的 IP 删除执行时间窗口'}
-    ok, note = _run_cloud_action(_release_unattached_static_ip(asset), action='AWS 未附加固定 IP 释放', target=str(asset.id))
-    if ok:
-        source = '人工手动删除' if not enforce_schedule else '到期自动删除'
-        async_to_sync(_mark_unattached_static_ip_deleted)(asset.id, with_delete_source(note, source))
-        return {'asset_id': asset.id, 'ip': ip, 'ok': True, 'error': None}
-    return {'asset_id': asset.id, 'ip': ip, 'ok': False, 'error': note}
+    task_claim = None
+    if enforce_schedule:
+        task_claim = claim_lifecycle_task_for_asset(CloudLifecycleTask.TASK_UNATTACHED_IP_DELETE, asset, scheduled_at=asset.actual_expires_at, queue_status='scheduled_unattached_ip_delete')
+        if not task_claim:
+            return {'asset_id': asset.id, 'ip': ip, 'ok': False, 'error': '本轮未附加固定 IP 删除计划已被其他进程认领、已完成或正在重试保护期内，跳过重复触发。'}
+    try:
+        ok, note = _run_cloud_action(_release_unattached_static_ip(asset), action='AWS 未附加固定 IP 释放', target=str(asset.id))
+        if ok:
+            source = '人工手动删除' if not enforce_schedule else '到期自动删除'
+            async_to_sync(_mark_unattached_static_ip_deleted)(asset.id, with_delete_source(note, source))
+            finish_lifecycle_task(task_claim, ok=True)
+            return {'asset_id': asset.id, 'ip': ip, 'ok': True, 'error': None}
+        finish_lifecycle_task(task_claim, ok=False, error=note)
+        return {'asset_id': asset.id, 'ip': ip, 'ok': False, 'error': note}
+    except Exception as exc:
+        finish_lifecycle_task(task_claim, ok=False, error=str(exc))
+        raise
