@@ -314,6 +314,7 @@ class CloudServerServicesTestCase(TestCase):
 
     # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
     def test_cloud_orders_list_exposes_auto_renew_enabled(self):
+        expires_at = timezone.now() + timezone.timedelta(days=20)
         order = CloudServerOrder.objects.create(
             order_no='ORDER-LIST-AUTO-RENEW-1',
             user=self.user,
@@ -330,8 +331,8 @@ class CloudServerServicesTestCase(TestCase):
             status='completed',
             public_ip='13.250.20.21',
             auto_renew_enabled=True,
-            service_expires_at=timezone.now() + timezone.timedelta(days=20),
         )
+        self._attach_order_expiry_asset(order, expires_at)
         staff_user = get_user_model().objects.create_user(username='staff_order_list_auto_renew', password='x', is_staff=True)
         request = self.factory.get('/api/admin/cloud-orders/')
         self._attach_bearer_session(request, staff_user)
@@ -624,6 +625,8 @@ class CloudServerServicesTestCase(TestCase):
     def test_manual_order_delete_writes_server_history_item(self):
         from bot.api import _run_shutdown_order_sync
 
+        SiteConfig.set('cloud_server_delete_enabled', '1')
+        expires_at = timezone.now() - timezone.timedelta(days=1)
         order = CloudServerOrder.objects.create(
             order_no='MANUAL-DELETE-HISTORY-ORDER-1',
             user=self.user,
@@ -639,7 +642,7 @@ class CloudServerServicesTestCase(TestCase):
             status='deleting',
             public_ip='52.77.18.246',
             previous_public_ip='52.77.18.246',
-            service_expires_at=timezone.now() - timezone.timedelta(days=1),
+            delete_at=timezone.now() - timezone.timedelta(hours=1),
         )
         CloudAsset.objects.create(
             kind=CloudAsset.KIND_SERVER,
@@ -651,7 +654,7 @@ class CloudServerServicesTestCase(TestCase):
             region_name=order.region_name,
             asset_name='manual-delete-history-order-asset',
             public_ip=order.public_ip,
-            actual_expires_at=order.service_expires_at,
+            actual_expires_at=expires_at,
             status=CloudAsset.STATUS_DELETING,
             is_active=True,
         )
@@ -956,6 +959,32 @@ class CloudServerServicesTestCase(TestCase):
         return request
 
     # 功能：提供 云资产、云订单和生命周期 的内部辅助逻辑，供同模块流程复用。
+    def _attach_order_expiry_asset(self, order, expires_at, *, asset_name=None, status=None, source=None, is_active=True):
+        asset = CloudAsset.objects.filter(order=order, kind=CloudAsset.KIND_SERVER).order_by('-sort_order', '-id').first()
+        if asset:
+            asset.actual_expires_at = expires_at
+            asset.save(update_fields=['actual_expires_at', 'updated_at'])
+            return asset
+        return CloudAsset.objects.create(
+            kind=CloudAsset.KIND_SERVER,
+            source=source or CloudAsset.SOURCE_ORDER,
+            order=order,
+            user=order.user,
+            provider=order.provider,
+            cloud_account=order.cloud_account,
+            account_label=order.account_label,
+            region_code=order.region_code,
+            region_name=order.region_name,
+            asset_name=asset_name or order.server_name or order.instance_id or order.order_no,
+            instance_id=order.instance_id,
+            public_ip=order.public_ip,
+            previous_public_ip=order.previous_public_ip,
+            actual_expires_at=expires_at,
+            status=status or CloudAsset.STATUS_RUNNING,
+            is_active=is_active,
+        )
+
+    # 功能：提供 云资产、云订单和生命周期 的内部辅助逻辑，供同模块流程复用。
     def _aws_test_account(self):
         account = getattr(self, '_cached_aws_test_account', None)
         if account:
@@ -995,6 +1024,7 @@ class CloudServerServicesTestCase(TestCase):
     def test_aliyun_create_and_renew_require_bound_account(self):
         from cloud.aliyun_simple import _create_instance_sync
 
+        expires_at = timezone.now() + timezone.timedelta(days=1)
         order = CloudServerOrder.objects.create(
             order_no='ALIYUN-NO-ACCOUNT-1',
             user=self.user,
@@ -1011,8 +1041,8 @@ class CloudServerServicesTestCase(TestCase):
             status='completed',
             public_ip='47.1.1.1',
             instance_id='aliyun-instance-without-account',
-            service_expires_at=timezone.now() + timezone.timedelta(days=1),
         )
+        self._attach_order_expiry_asset(order, expires_at, source=CloudAsset.SOURCE_ALIYUN)
 
         create_result = _create_instance_sync(order, 'aliyun-no-account')
         with self.assertRaisesMessage(ValueError, '缺少订单绑定的启用阿里云账号'):
@@ -1238,6 +1268,7 @@ class CloudServerServicesTestCase(TestCase):
 
     # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
     def test_cloud_assets_list_uses_bulk_order_inference_without_per_asset_fallback(self):
+        expires_at = timezone.now() + timezone.timedelta(days=30)
         order = CloudServerOrder.objects.create(
             order_no='BULK-LIST-INFER-001',
             user=self.user,
@@ -1252,7 +1283,6 @@ class CloudServerServicesTestCase(TestCase):
             pay_amount='19.00',
             status='completed',
             public_ip='10.77.88.1',
-            service_expires_at=timezone.now() + timezone.timedelta(days=30),
         )
         asset = CloudAsset.objects.create(
             kind=CloudAsset.KIND_SERVER,
@@ -1262,8 +1292,8 @@ class CloudServerServicesTestCase(TestCase):
             region_name=self.plan.region_name,
             asset_name='bulk-list-infer-asset',
             public_ip='10.77.88.1',
+            actual_expires_at=expires_at,
             status=CloudAsset.STATUS_RUNNING,
-            actual_expires_at=timezone.now() + timezone.timedelta(days=30),
         )
         admin = get_user_model().objects.create_user(username='bulk_list_infer_admin', password='x', is_staff=True)
         request = self.factory.get('/api/dashboard/cloud-assets/', {'paginated': '1'})
@@ -1468,6 +1498,7 @@ class CloudServerServicesTestCase(TestCase):
     # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
     def test_rebind_cloud_server_user_syncs_order_asset_and_server(self):
         new_user = TelegramUser.objects.create(tg_user_id=990002, username='svc_rebind_new')
+        expires_at = timezone.now() + timezone.timedelta(days=20)
         order = CloudServerOrder.objects.create(
             order_no='REBIND-SYNC-1',
             user=self.user,
@@ -1485,7 +1516,6 @@ class CloudServerServicesTestCase(TestCase):
             server_name='rebind-sync-server',
             instance_id='rebind-sync-server',
             public_ip='13.250.10.21',
-            service_expires_at=timezone.now() + timezone.timedelta(days=20),
         )
         asset = CloudAsset.objects.create(
             kind=CloudAsset.KIND_SERVER,
@@ -1498,6 +1528,7 @@ class CloudServerServicesTestCase(TestCase):
             asset_name=order.server_name,
             instance_id=order.instance_id,
             public_ip=order.public_ip,
+            actual_expires_at=expires_at,
             status=CloudAsset.STATUS_RUNNING,
         )
         server = Server.objects.create(
@@ -1590,6 +1621,7 @@ class CloudServerServicesTestCase(TestCase):
 
     # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
     def test_cloud_renewal_address_order_uses_usdt_even_after_trx_wallet_order(self):
+        expires_at = timezone.now() + timezone.timedelta(days=10)
         order = CloudServerOrder.objects.create(
             order_no='RENEW-TRX-SOURCE-USDT-ADDRESS-1',
             user=self.user,
@@ -1606,8 +1638,8 @@ class CloudServerServicesTestCase(TestCase):
             status='completed',
             public_ip='8.8.4.80',
             service_started_at=timezone.now() - timezone.timedelta(days=20),
-            service_expires_at=timezone.now() + timezone.timedelta(days=10),
         )
+        self._attach_order_expiry_asset(order, expires_at)
 
         renewal = async_to_sync(create_cloud_server_renewal_for_user)(order.id, self.user.id, 31)
 
