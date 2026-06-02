@@ -1861,6 +1861,32 @@ UV_CACHE_DIR=/private/tmp/uv-cache-shop DJANGO_TEST_SQLITE=1 PYTHONDONTWRITEBYTE
 UV_CACHE_DIR=/private/tmp/uv-cache-shop DJANGO_TEST_SQLITE=1 PYTHONDONTWRITEBYTECODE=1 uv run python manage.py makemigrations --check --dry-run
 ```
 
+## 2026-06-02 快照刷新聚合层依赖清理
+
+### 范围
+
+终端版 Codex 复查当前提交时指出 `cloud/dashboard_snapshots.py` 仍通过 `cloud.api` 聚合层调用快照刷新、自动续费计划和通知计划构建逻辑。该路径会被同步、生命周期和服务模块调用，属于生产代码重新依赖兼容聚合层。
+
+### 变更
+
+- `cloud/dashboard_snapshots.py` 改为局部导入真实模块：
+  - `cloud.api_asset_snapshots.refresh_cloud_asset_dashboard_snapshots`
+  - `cloud.api_tasks._build_auto_renew_plan_items`
+  - `cloud.api_tasks._build_notice_plan_bundle`
+- `DEVELOPMENT.md` 和 `docs/project-overview.md` 修正当前架构说明：`cloud/api.py` 只保留兼容导出，不再作为运行时、管理命令或测试替换入口。
+
+### 验证
+
+已通过：
+
+```bash
+rg -n "from cloud import api(\\s|$)|import cloud\\.api|from cloud\\.api import|cloud_api|cloud\\.api\\..*patch|测试 patch|patch/import|re-export|兼容导出和测试" cloud bot orders core shop DEVELOPMENT.md docs/project-overview.md --glob '!**/migrations/**' -S
+UV_CACHE_DIR=/private/tmp/uv-cache-shop DJANGO_TEST_SQLITE=1 PYTHONDONTWRITEBYTECODE=1 uv run python -m py_compile cloud/dashboard_snapshots.py cloud/api_asset_snapshots.py cloud/api_tasks.py
+UV_CACHE_DIR=/private/tmp/uv-cache-shop DJANGO_TEST_SQLITE=1 PYTHONDONTWRITEBYTECODE=1 uv run python manage.py test cloud.tests.CloudServerServicesTestCase.test_update_cloud_asset_defers_snapshot_refresh cloud.tests.CloudServerServicesTestCase.test_run_auto_renew_tasks_executes_due_retry_and_fallback_queue cloud.tests.CloudServerServicesTestCase.test_refresh_notice_plan_view_api_builds_notice_plan_view
+UV_CACHE_DIR=/private/tmp/uv-cache-shop DJANGO_TEST_SQLITE=1 PYTHONDONTWRITEBYTECODE=1 uv run python manage.py check
+UV_CACHE_DIR=/private/tmp/uv-cache-shop DJANGO_TEST_SQLITE=1 PYTHONDONTWRITEBYTECODE=1 uv run python manage.py makemigrations --check --dry-run
+```
+
 ## 2026-06-02 生产测试覆盖钩子清理
 
 ### 范围
