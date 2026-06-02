@@ -1,5 +1,45 @@
 # 重构版本记录
 
+## 2026-06-02 21:24 自动监工：后台到期字段统一巡检
+
+### 范围
+
+本轮继续监工 Shop Django 后端仓库，起始工作树干净，最近提交为 `fb206fe 记录资产更换IP返回来源复查`。重点复查云资产生命周期重构后的旧订单到期字段、旧计划快照表、退款旧入口、废弃 app 回流、Bot 返回路径和固定 IP 释放回归。验证过程中工作树出现同主题未提交改动，内容为后台订单、任务、删机计划和 IP 删除日志 payload 从 `service_expires_at` 收口为 `actual_expires_at`，本轮按资产唯一到期事实方向一起验证并收口。
+
+### 复查结论
+
+- `INSTALLED_APPS` 仅包含 `core/bot/orders/cloud` 当前运行域；仓库根下未发现 `accounts/finance/mall/monitoring/dashboard_api/biz` 废弃 app 目录恢复。
+- 模型 introspection 确认 `CloudServerOrder` 没有 `service_expires_at` 或 `actual_expires_at` 字段，`CloudAsset` 只有 `actual_expires_at` 这一类到期字段。
+- 严格排除迁移和测试后，运行时代码未发现旧订单到期字段 ORM 查询或写入、旧计划快照模型、旧退款函数名、`STATUS_REFUNDED/refunded` 状态回流。
+- 后台订单列表/详情、资产编辑关联订单、生命周期计划、自动续费任务、删机历史和未附加固定 IP 删除项的到期响应字段继续收口为 `actual_expires_at`；前端 `vue-shop-admin/apps/web-antd` 对这些页面和类型也使用 `actual_expires_at`，未发现 `service_expires_at` 依赖。
+
+### 修复内容
+
+- 收口后台 API payload 和对应测试断言中的派生到期字段名：订单、任务、删机计划、删机历史、未附加固定 IP 删除项统一返回或接收 `actual_expires_at`。
+- 订单详情后台编辑到期时间继续写入 `CloudAsset.actual_expires_at`，并同步重算订单生命周期字段和 Server 兼容记录；不恢复订单表到期字段。
+
+### 验证
+
+已通过：
+
+```bash
+UV_CACHE_DIR=/private/tmp/uv-cache-shop uv run python manage.py check
+UV_CACHE_DIR=/private/tmp/uv-cache-shop uv run python -m py_compile bot/api.py bot/handlers.py bot/keyboards.py cloud/services.py cloud/lifecycle.py cloud/api.py cloud/api_orders.py cloud/api_asset_edit.py cloud/management/commands/sync_aws_assets.py cloud/management/commands/sync_aliyun_assets.py
+UV_CACHE_DIR=/private/tmp/uv-cache-shop uv run python manage.py shell -c "from cloud.models import CloudAsset, CloudServerOrder; print([f.name for f in CloudServerOrder._meta.fields]); print([f.name for f in CloudAsset._meta.fields if 'expire' in f.name or 'expires' in f.name])"
+UV_CACHE_DIR=/private/tmp/uv-cache-shop uv run python manage.py makemigrations --check --dry-run
+DJANGO_TEST_SQLITE=1 UV_CACHE_DIR=/private/tmp/uv-cache-shop uv run python manage.py test bot.tests.RetainedIpRenewalUiTestCase --noinput
+DJANGO_TEST_SQLITE=1 UV_CACHE_DIR=/private/tmp/uv-cache-shop uv run python manage.py test cloud.tests.CloudServerServicesTestCase.test_aws_sync_release_static_ip_respects_asset_shutdown_disabled cloud.tests.CloudServerServicesTestCase.test_aws_sync_release_static_ip_ignores_shutdown_disabled_account cloud.tests.CloudServerServicesTestCase.test_aws_sync_release_static_ip_respects_global_ip_delete_switch cloud.tests.CloudServerServicesTestCase.test_aws_sync_release_static_ip_clears_retained_order_after_successful_release --noinput
+DJANGO_TEST_SQLITE=1 UV_CACHE_DIR=/private/tmp/uv-cache-shop uv run python manage.py test cloud.tests.CloudServerServicesTestCase.test_notice_delete_plan_and_proxy_list_use_asset_expiry cloud.tests.CloudServerServicesTestCase.test_order_rejects_removed_service_expiry_field cloud.tests.CloudServerServicesTestCase.test_linked_active_order_asset_delete_plan_uses_order_payload cloud.tests.CloudServerServicesTestCase.test_dashboard_order_expiry_update_syncs_asset_expiry_and_lifecycle_plan cloud.tests.CloudServerServicesTestCase.test_shutdown_log_items_prefer_order_lifecycle_schedule cloud.tests.CloudServerServicesTestCase.test_unattached_ip_delete_items_include_name_expiry_and_detail_path cloud.tests.CloudServerServicesTestCase.test_update_cloud_asset_expiry_refreshes_delete_plan_view cloud.tests.CloudServerServicesTestCase.test_sync_aliyun_order_update_recalculates_lifecycle_on_expiry_change cloud.tests.CloudServerServicesTestCase.test_sync_aliyun_assets_preserves_existing_asset_expiry --noinput
+DJANGO_TEST_SQLITE=1 UV_CACHE_DIR=/private/tmp/uv-cache-shop uv run python manage.py test cloud.tests.CloudOrderStatusDashboardSyncTestCase.test_order_detail_manual_edit_syncs_cloud_identity_and_proxy_fields --noinput
+rg -n "service_expires_at__|service_expires_at\s*=|CloudLifecyclePlan|CloudNoticePlan|CloudAutoRenewPlan|refund_to_balance|refund_balance|STATUS_REFUNDED|status=['\"]refunded|\brefunded\b" cloud orders bot core shop --glob '!**/migrations/**' --glob '!**/tests.py'
+rg -n "service_expires_at|actual_expires_at" /Users/a399/Desktop/data/vue-shop-admin/apps/web-antd/src --glob '!node_modules/**'
+git diff --check
+```
+
+结果：Django 系统检查、关键模块编译、模型字段 introspection、迁移 dry-run、22 条 Bot 返回路径测试、4 条 AWS 固定 IP 释放回归、10 条到期字段和同步聚焦回归、旧字段/旧计划/旧退款扫描、前端字段依赖扫描和空白检查均通过。首次字段聚焦测试命令误用了一个不存在的测试选择器，已改为 `test_order_detail_manual_edit_syncs_cloud_identity_and_proxy_fields` 单独重跑通过。`makemigrations --check --dry-run` 无模型变更；默认 MySQL 迁移历史检查因沙箱无法连接 `127.0.0.1` 输出警告。
+
+剩余风险：本轮未跑完整测试套件，未连接真实 MySQL、AWS Lightsail 或阿里云 API，未执行真实 Telegram Bot 回调、钱包扣款、自动续费支付、云端删机、固定 IP 释放或历史数据清理。
+
 ## 2026-06-02 21:15 自动监工：资产更换 IP 返回来源补漏
 
 ### 范围

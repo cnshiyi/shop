@@ -3937,7 +3937,7 @@ class CloudServerServicesTestCase(TestCase):
         proxy_item = _asset_payload(asset)
 
         self.assertEqual(notice['expires_at'], asset_expiry)
-        self.assertEqual(parse_datetime(delete_item['service_expires_at']), asset_expiry)
+        self.assertEqual(parse_datetime(delete_item['actual_expires_at']), asset_expiry)
         self.assertEqual(parse_datetime(proxy_item['actual_expires_at']), asset_expiry)
 
     # 功能：验证订单旧到期字段已彻底移除，测试和业务不能再把它当模型字段写入。
@@ -3958,7 +3958,7 @@ class CloudServerServicesTestCase(TestCase):
                 pay_method='balance',
                 status='completed',
                 public_ip='3.3.3.32',
-                service_expires_at=timezone.now() + timezone.timedelta(days=5),
+                actual_expires_at=timezone.now() + timezone.timedelta(days=5),
             )
 
     # 功能：验证有关联有效订单的资产删除计划回到订单计划展示，避免作为孤立资产执行。
@@ -4005,7 +4005,7 @@ class CloudServerServicesTestCase(TestCase):
         self.assertEqual(item['asset_id'], asset.id)
         self.assertEqual(item['detail_path'], f'/admin/cloud-orders/{order.id}')
         self.assertEqual(item['asset_detail_path'], f'/admin/cloud-assets/{asset.id}')
-        self.assertEqual(parse_datetime(item['service_expires_at']), expires_at)
+        self.assertEqual(parse_datetime(item['actual_expires_at']), expires_at)
 
     # 功能：验证孤立资产删机入口不能绕过仍有效的关联订单，避免订单和资产状态分叉。
     def test_orphan_asset_delete_refuses_linked_active_order_when_enforced(self):
@@ -5149,7 +5149,7 @@ class CloudServerServicesTestCase(TestCase):
         staff_user = get_user_model().objects.create_user(username='staff_order_expiry_update', password='x', is_staff=True, is_superuser=True)
         request = RequestFactory().patch(
             f'/api/dashboard/cloud-orders/{order.id}/',
-            data=json.dumps({'service_expires_at': new_expiry.isoformat()}),
+            data=json.dumps({'actual_expires_at': new_expiry.isoformat()}),
             content_type='application/json',
             HTTP_AUTHORIZATION='',
         )
@@ -6724,7 +6724,7 @@ class CloudServerServicesTestCase(TestCase):
         items = _shutdown_log_items(limit=20)
         row = next(item for item in items if item.get('order_id') == order.id)
 
-        self.assertEqual(parse_datetime(row['service_expires_at']), asset_expires_at)
+        self.assertEqual(parse_datetime(row['actual_expires_at']), asset_expires_at)
         self.assertEqual(parse_datetime(row['suspend_at']), order.suspend_at)
         self.assertEqual(parse_datetime(row['delete_at']), order.delete_at)
 
@@ -7091,7 +7091,7 @@ class CloudServerServicesTestCase(TestCase):
 
         self.assertEqual(row['asset_name'], 'visible-unattached-name-expiry')
         self.assertEqual(row['detail_path'], f'/admin/cloud-assets/{asset.id}')
-        self.assertEqual(parse_datetime(row['service_expires_at']), delete_due_at)
+        self.assertEqual(parse_datetime(row['actual_expires_at']), delete_due_at)
 
     # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
     def test_cloud_orders_list_keeps_renew_pending_visible(self):
@@ -9242,7 +9242,7 @@ class CloudServerServicesTestCase(TestCase):
         row = next(item for item in data['due_items'] if item.get('asset_id') == asset.id)
         self.assertEqual(asset.actual_expires_at, new_expiry)
         self.assertNotEqual(parse_datetime(row['delete_at']), old_delete_at)
-        self.assertEqual(parse_datetime(row['service_expires_at']), new_expiry)
+        self.assertEqual(parse_datetime(row['actual_expires_at']), new_expiry)
 
     # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
     def test_update_unattached_ip_release_time_refreshes_delete_plan_view(self):
@@ -13278,7 +13278,7 @@ class CloudServerServicesTestCase(TestCase):
             public_ip='6.6.6.70',
         )
 
-        self.assertNotIn('service_expires_at', updates)
+        self.assertNotIn('actual_expires_at', updates)
         self.assertGreater(updates['suspend_at'], new_expires_at)
         self.assertGreaterEqual(updates['delete_at'], updates['suspend_at'])
         self.assertGreater(updates['ip_recycle_at'], updates['delete_at'])
@@ -16293,7 +16293,7 @@ class CloudOrderStatusDashboardSyncTestCase(TestCase):
             'mtproxy_host': '203.0.113.88',
             'mtproxy_link': 'tg://proxy?server=203.0.113.88&port=443&secret=abcdef',
             'mtproxy_port': 443,
-            'service_expires_at': expires_at.isoformat(),
+            'actual_expires_at': expires_at.isoformat(),
         }, order.id)
 
         self.assertEqual(response.status_code, 200)

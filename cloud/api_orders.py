@@ -169,7 +169,7 @@ def _cloud_order_summary_payload(order):
         'public_ip': order.public_ip,
         'previous_public_ip': order.previous_public_ip,
         'service_started_at': _iso(order.service_started_at),
-        'service_expires_at': _iso(order_asset_expiry(order)),
+        'actual_expires_at': _iso(order_asset_expiry(order)),
         'created_at': _iso(order.created_at),
         'updated_at': _iso(order.updated_at),
         'replacement_for_id': order.replacement_for_id,
@@ -310,7 +310,7 @@ def _cloud_order_detail_payload(order):
         'server_name': order.server_name,
         'lifecycle_days': order.lifecycle_days,
         'service_started_at': _iso(order.service_started_at),
-        'service_expires_at': _iso(order_asset_expiry(order)),
+        'actual_expires_at': _iso(order_asset_expiry(order)),
         'renew_grace_expires_at': _iso(order.renew_grace_expires_at),
         'suspend_at': _iso(order.suspend_at),
         'delete_at': _iso(order.delete_at),
@@ -384,12 +384,12 @@ def cloud_orders_list(request):
     now = timezone.now()
     for item in items:
         status = item.get('status')
-        service_expires_at = item.get('service_expires_at')
+        actual_expires_at = item.get('actual_expires_at')
         renew_grace_expires_at = item.get('renew_grace_expires_at')
         delete_at = item.get('delete_at')
         auto_renew_enabled = bool(item.get('auto_renew_enabled'))
 
-        service_expires_dt = parse_datetime(service_expires_at) if isinstance(service_expires_at, str) and service_expires_at else None
+        service_expires_dt = parse_datetime(actual_expires_at) if isinstance(actual_expires_at, str) and actual_expires_at else None
         renew_grace_dt = parse_datetime(renew_grace_expires_at) if isinstance(renew_grace_expires_at, str) and renew_grace_expires_at else None
         delete_dt = parse_datetime(delete_at) if isinstance(delete_at, str) and delete_at else None
         if service_expires_dt is not None and timezone.is_naive(service_expires_dt):
@@ -665,10 +665,10 @@ def cloud_order_detail(request, order_id):
                 if field in payload:
                     setattr(order, field, _parse_iso_datetime(payload.get(field), label) if payload.get(field) else None)
                     changed_fields.add(field)
-            if 'service_expires_at' in payload:
+            if 'actual_expires_at' in payload:
                 asset_expiry_change_requested = True
-                asset_expires_at = _parse_iso_datetime(payload.get('service_expires_at'), '服务到期时间') if payload.get('service_expires_at') else None
-                changed_fields.add('service_expires_at')
+                asset_expires_at = _parse_iso_datetime(payload.get('actual_expires_at'), '服务到期时间') if payload.get('actual_expires_at') else None
+                changed_fields.add('actual_expires_at')
                 lifecycle_updates = compute_order_lifecycle_fields(asset_expires_at) if asset_expires_at else {
                     'renew_grace_expires_at': None,
                     'suspend_at': None,
@@ -681,7 +681,7 @@ def cloud_order_detail(request, order_id):
                         changed_fields.add(field)
             if changed_fields:
                 order_update_fields = set(changed_fields)
-                order_update_fields.discard('service_expires_at')
+                order_update_fields.discard('actual_expires_at')
                 update_values = {field: getattr(order, field) for field in order_update_fields}
                 update_values['updated_at'] = timezone.now()
                 if order_update_fields:
@@ -699,7 +699,7 @@ def cloud_order_detail(request, order_id):
                 if asset_expiry_change_requested:
                     asset_updates['actual_expires_at'] = asset_expires_at
                     server_updates['expires_at'] = asset_expires_at
-                # CloudAsset.user remains manual; explicit service_expires_at edits write the single asset expiry fact.
+                # CloudAsset.user remains manual; explicit actual_expires_at edits write the single asset expiry fact.
                 if 'public_ip' in changed_fields:
                     asset_updates['public_ip'] = order.public_ip
                     server_updates['public_ip'] = order.public_ip

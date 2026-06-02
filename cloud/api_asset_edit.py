@@ -94,7 +94,7 @@ def update_cloud_asset(request, asset_id):
             'order_status': getattr(order, 'status', '') or '',
             'order_status_label': _status_label(getattr(order, 'status', ''), CloudServerOrder.STATUS_CHOICES) if order else '',
             'service_started_at': _iso(getattr(order, 'service_started_at', None)),
-            'service_expires_at': _iso(asset.actual_expires_at or order_asset_expiry(order)),
+            'actual_expires_at': _iso(asset.actual_expires_at or order_asset_expiry(order)),
             'renew_grace_expires_at': _iso(getattr(order, 'renew_grace_expires_at', None)),
             'suspend_at': _iso(getattr(order, 'suspend_at', None)),
             'delete_at': _iso(getattr(order, 'delete_at', None)),

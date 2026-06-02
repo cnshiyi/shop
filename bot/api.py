@@ -529,12 +529,12 @@ def _refresh_plan_payload_from_assets(items):
         item['status_label'] = _status_label(asset.status, CloudAsset.STATUS_CHOICES)
         item['provider_status'] = asset.provider_status or ''
         if item.get('plan_kind') == PLAN_KIND_UNATTACHED_IP_DELETE:
-            item['service_expires_at'] = _iso(asset.actual_expires_at)
+            item['actual_expires_at'] = _iso(asset.actual_expires_at)
             item['delete_at'] = _iso(asset.actual_expires_at)
             item['next_run_at'] = _iso(asset.actual_expires_at)
         else:
             expires_at, suspend_at, delete_at = _server_asset_lifecycle_times(asset)
-            item['service_expires_at'] = _iso(expires_at)
+            item['actual_expires_at'] = _iso(expires_at)
             item['suspend_at'] = _iso(suspend_at)
             item['delete_at'] = _iso(delete_at)
             item['next_run_at'] = _iso(delete_at)
@@ -790,7 +790,7 @@ def _shutdown_log_items(limit=100):
             'status': status,
             'status_label': status_label,
             'deletion_source_label': _delete_source_label(note),
-            'service_expires_at': expires_at,
+            'actual_expires_at': expires_at,
             'suspend_at': suspend_at,
             'delete_at': delete_at,
             'note': note,
@@ -835,7 +835,7 @@ def _shutdown_log_items(limit=100):
             'status': trace.event_type,
             'status_label': _status_label(trace.event_type, CloudIpLog.EVENT_CHOICES),
             'deletion_source_label': _delete_source_label(note),
-            'service_expires_at': expires_at,
+            'actual_expires_at': expires_at,
             'suspend_at': suspend_at,
             'delete_at': delete_at,
             'note': note,
@@ -850,7 +850,7 @@ def _shutdown_log_items(limit=100):
 
     def sort_key(item):
         suspend_at = item['suspend_at']
-        sort_at = item['logged_at'] or item['service_expires_at']
+        sort_at = item['logged_at'] or item['actual_expires_at']
         is_old_shutdown = bool(suspend_at and suspend_at < cutoff)
         timestamp = sort_at.timestamp() if sort_at else float('inf')
         return (1 if is_old_shutdown else 0, -timestamp if is_old_shutdown else -timestamp, str(item['id']))
@@ -859,7 +859,7 @@ def _shutdown_log_items(limit=100):
     return [
         {
             **item,
-            'service_expires_at': _iso(item['service_expires_at']),
+            'actual_expires_at': _iso(item['actual_expires_at']),
             'suspend_at': _iso(item['suspend_at']),
             'delete_at': _iso(item['delete_at']),
             'is_old_shutdown': bool(item['suspend_at'] and item['suspend_at'] < cutoff),
@@ -1153,7 +1153,7 @@ def _unattached_ip_delete_items(limit=50, assets=None):
             'public_ip': (trace.public_ip if trace else None) or asset.public_ip or asset.previous_public_ip or '',
             'provider_status': asset.provider_status or (_status_label(trace.event_type, CloudIpLog.EVENT_CHOICES) if trace else ''),
             'deletion_source_label': _delete_source_label(trace_note, default='计划自动删除'),
-            'service_expires_at': _iso(asset.actual_expires_at),
+            'actual_expires_at': _iso(asset.actual_expires_at),
             'delete_at': _iso(delete_at),
             'logged_at': _iso(logged_at),
             'source_note': source_note,
@@ -1197,7 +1197,7 @@ def _unattached_ip_delete_items(limit=50, assets=None):
             'public_ip': trace.public_ip or trace.previous_public_ip or '',
             'provider_status': _status_label(trace.event_type, CloudIpLog.EVENT_CHOICES),
             'deletion_source_label': _delete_source_label(trace.note),
-            'service_expires_at': _iso(getattr(asset, 'actual_expires_at', None)),
+            'actual_expires_at': _iso(getattr(asset, 'actual_expires_at', None)),
             'delete_at': _iso(delete_at),
             'logged_at': _iso(logged_at),
             'source_note': _cloud_ip_trace_note_newest_first(trace.note),
@@ -1416,7 +1416,7 @@ def _shutdown_plan_item_payload(order, *, queue_status='scheduled_future', queue
         'tg_user_id': getattr(order.user, 'tg_user_id', None) if order.user else None,
         'user_display_name': user_display_name,
         'username_label': username_label,
-        'service_expires_at': _iso(order_asset_expiry(order)),
+        'actual_expires_at': _iso(order_asset_expiry(order)),
         'suspend_at': _iso(order.suspend_at),
         'delete_at': _iso(order.delete_at),
         'ip_recycle_at': _iso(order.ip_recycle_at),
@@ -1508,7 +1508,7 @@ def _asset_delete_plan_item_payload(asset, *, queue_status='scheduled_future', q
         'tg_user_id': getattr(asset.user, 'tg_user_id', None) if getattr(asset, 'user', None) else None,
         'user_display_name': user_display_name,
         'username_label': username_label,
-        'service_expires_at': _iso(expires_at),
+        'actual_expires_at': _iso(expires_at),
         'suspend_at': _iso(suspend_at),
         'delete_at': _iso(plan_at),
         'ip_recycle_at': _iso(getattr(linked_order, 'ip_recycle_at', None)),
@@ -1627,7 +1627,7 @@ def _shutdown_history_item_payload(log):
         'note': log.note or '',
         'display_note': _compact_dashboard_note(log.note or '', max_chars=500),
         'executed_at': _iso(log.created_at),
-        'service_expires_at': _iso(order_asset_expiry(order)),
+        'actual_expires_at': _iso(order_asset_expiry(order)),
         'suspend_at': _iso(getattr(order, 'suspend_at', None)),
         'delete_at': _iso(getattr(order, 'delete_at', None)),
         'related_path': f'/admin/cloud-orders/{log.order_id}' if log.order_id else '',
@@ -1661,7 +1661,7 @@ def _shutdown_history_order_payload(order):
         'note': order.provision_note or '',
         'display_note': _compact_dashboard_note(order.provision_note or '', max_chars=500),
         'executed_at': _iso(executed_at),
-        'service_expires_at': _iso(order_asset_expiry(order)),
+        'actual_expires_at': _iso(order_asset_expiry(order)),
         'suspend_at': _iso(order.suspend_at),
         'delete_at': _iso(order.delete_at),
         'related_path': f'/admin/cloud-orders/{order.id}',
