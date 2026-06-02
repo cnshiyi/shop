@@ -1,5 +1,42 @@
 # 重构版本记录
 
+## 2026-06-02 18:34 自动监工：开通日志测试夹具补齐
+
+### 范围
+
+本轮继续监工 Shop Django 后端仓库，起始时工作树包含开通日志脱敏与到期缓存相关改动；运行期间当前分支已新增 `c1fcb9f 修复开通结果异步日志回归`、`4b36bb6 补充开通结果日志回归测试`、`ee43ddf 记录实机开通删除回归修复` 和 `fd97302 补强开通日志测试数据`。本轮在当前 HEAD 上继续复查云资产到期事实源、订单旧到期字段、旧计划快照表、退款旧入口、废弃 app 回流和生命周期任务认领冲突保护。
+
+### 修复
+
+- 补齐两条开通结果日志回归测试订单的必填 `plan=self.plan`，避免 SQLite 聚焦测试因 `cloud_order.plan_id` 非空约束失败。
+- 保留开通结果日志读取 `_asset_expires_at` 缓存的行为，不在异步开通流程返回后重新查询 `CloudAsset` 到期时间。
+- 保留代理链接、`secret` 和 SOCKS5 凭据的日志脱敏行为。
+
+### 复查结论
+
+- `CloudServerOrder` 仍未恢复 `service_expires_at` 模型字段；生产代码未发现对旧订单到期列的危险 ORM 字段定义、查询或写入。
+- `CloudAsset.actual_expires_at` 仍是唯一结构化资产到期事实；订单接口中的 `service_expires_at` 只作为兼容 payload 字段，显式编辑写入资产事实字段。
+- 未发现 `refund_to_balance`、`refund_balance`、`STATUS_REFUNDED`、`refunded` 旧状态、`CloudLifecyclePlan`、`CloudNoticePlan`、`CloudAutoRenewPlan` 或旧生命周期 plan snapshot 函数回流。
+- `INSTALLED_APPS` 仍只包含 `core`、`bot`、`orders`、`cloud` 四个当前运行时 app；旧 `accounts/finance/mall/monitoring/dashboard_api/biz` 目录未恢复，`dashboard_api` 命中仅为 URL namespace。
+
+### 验证
+
+本地已通过：
+
+```bash
+UV_CACHE_DIR=/private/tmp/uv-cache-shop uv run python manage.py check
+UV_CACHE_DIR=/private/tmp/uv-cache-shop uv run python -m py_compile cloud/provisioning.py cloud/tests.py cloud/services.py cloud/api_orders.py cloud/asset_expiry.py
+UV_CACHE_DIR=/private/tmp/uv-cache-shop DJANGO_TEST_SQLITE=1 PYTHONDONTWRITEBYTECODE=1 uv run python manage.py makemigrations --check --dry-run
+UV_CACHE_DIR=/private/tmp/uv-cache-shop DJANGO_TEST_SQLITE=1 PYTHONDONTWRITEBYTECODE=1 uv run python manage.py test cloud.tests.CloudServerServicesTestCase.test_provision_result_log_uses_cached_asset_expiry cloud.tests.CloudServerServicesTestCase.test_provision_result_log_masks_proxy_secrets --noinput --verbosity 2
+UV_CACHE_DIR=/private/tmp/uv-cache-shop DJANGO_TEST_SQLITE=1 PYTHONDONTWRITEBYTECODE=1 uv run python manage.py test cloud.tests.CloudServerServicesTestCase.test_order_rejects_removed_service_expiry_field cloud.tests.CloudServerServicesTestCase.test_update_cloud_asset_expiry_refreshes_order_lifecycle cloud.tests.CloudServerServicesTestCase.test_sync_aliyun_assets_preserves_existing_asset_expiry --noinput --verbosity 1
+UV_CACHE_DIR=/private/tmp/uv-cache-shop DJANGO_TEST_SQLITE=1 PYTHONDONTWRITEBYTECODE=1 uv run python manage.py test cloud.tests.CloudServerServicesTestCase.test_lifecycle_delete_task_claim_blocks_same_cycle_duplicate cloud.tests.CloudServerServicesTestCase.test_lifecycle_asset_task_claim_blocks_same_cycle_duplicate cloud.tests.CloudServerServicesTestCase.test_order_static_ip_release_skips_when_lifecycle_task_claimed --noinput --verbosity 1
+git diff --check
+```
+
+说明：新增日志测试首次因测试订单缺少 `total_amount`、`user`、`plan` 三个必填字段失败；已在 `fd97302` 和本轮补丁中补齐后重跑通过。
+
+剩余风险：本轮未跑完整测试套件，也未覆盖真实 MySQL 和真实云厂商 API。
+
 ## 2026-06-02 18:22 自动监工：到期事实与生命周期复查通过
 
 ### 范围
@@ -1914,6 +1951,40 @@ uv run python manage.py test bot.tests.DashboardSessionExpiryTestCase bot.tests.
 ```
 
 The focused test run is blocked by local MySQL test database permissions:
+
+```text
+Access denied for user 'a'@'localhost' to database 'test_a'
+```
+
+## 2026-06-02 开通日志测试夹具补强
+
+### 范围
+
+第二十一轮监工复查自动化补丁，确认新增开通日志回归测试需要完整订单夹具，避免测试订单缺少用户和套餐关联时掩盖真实断言。
+
+### 测试变更
+
+- `cloud/tests.py` 的开通结果日志缓存测试补齐 `user` 和 `plan`。
+- `cloud/tests.py` 的代理密钥脱敏测试补齐 `user` 和 `plan`。
+- 保持测试代码只在测试文件中，不改动运行逻辑。
+
+### 验证命令
+
+已通过：
+
+```bash
+uv run python -m py_compile cloud/tests.py cloud/provisioning.py cloud/services.py cloud/lifecycle.py cloud/lifecycle_execution.py
+uv run python manage.py check
+uv run python manage.py makemigrations --check --dry-run
+```
+
+受本地 MySQL 权限阻塞：
+
+```bash
+uv run python manage.py test cloud.tests.CloudServerServicesTestCase.test_provision_result_log_uses_cached_asset_expiry cloud.tests.CloudServerServicesTestCase.test_provision_result_log_masks_proxy_secrets --keepdb
+```
+
+阻塞原因：
 
 ```text
 Access denied for user 'a'@'localhost' to database 'test_a'
