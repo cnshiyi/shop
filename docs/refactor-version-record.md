@@ -4729,6 +4729,79 @@ git diff --check
 - 本轮未执行真实 Telegram 点击、真实云资源创建/删除/IP 变更、真实支付、链上广播、生产发布或不可逆操作。
 - 真机测试仍需在用户明确授权真实云资源成本后，单独按中文报告记录云资源 ID 脱敏结果。
 
+## 2026-06-03 详情页返回按钮极端回调压缩
+
+### 范围
+
+本轮继续巡检 Shop Django 后端的机器人返回链、Telegram `callback_data` 64 字节限制、云资产生命周期唯一到期事实、废弃 app 回流、旧计划快照和旧退款入口。
+
+### 运行时变化
+
+- `cloud_server_detail()` 的底部“返回列表”按钮不再直接使用一次压缩后的返回来源，而是通过专用兜底函数再次检查字节长度。
+- 当返回来源是极端嵌套订单详情，例如 `cloud:detail:<18位订单ID>:profile:orders:cloud:filter:provisioning:page:<18位页码>` 时，返回按钮会降级为 `poc:provisioning:<页码>`，避免生成 67 字节 callback。
+- 常规来源、短资产详情来源和已在 64 字节内的返回路径保持原有行为。
+- 新增聚焦测试覆盖 18 位订单 ID + 18 位页码 + 长筛选来源下的详情页返回按钮，防止后续恢复超长回调。
+
+### 监工结果
+
+- 极端回调样本复查 27 个按钮，修复后未发现超过 64 字节的 `callback_data`。
+- `CloudAsset` 仍只有 `actual_expires_at` 作为结构化资产到期字段。
+- `CloudServerOrder` 未恢复 `service_expires_at` 或 `actual_expires_at`，仅保留 `renew_grace_expires_at` 流程字段。
+- `CloudAssetDashboardSnapshot` 未恢复派生到期字段。
+- 未发现旧计划快照、旧退款函数名、`allow_client_port` 或废弃 app 目录回流；`dashboard_api` 仅作为现有路由 namespace。
+
+### 验证
+
+本地已通过:
+
+```bash
+UV_CACHE_DIR=/Users/a399/Desktop/data/shop/.uv-cache uv run python manage.py check
+UV_CACHE_DIR=/Users/a399/Desktop/data/shop/.uv-cache uv run python -m py_compile bot/handlers.py bot/keyboards.py bot/tests.py cloud/services.py cloud/models.py cloud/api_orders.py orders/services.py orders/tests.py
+DB_ENGINE=sqlite SQLITE_NAME=/private/tmp/shop_auto_bot_ui_<进程>.sqlite3 UV_CACHE_DIR=/Users/a399/Desktop/data/shop/.uv-cache uv run python manage.py test bot.tests.RetainedIpRenewalUiTestCase --noinput --verbosity 1
+DB_ENGINE=sqlite SQLITE_NAME=/private/tmp/shop_auto_lifecycle_<进程>.sqlite3 UV_CACHE_DIR=/Users/a399/Desktop/data/shop/.uv-cache uv run python manage.py test cloud.tests.CloudServerServicesTestCase.test_due_orders_use_asset_expiry_for_lightsail_lifecycle cloud.tests.CloudServerServicesTestCase.test_notice_delete_plan_and_proxy_list_use_asset_expiry cloud.tests.CloudServerServicesTestCase.test_sync_aws_assets_preserves_existing_manual_asset_note cloud.tests.CloudServerServicesTestCase.test_sync_aws_assets_preserves_existing_unattached_ip_due_time cloud.tests.CloudOrderStatusDashboardSyncTestCase.test_order_detail_manual_edit_syncs_cloud_identity_and_proxy_fields orders.tests.ChainPaymentScannerTestCase.test_expired_asset_renewal_payment_unbinds_asset_for_retry --noinput --verbosity 1
+DB_ENGINE=sqlite SQLITE_NAME=/private/tmp/shop_auto_introspect_<进程>.sqlite3 UV_CACHE_DIR=/Users/a399/Desktop/data/shop/.uv-cache uv run python manage.py shell -c "from cloud.models import CloudAsset, CloudServerOrder, CloudAssetDashboardSnapshot; print([f.name for f in CloudAsset._meta.fields if 'expires' in f.name or 'expiry' in f.name]); print([f.name for f in CloudServerOrder._meta.fields if 'expires' in f.name or 'expiry' in f.name]); print([f.name for f in CloudAssetDashboardSnapshot._meta.fields if 'expires' in f.name or 'expiry' in f.name])"
+DB_ENGINE=sqlite SQLITE_NAME=/private/tmp/shop_auto_migrations_<进程>.sqlite3 UV_CACHE_DIR=/Users/a399/Desktop/data/shop/.uv-cache uv run python manage.py makemigrations --check --dry-run
+DJANGO_SETTINGS_MODULE=shop.settings UV_CACHE_DIR=/Users/a399/Desktop/data/shop/.uv-cache uv run python - <<'PY'
+import django
+from decimal import Decimal
+from types import SimpleNamespace
+
+django.setup()
+from bot.keyboards import cloud_server_detail, cloud_server_renew_payment, cloud_server_change_ip_region_menu, cloud_order_list, cloud_server_list, cloud_ip_query_result
+item_id = 999999999999999999
+regions = [('ap-southeast-1', '新加坡'), ('ap-northeast-1', '日本'), ('eu-central-1', '德国'), ('ap-northeast-3', '大阪'), ('me-central-1', '阿联酋')]
+long_back = f'cloud:detail:{item_id}:profile:orders:cloud:filter:provisioning:page:{item_id}'
+order = SimpleNamespace(id=item_id, status='completed', public_ip='1.1.1.1', previous_public_ip='', pay_amount=Decimal('1'), total_amount=Decimal('1'), currency='USDT', get_status_display=lambda: '已完成')
+markups = [
+    cloud_server_detail(item_id, True, True, True, long_back, True),
+    cloud_server_renew_payment(item_id, Decimal('1'), Decimal('2'), back_callback=long_back),
+    cloud_server_change_ip_region_menu(item_id, regions, expanded=True, back_callback=long_back),
+    cloud_order_list([order], page=item_id, total_pages=item_id, prefix='profile:orders:cloud:filter:provisioning:page', order_filter='paid'),
+    cloud_server_list([order], page=item_id, total_pages=item_id, prefix='profile:orders:cloud:filter:provisioning:page'),
+    cloud_ip_query_result([], [{'order_id': item_id, 'asset_id': 0, 'can_change_ip': True, 'can_reinit': True, 'can_config': True, 'can_auto_renew': True, 'can_support': True}], include_reinit=True),
+]
+violations = []
+for markup in markups:
+    for row in markup.inline_keyboard:
+        for button in row:
+            data = getattr(button, 'callback_data', None)
+            if data and len(data.encode()) > 64:
+                violations.append((len(data.encode()), data))
+assert not violations, violations
+PY
+rg -n "service_expires_at|allow_client_port|refund_cloud_server|refund_cloud_order|CloudServerPlanSnapshot|plan_snapshot|snapshot_plan" bot cloud orders shop core -g '!**/migrations/**'
+find . -maxdepth 2 -type d \( -name accounts -o -name finance -o -name mall -o -name monitoring -o -name dashboard_api -o -name biz \) -print
+git diff --check
+```
+
+第一次未设置 SQLite 的回调 UI 测试会在导入期尝试读取本机 MySQL `SiteConfig` 并打印沙箱拒绝日志，随后已用 `DB_ENGINE=sqlite` 和 `SQLITE_NAME` 重跑通过。极端回调脚本调用客服按钮配置时也会打印同类本机 MySQL 沙箱日志，但脚本最终确认违规列表为空。
+
+### 剩余风险
+
+- 本轮未跑完整测试套件。
+- 本轮未执行真实 Telegram 点击、真实云资源创建/删除/IP 变更、真实支付、链上广播、生产发布或不可逆操作。
+- 真机测试仍需在用户明确授权真实云资源成本后，单独按中文报告记录云资源 ID 脱敏结果。
+
 ## 2026-06-03 旧主代理链接端口一致性收口
 
 ### 范围

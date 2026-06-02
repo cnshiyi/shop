@@ -1023,6 +1023,38 @@ class RetainedIpRenewalUiTestCase(SimpleTestCase):
         self.assertIn('cad:9999999:clp:12345', callbacks)
         self.assertTrue(all(len(item.encode()) <= 64 for item in callbacks if item))
 
+    def test_cloud_server_detail_back_button_from_extreme_nested_detail_stays_under_limit(self):
+        item_id = 999999999999999999
+        back_callback = f'cloud:detail:{item_id}:profile:orders:cloud:filter:provisioning:page:{item_id}'
+
+        markup = cloud_server_detail(
+            item_id,
+            can_renew=True,
+            can_change_ip=True,
+            can_reinit=True,
+            back_callback=back_callback,
+            can_upgrade=True,
+        )
+        callbacks = [button.callback_data for row in markup.inline_keyboard for button in row if button.callback_data]
+
+        self.assertIn(f'poc:provisioning:{item_id}', callbacks)
+        self.assertTrue(all(len(item.encode()) <= 64 for item in callbacks))
+
+    def test_cloud_server_detail_back_button_falls_back_to_cloud_list_when_source_is_too_long(self):
+        back_callback = 'x' * 100
+
+        markup = cloud_server_detail(
+            88,
+            can_renew=False,
+            can_change_ip=False,
+            can_reinit=False,
+            back_callback=back_callback,
+        )
+        callbacks = [button.callback_data for row in markup.inline_keyboard for button in row if button.callback_data]
+
+        self.assertIn('cloud:list', callbacks)
+        self.assertTrue(all(len(item.encode()) <= 64 for item in callbacks))
+
     def test_asset_detail_direct_action_buttons_compact_back_callback(self):
         source = inspect.getsource(register_handlers)
         asset_detail_source = source.split('async def cb_cloud_asset_detail', 1)[1].split("@dp.callback_query(F.data.startswith('cloud:assetinit:'))", 1)[0]

@@ -247,6 +247,26 @@ def _shorten_callback_base(callback_data: str) -> str:
     return text
 
 
+def _compact_back_button_callback(callback_data: str | None) -> str:
+    text = compact_callback_path(callback_data)
+    if not text:
+        return 'cloud:list'
+    if len(text.encode()) <= 64:
+        return text
+    parts = text.split(':')
+    if len(parts) > 3 and parts[:2] == ['cloud', 'detail']:
+        nested = compact_callback_path(':'.join(parts[3:]))
+        if nested and len(nested.encode()) <= 64:
+            return nested
+    compact = _compact_back_callback_for_nested_action(text)
+    if compact and len(compact.encode()) <= 64:
+        return compact
+    compact = _compact_back_callback_for_nested_action(text, include_page=False)
+    if compact and len(compact.encode()) <= 64:
+        return compact
+    return 'cloud:list'
+
+
 _COMPACT_REGION_CODES = {
     'us-east-1': 'ue1',
     'us-east-2': 'ue2',
@@ -771,7 +791,7 @@ def cloud_server_renew_payment(order_id: int, amount, trx_amount, auto_renew_ena
 
 def cloud_server_detail(order_id: int, can_renew: bool, can_change_ip: bool, can_reinit: bool = False, back_callback: str = 'cloud:list', can_upgrade: bool = False, can_resume_init: bool = False):
     kb = InlineKeyboardBuilder()
-    back_callback = compact_callback_path(back_callback)
+    back_callback = _compact_back_button_callback(back_callback)
     if can_renew:
         kb.button(text='🔄 续费', callback_data=append_back_callback(f'cloud:renew:{order_id}', back_callback))
     if can_change_ip:
