@@ -18,8 +18,12 @@
 ```bash
 UV_CACHE_DIR=/private/tmp/uv-cache-shop DJANGO_TEST_SQLITE=1 PYTHONDONTWRITEBYTECODE=1 uv run python -m py_compile bot/api.py
 UV_CACHE_DIR=/private/tmp/uv-cache-shop DJANGO_TEST_SQLITE=1 PYTHONDONTWRITEBYTECODE=1 uv run python manage.py check
+UV_CACHE_DIR=/private/tmp/uv-cache-shop DJANGO_TEST_SQLITE=1 PYTHONDONTWRITEBYTECODE=1 uv run python manage.py makemigrations --check --dry-run
 UV_CACHE_DIR=/private/tmp/uv-cache-shop DJANGO_TEST_SQLITE=1 PYTHONDONTWRITEBYTECODE=1 uv run python manage.py test cloud.tests.CloudServerServicesTestCase.test_manual_unattached_ip_delete_writes_log_and_history_item cloud.tests.CloudServerServicesTestCase.test_legacy_unattached_ip_delete_log_without_known_note_shows_history cloud.tests.CloudServerServicesTestCase.test_lifecycle_plans_include_ip_delete_history_item --noinput --verbosity 1
 ```
+
+- 旧订单到期字段、旧计划快照模型、旧退款符号和废弃 app 回流窄扫描无新增危险命中。
+- 生产代码中已无 `真机测试：未附加IP删除` 或其他 `真机测试` 历史匹配标记。
 
 `codex-cli` 只读复查 session：`019e879e-8aca-71e1-bad5-fb8fdd9fde3b`。
 
