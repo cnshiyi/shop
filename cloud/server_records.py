@@ -50,6 +50,18 @@ def _payload_args(args):
     return [_payload_q(arg) if isinstance(arg, Q) else arg for arg in args]
 
 
+def _preserve_existing_manual_fields(payload: dict, asset: CloudAsset) -> dict:
+    payload = dict(payload)
+    if asset.user_id:
+        if 'user' in payload:
+            payload['user'] = asset.user
+        if 'user_id' in payload:
+            payload['user_id'] = asset.user_id
+    if asset.actual_expires_at and 'actual_expires_at' in payload:
+        payload['actual_expires_at'] = asset.actual_expires_at
+    return payload
+
+
 class _ServerObjects:
     def _qs(self):
         return CloudAsset.objects.filter(kind=CloudAsset.KIND_SERVER)
@@ -128,6 +140,7 @@ class _ServerObjects:
         kwargs.setdefault('kind', CloudAsset.KIND_SERVER)
         existing = self._find_existing_for_create(kwargs)
         if existing:
+            kwargs = _preserve_existing_manual_fields(kwargs, existing)
             for key, value in kwargs.items():
                 setattr(existing, key, value)
             existing.save(update_fields=list(kwargs.keys()))

@@ -3725,6 +3725,49 @@ class CloudServerServicesTestCase(TestCase):
         self.assertEqual(blank_asset.actual_expires_at, CloudServerOrder.normalize_expiry_time(new_expiry))
         self.assertEqual(manual_asset.actual_expires_at, manual_expiry)
 
+    # 功能：验证旧 Server 兼容入口复用资产时不覆盖手工用户和到期时间。
+    def test_server_compat_create_preserves_manual_asset_owner_and_expiry(self):
+        owner = TelegramUser.objects.create(tg_user_id=991001, username='compat_owner')
+        incoming_user = TelegramUser.objects.create(tg_user_id=991002, username='compat_incoming')
+        manual_expiry = timezone.now() + timezone.timedelta(days=30)
+        incoming_expiry = timezone.now() + timezone.timedelta(days=5)
+        asset = CloudAsset.objects.create(
+            kind=CloudAsset.KIND_SERVER,
+            source=CloudAsset.SOURCE_AWS_SYNC,
+            user=owner,
+            provider='aws_lightsail',
+            account_label='aws:compat-preserve',
+            region_code=self.plan.region_code,
+            region_name=self.plan.region_name,
+            asset_name='compat-preserve-old',
+            instance_id='compat-preserve-instance',
+            public_ip='3.3.3.34',
+            actual_expires_at=manual_expiry,
+            status=CloudAsset.STATUS_RUNNING,
+            is_active=True,
+        )
+
+        server = Server.objects.create(
+            source=Server.SOURCE_AWS_SYNC,
+            user=incoming_user,
+            provider='aws_lightsail',
+            account_label='aws:compat-preserve',
+            region_code=self.plan.region_code,
+            region_name=self.plan.region_name,
+            server_name='compat-preserve-new',
+            instance_id='compat-preserve-instance',
+            public_ip='3.3.3.34',
+            expires_at=incoming_expiry,
+            status=Server.STATUS_STOPPED,
+        )
+
+        asset.refresh_from_db()
+        self.assertEqual(server.id, asset.id)
+        self.assertEqual(asset.user, owner)
+        self.assertEqual(asset.actual_expires_at, manual_expiry)
+        self.assertEqual(asset.asset_name, 'compat-preserve-new')
+        self.assertEqual(asset.status, CloudAsset.STATUS_STOPPED)
+
     # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
     def test_get_migration_due_orders_is_distinct(self):
         old_order = CloudServerOrder.objects.create(

@@ -1,5 +1,29 @@
 # 重构版本记录
 
+## 2026-06-02 自动监工：Server 兼容入口保护手工资产字段
+
+### 范围
+
+本轮继续检查云资产生命周期重构后的兼容入口，重点看旧 `Server` 包装层复用 `CloudAsset` 时是否会破坏当前资产事实源。
+
+### 运行变更
+
+- `cloud.server_records.Server.objects.create()` 复用已有 `CloudAsset` 时，保留已有手工绑定用户和 `actual_expires_at`，不再被旧入口传入的 `user` / `expires_at` 覆盖。
+- 保持旧入口仍可同步资源名、状态等运行字段，避免为了保护手工字段而阻断兼容命令更新。
+- 新增回归测试覆盖旧 `Server` 入口按实例/IP 复用资产时，资产 owner 和实际到期时间保持不变。
+
+### 验证
+
+本地已通过：
+
+```bash
+UV_CACHE_DIR=/private/tmp/uv-cache-shop uv run python manage.py check
+UV_CACHE_DIR=/private/tmp/uv-cache-shop uv run python -m py_compile cloud/server_records.py cloud/tests.py
+UV_CACHE_DIR=/private/tmp/uv-cache-shop DJANGO_TEST_SQLITE=1 uv run python manage.py test cloud.tests.CloudServerServicesTestCase.test_server_compat_create_preserves_manual_asset_owner_and_expiry --noinput --verbosity 1
+```
+
+当前工作树另有未提交的订单到期字段迁移草稿（`CloudServerOrder.service_expires_at` 移除方向），旧的 `test_order_save_backfills_blank_asset_expiry_only` 已不适配该迁移状态，未纳入本轮提交。
+
 ## 2026-06-02 自动监工：资产到期与 Server 兼容层收口
 
 ### 范围
