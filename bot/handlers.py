@@ -4584,7 +4584,7 @@ def register_handlers(dp: Dispatcher):
         user = await get_or_create_user(callback.from_user.id, callback.from_user.username, callback.from_user.first_name)
         parts = callback.data.split(':', 3)
         order_id = int(parts[2])
-        back_callback = parts[3] if len(parts) > 3 else ''
+        back_callback = compact_callback_path(parts[3]) if len(parts) > 3 else ''
         is_admin = await _is_admin_chat(callback.message)
         group_context = await _is_group_visible_order(callback, order_id)
         if _is_group_chat_message(callback.message) and not (is_admin or group_context):
@@ -4785,7 +4785,7 @@ def register_handlers(dp: Dispatcher):
         user = await get_or_create_user(callback.from_user.id, callback.from_user.username, callback.from_user.first_name)
         parts = callback.data.split(':', 3)
         order_id = int(parts[2])
-        back_callback = parts[3] if len(parts) > 3 else ''
+        back_callback = compact_callback_path(parts[3]) if len(parts) > 3 else ''
         allowed, is_admin, group_context = await _can_use_renewal_payment_callback(callback, state, user, order_id)
         if not allowed:
             logger.warning('CLOUD_RENEWWALLET_DENIED user_id=%s order_id=%s reason=not_owner_group_admin_or_recent_query callback_data=%s', user.id, order_id, callback.data)
@@ -4934,7 +4934,7 @@ def register_handlers(dp: Dispatcher):
         user = await get_or_create_user(callback.from_user.id, callback.from_user.username, callback.from_user.first_name)
         parts = callback.data.split(':', 3)
         order_id = int(parts[2])
-        back_callback = parts[3] if len(parts) > 3 else ''
+        back_callback = compact_callback_path(parts[3]) if len(parts) > 3 else ''
         is_admin = await _is_admin_chat(callback.message)
         order = await get_cloud_server_for_admin(order_id) if is_admin else await get_user_cloud_server(order_id, user.id)
         if not order:
@@ -4960,7 +4960,7 @@ def register_handlers(dp: Dispatcher):
         user = await get_or_create_user(callback.from_user.id, callback.from_user.username, callback.from_user.first_name)
         parts = callback.data.split(':', 4)
         order_id = int(parts[3])
-        back_callback = parts[4] if len(parts) > 4 else ''
+        back_callback = compact_callback_path(parts[4]) if len(parts) > 4 else ''
         order = await get_cloud_server_for_admin(order_id) if await _is_admin_chat(callback.message) else await get_user_cloud_server(order_id, user.id)
         if not order:
             await _safe_callback_answer(callback, '服务器记录不存在', show_alert=True)
@@ -5083,7 +5083,7 @@ def register_handlers(dp: Dispatcher):
         user = await get_or_create_user(callback.from_user.id, callback.from_user.username, callback.from_user.first_name)
         parts = callback.data.split(':', 3)
         order_id = int(parts[2])
-        back_callback = parts[3] if len(parts) > 3 else ''
+        back_callback = compact_callback_path(parts[3]) if len(parts) > 3 else ''
         is_admin = await _is_admin_chat(callback.message)
         logger.info('CLOUD_UPGRADE_PLAN_START user_id=%s order_id=%s admin=%s callback_data=%s', user.id, order_id, is_admin, callback.data)
         plans, err = await list_cloud_server_upgrade_plans(order_id, user.id, admin=is_admin)
@@ -5124,7 +5124,7 @@ def register_handlers(dp: Dispatcher):
         user = await get_or_create_user(callback.from_user.id, callback.from_user.username, callback.from_user.first_name)
         parts = callback.data.split(':', 4)
         _, _, raw_order_id, raw_plan_id = parts[:4]
-        back_callback = parts[4] if len(parts) > 4 else ''
+        back_callback = compact_callback_path(parts[4]) if len(parts) > 4 else ''
         is_admin = await _is_admin_chat(callback.message)
         new_order, err = await create_cloud_server_upgrade_order(int(raw_order_id), user.id, int(raw_plan_id), admin=is_admin)
         if err:
@@ -5146,7 +5146,7 @@ def register_handlers(dp: Dispatcher):
         user = await get_or_create_user(callback.from_user.id, callback.from_user.username, callback.from_user.first_name)
         parts = callback.data.split(':', 3)
         order_id = int(parts[2])
-        back_callback = parts[3] if len(parts) > 3 else ''
+        back_callback = compact_callback_path(parts[3]) if len(parts) > 3 else ''
         is_admin = await _is_admin_chat(callback.message)
         order = await get_cloud_server_for_admin(order_id) if is_admin else await get_user_cloud_server(order_id, user.id)
         if not order:

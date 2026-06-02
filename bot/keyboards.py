@@ -625,11 +625,11 @@ def cloud_server_detail(order_id: int, can_renew: bool, can_change_ip: bool, can
     if can_change_ip:
         kb.button(text='🌐 更换IP', callback_data=append_back_callback(f'cloud:ip:{order_id}', back_callback))
     if can_resume_init:
-        kb.button(text='🛠 继续初始化', callback_data=f'cloud:reinit:{order_id}:{back_callback}')
+        kb.button(text='🛠 继续初始化', callback_data=append_back_callback(f'cloud:reinit:{order_id}', back_callback))
     elif can_reinit:
-        kb.button(text='🛠 重新安装', callback_data=f'cloud:reinit:{order_id}:{back_callback}')
+        kb.button(text='🛠 重新安装', callback_data=append_back_callback(f'cloud:reinit:{order_id}', back_callback))
     if can_upgrade:
-        kb.button(text='⚙️ 修改配置', callback_data=f'cloud:upgrade:{order_id}:{back_callback}')
+        kb.button(text='⚙️ 修改配置', callback_data=append_back_callback(f'cloud:upgrade:{order_id}', back_callback))
     kb.button(text='🔙 返回列表', callback_data=back_callback)
     kb.adjust(2, 2, 2, 1)
     return _log_inline_keyboard(

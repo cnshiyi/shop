@@ -1,5 +1,30 @@
 # 重构版本记录
 
+## 2026-06-03 00:18 自动监工：返回来源二次压缩
+
+### 范围
+
+提交 `6630481 收口旧端口按钮兼容文案` 后，工作树出现新的机器人返回链收口改动。本轮按相关外部改动处理，未回滚，先核对差异并补充验证。
+
+### 修改
+
+- 续费、续费钱包支付、更换 IP、更多地区、修改配置、修改配置支付和重新安装处理器读取 `back_callback` 时统一调用 `compact_callback_path()`，避免旧长路径继续向下传递。
+- `cloud_server_detail()` 中重新安装、继续初始化和修改配置按钮改为 `append_back_callback()`，避免空返回来源时生成尾随冒号，同时继续压缩长返回路径。
+
+### 验证
+
+已通过：
+
+```bash
+uv run python -m py_compile bot/handlers.py bot/keyboards.py core/texts.py
+uv run python manage.py test bot.tests.RetainedIpRenewalUiTestCase --keepdb
+uv run python manage.py check
+uv run python manage.py makemigrations --check --dry-run
+git diff --check
+```
+
+结果：机器人返回 UI 聚焦测试 33 条通过，确认资产详情、订单详情、续费、更换 IP、重新安装、修改配置等返回链仍保持短回调并满足 Telegram `callback_data` 64 字节限制。
+
 ## 2026-06-03 00:15 自动监工：旧端口文案兼容收口
 
 ### 范围

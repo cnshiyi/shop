@@ -1243,6 +1243,21 @@ class RetainedIpRenewalUiTestCase(SimpleTestCase):
         self.assertIn("callback.data.split(':', 4)", upgrade_pay_source)
         self.assertIn('cloud_previous_detail_callback(int(raw_order_id), back_callback)', upgrade_pay_source)
 
+    def test_cloud_action_handlers_compact_nested_back_callback_before_reuse(self):
+        source = inspect.getsource(register_handlers)
+        sections = [
+            source.split('async def cb_cloud_renew', 1)[1].split("@dp.callback_query(F.data.startswith('cloud:assetrenewplan:'))", 1)[0],
+            source.split('async def cb_cloud_renew_wallet', 1)[1].split("@dp.callback_query(F.data.startswith('cloud:rp:'))", 1)[0],
+            source.split('async def cb_cloud_change_ip', 1)[1].split("@dp.callback_query(F.data.startswith('cloud:ipregions:more:'))", 1)[0],
+            source.split('async def cb_cloud_change_ip_regions_more', 1)[1].split("@dp.callback_query(F.data.startswith('cloud:ipregion:'))", 1)[0],
+            source.split('async def cb_cloud_upgrade', 1)[1].split("@dp.callback_query(F.data.startswith('cloud:upgradepay:'))", 1)[0],
+            source.split('async def cb_cloud_upgrade_pay', 1)[1].split("@dp.callback_query(F.data.startswith('cloud:reinit:'))", 1)[0],
+            source.split('async def cb_cloud_reinit', 1)[1].split("@dp.callback_query(F.data.startswith('cloud:reinitconfirm:'))", 1)[0],
+        ]
+
+        for section in sections:
+            self.assertIn('back_callback = compact_callback_path(', section)
+
     def test_validate_reinstall_proxy_link_keeps_strict_port_check_by_default(self):
         order = SimpleNamespace(
             id=1,
