@@ -1887,6 +1887,37 @@ UV_CACHE_DIR=/private/tmp/uv-cache-shop DJANGO_TEST_SQLITE=1 PYTHONDONTWRITEBYTE
 UV_CACHE_DIR=/private/tmp/uv-cache-shop DJANGO_TEST_SQLITE=1 PYTHONDONTWRITEBYTECODE=1 uv run python manage.py makemigrations --check --dry-run
 ```
 
+## 2026-06-02 生产测试覆盖钩子监工复查
+
+### 范围
+
+本轮在最新提交 `d618846` 上继续复查生产测试覆盖钩子清理结果，重点确认测试直连真实模块后没有恢复 `cloud.api` 聚合层 patch 入口，云资产生命周期仍以 `CloudAsset.actual_expires_at` 作为唯一结构化服务到期事实。
+
+### 结论
+
+- 未发现 `_cloud_api_override()`、`cloud.api.*` 测试覆盖钩子、旧 `older tests/imports` 兼容注释或生产模块测试混入回流。
+- 未发现 `CloudServerOrder.service_expires_at` 运行时 ORM 写入、`normalize_service_expiry`、`service_expired_at`、旧计划快照模型或退款旧入口回流。
+- `shop/settings.py` 的 `INSTALLED_APPS` 仍只包含 `core`、`bot`、`orders`、`cloud` 当前运行域，未恢复废弃 app。
+- `service_expires_at` 运行时代码命中均为 API 兼容字段、日志字段或从 `order_asset_expiry()` / `CloudAsset.actual_expires_at` 派生的展示值；订单编辑接口仍显式丢弃订单表旧字段并只写资产到期事实。
+- `cloud/tests.py` 中唯一 `service_expires_at=` 是负向回归用例，用于确认订单模型拒绝旧字段。
+
+### 验证
+
+已通过：
+
+```bash
+UV_CACHE_DIR=/private/tmp/uv-cache-shop DJANGO_TEST_SQLITE=1 PYTHONDONTWRITEBYTECODE=1 uv run python manage.py check
+UV_CACHE_DIR=/private/tmp/uv-cache-shop DJANGO_TEST_SQLITE=1 PYTHONDONTWRITEBYTECODE=1 uv run python manage.py makemigrations --check --dry-run
+UV_CACHE_DIR=/private/tmp/uv-cache-shop PYTHONDONTWRITEBYTECODE=1 uv run python -m py_compile cloud/api.py cloud/api_asset_edit.py cloud/api_asset_snapshots.py cloud/api_assets.py cloud/api_monitors.py cloud/api_orders.py cloud/api_servers.py cloud/api_sync.py cloud/api_tasks.py cloud/sync_jobs.py cloud/services.py cloud/lifecycle.py bot/api.py
+UV_CACHE_DIR=/private/tmp/uv-cache-shop DJANGO_TEST_SQLITE=1 PYTHONDONTWRITEBYTECODE=1 uv run python manage.py test cloud.tests.CloudServerServicesTestCase.test_cloud_assets_list_uses_bulk_order_inference_without_per_asset_fallback cloud.tests.CloudServerServicesTestCase.test_cloud_asset_dashboard_snapshot_refresh_materializes_paginated_list cloud.tests.CloudServerServicesTestCase.test_update_cloud_asset_defers_snapshot_refresh cloud.tests.CloudServerServicesTestCase.test_sync_cloud_asset_status_uses_asset_scope cloud.tests.CloudServerServicesTestCase.test_sync_retained_ip_asset_uses_order_account_and_static_ip_scope cloud.tests.CloudServerServicesTestCase.test_auto_renew_task_detail_includes_due_retry_and_fallback_items cloud.tests.CloudServerServicesTestCase.test_auto_renew_detail_keeps_valid_order_without_asset cloud.tests.CloudServerServicesTestCase.test_run_auto_renew_tasks_executes_due_retry_and_fallback_queue cloud.tests.CloudServerServicesTestCase.test_run_auto_renew_order_executes_single_order cloud.tests.CloudServerServicesTestCase.test_dashboard_asset_order_inference_scopes_duplicate_ip_by_account cloud.tests.DashboardTronBalanceQueryTestCase.test_fetch_address_chain_balances_uses_resolved_headers --noinput --verbosity 1
+UV_CACHE_DIR=/private/tmp/uv-cache-shop DJANGO_TEST_SQLITE=1 PYTHONDONTWRITEBYTECODE=1 uv run python manage.py test cloud.tests.CloudServerServicesTestCase.test_order_rejects_removed_service_expiry_field --noinput --verbosity 1
+rg -n "def _cloud_api_override|_cloud_api_override\\(|from cloud\\.api import|import cloud\\.api|cloud\\.api\\." cloud bot orders core shop --glob '!**/migrations/**' -S
+rg -n "\\b(TestCase|SimpleTestCase|TransactionTestCase|APITestCase|RequestFactory|AsyncMock|MagicMock|Mock|patch\\(|pytest|unittest|def test_|真机测试|测试用例|仅测试|for test|test only|older tests/imports)\\b" cloud bot orders core shop --glob '!**/migrations/**' --glob '!**/tests.py' --glob '!**/tests_*.py' --glob '!**/test_*.py' -S
+git diff --check
+```
+
+剩余风险：本轮未跑完整测试套件；默认 MySQL 未覆盖，继续使用 SQLite 聚焦测试和静态扫描兜底。
+
 ## 2026-06-02 生产代码和测试代码边界复查
 
 ### 范围
