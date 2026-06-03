@@ -7471,7 +7471,7 @@ git diff --check
 ### 修改
 
 - 更新 `cloud/services.py`，让旧机迁移计划只调整订单侧计划字段，不再通过 `_update_order_primary_records` 覆盖资产实际到期时间，并把日志和用户文案改为迁移截止时间语义。
-- 更新 `cloud/provisioning.py`，让重建源订单标记待删除时保留资产实际到期事实，只更新迁移、宽限、删除和回收计划。
+- 更新 `cloud/provisioning.py`，让重建源订单标记待删除时保留资产实际到期事实，只更新迁移、宽限、删除和回收计划；相关云 IP 日志文案统一改为“资产到期”，避免继续混用服务到期语义。
 - 更新 `cloud/management/commands/sync_aws_assets.py`，让 AWS 同步确认删除迁移旧机时不再把 `migration_due_at` 写入资产 `actual_expires_at`。
 - 更新 `cloud/tests.py`，覆盖重建、换 IP、旧机迁移计划和 AWS 同步删除场景，确认资产到期事实保持不变。
 - 覆盖更新 `docs/auto-optimization-latest.md`，并在本文件追加本轮中文巡检记录。
@@ -7482,8 +7482,10 @@ git diff --check
 
 ```bash
 UV_CACHE_DIR=/private/tmp/uv-cache-shop PYTHONDONTWRITEBYTECODE=1 uv run python manage.py check
+UV_CACHE_DIR=/private/tmp/uv-cache-shop PYTHONDONTWRITEBYTECODE=1 uv run python -m py_compile shop/urls.py shop/admin_urls.py shop/auth_urls.py bot/handlers.py bot/api.py bot/tests.py cloud/api_tasks.py cloud/task_center.py cloud/lifecycle_tasks.py cloud/lifecycle_schedule.py cloud/sync_jobs.py cloud/services.py cloud/provisioning.py cloud/management/commands/sync_aws_assets.py cloud/tests_task_center.py
 UV_CACHE_DIR=/private/tmp/uv-cache-shop PYTHONDONTWRITEBYTECODE=1 uv run python -m py_compile cloud/management/commands/sync_aws_assets.py cloud/provisioning.py cloud/services.py cloud/tests.py
 DJANGO_TEST_SQLITE=1 UV_CACHE_DIR=/private/tmp/uv-cache-shop PYTHONDONTWRITEBYTECODE=1 uv run python manage.py test cloud.tests_task_center --settings=shop.settings --verbosity=2
+DJANGO_TEST_SQLITE=1 UV_CACHE_DIR=/private/tmp/uv-cache-shop PYTHONDONTWRITEBYTECODE=1 uv run python manage.py test bot.tests.ApiPrefixContractTestCase bot.tests.DashboardAuthSurfaceTestCase --settings=shop.settings --verbosity=2
 DJANGO_TEST_SQLITE=1 UV_CACHE_DIR=/private/tmp/uv-cache-shop PYTHONDONTWRITEBYTECODE=1 uv run python manage.py test bot.tests.RetainedIpRenewalUiTestCase --settings=shop.settings --verbosity=2
 DJANGO_TEST_SQLITE=1 UV_CACHE_DIR=/private/tmp/uv-cache-shop PYTHONDONTWRITEBYTECODE=1 uv run python manage.py test cloud.tests.CloudServerServicesTestCase.test_rebuild_source_migration_schedule_preserves_asset_expiry cloud.tests.CloudServerServicesTestCase.test_mark_cloud_server_ip_change_requested_falls_back_when_plan_missing cloud.tests.CloudServerServicesTestCase.test_sync_aws_missing_order_preserves_asset_expiry_when_migration_due_is_earlier cloud.tests.CloudServerServicesTestCase.test_source_migration_schedule_keeps_asset_actual_expiry cloud.tests.CloudServerServicesTestCase.test_aws_sync_deleted_migration_order_keeps_asset_actual_expiry --settings=shop.settings --verbosity=2
 DJANGO_TEST_SQLITE=1 UV_CACHE_DIR=/private/tmp/uv-cache-shop PYTHONDONTWRITEBYTECODE=1 uv run python manage.py shell -c "...字段内省..."
@@ -7492,10 +7494,11 @@ DJANGO_TEST_SQLITE=1 UV_CACHE_DIR=/private/tmp/uv-cache-shop PYTHONDONTWRITEBYTE
 UV_CACHE_DIR=/private/tmp/uv-cache-shop PYTHONDONTWRITEBYTECODE=1 uv run python manage.py migrate --plan --noinput
 rg -n "service_expires_at\s*=|actual_expires_at\s*=.*order\.|order\..*actual_expires_at|CloudLifecyclePlan\b|CloudNoticePlan\b|CloudAutoRenewPlan\b|refund_order|process_refund|create_refund|issue_refund|refund_to_balance|refund_balance|STATUS_REFUNDED|status=['\"]refunded['\"]|normalize_service_expiry|service_expired_at" bot core orders cloud shop --glob '!**/migrations/**' --glob '!**/tests.py'
 find . -maxdepth 2 -type d \( -name accounts -o -name finance -o -name mall -o -name monitoring -o -name dashboard_api -o -name biz \) -print
+rg -n "/api/dashboard|/api/users|/api/task-list|/api/plan-settings" /Users/a399/Desktop/data/vue-shop-admin/DEVELOPMENT.md /Users/a399/Desktop/data/vue-shop-admin/apps/web-antd/src /Users/a399/Desktop/data/vue-shop-admin/docs --glob '!**/node_modules/**' --glob '!**/dist/**' --glob '!**/.git/**'
 git diff --check
 ```
 
-结果：`manage.py check`、编译检查、14 个任务中心测试、49 个机器人返回链测试、5 个迁移/同步聚焦测试、字段内省、默认 `makemigrations --check --dry-run`、SQLite `migrate --plan`、红线扫描、废弃 app 目录扫描和 `git diff --check` 均符合预期。默认 MySQL `migrate --plan` 因当前沙箱无法连接本地 MySQL `127.0.0.1:3306` 失败，已记录为环境限制。SQLite 检查仍会打印不支持 `db_comment` / `db_table_comment` 的预期 warning；机器人返回链测试仍会打印既有配置读取容错、mocked postcheck 异常和 IP 校验日志。
+结果：`manage.py check`、编译检查、10 个路由/后台鉴权测试、14 个任务中心测试、49 个机器人返回链测试、5 个迁移/同步聚焦测试、字段内省、默认 `makemigrations --check --dry-run`、SQLite `migrate --plan`、红线扫描、废弃 app 目录扫描、前端存在路径旧前缀扫描和 `git diff --check` 均符合预期。默认 MySQL `migrate --plan` 因当前沙箱无法连接本地 MySQL `127.0.0.1:3306` 失败，已记录为环境限制。SQLite 检查仍会打印不支持 `db_comment` / `db_table_comment` 的预期 warning；机器人返回链测试仍会打印既有配置读取容错、mocked postcheck 异常和 IP 校验日志。
 
 ### 剩余风险
 
