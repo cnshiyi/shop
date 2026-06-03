@@ -16,7 +16,7 @@ from django.utils import timezone
 
 from bot.api import DASHBOARD_SESSION_IDLE_SECONDS, _active_proxy_counts_by_user, _authenticate_dashboard_request, admin_users_list, archive_telegram_chat, auth_totp_start, create_admin_user, create_cloud_account, create_product, delete_cloud_account, me, send_daily_expiry_summary_test_notification, send_telegram_chat_message, site_config_groups, telegram_login_start, update_cloud_account, update_site_config, users_list, verify_cloud_account
 from bot.handlers import _asset_reinstall_confirm_keyboard, _asset_renewal_plan_keyboard, _buy_cloud_server_with_balance_and_notify, _cloud_renewal_postcheck_and_notify, _cloud_server_created_text, _fetch_tron_address_summary, _hydrate_order_proxy_links, _install_notice_copy_wrapper, _pay_cloud_server_order_with_balance_and_notify, _proxy_links_text, _reinstall_confirm_keyboard, _requires_recovery_provision, _retained_ip_renewal_plan_keyboard, _save_asset_main_proxy_link, _save_user_main_proxy_link, _trongrid_get_with_key_fallback, _trongrid_post_with_key_fallback, _validate_reinstall_proxy_link, register_handlers
-from bot.keyboards import _compact_back_button_callback, append_back_callback, balance_details_list, cloud_asset_detail_callback, cloud_detail_callback, cloud_previous_detail_callback, compact_callback_path, cloud_ip_query_result, cloud_order_list, cloud_order_readonly_detail, cloud_server_change_ip_region_menu, cloud_server_detail, cloud_server_list, cloud_server_renew_payment
+from bot.keyboards import _compact_back_button_callback, append_back_callback, balance_details_list, cloud_asset_detail_callback, cloud_auto_renew_callback, cloud_detail_callback, cloud_previous_detail_callback, compact_callback_path, cloud_ip_query_result, cloud_order_list, cloud_order_readonly_detail, cloud_server_change_ip_region_menu, cloud_server_detail, cloud_server_list, cloud_server_renew_payment
 from bot.models import TelegramChatArchive, TelegramChatMessage, TelegramLoginAccount, TelegramUser
 from bot.services import record_telegram_message
 from bot.states import CustomServerStates
@@ -1395,6 +1395,24 @@ class RetainedIpRenewalUiTestCase(SimpleTestCase):
         self.assertIn('cloud:upgrade:88:cloud:querymenu', callbacks)
         self.assertIn('cloud:aa:changeip:99:cloud:querymenu', callbacks)
         self.assertIn('cloud:aa:upgrade:99:cloud:querymenu', callbacks)
+
+    def test_cloud_auto_renew_callbacks_keep_nested_back_under_limit(self):
+        item_id = 999999999999999999
+        back_callback = f'cloud:ad:asset:{item_id}:cloud:list:page:{item_id}'
+        callbacks = [
+            cloud_auto_renew_callback('on', item_id, back_callback),
+            cloud_auto_renew_callback('off', item_id, back_callback),
+        ]
+        source = inspect.getsource(register_handlers)
+        asset_detail_source = source.split('async def cb_cloud_asset_detail', 1)[1].split("@dp.callback_query(F.data.startswith('cloud:assetaction:'))", 1)[0]
+        auto_renew_source = source.split('async def cb_cloud_auto_renew_toggle', 1)[1].split('def _retained_recovery_missing_payment_text', 1)[0]
+
+        self.assertEqual(callbacks[0], f'ao:{item_id}:a:{item_id}:{item_id}')
+        self.assertEqual(callbacks[1], f'af:{item_id}:a:{item_id}:{item_id}')
+        self.assertTrue(all(len(item.encode()) <= 64 for item in callbacks))
+        self.assertIn('cloud_auto_renew_callback(', asset_detail_source)
+        self.assertIn("@dp.callback_query(F.data.startswith('ao:'))", source)
+        self.assertIn("_parse_cloud_auto_renew_callback_data(callback.data)", auto_renew_source)
 
     def test_cloud_upgrade_payment_keeps_back_path(self):
         source = inspect.getsource(register_handlers)

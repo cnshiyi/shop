@@ -5204,6 +5204,44 @@ git diff --check
 - 本轮未执行真实 Telegram 点击、真实云资源创建/删除/IP 变更、真实支付、链上广播、生产发布或不可逆操作。
 - 真机测试仍需在用户明确授权真实云资源成本后，单独按中文报告记录云资源 ID 脱敏结果。
 
+## 2026-06-03 自动续费返回链修复巡检
+
+### 范围
+
+本轮从 `8f7dca6 修复任务中心失败历史状态计数` 继续监工，重点复查云资产生命周期唯一到期事实、后台任务中心统计、机器人资产详情返回链和 Telegram `callback_data` 64 字节限制。
+
+### 修复
+
+- 修复群聊资产详情里的自动续费按钮不携带上一层返回路径的问题，改为统一使用紧凑 callback helper。
+- 新增自动续费短 callback：开启使用 `ao:`，关闭使用 `af:`，在极端大 ID 和嵌套资产详情返回路径下仍保持不超过 64 字节。
+- 自动续费处理器现在同时解析长格式和短格式，并在切换后保留原按钮的返回路径，避免用户从资产详情切换自动续费后丢失上一层上下文。
+
+### 巡检结果
+
+- `CloudAsset.actual_expires_at` 仍是唯一结构化资产到期事实；`CloudServerOrder` 未恢复 `actual_expires_at` 或 `service_expires_at`；`CloudAssetDashboardSnapshot` 未恢复到期字段。
+- 收窄扫描未发现废弃 app 目录或旧退款入口回流；`dashboard_api` 命中仅为当前 URL namespace/helper，不是废弃 app 恢复。
+- 后台任务中心失败历史计数测试仍通过。
+
+### 验证
+
+本地已通过:
+
+```bash
+UV_CACHE_DIR=/private/tmp/shop-uv-cache uv run python -m py_compile bot/keyboards.py bot/handlers.py bot/tests.py cloud/task_center.py cloud/tests_task_center.py
+UV_CACHE_DIR=/private/tmp/shop-uv-cache uv run python manage.py check
+UV_CACHE_DIR=/private/tmp/shop-uv-cache DJANGO_TEST_SQLITE=1 uv run python manage.py test bot.tests.RetainedIpRenewalUiTestCase --verbosity 2
+UV_CACHE_DIR=/private/tmp/shop-uv-cache DJANGO_TEST_SQLITE=1 uv run python manage.py test cloud.tests_task_center --verbosity 2
+UV_CACHE_DIR=/private/tmp/shop-uv-cache uv run python manage.py shell -c "from cloud.models import CloudAsset, CloudServerOrder, CloudAssetDashboardSnapshot; print('CloudAsset.actual_expires_at', any(f.name == 'actual_expires_at' for f in CloudAsset._meta.fields)); print('CloudServerOrder.actual_expires_at', any(f.name == 'actual_expires_at' for f in CloudServerOrder._meta.fields)); print('CloudServerOrder.service_expires_at', any(f.name == 'service_expires_at' for f in CloudServerOrder._meta.fields)); print('CloudAssetDashboardSnapshot.actual_expires_at', any(f.name == 'actual_expires_at' for f in CloudAssetDashboardSnapshot._meta.fields))"
+```
+
+SQLite 聚焦测试仍会打印不支持 `db_comment` 的预期 warning；bot SimpleTestCase 仍会打印配置读取被禁止数据库访问拦截的既有容错日志，最终测试通过。
+
+### 剩余风险
+
+- 本轮未跑完整测试套件。
+- 本轮未执行真实 Telegram 点击、真实云资源创建/删除/IP 变更、真实支付、链上广播、生产发布或不可逆操作。
+- 真机测试仍需在用户明确授权真实云资源成本后，单独按中文报告记录云资源 ID 脱敏结果。
+
 ## 2026-06-03 任务中心失败历史状态计数修复
 
 ### 范围

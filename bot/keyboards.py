@@ -130,6 +130,11 @@ def cloud_asset_action_callback(action: str, asset_id: int, back_callback: str |
     return append_back_callback(f'cloud:aa:{action}:{asset_id}', back_callback)
 
 
+def cloud_auto_renew_callback(action: str, order_id: int, back_callback: str | None = None) -> str:
+    action = 'on' if action == 'on' else 'off'
+    return append_back_callback(f'cloud:autorenew:{action}:{order_id}', back_callback)
+
+
 def cloud_renew_payment_callback(order_id: int, currency: str, back_callback: str | None = None) -> str:
     return append_back_callback(f'cloud:rp:{order_id}:{currency}', back_callback)
 
@@ -242,6 +247,10 @@ def _shorten_callback_base(callback_data: str) -> str:
         return f'ai:{parts[2]}'
     if len(parts) >= 4 and parts[:2] == ['cloud', 'aa']:
         action_code = {'renew': 'ar', 'changeip': 'ac', 'upgrade': 'au'}.get(parts[2])
+        if action_code:
+            return f'{action_code}:{parts[3]}'
+    if len(parts) >= 4 and parts[:2] == ['cloud', 'autorenew']:
+        action_code = {'on': 'ao', 'off': 'af'}.get(parts[2])
         if action_code:
             return f'{action_code}:{parts[3]}'
     return text

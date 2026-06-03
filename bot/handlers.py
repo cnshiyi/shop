@@ -43,7 +43,7 @@ from bot.keyboards import (
     cloud_server_change_ip_region_menu,
     cart_menu, wallet_recharge_prompt_menu, cloud_ip_query_result,
     cloud_query_menu, configured_link_for_label, configured_link_menu,
-    cloud_detail_callback, cloud_asset_detail_callback, cloud_previous_detail_callback, cloud_asset_action_callback, append_back_callback, compact_callback_path, expand_compact_region_code,
+    cloud_detail_callback, cloud_asset_detail_callback, cloud_previous_detail_callback, cloud_asset_action_callback, cloud_auto_renew_callback, append_back_callback, compact_callback_path, expand_compact_region_code,
     _compact_back_button_callback,
 )
 from bot.services import create_admin_reply_link, get_admin_reply_link, get_admin_reply_link_by_id, get_or_create_user, get_admin_forward_mute_status, is_admin_forward_muted, mute_admin_forward_for_days, record_bot_operation_log, record_telegram_message, should_forward_telegram_group
@@ -164,6 +164,27 @@ _CUSTOM_CLOUD_MAX_QUANTITY = 99
 _NOTICE_COPY_SENDING = contextvars.ContextVar('notice_copy_sending', default=False)
 TRONGRID_BASE_URL = 'https://api.trongrid.io'
 USDT_CONTRACT = 'TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t'
+
+
+def _parse_cloud_auto_renew_callback_data(callback_data: str | None) -> tuple[str, int, str] | None:
+    text = str(callback_data or '').strip()
+    if text.startswith(('ao:', 'af:')):
+        parts = text.split(':', 2)
+        if len(parts) < 2:
+            return None
+        action = 'on' if parts[0] == 'ao' else 'off'
+        order_id_text = parts[1]
+        back_callback = compact_callback_path(parts[2]) if len(parts) > 2 else ''
+    else:
+        parts = text.split(':', 4)
+        if len(parts) < 4 or parts[:2] != ['cloud', 'autorenew']:
+            return None
+        action = parts[2]
+        order_id_text = parts[3]
+        back_callback = compact_callback_path(parts[4]) if len(parts) > 4 else ''
+    if action not in {'on', 'off'} or not str(order_id_text).isdigit():
+        return None
+    return action, int(order_id_text), back_callback
 
 
 def _extract_query_ip(raw_text: str) -> str:
@@ -4187,7 +4208,7 @@ def register_handlers(dp: Dispatcher):
             if item_order_id:
                 rows.append([
                     InlineKeyboardButton(text='🔄 续费', callback_data=append_back_callback(f'cloud:renew:{item_order_id}', back_callback)),
-                    InlineKeyboardButton(text=f'{"⛔ 关闭" if getattr(item, "auto_renew_enabled", False) else "⚡ 开启"}自动续费', callback_data=f'cloud:autorenew:{"off" if getattr(item, "auto_renew_enabled", False) else "on"}:{item_order_id}'),
+                    InlineKeyboardButton(text=f'{"⛔ 关闭" if getattr(item, "auto_renew_enabled", False) else "⚡ 开启"}自动续费', callback_data=cloud_auto_renew_callback('off' if getattr(item, "auto_renew_enabled", False) else 'on', item_order_id, back_callback)),
                 ])
             else:
                 rows.append([InlineKeyboardButton(text='🔄 续费', callback_data=cloud_asset_action_callback('renew', item_id, back_callback))])
@@ -4682,11 +4703,16 @@ def register_handlers(dp: Dispatcher):
             f'✅ 开机检查完成\n\n订单: {order_no}\nIP: {ip}\n状态: {note}',
         )
 
+    @dp.callback_query(F.data.startswith('ao:'))
+    @dp.callback_query(F.data.startswith('af:'))
     @dp.callback_query(F.data.startswith('cloud:autorenew:'))
     async def cb_cloud_auto_renew_toggle(callback: CallbackQuery):
         user = await get_or_create_user(callback.from_user.id, callback.from_user.username, callback.from_user.first_name)
-        _, _, action, order_id_text = callback.data.split(':')
-        order_id = int(order_id_text)
+        parsed = _parse_cloud_auto_renew_callback_data(callback.data)
+        if not parsed:
+            await _safe_callback_answer(callback, '自动续费参数无效', show_alert=True)
+            return
+        action, order_id, back_callback = parsed
         enabled = action == 'on'
         is_admin = await _is_admin_chat(callback.message)
         group_context = await _is_group_visible_order(callback, order_id)
@@ -4715,13 +4741,13 @@ def register_handlers(dp: Dispatcher):
             new_markup = None
             if current_markup:
                 rows = []
-                target_on = f'cloud:autorenew:on:{order.id}'
-                target_off = f'cloud:autorenew:off:{order.id}'
                 for row in current_markup.inline_keyboard:
                     new_row = []
                     for button in row:
-                        if button.callback_data in {target_on, target_off}:
-                            new_row.append(InlineKeyboardButton(text=f'{"⛔ 关闭" if enabled else "⚡ 开启"}自动续费', callback_data=target_off if enabled else target_on))
+                        button_parsed = _parse_cloud_auto_renew_callback_data(button.callback_data)
+                        if button_parsed and button_parsed[1] == order.id:
+                            button_back_callback = button_parsed[2] or back_callback
+                            new_row.append(InlineKeyboardButton(text=f'{"⛔ 关闭" if enabled else "⚡ 开启"}自动续费', callback_data=cloud_auto_renew_callback('off' if enabled else 'on', order.id, button_back_callback)))
                         else:
                             new_row.append(button)
                     rows.append(new_row)
