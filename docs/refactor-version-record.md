@@ -6970,3 +6970,56 @@ find . -maxdepth 2 -type d \( -name accounts -o -name finance -o -name mall -o -
 - 本轮未执行真实 Telegram 点击、真实云资源创建/删除/IP 变更、真实支付、链上广播、生产发布或不可逆操作。
 - 真机测试仍需在用户明确授权真实云资源成本后，单独按中文报告记录云资源 ID 脱敏结果。
 - 工作树仍保留其它未提交路由/文档/测试路径改动，本轮不纳入提交。
+
+## 2026-06-03 真机测试计划复查收尾
+
+- 本轮按 `TODO.md` 真机测试计划复查执行；没有获得用户明确授权真实云资源成本，因此未执行真实云资源创建、删除、IP 变更、附加 IP / 固定 IP 变更、续费、真实支付或链上广播。
+- 已在 `docs/real-machine-test-report.md` 新增 2026-06-03 计划复查记录，明确后续执行前置条件和脱敏要求。
+- 已覆盖更新 `docs/auto-optimization-latest.md`，并将 `TODO.md` 固定任务全部勾选；下一轮如无新增任务，按固定巡检清单做只读巡检。
+- 本轮验证通过：`manage.py check`、任务中心/数据库测试文件 Python 编译、字段内省、红线关键字扫描、废弃 app 目录扫描和 `git diff --check`。
+- 剩余风险：未跑完整测试套件；未执行真实 Telegram 点击；所有真机验证仍需用户明确授权真实云资源成本后单独记录。
+
+## 2026-06-03 本地数据库差异复查
+
+### 范围
+
+本轮继续监工 Shop Django 后端，先读取自动化记忆、当前 git 状态、最近提交、`docs/auto-optimization-control.md`、`docs/auto-optimization-latest.md`、版本记录末尾、`AGENTS.md` 和 `TODO.md`。按 `TODO.md` 第一项未完成任务，聚焦确认默认 MySQL/MariaDB 环境和 SQLite 聚焦测试不会隐藏字段、迁移或测试行为差异。
+
+### 发现
+
+- 本轮开始时工作树已有其它未提交路由、文档和测试路径改动，例如 `shop/admin_urls.py`、`shop/auth_urls.py`、`shop/urls.py`、`shop/dashboard_urls.py` 删除，以及后台 API 路径从 `/api/dashboard` 到 `/api/admin` 的测试调整；本轮未回退、未覆盖这些既有改动。
+- `manage.py check` 在默认 MySQL 配置下通过。
+- 默认 MySQL/MariaDB 的 `migrate --plan` 在当前沙箱会失败：Django MySQL 后端字段检查需要读取服务器版本特性，连接 `127.0.0.1:3306` 时被沙箱拒绝，不能据此判断迁移图异常。
+- `DJANGO_TEST_SQLITE=1` 的 `migrate --plan` 可生成完整迁移计划，但 SQLite 会打印不支持 `db_comment` 和 `db_table_comment` 的预期 warning。
+- `DJANGO_TEST_SQLITE=1` 字段内省确认：`CloudAsset` 到期字段仍只有 `actual_expires_at`；`CloudServerOrder` 未恢复 `actual_expires_at` 或 `service_expires_at`；`CloudAssetDashboardSnapshot` 未恢复到期字段。
+- `core.tests.SiteConfigCacheTestCase.test_set_invalidates_async_config_cache` 在内存 SQLite 下失败，原因是 `TestCase` 外层事务锁住 `core_site_config`，`async_to_sync(get_config)` 通过异步连接读取时触发 SQLite 表锁并返回默认值；这会让 SQLite 聚焦测试误报配置缓存行为差异。
+
+### 修改
+
+- `core/tests.py` 将 `SiteConfigCacheTestCase` 从 `TestCase` 调整为 `TransactionTestCase`，让跨同步/异步连接的缓存失效测试在 SQLite 下使用可见的已提交数据，保留原测试意图。
+- 覆盖更新 `docs/auto-optimization-latest.md`。
+- `TODO.md` 勾选本地数据库差异复查。
+
+### 验证
+
+本地已通过：
+
+```bash
+UV_CACHE_DIR=/private/tmp/uv-cache-shop PYTHONDONTWRITEBYTECODE=1 uv run python manage.py check
+UV_CACHE_DIR=/private/tmp/uv-cache-shop PYTHONDONTWRITEBYTECODE=1 uv run python -m py_compile core/tests.py shop/settings.py core/models.py core/cache.py
+DJANGO_TEST_SQLITE=1 UV_CACHE_DIR=/private/tmp/uv-cache-shop PYTHONDONTWRITEBYTECODE=1 uv run python manage.py test core.tests --settings=shop.settings --verbosity=2
+DJANGO_TEST_SQLITE=1 UV_CACHE_DIR=/private/tmp/uv-cache-shop PYTHONDONTWRITEBYTECODE=1 uv run python manage.py makemigrations --check --dry-run
+UV_CACHE_DIR=/private/tmp/uv-cache-shop PYTHONDONTWRITEBYTECODE=1 uv run python manage.py makemigrations --check --dry-run
+DJANGO_TEST_SQLITE=1 UV_CACHE_DIR=/private/tmp/uv-cache-shop PYTHONDONTWRITEBYTECODE=1 uv run python manage.py migrate --plan --noinput
+DJANGO_TEST_SQLITE=1 UV_CACHE_DIR=/private/tmp/uv-cache-shop PYTHONDONTWRITEBYTECODE=1 uv run python manage.py shell -c "from django.conf import settings; from django.db import connection; from cloud.models import CloudAsset, CloudServerOrder, CloudAssetDashboardSnapshot; print('engine', settings.DATABASES['default']['ENGINE']); print('name', settings.DATABASES['default']['NAME']); print('vendor', connection.vendor); print('asset_expiry_fields', [f.name for f in CloudAsset._meta.fields if 'expires' in f.name or 'expiry' in f.name]); print('order_removed_expiry_fields', [f.name for f in CloudServerOrder._meta.fields if f.name in {'actual_expires_at','service_expires_at'}]); print('snapshot_expiry_like_fields', [f.name for f in CloudAssetDashboardSnapshot._meta.fields if 'expires' in f.name or 'expiry' in f.name or f.name=='actual_expires_at'])"
+```
+
+结果：`manage.py check`、编译检查、SQLite `core.tests` 14 个测试、SQLite/默认 `makemigrations --check --dry-run` 和字段内省均通过；默认 `makemigrations` 仍有本地 MySQL 沙箱连接 warning 但最终显示 `No changes detected`。默认 `migrate --plan` 因当前沙箱禁止连接本地 MySQL 而失败，已记录为环境限制。SQLite `migrate --plan` 会打印大量 `db_comment` warning，但可生成完整迁移计划。
+
+### 剩余风险
+
+- 本轮未在真实 MySQL/MariaDB 上执行 `migrate --plan`，因为当前沙箱禁止连接 `127.0.0.1:3306`。
+- 本轮未跑完整测试套件。
+- 本轮未执行真实 Telegram 点击、真实云资源创建/删除/IP 变更、真实支付、链上广播、生产发布或不可逆操作。
+- 真机测试仍需在用户明确授权真实云资源成本后，单独按中文报告记录云资源 ID 脱敏结果。
+- 工作树仍保留其它未提交路由/文档/测试路径改动，本轮不纳入提交。

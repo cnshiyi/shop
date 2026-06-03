@@ -4,28 +4,28 @@
 
 ## 最近一轮
 
-- 时间：2026-06-03 14:51 CST
-- 状态：已修复后台任务中心对到期持久化 pending 任务的漏报。
+- 时间：2026-06-03 15:02 CST
+- 状态：已完成真机测试计划复查；未获得真实云资源成本授权，因此未执行任何真实云操作。
 - 最近提交：本轮提交后以 `git log -1` 为准。
-- 本轮改动：`cloud/task_center.py` 将到期 `CloudLifecycleTask.STATUS_PENDING` 和 `CloudNoticeTask.STATUS_PENDING` 纳入生命周期/通知 section 的 active、total、status_counts 和 items；`cloud/tests_task_center.py` 补充无计划项/无通知日志时 pending DB 任务仍出现在总览的聚焦测试；`TODO.md` 勾选后台任务中心和状态统计复查。
-- 本轮结论：云资产同步 worker、自动续费重试、生命周期计划和通知计划的任务中心聚合继续可见；本轮补齐了计划 bundle 或历史日志缺失时，持久化到期待执行/待通知任务被后台总览漏报的问题。
+- 本轮改动：`docs/real-machine-test-report.md` 新增未授权计划复查记录；`TODO.md` 勾选真机测试计划复查；覆盖更新本文件并追加版本记录。
+- 本轮结论：现有真机报告继续保留 2026-06-02 的脱敏真实测试记录，灰色地带续费和人工创建无订单资产仍为待授权执行项；后续必须先获得用户明确授权真实云资源成本，才可执行创建、删除、IP 变更、附加 IP / 固定 IP 变更、续费、生命周期、通知计划或删除计划真机验证。
 
 ## 最近验证
 
 - `UV_CACHE_DIR=/private/tmp/uv-cache-shop PYTHONDONTWRITEBYTECODE=1 uv run python manage.py check` 通过。
-- `UV_CACHE_DIR=/private/tmp/uv-cache-shop PYTHONDONTWRITEBYTECODE=1 uv run python -m py_compile cloud/task_center.py cloud/tests_task_center.py cloud/api_tasks.py cloud/lifecycle_tasks.py cloud/sync_jobs.py` 通过。
-- `UV_CACHE_DIR=/private/tmp/uv-cache-shop DJANGO_TEST_SQLITE=1 PYTHONDONTWRITEBYTECODE=1 uv run python manage.py test cloud.tests_task_center --settings=shop.settings --verbosity=2` 通过，共 14 个测试。
-- `UV_CACHE_DIR=/private/tmp/uv-cache-shop PYTHONDONTWRITEBYTECODE=1 uv run python manage.py makemigrations --check --dry-run` 输出 `No changes detected`，仍有本地 MySQL 沙箱连接 warning。
+- `UV_CACHE_DIR=/private/tmp/uv-cache-shop PYTHONDONTWRITEBYTECODE=1 uv run python -m py_compile cloud/task_center.py cloud/tests_task_center.py core/tests.py` 通过。
+- `DJANGO_TEST_SQLITE=1 UV_CACHE_DIR=/private/tmp/uv-cache-shop PYTHONDONTWRITEBYTECODE=1 uv run python manage.py shell -c "from django.apps import apps; from cloud.models import CloudAsset, CloudServerOrder, CloudAssetDashboardSnapshot; retired={'accounts','finance','mall','monitoring','dashboard_api','biz'}; installed={c.label for c in apps.get_app_configs()}; print('retired_installed', sorted(retired & installed)); print('CloudAsset expiry fields', [f.name for f in CloudAsset._meta.fields if 'expires' in f.name or 'expiry' in f.name]); print('CloudServerOrder removed expiry fields', [f.name for f in CloudServerOrder._meta.fields if f.name in {'actual_expires_at','service_expires_at'}]); print('CloudAssetDashboardSnapshot expiry fields', [f.name for f in CloudAssetDashboardSnapshot._meta.fields if 'expires' in f.name or 'expiry' in f.name or f.name=='actual_expires_at'])"` 确认废弃 app 未安装、订单到期字段未恢复、资产到期事实仍为 `CloudAsset.actual_expires_at`。
+- 红线关键字扫描未发现订单服务到期字段、旧计划快照、旧退款函数名或废弃 runtime app 回流。
+- `find . -maxdepth 2 -type d \( -name accounts -o -name finance -o -name mall -o -name monitoring -o -name dashboard_api -o -name biz \) -print` 未发现废弃 runtime app 目录回流。
 - `git diff --check` 通过。
-- 红线扫描未发现订单服务到期字段、旧计划快照、旧退款函数名或废弃 runtime app 回流；命中项仍为固定 IP 回收、资产侧 `actual_expires_at` 派生使用和测试数据。
 
 ## 剩余风险
 
-- 工作树仍存在其它未提交路由/文档/测试路径改动，本轮未回退；提交时只暂存本轮任务中心修复、聚焦测试和中文记录。
+- 工作树仍存在其它未提交路由、文档和测试路径改动，本轮未回退；提交时只暂存真机计划复查相关文档和必要自动化记录。
+- 本轮未执行真机测试，因为没有用户明确授权真实云资源成本。
 - 本轮未跑完整测试套件。
 - 本轮未执行真实 Telegram 点击、真实云资源、真实支付、链上广播、生产发布或不可逆操作。
-- SQLite 聚焦测试仍会打印不支持 `db_comment` 的预期 warning；`makemigrations --check --dry-run` 在默认 MySQL 连接被沙箱拒绝时仍会打印一致性检查 warning，但最终显示无迁移变化。
 
 ## 下一步
 
-- 下一轮领取 `TODO.md` 中本地数据库差异复查，继续确认默认 MySQL/MariaDB 环境和 SQLite 聚焦测试不会隐藏字段、迁移或行为差异。
+- `TODO.md` 当前固定任务已全部勾选；下一轮如无新增明确任务，按 `docs/auto-optimization-control.md` 固定巡检清单做只读巡检，重点继续看机器人返回链、云资产生命周期唯一到期事实、后台任务中心可观测性和红线回流。
