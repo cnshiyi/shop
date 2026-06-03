@@ -83,6 +83,7 @@ class CloudTaskCenterApiTestCase(TestCase):
             section = _notice_section(now)
 
         self.assertEqual(section['failed'], 1)
+        self.assertEqual(section['total'], 1)
         self.assertEqual(section['health'], 'error')
         self.assertEqual(section['items'][0]['note'], 'Bot失败；后续生命周期巡检会重试')
 
@@ -128,6 +129,7 @@ class CloudTaskCenterApiTestCase(TestCase):
             section = _auto_renew_section(now)
 
         self.assertEqual(section['failed'], 1)
+        self.assertEqual(section['total'], 1)
         self.assertEqual(section['health'], 'error')
         self.assertEqual(section['items'][0]['order_no'], 'AUTO-HISTORY-FAILED-1')
         self.assertEqual(section['items'][0]['note'], '云厂商续费失败')
@@ -185,6 +187,7 @@ class CloudTaskCenterApiTestCase(TestCase):
             section = _auto_renew_section(now)
 
         self.assertEqual(section['failed'], 9)
+        self.assertEqual(section['total'], 9)
         self.assertEqual(section['health'], 'error')
         self.assertEqual(len(section['items']), 8)
 
@@ -235,5 +238,6 @@ class CloudTaskCenterApiTestCase(TestCase):
             section = _lifecycle_section(now)
 
         self.assertEqual(section['failed'], 1)
+        self.assertEqual(section['total'], 1)
         self.assertEqual(section['health'], 'error')
         self.assertEqual(section['items'][0]['note'], '删除任务执行失败')
