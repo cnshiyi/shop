@@ -1,5 +1,53 @@
 # 重构版本记录
 
+## 2026-06-03 11:32 自动监工：修复任务中心执行记录漏报
+
+### 范围
+
+本轮从提交 `e4749aa 记录自动续费返回链巡检` 后继续监工。起始读取 git 状态时工作树存在上一轮自动化未提交的 `cloud/task_center.py`、`cloud/tests_task_center.py` 修改，本轮在确认差异后继续完成验证和收尾。
+
+重点复查后台任务中心、云生命周期执行记录、通知计划执行记录、`CloudAsset.actual_expires_at` 唯一到期事实、订单旧到期字段、计划快照、旧退款入口、废弃 app 回流，以及机器人返回链和 Telegram `callback_data` 64 字节限制。
+
+### 修改
+
+- 修复后台任务中心 `lifecycle` 分区只依赖计划 bundle 和 `CloudIpLog` 历史的问题：现在会纳入最近 24 小时内 `CloudLifecycleTask` 的执行中和失败记录，避免执行器失败但未写入历史日志时后台总览漏报。
+- 修复后台任务中心 `notices` 分区只依赖通知计划和用户通知日志的问题：现在会纳入最近 24 小时内 `CloudNoticeTask` 的通知中和失败记录，避免 Bot 通知任务失败但未写入用户通知日志时漏报。
+- 生命周期 DB 执行记录会按订单、资产或 IP 与计划项去重；当同一对象同时存在计划项和执行器失败记录时，总览优先展示执行器错误，避免 total、active、failed 和 `status_counts` 重复计数。
+- DB 执行记录统一补充 `last_error`、`failure_reason`、`note`、`detail_path` 和 `related_path`，后台任务中心卡片可以直接展示失败原因和跳转目标。
+- 补充 `cloud.tests_task_center` 聚焦测试，覆盖生命周期 DB 失败无历史日志、生命周期 DB 失败与计划项重复、通知 DB 失败无用户通知日志。
+
+### 监工结果
+
+- `CloudAsset` 仍只有 `actual_expires_at` 作为结构化资产到期事实。
+- `CloudServerOrder` 未恢复 `service_expires_at` 或 `actual_expires_at`。
+- `CloudAssetDashboardSnapshot` 未恢复资产到期字段；仅保留 `risk_expired` 风险布尔字段。
+- 旧退款函数名、旧退款状态、旧端口入口和废弃 app runtime 导入扫描无命中；`dashboard_api` 仍仅为当前 URL namespace。
+- 机器人返回链聚焦测试继续通过，覆盖资产详情、订单详情、续费、换 IP、重装、修改配置和 IP 查询结果等 callback 边界。
+- 真机测试未执行：本轮未执行真实 Telegram 点击、真实云资源创建/删除/IP 变更、真实支付、链上广播、生产发布或不可逆操作。
+
+### 验证
+
+本地已通过：
+
+```bash
+UV_CACHE_DIR=/private/tmp/shop-uv-cache uv run python manage.py check
+UV_CACHE_DIR=/private/tmp/shop-uv-cache uv run python -m py_compile bot/keyboards.py bot/handlers.py cloud/api_tasks.py bot/api.py cloud/task_center.py cloud/tests_task_center.py
+UV_CACHE_DIR=/private/tmp/shop-uv-cache DJANGO_TEST_SQLITE=1 uv run python manage.py test cloud.tests_task_center --verbosity 1
+UV_CACHE_DIR=/private/tmp/shop-uv-cache DJANGO_TEST_SQLITE=1 uv run python manage.py test bot.tests.RetainedIpRenewalUiTestCase --verbosity 1
+UV_CACHE_DIR=/private/tmp/shop-uv-cache DJANGO_TEST_SQLITE=1 uv run python manage.py shell -c "from django.conf import settings; retired={'accounts','finance','mall','monitoring','dashboard_api','biz'}; print('retired_apps', [app for app in settings.INSTALLED_APPS if app.split('.')[0] in retired]); from cloud.models import CloudAsset, CloudServerOrder, CloudAssetDashboardSnapshot; print('asset_expiry_fields', [f.name for f in CloudAsset._meta.fields if 'expire' in f.name or 'expiry' in f.name]); print('order_removed_expiry_fields', [f.name for f in CloudServerOrder._meta.fields if f.name in {'actual_expires_at','service_expires_at'}]); print('snapshot_expiry_fields', [f.name for f in CloudAssetDashboardSnapshot._meta.fields if 'expire' in f.name or 'expiry' in f.name or f.name == 'actual_expires_at'])"
+rg -n "service_expires_at|CloudAssetPlanSnapshot|CloudOrderPlanSnapshot|refund_cloud_server_order|refund_cloud_order|refund_order|process_refund|create_refund|issue_refund|refund_to_balance|refund_balance|STATUS_REFUNDED|status=['\"]refunded|allow_client_port|set_cloud_server_port|custom:port|cloud:ipport" bot core orders cloud shop --glob '!**/migrations/**' --glob '!**/tests.py' --glob '!**/tests_*.py'
+rg -n "from (accounts|finance|mall|monitoring|dashboard_api|biz)\b|include\(.*(accounts|finance|mall|monitoring|dashboard_api|biz)" shop core bot orders cloud --glob '!**/migrations/**'
+git diff --check
+```
+
+SQLite 聚焦测试仍会打印不支持 `db_comment` 的预期 warning；`RetainedIpRenewalUiTestCase` 仍会打印 `SimpleTestCase` 禁止数据库查询配置的既有容错日志和 mocked postcheck 异常日志，最终均为 OK。
+
+### 剩余风险
+
+- 本轮未跑完整测试套件。
+- 本轮未执行真实 Telegram 点击、真实云资源创建/删除/IP 变更、真实支付、链上广播、生产发布或不可逆操作。
+- 真机测试仍需在用户明确授权真实云资源成本后单独执行，并写中文报告，云资源 ID 需脱敏。
+
 ## 2026-06-03 10:34 自动监工：复查生命周期事实与任务总览
 
 ### 范围

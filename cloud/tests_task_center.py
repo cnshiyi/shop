@@ -5,11 +5,43 @@ from django.contrib.auth import get_user_model
 from django.test import RequestFactory, TestCase
 from django.utils import timezone
 
-from cloud.models import CloudAssetSyncJob, CloudAutoRenewPatrolLog
+from bot.models import TelegramUser
+from cloud.models import (
+    CloudAssetSyncJob,
+    CloudAutoRenewPatrolLog,
+    CloudLifecycleTask,
+    CloudNoticeTask,
+    CloudServerOrder,
+    CloudServerPlan,
+)
 from cloud.task_center import _auto_renew_section, _lifecycle_section, _notice_section, task_center_overview
 
 
 class CloudTaskCenterApiTestCase(TestCase):
+    def _create_cloud_order(self, order_no='TASK-CENTER-ORDER-1'):
+        user = TelegramUser.objects.create(tg_user_id=900001, username='task_center_user')
+        plan = CloudServerPlan.objects.create(
+            provider='aws_lightsail',
+            region_code='us-east-1',
+            region_name='美国东部',
+            plan_name='Task center plan',
+            price='10.000000',
+            currency='USDT',
+        )
+        return CloudServerOrder.objects.create(
+            order_no=order_no,
+            user=user,
+            plan=plan,
+            provider='aws_lightsail',
+            region_code='us-east-1',
+            region_name='美国东部',
+            plan_name=plan.plan_name,
+            total_amount='10.000000',
+            pay_amount='10.000000000',
+            status='completed',
+            public_ip='1.1.3.1',
+        )
+
     def test_task_center_overview_returns_unified_sections(self):
         user = get_user_model().objects.create_user(
             username='task_center_staff',
@@ -245,3 +277,98 @@ class CloudTaskCenterApiTestCase(TestCase):
         self.assertEqual(section['health'], 'error')
         self.assertEqual(section['items'][0]['note'], '删除任务执行失败')
         self.assertEqual(section['status_counts']['failed'], 1)
+
+    def test_lifecycle_section_counts_failed_db_task_without_history_log(self):
+        now = timezone.now()
+        order = self._create_cloud_order('TASK-LIFECYCLE-DB-FAILED-1')
+        CloudLifecycleTask.objects.create(
+            source_key='task-center-lifecycle-db-failed',
+            task_type=CloudLifecycleTask.TASK_DELETE,
+            source_kind=CloudLifecycleTask.SOURCE_ORDER,
+            order=order,
+            user=order.user,
+            scheduled_at=now,
+            status=CloudLifecycleTask.STATUS_FAILED,
+            last_error='生命周期执行器失败但没有历史日志',
+            last_run_at=now,
+        )
+
+        with patch('bot.api._build_lifecycle_plan_bundle', return_value={
+            'due_items': [],
+            'future_plan_items': [],
+            'ip_delete_items': [],
+            'history_items': [],
+        }):
+            section = _lifecycle_section(now)
+
+        self.assertEqual(section['failed'], 1)
+        self.assertEqual(section['total'], 1)
+        self.assertEqual(section['health'], 'error')
+        self.assertEqual(section['items'][0]['note'], '生命周期执行器失败但没有历史日志')
+        self.assertEqual(section['status_counts']['failed'], 1)
+
+    def test_lifecycle_section_prefers_db_task_over_duplicate_plan_item(self):
+        now = timezone.now()
+        order = self._create_cloud_order('TASK-LIFECYCLE-DB-DUP-1')
+        CloudLifecycleTask.objects.create(
+            source_key='task-center-lifecycle-db-duplicate',
+            task_type=CloudLifecycleTask.TASK_DELETE,
+            source_kind=CloudLifecycleTask.SOURCE_ORDER,
+            order=order,
+            user=order.user,
+            scheduled_at=now,
+            status=CloudLifecycleTask.STATUS_FAILED,
+            last_error='执行器失败记录优先于计划项',
+            last_run_at=now,
+        )
+
+        with patch('bot.api._build_lifecycle_plan_bundle', return_value={
+            'due_items': [
+                {
+                    'id': 'active-plan-duplicate',
+                    'order_id': order.id,
+                    'order_no': order.order_no,
+                    'queue_status': 'due_now',
+                    'queue_status_label': '待执行',
+                    'provider': order.provider,
+                    'ip': order.public_ip,
+                    'failure_reason': '计划项失败不应重复计数',
+                },
+            ],
+            'future_plan_items': [],
+            'ip_delete_items': [],
+            'history_items': [],
+        }):
+            section = _lifecycle_section(now)
+
+        self.assertEqual(section['failed'], 1)
+        self.assertEqual(section['total'], 1)
+        self.assertEqual(section['active'], 0)
+        self.assertEqual(section['items'][0]['note'], '执行器失败记录优先于计划项')
+        self.assertEqual(section['status_counts'], {'failed': 1})
+
+    def test_notice_section_counts_failed_db_task_without_notice_log(self):
+        now = timezone.now()
+        order = self._create_cloud_order('TASK-NOTICE-DB-FAILED-1')
+        CloudNoticeTask.objects.create(
+            source_key='task-center-notice-db-failed',
+            notice_type=CloudNoticeTask.NOTICE_DELETE,
+            order=order,
+            user=order.user,
+            notice_at=now,
+            status=CloudNoticeTask.STATUS_FAILED,
+            last_error='通知任务失败但没有用户通知日志',
+            last_run_at=now,
+        )
+
+        with patch('cloud.api_tasks._build_notice_plan_bundle', return_value={
+            'active_items': [],
+            'history_items': [],
+        }):
+            section = _notice_section(now)
+
+        self.assertEqual(section['failed'], 1)
+        self.assertEqual(section['total'], 1)
+        self.assertEqual(section['health'], 'error')
+        self.assertEqual(section['items'][0]['note'], '通知任务失败但没有用户通知日志')
+        self.assertEqual(section['status_counts']['failed_retry'], 1)

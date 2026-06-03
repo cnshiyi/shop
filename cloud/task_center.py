@@ -7,6 +7,8 @@ from django.views.decorators.http import require_GET
 
 from cloud.models import (
     CloudAssetSyncJob,
+    CloudLifecycleTask,
+    CloudNoticeTask,
     CloudServerOrder,
 )
 from cloud.sync_jobs import _cloud_asset_sync_job_payload, _cloud_asset_sync_jobs_metrics_payload
@@ -68,6 +70,19 @@ def _task_identity(item: dict) -> tuple:
         item.get('asset_id') or '',
         item.get('ip') or item.get('public_ip') or '',
     )
+
+
+def _lifecycle_task_identity(item: dict) -> tuple:
+    order_id = item.get('order_id')
+    if order_id:
+        return ('order', order_id)
+    asset_id = item.get('asset_id')
+    if asset_id:
+        return ('asset', asset_id)
+    ip = item.get('ip') or item.get('public_ip')
+    if ip:
+        return ('ip', ip)
+    return ('raw', _task_identity(item))
 
 
 def _recent_failed_history_items(items, *, since, exclude_keys=None) -> list[dict]:
@@ -235,6 +250,132 @@ def _plan_item(row, *, task_type: str, task_label: str) -> dict:
     }
 
 
+def _lifecycle_task_db_item(task: CloudLifecycleTask) -> dict:
+    order = getattr(task, 'order', None)
+    asset = getattr(task, 'asset', None)
+    provider = getattr(asset, 'provider', None) or getattr(order, 'provider', '') or ''
+    public_ip = (
+        getattr(asset, 'public_ip', None)
+        or getattr(asset, 'previous_public_ip', None)
+        or getattr(order, 'public_ip', None)
+        or getattr(order, 'previous_public_ip', None)
+        or ''
+    )
+    queue_status = 'failed' if task.status == CloudLifecycleTask.STATUS_FAILED else task.status
+    task_type_label = _status_label(task.task_type, CloudLifecycleTask.TASK_TYPE_CHOICES)
+    status_label = _status_label(task.status, CloudLifecycleTask.STATUS_CHOICES)
+    return {
+        'id': f'lifecycle-db:{task.id}',
+        'source_key': task.source_key,
+        'task_type': task.task_type,
+        'task_label': task_type_label,
+        'status': queue_status,
+        'status_label': status_label,
+        'queue_status': queue_status,
+        'queue_status_label': status_label,
+        'execution_status': queue_status,
+        'execution_status_label': status_label,
+        'provider': provider,
+        'provider_label': _provider_label(provider),
+        'order_id': task.order_id,
+        'order_no': getattr(order, 'order_no', '') or '',
+        'asset_id': task.asset_id,
+        'public_ip': public_ip,
+        'last_error': task.last_error or '',
+        'failure_reason': task.last_error or '',
+        'note': task.last_error or '',
+        'created_at': _iso(task.created_at),
+        'updated_at': _iso(task.updated_at),
+        'next_run_at': _iso(task.scheduled_at),
+        'related_path': (
+            f'/admin/cloud-orders/{task.order_id}'
+            if task.order_id else (f'/admin/cloud-assets/{task.asset_id}' if task.asset_id else '')
+        ),
+        'detail_path': (
+            f'/admin/cloud-orders/{task.order_id}'
+            if task.order_id else (f'/admin/cloud-assets/{task.asset_id}' if task.asset_id else '')
+        ),
+    }
+
+
+def _notice_task_db_item(task: CloudNoticeTask) -> dict:
+    order = getattr(task, 'order', None)
+    asset = getattr(task, 'asset', None)
+    provider = getattr(asset, 'provider', None) or getattr(order, 'provider', '') or ''
+    public_ip = (
+        getattr(asset, 'public_ip', None)
+        or getattr(asset, 'previous_public_ip', None)
+        or getattr(order, 'public_ip', None)
+        or getattr(order, 'previous_public_ip', None)
+        or ''
+    )
+    notice_status = 'failed_retry' if task.status == CloudNoticeTask.STATUS_FAILED else task.status
+    notice_type_label = _status_label(task.notice_type, CloudNoticeTask.NOTICE_TYPE_CHOICES)
+    status_label = _status_label(task.status, CloudNoticeTask.STATUS_CHOICES)
+    return {
+        'id': f'notice-db:{task.id}',
+        'source_key': task.source_key,
+        'task_type': task.notice_type,
+        'task_label': notice_type_label,
+        'notice_type': task.notice_type,
+        'notice_type_label': notice_type_label,
+        'status': notice_status,
+        'status_label': status_label,
+        'notice_status': notice_status,
+        'notice_status_label': status_label,
+        'queue_status': notice_status,
+        'queue_status_label': status_label,
+        'execution_status': notice_status,
+        'execution_status_label': status_label,
+        'provider': provider,
+        'provider_label': _provider_label(provider),
+        'order_id': task.order_id,
+        'order_no': getattr(order, 'order_no', '') or '',
+        'asset_id': task.asset_id,
+        'public_ip': public_ip,
+        'last_error': task.last_error or '',
+        'failure_reason': task.last_error or '',
+        'note': task.last_error or '',
+        'created_at': _iso(task.created_at),
+        'updated_at': _iso(task.updated_at),
+        'next_run_at': _iso(task.notice_at),
+        'related_path': (
+            f'/admin/cloud-orders/{task.order_id}'
+            if task.order_id else (f'/admin/cloud-assets/{task.asset_id}' if task.asset_id else '')
+        ),
+        'detail_path': (
+            f'/admin/cloud-orders/{task.order_id}'
+            if task.order_id else (f'/admin/cloud-assets/{task.asset_id}' if task.asset_id else '')
+        ),
+    }
+
+
+def _recent_lifecycle_db_task_items(now) -> list[dict]:
+    queryset = (
+        CloudLifecycleTask.objects
+        .select_related('order', 'asset')
+        .filter(
+            status__in=[CloudLifecycleTask.STATUS_CLAIMED, CloudLifecycleTask.STATUS_FAILED],
+            updated_at__gte=now - timezone.timedelta(days=1),
+        )
+        .order_by('-updated_at', '-id')[:1000]
+    )
+    return [_lifecycle_task_db_item(task) for task in queryset]
+
+
+def _recent_notice_db_task_items(now) -> list[dict]:
+    queryset = (
+        CloudNoticeTask.objects
+        .select_related('order', 'asset')
+        .filter(
+            status__in=[CloudNoticeTask.STATUS_CLAIMED, CloudNoticeTask.STATUS_FAILED],
+            updated_at__gte=now - timezone.timedelta(days=1),
+        )
+        .order_by('-updated_at', '-id')[:1000]
+    )
+    return [_notice_task_db_item(task) for task in queryset]
+
+
 def _sync_section(now) -> dict:
     metrics = _cloud_asset_sync_jobs_metrics_payload(window_hours=24)
     active_jobs = [
@@ -288,7 +429,6 @@ def _lifecycle_section(now) -> dict:
         *bundle.get('future_plan_items', []),
         *[item for item in bundle.get('ip_delete_items', []) if not item.get('is_history')],
     ]
-    failed_count = sum(1 for item in items_source if item.get('last_failure_reason') or item.get('failure_reason'))
     active_failure_keys = {
         _task_identity(item)
         for item in items_source
@@ -299,20 +439,37 @@ def _lifecycle_section(now) -> dict:
         since=now - timezone.timedelta(days=1),
         exclude_keys=active_failure_keys,
     )
+    db_task_items = _recent_lifecycle_db_task_items(now)
+    db_task_keys = {_lifecycle_task_identity(item) for item in db_task_items}
+    if db_task_keys:
+        items_source = [
+            item for item in items_source
+            if _lifecycle_task_identity(item) not in db_task_keys
+        ]
+        recent_failed_history = [
+            item for item in recent_failed_history
+            if _lifecycle_task_identity(item) not in db_task_keys
+        ]
+    failed_count = sum(1 for item in items_source if item.get('last_failure_reason') or item.get('failure_reason'))
+    db_failed_count = sum(1 for item in db_task_items if item.get('queue_status') == 'failed')
+    db_active_count = sum(1 for item in db_task_items if item.get('queue_status') == 'claimed')
     warning_count = sum(1 for item in items_source if item.get('queue_status') in ['overdue', 'due_now', 'blocked'])
     items = [
         _plan_item(row, task_type='lifecycle', task_label='生命周期计划')
-        for row in [*items_source, *recent_failed_history][:8]
+        for row in [*items_source, *recent_failed_history, *db_task_items][:8]
     ]
+    status_counts = _status_counts_from_items([*items_source, *recent_failed_history], 'queue_status')
+    for status, count in _status_counts_from_items(db_task_items, 'queue_status').items():
+        status_counts[status] = status_counts.get(status, 0) + count
     return _task_section_payload(
         key='lifecycle',
         title='生命周期计划',
         path='/admin/tasks/plans',
-        total=len(items_source) + len(recent_failed_history),
-        active=sum(1 for item in items_source if item.get('queue_status') in ['due_now', 'scheduled_future', 'overdue', 'within_window']),
-        failed=failed_count + len(recent_failed_history),
+        total=len(items_source) + len(recent_failed_history) + len(db_task_items),
+        active=sum(1 for item in items_source if item.get('queue_status') in ['due_now', 'scheduled_future', 'overdue', 'within_window']) + db_active_count,
+        failed=failed_count + len(recent_failed_history) + db_failed_count,
         warning=warning_count,
-        status_counts=_status_counts_from_items([*items_source, *recent_failed_history], 'queue_status'),
+        status_counts=status_counts,
         items=items,
         generated_at=now,
     )
@@ -334,20 +491,30 @@ def _notice_section(now) -> dict:
         since=now - timezone.timedelta(days=1),
         exclude_keys=active_failure_keys,
     )
+    history_failure_keys = {_task_identity(item) for item in recent_failed_history}
+    db_task_items = [
+        item for item in _recent_notice_db_task_items(now)
+        if _task_identity(item) not in active_failure_keys and _task_identity(item) not in history_failure_keys
+    ]
+    db_failed_count = sum(1 for item in db_task_items if item.get('notice_status') == 'failed_retry')
+    db_active_count = sum(1 for item in db_task_items if item.get('notice_status') == 'claimed')
     warning_count = sum(1 for item in items_source if item.get('queue_status') in _NOTICE_WARNING_QUEUE_STATUSES)
     items = [
         _plan_item(row, task_type='notice', task_label='通知计划')
-        for row in [*items_source, *recent_failed_history][:8]
+        for row in [*items_source, *recent_failed_history, *db_task_items][:8]
     ]
+    status_counts = _status_counts_from_items([*items_source, *recent_failed_history], 'queue_status')
+    for status, count in _status_counts_from_items(db_task_items, 'queue_status').items():
+        status_counts[status] = status_counts.get(status, 0) + count
     return _task_section_payload(
         key='notices',
         title='通知计划',
         path='/admin/tasks/notices',
-        total=len(items_source) + len(recent_failed_history),
-        active=sum(1 for item in items_source if item.get('queue_status') in ['due_now', 'scheduled_future', 'overdue', 'fallback_notice', 'within_window']),
-        failed=failed_count + len(recent_failed_history),
+        total=len(items_source) + len(recent_failed_history) + len(db_task_items),
+        active=sum(1 for item in items_source if item.get('queue_status') in ['due_now', 'scheduled_future', 'overdue', 'fallback_notice', 'within_window']) + db_active_count,
+        failed=failed_count + len(recent_failed_history) + db_failed_count,
         warning=warning_count,
-        status_counts=_status_counts_from_items([*items_source, *recent_failed_history], 'queue_status'),
+        status_counts=status_counts,
         items=items,
         generated_at=now,
     )
