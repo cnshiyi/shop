@@ -7237,61 +7237,6 @@ git diff --check
 - 本轮未执行真实 Telegram 点击、真实云资源创建/删除/IP 变更、真实支付、链上广播、生产发布或不可逆操作。
 - 前端 `DEVELOPMENT.md` 仍有旧 `/api/dashboard/` 文档说明残留；源码只读扫描未发现旧调用。
 
-## 2026-06-03 固定巡检与 AWS 同步观察项记录
-
-### 范围
-
-本轮继续监工 Shop Django 后端，先读取自动化记忆、当前 git 状态、最近提交、`docs/auto-optimization-control.md`、`docs/auto-optimization-latest.md`、版本记录末尾、`AGENTS.md` 和 `TODO.md`。由于 `TODO.md` 固定任务已全部勾选，本轮按固定巡检清单执行，不做真实云资源、真实支付、链上广播、生产发布或其它不可逆操作。
-
-### 发现
-
-- 本轮开始时工作树干净，最近提交为 `510cabb`「校正固定巡检验证记录」。
-- 未发现需要修改运行代码的问题。
-- `manage.py check` 和编译检查通过，后台 API 仍收口到 `/api/auth/` 与 `/api/admin/`；旧 `/api/dashboard/` 和根 `/api/` 后台业务入口未恢复。
-- 字段内省确认废弃 app 未安装；`CloudAsset` 到期字段仍只有 `actual_expires_at`；`CloudServerOrder` 未恢复 `actual_expires_at` 或 `service_expires_at`；`CloudAssetDashboardSnapshot` 未恢复到期字段。
-- 红线关键字扫描未发现订单到期字段、旧计划快照、旧退款函数名或废弃 runtime app 回流。命中的 `_asset_expires_at`、`ip_recycle_at=asset.actual_expires_at` 和 `CloudAsset.actual_expires_at` 写入仍属于资产侧唯一到期事实或固定 IP 回收同步。
-- 额外观察到 `cloud/management/commands/sync_aws_assets.py` 在云端确认删除且存在 `migration_due_at` 时，会把服务端资产 `actual_expires_at` 压到迁移截止时间，并同步订单生命周期派生字段；本轮未判定为恢复订单到期字段，但后续仍应重点关注该同步链是否符合唯一资产到期事实。
-- 机器人返回链 49 个聚焦测试继续通过，资产详情、订单详情、续费、钱包支付、换 IP、重装、修改配置和嵌套返回路径仍满足 Telegram `callback_data` 限制。
-- 任务中心 14 个聚焦测试继续通过，未发现生命周期、通知或自动续费 section 的 pending/failed 任务漏报回归。
-- 前端只读扫描确认 `/Users/a399/Desktop/data/vue-shop-admin/apps/web-antd/src` 和 `/Users/a399/Desktop/data/vue-shop-admin/docs` 未检出旧 `/api/dashboard`、`/api/users`、`/api/task-list` 或 `/api/plan-settings` 调用。第一次扫描包含不存在的 `apps/web-antd/docs` 路径导致 `rg` 报错，已改用实际存在路径重跑。
-- 废弃 app 目录扫描无输出。
-
-### 修改
-
-- 覆盖更新 `docs/auto-optimization-latest.md`。
-- 在 `docs/refactor-version-record.md` 追加本轮中文巡检记录。
-
-### 验证
-
-本地已通过：
-
-```bash
-UV_CACHE_DIR=/private/tmp/uv-cache-shop PYTHONDONTWRITEBYTECODE=1 uv run python manage.py check
-UV_CACHE_DIR=/private/tmp/uv-cache-shop PYTHONDONTWRITEBYTECODE=1 uv run python -m py_compile shop/urls.py shop/admin_urls.py shop/auth_urls.py bot/handlers.py bot/api.py bot/tests.py cloud/api_tasks.py cloud/task_center.py cloud/lifecycle_tasks.py cloud/lifecycle_schedule.py cloud/sync_jobs.py cloud/services.py cloud/tests_task_center.py
-DJANGO_TEST_SQLITE=1 UV_CACHE_DIR=/private/tmp/uv-cache-shop PYTHONDONTWRITEBYTECODE=1 uv run python manage.py test bot.tests.ApiPrefixContractTestCase bot.tests.DashboardAuthSurfaceTestCase --settings=shop.settings --verbosity=2
-DJANGO_TEST_SQLITE=1 UV_CACHE_DIR=/private/tmp/uv-cache-shop PYTHONDONTWRITEBYTECODE=1 uv run python manage.py test cloud.tests_task_center --settings=shop.settings --verbosity=2
-DJANGO_TEST_SQLITE=1 UV_CACHE_DIR=/private/tmp/uv-cache-shop PYTHONDONTWRITEBYTECODE=1 uv run python manage.py test bot.tests.RetainedIpRenewalUiTestCase --settings=shop.settings --verbosity=2
-DJANGO_TEST_SQLITE=1 UV_CACHE_DIR=/private/tmp/uv-cache-shop PYTHONDONTWRITEBYTECODE=1 uv run python manage.py shell -c "...字段内省..."
-UV_CACHE_DIR=/private/tmp/uv-cache-shop PYTHONDONTWRITEBYTECODE=1 uv run python manage.py makemigrations --check --dry-run
-DJANGO_TEST_SQLITE=1 UV_CACHE_DIR=/private/tmp/uv-cache-shop PYTHONDONTWRITEBYTECODE=1 uv run python manage.py migrate --plan --noinput
-UV_CACHE_DIR=/private/tmp/uv-cache-shop PYTHONDONTWRITEBYTECODE=1 uv run python manage.py migrate --plan --noinput
-rg -n "service_expires_at\s*=|actual_expires_at\s*=.*order\.|order\..*actual_expires_at|CloudLifecyclePlan\b|CloudNoticePlan\b|CloudAutoRenewPlan\b|refund_order|process_refund|create_refund|issue_refund|refund_to_balance|refund_balance|STATUS_REFUNDED|status=['\"]refunded['\"]|normalize_service_expiry|service_expired_at" bot core orders cloud shop --glob '!**/migrations/**' --glob '!**/tests.py'
-find . -maxdepth 2 -type d \( -name accounts -o -name finance -o -name mall -o -name monitoring -o -name dashboard_api -o -name biz \) -print
-rg -n "/api/dashboard|/api/users|dashboard_urls|dashboard_api" bot core orders cloud shop docs TODO.md AGENTS.md --glob '!docs/refactor-version-record.md'
-rg -n "/api/dashboard|/api/users|/api/task-list|/api/plan-settings" /Users/a399/Desktop/data/vue-shop-admin/apps/web-antd/src /Users/a399/Desktop/data/vue-shop-admin/docs
-git diff --check
-```
-
-结果：`manage.py check`、编译检查、10 个路由/后台鉴权测试、14 个任务中心测试、49 个机器人返回链测试、字段内省、SQLite `migrate --plan`、`makemigrations --check --dry-run` 和 `git diff --check` 均通过。SQLite 检查仍会打印不支持 `db_comment` / `db_table_comment` 的预期 warning；机器人返回链测试仍会打印既有配置读取容错、mocked postcheck 异常和 IP 校验日志；默认 `makemigrations --check --dry-run` 仍因当前沙箱无法连接本地 MySQL `127.0.0.1:3306` 打印迁移历史一致性 warning，但最终输出 `No changes detected`；默认 MySQL `migrate --plan` 因同一沙箱网络限制失败。
-
-### 剩余风险
-
-- 本轮未跑完整测试套件。
-- 本轮未在真实 MySQL/MariaDB 上执行迁移计划。
-- 本轮未执行真实 Telegram 点击、真实云资源创建/删除/IP 变更、真实支付、链上广播、生产发布或不可逆操作。
-- 前端扫描仅覆盖已知本地源码和文档路径；未做浏览器联调。
-- AWS 同步删除链路中的 `migration_due_at` 到资产 `actual_expires_at` 同步需要继续观察真实业务语义，避免未来误把订单侧字段当作资产到期事实来源。
-
 ## 2026-06-03 固定巡检与前端文档残留记录
 
 ### 范围
@@ -7486,3 +7431,24 @@ git diff --check
 - 本轮未在真实 MySQL/MariaDB 上执行迁移计划。
 - 本轮未执行真实 Telegram 点击、真实云资源创建/删除/IP 变更、真实支付、链上广播、生产发布或不可逆操作。
 - 前端若仍调用旧 `/api/dashboard/` 或根 `/api/` 后台业务前缀，需要同步切换到 `/api/auth/` 与 `/api/admin/`。
+
+## 2026-06-03 固定巡检最终收口
+
+### 范围
+
+本轮继续监工 Shop Django 后端，按固定入口读取自动化记忆、git 状态、最近提交、控制文档、最新状态、版本记录末尾、`AGENTS.md`、`TODO.md` 和 `django-shop-backend` 技能。由于 `TODO.md` 已全部完成，本轮执行固定巡检并更新中文记录。
+
+### 结果
+
+- 本轮未修改运行代码，只更新 `docs/auto-optimization-latest.md` 与 `docs/refactor-version-record.md`。
+- `manage.py check`、编译检查、10 个路由/后台鉴权测试、14 个任务中心测试、49 个机器人返回链测试、字段内省、SQLite `migrate --plan`、`makemigrations --check --dry-run`、红线扫描、废弃 app 目录扫描、前端存在路径旧前缀扫描和 `git diff --check` 均符合预期。
+- 字段内省确认废弃 app 未安装；`CloudAsset` 到期字段仍只有 `actual_expires_at`；`CloudServerOrder` 未恢复 `actual_expires_at` 或 `service_expires_at`；`CloudAssetDashboardSnapshot` 未恢复到期字段。
+- 默认 MySQL `migrate --plan` 仍因当前沙箱禁止连接 `127.0.0.1:3306` 失败，属于环境限制。
+- 前端源码无旧 API 前缀命中；`/Users/a399/Desktop/data/vue-shop-admin/DEVELOPMENT.md` 仍有旧 `/api/dashboard/` 文字说明残留，本轮未跨仓库修改。
+
+### 剩余风险
+
+- 本轮未跑完整测试套件。
+- 本轮未在真实 MySQL/MariaDB 上执行迁移计划。
+- 本轮未执行真实 Telegram 点击、真实云资源创建/删除/IP 变更、真实支付、链上广播、生产发布或不可逆操作。
+- 前端文档仍有旧 `/api/dashboard/` 描述残留；源码只读扫描未发现旧调用。
