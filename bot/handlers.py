@@ -4683,7 +4683,12 @@ def register_handlers(dp: Dispatcher):
         if not await _is_admin_chat(callback.message):
             await _safe_callback_answer(callback, '仅管理员可使用开机', show_alert=True)
             return
-        order_id = int(callback.data.split(':')[2])
+        parts = callback.data.split(':', 3)
+        order_id = int(parts[2])
+        back_callback = _compact_back_button_callback(parts[3] if len(parts) > 3 else 'cloud:querymenu')
+        result_markup = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text='🔙 返回原页面', callback_data=back_callback)],
+        ])
         logger.info('CLOUD_ADMIN_START_CLICK admin_id=%s order_id=%s callback_data=%s', getattr(callback.from_user, 'id', None), order_id, callback.data)
         await _safe_callback_answer(callback, '正在检查开机状态')
         order, err = await start_cloud_server_from_admin(order_id)
@@ -4694,6 +4699,7 @@ def register_handlers(dp: Dispatcher):
             await _safe_edit_text(
                 callback.message,
                 f'⚠️ 开机结果\n\n订单: {order_no}\nIP: {ip}\n状态: {_public_cloud_error_text(err)}',
+                reply_markup=result_markup,
             )
             return
         note = str(getattr(order, 'provision_note', '') or '').split('管理员手动开机：')[-1].strip() or '已提交开机检查。'
@@ -4701,6 +4707,7 @@ def register_handlers(dp: Dispatcher):
         await _safe_edit_text(
             callback.message,
             f'✅ 开机检查完成\n\n订单: {order_no}\nIP: {ip}\n状态: {note}',
+            reply_markup=result_markup,
         )
 
     @dp.callback_query(F.data.startswith('ao:'))

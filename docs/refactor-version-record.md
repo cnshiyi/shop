@@ -5252,6 +5252,50 @@ git diff --check
 - 本轮未执行真实 Telegram 点击、真实云资源创建/删除/IP 变更、真实支付、链上广播、生产发布或不可逆操作。
 - 真机测试仍需在用户明确授权真实云资源成本后，单独按中文报告记录云资源 ID 脱敏结果。
 
+## 2026-06-03 管理员开机返回链修复
+
+### 范围
+
+本轮继续监工 Shop Django 后端，重点检查机器人返回链、Telegram `callback_data` 64 字节限制、云资产生命周期唯一到期事实、后台任务中心统计、废弃 app 回流、旧计划快照和旧退款入口。
+
+### 监工结果
+
+- 当前工作树起始干净，最近提交为 `c96a4a7 记录生命周期返回链巡检`。
+- 发现管理员在 IP 查询结果里点击“开机”时，按钮只生成 `cloud:start:<订单ID>`，处理结果页也没有返回按钮；从查询菜单进入后会断开上一层返回链。
+- 修复 `bot/keyboards.py`：IP 查询结果中的订单开机和资产关联订单开机按钮统一携带 `cloud:querymenu` 返回路径，并复用现有 `append_back_callback` 压缩逻辑。
+- 修复 `bot/handlers.py`：管理员开机处理器解析 `cloud:start:<订单ID>:<返回路径>`，成功和失败结果页都展示“返回原页面”按钮；没有返回路径时默认回到 `cloud:querymenu`。
+- 补充 `bot/tests.py`：覆盖管理员查询键盘中的开机 callback、64 字节限制，以及开机处理器保留返回路径的源码断言。
+- 结构化字段确认：`CloudAsset` 仍只有 `actual_expires_at` 作为资产到期事实；`CloudServerOrder` 未恢复 `actual_expires_at` 或 `service_expires_at`；`CloudAssetDashboardSnapshot` 无到期字段。
+- `INSTALLED_APPS` 未恢复 `accounts`、`finance`、`mall`、`monitoring`、`dashboard_api`、`biz`；仓库根部也未发现这些废弃 app 目录回流。
+- 收窄扫描未发现旧计划快照、旧退款函数名或订单服务到期字段恢复；命中的 `ip_recycle_at=asset.actual_expires_at` 仍是未附加固定 IP 回收派生时间，不是订单到期事实恢复。
+
+### 验证
+
+本地已通过:
+
+```bash
+UV_CACHE_DIR=/private/tmp/shop-uv-cache uv run python manage.py check
+UV_CACHE_DIR=/private/tmp/shop-uv-cache uv run python -m py_compile bot/keyboards.py bot/handlers.py bot/tests.py cloud/task_center.py cloud/tests_task_center.py cloud/api_tasks.py
+DB_ENGINE=sqlite SQLITE_NAME=/private/tmp/shop_bot_order_balance_start_20260603.sqlite3 UV_CACHE_DIR=/private/tmp/shop-uv-cache PYTHONDONTWRITEBYTECODE=1 uv run python manage.py test bot.tests.BotOrderAndBalanceFilterTestCase --noinput --verbosity 1
+DB_ENGINE=sqlite SQLITE_NAME=/private/tmp/shop_bot_callbacks_start_20260603.sqlite3 UV_CACHE_DIR=/private/tmp/shop-uv-cache PYTHONDONTWRITEBYTECODE=1 uv run python manage.py test bot.tests.RetainedIpRenewalUiTestCase --noinput --verbosity 1
+DB_ENGINE=sqlite SQLITE_NAME=/private/tmp/shop_task_center_start_20260603.sqlite3 UV_CACHE_DIR=/private/tmp/shop-uv-cache PYTHONDONTWRITEBYTECODE=1 uv run python manage.py test cloud.tests_task_center --noinput --verbosity 1
+DB_ENGINE=sqlite SQLITE_NAME=/private/tmp/shop_introspect_start_20260603.sqlite3 UV_CACHE_DIR=/private/tmp/shop-uv-cache PYTHONDONTWRITEBYTECODE=1 uv run python manage.py shell -c "from django.conf import settings; retired={'accounts','finance','mall','monitoring','dashboard_api','biz'}; print('retired_apps', [app for app in settings.INSTALLED_APPS if app.split('.')[0] in retired]); from cloud.models import CloudAsset, CloudServerOrder, CloudAssetDashboardSnapshot; print('asset_expiry_fields', [f.name for f in CloudAsset._meta.fields if 'expires' in f.name or 'expiry' in f.name]); print('order_expiry_fields', [f.name for f in CloudServerOrder._meta.fields if 'expires' in f.name or 'expiry' in f.name]); print('snapshot_expiry_fields', [f.name for f in CloudAssetDashboardSnapshot._meta.fields if 'expires' in f.name or 'expiry' in f.name]); print('default_port', CloudServerOrder._meta.get_field('mtproxy_port').default)"
+UV_CACHE_DIR=/private/tmp/shop-uv-cache uv run python manage.py makemigrations --check --dry-run
+rg -n "service_expires_at\\s*=|actual_expires_at\\s*=.*order\\.|order\\..*actual_expires_at|CloudLifecyclePlan\\b|CloudNoticePlan\\b|CloudAutoRenewPlan\\b|refund_order|process_refund|create_refund|issue_refund|refund_to_balance|refund_balance|STATUS_REFUNDED|status=['\\\"]refunded['\\\"]|normalize_service_expiry|service_expired_at" bot core orders cloud shop --glob '!**/migrations/**' --glob '!**/tests.py'
+find . -maxdepth 2 -type d \( -name accounts -o -name finance -o -name mall -o -name monitoring -o -name dashboard_api -o -name biz \) -print
+git diff --check
+```
+
+另外用 `DJANGO_SETTINGS_MODULE=shop.settings` 动态枚举极端 18 位 ID、嵌套来源和管理员开机查询入口的 callback。第一次脚本把 `cloud_server_renew_payment` 的返回路径误传为位置参数，修正为关键字参数后重跑通过，枚举 83 个 callback，最大 64 字节，无超限。
+
+`makemigrations --check --dry-run` 仍出现本地沙箱无法连接 `127.0.0.1` MySQL 的迁移历史一致性警告，但最终结果为 `No changes detected`。SQLite 测试仍会打印不支持 `db_comment` 的预期系统警告；bot SimpleTestCase 配置读取容错日志和 mocked postcheck 异常日志仍为既有测试输出，最终通过。
+
+### 剩余风险
+
+- 本轮未跑完整测试套件。
+- 本轮未执行真实 Telegram 点击、真实云资源创建/删除/IP 变更、真实支付、链上广播、生产发布或不可逆操作。
+- 真机测试仍需在用户明确授权真实云资源成本后，单独按中文报告记录云资源 ID 脱敏结果。
+
 ## 2026-06-03 12:02 生命周期唯一到期事实与返回链巡检
 
 ### 范围

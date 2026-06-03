@@ -1030,7 +1030,7 @@ def cloud_ip_query_result(result_items, renewable_items, page: int = 1, total_pa
         if order_id > 0:
             action_buttons.append(InlineKeyboardButton(text='🔄 续费IP', callback_data=f'cloud:renew:{order_id}:cloud:querymenu'))
             if include_start:
-                action_buttons.append(InlineKeyboardButton(text='▶️ 开机', callback_data=f'cloud:start:{order_id}'))
+                action_buttons.append(InlineKeyboardButton(text='▶️ 开机', callback_data=append_back_callback(f'cloud:start:{order_id}', 'cloud:querymenu')))
             if item.get('can_change_ip'):
                 action_buttons.append(InlineKeyboardButton(text='🌐 更换IP', callback_data=f'cloud:ip:{order_id}:cloud:querymenu'))
             if item.get('can_reinit') and (include_reinit or item.get('can_support')):
@@ -1048,7 +1048,7 @@ def cloud_ip_query_result(result_items, renewable_items, page: int = 1, total_pa
             action_buttons.append(InlineKeyboardButton(text='🔄 续费IP', callback_data=cloud_asset_action_callback('renew', asset_id, 'cloud:querymenu')))
             start_order_id = int(item.get('start_order_id') or 0)
             if include_start and start_order_id > 0:
-                action_buttons.append(InlineKeyboardButton(text='▶️ 开机', callback_data=f'cloud:start:{start_order_id}'))
+                action_buttons.append(InlineKeyboardButton(text='▶️ 开机', callback_data=append_back_callback(f'cloud:start:{start_order_id}', 'cloud:querymenu')))
             if item.get('can_change_ip'):
                 action_buttons.append(InlineKeyboardButton(text='🌐 更换IP', callback_data=cloud_asset_action_callback('changeip', asset_id, 'cloud:querymenu')))
             if item.get('can_reinit') and (include_reinit or item.get('can_support')):

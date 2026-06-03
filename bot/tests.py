@@ -1941,7 +1941,17 @@ class BotOrderAndBalanceFilterTestCase(TestCase):
 
         self.assertIn('🛠 重新安装', texts)
         self.assertIn('🕒 修改时间', texts)
+        self.assertIn('cloud:start:123:cloud:querymenu', callbacks)
         self.assertIn('exp:o:123:cloud:querymenu', callbacks)
+        self.assertTrue(all(len(item.encode()) <= 64 for item in callbacks if item))
+
+    def test_admin_start_handler_keeps_query_menu_back_path(self):
+        source = inspect.getsource(register_handlers)
+        start_source = source.split('async def cb_cloud_start', 1)[1].split("@dp.callback_query(F.data.startswith('ao:'))", 1)[0]
+
+        self.assertIn("parts = callback.data.split(':', 3)", start_source)
+        self.assertIn("_compact_back_button_callback(parts[3] if len(parts) > 3 else 'cloud:querymenu')", start_source)
+        self.assertIn("callback_data=back_callback", start_source)
 
 
 class BotAdminExpiryUpdateTestCase(TestCase):
