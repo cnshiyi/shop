@@ -5252,6 +5252,44 @@ git diff --check
 - 本轮未执行真实 Telegram 点击、真实云资源创建/删除/IP 变更、真实支付、链上广播、生产发布或不可逆操作。
 - 真机测试仍需在用户明确授权真实云资源成本后，单独按中文报告记录云资源 ID 脱敏结果。
 
+## 2026-06-03 后台任务中心与续费回链复核
+
+### 范围
+
+本轮继续监工 Shop Django 后端，重点复核 `CloudAsset.actual_expires_at` 唯一到期事实、订单表和快照表是否恢复旧到期字段、后台任务中心失败统计、机器人资产详情/订单详情/续费/换 IP/重装/修改配置返回链、Telegram `callback_data` 64 字节限制、废弃 app 回流、旧退款入口和旧计划快照。
+
+### 监工结果
+
+- 当前工作树起始干净，最近提交为 `f70355e 修复续费钱包支付返回链`。
+- 未发现需要修改运行代码的新问题；本轮仅追加中文版本记录。
+- `CloudAsset` 继续以 `actual_expires_at` 作为资产到期事实；`CloudServerOrder` 未恢复 `actual_expires_at` 或 `service_expires_at`；`CloudAssetDashboardSnapshot` 未恢复到期字段。
+- `accounts`、`finance`、`mall`、`monitoring`、`dashboard_api`、`biz` 未作为运行 app 回流；命中的 `dashboard_api` 仍是当前 URL namespace 和 `core.dashboard_api` helper。
+- 收窄扫描未发现旧退款函数名、旧退款逻辑、旧计划快照表或订单服务到期字段回流。
+- 机器人回链聚焦测试覆盖资产详情、订单详情、续费、换 IP、重装、修改配置、自动续费、IP 查询结果和续费结果返回按钮，仍满足 Telegram `callback_data` 64 字节限制。
+- 后台任务中心聚焦测试覆盖同步任务、生命周期、通知计划和自动续费失败统计；未发现后台总览漏报或失败状态不一致的新问题。
+
+### 验证
+
+本地已通过:
+
+```bash
+UV_CACHE_DIR=/private/tmp/uv-cache uv run python manage.py check
+UV_CACHE_DIR=/private/tmp/uv-cache uv run python -m py_compile bot/api.py bot/handlers.py cloud/services.py cloud/bootstrap.py cloud/api.py cloud/task_center.py cloud/api_tasks.py cloud/sync_jobs.py cloud/management/commands/sync_aws_assets.py cloud/management/commands/sync_aliyun_assets.py cloud/management/commands/reconcile_cloud_assets_from_servers.py
+UV_CACHE_DIR=/private/tmp/uv-cache DJANGO_TEST_SQLITE=1 uv run python manage.py test cloud.tests_task_center.CloudTaskCenterApiTestCase -v 2
+UV_CACHE_DIR=/private/tmp/uv-cache DJANGO_TEST_SQLITE=1 uv run python manage.py test bot.tests.RetainedIpRenewalUiTestCase -v 2
+UV_CACHE_DIR=/private/tmp/uv-cache DJANGO_TEST_SQLITE=1 uv run python manage.py test orders.tests.ChainPaymentScannerTestCase.test_expired_address_payments_are_not_candidates_and_renewal_status_restores orders.tests.ChainPaymentScannerTestCase.test_expired_asset_renewal_payment_unbinds_asset_for_retry orders.tests.ChainPaymentScannerTestCase.test_public_asset_renewal_expiry_does_not_claim_unowned_asset -v 2
+UV_CACHE_DIR=/private/tmp/uv-cache DJANGO_TEST_SQLITE=1 uv run python manage.py test cloud.tests.CloudOrderStatusDashboardSyncTestCase.test_order_detail_manual_edit_syncs_cloud_identity_and_proxy_fields -v 2
+UV_CACHE_DIR=/private/tmp/uv-cache DJANGO_TEST_SQLITE=1 uv run python manage.py makemigrations --check --dry-run
+```
+
+第一次未指定 SQLite 的聚焦测试仍会尝试连接本机 MySQL 并被沙箱拒绝；已改用 `DJANGO_TEST_SQLITE=1` 重跑通过。SQLite 测试仍会打印不支持 `db_comment` 的预期 warning；bot SimpleTestCase 仍会打印配置读取被禁止数据库访问拦截的既有容错日志，最终测试通过。
+
+### 剩余风险
+
+- 本轮未跑完整测试套件。
+- 本轮未执行真实 Telegram 点击、真实云资源创建/删除/IP 变更、真实支付、链上广播、生产发布或不可逆操作。
+- 真机测试仍需在用户明确授权真实云资源成本后，单独按中文报告记录云资源 ID 脱敏结果。
+
 ## 2026-06-03 续费钱包支付恢复返回链修复
 
 ### 范围
