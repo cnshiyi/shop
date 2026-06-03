@@ -2251,6 +2251,15 @@ def _asset_reinstall_submitted_keyboard(asset_id: int, back_callback: str | None
     ])
 
 
+def _cloud_renewal_result_keyboard(order_id: int, back_callback: str | None = None):
+    back_callback = compact_callback_path(back_callback)
+    if not back_callback:
+        return main_menu()
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text='🔙 返回原代理', callback_data=cloud_previous_detail_callback(order_id, back_callback))],
+    ])
+
+
 async def _issue_reinstall_confirm_token(state: FSMContext, *, kind: str, item_id: int) -> str:
     token = secrets.token_urlsafe(6)
     await state.set_state(None)
@@ -4820,16 +4829,28 @@ def register_handlers(dp: Dispatcher):
                 candidate = await get_cloud_server_for_admin(order_id)
                 existing = candidate if _requires_recovery_provision(candidate) else None
             if err == '当前订单状态不可钱包支付' and _requires_recovery_provision(existing):
-                await _safe_edit_text(callback.message, '✅ 这笔续费已支付，固定 IP 恢复正在处理中。\n\n系统会保持旧 IP / 旧端口 / 旧密钥不变，完成后自动发送代理链接。')
+                await _safe_edit_text(
+                    callback.message,
+                    '✅ 这笔续费已支付，固定 IP 恢复正在处理中。\n\n系统会保持旧 IP / 旧端口 / 旧密钥不变，完成后自动发送代理链接。',
+                    reply_markup=_cloud_renewal_result_keyboard(order_id, back_callback),
+                )
                 asyncio.create_task(_provision_cloud_server_and_notify(callback.bot, callback.from_user.id, existing.id, existing.mtproxy_port or MTPROXY_DEFAULT_PORT))
                 return
             if err == '当前订单状态不可钱包支付' and existing and existing.status == 'completed' and existing.paid_at:
                 missing_recovery = _retained_recovery_missing_payment_text(existing)
                 if missing_recovery:
-                    await _safe_edit_text(callback.message, f'⚠️ 这笔续费已记录为已支付，但固定 IP 恢复资料不完整。\n\n订单号: {existing.order_no}\n缺少: {missing_recovery}\n\n我没有再次扣款。请先通过未附加 IP 续费流程补充旧主代理链接，或联系管理员核对这笔订单。')
+                    await _safe_edit_text(
+                        callback.message,
+                        f'⚠️ 这笔续费已记录为已支付，但固定 IP 恢复资料不完整。\n\n订单号: {existing.order_no}\n缺少: {missing_recovery}\n\n我没有再次扣款。请先通过未附加 IP 续费流程补充旧主代理链接，或联系管理员核对这笔订单。',
+                        reply_markup=_cloud_renewal_result_keyboard(order_id, back_callback),
+                    )
                     return
                 asyncio.create_task(_cloud_renewal_postcheck_and_notify(callback.bot, callback.from_user.id, existing.id))
-                await _safe_edit_text(callback.message, f'✅ 这笔续费已完成。\n\n订单号: {existing.order_no}\n{_cloud_order_plan_text(existing)}\n\n我会继续执行续费后巡检。')
+                await _safe_edit_text(
+                    callback.message,
+                    f'✅ 这笔续费已完成。\n\n订单号: {existing.order_no}\n{_cloud_order_plan_text(existing)}\n\n我会继续执行续费后巡检。',
+                    reply_markup=_cloud_renewal_result_keyboard(order_id, back_callback),
+                )
                 return
             await _safe_edit_text(callback.message, 
                 f'❌ 钱包自动续费失败：{_public_cloud_error_text(err)}。\n请先充值余额后再试，或使用下方地址支付。',
@@ -4837,7 +4858,11 @@ def register_handlers(dp: Dispatcher):
             )
             return
         if _requires_recovery_provision(order):
-            await _safe_edit_text(callback.message, '✅ 云服务器钱包续费成功，正在自动恢复固定 IP 服务器。\n\n系统会保持旧 IP / 旧端口 / 旧密钥不变，完成后自动发送代理链接。')
+            await _safe_edit_text(
+                callback.message,
+                '✅ 云服务器钱包续费成功，正在自动恢复固定 IP 服务器。\n\n系统会保持旧 IP / 旧端口 / 旧密钥不变，完成后自动发送代理链接。',
+                reply_markup=_cloud_renewal_result_keyboard(order.id, back_callback),
+            )
             await _send_admin_user_action_notice(callback.bot, user, '续费', [
                 ('订单号', order.order_no),
                 ('IP', getattr(order, 'public_ip', None) or getattr(order, 'previous_public_ip', None) or '-'),
@@ -4907,21 +4932,37 @@ def register_handlers(dp: Dispatcher):
                 candidate = await get_cloud_server_for_admin(order_id)
                 existing = candidate if _requires_recovery_provision(candidate) else None
             if err == '当前订单状态不可钱包支付' and _requires_recovery_provision(existing):
-                await _safe_edit_text(callback.message, '✅ 这笔续费已支付，固定 IP 恢复正在处理中。\n\n系统会保持旧 IP / 旧端口 / 旧密钥不变，完成后自动发送代理链接。')
+                await _safe_edit_text(
+                    callback.message,
+                    '✅ 这笔续费已支付，固定 IP 恢复正在处理中。\n\n系统会保持旧 IP / 旧端口 / 旧密钥不变，完成后自动发送代理链接。',
+                    reply_markup=_cloud_renewal_result_keyboard(order_id, back_callback),
+                )
                 asyncio.create_task(_provision_cloud_server_and_notify(callback.bot, callback.from_user.id, existing.id, existing.mtproxy_port or MTPROXY_DEFAULT_PORT))
                 return
             if err == '当前订单状态不可钱包支付' and existing and existing.status == 'completed' and existing.paid_at:
                 missing_recovery = _retained_recovery_missing_payment_text(existing)
                 if missing_recovery:
-                    await _safe_edit_text(callback.message, f'⚠️ 这笔续费已记录为已支付，但固定 IP 恢复资料不完整。\n\n订单号: {existing.order_no}\n缺少: {missing_recovery}\n\n我没有再次扣款。请先通过未附加 IP 续费流程补充旧主代理链接，或联系管理员核对这笔订单。')
+                    await _safe_edit_text(
+                        callback.message,
+                        f'⚠️ 这笔续费已记录为已支付，但固定 IP 恢复资料不完整。\n\n订单号: {existing.order_no}\n缺少: {missing_recovery}\n\n我没有再次扣款。请先通过未附加 IP 续费流程补充旧主代理链接，或联系管理员核对这笔订单。',
+                        reply_markup=_cloud_renewal_result_keyboard(order_id, back_callback),
+                    )
                     return
                 asyncio.create_task(_cloud_renewal_postcheck_and_notify(callback.bot, callback.from_user.id, existing.id))
-                await _safe_edit_text(callback.message, f'✅ 这笔续费已完成。\n\n订单号: {existing.order_no}\n{_cloud_order_plan_text(existing)}\n\n我会继续执行续费后巡检。')
+                await _safe_edit_text(
+                    callback.message,
+                    f'✅ 这笔续费已完成。\n\n订单号: {existing.order_no}\n{_cloud_order_plan_text(existing)}\n\n我会继续执行续费后巡检。',
+                    reply_markup=_cloud_renewal_result_keyboard(order_id, back_callback),
+                )
                 return
             await _safe_edit_text(callback.message, f'❌ {_public_cloud_error_text(err)}。', reply_markup=wallet_recharge_prompt_menu(append_back_callback(f'cloud:renew:{order_id}', back_callback), '🔙 返回续费支付'))
             return
         if _requires_recovery_provision(order):
-            await _safe_edit_text(callback.message, '✅ 云服务器续费成功，正在自动恢复固定 IP 服务器。\n\n系统会保持旧 IP / 旧端口 / 旧密钥不变，完成后自动发送代理链接。')
+            await _safe_edit_text(
+                callback.message,
+                '✅ 云服务器续费成功，正在自动恢复固定 IP 服务器。\n\n系统会保持旧 IP / 旧端口 / 旧密钥不变，完成后自动发送代理链接。',
+                reply_markup=_cloud_renewal_result_keyboard(order.id, back_callback),
+            )
             await _send_admin_user_action_notice(callback.bot, user, '续费', [
                 ('订单号', order.order_no),
                 ('IP', getattr(order, 'public_ip', None) or getattr(order, 'previous_public_ip', None) or '-'),

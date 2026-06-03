@@ -15,7 +15,7 @@ from django.test import RequestFactory, SimpleTestCase, TestCase
 from django.utils import timezone
 
 from bot.api import DASHBOARD_SESSION_IDLE_SECONDS, _active_proxy_counts_by_user, _authenticate_dashboard_request, admin_users_list, archive_telegram_chat, auth_totp_start, create_admin_user, create_cloud_account, create_product, delete_cloud_account, me, send_daily_expiry_summary_test_notification, send_telegram_chat_message, site_config_groups, telegram_login_start, update_cloud_account, update_site_config, users_list, verify_cloud_account
-from bot.handlers import _asset_reinstall_confirm_keyboard, _asset_reinstall_submitted_keyboard, _asset_renewal_plan_keyboard, _buy_cloud_server_with_balance_and_notify, _cloud_renewal_postcheck_and_notify, _cloud_server_created_text, _fetch_tron_address_summary, _hydrate_order_proxy_links, _install_notice_copy_wrapper, _pay_cloud_server_order_with_balance_and_notify, _proxy_links_text, _reinstall_confirm_keyboard, _reinstall_submitted_keyboard, _requires_recovery_provision, _retained_ip_renewal_plan_keyboard, _save_asset_main_proxy_link, _save_user_main_proxy_link, _trongrid_get_with_key_fallback, _trongrid_post_with_key_fallback, _validate_reinstall_proxy_link, register_handlers
+from bot.handlers import _asset_reinstall_confirm_keyboard, _asset_reinstall_submitted_keyboard, _asset_renewal_plan_keyboard, _buy_cloud_server_with_balance_and_notify, _cloud_renewal_postcheck_and_notify, _cloud_renewal_result_keyboard, _cloud_server_created_text, _fetch_tron_address_summary, _hydrate_order_proxy_links, _install_notice_copy_wrapper, _pay_cloud_server_order_with_balance_and_notify, _proxy_links_text, _reinstall_confirm_keyboard, _reinstall_submitted_keyboard, _requires_recovery_provision, _retained_ip_renewal_plan_keyboard, _save_asset_main_proxy_link, _save_user_main_proxy_link, _trongrid_get_with_key_fallback, _trongrid_post_with_key_fallback, _validate_reinstall_proxy_link, register_handlers
 from bot.keyboards import _compact_back_button_callback, append_back_callback, balance_details_list, cloud_asset_detail_callback, cloud_auto_renew_callback, cloud_detail_callback, cloud_previous_detail_callback, compact_callback_path, cloud_ip_query_result, cloud_order_list, cloud_order_readonly_detail, cloud_server_change_ip_region_menu, cloud_server_detail, cloud_server_list, cloud_server_renew_payment
 from bot.models import TelegramChatArchive, TelegramChatMessage, TelegramLoginAccount, TelegramUser
 from bot.services import record_telegram_message
@@ -1202,6 +1202,20 @@ class RetainedIpRenewalUiTestCase(SimpleTestCase):
         self.assertIn('cloud:rp:9999999:TRX:cad:9999999:clp:12345', callbacks)
         self.assertIn('cad:9999999:clp:12345', callbacks)
         self.assertTrue(all(len(item.encode()) <= 64 for item in callbacks if item))
+
+    def test_cloud_renewal_result_branches_keep_back_path(self):
+        item_id = 999999999999999999
+        back_callback = f'cloud:ad:asset:{item_id}:cloud:list:page:{item_id}'
+        markup = _cloud_renewal_result_keyboard(item_id, back_callback)
+        callbacks = [button.callback_data for row in markup.inline_keyboard for button in row if button.callback_data]
+        source = inspect.getsource(register_handlers)
+        wallet_source = source.split('async def cb_cloud_renew_wallet', 1)[1].split("@dp.callback_query(F.data.startswith('p:'))", 1)[0]
+        renew_pay_source = source.split('async def cb_cloud_renew_pay', 1)[1].split("@dp.callback_query(F.data.startswith('i:'))", 1)[0]
+
+        self.assertEqual(callbacks, [f'cad:{item_id}:clp:{item_id}'])
+        self.assertTrue(all(len(item.encode()) <= 64 for item in callbacks))
+        self.assertGreaterEqual(wallet_source.count('reply_markup=_cloud_renewal_result_keyboard'), 4)
+        self.assertGreaterEqual(renew_pay_source.count('reply_markup=_cloud_renewal_result_keyboard'), 4)
 
     def test_wallet_balance_purchase_auto_submits_default_port(self):
         order = SimpleNamespace(

@@ -5252,6 +5252,43 @@ git diff --check
 - 本轮未执行真实 Telegram 点击、真实云资源创建/删除/IP 变更、真实支付、链上广播、生产发布或不可逆操作。
 - 真机测试仍需在用户明确授权真实云资源成本后，单独按中文报告记录云资源 ID 脱敏结果。
 
+## 2026-06-03 续费钱包支付恢复返回链修复
+
+### 范围
+
+本轮继续监工 Shop Django 后端，重点复核云资产生命周期唯一到期事实、后台任务中心状态统计、机器人续费钱包支付结果页返回链、Telegram `callback_data` 64 字节限制、旧计划快照、旧退款入口和废弃 app 回流。
+
+### 修改
+
+- 发现续费钱包支付在固定 IP 恢复、已支付巡检和恢复资料不完整分支中只更新文字，不带返回键盘；用户从资产详情、订单详情或 IP 查询结果进入续费支付后，异常/恢复结果页会丢失上一层入口。
+- 新增 `_cloud_renewal_result_keyboard`，复用 `cloud_previous_detail_callback` 和现有 callback 压缩逻辑；有返回上下文时回“原代理”，无返回上下文时保持主菜单行为。
+- `cloud:renewwallet:*` 和 `cloud:rp:*`/`cloud:renewpay:*` 两个钱包支付处理器的恢复中、已支付巡检、恢复资料不完整、恢复创建成功分支均接入结果键盘。
+- 补充 `bot.tests.RetainedIpRenewalUiTestCase` 聚焦测试，覆盖极端 18 位 ID + 嵌套资产详情来源下续费结果返回 callback 不超过 64 字节，并检查两个处理器的结果分支都传入返回键盘。
+
+### 验证
+
+本地已通过:
+
+```bash
+UV_CACHE_DIR=/private/tmp/shop-uv-cache uv run python -m py_compile bot/handlers.py bot/tests.py bot/keyboards.py cloud/task_center.py cloud/tests_task_center.py cloud/api_tasks.py
+UV_CACHE_DIR=/private/tmp/shop-uv-cache uv run python manage.py check
+DJANGO_TEST_SQLITE=1 UV_CACHE_DIR=/private/tmp/shop-uv-cache uv run python manage.py test bot.tests.RetainedIpRenewalUiTestCase cloud.tests_task_center --verbosity 2
+UV_CACHE_DIR=/private/tmp/shop-uv-cache uv run python manage.py shell -c "from django.apps import apps; from cloud.models import CloudAsset, CloudServerOrder, CloudAssetDashboardSnapshot; print('retired_apps', [a for a in ['accounts','finance','mall','monitoring','dashboard_api','biz'] if apps.is_installed(a)]); print('cloudasset_expiry_fields', [f.name for f in CloudAsset._meta.fields if 'expires' in f.name or 'expiry' in f.name]); print('order_has_actual_expires_at', hasattr(CloudServerOrder, 'actual_expires_at')); print('order_has_service_expires_at', hasattr(CloudServerOrder, 'service_expires_at')); print('snapshot_expiry_fields', [f.name for f in CloudAssetDashboardSnapshot._meta.fields if 'expires' in f.name or 'expiry' in f.name])"
+UV_CACHE_DIR=/private/tmp/shop-uv-cache uv run python manage.py makemigrations --check --dry-run
+DJANGO_TEST_SQLITE=1 UV_CACHE_DIR=/private/tmp/shop-uv-cache uv run python manage.py shell -c "from decimal import Decimal; from bot.handlers import _cloud_renewal_result_keyboard; from bot.keyboards import cloud_server_detail, cloud_server_renew_payment, cloud_server_change_ip_region_menu, cloud_ip_query_result; item=999999999999999999; back=f'cloud:ad:asset:{item}:cloud:list:page:{item}'; regions=[('ap-southeast-1','SG'),('ap-northeast-1','JP'),('us-east-1','US'),('eu-west-2','UK'),('ap-south-1','IN'),('ca-central-1','CA')]; markups=[cloud_server_detail(item, True, True, True, back, True), cloud_server_renew_payment(item, Decimal('12.3'), Decimal('45.6'), back_callback=back), cloud_server_change_ip_region_menu(item, regions, back_callback=back), _cloud_renewal_result_keyboard(item, back), cloud_ip_query_result([], [{'ip':'1.2.3.4','order_id':item,'asset_id':0,'can_change_ip':True,'can_reinit':True,'can_config':True,'can_auto_renew':True,'auto_renew_enabled':False}], include_start=True, include_reinit=True)]; callbacks=[b.callback_data for m in markups for row in m.inline_keyboard for b in row if b.callback_data]; over=[c for c in callbacks if len(c.encode())>64]; print('callback_count', len(callbacks)); print('max_callback_bytes', max(len(c.encode()) for c in callbacks)); print('over_limit', over[:5])"
+git diff --check
+```
+
+结果：`manage.py check` 通过；SQLite 下 `bot.tests.RetainedIpRenewalUiTestCase` 和 `cloud.tests_task_center` 共 61 条通过；字段 introspection 确认废弃 app 未安装、`CloudAsset` 到期字段仅 `actual_expires_at`、`CloudServerOrder` 未恢复 `actual_expires_at/service_expires_at`、`CloudAssetDashboardSnapshot` 无到期字段；极端 callback 枚举 24 个，最大 62 字节，无超过 64 字节限制；`makemigrations --check --dry-run` 为 `No changes detected`；`git diff --check` 通过。
+
+`makemigrations --check --dry-run` 仍出现本地沙箱无法连接 `127.0.0.1` MySQL 的迁移历史一致性警告，但最终结果为 `No changes detected`。第一次 callback 枚举未指定 SQLite，触发本地 MySQL 沙箱连接日志；已用 `DJANGO_TEST_SQLITE=1` 重跑通过。SQLite 测试仍会打印不支持 `db_comment` 的预期 warning；bot SimpleTestCase 配置读取容错日志和 mocked postcheck 异常日志仍为既有测试输出，最终 OK。
+
+### 剩余风险
+
+- 本轮未跑完整测试套件。
+- 本轮未执行真实 Telegram 点击、真实云资源创建/删除/IP 变更、真实支付、链上广播、生产发布或不可逆操作。
+- 真机测试仍需在用户明确授权真实云资源成本后，单独按中文报告记录云资源 ID 脱敏结果。
+
 ## 2026-06-03 重装提交返回链修复
 
 ### 范围
