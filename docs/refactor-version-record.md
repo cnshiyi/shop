@@ -5252,6 +5252,52 @@ git diff --check
 - 本轮未执行真实 Telegram 点击、真实云资源创建/删除/IP 变更、真实支付、链上广播、生产发布或不可逆操作。
 - 真机测试仍需在用户明确授权真实云资源成本后，单独按中文报告记录云资源 ID 脱敏结果。
 
+## 2026-06-03 重装提交返回链修复
+
+### 范围
+
+本轮继续巡检 Shop Django 后端，重点检查机器人资产详情、订单详情、IP 查询结果进入重装流程后的返回链，以及 Telegram `callback_data` 64 字节限制；同时复核云资产生命周期唯一到期事实、后台任务中心统计、旧计划快照、旧退款入口和废弃 app 回流。
+
+### 运行时变化
+
+- 修复订单重装确认提交成功后固定返回主菜单的问题：确认处理器现在读取 FSM 中保存的 `reinstall_back`，提交结果页提供“返回原代理”。
+- 修复资产重装确认提交成功后固定返回主菜单的问题：资产确认处理器同样复用 `reinstall_back`，提交结果页返回资产详情。
+- 新增 `_reinstall_submitted_keyboard()` 与 `_asset_reinstall_submitted_keyboard()`，无返回上下文时仍保持原主菜单行为；有返回上下文时压缩后再生成详情回调，避免超过 Telegram 64 字节限制。
+- 新增聚焦测试覆盖重装提交结果键盘、极端 18 位 ID 嵌套来源和确认处理器复用 `reinstall_back` 的源码路径。
+
+### 监工结果
+
+- `CloudAsset.actual_expires_at` 仍是唯一结构化资产到期事实。
+- `CloudServerOrder` 未恢复 `actual_expires_at` 或 `service_expires_at`。
+- `CloudAssetDashboardSnapshot` 未恢复 `actual_expires_at`，仅保留风险标记字段。
+- `INSTALLED_APPS` 未恢复 `accounts`、`finance`、`mall`、`monitoring`、`dashboard_api`、`biz`。
+- 收窄扫描未发现旧计划快照表、旧退款函数名、旧端口入口或订单服务到期字段回流；命中的 `ip_recycle_at=asset.actual_expires_at` 仍是固定 IP 回收计划派生时间。
+- 重装提交结果 callback 枚举 16 个极端样本，最大 58 字节，无超过 64 字节。
+
+### 验证
+
+本地已通过:
+
+```bash
+UV_CACHE_DIR=/private/tmp/shop-uv-cache uv run python -m py_compile bot/handlers.py bot/tests.py bot/keyboards.py cloud/task_center.py cloud/tests_task_center.py cloud/api_tasks.py
+UV_CACHE_DIR=/private/tmp/shop-uv-cache uv run python manage.py check
+UV_CACHE_DIR=/private/tmp/shop-uv-cache DJANGO_TEST_SQLITE=1 uv run python manage.py test bot.tests.RetainedIpRenewalUiTestCase --verbosity 2
+UV_CACHE_DIR=/private/tmp/shop-uv-cache DJANGO_TEST_SQLITE=1 uv run python manage.py test cloud.tests_task_center --verbosity 2
+UV_CACHE_DIR=/private/tmp/shop-uv-cache uv run python manage.py makemigrations --check --dry-run
+UV_CACHE_DIR=/private/tmp/shop-uv-cache DJANGO_TEST_SQLITE=1 uv run python manage.py shell -c "from django.apps import apps; from django.conf import settings; checks=[('cloud','CloudAsset','actual_expires_at'),('cloud','CloudServerOrder','actual_expires_at'),('cloud','CloudServerOrder','service_expires_at'),('cloud','CloudAssetDashboardSnapshot','actual_expires_at'),('cloud','CloudAssetDashboardSnapshot','risk_expired')]; print('installed_retired_apps=', [a for a in ['accounts','finance','mall','monitoring','dashboard_api','biz'] if a in settings.INSTALLED_APPS]); [print(f'{model}.{field}=', field in {f.name for f in apps.get_model(app, model)._meta.get_fields()}) for app, model, field in checks]"
+UV_CACHE_DIR=/private/tmp/shop-uv-cache DJANGO_TEST_SQLITE=1 uv run python manage.py shell -c "from bot.handlers import _reinstall_submitted_keyboard,_asset_reinstall_submitted_keyboard; ids=[88,999999999999999999]; backs=['cloud:querymenu','cloud:list:page:3','cloud:ad:asset:999999999999999999:cloud:list:page:999999999999999999','profile:orders:cloud:filter:provisioning:page:999999999999999999']; callbacks=[]; [callbacks.extend([button.callback_data for row in _reinstall_submitted_keyboard(i,b).inline_keyboard for button in row if button.callback_data]) for i in ids for b in backs]; [callbacks.extend([button.callback_data for row in _asset_reinstall_submitted_keyboard(i,b).inline_keyboard for button in row if button.callback_data]) for i in ids for b in backs]; oversized=[c for c in callbacks if len(c.encode())>64]; print('callback_count=', len(callbacks)); print('max_callback_bytes=', max(len(c.encode()) for c in callbacks)); print('oversized=', oversized)"
+rg -n "class .*PlanSnapshot|PlanSnapshot|service_expires_at\\s*=\\s*models\\.|CloudServerOrder.*actual_expires_at|CloudAssetDashboardSnapshot.*actual_expires_at|def .*refund|refund_order|process_refund|create_refund|cloud:ipport|custom:port|waiting_port" --glob '!**/migrations/**' --glob '!CHANGELOG.md' --glob '!docs/**'
+git diff --check
+```
+
+`makemigrations --check --dry-run` 仍出现本地沙箱无法连接 `127.0.0.1` MySQL 的迁移历史一致性警告，但最终为 `No changes detected`。SQLite 测试仍打印不支持 `db_comment` 的预期 warning，bot SimpleTestCase 配置读取容错日志和 mocked postcheck 异常日志仍为既有测试输出，最终通过。
+
+### 剩余风险
+
+- 本轮未跑完整测试套件。
+- 本轮未执行真实 Telegram 点击、真实云资源创建/删除/IP 变更、真实支付、链上广播、生产发布或不可逆操作。
+- 真机测试仍需在用户明确授权真实云资源成本后，单独按中文报告记录云资源 ID 脱敏结果。
+
 ## 2026-06-03 管理员开机返回链修复
 
 ### 范围

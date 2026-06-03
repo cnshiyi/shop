@@ -15,7 +15,7 @@ from django.test import RequestFactory, SimpleTestCase, TestCase
 from django.utils import timezone
 
 from bot.api import DASHBOARD_SESSION_IDLE_SECONDS, _active_proxy_counts_by_user, _authenticate_dashboard_request, admin_users_list, archive_telegram_chat, auth_totp_start, create_admin_user, create_cloud_account, create_product, delete_cloud_account, me, send_daily_expiry_summary_test_notification, send_telegram_chat_message, site_config_groups, telegram_login_start, update_cloud_account, update_site_config, users_list, verify_cloud_account
-from bot.handlers import _asset_reinstall_confirm_keyboard, _asset_renewal_plan_keyboard, _buy_cloud_server_with_balance_and_notify, _cloud_renewal_postcheck_and_notify, _cloud_server_created_text, _fetch_tron_address_summary, _hydrate_order_proxy_links, _install_notice_copy_wrapper, _pay_cloud_server_order_with_balance_and_notify, _proxy_links_text, _reinstall_confirm_keyboard, _requires_recovery_provision, _retained_ip_renewal_plan_keyboard, _save_asset_main_proxy_link, _save_user_main_proxy_link, _trongrid_get_with_key_fallback, _trongrid_post_with_key_fallback, _validate_reinstall_proxy_link, register_handlers
+from bot.handlers import _asset_reinstall_confirm_keyboard, _asset_reinstall_submitted_keyboard, _asset_renewal_plan_keyboard, _buy_cloud_server_with_balance_and_notify, _cloud_renewal_postcheck_and_notify, _cloud_server_created_text, _fetch_tron_address_summary, _hydrate_order_proxy_links, _install_notice_copy_wrapper, _pay_cloud_server_order_with_balance_and_notify, _proxy_links_text, _reinstall_confirm_keyboard, _reinstall_submitted_keyboard, _requires_recovery_provision, _retained_ip_renewal_plan_keyboard, _save_asset_main_proxy_link, _save_user_main_proxy_link, _trongrid_get_with_key_fallback, _trongrid_post_with_key_fallback, _validate_reinstall_proxy_link, register_handlers
 from bot.keyboards import _compact_back_button_callback, append_back_callback, balance_details_list, cloud_asset_detail_callback, cloud_auto_renew_callback, cloud_detail_callback, cloud_previous_detail_callback, compact_callback_path, cloud_ip_query_result, cloud_order_list, cloud_order_readonly_detail, cloud_server_change_ip_region_menu, cloud_server_detail, cloud_server_list, cloud_server_renew_payment
 from bot.models import TelegramChatArchive, TelegramChatMessage, TelegramLoginAccount, TelegramUser
 from bot.services import record_telegram_message
@@ -1087,6 +1087,34 @@ class RetainedIpRenewalUiTestCase(SimpleTestCase):
 
         self.assertEqual(order_markup.inline_keyboard[1][0].callback_data, 'cloud:detail:88:clp:3')
         self.assertEqual(asset_markup.inline_keyboard[1][0].callback_data, 'cad:99:cloud:querymenu')
+
+    def test_reinstall_submitted_buttons_keep_back_path(self):
+        order_markup = _reinstall_submitted_keyboard(88, 'cloud:querymenu')
+        asset_markup = _asset_reinstall_submitted_keyboard(99, 'cloud:list:page:3')
+        nested_asset_markup = _asset_reinstall_submitted_keyboard(
+            999999999999999999,
+            'cloud:ad:asset:999999999999999999:cloud:list:page:999999999999999999',
+        )
+        callbacks = [
+            order_markup.inline_keyboard[0][0].callback_data,
+            asset_markup.inline_keyboard[0][0].callback_data,
+            nested_asset_markup.inline_keyboard[0][0].callback_data,
+        ]
+
+        self.assertEqual(callbacks[0], 'cloud:detail:88:cloud:querymenu')
+        self.assertEqual(callbacks[1], 'cad:99:clp:3')
+        self.assertEqual(callbacks[2], 'cad:999999999999999999:clp:999999999999999999')
+        self.assertTrue(all(len(item.encode()) <= 64 for item in callbacks))
+
+    def test_reinstall_confirm_handlers_reuse_saved_back_path_after_submit(self):
+        source = inspect.getsource(register_handlers)
+        asset_confirm_source = source.split('async def cb_cloud_asset_reinit_confirm', 1)[1].split("@dp.callback_query(F.data.startswith('d:'))", 1)[0]
+        order_confirm_source = source.split('async def cb_cloud_reinit_confirm', 1)[1].split("@dp.callback_query(F.data.startswith('exp:'))", 1)[0]
+
+        self.assertIn("back_callback = data.get('reinstall_back')", asset_confirm_source)
+        self.assertIn('_asset_reinstall_submitted_keyboard(asset_id, back_callback)', asset_confirm_source)
+        self.assertIn("back_callback = data.get('reinstall_back')", order_confirm_source)
+        self.assertIn('_reinstall_submitted_keyboard(order.id, back_callback)', order_confirm_source)
 
     def test_asset_renewal_plan_keyboard_keeps_back_path(self):
         plans = [SimpleNamespace(id=1)]

@@ -2233,6 +2233,24 @@ def _asset_reinstall_confirm_keyboard(asset_id: int, token: str, back_callback: 
     ])
 
 
+def _reinstall_submitted_keyboard(order_id: int, back_callback: str | None = None):
+    back_callback = compact_callback_path(back_callback)
+    if not back_callback:
+        return main_menu()
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text='🔙 返回原代理', callback_data=cloud_previous_detail_callback(order_id, back_callback))],
+    ])
+
+
+def _asset_reinstall_submitted_keyboard(asset_id: int, back_callback: str | None = None):
+    back_callback = compact_callback_path(back_callback)
+    if not back_callback:
+        return main_menu()
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text='🔙 返回原代理', callback_data=cloud_asset_detail_callback(asset_id, back_callback))],
+    ])
+
+
 async def _issue_reinstall_confirm_token(state: FSMContext, *, kind: str, item_id: int) -> str:
     token = secrets.token_urlsafe(6)
     await state.set_state(None)
@@ -4440,6 +4458,8 @@ def register_handlers(dp: Dispatcher):
         if not await _consume_reinstall_confirm_token(state, kind='asset', item_id=asset_id, token=token):
             await _safe_callback_answer(callback, '这个确认按钮已过期或已使用，请重新进入详情并重新生成按钮。', show_alert=True)
             return
+        data = await state.get_data()
+        back_callback = data.get('reinstall_back')
         await _safe_callback_answer(callback, '已确认，后台处理中')
         await _safe_remove_inline_keyboard(callback.message)
         user = await get_or_create_user(callback.from_user.id, callback.from_user.username, callback.from_user.first_name)
@@ -4468,7 +4488,7 @@ def register_handlers(dp: Dispatcher):
             return
         _ASSET_REINIT_INFLIGHT.add(asset_id)
         logger.info('CLOUD_ASSET_REINIT_SUBMIT user_id=%s asset_id=%s order_id=%s target_order_id=%s ip=%s', user.id, asset_id, order.id, rebuild_order.id, getattr(item, 'public_ip', None))
-        await callback.message.reply('🛠 已确认重新安装：后台只会在当前服务器重新执行 BBR/MTProxy 安装，不会创建新实例，也不会迁移固定 IP。预计约 5 分钟，完成后会自动通知你。\n\n后台处理期间，底部菜单和其它按钮可正常使用。', reply_markup=main_menu())
+        await callback.message.reply('🛠 已确认重新安装：后台只会在当前服务器重新执行 BBR/MTProxy 安装，不会创建新实例，也不会迁移固定 IP。预计约 5 分钟，完成后会自动通知你。\n\n后台处理期间，底部菜单和其它按钮可正常使用。', reply_markup=_asset_reinstall_submitted_keyboard(asset_id, back_callback))
         task = asyncio.create_task(_provision_cloud_server_and_notify(bot, callback.from_user.id, rebuild_order.id, rebuild_order.mtproxy_port or MTPROXY_DEFAULT_PORT, retry_only=True))
         task.add_done_callback(lambda _task, _asset_id=asset_id: _ASSET_REINIT_INFLIGHT.discard(_asset_id))
 
@@ -5253,6 +5273,8 @@ def register_handlers(dp: Dispatcher):
         if not await _consume_reinstall_confirm_token(state, kind='order', item_id=order_id, token=token):
             await _safe_callback_answer(callback, '这个确认按钮已过期或已使用，请重新进入详情并重新生成按钮。', show_alert=True)
             return
+        data = await state.get_data()
+        back_callback = data.get('reinstall_back')
         await _safe_callback_answer(callback, '已确认，后台处理中')
         await _safe_remove_inline_keyboard(callback.message)
         user = await get_or_create_user(callback.from_user.id, callback.from_user.username, callback.from_user.first_name)
@@ -5274,7 +5296,7 @@ def register_handlers(dp: Dispatcher):
         action_text = '重建服务器' if is_rebuild else ('继续初始化' if order.status in {'paid', 'provisioning', 'failed'} else '重新安装')
         retry_only = bool(not is_rebuild and order.public_ip and order.login_password)
         work_text = '新建服务器并安装代理，成功后迁移固定 IP，旧机保留 3 天' if is_rebuild else ('重新执行 BBR/MTProxy 安装' if retry_only else '继续创建服务器并完成初始化')
-        await callback.message.reply(_bot_text_format('bot_reinstall_submitted', '🛠 已确认{action_text}，后台会{work_text}。预计约 5 分钟，完成后会自动通知你。\n\n后台处理期间，底部菜单和其它按钮可正常使用。', action_text=action_text, work_text=work_text), reply_markup=main_menu())
+        await callback.message.reply(_bot_text_format('bot_reinstall_submitted', '🛠 已确认{action_text}，后台会{work_text}。预计约 5 分钟，完成后会自动通知你。\n\n后台处理期间，底部菜单和其它按钮可正常使用。', action_text=action_text, work_text=work_text), reply_markup=_reinstall_submitted_keyboard(order.id, back_callback))
         await _send_admin_user_action_notice(bot, user, '重装', [
             ('订单号', order.order_no),
             ('IP', getattr(order, 'public_ip', None) or getattr(order, 'previous_public_ip', None) or '-'),
