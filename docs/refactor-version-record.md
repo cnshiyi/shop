@@ -5252,6 +5252,43 @@ git diff --check
 - 本轮未执行真实 Telegram 点击、真实云资源创建/删除/IP 变更、真实支付、链上广播、生产发布或不可逆操作。
 - 真机测试仍需在用户明确授权真实云资源成本后，单独按中文报告记录云资源 ID 脱敏结果。
 
+## 2026-06-03 后台任务中心与回调容量巡检
+
+### 范围
+
+本轮从 `f1635a7` 继续监工 Shop Django 后端，重点复核云资产生命周期唯一到期事实、后台任务中心失败状态统计、通知计划和生命周期执行任务漏报、机器人返回链与 Telegram `callback_data` 64 字节限制，以及废弃 app、旧计划快照、旧退款入口回流风险。
+
+### 监工结果
+
+- 当前工作树起始干净，最近提交为 `f1635a7 修复任务中心执行记录漏报`。
+- 未发现需要修改运行代码的问题；本轮仅追加中文版本记录。
+- `CloudAsset` 仍只有 `actual_expires_at` 作为结构化资产到期事实；`CloudServerOrder` 未恢复 `actual_expires_at` 或 `service_expires_at`，仅保留 `renew_grace_expires_at` 等流程时间；`CloudAssetDashboardSnapshot` 未恢复到期字段。
+- `INSTALLED_APPS` 未恢复 `accounts`、`finance`、`mall`、`monitoring`、`dashboard_api`、`biz`。
+- 后台任务中心的通知计划、生命周期计划、自动续费状态统计聚焦测试通过；`status_counts` 对计划项、最近失败历史和 DB 执行任务记录的归一化仍能覆盖 `failed_retry`、`failed`、`retry_failed` 等失败状态。
+- bot 回调短码生成与处理器注册一致：`ao:`/`af:`、`p:`、`r:`、`i:`、`ri:`、`u:`、`arp:`、`rnp:`、`cad:`、`csd:`、`d:` 均有对应解析路径。
+- 使用 18 位极端 ID 枚举订单详情、资产详情、续费支付、IP 查询订单/资产动作、自动续费和资产操作按钮，未发现超过 Telegram 64 字节限制的 callback。
+
+### 验证
+
+本地已通过:
+
+```bash
+UV_CACHE_DIR=/private/tmp/shop-uv-cache uv run python manage.py check
+UV_CACHE_DIR=/private/tmp/shop-uv-cache uv run python -m py_compile bot/api.py bot/handlers.py bot/keyboards.py cloud/services.py cloud/bootstrap.py cloud/api.py cloud/task_center.py cloud/api_tasks.py cloud/tests_task_center.py
+DJANGO_TEST_SQLITE=1 UV_CACHE_DIR=/private/tmp/shop-uv-cache uv run python manage.py makemigrations --check --dry-run
+DJANGO_TEST_SQLITE=1 UV_CACHE_DIR=/private/tmp/shop-uv-cache uv run python manage.py shell -c "from django.apps import apps; from cloud.models import CloudAsset, CloudServerOrder, CloudAssetDashboardSnapshot; print('retired_installed=', [x for x in ['accounts','finance','mall','monitoring','biz','dashboard_api'] if apps.is_installed(x)]); print('CloudAsset expiry fields=', [f.name for f in CloudAsset._meta.fields if 'expires' in f.name]); print('CloudServerOrder expiry fields=', [f.name for f in CloudServerOrder._meta.fields if 'expires' in f.name]); print('Snapshot expiry fields=', [f.name for f in CloudAssetDashboardSnapshot._meta.fields if 'expires' in f.name])"
+DJANGO_TEST_SQLITE=1 UV_CACHE_DIR=/private/tmp/shop-uv-cache uv run python manage.py test bot.tests.RetainedIpRenewalUiTestCase cloud.tests_task_center --keepdb --noinput --verbosity 1
+DJANGO_TEST_SQLITE=1 UV_CACHE_DIR=/private/tmp/shop-uv-cache uv run python manage.py shell -c "from decimal import Decimal; from bot.keyboards import cloud_server_detail, cloud_server_renew_payment, cloud_ip_query_result, cloud_auto_renew_callback, cloud_asset_action_callback; long_id=999999999999999999; back=f'cloud:ad:asset:{long_id}:profile:orders:cloud:filter:provisioning:page:{long_id}'; order_item={'ip':'1.1.1.1','order_id':long_id,'can_change_ip':True,'can_reinit':True,'can_config':True,'can_auto_renew':True,'auto_renew_enabled':False}; asset_item={'ip':'1.1.1.2','asset_id':long_id,'can_change_ip':True,'can_reinit':True,'can_config':True,'can_support':True}; markups=[cloud_server_detail(long_id, True, True, True, back, True), cloud_server_renew_payment(long_id, Decimal('12.3'), Decimal('45.6'), back_callback=back), cloud_ip_query_result([], [order_item, asset_item], 1, 1, include_reinit=True)]; extra=[cloud_auto_renew_callback('on', long_id, back), cloud_auto_renew_callback('off', long_id, back), cloud_asset_action_callback('changeip', long_id, back), cloud_asset_action_callback('upgrade', long_id, back)]; callbacks=extra[:]; [callbacks.append(b.callback_data) for m in markups for row in m.inline_keyboard for b in row if b.callback_data]; too_long=[(len(c.encode()), c) for c in callbacks if len(c.encode())>64]; print('callback_count=', len(callbacks)); print('too_long=', too_long); print('max_len=', max(len(c.encode()) for c in callbacks)); print('max_callback=', max(callbacks, key=lambda c: len(c.encode())));"
+```
+
+SQLite 测试仍会打印不支持 `db_comment` 的预期系统警告；bot SimpleTestCase 仍会打印配置读取被禁止数据库查询拦截的既有容错日志；mocked postcheck 异常日志仍为测试覆盖输出，最终测试通过。两次 callback 枚举脚本先后因参数形状写错失败，修正为 `cloud_ip_query_result([], [order_item, asset_item], ...)` 后通过且无超长 callback。
+
+### 剩余风险
+
+- 本轮未跑完整测试套件。
+- 本轮未执行真实 Telegram 点击、真实云资源创建/删除/IP 变更、真实支付、链上广播、生产发布或不可逆操作。
+- 真机测试仍需在用户明确授权真实云资源成本后，单独按中文报告记录云资源 ID 脱敏结果。
+
 ## 2026-06-03 自动续费返回链与任务中心巡检
 
 ### 范围
