@@ -5159,6 +5159,53 @@ git diff --check
 - 本轮未执行真实 Telegram 点击、真实云资源创建/删除/IP 变更、真实支付、链上广播、生产发布或不可逆操作。
 - 真机测试仍需在用户明确授权真实云资源成本后，单独按中文报告记录云资源 ID 脱敏结果。
 
+## 2026-06-03 本地 MySQL 恢复与默认测试库权限修复
+
+### 范围
+
+本轮按用户“修复 mysql”要求，优先处理当前会话中聚焦测试无法连接或无法创建 MySQL 测试库的问题，并继续确认当前仓库状态、最近提交和自动化监工配置。
+
+### 处理结果
+
+- 起始工作树干净，最新提交为 `f1fd96f 校准任务中心最近失败总数`。
+- 已恢复 `Shop 自动优化监工` 自动化为启用状态，保持每 10 分钟在 `/Users/a399/Desktop/data/shop` 当前项目上下文运行。
+- 定位默认 `127.0.0.1:3306` 不是 Docker 临时容器，而是 OrbStack `database` 机器中的 MariaDB 10.11 服务。
+- 未停用或删除 OrbStack `database` 机器中的 MariaDB 数据；只通过 `orb sudo mysql` 给本地 `a` 用户补齐 `a` 与 `test_a` 库权限，修复 Django 创建测试库时报 `Access denied for user 'a'@'localhost' to database 'test_a'` 的问题。
+- 排障期间曾使用 AWS Public ECR 拉取官方 MySQL 8 镜像，在 `127.0.0.1:3307` 临时启动 `shop-mysql` 容器验证 MySQL 8 连通性；默认 3306 权限修复后，已停止并移除该临时容器，避免留下额外服务。
+- `127.0.0.1:3306` 的 `a` 库已有 41 张表，迁移计划为空，未执行清库或数据删除。
+
+### 验证
+
+本地已通过:
+
+```bash
+uv run python manage.py migrate --plan
+uv run python manage.py check
+uv run python manage.py test cloud.tests_task_center bot.tests.TronGridFallbackTestCase bot.tests.RetainedIpRenewalUiTestCase --verbosity 1
+MYSQL_PORT=3307 uv run python manage.py check
+MYSQL_PORT=3307 uv run python manage.py test cloud.tests_task_center bot.tests.TronGridFallbackTestCase bot.tests.RetainedIpRenewalUiTestCase --verbosity 1
+```
+
+默认 3306 验证结果：
+
+- `uv run python manage.py migrate --plan`：`No planned migration operations`
+- `uv run python manage.py check`：`System check identified no issues`
+- `uv run python manage.py test cloud.tests_task_center bot.tests.TronGridFallbackTestCase bot.tests.RetainedIpRenewalUiTestCase --verbosity 1`：56 个测试通过
+
+并行只读 `codex-cli` 巡检结果：
+
+- 未发现高置信问题。
+- `CloudAsset.actual_expires_at` 仍是唯一结构化资产到期事实。
+- `CloudServerOrder` 未恢复 `service_expires_at` 或 `actual_expires_at`。
+- 旧退款函数名、旧计划快照、废弃 app 运行时回流未发现高置信问题。
+- Telegram `callback_data` 长路径已有短码压缩和 64 字节保护。
+
+### 剩余风险
+
+- 默认 3306 当前是 OrbStack `database` 机器的 MariaDB 10.11，而不是 MySQL 8；Django 当前验证可用，但若后续必须严格使用 MySQL 8，需要先迁移或停用该 MariaDB 服务，再把 MySQL 8 绑定回 3306。
+- 本轮未跑完整测试套件。
+- 本轮未执行真实 Telegram 点击、真实云资源创建/删除/IP 变更、真实支付、链上广播、生产发布或不可逆操作。
+
 ## 2026-06-03 后台任务中心与生命周期巡检
 
 ### 范围
