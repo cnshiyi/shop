@@ -4,7 +4,7 @@
 
 ## 最近一轮
 
-- 时间：2026-06-03 15:31 CST
+- 时间：2026-06-03 15:35 CST
 - 状态：已完成后台 API 路由拆分收尾、固定巡检和提交前验证。
 - 最近提交：本轮提交后以当前 `HEAD` 为准。
 - 本轮改动：将后台 API 路由从旧 `shop/dashboard_urls.py` 拆分为 `shop/auth_urls.py` 和 `shop/admin_urls.py`；`shop/urls.py` 只暴露 `/api/csrf/`、`/api/auth/`、`/api/admin/` 和首页；删除旧 `/api/dashboard/` 与根 `/api/` 后台业务挂载；测试和中文架构文档同步改到 `/api/admin/`。
