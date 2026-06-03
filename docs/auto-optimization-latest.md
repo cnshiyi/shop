@@ -4,17 +4,17 @@
 
 ## 最近一轮
 
-- 时间：2026-06-03 15:35 CST
-- 状态：已完成后台 API 路由拆分收尾、固定巡检和提交前验证。
+- 时间：2026-06-03 16:05 CST
+- 状态：已完成固定巡检；本轮未发现需要修改运行代码的问题。
 - 最近提交：本轮提交后以当前 `HEAD` 为准。
-- 本轮改动：将后台 API 路由从旧 `shop/dashboard_urls.py` 拆分为 `shop/auth_urls.py` 和 `shop/admin_urls.py`；`shop/urls.py` 只暴露 `/api/csrf/`、`/api/auth/`、`/api/admin/` 和首页；删除旧 `/api/dashboard/` 与根 `/api/` 后台业务挂载；测试和中文架构文档同步改到 `/api/admin/`。
-- 本轮修复：在 `/api/admin/` 下保留 `task-list/` 和 `plan-settings/` 两个旧后台业务兼容别名，避免前端或脚本滞后时出现无意义 404；新增路由契约测试覆盖新前缀、兼容别名和已移除旧入口。
-- 本轮结论：后台认证入口已收口到 `/api/auth/`，后台业务入口已收口到 `/api/admin/`；废弃 runtime app 未恢复，云资产到期事实仍只来自 `CloudAsset.actual_expires_at`。
+- 本轮范围：在 `TODO.md` 固定任务全部完成后，按控制台固定巡检清单复核后台 API 路由拆分、云资产生命周期唯一到期事实、机器人返回链、Telegram `callback_data` 长度、任务中心状态统计、废弃 app 回流和迁移变更。
+- 本轮结论：后台 API 仍收口到 `/api/auth/` 与 `/api/admin/`；废弃 runtime app 未恢复；云资产到期事实仍只来自 `CloudAsset.actual_expires_at`；任务中心 pending/failed 统计和机器人返回链聚焦测试未发现回归。
+- 本轮改动：仅更新自动化中文记录和版本记录。
 
 ## 最近验证
 
 - `UV_CACHE_DIR=/private/tmp/uv-cache-shop PYTHONDONTWRITEBYTECODE=1 uv run python manage.py check` 通过。
-- `UV_CACHE_DIR=/private/tmp/uv-cache-shop PYTHONDONTWRITEBYTECODE=1 uv run python -m py_compile shop/urls.py shop/admin_urls.py shop/auth_urls.py bot/tests.py cloud/tests.py cloud/tests_task_center.py` 通过。
+- `UV_CACHE_DIR=/private/tmp/uv-cache-shop PYTHONDONTWRITEBYTECODE=1 uv run python -m py_compile shop/urls.py shop/admin_urls.py shop/auth_urls.py bot/tests.py cloud/tests.py cloud/tests_task_center.py cloud/task_center.py cloud/api_tasks.py cloud/lifecycle_tasks.py cloud/sync_jobs.py` 通过。
 - `DJANGO_TEST_SQLITE=1 UV_CACHE_DIR=/private/tmp/uv-cache-shop PYTHONDONTWRITEBYTECODE=1 uv run python manage.py test bot.tests.ApiPrefixContractTestCase bot.tests.DashboardAuthSurfaceTestCase --settings=shop.settings --verbosity=2` 通过，共 10 个测试。
 - `DJANGO_TEST_SQLITE=1 UV_CACHE_DIR=/private/tmp/uv-cache-shop PYTHONDONTWRITEBYTECODE=1 uv run python manage.py test cloud.tests_task_center --settings=shop.settings --verbosity=2` 通过，共 14 个测试。
 - `DJANGO_TEST_SQLITE=1 UV_CACHE_DIR=/private/tmp/uv-cache-shop PYTHONDONTWRITEBYTECODE=1 uv run python manage.py test bot.tests.RetainedIpRenewalUiTestCase --settings=shop.settings --verbosity=2` 通过，共 49 个测试。
