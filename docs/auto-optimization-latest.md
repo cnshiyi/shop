@@ -4,17 +4,17 @@
 
 ## 最近一轮
 
-- 时间：2026-06-03 19:22 CST
-- 状态：已完成固定巡检复核，未发现需要修改运行代码的新问题。
+- 时间：2026-06-03 19:34 CST
+- 状态：已完成固定巡检三次复核，未发现需要修改运行代码的新问题。
 - 最近提交：本轮提交后以当前 `HEAD` 为准。
 - 本轮范围：读取自动化记忆、当前 git 状态、最近提交、`docs/auto-optimization-control.md`、本文件、`docs/refactor-version-record.md` 末尾、`AGENTS.md`、`TODO.md` 和 `django-shop-backend` 技能；由于 `TODO.md` 已全部勾选，按固定巡检清单执行。
-- 本轮结论：`CloudAsset.actual_expires_at` 继续作为唯一资产到期事实；订单表未恢复 `actual_expires_at` 或 `service_expires_at`；计划快照表未恢复到期字段；废弃 runtime app 未重新安装；机器人返回链、Telegram `callback_data` 限制、后台任务中心状态统计和迁移/同步保留资产到期事实的聚焦测试继续通过。本轮未发现上一轮通知计划状态统计修复后的新回归。
+- 本轮结论：`CloudAsset.actual_expires_at` 继续作为唯一资产到期事实；订单表未恢复 `actual_expires_at` 或 `service_expires_at`；计划快照表未恢复实际到期字段；废弃 runtime app 未重新安装；机器人返回链、Telegram `callback_data` 限制、后台任务中心状态统计和迁移/同步保留资产到期事实的聚焦测试继续通过。本轮未发现上一轮通知计划状态统计修复后的新回归。
 
 ## 最近验证
 
 - `UV_CACHE_DIR=/private/tmp/uv-cache-shop PYTHONDONTWRITEBYTECODE=1 uv run python manage.py check` 通过。
 - `UV_CACHE_DIR=/private/tmp/uv-cache-shop PYTHONDONTWRITEBYTECODE=1 uv run python -m py_compile shop/urls.py shop/admin_urls.py shop/auth_urls.py bot/handlers.py bot/api.py bot/keyboards.py bot/tests.py cloud/api_tasks.py cloud/task_center.py cloud/lifecycle_tasks.py cloud/lifecycle_schedule.py cloud/sync_jobs.py cloud/services.py cloud/provisioning.py cloud/management/commands/sync_aws_assets.py cloud/management/commands/sync_aliyun_assets.py cloud/management/commands/reconcile_cloud_assets_from_servers.py cloud/tests.py cloud/tests_task_center.py` 通过。
-- `DJANGO_TEST_SQLITE=1 UV_CACHE_DIR=/private/tmp/uv-cache-shop PYTHONDONTWRITEBYTECODE=1 uv run python manage.py shell -c "...字段内省..."` 确认废弃 app 未安装，`CloudAsset` 到期字段只有 `actual_expires_at`，`CloudServerOrder` 未恢复 `actual_expires_at` 或 `service_expires_at`，`CloudAssetDashboardSnapshot` 未恢复到期字段。
+- `DJANGO_TEST_SQLITE=1 UV_CACHE_DIR=/private/tmp/uv-cache-shop PYTHONDONTWRITEBYTECODE=1 uv run python manage.py shell -c "...字段内省..."` 确认废弃 app 未安装，`CloudAsset` 到期字段只有 `actual_expires_at`，`CloudServerOrder` 未恢复 `actual_expires_at` 或 `service_expires_at`，`CloudAssetDashboardSnapshot` 未恢复实际到期字段。
 - `DJANGO_TEST_SQLITE=1 UV_CACHE_DIR=/private/tmp/uv-cache-shop PYTHONDONTWRITEBYTECODE=1 uv run python manage.py test cloud.tests_task_center --settings=shop.settings --verbosity=2` 通过，共 14 个测试。
 - `DJANGO_TEST_SQLITE=1 UV_CACHE_DIR=/private/tmp/uv-cache-shop PYTHONDONTWRITEBYTECODE=1 uv run python manage.py test bot.tests.ApiPrefixContractTestCase bot.tests.DashboardAuthSurfaceTestCase bot.tests.RetainedIpRenewalUiTestCase --settings=shop.settings --verbosity=2` 通过，共 59 个测试。
 - `DJANGO_TEST_SQLITE=1 UV_CACHE_DIR=/private/tmp/uv-cache-shop PYTHONDONTWRITEBYTECODE=1 uv run python manage.py test cloud.tests.CloudServerServicesTestCase.test_rebuild_source_migration_schedule_preserves_asset_expiry cloud.tests.CloudServerServicesTestCase.test_mark_cloud_server_ip_change_requested_falls_back_when_plan_missing cloud.tests.CloudServerServicesTestCase.test_sync_aws_missing_order_preserves_asset_expiry_when_migration_due_is_earlier cloud.tests.CloudServerServicesTestCase.test_source_migration_schedule_keeps_asset_actual_expiry cloud.tests.CloudServerServicesTestCase.test_aws_sync_deleted_migration_order_keeps_asset_actual_expiry --settings=shop.settings --verbosity=2` 通过，共 5 个测试。
