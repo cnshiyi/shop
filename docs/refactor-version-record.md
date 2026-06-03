@@ -5204,6 +5204,46 @@ git diff --check
 - 本轮未执行真实 Telegram 点击、真实云资源创建/删除/IP 变更、真实支付、链上广播、生产发布或不可逆操作。
 - 真机测试仍需在用户明确授权真实云资源成本后，单独按中文报告记录云资源 ID 脱敏结果。
 
+## 2026-06-03 自动续费返回链与任务中心巡检
+
+### 范围
+
+本轮从提交 `fa20b69 修复IP查询自动续费返回链` 后继续监工，重点复查机器人资产详情、订单详情、续费、换 IP、重装、修改配置和自动续费返回链，确认 Telegram `callback_data` 64 字节限制、云资产生命周期唯一到期事实、后台任务中心失败统计、旧计划快照、旧退款入口和废弃 app 回流情况。
+
+### 监工结果
+
+- 起始工作树干净，未发现需要修改运行代码的问题；本轮仅追加中文版本记录。
+- `CloudAsset` 仍只有 `actual_expires_at` 作为结构化资产到期事实。
+- `CloudServerOrder` 未恢复 `service_expires_at` 或 `actual_expires_at`，默认端口仍为 443。
+- `CloudAssetDashboardSnapshot` 未恢复到期字段，仅保留 `risk_expired` 等风险展示字段。
+- `INSTALLED_APPS` 未恢复 `accounts`、`finance`、`mall`、`monitoring`、`dashboard_api`、`biz`。
+- 收窄扫描未发现旧计划快照、旧退款函数名、旧退款状态、旧端口入口或订单服务到期字段恢复。
+- bot 回调聚焦测试确认资产详情、订单详情、续费支付、换 IP、重装、修改配置、自动续费和 IP 查询入口仍保持返回路径并满足 64 字节限制。
+- 任务中心聚焦测试确认通知计划、生命周期计划和自动续费最近失败历史仍纳入 failed 与 `status_counts`，未发现后台总览漏报回退。
+
+### 验证
+
+本地已通过:
+
+```bash
+UV_CACHE_DIR=/private/tmp/shop-uv-cache PYTHONDONTWRITEBYTECODE=1 uv run python manage.py check
+UV_CACHE_DIR=/private/tmp/shop-uv-cache PYTHONDONTWRITEBYTECODE=1 uv run python -m py_compile bot/keyboards.py bot/handlers.py bot/api.py cloud/task_center.py cloud/api_tasks.py cloud/lifecycle.py cloud/lifecycle_execution.py cloud/services.py cloud/provisioning.py
+rg -n "service_expires_at\\s*=|order\\.(service_expires_at|actual_expires_at)|CloudServerOrder\\([^\\n]*(service_expires_at|actual_expires_at)|\\bCloudLifecyclePlan\\b|\\bCloudNoticePlan\\b|\\bCloudAutoRenewPlan\\b|CloudAssetPlanSnapshot|CloudOrderPlanSnapshot|refund_cloud_server_order|refund_cloud_order|\\brefund_order\\b|\\bprocess_refund\\b|\\bcreate_refund\\b|\\bissue_refund\\b|refund_to_balance|refund_balance|STATUS_REFUNDED|status=['\\\"]refunded['\\\"]|normalize_service_expiry|service_expired_at|allow_client_port|set_cloud_server_port|custom:port:|cloud:ipport:" bot core orders cloud shop --glob '!**/migrations/**' --glob '!**/tests.py' --glob '!**/tests_*.py'
+DB_ENGINE=sqlite SQLITE_NAME=/private/tmp/shop_introspect_current.sqlite3 UV_CACHE_DIR=/private/tmp/shop-uv-cache PYTHONDONTWRITEBYTECODE=1 uv run python manage.py shell -c "from django.conf import settings; retired={'accounts','finance','mall','monitoring','dashboard_api','biz'}; print('retired_apps', [app for app in settings.INSTALLED_APPS if app.split('.')[0] in retired]); from cloud.models import CloudAsset, CloudServerOrder, CloudAssetDashboardSnapshot; print('asset_expiry_fields', [f.name for f in CloudAsset._meta.fields if 'expire' in f.name or 'expiry' in f.name or f.name == 'actual_expires_at']); print('order_expiry_fields', [f.name for f in CloudServerOrder._meta.fields if f.name in {'service_expires_at','actual_expires_at'}]); print('snapshot_expiry_fields', [f.name for f in CloudAssetDashboardSnapshot._meta.fields if 'expire' in f.name or 'expiry' in f.name or f.name == 'actual_expires_at']); print('default_port', CloudServerOrder._meta.get_field('mtproxy_port').default)"
+DJANGO_TEST_SQLITE=1 DB_ENGINE=sqlite SQLITE_NAME=/private/tmp/shop_bot_tests.sqlite3 UV_CACHE_DIR=/private/tmp/shop-uv-cache PYTHONDONTWRITEBYTECODE=1 uv run python manage.py test bot.tests.RetainedIpRenewalUiTestCase --verbosity 2
+DJANGO_TEST_SQLITE=1 DB_ENGINE=sqlite SQLITE_NAME=/private/tmp/shop_task_center_tests.sqlite3 UV_CACHE_DIR=/private/tmp/shop-uv-cache PYTHONDONTWRITEBYTECODE=1 uv run python manage.py test cloud.tests_task_center --verbosity 2
+DB_ENGINE=sqlite SQLITE_NAME=/private/tmp/shop_migrations_check.sqlite3 UV_CACHE_DIR=/private/tmp/shop-uv-cache PYTHONDONTWRITEBYTECODE=1 uv run python manage.py makemigrations --check --dry-run
+git diff --check
+```
+
+SQLite 聚焦测试仍会打印不支持 `db_comment` 的预期系统警告；bot SimpleTestCase 仍会打印配置读取被禁止数据库访问拦截的既有容错日志和 mocked postcheck 异常日志，最终测试结果均为 OK。
+
+### 剩余风险
+
+- 本轮未跑完整测试套件。
+- 本轮未执行真实 Telegram 点击、真实云资源创建/删除/IP 变更、真实支付、链上广播、生产发布或不可逆操作。
+- 真机测试仍需在用户明确授权真实云资源成本后，单独按中文报告记录云资源 ID 脱敏结果。
+
 ## 2026-06-03 IP 查询自动续费返回链修复
 
 ### 范围
