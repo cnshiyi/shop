@@ -5111,6 +5111,58 @@ git diff --check
 - 本轮未执行真实 Telegram 点击、真实云资源创建/删除/IP 变更、真实支付、链上广播、生产发布或不可逆操作。
 - 真机测试仍需在用户明确授权真实云资源成本后，单独按中文报告记录云资源 ID 脱敏结果。
 
+## 2026-06-03 数据库中文注释补齐
+
+### 范围
+
+本轮按用户要求为当前运行时 Django 后端数据库补中文注释，并确保没有未提交孤儿代码。改动范围限定在当前活跃 app：`core`、`bot`、`orders`、`cloud`。
+
+### 运行时变化
+
+- 为当前活跃模型补齐 `db_table_comment`，覆盖系统配置、Telegram、订单、云资产、生命周期任务、通知任务、自动续费任务、链上监控等运行时表。
+- 为模型字段补齐 `db_comment`，优先复用现有中文字段名；对密钥、余额、链上交易哈希、任务认领、生命周期依据等关键字段改用更明确的数据库注释。
+- `CloudAsset.actual_expires_at` 的数据库注释明确标注为“云资产唯一真实到期事实，生命周期计划和续费判断以此字段为准”。
+- `CloudServerOrder` 的 `service_started_at`、`renew_grace_expires_at`、`suspend_at`、`delete_at`、`ip_recycle_at`、`migration_due_at` 均标注为订单流程时间，不作为资产到期事实。
+- `CloudAssetDashboardSnapshot` 的表注释明确为后台列表快照，不保存资产到期事实。
+- 新增迁移：`bot.0016`、`core.0013`、`cloud.0050`、`orders.0006`，仅记录表注释和字段注释状态变化。
+
+### 监工结果
+
+- `CloudAsset` 仍只有 `actual_expires_at` 一个结构化资产到期字段。
+- `CloudServerOrder` 未恢复 `service_expires_at` 或 `actual_expires_at`。
+- `CloudAssetDashboardSnapshot` 未恢复资产到期事实字段，仅保留风险布尔字段 `risk_expired`。
+- 旧计划快照表、旧退款函数名和废弃 app 未回流。
+
+### 验证
+
+本地已通过:
+
+```bash
+UV_CACHE_DIR=/private/tmp/uv-cache-shop PYTHONDONTWRITEBYTECODE=1 DJANGO_TEST_SQLITE=1 uv run python manage.py check
+UV_CACHE_DIR=/private/tmp/uv-cache-shop PYTHONDONTWRITEBYTECODE=1 DJANGO_TEST_SQLITE=1 uv run python -m py_compile cloud/models.py core/models.py bot/models.py orders/models.py cloud/migrations/0050_alter_addressmonitor_table_comment_and_more.py core/migrations/0013_alter_cloudaccountconfig_table_comment_and_more.py bot/migrations/0016_alter_adminreplylink_table_comment_and_more.py orders/migrations/0006_alter_balanceledger_table_comment_and_more.py
+UV_CACHE_DIR=/private/tmp/uv-cache-shop PYTHONDONTWRITEBYTECODE=1 DJANGO_TEST_SQLITE=1 uv run python manage.py makemigrations --check --dry-run
+UV_CACHE_DIR=/private/tmp/uv-cache-shop PYTHONDONTWRITEBYTECODE=1 DJANGO_TEST_SQLITE=1 uv run python - <<'PY'
+import os
+os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'shop.settings')
+import django
+django.setup()
+from django.apps import apps
+from cloud.models import CloudAsset, CloudAssetDashboardSnapshot, CloudServerOrder
+print([app for app in ['accounts', 'finance', 'mall', 'monitoring', 'dashboard_api', 'biz'] if apps.is_installed(app)])
+print([f.name for f in CloudAsset._meta.fields if 'expire' in f.name or 'expires' in f.name])
+print([name for name in ['service_expires_at', 'actual_expires_at'] if hasattr(CloudServerOrder, name)])
+print([f.name for f in CloudAssetDashboardSnapshot._meta.fields if 'expire' in f.name or 'expires' in f.name])
+print(CloudAsset._meta.get_field('actual_expires_at').db_comment)
+PY
+git diff --check
+```
+
+### 剩余风险
+
+- 本轮未跑完整测试套件。
+- 本轮未执行生产数据库迁移；上线执行这些注释迁移时仍需按 MySQL 表结构变更窗口评估锁表影响。
+- 本轮未执行真实 Telegram 点击、真实云资源创建/删除/IP 变更、真实支付、链上广播、生产发布或不可逆操作。
+
 ## 2026-06-03 模型注释改动风险巡检
 
 ### 范围

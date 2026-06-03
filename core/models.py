@@ -25,13 +25,14 @@ class SiteConfig(models.Model):
     _plain_value_cache = {}
     _cache_lock = RLock()
 
-    key = models.CharField('键', max_length=191, unique=True, db_index=True)
-    value = models.TextField('值', blank=True, null=True)
-    is_sensitive = models.BooleanField('敏感配置', default=False)
-    sort_order = models.IntegerField('排序', default=0, db_index=True)
+    key = models.CharField('键', max_length=191, unique=True, db_index=True, db_comment='键')
+    value = models.TextField('值', blank=True, null=True, db_comment='配置值；敏感配置会加密存储')
+    is_sensitive = models.BooleanField('敏感配置', default=False, db_comment='是否按敏感配置加密存储')
+    sort_order = models.IntegerField('排序', default=0, db_index=True, db_comment='排序')
 
     class Meta:
         db_table = 'core_site_config'
+        db_table_comment = '系统运行配置表'
         verbose_name = '系统配置'
         verbose_name_plural = '系统配置'
 
@@ -151,22 +152,23 @@ class CloudAccountConfig(models.Model):
         (STATUS_UNSUPPORTED, '暂不支持'),
     )
 
-    provider = models.CharField('云厂商', max_length=32, choices=PROVIDER_CHOICES, db_index=True)
-    name = models.CharField('账户名称', max_length=128)
-    external_account_id = models.CharField('云厂商账号ID', max_length=128, blank=True, null=True, db_index=True)
-    access_key = models.TextField('Access Key')
-    secret_key = models.TextField('Secret Key')
-    region_hint = models.CharField('默认地区', max_length=128, blank=True, null=True)
-    is_active = models.BooleanField('启用', default=True)
-    shutdown_enabled = models.BooleanField('关机计划启用', default=True, db_index=True)
-    status = models.CharField('巡检状态', max_length=32, choices=STATUS_CHOICES, default=STATUS_UNKNOWN, db_index=True)
-    status_note = models.TextField('巡检说明', blank=True, null=True)
-    last_checked_at = models.DateTimeField('最近巡检时间', blank=True, null=True)
-    created_at = models.DateTimeField('创建时间', auto_now_add=True)
-    updated_at = models.DateTimeField('更新时间', auto_now=True)
+    provider = models.CharField('云厂商', max_length=32, choices=PROVIDER_CHOICES, db_index=True, db_comment='云厂商')
+    name = models.CharField('账户名称', max_length=128, db_comment='账户名称')
+    external_account_id = models.CharField('云厂商账号ID', max_length=128, blank=True, null=True, db_index=True, db_comment='云厂商账号ID')
+    access_key = models.TextField('Access Key', db_comment='加密存储的云账号访问密钥')
+    secret_key = models.TextField('Secret Key', db_comment='加密存储的云账号私密密钥')
+    region_hint = models.CharField('默认地区', max_length=128, blank=True, null=True, db_comment='默认地区')
+    is_active = models.BooleanField('启用', default=True, db_comment='启用')
+    shutdown_enabled = models.BooleanField('关机计划启用', default=True, db_index=True, db_comment='关机计划启用')
+    status = models.CharField('巡检状态', max_length=32, choices=STATUS_CHOICES, default=STATUS_UNKNOWN, db_index=True, db_comment='巡检状态')
+    status_note = models.TextField('巡检说明', blank=True, null=True, db_comment='巡检说明')
+    last_checked_at = models.DateTimeField('最近巡检时间', blank=True, null=True, db_comment='最近巡检时间')
+    created_at = models.DateTimeField('创建时间', auto_now_add=True, db_comment='创建时间')
+    updated_at = models.DateTimeField('更新时间', auto_now=True, db_comment='更新时间')
 
     class Meta:
         db_table = 'core_cloud_account'
+        db_table_comment = '云厂商和外部服务账号配置表'
         verbose_name = '云账户配置'
         verbose_name_plural = '云账户配置'
         ordering = ['provider', 'name', 'id']
@@ -212,18 +214,19 @@ class ExternalSyncLog(models.Model):
         (SOURCE_DASHBOARD, '后台接口'),
     )
 
-    account = models.ForeignKey('core.CloudAccountConfig', verbose_name='关联账户', on_delete=models.SET_NULL, blank=True, null=True, related_name='sync_logs')
-    source = models.CharField('来源', max_length=32, choices=SOURCE_CHOICES, db_index=True)
-    action = models.CharField('动作', max_length=64, db_index=True)
-    target = models.CharField('目标', max_length=191, blank=True, null=True, db_index=True)
-    request_payload = models.TextField('请求载荷', blank=True, null=True)
-    response_payload = models.TextField('响应载荷', blank=True, null=True)
-    is_success = models.BooleanField('是否成功', default=True, db_index=True)
-    error_message = models.TextField('错误信息', blank=True, null=True)
-    created_at = models.DateTimeField('创建时间', auto_now_add=True, db_index=True)
+    account = models.ForeignKey('core.CloudAccountConfig', verbose_name='关联账户', on_delete=models.SET_NULL, blank=True, null=True, related_name='sync_logs', db_comment='关联账户')
+    source = models.CharField('来源', max_length=32, choices=SOURCE_CHOICES, db_index=True, db_comment='来源')
+    action = models.CharField('动作', max_length=64, db_index=True, db_comment='动作')
+    target = models.CharField('目标', max_length=191, blank=True, null=True, db_index=True, db_comment='目标')
+    request_payload = models.TextField('请求载荷', blank=True, null=True, db_comment='请求载荷')
+    response_payload = models.TextField('响应载荷', blank=True, null=True, db_comment='响应载荷')
+    is_success = models.BooleanField('是否成功', default=True, db_index=True, db_comment='是否成功')
+    error_message = models.TextField('错误信息', blank=True, null=True, db_comment='错误信息')
+    created_at = models.DateTimeField('创建时间', auto_now_add=True, db_index=True, db_comment='创建时间')
 
     class Meta:
         db_table = 'core_sync_log'
+        db_table_comment = '外部系统同步调用日志表'
         verbose_name = '外部同步日志'
         verbose_name_plural = '外部同步日志'
         ordering = ['-created_at', '-id']
