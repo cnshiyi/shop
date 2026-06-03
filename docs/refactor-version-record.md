@@ -5111,6 +5111,58 @@ git diff --check
 - 本轮未执行真实 Telegram 点击、真实云资源创建/删除/IP 变更、真实支付、链上广播、生产发布或不可逆操作。
 - 真机测试仍需在用户明确授权真实云资源成本后，单独按中文报告记录云资源 ID 脱敏结果。
 
+## 2026-06-03 后台任务中心与回调链巡检
+
+### 范围
+
+本轮从 `9a00779 添加数据库中文注释` 开始，继续巡检 Shop Django 后端的数据库注释迁移漂移、云资产生命周期唯一到期事实、后台任务中心状态统计、机器人返回链和 Telegram `callback_data` 64 字节限制。
+
+### 监工结果
+
+- 本轮未发现需要修改运行时代码的新缺陷。
+- `makemigrations --check --dry-run` 结果为 `No changes detected`，上一轮中文注释迁移未产生新的模型漂移。
+- 后台任务中心聚焦测试继续覆盖云资产同步、生命周期计划、通知计划和自动续费失败统计；本轮 53 条聚焦测试全部通过。
+- `CloudAsset` 仍只有 `actual_expires_at` 作为结构化资产到期字段。
+- `CloudServerOrder` 未恢复 `service_expires_at` 或 `actual_expires_at`，仅保留 `renew_grace_expires_at`、`expired_at` 等订单流程时间字段。
+- `CloudAssetDashboardSnapshot` 未恢复派生到期字段，仅保留风险布尔字段 `risk_expired`。
+- 未发现旧计划快照、旧退款函数名、废弃 app 目录或废弃 app 注册回流。
+
+### 验证
+
+本地已通过:
+
+```bash
+UV_CACHE_DIR=/private/tmp/uv-cache-shop PYTHONDONTWRITEBYTECODE=1 DJANGO_TEST_SQLITE=1 uv run python manage.py check
+UV_CACHE_DIR=/private/tmp/uv-cache-shop PYTHONDONTWRITEBYTECODE=1 DJANGO_TEST_SQLITE=1 uv run python manage.py makemigrations --check --dry-run
+UV_CACHE_DIR=/private/tmp/uv-cache-shop PYTHONDONTWRITEBYTECODE=1 DJANGO_TEST_SQLITE=1 uv run python -m py_compile bot/api.py bot/handlers.py cloud/services.py cloud/bootstrap.py cloud/api.py cloud/task_center.py cloud/lifecycle.py cloud/lifecycle_execution.py orders/payment_scanner.py
+UV_CACHE_DIR=/private/tmp/uv-cache-shop PYTHONDONTWRITEBYTECODE=1 DJANGO_TEST_SQLITE=1 uv run python manage.py test cloud.tests_task_center bot.tests.RetainedIpRenewalUiTestCase --verbosity=2
+UV_CACHE_DIR=/private/tmp/uv-cache-shop PYTHONDONTWRITEBYTECODE=1 DJANGO_TEST_SQLITE=1 uv run python - <<'PY'
+import os
+os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'shop.settings')
+import django
+django.setup()
+from django.apps import apps
+from django.conf import settings
+retired = {'accounts','finance','mall','monitoring','dashboard_api','biz'}
+print('retired_installed=', sorted(retired & set(settings.INSTALLED_APPS)))
+for label, model_name in [('cloud','CloudAsset'), ('cloud','CloudServerOrder'), ('cloud','CloudAssetDashboardSnapshot')]:
+    model = apps.get_model(label, model_name)
+    fields = [f.name for f in model._meta.get_fields()]
+    print(model_name, [name for name in fields if 'expire' in name or 'expires' in name])
+PY
+rg -n "service_expires_at|CloudAssetDashboardSnapshot.*expires|refund_order|refund_cloud|legacy_refund|PlanSnapshot|CloudLifecyclePlanSnapshot|CloudNoticePlanSnapshot|CloudAutoRenewPlanSnapshot" cloud bot orders core shop -g '!**/migrations/**'
+find . -maxdepth 2 -type d \( -name accounts -o -name finance -o -name mall -o -name monitoring -o -name dashboard_api -o -name biz \) -print
+git diff --check
+```
+
+SQLite 测试环境仍会输出数据库注释不受支持的 `fields.W163` / `models.W046` 警告，最终测试结果为通过。
+
+### 剩余风险
+
+- 本轮未跑完整测试套件。
+- 本轮未执行真实 Telegram 点击、真实云资源创建/删除/IP 变更、真实支付、链上广播、生产发布、数据删除或不可逆操作。
+- 真机测试仍需在用户明确授权真实云资源成本后，单独按中文报告记录云资源 ID 脱敏结果。
+
 ## 2026-06-03 数据库中文注释补齐
 
 ### 范围
