@@ -4,25 +4,28 @@
 
 ## 最近一轮
 
-- 时间：2026-06-03
-- 状态：已修复后台任务中心自动续费重试队列漏报。
-- 最近提交：本轮提交后生成。
-- 本轮改动：`cloud/task_center.py` 将 `CloudAutoRenewRetryTask` 待重试/失败任务纳入自动续费 section，使用 `retry_pending`/`retry_failed` 进入总数、活跃数、告警数和状态分布；`cloud/tests.py` 新增聚焦测试覆盖没有巡检日志时的待充值重试任务。
+- 时间：2026-06-03 14:51 CST
+- 状态：已修复后台任务中心对到期持久化 pending 任务的漏报。
+- 最近提交：本轮提交后以 `git log -1` 为准。
+- 本轮改动：`cloud/task_center.py` 将到期 `CloudLifecycleTask.STATUS_PENDING` 和 `CloudNoticeTask.STATUS_PENDING` 纳入生命周期/通知 section 的 active、total、status_counts 和 items；`cloud/tests_task_center.py` 补充无计划项/无通知日志时 pending DB 任务仍出现在总览的聚焦测试；`TODO.md` 勾选后台任务中心和状态统计复查。
+- 本轮结论：云资产同步 worker、自动续费重试、生命周期计划和通知计划的任务中心聚合继续可见；本轮补齐了计划 bundle 或历史日志缺失时，持久化到期待执行/待通知任务被后台总览漏报的问题。
 
 ## 最近验证
 
-- `UV_CACHE_DIR=/private/tmp/uv-cache uv run python manage.py check` 通过。
-- `UV_CACHE_DIR=/private/tmp/uv-cache uv run python -m py_compile cloud/task_center.py cloud/api_tasks.py cloud/lifecycle.py bot/keyboards.py bot/handlers.py orders/payment_scanner.py` 通过。
-- `UV_CACHE_DIR=/private/tmp/uv-cache DJANGO_TEST_SQLITE=1 uv run python manage.py test cloud.tests.CloudServerServicesTestCase.test_task_center_counts_pending_auto_renew_retry_tasks cloud.tests.CloudServerServicesTestCase.test_auto_renew_retry_task_waits_for_recharge_then_retries cloud.tests.CloudServerServicesTestCase.test_auto_renew_task_detail_includes_due_retry_and_fallback_items cloud.tests.CloudServerServicesTestCase.test_run_auto_renew_tasks_executes_due_retry_and_fallback_queue cloud.tests.CloudServerServicesTestCase.test_tasks_overview_exposes_click_paths_for_entry_and_order_number cloud.tests.CloudOrderStatusDashboardSyncTestCase bot.tests.RetainedIpRenewalUiTestCase orders.tests.ChainPaymentScannerTestCase --verbosity=2` 通过，共 74 个测试。
-- `UV_CACHE_DIR=/private/tmp/uv-cache uv run python manage.py makemigrations --check --dry-run` 显示 `No changes detected`；本地沙箱仍会打印无法连接 `127.0.0.1` MySQL 的迁移历史一致性警告。
+- `UV_CACHE_DIR=/private/tmp/uv-cache-shop PYTHONDONTWRITEBYTECODE=1 uv run python manage.py check` 通过。
+- `UV_CACHE_DIR=/private/tmp/uv-cache-shop PYTHONDONTWRITEBYTECODE=1 uv run python -m py_compile cloud/task_center.py cloud/tests_task_center.py cloud/api_tasks.py cloud/lifecycle_tasks.py cloud/sync_jobs.py` 通过。
+- `UV_CACHE_DIR=/private/tmp/uv-cache-shop DJANGO_TEST_SQLITE=1 PYTHONDONTWRITEBYTECODE=1 uv run python manage.py test cloud.tests_task_center --settings=shop.settings --verbosity=2` 通过，共 14 个测试。
+- `UV_CACHE_DIR=/private/tmp/uv-cache-shop PYTHONDONTWRITEBYTECODE=1 uv run python manage.py makemigrations --check --dry-run` 输出 `No changes detected`，仍有本地 MySQL 沙箱连接 warning。
 - `git diff --check` 通过。
+- 红线扫描未发现订单服务到期字段、旧计划快照、旧退款函数名或废弃 runtime app 回流；命中项仍为固定 IP 回收、资产侧 `actual_expires_at` 派生使用和测试数据。
 
 ## 剩余风险
 
-- 工作树存在其它未提交路由/文档/测试路径改动，本轮未覆盖或回退，提交时只暂存本轮任务中心修复和记录。
+- 工作树仍存在其它未提交路由/文档/测试路径改动，本轮未回退；提交时只暂存本轮任务中心修复、聚焦测试和中文记录。
 - 本轮未跑完整测试套件。
 - 本轮未执行真实 Telegram 点击、真实云资源、真实支付、链上广播、生产发布或不可逆操作。
+- SQLite 聚焦测试仍会打印不支持 `db_comment` 的预期 warning；`makemigrations --check --dry-run` 在默认 MySQL 连接被沙箱拒绝时仍会打印一致性检查 warning，但最终显示无迁移变化。
 
 ## 下一步
 
-- 下一轮继续关注后台任务中心与前端路由重命名后的 API 路径一致性，并复查机器人返回链。
+- 下一轮领取 `TODO.md` 中本地数据库差异复查，继续确认默认 MySQL/MariaDB 环境和 SQLite 聚焦测试不会隐藏字段、迁移或行为差异。

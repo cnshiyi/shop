@@ -6893,3 +6893,80 @@ git diff --check
 - 本轮未跑完整测试套件。
 - 本轮未执行真实 Telegram 点击、真实云资源创建/删除/IP 变更、真实支付、链上广播、生产发布或不可逆操作。
 - 真机测试仍需在用户明确授权真实云资源成本后，单独按中文报告记录云资源 ID 脱敏结果。
+
+## 2026-06-03 机器人返回链复查
+
+### 范围
+
+本轮继续监工 Shop Django 后端，先读取自动化记忆、当前 git 状态、最近提交、`docs/auto-optimization-control.md`、`docs/auto-optimization-latest.md`、版本记录末尾、`AGENTS.md` 和 `TODO.md`。按 `TODO.md` 第一项，聚焦复查机器人资产详情、订单详情、续费、钱包支付续费、换 IP、重装、修改配置的返回上一层行为，并确认 Telegram `callback_data` 不超过 64 字节。
+
+### 监工结果
+
+- 本轮开始时工作树已有其它未提交路由、文档和测试路径改动，例如 `shop/admin_urls.py`、`shop/auth_urls.py`、`shop/urls.py`、`shop/dashboard_urls.py` 删除，以及多份架构/迁移文档和测试文件改动；本轮未回退、未覆盖这些既有改动。
+- 未发现需要修改运行代码的问题；本轮只更新自动化中文记录和 TODO 状态。
+- `bot.keyboards` 对订单详情、资产详情、续费支付、换 IP、重装、修改配置、自动续费和二级操作的回调压缩逻辑继续生效。
+- `bot.handlers` 仍注册并解析 `cad/csd/d/r/i/ri/u/p/im/ir/ai/ar/ac/au/ao/af/arp/rnp` 等短回调，未发现“键盘生成短码但处理器不识别”的返回链断点。
+- 动态枚举极端 18 位资产/订单 ID、长订单筛选来源、资产详情嵌套订单详情、列表分页和 120 字节异常来源，共 306 个回调；最大长度 64 字节，超限 0。
+- 红线扫描未发现 `CloudServerOrder.service_expires_at`、订单侧 `actual_expires_at`、旧计划快照、旧退款函数名或废弃 runtime app 回流；命中的 `ip_recycle_at=asset.actual_expires_at` 和 `CloudAsset.actual_expires_at` 写入仍属于固定 IP 回收或资产侧唯一到期事实。
+
+### 验证
+
+本地已通过：
+
+```bash
+UV_CACHE_DIR=/private/tmp/uv-cache-shop PYTHONDONTWRITEBYTECODE=1 uv run python manage.py check
+UV_CACHE_DIR=/private/tmp/uv-cache-shop DJANGO_TEST_SQLITE=1 PYTHONDONTWRITEBYTECODE=1 uv run python manage.py test bot.tests.RetainedIpRenewalUiTestCase --settings=shop.settings --verbosity=2
+UV_CACHE_DIR=/private/tmp/uv-cache-shop PYTHONDONTWRITEBYTECODE=1 uv run python -m py_compile bot/keyboards.py bot/handlers.py bot/tests.py cloud/services.py cloud/provisioning.py cloud/api_orders.py cloud/api_assets.py cloud/lifecycle.py orders/payment_scanner.py
+DJANGO_SETTINGS_MODULE=shop.settings DJANGO_TEST_SQLITE=1 UV_CACHE_DIR=/private/tmp/uv-cache-shop PYTHONDONTWRITEBYTECODE=1 uv run python - <<'PY'
+# 动态枚举 bot 关键键盘和回调 helper，确认 306 个 callback_data 最大 64 字节、超限 0。
+PY
+rg -n "service_expires_at\s*=|actual_expires_at\s*=.*order\.|order\..*actual_expires_at|CloudLifecyclePlan\b|CloudNoticePlan\b|CloudAutoRenewPlan\b|refund_order|process_refund|create_refund|issue_refund|refund_to_balance|refund_balance|STATUS_REFUNDED|status=['\"]refunded['\"]|normalize_service_expiry|service_expired_at" bot core orders cloud shop --glob '!**/migrations/**' --glob '!**/tests.py'
+find . -maxdepth 2 -type d \( -name accounts -o -name finance -o -name mall -o -name monitoring -o -name dashboard_api -o -name biz \) -print
+```
+
+`RetainedIpRenewalUiTestCase` 共 49 个测试通过。测试中仍会打印 SimpleTestCase 禁止数据库查询配置的既有容错日志和 mocked postcheck 异常日志，最终结果通过。动态脚本首次未指定 SQLite 时触发本地 MySQL 沙箱拒绝日志，但命令最终通过；已使用 `DJANGO_TEST_SQLITE=1` 重跑完成干净验证。
+
+### 剩余风险
+
+- 本轮未跑完整测试套件。
+- 本轮未执行真实 Telegram 点击、真实云资源创建/删除/IP 变更、真实支付、链上广播、生产发布或不可逆操作。
+- 真机测试仍需在用户明确授权真实云资源成本后，单独按中文报告记录云资源 ID 脱敏结果。
+- 工作树仍保留其它未提交路由/文档/测试路径改动，本轮不纳入提交。
+
+## 2026-06-03 云资产生命周期复查
+
+### 范围
+
+本轮继续监工 Shop Django 后端，先读取自动化记忆、当前 git 状态、最近提交、`docs/auto-optimization-control.md`、`docs/auto-optimization-latest.md`、版本记录末尾、`AGENTS.md` 和 `TODO.md`。按 `TODO.md` 第一项未完成任务，聚焦确认 `CloudAsset.actual_expires_at` 仍是唯一资产到期事实，订单表、计划快照、旧退款入口和废弃 runtime app 没有回流。
+
+### 监工结果
+
+- 本轮开始时工作树已有其它未提交路由、文档和测试路径改动，例如 `shop/admin_urls.py`、`shop/auth_urls.py`、`shop/urls.py`、`shop/dashboard_urls.py` 删除，以及多份架构/迁移文档和测试文件改动；本轮未回退、未覆盖这些既有改动。
+- 未发现需要修改运行代码的问题；本轮只更新自动化中文记录和 TODO 状态。
+- 字段内省确认 `CloudAsset` 的到期字段只有 `actual_expires_at`；`CloudServerOrder` 没有 `actual_expires_at` 或 `service_expires_at`，仅保留 `renew_grace_expires_at` 等流程时间字段；`CloudAssetDashboardSnapshot` 没有派生到期时间字段，仅保留风险布尔字段 `risk_expired`。
+- `INSTALLED_APPS` 未安装 `accounts`、`finance`、`mall`、`monitoring`、`dashboard_api`、`biz`，仓库根部也未发现这些废弃 runtime app 目录回流。
+- 关键字扫描未发现旧计划快照类名、旧退款函数名、退款状态或订单服务到期字段恢复。命中的 `ip_recycle_at=asset.actual_expires_at`、`CloudAsset.actual_expires_at` 写入和 `orders.*.expired_at` 仍分别属于固定 IP 回收、资产侧唯一到期事实和支付订单超时，不是订单服务到期事实恢复。
+
+### 验证
+
+本地已通过：
+
+```bash
+UV_CACHE_DIR=/private/tmp/uv-cache-shop PYTHONDONTWRITEBYTECODE=1 uv run python manage.py check
+UV_CACHE_DIR=/private/tmp/uv-cache-shop PYTHONDONTWRITEBYTECODE=1 uv run python -m py_compile cloud/models.py cloud/asset_expiry.py cloud/lifecycle.py cloud/lifecycle_schedule.py cloud/lifecycle_tasks.py cloud/services.py cloud/provisioning.py orders/payment_scanner.py orders/models.py
+DJANGO_TEST_SQLITE=1 UV_CACHE_DIR=/private/tmp/uv-cache-shop PYTHONDONTWRITEBYTECODE=1 uv run python manage.py shell -c "from django.apps import apps; from cloud.models import CloudAsset, CloudServerOrder, CloudAssetDashboardSnapshot; retired={'accounts','finance','mall','monitoring','dashboard_api','biz'}; installed={c.label for c in apps.get_app_configs()}; print('retired_installed', sorted(retired & installed)); print('CloudAsset expiry fields', [f.name for f in CloudAsset._meta.fields if 'expires' in f.name or 'expiry' in f.name]); print('CloudServerOrder actual_expires_at', any(f.name=='actual_expires_at' for f in CloudServerOrder._meta.fields)); print('CloudServerOrder service_expires_at', any(f.name=='service_expires_at' for f in CloudServerOrder._meta.fields)); print('CloudServerOrder expiry-like fields', [f.name for f in CloudServerOrder._meta.fields if 'expires' in f.name or 'expiry' in f.name]); print('CloudAssetDashboardSnapshot expiry-like fields', [f.name for f in CloudAssetDashboardSnapshot._meta.fields if 'expires' in f.name or 'expiry' in f.name or f.name=='risk_expired'])"
+DB_ENGINE=sqlite SQLITE_NAME=/private/tmp/shop_lifecycle_audit_20260603.sqlite3 UV_CACHE_DIR=/private/tmp/uv-cache-shop PYTHONDONTWRITEBYTECODE=1 uv run python manage.py test cloud.tests.CloudServerServicesTestCase.test_order_rejects_removed_service_expiry_field cloud.tests.CloudServerServicesTestCase.test_update_cloud_asset_expiry_refreshes_delete_plan_view cloud.tests.CloudServerServicesTestCase.test_update_cloud_asset_expiry_refreshes_order_lifecycle cloud.tests.CloudServerServicesTestCase.test_unbound_asset_renewal_lists_plans_without_creating_order cloud.tests.CloudServerServicesTestCase.test_prepare_unbound_asset_renewal_creates_pending_payment_order cloud.tests.CloudServerServicesTestCase.test_completed_asset_recovery_order_renews_without_reprovisioning cloud.tests.CloudServerServicesTestCase.test_sync_aws_assets_preserves_existing_unattached_ip_due_time cloud.tests.CloudServerServicesTestCase.test_sync_aws_retained_ip_preserves_existing_asset_user --noinput --verbosity 1
+DB_ENGINE=sqlite SQLITE_NAME=/private/tmp/shop_orders_lifecycle_audit_20260603.sqlite3 UV_CACHE_DIR=/private/tmp/uv-cache-shop PYTHONDONTWRITEBYTECODE=1 uv run python manage.py test orders.tests.ChainPaymentScannerTestCase.test_public_asset_renewal_expiry_does_not_claim_unowned_asset orders.tests.ChainPaymentScannerTestCase.test_expired_asset_renewal_payment_unbinds_asset_for_retry --noinput --verbosity 1
+UV_CACHE_DIR=/private/tmp/uv-cache-shop PYTHONDONTWRITEBYTECODE=1 uv run python manage.py makemigrations --check --dry-run
+rg -n "service_expires_at\s*=|actual_expires_at\s*=.*order\.|order\..*actual_expires_at|CloudLifecyclePlan\b|CloudNoticePlan\b|CloudAutoRenewPlan\b|refund_order|process_refund|create_refund|issue_refund|refund_to_balance|refund_balance|STATUS_REFUNDED|status=['\"]refunded['\"]|normalize_service_expiry|service_expired_at|allow_client_port" bot core orders cloud shop --glob '!**/migrations/**'
+find . -maxdepth 2 -type d \( -name accounts -o -name finance -o -name mall -o -name monitoring -o -name dashboard_api -o -name biz \) -print
+```
+
+`manage.py check`、编译检查、字段内省、8 个生命周期/同步聚焦测试和 2 个支付扫描聚焦测试均通过。SQLite 测试仍会打印不支持 `db_comment` 的预期 warning；`makemigrations --check --dry-run` 仍因本地默认 MySQL 被沙箱拒绝打印一致性检查 warning，但最终输出 `No changes detected`。
+
+### 剩余风险
+
+- 本轮未跑完整测试套件。
+- 本轮未执行真实 Telegram 点击、真实云资源创建/删除/IP 变更、真实支付、链上广播、生产发布或不可逆操作。
+- 真机测试仍需在用户明确授权真实云资源成本后，单独按中文报告记录云资源 ID 脱敏结果。
+- 工作树仍保留其它未提交路由/文档/测试路径改动，本轮不纳入提交。

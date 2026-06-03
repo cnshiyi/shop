@@ -4,11 +4,11 @@
 
 ## 待办
 
-- [ ] 机器人返回链复查：覆盖资产详情、订单详情、续费、钱包支付续费、换 IP、重装、修改配置的返回上一层行为，并确认所有 Telegram `callback_data` 不超过 64 字节。
+- [x] 机器人返回链复查：覆盖资产详情、订单详情、续费、钱包支付续费、换 IP、重装、修改配置的返回上一层行为，并确认所有 Telegram `callback_data` 不超过 64 字节。
   - 输出：修复代码或记录无问题；必要时补 `bot.tests` 聚焦测试。
   - 验证：`uv run python manage.py check` 和相关 bot 聚焦测试。
 
-- [ ] 云资产生命周期复查：确认 `CloudAsset.actual_expires_at` 仍是唯一资产到期事实，订单表、计划快照和旧退款入口没有回流。
+- [x] 云资产生命周期复查：确认 `CloudAsset.actual_expires_at` 仍是唯一资产到期事实，订单表、计划快照和旧退款入口没有回流。
   - 输出：修复代码或记录无问题；必要时补 `cloud` / `orders` 聚焦测试。
   - 验证：`uv run python manage.py check`、相关生命周期测试、字段/关键字扫描。
 
