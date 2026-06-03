@@ -7149,6 +7149,51 @@ git diff --check
 - 本轮未执行真实 Telegram 点击、真实云资源创建/删除/IP 变更、真实支付、链上广播、生产发布或不可逆操作。
 - 前端若仍调用旧 `/api/dashboard/` 或根 `/api/` 后台业务前缀，需要同步切换到 `/api/auth/` 与 `/api/admin/`。
 
+## 2026-06-03 固定巡检与前后端路由残留复核
+
+### 范围
+
+本轮继续监工 Shop Django 后端，先读取自动化记忆、当前 git 状态、最近提交、`docs/auto-optimization-control.md`、`docs/auto-optimization-latest.md`、版本记录末尾、`AGENTS.md` 和 `TODO.md`。由于 `TODO.md` 固定任务已全部勾选，本轮按固定巡检清单执行，只读复核后台 API 路由拆分后的旧前缀残留、云资产生命周期唯一到期事实、机器人返回链、任务中心状态统计、废弃 app 红线和数据库迁移差异。
+
+### 发现
+
+- 本轮开始时工作树干净，最近提交为 `c439448`「记录后台 API 路由拆分收口」。
+- 后端 `manage.py check` 通过，未发现新的导入错误或 Django 配置错误。
+- 后端旧 `/api/dashboard` 命中主要来自历史 `CHANGELOG.md`、自动化记录和用于确认旧入口不可解析的 `bot.tests.ApiPrefixContractTestCase`，未发现运行路由重新挂载旧入口。
+- 前端仓库只读扫描显示 `/Users/a399/Desktop/data/vue-shop-admin/apps/web-antd/src` 未检出旧 `/api/dashboard` 调用，业务页面主要从 `#/api/admin` 导入；前端 `DEVELOPMENT.md` 仍有「接口主要来自 `/api/admin/` 与 `/api/dashboard/`」这类旧说明残留，本轮不在后端仓库修改。
+- 字段内省确认废弃 app 未安装；`CloudAsset` 到期字段仍只有 `actual_expires_at`；`CloudServerOrder` 未恢复 `actual_expires_at` 或 `service_expires_at`；`CloudAssetDashboardSnapshot` 未恢复到期字段。
+- 红线关键字扫描未发现订单到期字段、旧计划快照、旧退款函数名或废弃 runtime app 回流。命中项仍为资产侧到期事实、固定 IP 回收时间同步或 `_asset_expires_at` 临时属性。
+- 资源巡检按钮复核确认云端资源详情使用 16 位短 key，支付扫描资源详情按钮也使用 16 位短 key，`mon:resd:<key>` 不会突破 Telegram `callback_data` 64 字节限制。
+- 默认 MySQL/MariaDB 的 `migrate --plan` 仍因当前沙箱禁止连接 `127.0.0.1:3306` 失败；SQLite `migrate --plan` 可生成完整迁移计划，但会打印不支持 `db_comment` / `db_table_comment` 的预期 warning。
+
+### 验证
+
+本地已通过：
+
+```bash
+UV_CACHE_DIR=/private/tmp/uv-cache-shop PYTHONDONTWRITEBYTECODE=1 uv run python manage.py check
+UV_CACHE_DIR=/private/tmp/uv-cache-shop PYTHONDONTWRITEBYTECODE=1 uv run python -m py_compile shop/urls.py shop/admin_urls.py shop/auth_urls.py bot/tests.py cloud/tests.py cloud/tests_task_center.py cloud/services.py cloud/lifecycle.py cloud/lifecycle_tasks.py
+DJANGO_TEST_SQLITE=1 UV_CACHE_DIR=/private/tmp/uv-cache-shop PYTHONDONTWRITEBYTECODE=1 uv run python manage.py test bot.tests.ApiPrefixContractTestCase bot.tests.DashboardAuthSurfaceTestCase --settings=shop.settings --verbosity=2
+DJANGO_TEST_SQLITE=1 UV_CACHE_DIR=/private/tmp/uv-cache-shop PYTHONDONTWRITEBYTECODE=1 uv run python manage.py test cloud.tests_task_center --settings=shop.settings --verbosity=2
+DJANGO_TEST_SQLITE=1 UV_CACHE_DIR=/private/tmp/uv-cache-shop PYTHONDONTWRITEBYTECODE=1 uv run python manage.py test bot.tests.RetainedIpRenewalUiTestCase --settings=shop.settings --verbosity=2
+DJANGO_TEST_SQLITE=1 UV_CACHE_DIR=/private/tmp/uv-cache-shop PYTHONDONTWRITEBYTECODE=1 uv run python manage.py shell -c "...字段内省..."
+UV_CACHE_DIR=/private/tmp/uv-cache-shop PYTHONDONTWRITEBYTECODE=1 uv run python manage.py makemigrations --check --dry-run
+DJANGO_TEST_SQLITE=1 UV_CACHE_DIR=/private/tmp/uv-cache-shop PYTHONDONTWRITEBYTECODE=1 uv run python manage.py migrate --plan --noinput
+rg -n "service_expires_at\s*=|actual_expires_at\s*=.*order\.|order\..*actual_expires_at|CloudLifecyclePlan\b|CloudNoticePlan\b|CloudAutoRenewPlan\b|refund_order|process_refund|create_refund|issue_refund|refund_to_balance|refund_balance|STATUS_REFUNDED|status=['\"]refunded['\"]|normalize_service_expiry|service_expired_at" bot core orders cloud shop --glob '!**/migrations/**' --glob '!**/tests.py'
+find . -maxdepth 2 -type d \( -name accounts -o -name finance -o -name mall -o -name monitoring -o -name dashboard_api -o -name biz \) -print
+rg -n "/api/dashboard" /Users/a399/Desktop/data/vue-shop-admin/apps/web-antd/src /Users/a399/Desktop/data/vue-shop-admin/apps/web-antd --glob '!**/node_modules/**' --glob '!**/dist/**' --glob '!**/.git/**'
+git diff --check
+```
+
+结果：`manage.py check`、编译检查、10 个路由/后台鉴权测试、14 个任务中心测试、49 个机器人返回链测试、字段内省、默认 `makemigrations --check --dry-run`、SQLite `migrate --plan`、红线扫描、废弃 app 目录扫描、前端源码旧前缀扫描和 `git diff --check` 均符合预期。默认 `migrate --plan` 因当前沙箱无法连接本地 MySQL 失败，已记录为环境限制。
+
+### 剩余风险
+
+- 本轮未跑完整测试套件。
+- 本轮未在真实 MySQL/MariaDB 上执行迁移计划。
+- 本轮未执行真实 Telegram 点击、真实云资源创建/删除/IP 变更、真实支付、链上广播、生产发布或不可逆操作。
+- 前端文档仍有旧 `/api/dashboard` 描述残留；源码只读扫描未发现旧调用。
+
 ## 2026-06-03 后台 API 路由拆分提交收口
 
 ### 范围
