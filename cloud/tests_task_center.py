@@ -307,6 +307,33 @@ class CloudTaskCenterApiTestCase(TestCase):
         self.assertEqual(section['items'][0]['note'], '生命周期执行器失败但没有历史日志')
         self.assertEqual(section['status_counts']['failed'], 1)
 
+    def test_lifecycle_section_counts_pending_db_task_without_plan_item(self):
+        now = timezone.now()
+        order = self._create_cloud_order('TASK-LIFECYCLE-DB-PENDING-1')
+        CloudLifecycleTask.objects.create(
+            source_key='task-center-lifecycle-db-pending',
+            task_type=CloudLifecycleTask.TASK_DELETE,
+            source_kind=CloudLifecycleTask.SOURCE_ORDER,
+            order=order,
+            user=order.user,
+            scheduled_at=now - timezone.timedelta(minutes=5),
+            status=CloudLifecycleTask.STATUS_PENDING,
+        )
+
+        with patch('bot.api._build_lifecycle_plan_bundle', return_value={
+            'due_items': [],
+            'future_plan_items': [],
+            'ip_delete_items': [],
+            'history_items': [],
+        }):
+            section = _lifecycle_section(now)
+
+        self.assertEqual(section['active'], 1)
+        self.assertEqual(section['total'], 1)
+        self.assertEqual(section['health'], 'warning')
+        self.assertEqual(section['items'][0]['status'], 'pending')
+        self.assertEqual(section['status_counts']['pending'], 1)
+
     def test_lifecycle_section_prefers_db_task_over_duplicate_plan_item(self):
         now = timezone.now()
         order = self._create_cloud_order('TASK-LIFECYCLE-DB-DUP-1')
@@ -372,3 +399,27 @@ class CloudTaskCenterApiTestCase(TestCase):
         self.assertEqual(section['health'], 'error')
         self.assertEqual(section['items'][0]['note'], '通知任务失败但没有用户通知日志')
         self.assertEqual(section['status_counts']['failed_retry'], 1)
+
+    def test_notice_section_counts_pending_db_task_without_notice_plan(self):
+        now = timezone.now()
+        order = self._create_cloud_order('TASK-NOTICE-DB-PENDING-1')
+        CloudNoticeTask.objects.create(
+            source_key='task-center-notice-db-pending',
+            notice_type=CloudNoticeTask.NOTICE_DELETE,
+            order=order,
+            user=order.user,
+            notice_at=now - timezone.timedelta(minutes=5),
+            status=CloudNoticeTask.STATUS_PENDING,
+        )
+
+        with patch('cloud.api_tasks._build_notice_plan_bundle', return_value={
+            'active_items': [],
+            'history_items': [],
+        }):
+            section = _notice_section(now)
+
+        self.assertEqual(section['active'], 1)
+        self.assertEqual(section['total'], 1)
+        self.assertEqual(section['health'], 'warning')
+        self.assertEqual(section['items'][0]['status'], 'pending')
+        self.assertEqual(section['status_counts']['pending'], 1)

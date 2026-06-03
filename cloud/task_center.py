@@ -356,8 +356,8 @@ def _recent_lifecycle_db_task_items(now) -> list[dict]:
         CloudLifecycleTask.objects
         .select_related('order', 'asset')
         .filter(
-            status__in=[CloudLifecycleTask.STATUS_CLAIMED, CloudLifecycleTask.STATUS_FAILED],
-            updated_at__gte=now - timezone.timedelta(days=1),
+            Q(status__in=[CloudLifecycleTask.STATUS_PENDING, CloudLifecycleTask.STATUS_CLAIMED], scheduled_at__lte=now)
+            | Q(status=CloudLifecycleTask.STATUS_FAILED, updated_at__gte=now - timezone.timedelta(days=1))
         )
         .order_by('-updated_at', '-id')[:1000]
     )
@@ -369,8 +369,8 @@ def _recent_notice_db_task_items(now) -> list[dict]:
         CloudNoticeTask.objects
         .select_related('order', 'asset')
         .filter(
-            status__in=[CloudNoticeTask.STATUS_CLAIMED, CloudNoticeTask.STATUS_FAILED],
-            updated_at__gte=now - timezone.timedelta(days=1),
+            Q(status__in=[CloudNoticeTask.STATUS_PENDING, CloudNoticeTask.STATUS_CLAIMED], notice_at__lte=now)
+            | Q(status=CloudNoticeTask.STATUS_FAILED, updated_at__gte=now - timezone.timedelta(days=1))
         )
         .order_by('-updated_at', '-id')[:1000]
     )
@@ -496,7 +496,7 @@ def _lifecycle_section(now) -> dict:
         ]
     failed_count = sum(1 for item in items_source if item.get('last_failure_reason') or item.get('failure_reason'))
     db_failed_count = sum(1 for item in db_task_items if item.get('queue_status') == 'failed')
-    db_active_count = sum(1 for item in db_task_items if item.get('queue_status') == 'claimed')
+    db_active_count = sum(1 for item in db_task_items if item.get('queue_status') in {'pending', 'claimed'})
     warning_count = sum(1 for item in items_source if item.get('queue_status') in ['overdue', 'due_now', 'blocked'])
     items = [
         _plan_item(row, task_type='lifecycle', task_label='生命周期计划')
@@ -541,7 +541,7 @@ def _notice_section(now) -> dict:
         if _task_identity(item) not in active_failure_keys and _task_identity(item) not in history_failure_keys
     ]
     db_failed_count = sum(1 for item in db_task_items if item.get('notice_status') == 'failed_retry')
-    db_active_count = sum(1 for item in db_task_items if item.get('notice_status') == 'claimed')
+    db_active_count = sum(1 for item in db_task_items if item.get('notice_status') in {'pending', 'claimed'})
     warning_count = sum(1 for item in items_source if item.get('queue_status') in _NOTICE_WARNING_QUEUE_STATUSES)
     items = [
         _plan_item(row, task_type='notice', task_label='通知计划')
