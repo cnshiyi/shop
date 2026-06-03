@@ -6,7 +6,7 @@ from django.test import RequestFactory, TestCase
 from django.utils import timezone
 
 from cloud.models import CloudAssetSyncJob
-from cloud.task_center import _notice_section, task_center_overview
+from cloud.task_center import _auto_renew_section, _notice_section, task_center_overview
 
 
 class CloudTaskCenterApiTestCase(TestCase):
@@ -55,6 +55,27 @@ class CloudTaskCenterApiTestCase(TestCase):
             'history_items': [],
         }):
             section = _notice_section(now)
+
+        self.assertEqual(section['failed'], 1)
+        self.assertEqual(section['health'], 'error')
+
+    def test_auto_renew_section_counts_retry_failed_as_failed(self):
+        now = timezone.now()
+        with patch('cloud.api_tasks._build_auto_renew_plan_items', return_value={
+            'due_items': [
+                {
+                    'id': 1,
+                    'order_id': 1,
+                    'order_no': 'AUTO-RENEW-FAILED-1',
+                    'queue_status': 'retry_failed',
+                    'queue_status_label': '失败待重试',
+                    'provider': 'aws_lightsail',
+                    'ip': '1.1.1.2',
+                },
+            ],
+            'future_plan_items': [],
+        }):
+            section = _auto_renew_section(now)
 
         self.assertEqual(section['failed'], 1)
         self.assertEqual(section['health'], 'error')

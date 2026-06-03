@@ -1,5 +1,50 @@
 # 重构版本记录
 
+## 2026-06-03 08:20 当前会话自动监工：修正自动续费失败总览统计
+
+### 范围
+
+本轮按用户要求继续执行当前会话监工，并在中途按用户要求恢复 `Shop 自动优化监工` 自动化。起始工作树干净，最新提交为 `9e36dc5 收窄订单主资产更新范围`。
+
+重点复查后台任务中心、自动续费详情、通知计划、云资产生命周期唯一到期事实、旧到期字段、旧计划快照、旧退款入口、旧端口入口和废弃 app 回流。
+
+### 修改
+
+- 修复任务中心“自动续费”分区失败统计漏报 `retry_failed` 的问题。
+- 自动续费详情 API 中 `queue_status=retry_failed` 表示“失败待重试”，任务中心现在会把它计入 `failed` 并把分区健康状态标记为 `error`。
+- 新增 `test_auto_renew_section_counts_retry_failed_as_failed`，防止后续再次把自动续费失败待重试任务显示为非失败状态。
+- 已恢复 Codex App 自动化 `Shop 自动优化监工`，状态为 `ACTIVE`，仍按每 10 分钟运行。
+
+### 监工结果
+
+- 修复前新增测试会失败：自动续费 `retry_failed` 项在任务中心 `failed` 中计为 0。
+- 修复后任务中心自动续费总览、自动续费详情 due/retry/fallback 聚焦测试均通过。
+- `CloudAsset` 仍只有 `actual_expires_at` 作为结构化资产到期字段。
+- 运行代码扫描未发现旧计划模型、旧退款函数名、旧端口入口或废弃 app 目录回流。
+
+### 验证
+
+本地已通过：
+
+```bash
+UV_CACHE_DIR=/Users/a399/Desktop/data/shop/.uv-cache DB_ENGINE=sqlite SQLITE_NAME=/private/tmp/shop_task_center_auto_renew_failed_before.sqlite3 PYTHONDONTWRITEBYTECODE=1 uv run python manage.py test cloud.tests_task_center.CloudTaskCenterApiTestCase.test_auto_renew_section_counts_retry_failed_as_failed --noinput --verbosity 1
+UV_CACHE_DIR=/Users/a399/Desktop/data/shop/.uv-cache DB_ENGINE=sqlite SQLITE_NAME=/private/tmp/shop_task_center_auto_renew_failed_after.sqlite3 PYTHONDONTWRITEBYTECODE=1 uv run python manage.py test cloud.tests_task_center --noinput --verbosity 1
+UV_CACHE_DIR=/Users/a399/Desktop/data/shop/.uv-cache DB_ENGINE=sqlite SQLITE_NAME=/private/tmp/shop_auto_renew_task_detail_session.sqlite3 PYTHONDONTWRITEBYTECODE=1 uv run python manage.py test cloud.tests.CloudServerServicesTestCase.test_auto_renew_task_detail_includes_due_retry_and_fallback_items cloud.tests.CloudServerServicesTestCase.test_run_auto_renew_tasks_executes_due_retry_and_fallback_queue --noinput --verbosity 1
+UV_CACHE_DIR=/Users/a399/Desktop/data/shop/.uv-cache PYTHONDONTWRITEBYTECODE=1 uv run python manage.py check
+UV_CACHE_DIR=/Users/a399/Desktop/data/shop/.uv-cache PYTHONDONTWRITEBYTECODE=1 uv run python -m py_compile cloud/task_center.py cloud/tests_task_center.py cloud/api_tasks.py
+UV_CACHE_DIR=/Users/a399/Desktop/data/shop/.uv-cache PYTHONDONTWRITEBYTECODE=1 uv run python manage.py makemigrations --check --dry-run
+rg -n "service_expires_at\s*=|order\.(service_expires_at|actual_expires_at)|CloudServerOrder\([^\n]*(service_expires_at|actual_expires_at)|CloudLifecyclePlan\b|CloudNoticePlan\b|CloudAutoRenewPlan\b|CloudAssetPlanSnapshot|CloudOrderPlanSnapshot|refund_cloud_server_order|refund_cloud_order|refund_order|process_refund|create_refund|issue_refund|refund_to_balance|refund_balance|STATUS_REFUNDED|status=['\"]refunded['\"]|normalize_service_expiry|service_expired_at|allow_client_port|set_cloud_server_port|custom:port:|cloud:ipport:" bot core orders cloud shop --glob '!**/migrations/**' --glob '!**/tests.py' --glob '!**/tests_*.py'
+find . -maxdepth 2 -type d \( -name accounts -o -name finance -o -name mall -o -name monitoring -o -name dashboard_api -o -name biz \) -print
+```
+
+第一条测试是修复前复现用例，按预期失败；修复后 `cloud.tests_task_center` 3 条通过。`makemigrations --check --dry-run` 仍出现本机无法连接 `127.0.0.1` MySQL 的迁移历史一致性警告，但最终结果为 `No changes detected`。
+
+### 剩余风险
+
+- 本轮未跑完整测试套件。
+- 本轮未执行真实 Telegram 点击、真实云资源创建/删除/IP 变更、真实支付、链上广播、生产发布或不可逆操作。
+- 真机测试仍需在用户明确授权真实云资源成本后单独执行，并写中文报告，云资源 ID 需脱敏。
+
 ## 2026-06-03 07:44 当前会话自动监工：收窄主资产更新范围
 
 ### 范围

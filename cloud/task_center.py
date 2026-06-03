@@ -13,6 +13,8 @@ from core.dashboard_api import _iso, _ok, _provider_label, _status_label, dashbo
 
 _NOTICE_FAILED_STATUSES = {'failed', 'partial_failed', 'failed_retry'}
 _NOTICE_WARNING_QUEUE_STATUSES = {'due_now', 'overdue', 'fallback_notice', 'within_window'}
+_AUTO_RENEW_FAILED_QUEUE_STATUSES = {'retry_failed'}
+_AUTO_RENEW_WARNING_QUEUE_STATUSES = {'due_now', 'overdue', 'balance_insufficient', 'retry_failed', 'fallback_retry'}
 
 
 def _status_counts(queryset, field='status') -> dict:
@@ -242,8 +244,12 @@ def _auto_renew_section(now) -> dict:
 
     bundle = _build_auto_renew_plan_items(now=now)
     items_source = [*bundle.get('due_items', []), *bundle.get('future_plan_items', [])]
-    failed_count = sum(1 for item in items_source if item.get('last_failure_reason'))
-    warning_count = sum(1 for item in items_source if item.get('queue_status') in ['due_now', 'overdue', 'balance_insufficient', 'retry_failed', 'fallback_retry'])
+    failed_count = sum(
+        1
+        for item in items_source
+        if item.get('last_failure_reason') or item.get('queue_status') in _AUTO_RENEW_FAILED_QUEUE_STATUSES
+    )
+    warning_count = sum(1 for item in items_source if item.get('queue_status') in _AUTO_RENEW_WARNING_QUEUE_STATUSES)
     items = [
         _plan_item(row, task_type='auto_renew', task_label='自动续费')
         for row in items_source[:8]
