@@ -25,10 +25,20 @@ def _status_counts(queryset, field='status') -> dict:
     }
 
 
+def _item_status_value(item: dict, field='queue_status') -> str:
+    return str(
+        item.get(field)
+        or item.get('status')
+        or item.get('notice_status')
+        or ('failed' if item.get('is_success') is False or item.get('delivered') is False else '')
+        or ''
+    )
+
+
 def _status_counts_from_items(items, field='queue_status') -> dict:
     counts = {}
     for item in items:
-        value = str(item.get(field) or item.get('status') or '')
+        value = _item_status_value(item, field)
         counts[value] = counts.get(value, 0) + 1
     return counts
 
@@ -302,7 +312,7 @@ def _lifecycle_section(now) -> dict:
         active=sum(1 for item in items_source if item.get('queue_status') in ['due_now', 'scheduled_future', 'overdue', 'within_window']),
         failed=failed_count + len(recent_failed_history),
         warning=warning_count,
-        status_counts=_status_counts_from_items(items_source, 'queue_status'),
+        status_counts=_status_counts_from_items([*items_source, *recent_failed_history], 'queue_status'),
         items=items,
         generated_at=now,
     )
@@ -337,7 +347,7 @@ def _notice_section(now) -> dict:
         active=sum(1 for item in items_source if item.get('queue_status') in ['due_now', 'scheduled_future', 'overdue', 'fallback_notice', 'within_window']),
         failed=failed_count + len(recent_failed_history),
         warning=warning_count,
-        status_counts=_status_counts_from_items(items_source, 'queue_status'),
+        status_counts=_status_counts_from_items([*items_source, *recent_failed_history], 'queue_status'),
         items=items,
         generated_at=now,
     )
@@ -372,6 +382,9 @@ def _auto_renew_section(now) -> dict:
         ]
         recent_failed_count = len(recent_failed_history)
     warning_count = sum(1 for item in items_source if item.get('queue_status') in _AUTO_RENEW_WARNING_QUEUE_STATUSES)
+    status_counts = _status_counts_from_items(items_source, 'queue_status')
+    if recent_failed_count:
+        status_counts['failed'] = status_counts.get('failed', 0) + recent_failed_count
     items = [
         _plan_item(row, task_type='auto_renew', task_label='自动续费')
         for row in [*items_source, *recent_failed_history][:8]
@@ -384,7 +397,7 @@ def _auto_renew_section(now) -> dict:
         active=sum(1 for item in items_source if item.get('queue_status') in ['due_now', 'scheduled_future', 'overdue', 'within_window', 'retry_failed', 'fallback_retry']),
         failed=failed_count + recent_failed_count,
         warning=warning_count,
-        status_counts=_status_counts_from_items(items_source, 'queue_status'),
+        status_counts=status_counts,
         items=items,
         generated_at=now,
     )

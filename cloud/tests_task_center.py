@@ -86,6 +86,7 @@ class CloudTaskCenterApiTestCase(TestCase):
         self.assertEqual(section['total'], 1)
         self.assertEqual(section['health'], 'error')
         self.assertEqual(section['items'][0]['note'], 'Bot失败；后续生命周期巡检会重试')
+        self.assertEqual(section['status_counts']['failed_retry'], 1)
 
     def test_auto_renew_section_counts_retry_failed_as_failed(self):
         now = timezone.now()
@@ -133,6 +134,7 @@ class CloudTaskCenterApiTestCase(TestCase):
         self.assertEqual(section['health'], 'error')
         self.assertEqual(section['items'][0]['order_no'], 'AUTO-HISTORY-FAILED-1')
         self.assertEqual(section['items'][0]['note'], '云厂商续费失败')
+        self.assertEqual(section['status_counts']['failed'], 1)
 
     def test_auto_renew_section_does_not_duplicate_active_failure_history(self):
         now = timezone.now()
@@ -190,6 +192,7 @@ class CloudTaskCenterApiTestCase(TestCase):
         self.assertEqual(section['total'], 9)
         self.assertEqual(section['health'], 'error')
         self.assertEqual(len(section['items']), 8)
+        self.assertEqual(section['status_counts']['failed'], 9)
 
     def test_lifecycle_section_exposes_failure_reason_in_item_note(self):
         now = timezone.now()
@@ -241,3 +244,4 @@ class CloudTaskCenterApiTestCase(TestCase):
         self.assertEqual(section['total'], 1)
         self.assertEqual(section['health'], 'error')
         self.assertEqual(section['items'][0]['note'], '删除任务执行失败')
+        self.assertEqual(section['status_counts']['failed'], 1)
