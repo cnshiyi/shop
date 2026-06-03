@@ -7296,7 +7296,7 @@ git diff --check
 
 ### 发现
 
-- 本轮开始时工作树可见上一轮“七次复核”版本记录差异，当前最近提交为 `b45f50f`「记录固定巡检六次复核」；本轮未丢弃该差异，并在其后继续追加记录。
+- 本轮开始时工作树可见上一轮“七次复核”版本记录差异，当前最近提交为 `b45f50f`「记录固定巡检六次复核」；运行中确认七次复核记录已提交为 `fab8ccf`「记录固定巡检七次复核」，本轮未丢弃该差异，并在其后继续追加八次复核记录。
 - 未发现需要修改运行代码的新问题，本轮只更新中文巡检记录。
 - 字段内省确认废弃 app 未安装；`CloudAsset` 到期字段仍只有 `actual_expires_at`；`CloudServerOrder` 未恢复 `actual_expires_at` 或 `service_expires_at`；`CloudAssetDashboardSnapshot` 未恢复实际到期字段。
 - 固定 IP 保留相关命中仍集中在 `ip_recycle_at` 与 `CloudAsset.actual_expires_at` 的回收链路同步，未恢复订单服务到期字段。
