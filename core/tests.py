@@ -5,7 +5,7 @@ from unittest.mock import patch
 
 from asgiref.sync import async_to_sync
 from django.apps import apps as django_apps
-from django.test import SimpleTestCase, TestCase
+from django.test import SimpleTestCase, TestCase, TransactionTestCase
 from django.contrib.auth import get_user_model
 from django.core.management import call_command
 from django.core.management.base import CommandError
@@ -63,7 +63,7 @@ class CryptoDecryptTestCase(SimpleTestCase):
         self.assertIn('CONFIG_DECRYPT_INVALID_TOKEN', '\n'.join(logs.output))
 
 
-class SiteConfigCacheTestCase(TestCase):
+class SiteConfigCacheTestCase(TransactionTestCase):
     def tearDown(self):
         SiteConfig.clear_cache()
 

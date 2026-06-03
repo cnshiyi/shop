@@ -6971,6 +6971,40 @@ find . -maxdepth 2 -type d \( -name accounts -o -name finance -o -name mall -o -
 - 真机测试仍需在用户明确授权真实云资源成本后，单独按中文报告记录云资源 ID 脱敏结果。
 - 工作树仍保留其它未提交路由/文档/测试路径改动，本轮不纳入提交。
 
+## 2026-06-03 后台任务中心 pending 任务漏报修复
+
+### 范围
+
+本轮继续监工 Shop Django 后端，按 `TODO.md` 后台任务中心和状态统计复查执行，聚焦云资产同步 worker、通知计划、自动续费、生命周期计划的状态统计、失败状态、重试状态和后台总览可观测性。
+
+### 发现与修改
+
+- 生命周期和通知 section 原本只直接聚合 `claimed` 和近期 `failed` 的持久化任务；如果 `CloudLifecycleTask` 或 `CloudNoticeTask` 已经处于到期 `pending` 状态，但计划 bundle 或历史日志暂时缺失，后台任务中心会漏报这些待执行/待通知任务。
+- `cloud/task_center.py` 已将到期 `CloudLifecycleTask.STATUS_PENDING` 和 `CloudNoticeTask.STATUS_PENDING` 纳入任务中心聚合，并把 pending/claimed DB 任务计入 `active`、`total`、`status_counts` 和 `items`。
+- `cloud/tests_task_center.py` 已补充无计划项/无通知日志时，到期 pending 生命周期任务和通知任务仍出现在后台任务中心的聚焦测试。
+- `TODO.md` 勾选后台任务中心和状态统计复查。
+
+### 验证
+
+本地已通过：
+
+```bash
+UV_CACHE_DIR=/private/tmp/uv-cache-shop PYTHONDONTWRITEBYTECODE=1 uv run python manage.py check
+UV_CACHE_DIR=/private/tmp/uv-cache-shop PYTHONDONTWRITEBYTECODE=1 uv run python -m py_compile cloud/task_center.py cloud/tests_task_center.py cloud/api_tasks.py cloud/lifecycle_tasks.py cloud/sync_jobs.py
+UV_CACHE_DIR=/private/tmp/uv-cache-shop DJANGO_TEST_SQLITE=1 PYTHONDONTWRITEBYTECODE=1 uv run python manage.py test cloud.tests_task_center --settings=shop.settings --verbosity=2
+UV_CACHE_DIR=/private/tmp/uv-cache-shop PYTHONDONTWRITEBYTECODE=1 uv run python manage.py makemigrations --check --dry-run
+git diff --check
+```
+
+`manage.py check`、编译检查、14 个任务中心 SQLite 聚焦测试、`makemigrations --check --dry-run` 和 `git diff --check` 均通过。SQLite 测试仍会打印不支持 `db_comment` 的预期 warning；`makemigrations --check --dry-run` 仍因本地默认 MySQL 被沙箱拒绝打印一致性检查 warning，但最终输出 `No changes detected`。
+
+### 剩余风险
+
+- 本轮未跑完整测试套件。
+- 本轮未执行真实 Telegram 点击、真实云资源创建/删除/IP 变更、真实支付、链上广播、生产发布或不可逆操作。
+- 真机测试仍需在用户明确授权真实云资源成本后，单独按中文报告记录云资源 ID 脱敏结果。
+- 工作树仍保留其它未提交路由/文档/测试路径改动，本轮不纳入提交。
+
 ## 2026-06-03 真机测试计划复查收尾
 
 - 本轮按 `TODO.md` 真机测试计划复查执行；没有获得用户明确授权真实云资源成本，因此未执行真实云资源创建、删除、IP 变更、附加 IP / 固定 IP 变更、续费、真实支付或链上广播。
