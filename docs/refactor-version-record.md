@@ -7196,7 +7196,7 @@ git diff --check
 ### 发现
 
 - 本轮开始时工作树干净，最近提交为 `510cabb 校正固定巡检验证记录`。
-- 未发现需要修改运行代码的问题。
+- 发现通知计划 section 的状态统计仍按 `queue_status` 聚合，会把 `notice_status=failed_retry`、`queue_status=due_now` 的失败重试项统计成 `due_now`，后台总览状态分布与失败状态不一致。
 - `manage.py check` 通过，后台 API 路由收口、任务中心统计和机器人返回链聚焦测试继续通过。
 - 字段内省确认废弃 app 未安装；`CloudAsset` 到期字段仍只有 `actual_expires_at`；`CloudServerOrder` 未恢复 `actual_expires_at` 或 `service_expires_at`；`CloudAssetDashboardSnapshot` 未恢复到期字段，只保留风险标记字段。
 - 红线关键字扫描未发现订单到期字段、旧计划快照、旧退款函数名或废弃 runtime app 回流。命中项仍为资产侧唯一到期事实、固定 IP 回收时间同步或 `_asset_expires_at` 临时属性。
@@ -7280,6 +7280,65 @@ git diff --check
 ```
 
 结果：`manage.py check`、编译检查、10 个路由/后台鉴权测试、14 个任务中心测试、49 个机器人返回链测试、字段内省、默认 `makemigrations --check --dry-run`、SQLite `migrate --plan`、红线扫描、废弃 app 目录扫描和 `git diff --check` 均符合预期。SQLite 检查仍会打印不支持 `db_comment` / `db_table_comment` 的预期 warning；机器人返回链测试仍会打印既有配置读取容错、mocked postcheck 异常和 IP 校验日志；默认 `migrate --plan` 因当前沙箱无法连接本地 MySQL `127.0.0.1:3306` 失败，已记录为环境限制。
+
+### 剩余风险
+
+- 本轮未跑完整测试套件。
+- 本轮未在真实 MySQL/MariaDB 上执行迁移计划。
+- 本轮未执行真实 Telegram 点击、真实云资源创建/删除/IP 变更、真实支付、链上广播、生产发布或不可逆操作。
+- 前端 `DEVELOPMENT.md` 仍有旧 `/api/dashboard/` 描述残留；源码只读扫描未发现旧调用。
+
+## 2026-06-03 固定巡检与后台状态复核
+
+### 范围
+
+本轮继续监工 Shop Django 后端，先读取自动化记忆、当前 git 状态、最近提交、`docs/auto-optimization-control.md`、`docs/auto-optimization-latest.md`、版本记录末尾、`AGENTS.md`、`TODO.md` 和 `django-shop-backend` 技能。由于 `TODO.md` 固定任务已全部勾选，本轮按固定巡检清单执行，不做真实云资源、真实支付、链上广播、生产发布或其它不可逆操作。
+
+### 发现
+
+- 本轮开始时工作树干净，最近提交为 `ada3c48`「记录迁移到期事实复核」。
+- 未发现需要修改运行代码的问题。
+- `CloudAsset.actual_expires_at` 继续作为唯一资产到期事实；字段内省确认 `CloudAsset` 到期字段只有 `actual_expires_at`，`CloudServerOrder` 未恢复 `actual_expires_at` 或 `service_expires_at`，`CloudAssetDashboardSnapshot` 未恢复到期字段。
+- 废弃 app 未安装，废弃 app 目录扫描无输出。
+- 红线关键字扫描未发现运行代码恢复订单到期字段、旧计划快照、旧退款函数名或把迁移截止时间写回资产到期事实。命中项仍为资产侧唯一到期事实、固定 IP 回收时间同步或 `_asset_expires_at` 临时属性。
+- 机器人返回链 49 个聚焦测试继续通过，资产详情、订单详情、续费、钱包支付、换 IP、重装、修改配置和嵌套返回路径仍满足 Telegram `callback_data` 限制。
+- 已修复通知计划 `status_counts` 聚合字段，任务中心 14 个聚焦测试继续通过，未发现生命周期、通知或自动续费 section 的 pending/failed 任务漏报回归。
+- 云资产迁移/重建/AWS 同步 5 个聚焦测试继续通过，确认迁移截止时间不覆盖资产实际到期事实。
+- 后端旧 API 前缀扫描未发现旧路由重新挂载；`dashboard_api` 命中来自 `core.dashboard_api` 共享 helper、历史文档和确认旧入口不可解析的测试。
+- 前端源码只读扫描未发现旧 `/api/dashboard`、`/api/users`、`/api/task-list` 或 `/api/plan-settings` 调用；`/Users/a399/Desktop/data/vue-shop-admin/DEVELOPMENT.md` 仍有旧 `/api/dashboard/` 文案残留，本轮不跨仓库修改。
+- 默认 MySQL/MariaDB 的 `migrate --plan` 仍因当前沙箱禁止连接 `127.0.0.1:3306` 失败；SQLite `migrate --plan` 可生成完整迁移计划，但会打印不支持 `db_comment` / `db_table_comment` 的预期 warning。
+
+### 修改
+
+- 更新 `cloud/task_center.py`，通知计划 section 的 `status_counts` 改为按 `notice_status` 聚合，避免失败重试被队列状态覆盖。
+- 更新 `cloud/tests_task_center.py`，补充失败重试通知计划的 `status_counts` 断言。
+- 覆盖更新 `docs/auto-optimization-latest.md`。
+- 在本文件追加本轮中文巡检记录。
+
+### 验证
+
+本地已通过：
+
+```bash
+UV_CACHE_DIR=/private/tmp/uv-cache-shop PYTHONDONTWRITEBYTECODE=1 uv run python manage.py check
+UV_CACHE_DIR=/private/tmp/uv-cache-shop PYTHONDONTWRITEBYTECODE=1 uv run python -m py_compile shop/urls.py shop/admin_urls.py shop/auth_urls.py bot/handlers.py bot/api.py bot/tests.py cloud/api_tasks.py cloud/task_center.py cloud/lifecycle_tasks.py cloud/lifecycle_schedule.py cloud/sync_jobs.py cloud/services.py cloud/provisioning.py cloud/management/commands/sync_aws_assets.py cloud/tests.py cloud/tests_task_center.py
+DJANGO_TEST_SQLITE=1 UV_CACHE_DIR=/private/tmp/uv-cache-shop PYTHONDONTWRITEBYTECODE=1 uv run python manage.py test cloud.tests_task_center --settings=shop.settings --verbosity=2
+DJANGO_TEST_SQLITE=1 UV_CACHE_DIR=/private/tmp/uv-cache-shop PYTHONDONTWRITEBYTECODE=1 uv run python manage.py test bot.tests.ApiPrefixContractTestCase bot.tests.DashboardAuthSurfaceTestCase --settings=shop.settings --verbosity=2
+DJANGO_TEST_SQLITE=1 UV_CACHE_DIR=/private/tmp/uv-cache-shop PYTHONDONTWRITEBYTECODE=1 uv run python manage.py test bot.tests.RetainedIpRenewalUiTestCase --settings=shop.settings --verbosity=2
+DJANGO_TEST_SQLITE=1 UV_CACHE_DIR=/private/tmp/uv-cache-shop PYTHONDONTWRITEBYTECODE=1 uv run python manage.py test cloud.tests.CloudServerServicesTestCase.test_rebuild_source_migration_schedule_preserves_asset_expiry cloud.tests.CloudServerServicesTestCase.test_mark_cloud_server_ip_change_requested_falls_back_when_plan_missing cloud.tests.CloudServerServicesTestCase.test_sync_aws_missing_order_preserves_asset_expiry_when_migration_due_is_earlier cloud.tests.CloudServerServicesTestCase.test_source_migration_schedule_keeps_asset_actual_expiry cloud.tests.CloudServerServicesTestCase.test_aws_sync_deleted_migration_order_keeps_asset_actual_expiry --settings=shop.settings --verbosity=2
+DJANGO_TEST_SQLITE=1 UV_CACHE_DIR=/private/tmp/uv-cache-shop PYTHONDONTWRITEBYTECODE=1 uv run python manage.py shell -c "...字段内省..."
+UV_CACHE_DIR=/private/tmp/uv-cache-shop PYTHONDONTWRITEBYTECODE=1 uv run python manage.py makemigrations --check --dry-run
+DJANGO_TEST_SQLITE=1 UV_CACHE_DIR=/private/tmp/uv-cache-shop PYTHONDONTWRITEBYTECODE=1 uv run python manage.py migrate --plan --noinput
+UV_CACHE_DIR=/private/tmp/uv-cache-shop PYTHONDONTWRITEBYTECODE=1 uv run python manage.py migrate --plan --noinput
+rg -n "service_expires_at\s*=|actual_expires_at\s*=.*order\.|order\..*actual_expires_at|CloudLifecyclePlan\b|CloudNoticePlan\b|CloudAutoRenewPlan\b|refund_order|process_refund|create_refund|issue_refund|refund_to_balance|refund_balance|STATUS_REFUNDED|status=['\"]refunded['\"]|normalize_service_expiry|service_expired_at" bot core orders cloud shop --glob '!**/migrations/**' --glob '!**/tests.py'
+find . -maxdepth 2 -type d \( -name accounts -o -name finance -o -name mall -o -name monitoring -o -name dashboard_api -o -name biz \) -print
+rg -n "callback_data=|InlineKeyboardButton\(|data=['\"](?:asset|order|renew|ip|rebuild|config)|mon:resd|renew:" bot cloud --glob '!**/migrations/**'
+rg -n "/api/dashboard|/api/users|dashboard_urls|dashboard_api" bot core orders cloud shop docs TODO.md AGENTS.md --glob '!docs/refactor-version-record.md'
+rg -n "/api/dashboard|/api/users|/api/task-list|/api/plan-settings" /Users/a399/Desktop/data/vue-shop-admin/DEVELOPMENT.md /Users/a399/Desktop/data/vue-shop-admin/apps/web-antd/src /Users/a399/Desktop/data/vue-shop-admin/docs --glob '!**/node_modules/**' --glob '!**/dist/**' --glob '!**/.git/**'
+git diff --check
+```
+
+结果：`manage.py check`、编译检查、14 个任务中心测试、10 个路由/后台鉴权测试、49 个机器人返回链测试、5 个迁移/同步聚焦测试、字段内省、默认 `makemigrations --check --dry-run`、SQLite `migrate --plan`、红线扫描、废弃 app 目录扫描、前后端旧前缀扫描和 `git diff --check` 均符合预期。默认 MySQL `migrate --plan` 因当前沙箱无法连接本地 MySQL `127.0.0.1:3306` 失败，已记录为环境限制。SQLite 检查仍会打印不支持 `db_comment` / `db_table_comment` 的预期 warning；机器人返回链测试仍会打印既有配置读取容错、mocked postcheck 异常和 IP 校验日志。
 
 ### 剩余风险
 

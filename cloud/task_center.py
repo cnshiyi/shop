@@ -547,7 +547,7 @@ def _notice_section(now) -> dict:
         _plan_item(row, task_type='notice', task_label='通知计划')
         for row in [*items_source, *recent_failed_history, *db_task_items][:8]
     ]
-    status_counts = _status_counts_from_items([*items_source, *recent_failed_history], 'queue_status')
+    status_counts = _status_counts_from_items([*items_source, *recent_failed_history], 'notice_status')
     for status, count in _status_counts_from_items(db_task_items, 'queue_status').items():
         status_counts[status] = status_counts.get(status, 0) + count
     return _task_section_payload(

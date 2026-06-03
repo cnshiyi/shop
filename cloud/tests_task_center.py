@@ -92,6 +92,8 @@ class CloudTaskCenterApiTestCase(TestCase):
         self.assertEqual(section['failed'], 1)
         self.assertEqual(section['health'], 'error')
         self.assertEqual(section['items'][0]['note'], '通知账号不可用')
+        self.assertEqual(section['status_counts']['failed_retry'], 1)
+        self.assertNotIn('due_now', section['status_counts'])
 
     def test_notice_section_counts_recent_failed_history_as_failed(self):
         now = timezone.now()
