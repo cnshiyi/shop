@@ -5111,6 +5111,58 @@ git diff --check
 - 本轮未执行真实 Telegram 点击、真实云资源创建/删除/IP 变更、真实支付、链上广播、生产发布或不可逆操作。
 - 真机测试仍需在用户明确授权真实云资源成本后，单独按中文报告记录云资源 ID 脱敏结果。
 
+## 2026-06-03 后台任务中心与生命周期巡检
+
+### 范围
+
+本轮继续巡检 Shop Django 后端的云资产生命周期唯一到期事实、订单/计划快照字段回流、旧退款入口、废弃 app 误用、Telegram 返回链 64 字节限制、云资产同步 worker、后台任务中心、通知计划、自动续费和生命周期计划状态统计。
+
+### 监工结果
+
+- 当前工作树起始状态干净，最近提交为 `f1fd96f 校准任务中心最近失败总数`。
+- `CloudAsset` 仍只有 `actual_expires_at` 作为结构化资产到期字段。
+- `CloudServerOrder` 未恢复 `service_expires_at` 或 `actual_expires_at`，仅保留 `renew_grace_expires_at` 等流程时间字段。
+- `CloudAssetDashboardSnapshot` 未恢复派生到期字段；生命周期任务和通知任务仅保留 `basis_actual_expires_at` 作为生成任务时引用快照，不作为到期事实。
+- 未发现旧计划快照模型、旧退款函数名或退款状态在 runtime 代码中回流；相关旧字段命中仅存在于历史迁移。
+- 未发现废弃 runtime app 重新加入 `INSTALLED_APPS`；`dashboard_api` 命中为当前 URL namespace 和 `core.dashboard_api` helper 命名。
+- 回调返回链聚焦测试覆盖资产详情、订单详情、续费、换 IP、重装、修改配置等路径，未发现超过 Telegram `callback_data` 64 字节限制的回退。
+- 后台任务中心、通知计划、自动续费和生命周期计划聚焦测试通过，未发现本轮漏报或失败状态统计回退。
+
+### 验证
+
+本地已通过:
+
+```bash
+UV_CACHE_DIR=/private/tmp/uv-cache-shop uv run python manage.py check
+UV_CACHE_DIR=/private/tmp/uv-cache-shop uv run python -m py_compile bot/api.py bot/handlers.py bot/keyboards.py cloud/services.py cloud/bootstrap.py cloud/api.py cloud/task_center.py cloud/api_tasks.py cloud/lifecycle.py cloud/asset_expiry.py
+UV_CACHE_DIR=/private/tmp/uv-cache-shop uv run python -m py_compile cloud/management/commands/sync_aws_assets.py cloud/management/commands/sync_aliyun_assets.py cloud/management/commands/reconcile_cloud_assets_from_servers.py cloud/management/commands/process_cloud_asset_sync_jobs.py cloud/management/commands/refresh_lifecycle_plans.py cloud/management/commands/refresh_notice_plans.py
+DJANGO_TEST_SQLITE=1 UV_CACHE_DIR=/private/tmp/uv-cache-shop uv run python manage.py test bot.tests.RetainedIpRenewalUiTestCase --noinput --verbosity 1
+DJANGO_TEST_SQLITE=1 UV_CACHE_DIR=/private/tmp/uv-cache-shop uv run python manage.py test cloud.tests_task_center --noinput --verbosity 1
+DJANGO_TEST_SQLITE=1 UV_CACHE_DIR=/private/tmp/uv-cache-shop uv run python manage.py test cloud.tests.CloudServerServicesTestCase.test_order_rejects_removed_service_expiry_field cloud.tests.CloudServerServicesTestCase.test_update_cloud_asset_expiry_refreshes_delete_plan_view cloud.tests.CloudServerServicesTestCase.test_update_cloud_asset_expiry_refreshes_order_lifecycle cloud.tests.CloudServerServicesTestCase.test_unbound_asset_renewal_lists_plans_without_creating_order cloud.tests.CloudServerServicesTestCase.test_prepare_unbound_asset_renewal_creates_pending_payment_order cloud.tests.CloudServerServicesTestCase.test_completed_asset_recovery_order_renews_without_reprovisioning --noinput --verbosity 1
+DJANGO_SETTINGS_MODULE=shop.settings DJANGO_TEST_SQLITE=1 UV_CACHE_DIR=/private/tmp/uv-cache-shop uv run python - <<'PY'
+import django
+django.setup()
+from django.conf import settings
+from cloud.models import CloudAsset, CloudServerOrder, CloudAssetDashboardSnapshot
+retired={'accounts','finance','mall','monitoring','dashboard_api','biz'}
+print('retired_apps', [app for app in settings.INSTALLED_APPS if app.split('.')[0] in retired])
+print('asset_expiry_fields', [f.name for f in CloudAsset._meta.fields if 'expires' in f.name or 'expiry' in f.name])
+print('order_expiry_fields', [f.name for f in CloudServerOrder._meta.fields if 'expires' in f.name or 'expiry' in f.name])
+print('snapshot_expiry_fields', [f.name for f in CloudAssetDashboardSnapshot._meta.fields if 'expires' in f.name or 'expiry' in f.name])
+PY
+rg -n "refund|退款|apply_refund|refund_order|refund_cloud|service_expires_at|CloudLifecyclePlan|CloudNoticePlan|CloudAutoRenewPlan" cloud orders bot core shop -g '*.py'
+rg -n "INSTALLED_APPS|include\\(|urlpatterns|dashboard_api|accounts|finance|mall|monitoring|biz" shop core bot orders cloud -g '*.py'
+git diff --check
+```
+
+第一次直接运行 `uv run` 时，默认缓存目录 `/Users/a399/.cache/uv` 被沙箱拒绝访问；已改用 `/private/tmp/uv-cache-shop` 后通过。第一次未设置 SQLite 运行聚焦测试时，沙箱禁止连接本机 MySQL `127.0.0.1`；已切到 `DJANGO_TEST_SQLITE=1` 重跑通过。SQLite 测试期间的 `db_comment` 告警为测试后端能力差异，不是业务失败。
+
+### 剩余风险
+
+- 本轮未跑完整测试套件。
+- 本轮未执行真实 Telegram 点击、真实云资源创建/删除/IP 变更、真实支付、链上广播、生产发布或不可逆操作。
+- 真机测试仍需在用户明确授权真实云资源成本后，单独按中文报告记录云资源 ID 脱敏结果。
+
 ## 2026-06-03 任务中心最近失败总数校准
 
 ### 范围
