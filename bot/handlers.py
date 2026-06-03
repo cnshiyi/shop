@@ -4994,10 +4994,12 @@ def register_handlers(dp: Dispatcher):
         if callback.data.startswith('ir:'):
             parts = callback.data.split(':', 3)
             _, raw_order_id, region_code = parts[:3]
+            back_callback = compact_callback_path(parts[3]) if len(parts) > 3 else ''
             region_code = expand_compact_region_code(region_code)
         else:
             parts = callback.data.split(':', 4)
             _, _, raw_order_id, region_code = parts[:4]
+            back_callback = compact_callback_path(parts[4]) if len(parts) > 4 else ''
         user = await get_or_create_user(callback.from_user.id, callback.from_user.username, callback.from_user.first_name)
         order_id = int(raw_order_id)
         is_admin = await _is_admin_chat(callback.message)
@@ -5020,7 +5022,9 @@ def register_handlers(dp: Dispatcher):
             return
         await callback.message.reply(
             f'🌐 已为你创建同配置新服务器\n\n新节点: {_public_region_text(new_order.region_name or region_name) or "默认节点"}\n新端口: {new_order.mtproxy_port or MTPROXY_DEFAULT_PORT}\n系统会重写生成新的 IP，请在 5 天内迁移。',
-            reply_markup=main_menu(),
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text='🔙 返回原代理', callback_data=cloud_previous_detail_callback(order_id, back_callback))],
+            ]) if back_callback else main_menu(),
         )
         await _send_admin_user_action_notice(bot, user, '换IP', [
             ('新订单号', new_order.order_no),

@@ -1265,6 +1265,16 @@ class RetainedIpRenewalUiTestCase(SimpleTestCase):
             asset_action_source,
         )
 
+    def test_cloud_change_ip_region_submission_keeps_back_path(self):
+        source = inspect.getsource(register_handlers)
+        region_source = source.split('async def cb_cloud_change_ip_region', 1)[1].split("@dp.callback_query(F.data.startswith('u:'))", 1)[0]
+
+        self.assertIn("parts = callback.data.split(':', 3)", region_source)
+        self.assertIn("back_callback = compact_callback_path(parts[3]) if len(parts) > 3 else ''", region_source)
+        self.assertIn("parts = callback.data.split(':', 4)", region_source)
+        self.assertIn("back_callback = compact_callback_path(parts[4]) if len(parts) > 4 else ''", region_source)
+        self.assertIn('cloud_previous_detail_callback(order_id, back_callback)', region_source)
+
     def test_asset_detail_handler_keeps_legacy_and_short_callback_parsing(self):
         source = inspect.getsource(register_handlers)
         asset_detail_source = source.split('async def cb_cloud_asset_detail', 1)[1].split("@dp.callback_query(F.data.startswith('cloud:assetaction:'))", 1)[0]
@@ -1441,6 +1451,7 @@ class RetainedIpRenewalUiTestCase(SimpleTestCase):
             source.split('async def cb_cloud_renew_wallet', 1)[1].split("@dp.callback_query(F.data.startswith('cloud:rp:'))", 1)[0],
             source.split('async def cb_cloud_change_ip', 1)[1].split("@dp.callback_query(F.data.startswith('cloud:ipregions:more:'))", 1)[0],
             source.split('async def cb_cloud_change_ip_regions_more', 1)[1].split("@dp.callback_query(F.data.startswith('cloud:ipregion:'))", 1)[0],
+            source.split('async def cb_cloud_change_ip_region', 1)[1].split("@dp.callback_query(F.data.startswith('u:'))", 1)[0],
             source.split('async def cb_cloud_upgrade', 1)[1].split("@dp.callback_query(F.data.startswith('cloud:upgradepay:'))", 1)[0],
             source.split('async def cb_cloud_upgrade_pay', 1)[1].split("@dp.callback_query(F.data.startswith('cloud:reinit:'))", 1)[0],
             source.split('async def cb_cloud_reinit', 1)[1].split("@dp.callback_query(F.data.startswith('cloud:reinitconfirm:'))", 1)[0],
