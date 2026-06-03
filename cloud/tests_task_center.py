@@ -5,7 +5,7 @@ from django.contrib.auth import get_user_model
 from django.test import RequestFactory, TestCase
 from django.utils import timezone
 
-from cloud.models import CloudAssetSyncJob
+from cloud.models import CloudAssetSyncJob, CloudAutoRenewPatrolLog
 from cloud.task_center import _auto_renew_section, _lifecycle_section, _notice_section, task_center_overview
 
 
@@ -129,6 +129,64 @@ class CloudTaskCenterApiTestCase(TestCase):
 
         self.assertEqual(section['failed'], 1)
         self.assertEqual(section['health'], 'error')
+        self.assertEqual(section['items'][0]['order_no'], 'AUTO-HISTORY-FAILED-1')
+        self.assertEqual(section['items'][0]['note'], '云厂商续费失败')
+
+    def test_auto_renew_section_does_not_duplicate_active_failure_history(self):
+        now = timezone.now()
+        with patch('cloud.api_tasks._build_auto_renew_plan_items', return_value={
+            'due_items': [
+                {
+                    'id': 1,
+                    'order_id': 1,
+                    'order_no': 'AUTO-RENEW-ACTIVE-FAILED-1',
+                    'queue_status': 'retry_failed',
+                    'queue_status_label': '失败待重试',
+                    'provider': 'aws_lightsail',
+                    'ip': '1.1.1.6',
+                    'last_failure_reason': '本轮失败已在队列中',
+                },
+            ],
+            'future_plan_items': [],
+            'history_qs': [
+                {
+                    'id': 'auto-history-duplicate-1',
+                    'order_id': 1,
+                    'order_no': 'AUTO-HISTORY-DUPLICATE-1',
+                    'is_success': False,
+                    'failure_reason': '历史失败不应重复',
+                    'executed_at': now - timezone.timedelta(minutes=20),
+                },
+            ],
+        }):
+            section = _auto_renew_section(now)
+
+        self.assertEqual(section['failed'], 1)
+        self.assertEqual(len(section['items']), 1)
+        self.assertEqual(section['items'][0]['note'], '本轮失败已在队列中')
+
+    def test_auto_renew_section_counts_all_recent_failed_history_queryset(self):
+        now = timezone.now()
+        for index in range(9):
+            CloudAutoRenewPatrolLog.objects.create(
+                batch_id='auto-renew-history-count',
+                order_no=f'AUTO-HISTORY-COUNT-{index}',
+                ip=f'1.1.2.{index}',
+                provider='aws_lightsail',
+                is_success=False,
+                failure_reason=f'失败 {index}',
+            )
+        history_qs = CloudAutoRenewPatrolLog.objects.order_by('-executed_at', '-id')
+        with patch('cloud.api_tasks._build_auto_renew_plan_items', return_value={
+            'due_items': [],
+            'future_plan_items': [],
+            'history_qs': history_qs,
+        }):
+            section = _auto_renew_section(now)
+
+        self.assertEqual(section['failed'], 9)
+        self.assertEqual(section['health'], 'error')
+        self.assertEqual(len(section['items']), 8)
 
     def test_lifecycle_section_exposes_failure_reason_in_item_note(self):
         now = timezone.now()

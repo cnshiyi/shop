@@ -5111,6 +5111,56 @@ git diff --check
 - 本轮未执行真实 Telegram 点击、真实云资源创建/删除/IP 变更、真实支付、链上广播、生产发布或不可逆操作。
 - 真机测试仍需在用户明确授权真实云资源成本后，单独按中文报告记录云资源 ID 脱敏结果。
 
+## 2026-06-03 自动续费失败历史总览补报
+
+### 范围
+
+本轮继续巡检 Shop Django 后端的云资产生命周期唯一到期事实、废弃 app 回流、旧计划快照、旧退款入口、机器人返回链、Telegram `callback_data` 64 字节限制，以及后台任务中心的状态统计和可观测性。
+
+### 运行时变化
+
+- `task_center_overview` 的自动续费区块在计入 24 小时内失败历史时，同步把最近失败历史补进 `items`，避免后台总览显示错误健康状态但列表看不到具体失败订单。
+- 自动续费区块会按订单排除已经在当前失败队列中的历史失败，避免同一订单既作为 `retry_failed` 当前项又作为历史失败重复计数。
+- 删除自动续费区块中不再使用的历史失败计数辅助函数，统一按最近失败历史总数驱动 `failed` 统计，列表最多展示前 8 条。
+
+### 监工结果
+
+- `CloudAsset` 仍只有 `actual_expires_at` 作为结构化资产到期字段。
+- `CloudServerOrder` 未恢复 `service_expires_at` 或 `actual_expires_at`，仅保留 `renew_grace_expires_at` 等流程时间字段。
+- `CloudAssetDashboardSnapshot` 未恢复派生到期字段。
+- 未发现旧计划快照、旧退款函数名或废弃 app 目录回流。
+- 本轮未改动机器人回调生成逻辑；沿用上一轮已验证的资产详情返回链压缩边界。
+
+### 验证
+
+本地已通过:
+
+```bash
+UV_CACHE_DIR=/Users/a399/Desktop/data/shop/.uv-cache PYTHONDONTWRITEBYTECODE=1 uv run python manage.py check
+UV_CACHE_DIR=/Users/a399/Desktop/data/shop/.uv-cache PYTHONDONTWRITEBYTECODE=1 uv run python -m py_compile cloud/task_center.py cloud/tests_task_center.py cloud/api_tasks.py bot/api.py bot/handlers.py
+UV_CACHE_DIR=/Users/a399/Desktop/data/shop/.uv-cache DB_ENGINE=sqlite SQLITE_NAME=/private/tmp/shop_task_center_20260603_next.sqlite3 PYTHONDONTWRITEBYTECODE=1 uv run python manage.py test cloud.tests_task_center --noinput --verbosity 1
+UV_CACHE_DIR=/Users/a399/Desktop/data/shop/.uv-cache DB_ENGINE=sqlite SQLITE_NAME=/private/tmp/shop_bot_retained_ip_20260603_next.sqlite3 PYTHONDONTWRITEBYTECODE=1 uv run python manage.py test bot.tests.RetainedIpRenewalUiTestCase --noinput --verbosity 1
+UV_CACHE_DIR=/Users/a399/Desktop/data/shop/.uv-cache PYTHONDONTWRITEBYTECODE=1 uv run python manage.py shell -c "from cloud.models import CloudAsset, CloudServerOrder, CloudAssetDashboardSnapshot; print([f.name for f in CloudAsset._meta.fields if 'expires' in f.name or 'expiry' in f.name]); print([f.name for f in CloudServerOrder._meta.fields if 'expires' in f.name or 'expiry' in f.name]); print([f.name for f in CloudAssetDashboardSnapshot._meta.fields if 'expires' in f.name or 'expiry' in f.name])"
+rg -n "service_expires_at\\s*=|order\\.(service_expires_at|actual_expires_at)|CloudServerOrder\\([^\\n]*(service_expires_at|actual_expires_at)|CloudLifecyclePlan\\b|CloudNoticePlan\\b|CloudAutoRenewPlan\\b|CloudAssetPlanSnapshot|CloudOrderPlanSnapshot|refund_order|process_refund|create_refund|issue_refund|refund_to_balance|refund_balance|STATUS_REFUNDED|status=['\\\"]refunded['\\\"]|normalize_service_expiry|service_expired_at" bot core orders cloud shop --glob '!**/migrations/**' --glob '!**/tests.py'
+find . -maxdepth 2 -type d \( -name accounts -o -name finance -o -name mall -o -name monitoring -o -name dashboard_api -o -name biz \) -print
+git diff --check
+```
+
+字段检查输出为:
+
+```text
+['actual_expires_at']
+['renew_grace_expires_at']
+[]
+```
+
+### 剩余风险
+
+- 本轮未跑完整测试套件。
+- `bot.tests.RetainedIpRenewalUiTestCase` 仍会打印 SimpleTestCase 禁止数据库查询配置的预期日志，最终 44 条通过。
+- 本轮未执行真实 Telegram 点击、真实云资源创建/删除/IP 变更、真实支付、链上广播、生产发布或不可逆操作。
+- 真机测试仍需在用户明确授权真实云资源成本后，单独按中文报告记录云资源 ID 脱敏结果。
+
 ## 2026-06-03 任务中心最近失败历史补报
 
 ### 范围

@@ -87,22 +87,6 @@ def _recent_failed_history_items(items, *, since, exclude_keys=None) -> list[dic
     return failed_items
 
 
-def _auto_renew_recent_failure_count(history_qs, *, since, exclude_order_ids=None) -> int:
-    if not history_qs:
-        return 0
-    exclude_order_ids = {item for item in (exclude_order_ids or set()) if item}
-    if hasattr(history_qs, 'filter'):
-        qs = history_qs.filter(executed_at__gte=since, is_success=False)
-        if exclude_order_ids:
-            qs = qs.exclude(order_id__in=exclude_order_ids)
-        return qs.count()
-    filtered_items = [
-        item for item in history_qs
-        if not isinstance(item, dict) or not item.get('order_id') or item.get('order_id') not in exclude_order_ids
-    ]
-    return len(_recent_failed_history_items(filtered_items, since=since))
-
-
 def _task_section_payload(
     *,
     key: str,
@@ -360,7 +344,7 @@ def _notice_section(now) -> dict:
 
 
 def _auto_renew_section(now) -> dict:
-    from cloud.api_tasks import _build_auto_renew_plan_items
+    from cloud.api_tasks import _auto_renew_history_item_payload, _build_auto_renew_plan_items
 
     bundle = _build_auto_renew_plan_items(now=now)
     items_source = [*bundle.get('due_items', []), *bundle.get('future_plan_items', [])]
@@ -374,15 +358,23 @@ def _auto_renew_section(now) -> dict:
         for item in items_source
         if item.get('last_failure_reason') or item.get('queue_status') in _AUTO_RENEW_FAILED_QUEUE_STATUSES
     }
-    recent_failed_count = _auto_renew_recent_failure_count(
-        bundle.get('history_qs'),
-        since=now - timezone.timedelta(days=1),
-        exclude_order_ids=active_failure_order_ids,
-    )
+    history_qs = bundle.get('history_qs')
+    if hasattr(history_qs, 'filter'):
+        recent_failed_history_qs = history_qs.filter(executed_at__gte=now - timezone.timedelta(days=1), is_success=False)
+        if active_failure_order_ids:
+            recent_failed_history_qs = recent_failed_history_qs.exclude(order_id__in=active_failure_order_ids)
+        recent_failed_count = recent_failed_history_qs.count()
+        recent_failed_history = [_auto_renew_history_item_payload(item) for item in recent_failed_history_qs[:8]]
+    else:
+        recent_failed_history = [
+            item for item in _recent_failed_history_items(history_qs or [], since=now - timezone.timedelta(days=1))
+            if not item.get('order_id') or item.get('order_id') not in active_failure_order_ids
+        ]
+        recent_failed_count = len(recent_failed_history)
     warning_count = sum(1 for item in items_source if item.get('queue_status') in _AUTO_RENEW_WARNING_QUEUE_STATUSES)
     items = [
         _plan_item(row, task_type='auto_renew', task_label='自动续费')
-        for row in items_source[:8]
+        for row in [*items_source, *recent_failed_history][:8]
     ]
     return _task_section_payload(
         key='auto_renew',
