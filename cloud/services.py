@@ -2625,7 +2625,7 @@ def _set_source_migration_expiry(order: CloudServerOrder, migration_due_at, reas
             f'{reason}: 旧服务器生命周期已更新；'
             f'旧机订单 {order.order_no}；旧机IP {order.public_ip or order.previous_public_ip or "-"}；'
             f'状态：旧服务器继续保留到迁移到期时间，之后进入宽限/删机/IP保留流程；'
-            f'服务到期 {_fmt_dt(before["actual_expires_at"])} -> {_fmt_dt(after["actual_expires_at"])}；'
+            f'资产到期 {_fmt_dt(before["actual_expires_at"])} -> {_fmt_dt(after["actual_expires_at"])}；'
             f'宽限到期 {_fmt_dt(before["renew_grace_expires_at"])} -> {_fmt_dt(after["renew_grace_expires_at"])}；'
             f'删机时间 {_fmt_dt(before["delete_at"])} -> {_fmt_dt(after["delete_at"])}；'
             f'IP保留到期 {_fmt_dt(before["ip_recycle_at"])} -> {_fmt_dt(after["ip_recycle_at"])}；'

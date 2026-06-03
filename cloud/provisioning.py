@@ -542,7 +542,7 @@ def _mark_rebuild_source_pending_deletion(order_id: int, replacement_order_id: i
         f'旧机临时IP {source_temp_public_ip or "未获取"}；原固定/旧IP {previous_public_ip or "-"}；'
         f'旧端口 {source.mtproxy_port or "-"}；旧secret {source.mtproxy_secret or "-"}；'
         f'处理结果：固定 IP 已迁移到新实例，旧服务器进入保留期，等待宽限期后删除；'
-        f'服务到期 {_fmt_dt(before_dates["actual_expires_at"])} -> {_fmt_dt(after_dates["actual_expires_at"])}；'
+        f'资产到期 {_fmt_dt(before_dates["actual_expires_at"])} -> {_fmt_dt(after_dates["actual_expires_at"])}；'
         f'宽限到期 {_fmt_dt(before_dates["renew_grace_expires_at"])} -> {_fmt_dt(after_dates["renew_grace_expires_at"])}；'
         f'删机时间 {_fmt_dt(before_dates["delete_at"])} -> {_fmt_dt(after_dates["delete_at"])}；'
         f'IP保留到期 {_fmt_dt(before_dates["ip_recycle_at"])} -> {_fmt_dt(after_dates["ip_recycle_at"])}。'
