@@ -6,7 +6,7 @@ from django.test import RequestFactory, TestCase
 from django.utils import timezone
 
 from cloud.models import CloudAssetSyncJob
-from cloud.task_center import _auto_renew_section, _notice_section, task_center_overview
+from cloud.task_center import _auto_renew_section, _lifecycle_section, _notice_section, task_center_overview
 
 
 class CloudTaskCenterApiTestCase(TestCase):
@@ -50,6 +50,7 @@ class CloudTaskCenterApiTestCase(TestCase):
                     'order_no': 'NOTICE-FAILED-1',
                     'provider': 'aws_lightsail',
                     'ip': '1.1.1.1',
+                    'last_error': '通知账号不可用',
                 },
             ],
             'history_items': [],
@@ -58,6 +59,7 @@ class CloudTaskCenterApiTestCase(TestCase):
 
         self.assertEqual(section['failed'], 1)
         self.assertEqual(section['health'], 'error')
+        self.assertEqual(section['items'][0]['note'], '通知账号不可用')
 
     def test_auto_renew_section_counts_retry_failed_as_failed(self):
         now = timezone.now()
@@ -71,6 +73,7 @@ class CloudTaskCenterApiTestCase(TestCase):
                     'queue_status_label': '失败待重试',
                     'provider': 'aws_lightsail',
                     'ip': '1.1.1.2',
+                    'failure_reason': '余额不足',
                 },
             ],
             'future_plan_items': [],
@@ -79,3 +82,28 @@ class CloudTaskCenterApiTestCase(TestCase):
 
         self.assertEqual(section['failed'], 1)
         self.assertEqual(section['health'], 'error')
+        self.assertEqual(section['items'][0]['note'], '余额不足')
+
+    def test_lifecycle_section_exposes_failure_reason_in_item_note(self):
+        now = timezone.now()
+        with patch('bot.api._build_lifecycle_plan_bundle', return_value={
+            'due_items': [
+                {
+                    'id': 'delete-1',
+                    'order_id': 1,
+                    'order_no': 'LIFE-FAILED-1',
+                    'queue_status': 'overdue',
+                    'queue_status_label': '已逾期',
+                    'provider': 'aws_lightsail',
+                    'ip': '1.1.1.3',
+                    'failure_reason': '云 API 删除失败',
+                },
+            ],
+            'future_plan_items': [],
+            'ip_delete_items': [],
+        }):
+            section = _lifecycle_section(now)
+
+        self.assertEqual(section['failed'], 1)
+        self.assertEqual(section['health'], 'error')
+        self.assertEqual(section['items'][0]['note'], '云 API 删除失败')

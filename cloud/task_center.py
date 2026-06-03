@@ -32,6 +32,14 @@ def _status_counts_from_items(items, field='queue_status') -> dict:
     return counts
 
 
+def _first_nonempty(*values) -> str:
+    for value in values:
+        text = str(value or '').strip()
+        if text:
+            return text
+    return ''
+
+
 def _task_section_payload(
     *,
     key: str,
@@ -109,7 +117,14 @@ def _plan_item(row, *, task_type: str, task_label: str) -> dict:
             'order_no': row.get('order_no') or '',
             'asset_id': asset_id,
             'public_ip': row.get('ip') or row.get('public_ip') or '',
-            'note': row.get('last_failure_reason') or row.get('execution_status') or row.get('notice_status_label') or '',
+            'note': _first_nonempty(
+                row.get('last_failure_reason'),
+                row.get('failure_reason'),
+                row.get('last_error'),
+                row.get('error'),
+                row.get('execution_status'),
+                row.get('notice_status_label'),
+            ),
             'created_at': row.get('created_at'),
             'updated_at': row.get('updated_at'),
             'next_run_at': row.get('next_run_at'),
@@ -132,7 +147,14 @@ def _plan_item(row, *, task_type: str, task_label: str) -> dict:
         'order_no': getattr(row, 'order_no', '') or getattr(getattr(row, 'order', None), 'order_no', '') or '',
         'asset_id': asset_id,
         'public_ip': getattr(row, 'ip', '') or '',
-        'note': getattr(row, 'last_failure_reason', '') or getattr(row, 'execution_status', '') or getattr(row, 'notice_status_label', '') or '',
+        'note': _first_nonempty(
+            getattr(row, 'last_failure_reason', ''),
+            getattr(row, 'failure_reason', ''),
+            getattr(row, 'last_error', ''),
+            getattr(row, 'error', ''),
+            getattr(row, 'execution_status', ''),
+            getattr(row, 'notice_status_label', ''),
+        ),
         'created_at': _iso(row.created_at),
         'updated_at': _iso(row.updated_at),
         'next_run_at': _iso(getattr(row, 'next_run_at', None)),
