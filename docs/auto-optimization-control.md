@@ -1,0 +1,52 @@
+# Shop 自动优化控制台
+
+这个文件是当前会话和后续自动化轮次的固定入口，用来减少跨会话复查成本。需要调整方向时，优先改这里；自动化每轮都应先读取本文件，再执行巡检、修复、验证、记录和提交。
+
+## 当前方向
+
+- 继续监工并优化 Shop Django 后端仓库，优先做最小安全修复。
+- 每轮开始必须先读取 `git status --short` 和最近一次提交，避免覆盖用户改动。
+- 每轮必须先读取本文件、`docs/auto-optimization-latest.md` 和 `docs/refactor-version-record.md` 末尾，继承最近上下文。
+- 使用 Codex CLI 工人模式时，还必须读取根目录 `AGENTS.md` 和 `TODO.md`，按 `continue to next task` 规则领取下一项未完成任务。
+- 每轮完成后必须更新 `docs/auto-optimization-latest.md`，并在 `docs/refactor-version-record.md` 追加中文版本记录。
+- 存在实际仓库变更时，必须运行必要验证并提交一个清晰的 git commit。
+
+## 核心红线
+
+- 云资产生命周期只以 `CloudAsset.actual_expires_at` 作为唯一资产到期事实。
+- 不恢复订单表到期字段，例如 `CloudServerOrder.service_expires_at` 或订单侧 `actual_expires_at`。
+- 不恢复计划快照表、旧退款逻辑、旧退款函数名或废弃 runtime app。
+- 不打印密钥、私钥、Telegram session、TOTP、支付密钥或云厂商密钥。
+- 不做真实支付、链上广播、生产发布、删除数据或不可逆操作。
+- 真机云资源测试必须先获得用户明确授权真实成本，并单独写中文报告，云资源 ID 脱敏。
+
+## 固定巡检清单
+
+- Django 基础检查：`uv run python manage.py check`。
+- 与改动相关的聚焦测试或编译检查。
+- 搜索订单到期字段、旧计划快照、旧退款函数名、废弃 app 回流。
+- 检查机器人资产详情、订单详情、续费、换 IP、重装、修改配置等返回链。
+- 检查 Telegram `callback_data` 不超过 64 字节。
+- 检查云资产同步 worker、后台任务中心、通知计划、自动续费、生命周期计划的状态统计和可观测性。
+- 发现后台总览漏报、错误状态不一致或任务重试异常时，优先修复并补聚焦测试。
+
+## 输出约定
+
+- `docs/auto-optimization-latest.md`：只保留最近一轮的摘要、命令、结果、commit、风险和下一步，方便快速复查。
+- `docs/refactor-version-record.md`：追加完整中文版本记录，不写英文文档。
+- `docs/real-machine-test-report.md`：仅在用户明确授权真实云资源成本后记录真机测试，资源 ID 脱敏，不打印密钥。
+- `TODO.md`：拆分给 Codex CLI 工人会话的下一项可验证任务。
+- `AGENTS.md`：定义 `continue to next task` 的执行规则。
+
+## 调整方向的方法
+
+- 想增加重点：直接在“当前方向”或“固定巡检清单”增加条目。
+- 想暂停某类操作：直接在“核心红线”增加条目。
+- 想让下一轮优先处理某个 bug：在下面“下一轮优先事项”写清现象、相关文件或失败命令。
+
+## 下一轮优先事项
+
+- 继续关注机器人返回链和钱包支付/续费流程的返回上一层行为。
+- 继续关注 MySQL 默认本地环境与 SQLite 聚焦测试之间的差异。
+- 继续关注自动化输出是否完整落入 `docs/auto-optimization-latest.md`。
+- 如果使用 CLI 长跑，优先用 `codex exec "continue to next task"` 的短工人循环，不建议让单个 CLI 会话无限累积上下文。

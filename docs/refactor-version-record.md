@@ -2547,7 +2547,7 @@ UV_CACHE_DIR=/private/tmp/uv-cache-shop DJANGO_TEST_SQLITE=1 PYTHONDONTWRITEBYTE
 
 ```bash
 UV_CACHE_DIR=/private/tmp/uv-cache-shop DJANGO_TEST_SQLITE=1 PYTHONDONTWRITEBYTECODE=1 uv run python manage.py check
-UV_CACHE_DIR=/private/tmp/uv-cache-shop DJANGO_TEST_SQLITE=1 PYTHONDONTWRITEBYTECODE=1 uv run python -m py_compile bot/api.py cloud/api.py cloud/api_tasks.py shop/dashboard_urls.py cloud/tests.py
+UV_CACHE_DIR=/private/tmp/uv-cache-shop DJANGO_TEST_SQLITE=1 PYTHONDONTWRITEBYTECODE=1 uv run python -m py_compile bot/api.py cloud/api.py cloud/api_tasks.py shop/admin_urls.py cloud/tests.py
 UV_CACHE_DIR=/private/tmp/uv-cache-shop DJANGO_TEST_SQLITE=1 PYTHONDONTWRITEBYTECODE=1 uv run python manage.py makemigrations --check --dry-run
 UV_CACHE_DIR=/private/tmp/uv-cache-shop DB_ENGINE=sqlite SQLITE_NAME=/private/tmp/shop-monitor-plan-view.sqlite3 PYTHONDONTWRITEBYTECODE=1 uv run python manage.py test cloud.tests.CloudServerServicesTestCase.test_refresh_lifecycle_plans_command_builds_lifecycle_plan_view cloud.tests.CloudServerServicesTestCase.test_refresh_lifecycle_plan_view_api_builds_lifecycle_plan_view cloud.tests.CloudServerServicesTestCase.test_refresh_notice_plans_command_builds_notice_plan_view cloud.tests.CloudServerServicesTestCase.test_refresh_notice_plan_view_api_builds_notice_plan_view cloud.tests.CloudServerServicesTestCase.test_notice_task_detail_uses_notice_plan_view --noinput --verbosity 1
 ```
@@ -3753,7 +3753,7 @@ DJANGO_TEST_REUSE_DB=1 uv run python manage.py test bot.tests.DashboardAuthSurfa
 本地已通过:
 
 ```bash
-uv run python -m py_compile cloud/api.py cloud/api_monitors.py cloud/task_center.py shop/dashboard_urls.py
+uv run python -m py_compile cloud/api.py cloud/api_monitors.py cloud/task_center.py shop/admin_urls.py
 DJANGO_TEST_REUSE_DB=1 uv run python manage.py test cloud.tests_task_center.CloudTaskCenterApiTestCase --keepdb --noinput --verbosity 1
 ```
 
@@ -3790,7 +3790,7 @@ This refactor split cloud asset sync execution out of `cloud/api.py` and made sy
 本地已通过:
 
 ```bash
-uv run python -m py_compile cloud/api.py cloud/sync_jobs.py cloud/management/commands/process_cloud_asset_sync_jobs.py cloud/management/commands/prune_cloud_sync_job_events.py shop/dashboard_urls.py
+uv run python -m py_compile cloud/api.py cloud/sync_jobs.py cloud/management/commands/process_cloud_asset_sync_jobs.py cloud/management/commands/prune_cloud_sync_job_events.py shop/admin_urls.py
 uv run python manage.py check
 uv run python manage.py makemigrations cloud --dry-run --check
 DJANGO_TEST_REUSE_DB=1 uv run python manage.py test cloud.tests.CloudServerServicesTestCase.test_sync_cloud_assets_runs_enabled_accounts_and_merges_results cloud.tests.CloudServerServicesTestCase.test_cloud_asset_sync_jobs_metrics_returns_operational_summary cloud.tests.CloudServerServicesTestCase.test_cancel_queued_cloud_asset_sync_job_marks_terminal_and_events cloud.tests.CloudServerServicesTestCase.test_sync_cloud_assets_with_selected_assets_uses_asset_scoped_tasks cloud.tests.CloudServerServicesTestCase.test_process_cloud_asset_sync_jobs_worker_processes_queued_job --keepdb --noinput --verbosity 1
@@ -3947,7 +3947,7 @@ uv run python manage.py migrate --plan
   - provider pricing list
   - custom cloud plan list
   - plan create/update/delete
-- `cloud/api.py` now imports these endpoint names at the bottom as compatibility exports, so `shop/dashboard_urls.py` can continue using `cloud_api.<view_name>`.
+- `cloud/api.py` now imports these endpoint names at the bottom as compatibility exports, so `shop/admin_urls.py` can continue using `cloud_api.<view_name>`.
 
 ### 清理
 
@@ -4002,7 +4002,7 @@ Fifth refactor pass continued splitting `bot/api.py` by moving admin account man
   - admin user list
   - admin create/update/delete
   - current admin password change
-- `bot/api.py` keeps compatibility exports for the moved endpoints, so `shop/dashboard_urls.py` continues resolving the same attributes.
+- `bot/api.py` keeps compatibility exports for the moved endpoints, so `shop/admin_urls.py` continues resolving the same attributes.
 
 ### 验证
 
@@ -4634,7 +4634,7 @@ git diff --check
 
 ```bash
 UV_CACHE_DIR=/private/tmp/uv-cache-shop DJANGO_TEST_SQLITE=1 PYTHONDONTWRITEBYTECODE=1 uv run python manage.py check
-UV_CACHE_DIR=/private/tmp/uv-cache-shop DJANGO_TEST_SQLITE=1 PYTHONDONTWRITEBYTECODE=1 uv run python -m py_compile bot/api_site_configs.py bot/api.py shop/dashboard_urls.py bot/tests.py
+UV_CACHE_DIR=/private/tmp/uv-cache-shop DJANGO_TEST_SQLITE=1 PYTHONDONTWRITEBYTECODE=1 uv run python -m py_compile bot/api_site_configs.py bot/api.py shop/admin_urls.py bot/tests.py
 UV_CACHE_DIR=/private/tmp/uv-cache-shop DJANGO_TEST_SQLITE=1 PYTHONDONTWRITEBYTECODE=1 uv run python manage.py test bot.tests.DashboardNotificationTestCase.test_daily_expiry_summary_test_endpoint_forces_send --noinput --verbosity 1
 ```
 
@@ -4655,7 +4655,7 @@ UV_CACHE_DIR=/private/tmp/uv-cache-shop DJANGO_TEST_SQLITE=1 PYTHONDONTWRITEBYTE
 
 - 新增 `cloud/api_asset_edit.py`，承接云资产详情、手动编辑、自动续费开关和后台删除端点。
 - 保留 `cloud/api.py` 作为兼容门面，重新导出旧 `cloud.api.*` 名称和既有导入/测试 patch 点。
-- `shop/dashboard_urls.py` now imports cloud dashboard route handlers from domain modules directly instead of routing through `cloud.api`.
+- `shop/admin_urls.py` now imports cloud dashboard route handlers from domain modules directly instead of routing through `cloud.api`.
 - `cloud/api_assets.py` now owns asset list, risk summary, snapshot refresh, and asset payload helpers only.
 - 手动刷新未附加固定 IP 删除计划时，现在会更新同订单/同资源的相关记录，并记录 `CLOUD_UNATTACHED_IP_DELETE_DUE_REFRESHED`。
 - 后台资产删除现在会删除同订单/同资源残留记录，清空订单云绑定，写入 `CloudIpLog`，并通过结构化 logger 字段记录被删除的残留 id。
@@ -4666,7 +4666,7 @@ UV_CACHE_DIR=/private/tmp/uv-cache-shop DJANGO_TEST_SQLITE=1 PYTHONDONTWRITEBYTE
 本地已通过:
 
 ```bash
-uv run python -m py_compile cloud/api.py cloud/api_assets.py cloud/api_asset_edit.py shop/dashboard_urls.py cloud/tests.py
+uv run python -m py_compile cloud/api.py cloud/api_assets.py cloud/api_asset_edit.py shop/admin_urls.py cloud/tests.py
 DJANGO_TEST_REUSE_DB=1 uv run python manage.py test cloud.tests.CloudServerServicesTestCase.test_cloud_assets_list_uses_bulk_order_inference_without_per_asset_fallback cloud.tests.CloudServerServicesTestCase.test_sync_cloud_asset_status_uses_asset_scope cloud.tests.CloudServerServicesTestCase.test_update_cloud_asset_defers_snapshot_refresh cloud.tests.CloudServerServicesTestCase.test_update_cloud_asset_refreshes_unattached_ip_delete_plan cloud.tests.CloudServerServicesTestCase.test_delete_cloud_asset_only_removes_asset_record cloud.tests.CloudServerServicesTestCase.test_delete_cloud_asset_also_removes_residual_server_record cloud.tests_task_center.CloudTaskCenterApiTestCase --keepdb --noinput --verbosity 1
 ```
 
@@ -4689,7 +4689,7 @@ DJANGO_TEST_REUSE_DB=1 uv run python manage.py test cloud.tests.CloudServerServi
 本地已通过:
 
 ```bash
-uv run python -m py_compile cloud/api.py cloud/api_assets.py cloud/api_asset_snapshots.py cloud/api_asset_edit.py shop/dashboard_urls.py cloud/tests.py
+uv run python -m py_compile cloud/api.py cloud/api_assets.py cloud/api_asset_snapshots.py cloud/api_asset_edit.py shop/admin_urls.py cloud/tests.py
 git diff --check
 ```
 
@@ -4792,7 +4792,7 @@ DJANGO_TEST_REUSE_DB=1 uv run python manage.py test cloud.tests.CloudServerServi
 本地已通过:
 
 ```bash
-uv run python -m py_compile run.py cloud/api.py cloud/dashboard_snapshots.py cloud/models.py cloud/tests.py cloud/management/commands/process_cloud_asset_sync_jobs.py shop/dashboard_urls.py
+uv run python -m py_compile run.py cloud/api.py cloud/dashboard_snapshots.py cloud/models.py cloud/tests.py cloud/management/commands/process_cloud_asset_sync_jobs.py shop/admin_urls.py
 uv run python manage.py check
 uv run python manage.py makemigrations cloud --dry-run --check
 uv run python manage.py sqlmigrate cloud 0042
@@ -4824,7 +4824,7 @@ git diff --check
 本地已通过:
 
 ```bash
-uv run python -m py_compile cloud/api.py cloud/dashboard_snapshots.py cloud/models.py cloud/tests.py cloud/management/commands/sync_aws_assets.py cloud/management/commands/sync_aliyun_assets.py cloud/management/commands/refresh_cloud_asset_dashboard_snapshots.py shop/dashboard_urls.py
+uv run python -m py_compile cloud/api.py cloud/dashboard_snapshots.py cloud/models.py cloud/tests.py cloud/management/commands/sync_aws_assets.py cloud/management/commands/sync_aliyun_assets.py cloud/management/commands/refresh_cloud_asset_dashboard_snapshots.py shop/admin_urls.py
 uv run python manage.py check
 uv run python manage.py makemigrations cloud --dry-run --check
 cd /Users/a399/Desktop/data/vue-shop-admin && ./node_modules/.bin/vue-tsc --noEmit --skipLibCheck -p apps/web-antd/tsconfig.json
@@ -6050,7 +6050,7 @@ git diff --check
 - `CloudAsset.actual_expires_at` 仍是唯一结构化资产到期事实。
 - `CloudServerOrder` 未恢复 `service_expires_at` 或 `actual_expires_at`。
 - `CloudAssetDashboardSnapshot` 未恢复到期字段。
-- 废弃 app 未进入 `INSTALLED_APPS`；扫描命中的 `dashboard_api` 仅为当前 `shop.dashboard_urls` 命名空间，命中的 `finance`/`monitoring` 为权限码或缓存键文字，不是旧 app 回流。
+- 废弃 app 未进入 `INSTALLED_APPS`；扫描命中的 `dashboard_api` 仅为当前 `shop.admin_urls` 命名空间，命中的 `finance`/`monitoring` 为权限码或缓存键文字，不是旧 app 回流。
 - 旧退款函数名、旧计划快照模型未发现回流；`ip_recycle_at=asset.actual_expires_at` 仍是固定 IP 回收计划派生时间，不是订单到期事实恢复。
 
 ### 验证
@@ -6825,3 +6825,26 @@ git diff --check
 - 本轮未跑完整测试套件。
 - 本轮未执行真实 Telegram 点击、真实云资源创建/删除/IP 变更、真实支付、链上广播、生产发布或不可逆操作。
 - 真机测试仍需在用户明确授权真实云资源成本后，单独按中文报告记录云资源 ID 脱敏结果。
+
+## 2026-06-03 自动优化复查入口收敛
+
+### 背景
+
+用户反馈自动化分散在多个会话后，复查和修改方向都很麻烦。本轮将自动化上下文收敛到仓库内固定中文文件，减少跨会话丢失上下文的问题。
+
+### 修改
+
+- 新增 `docs/auto-optimization-control.md`，作为后续自动化每轮必须先读取的任务方向、红线、巡检清单和下一轮优先事项入口。
+- 新增 `docs/auto-optimization-latest.md`，作为最近一轮状态摘要，便于快速复查，不需要翻完整版本记录。
+- 新增根目录 `AGENTS.md`，定义 Codex CLI 收到 `continue to next task` 后的读取顺序、执行边界、验证和提交流程。
+- 新增根目录 `TODO.md`，把持续优化方向拆成可验证、可领取的小任务，方便短工人会话循环执行。
+- 准备同步更新 `shop` 自动化提示词，要求每轮先读取上述文件和版本记录末尾，再执行巡检、修复、验证、记录和提交。
+
+### 验证
+
+- 本轮为中文文档和自动化提示词调整，不涉及运行代码逻辑。
+
+### 剩余风险
+
+- 需要观察下一轮自动化是否稳定覆盖更新 `docs/auto-optimization-latest.md`。
+- 代码层面的持续巡检仍由后续每 10 分钟自动化执行。
