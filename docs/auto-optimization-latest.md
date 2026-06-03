@@ -4,27 +4,27 @@
 
 ## 最近一轮
 
-- 时间：2026-06-03 17:48 CST
-- 状态：已完成固定巡检和提交前验证；本轮未修改运行代码，只更新巡检记录。
+- 时间：2026-06-03 18:30 CST
+- 状态：已修复迁移/重建/AWS 同步路径误把迁移截止时间写回资产到期事实的问题，并完成聚焦验证。
 - 最近提交：本轮提交后以当前 `HEAD` 为准。
-- 本轮范围：读取自动化记忆、当前 git 状态、最近提交、`docs/auto-optimization-control.md`、本文件、`docs/refactor-version-record.md` 末尾、`AGENTS.md`、`TODO.md` 和 `django-shop-backend` 技能；由于 `TODO.md` 已全部勾选，按固定巡检清单执行。
-- 本轮结论：云资产生命周期仍只以 `CloudAsset.actual_expires_at` 作为唯一资产到期事实；订单表、计划快照、旧退款入口和废弃 runtime app 未回流；后台 API 路由收口和机器人返回链未发现新回归；任务中心 pending/failed/retry 统计继续通过聚焦测试。
-- 前端只读观察：`/Users/a399/Desktop/data/vue-shop-admin/apps/web-antd/src` 未检出旧 `/api/dashboard`、`/api/users`、`/api/task-list` 或 `/api/plan-settings` 调用；`/Users/a399/Desktop/data/vue-shop-admin/DEVELOPMENT.md` 仍有旧 `/api/dashboard/` 文字说明残留，本轮仅记录风险，未跨仓库修改。
+- 本轮范围：读取自动化记忆、当前 git 状态、最近提交、`docs/auto-optimization-control.md`、本文件、`docs/refactor-version-record.md` 末尾、`AGENTS.md`、`TODO.md` 和 `django-shop-backend` 技能；由于 `TODO.md` 已全部勾选，按固定巡检清单执行，并优先处理云资产唯一到期事实红线。
+- 本轮结论：`CloudAsset.actual_expires_at` 继续作为唯一资产到期事实；更换 IP、重装/重建、provisioning 旧机待删除和 AWS 同步确认删除迁移旧机时，只调整订单侧迁移、宽限、删除和固定 IP 回收计划，不再把 `migration_due_at` 写入资产 `actual_expires_at` 或旧兼容 `Server.expires_at`。
 
 ## 最近验证
 
 - `UV_CACHE_DIR=/private/tmp/uv-cache-shop PYTHONDONTWRITEBYTECODE=1 uv run python manage.py check` 通过。
 - `UV_CACHE_DIR=/private/tmp/uv-cache-shop PYTHONDONTWRITEBYTECODE=1 uv run python -m py_compile shop/urls.py shop/admin_urls.py shop/auth_urls.py bot/handlers.py bot/api.py bot/tests.py cloud/api_tasks.py cloud/task_center.py cloud/lifecycle_tasks.py cloud/lifecycle_schedule.py cloud/sync_jobs.py cloud/services.py cloud/tests_task_center.py` 通过。
-- `DJANGO_TEST_SQLITE=1 UV_CACHE_DIR=/private/tmp/uv-cache-shop PYTHONDONTWRITEBYTECODE=1 uv run python manage.py test bot.tests.ApiPrefixContractTestCase bot.tests.DashboardAuthSurfaceTestCase --settings=shop.settings --verbosity=2` 通过，共 10 个测试。
+- `UV_CACHE_DIR=/private/tmp/uv-cache-shop PYTHONDONTWRITEBYTECODE=1 uv run python -m py_compile cloud/management/commands/sync_aws_assets.py cloud/provisioning.py cloud/services.py cloud/tests.py` 通过。
 - `DJANGO_TEST_SQLITE=1 UV_CACHE_DIR=/private/tmp/uv-cache-shop PYTHONDONTWRITEBYTECODE=1 uv run python manage.py test cloud.tests_task_center --settings=shop.settings --verbosity=2` 通过，共 14 个测试。
-- `DJANGO_TEST_SQLITE=1 UV_CACHE_DIR=/private/tmp/uv-cache-shop PYTHONDONTWRITEBYTECODE=1 uv run python manage.py test bot.tests.RetainedIpRenewalUiTestCase --settings=shop.settings --verbosity=2` 通过，共 49 个测试。
+- `DJANGO_TEST_SQLITE=1 UV_CACHE_DIR=/private/tmp/uv-cache-shop PYTHONDONTWRITEBYTECODE=1 uv run python manage.py test bot.tests.ApiPrefixContractTestCase bot.tests.DashboardAuthSurfaceTestCase bot.tests.RetainedIpRenewalUiTestCase --settings=shop.settings --verbosity=2` 通过，共 59 个测试。
+- `DJANGO_TEST_SQLITE=1 UV_CACHE_DIR=/private/tmp/uv-cache-shop PYTHONDONTWRITEBYTECODE=1 uv run python manage.py test cloud.tests.CloudServerServicesTestCase.test_rebuild_source_migration_schedule_preserves_asset_expiry cloud.tests.CloudServerServicesTestCase.test_mark_cloud_server_ip_change_requested_falls_back_when_plan_missing cloud.tests.CloudServerServicesTestCase.test_sync_aws_missing_order_preserves_asset_expiry_when_migration_due_is_earlier --settings=shop.settings --verbosity=2` 通过，共 3 个测试。
+- `DJANGO_TEST_SQLITE=1 UV_CACHE_DIR=/private/tmp/uv-cache-shop PYTHONDONTWRITEBYTECODE=1 uv run python manage.py test cloud.tests.CloudServerServicesTestCase.test_source_migration_schedule_keeps_asset_actual_expiry cloud.tests.CloudServerServicesTestCase.test_aws_sync_deleted_migration_order_keeps_asset_actual_expiry --settings=shop.settings --verbosity=2` 通过，共 2 个测试。
 - `DJANGO_TEST_SQLITE=1 UV_CACHE_DIR=/private/tmp/uv-cache-shop PYTHONDONTWRITEBYTECODE=1 uv run python manage.py shell -c "...字段内省..."` 确认废弃 app 未安装，`CloudAsset` 到期字段只有 `actual_expires_at`，`CloudServerOrder` 未恢复 `actual_expires_at` 或 `service_expires_at`，`CloudAssetDashboardSnapshot` 未恢复到期字段。
 - `UV_CACHE_DIR=/private/tmp/uv-cache-shop PYTHONDONTWRITEBYTECODE=1 uv run python manage.py makemigrations --check --dry-run` 输出 `No changes detected`；当前沙箱仍无法连接默认 MySQL `127.0.0.1:3306`，因此会打印迁移历史一致性检查 warning。
 - `DJANGO_TEST_SQLITE=1 UV_CACHE_DIR=/private/tmp/uv-cache-shop PYTHONDONTWRITEBYTECODE=1 uv run python manage.py migrate --plan --noinput` 可生成完整迁移计划；SQLite 仍打印不支持 `db_comment` / `db_table_comment` 的预期 warning。
 - 默认 `UV_CACHE_DIR=/private/tmp/uv-cache-shop PYTHONDONTWRITEBYTECODE=1 uv run python manage.py migrate --plan --noinput` 因当前沙箱禁止连接本地 MySQL `127.0.0.1:3306` 失败，属于环境限制。
-- 红线关键字扫描未发现订单到期字段、旧计划快照、旧退款函数名或废弃 runtime app 回流；命中项仍为资产侧唯一到期事实、固定 IP 回收时间同步或 `_asset_expires_at` 临时属性。
+- 红线关键字扫描未发现运行代码继续把 `migration_due_at` 写入资产 `actual_expires_at` 或 `Server.expires_at`；剩余命中为资产侧唯一到期事实、固定 IP 回收时间同步或 `_asset_expires_at` 临时属性。
 - 废弃 app 目录扫描无输出。
-- 前端只读扫描使用存在路径重跑后，源码无旧 API 前缀命中；仅前端 `DEVELOPMENT.md` 有旧 `/api/dashboard/` 文字说明命中。
 - `git diff --check` 通过。
 
 ## 剩余风险
@@ -32,7 +32,7 @@
 - 本轮未跑完整测试套件。
 - 本轮未在真实 MySQL/MariaDB 上执行迁移计划，因为当前沙箱禁止连接本地 `127.0.0.1:3306`。
 - 本轮未执行真实 Telegram 点击、真实云资源创建/删除/IP 变更、真实支付、链上广播、生产发布或不可逆操作。
-- 前端文档仍有旧 `/api/dashboard/` 描述残留；源码只读扫描未发现旧调用。
+- 前端 `DEVELOPMENT.md` 仍有旧 `/api/dashboard/` 描述残留；本轮未跨仓库修改。
 
 ## 下一步
 

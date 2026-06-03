@@ -487,9 +487,8 @@ def _mark_rebuild_source_pending_deletion(order_id: int, replacement_order_id: i
         provision_note=source.provision_note,
         updated_at=now,
     )
-    CloudAsset.objects.filter(order=source, kind=CloudAsset.KIND_SERVER).update(actual_expires_at=migration_due_at, updated_at=now)
     after_dates = {
-        'actual_expires_at': migration_due_at,
+        'actual_expires_at': order_asset_expiry(source),
         'renew_grace_expires_at': source.renew_grace_expires_at,
         'suspend_at': source.suspend_at,
         'delete_at': source.delete_at,
@@ -497,7 +496,7 @@ def _mark_rebuild_source_pending_deletion(order_id: int, replacement_order_id: i
         'migration_due_at': source.migration_due_at,
     }
     logger.info(
-        '[PROVISION][REBUILD_SOURCE_DATE_CHANGE] source_order_id=%s source_order_no=%s replacement_order_id=%s replacement_order_no=%s source_temp_public_ip=%s previous_public_ip=%s actual_expires_at=%s->%s renew_grace_expires_at=%s->%s suspend_at=%s->%s delete_at=%s->%s ip_recycle_at=%s->%s migration_due_at=%s->%s',
+        '[PROVISION][REBUILD_SOURCE_SCHEDULE_CHANGE] source_order_id=%s source_order_no=%s replacement_order_id=%s replacement_order_no=%s source_temp_public_ip=%s previous_public_ip=%s actual_expires_at=%s->%s renew_grace_expires_at=%s->%s suspend_at=%s->%s delete_at=%s->%s ip_recycle_at=%s->%s migration_due_at=%s->%s',
         source.id,
         source.order_no,
         replacement.id,
@@ -525,7 +524,6 @@ def _mark_rebuild_source_pending_deletion(order_id: int, replacement_order_id: i
             'public_ip': source_temp_public_ip or None,
             'previous_public_ip': previous_public_ip,
             'mtproxy_host': None,
-            'actual_expires_at': migration_due_at,
             'is_active': False,
         },
         server_updates={
@@ -533,7 +531,6 @@ def _mark_rebuild_source_pending_deletion(order_id: int, replacement_order_id: i
             'public_ip': source_temp_public_ip or None,
             'previous_public_ip': previous_public_ip,
             'provider_status': '旧机保留期，等待删除',
-            'expires_at': migration_due_at,
             'is_active': False,
         },
         now=now,

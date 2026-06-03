@@ -430,7 +430,6 @@ def _sync_order_deleted_from_cloud(order, old_public_ip, *, source: str = 'AWS å
     current_expires_at = order_asset_expiry(order)
     if order.migration_due_at and (not current_expires_at or current_expires_at > order.migration_due_at):
         apply_order_lifecycle_from_asset_expiry(order, order.migration_due_at, save=False)
-        CloudAsset.objects.filter(order=order, kind=CloudAsset.KIND_SERVER).update(actual_expires_at=order.migration_due_at, updated_at=now)
         update_fields.extend(['renew_grace_expires_at', 'suspend_at', 'delete_at', 'ip_recycle_at'])
     order.save(update_fields=update_fields)
     logger.info(
@@ -441,7 +440,7 @@ def _sync_order_deleted_from_cloud(order, old_public_ip, *, source: str = 'AWS å
         before['status'],
         order.status,
         _fmt_dt(before['actual_expires_at']),
-        _fmt_dt(order.migration_due_at or order_asset_expiry(order)),
+        _fmt_dt(order_asset_expiry(order)),
         _fmt_dt(before['renew_grace_expires_at']),
         _fmt_dt(order.renew_grace_expires_at),
         _fmt_dt(before['suspend_at']),

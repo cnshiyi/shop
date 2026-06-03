@@ -2582,14 +2582,10 @@ def _set_source_migration_expiry(order: CloudServerOrder, migration_due_at, reas
         provision_note=order.provision_note,
         updated_at=timezone.now(),
     )
-    asset, _ = _update_order_primary_records(
-        order,
-        asset_updates={'actual_expires_at': migration_due_at},
-        server_updates={'expires_at': migration_due_at},
-    )
+    asset, _ = _update_order_primary_records(order)
     asset_count = 1 if asset else 0
     after = {
-        'actual_expires_at': migration_due_at,
+        'actual_expires_at': order_asset_expiry(order),
         'renew_grace_expires_at': order.renew_grace_expires_at,
         'suspend_at': order.suspend_at,
         'delete_at': order.delete_at,
@@ -2597,7 +2593,7 @@ def _set_source_migration_expiry(order: CloudServerOrder, migration_due_at, reas
         'migration_due_at': order.migration_due_at,
     }
     logger.info(
-        'CLOUD_SOURCE_MIGRATION_EXPIRY_CHANGE reason=%s order_id=%s order_no=%s status=%s public_ip=%s previous_public_ip=%s actual_expires_at=%s->%s renew_grace_expires_at=%s->%s suspend_at=%s->%s delete_at=%s->%s ip_recycle_at=%s->%s migration_due_at=%s->%s asset_count=%s',
+        'CLOUD_SOURCE_MIGRATION_SCHEDULE_CHANGE reason=%s order_id=%s order_no=%s status=%s public_ip=%s previous_public_ip=%s actual_expires_at=%s->%s renew_grace_expires_at=%s->%s suspend_at=%s->%s delete_at=%s->%s ip_recycle_at=%s->%s migration_due_at=%s->%s asset_count=%s',
         reason,
         order.id,
         order.order_no,
@@ -3896,8 +3892,8 @@ def mark_cloud_server_ip_change_requested(order_id: int, user_id: int, region_co
         _set_source_migration_expiry(
             order,
             migration_due_at,
-            '更换 IP 新建同配置服务器，旧机到期时间调整',
-            f'已发起更换 IP，新实例订单: {new_order.order_no}。旧机追溯：旧IP={old_public_ip or "-"}；旧端口={old_port or "-"}；旧secret={old_secret or "-"}。新服务器为同配置服务器，会申请并绑定新的固定 IP，同时继承旧服务器原到期时间和旧 secret；旧服务器服务到期时间调整为 {migration_due_at:%Y-%m-%d %H:%M}，宽限 3 天后删除，删除后旧 IP 继续保留至 {ip_recycle_at:%Y-%m-%d %H:%M}。'
+            '更换 IP 新建同配置服务器，旧机迁移计划调整',
+            f'已发起更换 IP，新实例订单: {new_order.order_no}。旧机追溯：旧IP={old_public_ip or "-"}；旧端口={old_port or "-"}；旧secret={old_secret or "-"}。新服务器为同配置服务器，会申请并绑定新的固定 IP，同时继承旧服务器原到期时间和旧 secret；旧机迁移截止时间设置为 {migration_due_at:%Y-%m-%d %H:%M}，宽限 3 天后删除，删除后旧 IP 继续保留至 {ip_recycle_at:%Y-%m-%d %H:%M}。'
         )
         return new_order
 
@@ -4016,8 +4012,8 @@ def create_cloud_server_rebuild_order(order_id: int):
     _set_source_migration_expiry(
         order,
         migration_due_at,
-        '重装/重建迁移旧机到期时间调整',
-        f'已发起重装迁移，新实例订单: {new_order.order_no}。旧机追溯：旧IP={old_public_ip or "-"}；旧端口={old_port or "-"}；旧secret={old_secret or "-"}；固定IP={order.static_ip_name or "-"}。旧实例服务到期时间调整为 {migration_due_at:%Y-%m-%d %H:%M}，宽限 3 天后删除，删除后固定 IP 保留 15 天；新机创建后会先迁移固定 IP {order.static_ip_name}，并强制沿用旧 secret 安装代理。'
+        '重装/重建迁移旧机迁移计划调整',
+        f'已发起重装迁移，新实例订单: {new_order.order_no}。旧机追溯：旧IP={old_public_ip or "-"}；旧端口={old_port or "-"}；旧secret={old_secret or "-"}；固定IP={order.static_ip_name or "-"}。旧机迁移截止时间设置为 {migration_due_at:%Y-%m-%d %H:%M}，宽限 3 天后删除，删除后固定 IP 保留 15 天；新机创建后会先迁移固定 IP {order.static_ip_name}，并强制沿用旧 secret 安装代理。'
     )
     return new_order, None
 

@@ -5005,7 +5005,7 @@ class CloudServerServicesTestCase(TestCase):
         self.assertEqual(account_ids, [source_account.id])
 
     # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
-    def test_rebuild_source_expiry_moves_to_three_day_migration_due(self):
+    def test_rebuild_source_migration_schedule_preserves_asset_expiry(self):
         source_expires_at = timezone.now() + timezone.timedelta(days=30)
         source = CloudServerOrder.objects.create(
             order_no='REBUILD-SOURCE-EXPIRY',
@@ -5051,11 +5051,11 @@ class CloudServerServicesTestCase(TestCase):
         source.refresh_from_db()
         asset = CloudAsset.objects.get(order=source)
         server = Server.objects.get(order=source)
-        self.assertEqual(order_asset_expiry(source), source.migration_due_at)
+        self.assertEqual(order_asset_expiry(source), source_expires_at)
         self.assertEqual(source.renew_grace_expires_at, source.migration_due_at + timezone.timedelta(days=3))
         self.assertEqual(source.delete_at, source.migration_due_at + timezone.timedelta(days=3))
-        self.assertEqual(asset.actual_expires_at, source.migration_due_at)
-        self.assertEqual(server.expires_at, source.migration_due_at)
+        self.assertEqual(asset.actual_expires_at, source_expires_at)
+        self.assertEqual(server.expires_at, source_expires_at)
 
     # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
     def test_rebuild_job_keeps_old_instance_until_migration_due(self):
@@ -6364,7 +6364,7 @@ class CloudServerServicesTestCase(TestCase):
         self.assertEqual(new_order.replacement_for_id, source_order.id)
         self.assertEqual(order_asset_expiry(new_order), original_expires_at)
         self.assertIsNotNone(source_order.migration_due_at)
-        self.assertEqual(order_asset_expiry(source_order), source_order.migration_due_at)
+        self.assertEqual(order_asset_expiry(source_order), original_expires_at)
         self.assertEqual(source_order.suspend_at, source_order.migration_due_at + timezone.timedelta(days=3))
         self.assertEqual(source_order.delete_at, source_order.migration_due_at + timezone.timedelta(days=3))
         self.assertEqual(source_order.renew_grace_expires_at, source_order.migration_due_at + timezone.timedelta(days=3))
@@ -13058,6 +13058,61 @@ class CloudServerServicesTestCase(TestCase):
         self.assertEqual(order.status, 'deleted')
 
     # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
+    def test_sync_aws_missing_order_preserves_asset_expiry_when_migration_due_is_earlier(self):
+        from cloud.lifecycle_schedule import compute_order_lifecycle_schedule, normalize_asset_expiry
+        from cloud.management.commands.sync_aws_assets import _sync_order_deleted_from_cloud
+
+        asset_expires_at = timezone.now() + timezone.timedelta(days=31)
+        migration_due_at = timezone.now() + timezone.timedelta(days=3)
+        expected_schedule = compute_order_lifecycle_schedule(normalize_asset_expiry(migration_due_at))
+        order = CloudServerOrder.objects.create(
+            order_no='AWS-MISS-MIGRATION-PRESERVE-EXPIRY',
+            user=self.user,
+            plan=self.plan,
+            provider=self.plan.provider,
+            region_code=self.plan.region_code,
+            region_name=self.plan.region_name,
+            plan_name=self.plan.plan_name,
+            quantity=1,
+            currency='USDT',
+            total_amount='19.00',
+            pay_amount='19.00',
+            pay_method='balance',
+            status='deleting',
+            public_ip='9.9.9.19',
+            previous_public_ip='9.9.9.19',
+            instance_id='aws-miss-migration-preserve-expiry',
+            migration_due_at=migration_due_at,
+        )
+        asset = CloudAsset.objects.create(
+            kind=CloudAsset.KIND_SERVER,
+            source=CloudAsset.SOURCE_AWS_SYNC,
+            order=order,
+            user=self.user,
+            provider='aws_lightsail',
+            region_code=self.plan.region_code,
+            region_name=self.plan.region_name,
+            asset_name='aws-miss-migration-preserve-expiry',
+            public_ip='9.9.9.19',
+            previous_public_ip='9.9.9.19',
+            instance_id=order.instance_id,
+            actual_expires_at=asset_expires_at,
+            status=CloudAsset.STATUS_RUNNING,
+            is_active=True,
+        )
+
+        _sync_order_deleted_from_cloud(order, '9.9.9.19', asset=asset)
+
+        order.refresh_from_db()
+        asset.refresh_from_db()
+        self.assertEqual(order.status, 'deleted')
+        self.assertEqual(order_asset_expiry(order), asset_expires_at)
+        self.assertEqual(asset.actual_expires_at, asset_expires_at)
+        self.assertEqual(order.renew_grace_expires_at, expected_schedule.renew_grace_expires_at)
+        self.assertEqual(order.delete_at, expected_schedule.delete_at)
+        self.assertEqual(order.ip_recycle_at, expected_schedule.ip_recycle_at)
+
+    # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
     def test_order_primary_records_prefer_ip_over_stale_names(self):
         from cloud.services import _order_primary_asset, _order_primary_server
 
@@ -15994,6 +16049,105 @@ class CloudServerServicesTestCase(TestCase):
             queue_status='scheduled_migration_delete',
             enforce_schedule=True,
         )
+
+    # 功能：验证旧机迁移计划不覆盖资产实际到期事实。
+    def test_source_migration_schedule_keeps_asset_actual_expiry(self):
+        from cloud.services import _set_source_migration_expiry
+
+        asset_expires_at = timezone.now() + timezone.timedelta(days=31)
+        migration_due_at = timezone.now() + timezone.timedelta(days=3)
+        order = CloudServerOrder.objects.create(
+            order_no='HB-TEST-MIGRATION-KEEPS-ASSET-EXPIRY',
+            user=self.user,
+            plan=self.plan,
+            provider=self.plan.provider,
+            region_code=self.plan.region_code,
+            region_name=self.plan.region_name,
+            plan_name=self.plan.plan_name,
+            quantity=1,
+            currency='USDT',
+            total_amount='19.00',
+            pay_amount='19.00',
+            status='completed',
+            public_ip='20.20.20.28',
+            instance_id='migration-keeps-asset-expiry',
+        )
+        asset = CloudAsset.objects.create(
+            kind=CloudAsset.KIND_SERVER,
+            source=CloudAsset.SOURCE_ORDER,
+            order=order,
+            user=self.user,
+            provider=order.provider,
+            region_code=order.region_code,
+            region_name=order.region_name,
+            asset_name=order.instance_id,
+            public_ip=order.public_ip,
+            actual_expires_at=asset_expires_at,
+            status=CloudAsset.STATUS_RUNNING,
+            is_active=True,
+        )
+
+        _set_source_migration_expiry(order, migration_due_at, '单元测试旧机迁移计划调整', '迁移测试')
+
+        order.refresh_from_db()
+        asset.refresh_from_db()
+        self.assertEqual(asset.actual_expires_at, asset_expires_at)
+        self.assertEqual(order_asset_expiry(order), asset_expires_at)
+        self.assertEqual(order.migration_due_at, migration_due_at)
+        self.assertEqual(order.delete_at, migration_due_at + timezone.timedelta(days=3))
+        self.assertIn('迁移测试', order.provision_note or '')
+
+    # 功能：验证 AWS 同步删除迁移旧机时不把迁移截止时间写成资产到期事实。
+    def test_aws_sync_deleted_migration_order_keeps_asset_actual_expiry(self):
+        from cloud.management.commands.sync_aws_assets import _sync_order_deleted_from_cloud
+
+        asset_expires_at = timezone.now() + timezone.timedelta(days=31)
+        migration_due_at = timezone.now() + timezone.timedelta(days=3)
+        order = CloudServerOrder.objects.create(
+            order_no='HB-TEST-AWS-SYNC-DELETED-KEEPS-ASSET-EXPIRY',
+            user=self.user,
+            plan=self.plan,
+            provider=self.plan.provider,
+            region_code=self.plan.region_code,
+            region_name=self.plan.region_name,
+            plan_name=self.plan.plan_name,
+            quantity=1,
+            currency='USDT',
+            total_amount='19.00',
+            pay_amount='19.00',
+            status='deleting',
+            public_ip='20.20.20.29',
+            instance_id='aws-sync-deleted-keeps-asset-expiry',
+            migration_due_at=migration_due_at,
+        )
+        asset = CloudAsset.objects.create(
+            kind=CloudAsset.KIND_SERVER,
+            source=CloudAsset.SOURCE_AWS_SYNC,
+            order=order,
+            user=self.user,
+            provider=order.provider,
+            region_code=order.region_code,
+            region_name=order.region_name,
+            asset_name=order.instance_id,
+            instance_id=order.instance_id,
+            public_ip=order.public_ip,
+            actual_expires_at=asset_expires_at,
+            status=CloudAsset.STATUS_RUNNING,
+            is_active=True,
+        )
+        expected_lifecycle = compute_order_lifecycle_fields(migration_due_at)
+
+        _sync_order_deleted_from_cloud(order, order.public_ip, source='单元测试 AWS 同步', asset=asset)
+
+        order.refresh_from_db()
+        asset.refresh_from_db()
+        self.assertEqual(order.status, 'deleted')
+        self.assertIsNone(order.public_ip)
+        self.assertEqual(asset.actual_expires_at, asset_expires_at)
+        self.assertEqual(order_asset_expiry(order), asset_expires_at)
+        self.assertEqual(order.migration_due_at, migration_due_at)
+        self.assertEqual(order.renew_grace_expires_at, expected_lifecycle['renew_grace_expires_at'])
+        self.assertEqual(order.delete_at, expected_lifecycle['delete_at'])
 
     # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
     def test_release_order_static_ip_uses_static_ip_asset_name_when_order_name_missing(self):
