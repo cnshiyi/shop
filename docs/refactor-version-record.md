@@ -5111,6 +5111,52 @@ git diff --check
 - 本轮未执行真实 Telegram 点击、真实云资源创建/删除/IP 变更、真实支付、链上广播、生产发布或不可逆操作。
 - 真机测试仍需在用户明确授权真实云资源成本后，单独按中文报告记录云资源 ID 脱敏结果。
 
+## 2026-06-03 模型注释改动风险巡检
+
+### 范围
+
+本轮从 `324791e 补齐自动续费失败历史总览` 开始巡检，先确认工作树已有 `bot/models.py`、`cloud/models.py`、`core/models.py`、`orders/models.py` 四个未提交改动。改动主要是批量添加 `db_comment` 和表注释，属于本轮开始前已有的模型注释变更，本轮未覆盖或回退这些改动。
+
+### 监工结果
+
+- `uv run python manage.py check` 通过。
+- 相关后端模块 `py_compile` 通过。
+- `CloudAsset` 仍只有 `actual_expires_at` 作为结构化资产到期字段。
+- `CloudServerOrder` 未恢复 `service_expires_at` 或 `actual_expires_at`，仅保留 `renew_grace_expires_at` 等流程时间字段。
+- `CloudAssetDashboardSnapshot` 未恢复派生到期字段。
+- 废弃 app 未进入 `INSTALLED_APPS`；旧计划快照、旧退款函数名、旧端口入口和废弃 app 目录未发现回流。
+- 机器人资产详情、订单详情、续费、换 IP、重装、修改配置等返回链聚焦测试仍满足 Telegram `callback_data` 64 字节限制。
+
+### 发现的问题
+
+- 当前未提交模型注释改动会触发迁移差异：`makemigrations --check --dry-run` 提示需要新增 `bot.0016`、`core.0013`、`cloud.0050`、`orders.0006` 等注释迁移。
+- SQLite 测试环境会因为这些 `db_comment` / `db_table_comment` 输出大量 `fields.W163` 和 `models.W046` 警告；本轮任务中心测试仍通过，但日志噪音明显。
+- `makemigrations --check --dry-run` 仍有本地沙箱无法连接 `127.0.0.1` MySQL 的迁移历史一致性警告，随后能列出缺失迁移。
+
+### 验证
+
+本地已通过:
+
+```bash
+UV_CACHE_DIR=/Users/a399/Desktop/data/shop/.uv-cache PYTHONDONTWRITEBYTECODE=1 uv run python manage.py check
+UV_CACHE_DIR=/Users/a399/Desktop/data/shop/.uv-cache PYTHONDONTWRITEBYTECODE=1 uv run python -m py_compile bot/api.py bot/handlers.py cloud/services.py cloud/bootstrap.py cloud/api.py cloud/task_center.py cloud/lifecycle.py cloud/lifecycle_execution.py cloud/management/commands/sync_aws_assets.py cloud/management/commands/sync_aliyun_assets.py cloud/management/commands/reconcile_cloud_assets_from_servers.py
+UV_CACHE_DIR=/Users/a399/Desktop/data/shop/.uv-cache PYTHONDONTWRITEBYTECODE=1 uv run python manage.py shell -c "from django.conf import settings; from cloud.models import CloudAsset, CloudServerOrder, CloudAssetDashboardSnapshot; print([a for a in settings.INSTALLED_APPS if a in {'accounts','finance','mall','monitoring','dashboard_api','biz'}]); print([f.name for f in CloudAsset._meta.fields if 'expires' in f.name or 'expiry' in f.name]); print([f.name for f in CloudServerOrder._meta.fields if 'expires' in f.name or 'expiry' in f.name]); print([f.name for f in CloudAssetDashboardSnapshot._meta.fields if 'expires' in f.name or 'expiry' in f.name])"
+UV_CACHE_DIR=/Users/a399/Desktop/data/shop/.uv-cache PYTHONDONTWRITEBYTECODE=1 DJANGO_TEST_SQLITE=1 uv run python manage.py test cloud.tests_task_center --verbosity=2
+UV_CACHE_DIR=/Users/a399/Desktop/data/shop/.uv-cache PYTHONDONTWRITEBYTECODE=1 DJANGO_TEST_SQLITE=1 uv run python manage.py test bot.tests.RetainedIpRenewalUiTestCase --verbosity=2
+UV_CACHE_DIR=/Users/a399/Desktop/data/shop/.uv-cache PYTHONDONTWRITEBYTECODE=1 uv run python manage.py makemigrations --check --dry-run
+rg -n "service_expires_at\\s*=|order\\.(service_expires_at|actual_expires_at)|CloudServerOrder\\([^\\n]*(service_expires_at|actual_expires_at)|CloudLifecyclePlan\\b|CloudNoticePlan\\b|CloudAutoRenewPlan\\b|CloudAssetPlanSnapshot|CloudOrderPlanSnapshot|refund_cloud_server_order|refund_cloud_order|refund_order|process_refund|create_refund|issue_refund|refund_to_balance|refund_balance|STATUS_REFUNDED|status=['\\\"]refunded['\\\"]|normalize_service_expiry|service_expired_at|allow_client_port|set_cloud_server_port|custom:port:|cloud:ipport:" bot core orders cloud shop --glob '!**/migrations/**' --glob '!**/tests.py' --glob '!**/tests_*.py'
+git diff --check
+```
+
+`cloud.tests_task_center` 9 条通过，`bot.tests.RetainedIpRenewalUiTestCase` 44 条通过。`makemigrations --check --dry-run` 预期失败，原因是本轮开始前已有模型注释改动尚未生成迁移。
+
+### 剩余风险
+
+- 本轮未跑完整测试套件。
+- 本轮未生成或提交模型注释迁移，避免把本轮开始前已有的模型改动混入自动化提交；后续需要由该模型注释改动的作者补迁移或撤回注释改动。
+- 本轮未执行真实 Telegram 点击、真实云资源创建/删除/IP 变更、真实支付、链上广播、生产发布或不可逆操作。
+- 真机测试仍需在用户明确授权真实云资源成本后，单独按中文报告记录云资源 ID 脱敏结果。
+
 ## 2026-06-03 自动续费失败历史总览补报
 
 ### 范围
