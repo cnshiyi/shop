@@ -5,21 +5,24 @@
 ## 最近一轮
 
 - 时间：2026-06-03
-- 状态：已建立固定复查入口，并兼容 Codex CLI `continue to next task` 工人模式。
-- 最近提交：`f70355e 修复续费钱包支付返回链`
-- 本轮改动：新增自动优化控制台、最新状态摘要、根目录 `AGENTS.md` 和 `TODO.md`，并更新自动化提示词以优先读取固定入口文件。
+- 状态：已修复后台任务中心自动续费重试队列漏报。
+- 最近提交：本轮提交后生成。
+- 本轮改动：`cloud/task_center.py` 将 `CloudAutoRenewRetryTask` 待重试/失败任务纳入自动续费 section，使用 `retry_pending`/`retry_failed` 进入总数、活跃数、告警数和状态分布；`cloud/tests.py` 新增聚焦测试覆盖没有巡检日志时的待充值重试任务。
 
 ## 最近验证
 
-- `uv run python manage.py check` 通过。
+- `UV_CACHE_DIR=/private/tmp/uv-cache uv run python manage.py check` 通过。
+- `UV_CACHE_DIR=/private/tmp/uv-cache uv run python -m py_compile cloud/task_center.py cloud/api_tasks.py cloud/lifecycle.py bot/keyboards.py bot/handlers.py orders/payment_scanner.py` 通过。
+- `UV_CACHE_DIR=/private/tmp/uv-cache DJANGO_TEST_SQLITE=1 uv run python manage.py test cloud.tests.CloudServerServicesTestCase.test_task_center_counts_pending_auto_renew_retry_tasks cloud.tests.CloudServerServicesTestCase.test_auto_renew_retry_task_waits_for_recharge_then_retries cloud.tests.CloudServerServicesTestCase.test_auto_renew_task_detail_includes_due_retry_and_fallback_items cloud.tests.CloudServerServicesTestCase.test_run_auto_renew_tasks_executes_due_retry_and_fallback_queue cloud.tests.CloudServerServicesTestCase.test_tasks_overview_exposes_click_paths_for_entry_and_order_number cloud.tests.CloudOrderStatusDashboardSyncTestCase bot.tests.RetainedIpRenewalUiTestCase orders.tests.ChainPaymentScannerTestCase --verbosity=2` 通过，共 74 个测试。
+- `UV_CACHE_DIR=/private/tmp/uv-cache uv run python manage.py makemigrations --check --dry-run` 显示 `No changes detected`；本地沙箱仍会打印无法连接 `127.0.0.1` MySQL 的迁移历史一致性警告。
 - `git diff --check` 通过。
-- 已确认 `/Users/a399/.codex/automations/shop/automation.toml` 为 `ACTIVE`，且提示词包含固定读取 `docs/auto-optimization-control.md`、`docs/auto-optimization-latest.md` 和版本记录末尾的要求。
 
 ## 剩余风险
 
-- 需要确认后续自动化是否按新提示词持续覆盖更新本文件。
-- 需要继续按 `docs/auto-optimization-control.md` 的巡检清单检查后端重构冲突和机器人返回链。
+- 工作树存在其它未提交路由/文档/测试路径改动，本轮未覆盖或回退，提交时只暂存本轮任务中心修复和记录。
+- 本轮未跑完整测试套件。
+- 本轮未执行真实 Telegram 点击、真实云资源、真实支付、链上广播、生产发布或不可逆操作。
 
 ## 下一步
 
-- 下一轮自动化先读 `docs/auto-optimization-control.md`、本文件、`docs/refactor-version-record.md` 末尾、`AGENTS.md` 和 `TODO.md`，再执行巡检、修复、测试、记录和提交。
+- 下一轮继续关注后台任务中心与前端路由重命名后的 API 路径一致性，并复查机器人返回链。

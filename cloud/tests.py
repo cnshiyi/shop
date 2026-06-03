@@ -56,6 +56,7 @@ from cloud.api_orders import _cloud_order_source_tags, cloud_order_detail, cloud
 from cloud.api_servers import delete_server, servers_list
 from cloud.api_sync import _apply_server_missing_state, sync_cloud_asset_status
 from cloud.api_tasks import auto_renew_task_detail, delete_notice_history, notice_task_detail, refresh_notice_plan_view, run_auto_renew_order, run_auto_renew_tasks, tasks_overview, update_notice_plan_text, update_notice_switches
+from cloud.task_center import task_center_payload
 from cloud.sync_jobs import _execute_cloud_asset_sync_job, cancel_cloud_asset_sync_job, cloud_asset_sync_job_detail, cloud_asset_sync_jobs_list, cloud_asset_sync_jobs_metrics, retry_cloud_asset_sync_job, sync_cloud_assets
 from core.cloud_accounts import cloud_account_label, cloud_account_label_variants, list_cloud_accounts_by_server_load
 from core.models import CloudAccountConfig, SiteConfig
@@ -11452,6 +11453,51 @@ class CloudServerServicesTestCase(TestCase):
         self.assertEqual(order.status, 'completed')
         self.assertEqual(self.user.balance, Decimal('81.000000'))
         self.assertTrue(CloudAutoRenewPatrolLog.objects.filter(order=order, is_success=True).exists())
+
+    # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
+    def test_task_center_counts_pending_auto_renew_retry_tasks(self):
+        expires_at = timezone.now() + timezone.timedelta(days=5)
+        order = CloudServerOrder.objects.create(
+            order_no='AUTO-RENEW-TASK-CENTER-RETRY-1',
+            user=self.user,
+            plan=self.plan,
+            provider=self.plan.provider,
+            region_code=self.plan.region_code,
+            region_name=self.plan.region_name,
+            plan_name=self.plan.plan_name,
+            quantity=1,
+            currency='USDT',
+            total_amount='19.00',
+            pay_amount='19.00',
+            pay_method='address',
+            status='renew_pending',
+            public_ip='6.6.6.21',
+            service_started_at=timezone.now() - timezone.timedelta(days=30),
+            suspend_at=expires_at + timezone.timedelta(days=1),
+            auto_renew_enabled=True,
+        )
+        self._create_auto_renew_asset(order, expires_at=expires_at)
+        CloudAutoRenewRetryTask.objects.create(
+            order=order,
+            user=self.user,
+            order_no=order.order_no,
+            ip=order.public_ip,
+            status=CloudAutoRenewRetryTask.STATUS_PENDING,
+            failure_reason='USDT 余额不足',
+            attempts=1,
+            next_check_at=timezone.now() + timezone.timedelta(minutes=10),
+        )
+
+        payload = task_center_payload()
+        auto_renew = next(section for section in payload['sections'] if section['key'] == 'auto_renew')
+        retry_item = next(item for item in auto_renew['items'] if item['order_no'] == order.order_no)
+
+        self.assertGreaterEqual(auto_renew['total'], 1)
+        self.assertGreaterEqual(auto_renew['active'], 1)
+        self.assertGreaterEqual(auto_renew['warning'], 1)
+        self.assertEqual(auto_renew['status_counts']['retry_pending'], 1)
+        self.assertEqual(retry_item['execution_status'], 'retry_pending')
+        self.assertEqual(retry_item['detail_path'], f'/admin/cloud-orders/{order.id}')
 
     # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
     def test_update_cloud_asset_price_restores_auto_renew_pending_state(self):

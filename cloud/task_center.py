@@ -1,12 +1,13 @@
 """后台任务中心聚合 API。"""
 
-from django.db.models import Count
+from django.db.models import Count, Q
 from django.utils import timezone
 from django.utils.dateparse import parse_datetime
 from django.views.decorators.http import require_GET
 
 from cloud.models import (
     CloudAssetSyncJob,
+    CloudAutoRenewRetryTask,
     CloudLifecycleTask,
     CloudNoticeTask,
     CloudServerOrder,
@@ -17,7 +18,7 @@ from core.dashboard_api import _iso, _ok, _provider_label, _status_label, dashbo
 _NOTICE_FAILED_STATUSES = {'failed', 'partial_failed', 'failed_retry'}
 _NOTICE_WARNING_QUEUE_STATUSES = {'due_now', 'overdue', 'fallback_notice', 'within_window'}
 _AUTO_RENEW_FAILED_QUEUE_STATUSES = {'retry_failed'}
-_AUTO_RENEW_WARNING_QUEUE_STATUSES = {'due_now', 'overdue', 'balance_insufficient', 'retry_failed', 'fallback_retry'}
+_AUTO_RENEW_WARNING_QUEUE_STATUSES = {'due_now', 'overdue', 'balance_insufficient', 'retry_pending', 'retry_failed', 'fallback_retry'}
 
 
 def _status_counts(queryset, field='status') -> dict:
@@ -376,6 +377,49 @@ def _recent_notice_db_task_items(now) -> list[dict]:
     return [_notice_task_db_item(task) for task in queryset]
 
 
+def _auto_renew_retry_db_item(task: CloudAutoRenewRetryTask) -> dict:
+    order = getattr(task, 'order', None)
+    queue_status = 'retry_failed' if task.status == CloudAutoRenewRetryTask.STATUS_FAILED else 'retry_pending'
+    status_label = _status_label(task.status, CloudAutoRenewRetryTask.STATUS_CHOICES)
+    return {
+        'id': f'auto-renew-retry-db:{task.id}',
+        'task_type': 'auto_renew',
+        'task_label': '自动续费重试',
+        'status': queue_status,
+        'status_label': status_label,
+        'queue_status': queue_status,
+        'queue_status_label': status_label,
+        'execution_status': queue_status,
+        'execution_status_label': status_label,
+        'provider': getattr(order, 'provider', '') or '',
+        'provider_label': _provider_label(getattr(order, 'provider', '') or ''),
+        'order_id': task.order_id,
+        'order_no': task.order_no or getattr(order, 'order_no', '') or '',
+        'public_ip': task.ip or getattr(order, 'public_ip', '') or getattr(order, 'previous_public_ip', '') or '',
+        'last_failure_reason': task.failure_reason or task.last_error or '',
+        'failure_reason': task.failure_reason or task.last_error or '',
+        'note': task.failure_reason or task.last_error or '',
+        'created_at': _iso(task.created_at),
+        'updated_at': _iso(task.updated_at),
+        'next_run_at': _iso(task.next_check_at),
+        'related_path': f'/admin/cloud-orders/{task.order_id}',
+        'detail_path': f'/admin/cloud-orders/{task.order_id}',
+    }
+
+
+def _auto_renew_retry_db_items(now) -> list[dict]:
+    queryset = (
+        CloudAutoRenewRetryTask.objects
+        .select_related('order')
+        .filter(
+            Q(status=CloudAutoRenewRetryTask.STATUS_PENDING)
+            | Q(status=CloudAutoRenewRetryTask.STATUS_FAILED, updated_at__gte=now - timezone.timedelta(days=1))
+        )
+        .order_by('next_check_at', '-updated_at', 'id')[:1000]
+    )
+    return [_auto_renew_retry_db_item(task) for task in queryset]
+
+
 def _sync_section(now) -> dict:
     metrics = _cloud_asset_sync_jobs_metrics_payload(window_hours=24)
     active_jobs = [
@@ -525,6 +569,11 @@ def _auto_renew_section(now) -> dict:
 
     bundle = _build_auto_renew_plan_items(now=now)
     items_source = [*bundle.get('due_items', []), *bundle.get('future_plan_items', [])]
+    db_retry_items = _auto_renew_retry_db_items(now)
+    db_retry_order_ids = {item.get('order_id') for item in db_retry_items if item.get('order_id')}
+    if db_retry_order_ids:
+        items_source = [item for item in items_source if item.get('order_id') not in db_retry_order_ids]
+    items_source = [*db_retry_items, *items_source]
     failed_count = sum(
         1
         for item in items_source
@@ -561,7 +610,7 @@ def _auto_renew_section(now) -> dict:
         title='自动续费',
         path='/admin/tasks/auto-renew',
         total=len(items_source) + recent_failed_count,
-        active=sum(1 for item in items_source if item.get('queue_status') in ['due_now', 'scheduled_future', 'overdue', 'within_window', 'retry_failed', 'fallback_retry']),
+        active=sum(1 for item in items_source if item.get('queue_status') in ['due_now', 'scheduled_future', 'overdue', 'within_window', 'retry_pending', 'retry_failed', 'fallback_retry']),
         failed=failed_count + recent_failed_count,
         warning=warning_count,
         status_counts=status_counts,

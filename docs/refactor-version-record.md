@@ -6848,3 +6848,48 @@ git diff --check
 
 - 需要观察下一轮自动化是否稳定覆盖更新 `docs/auto-optimization-latest.md`。
 - 代码层面的持续巡检仍由后续每 10 分钟自动化执行。
+
+## 2026-06-03 自动续费重试任务中心漏报修复
+
+### 范围
+
+本轮继续监工 Shop Django 后端，先读取自动化记忆、`docs/auto-optimization-control.md`、`docs/auto-optimization-latest.md`、版本记录末尾、当前 git 状态和最近提交。重点复核云资产生命周期唯一到期事实、废弃 app 回流、旧计划快照/旧退款入口、机器人返回链、Telegram `callback_data` 64 字节限制、后台任务中心和自动续费重试状态。
+
+### 发现
+
+- `CloudAsset.actual_expires_at` 仍是资产到期唯一事实；运行代码未恢复 `CloudServerOrder.actual_expires_at`、`CloudServerOrder.service_expires_at` 或计划快照表。
+- 搜索未发现旧退款函数名、旧计划快照、废弃 runtime app 直接回流。
+- 机器人续费、换 IP、重装、修改配置和钱包支付短回调用例继续通过，未发现超过 Telegram 64 字节限制的新问题。
+- 后台任务中心自动续费 section 只聚合计划项和巡检日志，没有直接纳入 `CloudAutoRenewRetryTask` 持久化重试队列；当存在“等待充值后重试”的待重试任务且巡检日志缺失或不在当前窗口时，总览可能低估自动续费待处理任务。
+
+### 修改
+
+- `cloud/task_center.py` 新增 `CloudAutoRenewRetryTask` 聚合，待重试任务以 `retry_pending` 进入自动续费 section，失败任务以 `retry_failed` 进入最近失败统计。
+- 自动续费 section 的 `total`、`active`、`warning`、`failed` 和 `status_counts` 纳入持久化重试任务，并优先展示重试任务的下一次检查时间、失败原因、订单路径和 IP。
+- `cloud/tests.py` 新增 `test_task_center_counts_pending_auto_renew_retry_tasks`，覆盖没有巡检日志时待充值重试任务仍出现在任务中心总览。
+- 覆盖更新 `docs/auto-optimization-latest.md`。
+
+### 验证
+
+本地已通过：
+
+```bash
+UV_CACHE_DIR=/private/tmp/uv-cache uv run python manage.py check
+UV_CACHE_DIR=/private/tmp/uv-cache uv run python -m py_compile cloud/task_center.py cloud/api_tasks.py cloud/lifecycle.py bot/keyboards.py bot/handlers.py orders/payment_scanner.py
+UV_CACHE_DIR=/private/tmp/uv-cache DJANGO_TEST_SQLITE=1 uv run python manage.py test cloud.tests.CloudServerServicesTestCase.test_task_center_counts_pending_auto_renew_retry_tasks cloud.tests.CloudServerServicesTestCase.test_auto_renew_retry_task_waits_for_recharge_then_retries cloud.tests.CloudServerServicesTestCase.test_auto_renew_task_detail_includes_due_retry_and_fallback_items cloud.tests.CloudServerServicesTestCase.test_run_auto_renew_tasks_executes_due_retry_and_fallback_queue cloud.tests.CloudServerServicesTestCase.test_tasks_overview_exposes_click_paths_for_entry_and_order_number cloud.tests.CloudOrderStatusDashboardSyncTestCase bot.tests.RetainedIpRenewalUiTestCase orders.tests.ChainPaymentScannerTestCase --verbosity=2
+UV_CACHE_DIR=/private/tmp/uv-cache uv run python manage.py makemigrations --check --dry-run
+git diff --check
+```
+
+结果：`manage.py check`、编译检查、74 个 SQLite 聚焦测试和 `git diff --check` 通过；`makemigrations --check --dry-run` 输出 `No changes detected`，但本地沙箱仍会打印无法连接 `127.0.0.1` MySQL 的迁移历史一致性警告。SQLite 测试仍会打印不支持 `db_comment` 的预期 warning；bot SimpleTestCase 仍会打印既有配置读取容错日志；mocked postcheck 异常日志为既有覆盖输出。
+
+### 工作树说明
+
+- 本轮开始时工作树已存在自动化文档相关未提交改动；运行期间又出现多处我未触碰的路由/文档/测试路径改动，例如 `shop/admin_urls.py`、`shop/urls.py`、`shop/dashboard_urls.py`、`ARCHITECTURE.md`、`DEVELOPMENT.md`、`cloud/tests_task_center.py` 和 `/api/dashboard` 到 `/api/admin` 的测试路径调整。
+- 本轮提交只暂存任务中心修复、对应聚焦测试和本轮中文记录，不回退其它未提交改动。
+
+### 剩余风险
+
+- 本轮未跑完整测试套件。
+- 本轮未执行真实 Telegram 点击、真实云资源创建/删除/IP 变更、真实支付、链上广播、生产发布或不可逆操作。
+- 真机测试仍需在用户明确授权真实云资源成本后，单独按中文报告记录云资源 ID 脱敏结果。
