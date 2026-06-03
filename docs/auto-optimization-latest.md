@@ -4,8 +4,8 @@
 
 ## 最近一轮
 
-- 时间：2026-06-03 17:46 CST
-- 状态：已完成固定巡检和提交前验证；本轮未修改运行代码。
+- 时间：2026-06-03 17:48 CST
+- 状态：已完成固定巡检和提交前验证；本轮未修改运行代码，只更新巡检记录。
 - 最近提交：本轮提交后以当前 `HEAD` 为准。
 - 本轮范围：读取自动化记忆、当前 git 状态、最近提交、`docs/auto-optimization-control.md`、本文件、`docs/refactor-version-record.md` 末尾、`AGENTS.md`、`TODO.md` 和 `django-shop-backend` 技能；由于 `TODO.md` 已全部勾选，按固定巡检清单执行。
 - 本轮结论：云资产生命周期仍只以 `CloudAsset.actual_expires_at` 作为唯一资产到期事实；订单表、计划快照、旧退款入口和废弃 runtime app 未回流；后台 API 路由收口和机器人返回链未发现新回归；任务中心 pending/failed/retry 统计继续通过聚焦测试。
@@ -24,7 +24,7 @@
 - 默认 `UV_CACHE_DIR=/private/tmp/uv-cache-shop PYTHONDONTWRITEBYTECODE=1 uv run python manage.py migrate --plan --noinput` 因当前沙箱禁止连接本地 MySQL `127.0.0.1:3306` 失败，属于环境限制。
 - 红线关键字扫描未发现订单到期字段、旧计划快照、旧退款函数名或废弃 runtime app 回流；命中项仍为资产侧唯一到期事实、固定 IP 回收时间同步或 `_asset_expires_at` 临时属性。
 - 废弃 app 目录扫描无输出。
-- 前端只读扫描使用存在路径重跑后，源码无旧 API 前缀命中；仅前端 `DEVELOPMENT.md` 有旧文字说明命中。
+- 前端只读扫描使用存在路径重跑后，源码无旧 API 前缀命中；仅前端 `DEVELOPMENT.md` 有旧 `/api/dashboard/` 文字说明命中。
 - `git diff --check` 通过。
 
 ## 剩余风险
