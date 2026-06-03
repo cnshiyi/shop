@@ -104,7 +104,7 @@
 4. 执行 `./.venv/bin/python -m py_compile ...`
 5. 执行关键回归：
    - `DJANGO_TEST_REUSE_DB=1 ./.venv/bin/python manage.py test biz.tests --keepdb --noinput --verbosity 1`
-   - `curl -s http://127.0.0.1:8000/api/user/info -H 'Authorization: Bearer session-1'`
+   - `curl -s http://127.0.0.1:8000/api/admin/user/info -H 'Authorization: Bearer session-1'`
 6. 记录到 `CHANGELOG.md`
 7. Git commit / push
 
@@ -114,7 +114,7 @@
 - [x] 新域服务出口：`bot/services.py`、`orders/services.py`、`cloud/services.py`
 - [x] 新域 API 出口：`bot/api.py`、`orders/api.py`、`cloud/api.py`
 - [x] `TelegramUsername` 运行时依赖清零
-- [x] `dashboard_api` 已拆分并并回 `bot/api.py`、`orders/api.py`、`cloud/api.py` + `shop/dashboard_urls.py`
+- [x] `dashboard_api` 已拆分并并回 `bot/api.py`、`orders/api.py`、`cloud/api.py` + `shop/admin_urls.py`
 - [ ] `INSTALLED_APPS` 调整方案单独设计
 
 ## 建议下一步

@@ -165,10 +165,10 @@ uv run python manage.py prune_cloud_sync_job_events --days 90 --keep-per-job 500
 - `cloud/api_monitors.py`：监控地址和 IP 日志 API。
 - `cloud/api_sync.py`：单条代理状态同步、服务器同步、套餐/价格同步。
 - `cloud/sync_jobs.py`：负责同步任务入队、worker 执行、任务事件、任务取消/重试、同步状态、同步任务指标 API。
-- `shop/dashboard_urls.py` 直接导入上述域模块，`cloud/api.py` 不再作为后台路由的运行时入口。
+- `shop/admin_urls.py` 直接导入上述域模块，`cloud/api.py` 不再作为后台路由的运行时入口。
 - 批量同步任务按账号/选中资产串行执行，不再在线程池里并发写任务状态；每个子任务完成后检查取消请求，保证状态推进和事件顺序可读。
 - `CloudAssetSyncJobEvent` 事件表通过 `job_id` 标量索引关联任务，不加外键；生产环境用 `prune_cloud_sync_job_events` 定期清理。
-- 后台路由新增 `GET /api/admin/cloud-assets/sync-jobs/metrics/`（同一聚合路由也挂在 `/api/dashboard/` 和 `/api/` 前缀下），前端代理列表抽屉和同步任务详情页读取这份指标。
+- 后台业务 API 统一走 `/api/admin/` 前缀，例如 `GET /api/admin/cloud-assets/sync-jobs/metrics/`，前端代理列表抽屉和同步任务详情页读取这份指标。
 
 后台任务中心：
 

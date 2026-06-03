@@ -35,7 +35,7 @@
 
 ### 删除或下线
 - `biz/`：已退出 `INSTALLED_APPS`，目录本体已删除，测试已迁入 `cloud/tests.py`
-- `dashboard_api/`：已退出 `INSTALLED_APPS`，目录本身也已删除，路由已并回 `shop/dashboard_urls.py`
+- `dashboard_api/`：已退出 `INSTALLED_APPS`，目录本身也已删除，路由已并回 `shop/admin_urls.py`
 - `dashboard_api/views.py`：已删除
 - `accounts_telegramusername` 相关逻辑：下线
 - 新规则：迁移完成并验证通过后，立即删除旧实现，不长期保留双实现
@@ -118,7 +118,7 @@
 - [x] 删除 `accounts/finance/mall/monitoring` 旧目录本体；相关运行时职责已迁入新域
 - [x] 删除 `biz/dashboard_api` 中已无运行时必要的业务实现与 app 注册残留
 - [x] 兼容壳已基本清空；剩余历史痕迹仅存在于迁移链、测试命名空间与复盘文档
-- [x] `shop/dashboard_urls.py` 已完全改走 `bot/orders/cloud` API 入口
+- [x] `shop/admin_urls.py` 已完全改走 `bot/orders/cloud` API 入口
 
 ### 第六阶段：收尾
 - [x] 执行测试并确认通过

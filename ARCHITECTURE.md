@@ -20,12 +20,12 @@
 - `monitoring/`
 - `dashboard_api/`
 
-补充说明：后台聚合路由已并回 `shop/dashboard_urls.py`；`biz/` 已删除，相关测试已迁入 `cloud/tests.py`。
+补充说明：后台聚合路由已并回 `shop/admin_urls.py`；`biz/` 已删除，相关测试已迁入 `cloud/tests.py`。
 
 其中：
 - `bot.models`、`orders.models`、`cloud.models` 已是当前真实模型归属。
 - 旧 `accounts/finance/mall/monitoring` 目录本体已删除，相关模型/服务/admin/命令职责都已并入新域。
-- 旧 `dashboard_api` 已退出运行时并并回 `shop/dashboard_urls.py`。
+- 旧 `dashboard_api` 已退出运行时并并回 `shop/admin_urls.py`。
 
 ## 迁移策略
 - 保持 `db_table` 稳定，避免为代码收口额外改线上数据结构。

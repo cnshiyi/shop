@@ -9,7 +9,7 @@
 - `cloud/api.py`
 - `cloud/api_monitors.py`
 - `cloud/task_center.py`
-- `shop/dashboard_urls.py`
+- `shop/admin_urls.py`
 - `DEVELOPMENT.md`
 - `docs/DATA_FLOW_AND_PERSISTENCE.md`
 - `docs/project-overview.md`

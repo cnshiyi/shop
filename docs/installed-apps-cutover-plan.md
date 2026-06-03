@@ -7,7 +7,7 @@
 已经完成退出的旧 app：
 
 - `biz`（已从 `INSTALLED_APPS` 移除，目录本体已删除）
-- `dashboard_api`（已从 `INSTALLED_APPS` 移除，目录本体已删除，路由已并回 `shop/dashboard_urls.py`）
+- `dashboard_api`（已从 `INSTALLED_APPS` 移除，目录本体已删除，路由已并回 `shop/admin_urls.py`）
 - `monitoring`（已从 `INSTALLED_APPS` 移除，监控模型 fresh DB 建表与状态归属已改由 `cloud` 承接）
 - `mall`（已从 `INSTALLED_APPS` 移除，商品/购物车/订单与云模型 fresh DB 建表已改由 `orders/cloud` 承接）
 - `finance`（已从 `INSTALLED_APPS` 移除，充值模型 fresh DB 建表与状态归属已改由 `orders` 承接）
@@ -25,7 +25,7 @@
 
 - `accounts` / `finance` / `mall` / `monitoring` 已全部退出 `INSTALLED_APPS`
 - 上述旧目录也已从当前工作树删除
-- `dashboard_api` 已并回 `shop/dashboard_urls.py`
+- `dashboard_api` 已并回 `shop/admin_urls.py`
 - `biz` 已退出运行时，目录本体也已删除
 
 仍需保留的“旧 app 痕迹”只存在于历史 migration 链与相关复盘文档中，而不再属于运行时目录结构。
@@ -35,7 +35,7 @@
 - [x] 目标表名已全部迁移完成
 - [x] `TelegramUsername` 已从 Django 状态下线
 - [x] `dashboard_api/views.py` 已删除
-- [x] `shop/dashboard_urls.py` 已完全路由到 `bot/orders/cloud` API 入口
+- [x] `shop/admin_urls.py` 已完全路由到 `bot/orders/cloud` API 入口
 - [x] `dashboard_api` 已从 `INSTALLED_APPS` 移除
 - [x] `orders/ledger.py` 已接管余额流水记账入口
 - [x] `bot.TelegramUser`、`orders.Recharge`、`orders.BalanceLedger` 已成为真实模型来源
@@ -70,7 +70,7 @@
 
 - `biz` 已删除，测试已迁入 `cloud/tests.py`
 - `accounts` / `finance` / `mall` / `monitoring` 已退出 `INSTALLED_APPS` 且目录本体已删除
-- `dashboard_api` 已并回 `shop/dashboard_urls.py`，目录本体已删除
+- `dashboard_api` 已并回 `shop/admin_urls.py`，目录本体已删除
 - fresh test DB、`check`、`makemigrations --check --dry-run` 已反复验证通过
 
 剩余的旧 app label 只存在于历史 migration 链与变更复盘中，不再构成当前运行时目录结构。

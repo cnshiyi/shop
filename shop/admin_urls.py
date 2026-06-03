@@ -13,14 +13,9 @@ from cloud import sync_jobs as cloud_sync_jobs
 from cloud import task_center as cloud_task_center
 from orders import api as orders_api
 
-app_name = 'dashboard_api'
+app_name = 'admin_api'
 
 urlpatterns = [
-    path('csrf/', bot_api.csrf, name='csrf'),
-    path('auth/login', bot_api.auth_login, name='auth-login'),
-    path('auth/logout', bot_api.auth_logout, name='auth-logout'),
-    path('auth/refresh', bot_api.auth_refresh, name='auth-refresh'),
-    path('auth/codes', bot_api.auth_codes, name='auth-codes'),
     path('auth/totp/start', bot_api.auth_totp_start, name='auth-totp-start'),
     path('auth/totp/bind', bot_api.auth_totp_bind, name='auth-totp-bind'),
     path('user/info', bot_api.user_info, name='user-info'),
@@ -47,7 +42,12 @@ urlpatterns = [
     path('telegram/messages/', bot_api.telegram_chat_messages, name='telegram-chat-messages'),
     path('bot/operation-logs/', bot_api.bot_operation_logs, name='bot-operation-logs'),
     path('products/', bot_api.products_list, name='products-list'),
+    path('products/create/', bot_api.create_product, name='product-create'),
+    path('products/<int:product_id>/', bot_api.update_product, name='product-update'),
     path('orders/', orders_api.orders_list, name='orders-list'),
+    path('recharges/', orders_api.recharges_list, name='recharges-list'),
+    path('recharges/<int:recharge_id>/', orders_api.recharge_detail, name='recharge-detail'),
+    path('recharges/<int:recharge_id>/status/', orders_api.update_recharge_status, name='recharge-status-update'),
     path('tasks/', cloud_task_api.tasks_overview, name='tasks-overview'),
     path('tasks/center/', cloud_task_center.task_center_overview, name='task-center-overview'),
     path('tasks/plans/', bot_api.lifecycle_plans, name='lifecycle-plans'),
@@ -65,8 +65,6 @@ urlpatterns = [
     path('tasks/auto-renew/run/', cloud_task_api.run_auto_renew_tasks, name='auto-renew-task-run'),
     path('tasks/auto-renew/orders/<int:order_id>/run/', cloud_task_api.run_auto_renew_order, name='auto-renew-order-run'),
     path('task-list/', cloud_task_api.tasks_overview, name='task-list-compat'),
-    path('products/create/', bot_api.create_product, name='product-create'),
-    path('products/<int:product_id>/', bot_api.update_product, name='product-update'),
     path('cloud-assets/', cloud_asset_api.cloud_assets_list, name='cloud-assets-list'),
     path('cloud-assets/risk-summary/', cloud_asset_api.cloud_assets_risk_summary, name='cloud-assets-risk-summary'),
     path('cloud-assets/<int:asset_id>/', cloud_asset_edit_api.update_cloud_asset, name='cloud-asset-update'),
@@ -116,8 +114,5 @@ urlpatterns = [
     path('cloud-plans/create/', cloud_plan_api.create_cloud_plan, name='cloud-plan-create'),
     path('cloud-plans/<int:plan_id>/', cloud_plan_api.update_cloud_plan, name='cloud-plan-update'),
     path('cloud-plans/<int:plan_id>/delete/', cloud_plan_api.delete_cloud_plan, name='cloud-plan-delete'),
-    path('recharges/', orders_api.recharges_list, name='recharges-list'),
-    path('recharges/<int:recharge_id>/', orders_api.recharge_detail, name='recharge-detail'),
-    path('recharges/<int:recharge_id>/status/', orders_api.update_recharge_status, name='recharge-status-update'),
     path('monitors/', cloud_monitor_api.monitors_list, name='monitors-list'),
 ]

@@ -7099,3 +7099,52 @@ git diff --check
 - 本轮未跑完整测试套件。
 - 本轮未在真实 MySQL/MariaDB 上执行迁移计划。
 - 本轮未执行真实 Telegram 点击、真实云资源创建/删除/IP 变更、真实支付、链上广播、生产发布或不可逆操作。
+
+## 2026-06-03 后台 API 路由拆分收尾
+
+### 范围
+
+本轮继续监工 Shop Django 后端，先读取自动化记忆、当前 git 状态、最近提交、`docs/auto-optimization-control.md`、`docs/auto-optimization-latest.md`、版本记录末尾、`AGENTS.md` 和 `TODO.md`。由于 `TODO.md` 固定任务已全部勾选，本轮按固定巡检清单执行，并收尾此前工作树中已存在的后台 API 路由拆分改动。
+
+### 发现与修改
+
+- 本轮开始时工作树已有未提交路由拆分差异：旧 `shop/dashboard_urls.py` 删除，新增 `shop/admin_urls.py` 和 `shop/auth_urls.py`，`shop/urls.py` 改为只挂载 `/api/csrf/`、`/api/auth/` 和 `/api/admin/`，测试与中文架构文档也已切到 `/api/admin/`。
+- 本轮将这组差异作为同一后台 API 收口任务处理，没有回退前序改动。
+- `shop/auth_urls.py` 承接登录、登出、刷新和权限码接口，统一暴露在 `/api/auth/`。
+- `shop/admin_urls.py` 承接后台业务 API，统一暴露在 `/api/admin/`。
+- 为减少前端或脚本滞后造成的回归，在 `/api/admin/` 下保留旧后台业务兼容别名 `task-list/` 和 `plan-settings/`。
+- `bot.tests.ApiPrefixContractTestCase` 新增路由契约覆盖：确认 `/api/csrf/`、`/api/auth/login`、`/api/auth/refresh`、`/api/admin/user/info`、`/api/admin/dashboard/overview/`、`/api/admin/cloud-assets/sync-jobs/metrics/`、`/api/admin/task-list/` 和 `/api/admin/plan-settings/` 可解析；确认旧 `/api/dashboard/*`、`/api/admin/auth/login` 和根 `/api/users/` 不再解析。
+- 中文文档同步把后台聚合路由从 `shop/dashboard_urls.py` 改为 `shop/admin_urls.py`，并记录后台业务 API 统一使用 `/api/admin/` 前缀。
+
+### 固定巡检结论
+
+- 字段内省确认废弃 app 未安装；`CloudAsset` 到期字段仍只有 `actual_expires_at`；`CloudServerOrder` 未恢复 `actual_expires_at` 或 `service_expires_at`；`CloudAssetDashboardSnapshot` 未恢复到期字段。
+- 红线关键字扫描未发现订单到期字段、旧计划快照、旧退款函数名或废弃 runtime app 回流。命中的 `ip_recycle_at=asset.actual_expires_at`、`CloudAsset.actual_expires_at` 写入和 `_asset_expires_at` 临时属性仍属于资产侧唯一到期事实或固定 IP 回收同步。
+- 机器人返回链 49 个聚焦测试继续通过，资产详情、订单详情、续费、钱包支付、换 IP、重装、修改配置和嵌套返回路径仍满足 Telegram `callback_data` 限制。
+- 任务中心 14 个聚焦测试继续通过，未发现生命周期、通知或自动续费 section 的 pending/failed 任务漏报回归。
+
+### 验证
+
+本地已通过：
+
+```bash
+UV_CACHE_DIR=/private/tmp/uv-cache-shop PYTHONDONTWRITEBYTECODE=1 uv run python manage.py check
+UV_CACHE_DIR=/private/tmp/uv-cache-shop PYTHONDONTWRITEBYTECODE=1 uv run python -m py_compile shop/urls.py shop/admin_urls.py shop/auth_urls.py bot/tests.py cloud/tests.py cloud/tests_task_center.py
+DJANGO_TEST_SQLITE=1 UV_CACHE_DIR=/private/tmp/uv-cache-shop PYTHONDONTWRITEBYTECODE=1 uv run python manage.py test bot.tests.ApiPrefixContractTestCase bot.tests.DashboardAuthSurfaceTestCase --settings=shop.settings --verbosity=2
+DJANGO_TEST_SQLITE=1 UV_CACHE_DIR=/private/tmp/uv-cache-shop PYTHONDONTWRITEBYTECODE=1 uv run python manage.py test cloud.tests_task_center --settings=shop.settings --verbosity=2
+DJANGO_TEST_SQLITE=1 UV_CACHE_DIR=/private/tmp/uv-cache-shop PYTHONDONTWRITEBYTECODE=1 uv run python manage.py test bot.tests.RetainedIpRenewalUiTestCase --settings=shop.settings --verbosity=2
+DJANGO_TEST_SQLITE=1 UV_CACHE_DIR=/private/tmp/uv-cache-shop PYTHONDONTWRITEBYTECODE=1 uv run python manage.py shell -c "from django.apps import apps; from cloud.models import CloudAsset, CloudServerOrder, CloudAssetDashboardSnapshot; retired={'accounts','finance','mall','monitoring','dashboard_api','biz'}; installed={c.label for c in apps.get_app_configs()}; print('retired_installed', sorted(retired & installed)); print('CloudAsset expiry fields', [f.name for f in CloudAsset._meta.fields if 'expires' in f.name or 'expiry' in f.name]); print('CloudServerOrder actual_expires_at', any(f.name=='actual_expires_at' for f in CloudServerOrder._meta.fields)); print('CloudServerOrder service_expires_at', any(f.name=='service_expires_at' for f in CloudServerOrder._meta.fields)); print('CloudServerOrder expiry-like fields', [f.name for f in CloudServerOrder._meta.fields if 'expires' in f.name or 'expiry' in f.name]); print('CloudAssetDashboardSnapshot expiry-like fields', [f.name for f in CloudAssetDashboardSnapshot._meta.fields if 'expires' in f.name or 'expiry' in f.name or f.name=='risk_expired'])"
+UV_CACHE_DIR=/private/tmp/uv-cache-shop PYTHONDONTWRITEBYTECODE=1 uv run python manage.py makemigrations --check --dry-run
+rg -n "service_expires_at\s*=|actual_expires_at\s*=.*order\.|order\..*actual_expires_at|CloudLifecyclePlan\b|CloudNoticePlan\b|CloudAutoRenewPlan\b|refund_order|process_refund|create_refund|issue_refund|refund_to_balance|refund_balance|STATUS_REFUNDED|status=['\"]refunded['\"]|normalize_service_expiry|service_expired_at" bot core orders cloud shop --glob '!**/migrations/**' --glob '!**/tests.py'
+find . -maxdepth 2 -type d \( -name accounts -o -name finance -o -name mall -o -name monitoring -o -name dashboard_api -o -name biz \) -print
+git diff --check
+```
+
+结果：`manage.py check`、编译检查、10 个路由/后台鉴权测试、14 个任务中心测试、49 个机器人返回链测试、字段内省和 `git diff --check` 均通过。SQLite 测试仍会打印不支持 `db_comment` / `db_table_comment` 的预期 warning；`RetainedIpRenewalUiTestCase` 仍会打印 SimpleTestCase 数据库访问容错日志和 mocked postcheck 异常日志；默认 `makemigrations --check --dry-run` 仍因当前沙箱无法连接本地 MySQL 打印迁移历史一致性 warning，但最终输出 `No changes detected`。
+
+### 剩余风险
+
+- 本轮未跑完整测试套件。
+- 本轮未在真实 MySQL/MariaDB 上执行迁移计划。
+- 本轮未执行真实 Telegram 点击、真实云资源创建/删除/IP 变更、真实支付、链上广播、生产发布或不可逆操作。
+- 前端若仍调用旧 `/api/dashboard/` 或根 `/api/` 后台业务前缀，需要同步切换到 `/api/auth/` 与 `/api/admin/`。

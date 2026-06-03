@@ -12,6 +12,7 @@ from django.contrib.auth.models import AnonymousUser
 from django.contrib.sessions.middleware import SessionMiddleware
 from django.contrib.sessions.models import Session
 from django.test import RequestFactory, SimpleTestCase, TestCase
+from django.urls import Resolver404, resolve
 from django.utils import timezone
 
 from bot.api import DASHBOARD_SESSION_IDLE_SECONDS, _active_proxy_counts_by_user, _authenticate_dashboard_request, admin_users_list, archive_telegram_chat, auth_totp_start, create_admin_user, create_cloud_account, create_product, delete_cloud_account, me, send_daily_expiry_summary_test_notification, send_telegram_chat_message, site_config_groups, telegram_login_start, update_cloud_account, update_site_config, users_list, verify_cloud_account
@@ -31,6 +32,34 @@ from core.texts import BOT_TEXTS
 from orders.ledger import record_balance_ledger
 from orders.models import Product, Recharge
 from orders.services import list_balance_details, list_cloud_orders
+
+
+class ApiPrefixContractTestCase(SimpleTestCase):
+    def test_only_auth_and_admin_api_prefixes_are_routed(self):
+        expected_routes = {
+            '/api/csrf/': 'api-csrf',
+            '/api/auth/login': 'auth_api:login',
+            '/api/auth/refresh': 'auth_api:refresh',
+            '/api/admin/user/info': 'admin_api:user-info',
+            '/api/admin/dashboard/overview/': 'admin_api:overview',
+            '/api/admin/cloud-assets/sync-jobs/metrics/': 'admin_api:cloud-assets-sync-jobs-metrics',
+            '/api/admin/task-list/': 'admin_api:task-list-compat',
+            '/api/admin/plan-settings/': 'admin_api:plan-settings-compat',
+        }
+
+        for path, view_name in expected_routes.items():
+            self.assertEqual(resolve(path).view_name, view_name)
+
+        removed_routes = [
+            '/api/dashboard/overview/',
+            '/api/dashboard/dashboard/overview/',
+            '/api/dashboard/auth/login',
+            '/api/admin/auth/login',
+            '/api/users/',
+        ]
+        for path in removed_routes:
+            with self.assertRaises(Resolver404):
+                resolve(path)
 
 
 class DashboardSessionExpiryTestCase(TestCase):
@@ -118,7 +147,7 @@ class DashboardAuthSurfaceTestCase(TestCase):
 
     def test_dashboard_me_accepts_bearer_session(self):
         user = get_user_model().objects.create_user(username='dashboard_me_staff', password='pass', is_staff=True)
-        request = self._authorized_get('/api/dashboard/me/', user)
+        request = self._authorized_get('/api/admin/dashboard/me/', user)
 
         response = me(request)
         payload = json.loads(response.content.decode('utf-8'))

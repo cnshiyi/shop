@@ -1,9 +1,10 @@
 from django.urls import include, path
+from bot import api as bot_api
 from core.views import index
 
 urlpatterns = [
-    path('api/admin/', include(('shop.dashboard_urls', 'dashboard_api'), namespace='dashboard_api_admin')),
-    path('api/dashboard/', include(('shop.dashboard_urls', 'dashboard_api'), namespace='dashboard_api_dashboard')),
-    path('api/', include(('shop.dashboard_urls', 'dashboard_api'), namespace='dashboard_api_root')),
+    path('api/csrf/', bot_api.csrf, name='api-csrf'),
+    path('api/auth/', include(('shop.auth_urls', 'auth_api'), namespace='auth_api')),
+    path('api/admin/', include(('shop.admin_urls', 'admin_api'), namespace='admin_api')),
     path('', index, name='index'),
 ]

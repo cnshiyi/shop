@@ -38,7 +38,8 @@ DB_ENGINE=sqlite SQLITE_NAME=local.sqlite3 uv run python run.py web
 - `run.py`：统一启动器，负责 `web` / `bot` / `worker` / `all`
 - `shop/settings.py`：数据库、会话、日志、敏感配置、默认 hosts
 - `shop/urls.py`：总路由
-- `shop/dashboard_urls.py`：后台 API 聚合路由
+- `shop/auth_urls.py`：认证 API 路由
+- `shop/admin_urls.py`：后台 API 聚合路由
 
 `run.py web` 会先执行：
 
@@ -213,11 +214,13 @@ DB_ENGINE=sqlite SQLITE_NAME=local.sqlite3 uv run python run.py web
 
 ## 5. 路由面
 
-`shop/dashboard_urls.py` 是后台 API 主聚合点，覆盖：
+`shop/auth_urls.py` 覆盖 `/api/auth/*` 登录、登出、刷新和权限码接口。
+
+`shop/admin_urls.py` 是 `/api/admin/*` 后台业务 API 主聚合点，覆盖：
 
 后台云资产路由直接导入 `cloud/api_assets.py`、`cloud/api_asset_edit.py`、`cloud/api_orders.py`、`cloud/api_tasks.py`、`cloud/api_sync.py`、`cloud/api_monitors.py`、`cloud/sync_jobs.py` 和 `cloud/task_center.py`。`cloud/api_asset_snapshots.py` 由列表 API、同步任务和刷新命令调用。`cloud/api.py` 只保留兼容导出，不再作为路由、管理命令或测试替换入口。
 
-- 认证与会话
+- 管理员会话信息和 TOTP 绑定
 - 用户、余额、折扣
 - Telegram 账号、登录、群组、消息
 - 商品、订单、充值
@@ -226,11 +229,11 @@ DB_ENGINE=sqlite SQLITE_NAME=local.sqlite3 uv run python run.py web
 - 生命周期、通知、自动续费、监控
 - 站点配置、按钮配置、云账号、管理员账号
 
-`shop/urls.py` 还保留了：
+`shop/urls.py` 暴露：
 
+- `/api/csrf/`
+- `/api/auth/`
 - `/api/admin/`
-- `/api/dashboard/`
-- `/api/`
 - 前台首页入口
 
 ## 6. 数据与规则
@@ -249,7 +252,7 @@ DB_ENGINE=sqlite SQLITE_NAME=local.sqlite3 uv run python run.py web
 
 ```bash
 uv run python manage.py check
-uv run python -m py_compile cloud/api.py cloud/sync_jobs.py cloud/management/commands/process_cloud_asset_sync_jobs.py cloud/management/commands/prune_cloud_sync_job_events.py shop/dashboard_urls.py
+uv run python -m py_compile cloud/api.py cloud/sync_jobs.py cloud/management/commands/process_cloud_asset_sync_jobs.py cloud/management/commands/prune_cloud_sync_job_events.py shop/auth_urls.py shop/admin_urls.py
 uv run python manage.py makemigrations cloud --dry-run --check
 DJANGO_TEST_REUSE_DB=1 uv run python manage.py test cloud.tests.CloudServerServicesTestCase.test_sync_cloud_assets_runs_enabled_accounts_and_merges_results cloud.tests.CloudServerServicesTestCase.test_cloud_asset_sync_jobs_metrics_returns_operational_summary cloud.tests.CloudServerServicesTestCase.test_cancel_queued_cloud_asset_sync_job_marks_terminal_and_events cloud.tests.CloudServerServicesTestCase.test_sync_cloud_assets_with_selected_assets_uses_asset_scoped_tasks cloud.tests.CloudServerServicesTestCase.test_process_cloud_asset_sync_jobs_worker_processes_queued_job --keepdb --noinput --verbosity 1
 ```

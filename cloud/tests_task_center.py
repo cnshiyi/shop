@@ -53,7 +53,7 @@ class CloudTaskCenterApiTestCase(TestCase):
             status=CloudAssetSyncJob.STATUS_QUEUED,
             current_task='queued',
         )
-        request = RequestFactory().get('/api/dashboard/tasks/center/')
+        request = RequestFactory().get('/api/admin/tasks/center/')
         request.user = user
 
         response = task_center_overview(request)

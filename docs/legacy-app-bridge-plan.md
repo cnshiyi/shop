@@ -29,7 +29,7 @@
 
 - `dashboard_api`
   - 已从 `INSTALLED_APPS` 移除
-  - 路由已并回 `shop/dashboard_urls.py`
+  - 路由已并回 `shop/admin_urls.py`
   - 目录本体已删除
 - `biz`
   - 已从 `INSTALLED_APPS` 移除
