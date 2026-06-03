@@ -7288,6 +7288,45 @@ git diff --check
 - 本轮未执行真实 Telegram 点击、真实云资源创建/删除/IP 变更、真实支付、链上广播、生产发布或不可逆操作。
 - 前端 `DEVELOPMENT.md` 仍有旧 `/api/dashboard/` 描述残留；源码只读扫描未发现旧调用。
 
+## 2026-06-03 迁移到期事实复核
+
+### 范围
+
+本轮继续监工 Shop Django 后端，先读取自动化记忆、当前 git 状态、最近提交、`docs/auto-optimization-control.md`、`docs/auto-optimization-latest.md`、版本记录末尾、`AGENTS.md`、`TODO.md` 和 `django-shop-backend` 技能。`TODO.md` 已全部勾选，因此按固定巡检清单复核当前 HEAD 中迁移/重建/AWS 同步路径保留资产到期事实的实现。
+
+### 结果
+
+- 当前 HEAD 已包含 `7d79e98`「保留迁移旧机资产到期事实」、`7f332b6`「修正迁移旧机资产到期文案」和 `0e22e5e`「校正迁移到期巡检记录」。
+- 复核确认 `_set_source_migration_expiry`、重建源订单待删除标记和 AWS 同步确认删除迁移旧机时，均不再把 `migration_due_at` 写入 `CloudAsset.actual_expires_at` 或旧兼容 `Server.expires_at`。
+- 字段内省确认废弃 app 未安装；`CloudAsset` 到期字段仍只有 `actual_expires_at`；`CloudServerOrder` 未恢复 `actual_expires_at` 或 `service_expires_at`；`CloudAssetDashboardSnapshot` 未恢复到期字段。
+- 红线扫描未发现运行代码继续把 `migration_due_at` 写入资产 `actual_expires_at` 或 `Server.expires_at`；废弃 app 目录扫描无输出。
+
+### 验证
+
+本地已通过：
+
+```bash
+UV_CACHE_DIR=/private/tmp/uv-cache-shop PYTHONDONTWRITEBYTECODE=1 uv run python manage.py check
+UV_CACHE_DIR=/private/tmp/uv-cache-shop PYTHONDONTWRITEBYTECODE=1 uv run python -m py_compile cloud/management/commands/sync_aws_assets.py cloud/provisioning.py cloud/services.py cloud/tests.py
+DJANGO_TEST_SQLITE=1 UV_CACHE_DIR=/private/tmp/uv-cache-shop PYTHONDONTWRITEBYTECODE=1 uv run python manage.py test cloud.tests_task_center --settings=shop.settings --verbosity=2
+DJANGO_TEST_SQLITE=1 UV_CACHE_DIR=/private/tmp/uv-cache-shop PYTHONDONTWRITEBYTECODE=1 uv run python manage.py test bot.tests.ApiPrefixContractTestCase bot.tests.DashboardAuthSurfaceTestCase bot.tests.RetainedIpRenewalUiTestCase --settings=shop.settings --verbosity=2
+DJANGO_TEST_SQLITE=1 UV_CACHE_DIR=/private/tmp/uv-cache-shop PYTHONDONTWRITEBYTECODE=1 uv run python manage.py test cloud.tests.CloudServerServicesTestCase.test_rebuild_source_migration_schedule_preserves_asset_expiry cloud.tests.CloudServerServicesTestCase.test_mark_cloud_server_ip_change_requested_falls_back_when_plan_missing cloud.tests.CloudServerServicesTestCase.test_sync_aws_missing_order_preserves_asset_expiry_when_migration_due_is_earlier cloud.tests.CloudServerServicesTestCase.test_source_migration_schedule_keeps_asset_actual_expiry cloud.tests.CloudServerServicesTestCase.test_aws_sync_deleted_migration_order_keeps_asset_actual_expiry --settings=shop.settings --verbosity=2
+DJANGO_TEST_SQLITE=1 UV_CACHE_DIR=/private/tmp/uv-cache-shop PYTHONDONTWRITEBYTECODE=1 uv run python manage.py shell -c "...字段内省..."
+UV_CACHE_DIR=/private/tmp/uv-cache-shop PYTHONDONTWRITEBYTECODE=1 uv run python manage.py makemigrations --check --dry-run
+DJANGO_TEST_SQLITE=1 UV_CACHE_DIR=/private/tmp/uv-cache-shop PYTHONDONTWRITEBYTECODE=1 uv run python manage.py migrate --plan --noinput
+UV_CACHE_DIR=/private/tmp/uv-cache-shop PYTHONDONTWRITEBYTECODE=1 uv run python manage.py migrate --plan --noinput
+git diff --check
+```
+
+结果：`manage.py check`、编译检查、14 个任务中心测试、59 个机器人返回链/路由测试、5 个迁移/同步聚焦测试、字段内省、默认 `makemigrations --check --dry-run`、SQLite `migrate --plan` 和 `git diff --check` 均符合预期。默认 MySQL `migrate --plan` 因当前沙箱无法连接本地 MySQL `127.0.0.1:3306` 失败，继续记录为环境限制。
+
+### 剩余风险
+
+- 本轮未跑完整测试套件。
+- 本轮未在真实 MySQL/MariaDB 上执行迁移计划。
+- 本轮未执行真实 Telegram 点击、真实云资源创建/删除/IP 变更、真实支付、链上广播、生产发布或不可逆操作。
+- 前端 `DEVELOPMENT.md` 仍有旧 `/api/dashboard/` 描述残留；本轮未跨仓库修改。
+
 ## 2026-06-03 固定巡检与前后端路由残留复核
 
 ### 范围

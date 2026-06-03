@@ -4,10 +4,10 @@
 
 ## 最近一轮
 
-- 时间：2026-06-03 18:30 CST
-- 状态：已修复迁移/重建/AWS 同步路径误把迁移截止时间写回资产到期事实的问题，并完成固定巡检和聚焦验证。
+- 时间：2026-06-03 18:32 CST
+- 状态：已复核迁移/重建/AWS 同步路径保留资产到期事实的当前实现，并完成固定巡检和聚焦验证。
 - 最近提交：本轮提交后以当前 `HEAD` 为准。
-- 本轮范围：读取自动化记忆、当前 git 状态、最近提交、`docs/auto-optimization-control.md`、本文件、`docs/refactor-version-record.md` 末尾、`AGENTS.md`、`TODO.md` 和 `django-shop-backend` 技能；由于 `TODO.md` 已全部勾选，按固定巡检清单执行，并优先处理云资产唯一到期事实红线。
+- 本轮范围：读取自动化记忆、当前 git 状态、最近提交、`docs/auto-optimization-control.md`、本文件、`docs/refactor-version-record.md` 末尾、`AGENTS.md`、`TODO.md` 和 `django-shop-backend` 技能；由于 `TODO.md` 已全部勾选，按固定巡检清单执行，并复核云资产唯一到期事实红线。
 - 本轮结论：`CloudAsset.actual_expires_at` 继续作为唯一资产到期事实；更换 IP、重装/重建、provisioning 旧机待删除和 AWS 同步确认删除迁移旧机时，只调整订单侧迁移、宽限、删除和固定 IP 回收计划，不再把 `migration_due_at` 写入资产 `actual_expires_at` 或旧兼容 `Server.expires_at`。
 
 ## 最近验证
