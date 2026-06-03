@@ -1375,7 +1375,8 @@ class RetainedIpRenewalUiTestCase(SimpleTestCase):
                     'can_change_ip': True,
                     'can_reinit': True,
                     'can_config': True,
-                    'can_auto_renew': False,
+                    'can_auto_renew': True,
+                    'auto_renew_enabled': False,
                 },
                 {
                     'ip': '5.6.7.8',
@@ -1393,8 +1394,10 @@ class RetainedIpRenewalUiTestCase(SimpleTestCase):
         self.assertIn('cloud:ip:88:cloud:querymenu', callbacks)
         self.assertIn('cloud:reinit:88:cloud:querymenu', callbacks)
         self.assertIn('cloud:upgrade:88:cloud:querymenu', callbacks)
+        self.assertIn('cloud:autorenew:on:88:cloud:querymenu', callbacks)
         self.assertIn('cloud:aa:changeip:99:cloud:querymenu', callbacks)
         self.assertIn('cloud:aa:upgrade:99:cloud:querymenu', callbacks)
+        self.assertTrue(all(len(item.encode()) <= 64 for item in callbacks if item))
 
     def test_cloud_auto_renew_callbacks_keep_nested_back_under_limit(self):
         item_id = 999999999999999999
