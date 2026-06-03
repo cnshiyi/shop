@@ -2,6 +2,7 @@
 
 from django.db.models import Count
 from django.utils import timezone
+from django.utils.dateparse import parse_datetime
 from django.views.decorators.http import require_GET
 
 from cloud.models import (
@@ -38,6 +39,68 @@ def _first_nonempty(*values) -> str:
         if text:
             return text
     return ''
+
+
+def _parse_task_time(value):
+    if not value:
+        return None
+    if hasattr(value, 'tzinfo'):
+        return value
+    if isinstance(value, str):
+        return parse_datetime(value)
+    return None
+
+
+def _task_identity(item: dict) -> tuple:
+    return (
+        item.get('notice_type') or item.get('task_type') or '',
+        item.get('order_id') or '',
+        item.get('asset_id') or '',
+        item.get('ip') or item.get('public_ip') or '',
+    )
+
+
+def _recent_failed_history_items(items, *, since, exclude_keys=None) -> list[dict]:
+    exclude_keys = set(exclude_keys or [])
+    failed_items = []
+    for item in items or []:
+        if not isinstance(item, dict):
+            continue
+        if _task_identity(item) in exclude_keys:
+            continue
+        item_time = _parse_task_time(
+            item.get('executed_at')
+            or item.get('created_at')
+            or item.get('logged_at')
+            or item.get('updated_at')
+        )
+        if item_time and item_time < since:
+            continue
+        is_failed = (
+            item.get('delivered') is False
+            or item.get('is_success') is False
+            or item.get('notice_status') in _NOTICE_FAILED_STATUSES
+            or bool(item.get('failure_reason'))
+        )
+        if is_failed:
+            failed_items.append(item)
+    return failed_items
+
+
+def _auto_renew_recent_failure_count(history_qs, *, since, exclude_order_ids=None) -> int:
+    if not history_qs:
+        return 0
+    exclude_order_ids = {item for item in (exclude_order_ids or set()) if item}
+    if hasattr(history_qs, 'filter'):
+        qs = history_qs.filter(executed_at__gte=since, is_success=False)
+        if exclude_order_ids:
+            qs = qs.exclude(order_id__in=exclude_order_ids)
+        return qs.count()
+    filtered_items = [
+        item for item in history_qs
+        if not isinstance(item, dict) or not item.get('order_id') or item.get('order_id') not in exclude_order_ids
+    ]
+    return len(_recent_failed_history_items(filtered_items, since=since))
 
 
 def _task_section_payload(
@@ -103,14 +166,27 @@ def _plan_item(row, *, task_type: str, task_label: str) -> dict:
         order_id = row.get('order_id')
         asset_id = row.get('asset_id')
         row_id = row.get('id') or order_id or asset_id or ''
+        status = (
+            row.get('queue_status')
+            or row.get('status')
+            or row.get('notice_status')
+            or ('failed' if row.get('is_success') is False or row.get('delivered') is False else '')
+        )
+        status_label = (
+            row.get('queue_status_label')
+            or row.get('status_label')
+            or row.get('notice_status_label')
+            or row.get('result_label')
+            or status
+        )
         return {
             'id': f'{task_type}:{row_id}',
             'task_type': task_type,
             'task_label': task_label,
-            'status': row.get('queue_status') or row.get('status') or '',
-            'status_label': row.get('queue_status_label') or row.get('status_label') or row.get('queue_status') or row.get('status') or '',
-            'execution_status': row.get('queue_status') or row.get('status') or '',
-            'execution_status_label': row.get('queue_status_label') or row.get('status_label') or '',
+            'status': status,
+            'status_label': status_label,
+            'execution_status': status,
+            'execution_status_label': status_label,
             'provider': row.get('provider') or '',
             'provider_label': row.get('provider_label') or _provider_label(row.get('provider') or ''),
             'order_id': order_id,
@@ -122,11 +198,13 @@ def _plan_item(row, *, task_type: str, task_label: str) -> dict:
                 row.get('failure_reason'),
                 row.get('last_error'),
                 row.get('error'),
+                row.get('retry_label'),
+                row.get('result_label') if row.get('is_success') is False or row.get('delivered') is False else '',
                 row.get('execution_status'),
                 row.get('notice_status_label'),
             ),
-            'created_at': row.get('created_at'),
-            'updated_at': row.get('updated_at'),
+            'created_at': row.get('created_at') or row.get('executed_at') or row.get('logged_at'),
+            'updated_at': row.get('updated_at') or row.get('executed_at') or row.get('logged_at'),
             'next_run_at': row.get('next_run_at'),
             'related_path': row.get('related_path') or row.get('detail_path') or row.get('order_detail_path') or '',
             'detail_path': row.get('detail_path') or row.get('related_path') or '',
@@ -217,10 +295,20 @@ def _lifecycle_section(now) -> dict:
         *[item for item in bundle.get('ip_delete_items', []) if not item.get('is_history')],
     ]
     failed_count = sum(1 for item in items_source if item.get('last_failure_reason') or item.get('failure_reason'))
+    active_failure_keys = {
+        _task_identity(item)
+        for item in items_source
+        if item.get('last_failure_reason') or item.get('failure_reason')
+    }
+    recent_failed_history = _recent_failed_history_items(
+        bundle.get('history_items', []),
+        since=now - timezone.timedelta(days=1),
+        exclude_keys=active_failure_keys,
+    )
     warning_count = sum(1 for item in items_source if item.get('queue_status') in ['overdue', 'due_now', 'blocked'])
     items = [
         _plan_item(row, task_type='lifecycle', task_label='生命周期计划')
-        for row in items_source[:8]
+        for row in [*items_source, *recent_failed_history][:8]
     ]
     return _task_section_payload(
         key='lifecycle',
@@ -228,7 +316,7 @@ def _lifecycle_section(now) -> dict:
         path='/admin/tasks/plans',
         total=len(items_source),
         active=sum(1 for item in items_source if item.get('queue_status') in ['due_now', 'scheduled_future', 'overdue', 'within_window']),
-        failed=failed_count,
+        failed=failed_count + len(recent_failed_history),
         warning=warning_count,
         status_counts=_status_counts_from_items(items_source, 'queue_status'),
         items=items,
@@ -242,10 +330,20 @@ def _notice_section(now) -> dict:
     bundle = _build_notice_plan_bundle(limit=1000, future_limit=200, history_limit=1000)
     items_source = bundle.get('active_items') or []
     failed_count = sum(1 for item in items_source if item.get('notice_status') in _NOTICE_FAILED_STATUSES)
+    active_failure_keys = {
+        _task_identity(item)
+        for item in items_source
+        if item.get('notice_status') in _NOTICE_FAILED_STATUSES
+    }
+    recent_failed_history = _recent_failed_history_items(
+        bundle.get('history_items', []),
+        since=now - timezone.timedelta(days=1),
+        exclude_keys=active_failure_keys,
+    )
     warning_count = sum(1 for item in items_source if item.get('queue_status') in _NOTICE_WARNING_QUEUE_STATUSES)
     items = [
         _plan_item(row, task_type='notice', task_label='通知计划')
-        for row in items_source[:8]
+        for row in [*items_source, *recent_failed_history][:8]
     ]
     return _task_section_payload(
         key='notices',
@@ -253,7 +351,7 @@ def _notice_section(now) -> dict:
         path='/admin/tasks/notices',
         total=len(items_source),
         active=sum(1 for item in items_source if item.get('queue_status') in ['due_now', 'scheduled_future', 'overdue', 'fallback_notice', 'within_window']),
-        failed=failed_count,
+        failed=failed_count + len(recent_failed_history),
         warning=warning_count,
         status_counts=_status_counts_from_items(items_source, 'queue_status'),
         items=items,
@@ -271,6 +369,16 @@ def _auto_renew_section(now) -> dict:
         for item in items_source
         if item.get('last_failure_reason') or item.get('queue_status') in _AUTO_RENEW_FAILED_QUEUE_STATUSES
     )
+    active_failure_order_ids = {
+        item.get('order_id')
+        for item in items_source
+        if item.get('last_failure_reason') or item.get('queue_status') in _AUTO_RENEW_FAILED_QUEUE_STATUSES
+    }
+    recent_failed_count = _auto_renew_recent_failure_count(
+        bundle.get('history_qs'),
+        since=now - timezone.timedelta(days=1),
+        exclude_order_ids=active_failure_order_ids,
+    )
     warning_count = sum(1 for item in items_source if item.get('queue_status') in _AUTO_RENEW_WARNING_QUEUE_STATUSES)
     items = [
         _plan_item(row, task_type='auto_renew', task_label='自动续费')
@@ -282,7 +390,7 @@ def _auto_renew_section(now) -> dict:
         path='/admin/tasks/auto-renew',
         total=len(items_source),
         active=sum(1 for item in items_source if item.get('queue_status') in ['due_now', 'scheduled_future', 'overdue', 'within_window', 'retry_failed', 'fallback_retry']),
-        failed=failed_count,
+        failed=failed_count + recent_failed_count,
         warning=warning_count,
         status_counts=_status_counts_from_items(items_source, 'queue_status'),
         items=items,

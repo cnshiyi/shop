@@ -61,6 +61,31 @@ class CloudTaskCenterApiTestCase(TestCase):
         self.assertEqual(section['health'], 'error')
         self.assertEqual(section['items'][0]['note'], '通知账号不可用')
 
+    def test_notice_section_counts_recent_failed_history_as_failed(self):
+        now = timezone.now()
+        with patch('cloud.api_tasks._build_notice_plan_bundle', return_value={
+            'active_items': [],
+            'history_items': [
+                {
+                    'id': 'notice-history-1',
+                    'order_id': 1,
+                    'order_no': 'NOTICE-HISTORY-FAILED-1',
+                    'notice_status': 'failed_retry',
+                    'notice_status_label': '通知失败，待重试',
+                    'delivered': False,
+                    'provider': 'aws_lightsail',
+                    'ip': '1.1.1.4',
+                    'retry_label': 'Bot失败；后续生命周期巡检会重试',
+                    'created_at': (now - timezone.timedelta(minutes=30)).isoformat(),
+                },
+            ],
+        }):
+            section = _notice_section(now)
+
+        self.assertEqual(section['failed'], 1)
+        self.assertEqual(section['health'], 'error')
+        self.assertEqual(section['items'][0]['note'], 'Bot失败；后续生命周期巡检会重试')
+
     def test_auto_renew_section_counts_retry_failed_as_failed(self):
         now = timezone.now()
         with patch('cloud.api_tasks._build_auto_renew_plan_items', return_value={
@@ -83,6 +108,27 @@ class CloudTaskCenterApiTestCase(TestCase):
         self.assertEqual(section['failed'], 1)
         self.assertEqual(section['health'], 'error')
         self.assertEqual(section['items'][0]['note'], '余额不足')
+
+    def test_auto_renew_section_counts_recent_failed_history_as_failed(self):
+        now = timezone.now()
+        with patch('cloud.api_tasks._build_auto_renew_plan_items', return_value={
+            'due_items': [],
+            'future_plan_items': [],
+            'history_qs': [
+                {
+                    'id': 'auto-history-1',
+                    'order_id': 1,
+                    'order_no': 'AUTO-HISTORY-FAILED-1',
+                    'is_success': False,
+                    'failure_reason': '云厂商续费失败',
+                    'executed_at': now - timezone.timedelta(minutes=20),
+                },
+            ],
+        }):
+            section = _auto_renew_section(now)
+
+        self.assertEqual(section['failed'], 1)
+        self.assertEqual(section['health'], 'error')
 
     def test_lifecycle_section_exposes_failure_reason_in_item_note(self):
         now = timezone.now()
@@ -107,3 +153,29 @@ class CloudTaskCenterApiTestCase(TestCase):
         self.assertEqual(section['failed'], 1)
         self.assertEqual(section['health'], 'error')
         self.assertEqual(section['items'][0]['note'], '云 API 删除失败')
+
+    def test_lifecycle_section_counts_recent_failed_history_as_failed(self):
+        now = timezone.now()
+        with patch('bot.api._build_lifecycle_plan_bundle', return_value={
+            'due_items': [],
+            'future_plan_items': [],
+            'ip_delete_items': [],
+            'history_items': [
+                {
+                    'id': 'life-history-1',
+                    'order_id': 1,
+                    'order_no': 'LIFE-HISTORY-FAILED-1',
+                    'is_success': False,
+                    'result_label': '失败/跳过',
+                    'failure_reason': '删除任务执行失败',
+                    'provider': 'aws_lightsail',
+                    'ip': '1.1.1.5',
+                    'executed_at': (now - timezone.timedelta(minutes=10)).isoformat(),
+                },
+            ],
+        }):
+            section = _lifecycle_section(now)
+
+        self.assertEqual(section['failed'], 1)
+        self.assertEqual(section['health'], 'error')
+        self.assertEqual(section['items'][0]['note'], '删除任务执行失败')
