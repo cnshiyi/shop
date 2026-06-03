@@ -4,11 +4,11 @@
 
 ## 最近一轮
 
-- 时间：2026-06-03 19:13 CST
-- 状态：已完成固定巡检，未发现需要修改运行代码的新问题。
+- 时间：2026-06-03 19:22 CST
+- 状态：已完成固定巡检复核，未发现需要修改运行代码的新问题。
 - 最近提交：本轮提交后以当前 `HEAD` 为准。
 - 本轮范围：读取自动化记忆、当前 git 状态、最近提交、`docs/auto-optimization-control.md`、本文件、`docs/refactor-version-record.md` 末尾、`AGENTS.md`、`TODO.md` 和 `django-shop-backend` 技能；由于 `TODO.md` 已全部勾选，按固定巡检清单执行。
-- 本轮结论：`CloudAsset.actual_expires_at` 继续作为唯一资产到期事实；订单表未恢复 `actual_expires_at` 或 `service_expires_at`；计划快照表未恢复到期字段；废弃 runtime app 未重新安装；机器人返回链、Telegram `callback_data` 限制、后台任务中心状态统计和迁移/同步保留资产到期事实的聚焦测试继续通过。上一轮通知计划状态统计修复未发现回归。
+- 本轮结论：`CloudAsset.actual_expires_at` 继续作为唯一资产到期事实；订单表未恢复 `actual_expires_at` 或 `service_expires_at`；计划快照表未恢复到期字段；废弃 runtime app 未重新安装；机器人返回链、Telegram `callback_data` 限制、后台任务中心状态统计和迁移/同步保留资产到期事实的聚焦测试继续通过。本轮未发现上一轮通知计划状态统计修复后的新回归。
 
 ## 最近验证
 
