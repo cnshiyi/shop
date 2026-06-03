@@ -6712,3 +6712,41 @@ UV_CACHE_DIR=/private/tmp/uv-cache-shop uv run python manage.py makemigrations -
 - 本轮未跑完整测试套件。
 - 本轮未执行真实 Telegram 点击、真实云资源创建/删除/IP 变更、真实支付、链上广播、生产发布或不可逆操作。
 - 真机测试仍需在用户明确授权真实云资源成本后，单独按中文报告记录云资源 ID 脱敏结果。
+
+## 2026-06-03 机器人返回链与生命周期字段巡检
+
+### 范围
+
+本轮继续监工 Shop Django 后端，重点复核云资产生命周期唯一到期事实、后台任务中心状态统计、机器人资产详情/订单详情/续费/换 IP/重装/修改配置返回链、Telegram `callback_data` 64 字节限制、旧计划快照、旧退款入口和废弃 app 回流。
+
+### 监工结果
+
+- 当前工作树起始干净，最近提交为 `6cdd789 修复重装提交返回链`。
+- 未发现需要修改运行代码的问题；本轮仅追加中文版本记录。
+- `CloudAsset` 仍只有 `actual_expires_at` 作为资产到期事实；`CloudServerOrder` 未恢复 `actual_expires_at` 或 `service_expires_at`；`CloudAssetDashboardSnapshot` 未恢复到期字段，仅保留风险布尔字段 `risk_expired`。
+- 废弃 app `accounts`、`finance`、`mall`、`monitoring`、`dashboard_api`、`biz` 未安装；`dashboard_api` 命名空间和 helper 命中仍属于当前后台 API 聚合。
+- 收窄扫描未发现旧退款函数名、旧退款状态、旧计划快照或订单服务到期字段回流；命中的 `ip_recycle_at=asset.actual_expires_at` 仍是固定 IP 回收派生时间。
+- 动态枚举 109 个极端 18 位 ID 和嵌套来源 callback，覆盖资产详情、订单详情、续费、换 IP、重装、修改配置、自动续费、IP 查询结果和重装提交结果；最大 63 字节，无超过 Telegram 64 字节限制。
+- 任务中心聚焦测试继续覆盖通知、生命周期、自动续费状态统计；未发现后台总览漏报或失败状态不一致的新问题。
+
+### 验证
+
+本地已通过:
+
+```bash
+UV_CACHE_DIR=/private/tmp/shop-uv-cache uv run python manage.py check
+UV_CACHE_DIR=/private/tmp/shop-uv-cache uv run python -m py_compile bot/keyboards.py bot/handlers.py bot/tests.py cloud/task_center.py cloud/tests_task_center.py cloud/api_tasks.py cloud/lifecycle_tasks.py cloud/lifecycle_execution.py cloud/provisioning.py cloud/asset_expiry.py
+UV_CACHE_DIR=/private/tmp/shop-uv-cache DJANGO_TEST_SQLITE=1 uv run python manage.py test cloud.tests_task_center --settings=shop.settings
+UV_CACHE_DIR=/private/tmp/shop-uv-cache DJANGO_TEST_SQLITE=1 uv run python manage.py test bot.tests.RetainedIpRenewalUiTestCase --settings=shop.settings
+UV_CACHE_DIR=/private/tmp/shop-uv-cache DJANGO_TEST_SQLITE=1 uv run python manage.py shell -c "from django.apps import apps; from cloud.models import CloudAsset, CloudServerOrder, CloudAssetDashboardSnapshot; retired={'accounts','finance','mall','monitoring','dashboard_api','biz'}; installed={c.label for c in apps.get_app_configs()}; print('retired_installed', sorted(retired & installed)); print('CloudAsset expiry fields', [f.name for f in CloudAsset._meta.fields if 'expires_at' in f.name]); print('CloudServerOrder has actual_expires_at', any(f.name=='actual_expires_at' for f in CloudServerOrder._meta.fields)); print('CloudServerOrder has service_expires_at', any(f.name=='service_expires_at' for f in CloudServerOrder._meta.fields)); print('CloudAssetDashboardSnapshot expiry fields', [f.name for f in CloudAssetDashboardSnapshot._meta.fields if 'expires' in f.name or f.name == 'risk_expired']);"
+UV_CACHE_DIR=/private/tmp/shop-uv-cache uv run python manage.py makemigrations --check --dry-run
+git diff --check
+```
+
+`makemigrations --check --dry-run` 仍出现本地沙箱无法连接 `127.0.0.1` MySQL 的迁移历史一致性警告，但最终结果为 `No changes detected`。第一次动态 callback 枚举脚本因本地参数名写错失败，按当前 `cloud_ip_query_result(result_items, renewable_items, ...)` 签名修正后通过。SQLite 测试仍会打印不支持 `db_comment` 的预期 warning；bot SimpleTestCase 仍会打印配置读取被禁止数据库访问拦截的既有容错日志；mocked postcheck 异常日志仍为既有覆盖输出，最终测试均通过。
+
+### 剩余风险
+
+- 本轮未跑完整测试套件。
+- 本轮未执行真实 Telegram 点击、真实云资源创建/删除/IP 变更、真实支付、链上广播、生产发布或不可逆操作。
+- 真机测试仍需在用户明确授权真实云资源成本后，单独按中文报告记录云资源 ID 脱敏结果。
