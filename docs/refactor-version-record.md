@@ -8411,3 +8411,57 @@ DB_ENGINE=mysql UV_CACHE_DIR=/private/tmp/uv-cache-shop PYTHONDONTWRITEBYTECODE=
 - 本轮没有执行新的真实云资源破坏性动作，只复核上一轮已完成的生命周期结果。
 - 本轮未执行链上真实充值到账；仍需要真实外部钱包转账来源才能覆盖到账扫描。
 - 工作树仍包含本轮外既存脏文件和迁移文件，本轮未回退。
+
+## 2026-06-04 无到期日期资产处理流程专项测试
+
+### 范围
+
+本轮按用户要求测试没有到期日期的资产处理流程，覆盖普通服务器资产和未附加固定 IP 资产。测试在真实 MySQL 连接中执行，但使用数据库事务临时创建数据并回滚，不触发真实云资源删除、固定 IP 释放、链上转账或生产发布。
+
+### 测试数据
+
+- 临时普通服务器资产：`CloudAsset.actual_expires_at=None`，绑定临时已完成云服务器订单。
+- 临时未附加固定 IP 资产：`CloudAsset.actual_expires_at=None`，使用 AWS 同步来源形态，`sync_state` 标记为未附加固定 IP。
+- 两条临时资产仅存在于事务内，命令结束后已回滚；真实库临时资产数量为 0。
+
+### 验证
+
+事务内执行：
+
+```bash
+DB_ENGINE=mysql UV_CACHE_DIR=/private/tmp/uv-cache-shop PYTHONDONTWRITEBYTECODE=1 uv run python manage.py shell
+```
+
+在 shell 事务内创建两条临时资产后调用：
+
+```python
+call_command("refresh_lifecycle_plans")
+call_command("refresh_notice_plans")
+```
+
+结果：
+
+- 普通服务器资产未生成 `CloudLifecycleTask`。
+- 普通服务器资产未生成 `CloudNoticeTask`。
+- 未附加固定 IP 资产未生成 `CloudLifecycleTask`。
+- 未附加固定 IP 资产未生成 `CloudNoticeTask`。
+- 事务内计划刷新输出：生命周期 `due=1 future=1 history=3 ip_delete=3`；通知 `due=2 future=1 history=7`。
+- 回滚后真实库复核：临时资产数量 0；`CloudLifecycleTask` 数量 0；`CloudNoticeTask` 数量 1，仍为既有历史记录。
+
+同时已通过：
+
+```bash
+DB_ENGINE=mysql UV_CACHE_DIR=/private/tmp/uv-cache-shop PYTHONDONTWRITEBYTECODE=1 uv run python manage.py check
+DJANGO_TEST_SQLITE=1 UV_CACHE_DIR=/private/tmp/uv-cache-shop PYTHONDONTWRITEBYTECODE=1 uv run python manage.py test cloud.tests cloud.tests_task_center --settings=shop.settings --verbosity=1
+```
+
+结果：`manage.py check` 通过；生命周期和任务中心相关测试 383 个通过。SQLite 只打印不支持表/字段 comment 的预期 warning。
+
+### 结论
+
+`CloudAsset.actual_expires_at=None` 的普通服务器和未附加固定 IP 不会被误加入到期删除、通知或 IP 回收任务。当前生命周期计划仍以 `CloudAsset.actual_expires_at` 作为资产到期事实，没有发现订单侧到期字段回流。
+
+### 剩余风险
+
+- 本轮未执行真实云侧未附加固定 IP 释放，只验证无到期日期资产不会进入计划任务。
+- 工作树仍包含本轮外既存脏文件和迁移文件，本轮未回退。
