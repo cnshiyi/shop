@@ -7288,61 +7288,6 @@ git diff --check
 - 本轮未执行真实 Telegram 点击、真实云资源创建/删除/IP 变更、真实支付、链上广播、生产发布或不可逆操作。
 - 前端 `DEVELOPMENT.md` 仍有旧 `/api/dashboard/` 描述残留；源码只读扫描未发现旧调用。
 
-## 2026-06-04 固定巡检十二次复核
-
-### 范围
-
-本轮继续监工 Shop Django 后端，先读取自动化记忆、当前 git 状态、最近提交、`docs/auto-optimization-control.md`、`docs/auto-optimization-latest.md`、版本记录末尾、`AGENTS.md`、`TODO.md` 和 `django-shop-backend` 技能。由于 `TODO.md` 固定任务已全部勾选，本轮按固定巡检清单继续复核云资产到期事实、机器人返回链、任务中心统计、迁移差异、固定 IP 保留链路和旧 API 前缀。不做真实云资源、真实支付、链上广播、生产发布或其它不可逆操作。
-
-### 发现
-
-- 本轮开始时工作树已有 `docs/refactor-version-record.md` 未提交差异，内容为删除上一轮“固定巡检十一次复核”记录；运行中并行会话已提交 `c935564`「修正固定巡检十一次记录位置」，本轮在该提交之上继续更新最新状态并补充十二次复核记录。
-- 本轮启动时最近提交为 `1c0a05c`「记录固定巡检十一次复核」；提交前当前 `HEAD` 为 `c935564`「修正固定巡检十一次记录位置」。
-- 未发现需要修改运行代码的新问题，本轮只更新中文巡检记录。
-- 字段内省确认废弃 app 未安装；`CloudAsset` 到期字段仍只有 `actual_expires_at`；`CloudServerOrder` 未恢复 `actual_expires_at` 或 `service_expires_at`，仅保留现有 `renew_grace_expires_at` 和订单自身 `expired_at`；`CloudAssetDashboardSnapshot` 未恢复实际到期字段，`risk_expired` 仍只是风险状态标记。
-- 固定 IP 保留相关命中仍集中在 `ip_recycle_at` 与 `CloudAsset.actual_expires_at` 的回收链路同步，未恢复订单服务到期字段。
-- 废弃 runtime app 目录扫描无输出，未发现 `accounts`、`finance`、`mall`、`monitoring`、`dashboard_api`、`biz` 回流。
-- 任务中心 14 个聚焦测试继续通过，通知、自动续费和生命周期 section 的 pending/failed/retry_failed 统计未发现回归。
-- 机器人返回链 59 个聚焦测试继续通过，资产详情、订单详情、续费、钱包支付、换 IP、重装、修改配置和长回调压缩仍满足 Telegram `callback_data` 64 字节限制。
-- 迁移/重建/AWS 同步 5 个聚焦测试继续通过，确认 `migration_due_at` 不会覆盖资产 `actual_expires_at`。
-- 红线关键字扫描未发现运行代码恢复订单到期字段、旧计划快照、旧退款函数名或废弃 runtime app。命中项仍为资产侧唯一到期事实、固定 IP 回收同步或 `_asset_expires_at` 临时属性。
-- 前端源码和前端 docs 只读扫描未发现旧 `/api/dashboard`、`/api/users`、`/api/task-list` 或 `/api/plan-settings` 调用；`/Users/a399/Desktop/data/vue-shop-admin/DEVELOPMENT.md` 仍有旧 `/api/dashboard/` 文字说明残留，本轮未跨仓库修改。
-- 针对默认 MySQL `migrate --plan` 失败，已复查 `shop/settings.py`：默认 `DB_ENGINE=mysql` 且缺省连接 `127.0.0.1:3306`，`DB_ENGINE=sqlite` 和 `DJANGO_TEST_SQLITE=1` 已覆盖本地/测试 SQLite 路径；当前运行环境没有常见 MySQL socket 文件，无法在沙箱内绕开 TCP 限制完成默认 MySQL 计划验证。
-
-### 修改
-
-- 覆盖更新 `docs/auto-optimization-latest.md`。
-- 在本文件追加本轮中文巡检记录。
-
-### 验证
-
-本地已通过：
-
-```bash
-UV_CACHE_DIR=/private/tmp/uv-cache-shop PYTHONDONTWRITEBYTECODE=1 uv run python manage.py check
-UV_CACHE_DIR=/private/tmp/uv-cache-shop PYTHONDONTWRITEBYTECODE=1 uv run python -m py_compile shop/urls.py shop/admin_urls.py shop/auth_urls.py bot/handlers.py bot/api.py bot/keyboards.py bot/tests.py cloud/api_tasks.py cloud/task_center.py cloud/lifecycle_tasks.py cloud/lifecycle_schedule.py cloud/sync_jobs.py cloud/services.py cloud/provisioning.py cloud/management/commands/sync_aws_assets.py cloud/management/commands/sync_aliyun_assets.py cloud/management/commands/reconcile_cloud_assets_from_servers.py cloud/tests.py cloud/tests_task_center.py
-DJANGO_TEST_SQLITE=1 UV_CACHE_DIR=/private/tmp/uv-cache-shop PYTHONDONTWRITEBYTECODE=1 uv run python manage.py shell -c "...字段内省..."
-DJANGO_TEST_SQLITE=1 UV_CACHE_DIR=/private/tmp/uv-cache-shop PYTHONDONTWRITEBYTECODE=1 uv run python manage.py test cloud.tests_task_center --settings=shop.settings --verbosity=2
-DJANGO_TEST_SQLITE=1 UV_CACHE_DIR=/private/tmp/uv-cache-shop PYTHONDONTWRITEBYTECODE=1 uv run python manage.py test bot.tests.ApiPrefixContractTestCase bot.tests.DashboardAuthSurfaceTestCase bot.tests.RetainedIpRenewalUiTestCase --settings=shop.settings --verbosity=2
-DJANGO_TEST_SQLITE=1 UV_CACHE_DIR=/private/tmp/uv-cache-shop PYTHONDONTWRITEBYTECODE=1 uv run python manage.py test cloud.tests.CloudServerServicesTestCase.test_rebuild_source_migration_schedule_preserves_asset_expiry cloud.tests.CloudServerServicesTestCase.test_mark_cloud_server_ip_change_requested_falls_back_when_plan_missing cloud.tests.CloudServerServicesTestCase.test_sync_aws_missing_order_preserves_asset_expiry_when_migration_due_is_earlier cloud.tests.CloudServerServicesTestCase.test_source_migration_schedule_keeps_asset_actual_expiry cloud.tests.CloudServerServicesTestCase.test_aws_sync_deleted_migration_order_keeps_asset_actual_expiry --settings=shop.settings --verbosity=2
-UV_CACHE_DIR=/private/tmp/uv-cache-shop PYTHONDONTWRITEBYTECODE=1 uv run python manage.py makemigrations --check --dry-run
-DJANGO_TEST_SQLITE=1 UV_CACHE_DIR=/private/tmp/uv-cache-shop PYTHONDONTWRITEBYTECODE=1 uv run python manage.py migrate --plan --noinput
-rg -n "service_expires_at\s*=|actual_expires_at\s*=.*order\.|order\..*actual_expires_at|CloudLifecyclePlan\b|CloudNoticePlan\b|CloudAutoRenewPlan\b|refund_order|process_refund|create_refund|issue_refund|refund_to_balance|refund_balance|STATUS_REFUNDED|status=['\"]refunded['\"]|normalize_service_expiry|service_expired_at" bot core orders cloud shop --glob '!**/migrations/**' --glob '!**/tests.py'
-find . -maxdepth 2 -type d \( -name accounts -o -name finance -o -name mall -o -name monitoring -o -name dashboard_api -o -name biz \) -print
-rg -n "/api/dashboard|/api/users|dashboard_urls|dashboard_api" bot core orders cloud shop docs TODO.md AGENTS.md --glob '!docs/refactor-version-record.md'
-rg -n "/api/dashboard|/api/users|/api/task-list|/api/plan-settings" /Users/a399/Desktop/data/vue-shop-admin/DEVELOPMENT.md /Users/a399/Desktop/data/vue-shop-admin/apps/web-antd/src /Users/a399/Desktop/data/vue-shop-admin/docs --glob '!**/node_modules/**' --glob '!**/dist/**' --glob '!**/.git/**'
-git diff --check
-```
-
-结果：`manage.py check`、编译检查、字段内省、14 个任务中心测试、59 个 bot 返回链/路由测试、5 个云资产迁移/同步聚焦测试、默认 `makemigrations --check --dry-run`、SQLite `migrate --plan` 和关键字/目录/旧 API 扫描均符合预期。默认 `makemigrations --check --dry-run` 的迁移历史检查和默认数据库 `migrate --plan` 因当前沙箱无法连接本地 MySQL `127.0.0.1:3306` 打印 warning 或失败，且当前未发现可用 MySQL socket，已记录为环境限制。SQLite 检查仍会打印不支持 `db_comment` / `db_table_comment` 的预期 warning；bot 返回链测试仍会打印既有配置读取容错、mocked postcheck 异常和 IP 校验日志。
-
-### 剩余风险
-
-- 本轮未跑完整测试套件。
-- 本轮默认数据库 `migrate --plan` 因沙箱网络限制无法连接本地 MySQL，且当前环境未发现可用 MySQL socket；未在生产或独立真实 MySQL/MariaDB 环境执行完整迁移演练。
-- 本轮未执行真实 Telegram 点击、真实云资源创建/删除/IP 变更、真实支付、链上广播、生产发布或不可逆操作。
-- 前端 `DEVELOPMENT.md` 仍有旧 `/api/dashboard/` 描述残留；源码只读扫描未发现旧调用。
-
 ## 2026-06-03 固定巡检八次复核
 
 ### 范围
@@ -8190,6 +8135,50 @@ git diff --check
 ```
 
 结果：`manage.py check`、编译检查、字段内省、14 个任务中心测试、59 个 bot 返回链/路由测试、5 个云资产迁移/同步聚焦测试、默认 `makemigrations --check --dry-run`、SQLite `migrate --plan`、默认数据库 `migrate --plan` 和 `git diff --check` 均符合预期。默认数据库 `migrate --plan` 本轮可连接并输出 `No planned migration operations`。SQLite 检查仍会打印不支持 `db_comment` / `db_table_comment` 的预期 warning；bot 返回链测试仍会打印既有配置读取容错、mocked postcheck 异常和 IP 校验日志。
+
+### 剩余风险
+
+- 本轮未跑完整测试套件。
+- 本轮默认数据库 `migrate --plan` 可执行且无待迁移操作，但未在生产或独立真实 MySQL/MariaDB 环境执行完整迁移演练。
+- 本轮未执行真实 Telegram 点击、真实云资源创建/删除/IP 变更、真实支付、链上广播、生产发布或不可逆操作。
+- 前端 `DEVELOPMENT.md` 仍有旧 `/api/dashboard/` 描述残留；源码只读扫描未发现旧调用。
+
+## 2026-06-04 固定巡检十二次复核
+
+### 范围
+
+本轮继续监工 Shop Django 后端，先读取自动化记忆、当前 git 状态、最近提交、`docs/auto-optimization-control.md`、`docs/auto-optimization-latest.md`、版本记录末尾、`AGENTS.md`、`TODO.md` 和 `django-shop-backend` 技能。由于 `TODO.md` 固定任务已全部勾选，本轮在并行提交 `1c0a05c` 与 `c935564` 之后继续整理记录顺序，并验证当前工作树中本地启动脚本中文输出相关变更。不做真实云资源、真实支付、链上广播、生产发布或其它不可逆操作。
+
+### 发现
+
+- `run.py` 新增 `run_migrate()` 与 `zh_bool()`，将 Web、worker、all 模式的迁移提示、Web 自动重载提示、bot/worker 退出和重启提示改为中文；迁移调用改为 `migrate --verbosity 0`，减少启动噪音。
+- `core/management/commands/ensure_dashboard_admin.py` 将命令 help 和创建、更新、已就绪提示改为中文；`--help` 验证未执行创建或更新管理员。
+- `CloudAsset.actual_expires_at` 仍是唯一资产到期事实；订单表未恢复 `actual_expires_at` 或 `service_expires_at`；计划快照表未恢复实际到期字段；废弃 runtime app 未回流。
+- 固定 IP 保留相关命中仍集中在 `ip_recycle_at` 与 `CloudAsset.actual_expires_at` 的回收链路同步，未恢复订单服务到期字段。
+- 机器人返回链、Telegram `callback_data` 限制、任务中心状态统计和迁移/同步保留资产到期事实的既有聚焦测试继续通过。
+- 默认数据库 `migrate --plan` 本轮可连接并输出 `No planned migration operations`，因此本轮不再记录为本地 MySQL 连接失败。
+- 前端源码和前端 docs 只读扫描未发现旧 `/api/dashboard`、`/api/users`、`/api/task-list` 或 `/api/plan-settings` 调用；`/Users/a399/Desktop/data/vue-shop-admin/DEVELOPMENT.md` 仍有旧 `/api/dashboard/` 文字说明残留，本轮未跨仓库修改。
+
+### 修改
+
+- 保留并验证 `run.py` 本地启动输出中文化与迁移日志收敛变更。
+- 保留并验证 `core/management/commands/ensure_dashboard_admin.py` 管理命令输出中文化变更。
+- 覆盖更新 `docs/auto-optimization-latest.md`。
+- 将本轮十二次复核记录追加到本文件末尾。
+
+### 验证
+
+本地已通过：
+
+```bash
+UV_CACHE_DIR=/private/tmp/uv-cache-shop PYTHONDONTWRITEBYTECODE=1 uv run python manage.py check
+UV_CACHE_DIR=/private/tmp/uv-cache-shop PYTHONDONTWRITEBYTECODE=1 uv run python -m py_compile run.py core/management/commands/ensure_dashboard_admin.py
+UV_CACHE_DIR=/private/tmp/uv-cache-shop PYTHONDONTWRITEBYTECODE=1 uv run python manage.py ensure_dashboard_admin --help
+UV_CACHE_DIR=/private/tmp/uv-cache-shop PYTHONDONTWRITEBYTECODE=1 uv run python manage.py migrate --plan --noinput
+git diff --check
+```
+
+本轮沿用并确认上一轮已通过的固定巡检验证：`manage.py check`、主模块编译检查、字段内省、14 个任务中心测试、59 个 bot 返回链/路由测试、5 个云资产迁移/同步聚焦测试、`makemigrations --check --dry-run`、SQLite `migrate --plan`、红线关键字扫描、废弃 app 目录扫描、后端旧 API 前缀扫描和前端旧 API 前缀只读扫描。
 
 ### 剩余风险
 

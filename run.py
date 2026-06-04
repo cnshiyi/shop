@@ -36,6 +36,10 @@ def env_bool(name: str, default: bool = False) -> bool:
     return value.strip().lower() in {'1', 'true', 'yes', 'on'}
 
 
+def zh_bool(value: bool) -> str:
+    return '开启' if value else '关闭'
+
+
 def env_int(name: str, default: int, minimum: int | None = None) -> int:
     try:
         value = int(str(os.getenv(name, str(default))).strip() or default)
@@ -48,6 +52,12 @@ def env_int(name: str, default: int, minimum: int | None = None) -> int:
 
 def run_manage(*args: str) -> None:
     subprocess.check_call([PYTHON, 'manage.py', *args], cwd=BASE_DIR, env=build_env())
+
+
+def run_migrate() -> None:
+    print('[run.py] 正在检查并应用数据库迁移', flush=True)
+    run_manage('migrate', '--verbosity', '0')
+    print('[run.py] 数据库迁移检查完成', flush=True)
 
 
 def start_process(*args: str) -> subprocess.Popen:
@@ -148,9 +158,9 @@ def build_runserver_command() -> list[str]:
 
 def run_web() -> int:
     cleanup_port(8000)
-    run_manage('migrate')
+    run_migrate()
     run_manage('ensure_dashboard_admin')
-    print(f'[run.py] starting web autoreload={web_autoreload_enabled()}', flush=True)
+    print(f'[run.py] 正在启动 Web 服务：自动重载={zh_bool(web_autoreload_enabled())}', flush=True)
     return subprocess.call(build_runserver_command(), cwd=BASE_DIR, env=build_env())
 
 
@@ -178,10 +188,10 @@ def run_bot() -> int:
         restart_count += 1
         limit = bot_restart_limit()
         if limit and restart_count > limit:
-            print(f'[run.py] bot keepalive reached restart limit={limit}, last_code={code}', flush=True)
+            print(f'[run.py] 机器人保活已达到重启上限：上限={limit}；最近退出码={code}', flush=True)
             return code
         delay = bot_keepalive_delay(restart_count)
-        print(f'[run.py] bot process exited code={code}; restarting in {delay}s (restart_count={restart_count})', flush=True)
+        print(f'[run.py] 机器人进程已退出：退出码={code}；将在 {delay} 秒后重启；重启次数={restart_count}', flush=True)
         time.sleep(delay)
 
 
@@ -204,8 +214,8 @@ def build_cloud_sync_worker_command() -> list[str]:
 
 
 def run_worker() -> int:
-    run_manage('migrate')
-    print('[run.py] starting cloud sync worker', flush=True)
+    run_migrate()
+    print('[run.py] 正在启动云资产同步 worker', flush=True)
     return subprocess.call(build_cloud_sync_worker_command(), cwd=BASE_DIR, env=build_env())
 
 
@@ -213,9 +223,9 @@ def run_all() -> int:
     cleanup_port(8000)
     cleanup_bot_runner()
     cleanup_cloud_sync_worker()
-    run_manage('migrate')
+    run_migrate()
     run_manage('ensure_dashboard_admin')
-    print(f'[run.py] starting web autoreload={web_autoreload_enabled()}', flush=True)
+    print(f'[run.py] 正在启动 Web 服务：自动重载={zh_bool(web_autoreload_enabled())}', flush=True)
     web_process = subprocess.Popen(build_runserver_command(), cwd=BASE_DIR, env=build_env())
     bot_process = start_process('-m', 'bot.runner')
     worker_process = subprocess.Popen(build_cloud_sync_worker_command(), cwd=BASE_DIR, env=build_env()) if cloud_sync_worker_enabled() else None
@@ -227,25 +237,25 @@ def run_all() -> int:
             bot_code = bot_process.poll()
             worker_code = worker_process.poll() if worker_process else None
             if web_code is not None:
-                print(f'[run.py] web process exited code={web_code}', flush=True)
+                print(f'[run.py] Web 进程已退出：退出码={web_code}', flush=True)
                 return web_code
             if bot_code is not None:
                 if not should_keepalive_bot():
-                    print(f'[run.py] bot process exited code={bot_code}', flush=True)
+                    print(f'[run.py] 机器人进程已退出：退出码={bot_code}', flush=True)
                     return bot_code
                 bot_restart_count += 1
                 limit = bot_restart_limit()
                 if limit and bot_restart_count > limit:
-                    print(f'[run.py] bot keepalive reached restart limit={limit}, last_code={bot_code}', flush=True)
+                    print(f'[run.py] 机器人保活已达到重启上限：上限={limit}；最近退出码={bot_code}', flush=True)
                     return bot_code
                 delay = bot_keepalive_delay(bot_restart_count)
-                print(f'[run.py] bot process exited code={bot_code}; restarting in {delay}s (restart_count={bot_restart_count})', flush=True)
+                print(f'[run.py] 机器人进程已退出：退出码={bot_code}；将在 {delay} 秒后重启；重启次数={bot_restart_count}', flush=True)
                 time.sleep(delay)
                 bot_process = start_process('-m', 'bot.runner')
             if worker_process and worker_code is not None:
                 worker_restart_count += 1
                 delay = min(60, 5 * worker_restart_count)
-                print(f'[run.py] cloud sync worker exited code={worker_code}; restarting in {delay}s (restart_count={worker_restart_count})', flush=True)
+                print(f'[run.py] 云资产同步 worker 已退出：退出码={worker_code}；将在 {delay} 秒后重启；重启次数={worker_restart_count}', flush=True)
                 time.sleep(delay)
                 worker_process = subprocess.Popen(build_cloud_sync_worker_command(), cwd=BASE_DIR, env=build_env())
             time.sleep(2)

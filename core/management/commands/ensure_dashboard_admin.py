@@ -5,7 +5,7 @@ import os
 
 
 class Command(BaseCommand):
-    help = 'Ensure a default dashboard admin exists'
+    help = '确保默认后台管理员存在'
 
     def handle(self, *args, **options):
         User = get_user_model()
@@ -33,12 +33,12 @@ class Command(BaseCommand):
                 changed = True
             if changed:
                 user.save()
-                self.stdout.write(self.style.SUCCESS(f'Updated dashboard admin: {username}'))
+                self.stdout.write(self.style.SUCCESS(f'后台管理员已更新：{username}'))
             else:
-                self.stdout.write(self.style.SUCCESS(f'Dashboard admin already ready: {username}'))
+                self.stdout.write(self.style.SUCCESS(f'后台管理员已就绪：{username}'))
             return
 
         if not password and not settings.DEBUG:
             raise CommandError('生产环境创建后台管理员必须设置 DASHBOARD_ADMIN_PASSWORD。')
         User.objects.create_superuser(username=username, email=email, password=password or 'Admin@123456')
-        self.stdout.write(self.style.SUCCESS(f'Created dashboard admin: {username}'))
+        self.stdout.write(self.style.SUCCESS(f'后台管理员已创建：{username}'))
