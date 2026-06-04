@@ -7288,6 +7288,49 @@ git diff --check
 - 本轮未执行真实 Telegram 点击、真实云资源创建/删除/IP 变更、真实支付、链上广播、生产发布或不可逆操作。
 - 前端 `DEVELOPMENT.md` 仍有旧 `/api/dashboard/` 描述残留；源码只读扫描未发现旧调用。
 
+## 2026-06-04 默认 MySQL 项目冒烟复核
+
+### 范围
+
+用户要求“用 mysql 跑一遍项目”。本轮读取自动化记忆、当前 git 状态、最近提交和 `django-shop-backend` 技能后，使用默认 MySQL 配置执行非破坏性项目冒烟验证。不创建或删除 MySQL 测试库，不执行真实云资源、真实支付、链上广播、生产发布或其它不可逆操作。
+
+### 发现
+
+- 当前最近提交为 `5fa2f09`「中文化本地启动脚本输出」，工作树开局干净。
+- 默认数据库连接可用，`migrate --plan` 输出 `No planned migration operations`。
+- 默认库 ORM 只读内省确认 `db_vendor=mysql`，当前库名为 `a`，可读取 `TelegramUser`、`CloudAsset` 和 `CloudServerOrder` 计数。
+- 字段内省确认废弃 app 未安装；`CloudAsset` 到期字段仍只有 `actual_expires_at`；`CloudServerOrder` 未恢复 `actual_expires_at` 或 `service_expires_at`；`CloudAssetDashboardSnapshot` 未恢复实际到期字段。
+- 短启动 `runserver 127.0.0.1:18080 --noreload` 冒烟通过，本机 HTTP 请求返回 200，随后已主动中断服务进程。
+
+### 修改
+
+- 覆盖更新 `docs/auto-optimization-latest.md`。
+- 在本文件追加本轮中文冒烟记录。
+
+### 验证
+
+本地已通过：
+
+```bash
+UV_CACHE_DIR=/private/tmp/uv-cache-shop PYTHONDONTWRITEBYTECODE=1 uv run python manage.py check
+UV_CACHE_DIR=/private/tmp/uv-cache-shop PYTHONDONTWRITEBYTECODE=1 uv run python manage.py migrate --plan --noinput
+UV_CACHE_DIR=/private/tmp/uv-cache-shop PYTHONDONTWRITEBYTECODE=1 uv run python manage.py makemigrations --check --dry-run
+UV_CACHE_DIR=/private/tmp/uv-cache-shop PYTHONDONTWRITEBYTECODE=1 uv run python -m py_compile shop/urls.py shop/admin_urls.py shop/auth_urls.py run.py core/management/commands/ensure_dashboard_admin.py bot/handlers.py bot/api.py cloud/task_center.py cloud/services.py cloud/provisioning.py
+UV_CACHE_DIR=/private/tmp/uv-cache-shop PYTHONDONTWRITEBYTECODE=1 uv run python manage.py shell -c "...默认 MySQL 只读内省..."
+UV_CACHE_DIR=/private/tmp/uv-cache-shop PYTHONDONTWRITEBYTECODE=1 uv run python - <<'PY'
+# 短启动 runserver，轮询 http://127.0.0.1:18080/，收到 HTTP 200 后主动中断
+PY
+```
+
+结果：MySQL 默认配置下系统检查、迁移计划、迁移生成检查、关键模块编译、ORM 只读内省和短启动 HTTP 冒烟均通过。
+
+### 剩余风险
+
+- 本轮未跑完整测试套件。
+- 本轮未用 MySQL 创建/删除测试库运行 Django 测试；为避免触碰数据库删除类操作，仅执行默认库非破坏性冒烟。
+- 本轮未在生产或独立真实 MySQL/MariaDB 环境执行完整迁移演练。
+- 本轮未执行真实 Telegram 点击、真实云资源创建/删除/IP 变更、真实支付、链上广播、生产发布或不可逆操作。
+
 ## 2026-06-03 固定巡检八次复核
 
 ### 范围
