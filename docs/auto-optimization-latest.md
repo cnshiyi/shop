@@ -4,25 +4,27 @@
 
 ## 最近一轮
 
-- 时间：2026-06-04 20:29 CST
-- 状态：按用户确认继续收紧“所有重装都走重装迁移/重建”的语义，bot 资产重装确认和订单重装确认不再保留“当前机重新安装”兜底路径。
-- 本轮范围：`bot/handlers.py` 将资产重装确认限制为必须拿到 `replacement_for_id` 的重建迁移订单，否则直接提示重新进入详情或联系人工；订单确认只允许两类后续动作：正常服务订单的“重建迁移”和未完成订单的“继续初始化”。
-- 本轮结论：用户点击“重新安装/重装确认”时不会再走当前服务器原地重跑安装；“继续初始化”只作为 `paid/provisioning/failed` 未完成订单恢复流程存在，按钮文案也明确显示为“确认继续初始化”。
+- 时间：2026-06-04 20:56 CST
+- 状态：按用户要求完成 Telegram bot 真机重测；实际创建 1 台 AWS Lightsail 测试服务器并完成开通，随后真实删除实例并释放固定 IP；同时修复重装确认页旧文案。
+- 本轮范围：主菜单、购买节点、新购钱包支付、云服务器开通、个人中心、订单筛选、余额筛选、充值提示、提醒列表、地址监控、代理列表、自动续费查询、IP 查询、续费入口、换 IP 入口、重装确认页、修改配置入口、联系客服。
+- 本轮修复：`core/texts.py` 中 `bot_reinstall_confirm`、`bot_reinstall_validate_ok`、`bot_reinstall_need_main_link` 默认文案统一为“重建迁移”；`bot/tests.py` 增加全局文案反向断言，防止“确认重新安装/重新安装大约/期间代理可能会断连”回流。
+- 本轮结论：bot 真机主流程可用；重装确认页已重测为“确认重建迁移”；测试云资源已清理。
 
 ## 最近验证
 
-- `DB_ENGINE=mysql UV_CACHE_DIR=/private/tmp/uv-cache-shop PYTHONDONTWRITEBYTECODE=1 uv run python -m py_compile bot/handlers.py cloud/services.py cloud/tests.py bot/tests.py` 通过。
-- `DJANGO_TEST_SQLITE=1 UV_CACHE_DIR=/private/tmp/uv-cache-shop PYTHONDONTWRITEBYTECODE=1 uv run python manage.py test cloud.tests.CloudServerServicesTestCase.test_create_cloud_server_rebuild_order_reuses_original_static_ip_without_temp cloud.tests.CloudServerServicesTestCase.test_reinit_request_creates_rebuild_order_for_active_server cloud.tests.CloudServerServicesTestCase.test_reinit_request_keeps_unfinished_order_as_resume_init cloud.tests.CloudServerServicesTestCase.test_rebuild_source_migration_schedule_preserves_asset_expiry cloud.tests.CloudServerServicesTestCase.test_rebuild_job_keeps_old_instance_until_migration_due --settings=shop.settings --verbosity=2` 通过，5 个重装/重建迁移测试 OK。
-- `DJANGO_TEST_SQLITE=1 UV_CACHE_DIR=/private/tmp/uv-cache-shop PYTHONDONTWRITEBYTECODE=1 uv run python manage.py test bot.tests.RetainedIpRenewalUiTestCase.test_reinstall_cancel_buttons_keep_back_path bot.tests.RetainedIpRenewalUiTestCase.test_reinstall_confirm_handlers_reuse_saved_back_path_after_submit bot.tests.RetainedIpRenewalUiTestCase.test_cloud_action_handlers_compact_nested_back_callback_before_reuse bot.tests.BotOrderAndBalanceFilterTestCase.test_admin_query_keyboard_includes_reinstall_and_expiry_actions --settings=shop.settings --verbosity=2` 通过，4 个 bot 按钮/返回链/源码约束测试 OK。
+- 真机：`@ceshiayan_bot` 轮询启动成功，项目数据库内 `TelegramLoginAccount #1` 可登录并能真实发送 `/start`、点击 inline 按钮。
+- 真机：新购订单 `#90` 创建 AWS Lightsail 实例成功，固定 IP 绑定成功，BBR、MTProxy 主代理、备用代理、Telemt 多端口和 SOCKS5 安装成功；随后实例真实删除、固定 IP 真实释放，本地订单/资产为 `deleted`。
+- `DB_ENGINE=mysql UV_CACHE_DIR=/private/tmp/uv-cache-shop PYTHONDONTWRITEBYTECODE=1 uv run python -m py_compile core/texts.py bot/tests.py bot/handlers.py` 通过。
+- `DJANGO_TEST_SQLITE=1 UV_CACHE_DIR=/private/tmp/uv-cache-shop PYTHONDONTWRITEBYTECODE=1 uv run python manage.py test bot.tests.RetainedIpRenewalUiTestCase.test_legacy_custom_port_flow_is_removed bot.tests.RetainedIpRenewalUiTestCase.test_reinstall_cancel_buttons_keep_back_path bot.tests.RetainedIpRenewalUiTestCase.test_reinstall_confirm_handlers_reuse_saved_back_path_after_submit --settings=shop.settings --verbosity=2` 通过。
 - `DB_ENGINE=mysql UV_CACHE_DIR=/private/tmp/uv-cache-shop PYTHONDONTWRITEBYTECODE=1 uv run python manage.py check` 通过。
 - `git diff --check` 通过。
-- `rg -n "确认重新安装|重新安装大约|准备重新安装|普通重装|不创建新实例|不迁移固定 IP|继续初始化当前服务器|else '重新安装'|已确认重新安装|retry_only=True" bot cloud -g '*.py'` 仅命中测试里的反向断言。
 
 ## 剩余风险
 
-- 本轮只改本地代码和测试，没有执行真实云创建、删除、固定 IP 释放、链上转账、真实支付或生产发布。
-- SQLite 测试环境继续打印不支持 `db_comment` / `db_table_comment` 的预期 warning。
+- 本轮执行了真实 AWS Lightsail 创建、删除和固定 IP 释放；完整脱敏记录已写入 `docs/real-machine-test-report.md`。
+- 本轮没有执行链上广播或真实地址充值到账。
+- TRON 扫块器在真机 bot 运行期间出现若干 429/ReadTimeout 重试日志，不影响本轮 bot 点击路径，但仍属于生产可观测风险。
 
 ## 下一步
 
-- 真机 bot 点击测试时，正常服务中的“重新安装”应创建 `SRVREBUILD` 新订单；如果创建失败，应提示无法创建重建迁移订单，不应继续当前机初始化。
+- 如果继续真机深测，建议单独验证“续费入口点击即进入待支付续费状态”的产品预期；本轮只确认入口可用，并未保留待支付状态。

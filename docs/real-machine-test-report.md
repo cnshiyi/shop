@@ -161,3 +161,84 @@
 - 真实候选处理：曾从全局 `lifecycle_tick` 入口尝试覆盖到期链路，真实库中一个既有普通删机候选被扫描并执行为 `deleted`，关联资产也为 `deleted/is_active=False`，生命周期任务为 `delete/done`。该资源属于既有替换链订单，不记录完整公网 IP、实例名、云资源 ID 或凭据。
 - 后续规则：除非明确要处理真实库全部到期候选，生命周期专项验证使用指定订单/资产执行器或只读计划刷新，不直接跑全局 `lifecycle_tick`。
 - 敏感信息：未记录完整公网 IP、代理链接、代理 secret、登录密码、Telegram token、session 或云账号密钥。
+
+## 2026-06-04 Telegram Bot 全功能真机重测与测试资源清理
+
+- 状态：通过，过程中发现并修复 1 个重装确认文案问题。
+- 授权：延续用户对真实 Telegram 账号、项目数据库余额和真实云资源测试的授权。
+- 后端仓库：`/Users/a399/Desktop/data/shop`
+- bot：`@ceshiayan_bot`
+- 登录账号：项目数据库内 `TelegramLoginAccount #1`，状态 `logged_in`
+- 测试用户：`TelegramUser #173`
+- 云厂商：AWS Lightsail
+- 套餐：新加坡，`实机测试 Nano`
+
+### 启动与登录
+
+- 本轮启动 `run.py bot` 真机进程，bot 轮询成功启动。
+- 项目数据库内 Telegram 登录账号可用，使用该账号向 bot 发送 `/start` 并实际点击 inline 按钮。
+- 启动时后台调度器也启动了生命周期、TRON 扫块、云同步等任务；TRON 扫块出现若干 429/ReadTimeout 重试日志，但不影响 bot 点击路径。
+
+### 主菜单与个人中心
+
+- `/start`：返回主菜单成功。
+- `👤 个人中心`：返回余额、订单、充值、明细、提醒、地址监控菜单成功。
+- `🔙 返回主菜单`：返回成功。
+- `📋 我的订单`：订单列表成功，筛选 `已支付`、`未付款`、`续费`、`新购` 均可切换。
+- `💰 充值余额`：币种选择成功；点击 `USDT` 后进入金额输入提示，未提交真实链上充值。
+- `📜 充值记录`：返回空记录提示成功。
+- `💳 余额明细`：列表成功，筛选 `收入`、`支出`、`充值`、`消费` 均可切换。
+- `🔔 提醒列表`：列表成功。
+- `🔍 地址监控`：添加地址提示和监控列表入口成功，未提交真实监控地址。
+
+### 查询与自助动作
+
+- `🔎 到期时间查询`：查询中心成功。
+- `🖥 代理列表`：列出当前可用代理成功。
+- `⚡ 自动续费查询`：列出自动续费状态成功。
+- `🔎 IP查询到期`：输入脱敏测试 IP 后返回到期时间、状态和自助动作按钮成功。
+- `⚡ 开启自动续费`：实际开启成功；随后点击 `⛔ 关闭自动续费` 还原成功。
+- `👩‍💻 联系客服`：提示发送问题/订单号/截图成功。
+- `⚙️ 修改配置`：真实点击后返回“当前状态不允许修改配置”，未创建配置变更订单。
+- `🌐 更换IP`：进入地区选择页成功，未继续确认创建新资源。
+- `🔄 续费IP`：进入续费页成功；该入口会把当前订单置为待支付续费状态，本轮后续已随测试资源一起清理。
+
+### 新购与开通
+
+- 操作路径：`🛠 购买节点` -> `新加坡` -> `套餐一` -> `数量 1` -> `钱包支付` -> `USDT 钱包支付`。
+- 订单：`#90` / `SRV20260604124116893188`
+- 资产：`#335`
+- 云实例：`20260604-************-*-o90`
+- 公网 IP：`13.250.xxx.xxx`
+- 支付方式：USDT 钱包余额支付。
+- 金额：5 USDT。
+- 结果：AWS Lightsail 实例创建成功，固定 IP 分配并绑定成功，SSH 密码登录成功，BBR 初始化成功，MTProxy 主代理、备用代理、Telemt 多端口和 SOCKS5 均安装成功。
+- 用户侧通知：bot 发送“云服务器创建完成”通知成功。
+- 敏感信息：未记录完整公网 IP、代理链接、代理 secret、登录密码、Telegram token、session 或云账号密钥。
+
+### 重装文案问题与修复
+
+- 发现：从 IP 查询结果点击 `🛠 重新安装` 后，确认页正文仍显示旧文案“确认重新安装/重新安装大约需要 5 分钟/期间代理可能会断连”，但按钮已显示“确认重建迁移”。
+- 修复：更新 `core.texts.BOT_TEXTS` 中 `bot_reinstall_confirm`、`bot_reinstall_validate_ok` 和 `bot_reinstall_need_main_link` 默认文案，统一为“重建迁移”语义。
+- 回归：重启 bot 后再次点击 `🛠 重新安装`，确认页显示“确认重建迁移？系统会新建服务器并迁移固定 IP，主/备用链接保持不变；旧机保留 3 天后进入删除流程。”，按钮为“确认重建迁移”。
+
+### 测试资源清理
+
+- 清理对象：本轮新购测试订单 `#90`、资产 `#335`、脱敏云实例 `20260604-************-*-o90`、脱敏固定 IP `13.250.xxx.xxx`。
+- 清理方式：先将本轮测试订单标记为人工测试清理中，再调用生命周期执行器真实删除 AWS 实例，随后释放该订单固定 IP。
+- 删除结果：`delete_ok=True`，实例标识已清空。
+- 固定 IP 释放结果：`recycle_ok=True`，固定 IP 名称已清空。
+- 最终本地状态：订单 `#90` 为 `deleted`，`public_ip` 为空，`previous_public_ip` 保留脱敏历史 IP；资产 `#335` 为 `deleted/is_active=False`。
+
+### 本轮验证
+
+- `DB_ENGINE=mysql UV_CACHE_DIR=/private/tmp/uv-cache-shop PYTHONDONTWRITEBYTECODE=1 uv run python -m py_compile core/texts.py bot/tests.py bot/handlers.py` 通过。
+- `DJANGO_TEST_SQLITE=1 UV_CACHE_DIR=/private/tmp/uv-cache-shop PYTHONDONTWRITEBYTECODE=1 uv run python manage.py test bot.tests.RetainedIpRenewalUiTestCase.test_legacy_custom_port_flow_is_removed bot.tests.RetainedIpRenewalUiTestCase.test_reinstall_cancel_buttons_keep_back_path bot.tests.RetainedIpRenewalUiTestCase.test_reinstall_confirm_handlers_reuse_saved_back_path_after_submit --settings=shop.settings --verbosity=2` 通过。
+- `DB_ENGINE=mysql UV_CACHE_DIR=/private/tmp/uv-cache-shop PYTHONDONTWRITEBYTECODE=1 uv run python manage.py check` 通过。
+- `git diff --check` 通过。
+
+### 剩余风险
+
+- 本轮执行了真实 AWS Lightsail 创建、实例删除和固定 IP 释放；资源已按测试报告完成清理。
+- 本轮没有执行链上广播或真实地址充值到账。
+- 续费入口点击会让现有订单进入待支付续费状态；本轮由于测试资源最终删除，未保留该待支付状态。

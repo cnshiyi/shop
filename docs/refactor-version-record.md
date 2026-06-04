@@ -8656,6 +8656,53 @@ git diff --check
 - 本轮未执行真实云创建、删除、固定 IP 释放、链上广播、真实支付或生产发布。
 - SQLite 测试环境仍会打印不支持 `db_comment` / `db_table_comment` 的预期 warning。
 
+## 2026-06-04 Telegram Bot 真机重测与重建迁移文案修复
+
+### 背景
+
+用户要求再次真机重测机器人功能。前一轮代码已把重装执行路径收敛到重建迁移，但真机点击 IP 查询结果页的 `🛠 重新安装` 后，确认页正文仍来自 `core.texts.BOT_TEXTS` 的旧默认文案，显示“确认重新安装/重新安装大约需要 5 分钟/期间代理可能会断连”，与当前“所有重装都走重装迁移/重建”的规则不一致。
+
+### 真机重测
+
+- 启动 `run.py bot`，bot `@ceshiayan_bot` 轮询成功，项目数据库内 `TelegramLoginAccount #1` 可用。
+- 使用真实 Telegram 登录账号发送 `/start` 并点击 inline 按钮。
+- 覆盖主菜单、个人中心、订单列表和筛选、余额明细和筛选、充值币种/金额提示、提醒列表、地址监控添加/列表入口、查询中心、代理列表、自动续费查询、IP 查询结果页、联系客服。
+- 覆盖 IP 查询结果页动作入口：续费入口、换 IP 地区选择、重装确认页、修改配置入口、自动续费开关和还原。
+- 执行真实新购：新加坡 `实机测试 Nano`，USDT 钱包余额支付，AWS Lightsail 实例创建、固定 IP 绑定、BBR、MTProxy 主代理、备用代理、Telemt 多端口和 SOCKS5 全部成功。
+- 测试资源清理：通过生命周期执行器真实删除本轮测试实例，并释放本轮固定 IP；本地订单 `#90` 和资产 `#335` 最终为 `deleted`。
+
+### 修改
+
+- `core/texts.py`：`bot_reinstall_confirm` 默认文案改为“确认重建迁移”，说明新建服务器、迁移固定 IP、旧机保留 3 天。
+- `core/texts.py`：`bot_reinstall_validate_ok` 默认文案改为重建迁移语义。
+- `core/texts.py`：`bot_reinstall_need_main_link` 末尾改为“确认是否重建迁移”。
+- `bot/tests.py`：在全局 bot 文案测试中增加反向断言，禁止旧“确认重新安装”“重新安装大约”“期间代理可能会断连”文案回流，并要求 `bot_reinstall_confirm` 包含“确认重建迁移”。
+
+### 验证
+
+本地已通过：
+
+```bash
+DB_ENGINE=mysql UV_CACHE_DIR=/private/tmp/uv-cache-shop PYTHONDONTWRITEBYTECODE=1 uv run python -m py_compile core/texts.py bot/tests.py bot/handlers.py
+DJANGO_TEST_SQLITE=1 UV_CACHE_DIR=/private/tmp/uv-cache-shop PYTHONDONTWRITEBYTECODE=1 uv run python manage.py test bot.tests.RetainedIpRenewalUiTestCase.test_legacy_custom_port_flow_is_removed bot.tests.RetainedIpRenewalUiTestCase.test_reinstall_cancel_buttons_keep_back_path bot.tests.RetainedIpRenewalUiTestCase.test_reinstall_confirm_handlers_reuse_saved_back_path_after_submit --settings=shop.settings --verbosity=2
+DB_ENGINE=mysql UV_CACHE_DIR=/private/tmp/uv-cache-shop PYTHONDONTWRITEBYTECODE=1 uv run python manage.py check
+git diff --check
+```
+
+结果：编译通过；3 个 bot 文案/重装按钮聚焦测试通过；`manage.py check` 通过；`git diff --check` 通过。第一次聚焦测试命令使用了错误类名，其中两个正确测试通过，一个错误类名未执行业务测试；随后已用正确类名重跑通过。
+
+### 真机复核结论
+
+- 重装确认页重启 bot 后已显示“确认重建迁移？系统会新建服务器并迁移固定 IP，主/备用链接保持不变；旧机保留 3 天后进入删除流程。”，按钮为“确认重建迁移”。
+- 本轮真机新购测试资源已清理，订单 `#90` 为 `deleted`，资产 `#335` 为 `deleted/is_active=False`，实例标识和固定 IP 名称均已清空。
+- 详细脱敏记录见 `docs/real-machine-test-report.md`。
+
+### 剩余风险
+
+- 本轮执行了真实 AWS Lightsail 创建、删除和固定 IP 释放；未执行链上广播或真实地址充值到账。
+- 真机运行期间 TRON 扫块器出现 429/ReadTimeout 重试日志，需要后续继续关注。
+- 续费入口点击会让现有订单进入待支付续费状态；本轮测试资源最终删除，没有保留待支付续费状态。
+
 ## 2026-06-04 重装入口强制走重建迁移
 
 ### 背景
