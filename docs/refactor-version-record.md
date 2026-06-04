@@ -7296,8 +7296,8 @@ git diff --check
 
 ### 发现
 
-- 本轮开始时工作树已有 `docs/refactor-version-record.md` 未提交差异，内容为删除上一轮“固定巡检十一次复核”记录；本轮未直接回滚该差异，而是在当前文件末尾追加本轮记录并覆盖最新状态。
-- 当前最近提交为 `1c0a05c`「记录固定巡检十一次复核」。
+- 本轮开始时工作树已有 `docs/refactor-version-record.md` 未提交差异，内容为删除上一轮“固定巡检十一次复核”记录；运行中并行会话已提交 `c935564`「修正固定巡检十一次记录位置」，本轮在该提交之上继续更新最新状态并补充十二次复核记录。
+- 本轮启动时最近提交为 `1c0a05c`「记录固定巡检十一次复核」；提交前当前 `HEAD` 为 `c935564`「修正固定巡检十一次记录位置」。
 - 未发现需要修改运行代码的新问题，本轮只更新中文巡检记录。
 - 字段内省确认废弃 app 未安装；`CloudAsset` 到期字段仍只有 `actual_expires_at`；`CloudServerOrder` 未恢复 `actual_expires_at` 或 `service_expires_at`，仅保留现有 `renew_grace_expires_at` 和订单自身 `expired_at`；`CloudAssetDashboardSnapshot` 未恢复实际到期字段，`risk_expired` 仍只是风险状态标记。
 - 固定 IP 保留相关命中仍集中在 `ip_recycle_at` 与 `CloudAsset.actual_expires_at` 的回收链路同步，未恢复订单服务到期字段。
@@ -7307,6 +7307,7 @@ git diff --check
 - 迁移/重建/AWS 同步 5 个聚焦测试继续通过，确认 `migration_due_at` 不会覆盖资产 `actual_expires_at`。
 - 红线关键字扫描未发现运行代码恢复订单到期字段、旧计划快照、旧退款函数名或废弃 runtime app。命中项仍为资产侧唯一到期事实、固定 IP 回收同步或 `_asset_expires_at` 临时属性。
 - 前端源码和前端 docs 只读扫描未发现旧 `/api/dashboard`、`/api/users`、`/api/task-list` 或 `/api/plan-settings` 调用；`/Users/a399/Desktop/data/vue-shop-admin/DEVELOPMENT.md` 仍有旧 `/api/dashboard/` 文字说明残留，本轮未跨仓库修改。
+- 针对默认 MySQL `migrate --plan` 失败，已复查 `shop/settings.py`：默认 `DB_ENGINE=mysql` 且缺省连接 `127.0.0.1:3306`，`DB_ENGINE=sqlite` 和 `DJANGO_TEST_SQLITE=1` 已覆盖本地/测试 SQLite 路径；当前运行环境没有常见 MySQL socket 文件，无法在沙箱内绕开 TCP 限制完成默认 MySQL 计划验证。
 
 ### 修改
 
@@ -7333,12 +7334,12 @@ rg -n "/api/dashboard|/api/users|/api/task-list|/api/plan-settings" /Users/a399/
 git diff --check
 ```
 
-结果：`manage.py check`、编译检查、字段内省、14 个任务中心测试、59 个 bot 返回链/路由测试、5 个云资产迁移/同步聚焦测试、默认 `makemigrations --check --dry-run`、SQLite `migrate --plan` 和关键字/目录/旧 API 扫描均符合预期。默认 `makemigrations --check --dry-run` 的迁移历史检查和默认数据库 `migrate --plan` 因当前沙箱无法连接本地 MySQL `127.0.0.1:3306` 打印 warning 或失败，已记录为环境限制。SQLite 检查仍会打印不支持 `db_comment` / `db_table_comment` 的预期 warning；bot 返回链测试仍会打印既有配置读取容错、mocked postcheck 异常和 IP 校验日志。
+结果：`manage.py check`、编译检查、字段内省、14 个任务中心测试、59 个 bot 返回链/路由测试、5 个云资产迁移/同步聚焦测试、默认 `makemigrations --check --dry-run`、SQLite `migrate --plan` 和关键字/目录/旧 API 扫描均符合预期。默认 `makemigrations --check --dry-run` 的迁移历史检查和默认数据库 `migrate --plan` 因当前沙箱无法连接本地 MySQL `127.0.0.1:3306` 打印 warning 或失败，且当前未发现可用 MySQL socket，已记录为环境限制。SQLite 检查仍会打印不支持 `db_comment` / `db_table_comment` 的预期 warning；bot 返回链测试仍会打印既有配置读取容错、mocked postcheck 异常和 IP 校验日志。
 
 ### 剩余风险
 
 - 本轮未跑完整测试套件。
-- 本轮默认数据库 `migrate --plan` 因沙箱网络限制无法连接本地 MySQL，未在生产或独立真实 MySQL/MariaDB 环境执行完整迁移演练。
+- 本轮默认数据库 `migrate --plan` 因沙箱网络限制无法连接本地 MySQL，且当前环境未发现可用 MySQL socket；未在生产或独立真实 MySQL/MariaDB 环境执行完整迁移演练。
 - 本轮未执行真实 Telegram 点击、真实云资源创建/删除/IP 变更、真实支付、链上广播、生产发布或不可逆操作。
 - 前端 `DEVELOPMENT.md` 仍有旧 `/api/dashboard/` 描述残留；源码只读扫描未发现旧调用。
 
