@@ -4824,7 +4824,7 @@ class CloudServerServicesTestCase(TestCase):
         self.assertIsNotNone(source_order.migration_due_at)
 
     # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
-    def test_reinit_request_reinstalls_current_server_without_rebuild_order(self):
+    def test_reinit_request_creates_rebuild_order_for_active_server(self):
         source_expires_at = timezone.now() + timezone.timedelta(days=31)
         source_order = CloudServerOrder.objects.create(
             order_no='HB-TEST-REINIT-NO-REBUILD-1',
@@ -4852,10 +4852,43 @@ class CloudServerServicesTestCase(TestCase):
 
         result = async_to_sync(mark_cloud_server_reinit_requested)(source_order.id, self.user.id)
 
+        self.assertNotEqual(result.id, source_order.id)
+        self.assertEqual(result.replacement_for_id, source_order.id)
+        self.assertTrue(result.order_no.startswith('SRVREBUILD'))
+        self.assertEqual(result.static_ip_name, source_order.static_ip_name)
+        self.assertEqual(result.mtproxy_secret, source_order.mtproxy_secret)
+        source_order.refresh_from_db()
+        self.assertIn('重装迁移', source_order.provision_note)
+        self.assertIsNotNone(source_order.migration_due_at)
+
+    # 功能：验证未完成订单仍走继续初始化，不创建重建迁移订单。
+    def test_reinit_request_keeps_unfinished_order_as_resume_init(self):
+        source_order = CloudServerOrder.objects.create(
+            order_no='HB-TEST-REINIT-RESUME-1',
+            user=self.user,
+            plan=self.plan,
+            provider=self.plan.provider,
+            region_code=self.plan.region_code,
+            region_name=self.plan.region_name,
+            plan_name=self.plan.plan_name,
+            quantity=1,
+            currency='USDT',
+            total_amount='19.00',
+            pay_amount='19.00',
+            pay_method='balance',
+            status='failed',
+            public_ip='1.2.3.45',
+            login_password='root-password',
+            mtproxy_port=8443,
+            service_started_at=timezone.now(),
+        )
+
+        result = async_to_sync(mark_cloud_server_reinit_requested)(source_order.id, self.user.id)
+
         self.assertEqual(result.id, source_order.id)
         self.assertFalse(CloudServerOrder.objects.filter(replacement_for=source_order).exists())
         source_order.refresh_from_db()
-        self.assertIn('不创建新实例，不迁移固定 IP', source_order.provision_note)
+        self.assertIn('继续初始化请求', source_order.provision_note)
         self.assertIsNone(source_order.migration_due_at)
 
     # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。

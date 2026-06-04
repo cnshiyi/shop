@@ -4076,10 +4076,10 @@ def mark_cloud_server_reinit_requested(order_id: int, user_id: int | None):
         return False
     if not _has_main_proxy_link(order):
         return 'missing_main_link'
-    note = '用户发起当前服务器重新安装请求：仅重新执行 BBR/MTProxy 安装，不创建新实例，不迁移固定 IP。'
-    order.provision_note = '\n'.join(filter(None, [order.provision_note, note]))
-    order.save(update_fields=['provision_note', 'updated_at'])
-    return order
+    rebuild_order, error = create_cloud_server_rebuild_order(order.id)
+    if error or not rebuild_order:
+        return error or '重建迁移订单创建失败'
+    return rebuild_order
 
 
 def _has_main_proxy_link(order: CloudServerOrder) -> bool:

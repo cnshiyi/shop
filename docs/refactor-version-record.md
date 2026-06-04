@@ -8616,3 +8616,42 @@ git diff --check
 
 - SQLite 后端仍会在测试和迁移计划中输出大量 `db_comment` / `db_table_comment` warning，属于预期差异。
 - 本轮未执行真实云资源删除、固定 IP 释放、链上广播、真实支付或生产发布。
+
+## 2026-06-04 弃用普通重装当前机逻辑
+
+### 背景
+
+用户确认“普通重装”应属于已弃用逻辑。当前代码仍存在正常订单直接在当前服务器重新执行 BBR/MTProxy 安装的路径，容易与现行的重建迁移语义冲突。
+
+### 修改
+
+- `cloud/services.py`：`mark_cloud_server_reinit_requested` 对正常服务订单不再返回原订单重跑安装；通过 `create_cloud_server_rebuild_order` 创建 `SRVREBUILD` 替换订单，沿用固定 IP、端口、secret 和资产到期事实，并设置旧机迁移保留计划。
+- `bot/handlers.py`：正常订单的重装入口只对 AWS Lightsail 展示；确认文案改为“重建迁移”，说明新建服务器、迁移固定 IP、旧机保留 3 天。
+- `bot/handlers.py`：资产重装确认不再固定 `retry_only=True`，而是按返回订单是否有 `replacement_for_id` 判断；重建迁移走创建/重建任务，未完成订单才走继续初始化。
+- `cloud/tests.py`：将旧回归测试改为要求正常订单重装创建 `SRVREBUILD` 替换订单；新增未完成订单仍保持继续初始化的测试。
+
+### 当前语义
+
+- 重装：正常 AWS Lightsail 订单创建 `SRVREBUILD` 新订单，新机创建并迁移固定 IP，旧机进入保留期。
+- 继续初始化：仅限 `paid/provisioning/failed` 且没有替换来源的未完成订单，继续使用原订单恢复初始化。
+- 换 IP：仍创建 `SRVIP` 同配置新订单，新机申请新的固定 IP。
+- 修改配置：仍创建 `SRVUPGRADE` / `SRVDOWNGRADE` 新订单，目标规格新机迁移原固定 IP。
+
+### 验证
+
+本地已通过：
+
+```bash
+DB_ENGINE=mysql UV_CACHE_DIR=/private/tmp/uv-cache-shop PYTHONDONTWRITEBYTECODE=1 uv run python -m py_compile bot/handlers.py cloud/services.py cloud/tests.py bot/tests.py
+DJANGO_TEST_SQLITE=1 UV_CACHE_DIR=/private/tmp/uv-cache-shop PYTHONDONTWRITEBYTECODE=1 uv run python manage.py test cloud.tests.CloudServerServicesTestCase.test_create_cloud_server_rebuild_order_reuses_original_static_ip_without_temp cloud.tests.CloudServerServicesTestCase.test_reinit_request_creates_rebuild_order_for_active_server cloud.tests.CloudServerServicesTestCase.test_reinit_request_keeps_unfinished_order_as_resume_init cloud.tests.CloudServerServicesTestCase.test_rebuild_source_migration_schedule_preserves_asset_expiry cloud.tests.CloudServerServicesTestCase.test_rebuild_job_keeps_old_instance_until_migration_due --settings=shop.settings --verbosity=2
+DJANGO_TEST_SQLITE=1 UV_CACHE_DIR=/private/tmp/uv-cache-shop PYTHONDONTWRITEBYTECODE=1 uv run python manage.py test bot.tests.RetainedIpRenewalUiTestCase.test_reinstall_confirm_handlers_reuse_saved_back_path_after_submit bot.tests.RetainedIpRenewalUiTestCase.test_cloud_action_handlers_compact_nested_back_callback_before_reuse bot.tests.BotOrderAndBalanceFilterTestCase.test_admin_query_keyboard_includes_reinstall_and_expiry_actions --settings=shop.settings --verbosity=2
+DB_ENGINE=mysql UV_CACHE_DIR=/private/tmp/uv-cache-shop PYTHONDONTWRITEBYTECODE=1 uv run python manage.py check
+git diff --check
+```
+
+结果：编译通过；5 个重装/重建迁移聚焦测试通过；3 个 bot 返回链/按钮测试通过；`manage.py check` 通过；`git diff --check` 通过。第一次 bot 聚焦测试命令使用了错误类名，未执行业务测试，随后已用正确类名重跑通过。
+
+### 剩余风险
+
+- 本轮未执行真实云创建、删除、固定 IP 释放、链上广播、真实支付或生产发布。
+- SQLite 测试环境仍会打印不支持 `db_comment` / `db_table_comment` 的预期 warning。

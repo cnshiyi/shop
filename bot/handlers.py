@@ -4589,9 +4589,12 @@ def register_handlers(dp: Dispatcher):
             await callback.message.reply(f'{rebuild_order}\n请重新进入详情并重新生成按钮。')
             return
         _ASSET_REINIT_INFLIGHT.add(asset_id)
-        logger.info('CLOUD_ASSET_REINIT_SUBMIT user_id=%s asset_id=%s order_id=%s target_order_id=%s ip=%s', user.id, asset_id, order.id, rebuild_order.id, getattr(item, 'public_ip', None))
-        await callback.message.reply('🛠 已确认重新安装：后台只会在当前服务器重新执行 BBR/MTProxy 安装，不会创建新实例，也不会迁移固定 IP。预计约 5 分钟，完成后会自动通知你。\n\n后台处理期间，底部菜单和其它按钮可正常使用。', reply_markup=_asset_reinstall_submitted_keyboard(asset_id, back_callback))
-        task = asyncio.create_task(_provision_cloud_server_and_notify(bot, callback.from_user.id, rebuild_order.id, rebuild_order.mtproxy_port or MTPROXY_DEFAULT_PORT, retry_only=True))
+        is_rebuild = bool(getattr(rebuild_order, 'replacement_for_id', None))
+        retry_only = bool(not is_rebuild and rebuild_order.status in {'paid', 'provisioning', 'failed'})
+        logger.info('CLOUD_ASSET_REINIT_SUBMIT user_id=%s asset_id=%s order_id=%s target_order_id=%s ip=%s rebuild=%s retry_only=%s', user.id, asset_id, order.id, rebuild_order.id, getattr(item, 'public_ip', None), is_rebuild, retry_only)
+        work_text = '新建服务器并迁移固定 IP，旧机保留 3 天' if is_rebuild else '继续初始化当前服务器'
+        await callback.message.reply(f'🛠 已确认重新安装：后台会{work_text}。预计约 5 分钟，完成后会自动通知你。\n\n后台处理期间，底部菜单和其它按钮可正常使用。', reply_markup=_asset_reinstall_submitted_keyboard(asset_id, back_callback))
+        task = asyncio.create_task(_provision_cloud_server_and_notify(bot, callback.from_user.id, rebuild_order.id, rebuild_order.mtproxy_port or MTPROXY_DEFAULT_PORT, retry_only=retry_only))
         task.add_done_callback(lambda _task, _asset_id=asset_id: _ASSET_REINIT_INFLIGHT.discard(_asset_id))
 
     @dp.callback_query(F.data.startswith('d:'))
@@ -4627,7 +4630,7 @@ def register_handlers(dp: Dispatcher):
         can_renew = bool(order.public_ip and order.status in {'completed', 'expiring', 'suspended', 'renew_pending', 'provisioning', 'paid'})
         can_change_ip = bool(not group_limited and order.provider == 'aws_lightsail' and order.status in {'completed', 'expiring', 'suspended'} and max(int(getattr(order, 'ip_change_quota', 0) or 0), 0) > 0)
         can_resume_init = bool(not group_limited and order.status in {'paid', 'provisioning', 'failed'} and (order.public_ip or not order.mtproxy_secret or not order.mtproxy_link or not order.login_password))
-        can_reinit = bool(not group_limited and order.public_ip and order.login_password and order.status == 'completed')
+        can_reinit = bool(not group_limited and order.provider == 'aws_lightsail' and order.public_ip and order.login_password and order.status == 'completed')
         can_upgrade = bool(not group_limited and order.provider == 'aws_lightsail' and order.status in {'completed', 'expiring', 'suspended'})
         logger.info(
             'CLOUD_DETAIL_RENDER user_id=%s order_id=%s order_no=%s status=%s provider=%s public_ip=%s login_password=%s mtproxy_secret=%s mtproxy_link=%s buttons={renew:%s,change_ip:%s,resume_init:%s,reinit:%s,config:%s} back=%s',
@@ -4979,7 +4982,7 @@ def register_handlers(dp: Dispatcher):
                 order.id,
                 can_renew=True,
                 can_change_ip=bool(order.provider == 'aws_lightsail' and order.public_ip and order.status in {"completed", "expiring", "suspended"} and max(int(getattr(order, 'ip_change_quota', 0) or 0), 0) > 0),
-                can_reinit=bool(order.public_ip and order.login_password and order.status == "completed"),
+                can_reinit=bool(order.provider == 'aws_lightsail' and order.public_ip and order.login_password and order.status == "completed"),
                 back_callback=back_callback or 'cloud:list',
                 can_upgrade=bool(order.provider == 'aws_lightsail' and order.status in {"completed", "expiring", "suspended"}),
                 can_resume_init=bool(order.status in {"paid", "provisioning", "failed"} and (order.public_ip or not order.mtproxy_secret or not order.mtproxy_link or not order.login_password)),
@@ -5080,7 +5083,7 @@ def register_handlers(dp: Dispatcher):
                 order.id,
                 can_renew=True,
                 can_change_ip=bool(order.provider == 'aws_lightsail' and order.public_ip and order.status in {"completed", "expiring", "suspended"} and max(int(getattr(order, 'ip_change_quota', 0) or 0), 0) > 0),
-                can_reinit=bool(order.public_ip and order.login_password and order.status == "completed"),
+                can_reinit=bool(order.provider == 'aws_lightsail' and order.public_ip and order.login_password and order.status == "completed"),
                 back_callback=back_callback or 'cloud:list',
                 can_upgrade=bool(order.provider == 'aws_lightsail' and order.status in {"completed", "expiring", "suspended"}),
                 can_resume_init=bool(order.status in {"paid", "provisioning", "failed"} and (order.public_ip or not order.mtproxy_secret or not order.mtproxy_link or not order.login_password)),
@@ -5295,6 +5298,12 @@ def register_handlers(dp: Dispatcher):
             await _safe_callback_answer(callback, '服务器记录不存在', show_alert=True)
             return
         is_unfinished = order.status in {'paid', 'provisioning', 'failed'}
+        if not is_unfinished and order.provider != 'aws_lightsail':
+            await _safe_callback_answer(callback, '当前仅支持 AWS Lightsail 重建迁移', show_alert=True)
+            return
+        if not is_unfinished and not order.mtproxy_secret:
+            await _safe_callback_answer(callback, '当前服务器缺少 MTProxy 密钥，无法保证链接不变', show_alert=True)
+            return
         if not is_unfinished and (not order.public_ip or not order.login_password):
             logger.warning('CLOUD_REINIT_DENIED user_id=%s order_id=%s order_no=%s status=%s public_ip=%s login_password=%s reason=missing_bootstrap_info', user.id, order.id, order.order_no, order.status, order.public_ip, bool(order.login_password))
             await _safe_callback_answer(callback, '当前服务器缺少公网 IP 或登录密码，暂时无法重新安装；请先在后台补齐实例登录信息', show_alert=True)
@@ -5312,7 +5321,7 @@ def register_handlers(dp: Dispatcher):
             return
         token = await _issue_reinstall_confirm_token(state, kind='order', item_id=order.id)
         await state.update_data(reinstall_back=back_callback)
-        await callback.message.reply(_bot_text('bot_reinstall_confirm', '⚠️ 确认重新安装？\n\n重新安装大约需要 5 分钟，期间代理可能会断连。系统会保持主/备用链接不变。'), reply_markup=_reinstall_confirm_keyboard(order.id, token, back_callback))
+        await callback.message.reply(_bot_text('bot_reinstall_confirm', '⚠️ 确认重建迁移？\n\n系统会新建服务器并迁移固定 IP，主/备用链接保持不变；旧机保留 3 天后进入删除流程。'), reply_markup=_reinstall_confirm_keyboard(order.id, token, back_callback))
 
     @dp.message(CustomServerStates.waiting_retained_ip_renewal_link)
     async def msg_cloud_retained_ip_renewal_link(message: Message, state: FSMContext):

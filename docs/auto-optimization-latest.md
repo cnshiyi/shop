@@ -4,28 +4,24 @@
 
 ## 最近一轮
 
-- 时间：2026-06-04 20:05 CST
-- 状态：按用户要求处理工作树脏文件。将既有模型主键注释、对应迁移、Django 系统表 MySQL 注释迁移、Redis 失败重连退避测试和 `.env.example` 示例配置整理成可提交状态。
-- 本轮提交：`record database comment migrations`；本轮不改生命周期业务逻辑、不触发真实云资源操作、链上转账或生产发布。
-- 本轮范围：`bot/models.py`、`cloud/models.py`、`core/models.py`、`orders/models.py` 显式声明 `BigAutoField id` 并补 `db_comment`；新增/保留对应迁移文件；`core/tests.py` 覆盖 Redis 失败退避期间不重复重连；`.env.example` 使用占位数据库名、用户名和密码。
-- 本轮结论：模型和迁移一致，默认 MySQL 迁移计划无待执行操作，SQLite 迁移计划可生成完整计划；Redis 退避测试通过。
+- 时间：2026-06-04 20:22 CST
+- 状态：按用户确认修正重装语义：普通“当前服务器重装”逻辑已弃用；正常服务中的重装现在走 AWS Lightsail 重建迁移，未完成订单仍保留“继续初始化”。
+- 本轮范围：`cloud.services.mark_cloud_server_reinit_requested` 不再对正常订单返回原订单重跑安装，而是创建 `SRVREBUILD` 替换订单；bot 详情和续费后详情只对 AWS 正常订单展示重装入口；bot 确认文案改为“重建迁移”；资产重装确认按返回订单判断是否重建迁移，不再固定 `retry_only=True`。
+- 本轮结论：三条高风险操作语义已收口：重装=重建迁移，换 IP=同配置新机新 IP，修改配置=目标规格新机并迁移固定 IP；只有 `paid/provisioning/failed` 未完成订单继续使用当前订单初始化恢复。
 
 ## 最近验证
 
-- `DJANGO_TEST_SQLITE=1 UV_CACHE_DIR=/private/tmp/uv-cache-shop PYTHONDONTWRITEBYTECODE=1 uv run python manage.py test core.tests.RedisCacheBackoffTestCase --settings=shop.settings --verbosity=2` 通过，1 个测试 OK。
+- `DB_ENGINE=mysql UV_CACHE_DIR=/private/tmp/uv-cache-shop PYTHONDONTWRITEBYTECODE=1 uv run python -m py_compile bot/handlers.py cloud/services.py cloud/tests.py bot/tests.py` 通过。
+- `DJANGO_TEST_SQLITE=1 UV_CACHE_DIR=/private/tmp/uv-cache-shop PYTHONDONTWRITEBYTECODE=1 uv run python manage.py test cloud.tests.CloudServerServicesTestCase.test_create_cloud_server_rebuild_order_reuses_original_static_ip_without_temp cloud.tests.CloudServerServicesTestCase.test_reinit_request_creates_rebuild_order_for_active_server cloud.tests.CloudServerServicesTestCase.test_reinit_request_keeps_unfinished_order_as_resume_init cloud.tests.CloudServerServicesTestCase.test_rebuild_source_migration_schedule_preserves_asset_expiry cloud.tests.CloudServerServicesTestCase.test_rebuild_job_keeps_old_instance_until_migration_due --settings=shop.settings --verbosity=2` 通过，5 个重装/重建迁移测试 OK。
+- `DJANGO_TEST_SQLITE=1 UV_CACHE_DIR=/private/tmp/uv-cache-shop PYTHONDONTWRITEBYTECODE=1 uv run python manage.py test bot.tests.RetainedIpRenewalUiTestCase.test_reinstall_confirm_handlers_reuse_saved_back_path_after_submit bot.tests.RetainedIpRenewalUiTestCase.test_cloud_action_handlers_compact_nested_back_callback_before_reuse bot.tests.BotOrderAndBalanceFilterTestCase.test_admin_query_keyboard_includes_reinstall_and_expiry_actions --settings=shop.settings --verbosity=2` 通过，3 个 bot 返回链/按钮测试 OK。
 - `DB_ENGINE=mysql UV_CACHE_DIR=/private/tmp/uv-cache-shop PYTHONDONTWRITEBYTECODE=1 uv run python manage.py check` 通过。
-- `DJANGO_TEST_SQLITE=1 UV_CACHE_DIR=/private/tmp/uv-cache-shop PYTHONDONTWRITEBYTECODE=1 uv run python manage.py makemigrations --check --dry-run --settings=shop.settings` 通过，输出 `No changes detected`。
-- `DJANGO_TEST_SQLITE=1 UV_CACHE_DIR=/private/tmp/uv-cache-shop PYTHONDONTWRITEBYTECODE=1 uv run python manage.py test core.tests --settings=shop.settings --verbosity=1` 通过，15 个测试 OK。
-- `DJANGO_TEST_SQLITE=1 UV_CACHE_DIR=/private/tmp/uv-cache-shop PYTHONDONTWRITEBYTECODE=1 uv run python manage.py migrate --plan --settings=shop.settings` 通过，可生成完整迁移计划；SQLite 仅打印不支持 `db_comment` / `db_table_comment` 的预期 warning。
-- `DB_ENGINE=mysql UV_CACHE_DIR=/private/tmp/uv-cache-shop PYTHONDONTWRITEBYTECODE=1 uv run python manage.py migrate --plan` 通过，输出 `No planned migration operations`。
 - `git diff --check` 通过。
 
 ## 剩余风险
 
-- 这批迁移主要是数据库注释和显式主键字段声明，不改变业务生命周期规则；生产环境如已应用这些迁移，提交后代码库与数据库迁移记录重新对齐。
-- SQLite 测试环境会继续打印 `db_comment` / `db_table_comment` 不支持的 warning，属于后端能力差异。
-- 本轮未执行真实云删除、固定 IP 释放、链上转账或生产发布。
+- 本轮只改本地代码和测试，没有执行真实云创建、删除、固定 IP 释放、链上转账或生产发布。
+- SQLite 测试环境继续打印不支持 `db_comment` / `db_table_comment` 的预期 warning。
 
 ## 下一步
 
-- 脏文件提交后，继续按用户要求做后续测试或巡检；如继续生命周期专项，避免直接运行全局 `lifecycle_tick` 处理无关真实候选。
+- 如果继续真机点击测试，重装按钮应表现为“重建迁移”：创建 `SRVREBUILD` 新订单，新机成功后迁移固定 IP，旧机保留 3 天后进入删除流程。
