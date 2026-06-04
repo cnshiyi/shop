@@ -6,6 +6,7 @@ from core.crypto import decrypt_text, encrypt_text
 
 
 class TelegramLoginAccount(models.Model):
+    id = models.BigAutoField('ID', primary_key=True, db_comment='主键ID')
     label = models.CharField('账号备注', max_length=191, db_comment='账号备注')
     phone = models.CharField('手机号', max_length=64, blank=True, null=True, db_comment='手机号')
     tg_user_id = models.BigIntegerField('Telegram 用户ID', blank=True, null=True, db_index=True, db_comment='Telegram 用户ID')
@@ -47,6 +48,7 @@ class TelegramLoginAccount(models.Model):
 
 
 class TelegramUser(models.Model):
+    id = models.BigAutoField('ID', primary_key=True, db_comment='主键ID')
     tg_user_id = models.BigIntegerField('Telegram 用户ID', unique=True, db_index=True, db_comment='Telegram 用户唯一数字ID')
     username = models.TextField('用户名集合', blank=True, null=True, db_comment='用户名集合')
     first_name = models.CharField('昵称', max_length=191, blank=True, null=True, db_comment='昵称')
@@ -119,6 +121,7 @@ class BotOperationLog(models.Model):
         (ACTION_CALLBACK, '点击按钮'),
     ]
 
+    id = models.BigAutoField('ID', primary_key=True, db_comment='主键ID')
     user = models.ForeignKey(TelegramUser, verbose_name='Telegram用户', on_delete=models.SET_NULL, blank=True, null=True, related_name='operation_logs', db_comment='Telegram用户')
     tg_user_id = models.BigIntegerField('Telegram用户ID', db_index=True, db_comment='Telegram用户ID')
     chat_id = models.BigIntegerField('会话ID', blank=True, null=True, db_index=True, db_comment='会话ID')
@@ -146,6 +149,7 @@ class BotOperationLog(models.Model):
 
 
 class TelegramChatArchive(models.Model):
+    id = models.BigAutoField('ID', primary_key=True, db_comment='主键ID')
     chat_id = models.BigIntegerField('会话ID', unique=True, db_index=True, db_comment='会话ID')
     title = models.CharField('会话标题', max_length=191, blank=True, null=True, db_comment='会话标题')
     note = models.TextField('备注', blank=True, null=True, db_comment='备注')
@@ -164,6 +168,7 @@ class TelegramChatArchive(models.Model):
 
 
 class TelegramGroupFilter(models.Model):
+    id = models.BigAutoField('ID', primary_key=True, db_comment='主键ID')
     chat_id = models.BigIntegerField('群组会话ID', unique=True, db_index=True, db_comment='群组会话ID')
     title = models.CharField('群组名称', max_length=191, blank=True, null=True, db_comment='群组名称')
     username = models.CharField('群组用户名', max_length=191, blank=True, null=True, db_index=True, db_comment='群组用户名')
@@ -186,6 +191,7 @@ class TelegramGroupFilter(models.Model):
 
 
 class AdminReplyLink(models.Model):
+    id = models.BigAutoField('ID', primary_key=True, db_comment='主键ID')
     admin_chat_id = models.BigIntegerField('管理员会话ID', db_index=True, db_comment='管理员会话ID')
     admin_message_id = models.BigIntegerField('管理员消息ID', db_index=True, db_comment='管理员消息ID')
     user = models.ForeignKey(TelegramUser, verbose_name='Telegram用户', on_delete=models.CASCADE, related_name='admin_reply_links', db_comment='Telegram用户')
@@ -219,6 +225,7 @@ class TelegramChatMessage(models.Model):
         (DIRECTION_OUT, '发出'),
     ]
 
+    id = models.BigAutoField('ID', primary_key=True, db_comment='主键ID')
     user = models.ForeignKey(TelegramUser, verbose_name='Telegram用户', on_delete=models.SET_NULL, blank=True, null=True, related_name='chat_messages', db_comment='Telegram用户')
     login_account = models.ForeignKey(TelegramLoginAccount, verbose_name='登录账号', on_delete=models.SET_NULL, blank=True, null=True, related_name='chat_messages', db_comment='登录账号')
     tg_user_id = models.BigIntegerField('Telegram用户ID', db_index=True, db_comment='Telegram用户ID')

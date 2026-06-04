@@ -25,6 +25,7 @@ class SiteConfig(models.Model):
     _plain_value_cache = {}
     _cache_lock = RLock()
 
+    id = models.BigAutoField('ID', primary_key=True, db_comment='主键ID')
     key = models.CharField('键', max_length=191, unique=True, db_index=True, db_comment='键')
     value = models.TextField('值', blank=True, null=True, db_comment='配置值；敏感配置会加密存储')
     is_sensitive = models.BooleanField('敏感配置', default=False, db_comment='是否按敏感配置加密存储')
@@ -152,6 +153,7 @@ class CloudAccountConfig(models.Model):
         (STATUS_UNSUPPORTED, '暂不支持'),
     )
 
+    id = models.BigAutoField('ID', primary_key=True, db_comment='主键ID')
     provider = models.CharField('云厂商', max_length=32, choices=PROVIDER_CHOICES, db_index=True, db_comment='云厂商')
     name = models.CharField('账户名称', max_length=128, db_comment='账户名称')
     external_account_id = models.CharField('云厂商账号ID', max_length=128, blank=True, null=True, db_index=True, db_comment='云厂商账号ID')
@@ -214,6 +216,7 @@ class ExternalSyncLog(models.Model):
         (SOURCE_DASHBOARD, '后台接口'),
     )
 
+    id = models.BigAutoField('ID', primary_key=True, db_comment='主键ID')
     account = models.ForeignKey('core.CloudAccountConfig', verbose_name='关联账户', on_delete=models.SET_NULL, blank=True, null=True, related_name='sync_logs', db_comment='关联账户')
     source = models.CharField('来源', max_length=32, choices=SOURCE_CHOICES, db_index=True, db_comment='来源')
     action = models.CharField('动作', max_length=64, db_index=True, db_comment='动作')

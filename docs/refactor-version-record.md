@@ -8566,3 +8566,53 @@ DB_ENGINE=mysql UV_CACHE_DIR=/private/tmp/uv-cache-shop PYTHONDONTWRITEBYTECODE=
 - 到期后本地成功删除链路使用本地替身阻断云 API，主要验证数据库状态转换；真实云 API 删除仅发生在上述既有候选的全局扫描处理中。
 - 本轮未执行链上广播、真实充值到账或生产发布。
 - 工作树仍包含本轮外既存脏文件和迁移文件，本轮未回退。
+
+## 2026-06-04 工作树脏文件整理
+
+### 范围
+
+本轮按用户要求“先处理脏文件”，整理此前留在工作树中的模型、迁移、测试和示例配置改动。处理目标是让代码库与当前数据库迁移状态重新对齐，并避免示例配置携带看起来像真实密码的值。
+
+### 修改
+
+- `bot/models.py`：为运行时模型显式声明 `id = models.BigAutoField(..., db_comment='主键ID')`。
+- `cloud/models.py`：为云服务器、云资产、同步任务、生命周期任务、通知任务、地址监控等运行时模型显式声明主键字段注释。
+- `core/models.py`：为 `SiteConfig`、`CloudAccountConfig`、`ExternalSyncLog` 显式声明主键字段注释。
+- `orders/models.py`：为商品、购物车、余额流水、充值、普通订单模型显式声明主键字段注释。
+- `bot/migrations/0017`、`bot/migrations/0018`、`cloud/migrations/0051`、`core/migrations/0014`、`orders/migrations/0007`：记录上述主键字段注释迁移。
+- `core/migrations/0015_comment_django_system_tables.py`：为 Django auth/contenttypes/session/migrations 系统表在 MySQL 下补充表和列注释；非 MySQL 后端直接跳过。
+- `core/tests.py`：新增 Redis 失败重连退避测试，确认失败后退避窗口内不会重复创建 Redis 连接。
+- `.env.example`：新增示例环境配置，并将数据库名、用户名、密码改为占位值，避免示例值被误认为真实凭据。
+
+### 验证
+
+本地已通过：
+
+```bash
+DJANGO_TEST_SQLITE=1 UV_CACHE_DIR=/private/tmp/uv-cache-shop PYTHONDONTWRITEBYTECODE=1 uv run python manage.py test core.tests.RedisCacheBackoffTestCase --settings=shop.settings --verbosity=2
+DB_ENGINE=mysql UV_CACHE_DIR=/private/tmp/uv-cache-shop PYTHONDONTWRITEBYTECODE=1 uv run python manage.py check
+DJANGO_TEST_SQLITE=1 UV_CACHE_DIR=/private/tmp/uv-cache-shop PYTHONDONTWRITEBYTECODE=1 uv run python manage.py makemigrations --check --dry-run --settings=shop.settings
+DJANGO_TEST_SQLITE=1 UV_CACHE_DIR=/private/tmp/uv-cache-shop PYTHONDONTWRITEBYTECODE=1 uv run python manage.py test core.tests --settings=shop.settings --verbosity=1
+DJANGO_TEST_SQLITE=1 UV_CACHE_DIR=/private/tmp/uv-cache-shop PYTHONDONTWRITEBYTECODE=1 uv run python manage.py migrate --plan --settings=shop.settings
+DB_ENGINE=mysql UV_CACHE_DIR=/private/tmp/uv-cache-shop PYTHONDONTWRITEBYTECODE=1 uv run python manage.py migrate --plan
+git diff --check
+```
+
+结果：
+
+- Redis 聚焦测试 1 条通过。
+- `manage.py check` 通过。
+- `makemigrations --check --dry-run` 输出 `No changes detected`，说明模型和迁移一致。
+- `core.tests` 15 条通过。
+- SQLite `migrate --plan` 能生成完整迁移计划；SQLite 仅打印不支持 `db_comment` / `db_table_comment` 的预期 warning。
+- 默认 MySQL `migrate --plan` 输出 `No planned migration operations`，说明当前数据库迁移记录已与这些迁移对齐。
+- `git diff --check` 通过。
+
+### 结论
+
+脏文件属于一组可提交的数据库注释、迁移、Redis 退避测试和示例配置整理。没有发现订单到期字段、旧计划快照、旧退款入口或废弃 runtime app 回流；没有修改云资产生命周期业务规则。
+
+### 剩余风险
+
+- SQLite 后端仍会在测试和迁移计划中输出大量 `db_comment` / `db_table_comment` warning，属于预期差异。
+- 本轮未执行真实云资源删除、固定 IP 释放、链上广播、真实支付或生产发布。

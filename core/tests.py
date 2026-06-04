@@ -48,6 +48,33 @@ class MySqlSqlModeSettingsTestCase(SimpleTestCase):
                 _mysql_sql_mode()
 
 
+class RedisCacheBackoffTestCase(SimpleTestCase):
+    def tearDown(self):
+        from core import cache
+
+        async_to_sync(cache.close)()
+
+    def test_get_redis_skips_reconnect_during_failure_backoff(self):
+        from core import cache
+
+        class FailingRedis:
+            async def ping(self):
+                raise OSError('redis down')
+
+        async_to_sync(cache.close)()
+        with (
+            patch.dict(os.environ, {'REDIS_RETRY_INTERVAL_SECONDS': '30'}, clear=False),
+            patch('core.cache.redis.from_url', return_value=FailingRedis()) as from_url,
+            patch('core.cache._redis_retry_now', side_effect=[100.0, 101.0]),
+        ):
+            first = async_to_sync(cache.get_redis)()
+            second = async_to_sync(cache.get_redis)()
+
+        self.assertIsNone(first)
+        self.assertIsNone(second)
+        self.assertEqual(from_url.call_count, 1)
+
+
 class CryptoDecryptTestCase(SimpleTestCase):
     def test_plain_legacy_value_still_returns_as_plaintext(self):
         self.assertEqual(decrypt_text('legacy-plain-value'), 'legacy-plain-value')

@@ -13,6 +13,7 @@ class Product(models.Model):
         (CONTENT_VIDEO, '视频'),
     )
 
+    id = models.BigAutoField('ID', primary_key=True, db_comment='主键ID')
     name = models.TextField('商品名称', db_comment='商品名称')
     description = models.TextField('商品描述', blank=True, null=True, db_comment='商品描述')
     price = models.DecimalField('商品单价(USDT)', max_digits=18, decimal_places=6, db_comment='商品单价(USDT)')
@@ -45,6 +46,7 @@ class CartItem(models.Model):
         (ITEM_CLOUD_PLAN, '云套餐'),
     )
 
+    id = models.BigAutoField('ID', primary_key=True, db_comment='主键ID')
     user = models.ForeignKey('bot.TelegramUser', verbose_name='用户', on_delete=models.CASCADE, related_name='cart_items', db_comment='用户')
     item_type = models.CharField('项目类型', max_length=32, choices=ITEM_TYPE_CHOICES, default=ITEM_PRODUCT, db_comment='项目类型')
     product = models.ForeignKey('orders.Product', verbose_name='商品', on_delete=models.CASCADE, related_name='cart_items', blank=True, null=True, db_comment='商品')
@@ -87,6 +89,7 @@ class BalanceLedger(models.Model):
         ('TRX', 'TRX'),
     )
 
+    id = models.BigAutoField('ID', primary_key=True, db_comment='主键ID')
     user = models.ForeignKey('bot.TelegramUser', verbose_name='用户', related_name='balance_ledgers', on_delete=models.CASCADE, db_comment='用户')
     type = models.CharField('类型', max_length=64, choices=TYPE_CHOICES, db_index=True, db_comment='类型')
     direction = models.CharField('方向', max_length=16, choices=DIRECTION_CHOICES, db_index=True, db_comment='方向')
@@ -122,6 +125,7 @@ class Recharge(models.Model):
         ('TRX', 'TRX'),
     )
 
+    id = models.BigAutoField('ID', primary_key=True, db_comment='主键ID')
     user = models.ForeignKey('bot.TelegramUser', verbose_name='用户', on_delete=models.CASCADE, db_comment='用户')
     currency = models.CharField('币种', max_length=32, choices=CURRENCY_CHOICES, default='USDT', db_index=True, db_comment='币种')
     amount = models.DecimalField('充值金额', max_digits=18, decimal_places=6, db_comment='充值金额')
@@ -162,6 +166,7 @@ class Order(models.Model):
         ('TRX', 'TRX'),
     )
 
+    id = models.BigAutoField('ID', primary_key=True, db_comment='主键ID')
     order_no = models.CharField('订单号', max_length=191, unique=True, db_index=True, db_comment='普通商品订单唯一编号')
     user = models.ForeignKey('bot.TelegramUser', verbose_name='用户', on_delete=models.CASCADE, db_comment='用户')
     product = models.ForeignKey('orders.Product', verbose_name='商品', on_delete=models.PROTECT, db_comment='商品')

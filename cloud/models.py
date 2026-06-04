@@ -14,6 +14,7 @@ class CloudServerPlan(models.Model):
         (PROVIDER_ALIYUN_ECS, '阿里云轻量云'),
     )
 
+    id = models.BigAutoField('ID', primary_key=True, db_comment='主键ID')
     provider = models.CharField('云厂商', max_length=32, choices=PROVIDER_CHOICES, db_index=True, db_comment='云厂商')
     region_code = models.CharField('地区代码', max_length=64, db_index=True, db_comment='地区代码')
     region_name = models.CharField('地区名称', max_length=128, db_comment='地区名称')
@@ -57,6 +58,7 @@ class CloudServerPlan(models.Model):
 
 
 class ServerPrice(models.Model):
+    id = models.BigAutoField('ID', primary_key=True, db_comment='主键ID')
     provider = models.CharField('云厂商', max_length=32, choices=CloudServerPlan.PROVIDER_CHOICES, db_index=True, db_comment='云厂商')
     region_code = models.CharField('地区代码', max_length=64, db_index=True, db_comment='地区代码')
     region_name = models.CharField('地区名称', max_length=128, db_comment='地区名称')
@@ -118,6 +120,7 @@ class CloudServerOrder(models.Model):
         ('TRX', 'TRX'),
     )
 
+    id = models.BigAutoField('ID', primary_key=True, db_comment='主键ID')
     order_no = models.CharField('订单号', max_length=191, unique=True, db_index=True, db_comment='云服务器订单唯一编号')
     user = models.ForeignKey('bot.TelegramUser', verbose_name='用户', on_delete=models.CASCADE, db_comment='用户')
     plan = models.ForeignKey('cloud.CloudServerPlan', verbose_name='套餐', on_delete=models.PROTECT, db_comment='套餐')
@@ -254,6 +257,7 @@ class CloudAsset(models.Model):
         (SOURCE_ORDER, '订单创建'),
     )
 
+    id = models.BigAutoField('ID', primary_key=True, db_comment='主键ID')
     kind = models.CharField('资产类型', max_length=32, choices=KIND_CHOICES, db_index=True, db_comment='资产类型')
     source = models.CharField('来源', max_length=32, choices=SOURCE_CHOICES, default=SOURCE_ORDER, db_index=True, db_comment='来源')
     provider = models.CharField('云厂商', max_length=32, blank=True, null=True, db_index=True, db_comment='云厂商')
@@ -324,6 +328,7 @@ class CloudAsset(models.Model):
 
 
 class CloudAssetDashboardSnapshot(models.Model):
+    id = models.BigAutoField('ID', primary_key=True, db_comment='主键ID')
     asset = models.OneToOneField('cloud.CloudAsset', verbose_name='云资产', on_delete=models.CASCADE, related_name='dashboard_snapshot', db_comment='云资产')
     payload = models.JSONField('列表载荷', default=dict, blank=True, db_comment='列表载荷')
     search_text = models.TextField('搜索文本', blank=True, db_comment='搜索文本')
@@ -395,6 +400,7 @@ class CloudAssetSyncJob(models.Model):
     )
     TERMINAL_STATUSES = {STATUS_SUCCEEDED, STATUS_PARTIAL, STATUS_FAILED, STATUS_CANCELLED}
 
+    id = models.BigAutoField('ID', primary_key=True, db_comment='主键ID')
     run_id = models.CharField('运行ID', max_length=32, unique=True, db_index=True, db_comment='运行ID')
     status = models.CharField('状态', max_length=32, choices=STATUS_CHOICES, default=STATUS_QUEUED, db_index=True, db_comment='状态')
     requested_by = models.ForeignKey(settings.AUTH_USER_MODEL, verbose_name='发起人', on_delete=models.SET_NULL, blank=True, null=True, related_name='cloud_asset_sync_jobs', db_comment='发起人')
@@ -465,6 +471,7 @@ class CloudAssetSyncJobEvent(models.Model):
         (TYPE_HEARTBEAT, '心跳'),
     )
 
+    id = models.BigAutoField('ID', primary_key=True, db_comment='主键ID')
     job_id = models.BigIntegerField('同步任务ID', db_index=True, db_comment='同步任务ID')
     event_type = models.CharField('事件类型', max_length=32, choices=TYPE_CHOICES, db_index=True, db_comment='事件类型')
     status_from = models.CharField('原状态', max_length=32, default='', blank=True, db_comment='原状态')
@@ -509,6 +516,7 @@ class CloudIpLog(models.Model):
         (EVENT_RECYCLED, '回收'),
     )
 
+    id = models.BigAutoField('ID', primary_key=True, db_comment='主键ID')
     order = models.ForeignKey('cloud.CloudServerOrder', verbose_name='关联订单', on_delete=models.SET_NULL, blank=True, null=True, related_name='ip_logs', db_comment='关联订单')
     asset = models.ForeignKey('cloud.CloudAsset', verbose_name='关联资产', on_delete=models.SET_NULL, blank=True, null=True, related_name='ip_logs', db_comment='关联资产')
     user = models.ForeignKey('bot.TelegramUser', verbose_name='关联用户', on_delete=models.SET_NULL, blank=True, null=True, related_name='cloud_ip_logs', db_comment='关联用户')
@@ -547,6 +555,7 @@ class CloudLifecyclePlanNote(models.Model):
         (PLAN_KIND_UNATTACHED_IP_DELETE, '未附加固定IP删除计划'),
     )
 
+    id = models.BigAutoField('ID', primary_key=True, db_comment='主键ID')
     plan_kind = models.CharField('计划类型', max_length=64, choices=PLAN_KIND_CHOICES, db_index=True, db_comment='计划类型')
     order = models.ForeignKey('cloud.CloudServerOrder', verbose_name='关联订单', on_delete=models.SET_NULL, blank=True, null=True, related_name='lifecycle_plan_notes', db_comment='关联订单')
     asset = models.ForeignKey('cloud.CloudAsset', verbose_name='关联资产', on_delete=models.SET_NULL, blank=True, null=True, related_name='lifecycle_plan_notes', db_comment='关联资产')
@@ -610,6 +619,7 @@ class CloudLifecycleTask(models.Model):
         (STATUS_CANCELLED, '已取消'),
     )
 
+    id = models.BigAutoField('ID', primary_key=True, db_comment='主键ID')
     source_key = models.CharField('来源唯一键', max_length=191, unique=True, db_comment='生命周期任务幂等来源唯一键')
     task_type = models.CharField('任务类型', max_length=64, choices=TASK_TYPE_CHOICES, db_index=True, db_comment='任务类型')
     source_kind = models.CharField('来源类型', max_length=32, choices=SOURCE_KIND_CHOICES, db_index=True, db_comment='来源类型')
@@ -671,6 +681,7 @@ class CloudNoticeTask(models.Model):
         (STATUS_CANCELLED, '已取消'),
     )
 
+    id = models.BigAutoField('ID', primary_key=True, db_comment='主键ID')
     source_key = models.CharField('来源唯一键', max_length=191, unique=True, db_comment='通知任务幂等来源唯一键')
     notice_type = models.CharField('通知类型', max_length=64, choices=NOTICE_TYPE_CHOICES, db_index=True, db_comment='通知类型')
     order = models.ForeignKey('cloud.CloudServerOrder', verbose_name='关联订单', on_delete=models.SET_NULL, blank=True, null=True, related_name='notice_tasks', db_comment='关联订单')
@@ -720,6 +731,7 @@ class CloudAutoRenewRetryTask(models.Model):
         (STATUS_FAILED, '重试失败'),
     ]
 
+    id = models.BigAutoField('ID', primary_key=True, db_comment='主键ID')
     order = models.ForeignKey('cloud.CloudServerOrder', verbose_name='云服务器订单', on_delete=models.CASCADE, related_name='auto_renew_retry_tasks', db_comment='云服务器订单')
     user = models.ForeignKey('bot.TelegramUser', verbose_name='用户', on_delete=models.SET_NULL, blank=True, null=True, related_name='auto_renew_retry_tasks', db_comment='用户')
     order_no = models.CharField('订单号', max_length=191, db_index=True, db_comment='订单号')
@@ -751,6 +763,7 @@ class CloudAutoRenewRetryTask(models.Model):
 
 
 class CloudAutoRenewPatrolLog(models.Model):
+    id = models.BigAutoField('ID', primary_key=True, db_comment='主键ID')
     order = models.ForeignKey('cloud.CloudServerOrder', verbose_name='云服务器订单', on_delete=models.SET_NULL, blank=True, null=True, related_name='auto_renew_patrol_logs', db_comment='云服务器订单')
     user = models.ForeignKey('bot.TelegramUser', verbose_name='用户', on_delete=models.SET_NULL, blank=True, null=True, related_name='auto_renew_patrol_logs', db_comment='用户')
     batch_id = models.CharField('巡检批次', max_length=64, db_index=True, db_comment='巡检批次')
@@ -789,6 +802,7 @@ class CloudAutoRenewPatrolLog(models.Model):
 
 
 class CloudUserNoticeLog(models.Model):
+    id = models.BigAutoField('ID', primary_key=True, db_comment='主键ID')
     user = models.ForeignKey('bot.TelegramUser', verbose_name='用户', on_delete=models.SET_NULL, blank=True, null=True, related_name='cloud_notice_logs', db_comment='用户')
     order = models.ForeignKey('cloud.CloudServerOrder', verbose_name='云服务器订单', on_delete=models.SET_NULL, blank=True, null=True, related_name='notice_logs', db_comment='云服务器订单')
     batch_id = models.CharField('通知批次', max_length=64, blank=True, default='', db_index=True, db_comment='通知批次')
@@ -821,6 +835,7 @@ class CloudUserNoticeLog(models.Model):
 
 
 class AddressMonitor(models.Model):
+    id = models.BigAutoField('ID', primary_key=True, db_comment='主键ID')
     user = models.ForeignKey('bot.TelegramUser', verbose_name='用户', on_delete=models.CASCADE, db_comment='用户')
     address = models.CharField('监控地址', max_length=191, db_index=True, db_comment='监控地址')
     remark = models.TextField('备注', blank=True, null=True, db_comment='备注')
@@ -862,6 +877,7 @@ class DailyAddressStat(models.Model):
         (ACCOUNT_SCOPE_CLOUD, '云账户'),
     )
 
+    id = models.BigAutoField('ID', primary_key=True, db_comment='主键ID')
     user = models.ForeignKey('bot.TelegramUser', verbose_name='用户', on_delete=models.CASCADE, related_name='daily_address_stats', db_comment='用户')
     monitor = models.ForeignKey('cloud.AddressMonitor', verbose_name='监控地址', on_delete=models.SET_NULL, blank=True, null=True, related_name='daily_stats', db_comment='监控地址')
     account_scope = models.CharField('账户归属类型', max_length=32, choices=ACCOUNT_SCOPE_CHOICES, default=ACCOUNT_SCOPE_PLATFORM, db_index=True, db_comment='账户归属类型')
@@ -896,6 +912,7 @@ class DailyAddressStat(models.Model):
 
 
 class ResourceSnapshot(models.Model):
+    id = models.BigAutoField('ID', primary_key=True, db_comment='主键ID')
     monitor = models.ForeignKey('cloud.AddressMonitor', verbose_name='监控地址', on_delete=models.CASCADE, related_name='resource_snapshots', db_comment='监控地址')
     account_scope = models.CharField('账户归属类型', max_length=32, choices=DailyAddressStat.ACCOUNT_SCOPE_CHOICES, default=DailyAddressStat.ACCOUNT_SCOPE_PLATFORM, db_index=True, db_comment='账户归属类型')
     account_key = models.CharField('账户标识', max_length=191, blank=True, null=True, db_index=True, db_comment='账户标识')
