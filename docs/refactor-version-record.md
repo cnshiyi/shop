@@ -8655,3 +8655,45 @@ git diff --check
 
 - 本轮未执行真实云创建、删除、固定 IP 释放、链上广播、真实支付或生产发布。
 - SQLite 测试环境仍会打印不支持 `db_comment` / `db_table_comment` 的预期 warning。
+
+## 2026-06-04 重装入口强制走重建迁移
+
+### 背景
+
+用户进一步确认“所有的重装都走重装迁移/重建”。上一轮已经把服务层正常重装改为创建 `SRVREBUILD`，但 bot 资产确认路径仍存在按返回订单状态退回“继续初始化当前服务器”的兜底文案和任务分支，订单确认路径也仍保留一个理论上的“重新安装”兜底动作文本。
+
+### 修改
+
+- `bot/handlers.py`：资产重装确认必须拿到带 `replacement_for_id` 的重建迁移订单；如果服务层返回原订单或其它非替换订单，直接提示“无法创建重建迁移订单”，不再调度当前机初始化。
+- `bot/handlers.py`：资产重装提交文案改为“已确认重建迁移”，后台任务固定以 `retry_only=False` 创建新机并迁移固定 IP。
+- `bot/handlers.py`：订单重装确认只允许“重建迁移”和“继续初始化”两种动作；非重建、非未完成恢复的异常返回会中止，不再显示或执行“重新安装”兜底。
+- `bot/tests.py`：补充确认按钮文案断言，要求普通确认显示“确认重建迁移”、未完成恢复显示“确认继续初始化”、资产确认显示“确认重建迁移”。
+- `bot/tests.py`：补充源码约束断言，防止资产重装确认重新出现“继续初始化当前服务器”或订单确认重新出现 `else '重新安装'`。
+
+### 当前语义
+
+- 重装：正常 AWS Lightsail 服务订单必须创建 `SRVREBUILD` 新订单，新机创建并迁移固定 IP，旧机保留 3 天后进入删除流程。
+- 资产重装：必须进入重建迁移；如果无法创建替换订单，则中止并提示重新进入详情或联系人工。
+- 继续初始化：只保留给 `paid/provisioning/failed` 且没有替换来源的未完成订单，用于恢复首次创建/初始化流程，不再作为“重装”兜底。
+- 换 IP：仍创建同配置新机并申请新固定 IP。
+- 修改配置：仍创建目标配置新机并迁移原固定 IP。
+
+### 验证
+
+本地已通过：
+
+```bash
+DB_ENGINE=mysql UV_CACHE_DIR=/private/tmp/uv-cache-shop PYTHONDONTWRITEBYTECODE=1 uv run python -m py_compile bot/handlers.py cloud/services.py cloud/tests.py bot/tests.py
+DJANGO_TEST_SQLITE=1 UV_CACHE_DIR=/private/tmp/uv-cache-shop PYTHONDONTWRITEBYTECODE=1 uv run python manage.py test cloud.tests.CloudServerServicesTestCase.test_create_cloud_server_rebuild_order_reuses_original_static_ip_without_temp cloud.tests.CloudServerServicesTestCase.test_reinit_request_creates_rebuild_order_for_active_server cloud.tests.CloudServerServicesTestCase.test_reinit_request_keeps_unfinished_order_as_resume_init cloud.tests.CloudServerServicesTestCase.test_rebuild_source_migration_schedule_preserves_asset_expiry cloud.tests.CloudServerServicesTestCase.test_rebuild_job_keeps_old_instance_until_migration_due --settings=shop.settings --verbosity=2
+DJANGO_TEST_SQLITE=1 UV_CACHE_DIR=/private/tmp/uv-cache-shop PYTHONDONTWRITEBYTECODE=1 uv run python manage.py test bot.tests.RetainedIpRenewalUiTestCase.test_reinstall_cancel_buttons_keep_back_path bot.tests.RetainedIpRenewalUiTestCase.test_reinstall_confirm_handlers_reuse_saved_back_path_after_submit bot.tests.RetainedIpRenewalUiTestCase.test_cloud_action_handlers_compact_nested_back_callback_before_reuse bot.tests.BotOrderAndBalanceFilterTestCase.test_admin_query_keyboard_includes_reinstall_and_expiry_actions --settings=shop.settings --verbosity=2
+DB_ENGINE=mysql UV_CACHE_DIR=/private/tmp/uv-cache-shop PYTHONDONTWRITEBYTECODE=1 uv run python manage.py check
+git diff --check
+rg -n "确认重新安装|重新安装大约|准备重新安装|普通重装|不创建新实例|不迁移固定 IP|继续初始化当前服务器|else '重新安装'|已确认重新安装|retry_only=True" bot cloud -g '*.py'
+```
+
+结果：编译通过；5 个重装/重建迁移服务测试通过；4 个 bot 按钮/返回链/源码约束测试通过；`manage.py check` 通过；`git diff --check` 通过；旧重装兜底关键字扫描只命中测试里的反向断言。
+
+### 剩余风险
+
+- 本轮未执行真实云创建、删除、固定 IP 释放、链上广播、真实支付或生产发布。
+- SQLite 测试环境仍会打印不支持 `db_comment` / `db_table_comment` 的预期 warning。

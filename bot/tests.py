@@ -1122,8 +1122,12 @@ class RetainedIpRenewalUiTestCase(SimpleTestCase):
 
     def test_reinstall_cancel_buttons_keep_back_path(self):
         order_markup = _reinstall_confirm_keyboard(88, 'token', 'cloud:list:page:3')
+        resume_markup = _reinstall_confirm_keyboard(88, 'token', 'cloud:list:page:3', resume_init=True)
         asset_markup = _asset_reinstall_confirm_keyboard(99, 'token', 'cloud:querymenu')
 
+        self.assertEqual(order_markup.inline_keyboard[0][0].text, '确认重建迁移')
+        self.assertEqual(resume_markup.inline_keyboard[0][0].text, '确认继续初始化')
+        self.assertEqual(asset_markup.inline_keyboard[0][0].text, '确认重建迁移')
         self.assertEqual(order_markup.inline_keyboard[1][0].callback_data, 'cloud:detail:88:clp:3')
         self.assertEqual(asset_markup.inline_keyboard[1][0].callback_data, 'cad:99:cloud:querymenu')
 
@@ -1152,8 +1156,13 @@ class RetainedIpRenewalUiTestCase(SimpleTestCase):
 
         self.assertIn("back_callback = data.get('reinstall_back')", asset_confirm_source)
         self.assertIn('_asset_reinstall_submitted_keyboard(asset_id, back_callback)', asset_confirm_source)
+        self.assertIn('reason=not_rebuild_order', asset_confirm_source)
+        self.assertIn('retry_only=False', asset_confirm_source)
+        self.assertNotIn('继续初始化当前服务器', asset_confirm_source)
         self.assertIn("back_callback = data.get('reinstall_back')", order_confirm_source)
         self.assertIn('_reinstall_submitted_keyboard(order.id, back_callback)', order_confirm_source)
+        self.assertIn("action_text = '重建迁移' if is_rebuild else '继续初始化'", order_confirm_source)
+        self.assertNotIn("else '重新安装'", order_confirm_source)
 
     def test_asset_renewal_plan_keyboard_keeps_back_path(self):
         plans = [SimpleNamespace(id=1)]

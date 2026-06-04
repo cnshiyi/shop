@@ -2204,7 +2204,7 @@ def _save_user_main_proxy_link(order_id: int, link_data: dict[str, str]):
     links = [item for item in links if not (isinstance(item, dict) and str(item.get('port') or '') == str(order.mtproxy_port))]
     links.insert(0, {'name': '主代理 mtg', 'server': link_data['server'], 'port': link_data['port'], 'secret': link_data['secret'], 'url': link_data['url']})
     order.proxy_links = links
-    order.provision_note = append_note(order.provision_note, '用户补充并校验主代理链接，准备重新安装。')
+    order.provision_note = append_note(order.provision_note, '用户补充并校验主代理链接，准备重建迁移。')
     order.save(update_fields=['mtproxy_link', 'mtproxy_secret', 'mtproxy_host', 'mtproxy_port', 'proxy_links', 'provision_note', 'updated_at'])
     _update_order_primary_records(
         order,
@@ -2220,16 +2220,17 @@ def _save_user_main_proxy_link(order_id: int, link_data: dict[str, str]):
     return order
 
 
-def _reinstall_confirm_keyboard(order_id: int, token: str, back_callback: str | None = None):
+def _reinstall_confirm_keyboard(order_id: int, token: str, back_callback: str | None = None, *, resume_init: bool = False):
+    confirm_text = '确认继续初始化' if resume_init else '确认重建迁移'
     return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text='确认重新安装', callback_data=f'cloud:reinitconfirm:{order_id}:{token}')],
+        [InlineKeyboardButton(text=confirm_text, callback_data=f'cloud:reinitconfirm:{order_id}:{token}')],
         [InlineKeyboardButton(text='取消', callback_data=cloud_previous_detail_callback(order_id, back_callback))],
     ])
 
 
 def _asset_reinstall_confirm_keyboard(asset_id: int, token: str, back_callback: str | None = None):
     return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text='确认重新安装', callback_data=f'cloud:assetreinitconfirm:{asset_id}:{token}')],
+        [InlineKeyboardButton(text='确认重建迁移', callback_data=f'cloud:assetreinitconfirm:{asset_id}:{token}')],
         [InlineKeyboardButton(text='取消', callback_data=cloud_asset_detail_callback(asset_id, back_callback))],
     ])
 
@@ -4588,13 +4589,16 @@ def register_handlers(dp: Dispatcher):
             logger.warning('CLOUD_ASSET_REINIT_DENIED user_id=%s asset_id=%s order_id=%s reason=%s', user.id, asset_id, order.id, rebuild_order)
             await callback.message.reply(f'{rebuild_order}\n请重新进入详情并重新生成按钮。')
             return
-        _ASSET_REINIT_INFLIGHT.add(asset_id)
         is_rebuild = bool(getattr(rebuild_order, 'replacement_for_id', None))
-        retry_only = bool(not is_rebuild and rebuild_order.status in {'paid', 'provisioning', 'failed'})
-        logger.info('CLOUD_ASSET_REINIT_SUBMIT user_id=%s asset_id=%s order_id=%s target_order_id=%s ip=%s rebuild=%s retry_only=%s', user.id, asset_id, order.id, rebuild_order.id, getattr(item, 'public_ip', None), is_rebuild, retry_only)
-        work_text = '新建服务器并迁移固定 IP，旧机保留 3 天' if is_rebuild else '继续初始化当前服务器'
-        await callback.message.reply(f'🛠 已确认重新安装：后台会{work_text}。预计约 5 分钟，完成后会自动通知你。\n\n后台处理期间，底部菜单和其它按钮可正常使用。', reply_markup=_asset_reinstall_submitted_keyboard(asset_id, back_callback))
-        task = asyncio.create_task(_provision_cloud_server_and_notify(bot, callback.from_user.id, rebuild_order.id, rebuild_order.mtproxy_port or MTPROXY_DEFAULT_PORT, retry_only=retry_only))
+        if not is_rebuild:
+            logger.warning('CLOUD_ASSET_REINIT_DENIED user_id=%s asset_id=%s order_id=%s target_order_id=%s reason=not_rebuild_order', user.id, asset_id, order.id, rebuild_order.id)
+            await callback.message.reply('当前代理无法创建重建迁移订单，请重新进入详情后再试，或联系人工客服。')
+            return
+        _ASSET_REINIT_INFLIGHT.add(asset_id)
+        logger.info('CLOUD_ASSET_REINIT_SUBMIT user_id=%s asset_id=%s order_id=%s target_order_id=%s ip=%s rebuild=%s retry_only=%s', user.id, asset_id, order.id, rebuild_order.id, getattr(item, 'public_ip', None), is_rebuild, False)
+        work_text = '新建服务器并迁移固定 IP，旧机保留 3 天'
+        await callback.message.reply(f'🛠 已确认重建迁移：后台会{work_text}。预计约 5 分钟，完成后会自动通知你。\n\n后台处理期间，底部菜单和其它按钮可正常使用。', reply_markup=_asset_reinstall_submitted_keyboard(asset_id, back_callback))
+        task = asyncio.create_task(_provision_cloud_server_and_notify(bot, callback.from_user.id, rebuild_order.id, rebuild_order.mtproxy_port or MTPROXY_DEFAULT_PORT, retry_only=False))
         task.add_done_callback(lambda _task, _asset_id=asset_id: _ASSET_REINIT_INFLIGHT.discard(_asset_id))
 
     @dp.callback_query(F.data.startswith('d:'))
@@ -5317,7 +5321,7 @@ def register_handlers(dp: Dispatcher):
         if is_unfinished:
             token = await _issue_reinstall_confirm_token(state, kind='order', item_id=order.id)
             await state.update_data(reinstall_back=back_callback)
-            await callback.message.reply(_bot_text('bot_resume_init_confirm', '⚠️ 确认继续初始化？\n\n系统会重新执行 BBR/MTProxy 安装并生成代理链接。'), reply_markup=_reinstall_confirm_keyboard(order.id, token, back_callback))
+            await callback.message.reply(_bot_text('bot_resume_init_confirm', '⚠️ 确认继续初始化？\n\n系统会重新执行 BBR/MTProxy 安装并生成代理链接。'), reply_markup=_reinstall_confirm_keyboard(order.id, token, back_callback, resume_init=True))
             return
         token = await _issue_reinstall_confirm_token(state, kind='order', item_id=order.id)
         await state.update_data(reinstall_back=back_callback)
@@ -5405,11 +5409,11 @@ def register_handlers(dp: Dispatcher):
         if asset_id:
             saved = await _save_asset_main_proxy_link(asset_id, None if is_admin_reinstall else user.id, link_data)
             token = await _issue_reinstall_confirm_token(state, kind='asset', item_id=saved.id)
-            await message.reply(_bot_text('bot_reinstall_validate_ok', '主代理链接校验通过。\n\n⚠️ 确认重新安装？重新安装大约需要 5 分钟，期间代理可能会断连。'), reply_markup=_asset_reinstall_confirm_keyboard(saved.id, token, data.get('reinstall_back')))
+            await message.reply(_bot_text('bot_reinstall_validate_ok', '主代理链接校验通过。\n\n⚠️ 确认重建迁移？系统会新建服务器并迁移固定 IP，旧机保留 3 天后进入删除流程。'), reply_markup=_asset_reinstall_confirm_keyboard(saved.id, token, data.get('reinstall_back')))
             return
         saved = await _save_user_main_proxy_link(item.id, link_data)
         token = await _issue_reinstall_confirm_token(state, kind='order', item_id=saved.id)
-        await message.reply(_bot_text('bot_reinstall_validate_ok', '主代理链接校验通过。\n\n⚠️ 确认重新安装？重新安装大约需要 5 分钟，期间代理可能会断连。'), reply_markup=_reinstall_confirm_keyboard(saved.id, token, data.get('reinstall_back')))
+        await message.reply(_bot_text('bot_reinstall_validate_ok', '主代理链接校验通过。\n\n⚠️ 确认重建迁移？系统会新建服务器并迁移固定 IP，旧机保留 3 天后进入删除流程。'), reply_markup=_reinstall_confirm_keyboard(saved.id, token, data.get('reinstall_back')))
 
     @dp.callback_query(F.data.startswith('cloud:reinitconfirm:'))
     async def cb_cloud_reinit_confirm(callback: CallbackQuery, bot: Bot, state: FSMContext):
@@ -5441,7 +5445,12 @@ def register_handlers(dp: Dispatcher):
             await callback.message.reply(f'{order}\n请重新进入详情并重新生成按钮。')
             return
         is_rebuild = bool(getattr(order, 'replacement_for_id', None))
-        action_text = '重建服务器' if is_rebuild else ('继续初始化' if order.status in {'paid', 'provisioning', 'failed'} else '重新安装')
+        is_resume_init = order.status in {'paid', 'provisioning', 'failed'} and not is_rebuild
+        if not is_rebuild and not is_resume_init:
+            logger.warning('CLOUD_REINIT_DENIED user_id=%s order_id=%s target_order_id=%s reason=not_rebuild_order', user.id, order_id, order.id)
+            await callback.message.reply('当前服务器无法创建重建迁移订单，请重新进入详情后再试，或联系人工客服。')
+            return
+        action_text = '重建迁移' if is_rebuild else '继续初始化'
         retry_only = bool(not is_rebuild and order.public_ip and order.login_password)
         work_text = '新建服务器并安装代理，成功后迁移固定 IP，旧机保留 3 天' if is_rebuild else ('重新执行 BBR/MTProxy 安装' if retry_only else '继续创建服务器并完成初始化')
         await callback.message.reply(_bot_text_format('bot_reinstall_submitted', '🛠 已确认{action_text}，后台会{work_text}。预计约 5 分钟，完成后会自动通知你。\n\n后台处理期间，底部菜单和其它按钮可正常使用。', action_text=action_text, work_text=work_text), reply_markup=_reinstall_submitted_keyboard(order.id, back_callback))
