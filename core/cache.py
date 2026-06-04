@@ -1,12 +1,14 @@
 import asyncio
 import logging
 import os
+import time
 from collections import defaultdict
 from datetime import date
 from urllib.parse import quote
 
 from django.apps import apps
 import redis.asyncio as redis
+from asgiref.sync import sync_to_async
 
 from core.runtime_config import get_runtime_config
 
@@ -41,6 +43,19 @@ REDIS_URL = os.getenv('REDIS_URL') or f"redis://{os.getenv('REDIS_HOST', '127.0.
 CONFIG_KEY_PREFIX = 'site_config:'
 
 _redis: redis.Redis | None = None
+_redis_last_failure_at: float = 0
+_redis_failure_logged = False
+
+
+def _redis_retry_interval_seconds() -> int:
+    try:
+        return max(1, int(str(os.getenv('REDIS_RETRY_INTERVAL_SECONDS', '30')).strip()))
+    except (TypeError, ValueError):
+        return 30
+
+
+def _redis_retry_now() -> float:
+    return time.monotonic()
 
 
 def get_cached_config_value(key: str, default: str = '') -> str:
@@ -73,9 +88,10 @@ async def refresh_config(keys: list[str] | None = None):
         return
     SiteConfig = _site_config_model()
     async with _config_lock:
-        values = await asyncio.to_thread(
-            lambda: {item.key: SiteConfig.get(item.key, '') for item in SiteConfig.objects.filter(key__in=selected)}
-        )
+        values = await sync_to_async(
+            lambda: {item.key: SiteConfig.get(item.key, '') for item in SiteConfig.objects.filter(key__in=selected)},
+            thread_sensitive=os.environ.get('DJANGO_TEST_SQLITE') == '1',
+        )()
         for key in selected:
             if key in values:
                 cache_config_value(key, values[key])
@@ -87,23 +103,36 @@ async def get_config(key: str, default: str = '') -> str:
     cached = get_cached_config_value(key, '')
     if cached != '':
         return cached
-    value = await asyncio.to_thread(_site_config_get_with_runtime_default, key, default)
+    value = await sync_to_async(
+        _site_config_get_with_runtime_default,
+        thread_sensitive=os.environ.get('DJANGO_TEST_SQLITE') == '1',
+    )(key, default)
     cache_config_value(key, value)
     return value
 
 
 async def get_redis() -> redis.Redis | None:
-    global _redis, REDIS_URL
+    global _redis, REDIS_URL, _redis_failure_logged, _redis_last_failure_at
     if _redis is not None:
         return _redis
+    now = _redis_retry_now()
+    if _redis_last_failure_at and now - _redis_last_failure_at < _redis_retry_interval_seconds():
+        return None
     try:
         REDIS_URL = build_redis_url()
         _redis = redis.from_url(REDIS_URL, decode_responses=True)
         await _redis.ping()
+        _redis_last_failure_at = 0
+        _redis_failure_logged = False
         logger.info('Redis connected')
         return _redis
     except Exception as exc:
-        logger.warning('Redis unavailable, fallback to DB/local cache: %s', exc)
+        _redis_last_failure_at = now
+        if not _redis_failure_logged:
+            logger.warning('Redis unavailable, fallback to DB/local cache: %s', exc)
+            _redis_failure_logged = True
+        else:
+            logger.debug('REDIS_UNAVAILABLE_RETRY_FAILED error=%s', exc)
         _redis = None
         return None
 
@@ -153,13 +182,15 @@ async def get_daily_stats(key: str, default: int = 0) -> int:
 
 
 async def close():
-    global _redis
+    global _redis, _redis_failure_logged, _redis_last_failure_at
     if _redis is not None:
         try:
             await _redis.close()
         except Exception as exc:
             logger.debug('REDIS_CLOSE_FAILED error=%s', exc)
         _redis = None
+    _redis_last_failure_at = 0
+    _redis_failure_logged = False
 
 
 __all__ = [

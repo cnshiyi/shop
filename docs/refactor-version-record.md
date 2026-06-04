@@ -8186,6 +8186,123 @@ git diff --check
 - 本轮未执行真实 Telegram 点击、真实云资源创建/删除/IP 变更、真实支付、链上广播、生产发布或不可逆操作。
 - 前端 `DEVELOPMENT.md` 仍有旧 `/api/dashboard/` 描述残留；源码只读扫描未发现旧调用。
 
+## 2026-06-04 Telegram Bot IP 详情剩余按钮补测
+
+### 范围
+
+本轮继续使用项目数据库中的已登录 Telegram 账号实际操作 bot，补测 IP 查询结果页中此前只展示、未逐项点击的一层按钮。执行边界为只进入选择页、确认页或提示页，不点击最终确认、最终支付或任何会触发真实删机、换 IP、重装、链上广播的不可逆动作。测试输出继续脱敏，不记录完整公网 IP、代理链接、Telegram session、bot token、云账号密钥或登录密码。
+
+### 结果
+
+- `🌐 更换IP`：实际点击后进入新地区选择页，显示新加坡选项和返回详情按钮。
+- `🛠 重新安装`：实际点击后进入“确认重新安装？”确认页；未点击最终确认，并已点击取消。
+- `⚙️ 修改配置`：实际点击后返回“修改配置暂不可用，原因：暂无可修改的配置”，说明当前资产无可改配置项。
+- `🔄 续费IP`：实际点击后进入续费页，显示 USDT 钱包支付、TRX 钱包支付和返回详情按钮；未再次支付，并已返回详情。
+- 复核数据库：测试用户余额仍为 USDT `990.000000`、TRX `1000.000000`；订单 `#79` 仍为 `completed`；资产 `#325` 仍为 `running`；余额流水仍为 2 条；地址监控数量为 0。
+
+### 验证
+
+本地已通过：
+
+```bash
+DB_ENGINE=mysql UV_CACHE_DIR=/private/tmp/uv-cache-shop PYTHONDONTWRITEBYTECODE=1 uv run python manage.py check
+DB_ENGINE=mysql UV_CACHE_DIR=/private/tmp/uv-cache-shop PYTHONDONTWRITEBYTECODE=1 uv run python -m py_compile bot/handlers.py
+```
+
+### 剩余风险
+
+- 本轮未执行真实删机、释放固定 IP、IP 变更最终确认、重新安装最终确认、真实配置变更、TRX 续费最终支付或链上充值到账扫描。
+- 本轮未跑完整测试套件。
+- 工作树存在本轮外既存脏文件和迁移文件，本轮未回退、未提交。
+
+## 2026-06-04 Telegram Bot 全功能真机补测与完整测试套件
+
+### 范围
+
+本轮按用户继续要求“全部测完”，在已登录 Telegram 账号和真实 bot 上继续执行剩余真实路径。覆盖 TRX 钱包续费、重新安装最终确认、换 IP 最终确认、新节点初始化、迁移旧机删除、旧固定 IP 释放、新旧 IP 查询复核，以及完整 Django 测试套件。测试记录继续脱敏，不记录完整公网 IP、代理链接、代理 secret、登录密码、Telegram token、session 或云账号密钥。
+
+### 发现与修复
+
+- 完整测试套件首次运行暴露 8 个测试失败：通知抄送 wrapper 假设测试 FakeBot 一定有 `edit_message_text`；云账号写接口测试仍按旧 cookie-only 请求方式调用；SQLite 异步配置缓存在线程中读不到新写入的 `SiteConfig`。
+- 修复 `bot/handlers.py`：通知抄送 wrapper 在 bot 对象缺少 `edit_message_text` 时只包装 `send_message`，兼容测试替身和真实 bot。
+- 修复 `core/cache.py`：异步配置读取在 SQLite 测试环境使用 `sync_to_async(..., thread_sensitive=True)`，避免测试库跨线程不可见。
+- 修复 `bot/tests.py`：云账号写接口测试使用真实 Bearer session；通知抄送 mock 接受新增可选参数；阿里云账号 ID patch 目标改为实际模块。
+
+### 真机结果
+
+- TRX 钱包续费成功，扣除 15.253 TRX；最终余额为 USDT `990.000000`、TRX `984.747000`。
+- 重新安装最终确认成功，bot 返回重试初始化完成。
+- 换 IP 最终确认成功，新订单 `#80` / 新资产 `#326` 完成并运行，用户侧收到“服务器重建完成，固定 IP 已迁移”通知。
+- 迁移旧机删除成功，旧订单 `#79` 与旧资产 `#325` 标记为 `deleted`。
+- 旧固定 IP 释放成功，旧 IP 再次通过 bot 查询时显示未查询到可续费的有效记录。
+- 修改配置入口真实点击后返回“暂无可修改的配置”，当前套餐/资产没有可执行的配置变更项。
+
+### 验证
+
+本地已通过：
+
+```bash
+DB_ENGINE=mysql UV_CACHE_DIR=/private/tmp/uv-cache-shop PYTHONDONTWRITEBYTECODE=1 uv run python manage.py check
+DB_ENGINE=mysql UV_CACHE_DIR=/private/tmp/uv-cache-shop PYTHONDONTWRITEBYTECODE=1 uv run python -m py_compile bot/handlers.py core/cache.py bot/tests.py cloud/lifecycle_execution.py cloud/lifecycle.py cloud/services.py
+DJANGO_TEST_SQLITE=1 UV_CACHE_DIR=/private/tmp/uv-cache-shop PYTHONDONTWRITEBYTECODE=1 uv run python manage.py test --settings=shop.settings --verbosity=1
+git diff --check
+```
+
+结果：完整测试套件 519 个测试通过；SQLite 仍打印不支持 `db_comment` / `db_table_comment` 的预期 warning。
+
+### 剩余风险
+
+- 未执行外部钱包真实链上充值到账扫描，因为本轮没有外部钱包向收款地址发起真实链上转账。
+- 当前资产没有可修改配置项，修改配置只覆盖到真实点击和不可用提示。
+- 工作树仍包含本轮外既存脏文件和迁移文件，本轮未回退、未提交。
+
+## 2026-06-04 Telegram Bot 真机全链路测试与修复
+
+### 范围
+
+本轮按用户明确授权，用项目数据库中已登录的 Telegram 账号实际操作测试 bot，不绕过 bot API 直接调用业务接口。测试范围覆盖主菜单、个人中心、购买节点、余额钱包支付、真实 AWS Lightsail 初始化、失败订单恢复初始化、订单详情、IP 查询、自动续费开关、续费钱包支付、充值入口、充值记录、余额明细、提醒列表、地址监控添加/列表/详情/删除和联系客服入口。敏感信息均按脱敏原则处理，不记录 token、session、完整公网 IP、代理 secret、登录密码或完整代理链接。
+
+### 发现
+
+- 个人中心 reply keyboard 文本按钮缺少处理，`📋 我的订单`、`💰 充值余额`、`📜 充值记录`、`💳 余额明细`、`🔔 提醒列表`、`🔍 地址监控`、`🔙 返回主菜单` 曾落入普通文本兜底。
+- `👩‍💻 联系客服` 主菜单文字按钮未纳入菜单集合，真实点击时被当成普通消息。
+- 云订单详情、云服务器详情、成功通知、续费成功提示、续费后巡检、提醒列表和提醒详情中直接调用会触发数据库查询的文案函数，在 async handler 内导致 `SynchronousOnlyOperation`，用户侧表现为按钮无响应或错误通知。
+- 真实购买订单初次云端实例已创建但初始化失败；通过修复后的订单详情进入“继续初始化”后，BBR、MTProxy 主链路、备用链路、Telemt 和 SOCKS5 初始化成功。
+- 续费钱包支付真实扣款成功，但由于一处缩进错误，成功提示曾不可达；修复后重复点击已支付续费按钮不再二次扣款，并能显示已完成和续费后巡检消息。
+
+### 修改
+
+- 扩展 `bot/handlers.py` 的文本菜单入口，支持个人中心全部 reply keyboard 文案和 `👩‍💻 联系客服`。
+- 失败/开通中云订单在订单列表详情中显示可操作详情与“继续初始化”，并在编辑失败时兜底发送新消息。
+- 将多个 async handler 内会同步查库的文案生成调用改为 `sync_to_async(...)`，覆盖订单详情、云服务器详情、初始化成功通知、续费提示、续费后巡检、IP 查询到期、提醒列表和提醒详情。
+- 修复续费成功提示缩进错误，恢复用户侧成功反馈和后续巡检提示。
+- 覆盖更新 `docs/auto-optimization-latest.md`，并更新 `docs/real-machine-test-report.md` 的脱敏真机记录。
+
+### 验证
+
+本地已通过：
+
+```bash
+DB_ENGINE=mysql UV_CACHE_DIR=/private/tmp/uv-cache-shop PYTHONDONTWRITEBYTECODE=1 uv run python -m py_compile bot/handlers.py
+DB_ENGINE=mysql UV_CACHE_DIR=/private/tmp/uv-cache-shop PYTHONDONTWRITEBYTECODE=1 uv run python manage.py check
+```
+
+真实 Telegram / 云资源验证：
+
+- 已登录 Telegram 项目账号可用，bot 以 `run.py bot` 正常 polling。
+- 真实购买流程：选择地区、套餐、数量、钱包 USDT 支付，创建订单 `#79`，用户余额扣除 5 U。
+- 真实云初始化：订单 `#79` 初始失败后，经“我的订单 -> 订单详情 -> 继续初始化 -> 确认”恢复成功，资产 `#325` 为 `running`，订单为 `completed`，到期事实来自 `CloudAsset.actual_expires_at`。
+- IP 查询显示运行中状态、到期时间、续费、更换 IP、重新安装、修改配置、自动续费和客服按钮；自动续费开/关均可编辑结果。
+- 续费钱包 USDT 支付成功，余额再扣除 5 U；重复点击已支付续费按钮余额保持不变，并显示“这笔续费已完成”和续费后巡检结果。
+- 充值入口、充值记录、余额明细、提醒列表、地址监控添加/列表/详情/删除、联系客服均已实际点击验证。
+
+### 剩余风险
+
+- 本轮未跑完整测试套件。
+- 本轮未执行真实删机、释放固定 IP、IP 变更、修改配置或重新安装破坏性路径。
+- 用户端保留了一条旧的初始化异常通知；根因已修复，真实订单和资产状态已完成。
+- 工作树存在本轮外既存脏文件和迁移文件，本轮未回退、未提交。
+
 ## 2026-06-04 固定巡检十二次复核
 
 ### 范围

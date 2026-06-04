@@ -626,7 +626,7 @@ async def _reply_cloud_query_results(message: Message, raw_text: str, state: FSM
         is_deleted = order.status in {'deleted', 'deleting', 'expired'} or not display_ip
         if is_deleted and not is_retained_ip:
             continue
-        expires_at = order_asset_expiry(order)
+        expires_at = await sync_to_async(order_asset_expiry)(order)
         expires_text = _format_local_dt(expires_at).split(' ', 1)[0] if expires_at else '今天到期'
         status_text = '固定 IP 保留中，可续费恢复' if is_retained_ip else '可续费'
         auto_renew_text = '已开启' if getattr(order, 'auto_renew_enabled', False) else '未开启'
@@ -852,7 +852,7 @@ def _install_notice_copy_wrapper(bot: Bot):
     if getattr(bot, '_notice_copy_wrapper_installed', False):
         return
     original_send_message = bot.send_message
-    original_edit_message_text = bot.edit_message_text
+    original_edit_message_text = getattr(bot, 'edit_message_text', None)
 
     async def _send_message_with_copy(*args, **kwargs):
         result = await original_send_message(*args, **kwargs)
@@ -878,34 +878,35 @@ def _install_notice_copy_wrapper(bot: Bot):
             logger.warning('用户结果抄送失败 chat_id=%s err=%s', chat_id, exc)
         return result
 
-    async def _edit_message_text_with_copy(*args, **kwargs):
-        result = await original_edit_message_text(*args, **kwargs)
-        if _NOTICE_COPY_SENDING.get():
-            return result
-        text = kwargs.get('text') if 'text' in kwargs else (args[0] if args else '')
-        chat_id = kwargs.get('chat_id') if 'chat_id' in kwargs else (args[1] if len(args) > 1 else None)
-        if chat_id is None:
-            return result
-        try:
-            if int(chat_id) < 0:
-                return result
-        except (TypeError, ValueError):
-            return result
-        try:
-            copy_recipient_ids = await _notice_copy_recipient_ids()
-            if str(text or '').startswith('📣'):
-                return result
-            token = _NOTICE_COPY_SENDING.set(True)
-            try:
-                await _copy_user_notice_to_admins(bot, int(chat_id), str(text or ''), parse_mode=kwargs.get('parse_mode'), title='机器人回复（编辑消息）', reply_markup=kwargs.get('reply_markup'))
-            finally:
-                _NOTICE_COPY_SENDING.reset(token)
-        except Exception as exc:
-            logger.warning('用户编辑结果抄送失败 chat_id=%s err=%s', chat_id, exc)
-        return result
-
     bot.send_message = _send_message_with_copy
-    bot.edit_message_text = _edit_message_text_with_copy
+    if original_edit_message_text is not None:
+        async def _edit_message_text_with_copy(*args, **kwargs):
+            result = await original_edit_message_text(*args, **kwargs)
+            if _NOTICE_COPY_SENDING.get():
+                return result
+            text = kwargs.get('text') if 'text' in kwargs else (args[0] if args else '')
+            chat_id = kwargs.get('chat_id') if 'chat_id' in kwargs else (args[1] if len(args) > 1 else None)
+            if chat_id is None:
+                return result
+            try:
+                if int(chat_id) < 0:
+                    return result
+            except (TypeError, ValueError):
+                return result
+            try:
+                copy_recipient_ids = await _notice_copy_recipient_ids()
+                if str(text or '').startswith('📣'):
+                    return result
+                token = _NOTICE_COPY_SENDING.set(True)
+                try:
+                    await _copy_user_notice_to_admins(bot, int(chat_id), str(text or ''), parse_mode=kwargs.get('parse_mode'), title='机器人回复（编辑消息）', reply_markup=kwargs.get('reply_markup'))
+                finally:
+                    _NOTICE_COPY_SENDING.reset(token)
+            except Exception as exc:
+                logger.warning('用户编辑结果抄送失败 chat_id=%s err=%s', chat_id, exc)
+            return result
+
+        bot.edit_message_text = _edit_message_text_with_copy
     bot._notice_copy_wrapper_installed = True
 
 
@@ -1685,7 +1686,7 @@ async def _initialize_proxy_asset_and_notify(bot: Bot, chat_id: int, user_id: in
             await _send_user_notice(bot, chat_id, error_text, reply_markup=_cloud_notice_keyboard_for_order(getattr(asset, 'order_id', None) or asset_id, 'cloud_asset_init_failed'))
             logger.warning('同步资产代理初始化失败: chat_id=%s user_id=%s asset_id=%s error=%s', chat_id, user_id, asset_id, err)
             return
-        success_text = '✅ 同步资产代理初始化完成\n\n' + _cloud_server_created_text(asset, getattr(asset, 'mtproxy_port', None))
+        success_text = '✅ 同步资产代理初始化完成\n\n' + await sync_to_async(_cloud_server_created_text)(asset, getattr(asset, 'mtproxy_port', None))
         _log_bot_cloud_notice('asset_init_completed', chat_id=chat_id, order=asset, text=success_text, keyboard='cloud_lifecycle_notice_actions')
         await _send_user_notice(bot, chat_id, success_text, reply_markup=_cloud_notice_keyboard_for_order(getattr(asset, 'order_id', None) or asset_id, 'cloud_asset_init_completed'), parse_mode='HTML', disable_web_page_preview=True)
         logger.info('同步资产代理初始化完成: chat_id=%s user_id=%s asset_id=%s ip=%s', chat_id, user_id, asset_id, getattr(asset, 'public_ip', None))
@@ -1771,9 +1772,9 @@ async def _provision_cloud_server_and_notify(bot: Bot, chat_id: int, order_id: i
         provisioned = await (reprovision_cloud_server_bootstrap(order_id) if retry_only else provision_cloud_server(order_id))
         if provisioned and provisioned.status == 'completed':
             if getattr(provisioned, 'replacement_for_id', None):
-                success_text = _cloud_server_created_text(provisioned, port, title='✅ 服务器重建完成，固定 IP 已迁移\n\n下面是新的代理链接，请直接复制使用。')
+                success_text = await sync_to_async(_cloud_server_created_text)(provisioned, port, title='✅ 服务器重建完成，固定 IP 已迁移\n\n下面是新的代理链接，请直接复制使用。')
             else:
-                success_text = _cloud_server_created_text(provisioned, port)
+                success_text = await sync_to_async(_cloud_server_created_text)(provisioned, port)
             if retry_only:
                 success_text = '✅ 云服务器重试初始化完成\n\n' + success_text.removeprefix('✅ 云服务器创建完成\n')
             _log_bot_cloud_notice('provision_completed', chat_id=chat_id, order=provisioned, text=success_text, keyboard='cloud_lifecycle_notice_actions')
@@ -1829,7 +1830,7 @@ async def _cloud_renewal_postcheck_and_notify(bot: Bot, chat_id: int, order_id: 
             await _send_user_notice(bot, chat_id, f'⚠️ 续费后巡检发现异常，已记录并尝试修复。\n订单号: {getattr(checked, "order_no", "-") or "-"}\n请稍后再查看代理状态，或联系人工客服。')
             return
         balance_text = _renew_balance_change_text(balance_change)
-        plan_text = _cloud_order_plan_text(checked, include_warnings=False) if checked else ''
+        plan_text = await sync_to_async(_cloud_order_plan_text)(checked, include_warnings=False) if checked else ''
         await _send_user_notice(
             bot,
             chat_id,
@@ -2861,7 +2862,16 @@ def _current_menu_labels() -> set[str]:
         return {'🛠 购买节点', '🔎 到期时间查询', '👤 个人中心'}
 
 
-MENU_BUTTONS = {'🛠 购买节点', '🔎 到期时间查询', '👤 个人中心'}
+PROFILE_MENU_BUTTONS = {
+    '📋 我的订单',
+    '💰 充值余额',
+    '📜 充值记录',
+    '💳 余额明细',
+    '🔔 提醒列表',
+    '🔍 地址监控',
+    '🔙 返回主菜单',
+}
+MENU_BUTTONS = {'🛠 购买节点', '🔎 到期时间查询', '👤 个人中心', '👩‍💻 联系客服'} | PROFILE_MENU_BUTTONS
 
 
 def register_handlers(dp: Dispatcher):
@@ -3152,6 +3162,13 @@ def register_handlers(dp: Dispatcher):
             sent = await message.answer(_bot_text('bot_query_center_entry', '🔎 查询中心\n\n请选择查询方式：'), reply_markup=cloud_query_menu())
             logger.info('机器人消息已发送：路由=查询中心菜单 用户ID=%s 会话ID=%s 回复消息ID=%s 发送消息ID=%s', getattr(message.from_user, 'id', None), message.chat.id, message.message_id, getattr(sent, 'message_id', None))
 
+        elif text == '👩‍💻 联系客服':
+            sent = await message.answer(
+                _bot_text('bot_support_contact_entry', '👩‍💻 联系客服\n\n请直接在当前聊天发送你的问题、订单号或截图，我会转发给客服处理。'),
+                reply_markup=main_menu(),
+            )
+            logger.info('机器人消息已发送：路由=文本联系客服 用户ID=%s 会话ID=%s 回复消息ID=%s 发送消息ID=%s', getattr(message.from_user, 'id', None), message.chat.id, message.message_id, getattr(sent, 'message_id', None))
+
         elif text == '👤 个人中心':
             sent = await message.answer(
                 f'👤 个人中心\n用户ID: {user.tg_user_id}\n用户名: {_display_username(user)}\n'
@@ -3160,6 +3177,60 @@ def register_handlers(dp: Dispatcher):
                 reply_markup=profile_menu(),
             )
             logger.info('机器人消息已发送：路由=个人中心菜单 用户ID=%s 会话ID=%s 回复消息ID=%s 发送消息ID=%s', getattr(message.from_user, 'id', None), message.chat.id, message.message_id, getattr(sent, 'message_id', None))
+
+        elif text == '📋 我的订单':
+            per_page = 8
+            orders, total = await list_cloud_orders(user.id, page=1, per_page=per_page, order_filter='all')
+            total_pages = max(1, math.ceil(total / per_page))
+            if orders:
+                sent = await message.answer(
+                    _bot_text('bot_cloud_orders_entry', '☁️ 云服务器订单\n\n请选择要查看的订单：'),
+                    reply_markup=cloud_order_list(orders, 1, total_pages, 'profile:orders:cloud:filter:all:page', order_filter='all'),
+                )
+            else:
+                sent = await message.answer(
+                    _bot_text('bot_cloud_orders_empty', '☁️ 云服务器订单\n\n暂无云服务器订单。'),
+                    reply_markup=cloud_order_list([], 1, 1, 'profile:orders:cloud:filter:all:page', order_filter='all'),
+                )
+            logger.info('机器人消息已发送：路由=文本我的订单 用户ID=%s 会话ID=%s 回复消息ID=%s 发送消息ID=%s', getattr(message.from_user, 'id', None), message.chat.id, message.message_id, getattr(sent, 'message_id', None))
+
+        elif text == '💰 充值余额':
+            sent = await message.answer(
+                _bot_text('bot_recharge_currency_prompt', '💰 请选择充值币种：\n\n可随时点击底部菜单打断当前输入。'),
+                reply_markup=recharge_currency_menu(),
+            )
+            logger.info('机器人消息已发送：路由=文本充值余额 用户ID=%s 会话ID=%s 回复消息ID=%s 发送消息ID=%s', getattr(message.from_user, 'id', None), message.chat.id, message.message_id, getattr(sent, 'message_id', None))
+
+        elif text == '📜 充值记录':
+            recharges, total = await list_recharges(user.id)
+            text_out, kb = _recharges_page(recharges, 1, total)
+            sent = await message.answer(text_out, reply_markup=kb or profile_menu())
+            logger.info('机器人消息已发送：路由=文本充值记录 用户ID=%s 会话ID=%s 回复消息ID=%s 发送消息ID=%s', getattr(message.from_user, 'id', None), message.chat.id, message.message_id, getattr(sent, 'message_id', None))
+
+        elif text == '💳 余额明细':
+            items, total = await list_balance_details(user.id, page=1, detail_filter='all')
+            text_out, kb = _balance_details_page(items, 1, total, 'all')
+            sent = await message.answer(text_out, reply_markup=kb)
+            logger.info('机器人消息已发送：路由=文本余额明细 用户ID=%s 会话ID=%s 回复消息ID=%s 发送消息ID=%s', getattr(message.from_user, 'id', None), message.chat.id, message.message_id, getattr(sent, 'message_id', None))
+
+        elif text == '🔔 提醒列表':
+            summary = await get_user_reminder_summary(user.id)
+            is_muted = bool(summary and not summary.get('cloud_reminder_enabled'))
+            page_orders, page, total_pages = _reminder_page_items(summary, 1)
+            reminder_text = await sync_to_async(_reminder_list_text)(summary, page)
+            sent = await message.answer(
+                reminder_text,
+                reply_markup=reminder_list_menu(page_orders, is_muted, page, total_pages),
+            )
+            logger.info('机器人消息已发送：路由=文本提醒列表 用户ID=%s 会话ID=%s 回复消息ID=%s 发送消息ID=%s', getattr(message.from_user, 'id', None), message.chat.id, message.message_id, getattr(sent, 'message_id', None))
+
+        elif text == '🔍 地址监控':
+            sent = await message.answer(_bot_text('bot_monitor_entry', '🔍 地址监控'), reply_markup=monitor_menu())
+            logger.info('机器人消息已发送：路由=文本地址监控 用户ID=%s 会话ID=%s 回复消息ID=%s 发送消息ID=%s', getattr(message.from_user, 'id', None), message.chat.id, message.message_id, getattr(sent, 'message_id', None))
+
+        elif text == '🔙 返回主菜单':
+            sent = await message.answer(_bot_text('bot_back_to_menu', '已返回主菜单，请使用底部按钮继续操作。'), reply_markup=main_menu())
+            logger.info('机器人消息已发送：路由=文本返回主菜单 用户ID=%s 会话ID=%s 回复消息ID=%s 发送消息ID=%s', getattr(message.from_user, 'id', None), message.chat.id, message.message_id, getattr(sent, 'message_id', None))
 
     @dp.callback_query(F.data == 'cloud:querymenu')
     async def cb_cloud_query_menu(callback: CallbackQuery, state: FSMContext):
@@ -3297,9 +3368,10 @@ def register_handlers(dp: Dispatcher):
         summary = await get_user_reminder_summary(user.id)
         is_muted = bool(summary and not summary.get('cloud_reminder_enabled'))
         page_orders, page, total_pages = _reminder_page_items(summary, page)
+        reminder_text = await sync_to_async(_reminder_list_text)(summary, page)
         await _safe_edit_text(
             callback.message,
-            _reminder_list_text(summary, page),
+            reminder_text,
             reply_markup=reminder_list_menu(page_orders, is_muted, page, total_pages),
         )
 
@@ -3321,9 +3393,10 @@ def register_handlers(dp: Dispatcher):
         if not order:
             await _safe_callback_answer(callback, '订单不存在', show_alert=True)
             return None
+        reminder_detail_text = await sync_to_async(_reminder_ip_detail_text)(order, page)
         await _safe_edit_text(
             callback.message,
-            _reminder_ip_detail_text(order, page),
+            reminder_detail_text,
             reply_markup=reminder_ip_detail_menu(order, page),
             parse_mode='HTML',
         )
@@ -4136,12 +4209,32 @@ def register_handlers(dp: Dispatcher):
             return
         order = await _hydrate_order_proxy_links(order)
         logger.info('CLOUD_ORDER_READONLY_RENDER user_id=%s order_id=%s order_no=%s status=%s back=%s proxy_links=%s', user.id, order.id, order.order_no, order.status, back_callback, len(getattr(order, 'proxy_links', None) or []))
-        await _safe_edit_text(
+        show_recovery_detail = bool(
+            order.status in {'paid', 'provisioning', 'failed'}
+            and (order.public_ip or not order.mtproxy_secret or not order.mtproxy_link or not order.login_password)
+        )
+        if show_recovery_detail:
+            text = await sync_to_async(_cloud_server_detail_text)(order)
+            markup = cloud_server_detail(
+                order.id,
+                can_renew=bool(order.public_ip and order.status in {'paid', 'provisioning'}),
+                can_change_ip=False,
+                can_reinit=False,
+                back_callback=back_callback,
+                can_upgrade=False,
+                can_resume_init=True,
+            )
+        else:
+            text = await sync_to_async(_cloud_order_readonly_text)(order)
+            markup = cloud_order_readonly_detail(order.id, back_callback)
+        edited = await _safe_edit_text(
             callback.message,
-            _cloud_order_readonly_text(order),
-            reply_markup=cloud_order_readonly_detail(order.id, back_callback),
+            text,
+            reply_markup=markup,
             parse_mode='HTML',
         )
+        if edited is None:
+            await callback.message.reply(text, reply_markup=markup, parse_mode='HTML')
 
     @dp.callback_query(F.data.startswith('adminreply:hint:'))
     async def cb_admin_reply_hint(callback: CallbackQuery, state: FSMContext):
@@ -4554,9 +4647,10 @@ def register_handlers(dp: Dispatcher):
             can_upgrade,
             back_callback,
         )
+        text = await sync_to_async(_cloud_server_detail_text)(order)
         await _safe_edit_text(
             callback.message,
-            _cloud_server_detail_text(order),
+            text,
             reply_markup=cloud_server_detail(order.id, can_renew, can_change_ip, can_reinit, back_callback, can_upgrade, can_resume_init),
             parse_mode='HTML',
         )
@@ -4846,9 +4940,10 @@ def register_handlers(dp: Dispatcher):
                     )
                     return
                 asyncio.create_task(_cloud_renewal_postcheck_and_notify(callback.bot, callback.from_user.id, existing.id))
+                plan_text = await sync_to_async(_cloud_order_plan_text)(existing)
                 await _safe_edit_text(
                     callback.message,
-                    f'✅ 这笔续费已完成。\n\n订单号: {existing.order_no}\n{_cloud_order_plan_text(existing)}\n\n我会继续执行续费后巡检。',
+                    f'✅ 这笔续费已完成。\n\n订单号: {existing.order_no}\n{plan_text}\n\n我会继续执行续费后巡检。',
                     reply_markup=_cloud_renewal_result_keyboard(order_id, back_callback),
                 )
                 return
@@ -4872,13 +4967,14 @@ def register_handlers(dp: Dispatcher):
             asyncio.create_task(_provision_cloud_server_and_notify(callback.bot, callback.from_user.id, order.id, order.mtproxy_port or MTPROXY_DEFAULT_PORT))
             return
         asyncio.create_task(_cloud_renewal_postcheck_and_notify(callback.bot, callback.from_user.id, order.id, getattr(order, 'renew_balance_change', None)))
+        plan_text = await sync_to_async(_cloud_order_plan_text)(order)
         await _safe_edit_text(callback.message, 
             '✅ 云服务器钱包自动续费成功\n\n'
             f'订单号: {order.order_no}\n'
             '续费时长: 31天\n'
             '支付方式: 钱包自动续费\n'
             '支付币种: USDT\n'
-            + _cloud_order_plan_text(order),
+            + plan_text,
             reply_markup=cloud_server_detail(
                 order.id,
                 can_renew=True,
@@ -4949,9 +5045,10 @@ def register_handlers(dp: Dispatcher):
                     )
                     return
                 asyncio.create_task(_cloud_renewal_postcheck_and_notify(callback.bot, callback.from_user.id, existing.id))
+                plan_text = await sync_to_async(_cloud_order_plan_text)(existing)
                 await _safe_edit_text(
                     callback.message,
-                    f'✅ 这笔续费已完成。\n\n订单号: {existing.order_no}\n{_cloud_order_plan_text(existing)}\n\n我会继续执行续费后巡检。',
+                    f'✅ 这笔续费已完成。\n\n订单号: {existing.order_no}\n{plan_text}\n\n我会继续执行续费后巡检。',
                     reply_markup=_cloud_renewal_result_keyboard(order_id, back_callback),
                 )
                 return
@@ -4972,12 +5069,13 @@ def register_handlers(dp: Dispatcher):
             asyncio.create_task(_provision_cloud_server_and_notify(callback.bot, callback.from_user.id, order.id, order.mtproxy_port or MTPROXY_DEFAULT_PORT))
             return
         asyncio.create_task(_cloud_renewal_postcheck_and_notify(callback.bot, callback.from_user.id, order.id, getattr(order, 'renew_balance_change', None)))
+        plan_text = await sync_to_async(_cloud_order_plan_text)(order)
         await _safe_edit_text(callback.message, 
             '✅ 云服务器续费成功\n\n'
             f'订单号: {order.order_no}\n'
             '续费时长: 31天\n'
             f'支付币种: {currency}\n'
-            + _cloud_order_plan_text(order),
+            + plan_text,
             reply_markup=cloud_server_detail(
                 order.id,
                 can_renew=True,

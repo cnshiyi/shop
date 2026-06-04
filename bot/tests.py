@@ -363,6 +363,16 @@ class TelegramMessageRecordingTestCase(TestCase):
 
 
 class DashboardCloudAccountVerifyTestCase(TestCase):
+    def _attach_bearer_session(self, request, user):
+        SessionMiddleware(lambda req: None).process_request(request)
+        request.session['_auth_user_id'] = str(user.pk)
+        request.session['_auth_user_backend'] = 'django.contrib.auth.backends.ModelBackend'
+        request.session['_auth_user_hash'] = user.get_session_auth_hash()
+        request.session.save()
+        request.user = AnonymousUser()
+        request.META['HTTP_AUTHORIZATION'] = f'Bearer session-{request.session.session_key}'
+        return request
+
     def test_cloud_account_write_actions_require_superuser(self):
         staff = get_user_model().objects.create_user(username='cloud_account_write_staff', password='pass', is_staff=True)
         account = CloudAccountConfig.objects.create(
@@ -384,7 +394,7 @@ class DashboardCloudAccountVerifyTestCase(TestCase):
             }),
             content_type='application/json',
         )
-        create_request.user = staff
+        self._attach_bearer_session(create_request, staff)
         self.assertEqual(create_cloud_account(create_request).status_code, 403)
         self.assertFalse(CloudAccountConfig.objects.filter(name='blocked-create').exists())
 
@@ -393,17 +403,17 @@ class DashboardCloudAccountVerifyTestCase(TestCase):
             data=json.dumps({'name': 'blocked-update'}),
             content_type='application/json',
         )
-        update_request.user = staff
+        self._attach_bearer_session(update_request, staff)
         self.assertEqual(update_cloud_account(update_request, account.id).status_code, 403)
         account.refresh_from_db()
         self.assertEqual(account.name, 'aws-staff-forbidden')
 
         verify_request = RequestFactory().post(f'/api/admin/settings/cloud-accounts/{account.id}/verify/')
-        verify_request.user = staff
+        self._attach_bearer_session(verify_request, staff)
         self.assertEqual(verify_cloud_account(verify_request, account.id).status_code, 403)
 
         delete_request = RequestFactory().post(f'/api/admin/settings/cloud-accounts/{account.id}/delete/')
-        delete_request.user = staff
+        self._attach_bearer_session(delete_request, staff)
         self.assertEqual(delete_cloud_account(delete_request, account.id).status_code, 403)
         self.assertTrue(CloudAccountConfig.objects.filter(id=account.id).exists())
 
@@ -421,7 +431,7 @@ class DashboardCloudAccountVerifyTestCase(TestCase):
             }),
             content_type='application/json',
         )
-        create_request.user = root
+        self._attach_bearer_session(create_request, root)
         create_response = create_cloud_account(create_request)
         self.assertEqual(create_response.status_code, 200)
         account_id = json.loads(create_response.content.decode('utf-8'))['data']['id']
@@ -431,14 +441,14 @@ class DashboardCloudAccountVerifyTestCase(TestCase):
             data=json.dumps({'name': 'aws-root-updated', 'is_active': False}),
             content_type='application/json',
         )
-        update_request.user = root
+        self._attach_bearer_session(update_request, root)
         self.assertEqual(update_cloud_account(update_request, account_id).status_code, 200)
         account = CloudAccountConfig.objects.get(id=account_id)
         self.assertEqual(account.name, 'aws-root-updated')
         self.assertFalse(account.is_active)
 
         delete_request = RequestFactory().post(f'/api/admin/settings/cloud-accounts/{account_id}/delete/')
-        delete_request.user = root
+        self._attach_bearer_session(delete_request, root)
         self.assertEqual(delete_cloud_account(delete_request, account_id).status_code, 200)
         self.assertFalse(CloudAccountConfig.objects.filter(id=account_id).exists())
 
@@ -473,7 +483,7 @@ class DashboardCloudAccountVerifyTestCase(TestCase):
             }),
             content_type='application/json',
         )
-        create_request.user = root
+        self._attach_bearer_session(create_request, root)
         create_response = create_cloud_account(create_request)
         create_payload = json.loads(create_response.content.decode('utf-8'))
 
@@ -486,7 +496,7 @@ class DashboardCloudAccountVerifyTestCase(TestCase):
             data=json.dumps({'external_account_id': existing.external_account_id}),
             content_type='application/json',
         )
-        update_request.user = root
+        self._attach_bearer_session(update_request, root)
         update_response = update_cloud_account(update_request, other.id)
         update_payload = json.loads(update_response.content.decode('utf-8'))
 
@@ -519,7 +529,7 @@ class DashboardCloudAccountVerifyTestCase(TestCase):
             data=json.dumps({'region': 'ap-southeast-1'}),
             content_type='application/json',
         )
-        request.user = staff
+        self._attach_bearer_session(request, staff)
 
         fake_lightsail = SimpleNamespace(get_instances=lambda: {'instances': []})
         fake_sts = SimpleNamespace(get_caller_identity=lambda: {'Account': '123456789012'})
@@ -593,7 +603,7 @@ class DashboardCloudAccountVerifyTestCase(TestCase):
             status=CloudAsset.STATUS_RUNNING,
         )
         request = RequestFactory().post(f'/api/admin/settings/cloud-accounts/{account.id}/delete/')
-        request.user = staff
+        self._attach_bearer_session(request, staff)
 
         response = delete_cloud_account(request, account.id)
         payload = json.loads(response.content.decode('utf-8'))
@@ -624,11 +634,11 @@ class DashboardCloudAccountVerifyTestCase(TestCase):
             data=json.dumps({'region': 'cn-hongkong'}),
             content_type='application/json',
         )
-        request.user = staff
+        self._attach_bearer_session(request, staff)
 
         with patch.dict(sys.modules, {'alibabacloud_swas_open20200601': fake_aliyun_module}), \
             patch('cloud.aliyun_simple._build_client', return_value=FakeClient()) as build_client, \
-            patch('bot.api._fetch_aliyun_account_id', return_value='aliyun-owner-1'):
+            patch('bot.api_cloud_accounts._fetch_aliyun_account_id', return_value='aliyun-owner-1'):
             response = verify_cloud_account(request, account.id)
 
         self.assertEqual(response.status_code, 200)
@@ -873,7 +883,7 @@ class TelegramListenerPushTestCase(SimpleTestCase):
             bot = FakeBot()
             copies = []
 
-            async def fake_copy(_bot, chat_id, text, parse_mode=None):
+            async def fake_copy(_bot, chat_id, text, parse_mode=None, **_kwargs):
                 copies.append((chat_id, text, parse_mode))
                 if len(copies) == 1:
                     await asyncio.sleep(0.02)
