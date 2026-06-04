@@ -483,7 +483,7 @@ def _cloud_asset_risk_state(asset, order, expires_at, provider_status_label, dis
     if order and not getattr(order, 'auto_renew_enabled', False):
         set_risk('auto_renew_off', '续费关闭', 13, '自动续费关闭')
     if not shutdown_enabled:
-        set_risk('shutdown_disabled', '关机计划关闭', 4, '本资产已关闭关机计划')
+        set_risk('shutdown_disabled', '资产开关关闭', 4, '本资产已关闭自动生命周期')
     if is_unattached_ip:
         set_risk('unattached_ip', '未附加固定IP', 3, '固定IP未附加实例')
     if not is_unattached_ip and expires_at and expires_at <= now:

@@ -8656,6 +8656,47 @@ git diff --check
 - 本轮未执行真实云创建、删除、固定 IP 释放、链上广播、真实支付或生产发布。
 - SQLite 测试环境仍会打印不支持 `db_comment` / `db_table_comment` 的预期 warning。
 
+## 2026-06-04 资产自动生命周期开关与关机总开关补齐
+
+### 背景
+
+用户要求补齐资产开关，并继续实测生命周期关闭服务器、删除服务器、释放固定 IP、执行时间窗口和各类开关。前一轮已新增 `cloud_server_shutdown_enabled`，但初始实现把“关机总开关”通过 `_shutdown_enabled_for_order` 传递到了删机和 IP 回收路径，容易和已有 `cloud_server_delete_enabled`、`cloud_ip_delete_enabled` 两个独立总开关混淆。
+
+### 修改
+
+- `core/runtime_config.py`：新增显式 `cloud_server_shutdown_enabled` 默认值、帮助文案和环境变量映射，默认开启，且文案明确只控制真实关机。
+- `cloud/lifecycle.py`：新增 `asset_auto_lifecycle_enabled` 和 `_asset_lifecycle_enabled_for_order`，将资产级 `CloudAsset.shutdown_enabled` 明确作为“资产自动生命周期开关”；`_shutdown_enabled_for_order` 只用于关机场景，同时叠加全局关机总开关。
+- `cloud/lifecycle.py`：到期队列中，关机队列受“关机总开关 + 资产开关”控制；删机、删机提醒、固定 IP 回收和回收提醒只受资产开关控制，不再被关机总开关误挡。
+- `cloud/lifecycle_execution.py`：执行器拆分错误原因。关机总开关关闭时只跳过真实关机；资产开关关闭时跳过该资产自动关机、自动删机、迁移旧机删除、订单固定 IP 释放、未附加 IP 释放。
+- `bot/api.py`、`cloud/api_assets.py`：后台生命周期计划、未附加 IP 删除计划和资产风险文案统一展示为“资产开关关闭”，保留内部状态码 `shutdown_disabled` 兼容前端。
+- `cloud/api_tasks.py`：通知计划中的删机提醒和 IP 回收提醒改为按资产自动生命周期开关筛选，不再读取关机总开关。
+- `cloud/management/commands/sync_aws_assets.py`：AWS 同步释放未附加固定 IP 时，资产开关关闭的状态标记改为“未附加固定IP-资产开关关闭”。
+- `cloud/tests.py`：新增和更新开关聚焦测试，覆盖默认开启、全局关机总开关阻断关机、全局关机总开关不阻断删机/IP 回收队列、资产开关阻断关机/删机/IP 释放/同步释放。
+
+### 当前语义
+
+- 服务器关机总开关：`cloud_server_shutdown_enabled=0` 只阻断到期真实关机。
+- 删除服务器总开关：`cloud_server_delete_enabled=0` 阻断真实删机。
+- 删除 IP 总开关：`cloud_ip_delete_enabled=0` 阻断真实释放固定 IP。
+- 资产开关：`CloudAsset.shutdown_enabled=False` 阻断该资产的自动关机、自动删机、固定 IP 回收和未附加 IP 自动释放。
+
+### 验证
+
+本地已通过：
+
+```bash
+DB_ENGINE=mysql UV_CACHE_DIR=/private/tmp/uv-cache-shop PYTHONDONTWRITEBYTECODE=1 uv run python -m py_compile core/runtime_config.py cloud/lifecycle.py cloud/lifecycle_execution.py cloud/api_tasks.py bot/api.py cloud/api_assets.py cloud/management/commands/sync_aws_assets.py cloud/tests.py
+DJANGO_TEST_SQLITE=1 UV_CACHE_DIR=/private/tmp/uv-cache-shop PYTHONDONTWRITEBYTECODE=1 uv run python manage.py test cloud.tests.CloudServerServicesTestCase.test_cloud_server_shutdown_enabled_defaults_on cloud.tests.CloudServerServicesTestCase.test_global_shutdown_switch_blocks_scheduled_suspend cloud.tests.CloudServerServicesTestCase.test_due_orders_skip_suspend_when_asset_shutdown_disabled cloud.tests.CloudServerServicesTestCase.test_due_orders_skip_order_static_ip_recycle_when_asset_shutdown_disabled cloud.tests.CloudServerServicesTestCase.test_due_orders_global_shutdown_switch_does_not_block_delete_or_recycle cloud.tests.CloudServerServicesTestCase.test_lifecycle_suspend_execution_guard_respects_asset_shutdown_disabled cloud.tests.CloudServerServicesTestCase.test_replaced_order_delete_respects_asset_shutdown_switch cloud.tests.CloudServerServicesTestCase.test_lifecycle_plans_show_asset_shutdown_disabled_plan_state cloud.tests.CloudServerServicesTestCase.test_order_static_ip_release_respects_asset_shutdown_disabled cloud.tests.CloudServerServicesTestCase.test_aws_sync_release_static_ip_respects_asset_shutdown_disabled cloud.tests.CloudServerServicesTestCase.test_unattached_ip_delete_respects_shutdown_disabled_asset --settings=shop.settings --verbosity=2
+DB_ENGINE=mysql UV_CACHE_DIR=/private/tmp/uv-cache-shop PYTHONDONTWRITEBYTECODE=1 uv run python manage.py check
+```
+
+结果：编译通过；11 条生命周期开关聚焦测试通过；`manage.py check` 通过。SQLite 测试环境仅打印不支持 `db_comment` / `db_table_comment` 的预期 warning。
+
+### 剩余风险
+
+- 本轮未执行新的真实 AWS 关机、删机或固定 IP 释放；后续真机生命周期矩阵需要单独写入 `docs/real-machine-test-report.md`。
+- 本轮未执行真实支付、链上广播或生产发布。
+
 ## 2026-06-04 Telegram Bot 真机重测与重建迁移文案修复
 
 ### 背景

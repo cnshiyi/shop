@@ -99,8 +99,22 @@ def cloud_server_delete_enabled() -> bool:
     return _config_bool('cloud_server_delete_enabled', '0')
 
 
+def cloud_server_shutdown_enabled() -> bool:
+    return _config_bool('cloud_server_shutdown_enabled', '1')
+
+
 def cloud_ip_delete_enabled() -> bool:
     return _config_bool('cloud_ip_delete_enabled', '0')
+
+
+def asset_auto_lifecycle_enabled(asset: CloudAsset | None = None) -> bool:
+    if asset is None:
+        return True
+    return getattr(asset, 'shutdown_enabled', True) is not False
+
+
+def _asset_lifecycle_enabled_for_order(order: CloudServerOrder, asset: CloudAsset | None = None) -> bool:
+    return asset_auto_lifecycle_enabled(asset)
 
 
 def _config_int(key: str, default: int) -> int:
@@ -270,9 +284,9 @@ def _append_due(bucket: dict, key: str, order: CloudServerOrder):
 
 
 def _shutdown_enabled_for_order(order: CloudServerOrder, asset: CloudAsset | None = None) -> bool:
-    if asset is None:
-        return True
-    return getattr(asset, 'shutdown_enabled', True) is not False
+    if not cloud_server_shutdown_enabled():
+        return False
+    return _asset_lifecycle_enabled_for_order(order, asset)
 
 
 def _orphan_asset_server_delete_at(asset: CloudAsset):
@@ -308,6 +322,7 @@ def _get_due_orders():
         delete_at = schedule['delete_at']
         ip_recycle_at = schedule['ip_recycle_at']
         active_order = order.status in ['completed', 'expiring', 'renew_pending']
+        asset_lifecycle_enabled = _asset_lifecycle_enabled_for_order(order, asset)
         shutdown_enabled = _shutdown_enabled_for_order(order, asset)
         if cloud_notice_type_enabled('renew_notice') and active_order and order.cloud_reminder_enabled and expires_at <= renew_notice_at and expires_at > now:
             if renew_notice_debug_repeat or not order.renew_notice_sent_at:
@@ -323,18 +338,18 @@ def _get_due_orders():
         )
         if auto_renew_allowed and active_order and order.auto_renew_enabled and (auto_renew_before_expiry or auto_renew_shutdown_fallback):
             _append_due(due, 'auto_renew', order)
-        if cloud_notice_type_enabled('delete_notice') and shutdown_enabled and order.status in ['suspended', 'deleting'] and order.delete_reminder_enabled and delete_at and delete_at <= delete_notice_at and delete_at > now and not order.delete_notice_sent_at:
+        if cloud_notice_type_enabled('delete_notice') and asset_lifecycle_enabled and order.status in ['suspended', 'deleting'] and order.delete_reminder_enabled and delete_at and delete_at <= delete_notice_at and delete_at > now and not order.delete_notice_sent_at:
             _append_due(due, 'delete_notice', order)
-        if cloud_notice_type_enabled('recycle_notice') and shutdown_enabled and order.status == 'deleted' and order.ip_recycle_reminder_enabled and ip_recycle_at and ip_recycle_at <= recycle_notice_at and ip_recycle_at > now and not order.recycle_notice_sent_at:
+        if cloud_notice_type_enabled('recycle_notice') and asset_lifecycle_enabled and order.status == 'deleted' and order.ip_recycle_reminder_enabled and ip_recycle_at and ip_recycle_at <= recycle_notice_at and ip_recycle_at > now and not order.recycle_notice_sent_at:
             _append_due(due, 'recycle_notice', order)
         if order.provider != 'aliyun_simple':
             if order.status == 'completed' and expires_at <= now and not order.renew_notice_sent_at:
                 _append_due(due, 'expire', order)
             if active_order and shutdown_enabled and suspend_at and suspend_at <= now:
                 _append_due(due, 'suspend', order)
-            if shutdown_enabled and order.status in ['suspended', 'deleting'] and delete_at and delete_at <= now:
+            if asset_lifecycle_enabled and order.status in ['suspended', 'deleting'] and delete_at and delete_at <= now:
                 _append_due(due, 'delete', order)
-            if shutdown_enabled and order.status == 'deleted' and ip_recycle_at and ip_recycle_at <= now:
+            if asset_lifecycle_enabled and order.status == 'deleted' and ip_recycle_at and ip_recycle_at <= now:
                 _append_due(due, 'recycle', order)
 
     retained_ip_orders = CloudServerOrder.objects.filter(
@@ -345,10 +360,10 @@ def _get_due_orders():
     ).select_related('user', 'cloud_account')
     for order in retained_ip_orders:
         asset = _order_primary_asset(order)
-        shutdown_enabled = _shutdown_enabled_for_order(order, asset)
-        if cloud_notice_type_enabled('recycle_notice') and shutdown_enabled and order.ip_recycle_reminder_enabled and order.ip_recycle_at <= recycle_notice_at and order.ip_recycle_at > now and not order.recycle_notice_sent_at:
+        asset_lifecycle_enabled = _asset_lifecycle_enabled_for_order(order, asset)
+        if cloud_notice_type_enabled('recycle_notice') and asset_lifecycle_enabled and order.ip_recycle_reminder_enabled and order.ip_recycle_at <= recycle_notice_at and order.ip_recycle_at > now and not order.recycle_notice_sent_at:
             _append_due(due, 'recycle_notice', order)
-        if shutdown_enabled and order.provider != 'aliyun_simple' and order.ip_recycle_at <= now:
+        if asset_lifecycle_enabled and order.provider != 'aliyun_simple' and order.ip_recycle_at <= now:
             _append_due(due, 'recycle', order)
 
     failed_cleanup_orders = (

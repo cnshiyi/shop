@@ -528,6 +528,65 @@ class CloudServerServicesTestCase(TestCase):
         self.assertTrue(result['ok'])
         safe_time.assert_not_called()
 
+    # 功能：验证全局关机开关默认保持开启，避免新增配置改变既有生命周期行为。
+    def test_cloud_server_shutdown_enabled_defaults_on(self):
+        from cloud.lifecycle import cloud_server_shutdown_enabled
+
+        SiteConfig.objects.filter(key='cloud_server_shutdown_enabled').delete()
+
+        self.assertTrue(cloud_server_shutdown_enabled())
+
+    # 功能：验证全局关机开关关闭时，计划关机不会触发真实云关机。
+    def test_global_shutdown_switch_blocks_scheduled_suspend(self):
+        from cloud.lifecycle_execution import run_shutdown_order_suspend
+
+        SiteConfig.set('cloud_server_shutdown_enabled', '0')
+        account = self._aws_test_account()
+        now = timezone.now()
+        order = CloudServerOrder.objects.create(
+            order_no='GLOBAL-SHUTDOWN-OFF-ORDER-1',
+            user=self.user,
+            plan=self.plan,
+            provider=self.plan.provider,
+            cloud_account=account,
+            account_label=cloud_account_label(account),
+            region_code=self.plan.region_code,
+            region_name=self.plan.region_name,
+            plan_name=self.plan.plan_name,
+            quantity=1,
+            currency='USDT',
+            total_amount='19.00',
+            pay_amount='19.00',
+            status='completed',
+            public_ip='52.77.18.242',
+            suspend_at=now - timezone.timedelta(minutes=1),
+        )
+        CloudAsset.objects.create(
+            kind=CloudAsset.KIND_SERVER,
+            source=CloudAsset.SOURCE_ORDER,
+            order=order,
+            user=self.user,
+            provider=order.provider,
+            cloud_account=account,
+            account_label=cloud_account_label(account),
+            region_code=order.region_code,
+            region_name=order.region_name,
+            public_ip=order.public_ip,
+            actual_expires_at=now - timezone.timedelta(days=1),
+            status=CloudAsset.STATUS_RUNNING,
+            shutdown_enabled=True,
+            is_active=True,
+        )
+
+        with patch('cloud.lifecycle._stop_instance', new=AsyncMock(return_value=(True, 'should not stop'))) as stop_instance:
+            result = run_shutdown_order_suspend(order.id, enforce_schedule=True)
+
+        self.assertFalse(result['ok'])
+        self.assertIn('服务器关机总开关已关闭', result['error'])
+        stop_instance.assert_not_called()
+        order.refresh_from_db()
+        self.assertEqual(order.status, 'completed')
+
     # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
     def test_manual_orphan_asset_delete_bypasses_schedule_limits(self):
         from bot.api import _run_orphan_asset_delete_sync
@@ -1044,7 +1103,7 @@ class CloudServerServicesTestCase(TestCase):
 
         self.assertNotIn(asset.id, due_ids)
         self.assertFalse(result['ok'])
-        self.assertIn('关机计划已关闭', result['error'])
+        self.assertIn('生命周期开关已关闭', result['error'])
         self.assertEqual(row['queue_status'], 'shutdown_disabled')
 
     # 功能：处理 云资产、云订单和生命周期 中的 setUp 业务流程。
@@ -3579,7 +3638,7 @@ class CloudServerServicesTestCase(TestCase):
         self.assertFalse(any(item.id == order.id for item in due['suspend']))
         self.assertTrue(any(item.id == order.id for item in due['expire']))
 
-    # 功能：验证资产关机计划关闭时，订单固定 IP 回收也不会进入自动执行队列。
+    # 功能：验证资产自动生命周期开关关闭时，订单固定 IP 回收也不会进入自动执行队列。
     def test_due_orders_skip_order_static_ip_recycle_when_asset_shutdown_disabled(self):
         recycle_at = timezone.now() - timezone.timedelta(minutes=1)
         order = CloudServerOrder.objects.create(
@@ -3622,6 +3681,82 @@ class CloudServerServicesTestCase(TestCase):
         due = async_to_sync(_get_due_orders)()
 
         self.assertFalse(any(item.id == order.id for item in due['recycle']))
+
+    # 功能：验证全局关机总开关只影响关机，不会误挡删机和固定 IP 回收队列。
+    def test_due_orders_global_shutdown_switch_does_not_block_delete_or_recycle(self):
+        SiteConfig.set('cloud_server_shutdown_enabled', '0')
+        now = timezone.now()
+        delete_order = CloudServerOrder.objects.create(
+            order_no='HB-LIFECYCLE-GLOBAL-SHUTDOWN-DELETE-1',
+            user=self.user,
+            plan=self.plan,
+            provider=self.plan.provider,
+            region_code=self.plan.region_code,
+            region_name=self.plan.region_name,
+            plan_name=self.plan.plan_name,
+            quantity=1,
+            currency='USDT',
+            total_amount='19.00',
+            pay_amount='19.00',
+            pay_method='balance',
+            status='suspended',
+            public_ip='10.0.0.25',
+            delete_at=now - timezone.timedelta(minutes=1),
+        )
+        CloudAsset.objects.create(
+            kind=CloudAsset.KIND_SERVER,
+            source=CloudAsset.SOURCE_ORDER,
+            order=delete_order,
+            user=self.user,
+            provider=delete_order.provider,
+            region_code=delete_order.region_code,
+            region_name=delete_order.region_name,
+            asset_name='global-shutdown-delete-asset',
+            public_ip='10.0.0.25',
+            actual_expires_at=now - timezone.timedelta(days=5),
+            shutdown_enabled=True,
+            is_active=True,
+        )
+        recycle_order = CloudServerOrder.objects.create(
+            order_no='HB-LIFECYCLE-GLOBAL-SHUTDOWN-RECYCLE-1',
+            user=self.user,
+            plan=self.plan,
+            provider=self.plan.provider,
+            region_code=self.plan.region_code,
+            region_name=self.plan.region_name,
+            plan_name=self.plan.plan_name,
+            quantity=1,
+            currency='USDT',
+            total_amount='19.00',
+            pay_amount='19.00',
+            pay_method='balance',
+            status='deleted',
+            previous_public_ip='10.0.0.26',
+            static_ip_name='StaticIp-global-shutdown-recycle',
+            ip_recycle_at=now - timezone.timedelta(minutes=1),
+        )
+        CloudAsset.objects.create(
+            kind=CloudAsset.KIND_SERVER,
+            source=CloudAsset.SOURCE_AWS_SYNC,
+            order=recycle_order,
+            user=self.user,
+            provider=recycle_order.provider,
+            region_code=recycle_order.region_code,
+            region_name=recycle_order.region_name,
+            asset_name='StaticIp-global-shutdown-recycle',
+            public_ip='10.0.0.26',
+            previous_public_ip='10.0.0.26',
+            actual_expires_at=now - timezone.timedelta(minutes=1),
+            status=CloudAsset.STATUS_DELETED,
+            provider_status='固定IP保留中-实例已删除',
+            shutdown_enabled=True,
+            is_active=False,
+        )
+
+        due = async_to_sync(_get_due_orders)()
+
+        self.assertTrue(any(item.id == delete_order.id for item in due['delete']))
+        self.assertTrue(any(item.id == recycle_order.id for item in due['recycle']))
 
     # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
     def test_lifecycle_suspend_execution_guard_respects_asset_shutdown_disabled(self):
@@ -3686,7 +3821,7 @@ class CloudServerServicesTestCase(TestCase):
             patch('cloud.lifecycle._get_orphan_asset_delete_due', new_callable=AsyncMock, return_value=[]), \
             patch('cloud.lifecycle._get_unattached_static_ip_delete_due', new_callable=AsyncMock, return_value=[]), \
             patch('cloud.lifecycle._is_cloud_suspend_time', return_value=True), \
-            patch('cloud.lifecycle_execution.run_shutdown_order_suspend', return_value={'ok': False, 'error': '资产关机计划已关闭，跳过真实关机。'}) as suspend_mock:
+            patch('cloud.lifecycle_execution.run_shutdown_order_suspend', return_value={'ok': False, 'error': '资产自动生命周期开关已关闭，跳过真实关机。'}) as suspend_mock:
             async_to_sync(lifecycle_tick)()
 
         suspend_mock.assert_called_once_with(order.id, queue_status='scheduled_suspend', enforce_schedule=True)
@@ -4479,7 +4614,7 @@ class CloudServerServicesTestCase(TestCase):
 
         old_order.refresh_from_db()
         self.assertFalse(result['ok'])
-        self.assertIn('关机计划已关闭', result['error'])
+        self.assertIn('生命周期开关已关闭', result['error'])
         self.assertEqual(old_order.status, 'deleting')
         delete_mock.assert_not_called()
 
@@ -8894,9 +9029,9 @@ class CloudServerServicesTestCase(TestCase):
         self.assertFalse(row['shutdown_enabled'])
         self.assertEqual(row['queue_status'], 'shutdown_disabled')
         self.assertEqual(row['plan_state'], 'shutdown_disabled')
-        self.assertEqual(row['plan_state_label'], '关机计划关闭')
+        self.assertEqual(row['plan_state_label'], '资产开关关闭')
         self.assertFalse(row['should_execute'])
-        self.assertIn('关机计划关闭', row['blocked_reason'])
+        self.assertIn('生命周期开关关闭', row['blocked_reason'])
 
     # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
     def test_lifecycle_plans_route_linked_asset_delete_to_order_item(self):
@@ -9699,7 +9834,7 @@ class CloudServerServicesTestCase(TestCase):
         self.assertEqual(due_items, [])
         self.assertEqual(len(future_items), 3)
 
-    # 功能：验证通知计划详情不会展示关机计划关闭的删机提醒。
+    # 功能：验证通知计划详情不会展示资产开关关闭的删机提醒。
     def test_notice_task_detail_hides_shutdown_disabled_lifecycle_notices(self):
         now = timezone.now()
         delete_at = now + timezone.timedelta(days=2)
@@ -10870,7 +11005,7 @@ class CloudServerServicesTestCase(TestCase):
             result = run_order_static_ip_release(order.id, queue_status='scheduled_recycle', enforce_schedule=True)
 
         self.assertFalse(result['ok'])
-        self.assertIn('关机计划已关闭', result['error'])
+        self.assertIn('生命周期开关已关闭', result['error'])
         release_mock.assert_not_called()
 
     # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
@@ -16602,7 +16737,7 @@ class CloudServerServicesTestCase(TestCase):
         self.assertFalse(ok)
         self.assertEqual(released, [])
         self.assertEqual(asset.status, CloudAsset.STATUS_UNKNOWN)
-        self.assertEqual(asset.provider_status, '未附加固定IP-关机计划关闭')
+        self.assertEqual(asset.provider_status, '未附加固定IP-资产开关关闭')
 
     # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
     def test_aws_sync_release_static_ip_ignores_shutdown_disabled_account(self):

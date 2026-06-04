@@ -16,7 +16,7 @@ from django.views.decorators.http import require_GET, require_POST
 from bot.models import TelegramLoginAccount
 from cloud.asset_expiry import order_asset_expiry
 from cloud.dashboard_snapshots import _refresh_dashboard_plan_snapshots
-from cloud.lifecycle import NOTICE_TYPE_SWITCH_CONFIG, _auto_renew_notice_batch_payload, _notice_effective_delivered, _get_due_orders, _get_notice_text_override, _lifecycle_notice_batch_payload, _notice_payload_for_order, _notice_override_key, _record_auto_renew_patrol_log, _renew_notice_batch_payload, _run_auto_renew, _set_notice_text_override, _shutdown_enabled_for_order, cloud_notice_type_enabled
+from cloud.lifecycle import NOTICE_TYPE_SWITCH_CONFIG, _asset_lifecycle_enabled_for_order, _auto_renew_notice_batch_payload, _notice_effective_delivered, _get_due_orders, _get_notice_text_override, _lifecycle_notice_batch_payload, _notice_payload_for_order, _notice_override_key, _record_auto_renew_patrol_log, _renew_notice_batch_payload, _run_auto_renew, _set_notice_text_override, cloud_notice_type_enabled
 from cloud.models import CloudAsset, CloudAutoRenewPatrolLog, CloudServerOrder, CloudUserNoticeLog
 from cloud.services import RenewalPriceMissingError, _renewal_price
 from core.dashboard_api import _decimal_to_str, _error, _iso, _ok, _provider_label, _read_payload, _status_label, _user_payload, dashboard_login_required, dashboard_superuser_required
@@ -783,7 +783,7 @@ def _notice_task_future_items(now, next_run_at, seen_keys: set[tuple[str, int]],
             if notice_type in {'delete_notice', 'recycle_notice'}:
                 asset_id = notice.get('asset_id')
                 asset = CloudAsset.objects.select_related('cloud_account').filter(id=asset_id).first() if asset_id else None
-                if not _shutdown_enabled_for_order(order, asset):
+                if not _asset_lifecycle_enabled_for_order(order, asset):
                     continue
             notice_at = _notice_task_time(order, notice_type, notice)
             if not notice_at:
