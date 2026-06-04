@@ -8374,3 +8374,40 @@ git diff --check
 - 本轮默认数据库 `migrate --plan` 可执行且无待迁移操作，但未在生产或独立真实 MySQL/MariaDB 环境执行完整迁移演练。
 - 本轮未执行真实 Telegram 点击、真实云资源创建/删除/IP 变更、真实支付、链上广播、生产发布或不可逆操作。
 - 前端 `DEVELOPMENT.md` 仍有旧 `/api/dashboard/` 描述残留；源码只读扫描未发现旧调用。
+
+## 2026-06-04 生命周期专项复核补测
+
+### 范围
+
+本轮按用户“生命周期测试”要求继续复核，不再触发新的真实删机、释放固定 IP、链上转账或生产发布。重点确认真实库订单/资产状态、bot polling 是否存在重复进程、生命周期聚焦测试是否通过，以及真实库生命周期计划和通知计划刷新是否正常。
+
+### 发现
+
+- 真实库中旧订单 `#79` 状态为 `deleted`，旧资产 `#325` 状态为 `deleted` 且不可见；新订单 `#80` 状态为 `completed`，新资产 `#326` 状态为 `running` 且可见。
+- 新旧资产的到期事实继续使用 `CloudAsset.actual_expires_at`，未发现订单侧到期字段回流。
+- 测试用户余额保持为 USDT `990.000000`、TRX `984.747000`，余额流水 3 条；地址监控已清空，数量为 0。
+- 发现 PyCharm debug 方式启动的 `run.py` 会继续派生一份重复 `bot.runner`，可能与正式 `run.py bot` 抢 Telegram polling。
+
+### 处理
+
+- 结束 PyCharm debug 派生的重复 `bot.runner` 和其 debug `run.py` 父进程，只保留正式 `uv run python run.py bot` 进程组。
+- 覆盖更新 `docs/auto-optimization-latest.md`，记录当前生命周期复核结果。
+
+### 验证
+
+本地已通过：
+
+```bash
+DB_ENGINE=mysql UV_CACHE_DIR=/private/tmp/uv-cache-shop PYTHONDONTWRITEBYTECODE=1 uv run python manage.py check
+DJANGO_TEST_SQLITE=1 UV_CACHE_DIR=/private/tmp/uv-cache-shop PYTHONDONTWRITEBYTECODE=1 uv run python manage.py test cloud.tests cloud.tests_task_center --settings=shop.settings --verbosity=1
+DB_ENGINE=mysql UV_CACHE_DIR=/private/tmp/uv-cache-shop PYTHONDONTWRITEBYTECODE=1 uv run python manage.py refresh_lifecycle_plans
+DB_ENGINE=mysql UV_CACHE_DIR=/private/tmp/uv-cache-shop PYTHONDONTWRITEBYTECODE=1 uv run python manage.py refresh_notice_plans
+```
+
+结果：`manage.py check` 通过；生命周期和任务中心相关测试 383 个通过；真实库生命周期计划刷新输出 `due=1 future=1 history=3 ip_delete=3`；通知计划刷新输出 `due=2 future=1 history=7`。刷新后未发现 pending lifecycle task 残留；通知任务表仅保留 1 条历史 failed 记录。
+
+### 剩余风险
+
+- 本轮没有执行新的真实云资源破坏性动作，只复核上一轮已完成的生命周期结果。
+- 本轮未执行链上真实充值到账；仍需要真实外部钱包转账来源才能覆盖到账扫描。
+- 工作树仍包含本轮外既存脏文件和迁移文件，本轮未回退。
