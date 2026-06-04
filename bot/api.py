@@ -95,6 +95,20 @@ def _asset_is_unattached_ip(asset):
     )
 
 
+def _ensure_unattached_ip_delete_due(asset, *, now=None):
+    if not _asset_is_unattached_ip(asset) or getattr(asset, 'actual_expires_at', None):
+        return getattr(asset, 'actual_expires_at', None)
+    delete_at = compute_unattached_ip_release_at(now or timezone.now())
+    updated = CloudAsset.objects.filter(id=asset.id, actual_expires_at__isnull=True).update(actual_expires_at=delete_at, updated_at=timezone.now())
+    if updated:
+        asset.actual_expires_at = delete_at
+        asset.updated_at = timezone.now()
+        return delete_at
+    refreshed = CloudAsset.objects.filter(id=asset.id).values_list('actual_expires_at', flat=True).first()
+    asset.actual_expires_at = refreshed
+    return refreshed
+
+
 def _asset_waiting_manual_time_q():
     return (
         Q(actual_expires_at__isnull=True)
@@ -1208,11 +1222,7 @@ def _unattached_ip_delete_items(limit=50, assets=None):
         if confirm_state['count'] >= confirm_state['threshold']:
             continue
         user_display_name, username_label = _telegram_user_labels(asset.user)
-        if asset.actual_expires_at:
-            delete_at = asset.actual_expires_at
-        else:
-            base_at = asset.updated_at or asset.created_at or now
-            delete_at = compute_unattached_ip_release_at(base_at)
+        delete_at = asset.actual_expires_at or _ensure_unattached_ip_delete_due(asset, now=now)
         trace = _cloud_ip_trace_from_maps(asset, trace_maps)
         trace_note = ''
         if trace:

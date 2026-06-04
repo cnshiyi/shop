@@ -8465,3 +8465,39 @@ DJANGO_TEST_SQLITE=1 UV_CACHE_DIR=/private/tmp/uv-cache-shop PYTHONDONTWRITEBYTE
 
 - 本轮未执行真实云侧未附加固定 IP 释放，只验证无到期日期资产不会进入计划任务。
 - 工作树仍包含本轮外既存脏文件和迁移文件，本轮未回退。
+
+## 2026-06-04 未附加固定 IP 缺失到期时间自动补齐规则
+
+### 范围
+
+本轮按用户要求实现规则：未附加固定 IP 如果没有到期时间，自动添加 15 天后删除计划。实现仍以 `CloudAsset.actual_expires_at` 作为唯一资产到期事实，不新增订单侧到期字段，不恢复旧计划快照。
+
+### 修改
+
+- `bot/api.py`：计划列表 `_unattached_ip_delete_items` 遇到未附加固定 IP 且 `actual_expires_at` 为空时，按 `compute_unattached_ip_release_at(now)` 写回 `CloudAsset.actual_expires_at`，并在计划行中展示同一删除时间。
+- `cloud/lifecycle.py`：生命周期扫描 `_get_unattached_static_ip_delete_due` 在查询到期释放候选前，先给缺失到期时间的未附加固定 IP 补齐默认释放时间；补齐后因时间在未来，不会被本轮误释放。
+- `cloud/tests.py`：新增计划列表补齐测试和生命周期扫描补齐测试，覆盖 15 天后删除计划、写回资产到期时间、以及不立即进入 due 列表。
+
+### 验证
+
+本地已通过：
+
+```bash
+DB_ENGINE=mysql UV_CACHE_DIR=/private/tmp/uv-cache-shop PYTHONDONTWRITEBYTECODE=1 uv run python -m py_compile bot/api.py cloud/lifecycle.py cloud/tests.py
+DJANGO_TEST_SQLITE=1 UV_CACHE_DIR=/private/tmp/uv-cache-shop PYTHONDONTWRITEBYTECODE=1 uv run python manage.py test cloud.tests.CloudServerServicesTestCase.test_unattached_ip_delete_items_fill_missing_expiry_with_default_delete_plan cloud.tests.CloudServerServicesTestCase.test_unattached_static_ip_due_scan_fills_missing_expiry_as_future_plan --settings=shop.settings --verbosity=2
+DB_ENGINE=mysql UV_CACHE_DIR=/private/tmp/uv-cache-shop PYTHONDONTWRITEBYTECODE=1 uv run python manage.py check
+DJANGO_TEST_SQLITE=1 UV_CACHE_DIR=/private/tmp/uv-cache-shop PYTHONDONTWRITEBYTECODE=1 uv run python manage.py test cloud.tests cloud.tests_task_center --settings=shop.settings --verbosity=1
+DB_ENGINE=mysql UV_CACHE_DIR=/private/tmp/uv-cache-shop PYTHONDONTWRITEBYTECODE=1 uv run python manage.py refresh_lifecycle_plans
+```
+
+结果：编译检查通过；2 个新增测试通过；`manage.py check` 通过；生命周期和任务中心相关测试 385 个通过；真实库计划刷新输出 `due=1 future=1 history=3 ip_delete=3`。真实库执行前后缺失到期时间的未附加固定 IP 存量均为 0。
+
+### 结论
+
+未附加固定 IP 缺失 `CloudAsset.actual_expires_at` 时，现在会自动补齐默认 15 天后的删除计划；实际删除仍受生命周期开关和执行时间窗口控制。
+
+### 剩余风险
+
+- 本轮没有真实云侧缺失样本可补写，真实库只验证刷新命令正常。
+- 本轮未执行真实固定 IP 释放、链上广播或生产发布。
+- 工作树仍包含本轮外既存脏文件和迁移文件，本轮未回退。

@@ -206,6 +206,14 @@ def _notice_asset_is_unattached_static_ip(asset: CloudAsset | None) -> bool:
     )
 
 
+def _ensure_unattached_static_ip_release_at(asset: CloudAsset | None, *, now=None):
+    if not _notice_asset_is_unattached_static_ip(asset) or getattr(asset, 'actual_expires_at', None):
+        return False
+    asset.actual_expires_at = compute_unattached_ip_release_at(now or timezone.now())
+    asset.save(update_fields=['actual_expires_at', 'updated_at'])
+    return True
+
+
 def _notice_asset_queryset():
     return (
         CloudAsset.objects.select_related('order', 'order__user', 'cloud_account', 'order__cloud_account')
@@ -1772,17 +1780,27 @@ def _get_orphan_asset_delete_due():
 def _get_unattached_static_ip_delete_due():
     now = timezone.now()
     waiting_manual_time_q = Q(provider_status__icontains='待人工添加时间') | Q(note__icontains='等待人工添加真实到期时间') | Q(note__icontains='等待人工添加时间')
-    return list(
-        CloudAsset.objects.select_related('cloud_account').filter(
+    base_queryset = (
+        CloudAsset.objects.select_related('cloud_account')
+        .filter(
             kind=CloudAsset.KIND_SERVER,
             order__isnull=True,
             provider='aws_lightsail',
-            actual_expires_at__lte=now,
-        ).filter(
+        )
+        .filter(
             Q(instance_id__isnull=True) | Q(instance_id='')
-        ).filter(
+        )
+        .filter(
             Q(provider_status__icontains='未附加固定IP') | Q(note__icontains='未附加固定IP') | Q(provider_resource_id__icontains='StaticIp')
-        ).exclude(shutdown_enabled=False).exclude(waiting_manual_time_q).exclude(status__in=[CloudAsset.STATUS_DELETED, CloudAsset.STATUS_DELETING, CloudAsset.STATUS_TERMINATED]).order_by(
+        )
+        .exclude(shutdown_enabled=False)
+        .exclude(waiting_manual_time_q)
+        .exclude(status__in=[CloudAsset.STATUS_DELETED, CloudAsset.STATUS_DELETING, CloudAsset.STATUS_TERMINATED])
+    )
+    for asset in base_queryset.filter(actual_expires_at__isnull=True):
+        _ensure_unattached_static_ip_release_at(asset, now=now)
+    return list(
+        base_queryset.filter(actual_expires_at__lte=now).order_by(
             Case(
                 When(provider_resource_id__icontains='StaticIp', then=Value(0)),
                 default=Value(1),

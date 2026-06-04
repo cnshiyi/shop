@@ -7407,6 +7407,35 @@ class CloudServerServicesTestCase(TestCase):
 
         self.assertEqual(parse_datetime(row['delete_at']), delete_due_at)
 
+    # 功能：验证未附加固定 IP 缺失到期时间时，计划页会自动补齐 15 天后删除。
+    def test_unattached_ip_delete_items_fill_missing_expiry_with_default_delete_plan(self):
+        before = timezone.now()
+        asset = CloudAsset.objects.create(
+            kind=CloudAsset.KIND_SERVER,
+            source=CloudAsset.SOURCE_AWS_SYNC,
+            user=self.user,
+            provider='aws_lightsail',
+            region_code=self.plan.region_code,
+            region_name=self.plan.region_name,
+            asset_name='visible-unattached-missing-expiry',
+            public_ip='5.5.5.17',
+            actual_expires_at=None,
+            status=CloudAsset.STATUS_RUNNING,
+            is_active=True,
+            provider_status='未附加固定IP',
+            note='未附加固定IP',
+        )
+
+        items = _unattached_ip_delete_items(limit=20)
+        asset.refresh_from_db()
+        row = next(item for item in items if item.get('id') == asset.id)
+
+        self.assertIsNotNone(asset.actual_expires_at)
+        self.assertGreater(asset.actual_expires_at, before + timezone.timedelta(days=14))
+        self.assertLess(asset.actual_expires_at, before + timezone.timedelta(days=16))
+        self.assertEqual(parse_datetime(row['delete_at']), asset.actual_expires_at)
+        self.assertEqual(parse_datetime(row['actual_expires_at']), asset.actual_expires_at)
+
     # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
     def test_unattached_ip_delete_items_skip_inactive_cloud_account_assets(self):
         inactive_account = CloudAccountConfig.objects.create(
@@ -16453,6 +16482,34 @@ class CloudServerServicesTestCase(TestCase):
         asset.refresh_from_db()
         self.assertNotEqual(asset.status, CloudAsset.STATUS_DELETED)
         self.assertEqual(asset.public_ip, '21.21.21.23')
+
+    # 功能：验证生命周期扫描会给无到期时间的未附加固定 IP 自动补齐 15 天后删除计划。
+    def test_unattached_static_ip_due_scan_fills_missing_expiry_as_future_plan(self):
+        before = timezone.now()
+        asset = CloudAsset.objects.create(
+            kind=CloudAsset.KIND_SERVER,
+            source=CloudAsset.SOURCE_AWS_SYNC,
+            user=self.user,
+            provider='aws_lightsail',
+            region_code=self.plan.region_code,
+            region_name=self.plan.region_name,
+            asset_name='StaticIp-unattached-missing-expiry-scan',
+            provider_resource_id='arn:aws:lightsail:ap-southeast-1:123456789012:StaticIp/StaticIp-unattached-missing-expiry-scan',
+            public_ip='5.5.5.57',
+            actual_expires_at=None,
+            status=CloudAsset.STATUS_UNKNOWN,
+            provider_status='未附加固定IP',
+            note='未附加固定IP',
+            is_active=False,
+        )
+
+        due_assets = async_to_sync(_get_unattached_static_ip_delete_due)()
+        asset.refresh_from_db()
+
+        self.assertNotIn(asset.id, {item.id for item in due_assets})
+        self.assertIsNotNone(asset.actual_expires_at)
+        self.assertGreater(asset.actual_expires_at, before + timezone.timedelta(days=14))
+        self.assertLess(asset.actual_expires_at, before + timezone.timedelta(days=16))
 
     # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
     def test_aws_sync_release_static_ip_respects_asset_shutdown_disabled(self):
