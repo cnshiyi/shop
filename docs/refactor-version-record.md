@@ -8697,6 +8697,39 @@ DB_ENGINE=mysql UV_CACHE_DIR=/private/tmp/uv-cache-shop PYTHONDONTWRITEBYTECODE=
 - 本轮未执行新的真实 AWS 关机、删机或固定 IP 释放；后续真机生命周期矩阵需要单独写入 `docs/real-machine-test-report.md`。
 - 本轮未执行真实支付、链上广播或生产发布。
 
+## 2026-06-04 生命周期开关矩阵真机实测
+
+### 背景
+
+用户要求继续实测到期关闭服务器、删除流程、非执行时间窗口、关闭删机开关以及每个开关，并明确要覆盖服务器和未附加 IP 的无到期时间处理规则。本轮在上一提交已补齐开关语义后，使用真实项目数据库订单和生命周期执行入口执行真机验证。
+
+### 真机测试
+
+- 使用 `TelegramUser #173` 和 `CloudServerPlan #131` 创建钱包余额购买订单 `#91`，扣除 5 USDT。
+- 调用真实 AWS Lightsail 开通流程，订单进入 `completed`，资产 `#337` 进入 `running`。
+- 关机阶段：验证非关机执行时间窗口、`cloud_server_shutdown_enabled=0`、资产开关关闭均跳过真实关机；打开后真实关机成功，订单变为 `suspended`，资产变为 `stopped/is_active=False`。
+- 删机阶段：验证 `cloud_server_delete_enabled=0`、非删机执行时间窗口、资产开关关闭均跳过真实删机；打开后真实删机成功，订单和资产变为 `deleted`，实例标识清空。
+- 固定 IP 回收阶段：验证 `cloud_ip_delete_enabled=0`、非 IP 删除执行时间窗口、资产开关关闭均跳过真实释放固定 IP；打开后真实释放固定 IP 成功，固定 IP 名称、`public_ip` 和 `ip_recycle_at` 清空。
+- 缺到期时间规则：创建临时本地未附加固定 IP 和临时本地服务器资产，验证只有未附加固定 IP 自动补约 15 天后删除时间，服务器不自动补时间并等待人工维护；随后删除两条临时资产。
+
+### 配置恢复
+
+- `cloud_server_shutdown_enabled` 已删除回默认值。
+- `cloud_server_delete_enabled=1`、`cloud_ip_delete_enabled=1`。
+- `cloud_suspend_time=15:00`、`cloud_delete_time=15:00`、`cloud_unattached_ip_delete_time=15:00`。
+- 测试订单 `#91` 最终为 `deleted`，测试资产 `#337` 最终为 `deleted/is_active=False`，实例标识、固定 IP 名称和回收时间均已清空。
+
+### 报告
+
+- 详细脱敏真机记录已追加到 `docs/real-machine-test-report.md`。
+- 未记录完整公网 IP、云资源 ID、代理链接、代理 secret、登录密码、Telegram token、session 或云账号密钥。
+
+### 剩余风险
+
+- 本轮执行了真实 AWS Lightsail 创建、关机、删除和固定 IP 释放；测试资源已清理。
+- 本轮未执行链上广播或真实地址充值到账。
+- 本轮未通过 Telegram bot inline 按钮触发生命周期执行器，而是使用项目数据库订单和生命周期执行入口执行真实云操作。
+
 ## 2026-06-04 Telegram Bot 真机重测与重建迁移文案修复
 
 ### 背景

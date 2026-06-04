@@ -4,23 +4,26 @@
 
 ## 最近一轮
 
-- 时间：2026-06-04 21:43 CST
-- 状态：按用户要求补齐资产开关语义，并新增显式服务器关机总开关。
-- 本轮范围：云资产生命周期开关、后台生命周期计划视图、通知计划筛选、生命周期执行器、AWS 未附加固定 IP 同步释放保护。
-- 本轮修复：新增 `cloud_server_shutdown_enabled` 配置，默认开启；该总开关只阻断到期真实关机。删除服务器仍由 `cloud_server_delete_enabled` 控制，释放固定 IP 仍由 `cloud_ip_delete_enabled` 控制。资产级 `CloudAsset.shutdown_enabled` 统一作为“资产自动生命周期开关”，关闭后阻断该资产自动关机、自动删机、订单固定 IP 回收、未附加 IP 释放和 AWS 同步释放。
-- 本轮结论：全局关机总开关、删机总开关、删 IP 总开关、资产开关语义已拆开，不再互相误挡。
+- 时间：2026-06-04 22:31 CST
+- 状态：按用户要求完成真实 AWS 生命周期矩阵实测；实际创建 1 台 AWS Lightsail 测试服务器，完成真实关机、真实删机和真实固定 IP 释放，并测试非执行时间窗口、关机总开关、删机总开关、删 IP 总开关、资产开关。
+- 本轮范围：钱包余额购买、云服务器开通、到期关机执行器、到期删机执行器、订单固定 IP 回收执行器、未附加 IP 缺到期时间自动补 15 天规则、服务器缺到期时间等待人工维护规则。
+- 本轮结论：关机总开关只阻断关机；删机总开关只阻断删机；删 IP 总开关只阻断固定 IP 释放；资产开关阻断该资产自动关机、自动删机和自动释放固定 IP。未附加固定 IP 缺到期时间会自动补约 15 天后删除，服务器缺到期时间不会自动补时间。
 
 ## 最近验证
 
-- `DB_ENGINE=mysql UV_CACHE_DIR=/private/tmp/uv-cache-shop PYTHONDONTWRITEBYTECODE=1 uv run python -m py_compile core/runtime_config.py cloud/lifecycle.py cloud/lifecycle_execution.py cloud/api_tasks.py bot/api.py cloud/api_assets.py cloud/management/commands/sync_aws_assets.py cloud/tests.py` 通过。
-- `DJANGO_TEST_SQLITE=1 UV_CACHE_DIR=/private/tmp/uv-cache-shop PYTHONDONTWRITEBYTECODE=1 uv run python manage.py test cloud.tests.CloudServerServicesTestCase.test_cloud_server_shutdown_enabled_defaults_on cloud.tests.CloudServerServicesTestCase.test_global_shutdown_switch_blocks_scheduled_suspend cloud.tests.CloudServerServicesTestCase.test_due_orders_skip_suspend_when_asset_shutdown_disabled cloud.tests.CloudServerServicesTestCase.test_due_orders_skip_order_static_ip_recycle_when_asset_shutdown_disabled cloud.tests.CloudServerServicesTestCase.test_due_orders_global_shutdown_switch_does_not_block_delete_or_recycle cloud.tests.CloudServerServicesTestCase.test_lifecycle_suspend_execution_guard_respects_asset_shutdown_disabled cloud.tests.CloudServerServicesTestCase.test_replaced_order_delete_respects_asset_shutdown_switch cloud.tests.CloudServerServicesTestCase.test_lifecycle_plans_show_asset_shutdown_disabled_plan_state cloud.tests.CloudServerServicesTestCase.test_order_static_ip_release_respects_asset_shutdown_disabled cloud.tests.CloudServerServicesTestCase.test_aws_sync_release_static_ip_respects_asset_shutdown_disabled cloud.tests.CloudServerServicesTestCase.test_unattached_ip_delete_respects_shutdown_disabled_asset --settings=shop.settings --verbosity=2` 通过。
-- `DB_ENGINE=mysql UV_CACHE_DIR=/private/tmp/uv-cache-shop PYTHONDONTWRITEBYTECODE=1 uv run python manage.py check` 通过。
+- 真机：订单 `#91` 钱包余额支付 5 USDT 后开通成功，资产 `#337` 在 AWS Lightsail 运行中。
+- 真机：`cloud_suspend_time` 非执行窗口、`cloud_server_shutdown_enabled=0`、资产开关关闭均能阻断真实关机；打开后真实关机成功，订单 `suspended`，资产 `stopped`。
+- 真机：`cloud_server_delete_enabled=0`、`cloud_delete_time` 非执行窗口、资产开关关闭均能阻断真实删机；打开后真实删机成功，订单和资产进入 `deleted`，实例标识清空。
+- 真机：`cloud_ip_delete_enabled=0`、`cloud_unattached_ip_delete_time` 非执行窗口、资产开关关闭均能阻断真实释放固定 IP；打开后真实释放成功，固定 IP 名称和回收时间清空。
+- 真实库规则：临时未附加固定 IP 无到期时间时自动补约 15 天后的删除时间；临时服务器无到期时间时保持等待人工维护；两条临时资产已删除。
+- 配置恢复：`cloud_server_shutdown_enabled` 已删除回默认值，`cloud_server_delete_enabled=1`，`cloud_ip_delete_enabled=1`，三个执行时间窗口恢复为 `15:00`。
 
 ## 剩余风险
 
-- 本轮尚未执行新的真实 AWS 生命周期关机、删机或固定 IP 释放实测。
-- SQLite 测试环境仍会打印不支持 `db_comment` / `db_table_comment` 的预期 warning。
+- 本轮执行了真实 AWS Lightsail 创建、关机、删除和固定 IP 释放；完整脱敏记录已写入 `docs/real-machine-test-report.md`。
+- 本轮没有执行链上广播或真实地址充值到账。
+- 本轮未通过 Telegram bot 点击触发生命周期执行器，而是使用项目数据库订单和生命周期执行入口进行真实云操作。
 
 ## 下一步
 
-- 继续按用户要求执行真机生命周期矩阵：到期关机、删机、固定 IP 删除、非执行时间窗口、关机总开关、删机总开关、删 IP 总开关、资产开关。
+- 如需继续真机深测，可单独覆盖后台页面按钮触发生命周期执行器，以及通知计划在真实开关状态下的页面展示。

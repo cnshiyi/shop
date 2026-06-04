@@ -242,3 +242,59 @@
 - 本轮执行了真实 AWS Lightsail 创建、实例删除和固定 IP 释放；资源已按测试报告完成清理。
 - 本轮没有执行链上广播或真实地址充值到账。
 - 续费入口点击会让现有订单进入待支付续费状态；本轮由于测试资源最终删除，未保留该待支付状态。
+
+## 2026-06-04 生命周期开关矩阵真机实测
+
+- 状态：通过。
+- 授权：延续用户对真实 Telegram 账号、项目数据库余额和真实云资源测试的授权。
+- 后端仓库：`/Users/a399/Desktop/data/shop`
+- 测试用户：`TelegramUser #173`
+- 云厂商：AWS Lightsail
+- 套餐：新加坡，`实机测试 Nano`
+- 订单：`#91` / `SRV20260604141229230551`
+- 资产：`#337`
+- 云实例：`20260604-************-*-o91`
+- 公网 IP：`52.76.xxx.xxx`
+- 支付方式：USDT 钱包余额支付。
+- 金额：5 USDT。
+
+### 新购与开通
+
+- 使用项目服务走真实钱包余额购买流程，订单由 `paid` 进入开通。
+- AWS Lightsail 实例创建成功，固定 IP 绑定成功，BBR、MTProxy 主代理、备用代理、Telemt 多端口和 SOCKS5 初始化完成。
+- 开通后本地订单为 `completed`，资产为 `running`，资产到期事实写入 `CloudAsset.actual_expires_at`。
+- 敏感信息：未记录完整公网 IP、代理链接、代理 secret、登录密码、Telegram token、session 或云账号密钥。
+
+### 关机阶段矩阵
+
+- 非执行时间窗口：`cloud_suspend_time=00:00` 时执行计划关机，返回“当前不在后台配置的服务器关机执行时间窗口”，订单保持 `completed`。
+- 关机总开关关闭：`cloud_server_shutdown_enabled=0` 时执行计划关机，返回“服务器关机总开关已关闭，跳过真实关机”，订单保持 `completed`。
+- 资产开关关闭：`CloudAsset.shutdown_enabled=False` 时执行计划关机，返回“资产自动生命周期开关已关闭，跳过真实关机”，订单保持 `completed`。
+- 真实关机：打开关机总开关、执行窗口和资产开关后，真实 AWS 关机成功；订单变为 `suspended`，资产变为 `stopped/is_active=False`。
+
+### 删机阶段矩阵
+
+- 删机总开关关闭：`cloud_server_delete_enabled=0` 时执行计划删机，返回“删除服务器总开关已关闭，跳过真实删机”，订单保持 `suspended`。
+- 非执行时间窗口：`cloud_delete_time=00:00` 时执行计划删机，返回“当前不在后台配置的服务器删除执行时间窗口”，订单保持 `suspended`。
+- 资产开关关闭：`CloudAsset.shutdown_enabled=False` 时执行计划删机，返回“资产自动生命周期开关已关闭，跳过真实删机”，订单保持 `suspended`。
+- 真实删机：打开删机总开关、执行窗口和资产开关后，真实 AWS 删机成功；订单变为 `deleted`，资产变为 `deleted/is_active=False`，实例标识清空，固定 IP 进入保留待回收状态。
+
+### 固定 IP 回收矩阵
+
+- 删 IP 总开关关闭：`cloud_ip_delete_enabled=0` 时执行固定 IP 回收，返回“删除IP总开关已关闭，跳过真实释放固定 IP”，固定 IP 保留信息仍在。
+- 非执行时间窗口：`cloud_unattached_ip_delete_time=00:00` 时执行固定 IP 回收，返回“当前不在后台配置的 IP 删除执行时间窗口”，固定 IP 保留信息仍在。
+- 资产开关关闭：`CloudAsset.shutdown_enabled=False` 时执行固定 IP 回收，返回“资产自动生命周期开关已关闭，跳过真实释放固定 IP”，固定 IP 保留信息仍在。
+- 真实释放：打开删 IP 总开关、执行窗口和资产开关后，真实 AWS 固定 IP 释放成功；订单仍为 `deleted`，固定 IP 名称、`public_ip` 和 `ip_recycle_at` 已清空，资产保持 `deleted/is_active=False`。
+
+### 缺到期时间资产规则
+
+- 当前真实库没有“未附加固定 IP 且缺到期时间”的现成记录，因此创建两条临时本地资产记录验证规则，随后删除。
+- 临时未附加固定 IP：无 `actual_expires_at` 时，生命周期扫描自动补齐约 15 天后的删除时间。
+- 临时服务器资产：无 `actual_expires_at` 时，生命周期扫描不自动补时间，保持等待人工维护。
+- 清理：两条临时本地资产已删除，最终临时资产残留数量为 0。
+
+### 配置恢复与最终状态
+
+- 已恢复测试前生命周期配置：`cloud_server_shutdown_enabled` 删除为默认值，`cloud_server_delete_enabled=1`，`cloud_ip_delete_enabled=1`，`cloud_suspend_time=15:00`，`cloud_delete_time=15:00`，`cloud_unattached_ip_delete_time=15:00`。
+- 最终本地状态：订单 `#91` 为 `deleted`，资产 `#337` 为 `deleted/is_active=False`；实例标识、固定 IP 名称和 IP 回收时间均已清空。
+- 最终清理结论：本轮真实 AWS 测试实例已删除，固定 IP 已释放，未发现本轮临时资产残留。
