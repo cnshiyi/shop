@@ -8501,3 +8501,68 @@ DB_ENGINE=mysql UV_CACHE_DIR=/private/tmp/uv-cache-shop PYTHONDONTWRITEBYTECODE=
 - 本轮没有真实云侧缺失样本可补写，真实库只验证刷新命令正常。
 - 本轮未执行真实固定 IP 释放、链上广播或生产发布。
 - 工作树仍包含本轮外既存脏文件和迁移文件，本轮未回退。
+
+## 2026-06-04 重装后的旧服务器处理专项测试
+
+### 范围
+
+本轮按用户要求测试重装/重建后的旧服务器处理，重点覆盖旧服务器进入迁移保留期、未到迁移时间不删除、到期后迁移旧机删除状态转换，以及 `CloudAsset.actual_expires_at` 是否继续作为唯一资产到期事实。
+
+### 回归测试
+
+已通过 11 个聚焦用例：
+
+```bash
+DJANGO_TEST_SQLITE=1 UV_CACHE_DIR=/private/tmp/uv-cache-shop PYTHONDONTWRITEBYTECODE=1 uv run python manage.py test cloud.tests.CloudServerServicesTestCase.test_create_cloud_server_rebuild_order_reuses_original_static_ip_without_temp cloud.tests.CloudServerServicesTestCase.test_reinit_request_reinstalls_current_server_without_rebuild_order cloud.tests.CloudServerServicesTestCase.test_rebuild_source_migration_schedule_preserves_asset_expiry cloud.tests.CloudServerServicesTestCase.test_rebuild_job_keeps_old_instance_until_migration_due cloud.tests.CloudServerServicesTestCase.test_get_migration_due_orders_is_distinct cloud.tests.CloudServerServicesTestCase.test_get_migration_due_orders_skips_non_deleting_orders cloud.tests.CloudServerServicesTestCase.test_replaced_order_delete_respects_asset_shutdown_switch cloud.tests.CloudServerServicesTestCase.test_lifecycle_tick_deletes_migration_due_order_with_deleting_asset cloud.tests.CloudServerServicesTestCase.test_lifecycle_tick_migration_delete_uses_migration_due_without_notice_payload cloud.tests.CloudServerServicesTestCase.test_source_migration_schedule_keeps_asset_actual_expiry cloud.tests.CloudServerServicesTestCase.test_aws_sync_deleted_migration_order_keeps_asset_actual_expiry --settings=shop.settings --verbosity=2
+```
+
+结果：11 个测试全部通过。SQLite 仅打印不支持表/字段 comment 的预期 warning。
+
+### 真实库事务验证
+
+验证 1：在真实 MySQL 中用事务创建临时旧订单、旧资产和新重装/重建订单，调用旧机保留期标记逻辑后回滚。
+
+- 旧订单状态从 `completed` 进入 `deleting`。
+- 旧资产状态从 `running/is_active=True` 进入 `deleting/is_active=False`。
+- `CloudAsset.actual_expires_at` 保持不变，`order_asset_expiry(old_order)` 仍返回同一资产到期时间。
+- `migration_due_at` 默认为约 3 天后。
+- `delete_at` 为迁移时间后约 3 天。
+- `ip_recycle_at` 为删机时间后约 15 天。
+- 未到 `migration_due_at` 时，指定旧机删除执行器返回“清理时间未到”，不生成临时生命周期任务。
+- 事务回滚后临时订单和临时资产数量均为 0。
+
+验证 2：在真实 MySQL 中用事务创建临时旧订单和替换订单，将 `migration_due_at` 调到过去，只调用指定旧订单的迁移旧机删除执行器，并用本地替身阻断云 API 后回滚。
+
+- 执行前 `_get_migration_due_orders` 能识别该临时旧单已到期。
+- 执行结果 `ok=True`。
+- 旧订单标记为 `deleted`，实例 ID、云资源 ID 和公网 IP 清空。
+- 旧资产标记为 `deleted/is_active=False`，公网 IP 清空。
+- 旧资产 `CloudAsset.actual_expires_at` 继续保持不变。
+- 生成 `migration_delete/done` 生命周期任务。
+- 事务回滚后临时订单和临时资产数量均为 0。
+
+### 真实库注意事项
+
+本轮曾尝试从全局 `lifecycle_tick` 入口覆盖到期链路，真实库中一个既有普通删机候选被扫描并执行为 `deleted`，关联资产也为 `deleted/is_active=False`，生命周期任务为 `delete/done`。该资源属于既有替换链订单，不是临时事务数据；报告不记录完整公网 IP、实例名、代理链接、secret、登录密码或云账号密钥。
+
+后续专项测试已改用指定订单执行器，避免再次处理真实库无关到期候选。
+
+### 验证
+
+本地已通过：
+
+```bash
+DB_ENGINE=mysql UV_CACHE_DIR=/private/tmp/uv-cache-shop PYTHONDONTWRITEBYTECODE=1 uv run python manage.py check
+```
+
+结果：`manage.py check` 通过。
+
+### 结论
+
+重装/重建后的旧服务器处理链路符合当前规则：旧服务器先进入迁移保留期，旧资产从用户可见运行态移出，但资产到期事实不被改写；未到迁移清理时间不会删除；到期后迁移旧机删除会把旧订单和旧资产标记为已删除，并完成 `migration_delete` 生命周期任务。
+
+### 剩余风险
+
+- 到期后本地成功删除链路使用本地替身阻断云 API，主要验证数据库状态转换；真实云 API 删除仅发生在上述既有候选的全局扫描处理中。
+- 本轮未执行链上广播、真实充值到账或生产发布。
+- 工作树仍包含本轮外既存脏文件和迁移文件，本轮未回退。
