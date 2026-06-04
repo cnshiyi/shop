@@ -4,8 +4,8 @@
 
 ## 最近一轮
 
-- 时间：2026-06-04 18:59 CST
-- 状态：按用户授权执行真实 Telegram Bot 与真实 AWS Lightsail 购买、初始化、续费、重装、换 IP、旧机删除和旧固定 IP 释放；完整测试套件已通过；发现并修复多处真实按钮无响应/异常问题。
+- 时间：2026-06-04 19:08 CST
+- 状态：按用户授权执行真实 Telegram Bot 与真实 AWS Lightsail 购买、初始化、续费、重装、换 IP、旧机删除和旧固定 IP 释放；追加生命周期专项测试通过；完整测试套件已通过；发现并修复多处真实按钮无响应/异常问题。
 - 最近提交：本轮未提交；当前工作树含本轮 `bot/handlers.py` 与文档更新，另有既存未归属脏文件未处理。
 - 本轮范围：使用项目数据库中的已登录 Telegram 账号与测试 bot 实际发消息、点击按钮；使用项目数据库余额完成 USDT 与 TRX 钱包支付；创建并初始化真实 AWS Lightsail 测试服务器；执行真实重新安装、真实换 IP、新节点初始化、旧机删除、旧固定 IP 释放；验证个人中心、订单详情、IP 查询、自动续费开关、充值入口、充值记录、余额明细、提醒列表、地址监控、客服入口、续费、换 IP、重装、修改配置入口。
 - 本轮结论：真实购买链路、USDT 续费、TRX 续费、重装、换 IP、新节点可用、旧 IP 不可续费、旧机删除和旧固定 IP 释放均已完成。最终活跃资产为 `#326`，订单 `#80` 为 `completed`，旧订单 `#79` 和旧资产 `#325` 已标记删除。修复了个人中心文本按钮漏处理、客服文本按钮漏处理、订单详情/提醒/续费/成功通知等 async handler 中同步查库导致的 `SynchronousOnlyOperation`。
@@ -15,6 +15,9 @@
 - `DB_ENGINE=mysql UV_CACHE_DIR=/private/tmp/uv-cache-shop PYTHONDONTWRITEBYTECODE=1 uv run python -m py_compile bot/handlers.py` 通过。
 - `DB_ENGINE=mysql UV_CACHE_DIR=/private/tmp/uv-cache-shop PYTHONDONTWRITEBYTECODE=1 uv run python manage.py check` 通过。
 - `DJANGO_TEST_SQLITE=1 UV_CACHE_DIR=/private/tmp/uv-cache-shop PYTHONDONTWRITEBYTECODE=1 uv run python manage.py test --settings=shop.settings --verbosity=1` 通过，519 个测试 OK。
+- `DJANGO_TEST_SQLITE=1 UV_CACHE_DIR=/private/tmp/uv-cache-shop PYTHONDONTWRITEBYTECODE=1 uv run python manage.py test cloud.tests cloud.tests_task_center --settings=shop.settings --verbosity=1` 通过，383 个生命周期/任务中心相关测试 OK。
+- `DB_ENGINE=mysql UV_CACHE_DIR=/private/tmp/uv-cache-shop PYTHONDONTWRITEBYTECODE=1 uv run python manage.py refresh_lifecycle_plans` 通过，真实库计划结果：`due=0 future=2 history=3 ip_delete=3`。
+- `DB_ENGINE=mysql UV_CACHE_DIR=/private/tmp/uv-cache-shop PYTHONDONTWRITEBYTECODE=1 uv run python manage.py refresh_notice_plans` 通过，真实库通知计划结果：`due=1 future=2 history=7`。
 - `DB_ENGINE=mysql UV_CACHE_DIR=/private/tmp/uv-cache-shop PYTHONDONTWRITEBYTECODE=1 uv run python run.py bot` 已启动并进入 polling，bot 为 `@ceshiayan_bot`。
 - 真实 Telegram 点击验证通过：`/start`、主菜单、购买节点、个人中心、我的订单、订单详情、继续初始化确认、IP 查询、自动续费开/关、续费钱包支付、充值入口、充值记录、余额明细、提醒列表、地址监控添加/列表/详情/删除、联系客服。
 - 追加 IP 详情页按钮复核：`🌐 更换IP` 已最终确认并完成新节点创建；`🛠 重新安装` 已最终确认并完成；`⚙️ 修改配置` 返回“暂无可修改的配置”；`🔄 续费IP` 已完成 USDT 与 TRX 钱包支付路径。

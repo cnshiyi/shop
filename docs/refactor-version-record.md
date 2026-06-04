@@ -8256,6 +8256,34 @@ git diff --check
 - 当前资产没有可修改配置项，修改配置只覆盖到真实点击和不可用提示。
 - 工作树仍包含本轮外既存脏文件和迁移文件，本轮未回退、未提交。
 
+## 2026-06-04 生命周期专项测试
+
+### 范围
+
+本轮按用户要求执行生命周期专项测试，不再触发新的真实删机或释放动作，只复核当前真实库状态、运行生命周期相关自动化测试、刷新真实库生命周期计划和通知计划。
+
+### 真实库状态
+
+- 旧订单 `#79` 状态为 `deleted`，旧资产 `#325` 状态为 `deleted`，旧固定 IP 已释放，`ip_recycle_at=None`。
+- 新订单 `#80` 状态为 `completed`，新资产 `#326` 状态为 `running`，资产到期事实仍为 `CloudAsset.actual_expires_at=2026-09-05T09:53:52.191087+00:00`。
+
+### 验证
+
+本地已通过：
+
+```bash
+DJANGO_TEST_SQLITE=1 UV_CACHE_DIR=/private/tmp/uv-cache-shop PYTHONDONTWRITEBYTECODE=1 uv run python manage.py test cloud.tests cloud.tests_task_center --settings=shop.settings --verbosity=1
+DB_ENGINE=mysql UV_CACHE_DIR=/private/tmp/uv-cache-shop PYTHONDONTWRITEBYTECODE=1 uv run python manage.py refresh_lifecycle_plans
+DB_ENGINE=mysql UV_CACHE_DIR=/private/tmp/uv-cache-shop PYTHONDONTWRITEBYTECODE=1 uv run python manage.py refresh_notice_plans
+```
+
+结果：生命周期和任务中心相关测试 383 个通过；真实库生命周期计划刷新输出 `due=0 future=2 history=3 ip_delete=3`；通知计划刷新输出 `due=1 future=2 history=7`。SQLite 仍打印不支持 `db_comment` / `db_table_comment` 的预期 warning。
+
+### 剩余风险
+
+- 本轮没有执行新的真实云资源破坏性动作，只复核上一轮生命周期结果。
+- 工作树仍包含本轮外既存脏文件和迁移文件，本轮未回退。
+
 ## 2026-06-04 Telegram Bot 真机全链路测试与修复
 
 ### 范围
