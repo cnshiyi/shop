@@ -159,14 +159,17 @@ def _build_tx_detail_keyboard(detail_key: str) -> InlineKeyboardMarkup:
 
 
 def _cache_resource_detail(detail_id: str, detail: dict):
-    detail_key = detail_id[:16]
-    _recent_resource_details[detail_id] = detail
-    _recent_resource_keys[detail_key] = detail_id
+    user_id = str(detail.get('user_id') or '').strip()
+    cache_key = f'{detail_id}:{user_id}' if user_id else detail_id
+    detail_key = hashlib.sha1(cache_key.encode('utf-8')).hexdigest()[:16] if user_id else detail_id[:16]
+    _recent_resource_details[cache_key] = detail
+    _recent_resource_keys[detail_key] = cache_key
     if len(_recent_resource_details) > MAX_TX_DETAIL_CACHE:
-        old_id, _ = _recent_resource_details.popitem(last=False)
-        old_keys = [key for key, value in _recent_resource_keys.items() if value == old_id]
+        old_cache_key, _ = _recent_resource_details.popitem(last=False)
+        old_keys = [key for key, value in _recent_resource_keys.items() if value == old_cache_key]
         for key in old_keys:
             _recent_resource_keys.pop(key, None)
+    return detail_key
 
 
 def _build_resource_detail_keyboard(detail_id: str) -> InlineKeyboardMarkup:

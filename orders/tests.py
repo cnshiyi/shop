@@ -11,7 +11,7 @@ from core.cloud_accounts import cloud_account_label
 from core.models import CloudAccountConfig
 from cloud.models import AddressMonitor, CloudAsset, CloudServerOrder, CloudServerPlan, DailyAddressStat
 from orders.models import BalanceLedger, CartItem, Order, Product, Recharge
-from orders.payment_scanner import _cache_tx_detail, _confirm_order_paid, _copy_notice_to_admins, _expire_timed_out_payment_orders, _get_address_chain_balances, _get_pending_address_orders, _get_pending_cloud_server_orders, _process_payment, _record_daily_stats_for_monitors, get_tx_detail, set_bot
+from orders.payment_scanner import _cache_resource_detail, _cache_tx_detail, _confirm_order_paid, _copy_notice_to_admins, _expire_timed_out_payment_orders, _get_address_chain_balances, _get_pending_address_orders, _get_pending_cloud_server_orders, _process_payment, _record_daily_stats_for_monitors, get_resource_detail, get_tx_detail, set_bot
 from orders.services import create_cart_address_orders, create_cart_balance_orders, get_trx_price
 from orders.tron_parser import is_valid_tron_address
 
@@ -218,6 +218,14 @@ class TronMonitorStatsTestCase(TestCase):
         self.assertNotEqual(first_key, second_key)
         self.assertEqual(get_tx_detail(first_key)['remark'], 'first')
         self.assertEqual(get_tx_detail(second_key)['remark'], 'second')
+
+    def test_resource_detail_cache_is_scoped_per_user_for_same_address_time(self):
+        first_key = _cache_resource_detail('TMonitorAddress:2026-06-06 08:00:00', {'user_id': 1, 'remark': 'first'})
+        second_key = _cache_resource_detail('TMonitorAddress:2026-06-06 08:00:00', {'user_id': 2, 'remark': 'second'})
+
+        self.assertNotEqual(first_key, second_key)
+        self.assertEqual(get_resource_detail(first_key)['remark'], 'first')
+        self.assertEqual(get_resource_detail(second_key)['remark'], 'second')
 
     def test_daily_stats_are_recorded_for_each_monitor_on_same_address(self):
         first = TelegramUser.objects.create(tg_user_id=990251, username='monitor_stats_first')
