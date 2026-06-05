@@ -9078,3 +9078,68 @@ git diff --check
 
 - Codex App 自动化为周期触发，不是同一个进程无限循环；下一轮会在下一次触发时继续领取任务。
 - 本轮只配置自动化和记录规则，未执行生产发布、真实支付、链上广播或真实云资源变更。
+
+## 2026-06-06 50 万代理列表深分页优化
+
+### 背景
+
+自动监工本轮按 `TODO.md` 领取“50 万数据深分页性能优化”。上一轮代理列表 IP 视图第 2 页、深页和最后一页为了保证数据库精确分页仍走 `CloudAsset` 关联聚合，50 万数据下约 4.7-5.5 秒，未达到 2 秒目标。
+
+### 修改
+
+- `cloud/models.py`：为 `CloudAssetDashboardSnapshot` 增加 `asset_due_sort_at`，作为后台列表排序缓存，字段注释明确来源为 `CloudAsset.actual_expires_at`，不作为资产到期事实。
+- `cloud/models.py`：为 `CloudAssetDashboardSnapshot` 增加 `is_display_visible`，缓存代理列表 `show_deleted=0` 的可见性判断，避免默认列表过滤触发 MySQL `index_merge`。
+- `cloud/models.py`：新增 `cad_user_due_page_idx`、`cad_tg_due_page_idx`、`cad_vis_user_due_idx`、`cad_vis_tg_due_idx` 组合索引，服务用户/群组分区的深分页。
+- `cloud/api_asset_snapshots.py`：刷新快照时同步排序缓存和可见性缓存；分组分页 key 查询改为使用快照单表字段 `asset_due_sort_at`，返回 payload 仍从 `CloudAsset.actual_expires_at` 读取真实到期事实。
+- `cloud/api_assets.py`：代理列表默认隐藏删除数据时使用 `is_display_visible=True`，替代运行时 OR 条件。
+- `cloud/migrations/0052_cloud_asset_dashboard_snapshot_due_sort.py`：新增排序缓存字段，回填现有快照行，并创建分组分页索引；迁移设为 `atomic = False` 以兼容 MySQL DDL。
+- `cloud/migrations/0053_cloud_asset_dashboard_snapshot_display_visible.py`：新增可见性缓存字段，回填现有快照行，并创建默认可见列表深分页索引。
+- `cloud/tests.py`：补充快照排序缓存和可见性缓存回归断言。
+- `TODO.md`：勾选本轮全自动巡检和 50 万深分页优化任务。
+- `docs/auto-optimization-latest.md`：覆盖更新本轮状态、性能结果、验证和风险。
+
+### 性能和对账
+
+本地 50 万压测库结果：
+
+- `CloudAssetDashboardSnapshot` 500000 条，`asset_due_sort_at` 非空 499749 条，`is_display_visible=True` 499494 条。
+- 用户/分组总数 499492，最后一页为 page=24975。
+- 代理列表 IP 视图分组分页接口：page=1 0.573 秒，page=2 0.403 秒，page=3 0.401 秒，page=10 0.404 秒，page=100 0.695 秒，page=1000 0.712 秒，page=24975 0.982 秒。
+- 使用旧的 `CloudAsset.actual_expires_at` 关联聚合逐页对账，上述页码分组 key 全部一致。
+- 旧基准查询仍约 3.3-3.7 秒，本轮优化后第 2 页、深页和最后一页均低于 2 秒。
+
+### 浏览器实测
+
+- 前端 dev server：`http://127.0.0.1:5666`，后端：`http://127.0.0.1:8000`。
+- 浏览器实际打开 `/admin/cloud-assets`，页面显示 `全部 (500000)` 和 `共 499492 个用户/分组`。
+- 浏览器实际请求 `page=1`、`page=2`、`page=24975` 均为 200。
+- 第 2 页正常激活并渲染 20 组；最后一页 page=24975 正常激活并渲染末页 12 组。
+- 浏览器控制台 0 warning / 0 error。
+
+### 验证
+
+本地已通过：
+
+```bash
+DB_ENGINE=mysql UV_CACHE_DIR=/private/tmp/uv-cache-shop PYTHONDONTWRITEBYTECODE=1 uv run python manage.py makemigrations --check --dry-run
+DB_ENGINE=mysql UV_CACHE_DIR=/private/tmp/uv-cache-shop PYTHONDONTWRITEBYTECODE=1 uv run python -m py_compile cloud/api_asset_snapshots.py cloud/api_assets.py cloud/models.py cloud/migrations/0052_cloud_asset_dashboard_snapshot_due_sort.py cloud/migrations/0053_cloud_asset_dashboard_snapshot_display_visible.py
+DB_ENGINE=mysql UV_CACHE_DIR=/private/tmp/uv-cache-shop PYTHONDONTWRITEBYTECODE=1 uv run python manage.py migrate cloud 0052
+DB_ENGINE=mysql UV_CACHE_DIR=/private/tmp/uv-cache-shop PYTHONDONTWRITEBYTECODE=1 uv run python manage.py migrate cloud 0053
+DB_ENGINE=mysql UV_CACHE_DIR=/private/tmp/uv-cache-shop PYTHONDONTWRITEBYTECODE=1 uv run python manage.py check
+DJANGO_TEST_SQLITE=1 UV_CACHE_DIR=/private/tmp/uv-cache-shop PYTHONDONTWRITEBYTECODE=1 uv run python manage.py test cloud.tests.CloudServerServicesTestCase.test_cloud_assets_list_compact_returns_ip_view_payload cloud.tests.CloudServerServicesTestCase.test_cloud_assets_list_compact_keeps_unbound_group_key cloud.tests.CloudServerServicesTestCase.test_cloud_assets_grouped_paginated_uses_twenty_user_groups_per_page --settings=shop.settings --verbosity=2
+git diff --check
+```
+
+SQLite 测试库输出不支持 `db_comment` / `db_table_comment` 的 warnings，属于当前测试环境预期差异。
+
+### 红线
+
+- 本轮未执行真实云资源创建、删除、关机、释放 IP、换 IP、真实支付、链上广播、删除数据或生产发布。
+- 本轮未打印密钥、私钥、Telegram session、TOTP、支付密钥或云厂商密钥。
+- `asset_due_sort_at` 不是新的到期事实来源；生命周期、续费判断和返回 payload 的到期时间仍以 `CloudAsset.actual_expires_at` 为准。
+
+### 剩余风险
+
+- 本地 50 万压测数据仍保留，清理需要单独确认。
+- 本轮仅优化默认 `show_deleted=0` 的 IP 视图分组分页；带复杂 keyword 或风险筛选的深分页仍可能受搜索条件选择性影响，需要按具体查询再测。
+- 后端仓库仍有本轮无关未跟踪文档 `docs/jisou-bot-functions.md`、`docs/telegram-search-development-plan.md`、`docs/telegram-search-large-scale-architecture.md`，本轮未处理。

@@ -339,6 +339,7 @@ class CloudAssetDashboardSnapshot(models.Model):
     public_ip = models.CharField('公网IP', max_length=128, blank=True, null=True, db_index=True, db_comment='公网IP')
     status = models.CharField('状态', max_length=32, blank=True, null=True, db_index=True, db_comment='状态')
     is_active = models.BooleanField('是否活跃', default=True, db_index=True, db_comment='是否活跃')
+    is_display_visible = models.BooleanField('后台列表可显示', default=True, db_index=True, db_comment='后台列表 show_deleted=0 时的可见性缓存')
     sort_order = models.IntegerField('排序', default=99, db_index=True, db_comment='排序')
     user = models.ForeignKey('bot.TelegramUser', verbose_name='绑定用户', on_delete=models.SET_NULL, blank=True, null=True, related_name='cloud_asset_dashboard_snapshots', db_comment='绑定用户')
     tg_user_id = models.BigIntegerField('Telegram 用户ID', blank=True, null=True, db_index=True, db_comment='Telegram 用户ID')
@@ -347,6 +348,7 @@ class CloudAssetDashboardSnapshot(models.Model):
     group_user_label = models.CharField('用户分组标签', max_length=191, blank=True, db_comment='用户分组标签')
     group_telegram_key = models.CharField('群组分组键', max_length=191, db_index=True, db_comment='群组分组键')
     group_telegram_label = models.CharField('群组分组标签', max_length=191, blank=True, db_comment='群组分组标签')
+    asset_due_sort_at = models.DateTimeField('资产到期排序缓存', blank=True, null=True, db_index=True, db_comment='仅用于后台列表排序缓存，来源 CloudAsset.actual_expires_at，不作为资产到期事实')
     risk_status = models.CharField('风险状态', max_length=64, default='other', db_index=True, db_comment='风险状态')
     risk_rank = models.IntegerField('风险排序', default=99, db_index=True, db_comment='风险排序')
     risk_statuses = models.JSONField('风险状态集合', default=list, blank=True, db_comment='风险状态集合')
@@ -375,6 +377,10 @@ class CloudAssetDashboardSnapshot(models.Model):
             models.Index(fields=['risk_account_disabled', 'risk_rank', '-sort_order'], name='cad_risk_display_idx'),
             models.Index(fields=['group_user_key', 'risk_rank', '-sort_order'], name='cad_group_user_idx'),
             models.Index(fields=['group_telegram_key', 'risk_rank', '-sort_order'], name='cad_group_tg_idx'),
+            models.Index(fields=['group_user_key', 'asset_due_sort_at', 'group_user_label'], name='cad_user_due_page_idx'),
+            models.Index(fields=['group_telegram_key', 'asset_due_sort_at', 'group_telegram_label'], name='cad_tg_due_page_idx'),
+            models.Index(fields=['is_display_visible', 'group_user_key', 'asset_due_sort_at', 'group_user_label'], name='cad_vis_user_due_idx'),
+            models.Index(fields=['is_display_visible', 'group_telegram_key', 'asset_due_sort_at', 'group_telegram_label'], name='cad_vis_tg_due_idx'),
             models.Index(fields=['provider', 'cloud_account', 'region_code', 'status'], name='cad_provider_scope_idx'),
             models.Index(fields=['risk_unattached_ip', 'is_active', 'status'], name='idx_cad_display_state'),
         ]

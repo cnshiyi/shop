@@ -34,6 +34,15 @@ _DASHBOARD_RISK_FLAGS = {
     'deleted': 'risk_deleted',
 }
 
+_HIDDEN_DISPLAY_STATUSES = {
+    CloudAsset.STATUS_DELETED,
+    CloudAsset.STATUS_DELETING,
+    CloudAsset.STATUS_EXPIRED,
+    CloudAsset.STATUS_TERMINATED,
+    CloudAsset.STATUS_TERMINATING,
+    CloudAsset.STATUS_UNKNOWN,
+}
+
 
 def _snapshot_group_key(item: dict, group_by='user') -> str:
     if group_by == 'telegram_group' and item.get('telegram_group_id'):
@@ -84,9 +93,12 @@ def _snapshot_search_text(item: dict) -> str:
 def _snapshot_defaults_from_payload(item: dict) -> dict:
     statuses = item.get('risk_statuses') or [item.get('risk_status') or 'other']
     statuses = list(dict.fromkeys(str(status or 'other') for status in statuses))
+    actual_expires_at = parse_datetime(item.get('actual_expires_at')) if item.get('actual_expires_at') else None
+    status = item.get('status') or ''
+    is_active = bool(item.get('is_active'))
     flags = {field: False for field in _DASHBOARD_RISK_FLAGS.values()}
-    for status in statuses:
-        field = _DASHBOARD_RISK_FLAGS.get(status)
+    for risk_status in statuses:
+        field = _DASHBOARD_RISK_FLAGS.get(risk_status)
         if field:
             flags[field] = True
     return {
@@ -97,8 +109,9 @@ def _snapshot_defaults_from_payload(item: dict) -> dict:
         'account_label': item.get('account_label') or '',
         'region_code': item.get('region_code') or '',
         'public_ip': item.get('public_ip') or '',
-        'status': item.get('status') or '',
-        'is_active': bool(item.get('is_active')),
+        'status': status,
+        'is_active': is_active,
+        'is_display_visible': bool(flags['risk_unattached_ip'] or (is_active and status not in _HIDDEN_DISPLAY_STATUSES)),
         'sort_order': int(item.get('sort_order') or 99),
         'user_id': item.get('user_id'),
         'tg_user_id': item.get('tg_user_id'),
@@ -107,6 +120,7 @@ def _snapshot_defaults_from_payload(item: dict) -> dict:
         'group_user_label': _snapshot_group_label(item, 'user')[:191],
         'group_telegram_key': _snapshot_group_key(item, 'telegram_group'),
         'group_telegram_label': _snapshot_group_label(item, 'telegram_group')[:191],
+        'asset_due_sort_at': actual_expires_at,
         'risk_status': item.get('risk_status') or 'other',
         'risk_rank': int(item.get('risk_rank') or 99),
         'risk_statuses': statuses,
@@ -132,10 +146,10 @@ def refresh_cloud_asset_dashboard_snapshots(asset_ids=None, *, reason: str = '',
     update_rows = []
     update_fields = [
         'payload', 'search_text', 'provider', 'cloud_account_id', 'account_label', 'region_code',
-        'public_ip', 'status', 'is_active', 'sort_order', 'user_id', 'tg_user_id',
+        'public_ip', 'status', 'is_active', 'is_display_visible', 'sort_order', 'user_id', 'tg_user_id',
         'telegram_group_id', 'group_user_key', 'group_user_label', 'group_telegram_key',
-        'group_telegram_label', 'risk_status', 'risk_rank', 'risk_statuses', 'risk_normal',
-        'risk_due_soon', 'risk_expired', 'risk_unattached_ip', 'risk_abnormal',
+        'group_telegram_label', 'asset_due_sort_at', 'risk_status', 'risk_rank',
+        'risk_statuses', 'risk_normal', 'risk_due_soon', 'risk_expired', 'risk_unattached_ip', 'risk_abnormal',
         'risk_account_disabled', 'risk_shutdown_disabled', 'risk_unbound_user',
         'risk_unbound_group', 'risk_auto_renew_off', 'risk_deleted', 'asset_updated_at',
     ]
@@ -244,9 +258,9 @@ def _dashboard_snapshot_risk_counts(queryset) -> dict:
 
 def _dashboard_snapshot_ordering(sort_by: str, sort_direction: str):
     if sort_by in {'actual_expires_at', 'expires_at', 'days_left', 'remaining_days'}:
-        expires = F('asset__actual_expires_at').desc(nulls_last=True) if sort_direction == 'desc' else F('asset__actual_expires_at').asc(nulls_last=True)
+        expires = F('asset_due_sort_at').desc(nulls_last=True) if sort_direction == 'desc' else F('asset_due_sort_at').asc(nulls_last=True)
         return [expires, 'risk_rank', '-sort_order', '-asset_id']
-    return ['risk_rank', F('asset__actual_expires_at').asc(nulls_last=True), '-sort_order', '-asset_id']
+    return ['risk_rank', F('asset_due_sort_at').asc(nulls_last=True), '-sort_order', '-asset_id']
 
 
 def _snapshot_payloads(rows):
@@ -395,9 +409,8 @@ def _dashboard_snapshot_group_page(queryset, request, *, group_by='user', sort_b
         for fetch_limit in (max(page_size * 25, 500), 2000, 5000):
             candidates = list(
                 queryset
-                .only('id', 'asset_id', group_field, group_label, 'risk_rank', 'asset__actual_expires_at')
-                .select_related('asset')
-                .order_by(F('asset__actual_expires_at').asc(nulls_last=True), group_label, group_field)[:fetch_limit]
+                .only('id', 'asset_id', group_field, group_label, 'risk_rank', 'asset_due_sort_at')
+                .order_by(F('asset_due_sort_at').asc(nulls_last=True), group_label, group_field)[:fetch_limit]
             )
             seen = set()
             page_keys = []
@@ -416,7 +429,7 @@ def _dashboard_snapshot_group_page(queryset, request, *, group_by='user', sort_b
     if not page_keys:
         grouped = list(
             queryset.values(group_field)
-            .annotate(group_expires=Min('asset__actual_expires_at'), group_name=Min(group_label), min_risk=Min('risk_rank'))
+            .annotate(group_expires=Min('asset_due_sort_at'), group_name=Min(group_label))
             .order_by(F('group_expires').asc(nulls_last=True), 'group_name', group_field)
             [start:start + page_size]
         )

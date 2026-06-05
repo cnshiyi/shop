@@ -1624,9 +1624,12 @@ class CloudServerServicesTestCase(TestCase):
         response = cloud_assets_list(request)
         payload = json.loads(response.content.decode('utf-8'))['data']
         row = next(item for item in payload['items'] if item['id'] == asset.id)
+        snapshot = CloudAssetDashboardSnapshot.objects.get(asset=asset)
 
         self.assertEqual(response.status_code, 200)
         self.assertEqual(row['public_ip'], '10.77.88.41')
+        self.assertEqual(snapshot.asset_due_sort_at, asset.actual_expires_at)
+        self.assertTrue(snapshot.is_display_visible)
         self.assertEqual(row['price'], '5.12')
         self.assertIn('status_countdown', row)
         self.assertNotIn('mtproxy_link', row)

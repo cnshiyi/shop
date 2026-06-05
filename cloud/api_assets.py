@@ -649,20 +649,7 @@ def cloud_assets_list(request):
         risk_counts = _dashboard_snapshot_risk_counts(base_queryset)
         queryset = _filter_dashboard_snapshots_by_risk(base_queryset, risk_status)
         if not show_deleted and risk_status in {'', 'all'}:
-            queryset = queryset.filter(
-                Q(risk_unattached_ip=True)
-                | (
-                    Q(is_active=True)
-                    & ~Q(status__in=[
-                        CloudAsset.STATUS_DELETED,
-                        CloudAsset.STATUS_DELETING,
-                        CloudAsset.STATUS_EXPIRED,
-                        CloudAsset.STATUS_TERMINATED,
-                        CloudAsset.STATUS_TERMINATING,
-                        CloudAsset.STATUS_UNKNOWN,
-                    ])
-                )
-            )
+            queryset = queryset.filter(is_display_visible=True)
         if not grouped and paginated:
             page_items, total, total_pages, page, page_size = _paginate_dashboard_snapshot_queryset(
                 queryset,
