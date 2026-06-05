@@ -95,6 +95,15 @@ def _asset_is_unattached_ip(asset):
     )
 
 
+def _unattached_ip_asset_q():
+    return (
+        Q(provider_status__icontains='未附加')
+        | Q(note__icontains='未附加IP')
+        | Q(note__icontains='未附加固定IP')
+        | Q(provider_resource_id__icontains='StaticIp')
+    )
+
+
 def _ensure_unattached_ip_delete_due(asset, *, now=None):
     if not _asset_is_unattached_ip(asset) or getattr(asset, 'actual_expires_at', None):
         return getattr(asset, 'actual_expires_at', None)
@@ -165,8 +174,33 @@ def _proxy_list_cloud_asset_queryset():
     )
 
 
-def _proxy_list_cloud_asset_plan_rows(limit=None):
-    queryset = _proxy_list_cloud_asset_queryset().distinct().order_by('-sort_order', 'actual_expires_at', '-updated_at', '-id')
+def _active_cloud_asset_account_disabled_q(active_account_labels: set[str] | None = None):
+    active_account_labels = active_account_labels if active_account_labels is not None else set(_active_cloud_account_labels())
+    account_label_present = Q(account_label__isnull=False) & ~Q(account_label='')
+    disabled_q = Q(cloud_account__is_active=False)
+    if active_account_labels:
+        disabled_q |= account_label_present & ~Q(account_label__in=list(active_account_labels))
+    else:
+        disabled_q |= account_label_present
+    return disabled_q
+
+
+def _active_cloud_asset_plan_queryset(*, active_account_labels: set[str] | None = None):
+    return _proxy_list_cloud_asset_queryset().exclude(
+        _active_cloud_asset_account_disabled_q(active_account_labels)
+    )
+
+
+def _proxy_list_cloud_asset_plan_rows(limit=None, *, include_unattached=True):
+    active_account_labels = set(_active_cloud_account_labels())
+    queryset = _active_cloud_asset_plan_queryset(active_account_labels=active_account_labels)
+    if not include_unattached:
+        queryset = queryset.exclude(_unattached_ip_asset_q())
+    queryset = queryset.order_by('-sort_order', 'actual_expires_at', '-updated_at', '-id')
+    if limit:
+        fetch_limit = max(int(limit) * 4, int(limit) + 200)
+        fetch_limit = min(fetch_limit, 5000)
+        queryset = queryset[:fetch_limit]
     rows = _dedupe_cloud_asset_plan_rows(list(queryset))
     active_account_labels = set(_active_cloud_account_labels())
     rows = [
@@ -208,7 +242,17 @@ def _asset_deleted_or_missing(asset):
 
 
 def _cloud_asset_plan_stats(assets=None):
-    plan_assets = list(assets) if assets is not None else _active_cloud_asset_plan_rows()
+    if assets is None:
+        queryset = _active_cloud_asset_plan_queryset()
+        unattached_q = _unattached_ip_asset_q()
+        server_queryset = queryset.exclude(unattached_q)
+        return {
+            'source_asset_count': queryset.count(),
+            'server_asset_count': server_queryset.count(),
+            'missing_expiry_count': server_queryset.filter(_asset_waiting_manual_time_q()).count(),
+            'unattached_ip_count': queryset.filter(unattached_q).count(),
+        }
+    plan_assets = list(assets)
     server_assets = [
         asset for asset in plan_assets
         if not _asset_is_unattached_ip(asset)
@@ -1722,8 +1766,7 @@ def _asset_shutdown_enabled(asset):
 
 def _collect_shutdown_plan_queue(now, limit=100):
     pending_until = now + timezone.timedelta(days=7)
-    plan_assets = _active_cloud_asset_plan_rows()
-    server_assets = [asset for asset in plan_assets if not _asset_is_unattached_ip(asset) and 'StaticIp' not in str(asset.provider_resource_id or '')]
+    server_assets = _proxy_list_cloud_asset_plan_rows(limit=limit, include_unattached=False)
     next_run_at = None
     seen_linked_order_ids = set()
     due_items = []
@@ -1775,7 +1818,7 @@ def _collect_shutdown_plan_queue(now, limit=100):
         'retry_orders': [],
         'fallback_orders': [],
         'orphan_due_assets': server_assets,
-        'source_assets': plan_assets,
+        'source_assets': [],
         'due_items': due_items,
         'future_plan_items': future_items,
         'next_run_at': next_run_at or (now + timezone.timedelta(minutes=30)),
@@ -2153,11 +2196,16 @@ def lifecycle_plans(request):
         compact_notes(history_items)
         compact_notes(due_items)
         compact_notes(future_plan_items)
-    _strip_lifecycle_plan_fields(shutdown_items, fields)
-    _strip_lifecycle_plan_fields(ip_delete_items, fields)
-    _strip_lifecycle_plan_fields(history_items, fields)
-    _strip_lifecycle_plan_fields(due_items, fields)
-    _strip_lifecycle_plan_fields(future_plan_items, fields)
+    response_shutdown_items = shutdown_items[:limit]
+    response_ip_delete_items = ip_delete_items[:limit]
+    response_history_items = history_items[:limit]
+    response_due_items = due_items[:limit]
+    response_future_plan_items = future_plan_items[:limit]
+    _strip_lifecycle_plan_fields(response_shutdown_items, fields)
+    _strip_lifecycle_plan_fields(response_ip_delete_items, fields)
+    _strip_lifecycle_plan_fields(response_history_items, fields)
+    _strip_lifecycle_plan_fields(response_due_items, fields)
+    _strip_lifecycle_plan_fields(response_future_plan_items, fields)
     last_refresh_at = _lifecycle_plan_generated_at()
     return _ok({
         'task_key': 'server_delete_plans',
@@ -2183,11 +2231,11 @@ def lifecycle_plans(request):
         'shutdown_due_count': len(due_items),
         'ip_delete_count': len(pending_ip_delete_items),
         'ip_delete_due_count': len(pending_ip_delete_items),
-        'due_items': due_items,
-        'future_plan_items': future_plan_items,
-        'history_items': history_items,
-        'shutdown_items': shutdown_items,
-        'ip_delete_items': ip_delete_items,
+        'due_items': response_due_items,
+        'future_plan_items': response_future_plan_items,
+        'history_items': response_history_items,
+        'shutdown_items': response_shutdown_items,
+        'ip_delete_items': response_ip_delete_items,
     })
 
 

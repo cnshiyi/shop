@@ -8927,3 +8927,53 @@ git diff --check
 - 本轮未执行真实云资源创建、删除、关机、释放 IP、真实支付、链上广播或生产发布。
 - 当前 `CloudAsset.shutdown_enabled` 仍是服务器关机计划和未附加 IP 删除计划共用的资产级单项布尔字段；本轮只修正后台显示语义。如果后续要求彻底拆分开关事实，需要新增独立字段、迁移和生命周期执行器适配。
 - 前端仓库存在大量本轮无关脏文件；后端仓库存在未跟踪文件 `docs/jisou-bot-functions.md`，本轮均未处理。
+
+## 2026-06-05 50 万资产压测和大列表性能优化
+
+### 背景
+
+用户要求把代理列表压测数据扩大到 50 万，并强调优化不能丢数据。前一轮 5 万数据下，代理列表、删除计划和通知计划已经暴露出首屏加载慢、删除计划返回体过大、通知计划全量扫描等问题。
+
+### 修改
+
+- `bot/api.py`：删除计划把全量统计和展示行构建拆开，统计继续使用数据库全量 count，展示行只按 `limit` 返回；避免为了统计把全部资产实例化。
+- `bot/api.py`：删除计划按数据库条件提前区分服务器和未附加 IP，服务器计划只拉取当前页面需要的候选行。
+- `bot/api.py`：删除计划响应体按 `limit` 截断 `shutdown_items`、`ip_delete_items`、`history_items`、`due_items` 和 `future_plan_items`，计数字段保持未截断。
+- `cloud/api_tasks.py`：通知计划使用资产候选查询构建计划，避免回退到 `_get_due_orders()` 全量订单扫描和订单到期字段路径。
+- `cloud/api_asset_snapshots.py`：代理列表分组分页改为数据库层分页；IP 紧凑视图第一页优先使用候选资产去重分组，候选不足时回退精确聚合。
+- 前端删除计划：列开关中服务器 IP 文案从重复的 `IP` 改为 `服务器IP`，避免与 IP 删除表的 `IP` 混淆。
+- `cloud/tests.py`：补充删除计划 `limit` 只截断返回数组、不截断计数的回归断言；补充通知计划详情不调用旧全量订单扫描的断言。
+
+### 压测数据
+
+- 本地数据库扩容到 `CloudAsset` 服务器资产 500000 条。
+- 同步创建 `CloudAssetDashboardSnapshot` 500000 条，避免代理列表进入页面后触发全量快照刷新。
+- 本轮压测数据全部为本地数据库记录，未调用云厂商 API，未创建真实云资源。
+
+### 实测结果
+
+- 代理列表 IP 视图：5 万数据从约 1.32 秒降到 0.50 秒；50 万数据首屏 2.29 秒，浏览器显示 `全部 (500000)` 和 `共 499492 个用户/分组`。
+- 删除计划：5 万数据从 10.51 秒 / 3.9MB 降到首刷 2.06 秒 / 260KB，缓存命中 0.43 秒；50 万数据首刷 4.80 秒，缓存命中 1.67 秒。
+- 删除计划 50 万浏览器实测：显示当前删除计划 454999 条、服务器资产 454248 条、未附加 IP 751 条；表格实际只加载 50 条，计数未丢。
+- 通知计划 50 万接口约 2.87 秒；浏览器显示 6000 组用户通知、近期 5400、未来 600。
+- 三个页面浏览器控制台均为 0 error / 0 warning。
+
+### 验证
+
+本地已通过：
+
+```bash
+DB_ENGINE=mysql UV_CACHE_DIR=/private/tmp/uv-cache-shop PYTHONDONTWRITEBYTECODE=1 uv run python manage.py check
+DJANGO_TEST_SQLITE=1 UV_CACHE_DIR=/private/tmp/uv-cache-shop PYTHONDONTWRITEBYTECODE=1 uv run python manage.py test cloud.tests.CloudServerServicesTestCase.test_lifecycle_plans_fields_basic_omits_notes_and_execution_payload cloud.tests.CloudServerServicesTestCase.test_notice_task_detail_uses_notice_plan_view --settings=shop.settings --verbosity=2
+pnpm -C /Users/a399/Desktop/data/vue-shop-admin --filter @vben/web-antd typecheck
+git diff --check
+```
+
+后端和前端仓库 `git diff --check` 均通过。SQLite 测试库输出不支持 `db_comment` / `db_table_comment` 的 warnings，属于当前测试环境预期差异。
+
+### 剩余风险
+
+- 本轮未执行真实云资源创建、删除、关机、释放 IP、真实支付、链上广播或生产发布。
+- 代理列表 IP 视图第一页已优化；第 2 页仍走精确分组聚合，50 万下约 5.12 秒。如果深分页也需要稳定 2 秒内，需要给快照表增加可排序的到期时间冗余字段和索引，或改成游标分页。
+- 本地压测数据保留在项目数据库中；清理压测数据属于删除数据操作，需要单独确认。
+- 前端仓库存在大量本轮无关脏文件；后端仓库存在未跟踪文档 `docs/jisou-bot-functions.md`、`docs/telegram-search-large-scale-architecture.md`，本轮均未处理。

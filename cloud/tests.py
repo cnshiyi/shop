@@ -1635,36 +1635,34 @@ class CloudServerServicesTestCase(TestCase):
 
     # 功能：验证删除计划轻量字段开关会移除备注和执行详情，降低大列表 payload。
     def test_lifecycle_plans_fields_basic_omits_notes_and_execution_payload(self):
-        asset = CloudAsset.objects.create(
-            kind=CloudAsset.KIND_SERVER,
-            source=CloudAsset.SOURCE_AWS_SYNC,
-            user=self.user,
-            provider='aws_lightsail',
-            region_code=self.plan.region_code,
-            region_name=self.plan.region_name,
-            asset_name='snapshot-lifecycle-fields-asset',
-            public_ip='10.77.88.51',
-            status=CloudAsset.STATUS_RUNNING,
-            actual_expires_at=timezone.now() - timezone.timedelta(days=3),
-            note='这是一段很长的删除计划备注',
-        )
+        for index in range(12):
+            CloudAsset.objects.create(
+                kind=CloudAsset.KIND_SERVER,
+                source=CloudAsset.SOURCE_AWS_SYNC,
+                user=self.user,
+                provider='aws_lightsail',
+                region_code=self.plan.region_code,
+                region_name=self.plan.region_name,
+                asset_name=f'snapshot-lifecycle-fields-asset-{index}',
+                public_ip=f'10.77.88.{50 + index}',
+                status=CloudAsset.STATUS_RUNNING,
+                actual_expires_at=timezone.now() - timezone.timedelta(days=3),
+                note='这是一段很长的删除计划备注',
+            )
         admin = get_user_model().objects.create_user(username='lifecycle_fields_admin', password='x', is_staff=True)
-        request = self.factory.get('/api/admin/tasks/plans/', {'compact': '1', 'fields': 'basic', 'limit': '10', 'refresh': '1'})
+        request = self.factory.get('/api/admin/tasks/plans/', {'compact': '1', 'fields': 'basic', 'limit': '5', 'refresh': '1'})
         self._attach_bearer_session(request, admin)
         response = lifecycle_plans(request)
         payload = json.loads(response.content.decode('utf-8'))['data']
-        rows = [
-            item
-            for item in payload['shutdown_items']
-            if item.get('asset_id') == asset.id or item.get('ip') == asset.public_ip
-        ]
+        row = payload['shutdown_items'][0]
 
         self.assertEqual(response.status_code, 200)
-        self.assertTrue(rows)
-        self.assertNotIn('note', rows[0])
-        self.assertNotIn('display_note', rows[0])
-        self.assertNotIn('execution_status', rows[0])
-        self.assertNotIn('execution_plan', rows[0])
+        self.assertLessEqual(len(payload['shutdown_items']), 5)
+        self.assertGreater(payload['shutdown_count'], len(payload['shutdown_items']))
+        self.assertNotIn('note', row)
+        self.assertNotIn('display_note', row)
+        self.assertNotIn('execution_status', row)
+        self.assertNotIn('execution_plan', row)
 
     # 功能：验证云资产列表快照搜索文本不会持久化代理密钥。
     def test_cloud_asset_dashboard_snapshot_search_text_masks_proxy_secret(self):
@@ -9915,7 +9913,9 @@ class CloudServerServicesTestCase(TestCase):
         request = self.factory.get('/api/admin/tasks/notices/', {'limit': 20, 'future_limit': 20, 'history_limit': 20})
         self._attach_bearer_session(request, staff_user)
 
-        response = notice_task_detail(request)
+        with patch('cloud.api_tasks._get_due_orders') as due_orders_mock:
+            due_orders_mock.side_effect = AssertionError('通知计划详情不应回退到全量订单扫描')
+            response = notice_task_detail(request)
 
         self.assertEqual(response.status_code, 200)
         data = json.loads(response.content)['data']

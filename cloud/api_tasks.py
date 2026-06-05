@@ -16,7 +16,8 @@ from django.views.decorators.http import require_GET, require_POST
 from bot.models import TelegramLoginAccount
 from cloud.asset_expiry import order_asset_expiry
 from cloud.dashboard_snapshots import _refresh_dashboard_plan_snapshots
-from cloud.lifecycle import NOTICE_TYPE_SWITCH_CONFIG, _asset_lifecycle_enabled_for_order, _auto_renew_notice_batch_payload, _notice_effective_delivered, _get_due_orders, _get_notice_text_override, _lifecycle_notice_batch_payload, _notice_payload_for_order, _notice_override_key, _record_auto_renew_patrol_log, _renew_notice_batch_payload, _run_auto_renew, _set_notice_text_override, cloud_notice_type_enabled
+from cloud.lifecycle import AUTO_RENEW_BEFORE_EXPIRY_WINDOW, NOTICE_TYPE_SWITCH_CONFIG, _asset_lifecycle_enabled_for_order, _auto_renew_notice_batch_payload, _notice_asset_is_unattached_static_ip, _notice_effective_delivered, _get_due_orders, _get_notice_text_override, _lifecycle_notice_batch_payload, _notice_payload_for_order, _notice_override_key, _notice_schedule, _record_auto_renew_patrol_log, _renew_notice_batch_payload, _run_auto_renew, _set_notice_text_override, cloud_notice_type_enabled
+from cloud.lifecycle_schedule import compute_order_lifecycle_fields
 from cloud.models import CloudAsset, CloudAutoRenewPatrolLog, CloudServerOrder, CloudUserNoticeLog
 from cloud.services import RenewalPriceMissingError, _renewal_price
 from core.dashboard_api import _decimal_to_str, _error, _iso, _ok, _provider_label, _read_payload, _status_label, _user_payload, dashboard_login_required, dashboard_superuser_required
@@ -1156,47 +1157,218 @@ def _strip_notice_item_fields(items: list[dict], fields: set[str]) -> list[dict]
     return items
 
 
+_NOTICE_ASSET_EXCLUDED_STATUSES = {
+    CloudAsset.STATUS_DELETED,
+    CloudAsset.STATUS_DELETING,
+    CloudAsset.STATUS_TERMINATED,
+    CloudAsset.STATUS_TERMINATING,
+}
+
+
+def _notice_plan_base_asset_queryset():
+    return (
+        CloudAsset.objects
+        .select_related('order', 'order__user', 'cloud_account', 'order__cloud_account')
+        .filter(kind=CloudAsset.KIND_SERVER, order__isnull=False, actual_expires_at__isnull=False)
+        .exclude(public_ip__isnull=True)
+        .exclude(public_ip='')
+        .exclude(status__in=_NOTICE_ASSET_EXCLUDED_STATUSES)
+    )
+
+
+def _notice_deferred_lifecycle_time(stored_at, computed_at, now, *, prefer_stored=False):
+    if prefer_stored and stored_at:
+        return stored_at
+    if stored_at and stored_at > now and (not computed_at or computed_at <= now):
+        return stored_at
+    return computed_at or stored_at
+
+
+def _notice_schedule_from_asset(order: CloudServerOrder, asset: CloudAsset, *, now) -> dict:
+    expires_at = asset.actual_expires_at
+    schedule = compute_order_lifecycle_fields(expires_at)
+    status = getattr(order, 'status', '')
+    suspend_at = _notice_deferred_lifecycle_time(getattr(order, 'suspend_at', None), schedule.get('suspend_at'), now)
+    delete_at = _notice_deferred_lifecycle_time(
+        getattr(order, 'delete_at', None),
+        schedule.get('delete_at'),
+        now,
+        prefer_stored=status in {'suspended', 'deleting'},
+    )
+    ip_recycle_at = _notice_deferred_lifecycle_time(
+        getattr(order, 'ip_recycle_at', None),
+        schedule.get('ip_recycle_at'),
+        now,
+        prefer_stored=status == 'deleted',
+    )
+    return {
+        'ip': getattr(order, 'public_ip', None) or asset.public_ip,
+        'expires_at': expires_at,
+        'suspend_at': suspend_at,
+        'delete_at': delete_at,
+        'ip_recycle_at': ip_recycle_at,
+        'auto_renew_enabled': bool(getattr(order, 'auto_renew_enabled', False)),
+        'asset_id': asset.id,
+    }
+
+
+def _notice_queue_status_for_time(notice_at, now):
+    if not notice_at or notice_at <= now:
+        return 'due_now', '本轮待通知'
+    if notice_at <= now + timezone.timedelta(days=3):
+        return 'within_window', '3天内待通知'
+    return 'scheduled_future', '未来计划'
+
+
+def _notice_assets_for_type(notice_type: str, *, now, future: bool):
+    active_statuses = ['completed', 'expiring', 'renew_pending']
+    qs = _notice_plan_base_asset_queryset()
+    if notice_type == 'renew_notice':
+        try:
+            notice_days = max(1, int(get_runtime_config('cloud_renew_notice_days', 5) or 5))
+        except Exception:
+            notice_days = 5
+        notice_window = now + timezone.timedelta(days=notice_days + 3)
+        qs = qs.filter(
+            order__status__in=active_statuses,
+            order__cloud_reminder_enabled=True,
+        )
+        if str(get_runtime_config('cloud_renew_notice_debug_repeat', '0') or '').strip().lower() not in {'1', 'true', 'yes', 'on'}:
+            qs = qs.filter(order__renew_notice_sent_at__isnull=True)
+        if future:
+            qs = qs.filter(actual_expires_at__gt=notice_window)
+        else:
+            qs = qs.filter(actual_expires_at__gt=now, actual_expires_at__lte=notice_window)
+        return qs.order_by('actual_expires_at', '-updated_at', '-id')
+    if notice_type == 'auto_renew_notice':
+        notice_window = now + timezone.timedelta(days=5)
+        qs = qs.filter(
+            order__status__in=active_statuses,
+            order__auto_renew_enabled=True,
+            order__auto_renew_notice_sent_at__isnull=True,
+        )
+        if future:
+            qs = qs.filter(actual_expires_at__gt=notice_window)
+        else:
+            qs = qs.filter(
+                actual_expires_at__gt=now + AUTO_RENEW_BEFORE_EXPIRY_WINDOW,
+                actual_expires_at__lte=notice_window,
+            )
+        return qs.order_by('actual_expires_at', '-updated_at', '-id')
+    if notice_type == 'delete_notice':
+        notice_window = now + timezone.timedelta(days=4)
+        qs = qs.filter(
+            order__status__in=['suspended', 'deleting'],
+            order__delete_reminder_enabled=True,
+            order__delete_notice_sent_at__isnull=True,
+            order__delete_at__isnull=False,
+        )
+        if future:
+            qs = qs.filter(order__delete_at__gt=notice_window)
+        else:
+            qs = qs.filter(order__delete_at__gt=now, order__delete_at__lte=notice_window)
+        return qs.order_by('order__delete_at', '-updated_at', '-id')
+    if notice_type == 'recycle_notice':
+        notice_window = now + timezone.timedelta(days=4)
+        qs = qs.filter(
+            order__status='deleted',
+            order__ip_recycle_reminder_enabled=True,
+            order__recycle_notice_sent_at__isnull=True,
+            order__ip_recycle_at__isnull=False,
+        )
+        if future:
+            qs = qs.filter(order__ip_recycle_at__gt=notice_window)
+        else:
+            qs = qs.filter(order__ip_recycle_at__gt=now, order__ip_recycle_at__lte=notice_window)
+        return qs.order_by('order__ip_recycle_at', '-updated_at', '-id')
+    return qs.none()
+
+
+def _append_notice_items_from_assets(
+    items: list[dict],
+    *,
+    notice_type: str,
+    assets,
+    now,
+    next_run_at,
+    seen_keys: set[tuple[str, int]],
+    latest_logs: dict,
+    account_attempts: list[dict] | None,
+    max_items: int | None = None,
+):
+    for asset in assets.iterator(chunk_size=1000):
+        if max_items is not None and len(items) >= max_items:
+            break
+        order = getattr(asset, 'order', None)
+        if not order or (notice_type, order.id) in seen_keys:
+            continue
+        if notice_type == 'auto_renew_notice' and _notice_asset_is_unattached_static_ip(asset):
+            continue
+        if notice_type in {'delete_notice', 'recycle_notice'} and not _asset_lifecycle_enabled_for_order(order, asset):
+            continue
+        notice = _notice_schedule_from_asset(order, asset, now=now)
+        notice_at = _notice_task_time(order, notice_type, notice)
+        if not notice_at:
+            continue
+        queue_status, queue_status_label = _notice_queue_status_for_time(notice_at, now)
+        items.append(_notice_task_item_payload(
+            order,
+            notice_type,
+            queue_status=queue_status,
+            queue_status_label=queue_status_label,
+            next_run_at=next_run_at,
+            latest_log=latest_logs.get((notice_type, order.id)) or latest_logs.get((_notice_event_type(notice_type), order.id)),
+            account_attempts=account_attempts,
+            notice=notice,
+        ))
+        seen_keys.add((notice_type, order.id))
+
+
 # 功能：提供 后台 API 接口 的内部辅助逻辑，供同模块流程复用。
 def _build_notice_plan_bundle(*, limit=1000, future_limit=200, history_limit=1000):
     now = timezone.now()
-    due = async_to_sync(_get_due_orders)()
     next_run_at = now + timezone.timedelta(minutes=10)
     latest_logs = _notice_latest_log_map()
     account_attempts = _planned_notice_account_attempts()
-    notice_cache: dict[int, dict | None] = {}
     due_items = []
     seen_keys = set()
-    for notice_type, config in _NOTICE_TASK_TYPES.items():
-        for order in list(due.get(notice_type) or []):
-            if getattr(order, config['field'], None):
-                continue
-            notice = notice_cache.get(order.id)
-            if order.id not in notice_cache:
-                notice = _notice_payload_for_order(order)
-                notice_cache[order.id] = notice
-            due_items.append(_notice_task_item_payload(
-                order,
-                notice_type,
-                queue_status='due_now',
-                queue_status_label='本轮待通知',
-                next_run_at=next_run_at,
-                latest_log=latest_logs.get((notice_type, order.id)) or latest_logs.get((_notice_event_type(notice_type), order.id)),
-                account_attempts=account_attempts,
-                notice=notice,
-            ))
-            seen_keys.add((notice_type, order.id))
+    for notice_type in _NOTICE_TASK_TYPES:
+        if not cloud_notice_type_enabled(notice_type):
+            continue
+        _append_notice_items_from_assets(
+            due_items,
+            notice_type=notice_type,
+            assets=_notice_assets_for_type(notice_type, now=now, future=False),
+            now=now,
+            next_run_at=next_run_at,
+            seen_keys=seen_keys,
+            latest_logs=latest_logs,
+            account_attempts=account_attempts,
+        )
     due_items.sort(key=lambda item: parse_datetime(item.get('notice_at') or '') or timezone.datetime.max.replace(tzinfo=dt_timezone.utc))
-    window_due_items, future_plan_items = _notice_task_future_items(
-        now,
-        next_run_at,
-        seen_keys,
-        latest_logs,
-        future_limit=max(limit + future_limit, 200),
-        account_attempts=account_attempts,
-        notice_cache=notice_cache,
-    )
-    due_items.extend(window_due_items)
-    due_items.sort(key=lambda item: parse_datetime(item.get('notice_at') or '') or timezone.datetime.max.replace(tzinfo=dt_timezone.utc))
+    future_plan_items = []
+    future_cap = max(int(limit or 0) + int(future_limit or 0) + 200, 250)
+    for notice_type in _NOTICE_TASK_TYPES:
+        if not cloud_notice_type_enabled(notice_type):
+            continue
+        _append_notice_items_from_assets(
+            future_plan_items,
+            notice_type=notice_type,
+            assets=_notice_assets_for_type(notice_type, now=now, future=True),
+            now=now,
+            next_run_at=next_run_at,
+            seen_keys=seen_keys,
+            latest_logs=latest_logs,
+            account_attempts=account_attempts,
+            max_items=future_cap,
+        )
+        if len(future_plan_items) >= future_cap:
+            break
+    future_plan_items = [
+        item for item in future_plan_items
+        if item.get('queue_status') == 'scheduled_future'
+    ]
+    future_plan_items.sort(key=lambda item: parse_datetime(item.get('notice_at') or '') or timezone.datetime.max.replace(tzinfo=dt_timezone.utc))
     active_items = [*due_items, *future_plan_items]
     history_qs = CloudUserNoticeLog.objects.select_related('order', 'user').filter(event_type__in=list(_NOTICE_HISTORY_LABELS)).order_by('-created_at', '-id')
     history_rows = _notice_history_group_items(history_qs[:max(history_limit, 1000)], account_attempts=account_attempts)

@@ -384,15 +384,41 @@ def _dashboard_snapshot_group_page(queryset, request, *, group_by='user', sort_b
     page, page_size = _parse_dashboard_page(request, default_size=20, min_size=1, max_size=100)
     group_field = 'group_telegram_key' if group_by == 'telegram_group' else 'group_user_key'
     group_label = 'group_telegram_label' if group_by == 'telegram_group' else 'group_user_label'
-    grouped = list(
-        queryset.values(group_field)
-        .annotate(group_expires=Min('asset__actual_expires_at'), group_name=Min(group_label), min_risk=Min('risk_rank'))
-        .order_by(F('group_expires').asc(nulls_last=True), 'group_name', group_field)
-    )
-    total = len(grouped)
+    total = queryset.values(group_field).distinct().count()
     total_pages = max((total + page_size - 1) // page_size, 1)
     page = min(page, total_pages)
-    page_keys = [row[group_field] for row in grouped[(page - 1) * page_size:page * page_size]]
+    start = (page - 1) * page_size
+    page_keys = []
+    if compact and page == 1:
+        for fetch_limit in (max(page_size * 25, 500), 2000, 5000):
+            candidates = list(
+                queryset
+                .only('id', 'asset_id', group_field, group_label, 'risk_rank', 'asset__actual_expires_at')
+                .select_related('asset')
+                .order_by(F('asset__actual_expires_at').asc(nulls_last=True), group_label, group_field)[:fetch_limit]
+            )
+            seen = set()
+            page_keys = []
+            for row in candidates:
+                key = getattr(row, group_field)
+                if key in seen:
+                    continue
+                seen.add(key)
+                page_keys.append(key)
+                if len(page_keys) >= page_size:
+                    break
+            if len(page_keys) >= page_size:
+                break
+        if len(page_keys) < page_size:
+            page_keys = []
+    if not page_keys:
+        grouped = list(
+            queryset.values(group_field)
+            .annotate(group_expires=Min('asset__actual_expires_at'), group_name=Min(group_label), min_risk=Min('risk_rank'))
+            .order_by(F('group_expires').asc(nulls_last=True), 'group_name', group_field)
+            [start:start + page_size]
+        )
+        page_keys = [row[group_field] for row in grouped]
     if not page_keys:
         return [], [], total, total_pages, page, page_size
     order_index = {key: index for index, key in enumerate(page_keys)}
