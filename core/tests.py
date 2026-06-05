@@ -48,6 +48,77 @@ class MySqlSqlModeSettingsTestCase(SimpleTestCase):
                 _mysql_sql_mode()
 
 
+class MySqlTimeoutSettingsTestCase(SimpleTestCase):
+    def test_mysql_timeout_options_default_to_ten_seconds(self):
+        with patch.dict(os.environ, {}, clear=True):
+            from shop.settings import _mysql_timeout_options
+
+            self.assertEqual(
+                _mysql_timeout_options(),
+                {
+                    'connect_timeout': 10,
+                    'read_timeout': 10,
+                    'write_timeout': 10,
+                },
+            )
+
+    def test_mysql_timeout_options_read_custom_env_values(self):
+        with patch.dict(
+            os.environ,
+            {
+                'MYSQL_CONNECT_TIMEOUT': '3',
+                'MYSQL_READ_TIMEOUT': '7',
+                'MYSQL_WRITE_TIMEOUT': '11',
+            },
+            clear=False,
+        ):
+            from shop.settings import _mysql_timeout_options
+
+            self.assertEqual(
+                _mysql_timeout_options(),
+                {
+                    'connect_timeout': 3,
+                    'read_timeout': 7,
+                    'write_timeout': 11,
+                },
+            )
+
+    def test_mysql_timeout_options_can_be_disabled(self):
+        with patch.dict(
+            os.environ,
+            {
+                'MYSQL_CONNECT_TIMEOUT': '0',
+                'MYSQL_READ_TIMEOUT': '-1',
+                'MYSQL_WRITE_TIMEOUT': '0',
+            },
+            clear=False,
+        ):
+            from shop.settings import _mysql_timeout_options
+
+            self.assertEqual(_mysql_timeout_options(), {})
+
+    def test_mysql_timeout_options_invalid_values_fall_back_to_defaults(self):
+        with patch.dict(
+            os.environ,
+            {
+                'MYSQL_CONNECT_TIMEOUT': 'abc',
+                'MYSQL_READ_TIMEOUT': '',
+                'MYSQL_WRITE_TIMEOUT': ' ',
+            },
+            clear=False,
+        ):
+            from shop.settings import _mysql_timeout_options
+
+            self.assertEqual(
+                _mysql_timeout_options(),
+                {
+                    'connect_timeout': 10,
+                    'read_timeout': 10,
+                    'write_timeout': 10,
+                },
+            )
+
+
 class RedisCacheBackoffTestCase(SimpleTestCase):
     def tearDown(self):
         from core import cache

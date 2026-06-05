@@ -9357,3 +9357,65 @@ git diff --check
 - `TODO.md` 当前没有新的未完成明确任务；下一轮继续按固定巡检清单执行。
 - 本地 50 万压测数据仍保留，清理需要单独确认。
 - 后端仓库仍有本轮无关未跟踪文档 `docs/jisou-bot-functions.md`、`docs/telegram-search-development-plan.md`、`docs/telegram-search-large-scale-architecture.md`，本轮未处理。
+
+## 2026-06-06 MySQL 管理命令连接超时收敛
+
+### 背景
+
+自动监工本轮按 `continue to next task` 规则先确认 git 状态和最近提交，再读取 `AGENTS.md`、`docs/auto-optimization-control.md`、`docs/auto-optimization-latest.md`、`docs/refactor-version-record.md` 末尾和 `TODO.md`。`TODO.md` 当前没有新的未完成明确任务，因此按固定巡检清单执行，并优先复查上一轮留下的 MySQL `migrate --plan` 挂起风险。
+
+### 发现
+
+- `DB_ENGINE=mysql uv run python manage.py migrate --plan` 在 60 秒保护窗口内仍无输出，返回 `142`。
+- 使用 `faulthandler.dump_traceback_later()` 追踪同一只读命令，确认卡点在 PyMySQL 建立连接后读取 server information 的握手阶段，尚未进入迁移计划加载、迁移表查询或数据库锁等待。
+- 当前 MySQL 连接配置只设置 `charset` 和 `MYSQL_SQL_MODE` 对应的 `init_command`，没有 `connect_timeout`、`read_timeout`、`write_timeout`，因此 MySQL 半开连接可能让 Django 管理命令无期限等待。
+
+### 修改
+
+- `shop/settings.py`：新增 `_mysql_timeout_options()`，默认向 PyMySQL 传入 `connect_timeout`、`read_timeout`、`write_timeout` 各 10 秒；支持 `MYSQL_CONNECT_TIMEOUT`、`MYSQL_READ_TIMEOUT`、`MYSQL_WRITE_TIMEOUT` 覆盖；对应值为 `0` 或负数时不传该 timeout。
+- `.env.example`：增加三个 MySQL timeout 示例配置。
+- `core/tests.py`：新增 `MySqlTimeoutSettingsTestCase`，覆盖默认值、自定义值、关闭值和非法值回退默认值。
+
+### 巡检结论
+
+- 修复后 `DB_ENGINE=mysql uv run python manage.py migrate --plan` 不再无输出挂起，本机当前 MySQL 握手仍无响应，约 10 秒内明确失败为 `OperationalError: Lost connection to MySQL server during query (timed out)`。
+- 运行时 `INSTALLED_APPS` 未恢复 `accounts`、`finance`、`mall`、`monitoring`、`dashboard_api`、`biz`。
+- 字段内省确认 `CloudAsset` 到期字段仍只有 `actual_expires_at`；`CloudServerOrder` 未恢复 `actual_expires_at` 或 `service_expires_at`；`CloudAssetDashboardSnapshot` 未恢复到期事实字段，仅保留 `risk_expired`。
+- 运行时代码扫描未发现订单侧到期字段、旧计划快照或旧退款入口回流；命中的 `CloudServerOrder.objects.update(ip_recycle_at=asset.actual_expires_at)` 是固定 IP 保留/删除流程的既有操作时间维护。
+- 机器人返回链、`callback_data` 长度、后台任务中心状态统计、支付扫描器和资源监控详情按钮缓存相关聚焦测试通过。
+
+### 验证
+
+本地已通过：
+
+```bash
+DB_ENGINE=mysql UV_CACHE_DIR=/private/tmp/uv-cache-shop PYTHONDONTWRITEBYTECODE=1 uv run python manage.py check
+DJANGO_TEST_SQLITE=1 UV_CACHE_DIR=/private/tmp/uv-cache-shop PYTHONDONTWRITEBYTECODE=1 uv run python manage.py shell -c "...字段/废弃 app 内省..."
+DB_ENGINE=mysql UV_CACHE_DIR=/private/tmp/uv-cache-shop PYTHONDONTWRITEBYTECODE=1 uv run python -m py_compile shop/settings.py core/tests.py bot/handlers.py bot/keyboards.py cloud/task_center.py cloud/api_tasks.py cloud/lifecycle.py orders/payment_scanner.py cloud/api_assets.py cloud/api_orders.py cloud/api_asset_snapshots.py cloud/models.py cloud/sync_jobs.py
+DJANGO_TEST_SQLITE=1 UV_CACHE_DIR=/private/tmp/uv-cache-shop PYTHONDONTWRITEBYTECODE=1 uv run python manage.py test core.tests.MySqlSqlModeSettingsTestCase core.tests.MySqlTimeoutSettingsTestCase --settings=shop.settings --verbosity=2
+DJANGO_TEST_SQLITE=1 UV_CACHE_DIR=/private/tmp/uv-cache-shop PYTHONDONTWRITEBYTECODE=1 uv run python manage.py test bot.tests.RetainedIpRenewalUiTestCase cloud.tests_task_center.CloudTaskCenterApiTestCase cloud.tests.CloudServerServicesTestCase.test_due_orders_use_asset_expiry_for_lightsail_lifecycle cloud.tests.CloudServerServicesTestCase.test_cloud_asset_detail_does_not_fallback_to_order_asset_expiry orders.tests.TronMonitorStatsTestCase.test_tx_detail_cache_is_scoped_per_user_for_same_hash orders.tests.TronMonitorStatsTestCase.test_resource_detail_cache_is_scoped_per_user_for_same_address_time --settings=shop.settings --verbosity=2
+git diff --check
+```
+
+迁移计划复查：
+
+```bash
+DB_ENGINE=mysql UV_CACHE_DIR=/private/tmp/uv-cache-shop PYTHONDONTWRITEBYTECODE=1 perl -e 'alarm 60; exec @ARGV' uv run python manage.py migrate --plan
+DB_ENGINE=mysql DJANGO_SETTINGS_MODULE=shop.settings UV_CACHE_DIR=/private/tmp/uv-cache-shop PYTHONDONTWRITEBYTECODE=1 uv run python -c "...faulthandler 追踪 migrate --plan..."
+DB_ENGINE=mysql UV_CACHE_DIR=/private/tmp/uv-cache-shop PYTHONDONTWRITEBYTECODE=1 uv run python manage.py migrate --plan
+```
+
+结果：修复前 60 秒超时返回 `142`；追踪定位在 PyMySQL 握手读取；修复后约 10 秒内明确失败为 MySQL 握手超时，不再无限挂起。SQLite 测试库输出不支持 `db_comment` / `db_table_comment` 的 warnings，属于当前测试环境预期差异。
+
+### 红线
+
+- 本轮未执行真实云资源创建、删除、关机、释放 IP、换 IP、真实支付、链上广播、删除数据或生产发布。
+- 本轮未打印密钥、私钥、Telegram session、TOTP、支付密钥或云厂商密钥。
+- 本轮未恢复订单侧到期字段、旧计划快照、旧退款入口或废弃 runtime app。
+
+### 剩余风险
+
+- 当前 MySQL 服务或连接目标仍在握手阶段无响应；代码已避免无限等待，但本机仍未得到 `migrate --plan` 的成功完成态。
+- 下一轮应继续检查本机 MySQL 监听、代理或服务状态，使迁移计划验证恢复到成功完成态。
+- 本地 50 万压测数据仍保留，清理需要单独确认。
+- 后端仓库仍有本轮无关未跟踪文档 `docs/jisou-bot-functions.md`、`docs/telegram-search-development-plan.md`、`docs/telegram-search-large-scale-architecture.md`，本轮未处理。

@@ -45,6 +45,19 @@ def _mysql_sql_mode() -> str:
     return ','.join(dict.fromkeys(modes))
 
 
+def _mysql_timeout_options() -> dict[str, int]:
+    timeout_envs = (
+        ('MYSQL_CONNECT_TIMEOUT', 'connect_timeout', 10),
+        ('MYSQL_READ_TIMEOUT', 'read_timeout', 10),
+        ('MYSQL_WRITE_TIMEOUT', 'write_timeout', 10),
+    )
+    return {
+        option_name: value
+        for env_name, option_name, default in timeout_envs
+        if (value := _env_int(env_name, default)) > 0
+    }
+
+
 ALLOWED_HOSTS = _split_csv_env(os.getenv('ALLOWED_HOSTS', '127.0.0.1,localhost,[::1]'))
 ADMIN_FRONTEND_URL = os.getenv('ADMIN_FRONTEND_URL', '/')
 CSRF_TRUSTED_ORIGINS = _split_csv_env(
@@ -96,6 +109,7 @@ else:
     mysql_options = {
         'charset': 'utf8mb4',
     }
+    mysql_options.update(_mysql_timeout_options())
     mysql_sql_mode = _mysql_sql_mode()
     if mysql_sql_mode:
         mysql_options['init_command'] = f"SET SESSION sql_mode='{mysql_sql_mode}'"
