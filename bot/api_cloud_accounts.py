@@ -1,5 +1,7 @@
 """Dashboard API views for cloud account management."""
 
+from types import SimpleNamespace
+
 from django.views.decorators.csrf import csrf_exempt
 from django.views.decorators.http import require_GET, require_POST
 
@@ -96,8 +98,72 @@ def _find_duplicate_cloud_account(*, provider: str, external_account_id: str = '
     return qs.first()
 
 
+def _find_duplicate_cloud_account_access_key(*, provider: str, access_key: str = '', exclude_id: int | None = None):
+    normalized_provider = str(provider or '').strip()
+    normalized_access_key = str(access_key or '').strip()
+    if not normalized_provider or not normalized_access_key:
+        return None
+    qs = CloudAccountConfig.objects.filter(provider=normalized_provider).only('id', 'provider', 'name', 'access_key')
+    if exclude_id:
+        qs = qs.exclude(id=exclude_id)
+    for candidate in qs.iterator():
+        if str(candidate.access_key_plain or '').strip() == normalized_access_key:
+            return candidate
+    return None
+
+
+def _fetch_cloud_account_external_account_id(provider: str, access_key: str, secret_key: str) -> str:
+    normalized_provider = str(provider or '').strip()
+    normalized_access_key = str(access_key or '').strip()
+    normalized_secret_key = str(secret_key or '').strip()
+    if not normalized_provider or not normalized_access_key or not normalized_secret_key:
+        return ''
+    if normalized_provider == CloudAccountConfig.PROVIDER_AWS:
+        import boto3
+        sts = boto3.client(
+            'sts',
+            aws_access_key_id=normalized_access_key,
+            aws_secret_access_key=normalized_secret_key,
+        )
+        return str(sts.get_caller_identity().get('Account') or '').strip()
+    if normalized_provider == CloudAccountConfig.PROVIDER_ALIYUN:
+        item = SimpleNamespace(
+            access_key_plain=normalized_access_key,
+            secret_key_plain=normalized_secret_key,
+        )
+        return _fetch_aliyun_account_id(item)
+    return ''
+
+
+def _resolve_cloud_account_external_account_id(provider: str, access_key: str, secret_key: str, submitted_external_account_id: str = ''):
+    normalized_submitted_id = str(submitted_external_account_id or '').strip()
+    try:
+        fetched_id = _fetch_cloud_account_external_account_id(provider, access_key, secret_key)
+    except Exception:
+        fetched_id = ''
+    if not fetched_id:
+        return '', _error('云账号验证失败：无法确认云厂商账号ID，请检查 Access Key 和 Secret Key 后重试', status=400)
+    if normalized_submitted_id and normalized_submitted_id != fetched_id:
+        return '', _error('云账号验证失败：填写的云厂商账号ID与密钥所属账号不一致', status=400)
+    return fetched_id, None
+
+
+def _fetch_cloud_account_external_account_id_response(provider: str, access_key: str, secret_key: str):
+    try:
+        fetched_id = _fetch_cloud_account_external_account_id(provider, access_key, secret_key)
+    except Exception:
+        fetched_id = ''
+    if not fetched_id:
+        return '', _error('云账号验证失败：无法确认云厂商账号ID，请检查 Access Key 和 Secret Key 后重试', status=400)
+    return fetched_id, None
+
+
 def _cloud_account_duplicate_error(duplicate):
     return f'云厂商账号ID已存在：{duplicate.get_provider_display()} / {duplicate.name}（内部ID {duplicate.id}）'
+
+
+def _cloud_account_access_key_duplicate_error(duplicate):
+    return f'云账号 Access Key 已存在：{duplicate.get_provider_display()} / {duplicate.name}（内部ID {duplicate.id}）'
 
 
 def _external_sync_log_payload(item):
@@ -161,9 +227,20 @@ def create_cloud_account(request):
         return _error('账户名称不能为空', status=400)
     if not access_key or not secret_key:
         return _error('Access Key 和 Secret Key 不能为空', status=400)
+    external_account_id, error_response = _resolve_cloud_account_external_account_id(
+        provider,
+        access_key,
+        secret_key,
+        external_account_id,
+    )
+    if error_response:
+        return error_response
     duplicate = _find_duplicate_cloud_account(provider=provider, external_account_id=external_account_id)
     if duplicate:
         return _error(_cloud_account_duplicate_error(duplicate), status=400)
+    duplicate = _find_duplicate_cloud_account_access_key(provider=provider, access_key=access_key)
+    if duplicate:
+        return _error(_cloud_account_access_key_duplicate_error(duplicate), status=400)
     item = CloudAccountConfig.objects.create(
         provider=provider,
         name=name,
@@ -200,9 +277,40 @@ def update_cloud_account(request, account_id: int):
         return _error('云平台类型不正确', status=400)
     if not name:
         return _error('账户名称不能为空', status=400)
+    normalized_access_key = str(item.access_key_plain if access_key in (None, '') else access_key or '').strip()
+    normalized_secret_key = str(item.secret_key_plain if secret_key in (None, '') else secret_key or '').strip()
     normalized_external_account_id = str(
         item.external_account_id if external_account_id is None else external_account_id or ''
     ).strip()
+    should_resolve_external_id = (
+        provider != item.provider
+        or access_key not in (None, '')
+        or secret_key not in (None, '')
+        or external_account_id is not None
+        or not normalized_external_account_id
+    )
+    if should_resolve_external_id:
+        fetched_external_account_id, error_response = _fetch_cloud_account_external_account_id_response(
+            provider,
+            normalized_access_key,
+            normalized_secret_key,
+        )
+        if error_response:
+            return error_response
+        duplicate = _find_duplicate_cloud_account(
+            provider=provider,
+            external_account_id=fetched_external_account_id,
+            exclude_id=item.id,
+        )
+        if duplicate:
+            return _error(_cloud_account_duplicate_error(duplicate), status=400)
+        if (
+            normalized_external_account_id
+            and normalized_external_account_id != fetched_external_account_id
+            and (CloudAsset.objects.filter(cloud_account=item).exists() or CloudServerOrder.objects.filter(cloud_account=item).exists())
+        ):
+            return _error('云账号验证失败：新密钥属于另一个云厂商账号，已有业务数据的云账号不能直接切换身份', status=400)
+        normalized_external_account_id = fetched_external_account_id
     duplicate = _find_duplicate_cloud_account(
         provider=provider,
         external_account_id=normalized_external_account_id,
@@ -210,10 +318,16 @@ def update_cloud_account(request, account_id: int):
     )
     if duplicate:
         return _error(_cloud_account_duplicate_error(duplicate), status=400)
+    duplicate = _find_duplicate_cloud_account_access_key(
+        provider=provider,
+        access_key=normalized_access_key,
+        exclude_id=item.id,
+    )
+    if duplicate:
+        return _error(_cloud_account_access_key_duplicate_error(duplicate), status=400)
     item.provider = provider
     item.name = name
-    if external_account_id is not None:
-        item.external_account_id = normalized_external_account_id or None
+    item.external_account_id = normalized_external_account_id or None
     if access_key not in (None, ''):
         item.access_key = str(access_key).strip()
     if secret_key not in (None, ''):

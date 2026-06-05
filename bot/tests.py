@@ -432,7 +432,8 @@ class DashboardCloudAccountVerifyTestCase(TestCase):
             content_type='application/json',
         )
         self._attach_bearer_session(create_request, root)
-        create_response = create_cloud_account(create_request)
+        with patch('bot.api_cloud_accounts._fetch_cloud_account_external_account_id', return_value='123456789012'):
+            create_response = create_cloud_account(create_request)
         self.assertEqual(create_response.status_code, 200)
         account_id = json.loads(create_response.content.decode('utf-8'))['data']['id']
 
@@ -484,7 +485,8 @@ class DashboardCloudAccountVerifyTestCase(TestCase):
             content_type='application/json',
         )
         self._attach_bearer_session(create_request, root)
-        create_response = create_cloud_account(create_request)
+        with patch('bot.api_cloud_accounts._fetch_cloud_account_external_account_id', return_value=existing.external_account_id):
+            create_response = create_cloud_account(create_request)
         create_payload = json.loads(create_response.content.decode('utf-8'))
 
         self.assertEqual(create_response.status_code, 400)
@@ -497,13 +499,156 @@ class DashboardCloudAccountVerifyTestCase(TestCase):
             content_type='application/json',
         )
         self._attach_bearer_session(update_request, root)
-        update_response = update_cloud_account(update_request, other.id)
+        with patch('bot.api_cloud_accounts._fetch_cloud_account_external_account_id', return_value=existing.external_account_id):
+            update_response = update_cloud_account(update_request, other.id)
         update_payload = json.loads(update_response.content.decode('utf-8'))
 
         self.assertEqual(update_response.status_code, 400)
         self.assertIn('云厂商账号ID已存在', update_payload['message'])
         other.refresh_from_db()
         self.assertFalse(other.external_account_id)
+
+    def test_cloud_account_access_key_must_be_unique_per_provider_without_external_account_id(self):
+        root = get_user_model().objects.create_user(username='cloud_account_ak_unique_root', password='pass', is_staff=True, is_superuser=True)
+        existing = CloudAccountConfig.objects.create(
+            provider=CloudAccountConfig.PROVIDER_AWS,
+            name='aws-ak-existing',
+            access_key='same-access-key',
+            secret_key='aws-sk-existing',
+            region_hint='ap-southeast-1',
+            is_active=True,
+        )
+        other = CloudAccountConfig.objects.create(
+            provider=CloudAccountConfig.PROVIDER_AWS,
+            name='aws-ak-other',
+            access_key='other-access-key',
+            secret_key='aws-sk-other',
+            region_hint='ap-southeast-1',
+            is_active=True,
+        )
+
+        create_request = RequestFactory().post(
+            '/api/admin/settings/cloud-accounts/create/',
+            data=json.dumps({
+                'provider': CloudAccountConfig.PROVIDER_AWS,
+                'name': 'aws-ak-duplicate',
+                'access_key': existing.access_key_plain,
+                'secret_key': 'aws-sk-new',
+            }),
+            content_type='application/json',
+        )
+        self._attach_bearer_session(create_request, root)
+        with patch('bot.api_cloud_accounts._fetch_cloud_account_external_account_id', return_value='999999999999'):
+            create_response = create_cloud_account(create_request)
+        create_payload = json.loads(create_response.content.decode('utf-8'))
+
+        self.assertEqual(create_response.status_code, 400)
+        self.assertIn('云账号 Access Key 已存在', create_payload['message'])
+        self.assertFalse(CloudAccountConfig.objects.filter(name='aws-ak-duplicate').exists())
+
+        update_request = RequestFactory().post(
+            f'/api/admin/settings/cloud-accounts/{other.id}/',
+            data=json.dumps({'access_key': existing.access_key_plain}),
+            content_type='application/json',
+        )
+        self._attach_bearer_session(update_request, root)
+        with patch('bot.api_cloud_accounts._fetch_cloud_account_external_account_id', return_value='888888888888'):
+            update_response = update_cloud_account(update_request, other.id)
+        update_payload = json.loads(update_response.content.decode('utf-8'))
+
+        self.assertEqual(update_response.status_code, 400)
+        self.assertIn('云账号 Access Key 已存在', update_payload['message'])
+        other.refresh_from_db()
+        self.assertEqual(other.access_key_plain, 'other-access-key')
+
+    def test_cloud_account_save_fetches_account_id_and_blocks_duplicate_different_keys(self):
+        root = get_user_model().objects.create_user(username='cloud_account_identity_unique_root', password='pass', is_staff=True, is_superuser=True)
+        existing = CloudAccountConfig.objects.create(
+            provider=CloudAccountConfig.PROVIDER_AWS,
+            name='aws-identity-existing',
+            external_account_id='123456789012',
+            access_key='aws-ak-existing',
+            secret_key='aws-sk-existing',
+            region_hint='ap-southeast-1',
+            is_active=True,
+        )
+        other = CloudAccountConfig.objects.create(
+            provider=CloudAccountConfig.PROVIDER_AWS,
+            name='aws-identity-other',
+            external_account_id='222222222222',
+            access_key='aws-ak-other',
+            secret_key='aws-sk-other',
+            region_hint='ap-southeast-1',
+            is_active=True,
+        )
+
+        create_request = RequestFactory().post(
+            '/api/admin/settings/cloud-accounts/create/',
+            data=json.dumps({
+                'provider': CloudAccountConfig.PROVIDER_AWS,
+                'name': 'aws-identity-duplicate',
+                'access_key': 'different-access-key',
+                'secret_key': 'different-secret-key',
+            }),
+            content_type='application/json',
+        )
+        self._attach_bearer_session(create_request, root)
+        with patch('bot.api_cloud_accounts._fetch_cloud_account_external_account_id', return_value=existing.external_account_id):
+            create_response = create_cloud_account(create_request)
+        create_payload = json.loads(create_response.content.decode('utf-8'))
+
+        self.assertEqual(create_response.status_code, 400)
+        self.assertIn('云厂商账号ID已存在', create_payload['message'])
+        self.assertFalse(CloudAccountConfig.objects.filter(name='aws-identity-duplicate').exists())
+
+        update_request = RequestFactory().post(
+            f'/api/admin/settings/cloud-accounts/{other.id}/',
+            data=json.dumps({
+                'access_key': 'another-different-access-key',
+                'secret_key': 'another-different-secret-key',
+            }),
+            content_type='application/json',
+        )
+        self._attach_bearer_session(update_request, root)
+        with patch('bot.api_cloud_accounts._fetch_cloud_account_external_account_id', return_value=existing.external_account_id):
+            update_response = update_cloud_account(update_request, other.id)
+        update_payload = json.loads(update_response.content.decode('utf-8'))
+
+        self.assertEqual(update_response.status_code, 400)
+        self.assertIn('云厂商账号ID已存在', update_payload['message'])
+        other.refresh_from_db()
+        self.assertEqual(other.external_account_id, '222222222222')
+        self.assertEqual(other.access_key_plain, 'aws-ak-other')
+
+    def test_cloud_account_update_allows_rotated_key_for_same_external_account_id(self):
+        root = get_user_model().objects.create_user(username='cloud_account_rotate_root', password='pass', is_staff=True, is_superuser=True)
+        account = CloudAccountConfig.objects.create(
+            provider=CloudAccountConfig.PROVIDER_AWS,
+            name='aws-rotated-key',
+            external_account_id='123456789012',
+            access_key='expired-access-key',
+            secret_key='expired-secret-key',
+            region_hint='ap-southeast-1',
+            is_active=True,
+        )
+        update_request = RequestFactory().post(
+            f'/api/admin/settings/cloud-accounts/{account.id}/',
+            data=json.dumps({
+                'access_key': 'new-access-key',
+                'secret_key': 'new-secret-key',
+            }),
+            content_type='application/json',
+        )
+        self._attach_bearer_session(update_request, root)
+
+        with patch('bot.api_cloud_accounts._fetch_cloud_account_external_account_id', return_value=account.external_account_id):
+            update_response = update_cloud_account(update_request, account.id)
+
+        self.assertEqual(update_response.status_code, 200)
+        account.refresh_from_db()
+        self.assertEqual(account.external_account_id, '123456789012')
+        self.assertEqual(account.access_key_plain, 'new-access-key')
+        self.assertEqual(account.secret_key_plain, 'new-secret-key')
 
     def test_cloud_account_verify_blocks_duplicate_external_account_id(self):
         staff = get_user_model().objects.create_user(username='aws_verify_unique_staff', password='pass', is_staff=True, is_superuser=True)
