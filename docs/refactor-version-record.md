@@ -8977,3 +8977,41 @@ git diff --check
 - 代理列表 IP 视图第一页已优化；第 2 页仍走精确分组聚合，50 万下约 5.12 秒。如果深分页也需要稳定 2 秒内，需要给快照表增加可排序的到期时间冗余字段和索引，或改成游标分页。
 - 本地压测数据保留在项目数据库中；清理压测数据属于删除数据操作，需要单独确认。
 - 前端仓库存在大量本轮无关脏文件；后端仓库存在未跟踪文档 `docs/jisou-bot-functions.md`、`docs/telegram-search-large-scale-architecture.md`，本轮均未处理。
+
+## 2026-06-05 代理列表分页实测和未绑定分组修复
+
+### 背景
+
+用户指出前一轮只验证了计数，没有实际验证分页数据是否丢失，并要求测试翻页、跳页、加载速度以及接口数据是否和数据库对得上。
+
+### 实测
+
+- 接口逐页请求 `page=1/2/3/10/100/1000/24975`，每页 `page_size=20`，均返回 200。
+- 接口耗时：第 1 页约 2.27 秒；第 2/3/10/100 页约 4.67-5.00 秒；第 1000 页约 5.21 秒；第 24975 页约 5.47 秒。
+- 使用与前端一致的 `show_deleted=0` 过滤条件和数据库精确分组排序对账后，以上各页的接口分组 key 均与数据库结果一致。
+- 浏览器实际进入代理列表，点击第 2 页后显示 `user:21928` 到 `user:23353` 对应分组；点击最后一页 `24975` 后显示 12 组，分页激活最后一页。
+- 浏览器请求记录包含 `page=1`、`page=2`、`page=24975` 三次代理列表请求，全部 200；控制台 0 error / 0 warning。
+
+### 发现和修复
+
+- 初次对账最后一页时发现未绑定用户资产在快照层分组 key 是 `unbound:<asset_id>`，但接口组装时会变成 `user:unbound`。如果一页有多个未绑定资产，存在被合并成一个组的风险。
+- `cloud/api_asset_snapshots.py`：紧凑 payload 增加 `group_user_key` / `group_telegram_key`；组装分组时优先使用快照分组 key，未绑定资产保持 `unbound:<asset_id>`。
+- `cloud/tests.py`：新增未绑定用户资产紧凑分组回归测试，确保不会回退到 `user:unbound`。
+
+### 验证
+
+本地已通过：
+
+```bash
+DB_ENGINE=mysql UV_CACHE_DIR=/private/tmp/uv-cache-shop PYTHONDONTWRITEBYTECODE=1 uv run python -m py_compile cloud/api_asset_snapshots.py
+DB_ENGINE=mysql UV_CACHE_DIR=/private/tmp/uv-cache-shop PYTHONDONTWRITEBYTECODE=1 uv run python manage.py check
+DJANGO_TEST_SQLITE=1 UV_CACHE_DIR=/private/tmp/uv-cache-shop PYTHONDONTWRITEBYTECODE=1 uv run python manage.py test cloud.tests.CloudServerServicesTestCase.test_cloud_assets_list_compact_keeps_unbound_group_key cloud.tests.CloudServerServicesTestCase.test_cloud_assets_list_compact_returns_ip_view_payload --settings=shop.settings --verbosity=2
+git diff --check
+```
+
+SQLite 测试库输出不支持 `db_comment` / `db_table_comment` 的 warnings，属于当前测试环境预期差异。
+
+### 剩余风险
+
+- 为保证分页数据和数据库精确一致，第 2 页及深分页仍走精确聚合，50 万下约 5 秒。如需继续降到 2 秒内，需要做索引/游标分页级别的结构优化。
+- 本轮未清理本地 50 万压测数据；清理属于删除数据操作，需要单独确认。

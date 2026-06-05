@@ -1633,6 +1633,37 @@ class CloudServerServicesTestCase(TestCase):
         self.assertNotIn('proxy_links', row)
         self.assertNotIn('provider_resource_id', row)
 
+    # 功能：验证未绑定用户资产在分组分页中保持独立分组键，避免最后一页被合并丢组。
+    def test_cloud_assets_list_compact_keeps_unbound_group_key(self):
+        asset = CloudAsset.objects.create(
+            kind=CloudAsset.KIND_SERVER,
+            source=CloudAsset.SOURCE_AWS_SYNC,
+            provider='aws_lightsail',
+            region_code=self.plan.region_code,
+            region_name=self.plan.region_name,
+            asset_name='snapshot-compact-unbound-asset',
+            public_ip='10.77.88.61',
+            status=CloudAsset.STATUS_RUNNING,
+            actual_expires_at=timezone.now() + timezone.timedelta(days=30),
+        )
+        refresh_cloud_asset_dashboard_snapshots(asset_ids=[asset.id], reason='test', full=False)
+
+        admin = get_user_model().objects.create_user(username='compact_unbound_group_admin', password='x', is_staff=True)
+        request = self.factory.get('/api/admin/cloud-assets/', {
+            'compact': '1',
+            'group_by': 'user',
+            'grouped': '1',
+            'paginated': '1',
+        })
+        self._attach_bearer_session(request, admin)
+        response = cloud_assets_list(request)
+        payload = json.loads(response.content.decode('utf-8'))['data']
+        group = next(item for item in payload['groups'] if item['items'][0]['id'] == asset.id)
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(group['user_key'], f'unbound:{asset.id}')
+        self.assertNotEqual(group['user_key'], 'user:unbound')
+
     # 功能：验证删除计划轻量字段开关会移除备注和执行详情，降低大列表 payload。
     def test_lifecycle_plans_fields_basic_omits_notes_and_execution_payload(self):
         for index in range(12):

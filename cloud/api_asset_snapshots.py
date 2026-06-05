@@ -274,6 +274,8 @@ def _compact_snapshot_payload(row):
         'public_ip': asset.public_ip or asset.previous_public_ip,
         'risk_rank': row.risk_rank,
         'sort_order': asset.sort_order,
+        'group_user_key': row.group_user_key,
+        'group_telegram_key': row.group_telegram_key,
         'status': asset.status,
         'status_countdown': _countdown_label(expires_at),
         'status_label': dict(CloudAsset.STATUS_CHOICES).get(asset.status, asset.status),
@@ -325,7 +327,7 @@ def _group_cloud_asset_payloads(items, group_by='telegram_group'):
     for item in items:
         if group_by == 'user':
             user_id = item.get('user_id') or item.get('tg_user_id')
-            key = f'user:{user_id}' if user_id else 'user:unbound'
+            key = item.get('group_user_key') or (f'user:{user_id}' if user_id else f"unbound:{item.get('id', '')}")
             group = groups.setdefault(key, {
                 'user_key': key,
                 'tg_user_id': item['tg_user_id'],
@@ -358,7 +360,7 @@ def _group_cloud_asset_payloads(items, group_by='telegram_group'):
                 })
             else:
                 user_id = item.get('user_id') or item.get('tg_user_id')
-                key = f'user:{user_id}' if user_id else 'user:unbound'
+                key = item.get('group_telegram_key') or (f'user:{user_id}' if user_id else f"unbound:{item.get('id', '')}")
                 group = groups.setdefault(key, {
                     'user_key': key,
                     'tg_user_id': item['tg_user_id'],
