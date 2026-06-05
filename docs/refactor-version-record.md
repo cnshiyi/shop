@@ -8883,3 +8883,47 @@ DB_ENGINE=mysql UV_CACHE_DIR=/private/tmp/uv-cache-shop PYTHONDONTWRITEBYTECODE=
 
 - 本轮未执行真实 Telegram 发送、真实 Bark 推送、真实支付、链上广播、云资源创建或生产发布。
 - 如果需要验证真实手机端通知效果，需要后台手动打开指定群/频道 `push_enabled` 后再进行真实消息测试。
+
+## 2026-06-05 后台大列表列开关与 IP 视图优化
+
+### 背景
+
+用户在压测代理列表、通知计划和删除计划时确认大数据量下加载变慢，并要求把所有列都做成顶部显示开关；关闭某列后不再加载该列对应的重字段。用户同时指出删除计划总开关缺少关机开关，服务器单项删除计划缺少关机开关，IP 删除计划单项开关不应显示为关机开关。
+
+### 修改
+
+- `cloud/api_asset_snapshots.py`：为代理列表增加紧凑 IP 视图 payload，价格最多保留 2 位小数；默认 `all` 风险统计和列表包含缺失云账号或停用云账号的孤儿资产。
+- `cloud/api_assets.py`：代理列表支持 `compact=1`，缺失云账号资产显示为“云账号未关联”，归入“云账号异常”。
+- `bot/api.py`：删除计划接口支持 `fields` 参数，按列开关裁剪备注、执行详情、云厂商状态等重字段。
+- `cloud/api_tasks.py`：通知计划接口支持 `fields=basic,channels,ips,retry,text`，按列开关裁剪 IP 列、文案、渠道、重试说明。
+- `bot/api_site_configs.py`：`cloud_actions` 配置组补齐 `cloud_server_shutdown_enabled`，删除计划页可同时显示关机服务器、删除服务器、删除 IP 三个总开关。
+- 前端代理列表：新增 `IP视图`，请求 `compact=1`，只显示用户、分组、IP/价格、到期/剩余、编辑；代理列表主表按当前视图显示对应列开关。
+- 前端通知计划：发送时间、用户、通知类型、通知状态、计划范围、IP 列表、IP 数量、通知时间、通知文案、通知渠道、重试说明、操作全部加入列开关；打开重列时才请求对应 `fields`。
+- 前端删除计划：所有计划/历史/失败面板相关列加入开关；顶部总开关显示关机服务器、删除服务器、删除 IP；服务器单项列显示关机计划，IP 单项列显示 IP 删除计划；修正操作列不再错误依赖备注列。
+- 前端长文本单元格：修正 Ant Design Vue `TypographyParagraph` 的 ellipsis 用法，避免列开关打开后控制台出现 warning/error。
+
+### 实测
+
+- 浏览器进入通知计划页，默认请求为 `fields=basic`；点击 IP 列表开关后请求变为 `fields=basic,ips`，按用户表和历史表实际显示 IP 列，控制台 0 error / 0 warning。
+- 浏览器进入删除计划页，顶部实际显示 `关机服务器`、`删除服务器`、`删除IP` 三个总开关；服务器表显示 `关机计划`，IP 表显示 `IP删除计划`；打开备注列后请求变为 `fields=basic,notes,execution`，控制台 0 error / 0 warning。
+- 浏览器进入代理列表，切换 `IP视图` 后请求带 `compact=1`；首屏列为用户、分组、IP/价格、到期/剩余、编辑；关闭 IP/价格列后表头同步消失；价格显示为 `5 USDT`，没有长小数。
+
+### 验证
+
+本地已通过：
+
+```bash
+pnpm --filter @vben/web-antd exec vue-tsc --noEmit --skipLibCheck
+DB_ENGINE=mysql UV_CACHE_DIR=/private/tmp/uv-cache-shop PYTHONDONTWRITEBYTECODE=1 uv run python -m py_compile bot/api.py bot/api_site_configs.py cloud/api_asset_snapshots.py cloud/api_assets.py cloud/api_tasks.py cloud/tests.py
+DB_ENGINE=mysql UV_CACHE_DIR=/private/tmp/uv-cache-shop PYTHONDONTWRITEBYTECODE=1 uv run python manage.py check
+DJANGO_TEST_SQLITE=1 UV_CACHE_DIR=/private/tmp/uv-cache-shop PYTHONDONTWRITEBYTECODE=1 uv run python manage.py test cloud.tests.CloudServerServicesTestCase.test_cloud_assets_list_compact_returns_ip_view_payload cloud.tests.CloudServerServicesTestCase.test_cloud_assets_list_all_includes_disabled_or_missing_cloud_account_assets cloud.tests.CloudServerServicesTestCase.test_lifecycle_plans_fields_basic_omits_notes_and_execution_payload --settings=shop.settings --verbosity=2
+git diff --check
+```
+
+结果：前端类型检查通过；后端编译通过；Django MySQL 配置检查通过；3 个聚焦测试通过；后端和前端仓库 `git diff --check` 均通过。SQLite 测试库输出不支持 `db_comment` / `db_table_comment` 的 warnings，属于当前测试环境预期差异。
+
+### 剩余风险
+
+- 本轮未执行真实云资源创建、删除、关机、释放 IP、真实支付、链上广播或生产发布。
+- 当前 `CloudAsset.shutdown_enabled` 仍是服务器关机计划和未附加 IP 删除计划共用的资产级单项布尔字段；本轮只修正后台显示语义。如果后续要求彻底拆分开关事实，需要新增独立字段、迁移和生命周期执行器适配。
+- 前端仓库存在大量本轮无关脏文件；后端仓库存在未跟踪文件 `docs/jisou-bot-functions.md`，本轮均未处理。

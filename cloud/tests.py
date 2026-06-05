@@ -1542,6 +1542,130 @@ class CloudServerServicesTestCase(TestCase):
         self.assertEqual(payload['total'], 1)
         self.assertEqual(payload['items'][0]['id'], asset.id)
 
+    # 功能：云账号异常资产仍必须出现在默认全部列表，避免成为无法管理的孤儿资产。
+    def test_cloud_assets_list_all_includes_disabled_or_missing_cloud_account_assets(self):
+        disabled_account = CloudAccountConfig.objects.create(
+            provider=CloudAccountConfig.PROVIDER_AWS,
+            name='snapshot-disabled-account',
+            external_account_id='snapshot-disabled-account-id',
+            access_key='snapshot-disabled-ak',
+            secret_key='snapshot-disabled-sk',
+            region_hint=self.plan.region_code,
+            is_active=False,
+        )
+        disabled_asset = CloudAsset.objects.create(
+            kind=CloudAsset.KIND_SERVER,
+            source=CloudAsset.SOURCE_AWS_SYNC,
+            user=self.user,
+            provider='aws_lightsail',
+            cloud_account=disabled_account,
+            account_label=cloud_account_label(disabled_account),
+            region_code=self.plan.region_code,
+            region_name=self.plan.region_name,
+            asset_name='snapshot-disabled-account-asset',
+            public_ip='10.77.88.31',
+            status=CloudAsset.STATUS_RUNNING,
+            actual_expires_at=timezone.now() + timezone.timedelta(days=30),
+        )
+        missing_account_asset = CloudAsset.objects.create(
+            kind=CloudAsset.KIND_SERVER,
+            source=CloudAsset.SOURCE_AWS_SYNC,
+            user=self.user,
+            provider='aws_lightsail',
+            region_code=self.plan.region_code,
+            region_name=self.plan.region_name,
+            asset_name='snapshot-missing-account-asset',
+            public_ip='10.77.88.32',
+            status=CloudAsset.STATUS_RUNNING,
+            actual_expires_at=timezone.now() + timezone.timedelta(days=30),
+        )
+        refresh_cloud_asset_dashboard_snapshots(
+            asset_ids=[disabled_asset.id, missing_account_asset.id],
+            reason='test',
+            full=False,
+        )
+
+        admin = get_user_model().objects.create_user(username='snapshot_all_orphan_admin', password='x', is_staff=True)
+        request = self.factory.get('/api/admin/cloud-assets/', {'paginated': '1'})
+        self._attach_bearer_session(request, admin)
+        response = cloud_assets_list(request)
+        payload = json.loads(response.content.decode('utf-8'))['data']
+        item_ids = {item['id'] for item in payload['items']}
+
+        self.assertEqual(response.status_code, 200)
+        self.assertIn(disabled_asset.id, item_ids)
+        self.assertIn(missing_account_asset.id, item_ids)
+        self.assertEqual(payload['risk_counts']['all'], 2)
+        self.assertEqual(payload['risk_counts']['account_disabled'], 2)
+
+    # 功能：验证 IP 轻量视图只返回列表必要字段，避免大列表加载完整代理 payload。
+    def test_cloud_assets_list_compact_returns_ip_view_payload(self):
+        asset = CloudAsset.objects.create(
+            kind=CloudAsset.KIND_SERVER,
+            source=CloudAsset.SOURCE_AWS_SYNC,
+            user=self.user,
+            provider='aws_lightsail',
+            region_code=self.plan.region_code,
+            region_name=self.plan.region_name,
+            asset_name='snapshot-compact-ip-asset',
+            public_ip='10.77.88.41',
+            status=CloudAsset.STATUS_RUNNING,
+            mtproxy_link='tg://proxy?server=10.77.88.41&port=443&secret=hidden',
+            proxy_links=[{'url': 'tg://proxy?server=10.77.88.41&port=443&secret=hidden'}],
+            actual_expires_at=timezone.now() + timezone.timedelta(days=30),
+            price=Decimal('5.123456'),
+            currency='USDT',
+        )
+        refresh_cloud_asset_dashboard_snapshots(asset_ids=[asset.id], reason='test', full=False)
+
+        admin = get_user_model().objects.create_user(username='snapshot_compact_admin', password='x', is_staff=True)
+        request = self.factory.get('/api/admin/cloud-assets/', {'paginated': '1', 'compact': '1'})
+        self._attach_bearer_session(request, admin)
+        response = cloud_assets_list(request)
+        payload = json.loads(response.content.decode('utf-8'))['data']
+        row = next(item for item in payload['items'] if item['id'] == asset.id)
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(row['public_ip'], '10.77.88.41')
+        self.assertEqual(row['price'], '5.12')
+        self.assertIn('status_countdown', row)
+        self.assertNotIn('mtproxy_link', row)
+        self.assertNotIn('proxy_links', row)
+        self.assertNotIn('provider_resource_id', row)
+
+    # 功能：验证删除计划轻量字段开关会移除备注和执行详情，降低大列表 payload。
+    def test_lifecycle_plans_fields_basic_omits_notes_and_execution_payload(self):
+        asset = CloudAsset.objects.create(
+            kind=CloudAsset.KIND_SERVER,
+            source=CloudAsset.SOURCE_AWS_SYNC,
+            user=self.user,
+            provider='aws_lightsail',
+            region_code=self.plan.region_code,
+            region_name=self.plan.region_name,
+            asset_name='snapshot-lifecycle-fields-asset',
+            public_ip='10.77.88.51',
+            status=CloudAsset.STATUS_RUNNING,
+            actual_expires_at=timezone.now() - timezone.timedelta(days=3),
+            note='这是一段很长的删除计划备注',
+        )
+        admin = get_user_model().objects.create_user(username='lifecycle_fields_admin', password='x', is_staff=True)
+        request = self.factory.get('/api/admin/tasks/plans/', {'compact': '1', 'fields': 'basic', 'limit': '10', 'refresh': '1'})
+        self._attach_bearer_session(request, admin)
+        response = lifecycle_plans(request)
+        payload = json.loads(response.content.decode('utf-8'))['data']
+        rows = [
+            item
+            for item in payload['shutdown_items']
+            if item.get('asset_id') == asset.id or item.get('ip') == asset.public_ip
+        ]
+
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(rows)
+        self.assertNotIn('note', rows[0])
+        self.assertNotIn('display_note', rows[0])
+        self.assertNotIn('execution_status', rows[0])
+        self.assertNotIn('execution_plan', rows[0])
+
     # 功能：验证云资产列表快照搜索文本不会持久化代理密钥。
     def test_cloud_asset_dashboard_snapshot_search_text_masks_proxy_secret(self):
         secret = 'ee0123456789abcdef0123456789abcdef'

@@ -1116,6 +1116,46 @@ def _compact_notice_items(items: list[dict], *, text_limit: int = 1200, ip_limit
     return items
 
 
+def _request_notice_fields(request) -> set[str]:
+    raw = str(request.GET.get('fields') or '').strip()
+    allowed = {'basic', 'channels', 'ips', 'retry', 'text'}
+    if not raw:
+        return set(allowed)
+    return {item.strip().lower() for item in raw.split(',') if item.strip().lower() in allowed}
+
+
+def _strip_notice_item_fields(items: list[dict], fields: set[str]) -> list[dict]:
+    if not items:
+        return items
+    hidden_keys: set[str] = set()
+    if 'channels' not in fields:
+        hidden_keys.update({
+            'notice_channel',
+            'notice_channel_attempts',
+            'notice_channel_label',
+            'target_chat_id',
+        })
+    if 'ips' not in fields:
+        hidden_keys.update({'ip', 'ips'})
+    if 'retry' not in fields:
+        hidden_keys.update({'failed_retry_count', 'result_label', 'retry_label'})
+    if 'text' not in fields:
+        hidden_keys.update({
+            'notice_has_manual_text',
+            'notice_manual_text',
+            'notice_override_key',
+            'notice_text_preview',
+            'order_ids',
+            'text_preview',
+        })
+    if not hidden_keys:
+        return items
+    for item in items:
+        for key in hidden_keys:
+            item.pop(key, None)
+    return items
+
+
 # 功能：提供 后台 API 接口 的内部辅助逻辑，供同模块流程复用。
 def _build_notice_plan_bundle(*, limit=1000, future_limit=200, history_limit=1000):
     now = timezone.now()
@@ -1198,6 +1238,7 @@ def notice_task_detail(request):
     history_limit = _request_int_param(request, 'history_limit', 10, maximum=100)
     history_offset = _request_int_param(request, 'history_offset', 0, minimum=0, maximum=100000)
     compact = str(request.GET.get('compact') or '').strip().lower() in {'1', 'true', 'yes', 'on'}
+    fields = _request_notice_fields(request)
 
     next_run_at = now + timezone.timedelta(minutes=10)
     bundle = _build_notice_plan_bundle(limit=max(limit, 200), future_limit=max(future_limit, 200), history_limit=max(history_limit, 200))
@@ -1234,6 +1275,19 @@ def notice_task_detail(request):
     recent_failure_user_count = len({item.get('user_id') for item in recent_history_items if not item.get('delivered') and item.get('user_id')})
     last_refresh_at = now
 
+    due_payload = _compact_notice_items(visible_due_items) if compact else visible_due_items
+    due_summary_payload = _compact_notice_items(due_user_summary_items) if compact else due_user_summary_items
+    future_payload = _compact_notice_items(visible_future_plan_items) if compact else visible_future_plan_items
+    future_summary_payload = _compact_notice_items(future_user_summary_items) if compact else future_user_summary_items
+    active_summary_payload = _compact_notice_items(active_user_summary_items) if compact else active_user_summary_items
+    history_payload = _compact_notice_items(visible_history_items) if compact else visible_history_items
+    _strip_notice_item_fields(due_payload, fields)
+    _strip_notice_item_fields(due_summary_payload, fields)
+    _strip_notice_item_fields(future_payload, fields)
+    _strip_notice_item_fields(future_summary_payload, fields)
+    _strip_notice_item_fields(active_summary_payload, fields)
+    _strip_notice_item_fields(history_payload, fields)
+
     return _ok({
         'task_key': 'cloud_notice_plan',
         'task_label': '通知计划',
@@ -1254,12 +1308,12 @@ def notice_task_detail(request):
         'recent_failure_user_count': recent_failure_user_count,
         'retry_policy_label': '通知失败不会写入已通知时间；生命周期巡检会在下一轮继续重试，直到成功送达。',
         'notice_switches': _notice_switch_items(),
-        'due_items': _compact_notice_items(visible_due_items) if compact else visible_due_items,
-        'due_user_summary_items': _compact_notice_items(due_user_summary_items) if compact else due_user_summary_items,
-        'future_plan_items': _compact_notice_items(visible_future_plan_items) if compact else visible_future_plan_items,
-        'future_user_summary_items': _compact_notice_items(future_user_summary_items) if compact else future_user_summary_items,
-        'active_user_summary_items': _compact_notice_items(active_user_summary_items) if compact else active_user_summary_items,
-        'history_items': _compact_notice_items(visible_history_items) if compact else visible_history_items,
+        'due_items': due_payload,
+        'due_user_summary_items': due_summary_payload,
+        'future_plan_items': future_payload,
+        'future_user_summary_items': future_summary_payload,
+        'active_user_summary_items': active_summary_payload,
+        'history_items': history_payload,
     })
 
 

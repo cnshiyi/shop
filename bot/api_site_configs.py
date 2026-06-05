@@ -63,6 +63,7 @@ def _site_config_group_map():
             'trongrid_api_key',
         ],
         'cloud_actions': [
+            'cloud_server_shutdown_enabled',
             'cloud_server_delete_enabled',
             'cloud_ip_delete_enabled',
         ],

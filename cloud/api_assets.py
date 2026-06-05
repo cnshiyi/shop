@@ -417,12 +417,20 @@ def _cloud_asset_provider_status_label(asset, account_label: str | None = None, 
         active_account_labels = set(active_account_labels)
     account = getattr(asset, 'cloud_account', None)
     asset_account_label = str(account_label or getattr(asset, 'account_label', '') or '').strip()
+    account_missing = (
+        str(getattr(asset, 'provider', '') or '').strip() in {'aws_lightsail', 'aliyun'}
+        and not getattr(asset, 'cloud_account_id', None)
+        and not asset_account_label
+    )
     account_disabled = (
-        getattr(account, 'is_active', True) is False
+        account_missing
+        or getattr(account, 'is_active', True) is False
         or (asset_account_label and asset_account_label not in active_account_labels)
     )
     if account_disabled:
         base_label = _provider_status_label(asset.provider_status)
+        if account_missing:
+            return f'云账号未关联 / {base_label}' if base_label and base_label != '-' else '云账号未关联'
         return f'云账号已停用 / {base_label}' if base_label and base_label != '-' else '云账号已停用'
     if asset.status == CloudAsset.STATUS_DELETED:
         return '已删除'
@@ -495,13 +503,14 @@ def _cloud_asset_risk_state(asset, order, expires_at, provider_status_label, dis
         or '失败' in provider_text
         or '异常' in provider_text
         or '云账号已停用' in provider_text
+        or '云账号未关联' in provider_text
         or '云上未找到' in provider_text
         or '云上不存在' in provider_text
         or '待确认' in provider_text
     ):
         set_risk('abnormal', '异常/待确认', 5, provider_text or '状态异常')
-    if '云账号已停用' in provider_text:
-        set_risk('account_disabled', '云账号已停用', 6, '云账号已停用')
+    if '云账号已停用' in provider_text or '云账号未关联' in provider_text:
+        set_risk('account_disabled', '云账号异常', 6, '云账号未关联或已停用')
     if status_text in {CloudAsset.STATUS_DELETED, CloudAsset.STATUS_DELETING, CloudAsset.STATUS_TERMINATED, CloudAsset.STATUS_TERMINATING}:
         set_risk('deleted', '已删除/终止', 30, '资产已删除或终止')
 
@@ -629,6 +638,7 @@ def cloud_assets_list(request):
     if group_by not in {'telegram_group', 'user'}:
         group_by = 'telegram_group'
     paginated = (request.GET.get('paginated') or '').lower() in {'1', 'true', 'yes'}
+    compact = (request.GET.get('compact') or '').lower() in {'1', 'true', 'yes'}
     risk_status = (request.GET.get('risk_status') or 'all').strip()
     show_deleted = (request.GET.get('show_deleted') or '').lower() in {'1', 'true', 'yes'}
     sort_by = (request.GET.get('sort_by') or '').strip().lower()
@@ -662,6 +672,7 @@ def cloud_assets_list(request):
                 default_size=20,
                 min_size=10,
                 max_size=200,
+                compact=compact,
             )
             return _ok({'items': page_items, 'total': total, 'page': page, 'page_size': page_size, 'total_pages': total_pages, 'risk_counts': risk_counts})
         if grouped and paginated:
@@ -671,6 +682,7 @@ def cloud_assets_list(request):
                 group_by=group_by,
                 sort_by=sort_by,
                 sort_direction=sort_direction,
+                compact=compact,
             )
             return _ok({'groups': page_groups, 'items': page_items, 'total': total, 'page': page, 'page_size': page_size, 'total_pages': total_pages, 'risk_counts': risk_counts})
         items = _snapshot_payloads(list(queryset.order_by(*_dashboard_snapshot_ordering(sort_by, sort_direction))))

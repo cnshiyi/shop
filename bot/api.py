@@ -669,6 +669,59 @@ def _lifecycle_plan_generated_at():
     return _LIFECYCLE_PLAN_CACHE.get('generated_at') or timezone.now()
 
 
+def _request_field_set(request, *, allowed: set[str], default: set[str] | None = None) -> set[str]:
+    raw = str(request.GET.get('fields') or '').strip()
+    if not raw:
+        return set(default or allowed)
+    values = {item.strip().lower() for item in raw.split(',') if item.strip()}
+    return {item for item in values if item in allowed}
+
+
+def _strip_lifecycle_plan_fields(items: list[dict], fields: set[str]) -> list[dict]:
+    if not items:
+        return items
+    hidden_keys: set[str] = set()
+    if 'notes' not in fields:
+        hidden_keys.update({
+            'blocked_reason',
+            'display_note',
+            'note',
+            'quality_flags',
+            'quality_label',
+            'source_note',
+            'state_summary',
+            'status_summary',
+        })
+    if 'execution' not in fields:
+        hidden_keys.update({
+            'delete_attempt_count',
+            'delete_attempt_label',
+            'delete_next_attempt',
+            'deletion_source_label',
+            'error',
+            'execution_plan',
+            'execution_status',
+            'failure_reason',
+            'last_failure_reason',
+            'retry_label',
+        })
+    if 'account' not in fields:
+        hidden_keys.update({
+            'account_label',
+            'cloud_account_id',
+            'cloud_account_name',
+            'external_account_id',
+        })
+    if 'provider' not in fields:
+        hidden_keys.update({'provider', 'provider_label', 'provider_status'})
+    if not hidden_keys:
+        return items
+    for item in items:
+        for key in hidden_keys:
+            item.pop(key, None)
+    return items
+
+
 def _cloud_ip_trace_logged_at(note, fallback=None):
     text = _cloud_ip_trace_note_newest_first(note)
     first_line = next((line for line in text.splitlines() if line.strip()), '')
@@ -2018,6 +2071,11 @@ def lifecycle_plans(request):
         }
 
     compact = str(request.GET.get('compact') or '').strip().lower() in {'1', 'true', 'yes', 'on'}
+    fields = _request_field_set(
+        request,
+        allowed={'account', 'basic', 'execution', 'notes', 'provider'},
+        default={'account', 'basic', 'execution', 'notes', 'provider'},
+    )
     force_refresh = str(request.GET.get('refresh') or request.GET.get('sync') or '').strip().lower() in {'1', 'true', 'yes', 'on'}
     sync_limit = max(limit, 1000)
     bundle, did_refresh = _cached_lifecycle_plan_bundle(limit=sync_limit, force_refresh=force_refresh)
@@ -2095,6 +2153,11 @@ def lifecycle_plans(request):
         compact_notes(history_items)
         compact_notes(due_items)
         compact_notes(future_plan_items)
+    _strip_lifecycle_plan_fields(shutdown_items, fields)
+    _strip_lifecycle_plan_fields(ip_delete_items, fields)
+    _strip_lifecycle_plan_fields(history_items, fields)
+    _strip_lifecycle_plan_fields(due_items, fields)
+    _strip_lifecycle_plan_fields(future_plan_items, fields)
     last_refresh_at = _lifecycle_plan_generated_at()
     return _ok({
         'task_key': 'server_delete_plans',

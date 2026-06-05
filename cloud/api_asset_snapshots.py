@@ -9,6 +9,7 @@ from django.utils.dateparse import parse_datetime
 from bot.models import TelegramUser
 from cloud.asset_queries import cloud_assets_base_queryset, dedupe_cloud_asset_rows
 from cloud.models import CloudAsset, CloudAssetDashboardSnapshot
+from core.dashboard_api import _countdown_label, _days_left, _decimal_to_str
 
 logger = logging.getLogger(__name__)
 
@@ -218,7 +219,7 @@ def _dashboard_snapshot_queryset(keyword=''):
 def _filter_dashboard_snapshots_by_risk(queryset, risk_status: str):
     risk_status = str(risk_status or '').strip()
     if not risk_status or risk_status == 'all':
-        return queryset.filter(risk_account_disabled=False)
+        return queryset
     field = _DASHBOARD_RISK_FLAGS.get(risk_status)
     if not field:
         return queryset.none()
@@ -230,7 +231,7 @@ def _filter_dashboard_snapshots_by_risk(queryset, risk_status: str):
 
 def _dashboard_snapshot_risk_counts(queryset) -> dict:
     aggregates = {
-        'all': Count('id', filter=Q(risk_account_disabled=False)),
+        'all': Count('id'),
     }
     for status, field in _DASHBOARD_RISK_FLAGS.items():
         if status == 'account_disabled':
@@ -252,6 +253,46 @@ def _snapshot_payloads(rows):
     return [dict(row.payload or {}) for row in rows]
 
 
+def _compact_snapshot_payload(row):
+    asset = row.asset
+    user = row.user
+    telegram_group = row.telegram_group
+    expires_at = asset.actual_expires_at
+    username_label = ''
+    if user:
+        username_label = f'@{user.username}' if user.username else str(user.tg_user_id or '')
+    return {
+        'id': asset.id,
+        'actual_expires_at': expires_at.isoformat() if expires_at else None,
+        'asset_name': asset.asset_name,
+        'currency': asset.currency or 'USDT',
+        'days_left': _days_left(expires_at),
+        'is_active': asset.is_active,
+        'note': asset.note,
+        'price': _decimal_to_str(asset.price, 2) if asset.price is not None else '',
+        'provider_status': asset.provider_status,
+        'public_ip': asset.public_ip or asset.previous_public_ip,
+        'risk_rank': row.risk_rank,
+        'sort_order': asset.sort_order,
+        'status': asset.status,
+        'status_countdown': _countdown_label(expires_at),
+        'status_label': dict(CloudAsset.STATUS_CHOICES).get(asset.status, asset.status),
+        'telegram_group_chat_id': getattr(telegram_group, 'chat_id', None),
+        'telegram_group_id': row.telegram_group_id,
+        'telegram_group_title': getattr(telegram_group, 'title', '') or '',
+        'telegram_group_username': getattr(telegram_group, 'username', '') or '',
+        'tg_user_id': row.tg_user_id,
+        'updated_at': asset.updated_at.isoformat() if asset.updated_at else None,
+        'user_display_name': getattr(user, 'first_name', '') or row.group_user_label or '未绑定用户',
+        'user_id': row.user_id,
+        'username_label': username_label or row.group_user_label or '-',
+    }
+
+
+def _compact_snapshot_payloads(rows):
+    return [_compact_snapshot_payload(row) for row in rows]
+
+
 def _parse_dashboard_page(request, *, default_size=20, min_size=1, max_size=200):
     try:
         page = max(int(request.GET.get('page') or '1'), 1)
@@ -265,14 +306,18 @@ def _parse_dashboard_page(request, *, default_size=20, min_size=1, max_size=200)
     return page, page_size
 
 
-def _paginate_dashboard_snapshot_queryset(queryset, request, *, sort_by='', sort_direction='', default_size=20, min_size=1, max_size=200):
+def _paginate_dashboard_snapshot_queryset(queryset, request, *, sort_by='', sort_direction='', default_size=20, min_size=1, max_size=200, compact=False):
     page, page_size = _parse_dashboard_page(request, default_size=default_size, min_size=min_size, max_size=max_size)
     total = queryset.count()
     total_pages = max((total + page_size - 1) // page_size, 1)
     page = min(page, total_pages)
     start = (page - 1) * page_size
-    rows = list(queryset.order_by(*_dashboard_snapshot_ordering(sort_by, sort_direction))[start:start + page_size])
-    return _snapshot_payloads(rows), total, total_pages, page, page_size
+    rows_queryset = queryset.order_by(*_dashboard_snapshot_ordering(sort_by, sort_direction))[start:start + page_size]
+    if compact:
+        rows_queryset = rows_queryset.select_related('asset', 'user', 'telegram_group').defer('payload', 'search_text')
+    rows = list(rows_queryset)
+    payloads = _compact_snapshot_payloads(rows) if compact else _snapshot_payloads(rows)
+    return payloads, total, total_pages, page, page_size
 
 
 def _group_cloud_asset_payloads(items, group_by='telegram_group'):
@@ -335,7 +380,7 @@ def _group_cloud_asset_payloads(items, group_by='telegram_group'):
     return ordered_groups
 
 
-def _dashboard_snapshot_group_page(queryset, request, *, group_by='user', sort_by='', sort_direction=''):
+def _dashboard_snapshot_group_page(queryset, request, *, group_by='user', sort_by='', sort_direction='', compact=False):
     page, page_size = _parse_dashboard_page(request, default_size=20, min_size=1, max_size=100)
     group_field = 'group_telegram_key' if group_by == 'telegram_group' else 'group_user_key'
     group_label = 'group_telegram_label' if group_by == 'telegram_group' else 'group_user_label'
@@ -351,12 +396,15 @@ def _dashboard_snapshot_group_page(queryset, request, *, group_by='user', sort_b
     if not page_keys:
         return [], [], total, total_pages, page, page_size
     order_index = {key: index for index, key in enumerate(page_keys)}
-    rows = list(
+    rows_queryset = (
         queryset
         .filter(**{f'{group_field}__in': page_keys})
         .order_by(*_dashboard_snapshot_ordering(sort_by, sort_direction))
     )
-    items = _snapshot_payloads(rows)
+    if compact:
+        rows_queryset = rows_queryset.select_related('asset', 'user', 'telegram_group').defer('payload', 'search_text')
+    rows = list(rows_queryset)
+    items = _compact_snapshot_payloads(rows) if compact else _snapshot_payloads(rows)
     ordered_groups = _group_cloud_asset_payloads(items, group_by)
     ordered_groups.sort(key=lambda group: order_index.get(group.get('user_key'), 999999))
     page_items = [row for group in ordered_groups for row in group['items']]
