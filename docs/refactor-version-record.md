@@ -8730,6 +8730,40 @@ DB_ENGINE=mysql UV_CACHE_DIR=/private/tmp/uv-cache-shop PYTHONDONTWRITEBYTECODE=
 - 本轮未执行链上广播或真实地址充值到账。
 - 本轮未通过 Telegram bot inline 按钮触发生命周期执行器，而是使用项目数据库订单和生命周期执行入口执行真实云操作。
 
+## 2026-06-05 Telegram Bot 与生命周期全流程重试实测
+
+### 背景
+
+用户要求“实际测试全部开工”并在 Telegram 用户号默认连接超时后要求重试。本轮继续使用真实 Telegram 登录账号、真实 bot、项目数据库余额和真实 AWS Lightsail 资源进行端到端测试。
+
+### 真机测试
+
+- 启动 `run.py bot`，bot 轮询成功；测试结束后停止本轮 bot 进程。
+- 默认 Telethon 连接 Telegram 超时，未发送消息、未改订单；改用 `ConnectionTcpAbridged` 和 `ConnectionTcpObfuscated` 后重试成功。
+- 使用项目数据库内 `TelegramLoginAccount #1` 实际发送 `/start` 到 `@ceshiayan_bot`，收到主菜单。
+- 实际点击覆盖：个人中心、我的订单、充值余额、余额明细、提醒列表、地址监控、查询中心、代理列表、自动续费查询、IP 查询到期。
+- 订单 `#92` 的 IP 详情实际点击：开启自动续费、关闭自动续费、续费 IP、换 IP、重新安装、修改配置。重建迁移只进入确认页并取消，未确认创建新机；修改配置返回当前状态不允许修改配置。
+- 使用测试用户余额创建订单 `#92`，扣除 5 USDT，真实 AWS Lightsail 开通成功。
+- 生命周期清理：关机总开关和资产开关阻断关机后，真实关机成功；删机总开关和资产开关阻断删机后，真实删机成功；删 IP 总开关和资产开关阻断固定 IP 释放后，真实释放成功。
+
+### 最终状态
+
+- 订单 `#92` 为 `deleted`，资产 `#340` 为 `deleted/is_active=False`。
+- 实例标识、固定 IP 名称和 IP 回收时间均已清空。
+- 配置已恢复：`cloud_server_shutdown_enabled` 删除回默认值，`cloud_server_delete_enabled=1`，`cloud_ip_delete_enabled=1`，`cloud_suspend_time=15:00`，`cloud_delete_time=15:00`，`cloud_unattached_ip_delete_time=15:00`。
+- 测试用户余额最终为 USDT `975.000000`、TRX `984.747000`。
+
+### 报告
+
+- 详细脱敏真机记录已追加到 `docs/real-machine-test-report.md`。
+- 未记录完整公网 IP、代理链接、代理 secret、登录密码、Telegram token、session 或云账号密钥。
+
+### 剩余风险
+
+- 本轮执行了真实 AWS Lightsail 创建、关机、删除和固定 IP 释放；测试资源已清理。
+- 本轮未执行链上广播或真实地址充值到账。
+- TRON 扫块器仍有 429 限流和积压追赶日志，属于后续可观测性风险。
+
 ## 2026-06-04 Telegram Bot 真机重测与重建迁移文案修复
 
 ### 背景

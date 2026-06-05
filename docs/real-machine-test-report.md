@@ -298,3 +298,63 @@
 - 已恢复测试前生命周期配置：`cloud_server_shutdown_enabled` 删除为默认值，`cloud_server_delete_enabled=1`，`cloud_ip_delete_enabled=1`，`cloud_suspend_time=15:00`，`cloud_delete_time=15:00`，`cloud_unattached_ip_delete_time=15:00`。
 - 最终本地状态：订单 `#91` 为 `deleted`，资产 `#337` 为 `deleted/is_active=False`；实例标识、固定 IP 名称和 IP 回收时间均已清空。
 - 最终清理结论：本轮真实 AWS 测试实例已删除，固定 IP 已释放，未发现本轮临时资产残留。
+
+## 2026-06-05 Telegram Bot 与生命周期全流程重试实测
+
+- 状态：通过，过程中发现 Telegram MTProto 默认连接方式超时，改用 `ConnectionTcpAbridged` 后重试成功。
+- 授权：延续用户对真实 Telegram 账号、项目数据库余额和真实云资源测试的授权。
+- 后端仓库：`/Users/a399/Desktop/data/shop`
+- bot：`@ceshiayan_bot`
+- 登录账号：项目数据库内 `TelegramLoginAccount #1`，状态 `logged_in`
+- 测试用户：`TelegramUser #173`
+- 云厂商：AWS Lightsail
+- 套餐：新加坡，`实机测试 Nano`
+
+### 启动与连接
+
+- 启动 `run.py bot` 真机进程，bot 轮询最终启动成功。
+- 首次使用 Telethon 默认连接访问 Telegram 连续超时，未发送消息、未点击按钮、未改订单。
+- 改用 `ConnectionTcpAbridged` 和 `ConnectionTcpObfuscated` 重试后均能连接，实际发送 `/start` 并收到 bot 主菜单。
+- 测试结束后已停止本轮 bot 进程；仅保留原本存在的 PyCharm `runserver`。
+
+### 真实购买与开通
+
+- 使用项目数据库余额创建测试订单 `#92` / `SRV20260605081555743902`。
+- 支付方式：USDT 钱包余额支付。
+- 金额：5 USDT。
+- 结果：余额从 980 USDT 扣到 975 USDT；AWS Lightsail 实例创建成功，固定 IP 绑定成功，订单进入 `completed`。
+- 资产：`#340`
+- 云实例：`20260605-************-*-o92`
+- 公网 IP：`54.169.xxx.xxx`
+- 敏感信息：未记录完整公网 IP、代理链接、代理 secret、登录密码、Telegram token、session 或云账号密钥。
+
+### Bot 真机点击覆盖
+
+- `/start`：返回主菜单成功，主菜单包含 `购买节点`、`到期时间查询`、`个人中心`。
+- `个人中心`：实际点击成功，二级菜单包含 `我的订单`、`充值余额`、`充值记录`、`余额明细`、`提醒列表`、`地址监控`、`返回主菜单`。
+- `我的订单`：实际点击成功，订单列表展示测试订单和既有订单。
+- `充值余额`：实际点击成功，进入币种选择提示，未提交链上充值。
+- `余额明细`：实际点击成功，展示余额支付流水。
+- `提醒列表`：实际点击成功，展示云服务器提醒列表。
+- `地址监控`：实际点击成功，进入地址监控页。
+- `查询中心`：实际点击成功，二级菜单包含 `代理列表`、`自动续费查询`、`IP查询到期`、`返回主菜单`。
+- `代理列表`：实际点击成功，展示代理列表。
+- `自动续费查询`：实际点击成功，展示自动续费列表。
+- `IP查询到期`：实际点击成功，输入脱敏测试 IP 后返回 IP 查询结果。
+- IP 详情按钮：实际点击 `开启自动续费`、`关闭自动续费`、`续费IP`、`更换IP`、`重新安装`、`修改配置`。
+- 重建迁移：只进入确认页并取消，确认页显示“确认重建迁移”，未确认创建新机。
+- 修改配置：返回“当前状态不允许修改配置”。
+- 续费入口：进入续费页后返回详情；该入口会把订单临时置为待续费，本轮后续随测试订单清理。
+
+### 生命周期开关与真实清理
+
+- 关机阶段：`cloud_server_shutdown_enabled=0` 阻断真实关机；资产开关关闭阻断真实关机；打开后真实关机成功，订单为 `suspended`，资产为 `stopped/is_active=False`。
+- 删机阶段：`cloud_server_delete_enabled=0` 阻断真实删机；资产开关关闭阻断真实删机；打开后真实删机成功，订单和资产为 `deleted`，实例标识清空，固定 IP 进入待释放。
+- 固定 IP 释放阶段：`cloud_ip_delete_enabled=0` 阻断真实释放固定 IP；资产开关关闭阻断真实释放固定 IP；打开后真实释放成功，固定 IP 名称、`public_ip` 和 `ip_recycle_at` 清空。
+
+### 配置恢复与最终状态
+
+- 已恢复：`cloud_server_shutdown_enabled` 删除回默认值，`cloud_server_delete_enabled=1`，`cloud_ip_delete_enabled=1`，`cloud_suspend_time=15:00`，`cloud_delete_time=15:00`，`cloud_unattached_ip_delete_time=15:00`。
+- 最终状态：订单 `#92` 为 `deleted`，资产 `#340` 为 `deleted/is_active=False`，实例标识、固定 IP 名称和 IP 回收时间均已清空。
+- 最终余额：测试用户 USDT 余额为 975，TRX 余额为 984.747。
+- 剩余风险：TRON 扫块器仍有 429 限流和积压追赶日志；本轮未执行链上广播或真实地址充值到账。
