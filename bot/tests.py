@@ -18,10 +18,10 @@ from django.utils import timezone
 from bot.api import DASHBOARD_SESSION_IDLE_SECONDS, _active_proxy_counts_by_user, _authenticate_dashboard_request, admin_users_list, archive_telegram_chat, auth_totp_start, create_admin_user, create_cloud_account, create_product, delete_cloud_account, me, send_daily_expiry_summary_test_notification, send_telegram_chat_message, site_config_groups, telegram_login_start, update_cloud_account, update_site_config, users_list, verify_cloud_account
 from bot.handlers import _asset_reinstall_confirm_keyboard, _asset_reinstall_submitted_keyboard, _asset_renewal_plan_keyboard, _buy_cloud_server_with_balance_and_notify, _cloud_renewal_postcheck_and_notify, _cloud_renewal_result_keyboard, _cloud_server_created_text, _fetch_tron_address_summary, _hydrate_order_proxy_links, _install_notice_copy_wrapper, _pay_cloud_server_order_with_balance_and_notify, _proxy_links_text, _reinstall_confirm_keyboard, _reinstall_submitted_keyboard, _requires_recovery_provision, _retained_ip_renewal_plan_keyboard, _save_asset_main_proxy_link, _save_user_main_proxy_link, _trongrid_get_with_key_fallback, _trongrid_post_with_key_fallback, _validate_reinstall_proxy_link, register_handlers
 from bot.keyboards import _compact_back_button_callback, append_back_callback, balance_details_list, cloud_asset_detail_callback, cloud_auto_renew_callback, cloud_detail_callback, cloud_previous_detail_callback, compact_callback_path, cloud_ip_query_result, cloud_order_list, cloud_order_readonly_detail, cloud_server_change_ip_region_menu, cloud_server_detail, cloud_server_list, cloud_server_renew_payment
-from bot.models import TelegramChatArchive, TelegramChatMessage, TelegramLoginAccount, TelegramUser
-from bot.services import record_telegram_message
+from bot.models import TelegramChatArchive, TelegramChatMessage, TelegramGroupFilter, TelegramLoginAccount, TelegramUser
+from bot.services import record_telegram_message, telegram_group_delivery_flags
 from bot.states import CustomServerStates
-from bot.telegram_listener import _build_bark_request, _build_push_payload, _is_self_sender, _sync_account_profile
+from bot.telegram_listener import _build_bark_request, _build_push_payload, _is_bot_sender, _is_self_sender, _sync_account_profile
 from cloud import services as cloud_services
 from cloud.asset_expiry import order_asset_expiry
 from cloud.models import CloudAsset, CloudServerOrder, CloudServerPlan
@@ -260,6 +260,28 @@ class BotRunnerWarmCacheTestCase(SimpleTestCase):
 
 
 class TelegramMessageRecordingTestCase(TestCase):
+    def test_group_push_switch_defaults_off_and_can_be_enabled(self):
+        flags = async_to_sync(telegram_group_delivery_flags)(
+            chat_id=-10070003,
+            title='Default Silent Group',
+            username='default_silent_group',
+        )
+
+        self.assertEqual(flags, {'enabled': False, 'push_enabled': False})
+        group = TelegramGroupFilter.objects.get(chat_id=-10070003)
+        self.assertFalse(group.enabled)
+        self.assertFalse(group.push_enabled)
+
+        group.push_enabled = True
+        group.save(update_fields=['push_enabled', 'updated_at'])
+
+        flags = async_to_sync(telegram_group_delivery_flags)(
+            chat_id=-10070003,
+            title='Default Silent Group',
+            username='default_silent_group',
+        )
+        self.assertEqual(flags, {'enabled': False, 'push_enabled': True})
+
     def test_recording_same_tg_user_refreshes_name_and_prioritizes_new_username(self):
         async_to_sync(record_telegram_message)(
             tg_user_id=70000,
@@ -919,10 +941,28 @@ class TelegramListenerPushTestCase(SimpleTestCase):
         )
         self.assertIsNone(payload)
 
+    def test_build_push_payload_skips_bot_sender(self):
+        payload = _build_push_payload(
+            is_outgoing=False,
+            is_private_chat=True,
+            sender_name='Notify Bot',
+            chat_title='Notify Bot',
+            text='bot notice',
+            content_type='text',
+            private_enabled=True,
+            sender_is_bot=True,
+        )
+        self.assertIsNone(payload)
+
     def test_is_self_sender_matches_login_account_id(self):
         self.assertTrue(_is_self_sender(SimpleNamespace(id='12345'), 12345))
         self.assertFalse(_is_self_sender(SimpleNamespace(id='12345'), 67890))
         self.assertFalse(_is_self_sender(SimpleNamespace(id='abc'), 12345))
+
+    def test_is_bot_sender_uses_telegram_user_bot_flag(self):
+        self.assertTrue(_is_bot_sender(SimpleNamespace(id=12345, bot=True)))
+        self.assertFalse(_is_bot_sender(SimpleNamespace(id=12345, bot=False)))
+        self.assertFalse(_is_bot_sender(None))
 
     def test_build_bark_request_defaults_to_foldable_notification(self):
         url, params = _build_bark_request(

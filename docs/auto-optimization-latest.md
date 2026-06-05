@@ -4,26 +4,23 @@
 
 ## 最近一轮
 
-- 时间：2026-06-05 16:26 CST
-- 状态：按用户要求完成真实 Telegram bot 重试实测、真实 AWS 开通和生命周期清理。
-- 本轮范围：bot 启动、Telegram 登录账号连接重试、主菜单、个人中心、订单、充值、余额明细、提醒、地址监控、查询中心、代理列表、自动续费查询、IP 查询、IP 详情动作、钱包余额购买、AWS Lightsail 开通、关机/删机/固定 IP 释放开关矩阵。
-- 本轮结论：默认 MTProto 连接超时后，改用 `ConnectionTcpAbridged`/`ConnectionTcpObfuscated` 可连接并实际发送 `/start`；bot 主流程和 IP 详情页动作可用；订单 `#92` 已真实开通并完成真实关机、删机和固定 IP 释放；测试资源已清理。
+- 时间：2026-06-05 22:19 CST
+- 状态：按用户要求完成 Telegram 个人号监听通知过滤调整。
+- 本轮范围：群组/频道 Bark 推送开关、机器人发送者过滤、相关 bot 聚焦测试。
+- 本轮结论：群组和频道消息默认不推送；只有后台人工打开 `TelegramGroupFilter.push_enabled` 后才允许推送；发送者是 Telegram bot 的消息不会触发监听推送。
 
 ## 最近验证
 
-- 真机：`run.py bot` 轮询启动成功，测试结束后已停止本轮 bot 进程。
-- 真机：项目数据库内 `TelegramLoginAccount #1` 可连接 Telegram，实际发送 `/start` 并收到 `@ceshiayan_bot` 主菜单。
-- 真机：实际点击个人中心、我的订单、充值余额、余额明细、提醒列表、地址监控、查询中心、代理列表、自动续费查询、IP 查询到期。
-- 真机：订单 `#92` 的 IP 详情实际点击自动续费开/关、续费入口、换 IP 入口、重建迁移确认页并取消、修改配置入口。
-- 真机：订单 `#92` 使用 5 USDT 钱包余额购买并真实 AWS 开通成功；随后测试关机总开关、删机总开关、删 IP 总开关、资产开关阻断，再真实关机、真实删机、真实固定 IP 释放。
-- 最终状态：订单 `#92` 和资产 `#340` 均为 `deleted`；实例标识、固定 IP 名称和 IP 回收时间已清空；生命周期配置恢复到测试前值。
+- 编译：`DB_ENGINE=mysql UV_CACHE_DIR=/private/tmp/uv-cache-shop PYTHONDONTWRITEBYTECODE=1 uv run python -m py_compile bot/telegram_listener.py bot/services.py bot/tests.py`
+- 聚焦测试：`DJANGO_TEST_SQLITE=1 UV_CACHE_DIR=/private/tmp/uv-cache-shop PYTHONDONTWRITEBYTECODE=1 uv run python manage.py test bot.tests.TelegramListenerPushTestCase bot.tests.TelegramMessageRecordingTestCase.test_group_push_switch_defaults_off_and_can_be_enabled --settings=shop.settings --verbosity=2`
+- 基础检查：`DB_ENGINE=mysql UV_CACHE_DIR=/private/tmp/uv-cache-shop PYTHONDONTWRITEBYTECODE=1 uv run python manage.py check`
+- 结果：编译通过；14 个监听推送/群组开关聚焦测试通过；`manage.py check` 无问题。
 
 ## 剩余风险
 
-- 本轮执行了真实 AWS Lightsail 创建、关机、删除和固定 IP 释放；完整脱敏记录已写入 `docs/real-machine-test-report.md`。
-- 本轮没有执行链上广播或真实地址充值到账。
-- TRON 扫块器仍有 429 限流和积压追赶日志，属于后续可观测性风险。
+- SQLite 聚焦测试仍会输出不支持 `db_comment` / `db_table_comment` 的预期 warning。
+- 本轮未执行真实 Telegram 发送、真实 Bark 推送、真实支付、链上广播、云资源创建或生产发布。
 
 ## 下一步
 
-- 如继续深测，可补充后台管理前端按钮触发生命周期执行器的浏览器实测。
+- 如需进一步确认，可在后台手动打开某个群/频道的通知开关，并用测试消息观察 Bark 是否只对该会话触发。

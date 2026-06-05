@@ -212,6 +212,7 @@ def _upsert_telegram_group_filter_sync(
         'title': (title or '')[:191] or None,
         'username': normalized_username,
         'enabled': False,
+        'push_enabled': False,
     }
     item, _ = TelegramGroupFilter.objects.get_or_create(chat_id=chat_id, defaults=defaults)
     changed = []

@@ -8852,3 +8852,34 @@ rg -n "确认重新安装|重新安装大约|准备重新安装|普通重装|不
 
 - 本轮未执行真实云创建、删除、固定 IP 释放、链上广播、真实支付或生产发布。
 - SQLite 测试环境仍会打印不支持 `db_comment` / `db_table_comment` 的预期 warning。
+
+## 2026-06-05 Telegram 群频道通知默认关闭和 bot 消息过滤
+
+### 背景
+
+用户要求调整通知逻辑：群组和频道消息默认不应触发通知，只有后台人工打开通知开关后才通知；同时机器人发送的消息需要屏蔽，避免触发监听推送。
+
+### 修改
+
+- `bot/services.py`：自动发现新的 Telegram 群组/频道过滤记录时，显式把 `push_enabled` 默认设为 `False`，确保新会话默认不推送。
+- `bot/telegram_listener.py`：新增 bot 发送者识别，发送者带 Telegram `bot=True` 标记时不生成 Bark 推送 payload。
+- `bot/telegram_listener.py`：群组/频道仍只在 `TelegramGroupFilter.push_enabled=True` 时生成推送 payload，后台人工开启后才生效。
+- `bot/tests.py`：补充群组/频道推送开关默认关闭、手动开启后返回开启状态的测试。
+- `bot/tests.py`：补充 bot 发送者不触发推送 payload 的测试。
+
+### 验证
+
+本地已通过：
+
+```bash
+DB_ENGINE=mysql UV_CACHE_DIR=/private/tmp/uv-cache-shop PYTHONDONTWRITEBYTECODE=1 uv run python -m py_compile bot/telegram_listener.py bot/services.py bot/tests.py
+DJANGO_TEST_SQLITE=1 UV_CACHE_DIR=/private/tmp/uv-cache-shop PYTHONDONTWRITEBYTECODE=1 uv run python manage.py test bot.tests.TelegramListenerPushTestCase bot.tests.TelegramMessageRecordingTestCase.test_group_push_switch_defaults_off_and_can_be_enabled --settings=shop.settings --verbosity=2
+DB_ENGINE=mysql UV_CACHE_DIR=/private/tmp/uv-cache-shop PYTHONDONTWRITEBYTECODE=1 uv run python manage.py check
+```
+
+结果：编译通过；14 个监听推送/群组开关聚焦测试通过；`manage.py check` 无问题。SQLite 聚焦测试仍会打印不支持 `db_comment` / `db_table_comment` 的预期 warning。
+
+### 剩余风险
+
+- 本轮未执行真实 Telegram 发送、真实 Bark 推送、真实支付、链上广播、云资源创建或生产发布。
+- 如果需要验证真实手机端通知效果，需要后台手动打开指定群/频道 `push_enabled` 后再进行真实消息测试。

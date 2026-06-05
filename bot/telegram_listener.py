@@ -186,7 +186,13 @@ def _is_self_sender(sender, self_user_id) -> bool:
         return False
 
 
-def _build_push_payload(*, is_outgoing: bool, is_private_chat: bool, sender_name: str | None, chat_title: str | None, text: str, content_type: str, private_enabled: bool, group_push_enabled: bool = False) -> tuple[str, str] | None:
+def _is_bot_sender(sender) -> bool:
+    return bool(sender and getattr(sender, 'bot', False))
+
+
+def _build_push_payload(*, is_outgoing: bool, is_private_chat: bool, sender_name: str | None, chat_title: str | None, text: str, content_type: str, private_enabled: bool, group_push_enabled: bool = False, sender_is_bot: bool = False) -> tuple[str, str] | None:
+    if sender_is_bot:
+        return None
     if is_outgoing:
         return None
     if is_private_chat:
@@ -382,6 +388,7 @@ async def _record_event(account: LoginAccountSnapshot, event, self_user_id=None)
         content_type=content_type,
         private_enabled=bool(push_config.get('private_enabled')),
         group_push_enabled=group_push_enabled,
+        sender_is_bot=_is_bot_sender(sender),
     )
     if payload and account_push_enabled:
         await _send_listener_push(title=payload[0], body=payload[1])
