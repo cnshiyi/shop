@@ -4,9 +4,9 @@
 
 ## 最近一轮
 
-- 时间：2026-06-06 00:10 CST
-- 状态：按用户要求新增全自动优化项目任务，并把 50 万数据深分页继续优化加入待办。
-- 本轮范围：更新 `TODO.md` 的可领取任务；更新自动优化控制台下一轮优先事项。
+- 时间：2026-06-06 00:27 CST
+- 状态：按用户要求激活 `shop` 上线前全自动监工审计，让自动化每轮审计、领取安全任务、验证、记录、提交，并在下一次触发后继续下一轮优化。
+- 本轮范围：更新 Codex App 中现有 `shop` 自动化；更新自动优化控制台，明确后端和前端双工作区监工审计规则。
 - 压测数据：本地数据库 `CloudAsset` 服务器资产 500000 条，`CloudAssetDashboardSnapshot` 500000 条，`TelegramUser` 500316 条；本轮补充数据前后都未调用云厂商 API、未执行真实删机/关机/释放 IP、未执行真实支付或链上广播。
 
 ## 性能结果
@@ -19,6 +19,7 @@
 
 ## 最近验证
 
+- 本轮自动监工配置变更：已将现有 `shop` 自动化从暂停改为启用，模型为 `gpt-5-codex`，执行环境为本地，工作区包含后端 `/Users/a399/Desktop/data/shop` 和前端 `/Users/a399/Desktop/data/vue-shop-admin`。
 - 本轮文档/任务清单变更：`DB_ENGINE=mysql UV_CACHE_DIR=/private/tmp/uv-cache-shop PYTHONDONTWRITEBYTECODE=1 uv run python manage.py check` 通过；`git diff --check` 通过。
 - 后端：`DB_ENGINE=mysql UV_CACHE_DIR=/private/tmp/uv-cache-shop PYTHONDONTWRITEBYTECODE=1 uv run python manage.py check` 通过。
 - 后端聚焦测试：`DJANGO_TEST_SQLITE=1 UV_CACHE_DIR=/private/tmp/uv-cache-shop PYTHONDONTWRITEBYTECODE=1 uv run python manage.py test cloud.tests.CloudServerServicesTestCase.test_lifecycle_plans_fields_basic_omits_notes_and_execution_payload cloud.tests.CloudServerServicesTestCase.test_notice_task_detail_uses_notice_plan_view --settings=shop.settings --verbosity=2` 通过；SQLite comment warnings 为预期差异。
@@ -29,13 +30,13 @@
 
 ## 剩余风险
 
-- 本轮只做本地数据库压测；未执行真实云资源创建、删除、关机、释放 IP、真实支付、链上广播或生产发布。
+- 本轮只配置自动化和仓库控制文档，未执行真实云资源创建、删除、关机、释放 IP、真实支付、链上广播或生产发布。
 - 代理列表 IP 视图第一页约 2.2s；第 2 页、深页和最后一页为保证精确分页仍走数据库聚合，50 万下约 4.7-5.5s。如后续需要深分页也保持 2s 内，需要增加快照表到期时间冗余字段和索引，或改为游标分页。
 - 本地压测数据保留在项目数据库中，用于继续压测；清理这批数据属于删除数据操作，需要单独确认。
-- 前端仓库存在大量本轮无关脏文件；后端仓库存在未跟踪文档 `docs/jisou-bot-functions.md`、`docs/telegram-search-large-scale-architecture.md`，本轮均未处理。
+- 前端仓库存在大量本轮无关脏文件；后端仓库存在未跟踪文档 `docs/jisou-bot-functions.md`、`docs/telegram-search-development-plan.md`、`docs/telegram-search-large-scale-architecture.md`，本轮均未处理。
 
 ## 下一步
 
-- 领取 `TODO.md` 第一项“全自动优化项目巡检”，按固定入口每轮只做一个最小安全修复。
+- 自动监工下一轮领取 `TODO.md` 第一项“全自动优化项目巡检”，按固定入口每轮只做一个最小安全修复或一轮完整审计。
 - 如果继续压测深分页，优先优化代理列表分组排序索引或改游标分页。
 - 如果要恢复较小本地数据库，需要单独确认清理 `LOADTEST20260605Z` 等压测数据。

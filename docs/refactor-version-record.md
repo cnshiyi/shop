@@ -9042,3 +9042,39 @@ git diff --check
 
 - 本轮仅新增任务清单和自动优化入口说明，不执行真实云资源、真实支付、链上广播、删除数据或生产发布。
 - 50 万压测数据仍保留在本地数据库；清理需要单独确认。
+
+## 2026-06-06 激活上线前全自动监工审计
+
+### 背景
+
+用户要求添加监工，让自动化一轮优化完成后自动进入下一轮，并在明天上线前持续执行全项目审计、测试和安全优化。
+
+### 修改
+
+- Codex App 自动化：更新现有 `shop` 自动化为“Shop 上线前全自动监工审计”，状态从暂停改为启用。
+- 自动化工作区：从仅后端扩展为后端 `/Users/a399/Desktop/data/shop` 和前端 `/Users/a399/Desktop/data/vue-shop-admin`。
+- 自动化规则：每轮先读取 `AGENTS.md`、自动优化控制台、最新状态、版本记录末尾和 `TODO.md`，再领取第一个不违反红线的未完成任务。
+- 自动化范围：覆盖后端、Telegram bot、订单/余额、TRON 支付扫描、云资产生命周期、代理列表、删除计划、通知计划、后台任务中心和相关前端管理页。
+- 自动化验证：要求至少运行 MySQL 环境 `manage.py check`、相关聚焦测试或编译检查、必要的浏览器实测，以及相关仓库 `git diff --check`。
+- `docs/auto-optimization-control.md`：记录自动监工已启用，并明确下一轮继续从 `TODO.md` 首个未完成任务领取。
+- `docs/auto-optimization-latest.md`：覆盖更新本轮自动监工配置状态。
+
+### 红线
+
+- 自动化禁止真实支付、链上广播、生产发布、删除数据、真实云资源创建/删除/关机/释放 IP/换 IP。
+- 自动化禁止打印密钥、私钥、Telegram session、TOTP、支付密钥或云厂商密钥。
+- 遇到不可逆操作或真实成本动作时，必须停止并报告。
+
+### 验证
+
+本地已通过：
+
+```bash
+DB_ENGINE=mysql UV_CACHE_DIR=/private/tmp/uv-cache-shop PYTHONDONTWRITEBYTECODE=1 uv run python manage.py check
+git diff --check
+```
+
+### 剩余风险
+
+- Codex App 自动化为周期触发，不是同一个进程无限循环；下一轮会在下一次触发时继续领取任务。
+- 本轮只配置自动化和记录规则，未执行生产发布、真实支付、链上广播或真实云资源变更。
