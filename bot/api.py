@@ -286,6 +286,32 @@ def _cloud_asset_plan_stats(assets=None):
     }
 
 
+def _lifecycle_plan_total_counts():
+    queryset = _active_cloud_asset_plan_queryset()
+    unattached_q = _unattached_ip_asset_q()
+    server_queryset = (
+        queryset
+        .exclude(unattached_q)
+        .exclude(_asset_waiting_manual_time_q())
+        .filter(actual_expires_at__isnull=False)
+    )
+    shutdown_complete_q = (
+        Q(order__status__in=['suspended', 'deleting', 'deleted'])
+        | Q(status__in=[
+            CloudAsset.STATUS_STOPPED,
+            CloudAsset.STATUS_SUSPENDED,
+            CloudAsset.STATUS_DELETING,
+            CloudAsset.STATUS_DELETED,
+            CloudAsset.STATUS_TERMINATING,
+            CloudAsset.STATUS_TERMINATED,
+        ])
+    )
+    return {
+        'shutdown_plan_count': server_queryset.exclude(shutdown_complete_q).count(),
+        'server_delete_count': server_queryset.count(),
+    }
+
+
 def _visible_lifecycle_plan_stats(shutdown_items: list[dict] | None = None, ip_delete_items: list[dict] | None = None):
     shutdown_items = list(shutdown_items or [])
     ip_delete_items = list(ip_delete_items or [])
@@ -1931,11 +1957,11 @@ def _collect_shutdown_plan_queue(now, limit=100):
                 shutdown_due_items.append(shutdown_payload)
             else:
                 shutdown_future_items.append(shutdown_payload)
-        if not shutdown_complete:
-            continue
-        if linked_order and linked_status not in {'suspended', 'deleting', 'failed', 'deleted', 'cancelled', 'expired'}:
-            continue
-        if delete_at and delete_at <= pending_until:
+        delete_stage_ready = (
+            shutdown_complete
+            and (not linked_order or linked_status in {'suspended', 'deleting', 'failed', 'deleted', 'cancelled', 'expired'})
+        )
+        if delete_at and delete_stage_ready and delete_at <= pending_until:
             due_items.append(
                 _asset_delete_plan_item_payload(
                     asset,
@@ -1948,7 +1974,7 @@ def _collect_shutdown_plan_queue(now, limit=100):
             _asset_delete_plan_item_payload(
                 asset,
                 queue_status='scheduled_future',
-                queue_status_label='计划中',
+                queue_status_label='计划中' if shutdown_complete else '等待关机完成',
             )
         )
 
@@ -2376,6 +2402,7 @@ def lifecycle_plans(request):
         if parse_item_dt(item.get('executed_at')) and parse_item_dt(item.get('executed_at')) >= recent_since
     ]
     plan_stats = _cloud_asset_plan_stats()
+    total_counts = _lifecycle_plan_total_counts()
     if compact:
         def compact_notes(items):
             for item in items:
@@ -2428,11 +2455,11 @@ def lifecycle_plans(request):
         'server_asset_count': plan_stats['server_asset_count'],
         'server_delete_history_count': len(history_items),
         'ip_delete_history_count': len(ip_delete_history_items),
-        'shutdown_plan_count': len(shutdown_plan_items),
+        'shutdown_plan_count': total_counts['shutdown_plan_count'],
         'shutdown_plan_due_count': sum(1 for item in shutdown_plan_items if item.get('queue_status') in {'due_now', 'within_window'}),
-        'server_delete_count': len(due_items) + len(future_plan_items),
+        'server_delete_count': total_counts['server_delete_count'],
         'server_delete_due_count': len(due_items),
-        'shutdown_count': len(due_items) + len(future_plan_items),
+        'shutdown_count': total_counts['server_delete_count'],
         'shutdown_due_count': len(due_items),
         'ip_delete_count': len(ip_delete_plan_items),
         'ip_delete_due_count': len(pending_ip_delete_items),

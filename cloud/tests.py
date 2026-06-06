@@ -7567,6 +7567,42 @@ class CloudServerServicesTestCase(TestCase):
             for item in data['ip_delete_items']
         ))
 
+    # 功能：验证生命周期计划总数统计全量远期计划，不受当前加载条数截断。
+    def test_lifecycle_plans_counts_all_future_server_assets_beyond_loaded_limit(self):
+        now = timezone.now()
+        for index in range(3):
+            CloudAsset.objects.create(
+                kind=CloudAsset.KIND_SERVER,
+                source=CloudAsset.SOURCE_AWS_SYNC,
+                user=self.user,
+                provider='aws_lightsail',
+                region_code=self.plan.region_code,
+                region_name=self.plan.region_name,
+                asset_name=f'lifecycle-full-count-{index}',
+                instance_id=f'i-lifecycle-full-count-{index}',
+                public_ip=f'5.5.6.{10 + index}',
+                status=CloudAsset.STATUS_RUNNING,
+                is_active=True,
+                actual_expires_at=now + timezone.timedelta(days=90, minutes=index),
+            )
+        staff_user = get_user_model().objects.create_user(username='staff_lifecycle_full_count', password='x', is_staff=True)
+        request = RequestFactory().get('/api/admin/tasks/plans/', {
+            'compact': '1',
+            'fields': 'basic,execution',
+            'limit': '1',
+            'refresh': '1',
+        })
+        self._attach_bearer_session(request, staff_user)
+
+        response = lifecycle_plans(request)
+
+        self.assertEqual(response.status_code, 200)
+        data = json.loads(response.content)['data']
+        self.assertGreaterEqual(data['shutdown_plan_count'], 3)
+        self.assertGreaterEqual(data['server_delete_count'], 3)
+        self.assertEqual(len(data['shutdown_plan_items']), 1)
+        self.assertEqual(len(data['server_delete_items']), 1)
+
     # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
     def test_update_lifecycle_plan_note_updates_asset_note(self):
         asset = CloudAsset.objects.create(
@@ -10251,6 +10287,45 @@ class CloudServerServicesTestCase(TestCase):
         data = json.loads(response.content)['data']
         row = next(item for item in data['due_user_summary_items'] if item.get('user_id') == self.user.id)
         self.assertNotIn('notice_text_preview', row)
+
+    # 功能：验证通知计划总数统计全量未来计划，不受当前页加载上限截断。
+    def test_notice_task_detail_counts_all_future_items_beyond_loaded_limit(self):
+        now = timezone.now()
+        for index in range(4):
+            expires_at = now + timezone.timedelta(days=40, minutes=index)
+            order = CloudServerOrder.objects.create(
+                order_no=f'NOTICE-FULL-FUTURE-COUNT-{index}',
+                user=self.user,
+                plan=self.plan,
+                provider=self.plan.provider,
+                region_code=self.plan.region_code,
+                region_name=self.plan.region_name,
+                plan_name=self.plan.plan_name,
+                quantity=1,
+                currency='USDT',
+                total_amount='19.00',
+                pay_amount='19.00',
+                status='completed',
+                public_ip=f'7.7.7.{90 + index}',
+                cloud_reminder_enabled=True,
+            )
+            self._create_auto_renew_asset(order, expires_at=expires_at)
+        staff_user = get_user_model().objects.create_user(username='staff_notice_full_future_count', password='x', is_staff=True)
+        request = self.factory.get('/api/admin/tasks/notices/', {
+            'compact': '1',
+            'fields': 'basic',
+            'limit': '1',
+            'future_limit': '1',
+            'history_limit': '1',
+        })
+        self._attach_bearer_session(request, staff_user)
+
+        response = notice_task_detail(request)
+
+        self.assertEqual(response.status_code, 200)
+        data = json.loads(response.content)['data']
+        self.assertGreaterEqual(data['future_count'], 4)
+        self.assertEqual(len(data['future_plan_items']), 1)
 
     # 功能：验证通知计划未来队列按调用方上限截断，避免订单多时继续无限扩张。
     def test_notice_task_future_items_respects_future_limit(self):

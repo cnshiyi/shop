@@ -4,55 +4,40 @@
 
 ## 最近一轮
 
-- 时间：2026-06-06 13:46 CST
-- 状态：已完成代理列表、通知表、计划表、服务器表的数据数量校验、数据真实性校验、翻页校验和压力测试；修复通知表隐藏列仍构造昂贵 payload、服务器表只暴露前 500 条的问题。
-- 本轮范围：后端服务器列表 API、通知计划 API、服务器表前端分页、四表真实浏览器复测和接口压测。
+- 时间：2026-06-06 14:08 CST
+- 状态：已修复计划表和通知表的计数口径问题：总数不再使用当前加载行数或构造上限，而是统计全库真实未来计划；列表仍按 `limit` 分批加载，避免 50 万数据一次性塞进前端。
+- 本轮范围：生命周期计划 API、通知计划 API、计划页标题显示、聚焦测试和真实前端复测。
 
 ## 修改内容
 
-- 服务器表后端 `/api/admin/servers/` 增加真实服务端分页：
-  - `paginated=1` 时返回 `items/page/page_size/total/total_pages`。
-  - 默认旧数组响应保持兼容，避免影响已有调用方。
-  - 支持第 1 页、第 2 页、深页和最后页按数据库排序精确返回，不再只取前 500 条。
-- 服务器表前端改为服务端分页：
-  - 翻页、跳页、分页大小、搜索和排序都会重新请求后端。
-  - 总数显示来自后端真实 `total`。
-- 通知表 API 优化隐藏列加载：
-  - 当页面传 `fields=basic` 且关闭文案/渠道等列时，不再构造批量通知文案和账号通知渠道 payload。
-  - 保持通知计划数量、当前页数据和历史记录语义不变。
-- 新增聚焦回归测试：
-  - 服务器表分页结果必须与 `CloudAsset` 数据库排序一致。
-  - 通知表关闭文案列时不得调用批量文案构造。
+- 生命周期计划：
+  - `shutdown_plan_count` 改为全库“未完成关机且有到期计划”的服务器资产数。
+  - `server_delete_count` 改为全库“有到期计划”的服务器资产数，远期删除也算计划。
+  - 删除计划列表会显示未来计划，但待执行删除仍保留阶段门槛：只有关机阶段完成且状态允许，才会进入待执行删除。
+  - 前端计划页标题改用后端总数，不再用当前加载行数。
+- 通知计划：
+  - `due_count/future_count/due_user_count/future_user_count/active_user_count` 改为全量统计，不再受 `future_limit` 或内部构造上限影响。
+  - 当前页列表仍只返回请求的 `limit/future_limit/history_limit`，保持页面加载可控。
+- 新增聚焦测试：
+  - 生命周期计划总数超过当前加载 limit 时仍返回全量 count。
+  - 通知未来计划超过当前加载 limit 时仍返回全量 future_count。
 
 ## 验证结论
 
-- 后端 `manage.py check` 通过。
-- 前端 `@vben/web-antd` 类型检查通过。
-- 聚焦测试通过：服务器分页、通知表隐藏文案列轻量加载。
-- Django Client 数据校验通过：
-  - 服务器表 DB/API 总数均为 `499993`，第 1/2/1000/10000 页 ID 与数据库精确对账一致。
-  - 通知表 `due_count=5401`、`future_count=600`、`active_user_count=6001`，offset 0/10/5391 均正常返回 10 行。
-  - 代理列表 `total=499492`，第 2 页 20 组样本资产 ID 均存在。
-  - 计划表 `shutdown_plan_count=947`、`server_delete_count=2`、`ip_delete_count=0`、`ip_delete_history_count=7`。
+- 当前 50 万数据库 API 对账：
+  - 计划表：`shutdown_plan_count=453489`，当前加载关机行 `50`；`server_delete_count=454747`，当前加载删除行 `50`；`ip_delete_count=1`，`ip_delete_history_count=7`。
+  - 通知表：`active_user_count=36033`，`due_count=5401`，`future_count=30632`；当前加载通知行 `10`。
 - 真实浏览器复测通过：
-  - `/admin/servers` 显示 `共 499993 条`，点击第 2 页后请求 `page=2&page_size=50&paginated=1` 返回 200，页面显示压测服务器数据。
-  - `/admin/tasks/notices` 请求 `fields=basic` 返回 200，页面显示 `6001` 组通知、近期 `5401`、未来 `600`。
-  - `/admin/cloud-assets` 返回 200，页面显示 `全部 (500000)` 和 20 组代理数据。
-  - `/admin/tasks/plans` 返回 200，页面显示关机计划、删除计划、IP 删除历史和压测计划数据。
+  - 计划页显示 `关机计划（453489）`、`删除计划（454747）`、`IP删除计划（1）`，接口 200。
+  - 通知页显示 `36033 组用户通知`、近期 `5401`、未来 `30632`，接口 200。
   - 浏览器 console error 为 0。
-- `curl` 压力测试通过：
-  - 代理列表：10 请求/3 workers，成功 10，失败 0，avg `1.899s`，p95 `2.333s`。
-  - 通知表 basic：5 请求/1 worker，成功 5，失败 0，avg `2.515s`，p95 `2.514s`。
-  - 计划表：6 请求/2 workers，成功 6，失败 0，avg `1.958s`，p95 `1.980s`。
-  - 服务器表分页：10 请求/2 workers，成功 10，失败 0，avg `2.197s`，p95 `3.913s`。
 
 ## 最近验证
 
 ```bash
-UV_CACHE_DIR=/private/tmp/uv-cache-shop PYTHONDONTWRITEBYTECODE=1 uv run python -m py_compile cloud/api_servers.py cloud/api_tasks.py
-UV_CACHE_DIR=/private/tmp/uv-cache-shop PYTHONDONTWRITEBYTECODE=1 uv run python manage.py check
+UV_CACHE_DIR=/private/tmp/uv-cache-shop PYTHONDONTWRITEBYTECODE=1 uv run python -m py_compile bot/api.py cloud/api_tasks.py cloud/tests.py
 DB_ENGINE=mysql UV_CACHE_DIR=/private/tmp/uv-cache-shop PYTHONDONTWRITEBYTECODE=1 uv run python manage.py check
-DJANGO_TEST_SQLITE=1 UV_CACHE_DIR=/private/tmp/uv-cache-shop PYTHONDONTWRITEBYTECODE=1 uv run python manage.py test cloud.tests.CloudServerServicesTestCase.test_servers_list_paginated_matches_cloud_asset_order cloud.tests.CloudServerServicesTestCase.test_notice_task_detail_basic_fields_skip_batch_text_payload --settings=shop.settings --verbosity=2
+DJANGO_TEST_SQLITE=1 UV_CACHE_DIR=/private/tmp/uv-cache-shop PYTHONDONTWRITEBYTECODE=1 uv run python manage.py test cloud.tests.CloudServerServicesTestCase.test_lifecycle_plans_counts_all_future_server_assets_beyond_loaded_limit cloud.tests.CloudServerServicesTestCase.test_notice_task_detail_counts_all_future_items_beyond_loaded_limit --settings=shop.settings --verbosity=2
 pnpm -C /Users/a399/Desktop/data/vue-shop-admin --filter @vben/web-antd typecheck
 ```
 
@@ -64,6 +49,6 @@ pnpm -C /Users/a399/Desktop/data/vue-shop-admin --filter @vben/web-antd typechec
 
 ## 剩余风险
 
-- 本地仍保留 50 万压测数据；清理属于删除数据操作，需要单独确认。
-- 通知表 `fields=basic` 已降至约 2.5 秒；如果打开文案/渠道列，仍会产生更重的 payload 构造，后续可继续做异步预计算或缓存。
-- 服务器表深页第 10000 页约 4 秒；当前已保证不丢数据，若目标低于 2 秒，需要进一步做游标分页或专用排序索引方案。
+- 本地 50 万压测数据仍保留，清理需要单独确认。
+- 全量通知统计会额外扫描通知候选资产；当前本地 50 万数据下通知接口约 5.3 秒，后续如要求低于 2 秒，需要把通知统计预聚合或缓存化。
+- 计划表现在统计全量计划，列表仍分批加载；后续可增加服务端分页/跳页到指定计划页。

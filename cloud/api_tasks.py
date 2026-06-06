@@ -1332,8 +1332,58 @@ def _append_notice_items_from_assets(
         seen_keys.add((notice_type, order.id))
 
 
+def _notice_user_group_key(asset, notice_type: str, plan_scope: str) -> str | None:
+    order = getattr(asset, 'order', None)
+    if not order:
+        return None
+    user = getattr(order, 'user', None)
+    if getattr(user, 'id', None):
+        user_key = user.id
+    else:
+        fallback = getattr(user, 'tg_user_id', None) or getattr(user, 'username', None) or getattr(user, 'first_name', None) or 'unknown'
+        user_key = f'unbound:{fallback}'
+    return f'{user_key}:{notice_type}:{plan_scope}'
+
+
+def _notice_plan_total_counts(now) -> dict:
+    due_count = 0
+    future_count = 0
+    due_user_groups = set()
+    future_user_groups = set()
+    for notice_type in _NOTICE_TASK_TYPES:
+        if not cloud_notice_type_enabled(notice_type):
+            continue
+        for future in (False, True):
+            seen_order_ids = set()
+            plan_scope = 'future' if future else 'due'
+            groups = future_user_groups if future else due_user_groups
+            for asset in _notice_assets_for_type(notice_type, now=now, future=future).iterator(chunk_size=1000):
+                order = getattr(asset, 'order', None)
+                if not order or order.id in seen_order_ids:
+                    continue
+                if notice_type == 'auto_renew_notice' and _notice_asset_is_unattached_static_ip(asset):
+                    continue
+                if notice_type in {'delete_notice', 'recycle_notice'} and not _asset_lifecycle_enabled_for_order(order, asset):
+                    continue
+                seen_order_ids.add(order.id)
+                if future:
+                    future_count += 1
+                else:
+                    due_count += 1
+                group_key = _notice_user_group_key(asset, notice_type, plan_scope)
+                if group_key:
+                    groups.add(group_key)
+    return {
+        'due_count': due_count,
+        'future_count': future_count,
+        'due_user_count': len(due_user_groups),
+        'future_user_count': len(future_user_groups),
+        'active_user_count': len(due_user_groups | future_user_groups),
+    }
+
+
 # 功能：提供 后台 API 接口 的内部辅助逻辑，供同模块流程复用。
-def _build_notice_plan_bundle(*, limit=1000, future_limit=200, history_limit=1000, fields: set[str] | None = None):
+def _build_notice_plan_bundle(*, limit=1000, future_limit=200, history_limit=1000, fields: set[str] | None = None, include_total_counts: bool = False):
     now = timezone.now()
     next_run_at = now + timezone.timedelta(minutes=10)
     fields = fields or {'basic', 'channels', 'ips', 'retry', 'text'}
@@ -1383,7 +1433,10 @@ def _build_notice_plan_bundle(*, limit=1000, future_limit=200, history_limit=100
     active_items = [*due_items, *future_plan_items]
     history_qs = CloudUserNoticeLog.objects.select_related('order', 'user').filter(event_type__in=list(_NOTICE_HISTORY_LABELS)).order_by('-created_at', '-id')
     history_rows = _notice_history_group_items(history_qs[:max(history_limit, 1000)], account_attempts=account_attempts)
-    return {'active_items': active_items, 'history_items': history_rows}
+    result = {'active_items': active_items, 'history_items': history_rows}
+    if include_total_counts:
+        result['total_counts'] = _notice_plan_total_counts(now)
+    return result
 
 
 # 功能：提供 后台 API 接口 的内部辅助逻辑，供同模块流程复用。
@@ -1396,15 +1449,16 @@ def refresh_notice_plan_view(request):
     limit = _request_int_param(request, 'limit', int(payload.get('limit') or 1000), maximum=1000)
     future_limit = _request_int_param(request, 'future_limit', int(payload.get('future_limit') or 200), maximum=2000)
     history_limit = _request_int_param(request, 'history_limit', int(payload.get('history_limit') or 1000), maximum=5000)
-    bundle = _build_notice_plan_bundle(limit=limit, future_limit=future_limit, history_limit=history_limit)
+    bundle = _build_notice_plan_bundle(limit=limit, future_limit=future_limit, history_limit=history_limit, include_total_counts=True)
     active_items = bundle.get('active_items') or []
     due_items = [item for item in active_items if item.get('queue_status') in {'due_now', 'fallback_notice', 'within_window'}]
     future_items = [item for item in active_items if item.get('queue_status') == 'scheduled_future']
     history_items = bundle.get('history_items') or []
+    total_counts = bundle.get('total_counts') or {}
     return _ok({
         'refreshed': True,
-        'due_count': len(due_items),
-        'future_count': len(future_items),
+        'due_count': total_counts.get('due_count', len(due_items)),
+        'future_count': total_counts.get('future_count', len(future_items)),
         'history_count': len(history_items),
     })
 
@@ -1424,7 +1478,7 @@ def notice_task_detail(request):
     fields = _request_notice_fields(request)
 
     next_run_at = now + timezone.timedelta(minutes=10)
-    bundle = _build_notice_plan_bundle(limit=max(limit, 200), future_limit=max(future_limit, 200), history_limit=max(history_limit, 200), fields=fields)
+    bundle = _build_notice_plan_bundle(limit=max(limit, 200), future_limit=max(future_limit, 200), history_limit=max(history_limit, 200), fields=fields, include_total_counts=True)
 
     active_items = bundle.get('active_items') or []
     due_items = [item for item in active_items if item.get('queue_status') in {'due_now', 'fallback_notice', 'within_window'}]
@@ -1471,6 +1525,7 @@ def notice_task_detail(request):
     _strip_notice_item_fields(future_summary_payload, fields)
     _strip_notice_item_fields(active_summary_payload, fields)
     _strip_notice_item_fields(history_payload, fields)
+    total_counts = bundle.get('total_counts') or {}
 
     return _ok({
         'task_key': 'cloud_notice_plan',
@@ -1480,11 +1535,11 @@ def notice_task_detail(request):
         'last_run_at': (latest_history_item or {}).get('created_at') or (latest_history_item or {}).get('logged_at'),
         'next_run_at': _iso(next_run_at),
         'last_refresh_at': _iso(last_refresh_at),
-        'due_count': len(due_items),
-        'due_user_count': due_user_total,
-        'future_count': len(future_plan_items),
-        'future_user_count': future_user_total,
-        'active_user_count': active_user_total,
+        'due_count': total_counts.get('due_count', len(due_items)),
+        'due_user_count': total_counts.get('due_user_count', due_user_total),
+        'future_count': total_counts.get('future_count', len(future_plan_items)),
+        'future_user_count': total_counts.get('future_user_count', future_user_total),
+        'active_user_count': total_counts.get('active_user_count', active_user_total),
         'history_count': len(history_all_items),
         'recent_success_count': recent_success_count,
         'recent_success_user_count': recent_success_user_count,
