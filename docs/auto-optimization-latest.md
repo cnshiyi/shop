@@ -4,9 +4,9 @@
 
 ## 最近一轮
 
-- 时间：2026-06-06 10:55 CST
+- 时间：2026-06-06 11:05 CST
 - 状态：`TODO.md` 当前无未完成明确任务，本轮按固定巡检清单执行只读巡检；未发现新的安全业务代码修复点，仅更新自动优化记录。
-- 本轮范围：Django 基础检查、MySQL 检查与迁移计划、云资产到期事实和废弃 app 回流巡检、旧计划快照和旧退款入口扫描、机器人返回链和 `callback_data` 聚焦测试、后台任务中心状态统计、支付详情缓存隔离验证。
+- 本轮范围：Django 基础检查、MySQL 配置检查与迁移计划复查、云资产到期事实和废弃 app 回流巡检、旧计划快照和旧退款入口扫描、机器人返回链和 `callback_data` 聚焦测试、后台任务中心状态统计、支付详情缓存隔离验证。
 
 ## 修改内容
 
@@ -17,7 +17,7 @@
 
 - `uv run python manage.py check` 通过，系统检查无问题。
 - `DB_ENGINE=mysql uv run python manage.py check` 通过，系统检查无问题。
-- `DB_ENGINE=mysql uv run python manage.py migrate --plan` 通过，输出 `No planned migration operations.`。
+- `DB_ENGINE=mysql uv run python manage.py migrate --plan` 本轮未通过，失败为本机 `127.0.0.1:3306` 连接被拒绝，未执行迁移操作。
 - 运行时 `INSTALLED_APPS` 未恢复 `accounts`、`finance`、`mall`、`monitoring`、`dashboard_api`、`biz`。
 - 字段内省确认 `CloudAsset` 到期字段仍只有 `actual_expires_at`；`CloudServerOrder` 未恢复 `actual_expires_at` 或 `service_expires_at`；`CloudAssetDashboardSnapshot` 仅保留 `asset_due_sort_at`、`risk_due_soon` 和 `risk_expired` 等排序/风险相关字段。
 - 运行时代码扫描未命中 `service_expires_at` 或旧退款入口；废弃 app 名称扫描仅命中当前 Telegram/云账号 payload 的普通 `accounts` 键，不是废弃 runtime app 回流。
@@ -29,7 +29,8 @@
 
 - 后端检查：`UV_CACHE_DIR=/private/tmp/uv-cache-shop PYTHONDONTWRITEBYTECODE=1 uv run python manage.py check` 通过。
 - MySQL 后端检查：`DB_ENGINE=mysql UV_CACHE_DIR=/private/tmp/uv-cache-shop PYTHONDONTWRITEBYTECODE=1 uv run python manage.py check` 通过。
-- 迁移计划复查：`DB_ENGINE=mysql UV_CACHE_DIR=/private/tmp/uv-cache-shop PYTHONDONTWRITEBYTECODE=1 perl -e 'alarm 25; exec @ARGV' uv run python manage.py migrate --plan` 通过，输出 `Planned operations: No planned migration operations.`。
+- 迁移计划复查：`DB_ENGINE=mysql UV_CACHE_DIR=/private/tmp/uv-cache-shop PYTHONDONTWRITEBYTECODE=1 perl -e 'alarm 25; exec @ARGV' uv run python manage.py migrate --plan` 失败，关键错误为 `Can't connect to MySQL server on '127.0.0.1' ([Errno 61] Connection refused)`。
+- 端口复查：`lsof -nP -iTCP:3306 -sTCP:LISTEN` 无输出，本机 3306 当前无监听进程。
 - 字段内省：`DJANGO_TEST_SQLITE=1 UV_CACHE_DIR=/private/tmp/uv-cache-shop PYTHONDONTWRITEBYTECODE=1 uv run python manage.py shell -c "...字段/废弃 app 内省..."` 通过，输出 `retired_installed []`、`CloudAsset expiry fields ['actual_expires_at']`、`CloudServerOrder expiry flags {'actual_expires_at': False, 'service_expires_at': False}`、`CloudAssetDashboardSnapshot expiry-like fields ['asset_due_sort_at', 'risk_due_soon', 'risk_expired']`。
 - 编译检查：`DB_ENGINE=mysql UV_CACHE_DIR=/private/tmp/uv-cache-shop PYTHONDONTWRITEBYTECODE=1 uv run python -m py_compile bot/handlers.py bot/keyboards.py cloud/task_center.py cloud/api_tasks.py cloud/lifecycle.py orders/payment_scanner.py cloud/api_assets.py cloud/api_orders.py cloud/api_asset_snapshots.py cloud/models.py cloud/sync_jobs.py shop/settings.py core/runtime_config.py` 通过。
 - 聚焦测试：`DJANGO_TEST_SQLITE=1 UV_CACHE_DIR=/private/tmp/uv-cache-shop PYTHONDONTWRITEBYTECODE=1 uv run python manage.py test bot.tests.RetainedIpRenewalUiTestCase cloud.tests_task_center.CloudTaskCenterApiTestCase cloud.tests.CloudServerServicesTestCase.test_due_orders_use_asset_expiry_for_lightsail_lifecycle cloud.tests.CloudServerServicesTestCase.test_cloud_asset_detail_does_not_fallback_to_order_asset_expiry orders.tests.TronMonitorStatsTestCase.test_tx_detail_cache_is_scoped_per_user_for_same_hash orders.tests.TronMonitorStatsTestCase.test_resource_detail_cache_is_scoped_per_user_for_same_address_time --settings=shop.settings --verbosity=1` 通过，67 个测试 OK。
@@ -39,6 +40,7 @@
 ## 剩余风险
 
 - 本轮未执行真实云资源创建、删除、关机、释放 IP、换 IP、真实支付、链上广播、删除数据或生产发布。
+- MySQL 迁移计划复查受本机数据库服务不可用影响未得到成功完成态；如需恢复，应先启动或修复本机 MySQL/OrbStack 3306 监听后复跑。
 - 本地 50 万压测数据仍保留；清理属于删除数据操作，需要单独确认。
 - 后端仓库仍有本轮无关未跟踪文档 `docs/jisou-bot-functions.md`、`docs/telegram-search-development-plan.md`、`docs/telegram-search-large-scale-architecture.md`，本轮未处理。
 

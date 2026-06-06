@@ -9893,3 +9893,69 @@ git grep -n "dashboard_plan_snapshots" -- shop core bot orders cloud ':!*/migrat
 
 - 本地 50 万压测数据仍保留，清理需要单独确认。
 - 后端仓库仍有本轮无关未跟踪文档 `docs/jisou-bot-functions.md`、`docs/telegram-search-development-plan.md`、`docs/telegram-search-large-scale-architecture.md`，本轮未处理。
+
+## 2026-06-06 固定巡检只读复查（九）
+
+### 背景
+
+自动监工本轮按 `continue to next task` 规则先确认 git 状态和最近提交，再读取 `AGENTS.md`、`docs/auto-optimization-control.md`、`docs/auto-optimization-latest.md`、`docs/refactor-version-record.md` 末尾和 `TODO.md`。`TODO.md` 当前没有新的未完成明确任务，因此按固定巡检清单执行只读巡检。
+
+### 巡检结论
+
+- `uv run python manage.py check` 通过，系统检查无问题。
+- `DB_ENGINE=mysql uv run python manage.py check` 通过，系统检查无问题。
+- `DB_ENGINE=mysql uv run python manage.py migrate --plan` 本轮失败为本机 `127.0.0.1:3306` 连接被拒绝；端口复查显示 3306 当前无监听进程，未执行迁移操作。
+- 运行时 `INSTALLED_APPS` 未恢复 `accounts`、`finance`、`mall`、`monitoring`、`dashboard_api`、`biz`。
+- 字段内省确认 `CloudAsset` 到期字段仍只有 `actual_expires_at`；`CloudServerOrder` 未恢复 `actual_expires_at` 或 `service_expires_at`；`CloudAssetDashboardSnapshot` 仅保留 `asset_due_sort_at`、`risk_due_soon` 和 `risk_expired` 等排序/风险相关字段。
+- 运行时代码扫描未命中 `service_expires_at` 或旧退款入口；废弃 app 名称扫描仅命中当前 Telegram/云账号 payload 的普通 `accounts` 键，不是废弃 runtime app 回流。
+- `dashboard_plan_snapshots` 命中为当前后台快照刷新模块，不是旧计划快照表恢复。
+- 运行时代码中 `actual_expires_at` 命中集中在 `CloudAsset`、API 输出、生命周期、同步、后台排序缓存、手动编辑路径和测试断言，未发现订单侧到期事实字段回流。
+- 机器人返回链、`callback_data` 长度、后台任务中心状态统计、支付扫描器和资源监控详情按钮缓存相关聚焦测试通过。
+- 本轮未发现需要业务代码修复的新问题，只更新自动优化状态记录。
+
+### 验证
+
+本地已通过：
+
+```bash
+UV_CACHE_DIR=/private/tmp/uv-cache-shop PYTHONDONTWRITEBYTECODE=1 uv run python manage.py check
+DB_ENGINE=mysql UV_CACHE_DIR=/private/tmp/uv-cache-shop PYTHONDONTWRITEBYTECODE=1 uv run python manage.py check
+DJANGO_TEST_SQLITE=1 UV_CACHE_DIR=/private/tmp/uv-cache-shop PYTHONDONTWRITEBYTECODE=1 uv run python manage.py shell -c "...字段/废弃 app 内省..."
+DB_ENGINE=mysql UV_CACHE_DIR=/private/tmp/uv-cache-shop PYTHONDONTWRITEBYTECODE=1 uv run python -m py_compile bot/handlers.py bot/keyboards.py cloud/task_center.py cloud/api_tasks.py cloud/lifecycle.py orders/payment_scanner.py cloud/api_assets.py cloud/api_orders.py cloud/api_asset_snapshots.py cloud/models.py cloud/sync_jobs.py shop/settings.py core/runtime_config.py
+DJANGO_TEST_SQLITE=1 UV_CACHE_DIR=/private/tmp/uv-cache-shop PYTHONDONTWRITEBYTECODE=1 uv run python manage.py test bot.tests.RetainedIpRenewalUiTestCase cloud.tests_task_center.CloudTaskCenterApiTestCase cloud.tests.CloudServerServicesTestCase.test_due_orders_use_asset_expiry_for_lightsail_lifecycle cloud.tests.CloudServerServicesTestCase.test_cloud_asset_detail_does_not_fallback_to_order_asset_expiry orders.tests.TronMonitorStatsTestCase.test_tx_detail_cache_is_scoped_per_user_for_same_hash orders.tests.TronMonitorStatsTestCase.test_resource_detail_cache_is_scoped_per_user_for_same_address_time --settings=shop.settings --verbosity=1
+```
+
+本地未通过：
+
+```bash
+DB_ENGINE=mysql UV_CACHE_DIR=/private/tmp/uv-cache-shop PYTHONDONTWRITEBYTECODE=1 perl -e 'alarm 25; exec @ARGV' uv run python manage.py migrate --plan
+lsof -nP -iTCP:3306 -sTCP:LISTEN
+```
+
+结果：`migrate --plan` 失败关键错误为 `Can't connect to MySQL server on '127.0.0.1' ([Errno 61] Connection refused)`；`lsof` 无输出，3306 当前无监听进程。
+
+字段/关键字扫描：
+
+```bash
+git grep -n "service_expires_at" -- shop core bot orders cloud ':!*/migrations/*'
+git grep -n -E "old_refund|legacy_refund|refund_cloud_order|refund_order|apply_refund|process_refund|create_refund" -- shop core bot orders cloud ':!*/migrations/*'
+git grep -n -E "['\"](accounts|finance|mall|monitoring|dashboard_api|biz)['\"]|include\(['\"](accounts|finance|mall|monitoring|dashboard_api|biz)" -- shop core bot orders cloud ':!*/migrations/*'
+git grep -l "actual_expires_at" -- shop core bot orders cloud ':!*/migrations/*'
+git grep -n "dashboard_plan_snapshots" -- shop core bot orders cloud ':!*/migrations/*'
+```
+
+结果：旧到期字段和旧退款入口在运行时代码中无命中；废弃 app 名称扫描仅命中普通 `accounts` payload 字段；`dashboard_plan_snapshots` 命中为当前后台快照刷新模块；`actual_expires_at` 命中范围符合当前 `CloudAsset` 到期事实规则。
+
+本机仍缺少 `rg`，本轮按限量规则改用 `git grep` 完成只读关键字扫描。SQLite 测试库输出不支持 `db_comment` / `db_table_comment` 的 warnings，属于当前测试环境预期差异；测试中故意触发的异常/警告路径已由断言覆盖。
+
+### 红线
+
+- 本轮未执行真实云资源创建、删除、关机、释放 IP、换 IP、真实支付、链上广播、删除数据或生产发布。
+- 本轮未打印密钥、私钥、Telegram session、TOTP、支付密钥或云厂商密钥。
+- 本轮未恢复订单侧到期字段、旧计划快照、旧退款入口或废弃 runtime app。
+
+### 剩余风险
+
+- MySQL 迁移计划复查受本机数据库服务不可用影响未得到成功完成态；如需恢复，应先启动或修复本机 MySQL/OrbStack 3306 监听后复跑。
+- 本地 50 万压测数据仍保留，清理需要单独确认。
+- 后端仓库仍有本轮无关未跟踪文档 `docs/jisou-bot-functions.md`、`docs/telegram-search-development-plan.md`、`docs/telegram-search-large-scale-architecture.md`，本轮未处理。
