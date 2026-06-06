@@ -7603,6 +7603,136 @@ class CloudServerServicesTestCase(TestCase):
         self.assertEqual(len(data['shutdown_plan_items']), 1)
         self.assertEqual(len(data['server_delete_items']), 1)
 
+    # 功能：验证 IP 删除计划总数统计全量未附加固定 IP，不受当前加载条数截断。
+    def test_lifecycle_plans_counts_all_ip_delete_plans_beyond_loaded_limit(self):
+        now = timezone.now()
+        for index in range(3):
+            CloudAsset.objects.create(
+                kind=CloudAsset.KIND_SERVER,
+                source=CloudAsset.SOURCE_AWS_SYNC,
+                user=self.user,
+                provider='aws_lightsail',
+                region_code=self.plan.region_code,
+                region_name=self.plan.region_name,
+                asset_name=f'lifecycle-ip-full-count-{index}',
+                public_ip=f'5.5.7.{10 + index}',
+                instance_id='',
+                provider_resource_id=f'StaticIp-lifecycle-ip-full-count-{index}',
+                status=CloudAsset.STATUS_RUNNING,
+                provider_status='未附加固定IP',
+                note='未附加固定IP',
+                is_active=True,
+                actual_expires_at=now + timezone.timedelta(days=15, minutes=index),
+            )
+        staff_user = get_user_model().objects.create_user(username='staff_lifecycle_ip_full_count', password='x', is_staff=True)
+        request = RequestFactory().get('/api/admin/tasks/plans/', {
+            'compact': '1',
+            'fields': 'basic,execution',
+            'limit': '1',
+            'refresh': '1',
+        })
+        self._attach_bearer_session(request, staff_user)
+
+        response = lifecycle_plans(request)
+
+        self.assertEqual(response.status_code, 200)
+        data = json.loads(response.content)['data']
+        self.assertGreaterEqual(data['ip_delete_count'], 3)
+        self.assertEqual(len(data['ip_delete_plan_items']), 1)
+        self.assertTrue(all(not item.get('is_history') for item in data['ip_delete_plan_items']))
+
+    # 功能：验证 IP 删除历史总数统计全量历史来源，不受当前加载条数截断。
+    def test_lifecycle_plans_counts_all_ip_delete_history_beyond_loaded_limit(self):
+        for index in range(3):
+            history_asset = CloudAsset.objects.create(
+                kind=CloudAsset.KIND_SERVER,
+                source=CloudAsset.SOURCE_AWS_SYNC,
+                user=self.user,
+                provider='aws_lightsail',
+                region_code=self.plan.region_code,
+                region_name=self.plan.region_name,
+                asset_name=f'lifecycle-ip-history-full-count-{index}',
+                previous_public_ip=f'5.5.8.{10 + index}',
+                status=CloudAsset.STATUS_DELETED,
+                provider_status='已删除',
+                is_active=False,
+            )
+            record_cloud_ip_log(
+                event_type=CloudIpLog.EVENT_RECYCLED,
+                asset=history_asset,
+                previous_public_ip=f'5.5.8.{10 + index}',
+                public_ip=None,
+                note='固定 IP 保留期结束，AWS 固定 IP 已真实释放',
+            )
+        staff_user = get_user_model().objects.create_user(username='staff_lifecycle_ip_history_full_count', password='x', is_staff=True)
+        request = RequestFactory().get('/api/admin/tasks/plans/', {
+            'compact': '1',
+            'fields': 'basic,execution',
+            'limit': '1',
+            'refresh': '1',
+        })
+        self._attach_bearer_session(request, staff_user)
+
+        response = lifecycle_plans(request)
+
+        self.assertEqual(response.status_code, 200)
+        data = json.loads(response.content)['data']
+        self.assertGreaterEqual(data['ip_delete_history_count'], 3)
+        self.assertEqual(len(data['ip_delete_history_items']), 1)
+        self.assertTrue(all(item.get('is_history') for item in data['ip_delete_history_items']))
+
+    # 功能：验证计划页全量统计随刷新进入缓存，普通加载不重复扫全库。
+    def test_lifecycle_plans_reuses_cached_count_snapshot_after_refresh(self):
+        import bot.api as bot_api
+
+        bot_api._LIFECYCLE_PLAN_CACHE.update({
+            'bundle': None,
+            'counts': None,
+            'generated_at': None,
+            'limit': 0,
+        })
+        now = timezone.now()
+        CloudAsset.objects.create(
+            kind=CloudAsset.KIND_SERVER,
+            source=CloudAsset.SOURCE_AWS_SYNC,
+            user=self.user,
+            provider='aws_lightsail',
+            region_code=self.plan.region_code,
+            region_name=self.plan.region_name,
+            asset_name='lifecycle-cached-count-server',
+            instance_id='i-lifecycle-cached-count-server',
+            public_ip='5.5.7.40',
+            status=CloudAsset.STATUS_RUNNING,
+            is_active=True,
+            actual_expires_at=now + timezone.timedelta(days=30),
+        )
+        staff_user = get_user_model().objects.create_user(username='staff_lifecycle_cached_count', password='x', is_staff=True)
+        refresh_request = RequestFactory().get('/api/admin/tasks/plans/', {
+            'compact': '1',
+            'fields': 'basic,execution',
+            'limit': '1',
+            'refresh': '1',
+        })
+        self._attach_bearer_session(refresh_request, staff_user)
+
+        refresh_response = lifecycle_plans(refresh_request)
+
+        self.assertEqual(refresh_response.status_code, 200)
+        self.assertIsNotNone(bot_api._LIFECYCLE_PLAN_CACHE.get('counts'))
+
+        cached_request = RequestFactory().get('/api/admin/tasks/plans/', {
+            'compact': '1',
+            'fields': 'basic,execution',
+            'limit': '1',
+        })
+        self._attach_bearer_session(cached_request, staff_user)
+        with patch('bot.api._build_lifecycle_plan_count_snapshot', side_effect=AssertionError('count snapshot should be cached')):
+            cached_response = lifecycle_plans(cached_request)
+
+        self.assertEqual(cached_response.status_code, 200)
+        cached_data = json.loads(cached_response.content)['data']
+        self.assertGreaterEqual(cached_data['server_delete_count'], 1)
+
     # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
     def test_update_lifecycle_plan_note_updates_asset_note(self):
         asset = CloudAsset.objects.create(
@@ -9734,8 +9864,8 @@ class CloudServerServicesTestCase(TestCase):
         self.assertFalse(any(item.get('asset_id') == history_asset.id for item in plan_rows))
         self.assertTrue(any(item.get('asset_id') == active_asset.id for item in data['ip_delete_items']))
         self.assertTrue(any(item.get('asset_id') == history_asset.id and item.get('is_history') for item in data['ip_delete_items']))
-        self.assertEqual(data['ip_delete_count'], len(plan_rows))
-        self.assertEqual(data['ip_delete_history_count'], len(history_rows))
+        self.assertGreaterEqual(data['ip_delete_count'], len(plan_rows))
+        self.assertGreaterEqual(data['ip_delete_history_count'], len(history_rows))
 
     # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
     def test_lifecycle_plans_sort_shutdown_items_by_delete_time(self):

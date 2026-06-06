@@ -10313,3 +10313,78 @@ pnpm -C /Users/a399/Desktop/data/vue-shop-admin --filter @vben/web-antd typechec
 
 - 全量通知统计在 50 万数据下会增加一次候选扫描，当前本地通知接口约 5.3 秒；如果目标是低于 2 秒，需要继续做统计缓存或预聚合。
 - 计划表标题已经显示全量计数，但列表仍按 limit 分批加载；后续如需要查看任意深页计划，应补服务端分页。
+
+## 2026-06-06 IP 删除历史和服务器删除计划高数据压测优化
+
+### 背景
+
+用户指出上一轮只把 IP 删除计划压到高数据量，`IP 删除历史 7 条` 不能代表后期真实高数据点，同时服务器删除计划也需要压测。随后用户又指出计划页翻页看起来有问题。
+
+### 修改
+
+- 后端生命周期计划 API：
+  - 新增 IP 删除计划全量计数，不再使用当前加载行数。
+  - 新增 IP 删除历史全量计数，不再受 `limit` 截断。
+  - “实例已删除但固定 IP 保留中”的未附加 IP 行按页面展示语义计入历史，不计入活动 IP 删除计划。
+  - 新增生命周期计划统计缓存快照，强制刷新时精确统计，普通页面加载复用缓存，避免每次请求重复扫描全库。
+  - 手动刷新计划表接口返回同一套全量统计口径。
+- 前端计划页：
+  - 关机计划、删除计划、IP 删除计划、IP 删除历史记录标题统一显示 `已加载 X / 总 Y`。
+  - 分页器显示“已加载 X 条”，避免把当前已加载数据的本地分页误认为几十万总量的服务端深分页。
+
+### 压测数据
+
+本地压测库已注入：
+
+```text
+CloudAsset 总量：1500000
+CloudIpLog 总量：515739
+CODEX-IPDEL-MILLION-*：499999
+CODEX-IPDEL-HISTORY-*：500000
+CODEX-SERVER-PLAN-MILLION-*：500000
+```
+
+API 对账：
+
+```text
+shutdown_plan_count=953489
+server_delete_count=954747
+ip_delete_count=500000
+ip_delete_history_count=500007
+```
+
+### 性能
+
+- 优化前：强制刷新约 19.901 秒，缓存读取仍约 13 秒。
+- 优化后：强制刷新约 20.281 秒，普通缓存加载约 0.371 / 0.362 / 0.352 秒。
+- 列表仍按 `limit=50` 返回，计数保持全量真实值。
+
+### 验证
+
+本地已通过：
+
+```bash
+UV_CACHE_DIR=/private/tmp/uv-cache-shop PYTHONDONTWRITEBYTECODE=1 uv run python -m py_compile bot/api.py cloud/tests.py
+DJANGO_TEST_SQLITE=1 UV_CACHE_DIR=/private/tmp/uv-cache-shop PYTHONDONTWRITEBYTECODE=1 uv run python manage.py test cloud.tests.CloudServerServicesTestCase.test_lifecycle_plans_counts_all_ip_delete_plans_beyond_loaded_limit cloud.tests.CloudServerServicesTestCase.test_lifecycle_plans_counts_all_ip_delete_history_beyond_loaded_limit cloud.tests.CloudServerServicesTestCase.test_lifecycle_plans_reuses_cached_count_snapshot_after_refresh cloud.tests.CloudServerServicesTestCase.test_lifecycle_plans_separate_ip_delete_plan_and_history_items --settings=shop.settings --verbosity=2
+DB_ENGINE=mysql UV_CACHE_DIR=/private/tmp/uv-cache-shop PYTHONDONTWRITEBYTECODE=1 uv run python manage.py check
+/Users/a399/.homebrew/bin/pnpm -C /Users/a399/Desktop/data/vue-shop-admin --filter @vben/web-antd typecheck
+```
+
+真实浏览器复测：
+
+- `/admin/tasks/plans` 页面接口返回 200。
+- 页面显示 `关机计划（已加载 50 / 总 953489）`、`删除计划（已加载 50 / 总 954747）`、`IP删除计划（已加载 50 / 总 500000）`、`IP删除历史记录（已加载 50 / 总 500007）`。
+- 点击 IP 删除历史第 2 页后，记录从 `CODEX-IPDEL-HISTORY-499980` 后续切到 `CODEX-IPDEL-HISTORY-499979` 至 `CODEX-IPDEL-HISTORY-499960`，当前已加载数据内翻页正常。
+- 浏览器 console error 为 0。
+
+### 红线
+
+- 本轮未执行真实云资源创建、删除、关机、释放 IP、换 IP、真实支付、链上广播、删除业务数据或生产发布。
+- 本轮未打印密钥、私钥、Telegram session、TOTP、支付密钥或云厂商密钥。
+- 本轮未恢复订单侧到期字段、旧计划快照、旧退款入口或废弃 runtime app。
+
+### 剩余风险
+
+- 本地 150 万资产和 50 万 IP 删除历史压测数据仍保留，清理需要单独确认。
+- 计划页当前是“加载更多 + 本地分页已加载数据”，不是每张表独立服务端深分页；如果要直接跳到任意深页，需要继续做服务端分页 API。
+- 强制刷新仍约 20 秒，建议上线前让后台定时刷新缓存，前端默认读取缓存。

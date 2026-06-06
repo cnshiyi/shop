@@ -33,6 +33,7 @@ PLAN_KIND_UNATTACHED_IP_DELETE = CloudLifecyclePlanNote.PLAN_KIND_UNATTACHED_IP_
 
 _LIFECYCLE_PLAN_CACHE = {
     'bundle': None,
+    'counts': None,
     'generated_at': None,
     'limit': 0,
 }
@@ -309,6 +310,97 @@ def _lifecycle_plan_total_counts():
     return {
         'shutdown_plan_count': server_queryset.exclude(shutdown_complete_q).count(),
         'server_delete_count': server_queryset.count(),
+    }
+
+
+def _unattached_ip_delete_active_queryset():
+    unattached_q = (
+        Q(provider_status__icontains='未附加')
+        | Q(note__icontains='未附加IP')
+        | Q(note__icontains='未附加固定IP')
+        | Q(note__icontains='固定 IP 已释放')
+        | Q(note__icontains='固定IP已释放')
+        | Q(note__icontains='固定 IP 云端已不存在')
+        | Q(note__icontains='固定IP云端已不存在')
+        | Q(provider_resource_id__icontains='StaticIp')
+    )
+    blank_instance_q = Q(instance_id__isnull=True) | Q(instance_id='')
+    active_account_labels = _active_cloud_account_labels()
+    inactive_account_labels = [
+        label
+        for account in CloudAccountConfig.objects.filter(
+            provider__in=[CloudAccountConfig.PROVIDER_AWS, CloudAccountConfig.PROVIDER_ALIYUN],
+            is_active=False,
+        )
+        for label in cloud_account_label_variants(account)
+    ]
+    active_account_q = (
+        Q(cloud_account__isnull=True, account_label__isnull=True)
+        | Q(cloud_account__isnull=True, account_label='')
+        | Q(cloud_account__is_active=True)
+        | Q(account_label__in=active_account_labels)
+    )
+    return (
+        CloudAsset.objects
+        .filter(kind=CloudAsset.KIND_SERVER)
+        .filter(unattached_q)
+        .filter(blank_instance_q)
+        .filter(active_account_q)
+        .exclude(Q(cloud_account__is_active=False) | Q(account_label__in=inactive_account_labels))
+        .exclude(_unattached_ip_deleted_or_missing_q())
+    )
+
+
+def _unattached_ip_delete_history_asset_queryset():
+    unattached_q = (
+        Q(provider_status__icontains='未附加')
+        | Q(note__icontains='未附加IP')
+        | Q(note__icontains='未附加固定IP')
+        | Q(note__icontains='固定 IP 已释放')
+        | Q(note__icontains='固定IP已释放')
+        | Q(note__icontains='固定 IP 云端已不存在')
+        | Q(note__icontains='固定IP云端已不存在')
+        | Q(provider_resource_id__icontains='StaticIp')
+    )
+    blank_instance_q = Q(instance_id__isnull=True) | Q(instance_id='')
+    return (
+        CloudAsset.objects
+        .filter(kind=CloudAsset.KIND_SERVER)
+        .filter(unattached_q)
+        .filter(blank_instance_q)
+        .filter(_unattached_ip_deleted_or_missing_q())
+    )
+
+
+def _completed_unattached_ip_active_count():
+    retained_ip_q = (
+        Q(ip_logs__note__icontains='固定 IP 保留')
+        | Q(ip_logs__note__icontains='固定IP保留')
+        | Q(ip_logs__note__icontains='固定 IP 继续保留')
+        | Q(ip_logs__note__icontains='固定IP继续保留')
+    )
+    instance_deleted_q = (
+        Q(ip_logs__note__icontains='实例已删除')
+        | Q(ip_logs__note__icontains='AWS 实例已执行删除')
+    )
+    return (
+        _unattached_ip_delete_active_queryset()
+        .filter(instance_deleted_q & retained_ip_q)
+        .distinct()
+        .count()
+    )
+
+
+def _ip_delete_plan_total_counts():
+    active_count = _unattached_ip_delete_active_queryset().count()
+    completed_active_count = _completed_unattached_ip_active_count()
+    return {
+        'ip_delete_count': max(active_count - completed_active_count, 0),
+        'ip_delete_history_count': (
+            CloudIpLog.objects.filter(_unattached_ip_delete_history_q()).count()
+            + _unattached_ip_delete_history_asset_queryset().count()
+            + completed_active_count
+        ),
     }
 
 
@@ -716,14 +808,33 @@ def _build_lifecycle_plan_bundle(*, limit=1000):
     return bundle
 
 
+def _build_lifecycle_plan_count_snapshot():
+    return {
+        'plan_stats': _cloud_asset_plan_stats(),
+        'total_counts': _lifecycle_plan_total_counts(),
+        'ip_delete_total_counts': _ip_delete_plan_total_counts(),
+    }
+
+
 def _sync_lifecycle_plan_table(*, limit=1000):
     bundle = _build_lifecycle_plan_bundle(limit=limit)
+    counts = _build_lifecycle_plan_count_snapshot()
     _LIFECYCLE_PLAN_CACHE.update({
         'bundle': deepcopy(bundle),
+        'counts': deepcopy(counts),
         'generated_at': timezone.now(),
         'limit': limit,
     })
     return deepcopy(bundle)
+
+
+def _cached_lifecycle_plan_count_snapshot():
+    cached = _LIFECYCLE_PLAN_CACHE.get('counts')
+    if cached is not None:
+        return deepcopy(cached)
+    counts = _build_lifecycle_plan_count_snapshot()
+    _LIFECYCLE_PLAN_CACHE['counts'] = deepcopy(counts)
+    return counts
 
 
 def _cached_lifecycle_plan_bundle(*, limit=1000, force_refresh=False):
@@ -2401,8 +2512,10 @@ def lifecycle_plans(request):
         item for item in history_items
         if parse_item_dt(item.get('executed_at')) and parse_item_dt(item.get('executed_at')) >= recent_since
     ]
-    plan_stats = _cloud_asset_plan_stats()
-    total_counts = _lifecycle_plan_total_counts()
+    count_snapshot = _cached_lifecycle_plan_count_snapshot()
+    plan_stats = count_snapshot['plan_stats']
+    total_counts = count_snapshot['total_counts']
+    ip_delete_total_counts = count_snapshot['ip_delete_total_counts']
     if compact:
         def compact_notes(items):
             for item in items:
@@ -2454,14 +2567,14 @@ def lifecycle_plans(request):
         'source_asset_count': plan_stats['source_asset_count'],
         'server_asset_count': plan_stats['server_asset_count'],
         'server_delete_history_count': len(history_items),
-        'ip_delete_history_count': len(ip_delete_history_items),
+        'ip_delete_history_count': ip_delete_total_counts['ip_delete_history_count'],
         'shutdown_plan_count': total_counts['shutdown_plan_count'],
         'shutdown_plan_due_count': sum(1 for item in shutdown_plan_items if item.get('queue_status') in {'due_now', 'within_window'}),
         'server_delete_count': total_counts['server_delete_count'],
         'server_delete_due_count': len(due_items),
         'shutdown_count': total_counts['server_delete_count'],
         'shutdown_due_count': len(due_items),
-        'ip_delete_count': len(ip_delete_plan_items),
+        'ip_delete_count': ip_delete_total_counts['ip_delete_count'],
         'ip_delete_due_count': len(pending_ip_delete_items),
         'due_items': response_due_items,
         'future_plan_items': response_future_plan_items,
@@ -2485,30 +2598,27 @@ def refresh_lifecycle_plan_view(request):
     except (TypeError, ValueError):
         limit = 1000
     limit = max(1, min(limit, 1000))
-    bundle = _build_lifecycle_plan_bundle(limit=limit)
+    bundle = _sync_lifecycle_plan_table(limit=limit)
     last_refresh_at = _lifecycle_plan_generated_at()
-    plan_stats = _cloud_asset_plan_stats(bundle.get('source_assets') or None)
-    ip_delete_plan_items = bundle.get('ip_delete_plan_items') or [
-        item for item in bundle.get('ip_delete_items') or [] if not item.get('is_history')
-    ]
-    ip_delete_history_items = bundle.get('ip_delete_history_items') or [
-        item for item in bundle.get('ip_delete_items') or [] if item.get('is_history')
-    ]
+    count_snapshot = _cached_lifecycle_plan_count_snapshot()
+    plan_stats = count_snapshot['plan_stats']
+    total_counts = count_snapshot['total_counts']
+    ip_delete_total_counts = count_snapshot['ip_delete_total_counts']
     return _ok({
         'refreshed': True,
         'last_refresh_at': _iso(last_refresh_at),
         'due_count': len(bundle.get('due_items') or []),
         'future_count': len(bundle.get('future_plan_items') or []),
-        'shutdown_count': len(bundle.get('shutdown_items') or []),
-        'shutdown_plan_count': len(bundle.get('shutdown_plan_items') or []),
-        'server_delete_count': len(bundle.get('server_delete_items') or []),
+        'shutdown_count': total_counts['server_delete_count'],
+        'shutdown_plan_count': total_counts['shutdown_plan_count'],
+        'server_delete_count': total_counts['server_delete_count'],
         'missing_expiry_count': plan_stats['missing_expiry_count'],
         'unattached_ip_count': plan_stats['unattached_ip_count'],
         'source_asset_count': plan_stats['source_asset_count'],
         'server_asset_count': plan_stats['server_asset_count'],
         'history_count': len(bundle.get('history_items') or []),
-        'ip_delete_count': len(ip_delete_plan_items),
-        'ip_delete_history_count': len(ip_delete_history_items),
+        'ip_delete_count': ip_delete_total_counts['ip_delete_count'],
+        'ip_delete_history_count': ip_delete_total_counts['ip_delete_history_count'],
     })
 
 
