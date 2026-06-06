@@ -193,9 +193,17 @@ def _active_cloud_asset_plan_queryset(*, active_account_labels: set[str] | None 
 
 def _proxy_list_cloud_asset_plan_rows(limit=None, *, include_unattached=True):
     active_account_labels = set(_active_cloud_account_labels())
-    queryset = _active_cloud_asset_plan_queryset(active_account_labels=active_account_labels)
-    if not include_unattached:
-        queryset = queryset.exclude(_unattached_ip_asset_q())
+    if include_unattached:
+        queryset = _active_cloud_asset_plan_queryset(active_account_labels=active_account_labels)
+    else:
+        queryset = (
+            CloudAsset.objects.select_related('order', 'user', 'cloud_account', 'order__cloud_account')
+            .filter(kind=CloudAsset.KIND_SERVER)
+            .exclude(_active_cloud_asset_account_disabled_q(active_account_labels))
+            .exclude(instance_id__isnull=True)
+            .exclude(instance_id='')
+            .exclude(status__in=[CloudAsset.STATUS_DELETED, CloudAsset.STATUS_TERMINATED])
+        )
     queryset = queryset.order_by('-sort_order', 'actual_expires_at', '-updated_at', '-id')
     if limit:
         fetch_limit = max(int(limit) * 4, int(limit) + 200)
@@ -644,6 +652,8 @@ def _collect_lifecycle_plan_rows(*, limit=1000):
     shutdown_history_items.extend(_shutdown_history_order_payload(order) for order in fallback_deleted_orders)
     source_assets = shutdown_queue.get('source_assets') or []
     ip_delete_items = _unattached_ip_delete_items(limit=limit)
+    ip_delete_plan_items = [item for item in ip_delete_items if not item.get('is_history')]
+    ip_delete_history_items = [item for item in ip_delete_items if item.get('is_history')]
     shutdown_plan_items = shutdown_queue.get('shutdown_plan_items') or [
         *shutdown_queue.get('shutdown_due_items', []),
         *shutdown_queue.get('shutdown_future_items', []),
@@ -659,16 +669,23 @@ def _collect_lifecycle_plan_rows(*, limit=1000):
         'shutdown_plan_items': shutdown_plan_items,
         'server_delete_items': server_delete_items,
         'shutdown_items': server_delete_items,
+        'ip_delete_plan_items': ip_delete_plan_items,
+        'ip_delete_history_items': ip_delete_history_items,
         'ip_delete_items': ip_delete_items,
     }
 
 
 def _build_lifecycle_plan_bundle(*, limit=1000):
     bundle = _collect_lifecycle_plan_rows(limit=limit)
-    ip_delete_active = [item for item in bundle['ip_delete_items'] if not item.get('is_history')]
-    ip_delete_history = [
-        *[item for item in bundle['ip_delete_items'] if item.get('is_history')],
-    ]
+    raw_ip_delete_items = list(bundle.get('ip_delete_items') or [])
+    ip_delete_active = list(bundle.get('ip_delete_plan_items') or [
+        item for item in raw_ip_delete_items if not item.get('is_history')
+    ])
+    ip_delete_history = list(bundle.get('ip_delete_history_items') or [
+        item for item in raw_ip_delete_items if item.get('is_history')
+    ])
+    bundle['ip_delete_plan_items'] = ip_delete_active
+    bundle['ip_delete_history_items'] = ip_delete_history
     bundle['ip_delete_items'] = [*ip_delete_active, *ip_delete_history]
     return bundle
 
@@ -2302,7 +2319,14 @@ def lifecycle_plans(request):
     )
     history_items = history_items[:limit]
 
-    ip_delete_items = list(bundle.get('ip_delete_items') or [])
+    bundled_ip_delete_items = list(bundle.get('ip_delete_items') or [])
+    ip_delete_plan_items = list(bundle.get('ip_delete_plan_items') or [
+        item for item in bundled_ip_delete_items if not item.get('is_history')
+    ])
+    ip_delete_history_items = list(bundle.get('ip_delete_history_items') or [
+        item for item in bundled_ip_delete_items if item.get('is_history')
+    ])
+    ip_delete_items = [*ip_delete_plan_items, *ip_delete_history_items]
     ip_delete_items = _refresh_plan_payload_from_assets(ip_delete_items)
     ip_delete_items = [decorate_plan_item(item) for item in ip_delete_items]
 
@@ -2333,7 +2357,8 @@ def lifecycle_plans(request):
         parsed = parse_item_dt(delete_at)
         return bool(parsed and parsed <= ip_delete_pending_until)
 
-    pending_ip_delete_items = [item for item in ip_delete_items if is_ip_delete_pending(item)]
+    ip_delete_plan_items = [item for item in ip_delete_items if not item.get('is_history')]
+    pending_ip_delete_items = [item for item in ip_delete_plan_items if is_ip_delete_pending(item)]
     ip_delete_history_items = [item for item in ip_delete_items if item.get('is_history')]
     due_items = [item for item in shutdown_items if is_server_delete_due(item)]
     future_plan_items = [item for item in shutdown_items if item not in due_items]
@@ -2341,9 +2366,10 @@ def lifecycle_plans(request):
     shutdown_items = _sort_lifecycle_active_items(shutdown_items)
     due_items = _sort_lifecycle_active_items(due_items)
     future_plan_items = _sort_lifecycle_active_items(future_plan_items)
-    ip_delete_items = _sort_lifecycle_active_items([item for item in ip_delete_items if not item.get('is_history')]) + _sort_lifecycle_history_items(ip_delete_history_items)
+    ip_delete_plan_items = _sort_lifecycle_active_items(ip_delete_plan_items)
     pending_ip_delete_items = _sort_lifecycle_active_items(pending_ip_delete_items)
     ip_delete_history_items = _sort_lifecycle_history_items(ip_delete_history_items)
+    ip_delete_items = [*ip_delete_plan_items, *ip_delete_history_items]
     recent_since = now - timezone.timedelta(days=1)
     recent_history = [
         item for item in history_items
@@ -2366,16 +2392,17 @@ def lifecycle_plans(request):
     response_shutdown_items = shutdown_items[:limit]
     response_shutdown_plan_items = shutdown_plan_items[:limit]
     response_server_delete_items = shutdown_items[:limit]
-    response_ip_delete_items = [
-        *[item for item in ip_delete_items if not item.get('is_history')][:limit],
-        *ip_delete_history_items[:limit],
-    ]
+    response_ip_delete_plan_items = ip_delete_plan_items[:limit]
+    response_ip_delete_history_items = ip_delete_history_items[:limit]
+    response_ip_delete_items = [*response_ip_delete_plan_items, *response_ip_delete_history_items]
     response_history_items = history_items[:limit]
     response_due_items = due_items[:limit]
     response_future_plan_items = future_plan_items[:limit]
     _strip_lifecycle_plan_fields(response_shutdown_items, fields)
     _strip_lifecycle_plan_fields(response_shutdown_plan_items, fields)
     _strip_lifecycle_plan_fields(response_server_delete_items, fields)
+    _strip_lifecycle_plan_fields(response_ip_delete_plan_items, fields)
+    _strip_lifecycle_plan_fields(response_ip_delete_history_items, fields)
     _strip_lifecycle_plan_fields(response_ip_delete_items, fields)
     _strip_lifecycle_plan_fields(response_history_items, fields)
     _strip_lifecycle_plan_fields(response_due_items, fields)
@@ -2407,7 +2434,7 @@ def lifecycle_plans(request):
         'server_delete_due_count': len(due_items),
         'shutdown_count': len(due_items) + len(future_plan_items),
         'shutdown_due_count': len(due_items),
-        'ip_delete_count': len(pending_ip_delete_items),
+        'ip_delete_count': len(ip_delete_plan_items),
         'ip_delete_due_count': len(pending_ip_delete_items),
         'due_items': response_due_items,
         'future_plan_items': response_future_plan_items,
@@ -2415,6 +2442,8 @@ def lifecycle_plans(request):
         'shutdown_plan_items': response_shutdown_plan_items,
         'server_delete_items': response_server_delete_items,
         'shutdown_items': response_shutdown_items,
+        'ip_delete_plan_items': response_ip_delete_plan_items,
+        'ip_delete_history_items': response_ip_delete_history_items,
         'ip_delete_items': response_ip_delete_items,
     })
 
@@ -2432,6 +2461,12 @@ def refresh_lifecycle_plan_view(request):
     bundle = _build_lifecycle_plan_bundle(limit=limit)
     last_refresh_at = _lifecycle_plan_generated_at()
     plan_stats = _cloud_asset_plan_stats(bundle.get('source_assets') or None)
+    ip_delete_plan_items = bundle.get('ip_delete_plan_items') or [
+        item for item in bundle.get('ip_delete_items') or [] if not item.get('is_history')
+    ]
+    ip_delete_history_items = bundle.get('ip_delete_history_items') or [
+        item for item in bundle.get('ip_delete_items') or [] if item.get('is_history')
+    ]
     return _ok({
         'refreshed': True,
         'last_refresh_at': _iso(last_refresh_at),
@@ -2445,7 +2480,8 @@ def refresh_lifecycle_plan_view(request):
         'source_asset_count': plan_stats['source_asset_count'],
         'server_asset_count': plan_stats['server_asset_count'],
         'history_count': len(bundle.get('history_items') or []),
-        'ip_delete_count': len(bundle.get('ip_delete_items') or []),
+        'ip_delete_count': len(ip_delete_plan_items),
+        'ip_delete_history_count': len(ip_delete_history_items),
     })
 
 

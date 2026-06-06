@@ -307,6 +307,8 @@ class CloudAsset(models.Model):
             models.Index(fields=['provider', 'account_label', 'region_code', 'public_ip'], name='ca_provider_acct_ip_idx'),
             models.Index(fields=['order', 'status'], name='ca_order_status_idx'),
             models.Index(fields=['kind', 'user', 'status'], name='ca_kind_user_status_idx'),
+            models.Index(fields=['kind', 'updated_at'], name='ca_kind_updated_idx'),
+            models.Index(fields=['kind', '-sort_order', 'actual_expires_at', '-updated_at'], name='ca_kind_sort_due_idx'),
         ]
 
     def __str__(self):

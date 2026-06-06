@@ -9528,6 +9528,62 @@ git diff --check
 - 本地 50 万压测数据仍保留，清理需要单独确认。
 - 后端仓库仍有本轮无关未跟踪文档 `docs/jisou-bot-functions.md`、`docs/telegram-search-development-plan.md`、`docs/telegram-search-large-scale-architecture.md`，本轮未处理。
 
+## 2026-06-06 代理列表快照与计划页 IP 删除字段拆分修复
+
+### 背景
+
+用户指出“IP删除计划和IP删除记录是不是弄混了”。复查确认后端原来把活动 IP 删除计划和 IP 删除历史记录拼进同一个 `ip_delete_items` 字段，前端再用 `is_history` 过滤；虽然能显示，但接口契约不清晰，容易造成计数和表格误判。浏览器实测计划页时还发现 50 万压测数据下计划页接口曾因服务器资产计划查询超时返回 500。
+
+### 修改
+
+- 后端生命周期计划接口新增明确字段：
+  - `ip_delete_plan_items`：只包含活动 IP 删除计划。
+  - `ip_delete_history_items`：只包含 IP 删除历史记录。
+- 保留 `ip_delete_items` 作为兼容字段，避免旧入口断裂。
+- `ip_delete_count` 改为活动 IP 删除计划总数，`ip_delete_due_count` / `pending_ip_delete_count` 保持近期待执行语义，`ip_delete_history_count` 保持历史记录总数语义。
+- 前端计划页改为优先读取 `ip_delete_plan_items` 和 `ip_delete_history_items`，不再以混合字段作为主数据源。
+- 代理列表快照刷新增加大数据保护，避免快照为空或快照过期时在列表请求内同步刷新 50 万资产。
+- 新增 `CloudAsset(kind, updated_at)` 索引支撑快照过期候选检查。
+- 服务器生命周期计划查询避开备注/状态文本模糊匹配路径，改用实例 ID 明确存在的服务器资产作为计划来源，避免大表文本扫描。
+- 新增 `CloudAsset(kind, -sort_order, actual_expires_at, -updated_at)` 索引支撑计划页排序取前批数据。
+
+### 验证
+
+本地已通过：
+
+```bash
+DB_ENGINE=mysql UV_CACHE_DIR=/private/tmp/uv-cache-shop PYTHONDONTWRITEBYTECODE=1 uv run python -m py_compile bot/api.py cloud/api_asset_snapshots.py cloud/models.py cloud/tests.py cloud/migrations/0055_cloudasset_kind_updated_index.py cloud/migrations/0056_cloudasset_lifecycle_plan_sort_index.py
+DB_ENGINE=mysql UV_CACHE_DIR=/private/tmp/uv-cache-shop PYTHONDONTWRITEBYTECODE=1 uv run python manage.py check
+DB_ENGINE=mysql UV_CACHE_DIR=/private/tmp/uv-cache-shop PYTHONDONTWRITEBYTECODE=1 uv run python manage.py migrate --plan
+DB_ENGINE=mysql UV_CACHE_DIR=/private/tmp/uv-cache-shop PYTHONDONTWRITEBYTECODE=1 uv run python manage.py migrate
+DJANGO_TEST_SQLITE=1 UV_CACHE_DIR=/private/tmp/uv-cache-shop PYTHONDONTWRITEBYTECODE=1 uv run python manage.py test cloud.tests.CloudServerServicesTestCase.test_cloud_assets_list_defers_large_stale_snapshot_refresh cloud.tests.CloudServerServicesTestCase.test_cloud_assets_grouped_paginated_uses_twenty_user_groups_per_page cloud.tests.CloudServerServicesTestCase.test_cloud_assets_list_compact_returns_ip_view_payload --settings=shop.settings --verbosity=2
+DJANGO_TEST_SQLITE=1 UV_CACHE_DIR=/private/tmp/uv-cache-shop PYTHONDONTWRITEBYTECODE=1 uv run python manage.py test cloud.tests.CloudServerServicesTestCase.test_lifecycle_plans_separate_ip_delete_plan_and_history_items cloud.tests.CloudServerServicesTestCase.test_lifecycle_plans_compact_request_keeps_ip_delete_history_item cloud.tests.CloudServerServicesTestCase.test_lifecycle_plans_include_ip_delete_history_item cloud.tests.CloudServerServicesTestCase.test_lifecycle_plans_include_real_released_retained_ip_history_without_active_row cloud.tests.CloudServerServicesTestCase.test_lifecycle_plans_move_deleted_unattached_ip_active_row_to_history cloud.tests.CloudServerServicesTestCase.test_lifecycle_plans_use_stage_specific_asset_switches cloud.tests.CloudServerServicesTestCase.test_lifecycle_plans_split_shutdown_before_server_delete --settings=shop.settings --verbosity=2
+pnpm -C /Users/a399/Desktop/data/vue-shop-admin --filter @vben/web-antd typecheck
+```
+
+浏览器和接口实测：
+
+- `/admin/tasks/plans` 实际打开成功。
+- 最新计划接口请求返回 200，`time_total=3.036615`。
+- 响应字段检查：`ip_delete_plan_items=0`、`ip_delete_history_items=7`、`plan_has_history_rows=false`、`history_has_active_rows=false`。
+- 页面显示：`IP删除计划（0）`、`IP删除历史记录（7）`、顶部 `IP删除历史 7 条`。
+- 当前浏览器 console error 为 0。
+
+SQLite 聚焦测试仍输出 `db_comment` / `db_table_comment` 不支持的 warnings，属于当前测试环境预期差异。
+
+### 红线
+
+- 本轮未执行真实云资源创建、删除、关机、释放 IP、换 IP、真实支付、链上广播、删除数据或生产发布。
+- 本轮未打印密钥、私钥、Telegram session、TOTP、支付密钥或云厂商密钥。
+- 本轮未恢复订单侧到期字段、旧计划快照、旧退款入口或废弃 runtime app。
+
+### 剩余风险
+
+- 本地 50 万压测数据仍保留，清理需要单独确认。
+- 计划页接口已从超时恢复到约 3 秒；如果必须稳定低于 2 秒，还需要继续做计划表缓存分页或预聚合。
+- 后端仓库仍有本轮无关未跟踪文档 `docs/jisou-bot-functions.md`、`docs/telegram-search-development-plan.md`、`docs/telegram-search-large-scale-architecture.md`，本轮未处理。
+- 前端仓库仍有大量本轮无关脏文件和既有 `apps/web-antd/src/views/dashboard/cloud-assets/index.vue` 脏改动，本轮未处理。
+
 ## 2026-06-06 计划页和生命周期计划分段修复
 
 ### 背景

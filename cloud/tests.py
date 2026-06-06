@@ -1667,6 +1667,40 @@ class CloudServerServicesTestCase(TestCase):
         self.assertEqual(group['user_key'], f'unbound:{asset.id}')
         self.assertNotEqual(group['user_key'], 'user:unbound')
 
+    # 功能：大量快照过期时列表接口不应在请求内同步全量刷新，避免大数据页面超时。
+    def test_cloud_assets_list_defers_large_stale_snapshot_refresh(self):
+        assets = []
+        for index in range(2):
+            assets.append(CloudAsset.objects.create(
+                kind=CloudAsset.KIND_SERVER,
+                source=CloudAsset.SOURCE_AWS_SYNC,
+                user=self.user,
+                provider='aws_lightsail',
+                region_code=self.plan.region_code,
+                region_name=self.plan.region_name,
+                asset_name=f'snapshot-stale-large-{index}',
+                public_ip=f'10.77.89.{index + 1}',
+                status=CloudAsset.STATUS_RUNNING,
+                actual_expires_at=timezone.now() + timezone.timedelta(days=30),
+            ))
+        refresh_cloud_asset_dashboard_snapshots(asset_ids=[asset.id for asset in assets], reason='test', full=False)
+        for asset in assets:
+            asset.asset_name = f'{asset.asset_name}-updated'
+            asset.save(update_fields=['asset_name', 'updated_at'])
+
+        admin = get_user_model().objects.create_user(username='snapshot_stale_large_admin', password='x', is_staff=True)
+        request = self.factory.get('/api/admin/cloud-assets/', {'compact': '1', 'grouped': '1', 'paginated': '1', 'group_by': 'user'})
+        self._attach_bearer_session(request, admin)
+        with patch('cloud.api_asset_snapshots._SNAPSHOT_SYNC_REFRESH_LIMIT', 1), \
+            patch('cloud.api_asset_snapshots.refresh_cloud_asset_dashboard_snapshots', side_effect=AssertionError('large stale snapshots should not block list requests')):
+            response = cloud_assets_list(request)
+        payload = json.loads(response.content.decode('utf-8'))['data']
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(payload['total'], 1)
+        self.assertEqual(len(payload['groups']), 1)
+        self.assertEqual({item['id'] for item in payload['items']}, {asset.id for asset in assets})
+
     # 功能：验证删除计划轻量字段开关会移除备注和执行详情，降低大列表 payload。
     def test_lifecycle_plans_fields_basic_omits_notes_and_execution_payload(self):
         for index in range(12):
@@ -9611,6 +9645,61 @@ class CloudServerServicesTestCase(TestCase):
 
         self.assertTrue(rows)
         self.assertGreaterEqual(data['ip_delete_history_count'], 1)
+
+    # 功能：验证 IP 删除计划和 IP 删除历史记录在接口字段中严格分离，旧兼容字段仍可包含两类数据。
+    def test_lifecycle_plans_separate_ip_delete_plan_and_history_items(self):
+        active_asset = CloudAsset.objects.create(
+            kind=CloudAsset.KIND_SERVER,
+            source=CloudAsset.SOURCE_AWS_SYNC,
+            user=self.user,
+            provider='aws_lightsail',
+            region_code=self.plan.region_code,
+            region_name=self.plan.region_name,
+            asset_name='separate-active-unattached-ip',
+            public_ip='52.77.18.251',
+            status=CloudAsset.STATUS_RUNNING,
+            provider_status='未附加固定IP',
+            note='未附加固定IP',
+            actual_expires_at=timezone.now() - timezone.timedelta(days=1),
+            is_active=True,
+        )
+        history_asset = CloudAsset.objects.create(
+            kind=CloudAsset.KIND_SERVER,
+            source=CloudAsset.SOURCE_AWS_SYNC,
+            user=self.user,
+            provider='aws_lightsail',
+            region_code=self.plan.region_code,
+            region_name=self.plan.region_name,
+            asset_name='separate-history-unattached-ip',
+            previous_public_ip='52.77.18.252',
+            status=CloudAsset.STATUS_DELETED,
+            provider_status='已删除',
+            is_active=False,
+        )
+        record_cloud_ip_log(
+            event_type=CloudIpLog.EVENT_RECYCLED,
+            asset=history_asset,
+            previous_public_ip='52.77.18.252',
+            public_ip=None,
+            note='固定 IP 保留期结束，AWS 固定 IP 已真实释放',
+        )
+        staff_user = get_user_model().objects.create_user(username='staff_lifecycle_ip_split_contract', password='x', is_staff=True)
+        request = self.factory.get('/api/admin/tasks/plans/', {'refresh': 1, 'limit': 1000})
+        self._attach_bearer_session(request, staff_user)
+
+        response = lifecycle_plans(request)
+        data = json.loads(response.content)['data']
+        plan_rows = data['ip_delete_plan_items']
+        history_rows = data['ip_delete_history_items']
+
+        self.assertTrue(any(item.get('asset_id') == active_asset.id for item in plan_rows))
+        self.assertFalse(any(item.get('asset_id') == active_asset.id for item in history_rows))
+        self.assertTrue(any(item.get('asset_id') == history_asset.id and item.get('is_history') for item in history_rows))
+        self.assertFalse(any(item.get('asset_id') == history_asset.id for item in plan_rows))
+        self.assertTrue(any(item.get('asset_id') == active_asset.id for item in data['ip_delete_items']))
+        self.assertTrue(any(item.get('asset_id') == history_asset.id and item.get('is_history') for item in data['ip_delete_items']))
+        self.assertEqual(data['ip_delete_count'], len(plan_rows))
+        self.assertEqual(data['ip_delete_history_count'], len(history_rows))
 
     # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
     def test_lifecycle_plans_sort_shutdown_items_by_delete_time(self):

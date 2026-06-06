@@ -1,7 +1,11 @@
 """云资产列表快照读写与分页辅助。"""
 
+import hashlib
 import logging
+import threading
 
+from django.core.cache import cache
+from django.db import close_old_connections
 from django.db.models import Count, F, Min, Q
 from django.utils import timezone
 from django.utils.dateparse import parse_datetime
@@ -12,6 +16,60 @@ from cloud.models import CloudAsset, CloudAssetDashboardSnapshot
 from core.dashboard_api import _countdown_label, _days_left, _decimal_to_str
 
 logger = logging.getLogger(__name__)
+
+_SNAPSHOT_SYNC_REFRESH_LIMIT = 1000
+
+
+def _normalize_snapshot_asset_ids(asset_ids):
+    if not asset_ids:
+        return []
+    normalized = []
+    seen = set()
+    for value in asset_ids:
+        try:
+            parsed = int(value)
+        except (TypeError, ValueError):
+            continue
+        if parsed <= 0 or parsed in seen:
+            continue
+        normalized.append(parsed)
+        seen.add(parsed)
+    return normalized
+
+
+def _defer_cloud_asset_dashboard_snapshot_refresh(*, reason: str, asset_ids=None, full=False) -> bool:
+    normalized_asset_ids = _normalize_snapshot_asset_ids(asset_ids)
+    if full:
+        scope_key = 'full'
+    else:
+        scope = ','.join(str(value) for value in normalized_asset_ids)
+        digest = hashlib.sha1(scope.encode('utf-8')).hexdigest()[:16] if scope else 'empty'
+        scope_key = f'assets:{digest}'
+    lock_key = f'cloud-asset-dashboard-snapshot-refresh:{scope_key}'
+    if not cache.add(lock_key, reason or 'pending', timeout=300):
+        return False
+
+    def _run():
+        close_old_connections()
+        try:
+            refresh_cloud_asset_dashboard_snapshots(
+                asset_ids=None if full else normalized_asset_ids,
+                reason=reason,
+                full=full,
+            )
+        except Exception:
+            logger.exception(
+                'CLOUD_ASSET_DASHBOARD_SNAPSHOT_DEFERRED_REFRESH_FAILED reason=%s full=%s assets=%s',
+                reason,
+                full,
+                len(normalized_asset_ids),
+            )
+        finally:
+            cache.delete(lock_key)
+            close_old_connections()
+
+    threading.Thread(target=_run, name='cloud-asset-dashboard-snapshot-refresh', daemon=True).start()
+    return True
 
 
 def _default_cloud_asset_payloads(assets, *, allow_mutation=False):
@@ -186,22 +244,41 @@ def refresh_cloud_asset_dashboard_snapshots(asset_ids=None, *, reason: str = '',
 
 
 def _ensure_cloud_asset_dashboard_snapshots(reason: str = 'list') -> bool:
-    asset_total = CloudAsset.objects.filter(kind=CloudAsset.KIND_SERVER).count()
-    snapshot_total = CloudAssetDashboardSnapshot.objects.count()
-    if asset_total and not snapshot_total:
-        refresh_cloud_asset_dashboard_snapshots(reason=f'{reason}:empty', full=True)
-        return True
+    asset_queryset = CloudAsset.objects.filter(kind=CloudAsset.KIND_SERVER)
+    if not CloudAssetDashboardSnapshot.objects.exists():
+        asset_total = asset_queryset.count()
+        if not asset_total:
+            return False
+        if asset_total <= _SNAPSHOT_SYNC_REFRESH_LIMIT:
+            refresh_cloud_asset_dashboard_snapshots(reason=f'{reason}:empty', full=True)
+            return True
+        _defer_cloud_asset_dashboard_snapshot_refresh(reason=f'{reason}:empty-large', full=True)
+        return False
     latest_asset = (
-        CloudAsset.objects
-        .filter(kind=CloudAsset.KIND_SERVER)
+        asset_queryset
         .order_by('-updated_at')
         .values_list('updated_at', flat=True)
         .first()
     )
     latest_snapshot = CloudAssetDashboardSnapshot.objects.order_by('-asset_updated_at').values_list('asset_updated_at', flat=True).first()
     if latest_asset and (not latest_snapshot or latest_snapshot < latest_asset):
-        refresh_cloud_asset_dashboard_snapshots(reason=f'{reason}:stale', full=True)
-        return True
+        stale_queryset = asset_queryset.order_by('-updated_at')
+        if latest_snapshot:
+            stale_queryset = stale_queryset.filter(updated_at__gt=latest_snapshot)
+        stale_ids = list(
+            stale_queryset.values_list('id', flat=True)[:_SNAPSHOT_SYNC_REFRESH_LIMIT + 1]
+        )
+        refresh_ids = _normalize_snapshot_asset_ids(stale_ids)
+        if refresh_ids and len(refresh_ids) <= _SNAPSHOT_SYNC_REFRESH_LIMIT:
+            refresh_cloud_asset_dashboard_snapshots(asset_ids=refresh_ids, reason=f'{reason}:stale', full=False)
+            return True
+        logger.info(
+            'CLOUD_ASSET_DASHBOARD_SNAPSHOT_STALE_LARGE_SKIPPED reason=%s candidates=%s limit=%s',
+            reason,
+            len(stale_ids),
+            _SNAPSHOT_SYNC_REFRESH_LIMIT,
+        )
+        return False
     return False
 
 
