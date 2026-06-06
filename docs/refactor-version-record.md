@@ -9959,3 +9959,51 @@ git grep -n "dashboard_plan_snapshots" -- shop core bot orders cloud ':!*/migrat
 - MySQL 迁移计划复查受本机数据库服务不可用影响未得到成功完成态；如需恢复，应先启动或修复本机 MySQL/OrbStack 3306 监听后复跑。
 - 本地 50 万压测数据仍保留，清理需要单独确认。
 - 后端仓库仍有本轮无关未跟踪文档 `docs/jisou-bot-functions.md`、`docs/telegram-search-development-plan.md`、`docs/telegram-search-large-scale-architecture.md`，本轮未处理。
+
+## 2026-06-06 修复终端监工 MySQL/OrbStack 预检
+
+### 背景
+
+用户要求修复自动监工巡检中暴露的 MySQL 环境问题。上一轮记录显示本机 `127.0.0.1:3306` 无监听，导致 `DB_ENGINE=mysql uv run python manage.py migrate --plan` 连接被拒绝。
+
+### 修改
+
+- 暂停终端版自动监工，避免修复环境时同时启动新一轮 `codex exec`。
+- 确认 OrbStack 已恢复运行，`127.0.0.1:3306` 当前由 OrbStack 监听，MySQL/MariaDB greeting 可读。
+- 新增用户级守护脚本 `/Users/a399/.codex/bin/shop-codex-auto-optimizer.zsh`，把原 LaunchAgent 中的长内联命令移入脚本。
+- 更新用户级 LaunchAgent `/Users/a399/Library/LaunchAgents/com.a399.shop-codex-auto-optimizer.plist`，改为调用上述脚本。
+- 守护脚本每轮执行 `codex exec` 前会检查 `127.0.0.1:3306` 是否监听；如果未监听，会尝试启动 OrbStack 并等待恢复，避免自动监工因为本机数据库端口短暂不可用反复失败。
+- 本轮未修改业务代码。
+
+### 验证
+
+本地已通过：
+
+```bash
+zsh -n /Users/a399/.codex/bin/shop-codex-auto-optimizer.zsh
+plutil -lint /Users/a399/Library/LaunchAgents/com.a399.shop-codex-auto-optimizer.plist
+lsof -nP -iTCP:3306 -sTCP:LISTEN
+UV_CACHE_DIR=/private/tmp/uv-cache-shop PYTHONDONTWRITEBYTECODE=1 uv run python - <<'PY'
+import socket
+s=socket.create_connection(('127.0.0.1', 3306), timeout=3)
+s.settimeout(3)
+print('tcp_connect ok')
+print('mysql_greeting_prefix', s.recv(16))
+s.close()
+PY
+DB_ENGINE=mysql UV_CACHE_DIR=/private/tmp/uv-cache-shop PYTHONDONTWRITEBYTECODE=1 uv run python manage.py check
+DB_ENGINE=mysql UV_CACHE_DIR=/private/tmp/uv-cache-shop PYTHONDONTWRITEBYTECODE=1 perl -e 'alarm 30; exec @ARGV' uv run python manage.py migrate --plan
+```
+
+结果：MySQL 端口监听恢复；`manage.py check` 通过；`migrate --plan` 输出 `Planned operations: No planned migration operations.`。
+
+### 红线
+
+- 本轮未执行真实云资源创建、删除、关机、释放 IP、换 IP、真实支付、链上广播、删除数据或生产发布。
+- 本轮未打印密钥、私钥、Telegram session、TOTP、支付密钥或云厂商密钥。
+
+### 剩余风险
+
+- OrbStack 属于本机运行环境；如果用户手动退出 OrbStack，守护脚本会尝试重新拉起，但仍可能受本机资源或 OrbStack 自身状态影响。
+- 本地 50 万压测数据仍保留，清理需要单独确认。
+- 后端仓库仍有本轮无关未跟踪文档 `docs/jisou-bot-functions.md`、`docs/telegram-search-development-plan.md`、`docs/telegram-search-large-scale-architecture.md`，本轮未处理。
