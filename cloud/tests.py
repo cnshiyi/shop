@@ -10213,6 +10213,45 @@ class CloudServerServicesTestCase(TestCase):
         row = next(item for item in data['due_items'] if item.get('order_id') == order.id and item.get('notice_type') == 'renew_notice')
         self.assertEqual(row['ip'], '7.7.7.71')
 
+    # 功能：验证通知表关闭文案列后不再构造批量通知文案，避免大数据分页加载被隐藏列拖慢。
+    def test_notice_task_detail_basic_fields_skip_batch_text_payload(self):
+        now = timezone.now()
+        expires_at = now + timezone.timedelta(days=1)
+        order = CloudServerOrder.objects.create(
+            order_no='NOTICE-BASIC-FIELDS-1',
+            user=self.user,
+            plan=self.plan,
+            provider=self.plan.provider,
+            region_code=self.plan.region_code,
+            region_name=self.plan.region_name,
+            plan_name=self.plan.plan_name,
+            quantity=1,
+            currency='USDT',
+            total_amount='19.00',
+            pay_amount='19.00',
+            status='completed',
+            public_ip='7.7.7.72',
+            cloud_reminder_enabled=True,
+        )
+        self._create_auto_renew_asset(order, expires_at=expires_at)
+        staff_user = get_user_model().objects.create_user(username='staff_notice_basic_fields', password='x', is_staff=True)
+        request = self.factory.get('/api/admin/tasks/notices/', {
+            'compact': '1',
+            'fields': 'basic',
+            'limit': '10',
+            'future_limit': '10',
+            'history_limit': '10',
+        })
+        self._attach_bearer_session(request, staff_user)
+
+        with patch('cloud.api_tasks._notice_actual_batch_payload', side_effect=AssertionError('隐藏文案列时不应构造批量文案')):
+            response = notice_task_detail(request)
+
+        self.assertEqual(response.status_code, 200)
+        data = json.loads(response.content)['data']
+        row = next(item for item in data['due_user_summary_items'] if item.get('user_id') == self.user.id)
+        self.assertNotIn('notice_text_preview', row)
+
     # 功能：验证通知计划未来队列按调用方上限截断，避免订单多时继续无限扩张。
     def test_notice_task_future_items_respects_future_limit(self):
         from cloud.api_tasks import _notice_task_future_items
@@ -11072,6 +11111,43 @@ class CloudServerServicesTestCase(TestCase):
 
         self.assertNotIn(unattached.id, ids)
         self.assertIn(attached.id, ids)
+
+    # 功能：验证服务器后台列表使用服务端分页返回全量资产，不再只暴露前 500 条。
+    def test_servers_list_paginated_matches_cloud_asset_order(self):
+        now = timezone.now()
+        assets = []
+        for index in range(3):
+            assets.append(CloudAsset.objects.create(
+                kind=CloudAsset.KIND_SERVER,
+                source=CloudAsset.SOURCE_ORDER,
+                user=self.user,
+                provider='aws_lightsail',
+                region_code=self.plan.region_code,
+                region_name=self.plan.region_name,
+                asset_name=f'paginated-server-{index}',
+                instance_id=f'i-paginated-server-{index}',
+                public_ip=f'9.9.9.{20 + index}',
+                status=CloudAsset.STATUS_RUNNING,
+                actual_expires_at=now + timezone.timedelta(days=index + 1),
+                is_active=True,
+            ))
+        staff_user = get_user_model().objects.create_user(username='staff_servers_list_paginated', password='x', is_staff=True)
+        request = RequestFactory().get('/api/admin/servers/', {
+            'paginated': '1',
+            'dedup': '0',
+            'page': '2',
+            'page_size': '2',
+        })
+        self._attach_bearer_session(request, staff_user)
+
+        response = servers_list(request)
+        data = json.loads(response.content)['data']
+
+        self.assertEqual(data['total'], 3)
+        self.assertEqual(data['page'], 2)
+        self.assertEqual(data['page_size'], 2)
+        self.assertEqual(data['total_pages'], 2)
+        self.assertEqual([item['id'] for item in data['items']], [assets[2].id])
 
     # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
     def test_send_logged_cloud_notice_deduplicates_same_event_and_order(self):

@@ -91,6 +91,15 @@ def servers_list(request):
     keyword = _get_keyword(request)
     dedup_raw = (request.GET.get('dedup') or '').lower()
     dedup = dedup_raw not in {'0', 'false', 'no', 'off'}
+    paginated = str(request.GET.get('paginated') or '').strip().lower() in {'1', 'true', 'yes', 'on'}
+    try:
+        page = max(1, int(request.GET.get('page') or 1))
+    except (TypeError, ValueError):
+        page = 1
+    try:
+        page_size = max(1, min(int(request.GET.get('page_size') or 50), 500))
+    except (TypeError, ValueError):
+        page_size = 50
     sort_by = (request.GET.get('sort_by') or '').strip().lower()
     sort_direction = _dashboard_sort_direction(request)
     ordering = ['actual_expires_at', '-updated_at', '-id']
@@ -112,7 +121,14 @@ def servers_list(request):
         queryset = queryset.filter(provider=provider)
     if region_code:
         queryset = queryset.filter(region_code=region_code)
-    items = [_server_payload(asset) for asset in queryset[:500]]
+    total = queryset.count() if paginated else None
+    if paginated:
+        start = (page - 1) * page_size
+        stop = start + page_size
+        page_queryset = queryset[start:stop]
+    else:
+        page_queryset = queryset[:500]
+    items = [_server_payload(asset) for asset in page_queryset]
     if dedup:
         seen = set()
         deduped = []
@@ -123,6 +139,15 @@ def servers_list(request):
             seen.add(dedup_key)
             deduped.append(item)
         items = deduped
+    if paginated:
+        total_value = int(total or 0)
+        return _ok({
+            'items': items,
+            'page': page,
+            'page_size': page_size,
+            'total': total_value,
+            'total_pages': (total_value + page_size - 1) // page_size if page_size else 0,
+        })
     return _ok(items)
 
 

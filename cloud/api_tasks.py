@@ -640,7 +640,7 @@ def _notice_status_payload(*, sent_at=None, latest_log=None, queue_status='sched
 
 
 # 功能：提供 后台 API 接口 的内部辅助逻辑，供同模块流程复用。
-def _notice_task_item_payload(order, notice_type: str, *, queue_status='scheduled_future', queue_status_label='未来计划', next_run_at=None, latest_log=None, account_attempts: list[dict] | None = None, notice: dict | None = None):
+def _notice_task_item_payload(order, notice_type: str, *, queue_status='scheduled_future', queue_status_label='未来计划', next_run_at=None, latest_log=None, account_attempts: list[dict] | None = None, notice: dict | None = None, fields: set[str] | None = None):
     user = getattr(order, 'user', None)
     usernames = list(getattr(user, 'usernames', []) or []) if user else []
     user_payload = _user_payload({
@@ -651,10 +651,11 @@ def _notice_task_item_payload(order, notice_type: str, *, queue_status='schedule
         'usernames': usernames,
         'primary_username': usernames[0] if usernames else '',
     }) if user else None
+    fields = fields or {'basic', 'channels', 'ips', 'retry', 'text'}
     notice = notice or _notice_payload_for_order(order) or {}
     expires_at = notice.get('expires_at') or order_asset_expiry(order)
     sent_at = getattr(order, _NOTICE_TASK_TYPES.get(notice_type, {}).get('field', ''), None)
-    return {
+    payload = {
         'id': f'{notice_type}-{order.id}',
         'order_id': order.id,
         'order_no': order.order_no,
@@ -668,8 +669,6 @@ def _notice_task_item_payload(order, notice_type: str, *, queue_status='schedule
         'queue_status': queue_status,
         'queue_status_label': queue_status_label,
         **_notice_status_payload(sent_at=sent_at, latest_log=latest_log, queue_status=queue_status),
-        **_notice_channel_payload(user, latest_log, account_attempts),
-        'notice_text_preview': _notice_task_text_preview(order, notice_type, notice),
         'user_id': user.id if user else None,
         'tg_user_id': user.tg_user_id if user else None,
         'user_display_name': user_payload['display_name'] if user_payload else '未绑定用户',
@@ -686,6 +685,11 @@ def _notice_task_item_payload(order, notice_type: str, *, queue_status='schedule
         'order_detail_path': f'/admin/cloud-orders/{order.id}',
         'order_link_path': f'/admin/cloud-orders/{order.id}',
     }
+    if 'channels' in fields:
+        payload.update(_notice_channel_payload(user, latest_log, account_attempts))
+    if 'text' in fields:
+        payload['notice_text_preview'] = _notice_task_text_preview(order, notice_type, notice)
+    return payload
 
 
 # 功能：提供 后台 API 接口 的内部辅助逻辑，供同模块流程复用。
@@ -815,7 +819,8 @@ def _notice_task_future_items(now, next_run_at, seen_keys: set[tuple[str, int]],
 
 
 # 功能：提供 后台 API 接口 的内部辅助逻辑，供同模块流程复用。
-def _notice_group_summary_items(items: list[dict], *, limit: int | None = None, offset: int = 0) -> tuple[list[dict], int]:
+def _notice_group_summary_items(items: list[dict], *, limit: int | None = None, offset: int = 0, fields: set[str] | None = None) -> tuple[list[dict], int]:
+    fields = fields or {'basic', 'channels', 'ips', 'retry', 'text'}
     grouped = {}
     for item in items:
         notice_type = item.get('notice_type') or ''
@@ -880,13 +885,14 @@ def _notice_group_summary_items(items: list[dict], *, limit: int | None = None, 
     visible_summary = summary[offset:offset + limit] if limit else summary[offset:]
     for group in visible_summary:
         order_ids = group.get('order_ids') or []
-        payload = _notice_actual_batch_payload(group.get('notice_type') or '', order_ids)
-        manual_payload = _notice_manual_text_payload(group.get('notice_type') or '', group.get('user_id'), order_ids)
-        manual_text = manual_payload.get('notice_manual_text') or ''
-        group.update(manual_payload)
-        group['notice_text_preview'] = manual_text or payload.get('text') or group.get('notice_text_preview') or ''
+        if 'text' in fields:
+            payload = _notice_actual_batch_payload(group.get('notice_type') or '', order_ids)
+            manual_payload = _notice_manual_text_payload(group.get('notice_type') or '', group.get('user_id'), order_ids)
+            manual_text = manual_payload.get('notice_manual_text') or ''
+            group.update(manual_payload)
+            group['notice_text_preview'] = manual_text or payload.get('text') or group.get('notice_text_preview') or ''
+            group['ip_count'] = int(payload.get('count') or group.get('ip_count') or 0)
         group['notice_count'] = 1
-        group['ip_count'] = int(payload.get('count') or group.get('ip_count') or 0)
     return visible_summary, total
 
 
@@ -1295,6 +1301,7 @@ def _append_notice_items_from_assets(
     latest_logs: dict,
     account_attempts: list[dict] | None,
     max_items: int | None = None,
+    fields: set[str] | None = None,
 ):
     for asset in assets.iterator(chunk_size=1000):
         if max_items is not None and len(items) >= max_items:
@@ -1320,16 +1327,18 @@ def _append_notice_items_from_assets(
             latest_log=latest_logs.get((notice_type, order.id)) or latest_logs.get((_notice_event_type(notice_type), order.id)),
             account_attempts=account_attempts,
             notice=notice,
+            fields=fields,
         ))
         seen_keys.add((notice_type, order.id))
 
 
 # 功能：提供 后台 API 接口 的内部辅助逻辑，供同模块流程复用。
-def _build_notice_plan_bundle(*, limit=1000, future_limit=200, history_limit=1000):
+def _build_notice_plan_bundle(*, limit=1000, future_limit=200, history_limit=1000, fields: set[str] | None = None):
     now = timezone.now()
     next_run_at = now + timezone.timedelta(minutes=10)
+    fields = fields or {'basic', 'channels', 'ips', 'retry', 'text'}
     latest_logs = _notice_latest_log_map()
-    account_attempts = _planned_notice_account_attempts()
+    account_attempts = _planned_notice_account_attempts() if 'channels' in fields else []
     due_items = []
     seen_keys = set()
     for notice_type in _NOTICE_TASK_TYPES:
@@ -1344,6 +1353,7 @@ def _build_notice_plan_bundle(*, limit=1000, future_limit=200, history_limit=100
             seen_keys=seen_keys,
             latest_logs=latest_logs,
             account_attempts=account_attempts,
+            fields=fields,
         )
     due_items.sort(key=lambda item: parse_datetime(item.get('notice_at') or '') or timezone.datetime.max.replace(tzinfo=dt_timezone.utc))
     future_plan_items = []
@@ -1361,6 +1371,7 @@ def _build_notice_plan_bundle(*, limit=1000, future_limit=200, history_limit=100
             latest_logs=latest_logs,
             account_attempts=account_attempts,
             max_items=future_cap,
+            fields=fields,
         )
         if len(future_plan_items) >= future_cap:
             break
@@ -1413,7 +1424,7 @@ def notice_task_detail(request):
     fields = _request_notice_fields(request)
 
     next_run_at = now + timezone.timedelta(minutes=10)
-    bundle = _build_notice_plan_bundle(limit=max(limit, 200), future_limit=max(future_limit, 200), history_limit=max(history_limit, 200))
+    bundle = _build_notice_plan_bundle(limit=max(limit, 200), future_limit=max(future_limit, 200), history_limit=max(history_limit, 200), fields=fields)
 
     active_items = bundle.get('active_items') or []
     due_items = [item for item in active_items if item.get('queue_status') in {'due_now', 'fallback_notice', 'within_window'}]
@@ -1421,12 +1432,13 @@ def notice_task_detail(request):
     due_items.sort(key=lambda item: parse_datetime(item.get('notice_at') or '') or timezone.datetime.max.replace(tzinfo=dt_timezone.utc))
     future_plan_items.sort(key=lambda item: parse_datetime(item.get('notice_at') or '') or timezone.datetime.max.replace(tzinfo=dt_timezone.utc))
 
-    due_user_summary_items, due_user_total = _notice_group_summary_items(due_items, limit=limit, offset=offset)
-    future_user_summary_items, future_user_total = _notice_group_summary_items(future_plan_items, limit=future_limit, offset=future_offset)
+    due_user_summary_items, due_user_total = _notice_group_summary_items(due_items, limit=limit, offset=offset, fields=fields)
+    future_user_summary_items, future_user_total = _notice_group_summary_items(future_plan_items, limit=future_limit, offset=future_offset, fields=fields)
     active_user_summary_items, active_user_total = _notice_group_summary_items(
         [*due_items, *future_plan_items],
         limit=limit,
         offset=offset,
+        fields=fields,
     )
     visible_due_items = due_items[offset:offset + limit]
     visible_future_plan_items = future_plan_items[future_offset:future_offset + future_limit]

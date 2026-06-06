@@ -4,63 +4,55 @@
 
 ## 最近一轮
 
-- 时间：2026-06-06 13:04 CST
-- 状态：已修复代理列表快照大数据阻塞、计划页 IP 删除计划/历史混用，以及 50 万压测数据下计划页接口超时；未执行真实云资源、真实支付、链上广播、删除数据或生产发布。
-- 本轮范围：后台代理列表、生命周期计划接口、计划页前端字段消费、CloudAsset 查询索引。
+- 时间：2026-06-06 13:46 CST
+- 状态：已完成代理列表、通知表、计划表、服务器表的数据数量校验、数据真实性校验、翻页校验和压力测试；修复通知表隐藏列仍构造昂贵 payload、服务器表只暴露前 500 条的问题。
+- 本轮范围：后端服务器列表 API、通知计划 API、服务器表前端分页、四表真实浏览器复测和接口压测。
 
 ## 修改内容
 
-- 代理列表快照刷新增加大数据保护：
-  - 快照为空且资产量超过同步阈值时转为后台延迟刷新。
-  - 快照过期但候选资产超过阈值时不在列表请求内同步全量刷新，避免请求超时。
-  - 新增 `CloudAsset(kind, updated_at)` 索引用于快照过期候选检查。
-- 生命周期计划接口明确拆分 IP 删除数据：
-  - 新增 `ip_delete_plan_items`：只返回活动 IP 删除计划。
-  - 新增 `ip_delete_history_items`：只返回 IP 删除历史记录。
-  - 保留 `ip_delete_items` 作为兼容字段，但前端计划页不再依赖它做主数据源。
-  - `ip_delete_count` 改为活动 IP 删除计划总数，`ip_delete_due_count` / `pending_ip_delete_count` 继续表示近期待执行，`ip_delete_history_count` 表示历史记录总数。
-- 计划页前端改为直接读取 `ip_delete_plan_items` 和 `ip_delete_history_items`，避免计划与历史记录在页面层混用。
-- 50 万压测数据下计划页接口优化：
-  - 服务器生命周期计划查询不再用备注/状态文本模糊匹配排除未附加 IP。
-  - 服务器计划只走实例 ID 明确存在的资产路径，避开大表文本扫描。
-  - 新增 `CloudAsset(kind, -sort_order, actual_expires_at, -updated_at)` 排序索引支撑计划页按到期时间取前批数据。
+- 服务器表后端 `/api/admin/servers/` 增加真实服务端分页：
+  - `paginated=1` 时返回 `items/page/page_size/total/total_pages`。
+  - 默认旧数组响应保持兼容，避免影响已有调用方。
+  - 支持第 1 页、第 2 页、深页和最后页按数据库排序精确返回，不再只取前 500 条。
+- 服务器表前端改为服务端分页：
+  - 翻页、跳页、分页大小、搜索和排序都会重新请求后端。
+  - 总数显示来自后端真实 `total`。
+- 通知表 API 优化隐藏列加载：
+  - 当页面传 `fields=basic` 且关闭文案/渠道等列时，不再构造批量通知文案和账号通知渠道 payload。
+  - 保持通知计划数量、当前页数据和历史记录语义不变。
+- 新增聚焦回归测试：
+  - 服务器表分页结果必须与 `CloudAsset` 数据库排序一致。
+  - 通知表关闭文案列时不得调用批量文案构造。
 
 ## 验证结论
 
-- 后端编译通过。
-- `DB_ENGINE=mysql uv run python manage.py check` 通过。
-- `DB_ENGINE=mysql uv run python manage.py migrate --plan` 通过，当前无待执行迁移。
-- MySQL 本地迁移已应用 `cloud.0056_cloudasset_lifecycle_plan_sort_index`。
-- 聚焦测试通过，覆盖：
-  - 代理列表大数据快照过期时不阻塞请求；
-  - IP 删除计划和 IP 删除历史字段严格分离；
-  - compact/limit 场景下 IP 删除历史记录不被活动计划挤掉；
-  - 关机、服务器删除、IP 删除三个阶段和单项开关语义不回退。
+- 后端 `manage.py check` 通过。
 - 前端 `@vben/web-antd` 类型检查通过。
-- 浏览器实测计划页：
-  - `/admin/tasks/plans` 可正常打开；
-  - 最新计划接口请求 200；
-  - 页面显示 `IP删除计划（0）`、`IP删除历史记录（7）`；
-  - 顶部统计显示 `IP删除历史 7 条`；
-  - 当前浏览器 console error 为 0。
-- 计划接口本地 50 万压测数据请求结果：
-  - `plans_http=200`
-  - 响应约 150 KB
-  - `time_total=3.036615`
-  - `ip_delete_plan_items=0`
-  - `ip_delete_history_items=7`
-  - `plan_has_history_rows=false`
-  - `history_has_active_rows=false`
+- 聚焦测试通过：服务器分页、通知表隐藏文案列轻量加载。
+- Django Client 数据校验通过：
+  - 服务器表 DB/API 总数均为 `499993`，第 1/2/1000/10000 页 ID 与数据库精确对账一致。
+  - 通知表 `due_count=5401`、`future_count=600`、`active_user_count=6001`，offset 0/10/5391 均正常返回 10 行。
+  - 代理列表 `total=499492`，第 2 页 20 组样本资产 ID 均存在。
+  - 计划表 `shutdown_plan_count=947`、`server_delete_count=2`、`ip_delete_count=0`、`ip_delete_history_count=7`。
+- 真实浏览器复测通过：
+  - `/admin/servers` 显示 `共 499993 条`，点击第 2 页后请求 `page=2&page_size=50&paginated=1` 返回 200，页面显示压测服务器数据。
+  - `/admin/tasks/notices` 请求 `fields=basic` 返回 200，页面显示 `6001` 组通知、近期 `5401`、未来 `600`。
+  - `/admin/cloud-assets` 返回 200，页面显示 `全部 (500000)` 和 20 组代理数据。
+  - `/admin/tasks/plans` 返回 200，页面显示关机计划、删除计划、IP 删除历史和压测计划数据。
+  - 浏览器 console error 为 0。
+- `curl` 压力测试通过：
+  - 代理列表：10 请求/3 workers，成功 10，失败 0，avg `1.899s`，p95 `2.333s`。
+  - 通知表 basic：5 请求/1 worker，成功 5，失败 0，avg `2.515s`，p95 `2.514s`。
+  - 计划表：6 请求/2 workers，成功 6，失败 0，avg `1.958s`，p95 `1.980s`。
+  - 服务器表分页：10 请求/2 workers，成功 10，失败 0，avg `2.197s`，p95 `3.913s`。
 
 ## 最近验证
 
 ```bash
-DB_ENGINE=mysql UV_CACHE_DIR=/private/tmp/uv-cache-shop PYTHONDONTWRITEBYTECODE=1 uv run python -m py_compile bot/api.py cloud/api_asset_snapshots.py cloud/models.py cloud/tests.py cloud/migrations/0055_cloudasset_kind_updated_index.py cloud/migrations/0056_cloudasset_lifecycle_plan_sort_index.py
+UV_CACHE_DIR=/private/tmp/uv-cache-shop PYTHONDONTWRITEBYTECODE=1 uv run python -m py_compile cloud/api_servers.py cloud/api_tasks.py
+UV_CACHE_DIR=/private/tmp/uv-cache-shop PYTHONDONTWRITEBYTECODE=1 uv run python manage.py check
 DB_ENGINE=mysql UV_CACHE_DIR=/private/tmp/uv-cache-shop PYTHONDONTWRITEBYTECODE=1 uv run python manage.py check
-DB_ENGINE=mysql UV_CACHE_DIR=/private/tmp/uv-cache-shop PYTHONDONTWRITEBYTECODE=1 uv run python manage.py migrate --plan
-DB_ENGINE=mysql UV_CACHE_DIR=/private/tmp/uv-cache-shop PYTHONDONTWRITEBYTECODE=1 uv run python manage.py migrate
-DJANGO_TEST_SQLITE=1 UV_CACHE_DIR=/private/tmp/uv-cache-shop PYTHONDONTWRITEBYTECODE=1 uv run python manage.py test cloud.tests.CloudServerServicesTestCase.test_cloud_assets_list_defers_large_stale_snapshot_refresh cloud.tests.CloudServerServicesTestCase.test_cloud_assets_grouped_paginated_uses_twenty_user_groups_per_page cloud.tests.CloudServerServicesTestCase.test_cloud_assets_list_compact_returns_ip_view_payload --settings=shop.settings --verbosity=2
-DJANGO_TEST_SQLITE=1 UV_CACHE_DIR=/private/tmp/uv-cache-shop PYTHONDONTWRITEBYTECODE=1 uv run python manage.py test cloud.tests.CloudServerServicesTestCase.test_lifecycle_plans_separate_ip_delete_plan_and_history_items cloud.tests.CloudServerServicesTestCase.test_lifecycle_plans_compact_request_keeps_ip_delete_history_item cloud.tests.CloudServerServicesTestCase.test_lifecycle_plans_include_ip_delete_history_item cloud.tests.CloudServerServicesTestCase.test_lifecycle_plans_include_real_released_retained_ip_history_without_active_row cloud.tests.CloudServerServicesTestCase.test_lifecycle_plans_move_deleted_unattached_ip_active_row_to_history cloud.tests.CloudServerServicesTestCase.test_lifecycle_plans_use_stage_specific_asset_switches cloud.tests.CloudServerServicesTestCase.test_lifecycle_plans_split_shutdown_before_server_delete --settings=shop.settings --verbosity=2
+DJANGO_TEST_SQLITE=1 UV_CACHE_DIR=/private/tmp/uv-cache-shop PYTHONDONTWRITEBYTECODE=1 uv run python manage.py test cloud.tests.CloudServerServicesTestCase.test_servers_list_paginated_matches_cloud_asset_order cloud.tests.CloudServerServicesTestCase.test_notice_task_detail_basic_fields_skip_batch_text_payload --settings=shop.settings --verbosity=2
 pnpm -C /Users/a399/Desktop/data/vue-shop-admin --filter @vben/web-antd typecheck
 ```
 
@@ -72,7 +64,6 @@ pnpm -C /Users/a399/Desktop/data/vue-shop-admin --filter @vben/web-antd typechec
 
 ## 剩余风险
 
-- 本地 50 万压测数据仍保留，清理属于删除数据操作，需要单独确认。
-- 计划页接口已从超时恢复到约 3 秒；如果目标是稳定低于 2 秒，还需要继续做计划表缓存分页或预聚合。
-- 后端仓库仍有本轮无关未跟踪文档 `docs/jisou-bot-functions.md`、`docs/telegram-search-development-plan.md`、`docs/telegram-search-large-scale-architecture.md`，本轮未处理。
-- 前端仓库仍有大量本轮无关脏文件和既有 `apps/web-antd/src/views/dashboard/cloud-assets/index.vue` 脏改动，本轮只提交计划页相关两个文件。
+- 本地仍保留 50 万压测数据；清理属于删除数据操作，需要单独确认。
+- 通知表 `fields=basic` 已降至约 2.5 秒；如果打开文案/渠道列，仍会产生更重的 payload 构造，后续可继续做异步预计算或缓存。
+- 服务器表深页第 10000 页约 4 秒；当前已保证不丢数据，若目标低于 2 秒，需要进一步做游标分页或专用排序索引方案。
