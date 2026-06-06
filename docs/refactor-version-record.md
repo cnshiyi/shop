@@ -9528,6 +9528,51 @@ git diff --check
 - 本地 50 万压测数据仍保留，清理需要单独确认。
 - 后端仓库仍有本轮无关未跟踪文档 `docs/jisou-bot-functions.md`、`docs/telegram-search-development-plan.md`、`docs/telegram-search-large-scale-architecture.md`，本轮未处理。
 
+## 2026-06-06 计划页和生命周期计划分段修复
+
+### 背景
+
+用户要求将“删除计划”改为“计划”，增加显式关机计划，并补齐关机计划、服务器删除计划、IP 删除计划各自的单项开关。同时要求联动顺序为关机完成后再进入服务器删除计划，服务器删除完成后再进入 IP 删除计划，并修复 `IP删除历史记录（0）`。
+
+### 修改内容
+
+- `CloudAsset` 新增 `server_delete_enabled` 和 `ip_delete_enabled` 字段，保留 `shutdown_enabled` 只表示关机计划开关。
+- 生命周期筛选和执行入口拆分为三类开关：
+  - 关机执行使用 `asset_shutdown_enabled`；
+  - 服务器删除和重装迁移旧服务器删除使用 `asset_server_delete_enabled`；
+  - 固定 IP 释放和未附加 IP 删除使用 `asset_ip_delete_enabled`。
+- 后台计划接口新增 `shutdown_plan_items` 和 `server_delete_items`，并保留旧 `shutdown_items` 作为服务器删除计划兼容别名。
+- 计划生成逻辑改为服务器未关机或未标记暂停时只进入关机计划；关机完成后才进入服务器删除计划。
+- IP 删除历史返回策略改为活动计划最多 `limit` 条加历史记录最多 `limit` 条，避免活动计划过多时历史记录被截断为 0。
+- 前端计划页改名为“计划”，展示顺序调整为关机计划、删除计划、IP 删除计划、IP 删除历史记录、服务器删除历史记录。
+- 前端单项开关分别写入 `shutdown_enabled`、`server_delete_enabled`、`ip_delete_enabled`，不再把 IP 删除开关标成关机开关。
+
+### 验证
+
+本地已通过：
+
+```bash
+DB_ENGINE=mysql UV_CACHE_DIR=/private/tmp/uv-cache-shop PYTHONDONTWRITEBYTECODE=1 uv run python -m py_compile bot/api.py cloud/lifecycle.py cloud/lifecycle_execution.py cloud/api_asset_edit.py cloud/models.py cloud/tests.py
+DB_ENGINE=mysql UV_CACHE_DIR=/private/tmp/uv-cache-shop PYTHONDONTWRITEBYTECODE=1 uv run python manage.py check
+DB_ENGINE=mysql UV_CACHE_DIR=/private/tmp/uv-cache-shop PYTHONDONTWRITEBYTECODE=1 uv run python manage.py migrate --plan
+DJANGO_TEST_SQLITE=1 UV_CACHE_DIR=/private/tmp/uv-cache-shop PYTHONDONTWRITEBYTECODE=1 uv run python manage.py test cloud.tests.CloudServerServicesTestCase.test_lifecycle_plans_split_shutdown_before_server_delete cloud.tests.CloudServerServicesTestCase.test_lifecycle_plans_use_stage_specific_asset_switches cloud.tests.CloudServerServicesTestCase.test_lifecycle_plans_compact_request_keeps_ip_delete_history_item --settings=shop.settings --verbosity=2
+pnpm -C /Users/a399/Desktop/data/vue-shop-admin --filter @vben/web-antd typecheck
+```
+
+结果：后端检查、迁移计划、聚焦测试和前端类型检查均通过。SQLite 测试库仍输出不支持 `db_comment` / `db_table_comment` 的 warnings，属于当前测试环境预期差异。
+
+### 红线
+
+- 本轮未执行真实云资源创建、删除、关机、释放 IP、换 IP、真实支付、链上广播、删除数据或生产发布。
+- 本轮未打印密钥、私钥、Telegram session、TOTP、支付密钥或云厂商密钥。
+- 本轮未恢复废弃 runtime app、订单侧到期字段、旧计划快照或旧退款入口。
+
+### 剩余风险
+
+- 本轮没有真实云关机/删机/IP 释放，只验证计划接口和执行入口的开关语义。
+- 本地 50 万压测数据仍保留，清理属于删除数据操作，需要单独确认。
+- 后端仓库仍有本轮无关未跟踪文档 `docs/jisou-bot-functions.md`、`docs/telegram-search-development-plan.md`、`docs/telegram-search-large-scale-architecture.md`，本轮未处理。
+
 ## 2026-06-06 固定巡检只读复查（八）
 
 ### 背景

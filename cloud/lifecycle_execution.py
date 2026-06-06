@@ -61,7 +61,7 @@ def _run_cloud_action(coro, *, action: str, target: str) -> tuple[bool, str]:
 
 def run_shutdown_order_suspend(order_id: int, *, queue_status='scheduled_suspend', enforce_schedule: bool = True) -> dict:
     from cloud.lifecycle import (
-        asset_auto_lifecycle_enabled,
+        asset_shutdown_enabled,
         cloud_server_shutdown_enabled,
         _is_cloud_suspend_time,
         _mark_suspended,
@@ -84,8 +84,8 @@ def run_shutdown_order_suspend(order_id: int, *, queue_status='scheduled_suspend
         reason = '服务器关机总开关已关闭，跳过真实关机。'
         async_to_sync(_record_lifecycle_action_failed)(order.id, 'suspend_skipped', reason)
         return {'order_id': order.id, 'order_no': order.order_no, 'ip': ip, 'queue_status': queue_status, 'ok': False, 'error': reason}
-    if enforce_schedule and not asset_auto_lifecycle_enabled(asset):
-        reason = '资产自动生命周期开关已关闭，跳过真实关机。'
+    if enforce_schedule and not asset_shutdown_enabled(asset):
+        reason = '资产关机计划开关已关闭，跳过真实关机。'
         async_to_sync(_record_lifecycle_action_failed)(order.id, 'suspend_skipped', reason)
         return {'order_id': order.id, 'order_no': order.order_no, 'ip': ip, 'queue_status': queue_status, 'ok': False, 'error': reason}
     if enforce_schedule:
@@ -124,7 +124,7 @@ def run_shutdown_order_suspend(order_id: int, *, queue_status='scheduled_suspend
 
 def run_shutdown_order_delete(order_id: int, *, queue_status='manual_single', enforce_schedule: bool = True) -> dict:
     from cloud.lifecycle import (
-        asset_auto_lifecycle_enabled,
+        asset_server_delete_enabled,
         _delete_instance,
         _is_cloud_delete_safe_time,
         _mark_deleted,
@@ -150,8 +150,8 @@ def run_shutdown_order_delete(order_id: int, *, queue_status='manual_single', en
         reason = '删除服务器总开关已关闭，跳过真实删机。'
         async_to_sync(_record_lifecycle_action_failed)(order.id, 'delete_skipped', reason)
         return {'order_id': order.id, 'order_no': order.order_no, 'ip': ip, 'queue_status': queue_status, 'ok': False, 'error': reason}
-    if enforce_schedule and not asset_auto_lifecycle_enabled(_order_primary_asset(order)):
-        reason = '资产自动生命周期开关已关闭，跳过真实删机。'
+    if enforce_schedule and not asset_server_delete_enabled(_order_primary_asset(order)):
+        reason = '资产服务器删除计划开关已关闭，跳过真实删机。'
         async_to_sync(_record_lifecycle_action_failed)(order.id, 'delete_skipped', reason)
         return {'order_id': order.id, 'order_no': order.order_no, 'ip': ip, 'queue_status': queue_status, 'ok': False, 'error': reason}
     if enforce_schedule:
@@ -191,7 +191,7 @@ def run_shutdown_order_delete(order_id: int, *, queue_status='manual_single', en
 
 def run_replaced_order_delete(order_id: int, *, queue_status='scheduled_migration_delete', enforce_schedule: bool = True) -> dict:
     from cloud.lifecycle import (
-        asset_auto_lifecycle_enabled,
+        asset_server_delete_enabled,
         _delete_replaced_server,
         _is_cloud_delete_safe_time,
         _mark_replaced_order_deleted,
@@ -209,8 +209,8 @@ def run_replaced_order_delete(order_id: int, *, queue_status='scheduled_migratio
         reason = '删除服务器总开关已关闭，跳过真实删机。'
         async_to_sync(_record_lifecycle_action_failed)(order.id, 'delete_skipped', reason)
         return {'order_id': order.id, 'order_no': order.order_no, 'ip': ip, 'queue_status': queue_status, 'ok': False, 'error': reason}
-    if enforce_schedule and not asset_auto_lifecycle_enabled(_order_primary_asset(order)):
-        reason = '资产自动生命周期开关已关闭，跳过迁移旧服务器真实删机。'
+    if enforce_schedule and not asset_server_delete_enabled(_order_primary_asset(order)):
+        reason = '资产服务器删除计划开关已关闭，跳过迁移旧服务器真实删机。'
         async_to_sync(_record_lifecycle_action_failed)(order.id, 'delete_skipped', reason)
         return {'order_id': order.id, 'order_no': order.order_no, 'ip': ip, 'queue_status': queue_status, 'ok': False, 'error': reason}
     if enforce_schedule:
@@ -249,7 +249,7 @@ def run_replaced_order_delete(order_id: int, *, queue_status='scheduled_migratio
 
 def run_orphan_asset_delete(asset_id: int, *, enforce_schedule: bool = True) -> dict:
     from cloud.lifecycle import (
-        asset_auto_lifecycle_enabled,
+        asset_server_delete_enabled,
         _delete_orphan_asset_instance,
         _is_cloud_delete_safe_time,
         _mark_orphan_asset_deleted,
@@ -272,8 +272,8 @@ def run_orphan_asset_delete(asset_id: int, *, enforce_schedule: bool = True) -> 
         return {'asset_id': asset.id, 'ip': ip, 'ok': False, 'error': '该资产有关联订单，请走订单删机计划，避免资产和订单状态不一致。'}
     if not cloud_server_delete_enabled():
         return {'asset_id': asset.id, 'ip': ip, 'ok': False, 'error': '删除服务器总开关已关闭，跳过真实删机。'}
-    if enforce_schedule and not asset_auto_lifecycle_enabled(asset):
-        return {'asset_id': asset.id, 'ip': ip, 'ok': False, 'error': '资产自动生命周期开关已关闭，跳过真实删机。'}
+    if enforce_schedule and not asset_server_delete_enabled(asset):
+        return {'asset_id': asset.id, 'ip': ip, 'ok': False, 'error': '资产服务器删除计划开关已关闭，跳过真实删机。'}
     if _asset_is_unattached_ip(asset) or not str(asset.instance_id or asset.provider_resource_id or asset.asset_name or '').strip():
         return {'asset_id': asset.id, 'ip': ip, 'ok': False, 'error': '该资产不是可删服务器，请走未附加 IP 删除'}
     if enforce_schedule:
@@ -311,7 +311,7 @@ def run_orphan_asset_delete(asset_id: int, *, enforce_schedule: bool = True) -> 
 
 def run_order_static_ip_release(order_id: int, *, queue_status='scheduled_recycle', enforce_schedule: bool = True) -> dict:
     from cloud.lifecycle import (
-        asset_auto_lifecycle_enabled,
+        asset_ip_delete_enabled,
         _is_cloud_unattached_ip_delete_time,
         _mark_recycled,
         _record_lifecycle_action_failed,
@@ -333,8 +333,8 @@ def run_order_static_ip_release(order_id: int, *, queue_status='scheduled_recycl
         reason = '删除IP总开关已关闭，跳过真实释放固定 IP。'
         async_to_sync(_record_lifecycle_action_failed)(order.id, 'recycle_skipped', reason)
         return {'order_id': order.id, 'order_no': order.order_no, 'ip': ip, 'queue_status': queue_status, 'ok': False, 'error': reason}
-    if enforce_schedule and not asset_auto_lifecycle_enabled(_order_primary_asset(order)):
-        reason = '资产自动生命周期开关已关闭，跳过真实释放固定 IP。'
+    if enforce_schedule and not asset_ip_delete_enabled(_order_primary_asset(order)):
+        reason = '资产 IP 删除计划开关已关闭，跳过真实释放固定 IP。'
         async_to_sync(_record_lifecycle_action_failed)(order.id, 'recycle_skipped', reason)
         return {'order_id': order.id, 'order_no': order.order_no, 'ip': ip, 'queue_status': queue_status, 'ok': False, 'error': reason}
     if enforce_schedule:
@@ -374,7 +374,7 @@ def run_order_static_ip_release(order_id: int, *, queue_status='scheduled_recycl
 
 def run_unattached_ip_release(asset_id: int, *, enforce_schedule: bool = True) -> dict:
     from cloud.lifecycle import (
-        asset_auto_lifecycle_enabled,
+        asset_ip_delete_enabled,
         _is_cloud_unattached_ip_delete_time,
         _mark_unattached_static_ip_deleted,
         _release_unattached_static_ip,
@@ -390,8 +390,8 @@ def run_unattached_ip_release(asset_id: int, *, enforce_schedule: bool = True) -
         return {'asset_id': asset.id, 'ip': ip, 'ok': False, 'error': '该 IP 已删除，不需要重复执行'}
     if not cloud_ip_delete_enabled():
         return {'asset_id': asset.id, 'ip': ip, 'ok': False, 'error': '删除IP总开关已关闭，跳过真实释放固定 IP。'}
-    if enforce_schedule and not asset_auto_lifecycle_enabled(asset):
-        return {'asset_id': asset.id, 'ip': ip, 'ok': False, 'error': '资产自动生命周期开关已关闭，跳过真实释放固定 IP。'}
+    if enforce_schedule and not asset_ip_delete_enabled(asset):
+        return {'asset_id': asset.id, 'ip': ip, 'ok': False, 'error': '资产 IP 删除计划开关已关闭，跳过真实释放固定 IP。'}
     if asset.instance_id:
         return {'asset_id': asset.id, 'ip': ip, 'ok': False, 'error': '该 IP 仍有关联实例，不能按未附加 IP 删除'}
     if enforce_schedule:

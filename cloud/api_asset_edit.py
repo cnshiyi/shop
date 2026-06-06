@@ -331,6 +331,12 @@ def update_cloud_asset(request, asset_id):
             if 'shutdown_enabled' in payload:
                 refresh_snapshots_needed = True
                 asset.shutdown_enabled = str(payload.get('shutdown_enabled')).lower() in {'1', 'true', 'yes', 'on'}
+            if 'server_delete_enabled' in payload:
+                refresh_snapshots_needed = True
+                asset.server_delete_enabled = str(payload.get('server_delete_enabled')).lower() in {'1', 'true', 'yes', 'on'}
+            if 'ip_delete_enabled' in payload:
+                refresh_snapshots_needed = True
+                asset.ip_delete_enabled = str(payload.get('ip_delete_enabled')).lower() in {'1', 'true', 'yes', 'on'}
 
             if 'sort_order' in payload:
                 sort_order = payload.get('sort_order')
