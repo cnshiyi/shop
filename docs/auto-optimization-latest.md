@@ -4,34 +4,51 @@
 
 ## 最近一轮
 
-- 时间：2026-06-08 01:08 CST
-- 状态：完成固定巡检清单中的只读专项审计，未发现需要本轮立即落地的安全热修。
-- 本轮范围：后端当前工作树保护性避让；`CloudAsset.actual_expires_at` 唯一到期事实复查；旧计划快照/旧退款入口扫描；Telegram 回调链和 64 字节限制实测。
+- 时间：2026-06-08 01:42 CST
+- 状态：完成代理列表全标签 100 万级注入压测、真实页面翻页对账、分页查询优化和机器人并发/返回链聚焦回归。
+- 本轮范围：代理列表 11 个标签、按用户分组分页第 1 页/第 2 页/末页、2,500,003 条快照规模下的接口性能、Telegram Bot 并发发送隔离和云资产操作返回链。
 
 ## 覆盖结果
 
-- 工作树保护：
-  - 后端已有未提交改动：`cloud/api_asset_snapshots.py`、`cloud/models.py`、`cloud/tests.py`、`cloud/migrations/0059_dashboard_snapshot_group_due_order_indexes.py`、`output/`。
-  - 本轮未修改这些文件，避免把自动化文档记录和用户业务改动混入同一补丁。
-- 资产到期事实复查：
-  - 运行时代码仍以 `CloudAsset.actual_expires_at` 为资产到期事实。
-  - 扫描未发现订单侧 `service_expires_at` 或订单侧 `actual_expires_at` 被重新当作运行时主事实回流。
-  - `cloud/api_orders.py` 中出现的 `actual_expires_at` 仍是资产事实的透传/编辑入口，未把事实重新落回订单表。
-- 旧入口与兼容逻辑复查：
-  - 未发现废弃 runtime app 回流。
-  - 未发现旧退款函数名重新接入当前主链路。
-  - 发现 `core.persistence`、`cloud.dashboard_snapshots` 等“snapshot”命名仍是当前仪表盘统计/缓存实现，不属于被禁用的旧计划快照表回流。
-- Telegram 回调链复查：
-  - 极端长链回调现有压缩逻辑仍生效，资产详情、二级动作、自动续费等高风险回调均保持在 64 字节以内。
-  - 直接实测样本：
-    - `cad:999999999999999999:d:999999999999999999` 长度 43 字节。
-    - `au:999999999999999999:a:999999999999999999:999999999999999999` 长度 61 字节。
-    - `ao:999999999999999999:a:999999999999999999:999999999999999999` 长度 61 字节。
+- 注入数据：
+  - 新增标签压测资产 `1,000,000` 条。
+  - 新增标签压测快照 `1,000,000` 条。
+  - 当前 `CloudAssetDashboardSnapshot=2,500,003`，可见快照 `2,489,998`。
+  - “全部”标签自然包含新增可见资产；其他 10 个风险标签各新增 `100,000` 条。
+- 注入后接口计数：
+  - 全部：`2,489,996` 组，`124,500` 页。
+  - 运行中：`549,988` 组，`27,500` 页。
+  - 即将到期：`101,250` 组，`5,063` 页。
+  - 已过期：`101,752` 组，`5,088` 页。
+  - 未附加固定IP：`100,001` 组，`5,001` 页。
+  - 异常/待确认：`100,000` 组，`5,000` 页。
+  - 云账号异常：`1,145,001` 组，`57,251` 页。
+  - 关机计划关闭：`100,384` 组，`5,020` 页。
+  - 未绑定用户：`100,001` 组，`5,001` 页。
+  - 未绑定群组：`100,003` 组，`5,001` 页。
+  - 续费关闭：`104,548` 组，`5,228` 页。
+- 真实页面标签压测：
+  - 注入前连续 3 轮切换 11 个标签，共 33 次，0 失败，0 控制台错误。
+  - 注入后逐标签真实页面验证第 1 页、第 2 页、末页，共 33 项，0 失败，0 控制台错误。
+  - `未附加固定IP` 和 `异常/待确认` 两个原本小数据标签已分别验证到 10 万级分页和末页。
+- 机器人回归：
+  - 已跑 `TelegramListenerPushTestCase.test_notice_copy_wrapper_keeps_concurrent_user_sends_isolated`。
+  - 已跑完整 `RetainedIpRenewalUiTestCase`，覆盖续费、换 IP、重装、修改配置、资产详情返回链、钱包异步任务、callback 64 字节限制。
+  - 共 50 个 bot 聚焦测试通过。
 
-## 发现与处理
+## 发现与修复
 
-- 本轮未发现需要代码修复的新回归。
-- 一次误选测试名导致 `AttributeError`，已改用仓库内现有 `RetainedIpRenewalUiTestCase` 聚焦用例重新验证，结果通过；未对测试代码做任何修改。
+- 发现 1：直接写入 100 万压测快照后，`asset_updated_at` 与资产 `updated_at` 存在轻微差异，列表接口把压测快照判成 stale，反复记录 `CLOUD_ASSET_DASHBOARD_SNAPSHOT_STALE_LARGE_DEFERRED`。
+  - 处理：用按 `asset_id` 范围分批更新对齐 `asset_updated_at`，避免一次性大 JOIN 超时。
+  - 结果：100 万行分批更新完成，stale 误报消失。
+- 发现 2：风险计数原实现使用单次条件聚合，在 250 万快照下需要全表扫描，冷计数约 `5.8s`。
+  - 修复：`_dashboard_snapshot_risk_counts()` 改为逐项索引计数，复用原缓存键和返回格式。
+  - 结果：同口径计数从约 `5.8s` 降到约 `1.2s`。
+- 发现 3：`运行中` 和 `云账号异常` 分组分页缺少复合索引，执行计划出现 `filesort`。
+  - 修复：新增 `0060_dashboard_snapshot_risk_group_indexes`，补 `normal/account_disabled` 的分组计数索引和到期排序索引。
+  - 结果：`运行中` 首屏接口从约 `4.3s` 降到约 `0.68s`；`云账号异常` 首屏接口从约 `5.1s` 降到约 `0.61s`；第 2 页和末页约 `0.32-0.38s`。
+- 发现 4：一次性 `UPDATE ... JOIN` 100 万行在本地 MySQL 超时。
+  - 处理：确认大数据维护应使用范围分批更新，已在本轮报告中记录。
 
 ## 验证
 
@@ -39,18 +56,24 @@
 
 ```bash
 UV_CACHE_DIR=/private/tmp/uv-cache-shop uv run python manage.py check
-UV_CACHE_DIR=/private/tmp/uv-cache-shop DJANGO_TEST_SQLITE=1 uv run python manage.py test bot.tests.RetainedIpRenewalUiTestCase.test_asset_detail_callback_from_extreme_order_detail_stays_under_limit bot.tests.RetainedIpRenewalUiTestCase.test_asset_detail_callback_recompacts_nested_asset_detail_back_path bot.tests.RetainedIpRenewalUiTestCase.test_extreme_nested_cloud_callbacks_stay_under_telegram_limit --settings=shop.settings --verbosity=1
-UV_CACHE_DIR=/private/tmp/uv-cache-shop uv run python manage.py shell -c "from bot.keyboards import cloud_asset_detail_callback, append_back_callback, cloud_auto_renew_callback; samples=[('asset_detail_from_extreme_order', cloud_asset_detail_callback(999999999999999999, 'cloud:detail:999999999999999999:profile:orders:cloud:filter:provisioning:page:999999999999999999')), ('asset_detail_nested_asset', cloud_asset_detail_callback(999999999999999999, 'cad:999999999999999999:d:999999999999999999:o:provisioning:999999999999999999')), ('asset_action_upgrade', append_back_callback('cloud:aa:upgrade:999999999999999999', 'cloud:ad:asset:999999999999999999:cloud:list:page:999999999999999999')), ('auto_renew_on', cloud_auto_renew_callback('on', 999999999999999999, 'cloud:ad:asset:999999999999999999:cloud:list:page:999999999999999999'))]; [print(name, len(value.encode()), value) for name, value in samples]"
+UV_CACHE_DIR=/private/tmp/uv-cache-shop uv run python -m py_compile cloud/api_asset_snapshots.py cloud/models.py
+UV_CACHE_DIR=/private/tmp/uv-cache-shop DJANGO_TEST_SQLITE=1 uv run python manage.py test cloud.tests.CloudServerServicesTestCase.test_cloud_assets_grouped_paginated_orders_null_due_groups_last cloud.tests.CloudServerServicesTestCase.test_cloud_assets_grouped_total_counts_distinct_groups_only cloud.tests.CloudServerServicesTestCase.test_cloud_assets_grouped_paginated_uses_twenty_user_groups_per_page --settings=shop.settings --verbosity=1
+UV_CACHE_DIR=/private/tmp/uv-cache-shop DJANGO_TEST_SQLITE=1 uv run python manage.py test bot.tests.TelegramListenerPushTestCase.test_notice_copy_wrapper_keeps_concurrent_user_sends_isolated bot.tests.RetainedIpRenewalUiTestCase --settings=shop.settings --verbosity=1
+UV_CACHE_DIR=/private/tmp/uv-cache-shop uv run python manage.py makemigrations --check --dry-run
+UV_CACHE_DIR=/private/tmp/uv-cache-shop uv run python manage.py migrate --plan
 git diff --check
 ```
+
+SQLite `db_comment` 警告仍是已知数据库能力差异。
 
 ## 红线
 
 - 本轮未执行真实云资源创建、关机、删除服务器、释放 IP、换 IP、真实支付、链上广播、生产发布或删除业务数据。
-- 本轮未打印密钥、私钥、Telegram session、TOTP、支付密钥、云厂商密钥、完整代理链接、代理 secret 或登录密码。
+- 本轮注入的是本地标签压测资产和快照，统一使用 `TAGSTRESS20260608` / `tagstress20260608:` 前缀，未打印密钥、私钥、Telegram session、TOTP、支付密钥、云厂商密钥、完整代理链接、代理 secret 或登录密码。
 - 本轮未恢复废弃 runtime app、订单侧到期字段、旧计划快照、旧退款逻辑、旧退款函数名或旧兼容入口。
 
 ## 剩余风险与下一轮
 
-- 后端当前有用户未提交业务改动，下一轮继续前先确认这些改动是否已稳定；自动化不应跨越式插入相关代码修复。
-- 若要继续高风险路径覆盖，优先回到真实浏览器或数据库对账场景，补做计划页/代理列表深分页真页与数据库精确排序一致性核验。
+- 真实页面在后端接口已降到亚秒级后，等待 DOM 稳定仍约 `5.7s`；后续应单独优化前端加载态、同步状态请求和渲染等待。
+- 机器人已完成代码级并发/返回链回归；下一轮继续做真机 Telegram 多任务高并发点击，重点覆盖并发购买、续费、换 IP、重装、修改配置和返回链。
+- 继续关注 250 万快照规模下通知计划、删除计划、IP 删除历史和计划页的深分页表现。

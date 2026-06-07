@@ -3,10 +3,11 @@
 import hashlib
 import logging
 import threading
+from datetime import datetime, timezone as datetime_timezone
 
 from django.core.cache import cache
 from django.db import close_old_connections
-from django.db.models import Count, F, Min, Q
+from django.db.models import F, Min, Q
 from django.utils import timezone
 from django.utils.dateparse import parse_datetime
 
@@ -467,16 +468,15 @@ def _dashboard_snapshot_risk_counts(queryset) -> dict:
         cached = cache.get(cache_key)
         if isinstance(cached, dict):
             return {key: int(value or 0) for key, value in cached.items()}
-    aggregates = {
-        'all': Count('id'),
+    result = {
+        'all': int(queryset.count() or 0),
     }
     for status, field in _DASHBOARD_RISK_FLAGS.items():
         if status == 'account_disabled':
-            aggregates[status] = Count('id', filter=Q(**{field: True}))
+            count_queryset = queryset.filter(**{field: True})
         else:
-            aggregates[status] = Count('id', filter=Q(risk_account_disabled=False, **{field: True}))
-    counts = queryset.aggregate(**aggregates)
-    result = {key: int(value or 0) for key, value in counts.items()}
+            count_queryset = queryset.filter(risk_account_disabled=False, **{field: True})
+        result[status] = int(count_queryset.count() or 0)
     if cache_key:
         cache.set(cache_key, result, timeout=_SNAPSHOT_COUNTS_CACHE_TTL)
     return result
@@ -654,6 +654,75 @@ def _group_cloud_asset_payloads(items, group_by='telegram_group'):
     return ordered_groups
 
 
+def _dashboard_snapshot_group_keys_from_ordered_rows(queryset, *, group_field: str, group_label: str, start: int, page_size: int):
+    target_count = start + page_size
+    if target_count <= 0:
+        return []
+    fetch_limit = max(target_count * 3, page_size * 25, 500)
+    max_fetch_limit = max(target_count + page_size * 10, 250000)
+    ordering = ('asset_due_sort_null_rank', 'asset_due_sort_at', group_label, group_field)
+    while fetch_limit <= max_fetch_limit:
+        rows = (
+            queryset
+            .order_by(*ordering)
+            .values_list(group_field, flat=True)[:fetch_limit]
+        )
+        seen = set()
+        ordered_keys = []
+        for key in rows:
+            if key in seen:
+                continue
+            seen.add(key)
+            ordered_keys.append(key)
+            if len(ordered_keys) >= target_count:
+                break
+        if len(ordered_keys) >= target_count or fetch_limit >= max_fetch_limit:
+            return ordered_keys[start:target_count] if len(ordered_keys) > start else []
+        fetch_limit = min(fetch_limit * 2, max_fetch_limit)
+    return []
+
+
+def _dashboard_snapshot_group_keys_from_reverse_tail(queryset, *, group_field: str, group_label: str, start: int, end: int, total: int):
+    tail_group_count = max(total - start, 0)
+    if tail_group_count <= 0:
+        return []
+    duplicate_excess = max(queryset.count() - total, 0)
+    candidate_limit = tail_group_count + duplicate_excess + max(end - start, 20)
+    if candidate_limit > 100000:
+        return []
+    reverse_ordering = ('-asset_due_sort_null_rank', '-asset_due_sort_at', f'-{group_label}', f'-{group_field}')
+    candidate_rows = (
+        queryset
+        .order_by(*reverse_ordering)
+        .values_list(group_field, flat=True)[:candidate_limit]
+    )
+    candidate_keys = []
+    seen = set()
+    for key in candidate_rows:
+        if key in seen:
+            continue
+        seen.add(key)
+        candidate_keys.append(key)
+        if len(candidate_keys) >= tail_group_count:
+            break
+    if len(candidate_keys) < tail_group_count:
+        return []
+    grouped_rows = list(
+        queryset
+        .filter(**{f'{group_field}__in': candidate_keys})
+        .values(group_field)
+        .annotate(group_due_null_rank=Min('asset_due_sort_null_rank'), group_expires=Min('asset_due_sort_at'), group_name=Min(group_label))
+    )
+    grouped_rows.sort(key=lambda row: (
+        row.get('group_due_null_rank') if row.get('group_due_null_rank') is not None else 1,
+        row.get('group_expires') or datetime.max.replace(tzinfo=datetime_timezone.utc),
+        row.get('group_name') or '',
+        row.get(group_field) or '',
+    ))
+    tail_keys = [row[group_field] for row in grouped_rows[-tail_group_count:]]
+    return tail_keys[:end - start]
+
+
 def _dashboard_snapshot_group_page(queryset, request, *, group_by='user', sort_by='', sort_direction='', compact=False):
     page, page_size = _parse_dashboard_page(request, default_size=20, min_size=1, max_size=100)
     group_field = 'group_telegram_key' if group_by == 'telegram_group' else 'group_user_key'
@@ -662,13 +731,14 @@ def _dashboard_snapshot_group_page(queryset, request, *, group_by='user', sort_b
     total_pages = max((total + page_size - 1) // page_size, 1)
     page = min(page, total_pages)
     start = (page - 1) * page_size
+    end = min(start + page_size, total)
     page_keys = []
     if compact and page == 1:
         for fetch_limit in (max(page_size * 25, 500), 2000, 5000):
             candidates = list(
                 queryset
-                .only('id', 'asset_id', group_field, group_label, 'risk_rank', 'asset_due_sort_at')
-                .order_by(F('asset_due_sort_at').asc(nulls_last=True), group_label, group_field)[:fetch_limit]
+                .only('id', 'asset_id', group_field, group_label, 'risk_rank', 'asset_due_sort_null_rank', 'asset_due_sort_at')
+                .order_by('asset_due_sort_null_rank', 'asset_due_sort_at', group_label, group_field)[:fetch_limit]
             )
             seen = set()
             page_keys = []
@@ -684,16 +754,32 @@ def _dashboard_snapshot_group_page(queryset, request, *, group_by='user', sort_b
                 break
         if len(page_keys) < page_size:
             page_keys = []
+    if not page_keys and compact and start <= 100000:
+        page_keys = _dashboard_snapshot_group_keys_from_ordered_rows(
+            queryset,
+            group_field=group_field,
+            group_label=group_label,
+            start=start,
+            page_size=end - start,
+        )
+    if not page_keys and compact and start > max(total // 2, page_size * 100):
+        page_keys = _dashboard_snapshot_group_keys_from_reverse_tail(
+            queryset,
+            group_field=group_field,
+            group_label=group_label,
+            start=start,
+            end=end,
+            total=total,
+        )
     if not page_keys:
-        end = min(start + page_size, total)
         reverse_rows = False
         if start > max(total // 2, page_size * 100):
             reverse_start = max(total - end, 0)
             grouped_queryset = (
                 queryset.order_by()
                 .values(group_field)
-                .annotate(group_expires=Min('asset_due_sort_at'), group_name=Min(group_label))
-                .order_by(F('group_expires').desc(nulls_first=True), '-group_name', f'-{group_field}')
+                .annotate(group_due_null_rank=Min('asset_due_sort_null_rank'), group_expires=Min('asset_due_sort_at'), group_name=Min(group_label))
+                .order_by('-group_due_null_rank', F('group_expires').desc(nulls_first=True), '-group_name', f'-{group_field}')
             )
             grouped = list(grouped_queryset[reverse_start:reverse_start + (end - start)])
             reverse_rows = True
@@ -701,8 +787,8 @@ def _dashboard_snapshot_group_page(queryset, request, *, group_by='user', sort_b
             grouped_queryset = (
                 queryset.order_by()
                 .values(group_field)
-                .annotate(group_expires=Min('asset_due_sort_at'), group_name=Min(group_label))
-                .order_by(F('group_expires').asc(nulls_last=True), 'group_name', group_field)
+                .annotate(group_due_null_rank=Min('asset_due_sort_null_rank'), group_expires=Min('asset_due_sort_at'), group_name=Min(group_label))
+                .order_by('group_due_null_rank', 'group_expires', 'group_name', group_field)
             )
             grouped = list(grouped_queryset[start:end])
         if reverse_rows:

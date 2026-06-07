@@ -12230,3 +12230,162 @@ git diff --check
 - 本轮未执行真实云资源创建、关机、删除服务器、释放 IP、换 IP、真实支付、链上广播、生产发布或删除业务数据。
 - 本轮未打印密钥、私钥、Telegram session、TOTP、支付密钥、云厂商密钥、完整代理链接、代理 secret 或登录密码。
 - 本轮未恢复废弃 runtime app、订单侧到期字段、旧计划快照、旧退款逻辑、旧退款函数名或旧兼容入口。
+
+## 2026-06-08 01:42 代理列表全标签百万级压测与分页性能优化
+
+### 背景
+
+用户要求代理列表不能只测试“全部”，必须把每个标签都测到，特别是“未附加固定IP”等标签加载和翻页；随后要求“每个标签注入 10 万数据”，并提醒机器人也要测试多任务高并发。
+
+本轮在本地 MySQL 真实库继续压测代理列表，覆盖后台接口、真实前端页面、数据库索引和机器人聚焦回归。
+
+### 数据注入
+
+- 新增标签压测资产 `1,000,000` 条。
+- 新增标签压测快照 `1,000,000` 条。
+- 压测数据统一使用：
+  - 资产前缀：`TAGSTRESS20260608`
+  - 分组前缀：`tagstress20260608:`
+- “全部”标签不是独立风险状态，已通过所有新增可见资产自然增加。
+- 其他 10 个风险标签各新增 `100,000` 条：
+  - 运行中
+  - 即将到期
+  - 已过期
+  - 未附加固定IP
+  - 异常/待确认
+  - 云账号异常
+  - 关机计划关闭
+  - 未绑定用户
+  - 未绑定群组
+  - 续费关闭
+
+注入后：
+
+- `CloudAssetDashboardSnapshot=2,500,003`
+- 可见快照 `2,489,998`
+
+### 注入后标签计数
+
+- 全部：`2,489,996` 组，`124,500` 页。
+- 运行中：`549,988` 组，`27,500` 页。
+- 即将到期：`101,250` 组，`5,063` 页。
+- 已过期：`101,752` 组，`5,088` 页。
+- 未附加固定IP：`100,001` 组，`5,001` 页。
+- 异常/待确认：`100,000` 组，`5,000` 页。
+- 云账号异常：`1,145,001` 组，`57,251` 页。
+- 关机计划关闭：`100,384` 组，`5,020` 页。
+- 未绑定用户：`100,001` 组，`5,001` 页。
+- 未绑定群组：`100,003` 组，`5,001` 页。
+- 续费关闭：`104,548` 组，`5,228` 页。
+
+### 真实页面压测
+
+注入前：
+
+- 在同一个真实页面连续切换 11 个标签 3 轮。
+- 共 33 次真实页面切换。
+- 每次都等待“按钮高亮、分页总数、DOM 组数、首条内容”全部匹配。
+- 结果：0 失败，0 控制台错误。
+
+注入后：
+
+- 真实页面逐标签验证第 1 页、第 2 页、末页。
+- 共 33 项。
+- 结果：0 失败，0 控制台错误。
+- `未附加固定IP` 从 1 组提升到 `100,001` 组后，第 1 页、第 2 页、末页均正确。
+- `异常/待确认` 从 0 组提升到 `100,000` 组后，第 1 页、第 2 页、末页均正确。
+
+### 发现的问题
+
+1. 直接写入压测快照后，`asset_updated_at` 与资产 `updated_at` 存在轻微差异。
+   - 后果：列表接口把 100 万压测快照判成 stale，每次加载都会记录 `CLOUD_ASSET_DASHBOARD_SNAPSHOT_STALE_LARGE_DEFERRED`。
+   - 处理：按 `asset_id` 范围分批对齐 `asset_updated_at`，避免一次性大 JOIN。
+2. 一次性 `UPDATE ... JOIN` 100 万行在本地 MySQL 超时。
+   - 结论：大数据维护必须使用范围分批更新。
+3. 风险计数旧实现使用单次条件聚合。
+   - 在 250 万快照下执行计划为全表扫描，冷计数约 `5.8s`。
+4. `运行中` 和 `云账号异常` 分组分页缺少复合索引。
+   - 执行计划出现 `filesort`，首屏和深页明显偏慢。
+
+### 修复
+
+- `cloud/api_asset_snapshots.py`
+  - `_dashboard_snapshot_risk_counts()` 改为逐项索引计数。
+  - 保留原缓存键和返回格式。
+  - 保留风险口径：除 `account_disabled` 外，其他标签继续排除 `risk_account_disabled=True`。
+  - 优化紧凑分组分页：
+    - 前段页面优先使用已排序行抽取分组键。
+    - 后半段页面优先用反向尾部候选抽取末页分组键。
+    - 排序统一纳入 `asset_due_sort_null_rank`，保证无到期时间资产排在最后。
+- `cloud/models.py`
+  - 新增可见资产分组到期排序索引。
+  - 新增 `normal/account_disabled` 的分组计数和到期排序复合索引。
+- `cloud/migrations/0059_dashboard_snapshot_group_due_order_indexes.py`
+  - 新增 `cad_vis_user_due_ord_idx`、`cad_vis_tg_due_ord_idx`。
+- `cloud/migrations/0060_dashboard_snapshot_risk_group_indexes.py`
+  - 新增 `cad_norm_user_group_idx`、`cad_norm_user_due_ord_idx`、`cad_acct_user_group_idx`、`cad_acct_user_due_ord_idx`。
+- `cloud/tests.py`
+  - 新增无到期时间分组排序回归测试，确保无到期时间资产组排在最后。
+
+### 性能结果
+
+风险计数：
+
+- 优化前单次条件聚合约 `5.8s`。
+- 优化后逐项索引计数约 `1.2s`。
+
+接口分页：
+
+- `运行中` 首屏从约 `4.3s` 降到约 `0.68s`。
+- `运行中` 第 2 页约 `0.35s`，末页约 `0.38s`。
+- `云账号异常` 首屏从约 `5.1s` 降到约 `0.61s`。
+- `云账号异常` 第 2 页约 `0.32s`，末页约 `0.37s`。
+- `未附加固定IP` 10 万级首屏约 `1.2s`，第 2 页和末页约 `0.6-0.7s`。
+- `异常/待确认` 10 万级首屏约 `1.3s`，第 2 页和末页约 `0.6-0.8s`。
+
+真实页面：
+
+- 后端接口已明显变快。
+- 前端等待 DOM 稳定仍约 `5.7s`，后续应单独优化前端加载态、同步状态请求和渲染等待。
+
+### 机器人高并发回归
+
+已跑现有 bot 聚焦测试：
+
+- `TelegramListenerPushTestCase.test_notice_copy_wrapper_keeps_concurrent_user_sends_isolated`
+  - 覆盖并发用户发送隔离。
+- 完整 `RetainedIpRenewalUiTestCase`
+  - 覆盖资产详情、订单详情、续费、钱包异步任务、换 IP、重装、修改配置、返回上一层和 callback 64 字节限制。
+
+结果：
+
+- 共 50 个 bot 聚焦测试通过。
+- 日志中的 `postcheck failed` 是测试主动模拟的失败分支，最终测试为 OK。
+
+### 验证
+
+已通过：
+
+```bash
+UV_CACHE_DIR=/private/tmp/uv-cache-shop uv run python manage.py check
+UV_CACHE_DIR=/private/tmp/uv-cache-shop uv run python -m py_compile cloud/api_asset_snapshots.py cloud/models.py
+UV_CACHE_DIR=/private/tmp/uv-cache-shop DJANGO_TEST_SQLITE=1 uv run python manage.py test cloud.tests.CloudServerServicesTestCase.test_cloud_assets_grouped_paginated_orders_null_due_groups_last cloud.tests.CloudServerServicesTestCase.test_cloud_assets_grouped_total_counts_distinct_groups_only cloud.tests.CloudServerServicesTestCase.test_cloud_assets_grouped_paginated_uses_twenty_user_groups_per_page --settings=shop.settings --verbosity=1
+UV_CACHE_DIR=/private/tmp/uv-cache-shop DJANGO_TEST_SQLITE=1 uv run python manage.py test bot.tests.TelegramListenerPushTestCase.test_notice_copy_wrapper_keeps_concurrent_user_sends_isolated bot.tests.RetainedIpRenewalUiTestCase --settings=shop.settings --verbosity=1
+UV_CACHE_DIR=/private/tmp/uv-cache-shop uv run python manage.py makemigrations --check --dry-run
+UV_CACHE_DIR=/private/tmp/uv-cache-shop uv run python manage.py migrate --plan
+git diff --check
+```
+
+SQLite `db_comment` 警告仍是已知数据库能力差异。
+
+### 红线
+
+- 本轮未执行真实云资源创建、关机、删除服务器、释放 IP、换 IP、真实支付、链上广播、生产发布或删除业务数据。
+- 本轮只注入本地压测资产和快照，未打印密钥、私钥、Telegram session、TOTP、支付密钥、云厂商密钥、完整代理链接、代理 secret 或登录密码。
+- 本轮未恢复废弃 runtime app、订单侧到期字段、旧计划快照、旧退款逻辑、旧退款函数名或旧兼容入口。
+
+### 剩余风险
+
+- 前端真实页面 DOM 稳定时间仍偏高，需要下一轮单独优化。
+- 机器人还需要继续做真机 Telegram 多任务高并发点击，覆盖并发购买、续费、换 IP、重装、修改配置和返回链。
+- 计划页、通知计划、删除计划、IP 删除历史仍需要在 250 万快照压力背景下继续深分页巡检。

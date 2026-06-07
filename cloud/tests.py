@@ -2871,6 +2871,51 @@ class CloudServerServicesTestCase(TestCase):
         self.assertEqual(len(payload['groups']), 1)
         self.assertEqual(payload['groups'][0]['user_key'], f'user:{tail_user.id}')
 
+    # 功能：验证分组分页按到期时间排序时，无到期时间的资产组排在最后。
+    def test_cloud_assets_grouped_paginated_orders_null_due_groups_last(self):
+        cache.clear()
+        admin = get_user_model().objects.create_user(username='admin_asset_grouped_null_due', password='x', is_staff=True)
+        null_user = TelegramUser.objects.create(tg_user_id=992610, username='group_null_due')
+        early_user = TelegramUser.objects.create(tg_user_id=992611, username='group_early_due')
+        later_user = TelegramUser.objects.create(tg_user_id=992612, username='group_later_due')
+
+        # 功能：创建相关业务对象；当前函数属于 云资产、云订单和生命周期。
+        def create_asset(user, name, expires_at):
+            return CloudAsset.objects.create(
+                kind=CloudAsset.KIND_SERVER,
+                source=CloudAsset.SOURCE_AWS_SYNC,
+                user=user,
+                provider='aws_lightsail',
+                region_code=self.plan.region_code,
+                region_name=self.plan.region_name,
+                asset_name=name,
+                public_ip=f'10.79.20.{user.id % 250}',
+                actual_expires_at=expires_at,
+                status=CloudAsset.STATUS_RUNNING,
+            )
+
+        create_asset(null_user, 'group-null-due-asset', None)
+        create_asset(later_user, 'group-later-due-asset', timezone.now() + timezone.timedelta(days=20))
+        create_asset(early_user, 'group-early-due-asset', timezone.now() + timezone.timedelta(days=2))
+
+        request = self.factory.get('/api/admin/cloud-assets/', {
+            'compact': '1',
+            'grouped': '1',
+            'paginated': '1',
+            'group_by': 'user',
+            'page': '1',
+            'page_size': '20',
+        })
+        self._attach_bearer_session(request, admin)
+        response = cloud_assets_list(request)
+        payload = json.loads(response.content.decode('utf-8'))['data']
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(
+            [group['user_key'] for group in payload['groups']],
+            [f'user:{early_user.id}', f'user:{later_user.id}', f'user:{null_user.id}'],
+        )
+
     # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
     def test_cloud_assets_list_filters_by_risk_and_searches_asset_identifiers(self):
         admin = get_user_model().objects.create_user(username='admin_asset_risk_filter', password='x', is_staff=True)
