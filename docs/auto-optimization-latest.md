@@ -4,65 +4,76 @@
 
 ## 最近一轮
 
-- 时间：2026-06-07 21:18 CST
-- 状态：完成生命周期真机创建 / 关机 / 删机 / 固定 IP 释放复测，并补齐生命周期计划页全局总开关展示态。
-- 本轮范围：真实云资源生命周期链路、后台订单详情 / 资产详情 / 计划页实测、计划页总开关联动、前端类型检查、后端聚焦测试。
+- 时间：2026-06-07 21:36 CST
+- 状态：完成任务中心、通知计划、代理列表和生命周期计划页真实浏览器巡检；修复任务中心 Ant Design Vue 运行时告警。
+- 本轮范围：前端真实页面、服务端分页口径、通知计划翻页、代理列表 150 万资产压力页、生命周期计划计数、后端聚焦测试、前端类型检查。
 
-## 真机生命周期结果
+## 真机生命周期基线
 
-- 测试订单：`#50095` / `SRV20260607125634332663`。
-- 测试资产：`#1500331`。
-- 测试用户：`TelegramUser #172`，`codex_real_machine_test`。
-- 云厂商和套餐：AWS Lightsail，新加坡，`实机测试 Nano`。
-- 支付方式：项目数据库 USDT 钱包余额支付，金额 5 USDT；未执行链上广播或真实地址充值。
-- 创建结果：AWS Lightsail 实例真实创建成功，固定 IP 绑定成功，代理初始化完成，订单进入 `completed`，资产进入 `running`。
-- 关机结果：真实关机成功，订单进入 `suspended`，资产进入 `stopped/is_active=False`。
-- 删机结果：第一次真实删机遇到 AWS 实例停止中状态转换，系统未误标已删除；等待稳定后只针对测试订单重试成功，订单和资产进入 `deleted`。
-- IP 释放结果：固定 IP 真实释放成功，订单固定 IP 名称、`public_ip`、`ip_recycle_at` 均已清空。
-- 最终清理：测试订单 `#50095` 为 `deleted`，测试资产 `#1500331` 为 `deleted/is_active=False`；实例标识、固定 IP 名称、公网 IP 和 IP 回收时间均已清空。
+- 上一轮已按用户授权完成真实 AWS Lightsail 创建服务器、关机、删除服务器和固定 IP 释放。
+- 测试订单 `#50095`、测试资产 `#1500331` 最终均为已删除状态；实例、固定 IP、公网 IP 和 IP 回收时间均已清空。
+- 本轮未再次创建或删除真实云资源，只复核生命周期计划页展示和服务端计数。
 
-## 修复摘要
+## 本轮修复
 
-- `bot/api.py` 的生命周期计划展示层显式叠加三个总开关：
-  - `cloud_server_shutdown_enabled=0` 时，关机计划项输出 `global_shutdown_disabled`。
-  - `cloud_server_delete_enabled=0` 时，删机计划项输出 `global_server_delete_disabled`。
-  - `cloud_ip_delete_enabled=0` 时，IP 删除计划项输出 `global_ip_delete_disabled`。
-- 上述状态同步落到 `queue_status`、`plan_state`、`plan_state_label`、`blocked_reason`，避免执行器已拦截但后台仍显示“待执行”的口径错位。
-- `cloud/tests.py` 新增总开关联动测试，并给原有单项开关测试补上显式总开关前置条件。
-- 前端计划页同步使用总开关状态展示阻塞原因，并在总开关关闭时禁用对应单项开关。
-- 前端订单详情页为 `Descriptions` 奇数项补齐 `:span="2"`，修复 Ant Design Vue 控制台告警。
+- 前端 `/Users/a399/Desktop/data/vue-shop-admin/apps/web-antd/src/views/dashboard/tasks/index.vue`：
+  - 任务中心说明列的 `TypographyParagraph` 改为使用 `content` 属性承载省略文本。
+  - 修复真实打开 `/admin/tasks` 时的 Ant Design Vue 告警：`When ellipsis is enabled, please use content instead of children`。
 
 ## 真实页面验证
 
-- 实际打开 `/admin/cloud-orders/50095`：确认订单详情、已删除状态、服务器信息和生命周期区域正常显示；控制台 0 error / 0 warning。
-- 实际打开 `/admin/cloud-assets/1500331`：确认资产详情、已删除状态、生命周期区域和关联订单正常显示；控制台 0 error / 0 warning。
-- 实际打开 `/admin/tasks/plans`：确认计划页、关机服务器 / 删除服务器 / 删除 IP 总开关、显示列开关和 IP 删除历史记录正常显示；控制台 0 error / 0 warning。
-- 计划接口刷新后计数：当前计划资产 `1500001`，关机计划 `979990`，删除计划 `2`，IP 删除计划 `500000`，IP 删除历史 `520008`。
+- 实际打开 `/admin/tasks`：
+  - 页面总量 `38159`，活动 `10704`，告警 `178`，失败 `1178`。
+  - 分区与后端一致：云资产同步 `0/0`，云服务器任务 `10516/10516`，生命周期计划 `7/8`，通知计划 `10/22895`，自动续费 `171/4740`。
+  - 控制台 0 error / 0 warning。
+- 实际打开 `/admin/tasks/notices`：
+  - 页面计数与服务端一致：通知计划 `21887`，近期计划 `3429`，未来计划 `18458`，历史通知 `14960`。
+  - 第 2 页和末页实测通过；末页服务端 offset `21880` 返回 7 条，页面也显示 7 条有效数据。
+  - 控制台 0 error / 0 warning。
+- 实际打开 `/admin/cloud-assets`：
+  - 页面风险计数与当前 API 完全一致：全部 `1500001`，运行中 `449988`，即将到期 `1250`，已过期 `1752`，未附加固定 IP `1`，云账号异常 `1045002`，关机计划关闭 `384`，未绑定用户 `1`，未绑定群组 `11`，续费关闭 `4556`，已删除 `5007`。
+  - 默认折叠已删除后分页总分组为 `1489996`，每页 20，末页 `74500`。
+  - 第 2 页真实点击验证通过，页面首尾数据与后端第 2 页一致。
+  - 末页真实点击验证通过，页面显示 `16 / 16` 组，末页首尾数据与后端第 `74500` 页一致。
+  - 控制台 0 error / 0 warning。
+- 实际打开 `/admin/tasks/plans`：
+  - 页面显示并后端核对：当前计划资产 `1500001`，服务器资产 `1000000`，缺少到期时间 `251`，未附加 IP `500001`，关机计划 `979990`，服务器删除计划 `2`，IP 删除计划 `500000`，IP 删除历史 `520008`。
+  - 控制台 0 error / 0 warning。
+
+## 压测结果
+
+- 代理列表 150 万资产压力页接口采样：
+  - page 1：`5318.89 ms`，20 组 / 20 项。
+  - page 2：`3240.93 ms`，20 组 / 20 项。
+  - page 1000：`3853.84 ms`，20 组 / 20 项。
+  - page 74500：`4895.32 ms`，16 组 / 16 项。
+- 本轮确认没有翻页丢数据；但代理列表仍未达到 2 秒内目标，继续列为性能风险。
 
 ## 验证
 
 本地已通过：
 
 ```bash
-UV_CACHE_DIR=/private/tmp/uv-cache-shop DJANGO_TEST_SQLITE=1 uv run python manage.py test cloud.tests.CloudServerServicesTestCase.test_global_shutdown_switch_blocks_scheduled_suspend cloud.tests.CloudServerServicesTestCase.test_lifecycle_plans_use_stage_specific_asset_switches cloud.tests.CloudServerServicesTestCase.test_order_static_ip_release_respects_asset_ip_delete_disabled cloud.tests.CloudServerServicesTestCase.test_lifecycle_tick_releases_retained_static_ip_after_recycle_due --settings=shop.settings --verbosity=1
-UV_CACHE_DIR=/private/tmp/uv-cache-shop DJANGO_TEST_SQLITE=1 uv run python manage.py test cloud.tests.CloudServerServicesTestCase.test_lifecycle_plans_use_stage_specific_asset_switches cloud.tests.CloudServerServicesTestCase.test_lifecycle_plans_show_global_stage_switches --settings=shop.settings --verbosity=1
 UV_CACHE_DIR=/private/tmp/uv-cache-shop uv run python manage.py check
-UV_CACHE_DIR=/private/tmp/uv-cache-shop uv run python -m py_compile bot/api.py cloud/tests.py cloud/lifecycle_execution.py cloud/lifecycle.py
+UV_CACHE_DIR=/private/tmp/uv-cache-shop DJANGO_TEST_SQLITE=1 uv run python manage.py test cloud.tests.CloudServerServicesTestCase.test_cloud_assets_list_compact_returns_ip_view_payload cloud.tests.CloudServerServicesTestCase.test_cloud_assets_list_all_includes_disabled_or_missing_cloud_account_assets cloud.tests.CloudServerServicesTestCase.test_cloud_assets_grouped_paginated_uses_twenty_user_groups_per_page cloud.tests.CloudServerServicesTestCase.test_lifecycle_plans_use_stage_specific_asset_switches cloud.tests.CloudServerServicesTestCase.test_lifecycle_plans_show_global_stage_switches --settings=shop.settings --verbosity=1
 pnpm --filter @vben/web-antd typecheck
 git diff --check
-git -C /Users/a399/Desktop/data/vue-shop-admin diff --check
 ```
 
-结果：6 个生命周期聚焦测试、Django 系统检查、Python 编译检查、前端类型检查和前后端空白检查均通过。SQLite 输出的 `db_comment` 警告为已知数据库能力差异。
+结果：Django 系统检查、5 个聚焦测试、前端类型检查和空白检查通过。SQLite 输出的 `db_comment` 警告为已知数据库能力差异。
+
+## 清理
+
+- 已删除本轮临时后台账号 `codex_ui_tester`。
+- 已关闭 Playwright 浏览器并删除 `.playwright-cli/` 临时目录。
 
 ## 红线
 
-- 本轮执行了用户已授权的真实云资源创建、关机、删除服务器和固定 IP 释放，并已单独写入 `docs/real-machine-test-report.md`。
-- 本轮未执行真实链上支付、链上广播、生产发布、删除业务数据或删除测试库。
-- 本轮未打印密钥、私钥、Telegram session、TOTP、支付密钥、云厂商密钥、完整公网 IP、代理链接、代理 secret 或登录密码。
+- 本轮未执行真实云资源创建、关机、删除服务器、释放 IP、换 IP、真实支付、链上广播、生产发布、删除业务数据或删除测试库。
+- 本轮未打印密钥、私钥、Telegram session、TOTP、支付密钥、云厂商密钥、完整代理链接、代理 secret 或登录密码。
 - 本轮未恢复废弃 runtime app、订单侧到期字段、旧计划快照、旧退款逻辑、旧退款函数名或旧兼容入口。
 
 ## 剩余风险
 
-- 本轮重点覆盖生命周期真机创建 / 关机 / 删机 / 固定 IP 释放和计划页开关联动；机器人真机全菜单点击未在本轮重复执行。
-- 下一轮继续覆盖机器人真机点击、通知计划页面、任务中心页面、代理列表页面的真实翻页 / 跳页 / 数据库对账。
+- 代理列表接口在 150 万资产下仍为 3.2 到 5.3 秒，需要继续优化到 2 秒内，同时保持第 2 页、深页和末页不丢数据。
+- 机器人真机全菜单点击未在本轮重复执行；当前重点已完成生命周期真实创建 / 关机 / 删除 / IP 释放基线。
