@@ -11532,6 +11532,58 @@ class CloudServerServicesTestCase(TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertFalse(CloudUserNoticeLog.objects.filter(id=log.id).exists())
 
+    # 功能：验证同一批次的多条通知历史仍使用日志 ID 作为表格唯一行键。
+    def test_notice_history_rows_keep_unique_log_ids_for_same_batch(self):
+        order = CloudServerOrder.objects.create(
+            order_no='NOTICE-PLAN-HISTORY-UNIQUE-1',
+            user=self.user,
+            plan=self.plan,
+            provider=self.plan.provider,
+            region_code=self.plan.region_code,
+            region_name=self.plan.region_name,
+            plan_name=self.plan.plan_name,
+            quantity=1,
+            currency='USDT',
+            total_amount='19.00',
+            pay_amount='19.00',
+            status='completed',
+            public_ip='7.7.7.73',
+        )
+        logs = [
+            CloudUserNoticeLog.objects.create(
+                user=self.user,
+                order=order,
+                batch_id='notice-batch-same-row-key',
+                event_type='renew_notice_batch',
+                target_chat_id=123456,
+                order_no=order.order_no,
+                ip=order.public_ip,
+                is_batch=True,
+                delivered=True,
+                text_preview=f'到期提醒：同批次历史 {index}',
+                extra={'order_ids': [order.id]},
+            )
+            for index in range(2)
+        ]
+        staff_user = get_user_model().objects.create_user(username='staff_notice_history_unique_ids', password='x', is_staff=True)
+        request = self.factory.get('/api/admin/tasks/notices/', {
+            'compact': '1',
+            'fields': 'basic',
+            'limit': 1,
+            'history_limit': 10,
+        })
+        self._attach_bearer_session(request, staff_user)
+        response = notice_task_detail(request)
+
+        self.assertEqual(response.status_code, 200)
+        data = json.loads(response.content)['data']
+        rows = [
+            item for item in data['history_items']
+            if item.get('batch_id') == 'notice-batch-same-row-key'
+        ]
+        self.assertEqual({item.get('id') for item in rows}, {log.id for log in logs})
+        self.assertEqual({item.get('log_id') for item in rows}, {log.id for log in logs})
+
     # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
     def test_cloud_ip_query_keyboard_limits_non_owner_to_renewal(self):
         from bot.keyboards import cloud_ip_query_result

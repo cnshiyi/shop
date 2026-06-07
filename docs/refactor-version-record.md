@@ -12551,3 +12551,89 @@ SQLite `db_comment` 警告仍是已知数据库能力差异。
 - 本轮未执行真实云资源创建、关机、删除服务器、释放 IP、换 IP、真实支付、链上广播、生产发布或删除业务数据。
 - 本轮未恢复废弃 runtime app、订单侧到期字段、旧计划快照、旧退款逻辑、旧退款函数名或旧兼容入口。
 - 本轮未打印 Telegram token、Telegram session、TOTP、支付密钥、云厂商密钥、完整代理链接或代理 secret。
+
+## 2026-06-08 02:20 通知历史行键唯一性与真实末页巡检
+
+### 背景
+
+继续执行自动巡检时，通知计划接口真实库对账显示：
+
+- 通知计划总数 `21429`，其中近期计划 `3428`、未来计划 `18001`。
+- 历史通知总数 `14960`。
+
+通知计划第 1 页、第 2 页和最后页行数正确。但历史通知第 1 页巡检发现同一个批次下可能出现重复行键，前端历史通知表格使用 `record.id` 作为 row key，存在深分页渲染不稳定风险。
+
+### 修复
+
+- `cloud/api_tasks.py`
+  - `_notice_history_group_items()` 中历史通知行 `id` 改为 `CloudUserNoticeLog.id`。
+  - 继续保留 `batch_id` 和 `log_id` 字段，删除接口仍能按日志 ID 定位并按批次删除同批历史。
+- `cloud/tests.py`
+  - 新增 `test_notice_history_rows_keep_unique_log_ids_for_same_batch`。
+  - 覆盖同批次两条通知日志，确认接口返回行 `id` 和 `log_id` 都使用各自日志 ID，不再共用 `batch_id`。
+
+### 真实库对账
+
+- 通知计划：
+  - active 总数：`21429`
+  - 近期计划：`3428`
+  - 未来计划：`18001`
+  - 第 1 页、第 2 页、最后页：均无重复，最后页 `9` 条。
+- 历史通知：
+  - history 总数：`14960`
+  - 第 1 页、第 2 页、最后页：均无重复，最后页 `10` 条。
+  - 修复后历史通知最后页 ID 为 `10-1`，与分页契约一致。
+
+### 真实前端验证
+
+使用 Playwright 打开真实页面：
+
+- `http://127.0.0.1:5666/admin/tasks/notices`
+
+页面显示：
+
+- `21429 组用户通知 / 21429 个 IP 通知项`
+- `近期计划 3428`
+- `未来计划 18001`
+
+翻页结果：
+
+- 通知计划最后页 `2143`：第一张表 `9` 行。
+- 历史通知最后页 `1496`：第二张表 `10` 行。
+- 最新相关请求全部 `200`：
+  - `/api/admin/user/info`
+  - `/api/admin/tasks/notices/?...history_offset=0&offset=0`
+  - `/api/admin/tasks/notices/?...history_offset=0&offset=21420`
+  - `/api/admin/tasks/notices/?...history_offset=14950&offset=21420`
+- 浏览器控制台：`0 error / 0 warning`。
+
+### 机器人多任务高并发
+
+已补跑：
+
+```bash
+UV_CACHE_DIR=/private/tmp/uv-cache-shop DJANGO_TEST_SQLITE=1 uv run python manage.py test bot.tests.TelegramListenerPushTestCase.test_notice_copy_wrapper_keeps_concurrent_user_sends_isolated --settings=shop.settings --verbosity=1
+```
+
+结果：通过。
+
+覆盖并发用户发送隔离，防止多任务并发时串用户、串消息或共享发送上下文。
+
+### 验证
+
+已通过：
+
+```bash
+UV_CACHE_DIR=/private/tmp/uv-cache-shop uv run python manage.py check
+UV_CACHE_DIR=/private/tmp/uv-cache-shop uv run python -m py_compile cloud/api_tasks.py cloud/tests.py
+UV_CACHE_DIR=/private/tmp/uv-cache-shop DJANGO_TEST_SQLITE=1 uv run python manage.py test cloud.tests.CloudServerServicesTestCase.test_notice_history_rows_keep_unique_log_ids_for_same_batch cloud.tests.CloudServerServicesTestCase.test_delete_notice_history_removes_notice_history_row cloud.tests.CloudServerServicesTestCase.test_notice_task_detail_deep_group_page_has_no_duplicates bot.tests.TelegramListenerPushTestCase.test_notice_copy_wrapper_keeps_concurrent_user_sends_isolated --settings=shop.settings --verbosity=1
+git diff --check
+```
+
+SQLite `db_comment` 警告仍是已知数据库能力差异。
+
+### 红线
+
+- 本轮未执行真实云资源创建、关机、删除服务器、释放 IP、换 IP、真实支付、链上广播、生产发布或删除业务数据。
+- 本轮未恢复废弃 runtime app、订单侧到期字段、旧计划快照、旧退款逻辑、旧退款函数名或旧兼容入口。
+- 本轮未打印 Telegram token、Telegram session、TOTP、支付密钥、云厂商密钥、完整代理链接、代理 secret 或登录密码。

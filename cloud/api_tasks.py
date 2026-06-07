@@ -756,7 +756,7 @@ def _notice_history_group_items(logs, account_attempts: list[dict] | None = None
         ip_count = len(order_ids) if order_ids else 1
         item = _notice_task_history_item_payload(log, account_attempts=account_attempts)
         item.update({
-            'id': log.batch_id or log.id,
+            'id': log.id,
             'log_id': log.id,
             'notice_event': log.event_type,
             'order_ids': order_ids,
