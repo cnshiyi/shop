@@ -11149,3 +11149,65 @@ git -C /Users/a399/Desktop/data/vue-shop-admin diff --check
 - 本轮无法完成真实浏览器翻页 / 跳页和真实 MySQL 数据库对账，50 万到 100 万级分页耗时仍待可访问本地端口和数据库的环境验证。
 - 当前后端工作区仍有未提交业务补丁：`cloud/api_asset_snapshots.py`、`cloud/management/commands/refresh_cloud_asset_dashboard_snapshots.py`、`cloud/tests.py`；本轮未介入这些变更。
 - 下一轮应在具备本地页面与数据库访问能力的环境中继续覆盖任务中心、生命周期计划、通知计划的真实点击和数据库精确对账。
+
+## 2026-06-07 代理列表 150 万资产快照补齐与真实页面验证
+
+### 背景
+
+用户要求继续全自动循环测试，并强调不能只调用 API，必须实际打开页面查看数据是否正常显示。本轮从代理列表真实浏览器翻页开始，发现数据库已有 150 万条 `CloudAsset`，但代理列表快照表只有 50 万条，导致未进入快照投影的 100 万资产在前端不可见，形成无法管理的孤儿资产。
+
+### 修改
+
+- `cloud/api_asset_snapshots.py` 新增缺失快照分批补齐逻辑：
+  - 少量缺失快照在列表请求内同步补齐。
+  - 大量缺失快照启动带锁后台补齐，不阻塞页面请求。
+  - 缺失检测先比较资产总数和快照总数，已对齐时不再做反关联缺失查询。
+- `refresh_cloud_asset_dashboard_snapshots` 管理命令改为默认只补齐缺失快照，并支持 `--batch-size`、`--max-batches`。
+- 分批补齐的批次上限固定为 10000，避免 50000 批次触发 MySQL `max_allowed_packet`。
+- 旧快照刷新改为显式 `--include-stale`，默认不再进入百万级旧快照扫描，避免管理命令或列表请求因旧快照全表扫描超时。
+- 增加快照补齐聚焦测试，覆盖缺失快照补齐、大量缺失时后台补齐、默认跳过旧快照扫描和云账号异常资产仍在全部列表可见。
+
+### 压测与真实页面对账
+
+- 修复前真实数据：`CloudAsset` 1500000 条，`CloudAssetDashboardSnapshot` 500000 条，缺失快照 1000000 条，页面只显示 `全部 (500000)`。
+- 已在真实库执行分批补齐，最终对账：资产 1500000 条，快照 1500000 条，缺失 0。
+- 数据库风险计数：
+  - 可见快照：1489998。
+  - 云账号异常：1045002。
+  - 非云账号异常运行中：449988。
+  - 即将到期：1250。
+  - 已过期：1752。
+  - 未附加固定 IP：1。
+- 真实页面刷新后显示：
+  - `全部 (1500000)`。
+  - `云账号异常 (1045002)`。
+  - 分组分页 `共 1489996 个用户/分组`。
+- 真实页面第 1 页显示 `huangyating6748`、`压测Y用户00000`、`198.19.0.0`、`5.12 USDT`，小数点保留两位。
+- 真实点击最后页第 74500 页后，页面显示 `压测用户Z98729` 到 `压测用户Z99719`，不是第 1 页重复数据。
+- 浏览器控制台检查为 0 error / 0 warning。
+
+### 验证
+
+本地已通过：
+
+```bash
+UV_CACHE_DIR=/private/tmp/uv-cache-shop DJANGO_TEST_SQLITE=1 uv run python manage.py test cloud.tests.CloudServerServicesTestCase.test_cloud_asset_dashboard_snapshot_backfill_materializes_missing_assets cloud.tests.CloudServerServicesTestCase.test_cloud_asset_dashboard_snapshot_backfill_skips_stale_by_default cloud.tests.CloudServerServicesTestCase.test_cloud_assets_list_defers_large_missing_snapshot_backfill cloud.tests.CloudServerServicesTestCase.test_cloud_assets_list_defers_large_stale_snapshot_refresh cloud.tests.CloudServerServicesTestCase.test_cloud_assets_list_all_includes_disabled_or_missing_cloud_account_assets --settings=shop.settings --verbosity=1
+UV_CACHE_DIR=/private/tmp/uv-cache-shop uv run python -m py_compile cloud/api_asset_snapshots.py cloud/management/commands/refresh_cloud_asset_dashboard_snapshots.py cloud/tests.py
+UV_CACHE_DIR=/private/tmp/uv-cache-shop uv run python manage.py check
+UV_CACHE_DIR=/private/tmp/uv-cache-shop uv run python manage.py refresh_cloud_asset_dashboard_snapshots --batch-size 50000 --max-batches 2
+git diff --check
+git -C /Users/a399/Desktop/data/vue-shop-admin diff --check
+```
+
+结果：5 个快照补齐与大数据列表聚焦测试、Django 系统检查、编译检查、管理命令安全返回和前后端空白检查均通过。SQLite 输出的 `db_comment` 警告为已知数据库能力差异。
+
+### 红线
+
+- 本轮未执行真实云资源创建、删除、关机、释放 IP、换 IP、真实支付、链上广播、删除业务数据、删除测试库或生产发布。
+- 本轮未打印密钥、私钥、Telegram session、TOTP、支付密钥或云厂商密钥。
+- 本轮未恢复废弃 runtime app、订单侧到期字段、旧计划快照、旧退款入口、旧退款函数名或旧兼容壳。
+
+### 剩余风险
+
+- 本轮修复代理列表快照投影完整性和真实页面可见性；任务中心、生命周期计划、通知计划仍需要继续做真实页面跳页和数据库对账。
+- 当前数据库没有 `logged_in` 状态的 Telegram 登录账号，机器人真机账号点击测试仍无法完成。

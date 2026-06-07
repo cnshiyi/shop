@@ -4,42 +4,42 @@
 
 ## 最近一轮
 
-- 时间：2026-06-07 19:15 CST
-- 状态：完成生命周期计划 / 任务中心分页契约专项审计，未发现需要立即修复的回归；真实页面与真实 MySQL 对账被当前沙箱限制阻塞。
-- 本轮范围：生命周期计划分页契约、IP 删除历史分页契约、任务中心生命周期状态统计聚合。
+- 时间：2026-06-07 19:32 CST
+- 状态：修复代理列表 150 万资产下快照缺失导致的孤儿资产不可见问题，并完成真实浏览器页面验证。
+- 本轮范围：代理列表快照投影补齐、百万级快照补齐命令安全上限、真实前端首页与最后页跳页、数据库数量和风险统计对账。
 
-## 审计摘要
+## 修复摘要
 
-- 复查 `bot/api.py` 的 `lifecycle_plans` 分页入口，确认关机计划、删机计划、IP 删除计划和 IP 删除历史继续使用独立分页参数，不存在把多个表混成同一分页状态的回流。
-- 复查 `cloud/lifecycle_plan_queries.py` 的 `paged_queryset()`、`server_lifecycle_plan_page()`、`ip_delete_history_page_sources()`，确认深页仍走当前反向截取策略，分页契约继续以精确总数和稳定排序返回。
-- 复查 `cloud/task_center.py` 的生命周期聚合，确认最近失败历史、数据库任务和计划项的去重优先级维持现状，没有发现状态统计漏报或重复计数回归。
-- 尝试执行真实浏览器页与真实 MySQL 对账时，当前会话对 `127.0.0.1:5666`、`127.0.0.1:8000` 以及本地 MySQL socket 连接均返回 `EPERM/Operation not permitted`，因此本轮只能完成 SQLite 聚焦验证，不能完成要求中的真实页面点击和真实库对账。
+- 发现真实数据库有 `CloudAsset` 1500000 条，但 `CloudAssetDashboardSnapshot` 只有 500000 条，导致新增的 1000000 条资产不进入代理列表页面。
+- 新增快照缺失分批补齐逻辑：少量缺失在请求内补齐，大量缺失只启动带锁后台补齐，避免页面请求同步跑百万级刷新。
+- `refresh_cloud_asset_dashboard_snapshots` 管理命令改为默认只补齐缺失快照，批次上限固定为 10000，避免 50000 批次触发 MySQL `max_allowed_packet`。
+- 旧快照刷新改为显式 `--include-stale`，默认不再进入百万级旧快照扫描，避免维护命令和列表请求因全表扫描超时。
+- 缺失检测先比较资产表与快照表数量，已对齐时不再执行反关联缺失查询。
 
-## 数据与样本
+## 数据与实测
 
-- 生命周期分页样本：覆盖删机计划第 1/2 页分页契约、IP 删除历史第 1/2 页分页契约。
-- 状态聚合样本：覆盖“最近失败历史计入 failed”“仅 DB 失败任务也应计入 failed”“DB 任务优先于重复计划项”三类任务中心生命周期场景。
+- 修复前：资产 1500000，快照 500000，缺失 1000000，页面只显示 `全部 (500000)`。
+- 已执行真实库补齐：资产 1500000，快照 1500000，缺失 0。
+- 修复后页面显示：`全部 (1500000)`、`云账号异常 (1045002)`、可见分组 `1489996`。
+- 数据库对账：可见快照 1489998，云账号异常 1045002，运行中非云账号异常 449988，即将到期 1250，已过期 1752，未附加固定 IP 1。
+- 真实浏览器第 1 页显示 `huangyating6748`、`压测Y用户00000`、`198.19.0.0`、`5.12 USDT`。
+- 真实浏览器跳到最后页第 74500 页，显示 `压测用户Z98729` 到 `压测用户Z99719`，不是第 1 页重复数据。
+- 浏览器控制台：0 error / 0 warning。
 
 ## 验证
 
 本地已通过：
 
 ```bash
-UV_CACHE_DIR=/private/tmp/uv-cache-shop DJANGO_TEST_SQLITE=1 uv run python manage.py test cloud.tests.CloudServerServicesTestCase.test_lifecycle_plans_server_delete_pagination_contract cloud.tests.CloudServerServicesTestCase.test_lifecycle_plans_ip_delete_history_pagination_contract cloud.tests.CloudServerServicesTestCase.test_lifecycle_plans_counts_all_ip_delete_history_beyond_loaded_limit cloud.tests.CloudServerServicesTestCase.test_lifecycle_plans_split_shutdown_before_server_delete --settings=shop.settings --verbosity=1
-UV_CACHE_DIR=/private/tmp/uv-cache-shop DJANGO_TEST_SQLITE=1 uv run python manage.py test cloud.tests_task_center.CloudTaskCenterApiTestCase.test_lifecycle_section_counts_recent_failed_history_as_failed cloud.tests_task_center.CloudTaskCenterApiTestCase.test_lifecycle_section_counts_failed_db_task_without_history_log cloud.tests_task_center.CloudTaskCenterApiTestCase.test_lifecycle_section_prefers_db_task_over_duplicate_plan_item --settings=shop.settings --verbosity=1
+UV_CACHE_DIR=/private/tmp/uv-cache-shop DJANGO_TEST_SQLITE=1 uv run python manage.py test cloud.tests.CloudServerServicesTestCase.test_cloud_asset_dashboard_snapshot_backfill_materializes_missing_assets cloud.tests.CloudServerServicesTestCase.test_cloud_asset_dashboard_snapshot_backfill_skips_stale_by_default cloud.tests.CloudServerServicesTestCase.test_cloud_assets_list_defers_large_missing_snapshot_backfill cloud.tests.CloudServerServicesTestCase.test_cloud_assets_list_defers_large_stale_snapshot_refresh cloud.tests.CloudServerServicesTestCase.test_cloud_assets_list_all_includes_disabled_or_missing_cloud_account_assets --settings=shop.settings --verbosity=1
+UV_CACHE_DIR=/private/tmp/uv-cache-shop uv run python -m py_compile cloud/api_asset_snapshots.py cloud/management/commands/refresh_cloud_asset_dashboard_snapshots.py cloud/tests.py
 UV_CACHE_DIR=/private/tmp/uv-cache-shop uv run python manage.py check
-UV_CACHE_DIR=/private/tmp/uv-cache-shop uv run python -m py_compile bot/api.py cloud/lifecycle_plan_queries.py cloud/task_center.py
+UV_CACHE_DIR=/private/tmp/uv-cache-shop uv run python manage.py refresh_cloud_asset_dashboard_snapshots --batch-size 50000 --max-batches 2
 git diff --check
 git -C /Users/a399/Desktop/data/vue-shop-admin diff --check
 ```
 
-结果：4 个生命周期分页聚焦测试、3 个任务中心生命周期聚焦测试、Django 系统检查、编译检查和前后端空白检查均通过。SQLite 的 `db_comment` 警告仍为已知数据库能力差异。
-
-## 阻塞与边界
-
-- 当前沙箱禁止访问本地 `127.0.0.1` 端口，无法打开 `http://127.0.0.1:5666` 前端页面或直连 `http://127.0.0.1:8000` 后端接口做真实浏览器验证。
-- 当前沙箱禁止连接本地 MySQL（`127.0.0.1` 返回 `Operation not permitted`），无法对真实 50 万到 100 万级数据做数据库对账和深分页耗时采样。
-- 因此本轮没有伪造“真实页面点击”或“真实数据库对账”结论，只记录了可执行的只读契约审计结果。
+结果：5 个快照补齐/大数据列表聚焦测试、Django 系统检查、编译检查、管理命令安全返回和前后端空白检查均通过。SQLite 的 `db_comment` 警告仍为已知数据库能力差异。
 
 ## 红线
 
@@ -49,6 +49,5 @@ git -C /Users/a399/Desktop/data/vue-shop-admin diff --check
 
 ## 剩余风险
 
-- 本轮未能完成用户要求中的真实浏览器翻页/跳页和真实 MySQL 数据库对账，50 万到 100 万级耗时结论仍缺失。
-- 当前后端工作区存在未提交业务改动：`cloud/api_asset_snapshots.py`、`cloud/management/commands/refresh_cloud_asset_dashboard_snapshots.py`、`cloud/tests.py`，本轮未介入这些补丁。
-- 下一轮应在具备本地端口和 MySQL 访问能力的环境中，继续对任务中心、生命周期计划和通知计划执行真实页面点击、深页跳页和数据库精确对账。
+- 本轮修复的是代理列表快照投影完整性和页面可见性；任务中心、生命周期计划、通知计划仍需继续做真实页面跳页和数据库对账。
+- 当前没有 `logged_in` 状态的 Telegram 登录账号，机器人真机账号点击测试仍无法完成，只能继续跑回调与菜单聚焦测试。

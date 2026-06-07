@@ -18,6 +18,9 @@ from core.dashboard_api import _countdown_label, _days_left, _decimal_to_str
 logger = logging.getLogger(__name__)
 
 _SNAPSHOT_SYNC_REFRESH_LIMIT = 1000
+_SNAPSHOT_BACKFILL_BATCH_SIZE = 5000
+_SNAPSHOT_BACKFILL_MAX_BATCH_SIZE = 10000
+_SNAPSHOT_BACKFILL_MAX_BATCHES = 500
 
 
 def _normalize_snapshot_asset_ids(asset_ids):
@@ -69,6 +72,107 @@ def _defer_cloud_asset_dashboard_snapshot_refresh(*, reason: str, asset_ids=None
             close_old_connections()
 
     threading.Thread(target=_run, name='cloud-asset-dashboard-snapshot-refresh', daemon=True).start()
+    return True
+
+
+def _next_missing_snapshot_asset_ids(limit: int) -> list[int]:
+    asset_total = CloudAsset.objects.filter(kind=CloudAsset.KIND_SERVER).count()
+    snapshot_total = CloudAssetDashboardSnapshot.objects.count()
+    if snapshot_total >= asset_total:
+        return []
+    return list(
+        cloud_assets_base_queryset()
+        .filter(dashboard_snapshot__isnull=True)
+        .order_by('id')
+        .values_list('id', flat=True)[:limit]
+    )
+
+
+def _next_stale_snapshot_asset_ids(limit: int) -> list[int]:
+    scan_limit = min(max(int(limit or 1), 1000), 5000)
+    rows = list(
+        CloudAssetDashboardSnapshot.objects
+        .order_by('asset_updated_at', 'asset_id')
+        .values_list('asset_id', 'asset_updated_at')[:scan_limit]
+    )
+    if not rows:
+        return []
+    asset_ids = [asset_id for asset_id, _ in rows if asset_id]
+    asset_updated_at = {}
+    chunk_size = _SNAPSHOT_BACKFILL_MAX_BATCH_SIZE
+    for index in range(0, len(asset_ids), chunk_size):
+        chunk_ids = asset_ids[index:index + chunk_size]
+        asset_updated_at.update(
+            CloudAsset.objects
+            .filter(kind=CloudAsset.KIND_SERVER, id__in=chunk_ids)
+            .values_list('id', 'updated_at')
+        )
+    stale_ids = []
+    for asset_id, snapshot_updated_at in rows:
+        updated_at = asset_updated_at.get(asset_id)
+        if updated_at and (snapshot_updated_at is None or updated_at > snapshot_updated_at):
+            stale_ids.append(asset_id)
+            if len(stale_ids) >= limit:
+                break
+    return stale_ids
+
+
+def backfill_cloud_asset_dashboard_snapshots(*, reason: str = '', batch_size: int = _SNAPSHOT_BACKFILL_BATCH_SIZE, max_batches: int | None = None, include_stale: bool = False) -> dict:
+    started_at = timezone.now()
+    batch_size = min(max(int(batch_size or _SNAPSHOT_BACKFILL_BATCH_SIZE), 1), _SNAPSHOT_BACKFILL_MAX_BATCH_SIZE)
+    max_batches = _SNAPSHOT_BACKFILL_MAX_BATCHES if max_batches is None else max(int(max_batches), 1)
+    batches = 0
+    refreshed = 0
+    created = 0
+    updated = 0
+    while batches < max_batches:
+        asset_ids = _next_missing_snapshot_asset_ids(batch_size)
+        batch_reason = f'{reason}:missing'
+        if not asset_ids and include_stale:
+            asset_ids = _next_stale_snapshot_asset_ids(batch_size)
+            batch_reason = f'{reason}:stale'
+        if not asset_ids:
+            break
+        summary = refresh_cloud_asset_dashboard_snapshots(asset_ids=asset_ids, reason=batch_reason, full=False)
+        batches += 1
+        refreshed += int(summary.get('assets') or 0)
+        created += int(summary.get('created') or 0)
+        updated += int(summary.get('updated') or 0)
+    duration = max((timezone.now() - started_at).total_seconds(), 0)
+    logger.info(
+        'CLOUD_ASSET_DASHBOARD_SNAPSHOT_BACKFILL reason=%s batches=%s refreshed=%s created=%s updated=%s duration=%.3f',
+        reason,
+        batches,
+        refreshed,
+        created,
+        updated,
+        duration,
+    )
+    return {
+        'batches': batches,
+        'assets': refreshed,
+        'created': created,
+        'updated': updated,
+        'duration_seconds': round(duration, 3),
+    }
+
+
+def _defer_cloud_asset_dashboard_snapshot_backfill(*, reason: str) -> bool:
+    lock_key = 'cloud-asset-dashboard-snapshot-backfill'
+    if not cache.add(lock_key, reason or 'pending', timeout=1800):
+        return False
+
+    def _run():
+        close_old_connections()
+        try:
+            backfill_cloud_asset_dashboard_snapshots(reason=reason)
+        except Exception:
+            logger.exception('CLOUD_ASSET_DASHBOARD_SNAPSHOT_BACKFILL_FAILED reason=%s', reason)
+        finally:
+            cache.delete(lock_key)
+            close_old_connections()
+
+    threading.Thread(target=_run, name='cloud-asset-dashboard-snapshot-backfill', daemon=True).start()
     return True
 
 
@@ -255,6 +359,13 @@ def _ensure_cloud_asset_dashboard_snapshots(reason: str = 'list') -> bool:
             return True
         _defer_cloud_asset_dashboard_snapshot_refresh(reason=f'{reason}:empty-large', full=True)
         return False
+    missing_ids = _next_missing_snapshot_asset_ids(_SNAPSHOT_SYNC_REFRESH_LIMIT + 1)
+    if missing_ids:
+        if len(missing_ids) <= _SNAPSHOT_SYNC_REFRESH_LIMIT:
+            refresh_cloud_asset_dashboard_snapshots(asset_ids=missing_ids, reason=f'{reason}:missing', full=False)
+            return True
+        _defer_cloud_asset_dashboard_snapshot_backfill(reason=f'{reason}:missing-large')
+        return False
     latest_asset = (
         asset_queryset
         .order_by('-updated_at')
@@ -274,7 +385,7 @@ def _ensure_cloud_asset_dashboard_snapshots(reason: str = 'list') -> bool:
             refresh_cloud_asset_dashboard_snapshots(asset_ids=refresh_ids, reason=f'{reason}:stale', full=False)
             return True
         logger.info(
-            'CLOUD_ASSET_DASHBOARD_SNAPSHOT_STALE_LARGE_SKIPPED reason=%s candidates=%s limit=%s',
+            'CLOUD_ASSET_DASHBOARD_SNAPSHOT_STALE_LARGE_DEFERRED reason=%s candidates=%s limit=%s',
             reason,
             len(stale_ids),
             _SNAPSHOT_SYNC_REFRESH_LIMIT,

@@ -48,7 +48,7 @@ from cloud.provisioning import (
 from cloud.services import _cloud_asset_deleted_or_missing, apply_cloud_server_renewal, create_cloud_server_order, create_cloud_server_rebuild_order, create_cloud_server_renewal, create_cloud_server_renewal_by_public_query, create_cloud_server_renewal_for_user, create_cloud_server_upgrade_order, ensure_cloud_asset_operation_order, get_cloud_server_by_ip, get_cloud_server_by_ip_for_user, get_group_proxy_asset_detail, get_proxy_asset_by_ip_for_admin, get_proxy_asset_by_ip_for_user, get_user_proxy_asset_detail, is_retained_ip_order_visible_in_group, list_all_auto_renew_cloud_servers, list_cloud_asset_renewal_plans, list_cloud_server_upgrade_plans, list_group_cloud_servers, list_retained_ip_renewal_plans, list_retained_ip_renewal_plans_by_asset, list_user_cloud_servers, mark_cloud_server_ip_change_requested, mark_cloud_server_reinit_requested, pay_cloud_server_order_with_balance, pay_cloud_server_renewal_with_balance, prepare_cloud_asset_renewal_with_link, prepare_retained_ip_renewal_with_link, rebind_cloud_server_user, record_cloud_ip_log, replace_cloud_asset_order_by_admin, run_cloud_server_renewal_postcheck, set_cloud_server_auto_renew_admin, set_group_cloud_server_auto_renew, sync_cloud_asset_user_binding
 from cloud.sync_safety import get_missing_confirmation_threshold
 from cloud.api_asset_edit import delete_cloud_asset, update_cloud_asset
-from cloud.api_asset_snapshots import refresh_cloud_asset_dashboard_snapshots
+from cloud.api_asset_snapshots import backfill_cloud_asset_dashboard_snapshots, refresh_cloud_asset_dashboard_snapshots
 from cloud.api_assets import _asset_payload, _display_cloud_asset_note, _infer_asset_order, cloud_assets_list
 from cloud.api_monitors import _fetch_address_chain_balances
 from cloud.api_orders import _cloud_order_source_tags, cloud_order_detail, cloud_orders_list, delete_cloud_order, update_cloud_order_status
@@ -1600,6 +1600,86 @@ class CloudServerServicesTestCase(TestCase):
         self.assertEqual(payload['risk_counts']['all'], 2)
         self.assertEqual(payload['risk_counts']['account_disabled'], 2)
 
+    # 功能：缺失的代理列表快照必须能被分批补齐，避免百万压测资产成为不可见孤儿资产。
+    def test_cloud_asset_dashboard_snapshot_backfill_materializes_missing_assets(self):
+        assets = []
+        for index in range(3):
+            assets.append(CloudAsset.objects.create(
+                kind=CloudAsset.KIND_SERVER,
+                source=CloudAsset.SOURCE_AWS_SYNC,
+                user=self.user,
+                provider='aws_lightsail',
+                region_code=self.plan.region_code,
+                region_name=self.plan.region_name,
+                asset_name=f'snapshot-missing-backfill-{index}',
+                public_ip=f'10.77.88.{70 + index}',
+                status=CloudAsset.STATUS_RUNNING,
+                actual_expires_at=timezone.now() + timezone.timedelta(days=30),
+            ))
+        refresh_cloud_asset_dashboard_snapshots(asset_ids=[assets[0].id], reason='test', full=False)
+
+        summary = backfill_cloud_asset_dashboard_snapshots(reason='test', batch_size=1, max_batches=5)
+
+        self.assertEqual(summary['batches'], 2)
+        self.assertEqual(summary['created'], 2)
+        self.assertEqual(
+            set(CloudAssetDashboardSnapshot.objects.values_list('asset_id', flat=True)),
+            {asset.id for asset in assets},
+        )
+
+    # 功能：默认补齐只处理缺失快照，不进入百万级旧快照扫描。
+    def test_cloud_asset_dashboard_snapshot_backfill_skips_stale_by_default(self):
+        asset = CloudAsset.objects.create(
+            kind=CloudAsset.KIND_SERVER,
+            source=CloudAsset.SOURCE_AWS_SYNC,
+            user=self.user,
+            provider='aws_lightsail',
+            region_code=self.plan.region_code,
+            region_name=self.plan.region_name,
+            asset_name='snapshot-stale-default-skip',
+            public_ip='10.77.88.79',
+            status=CloudAsset.STATUS_RUNNING,
+            actual_expires_at=timezone.now() + timezone.timedelta(days=30),
+        )
+        refresh_cloud_asset_dashboard_snapshots(asset_ids=[asset.id], reason='test', full=False)
+        asset.asset_name = 'snapshot-stale-default-skip-updated'
+        asset.save(update_fields=['asset_name', 'updated_at'])
+
+        with patch('cloud.api_asset_snapshots._next_stale_snapshot_asset_ids', side_effect=AssertionError('stale scan should be explicit')):
+            summary = backfill_cloud_asset_dashboard_snapshots(reason='test', batch_size=1, max_batches=1)
+
+        self.assertEqual(summary['batches'], 0)
+
+    # 功能：大量缺失快照不应阻塞列表请求，但必须触发后台分批补齐。
+    def test_cloud_assets_list_defers_large_missing_snapshot_backfill(self):
+        assets = []
+        for index in range(3):
+            assets.append(CloudAsset.objects.create(
+                kind=CloudAsset.KIND_SERVER,
+                source=CloudAsset.SOURCE_AWS_SYNC,
+                user=self.user,
+                provider='aws_lightsail',
+                region_code=self.plan.region_code,
+                region_name=self.plan.region_name,
+                asset_name=f'snapshot-missing-large-{index}',
+                public_ip=f'10.77.88.{80 + index}',
+                status=CloudAsset.STATUS_RUNNING,
+                actual_expires_at=timezone.now() + timezone.timedelta(days=30),
+            ))
+        refresh_cloud_asset_dashboard_snapshots(asset_ids=[assets[0].id], reason='test', full=False)
+
+        admin = get_user_model().objects.create_user(username='snapshot_missing_large_admin', password='x', is_staff=True)
+        request = self.factory.get('/api/admin/cloud-assets/', {'paginated': '1'})
+        self._attach_bearer_session(request, admin)
+        with patch('cloud.api_asset_snapshots._SNAPSHOT_SYNC_REFRESH_LIMIT', 1), \
+            patch('cloud.api_asset_snapshots._defer_cloud_asset_dashboard_snapshot_backfill', return_value=True) as deferred_backfill:
+            response = cloud_assets_list(request)
+        payload = json.loads(response.content.decode('utf-8'))['data']
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(payload['total'], 1)
+        deferred_backfill.assert_called_once()
+
     # 功能：验证 IP 轻量视图只返回列表必要字段，避免大列表加载完整代理 payload。
     def test_cloud_assets_list_compact_returns_ip_view_payload(self):
         asset = CloudAsset.objects.create(
@@ -1694,6 +1774,7 @@ class CloudServerServicesTestCase(TestCase):
         request = self.factory.get('/api/admin/cloud-assets/', {'compact': '1', 'grouped': '1', 'paginated': '1', 'group_by': 'user'})
         self._attach_bearer_session(request, admin)
         with patch('cloud.api_asset_snapshots._SNAPSHOT_SYNC_REFRESH_LIMIT', 1), \
+            patch('cloud.api_asset_snapshots._defer_cloud_asset_dashboard_snapshot_backfill', side_effect=AssertionError('stale backfill should be explicit')), \
             patch('cloud.api_asset_snapshots.refresh_cloud_asset_dashboard_snapshots', side_effect=AssertionError('large stale snapshots should not block list requests')):
             response = cloud_assets_list(request)
         payload = json.loads(response.content.decode('utf-8'))['data']
