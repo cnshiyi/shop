@@ -4,53 +4,59 @@
 
 ## 最近一轮
 
-- 时间：2026-06-08 02:20 CST
-- 状态：完成一轮通知计划/历史通知真实页面巡检，并修复历史通知同批次多行使用同一个表格行键的问题。
-- 本轮范围：后端通知计划接口、历史通知删除契约、通知计划真实库分页对账、前端真实页面末页翻页、机器人多任务高并发发送隔离回归。
+- 时间：2026-06-08 02:38 CST
+- 状态：完成一轮代理列表全标签真实浏览器巡检；本轮未发现必须改代码的问题。
+- 本轮范围：代理列表 IP 视图、11 个风险标签点击加载、未附加固定IP第 1/2/末页翻页、接口/页面/数据库口径对账、浏览器控制台检查。
 
-## 发现与修复
-
-- 发现 1：历史通知接口把行 `id` 写成 `batch_id or log.id`。同一个批次存在多条 `CloudUserNoticeLog` 时，多行会共享同一个 `id`。
-  - 影响：前端历史通知表格使用 `record.id` 作为 row key，会导致同批次历史行 key 重复，深分页和渲染稳定性受影响。
-  - 修复：`cloud/api_tasks.py` 的历史通知行 `id` 改为日志 ID，继续保留 `batch_id` 和 `log_id` 字段。
-  - 回归：`cloud.tests.CloudServerServicesTestCase.test_notice_history_rows_keep_unique_log_ids_for_same_batch` 覆盖同批次两条日志，断言 `id` 和 `log_id` 都是各自日志 ID。
-
-## 真实库对账
-
-- 通知计划：
-  - active 总数：`21429`
-  - 近期计划：`3428`
-  - 未来计划：`18001`
-  - 第 1 页、第 2 页、最后页均无重复，最后页 `9` 条。
-- 历史通知：
-  - history 总数：`14960`
-  - 第 1 页、第 2 页、最后页均无重复，最后页 `10` 条。
-  - 修复后历史通知最后页返回日志 ID `10-1`，与分页契约一致。
-
-## 真实页面验证
+## 真实页面巡检
 
 使用 Playwright 打开真实前端：
 
-- `http://127.0.0.1:5666/admin/tasks/notices`
+- `http://127.0.0.1:5666/admin/cloud-assets`
 
-页面结果：
+页面已确认：
 
-- 顶部统计显示 `21429 组用户通知 / 21429 个 IP 通知项`。
-- 近期计划显示 `3428`，未来计划显示 `18001`。
-- 点击通知计划最后页 `2143` 后，第一张表显示 `9` 行。
-- 点击历史通知最后页 `1496` 后，第二张表显示 `10` 行。
-- 最新相关请求：
-  - `/api/admin/user/info`：`200`
-  - `/api/admin/tasks/notices/?...history_offset=0&offset=0`：`200`
-  - `/api/admin/tasks/notices/?...history_offset=0&offset=21420`：`200`
-  - `/api/admin/tasks/notices/?...history_offset=14950&offset=21420`：`200`
-- 浏览器控制台：`0 error / 0 warning`。
+- 默认进入 IP 视图。
+- 显示列只保留：用户、分组、IP/价格、到期/剩余、编辑。
+- 首屏真实渲染 20 个用户/分组。
+- 价格显示最多 2 位小数，例如 `5.12 USDT`。
+- 页面控制台：`0 error / 0 warning`。
 
-## 机器人并发回归
+## 标签点击结果
 
-- 已跑 `bot.tests.TelegramListenerPushTestCase.test_notice_copy_wrapper_keeps_concurrent_user_sends_isolated`。
-- 结果：通过。
-- 覆盖点：多用户并发发送隔离，避免并发任务串用户、串消息或共享发送上下文。
+11 个标签均已实际点击，相关 `/api/admin/cloud-assets/` 分页请求全部 `200`：
+
+- 全部：资产数 `2500003`，分组数 `2489996`，首屏 `20` 组 / `20` 行，约 `10.5s`。
+- 运行中：资产数 `549988`，分组数 `549988`，首屏 `20` 组 / `20` 行，约 `8.0s`。
+- 即将到期：资产数 `101250`，分组数 `101250`，首屏 `20` 组 / `20` 行，约 `11.2s`。
+- 已过期：资产数 `101752`，分组数 `101752`，首屏 `20` 组 / `20` 行，约 `10.2s`。
+- 未附加固定IP：资产数 `100001`，分组数 `100001`，首屏 `20` 组 / `20` 行，约 `8.1s`。
+- 异常/待确认：资产数 `100000`，分组数 `100000`，首屏 `20` 组 / `20` 行，约 `10.6s`。
+- 云账号异常：资产数 `1145002`，分组数 `1145001`，首屏 `20` 组 / `20` 行，约 `7.9s`。
+- 关机计划关闭：资产数 `100384`，分组数 `100384`，首屏 `20` 组 / `20` 行，约 `11.1s`。
+- 未绑定用户：资产数 `100001`，分组数 `100001`，首屏 `20` 组 / `20` 行，约 `11.1s`。
+- 未绑定群组：资产数 `100013`，分组数 `100003`，首屏 `20` 组 / `30` 行，约 `16.5s`。
+- 续费关闭：资产数 `104558`，分组数 `104548`，首屏 `20` 组 / `30` 行，约 `12.2s`。
+
+口径说明：
+
+- 标签按钮数字来自资产风险计数。
+- 分页 `共 N 个用户/分组` 来自当前分组模式下的分组数。
+- 所以云账号异常、未绑定群组、续费关闭这类标签出现“资产数大于分组数”是合理结果，不是丢数据。
+
+## 翻页专项
+
+未附加固定IP：
+
+- 第 1 页：`page=1`，`20` 组 / `20` 行，请求 `200`。
+- 第 2 页：`page=2`，`20` 组 / `20` 行，请求 `200`，约 `11.0s`。
+- 最后页：`page=5001`，`1` 组 / `1` 行，请求 `200`，约 `10.6s`。
+- 接口末页对账：
+  - `total=100001`
+  - `total_pages=5001`
+  - `loaded=1`
+  - `provider_status=未附加固定IP`
+  - `price=5.12`
 
 ## 验证
 
@@ -58,12 +64,9 @@
 
 ```bash
 UV_CACHE_DIR=/private/tmp/uv-cache-shop uv run python manage.py check
-UV_CACHE_DIR=/private/tmp/uv-cache-shop uv run python -m py_compile cloud/api_tasks.py cloud/tests.py
-UV_CACHE_DIR=/private/tmp/uv-cache-shop DJANGO_TEST_SQLITE=1 uv run python manage.py test cloud.tests.CloudServerServicesTestCase.test_notice_history_rows_keep_unique_log_ids_for_same_batch cloud.tests.CloudServerServicesTestCase.test_delete_notice_history_removes_notice_history_row cloud.tests.CloudServerServicesTestCase.test_notice_task_detail_deep_group_page_has_no_duplicates bot.tests.TelegramListenerPushTestCase.test_notice_copy_wrapper_keeps_concurrent_user_sends_isolated --settings=shop.settings --verbosity=1
-git diff --check
 ```
 
-SQLite `db_comment` 警告仍是已知数据库能力差异。
+本轮只读巡检未改业务代码，未新增聚焦测试。
 
 ## 红线
 
@@ -73,5 +76,5 @@ SQLite `db_comment` 警告仍是已知数据库能力差异。
 
 ## 下一步
 
-- 继续真实浏览器专项巡检，优先覆盖代理列表每个标签、计划页、任务中心在高数据下的翻页/跳页和页面显示一致性。
+- 继续真实浏览器巡检计划页和任务中心，重点看高数据下关机计划、删除计划、IP 删除计划/历史的翻页、跳页、控制台状态。
 - 继续真机 Telegram 多任务高并发点击验证，重点覆盖购买、续费、换 IP、重装、修改配置和返回链。
