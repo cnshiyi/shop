@@ -11631,3 +11631,13 @@ UV_CACHE_DIR=/private/tmp/uv-cache-shop uv run python manage.py check
 - 本轮未执行链上广播、真实地址充值到账、生产发布、删除业务数据或删除测试库。
 - 本轮最终报告不记录完整公网 IP、完整实例名、完整固定 IP 名、完整代理链接、代理 secret、登录密码、云账号密钥或 Telegram session。
 - 本轮未恢复废弃 runtime app、订单侧到期字段、旧计划快照、旧退款逻辑、旧退款函数名或旧兼容入口。
+
+## 2026-06-07 22:08 本轮最终收口说明
+
+上一段 `22:05 生命周期失败任务收敛与代理列表分组总数修复` 是真机重测过程中自动写入的中间记录，其中“本轮未执行真实云资源”的描述已被随后完成的真实生命周期复测覆盖。本轮最终结论以 `2026-06-07 22:03 生命周期真机重测与任务收敛修复`、`docs/auto-optimization-latest.md` 和 `docs/real-machine-test-report.md` 的记录为准：
+
+- 已真实创建 AWS Lightsail 测试服务器、完成关机、删机和固定 IP 释放。
+- 测试订单 `#50096`、测试资产 `#1500332` 最终均为 `deleted`，实例、固定 IP 和当前公网 IP 已清空。
+- 生命周期任务 `suspend/delete/recycle` 已全部收敛为 `done`，失败数为 0。
+- 临时后台账号、Playwright 浏览器和 `.playwright-cli/` 临时目录已清理。
+- 本轮最终验证命令均已通过，未发现测试资源残留。

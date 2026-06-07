@@ -419,3 +419,69 @@
 - 生命周期任务最终状态：`suspend/done`、`delete/done`、`recycle/done`。
 - 最终本地状态：订单 `#50095` 为 `deleted`，资产 `#1500331` 为 `deleted/is_active=False`；实例标识、固定 IP 名称、公网 IP 和 IP 回收时间均已清空。
 - 最终清理结论：本轮真实 AWS 测试实例已删除，固定 IP 已释放，未发现本轮测试资源残留。
+
+## 2026-06-07 生命周期创建、关机、删机、释放 IP 二次真机复测
+
+- 状态：通过，并修复 1 个生命周期任务状态收敛问题。
+- 授权：用户再次明确要求生命周期创建服务器、删除服务器也要测试到，延续对真实云资源成本的授权。
+- 后端仓库：`/Users/a399/Desktop/data/shop`
+- 前端仓库：`/Users/a399/Desktop/data/vue-shop-admin`
+- 云厂商：AWS Lightsail
+- 套餐：新加坡，`实机测试 Nano`
+- 测试用户：`TelegramUser #172`，`codex_real_machine_test`
+- 订单：`#50096`
+- 资产：`#1500332`
+- 云实例：已脱敏记录，最终已删除并清空本地实例标识。
+- 公网 IP：已脱敏记录，最终当前公网 IP 已清空。
+- 支付方式：USDT 钱包余额支付。
+- 金额：5 USDT。
+
+### 真实创建
+
+- 使用项目服务创建余额支付订单，订单从 `paid` 进入开通流程。
+- AWS Lightsail 实例真实创建成功，固定 IP 绑定成功。
+- BBR、MTProxy 主代理、备用代理、Telemt 多端口和 SOCKS5 初始化完成。
+- 开通后本地订单为 `completed`，资产为 `running/is_active=True`。
+- 资产到期事实写入 `CloudAsset.actual_expires_at`。
+- 敏感信息：本报告未记录完整公网 IP、完整实例名、完整固定 IP 名、代理链接、代理 secret、登录密码、Telegram token、session 或云账号密钥。
+
+### 关机阶段矩阵
+
+- 关机总开关关闭：`cloud_server_shutdown_enabled=0` 时执行计划关机，返回“服务器关机总开关已关闭，跳过真实关机”，订单保持 `completed`，资产保持 `running/is_active=True`。
+- 资产关机开关关闭：`CloudAsset.shutdown_enabled=False` 时执行计划关机，返回“资产关机计划开关已关闭，跳过真实关机”，订单保持 `completed`，资产保持 `running/is_active=True`。
+- 非执行时间窗口：`cloud_suspend_time` 设置为当前窗口外时执行计划关机，返回“当前不在后台配置的服务器关机执行时间窗口”，订单保持 `completed`。
+- 真实关机：打开关机总开关、资产关机开关和当前执行窗口后，AWS 实例真实关机成功；订单变为 `suspended`，资产变为 `stopped/is_active=False`。
+
+### 删机阶段矩阵
+
+- 删机总开关关闭：`cloud_server_delete_enabled=0` 时执行计划删机，返回“删除服务器总开关已关闭，跳过真实删机”，订单保持 `suspended`。
+- 资产删机开关关闭：`CloudAsset.server_delete_enabled=False` 时执行计划删机，返回“资产服务器删除计划开关已关闭，跳过真实删机”，订单保持 `suspended`。
+- 非执行时间窗口：`cloud_delete_time` 设置为当前窗口外时执行计划删机，返回“当前不在后台配置的服务器删除执行时间窗口”，订单保持 `suspended`。
+- 第一次真实删机：AWS 返回实例正在停止状态转换，系统保持 `suspended/stopped`，未误标已删除。
+- 第二次真实删机：等待后人工重试成功，AWS 实例真实删除；订单和资产进入 `deleted`，实例标识清空，固定 IP 进入待释放状态。
+
+### 固定 IP 释放矩阵
+
+- 删 IP 总开关关闭：`cloud_ip_delete_enabled=0` 时执行固定 IP 回收，返回“删除IP总开关已关闭，跳过真实释放固定 IP”，固定 IP 保留信息仍在。
+- 资产 IP 删除开关关闭：`CloudAsset.ip_delete_enabled=False` 时执行固定 IP 回收，返回“资产 IP 删除计划开关已关闭，跳过真实释放固定 IP”，固定 IP 保留信息仍在。
+- 非执行时间窗口：`cloud_unattached_ip_delete_time` 设置为当前窗口外时执行固定 IP 回收，返回“当前不在后台配置的 IP 删除执行时间窗口”，固定 IP 保留信息仍在。
+- 真实释放：打开删 IP 总开关、资产 IP 删除开关和当前执行窗口后，AWS 固定 IP 真实释放成功；订单仍为 `deleted`，固定 IP 名称、当前公网 IP 和 `ip_recycle_at` 已清空，资产保持 `deleted/is_active=False`。
+
+### 页面实测
+
+- 实际打开订单详情页 `/admin/cloud-orders/50096`：页面标题为“云订单详情”，订单状态为已删除，生命周期区域正常显示，控制台 0 error / 0 warning。
+- 实际打开资产详情页 `/admin/cloud-assets/1500332`：页面标题为“代理详情”，包含已删除状态、生命周期区域和关联订单，控制台 0 error。
+- 实际打开计划页 `/admin/tasks/plans`：页面标题为“计划”，包含关机计划、删除计划、IP 删除和历史区域，控制台 0 error。
+
+### 发现与修复
+
+- 发现：真实删机第一次因 AWS 停止中过渡失败、第二次人工重试成功后，原 `delete` 生命周期任务仍为 `failed`，会造成计划页或任务中心假失败。
+- 修复：生命周期动作成功后，统一将同一订单或资产的同类型未完成 / 失败任务收敛为 `done`。
+- 回归：新增聚焦测试 `test_manual_delete_success_finishes_failed_lifecycle_delete_task`。
+- 本轮测试订单最终生命周期任务为：`suspend/done`、`delete/done`、`recycle/done`，失败数 0。
+
+### 配置恢复与最终状态
+
+- 已恢复测试前生命周期配置：`cloud_server_shutdown_enabled` 删除为默认值，`cloud_server_delete_enabled=1`，`cloud_ip_delete_enabled=1`，`cloud_suspend_time=15:00`，`cloud_delete_time=15:00`，`cloud_unattached_ip_delete_time=15:00`。
+- 最终本地状态：订单 `#50096` 为 `deleted`，资产 `#1500332` 为 `deleted/is_active=False`；实例标识、固定 IP 名称、当前公网 IP 和 IP 回收时间均已清空。
+- 最终清理结论：本轮真实 AWS 测试实例已删除，固定 IP 已释放，未发现本轮测试资源残留。
