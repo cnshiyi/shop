@@ -10961,3 +10961,44 @@ git diff --check
 
 - 本轮只修复生命周期单项开关隔离，不包含真实云资源执行。
 - 下一轮继续做计划页、通知页、代理列表的大数据真实性、翻页、跳页和性能压测。
+
+## 2026-06-07 通知计划服务端分页专项只读审计
+
+### 背景
+
+用户要求继续自动循环测试与重构监工。本轮后端和前端工作区已经存在围绕“通知计划服务端分页”展开的未提交补丁，因此按最小边界执行一次专项只读审计，确认这组补丁的接口契约、任务中心统计、刷新命令和前端类型调用是否一致，不把额外业务代码混入本轮。
+
+### 审计结论
+
+- `cloud/api_tasks.py` 中通知计划详情、刷新接口和预览构造已统一改为 `_build_notice_plan_summary()`，旧 `future_limit/future_offset` 通知参数不再参与调用链。
+- `cloud/task_center.py` 的通知区块已经改用 `active_user_summary_items` 和 `active_user_total` 汇总，不再依赖旧 `due_items/future_plan_items`。
+- `cloud/dashboard_snapshots.py` 与 `cloud/management/commands/refresh_notice_plans.py` 已改为从新摘要接口取通知计划数据，刷新输出改为总数统计。
+- 前端 `/Users/a399/Desktop/data/vue-shop-admin/apps/web-antd` 中通知计划类型与页面调用已切到 `active_user_summary_items`，并删除了 `future_limit/future_offset`。
+- 本轮未发现必须立即追加代码修复的回归；当前补丁在通知计划聚焦测试、系统检查、编译检查、前端类型检查和双仓库空白检查下通过。
+
+### 验证
+
+本地已通过：
+
+```bash
+UV_CACHE_DIR=/private/tmp/uv-cache-shop DJANGO_TEST_SQLITE=1 uv run python manage.py test cloud.tests.CloudServerServicesTestCase.test_refresh_notice_plans_command_builds_notice_plan_view cloud.tests.CloudServerServicesTestCase.test_refresh_notice_plan_view_api_builds_notice_plan_view cloud.tests.CloudServerServicesTestCase.test_notice_task_detail_uses_notice_plan_view cloud.tests.CloudServerServicesTestCase.test_notice_task_detail_basic_fields_skip_batch_text_payload cloud.tests.CloudServerServicesTestCase.test_notice_task_detail_counts_all_future_groups_beyond_loaded_limit cloud.tests.CloudServerServicesTestCase.test_notice_task_detail_deep_group_page_has_no_duplicates cloud.tests.CloudServerServicesTestCase.test_notice_task_detail_hides_shutdown_disabled_lifecycle_notices cloud.tests_task_center.CloudTaskCenterApiTestCase.test_notice_section_counts_failed_retry_as_failed cloud.tests_task_center.CloudTaskCenterApiTestCase.test_notice_section_counts_recent_failed_history_as_failed --settings=shop.settings --verbosity=1
+UV_CACHE_DIR=/private/tmp/uv-cache-shop uv run python manage.py check
+UV_CACHE_DIR=/private/tmp/uv-cache-shop uv run python -m py_compile cloud/api_tasks.py cloud/dashboard_snapshots.py cloud/management/commands/refresh_notice_plans.py cloud/task_center.py cloud/tests.py cloud/tests_task_center.py
+pnpm --dir /Users/a399/Desktop/data/vue-shop-admin/apps/web-antd typecheck
+git diff --check
+git -C /Users/a399/Desktop/data/vue-shop-admin diff --check
+```
+
+结果：9 个通知计划聚焦测试、Django 系统检查、后端编译检查、前端类型检查、后端与前端空白检查均通过。SQLite 输出的 `db_comment` 警告为已知数据库能力差异。
+
+### 红线
+
+- 本轮未执行真实云资源创建、删除、关机、释放 IP、换 IP、真实支付、链上广播、删除业务数据、删除测试库或生产发布。
+- 本轮未打印密钥、私钥、Telegram session、TOTP、支付密钥或云厂商密钥。
+- 本轮未恢复废弃 runtime app、订单侧到期字段、旧计划快照、旧退款入口、旧 `Server` 兼容壳或旧云 API 聚合入口。
+
+### 剩余风险
+
+- 本轮属于只读专项审计，没有替当前未提交的通知计划重构补丁额外补代码。
+- 仍需继续检查通知计划相关测试桩与前端真实浏览器翻页链路，确认不存在旧字段回流。
+- 任务中心、通知计划页和通知刷新命令虽然已通过静态与聚焦验证，但还没有完成浏览器控制台 0 error / 0 warning 的真实点击验证。
