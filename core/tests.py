@@ -188,6 +188,23 @@ class SiteConfigCacheTestCase(TransactionTestCase):
         self.assertEqual(async_to_sync(get_config)('cache_invalidate_test', ''), 'new')
 
 
+class SiteConfigSimpleTestIsolationTestCase(SimpleTestCase):
+    def tearDown(self):
+        SiteConfig.clear_cache()
+
+    def test_get_returns_default_without_error_log_when_db_is_forbidden(self):
+        SiteConfig.clear_cache()
+
+        class DatabaseOperationForbidden(Exception):
+            pass
+
+        with (
+            patch.object(SiteConfig.objects, 'filter', side_effect=DatabaseOperationForbidden('db access forbidden')),
+            self.assertNoLogs('core.models', level='ERROR'),
+        ):
+            self.assertEqual(SiteConfig.get('bot_button_config', 'fallback'), 'fallback')
+
+
 class PortOverrideTextMigrationTestCase(TestCase):
     def test_port_override_text_migration_does_not_restore_removed_copy(self):
         migration = importlib.import_module('core.migrations.0012_remove_user_port_override_texts')

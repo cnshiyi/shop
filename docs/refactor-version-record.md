@@ -12505,3 +12505,49 @@ SQLite `db_comment` 警告仍是已知数据库能力差异。
 - 本轮未恢复废弃 runtime app、订单侧到期字段、旧计划快照、旧退款逻辑、旧退款函数名或旧兼容入口。
 - 本轮曾因 Playwright 本地存储命令回显一个临时本地后台 session token，已立即删除旧 session 并改用未回显的新浏览器状态文件继续测试。
 - 未打印 Telegram token、Telegram session、TOTP、支付密钥、云厂商密钥、完整代理链接或代理 secret。
+
+## 2026-06-08 02:10 SiteConfig 测试隔离日志降噪
+
+### 背景
+
+`TODO.md` 已无新的未完成条目，本轮按固定巡检清单做只读审计，重点复查生命周期总开关/单项开关联动、通知计划屏蔽逻辑，以及机器人资产详情、订单详情、续费、换 IP、重装、修改配置与返回链。巡检过程中，`RetainedIpRenewalUiTestCase` 虽然整体通过，但会因为按钮配置读取触发 `SiteConfig.get()`，在 `SimpleTestCase` 禁止数据库访问场景下误打整段 error 栈日志。
+
+### 修复
+
+- `core/models.py`
+  - 新增 `_is_database_access_forbidden()`，识别 `DatabaseOperationForbidden`。
+  - `SiteConfig.get()` 在非事务内遇到测试隔离数据库禁止访问时，直接返回默认值并记 debug 跳过，不再记 error 栈。
+- `core/tests.py`
+  - 新增 `SiteConfigSimpleTestIsolationTestCase`。
+  - 覆盖 `SimpleTestCase` 下 `SiteConfig.get()` 返回默认值且不产出 error 日志的回归场景。
+
+### 巡检结果
+
+- 生命周期：
+  - `test_lifecycle_plans_use_stage_specific_asset_switches` 通过，确认关机、删机、IP 删除分别受各自单项开关控制。
+  - `test_lifecycle_plans_show_global_stage_switches` 通过，确认总开关关闭时页面 `queue_status`、`plan_state`、`plan_state_label` 和阻塞说明一致。
+- 通知计划：
+  - `test_notice_task_detail_hides_shutdown_disabled_lifecycle_notices` 通过，确认关机/删机/IP 删除关闭后不会在通知详情中误显示对应计划。
+- 机器人返回链：
+  - `RetainedIpRenewalUiTestCase` 49 个测试通过，继续覆盖资产详情、订单详情、续费、钱包异步任务、换 IP、重装、修改配置、返回上一层和 callback 64 字节限制。
+- 前端仓库：
+  - `/Users/a399/Desktop/data/vue-shop-admin` 本轮 `git status --short` 为空，未发现前端工作树改动。
+
+### 验证
+
+已通过：
+
+```bash
+UV_CACHE_DIR=/private/tmp/uv-cache-shop uv run python manage.py check
+UV_CACHE_DIR=/private/tmp/uv-cache-shop uv run python -m py_compile core/models.py core/tests.py
+UV_CACHE_DIR=/private/tmp/uv-cache-shop DJANGO_TEST_SQLITE=1 uv run python manage.py test core.tests.SiteConfigSimpleTestIsolationTestCase bot.tests.RetainedIpRenewalUiTestCase cloud.tests.CloudServerServicesTestCase.test_lifecycle_plans_use_stage_specific_asset_switches cloud.tests.CloudServerServicesTestCase.test_lifecycle_plans_show_global_stage_switches cloud.tests.CloudServerServicesTestCase.test_notice_task_detail_hides_shutdown_disabled_lifecycle_notices --settings=shop.settings --verbosity=1
+git diff --check
+```
+
+SQLite `db_comment` 警告仍是已知数据库能力差异。
+
+### 红线
+
+- 本轮未执行真实云资源创建、关机、删除服务器、释放 IP、换 IP、真实支付、链上广播、生产发布或删除业务数据。
+- 本轮未恢复废弃 runtime app、订单侧到期字段、旧计划快照、旧退款逻辑、旧退款函数名或旧兼容入口。
+- 本轮未打印 Telegram token、Telegram session、TOTP、支付密钥、云厂商密钥、完整代理链接或代理 secret。

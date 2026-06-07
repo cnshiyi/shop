@@ -19,6 +19,10 @@ def _is_site_config_table_not_ready(exc: Exception) -> bool:
     )
 
 
+def _is_database_access_forbidden(exc: Exception) -> bool:
+    return exc.__class__.__name__ == 'DatabaseOperationForbidden'
+
+
 class SiteConfig(models.Model):
     _CACHE_MISSING = object()
     _CACHE_TTL_SECONDS = 30
@@ -91,9 +95,12 @@ class SiteConfig(models.Model):
                 return default
             logger.exception('SiteConfig.get 读取失败 key=%s', key)
             return default
-        except Exception:
+        except Exception as exc:
             if connection.in_atomic_block:
                 raise
+            if _is_database_access_forbidden(exc):
+                logger.debug('SiteConfig.get 跳过：测试场景禁止数据库访问 key=%s', key)
+                return default
             logger.exception('SiteConfig.get 读取失败 key=%s', key)
             return default
 
