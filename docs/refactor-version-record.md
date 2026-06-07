@@ -14392,3 +14392,102 @@ rg -n "service_expires_at|actual_expires_at.*CloudServerOrder|CloudServerOrder.*
 - 下一轮继续巡检生命周期创建服务器、关机计划、删除计划、IP 删除计划的开关联动和执行顺序。
 - 继续压测代理列表深页/跳页，特别是云账号异常标签冷缓存加载时间。
 - 继续覆盖机器人全功能真机可操作路径和 callback 返回链。
+
+## 2026-06-08 06:59 生命周期计划和开关联动巡检
+
+### 背景
+
+继续执行当前会话连续巡检。本轮聚焦生命周期链路：关机计划、删除计划、服务器删除历史、IP 删除计划、IP 删除历史，以及全局/单项开关对执行顺序的影响。
+
+### 后端聚焦测试
+
+执行：
+
+```bash
+UV_CACHE_DIR=/private/tmp/uv-cache-shop DJANGO_TEST_SQLITE=1 uv run python manage.py test cloud.tests.CloudServerServicesTestCase.test_cloud_server_shutdown_enabled_defaults_on cloud.tests.CloudServerServicesTestCase.test_global_shutdown_switch_blocks_scheduled_suspend cloud.tests.CloudServerServicesTestCase.test_due_orders_global_shutdown_switch_does_not_block_delete_or_recycle cloud.tests.CloudServerServicesTestCase.test_lifecycle_plans_split_shutdown_before_server_delete cloud.tests.CloudServerServicesTestCase.test_lifecycle_plans_use_stage_specific_asset_switches cloud.tests.CloudServerServicesTestCase.test_lifecycle_plans_show_global_stage_switches cloud.tests.CloudServerServicesTestCase.test_lifecycle_tick_recycle_respects_ip_delete_time_window cloud.tests.CloudServerServicesTestCase.test_lifecycle_tick_unattached_ip_uses_ip_delete_time_window cloud.tests.CloudServerServicesTestCase.test_lifecycle_tick_rechecks_orphan_asset_delete_time_before_cloud_delete cloud.tests.CloudServerServicesTestCase.test_lifecycle_tick_rechecks_unattached_ip_delete_time_before_release --settings=shop.settings --verbosity=1
+```
+
+结果：
+
+- `10` 个测试通过。
+- 覆盖关机总开关默认开启。
+- 覆盖关机总开关关闭阻止计划关机。
+- 覆盖关机总开关不阻止删除或 IP 回收阶段。
+- 覆盖生命周期计划页先关机、再删机、再 IP 删除的拆分展示。
+- 覆盖资产级 `shutdown_enabled`、`server_delete_enabled`、`ip_delete_enabled` 分阶段生效。
+- 覆盖全局关机、删机、IP 删除开关在计划页展示对应状态。
+- 覆盖 IP 删除执行窗口、未附加 IP 删除窗口、执行前重算删除时间。
+
+### 真实 HTTP
+
+访问：
+
+```text
+/api/admin/tasks/plans/?compact=1&fields=basic,switches,timing,state,identity&shutdown_page=1&shutdown_page_size=20&server_delete_page=1&server_delete_page_size=20&server_history_page=1&server_history_page_size=20&ip_delete_page=1&ip_delete_page_size=20&ip_delete_history_page=1&ip_delete_history_page_size=20
+```
+
+结果：
+
+- 耗时约 `28.669s`，随后页面缓存加载约 `5.542s`。
+- 关机计划：`1979990`，分页 `page=1/page_size=20/total=1979990/loaded=20`。
+- 删除计划：`2`，分页 `page=1/page_size=20/total=2/loaded=2`。
+- 服务器删除历史：`20010`，分页 `page=1/page_size=20/total=20010/loaded=20`。
+- IP 删除计划：`500000`，分页 `page=1/page_size=20/total=500000/loaded=20`。
+- IP 删除历史：`520010`，分页 `page=1/page_size=20/total=520010/loaded=20`。
+- 缺少到期时间：`251`。
+- 未附加 IP：`600001`。
+
+抽样状态：
+
+- 关机计划首行包含 `shutdown_disabled`，其 `shutdown_enabled/server_delete_enabled/ip_delete_enabled` 均为 `False`，后续计划项为 `scheduled` 且三个阶段开关为 `True`。
+- 删除计划首两行均为 `scheduled`，`shutdown_enabled/server_delete_enabled/ip_delete_enabled` 均为 `True`。
+- IP 删除计划首批为 `scheduled`，`ip_delete_enabled=True`。
+
+### 真实前端页面
+
+打开：
+
+```text
+http://127.0.0.1:5666/admin/tasks/plans
+```
+
+结果：
+
+- 页面请求 `/api/admin/tasks/plans/` 成功返回。
+- 页面可见文本：
+  - `关机计划`
+  - `删除计划`
+  - `服务器删除历史`
+  - `IP 删除计划`
+  - `IP 删除历史`
+- 页面表格行数合计可见 `202` 行。
+- 页面控制台错误数：`0`。
+
+### 验证
+
+基础检查通过：
+
+```bash
+UV_CACHE_DIR=/private/tmp/uv-cache-shop uv run python manage.py check
+```
+
+红线扫描通过：
+
+```bash
+rg -n "service_expires_at|actual_expires_at.*CloudServerOrder|CloudServerOrder.*actual_expires_at|plan snapshot|snapshot table|old refund|refund_legacy|refund_old|legacy_refund|accounts\\.|finance\\.|mall\\.|monitoring\\.|dashboard_api\\.|biz\\." cloud bot orders core shop -g '!**/migrations/**'
+```
+
+命中项仍为 Telegram 登录账号、云账号测试和 `CloudServerOrder.ip_recycle_at` 同步语句，不是红线问题。
+
+### 红线
+
+- 本轮未执行真实云资源创建、关机、删除服务器、释放 IP、换 IP、真实支付、链上广播、生产发布或删除业务数据。
+- 本轮未打印密钥、Telegram session、支付密钥或完整代理链接。
+- 临时后台 session 已删除。
+- Playwright 临时截图目录已删除。
+
+### 结果
+
+- 未发现需要修改代码的问题。
+- 仅更新 `docs/auto-optimization-latest.md` 和 `docs/refactor-version-record.md` 记录巡检结果。
+- 下一轮继续巡检机器人全功能 callback 返回链、资产详情/订单详情/续费/换 IP/重装/修改配置路径。
