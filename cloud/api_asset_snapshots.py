@@ -602,9 +602,9 @@ def _group_cloud_asset_payloads(items, group_by='telegram_group'):
             key = item.get('group_user_key') or (f'user:{user_id}' if user_id else f"unbound:{item.get('id', '')}")
             group = groups.setdefault(key, {
                 'user_key': key,
-                'tg_user_id': item['tg_user_id'],
-                'user_display_name': item['user_display_name'],
-                'username_label': item['username_label'],
+                'tg_user_id': item.get('tg_user_id'),
+                'user_display_name': item.get('user_display_name') or item.get('group_user_label') or '未绑定用户',
+                'username_label': item.get('username_label') or (str(item.get('tg_user_id') or '-') if user_id else '-'),
                 'telegram_group_id': None,
                 'telegram_group_chat_id': None,
                 'telegram_group_title': '',
@@ -635,9 +635,9 @@ def _group_cloud_asset_payloads(items, group_by='telegram_group'):
                 key = item.get('group_telegram_key') or (f'user:{user_id}' if user_id else f"unbound:{item.get('id', '')}")
                 group = groups.setdefault(key, {
                     'user_key': key,
-                    'tg_user_id': item['tg_user_id'],
-                    'user_display_name': item['user_display_name'],
-                    'username_label': item['username_label'] or (str(item.get('tg_user_id') or '-') if user_id else '-'),
+                    'tg_user_id': item.get('tg_user_id'),
+                    'user_display_name': item.get('user_display_name') or item.get('group_user_label') or '未绑定用户',
+                    'username_label': item.get('username_label') or (str(item.get('tg_user_id') or '-') if user_id else '-'),
                     'telegram_group_id': None,
                     'telegram_group_chat_id': None,
                     'telegram_group_title': '',
@@ -648,7 +648,7 @@ def _group_cloud_asset_payloads(items, group_by='telegram_group'):
         group['items'].append(item)
     ordered_groups = list(groups.values())
     ordered_groups.sort(key=lambda group: (
-        min((row['actual_expires_at'] or '9999-12-31T23:59:59') for row in group['items']),
+        min((row.get('actual_expires_at') or '9999-12-31T23:59:59') for row in group['items']),
         str(group.get('user_display_name') or group.get('telegram_group_title') or '未绑定'),
     ))
     return ordered_groups

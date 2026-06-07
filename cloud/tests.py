@@ -2819,6 +2819,49 @@ class CloudServerServicesTestCase(TestCase):
         self.assertEqual(len(payload2['groups']), 2)
         self.assertEqual(len(payload2['items']), 2)
 
+    # 功能：旧快照 payload 缺少用户展示字段时，风险标签分组分页仍不能 500。
+    def test_cloud_assets_grouped_risk_page_tolerates_old_snapshot_payload_missing_user_fields(self):
+        cache.clear()
+        admin = get_user_model().objects.create_user(username='admin_asset_grouped_old_payload', password='x', is_staff=True)
+        asset = CloudAsset.objects.create(
+            kind=CloudAsset.KIND_SERVER,
+            source=CloudAsset.SOURCE_AWS_SYNC,
+            provider='aws_lightsail',
+            region_code=self.plan.region_code,
+            region_name=self.plan.region_name,
+            asset_name='old-payload-unattached-ip',
+            public_ip='10.79.8.8',
+            status=CloudAsset.STATUS_UNKNOWN,
+            provider_status='未附加固定IP',
+            note='未附加固定IP',
+            actual_expires_at=timezone.now() + timezone.timedelta(days=15),
+        )
+        refresh_cloud_asset_dashboard_snapshots(asset_ids=[asset.id], reason='test', full=False)
+        snapshot = CloudAssetDashboardSnapshot.objects.get(asset=asset)
+        payload = dict(snapshot.payload or {})
+        for key in ('actual_expires_at', 'tg_user_id', 'user_display_name', 'username_label'):
+            payload.pop(key, None)
+        snapshot.payload = payload
+        snapshot.save(update_fields=['payload'])
+
+        request = self.factory.get('/api/admin/cloud-assets/', {
+            'grouped': '1',
+            'paginated': '1',
+            'group_by': 'user',
+            'page': '1',
+            'page_size': '20',
+            'risk_status': 'unattached_ip',
+        })
+        self._attach_bearer_session(request, admin)
+        response = cloud_assets_list(request)
+        payload = json.loads(response.content.decode('utf-8'))['data']
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(payload['total'], 1)
+        self.assertEqual(len(payload['groups']), 1)
+        self.assertEqual(payload['groups'][0]['username_label'], '-')
+        self.assertEqual([item['id'] for item in payload['items']], [asset.id])
+
     # 功能：验证分组分页总数只按分组键统计，末页反向分页不丢组。
     def test_cloud_assets_grouped_total_counts_distinct_groups_only(self):
         cache.clear()

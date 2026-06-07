@@ -14259,3 +14259,136 @@ http://127.0.0.1:5666/admin/tasks/auto-renew
 - 未发现需要修改代码的问题。
 - 仅更新 `docs/auto-optimization-latest.md` 和 `docs/refactor-version-record.md` 记录巡检结果。
 - 下一轮继续巡检云资产同步 worker、云账号异常资产可见性、同步任务失败/重试状态和真实页面展示对账。
+
+## 2026-06-08 06:52 机器人并发、云同步 worker 和代理列表标签巡检修复
+
+### 背景
+
+继续执行当前会话的连续自动巡检。本轮根据用户补充要求，把机器人多任务高并发、代理列表每个风险标签、云账号异常资产可见性、未附加 IP 和真实前端页面作为重点。
+
+### 发现的问题
+
+真实 HTTP 和页面巡检时发现：
+
+- 代理列表旧快照 payload 缺少 `tg_user_id` 时，`grouped=1&risk_status=unattached_ip` 会在后端分组构造处触发 `KeyError`。
+- 修复第一处后，旧快照 payload 缺少 `actual_expires_at` 又会在分组排序处触发第二个 `KeyError`。
+- 前端代理列表默认 `grouped=true`，在当前 IP 视图和 250 万级快照数据下会优先走分组分页，冷启动容易被大 distinct 统计拖慢。
+
+### 修复
+
+后端：
+
+- `cloud/api_asset_snapshots.py`
+  - `_group_cloud_asset_payloads()` 使用 `item.get()` 安全读取旧 payload 中可能缺失的用户展示字段。
+  - 分组排序使用 `row.get('actual_expires_at')`，缺失时按远未来时间排序，避免旧快照 500。
+- `cloud/tests.py`
+  - 新增 `test_cloud_assets_grouped_risk_page_tolerates_old_snapshot_payload_missing_user_fields`。
+  - 测试构造未附加固定 IP 旧快照，移除 `actual_expires_at`、`tg_user_id`、`user_display_name`、`username_label` 后访问 `grouped=1&risk_status=unattached_ip`，断言返回 200、总数 1、行数据不丢。
+
+前端：
+
+- `/Users/a399/Desktop/data/vue-shop-admin/apps/web-antd/src/views/dashboard/cloud-assets/index.vue`
+  - IP 视图默认关闭分组，首屏直接使用服务端行分页。
+  - 切换到 IP 视图时自动关闭分组并清空旧分组展开状态，避免把旧分组页状态带入 IP 视图。
+
+### 机器人高并发测试
+
+执行：
+
+```bash
+UV_CACHE_DIR=/private/tmp/uv-cache-shop DJANGO_TEST_SQLITE=1 uv run python manage.py test bot.tests.TelegramListenerPushTestCase.test_notice_copy_wrapper_keeps_concurrent_user_sends_isolated bot.tests.RetainedIpRenewalUiTestCase.test_cloud_background_tasks_keep_high_concurrency_isolated --settings=shop.settings --verbosity=1
+```
+
+结果：
+
+- `2` 个测试通过。
+- 覆盖通知复制 wrapper 并发发送隔离。
+- 覆盖云服务器后台钱包直付/补付任务高并发隔离，用户、订单和任务数量没有串上下文。
+
+### 云同步和异常资产测试
+
+执行：
+
+```bash
+UV_CACHE_DIR=/private/tmp/uv-cache-shop DJANGO_TEST_SQLITE=1 uv run python manage.py test cloud.tests.CloudServerServicesTestCase.test_cloud_assets_list_all_includes_disabled_or_missing_cloud_account_assets cloud.tests.CloudServerServicesTestCase.test_sync_cloud_assets_runs_enabled_accounts_and_merges_results cloud.tests.CloudServerServicesTestCase.test_cloud_asset_sync_jobs_metrics_returns_operational_summary cloud.tests.CloudServerServicesTestCase.test_cancel_queued_cloud_asset_sync_job_marks_terminal_and_events cloud.tests.CloudServerServicesTestCase.test_sync_cloud_assets_with_selected_assets_uses_asset_scoped_tasks cloud.tests.CloudServerServicesTestCase.test_process_cloud_asset_sync_jobs_worker_processes_queued_job cloud.tests.CloudServerServicesTestCase.test_sync_missing_confirmation_note_preserves_existing_note cloud.tests.CloudServerServicesTestCase.test_sync_missing_delete_threshold_is_at_least_five cloud.tests.CloudServerServicesTestCase.test_sync_missing_confirmation_requires_interval cloud.tests.CloudServerServicesTestCase.test_unattached_ip_delete_items_expose_missing_confirmation_state --settings=shop.settings --verbosity=1
+```
+
+结果：
+
+- `10` 个测试通过。
+- 覆盖同步入队、执行、详情、列表、重试、取消、指标汇总、选定资产同步、worker 认领执行。
+- 覆盖云账号停用或缺失的资产仍在默认全部列表可见。
+- 覆盖未附加 IP 缺失确认状态在删除计划项中可见。
+
+### 分组旧快照回归测试
+
+执行：
+
+```bash
+UV_CACHE_DIR=/private/tmp/uv-cache-shop DJANGO_TEST_SQLITE=1 uv run python manage.py test cloud.tests.CloudServerServicesTestCase.test_cloud_assets_grouped_risk_page_tolerates_old_snapshot_payload_missing_user_fields cloud.tests.CloudServerServicesTestCase.test_cloud_assets_grouped_paginated_uses_twenty_user_groups_per_page cloud.tests.CloudServerServicesTestCase.test_cloud_assets_grouped_total_counts_distinct_groups_only --settings=shop.settings --verbosity=1
+```
+
+结果：
+
+- `3` 个测试通过。
+- SQLite 的 `db_comment` warnings 仍是已知测试噪声。
+
+### 真实 HTTP 和页面结果
+
+真实 HTTP：
+
+- 非分组 IP 视图标签分页：
+  - 全部：`2489998`，加载 `20` 行。
+  - 未附加固定 IP：`100001`，加载 `20` 行。
+  - 云账号异常：`1145002`，加载 `20` 行。
+  - 关机计划关闭：`100384`，加载 `20` 行。
+  - 未绑定群组：`100013`，加载 `20` 行。
+  - 续费关闭：`104558`，加载 `20` 行。
+- `compact=1` 分组接口：
+  - 全部：`2489996` 组，加载 `20` 行。
+  - 云账号异常：`1145001` 组，加载 `20` 行。
+  - 未附加固定 IP：`100001` 组，加载 `20` 行。
+
+真实前端：
+
+- 打开 `http://127.0.0.1:5666/admin/cloud-assets`。
+- 初始 IP 视图为非分组，显示 `共 2489998 条代理`，表格 20 行。
+- 逐个点击未附加固定 IP、云账号异常、关机计划关闭、未绑定群组、续费关闭、全部，页面分页总数和 API `total` 一致。
+- 页面控制台错误数：`0`。
+
+### 验证
+
+基础检查通过：
+
+```bash
+UV_CACHE_DIR=/private/tmp/uv-cache-shop uv run python manage.py check
+```
+
+前端类型检查通过：
+
+```bash
+pnpm --filter @vben/web-antd typecheck
+```
+
+红线扫描通过：
+
+```bash
+rg -n "service_expires_at|actual_expires_at.*CloudServerOrder|CloudServerOrder.*actual_expires_at|plan snapshot|snapshot table|old refund|refund_legacy|refund_old|legacy_refund|accounts\\.|finance\\.|mall\\.|monitoring\\.|dashboard_api\\.|biz\\." cloud bot orders core shop -g '!**/migrations/**'
+```
+
+命中项为 Telegram 登录账号、云账号测试和 `CloudServerOrder.ip_recycle_at` 同步语句，不是红线问题。
+
+`git diff --check` 在后端仓库和前端仓库均通过。
+
+### 红线
+
+- 本轮未执行真实云资源创建、关机、删除服务器、释放 IP、换 IP、真实支付、链上广播、生产发布或删除业务数据。
+- 本轮未打印密钥、Telegram session、支付密钥或完整代理链接。
+- 临时后台 session 已删除。
+- Playwright 临时截图目录已删除。
+
+### 下一步
+
+- 下一轮继续巡检生命周期创建服务器、关机计划、删除计划、IP 删除计划的开关联动和执行顺序。
+- 继续压测代理列表深页/跳页，特别是云账号异常标签冷缓存加载时间。
+- 继续覆盖机器人全功能真机可操作路径和 callback 返回链。
