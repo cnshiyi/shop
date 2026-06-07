@@ -12165,3 +12165,68 @@ SQLite `db_comment` 警告为已知数据库能力差异。
 - 本轮未执行真实支付、链上广播、生产发布或删除业务压测数据。
 - 本轮未打印密钥、私钥、Telegram session、TOTP、支付密钥、云厂商密钥、完整代理链接、代理 secret 或登录密码。
 - 本轮未恢复废弃 runtime app、订单侧到期字段、旧计划快照、旧退款逻辑、旧退款函数名或旧兼容入口。
+
+## 2026-06-08 01:08 固定巡检只读审计与回调长度复核
+
+### 背景
+
+本轮按照 `AGENTS.md` 和自动优化控制台继续执行固定巡检。由于后端当前工作树存在未提交业务改动：
+
+- `cloud/api_asset_snapshots.py`
+- `cloud/models.py`
+- `cloud/tests.py`
+- `cloud/migrations/0059_dashboard_snapshot_group_due_order_indexes.py`
+- `output/`
+
+为避免自动化记录和业务补丁混在一起，本轮不接触上述文件，只做一轮可验证的只读专项审计，并单独更新中文记录。
+
+### 审计范围
+
+1. `CloudAsset.actual_expires_at` 是否仍是唯一资产到期事实。
+2. 订单侧到期字段、旧计划快照、旧退款入口、废弃 runtime app 是否有回流。
+3. Telegram 资产详情/续费/修改配置等高风险回调链是否仍满足 64 字节上限。
+
+### 审计结论
+
+- 资产到期事实：
+  - 运行时代码仍以 `CloudAsset.actual_expires_at` 为唯一资产到期事实。
+  - 未发现订单侧 `service_expires_at` 或订单侧 `actual_expires_at` 被重新当作运行时主事实使用。
+  - `cloud/api_orders.py` 中对 `actual_expires_at` 的处理仍是资产事实透传或显式编辑入口，未把事实重新写回订单主字段契约。
+- 旧入口回流：
+  - 未发现废弃 runtime app 回流。
+  - 未发现旧退款函数名重新接入现行支付或订单链路。
+  - 扫描到的 `snapshot` 命名主要集中在 `core.persistence`、`cloud.dashboard_snapshots`、`cloud/api_asset_snapshots.py`，属于当前仪表盘统计与缓存实现，不是旧计划快照表回流。
+- Telegram 回调链：
+  - 长回调压缩逻辑仍有效。
+  - 极端样本实测结果：
+    - `cad:999999999999999999:d:999999999999999999` 为 43 字节。
+    - `au:999999999999999999:a:999999999999999999:999999999999999999` 为 61 字节。
+    - `ao:999999999999999999:a:999999999999999999:999999999999999999` 为 61 字节。
+  - 资产详情、嵌套资产详情、二级动作和自动续费三组现有 bot 聚焦测试全部通过。
+
+### 验证
+
+已通过：
+
+```bash
+UV_CACHE_DIR=/private/tmp/uv-cache-shop uv run python manage.py check
+UV_CACHE_DIR=/private/tmp/uv-cache-shop DJANGO_TEST_SQLITE=1 uv run python manage.py test bot.tests.RetainedIpRenewalUiTestCase.test_asset_detail_callback_from_extreme_order_detail_stays_under_limit bot.tests.RetainedIpRenewalUiTestCase.test_asset_detail_callback_recompacts_nested_asset_detail_back_path bot.tests.RetainedIpRenewalUiTestCase.test_extreme_nested_cloud_callbacks_stay_under_telegram_limit --settings=shop.settings --verbosity=1
+UV_CACHE_DIR=/private/tmp/uv-cache-shop uv run python manage.py shell -c "from bot.keyboards import cloud_asset_detail_callback, append_back_callback, cloud_auto_renew_callback; samples=[('asset_detail_from_extreme_order', cloud_asset_detail_callback(999999999999999999, 'cloud:detail:999999999999999999:profile:orders:cloud:filter:provisioning:page:999999999999999999')), ('asset_detail_nested_asset', cloud_asset_detail_callback(999999999999999999, 'cad:999999999999999999:d:999999999999999999:o:provisioning:999999999999999999')), ('asset_action_upgrade', append_back_callback('cloud:aa:upgrade:999999999999999999', 'cloud:ad:asset:999999999999999999:cloud:list:page:999999999999999999')), ('auto_renew_on', cloud_auto_renew_callback('on', 999999999999999999, 'cloud:ad:asset:999999999999999999:cloud:list:page:999999999999999999'))]; [print(name, len(value.encode()), value) for name, value in samples]"
+git diff --check
+```
+
+说明：
+
+- 本轮一开始误用了不存在的测试名，报 `AttributeError`；随后改用仓库内已有 `RetainedIpRenewalUiTestCase` 用例重跑并通过。
+- 未为通过审计去补临时代码或测试兼容逻辑。
+
+### 结果
+
+- 本轮没有代码修复提交点，结论是当前高风险回调链和到期事实主链保持稳定。
+- 已把本轮状态覆盖写入 `docs/auto-optimization-latest.md`，并保留本条中文审计记录供后续轮次继承。
+
+### 红线
+
+- 本轮未执行真实云资源创建、关机、删除服务器、释放 IP、换 IP、真实支付、链上广播、生产发布或删除业务数据。
+- 本轮未打印密钥、私钥、Telegram session、TOTP、支付密钥、云厂商密钥、完整代理链接、代理 secret 或登录密码。
+- 本轮未恢复废弃 runtime app、订单侧到期字段、旧计划快照、旧退款逻辑、旧退款函数名或旧兼容入口。
