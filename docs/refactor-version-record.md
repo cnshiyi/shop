@@ -11681,3 +11681,55 @@ git diff --check
 - 本轮未执行真实云资源创建、关机、删除服务器、释放 IP、真实支付、链上广播、生产发布、删除业务数据或删除测试库。
 - 本轮未打印密钥、私钥、Telegram session、TOTP、支付密钥、云厂商密钥、完整代理链接、代理 secret 或登录密码。
 - 本轮未恢复废弃 runtime app、订单侧到期字段、旧计划快照、旧退款逻辑、旧退款函数名或旧兼容入口。
+
+## 2026-06-07 22:30 代理列表翻页对账与前端图标离线化
+
+### 数据库与分页对账
+
+- 当前压测数据仍在：`CloudAsset=1500002`，`CloudAssetDashboardSnapshot=1500002`，可显示快照 `1489998`。
+- 未分组 IP 视图按资产分页抽样：
+  - page 1 / page 2 / page 1000 / 最后一页 page 29800 均与数据库精确排序结果一致。
+  - page 1 冷加载约 `6420.29 ms`，page 2 `289.57 ms`，page 1000 `592.31 ms`，最后一页 `274.40 ms`。
+- 用户分组视图按分组分页抽样：
+  - page 1 / page 2 / page 1000 / 最后一页 page 74500 均与数据库精确分组排序结果一致。
+  - page 1 `2447.22 ms`，page 2 `1011.56 ms`，page 1000 `1736.28 ms`，最后一页 `1078.49 ms`。
+- 结论：本轮未发现翻页丢数据、重复数据或总数口径不一致；但未分组 IP 视图首屏冷加载仍慢，后续继续优化。
+
+### 真实页面验证
+
+- 实际打开 `/admin/cloud-assets`：
+  - 页面标题为“代理列表”。
+  - 默认“IP 视图 + 按用户分区”加载成功，总数显示 `1489996` 个用户/分组。
+  - 第 1 页 DOM 渲染 20 行，行 ID 与数据库精确组展开结果一致。
+  - 实际点击第 2 页后 DOM 渲染 20 行，行 ID 与数据库精确组展开结果一致。
+- 实际打开 `/admin/tasks/plans`：
+  - 页面标题为“计划”。
+  - 页面包含关机计划、删除计划、IP 删除和历史区域。
+  - 未出现加载失败、请求失败或异常文案。
+
+### 发现与修复
+
+- 真实浏览器发现控制台错误：菜单图标会请求外部 `api.unisvg.com/lucide.json`，网络超时时产生 error。
+- 前端仓库 `/Users/a399/Desktop/data/vue-shop-admin` 修复：
+  - `packages/@core/base/icons/src/lucide.ts` 补齐后台菜单需要的本地 lucide 组件导出。
+  - `apps/web-antd/src/router/routes/modules/admin.ts`、`dashboard.ts`、`vben.ts` 将 `lucide:*` 字符串改为本地组件引用。
+  - 修复后 `/admin/cloud-assets` 和 `/admin/tasks/plans` 控制台 error / warning 均为 0。
+- 前端提交：`4459e5d fix: use local lucide menu icons`。
+
+### 验证
+
+已通过：
+
+```bash
+UV_CACHE_DIR=/private/tmp/uv-cache-shop uv run python manage.py check
+/Users/a399/.homebrew/bin/pnpm --filter @vben/web-antd typecheck
+git -C /Users/a399/Desktop/data/vue-shop-admin diff --check
+```
+
+前端提交时 pre-commit 已通过 `lint-js`。
+
+### 红线
+
+- 本轮未执行真实云资源创建、关机、删除服务器、释放 IP、真实支付、链上广播、生产发布、删除业务数据或删除测试库。
+- 本轮未打印密钥、私钥、Telegram session、TOTP、支付密钥、云厂商密钥、完整代理链接、代理 secret 或登录密码。
+- 本轮未恢复废弃 runtime app、订单侧到期字段、旧计划快照、旧退款逻辑、旧退款函数名或旧兼容入口。

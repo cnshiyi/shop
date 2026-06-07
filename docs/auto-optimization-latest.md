@@ -4,40 +4,68 @@
 
 ## 最近一轮
 
-- 时间：2026-06-07 22:18 CST
-- 状态：完成一轮后台订单详情安全巡检、修复、后端验证和真实页面验证。
-- 本轮范围：已删除云订单详情 API、历史订单摘要字段、后台订单详情页真实浏览器检查。
+- 时间：2026-06-07 22:30 CST
+- 状态：完成代理列表数据库/API/真实页面翻页对账，修复前端菜单图标外网依赖导致的控制台错误。
+- 本轮范围：150 万资产快照分页对账、代理列表真实浏览器第 1 页 / 第 2 页核对、计划页真实浏览器核对、前端菜单图标离线化。
 
-## 本轮修复
+## 数据库与分页对账
 
-- `cloud/api_orders.py`：
-  - 已删除订单详情返回前统一脱敏历史公网 IP、MTProxy 主机、代理链路列表和创建说明。
-  - 已删除订单的 `mtproxy_link` 和 `proxy_links` 不再通过后台详情 API 返回历史完整链路。
-  - 创建说明中的 `tg://proxy`、`socks5://`、`secret=` 和公网 IP 会在响应层脱敏；数据库原始审计记录不被清空。
-  - `history_orders` 中已删除订单摘要的公网 IP / 历史公网 IP 也同步脱敏，避免详情主体已脱敏但历史摘要仍带出历史 IP。
-- `cloud/tests.py`：
-  - 新增已删除订单详情脱敏回归测试，断言响应不包含完整代理链路、完整 secret、socks5 凭据、`secret=` 和完整公网 IP。
+- 当前数据库规模：
+  - `CloudAsset`：1,500,002。
+  - `CloudAssetDashboardSnapshot`：1,500,002。
+  - 可显示快照：1,489,998。
+  - `CloudLifecycleTask`：13。
+  - `CloudNoticeTask`：6,335。
+  - IP 删除日志：20,001。
+- 未分组 IP 视图，page_size=50：
+  - page 1：接口 6,420.29 ms，加载 50/50，total=1,489,998，数据库精确对账一致。
+  - page 2：接口 289.57 ms，加载 50/50，total=1,489,998，数据库精确对账一致。
+  - page 1000：接口 592.31 ms，加载 50/50，total=1,489,998，数据库精确对账一致。
+  - page 29800：接口 274.40 ms，加载 48/48，total=1,489,998，数据库精确对账一致。
+- 用户分组视图，page_size=20：
+  - page 1：接口 2,447.22 ms，加载 20 组 / 20 条，total=1,489,996，数据库精确对账一致。
+  - page 2：接口 1,011.56 ms，加载 20 组 / 20 条，total=1,489,996，数据库精确对账一致。
+  - page 1000：接口 1,736.28 ms，加载 20 组 / 20 条，total=1,489,996，数据库精确对账一致。
+  - page 74500：接口 1,078.49 ms，加载 16 组 / 16 条，total=1,489,996，数据库精确对账一致。
 
 ## 页面实测
 
-- 实际打开 `/admin/cloud-orders/50096`：
-  - 页面标题为“云订单详情”，状态显示“已删除”。
-  - 页面正文不包含 `tg://proxy`、`socks5://` 或 `secret=`。
-  - 页面正文包含脱敏提示文本，说明历史 secret 已被响应层收敛。
-  - 控制台 error 为 0，warning 为 0。
+- 实际打开 `/admin/cloud-assets`：
+  - 页面标题为“代理列表”。
+  - 默认“IP 视图 + 按用户分区”加载成功，总数显示“共 1489996 个用户/分组”。
+  - 第 1 页渲染 20 行，DOM 行 ID 与数据库精确组展开结果一致。
+  - 实际点击到第 2 页后渲染 20 行，DOM 行 ID 与数据库精确组展开结果一致。
+  - 页面无加载失败 / 请求失败文案。
+- 实际打开 `/admin/tasks/plans`：
+  - 页面标题为“计划”。
+  - 页面包含关机计划、删除计划、IP 删除和历史区域。
+  - 页面无加载失败 / 请求失败 / 异常文案。
+
+## 本轮修复
+
+- 前端仓库 `/Users/a399/Desktop/data/vue-shop-admin`：
+  - `apps/web-antd/src/router/routes/modules/admin.ts`
+  - `apps/web-antd/src/router/routes/modules/dashboard.ts`
+  - `apps/web-antd/src/router/routes/modules/vben.ts`
+  - `packages/@core/base/icons/src/lucide.ts`
+- 将路由菜单里的 `lucide:*` Iconify 字符串改为 `@vben/icons` 本地 lucide 组件。
+- 修复真实页面控制台错误：浏览器不再请求 `https://api.unisvg.com/lucide.json?...`，避免上线依赖外部图标服务。
+- 前端提交：`4459e5d fix: use local lucide menu icons`。
 
 ## 验证
 
 本地已通过：
 
 ```bash
-UV_CACHE_DIR=/private/tmp/uv-cache-shop DJANGO_TEST_SQLITE=1 uv run python manage.py test cloud.tests.CloudOrderStatusDashboardSyncTestCase.test_deleted_order_detail_masks_proxy_links_and_historical_ips cloud.tests.CloudOrderStatusDashboardSyncTestCase.test_order_detail_status_edit_syncs_primary_asset_status cloud.tests.CloudOrderStatusDashboardSyncTestCase.test_order_detail_manual_edit_syncs_cloud_identity_and_proxy_fields --settings=shop.settings --verbosity=1
-UV_CACHE_DIR=/private/tmp/uv-cache-shop uv run python -m py_compile cloud/api_orders.py cloud/tests.py
 UV_CACHE_DIR=/private/tmp/uv-cache-shop uv run python manage.py check
-git diff --check
+/Users/a399/.homebrew/bin/pnpm --filter @vben/web-antd typecheck
+git -C /Users/a399/Desktop/data/vue-shop-admin diff --check
 ```
 
-结果：Django 系统检查、3 个聚焦测试、编译检查和空白检查通过。SQLite `db_comment` 警告仍为已知测试库能力差异。
+真实浏览器复测：
+
+- `/admin/cloud-assets` 控制台 error 为 0，warning 为 0。
+- `/admin/tasks/plans` 控制台 error 为 0，warning 为 0。
 
 ## 清理
 
@@ -53,5 +81,6 @@ git diff --check
 
 ## 剩余风险与下一轮
 
-- 继续执行不少于 4 小时的自动巡检目标，下一轮回到数据库口径、代理列表翻页对账、计划页 / 通知页数据真实性和前端真实页面检查。
-- 已删除资产详情、IP 删除历史和服务器删除历史也应继续检查是否存在类似历史敏感字段展示面。
+- 继续执行不少于 4 小时的自动巡检目标。
+- 未分组 IP 视图第 1 页冷加载仍约 6.4 秒，数据准确但首屏性能仍需继续优化。
+- 下一轮继续检查已删除资产详情、IP 删除历史、服务器删除历史是否存在历史敏感字段展示面，并继续跑计划页 / 通知页分页真实性对账。
