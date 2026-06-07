@@ -7785,6 +7785,51 @@ class CloudServerServicesTestCase(TestCase):
         self.assertEqual(len(data['ip_delete_history_items']), 1)
         self.assertTrue(all(item.get('is_history') for item in data['ip_delete_history_items']))
 
+    # 功能：验证服务器删除历史作为独立分页表返回，不混入删除计划或 IP 删除历史。
+    def test_lifecycle_plans_returns_server_delete_history_table(self):
+        for index in range(3):
+            CloudServerOrder.objects.create(
+                order_no=f'LIFECYCLE-SERVER-HISTORY-{index}',
+                user=self.user,
+                plan=self.plan,
+                provider=self.plan.provider,
+                region_code=self.plan.region_code,
+                region_name=self.plan.region_name,
+                plan_name=self.plan.plan_name,
+                quantity=1,
+                currency='USDT',
+                total_amount='19.00',
+                pay_amount='19.00',
+                status='deleted',
+                public_ip=f'5.5.9.{10 + index}',
+                previous_public_ip=f'5.5.9.{10 + index}',
+                delete_at=timezone.now() - timezone.timedelta(hours=index + 1),
+                provision_note='执行内容：实例已删除；删除来源：到期自动删除',
+            )
+        staff_user = get_user_model().objects.create_user(username='staff_lifecycle_server_history', password='x', is_staff=True)
+        request = RequestFactory().get('/api/admin/tasks/plans/', {
+            'compact': '1',
+            'fields': 'basic,execution,notes',
+            'limit': '1',
+            'refresh': '1',
+            'server_history_page_size': '1',
+        })
+        self._attach_bearer_session(request, staff_user)
+
+        response = lifecycle_plans(request)
+
+        self.assertEqual(response.status_code, 200)
+        data = json.loads(response.content)['data']
+        self.assertGreaterEqual(data['server_history_count'], 3)
+        self.assertEqual(len(data['server_history_items']), 1)
+        row = data['server_history_items'][0]
+        self.assertEqual(row['plan_kind'], 'server_history')
+        self.assertEqual(row['source_kind'], 'order')
+        self.assertEqual(row['result_label'], '成功')
+        self.assertEqual(data['pagination']['server_history']['page_size'], 1)
+        self.assertGreaterEqual(data['pagination']['server_history']['total'], 3)
+        self.assertNotEqual(row['plan_kind'], CloudLifecyclePlanNote.PLAN_KIND_UNATTACHED_IP_DELETE)
+
     # 功能：验证计划页全量统计随刷新进入缓存，普通加载不重复扫全库。
     def test_lifecycle_plans_reuses_cached_count_snapshot_after_refresh(self):
         import bot.api as bot_api
@@ -12866,6 +12911,95 @@ class CloudServerServicesTestCase(TestCase):
         self.assertEqual(data['order_detail_path'], f'/admin/cloud-orders/{order.id}')
         self.assertEqual(data['order_link_path'], f'/admin/cloud-orders/{order.id}')
         self.assertEqual(data['related_order']['order_link_path'], f'/admin/cloud-orders/{order.id}')
+
+    # 功能：验证已删除资产详情不会继续暴露历史代理链路、secret 和完整公网 IP。
+    def test_deleted_cloud_asset_detail_masks_proxy_links_and_history_notes(self):
+        secret = 'abcdef0123456789abcdef0123456789'
+        mtproxy_link = f'tg://proxy?server=198.51.100.77&port=443&secret={secret}'
+        socks_link = 'socks5://user:password@198.51.100.77:1080'
+        order = CloudServerOrder.objects.create(
+            order_no='ASSET-DETAIL-DELETED-MASK',
+            user=self.user,
+            plan=self.plan,
+            provider=self.plan.provider,
+            region_code=self.plan.region_code,
+            region_name=self.plan.region_name,
+            plan_name=self.plan.plan_name,
+            quantity=1,
+            currency='USDT',
+            total_amount='19.00',
+            pay_amount='19.00',
+            pay_method='balance',
+            status='completed',
+            public_ip='198.51.100.77',
+            previous_public_ip='198.51.100.76',
+            mtproxy_host='198.51.100.77',
+            mtproxy_port=443,
+            mtproxy_secret=secret,
+            mtproxy_link=mtproxy_link,
+            proxy_links=[
+                {'name': '主代理 mtg', 'url': mtproxy_link, 'server': '198.51.100.77', 'port': '443', 'secret': secret},
+                {'name': '备用 socks5', 'url': socks_link, 'server': '198.51.100.77', 'port': '1080'},
+            ],
+            provision_note=f'创建完成：{mtproxy_link}\n备用：{socks_link}\n旧IP=198.51.100.76 secret={secret}',
+            service_started_at=timezone.now(),
+        )
+        asset = CloudAsset.objects.create(
+            kind=CloudAsset.KIND_SERVER,
+            source=CloudAsset.SOURCE_ORDER,
+            order=order,
+            user=self.user,
+            provider=self.plan.provider,
+            region_code=self.plan.region_code,
+            region_name=self.plan.region_name,
+            asset_name='asset-detail-deleted-mask',
+            public_ip='198.51.100.77',
+            previous_public_ip='198.51.100.76',
+            mtproxy_host='198.51.100.77',
+            mtproxy_port=443,
+            mtproxy_secret=secret,
+            mtproxy_link=mtproxy_link,
+            proxy_links=list(order.proxy_links),
+            note=f'资产备注：{mtproxy_link} {socks_link} secret={secret} 198.51.100.76',
+            status=CloudAsset.STATUS_DELETED,
+            is_active=False,
+            actual_expires_at=timezone.now() - timezone.timedelta(days=1),
+        )
+        CloudIpLog.objects.create(
+            event_type=CloudIpLog.EVENT_DELETED,
+            order=order,
+            asset=asset,
+            user=self.user,
+            order_no=order.order_no,
+            asset_name=asset.asset_name,
+            public_ip='198.51.100.77',
+            previous_public_ip='198.51.100.76',
+            note=f'删除日志：{mtproxy_link}\n备用：{socks_link}\nsecret={secret}\nIP：198.51.100.77；旧IP=198.51.100.76',
+        )
+        staff_user = get_user_model().objects.create_user(username='staff_deleted_asset_mask', password='x', is_staff=True)
+        request = RequestFactory().get(f'/api/admin/cloud-assets/{asset.id}/')
+        self._attach_bearer_session(request, staff_user)
+
+        response = update_cloud_asset(request, asset.id)
+
+        self.assertEqual(response.status_code, 200)
+        data = json.loads(response.content.decode())['data']
+        response_text = response.content.decode()
+        self.assertEqual(data['status'], CloudAsset.STATUS_DELETED)
+        self.assertEqual(data['mtproxy_link'], '')
+        self.assertEqual(data['proxy_links'], [])
+        self.assertEqual(data['public_ip'], '198.51.100.*')
+        self.assertEqual(data['previous_public_ip'], '198.51.100.*')
+        self.assertEqual(data['mtproxy_host'], '198.51.100.*')
+        self.assertIn('代理链路已脱敏', data['provision_note'])
+        self.assertIn('secret已脱敏', data['provision_note'])
+        self.assertTrue(data['ip_logs'])
+        self.assertNotIn(mtproxy_link, response_text)
+        self.assertNotIn(socks_link, response_text)
+        self.assertNotIn(secret, response_text)
+        self.assertNotIn('secret=', response_text)
+        self.assertNotIn('198.51.100.77', response_text)
+        self.assertNotIn('198.51.100.76', response_text)
 
     # 功能：验证后台资产详情只展示资产自己的到期事实，不从同订单其他资产兜底。
     def test_cloud_asset_detail_does_not_fallback_to_order_asset_expiry(self):

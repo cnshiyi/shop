@@ -28,6 +28,11 @@ from cloud.services import sync_cloud_asset_user_binding
 from core.cloud_accounts import cloud_account_label, cloud_account_label_variants, list_cloud_account_labels
 from core.dashboard_api import _countdown_label, _days_left, _decimal_to_str, _get_keyword, _iso, _ok, _provider_label, _provider_status_label, _region_label, _server_source_label, _split_usernames, _status_label, _user_payload, dashboard_login_required
 
+_PROXY_URL_RE = re.compile(r'(?i)\b(?:tg://proxy|socks5://|https?://t\.me/proxy)[^\s，。；;]+')
+_SECRET_PARAM_RE = re.compile(r'(?i)secret=[^&\s，。；;]+')
+_SOCKS_CREDENTIAL_RE = re.compile(r'(?i)(socks5://)[^@\s/]+@')
+_IPV4_RE = re.compile(r'\b(?:(?:25[0-5]|2[0-4]\d|1?\d?\d)\.){3}(?:25[0-5]|2[0-4]\d|1?\d?\d)\b')
+
 
 def _mask_secret(value, keep=4):
     text = str(value or '')
@@ -36,6 +41,58 @@ def _mask_secret(value, keep=4):
     if len(text) <= keep * 2:
         return '*' * len(text)
     return f'{text[:keep]}***{text[-keep:]}'
+
+
+# 功能：脱敏历史公网 IP，只保留可用于后台辨认的前 3 段。
+def _mask_public_ip(value):
+    text = str(value or '').strip()
+    if not text:
+        return ''
+    if '*' in text:
+        return text
+    parts = text.split('.')
+    if len(parts) == 4 and all(part.isdigit() and 0 <= int(part) <= 255 for part in parts):
+        return '.'.join(parts[:3] + ['*'])
+    return _mask_secret(text, keep=3)
+
+
+# 功能：删除态资产的备注展示只保留脱敏审计信息。
+def _sanitize_deleted_asset_text(value):
+    text = str(value or '')
+    if not text:
+        return ''
+    text = _PROXY_URL_RE.sub('[代理链路已脱敏]', text)
+    text = _SOCKS_CREDENTIAL_RE.sub(r'\1***@', text)
+    text = _SECRET_PARAM_RE.sub('secret已脱敏', text)
+    return _IPV4_RE.sub(lambda match: _mask_public_ip(match.group(0)), text)
+
+
+# 功能：删除态资产详情和显式展开列表不再返回历史完整代理链路。
+def _sanitize_deleted_asset_payload(payload):
+    if not isinstance(payload, dict):
+        return payload
+    payload['public_ip'] = _mask_public_ip(payload.get('public_ip'))
+    payload['previous_public_ip'] = _mask_public_ip(payload.get('previous_public_ip'))
+    payload['mtproxy_host'] = _mask_public_ip(payload.get('mtproxy_host'))
+    payload['mtproxy_link'] = ''
+    payload['proxy_links'] = []
+    for field in ('note', 'provision_note'):
+        if field in payload:
+            payload[field] = _sanitize_deleted_asset_text(payload.get(field))
+    for item in payload.get('ip_logs') or []:
+        if not isinstance(item, dict):
+            continue
+        item['public_ip'] = _mask_public_ip(item.get('public_ip'))
+        item['previous_public_ip'] = _mask_public_ip(item.get('previous_public_ip'))
+        for field in ('note', 'display_note', 'source_note'):
+            if field in item:
+                item[field] = _sanitize_deleted_asset_text(item.get(field))
+    for item in [payload.get('related_order'), *(payload.get('history_orders') or [])]:
+        if not isinstance(item, dict):
+            continue
+        item['public_ip'] = _mask_public_ip(item.get('public_ip'))
+        item['previous_public_ip'] = _mask_public_ip(item.get('previous_public_ip'))
+    return payload
 
 
 # 功能：提供 后台 API 接口 的内部辅助逻辑，供同模块流程复用。
@@ -573,7 +630,7 @@ def _asset_payload(asset, *, context: CloudAssetPayloadContext | None = None):
         display_status_label = '未附加固定IP'
         provider_status_label = '云账号已停用 / 固定IP仍存在但未附加' if provider_account_disabled else '固定IP仍存在但未附加'
     risk_state = _cloud_asset_risk_state(asset, order, expires_at, provider_status_label, display_status, user)
-    return {
+    payload = {
         'id': asset.id,
         'kind': asset.kind,
         'source': asset.source,
@@ -627,6 +684,9 @@ def _asset_payload(asset, *, context: CloudAssetPayloadContext | None = None):
         'is_active': asset.is_active,
         'updated_at': _iso(asset.updated_at),
     }
+    if display_status in {CloudAsset.STATUS_DELETED, CloudAsset.STATUS_TERMINATED}:
+        _sanitize_deleted_asset_payload(payload)
+    return payload
 
 # 功能：处理 后台 API 接口 中的 cloud assets list 业务流程。
 @dashboard_login_required

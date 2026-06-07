@@ -18,6 +18,7 @@ from cloud.api_assets import (
     _is_unattached_ip_asset,
     _parse_iso_datetime,
     _resolve_telegram_user,
+    _sanitize_deleted_asset_payload,
     _sync_telegram_username,
     _unattached_ip_delete_due_at,
 )
@@ -119,6 +120,8 @@ def update_cloud_asset(request, asset_id):
             ],
             'lifecycle_order_links': lifecycle_order_links,
         })
+        if payload.get('status') in {CloudAsset.STATUS_DELETED, CloudAsset.STATUS_TERMINATED}:
+            _sanitize_deleted_asset_payload(payload)
         return _ok(payload)
     if not getattr(request.user, 'is_superuser', False):
         return _error('需要超级管理员权限', status=403)

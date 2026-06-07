@@ -31,6 +31,7 @@ from cloud.lifecycle_plan_queries import (
     completed_unattached_ip_active_queryset,
     ip_delete_history_page_sources,
     ip_delete_plan_counts,
+    paged_queryset,
     unattached_ip_delete_plan_page,
     page_bounds,
     page_meta,
@@ -307,6 +308,21 @@ def _server_lifecycle_plan_page_items(*, plan_stage: str, page: int, page_size: 
     if plan_stage == 'shutdown':
         return [_shutdown_stage_item_payload(asset, queue_status='scheduled_future', queue_status_label='计划中') for asset in assets]
     return [_asset_delete_plan_item_payload(asset, queue_status='scheduled_future', queue_status_label='计划中') for asset in assets]
+
+
+def _server_delete_history_queryset():
+    return CloudServerOrder.objects.select_related('user').filter(status='deleted')
+
+
+def _server_delete_history_page_items(*, page: int, page_size: int, total: int | None = None) -> list[dict]:
+    orders = paged_queryset(
+        _server_delete_history_queryset(),
+        ordering=('-updated_at', '-id'),
+        page=page,
+        page_size=page_size,
+        total=total,
+    )
+    return [_shutdown_history_order_payload(order) for order in orders]
 
 
 def _unattached_ip_delete_active_queryset():
@@ -860,11 +876,13 @@ def _load_lifecycle_plan_count_snapshot():
 def _sync_lifecycle_plan_table(*, limit=1000, page_size=None):
     page_size = max(1, min(int(page_size or limit or 1000), 1000))
     server_delete_items = _server_lifecycle_plan_page_items(plan_stage='delete', page=1, page_size=page_size)
+    server_history_items = _server_delete_history_page_items(page=1, page_size=page_size)
     ip_delete_plan_items = _ip_delete_plan_asset_page_items(page=1, page_size=page_size)
     ip_delete_history_items = _ip_delete_history_page_items(page=1, page_size=page_size)
     bundle = {
         'shutdown_plan_items': _server_lifecycle_plan_page_items(plan_stage='shutdown', page=1, page_size=page_size),
         'server_delete_items': server_delete_items,
+        'server_history_items': server_history_items,
         'ip_delete_plan_items': ip_delete_plan_items,
         'ip_delete_history_items': ip_delete_history_items,
     }
@@ -2179,6 +2197,8 @@ def _shutdown_history_item_payload(log):
     ok = log.event_type == 'deleted'
     return {
         **_plan_item_identity('ip_log', log.id, plan_kind='server_history'),
+        'plan_kind': 'server_history',
+        'is_history': True,
         'order_id': log.order_id,
         'order_no': log.order_no or getattr(order, 'order_no', '') or '-',
         'ip': log.public_ip or log.previous_public_ip or getattr(order, 'public_ip', '') or getattr(order, 'previous_public_ip', '') or '未分配',
@@ -2213,6 +2233,8 @@ def _shutdown_history_order_payload(order):
     executed_at = order.updated_at or order.delete_at
     return {
         **_plan_item_identity('order', order.id, plan_kind='server_history'),
+        'plan_kind': 'server_history',
+        'is_history': True,
         'order_id': order.id,
         'order_no': order.order_no or '-',
         'ip': ip,
@@ -2264,6 +2286,7 @@ def lifecycle_plans(request):
 
     shutdown_page, shutdown_page_size = parse_page_params('shutdown')
     server_delete_page, server_delete_page_size = parse_page_params('server_delete')
+    server_history_page, server_history_page_size = parse_page_params('server_history')
     ip_delete_page, ip_delete_page_size = parse_page_params('ip_delete')
     ip_delete_history_page, ip_delete_history_page_size = parse_page_params('ip_delete_history')
 
@@ -2552,6 +2575,7 @@ def lifecycle_plans(request):
     plan_stats = count_snapshot['plan_stats']
     total_counts = count_snapshot['total_counts']
     ip_delete_total_counts = count_snapshot['ip_delete_total_counts']
+    server_history_count = _server_delete_history_queryset().count()
 
     shutdown_plan_items = [
         decorate_plan_item(item)
@@ -2579,6 +2603,14 @@ def lifecycle_plans(request):
     ]
     server_delete_active_items = dedupe_shutdown_active_items(server_delete_active_items)
     server_delete_due_items = [item for item in server_delete_active_items if is_server_delete_due(item)]
+    server_history_items = [
+        decorate_plan_item(item)
+        for item in _server_delete_history_page_items(
+            page=server_history_page,
+            page_size=server_history_page_size,
+            total=server_history_count,
+        )
+    ]
 
     ip_delete_plan_items = [
         decorate_plan_item(item)
@@ -2611,14 +2643,17 @@ def lifecycle_plans(request):
             return items
         compact_notes(shutdown_plan_items)
         compact_notes(server_delete_active_items)
+        compact_notes(server_history_items)
         compact_notes(ip_delete_plan_items)
         compact_notes(ip_delete_history_items)
     response_shutdown_plan_items = shutdown_plan_items[:shutdown_page_size]
     response_server_delete_items = server_delete_active_items[:server_delete_page_size]
+    response_server_history_items = server_history_items[:server_history_page_size]
     response_ip_delete_plan_items = ip_delete_plan_items[:ip_delete_page_size]
     response_ip_delete_history_items = ip_delete_history_items[:ip_delete_history_page_size]
     _strip_lifecycle_plan_fields(response_shutdown_plan_items, fields)
     _strip_lifecycle_plan_fields(response_server_delete_items, fields)
+    _strip_lifecycle_plan_fields(response_server_history_items, fields)
     _strip_lifecycle_plan_fields(response_ip_delete_plan_items, fields)
     _strip_lifecycle_plan_fields(response_ip_delete_history_items, fields)
     last_refresh_at = _lifecycle_plan_generated_at()
@@ -2644,15 +2679,18 @@ def lifecycle_plans(request):
         'shutdown_plan_due_count': sum(1 for item in shutdown_plan_items if item.get('queue_status') in {'due_now', 'within_window'}),
         'server_delete_count': total_counts['server_delete_count'],
         'server_delete_due_count': len(server_delete_due_items),
+        'server_history_count': server_history_count,
         'ip_delete_count': ip_delete_total_counts['ip_delete_count'],
         'ip_delete_due_count': len(pending_ip_delete_items),
         'shutdown_plan_items': response_shutdown_plan_items,
         'server_delete_items': response_server_delete_items,
+        'server_history_items': response_server_history_items,
         'ip_delete_plan_items': response_ip_delete_plan_items,
         'ip_delete_history_items': response_ip_delete_history_items,
         'pagination': {
             'shutdown_plan': _page_meta(shutdown_page, shutdown_page_size, total_counts['shutdown_plan_count']),
             'server_delete': _page_meta(server_delete_page, server_delete_page_size, total_counts['server_delete_count']),
+            'server_history': _page_meta(server_history_page, server_history_page_size, server_history_count),
             'ip_delete': _page_meta(ip_delete_page, ip_delete_page_size, ip_delete_total_counts['ip_delete_count']),
             'ip_delete_history': _page_meta(ip_delete_history_page, ip_delete_history_page_size, ip_delete_total_counts['ip_delete_history_count']),
         },
@@ -2680,10 +2718,12 @@ def refresh_lifecycle_plan_view(request):
         'last_refresh_at': _iso(last_refresh_at),
         'loaded_shutdown_plan_count': len(bundle.get('shutdown_plan_items') or []),
         'loaded_server_delete_count': len(bundle.get('server_delete_items') or []),
+        'loaded_server_history_count': len(bundle.get('server_history_items') or []),
         'loaded_ip_delete_count': len(bundle.get('ip_delete_plan_items') or []),
         'loaded_ip_delete_history_count': len(bundle.get('ip_delete_history_items') or []),
         'shutdown_plan_count': total_counts['shutdown_plan_count'],
         'server_delete_count': total_counts['server_delete_count'],
+        'server_history_count': _server_delete_history_queryset().count(),
         'missing_expiry_count': plan_stats['missing_expiry_count'],
         'unattached_ip_count': plan_stats['unattached_ip_count'],
         'source_asset_count': plan_stats['source_asset_count'],

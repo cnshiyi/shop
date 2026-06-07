@@ -11682,6 +11682,80 @@ git diff --check
 - 本轮未打印密钥、私钥、Telegram session、TOTP、支付密钥、云厂商密钥、完整代理链接、代理 secret 或登录密码。
 - 本轮未恢复废弃 runtime app、订单侧到期字段、旧计划快照、旧退款逻辑、旧退款函数名或旧兼容入口。
 
+## 2026-06-07 22:52 已删除资产脱敏与服务器删除历史表补齐
+
+### 背景
+
+自动巡检继续检查生命周期创建 / 删除服务器链路后的后台展示面。上一轮真机生命周期测试已覆盖真实创建、关机、删机和固定 IP 释放，但本轮发现两个管理面问题：
+
+- 已删除资产详情仍可能从资产备注、IP 日志、关联订单或历史订单里展示历史代理链路、完整公网 IP、`secret=` 片段。
+- 计划页只有关机计划、删除计划、IP 删除计划和 IP 删除历史，缺少独立的服务器删除历史记录，导致已删除服务器数量无法在计划页直接管理和对账。
+
+### 修复
+
+- `cloud/api_assets.py`
+  - 新增删除态资产详情响应脱敏逻辑。
+  - 删除态 / 终止态资产不再返回完整 `mtproxy_link`、`proxy_links`、完整公网 IP、历史备注中的 `tg://proxy`、`socks5://` 或 `secret=`。
+  - 关联订单、历史订单、IP 日志中的公网 IP 和备注同步脱敏，避免详情主体与展开区域口径分叉。
+- `cloud/api_asset_edit.py`
+  - 资产详情扩展字段拼装后再次执行删除态脱敏，覆盖 `provision_note`、`ip_logs`、`related_order` 和 `history_orders`。
+- `bot/api.py`
+  - 新增 `server_history_items`、`server_history_count` 和 `pagination.server_history`。
+  - 服务器删除历史当前按 `CloudServerOrder(status='deleted')` 服务端分页，作为独立表返回，不再和删除计划或 IP 删除历史混在一起。
+  - 刷新接口同步返回服务器历史加载数量和总数。
+- 前端仓库 `/Users/a399/Desktop/data/vue-shop-admin`
+  - `apps/web-antd/src/api/admin.ts` 补齐服务器删除历史类型和分页请求参数。
+  - `apps/web-antd/src/views/dashboard/tasks/plans.vue` 新增“服务器删除历史记录”表格，支持列开关、分页、执行状态、删除来源、备注和查看详情。
+- `cloud/tests.py`
+  - 新增 `test_deleted_cloud_asset_detail_masks_proxy_links_and_history_notes`。
+  - 新增 `test_lifecycle_plans_returns_server_delete_history_table`。
+
+### 页面实测
+
+- 实际打开 `/admin/cloud-assets/1500332`：
+  - 页面标题为“代理详情”，状态显示已删除。
+  - 页面正文不包含 `tg://proxy`、`socks5://`、`secret=`。
+  - 页面无加载失败、请求失败或异常文案。
+  - 控制台 error / warning 均为 0。
+- 实际打开 `/admin/tasks/plans`：
+  - 页面标题为“计划”。
+  - 页面包含关机计划、删除计划、服务器删除历史记录、IP 删除计划、IP 删除历史记录。
+  - 服务器删除历史记录显示 `已加载 50 / 总 20009`。
+  - 数据库 `CloudServerOrder(status='deleted')` 数量为 `20009`，与页面总数一致。
+  - 页面无加载失败、请求失败或异常文案。
+  - 控制台 error / warning 均为 0。
+
+### 验证
+
+已通过：
+
+```bash
+UV_CACHE_DIR=/private/tmp/uv-cache-shop DJANGO_TEST_SQLITE=1 uv run python manage.py test cloud.tests.CloudServerServicesTestCase.test_lifecycle_plans_returns_server_delete_history_table cloud.tests.CloudServerServicesTestCase.test_deleted_cloud_asset_detail_masks_proxy_links_and_history_notes cloud.tests.CloudServerServicesTestCase.test_lifecycle_plans_counts_all_ip_delete_history_beyond_loaded_limit --settings=shop.settings --verbosity=1
+UV_CACHE_DIR=/private/tmp/uv-cache-shop uv run python -m py_compile bot/api.py cloud/api_assets.py cloud/api_asset_edit.py cloud/tests.py
+UV_CACHE_DIR=/private/tmp/uv-cache-shop uv run python manage.py check
+/Users/a399/.homebrew/bin/pnpm --filter @vben/web-antd typecheck
+git diff --check
+git -C /Users/a399/Desktop/data/vue-shop-admin diff --check
+```
+
+SQLite `db_comment` 警告为已知数据库能力差异。
+
+### 生命周期真机覆盖说明
+
+- `docs/real-machine-test-report.md` 已记录此前用户授权下的真实创建服务器、关机、删除服务器、固定 IP 释放、机器人点击和支付流程测试。
+- 本轮未新增真实云资源创建、关机、删机或固定 IP 释放；本轮重点是修复生命周期历史展示和敏感字段暴露面。
+
+### 红线
+
+- 本轮未执行真实云资源创建、关机、删除服务器、释放 IP、真实支付、链上广播、生产发布、删除业务数据或删除测试库。
+- 本轮未打印密钥、私钥、Telegram session、TOTP、支付密钥、云厂商密钥、完整代理链接、代理 secret 或登录密码。
+- 本轮未恢复废弃 runtime app、订单侧到期字段、旧计划快照、旧退款逻辑、旧退款函数名或旧兼容入口。
+
+### 剩余风险
+
+- 服务器删除历史当前以已删除云订单为主口径；后续应继续把无订单孤儿服务器删除历史并入统一查询层。
+- 150 万资产数据下，计划页和代理列表首屏冷加载仍需继续优化，但必须继续保持翻页和数据库精确对账一致。
+
 ## 2026-06-07 22:30 代理列表翻页对账与前端图标离线化
 
 ### 数据库与分页对账
