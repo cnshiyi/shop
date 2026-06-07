@@ -13171,6 +13171,53 @@ class CloudServerServicesTestCase(TestCase):
         self.assertEqual(data['order_link_path'], f'/admin/cloud-orders/{order.id}')
         self.assertEqual(data['related_order']['order_link_path'], f'/admin/cloud-orders/{order.id}')
 
+    # 功能：验证后台资产详情返回三个生命周期单项开关，避免页面刷新后错显默认开启。
+    def test_cloud_asset_detail_exposes_lifecycle_switches(self):
+        order = CloudServerOrder.objects.create(
+            order_no='ASSET-DETAIL-LIFECYCLE-SWITCHES',
+            user=self.user,
+            plan=self.plan,
+            provider=self.plan.provider,
+            region_code=self.plan.region_code,
+            region_name=self.plan.region_name,
+            plan_name=self.plan.plan_name,
+            quantity=1,
+            currency='USDT',
+            total_amount='19.00',
+            pay_amount='19.00',
+            pay_method='balance',
+            status='completed',
+            public_ip='2.2.2.22',
+            service_started_at=timezone.now(),
+        )
+        asset = CloudAsset.objects.create(
+            kind=CloudAsset.KIND_SERVER,
+            source=CloudAsset.SOURCE_ORDER,
+            order=order,
+            user=self.user,
+            provider=self.plan.provider,
+            region_code=self.plan.region_code,
+            region_name=self.plan.region_name,
+            asset_name='asset-detail-lifecycle-switches',
+            public_ip='2.2.2.22',
+            actual_expires_at=timezone.now() + timezone.timedelta(days=8),
+            shutdown_enabled=False,
+            server_delete_enabled=False,
+            ip_delete_enabled=False,
+        )
+        staff_user = get_user_model().objects.create_user(username='staff_asset_switches', password='x', is_staff=True)
+        request = RequestFactory().get(f'/api/admin/cloud-assets/{asset.id}/')
+        self._attach_bearer_session(request, staff_user)
+
+        response = update_cloud_asset(request, asset.id)
+        payload = json.loads(response.content)
+        data = payload.get('data') or payload
+
+        self.assertEqual(response.status_code, 200)
+        self.assertFalse(data['shutdown_enabled'])
+        self.assertFalse(data['server_delete_enabled'])
+        self.assertFalse(data['ip_delete_enabled'])
+
     # 功能：验证已删除资产详情不会继续暴露历史代理链路、secret 和完整公网 IP。
     def test_deleted_cloud_asset_detail_masks_proxy_links_and_history_notes(self):
         secret = 'abcdef0123456789abcdef0123456789'

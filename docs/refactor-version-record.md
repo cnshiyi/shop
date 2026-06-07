@@ -12075,3 +12075,93 @@ git -C /Users/a399/Desktop/data/vue-shop-admin diff --check
 - 本轮未执行真实云资源创建、关机、删除服务器、释放 IP、真实支付、链上广播、生产发布、删除业务数据或删除测试库。
 - 本轮未打印密钥、私钥、Telegram session、TOTP、支付密钥、云厂商密钥、完整代理链接、代理 secret 或登录密码。
 - 本轮未恢复废弃 runtime app、订单侧到期字段、旧计划快照、旧退款逻辑、旧退款函数名或旧兼容入口。
+## 2026-06-08 00:34 生命周期真页开关复核与资产详情开关修复
+
+### 背景
+
+用户再次强调“生命周期 创建服务器 删除服务器也要测试到”。本轮延续自动优化巡检规则，先读取自动优化控制台、最新状态、版本记录和 TODO，并以最新真实测试资源作为专项复核对象：
+
+- 订单：`#50097`
+- 资产：`#1500333`
+- 范围：真实创建、关机、删除服务器、释放固定 IP 的终态证据和前端页面展示。
+
+本轮没有再次新建第二台云服务器，避免重复产生真实云资源成本；复用上一轮已授权并已清理完成的真实订单和资产做数据库、任务、页面三方对账。
+
+### 数据库与生命周期任务对账
+
+- 订单 `#50097` 当前为 `deleted`。
+- 资产 `#1500333` 当前为 `deleted/is_active=False`。
+- 生命周期任务共 3 条：
+  - `suspend/done`
+  - `delete/done`
+  - `recycle/done`
+- 三条任务均已完成且无错误。
+- 资产实例 ID、公网 IP、固定 IP 名称等执行后清理字段已清空或脱敏显示。
+
+### 真页验证
+
+- 实际打开 `/admin/tasks/plans`：
+  - 页面标题为“计划”。
+  - 页面包含关机计划、删除计划、IP 删除计划、服务器删除历史记录、IP 删除历史记录。
+  - 控制台 error / warning 为 0。
+- 实际打开 `/admin/cloud-orders/50097`：
+  - 页面标题为“云订单详情”。
+  - 页面显示已删除和生命周期区域。
+  - 页面能看到创建、关机、服务器删除、IP 释放相关记录。
+- 实际打开 `/admin/cloud-assets/1500333`：
+  - 页面标题为“代理详情”。
+  - 页面显示已删除、生命周期日志和关联订单。
+  - 关机计划、删除计划、IP 删除计划三个资产单项开关均显示。
+  - 三个单项开关都通过真实页面点击测试：逐项关闭，再恢复开启。
+  - 最终数据库确认 `shutdown_enabled=True`、`server_delete_enabled=True`、`ip_delete_enabled=True`。
+  - 控制台 error / warning 为 0。
+
+### 发现的问题
+
+本轮真页点击暴露两个实际问题：
+
+1. 资产详情 API 只返回 `shutdown_enabled`，没有返回 `server_delete_enabled` 和 `ip_delete_enabled`。
+   - 后果：页面刷新后删除计划和 IP 删除计划会错显为默认开启。
+   - 这会误导人工判断资产单项开关状态。
+2. 计划页和资产详情页面存在前端可观测性问题。
+   - 计划页“IP删除历史记录”没有空格，自动巡检文本识别时容易和删除计划混在一起。
+   - 时区按钮和布局折叠按钮仍使用外联 Iconify 图标，访问 `api.unisvg.com` 失败时产生控制台 error。
+
+### 修复
+
+- 后端：
+  - `cloud/api_assets.py`
+    - 资产详情 payload 补齐 `server_delete_enabled` 和 `ip_delete_enabled`。
+  - `cloud/tests.py`
+    - 新增 `test_cloud_asset_detail_exposes_lifecycle_switches`，断言资产详情接口原样返回三个生命周期单项开关。
+- 前端：
+  - `/Users/a399/Desktop/data/vue-shop-admin/apps/web-antd/src/api/admin.ts`
+    - `DashboardCloudAssetItem` 补齐 `server_delete_enabled` 和 `ip_delete_enabled` 类型。
+  - `/Users/a399/Desktop/data/vue-shop-admin/apps/web-antd/src/views/dashboard/cloud-assets/detail.vue`
+    - 资产详情页补齐“删除计划”和“IP 删除计划”两个单项开关。
+    - 三个开关复用同一个资产更新接口保存，并更新风险状态字段。
+  - `/Users/a399/Desktop/data/vue-shop-admin/apps/web-antd/src/views/dashboard/tasks/plans.vue`
+    - “IP删除历史记录”改为“IP 删除历史记录”。
+  - `/Users/a399/Desktop/data/vue-shop-admin/packages/effects/layouts/src/widgets/timezone/timezone-button.vue`
+    - 时区按钮改为本地 `CalendarClock` 图标。
+  - `/Users/a399/Desktop/data/vue-shop-admin/packages/@core/ui-kit/layout-ui/src/vben-layout.vue`
+    - 页头折叠按钮改为本地 `FoldHorizontal` / `Expand` 图标。
+
+### 验证
+
+已通过：
+
+```bash
+UV_CACHE_DIR=/private/tmp/uv-cache-shop uv run python manage.py check
+UV_CACHE_DIR=/private/tmp/uv-cache-shop DJANGO_TEST_SQLITE=1 uv run python manage.py test cloud.tests.CloudServerServicesTestCase.test_cloud_asset_detail_exposes_lifecycle_switches cloud.tests.CloudServerServicesTestCase.test_cloud_asset_detail_exposes_related_order_click_path --settings=shop.settings --verbosity=1
+/Users/a399/.homebrew/bin/pnpm --filter @vben/web-antd typecheck
+```
+
+SQLite `db_comment` 警告为已知数据库能力差异。
+
+### 红线
+
+- 本轮没有再次创建第二台真实云服务器。
+- 本轮未执行真实支付、链上广播、生产发布或删除业务压测数据。
+- 本轮未打印密钥、私钥、Telegram session、TOTP、支付密钥、云厂商密钥、完整代理链接、代理 secret 或登录密码。
+- 本轮未恢复废弃 runtime app、订单侧到期字段、旧计划快照、旧退款逻辑、旧退款函数名或旧兼容入口。

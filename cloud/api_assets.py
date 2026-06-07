@@ -577,6 +577,8 @@ def _cloud_asset_risk_state(asset, order, expires_at, provider_status_label, dis
         'risk_label': risk_label,
         'risk_rank': risk_rank,
         'risk_reasons': reasons,
+        'server_delete_enabled': getattr(asset, 'server_delete_enabled', True) is not False,
+        'ip_delete_enabled': getattr(asset, 'ip_delete_enabled', True) is not False,
         'shutdown_enabled': shutdown_enabled,
     }
 
