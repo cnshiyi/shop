@@ -10640,3 +10640,69 @@ rg -n "service_expires_at|old_refund|legacy_refund|refund_cloud_order|refund_ord
 
 - 旧兼容入口删除后，仍持有旧冒号账号标签或 provider-only 标签的数据不会再被账号标签辅助函数归属到云账号；这是本轮按“不需要兼容”执行的预期结果。
 - 默认 MySQL 全量测试仍可能遇到已有测试库 `test_a` 的交互确认；本轮未删除测试库，继续使用 SQLite 隔离库跑聚焦测试。
+
+## 2026-06-07 再查兼容代码并移除机器人旧回调入口
+
+### 背景
+
+用户要求“再查一轮兼容代码”。本轮在 `ae69e7d Remove cloud asset compatibility leftovers` 后继续只查运行时代码，重点扫描旧云资产兼容壳、旧云 API 聚合入口、旧计划字段、旧退款入口、废弃 runtime app 回流和机器人旧 callback 入口。
+
+### 发现
+
+- 云资产兼容壳、旧 `cloud.api` 聚合入口、旧 `Server` 包装、旧计划兼容路由、旧退款入口、旧到期字段、旧计划投影和废弃 runtime app 回流在运行时代码中无命中。
+- 机器人仍有两个旧 callback 入口属于真实兼容残留：
+  - `cloud:assetdetail:`
+  - `cloud:renewpay:`
+- `cloud:mute:` 仍由当前提醒按钮使用，是订单级关闭提醒入口；上一轮已经删除了它回退到用户级静默的旧兼容分支，本轮不删除当前按钮入口。
+
+### 修改
+
+- `bot/handlers.py`：
+  - 删除 `cloud:assetdetail:` 回调注册。
+  - 删除资产详情处理器中 `cloud:assetdetail:<id>` 和 `cloud:assetdetail:<kind>:<id>` 的解析分支。
+  - 删除 `cloud:renewpay:` 回调注册。
+  - 删除 callback 路由标签中的旧 `cloud.assetdetail` 和 `cloud.renewpay` 项。
+- `bot/keyboards.py`：
+  - `cloud_previous_detail_callback()` 不再把 `cloud:assetdetail:` 视为可返回的详情路径。
+  - `compact_callback_path()` 不再压缩旧 `cloud:assetdetail:`。
+- `bot/tests.py`：
+  - 删除旧 `cloud:assetdetail:` 压缩断言。
+  - 改为断言旧 `cloud:assetdetail:` 和 `cloud:renewpay:` 注册不存在。
+  - 继续覆盖当前 `cloud:ad:`、`cad:`、`csd:`、`cloud:rp:` 和 `p:` 返回链。
+
+### 验证
+
+本地已通过：
+
+```bash
+uv run python -m py_compile bot/handlers.py bot/keyboards.py bot/tests.py
+uv run python manage.py check
+DJANGO_TEST_SQLITE=1 uv run python manage.py test bot.tests.RetainedIpRenewalUiTestCase --settings=shop.settings --verbosity=1
+git diff --check
+```
+
+结果：编译通过；Django 系统检查通过；机器人返回链与回调聚焦测试 49 条通过；diff 空白检查通过。
+
+### 红线扫描
+
+运行时代码扫描已通过：
+
+```bash
+rg -n "cloud:assetdetail|cloud:renewpay|custom:port|cloud:ipport|waiting_port|set_cloud_server_port|bot_custom_port|bot_set_port" bot cloud core orders shop -g '!*/migrations/*' -g '!*/tests.py' -g '!*/tests_*.py'
+rg -n "legacy|compat|兼容|server_records|reconcile_cloud_assets_from_servers|_order_primary_server|server_updates|task-list-compat|plan-settings-compat|mute_cloud_reminders|unmute_cloud_reminders|Server\\.objects|cloud\\.server_records|compat_server_record|sync_state__compat_server_record" shop core bot orders cloud -g '!*/migrations/*' -g '!*/tests.py' -g '!*/tests_*.py'
+rg -n "\\bfrom cloud import api\\b|\\bimport cloud\\.api\\b|\\bfrom cloud\\.api import\\b|\\bfrom cloud\\.api$|cloud/api\\.py|cloud\\.api\\b" shop core bot orders cloud -g '!*/migrations/*' -g '!*/tests.py' -g '!*/tests_*.py'
+rg -n "service_expires_at|old_refund|legacy_refund|refund_cloud_order|refund_order|apply_refund|process_refund|create_refund|CloudLifecyclePlanSnapshot|CloudNoticePlanSnapshot|PlanSnapshot|lifecycle_plan_projection" shop core bot orders cloud -g '!*/migrations/*' -g '!*/tests.py' -g '!*/tests_*.py'
+```
+
+结果：无命中。
+
+### 红线
+
+- 本轮未执行真实云资源创建、删除、关机、释放 IP、换 IP、真实支付、链上广播、删除业务数据、删除测试库或生产发布。
+- 本轮未打印密钥、私钥、Telegram session、TOTP、支付密钥或云厂商密钥。
+- 本轮未恢复废弃 runtime app、订单侧到期字段、旧计划快照、旧退款入口、旧 `Server` 兼容壳或旧云 API 聚合入口。
+
+### 剩余风险
+
+- 历史文档和版本记录中仍保留旧兼容关键词，用于追溯历史，不代表运行时代码仍保留兼容入口。
+- 默认 MySQL 全量测试仍可能遇到已有测试库 `test_a` 的交互确认；本轮未删除测试库，继续使用 SQLite 隔离库跑聚焦测试。

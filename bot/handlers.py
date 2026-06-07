@@ -1199,7 +1199,6 @@ def _callback_route_label(callback_data: str | None) -> str:
         ('cad:', 'cad 人工代理详情短回调'),
         ('csd:', 'csd 云服务器资产详情短回调'),
         ('cloud:ad:', 'cloud.ad 人工代理详情'),
-        ('cloud:assetdetail:', 'cloud.assetdetail 人工代理详情'),
         ('cloud:detail:', 'cloud.detail 代理详情'),
         ('d:', 'cloud.detail.compact 代理详情短回调'),
         ('cloud:list:page:', 'cloud.list.page 代理列表分页'),
@@ -1211,7 +1210,6 @@ def _callback_route_label(callback_data: str | None) -> str:
         ('cloud:queryip:page:', 'cloud.queryip.page IP查询分页'),
         ('poc:', 'profile.orders.cloud.compact 云订单短返回'),
         ('cloud:rp:', 'cloud.rp 续费钱包支付短回调'),
-        ('cloud:renewpay:', 'cloud.renewpay 续费钱包支付'),
         ('cloud:renewwallet:', 'cloud.renewwallet 自动续费钱包支付'),
         ('ar:', 'ar 资产续费短回调'),
         ('ac:', 'ac 资产更换IP短回调'),
@@ -4276,7 +4274,6 @@ def register_handlers(dp: Dispatcher):
             reply_markup=main_menu(),
         )
 
-    @dp.callback_query(F.data.startswith('cloud:assetdetail:'))
     @dp.callback_query(F.data.startswith('cloud:ad:'))
     @dp.callback_query(F.data.startswith('cad:'))
     @dp.callback_query(F.data.startswith('csd:'))
@@ -4292,14 +4289,6 @@ def register_handlers(dp: Dispatcher):
             item_kind = parts[2] or 'asset'
             raw_item_id = parts[3]
             back_parts = parts[4:]
-        elif len(parts) >= 4 and parts[:2] == ['cloud', 'assetdetail'] and not str(parts[2]).isdigit():
-            item_kind = parts[2] or 'asset'
-            raw_item_id = parts[3]
-            back_parts = parts[4:]
-        elif len(parts) >= 3 and parts[:2] == ['cloud', 'assetdetail']:
-            item_kind = 'asset'
-            raw_item_id = parts[2]
-            back_parts = parts[3:]
         else:
             await _safe_callback_answer(callback, '代理详情参数无效', show_alert=True)
             return
@@ -4995,7 +4984,6 @@ def register_handlers(dp: Dispatcher):
 
     @dp.callback_query(F.data.startswith('p:'))
     @dp.callback_query(F.data.startswith('cloud:rp:'))
-    @dp.callback_query(F.data.startswith('cloud:renewpay:'))
     async def cb_cloud_renew_pay(callback: CallbackQuery, state: FSMContext):
         await _safe_callback_answer(callback, '续费钱包支付处理中')
         user = await get_or_create_user(callback.from_user.id, callback.from_user.username, callback.from_user.first_name)

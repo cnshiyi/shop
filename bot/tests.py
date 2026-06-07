@@ -1193,20 +1193,10 @@ class RetainedIpRenewalUiTestCase(SimpleTestCase):
             'cad:99:clp:3',
         )
         self.assertEqual(
-            cloud_previous_detail_callback(88, 'cloud:assetdetail:99:profile:orders:cloud:filter:paid:page:2'),
-            'cad:99:poc:paid:2',
-        )
-        self.assertEqual(
-            cloud_previous_detail_callback(88, 'cloud:assetdetail:asset:99:profile:orders:cloud:filter:paid:page:2'),
-            'cad:99:poc:paid:2',
-        )
-        self.assertEqual(
             cloud_previous_detail_callback(88, back_callback),
             'cloud:detail:88:poc:paid:2',
         )
         self.assertEqual(compact_callback_path(back_callback), 'poc:paid:2')
-        self.assertEqual(compact_callback_path('cloud:assetdetail:99'), 'cad:99')
-        self.assertEqual(compact_callback_path('cloud:assetdetail:asset:99'), 'cad:99')
         self.assertEqual(compact_callback_path('cloud:list:page:12345'), 'clp:12345')
 
     def test_cloud_server_detail_actions_keep_back_path(self):
@@ -1553,16 +1543,16 @@ class RetainedIpRenewalUiTestCase(SimpleTestCase):
         self.assertIn("back_callback = compact_callback_path(parts[4]) if len(parts) > 4 else ''", region_source)
         self.assertIn('cloud_previous_detail_callback(order_id, back_callback)', region_source)
 
-    def test_asset_detail_handler_keeps_long_and_short_callback_parsing(self):
+    def test_asset_detail_handler_keeps_current_callback_parsing(self):
         source = inspect.getsource(register_handlers)
         asset_detail_source = source.split('async def cb_cloud_asset_detail', 1)[1].split("@dp.callback_query(F.data.startswith('cloud:assetaction:'))", 1)[0]
 
-        self.assertIn("@dp.callback_query(F.data.startswith('cloud:assetdetail:'))", source)
+        self.assertNotIn("@dp.callback_query(F.data.startswith('cloud:assetdetail:'))", source)
         self.assertIn("@dp.callback_query(F.data.startswith('cloud:ad:'))", source)
         self.assertIn("@dp.callback_query(F.data.startswith('cad:'))", source)
         self.assertIn("@dp.callback_query(F.data.startswith('csd:'))", source)
         self.assertIn("parts[:2] == ['cloud', 'ad']", asset_detail_source)
-        self.assertIn("parts[:2] == ['cloud', 'assetdetail']", asset_detail_source)
+        self.assertNotIn("parts[:2] == ['cloud', 'assetdetail']", asset_detail_source)
         self.assertIn("item_id = int(raw_item_id)", asset_detail_source)
 
     def test_compact_profile_cloud_order_callback_is_registered(self):
@@ -1570,6 +1560,7 @@ class RetainedIpRenewalUiTestCase(SimpleTestCase):
         self.assertIn("@dp.callback_query(F.data.startswith('poc:'))", source)
         self.assertIn("@dp.callback_query(F.data.startswith('clp:'))", source)
         self.assertIn("@dp.callback_query(F.data.startswith('cloud:rp:'))", source)
+        self.assertNotIn("@dp.callback_query(F.data.startswith('cloud:renewpay:'))", source)
         self.assertIn("await _render_profile_cloud_orders(callback, page=page, order_filter=order_filter)", source)
 
     def test_cloud_order_list_uses_short_back_callback(self):

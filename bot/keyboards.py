@@ -104,7 +104,7 @@ def cloud_previous_detail_callback(order_id: int, back_callback: str | None = No
     if raw_back_callback.startswith('d:') and len(raw_back_callback.encode()) <= 64:
         return raw_back_callback
     back_callback = compact_callback_path(raw_back_callback)
-    if back_callback.startswith(('cloud:detail:', 'cloud:assetdetail:', 'cloud:ad:', 'cad:', 'csd:')):
+    if back_callback.startswith(('cloud:detail:', 'cloud:ad:', 'cad:', 'csd:')):
         return back_callback if len(back_callback.encode()) <= 64 else cloud_detail_callback(order_id, back_callback)
     return cloud_detail_callback(order_id, back_callback)
 
@@ -170,19 +170,6 @@ def compact_callback_path(callback_data: str | None) -> str:
             prefix = 'cad' if parts[2] == 'asset' else 'csd'
             return f'{prefix}:{parts[3]}:{nested}' if nested else f'{prefix}:{parts[3]}'
         return f'cloud:ad:{parts[2]}:{parts[3]}:{nested}' if nested else f'cloud:ad:{parts[2]}:{parts[3]}'
-    if len(parts) >= 3 and parts[:2] == ['cloud', 'assetdetail']:
-        item_kind = 'asset'
-        item_id = parts[2]
-        nested_parts = parts[3:]
-        if len(parts) >= 4 and not str(parts[2]).isdigit():
-            item_kind = parts[2] or 'asset'
-            item_id = parts[3]
-            nested_parts = parts[4:]
-        nested = compact_callback_path(':'.join(nested_parts))
-        if item_kind in {'asset', 'server'}:
-            prefix = 'cad' if item_kind == 'asset' else 'csd'
-            return f'{prefix}:{item_id}:{nested}' if nested else f'{prefix}:{item_id}'
-        return f'cloud:ad:{item_kind}:{item_id}:{nested}' if nested else f'cloud:ad:{item_kind}:{item_id}'
     if len(parts) > 3 and parts[:2] == ['cloud', 'detail']:
         nested = compact_callback_path(':'.join(parts[3:]))
         return f'cloud:detail:{parts[2]}:{nested}' if nested else f'cloud:detail:{parts[2]}'
