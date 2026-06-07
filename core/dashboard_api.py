@@ -299,13 +299,14 @@ def _staff_required(user):
 
 
 def _refresh_dashboard_session(request, session_key: str | None = None):
-    session = getattr(request, 'session', None)
-    if session is not None:
-        session.set_expiry(DASHBOARD_SESSION_IDLE_SECONDS)
     if session_key:
         Session.objects.filter(session_key=session_key, expire_date__gt=timezone.now()).update(
             expire_date=timezone.now() + timezone.timedelta(seconds=DASHBOARD_SESSION_IDLE_SECONDS)
         )
+        return
+    session = getattr(request, 'session', None)
+    if session is not None:
+        session.set_expiry(DASHBOARD_SESSION_IDLE_SECONDS)
 
 
 def _session_token_for_request(request) -> str:

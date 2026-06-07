@@ -82,6 +82,31 @@ class DashboardSessionExpiryTestCase(TestCase):
         self.assertGreater(remaining_seconds, DASHBOARD_SESSION_IDLE_SECONDS - 30)
         self.assertLessEqual(remaining_seconds, DASHBOARD_SESSION_IDLE_SECONDS + 30)
 
+    def test_bearer_dashboard_request_does_not_create_cookie_session(self):
+        from django.contrib.sessions.backends.db import SessionStore
+
+        user = get_user_model().objects.create_user(username='dashboard_bearer_staff', password='pass', is_staff=True)
+        bearer_session = SessionStore()
+        bearer_session['_auth_user_id'] = str(user.pk)
+        bearer_session['_auth_user_backend'] = 'django.contrib.auth.backends.ModelBackend'
+        bearer_session['_auth_user_hash'] = user.get_session_auth_hash()
+        bearer_session.set_expiry(60)
+        bearer_session.save()
+        request = RequestFactory().get('/api/admin/cloud-assets/')
+        SessionMiddleware(lambda req: None).process_request(request)
+        request.user = AnonymousUser()
+        request.META['HTTP_AUTHORIZATION'] = f'Bearer session-{bearer_session.session_key}'
+
+        authenticated = _authenticate_dashboard_request(request)
+
+        self.assertEqual(authenticated, user)
+        self.assertIsNone(request.session.session_key)
+        self.assertFalse(request.session.modified)
+        refreshed = Session.objects.get(session_key=bearer_session.session_key)
+        remaining_seconds = (refreshed.expire_date - timezone.now()).total_seconds()
+        self.assertGreater(remaining_seconds, DASHBOARD_SESSION_IDLE_SECONDS - 30)
+        self.assertLessEqual(remaining_seconds, DASHBOARD_SESSION_IDLE_SECONDS + 30)
+
 
 class DashboardAuthSurfaceTestCase(TestCase):
     def _attach_bearer_session(self, request, user):

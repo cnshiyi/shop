@@ -2871,6 +2871,147 @@ class CloudServerServicesTestCase(TestCase):
         self.assertEqual(len(payload['groups']), 1)
         self.assertEqual(payload['groups'][0]['user_key'], f'user:{tail_user.id}')
 
+    # 功能：重复分组在 compact 分页下不能跨页重复，避免大数据快路径把旧分组排到后续页。
+    def test_cloud_assets_grouped_duplicate_groups_do_not_repeat_across_pages(self):
+        cache.clear()
+        admin = get_user_model().objects.create_user(username='admin_asset_grouped_duplicate_precise', password='x', is_staff=True)
+        shared_user = TelegramUser.objects.create(tg_user_id=992520, username='group_page_duplicate_shared')
+        middle_user = TelegramUser.objects.create(tg_user_id=992522, username='group_page_duplicate_middle')
+        tail_user = TelegramUser.objects.create(tg_user_id=992521, username='group_page_duplicate_tail')
+        for index in range(2):
+            CloudAsset.objects.create(
+                kind=CloudAsset.KIND_SERVER,
+                source=CloudAsset.SOURCE_AWS_SYNC,
+                user=shared_user,
+                provider='aws_lightsail',
+                region_code=self.plan.region_code,
+                region_name=self.plan.region_name,
+                asset_name=f'group-page-duplicate-shared-{index}',
+                public_ip=f'10.79.12.{index}',
+                actual_expires_at=timezone.now() + timezone.timedelta(days=index + 1),
+                status=CloudAsset.STATUS_RUNNING,
+            )
+        CloudAsset.objects.create(
+            kind=CloudAsset.KIND_SERVER,
+            source=CloudAsset.SOURCE_AWS_SYNC,
+            user=middle_user,
+            provider='aws_lightsail',
+            region_code=self.plan.region_code,
+            region_name=self.plan.region_name,
+            asset_name='group-page-duplicate-middle',
+            public_ip='10.79.12.8',
+            actual_expires_at=timezone.now() + timezone.timedelta(days=10),
+            status=CloudAsset.STATUS_RUNNING,
+        )
+        CloudAsset.objects.create(
+            kind=CloudAsset.KIND_SERVER,
+            source=CloudAsset.SOURCE_AWS_SYNC,
+            user=tail_user,
+            provider='aws_lightsail',
+            region_code=self.plan.region_code,
+            region_name=self.plan.region_name,
+            asset_name='group-page-duplicate-tail',
+            public_ip='10.79.12.9',
+            actual_expires_at=timezone.now() + timezone.timedelta(days=30),
+            status=CloudAsset.STATUS_RUNNING,
+        )
+
+        request = self.factory.get('/api/admin/cloud-assets/', {
+            'compact': '1',
+            'grouped': '1',
+            'paginated': '1',
+            'group_by': 'user',
+            'page': '1',
+            'page_size': '2',
+        })
+        self._attach_bearer_session(request, admin)
+        response = cloud_assets_list(request)
+        payload = json.loads(response.content.decode('utf-8'))['data']
+
+        self.assertEqual(response.status_code, 200)
+        page1_keys = [group['user_key'] for group in payload['groups']]
+
+        page2 = self.factory.get('/api/admin/cloud-assets/', {
+            'compact': '1',
+            'grouped': '1',
+            'paginated': '1',
+            'group_by': 'user',
+            'page': '2',
+            'page_size': '2',
+        })
+        self._attach_bearer_session(page2, admin)
+        response2 = cloud_assets_list(page2)
+        payload2 = json.loads(response2.content.decode('utf-8'))['data']
+        page2_keys = [group['user_key'] for group in payload2['groups']]
+
+        self.assertEqual(response2.status_code, 200)
+        self.assertEqual(payload['total'], 3)
+        self.assertEqual(payload['total_pages'], 2)
+        self.assertEqual(page1_keys, [f'user:{shared_user.id}', f'user:{middle_user.id}'])
+        self.assertEqual(page2_keys, [f'user:{tail_user.id}'])
+        self.assertFalse(set(page1_keys) & set(page2_keys))
+
+    # 功能：重复分组的最后一页也必须走有界反向分页，避免百万数据末页回落到超重 group-by 后空页。
+    def test_cloud_assets_grouped_duplicate_groups_reverse_tail_keeps_last_page(self):
+        cache.clear()
+        admin = get_user_model().objects.create_user(username='admin_asset_grouped_duplicate_tail', password='x', is_staff=True)
+        shared_user = TelegramUser.objects.create(tg_user_id=992530, username='group_page_tail_shared')
+        asset_ids = []
+        for index in range(2):
+            asset_ids.append(CloudAsset.objects.create(
+                kind=CloudAsset.KIND_SERVER,
+                source=CloudAsset.SOURCE_AWS_SYNC,
+                user=shared_user,
+                provider='aws_lightsail',
+                region_code=self.plan.region_code,
+                region_name=self.plan.region_name,
+                asset_name=f'group-page-tail-shared-{index}',
+                public_ip=f'10.79.13.{index}',
+                actual_expires_at=timezone.now() + timezone.timedelta(days=index + 1),
+                status=CloudAsset.STATUS_RUNNING,
+            ).id)
+        tail_user = None
+        for index in range(104):
+            user = TelegramUser.objects.create(tg_user_id=992600 + index, username=f'group_page_tail_{index}')
+            tail_user = user
+            asset_ids.append(CloudAsset.objects.create(
+                kind=CloudAsset.KIND_SERVER,
+                source=CloudAsset.SOURCE_AWS_SYNC,
+                user=user,
+                provider='aws_lightsail',
+                region_code=self.plan.region_code,
+                region_name=self.plan.region_name,
+                asset_name=f'group-page-tail-{index}',
+                public_ip=f'10.79.14.{index}',
+                actual_expires_at=timezone.now() + timezone.timedelta(days=10 + index),
+                status=CloudAsset.STATUS_RUNNING,
+            ).id)
+        refresh_cloud_asset_dashboard_snapshots(asset_ids=asset_ids, reason='test', full=False)
+
+        request = self.factory.get('/api/admin/cloud-assets/', {
+            'compact': '1',
+            'grouped': '1',
+            'paginated': '1',
+            'group_by': 'user',
+            'page': '105',
+            'page_size': '1',
+        })
+        self._attach_bearer_session(request, admin)
+        from cloud import api_asset_snapshots
+        with patch('cloud.api_asset_snapshots._dashboard_snapshot_group_keys_from_ordered_rows', return_value=[]), patch(
+            'cloud.api_asset_snapshots._dashboard_snapshot_group_keys_from_reverse_tail',
+            wraps=api_asset_snapshots._dashboard_snapshot_group_keys_from_reverse_tail,
+        ) as reverse_tail:
+            response = cloud_assets_list(request)
+        payload = json.loads(response.content.decode('utf-8'))['data']
+
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(reverse_tail.called)
+        self.assertEqual(payload['total'], 105)
+        self.assertEqual(payload['total_pages'], 105)
+        self.assertEqual(len(payload['groups']), 1)
+        self.assertEqual(payload['groups'][0]['user_key'], f'user:{tail_user.id}')
+
     # 功能：验证分组分页按到期时间排序时，无到期时间的资产组排在最后。
     def test_cloud_assets_grouped_paginated_orders_null_due_groups_last(self):
         cache.clear()

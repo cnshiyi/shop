@@ -654,12 +654,20 @@ def _group_cloud_asset_payloads(items, group_by='telegram_group'):
     return ordered_groups
 
 
-def _dashboard_snapshot_group_keys_from_ordered_rows(queryset, *, group_field: str, group_label: str, start: int, page_size: int):
+def _dashboard_snapshot_group_keys_from_ordered_rows(
+    queryset,
+    *,
+    group_field: str,
+    group_label: str,
+    start: int,
+    page_size: int,
+    duplicate_excess: int = 0,
+):
     target_count = start + page_size
     if target_count <= 0:
         return []
-    fetch_limit = max(target_count * 3, page_size * 25, 500)
-    max_fetch_limit = max(target_count + page_size * 10, 250000)
+    fetch_limit = max(target_count + max(int(duplicate_excess or 0), 0) + page_size * 2, page_size * 25, 500)
+    max_fetch_limit = max(fetch_limit, 250000)
     ordering = ('asset_due_sort_null_rank', 'asset_due_sort_at', group_label, group_field)
     while fetch_limit <= max_fetch_limit:
         rows = (
@@ -733,7 +741,14 @@ def _dashboard_snapshot_group_page(queryset, request, *, group_by='user', sort_b
     start = (page - 1) * page_size
     end = min(start + page_size, total)
     page_keys = []
-    if compact and page == 1:
+    duplicate_excess = 0
+    exact_row_paging_safe = False
+    reverse_row_paging_safe = False
+    if compact:
+        duplicate_excess = max(queryset.count() - total, 0)
+        exact_row_paging_safe = start + (end - start) + duplicate_excess <= 250000
+        reverse_row_paging_safe = duplicate_excess <= 100000
+    if compact and duplicate_excess == 0 and page == 1:
         for fetch_limit in (max(page_size * 25, 500), 2000, 5000):
             candidates = list(
                 queryset
@@ -754,15 +769,16 @@ def _dashboard_snapshot_group_page(queryset, request, *, group_by='user', sort_b
                 break
         if len(page_keys) < page_size:
             page_keys = []
-    if not page_keys and compact and start <= 100000:
+    if not page_keys and compact and exact_row_paging_safe and start <= 100000:
         page_keys = _dashboard_snapshot_group_keys_from_ordered_rows(
             queryset,
             group_field=group_field,
             group_label=group_label,
             start=start,
             page_size=end - start,
+            duplicate_excess=duplicate_excess,
         )
-    if not page_keys and compact and start > max(total // 2, page_size * 100):
+    if not page_keys and compact and reverse_row_paging_safe and start > max(total // 2, page_size * 100):
         page_keys = _dashboard_snapshot_group_keys_from_reverse_tail(
             queryset,
             group_field=group_field,

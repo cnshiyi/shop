@@ -13331,6 +13331,55 @@ UV_CACHE_DIR=/private/tmp/uv-cache-shop uv run python manage.py check
 - 本轮未执行真实云资源创建、关机、删除服务器、释放 IP、换 IP、真实支付、链上广播、生产发布或删除业务数据。
 - 本轮未恢复废弃 runtime app、订单侧到期字段、旧计划快照、旧退款逻辑、旧退款函数名或旧兼容入口。
 - 本轮未打印 Telegram token、Telegram session、TOTP、支付密钥、云厂商密钥、完整代理链接、代理 secret 或登录密码。
+## 2026-06-08 05:11 后台 Bearer 会话与 compact 分组分页修复
+
+### 背景
+
+继续执行自动巡检。`TODO.md` 中显式任务已全部完成，本轮按固定巡检清单先审阅当前未提交改动，确认是一组围绕后台会话续期和代理列表 compact 分组分页的遗留安全补丁，再做最小范围验证与收尾。
+
+### 修复
+
+- `core/dashboard_api.py`
+  - 调整 `_refresh_dashboard_session` 的执行顺序。
+  - Bearer 会话请求命中 `session_key` 时只刷新目标会话有效期，直接返回，不再顺带把匿名 API 请求写成新的 cookie session。
+- `bot/tests.py`
+  - 新增 `test_bearer_dashboard_request_does_not_create_cookie_session`。
+  - 覆盖后台 Bearer 认证请求续期后不生成本地 cookie session，同时原会话 TTL 正常续期。
+- `cloud/api_asset_snapshots.py`
+  - `_dashboard_snapshot_group_keys_from_ordered_rows` 新增 `duplicate_excess` 预算，按行快路径会把重复分组额外行数算入抓取窗口。
+  - compact 首屏快路径仅在不存在重复分组时启用，避免重复分组跨页重复。
+  - compact 深页按行快路径和末页反向 tail 兜底都增加重复量级保护，避免掉回超重 group-by 或返回空页。
+- `cloud/tests.py`
+  - 新增 `test_cloud_assets_grouped_duplicate_groups_do_not_repeat_across_pages`，验证重复分组不会在第 1 页和第 2 页重复出现。
+  - 新增 `test_cloud_assets_grouped_duplicate_groups_reverse_tail_keeps_last_page`，验证末页仍能命中反向 tail 兜底，避免空页。
+
+### 巡检结论
+
+- 后端工作树的 4 个未提交改动属于同一条修复线，可作为单一提交收尾。
+- 前端仓库 `/Users/a399/Desktop/data/vue-shop-admin` 本轮 `git status --short` 为空，没有待避让的本地改动。
+- 红线扫描未发现废弃 runtime app、旧计划快照、旧退款入口或订单侧到期字段回流。
+- 本轮未执行真实浏览器翻页、真实 Telegram 客户端点击、真实云资源操作或真实支付。
+
+### 验证
+
+已通过：
+
+```bash
+UV_CACHE_DIR=/private/tmp/uv-cache-shop uv run python manage.py check
+UV_CACHE_DIR=/private/tmp/uv-cache-shop DJANGO_TEST_SQLITE=1 uv run python manage.py test bot.tests.DashboardSessionExpiryTestCase cloud.tests.CloudServerServicesTestCase.test_cloud_assets_grouped_duplicate_groups_do_not_repeat_across_pages cloud.tests.CloudServerServicesTestCase.test_cloud_assets_grouped_duplicate_groups_reverse_tail_keeps_last_page --settings=shop.settings --verbosity=1
+git diff --check
+```
+
+补充说明：
+
+- SQLite 测试环境仍会输出既有 `db_comment` 告警，这是仓库长期现状，不是本轮回归。
+- 本轮分页专项是逻辑正确性验证，未新增 10 万级以上压测写入；历史大样本目录 `output/playwright/` 继续保留但未纳入提交。
+
+### 后续
+
+- 下一轮继续用本地 50 万/百万级数据复查 Telegram 分组视图深分页与末页场景，确认重复分组修复在真实大样本下不丢组、不串页。
+- 继续关注生命周期计划页冷态 count 的投影化路线，减少计划页冷启动压力。
+
 ## 2026-06-08 04:39 机器人高并发与生命周期计划缓存修复
 
 ### 背景
