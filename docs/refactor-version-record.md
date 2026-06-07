@@ -13452,3 +13452,124 @@ git diff --check
 
 - 继续压测代理列表全标签深分页，重点验证新索引在 Telegram 分组视图下不会丢组或串页。
 - 生命周期计划页冷态 count 仍偏重，后续应推进任务表投影，页面优先读投影。
+## 2026-06-08 05:24 代理列表重复分组末页修复与全标签真实压测
+
+### 背景
+
+继续执行当前会话自动巡检，用户强调代理列表不能只测“全部”，每个标签都要压测和真实打开前端，同时机器人要覆盖多任务高并发。本轮在上一轮未提交补丁基础上继续做实库、真实 HTTP、真实浏览器和聚焦测试。
+
+### 发现的问题
+
+- 后端 `runserver --noreload` 仍跑旧进程时，`risk_status=all` 曾返回空页；重启后确认旧进程问题消失。
+- 重启加载当前代码后，`group_by=telegram_group` 的 `all` 标签最后一页仍失败：数据库/API total 为 `2458992`，最后一页应返回 `12` 组，但 HTTP 返回 `0` 组。
+- 直接调用 `_dashboard_snapshot_group_page()` 复现 MySQL `OperationalError (2013, Lost connection to MySQL server during query timed out)`，根因是重复分组场景下禁用了有界反向尾页快路径，末页回落到超重 `GROUP BY` 深页查询。
+
+### 修复
+
+- `cloud/api_asset_snapshots.py`
+  - 将重复分组下的反向尾页快路径从“一律禁用”改为“重复扩容量不超过 `100000` 时启用”。
+  - 现有 `_dashboard_snapshot_group_keys_from_reverse_tail()` 已按 `duplicate_excess` 扩大候选范围，能在有界扫描内覆盖末页重复分组。
+- `cloud/tests.py`
+  - 新增 `test_cloud_assets_grouped_duplicate_groups_reverse_tail_keeps_last_page`。
+  - 强制跳过正向有界扫描，确认重复分组最后一页会进入反向尾页 helper，并返回最后一组。
+- `core/dashboard_api.py` / `bot/tests.py`
+  - 保留 Bearer session 修复：Bearer 后台请求只刷新 bearer 对应 Session 行，不再创建或修改当前空 cookie session。
+
+### 实库对账
+
+`group_by=telegram_group` 全标签 DB/HTTP 对账通过：
+
+| 标签 | 分组 total | 覆盖页 | 结果 |
+| --- | ---: | --- | --- |
+| all | 2458992 | 1 / 2 / 100 / 5001 / 122950 | 末页 12 组 |
+| normal | 549988 | 1 / 2 / 100 / 5001 / 27500 | 末页 8 组 |
+| due_soon | 100250 | 1 / 2 / 100 / 5001 / 5013 | 末页 10 组 |
+| expired | 100352 | 1 / 2 / 100 / 5001 / 5018 | 末页 12 组 |
+| unattached_ip | 100001 | 1 / 2 / 100 / 5001 | 末页 1 组 |
+| abnormal | 100000 | 1 / 2 / 100 / 5000 | 末页 20 组 |
+| account_disabled | 1109001 | 1 / 2 / 100 / 5001 / 55451 | 末页 1 组 |
+| shutdown_disabled | 100369 | 1 / 2 / 100 / 5001 / 5019 | 末页 9 组 |
+| unbound_user | 100001 | 1 / 2 / 100 / 5001 | 末页 1 组 |
+| unbound_group | 100003 | 1 / 2 / 100 / 5001 | 末页 3 组 |
+| auto_renew_off | 101002 | 1 / 2 / 100 / 5001 / 5051 | 末页 2 组 |
+
+默认 `group_by=user` 全标签 DB/HTTP 对账通过：
+
+| 标签 | 分组 total | 覆盖页 | 结果 |
+| --- | ---: | --- | --- |
+| all | 2489996 | 1 / 2 / 124500 | 末页 16 组 |
+| normal | 549988 | 1 / 2 / 27500 | 末页 8 组 |
+| due_soon | 101250 | 1 / 2 / 5063 | 末页 10 组 |
+| expired | 101752 | 1 / 2 / 5088 | 末页 12 组 |
+| unattached_ip | 100001 | 1 / 2 / 5001 | 末页 1 组 |
+| abnormal | 100000 | 1 / 2 / 5000 | 末页 20 组 |
+| account_disabled | 1145001 | 1 / 2 / 57251 | 末页 1 组 |
+| shutdown_disabled | 100384 | 1 / 2 / 5020 | 末页 4 组 |
+| unbound_user | 100001 | 1 / 2 / 5001 | 末页 1 组 |
+| unbound_group | 100003 | 1 / 2 / 5001 | 末页 3 组 |
+| auto_renew_off | 104548 | 1 / 2 / 5228 | 末页 8 组 |
+
+### 真实页面
+
+使用真实浏览器打开：
+
+- `http://127.0.0.1:5666/admin/cloud-assets`
+- `http://127.0.0.1:5666/admin/tasks/plans`
+
+代理列表逐个点击 11 个标签并等待页面分页总数变更：
+
+| 标签 | API total | 页面 total | 控制台 |
+| --- | ---: | ---: | --- |
+| 运行中 | 549988 | 549988 | 0 error / 0 warning |
+| 即将到期 | 101250 | 101250 | 0 error / 0 warning |
+| 已过期 | 101752 | 101752 | 0 error / 0 warning |
+| 未附加固定IP | 100001 | 100001 | 0 error / 0 warning |
+| 异常/待确认 | 100000 | 100000 | 0 error / 0 warning |
+| 云账号异常 | 1145001 | 1145001 | 0 error / 0 warning |
+| 关机计划关闭 | 100384 | 100384 | 0 error / 0 warning |
+| 未绑定用户 | 100001 | 100001 | 0 error / 0 warning |
+| 未绑定群组 | 100003 | 100003 | 0 error / 0 warning |
+| 续费关闭 | 104548 | 104548 | 0 error / 0 warning |
+| 全部 | 2489996 | 2489996 | 0 error / 0 warning |
+
+计划页真实页面：
+
+- 页面标题：`计划 - Vben Admin Antd`。
+- 关机计划、删除计划、IP 删除计划、IP 删除历史、显示列均可见。
+- 控制台 `0 error / 0 warning`。
+- API 分页元数据：关机计划 `1879990`、服务器删除计划 `2`、服务器删除历史 `20010`、IP 删除计划 `500000`、IP 删除历史 `520010`。
+
+### 机器人
+
+通过：
+
+```bash
+UV_CACHE_DIR=/private/tmp/uv-cache-shop DJANGO_TEST_SQLITE=1 uv run python manage.py test bot.tests.RetainedIpRenewalUiTestCase.test_cloud_background_tasks_keep_high_concurrency_isolated bot.tests.RetainedIpRenewalUiTestCase --settings=shop.settings --verbosity=1
+```
+
+结果：
+
+- `50` 个机器人聚焦测试通过。
+- 覆盖钱包直付创建、订单补付创建、续费后巡检通知多任务并发。
+- 覆盖资产详情、订单详情、续费、换 IP、重装、修改配置和返回链。
+- 覆盖 callback 64 字节限制。
+
+### 验证
+
+已通过：
+
+```bash
+UV_CACHE_DIR=/private/tmp/uv-cache-shop uv run python manage.py check
+UV_CACHE_DIR=/private/tmp/uv-cache-shop uv run python -m py_compile core/dashboard_api.py cloud/api_asset_snapshots.py bot/tests.py cloud/tests.py
+UV_CACHE_DIR=/private/tmp/uv-cache-shop DJANGO_TEST_SQLITE=1 uv run python manage.py test bot.tests.DashboardSessionExpiryTestCase.test_bearer_dashboard_request_does_not_create_cookie_session cloud.tests.CloudServerServicesTestCase.test_cloud_assets_grouped_duplicate_groups_do_not_repeat_across_pages cloud.tests.CloudServerServicesTestCase.test_cloud_assets_grouped_duplicate_groups_reverse_tail_keeps_last_page cloud.tests.CloudServerServicesTestCase.test_cloud_assets_grouped_total_counts_distinct_groups_only cloud.tests.CloudServerServicesTestCase.test_cloud_assets_paginated_uses_true_database_pages --settings=shop.settings --verbosity=1
+git diff --check
+```
+
+一次命令误指定不存在的 `bot.tests.CloudBackgroundTaskConcurrencyTestCase`，已改用真实存在的 `RetainedIpRenewalUiTestCase.test_cloud_background_tasks_keep_high_concurrency_isolated` 重跑通过；该失败是命令错误，不是业务失败。
+
+### 红线
+
+- 本轮未执行真实云资源创建、关机、删除服务器、释放 IP、换 IP、真实支付、链上广播、生产发布或删除业务数据。
+- 本轮未恢复废弃 runtime app、订单侧到期字段、旧计划快照表、旧退款逻辑或旧退款函数名。
+- `core.dashboard_api` 命中是当前后台 API 公共工具模块；`dashboard_snapshots` 命中是当前刷新 helper 命名，不是旧计划快照表。
+- 本轮使用临时后台 session 做真实页面巡检，结束前删除；未打印 token、session、TOTP、支付密钥、云厂商密钥或完整代理链接。
