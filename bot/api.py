@@ -31,13 +31,14 @@ from cloud.lifecycle_plan_queries import (
     completed_unattached_ip_active_queryset,
     ip_delete_history_page_sources,
     ip_delete_plan_counts,
-    paged_queryset,
     unattached_ip_delete_plan_page,
     page_bounds,
     page_meta,
     server_lifecycle_plan_counts,
     server_lifecycle_plan_page,
     server_lifecycle_plan_queryset,
+    server_delete_history_counts,
+    server_delete_history_page_sources,
     server_shutdown_complete_q,
     unattached_ip_asset_q as query_unattached_ip_asset_q,
     unattached_ip_delete_active_queryset,
@@ -310,19 +311,21 @@ def _server_lifecycle_plan_page_items(*, plan_stage: str, page: int, page_size: 
     return [_asset_delete_plan_item_payload(asset, queue_status='scheduled_future', queue_status_label='计划中') for asset in assets]
 
 
-def _server_delete_history_queryset():
-    return CloudServerOrder.objects.select_related('user').filter(status='deleted')
-
-
 def _server_delete_history_page_items(*, page: int, page_size: int, total: int | None = None) -> list[dict]:
-    orders = paged_queryset(
-        _server_delete_history_queryset(),
-        ordering=('-updated_at', '-id'),
+    counts = server_delete_history_counts()
+    sources = server_delete_history_page_sources(
         page=page,
         page_size=page_size,
-        total=total,
+        order_total=counts['server_history_order_count'],
+        asset_total=counts['server_history_asset_count'],
     )
-    return [_shutdown_history_order_payload(order) for order in orders]
+    items = []
+    for source_type, source in sources:
+        if source_type == 'order':
+            items.append(_shutdown_history_order_payload(source))
+        else:
+            items.append(_shutdown_history_asset_payload(source))
+    return items
 
 
 def _unattached_ip_delete_active_queryset():
@@ -2263,6 +2266,49 @@ def _shutdown_history_order_payload(order):
     }
 
 
+def _shutdown_history_asset_payload(asset):
+    user_display_name, username_label = _telegram_user_labels(asset.user)
+    account_name, external_account_id = _cloud_account_labels(asset)
+    executed_at = asset.updated_at or asset.actual_expires_at
+    note = _asset_note_text(asset) or asset.provider_status or '无订单服务器已删除'
+    return {
+        **_plan_item_identity('asset', asset.id, plan_kind='server_history'),
+        'plan_kind': 'server_history',
+        'is_history': True,
+        'order_id': None,
+        'asset_id': asset.id,
+        'order_no': asset.asset_name or asset.instance_id or f'asset-{asset.id}',
+        'ip': asset.public_ip or asset.previous_public_ip or '未分配',
+        'provider': asset.provider,
+        'provider_label': _provider_label(asset.provider),
+        'cloud_account_id': asset.cloud_account_id,
+        'cloud_account_name': account_name,
+        'external_account_id': external_account_id,
+        'account_label': asset.account_label or '',
+        'user_id': asset.user_id,
+        'tg_user_id': getattr(asset.user, 'tg_user_id', None) if asset.user else None,
+        'user_display_name': user_display_name,
+        'username_label': username_label,
+        'is_success': True,
+        'result_label': '成功',
+        'failure_reason': '',
+        'execution_status': _status_label(asset.status, CloudAsset.STATUS_CHOICES) or '服务器已删除',
+        'deletion_source_label': _delete_source_label(note),
+        'source_note': note,
+        'note': note,
+        'display_note': _compact_dashboard_note(note, max_chars=500),
+        'executed_at': _iso(executed_at),
+        'actual_expires_at': _iso(asset.actual_expires_at),
+        'suspend_at': None,
+        'delete_at': _iso(executed_at),
+        'related_path': f'/admin/cloud-assets/{asset.id}',
+        'detail_path': f'/admin/cloud-assets/{asset.id}',
+        'asset_detail_path': f'/admin/cloud-assets/{asset.id}',
+        'order_detail_path': '',
+        'order_link_path': '',
+    }
+
+
 @dashboard_login_required
 @require_GET
 def lifecycle_plans(request):
@@ -2575,7 +2621,8 @@ def lifecycle_plans(request):
     plan_stats = count_snapshot['plan_stats']
     total_counts = count_snapshot['total_counts']
     ip_delete_total_counts = count_snapshot['ip_delete_total_counts']
-    server_history_count = _server_delete_history_queryset().count()
+    server_history_total_counts = server_delete_history_counts()
+    server_history_count = server_history_total_counts['server_history_count']
 
     shutdown_plan_items = [
         decorate_plan_item(item)
@@ -2723,7 +2770,7 @@ def refresh_lifecycle_plan_view(request):
         'loaded_ip_delete_history_count': len(bundle.get('ip_delete_history_items') or []),
         'shutdown_plan_count': total_counts['shutdown_plan_count'],
         'server_delete_count': total_counts['server_delete_count'],
-        'server_history_count': _server_delete_history_queryset().count(),
+        'server_history_count': server_delete_history_counts()['server_history_count'],
         'missing_expiry_count': plan_stats['missing_expiry_count'],
         'unattached_ip_count': plan_stats['unattached_ip_count'],
         'source_asset_count': plan_stats['source_asset_count'],

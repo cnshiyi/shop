@@ -11756,6 +11756,74 @@ SQLite `db_comment` 警告为已知数据库能力差异。
 - 服务器删除历史当前以已删除云订单为主口径；后续应继续把无订单孤儿服务器删除历史并入统一查询层。
 - 150 万资产数据下，计划页和代理列表首屏冷加载仍需继续优化，但必须继续保持翻页和数据库精确对账一致。
 
+## 2026-06-07 23:02 服务器删除历史纳入无订单孤儿资产
+
+### 背景
+
+上一轮补齐了计划页“服务器删除历史记录”，但当时历史总数只按 `CloudServerOrder(status='deleted')` 统计。继续巡检时复查了用户此前提出的孤儿资产风险：未关联订单的已删除服务器如果只存在于 `CloudAsset`，就可能不出现在服务器删除历史里，后续无法从计划页发现和管理。
+
+### 数据库现状
+
+本轮真实库只读统计：
+
+- 已删除云订单：`20009`。
+- 无订单已删除服务器资产：`0`。
+- 无订单已删除未附加 IP 资产：`0`。
+- 当前页面应显示的服务器删除历史总数：`20009`。
+
+虽然当前真实库没有这类孤儿已删除服务器，但代码口径确实需要提前补齐，避免后续同步或人工导入产生不可见历史。
+
+### 修复
+
+- `cloud/lifecycle_plan_queries.py`
+  - 新增 `server_delete_history_order_queryset()`。
+  - 新增 `server_delete_history_asset_queryset()`。
+  - 新增 `server_delete_history_counts()`。
+  - 新增 `server_delete_history_page_sources()`。
+  - 服务器删除历史总数统一为“已删除云订单 + 无订单已删除服务器资产”。
+  - 无订单已删除服务器资产会排除未附加固定 IP 口径，避免和 IP 删除历史混表。
+- `bot/api.py`
+  - 计划页服务器删除历史改为调用查询层。
+  - 新增 `_shutdown_history_asset_payload()`，无订单删除服务器历史行可直接跳转资产详情页。
+  - 刷新接口继续返回统一后的 `server_history_count`。
+- `cloud/tests.py`
+  - 新增 `test_lifecycle_plans_server_history_includes_orphan_deleted_server_asset`。
+  - 验证无订单已删除服务器会进入 `server_history_items`，且不会混入 `ip_delete_history_items`。
+
+### 页面实测
+
+- 实际打开 `/admin/tasks/plans`。
+- 页面标题为“计划”。
+- 页面包含“服务器删除历史记录”。
+- 页面显示 `服务器删除历史记录（已加载 50 / 总 20009）`。
+- 页面总数与数据库预期总数一致。
+- 页面无加载失败、请求失败或异常文案。
+- 控制台 error / warning 均为 0。
+
+### 验证
+
+已通过：
+
+```bash
+UV_CACHE_DIR=/private/tmp/uv-cache-shop DJANGO_TEST_SQLITE=1 uv run python manage.py test cloud.tests.CloudServerServicesTestCase.test_lifecycle_plans_server_history_includes_orphan_deleted_server_asset cloud.tests.CloudServerServicesTestCase.test_lifecycle_plans_returns_server_delete_history_table --settings=shop.settings --verbosity=1
+UV_CACHE_DIR=/private/tmp/uv-cache-shop uv run python -m py_compile bot/api.py cloud/lifecycle_plan_queries.py cloud/tests.py
+UV_CACHE_DIR=/private/tmp/uv-cache-shop uv run python manage.py check
+git diff --check
+```
+
+SQLite `db_comment` 警告为已知数据库能力差异。
+
+### 红线
+
+- 本轮未执行真实云资源创建、关机、删除服务器、释放 IP、真实支付、链上广播、生产发布、删除业务数据或删除测试库。
+- 本轮未打印密钥、私钥、Telegram session、TOTP、支付密钥、云厂商密钥、完整代理链接、代理 secret 或登录密码。
+- 本轮未恢复废弃 runtime app、订单侧到期字段、旧计划快照、旧退款逻辑、旧退款函数名或旧兼容入口。
+
+### 剩余风险
+
+- 下一轮继续做代理列表和计划页深分页真实性对账，重点看翻页 / 跳页是否丢数据或重复。
+- 150 万资产数据下首屏冷加载仍需继续优化，但优化必须保持数据库精确对账一致。
+
 ## 2026-06-07 22:30 代理列表翻页对账与前端图标离线化
 
 ### 数据库与分页对账

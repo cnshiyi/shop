@@ -4,34 +4,38 @@
 
 ## 最近一轮
 
-- 时间：2026-06-07 22:52 CST
-- 状态：完成已删除资产详情敏感字段收敛，并补齐计划页“服务器删除历史记录”独立分页表。
-- 本轮范围：已删除资产详情、计划页关机/删机/IP 删除/IP 历史/服务器删除历史、真实浏览器页面验证、数据库数量对账。
+- 时间：2026-06-07 23:02 CST
+- 状态：完成服务器删除历史口径补强，把无订单已删除服务器资产纳入计划页服务器删除历史查询层。
+- 本轮范围：生命周期计划查询层、服务器删除历史分页、孤儿删除服务器资产回归测试、真实计划页数量对账。
 
 ## 本轮修复
 
-- 后端仓库 `/Users/a399/Desktop/data/shop`：
-  - `cloud/api_assets.py`：删除态 / 终止态资产详情不再返回完整历史公网 IP、`mtproxy_link`、`proxy_links`、备注中的 `tg://proxy`、`socks5://` 或 `secret=`。
-  - `cloud/api_asset_edit.py`：资产详情扩展字段加载后再次执行删除态脱敏，覆盖关联订单、历史订单和 IP 日志。
-  - `bot/api.py`：生命周期计划页新增 `server_history_items`、`server_history_count` 和 `pagination.server_history`，服务器删除历史作为独立分页表返回。
-  - `cloud/tests.py`：新增已删除资产详情脱敏回归测试、服务器删除历史独立分页回归测试。
-- 前端仓库 `/Users/a399/Desktop/data/vue-shop-admin`：
-  - `apps/web-antd/src/api/admin.ts`：补齐服务器删除历史响应类型和请求分页参数。
-  - `apps/web-antd/src/views/dashboard/tasks/plans.vue`：新增“服务器删除历史记录”表格，支持列开关、分页、查看详情。
+- `cloud/lifecycle_plan_queries.py`
+  - 新增服务器删除历史查询层：
+    - `server_delete_history_order_queryset()`
+    - `server_delete_history_asset_queryset()`
+    - `server_delete_history_counts()`
+    - `server_delete_history_page_sources()`
+  - 服务器删除历史总数现在等于已删除云订单数量 + 无订单已删除服务器资产数量。
+  - 无订单已删除服务器资产会排除未附加固定 IP 口径，避免和 IP 删除历史混表。
+- `bot/api.py`
+  - 计划页服务器删除历史改为复用查询层来源。
+  - 新增无订单已删除服务器资产的历史行 payload，详情入口指向资产详情页。
+- `cloud/tests.py`
+  - 新增 `test_lifecycle_plans_server_history_includes_orphan_deleted_server_asset`。
+  - 覆盖无订单已删除服务器必须出现在 `server_history_items`，且不能混入 `ip_delete_history_items`。
 
-## 页面实测
+## 数据库与页面对账
 
-- 实际打开 `/admin/cloud-assets/1500332`：
-  - 页面标题为“代理详情”。
-  - 状态显示已删除。
-  - 页面正文不包含 `tg://proxy`、`socks5://`、`secret=`。
-  - 页面无加载失败 / 请求失败 / 异常文案。
-  - 控制台 error 为 0，warning 为 0。
+- 当前真实库只读统计：
+  - 已删除云订单：20009。
+  - 无订单已删除服务器资产：0。
+  - 预期服务器删除历史总数：20009。
 - 实际打开 `/admin/tasks/plans`：
   - 页面标题为“计划”。
-  - 页面包含关机计划、删除计划、服务器删除历史记录、IP 删除计划、IP 删除历史记录。
-  - 服务器删除历史记录显示“已加载 50 / 总 20009”。
-  - 数据库 `CloudServerOrder(status='deleted')` 数量为 20009，与页面总数一致。
+  - 页面包含“服务器删除历史记录”。
+  - 页面显示 `服务器删除历史记录（已加载 50 / 总 20009）`。
+  - 页面总数与数据库预期总数一致。
   - 页面无加载失败 / 请求失败 / 异常文案。
   - 控制台 error 为 0，warning 为 0。
 
@@ -40,20 +44,19 @@
 本地已通过：
 
 ```bash
-UV_CACHE_DIR=/private/tmp/uv-cache-shop DJANGO_TEST_SQLITE=1 uv run python manage.py test cloud.tests.CloudServerServicesTestCase.test_lifecycle_plans_returns_server_delete_history_table cloud.tests.CloudServerServicesTestCase.test_deleted_cloud_asset_detail_masks_proxy_links_and_history_notes cloud.tests.CloudServerServicesTestCase.test_lifecycle_plans_counts_all_ip_delete_history_beyond_loaded_limit --settings=shop.settings --verbosity=1
-UV_CACHE_DIR=/private/tmp/uv-cache-shop uv run python -m py_compile bot/api.py cloud/api_assets.py cloud/api_asset_edit.py cloud/tests.py
+UV_CACHE_DIR=/private/tmp/uv-cache-shop DJANGO_TEST_SQLITE=1 uv run python manage.py test cloud.tests.CloudServerServicesTestCase.test_lifecycle_plans_server_history_includes_orphan_deleted_server_asset cloud.tests.CloudServerServicesTestCase.test_lifecycle_plans_returns_server_delete_history_table --settings=shop.settings --verbosity=1
+UV_CACHE_DIR=/private/tmp/uv-cache-shop uv run python -m py_compile bot/api.py cloud/lifecycle_plan_queries.py cloud/tests.py
 UV_CACHE_DIR=/private/tmp/uv-cache-shop uv run python manage.py check
-/Users/a399/.homebrew/bin/pnpm --filter @vben/web-antd typecheck
 git diff --check
-git -C /Users/a399/Desktop/data/vue-shop-admin diff --check
 ```
 
 SQLite `db_comment` 警告为已知数据库能力差异，不影响本轮结果。
 
-## 生命周期真机覆盖
+## 清理
 
-- `docs/real-machine-test-report.md` 已记录此前用户授权下的真实创建服务器、关机、删除服务器、固定 IP 释放、机器人点击和支付流程测试，资源 ID、公网 IP、代理链接和密钥均已脱敏。
-- 本轮未新增真实云资源创建、关机、删机或释放 IP；本轮重点是修复历史展示面和计划页缺表问题。
+- 本轮使用临时后台账号 `codex_ui_tester` 做页面验证，已删除。
+- 本轮启动本地 Django `runserver` 做页面验证，已停止。
+- 本轮 Playwright 浏览器、`.playwright-cli/` 和临时登录态文件已清理。
 
 ## 红线
 
@@ -64,5 +67,5 @@ SQLite `db_comment` 警告为已知数据库能力差异，不影响本轮结果
 ## 剩余风险与下一轮
 
 - 继续执行不少于 4 小时的自动巡检目标。
-- 计划页服务器删除历史当前按已删除云订单分页；后续应继续把无订单孤儿服务器删除历史并入统一查询层，避免口径再次分叉。
-- 继续关注 150 万资产下计划页首屏和代理列表首屏冷加载性能，同时保持翻页与数据库精确对账一致。
+- 下一轮继续做代理列表和计划页深分页真实性对账，重点验证翻页 / 跳页不丢数据、不重复数据。
+- 继续关注 150 万资产数据下首屏冷加载性能，优化时必须保持数据库精确对账一致。

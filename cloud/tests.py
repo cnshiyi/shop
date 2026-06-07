@@ -7830,6 +7830,66 @@ class CloudServerServicesTestCase(TestCase):
         self.assertGreaterEqual(data['pagination']['server_history']['total'], 3)
         self.assertNotEqual(row['plan_kind'], CloudLifecyclePlanNote.PLAN_KIND_UNATTACHED_IP_DELETE)
 
+    # 功能：验证无订单已删除服务器也进入服务器删除历史，避免成为计划页不可见的孤儿资产。
+    def test_lifecycle_plans_server_history_includes_orphan_deleted_server_asset(self):
+        CloudServerOrder.objects.create(
+            order_no='LIFECYCLE-SERVER-HISTORY-ORDER',
+            user=self.user,
+            plan=self.plan,
+            provider=self.plan.provider,
+            region_code=self.plan.region_code,
+            region_name=self.plan.region_name,
+            plan_name=self.plan.plan_name,
+            quantity=1,
+            currency='USDT',
+            total_amount='19.00',
+            pay_amount='19.00',
+            status='deleted',
+            public_ip='5.5.9.20',
+            previous_public_ip='5.5.9.20',
+            delete_at=timezone.now() - timezone.timedelta(hours=1),
+            provision_note='执行内容：实例已删除；删除来源：到期自动删除',
+        )
+        orphan_asset = CloudAsset.objects.create(
+            kind=CloudAsset.KIND_SERVER,
+            source=CloudAsset.SOURCE_AWS_SYNC,
+            user=self.user,
+            provider='aws_lightsail',
+            region_code=self.plan.region_code,
+            region_name=self.plan.region_name,
+            asset_name='orphan-deleted-server-history',
+            provider_resource_id='arn:aws:lightsail:ap-southeast-1:123456789012:Instance/orphan-deleted-server-history',
+            previous_public_ip='5.5.9.21',
+            status=CloudAsset.STATUS_DELETED,
+            provider_status='已删除',
+            note='无订单服务器已删除，应该进入服务器删除历史',
+            is_active=False,
+            actual_expires_at=timezone.now() - timezone.timedelta(days=1),
+        )
+        staff_user = get_user_model().objects.create_user(username='staff_lifecycle_orphan_server_history', password='x', is_staff=True)
+        request = RequestFactory().get('/api/admin/tasks/plans/', {
+            'compact': '1',
+            'fields': 'basic,execution,notes',
+            'limit': '20',
+            'refresh': '1',
+            'server_history_page_size': '20',
+        })
+        self._attach_bearer_session(request, staff_user)
+
+        response = lifecycle_plans(request)
+
+        self.assertEqual(response.status_code, 200)
+        data = json.loads(response.content)['data']
+        asset_rows = [
+            item for item in data['server_history_items']
+            if item.get('source_kind') == 'asset' and item.get('asset_id') == orphan_asset.id
+        ]
+        self.assertEqual(len(asset_rows), 1)
+        self.assertGreaterEqual(data['server_history_count'], 2)
+        self.assertEqual(asset_rows[0]['plan_kind'], 'server_history')
+        self.assertEqual(asset_rows[0]['detail_path'], f'/admin/cloud-assets/{orphan_asset.id}')
+        self.assertFalse(any(item.get('asset_id') == orphan_asset.id for item in data['ip_delete_history_items']))
+
     # 功能：验证计划页全量统计随刷新进入缓存，普通加载不重复扫全库。
     def test_lifecycle_plans_reuses_cached_count_snapshot_after_refresh(self):
         import bot.api as bot_api

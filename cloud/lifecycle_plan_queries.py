@@ -7,7 +7,7 @@ from __future__ import annotations
 
 from django.db.models import Q
 
-from cloud.models import CloudAsset, CloudIpLog
+from cloud.models import CloudAsset, CloudIpLog, CloudServerOrder
 from core.cloud_accounts import cloud_account_label_variants
 from core.models import CloudAccountConfig
 
@@ -132,6 +132,64 @@ def server_lifecycle_plan_page(*, plan_stage: str, page: int, page_size: int, to
     else:
         queryset = queryset.filter(server_shutdown_complete_q())
     return paged_queryset(queryset, ordering=('actual_expires_at', 'id'), page=page, page_size=page_size, total=total)
+
+
+def server_delete_history_order_queryset():
+    return CloudServerOrder.objects.select_related('user').filter(status='deleted')
+
+
+def server_delete_history_asset_queryset():
+    return (
+        CloudAsset.objects.select_related('user', 'cloud_account')
+        .filter(kind=CloudAsset.KIND_SERVER, order__isnull=True)
+        .filter(status__in=[CloudAsset.STATUS_DELETED, CloudAsset.STATUS_TERMINATED])
+        .exclude(broad_unattached_ip_asset_q())
+    )
+
+
+def server_delete_history_counts() -> dict[str, int]:
+    order_count = server_delete_history_order_queryset().count()
+    asset_count = server_delete_history_asset_queryset().count()
+    return {
+        'server_history_asset_count': asset_count,
+        'server_history_count': order_count + asset_count,
+        'server_history_order_count': order_count,
+    }
+
+
+def server_delete_history_page_sources(
+    *,
+    page: int,
+    page_size: int,
+    order_total: int | None = None,
+    asset_total: int | None = None,
+) -> list[tuple[str, object]]:
+    start, _end = page_bounds(page, page_size)
+    items: list[tuple[str, object]] = []
+    orders = server_delete_history_order_queryset()
+    if order_total is None:
+        order_total = orders.count()
+    if start < order_total:
+        order_rows = paged_queryset(
+            orders,
+            ordering=('-updated_at', '-id'),
+            page=page,
+            page_size=page_size,
+            total=order_total,
+        )
+        items.extend(('order', order) for order in order_rows)
+    remaining = page_size - len(items)
+    if remaining <= 0:
+        return items
+
+    asset_start = max(start - order_total, 0)
+    assets = server_delete_history_asset_queryset().order_by('-updated_at', '-id')
+    if asset_total is None:
+        asset_total = assets.count()
+    if asset_start < asset_total:
+        asset_end = min(asset_start + remaining, asset_total)
+        items.extend(('asset', asset) for asset in assets[asset_start:asset_end])
+    return items
 
 
 def unattached_ip_deleted_or_missing_q():
