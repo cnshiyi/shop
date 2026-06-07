@@ -14561,3 +14561,89 @@ rg -n "service_expires_at|actual_expires_at.*CloudServerOrder|CloudServerOrder.*
 - 未发现需要修改代码的问题。
 - 仅更新 `docs/auto-optimization-latest.md` 和 `docs/refactor-version-record.md` 记录巡检结果。
 - 下一轮继续做代理列表深页/跳页数据对账，尤其是 IP 视图各风险标签第 2 页、深页、末页是否与数据库精确结果一致。
+
+## 2026-06-08 07:14 机器人并发隔离与 12 万分组深页对账
+
+### 背景
+
+继续执行自动化固定巡检清单。`TODO.md` 已无未完成项，因此本轮不做新代码修复，只对当前未提交的机器人并发测试增量和代理列表深分页核心 helper 做可重复验证。
+
+### Git 与工作区
+
+- 后端 `git status --short` 显示 `bot/tests.py` 存在未提交改动。
+- 前端仓库 `/Users/a399/Desktop/data/vue-shop-admin` 当前工作区干净。
+- 本轮未覆盖或改写 `bot/tests.py`，避免干扰现有本地增量。
+
+### 测试
+
+执行：
+
+```bash
+UV_CACHE_DIR=/private/tmp/uv-cache-shop DJANGO_TEST_SQLITE=1 uv run python manage.py test bot.tests.RetainedIpRenewalUiTestCase.test_cloud_background_tasks_keep_bulk_concurrency_isolated --settings=shop.settings --verbosity=1
+```
+
+结果：
+
+- `1` 个聚焦测试通过。
+- 覆盖 `20` 组后台钱包直付、`20` 组后台钱包补付、`20` 组续费后检查并发。
+- 日志中各任务的 `chat_id`、`user_id`、`order_id`、数量和任务数未串上下文。
+
+### 12 万量级分页对账
+
+由于当前沙箱禁止访问 `127.0.0.1:3306`，无法连接本地 MySQL 做真实库只读审计。本轮改用独立临时 SQLite 审计库进行可重复大数据验证。
+
+执行：
+
+```bash
+DB_ENGINE=sqlite SQLITE_NAME=/private/tmp/shop-automation-audit.sqlite3 UV_CACHE_DIR=/private/tmp/uv-cache-shop uv run python manage.py migrate --settings=shop.settings --noinput
+DB_ENGINE=sqlite SQLITE_NAME=/private/tmp/shop-automation-audit.sqlite3 UV_CACHE_DIR=/private/tmp/uv-cache-shop uv run python manage.py shell --settings=shop.settings -c \"...构造 120005 条 CloudAsset/CloudAssetDashboardSnapshot，并对 _dashboard_snapshot_group_keys_from_ordered_rows 做 start=120000/page_size=3 精确对账...\"
+```
+
+结果：
+
+- 临时审计库成功迁移。
+- 构造 `120005` 条 `CloudAsset` 和 `120005` 条 `CloudAssetDashboardSnapshot`。
+- 代理列表分组深页 helper 对账结果：
+  - `expected=['user:120000', 'user:120001', 'user:120002']`
+  - `actual=['user:120000', 'user:120001', 'user:120002']`
+  - `match=True`
+- 说明在 `duplicate_excess=0` 的 12 万深页场景下，正向有界分页 helper 没有丢组、重组或顺序漂移。
+
+### 红线扫描
+
+执行：
+
+```bash
+rg -n "service_expires_at|actual_expires_at.*CloudServerOrder|CloudServerOrder.*actual_expires_at|plan snapshot|snapshot table|old refund|refund_legacy|refund_old|legacy_refund|accounts\\.|finance\\.|mall\\.|monitoring\\.|dashboard_api\\.|biz\\." cloud bot orders core shop -g '!**/migrations/**'
+```
+
+结果：
+
+- 命中项仍是 Telegram 登录账号代码、测试桩和 `CloudServerOrder.ip_recycle_at` 同步语句。
+- 未发现订单侧到期字段回流、旧计划快照、旧退款入口或废弃 runtime app 回流。
+
+### 验证
+
+基础检查通过：
+
+```bash
+UV_CACHE_DIR=/private/tmp/uv-cache-shop uv run python manage.py check
+git diff --check
+```
+
+说明：
+
+- 临时 SQLite 迁移输出的 `db_comment` warnings 仍是已知测试噪声。
+- 本轮没有执行浏览器前端翻页，因为当前环境无法同时访问受限本地 MySQL 数据源。
+
+### 红线
+
+- 本轮未执行真实云资源创建、关机、删除服务器、释放 IP、换 IP、真实支付、链上广播、生产发布或删除业务数据。
+- 本轮未打印密钥、Telegram session、支付密钥、云厂商密钥或完整代理链接。
+- 临时审计文件保留在 `/private/tmp/shop-automation-audit.sqlite3`。
+
+### 结果
+
+- 未发现需要修改代码的问题。
+- 仅更新 `docs/auto-optimization-latest.md`、`docs/refactor-version-record.md` 和自动化记忆。
+- 下一轮优先在可访问真实数据源的环境继续做代理列表 HTTP/前端深页与末页一致性验证，补上浏览器实测链路。
