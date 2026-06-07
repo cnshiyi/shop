@@ -4,59 +4,64 @@
 
 ## 最近一轮
 
-- 时间：2026-06-07 23:02 CST
-- 状态：完成服务器删除历史口径补强，把无订单已删除服务器资产纳入计划页服务器删除历史查询层。
-- 本轮范围：生命周期计划查询层、服务器删除历史分页、孤儿删除服务器资产回归测试、真实计划页数量对账。
+- 时间：2026-06-08 00:10 CST
+- 状态：完成 IP 删除历史混合来源分页排序修复，避免历史页先吐尽日志再补资产。
+- 本轮范围：生命周期计划查询层、IP 删除历史分页契约、跨来源顺序回归测试、10 万量级只读压测。
 
 ## 本轮修复
 
 - `cloud/lifecycle_plan_queries.py`
-  - 新增服务器删除历史查询层：
-    - `server_delete_history_order_queryset()`
-    - `server_delete_history_asset_queryset()`
-    - `server_delete_history_counts()`
-    - `server_delete_history_page_sources()`
-  - 服务器删除历史总数现在等于已删除云订单数量 + 无订单已删除服务器资产数量。
-  - 无订单已删除服务器资产会排除未附加固定 IP 口径，避免和 IP 删除历史混表。
-- `bot/api.py`
-  - 计划页服务器删除历史改为复用查询层来源。
-  - 新增无订单已删除服务器资产的历史行 payload，详情入口指向资产详情页。
+  - `ip_delete_history_page_sources()` 改为按统一时间轴合并三类来源：
+    - `CloudIpLog` 历史日志按 `created_at desc, id desc`
+    - 已删除未附加 IP 资产按 `updated_at desc, id desc`
+    - 完成态保留 IP 资产按 `updated_at desc, id desc`
+  - 不再按“先日志、再历史资产、最后完成态资产”的来源顺序硬拼页，避免首页、跨页和深分页错序。
+  - 使用分块拉取 + 小顶堆归并，只读取当前分页窗口需要的区间。
 - `cloud/tests.py`
-  - 新增 `test_lifecycle_plans_server_history_includes_orphan_deleted_server_asset`。
-  - 覆盖无订单已删除服务器必须出现在 `server_history_items`，且不能混入 `ip_delete_history_items`。
+  - 新增 `test_lifecycle_plans_ip_delete_history_mixes_logs_and_assets_by_time`。
+  - 覆盖日志、已删除资产、完成态保留 IP 资产交错时间时，`ip_delete_history_page=1/2` 必须保持统一时间轴顺序。
 
-## 数据库与页面对账
+## 发现
 
-- 当前真实库只读统计：
-  - 已删除云订单：20009。
-  - 无订单已删除服务器资产：0。
-  - 预期服务器删除历史总数：20009。
-- 实际打开 `/admin/tasks/plans`：
-  - 页面标题为“计划”。
-  - 页面包含“服务器删除历史记录”。
-  - 页面显示 `服务器删除历史记录（已加载 50 / 总 20009）`。
-  - 页面总数与数据库预期总数一致。
-  - 页面无加载失败 / 请求失败 / 异常文案。
-  - 控制台 error 为 0，warning 为 0。
+- 修复前的 `ip_delete_history_page_sources()` 先分页日志，再分页历史资产，最后才补完成态保留 IP 资产。
+- 一旦资产或完成态保留 IP 的 `updated_at` 新于部分日志，IP 删除历史就会出现：
+  - 首屏顺序错误。
+  - 跨页页边界错误。
+  - 深分页和真实执行时间轴不一致。
+
+## 压测
+
+- 只读合成压测规模：`100000` 条混合历史源
+  - `CloudIpLog` 40000
+  - 已删除未附加 IP 资产 30000
+  - 完成态保留 IP 资产 30000
+- 实测页耗时：
+  - `page=1 size=50`：`0.12 ms`
+  - `page=2 size=50`：`0.07 ms`
+  - `page=1000 size=50`：`20.29 ms`
+  - `page=2000 size=50`：`38.00 ms`
+- 结果：统一时间轴归并在 10 万量级合成源下仍可稳定返回整页，无重复、无丢页。
 
 ## 验证
 
 本地已通过：
 
 ```bash
-UV_CACHE_DIR=/private/tmp/uv-cache-shop DJANGO_TEST_SQLITE=1 uv run python manage.py test cloud.tests.CloudServerServicesTestCase.test_lifecycle_plans_server_history_includes_orphan_deleted_server_asset cloud.tests.CloudServerServicesTestCase.test_lifecycle_plans_returns_server_delete_history_table --settings=shop.settings --verbosity=1
-UV_CACHE_DIR=/private/tmp/uv-cache-shop uv run python -m py_compile bot/api.py cloud/lifecycle_plan_queries.py cloud/tests.py
+UV_CACHE_DIR=/private/tmp/uv-cache-shop DJANGO_TEST_SQLITE=1 uv run python manage.py test cloud.tests.CloudServerServicesTestCase.test_lifecycle_plans_ip_delete_history_mixes_logs_and_assets_by_time cloud.tests.CloudServerServicesTestCase.test_lifecycle_plans_ip_delete_history_pagination_contract cloud.tests.CloudServerServicesTestCase.test_lifecycle_plans_server_history_mixes_orders_and_assets_by_updated_at cloud.tests.CloudServerServicesTestCase.test_lifecycle_plans_server_history_includes_orphan_deleted_server_asset cloud.tests.CloudServerServicesTestCase.test_lifecycle_plans_returns_server_delete_history_table --settings=shop.settings --verbosity=1
+UV_CACHE_DIR=/private/tmp/uv-cache-shop uv run python -m py_compile cloud/lifecycle_plan_queries.py cloud/tests.py
 UV_CACHE_DIR=/private/tmp/uv-cache-shop uv run python manage.py check
+DB_ENGINE=sqlite SQLITE_NAME=:memory: UV_CACHE_DIR=/private/tmp/uv-cache-shop uv run python - <<'PY'
+# 10 万量级只读合成压测，补丁 cloud.lifecycle_plan_queries.ip_delete_history_page_sources 的三源归并分页
+PY
 git diff --check
 ```
 
 SQLite `db_comment` 警告为已知数据库能力差异，不影响本轮结果。
 
-## 清理
+## 前端与页面验证
 
-- 本轮使用临时后台账号 `codex_ui_tester` 做页面验证，已删除。
-- 本轮启动本地 Django `runserver` 做页面验证，已停止。
-- 本轮 Playwright 浏览器、`.playwright-cli/` 和临时登录态文件已清理。
+- 前端仓库 `/Users/a399/Desktop/data/vue-shop-admin` 本轮 `git status --short` 为空，无新增改动。
+- 本轮未重跑浏览器页面点击；当前沙箱对本地端口监听仍有限制，上一轮记录的 `/admin/tasks/plans` 真页验证阻塞未解除。
 
 ## 红线
 
@@ -66,6 +71,5 @@ SQLite `db_comment` 警告为已知数据库能力差异，不影响本轮结果
 
 ## 剩余风险与下一轮
 
-- 继续执行不少于 4 小时的自动巡检目标。
-- 下一轮继续做代理列表和计划页深分页真实性对账，重点验证翻页 / 跳页不丢数据、不重复数据。
-- 继续关注 150 万资产数据下首屏冷加载性能，优化时必须保持数据库精确对账一致。
+- 计划页历史查询层现在有两处相似的堆归并逻辑；后续可考虑抽公共 helper，但这不属于本轮最小修复范围。
+- 下一轮优先继续审计计划页和代理列表深分页真页对账；如沙箱端口限制仍在，只能继续走 API 级和只读压测验证。

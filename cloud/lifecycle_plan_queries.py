@@ -5,6 +5,8 @@
 
 from __future__ import annotations
 
+import heapq
+
 from django.db.models import Q
 
 from cloud.models import CloudAsset, CloudIpLog, CloudServerOrder
@@ -164,31 +166,64 @@ def server_delete_history_page_sources(
     order_total: int | None = None,
     asset_total: int | None = None,
 ) -> list[tuple[str, object]]:
-    start, _end = page_bounds(page, page_size)
-    items: list[tuple[str, object]] = []
-    orders = server_delete_history_order_queryset()
+    start, end = page_bounds(page, page_size)
+    orders = server_delete_history_order_queryset().order_by('-updated_at', '-id')
+    assets = server_delete_history_asset_queryset().order_by('-updated_at', '-id')
     if order_total is None:
         order_total = orders.count()
-    if start < order_total:
-        order_rows = paged_queryset(
-            orders,
-            ordering=('-updated_at', '-id'),
-            page=page,
-            page_size=page_size,
-            total=order_total,
-        )
-        items.extend(('order', order) for order in order_rows)
-    remaining = page_size - len(items)
-    if remaining <= 0:
-        return items
-
-    asset_start = max(start - order_total, 0)
-    assets = server_delete_history_asset_queryset().order_by('-updated_at', '-id')
     if asset_total is None:
         asset_total = assets.count()
-    if asset_start < asset_total:
-        asset_end = min(asset_start + remaining, asset_total)
-        items.extend(('asset', asset) for asset in assets[asset_start:asset_end])
+    total = order_total + asset_total
+    if total <= 0 or start >= total:
+        return []
+
+    chunk_size = max(page_size * 4, 50)
+    source_specs = [
+        ('order', orders, order_total),
+        ('asset', assets, asset_total),
+    ]
+    source_state = {}
+    heap: list[tuple[object, int, str, object]] = []
+
+    def history_sort_key(item) -> tuple[float, int]:
+        updated_at = getattr(item, 'updated_at', None)
+        updated_at_ts = updated_at.timestamp() if updated_at is not None else 0.0
+        return (-updated_at_ts, -int(getattr(item, 'id', 0) or 0))
+
+    def refill(kind: str):
+        state = source_state[kind]
+        if state['buffer'] or state['offset'] >= state['total']:
+            return
+        batch_end = min(state['offset'] + chunk_size, state['total'])
+        state['buffer'] = list(state['queryset'][state['offset']:batch_end])
+        state['offset'] = batch_end
+        if state['buffer']:
+            first = state['buffer'].pop(0)
+            heapq.heappush(heap, (history_sort_key(first), state['priority'], kind, first))
+
+    for priority, (kind, queryset, source_total) in enumerate(source_specs):
+        source_state[kind] = {
+            'queryset': queryset,
+            'total': source_total,
+            'offset': 0,
+            'buffer': [],
+            'priority': priority,
+        }
+        refill(kind)
+
+    items: list[tuple[str, object]] = []
+    index = 0
+    while heap and index < end:
+        _sort_key, _priority, kind, item = heapq.heappop(heap)
+        if index >= start:
+            items.append((kind, item))
+        index += 1
+        state = source_state[kind]
+        if state['buffer']:
+            next_item = state['buffer'].pop(0)
+            heapq.heappush(heap, (history_sort_key(next_item), state['priority'], kind, next_item))
+        else:
+            refill(kind)
     return items
 
 
@@ -301,38 +336,67 @@ def ip_delete_history_page_sources(
     completed_total: int | None = None,
 ) -> list[tuple[str, object]]:
     start, end = page_bounds(page, page_size)
-    items: list[tuple[str, object]] = []
-    history_logs = CloudIpLog.objects.filter(unattached_ip_delete_history_q())
+    history_logs = CloudIpLog.objects.filter(unattached_ip_delete_history_q()).select_related('asset', 'order', 'user').order_by('-created_at', '-id')
+    history_assets = unattached_ip_delete_history_asset_queryset().order_by('-updated_at', '-id')
+    completed_assets = completed_unattached_ip_active_queryset().order_by('-updated_at', '-id')
     if log_total is None:
         log_total = history_logs.count()
-    if start < log_total and len(items) < page_size:
-        traces = paged_queryset(
-            history_logs.select_related('asset', 'order', 'user'),
-            ordering=('-id',),
-            page=page,
-            page_size=page_size,
-            total=log_total,
-        )
-        items.extend(('log', trace) for trace in traces)
-
-    remaining = page_size - len(items)
-    if remaining <= 0:
-        return items
-
-    asset_start = max(start - log_total, 0)
-    history_assets = unattached_ip_delete_history_asset_queryset().order_by('-updated_at', '-id')
     if asset_total is None:
         asset_total = history_assets.count()
-    if asset_start < asset_total:
-        asset_end = min(asset_start + remaining, asset_total)
-        items.extend(('asset', asset) for asset in history_assets[asset_start:asset_end])
-        remaining = page_size - len(items)
-    if remaining <= 0:
-        return items
+    if completed_total is None:
+        completed_total = completed_assets.count()
+    total = log_total + asset_total + completed_total
+    if total <= 0 or start >= total:
+        return []
 
-    completed_start = max(start - log_total - asset_total, 0)
-    if completed_total is not None and completed_start >= completed_total:
-        return items
-    completed_assets = completed_unattached_ip_active_queryset().order_by('-updated_at', '-id')
-    items.extend(('asset', asset) for asset in completed_assets[completed_start:completed_start + remaining])
+    chunk_size = max(page_size * 4, 50)
+    source_specs = [
+        ('log', history_logs, log_total, lambda item: getattr(item, 'created_at', None)),
+        ('asset', history_assets, asset_total, lambda item: getattr(item, 'updated_at', None)),
+        ('asset', completed_assets, completed_total, lambda item: getattr(item, 'updated_at', None)),
+    ]
+    source_state = {}
+    heap: list[tuple[object, int, str, object]] = []
+
+    def history_sort_key(item, time_getter) -> tuple[float, int]:
+        timestamp = time_getter(item)
+        ts_value = timestamp.timestamp() if timestamp is not None else 0.0
+        return (-ts_value, -int(getattr(item, 'id', 0) or 0))
+
+    def refill(state_key: int):
+        state = source_state[state_key]
+        if state['buffer'] or state['offset'] >= state['total']:
+            return
+        batch_end = min(state['offset'] + chunk_size, state['total'])
+        state['buffer'] = list(state['queryset'][state['offset']:batch_end])
+        state['offset'] = batch_end
+        if state['buffer']:
+            first = state['buffer'].pop(0)
+            heapq.heappush(heap, (history_sort_key(first, state['time_getter']), state['priority'], state_key, first))
+
+    for priority, (kind, queryset, source_total, time_getter) in enumerate(source_specs):
+        source_state[priority] = {
+            'kind': kind,
+            'queryset': queryset,
+            'total': source_total,
+            'offset': 0,
+            'buffer': [],
+            'priority': priority,
+            'time_getter': time_getter,
+        }
+        refill(priority)
+
+    items: list[tuple[str, object]] = []
+    index = 0
+    while heap and index < end:
+        _sort_key, _priority, state_key, item = heapq.heappop(heap)
+        state = source_state[state_key]
+        if index >= start:
+            items.append((state['kind'], item))
+        index += 1
+        if state['buffer']:
+            next_item = state['buffer'].pop(0)
+            heapq.heappush(heap, (history_sort_key(next_item, state['time_getter']), state['priority'], state_key, next_item))
+        else:
+            refill(state_key)
     return items

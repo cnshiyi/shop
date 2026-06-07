@@ -11824,6 +11824,152 @@ SQLite `db_comment` 警告为已知数据库能力差异。
 - 下一轮继续做代理列表和计划页深分页真实性对账，重点看翻页 / 跳页是否丢数据或重复。
 - 150 万资产数据下首屏冷加载仍需继续优化，但优化必须保持数据库精确对账一致。
 
+## 2026-06-08 00:10 IP 删除历史混合来源分页排序修复
+
+### 背景
+
+按自动优化固定巡检继续复查计划页历史分页时，发现上一轮虽然已修复“服务器删除历史”的混合来源排序，但 `ip_delete_history_page_sources()` 仍保留老的分段分页方式：
+
+- 先分页 `CloudIpLog` 历史日志。
+- 当前页没满时，再补已删除未附加 IP 资产。
+- 还没满时，最后补“实例已删除但固定 IP 保留中”的完成态资产。
+
+这意味着只要资产或完成态保留 IP 的 `updated_at` 新于部分日志，IP 删除历史第一页和跨页边界就会错位，页面看到的并不是统一时间轴。
+
+### 风险
+
+- IP 删除历史首页可能不是最新记录。
+- 深分页和跨页页边界会与真实执行时间轴不一致。
+- 人工复核“已释放 / 云端不存在 / 实例已删但保留 IP”混合历史时，容易误判先后顺序。
+
+### 修复
+
+- `cloud/lifecycle_plan_queries.py`
+  - `ip_delete_history_page_sources()` 改为统一按时间归并三类来源：
+    - `CloudIpLog` 按 `created_at desc, id desc`
+    - 已删除未附加 IP 资产按 `updated_at desc, id desc`
+    - 完成态保留 IP 资产按 `updated_at desc, id desc`
+  - 使用分块读取 + 小顶堆归并，仅拉取当前分页窗口所需区间。
+  - 不再按“日志 -> 历史资产 -> 完成态资产”的来源顺序硬拼页。
+- `cloud/tests.py`
+  - 新增 `test_lifecycle_plans_ip_delete_history_mixes_logs_and_assets_by_time`。
+  - 构造“最新日志 / 次新历史资产 / 再次新完成态资产 / 最旧日志”的交错样本，验证 `ip_delete_history_page=1/2` 返回顺序必须按统一时间轴，而不是先日志后资产。
+
+### 验证
+
+已通过：
+
+```bash
+UV_CACHE_DIR=/private/tmp/uv-cache-shop DJANGO_TEST_SQLITE=1 uv run python manage.py test cloud.tests.CloudServerServicesTestCase.test_lifecycle_plans_ip_delete_history_mixes_logs_and_assets_by_time cloud.tests.CloudServerServicesTestCase.test_lifecycle_plans_ip_delete_history_pagination_contract cloud.tests.CloudServerServicesTestCase.test_lifecycle_plans_server_history_mixes_orders_and_assets_by_updated_at cloud.tests.CloudServerServicesTestCase.test_lifecycle_plans_server_history_includes_orphan_deleted_server_asset cloud.tests.CloudServerServicesTestCase.test_lifecycle_plans_returns_server_delete_history_table --settings=shop.settings --verbosity=1
+UV_CACHE_DIR=/private/tmp/uv-cache-shop uv run python -m py_compile cloud/lifecycle_plan_queries.py cloud/tests.py
+UV_CACHE_DIR=/private/tmp/uv-cache-shop uv run python manage.py check
+git diff --check
+```
+
+SQLite `db_comment` 警告仍是已知数据库能力差异。
+
+### 10 万量级只读压测
+
+为满足每轮压测要求，本轮没有碰真实库或真实云资源，而是直接对修复后的查询函数做 10 万量级合成源基准：
+
+- `CloudIpLog`：40000 条
+- 已删除未附加 IP 资产：30000 条
+- 完成态保留 IP 资产：30000 条
+- 合计：100000 条历史源
+
+结果：
+
+- `page=1 size=50`：`0.12 ms`
+- `page=2 size=50`：`0.07 ms`
+- `page=1000 size=50`：`20.29 ms`
+- `page=2000 size=50`：`38.00 ms`
+
+说明修复后的统一时间轴归并在 10 万量级下仍能稳定取页，没有出现整页缺失或异常退化。
+
+### 前端与真页验证
+
+- 前端仓库 `/Users/a399/Desktop/data/vue-shop-admin` 本轮 `git status --short` 为空，无新增前端改动。
+- 本轮未补跑浏览器点击；上一轮已记录当前沙箱对本地端口监听和 Vite 临时目录写入仍有限制，真页验证阻塞条件没有变化。
+
+### 红线
+
+- 本轮未执行真实云资源创建、关机、删除服务器、释放 IP、真实支付、链上广播、生产发布、删除业务数据或删除测试库。
+- 本轮未打印密钥、私钥、Telegram session、TOTP、支付密钥、云厂商密钥、完整代理链接、代理 secret 或登录密码。
+- 本轮未恢复废弃 runtime app、订单侧到期字段、旧计划快照、旧退款逻辑、旧退款函数名或旧兼容入口。
+
+### 剩余风险
+
+- 计划页历史查询层现在有两处相似的堆归并逻辑，后续可考虑抽公共 helper，但不属于本轮最小安全修复范围。
+- 真页点击与控制台检查仍受当前沙箱限制影响，下一轮若限制未解除，仍只能继续做 API 级与只读压测验证。
+
+## 2026-06-07 23:11 服务器删除历史混合来源分页排序修复
+
+### 背景
+
+按自动优化固定巡检继续审计计划页深分页时，复查了刚补齐不久的“服务器删除历史记录”。本轮发现查询层虽然已经把已删除订单和无订单孤儿删除服务器资产都纳入历史总数，但分页实现仍按来源分段：
+
+- 先按页取 `CloudServerOrder(status='deleted')`。
+- 当前页没满时，再补无订单已删除服务器资产。
+
+这意味着只要孤儿资产的 `updated_at` 新于部分已删除订单，页面就会把更“新”的孤儿资产挤到后页，形成错序和页边界错误。
+
+### 风险
+
+- 服务器删除历史第一页可能不是最新记录。
+- 深页和最后一页会和数据库真实时间轴不一致。
+- 当前页切换时，来源边界附近容易出现“这一页不该看到旧订单 / 下一页才看到更近的孤儿资产”的问题。
+
+这类问题不只是展示误差，会直接影响生命周期人工复核和删除历史对账。
+
+### 修复
+
+- `cloud/lifecycle_plan_queries.py`
+  - `server_delete_history_page_sources()` 改为先对两个来源都按 `-updated_at, -id` 排序。
+  - 使用分块读取 + 小顶堆归并的方式，按统一时间轴生成当前分页窗口。
+  - 保留现有“已删除订单 + 无订单已删除服务器资产”的总数口径，但不再按来源硬拼页。
+- `cloud/tests.py`
+  - 新增 `test_lifecycle_plans_server_history_mixes_orders_and_assets_by_updated_at`。
+  - 构造“最新订单 / 次新孤儿资产 / 中间孤儿资产 / 最旧订单”的交错样本，验证 `server_history_page=1/2` 返回顺序必须是统一时间轴，而不是先订单后资产。
+
+### 验证
+
+已通过：
+
+```bash
+UV_CACHE_DIR=/private/tmp/uv-cache-shop DJANGO_TEST_SQLITE=1 uv run python manage.py test cloud.tests.CloudServerServicesTestCase.test_lifecycle_plans_server_history_mixes_orders_and_assets_by_updated_at cloud.tests.CloudServerServicesTestCase.test_lifecycle_plans_server_history_includes_orphan_deleted_server_asset cloud.tests.CloudServerServicesTestCase.test_lifecycle_plans_returns_server_delete_history_table --settings=shop.settings --verbosity=1
+UV_CACHE_DIR=/private/tmp/uv-cache-shop uv run python -m py_compile cloud/lifecycle_plan_queries.py cloud/tests.py
+UV_CACHE_DIR=/private/tmp/uv-cache-shop uv run python manage.py check
+git diff --check
+```
+
+SQLite `db_comment` 警告仍是已知数据库能力差异。
+
+### 真实页面验证阻塞
+
+本轮尝试按要求补做 `/admin/tasks/plans` 真实页面翻页验证，并且为了不触碰真实 MySQL，还额外准备了 SQLite 文件库的临时环境：
+
+- `DB_ENGINE=sqlite SQLITE_NAME=/private/tmp/shop-automation.sqlite3 uv run python manage.py migrate --noinput` 已成功。
+- 已向该临时库写入 49 条已删除订单历史 + 3 条更“新”的孤儿删除资产，专门用于复现分页边界顺序问题。
+
+但最终仍被当前沙箱限制挡住：
+
+- `manage.py runserver 127.0.0.1:8000 --noreload` 监听本地端口时报 `Operation not permitted`。
+- 前端 `pnpm vite --mode development --host 127.0.0.1` 启动时无法写入 `node_modules/.vite-temp/...`，报 `EPERM`。
+- 默认 MySQL 本地连接也继续报 `Can't connect to MySQL server on '127.0.0.1' ([Errno 1] Operation not permitted)`。
+
+因此本轮无法完成浏览器实际点击分页和控制台检查，只能保留 API 级验证与临时页面环境准备结论。
+
+### 红线
+
+- 本轮未执行真实云资源创建、关机、删除服务器、释放 IP、真实支付、链上广播、生产发布、删除业务数据或删除测试库。
+- 本轮未打印密钥、私钥、Telegram session、TOTP、支付密钥、云厂商密钥、完整代理链接、代理 secret 或登录密码。
+- 本轮未恢复废弃 runtime app、订单侧到期字段、旧计划快照、旧退款逻辑、旧退款函数名或旧兼容入口。
+
+### 剩余风险
+
+- `ip_delete_history_page_sources()` 仍按来源分段拼页，后续应继续确认是否也需要统一时间轴归并。
+- 真实浏览器对账仍需要解除当前沙箱对本地端口监听和前端临时文件写入的限制。
+
 ## 2026-06-07 22:30 代理列表翻页对账与前端图标离线化
 
 ### 数据库与分页对账

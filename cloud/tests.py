@@ -7890,6 +7890,108 @@ class CloudServerServicesTestCase(TestCase):
         self.assertEqual(asset_rows[0]['detail_path'], f'/admin/cloud-assets/{orphan_asset.id}')
         self.assertFalse(any(item.get('asset_id') == orphan_asset.id for item in data['ip_delete_history_items']))
 
+    # 功能：验证服务器删除历史跨来源分页按统一更新时间排序，不会先吐尽订单再补资产。
+    def test_lifecycle_plans_server_history_mixes_orders_and_assets_by_updated_at(self):
+        base = timezone.now()
+        order_newest = CloudServerOrder.objects.create(
+            order_no='LIFECYCLE-SERVER-HISTORY-MIX-ORDER-NEWEST',
+            user=self.user,
+            plan=self.plan,
+            provider=self.plan.provider,
+            region_code=self.plan.region_code,
+            region_name=self.plan.region_name,
+            plan_name=self.plan.plan_name,
+            quantity=1,
+            currency='USDT',
+            total_amount='19.00',
+            pay_amount='19.00',
+            status='deleted',
+            public_ip='5.5.9.30',
+            previous_public_ip='5.5.9.30',
+            delete_at=base - timezone.timedelta(hours=1),
+            provision_note='最新删机订单',
+        )
+        order_oldest = CloudServerOrder.objects.create(
+            order_no='LIFECYCLE-SERVER-HISTORY-MIX-ORDER-OLDEST',
+            user=self.user,
+            plan=self.plan,
+            provider=self.plan.provider,
+            region_code=self.plan.region_code,
+            region_name=self.plan.region_name,
+            plan_name=self.plan.plan_name,
+            quantity=1,
+            currency='USDT',
+            total_amount='19.00',
+            pay_amount='19.00',
+            status='deleted',
+            public_ip='5.5.9.31',
+            previous_public_ip='5.5.9.31',
+            delete_at=base - timezone.timedelta(hours=4),
+            provision_note='最旧删机订单',
+        )
+        asset_middle = CloudAsset.objects.create(
+            kind=CloudAsset.KIND_SERVER,
+            source=CloudAsset.SOURCE_AWS_SYNC,
+            user=self.user,
+            provider='aws_lightsail',
+            region_code=self.plan.region_code,
+            region_name=self.plan.region_name,
+            asset_name='server-history-mix-asset-middle',
+            provider_resource_id='arn:aws:lightsail:ap-southeast-1:123456789012:Instance/server-history-mix-asset-middle',
+            previous_public_ip='5.5.9.32',
+            status=CloudAsset.STATUS_DELETED,
+            provider_status='已删除',
+            note='中间时间的孤儿删机资产',
+            is_active=False,
+            actual_expires_at=base - timezone.timedelta(days=1),
+        )
+        asset_newer = CloudAsset.objects.create(
+            kind=CloudAsset.KIND_SERVER,
+            source=CloudAsset.SOURCE_AWS_SYNC,
+            user=self.user,
+            provider='aws_lightsail',
+            region_code=self.plan.region_code,
+            region_name=self.plan.region_name,
+            asset_name='server-history-mix-asset-newer',
+            provider_resource_id='arn:aws:lightsail:ap-southeast-1:123456789012:Instance/server-history-mix-asset-newer',
+            previous_public_ip='5.5.9.33',
+            status=CloudAsset.STATUS_DELETED,
+            provider_status='已删除',
+            note='第二新的孤儿删机资产',
+            is_active=False,
+            actual_expires_at=base - timezone.timedelta(days=1),
+        )
+        CloudServerOrder.objects.filter(id=order_newest.id).update(updated_at=base + timezone.timedelta(minutes=5))
+        CloudAsset.objects.filter(id=asset_newer.id).update(updated_at=base + timezone.timedelta(minutes=4))
+        CloudAsset.objects.filter(id=asset_middle.id).update(updated_at=base + timezone.timedelta(minutes=3))
+        CloudServerOrder.objects.filter(id=order_oldest.id).update(updated_at=base + timezone.timedelta(minutes=2))
+
+        staff_user = get_user_model().objects.create_user(username='staff_lifecycle_server_history_mix', password='x', is_staff=True)
+        seen = []
+        for page in [1, 2]:
+            request = RequestFactory().get('/api/admin/tasks/plans/', {
+                'compact': '1',
+                'fields': 'basic,execution,notes',
+                'limit': '2',
+                'server_history_page': str(page),
+                'server_history_page_size': '2',
+                **({'refresh': '1'} if page == 1 else {}),
+            })
+            self._attach_bearer_session(request, staff_user)
+            response = lifecycle_plans(request)
+            self.assertEqual(response.status_code, 200)
+            data = json.loads(response.content)['data']
+            self.assertEqual(data['pagination']['server_history']['page'], page)
+            self.assertEqual(data['pagination']['server_history']['page_size'], 2)
+            seen.extend((item.get('source_kind'), item.get('source_id')) for item in data['server_history_items'])
+
+        self.assertEqual(seen, [
+            ('order', order_newest.id),
+            ('asset', asset_newer.id),
+            ('asset', asset_middle.id),
+            ('order', order_oldest.id),
+        ])
+
     # 功能：验证计划页全量统计随刷新进入缓存，普通加载不重复扫全库。
     def test_lifecycle_plans_reuses_cached_count_snapshot_after_refresh(self):
         import bot.api as bot_api
@@ -8099,6 +8201,103 @@ class CloudServerServicesTestCase(TestCase):
 
         self.assertEqual([name for name in seen if name in expected_names], list(reversed(expected_names)))
         self.assertEqual(len(seen), len(set(seen)))
+
+    # 功能：验证 IP 删除历史跨来源分页按统一时间轴排序，不会先吐尽日志再补资产。
+    def test_lifecycle_plans_ip_delete_history_mixes_logs_and_assets_by_time(self):
+        base = timezone.now()
+        log_newest = CloudIpLog.objects.create(
+            event_type=CloudIpLog.EVENT_RECYCLED,
+            provider='aws_lightsail',
+            region_code=self.plan.region_code,
+            region_name=self.plan.region_name,
+            asset_name='ip-history-log-newest',
+            previous_public_ip='5.5.10.30',
+            public_ip=None,
+            note='固定 IP 保留期结束，AWS 固定 IP 已真实释放',
+        )
+        history_asset = CloudAsset.objects.create(
+            kind=CloudAsset.KIND_SERVER,
+            source=CloudAsset.SOURCE_AWS_SYNC,
+            user=self.user,
+            provider='aws_lightsail',
+            region_code=self.plan.region_code,
+            region_name=self.plan.region_name,
+            asset_name='ip-history-asset-middle',
+            previous_public_ip='5.5.10.31',
+            status=CloudAsset.STATUS_DELETED,
+            provider_status='已删除',
+            note='固定 IP 云端已不存在',
+            is_active=False,
+            actual_expires_at=base - timezone.timedelta(days=1),
+        )
+        completed_asset = CloudAsset.objects.create(
+            kind=CloudAsset.KIND_SERVER,
+            source=CloudAsset.SOURCE_AWS_SYNC,
+            user=self.user,
+            provider='aws_lightsail',
+            region_code=self.plan.region_code,
+            region_name=self.plan.region_name,
+            asset_name='ip-history-completed-active',
+            previous_public_ip='5.5.10.32',
+            status=CloudAsset.STATUS_RUNNING,
+            provider_status='未附加固定IP',
+            note='未附加固定IP',
+            is_active=True,
+            actual_expires_at=base - timezone.timedelta(days=1),
+        )
+        CloudIpLog.objects.create(
+            event_type=CloudIpLog.EVENT_CHANGED,
+            asset=completed_asset,
+            user=self.user,
+            provider='aws_lightsail',
+            region_code=self.plan.region_code,
+            region_name=self.plan.region_name,
+            asset_name=completed_asset.asset_name,
+            previous_public_ip='5.5.10.32',
+            public_ip=None,
+            note='实例已删除，固定 IP 保留',
+        )
+        log_oldest = CloudIpLog.objects.create(
+            event_type=CloudIpLog.EVENT_DELETED,
+            provider='aws_lightsail',
+            region_code=self.plan.region_code,
+            region_name=self.plan.region_name,
+            asset_name='ip-history-log-oldest',
+            previous_public_ip='5.5.10.33',
+            public_ip=None,
+            note='未附加固定IP；IP校验发现云上不存在，已标记删除',
+        )
+
+        CloudIpLog.objects.filter(id=log_newest.id).update(created_at=base + timezone.timedelta(minutes=5))
+        CloudAsset.objects.filter(id=history_asset.id).update(updated_at=base + timezone.timedelta(minutes=4))
+        CloudAsset.objects.filter(id=completed_asset.id).update(updated_at=base + timezone.timedelta(minutes=3))
+        CloudIpLog.objects.filter(id=log_oldest.id).update(created_at=base + timezone.timedelta(minutes=2))
+
+        staff_user = get_user_model().objects.create_user(username='staff_lifecycle_ip_history_mix', password='x', is_staff=True)
+        seen = []
+        for page in [1, 2]:
+            request = RequestFactory().get('/api/admin/tasks/plans/', {
+                'compact': '1',
+                'fields': 'basic,execution,notes',
+                'limit': '2',
+                'ip_delete_history_page': str(page),
+                'ip_delete_history_page_size': '2',
+                **({'refresh': '1'} if page == 1 else {}),
+            })
+            self._attach_bearer_session(request, staff_user)
+            response = lifecycle_plans(request)
+            self.assertEqual(response.status_code, 200)
+            data = json.loads(response.content)['data']
+            self.assertEqual(data['pagination']['ip_delete_history']['page'], page)
+            self.assertEqual(data['pagination']['ip_delete_history']['page_size'], 2)
+            seen.extend((item.get('source_kind'), item.get('source_id')) for item in data['ip_delete_history_items'])
+
+        self.assertEqual(seen, [
+            ('ip_log', log_newest.id),
+            ('asset', history_asset.id),
+            ('asset', completed_asset.id),
+            ('ip_log', log_oldest.id),
+        ])
 
     # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
     def test_update_lifecycle_plan_note_updates_asset_note(self):
