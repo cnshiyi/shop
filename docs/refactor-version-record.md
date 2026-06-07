@@ -10923,3 +10923,41 @@ git -C /Users/a399/Desktop/data/vue-shop-admin diff --check
 - 生命周期计划首次统计仍约 14.4 秒，后续翻页依赖进程内统计缓存；下一轮建议推进任务表投影或统计缓存表。
 - IP 删除计划最后页仍约 3.6 秒，主要瓶颈是未附加 IP 查询和完成保留 IP 排除条件。
 - 通知计划接口仍约 5 秒，下一轮应改为服务端分页查询或任务表投影，不再每次构建全量集合。
+
+## 2026-06-07 生命周期资产开关隔离专项
+
+### 背景
+
+用户要求继续循环测试，并重点确认生命周期各开关的影响边界。上一轮发现一个边界风险：未附加固定 IP 和订单删除后的固定 IP 回收属于 IP 删除流程，不应该被服务器关机开关阻断。
+
+### 修改
+
+- AWS 同步释放未附加固定 IP 时，资产级阻断条件从 `shutdown_enabled` 改为 `ip_delete_enabled`。
+- 未附加固定 IP 删除进入执行队列时，确认资产关机开关关闭不会阻断 IP 删除。
+- 订单固定 IP 回收进入执行队列时，确认资产关机开关关闭不会阻断 IP 删除。
+- 订单固定 IP 回收执行入口改为验证资产 IP 删除计划开关关闭时才阻断释放。
+- 生命周期计划关机项展示文案收敛为“关机开关关闭 / 关机计划开关关闭”，避免继续使用泛化的“资产开关关闭”。
+
+### 验证
+
+本地已通过：
+
+```bash
+DJANGO_TEST_SQLITE=1 uv run python manage.py test cloud.tests.CloudServerServicesTestCase.test_unattached_ip_delete_ignores_shutdown_disabled_asset cloud.tests.CloudServerServicesTestCase.test_due_orders_recycle_ignores_asset_shutdown_disabled cloud.tests.CloudServerServicesTestCase.test_order_static_ip_release_respects_asset_ip_delete_disabled cloud.tests.CloudServerServicesTestCase.test_aws_sync_release_static_ip_respects_asset_ip_delete_disabled cloud.tests.CloudServerServicesTestCase.test_aws_sync_release_static_ip_ignores_shutdown_disabled_account cloud.tests.CloudServerServicesTestCase.test_aws_sync_release_static_ip_respects_global_ip_delete_switch cloud.tests.CloudServerServicesTestCase.test_lifecycle_plans_use_stage_specific_asset_switches cloud.tests.CloudServerServicesTestCase.test_lifecycle_plans_ignore_account_shutdown_disabled_plan_state cloud.tests.CloudServerServicesTestCase.test_lifecycle_plans_show_asset_shutdown_disabled_plan_state cloud.tests.CloudServerServicesTestCase.test_due_orders_global_shutdown_switch_does_not_block_delete_or_recycle --settings=shop.settings --verbosity=1
+uv run python manage.py check
+uv run python -m py_compile bot/api.py cloud/lifecycle.py cloud/lifecycle_execution.py cloud/lifecycle_plan_queries.py cloud/management/commands/sync_aws_assets.py cloud/tests.py
+git diff --check
+```
+
+结果：10 个生命周期聚焦测试、Django 系统检查、编译检查和空白检查均通过。SQLite 测试输出的 `db_comment` 警告为已知数据库能力差异。
+
+### 红线
+
+- 本轮未执行真实云资源创建、删除、关机、释放 IP、换 IP、真实支付、链上广播、删除业务数据、删除测试库或生产发布。
+- 本轮未打印密钥、私钥、Telegram session、TOTP、支付密钥或云厂商密钥。
+- 本轮未恢复废弃 runtime app、订单侧到期字段、旧计划快照、旧退款入口、旧 `Server` 兼容壳或旧云 API 聚合入口。
+
+### 剩余风险
+
+- 本轮只修复生命周期单项开关隔离，不包含真实云资源执行。
+- 下一轮继续做计划页、通知页、代理列表的大数据真实性、翻页、跳页和性能压测。

@@ -4,66 +4,30 @@
 
 ## 最近一轮
 
-- 时间：2026-06-07 15:28 CST
-- 状态：已完成“再次压测”专项；代理列表 50 万快照深分页已降到 0.5 秒级并完成数据库对账；生命周期计划完成结构化来源字段重构和分页查询优化。
-- 本轮范围：本地 MySQL 大数据压测、代理列表分页、生命周期计划分页、IP 删除计划/历史、通知计划只读压测、前端计划页结构化 key 配套修复。
-
-## 数据规模
-
-- `CloudAsset`：1,500,000
-- `CloudAssetDashboardSnapshot`：500,000
-- 可显示快照：499,494
-- `CloudIpLog`：515,739
-- 服务器资产：1,500,000
+- 时间：2026-06-07 16:13 CST
+- 状态：已完成生命周期资产开关隔离专项。
+- 本轮范围：未附加固定 IP 删除、订单固定 IP 回收、AWS 同步释放未附加固定 IP、生命周期计划关机开关展示。
 
 ## 修改摘要
 
-- `cloud_asset_dashboard_snapshot` 增加 `asset_due_sort_null_rank` 和组合索引 `cad_vis_list_page_idx`，让代理列表默认排序命中索引。
-- 代理列表分页接近尾页时使用反向窗口取数再反转，保持页码契约不变，避免深 offset 扫描。
-- 生命周期计划查询层抽出通用反向分页，服务器计划排序统一为 `actual_expires_at,id`，避免 `user_id` 导致 filesort。
-- IP 删除历史分页复用已计算的日志/资产/完成保留统计，减少尾页重复 count。
-- 生命周期计划项不再使用 `order-xxx`、`asset-xxx`、`log-xxx`、`trace-xxx` 混合字符串主键，统一返回 `source_kind`、`source_id`、`plan_item_key`。
-- 前端计划页和工作台改为使用 `plan_item_key`/结构化来源作为行 key，资产开关和备注保存只使用明确的 `asset_id` 或 `order_id`。
-- 聚焦测试新增结构化计划项身份字段断言，防止混合字符串主键回流。
-
-## 压测结果
-
-代理列表 IP 视图，50 万快照，`page_size=20`：
-
-- 第 1 页：0.561 秒，数据库对账一致。
-- 第 2 页：0.541 秒，数据库对账一致。
-- 第 1000 页：0.606 秒，数据库对账一致。
-- 倒数第 2 页：0.546 秒，数据库对账一致。
-- 最后一页：0.515 秒，数据库对账一致。
-
-生命周期计划，统计缓存预热后，`page_size=50`：
-
-- 关机计划：996,990 条；第 1 页 0.629 秒，最后页 0.544 秒。
-- 服务器删除计划：2,752 条；第 1 页 0.579 秒，最后页 2.578 秒。
-- IP 删除计划：500,000 条；第 1 页 0.579 秒，最后页 3.616 秒。
-- IP 删除历史：500,007 条；第 1 页 0.586 秒，最后页 0.918 秒。
-- 所有计划页返回项 `plan_item_key` 无重复，`source_kind/source_id` 完整，`id` 不再是字符串前缀。
-
-通知计划只读压测：
-
-- 组通知统计：due 5,400；future 30,031；history 1,000。
-- `offset=0/100/1000/5000/100000` 均能返回正确切片，耗时约 4.9-5.5 秒。
-- 通知计划仍是剩余优化点：当前每次请求仍会构建较大的通知计划集合后切片。
+- AWS 同步释放未附加固定 IP 时，不再读取资产关机开关 `shutdown_enabled`，改为读取资产 IP 删除开关 `ip_delete_enabled`。
+- 未附加固定 IP 的资产关机开关关闭时，IP 删除仍可进入执行队列；只有资产 IP 删除开关关闭时才阻止释放。
+- 订单删除后的固定 IP 回收同样只受 IP 删除开关影响，不再被资产关机开关误挡。
+- 生命周期计划页继续明确展示关机计划受关机开关控制，文案从泛化“资产开关关闭”收敛为“关机开关关闭 / 关机计划开关关闭”。
+- 补齐聚焦测试，防止“关机开关误挡 IP 删除”回流。
 
 ## 验证
 
 本地已通过：
 
 ```bash
-uv run python -m py_compile bot/api.py cloud/api_asset_snapshots.py cloud/lifecycle_plan_queries.py cloud/models.py cloud/tests.py
+DJANGO_TEST_SQLITE=1 uv run python manage.py test cloud.tests.CloudServerServicesTestCase.test_unattached_ip_delete_ignores_shutdown_disabled_asset cloud.tests.CloudServerServicesTestCase.test_due_orders_recycle_ignores_asset_shutdown_disabled cloud.tests.CloudServerServicesTestCase.test_order_static_ip_release_respects_asset_ip_delete_disabled cloud.tests.CloudServerServicesTestCase.test_aws_sync_release_static_ip_respects_asset_ip_delete_disabled cloud.tests.CloudServerServicesTestCase.test_aws_sync_release_static_ip_ignores_shutdown_disabled_account cloud.tests.CloudServerServicesTestCase.test_aws_sync_release_static_ip_respects_global_ip_delete_switch cloud.tests.CloudServerServicesTestCase.test_lifecycle_plans_use_stage_specific_asset_switches cloud.tests.CloudServerServicesTestCase.test_lifecycle_plans_ignore_account_shutdown_disabled_plan_state cloud.tests.CloudServerServicesTestCase.test_lifecycle_plans_show_asset_shutdown_disabled_plan_state cloud.tests.CloudServerServicesTestCase.test_due_orders_global_shutdown_switch_does_not_block_delete_or_recycle --settings=shop.settings --verbosity=1
 uv run python manage.py check
-DJANGO_TEST_SQLITE=1 uv run python manage.py test cloud.tests.CloudServerServicesTestCase.test_cloud_assets_paginated_uses_true_database_pages cloud.tests.CloudServerServicesTestCase.test_lifecycle_plans_server_delete_pagination_contract cloud.tests.CloudServerServicesTestCase.test_lifecycle_plans_ip_delete_history_pagination_contract --settings=shop.settings --verbosity=1
+uv run python -m py_compile bot/api.py cloud/lifecycle.py cloud/lifecycle_execution.py cloud/lifecycle_plan_queries.py cloud/management/commands/sync_aws_assets.py cloud/tests.py
 git diff --check
-pnpm --dir /Users/a399/Desktop/data/vue-shop-admin/apps/web-antd typecheck
-git -C /Users/a399/Desktop/data/vue-shop-admin diff --check
 ```
 
-结果：后端编译、Django 系统检查、聚焦测试、前端类型检查、空白检查均通过。SQLite 测试输出的 `db_comment` 警告为已知数据库能力差异。
+结果：10 个生命周期聚焦测试、Django 系统检查、编译检查和空白检查均通过。SQLite 测试输出的 `db_comment` 警告为已知数据库能力差异。
 
 ## 红线
 
@@ -73,6 +37,5 @@ git -C /Users/a399/Desktop/data/vue-shop-admin diff --check
 
 ## 剩余风险
 
-- 生命周期计划首次统计仍约 14.4 秒，后续翻页依赖进程内统计缓存；上线前建议下一轮把生命周期统计投影到任务表或统计缓存表。
-- IP 删除计划最后页仍约 3.6 秒，主要瓶颈是未附加 IP 查询和完成保留 IP 排除条件；需要下一轮继续做任务表投影或更细的物化统计。
-- 通知计划接口仍约 5 秒，建议下一轮把通知计划也改为服务端分页查询或任务表投影，不再每次构建全量集合。
+- 本轮只修复生命周期单项开关隔离，不包含真实云资源执行。
+- 下一轮继续做计划页、通知页、代理列表的大数据真实性、翻页、跳页和性能压测。

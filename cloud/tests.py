@@ -1071,8 +1071,8 @@ class CloudServerServicesTestCase(TestCase):
         self.assertEqual(data['success_count'], 0)
         self.assertIn('IP 删除执行时间窗口', data['message'])
 
-    # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
-    def test_unattached_ip_delete_respects_shutdown_disabled_asset(self):
+    # 功能：验证未附加固定 IP 删除只受 IP 删除开关影响，不受资产关机开关影响。
+    def test_unattached_ip_delete_ignores_shutdown_disabled_asset(self):
         from bot.api import _run_unattached_ip_delete_sync, _unattached_ip_delete_items
 
         SiteConfig.set('cloud_ip_delete_enabled', '1')
@@ -1092,18 +1092,21 @@ class CloudServerServicesTestCase(TestCase):
             actual_expires_at=timezone.now() - timezone.timedelta(days=1),
             status=CloudAsset.STATUS_RUNNING,
             shutdown_enabled=False,
+            ip_delete_enabled=True,
             is_active=True,
         )
 
         due_ids = {item.id for item in async_to_sync(_get_unattached_static_ip_delete_due)()}
-        result = _run_unattached_ip_delete_sync(asset.id, enforce_schedule=True)
+        with patch('cloud.lifecycle._is_cloud_unattached_ip_delete_time', return_value=True), \
+            patch('cloud.lifecycle._release_unattached_static_ip', new=AsyncMock(return_value=(True, 'ip release ok'))):
+            result = _run_unattached_ip_delete_sync(asset.id, enforce_schedule=True)
         items = _unattached_ip_delete_items(limit=20)
         row = next(item for item in items if item.get('asset_id') == asset.id)
 
-        self.assertNotIn(asset.id, due_ids)
-        self.assertFalse(result['ok'])
-        self.assertIn('生命周期开关已关闭', result['error'])
-        self.assertEqual(row['queue_status'], 'shutdown_disabled')
+        self.assertIn(asset.id, due_ids)
+        self.assertTrue(result['ok'])
+        self.assertNotEqual(row.get('queue_status'), 'shutdown_disabled')
+        self.assertNotEqual(row.get('queue_status'), 'ip_delete_disabled')
 
     # 功能：处理 云资产、云订单和生命周期 中的 setUp 业务流程。
     def setUp(self):
@@ -3827,8 +3830,8 @@ class CloudServerServicesTestCase(TestCase):
         self.assertFalse(any(item.id == order.id for item in due['suspend']))
         self.assertTrue(any(item.id == order.id for item in due['expire']))
 
-    # 功能：验证资产自动生命周期开关关闭时，订单固定 IP 回收也不会进入自动执行队列。
-    def test_due_orders_skip_order_static_ip_recycle_when_asset_shutdown_disabled(self):
+    # 功能：验证订单固定 IP 回收只受 IP 删除开关影响，不受资产关机开关影响。
+    def test_due_orders_recycle_ignores_asset_shutdown_disabled(self):
         recycle_at = timezone.now() - timezone.timedelta(minutes=1)
         order = CloudServerOrder.objects.create(
             order_no='HB-LIFECYCLE-ASSET-RECYCLE-OFF-1',
@@ -3864,12 +3867,13 @@ class CloudServerServicesTestCase(TestCase):
             status=CloudAsset.STATUS_DELETED,
             provider_status='固定IP保留中-实例已删除',
             shutdown_enabled=False,
+            ip_delete_enabled=True,
             is_active=False,
         )
 
         due = async_to_sync(_get_due_orders)()
 
-        self.assertFalse(any(item.id == order.id for item in due['recycle']))
+        self.assertTrue(any(item.id == order.id for item in due['recycle']))
 
     # 功能：验证全局关机总开关只影响关机，不会误挡删机和固定 IP 回收队列。
     def test_due_orders_global_shutdown_switch_does_not_block_delete_or_recycle(self):
@@ -9410,7 +9414,7 @@ class CloudServerServicesTestCase(TestCase):
             currency='USDT',
             total_amount='19.00',
             pay_amount='19.00',
-            status='suspended',
+            status='completed',
             public_ip='3.3.3.39',
             suspend_at=timezone.now() - timezone.timedelta(days=2),
             delete_at=timezone.now() - timezone.timedelta(hours=1),
@@ -9442,9 +9446,9 @@ class CloudServerServicesTestCase(TestCase):
         self.assertFalse(row['shutdown_enabled'])
         self.assertEqual(row['queue_status'], 'shutdown_disabled')
         self.assertEqual(row['plan_state'], 'shutdown_disabled')
-        self.assertEqual(row['plan_state_label'], '资产开关关闭')
+        self.assertEqual(row['plan_state_label'], '关机开关关闭')
         self.assertFalse(row['should_execute'])
-        self.assertIn('生命周期开关关闭', row['blocked_reason'])
+        self.assertIn('关机计划开关关闭', row['blocked_reason'])
 
     # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
     def test_lifecycle_plans_route_linked_asset_delete_to_order_item(self):
@@ -11444,8 +11448,8 @@ class CloudServerServicesTestCase(TestCase):
         self.assertIn('已被其他进程认领', result['error'])
         release_mock.assert_not_called()
 
-    # 功能：验证订单固定 IP 回收入口会尊重资产级关机计划开关。
-    def test_order_static_ip_release_respects_asset_shutdown_disabled(self):
+    # 功能：验证订单固定 IP 回收入口会尊重资产级 IP 删除计划开关。
+    def test_order_static_ip_release_respects_asset_ip_delete_disabled(self):
         from cloud.lifecycle_execution import run_order_static_ip_release
 
         now = timezone.now()
@@ -11483,7 +11487,8 @@ class CloudServerServicesTestCase(TestCase):
             actual_expires_at=recycle_at,
             status=CloudAsset.STATUS_DELETED,
             provider_status='固定IP保留中-实例已删除',
-            shutdown_enabled=False,
+            shutdown_enabled=True,
+            ip_delete_enabled=False,
             is_active=False,
         )
 
@@ -11493,7 +11498,7 @@ class CloudServerServicesTestCase(TestCase):
             result = run_order_static_ip_release(order.id, queue_status='scheduled_recycle', enforce_schedule=True)
 
         self.assertFalse(result['ok'])
-        self.assertIn('生命周期开关已关闭', result['error'])
+        self.assertIn('IP 删除计划开关已关闭', result['error'])
         release_mock.assert_not_called()
 
     # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
@@ -17088,7 +17093,7 @@ class CloudServerServicesTestCase(TestCase):
         self.assertLess(asset.actual_expires_at, before + timezone.timedelta(days=16))
 
     # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
-    def test_aws_sync_release_static_ip_respects_asset_shutdown_disabled(self):
+    def test_aws_sync_release_static_ip_respects_asset_ip_delete_disabled(self):
         from cloud.management.commands.sync_aws_assets import _release_static_ip_if_due
 
         account = CloudAccountConfig.objects.create(
@@ -17112,7 +17117,8 @@ class CloudServerServicesTestCase(TestCase):
             status=CloudAsset.STATUS_UNKNOWN,
             provider_status='未附加固定IP',
             note='未附加固定IP',
-            shutdown_enabled=False,
+            shutdown_enabled=True,
+            ip_delete_enabled=False,
             is_active=False,
         )
         released = []
@@ -17145,7 +17151,7 @@ class CloudServerServicesTestCase(TestCase):
         self.assertFalse(ok)
         self.assertEqual(released, [])
         self.assertEqual(asset.status, CloudAsset.STATUS_UNKNOWN)
-        self.assertEqual(asset.provider_status, '未附加固定IP-资产开关关闭')
+        self.assertEqual(asset.provider_status, '未附加固定IP-IP删除开关关闭')
 
     # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
     def test_aws_sync_release_static_ip_ignores_shutdown_disabled_account(self):

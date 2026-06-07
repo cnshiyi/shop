@@ -185,8 +185,8 @@ def _release_static_ip_if_due(client, region, asset, static_ip_name, static_ip_a
             f'跳过 AWS {region} 未附加IP释放：{reason} 资产#{asset.id} IP={public_ip or "缺失"}'
         ))
         return False
-    if getattr(asset, 'shutdown_enabled', True) is False:
-        reason = '资产自动生命周期开关已关闭，AWS 同步拒绝真实释放未附加固定 IP'
+    if getattr(asset, 'ip_delete_enabled', True) is False:
+        reason = '资产 IP 删除计划开关已关闭，AWS 同步拒绝真实释放未附加固定 IP'
         record_external_sync_log(
             source='aws_lightsail',
             action='release_static_ip',
@@ -196,7 +196,7 @@ def _release_static_ip_if_due(client, region, asset, static_ip_name, static_ip_a
             is_success=True,
             account=asset.cloud_account,
         )
-        asset.provider_status = '未附加固定IP-资产开关关闭'
+        asset.provider_status = '未附加固定IP-IP删除开关关闭'
         asset.save(update_fields=['provider_status', 'updated_at'])
         stdout.write(stdout.style.WARNING(
             f'跳过 AWS {region} 未附加IP释放：{reason} 资产#{asset.id} IP={public_ip or "缺失"}'
