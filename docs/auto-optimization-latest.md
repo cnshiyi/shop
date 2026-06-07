@@ -4,82 +4,47 @@
 
 ## 最近一轮
 
-- 时间：2026-06-08 03:10 CST
-- 状态：已修复自动续费详情页慢加载和前端控制台告警，并完成真实页面验证。
-- 本轮范围：任务中心进入自动续费详情、自动续费计划查询层、自动续费详情前端表格 rowKey、Typography 省略文本、机器人多任务并发聚焦测试。
+- 时间：2026-06-08 03:13 CST
+- 状态：完成一轮任务中心聚合层只读审计；本轮未改业务代码。
+- 本轮范围：任务中心聚合 API/测试、固定巡检清单、红线关键字扫描、Django check。
 
-## 修复内容
+## 本轮专项
 
-- `cloud/api_tasks.py`
-  - 自动续费详情不再调用全生命周期 `_get_due_orders()` 扫描全量资产。
-  - 改为直接从 `CloudAsset.actual_expires_at` 查询自动续费到期资产，继续排除已删除/终止资产、未附加固定 IP 和无公网 IP 资产。
-  - 重试队列的订单资产状态改为批量查询，避免逐订单查询资产。
-  - 构建待执行/未来计划项时复用 notice payload，避免重复读取资产到期事实。
-  - 保留最近失败原因，直接到期订单和失败重试订单的状态口径不丢失。
-- `cloud/tests.py`
-  - 自动续费详情测试改为使用 `CloudAsset.actual_expires_at` 驱动，不再 patch 旧 `_get_due_orders` 入口。
-  - 明确无资产到期事实的订单不会进入自动续费详情计划。
-- 前端 `apps/web-antd/src/views/dashboard/tasks/auto-renew-detail.vue`
-  - 表格 `row-key` 不再使用 Ant Design Vue 已废弃的 `index` 参数。
-  - 带省略的 `TypographyParagraph` 改用 `content`，消除控制台 error。
+原计划继续覆盖任务中心真实前端巡检，但当前沙箱禁止访问本机回环网络：
 
-## 性能对账
+- 浏览器/Node 访问 `127.0.0.1:5666` 返回 `EPERM`
+- Django 默认 MySQL 连接 `127.0.0.1` 也返回 `Operation not permitted`
 
-后端函数计时：
+因此本轮退回为可验证的只读专项审计，重点检查任务中心聚合逻辑在测试层和静态巡检下是否存在明显回归。
 
-- 修复前：`collect_sec 54.581`，`build_sec 67.3`。
-- 修复后：`collect_sec 0.606`，`build_sec 0.902`。
+## 审计结果
 
-真实接口：
+- `cloud.tests_task_center` 共 `14` 个聚焦测试全部通过。
+- 任务中心聚合仍覆盖 `cloud_sync`、`cloud_orders`、`lifecycle`、`notices`、`auto_renew` 五个 section。
+- 静态扫描未发现 runtime 代码恢复订单侧到期事实字段、旧计划快照入口、旧退款入口或废弃 runtime app 回流。
+- `CloudAsset.actual_expires_at` 仍是当前 runtime 代码中的资产到期事实来源；涉及 `service_expires_at` 的命中仅见于历史迁移或日志字段语义，不是当前 runtime 回流。
 
-- 修复并重启临时后端前，旧进程接口约 `74.05s`。
-- 重启后新代码接口约 `1.21s`。
-- 返回口径保持一致：
-  - `due_count=443`
-  - `recent_failure_count=1026`
-  - `recent_success_count=0`
-  - `latest_batch_count=171`
-  - `latest_batch_failure_count=171`
-  - `due_items=443`
-  - `history_items=200`
-  - `future_plan_items=0`
-
-## 真实页面验证
-
-使用 Playwright 打开：
-
-- `http://127.0.0.1:5666/admin/tasks/auto-renew`
-
-页面确认：
-
-- 页面标题：`续费列表 - Vben Admin Antd`。
-- 顶部统计显示：
-  - 最近24小时成功：`0`
-  - 最近24小时失败：`1026`
-  - 当前待执行 IP：`443`
-  - 最新批次：`7a1c26d5a339462a / 171 条`
-- 待执行 IP 表真实渲染，首屏显示失败待重试记录、订单号、到期时间、自动续费时间、余额和操作按钮。
-- 历史执行记录真实渲染。
-- 请求状态：
-  - `/api/admin/user/info`：`200`
-  - `/api/admin/tasks/auto-renew/`：`200`
-  - 未再出现 `net::ERR_ABORTED`。
-- 浏览器控制台：`0 error / 0 warning`。
-
-## 验证命令
+## 验证
 
 已通过：
 
 ```bash
 UV_CACHE_DIR=/private/tmp/uv-cache-shop uv run python manage.py check
-UV_CACHE_DIR=/private/tmp/uv-cache-shop uv run python -m py_compile cloud/api_tasks.py cloud/tests.py cloud/tests_task_center.py bot/tests.py
-cd /Users/a399/Desktop/data/vue-shop-admin/apps/web-antd && pnpm exec vue-tsc --noEmit --skipLibCheck
-UV_CACHE_DIR=/private/tmp/uv-cache-shop DJANGO_TEST_SQLITE=1 uv run python manage.py test cloud.tests.CloudServerServicesTestCase.test_auto_renew_task_detail_includes_due_retry_and_fallback_items cloud.tests.CloudServerServicesTestCase.test_auto_renew_detail_ignores_order_without_asset_expiry_fact cloud.tests.CloudServerServicesTestCase.test_run_auto_renew_tasks_executes_due_retry_and_fallback_queue cloud.tests.CloudServerServicesTestCase.test_run_auto_renew_order_executes_single_order --settings=shop.settings --verbosity=1
-UV_CACHE_DIR=/private/tmp/uv-cache-shop DJANGO_TEST_SQLITE=1 uv run python manage.py test cloud.tests_task_center.CloudTaskCenterApiTestCase.test_auto_renew_section_counts_retry_failed_as_failed cloud.tests_task_center.CloudTaskCenterApiTestCase.test_auto_renew_section_counts_recent_failed_history_as_failed cloud.tests_task_center.CloudTaskCenterApiTestCase.test_auto_renew_section_does_not_duplicate_active_failure_history cloud.tests_task_center.CloudTaskCenterApiTestCase.test_auto_renew_section_counts_all_recent_failed_history_queryset --settings=shop.settings --verbosity=1
-UV_CACHE_DIR=/private/tmp/uv-cache-shop DJANGO_TEST_SQLITE=1 uv run python manage.py test bot.tests.TelegramListenerPushTestCase.test_notice_copy_wrapper_keeps_concurrent_user_sends_isolated --settings=shop.settings --verbosity=1
+UV_CACHE_DIR=/private/tmp/uv-cache-shop DJANGO_TEST_SQLITE=1 uv run python manage.py test cloud.tests_task_center --settings=shop.settings --verbosity=1
 ```
 
-SQLite `db_comment` 警告仍是已知数据库能力差异，不影响本轮结果。
+已确认的环境阻断：
+
+```bash
+node -e "require('http').get('http://127.0.0.1:5666/admin/tasks').on('error', console.log)"
+UV_CACHE_DIR=/private/tmp/uv-cache-shop uv run python manage.py shell -c "from cloud.task_center import task_center_payload; print(task_center_payload())"
+```
+
+结果：
+
+- 本地 HTTP 访问被沙箱拦截，报 `connect EPERM 127.0.0.1:5666`
+- 默认 MySQL 连接被沙箱拦截，报 `Can't connect to MySQL server on '127.0.0.1' ([Errno 1] Operation not permitted)`
+- SQLite 仍有 `db_comment` 能力差异告警，属已知差异，不影响本轮聚焦测试结果
 
 ## 红线
 
@@ -89,6 +54,5 @@ SQLite `db_comment` 警告仍是已知数据库能力差异，不影响本轮结
 
 ## 下一步
 
-- 继续真实浏览器巡检生命周期创建/关机/删除/IP 删除开关联动。
-- 继续机器人真机多任务高并发点击测试，覆盖购买、续费、换 IP、重装迁移/重建、修改配置和返回链。
-- 继续代理列表各标签翻页、跳页和数据库对账。
+- 若后续运行环境允许访问本机回环网络和本地 MySQL，优先恢复任务中心真实浏览器巡检，对 `/admin/tasks` 做卡片点击、详情跳转、控制台和请求状态复查。
+- 继续覆盖任务中心与计划页、通知计划、自动续费页之间的状态口径一致性，重点看失败/告警计数和最近失败样本是否重复或漏报。

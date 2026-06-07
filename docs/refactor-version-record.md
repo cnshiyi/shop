@@ -12638,6 +12638,63 @@ SQLite `db_comment` 警告仍是已知数据库能力差异。
 - 本轮未恢复废弃 runtime app、订单侧到期字段、旧计划快照、旧退款逻辑、旧退款函数名或旧兼容入口。
 - 本轮未打印 Telegram token、Telegram session、TOTP、支付密钥、云厂商密钥、完整代理链接、代理 secret 或登录密码。
 
+## 2026-06-08 03:13 任务中心聚合层只读审计
+
+### 背景
+
+按自动优化固定巡检清单继续覆盖高风险路径，原计划对任务中心 `/admin/tasks` 做真实浏览器巡检，并与默认 MySQL 实库聚合结果对账。
+
+本轮环境存在明显沙箱边界：
+
+- 浏览器/Node 访问 `127.0.0.1:5666` 被拦截，返回 `connect EPERM`
+- Django 默认 MySQL 连接 `127.0.0.1` 被拦截，返回 `Operation not permitted`
+
+因此本轮不做不可验证的猜测性修复，改为任务中心聚合层只读审计，并补跑可在当前环境完成的真实验证。
+
+### 审计范围
+
+- `cloud/task_center.py`
+- `cloud/tests_task_center.py`
+- 固定巡检清单中的红线关键字扫描
+
+### 审计结论
+
+- `cloud.tests_task_center` 共 `14` 个测试全部通过，覆盖：
+  - 五个 section 统一聚合存在性
+  - 通知计划失败重试统计
+  - 生命周期失败历史统计
+  - 自动续费失败/重试/历史去重统计
+- 静态扫描未发现 runtime 层恢复订单侧到期事实字段、旧计划快照入口、旧退款入口或废弃 runtime app 回流。
+- `CloudAsset.actual_expires_at` 仍是 runtime 资产到期事实来源；`service_expires_at` 相关命中仍主要位于历史迁移、日志语义或兼容测试上下文，没有发现当前 runtime 用它替代资产事实。
+
+### 验证
+
+已通过：
+
+```bash
+UV_CACHE_DIR=/private/tmp/uv-cache-shop uv run python manage.py check
+UV_CACHE_DIR=/private/tmp/uv-cache-shop DJANGO_TEST_SQLITE=1 uv run python manage.py test cloud.tests_task_center --settings=shop.settings --verbosity=1
+```
+
+已确认的环境阻断：
+
+```bash
+node -e "require('http').get('http://127.0.0.1:5666/admin/tasks').on('error', console.log)"
+UV_CACHE_DIR=/private/tmp/uv-cache-shop uv run python manage.py shell -c "from cloud.task_center import task_center_payload; print(task_center_payload())"
+```
+
+结果：
+
+- 本机回环 HTTP 被沙箱拦截，无法在当前会话中完成真实浏览器/接口巡检
+- 默认 MySQL 也被沙箱拦截，无法读取真实库做本轮数据库对账
+- SQLite `db_comment` 告警仍是已知能力差异，不影响任务中心聚焦测试通过
+
+### 结果
+
+- 本轮未改业务代码，只更新巡检记录
+- 未发现需要在当前边界内立即修复的任务中心聚合回归
+- 下一轮若环境允许本机回环和本地 MySQL，优先恢复 `/admin/tasks` 真实浏览器巡检，并核对任务中心和计划页/通知计划/自动续费页的失败与告警口径
+
 ## 2026-06-08 02:42 计划页真实浏览器巡检
 
 ### 背景
