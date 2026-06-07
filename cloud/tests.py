@@ -2921,6 +2921,13 @@ class CloudServerServicesTestCase(TestCase):
         admin = get_user_model().objects.create_user(username='admin_asset_risk_filter', password='x', is_staff=True)
         group = TelegramGroupFilter.objects.create(chat_id=-1001993001, title='Risk Filter Group', enabled=True)
         normal_user = TelegramUser.objects.create(tg_user_id=991301, username='risk_normal_user')
+        account = CloudAccountConfig.objects.create(
+            provider=CloudAccountConfig.PROVIDER_AWS,
+            name='risk-filter-active-account',
+            region_hint=self.plan.region_code,
+            is_active=True,
+        )
+        account_label = cloud_account_label(account)
         due_expires_at = timezone.now() + timezone.timedelta(days=2)
         due_order = CloudServerOrder.objects.create(
             order_no='RISK-FILTER-ORDER-001',
@@ -2944,6 +2951,8 @@ class CloudServerServicesTestCase(TestCase):
             order=due_order,
             user=self.user,
             telegram_group=group,
+            cloud_account=account,
+            account_label=account_label,
             provider='aws_lightsail',
             region_code=self.plan.region_code,
             region_name=self.plan.region_name,
@@ -2958,6 +2967,8 @@ class CloudServerServicesTestCase(TestCase):
             source=CloudAsset.SOURCE_AWS_SYNC,
             user=normal_user,
             telegram_group=group,
+            cloud_account=account,
+            account_label=account_label,
             provider='aws_lightsail',
             region_code=self.plan.region_code,
             region_name=self.plan.region_name,
@@ -3159,12 +3170,21 @@ class CloudServerServicesTestCase(TestCase):
     def test_cloud_asset_expired_filter_excludes_unattached_ip_assets(self):
         admin = get_user_model().objects.create_user(username='admin_asset_expired_unattached_filter', password='x', is_staff=True)
         group = TelegramGroupFilter.objects.create(chat_id=-1001993002, title='Risk Filter Group 2', enabled=True)
+        account = CloudAccountConfig.objects.create(
+            provider=CloudAccountConfig.PROVIDER_AWS,
+            name='risk-expired-active-account',
+            region_hint=self.plan.region_code,
+            is_active=True,
+        )
+        account_label = cloud_account_label(account)
         expired_at = timezone.now() - timezone.timedelta(days=1)
         expired_asset = CloudAsset.objects.create(
             kind=CloudAsset.KIND_SERVER,
             source=CloudAsset.SOURCE_AWS_SYNC,
             user=self.user,
             telegram_group=group,
+            cloud_account=account,
+            account_label=account_label,
             provider='aws_lightsail',
             region_code=self.plan.region_code,
             region_name=self.plan.region_name,
@@ -3178,6 +3198,8 @@ class CloudServerServicesTestCase(TestCase):
             source=CloudAsset.SOURCE_AWS_SYNC,
             user=self.user,
             telegram_group=group,
+            cloud_account=account,
+            account_label=account_label,
             provider='aws_lightsail',
             region_code=self.plan.region_code,
             region_name=self.plan.region_name,
@@ -3212,10 +3234,18 @@ class CloudServerServicesTestCase(TestCase):
     # 功能：验证后台资产风险识别使用原始云状态，避免展示态标签折叠后漏掉未附加固定IP。
     def test_cloud_asset_unattached_filter_uses_raw_provider_status(self):
         admin = get_user_model().objects.create_user(username='admin_asset_raw_unattached_filter', password='x', is_staff=True)
+        account = CloudAccountConfig.objects.create(
+            provider=CloudAccountConfig.PROVIDER_AWS,
+            name='risk-unattached-active-account',
+            region_hint=self.plan.region_code,
+            is_active=True,
+        )
         asset = CloudAsset.objects.create(
             kind=CloudAsset.KIND_SERVER,
             source=CloudAsset.SOURCE_AWS_SYNC,
             user=self.user,
+            cloud_account=account,
+            account_label=cloud_account_label(account),
             provider='aws_lightsail',
             region_code=self.plan.region_code,
             region_name=self.plan.region_name,
