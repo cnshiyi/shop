@@ -7,6 +7,7 @@ from django.views.decorators.http import require_GET
 
 from cloud.models import (
     CloudAssetSyncJob,
+    CloudAutoRenewPatrolLog,
     CloudAutoRenewRetryTask,
     CloudIpLog,
     CloudLifecycleTask,
@@ -366,13 +367,34 @@ def _recent_lifecycle_db_task_items(now) -> list[dict]:
 
 
 def _current_lifecycle_plan_items(*, page_size=1000) -> list[dict]:
-    from bot.api import _ip_delete_plan_asset_page_items, _server_lifecycle_plan_page_items
+    from bot.api import _asset_delete_plan_item_payload, _shutdown_stage_item_payload
+    from cloud.lifecycle_plan_queries import server_lifecycle_plan_queryset, server_shutdown_complete_q
 
-    return [
-        *_server_lifecycle_plan_page_items(plan_stage='shutdown', page=1, page_size=page_size),
-        *_server_lifecycle_plan_page_items(plan_stage='delete', page=1, page_size=page_size),
-        *_ip_delete_plan_asset_page_items(page=1, page_size=page_size),
-    ]
+    limit = max(int(page_size or 1), 1)
+    items = []
+
+    shutdown_assets = (
+        server_lifecycle_plan_queryset()
+        .exclude(server_shutdown_complete_q())
+        .order_by('actual_expires_at', 'id')[:limit]
+    )
+    items.extend(
+        _shutdown_stage_item_payload(asset, queue_status='scheduled_future', queue_status_label='计划中')
+        for asset in shutdown_assets
+    )
+
+    if len(items) < limit:
+        delete_assets = (
+            server_lifecycle_plan_queryset()
+            .filter(server_shutdown_complete_q())
+            .order_by('actual_expires_at', 'id')[:limit - len(items)]
+        )
+        items.extend(
+            _asset_delete_plan_item_payload(asset, queue_status='scheduled_future', queue_status_label='计划中')
+            for asset in delete_assets
+        )
+
+    return items
 
 
 def _recent_lifecycle_failed_history_items(now) -> list[dict]:
@@ -466,6 +488,38 @@ def _auto_renew_retry_db_items(now) -> list[dict]:
     return [_auto_renew_retry_db_item(task) for task in queryset]
 
 
+def _auto_renew_recent_failed_history_items(now, *, exclude_order_ids=None, limit=8) -> tuple[list[dict], int]:
+    exclude_order_ids = {order_id for order_id in (exclude_order_ids or set()) if order_id}
+    queryset = CloudAutoRenewPatrolLog.objects.filter(
+        executed_at__gte=now - timezone.timedelta(days=1),
+        is_success=False,
+    ).order_by('-executed_at', '-id')
+    if exclude_order_ids:
+        queryset = queryset.exclude(order_id__in=list(exclude_order_ids))
+    total = queryset.count()
+    items = []
+    for log in queryset[:limit]:
+        order_id = log.completed_order_id or log.order_id
+        items.append({
+            'id': f'auto-renew-history:{log.id}',
+            'order_id': order_id,
+            'order_no': log.order_no,
+            'is_success': False,
+            'queue_status': 'failed',
+            'queue_status_label': '失败',
+            'provider': log.provider,
+            'provider_label': _provider_label(log.provider),
+            'ip': log.ip,
+            'failure_reason': log.failure_reason,
+            'created_at': _iso(log.executed_at),
+            'updated_at': _iso(log.executed_at),
+            'executed_at': _iso(log.executed_at),
+            'related_path': f'/admin/cloud-orders/{order_id}' if order_id else '',
+            'detail_path': f'/admin/cloud-orders/{order_id}' if order_id else '',
+        })
+    return items, total
+
+
 def _sync_section(now) -> dict:
     metrics = _cloud_asset_sync_jobs_metrics_payload(window_hours=24)
     active_jobs = [
@@ -511,7 +565,7 @@ def _cloud_orders_section(now) -> dict:
 
 
 def _lifecycle_section(now) -> dict:
-    items_source = _current_lifecycle_plan_items(page_size=1000)
+    items_source = _current_lifecycle_plan_items(page_size=8)
     active_failure_keys = {
         _task_identity(item)
         for item in items_source
@@ -555,6 +609,7 @@ def _lifecycle_section(now) -> dict:
         status_counts=status_counts,
         items=items,
         generated_at=now,
+        extra={'overview_mode': 'preview'},
     )
 
 
@@ -562,9 +617,9 @@ def _notice_section(now) -> dict:
     from cloud.api_tasks import _build_notice_plan_summary
 
     bundle = _build_notice_plan_summary(
-        limit=1000,
+        limit=8,
         offset=0,
-        history_limit=1000,
+        history_limit=8,
         history_offset=0,
         fields={'basic', 'channels', 'retry'},
         include_total_counts=False,
@@ -611,52 +666,33 @@ def _notice_section(now) -> dict:
 
 
 def _auto_renew_section(now) -> dict:
-    from cloud.api_tasks import _auto_renew_history_item_payload, _build_auto_renew_plan_items
-
-    bundle = _build_auto_renew_plan_items(now=now)
-    items_source = [*bundle.get('due_items', []), *bundle.get('future_plan_items', [])]
     db_retry_items = _auto_renew_retry_db_items(now)
     db_retry_order_ids = {item.get('order_id') for item in db_retry_items if item.get('order_id')}
-    if db_retry_order_ids:
-        items_source = [item for item in items_source if item.get('order_id') not in db_retry_order_ids]
-    items_source = [*db_retry_items, *items_source]
     failed_count = sum(
         1
-        for item in items_source
+        for item in db_retry_items
         if item.get('last_failure_reason') or item.get('queue_status') in _AUTO_RENEW_FAILED_QUEUE_STATUSES
     )
-    active_failure_order_ids = {
-        item.get('order_id')
-        for item in items_source
-        if item.get('last_failure_reason') or item.get('queue_status') in _AUTO_RENEW_FAILED_QUEUE_STATUSES
-    }
-    history_qs = bundle.get('history_qs')
-    if hasattr(history_qs, 'filter'):
-        recent_failed_history_qs = history_qs.filter(executed_at__gte=now - timezone.timedelta(days=1), is_success=False)
-        if active_failure_order_ids:
-            recent_failed_history_qs = recent_failed_history_qs.exclude(order_id__in=active_failure_order_ids)
-        recent_failed_count = recent_failed_history_qs.count()
-        recent_failed_history = [_auto_renew_history_item_payload(item) for item in recent_failed_history_qs[:8]]
-    else:
-        recent_failed_history = [
-            item for item in _recent_failed_history_items(history_qs or [], since=now - timezone.timedelta(days=1))
-            if not item.get('order_id') or item.get('order_id') not in active_failure_order_ids
-        ]
-        recent_failed_count = len(recent_failed_history)
-    warning_count = sum(1 for item in items_source if item.get('queue_status') in _AUTO_RENEW_WARNING_QUEUE_STATUSES)
-    status_counts = _status_counts_from_items(items_source, 'queue_status')
+    recent_failed_history, recent_failed_count = _auto_renew_recent_failed_history_items(
+        now,
+        exclude_order_ids=db_retry_order_ids,
+        limit=8,
+    )
+    warning_count = sum(1 for item in db_retry_items if item.get('queue_status') in _AUTO_RENEW_WARNING_QUEUE_STATUSES)
+    status_counts = _status_counts_from_items(db_retry_items, 'queue_status')
     if recent_failed_count:
         status_counts['failed'] = status_counts.get('failed', 0) + recent_failed_count
     items = [
         _plan_item(row, task_type='auto_renew', task_label='自动续费')
-        for row in [*items_source, *recent_failed_history][:8]
+        for row in [*db_retry_items, *recent_failed_history][:8]
     ]
+    total_enabled = CloudServerOrder.objects.filter(auto_renew_enabled=True).count()
     return _task_section_payload(
         key='auto_renew',
         title='自动续费',
         path='/admin/tasks/auto-renew',
-        total=len(items_source) + recent_failed_count,
-        active=sum(1 for item in items_source if item.get('queue_status') in ['due_now', 'scheduled_future', 'overdue', 'within_window', 'retry_pending', 'retry_failed', 'fallback_retry']),
+        total=total_enabled + recent_failed_count,
+        active=len(db_retry_items),
         failed=failed_count + recent_failed_count,
         warning=warning_count,
         status_counts=status_counts,

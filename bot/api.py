@@ -1,5 +1,6 @@
 """bot 域后台 API。"""
 
+import json
 import re
 import secrets
 from copy import deepcopy
@@ -42,7 +43,7 @@ from cloud.sync_safety import missing_confirmation_state
 from core.cloud_accounts import cloud_account_label, cloud_account_label_variants
 from core.dashboard_api import DASHBOARD_SESSION_IDLE_SECONDS, _apply_keyword_filter, _authenticate_dashboard_request, _countdown_label, _dashboard_session_payload, _days_left, _decimal_to_str, _error, _get_keyword, _iso, _json_payload, _ok, _parse_decimal, _parse_runtime_time_point, _payload_bool, _provider_label, _provider_status_label, _read_payload, _region_label, _server_source_label, _session_token_for_request, _split_usernames, _staff_required, _status_label, _user_payload, _user_from_bearer_session, dashboard_login_required, dashboard_superuser_required
 from core.dashboard_totp import dashboard_totp_secret as _totp_secret, generate_totp_secret as _generate_totp_secret, normalize_totp_secret as _normalize_totp_secret, totp_otpauth_url as _totp_otpauth_url, verify_totp_token as _verify_totp_token
-from core.models import CloudAccountConfig
+from core.models import CloudAccountConfig, SiteConfig
 from core.runtime_config import get_runtime_config
 from orders.models import Order, Product, Recharge
 
@@ -56,6 +57,7 @@ _LIFECYCLE_PLAN_CACHE = {
     'generated_at': None,
     'limit': 0,
 }
+_LIFECYCLE_PLAN_COUNT_SNAPSHOT_KEY = 'cloud_lifecycle_plan_count_snapshot'
 
 
 def _plan_item_identity(source_kind: str, source_id, *, plan_kind: str = '', plan_stage: str = '') -> dict:
@@ -815,6 +817,35 @@ def _build_lifecycle_plan_count_snapshot():
     }
 
 
+def _store_lifecycle_plan_count_snapshot(counts: dict, *, generated_at=None):
+    generated_at = generated_at or timezone.now()
+    payload = {
+        'counts': counts,
+        'generated_at': _iso(generated_at),
+    }
+    SiteConfig.set(_LIFECYCLE_PLAN_COUNT_SNAPSHOT_KEY, json.dumps(payload, ensure_ascii=False))
+
+
+def _load_lifecycle_plan_count_snapshot():
+    raw = SiteConfig.get(_LIFECYCLE_PLAN_COUNT_SNAPSHOT_KEY, '')
+    if not raw:
+        return None, None
+    try:
+        payload = json.loads(raw)
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return None, None
+    counts = payload.get('counts') if isinstance(payload, dict) else None
+    if not isinstance(counts, dict):
+        return None, None
+    required_top_keys = {'plan_stats', 'total_counts', 'ip_delete_total_counts'}
+    if not required_top_keys.issubset(counts.keys()):
+        return None, None
+    generated_at = parse_datetime(str(payload.get('generated_at') or '')) if isinstance(payload, dict) else None
+    if generated_at and timezone.is_naive(generated_at):
+        generated_at = timezone.make_aware(generated_at, timezone.get_current_timezone())
+    return counts, generated_at
+
+
 def _sync_lifecycle_plan_table(*, limit=1000, page_size=None):
     page_size = max(1, min(int(page_size or limit or 1000), 1000))
     server_delete_items = _server_lifecycle_plan_page_items(plan_stage='delete', page=1, page_size=page_size)
@@ -828,6 +859,7 @@ def _sync_lifecycle_plan_table(*, limit=1000, page_size=None):
     }
     counts = _build_lifecycle_plan_count_snapshot()
     generated_at = timezone.now()
+    _store_lifecycle_plan_count_snapshot(counts, generated_at=generated_at)
     _LIFECYCLE_PLAN_CACHE.update({
         'bundle': deepcopy(bundle),
         'counts': deepcopy(counts),
@@ -845,8 +877,14 @@ def _cached_lifecycle_plan_count_snapshot():
     cached = _LIFECYCLE_PLAN_CACHE.get('counts')
     if cached is not None:
         return deepcopy(cached)
+    persisted, generated_at = _load_lifecycle_plan_count_snapshot()
+    if persisted is not None:
+        _LIFECYCLE_PLAN_CACHE['counts'] = deepcopy(persisted)
+        _LIFECYCLE_PLAN_CACHE['generated_at'] = generated_at or timezone.now()
+        return deepcopy(persisted)
     counts = _build_lifecycle_plan_count_snapshot()
     generated_at = timezone.now()
+    _store_lifecycle_plan_count_snapshot(counts, generated_at=generated_at)
     _LIFECYCLE_PLAN_CACHE['counts'] = deepcopy(counts)
     _LIFECYCLE_PLAN_CACHE['generated_at'] = generated_at
     return counts

@@ -11255,3 +11255,81 @@ git -C /Users/a399/Desktop/data/vue-shop-admin diff --check
 
 - 当前工作区仍有未提交的任务中心相关改动：`cloud/api_tasks.py`、`cloud/task_center.py`、`cloud/tests_task_center.py`，本轮未介入。
 - 任务中心、生命周期计划、通知计划的 50 万到 100 万级真实页面跳页和数据库精确对账仍待下一轮继续。
+
+## 2026-06-07 任务中心轻量化与生命周期计划持久计数快照
+
+### 背景
+
+用户要求当前会话持续循环测试，并强调不能只调用 API，必须实际打开页面查看数据是否正常显示。本轮继续处理百万级压测数据下任务中心、生命周期计划和 IP 删除历史加载慢的问题，并对计划页翻页做真实页面和数据库双向对账。
+
+### 修改
+
+- `cloud/task_center.py` 将生命周期、通知计划和自动续费总览改为轻量预览：
+  - 生命周期只取少量当前计划项和 DB 任务 / 失败历史，不再为了任务中心总览构建完整计划页。
+  - 通知计划只取 8 条预览和 8 条历史，不再默认取 1000 条。
+  - 自动续费直接读取 `CloudAutoRenewRetryTask` 与 `CloudAutoRenewPatrolLog`，不再通过完整自动续费计划构建统计。
+- `cloud/api_tasks.py` 的自动续费置顶任务改为读取重试任务和近 24 小时巡检日志，避免旧 `/api/admin/tasks/` 页面触发完整自动续费计划扫描。
+- `bot/api.py` 新增生命周期计划计数持久快照：
+  - key 为 `cloud_lifecycle_plan_count_snapshot`。
+  - 显式刷新 / 同步计划表时重算全量计数并写入 `SiteConfig`。
+  - 普通 GET 优先复用进程缓存，再读持久快照，避免 runserver 重启后第一次普通访问同步扫 150 万资产。
+- `cloud/tests.py` 增加生命周期计划测试隔离，清理 `SiteConfig` 缓存和计划进程缓存；新增持久计数快照复用测试。
+- `cloud/tests_task_center.py` 改为使用真实 DB 任务和历史记录验证自动续费统计，减少 mock 完整计划构建导致的口径偏差。
+
+### 真实页面验证
+
+- 已重启后端开发服务，确认页面运行在本轮最新代码上。
+- 实际打开前端页面：`/admin/tasks/plans`。
+- 页面显示：
+  - 当前计划资产：1500000。
+  - 缺少到期时间：251。
+  - 未附加 IP：500001。
+  - 服务器资产：999999。
+  - 关机计划：已加载 50 / 总 979990。
+  - IP 删除计划：共 500000。
+  - IP 删除历史：520007。
+- 实际点击 IP 删除历史第 2 页：
+  - 页面显示 `51-100 / 共 520007 条`。
+  - 页面首行资产名为 `LOADTEST20260605X-asset-018990`。
+- 实际点击 IP 删除历史最后页 `10401`：
+  - 页面显示 `520001-520007 / 共 520007 条`。
+  - 页面首行资产名为 `20260605-7886424151-5-o92`。
+  - 页面末行资产名为 `20260602-990000000001-5-o78-ip`。
+- 浏览器控制台检查为 0 error / 0 warning。
+- 临时后台账号 `codex_ui_tester` 已删除。
+
+### 数据库对账
+
+使用同一查询层 `ip_delete_history_page_sources()` 对账：
+
+- 计数：IP 删除计划 500000，IP 删除历史日志 520006，IP 删除历史总数 520007。
+- 第 2 页加载 50 条：
+  - 前三条：`LOADTEST20260605X-asset-018990`、`LOADTEST20260605X-asset-018970`、`LOADTEST20260605X-asset-018950`。
+  - 后三条：`LOADTEST20260605X-asset-018050`、`LOADTEST20260605X-asset-018030`、`LOADTEST20260605X-asset-018010`。
+- 最后一页加载 7 条：
+  - 前三条：`20260605-7886424151-5-o92`、`20260604-7886424151-5-o91`、`20260604-7886424151-5-o90`。
+  - 后三条：`20260602-990000000001-5-o76`、`20260602-990000000001-5-o75`、`20260602-990000000001-5-o78-ip`。
+
+结论：本轮验证不是只看计数，第 2 页和最后页页面内容均与数据库分页结果一致，未发现翻页丢数据或第一页重复渲染。
+
+### 验证
+
+本地已通过：
+
+```bash
+UV_CACHE_DIR=/private/tmp/uv-cache-shop DJANGO_TEST_SQLITE=1 uv run python manage.py test cloud.tests.CloudServerServicesTestCase.test_lifecycle_plans_reuses_cached_count_snapshot_after_refresh cloud.tests.CloudServerServicesTestCase.test_lifecycle_plans_reads_persisted_count_snapshot_after_process_cache_clear cloud.tests.CloudServerServicesTestCase.test_lifecycle_plans_server_delete_pagination_contract cloud.tests.CloudServerServicesTestCase.test_lifecycle_plans_ip_delete_history_pagination_contract cloud.tests.CloudServerServicesTestCase.test_lifecycle_plans_use_stage_specific_asset_switches cloud.tests.CloudServerServicesTestCase.test_manual_order_delete_enters_lifecycle_success_history cloud.tests_task_center.CloudTaskCenterApiTestCase --settings=shop.settings --verbosity=1
+UV_CACHE_DIR=/private/tmp/uv-cache-shop uv run python manage.py check
+```
+
+结果：20 个任务中心 / 生命周期聚焦测试和 Django 系统检查通过。SQLite 输出的 `db_comment` 警告为已知数据库能力差异。
+
+### 红线
+
+- 本轮未执行真实云资源创建、删除、关机、释放 IP、换 IP、真实支付、链上广播、删除业务数据、删除测试库或生产发布。
+- 本轮未打印密钥、私钥、Telegram session、TOTP、支付密钥或云厂商密钥。
+- 本轮未恢复废弃 runtime app、订单侧到期字段、旧计划快照、旧退款入口、旧退款函数名或旧兼容壳。
+
+### 剩余风险
+
+- 当前没有 `logged_in` 状态的 Telegram 登录账号，机器人真机菜单/回调点击仍无法完成。
+- 下一轮继续覆盖通知计划页面、任务中心页面和代理列表页面的真实翻页 / 跳页 / 数据库对账，并继续检查生命周期全局开关与单项开关联动。

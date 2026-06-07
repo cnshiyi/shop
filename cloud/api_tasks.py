@@ -17,7 +17,7 @@ from cloud.asset_expiry import order_asset_expiry
 from cloud.dashboard_snapshots import _refresh_dashboard_plan_snapshots
 from cloud.lifecycle import AUTO_RENEW_BEFORE_EXPIRY_WINDOW, NOTICE_TYPE_SWITCH_CONFIG, _auto_renew_notice_batch_payload, _notice_effective_delivered, _get_due_orders, _get_notice_text_override, _lifecycle_notice_batch_payload, _notice_payload_for_order, _notice_override_key, _notice_schedule, _record_auto_renew_patrol_log, _renew_notice_batch_payload, _run_auto_renew, _set_notice_text_override, cloud_notice_type_enabled
 from cloud.lifecycle_schedule import compute_order_lifecycle_fields
-from cloud.models import CloudAsset, CloudAutoRenewPatrolLog, CloudServerOrder, CloudUserNoticeLog
+from cloud.models import CloudAsset, CloudAutoRenewPatrolLog, CloudAutoRenewRetryTask, CloudServerOrder, CloudUserNoticeLog
 from cloud.services import RenewalPriceMissingError, _renewal_price
 from core.dashboard_api import _decimal_to_str, _error, _iso, _ok, _provider_label, _read_payload, _status_label, _user_payload, dashboard_login_required, dashboard_superuser_required
 from core.models import SiteConfig
@@ -68,15 +68,15 @@ def _auto_renew_task_status(order, now, *, latest_failure_reason: str | None = N
 
 # 功能：提供 后台 API 接口 的内部辅助逻辑，供同模块流程复用。
 def _auto_renew_pinned_task(now):
-    bundle = _build_auto_renew_plan_items(now=now)
-    plan_items = [*bundle.get('due_items', []), *bundle.get('future_plan_items', [])]
     total_enabled = CloudServerOrder.objects.filter(auto_renew_enabled=True).count()
-    failed_count = sum(1 for item in plan_items if item.get('queue_status') == 'retry_failed')
-    pending_count = sum(1 for item in plan_items if item.get('queue_status') in _AUTO_RENEW_PLAN_DUE_STATUSES)
+    retry_queryset = CloudAutoRenewRetryTask.objects.filter(
+        status__in=[CloudAutoRenewRetryTask.STATUS_PENDING, CloudAutoRenewRetryTask.STATUS_FAILED],
+    )
+    pending_count = retry_queryset.filter(status=CloudAutoRenewRetryTask.STATUS_PENDING).count()
+    failed_count = retry_queryset.filter(status=CloudAutoRenewRetryTask.STATUS_FAILED).count()
     success_count = CloudAutoRenewPatrolLog.objects.filter(is_success=True, executed_at__gte=now - timezone.timedelta(days=1)).count()
     latest_time = (
-        bundle.get('last_run_at')
-        or CloudAutoRenewPatrolLog.objects.order_by('-executed_at').values_list('executed_at', flat=True).first()
+        CloudAutoRenewPatrolLog.objects.order_by('-executed_at').values_list('executed_at', flat=True).first()
         or now
     )
     if failed_count:

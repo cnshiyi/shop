@@ -1110,6 +1110,15 @@ class CloudServerServicesTestCase(TestCase):
 
     # 功能：处理 云资产、云订单和生命周期 中的 setUp 业务流程。
     def setUp(self):
+        import bot.api as bot_api
+
+        SiteConfig.clear_cache()
+        bot_api._LIFECYCLE_PLAN_CACHE.update({
+            'bundle': None,
+            'counts': None,
+            'generated_at': None,
+            'limit': 0,
+        })
         self.factory = RequestFactory()
         self.user = TelegramUser.objects.create(tg_user_id=990001, username='svc_test')
         self.plan = CloudServerPlan.objects.create(
@@ -7727,6 +7736,7 @@ class CloudServerServicesTestCase(TestCase):
     def test_lifecycle_plans_reuses_cached_count_snapshot_after_refresh(self):
         import bot.api as bot_api
 
+        SiteConfig.objects.filter(key=bot_api._LIFECYCLE_PLAN_COUNT_SNAPSHOT_KEY).delete()
         bot_api._LIFECYCLE_PLAN_CACHE.update({
             'bundle': None,
             'counts': None,
@@ -7773,6 +7783,63 @@ class CloudServerServicesTestCase(TestCase):
 
         self.assertEqual(cached_response.status_code, 200)
         cached_data = json.loads(cached_response.content)['data']
+        self.assertGreaterEqual(cached_data['shutdown_plan_count'], 1)
+
+    # 功能：验证计划页进程缓存清空后可复用持久计数快照，避免冷启动普通加载重扫全库。
+    def test_lifecycle_plans_reads_persisted_count_snapshot_after_process_cache_clear(self):
+        import bot.api as bot_api
+
+        SiteConfig.objects.filter(key=bot_api._LIFECYCLE_PLAN_COUNT_SNAPSHOT_KEY).delete()
+        bot_api._LIFECYCLE_PLAN_CACHE.update({
+            'bundle': None,
+            'counts': None,
+            'generated_at': None,
+            'limit': 0,
+        })
+        now = timezone.now()
+        CloudAsset.objects.create(
+            kind=CloudAsset.KIND_SERVER,
+            source=CloudAsset.SOURCE_AWS_SYNC,
+            user=self.user,
+            provider='aws_lightsail',
+            region_code=self.plan.region_code,
+            region_name=self.plan.region_name,
+            asset_name='lifecycle-persisted-count-server',
+            instance_id='i-lifecycle-persisted-count-server',
+            public_ip='5.5.7.41',
+            status=CloudAsset.STATUS_RUNNING,
+            is_active=True,
+            actual_expires_at=now + timezone.timedelta(days=30),
+        )
+        staff_user = get_user_model().objects.create_user(username='staff_lifecycle_persisted_count', password='x', is_staff=True)
+        refresh_request = RequestFactory().get('/api/admin/tasks/plans/', {
+            'compact': '1',
+            'fields': 'basic,execution',
+            'limit': '1',
+            'refresh': '1',
+        })
+        self._attach_bearer_session(refresh_request, staff_user)
+        refresh_response = lifecycle_plans(refresh_request)
+        self.assertEqual(refresh_response.status_code, 200)
+
+        bot_api._LIFECYCLE_PLAN_CACHE.update({
+            'bundle': None,
+            'counts': None,
+            'generated_at': None,
+            'limit': 0,
+        })
+        cached_request = RequestFactory().get('/api/admin/tasks/plans/', {
+            'compact': '1',
+            'fields': 'basic,execution',
+            'limit': '1',
+        })
+        self._attach_bearer_session(cached_request, staff_user)
+        with patch('bot.api._build_lifecycle_plan_count_snapshot', side_effect=AssertionError('persisted count snapshot should be reused')):
+            cached_response = lifecycle_plans(cached_request)
+
+        self.assertEqual(cached_response.status_code, 200)
+        cached_data = json.loads(cached_response.content)['data']
+        self.assertEqual(cached_data['cache_mode'], 'cached')
         self.assertGreaterEqual(cached_data['shutdown_plan_count'], 1)
 
     # 功能：验证服务器删除计划服务端分页契约，跨页不重复且排序结果能和数据库事实对上。
@@ -9816,7 +9883,7 @@ class CloudServerServicesTestCase(TestCase):
 
         self.assertTrue(result['ok'])
         staff_user = get_user_model().objects.create_user(username='staff_manual_delete_lifecycle_history', password='x', is_staff=True)
-        request = self.factory.get('/api/admin/tasks/plans/', {'limit': 1000})
+        request = self.factory.get('/api/admin/tasks/plans/', {'limit': 1000, 'refresh': '1'})
         self._attach_bearer_session(request, staff_user)
 
         response = lifecycle_plans(request)
@@ -13583,7 +13650,7 @@ class CloudServerServicesTestCase(TestCase):
             actual_expires_at=timezone.now() + timezone.timedelta(days=1),
         )
         staff_user = get_user_model().objects.create_user(username='staff_lifecycle_cached_table', password='x', is_staff=True)
-        request = self.factory.get('/api/admin/tasks/plans/', {'limit': 1000})
+        request = self.factory.get('/api/admin/tasks/plans/', {'limit': 1000, 'refresh': '1'})
         self._attach_bearer_session(request, staff_user)
         first_response = lifecycle_plans(request)
         self.assertEqual(json.loads(first_response.content)['data']['cache_mode'], 'refreshed')

@@ -4,37 +4,48 @@
 
 ## 最近一轮
 
-- 时间：2026-06-07 20:05 CST
-- 状态：修复后台云订单编辑到期时间时未同步同订单全部服务器资产，避免 `CloudAsset.actual_expires_at` 事实分裂。
-- 本轮范围：生命周期事实专项巡检、运行时旧入口扫描、后台订单到期时间同步修复、聚焦回归测试。
+- 时间：2026-06-07 20:44 CST
+- 状态：修复任务中心和生命周期计划在百万级资产下的冷启动慢加载，并完成真实前端计划页翻页对账。
+- 本轮范围：任务中心轻量预览、生命周期计划计数持久快照、生命周期测试隔离、真实页面分页验证。
 
 ## 修复摘要
 
-- `TODO.md` 已无未完成条目，本轮按固定巡检清单执行“生命周期事实与旧兼容回流”专项审计。
-- 扫描确认运行时 `INSTALLED_APPS` 仍只包含 `core`、`bot`、`orders`、`cloud`，未恢复 `accounts`、`finance`、`mall`、`monitoring`、`dashboard_api`、`biz`。
-- 运行时代码未发现 `service_expires_at`、旧退款入口或旧计划快照表回流；`dashboard_plan_snapshots` 命中为当前后台计划投影刷新逻辑，不是旧架构残留。
-- 审计过程触发真实回归：后台 `cloud_order_detail` 编辑 `actual_expires_at` 时只通过 `_update_order_primary_records()` 更新主记录，导致同订单其他服务器资产仍保留旧到期时间，`order_asset_expiry(order)` 可继续读到旧值。
-- 已改为在订单后台编辑到期时间时调用 `set_order_asset_expiry(order, asset_expires_at, update_lifecycle=False)`，统一同步同订单全部服务器资产，再保留原有主记录字段同步逻辑处理 IP、名称、状态等非到期字段。
+- `cloud/task_center.py` 的生命周期、通知计划和自动续费总览改为轻量预览，不再为任务中心同步构建完整百万级计划。
+- 自动续费置顶任务改为直接读取 `CloudAutoRenewRetryTask` 和 `CloudAutoRenewPatrolLog`，避免旧接口为了统计扫描完整自动续费计划。
+- `bot/api.py` 新增生命周期计划计数持久快照 `cloud_lifecycle_plan_count_snapshot`，显式刷新时重算并写入 `SiteConfig`，普通 GET 优先复用进程缓存或持久快照。
+- `cloud/tests.py` 增加生命周期计划缓存隔离，避免 `SiteConfig` 缓存和计划进程缓存跨测试污染；旧“首次刷新”测试改为显式 `refresh=1` 后再验证普通请求走缓存。
+- `cloud/tests_task_center.py` 改用真实 DB 任务和历史记录验证自动续费统计，不再 mock 完整自动续费计划构建。
 
-## 数据与结论
+## 真实页面和数据库对账
 
-- 本轮不涉及真实云资源、真实支付、链上广播、数据库删除或生产发布。
-- 本轮属于后端生命周期事实修复，不涉及前端代码改动；前端仓库空白检查保持通过。
-- 压测数据规模：本轮未进行 10 万级以上压测，属于单点生命周期回归修复与聚焦测试。
+- 后端已用最新代码重启：`127.0.0.1:8000`。
+- 前端实际打开：`127.0.0.1:5666/admin/tasks/plans`。
+- 页面显示：
+  - 当前计划资产：1500000。
+  - 缺少到期时间：251。
+  - 未附加 IP：500001。
+  - 服务器资产：999999。
+  - 关机计划：已加载 50 / 总 979990。
+  - IP 删除计划：共 500000。
+  - IP 删除历史：520007。
+- 浏览器实际点击 IP 删除历史第 2 页，页面显示 `51-100 / 共 520007 条`，首行 `LOADTEST20260605X-asset-018990`。
+- 浏览器实际点击 IP 删除历史最后页 `10401`，页面显示 `520001-520007 / 共 520007 条`，首行 `20260605-7886424151-5-o92`，末行 `20260602-990000000001-5-o78-ip`。
+- 数据库同一查询层对账：
+  - 第 2 页 50 条，前三条为 `LOADTEST20260605X-asset-018990`、`LOADTEST20260605X-asset-018970`、`LOADTEST20260605X-asset-018950`，后三条为 `LOADTEST20260605X-asset-018050`、`LOADTEST20260605X-asset-018030`、`LOADTEST20260605X-asset-018010`。
+  - 最后一页 7 条，前三条为 `20260605-7886424151-5-o92`、`20260604-7886424151-5-o91`、`20260604-7886424151-5-o90`，后三条为 `20260602-990000000001-5-o76`、`20260602-990000000001-5-o75`、`20260602-990000000001-5-o78-ip`。
+- 浏览器控制台：0 error / 0 warning。
+- 临时后台账号 `codex_ui_tester` 已删除，`.playwright-cli/` 临时产物清理中。
 
 ## 验证
 
 本地已通过：
 
 ```bash
-UV_CACHE_DIR=/private/tmp/uv-cache-shop DJANGO_TEST_SQLITE=1 uv run python manage.py test cloud.tests.CloudServerServicesTestCase.test_dashboard_order_expiry_update_syncs_asset_expiry_and_lifecycle_plan cloud.tests.CloudServerServicesTestCase.test_cloud_asset_detail_does_not_fallback_to_order_asset_expiry cloud.tests.CloudServerServicesTestCase.test_aws_notice_schedule_does_not_override_manual_order_expiry --settings=shop.settings --verbosity=1
+UV_CACHE_DIR=/private/tmp/uv-cache-shop DJANGO_TEST_SQLITE=1 uv run python manage.py test cloud.tests.CloudServerServicesTestCase.test_lifecycle_plans_reuses_cached_count_snapshot_after_refresh cloud.tests.CloudServerServicesTestCase.test_lifecycle_plans_reads_persisted_count_snapshot_after_process_cache_clear cloud.tests.CloudServerServicesTestCase.test_lifecycle_plans_server_delete_pagination_contract cloud.tests.CloudServerServicesTestCase.test_lifecycle_plans_ip_delete_history_pagination_contract cloud.tests.CloudServerServicesTestCase.test_lifecycle_plans_use_stage_specific_asset_switches cloud.tests.CloudServerServicesTestCase.test_manual_order_delete_enters_lifecycle_success_history cloud.tests_task_center.CloudTaskCenterApiTestCase --settings=shop.settings --verbosity=1
 UV_CACHE_DIR=/private/tmp/uv-cache-shop uv run python manage.py check
-UV_CACHE_DIR=/private/tmp/uv-cache-shop uv run python -m py_compile cloud/api_orders.py cloud/asset_expiry.py cloud/api_asset_edit.py cloud/models.py
-git diff --check
-git -C /Users/a399/Desktop/data/vue-shop-admin diff --check
 ```
 
-结果：3 个生命周期到期事实聚焦测试、Django 系统检查、编译检查和前后端空白检查均通过。SQLite 测试中的 `db_comment` 警告仍为已知数据库能力差异。
+结果：20 个任务中心 / 生命周期聚焦测试和 Django 系统检查均通过。SQLite 输出的 `db_comment` 警告仍为已知数据库能力差异。
 
 ## 红线
 
@@ -44,6 +55,5 @@ git -C /Users/a399/Desktop/data/vue-shop-admin diff --check
 
 ## 剩余风险
 
-- 当前后端工作区仍有未提交业务改动：`cloud/api_tasks.py`、`cloud/task_center.py`、`cloud/tests_task_center.py`；本轮未介入。
-- 任务中心、生命周期计划、通知计划的 50 万到 100 万级真实翻页和数据库精确对账仍待下一轮继续。
-- 当前没有 `logged_in` 状态的 Telegram 登录账号，机器人真机菜单/回调点击仍无法做真实账号验证。
+- 当前没有 `logged_in` 状态的 Telegram 登录账号，机器人真机菜单/回调点击仍无法完成。
+- 下一轮继续覆盖任务中心、通知计划页面和代理列表页面的真实翻页、跳页和数据库对账，并继续检查生命周期全局开关 / 单项开关联动。
