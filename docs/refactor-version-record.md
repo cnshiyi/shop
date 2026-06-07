@@ -11064,3 +11064,42 @@ git -C /Users/a399/Desktop/data/vue-shop-admin diff --check
 - 生命周期真实云资源执行未在本轮触发，本轮只做页面和服务端分页真实性验证。
 - 自动续费计划、生命周期计划仍使用各自业务字段 `due_items/future_plan_items`，这不是通知计划旧兼容残留。
 - 下一轮建议继续压测任务中心、生命周期计划和通知计划在 50 万到 100 万数据下的页面跳页耗时。
+## 2026-06-07 机器人回调长度与返回链专项只读审计
+
+### 背景
+
+`TODO.md` 已无未完成条目，本轮按 `docs/auto-optimization-control.md` 固定巡检清单执行只读专项审计。考虑到机器人菜单和回调链路仍属于高风险路径，本轮集中复查 Telegram `callback_data` 长度上限和云资产相关返回链是否继续走短回调约定。
+
+### 审计结论
+
+- `bot/keyboards.py` 中 `compact_callback_path()`、`append_back_callback()`、`_compact_back_button_callback()` 仍负责压缩云资产详情、续费、换 IP、重建迁移和自动续费的嵌套返回路径。
+- `bot/tests.RetainedIpRenewalUiTestCase` 的极端长 ID 用例继续通过，说明 `cloud_server_detail`、`cloud_server_renew_payment`、`cloud_ip_query_result`、自动续费短回调在深层返回路径下仍保持 `<= 64` 字节。
+- `cloud.resource_monitor._cache_resource_detail()` 继续使用 `sha1(...).hexdigest()[:16]` 生成短键；资源详情按钮 `mon:resd:{detail_key}` 不会把地址和时间直接拼进回调。
+- `cloud.tests.DashboardTronBalanceQueryTestCase.test_resource_detail_cache_is_scoped_per_user_for_same_address_time` 通过，确认同一地址和时间戳在不同 `user_id` 下不会串缓存详情。
+- 本轮未发现必须立即补代码的回归，因此不改业务代码，只更新文档和自动化记录。
+
+### 验证
+
+本地已通过：
+
+```bash
+UV_CACHE_DIR=/private/tmp/uv-cache-shop DJANGO_TEST_SQLITE=1 uv run python manage.py test bot.tests.RetainedIpRenewalUiTestCase.test_cloud_server_detail_actions_from_long_asset_detail_stay_under_callback_limit bot.tests.RetainedIpRenewalUiTestCase.test_extreme_nested_cloud_callbacks_stay_under_telegram_limit bot.tests.RetainedIpRenewalUiTestCase.test_cloud_auto_renew_callbacks_keep_nested_back_under_limit bot.tests.RetainedIpRenewalUiTestCase.test_cloud_ip_query_actions_return_to_query_menu --settings=shop.settings --verbosity=1
+UV_CACHE_DIR=/private/tmp/uv-cache-shop DJANGO_TEST_SQLITE=1 uv run python manage.py test cloud.tests.DashboardTronBalanceQueryTestCase.test_resource_detail_cache_is_scoped_per_user_for_same_address_time --settings=shop.settings --verbosity=1
+UV_CACHE_DIR=/private/tmp/uv-cache-shop uv run python manage.py check
+UV_CACHE_DIR=/private/tmp/uv-cache-shop uv run python -m py_compile bot/keyboards.py bot/handlers.py cloud/resource_monitor.py
+git diff --check
+git -C /Users/a399/Desktop/data/vue-shop-admin diff --check
+```
+
+结果：4 个机器人回调聚焦测试、1 个资源详情缓存测试、Django 系统检查、编译检查和空白检查均通过。SQLite 的 `db_comment` 警告为已知数据库能力差异。
+
+### 红线
+
+- 本轮未执行真实云资源创建、删除、关机、释放 IP、换 IP、真实支付、链上广播、删除业务数据、删除测试库或生产发布。
+- 本轮未打印密钥、私钥、Telegram session、TOTP、支付密钥或云厂商密钥。
+- 本轮未恢复废弃 runtime app、订单侧到期字段、旧计划快照、旧退款逻辑、旧退款函数名或旧兼容入口。
+
+### 剩余风险
+
+- 本轮没有触发真实机器人交互，也没有覆盖后台浏览器页面。
+- 下一轮建议回到 50 万到 100 万级数据页面，继续审计任务中心、生命周期计划、通知计划的真实翻页和跳页耗时。
