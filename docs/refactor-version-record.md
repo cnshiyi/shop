@@ -11682,6 +11682,60 @@ git diff --check
 - 本轮未打印密钥、私钥、Telegram session、TOTP、支付密钥、云厂商密钥、完整代理链接、代理 secret 或登录密码。
 - 本轮未恢复废弃 runtime app、订单侧到期字段、旧计划快照、旧退款逻辑、旧退款函数名或旧兼容入口。
 
+## 2026-06-08 00:15 生命周期创建、关机、删机、释放 IP 三次真机复测
+
+### 背景
+
+用户继续要求生命周期里的创建服务器、删除服务器也必须测试到。本轮在当前会话内直接使用项目服务走真实 AWS Lightsail 最小成本链路，覆盖真实创建、关机、删机、固定 IP 释放，以及计划页、订单详情页、资产详情页的前端真实显示。
+
+### 真机范围
+
+- 测试用户：`TelegramUser #172`，`codex_real_machine_test`。
+- 套餐：`CloudServerPlan #131`，新加坡，`实机测试 Nano`。
+- 订单：`#50097`。
+- 资产：`#1500333`。
+- 支付方式：USDT 钱包余额支付，金额 5 USDT。
+- 云实例、公网 IP、固定 IP 名称、代理链接、代理 secret、登录密码、Telegram token、session 和云账号密钥均未写入报告。
+
+### 覆盖结果
+
+- 真实创建：项目余额支付订单进入 `paid` 后调用开通流程，AWS Lightsail 实例创建成功，固定 IP 绑定成功，BBR、MTProxy 主/备用、Telemt 多端口和 SOCKS5 初始化完成；订单进入 `completed`，资产进入 `running/is_active=True`，资产到期事实写入 `CloudAsset.actual_expires_at`。
+- 关机阶段：验证 `cloud_server_shutdown_enabled=0`、`CloudAsset.shutdown_enabled=False`、非执行时间窗口都能阻断真实关机；打开总开关、资产开关和当前窗口后真实关机成功，订单进入 `suspended`，资产进入 `stopped/is_active=False`。
+- 删机阶段：验证 `cloud_server_delete_enabled=0`、`CloudAsset.server_delete_enabled=False`、非执行时间窗口都能阻断真实删机；第一次真实删机遇到 AWS 停止中过渡状态，系统未误标已删除；等待后第二次重试成功，订单和资产进入 `deleted`，实例标识清空。
+- 固定 IP 释放阶段：验证 `cloud_ip_delete_enabled=0`、`CloudAsset.ip_delete_enabled=False`、非执行时间窗口都能阻断真实释放固定 IP；打开总开关、资产 IP 删除开关和当前窗口后真实释放成功。
+
+### 数据库对账
+
+- 最终订单 `#50097` 为 `deleted`。
+- 最终资产 `#1500333` 为 `deleted/is_active=False`。
+- 实例标识、固定 IP 名称、当前公网 IP 和 IP 回收时间均已清空。
+- 生命周期任务最终状态为 `suspend/done`、`delete/done`、`recycle/done`。
+- 生命周期配置已恢复：`cloud_server_shutdown_enabled` 恢复为默认缺省，`cloud_server_delete_enabled=1`，`cloud_ip_delete_enabled=1`，`cloud_suspend_time=15:00`，`cloud_delete_time=15:00`，`cloud_unattached_ip_delete_time=15:00`。
+
+### 前端页面实测
+
+- 实际打开 `/admin/tasks/plans`：页面标题为“计划”，包含关机服务器、删除服务器、删除 IP 三个总开关，包含关机计划、服务器删除历史和 IP 删除历史区域；控制台 error / warning 均为 0。
+- 实际打开 `/admin/cloud-orders/50097`：页面标题为“云订单详情”，显示已删除状态和生命周期区域，无加载失败或请求失败；控制台 error / warning 均为 0。
+- 实际打开 `/admin/cloud-assets/1500333`：页面标题为“代理详情”，显示已删除状态、生命周期区域和关联订单，无加载失败或请求失败；控制台 error / warning 均为 0。
+
+### 验证
+
+已通过：
+
+```bash
+UV_CACHE_DIR=/private/tmp/uv-cache-shop DJANGO_TEST_SQLITE=1 uv run python manage.py test cloud.tests.CloudServerServicesTestCase.test_lifecycle_plans_server_history_mixes_orders_and_assets_by_updated_at cloud.tests.CloudServerServicesTestCase.test_lifecycle_plans_server_history_includes_orphan_deleted_server_asset cloud.tests.CloudServerServicesTestCase.test_lifecycle_plans_returns_server_delete_history_table --settings=shop.settings --verbosity=1
+UV_CACHE_DIR=/private/tmp/uv-cache-shop uv run python -m py_compile cloud/lifecycle_plan_queries.py cloud/tests.py
+UV_CACHE_DIR=/private/tmp/uv-cache-shop uv run python manage.py check
+git diff --check
+```
+
+### 红线
+
+- 本轮执行了用户明确授权的真实 AWS Lightsail 创建、关机、删除服务器和固定 IP 释放。
+- 本轮未执行真实链上支付、链上广播、生产发布或删除业务压测数据。
+- 本轮未打印密钥、私钥、Telegram session、TOTP、支付密钥、云厂商密钥、完整代理链接、代理 secret 或登录密码。
+- 本轮未恢复废弃 runtime app、订单侧到期字段、旧计划快照、旧退款逻辑、旧退款函数名或旧兼容入口。
+
 ## 2026-06-07 22:52 已删除资产脱敏与服务器删除历史表补齐
 
 ### 背景

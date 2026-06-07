@@ -4,72 +4,89 @@
 
 ## 最近一轮
 
-- 时间：2026-06-08 00:10 CST
-- 状态：完成 IP 删除历史混合来源分页排序修复，避免历史页先吐尽日志再补资产。
-- 本轮范围：生命周期计划查询层、IP 删除历史分页契约、跨来源顺序回归测试、10 万量级只读压测。
+- 时间：2026-06-08 00:15 CST
+- 状态：完成生命周期真实创建、关机、删机、固定 IP 释放复测，并完成前端计划页、订单详情页、资产详情页实测。
+- 本轮范围：AWS Lightsail 真机创建、生命周期开关矩阵、真实删除和释放清理、数据库终态对账、前端页面验证。
 
-## 本轮修复
+## 真机实测
 
-- `cloud/lifecycle_plan_queries.py`
-  - `ip_delete_history_page_sources()` 改为按统一时间轴合并三类来源：
-    - `CloudIpLog` 历史日志按 `created_at desc, id desc`
-    - 已删除未附加 IP 资产按 `updated_at desc, id desc`
-    - 完成态保留 IP 资产按 `updated_at desc, id desc`
-  - 不再按“先日志、再历史资产、最后完成态资产”的来源顺序硬拼页，避免首页、跨页和深分页错序。
-  - 使用分块拉取 + 小顶堆归并，只读取当前分页窗口需要的区间。
-- `cloud/tests.py`
-  - 新增 `test_lifecycle_plans_ip_delete_history_mixes_logs_and_assets_by_time`。
-  - 覆盖日志、已删除资产、完成态保留 IP 资产交错时间时，`ip_delete_history_page=1/2` 必须保持统一时间轴顺序。
+- 测试用户：`TelegramUser #172`，`codex_real_machine_test`。
+- 套餐：`CloudServerPlan #131`，新加坡，`实机测试 Nano`。
+- 订单：`#50097`。
+- 资产：`#1500333`。
+- 金额：5 USDT，使用项目余额支付。
+- 云资源、公网 IP、代理链接、代理 secret、登录密码和云账号密钥均未写入报告。
 
-## 发现
+## 覆盖结果
 
-- 修复前的 `ip_delete_history_page_sources()` 先分页日志，再分页历史资产，最后才补完成态保留 IP 资产。
-- 一旦资产或完成态保留 IP 的 `updated_at` 新于部分日志，IP 删除历史就会出现：
-  - 首屏顺序错误。
-  - 跨页页边界错误。
-  - 深分页和真实执行时间轴不一致。
+- 真实创建：
+  - 项目服务创建余额支付订单，订单从 `paid` 进入开通。
+  - AWS Lightsail 实例真实创建成功，固定 IP 绑定成功。
+  - BBR、MTProxy 主代理、备用代理、Telemt 多端口和 SOCKS5 初始化完成。
+  - 开通后订单为 `completed`，资产为 `running/is_active=True`，资产到期事实写入 `CloudAsset.actual_expires_at`。
+- 关机阶段：
+  - `cloud_server_shutdown_enabled=0` 阻断真实关机。
+  - `CloudAsset.shutdown_enabled=False` 阻断真实关机。
+  - 非执行时间窗口阻断真实关机。
+  - 打开总开关、资产关机开关和当前窗口后，真实关机成功，订单进入 `suspended`，资产进入 `stopped/is_active=False`。
+- 删机阶段：
+  - `cloud_server_delete_enabled=0` 阻断真实删机。
+  - `CloudAsset.server_delete_enabled=False` 阻断真实删机。
+  - 非执行时间窗口阻断真实删机。
+  - 第一次真实删机遇到 AWS 停止中过渡状态，系统未误标删除。
+  - 等待后第二次真实删机成功，订单和资产进入 `deleted`，实例标识清空，固定 IP 进入待释放。
+- 固定 IP 释放阶段：
+  - `cloud_ip_delete_enabled=0` 阻断真实释放固定 IP。
+  - `CloudAsset.ip_delete_enabled=False` 阻断真实释放固定 IP。
+  - 非执行时间窗口阻断真实释放固定 IP。
+  - 打开总开关、资产 IP 删除开关和当前窗口后，真实释放成功。
 
-## 压测
+## 数据库对账
 
-- 只读合成压测规模：`100000` 条混合历史源
-  - `CloudIpLog` 40000
-  - 已删除未附加 IP 资产 30000
-  - 完成态保留 IP 资产 30000
-- 实测页耗时：
-  - `page=1 size=50`：`0.12 ms`
-  - `page=2 size=50`：`0.07 ms`
-  - `page=1000 size=50`：`20.29 ms`
-  - `page=2000 size=50`：`38.00 ms`
-- 结果：统一时间轴归并在 10 万量级合成源下仍可稳定返回整页，无重复、无丢页。
+- 最终订单：`#50097` 为 `deleted`。
+- 最终资产：`#1500333` 为 `deleted/is_active=False`。
+- 实例标识、固定 IP 名称、当前公网 IP 和 IP 回收时间均已清空。
+- 生命周期任务最终为：`suspend/done`、`delete/done`、`recycle/done`。
+- 生命周期配置已恢复：`cloud_server_shutdown_enabled` 恢复为默认缺省，`cloud_server_delete_enabled=1`，`cloud_ip_delete_enabled=1`，三个执行时间均恢复为 `15:00`。
+
+## 前端页面验证
+
+- 实际打开 `/admin/tasks/plans`：
+  - 页面标题为“计划”。
+  - 显示关机服务器、删除服务器、删除 IP 三个总开关。
+  - 显示关机计划、服务器删除历史、IP 删除历史区域。
+  - 页面计数显示：服务器删除历史 `20010`，IP 删除历史 `520008`。
+  - 控制台 error / warning 均为 0。
+- 实际打开 `/admin/cloud-orders/50097`：
+  - 页面标题为“云订单详情”。
+  - 显示已删除状态和生命周期区域。
+  - 未出现加载失败、请求失败或异常文案。
+  - 控制台 error / warning 均为 0。
+- 实际打开 `/admin/cloud-assets/1500333`：
+  - 页面标题为“代理详情”。
+  - 显示已删除状态、生命周期区域和关联订单。
+  - 未出现加载失败、请求失败或异常文案。
+  - 控制台 error / warning 均为 0。
 
 ## 验证
 
 本地已通过：
 
 ```bash
-UV_CACHE_DIR=/private/tmp/uv-cache-shop DJANGO_TEST_SQLITE=1 uv run python manage.py test cloud.tests.CloudServerServicesTestCase.test_lifecycle_plans_ip_delete_history_mixes_logs_and_assets_by_time cloud.tests.CloudServerServicesTestCase.test_lifecycle_plans_ip_delete_history_pagination_contract cloud.tests.CloudServerServicesTestCase.test_lifecycle_plans_server_history_mixes_orders_and_assets_by_updated_at cloud.tests.CloudServerServicesTestCase.test_lifecycle_plans_server_history_includes_orphan_deleted_server_asset cloud.tests.CloudServerServicesTestCase.test_lifecycle_plans_returns_server_delete_history_table --settings=shop.settings --verbosity=1
+UV_CACHE_DIR=/private/tmp/uv-cache-shop DJANGO_TEST_SQLITE=1 uv run python manage.py test cloud.tests.CloudServerServicesTestCase.test_lifecycle_plans_server_history_mixes_orders_and_assets_by_updated_at cloud.tests.CloudServerServicesTestCase.test_lifecycle_plans_server_history_includes_orphan_deleted_server_asset cloud.tests.CloudServerServicesTestCase.test_lifecycle_plans_returns_server_delete_history_table --settings=shop.settings --verbosity=1
 UV_CACHE_DIR=/private/tmp/uv-cache-shop uv run python -m py_compile cloud/lifecycle_plan_queries.py cloud/tests.py
 UV_CACHE_DIR=/private/tmp/uv-cache-shop uv run python manage.py check
-DB_ENGINE=sqlite SQLITE_NAME=:memory: UV_CACHE_DIR=/private/tmp/uv-cache-shop uv run python - <<'PY'
-# 10 万量级只读合成压测，补丁 cloud.lifecycle_plan_queries.ip_delete_history_page_sources 的三源归并分页
-PY
 git diff --check
 ```
 
-SQLite `db_comment` 警告为已知数据库能力差异，不影响本轮结果。
-
-## 前端与页面验证
-
-- 前端仓库 `/Users/a399/Desktop/data/vue-shop-admin` 本轮 `git status --short` 为空，无新增改动。
-- 本轮未重跑浏览器页面点击；当前沙箱对本地端口监听仍有限制，上一轮记录的 `/admin/tasks/plans` 真页验证阻塞未解除。
-
 ## 红线
 
-- 本轮未执行真实云资源创建、关机、删除服务器、释放 IP、真实支付、链上广播、生产发布、删除业务数据或删除测试库。
+- 本轮执行了用户明确授权的真实 AWS Lightsail 创建、关机、删除服务器和固定 IP 释放。
+- 本轮未执行真实链上支付、链上广播、生产发布或删除业务压测数据。
 - 本轮未打印密钥、私钥、Telegram session、TOTP、支付密钥、云厂商密钥、完整代理链接、代理 secret 或登录密码。
 - 本轮未恢复废弃 runtime app、订单侧到期字段、旧计划快照、旧退款逻辑、旧退款函数名或旧兼容入口。
 
 ## 剩余风险与下一轮
 
-- 计划页历史查询层现在有两处相似的堆归并逻辑；后续可考虑抽公共 helper，但这不属于本轮最小修复范围。
-- 下一轮优先继续审计计划页和代理列表深分页真页对账；如沙箱端口限制仍在，只能继续走 API 级和只读压测验证。
+- 真实删机仍可能遇到 AWS 停止中过渡状态；当前执行器已正确保持未删除并允许重试，后续可以继续观察任务中心是否对该类重试展示足够清楚。
+- 下一轮继续做计划页和代理列表深分页真页对账，重点验证跳页、末页和数据库精确排序一致。
