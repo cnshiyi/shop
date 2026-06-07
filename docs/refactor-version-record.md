@@ -14647,3 +14647,118 @@ git diff --check
 - 未发现需要修改代码的问题。
 - 仅更新 `docs/auto-optimization-latest.md`、`docs/refactor-version-record.md` 和自动化记忆。
 - 下一轮优先在可访问真实数据源的环境继续做代理列表 HTTP/前端深页与末页一致性验证，补上浏览器实测链路。
+
+## 2026-06-08 07:21 代理列表真实分页与机器人高并发巡检
+
+### 背景
+
+继续执行当前会话连续巡检。用户强调机器人必须测试多任务高并发，同时代理列表不能只测全部标签，还要逐个风险标签压测、翻页并核验数据真实性。
+
+### 代码改动
+
+- 在 `bot/tests.py` 补充 `test_cloud_background_tasks_keep_bulk_concurrency_isolated`。
+- 新用例并发运行 `60` 个后台任务：
+  - `20` 组钱包直付。
+  - `20` 组钱包补付。
+  - `20` 组续费后检查。
+- 校验每个聊天窗口、订单、购买数量和派生 `_provision_cloud_server_and_notify` 任务没有串上下文。
+
+### 真实库/API 分页对账
+
+使用默认数据库对代理列表接口和数据库同排序切片做精确对账。
+
+覆盖标签：
+
+- `all`
+- `unattached_ip`
+- `account_disabled`
+- `shutdown_disabled`
+- `unbound_group`
+- `auto_renew_off`
+- `normal`
+- `due_soon`
+- `expired`
+- `abnormal`
+- `unbound_user`
+
+覆盖分页：
+
+- 第 `1` 页。
+- 第 `2` 页。
+- 第 `1000` 页。
+- 末页。
+
+结果：
+
+- 共 `44` 个分页点全部一致。
+- 对账字段为 API 返回的 `id/public_ip` 与数据库 `CloudAssetDashboardSnapshot.asset_id` + 关联 `CloudAsset.public_ip/previous_public_ip`。
+- 首次使用快照表冗余 `public_ip` 作为基准时，发现一条历史快照保留脱敏旧值；接口紧凑视图返回实时 `CloudAsset` 字段，因此修正对账基准为资产表事实后全部一致。
+- 末页对账使用与接口等价的反向切片，避免正向超大 offset 把 MySQL 拖到超时。
+
+### 真实前端页面
+
+使用本机 Google Chrome 打开：
+
+```text
+http://127.0.0.1:5666/admin/cloud-assets
+```
+
+逐个点击重点标签，并实际点击第 `2` 页和末页。
+
+结果：
+
+- 全部：`共 2489998 条代理`，第 `2` 页 `20` 行，末页 `124500` 加载 `18` 行。
+- 未附加固定 IP：`共 100001 条代理`，第 `2` 页 `20` 行，末页 `5001` 加载 `1` 行。
+- 云账号异常：`共 1145002 条代理`，第 `2` 页 `20` 行，末页 `57251` 加载 `2` 行。
+- 关机计划关闭：`共 100384 条代理`，第 `2` 页 `20` 行，末页 `5020` 加载 `4` 行。
+- 未绑定群组：`共 100013 条代理`，第 `2` 页 `20` 行，末页 `5001` 加载 `13` 行。
+- 续费关闭：`共 104558 条代理`，第 `2` 页 `20` 行，末页 `5228` 加载 `18` 行。
+- 页面控制台错误数：`0`。
+
+### 机器人回归
+
+执行：
+
+```bash
+UV_CACHE_DIR=/private/tmp/uv-cache-shop DJANGO_TEST_SQLITE=1 uv run python manage.py test bot.tests --settings=shop.settings --verbosity=1
+```
+
+结果：
+
+- `107` 个测试全部通过。
+- 新增高并发用例通过。
+- 继续覆盖机器人 callback 返回链、64 字节限制、资产详情、订单详情、续费、钱包支付续费、换 IP、重装/重建迁移、修改配置、通知复制并发和后台钱包任务隔离。
+
+### 验证
+
+基础检查通过：
+
+```bash
+UV_CACHE_DIR=/private/tmp/uv-cache-shop uv run python manage.py check
+git diff --check
+```
+
+红线扫描通过：
+
+```bash
+rg -n "service_expires_at|actual_expires_at.*CloudServerOrder|CloudServerOrder.*actual_expires_at|plan snapshot|snapshot table|old refund|refund_legacy|refund_old|legacy_refund|accounts\\.|finance\\.|mall\\.|monitoring\\.|dashboard_api\\.|biz\\." cloud bot orders core shop -g '!**/migrations/**'
+```
+
+命中项仍是 Telegram 登录账号代码、云账号测试桩和 `CloudServerOrder.ip_recycle_at` 同步语句，不是旧到期事实回流。
+
+### 清理
+
+- 临时后台 session 已删除。
+- 临时后台用户 `codex_page_audit` 已删除。
+- Playwright 截图目录 `output/` 已删除。
+- 上一轮遗留的 `/private/tmp/shop-automation-audit.sqlite3` 已删除。
+
+### 红线
+
+- 本轮未执行真实云资源创建、关机、删除服务器、释放 IP、换 IP、真实支付、链上广播、生产发布或删除业务数据。
+- 本轮未打印密钥、Telegram session、支付密钥、云厂商密钥或完整代理链接。
+
+### 下一步
+
+- 下一轮继续生命周期创建服务器、关机计划、删除计划、IP 删除计划的开关联动和执行顺序巡检。
+- 继续关注云账号异常标签首屏约 `2.4s` 的加载耗时。

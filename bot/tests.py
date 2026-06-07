@@ -1596,6 +1596,115 @@ class RetainedIpRenewalUiTestCase(SimpleTestCase):
         self.assertTrue(any('1 台服务器创建任务已提交' in text for text in message_by_chat[1002]))
         self.assertTrue(any('续费已完成' in text for text in message_by_chat[1003]))
 
+    def test_cloud_background_tasks_keep_bulk_concurrency_isolated(self):
+        class FakeBot:
+            def __init__(self):
+                self.messages = []
+
+            async def send_message(self, **kwargs):
+                self.messages.append(kwargs)
+                await asyncio.sleep(0)
+                return SimpleNamespace(message_id=len(self.messages))
+
+        parent_quantities = {}
+
+        def order_view(order_id, order_no, *, quantity=1):
+            return SimpleNamespace(
+                id=order_id,
+                order_no=order_no,
+                region_name='新加坡',
+                plan_name='nano',
+                quantity=quantity,
+                pay_amount=Decimal('19.00'),
+                currency='USDT',
+                mtproxy_port=443,
+                public_ip=f'10.0.{order_id % 255}.{order_id % 251}',
+                previous_public_ip='',
+                status='completed',
+            )
+
+        async def fake_buy(user_id, plan_id, currency, quantity):
+            await asyncio.sleep((plan_id % 5) / 1000)
+            order_id = 10000 + plan_id
+            parent_quantities[order_id] = quantity
+            return order_view(order_id, f'BOT-BULK-BUY-{plan_id}', quantity=quantity), None
+
+        async def fake_pay(order_id, user_id, currency):
+            await asyncio.sleep((order_id % 7) / 1000)
+            parent_order_id = 20000 + order_id
+            parent_quantities[parent_order_id] = 1
+            return order_view(parent_order_id, f'BOT-BULK-PAY-{order_id}', quantity=1), None
+
+        async def fake_prepare(order_id, user_id, port):
+            await asyncio.sleep((order_id % 3) / 1000)
+            quantity = parent_quantities.get(order_id, 1)
+            return [
+                SimpleNamespace(id=order_id * 10 + index, mtproxy_port=port)
+                for index in range(quantity)
+            ]
+
+        async def fake_postcheck(order_id):
+            await asyncio.sleep((order_id % 4) / 1000)
+            return order_view(order_id, f'BOT-BULK-RENEW-{order_id}'), None
+
+        scheduled = []
+
+        def capture_task(coro):
+            frame = getattr(coro, 'cr_frame', None)
+            frame_locals = dict(frame.f_locals) if frame is not None else {}
+            scheduled.append((
+                coro.cr_code.co_name,
+                frame_locals.get('chat_id'),
+                frame_locals.get('order_id'),
+                frame_locals.get('port'),
+            ))
+            coro.close()
+            return object()
+
+        async def run_case():
+            bot = FakeBot()
+            with patch('bot.handlers.buy_cloud_server_with_balance', new=AsyncMock(side_effect=fake_buy)), \
+                    patch('bot.handlers.pay_cloud_server_order_with_balance', new=AsyncMock(side_effect=fake_pay)), \
+                    patch('bot.handlers.prepare_cloud_server_order_instances', new=AsyncMock(side_effect=fake_prepare)) as prepare_mock, \
+                    patch('bot.handlers.run_cloud_server_renewal_postcheck', new=AsyncMock(side_effect=fake_postcheck)), \
+                    patch('bot.handlers.is_cloud_asset_renewal_order', return_value=False), \
+                    patch('bot.handlers._requires_recovery_provision', return_value=False), \
+                    patch('bot.handlers._cloud_order_plan_text', return_value='套餐: nano\n'), \
+                    patch('bot.handlers._send_admin_user_action_notice', new=AsyncMock()), \
+                    patch('bot.handlers.asyncio.create_task', side_effect=capture_task):
+                tasks = []
+                for index in range(20):
+                    quantity = 1 + (index % 3)
+                    tasks.append(_buy_cloud_server_with_balance_and_notify(bot, 30000 + index, 700 + index, 900 + index, quantity, 'USDT'))
+                    tasks.append(_pay_cloud_server_order_with_balance_and_notify(bot, 40000 + index, 800 + index, 1200 + index, 'USDT'))
+                    tasks.append(_cloud_renewal_postcheck_and_notify(bot, 50000 + index, 1500 + index, {'currency': 'USDT', 'amount': Decimal('1.00'), 'before': Decimal('5.00'), 'after': Decimal('4.00')}))
+                await asyncio.gather(*tasks)
+            return bot.messages, prepare_mock.await_args_list
+
+        messages, prepare_calls = async_to_sync(run_case)()
+
+        self.assertGreaterEqual(len(messages), 60)
+        self.assertEqual(len({item['chat_id'] for item in messages}), 60)
+        self.assertEqual(len(prepare_calls), 40)
+        expected_scheduled = sum(1 + (index % 3) for index in range(20)) + 20
+        self.assertEqual(len(scheduled), expected_scheduled)
+        self.assertEqual({item[0] for item in scheduled}, {'_provision_cloud_server_and_notify'})
+        self.assertTrue(all(port == 443 for _name, _chat_id, _order_id, port in scheduled))
+        self.assertEqual(
+            {chat_id for _name, chat_id, _order_id, _port in scheduled},
+            {*(30000 + index for index in range(20)), *(40000 + index for index in range(20))},
+        )
+        for index in range(20):
+            buy_texts = [item['text'] for item in messages if item['chat_id'] == 30000 + index]
+            pay_texts = [item['text'] for item in messages if item['chat_id'] == 40000 + index]
+            renew_texts = [item['text'] for item in messages if item['chat_id'] == 50000 + index]
+            self.assertEqual(len(buy_texts), 1)
+            self.assertEqual(len(pay_texts), 1)
+            self.assertGreaterEqual(len(renew_texts), 1)
+            self.assertIn(f'{1 + (index % 3)} 台服务器创建任务已提交', buy_texts[0])
+            self.assertIn('1 台服务器创建任务已提交', pay_texts[0])
+            self.assertTrue(any('续费已完成' in text for text in renew_texts))
+
     def test_removed_custom_port_flow_stays_removed(self):
         source = inspect.getsource(register_handlers)
         all_bot_texts = '\n'.join(value for value, _ in BOT_TEXTS.values())
