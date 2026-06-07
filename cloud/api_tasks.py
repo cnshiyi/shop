@@ -15,7 +15,24 @@ from django.views.decorators.http import require_GET, require_POST
 from bot.models import TelegramLoginAccount
 from cloud.asset_expiry import order_asset_expiry
 from cloud.dashboard_snapshots import _refresh_dashboard_plan_snapshots
-from cloud.lifecycle import AUTO_RENEW_BEFORE_EXPIRY_WINDOW, NOTICE_TYPE_SWITCH_CONFIG, _auto_renew_notice_batch_payload, _notice_effective_delivered, _get_due_orders, _get_notice_text_override, _lifecycle_notice_batch_payload, _notice_payload_for_order, _notice_override_key, _notice_schedule, _record_auto_renew_patrol_log, _renew_notice_batch_payload, _run_auto_renew, _set_notice_text_override, cloud_notice_type_enabled
+from cloud.lifecycle import (
+    AUTO_RENEW_BEFORE_EXPIRY_WINDOW,
+    NOTICE_TYPE_SWITCH_CONFIG,
+    _auto_renew_notice_batch_payload,
+    _bulk_notice_payload_map,
+    _get_notice_text_override,
+    _lifecycle_notice_batch_payload,
+    _notice_asset_is_unattached_static_ip,
+    _notice_effective_delivered,
+    _notice_override_key,
+    _notice_payload_for_order,
+    _notice_schedule,
+    _record_auto_renew_patrol_log,
+    _renew_notice_batch_payload,
+    _run_auto_renew,
+    _set_notice_text_override,
+    cloud_notice_type_enabled,
+)
 from cloud.lifecycle_schedule import compute_order_lifecycle_fields
 from cloud.models import CloudAsset, CloudAutoRenewPatrolLog, CloudAutoRenewRetryTask, CloudServerOrder, CloudUserNoticeLog
 from cloud.services import RenewalPriceMissingError, _renewal_price
@@ -40,13 +57,14 @@ def _order_has_renewal_price(order) -> bool:
 
 
 # 功能：提供 后台 API 接口 的内部辅助逻辑，供同模块流程复用。
-def _auto_renew_task_status(order, now, *, latest_failure_reason: str | None = None):
+def _auto_renew_task_status(order, now, *, latest_failure_reason: str | None = None, expires_at=None):
     if not getattr(order, 'auto_renew_enabled', False):
         return None
     last_renewed_at = getattr(order, 'last_renewed_at', None)
     if last_renewed_at and last_renewed_at >= now - timezone.timedelta(days=1):
         return 'auto_renew_success', '自动续费成功'
-    expires_at = order_asset_expiry(order)
+    if expires_at is None:
+        expires_at = order_asset_expiry(order)
     suspend_at = getattr(order, 'suspend_at', None)
     in_renew_window = bool(expires_at and expires_at <= now + timezone.timedelta(days=1) and expires_at > now)
     in_shutdown_fallback = bool(expires_at and expires_at <= now and suspend_at and suspend_at > now)
@@ -154,7 +172,7 @@ def tasks_overview(request):
 
 
 # 功能：提供 后台 API 接口 的内部辅助逻辑，供同模块流程复用。
-def _auto_renew_due_item_payload(order, *, queue_status: str = 'due_now', queue_status_label: str = '本轮待执行', next_run_at=None, last_failure_reason: str | None = None):
+def _auto_renew_due_item_payload(order, *, queue_status: str = 'due_now', queue_status_label: str = '本轮待执行', next_run_at=None, last_failure_reason: str | None = None, notice: dict | None = None):
     user = getattr(order, 'user', None)
     usernames = list(getattr(user, 'usernames', []) or []) if user else []
     user_payload = _user_payload({
@@ -168,8 +186,11 @@ def _auto_renew_due_item_payload(order, *, queue_status: str = 'due_now', queue_
     notice_type = 'auto_renew_notice'
     latest_log = None
     sent_at = getattr(order, 'auto_renew_notice_sent_at', None)
-    notice = _notice_payload_for_order(order) or {}
-    expires_at = notice.get('expires_at') or order_asset_expiry(order)
+    notice_was_provided = notice is not None
+    notice = notice if notice_was_provided else (_notice_payload_for_order(order) or {})
+    expires_at = notice.get('expires_at')
+    if expires_at is None and not notice_was_provided:
+        expires_at = order_asset_expiry(order)
     auto_renew_at = expires_at - timezone.timedelta(days=1) if expires_at else None
     return {
         'id': order.id,
@@ -226,15 +247,91 @@ def _auto_renew_order_has_active_notice(order) -> bool:
     return any(asset.is_active and asset.status not in excluded_statuses for asset in linked_assets)
 
 
+_AUTO_RENEW_ACTIVE_ORDER_STATUSES = {'completed', 'expiring', 'renew_pending'}
+_AUTO_RENEW_EXCLUDED_ASSET_STATUSES = {
+    CloudAsset.STATUS_DELETED,
+    CloudAsset.STATUS_DELETING,
+    CloudAsset.STATUS_TERMINATED,
+    CloudAsset.STATUS_TERMINATING,
+}
+
+
+def _auto_renew_notice_context(orders: list[CloudServerOrder]) -> dict[int, dict]:
+    if not orders:
+        return {}
+    order_ids = [order.id for order in orders if getattr(order, 'id', None)]
+    payload_map = _bulk_notice_payload_map(orders)
+    context = {
+        order.id: {
+            'notice': payload_map.get(order.id),
+            'has_assets': False,
+            'has_active_asset': False,
+        }
+        for order in orders
+        if getattr(order, 'id', None)
+    }
+    asset_rows = CloudAsset.objects.filter(order_id__in=order_ids, kind=CloudAsset.KIND_SERVER).values('order_id', 'status', 'is_active')
+    for row in asset_rows:
+        order_context = context.setdefault(row['order_id'], {'notice': None, 'has_assets': False, 'has_active_asset': False})
+        order_context['has_assets'] = True
+        if row.get('is_active') and row.get('status') not in _AUTO_RENEW_EXCLUDED_ASSET_STATUSES:
+            order_context['has_active_asset'] = True
+    return context
+
+
+def _auto_renew_notice_from_context(order, context: dict[int, dict]) -> dict | None:
+    if not order:
+        return None
+    order_context = context.get(order.id) or {}
+    notice = order_context.get('notice')
+    if order_context.get('has_assets') and not order_context.get('has_active_asset'):
+        return None
+    if notice:
+        return notice
+    if order_context.get('has_assets'):
+        return None
+    ip = str(getattr(order, 'public_ip', None) or getattr(order, 'previous_public_ip', None) or '').strip()
+    if not ip or getattr(order, 'status', None) not in _AUTO_RENEW_ACTIVE_ORDER_STATUSES:
+        return None
+    return {
+        'ip': ip,
+        'expires_at': None,
+        'suspend_at': getattr(order, 'suspend_at', None),
+        'delete_at': getattr(order, 'delete_at', None),
+        'ip_recycle_at': getattr(order, 'ip_recycle_at', None),
+        'auto_renew_enabled': bool(getattr(order, 'auto_renew_enabled', False)),
+        'asset_id': None,
+    }
+
+
+def _auto_renew_due_asset_rows(now):
+    due_until = now + AUTO_RENEW_BEFORE_EXPIRY_WINDOW
+    due_qs = (
+        CloudAsset.objects.select_related('order', 'order__user', 'cloud_account', 'order__cloud_account')
+        .filter(
+            kind=CloudAsset.KIND_SERVER,
+            actual_expires_at__isnull=False,
+            order__auto_renew_enabled=True,
+            order__status__in=list(_AUTO_RENEW_ACTIVE_ORDER_STATUSES),
+        )
+        .exclude(public_ip__isnull=True)
+        .exclude(public_ip='')
+        .exclude(status__in=list(_AUTO_RENEW_EXCLUDED_ASSET_STATUSES))
+        .filter(
+            Q(actual_expires_at__gt=now, actual_expires_at__lte=due_until)
+            | Q(actual_expires_at__lte=now, order__suspend_at__gt=now)
+        )
+        .order_by('actual_expires_at', 'order_id', 'id')
+    )
+    return list(due_qs)
+
+
 # 功能：提供 后台 API 接口 的内部辅助逻辑，供同模块流程复用。
-def _auto_renew_future_plan_items(now, next_run_at, due_orders: list):
+def _auto_renew_future_plan_items(now, next_run_at, due_orders: list, *, notice_by_order: dict[int, dict] | None = None):
     plan_items = []
     seen = set()
     for order in due_orders:
-        if not _auto_renew_order_has_active_notice(order):
-            continue
         seen.add(order.id)
-        plan_items.append(_auto_renew_due_item_payload(order, queue_status='due_now', queue_status_label='本轮待执行', next_run_at=next_run_at))
     future_assets = (
         CloudAsset.objects.select_related('order', 'order__user')
         .filter(
@@ -243,6 +340,9 @@ def _auto_renew_future_plan_items(now, next_run_at, due_orders: list):
             order__auto_renew_enabled=True,
             order__status__in=['completed', 'expiring', 'renew_pending'],
         )
+        .exclude(public_ip__isnull=True)
+        .exclude(public_ip='')
+        .exclude(status__in=list(_AUTO_RENEW_EXCLUDED_ASSET_STATUSES))
         .exclude(order_id__in=list(seen))
         .order_by('actual_expires_at', 'order_id', 'id')[:100]
     )
@@ -250,11 +350,12 @@ def _auto_renew_future_plan_items(now, next_run_at, due_orders: list):
         order = asset.order
         if not order or order.id in seen:
             continue
-        if not _auto_renew_order_has_active_notice(order):
+        if _notice_asset_is_unattached_static_ip(asset):
             continue
         expires_at = asset.actual_expires_at
         if not expires_at:
             continue
+        notice = _notice_schedule(order, asset)
         seen.add(order.id)
         if expires_at <= now:
             queue_status = 'fallback_retry'
@@ -265,20 +366,32 @@ def _auto_renew_future_plan_items(now, next_run_at, due_orders: list):
         else:
             queue_status = 'scheduled_future'
             queue_status_label = '未来计划'
-        plan_items.append(_auto_renew_due_item_payload(order, queue_status=queue_status, queue_status_label=queue_status_label, next_run_at=next_run_at))
+        if notice_by_order is not None:
+            notice_by_order[order.id] = notice
+        plan_items.append(_auto_renew_due_item_payload(order, queue_status=queue_status, queue_status_label=queue_status_label, next_run_at=next_run_at, notice=notice))
     return plan_items
 
 
 # 功能：提供 后台 API 接口 的内部辅助逻辑，供同模块流程复用。
 def _collect_auto_renew_due_orders(now):
-    due = async_to_sync(_get_due_orders)()
-    due_orders = [order for order in list(due.get('auto_renew') or []) if _auto_renew_order_has_active_notice(order)]
-    due_ids = {order.id for order in due_orders}
-    history_qs = CloudAutoRenewPatrolLog.objects.select_related('order', 'user').order_by('-executed_at', '-id')
+    due_orders = []
+    due_ids = set()
+    notice_by_order = {}
+    for asset in _auto_renew_due_asset_rows(now):
+        if _notice_asset_is_unattached_static_ip(asset):
+            continue
+        order = asset.order
+        if not order or order.id in due_ids:
+            continue
+        due_ids.add(order.id)
+        due_orders.append(order)
+        notice_by_order[order.id] = _notice_schedule(order, asset)
+    history_qs = CloudAutoRenewPatrolLog.objects.select_related('order', 'order__user', 'user').order_by('-executed_at', '-id')
 
-    retry_orders = []
+    retry_candidates = []
     recent_logs = history_qs.filter(executed_at__gte=now - timezone.timedelta(days=7))
     seen_history_order_ids = set()
+    latest_failure_by_order = {}
     for log in recent_logs:
         order = getattr(log, 'order', None)
         if not order:
@@ -291,11 +404,20 @@ def _collect_auto_renew_due_orders(now):
         if not getattr(order, 'auto_renew_enabled', False):
             continue
         if order.id in due_ids:
+            latest_failure_by_order[order.id] = log.failure_reason
             continue
-        if not _auto_renew_order_has_active_notice(order):
+        retry_candidates.append((order, 'retry_failed', '失败待重试', log.failure_reason))
+
+    retry_orders = []
+    retry_context = _auto_renew_notice_context([item[0] for item in retry_candidates])
+    for order, queue_status, queue_status_label, failure_reason in retry_candidates:
+        notice = _auto_renew_notice_from_context(order, retry_context)
+        if not notice:
             continue
         due_ids.add(order.id)
-        retry_orders.append((order, 'retry_failed', '失败待重试', log.failure_reason))
+        notice_by_order[order.id] = notice
+        latest_failure_by_order[order.id] = failure_reason
+        retry_orders.append((order, queue_status, queue_status_label, failure_reason))
 
     fallback_orders = []
     fallback_assets = (
@@ -306,6 +428,9 @@ def _collect_auto_renew_due_orders(now):
             order__auto_renew_enabled=True,
             order__status__in=['completed', 'expiring', 'renew_pending'],
         )
+        .exclude(public_ip__isnull=True)
+        .exclude(public_ip='')
+        .exclude(status__in=list(_AUTO_RENEW_EXCLUDED_ASSET_STATUSES))
         .exclude(order_id__in=list(due_ids))
         .order_by('actual_expires_at', 'order_id', 'id')[:100]
     )
@@ -313,9 +438,10 @@ def _collect_auto_renew_due_orders(now):
         order = asset.order
         if not order or order.id in due_ids:
             continue
-        if not _auto_renew_order_has_active_notice(order):
+        if _notice_asset_is_unattached_static_ip(asset):
             continue
         due_ids.add(order.id)
+        notice_by_order[order.id] = _notice_schedule(order, asset)
         fallback_orders.append((order, 'fallback_retry', '过期后兜底重试', None))
 
     return {
@@ -324,6 +450,8 @@ def _collect_auto_renew_due_orders(now):
         'fallback_orders': fallback_orders,
         'history_qs': history_qs,
         'due_ids': due_ids,
+        'notice_by_order': notice_by_order,
+        'latest_failure_by_order': latest_failure_by_order,
     }
 
 
@@ -420,27 +548,31 @@ def _build_auto_renew_plan_items(now=None):
     last_run_at = getattr(latest_log, 'executed_at', None)
     next_run_at = (last_run_at + timezone.timedelta(minutes=30)) if last_run_at else (now + timezone.timedelta(minutes=30))
     due_orders = queue['due_orders']
-    latest_failure_by_order = {}
-    for log in history_qs.filter(is_success=False, executed_at__gte=now - timezone.timedelta(days=7)):
-        if log.order_id and log.order_id not in latest_failure_by_order:
-            latest_failure_by_order[log.order_id] = log.failure_reason
+    notice_by_order = queue.get('notice_by_order') or {}
+    latest_failure_by_order = queue.get('latest_failure_by_order') or {}
     # 功能：处理 后台 API 接口 中的 due queue state 业务流程。
     def due_queue_state(order):
-        status = _auto_renew_task_status(order, now, latest_failure_reason=latest_failure_by_order.get(order.id))
+        notice = notice_by_order.get(order.id) or {}
+        status = _auto_renew_task_status(order, now, latest_failure_reason=latest_failure_by_order.get(order.id), expires_at=notice.get('expires_at'))
         return status[0] if status else ''
-    due_items = [
-        _auto_renew_due_item_payload(
-            order,
-            queue_status='retry_failed' if due_queue_state(order) == 'auto_renew_failed' else 'due_now',
-            queue_status_label='失败待重试' if due_queue_state(order) == 'auto_renew_failed' else '本轮待执行',
-            next_run_at=next_run_at,
-            last_failure_reason=latest_failure_by_order.get(order.id),
+
+    due_items = []
+    for order in due_orders:
+        queue_state = due_queue_state(order)
+        due_items.append(
+            _auto_renew_due_item_payload(
+                order,
+                queue_status='retry_failed' if queue_state == 'auto_renew_failed' else 'due_now',
+                queue_status_label='失败待重试' if queue_state == 'auto_renew_failed' else '本轮待执行',
+                next_run_at=next_run_at,
+                last_failure_reason=latest_failure_by_order.get(order.id),
+                notice=notice_by_order.get(order.id),
+            )
         )
-        for order in due_orders
-    ]
     # 功能：处理 后台 API 接口 中的 retry item payload 业务流程。
     def retry_item_payload(order, queue_status, queue_status_label, last_failure_reason):
-        status = _auto_renew_task_status(order, now, latest_failure_reason=last_failure_reason)
+        notice = notice_by_order.get(order.id) or {}
+        status = _auto_renew_task_status(order, now, latest_failure_reason=last_failure_reason, expires_at=notice.get('expires_at'))
         if status and status[0] == 'auto_renew_pending':
             queue_status = 'due_now'
             queue_status_label = '本轮待执行'
@@ -450,6 +582,7 @@ def _build_auto_renew_plan_items(now=None):
             queue_status_label=queue_status_label,
             next_run_at=next_run_at,
             last_failure_reason=last_failure_reason,
+            notice=notice_by_order.get(order.id),
         )
 
     due_items.extend([
@@ -457,7 +590,7 @@ def _build_auto_renew_plan_items(now=None):
         for order, queue_status, queue_status_label, last_failure_reason in queue['retry_orders']
     ])
     due_items.extend([
-        _auto_renew_due_item_payload(order, queue_status=queue_status, queue_status_label=queue_status_label, next_run_at=next_run_at)
+        _auto_renew_due_item_payload(order, queue_status=queue_status, queue_status_label=queue_status_label, next_run_at=next_run_at, notice=notice_by_order.get(order.id))
         for order, queue_status, queue_status_label, _ in queue['fallback_orders']
     ])
     all_future_items = _auto_renew_future_plan_items(
@@ -468,6 +601,7 @@ def _build_auto_renew_plan_items(now=None):
             *[item[0] for item in queue['retry_orders']],
             *[item[0] for item in queue['fallback_orders']],
         ],
+        notice_by_order=notice_by_order,
     )
     future_plan_items = [
         item for item in all_future_items

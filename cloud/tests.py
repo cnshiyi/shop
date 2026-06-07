@@ -13773,12 +13773,7 @@ class CloudServerServicesTestCase(TestCase):
         request = RequestFactory().get('/api/admin/tasks/auto-renew/')
         self._attach_bearer_session(request, staff_user)
 
-        # 功能：处理 云资产、云订单和生命周期 中的 fake get due orders 业务流程。
-        async def fake_get_due_orders():
-            return {'auto_renew': [due_order]}
-
-        with patch('cloud.api_tasks._get_due_orders', side_effect=fake_get_due_orders):
-            response = auto_renew_task_detail(request)
+        response = auto_renew_task_detail(request)
 
         payload = json.loads(response.content)
         data = payload.get('data') or payload
@@ -13795,7 +13790,7 @@ class CloudServerServicesTestCase(TestCase):
         self.assertEqual(retry_item['last_failure_reason'], '余额不足')
 
     # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
-    def test_auto_renew_detail_keeps_valid_order_without_asset(self):
+    def test_auto_renew_detail_ignores_order_without_asset_expiry_fact(self):
         due_order = CloudServerOrder.objects.create(
             order_no='AUTO-RENEW-NO-ASSET-1',
             user=self.user,
@@ -13818,19 +13813,14 @@ class CloudServerServicesTestCase(TestCase):
         request = RequestFactory().get('/api/admin/tasks/auto-renew/')
         self._attach_bearer_session(request, staff_user)
 
-        # 功能：处理 云资产、云订单和生命周期 中的 fake get due orders 业务流程。
-        async def fake_get_due_orders():
-            return {'auto_renew': [due_order]}
-
-        with patch('cloud.api_tasks._get_due_orders', side_effect=fake_get_due_orders):
-            response = auto_renew_task_detail(request)
+        response = auto_renew_task_detail(request)
 
         payload = json.loads(response.content)
         data = payload.get('data') or payload
         queue_status_map = {item['order_no']: item['queue_status'] for item in data['due_items']}
 
         self.assertEqual(response.status_code, 200)
-        self.assertEqual(queue_status_map[due_order.order_no], 'due_now')
+        self.assertNotIn(due_order.order_no, queue_status_map)
 
     # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
     def test_run_auto_renew_tasks_executes_due_retry_and_fallback_queue(self):
@@ -13911,10 +13901,6 @@ class CloudServerServicesTestCase(TestCase):
         request = RequestFactory().post('/api/admin/tasks/auto-renew/run/', data='{}', content_type='application/json')
         self._attach_bearer_session(request, staff_user)
 
-        # 功能：处理 云资产、云订单和生命周期 中的 fake get due orders 业务流程。
-        async def fake_get_due_orders():
-            return {'auto_renew': [due_order]}
-
         # 功能：处理 云资产、云订单和生命周期 中的 fake run auto renew 业务流程。
         def fake_run_auto_renew(order_id):
             order = CloudServerOrder.objects.get(id=order_id)
@@ -13922,7 +13908,7 @@ class CloudServerServicesTestCase(TestCase):
                 return None, '余额不足', {'currency': 'USDT', 'amount': None}
             return order, None, {'currency': 'USDT', 'amount': Decimal('19.00'), 'before': Decimal('100.00'), 'after': Decimal('81.00'), 'payer_user_id': self.user.id}
 
-        with patch('cloud.api_tasks._get_due_orders', side_effect=fake_get_due_orders), patch('cloud.api_tasks._run_auto_renew', new=fake_run_auto_renew):
+        with patch('cloud.api_tasks._run_auto_renew', new=fake_run_auto_renew):
             response = run_auto_renew_tasks(request)
 
         payload = json.loads(response.content)

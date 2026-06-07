@@ -12703,6 +12703,88 @@ UV_CACHE_DIR=/private/tmp/uv-cache-shop uv run python manage.py check
 - 本轮未恢复废弃 runtime app、订单侧到期字段、旧计划快照、旧退款逻辑、旧退款函数名或旧兼容入口。
 - 本轮未打印 Telegram token、Telegram session、TOTP、支付密钥、云厂商密钥、完整代理链接、代理 secret 或登录密码。
 
+## 2026-06-08 03:10 自动续费详情性能修复和真实页面验证
+
+### 背景
+
+继续执行自动巡检时，从任务中心进入 `/admin/tasks/auto-renew` 发现自动续费详情页请求被前端中断，页面显示 0；直接请求后端需要约 54 到 74 秒才返回。用户要求机器人多任务高并发也要纳入测试，因此本轮同时补跑机器人并发隔离测试。
+
+### 问题
+
+- 自动续费详情页通过 `_get_due_orders()` 间接扫描全生命周期资产，在 250 万级资产和大量历史记录下，详情页读路径被拖慢。
+- 构建计划项时重复逐订单读取资产和通知 payload。
+- 前端自动续费详情表格 `row-key` 使用 Ant Design Vue 已废弃的 `index` 参数。
+- 带 `ellipsis` 的 `TypographyParagraph` 使用子节点文本，Ant Design Vue 在控制台报 error。
+
+### 修复
+
+- `cloud/api_tasks.py`
+  - 自动续费详情改为直接从 `CloudAsset.actual_expires_at` 筛选自动续费候选。
+  - 保持过滤：已删除/删除中/已终止/终止中资产、未附加固定 IP、无公网 IP 不进入自动续费计划。
+  - 重试队列批量生成 notice context，避免逐订单查询资产。
+  - 待执行、失败重试、过期兜底和未来计划共用 notice payload。
+  - 直接到期订单仍保留最近失败原因。
+- `cloud/tests.py`
+  - 自动续费详情测试改为资产到期事实驱动。
+  - 明确没有 `CloudAsset.actual_expires_at` 的订单不会进入自动续费计划。
+- `apps/web-antd/src/views/dashboard/tasks/auto-renew-detail.vue`
+  - `renewRowKey`、`historyRowKey`、`failureRowKey` 不再使用 index 参数。
+  - 带省略的段落改用 `content` 属性，消除控制台 error。
+
+### 性能和数据对账
+
+后端函数计时：
+
+- 修复前：`collect_sec 54.581`，`build_sec 67.3`。
+- 修复后：`collect_sec 0.606`，`build_sec 0.902`。
+
+真实接口：
+
+- 旧进程：约 `74.05s`。
+- 新代码重启后：约 `1.21s`。
+- 数据口径保持：
+  - 待执行：`443`
+  - 近 24 小时失败：`1026`
+  - 最新批次：`171`
+  - 最新批次失败：`171`
+  - 历史明细：`200`
+
+### 真实前端验证
+
+使用 Playwright 打开：
+
+- `http://127.0.0.1:5666/admin/tasks/auto-renew`
+
+页面确认：
+
+- 页面标题为 `续费列表 - Vben Admin Antd`。
+- 顶部统计显示当前待执行 IP `443`，最近24小时失败 `1026`，最新批次 `7a1c26d5a339462a / 171 条`。
+- 待执行 IP 表和历史执行记录表均真实渲染。
+- `/api/admin/user/info` 和 `/api/admin/tasks/auto-renew/` 均为 `200`。
+- 未再出现 `net::ERR_ABORTED`。
+- 浏览器控制台 `0 error / 0 warning`。
+
+### 验证
+
+已通过：
+
+```bash
+UV_CACHE_DIR=/private/tmp/uv-cache-shop uv run python manage.py check
+UV_CACHE_DIR=/private/tmp/uv-cache-shop uv run python -m py_compile cloud/api_tasks.py cloud/tests.py cloud/tests_task_center.py bot/tests.py
+cd /Users/a399/Desktop/data/vue-shop-admin/apps/web-antd && pnpm exec vue-tsc --noEmit --skipLibCheck
+UV_CACHE_DIR=/private/tmp/uv-cache-shop DJANGO_TEST_SQLITE=1 uv run python manage.py test cloud.tests.CloudServerServicesTestCase.test_auto_renew_task_detail_includes_due_retry_and_fallback_items cloud.tests.CloudServerServicesTestCase.test_auto_renew_detail_ignores_order_without_asset_expiry_fact cloud.tests.CloudServerServicesTestCase.test_run_auto_renew_tasks_executes_due_retry_and_fallback_queue cloud.tests.CloudServerServicesTestCase.test_run_auto_renew_order_executes_single_order --settings=shop.settings --verbosity=1
+UV_CACHE_DIR=/private/tmp/uv-cache-shop DJANGO_TEST_SQLITE=1 uv run python manage.py test cloud.tests_task_center.CloudTaskCenterApiTestCase.test_auto_renew_section_counts_retry_failed_as_failed cloud.tests_task_center.CloudTaskCenterApiTestCase.test_auto_renew_section_counts_recent_failed_history_as_failed cloud.tests_task_center.CloudTaskCenterApiTestCase.test_auto_renew_section_does_not_duplicate_active_failure_history cloud.tests_task_center.CloudTaskCenterApiTestCase.test_auto_renew_section_counts_all_recent_failed_history_queryset --settings=shop.settings --verbosity=1
+UV_CACHE_DIR=/private/tmp/uv-cache-shop DJANGO_TEST_SQLITE=1 uv run python manage.py test bot.tests.TelegramListenerPushTestCase.test_notice_copy_wrapper_keeps_concurrent_user_sends_isolated --settings=shop.settings --verbosity=1
+```
+
+SQLite `db_comment` 警告仍是已知数据库能力差异。
+
+### 红线
+
+- 本轮未执行真实云资源创建、关机、删除服务器、释放 IP、换 IP、真实支付、链上广播、生产发布或删除业务数据。
+- 本轮未恢复废弃 runtime app、订单侧到期字段、旧计划快照、旧退款逻辑、旧退款函数名或旧兼容入口。
+- 本轮未打印 Telegram token、Telegram session、TOTP、支付密钥、云厂商密钥、完整代理链接、代理 secret 或登录密码。
+
 ## 2026-06-08 02:38 代理列表全标签真实浏览器巡检
 
 ### 背景
