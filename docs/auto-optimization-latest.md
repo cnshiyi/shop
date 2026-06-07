@@ -4,26 +4,25 @@
 
 ## 最近一轮
 
-- 时间：2026-06-08 06:24 CST
-- 状态：完成一轮无代码变更巡检；后端机器人整组测试、机器人高并发专项、生命周期开关专项、真实前端页面标签/分页巡检均通过。
-- 本轮范围：机器人多任务高并发、机器人全量业务测试、生命周期关机/删机/IP 删除开关联动、IP 删除执行时间窗、代理列表重点标签加载、计划页末页展示和控制台错误检查。
+- 时间：2026-06-08 06:28 CST
+- 状态：完成一轮任务中心/通知计划/自动续费统计口径和真实页面巡检；未发现需要修改代码的问题。
+- 本轮范围：任务中心统一统计、通知计划字段开关与分页、自动续费待处理队列、真实 HTTP 接口、真实前端页面、控制台错误检查。
 
 ## 巡检结论
 
-- 机器人测试：
-  - 整组 `bot.tests` 共 `106` 个测试通过。
-  - 多用户通知复制并发隔离通过。
-  - 钱包直付、订单补付、续费后巡检通知三类后台任务高并发隔离通过。
-  - 资产详情、订单详情、续费、换 IP、重装、修改配置、管理员修改时间、返回链和 `callback_data` 64 字节限制仍由整组测试覆盖。
-- 生命周期测试：
-  - 资产单项 `shutdown_enabled`、`server_delete_enabled`、`ip_delete_enabled` 会正确投影到对应计划状态。
-  - 全局生命周期总开关会覆盖计划页展示状态。
-  - 订单固定 IP 回收和未附加固定 IP 释放都会再次校验后台配置的 IP 删除执行时间窗口。
+- 后端聚焦测试全部通过：
+  - `cloud.tests_task_center` 共 `14` 个测试通过。
+  - 通知计划隐藏列/未来计划计数/深页无重复/关机关闭隐藏删机通知共 `4` 个测试通过。
+  - 自动续费任务中心、详情、跳过无资产到期事实、批量执行、单项执行共 `5` 个测试通过。
+- 真实 HTTP 接口：
+  - `/api/admin/tasks/center/` 返回 5 个分区，总任务 `37701`、active `10704`、failed `1178`、warning `178`。
+  - `/api/admin/tasks/notices/?compact=1&fields=basic&limit=20&history_limit=20` 返回近期 `3428`、未来 `18001`、未来用户 `18001`，加载 20 组、20 条历史；隐藏文案列时没有构造文案预览。
+  - `/api/admin/tasks/notices/?compact=1&fields=basic,text,channels&limit=20&history_limit=20` 返回同口径计数，文案列开启时有文案预览。
+  - `/api/admin/tasks/auto-renew/?limit=20&history_limit=20` 返回待续费 `443`，加载 443 条待处理和 200 条历史。
 - 真实前端页面：
-  - 代理列表重点标签均能加载：未附加固定 IP、未绑定群组、关机计划关闭、续费关闭、云账号异常、全部。
-  - 计划页首页关键总数显示正常：关机计划 `1979990`、删除计划 `2`、IP 删除计划 `500000`、IP 删除历史存在。
-  - 计划页关机计划末页真实显示 `关机计划（已加载 40 / 总 1979990）`，分页范围 `1979951-1979990 / 共 1979990 条`。
-  - 末页前 8 条可见 IP 为 `10.6.207.191`、`10.6.208.25`、`10.6.208.115`、`10.6.208.205`、`10.6.209.39`、`10.6.209.129`、`10.6.209.219`、`10.6.210.53`，与上一轮数据库末页对账一致。
+  - `/admin/tasks` 任务列表加载到任务、自动续费入口和生命周期/计划入口。
+  - `/admin/tasks/notices` 通知计划加载到标题、计数区域和表格列。
+  - `/admin/tasks/auto-renew` 自动续费页面加载到标题、待执行信息和表格。
   - 页面控制台错误数：`0`。
 
 ## 验证
@@ -32,23 +31,22 @@
 
 ```bash
 UV_CACHE_DIR=/private/tmp/uv-cache-shop uv run python manage.py check
-UV_CACHE_DIR=/private/tmp/uv-cache-shop DJANGO_TEST_SQLITE=1 uv run python manage.py test bot.tests.TelegramListenerPushTestCase.test_notice_copy_wrapper_keeps_concurrent_user_sends_isolated bot.tests.RetainedIpRenewalUiTestCase.test_cloud_background_tasks_keep_high_concurrency_isolated --settings=shop.settings --verbosity=1
-UV_CACHE_DIR=/private/tmp/uv-cache-shop DJANGO_TEST_SQLITE=1 uv run python manage.py test cloud.tests.CloudServerServicesTestCase.test_lifecycle_plans_show_asset_shutdown_disabled_plan_state cloud.tests.CloudServerServicesTestCase.test_lifecycle_plans_use_stage_specific_asset_switches cloud.tests.CloudServerServicesTestCase.test_lifecycle_plans_show_global_stage_switches cloud.tests.CloudServerServicesTestCase.test_lifecycle_tick_recycle_respects_ip_delete_time_window cloud.tests.CloudServerServicesTestCase.test_lifecycle_tick_unattached_ip_uses_ip_delete_time_window --settings=shop.settings --verbosity=1
-UV_CACHE_DIR=/private/tmp/uv-cache-shop DJANGO_TEST_SQLITE=1 uv run python manage.py test bot.tests --settings=shop.settings --verbosity=1
-rg -n "service_expires_at|actual_expires_at.*CloudServerOrder|CloudServerOrder.*actual_expires_at|plan snapshot|snapshot table|old refund|refund_legacy|refund_old|legacy_refund|accounts\\.|finance\\.|mall\\.|monitoring\\.|dashboard_api\\.|biz\\." cloud bot orders core shop -g '!**/migrations/**'
+UV_CACHE_DIR=/private/tmp/uv-cache-shop DJANGO_TEST_SQLITE=1 uv run python manage.py test cloud.tests_task_center --settings=shop.settings --verbosity=1
+UV_CACHE_DIR=/private/tmp/uv-cache-shop DJANGO_TEST_SQLITE=1 uv run python manage.py test cloud.tests.CloudServerServicesTestCase.test_notice_task_detail_basic_fields_skip_batch_text_payload cloud.tests.CloudServerServicesTestCase.test_notice_task_detail_counts_all_future_groups_beyond_loaded_limit cloud.tests.CloudServerServicesTestCase.test_notice_task_detail_deep_group_page_has_no_duplicates cloud.tests.CloudServerServicesTestCase.test_notice_task_detail_hides_shutdown_disabled_lifecycle_notices --settings=shop.settings --verbosity=1
+UV_CACHE_DIR=/private/tmp/uv-cache-shop DJANGO_TEST_SQLITE=1 uv run python manage.py test cloud.tests.CloudServerServicesTestCase.test_task_center_counts_pending_auto_renew_retry_tasks cloud.tests.CloudServerServicesTestCase.test_auto_renew_task_detail_includes_due_retry_and_fallback_items cloud.tests.CloudServerServicesTestCase.test_auto_renew_detail_ignores_order_without_asset_expiry_fact cloud.tests.CloudServerServicesTestCase.test_run_auto_renew_tasks_executes_due_retry_and_fallback_queue cloud.tests.CloudServerServicesTestCase.test_run_auto_renew_order_executes_single_order --settings=shop.settings --verbosity=1
 ```
 
 真实页面巡检使用系统 Chrome 打开：
 
 ```text
-http://127.0.0.1:5666/admin/cloud-assets
-http://127.0.0.1:5666/admin/tasks/plans
+http://127.0.0.1:5666/admin/tasks
+http://127.0.0.1:5666/admin/tasks/notices
+http://127.0.0.1:5666/admin/tasks/auto-renew
 ```
 
 说明：
 
 - SQLite 的 `db_comment` warnings 仍是已知测试噪声。
-- 红线扫描只命中当前云账号测试、Telegram 登录账号查询和 `CloudServerOrder.ip_recycle_at` 同步语句；未发现订单侧服务器到期字段、旧退款入口或废弃 runtime app 回流。
 - 临时后台 session 已删除，未保留 `/private/tmp/shop_admin_session.json`、`/private/tmp/shop_pw_state.json` 或 `.playwright-cli/` 产物。
 
 ## 受限项
@@ -58,5 +56,5 @@ http://127.0.0.1:5666/admin/tasks/plans
 
 ## 下一步
 
-- 继续不停轮巡检，下一轮优先做任务中心/通知计划/自动续费统计口径和真实页面展示对账。
-- 继续把机器人多任务高并发与生命周期开关执行链作为每轮高优先级检查项。
+- 继续不停轮巡检，下一轮优先做云资产同步 worker、云账号异常资产可见性、同步任务失败/重试状态和真实页面展示对账。
+- 继续把机器人多任务高并发、生命周期开关执行链、代理列表标签翻页作为固定高优先级检查项。

@@ -14118,3 +14118,144 @@ UV_CACHE_DIR=/private/tmp/uv-cache-shop uv run python manage.py check
 - 本轮无新增代码问题。
 - 仅更新 `docs/auto-optimization-latest.md` 和 `docs/refactor-version-record.md` 记录巡检结果。
 - 下一轮继续巡检任务中心、通知计划、自动续费统计口径和真实页面展示对账。
+
+## 2026-06-08 06:28 任务中心、通知计划和自动续费页面巡检
+
+### 背景
+
+继续执行当前会话不少于 4 小时的自动巡检。本轮聚焦固定清单中的任务中心、通知计划、自动续费统计口径和可观测性，要求后端聚焦测试、真实 HTTP 接口和真实前端页面都给出证据。
+
+### 后端聚焦测试
+
+任务中心整组通过：
+
+```bash
+UV_CACHE_DIR=/private/tmp/uv-cache-shop DJANGO_TEST_SQLITE=1 uv run python manage.py test cloud.tests_task_center --settings=shop.settings --verbosity=1
+```
+
+结果：
+
+- `14` 个测试通过。
+- 覆盖任务中心统一分区、通知失败/历史失败计数、自动续费失败/历史失败去重、生命周期失败任务/历史失败和 pending 任务统计。
+
+通知计划聚焦通过：
+
+```bash
+UV_CACHE_DIR=/private/tmp/uv-cache-shop DJANGO_TEST_SQLITE=1 uv run python manage.py test cloud.tests.CloudServerServicesTestCase.test_notice_task_detail_basic_fields_skip_batch_text_payload cloud.tests.CloudServerServicesTestCase.test_notice_task_detail_counts_all_future_groups_beyond_loaded_limit cloud.tests.CloudServerServicesTestCase.test_notice_task_detail_deep_group_page_has_no_duplicates cloud.tests.CloudServerServicesTestCase.test_notice_task_detail_hides_shutdown_disabled_lifecycle_notices --settings=shop.settings --verbosity=1
+```
+
+结果：
+
+- `4` 个测试通过。
+- 覆盖隐藏文案列时不构造批量文案、未来计划全量计数、深页无重复、关机关闭资产不展示删机提醒。
+
+自动续费聚焦通过：
+
+```bash
+UV_CACHE_DIR=/private/tmp/uv-cache-shop DJANGO_TEST_SQLITE=1 uv run python manage.py test cloud.tests.CloudServerServicesTestCase.test_task_center_counts_pending_auto_renew_retry_tasks cloud.tests.CloudServerServicesTestCase.test_auto_renew_task_detail_includes_due_retry_and_fallback_items cloud.tests.CloudServerServicesTestCase.test_auto_renew_detail_ignores_order_without_asset_expiry_fact cloud.tests.CloudServerServicesTestCase.test_run_auto_renew_tasks_executes_due_retry_and_fallback_queue cloud.tests.CloudServerServicesTestCase.test_run_auto_renew_order_executes_single_order --settings=shop.settings --verbosity=1
+```
+
+结果：
+
+- `5` 个测试通过。
+- 覆盖任务中心自动续费 retry 统计、自动续费详情队列、无资产到期事实跳过、批量执行和单项执行。
+
+基础检查通过：
+
+```bash
+UV_CACHE_DIR=/private/tmp/uv-cache-shop uv run python manage.py check
+```
+
+### 真实 HTTP 接口
+
+使用临时后台 session 访问真实后端接口，未打印会话值。
+
+任务中心：
+
+```text
+/api/admin/tasks/center/
+elapsed=1.823s
+sections=[
+  cloud_sync total=0 active=0 failed=0 health=ok,
+  cloud_orders total=10516 active=10516 failed=0 health=warning,
+  lifecycle total=8 active=7 failed=0 health=warning,
+  notices total=22437 active=10 failed=1007 health=error,
+  auto_renew total=4740 active=171 failed=171 health=error
+]
+totals={sections=5, tasks=37701, active=10704, failed=1178, warning=178}
+```
+
+任务列表：
+
+```text
+/api/admin/tasks/
+elapsed=0.043s
+items=50
+first_ids=[-10001, 20347, 20872, 21397, 21922, 22447]
+```
+
+通知计划基本字段：
+
+```text
+/api/admin/tasks/notices/?compact=1&fields=basic&limit=20&history_limit=20
+elapsed=1.048s
+due_count=3428
+future_count=18001
+future_user_count=18001
+loaded=20
+history_loaded=20
+has_text_preview=false
+```
+
+通知计划开启文案/渠道列：
+
+```text
+/api/admin/tasks/notices/?compact=1&fields=basic,text,channels&limit=20&history_limit=20
+elapsed=1.202s
+due_count=3428
+future_count=18001
+future_user_count=18001
+loaded=20
+history_loaded=20
+has_text_preview=true
+```
+
+自动续费：
+
+```text
+/api/admin/tasks/auto-renew/?limit=20&history_limit=20
+elapsed=1.249s
+due_count=443
+loaded=443
+history_loaded=200
+```
+
+### 真实前端页面
+
+使用系统 Chrome 打开：
+
+```text
+http://127.0.0.1:5666/admin/tasks
+http://127.0.0.1:5666/admin/tasks/notices
+http://127.0.0.1:5666/admin/tasks/auto-renew
+```
+
+结果：
+
+- 任务列表页面加载到任务、自动续费入口和生命周期/计划入口。
+- 通知计划页面加载到标题、计数区域和表格列。
+- 自动续费页面加载到标题、待执行信息和表格。
+- 页面控制台错误数：`0`。
+
+### 红线
+
+- 本轮未执行真实云资源创建、关机、删除服务器、释放 IP、换 IP、真实支付、链上广播、生产发布或删除业务数据。
+- 本轮未修改业务代码。
+- 临时后台 session 已删除。
+- 未保留 `/private/tmp/shop_admin_session.json`、`/private/tmp/shop_pw_state.json` 或 `.playwright-cli/` 产物。
+
+### 结果
+
+- 未发现需要修改代码的问题。
+- 仅更新 `docs/auto-optimization-latest.md` 和 `docs/refactor-version-record.md` 记录巡检结果。
+- 下一轮继续巡检云资产同步 worker、云账号异常资产可见性、同步任务失败/重试状态和真实页面展示对账。
