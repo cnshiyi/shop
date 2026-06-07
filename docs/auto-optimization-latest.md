@@ -4,52 +4,50 @@
 
 ## 最近一轮
 
-- 时间：2026-06-07 13:25 CST
-- 状态：已完成生命周期计划页“不要兼容旧字段”的重构收口。
-- 本轮范围：后端生命周期计划 API 严格四表契约、任务中心生命周期来源收敛、停用云账号资产可见口径修复、前端计划页旧字段删除。
+- 时间：2026-06-07 13:31 CST
+- 状态：已完成无明确 TODO 后的一轮只读巡检；未发现需要修改业务代码的问题。
+- 本轮范围：生命周期计划、任务中心、机器人返回链、红线扫描、默认/MySQL 检查、前端类型检查。
 
-## 修改内容
+## 巡检结论
 
-- 生命周期计划 API：
-  - 删除旧兼容字段 `due_items`、`future_plan_items`、`history_items`、`shutdown_items`、混合 `ip_delete_items`。
-  - 删除旧 `_build_lifecycle_plan_bundle()` / `_collect_lifecycle_plan_rows()` 路径。
-  - 响应只保留四张表：`shutdown_plan_items`、`server_delete_items`、`ip_delete_plan_items`、`ip_delete_history_items`。
-  - 刷新接口只返回四张表 loaded/count 统计，不再返回旧 due/future/history/shutdown 兼容计数。
-- 生命周期查询层：
-  - `cloud/lifecycle_plan_queries.py` 中服务器关机计划只包含未关机资产，服务器删除计划只包含关机完成资产。
-  - 排序统一按 `actual_expires_at/user_id/id`，分页契约继续使用 `pagination.{table}.page/page_size/total/loaded`。
-  - 不再把未关联云账号或停用云账号的资产从计划查询/统计里过滤掉，避免代理列表可见但计划页不可管理的孤儿资产。
-- 计划页去重：
-  - 同 IP 多条资产时，优先保留真实运行/已关机资产，避免后台人工编辑生成的 pending 审计资产覆盖真实资产。
-- 任务中心：
-  - 生命周期区块不再调用旧 bundle，改为读取当前关机计划、服务器删除计划、IP 删除计划和近期失败历史。
-- 前端计划页：
-  - TypeScript 类型删除旧兼容字段。
-  - 计划页不再 fallback 到 `shutdown_items` / 混合 `ip_delete_items`。
-  - 移除旧“服务器删除历史记录”卡片，保留当前的关机计划、删除计划、IP 删除计划、IP 删除历史记录。
+- 后端和前端工作区在巡检开始前均为干净状态。
+- `TODO.md` 已无未完成任务；按 `docs/auto-optimization-control.md` 固定巡检清单执行只读巡检。
+- 生命周期计划上一轮四表契约仍有效，相关聚焦测试通过。
+- 机器人 callback/返回链测试通过，覆盖资产详情、订单详情、续费、钱包支付续费、换 IP、重装、修改配置等既有回归用例。
+- 前端 `@vben/web-antd` 类型检查通过。
+- 默认 MySQL 直接跑全量 `bot.tests` 时命中已有测试库 `test_a`，Django 需要交互确认删除；本轮未自动删除测试库，改用 `DJANGO_TEST_SQLITE=1` 隔离测试库完成验证。
 
 ## 验证
 
 本地已通过：
 
 ```bash
-uv run python -m py_compile bot/api.py cloud/lifecycle_plan_queries.py cloud/task_center.py cloud/management/commands/refresh_lifecycle_plans.py cloud/tests.py cloud/tests_task_center.py
-DJANGO_TEST_SQLITE=1 uv run python manage.py test cloud.tests_task_center.CloudTaskCenterApiTestCase cloud.tests.CloudServerServicesTestCase.test_lifecycle_plans_fields_basic_omits_notes_and_execution_payload cloud.tests.CloudServerServicesTestCase.test_lifecycle_plans_counts_all_future_server_assets_beyond_loaded_limit cloud.tests.CloudServerServicesTestCase.test_lifecycle_plans_reuses_cached_count_snapshot_after_refresh cloud.tests.CloudServerServicesTestCase.test_lifecycle_plans_server_delete_pagination_contract cloud.tests.CloudServerServicesTestCase.test_lifecycle_plans_split_shutdown_before_server_delete cloud.tests.CloudServerServicesTestCase.test_lifecycle_plans_use_stage_specific_asset_switches cloud.tests.CloudServerServicesTestCase.test_lifecycle_plans_separate_ip_delete_plan_and_history_items cloud.tests.CloudServerServicesTestCase.test_lifecycle_plans_sort_shutdown_items_by_delete_time cloud.tests.CloudServerServicesTestCase.test_lifecycle_plans_group_same_delete_time_by_user cloud.tests.CloudServerServicesTestCase.test_update_cloud_asset_expiry_refreshes_delete_plan_view cloud.tests.CloudServerServicesTestCase.test_lifecycle_plan_counts_match_proxy_list_assets --settings=shop.settings --verbosity=1
 uv run python manage.py check
+uv run python -m py_compile bot/api.py bot/handlers.py cloud/lifecycle_plan_queries.py cloud/task_center.py cloud/management/commands/refresh_lifecycle_plans.py
+DJANGO_TEST_SQLITE=1 uv run python manage.py test cloud.tests_task_center.CloudTaskCenterApiTestCase cloud.tests.CloudServerServicesTestCase.test_lifecycle_plans_fields_basic_omits_notes_and_execution_payload cloud.tests.CloudServerServicesTestCase.test_lifecycle_plans_counts_all_future_server_assets_beyond_loaded_limit cloud.tests.CloudServerServicesTestCase.test_lifecycle_plans_reuses_cached_count_snapshot_after_refresh cloud.tests.CloudServerServicesTestCase.test_lifecycle_plans_server_delete_pagination_contract cloud.tests.CloudServerServicesTestCase.test_lifecycle_plans_split_shutdown_before_server_delete cloud.tests.CloudServerServicesTestCase.test_lifecycle_plans_use_stage_specific_asset_switches cloud.tests.CloudServerServicesTestCase.test_lifecycle_plans_separate_ip_delete_plan_and_history_items cloud.tests.CloudServerServicesTestCase.test_lifecycle_plans_sort_shutdown_items_by_delete_time cloud.tests.CloudServerServicesTestCase.test_lifecycle_plans_group_same_delete_time_by_user cloud.tests.CloudServerServicesTestCase.test_update_cloud_asset_expiry_refreshes_delete_plan_view cloud.tests.CloudServerServicesTestCase.test_lifecycle_plan_counts_match_proxy_list_assets --settings=shop.settings --verbosity=1
 DB_ENGINE=mysql uv run python manage.py check
-DB_ENGINE=mysql uv run python manage.py migrate --plan
+DJANGO_TEST_SQLITE=1 uv run python manage.py test bot.tests --settings=shop.settings --verbosity=1
 /Users/a399/.homebrew/bin/pnpm -C /Users/a399/Desktop/data/vue-shop-admin --filter @vben/web-antd typecheck
-git diff --check
 ```
 
-结果：后端编译通过；25 条聚焦测试通过；默认和 MySQL `manage.py check` 通过；MySQL 无待执行迁移；前端 typecheck 通过；diff 空白检查通过。
+结果：默认和 MySQL `manage.py check` 通过；后端核心文件编译通过；生命周期/任务中心聚焦测试 25 条通过；机器人测试 104 条通过；前端 typecheck 通过。SQLite 测试中的字段/表注释警告为已知数据库能力差异。
+
+## 红线扫描
+
+```bash
+rg -n "service_expires_at" shop core bot orders cloud -g '!*/migrations/*'
+rg -n "old_refund|legacy_refund|refund_cloud_order|refund_order|apply_refund|process_refund|create_refund" shop core bot orders cloud -g '!*/migrations/*'
+rg -n "['\"](accounts|finance|mall|monitoring|dashboard_api|biz)['\"]|include\\(['\"](accounts|finance|mall|monitoring|dashboard_api|biz)" shop core bot orders cloud -g '!*/migrations/*'
+rg -n "lifecycle_plan_projection|0058_lifecycle_task_plan_page_index|plan_projection|page_lifecycle_plan_tasks|sync_lifecycle_plan_projection" bot cloud docs -g '!*/migrations/*'
+```
+
+结果：未发现 `service_expires_at`、旧退款入口或废弃 runtime app 回流；`accounts` 命中为 Telegram/同步接口普通字段名；计划投影命中仅在历史文档记录中。
 
 ## 红线
 
-- 本轮未执行真实云资源创建、删除、关机、释放 IP、换 IP、真实支付、链上广播、删除业务数据或生产发布。
+- 本轮未执行真实云资源创建、删除、关机、释放 IP、换 IP、真实支付、链上广播、删除业务数据、删除测试库或生产发布。
 - 本轮未打印密钥、私钥、Telegram session、TOTP、支付密钥或云厂商密钥。
 - 本轮未恢复废弃 runtime app、订单侧到期字段、旧计划快照或旧退款入口。
-- 红线扫描未发现 `service_expires_at`、旧退款入口或废弃 runtime app 回流；命中的 `accounts` 均为 Telegram/同步接口普通字段名，非废弃 app。
 
 ## 剩余风险
 
@@ -57,3 +55,4 @@ git diff --check
 - 任务中心生命周期、通知、自动续费统计仍建议后续抽 domain metrics，避免计数口径再次分叉。
 - 机器人返回链仍需后续抽 callback source 编解码模块，集中处理 64 字节限制。
 - 本地高数据压测数据仍保留，清理需要单独确认。
+- 默认 MySQL 测试库 `test_a` 已存在；如后续需要跑 MySQL 全量测试，应先人工确认是否可以删除或改用独立测试库名。
