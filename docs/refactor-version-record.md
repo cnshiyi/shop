@@ -10706,3 +10706,81 @@ rg -n "service_expires_at|old_refund|legacy_refund|refund_cloud_order|refund_ord
 
 - 历史文档和版本记录中仍保留旧兼容关键词，用于追溯历史，不代表运行时代码仍保留兼容入口。
 - 默认 MySQL 全量测试仍可能遇到已有测试库 `test_a` 的交互确认；本轮未删除测试库，继续使用 SQLite 隔离库跑聚焦测试。
+
+## 2026-06-07 逐文件查兼容代码并移除旧账号标签解析
+
+### 背景
+
+用户要求“逐文件查兼容代码，不要偷懒”。本轮在 `6f70c9c Remove legacy bot callback routes` 后继续检查，不恢复废弃 runtime app，不恢复旧订单到期字段、旧计划快照、旧退款入口、旧 `Server` 兼容壳或旧云 API 聚合入口。
+
+### 逐文件扫描
+
+本轮扫描范围为 `shop/`、`core/`、`bot/`、`orders/`、`cloud/` 下的运行时代码，排除 `migrations/`、`__pycache__/`、`tests.py`、`tests_*.py`。共逐文件检查 113 个文件。
+
+强规则扫描 0 个文件、0 条命中。强规则覆盖旧 bot callback、旧端口入口、旧 `Server` 包装、旧云 API 聚合入口、旧管理命令、旧计划快照、旧退款入口、订单侧旧到期字段、旧账号标签变体等。
+
+宽规则扫描 32 个文件、263 条命中，已逐文件复核。命中主要属于当前业务：Redis/TronGrid/通知账号容灾 fallback、迁移旧机、未附加固定 IP 续费、历史记录展示、脏数据质量标记、重装迁移和任务重试状态，不是旧兼容入口。
+
+### 发现
+
+- 运行时代码中发现一个真实兼容残留：`core/cloud_accounts.py` 的 `get_cloud_account_from_label()` 仍会按 provider 归一化和 `external_account_id` 接受旧 `aws_lightsail+外部账号+名称` 标签，把它解析成当前 AWS 云账号。
+- 测试代码中还有旧账号标签变体口径，原来保护“旧标签应与当前账号合并”的行为。
+- 当前说明文档仍有几处把已删除的 `cloud/api.py` 聚合入口、`reconcile_cloud_assets_from_servers` 管理命令和旧 `Server` 入口写成当前结构。
+
+### 修改
+
+- `core/cloud_accounts.py`：
+  - `get_cloud_account_from_label()` 不再按旧 provider 标签或外部账号 ID 兜底解析。
+  - 当前只接受 `cloud_account_label()` 生成的标准账号标签完整匹配。
+- `core/tests.py`：
+  - 删除旧 `aws_lightsail+...` 标签变体应存在的断言。
+  - 新增断言旧 provider 标签不再解析为当前账号。
+  - 账号负载统计测试改为只统计当前标准标签。
+- `cloud/tests.py`：
+  - 资产去重测试改为验证旧账号标签残留不会再与当前标准标签合并。
+  - 代理列表测试改为验证旧账号标签残留单独显示，不再被当前账号标签合并隐藏。
+- 当前说明文档：
+  - `DEVELOPMENT.md`
+  - `docs/project-overview.md`
+  - `docs/DATA_FLOW_AND_PERSISTENCE.md`
+  - `docs/installed-apps-cutover-plan.md`
+- `docs/refactor-worktree-boundary.md`
+- `docs/table-rename-plan.md`
+- `docs/refactor-mapping.md`
+
+上述文档已移除或更新仍指向已删除旧入口的当前说明，统一指向 `cloud/api_*` 域模块。
+- 覆盖更新 `docs/auto-optimization-latest.md`。
+
+### 验证
+
+本地已通过：
+
+```bash
+uv run python -m py_compile core/cloud_accounts.py core/tests.py cloud/tests.py
+uv run python manage.py check
+DJANGO_TEST_SQLITE=1 uv run python manage.py test core.tests.CloudAccountSelectionTestCase cloud.tests.CloudServerServicesTestCase.test_dedupe_cloud_assets_does_not_merge_old_account_label_variants cloud.tests.CloudServerServicesTestCase.test_cloud_assets_list_keeps_old_account_label_variants_separate cloud.tests.CloudServerServicesTestCase.test_cloud_account_label_variants_return_current_label_only cloud.tests.CloudServerServicesTestCase.test_account_load_does_not_count_provider_only_label_for_every_account --settings=shop.settings --verbosity=1
+git diff --check
+```
+
+结果：编译通过；Django 系统检查通过；账号标签和代理列表/去重聚焦测试 7 条通过；diff 空白检查通过。SQLite 测试输出的 `db_comment` 警告为已知数据库能力差异。
+
+### 红线扫描
+
+运行时代码逐文件扫描结果：
+
+- 文件数：113
+- 强规则命中：0 个文件、0 条
+- 宽规则命中：32 个文件、263 条，已逐文件复核为当前业务语义或容灾语义
+
+测试代码中保留的旧字符串仅用于负向断言，例如旧 callback 不应注册、旧账号标签不应解析；这类测试用于防止兼容入口回流。
+
+### 红线
+
+- 本轮未执行真实云资源创建、删除、关机、释放 IP、换 IP、真实支付、链上广播、删除业务数据、删除测试库或生产发布。
+- 本轮未打印密钥、私钥、Telegram session、TOTP、支付密钥或云厂商密钥。
+- 本轮未恢复废弃 runtime app、订单侧到期字段、旧计划快照、旧退款入口、旧 `Server` 兼容壳、旧云 API 聚合入口或旧账号标签解析。
+
+### 剩余风险
+
+- 历史版本记录和复盘文档中仍保留旧兼容关键词，用于追溯历史，不代表运行时代码仍保留兼容入口。
+- 默认 MySQL 全量测试仍可能遇到已有测试库 `test_a` 的交互确认；本轮未删除测试库，继续使用 SQLite 隔离库跑聚焦测试。

@@ -6,7 +6,11 @@
 
 本轮当前由重构接管的文件：
 
-- `cloud/api.py`
+- `cloud/api_assets.py`
+- `cloud/api_asset_edit.py`
+- `cloud/api_orders.py`
+- `cloud/api_tasks.py`
+- `cloud/api_sync.py`
 - `cloud/api_monitors.py`
 - `cloud/task_center.py`
 - `shop/admin_urls.py`

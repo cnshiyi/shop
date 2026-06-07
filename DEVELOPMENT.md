@@ -141,22 +141,21 @@ Telegram Bot 的 `🖥 代理列表` 只以 `CloudAsset` 为数据源。
 
 ```bash
 uv run python manage.py check
-uv run python -m py_compile bot/api.py bot/handlers.py cloud/services.py cloud/bootstrap.py cloud/api.py cloud/api_asset_edit.py
+uv run python -m py_compile bot/api.py bot/handlers.py cloud/services.py cloud/bootstrap.py cloud/api_assets.py cloud/api_asset_edit.py
 ```
 
 云同步相关：
 
 ```bash
-uv run python -m py_compile cloud/sync_jobs.py cloud/management/commands/sync_aws_assets.py cloud/management/commands/sync_aliyun_assets.py cloud/management/commands/reconcile_cloud_assets_from_servers.py cloud/management/commands/process_cloud_asset_sync_jobs.py cloud/management/commands/prune_cloud_sync_job_events.py
+uv run python -m py_compile cloud/sync_jobs.py cloud/management/commands/sync_aws_assets.py cloud/management/commands/sync_aliyun_assets.py cloud/management/commands/process_cloud_asset_sync_jobs.py cloud/management/commands/prune_cloud_sync_job_events.py
 uv run python manage.py sync_aws_assets --region ap-southeast-1
 uv run python manage.py sync_aliyun_assets --region cn-hongkong
 uv run python manage.py process_cloud_asset_sync_jobs --once
 uv run python manage.py prune_cloud_sync_job_events --days 90 --keep-per-job 500 --dry-run
 ```
 
-云后台 API 已经从 `cloud/api.py` 拆成域模块，`cloud/api.py` 只保留兼容导出：
+云后台 API 已经拆成域模块，旧 `cloud/api.py` 聚合层已删除：
 
-- `cloud/api.py`：兼容聚合层，只保留旧 `cloud.api.*` 名称导出；运行时代码和测试替换目标应直接指向拆分后的真实模块。
 - `cloud/api_assets.py`：代理列表、风险摘要和资产载荷辅助。
 - `cloud/api_asset_snapshots.py`：代理列表快照刷新、快照搜索、风险计数、分页和分组。
 - `cloud/api_asset_edit.py`：代理详情、人工编辑、自动续费开关和后台删除；删除会清理同资源残留记录，未附加固定 IP 刷新会同步相关记录到期时间。
@@ -165,7 +164,7 @@ uv run python manage.py prune_cloud_sync_job_events --days 90 --keep-per-job 500
 - `cloud/api_monitors.py`：监控地址和 IP 日志 API。
 - `cloud/api_sync.py`：单条代理状态同步、服务器同步、套餐/价格同步。
 - `cloud/sync_jobs.py`：负责同步任务入队、worker 执行、任务事件、任务取消/重试、同步状态、同步任务指标 API。
-- `shop/admin_urls.py` 直接导入上述域模块，`cloud/api.py` 不再作为后台路由的运行时入口。
+- `shop/admin_urls.py` 直接导入上述域模块，运行时代码和测试替换目标都应指向真实域模块。
 - 批量同步任务按账号/选中资产串行执行，不再在线程池里并发写任务状态；每个子任务完成后检查取消请求，保证状态推进和事件顺序可读。
 - `CloudAssetSyncJobEvent` 事件表通过 `job_id` 标量索引关联任务，不加外键；生产环境用 `prune_cloud_sync_job_events` 定期清理。
 - 后台业务 API 统一走 `/api/admin/` 前缀，例如 `GET /api/admin/cloud-assets/sync-jobs/metrics/`，前端代理列表抽屉和同步任务详情页读取这份指标。
@@ -175,7 +174,7 @@ uv run python manage.py prune_cloud_sync_job_events --days 90 --keep-per-job 500
 - `GET /api/admin/tasks/center/` 由 `cloud/task_center.py` 提供统一任务摘要。
 - 当前聚合范围包括云资产同步、云订单任务、生命周期计划、通知计划和自动续费计划。
 - `/admin/tasks` 前端页优先读取任务中心 API；如果 API 不可用，回退到旧的 `/admin/tasks/` 任务列表。
-- `cloud/api_monitors.py` 接管监控地址和 IP 日志 API，`cloud/api.py` 只做兼容导出。
+- `cloud/api_monitors.py` 接管监控地址和 IP 日志 API。
 
 如果用户反馈“没生效”，优先检查：
 

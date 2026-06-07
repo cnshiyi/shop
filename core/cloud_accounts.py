@@ -47,18 +47,9 @@ def get_cloud_account_from_label(label: str, provider: str | None = None):
         return None
     CloudAccountConfig = apps.get_model('core', 'CloudAccountConfig')
     normalized_provider = normalize_cloud_account_provider(provider or '')
-    parts = text.split('+')
-    label_provider = normalize_cloud_account_provider(parts[0]) if parts else ''
-    account_id = parts[1].strip() if len(parts) >= 2 else ''
     queryset = CloudAccountConfig.objects.filter(is_active=True)
     if normalized_provider:
         queryset = queryset.filter(provider=normalized_provider)
-    elif label_provider:
-        queryset = queryset.filter(provider=label_provider)
-    if account_id and '+' in text:
-        account = queryset.filter(external_account_id=account_id).first()
-        if account:
-            return account
     for account in queryset.order_by('id'):
         if text == cloud_account_label(account):
             return account

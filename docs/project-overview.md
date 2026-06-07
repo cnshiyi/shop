@@ -169,9 +169,6 @@ DB_ENGINE=sqlite SQLITE_NAME=local.sqlite3 uv run python run.py web
   - 资源巡检
 - `cloud/sync_safety.py`
   - 缺失确认、二次确认、防误删保护
-- `cloud/api.py`
-  - 云后台 API 兼容聚合层
-  - 重新导出拆分后的域接口给旧导入使用；运行时路由、管理命令和测试替换目标应直接指向真实域模块
 - `cloud/api_assets.py`
   - 代理列表、风险摘要和资产载荷辅助
 - `cloud/api_asset_snapshots.py`
@@ -201,7 +198,6 @@ DB_ENGINE=sqlite SQLITE_NAME=local.sqlite3 uv run python run.py web
 - `cloud/management/commands/`
   - `sync_aws_assets`
   - `sync_aliyun_assets`
-  - `reconcile_cloud_assets_from_servers`
   - `refresh_lifecycle_plans`
   - `refresh_notice_plans`
   - `dedupe_servers`
@@ -218,7 +214,7 @@ DB_ENGINE=sqlite SQLITE_NAME=local.sqlite3 uv run python run.py web
 
 `shop/admin_urls.py` 是 `/api/admin/*` 后台业务 API 主聚合点，覆盖：
 
-后台云资产路由直接导入 `cloud/api_assets.py`、`cloud/api_asset_edit.py`、`cloud/api_orders.py`、`cloud/api_tasks.py`、`cloud/api_sync.py`、`cloud/api_monitors.py`、`cloud/sync_jobs.py` 和 `cloud/task_center.py`。`cloud/api_asset_snapshots.py` 由列表 API、同步任务和刷新命令调用。`cloud/api.py` 只保留兼容导出，不再作为路由、管理命令或测试替换入口。
+后台云资产路由直接导入 `cloud/api_assets.py`、`cloud/api_asset_edit.py`、`cloud/api_orders.py`、`cloud/api_tasks.py`、`cloud/api_sync.py`、`cloud/api_monitors.py`、`cloud/sync_jobs.py` 和 `cloud/task_center.py`。`cloud/api_asset_snapshots.py` 由列表 API、同步任务和刷新命令调用。旧 `cloud/api.py` 聚合入口已删除，路由、管理命令和测试替换目标都应直接指向真实域模块。
 
 - 管理员会话信息和 TOTP 绑定
 - 用户、余额、折扣
@@ -252,7 +248,7 @@ DB_ENGINE=sqlite SQLITE_NAME=local.sqlite3 uv run python run.py web
 
 ```bash
 uv run python manage.py check
-uv run python -m py_compile cloud/api.py cloud/sync_jobs.py cloud/management/commands/process_cloud_asset_sync_jobs.py cloud/management/commands/prune_cloud_sync_job_events.py shop/auth_urls.py shop/admin_urls.py
+uv run python -m py_compile cloud/api_assets.py cloud/api_asset_edit.py cloud/api_orders.py cloud/api_tasks.py cloud/api_sync.py cloud/api_monitors.py cloud/sync_jobs.py cloud/management/commands/process_cloud_asset_sync_jobs.py cloud/management/commands/prune_cloud_sync_job_events.py shop/auth_urls.py shop/admin_urls.py
 uv run python manage.py makemigrations cloud --dry-run --check
 DJANGO_TEST_REUSE_DB=1 uv run python manage.py test cloud.tests.CloudServerServicesTestCase.test_sync_cloud_assets_runs_enabled_accounts_and_merges_results cloud.tests.CloudServerServicesTestCase.test_cloud_asset_sync_jobs_metrics_returns_operational_summary cloud.tests.CloudServerServicesTestCase.test_cancel_queued_cloud_asset_sync_job_marks_terminal_and_events cloud.tests.CloudServerServicesTestCase.test_sync_cloud_assets_with_selected_assets_uses_asset_scoped_tasks cloud.tests.CloudServerServicesTestCase.test_process_cloud_asset_sync_jobs_worker_processes_queued_job --keepdb --noinput --verbosity 1
 ```

@@ -17,7 +17,7 @@
 
 - `bot/models.py` / `bot/services.py` / `bot/api.py`
 - `orders/models.py` / `orders/services.py` / `orders/api.py` / `orders/ledger.py` / `orders/payment_scanner.py`
-- `cloud/models.py` / `cloud/services.py` / `cloud/api.py` / `cloud/cache.py` / `cloud/resource_monitor.py`
+- `cloud/models.py` / `cloud/services.py` / `cloud/api_*` 域模块 / `cloud/cache.py` / `cloud/resource_monitor.py`
 
 ## 当前状态说明
 

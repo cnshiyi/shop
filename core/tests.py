@@ -12,11 +12,12 @@ from django.core.management.base import CommandError
 from django.db import migrations
 from django.test import override_settings
 
-from core.cloud_accounts import cloud_account_label_variants, list_cloud_accounts_by_server_load
+from core.cloud_accounts import cloud_account_label, cloud_account_label_variants, get_cloud_account_from_label, list_cloud_accounts_by_server_load
 from core.crypto import decrypt_text, encrypt_text
 from core.models import CloudAccountConfig
 from core.models import SiteConfig
 from core.persistence import record_external_sync_log
+from cloud.models import CloudAsset
 
 
 class MySqlSqlModeSettingsTestCase(SimpleTestCase):
@@ -262,7 +263,7 @@ class EnsureDashboardAdminCommandTestCase(TestCase):
 
 
 class CloudAccountSelectionTestCase(TestCase):
-    def test_aws_label_variants_include_lightsail_alias_for_historical_rows(self):
+    def test_aws_label_variants_return_current_label_only(self):
         account = CloudAccountConfig.objects.create(
             provider=CloudAccountConfig.PROVIDER_AWS,
             name='main',
@@ -273,10 +274,22 @@ class CloudAccountSelectionTestCase(TestCase):
 
         labels = cloud_account_label_variants(account)
 
-        self.assertIn('aws+123456789012+main', labels)
-        self.assertIn('aws_lightsail+123456789012+main', labels)
+        self.assertEqual(labels, [cloud_account_label(account)])
+        self.assertNotIn('aws_lightsail+123456789012+main', labels)
 
-    def test_server_load_counts_historical_aws_lightsail_account_labels(self):
+    def test_get_cloud_account_from_label_rejects_old_provider_label(self):
+        account = CloudAccountConfig.objects.create(
+            provider=CloudAccountConfig.PROVIDER_AWS,
+            name='main',
+            external_account_id='123456789012',
+            access_key='ak',
+            secret_key='sk',
+        )
+
+        self.assertEqual(get_cloud_account_from_label(cloud_account_label(account), 'aws').id, account.id)
+        self.assertIsNone(get_cloud_account_from_label('aws_lightsail+123456789012+main', 'aws_lightsail'))
+
+    def test_server_load_counts_current_account_labels_only(self):
         first = CloudAccountConfig.objects.create(
             provider=CloudAccountConfig.PROVIDER_AWS,
             name='first',
@@ -291,8 +304,9 @@ class CloudAccountSelectionTestCase(TestCase):
             access_key='ak2',
             secret_key='sk2',
         )
-        CloudAsset.objects.create(kind=CloudAsset.KIND_SERVER, provider='aws_lightsail', account_label='aws_lightsail+111+first', public_ip='10.0.0.1')
-        CloudAsset.objects.create(kind=CloudAsset.KIND_SERVER, provider='aws_lightsail', account_label='aws_lightsail+111+first', public_ip='10.0.0.2')
+        CloudAsset.objects.create(kind=CloudAsset.KIND_SERVER, provider='aws_lightsail', account_label=cloud_account_label(first), public_ip='10.0.0.1')
+        CloudAsset.objects.create(kind=CloudAsset.KIND_SERVER, provider='aws_lightsail', account_label=cloud_account_label(first), public_ip='10.0.0.2')
+        CloudAsset.objects.create(kind=CloudAsset.KIND_SERVER, provider='aws_lightsail', account_label='aws_lightsail+222+second', public_ip='10.0.0.3')
 
         accounts = list_cloud_accounts_by_server_load('aws_lightsail')
 

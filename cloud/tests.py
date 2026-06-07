@@ -1353,7 +1353,7 @@ class CloudServerServicesTestCase(TestCase):
         self.assertEqual(CloudAsset.objects.filter(public_ip='13.250.30.10').count(), 2)
 
     # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
-    def test_dedupe_cloud_assets_merges_same_cloud_account_label_variants(self):
+    def test_dedupe_cloud_assets_does_not_merge_old_account_label_variants(self):
         account = CloudAccountConfig.objects.create(
             provider=CloudAccountConfig.PROVIDER_AWS,
             name='dedupe-label-variant',
@@ -1366,7 +1366,6 @@ class CloudServerServicesTestCase(TestCase):
             kind=CloudAsset.KIND_SERVER,
             source=CloudAsset.SOURCE_AWS_SYNC,
             provider='aws_lightsail',
-            cloud_account=account,
             account_label='aws_lightsail+123456789012+dedupe-label-variant',
             region_code='ap-southeast-1',
             asset_name='dedupe-label-variant-old',
@@ -1393,13 +1392,14 @@ class CloudServerServicesTestCase(TestCase):
 
         call_command('dedupe_cloud_assets')
 
-        self.assertEqual(CloudAsset.objects.filter(public_ip='13.250.30.13').count(), 1)
+        self.assertEqual(CloudAsset.objects.filter(public_ip='13.250.30.13').count(), 2)
+        self.assertTrue(CloudAsset.objects.filter(id=old_asset.id).exists())
         self.assertTrue(CloudAsset.objects.filter(id=keep_asset.id).exists())
         log.refresh_from_db()
-        self.assertEqual(log.asset_id, keep_asset.id)
+        self.assertEqual(log.asset_id, old_asset.id)
 
     # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
-    def test_cloud_assets_list_dedupes_same_cloud_account_label_variants(self):
+    def test_cloud_assets_list_keeps_old_account_label_variants_separate(self):
         account = CloudAccountConfig.objects.create(
             provider=CloudAccountConfig.PROVIDER_AWS,
             name='ui-dedupe-label-variant',
@@ -1412,7 +1412,6 @@ class CloudServerServicesTestCase(TestCase):
             kind=CloudAsset.KIND_SERVER,
             source=CloudAsset.SOURCE_AWS_SYNC,
             provider='aws_lightsail',
-            cloud_account=account,
             account_label='aws_lightsail+123456789012+ui-dedupe-label-variant',
             region_code='ap-southeast-1',
             asset_name='ui-dedupe-old',
@@ -1440,8 +1439,9 @@ class CloudServerServicesTestCase(TestCase):
         payload = json.loads(response.content.decode('utf-8'))['data']
 
         self.assertEqual(response.status_code, 200)
-        self.assertEqual(payload['total'], 1)
-        self.assertEqual(payload['items'][0]['id'], keep_asset.id)
+        self.assertEqual(payload['total'], 2)
+        item_ids = {item['id'] for item in payload['items']}
+        self.assertIn(keep_asset.id, item_ids)
 
     # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
     def test_cloud_assets_list_uses_bulk_order_inference_without_per_asset_fallback(self):

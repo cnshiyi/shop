@@ -50,11 +50,11 @@
 - `server_prices` → `cloud_price`
 - `cloud_server_orders` → `cloud_order`
 - `cloud_assets` → `cloud_asset`
-- `servers` → `cloud_asset`（`Server` 只作为兼容投影，不再拥有独立表）
+- `servers` → `cloud_asset`（旧 `Server` 运行时入口已删除，不再拥有独立表）
 
 原因：
 - `cloud.models` 已经作为统一出口
-- 云资源链路已开始从 `cloud.services` / `cloud.cache` / `cloud.api` 暴露
+- 云资源链路已从 `cloud.services` / `cloud.cache` / `cloud/api_*` 域模块暴露
 
 注意：
 - `CloudServerOrder` 外键和生命周期逻辑较多，放在本批后段执行
@@ -112,9 +112,9 @@
 
 - [x] 新域模型出口：`bot/models.py`、`orders/models.py`、`cloud/models.py`
 - [x] 新域服务出口：`bot/services.py`、`orders/services.py`、`cloud/services.py`
-- [x] 新域 API 出口：`bot/api.py`、`orders/api.py`、`cloud/api.py`
+- [x] 新域 API 出口：`bot/api.py`、`orders/api.py`、`cloud/api_*` 域模块
 - [x] `TelegramUsername` 运行时依赖清零
-- [x] `dashboard_api` 已拆分并并回 `bot/api.py`、`orders/api.py`、`cloud/api.py` + `shop/admin_urls.py`
+- [x] `dashboard_api` 已拆分并并回 `bot/api.py`、`orders/api.py`、`cloud/api_*` 域模块 + `shop/admin_urls.py`
 - [ ] `INSTALLED_APPS` 调整方案单独设计
 
 ## 建议下一步

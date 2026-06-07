@@ -52,7 +52,7 @@
 - `server_prices` / `mall_serverprice` → `cloud_price`
 - `cloud_server_orders` / `mall_cloudserverorder` → `cloud_order`
 - `cloud_assets` / `mall_cloudasset` → `cloud_asset`
-- `servers` / `mall_server` → `cloud_asset`（`Server` 仅保留为指向 `cloud_asset` 的兼容投影）
+- `servers` / `mall_server` → `cloud_asset`（旧 `Server` 运行时入口已删除）
 - `address_monitors` / `monitoring_addressmonitor` → `cloud_address_monitor`
 - `daily_address_stats` / `monitoring_dailyaddressstat` → `cloud_address_stat_daily`
 - `resource_snapshots` / `monitoring_resourcesnapshot` → `cloud_resource_snapshot`
@@ -73,7 +73,7 @@
 - [x] `bot/models.py` 建立 bot 域过渡入口
 - [x] `orders/models.py` 建立订单域过渡入口
 - [x] `cloud/models.py` 建立云资源域过渡入口
-- [x] 增加 `bot/api.py`、`orders/api.py`、`cloud/api.py` 过渡入口
+- [x] 增加 `bot/api.py`、`orders/api.py`、`cloud/api_*` 域模块入口
 
 ### 第二阶段：清理重复真相
 - [x] 下线 `TelegramUsername`（Django 状态已移除，数据库表暂保留）
@@ -117,7 +117,7 @@
 ### 第五阶段：删除旧目录
 - [x] 删除 `accounts/finance/mall/monitoring` 旧目录本体；相关运行时职责已迁入新域
 - [x] 删除 `biz/dashboard_api` 中已无运行时必要的业务实现与 app 注册残留
-- [x] 兼容壳已基本清空；剩余历史痕迹仅存在于迁移链、测试命名空间与复盘文档
+- [x] 旧转发壳已删除；剩余历史痕迹仅存在于迁移链和复盘文档
 - [x] `shop/admin_urls.py` 已完全改走 `bot/orders/cloud` API 入口
 
 ### 第六阶段：收尾
