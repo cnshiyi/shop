@@ -26,7 +26,6 @@
   - `cloud.CloudAssetDashboardSnapshot`（代理列表查询快照，用于后台分页/搜索/风险统计）
   - `cloud.CloudAssetSyncJob`（后台代理同步任务状态、进度、worker 心跳、取消与结果）
   - `cloud.CloudAssetSyncJobEvent`（后台代理同步任务事件流，记录详细状态更新时间线）
-  - `cloud.Server`（兼容投影，映射到 `cloud_asset`，不再有独立表）
 - 充值与财务
   - `orders.Recharge`
 - 地址监控

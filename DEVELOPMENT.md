@@ -194,7 +194,7 @@ ps -axo pid,lstart,command | grep -E 'run.py all|bot.runner|manage.py runserver|
 
 ### P1：云资产模型收口
 
-- 继续弱化 `Server` 旧表存在感，避免新功能再依赖它作为主数据源
+- 继续清理历史文档里对旧 `Server` 入口的残留叙述，避免新功能误以为它仍是运行时入口
 - Bot 代理详情、后台代理详情、同步脚本都以 `CloudAsset` 为主
 - 订单只表达购买/续费/迁移/升级业务，不表达资产人工绑定真相
 

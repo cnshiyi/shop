@@ -145,7 +145,6 @@ DB_ENGINE=sqlite SQLITE_NAME=local.sqlite3 uv run python run.py web
   - `ServerPrice`：价格模板
   - `CloudServerOrder`：云服务器订单，保留续费、删机、IP 回收、自动续费等生命周期时间线，不再承载服务到期事实
   - `CloudAsset`：云资产主表，`kind='server'` 是服务器资产唯一事实记录
-  - `Server`：非 Django 模型兼容门面，仅用于旧 import/脚本过渡，不能再作为运行时主入口
   - `CloudIpLog`：IP 变更与生命周期日志，关联订单与资产，不再关联 `Server`
   - `CloudLifecyclePlanNote`：生命周期计划备注
   - 删除计划、通知计划、自动续费计划均按订单、资产和日志实时生成，不再保留派生快照表

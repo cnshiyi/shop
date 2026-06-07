@@ -8,7 +8,7 @@
 - `core/`：公共配置、公共模型与基础设施
 - `bot/`：Telegram 用户模型、后台认证/用户/配置 API、机器人交互
 - `orders/`：充值、余额流水、商品、购物车、订单与交易相关服务
-- `cloud/`：云套餐、价格模板、云订单、云资产、监控模型与相关服务/缓存；`CloudAsset` 是唯一云资源事实表，`Server` 仅为兼容投影
+- `cloud/`：云套餐、价格模板、云订单、云资产、监控模型与相关服务/缓存；`CloudAsset` 是唯一云资源事实表，旧 `Server` 运行时入口已删除
 - `orders/payment_scanner.py`：链上支付扫描
 - `cloud/resource_monitor.py`：链上资源巡检
 

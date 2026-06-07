@@ -102,7 +102,7 @@
 
 - `cloud_asset` 是唯一云资源事实表。
 - 历史 `cloud_server` 表已拆除。
-- 代码中的 `Server` 模型仅作为兼容投影映射到 `cloud_asset`。
+- 旧 `Server` 运行时入口已删除，不再恢复 `cloud_server` 或 `Server` 包装层。
 - 新增云资源状态、同步、安全确认逻辑应优先挂到 `cloud_asset` 或明确的 `cloud_*` 辅助表，不要恢复 `cloud_server`。
 
 ## 4. 模型名规则

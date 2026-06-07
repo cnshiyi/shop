@@ -10784,3 +10784,57 @@ git diff --check
 
 - 历史版本记录和复盘文档中仍保留旧兼容关键词，用于追溯历史，不代表运行时代码仍保留兼容入口。
 - 默认 MySQL 全量测试仍可能遇到已有测试库 `test_a` 的交互确认；本轮未删除测试库，继续使用 SQLite 隔离库跑聚焦测试。
+
+## 2026-06-07 再查兼容代码并清理旧 Server 文档口径
+
+### 背景
+
+用户要求“再查一轮”。本轮从提交 `4e1e88f Remove legacy cloud account label compatibility` 后继续检查，工作区起始干净。目标仍是不恢复废弃 runtime app、旧订单到期字段、旧计划快照、旧退款入口、旧 `Server` 兼容壳、旧云 API 聚合入口或旧账号标签解析。
+
+### 扫描
+
+本轮继续扫描运行时代码：`shop/`、`core/`、`bot/`、`orders/`、`cloud/`，排除 `migrations/`、`tests.py`、`tests_*.py`。
+
+强规则覆盖：旧 bot callback、旧端口入口、旧 `cloud.api` 聚合入口、旧 `Server` 包装、旧计划快照、旧退款入口、订单侧旧到期字段、旧账号标签变体等。结果：无运行时代码命中。
+
+测试代码中旧字符串仍主要用于负向断言，例如旧 callback 不应注册、旧端口入口不存在、旧账号标签不应解析；不作为运行时兼容入口。
+
+### 发现
+
+运行时代码未发现新的兼容残留。当前说明文档仍有几处旧 `Server` 兼容投影/兼容门面的误导口径：
+
+- `ARCHITECTURE.md` 仍写 `Server` 仅为兼容投影。
+- `docs/project-overview.md` 仍列出 `Server` 非 Django 模型兼容门面。
+- `docs/DB_NAMING_CONVENTIONS.md` 仍写代码中的 `Server` 模型作为兼容投影。
+- `docs/DATA_FLOW_AND_PERSISTENCE.md` 仍把 `cloud.Server` 写进当前业务数据库模型列表。
+- `docs/installed-apps-cutover-plan.md` 仍把 `cloud.Server` 写成真实模型来源。
+- `DEVELOPMENT.md` 中“继续弱化 `Server` 旧表存在感”容易误导为旧入口仍存在。
+
+### 修改
+
+- 明确旧 `Server` 运行时入口已删除。
+- 移除 `cloud.Server` 当前模型来源、兼容投影、兼容门面的表述。
+- 保留“不要恢复 `cloud_server` 或 `Server` 包装层”的红线说明。
+- 覆盖更新 `docs/auto-optimization-latest.md`。
+
+### 验证
+
+本地已通过：
+
+```bash
+uv run python manage.py check
+git diff --check
+```
+
+结果：Django 系统检查通过；diff 空白检查通过。
+
+### 红线
+
+- 本轮未执行真实云资源创建、删除、关机、释放 IP、换 IP、真实支付、链上广播、删除业务数据、删除测试库或生产发布。
+- 本轮未打印密钥、私钥、Telegram session、TOTP、支付密钥或云厂商密钥。
+- 本轮未恢复废弃 runtime app、订单侧到期字段、旧计划快照、旧退款入口、旧 `Server` 兼容壳、旧云 API 聚合入口或旧账号标签解析。
+
+### 剩余风险
+
+- 历史版本记录和复盘文档中仍保留旧兼容关键词，用于追溯历史，不代表运行时代码仍保留兼容入口。
+- 默认 MySQL 全量测试仍可能遇到已有测试库 `test_a` 的交互确认；本轮未删除测试库。

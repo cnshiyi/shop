@@ -40,7 +40,7 @@
 - [x] `orders/ledger.py` 已接管余额流水记账入口
 - [x] `bot.TelegramUser`、`orders.Recharge`、`orders.BalanceLedger` 已成为真实模型来源
 - [x] `orders.Product` / `orders.CartItem` / `orders.Order` 已成为真实模型来源
-- [x] `cloud.CloudServerPlan` / `cloud.ServerPrice` / `cloud.CloudServerOrder` / `cloud.CloudAsset` / `cloud.Server` / `cloud.CloudIpLog` 已成为真实模型来源
+- [x] `cloud.CloudServerPlan` / `cloud.ServerPrice` / `cloud.CloudServerOrder` / `cloud.CloudAsset` / `cloud.CloudIpLog` 已成为真实模型来源
 - [x] `cloud.AddressMonitor` / `cloud.DailyAddressStat` / `cloud.ResourceSnapshot` 已成为真实模型来源
 - [x] `cloud.cache` 已成为真实监控缓存实现来源
 - [x] `orders/payment_scanner.py` 与 `cloud/resource_monitor.py` 已接管原 `tron/*` 运行时职责
