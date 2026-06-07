@@ -18,7 +18,7 @@ from django.db.models import Case, IntegerField, Q, Value, When
 from django.utils import timezone
 
 from bot.models import TelegramLoginAccount, TelegramUser
-from cloud.asset_expiry import apply_order_lifecycle_from_asset_expiry, order_asset_expiry
+from cloud.asset_expiry import apply_order_lifecycle_from_asset_expiry, order_asset_expiry, set_order_asset_expiry
 from cloud.lifecycle_schedule import compute_order_lifecycle_fields, runtime_int_config, with_runtime_time
 from cloud.models import CloudAsset, CloudIpLog, CloudServerOrder, CloudServerPlan, ServerPrice
 from cloud.note_utils import append_note, prepend_note
@@ -1693,11 +1693,7 @@ def _update_cloud_order_expiry(order: CloudServerOrder, expires_at, *, now=None,
         'renew_notice_sent_at', 'auto_renew_notice_sent_at', 'auto_renew_failure_notice_sent_at',
         'delete_notice_sent_at', 'recycle_notice_sent_at', 'provision_note', 'updated_at',
     ])
-    _update_order_primary_records(
-        order,
-        asset_updates={'actual_expires_at': expires_at, 'updated_at': now},
-        now=now,
-    )
+    set_order_asset_expiry(order, expires_at, update_lifecycle=False)
     record_cloud_ip_log(
         event_type='changed',
         order=order,

@@ -13573,6 +13573,83 @@ git diff --check
 - 本轮未恢复废弃 runtime app、订单侧到期字段、旧计划快照表、旧退款逻辑或旧退款函数名。
 - `core.dashboard_api` 命中是当前后台 API 公共工具模块；`dashboard_snapshots` 命中是当前刷新 helper 命名，不是旧计划快照表。
 - 本轮使用临时后台 session 做真实页面巡检，结束前删除；未打印 token、session、TOTP、支付密钥、云厂商密钥或完整代理链接。
+
+## 2026-06-08 05:46 机器人高并发巡检与管理员到期修复
+
+### 背景
+
+继续执行当前会话自动巡检。用户明确要求机器人也要测试多任务高并发，因此本轮从机器人并发专项开始，并扩大到整组 `bot.tests`，重点关注按钮返回链、钱包直付/补付、续费后巡检通知和管理员修改到期时间。
+
+### 发现
+
+首次整组运行：
+
+```bash
+UV_CACHE_DIR=/private/tmp/uv-cache-shop DJANGO_TEST_SQLITE=1 uv run python manage.py test bot.tests --settings=shop.settings --verbosity=1
+```
+
+暴露 1 个失败：
+
+- `bot.tests.BotAdminExpiryUpdateTestCase.test_admin_expiry_update_syncs_order_asset_and_server`
+
+问题表现：
+
+- 管理员通过机器人修改订单到期时间后，订单下只有 `_order_primary_asset()` 选中的一条服务器资产写入新 `CloudAsset.actual_expires_at`。
+- 同订单另一条服务器资产仍保留旧到期时间。
+- `order_asset_expiry(order)` 按资产排序读取时可能命中旧资产，导致订单详情、机器人按钮链和生命周期计划看到旧到期事实。
+
+### 修复
+
+- `cloud/services.py`
+  - `_update_cloud_order_expiry()` 不再只调用 `_update_order_primary_records()` 更新单条主资产。
+  - 改为调用 `set_order_asset_expiry(order, expires_at, update_lifecycle=False)`，把订单下所有服务器资产的 `CloudAsset.actual_expires_at` 写齐。
+  - 生命周期计划字段仍由 `_update_cloud_order_expiry()` 自己按 `compute_order_lifecycle_fields()` 写入，避免重复更新，也没有恢复订单侧到期字段。
+
+### 机器人高并发结果
+
+正确路径重跑通过：
+
+```bash
+UV_CACHE_DIR=/private/tmp/uv-cache-shop DJANGO_TEST_SQLITE=1 uv run python manage.py test bot.tests.TelegramListenerPushTestCase.test_notice_copy_wrapper_keeps_concurrent_user_sends_isolated bot.tests.RetainedIpRenewalUiTestCase.test_cloud_background_tasks_keep_high_concurrency_isolated --settings=shop.settings --verbosity=1
+```
+
+覆盖：
+
+- 多用户通知复制并发隔离。
+- 钱包直付创建、订单补付创建、续费后巡检通知三类后台任务高并发隔离。
+
+修复后单用例通过：
+
+```bash
+UV_CACHE_DIR=/private/tmp/uv-cache-shop DJANGO_TEST_SQLITE=1 uv run python manage.py test bot.tests.BotAdminExpiryUpdateTestCase.test_admin_expiry_update_syncs_order_asset_and_server --settings=shop.settings --verbosity=1
+```
+
+整组机器人测试通过：
+
+```bash
+UV_CACHE_DIR=/private/tmp/uv-cache-shop DJANGO_TEST_SQLITE=1 uv run python manage.py test bot.tests --settings=shop.settings --verbosity=1
+```
+
+结果：
+
+- `106` 个机器人测试通过。
+- 覆盖资产详情、订单详情、续费、换 IP、重装、修改配置、管理员修改时间、返回链和 `callback_data` 64 字节限制。
+
+### 验证
+
+已通过：
+
+```bash
+UV_CACHE_DIR=/private/tmp/uv-cache-shop uv run python manage.py check
+UV_CACHE_DIR=/private/tmp/uv-cache-shop uv run python -m py_compile cloud/services.py bot/tests.py
+git diff --check
+```
+
+说明：
+
+- SQLite 的 `db_comment` warnings 是当前测试库已知噪声。
+- 本轮未执行真实云资源创建、关机、删除服务器、释放 IP、换 IP、真实支付、链上广播、生产发布或删除业务数据。
+- 本轮没有打印 token、Telegram session、TOTP、支付密钥、云厂商密钥或完整代理链接。
 ## 2026-06-08 05:43 用户分区风险标签末页性能优化
 
 ### 背景
