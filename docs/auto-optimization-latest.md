@@ -4,38 +4,20 @@
 
 ## 最近一轮
 
-- 时间：2026-06-08 05:46 CST
-- 状态：完成一轮机器人多任务高并发和全量 `bot.tests` 巡检；发现并修复管理员通过机器人修改到期时间时，订单下多条服务器资产到期事实不同步的问题。
-- 本轮范围：机器人按钮/返回链、后台钱包直付/补付并发、续费后巡检通知并发、管理员修改到期时间、`CloudAsset.actual_expires_at` 单一事实写入。
+- 时间：2026-06-08 06:13 CST
+- 状态：完成一轮只读生命周期/机器人高风险路径巡检；未发现需要立即提交的代码缺陷，本轮仅更新记录。
+- 本轮范围：生命周期总开关与资产单项开关联动、IP 删除执行时间窗、机器人详情回退链与 Telegram `callback_data` 长度约束。
 
-## 修复内容
+## 巡检结论
 
-- `cloud/services.py`
-  - `_update_cloud_order_expiry()` 不再只通过 `_update_order_primary_records()` 更新一条主资产。
-  - 改为调用 `set_order_asset_expiry(order, expires_at, update_lifecycle=False)`，把订单下所有服务器资产的 `CloudAsset.actual_expires_at` 一次写齐。
-  - 生命周期字段仍由 `_update_cloud_order_expiry()` 当前逻辑计算并保存，避免重复计算或恢复订单侧到期字段。
-
-## 发现的问题
-
-- 整组 `bot.tests` 首次运行暴露失败：
-  - `bot.tests.BotAdminExpiryUpdateTestCase.test_admin_expiry_update_syncs_order_asset_and_server`
-  - 现象：管理员修改订单到期时间后，订单关联的一条资产更新为新到期时间，但同订单另一条服务器资产仍保留旧到期时间；`order_asset_expiry(order)` 可能读到旧资产，导致生命周期显示和机器人详情不一致。
-- 修复后该用例和整组机器人测试均已通过。
-
-## 机器人高并发验证
-
-已通过：
-
-- `bot.tests.TelegramListenerPushTestCase.test_notice_copy_wrapper_keeps_concurrent_user_sends_isolated`
-- `bot.tests.RetainedIpRenewalUiTestCase.test_cloud_background_tasks_keep_high_concurrency_isolated`
-- 整组 `bot.tests` 共 `106` 个测试。
-
-覆盖点：
-
-- 多用户通知复制并发隔离。
-- 钱包直付创建、订单补付创建、续费后巡检通知三类后台任务并发隔离。
-- 资产详情、订单详情、续费、换 IP、重装、修改配置、管理员修改到期时间按钮链和返回链。
-- Telegram `callback_data` 64 字节限制。
+- 生命周期计划相关聚焦测试全部通过，确认以下契约仍成立：
+  - 资产单项 `shutdown_enabled`、`server_delete_enabled`、`ip_delete_enabled` 会分别投影到对应计划状态。
+  - 全局生命周期总开关会覆盖计划页展示状态，不会被资产局部状态绕过。
+  - 订单固定 IP 回收与未附加固定 IP 释放都会再次校验后台配置的 IP 删除执行时间窗口。
+- 机器人高风险回退链聚焦测试全部通过，确认：
+  - 资产详情从超长订单详情返回时会压缩为短回调路径。
+  - 嵌套资产详情回退链会重新压缩，不会把历史长路径继续向下传。
+  - 极端大 ID 场景下，续费/换 IP/重装/修改配置等按钮的 `callback_data` 仍不超过 Telegram 64 字节限制。
 
 ## 验证
 
@@ -43,24 +25,29 @@
 
 ```bash
 UV_CACHE_DIR=/private/tmp/uv-cache-shop uv run python manage.py check
-UV_CACHE_DIR=/private/tmp/uv-cache-shop uv run python -m py_compile cloud/services.py bot/tests.py
-UV_CACHE_DIR=/private/tmp/uv-cache-shop DJANGO_TEST_SQLITE=1 uv run python manage.py test bot.tests.TelegramListenerPushTestCase.test_notice_copy_wrapper_keeps_concurrent_user_sends_isolated bot.tests.RetainedIpRenewalUiTestCase.test_cloud_background_tasks_keep_high_concurrency_isolated --settings=shop.settings --verbosity=1
-UV_CACHE_DIR=/private/tmp/uv-cache-shop DJANGO_TEST_SQLITE=1 uv run python manage.py test bot.tests.BotAdminExpiryUpdateTestCase.test_admin_expiry_update_syncs_order_asset_and_server --settings=shop.settings --verbosity=1
-UV_CACHE_DIR=/private/tmp/uv-cache-shop DJANGO_TEST_SQLITE=1 uv run python manage.py test bot.tests --settings=shop.settings --verbosity=1
+UV_CACHE_DIR=/private/tmp/uv-cache-shop DJANGO_TEST_SQLITE=1 uv run python manage.py test cloud.tests.CloudServerServicesTestCase.test_lifecycle_plans_show_asset_shutdown_disabled_plan_state cloud.tests.CloudServerServicesTestCase.test_lifecycle_plans_use_stage_specific_asset_switches cloud.tests.CloudServerServicesTestCase.test_lifecycle_plans_show_global_stage_switches cloud.tests.CloudServerServicesTestCase.test_lifecycle_tick_recycle_respects_ip_delete_time_window cloud.tests.CloudServerServicesTestCase.test_lifecycle_tick_unattached_ip_uses_ip_delete_time_window --settings=shop.settings --verbosity=1
+UV_CACHE_DIR=/private/tmp/uv-cache-shop DJANGO_TEST_SQLITE=1 uv run python manage.py test bot.tests.RetainedIpRenewalUiTestCase.test_asset_detail_callback_from_extreme_order_detail_stays_under_limit bot.tests.RetainedIpRenewalUiTestCase.test_asset_detail_callback_recompacts_nested_asset_detail_back_path bot.tests.RetainedIpRenewalUiTestCase.test_extreme_nested_cloud_callbacks_stay_under_telegram_limit --settings=shop.settings --verbosity=1
 git diff --check
+```
+
+只读扫描已执行：
+
+```bash
+rg -n "service_expires_at|actual_expires_at.*CloudServerOrder|plan snapshot|snapshot table|old refund|refund_legacy|dashboard_api|accounts|finance|mall|monitoring|biz" cloud bot orders core shop -g '!**/migrations/**'
 ```
 
 说明：
 
-- SQLite 的 `db_comment` warnings 是当前测试库已知噪声，不是业务失败。
-- 本轮未打印 token、Telegram session、支付密钥、云厂商密钥或完整代理链接。
+- SQLite 的 `db_comment` warnings 仍是已知测试噪声，不影响本轮聚焦结论。
+- `core.dashboard_api` 与 `core.cloud_accounts` 是当前运行时代码；本轮未发现废弃 runtime app 回流，也未发现订单侧到期字段和旧退款入口回流。
 
 ## 受限项
 
+- 受当前会话沙箱限制，无法连接本地 MySQL：对 `127.0.0.1` 的数据库连接返回 `Operation not permitted`，因此本轮没法做实库生命周期对账。
+- 本地前端页面 `http://127.0.0.1:5666/admin/cloud-assets` 当前未启动，`curl` 连接失败；因此本轮未执行真实浏览器翻页/点击和控制台检查。
 - 本轮未执行真实云资源创建、关机、删除服务器、释放 IP、换 IP、真实支付、链上广播、生产发布或删除业务数据。
-- 本轮没有启动真实 Telegram bot 进程，也没有调用 Telegram HTTP API；验证集中在项目内现有机器人业务测试和并发测试。
 
 ## 下一步
 
-- 继续巡检生命周期计划页和代理列表深分页，重点关注页面展示与数据库对账一致。
-- 继续按用户要求把机器人多任务高并发纳入后续每轮巡检。
+- 在具备本地 MySQL 和前端页面可达条件的下一轮，优先补生命周期计划页的真实页面巡检和实库对账。
+- 继续维持“每轮一个最小动作”的节奏，优先盯住生命周期总开关/单项开关和机器人支付/续费返回链。

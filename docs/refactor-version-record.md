@@ -13770,3 +13770,75 @@ git diff --check
 - 本轮未恢复废弃 runtime app、订单侧到期字段、旧计划快照表、旧退款逻辑或旧退款函数名。
 - `core.dashboard_api` 命中是当前后台 API 公共工具模块；`dashboard_snapshots` 命中是当前刷新 helper 命名，不是旧计划快照表。
 - 本轮使用临时后台 session 做真实页面巡检，结束前删除；未打印 token、session、TOTP、支付密钥、云厂商密钥或完整代理链接。
+
+## 2026-06-08 06:13 生命周期与机器人回退链只读巡检
+
+### 背景
+
+`TODO.md` 里的专项任务均已完成，本轮按 `docs/auto-optimization-control.md` 固定巡检清单执行只读审计，不与用户正在修改的 `bot/api.py` 和前端文件混做一个补丁。优先复查用户明确要求的高风险路径：生命周期总开关/单项开关联动、IP 删除执行时间窗、机器人详情回退链和 Telegram 回调长度约束。
+
+### 巡检动作
+
+- 后端仓库先执行 `git status --short`、`git log -1 --oneline --decorate --stat`，确认存在用户未提交改动：
+  - `bot/api.py`
+  - `.playwright-cli/`
+- 前端仓库状态确认存在用户未提交改动：
+  - `apps/web-antd/src/views/dashboard/cloud-assets/index.vue`
+- 读取 `AGENTS.md`、`docs/auto-optimization-control.md`、`docs/auto-optimization-latest.md`、`docs/refactor-version-record.md` 末尾和 `TODO.md` 后，判断本轮应执行固定巡检清单而不是继续领取新修复任务。
+
+### 验证结果
+
+后端基础检查通过：
+
+```bash
+UV_CACHE_DIR=/private/tmp/uv-cache-shop uv run python manage.py check
+```
+
+生命周期聚焦测试通过：
+
+```bash
+UV_CACHE_DIR=/private/tmp/uv-cache-shop DJANGO_TEST_SQLITE=1 uv run python manage.py test cloud.tests.CloudServerServicesTestCase.test_lifecycle_plans_show_asset_shutdown_disabled_plan_state cloud.tests.CloudServerServicesTestCase.test_lifecycle_plans_use_stage_specific_asset_switches cloud.tests.CloudServerServicesTestCase.test_lifecycle_plans_show_global_stage_switches cloud.tests.CloudServerServicesTestCase.test_lifecycle_tick_recycle_respects_ip_delete_time_window cloud.tests.CloudServerServicesTestCase.test_lifecycle_tick_unattached_ip_uses_ip_delete_time_window --settings=shop.settings --verbosity=1
+```
+
+确认点：
+
+- 资产单项关机/删机/IP 删除开关会正确投影到生命周期计划状态。
+- 全局总开关能覆盖各计划阶段状态，不会被资产局部状态绕过。
+- 生命周期执行器在订单 IP 回收与未附加固定 IP 释放前都会再次校验 IP 删除执行时间窗。
+
+机器人回退链聚焦测试通过：
+
+```bash
+UV_CACHE_DIR=/private/tmp/uv-cache-shop DJANGO_TEST_SQLITE=1 uv run python manage.py test bot.tests.RetainedIpRenewalUiTestCase.test_asset_detail_callback_from_extreme_order_detail_stays_under_limit bot.tests.RetainedIpRenewalUiTestCase.test_asset_detail_callback_recompacts_nested_asset_detail_back_path bot.tests.RetainedIpRenewalUiTestCase.test_extreme_nested_cloud_callbacks_stay_under_telegram_limit --settings=shop.settings --verbosity=1
+```
+
+确认点：
+
+- 资产详情从超长订单详情返回时会压缩回调路径。
+- 嵌套资产详情返回链会重新压缩，不会把长链继续下传。
+- 极端大 ID 下，续费/换 IP/重装/修改配置按钮仍满足 Telegram `callback_data` 64 字节限制。
+
+红线关键字只读扫描已执行：
+
+```bash
+rg -n "service_expires_at|actual_expires_at.*CloudServerOrder|plan snapshot|snapshot table|old refund|refund_legacy|dashboard_api|accounts|finance|mall|monitoring|biz" cloud bot orders core shop -g '!**/migrations/**'
+```
+
+结论：
+
+- 未发现订单侧到期字段回流。
+- 未发现旧退款入口回流。
+- 未发现废弃 runtime app 被重新接入运行时。
+- `core.dashboard_api`/`core.cloud_accounts` 命中属于当前架构公共模块，不是废弃 app 回流。
+
+### 受限项
+
+- 当前沙箱禁止连接 `127.0.0.1` MySQL，本轮尝试实库只读对账时得到 `Operation not permitted`，因此未完成真实数据库 ID/数量对账。
+- 本地前端页面 `http://127.0.0.1:5666/admin/cloud-assets` 当前未启动，`curl` 连接失败；因此未执行真实浏览器翻页、点击和控制台检查。
+- `ps` 进程查询同样受限，无法在本轮进一步确认本地前后端进程状态。
+
+### 结果
+
+- 本轮未发现需要提交的代码问题，未修改业务代码，只更新自动化文档。
+- 已执行 `git diff --check`，通过。
+- 下一轮在环境允许时优先补生命周期计划页的真实页面巡检和实库对账，再决定是否需要针对页面/执行器做最小修复。
