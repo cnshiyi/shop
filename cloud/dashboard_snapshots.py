@@ -76,8 +76,15 @@ def _refresh_dashboard_plan_snapshots(reason: str = '', *, lifecycle_limit: int 
     except Exception:
         logger.exception('DASHBOARD_SNAPSHOT_AUTO_RENEW_REFRESH_FAILED reason=%s', reason)
     try:
-        from cloud.api_tasks import _build_notice_plan_bundle
-        _build_notice_plan_bundle(limit=500, future_limit=200, history_limit=1000)
+        from cloud.api_tasks import _build_notice_plan_summary
+        _build_notice_plan_summary(
+            limit=500,
+            offset=0,
+            history_limit=1000,
+            history_offset=0,
+            fields={'basic'},
+            include_total_counts=True,
+        )
     except (OperationalError, ProgrammingError) as exc:
         if _is_db_table_not_ready_error(exc):
             logger.debug('DASHBOARD_SNAPSHOT_NOTICE_REFRESH_SKIPPED reason=%s error=%s', reason, exc)

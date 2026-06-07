@@ -11002,3 +11002,65 @@ git -C /Users/a399/Desktop/data/vue-shop-admin diff --check
 - 本轮属于只读专项审计，没有替当前未提交的通知计划重构补丁额外补代码。
 - 仍需继续检查通知计划相关测试桩与前端真实浏览器翻页链路，确认不存在旧字段回流。
 - 任务中心、通知计划页和通知刷新命令虽然已通过静态与聚焦验证，但还没有完成浏览器控制台 0 error / 0 warning 的真实点击验证。
+
+## 2026-06-07 通知计划服务端分页重构与代理列表真实页面对账
+
+### 背景
+
+用户要求不要只调用 API，必须实际打开前端页面确认数据是否正常显示；同时要求不要保留旧兼容路径，发现兼容残留直接重构。本轮承接上一轮代理列表分页页面显示异常和通知计划大数据加载慢的问题，目标是切掉通知计划旧字段口径，并验证 50 万级代理列表翻页不会丢数据、不会重复显示第一页。
+
+### 修改
+
+- 通知计划删除旧 `_build_notice_plan_bundle` 路径，统一改为 `_build_notice_plan_summary`。
+- 通知计划详情只返回 `active_user_summary_items` 和 `history_items`，不再返回旧 `due_items`、`future_plan_items`、`due_user_summary_items`、`future_user_summary_items`。
+- 通知计划服务端按用户分组分页，前端移除 `future_limit/future_offset`，不再把近期计划和未来计划拆成两套分页。
+- 通知删除提醒改为只受服务器删除开关影响；IP 回收提醒改为只受 IP 删除开关影响，不再沿用关机开关判断。
+- 任务中心通知统计改为复用新通知计划 summary，避免任务中心和通知计划页统计口径再次分叉。
+- 代理列表分组分页前端直接使用后端返回的 `groups`，不再用 `items` 重新建组后排序。
+- 代理列表 IP 视图保留后端返回顺序，避免前端默认排序导致页面翻页和数据库页序不一致。
+- 清理本轮真实页面测试产生的 `.playwright-cli/` 临时产物和临时会话文件。
+
+### 真实页面对账
+
+本轮实际打开 `http://127.0.0.1:5666/admin/cloud-assets`，通过本地临时后台会话进入页面。临时会话只用于页面测试，未打印 token，测试后已删除临时文件。
+
+页面显示数据规模：
+
+- 全部资产：500000。
+- 分组分页总数：499492。
+
+数据库只读分页对账结果：
+
+- 第 1 页：`huangyating6748`、`压测Y用户00000`、`压测Y用户00075`、`压测Y用户00150`、`压测Y用户00225`；IP 为 `52.221.62.194`、`198.19.0.0`、`198.19.0.75`、`198.19.0.150`、`198.19.0.225`。
+- 第 2 页：`压测Y用户01425`、`压测Y用户01500`、`压测Y用户01575`、`压测Y用户01650`、`压测Y用户01725`；IP 为 `198.19.5.145`、`198.19.5.220`、`198.19.6.39`、`198.19.6.114`、`198.19.6.189`。
+- 第 3 页：`压测Y用户02925`、`压测Y用户03000`、`压测Y用户03075`、`压测Y用户03150`、`压测Y用户03225`；IP 为 `198.19.11.109`、`198.19.11.184`、`198.19.12.3`、`198.19.12.78`、`198.19.12.153`。
+- 最后一页 24975：共 12 组；`压测用户004799`、`压测用户004819`、`压测用户004839`、`压测用户004859`、`压测用户004879`；IP 为 `198.51.18.209`、`198.51.18.229`、`198.51.18.249`、`198.51.19.14`、`198.51.19.34`。
+
+页面实际可见结果与数据库只读分页结果一致。第 2 页不再重复显示第 1 页，深页和最后页也能正确显示对应数据。
+
+### 验证
+
+本地已通过：
+
+```bash
+uv run python -m py_compile cloud/api_tasks.py cloud/task_center.py cloud/dashboard_snapshots.py cloud/management/commands/refresh_notice_plans.py cloud/tests.py cloud/tests_task_center.py
+DJANGO_TEST_SQLITE=1 uv run python manage.py test cloud.tests.CloudServerServicesTestCase.test_notice_task_detail_counts_all_future_groups_beyond_loaded_limit cloud.tests.CloudServerServicesTestCase.test_notice_task_detail_deep_group_page_has_no_duplicates cloud.tests.CloudServerServicesTestCase.test_notice_task_detail_basic_fields_skip_batch_text_payload cloud.tests.CloudServerServicesTestCase.test_notice_task_detail_hides_shutdown_disabled_lifecycle_notices cloud.tests_task_center.CloudTaskCenterApiTestCase.test_notice_section_counts_failed_retry_as_failed cloud.tests_task_center.CloudTaskCenterApiTestCase.test_notice_section_counts_recent_failed_history_as_failed --settings=shop.settings --verbosity=1
+uv run python manage.py check
+git diff --check
+pnpm --dir /Users/a399/Desktop/data/vue-shop-admin/apps/web-antd typecheck
+git -C /Users/a399/Desktop/data/vue-shop-admin diff --check
+```
+
+结果：编译检查、6 个聚焦测试、Django 系统检查、前端类型检查和空白检查均通过。SQLite 测试输出的 `db_comment` 警告为已知数据库能力差异。
+
+### 红线
+
+- 本轮未执行真实云资源创建、删除、关机、释放 IP、换 IP、真实支付、链上广播、删除业务数据、删除测试库或生产发布。
+- 本轮未打印密钥、私钥、Telegram session、TOTP、支付密钥或云厂商密钥。
+- 本轮未恢复废弃 runtime app、订单侧到期字段、旧计划快照、旧退款入口、旧 `Server` 兼容壳或旧云 API 聚合入口。
+
+### 剩余风险
+
+- 生命周期真实云资源执行未在本轮触发，本轮只做页面和服务端分页真实性验证。
+- 自动续费计划、生命周期计划仍使用各自业务字段 `due_items/future_plan_items`，这不是通知计划旧兼容残留。
+- 下一轮建议继续压测任务中心、生命周期计划和通知计划在 50 万到 100 万数据下的页面跳页耗时。

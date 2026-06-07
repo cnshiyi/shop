@@ -10356,13 +10356,16 @@ class CloudServerServicesTestCase(TestCase):
         )
         self._create_auto_renew_asset(order, expires_at=expires_at)
 
-        call_command('refresh_notice_plans', limit=20, future_limit=20, history_limit=20)
+        call_command('refresh_notice_plans', limit=20, history_limit=20)
 
         staff_user = get_user_model().objects.create_user(username='staff_cmd_notice_plan', password='x', is_staff=True)
-        request = self.factory.get('/api/admin/tasks/notices/', {'limit': 20, 'future_limit': 20, 'history_limit': 20})
+        request = self.factory.get('/api/admin/tasks/notices/', {'limit': 20, 'history_limit': 20})
         self._attach_bearer_session(request, staff_user)
         data = json.loads(notice_task_detail(request).content)['data']
-        self.assertTrue(any(item.get('order_id') == order.id and item.get('notice_type') == 'renew_notice' for item in data['due_items']))
+        self.assertTrue(any(
+            item.get('notice_type') == 'renew_notice' and order.id in (item.get('order_ids') or [])
+            for item in data['active_user_summary_items']
+        ))
 
     # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
     def test_refresh_notice_plan_view_api_builds_notice_plan_view(self):
@@ -10386,7 +10389,7 @@ class CloudServerServicesTestCase(TestCase):
         )
         self._create_auto_renew_asset(order, expires_at=expires_at)
         staff_user = get_user_model().objects.create_user(username='staff_api_notice_refresh', password='x', is_staff=True)
-        request = self.factory.post('/api/admin/tasks/notices/refresh/', data=json.dumps({'limit': 20, 'future_limit': 20, 'history_limit': 20}), content_type='application/json')
+        request = self.factory.post('/api/admin/tasks/notices/refresh/', data=json.dumps({'limit': 20, 'history_limit': 20}), content_type='application/json')
         self._attach_bearer_session(request, staff_user)
 
         response = refresh_notice_plan_view(request)
@@ -10417,7 +10420,7 @@ class CloudServerServicesTestCase(TestCase):
         )
         self._create_auto_renew_asset(order, expires_at=expires_at)
         staff_user = get_user_model().objects.create_user(username='staff_notice_plan_table', password='x', is_staff=True)
-        request = self.factory.get('/api/admin/tasks/notices/', {'limit': 20, 'future_limit': 20, 'history_limit': 20})
+        request = self.factory.get('/api/admin/tasks/notices/', {'limit': 20, 'history_limit': 20})
         self._attach_bearer_session(request, staff_user)
 
         with patch('cloud.api_tasks._get_due_orders') as due_orders_mock:
@@ -10426,8 +10429,8 @@ class CloudServerServicesTestCase(TestCase):
 
         self.assertEqual(response.status_code, 200)
         data = json.loads(response.content)['data']
-        row = next(item for item in data['due_items'] if item.get('order_id') == order.id and item.get('notice_type') == 'renew_notice')
-        self.assertEqual(row['ip'], '7.7.7.71')
+        row = next(item for item in data['active_user_summary_items'] if item.get('notice_type') == 'renew_notice' and order.id in (item.get('order_ids') or []))
+        self.assertIn('7.7.7.71', row.get('ips') or [])
 
     # 功能：验证通知表关闭文案列后不再构造批量通知文案，避免大数据分页加载被隐藏列拖慢。
     def test_notice_task_detail_basic_fields_skip_batch_text_payload(self):
@@ -10455,7 +10458,6 @@ class CloudServerServicesTestCase(TestCase):
             'compact': '1',
             'fields': 'basic',
             'limit': '10',
-            'future_limit': '10',
             'history_limit': '10',
         })
         self._attach_bearer_session(request, staff_user)
@@ -10465,17 +10467,20 @@ class CloudServerServicesTestCase(TestCase):
 
         self.assertEqual(response.status_code, 200)
         data = json.loads(response.content)['data']
-        row = next(item for item in data['due_user_summary_items'] if item.get('user_id') == self.user.id)
+        row = next(item for item in data['active_user_summary_items'] if item.get('user_id') == self.user.id)
         self.assertNotIn('notice_text_preview', row)
 
-    # 功能：验证通知计划总数统计全量未来计划，不受当前页加载上限截断。
-    def test_notice_task_detail_counts_all_future_items_beyond_loaded_limit(self):
+    # 功能：验证通知计划总数统计全量未来计划，且分页只加载当前页分组。
+    def test_notice_task_detail_counts_all_future_groups_beyond_loaded_limit(self):
         now = timezone.now()
+        users = []
         for index in range(4):
+            user = TelegramUser.objects.create(tg_user_id=910500 + index, username=f'notice_future_group_{index}')
+            users.append(user)
             expires_at = now + timezone.timedelta(days=40, minutes=index)
             order = CloudServerOrder.objects.create(
                 order_no=f'NOTICE-FULL-FUTURE-COUNT-{index}',
-                user=self.user,
+                user=user,
                 plan=self.plan,
                 provider=self.plan.provider,
                 region_code=self.plan.region_code,
@@ -10495,7 +10500,6 @@ class CloudServerServicesTestCase(TestCase):
             'compact': '1',
             'fields': 'basic',
             'limit': '1',
-            'future_limit': '1',
             'history_limit': '1',
         })
         self._attach_bearer_session(request, staff_user)
@@ -10505,18 +10509,25 @@ class CloudServerServicesTestCase(TestCase):
         self.assertEqual(response.status_code, 200)
         data = json.loads(response.content)['data']
         self.assertGreaterEqual(data['future_count'], 4)
-        self.assertEqual(len(data['future_plan_items']), 1)
+        self.assertGreaterEqual(data['future_user_count'], 4)
+        self.assertEqual(len(data['active_user_summary_items']), 1)
+        self.assertEqual(data['active_user_summary_items'][0]['plan_scope'], 'future')
 
-    # 功能：验证通知计划未来队列按调用方上限截断，避免订单多时继续无限扩张。
-    def test_notice_task_future_items_respects_future_limit(self):
-        from cloud.api_tasks import _notice_task_future_items
-
+    # 功能：验证通知计划服务端分页深页不会空页、不会重复。
+    def test_notice_task_detail_deep_group_page_has_no_duplicates(self):
         now = timezone.now()
-        expires_at = now + timezone.timedelta(days=40)
+        created_user_ids = []
         for index in range(6):
+            user = TelegramUser.objects.create(
+                tg_user_id=911000 + index,
+                username=f'notice_deep_group_{index}',
+                first_name=f'NoticeDeep{index}',
+            )
+            created_user_ids.append(user.id)
+            expires_at = now + timezone.timedelta(days=40, minutes=index)
             order = CloudServerOrder.objects.create(
-                order_no=f'NOTICE-FUTURE-LIMIT-{index}',
-                user=self.user,
+                order_no=f'NOTICE-DEEP-GROUP-PAGE-{index}',
+                user=user,
                 plan=self.plan,
                 provider=self.plan.provider,
                 region_code=self.plan.region_code,
@@ -10527,21 +10538,42 @@ class CloudServerServicesTestCase(TestCase):
                 total_amount='19.00',
                 pay_amount='19.00',
                 status='completed',
-                public_ip=f'7.7.7.{80 + index}',
+                public_ip=f'7.7.8.{80 + index}',
                 cloud_reminder_enabled=True,
             )
-            self._create_auto_renew_asset(order, expires_at=expires_at + timezone.timedelta(minutes=index))
+            self._create_auto_renew_asset(order, expires_at=expires_at)
+        staff_user = get_user_model().objects.create_user(username='staff_notice_deep_group_page', password='x', is_staff=True)
+        first_request = self.factory.get('/api/admin/tasks/notices/', {
+            'compact': '1',
+            'fields': 'basic',
+            'limit': '3',
+            'offset': '0',
+            'history_limit': '1',
+        })
+        self._attach_bearer_session(first_request, staff_user)
+        second_request = self.factory.get('/api/admin/tasks/notices/', {
+            'compact': '1',
+            'fields': 'basic',
+            'limit': '3',
+            'offset': '3',
+            'history_limit': '1',
+        })
+        self._attach_bearer_session(second_request, staff_user)
 
-        due_items, future_items = _notice_task_future_items(
-            now,
-            now + timezone.timedelta(minutes=10),
-            set(),
-            {},
-            future_limit=3,
-        )
+        first_data = json.loads(notice_task_detail(first_request).content)['data']
+        second_data = json.loads(notice_task_detail(second_request).content)['data']
+        first_keys = {item['id'] for item in first_data['active_user_summary_items']}
+        second_keys = {item['id'] for item in second_data['active_user_summary_items']}
+        seen_user_ids = {
+            item.get('user_id')
+            for item in [*first_data['active_user_summary_items'], *second_data['active_user_summary_items']]
+            if item.get('user_id') in created_user_ids
+        }
 
-        self.assertEqual(due_items, [])
-        self.assertEqual(len(future_items), 3)
+        self.assertEqual(len(first_data['active_user_summary_items']), 3)
+        self.assertEqual(len(second_data['active_user_summary_items']), 3)
+        self.assertFalse(first_keys & second_keys)
+        self.assertEqual(seen_user_ids, set(created_user_ids))
 
     # 功能：验证通知计划详情不会展示资产开关关闭的删机提醒。
     def test_notice_task_detail_hides_shutdown_disabled_lifecycle_notices(self):
@@ -10577,6 +10609,7 @@ class CloudServerServicesTestCase(TestCase):
             actual_expires_at=now - timezone.timedelta(days=5),
             status=CloudAsset.STATUS_RUNNING,
             shutdown_enabled=False,
+            server_delete_enabled=False,
             is_active=True,
         )
         recycle_order = CloudServerOrder.objects.create(
@@ -10612,17 +10645,18 @@ class CloudServerServicesTestCase(TestCase):
             status=CloudAsset.STATUS_DELETED,
             provider_status='固定IP保留中-实例已删除',
             shutdown_enabled=False,
+            ip_delete_enabled=False,
             is_active=False,
         )
         staff_user = get_user_model().objects.create_user(username='staff_notice_shutdown_off', password='x', is_staff=True)
-        request = self.factory.get('/api/admin/tasks/notices/', {'limit': 20, 'future_limit': 20, 'history_limit': 20})
+        request = self.factory.get('/api/admin/tasks/notices/', {'limit': 20, 'history_limit': 20})
         self._attach_bearer_session(request, staff_user)
 
         response = notice_task_detail(request)
 
         self.assertEqual(response.status_code, 200)
         data = json.loads(response.content)['data']
-        visible_items = [*data['due_items'], *data['future_plan_items']]
+        visible_items = data['active_user_summary_items']
         self.assertFalse(any(item.get('order_id') == order.id and item.get('notice_type') == 'delete_notice' for item in visible_items))
         self.assertFalse(any(item.get('order_id') == recycle_order.id and item.get('notice_type') == 'recycle_notice' for item in visible_items))
 
@@ -10710,7 +10744,7 @@ class CloudServerServicesTestCase(TestCase):
             extra={'order_ids': [order.id], 'send_attempts': [{'channel': 'bot', 'channel_label': 'Bot', 'ok': True, 'error': ''}]},
         )
         staff_user = get_user_model().objects.create_user(username='staff_notice_plan_history_delete', password='x', is_staff=True, is_superuser=True)
-        sync_request = self.factory.get('/api/admin/tasks/notices/', {'limit': 20, 'future_limit': 20, 'history_limit': 20})
+        sync_request = self.factory.get('/api/admin/tasks/notices/', {'limit': 20, 'history_limit': 20})
         self._attach_bearer_session(sync_request, staff_user)
         sync_response = notice_task_detail(sync_request)
         self.assertEqual(sync_response.status_code, 200)

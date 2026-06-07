@@ -70,8 +70,8 @@ class CloudTaskCenterApiTestCase(TestCase):
 
     def test_notice_section_counts_failed_retry_as_failed(self):
         now = timezone.now()
-        with patch('cloud.api_tasks._build_notice_plan_bundle', return_value={
-            'active_items': [
+        with patch('cloud.api_tasks._build_notice_plan_summary', return_value={
+            'active_user_summary_items': [
                 {
                     'id': 'renew_notice-1',
                     'notice_status': 'failed_retry',
@@ -86,6 +86,7 @@ class CloudTaskCenterApiTestCase(TestCase):
                 },
             ],
             'history_items': [],
+            'active_user_total': 1,
         }):
             section = _notice_section(now)
 
@@ -97,8 +98,8 @@ class CloudTaskCenterApiTestCase(TestCase):
 
     def test_notice_section_counts_recent_failed_history_as_failed(self):
         now = timezone.now()
-        with patch('cloud.api_tasks._build_notice_plan_bundle', return_value={
-            'active_items': [],
+        with patch('cloud.api_tasks._build_notice_plan_summary', return_value={
+            'active_user_summary_items': [],
             'history_items': [
                 {
                     'id': 'notice-history-1',
@@ -113,6 +114,7 @@ class CloudTaskCenterApiTestCase(TestCase):
                     'created_at': (now - timezone.timedelta(minutes=30)).isoformat(),
                 },
             ],
+            'active_user_total': 0,
         }):
             section = _notice_section(now)
 
@@ -369,9 +371,10 @@ class CloudTaskCenterApiTestCase(TestCase):
             last_run_at=now,
         )
 
-        with patch('cloud.api_tasks._build_notice_plan_bundle', return_value={
-            'active_items': [],
+        with patch('cloud.api_tasks._build_notice_plan_summary', return_value={
+            'active_user_summary_items': [],
             'history_items': [],
+            'active_user_total': 0,
         }):
             section = _notice_section(now)
 
@@ -393,9 +396,10 @@ class CloudTaskCenterApiTestCase(TestCase):
             status=CloudNoticeTask.STATUS_PENDING,
         )
 
-        with patch('cloud.api_tasks._build_notice_plan_bundle', return_value={
-            'active_items': [],
+        with patch('cloud.api_tasks._build_notice_plan_summary', return_value={
+            'active_user_summary_items': [],
             'history_items': [],
+            'active_user_total': 0,
         }):
             section = _notice_section(now)
 

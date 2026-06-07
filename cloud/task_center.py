@@ -559,10 +559,17 @@ def _lifecycle_section(now) -> dict:
 
 
 def _notice_section(now) -> dict:
-    from cloud.api_tasks import _build_notice_plan_bundle
+    from cloud.api_tasks import _build_notice_plan_summary
 
-    bundle = _build_notice_plan_bundle(limit=1000, future_limit=200, history_limit=1000)
-    items_source = bundle.get('active_items') or []
+    bundle = _build_notice_plan_summary(
+        limit=1000,
+        offset=0,
+        history_limit=1000,
+        history_offset=0,
+        fields={'basic', 'channels', 'retry'},
+        include_total_counts=False,
+    )
+    items_source = bundle.get('active_user_summary_items') or []
     failed_count = sum(1 for item in items_source if item.get('notice_status') in _NOTICE_FAILED_STATUSES)
     active_failure_keys = {
         _task_identity(item)
@@ -593,7 +600,7 @@ def _notice_section(now) -> dict:
         key='notices',
         title='通知计划',
         path='/admin/tasks/notices',
-        total=len(items_source) + len(recent_failed_history) + len(db_task_items),
+        total=int(bundle.get('active_user_total') or len(items_source)) + len(recent_failed_history) + len(db_task_items),
         active=sum(1 for item in items_source if item.get('queue_status') in ['due_now', 'scheduled_future', 'overdue', 'fallback_notice', 'within_window']) + db_active_count,
         failed=failed_count + len(recent_failed_history) + db_failed_count,
         warning=warning_count,

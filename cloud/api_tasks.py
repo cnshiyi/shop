@@ -7,16 +7,15 @@ import uuid
 from datetime import timezone as dt_timezone
 
 from asgiref.sync import async_to_sync
-from django.db.models import Q
+from django.db.models import Count, Min, Q
 from django.utils import timezone
-from django.utils.dateparse import parse_datetime
 from django.views.decorators.csrf import csrf_exempt
 from django.views.decorators.http import require_GET, require_POST
 
 from bot.models import TelegramLoginAccount
 from cloud.asset_expiry import order_asset_expiry
 from cloud.dashboard_snapshots import _refresh_dashboard_plan_snapshots
-from cloud.lifecycle import AUTO_RENEW_BEFORE_EXPIRY_WINDOW, NOTICE_TYPE_SWITCH_CONFIG, _asset_lifecycle_enabled_for_order, _auto_renew_notice_batch_payload, _notice_asset_is_unattached_static_ip, _notice_effective_delivered, _get_due_orders, _get_notice_text_override, _lifecycle_notice_batch_payload, _notice_payload_for_order, _notice_override_key, _notice_schedule, _record_auto_renew_patrol_log, _renew_notice_batch_payload, _run_auto_renew, _set_notice_text_override, cloud_notice_type_enabled
+from cloud.lifecycle import AUTO_RENEW_BEFORE_EXPIRY_WINDOW, NOTICE_TYPE_SWITCH_CONFIG, _auto_renew_notice_batch_payload, _notice_effective_delivered, _get_due_orders, _get_notice_text_override, _lifecycle_notice_batch_payload, _notice_payload_for_order, _notice_override_key, _notice_schedule, _record_auto_renew_patrol_log, _renew_notice_batch_payload, _run_auto_renew, _set_notice_text_override, cloud_notice_type_enabled
 from cloud.lifecycle_schedule import compute_order_lifecycle_fields
 from cloud.models import CloudAsset, CloudAutoRenewPatrolLog, CloudServerOrder, CloudUserNoticeLog
 from cloud.services import RenewalPriceMissingError, _renewal_price
@@ -747,155 +746,6 @@ def _notice_latest_log_map():
 
 
 # 功能：提供 后台 API 接口 的内部辅助逻辑，供同模块流程复用。
-def _notice_task_future_items(now, next_run_at, seen_keys: set[tuple[str, int]], latest_logs: dict, *, due_window_days=3, future_limit=10, account_attempts: list[dict] | None = None, notice_cache: dict[int, dict | None] | None = None):
-    items = []
-    try:
-        max_items = max(int(future_limit or 0), 0)
-    except (TypeError, ValueError):
-        max_items = 10
-    if max_items <= 0:
-        return [], []
-    qs = CloudServerOrder.objects.select_related('user', 'cloud_account').filter(
-        status__in=['completed', 'expiring', 'renew_pending', 'suspended', 'deleting', 'deleted'],
-    ).order_by('delete_at', 'ip_recycle_at', 'id')[:1000]
-    for order in qs:
-        if len(items) >= max_items:
-            break
-        if notice_cache is not None and order.id in notice_cache:
-            notice = notice_cache[order.id]
-        else:
-            notice = _notice_payload_for_order(order)
-            if notice_cache is not None:
-                notice_cache[order.id] = notice
-        if not notice:
-            continue
-        for notice_type, config in _NOTICE_TASK_TYPES.items():
-            if (notice_type, order.id) in seen_keys:
-                continue
-            if not cloud_notice_type_enabled(notice_type):
-                continue
-            sent_at = getattr(order, config['field'], None)
-            if sent_at:
-                continue
-            if notice_type == 'renew_notice' and (not order.cloud_reminder_enabled or order.status not in {'completed', 'expiring', 'renew_pending'}):
-                continue
-            if notice_type == 'auto_renew_notice' and (not order.auto_renew_enabled or order.status not in {'completed', 'expiring', 'renew_pending'}):
-                continue
-            if notice_type == 'delete_notice' and (not order.delete_reminder_enabled or order.status not in {'suspended', 'deleting'}):
-                continue
-            if notice_type == 'recycle_notice' and (not order.ip_recycle_reminder_enabled or order.status != 'deleted'):
-                continue
-            if notice_type in {'delete_notice', 'recycle_notice'}:
-                asset_id = notice.get('asset_id')
-                asset = CloudAsset.objects.select_related('cloud_account').filter(id=asset_id).first() if asset_id else None
-                if not _asset_lifecycle_enabled_for_order(order, asset):
-                    continue
-            notice_at = _notice_task_time(order, notice_type, notice)
-            if not notice_at:
-                continue
-            if notice_at <= now:
-                queue_status, queue_status_label = 'fallback_notice', '已到通知时间'
-            elif notice_at <= now + timezone.timedelta(days=due_window_days):
-                queue_status, queue_status_label = 'within_window', '3天内待通知'
-            else:
-                queue_status, queue_status_label = 'scheduled_future', '未来计划'
-            items.append(_notice_task_item_payload(
-                order,
-                notice_type,
-                queue_status=queue_status,
-                queue_status_label=queue_status_label,
-                next_run_at=next_run_at,
-                latest_log=latest_logs.get((notice_type, order.id)) or latest_logs.get((_notice_event_type(notice_type), order.id)),
-                account_attempts=account_attempts,
-                notice=notice,
-            ))
-            seen_keys.add((notice_type, order.id))
-            if len(items) >= max_items:
-                break
-    items.sort(key=lambda item: parse_datetime(item.get('notice_at') or '') or timezone.datetime.max.replace(tzinfo=dt_timezone.utc))
-    due_items = [item for item in items if item.get('queue_status') in {'fallback_notice', 'within_window'}]
-    future_items = [item for item in items if item.get('queue_status') == 'scheduled_future']
-    return due_items, future_items
-
-
-# 功能：提供 后台 API 接口 的内部辅助逻辑，供同模块流程复用。
-def _notice_group_summary_items(items: list[dict], *, limit: int | None = None, offset: int = 0, fields: set[str] | None = None) -> tuple[list[dict], int]:
-    fields = fields or {'basic', 'channels', 'ips', 'retry', 'text'}
-    grouped = {}
-    for item in items:
-        notice_type = item.get('notice_type') or ''
-        queue_status = item.get('queue_status') or ''
-        plan_scope = 'future' if queue_status == 'scheduled_future' else 'due'
-        user_key = item.get('user_id') or f"unbound:{item.get('tg_user_id') or item.get('user_display_name') or 'unknown'}"
-        key = f'{user_key}:{notice_type}:{plan_scope}'
-        group = grouped.setdefault(key, {
-            'id': key,
-            'plan_scope': plan_scope,
-            'plan_scope_label': '未来计划' if plan_scope == 'future' else '近期计划',
-            'user_id': item.get('user_id'),
-            'tg_user_id': item.get('tg_user_id'),
-            'user_display_name': item.get('user_display_name') or '未绑定用户',
-            'username_label': item.get('username_label') or '-',
-            'notice_channel': item.get('notice_channel') or 'unbound',
-            'notice_channel_label': item.get('notice_channel_label') or '未绑定通知渠道',
-            'notice_channel_attempts': item.get('notice_channel_attempts') or [],
-            'notice_type': notice_type,
-            'notice_type_label': item.get('notice_type_label') or notice_type,
-            'notice_event': _notice_event_type(notice_type),
-            'notice_count': 0,
-            'ip_count': 0,
-            'ips': [],
-            'order_ids': [],
-            'pending_count': 0,
-            'failed_retry_count': 0,
-            'next_notice_at': item.get('notice_at'),
-            'notice_text_preview': '',
-            'retry_label': item.get('retry_label') or '-',
-            'related_path': item.get('related_path') or '',
-        })
-        if item.get('notice_channel_attempts') and not group.get('notice_channel_attempts'):
-            group['notice_channel_attempts'] = item.get('notice_channel_attempts') or []
-        group['notice_count'] += 1
-        order_id = item.get('order_id')
-        if order_id and order_id not in group['order_ids']:
-            group['order_ids'].append(order_id)
-        ip = item.get('ip') or '-'
-        if ip not in group['ips']:
-            group['ips'].append(ip)
-            group['ip_count'] += 1
-        if item.get('notice_status') in {'pending', 'scheduled_soon'}:
-            group['pending_count'] += 1
-        if item.get('notice_status') == 'failed_retry':
-            group['failed_retry_count'] += 1
-            group['retry_label'] = item.get('retry_label') or group['retry_label']
-        notice_at = item.get('notice_at')
-        if notice_at and (not group.get('next_notice_at') or notice_at < group['next_notice_at']):
-            group['next_notice_at'] = notice_at
-            group['related_path'] = item.get('related_path') or group.get('related_path') or ''
-        if not group.get('notice_text_preview'):
-            label = group.get('notice_type_label') or '通知'
-            group['notice_text_preview'] = f'{label}：{group["user_display_name"]} 共 {group["ip_count"]} 个 IP，系统会合并成一条通知发送。'
-    summary = sorted(grouped.values(), key=lambda item: (
-        item.get('user_display_name') or '',
-        item.get('username_label') or '',
-        item.get('next_notice_at') or '',
-        item.get('notice_type_label') or '',
-    ))
-    total = len(summary)
-    visible_summary = summary[offset:offset + limit] if limit else summary[offset:]
-    for group in visible_summary:
-        order_ids = group.get('order_ids') or []
-        if 'text' in fields:
-            payload = _notice_actual_batch_payload(group.get('notice_type') or '', order_ids)
-            manual_payload = _notice_manual_text_payload(group.get('notice_type') or '', group.get('user_id'), order_ids)
-            manual_text = manual_payload.get('notice_manual_text') or ''
-            group.update(manual_payload)
-            group['notice_text_preview'] = manual_text or payload.get('text') or group.get('notice_text_preview') or ''
-            group['ip_count'] = int(payload.get('count') or group.get('ip_count') or 0)
-        group['notice_count'] = 1
-    return visible_summary, total
-
-
 # 功能：提供 后台 API 接口 的内部辅助逻辑，供同模块流程复用。
 def _notice_history_group_items(logs, account_attempts: list[dict] | None = None) -> list[dict]:
     items = []
@@ -1290,89 +1140,227 @@ def _notice_assets_for_type(notice_type: str, *, now, future: bool):
     return qs.none()
 
 
-def _append_notice_items_from_assets(
-    items: list[dict],
-    *,
-    notice_type: str,
-    assets,
-    now,
-    next_run_at,
-    seen_keys: set[tuple[str, int]],
-    latest_logs: dict,
-    account_attempts: list[dict] | None,
-    max_items: int | None = None,
-    fields: set[str] | None = None,
-):
-    for asset in assets.iterator(chunk_size=1000):
-        if max_items is not None and len(items) >= max_items:
-            break
-        order = getattr(asset, 'order', None)
-        if not order or (notice_type, order.id) in seen_keys:
-            continue
-        if notice_type == 'auto_renew_notice' and _notice_asset_is_unattached_static_ip(asset):
-            continue
-        if notice_type in {'delete_notice', 'recycle_notice'} and not _asset_lifecycle_enabled_for_order(order, asset):
-            continue
-        notice = _notice_schedule_from_asset(order, asset, now=now)
-        notice_at = _notice_task_time(order, notice_type, notice)
-        if not notice_at:
-            continue
-        queue_status, queue_status_label = _notice_queue_status_for_time(notice_at, now)
-        items.append(_notice_task_item_payload(
-            order,
-            notice_type,
-            queue_status=queue_status,
-            queue_status_label=queue_status_label,
-            next_run_at=next_run_at,
-            latest_log=latest_logs.get((notice_type, order.id)) or latest_logs.get((_notice_event_type(notice_type), order.id)),
-            account_attempts=account_attempts,
-            notice=notice,
-            fields=fields,
-        ))
-        seen_keys.add((notice_type, order.id))
+def _notice_plan_scope_for_future(future: bool) -> str:
+    return 'future' if future else 'due'
 
 
-def _notice_user_group_key(asset, notice_type: str, plan_scope: str) -> str | None:
-    order = getattr(asset, 'order', None)
-    if not order:
-        return None
-    user = getattr(order, 'user', None)
-    if getattr(user, 'id', None):
-        user_key = user.id
+def _notice_plan_scope_label(plan_scope: str) -> str:
+    return '未来计划' if plan_scope == 'future' else '近期计划'
+
+
+def _notice_group_user_payload(row: dict) -> dict:
+    user_id = row.get('order__user_id')
+    username = row.get('order__user__username') or ''
+    user_payload = _user_payload({
+        'id': user_id,
+        'tg_user_id': row.get('order__user__tg_user_id'),
+        'username': username,
+        'first_name': row.get('order__user__first_name') or '',
+        'usernames': [],
+        'primary_username': '',
+    }) if user_id else None
+    return {
+        'user_id': user_id,
+        'tg_user_id': row.get('order__user__tg_user_id') if user_id else None,
+        'user_display_name': (user_payload or {}).get('display_name') or '未绑定用户',
+        'username_label': (user_payload or {}).get('username_label') or '-',
+    }
+
+
+def _notice_group_key_from_row(row: dict, notice_type: str, plan_scope: str) -> str:
+    user_id = row.get('order__user_id')
+    if user_id:
+        user_key = user_id
     else:
-        fallback = getattr(user, 'tg_user_id', None) or getattr(user, 'username', None) or getattr(user, 'first_name', None) or 'unknown'
+        fallback = row.get('order__user__tg_user_id') or row.get('order__user__username') or row.get('order__user__first_name') or 'unknown'
         user_key = f'unbound:{fallback}'
     return f'{user_key}:{notice_type}:{plan_scope}'
 
 
-def _notice_plan_total_counts(now) -> dict:
-    due_count = 0
-    future_count = 0
-    due_user_groups = set()
-    future_user_groups = set()
-    for notice_type in _NOTICE_TASK_TYPES:
+def _notice_source_time_field(notice_type: str) -> str:
+    if notice_type in {'renew_notice', 'auto_renew_notice'}:
+        return 'actual_expires_at'
+    if notice_type == 'delete_notice':
+        return 'order__delete_at'
+    if notice_type == 'recycle_notice':
+        return 'order__ip_recycle_at'
+    return 'actual_expires_at'
+
+
+def _notice_group_next_at(notice_type: str, source_at):
+    if not source_at:
+        return None
+    if notice_type == 'renew_notice':
+        try:
+            notice_days = max(1, int(get_runtime_config('cloud_renew_notice_days', 5) or 5))
+        except Exception:
+            notice_days = 5
+        return source_at - timezone.timedelta(days=notice_days)
+    if notice_type == 'auto_renew_notice':
+        return source_at - timezone.timedelta(days=2)
+    if notice_type in {'delete_notice', 'recycle_notice'}:
+        return source_at - timezone.timedelta(days=1)
+    return source_at
+
+
+def _notice_group_base_queryset(notice_type: str, *, now, future: bool):
+    qs = _notice_assets_for_type(notice_type, now=now, future=future)
+    if notice_type == 'auto_renew_notice':
+        qs = qs.exclude(
+            provider='aws_lightsail',
+            instance_id='',
+            provider_status__icontains='未附加',
+        )
+    if notice_type == 'delete_notice':
+        qs = qs.exclude(server_delete_enabled=False)
+    if notice_type == 'recycle_notice':
+        qs = qs.exclude(ip_delete_enabled=False)
+    return qs
+
+
+def _notice_group_rows_for_scope(now, *, future: bool) -> list[dict]:
+    plan_scope = _notice_plan_scope_for_future(future)
+    rows = []
+    for notice_type, config in _NOTICE_TASK_TYPES.items():
         if not cloud_notice_type_enabled(notice_type):
             continue
-        for future in (False, True):
-            seen_order_ids = set()
-            plan_scope = 'future' if future else 'due'
-            groups = future_user_groups if future else due_user_groups
-            for asset in _notice_assets_for_type(notice_type, now=now, future=future).iterator(chunk_size=1000):
-                order = getattr(asset, 'order', None)
-                if not order or order.id in seen_order_ids:
-                    continue
-                if notice_type == 'auto_renew_notice' and _notice_asset_is_unattached_static_ip(asset):
-                    continue
-                if notice_type in {'delete_notice', 'recycle_notice'} and not _asset_lifecycle_enabled_for_order(order, asset):
-                    continue
-                seen_order_ids.add(order.id)
-                if future:
-                    future_count += 1
-                else:
-                    due_count += 1
-                group_key = _notice_user_group_key(asset, notice_type, plan_scope)
-                if group_key:
-                    groups.add(group_key)
+        time_field = _notice_source_time_field(notice_type)
+        qs = _notice_group_base_queryset(notice_type, now=now, future=future)
+        for row in qs.values(
+            'order__user_id',
+            'order__user__tg_user_id',
+            'order__user__username',
+            'order__user__first_name',
+        ).annotate(
+            notice_count=Count('order_id', distinct=True),
+            next_source_at=Min(time_field),
+        ):
+            user_payload = _notice_group_user_payload(row)
+            next_notice_at = _notice_group_next_at(notice_type, row.get('next_source_at'))
+            rows.append({
+                'id': _notice_group_key_from_row(row, notice_type, plan_scope),
+                'plan_scope': plan_scope,
+                'plan_scope_label': _notice_plan_scope_label(plan_scope),
+                **user_payload,
+                'notice_type': notice_type,
+                'notice_type_label': config.get('label') or notice_type,
+                'notice_event': _notice_event_type(notice_type),
+                'notice_count': int(row.get('notice_count') or 0),
+                'ip_count': int(row.get('notice_count') or 0),
+                'pending_count': 0,
+                'failed_retry_count': 0,
+                'next_notice_at': _iso(next_notice_at),
+                '_next_notice_at_value': next_notice_at,
+            })
+    rows.sort(key=lambda item: (
+        item.get('user_display_name') or '',
+        item.get('username_label') or '',
+        item.get('_next_notice_at_value') or timezone.datetime.max.replace(tzinfo=dt_timezone.utc),
+        item.get('notice_type_label') or '',
+    ))
+    return rows
+
+
+def _notice_group_order_queryset(row: dict, *, now):
+    notice_type = row.get('notice_type') or ''
+    future = row.get('plan_scope') == 'future'
+    qs = _notice_group_base_queryset(notice_type, now=now, future=future)
+    user_id = row.get('user_id')
+    if user_id:
+        qs = qs.filter(order__user_id=user_id)
+    else:
+        qs = qs.filter(order__user__isnull=True)
+    return qs
+
+
+def _notice_group_summary_from_row(row: dict, *, now, next_run_at, latest_logs: dict, account_attempts: list[dict] | None, fields: set[str]) -> dict:
+    qs = _notice_group_order_queryset(row, now=now)
+    order_rows = list(qs.values(
+        'order_id',
+        'order__public_ip',
+        'order__previous_public_ip',
+        'public_ip',
+    ).order_by(_notice_source_time_field(row.get('notice_type') or ''), 'order_id')[:1000])
+    order_ids = []
+    ips = []
+    for item in order_rows:
+        order_id = item.get('order_id')
+        if order_id and order_id not in order_ids:
+            order_ids.append(order_id)
+        ip = item.get('order__public_ip') or item.get('public_ip') or item.get('order__previous_public_ip') or '-'
+        if ip not in ips:
+            ips.append(ip)
+    first_order_id = order_ids[0] if order_ids else None
+    user = None
+    if row.get('user_id'):
+        from bot.models import TelegramUser
+        user = TelegramUser.objects.filter(id=row.get('user_id')).first()
+    latest_log = None
+    for order_id in order_ids[:20]:
+        latest_log = latest_logs.get((row.get('notice_type'), order_id)) or latest_logs.get((row.get('notice_event'), order_id))
+        if latest_log:
+            break
+    queue_status = 'scheduled_future' if row.get('plan_scope') == 'future' else 'within_window'
+    queue_status_label = '未来计划' if queue_status == 'scheduled_future' else '3天内待通知'
+    payload = {
+        **{key: value for key, value in row.items() if not key.startswith('_')},
+        'queue_status': queue_status,
+        'queue_status_label': queue_status_label,
+        'notice_channel': 'unbound',
+        'notice_channel_label': '未绑定通知渠道',
+        'notice_channel_attempts': [],
+        'ips': ips,
+        'order_ids': order_ids,
+        'related_path': f'/admin/cloud-orders/{first_order_id}' if first_order_id else '',
+        **_notice_status_payload(sent_at=None, latest_log=latest_log, queue_status=queue_status),
+    }
+    if 'channels' in fields:
+        payload.update(_notice_channel_payload(user, latest_log, account_attempts))
+    if 'text' in fields:
+        manual_payload = _notice_manual_text_payload(row.get('notice_type') or '', row.get('user_id'), order_ids)
+        batch_payload = _notice_actual_batch_payload(row.get('notice_type') or '', order_ids)
+        manual_text = manual_payload.get('notice_manual_text') or ''
+        payload.update(manual_payload)
+        payload['notice_text_preview'] = manual_text or batch_payload.get('text') or payload.get('notice_text_preview') or ''
+        payload['ip_count'] = int(batch_payload.get('count') or payload.get('ip_count') or 0)
+    else:
+        payload['notice_text_preview'] = f'{payload.get("notice_type_label") or "通知"}：{payload.get("user_display_name") or "未绑定用户"} 共 {payload.get("ip_count") or 0} 个 IP，系统会合并成一条通知发送。'
+    payload['notice_count'] = 1
+    return payload
+
+
+def _notice_group_summary_page(now, *, limit: int, offset: int, fields: set[str], latest_logs: dict, account_attempts: list[dict] | None, scope: str = 'active') -> tuple[list[dict], int]:
+    due_rows = _notice_group_rows_for_scope(now, future=False) if scope in {'active', 'due'} else []
+    future_rows = _notice_group_rows_for_scope(now, future=True) if scope in {'active', 'future'} else []
+    rows = [*due_rows, *future_rows]
+    rows.sort(key=lambda item: (
+        item.get('user_display_name') or '',
+        item.get('username_label') or '',
+        item.get('_next_notice_at_value') or timezone.datetime.max.replace(tzinfo=dt_timezone.utc),
+        item.get('notice_type_label') or '',
+    ))
+    total = len(rows)
+    visible_rows = rows[offset:offset + limit] if limit else rows[offset:]
+    return [
+        _notice_group_summary_from_row(
+            row,
+            now=now,
+            next_run_at=now + timezone.timedelta(minutes=10),
+            latest_logs=latest_logs,
+            account_attempts=account_attempts,
+            fields=fields,
+        )
+        for row in visible_rows
+    ], total
+
+
+def _notice_plan_total_counts(now) -> dict:
+    due_rows = _notice_group_rows_for_scope(now, future=False)
+    future_rows = _notice_group_rows_for_scope(now, future=True)
+    due_count = sum(int(row.get('notice_count') or 0) for row in due_rows)
+    future_count = sum(int(row.get('notice_count') or 0) for row in future_rows)
+    due_user_groups = {row.get('id') for row in due_rows}
+    future_user_groups = {row.get('id') for row in future_rows}
     return {
         'due_count': due_count,
         'future_count': future_count,
@@ -1383,60 +1371,48 @@ def _notice_plan_total_counts(now) -> dict:
 
 
 # 功能：提供 后台 API 接口 的内部辅助逻辑，供同模块流程复用。
-def _build_notice_plan_bundle(*, limit=1000, future_limit=200, history_limit=1000, fields: set[str] | None = None, include_total_counts: bool = False):
+def _build_notice_plan_summary(*, limit=10, offset=0, history_limit=10, history_offset=0, fields: set[str] | None = None, include_total_counts: bool = True):
     now = timezone.now()
-    next_run_at = now + timezone.timedelta(minutes=10)
     fields = fields or {'basic', 'channels', 'ips', 'retry', 'text'}
     latest_logs = _notice_latest_log_map()
     account_attempts = _planned_notice_account_attempts() if 'channels' in fields else []
-    due_items = []
-    seen_keys = set()
-    for notice_type in _NOTICE_TASK_TYPES:
-        if not cloud_notice_type_enabled(notice_type):
-            continue
-        _append_notice_items_from_assets(
-            due_items,
-            notice_type=notice_type,
-            assets=_notice_assets_for_type(notice_type, now=now, future=False),
-            now=now,
-            next_run_at=next_run_at,
-            seen_keys=seen_keys,
-            latest_logs=latest_logs,
-            account_attempts=account_attempts,
-            fields=fields,
-        )
-    due_items.sort(key=lambda item: parse_datetime(item.get('notice_at') or '') or timezone.datetime.max.replace(tzinfo=dt_timezone.utc))
-    future_plan_items = []
-    future_cap = max(int(limit or 0) + int(future_limit or 0) + 200, 250)
-    for notice_type in _NOTICE_TASK_TYPES:
-        if not cloud_notice_type_enabled(notice_type):
-            continue
-        _append_notice_items_from_assets(
-            future_plan_items,
-            notice_type=notice_type,
-            assets=_notice_assets_for_type(notice_type, now=now, future=True),
-            now=now,
-            next_run_at=next_run_at,
-            seen_keys=seen_keys,
-            latest_logs=latest_logs,
-            account_attempts=account_attempts,
-            max_items=future_cap,
-            fields=fields,
-        )
-        if len(future_plan_items) >= future_cap:
-            break
-    future_plan_items = [
-        item for item in future_plan_items
-        if item.get('queue_status') == 'scheduled_future'
-    ]
-    future_plan_items.sort(key=lambda item: parse_datetime(item.get('notice_at') or '') or timezone.datetime.max.replace(tzinfo=dt_timezone.utc))
-    active_items = [*due_items, *future_plan_items]
+    active_user_summary_items, active_user_total = _notice_group_summary_page(
+        now,
+        limit=limit,
+        offset=offset,
+        fields=fields,
+        latest_logs=latest_logs,
+        account_attempts=account_attempts,
+        scope='active',
+    )
     history_qs = CloudUserNoticeLog.objects.select_related('order', 'user').filter(event_type__in=list(_NOTICE_HISTORY_LABELS)).order_by('-created_at', '-id')
-    history_rows = _notice_history_group_items(history_qs[:max(history_limit, 1000)], account_attempts=account_attempts)
-    result = {'active_items': active_items, 'history_items': history_rows}
+    history_rows = _notice_history_group_items(history_qs[history_offset:history_offset + history_limit], account_attempts=account_attempts)
+    result = {
+        'active_user_summary_items': active_user_summary_items,
+        'active_user_total': active_user_total,
+        'history_items': history_rows,
+        'history_count': history_qs.count(),
+    }
     if include_total_counts:
         result['total_counts'] = _notice_plan_total_counts(now)
     return result
+
+
+def _notice_plan_preview_items(*, limit=1000, fields: set[str] | None = None):
+    now = timezone.now()
+    fields = fields or {'basic'}
+    latest_logs = _notice_latest_log_map()
+    account_attempts = _planned_notice_account_attempts() if 'channels' in fields else []
+    rows, _ = _notice_group_summary_page(
+        now,
+        limit=limit,
+        offset=0,
+        fields=fields,
+        latest_logs=latest_logs,
+        account_attempts=account_attempts,
+        scope='active',
+    )
+    return rows
 
 
 # 功能：提供 后台 API 接口 的内部辅助逻辑，供同模块流程复用。
@@ -1447,19 +1423,14 @@ def _build_notice_plan_bundle(*, limit=1000, future_limit=200, history_limit=100
 def refresh_notice_plan_view(request):
     payload = _request_json_payload(request)
     limit = _request_int_param(request, 'limit', int(payload.get('limit') or 1000), maximum=1000)
-    future_limit = _request_int_param(request, 'future_limit', int(payload.get('future_limit') or 200), maximum=2000)
     history_limit = _request_int_param(request, 'history_limit', int(payload.get('history_limit') or 1000), maximum=5000)
-    bundle = _build_notice_plan_bundle(limit=limit, future_limit=future_limit, history_limit=history_limit, include_total_counts=True)
-    active_items = bundle.get('active_items') or []
-    due_items = [item for item in active_items if item.get('queue_status') in {'due_now', 'fallback_notice', 'within_window'}]
-    future_items = [item for item in active_items if item.get('queue_status') == 'scheduled_future']
-    history_items = bundle.get('history_items') or []
-    total_counts = bundle.get('total_counts') or {}
+    summary = _build_notice_plan_summary(limit=limit, offset=0, history_limit=history_limit, history_offset=0, fields={'basic'}, include_total_counts=True)
+    total_counts = summary.get('total_counts') or {}
     return _ok({
         'refreshed': True,
-        'due_count': total_counts.get('due_count', len(due_items)),
-        'future_count': total_counts.get('future_count', len(future_items)),
-        'history_count': len(history_items),
+        'due_count': total_counts.get('due_count', 0),
+        'future_count': total_counts.get('future_count', 0),
+        'history_count': summary.get('history_count', 0),
     })
 
 
@@ -1470,87 +1441,62 @@ def notice_task_detail(request):
     now = timezone.now()
     limit = _request_int_param(request, 'limit', 10, maximum=100)
     offset = _request_int_param(request, 'offset', 0, minimum=0, maximum=100000)
-    future_limit = _request_int_param(request, 'future_limit', 10, maximum=100)
-    future_offset = _request_int_param(request, 'future_offset', 0, minimum=0, maximum=100000)
     history_limit = _request_int_param(request, 'history_limit', 10, maximum=100)
     history_offset = _request_int_param(request, 'history_offset', 0, minimum=0, maximum=100000)
     compact = str(request.GET.get('compact') or '').strip().lower() in {'1', 'true', 'yes', 'on'}
     fields = _request_notice_fields(request)
 
     next_run_at = now + timezone.timedelta(minutes=10)
-    bundle = _build_notice_plan_bundle(limit=max(limit, 200), future_limit=max(future_limit, 200), history_limit=max(history_limit, 200), fields=fields, include_total_counts=True)
-
-    active_items = bundle.get('active_items') or []
-    due_items = [item for item in active_items if item.get('queue_status') in {'due_now', 'fallback_notice', 'within_window'}]
-    future_plan_items = [item for item in active_items if item.get('queue_status') == 'scheduled_future']
-    due_items.sort(key=lambda item: parse_datetime(item.get('notice_at') or '') or timezone.datetime.max.replace(tzinfo=dt_timezone.utc))
-    future_plan_items.sort(key=lambda item: parse_datetime(item.get('notice_at') or '') or timezone.datetime.max.replace(tzinfo=dt_timezone.utc))
-
-    due_user_summary_items, due_user_total = _notice_group_summary_items(due_items, limit=limit, offset=offset, fields=fields)
-    future_user_summary_items, future_user_total = _notice_group_summary_items(future_plan_items, limit=future_limit, offset=future_offset, fields=fields)
-    active_user_summary_items, active_user_total = _notice_group_summary_items(
-        [*due_items, *future_plan_items],
+    summary = _build_notice_plan_summary(
         limit=limit,
         offset=offset,
+        history_limit=history_limit,
+        history_offset=history_offset,
         fields=fields,
+        include_total_counts=True,
     )
-    visible_due_items = due_items[offset:offset + limit]
-    visible_future_plan_items = future_plan_items[future_offset:future_offset + future_limit]
-
-    history_all_items = bundle.get('history_items') or []
-    history_all_items.sort(key=lambda item: parse_datetime(item.get('created_at') or item.get('logged_at') or '') or timezone.datetime.min.replace(tzinfo=dt_timezone.utc), reverse=True)
-    visible_history_items = history_all_items[history_offset:history_offset + history_limit]
+    active_user_summary_items = summary.get('active_user_summary_items') or []
+    active_user_total = int(summary.get('active_user_total') or 0)
+    visible_history_items = summary.get('history_items') or []
     recent_since = now - timezone.timedelta(days=1)
+    recent_history_qs = CloudUserNoticeLog.objects.filter(event_type__in=list(_NOTICE_HISTORY_LABELS), created_at__gte=recent_since)
     recent_history_items = [
-        item for item in history_all_items
-        if parse_datetime(item.get('created_at') or item.get('logged_at') or '')
-        and parse_datetime(item.get('created_at') or item.get('logged_at') or '') >= recent_since
+        _notice_task_history_item_payload(item)
+        for item in recent_history_qs.select_related('order', 'user').order_by('-created_at', '-id')[:1000]
     ]
-    latest_history_item = history_all_items[0] if history_all_items else None
+    latest_history_item = CloudUserNoticeLog.objects.filter(event_type__in=list(_NOTICE_HISTORY_LABELS)).order_by('-created_at', '-id').first()
     recent_success_count = sum(1 for item in recent_history_items if item.get('delivered'))
     recent_failure_count = sum(1 for item in recent_history_items if not item.get('delivered'))
     recent_success_user_count = len({item.get('user_id') for item in recent_history_items if item.get('delivered') and item.get('user_id')})
     recent_failure_user_count = len({item.get('user_id') for item in recent_history_items if not item.get('delivered') and item.get('user_id')})
     last_refresh_at = now
 
-    due_payload = _compact_notice_items(visible_due_items) if compact else visible_due_items
-    due_summary_payload = _compact_notice_items(due_user_summary_items) if compact else due_user_summary_items
-    future_payload = _compact_notice_items(visible_future_plan_items) if compact else visible_future_plan_items
-    future_summary_payload = _compact_notice_items(future_user_summary_items) if compact else future_user_summary_items
     active_summary_payload = _compact_notice_items(active_user_summary_items) if compact else active_user_summary_items
     history_payload = _compact_notice_items(visible_history_items) if compact else visible_history_items
-    _strip_notice_item_fields(due_payload, fields)
-    _strip_notice_item_fields(due_summary_payload, fields)
-    _strip_notice_item_fields(future_payload, fields)
-    _strip_notice_item_fields(future_summary_payload, fields)
     _strip_notice_item_fields(active_summary_payload, fields)
     _strip_notice_item_fields(history_payload, fields)
-    total_counts = bundle.get('total_counts') or {}
+    total_counts = summary.get('total_counts') or {}
 
     return _ok({
         'task_key': 'cloud_notice_plan',
         'task_label': '通知计划',
         'status_label': '置顶任务',
         'interval_minutes': 10,
-        'last_run_at': (latest_history_item or {}).get('created_at') or (latest_history_item or {}).get('logged_at'),
+        'last_run_at': _iso(latest_history_item.created_at) if latest_history_item else None,
         'next_run_at': _iso(next_run_at),
         'last_refresh_at': _iso(last_refresh_at),
-        'due_count': total_counts.get('due_count', len(due_items)),
-        'due_user_count': total_counts.get('due_user_count', due_user_total),
-        'future_count': total_counts.get('future_count', len(future_plan_items)),
-        'future_user_count': total_counts.get('future_user_count', future_user_total),
+        'due_count': total_counts.get('due_count', 0),
+        'due_user_count': total_counts.get('due_user_count', 0),
+        'future_count': total_counts.get('future_count', 0),
+        'future_user_count': total_counts.get('future_user_count', 0),
         'active_user_count': total_counts.get('active_user_count', active_user_total),
-        'history_count': len(history_all_items),
+        'history_count': summary.get('history_count', len(history_payload)),
         'recent_success_count': recent_success_count,
         'recent_success_user_count': recent_success_user_count,
         'recent_failure_count': recent_failure_count,
         'recent_failure_user_count': recent_failure_user_count,
         'retry_policy_label': '通知失败不会写入已通知时间；生命周期巡检会在下一轮继续重试，直到成功送达。',
         'notice_switches': _notice_switch_items(),
-        'due_items': due_payload,
-        'due_user_summary_items': due_summary_payload,
-        'future_plan_items': future_payload,
-        'future_user_summary_items': future_summary_payload,
         'active_user_summary_items': active_summary_payload,
         'history_items': history_payload,
     })
