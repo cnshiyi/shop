@@ -155,6 +155,52 @@ def finish_lifecycle_task(claim: TaskClaim | None, *, ok: bool, error: str = '')
     )
 
 
+def finish_open_lifecycle_tasks_for_order(task_type: str, order: CloudServerOrder | None):
+    if not getattr(order, 'id', None):
+        return 0
+    now = timezone.now()
+    return CloudLifecycleTask.objects.filter(
+        task_type=task_type,
+        source_kind=CloudLifecycleTask.SOURCE_ORDER,
+        order_id=order.id,
+        status__in=[
+            CloudLifecycleTask.STATUS_PENDING,
+            CloudLifecycleTask.STATUS_CLAIMED,
+            CloudLifecycleTask.STATUS_FAILED,
+        ],
+    ).update(
+        status=CloudLifecycleTask.STATUS_DONE,
+        claim_token='',
+        last_error='',
+        last_run_at=now,
+        completed_at=now,
+        updated_at=now,
+    )
+
+
+def finish_open_lifecycle_tasks_for_asset(task_type: str, asset: CloudAsset | None):
+    if not getattr(asset, 'id', None):
+        return 0
+    now = timezone.now()
+    return CloudLifecycleTask.objects.filter(
+        task_type=task_type,
+        source_kind=CloudLifecycleTask.SOURCE_ASSET,
+        asset_id=asset.id,
+        status__in=[
+            CloudLifecycleTask.STATUS_PENDING,
+            CloudLifecycleTask.STATUS_CLAIMED,
+            CloudLifecycleTask.STATUS_FAILED,
+        ],
+    ).update(
+        status=CloudLifecycleTask.STATUS_DONE,
+        claim_token='',
+        last_error='',
+        last_run_at=now,
+        completed_at=now,
+        updated_at=now,
+    )
+
+
 NOTICE_EVENT_TYPE_MAP = {
     'renew_notice': CloudNoticeTask.NOTICE_RENEW,
     'renew_notice_batch': CloudNoticeTask.NOTICE_RENEW,

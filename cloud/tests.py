@@ -9,6 +9,7 @@ from unittest.mock import AsyncMock, patch
 from asgiref.sync import async_to_sync
 from django.contrib.auth import get_user_model
 from django.contrib.auth.models import AnonymousUser
+from django.core.cache import cache
 from django.core.management import call_command
 from django.core.management.base import CommandError
 from django.contrib.sessions.middleware import SessionMiddleware
@@ -2817,6 +2818,58 @@ class CloudServerServicesTestCase(TestCase):
         payload2 = json.loads(response2.content.decode('utf-8'))['data']
         self.assertEqual(len(payload2['groups']), 2)
         self.assertEqual(len(payload2['items']), 2)
+
+    # 功能：验证分组分页总数只按分组键统计，末页反向分页不丢组。
+    def test_cloud_assets_grouped_total_counts_distinct_groups_only(self):
+        cache.clear()
+        admin = get_user_model().objects.create_user(username='admin_asset_grouped_distinct_pages', password='x', is_staff=True)
+        shared_user = TelegramUser.objects.create(tg_user_id=992500, username='group_page_shared_user')
+        tail_user = TelegramUser.objects.create(tg_user_id=992501, username='group_page_tail_user')
+        for index in range(3):
+            CloudAsset.objects.create(
+                kind=CloudAsset.KIND_SERVER,
+                source=CloudAsset.SOURCE_AWS_SYNC,
+                user=shared_user,
+                provider='aws_lightsail',
+                region_code=self.plan.region_code,
+                region_name=self.plan.region_name,
+                asset_name=f'group-page-shared-{index}',
+                public_ip=f'10.79.10.{index}',
+                actual_expires_at=timezone.now() + timezone.timedelta(days=index + 1),
+                status=CloudAsset.STATUS_RUNNING,
+                sort_order=300 - index,
+            )
+        CloudAsset.objects.create(
+            kind=CloudAsset.KIND_SERVER,
+            source=CloudAsset.SOURCE_AWS_SYNC,
+            user=tail_user,
+            provider='aws_lightsail',
+            region_code=self.plan.region_code,
+            region_name=self.plan.region_name,
+            asset_name='group-page-tail',
+            public_ip='10.79.10.9',
+            actual_expires_at=timezone.now() + timezone.timedelta(days=30),
+            status=CloudAsset.STATUS_RUNNING,
+            sort_order=100,
+        )
+
+        request = self.factory.get('/api/admin/cloud-assets/', {
+            'compact': '1',
+            'grouped': '1',
+            'paginated': '1',
+            'group_by': 'user',
+            'page': '2',
+            'page_size': '1',
+        })
+        self._attach_bearer_session(request, admin)
+        response = cloud_assets_list(request)
+        payload = json.loads(response.content.decode('utf-8'))['data']
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(payload['total'], 2)
+        self.assertEqual(payload['total_pages'], 2)
+        self.assertEqual(len(payload['groups']), 1)
+        self.assertEqual(payload['groups'][0]['user_key'], f'user:{tail_user.id}')
 
     # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
     def test_cloud_assets_list_filters_by_risk_and_searches_asset_identifiers(self):
@@ -11715,6 +11768,60 @@ class CloudServerServicesTestCase(TestCase):
         self.assertIsNotNone(first_notice_claim)
         self.assertIsNone(blocked_notice_claim)
         self.assertIsNotNone(retry_notice_claim)
+
+    # 功能：验证计划删机失败后，人工重试成功会把同一订单的失败任务收敛为已完成。
+    def test_manual_delete_success_finishes_failed_lifecycle_delete_task(self):
+        from cloud.lifecycle_execution import run_shutdown_order_delete
+        from cloud.lifecycle_tasks import claim_lifecycle_task_for_order, finish_lifecycle_task
+
+        now = timezone.now()
+        delete_at = now - timezone.timedelta(minutes=1)
+        order = CloudServerOrder.objects.create(
+            order_no='LIFECYCLE-MANUAL-DELETE-FINISH-1',
+            user=self.user,
+            plan=self.plan,
+            provider='aws_lightsail',
+            region_code='ap-southeast-1',
+            region_name='Singapore',
+            plan_name=self.plan.plan_name,
+            quantity=1,
+            currency='USDT',
+            total_amount='19.00',
+            pay_amount='19.00',
+            pay_method='balance',
+            status='suspended',
+            public_ip='8.8.8.96',
+            instance_id='manual-delete-finish-instance',
+            service_started_at=now - timezone.timedelta(days=35),
+            delete_at=delete_at,
+        )
+        CloudAsset.objects.create(
+            kind=CloudAsset.KIND_SERVER,
+            source=CloudAsset.SOURCE_ORDER,
+            order=order,
+            user=self.user,
+            provider=order.provider,
+            region_code=order.region_code,
+            region_name=order.region_name,
+            asset_name='manual-delete-finish-asset',
+            public_ip=order.public_ip,
+            actual_expires_at=now - timezone.timedelta(days=5),
+            status=CloudAsset.STATUS_STOPPED,
+            is_active=False,
+        )
+        claim = claim_lifecycle_task_for_order(CloudLifecycleTask.TASK_DELETE, order, scheduled_at=delete_at, queue_status='scheduled_delete')
+        finish_lifecycle_task(claim, ok=False, error='云端实例停止中')
+
+        with patch('cloud.lifecycle.cloud_server_delete_enabled', return_value=True), \
+            patch('cloud.lifecycle._delete_instance', new=AsyncMock(return_value=(True, '删除成功'))), \
+            patch('cloud.lifecycle._mark_deleted', new=AsyncMock()):
+            result = run_shutdown_order_delete(order.id, enforce_schedule=False)
+
+        task = CloudLifecycleTask.objects.get(id=claim.id)
+        self.assertTrue(result['ok'])
+        self.assertEqual(task.status, CloudLifecycleTask.STATUS_DONE)
+        self.assertEqual(task.last_error, '')
+        self.assertIsNotNone(task.completed_at)
 
     # 功能：验证订单固定 IP 回收入口会尊重数据库任务认领状态。
     def test_order_static_ip_release_skips_when_lifecycle_task_claimed(self):

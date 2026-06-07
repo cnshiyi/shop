@@ -8,7 +8,13 @@ from asgiref.sync import async_to_sync
 from django.utils import timezone
 
 from core.runtime_config import get_runtime_config
-from cloud.lifecycle_tasks import claim_lifecycle_task_for_asset, claim_lifecycle_task_for_order, finish_lifecycle_task
+from cloud.lifecycle_tasks import (
+    claim_lifecycle_task_for_asset,
+    claim_lifecycle_task_for_order,
+    finish_lifecycle_task,
+    finish_open_lifecycle_tasks_for_asset,
+    finish_open_lifecycle_tasks_for_order,
+)
 from cloud.models import CloudAsset, CloudLifecycleTask, CloudServerOrder
 
 
@@ -113,6 +119,7 @@ def run_shutdown_order_suspend(order_id: int, *, queue_status='scheduled_suspend
         if ok:
             async_to_sync(_mark_suspended)(order.id, note)
             finish_lifecycle_task(task_claim, ok=True)
+            finish_open_lifecycle_tasks_for_order(CloudLifecycleTask.TASK_SUSPEND, order)
             return {'order_id': order.id, 'order_no': order.order_no, 'ip': ip, 'queue_status': queue_status, 'ok': True, 'error': None}
         async_to_sync(_record_lifecycle_action_failed)(order.id, 'suspend_failed', note)
         finish_lifecycle_task(task_claim, ok=False, error=note)
@@ -180,6 +187,7 @@ def run_shutdown_order_delete(order_id: int, *, queue_status='manual_single', en
             source = '人工手动删除' if not enforce_schedule or str(queue_status or '').startswith('manual') else '到期自动删除'
             async_to_sync(_mark_deleted)(order.id, with_delete_source(note, source))
             finish_lifecycle_task(task_claim, ok=True)
+            finish_open_lifecycle_tasks_for_order(CloudLifecycleTask.TASK_DELETE, order)
             return {'order_id': order.id, 'order_no': order.order_no, 'ip': ip, 'queue_status': queue_status, 'ok': True, 'error': None}
         async_to_sync(_record_lifecycle_action_failed)(order.id, 'delete_failed', note)
         finish_lifecycle_task(task_claim, ok=False, error=note)
@@ -238,6 +246,7 @@ def run_replaced_order_delete(order_id: int, *, queue_status='scheduled_migratio
         if ok:
             async_to_sync(_mark_replaced_order_deleted)(order.id, note)
             finish_lifecycle_task(task_claim, ok=True)
+            finish_open_lifecycle_tasks_for_order(CloudLifecycleTask.TASK_MIGRATION_DELETE, order)
             return {'order_id': order.id, 'order_no': order.order_no, 'ip': ip, 'queue_status': queue_status, 'ok': True, 'error': None}
         async_to_sync(_record_lifecycle_action_failed)(order.id, 'delete_failed', note)
         finish_lifecycle_task(task_claim, ok=False, error=note)
@@ -296,11 +305,13 @@ def run_orphan_asset_delete(asset_id: int, *, enforce_schedule: bool = True) -> 
             source = '人工手动删除' if not enforce_schedule else '到期自动删除'
             async_to_sync(_mark_orphan_asset_deleted)(asset.id, with_delete_source(note, source))
             finish_lifecycle_task(task_claim, ok=True)
+            finish_open_lifecycle_tasks_for_asset(CloudLifecycleTask.TASK_ORPHAN_ASSET_DELETE, asset)
             return {'asset_id': asset.id, 'ip': ip, 'ok': True, 'error': None}
         if asset.provider != 'aws_lightsail':
             source = '人工手动清理' if not enforce_schedule else '到期自动清理'
             async_to_sync(_mark_orphan_asset_deleted)(asset.id, with_delete_source(note, source))
             finish_lifecycle_task(task_claim, ok=True)
+            finish_open_lifecycle_tasks_for_asset(CloudLifecycleTask.TASK_ORPHAN_ASSET_DELETE, asset)
             return {'asset_id': asset.id, 'ip': ip, 'ok': True, 'error': None}
         finish_lifecycle_task(task_claim, ok=False, error=note)
         return {'asset_id': asset.id, 'ip': ip, 'ok': False, 'error': note}
@@ -363,6 +374,7 @@ def run_order_static_ip_release(order_id: int, *, queue_status='scheduled_recycl
             source = '人工手动释放' if not enforce_schedule or str(queue_status or '').startswith('manual') else '到期自动释放'
             async_to_sync(_mark_recycled)(order.id, with_delete_source(note, source))
             finish_lifecycle_task(task_claim, ok=True)
+            finish_open_lifecycle_tasks_for_order(CloudLifecycleTask.TASK_RECYCLE, order)
             return {'order_id': order.id, 'order_no': order.order_no, 'ip': ip, 'queue_status': queue_status, 'ok': True, 'error': None}
         async_to_sync(_record_lifecycle_action_failed)(order.id, 'recycle_failed', note)
         finish_lifecycle_task(task_claim, ok=False, error=note)
@@ -412,6 +424,7 @@ def run_unattached_ip_release(asset_id: int, *, enforce_schedule: bool = True) -
             source = '人工手动删除' if not enforce_schedule else '到期自动删除'
             async_to_sync(_mark_unattached_static_ip_deleted)(asset.id, with_delete_source(note, source))
             finish_lifecycle_task(task_claim, ok=True)
+            finish_open_lifecycle_tasks_for_asset(CloudLifecycleTask.TASK_UNATTACHED_IP_DELETE, asset)
             return {'asset_id': asset.id, 'ip': ip, 'ok': True, 'error': None}
         finish_lifecycle_task(task_claim, ok=False, error=note)
         return {'asset_id': asset.id, 'ip': ip, 'ok': False, 'error': note}

@@ -21,6 +21,8 @@ _SNAPSHOT_SYNC_REFRESH_LIMIT = 1000
 _SNAPSHOT_BACKFILL_BATCH_SIZE = 5000
 _SNAPSHOT_BACKFILL_MAX_BATCH_SIZE = 10000
 _SNAPSHOT_BACKFILL_MAX_BATCHES = 500
+_SNAPSHOT_COUNTS_CACHE_TTL = 300
+_SNAPSHOT_COUNTS_VERSION_KEY = 'cloud:asset-dashboard-snapshot:counts-version'
 
 
 def _normalize_snapshot_asset_ids(asset_ids):
@@ -38,6 +40,32 @@ def _normalize_snapshot_asset_ids(asset_ids):
         normalized.append(parsed)
         seen.add(parsed)
     return normalized
+
+
+def _snapshot_counts_cache_version() -> str:
+    version = cache.get(_SNAPSHOT_COUNTS_VERSION_KEY)
+    if version is None:
+        version = '0'
+        cache.set(_SNAPSHOT_COUNTS_VERSION_KEY, version, timeout=None)
+    return str(version)
+
+
+def _bump_snapshot_counts_cache_version():
+    cache.set(
+        _SNAPSHOT_COUNTS_VERSION_KEY,
+        str(int(timezone.now().timestamp() * 1000)),
+        timeout=None,
+    )
+
+
+def _snapshot_queryset_cache_key(prefix: str, queryset, *parts) -> str | None:
+    try:
+        sql, params = queryset.order_by().query.sql_with_params()
+    except Exception:
+        return None
+    raw = repr((prefix, _snapshot_counts_cache_version(), str(sql), tuple(params), parts))
+    digest = hashlib.sha1(raw.encode('utf-8')).hexdigest()
+    return f'cloud:asset-dashboard-snapshot:{prefix}:{digest}'
 
 
 def _defer_cloud_asset_dashboard_snapshot_refresh(*, reason: str, asset_ids=None, full=False) -> bool:
@@ -335,6 +363,7 @@ def refresh_cloud_asset_dashboard_snapshots(asset_ids=None, *, reason: str = '',
         if keep_ids:
             stale_qs = stale_qs.exclude(asset_id__in=keep_ids)
         stale_qs.delete()
+    _bump_snapshot_counts_cache_version()
     duration = max((timezone.now() - started_at).total_seconds(), 0)
     logger.info(
         'CLOUD_ASSET_DASHBOARD_SNAPSHOT_REFRESH reason=%s full=%s assets=%s created=%s updated=%s duration=%.3f',
@@ -433,6 +462,11 @@ def _filter_dashboard_snapshots_by_risk(queryset, risk_status: str):
 
 
 def _dashboard_snapshot_risk_counts(queryset) -> dict:
+    cache_key = _snapshot_queryset_cache_key('risk-counts', queryset)
+    if cache_key:
+        cached = cache.get(cache_key)
+        if isinstance(cached, dict):
+            return {key: int(value or 0) for key, value in cached.items()}
     aggregates = {
         'all': Count('id'),
     }
@@ -442,7 +476,22 @@ def _dashboard_snapshot_risk_counts(queryset) -> dict:
         else:
             aggregates[status] = Count('id', filter=Q(risk_account_disabled=False, **{field: True}))
     counts = queryset.aggregate(**aggregates)
-    return {key: int(value or 0) for key, value in counts.items()}
+    result = {key: int(value or 0) for key, value in counts.items()}
+    if cache_key:
+        cache.set(cache_key, result, timeout=_SNAPSHOT_COUNTS_CACHE_TTL)
+    return result
+
+
+def _dashboard_snapshot_group_total(queryset, group_field: str) -> int:
+    cache_key = _snapshot_queryset_cache_key('group-total', queryset, group_field)
+    if cache_key:
+        cached = cache.get(cache_key)
+        if cached is not None:
+            return int(cached or 0)
+    total = queryset.order_by().values(group_field).distinct().count()
+    if cache_key:
+        cache.set(cache_key, total, timeout=_SNAPSHOT_COUNTS_CACHE_TTL)
+    return int(total or 0)
 
 
 def _dashboard_snapshot_ordering(sort_by: str, sort_direction: str):
@@ -609,7 +658,7 @@ def _dashboard_snapshot_group_page(queryset, request, *, group_by='user', sort_b
     page, page_size = _parse_dashboard_page(request, default_size=20, min_size=1, max_size=100)
     group_field = 'group_telegram_key' if group_by == 'telegram_group' else 'group_user_key'
     group_label = 'group_telegram_label' if group_by == 'telegram_group' else 'group_user_label'
-    total = queryset.values(group_field).distinct().count()
+    total = _dashboard_snapshot_group_total(queryset, group_field)
     total_pages = max((total + page_size - 1) // page_size, 1)
     page = min(page, total_pages)
     start = (page - 1) * page_size
@@ -636,12 +685,28 @@ def _dashboard_snapshot_group_page(queryset, request, *, group_by='user', sort_b
         if len(page_keys) < page_size:
             page_keys = []
     if not page_keys:
-        grouped = list(
-            queryset.values(group_field)
-            .annotate(group_expires=Min('asset_due_sort_at'), group_name=Min(group_label))
-            .order_by(F('group_expires').asc(nulls_last=True), 'group_name', group_field)
-            [start:start + page_size]
-        )
+        end = min(start + page_size, total)
+        reverse_rows = False
+        if start > max(total // 2, page_size * 100):
+            reverse_start = max(total - end, 0)
+            grouped_queryset = (
+                queryset.order_by()
+                .values(group_field)
+                .annotate(group_expires=Min('asset_due_sort_at'), group_name=Min(group_label))
+                .order_by(F('group_expires').desc(nulls_first=True), '-group_name', f'-{group_field}')
+            )
+            grouped = list(grouped_queryset[reverse_start:reverse_start + (end - start)])
+            reverse_rows = True
+        else:
+            grouped_queryset = (
+                queryset.order_by()
+                .values(group_field)
+                .annotate(group_expires=Min('asset_due_sort_at'), group_name=Min(group_label))
+                .order_by(F('group_expires').asc(nulls_last=True), 'group_name', group_field)
+            )
+            grouped = list(grouped_queryset[start:end])
+        if reverse_rows:
+            grouped.reverse()
         page_keys = [row[group_field] for row in grouped]
     if not page_keys:
         return [], [], total, total_pages, page, page_size

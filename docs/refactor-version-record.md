@@ -11504,3 +11504,130 @@ git diff --check
 - 本轮未执行真实云资源创建、关机、删除服务器、释放 IP、换 IP、真实支付、链上广播、生产发布、删除业务数据或删除测试库。
 - 本轮未打印密钥、私钥、Telegram session、TOTP、支付密钥、云厂商密钥、完整代理链接、代理 secret 或登录密码。
 - 本轮未恢复废弃 runtime app、订单侧到期字段、旧计划快照、旧退款逻辑、旧退款函数名或旧兼容入口。
+
+## 2026-06-07 22:05 生命周期失败任务收敛与代理列表分组总数修复
+
+### 背景
+
+`TODO.md` 已无新的未完成条目，本轮按 `docs/auto-optimization-control.md` 固定巡检清单继续收口现有后端未提交补丁。当前工作区改动集中在两个高风险点：
+
+- 生命周期真实动作成功后，任务中心里历史失败任务未自动收敛，容易造成值班误判。
+- 代理列表分组分页总数在“同一用户多资产”场景可能按资产数而不是按 distinct group 数统计，导致总页数偏大，末页口径不稳。
+
+### 修改
+
+- `cloud/lifecycle_tasks.py`
+  - 新增 `finish_open_lifecycle_tasks_for_order()` 与 `finish_open_lifecycle_tasks_for_asset()`。
+  - 将同一订单 / 资产、同一任务类型、状态为 `pending` / `claimed` / `failed` 的未完成生命周期任务统一收敛为 `done`，并清空 `claim_token` 与 `last_error`。
+- `cloud/lifecycle_execution.py`
+  - 在关机、删机、迁移删机、孤儿资产删机、订单 IP 回收、未附加 IP 删除成功后调用上述收敛逻辑。
+  - 这样人工成功执行一次真实动作后，任务中心不会继续挂着旧失败项。
+- `cloud/api_asset_snapshots.py`
+  - 新增风险计数与分组总数缓存，缓存键基于 queryset SQL 指纹与版本号生成，快照刷新后统一 bump 版本。
+  - 将分组分页总数改为 `values(group_field).distinct().count()`，只按用户组键 / 群组键去重。
+  - 深页与末页维持反向分页路径，减少尾页大偏移扫描。
+- `cloud/tests.py`
+  - 新增 `test_cloud_assets_grouped_total_counts_distinct_groups_only`，验证同一用户 3 个资产时总分组数仍是 1。
+  - 新增 `test_manual_delete_success_finishes_failed_lifecycle_delete_task`，验证人工删机成功后旧失败任务会收敛为 `done`。
+
+### 验证
+
+本地已通过：
+
+```bash
+UV_CACHE_DIR=/private/tmp/uv-cache-shop uv run python manage.py check
+UV_CACHE_DIR=/private/tmp/uv-cache-shop DJANGO_TEST_SQLITE=1 uv run python manage.py test cloud.tests.CloudServerServicesTestCase.test_cloud_assets_grouped_total_counts_distinct_groups_only cloud.tests.CloudServerServicesTestCase.test_manual_delete_success_finishes_failed_lifecycle_delete_task --settings=shop.settings --verbosity=1
+UV_CACHE_DIR=/private/tmp/uv-cache-shop uv run python -m py_compile cloud/api_asset_snapshots.py cloud/lifecycle_tasks.py cloud/lifecycle_execution.py cloud/tests.py
+git diff --check
+```
+
+结果：Django 系统检查、2 个聚焦回归测试、编译检查和空白检查通过。SQLite `db_comment` 警告为已知数据库能力差异。
+
+### 额外巡检
+
+- 前端仓库 `/Users/a399/Desktop/data/vue-shop-admin` 本轮 `git status --short` 为空，未发现前端未提交改动，因此未触发前端类型检查。
+- 尝试补做真实本地 MySQL 只读对账时，当前沙箱阻止连接 `127.0.0.1:3306`，报错 `Operation not permitted`；因此本轮未能在 MySQL 实库复跑代理列表深分页对账，只保留 SQLite 聚焦回归。
+- 工作区仍有未跟踪目录 `.playwright-cli/`。当前命令策略阻止直接删除该目录，本轮保留并在最新状态文件中注明。
+
+### 红线
+
+- 本轮未执行真实云资源创建、关机、删除服务器、释放 IP、换 IP、真实支付、链上广播、生产发布、删除业务数据或删除测试库。
+- 本轮未打印密钥、私钥、Telegram session、TOTP、支付密钥、云厂商密钥、完整代理链接、代理 secret 或登录密码。
+- 本轮未恢复废弃 runtime app、订单侧到期字段、旧计划快照、旧退款逻辑、旧退款函数名或旧兼容入口。
+
+### 剩余风险
+
+- 代理列表 150 万资产场景仍需要在真实 MySQL 本地库重新验证第 2 页、深页和末页耗时与对账，2 秒内目标尚未重新确认。
+- 生命周期任务收敛逻辑当前通过删机回归覆盖，后续还应补充关机、迁移删机、孤儿资产删机和 IP 回收的同类测试。
+
+## 2026-06-07 22:03 生命周期真机重测与任务收敛修复
+
+### 背景
+
+用户要求生命周期里的创建服务器、删除服务器也必须测试到。本轮在用户明确授权真实云资源成本后，再次创建 1 台 AWS Lightsail 测试服务器，重点覆盖创建、关机、删机、固定 IP 释放，以及各阶段总开关、资产单项开关和执行时间窗口。
+
+### 真实生命周期实测
+
+- 创建测试订单 `#50096`、测试资产 `#1500332`。
+- 余额支付下单成功，AWS Lightsail 实例真实创建成功，固定 IP 绑定成功，BBR 和代理安装完成，订单进入 `completed`，资产进入 `running`。
+- 关机阶段：
+  - `cloud_server_shutdown_enabled=0` 阻断真实关机。
+  - 资产关机开关关闭阻断真实关机。
+  - 关机执行窗口外阻断真实关机。
+  - 开关与窗口允许后真实关机成功，订单进入 `suspended`，资产进入 `stopped/is_active=False`。
+- 删机阶段：
+  - `cloud_server_delete_enabled=0` 阻断真实删机。
+  - 资产服务器删除开关关闭阻断真实删机。
+  - 删除服务器执行窗口外阻断真实删机。
+  - 第一次真实删机遇到 AWS 实例停止中过渡状态，系统未误标删除。
+  - 第二次人工重试真实删机成功，订单和资产进入 `deleted`，实例标识清空。
+- 固定 IP 回收阶段：
+  - `cloud_ip_delete_enabled=0` 阻断真实释放固定 IP。
+  - 资产 IP 删除开关关闭阻断真实释放固定 IP。
+  - IP 删除执行窗口外阻断真实释放固定 IP。
+  - 开关与窗口允许后真实释放固定 IP 成功。
+- 最终状态：订单 `#50096` 为 `deleted`，资产 `#1500332` 为 `deleted/is_active=False`，实例、固定 IP 和当前公网 IP 均已清空。
+
+### 发现与修复
+
+- 真实删机第一次失败、第二次人工重试成功后，原 `delete` 生命周期任务仍停留在 `failed`，会导致任务中心 / 计划页出现假失败。
+- `cloud/lifecycle_tasks.py` 新增：
+  - `finish_open_lifecycle_tasks_for_order()`
+  - `finish_open_lifecycle_tasks_for_asset()`
+- `cloud/lifecycle_execution.py` 在关机、删机、迁移旧机删机、无订单资产删机、订单固定 IP 回收和未附加 IP 删除成功后，统一收敛同一来源的未完成 / 失败任务为 `done`。
+- 已对本轮测试订单执行收敛，最终 `suspend/delete/recycle` 三类任务均为 `done`，失败数为 0。
+- `cloud/tests.py` 新增 `test_manual_delete_success_finishes_failed_lifecycle_delete_task`，固化“计划任务失败后人工重试成功必须收敛为 done”的红线。
+
+### 代理列表分页优化
+
+- `cloud/api_asset_snapshots.py` 为风险计数和分组总数增加版本化短缓存。
+- 分组总数统计清理默认排序后再 `distinct().count()`，避免默认排序字段带入分组计数。
+- 深页 / 末页分组分页增加反向分页路径，保持前端排序契约不变。
+- `cloud/tests.py` 新增 `test_cloud_assets_grouped_total_counts_distinct_groups_only`，覆盖分组总数和末页不丢组。
+
+### 压测与页面实测
+
+- MySQL 150 万资产分页采样：
+  - 冷缓存 page 1 `4765.82 ms`，page 2 `1016.32 ms`，page 1000 `1706.28 ms`，page 74500 `1091.12 ms`。
+  - 热缓存 page 1 `1956.39 ms`，page 2 `999.43 ms`，page 1000 `1702.38 ms`，page 74500 `1075.15 ms`。
+- 实际打开 `/admin/cloud-assets` 并点击第 2 页、末页，页面首尾数据与数据库/API 对账一致。
+- 实际打开 `/admin/cloud-orders/50096`，页面标题为“云订单详情”，订单为已删除，生命周期区域正常显示，控制台 0 error / 0 warning。
+- 实际打开 `/admin/cloud-assets/1500332`，页面标题为“代理详情”，包含已删除状态、生命周期和关联订单，控制台 0 error。
+- 实际打开 `/admin/tasks/plans`，页面标题为“计划”，包含关机计划、删除计划、IP 删除和历史区域，控制台 0 error。
+
+### 验证
+
+已通过：
+
+```bash
+UV_CACHE_DIR=/private/tmp/uv-cache-shop DJANGO_TEST_SQLITE=1 uv run python manage.py test cloud.tests.CloudServerServicesTestCase.test_manual_delete_success_finishes_failed_lifecycle_delete_task cloud.tests.CloudServerServicesTestCase.test_failed_lifecycle_and_notice_tasks_wait_retry_window cloud.tests.CloudServerServicesTestCase.test_lifecycle_delete_task_claim_blocks_same_cycle_duplicate cloud.tests.CloudServerServicesTestCase.test_cloud_assets_grouped_total_counts_distinct_groups_only --settings=shop.settings --verbosity=1
+UV_CACHE_DIR=/private/tmp/uv-cache-shop uv run python -m py_compile cloud/lifecycle_tasks.py cloud/lifecycle_execution.py cloud/api_asset_snapshots.py cloud/tests.py
+UV_CACHE_DIR=/private/tmp/uv-cache-shop uv run python manage.py check
+```
+
+### 红线
+
+- 本轮执行了用户明确授权的真实 AWS Lightsail 创建、关机、删机和固定 IP 释放。
+- 本轮未执行链上广播、真实地址充值到账、生产发布、删除业务数据或删除测试库。
+- 本轮最终报告不记录完整公网 IP、完整实例名、完整固定 IP 名、完整代理链接、代理 secret、登录密码、云账号密钥或 Telegram session。
+- 本轮未恢复废弃 runtime app、订单侧到期字段、旧计划快照、旧退款逻辑、旧退款函数名或旧兼容入口。
