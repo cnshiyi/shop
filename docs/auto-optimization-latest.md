@@ -4,92 +4,53 @@
 
 ## 最近一轮
 
-- 时间：2026-06-08 04:04 CST
-- 状态：完成生命周期阶段开关专项巡检，并修复一个测试口径问题。
-- 本轮范围：生命周期关机/删机/IP 删除总开关、资产单项开关、未附加 IP 默认 15 天删除计划、计划页真实渲染、基础检查、编译检查、红线扫描。
+- 时间：2026-06-08 04:11 CST
+- 状态：完成机器人回调链与 `callback_data` 长度约束只读专项巡检，无业务代码改动。
+- 本轮范围：后端/前端 git 基线、机器人资产/订单/续费/换 IP/重装/修改配置返回链测试、`callback_data <= 64 bytes` 回归、基础检查、迁移计划连通性、红线扫描。
 
-## 发现与修复
+## 发现与结论
 
 发现：
 
-- 首次运行生命周期专项时，`test_lifecycle_plans_ignore_account_shutdown_disabled_plan_state` 失败。
-- 失败原因不是运行时代码，而是测试没有隔离 `cloud_server_delete_enabled`。
-- 当前安全默认值是 `cloud_server_delete_enabled=0`，删除阶段被服务器删除总开关挡住是正确行为。
-- 该测试要验证的是“云账号关机开关关闭，不应该影响服务器删除阶段”，因此需要显式打开服务器删除总开关。
+- `TODO.md` 中可执行任务已全部完成，本轮按固定巡检清单执行只读专项。
+- `uv run python manage.py check` 通过。
+- `uv run python manage.py migrate --plan` 仍因沙箱禁止访问 `127.0.0.1:3306` 失败，无法验证默认 MySQL 计划，只能继续依赖 SQLite 聚焦测试和静态巡检。
+- 前端仓库 `/Users/a399/Desktop/data/vue-shop-admin` 本轮 `git status --short` 为空，未发现未提交前端改动。
+- 机器人回调专项中，最初误用了不存在的测试类 `bot.tests.BotCallbackContractTestCase`；实际承载云资产/订单返回链与回调长度约束的是 `bot.tests.RetainedIpRenewalUiTestCase`。
 
-修复：
+结论：
 
-- `cloud/tests.py`
-  - 在 `test_lifecycle_plans_ignore_account_shutdown_disabled_plan_state` 开头增加 `SiteConfig.set('cloud_server_delete_enabled', '1')`。
-  - 保持运行时代码不变。
+- `RetainedIpRenewalUiTestCase` 共 `49` 个测试全部通过。
+- 已覆盖资产详情、订单详情、续费支付、换 IP、重装、修改配置、自动续费、只读订单详情、分页返回链等高风险回调路径。
+- 现有压缩回调契约仍然生效，测试中所有相关 `callback_data` 都满足 Telegram `64` 字节上限。
+- 红线扫描未发现运行时代码回流 `service_expires_at`、旧计划快照、旧退款函数名或废弃 runtime app 导入；`service_expires_at` 命中仅存在于历史 migrations。
 
-## 生命周期专项测试
-
-已通过 16 个聚焦测试，覆盖：
-
-- 关机总开关默认开启。
-- 关机总开关只阻止计划关机，不阻止删机或 IP 回收。
-- 资产 `shutdown_enabled=False` 阻止关机执行。
-- 资产 `server_delete_enabled=False` 阻止服务器删除计划执行。
-- 资产 `ip_delete_enabled=False` 阻止 IP 删除计划执行。
-- 关机计划完成后才进入服务器删除计划。
-- 未附加 IP 缺少到期时间时生成默认 15 天后删除计划。
-- 未附加 IP 有到期时间时使用 `CloudAsset.actual_expires_at`。
-- IP 删除执行器尊重资产单项 IP 删除开关和全局 IP 删除总开关。
-
-命令：
-
-```bash
-UV_CACHE_DIR=/private/tmp/uv-cache-shop DJANGO_TEST_SQLITE=1 uv run python manage.py test cloud.tests.CloudServerServicesTestCase.test_cloud_server_shutdown_enabled_defaults_on cloud.tests.CloudServerServicesTestCase.test_global_shutdown_switch_blocks_scheduled_suspend cloud.tests.CloudServerServicesTestCase.test_due_orders_skip_suspend_when_asset_shutdown_disabled cloud.tests.CloudServerServicesTestCase.test_due_orders_global_shutdown_switch_does_not_block_delete_or_recycle cloud.tests.CloudServerServicesTestCase.test_lifecycle_suspend_execution_guard_respects_asset_shutdown_disabled cloud.tests.CloudServerServicesTestCase.test_lifecycle_plans_ignore_account_shutdown_disabled_plan_state cloud.tests.CloudServerServicesTestCase.test_lifecycle_plans_show_asset_shutdown_disabled_plan_state cloud.tests.CloudServerServicesTestCase.test_lifecycle_plans_split_shutdown_before_server_delete cloud.tests.CloudServerServicesTestCase.test_lifecycle_plans_use_stage_specific_asset_switches cloud.tests.CloudServerServicesTestCase.test_lifecycle_plans_show_global_stage_switches cloud.tests.CloudServerServicesTestCase.test_unattached_ip_delete_items_fill_missing_expiry_with_default_delete_plan cloud.tests.CloudServerServicesTestCase.test_unattached_ip_delete_items_use_actual_expiry_as_delete_plan cloud.tests.CloudServerServicesTestCase.test_order_static_ip_release_respects_asset_ip_delete_disabled cloud.tests.CloudServerServicesTestCase.test_aws_sync_release_static_ip_respects_asset_ip_delete_disabled cloud.tests.CloudServerServicesTestCase.test_aws_sync_release_static_ip_respects_global_ip_delete_switch cloud.tests.CloudServerServicesTestCase.test_unattached_static_ip_due_scan_fills_missing_expiry_as_future_plan --settings=shop.settings --verbosity=1
-```
-
-结果：`Ran 16 tests`，全部通过。SQLite `db_comment` 警告仍是测试数据库能力差异。
-
-## 真实页面
-
-本轮创建一次临时后台 session，仅用于真实 Chrome 页面巡检；结束时已删除 session 和临时文件。
-
-真实打开：
-
-- `http://127.0.0.1:5666/admin/tasks/plans`
-- 标题：`计划 - Vben Admin Antd`
-- 耗时：约 `7.7s`
-- 控制台：`0 error / 0 warning`
-
-滚动到底部后确认五个区域均存在：
-
-- 关机计划
-- 删除计划
-- 服务器删除历史
-- IP 删除计划
-- IP 删除历史
-
-## 验证
+## 机器人回调专项验证
 
 已通过：
 
 ```bash
 UV_CACHE_DIR=/private/tmp/uv-cache-shop uv run python manage.py check
-UV_CACHE_DIR=/private/tmp/uv-cache-shop uv run python -m py_compile cloud/tests.py bot/api.py cloud/lifecycle_execution.py cloud/lifecycle_plan_queries.py
+UV_CACHE_DIR=/private/tmp/uv-cache-shop DJANGO_TEST_SQLITE=1 uv run python manage.py test bot.tests.RetainedIpRenewalUiTestCase --settings=shop.settings --verbosity=1
+UV_CACHE_DIR=/private/tmp/uv-cache-shop uv run python -m py_compile bot/api.py bot/handlers.py bot/keyboards.py orders/payment_scanner.py cloud/resource_monitor.py
 git diff --check
 ```
 
-红线扫描：
+测试覆盖结论：
 
-```bash
-rg -n "service_expires_at|CloudLifecyclePlanSnapshot|legacy_refund|old_refund|from accounts|from finance|from mall|from monitoring|from dashboard_api|from biz|import accounts|import finance|import mall|import monitoring|import dashboard_api|import biz" shop core bot orders cloud -g '*.py'
-```
+- 资产详情返回代理列表/订单列表。
+- 订单详情返回订单列表。
+- 续费钱包支付返回详情。
+- 换 IP 区域选择/提交返回详情。
+- 重装确认/提交返回详情。
+- 修改配置/自动续费二级动作返回详情。
+- 极长 ID、深层嵌套回调、压缩回调别名路径均保持在 64 字节以内。
 
-扫描结果：
+## 受限项
 
-- `service_expires_at` 只命中历史 migrations。
-- 未命中运行时代码中的旧计划快照、旧退款函数名或废弃 runtime app 导入。
-
-## 清理
-
-- 已删除临时后台 session：`deleted=1`。
-- 未发现 `.playwright-cli`、`playwright-report` 或 `test-results` 临时产物。
-- 未留下截图、临时脚本或有效后台 session。
+- 本轮未做真实 Telegram 账号交互：当前自动化环境未提供可安全使用的本地登录会话或测试账号，且红线禁止打印 session/token/TOTP/密钥。
+- 本轮未做真实浏览器点击：本轮聚焦对象是机器人回调链，前端仓库也无新改动；页面级真实巡检留给下一轮继续覆盖代理列表/计划页。
+- 本轮未做默认 MySQL 数据库对账：`127.0.0.1:3306` 访问仍被沙箱拦截。
 
 ## 红线
 
@@ -99,5 +60,6 @@ rg -n "service_expires_at|CloudLifecyclePlanSnapshot|legacy_refund|old_refund|fr
 
 ## 下一步
 
-- 继续循环巡检代理列表高数据量标签翻页、任务中心统计和通知计划口径。
-- 下一轮如再触发生命周期测试失败，优先判断是安全默认值、测试隔离还是运行时代码问题。
+- 下一轮优先恢复真实页面巡检：继续覆盖 `/admin/cloud-assets` 与 `/admin/tasks/plans`，并检查控制台、翻页和返回链。
+- 如果环境允许本机 MySQL，补跑 `uv run python manage.py migrate --plan` 和相关实库对账。
+- 继续关注机器人真实交互验证入口，若存在脱敏测试账号或本地安全会话，可补一轮真实菜单/回调链路验证。

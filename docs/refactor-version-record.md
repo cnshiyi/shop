@@ -12638,6 +12638,57 @@ SQLite `db_comment` 警告仍是已知数据库能力差异。
 - 本轮未恢复废弃 runtime app、订单侧到期字段、旧计划快照、旧退款逻辑、旧退款函数名或旧兼容入口。
 - 本轮未打印 Telegram token、Telegram session、TOTP、支付密钥、云厂商密钥、完整代理链接、代理 secret 或登录密码。
 
+## 2026-06-08 04:11 机器人回调链与 callback_data 长度专项巡检
+
+### 背景
+
+`TODO.md` 里的可执行任务已全部完成，本轮按 `docs/auto-optimization-control.md` 固定巡检清单执行只读专项，继续覆盖高风险机器人菜单/回调路径，但不混入前端或生命周期运行时代码改动。
+
+### 本轮范围
+
+- 后端仓库 `git status --short`、`git log -1 --oneline --decorate --stat`
+- 前端仓库 `/Users/a399/Desktop/data/vue-shop-admin` `git status --short`
+- `manage.py check`
+- 机器人资产详情、订单详情、续费、换 IP、重装、修改配置、自动续费、返回链和回调长度约束聚焦测试
+- 迁移计划连通性检查
+- 红线关键字扫描
+
+### 发现
+
+- 后端当前分支仍为 `codex/cloud-asset-lifecycle-refactor`，最近提交是 `444031a test: isolate lifecycle delete switch coverage`。
+- 前端仓库本轮工作区干净，没有未提交改动。
+- `uv run python manage.py check` 通过。
+- `uv run python manage.py migrate --plan` 再次因沙箱禁止连接 `127.0.0.1:3306` 失败，错误仍是 `Operation not permitted`，说明默认 MySQL/MariaDB 连通性问题还在。
+- 最初误用不存在的测试类 `bot.tests.BotCallbackContractTestCase`，实际承载机器人云资产/订单回调契约的是 `bot.tests.RetainedIpRenewalUiTestCase`。
+
+### 结论
+
+- `RetainedIpRenewalUiTestCase` 共 `49` 个测试全部通过。
+- 现有压缩回调协议仍然有效：订单详情、资产详情、续费支付、换 IP、重装、修改配置、自动续费、只读详情、深分页返回链都能在测试中保持 `callback_data <= 64 bytes`。
+- 红线扫描未发现运行时代码回流订单到期字段、旧计划快照、旧退款逻辑或废弃 runtime app；`service_expires_at` 命中仍只在历史 migrations。
+- 本轮未发现需要修改的运行时代码，因此仅更新文档记录。
+
+### 验证
+
+```bash
+UV_CACHE_DIR=/private/tmp/uv-cache-shop uv run python manage.py check
+UV_CACHE_DIR=/private/tmp/uv-cache-shop DJANGO_TEST_SQLITE=1 uv run python manage.py test bot.tests.RetainedIpRenewalUiTestCase --settings=shop.settings --verbosity=1
+UV_CACHE_DIR=/private/tmp/uv-cache-shop uv run python -m py_compile bot/api.py bot/handlers.py bot/keyboards.py orders/payment_scanner.py cloud/resource_monitor.py
+git diff --check
+rg -n "service_expires_at|CloudLifecyclePlanSnapshot|legacy_refund|old_refund|from accounts|from finance|from mall|from monitoring|from dashboard_api|from biz|import accounts|import finance|import mall|import monitoring|import dashboard_api|import biz" shop core bot orders cloud -g '*.py'
+```
+
+### 红线
+
+- 本轮未执行真实云资源创建、关机、删除服务器、释放 IP、换 IP、真实支付、链上广播、生产发布或删除业务数据。
+- 本轮未打印 Telegram token、Telegram session、TOTP、支付密钥、云厂商密钥、完整代理链接、代理 secret 或登录密码。
+- 本轮未恢复废弃 runtime app、订单侧到期字段、旧计划快照、旧退款逻辑、旧退款函数名或旧兼容入口。
+
+### 下一步
+
+- 下一轮继续回到真实页面巡检，优先代理列表和计划页。
+- 如果沙箱允许访问本机 MySQL，再补默认数据库 `migrate --plan` 与实库对账。
+
 ## 2026-06-08 04:04 生命周期阶段开关专项巡检
 
 ### 背景
