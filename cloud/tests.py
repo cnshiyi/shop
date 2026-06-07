@@ -17842,6 +17842,18 @@ class CloudOrderStatusDashboardSyncTestCase(TestCase):
         request.META['HTTP_AUTHORIZATION'] = f'Bearer session-{request.session.session_key}'
         return view(request, *args)
 
+    # 功能：提供 云资产、云订单和生命周期 的内部辅助逻辑，供同模块流程复用。
+    def _get_json(self, view, path, *args):
+        request = self.factory.get(path)
+        SessionMiddleware(lambda req: None).process_request(request)
+        request.session['_auth_user_id'] = str(self.admin.pk)
+        request.session['_auth_user_backend'] = 'django.contrib.auth.backends.ModelBackend'
+        request.session['_auth_user_hash'] = self.admin.get_session_auth_hash()
+        request.session.save()
+        request.user = AnonymousUser()
+        request.META['HTTP_AUTHORIZATION'] = f'Bearer session-{request.session.session_key}'
+        return view(request, *args)
+
     # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
     def test_status_endpoint_syncs_primary_asset_status(self):
         order, asset = self._create_order_with_primary_asset()
@@ -17867,6 +17879,58 @@ class CloudOrderStatusDashboardSyncTestCase(TestCase):
         self.assertEqual(order.status, 'deleted')
         self.assertFalse(asset.is_active)
         self.assertEqual(asset.status, CloudAsset.STATUS_DELETED)
+
+    # 功能：验证已删除订单详情不会继续暴露历史代理链路和完整公网 IP。
+    def test_deleted_order_detail_masks_proxy_links_and_historical_ips(self):
+        secret = '0123456789abcdef0123456789abcdef'
+        mtproxy_link = f'tg://proxy?server=198.51.100.99&port=443&secret={secret}'
+        socks_link = 'socks5://user:password@198.51.100.99:1080'
+        order = CloudServerOrder.objects.create(
+            order_no='STATUS-SYNC-DELETED-MASK',
+            user=self.user,
+            plan=self.plan,
+            provider=self.plan.provider,
+            region_code=self.plan.region_code,
+            region_name=self.plan.region_name,
+            plan_name=self.plan.plan_name,
+            quantity=1,
+            currency='USDT',
+            total_amount=Decimal('19.000000'),
+            pay_amount=Decimal('19.000000000'),
+            pay_method='balance',
+            status='deleted',
+            public_ip='198.51.100.99',
+            previous_public_ip='198.51.100.98',
+            mtproxy_host='198.51.100.99',
+            mtproxy_port=443,
+            mtproxy_secret=secret,
+            mtproxy_link=mtproxy_link,
+            proxy_links=[
+                {'name': '主代理 mtg', 'url': mtproxy_link, 'server': '198.51.100.99', 'port': '443', 'secret': secret},
+                {'name': '备用 socks5', 'url': socks_link, 'server': '198.51.100.99', 'port': '1080'},
+            ],
+            provision_note=f'创建完成：{mtproxy_link}\n备用：{socks_link}\n旧IP=198.51.100.98 secret={secret}',
+        )
+
+        response = self._get_json(cloud_order_detail, f'/admin/cloud-orders/{order.id}/', order.id)
+
+        self.assertEqual(response.status_code, 200)
+        payload = json.loads(response.content.decode())['data']
+        response_text = response.content.decode()
+        self.assertEqual(payload['status'], 'deleted')
+        self.assertEqual(payload['order_no'], 'STATUS-SYNC-DELETED-MASK')
+        self.assertEqual(payload['mtproxy_link'], '')
+        self.assertEqual(payload['proxy_links'], [])
+        self.assertEqual(payload['public_ip'], '198.51.100.*')
+        self.assertEqual(payload['previous_public_ip'], '198.51.100.*')
+        self.assertEqual(payload['mtproxy_host'], '198.51.100.*')
+        self.assertIn('代理链路已脱敏', payload['provision_note'])
+        self.assertNotIn('secret=', response_text)
+        self.assertNotIn(mtproxy_link, response_text)
+        self.assertNotIn(socks_link, response_text)
+        self.assertNotIn(secret, response_text)
+        self.assertNotIn('198.51.100.99', response_text)
+        self.assertNotIn('198.51.100.98', response_text)
 
     # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
     def test_order_detail_manual_edit_syncs_cloud_identity_and_proxy_fields(self):

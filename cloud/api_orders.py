@@ -1,6 +1,7 @@
 """云订单后台 API。"""
 
 import logging
+import re
 from urllib.parse import parse_qs, parse_qsl, urlencode, urlparse
 
 from asgiref.sync import async_to_sync
@@ -23,6 +24,11 @@ from core.dashboard_api import _apply_keyword_filter, _days_left, _decimal_to_st
 from core.runtime_config import get_runtime_config
 
 logger = logging.getLogger(__name__)
+
+_PROXY_URL_RE = re.compile(r'(?i)\b(?:tg://proxy|socks5://|https?://t\.me/proxy)[^\s，。；;]+')
+_SECRET_PARAM_RE = re.compile(r'(?i)secret=[^&\s，。；;]+')
+_SOCKS_CREDENTIAL_RE = re.compile(r'(?i)(socks5://)[^@\s/]+@')
+_IPV4_RE = re.compile(r'\b(?:(?:25[0-5]|2[0-4]\d|1?\d?\d)\.){3}(?:25[0-5]|2[0-4]\d|1?\d?\d)\b')
 
 
 def _cloud_execution_status(note: str | None):
@@ -48,6 +54,39 @@ def _mask_secret(value, keep=4):
     if len(text) <= keep * 2:
         return '*' * len(text)
     return f'{text[:keep]}***{text[-keep:]}'
+
+
+# 功能：脱敏历史公网 IP，只保留可用于人工辨认的前 3 段。
+def _mask_public_ip(value):
+    text = str(value or '').strip()
+    if not text:
+        return ''
+    parts = text.split('.')
+    if len(parts) == 4 and all(part.isdigit() and 0 <= int(part) <= 255 for part in parts):
+        return '.'.join(parts[:3] + ['*'])
+    return _mask_secret(text, keep=3)
+
+
+# 功能：已删除订单详情只展示脱敏历史说明，避免后台 API 继续暴露旧代理链路。
+def _sanitize_deleted_order_note(value):
+    text = str(value or '')
+    if not text:
+        return ''
+    text = _PROXY_URL_RE.sub('[代理链路已脱敏]', text)
+    text = _SOCKS_CREDENTIAL_RE.sub(r'\1***@', text)
+    text = _SECRET_PARAM_RE.sub('secret已脱敏', text)
+    return _IPV4_RE.sub(lambda match: _mask_public_ip(match.group(0)), text)
+
+
+# 功能：已删除订单详情返回前统一收敛敏感展示字段。
+def _sanitize_deleted_order_payload(payload):
+    payload['public_ip'] = _mask_public_ip(payload.get('public_ip'))
+    payload['previous_public_ip'] = _mask_public_ip(payload.get('previous_public_ip'))
+    payload['mtproxy_host'] = _mask_public_ip(payload.get('mtproxy_host'))
+    payload['mtproxy_link'] = ''
+    payload['proxy_links'] = []
+    payload['provision_note'] = _sanitize_deleted_order_note(payload.get('provision_note'))
+    return payload
 
 
 # 功能：解析代理主链接，供订单和资产编辑保持链路字段一致。
@@ -154,7 +193,7 @@ def _cloud_order_summary_payload(order):
         return None
     order_source, order_source_label = _cloud_order_source_label(order)
     order_source_tags = _cloud_order_source_tags(order)
-    return {
+    payload = {
         'id': order.id,
         'order_id': order.id,
         'order_no': order.order_no,
@@ -177,6 +216,10 @@ def _cloud_order_summary_payload(order):
         'order_detail_path': f'/admin/cloud-orders/{order.id}',
         'order_link_path': f'/admin/cloud-orders/{order.id}',
     }
+    if order.status == 'deleted':
+        payload['public_ip'] = _mask_public_ip(payload.get('public_ip'))
+        payload['previous_public_ip'] = _mask_public_ip(payload.get('previous_public_ip'))
+    return payload
 
 
 # 功能：提供 后台 API 接口 的内部辅助逻辑，供同模块流程复用。
@@ -355,6 +398,8 @@ def _cloud_order_detail_payload(order):
         'replacement_for_detail_path': f'/admin/cloud-orders/{order.replacement_for_id}' if order.replacement_for_id else '',
         'history_orders': _related_order_history_payload(order),
     })
+    if order.status == 'deleted':
+        _sanitize_deleted_order_payload(payload)
     return payload
 
 

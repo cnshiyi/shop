@@ -11641,3 +11641,43 @@ UV_CACHE_DIR=/private/tmp/uv-cache-shop uv run python manage.py check
 - 生命周期任务 `suspend/delete/recycle` 已全部收敛为 `done`，失败数为 0。
 - 临时后台账号、Playwright 浏览器和 `.playwright-cli/` 临时目录已清理。
 - 本轮最终验证命令均已通过，未发现测试资源残留。
+
+## 2026-06-07 22:18 已删除订单详情敏感字段收敛
+
+### 背景
+
+上一轮真机生命周期测试后，后台订单详情页仍会向已登录管理员展示已删除订单的历史代理链路、历史公网 IP 和创建说明中的旧 secret 片段。本轮按自动巡检规则处理这个可直接修复的后台暴露面。
+
+### 修复
+
+- `cloud/api_orders.py`
+  - 新增已删除订单响应层脱敏逻辑。
+  - `deleted` 状态订单详情不再返回完整 `mtproxy_link` 和 `proxy_links`。
+  - 创建说明中的 `tg://proxy`、`socks5://`、`secret=` 和公网 IP 统一脱敏。
+  - 历史订单摘要中的已删除订单公网 IP / 历史公网 IP 也同步脱敏，避免详情主体和历史摘要口径分叉。
+- `cloud/tests.py`
+  - 新增 `test_deleted_order_detail_masks_proxy_links_and_historical_ips`，覆盖完整代理链路、socks5 凭据、完整 secret、`secret=` 和完整公网 IP 不应出现在响应体中。
+
+### 真实页面验证
+
+- 已实际打开 `/admin/cloud-orders/50096`。
+- 页面标题为“云订单详情”，状态显示“已删除”。
+- 页面正文不包含 `tg://proxy`、`socks5://` 或 `secret=`。
+- 页面控制台 error 为 0，warning 为 0。
+
+### 验证
+
+已通过：
+
+```bash
+UV_CACHE_DIR=/private/tmp/uv-cache-shop DJANGO_TEST_SQLITE=1 uv run python manage.py test cloud.tests.CloudOrderStatusDashboardSyncTestCase.test_deleted_order_detail_masks_proxy_links_and_historical_ips cloud.tests.CloudOrderStatusDashboardSyncTestCase.test_order_detail_status_edit_syncs_primary_asset_status cloud.tests.CloudOrderStatusDashboardSyncTestCase.test_order_detail_manual_edit_syncs_cloud_identity_and_proxy_fields --settings=shop.settings --verbosity=1
+UV_CACHE_DIR=/private/tmp/uv-cache-shop uv run python -m py_compile cloud/api_orders.py cloud/tests.py
+UV_CACHE_DIR=/private/tmp/uv-cache-shop uv run python manage.py check
+git diff --check
+```
+
+### 红线
+
+- 本轮未执行真实云资源创建、关机、删除服务器、释放 IP、真实支付、链上广播、生产发布、删除业务数据或删除测试库。
+- 本轮未打印密钥、私钥、Telegram session、TOTP、支付密钥、云厂商密钥、完整代理链接、代理 secret 或登录密码。
+- 本轮未恢复废弃 runtime app、订单侧到期字段、旧计划快照、旧退款逻辑、旧退款函数名或旧兼容入口。
