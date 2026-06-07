@@ -12389,3 +12389,119 @@ SQLite `db_comment` 警告仍是已知数据库能力差异。
 - 前端真实页面 DOM 稳定时间仍偏高，需要下一轮单独优化。
 - 机器人还需要继续做真机 Telegram 多任务高并发点击，覆盖并发购买、续费、换 IP、重装、修改配置和返回链。
 - 计划页、通知计划、删除计划、IP 删除历史仍需要在 250 万快照压力背景下继续深分页巡检。
+
+## 2026-06-08 02:06 计划页计数缓存失效与 IP 删除历史深分页修复
+
+### 背景
+
+上一轮代理列表全标签百万级压测后，继续巡检计划页、通知计划和删除计划。在 250 万资产快照和 52 万 IP 删除历史规模下，计划页暴露两个真实问题：
+
+1. 生命周期计划页分页总数仍使用旧缓存，和 `cloud.lifecycle_plan_queries` 查询层实时计数分叉。
+2. `IP 删除历史`深页会从头合并到末页，在真实库末页压测时卡在 `cloud_ip_log` 排序和 Python 合并过程。
+
+用户同时提醒机器人要测试多任务高并发，本轮补跑了机器人并发发送隔离聚焦回归，真机 Telegram 多任务点击仍作为后续重点。
+
+### 修复
+
+- `bot/api.py`
+  - 给生命周期计划计数缓存增加 `counts_fingerprint`。
+  - 指纹包含：
+    - 服务器资产总数。
+    - 服务器资产最新更新时间。
+    - IP 日志总数。
+    - IP 日志最新记录时间。
+    - 删除订单总数。
+    - 最新删除订单 ID。
+  - 进程缓存和持久缓存都必须指纹一致才复用，否则自动重建计数快照。
+  - 没有指纹的旧缓存直接失效，不再继续作为计划页 total 来源。
+- `cloud/lifecycle_plan_queries.py`
+  - `ip_delete_history_page_sources()` 在后半段分页改成尾部反向合并。
+  - 先截断 `end = min(end, total)`，避免最后一页不足 `page_size` 时多返回行。
+  - 反向合并后再反转结果，保持页面看到的顺序仍是原始统一时间轴顺序。
+- `cloud/tests.py`
+  - 新增计数缓存随资产变化自动失效测试。
+  - 新增 IP 删除历史尾页反向分页测试，覆盖最后一页不足 `page_size` 的边界。
+
+### 真实库结果
+
+查询层计数：
+
+- 关机计划：`1879990`
+- 服务器删除计划：`2`
+- 服务器删除历史：`20010`
+- IP 删除计划：`500000`
+- IP 删除历史：`520010`
+
+分页对账：
+
+- 关机计划第 1 页、第 2 页、末页：通过。
+- 服务器删除计划第 1 页：通过。
+- 服务器删除历史第 1 页、第 2 页、末页：通过。
+- IP 删除计划第 1 页、第 2 页、末页：通过。
+- IP 删除历史第 1 页、第 2 页、末页：修复后通过。
+
+性能和边界：
+
+- `shutdown_plan.total` 从旧缓存错误值 `979990` 修正为 `1879990`。
+- `IP 删除历史`最后一页 `10401` 真实库耗时约 `1.87s`。
+- 最后一页返回 `10` 条，和 `pagination.loaded=10` 一致。
+
+### 真实前端验证
+
+使用 Playwright 打开真实页面：
+
+- `http://127.0.0.1:5666/admin/tasks/plans`
+
+页面成功显示：
+
+- 当前计划资产：`2500003`
+- 未附加IP：`600001`
+- 服务器资产：`1900002`
+- 服务器删除历史：`20010`
+- IP删除历史：`520010`
+- 关机计划：`已加载 50 / 总 1879990`
+
+点击 `IP 删除历史`最后一页 `10401` 后，页面显示：
+
+- `520001-520010 / 共 520010 条`
+
+最新相关请求：
+
+- `/api/admin/user/info`：`200`
+- `/api/admin/tasks/plans/` 首页：`200`
+- `/api/admin/tasks/plans/` IP 删除历史末页：`200`
+
+本轮页面实测过程中发现 8000 后端端口一度没有监听，导致 Vite 代理返回 502。清理残留 runserver 后，用前台 `--noreload` 后端进程恢复页面验证。
+
+### 机器人并发回归
+
+已跑：
+
+```bash
+UV_CACHE_DIR=/private/tmp/uv-cache-shop DJANGO_TEST_SQLITE=1 uv run python manage.py test bot.tests.TelegramListenerPushTestCase.test_notice_copy_wrapper_keeps_concurrent_user_sends_isolated --settings=shop.settings --verbosity=1
+```
+
+结果：通过。
+
+真机 Telegram 多任务高并发点击仍未在本轮完成，后续继续覆盖购买、续费、换 IP、重装、修改配置和返回链。
+
+### 验证
+
+已通过：
+
+```bash
+UV_CACHE_DIR=/private/tmp/uv-cache-shop uv run python manage.py check
+UV_CACHE_DIR=/private/tmp/uv-cache-shop uv run python -m py_compile bot/api.py cloud/lifecycle_plan_queries.py cloud/tests.py
+UV_CACHE_DIR=/private/tmp/uv-cache-shop DJANGO_TEST_SQLITE=1 uv run python manage.py test cloud.tests.CloudServerServicesTestCase.test_lifecycle_plans_reuses_cached_count_snapshot_after_refresh cloud.tests.CloudServerServicesTestCase.test_lifecycle_plans_reads_persisted_count_snapshot_after_process_cache_clear cloud.tests.CloudServerServicesTestCase.test_lifecycle_plans_rebuilds_cached_count_snapshot_when_asset_changes cloud.tests.CloudServerServicesTestCase.test_ip_delete_history_page_sources_reverse_tail_keeps_order cloud.tests.CloudServerServicesTestCase.test_lifecycle_plans_ip_delete_history_pagination_contract cloud.tests.CloudServerServicesTestCase.test_lifecycle_plans_ip_delete_history_mixes_logs_and_assets_by_time --settings=shop.settings --verbosity=1
+UV_CACHE_DIR=/private/tmp/uv-cache-shop DJANGO_TEST_SQLITE=1 uv run python manage.py test bot.tests.TelegramListenerPushTestCase.test_notice_copy_wrapper_keeps_concurrent_user_sends_isolated --settings=shop.settings --verbosity=1
+git diff --check
+```
+
+SQLite `db_comment` 警告仍是已知数据库能力差异。
+
+### 红线
+
+- 本轮未执行真实云资源创建、关机、删除服务器、释放 IP、换 IP、真实支付、链上广播、生产发布或删除业务数据。
+- 本轮未恢复废弃 runtime app、订单侧到期字段、旧计划快照、旧退款逻辑、旧退款函数名或旧兼容入口。
+- 本轮曾因 Playwright 本地存储命令回显一个临时本地后台 session token，已立即删除旧 session 并改用未回显的新浏览器状态文件继续测试。
+- 未打印 Telegram token、Telegram session、TOTP、支付密钥、云厂商密钥、完整代理链接或代理 secret。

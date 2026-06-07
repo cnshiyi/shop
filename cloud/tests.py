@@ -8147,6 +8147,76 @@ class CloudServerServicesTestCase(TestCase):
         self.assertEqual(cached_data['cache_mode'], 'cached')
         self.assertGreaterEqual(cached_data['shutdown_plan_count'], 1)
 
+    # 功能：验证计划页计数缓存遇到资产数据变化会自动失效，避免分页 total 继续使用旧值。
+    def test_lifecycle_plans_rebuilds_cached_count_snapshot_when_asset_changes(self):
+        import bot.api as bot_api
+
+        SiteConfig.objects.filter(key=bot_api._LIFECYCLE_PLAN_COUNT_SNAPSHOT_KEY).delete()
+        bot_api._LIFECYCLE_PLAN_CACHE.update({
+            'bundle': None,
+            'counts': None,
+            'counts_fingerprint': None,
+            'generated_at': None,
+            'limit': 0,
+        })
+        now = timezone.now()
+        CloudAsset.objects.create(
+            kind=CloudAsset.KIND_SERVER,
+            source=CloudAsset.SOURCE_AWS_SYNC,
+            user=self.user,
+            provider='aws_lightsail',
+            region_code=self.plan.region_code,
+            region_name=self.plan.region_name,
+            asset_name='lifecycle-fingerprint-server-1',
+            instance_id='i-lifecycle-fingerprint-server-1',
+            public_ip='5.5.7.42',
+            status=CloudAsset.STATUS_RUNNING,
+            is_active=True,
+            actual_expires_at=now + timezone.timedelta(days=30),
+        )
+        staff_user = get_user_model().objects.create_user(username='staff_lifecycle_fingerprint_count', password='x', is_staff=True)
+        refresh_request = RequestFactory().get('/api/admin/tasks/plans/', {
+            'compact': '1',
+            'fields': 'basic,execution',
+            'limit': '1',
+            'refresh': '1',
+            'shutdown_page_size': '1',
+        })
+        self._attach_bearer_session(refresh_request, staff_user)
+        refresh_response = lifecycle_plans(refresh_request)
+        self.assertEqual(refresh_response.status_code, 200)
+        refresh_data = json.loads(refresh_response.content)['data']
+        self.assertEqual(refresh_data['shutdown_plan_count'], 1)
+        self.assertEqual(refresh_data['pagination']['shutdown_plan']['total'], 1)
+
+        CloudAsset.objects.create(
+            kind=CloudAsset.KIND_SERVER,
+            source=CloudAsset.SOURCE_AWS_SYNC,
+            user=self.user,
+            provider='aws_lightsail',
+            region_code=self.plan.region_code,
+            region_name=self.plan.region_name,
+            asset_name='lifecycle-fingerprint-server-2',
+            instance_id='i-lifecycle-fingerprint-server-2',
+            public_ip='5.5.7.43',
+            status=CloudAsset.STATUS_RUNNING,
+            is_active=True,
+            actual_expires_at=now + timezone.timedelta(days=31),
+        )
+        cached_request = RequestFactory().get('/api/admin/tasks/plans/', {
+            'compact': '1',
+            'fields': 'basic,execution',
+            'limit': '1',
+            'shutdown_page_size': '1',
+        })
+        self._attach_bearer_session(cached_request, staff_user)
+        cached_response = lifecycle_plans(cached_request)
+
+        self.assertEqual(cached_response.status_code, 200)
+        cached_data = json.loads(cached_response.content)['data']
+        self.assertEqual(cached_data['shutdown_plan_count'], 2)
+        self.assertEqual(cached_data['pagination']['shutdown_plan']['total'], 2)
+
     # 功能：验证服务器删除计划服务端分页契约，跨页不重复且排序结果能和数据库事实对上。
     def test_lifecycle_plans_server_delete_pagination_contract(self):
         now = timezone.now()
@@ -8246,6 +8316,36 @@ class CloudServerServicesTestCase(TestCase):
 
         self.assertEqual([name for name in seen if name in expected_names], list(reversed(expected_names)))
         self.assertEqual(len(seen), len(set(seen)))
+
+    # 功能：验证 IP 删除历史后半段分页从尾部反向合并后，返回顺序仍与正向时间轴一致。
+    def test_ip_delete_history_page_sources_reverse_tail_keeps_order(self):
+        from cloud.lifecycle_plan_queries import ip_delete_history_page_sources
+
+        base = timezone.now() - timezone.timedelta(days=1)
+        logs = []
+        for index in range(211):
+            logs.append(CloudIpLog.objects.create(
+                event_type=CloudIpLog.EVENT_RECYCLED,
+                provider='aws_lightsail',
+                region_code=self.plan.region_code,
+                region_name=self.plan.region_name,
+                asset_name=f'ip-history-tail-{index}',
+                previous_public_ip=f'5.5.11.{index}',
+                public_ip=None,
+                note='固定 IP 保留期结束，AWS 固定 IP 已真实释放',
+            ))
+        for index, log in enumerate(logs):
+            CloudIpLog.objects.filter(id=log.id).update(created_at=base + timezone.timedelta(seconds=index))
+
+        sources = ip_delete_history_page_sources(
+            page=106,
+            page_size=2,
+            log_total=211,
+            asset_total=0,
+            completed_total=0,
+        )
+
+        self.assertEqual([source.asset_name for _kind, source in sources], ['ip-history-tail-0'])
 
     # 功能：验证 IP 删除历史跨来源分页按统一时间轴排序，不会先吐尽日志再补资产。
     def test_lifecycle_plans_ip_delete_history_mixes_logs_and_assets_by_time(self):

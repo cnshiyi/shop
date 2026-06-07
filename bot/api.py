@@ -62,6 +62,7 @@ PLAN_KIND_UNATTACHED_IP_DELETE = CloudLifecyclePlanNote.PLAN_KIND_UNATTACHED_IP_
 _LIFECYCLE_PLAN_CACHE = {
     'bundle': None,
     'counts': None,
+    'counts_fingerprint': None,
     'generated_at': None,
     'limit': 0,
 }
@@ -847,10 +848,30 @@ def _build_lifecycle_plan_count_snapshot():
     }
 
 
-def _store_lifecycle_plan_count_snapshot(counts: dict, *, generated_at=None):
+def _latest_ordered_value(queryset, field: str):
+    return queryset.order_by(f'-{field}', '-id').values_list(field, flat=True).first()
+
+
+def _lifecycle_plan_count_fingerprint():
+    server_assets = CloudAsset.objects.filter(kind=CloudAsset.KIND_SERVER)
+    ip_logs = CloudIpLog.objects.all()
+    deleted_orders = CloudServerOrder.objects.filter(status='deleted')
+    return {
+        'server_asset_count': server_assets.count(),
+        'server_asset_latest_updated_at': _iso(_latest_ordered_value(server_assets, 'updated_at')),
+        'ip_log_count': ip_logs.count(),
+        'ip_log_latest_created_at': _iso(_latest_ordered_value(ip_logs, 'created_at')),
+        'deleted_order_count': deleted_orders.count(),
+        'deleted_order_latest_id': deleted_orders.order_by('-id').values_list('id', flat=True).first() or 0,
+    }
+
+
+def _store_lifecycle_plan_count_snapshot(counts: dict, *, generated_at=None, fingerprint=None):
     generated_at = generated_at or timezone.now()
+    fingerprint = fingerprint or _lifecycle_plan_count_fingerprint()
     payload = {
         'counts': counts,
+        'fingerprint': fingerprint,
         'generated_at': _iso(generated_at),
     }
     SiteConfig.set(_LIFECYCLE_PLAN_COUNT_SNAPSHOT_KEY, json.dumps(payload, ensure_ascii=False))
@@ -859,21 +880,24 @@ def _store_lifecycle_plan_count_snapshot(counts: dict, *, generated_at=None):
 def _load_lifecycle_plan_count_snapshot():
     raw = SiteConfig.get(_LIFECYCLE_PLAN_COUNT_SNAPSHOT_KEY, '')
     if not raw:
-        return None, None
+        return None, None, None
     try:
         payload = json.loads(raw)
     except (TypeError, ValueError, json.JSONDecodeError):
-        return None, None
+        return None, None, None
     counts = payload.get('counts') if isinstance(payload, dict) else None
     if not isinstance(counts, dict):
-        return None, None
+        return None, None, None
     required_top_keys = {'plan_stats', 'total_counts', 'ip_delete_total_counts'}
     if not required_top_keys.issubset(counts.keys()):
-        return None, None
+        return None, None, None
+    fingerprint = payload.get('fingerprint') if isinstance(payload, dict) else None
+    if not isinstance(fingerprint, dict):
+        return None, None, None
     generated_at = parse_datetime(str(payload.get('generated_at') or '')) if isinstance(payload, dict) else None
     if generated_at and timezone.is_naive(generated_at):
         generated_at = timezone.make_aware(generated_at, timezone.get_current_timezone())
-    return counts, generated_at
+    return counts, generated_at, fingerprint
 
 
 def _sync_lifecycle_plan_table(*, limit=1000, page_size=None):
@@ -895,6 +919,7 @@ def _sync_lifecycle_plan_table(*, limit=1000, page_size=None):
     _LIFECYCLE_PLAN_CACHE.update({
         'bundle': deepcopy(bundle),
         'counts': deepcopy(counts),
+        'counts_fingerprint': _lifecycle_plan_count_fingerprint(),
         'generated_at': generated_at,
         'limit': page_size,
     })
@@ -906,18 +931,22 @@ def _refresh_lifecycle_plan_cache(*, page_size=1000):
 
 
 def _cached_lifecycle_plan_count_snapshot():
+    current_fingerprint = _lifecycle_plan_count_fingerprint()
     cached = _LIFECYCLE_PLAN_CACHE.get('counts')
-    if cached is not None:
+    cached_fingerprint = _LIFECYCLE_PLAN_CACHE.get('counts_fingerprint')
+    if cached is not None and cached_fingerprint == current_fingerprint:
         return deepcopy(cached)
-    persisted, generated_at = _load_lifecycle_plan_count_snapshot()
-    if persisted is not None:
+    persisted, generated_at, persisted_fingerprint = _load_lifecycle_plan_count_snapshot()
+    if persisted is not None and persisted_fingerprint == current_fingerprint:
         _LIFECYCLE_PLAN_CACHE['counts'] = deepcopy(persisted)
+        _LIFECYCLE_PLAN_CACHE['counts_fingerprint'] = deepcopy(persisted_fingerprint)
         _LIFECYCLE_PLAN_CACHE['generated_at'] = generated_at or timezone.now()
         return deepcopy(persisted)
     counts = _build_lifecycle_plan_count_snapshot()
     generated_at = timezone.now()
-    _store_lifecycle_plan_count_snapshot(counts, generated_at=generated_at)
+    _store_lifecycle_plan_count_snapshot(counts, generated_at=generated_at, fingerprint=current_fingerprint)
     _LIFECYCLE_PLAN_CACHE['counts'] = deepcopy(counts)
+    _LIFECYCLE_PLAN_CACHE['counts_fingerprint'] = deepcopy(current_fingerprint)
     _LIFECYCLE_PLAN_CACHE['generated_at'] = generated_at
     return counts
 

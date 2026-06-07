@@ -348,6 +348,16 @@ def ip_delete_history_page_sources(
     total = log_total + asset_total + completed_total
     if total <= 0 or start >= total:
         return []
+    end = min(end, total)
+
+    reverse_page = start > max(total // 2, page_size * 100)
+    if reverse_page:
+        reverse_start = max(total - end, 0)
+        reverse_end = reverse_start + (end - start)
+        start, end = reverse_start, reverse_end
+        history_logs = CloudIpLog.objects.filter(unattached_ip_delete_history_q()).select_related('asset', 'order', 'user').order_by('created_at', 'id')
+        history_assets = unattached_ip_delete_history_asset_queryset().order_by('updated_at', 'id')
+        completed_assets = completed_unattached_ip_active_queryset().order_by('updated_at', 'id')
 
     chunk_size = max(page_size * 4, 50)
     source_specs = [
@@ -361,7 +371,10 @@ def ip_delete_history_page_sources(
     def history_sort_key(item, time_getter) -> tuple[float, int]:
         timestamp = time_getter(item)
         ts_value = timestamp.timestamp() if timestamp is not None else 0.0
-        return (-ts_value, -int(getattr(item, 'id', 0) or 0))
+        item_id = int(getattr(item, 'id', 0) or 0)
+        if reverse_page:
+            return (ts_value, item_id)
+        return (-ts_value, -item_id)
 
     def refill(state_key: int):
         state = source_state[state_key]
@@ -372,7 +385,8 @@ def ip_delete_history_page_sources(
         state['offset'] = batch_end
         if state['buffer']:
             first = state['buffer'].pop(0)
-            heapq.heappush(heap, (history_sort_key(first, state['time_getter']), state['priority'], state_key, first))
+            priority_key = -state['priority'] if reverse_page else state['priority']
+            heapq.heappush(heap, (history_sort_key(first, state['time_getter']), priority_key, state_key, first))
 
     for priority, (kind, queryset, source_total, time_getter) in enumerate(source_specs):
         source_state[priority] = {
@@ -396,7 +410,10 @@ def ip_delete_history_page_sources(
         index += 1
         if state['buffer']:
             next_item = state['buffer'].pop(0)
-            heapq.heappush(heap, (history_sort_key(next_item, state['time_getter']), state['priority'], state_key, next_item))
+            priority_key = -state['priority'] if reverse_page else state['priority']
+            heapq.heappush(heap, (history_sort_key(next_item, state['time_getter']), priority_key, state_key, next_item))
         else:
             refill(state_key)
+    if reverse_page:
+        items.reverse()
     return items

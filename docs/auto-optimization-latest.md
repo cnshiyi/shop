@@ -4,63 +4,73 @@
 
 ## 最近一轮
 
-- 时间：2026-06-08 01:42 CST
-- 状态：完成代理列表全标签 100 万级注入压测、真实页面翻页对账、分页查询优化和机器人并发/返回链聚焦回归。
-- 本轮范围：代理列表 11 个标签、按用户分组分页第 1 页/第 2 页/末页、2,500,003 条快照规模下的接口性能、Telegram Bot 并发发送隔离和云资产操作返回链。
-
-## 覆盖结果
-
-- 注入数据：
-  - 新增标签压测资产 `1,000,000` 条。
-  - 新增标签压测快照 `1,000,000` 条。
-  - 当前 `CloudAssetDashboardSnapshot=2,500,003`，可见快照 `2,489,998`。
-  - “全部”标签自然包含新增可见资产；其他 10 个风险标签各新增 `100,000` 条。
-- 注入后接口计数：
-  - 全部：`2,489,996` 组，`124,500` 页。
-  - 运行中：`549,988` 组，`27,500` 页。
-  - 即将到期：`101,250` 组，`5,063` 页。
-  - 已过期：`101,752` 组，`5,088` 页。
-  - 未附加固定IP：`100,001` 组，`5,001` 页。
-  - 异常/待确认：`100,000` 组，`5,000` 页。
-  - 云账号异常：`1,145,001` 组，`57,251` 页。
-  - 关机计划关闭：`100,384` 组，`5,020` 页。
-  - 未绑定用户：`100,001` 组，`5,001` 页。
-  - 未绑定群组：`100,003` 组，`5,001` 页。
-  - 续费关闭：`104,548` 组，`5,228` 页。
-- 真实页面标签压测：
-  - 注入前连续 3 轮切换 11 个标签，共 33 次，0 失败，0 控制台错误。
-  - 注入后逐标签真实页面验证第 1 页、第 2 页、末页，共 33 项，0 失败，0 控制台错误。
-  - `未附加固定IP` 和 `异常/待确认` 两个原本小数据标签已分别验证到 10 万级分页和末页。
-- 机器人回归：
-  - 已跑 `TelegramListenerPushTestCase.test_notice_copy_wrapper_keeps_concurrent_user_sends_isolated`。
-  - 已跑完整 `RetainedIpRenewalUiTestCase`，覆盖续费、换 IP、重装、修改配置、资产详情返回链、钱包异步任务、callback 64 字节限制。
-  - 共 50 个 bot 聚焦测试通过。
+- 时间：2026-06-08 02:06 CST
+- 状态：完成计划页高数据口径修复、IP 删除历史深分页优化、真实前端页面翻页验证和机器人并发聚焦回归。
+- 本轮范围：250 万资产快照压力背景下的生命周期计划页、关机计划、服务器删除计划、服务器删除历史、IP 删除计划、IP 删除历史、计划页缓存、真实浏览器分页显示。
 
 ## 发现与修复
 
-- 发现 1：直接写入 100 万压测快照后，`asset_updated_at` 与资产 `updated_at` 存在轻微差异，列表接口把压测快照判成 stale，反复记录 `CLOUD_ASSET_DASHBOARD_SNAPSHOT_STALE_LARGE_DEFERRED`。
-  - 处理：用按 `asset_id` 范围分批更新对齐 `asset_updated_at`，避免一次性大 JOIN 超时。
-  - 结果：100 万行分批更新完成，stale 误报消失。
-- 发现 2：风险计数原实现使用单次条件聚合，在 250 万快照下需要全表扫描，冷计数约 `5.8s`。
-  - 修复：`_dashboard_snapshot_risk_counts()` 改为逐项索引计数，复用原缓存键和返回格式。
-  - 结果：同口径计数从约 `5.8s` 降到约 `1.2s`。
-- 发现 3：`运行中` 和 `云账号异常` 分组分页缺少复合索引，执行计划出现 `filesort`。
-  - 修复：新增 `0060_dashboard_snapshot_risk_group_indexes`，补 `normal/account_disabled` 的分组计数索引和到期排序索引。
-  - 结果：`运行中` 首屏接口从约 `4.3s` 降到约 `0.68s`；`云账号异常` 首屏接口从约 `5.1s` 降到约 `0.61s`；第 2 页和末页约 `0.32-0.38s`。
-- 发现 4：一次性 `UPDATE ... JOIN` 100 万行在本地 MySQL 超时。
-  - 处理：确认大数据维护应使用范围分批更新，已在本轮报告中记录。
+- 发现 1：生命周期计划页 `pagination.shutdown_plan.total` 复用了旧的持久计数缓存。
+  - 现象：查询层实时计数 `shutdown_plan_count=1879990`，但页面 API 曾返回旧值 `979990`。
+  - 修复：计划计数缓存增加数据指纹，覆盖服务器资产总数、服务器资产最新更新时间、IP 日志总数、IP 日志最新记录时间、删除订单总数和最新删除订单 ID。指纹变化时自动重建计数快照。
+  - 结果：真实库计划页关机计划 total 已恢复为 `1879990`，与查询层一致。
+- 发现 2：`IP 删除历史` 深页合并查询从第 1 条遍历到末页，在 `520010` 条历史规模下卡住。
+  - 修复：`ip_delete_history_page_sources()` 在后半段分页改为从尾部反向合并，再反转成原始时间轴顺序。
+  - 结果：真实库 `IP 删除历史`最后一页 `10401` 返回 `520001-520010 / 共 520010 条`，耗时约 `1.87s`。
+- 发现 3：反向分页末页未先把 `end` 截到 `total`，导致最后一页元数据为 `10` 条但实际返回 `50` 条。
+  - 修复：合并前先 `end = min(end, total)`。
+  - 结果：真实库最后一页实际返回 `10` 条，和 `pagination.loaded=10` 一致。
+- 发现 4：前端计划页实测时 Vite 代理曾返回 `/api/admin/user/info` 502。
+  - 原因：本地 8000 后端没有监听，残留 runserver 进程不服务请求。
+  - 处理：清理旧 runserver 并以前台 `--noreload` 临时启动后端完成页面实测。
+
+## 真实库对账
+
+- 查询层计数：
+  - 关机计划：`1879990`
+  - 服务器删除计划：`2`
+  - 服务器删除历史：`20010`
+  - IP 删除计划：`500000`
+  - IP 删除历史：`520010`
+- API 分页对账：
+  - 关机计划第 1 页、第 2 页、末页：`meta.total`、`meta.loaded`、实际行数一致。
+  - 服务器删除计划第 1 页：一致。
+  - 服务器删除历史第 1 页、第 2 页、末页：一致。
+  - IP 删除计划第 1 页、第 2 页、末页：一致。
+  - IP 删除历史第 1 页、第 2 页、末页：修复后末页一致。
+
+## 真实前端页面
+
+- 使用 Playwright 真实打开：`http://127.0.0.1:5666/admin/tasks/plans`。
+- 页面成功显示：
+  - 当前计划资产：`2500003`
+  - 未附加IP：`600001`
+  - 服务器资产：`1900002`
+  - 服务器删除历史：`20010`
+  - IP删除历史：`520010`
+  - 关机计划表：`已加载 50 / 总 1879990`
+- 点击 `IP 删除历史`最后一页 `10401` 后，页面显示：`520001-520010 / 共 520010 条`。
+- 最新相关前端请求：
+  - `/api/admin/user/info`：`200`
+  - `/api/admin/tasks/plans/` 首页：`200`
+  - `/api/admin/tasks/plans/` IP 删除历史末页：`200`
+
+## 机器人回归
+
+- 已跑机器人并发发送隔离聚焦测试：
+  - `bot.tests.TelegramListenerPushTestCase.test_notice_copy_wrapper_keeps_concurrent_user_sends_isolated`
+- 结果：通过。
+- 真机 Telegram 多任务高并发点击仍需继续单独执行，重点覆盖购买、续费、换 IP、重装、修改配置和返回链。本轮未打印 Telegram token、session 或账号敏感信息。
 
 ## 验证
 
-本地已通过：
+已通过：
 
 ```bash
 UV_CACHE_DIR=/private/tmp/uv-cache-shop uv run python manage.py check
-UV_CACHE_DIR=/private/tmp/uv-cache-shop uv run python -m py_compile cloud/api_asset_snapshots.py cloud/models.py
-UV_CACHE_DIR=/private/tmp/uv-cache-shop DJANGO_TEST_SQLITE=1 uv run python manage.py test cloud.tests.CloudServerServicesTestCase.test_cloud_assets_grouped_paginated_orders_null_due_groups_last cloud.tests.CloudServerServicesTestCase.test_cloud_assets_grouped_total_counts_distinct_groups_only cloud.tests.CloudServerServicesTestCase.test_cloud_assets_grouped_paginated_uses_twenty_user_groups_per_page --settings=shop.settings --verbosity=1
-UV_CACHE_DIR=/private/tmp/uv-cache-shop DJANGO_TEST_SQLITE=1 uv run python manage.py test bot.tests.TelegramListenerPushTestCase.test_notice_copy_wrapper_keeps_concurrent_user_sends_isolated bot.tests.RetainedIpRenewalUiTestCase --settings=shop.settings --verbosity=1
-UV_CACHE_DIR=/private/tmp/uv-cache-shop uv run python manage.py makemigrations --check --dry-run
-UV_CACHE_DIR=/private/tmp/uv-cache-shop uv run python manage.py migrate --plan
+UV_CACHE_DIR=/private/tmp/uv-cache-shop uv run python -m py_compile bot/api.py cloud/lifecycle_plan_queries.py cloud/tests.py
+UV_CACHE_DIR=/private/tmp/uv-cache-shop DJANGO_TEST_SQLITE=1 uv run python manage.py test cloud.tests.CloudServerServicesTestCase.test_lifecycle_plans_reuses_cached_count_snapshot_after_refresh cloud.tests.CloudServerServicesTestCase.test_lifecycle_plans_reads_persisted_count_snapshot_after_process_cache_clear cloud.tests.CloudServerServicesTestCase.test_lifecycle_plans_rebuilds_cached_count_snapshot_when_asset_changes cloud.tests.CloudServerServicesTestCase.test_ip_delete_history_page_sources_reverse_tail_keeps_order cloud.tests.CloudServerServicesTestCase.test_lifecycle_plans_ip_delete_history_pagination_contract cloud.tests.CloudServerServicesTestCase.test_lifecycle_plans_ip_delete_history_mixes_logs_and_assets_by_time --settings=shop.settings --verbosity=1
+UV_CACHE_DIR=/private/tmp/uv-cache-shop DJANGO_TEST_SQLITE=1 uv run python manage.py test bot.tests.TelegramListenerPushTestCase.test_notice_copy_wrapper_keeps_concurrent_user_sends_isolated --settings=shop.settings --verbosity=1
 git diff --check
 ```
 
@@ -69,11 +79,11 @@ SQLite `db_comment` 警告仍是已知数据库能力差异。
 ## 红线
 
 - 本轮未执行真实云资源创建、关机、删除服务器、释放 IP、换 IP、真实支付、链上广播、生产发布或删除业务数据。
-- 本轮注入的是本地标签压测资产和快照，统一使用 `TAGSTRESS20260608` / `tagstress20260608:` 前缀，未打印密钥、私钥、Telegram session、TOTP、支付密钥、云厂商密钥、完整代理链接、代理 secret 或登录密码。
 - 本轮未恢复废弃 runtime app、订单侧到期字段、旧计划快照、旧退款逻辑、旧退款函数名或旧兼容入口。
+- 本轮曾暴露一个临时本地后台 session token，已立即删除旧 session 并重新生成未回显的新浏览器状态继续测试；未打印 Telegram token、Telegram session、TOTP、支付密钥、云厂商密钥、完整代理链接或代理 secret。
 
-## 剩余风险与下一轮
+## 下一步
 
-- 真实页面在后端接口已降到亚秒级后，等待 DOM 稳定仍约 `5.7s`；后续应单独优化前端加载态、同步状态请求和渲染等待。
-- 机器人已完成代码级并发/返回链回归；下一轮继续做真机 Telegram 多任务高并发点击，重点覆盖并发购买、续费、换 IP、重装、修改配置和返回链。
-- 继续关注 250 万快照规模下通知计划、删除计划、IP 删除历史和计划页的深分页表现。
+- 继续真机 Telegram 多任务高并发点击测试。
+- 继续计划页前端渲染性能优化，当前后端末页已约 `1.87s`，但整页 DOM 很大。
+- 继续通知计划和服务器删除历史高数据深分页巡检。
