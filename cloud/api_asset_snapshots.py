@@ -731,6 +731,10 @@ def _dashboard_snapshot_group_keys_from_reverse_tail(queryset, *, group_field: s
     return tail_keys[:end - start]
 
 
+def _dashboard_snapshot_can_use_forward_row_paging(*, start: int, duplicate_excess: int) -> bool:
+    return start <= 100000 or (duplicate_excess == 0 and start <= 150000)
+
+
 def _dashboard_snapshot_group_page(queryset, request, *, group_by='user', sort_by='', sort_direction='', compact=False):
     page, page_size = _parse_dashboard_page(request, default_size=20, min_size=1, max_size=100)
     group_field = 'group_telegram_key' if group_by == 'telegram_group' else 'group_user_key'
@@ -769,7 +773,12 @@ def _dashboard_snapshot_group_page(queryset, request, *, group_by='user', sort_b
                 break
         if len(page_keys) < page_size:
             page_keys = []
-    if not page_keys and compact and exact_row_paging_safe and start <= 100000:
+    if (
+        not page_keys
+        and compact
+        and exact_row_paging_safe
+        and _dashboard_snapshot_can_use_forward_row_paging(start=start, duplicate_excess=duplicate_excess)
+    ):
         page_keys = _dashboard_snapshot_group_keys_from_ordered_rows(
             queryset,
             group_field=group_field,

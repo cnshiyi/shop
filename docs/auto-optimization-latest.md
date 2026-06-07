@@ -4,71 +4,66 @@
 
 ## 最近一轮
 
-- 时间：2026-06-08 05:24 CST
-- 状态：完成一轮代理列表百万级全标签分页压测、生命周期计划页复查、机器人高并发/返回链测试；修复代理列表分组末页在重复分组下回落超重查询导致空页的问题。
-- 本轮范围：代理列表 `user`/`telegram_group` 两种分区、全部风险标签首二页/深页/末页、生命周期关机/删机/IP 删除计划分页、机器人多任务高并发和 callback 返回链、后台 Bearer session 回归。
+- 时间：2026-06-08 05:43 CST
+- 状态：完成一轮代理列表用户分区末页性能专项、真实 HTTP 对账、真实前端页面复查和聚焦测试；修复 10 万量级风险标签末页慢路径。
+- 本轮范围：代理列表默认 `group_by=user` 末页、风险标签组合索引、分页策略、真实浏览器标签点击、迁移状态、红线扫描。
 
 ## 修复内容
 
+- `cloud/models.py` / `cloud/migrations/0062_dashboard_snapshot_user_risk_due_indexes.py`
+  - 为用户分区补齐 6 个风险标签到期排序组合索引：
+    - 即将到期、已过期、未附加固定IP、异常/待确认、未绑定用户、未绑定群组。
+  - 迁移使用 `SeparateDatabaseAndState + RunPython` 幂等建索引，能处理本地建索引中途断线后“索引已存在但迁移未记录”的半完成状态。
+  - 本地已执行 `MYSQL_READ_TIMEOUT=600 MYSQL_WRITE_TIMEOUT=600 uv run python manage.py migrate cloud 0062`。
 - `cloud/api_asset_snapshots.py`
-  - 放开有界反向尾页分页对重复分组的支持：当重复分组扩容量在安全阈值内时，末页不再回落到超重 `GROUP BY` 深页查询。
-  - 修复百万级 `all` 标签最后一页：此前 `api_total=2458992` 但末页应有 `12` 组时返回 `0` 组；修复后末页返回 `12` 组，约 `0.63s`。
+  - 增加 `_dashboard_snapshot_can_use_forward_row_paging()`。
+  - 对无重复分组且 `start <= 150000` 的中等尾页允许正向有界扫描，避免没有专用索引的标签走慢反向排序。
+  - 有重复分组仍不放宽，避免 `unbound_group` 这类重复分组走正向大窗口后变慢或串页。
 - `cloud/tests.py`
-  - 新增 `test_cloud_assets_grouped_duplicate_groups_reverse_tail_keeps_last_page`，锁定“重复分组 + 最后一页”必须走有界反向分页并返回最后一组。
-- `core/dashboard_api.py` / `bot/tests.py`
-  - 继续保留上一阶段 Bearer session 修复和测试：Bearer 请求只刷新 bearer 对应 Session 行，不再创建/修改空 cookie session，避免高频分页时响应保存阶段放大 MySQL 连接异常。
+  - 新增 `test_cloud_assets_forward_row_paging_allows_medium_unique_tail_pages`，锁定分页策略边界。
 
 ## 实库压测
 
-代理列表 `group_by=telegram_group` 全标签 DB/HTTP 对账通过：
+直接 helper 压测，真实 MySQL：
 
-- `all`：`2458992` 组，页 `1/2/100/5001/122950` 均正确，末页 `12` 组。
-- `normal`：`549988` 组，末页 `8` 组。
-- `due_soon`：`100250` 组，末页 `10` 组。
-- `expired`：`100352` 组，末页 `12` 组。
-- `unattached_ip`：`100001` 组，末页 `1` 组。
-- `abnormal`：`100000` 组，末页 `20` 组。
-- `account_disabled`：`1109001` 组，末页 `1` 组。
-- `shutdown_disabled`：`100369` 组，末页 `9` 组。
-- `unbound_user`：`100001` 组，末页 `1` 组。
-- `unbound_group`：`100003` 组，末页 `3` 组。
-- `auto_renew_off`：`101002` 组，末页 `2` 组。
+- `shutdown_disabled`：从约 `2.0s` 降到 `0.344s`。
+- `unbound_group`：从约 `4.2s` 降到 `0.162s`。
+- `due_soon`：`0.198s`。
+- `all`：`0.271s`。
 
-代理列表默认 `group_by=user` 全标签 DB/HTTP 对账通过：
+真实 HTTP 用户分区末页对账通过：
 
-- `all`：`2489996` 组，末页 `16` 组。
-- `normal`：`549988` 组，末页 `8` 组。
-- `due_soon`：`101250` 组，末页 `10` 组。
-- `expired`：`101752` 组，末页 `12` 组。
-- `unattached_ip`：`100001` 组，末页 `1` 组。
-- `abnormal`：`100000` 组，末页 `20` 组。
-- `account_disabled`：`1145001` 组，末页 `1` 组。
-- `shutdown_disabled`：`100384` 组，末页 `4` 组。
-- `unbound_user`：`100001` 组，末页 `1` 组。
-- `unbound_group`：`100003` 组，末页 `3` 组。
-- `auto_renew_off`：`104548` 组，末页 `8` 组。
+- `due_soon`：`101250` 组，末页 `10` 组，`1.570s`。
+- `expired`：`101752` 组，末页 `12` 组，`1.261s`。
+- `unattached_ip`：`100001` 组，末页 `1` 组，`0.957s`。
+- `abnormal`：`100000` 组，末页 `20` 组，`0.926s`。
+- `shutdown_disabled`：`100384` 组，末页 `4` 组，`1.421s`。
+- `unbound_user`：`100001` 组，末页 `1` 组，`0.903s`。
+- `unbound_group`：`100003` 组，末页 `3` 组，`0.906s`。
+- `auto_renew_off`：`104548` 组，末页 `8` 组，`1.221s`。
+- `all`：`2489996` 组，末页 `16` 组，`1.253s`。
+- `account_disabled`：`1145001` 组，末页 `1` 组，`0.704s`。
+
+DB 状态：
+
+- 目标索引实际存在：`cad_due_user_due_ord_idx`、`cad_exp_user_due_ord_idx`、`cad_unatt_user_due_ord_idx`、`cad_abn_user_due_ord_idx`、`cad_nouser_user_due_idx`、`cad_nogroup_user_due_idx`。
+- `cloud.0062_dashboard_snapshot_user_risk_due_indexes` 已记录。
 
 ## 真实页面复查
 
 已用真实浏览器打开：
 
 - `http://127.0.0.1:5666/admin/cloud-assets`
-- `http://127.0.0.1:5666/admin/tasks/plans`
 
 结果：
 
-- 代理列表标题：`代理列表 - Vben Admin Antd`，逐个点击 11 个风险标签，均触发对应 `risk_status` 请求，响应 `200`，页面分页总数与 API total 一致，控制台 `0 error / 0 warning`。
-- 代理列表全标签页面结果：运行中 `549988`、即将到期 `101250`、已过期 `101752`、未附加固定IP `100001`、异常/待确认 `100000`、云账号异常 `1145001`、关机计划关闭 `100384`、未绑定用户 `100001`、未绑定群组 `100003`、续费关闭 `104548`、全部 `2489996`。
-- 计划页标题：`计划 - Vben Admin Antd`，关机计划、删除计划、IP 删除计划、IP 删除历史、显示列均可见，控制台 `0 error / 0 warning`。
-- 计划页 API 分页：关机计划 `1879990`、服务器删除计划 `2`、服务器删除历史 `20010`、IP 删除计划 `500000`、IP 删除历史 `520010`；各表第一页加载数量与分页元数据一致。
-
-## 机器人
-
-已通过机器人聚焦测试：
-
-- `RetainedIpRenewalUiTestCase` 共 `50` 个测试通过。
-- 覆盖多任务高并发：钱包直付创建、订单补付创建、续费后巡检通知并发执行，确认 chat/order/port 隔离。
-- 覆盖资产详情、订单详情、续费、换 IP、重装、修改配置、返回链和 callback 64 字节限制。
+- 页面标题：`代理列表 - Vben Admin Antd`。
+- 控制台 `0 error / 0 warning`。
+- 真实点击并等待页面分页 total 变更：
+  - 关机计划关闭：API/page total `100384`。
+  - 未绑定群组：API/page total `100003`。
+  - 未附加固定IP：API/page total `100001`。
+  - 全部：API/page total `2489996`。
 
 ## 验证
 
@@ -76,9 +71,9 @@
 
 ```bash
 UV_CACHE_DIR=/private/tmp/uv-cache-shop uv run python manage.py check
-UV_CACHE_DIR=/private/tmp/uv-cache-shop uv run python -m py_compile core/dashboard_api.py cloud/api_asset_snapshots.py bot/tests.py cloud/tests.py
-UV_CACHE_DIR=/private/tmp/uv-cache-shop DJANGO_TEST_SQLITE=1 uv run python manage.py test bot.tests.RetainedIpRenewalUiTestCase.test_cloud_background_tasks_keep_high_concurrency_isolated bot.tests.RetainedIpRenewalUiTestCase --settings=shop.settings --verbosity=1
-UV_CACHE_DIR=/private/tmp/uv-cache-shop DJANGO_TEST_SQLITE=1 uv run python manage.py test bot.tests.DashboardSessionExpiryTestCase.test_bearer_dashboard_request_does_not_create_cookie_session cloud.tests.CloudServerServicesTestCase.test_cloud_assets_grouped_duplicate_groups_do_not_repeat_across_pages cloud.tests.CloudServerServicesTestCase.test_cloud_assets_grouped_duplicate_groups_reverse_tail_keeps_last_page cloud.tests.CloudServerServicesTestCase.test_cloud_assets_grouped_total_counts_distinct_groups_only cloud.tests.CloudServerServicesTestCase.test_cloud_assets_paginated_uses_true_database_pages --settings=shop.settings --verbosity=1
+UV_CACHE_DIR=/private/tmp/uv-cache-shop uv run python -m py_compile cloud/api_asset_snapshots.py cloud/models.py cloud/tests.py cloud/migrations/0062_dashboard_snapshot_user_risk_due_indexes.py
+UV_CACHE_DIR=/private/tmp/uv-cache-shop uv run python manage.py makemigrations --check --dry-run
+UV_CACHE_DIR=/private/tmp/uv-cache-shop DJANGO_TEST_SQLITE=1 uv run python manage.py test cloud.tests.CloudServerServicesTestCase.test_cloud_assets_forward_row_paging_allows_medium_unique_tail_pages cloud.tests.CloudServerServicesTestCase.test_cloud_assets_grouped_duplicate_groups_reverse_tail_keeps_last_page cloud.tests.CloudServerServicesTestCase.test_cloud_assets_grouped_duplicate_groups_do_not_repeat_across_pages cloud.tests.CloudServerServicesTestCase.test_cloud_assets_grouped_total_counts_distinct_groups_only cloud.tests.CloudServerServicesTestCase.test_cloud_assets_paginated_uses_true_database_pages --settings=shop.settings --verbosity=1
 git diff --check
 ```
 
@@ -96,5 +91,5 @@ git diff --check
 
 ## 下一步
 
-- 继续优化默认用户分区部分标签末页仍在 `4s-6.5s` 的场景，目标是在不丢数据的前提下降到更稳定的 2 秒内。
-- 继续推进生命周期任务表投影路线，降低计划页冷态 count 成本。
+- 继续巡检生命周期计划页冷态 count 和任务表投影路线。
+- 继续抽样代理列表跳页/翻页与 DB 对账，重点防止新增索引后查询计划变化导致其他标签回退。

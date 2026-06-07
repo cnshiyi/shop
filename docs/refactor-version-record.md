@@ -13573,3 +13573,123 @@ git diff --check
 - 本轮未恢复废弃 runtime app、订单侧到期字段、旧计划快照表、旧退款逻辑或旧退款函数名。
 - `core.dashboard_api` 命中是当前后台 API 公共工具模块；`dashboard_snapshots` 命中是当前刷新 helper 命名，不是旧计划快照表。
 - 本轮使用临时后台 session 做真实页面巡检，结束前删除；未打印 token、session、TOTP、支付密钥、云厂商密钥或完整代理链接。
+## 2026-06-08 05:43 用户分区风险标签末页性能优化
+
+### 背景
+
+继续执行当前会话自动巡检。上一轮已经修复 `telegram_group` 分区重复分组末页空页问题，但记录中仍有默认 `group_by=user` 部分风险标签末页 `4s-6.5s` 的性能风险。本轮聚焦这个慢点，要求不丢数据、不串页，并继续真实打开前端页面验证。
+
+### 定位
+
+真实 MySQL 直接 helper profiling：
+
+| 标签 | 分组数 | 末页 | 优化前耗时 |
+| --- | ---: | ---: | ---: |
+| due_soon | 101250 | 5063 | 6.41s |
+| expired | 101752 | 5088 | 4.09s |
+| unattached_ip | 100001 | 5001 | 4.11s |
+| abnormal | 100000 | 5000 | 4.24s |
+| shutdown_disabled | 100384 | 5020 | 1.96s-2.16s |
+| unbound_user | 100001 | 5001 | 4.04s |
+| unbound_group | 100003 | 5001 | 4.23s |
+
+拆分 `_dashboard_snapshot_group_keys_from_reverse_tail()` 后确认慢点在“反向候选行”SQL。例如 `due_soon` 只取 30 行仍接近 4 秒；候选 key 回查和 Python 排序几乎不耗时。
+
+### 修复
+
+- `cloud/models.py`
+  - 为用户分区补 6 个风险标签到期排序组合索引：
+    - `cad_due_user_due_ord_idx`
+    - `cad_exp_user_due_ord_idx`
+    - `cad_unatt_user_due_ord_idx`
+    - `cad_abn_user_due_ord_idx`
+    - `cad_nouser_user_due_idx`
+    - `cad_nogroup_user_due_idx`
+  - 没有继续给 `shutdown_disabled` 和 `auto_renew_off` 堆索引，因为当前 MySQL 已接近 64 索引上限；`auto_renew_off` 已经足够快，`shutdown_disabled` 改用查询策略优化。
+- `cloud/migrations/0062_dashboard_snapshot_user_risk_due_indexes.py`
+  - 新增幂等迁移，使用 `SeparateDatabaseAndState + RunPython`。
+  - 迁移会跳过已存在索引，解决本地大表建索引时连接超时后“索引已建、迁移未记录”的半完成状态。
+  - 本地已执行：
+
+```bash
+MYSQL_READ_TIMEOUT=600 MYSQL_WRITE_TIMEOUT=600 UV_CACHE_DIR=/private/tmp/uv-cache-shop uv run python manage.py migrate cloud 0062
+```
+
+- `cloud/api_asset_snapshots.py`
+  - 新增 `_dashboard_snapshot_can_use_forward_row_paging()`。
+  - 对无重复分组且 `start <= 150000` 的中等尾页允许正向有界扫描，避免 `shutdown_disabled` 这类没有专用索引的标签走慢反向排序。
+  - 有重复分组仍不放宽，避免 `unbound_group` 被正向大窗口拖慢或串页。
+- `cloud/tests.py`
+  - 新增 `test_cloud_assets_forward_row_paging_allows_medium_unique_tail_pages`，锁定策略边界。
+
+### 实库结果
+
+直接 helper 压测，真实 MySQL：
+
+| 标签 | 末页加载 | 优化后耗时 |
+| --- | ---: | ---: |
+| due_soon | 10 | 0.123s-0.198s |
+| expired | 12 | 0.119s |
+| unattached_ip | 1 | 0.162s |
+| abnormal | 20 | 0.180s |
+| shutdown_disabled | 4 | 0.344s |
+| unbound_user | 1 | 0.159s |
+| unbound_group | 3 | 0.162s-0.167s |
+| auto_renew_off | 8 | 0.181s-0.188s |
+| all | 16 | 0.271s-0.379s |
+| account_disabled | 1 | 0.168s-0.174s |
+
+真实 HTTP 用户分区末页对账通过：
+
+| 标签 | total | 末页 | 加载 | 耗时 |
+| --- | ---: | ---: | ---: | ---: |
+| due_soon | 101250 | 5063 | 10 | 1.570s |
+| expired | 101752 | 5088 | 12 | 1.261s |
+| unattached_ip | 100001 | 5001 | 1 | 0.957s |
+| abnormal | 100000 | 5000 | 20 | 0.926s |
+| shutdown_disabled | 100384 | 5020 | 4 | 1.421s |
+| unbound_user | 100001 | 5001 | 1 | 0.903s |
+| unbound_group | 100003 | 5001 | 3 | 0.906s |
+| auto_renew_off | 104548 | 5228 | 8 | 1.221s |
+| all | 2489996 | 124500 | 16 | 1.253s |
+| account_disabled | 1145001 | 57251 | 1 | 0.704s |
+
+DB 状态确认：
+
+- 6 个目标索引实际存在。
+- `cloud.0062_dashboard_snapshot_user_risk_due_indexes` 已记录。
+- 没有残留本轮放弃的 `cad_shut_user_due_ord_idx` 或 `cad_renewoff_user_due_idx`。
+
+### 真实页面
+
+使用真实浏览器打开：
+
+- `http://127.0.0.1:5666/admin/cloud-assets`
+
+结果：
+
+| 标签 | API total | 页面 total | 控制台 |
+| --- | ---: | ---: | --- |
+| 关机计划关闭 | 100384 | 100384 | 0 error / 0 warning |
+| 未绑定群组 | 100003 | 100003 | 0 error / 0 warning |
+| 未附加固定IP | 100001 | 100001 | 0 error / 0 warning |
+| 全部 | 2489996 | 2489996 | 0 error / 0 warning |
+
+### 验证
+
+已通过：
+
+```bash
+UV_CACHE_DIR=/private/tmp/uv-cache-shop uv run python manage.py check
+UV_CACHE_DIR=/private/tmp/uv-cache-shop uv run python -m py_compile cloud/api_asset_snapshots.py cloud/models.py cloud/tests.py cloud/migrations/0062_dashboard_snapshot_user_risk_due_indexes.py
+UV_CACHE_DIR=/private/tmp/uv-cache-shop uv run python manage.py makemigrations --check --dry-run
+UV_CACHE_DIR=/private/tmp/uv-cache-shop DJANGO_TEST_SQLITE=1 uv run python manage.py test cloud.tests.CloudServerServicesTestCase.test_cloud_assets_forward_row_paging_allows_medium_unique_tail_pages cloud.tests.CloudServerServicesTestCase.test_cloud_assets_grouped_duplicate_groups_reverse_tail_keeps_last_page cloud.tests.CloudServerServicesTestCase.test_cloud_assets_grouped_duplicate_groups_do_not_repeat_across_pages cloud.tests.CloudServerServicesTestCase.test_cloud_assets_grouped_total_counts_distinct_groups_only cloud.tests.CloudServerServicesTestCase.test_cloud_assets_paginated_uses_true_database_pages --settings=shop.settings --verbosity=1
+git diff --check
+```
+
+### 红线
+
+- 本轮未执行真实云资源创建、关机、删除服务器、释放 IP、换 IP、真实支付、链上广播、生产发布或删除业务数据。
+- 本轮未恢复废弃 runtime app、订单侧到期字段、旧计划快照表、旧退款逻辑或旧退款函数名。
+- `core.dashboard_api` 命中是当前后台 API 公共工具模块；`dashboard_snapshots` 命中是当前刷新 helper 命名，不是旧计划快照表。
+- 本轮使用临时后台 session 做真实页面巡检，结束前删除；未打印 token、session、TOTP、支付密钥、云厂商密钥或完整代理链接。
