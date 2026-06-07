@@ -4,82 +4,50 @@
 
 ## 最近一轮
 
-- 时间：2026-06-08 03:48 CST
-- 状态：完成一轮代理列表全标签真实前端巡检、数据库分组口径对账和聚焦测试修复。
-- 本轮范围：`/admin/cloud-assets` 代理列表、11 个风险标签、未附加固定 IP 第 2 页和末页、快照查询层分组总数、代理列表风险筛选测试。
+- 时间：2026-06-08 03:58 CST
+- 状态：完成一轮机器人多任务高并发、callback 返回链、后台真实页面和红线巡检。
+- 本轮范围：`bot.tests` 机器人并发与返回链聚焦测试、`/admin/tasks/plans`、`/admin/cloud-assets`、`/admin/logs/operations`、`/admin/telegram-accounts/accounts`、基础检查、编译检查、红线扫描。
+
+## 机器人专项
+
+已覆盖的机器人功能链路：
+
+- 多用户并发监听推送隔离。
+- 资产详情、订单详情、代理详情短回调。
+- 续费、钱包余额续费、TRX/USDT 续费支付按钮。
+- 换 IP、地区提交、修改配置。
+- 重装迁移/重建确认、取消、提交后返回链。
+- 管理员查询入口、修改到期入口、余额明细分页。
+- Telegram `callback_data` 64 字节限制和极端嵌套返回链压缩。
+
+聚焦测试结果：
+
+```bash
+UV_CACHE_DIR=/private/tmp/uv-cache-shop DJANGO_TEST_SQLITE=1 uv run python manage.py test bot.tests.TelegramListenerPushTestCase.test_notice_copy_wrapper_keeps_concurrent_user_sends_isolated bot.tests.RetainedIpRenewalUiTestCase.test_cloud_detail_callbacks_keep_nested_back_path bot.tests.RetainedIpRenewalUiTestCase.test_cloud_server_detail_actions_keep_back_path bot.tests.RetainedIpRenewalUiTestCase.test_cloud_server_detail_actions_from_long_asset_detail_stay_under_callback_limit bot.tests.RetainedIpRenewalUiTestCase.test_cloud_server_detail_back_button_from_extreme_nested_detail_stays_under_limit bot.tests.RetainedIpRenewalUiTestCase.test_cloud_server_detail_back_button_falls_back_to_cloud_list_when_source_is_too_long bot.tests.RetainedIpRenewalUiTestCase.test_detail_back_buttons_fall_back_when_source_is_too_long bot.tests.RetainedIpRenewalUiTestCase.test_asset_detail_direct_action_buttons_compact_back_callback bot.tests.RetainedIpRenewalUiTestCase.test_reinstall_cancel_buttons_keep_back_path bot.tests.RetainedIpRenewalUiTestCase.test_reinstall_submitted_buttons_keep_back_path bot.tests.RetainedIpRenewalUiTestCase.test_reinstall_confirm_handlers_reuse_saved_back_path_after_submit bot.tests.RetainedIpRenewalUiTestCase.test_asset_renewal_plan_keyboard_keeps_back_path bot.tests.RetainedIpRenewalUiTestCase.test_retained_ip_renewal_plan_keyboard_keeps_back_path bot.tests.RetainedIpRenewalUiTestCase.test_second_level_cloud_actions_with_large_ids_stay_under_callback_limit bot.tests.RetainedIpRenewalUiTestCase.test_extreme_nested_cloud_callbacks_stay_under_telegram_limit bot.tests.RetainedIpRenewalUiTestCase.test_cloud_renew_payment_keyboard_keeps_back_path bot.tests.RetainedIpRenewalUiTestCase.test_cloud_renew_payment_from_asset_detail_returns_to_asset_detail bot.tests.RetainedIpRenewalUiTestCase.test_cloud_renew_payment_from_long_asset_detail_stays_under_callback_limit bot.tests.RetainedIpRenewalUiTestCase.test_cloud_renewal_result_branches_keep_back_path bot.tests.RetainedIpRenewalUiTestCase.test_cloud_change_ip_keyboards_keep_back_path bot.tests.RetainedIpRenewalUiTestCase.test_cloud_change_ip_from_asset_detail_returns_to_asset_detail bot.tests.RetainedIpRenewalUiTestCase.test_asset_change_ip_action_keeps_back_path_when_rendering_regions bot.tests.RetainedIpRenewalUiTestCase.test_cloud_change_ip_region_submission_keeps_back_path bot.tests.RetainedIpRenewalUiTestCase.test_asset_detail_handler_keeps_current_callback_parsing bot.tests.RetainedIpRenewalUiTestCase.test_cloud_ip_query_actions_return_to_query_menu bot.tests.RetainedIpRenewalUiTestCase.test_cloud_auto_renew_callbacks_keep_nested_back_under_limit bot.tests.RetainedIpRenewalUiTestCase.test_cloud_upgrade_payment_keeps_back_path bot.tests.RetainedIpRenewalUiTestCase.test_cloud_action_handlers_compact_nested_back_callback_before_reuse bot.tests.BotOrderAndBalanceFilterTestCase.test_balance_detail_filters_and_pagination_callbacks_keep_filter bot.tests.BotOrderAndBalanceFilterTestCase.test_paid_cloud_order_prepare_submits_default_port_directly bot.tests.BotOrderAndBalanceFilterTestCase.test_balance_pay_existing_cloud_order_auto_submits_default_port bot.tests.BotOrderAndBalanceFilterTestCase.test_admin_query_keyboard_includes_reinstall_and_expiry_actions bot.tests.BotOrderAndBalanceFilterTestCase.test_admin_start_handler_keeps_query_menu_back_path --settings=shop.settings --verbosity=1
+```
+
+结果：`Ran 33 tests`，全部通过。SQLite `db_comment` 警告仍是测试数据库能力差异，不是业务失败。
 
 ## 真实页面
 
-使用真实浏览器打开：
+本轮创建一次临时后台 session，仅用于浏览器真实页面巡检；结束时已删除该 session 和临时文件。
 
-- `http://127.0.0.1:5666/admin/cloud-assets`
+真实 Chrome 打开结果：
 
-页面确认：
+| 页面 | URL | 标题 | 结果 | 控制台 |
+| --- | --- | --- | --- | --- |
+| 生命周期计划页 | `http://127.0.0.1:5666/admin/tasks/plans` | `计划 - Vben Admin Antd` | 已渲染 | `0 error / 0 warning` |
+| 代理列表页 | `http://127.0.0.1:5666/admin/cloud-assets` | `代理列表 - Vben Admin Antd` | 已渲染 | `0 error / 0 warning` |
+| 机器人操作日志 | `http://127.0.0.1:5666/admin/logs/operations` | `操作日志 - Vben Admin Antd` | 已渲染 | `0 error / 0 warning` |
+| Telegram 账号 | `http://127.0.0.1:5666/admin/telegram-accounts/accounts` | `账号列表 - Vben Admin Antd` | 已渲染 | `0 error / 0 warning` |
 
-- 页面标题为 `代理列表 - Vben Admin Antd`。
-- 首屏真实渲染代理列表，显示 `全部 (2500003)`。
-- 当前为 IP 视图，显示列为用户、分组、IP/价格、到期/剩余、编辑。
-- 页面控制台 `0 error / 0 warning`。
+计划页滚动到底部后确认五个区域均存在：
 
-全标签真实点击结果：
-
-| 标签 | 分组总数 | 首屏 | 耗时 |
-| --- | ---: | --- | ---: |
-| 全部 | 2489996 | 20 组 / 20 个编辑按钮 | 已加载页面 |
-| 运行中 | 549988 | 20 组 / 20 个编辑按钮 | 约 6.6s |
-| 即将到期 | 101250 | 20 组 / 20 个编辑按钮 | 约 6.5s |
-| 已过期 | 101752 | 20 组 / 20 个编辑按钮 | 约 6.5s |
-| 未附加固定IP | 100001 | 20 组 / 20 个编辑按钮 | 约 6.5s |
-| 异常/待确认 | 100000 | 20 组 / 20 个编辑按钮 | 约 6.6s |
-| 云账号异常 | 1145001 | 20 组 / 20 个编辑按钮 | 约 6.4s |
-| 关机计划关闭 | 100384 | 20 组 / 20 个编辑按钮 | 约 6.6s |
-| 未绑定用户 | 100001 | 20 组 / 20 个编辑按钮 | 约 6.9s |
-| 未绑定群组 | 100003 | 20 组 / 30 个编辑按钮 | 约 6.7s |
-| 续费关闭 | 104548 | 20 组 / 30 个编辑按钮 | 约 6.5s |
-
-未附加固定 IP 翻页：
-
-- 第 2 页：显示 `共 100001 个用户/分组`、`已展开 20 / 20 组`，耗时约 `6.4s`。
-- 第 5001 页：显示 `共 100001 个用户/分组`、`已展开 1 / 1 组`，耗时约 `7.3s`。
-
-说明：
-
-- 一次过早点击标签的脚本巡检得到 `0` 分组；复查代码确认标签切换会重置页码，等待首屏非 0 后重跑未复现。该轮作废，不作为业务失败。
-
-## 数据对账
-
-使用后端同一套 `/api/admin/cloud-assets/` 入口和 `cloud.api_asset_snapshots` 查询 helper 对账。
-
-风险资产数：
-
-- `all=2500003`
-- `normal=549988`
-- `due_soon=101250`
-- `expired=101752`
-- `unattached_ip=100001`
-- `abnormal=100000`
-- `account_disabled=1145002`
-- `shutdown_disabled=100384`
-- `unbound_user=100001`
-- `unbound_group=100013`
-- `auto_renew_off=104558`
-
-11 个标签第 1 页 API `total` 均与数据库分组总数一致。
-
-未附加固定 IP 分页对账：
-
-- 第 1 页：`20` 组，唯一 key，无跨页重叠。
-- 第 2 页：`20` 组，唯一 key，无跨页重叠。
-- 第 5001 页：`1` 组，唯一 key，无跨页重叠。
-
-## 修复
-
-修复测试数据口径：
-
-- `cloud/tests.py`
-  - 给 3 个代理列表风险筛选测试补齐有效 AWS 云账号和 `account_label`。
-  - 目的：测试 `due_soon`、`expired`、`unattached_ip` 标签本身，而不是被当前规则归入“云账号异常”。
-  - 未修改运行时代码。
+- 关机计划
+- 删除计划
+- 服务器删除历史
+- IP 删除计划
+- IP 删除历史
 
 ## 验证
 
@@ -87,24 +55,33 @@
 
 ```bash
 UV_CACHE_DIR=/private/tmp/uv-cache-shop uv run python manage.py check
-UV_CACHE_DIR=/private/tmp/uv-cache-shop uv run python -m py_compile cloud/tests.py
-UV_CACHE_DIR=/private/tmp/uv-cache-shop DJANGO_TEST_SQLITE=1 uv run python manage.py test cloud.tests.CloudServerServicesTestCase.test_cloud_assets_grouped_paginated_uses_twenty_user_groups_per_page cloud.tests.CloudServerServicesTestCase.test_cloud_assets_grouped_total_counts_distinct_groups_only cloud.tests.CloudServerServicesTestCase.test_cloud_assets_grouped_paginated_orders_null_due_groups_last cloud.tests.CloudServerServicesTestCase.test_cloud_assets_list_filters_by_risk_and_searches_asset_identifiers cloud.tests.CloudServerServicesTestCase.test_cloud_asset_expired_filter_excludes_unattached_ip_assets cloud.tests.CloudServerServicesTestCase.test_cloud_asset_unattached_filter_uses_raw_provider_status cloud.tests.CloudServerServicesTestCase.test_cloud_assets_paginated_uses_true_database_pages --settings=shop.settings --verbosity=1
-git diff --check
+UV_CACHE_DIR=/private/tmp/uv-cache-shop uv run python -m py_compile bot/tests.py bot/handlers.py bot/keyboards.py bot/telegram_listener.py
 ```
 
-说明：
+红线扫描：
 
-- SQLite `db_comment` 警告仍是已知数据库能力差异。
-- 一次聚焦测试命令包含不存在的测试名，纠正后重跑通过；该失败不是业务断言失败。
+```bash
+rg -n "service_expires_at|CloudLifecyclePlanSnapshot|legacy_refund|old_refund|from accounts|from finance|from mall|from monitoring|from dashboard_api|from biz|import accounts|import finance|import mall|import monitoring|import dashboard_api|import biz" shop core bot orders cloud -g '*.py'
+```
+
+扫描结果：
+
+- `service_expires_at` 只命中历史 migrations。
+- 未命中运行时代码中的旧计划快照、旧退款函数名或废弃 runtime app 导入。
+
+## 清理
+
+- 已删除临时后台 session：`deleted=1`。
+- 已删除本轮 `.playwright-cli` 临时产物。
+- 本轮未留下新的浏览器截图、临时脚本或有效后台 session。
 
 ## 红线
 
 - 本轮未执行真实云资源创建、关机、删除服务器、释放 IP、换 IP、真实支付、链上广播、生产发布或删除业务数据。
 - 本轮未恢复废弃 runtime app、订单侧到期字段、旧计划快照、旧退款逻辑、旧退款函数名或旧兼容入口。
-- 红线扫描命中仅在历史迁移文件中出现 `service_expires_at`。
-- 本轮创建过临时后台 session 用于真实页面巡检；一次 CLI 回显后已立即作废旧 session，重新创建的临时 session 也已在结束时删除。
+- 本轮未打印 Telegram token、Telegram session、TOTP、支付密钥、云厂商密钥、完整代理链接、代理 secret 或登录密码。
 
 ## 下一步
 
-- 继续巡检机器人 callback 返回链，重点覆盖资产详情、续费、换 IP、重装迁移/重建、修改配置的多任务高并发。
-- 继续关注代理列表全标签耗时，目前多数标签约 `6.4s-6.9s`，仍可作为下一轮性能优化候选。
+- 继续循环巡检生命周期创建/关机/删除开关联动，保持不做不可逆真实操作，除非单独形成真机测试报告并脱敏记录资源 ID。
+- 下一轮优先继续看代理列表标签高数据量性能和机器人实际按钮链路的后台可观测性。
