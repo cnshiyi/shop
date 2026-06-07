@@ -11103,3 +11103,49 @@ git -C /Users/a399/Desktop/data/vue-shop-admin diff --check
 
 - 本轮没有触发真实机器人交互，也没有覆盖后台浏览器页面。
 - 下一轮建议回到 50 万到 100 万级数据页面，继续审计任务中心、生命周期计划、通知计划的真实翻页和跳页耗时。
+
+## 2026-06-07 生命周期计划 / 任务中心分页契约专项审计
+
+### 背景
+
+`TODO.md` 已无未完成条目，本轮继续按 `docs/auto-optimization-control.md` 固定巡检清单执行只读专项审计，优先覆盖高风险生命周期链路。原计划执行任务中心 / 生命周期计划的真实页面翻页、跳页与数据库对账，但当前自动化沙箱禁止访问本地 `127.0.0.1` 端口和本地 MySQL，因此本轮改为验证当前代码的分页契约和任务中心生命周期聚合逻辑，避免伪造真实页面结论。
+
+### 审计结论
+
+- 复查 `bot/api.py` 的 `lifecycle_plans`，确认关机计划、删机计划、IP 删除计划和 IP 删除历史仍使用独立 `*_page` / `*_page_size` 参数，返回体继续显式携带各自 `pagination` 元信息。
+- 复查 `cloud/lifecycle_plan_queries.py`，确认 `paged_queryset()` 的深页反向截取策略、`server_lifecycle_plan_page()` 的稳定排序口径，以及 `ip_delete_history_page_sources()` 的日志 / 资产 / 已完成活动项拼接顺序都未回退。
+- 复查 `cloud/task_center.py`，确认生命周期任务中心仍优先展示数据库任务，且最近失败历史、无历史日志的 DB 失败任务、重复计划项去重逻辑继续按现有架构运行。
+- 本轮未发现必须立即补代码的回归，因此不修改业务代码，只更新中文记录。
+
+### 受限项
+
+- 当前会话访问 `127.0.0.1:5666`、`127.0.0.1:8000` 会返回 `EPERM`，无法实际打开前端页面做浏览器点击验证。
+- 当前会话访问本地 MySQL `127.0.0.1` 会返回 `Operation not permitted`，无法用真实 50 万到 100 万级数据执行数据库对账和深分页耗时采样。
+- 因此本轮只报告 SQLite 聚焦测试和静态复查结论，不宣称已经完成真实页面与真实数据库验证。
+
+### 验证
+
+本地已通过：
+
+```bash
+UV_CACHE_DIR=/private/tmp/uv-cache-shop DJANGO_TEST_SQLITE=1 uv run python manage.py test cloud.tests.CloudServerServicesTestCase.test_lifecycle_plans_server_delete_pagination_contract cloud.tests.CloudServerServicesTestCase.test_lifecycle_plans_ip_delete_history_pagination_contract cloud.tests.CloudServerServicesTestCase.test_lifecycle_plans_counts_all_ip_delete_history_beyond_loaded_limit cloud.tests.CloudServerServicesTestCase.test_lifecycle_plans_split_shutdown_before_server_delete --settings=shop.settings --verbosity=1
+UV_CACHE_DIR=/private/tmp/uv-cache-shop DJANGO_TEST_SQLITE=1 uv run python manage.py test cloud.tests_task_center.CloudTaskCenterApiTestCase.test_lifecycle_section_counts_recent_failed_history_as_failed cloud.tests_task_center.CloudTaskCenterApiTestCase.test_lifecycle_section_counts_failed_db_task_without_history_log cloud.tests_task_center.CloudTaskCenterApiTestCase.test_lifecycle_section_prefers_db_task_over_duplicate_plan_item --settings=shop.settings --verbosity=1
+UV_CACHE_DIR=/private/tmp/uv-cache-shop uv run python manage.py check
+UV_CACHE_DIR=/private/tmp/uv-cache-shop uv run python -m py_compile bot/api.py cloud/lifecycle_plan_queries.py cloud/task_center.py
+git diff --check
+git -C /Users/a399/Desktop/data/vue-shop-admin diff --check
+```
+
+结果：4 个生命周期分页聚焦测试、3 个任务中心生命周期聚焦测试、Django 系统检查、编译检查和前后端空白检查均通过。SQLite 输出的 `db_comment` 警告为已知数据库能力差异。
+
+### 红线
+
+- 本轮未执行真实云资源创建、删除、关机、释放 IP、换 IP、真实支付、链上广播、删除业务数据、删除测试库或生产发布。
+- 本轮未打印密钥、私钥、Telegram session、TOTP、支付密钥或云厂商密钥。
+- 本轮未恢复废弃 runtime app、订单侧到期字段、旧计划快照、旧退款入口、旧退款函数名或旧兼容壳。
+
+### 剩余风险
+
+- 本轮无法完成真实浏览器翻页 / 跳页和真实 MySQL 数据库对账，50 万到 100 万级分页耗时仍待可访问本地端口和数据库的环境验证。
+- 当前后端工作区仍有未提交业务补丁：`cloud/api_asset_snapshots.py`、`cloud/management/commands/refresh_cloud_asset_dashboard_snapshots.py`、`cloud/tests.py`；本轮未介入这些变更。
+- 下一轮应在具备本地页面与数据库访问能力的环境中继续覆盖任务中心、生命周期计划、通知计划的真实点击和数据库精确对账。
