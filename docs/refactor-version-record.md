@@ -11385,6 +11385,7 @@ UV_CACHE_DIR=/private/tmp/uv-cache-shop uv run python manage.py check
 - 已追加 `docs/real-machine-test-report.md`，资源 ID 和公网 IP 脱敏。
 - 未执行真实链上支付、链上广播、生产发布、删除业务数据或删除测试库。
 - 未恢复废弃 runtime app、订单侧到期字段、旧计划快照、旧退款逻辑、旧退款函数名或旧兼容入口。
+
 ## 2026-06-07 21:13 生命周期计划页补齐全局总开关展示态
 
 ### 背景
@@ -11407,6 +11408,8 @@ UV_CACHE_DIR=/private/tmp/uv-cache-shop uv run python manage.py check
 - `cloud/tests.py`：
   - 原 `test_lifecycle_plans_use_stage_specific_asset_switches` 显式打开三个总开关，确保它只验证资产单项开关。
   - 新增 `test_lifecycle_plans_show_global_stage_switches`，覆盖三个总开关分别落成阻塞态。
+- `/Users/a399/Desktop/data/vue-shop-admin/apps/web-antd/src/views/dashboard/tasks/plans.vue` 同步使用总开关状态展示阻塞原因，并在总开关关闭时禁用对应单项开关。
+- 修复前端类型问题：计划项的 `execution_status` 允许为 `null`，`executionText()` 已按后端接口真实类型收窄。
 
 ### 验证
 
@@ -11415,12 +11418,18 @@ UV_CACHE_DIR=/private/tmp/uv-cache-shop uv run python manage.py check
 ```bash
 UV_CACHE_DIR=/private/tmp/uv-cache-shop DJANGO_TEST_SQLITE=1 uv run python manage.py test cloud.tests.CloudServerServicesTestCase.test_lifecycle_plans_use_stage_specific_asset_switches cloud.tests.CloudServerServicesTestCase.test_lifecycle_plans_show_global_stage_switches --settings=shop.settings --verbosity=1
 UV_CACHE_DIR=/private/tmp/uv-cache-shop uv run python manage.py check
-UV_CACHE_DIR=/private/tmp/uv-cache-shop uv run python -m py_compile bot/api.py cloud/tests.py
+UV_CACHE_DIR=/private/tmp/uv-cache-shop uv run python -m py_compile bot/api.py cloud/tests.py cloud/lifecycle_execution.py cloud/lifecycle.py
+pnpm --filter @vben/web-antd typecheck
 git diff --check
 git -C /Users/a399/Desktop/data/vue-shop-admin diff --check
 ```
 
-结果：2 个生命周期计划总开关 / 单项开关联动聚焦测试、Django 系统检查、编译检查和前后端空白检查通过。SQLite `db_comment` 警告为已知差异。
+结果：2 个生命周期计划总开关 / 单项开关联动聚焦测试、Django 系统检查、编译检查、前端类型检查和前后端空白检查通过。SQLite `db_comment` 警告为已知差异。
+
+### 页面复测
+
+- 实际打开 `/admin/tasks/plans`，确认计划页、关机服务器 / 删除服务器 / 删除 IP 总开关和显示列开关正常显示。
+- 浏览器控制台检查为 0 error / 0 warning。
 
 ### 红线
 
@@ -11430,5 +11439,4 @@ git -C /Users/a399/Desktop/data/vue-shop-admin diff --check
 
 ### 剩余风险
 
-- 本轮修复的是计划页展示层与执行层的状态一致性，还没有做新的真实浏览器点击验证。
 - 后续应继续覆盖通知计划页面、任务中心页面和生命周期计划页面的真实翻页 / 跳页 / 数据库对账。
