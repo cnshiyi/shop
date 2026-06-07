@@ -12,7 +12,7 @@ from django.views.decorators.csrf import csrf_exempt
 from django.views.decorators.http import require_GET, require_POST, require_http_methods
 
 from cloud.api_assets import _parse_iso_datetime, _resolve_telegram_user, _sync_telegram_username
-from cloud.asset_expiry import order_asset_expiry
+from cloud.asset_expiry import order_asset_expiry, set_order_asset_expiry
 from cloud.lifecycle_schedule import compute_order_lifecycle_fields
 from cloud.lifecycle_state import primary_record_updates_for_order_status
 from cloud.models import CloudAsset, CloudIpLog, CloudServerOrder
@@ -695,7 +695,9 @@ def cloud_order_detail(request, order_id):
                 )
                 asset_updates = {}
                 if asset_expiry_change_requested:
-                    asset_updates['actual_expires_at'] = asset_expires_at
+                    # 后台编辑订单到期时间时，需要同步同订单下全部服务器资产，
+                    # 不能只改“主记录”，否则 order_asset_expiry() 仍可能读到旧值。
+                    set_order_asset_expiry(order, asset_expires_at, update_lifecycle=False)
                 # CloudAsset.user remains manual; explicit actual_expires_at edits write the single asset expiry fact.
                 if 'public_ip' in changed_fields:
                     asset_updates['public_ip'] = order.public_ip

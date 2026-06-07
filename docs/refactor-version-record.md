@@ -11211,3 +11211,47 @@ git -C /Users/a399/Desktop/data/vue-shop-admin diff --check
 
 - 本轮修复代理列表快照投影完整性和真实页面可见性；任务中心、生命周期计划、通知计划仍需要继续做真实页面跳页和数据库对账。
 - 当前数据库没有 `logged_in` 状态的 Telegram 登录账号，机器人真机账号点击测试仍无法完成。
+
+## 2026-06-07 后台订单到期时间同步全部资产修复
+
+### 背景
+
+`TODO.md` 已无未完成条目，本轮按 `docs/auto-optimization-control.md` 固定巡检清单执行“生命周期事实与旧兼容回流”专项审计。初始目标是确认 `CloudAsset.actual_expires_at` 仍是唯一资产到期事实，并检查运行时旧 app、旧计划快照和旧退款入口是否回流。
+
+### 审计结论
+
+- `shop/settings.py` 中 `INSTALLED_APPS` 仍只包含 `core`、`bot`、`orders`、`cloud`，未恢复 `accounts`、`finance`、`mall`、`monitoring`、`dashboard_api`、`biz`。
+- 运行时代码扫描未命中 `service_expires_at`、旧退款入口或旧计划快照表回流；`dashboard_plan_snapshots` 命中为当前后台计划投影刷新逻辑，不属于旧架构残留。
+- 聚焦测试暴露真实回归：后台 `cloud_order_detail` 编辑 `actual_expires_at` 时，仅通过 `_update_order_primary_records()` 更新主记录，无法保证同订单全部服务器资产同步新到期时间。
+- 当订单下存在多个服务器资产时，`order_asset_expiry(order)` 仍可能从排序更靠前的旧资产读到旧值，形成“订单页面已改新到期时间，但资产唯一事实未全部收敛”的状态分裂。
+
+### 修改
+
+- `cloud/api_orders.py` 在后台订单编辑 `actual_expires_at` 时，改为调用 `set_order_asset_expiry(order, asset_expires_at, update_lifecycle=False)`。
+- 这样会统一更新同订单下全部 `CloudAsset.KIND_SERVER` 资产的 `actual_expires_at`，同时保留原有逻辑继续同步 IP、实例名、状态等主记录字段。
+- 生命周期字段 `renew_grace_expires_at`、`suspend_at`、`delete_at`、`ip_recycle_at` 仍按后台编辑后的到期时间更新，未恢复订单侧旧到期事实字段。
+
+### 验证
+
+本地已通过：
+
+```bash
+UV_CACHE_DIR=/private/tmp/uv-cache-shop DJANGO_TEST_SQLITE=1 uv run python manage.py test cloud.tests.CloudServerServicesTestCase.test_dashboard_order_expiry_update_syncs_asset_expiry_and_lifecycle_plan cloud.tests.CloudServerServicesTestCase.test_cloud_asset_detail_does_not_fallback_to_order_asset_expiry cloud.tests.CloudServerServicesTestCase.test_aws_notice_schedule_does_not_override_manual_order_expiry --settings=shop.settings --verbosity=1
+UV_CACHE_DIR=/private/tmp/uv-cache-shop uv run python manage.py check
+UV_CACHE_DIR=/private/tmp/uv-cache-shop uv run python -m py_compile cloud/api_orders.py cloud/asset_expiry.py cloud/api_asset_edit.py cloud/models.py
+git diff --check
+git -C /Users/a399/Desktop/data/vue-shop-admin diff --check
+```
+
+结果：3 个生命周期事实聚焦测试、Django 系统检查、编译检查和前后端空白检查均通过。SQLite 输出的 `db_comment` 警告为已知数据库能力差异。
+
+### 红线
+
+- 本轮未执行真实云资源创建、删除、关机、释放 IP、换 IP、真实支付、链上广播、删除业务数据、删除测试库或生产发布。
+- 本轮未打印密钥、私钥、Telegram session、TOTP、支付密钥或云厂商密钥。
+- 本轮未恢复废弃 runtime app、订单侧到期字段、旧计划快照、旧退款逻辑、旧退款函数名或旧兼容入口。
+
+### 剩余风险
+
+- 当前工作区仍有未提交的任务中心相关改动：`cloud/api_tasks.py`、`cloud/task_center.py`、`cloud/tests_task_center.py`，本轮未介入。
+- 任务中心、生命周期计划、通知计划的 50 万到 100 万级真实页面跳页和数据库精确对账仍待下一轮继续。

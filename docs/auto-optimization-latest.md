@@ -4,50 +4,46 @@
 
 ## 最近一轮
 
-- 时间：2026-06-07 19:32 CST
-- 状态：修复代理列表 150 万资产下快照缺失导致的孤儿资产不可见问题，并完成真实浏览器页面验证。
-- 本轮范围：代理列表快照投影补齐、百万级快照补齐命令安全上限、真实前端首页与最后页跳页、数据库数量和风险统计对账。
+- 时间：2026-06-07 20:05 CST
+- 状态：修复后台云订单编辑到期时间时未同步同订单全部服务器资产，避免 `CloudAsset.actual_expires_at` 事实分裂。
+- 本轮范围：生命周期事实专项巡检、运行时旧入口扫描、后台订单到期时间同步修复、聚焦回归测试。
 
 ## 修复摘要
 
-- 发现真实数据库有 `CloudAsset` 1500000 条，但 `CloudAssetDashboardSnapshot` 只有 500000 条，导致新增的 1000000 条资产不进入代理列表页面。
-- 新增快照缺失分批补齐逻辑：少量缺失在请求内补齐，大量缺失只启动带锁后台补齐，避免页面请求同步跑百万级刷新。
-- `refresh_cloud_asset_dashboard_snapshots` 管理命令改为默认只补齐缺失快照，批次上限固定为 10000，避免 50000 批次触发 MySQL `max_allowed_packet`。
-- 旧快照刷新改为显式 `--include-stale`，默认不再进入百万级旧快照扫描，避免维护命令和列表请求因全表扫描超时。
-- 缺失检测先比较资产表与快照表数量，已对齐时不再执行反关联缺失查询。
+- `TODO.md` 已无未完成条目，本轮按固定巡检清单执行“生命周期事实与旧兼容回流”专项审计。
+- 扫描确认运行时 `INSTALLED_APPS` 仍只包含 `core`、`bot`、`orders`、`cloud`，未恢复 `accounts`、`finance`、`mall`、`monitoring`、`dashboard_api`、`biz`。
+- 运行时代码未发现 `service_expires_at`、旧退款入口或旧计划快照表回流；`dashboard_plan_snapshots` 命中为当前后台计划投影刷新逻辑，不是旧架构残留。
+- 审计过程触发真实回归：后台 `cloud_order_detail` 编辑 `actual_expires_at` 时只通过 `_update_order_primary_records()` 更新主记录，导致同订单其他服务器资产仍保留旧到期时间，`order_asset_expiry(order)` 可继续读到旧值。
+- 已改为在订单后台编辑到期时间时调用 `set_order_asset_expiry(order, asset_expires_at, update_lifecycle=False)`，统一同步同订单全部服务器资产，再保留原有主记录字段同步逻辑处理 IP、名称、状态等非到期字段。
 
-## 数据与实测
+## 数据与结论
 
-- 修复前：资产 1500000，快照 500000，缺失 1000000，页面只显示 `全部 (500000)`。
-- 已执行真实库补齐：资产 1500000，快照 1500000，缺失 0。
-- 修复后页面显示：`全部 (1500000)`、`云账号异常 (1045002)`、可见分组 `1489996`。
-- 数据库对账：可见快照 1489998，云账号异常 1045002，运行中非云账号异常 449988，即将到期 1250，已过期 1752，未附加固定 IP 1。
-- 真实浏览器第 1 页显示 `huangyating6748`、`压测Y用户00000`、`198.19.0.0`、`5.12 USDT`。
-- 真实浏览器跳到最后页第 74500 页，显示 `压测用户Z98729` 到 `压测用户Z99719`，不是第 1 页重复数据。
-- 浏览器控制台：0 error / 0 warning。
+- 本轮不涉及真实云资源、真实支付、链上广播、数据库删除或生产发布。
+- 本轮属于后端生命周期事实修复，不涉及前端代码改动；前端仓库空白检查保持通过。
+- 压测数据规模：本轮未进行 10 万级以上压测，属于单点生命周期回归修复与聚焦测试。
 
 ## 验证
 
 本地已通过：
 
 ```bash
-UV_CACHE_DIR=/private/tmp/uv-cache-shop DJANGO_TEST_SQLITE=1 uv run python manage.py test cloud.tests.CloudServerServicesTestCase.test_cloud_asset_dashboard_snapshot_backfill_materializes_missing_assets cloud.tests.CloudServerServicesTestCase.test_cloud_asset_dashboard_snapshot_backfill_skips_stale_by_default cloud.tests.CloudServerServicesTestCase.test_cloud_assets_list_defers_large_missing_snapshot_backfill cloud.tests.CloudServerServicesTestCase.test_cloud_assets_list_defers_large_stale_snapshot_refresh cloud.tests.CloudServerServicesTestCase.test_cloud_assets_list_all_includes_disabled_or_missing_cloud_account_assets --settings=shop.settings --verbosity=1
-UV_CACHE_DIR=/private/tmp/uv-cache-shop uv run python -m py_compile cloud/api_asset_snapshots.py cloud/management/commands/refresh_cloud_asset_dashboard_snapshots.py cloud/tests.py
+UV_CACHE_DIR=/private/tmp/uv-cache-shop DJANGO_TEST_SQLITE=1 uv run python manage.py test cloud.tests.CloudServerServicesTestCase.test_dashboard_order_expiry_update_syncs_asset_expiry_and_lifecycle_plan cloud.tests.CloudServerServicesTestCase.test_cloud_asset_detail_does_not_fallback_to_order_asset_expiry cloud.tests.CloudServerServicesTestCase.test_aws_notice_schedule_does_not_override_manual_order_expiry --settings=shop.settings --verbosity=1
 UV_CACHE_DIR=/private/tmp/uv-cache-shop uv run python manage.py check
-UV_CACHE_DIR=/private/tmp/uv-cache-shop uv run python manage.py refresh_cloud_asset_dashboard_snapshots --batch-size 50000 --max-batches 2
+UV_CACHE_DIR=/private/tmp/uv-cache-shop uv run python -m py_compile cloud/api_orders.py cloud/asset_expiry.py cloud/api_asset_edit.py cloud/models.py
 git diff --check
 git -C /Users/a399/Desktop/data/vue-shop-admin diff --check
 ```
 
-结果：5 个快照补齐/大数据列表聚焦测试、Django 系统检查、编译检查、管理命令安全返回和前后端空白检查均通过。SQLite 的 `db_comment` 警告仍为已知数据库能力差异。
+结果：3 个生命周期到期事实聚焦测试、Django 系统检查、编译检查和前后端空白检查均通过。SQLite 测试中的 `db_comment` 警告仍为已知数据库能力差异。
 
 ## 红线
 
 - 本轮未执行真实云资源创建、删除、关机、释放 IP、换 IP、真实支付、链上广播、删除业务数据、删除测试库或生产发布。
 - 本轮未打印密钥、私钥、Telegram session、TOTP、支付密钥或云厂商密钥。
-- 本轮未恢复废弃 runtime app、订单侧到期字段、旧计划快照、旧退款入口或旧兼容壳。
+- 本轮未恢复废弃 runtime app、订单侧到期字段、旧计划快照、旧退款逻辑、旧退款函数名或旧兼容入口。
 
 ## 剩余风险
 
-- 本轮修复的是代理列表快照投影完整性和页面可见性；任务中心、生命周期计划、通知计划仍需继续做真实页面跳页和数据库对账。
-- 当前没有 `logged_in` 状态的 Telegram 登录账号，机器人真机账号点击测试仍无法完成，只能继续跑回调与菜单聚焦测试。
+- 当前后端工作区仍有未提交业务改动：`cloud/api_tasks.py`、`cloud/task_center.py`、`cloud/tests_task_center.py`；本轮未介入。
+- 任务中心、生命周期计划、通知计划的 50 万到 100 万级真实翻页和数据库精确对账仍待下一轮继续。
+- 当前没有 `logged_in` 状态的 Telegram 登录账号，机器人真机菜单/回调点击仍无法做真实账号验证。
