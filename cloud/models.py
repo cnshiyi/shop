@@ -316,22 +316,6 @@ class CloudAsset(models.Model):
     def __str__(self):
         return self.asset_name or self.instance_id or self.public_ip or f'asset-{self.pk}'
 
-    @property
-    def server_name(self):
-        return self.asset_name
-
-    @server_name.setter
-    def server_name(self, value):
-        self.asset_name = value
-
-    @property
-    def expires_at(self):
-        return self.actual_expires_at
-
-    @expires_at.setter
-    def expires_at(self, value):
-        self.actual_expires_at = value
-
 
 class CloudAssetDashboardSnapshot(models.Model):
     id = models.BigAutoField('ID', primary_key=True, db_comment='主键ID')

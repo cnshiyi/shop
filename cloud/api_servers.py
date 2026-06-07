@@ -176,7 +176,7 @@ def rebuild_server_preserve_link(request, server_id: int):
 @dashboard_superuser_required
 @require_http_methods(['POST', 'DELETE'])
 def delete_server(request, server_id: int):
-    asset = CloudAsset.objects.select_related('order').filter(id=server_id, kind=CloudAsset.KIND_SERVER, sync_state__compat_server_record=True).first()
+    asset = CloudAsset.objects.select_related('order').filter(id=server_id, kind=CloudAsset.KIND_SERVER).first()
     if not asset:
         return _error('服务器不存在', status=404)
     now = timezone.now()

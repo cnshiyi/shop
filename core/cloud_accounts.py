@@ -24,18 +24,8 @@ def cloud_account_label(account) -> str:
 def cloud_account_label_variants(account) -> list[str]:
     if not account:
         return []
-    provider = str(getattr(account, 'provider', '') or '').strip()
-    provider_aliases = _provider_values(provider)
-    name = str(getattr(account, 'name', '') or '').strip()
-    external_id = str(getattr(account, 'external_account_id', '') or '').strip()
-    db_id = str(getattr(account, 'id', '') or '').strip()
-    ids = [item for item in [external_id, db_id] if item]
-    labels = [cloud_account_label(account)]
-    for provider_value in provider_aliases:
-        for account_id in ids:
-            labels.append(f'{provider_value}+{account_id}+{name}'[:191])
-            labels.append(f'{provider_value}:{account_id}:{name}'[:191])
-    return list(dict.fromkeys(item for item in labels if item))
+    label = cloud_account_label(account)
+    return [label] if label else []
 
 
 def list_cloud_account_labels(is_active: bool | None = None) -> list[str]:
@@ -57,7 +47,7 @@ def get_cloud_account_from_label(label: str, provider: str | None = None):
         return None
     CloudAccountConfig = apps.get_model('core', 'CloudAccountConfig')
     normalized_provider = normalize_cloud_account_provider(provider or '')
-    parts = text.replace(':', '+').split('+')
+    parts = text.split('+')
     label_provider = normalize_cloud_account_provider(parts[0]) if parts else ''
     account_id = parts[1].strip() if len(parts) >= 2 else ''
     queryset = CloudAccountConfig.objects.filter(is_active=True)
@@ -65,16 +55,12 @@ def get_cloud_account_from_label(label: str, provider: str | None = None):
         queryset = queryset.filter(provider=normalized_provider)
     elif label_provider:
         queryset = queryset.filter(provider=label_provider)
-    if account_id:
+    if account_id and '+' in text:
         account = queryset.filter(external_account_id=account_id).first()
         if account:
             return account
-        if account_id.isdigit():
-            account = queryset.filter(id=int(account_id)).first()
-            if account:
-                return account
     for account in queryset.order_by('id'):
-        if text in cloud_account_label_variants(account):
+        if text == cloud_account_label(account):
             return account
     return None
 

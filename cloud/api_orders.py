@@ -544,12 +544,11 @@ def _apply_cloud_order_status(order, new_status):
     order.provision_note = _append_provision_note(order, note)
     order.save()
 
-    asset_updates, server_updates = _primary_record_updates_for_order_status(new_status, order.provision_note)
-    if asset_updates or server_updates:
+    asset_updates = _primary_record_updates_for_order_status(new_status, order.provision_note)
+    if asset_updates:
         _update_order_primary_records(
             order,
             asset_updates=asset_updates,
-            server_updates=server_updates,
             now=now,
         )
 
@@ -695,35 +694,27 @@ def cloud_order_detail(request, order_id):
                     getattr(getattr(order, 'user', None), 'id', None),
                 )
                 asset_updates = {}
-                server_updates = {}
                 if asset_expiry_change_requested:
                     asset_updates['actual_expires_at'] = asset_expires_at
-                    server_updates['expires_at'] = asset_expires_at
                 # CloudAsset.user remains manual; explicit actual_expires_at edits write the single asset expiry fact.
                 if 'public_ip' in changed_fields:
                     asset_updates['public_ip'] = order.public_ip
-                    server_updates['public_ip'] = order.public_ip
                 if 'previous_public_ip' in changed_fields:
                     asset_updates['previous_public_ip'] = order.previous_public_ip
-                    server_updates['previous_public_ip'] = order.previous_public_ip
                 if 'server_name' in changed_fields:
                     asset_updates['asset_name'] = order.server_name
-                    server_updates['server_name'] = order.server_name
                 if 'instance_id' in changed_fields:
                     asset_updates['instance_id'] = order.instance_id
-                    server_updates['instance_id'] = order.instance_id
                 if 'provider_resource_id' in changed_fields:
                     asset_updates['provider_resource_id'] = order.provider_resource_id
-                    server_updates['provider_resource_id'] = order.provider_resource_id
                 for mtproxy_field in ('mtproxy_host', 'mtproxy_link', 'mtproxy_port', 'mtproxy_secret', 'proxy_links'):
                     if mtproxy_field in changed_fields:
                         asset_updates[mtproxy_field] = getattr(order, mtproxy_field)
                 if 'status' in changed_fields:
-                    status_asset_updates, status_server_updates = _primary_record_updates_for_order_status(order.status, order.provision_note)
+                    status_asset_updates = _primary_record_updates_for_order_status(order.status, order.provision_note)
                     asset_updates.update(status_asset_updates)
-                    server_updates.update(status_server_updates)
-                if asset_updates or server_updates:
-                    _update_order_primary_records(order, asset_updates=asset_updates, server_updates=server_updates)
+                if asset_updates:
+                    _update_order_primary_records(order, asset_updates=asset_updates)
     except ValueError as exc:
         return _error(str(exc), status=400)
     order.refresh_from_db()

@@ -91,7 +91,6 @@ from cloud.services import (
     mark_cloud_server_reinit_requested,
     mute_all_user_reminders,
     mute_cloud_order_reminders,
-    mute_cloud_reminders,
     pay_cloud_server_order_with_balance,
     pay_cloud_server_renewal_with_balance,
     prepare_cloud_server_order_instances,
@@ -105,7 +104,6 @@ from cloud.services import (
     set_cloud_server_auto_renew_admin,
     start_cloud_server_from_admin,
     unmute_all_user_reminders,
-    unmute_cloud_reminders,
     update_cloud_item_expiry_for_admin,
 )
 from orders.services import (
@@ -4669,11 +4667,6 @@ def register_handlers(dp: Dispatcher):
         raw_order_id = parts[2] if len(parts) >= 3 else ''
         updated = await mute_cloud_order_reminders(int(raw_order_id), user.id) if str(raw_order_id).isdigit() else None
         if not updated:
-            if len(parts) >= 4 and str(parts[3]).isdigit():
-                legacy = await mute_cloud_reminders(user.id, int(parts[3]))
-                if legacy:
-                    await _safe_callback_answer(callback, '已关闭提醒')
-                    return
             await _safe_callback_answer(callback, '关闭提醒失败', show_alert=True)
             return
         logger.info('CLOUD_NOTICE_MUTE_ORDER user_id=%s order_id=%s order_no=%s callback_data=%s', user.id, updated.id, updated.order_no, callback.data)

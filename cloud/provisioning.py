@@ -450,7 +450,6 @@ def _mark_rebuild_source_pending_deletion(order_id: int, replacement_order_id: i
         _update_order_primary_records(
             source,
             asset_updates={'previous_public_ip': previous_public_ip, 'public_ip': previous_public_ip},
-            server_updates={'previous_public_ip': previous_public_ip, 'public_ip': previous_public_ip},
             now=now,
         )
         record_cloud_ip_log(event_type='renewed', order=source, previous_public_ip=previous_public_ip, public_ip=previous_public_ip, note=f'固定 IP 保留期恢复完成，新实例订单: {replacement.order_no}')
@@ -516,7 +515,7 @@ def _mark_rebuild_source_pending_deletion(order_id: int, replacement_order_id: i
         _fmt_dt(before_dates['migration_due_at']),
         _fmt_dt(after_dates['migration_due_at']),
     )
-    asset, server = _update_order_primary_records(
+    asset, _ = _update_order_primary_records(
         source,
         asset_updates={
             'status': CloudAsset.STATUS_DELETING,
@@ -524,13 +523,6 @@ def _mark_rebuild_source_pending_deletion(order_id: int, replacement_order_id: i
             'public_ip': source_temp_public_ip or None,
             'previous_public_ip': previous_public_ip,
             'mtproxy_host': None,
-            'is_active': False,
-        },
-        server_updates={
-            'status': CloudAsset.STATUS_DELETING,
-            'public_ip': source_temp_public_ip or None,
-            'previous_public_ip': previous_public_ip,
-            'provider_status': '旧机保留期，等待删除',
             'is_active': False,
         },
         now=now,
@@ -1139,7 +1131,6 @@ def _mark_failed(order_id: int, note: str, cleanup_at=None):
     _update_order_primary_records(
         order,
         asset_updates=drop_asset_note_update({'note': note, 'status': CloudAsset.STATUS_UNKNOWN, 'is_active': False}),
-        server_updates=drop_asset_note_update({'note': note, 'status': CloudAsset.STATUS_UNKNOWN, 'is_active': False}),
         now=timezone.now(),
     )
     logger.info('[PROVISION] failed_server_asset_synced order=%s asset_id=%s', order.order_no, getattr(server_asset, 'id', None))

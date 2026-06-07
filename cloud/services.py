@@ -1,4 +1,4 @@
-"""cloud 域服务主入口：当前真实云业务实现已收口到这里，旧 `biz.services.*` 仅保留兼容壳。"""
+"""cloud 域服务主入口：当前真实云业务实现已收口到这里。"""
 
 import json
 import logging
@@ -89,15 +89,6 @@ def scoped_server_match_for_asset(asset: CloudAsset | None, *, include_order: bo
     return scope & identity
 
 
-def _asset_update_from_server_fields(updates: dict | None) -> dict:
-    mapped = drop_asset_note_update(updates)
-    if 'server_name' in mapped:
-        mapped['asset_name'] = mapped.pop('server_name')
-    if 'expires_at' in mapped:
-        mapped['actual_expires_at'] = mapped.pop('expires_at')
-    return mapped
-
-
 def _normalize_cloud_order_quantity(quantity: int) -> int:
     try:
         normalized = int(quantity or 1)
@@ -170,18 +161,12 @@ def _order_primary_asset(order: CloudServerOrder | None):
     return queryset.order_by('-updated_at', '-id').first()
 
 
-def _order_primary_server(order: CloudServerOrder | None):
-    return _order_primary_asset(order)
-
-
-def _update_order_primary_records(order: CloudServerOrder | None, *, asset_updates: dict | None = None, server_updates: dict | None = None, now=None):
+def _update_order_primary_records(order: CloudServerOrder | None, *, asset_updates: dict | None = None, now=None):
     now = now or timezone.now()
     asset = _order_primary_asset(order)
     updates = {}
     if asset_updates:
         updates.update(drop_asset_note_update(asset_updates))
-    if server_updates:
-        updates.update(_asset_update_from_server_fields(server_updates))
     if asset and updates:
         updates.setdefault('updated_at', now)
         CloudAsset.objects.filter(id=asset.id).update(**updates)
@@ -333,7 +318,7 @@ def _sync_order_cloud_runtime_state(order: CloudServerOrder, state: str, public_
     }
     if public_ip and public_ip != '-':
         updates['public_ip'] = public_ip
-    _update_order_primary_records(order, asset_updates=updates, server_updates=updates)
+    _update_order_primary_records(order, asset_updates=updates)
 
 
 AWS_START_WAIT_ATTEMPTS = 10
@@ -1711,7 +1696,6 @@ def _update_cloud_order_expiry(order: CloudServerOrder, expires_at, *, now=None,
     _update_order_primary_records(
         order,
         asset_updates={'actual_expires_at': expires_at, 'updated_at': now},
-        server_updates={'expires_at': expires_at, 'updated_at': now},
         now=now,
     )
     record_cloud_ip_log(
@@ -2533,14 +2517,14 @@ def _build_cloud_ip_log_note(event_type, order_obj, asset_obj, server_obj, curre
     ) or (
         order_asset_expiry(order_obj)
         or getattr(asset_obj, 'actual_expires_at', None)
-        or getattr(server_obj, 'expires_at', None)
+        or getattr(server_obj, 'actual_expires_at', None)
     )
     ip_value = current_ip or previous_ip or '-'
     base_parts = [
         f'IP：{ip_value}',
         f'触发事件：{trigger_label or _cloud_log_trigger_label(order_obj)}',
         f'订单号：{getattr(order_obj, "order_no", None) or "-"}',
-        f'服务器名：{getattr(order_obj, "server_name", None) or getattr(asset_obj, "asset_name", None) or getattr(server_obj, "server_name", None) or "-"}',
+        f'服务器名：{getattr(order_obj, "server_name", None) or getattr(asset_obj, "asset_name", None) or getattr(server_obj, "asset_name", None) or "-"}',
         f'用户：{_cloud_log_user_label(user_obj)}',
         f'执行时间：{_fmt_log_dt(executed_at or timezone.now())}',
         f'{"计划释放时间" if is_unattached_static_ip else "到期时间"}：{_fmt_log_dt(expires_at)}',
@@ -3627,11 +3611,9 @@ def apply_cloud_server_renewal(order_id: int, days: int = 31, run_post_checks: b
             order.save(update_fields=['provision_note', 'updated_at'])
             raise ValueError(recovery_err)
     asset_update = {'actual_expires_at': new_expires_at, 'updated_at': timezone.now()}
-    server_update = {'expires_at': new_expires_at, 'updated_at': timezone.now()}
     if retained_ip:
         asset_update.update({'public_ip': order.public_ip or order.previous_public_ip, 'previous_public_ip': order.public_ip or order.previous_public_ip, 'provider_status': '未附加固定IP-续费保留中', 'is_active': False})
-        server_update.update({'public_ip': order.public_ip or order.previous_public_ip, 'previous_public_ip': order.public_ip or order.previous_public_ip, 'provider_status': '未附加固定IP-续费保留中', 'is_active': False})
-    _update_order_primary_records(order, asset_updates=asset_update, server_updates=server_update)
+    _update_order_primary_records(order, asset_updates=asset_update)
     record_cloud_ip_log(
         event_type=CloudIpLog.EVENT_RENEWED,
         order=order,
@@ -3755,7 +3737,6 @@ def run_cloud_server_renewal_postcheck(order_id: int):
         _update_order_primary_records(
             order,
             asset_updates={'actual_expires_at': asset_expires_at},
-            server_updates={'expires_at': asset_expires_at},
         )
         order.provision_note = append_note(order.provision_note, note)
         order.save(update_fields=['provision_note', 'updated_at'])
@@ -3786,7 +3767,6 @@ def rebind_cloud_server_user(order_id: int, new_user_id: int):
         asset, _ = _update_order_primary_records(
             order,
             asset_updates={'user': new_user},
-            server_updates={'user': new_user},
             now=timezone.now(),
         )
         record_cloud_ip_log(
@@ -4052,7 +4032,6 @@ def run_cloud_server_rebuild_job(new_order_id: int):
         _update_order_primary_records(
             source_order,
             asset_updates=drop_asset_note_update({'note': failure_note}),
-            server_updates=drop_asset_note_update({'note': failure_note}),
         )
 
 
@@ -4282,16 +4261,6 @@ def create_cloud_server_upgrade_order(order_id: int, user_id: int, target_plan_i
 
 
 @sync_to_async
-def mute_cloud_reminders(user_id: int, days: int = 3):
-    user = TelegramUser.objects.filter(id=user_id).first()
-    if not user:
-        return None
-    user.cloud_reminder_muted_until = timezone.now() + timezone.timedelta(days=days)
-    user.save(update_fields=['cloud_reminder_muted_until', 'updated_at'])
-    return user
-
-
-@sync_to_async
 def mute_cloud_order_reminders(order_id: int, user_id: int):
     order = CloudServerOrder.objects.filter(id=order_id, user_id=user_id).first()
     if not order:
@@ -4302,17 +4271,6 @@ def mute_cloud_order_reminders(order_id: int, user_id: int):
     order.ip_recycle_reminder_enabled = False
     order.save(update_fields=['cloud_reminder_enabled', 'suspend_reminder_enabled', 'delete_reminder_enabled', 'ip_recycle_reminder_enabled', 'updated_at'])
     return order
-
-
-@sync_to_async
-def unmute_cloud_reminders(user_id: int):
-    user = TelegramUser.objects.filter(id=user_id).first()
-    if not user:
-        return None
-    user.cloud_reminder_muted_until = None
-    user.save(update_fields=['cloud_reminder_muted_until', 'updated_at'])
-    return user
-
 
 @sync_to_async
 def get_user_reminder_summary(user_id: int):
@@ -4595,7 +4553,6 @@ __all__ = [
     'mark_cloud_server_reinit_requested',
     'mute_all_user_reminders',
     'mute_cloud_order_reminders',
-    'mute_cloud_reminders',
     'pay_cloud_server_order_with_balance',
     'pay_cloud_server_renewal_with_balance',
     'prepare_cloud_server_order_instances',
@@ -4613,5 +4570,4 @@ __all__ = [
     'start_cloud_server_from_admin',
     'sync_cloud_asset_user_binding',
     'unmute_all_user_reminders',
-    'unmute_cloud_reminders',
 ]

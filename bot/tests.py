@@ -25,7 +25,6 @@ from bot.telegram_listener import _build_bark_request, _build_push_payload, _is_
 from cloud import services as cloud_services
 from cloud.asset_expiry import order_asset_expiry
 from cloud.models import CloudAsset, CloudServerOrder, CloudServerPlan
-from cloud.server_records import Server
 from cloud.services import prepare_cloud_server_order_instances, update_cloud_item_expiry_for_admin
 from core.models import CloudAccountConfig, SiteConfig
 from core.texts import BOT_TEXTS
@@ -43,8 +42,6 @@ class ApiPrefixContractTestCase(SimpleTestCase):
             '/api/admin/user/info': 'admin_api:user-info',
             '/api/admin/dashboard/overview/': 'admin_api:overview',
             '/api/admin/cloud-assets/sync-jobs/metrics/': 'admin_api:cloud-assets-sync-jobs-metrics',
-            '/api/admin/task-list/': 'admin_api:task-list-compat',
-            '/api/admin/plan-settings/': 'admin_api:plan-settings-compat',
         }
 
         for path, view_name in expected_routes.items():
@@ -55,6 +52,8 @@ class ApiPrefixContractTestCase(SimpleTestCase):
             '/api/dashboard/dashboard/overview/',
             '/api/dashboard/auth/login',
             '/api/admin/auth/login',
+            '/api/admin/task-list/',
+            '/api/admin/plan-settings/',
             '/api/users/',
         ]
         for path in removed_routes:
@@ -1484,7 +1483,7 @@ class RetainedIpRenewalUiTestCase(SimpleTestCase):
         self.assertIn('创建任务已提交', text)
         self.assertEqual(scheduled, ['_provision_cloud_server_and_notify'])
 
-    def test_legacy_custom_port_flow_is_removed(self):
+    def test_removed_custom_port_flow_stays_removed(self):
         source = inspect.getsource(register_handlers)
         all_bot_texts = '\n'.join(value for value, _ in BOT_TEXTS.values())
 
@@ -1554,7 +1553,7 @@ class RetainedIpRenewalUiTestCase(SimpleTestCase):
         self.assertIn("back_callback = compact_callback_path(parts[4]) if len(parts) > 4 else ''", region_source)
         self.assertIn('cloud_previous_detail_callback(order_id, back_callback)', region_source)
 
-    def test_asset_detail_handler_keeps_legacy_and_short_callback_parsing(self):
+    def test_asset_detail_handler_keeps_long_and_short_callback_parsing(self):
         source = inspect.getsource(register_handlers)
         asset_detail_source = source.split('async def cb_cloud_asset_detail', 1)[1].split("@dp.callback_query(F.data.startswith('cloud:assetaction:'))", 1)[0]
 
@@ -2068,7 +2067,7 @@ class BotOrderAndBalanceFilterTestCase(TestCase):
         self.assertIsNone(asset.mtproxy_link)
         self.assertIsNone(asset.mtproxy_port)
 
-    def test_query_link_save_allows_asset_recorded_legacy_port(self):
+    def test_query_link_save_allows_asset_recorded_custom_port(self):
         asset = CloudAsset.objects.create(
             kind=CloudAsset.KIND_SERVER,
             source=CloudAsset.SOURCE_AWS_SYNC,
@@ -2076,7 +2075,7 @@ class BotOrderAndBalanceFilterTestCase(TestCase):
             provider='aws_lightsail',
             region_code=self.plan.region_code,
             region_name=self.plan.region_name,
-            asset_name='query-link-asset-legacy-port',
+            asset_name='query-link-asset-custom-port',
             public_ip='31.31.32.11',
             mtproxy_port=9528,
             status=CloudAsset.STATUS_RUNNING,
@@ -2109,8 +2108,8 @@ class BotOrderAndBalanceFilterTestCase(TestCase):
         self.assertFalse(order.mtproxy_link)
         self.assertEqual(order.mtproxy_port, 443)
 
-    def test_query_link_save_allows_order_recorded_legacy_port(self):
-        order = self._cloud_order('ORDER-QUERY-LINK-LEGACY-PORT', status='completed', public_ip='31.31.32.13', paid=True)
+    def test_query_link_save_allows_order_recorded_custom_port(self):
+        order = self._cloud_order('ORDER-QUERY-LINK-CUSTOM-PORT', status='completed', public_ip='31.31.32.13', paid=True)
         order.mtproxy_port = 9528
         order.save(update_fields=['mtproxy_port', 'updated_at'])
         link_data = {
@@ -2278,17 +2277,17 @@ class BotAdminExpiryUpdateTestCase(TestCase):
             status=CloudAsset.STATUS_RUNNING,
             actual_expires_at=old_expiry,
         )
-        server = Server.objects.create(
-            source=Server.SOURCE_ORDER,
+        server = CloudAsset.objects.create(kind=CloudAsset.KIND_SERVER,
+            source=CloudAsset.SOURCE_ORDER,
             order=order,
             user=self.user,
             provider=order.provider,
             region_code=order.region_code,
             region_name=order.region_name,
-            server_name='expiry-server',
+            asset_name='expiry-server',
             public_ip='8.8.8.8',
-            status=Server.STATUS_RUNNING,
-            expires_at=old_expiry,
+            status=CloudAsset.STATUS_RUNNING,
+            actual_expires_at=old_expiry,
         )
 
         with patch('cloud.services._refresh_dashboard_plan_snapshots_after_service_change'):
@@ -2301,5 +2300,5 @@ class BotAdminExpiryUpdateTestCase(TestCase):
         server.refresh_from_db()
         self.assertEqual(order_asset_expiry(order), new_expiry)
         self.assertEqual(asset.actual_expires_at, new_expiry)
-        self.assertEqual(server.expires_at, new_expiry)
+        self.assertEqual(server.actual_expires_at, new_expiry)
         self.assertIsNone(order.renew_notice_sent_at)

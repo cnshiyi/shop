@@ -12,7 +12,6 @@ from django.core.management.base import CommandError
 from django.db import migrations
 from django.test import override_settings
 
-from cloud.server_records import Server
 from core.cloud_accounts import cloud_account_label_variants, list_cloud_accounts_by_server_load
 from core.crypto import decrypt_text, encrypt_text
 from core.models import CloudAccountConfig
@@ -147,8 +146,8 @@ class RedisCacheBackoffTestCase(SimpleTestCase):
 
 
 class CryptoDecryptTestCase(SimpleTestCase):
-    def test_plain_legacy_value_still_returns_as_plaintext(self):
-        self.assertEqual(decrypt_text('legacy-plain-value'), 'legacy-plain-value')
+    def test_plain_unencrypted_value_still_returns_as_plaintext(self):
+        self.assertEqual(decrypt_text('plain-config-value'), 'plain-config-value')
 
     def test_invalid_fernet_like_token_does_not_fallback_to_ciphertext(self):
         with patch.dict(os.environ, {'CONFIG_ENCRYPTION_KEY': 'first-key'}, clear=False):
@@ -292,8 +291,8 @@ class CloudAccountSelectionTestCase(TestCase):
             access_key='ak2',
             secret_key='sk2',
         )
-        Server.objects.create(provider='aws_lightsail', account_label='aws_lightsail+111+first', public_ip='10.0.0.1')
-        Server.objects.create(provider='aws_lightsail', account_label='aws_lightsail+111+first', public_ip='10.0.0.2')
+        CloudAsset.objects.create(kind=CloudAsset.KIND_SERVER, provider='aws_lightsail', account_label='aws_lightsail+111+first', public_ip='10.0.0.1')
+        CloudAsset.objects.create(kind=CloudAsset.KIND_SERVER, provider='aws_lightsail', account_label='aws_lightsail+111+first', public_ip='10.0.0.2')
 
         accounts = list_cloud_accounts_by_server_load('aws_lightsail')
 

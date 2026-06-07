@@ -231,8 +231,6 @@ def _mark_deleted_when_missing_in_aliyun(region, existing_instance_ids, stdout, 
     ).order_by('-updated_at', '-id')
     now_iso = timezone.now().isoformat()
     for asset in queryset:
-        if (asset.sync_state or {}).get('compat_server_record') and not asset.order_id:
-            continue
         instance_id = str(asset.instance_id or '').strip()
         public_ip = str(asset.public_ip or '').strip()
         if instance_id and instance_id in existing_instance_ids:

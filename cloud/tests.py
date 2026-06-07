@@ -20,7 +20,6 @@ from bot.api import _asset_delete_plan_item_payload, _shutdown_log_items, _unatt
 from bot.models import TelegramGroupFilter, TelegramUser
 from cloud.bootstrap import _build_mtproxy_script, _extract_tg_links
 from cloud.models import CloudAsset, CloudAssetDashboardSnapshot, CloudAssetSyncJob, CloudAssetSyncJobEvent, CloudAutoRenewPatrolLog, CloudAutoRenewRetryTask, CloudIpLog, CloudLifecyclePlanNote, CloudLifecycleTask, CloudNoticeTask, CloudServerOrder, CloudServerPlan, CloudUserNoticeLog, DailyAddressStat
-from cloud.server_records import Server
 from cloud.lifecycle import _apply_notice_schedule_to_order, _auto_renew_candidate_users, _enqueue_auto_renew_retry, _get_due_orders, _get_migration_due_orders, _get_orphan_asset_delete_due, _get_unattached_static_ip_delete_due, _group_balance_lines_for_orders, _is_cloud_delete_safe_time, _is_cloud_suspend_time, _mark_deleted, _mark_suspended, _next_cloud_action_run_at, _notice_payload_for_order, _notice_plan_text, _process_auto_renew_retry_tasks, _run_auto_renew, _send_logged_cloud_notice, _send_order_notice_batch, auto_renew_patrol_tick, daily_expiry_summary_tick, lifecycle_tick, sync_server_status_tick
 from cloud.lifecycle_schedule import compute_order_lifecycle_fields
 from cloud.asset_expiry import order_asset_expiry
@@ -128,25 +127,25 @@ class CloudServerServicesTestCase(TestCase):
         self.assertIn('secret=***', preview)
 
     # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
-    def test_cloud_account_label_variants_cover_legacy_colon_labels(self):
+    def test_cloud_account_label_variants_return_current_label_only(self):
         account = CloudAccountConfig.objects.create(
             provider=CloudAccountConfig.PROVIDER_AWS,
-            name='legacy-label-account',
+            name='current-label-account',
             external_account_id='123456789012',
-            access_key='AKIALEGACYLABEL1234',
-            secret_key='legacy-secret-key-value-long-enough-1234567890',
+            access_key='AKIACURRENTLABEL123',
+            secret_key='current-secret-key-value-long-enough-1234567890',
             is_active=True,
         )
 
         variants = cloud_account_label_variants(account)
 
-        self.assertIn(cloud_account_label(account), variants)
-        self.assertIn(f'aws:{account.id}:legacy-label-account', variants)
-        self.assertIn('aws:123456789012:legacy-label-account', variants)
+        self.assertEqual(variants, [cloud_account_label(account)])
+        self.assertNotIn(f'aws:{account.id}:current-label-account', variants)
+        self.assertNotIn('aws:123456789012:current-label-account', variants)
         self.assertNotIn('aws', variants)
 
     # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
-    def test_account_load_does_not_count_provider_only_legacy_label_for_every_account(self):
+    def test_account_load_does_not_count_provider_only_label_for_every_account(self):
         first = CloudAccountConfig.objects.create(
             provider=CloudAccountConfig.PROVIDER_AWS,
             name='load-account-a',
@@ -163,22 +162,22 @@ class CloudServerServicesTestCase(TestCase):
             secret_key='D' * 40,
             is_active=True,
         )
-        Server.objects.create(
-            source=Server.SOURCE_AWS_SYNC,
+        CloudAsset.objects.create(kind=CloudAsset.KIND_SERVER,
+            source=CloudAsset.SOURCE_AWS_SYNC,
             provider='aws_lightsail',
             account_label=cloud_account_label(first),
             region_code='ap-southeast-1',
-            server_name='load-a-current',
+            asset_name='load-a-current',
             instance_id='load-a-current',
             public_ip='8.8.8.81',
         )
-        Server.objects.create(
-            source=Server.SOURCE_AWS_SYNC,
+        CloudAsset.objects.create(kind=CloudAsset.KIND_SERVER,
+            source=CloudAsset.SOURCE_AWS_SYNC,
             provider='aws_lightsail',
             account_label='aws',
             region_code='ap-southeast-1',
-            server_name='legacy-provider-only',
-            instance_id='legacy-provider-only',
+            asset_name='provider-only-label',
+            instance_id='provider-only-label',
             public_ip='8.8.8.82',
         )
 
@@ -201,30 +200,30 @@ class CloudServerServicesTestCase(TestCase):
         self.assertEqual([item['PlanId'] for item in ordered], ['desired-plan', 'fallback-plan', 'larger-plan'])
 
     # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
-    def test_aws_sync_server_resolution_accepts_legacy_account_label(self):
+    def test_aws_sync_server_resolution_accepts_current_account_label(self):
         from cloud.management.commands.sync_aws_assets import _resolve_server
 
         account = CloudAccountConfig.objects.create(
             provider=CloudAccountConfig.PROVIDER_AWS,
-            name='legacy-sync-account',
+            name='current-sync-account',
             external_account_id='123456789012',
-            access_key='AKIALEGACYSYNC1234',
-            secret_key='legacy-secret-key-value-long-enough-1234567890',
+            access_key='AKIACURRENTSYNC123',
+            secret_key='current-secret-key-value-long-enough-1234567890',
             is_active=True,
         )
-        server = Server.objects.create(
-            source=Server.SOURCE_AWS_SYNC,
+        server = CloudAsset.objects.create(kind=CloudAsset.KIND_SERVER,
+            source=CloudAsset.SOURCE_AWS_SYNC,
             provider='aws_lightsail',
-            account_label=f'aws:{account.id}:legacy-sync-account',
+            account_label=cloud_account_label(account),
             region_code='ap-southeast-1',
-            server_name='legacy-sync-instance',
-            instance_id='legacy-sync-instance',
+            asset_name='current-sync-instance',
+            instance_id='current-sync-instance',
             public_ip='8.8.8.88',
-            status=Server.STATUS_RUNNING,
+            status=CloudAsset.STATUS_RUNNING,
             is_active=True,
         )
 
-        resolved = _resolve_server('legacy-sync-instance', '', '', None, account)
+        resolved = _resolve_server('current-sync-instance', '', '', None, account)
 
         self.assertEqual(resolved, server)
 
@@ -251,12 +250,12 @@ class CloudServerServicesTestCase(TestCase):
             instance_id='same-name-no-ip',
             public_ip='',
         )
-        Server.objects.create(
-            source=Server.SOURCE_AWS_SYNC,
+        CloudAsset.objects.create(kind=CloudAsset.KIND_SERVER,
+            source=CloudAsset.SOURCE_AWS_SYNC,
             provider='aws_lightsail',
             account_label=cloud_account_label(account),
             region_code='us-east-1',
-            server_name='same-name-no-ip',
+            asset_name='same-name-no-ip',
             instance_id='same-name-no-ip',
             public_ip='',
         )
@@ -287,12 +286,12 @@ class CloudServerServicesTestCase(TestCase):
             instance_id='aliyun-same-name-no-ip',
             public_ip='',
         )
-        Server.objects.create(
-            source=Server.SOURCE_ALIYUN,
+        CloudAsset.objects.create(kind=CloudAsset.KIND_SERVER,
+            source=CloudAsset.SOURCE_ALIYUN,
             provider='aliyun_simple',
             account_label=cloud_account_label(account),
             region_code='cn-shanghai',
-            server_name='aliyun-same-name-no-ip',
+            asset_name='aliyun-same-name-no-ip',
             instance_id='aliyun-same-name-no-ip',
             public_ip='',
         )
@@ -724,7 +723,7 @@ class CloudServerServicesTestCase(TestCase):
         self.assertTrue(CloudIpLog.objects.filter(order=order, asset=asset, event_type=CloudIpLog.EVENT_RECYCLED).exists())
 
     # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
-    def test_legacy_unattached_ip_delete_log_without_known_note_shows_history(self):
+    def test_unattached_ip_delete_log_without_known_note_shows_history(self):
         asset = CloudAsset.objects.create(
             kind=CloudAsset.KIND_SERVER,
             source=CloudAsset.SOURCE_AWS_SYNC,
@@ -732,8 +731,8 @@ class CloudServerServicesTestCase(TestCase):
             provider='aws_lightsail',
             region_code=self.plan.region_code,
             region_name=self.plan.region_name,
-            asset_name='legacy-unattached-ip-delete',
-            provider_resource_id='arn:aws:lightsail:ap-southeast-1:123456789012:StaticIp/legacy-unattached-ip-delete',
+            asset_name='unattached-ip-delete-history',
+            provider_resource_id='arn:aws:lightsail:ap-southeast-1:123456789012:StaticIp/unattached-ip-delete-history',
             previous_public_ip='52.77.18.245',
             status=CloudAsset.STATUS_DELETED,
             provider_status='未附加固定IP-已到期删除',
@@ -1286,17 +1285,17 @@ class CloudServerServicesTestCase(TestCase):
             status=CloudAsset.STATUS_RUNNING,
             is_active=True,
         )
-        server = Server.objects.create(
-            source=Server.SOURCE_AWS_SYNC,
+        server = CloudAsset.objects.create(kind=CloudAsset.KIND_SERVER,
+            source=CloudAsset.SOURCE_AWS_SYNC,
             order=order,
             user=self.user,
             provider='aws_lightsail',
             region_code=self.plan.region_code,
             region_name=self.plan.region_name,
-            server_name=order.server_name,
+            asset_name=order.server_name,
             instance_id=order.instance_id,
             public_ip=order.public_ip,
-            status=Server.STATUS_RUNNING,
+            status=CloudAsset.STATUS_RUNNING,
             is_active=True,
         )
 
@@ -1308,7 +1307,7 @@ class CloudServerServicesTestCase(TestCase):
         server.refresh_from_db()
         self.assertEqual(order.status, 'completed')
         self.assertEqual(asset.status, CloudAsset.STATUS_RUNNING)
-        self.assertEqual(server.status, Server.STATUS_RUNNING)
+        self.assertEqual(server.status, CloudAsset.STATUS_RUNNING)
 
     # 功能：提供 云资产、云订单和生命周期 的内部辅助逻辑，供同模块流程复用。
     def _create_auto_renew_asset(self, order, *, status=None, asset_name=None, expires_at=None):
@@ -1808,65 +1807,65 @@ class CloudServerServicesTestCase(TestCase):
 
     # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
     def test_dedupe_servers_does_not_delete_cross_account_instance_id(self):
-        Server.objects.create(
-            source=Server.SOURCE_AWS_SYNC,
+        CloudAsset.objects.create(kind=CloudAsset.KIND_SERVER,
+            source=CloudAsset.SOURCE_AWS_SYNC,
             provider='aws_lightsail',
             account_label='aws+111+primary',
             region_code='ap-southeast-1',
-            server_name='server-account-a',
+            asset_name='server-account-a',
             instance_id='same-instance-name',
             public_ip='13.250.30.11',
         )
-        Server.objects.create(
-            source=Server.SOURCE_AWS_SYNC,
+        CloudAsset.objects.create(kind=CloudAsset.KIND_SERVER,
+            source=CloudAsset.SOURCE_AWS_SYNC,
             provider='aws_lightsail',
             account_label='aws+222+secondary',
             region_code='ap-southeast-1',
-            server_name='server-account-b',
+            asset_name='server-account-b',
             instance_id='same-instance-name',
             public_ip='13.250.30.12',
         )
 
         call_command('dedupe_servers')
 
-        self.assertEqual(Server.objects.filter(instance_id='same-instance-name').count(), 2)
+        self.assertEqual(CloudAsset.objects.filter(instance_id='same-instance-name').count(), 2)
 
     # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
     def test_dedupe_servers_does_not_delete_cross_region_instance_id(self):
         for region, public_ip in [('ap-southeast-1', '13.250.30.17'), ('ap-northeast-1', '13.250.30.18')]:
-            Server.objects.create(
-                source=Server.SOURCE_AWS_SYNC,
+            CloudAsset.objects.create(kind=CloudAsset.KIND_SERVER,
+                source=CloudAsset.SOURCE_AWS_SYNC,
                 provider='aws_lightsail',
                 account_label='aws+111+primary',
                 region_code=region,
-                server_name='server-region-scope',
+                asset_name='server-region-scope',
                 instance_id='same-region-instance-name',
                 public_ip=public_ip,
             )
 
         call_command('dedupe_servers')
 
-        self.assertEqual(Server.objects.filter(instance_id='same-region-instance-name').count(), 2)
+        self.assertEqual(CloudAsset.objects.filter(instance_id='same-region-instance-name').count(), 2)
 
     # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
     def test_dedupe_servers_keeps_same_instance_with_different_ips(self):
         for public_ip in ['13.250.31.17', '13.250.31.18']:
-            Server.objects.create(
-                source=Server.SOURCE_AWS_SYNC,
+            CloudAsset.objects.create(kind=CloudAsset.KIND_SERVER,
+                source=CloudAsset.SOURCE_AWS_SYNC,
                 provider='aws_lightsail',
                 account_label='aws+111+primary',
                 region_code='ap-southeast-1',
-                server_name='server-same-instance-different-ip',
+                asset_name='server-same-instance-different-ip',
                 instance_id='server-same-instance-different-ip',
                 public_ip=public_ip,
             )
 
         call_command('dedupe_servers')
 
-        self.assertEqual(Server.objects.filter(instance_id='server-same-instance-different-ip').count(), 2)
+        self.assertEqual(CloudAsset.objects.filter(instance_id='server-same-instance-different-ip').count(), 2)
 
     # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
-    def test_upsert_cloud_asset_keeps_server_records_separated_by_account(self):
+    def test_upsert_cloud_asset_keeps_assets_separated_by_account(self):
         for account_label, public_ip in [('aws+111+primary', '13.250.30.13'), ('aws+222+secondary', '13.250.30.14')]:
             call_command(
                 'upsert_cloud_asset',
@@ -1879,7 +1878,6 @@ class CloudServerServicesTestCase(TestCase):
             )
 
         self.assertEqual(CloudAsset.objects.filter(instance_id='manual-same-instance').count(), 2)
-        self.assertEqual(Server.objects.filter(instance_id='manual-same-instance').count(), 2)
 
     # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
     def test_upsert_cloud_asset_keeps_same_instance_with_different_ips(self):
@@ -1895,12 +1893,11 @@ class CloudServerServicesTestCase(TestCase):
             )
 
         self.assertEqual(CloudAsset.objects.filter(instance_id='manual-same-instance-different-ip').count(), 2)
-        self.assertEqual(Server.objects.filter(instance_id='manual-same-instance-different-ip').count(), 2)
-        self.assertTrue(Server.objects.filter(instance_id='manual-same-instance-different-ip', public_ip='13.250.31.19').exists())
-        self.assertTrue(Server.objects.filter(instance_id='manual-same-instance-different-ip', public_ip='13.250.31.20').exists())
+        self.assertTrue(CloudAsset.objects.filter(instance_id='manual-same-instance-different-ip', public_ip='13.250.31.19').exists())
+        self.assertTrue(CloudAsset.objects.filter(instance_id='manual-same-instance-different-ip', public_ip='13.250.31.20').exists())
 
-    # 功能：验证同订单新身份的兼容服务器创建不会覆盖已有人工备注记录。
-    def test_server_create_with_new_identity_does_not_overwrite_same_order_note(self):
+    # 功能：验证同订单新身份的资产创建不会覆盖已有人工备注记录。
+    def test_asset_create_with_new_identity_does_not_overwrite_same_order_note(self):
         order = CloudServerOrder.objects.create(
             order_no='SERVER-CREATE-NEW-IDENTITY-NOTE',
             user=self.user,
@@ -1915,37 +1912,37 @@ class CloudServerServicesTestCase(TestCase):
             pay_amount='19.00',
             status='completed',
         )
-        existing = Server.objects.create(
-            source=Server.SOURCE_AWS_SYNC,
+        existing = CloudAsset.objects.create(kind=CloudAsset.KIND_SERVER,
+            source=CloudAsset.SOURCE_AWS_SYNC,
             order=order,
             user=self.user,
             provider='aws_lightsail',
             region_code='ap-southeast-1',
-            server_name='existing-note-server',
+            asset_name='existing-note-server',
             instance_id='existing-note-instance',
             public_ip='13.250.31.21',
             note='已有人工备注',
         )
 
-        created = Server.objects.create(
-            source=Server.SOURCE_AWS_SYNC,
+        created = CloudAsset.objects.create(kind=CloudAsset.KIND_SERVER,
+            source=CloudAsset.SOURCE_AWS_SYNC,
             order=order,
             user=self.user,
             provider='aws_lightsail',
             region_code='ap-southeast-1',
-            server_name='created-note-server',
+            asset_name='created-note-server',
             instance_id='created-note-instance',
             public_ip='13.250.31.22',
-            note='新兼容记录备注',
+            note='新资产备注',
         )
 
         existing.refresh_from_db()
         self.assertNotEqual(existing.id, created.id)
-        self.assertEqual(Server.objects.filter(order=order).count(), 2)
+        self.assertEqual(CloudAsset.objects.filter(order=order).count(), 2)
         self.assertEqual(existing.instance_id, 'existing-note-instance')
         self.assertEqual(existing.public_ip, '13.250.31.21')
         self.assertEqual(existing.note, '已有人工备注')
-        self.assertEqual(created.note, '新兼容记录备注')
+        self.assertEqual(created.note, '新资产备注')
 
     # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
     def test_rebind_cloud_server_user_syncs_order_asset_and_server(self):
@@ -1983,17 +1980,17 @@ class CloudServerServicesTestCase(TestCase):
             actual_expires_at=expires_at,
             status=CloudAsset.STATUS_RUNNING,
         )
-        server = Server.objects.create(
+        server = CloudAsset.objects.create(kind=CloudAsset.KIND_SERVER,
             order=order,
             user=self.user,
-            source=Server.SOURCE_ORDER,
+            source=CloudAsset.SOURCE_ORDER,
             provider=order.provider,
             region_code=order.region_code,
             region_name=order.region_name,
-            server_name=order.server_name,
+            asset_name=order.server_name,
             instance_id=order.instance_id,
             public_ip=order.public_ip,
-            status=Server.STATUS_RUNNING,
+            status=CloudAsset.STATUS_RUNNING,
         )
 
         rebound = async_to_sync(rebind_cloud_server_user)(order.id, new_user.id)
@@ -3149,18 +3146,18 @@ class CloudServerServicesTestCase(TestCase):
             is_active=True,
         )
         self._attach_order_expiry_asset(order, new_expiry)
-        server = Server.objects.create(
-            source=Server.SOURCE_ORDER,
+        server = CloudAsset.objects.create(kind=CloudAsset.KIND_SERVER,
+            source=CloudAsset.SOURCE_ORDER,
             order=order,
             user=self.user,
             provider=order.provider,
             region_code=order.region_code,
             region_name=order.region_name,
-            server_name=order.server_name,
+            asset_name=order.server_name,
             instance_id=order.instance_id,
             public_ip=order.public_ip,
-            expires_at=old_expiry,
-            status=Server.STATUS_RUNNING,
+            actual_expires_at=old_expiry,
+            status=CloudAsset.STATUS_RUNNING,
             provider_status='running',
             is_active=True,
         )
@@ -3178,7 +3175,7 @@ class CloudServerServicesTestCase(TestCase):
         server.refresh_from_db()
         self.assertIn('已跳过开机和 MTProxy 巡检', order.provision_note)
         self.assertEqual(asset.actual_expires_at, new_expiry)
-        self.assertEqual(server.expires_at, new_expiry)
+        self.assertEqual(server.actual_expires_at, new_expiry)
 
     # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
     def test_address_renewal_failure_rolls_back_paid_fields(self):
@@ -3295,19 +3292,19 @@ class CloudServerServicesTestCase(TestCase):
         )
         source_expiry = timezone.now() + timezone.timedelta(days=20)
         self._attach_order_expiry_asset(source, source_expiry)
-        old_server = Server.objects.create(
+        old_server = CloudAsset.objects.create(kind=CloudAsset.KIND_SERVER,
             order=source,
             user=self.user,
             provider=source.provider,
             account_label=source.provider,
             region_code=source.region_code,
             region_name=source.region_name,
-            server_name=source.server_name,
+            asset_name=source.server_name,
             instance_id=source.instance_id,
             provider_resource_id=source.provider_resource_id,
             public_ip=source.public_ip,
-            expires_at=source_expiry,
-            status=Server.STATUS_RUNNING,
+            actual_expires_at=source_expiry,
+            status=CloudAsset.STATUS_RUNNING,
             is_active=True,
         )
         replacement = CloudServerOrder.objects.create(
@@ -3346,13 +3343,13 @@ class CloudServerServicesTestCase(TestCase):
 
         old_server.refresh_from_db()
         replacement.refresh_from_db()
-        new_server = Server.objects.filter(order=replacement).first()
+        new_server = CloudAsset.objects.filter(order=replacement).first()
         self.assertEqual(old_server.order_id, source.id)
         self.assertEqual(old_server.instance_id, source.instance_id)
         self.assertIsNotNone(new_server)
         self.assertNotEqual(new_server.id, old_server.id)
         self.assertEqual(new_server.public_ip, source.public_ip)
-        self.assertEqual(new_server.expires_at, source_expiry)
+        self.assertEqual(new_server.actual_expires_at, source_expiry)
 
     # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
     def test_asset_renewal_mark_success_starts_new_service_period(self):
@@ -3445,19 +3442,19 @@ class CloudServerServicesTestCase(TestCase):
             instance_id='new-sync-instance',
             provider_resource_id='new-sync-instance',
         )
-        old_server = Server.objects.create(
+        old_server = CloudAsset.objects.create(kind=CloudAsset.KIND_SERVER,
             order=source,
             user=self.user,
             provider='aws_lightsail',
             account_label='aws_lightsail',
             region_code=source.region_code,
             region_name=source.region_name,
-            server_name=source.server_name,
+            asset_name=source.server_name,
             instance_id=source.instance_id,
             provider_resource_id=source.provider_resource_id,
             public_ip=source.public_ip,
-            expires_at=source_expiry,
-            status=Server.STATUS_RUNNING,
+            actual_expires_at=source_expiry,
+            status=CloudAsset.STATUS_RUNNING,
             is_active=True,
         )
 
@@ -3541,32 +3538,32 @@ class CloudServerServicesTestCase(TestCase):
             public_ip='7.7.7.7',
             status=CloudAsset.STATUS_RUNNING,
         )
-        ip_server = Server.objects.create(
+        ip_server = CloudAsset.objects.create(kind=CloudAsset.KIND_SERVER,
             order=stable_ip_order,
             user=self.user,
             provider='aws_lightsail',
             account_label='aws_lightsail',
             region_code=stable_ip_order.region_code,
             region_name=stable_ip_order.region_name,
-            server_name='old-instance-name',
+            asset_name='old-instance-name',
             instance_id='old-instance-name',
             provider_resource_id='old-instance-arn',
             public_ip='8.8.8.8',
-            status=Server.STATUS_RUNNING,
+            status=CloudAsset.STATUS_RUNNING,
             is_active=True,
         )
-        Server.objects.create(
+        CloudAsset.objects.create(kind=CloudAsset.KIND_SERVER,
             order=dirty_name_order,
             user=self.user,
             provider='aws_lightsail',
             account_label='aws_lightsail',
             region_code=dirty_name_order.region_code,
             region_name=dirty_name_order.region_name,
-            server_name='new-instance-name',
+            asset_name='new-instance-name',
             instance_id='new-instance-name',
             provider_resource_id='new-instance-arn',
             public_ip='7.7.7.7',
-            status=Server.STATUS_RUNNING,
+            status=CloudAsset.STATUS_RUNNING,
             is_active=True,
         )
 
@@ -4220,25 +4217,25 @@ class CloudServerServicesTestCase(TestCase):
             actual_expires_at=timezone.now() - timezone.timedelta(days=5),
             is_active=True,
         )
-        stale_server = Server.objects.create(
-            source=Server.SOURCE_ORDER,
+        stale_server = CloudAsset.objects.create(kind=CloudAsset.KIND_SERVER,
+            source=CloudAsset.SOURCE_ORDER,
             order=order,
             user=self.user,
             provider=order.provider,
             region_code=order.region_code,
             region_name=order.region_name,
-            server_name='stale-server',
+            asset_name='stale-server',
             public_ip='10.0.0.3',
             is_active=True,
         )
-        active_server = Server.objects.create(
-            source=Server.SOURCE_ORDER,
+        active_server = CloudAsset.objects.create(kind=CloudAsset.KIND_SERVER,
+            source=CloudAsset.SOURCE_ORDER,
             order=order,
             user=self.user,
             provider=order.provider,
             region_code=order.region_code,
             region_name=order.region_name,
-            server_name='active-server',
+            asset_name='active-server',
             public_ip='10.0.0.2',
             is_active=True,
         )
@@ -4603,49 +4600,6 @@ class CloudServerServicesTestCase(TestCase):
         delete_mock.assert_not_called()
         self.assertFalse(result['ok'])
         self.assertIn('请走订单删机计划', result['error'])
-
-    # 功能：验证旧 Server 兼容入口复用资产时不覆盖手工用户和到期时间。
-    def test_server_compat_create_preserves_manual_asset_owner_and_expiry(self):
-        owner = TelegramUser.objects.create(tg_user_id=991001, username='compat_owner')
-        incoming_user = TelegramUser.objects.create(tg_user_id=991002, username='compat_incoming')
-        manual_expiry = timezone.now() + timezone.timedelta(days=30)
-        incoming_expiry = timezone.now() + timezone.timedelta(days=5)
-        asset = CloudAsset.objects.create(
-            kind=CloudAsset.KIND_SERVER,
-            source=CloudAsset.SOURCE_AWS_SYNC,
-            user=owner,
-            provider='aws_lightsail',
-            account_label='aws:compat-preserve',
-            region_code=self.plan.region_code,
-            region_name=self.plan.region_name,
-            asset_name='compat-preserve-old',
-            instance_id='compat-preserve-instance',
-            public_ip='3.3.3.34',
-            actual_expires_at=manual_expiry,
-            status=CloudAsset.STATUS_RUNNING,
-            is_active=True,
-        )
-
-        server = Server.objects.create(
-            source=Server.SOURCE_AWS_SYNC,
-            user=incoming_user,
-            provider='aws_lightsail',
-            account_label='aws:compat-preserve',
-            region_code=self.plan.region_code,
-            region_name=self.plan.region_name,
-            server_name='compat-preserve-new',
-            instance_id='compat-preserve-instance',
-            public_ip='3.3.3.34',
-            expires_at=incoming_expiry,
-            status=Server.STATUS_STOPPED,
-        )
-
-        asset.refresh_from_db()
-        self.assertEqual(server.id, asset.id)
-        self.assertEqual(asset.user, owner)
-        self.assertEqual(asset.actual_expires_at, manual_expiry)
-        self.assertEqual(asset.asset_name, 'compat-preserve-new')
-        self.assertEqual(asset.status, CloudAsset.STATUS_STOPPED)
 
     # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
     def test_get_migration_due_orders_is_distinct(self):
@@ -5347,12 +5301,12 @@ class CloudServerServicesTestCase(TestCase):
             static_ip_name='StaticIp-2',
             replacement_for=source_order,
         )
-        Server.objects.create(
+        CloudAsset.objects.create(kind=CloudAsset.KIND_SERVER,
             provider='aws_lightsail',
             account_label=f'aws+{other_account.external_account_id}+{other_account.name}',
             region_code=self.plan.region_code,
             public_ip='3.0.114.174',
-            status=Server.STATUS_RUNNING,
+            status=CloudAsset.STATUS_RUNNING,
             is_active=True,
         )
 
@@ -5386,7 +5340,7 @@ class CloudServerServicesTestCase(TestCase):
             migration_due_at=timezone.now() + timezone.timedelta(days=3),
         )
         self._attach_order_expiry_asset(source, source_expires_at)
-        Server.objects.create(source=Server.SOURCE_ORDER, order=source, user=self.user, public_ip='1.2.3.4')
+        CloudAsset.objects.create(kind=CloudAsset.KIND_SERVER, source=CloudAsset.SOURCE_ORDER, order=source, user=self.user, public_ip='1.2.3.4')
         replacement = CloudServerOrder.objects.create(
             order_no='REBUILD-NEW-EXPIRY',
             user=self.user,
@@ -5410,12 +5364,12 @@ class CloudServerServicesTestCase(TestCase):
 
         source.refresh_from_db()
         asset = CloudAsset.objects.get(order=source)
-        server = Server.objects.get(order=source)
+        server = CloudAsset.objects.get(order=source)
         self.assertEqual(order_asset_expiry(source), source_expires_at)
         self.assertEqual(source.renew_grace_expires_at, source.migration_due_at + timezone.timedelta(days=3))
         self.assertEqual(source.delete_at, source.migration_due_at + timezone.timedelta(days=3))
         self.assertEqual(asset.actual_expires_at, source_expires_at)
-        self.assertEqual(server.expires_at, source_expires_at)
+        self.assertEqual(server.actual_expires_at, source_expires_at)
 
     # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
     def test_rebuild_job_keeps_old_instance_until_migration_due(self):
@@ -5515,15 +5469,15 @@ class CloudServerServicesTestCase(TestCase):
             actual_expires_at=old_expiry,
             price='23.00',
         )
-        server = Server.objects.create(
-            source=Server.SOURCE_ORDER,
+        server = CloudAsset.objects.create(kind=CloudAsset.KIND_SERVER,
+            source=CloudAsset.SOURCE_ORDER,
             order=old_order,
             user=self.user,
             provider='aws_lightsail',
             region_code=self.plan.region_code,
             region_name=self.plan.region_name,
             public_ip='8.8.8.8',
-            expires_at=old_expiry,
+            actual_expires_at=old_expiry,
             is_active=True,
         )
         new_user = TelegramUser.objects.create(tg_user_id=990002, username='svc_target')
@@ -5553,7 +5507,7 @@ class CloudServerServicesTestCase(TestCase):
         self.assertEqual(server.user_id, new_user.id)
         self.assertEqual(new_order.user_id, new_user.id)
         self.assertEqual(asset.actual_expires_at, new_expiry)
-        self.assertEqual(server.expires_at, new_expiry)
+        self.assertEqual(server.actual_expires_at, new_expiry)
         self.assertEqual(order_asset_expiry(new_order), new_expiry)
         self.assertEqual(new_order.replacement_for_id, old_order.id)
 
@@ -5719,16 +5673,16 @@ class CloudServerServicesTestCase(TestCase):
             public_ip='4.4.4.5',
             actual_expires_at=old_expiry,
         )
-        server = Server.objects.create(
-            source=Server.SOURCE_ORDER,
+        server = CloudAsset.objects.create(kind=CloudAsset.KIND_SERVER,
+            source=CloudAsset.SOURCE_ORDER,
             order=order,
             user=self.user,
             provider=order.provider,
             region_code=order.region_code,
             region_name=order.region_name,
-            server_name='dash-order-expiry-update-server',
+            asset_name='dash-order-expiry-update-server',
             public_ip='4.4.4.5',
-            expires_at=old_expiry,
+            actual_expires_at=old_expiry,
         )
         asset.refresh_from_db()
         server.refresh_from_db()
@@ -5753,7 +5707,7 @@ class CloudServerServicesTestCase(TestCase):
         self.assertGreaterEqual(order.delete_at, order.suspend_at)
         self.assertGreater(order.ip_recycle_at, order.delete_at)
         self.assertEqual(asset.actual_expires_at, new_expiry)
-        self.assertEqual(server.expires_at, new_expiry)
+        self.assertEqual(server.actual_expires_at, new_expiry)
 
     # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
     def test_dashboard_order_ip_and_name_update_syncs_asset_server(self):
@@ -5788,16 +5742,16 @@ class CloudServerServicesTestCase(TestCase):
             public_ip=order.public_ip,
             actual_expires_at=expires_at,
         )
-        Server.objects.create(
-            source=Server.SOURCE_ORDER,
+        CloudAsset.objects.create(kind=CloudAsset.KIND_SERVER,
+            source=CloudAsset.SOURCE_ORDER,
             order=order,
             user=self.user,
             provider=order.provider,
             region_code=order.region_code,
             region_name=order.region_name,
-            server_name=order.server_name,
+            asset_name=order.server_name,
             public_ip=order.public_ip,
-            expires_at=expires_at,
+            actual_expires_at=expires_at,
         )
         staff_user = get_user_model().objects.create_user(username='staff_order_ip_name_update', password='x', is_staff=True, is_superuser=True)
         request = RequestFactory().patch(
@@ -5813,7 +5767,7 @@ class CloudServerServicesTestCase(TestCase):
         self.assertEqual(response.status_code, 200)
         order.refresh_from_db()
         asset = CloudAsset.objects.get(order=order)
-        server = Server.objects.get(order=order)
+        server = CloudAsset.objects.get(order=order)
         self.assertEqual(order.public_ip, '4.4.4.41')
         self.assertEqual(order.previous_public_ip, '4.4.4.40')
         self.assertEqual(order.server_name, 'new-dashboard-name')
@@ -5822,7 +5776,7 @@ class CloudServerServicesTestCase(TestCase):
         self.assertEqual(asset.asset_name, 'new-dashboard-name')
         self.assertEqual(server.public_ip, '4.4.4.41')
         self.assertEqual(server.previous_public_ip, '4.4.4.40')
-        self.assertEqual(server.server_name, 'new-dashboard-name')
+        self.assertEqual(server.asset_name, 'new-dashboard-name')
 
     # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
     def test_dashboard_asset_ip_update_syncs_order_previous_ip(self):
@@ -5857,16 +5811,16 @@ class CloudServerServicesTestCase(TestCase):
             public_ip=order.public_ip,
             actual_expires_at=expires_at,
         )
-        Server.objects.create(
-            source=Server.SOURCE_ORDER,
+        CloudAsset.objects.create(kind=CloudAsset.KIND_SERVER,
+            source=CloudAsset.SOURCE_ORDER,
             order=order,
             user=self.user,
             provider=order.provider,
             region_code=order.region_code,
             region_name=order.region_name,
-            server_name=order.server_name,
+            asset_name=order.server_name,
             public_ip=order.public_ip,
-            expires_at=expires_at,
+            actual_expires_at=expires_at,
         )
         staff_user = get_user_model().objects.create_user(username='staff_asset_ip_update', password='x', is_staff=True, is_superuser=True)
         request = RequestFactory().patch(
@@ -5882,7 +5836,7 @@ class CloudServerServicesTestCase(TestCase):
         self.assertEqual(response.status_code, 200)
         order.refresh_from_db()
         asset.refresh_from_db()
-        server = Server.objects.get(order=order)
+        server = CloudAsset.objects.get(order=order)
         self.assertEqual(order.public_ip, '4.4.4.43')
         self.assertEqual(order.previous_public_ip, '4.4.4.42')
         self.assertEqual(asset.public_ip, '4.4.4.43')
@@ -5923,16 +5877,16 @@ class CloudServerServicesTestCase(TestCase):
             public_ip=order.public_ip,
             actual_expires_at=expires_at,
         )
-        Server.objects.create(
-            source=Server.SOURCE_ORDER,
+        CloudAsset.objects.create(kind=CloudAsset.KIND_SERVER,
+            source=CloudAsset.SOURCE_ORDER,
             order=order,
             user=self.user,
             provider=order.provider,
             region_code=order.region_code,
             region_name=order.region_name,
-            server_name=order.server_name,
+            asset_name=order.server_name,
             public_ip='4.4.4.45',
-            expires_at=expires_at,
+            actual_expires_at=expires_at,
         )
         staff_user = get_user_model().objects.create_user(username='staff_asset_ip_presync', password='x', is_staff=True, is_superuser=True)
         request = RequestFactory().patch(
@@ -5948,7 +5902,7 @@ class CloudServerServicesTestCase(TestCase):
         self.assertEqual(response.status_code, 200)
         order.refresh_from_db()
         asset.refresh_from_db()
-        server = Server.objects.get(order=order)
+        server = CloudAsset.objects.get(order=order)
         self.assertEqual(order.public_ip, '4.4.4.45')
         self.assertEqual(order.previous_public_ip, '4.4.4.44')
         self.assertEqual(asset.public_ip, '4.4.4.45')
@@ -5997,28 +5951,28 @@ class CloudServerServicesTestCase(TestCase):
             public_ip=order.public_ip,
             actual_expires_at=expires_at,
         )
-        wrong_server = Server.objects.create(
-            source=Server.SOURCE_AWS_SYNC,
+        wrong_server = CloudAsset.objects.create(kind=CloudAsset.KIND_SERVER,
+            source=CloudAsset.SOURCE_AWS_SYNC,
             provider=order.provider,
             account_label='aws+222+secondary',
             region_code=order.region_code,
             region_name=order.region_name,
-            server_name='scoped-server-secondary',
+            asset_name='scoped-server-secondary',
             instance_id=order.instance_id,
             public_ip='4.4.4.99',
         )
-        right_server = Server.objects.create(
-            source=Server.SOURCE_ORDER,
+        right_server = CloudAsset.objects.create(kind=CloudAsset.KIND_SERVER,
+            source=CloudAsset.SOURCE_ORDER,
             order=order,
             user=self.user,
             provider=order.provider,
             account_label=order.account_label,
             region_code=order.region_code,
             region_name=order.region_name,
-            server_name=order.server_name,
+            asset_name=order.server_name,
             instance_id=order.instance_id,
             public_ip=order.public_ip,
-            expires_at=expires_at,
+            actual_expires_at=expires_at,
         )
         staff_user = get_user_model().objects.create_user(username='staff_asset_scoped_server', password='x', is_staff=True, is_superuser=True)
         request = RequestFactory().patch(
@@ -6038,36 +5992,35 @@ class CloudServerServicesTestCase(TestCase):
         self.assertEqual(wrong_server.public_ip, '4.4.4.99')
 
     # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
-    def test_dashboard_asset_update_matches_legacy_colon_account_label(self):
+    def test_dashboard_asset_update_matches_current_account_label(self):
         account = self._aws_test_account()
-        plus_label = cloud_account_label(account)
-        legacy_label = f'aws:{account.id}:{account.name}'
+        current_label = cloud_account_label(account)
         asset = CloudAsset.objects.create(
             kind=CloudAsset.KIND_SERVER,
             source=CloudAsset.SOURCE_AWS_SYNC,
             user=self.user,
             provider=self.plan.provider,
             cloud_account=account,
-            account_label=plus_label,
+            account_label=current_label,
             region_code=self.plan.region_code,
             region_name=self.plan.region_name,
-            asset_name='legacy-label-server',
-            instance_id='legacy-label-server',
+            asset_name='current-label-server',
+            instance_id='current-label-server',
             public_ip='4.4.4.70',
             actual_expires_at=timezone.now() + timezone.timedelta(days=20),
         )
-        server = Server.objects.create(
-            source=Server.SOURCE_AWS_SYNC,
+        server = CloudAsset.objects.create(kind=CloudAsset.KIND_SERVER,
+            source=CloudAsset.SOURCE_AWS_SYNC,
             provider=self.plan.provider,
-            account_label=legacy_label,
+            account_label=current_label,
             region_code=self.plan.region_code,
             region_name=self.plan.region_name,
-            server_name='legacy-label-server',
-            instance_id='legacy-label-server',
+            asset_name='current-label-server',
+            instance_id='current-label-server',
             public_ip='4.4.4.70',
-            expires_at=asset.actual_expires_at,
+            actual_expires_at=asset.actual_expires_at,
         )
-        staff_user = get_user_model().objects.create_user(username='staff_legacy_label_update', password='x', is_staff=True, is_superuser=True)
+        staff_user = get_user_model().objects.create_user(username='staff_current_label_update', password='x', is_staff=True, is_superuser=True)
         request = RequestFactory().patch(
             f'/api/admin/cloud-assets/{asset.id}/',
             data=json.dumps({'public_ip': '4.4.4.71'}),
@@ -6081,7 +6034,7 @@ class CloudServerServicesTestCase(TestCase):
         self.assertEqual(response.status_code, 200)
         server.refresh_from_db()
         self.assertEqual(server.public_ip, '4.4.4.71')
-        self.assertEqual(server.account_label, legacy_label)
+        self.assertEqual(server.account_label, current_label)
 
     # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
     def test_dashboard_asset_update_created_server_preserves_account_label(self):
@@ -6113,7 +6066,7 @@ class CloudServerServicesTestCase(TestCase):
         response = update_cloud_asset(request, asset.id)
 
         self.assertEqual(response.status_code, 200)
-        server = Server.objects.get(instance_id='i-create-server-account-scope')
+        server = CloudAsset.objects.get(instance_id='i-create-server-account-scope')
         self.assertEqual(server.account_label, label)
         self.assertEqual(server.provider, self.plan.provider)
         self.assertEqual(server.region_code, self.plan.region_code)
@@ -6788,14 +6741,14 @@ class CloudServerServicesTestCase(TestCase):
 
         order.refresh_from_db()
         asset = CloudAsset.objects.get(order=order, kind=CloudAsset.KIND_SERVER)
-        server = Server.objects.get(order=order)
+        server = CloudAsset.objects.get(order=order)
         log = CloudIpLog.objects.filter(order=order).latest('id')
 
         self.assertEqual(order.status, 'provisioning')
         self.assertEqual(order.server_name, 'sg-test-node-01')
         self.assertEqual(asset.status, CloudAsset.STATUS_PENDING)
         self.assertTrue(asset.is_active)
-        self.assertEqual(server.status, Server.STATUS_PENDING)
+        self.assertEqual(server.status, CloudAsset.STATUS_PENDING)
         self.assertTrue(server.is_active)
         self.assertEqual(log.event_type, CloudIpLog.EVENT_CREATED)
         self.assertIn('服务器开始创建', log.note)
@@ -9896,7 +9849,7 @@ class CloudServerServicesTestCase(TestCase):
         self.assertTrue(rows)
         self.assertGreaterEqual(data['ip_delete_history_count'], 1)
 
-    # 功能：验证 IP 删除计划和 IP 删除历史记录在接口字段中严格分离，旧兼容字段仍可包含两类数据。
+    # 功能：验证 IP 删除计划和 IP 删除历史记录在接口字段中严格分离。
     def test_lifecycle_plans_separate_ip_delete_plan_and_history_items(self):
         active_asset = CloudAsset.objects.create(
             kind=CloudAsset.KIND_SERVER,
@@ -11000,266 +10953,12 @@ class CloudServerServicesTestCase(TestCase):
         self.assertEqual(order.provider_resource_id, '')
         self.assertTrue(CloudIpLog.objects.filter(order=order, note__contains='后台手动删除代理列表记录').exists())
 
-    # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
-    def test_reconcile_cloud_assets_skips_deleted_server_residual(self):
-        order = CloudServerOrder.objects.create(
-            order_no='RECONCILE-DELETED-SERVER-1',
-            user=self.user,
-            plan=self.plan,
-            provider=self.plan.provider,
-            region_code=self.plan.region_code,
-            region_name=self.plan.region_name,
-            plan_name=self.plan.plan_name,
-            quantity=1,
-            currency='USDT',
-            total_amount='19.00',
-            pay_amount='19.00',
-            pay_method='balance',
-            status='deleted',
-            public_ip=None,
-            previous_public_ip='7.7.7.7',
-            instance_id='i-reconcile-deleted-server',
-            provider_resource_id='res-reconcile-deleted-server',
-            service_started_at=timezone.now(),
-        )
-        Server.objects.create(
-            source=Server.SOURCE_AWS_SYNC,
-            order=order,
-            user=self.user,
-            provider=order.provider,
-            region_code=order.region_code,
-            region_name=order.region_name,
-            server_name='reconcile-deleted-server',
-            public_ip=None,
-            previous_public_ip='7.7.7.7',
-            instance_id=order.instance_id,
-            provider_resource_id=order.provider_resource_id,
-            status=Server.STATUS_DELETED,
-            provider_status='云上未找到实例/IP',
-            is_active=False,
-            note='状态: 云上未找到实例/IP',
-        )
 
-        call_command('reconcile_cloud_assets_from_servers')
 
-        residual_assets = CloudAsset.objects.filter(
-            instance_id='i-reconcile-deleted-server',
-            provider_resource_id='res-reconcile-deleted-server',
-        )
-        self.assertEqual(residual_assets.count(), 1)
-        self.assertFalse(residual_assets.exclude(status=CloudAsset.STATUS_DELETED).exists())
 
-    # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
-    def test_reconcile_cloud_assets_does_not_match_cross_provider_instance_id(self):
-        CloudAsset.objects.create(
-            kind=CloudAsset.KIND_SERVER,
-            source=CloudAsset.SOURCE_ALIYUN,
-            user=self.user,
-            provider='aliyun_simple',
-            region_code='cn-hongkong',
-            region_name='中国香港',
-            asset_name='aliyun-shared-instance',
-            instance_id='shared-instance-id',
-            provider_resource_id='shared-instance-id',
-            public_ip=None,
-            status=CloudAsset.STATUS_RUNNING,
-            is_active=True,
-        )
-        Server.objects.create(
-            source=Server.SOURCE_AWS_SYNC,
-            user=self.user,
-            provider='aws_lightsail',
-            region_code=self.plan.region_code,
-            region_name=self.plan.region_name,
-            server_name='aws-shared-instance',
-            instance_id='shared-instance-id',
-            provider_resource_id='arn:aws:lightsail:ap-southeast-1:123456789012:Instance/shared-instance-id',
-            public_ip=None,
-            status=Server.STATUS_RUNNING,
-            provider_status='运行中',
-            is_active=True,
-        )
 
-        call_command('reconcile_cloud_assets_from_servers')
 
-        self.assertTrue(CloudAsset.objects.filter(provider='aliyun_simple', instance_id='shared-instance-id').exists())
-        self.assertTrue(CloudAsset.objects.filter(provider='aws_lightsail', instance_id='shared-instance-id').exists())
 
-    # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
-    def test_reconcile_cloud_assets_preserves_server_account_label(self):
-        account = CloudAccountConfig.objects.create(
-            provider=CloudAccountConfig.PROVIDER_AWS,
-            name='reconcile-account',
-            external_account_id='123456789012',
-            access_key='A' * 20,
-            secret_key='B' * 40,
-            is_active=True,
-        )
-        label = cloud_account_label(account)
-        Server.objects.create(
-            source=Server.SOURCE_AWS_SYNC,
-            user=self.user,
-            provider='aws_lightsail',
-            account_label=label,
-            region_code='ap-southeast-1',
-            region_name='新加坡',
-            server_name='reconcile-account-server',
-            instance_id='reconcile-account-server',
-            public_ip='13.250.30.200',
-            status=Server.STATUS_RUNNING,
-            is_active=True,
-        )
-
-        call_command('reconcile_cloud_assets_from_servers')
-
-        asset = CloudAsset.objects.get(instance_id='reconcile-account-server')
-        self.assertEqual(asset.account_label, label)
-        self.assertEqual(asset.cloud_account, account)
-
-    # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
-    def test_reconcile_cloud_assets_skips_inactive_cloud_account_server(self):
-        account = CloudAccountConfig.objects.create(
-            provider=CloudAccountConfig.PROVIDER_AWS,
-            name='reconcile-inactive-account',
-            external_account_id='123456789012',
-            access_key='A' * 20,
-            secret_key='B' * 40,
-            is_active=False,
-        )
-        label = cloud_account_label(account)
-        Server.objects.create(
-            source=Server.SOURCE_AWS_SYNC,
-            user=self.user,
-            provider='aws_lightsail',
-            account_label=label,
-            region_code='ap-southeast-1',
-            region_name='新加坡',
-            server_name='inactive-account-server',
-            instance_id='inactive-account-server',
-            public_ip='13.250.30.203',
-            status=Server.STATUS_RUNNING,
-            is_active=True,
-        )
-
-        call_command('reconcile_cloud_assets_from_servers')
-
-        self.assertFalse(CloudAsset.objects.filter(instance_id='inactive-account-server').exists())
-
-    # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
-    def test_reconcile_cloud_assets_skips_server_marked_cloud_missing(self):
-        account = CloudAccountConfig.objects.create(
-            provider=CloudAccountConfig.PROVIDER_AWS,
-            name='reconcile-missing-account',
-            external_account_id='123456789012',
-            access_key='A' * 20,
-            secret_key='B' * 40,
-            is_active=True,
-        )
-        label = cloud_account_label(account)
-        Server.objects.create(
-            source=Server.SOURCE_AWS_SYNC,
-            user=self.user,
-            provider='aws_lightsail',
-            account_label=label,
-            region_code='ap-southeast-1',
-            region_name='新加坡',
-            server_name='missing-account-server',
-            instance_id='missing-account-server',
-            public_ip='13.250.30.204',
-            status=Server.STATUS_RUNNING,
-            provider_status='云上未找到实例/IP',
-            note='服务器校验发现云上不存在，已标记删除',
-            is_active=True,
-        )
-
-        call_command('reconcile_cloud_assets_from_servers')
-
-        self.assertFalse(CloudAsset.objects.filter(instance_id='missing-account-server').exists())
-
-    # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
-    def test_reconcile_cloud_assets_matches_legacy_account_label_variants(self):
-        account = CloudAccountConfig.objects.create(
-            provider=CloudAccountConfig.PROVIDER_AWS,
-            name='reconcile-legacy-account',
-            external_account_id='123456789012',
-            access_key='A' * 20,
-            secret_key='B' * 40,
-            is_active=True,
-        )
-        current_label = cloud_account_label(account)
-        legacy_label = 'aws_lightsail+123456789012+reconcile-legacy-account'
-        asset = CloudAsset.objects.create(
-            kind=CloudAsset.KIND_SERVER,
-            source=CloudAsset.SOURCE_AWS_SYNC,
-            user=self.user,
-            provider='aws_lightsail',
-            cloud_account=account,
-            account_label=current_label,
-            region_code='ap-southeast-1',
-            region_name='新加坡',
-            asset_name='reconcile-legacy-instance',
-            instance_id='reconcile-legacy-instance',
-            public_ip='13.250.30.201',
-            status=CloudAsset.STATUS_RUNNING,
-            is_active=True,
-        )
-        original_asset_id = asset.id
-        Server.objects.create(
-            source=Server.SOURCE_AWS_SYNC,
-            user=self.user,
-            provider='aws_lightsail',
-            account_label=legacy_label,
-            region_code='ap-southeast-1',
-            region_name='新加坡',
-            server_name='reconcile-legacy-instance',
-            instance_id='reconcile-legacy-instance',
-            public_ip='13.250.30.201',
-            status=Server.STATUS_RUNNING,
-            provider_status='运行中',
-            is_active=True,
-        )
-
-        call_command('reconcile_cloud_assets_from_servers')
-
-        self.assertEqual(CloudAsset.objects.filter(instance_id='reconcile-legacy-instance').count(), 1)
-        asset.refresh_from_db()
-        self.assertEqual(asset.id, original_asset_id)
-        self.assertEqual(asset.cloud_account, account)
-        self.assertEqual(asset.account_label, legacy_label)
-
-    # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
-    def test_reconcile_cloud_assets_does_not_match_cross_region_same_instance_without_ip(self):
-        CloudAsset.objects.create(
-            kind=CloudAsset.KIND_SERVER,
-            source=CloudAsset.SOURCE_AWS_SYNC,
-            user=self.user,
-            provider='aws_lightsail',
-            region_code='us-east-1',
-            region_name='弗吉尼亚',
-            asset_name='reconcile-same-instance',
-            instance_id='reconcile-same-instance',
-            public_ip=None,
-            status=CloudAsset.STATUS_RUNNING,
-            is_active=True,
-        )
-        Server.objects.create(
-            source=Server.SOURCE_AWS_SYNC,
-            user=self.user,
-            provider='aws_lightsail',
-            region_code='ap-southeast-1',
-            region_name='新加坡',
-            server_name='reconcile-same-instance',
-            instance_id='reconcile-same-instance',
-            public_ip=None,
-            status=Server.STATUS_RUNNING,
-            is_active=True,
-        )
-
-        call_command('reconcile_cloud_assets_from_servers')
-
-        self.assertEqual(CloudAsset.objects.filter(instance_id='reconcile-same-instance').count(), 2)
-        self.assertTrue(CloudAsset.objects.filter(instance_id='reconcile-same-instance', region_code='us-east-1').exists())
-        self.assertTrue(CloudAsset.objects.filter(instance_id='reconcile-same-instance', region_code='ap-southeast-1').exists())
 
     # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
     def test_delete_server_only_removes_server_record(self):
@@ -11299,18 +10998,18 @@ class CloudServerServicesTestCase(TestCase):
             price='19.00',
             status=CloudAsset.STATUS_RUNNING,
         )
-        server = Server.objects.create(
-            source=Server.SOURCE_ORDER,
+        server = CloudAsset.objects.create(kind=CloudAsset.KIND_SERVER,
+            source=CloudAsset.SOURCE_ORDER,
             order=order,
             user=self.user,
             provider=order.provider,
             region_code=order.region_code,
             region_name=order.region_name,
-            server_name='delete-server-only',
+            asset_name='delete-server-only',
             public_ip=order.public_ip,
             instance_id=order.instance_id,
             provider_resource_id=order.provider_resource_id,
-            status=Server.STATUS_RUNNING,
+            status=CloudAsset.STATUS_RUNNING,
         )
         staff_user = get_user_model().objects.create_user(username='staff_server_delete_only', password='x', is_staff=True, is_superuser=True)
         request = RequestFactory().post(f'/api/admin/servers/{server.id}/delete/')
@@ -11320,7 +11019,7 @@ class CloudServerServicesTestCase(TestCase):
 
         self.assertEqual(response.status_code, 200)
         order.refresh_from_db()
-        self.assertFalse(Server.objects.filter(id=server.id).exists())
+        self.assertFalse(CloudAsset.objects.filter(id=server.id).exists())
         self.assertFalse(CloudAsset.objects.filter(id=asset.id).exists())
         self.assertEqual(order.status, 'completed')
         self.assertEqual(order.public_ip, '9.9.9.9')
@@ -11366,27 +11065,27 @@ class CloudServerServicesTestCase(TestCase):
 
     # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
     def test_servers_list_excludes_unattached_static_ip_rows(self):
-        unattached = Server.objects.create(
+        unattached = CloudAsset.objects.create(kind=CloudAsset.KIND_SERVER,
             user=self.user,
             provider='aws_lightsail',
             region_code=self.plan.region_code,
             region_name=self.plan.region_name,
-            server_name='unattached-static-ip-row',
+            asset_name='unattached-static-ip-row',
             public_ip='9.9.9.10',
             instance_id='',
-            status=Server.STATUS_RUNNING,
+            status=CloudAsset.STATUS_RUNNING,
             provider_status='未附加固定IP-续费保留中',
             note='未附加固定IP',
         )
-        attached = Server.objects.create(
+        attached = CloudAsset.objects.create(kind=CloudAsset.KIND_SERVER,
             user=self.user,
             provider='aws_lightsail',
             region_code=self.plan.region_code,
             region_name=self.plan.region_name,
-            server_name='attached-server-row',
+            asset_name='attached-server-row',
             public_ip='9.9.9.11',
             instance_id='i-attached-server-row',
-            status=Server.STATUS_RUNNING,
+            status=CloudAsset.STATUS_RUNNING,
             provider_status='运行中',
         )
         staff_user = get_user_model().objects.create_user(username='staff_servers_list_unattached', password='x', is_staff=True)
@@ -13260,18 +12959,18 @@ class CloudServerServicesTestCase(TestCase):
             note='未附加固定IP',
             is_active=False,
         )
-        server = Server.objects.create(
-            source=Server.SOURCE_AWS_SYNC,
+        server = CloudAsset.objects.create(kind=CloudAsset.KIND_SERVER,
+            source=CloudAsset.SOURCE_AWS_SYNC,
             user=self.user,
             order=order,
             provider='aws_lightsail',
             region_code=self.plan.region_code,
             region_name=self.plan.region_name,
-            server_name='refresh-unattached-ip-server',
+            asset_name='refresh-unattached-ip-server',
             provider_resource_id='aws-static-ip-refresh-1',
             public_ip='10.9.0.9',
-            expires_at=old_due_at,
-            status=Server.STATUS_UNKNOWN,
+            actual_expires_at=old_due_at,
+            status=CloudAsset.STATUS_UNKNOWN,
             provider_status='未附加固定IP',
             note='未附加固定IP',
             is_active=False,
@@ -13292,7 +12991,7 @@ class CloudServerServicesTestCase(TestCase):
         order.refresh_from_db()
         self.assertEqual(response.status_code, 200)
         self.assertGreater(asset.actual_expires_at, old_due_at)
-        self.assertEqual(server.expires_at, asset.actual_expires_at)
+        self.assertEqual(server.actual_expires_at, asset.actual_expires_at)
         self.assertEqual(order.ip_recycle_at, asset.actual_expires_at)
 
     # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
@@ -13313,21 +13012,6 @@ class CloudServerServicesTestCase(TestCase):
             note='未附加固定IP',
             is_active=False,
         )
-        server = Server.objects.create(
-            source=Server.SOURCE_AWS_SYNC,
-            user=self.user,
-            provider='aws_lightsail',
-            region_code=self.plan.region_code,
-            region_name=self.plan.region_name,
-            server_name='rebound-ip-server',
-            provider_resource_id='aws-static-ip-manual-1',
-            public_ip='10.9.0.1',
-            expires_at=asset.actual_expires_at,
-            status=Server.STATUS_UNKNOWN,
-            provider_status='未附加固定IP',
-            note='未附加固定IP',
-            is_active=False,
-        )
         staff_user = get_user_model().objects.create_user(username='staff_rebound_manual', password='x', is_staff=True, is_superuser=True)
         request = RequestFactory().patch(
             f'/api/admin/cloud-assets/{asset.id}/',
@@ -13340,7 +13024,6 @@ class CloudServerServicesTestCase(TestCase):
         response = update_cloud_asset(request, asset.id)
 
         asset.refresh_from_db()
-        server.refresh_from_db()
         self.assertEqual(response.status_code, 200)
         self.assertEqual(asset.instance_id, 'i-rebound-manual-1')
         self.assertEqual(asset.provider_status, '已重新绑定实例-待人工添加时间')
@@ -13348,11 +13031,6 @@ class CloudServerServicesTestCase(TestCase):
         self.assertTrue(asset.is_active)
         self.assertEqual(asset.status, CloudAsset.STATUS_RUNNING)
         self.assertEqual(asset.note, '未附加固定IP')
-        self.assertEqual(server.instance_id, 'i-rebound-manual-1')
-        self.assertIsNone(server.expires_at)
-        self.assertEqual(server.provider_status, '已重新绑定实例-待人工添加时间')
-        self.assertTrue(server.is_active)
-        self.assertEqual(server.status, Server.STATUS_RUNNING)
 
     # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
     def test_system_note_updates_preserve_manual_primary_record_notes(self):
@@ -13383,22 +13061,10 @@ class CloudServerServicesTestCase(TestCase):
             public_ip='10.9.9.1',
             note='资产人工备注',
         )
-        server = Server.objects.create(
-            source=Server.SOURCE_ORDER,
-            order=order,
-            user=self.user,
-            provider=self.plan.provider,
-            region_code=self.plan.region_code,
-            public_ip='10.9.9.1',
-            note='服务器人工备注',
-        )
-
-        _update_order_primary_records(order, asset_updates={'note': '系统追加备注'}, server_updates={'note': '系统追加备注'})
+        _update_order_primary_records(order, asset_updates={'note': '系统追加备注'})
 
         asset.refresh_from_db()
-        server.refresh_from_db()
         self.assertEqual(asset.note, '资产人工备注')
-        self.assertEqual(server.note, '服务器人工备注')
 
     # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
     def test_sync_cloud_asset_user_binding_uses_asset_name_tg_id(self):
@@ -13549,15 +13215,15 @@ class CloudServerServicesTestCase(TestCase):
             note='旧人工备注',
             is_active=True,
         )
-        server = Server.objects.create(
-            source=Server.SOURCE_AWS_SYNC,
+        server = CloudAsset.objects.create(kind=CloudAsset.KIND_SERVER,
+            source=CloudAsset.SOURCE_AWS_SYNC,
             order=order,
             user=self.user,
             provider='aws_lightsail',
             region_code=self.plan.region_code,
             region_name=self.plan.region_name,
             public_ip='10.9.9.2',
-            status=Server.STATUS_RUNNING,
+            status=CloudAsset.STATUS_RUNNING,
             note='旧服务器备注',
             is_active=True,
         )
@@ -13992,19 +13658,19 @@ class CloudServerServicesTestCase(TestCase):
             status=CloudAsset.STATUS_RUNNING,
             is_active=True,
         )
-        server = Server.objects.create(
-            source=Server.SOURCE_AWS_SYNC,
+        server = CloudAsset.objects.create(kind=CloudAsset.KIND_SERVER,
+            source=CloudAsset.SOURCE_AWS_SYNC,
             order=order,
             user=self.user,
             provider='aws_lightsail',
             region_code=self.plan.region_code,
             region_name=self.plan.region_name,
-            server_name='aws-missing-confirm-server',
+            asset_name='aws-missing-confirm-server',
             public_ip='9.9.9.9',
             previous_public_ip='9.9.9.9',
             instance_id=order.instance_id,
             provider_resource_id=order.provider_resource_id,
-            status=Server.STATUS_RUNNING,
+            status=CloudAsset.STATUS_RUNNING,
             is_active=True,
         )
 
@@ -14014,7 +13680,7 @@ class CloudServerServicesTestCase(TestCase):
         self.assertEqual(asset.status, CloudAsset.STATUS_RUNNING)
         self.assertEqual(asset.provider_status, '云上未找到实例/IP-待确认')
         self.assertEqual(asset.sync_state['missing_confirmation']['count'], 1)
-        self.assertEqual(server.status, Server.STATUS_RUNNING)
+        self.assertEqual(server.status, CloudAsset.STATUS_RUNNING)
         self.assertEqual(order.status, 'completed')
 
         with patch('cloud.sync_safety.get_missing_confirmation_interval_minutes', return_value=0):
@@ -14023,7 +13689,7 @@ class CloudServerServicesTestCase(TestCase):
                 asset.refresh_from_db(); server.refresh_from_db(); order.refresh_from_db()
                 self.assertEqual(deleted, [])
                 self.assertEqual(asset.status, CloudAsset.STATUS_RUNNING)
-                self.assertEqual(server.status, Server.STATUS_RUNNING)
+                self.assertEqual(server.status, CloudAsset.STATUS_RUNNING)
                 self.assertEqual(order.status, 'completed')
 
             deleted = _mark_deleted_when_missing_in_aws(self.plan.region_code, set(), set(), DummyStdout())
@@ -14031,7 +13697,7 @@ class CloudServerServicesTestCase(TestCase):
         self.assertTrue(deleted)
         self.assertEqual(asset.status, CloudAsset.STATUS_DELETED)
         self.assertGreaterEqual(asset.sync_state['missing_confirmation']['count'], 5)
-        self.assertEqual(server.status, Server.STATUS_DELETED)
+        self.assertEqual(server.status, CloudAsset.STATUS_DELETED)
         self.assertEqual(order.status, 'deleted')
 
     # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
@@ -14090,8 +13756,8 @@ class CloudServerServicesTestCase(TestCase):
         self.assertEqual(order.ip_recycle_at, expected_schedule.ip_recycle_at)
 
     # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
-    def test_order_primary_records_prefer_ip_over_stale_names(self):
-        from cloud.services import _order_primary_asset, _order_primary_server
+    def test_order_primary_asset_prefers_ip_over_stale_names(self):
+        from cloud.services import _order_primary_asset
 
         order = CloudServerOrder.objects.create(
             order_no='PRIMARY-IP-FIRST-1',
@@ -14137,36 +13803,11 @@ class CloudServerServicesTestCase(TestCase):
             public_ip='9.9.9.20',
             status=CloudAsset.STATUS_RUNNING,
         )
-        stale_server = Server.objects.create(
-            order=order,
-            user=self.user,
-            provider='aws_lightsail',
-            region_code=self.plan.region_code,
-            server_name='stale-server-name',
-            instance_id='stale-instance-id',
-            provider_resource_id='stale-resource-id',
-            public_ip='8.8.8.8',
-            status=Server.STATUS_RUNNING,
-        )
-        ip_server = Server.objects.create(
-            order=order,
-            user=self.user,
-            provider='aws_lightsail',
-            region_code=self.plan.region_code,
-            server_name='current-server-name',
-            instance_id='current-instance-id',
-            public_ip='9.9.9.20',
-            status=Server.STATUS_RUNNING,
-        )
         stale_asset.previous_public_ip = '9.9.9.20'
         stale_asset.save(update_fields=['previous_public_ip', 'updated_at'])
-        stale_server.previous_public_ip = '9.9.9.20'
-        stale_server.save(update_fields=['previous_public_ip', 'updated_at'])
 
         self.assertEqual(_order_primary_asset(order).id, ip_asset.id)
-        self.assertEqual(_order_primary_server(order).id, ip_server.id)
         self.assertNotEqual(_order_primary_asset(order).id, stale_asset.id)
-        self.assertNotEqual(_order_primary_server(order).id, stale_server.id)
 
     # 功能：验证主记录更新只修改当前主资产，不误写同订单历史资产。
     def test_order_primary_record_update_does_not_mutate_stale_same_order_assets(self):
@@ -14222,7 +13863,6 @@ class CloudServerServicesTestCase(TestCase):
         selected, _ = _update_order_primary_records(
             order,
             asset_updates={'actual_expires_at': new_expiry, 'mtproxy_host': '9.9.9.99'},
-            server_updates={'expires_at': new_expiry},
         )
 
         stale_asset.refresh_from_db()
@@ -14389,16 +14029,16 @@ class CloudServerServicesTestCase(TestCase):
             provider_status='已关机-到期延停',
             is_active=False,
         )
-        server = Server.objects.create(
+        server = CloudAsset.objects.create(kind=CloudAsset.KIND_SERVER,
             order=order,
             user=self.user,
             provider='aws_lightsail',
             region_code=self.plan.region_code,
-            server_name='admin-start-instance',
+            asset_name='admin-start-instance',
             instance_id='admin-start-instance',
             public_ip='9.9.9.41',
             previous_public_ip='9.9.9.41',
-            status=Server.STATUS_STOPPED,
+            status=CloudAsset.STATUS_STOPPED,
             provider_status='已关机-到期延停',
             is_active=False,
         )
@@ -14427,7 +14067,7 @@ class CloudServerServicesTestCase(TestCase):
         self.assertEqual(returned_order.status, 'completed')
         self.assertEqual(order.status, 'completed')
         self.assertEqual(asset.status, CloudAsset.STATUS_RUNNING)
-        self.assertEqual(server.status, Server.STATUS_RUNNING)
+        self.assertEqual(server.status, CloudAsset.STATUS_RUNNING)
         self.assertTrue(asset.is_active)
         self.assertTrue(server.is_active)
 
@@ -14562,19 +14202,19 @@ class CloudServerServicesTestCase(TestCase):
             provider_status='未附加固定IP',
             is_active=False,
         )
-        server = Server.objects.create(
-            source=Server.SOURCE_AWS_SYNC,
+        server = CloudAsset.objects.create(kind=CloudAsset.KIND_SERVER,
+            source=CloudAsset.SOURCE_AWS_SYNC,
             order=order,
             user=self.user,
             provider='aws_lightsail',
             region_code=self.plan.region_code,
             region_name=self.plan.region_name,
-            server_name='aws-prev-ip-server',
+            asset_name='aws-prev-ip-server',
             public_ip=None,
             previous_public_ip='9.9.9.10',
             instance_id='',
             provider_resource_id='StaticIp-prev-ip-1',
-            status=Server.STATUS_UNKNOWN,
+            status=CloudAsset.STATUS_UNKNOWN,
             provider_status='未附加固定IP',
             is_active=False,
         )
@@ -14584,7 +14224,7 @@ class CloudServerServicesTestCase(TestCase):
 
         self.assertEqual(deleted, [])
         self.assertEqual(asset.status, CloudAsset.STATUS_UNKNOWN)
-        self.assertEqual(server.status, Server.STATUS_UNKNOWN)
+        self.assertEqual(server.status, CloudAsset.STATUS_UNKNOWN)
         self.assertEqual(order.status, 'completed')
         self.assertNotIn('云上未找到实例/IP-待确认', asset.provider_status or '')
 
@@ -14621,16 +14261,16 @@ class CloudServerServicesTestCase(TestCase):
             status=CloudAsset.STATUS_RUNNING,
             is_active=True,
         )
-        server = Server.objects.create(
-            source=Server.SOURCE_AWS_SYNC,
+        server = CloudAsset.objects.create(kind=CloudAsset.KIND_SERVER,
+            source=CloudAsset.SOURCE_AWS_SYNC,
             provider='aws_lightsail',
             region_code=self.plan.region_code,
-            server_name='aws-unrelated-live-server',
+            asset_name='aws-unrelated-live-server',
             public_ip='9.9.9.77',
             previous_public_ip='',
             instance_id='aws-unrelated-live-instance',
             provider_resource_id='',
-            status=Server.STATUS_RUNNING,
+            status=CloudAsset.STATUS_RUNNING,
             is_active=True,
         )
 
@@ -14641,7 +14281,7 @@ class CloudServerServicesTestCase(TestCase):
         asset.refresh_from_db()
         server.refresh_from_db()
         self.assertEqual(asset.status, CloudAsset.STATUS_DELETED)
-        self.assertEqual(server.status, Server.STATUS_RUNNING)
+        self.assertEqual(server.status, CloudAsset.STATUS_RUNNING)
 
     # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
     def test_sync_aliyun_order_update_recalculates_lifecycle_on_expiry_change(self):
@@ -14840,19 +14480,19 @@ class CloudServerServicesTestCase(TestCase):
             status=CloudAsset.STATUS_RUNNING,
             is_active=True,
         )
-        server = Server.objects.create(
-            source=Server.SOURCE_ALIYUN,
+        server = CloudAsset.objects.create(kind=CloudAsset.KIND_SERVER,
+            source=CloudAsset.SOURCE_ALIYUN,
             order=order,
             user=self.user,
             provider='aliyun_simple',
             region_code='cn-hongkong',
             region_name='中国香港',
-            server_name='aliyun-missing-confirm-server',
+            asset_name='aliyun-missing-confirm-server',
             public_ip='6.6.6.6',
             previous_public_ip='6.6.6.6',
             instance_id=order.instance_id,
             provider_resource_id=order.provider_resource_id,
-            status=Server.STATUS_RUNNING,
+            status=CloudAsset.STATUS_RUNNING,
             is_active=True,
         )
 
@@ -14862,7 +14502,7 @@ class CloudServerServicesTestCase(TestCase):
         self.assertEqual(asset.status, CloudAsset.STATUS_RUNNING)
         self.assertEqual(asset.provider_status, '云上未找到实例-待确认')
         self.assertEqual(asset.sync_state['missing_confirmation']['count'], 1)
-        self.assertEqual(server.status, Server.STATUS_RUNNING)
+        self.assertEqual(server.status, CloudAsset.STATUS_RUNNING)
         self.assertEqual(order.status, 'completed')
 
         with patch('cloud.sync_safety.get_missing_confirmation_interval_minutes', return_value=0):
@@ -14871,7 +14511,7 @@ class CloudServerServicesTestCase(TestCase):
                 asset.refresh_from_db(); server.refresh_from_db(); order.refresh_from_db()
                 self.assertEqual(deleted, [])
                 self.assertEqual(asset.status, CloudAsset.STATUS_RUNNING)
-                self.assertEqual(server.status, Server.STATUS_RUNNING)
+                self.assertEqual(server.status, CloudAsset.STATUS_RUNNING)
                 self.assertEqual(order.status, 'completed')
 
             deleted = _mark_deleted_when_missing_in_aliyun('cn-hongkong', set(), DummyStdout())
@@ -14879,7 +14519,7 @@ class CloudServerServicesTestCase(TestCase):
         self.assertTrue(deleted)
         self.assertEqual(asset.status, CloudAsset.STATUS_DELETED)
         self.assertGreaterEqual(asset.sync_state['missing_confirmation']['count'], 5)
-        self.assertEqual(server.status, Server.STATUS_DELETED)
+        self.assertEqual(server.status, CloudAsset.STATUS_DELETED)
         self.assertEqual(order.status, 'deleted')
 
     # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
@@ -14915,16 +14555,16 @@ class CloudServerServicesTestCase(TestCase):
             status=CloudAsset.STATUS_RUNNING,
             is_active=True,
         )
-        server = Server.objects.create(
-            source=Server.SOURCE_ALIYUN,
+        server = CloudAsset.objects.create(kind=CloudAsset.KIND_SERVER,
+            source=CloudAsset.SOURCE_ALIYUN,
             provider='aliyun_simple',
             region_code='cn-hongkong',
-            server_name='aliyun-unrelated-live-server',
+            asset_name='aliyun-unrelated-live-server',
             public_ip='6.6.6.77',
             previous_public_ip='',
             instance_id='aliyun-unrelated-live-instance',
             provider_resource_id='',
-            status=Server.STATUS_RUNNING,
+            status=CloudAsset.STATUS_RUNNING,
             is_active=True,
         )
 
@@ -14935,7 +14575,7 @@ class CloudServerServicesTestCase(TestCase):
         asset.refresh_from_db()
         server.refresh_from_db()
         self.assertEqual(asset.status, CloudAsset.STATUS_DELETED)
-        self.assertEqual(server.status, Server.STATUS_RUNNING)
+        self.assertEqual(server.status, CloudAsset.STATUS_RUNNING)
 
     # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
     def test_aliyun_order_is_not_enqueued_for_shutdown_delete_plan(self):
@@ -15059,22 +14699,6 @@ class CloudServerServicesTestCase(TestCase):
             note='未附加固定IP',
             is_active=False,
         )
-        server = Server.objects.create(
-            source=Server.SOURCE_AWS_SYNC,
-            user=self.user,
-            provider='aws_lightsail',
-            account_label=account_label,
-            region_code=self.plan.region_code,
-            region_name=self.plan.region_name,
-            server_name='rebind-static-ip-server',
-            public_ip='10.9.0.2',
-            expires_at=asset.actual_expires_at,
-            status=Server.STATUS_UNKNOWN,
-            provider_status='未附加固定IP',
-            note='未附加固定IP',
-            is_active=False,
-        )
-
         # 测试类：组织 FakeLightsailClient 相关的回归测试。
         class FakeLightsailClient:
             # 功能：读取并返回相关数据；当前函数属于 云资产、云订单和生命周期。
@@ -15100,18 +14724,12 @@ class CloudServerServicesTestCase(TestCase):
             call_command('sync_aws_assets', region='ap-southeast-1')
 
         asset.refresh_from_db()
-        server.refresh_from_db()
         self.assertEqual(asset.instance_id, 'i-rebound-sync-1')
         self.assertEqual(asset.provider_status, '已重新绑定实例-待人工添加时间')
         self.assertIsNone(asset.actual_expires_at)
         self.assertTrue(asset.is_active)
         self.assertEqual(asset.status, CloudAsset.STATUS_RUNNING)
         self.assertEqual(asset.note, '未附加固定IP')
-        self.assertEqual(server.instance_id, 'i-rebound-sync-1')
-        self.assertIsNone(server.expires_at)
-        self.assertEqual(server.provider_status, '已重新绑定实例-待人工添加时间')
-        self.assertTrue(server.is_active)
-        self.assertEqual(server.status, Server.STATUS_RUNNING)
 
     # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
     def test_sync_aws_assets_updates_retained_asset_after_renewal_recovery(self):
@@ -15635,21 +15253,21 @@ class CloudServerServicesTestCase(TestCase):
             provider_status='已到期关机，等待删除（云端已关机）',
             is_active=False,
         )
-        server = Server.objects.create(
-            source=Server.SOURCE_AWS_SYNC,
+        server = CloudAsset.objects.create(kind=CloudAsset.KIND_SERVER,
+            source=CloudAsset.SOURCE_AWS_SYNC,
             order=order,
             user=self.user,
             provider='aws_lightsail',
             account_label=account_label,
             region_code=self.plan.region_code,
             region_name=self.plan.region_name,
-            server_name='i-suspended-runtime-1',
+            asset_name='i-suspended-runtime-1',
             public_ip='10.9.0.3',
             previous_public_ip='10.9.0.3',
             instance_id=order.instance_id,
             provider_resource_id=order.provider_resource_id,
-            expires_at=asset_expires_at,
-            status=Server.STATUS_SUSPENDED,
+            actual_expires_at=asset_expires_at,
+            status=CloudAsset.STATUS_SUSPENDED,
             provider_status='已到期关机，等待删除（云端已关机）',
             is_active=False,
         )
@@ -15683,7 +15301,7 @@ class CloudServerServicesTestCase(TestCase):
         order.refresh_from_db()
         self.assertEqual(asset.status, CloudAsset.STATUS_RUNNING)
         self.assertTrue(asset.is_active)
-        self.assertEqual(server.status, Server.STATUS_RUNNING)
+        self.assertEqual(server.status, CloudAsset.STATUS_RUNNING)
         self.assertTrue(server.is_active)
         self.assertEqual(order.status, 'suspended')
         self.assertIn('云端运行中', asset.provider_status or '')
@@ -15743,19 +15361,19 @@ class CloudServerServicesTestCase(TestCase):
             note='IP校验发现云上不存在，已标记删除',
             is_active=False,
         )
-        server = Server.objects.create(
-            source=Server.SOURCE_AWS_SYNC,
+        server = CloudAsset.objects.create(kind=CloudAsset.KIND_SERVER,
+            source=CloudAsset.SOURCE_AWS_SYNC,
             user=self.user,
             provider='aws_lightsail',
             account_label=account_label,
             region_code=self.plan.region_code,
             region_name=self.plan.region_name,
-            server_name='i-revive-dirty-deleted-asset',
+            asset_name='i-revive-dirty-deleted-asset',
             public_ip='10.9.0.6',
             previous_public_ip='10.9.0.6',
             instance_id='i-revive-dirty-deleted-asset',
             provider_resource_id='arn:aws:lightsail:ap-southeast-1:123456789012:Instance/i-revive-dirty-deleted-asset',
-            status=Server.STATUS_DELETED,
+            status=CloudAsset.STATUS_DELETED,
             provider_status='云上未找到实例/IP-待确认',
             note='服务器校验发现云上不存在，已标记删除',
             is_active=False,
@@ -15792,7 +15410,7 @@ class CloudServerServicesTestCase(TestCase):
         self.assertTrue(asset.is_active)
         self.assertNotIn('已标记删除', asset.note or '')
         self.assertNotIn('云上不存在', asset.note or '')
-        self.assertEqual(server.status, Server.STATUS_RUNNING)
+        self.assertEqual(server.status, CloudAsset.STATUS_RUNNING)
         self.assertTrue(server.is_active)
         self.assertNotIn('已标记删除', server.note or '')
         queried = async_to_sync(get_proxy_asset_by_ip_for_user)('10.9.0.6', self.user.id)
@@ -15952,18 +15570,18 @@ class CloudServerServicesTestCase(TestCase):
             provider_status='已删除',
             is_active=False,
         )
-        server = Server.objects.create(
-            source=Server.SOURCE_AWS_SYNC,
+        server = CloudAsset.objects.create(kind=CloudAsset.KIND_SERVER,
+            source=CloudAsset.SOURCE_AWS_SYNC,
             user=self.user,
             provider='aws_lightsail',
             region_code=self.plan.region_code,
             region_name=self.plan.region_name,
-            server_name='deleted-sync-server',
+            asset_name='deleted-sync-server',
             instance_id='deleted-sync-instance',
             provider_resource_id='deleted-sync-arn',
             public_ip=None,
             previous_public_ip='20.20.20.31',
-            status=Server.STATUS_DELETED,
+            status=CloudAsset.STATUS_DELETED,
             provider_status='已删除',
             is_active=False,
         )
@@ -16021,33 +15639,33 @@ class CloudServerServicesTestCase(TestCase):
             provider_status='运行中',
             is_active=True,
         )
-        aws_ip_server = Server.objects.create(
-            source=Server.SOURCE_AWS_SYNC,
+        aws_ip_server = CloudAsset.objects.create(kind=CloudAsset.KIND_SERVER,
+            source=CloudAsset.SOURCE_AWS_SYNC,
             user=self.user,
             provider='aws_lightsail',
             account_label=aws_label,
             region_code=self.plan.region_code,
             region_name=self.plan.region_name,
-            server_name='aws-old-instance-for-same-ip',
+            asset_name='aws-old-instance-for-same-ip',
             instance_id='aws-old-instance-for-same-ip',
             provider_resource_id='arn:aws:lightsail:ap-southeast-1:123456789012:Instance/aws-old-instance-for-same-ip',
             public_ip='20.20.20.40',
-            status=Server.STATUS_RUNNING,
+            status=CloudAsset.STATUS_RUNNING,
             provider_status='运行中',
             is_active=True,
         )
-        Server.objects.create(
-            source=Server.SOURCE_AWS_SYNC,
+        CloudAsset.objects.create(kind=CloudAsset.KIND_SERVER,
+            source=CloudAsset.SOURCE_AWS_SYNC,
             user=self.user,
             provider='aws_lightsail',
             account_label=aws_label,
             region_code=self.plan.region_code,
             region_name=self.plan.region_name,
-            server_name='aws-new-instance-conflict',
+            asset_name='aws-new-instance-conflict',
             instance_id='aws-new-instance-conflict',
             provider_resource_id='arn:aws:lightsail:ap-southeast-1:123456789012:Instance/aws-new-instance-conflict',
             public_ip='20.20.20.41',
-            status=Server.STATUS_RUNNING,
+            status=CloudAsset.STATUS_RUNNING,
             provider_status='运行中',
             is_active=True,
         )
@@ -16099,33 +15717,33 @@ class CloudServerServicesTestCase(TestCase):
             provider_status='运行中',
             is_active=True,
         )
-        aliyun_ip_server = Server.objects.create(
-            source=Server.SOURCE_ALIYUN,
+        aliyun_ip_server = CloudAsset.objects.create(kind=CloudAsset.KIND_SERVER,
+            source=CloudAsset.SOURCE_ALIYUN,
             user=self.user,
             provider='aliyun_simple',
             account_label=aliyun_label,
             region_code='cn-hongkong',
             region_name='香港',
-            server_name='aliyun-old-instance-for-same-ip',
+            asset_name='aliyun-old-instance-for-same-ip',
             instance_id='aliyun-old-instance-for-same-ip',
             provider_resource_id='aliyun-old-instance-for-same-ip',
             public_ip='20.20.20.42',
-            status=Server.STATUS_RUNNING,
+            status=CloudAsset.STATUS_RUNNING,
             provider_status='运行中',
             is_active=True,
         )
-        Server.objects.create(
-            source=Server.SOURCE_ALIYUN,
+        CloudAsset.objects.create(kind=CloudAsset.KIND_SERVER,
+            source=CloudAsset.SOURCE_ALIYUN,
             user=self.user,
             provider='aliyun_simple',
             account_label=aliyun_label,
             region_code='cn-hongkong',
             region_name='香港',
-            server_name='aliyun-new-instance-conflict',
+            asset_name='aliyun-new-instance-conflict',
             instance_id='aliyun-new-instance-conflict',
             provider_resource_id='aliyun-new-instance-conflict',
             public_ip='20.20.20.43',
-            status=Server.STATUS_RUNNING,
+            status=CloudAsset.STATUS_RUNNING,
             provider_status='运行中',
             is_active=True,
         )
@@ -16164,30 +15782,30 @@ class CloudServerServicesTestCase(TestCase):
             provider_status='运行中',
             is_active=True,
         )
-        current_server = Server.objects.create(
-            source=Server.SOURCE_AWS_SYNC,
+        current_server = CloudAsset.objects.create(kind=CloudAsset.KIND_SERVER,
+            source=CloudAsset.SOURCE_AWS_SYNC,
             user=self.user,
             provider='aws_lightsail',
             region_code=self.plan.region_code,
             region_name=self.plan.region_name,
-            server_name='current-ip-owner',
+            asset_name='current-ip-owner',
             instance_id='current-ip-owner',
             public_ip='20.20.20.50',
-            status=Server.STATUS_RUNNING,
+            status=CloudAsset.STATUS_RUNNING,
             provider_status='运行中',
             is_active=True,
         )
-        Server.objects.create(
-            source=Server.SOURCE_AWS_SYNC,
+        CloudAsset.objects.create(kind=CloudAsset.KIND_SERVER,
+            source=CloudAsset.SOURCE_AWS_SYNC,
             user=self.user,
             provider='aws_lightsail',
             region_code=self.plan.region_code,
             region_name=self.plan.region_name,
-            server_name='stale-previous-ip-owner',
+            asset_name='stale-previous-ip-owner',
             instance_id='stale-previous-ip-owner',
             public_ip='20.20.20.51',
             previous_public_ip='20.20.20.50',
-            status=Server.STATUS_RUNNING,
+            status=CloudAsset.STATUS_RUNNING,
             provider_status='运行中',
             is_active=True,
         )
@@ -16239,20 +15857,20 @@ class CloudServerServicesTestCase(TestCase):
             provider_status='运行中',
             is_active=True,
         )
-        server = Server.objects.create(
-            source=Server.SOURCE_ORDER,
+        server = CloudAsset.objects.create(kind=CloudAsset.KIND_SERVER,
+            source=CloudAsset.SOURCE_ORDER,
             order=order,
             user=self.user,
             provider='aws_lightsail',
             region_code=self.plan.region_code,
             region_name=self.plan.region_name,
-            server_name='delete-retain-instance',
+            asset_name='delete-retain-instance',
             instance_id='delete-retain-instance',
             provider_resource_id='delete-retain-arn',
             public_ip='20.20.20.32',
             previous_public_ip='20.20.20.32',
-            expires_at=recycle_at,
-            status=Server.STATUS_RUNNING,
+            actual_expires_at=recycle_at,
+            status=CloudAsset.STATUS_RUNNING,
             provider_status='运行中',
             is_active=True,
         )
@@ -16269,7 +15887,7 @@ class CloudServerServicesTestCase(TestCase):
         self.assertGreater(order.ip_recycle_at, recycle_at)
         self.assertGreater(order.ip_recycle_at, now + timezone.timedelta(days=14))
         self.assertEqual(asset.actual_expires_at, order.ip_recycle_at)
-        self.assertEqual(server.expires_at, order.ip_recycle_at)
+        self.assertEqual(server.actual_expires_at, order.ip_recycle_at)
         self.assertIn('固定IP名=StaticIp-delete-retain', order.provision_note)
         self.assertIn('未附加 IP 计划回收=', order.provision_note)
         self.assertEqual(order.instance_id, '')
@@ -16279,7 +15897,7 @@ class CloudServerServicesTestCase(TestCase):
         self.assertEqual(asset.provider_status, '固定IP保留中-实例已删除')
         self.assertEqual(server.public_ip, '20.20.20.32')
         self.assertIsNone(server.instance_id)
-        self.assertEqual(server.status, Server.STATUS_DELETED)
+        self.assertEqual(server.status, CloudAsset.STATUS_DELETED)
         self.assertEqual(server.provider_status, '固定IP保留中-实例已删除')
         self.assertFalse(any(getattr(item, 'asset_id', None) == asset.id for item in async_to_sync(list_user_cloud_servers)(self.user.id)))
         admin = get_user_model().objects.create_user(username='admin_retained_ip_asset_filter', password='x', is_staff=True)
@@ -17210,16 +16828,16 @@ class CloudServerServicesTestCase(TestCase):
             note='未附加固定IP',
             is_active=False,
         )
-        server = Server.objects.create(
-            source=Server.SOURCE_AWS_SYNC,
+        server = CloudAsset.objects.create(kind=CloudAsset.KIND_SERVER,
+            source=CloudAsset.SOURCE_AWS_SYNC,
             user=self.user,
             provider='aws_lightsail',
             region_code=self.plan.region_code,
             region_name=self.plan.region_name,
-            server_name='unattached-static-ip-shadow',
+            asset_name='unattached-static-ip-shadow',
             public_ip='21.21.21.21',
-            expires_at=due_at,
-            status=Server.STATUS_UNKNOWN,
+            actual_expires_at=due_at,
+            status=CloudAsset.STATUS_UNKNOWN,
             provider_status='未附加固定IP',
             note='未附加固定IP',
             is_active=False,
@@ -17246,7 +16864,7 @@ class CloudServerServicesTestCase(TestCase):
         self.assertEqual(asset.provider_status, '未附加固定IP-已到期删除')
         self.assertIsNone(asset.public_ip)
         self.assertEqual(asset.previous_public_ip, '21.21.21.21')
-        self.assertEqual(server.status, Server.STATUS_DELETED)
+        self.assertEqual(server.status, CloudAsset.STATUS_DELETED)
         self.assertEqual(server.provider_status, '未附加固定IP-已到期删除')
         self.assertIsNone(server.public_ip)
         self.assertEqual(server.previous_public_ip, '21.21.21.21')
@@ -17749,7 +17367,7 @@ class CloudOrderStatusDashboardSyncTestCase(TestCase):
         )
 
     # 功能：提供 云资产、云订单和生命周期 的内部辅助逻辑，供同模块流程复用。
-    def _create_order_with_primary_records(self):
+    def _create_order_with_primary_asset(self):
         expires_at = timezone.now() + timezone.timedelta(days=20)
         order = CloudServerOrder.objects.create(
             order_no='STATUS-SYNC-ORDER',
@@ -17781,20 +17399,7 @@ class CloudOrderStatusDashboardSyncTestCase(TestCase):
             status=CloudAsset.STATUS_RUNNING,
             is_active=True,
         )
-        server = Server.objects.create(
-            source=Server.SOURCE_ORDER,
-            order=order,
-            user=self.user,
-            provider=order.provider,
-            region_code=order.region_code,
-            region_name=order.region_name,
-            server_name='status-sync-server',
-            public_ip=order.public_ip,
-            expires_at=expires_at,
-            status=Server.STATUS_RUNNING,
-            is_active=True,
-        )
-        return order, asset, server
+        return order, asset
 
     # 功能：提供 云资产、云订单和生命周期 的内部辅助逻辑，供同模块流程复用。
     def _post_json(self, view, path, payload, *args):
@@ -17809,46 +17414,37 @@ class CloudOrderStatusDashboardSyncTestCase(TestCase):
         return view(request, *args)
 
     # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
-    def test_status_endpoint_syncs_primary_asset_and_server_status(self):
-        order, asset, server = self._create_order_with_primary_records()
+    def test_status_endpoint_syncs_primary_asset_status(self):
+        order, asset = self._create_order_with_primary_asset()
 
         response = self._post_json(update_cloud_order_status, f'/admin/cloud-orders/{order.id}/status/', {'status': 'suspended'}, order.id)
 
         self.assertEqual(response.status_code, 200)
         order.refresh_from_db()
         asset.refresh_from_db()
-        server.refresh_from_db()
         self.assertEqual(order.status, 'suspended')
         self.assertFalse(asset.is_active)
         self.assertEqual(asset.status, CloudAsset.STATUS_STOPPED)
-        self.assertFalse(server.is_active)
-        self.assertEqual(server.status, Server.STATUS_STOPPED)
 
     # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
-    def test_order_detail_status_edit_syncs_primary_asset_and_server_status(self):
-        order, asset, server = self._create_order_with_primary_records()
+    def test_order_detail_status_edit_syncs_primary_asset_status(self):
+        order, asset = self._create_order_with_primary_asset()
 
         response = self._post_json(cloud_order_detail, f'/admin/cloud-orders/{order.id}/', {'status': 'deleted'}, order.id)
 
         self.assertEqual(response.status_code, 200)
         order.refresh_from_db()
         asset.refresh_from_db()
-        server.refresh_from_db()
         self.assertEqual(order.status, 'deleted')
         self.assertFalse(asset.is_active)
         self.assertEqual(asset.status, CloudAsset.STATUS_DELETED)
-        self.assertFalse(server.is_active)
-        self.assertEqual(server.status, Server.STATUS_DELETED)
 
     # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
     def test_order_detail_manual_edit_syncs_cloud_identity_and_proxy_fields(self):
-        order, asset, server = self._create_order_with_primary_records()
+        order, asset = self._create_order_with_primary_asset()
         asset_expiry = timezone.now() + timezone.timedelta(days=20)
-        server_expiry = timezone.now() + timezone.timedelta(days=21)
         asset.actual_expires_at = asset_expiry
         asset.save(update_fields=['actual_expires_at'])
-        server.expires_at = server_expiry
-        server.save(update_fields=['actual_expires_at'])
         expires_at = timezone.now() + timezone.timedelta(days=45)
 
         response = self._post_json(cloud_order_detail, f'/admin/cloud-orders/{order.id}/', {
@@ -17865,18 +17461,12 @@ class CloudOrderStatusDashboardSyncTestCase(TestCase):
         self.assertEqual(response.status_code, 200)
         order.refresh_from_db()
         asset.refresh_from_db()
-        server.refresh_from_db()
         self.assertEqual(order.previous_public_ip, '203.0.113.10')
         self.assertEqual(asset.asset_name, 'manual-edited-name')
-        self.assertEqual(server.server_name, 'manual-edited-name')
         self.assertEqual(asset.public_ip, '203.0.113.88')
-        self.assertEqual(server.public_ip, '203.0.113.88')
         self.assertEqual(asset.previous_public_ip, '203.0.113.10')
-        self.assertEqual(server.previous_public_ip, '203.0.113.10')
         self.assertEqual(asset.instance_id, 'manual-edited-instance')
-        self.assertEqual(server.instance_id, 'manual-edited-instance')
         self.assertEqual(asset.provider_resource_id, 'manual-edited-resource')
-        self.assertEqual(server.provider_resource_id, 'manual-edited-resource')
         self.assertEqual(asset.mtproxy_host, '203.0.113.88')
         self.assertEqual(asset.mtproxy_link, 'tg://proxy?server=203.0.113.88&port=443&secret=abcdef')
         self.assertEqual(order.mtproxy_link, 'tg://proxy?server=203.0.113.88&port=443&secret=abcdef')
@@ -17886,11 +17476,10 @@ class CloudOrderStatusDashboardSyncTestCase(TestCase):
         self.assertEqual(order.proxy_links[0]['url'], 'tg://proxy?server=203.0.113.88&port=443&secret=abcdef')
         self.assertEqual(asset.proxy_links[0]['url'], 'tg://proxy?server=203.0.113.88&port=443&secret=abcdef')
         self.assertEqual(asset.actual_expires_at, expires_at)
-        self.assertEqual(server.expires_at, expires_at)
 
     # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
     def test_order_detail_manual_secret_edit_syncs_primary_asset(self):
-        order, asset, _server = self._create_order_with_primary_records()
+        order, asset = self._create_order_with_primary_asset()
         order.mtproxy_secret = 'old-secret'
         order.save(update_fields=['mtproxy_secret'])
         asset.mtproxy_secret = 'old-secret'
@@ -17908,7 +17497,7 @@ class CloudOrderStatusDashboardSyncTestCase(TestCase):
 
     # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
     def test_order_detail_manual_secret_edit_updates_main_link_and_proxy_links(self):
-        order, asset, _server = self._create_order_with_primary_records()
+        order, asset = self._create_order_with_primary_asset()
         old_link = 'tg://proxy?server=203.0.113.10&port=443&secret=old-secret&tag=keep'
         backup_link = 'tg://proxy?server=203.0.113.10&port=8443&secret=backup-secret'
         order.mtproxy_link = old_link
@@ -17942,8 +17531,8 @@ class CloudOrderStatusDashboardSyncTestCase(TestCase):
         self.assertIn('secret=new-secret', asset.proxy_links[0]['url'])
 
     # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
-    def test_order_detail_manual_previous_ip_edit_syncs_primary_records(self):
-        order, asset, server = self._create_order_with_primary_records()
+    def test_order_detail_manual_previous_ip_edit_syncs_primary_asset(self):
+        order, asset = self._create_order_with_primary_asset()
 
         response = self._post_json(cloud_order_detail, f'/admin/cloud-orders/{order.id}/', {
             'previous_public_ip': '203.0.113.9',
@@ -17952,22 +17541,19 @@ class CloudOrderStatusDashboardSyncTestCase(TestCase):
         self.assertEqual(response.status_code, 200)
         order.refresh_from_db()
         asset.refresh_from_db()
-        server.refresh_from_db()
         self.assertEqual(order.public_ip, '203.0.113.10')
         self.assertEqual(order.previous_public_ip, '203.0.113.9')
         self.assertEqual(asset.previous_public_ip, '203.0.113.9')
-        self.assertEqual(server.previous_public_ip, '203.0.113.9')
 
     # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
     def test_delete_cloud_order_blocks_physical_delete_when_cloud_records_exist(self):
-        order, asset, server = self._create_order_with_primary_records()
+        order, asset = self._create_order_with_primary_asset()
 
         response = self._post_json(delete_cloud_order, f'/admin/cloud-orders/{order.id}/delete/', {}, order.id)
 
         self.assertEqual(response.status_code, 409)
         self.assertTrue(CloudServerOrder.objects.filter(id=order.id).exists())
         self.assertTrue(CloudAsset.objects.filter(id=asset.id, order=order).exists())
-        self.assertTrue(Server.objects.filter(id=server.id, order=order).exists())
 
     # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
     def test_delete_cloud_order_allows_unlinked_pending_order(self):

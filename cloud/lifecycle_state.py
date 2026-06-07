@@ -32,21 +32,19 @@ RETAINED_IP_ASSET_STATUSES = {
 }
 
 
-def primary_record_updates_for_order_status(order_status: str) -> tuple[dict, dict]:
+def primary_record_updates_for_order_status(order_status: str) -> dict:
     status = str(order_status or '').strip()
     if status in ACTIVE_ORDER_STATUSES:
-        updates = {
+        return {
             'is_active': True,
             'status': ORDER_TO_ASSET_STATUS[status],
         }
-        return updates, dict(updates)
     if status in INACTIVE_ORDER_STATUSES:
-        updates = {
+        return {
             'is_active': False,
             'status': ORDER_TO_ASSET_STATUS.get(status, CloudAsset.STATUS_UNKNOWN),
         }
-        return updates, dict(updates)
-    return {}, {}
+    return {}
 
 
 def order_status_from_cloud_status(status: str, *, expires_at=None, now=None, default='completed') -> str:

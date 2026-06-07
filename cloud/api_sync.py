@@ -40,8 +40,8 @@ def _apply_server_missing_state(provider, region, existing_instance_ids, account
     queryset = CloudAsset.objects.filter(kind=CloudAsset.KIND_SERVER, provider=provider, region_code=region).exclude(instance_id__isnull=True).exclude(instance_id='')
     if account:
         queryset = queryset.filter(account_label__in=cloud_account_label_variants(account))
-    legacy_queryset = queryset.filter(provider_status='missing')
-    legacy_updated = legacy_queryset.update(
+    missing_state_queryset = queryset.filter(provider_status='missing')
+    updated = missing_state_queryset.update(
         status=CloudAsset.STATUS_DELETED,
         provider_status='已删除',
         is_active=False,
@@ -60,7 +60,7 @@ def _apply_server_missing_state(provider, region, existing_instance_ids, account
         getattr(account, 'id', None),
         len([item for item in existing_instance_ids or [] if item]),
     )
-    return legacy_updated
+    return updated
 
 
 # 功能：同步外部或派生数据；当前函数属于 云同步后台 API。

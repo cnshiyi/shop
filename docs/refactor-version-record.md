@@ -10565,3 +10565,78 @@ rg -n "lifecycle_plan_projection|0058_lifecycle_task_plan_page_index|plan_projec
 
 - 后续如需要跑 MySQL 全量测试，应先人工确认 `test_a` 是否可删除，或配置独立测试库名，避免误删本地数据。
 - 下一轮继续按 `TODO.md` 首个未完成任务领取；若仍无未完成任务，继续固定巡检并只修一个明确安全问题。
+
+## 2026-06-07 移除兼容残留
+
+### 背景
+
+用户明确要求“移除兼容残留”，并确认“不需要兼容了”。本轮按当前重构方向继续收口，不恢复废弃 runtime app，不恢复旧订单到期字段、旧计划快照、旧退款入口或旧 `Server` 兼容壳。
+
+### 修改
+
+- 删除旧兼容入口文件：
+  - `cloud/api.py`
+  - `cloud/server_records.py`
+  - `cloud/management/commands/reconcile_cloud_assets_from_servers.py`
+- 删除后台旧兼容路由：
+  - `task-list-compat`
+  - `plan-settings-compat`
+- 删除机器人旧提醒兼容：
+  - `cloud:mute` 回退到用户级静默的分支
+  - `mute_cloud_reminders`
+  - `unmute_cloud_reminders`
+- `CloudAsset` 移除旧别名：
+  - `server_name`
+  - `expires_at`
+- 云订单状态同步只写当前资产记录：
+  - 删除 `server_updates`
+  - 删除 `_order_primary_server`
+  - 删除旧 server 字段到 asset 字段的映射辅助逻辑
+- 云账号标签收敛为当前标准标签：
+  - `cloud_account_label_variants()` 只返回 `provider+external_account_id+name`
+  - `get_cloud_account_from_label()` 不再解析冒号标签和 provider-only 标签
+- AWS / Aliyun 同步、资产编辑、重建迁移、删除服务器接口移除 `compat_server_record` 分支。
+- 测试改为当前架构口径：
+  - `Server.objects.create(...)` 改为直接创建 `CloudAsset`
+  - `server_name` / `expires_at` 兼容断言改为 `asset_name` / `actual_expires_at`
+  - 删除旧 Server 兼容入口测试
+  - 账号标签测试改为验证当前标签，不再覆盖旧冒号标签
+  - 删除或改名测试中的兼容残留文案
+
+### 验证
+
+本地已通过：
+
+```bash
+uv run python -m py_compile bot/tests.py cloud/tests.py core/tests.py bot/handlers.py cloud/models.py cloud/services.py cloud/api_orders.py cloud/api_asset_edit.py cloud/api_servers.py cloud/provisioning.py cloud/lifecycle_state.py cloud/management/commands/sync_aws_assets.py cloud/management/commands/sync_aliyun_assets.py shop/admin_urls.py
+uv run python manage.py check
+DJANGO_TEST_SQLITE=1 uv run python manage.py test bot.tests.ApiPrefixContractTestCase cloud.tests.CloudServerServicesTestCase.test_cloud_account_label_variants_return_current_label_only cloud.tests.CloudServerServicesTestCase.test_account_load_does_not_count_provider_only_label_for_every_account cloud.tests.CloudServerServicesTestCase.test_aws_sync_server_resolution_accepts_current_account_label cloud.tests.CloudServerServicesTestCase.test_unattached_ip_delete_log_without_known_note_shows_history cloud.tests.CloudServerServicesTestCase.test_dashboard_asset_update_matches_current_account_label cloud.tests.CloudServerServicesTestCase.test_lifecycle_plans_separate_ip_delete_plan_and_history_items core.tests.CryptoDecryptTestCase --settings=shop.settings --verbosity=1
+DJANGO_TEST_SQLITE=1 uv run python manage.py test cloud.tests.CloudOrderStatusDashboardSyncTestCase --settings=shop.settings --verbosity=1
+DJANGO_TEST_SQLITE=1 uv run python manage.py test cloud.tests.CloudServerServicesTestCase.test_dedupe_cloud_assets_merges_same_cloud_account_label_variants cloud.tests.CloudServerServicesTestCase.test_cloud_assets_list_dedupes_same_cloud_account_label_variants cloud.tests.CloudServerServicesTestCase.test_aws_sync_resolution_does_not_match_cross_region_same_instance_without_ip cloud.tests.CloudServerServicesTestCase.test_dashboard_asset_update_matches_current_account_label --settings=shop.settings --verbosity=1
+DB_ENGINE=mysql uv run python manage.py check
+uv run python manage.py makemigrations --check --dry-run
+git diff --check
+```
+
+结果：编译通过；默认和 MySQL `manage.py check` 通过；迁移检查无待生成迁移；聚焦测试共 21 条通过；diff 空白检查通过。SQLite 测试中的字段/表注释警告为已知数据库能力差异。
+
+### 红线扫描
+
+```bash
+rg -n "legacy|compat|兼容|server_records|reconcile_cloud_assets_from_servers|_order_primary_server|server_updates|task-list-compat|plan-settings-compat|mute_cloud_reminders|unmute_cloud_reminders|Server\\.objects|cloud\\.server_records|compat_server_record|sync_state__compat_server_record" shop core bot orders cloud -g '!*/migrations/*'
+rg -n "\\bfrom cloud import api\\b|\\bimport cloud\\.api\\b|\\bfrom cloud\\.api import\\b|\\bfrom cloud\\.api$" shop core bot orders cloud -g '!*/migrations/*'
+rg -n "service_expires_at|old_refund|legacy_refund|refund_cloud_order|refund_order|apply_refund|process_refund|create_refund|lifecycle_plan_projection|0058_lifecycle_task_plan_page_index|plan_projection|page_lifecycle_plan_tasks|sync_lifecycle_plan_projection" shop core bot orders cloud -g '!*/migrations/*'
+```
+
+结果：无命中。
+
+### 红线
+
+- 本轮未执行真实云资源创建、删除、关机、释放 IP、换 IP、真实支付、链上广播、删除业务数据、删除测试库或生产发布。
+- 本轮未打印密钥、私钥、Telegram session、TOTP、支付密钥或云厂商密钥。
+- 本轮未恢复废弃 runtime app、订单侧到期字段、旧计划快照、旧退款入口或旧 `Server` 兼容壳。
+
+### 剩余风险
+
+- 旧兼容入口删除后，仍持有旧冒号账号标签或 provider-only 标签的数据不会再被账号标签辅助函数归属到云账号；这是本轮按“不需要兼容”执行的预期结果。
+- 默认 MySQL 全量测试仍可能遇到已有测试库 `test_a` 的交互确认；本轮未删除测试库，继续使用 SQLite 隔离库跑聚焦测试。

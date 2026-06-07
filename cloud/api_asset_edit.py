@@ -26,7 +26,6 @@ from cloud.dashboard_snapshots import _refresh_dashboard_plan_snapshots, _refres
 from cloud.lifecycle_schedule import compute_order_lifecycle_fields
 from cloud.models import CloudAsset, CloudIpLog, CloudServerOrder, CloudServerPlan
 from cloud.note_utils import append_note
-from cloud.server_records import Server
 from cloud.services import ensure_cloud_asset_operation_order, ensure_manual_expiry_operation_order, ensure_manual_owner_operation_order, ensure_manual_price_operation_order, record_cloud_ip_log, replace_cloud_asset_order_by_admin, scoped_server_match_for_asset, set_cloud_server_auto_renew_admin, sync_cloud_asset_user_binding
 from core.dashboard_api import _error, _iso, _ok, _parse_decimal, _read_payload, _status_label, dashboard_login_required, dashboard_superuser_required
 
@@ -381,28 +380,28 @@ def update_cloud_asset(request, asset_id):
     if linked_order_id and pending_order_updates and not manual_replace_authoritative:
         try:
             CloudServerOrder.objects.filter(pk=linked_order_id).update(**pending_order_updates, updated_at=timezone.now())
-            server_updates = {}
+            linked_asset_updates = {}
             if 'public_ip' in pending_order_updates:
-                server_updates['public_ip'] = pending_order_updates.get('public_ip')
+                linked_asset_updates['public_ip'] = pending_order_updates.get('public_ip')
             if 'previous_public_ip' in pending_order_updates:
-                server_updates['previous_public_ip'] = pending_order_updates.get('previous_public_ip')
-            if server_updates:
-                Server.objects.filter(order_id=linked_order_id).update(**server_updates, updated_at=timezone.now())
+                linked_asset_updates['previous_public_ip'] = pending_order_updates.get('previous_public_ip')
+            if linked_asset_updates:
+                CloudAsset.objects.filter(kind=CloudAsset.KIND_SERVER, order_id=linked_order_id).update(**linked_asset_updates, updated_at=timezone.now())
         except Exception as exc:
             logger.warning('CLOUD_ASSET_MANUAL_ORDER_SYNC_SKIPPED asset_id=%s order_id=%s fields=%s error=%s', asset_id, linked_order_id, sorted(pending_order_updates), exc)
 
     asset = CloudAsset.objects.select_related('user', 'order', 'cloud_account', 'telegram_group').get(pk=asset_id)
     if related_server_sync_updates:
-        server_updates = dict(related_server_sync_updates)
+        related_asset_updates = dict(related_server_sync_updates)
         if 'public_ip' in payload and changed_public_ip_before:
-            server_updates['previous_public_ip'] = changed_public_ip_before
+            related_asset_updates['previous_public_ip'] = changed_public_ip_before
         try:
-            Server.objects.filter(
+            CloudAsset.objects.filter(
                 scoped_server_match_for_asset(asset, include_order=False, include_ip=True),
-                sync_state__compat_server_record=True,
-            ).exclude(id=asset.id).update(**server_updates, updated_at=timezone.now())
+                kind=CloudAsset.KIND_SERVER,
+            ).exclude(id=asset.id).update(**related_asset_updates, updated_at=timezone.now())
         except Exception as exc:
-            logger.warning('CLOUD_ASSET_RELATED_SERVER_SYNC_SKIPPED asset_id=%s fields=%s error=%s', asset_id, sorted(server_updates), exc)
+            logger.warning('CLOUD_ASSET_RELATED_ASSET_SYNC_SKIPPED asset_id=%s fields=%s error=%s', asset_id, sorted(related_asset_updates), exc)
     if refresh_unattached_delete_due and refreshed_due_at:
         related_ids = list(
             _related_cloud_asset_records(asset, order=asset.order, previous_public_ip=changed_public_ip_before)
