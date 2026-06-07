@@ -14491,3 +14491,73 @@ rg -n "service_expires_at|actual_expires_at.*CloudServerOrder|CloudServerOrder.*
 - 未发现需要修改代码的问题。
 - 仅更新 `docs/auto-optimization-latest.md` 和 `docs/refactor-version-record.md` 记录巡检结果。
 - 下一轮继续巡检机器人全功能 callback 返回链、资产详情/订单详情/续费/换 IP/重装/修改配置路径。
+
+## 2026-06-08 07:03 Telegram 机器人全功能和高并发巡检
+
+### 背景
+
+继续执行当前会话连续巡检。本轮按用户要求重点复查机器人全部功能路径和多任务高并发，覆盖 callback 返回链和 Telegram `callback_data` 64 字节限制。
+
+### 测试
+
+执行：
+
+```bash
+UV_CACHE_DIR=/private/tmp/uv-cache-shop DJANGO_TEST_SQLITE=1 uv run python manage.py test bot.tests --settings=shop.settings --verbosity=1
+```
+
+结果：
+
+- `106` 个测试通过。
+- SQLite 的 `db_comment` warnings 仍是已知测试噪声。
+
+### 覆盖范围
+
+本轮覆盖：
+
+- 云服务器详情按钮保留返回路径。
+- 资产详情入口直接操作按钮会压缩返回来源。
+- 极端嵌套 callback 仍不超过 Telegram `callback_data` 64 字节限制。
+- 续费支付按钮保留返回详情路径。
+- 换 IP 区域菜单保留返回路径。
+- 重装确认按钮、重装提交按钮保留返回路径。
+- 重装确认处理复用提交前保存的返回路径。
+- 普通重装旧文案没有回流，确认处理仍走重建/迁移语义。
+- 修改配置按钮保留返回路径。
+- 订单列表、订单只读详情、资产详情在来源过长时回退到安全入口。
+- 通知复制 wrapper 并发发送隔离。
+- 云服务器后台钱包直付/补付任务并发隔离，用户、订单和任务数量没有串上下文。
+
+### 安全检查
+
+- 测试日志中的代理 secret 按现有日志策略脱敏。
+- 未输出完整代理链接。
+- 未打印 Telegram session、支付密钥或云厂商密钥。
+
+### 验证
+
+基础检查通过：
+
+```bash
+UV_CACHE_DIR=/private/tmp/uv-cache-shop uv run python manage.py check
+```
+
+红线扫描通过：
+
+```bash
+rg -n "service_expires_at|actual_expires_at.*CloudServerOrder|CloudServerOrder.*actual_expires_at|plan snapshot|snapshot table|old refund|refund_legacy|refund_old|legacy_refund|accounts\\.|finance\\.|mall\\.|monitoring\\.|dashboard_api\\.|biz\\." cloud bot orders core shop -g '!**/migrations/**'
+```
+
+命中项仍为 Telegram 登录账号、云账号测试和 `CloudServerOrder.ip_recycle_at` 同步语句，不是红线问题。
+
+### 红线
+
+- 本轮未执行真实云资源创建、关机、删除服务器、释放 IP、换 IP、真实支付、链上广播、生产发布或删除业务数据。
+- 本轮没有创建临时后台 session。
+- 未保留 Playwright 临时产物。
+
+### 结果
+
+- 未发现需要修改代码的问题。
+- 仅更新 `docs/auto-optimization-latest.md` 和 `docs/refactor-version-record.md` 记录巡检结果。
+- 下一轮继续做代理列表深页/跳页数据对账，尤其是 IP 视图各风险标签第 2 页、深页、末页是否与数据库精确结果一致。
