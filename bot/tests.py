@@ -1473,6 +1473,104 @@ class RetainedIpRenewalUiTestCase(SimpleTestCase):
         self.assertIn('创建任务已提交', text)
         self.assertEqual(scheduled, ['_provision_cloud_server_and_notify'])
 
+    def test_cloud_background_tasks_keep_high_concurrency_isolated(self):
+        class FakeBot:
+            def __init__(self):
+                self.messages = []
+
+            async def send_message(self, **kwargs):
+                self.messages.append(kwargs)
+                await asyncio.sleep(0)
+                return SimpleNamespace(message_id=len(self.messages))
+
+        def order_view(order_id, order_no, *, quantity=1):
+            return SimpleNamespace(
+                id=order_id,
+                order_no=order_no,
+                region_name='新加坡',
+                plan_name='nano',
+                quantity=quantity,
+                pay_amount=Decimal('19.00'),
+                currency='USDT',
+                mtproxy_port=443,
+                public_ip=f'10.0.0.{order_id % 255}',
+                previous_public_ip='',
+                status='completed',
+            )
+
+        async def fake_buy(user_id, plan_id, currency, quantity):
+            await asyncio.sleep(0.02 if user_id == 7 else 0)
+            return order_view(801, 'BOT-CONCURRENT-BUY', quantity=quantity), None
+
+        async def fake_pay(order_id, user_id, currency):
+            await asyncio.sleep(0.01)
+            return order_view(802, 'BOT-CONCURRENT-PAY'), None
+
+        async def fake_prepare(order_id, user_id, port):
+            await asyncio.sleep(0)
+            if order_id == 801:
+                return [
+                    SimpleNamespace(id=811, mtproxy_port=443),
+                    SimpleNamespace(id=812, mtproxy_port=443),
+                ]
+            return [SimpleNamespace(id=821, mtproxy_port=443)]
+
+        async def fake_postcheck(order_id):
+            await asyncio.sleep(0.015)
+            return order_view(order_id, 'BOT-CONCURRENT-RENEW'), None
+
+        scheduled = []
+
+        def capture_task(coro):
+            frame_locals = dict(getattr(coro, 'cr_frame', None).f_locals)
+            scheduled.append((
+                coro.cr_code.co_name,
+                frame_locals.get('chat_id'),
+                frame_locals.get('order_id'),
+                frame_locals.get('port'),
+            ))
+            coro.close()
+            return object()
+
+        async def run_case():
+            bot = FakeBot()
+            with patch('bot.handlers.buy_cloud_server_with_balance', new=AsyncMock(side_effect=fake_buy)), \
+                    patch('bot.handlers.pay_cloud_server_order_with_balance', new=AsyncMock(side_effect=fake_pay)), \
+                    patch('bot.handlers.prepare_cloud_server_order_instances', new=AsyncMock(side_effect=fake_prepare)) as prepare_mock, \
+                    patch('bot.handlers.run_cloud_server_renewal_postcheck', new=AsyncMock(side_effect=fake_postcheck)), \
+                    patch('bot.handlers.is_cloud_asset_renewal_order', return_value=False), \
+                    patch('bot.handlers._requires_recovery_provision', return_value=False), \
+                    patch('bot.handlers._cloud_order_plan_text', return_value='套餐: nano\n'), \
+                    patch('bot.handlers._send_admin_user_action_notice', new=AsyncMock()), \
+                    patch('bot.handlers.asyncio.create_task', side_effect=capture_task):
+                await asyncio.gather(
+                    _buy_cloud_server_with_balance_and_notify(bot, 1001, 7, 55, 2, 'USDT'),
+                    _pay_cloud_server_order_with_balance_and_notify(bot, 1002, 8, 88, 'USDT'),
+                    _cloud_renewal_postcheck_and_notify(bot, 1003, 99, {'currency': 'USDT', 'amount': Decimal('1.00'), 'before': Decimal('5.00'), 'after': Decimal('4.00')}),
+                )
+            return bot.messages, prepare_mock.await_args_list
+
+        messages, prepare_calls = async_to_sync(run_case)()
+
+        self.assertEqual(
+            sorted((name, chat_id, order_id, port) for name, chat_id, order_id, port in scheduled),
+            [
+                ('_provision_cloud_server_and_notify', 1001, 811, 443),
+                ('_provision_cloud_server_and_notify', 1001, 812, 443),
+                ('_provision_cloud_server_and_notify', 1002, 821, 443),
+            ],
+        )
+        self.assertEqual(
+            {(call.args[0], call.args[1], call.args[2]) for call in prepare_calls},
+            {(801, 7, 443), (802, 8, 443)},
+        )
+        message_by_chat = {}
+        for item in messages:
+            message_by_chat.setdefault(item['chat_id'], []).append(item['text'])
+        self.assertTrue(any('2 台服务器创建任务已提交' in text for text in message_by_chat[1001]))
+        self.assertTrue(any('1 台服务器创建任务已提交' in text for text in message_by_chat[1002]))
+        self.assertTrue(any('续费已完成' in text for text in message_by_chat[1003]))
+
     def test_removed_custom_port_flow_stays_removed(self):
         source = inspect.getsource(register_handlers)
         all_bot_texts = '\n'.join(value for value, _ in BOT_TEXTS.values())

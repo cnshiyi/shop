@@ -7,11 +7,15 @@ from __future__ import annotations
 
 import heapq
 
+from django.core.cache import cache
 from django.db.models import Q
 
 from cloud.models import CloudAsset, CloudIpLog, CloudServerOrder
 from core.cloud_accounts import cloud_account_label_variants
 from core.models import CloudAccountConfig
+
+_LIFECYCLE_PLAN_COUNTS_CACHE_KEY = 'cloud:lifecycle-plan:server-counts:v2'
+_LIFECYCLE_PLAN_COUNTS_CACHE_TTL = 30
 
 
 def page_bounds(page: int, page_size: int) -> tuple[int, int]:
@@ -31,6 +35,10 @@ def page_meta(page: int, page_size: int, total: int) -> dict:
         'total': total,
         'loaded': min(page_size, max(total - ((page - 1) * page_size), 0)),
     }
+
+
+def clear_lifecycle_plan_counts_cache():
+    cache.delete(_LIFECYCLE_PLAN_COUNTS_CACHE_KEY)
 
 
 def reverse_ordering(ordering: tuple[str, ...]) -> tuple[str, ...]:
@@ -105,6 +113,14 @@ def server_shutdown_complete_q():
 
 
 def server_lifecycle_plan_queryset():
+    blank_instance_q = Q(instance_id__isnull=True) | Q(instance_id='')
+    unattached_asset_ids = (
+        CloudAsset.objects
+        .filter(kind=CloudAsset.KIND_SERVER)
+        .filter(blank_instance_q)
+        .filter(unattached_ip_asset_q())
+        .values('id')
+    )
     return (
         CloudAsset.objects.select_related('order', 'user', 'cloud_account', 'order__cloud_account')
         .filter(kind=CloudAsset.KIND_SERVER, actual_expires_at__isnull=False)
@@ -114,17 +130,24 @@ def server_lifecycle_plan_queryset():
             CloudAsset.STATUS_TERMINATED,
             CloudAsset.STATUS_TERMINATING,
         ])
-        .exclude(unattached_ip_asset_q())
-        .exclude(asset_waiting_manual_time_q())
+        .exclude(id__in=unattached_asset_ids)
     )
 
 
 def server_lifecycle_plan_counts() -> dict[str, int]:
+    cached = cache.get(_LIFECYCLE_PLAN_COUNTS_CACHE_KEY)
+    if isinstance(cached, dict):
+        return {
+            'shutdown_plan_count': int(cached.get('shutdown_plan_count') or 0),
+            'server_delete_count': int(cached.get('server_delete_count') or 0),
+        }
     queryset = server_lifecycle_plan_queryset()
-    return {
+    counts = {
         'shutdown_plan_count': queryset.exclude(server_shutdown_complete_q()).count(),
         'server_delete_count': queryset.filter(server_shutdown_complete_q()).count(),
     }
+    cache.set(_LIFECYCLE_PLAN_COUNTS_CACHE_KEY, counts, timeout=_LIFECYCLE_PLAN_COUNTS_CACHE_TTL)
+    return counts
 
 
 def server_lifecycle_plan_page(*, plan_stage: str, page: int, page_size: int, total: int | None = None):

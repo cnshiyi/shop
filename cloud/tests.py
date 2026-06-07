@@ -11228,7 +11228,7 @@ class CloudServerServicesTestCase(TestCase):
         request = self.factory.get('/api/admin/tasks/notices/', {'limit': 20, 'history_limit': 20})
         self._attach_bearer_session(request, staff_user)
 
-        with patch('cloud.api_tasks._get_due_orders') as due_orders_mock:
+        with patch('cloud.lifecycle._get_due_orders') as due_orders_mock:
             due_orders_mock.side_effect = AssertionError('通知计划详情不应回退到全量订单扫描')
             response = notice_task_detail(request)
 

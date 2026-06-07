@@ -27,6 +27,7 @@ from cloud.lifecycle_execution import run_orphan_asset_delete, run_shutdown_orde
 from cloud.lifecycle_plan_queries import (
     active_cloud_account_labels as query_active_cloud_account_labels,
     asset_waiting_manual_time_q as query_asset_waiting_manual_time_q,
+    clear_lifecycle_plan_counts_cache,
     completed_unattached_ip_active_count,
     completed_unattached_ip_active_queryset,
     ip_delete_history_page_sources,
@@ -901,6 +902,7 @@ def _load_lifecycle_plan_count_snapshot():
 
 
 def _sync_lifecycle_plan_table(*, limit=1000, page_size=None):
+    clear_lifecycle_plan_counts_cache()
     page_size = max(1, min(int(page_size or limit or 1000), 1000))
     server_delete_items = _server_lifecycle_plan_page_items(plan_stage='delete', page=1, page_size=page_size)
     server_history_items = _server_delete_history_page_items(page=1, page_size=page_size)
@@ -942,6 +944,7 @@ def _cached_lifecycle_plan_count_snapshot():
         _LIFECYCLE_PLAN_CACHE['counts_fingerprint'] = deepcopy(persisted_fingerprint)
         _LIFECYCLE_PLAN_CACHE['generated_at'] = generated_at or timezone.now()
         return deepcopy(persisted)
+    clear_lifecycle_plan_counts_cache()
     counts = _build_lifecycle_plan_count_snapshot()
     generated_at = timezone.now()
     _store_lifecycle_plan_count_snapshot(counts, generated_at=generated_at, fingerprint=current_fingerprint)

@@ -13331,3 +13331,75 @@ UV_CACHE_DIR=/private/tmp/uv-cache-shop uv run python manage.py check
 - 本轮未执行真实云资源创建、关机、删除服务器、释放 IP、换 IP、真实支付、链上广播、生产发布或删除业务数据。
 - 本轮未恢复废弃 runtime app、订单侧到期字段、旧计划快照、旧退款逻辑、旧退款函数名或旧兼容入口。
 - 本轮未打印 Telegram token、Telegram session、TOTP、支付密钥、云厂商密钥、完整代理链接、代理 secret 或登录密码。
+## 2026-06-08 04:39 机器人高并发与生命周期计划缓存修复
+
+### 背景
+
+继续执行自动巡检，用户强调机器人要覆盖多任务高并发，同时生命周期计划页和代理列表仍是高数据量风险点。本轮在上一轮未提交补丁基础上继续收敛，优先修复生命周期聚焦测试暴露的计划页旧 count 风险，并补机器人后台并发测试。
+
+### 修复
+
+- `bot/tests.py`
+  - 新增 `test_cloud_background_tasks_keep_high_concurrency_isolated`。
+  - 同时模拟钱包直付创建、订单补付创建、续费后巡检并发执行。
+  - 校验后台创建任务按 chat_id、order_id、端口隔离，不串线、不少发消息。
+- `cloud/tests.py`
+  - 修正通知计划详情测试 patch 入口，改为当前 `cloud.lifecycle._get_due_orders`。
+- `cloud/models.py`
+  - 给代理列表快照补齐风险标签 + 云账号异常 + Telegram 分组索引。
+  - 新增迁移 `cloud/migrations/0061_dashboard_snapshot_tg_risk_group_indexes.py`。
+  - 本机已执行 `uv run python manage.py migrate cloud 0061`。
+- `cloud/lifecycle_plan_queries.py` / `bot/api.py`
+  - 生命周期服务器计划 count 增加短 TTL 缓存。
+  - 页面强制刷新和指纹失效重建前会清理短缓存，避免复用旧 total 导致有计划项但分页为空。
+
+### 真实页面
+
+使用真实浏览器打开：
+
+- `http://127.0.0.1:5666/admin/tasks/plans`
+- `http://127.0.0.1:5666/admin/cloud-assets`
+
+结果：
+
+| 页面 | 标题 | 耗时 | 控制台 | 关键结果 |
+| --- | --- | ---: | --- | --- |
+| 计划页 | `计划 - Vben Admin Antd` | 约 9.15s | 0 error / 0 warning | 关机计划、删除计划、IP 删除计划、IP 删除历史均显示 |
+| 代理列表 | `代理列表 - Vben Admin Antd` | 约 9.41s | 0 error / 0 warning | IP 视图、全部、未附加固定IP、编辑按钮均显示 |
+
+计划页接口计数：
+
+- 关机计划：`1879990`
+- 服务器删除计划：`2`
+- IP 删除计划：`500000`
+- IP 删除历史：`520010`
+
+临时后台 session 已删除，未打印 token/session。
+
+### 验证
+
+已通过：
+
+```bash
+UV_CACHE_DIR=/private/tmp/uv-cache-shop uv run python manage.py check
+UV_CACHE_DIR=/private/tmp/uv-cache-shop uv run python -m py_compile bot/api.py bot/handlers.py bot/tests.py cloud/lifecycle_plan_queries.py cloud/models.py cloud/tests.py
+UV_CACHE_DIR=/private/tmp/uv-cache-shop DJANGO_TEST_SQLITE=1 uv run python manage.py test bot.tests.RetainedIpRenewalUiTestCase --settings=shop.settings --verbosity=1
+UV_CACHE_DIR=/private/tmp/uv-cache-shop DJANGO_TEST_SQLITE=1 uv run python manage.py test cloud.tests.CloudServerServicesTestCase.test_lifecycle_plans_ignore_account_shutdown_disabled_plan_state cloud.tests.CloudServerServicesTestCase.test_lifecycle_plans_show_asset_shutdown_disabled_plan_state cloud.tests.CloudServerServicesTestCase.test_lifecycle_plans_split_shutdown_before_server_delete cloud.tests.CloudServerServicesTestCase.test_lifecycle_plans_use_stage_specific_asset_switches cloud.tests.CloudServerServicesTestCase.test_lifecycle_plans_show_global_stage_switches cloud.tests.CloudServerServicesTestCase.test_unattached_ip_delete_items_fill_missing_expiry_with_default_delete_plan cloud.tests.CloudServerServicesTestCase.test_unattached_static_ip_due_scan_fills_missing_expiry_as_future_plan --settings=shop.settings --verbosity=1
+UV_CACHE_DIR=/private/tmp/uv-cache-shop DJANGO_TEST_SQLITE=1 uv run python manage.py test cloud.tests.CloudServerServicesTestCase.test_lifecycle_plans_reuses_cached_count_snapshot_after_refresh cloud.tests.CloudServerServicesTestCase.test_lifecycle_plans_reads_persisted_count_snapshot_after_process_cache_clear cloud.tests.CloudServerServicesTestCase.test_lifecycle_plans_rebuilds_cached_count_snapshot_when_asset_changes cloud.tests.CloudServerServicesTestCase.test_lifecycle_plans_server_delete_pagination_contract cloud.tests.CloudServerServicesTestCase.test_lifecycle_plans_returns_server_delete_history_table cloud.tests.CloudServerServicesTestCase.test_lifecycle_plans_server_history_mixes_orders_and_assets_by_updated_at cloud.tests.CloudServerServicesTestCase.test_lifecycle_plans_ip_delete_history_pagination_contract cloud.tests.CloudServerServicesTestCase.test_lifecycle_plans_ip_delete_history_mixes_logs_and_assets_by_time --settings=shop.settings --verbosity=1
+git diff --check
+```
+
+红线扫描：
+
+- 未发现运行时代码回流废弃 runtime app、旧计划快照或旧退款函数。
+- `service_expires_at` 仅命中历史 migrations。
+
+### 红线
+
+- 本轮未执行真实云资源创建、关机、删除服务器、释放 IP、换 IP、真实支付、链上广播、生产发布或删除业务数据。
+- 本轮未打印 Telegram token、Telegram session、TOTP、支付密钥、云厂商密钥、完整代理链接、代理 secret 或登录密码。
+
+### 后续
+
+- 继续压测代理列表全标签深分页，重点验证新索引在 Telegram 分组视图下不会丢组或串页。
+- 生命周期计划页冷态 count 仍偏重，后续应推进任务表投影，页面优先读投影。
