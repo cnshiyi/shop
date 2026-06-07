@@ -68,6 +68,7 @@ _LIFECYCLE_PLAN_CACHE = {
     'limit': 0,
 }
 _LIFECYCLE_PLAN_COUNT_SNAPSHOT_KEY = 'cloud_lifecycle_plan_count_snapshot'
+_LIFECYCLE_PLAN_COUNT_SNAPSHOT_MAX_AGE_SECONDS = 60
 
 
 def _plan_item_identity(source_kind: str, source_id, *, plan_kind: str = '', plan_stage: str = '') -> dict:
@@ -901,6 +902,12 @@ def _load_lifecycle_plan_count_snapshot():
     return counts, generated_at, fingerprint
 
 
+def _lifecycle_plan_count_snapshot_is_fresh(generated_at) -> bool:
+    if not generated_at:
+        return False
+    return (timezone.now() - generated_at).total_seconds() <= _LIFECYCLE_PLAN_COUNT_SNAPSHOT_MAX_AGE_SECONDS
+
+
 def _sync_lifecycle_plan_table(*, limit=1000, page_size=None):
     clear_lifecycle_plan_counts_cache()
     page_size = max(1, min(int(page_size or limit or 1000), 1000))
@@ -936,10 +943,15 @@ def _cached_lifecycle_plan_count_snapshot():
     current_fingerprint = _lifecycle_plan_count_fingerprint()
     cached = _LIFECYCLE_PLAN_CACHE.get('counts')
     cached_fingerprint = _LIFECYCLE_PLAN_CACHE.get('counts_fingerprint')
-    if cached is not None and cached_fingerprint == current_fingerprint:
+    cached_generated_at = _LIFECYCLE_PLAN_CACHE.get('generated_at')
+    if cached is not None and cached_fingerprint == current_fingerprint and _lifecycle_plan_count_snapshot_is_fresh(cached_generated_at):
         return deepcopy(cached)
     persisted, generated_at, persisted_fingerprint = _load_lifecycle_plan_count_snapshot()
-    if persisted is not None and persisted_fingerprint == current_fingerprint:
+    if (
+        persisted is not None
+        and persisted_fingerprint == current_fingerprint
+        and _lifecycle_plan_count_snapshot_is_fresh(generated_at)
+    ):
         _LIFECYCLE_PLAN_CACHE['counts'] = deepcopy(persisted)
         _LIFECYCLE_PLAN_CACHE['counts_fingerprint'] = deepcopy(persisted_fingerprint)
         _LIFECYCLE_PLAN_CACHE['generated_at'] = generated_at or timezone.now()

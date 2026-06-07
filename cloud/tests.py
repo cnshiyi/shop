@@ -8395,6 +8395,79 @@ class CloudServerServicesTestCase(TestCase):
         self.assertEqual(cached_data['shutdown_plan_count'], 2)
         self.assertEqual(cached_data['pagination']['shutdown_plan']['total'], 2)
 
+    # 功能：验证计划页计数快照过期后即使资产指纹未变也会重算，避免默认加载继续显示旧计划总数。
+    def test_lifecycle_plans_rebuilds_stale_count_snapshot_without_fingerprint_change(self):
+        import bot.api as bot_api
+
+        SiteConfig.objects.filter(key=bot_api._LIFECYCLE_PLAN_COUNT_SNAPSHOT_KEY).delete()
+        bot_api._LIFECYCLE_PLAN_CACHE.update({
+            'bundle': None,
+            'counts': None,
+            'counts_fingerprint': None,
+            'generated_at': None,
+            'limit': 0,
+        })
+        now = timezone.now()
+        asset = CloudAsset.objects.create(
+            kind=CloudAsset.KIND_SERVER,
+            source=CloudAsset.SOURCE_AWS_SYNC,
+            user=self.user,
+            provider='aws_lightsail',
+            region_code=self.plan.region_code,
+            region_name=self.plan.region_name,
+            asset_name='lifecycle-stale-count-server',
+            instance_id='i-lifecycle-stale-count-server',
+            public_ip='5.5.7.44',
+            status=CloudAsset.STATUS_RUNNING,
+            is_active=True,
+            actual_expires_at=now + timezone.timedelta(days=30),
+        )
+        staff_user = get_user_model().objects.create_user(username='staff_lifecycle_stale_count', password='x', is_staff=True)
+        refresh_request = RequestFactory().get('/api/admin/tasks/plans/', {
+            'compact': '1',
+            'fields': 'basic,execution',
+            'limit': '1',
+            'refresh': '1',
+            'shutdown_page_size': '1',
+            'delete_page_size': '1',
+        })
+        self._attach_bearer_session(refresh_request, staff_user)
+        refresh_response = lifecycle_plans(refresh_request)
+        self.assertEqual(refresh_response.status_code, 200)
+        refresh_data = json.loads(refresh_response.content)['data']
+        self.assertEqual(refresh_data['shutdown_plan_count'], 1)
+        self.assertEqual(refresh_data['server_delete_count'], 0)
+
+        fingerprint = bot_api._lifecycle_plan_count_fingerprint()
+        CloudAsset.objects.filter(id=asset.id).update(status=CloudAsset.STATUS_STOPPED)
+        self.assertEqual(bot_api._lifecycle_plan_count_fingerprint(), fingerprint)
+
+        stale_generated_at = timezone.now() - timezone.timedelta(
+            seconds=bot_api._LIFECYCLE_PLAN_COUNT_SNAPSHOT_MAX_AGE_SECONDS + 5,
+        )
+        raw = SiteConfig.get(bot_api._LIFECYCLE_PLAN_COUNT_SNAPSHOT_KEY, '')
+        payload = json.loads(raw)
+        payload['generated_at'] = stale_generated_at.isoformat()
+        SiteConfig.set(bot_api._LIFECYCLE_PLAN_COUNT_SNAPSHOT_KEY, json.dumps(payload, ensure_ascii=False))
+        bot_api._LIFECYCLE_PLAN_CACHE['generated_at'] = stale_generated_at
+
+        cached_request = RequestFactory().get('/api/admin/tasks/plans/', {
+            'compact': '1',
+            'fields': 'basic,execution',
+            'limit': '1',
+            'shutdown_page_size': '1',
+            'delete_page_size': '1',
+        })
+        self._attach_bearer_session(cached_request, staff_user)
+        cached_response = lifecycle_plans(cached_request)
+
+        self.assertEqual(cached_response.status_code, 200)
+        cached_data = json.loads(cached_response.content)['data']
+        self.assertEqual(cached_data['shutdown_plan_count'], 0)
+        self.assertEqual(cached_data['server_delete_count'], 1)
+        self.assertEqual(cached_data['pagination']['shutdown_plan']['total'], 0)
+        self.assertEqual(cached_data['pagination']['server_delete']['total'], 1)
+
     # 功能：验证服务器删除计划服务端分页契约，跨页不重复且排序结果能和数据库事实对上。
     def test_lifecycle_plans_server_delete_pagination_contract(self):
         now = timezone.now()

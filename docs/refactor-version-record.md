@@ -13842,3 +13842,134 @@ rg -n "service_expires_at|actual_expires_at.*CloudServerOrder|plan snapshot|snap
 - 本轮未发现需要提交的代码问题，未修改业务代码，只更新自动化文档。
 - 已执行 `git diff --check`，通过。
 - 下一轮在环境允许时优先补生命周期计划页的真实页面巡检和实库对账，再决定是否需要针对页面/执行器做最小修复。
+
+## 2026-06-08 06:18 生命周期计划计数缓存与代理列表加载修复
+
+### 背景
+
+继续执行当前会话不少于 4 小时的自动巡检。本轮承接上一轮真实页面巡检，重点复查计划页总数、深分页展示、数据库口径对账，以及代理列表在百万级压测数据下快速切标签的加载稳定性。
+
+### 发现
+
+计划页普通加载和强制刷新存在计数差异：
+
+- 普通加载曾显示 `shutdown_plan_count=1879990`。
+- 强制刷新和实时查询层显示 `shutdown_plan_count=1979990`。
+- 实时查询层结果为：
+  - 关机计划：`1979990`
+  - 服务器删除计划：`2`
+  - IP 删除计划：`500000`
+  - IP 删除历史：`520010`
+
+原因是生命周期计划页计数快照只比较资产指纹。部分状态变化不会改变当前指纹，但会改变关机计划/删除计划分段口径，导致普通页面继续复用旧 `SiteConfig` 计数快照。
+
+代理列表另一个问题是 `loadData()` 把主资产请求和 `sync-status` 请求放进同一个 `Promise.all()`。快速切标签或接口慢时，`sync-status` 被取消/超时会让主列表加载也受影响，页面控制台出现请求错误。
+
+### 修复
+
+- `bot/api.py`
+  - 新增 `_LIFECYCLE_PLAN_COUNT_SNAPSHOT_MAX_AGE_SECONDS = 60`。
+  - 新增 `_lifecycle_plan_count_snapshot_is_fresh()`。
+  - `_cached_lifecycle_plan_count_snapshot()` 只有在指纹一致且快照未超过 60 秒时才复用进程缓存或持久化快照。
+  - 快照过期后重新构建计数，并写回 `SiteConfig` 和进程缓存。
+- `cloud/tests.py`
+  - 新增 `test_lifecycle_plans_rebuilds_stale_count_snapshot_without_fingerprint_change`。
+  - 覆盖“指纹未变、快照过期、分段计数变化”场景，确认普通计划页加载会重算并返回关机 `0`、删除 `1`。
+- 前端仓库 `/Users/a399/Desktop/data/vue-shop-admin`
+  - `apps/web-antd/src/views/dashboard/cloud-assets/index.vue`
+  - 新增 `applyCloudAssetSyncStatus()`。
+  - 主资产请求先渲染，`sync-status` 改为非阻塞异步更新；失败时返回 `null`，不影响标签切换和分页主表格。
+
+### 真实页面和数据库对账
+
+真实浏览器打开：
+
+```text
+http://127.0.0.1:5666/admin/tasks/plans
+```
+
+页面显示：
+
+- 当前计划资产：`2500003`
+- 缺少到期时间：`251`
+- 未附加 IP：`600001`
+- 服务器资产：`1900002`
+- 服务器删除历史：`20010`
+- IP 删除历史：`520010`
+- 关机计划：`已加载 50 / 总 1979990`
+- 删除计划：`2`
+- IP 删除计划：`已加载 50 / 总 500000`
+
+数据库实时对账：
+
+```text
+server_lifecycle_plan_counts() -> {'shutdown_plan_count': 1979990, 'server_delete_count': 2}
+ip_delete_plan_counts() -> {'ip_delete_count': 500000, 'ip_delete_completed_active_count': 1, 'ip_delete_history_asset_count': 0, 'ip_delete_history_count': 520010, 'ip_delete_history_log_count': 520009}
+CloudAsset.objects.count() -> 2500003
+CloudIpLog.objects.count() -> 530242
+```
+
+分页真实性：
+
+- 关机计划第 2 页页面显示 `51-100 / 共 1979990 条`。
+- 第 2 页前 8 条页面 IP 与数据库一致：
+  - `198.19.14.166`
+  - `198.19.14.241`
+  - `198.19.15.60`
+  - `198.19.15.135`
+  - `198.19.15.210`
+  - `198.19.16.29`
+  - `198.19.16.104`
+  - `198.19.16.179`
+- 关机计划末页页面显示 `已加载 40 / 总 1979990`。
+- 数据库 `server_lifecycle_plan_page(plan_stage='shutdown', page=39600, page_size=50)` 返回 40 条，前 8 条 IP 与页面快照一致：
+  - `10.6.207.191`
+  - `10.6.208.25`
+  - `10.6.208.115`
+  - `10.6.208.205`
+  - `10.6.209.39`
+  - `10.6.209.129`
+  - `10.6.209.219`
+  - `10.6.210.53`
+
+页面控制台：
+
+```text
+Total messages: 2 (Errors: 0, Warnings: 0)
+```
+
+### 验证
+
+后端通过：
+
+```bash
+UV_CACHE_DIR=/private/tmp/uv-cache-shop uv run python manage.py check
+UV_CACHE_DIR=/private/tmp/uv-cache-shop uv run python -m py_compile bot/api.py cloud/tests.py
+UV_CACHE_DIR=/private/tmp/uv-cache-shop DJANGO_TEST_SQLITE=1 uv run python manage.py test cloud.tests.CloudServerServicesTestCase.test_lifecycle_plans_rebuilds_stale_count_snapshot_without_fingerprint_change cloud.tests.CloudServerServicesTestCase.test_lifecycle_plans_reuses_cached_count_snapshot_after_refresh cloud.tests.CloudServerServicesTestCase.test_lifecycle_plans_reads_persisted_count_snapshot_after_process_cache_clear cloud.tests.CloudServerServicesTestCase.test_lifecycle_plans_rebuilds_cached_count_snapshot_when_asset_changes --settings=shop.settings --verbosity=1
+git diff --check
+```
+
+前端通过：
+
+```bash
+pnpm --filter @vben/web-antd typecheck
+git diff --check
+```
+
+说明：
+
+- SQLite 的 `db_comment` warnings 仍是已知噪声。
+- 临时后台 session 已删除。
+- `.playwright-cli/`、`/private/tmp/shop_pw_state.json` 和临时注入脚本已清理。
+
+### 红线
+
+- 本轮未执行真实云资源创建、关机、删除服务器、释放 IP、换 IP、真实支付、链上广播、生产发布或删除业务数据。
+- 本轮未恢复废弃 runtime app、订单侧到期字段、旧计划快照表、旧退款逻辑或旧退款函数名。
+- 本轮未打印密钥、Telegram session、TOTP、支付密钥、云厂商密钥或完整代理链接。
+
+### 下一步
+
+- 提交本轮后端修复。
+- 在前端仓库单独提交代理列表加载修复。
+- 下一轮继续执行机器人多任务高并发、生命周期开关执行链和真实页面巡检。
