@@ -10021,6 +10021,7 @@ class CloudServerServicesTestCase(TestCase):
 
     # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
     def test_lifecycle_plans_ignore_account_shutdown_disabled_plan_state(self):
+        SiteConfig.set('cloud_server_delete_enabled', '1')
         account = CloudAccountConfig.objects.create(
             provider=CloudAccountConfig.PROVIDER_AWS,
             name='shutdown-disabled-plan-state',

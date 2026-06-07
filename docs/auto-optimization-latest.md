@@ -4,44 +4,59 @@
 
 ## 最近一轮
 
-- 时间：2026-06-08 03:58 CST
-- 状态：完成一轮机器人多任务高并发、callback 返回链、后台真实页面和红线巡检。
-- 本轮范围：`bot.tests` 机器人并发与返回链聚焦测试、`/admin/tasks/plans`、`/admin/cloud-assets`、`/admin/logs/operations`、`/admin/telegram-accounts/accounts`、基础检查、编译检查、红线扫描。
+- 时间：2026-06-08 04:04 CST
+- 状态：完成生命周期阶段开关专项巡检，并修复一个测试口径问题。
+- 本轮范围：生命周期关机/删机/IP 删除总开关、资产单项开关、未附加 IP 默认 15 天删除计划、计划页真实渲染、基础检查、编译检查、红线扫描。
 
-## 机器人专项
+## 发现与修复
 
-已覆盖的机器人功能链路：
+发现：
 
-- 多用户并发监听推送隔离。
-- 资产详情、订单详情、代理详情短回调。
-- 续费、钱包余额续费、TRX/USDT 续费支付按钮。
-- 换 IP、地区提交、修改配置。
-- 重装迁移/重建确认、取消、提交后返回链。
-- 管理员查询入口、修改到期入口、余额明细分页。
-- Telegram `callback_data` 64 字节限制和极端嵌套返回链压缩。
+- 首次运行生命周期专项时，`test_lifecycle_plans_ignore_account_shutdown_disabled_plan_state` 失败。
+- 失败原因不是运行时代码，而是测试没有隔离 `cloud_server_delete_enabled`。
+- 当前安全默认值是 `cloud_server_delete_enabled=0`，删除阶段被服务器删除总开关挡住是正确行为。
+- 该测试要验证的是“云账号关机开关关闭，不应该影响服务器删除阶段”，因此需要显式打开服务器删除总开关。
 
-聚焦测试结果：
+修复：
+
+- `cloud/tests.py`
+  - 在 `test_lifecycle_plans_ignore_account_shutdown_disabled_plan_state` 开头增加 `SiteConfig.set('cloud_server_delete_enabled', '1')`。
+  - 保持运行时代码不变。
+
+## 生命周期专项测试
+
+已通过 16 个聚焦测试，覆盖：
+
+- 关机总开关默认开启。
+- 关机总开关只阻止计划关机，不阻止删机或 IP 回收。
+- 资产 `shutdown_enabled=False` 阻止关机执行。
+- 资产 `server_delete_enabled=False` 阻止服务器删除计划执行。
+- 资产 `ip_delete_enabled=False` 阻止 IP 删除计划执行。
+- 关机计划完成后才进入服务器删除计划。
+- 未附加 IP 缺少到期时间时生成默认 15 天后删除计划。
+- 未附加 IP 有到期时间时使用 `CloudAsset.actual_expires_at`。
+- IP 删除执行器尊重资产单项 IP 删除开关和全局 IP 删除总开关。
+
+命令：
 
 ```bash
-UV_CACHE_DIR=/private/tmp/uv-cache-shop DJANGO_TEST_SQLITE=1 uv run python manage.py test bot.tests.TelegramListenerPushTestCase.test_notice_copy_wrapper_keeps_concurrent_user_sends_isolated bot.tests.RetainedIpRenewalUiTestCase.test_cloud_detail_callbacks_keep_nested_back_path bot.tests.RetainedIpRenewalUiTestCase.test_cloud_server_detail_actions_keep_back_path bot.tests.RetainedIpRenewalUiTestCase.test_cloud_server_detail_actions_from_long_asset_detail_stay_under_callback_limit bot.tests.RetainedIpRenewalUiTestCase.test_cloud_server_detail_back_button_from_extreme_nested_detail_stays_under_limit bot.tests.RetainedIpRenewalUiTestCase.test_cloud_server_detail_back_button_falls_back_to_cloud_list_when_source_is_too_long bot.tests.RetainedIpRenewalUiTestCase.test_detail_back_buttons_fall_back_when_source_is_too_long bot.tests.RetainedIpRenewalUiTestCase.test_asset_detail_direct_action_buttons_compact_back_callback bot.tests.RetainedIpRenewalUiTestCase.test_reinstall_cancel_buttons_keep_back_path bot.tests.RetainedIpRenewalUiTestCase.test_reinstall_submitted_buttons_keep_back_path bot.tests.RetainedIpRenewalUiTestCase.test_reinstall_confirm_handlers_reuse_saved_back_path_after_submit bot.tests.RetainedIpRenewalUiTestCase.test_asset_renewal_plan_keyboard_keeps_back_path bot.tests.RetainedIpRenewalUiTestCase.test_retained_ip_renewal_plan_keyboard_keeps_back_path bot.tests.RetainedIpRenewalUiTestCase.test_second_level_cloud_actions_with_large_ids_stay_under_callback_limit bot.tests.RetainedIpRenewalUiTestCase.test_extreme_nested_cloud_callbacks_stay_under_telegram_limit bot.tests.RetainedIpRenewalUiTestCase.test_cloud_renew_payment_keyboard_keeps_back_path bot.tests.RetainedIpRenewalUiTestCase.test_cloud_renew_payment_from_asset_detail_returns_to_asset_detail bot.tests.RetainedIpRenewalUiTestCase.test_cloud_renew_payment_from_long_asset_detail_stays_under_callback_limit bot.tests.RetainedIpRenewalUiTestCase.test_cloud_renewal_result_branches_keep_back_path bot.tests.RetainedIpRenewalUiTestCase.test_cloud_change_ip_keyboards_keep_back_path bot.tests.RetainedIpRenewalUiTestCase.test_cloud_change_ip_from_asset_detail_returns_to_asset_detail bot.tests.RetainedIpRenewalUiTestCase.test_asset_change_ip_action_keeps_back_path_when_rendering_regions bot.tests.RetainedIpRenewalUiTestCase.test_cloud_change_ip_region_submission_keeps_back_path bot.tests.RetainedIpRenewalUiTestCase.test_asset_detail_handler_keeps_current_callback_parsing bot.tests.RetainedIpRenewalUiTestCase.test_cloud_ip_query_actions_return_to_query_menu bot.tests.RetainedIpRenewalUiTestCase.test_cloud_auto_renew_callbacks_keep_nested_back_under_limit bot.tests.RetainedIpRenewalUiTestCase.test_cloud_upgrade_payment_keeps_back_path bot.tests.RetainedIpRenewalUiTestCase.test_cloud_action_handlers_compact_nested_back_callback_before_reuse bot.tests.BotOrderAndBalanceFilterTestCase.test_balance_detail_filters_and_pagination_callbacks_keep_filter bot.tests.BotOrderAndBalanceFilterTestCase.test_paid_cloud_order_prepare_submits_default_port_directly bot.tests.BotOrderAndBalanceFilterTestCase.test_balance_pay_existing_cloud_order_auto_submits_default_port bot.tests.BotOrderAndBalanceFilterTestCase.test_admin_query_keyboard_includes_reinstall_and_expiry_actions bot.tests.BotOrderAndBalanceFilterTestCase.test_admin_start_handler_keeps_query_menu_back_path --settings=shop.settings --verbosity=1
+UV_CACHE_DIR=/private/tmp/uv-cache-shop DJANGO_TEST_SQLITE=1 uv run python manage.py test cloud.tests.CloudServerServicesTestCase.test_cloud_server_shutdown_enabled_defaults_on cloud.tests.CloudServerServicesTestCase.test_global_shutdown_switch_blocks_scheduled_suspend cloud.tests.CloudServerServicesTestCase.test_due_orders_skip_suspend_when_asset_shutdown_disabled cloud.tests.CloudServerServicesTestCase.test_due_orders_global_shutdown_switch_does_not_block_delete_or_recycle cloud.tests.CloudServerServicesTestCase.test_lifecycle_suspend_execution_guard_respects_asset_shutdown_disabled cloud.tests.CloudServerServicesTestCase.test_lifecycle_plans_ignore_account_shutdown_disabled_plan_state cloud.tests.CloudServerServicesTestCase.test_lifecycle_plans_show_asset_shutdown_disabled_plan_state cloud.tests.CloudServerServicesTestCase.test_lifecycle_plans_split_shutdown_before_server_delete cloud.tests.CloudServerServicesTestCase.test_lifecycle_plans_use_stage_specific_asset_switches cloud.tests.CloudServerServicesTestCase.test_lifecycle_plans_show_global_stage_switches cloud.tests.CloudServerServicesTestCase.test_unattached_ip_delete_items_fill_missing_expiry_with_default_delete_plan cloud.tests.CloudServerServicesTestCase.test_unattached_ip_delete_items_use_actual_expiry_as_delete_plan cloud.tests.CloudServerServicesTestCase.test_order_static_ip_release_respects_asset_ip_delete_disabled cloud.tests.CloudServerServicesTestCase.test_aws_sync_release_static_ip_respects_asset_ip_delete_disabled cloud.tests.CloudServerServicesTestCase.test_aws_sync_release_static_ip_respects_global_ip_delete_switch cloud.tests.CloudServerServicesTestCase.test_unattached_static_ip_due_scan_fills_missing_expiry_as_future_plan --settings=shop.settings --verbosity=1
 ```
 
-结果：`Ran 33 tests`，全部通过。SQLite `db_comment` 警告仍是测试数据库能力差异，不是业务失败。
+结果：`Ran 16 tests`，全部通过。SQLite `db_comment` 警告仍是测试数据库能力差异。
 
 ## 真实页面
 
-本轮创建一次临时后台 session，仅用于浏览器真实页面巡检；结束时已删除该 session 和临时文件。
+本轮创建一次临时后台 session，仅用于真实 Chrome 页面巡检；结束时已删除 session 和临时文件。
 
-真实 Chrome 打开结果：
+真实打开：
 
-| 页面 | URL | 标题 | 结果 | 控制台 |
-| --- | --- | --- | --- | --- |
-| 生命周期计划页 | `http://127.0.0.1:5666/admin/tasks/plans` | `计划 - Vben Admin Antd` | 已渲染 | `0 error / 0 warning` |
-| 代理列表页 | `http://127.0.0.1:5666/admin/cloud-assets` | `代理列表 - Vben Admin Antd` | 已渲染 | `0 error / 0 warning` |
-| 机器人操作日志 | `http://127.0.0.1:5666/admin/logs/operations` | `操作日志 - Vben Admin Antd` | 已渲染 | `0 error / 0 warning` |
-| Telegram 账号 | `http://127.0.0.1:5666/admin/telegram-accounts/accounts` | `账号列表 - Vben Admin Antd` | 已渲染 | `0 error / 0 warning` |
+- `http://127.0.0.1:5666/admin/tasks/plans`
+- 标题：`计划 - Vben Admin Antd`
+- 耗时：约 `7.7s`
+- 控制台：`0 error / 0 warning`
 
-计划页滚动到底部后确认五个区域均存在：
+滚动到底部后确认五个区域均存在：
 
 - 关机计划
 - 删除计划
@@ -55,7 +70,8 @@ UV_CACHE_DIR=/private/tmp/uv-cache-shop DJANGO_TEST_SQLITE=1 uv run python manag
 
 ```bash
 UV_CACHE_DIR=/private/tmp/uv-cache-shop uv run python manage.py check
-UV_CACHE_DIR=/private/tmp/uv-cache-shop uv run python -m py_compile bot/tests.py bot/handlers.py bot/keyboards.py bot/telegram_listener.py
+UV_CACHE_DIR=/private/tmp/uv-cache-shop uv run python -m py_compile cloud/tests.py bot/api.py cloud/lifecycle_execution.py cloud/lifecycle_plan_queries.py
+git diff --check
 ```
 
 红线扫描：
@@ -72,8 +88,8 @@ rg -n "service_expires_at|CloudLifecyclePlanSnapshot|legacy_refund|old_refund|fr
 ## 清理
 
 - 已删除临时后台 session：`deleted=1`。
-- 已删除本轮 `.playwright-cli` 临时产物。
-- 本轮未留下新的浏览器截图、临时脚本或有效后台 session。
+- 未发现 `.playwright-cli`、`playwright-report` 或 `test-results` 临时产物。
+- 未留下截图、临时脚本或有效后台 session。
 
 ## 红线
 
@@ -83,5 +99,5 @@ rg -n "service_expires_at|CloudLifecyclePlanSnapshot|legacy_refund|old_refund|fr
 
 ## 下一步
 
-- 继续循环巡检生命周期创建/关机/删除开关联动，保持不做不可逆真实操作，除非单独形成真机测试报告并脱敏记录资源 ID。
-- 下一轮优先继续看代理列表标签高数据量性能和机器人实际按钮链路的后台可观测性。
+- 继续循环巡检代理列表高数据量标签翻页、任务中心统计和通知计划口径。
+- 下一轮如再触发生命周期测试失败，优先判断是安全默认值、测试隔离还是运行时代码问题。
