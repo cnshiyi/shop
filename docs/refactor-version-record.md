@@ -12842,6 +12842,81 @@ SQLite `db_comment` 警告仍是已知数据库能力差异。
 - 本轮未恢复废弃 runtime app、订单侧到期字段、旧计划快照、旧退款逻辑、旧退款函数名或旧兼容入口。
 - 本轮未打印 Telegram token、Telegram session、TOTP、支付密钥、云厂商密钥、完整代理链接、代理 secret 或登录密码。
 
+## 2026-06-08 03:28 生命周期计划页真实翻页和机器人并发巡检
+
+### 背景
+
+继续执行自动巡检，并按用户最新要求把机器人多任务高并发纳入验证。本轮重点复查生命周期计划页五张表，尤其是 IP 删除计划和 IP 删除历史是否混淆、深页和末页是否丢数据。
+
+本轮未修改业务代码，只更新巡检记录。
+
+### 真实页面
+
+使用 Playwright 打开：
+
+- `http://127.0.0.1:5666/admin/tasks/plans`
+
+页面确认：
+
+- 页面标题为 `计划 - Vben Admin Antd`。
+- 关机服务器、删除服务器、删除 IP 三个总开关均显示。
+- 显示列开关包含关机开关、删机开关和 IP 删除开关。
+- 五张表均真实渲染。
+
+实际点击 IP 删除历史分页：
+
+- 第 2 页：显示 `101-200 / 共 520010 条`，耗时约 `4.8s`。
+- 末页 `5201`：显示 `IP 删除历史记录（已加载 10 / 总 520010）` 和 `520001-520010 / 共 520010 条`，耗时约 `4.6s`。
+
+### 数据对账
+
+生命周期计划查询层当前计数：
+
+- 关机计划：`1879990`
+- 删除计划：`2`
+- 服务器删除历史：`20010`
+- IP 删除计划：`500000`
+- IP 删除历史：`520010`
+
+数据库分页真实性对账：
+
+- 关机计划：第 1、2、10、1000、18800 页通过；末页 `90` 条。
+- 服务器删除计划：第 1 页通过；共 `2` 条。
+- IP 删除计划：第 1、2、10、1000、5000 页通过。
+- 服务器删除历史：第 1、2、10、201 页通过；末页 `10` 条。
+- IP 删除历史：第 1、2、10、1000、5201 页通过；末页 `10` 条。
+
+所有抽查页均满足条数正确、单页无重复、抽查页之间无重叠。
+
+### 机器人并发
+
+已通过机器人监听推送并发隔离测试：
+
+```bash
+UV_CACHE_DIR=/private/tmp/uv-cache-shop DJANGO_TEST_SQLITE=1 uv run python manage.py test bot.tests.TelegramListenerPushTestCase.test_notice_copy_wrapper_keeps_concurrent_user_sends_isolated --settings=shop.settings --verbosity=1
+```
+
+该测试覆盖多用户并发发送时的上下文隔离，避免通知包装在并发场景下串用户。
+
+### 验证
+
+已通过：
+
+```bash
+UV_CACHE_DIR=/private/tmp/uv-cache-shop uv run python manage.py check
+UV_CACHE_DIR=/private/tmp/uv-cache-shop DJANGO_TEST_SQLITE=1 uv run python manage.py test bot.tests.TelegramListenerPushTestCase.test_notice_copy_wrapper_keeps_concurrent_user_sends_isolated cloud.tests.CloudServerServicesTestCase.test_lifecycle_plans_counts_all_ip_delete_history_beyond_loaded_limit cloud.tests.CloudServerServicesTestCase.test_lifecycle_plans_server_history_includes_orphan_deleted_server_asset cloud.tests.CloudServerServicesTestCase.test_lifecycle_plans_server_history_mixes_orders_and_assets_by_updated_at cloud.tests.CloudServerServicesTestCase.test_lifecycle_plans_server_delete_pagination_contract cloud.tests.CloudServerServicesTestCase.test_lifecycle_plans_ip_delete_history_pagination_contract cloud.tests.CloudServerServicesTestCase.test_ip_delete_history_page_sources_reverse_tail_keeps_order cloud.tests.CloudServerServicesTestCase.test_lifecycle_plans_ip_delete_history_mixes_logs_and_assets_by_time cloud.tests.CloudServerServicesTestCase.test_lifecycle_plans_separate_ip_delete_plan_and_history_items --settings=shop.settings --verbosity=1
+git diff --check
+```
+
+一次聚焦测试命令包含不存在的测试名，纠正后重跑通过；该失败不是业务失败。
+
+### 红线
+
+- 本轮未执行真实云资源创建、关机、删除服务器、释放 IP、换 IP、真实支付、链上广播、生产发布或删除业务数据。
+- 本轮未恢复废弃 runtime app、订单侧到期字段、旧计划快照、旧退款逻辑、旧退款函数名或旧兼容入口。
+- 红线扫描命中的 `core.dashboard_api` 是当前公共后台 API 工具模块导入；`service_expires_at` 命中仅在历史迁移文件中。
+- 本轮未打印 Telegram token、Telegram session、TOTP、支付密钥、云厂商密钥、完整代理链接、代理 secret 或登录密码。
+
 ## 2026-06-08 02:38 代理列表全标签真实浏览器巡检
 
 ### 背景
