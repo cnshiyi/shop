@@ -339,6 +339,7 @@ class CloudAssetDashboardSnapshot(models.Model):
     group_telegram_key = models.CharField('群组分组键', max_length=191, db_index=True, db_comment='群组分组键')
     group_telegram_label = models.CharField('群组分组标签', max_length=191, blank=True, db_comment='群组分组标签')
     asset_due_sort_at = models.DateTimeField('资产到期排序缓存', blank=True, null=True, db_index=True, db_comment='仅用于后台列表排序缓存，来源 CloudAsset.actual_expires_at，不作为资产到期事实')
+    asset_due_sort_null_rank = models.PositiveSmallIntegerField('资产到期空值排序', default=1, db_comment='仅用于后台列表排序，0=有到期时间，1=无到期时间，不作为资产到期事实')
     risk_status = models.CharField('风险状态', max_length=64, default='other', db_index=True, db_comment='风险状态')
     risk_rank = models.IntegerField('风险排序', default=99, db_index=True, db_comment='风险排序')
     risk_statuses = models.JSONField('风险状态集合', default=list, blank=True, db_comment='风险状态集合')
@@ -371,6 +372,7 @@ class CloudAssetDashboardSnapshot(models.Model):
             models.Index(fields=['group_telegram_key', 'asset_due_sort_at', 'group_telegram_label'], name='cad_tg_due_page_idx'),
             models.Index(fields=['is_display_visible', 'group_user_key', 'asset_due_sort_at', 'group_user_label'], name='cad_vis_user_due_idx'),
             models.Index(fields=['is_display_visible', 'group_telegram_key', 'asset_due_sort_at', 'group_telegram_label'], name='cad_vis_tg_due_idx'),
+            models.Index(fields=['is_display_visible', 'risk_rank', 'asset_due_sort_null_rank', 'asset_due_sort_at', '-sort_order', '-asset_id'], name='cad_vis_list_page_idx'),
             models.Index(fields=['provider', 'cloud_account', 'region_code', 'status'], name='cad_provider_scope_idx'),
             models.Index(fields=['risk_unattached_ip', 'is_active', 'status'], name='idx_cad_display_state'),
         ]

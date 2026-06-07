@@ -7734,6 +7734,11 @@ class CloudServerServicesTestCase(TestCase):
             self.assertEqual(data['pagination']['server_delete']['page'], page)
             self.assertEqual(data['pagination']['server_delete']['page_size'], 2)
             self.assertGreaterEqual(data['pagination']['server_delete']['total'], 7)
+            for item in data['server_delete_items']:
+                self.assertIsInstance(item['id'], int)
+                self.assertIn(item.get('source_kind'), {'asset', 'order'})
+                self.assertIsInstance(item.get('source_id'), int)
+                self.assertTrue(str(item.get('plan_item_key') or '').startswith('plan:'))
             seen.extend(item['asset_name'] for item in data['server_delete_items'])
 
         self.assertEqual([name for name in seen if name in expected_names], expected_names)
@@ -7775,6 +7780,11 @@ class CloudServerServicesTestCase(TestCase):
             self.assertEqual(data['pagination']['ip_delete_history']['page'], page)
             self.assertEqual(data['pagination']['ip_delete_history']['page_size'], 2)
             self.assertGreaterEqual(data['pagination']['ip_delete_history']['total'], 7)
+            for item in data['ip_delete_history_items']:
+                self.assertIsInstance(item['id'], int)
+                self.assertIn(item.get('source_kind'), {'asset', 'ip_log'})
+                self.assertIsInstance(item.get('source_id'), int)
+                self.assertTrue(str(item.get('plan_item_key') or '').startswith('plan:'))
             seen.extend(item['asset_name'] for item in data['ip_delete_history_items'])
 
         self.assertEqual([name for name in seen if name in expected_names], list(reversed(expected_names)))

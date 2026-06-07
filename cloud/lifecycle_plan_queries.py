@@ -31,6 +31,25 @@ def page_meta(page: int, page_size: int, total: int) -> dict:
     }
 
 
+def reverse_ordering(ordering: tuple[str, ...]) -> tuple[str, ...]:
+    return tuple(field[1:] if field.startswith('-') else f'-{field}' for field in ordering)
+
+
+def paged_queryset(queryset, *, ordering: tuple[str, ...], page: int, page_size: int, total: int | None = None):
+    start, end = page_bounds(page, page_size)
+    if total is None:
+        total = queryset.count()
+    end = min(end, total)
+    if start >= end:
+        return []
+    if start > max(total // 2, page_size * 100):
+        reverse_start = max(total - end, 0)
+        rows = list(queryset.order_by(*reverse_ordering(ordering))[reverse_start:reverse_start + (end - start)])
+        rows.reverse()
+        return rows
+    return list(queryset.order_by(*ordering)[start:end])
+
+
 def active_cloud_account_labels() -> list[str]:
     labels = []
     for account in CloudAccountConfig.objects.filter(
@@ -106,14 +125,13 @@ def server_lifecycle_plan_counts() -> dict[str, int]:
     }
 
 
-def server_lifecycle_plan_page(*, plan_stage: str, page: int, page_size: int):
+def server_lifecycle_plan_page(*, plan_stage: str, page: int, page_size: int, total: int | None = None):
     queryset = server_lifecycle_plan_queryset()
     if plan_stage == 'shutdown':
         queryset = queryset.exclude(server_shutdown_complete_q())
     else:
         queryset = queryset.filter(server_shutdown_complete_q())
-    start, end = page_bounds(page, page_size)
-    return list(queryset.order_by('actual_expires_at', 'user_id', 'id')[start:end])
+    return paged_queryset(queryset, ordering=('actual_expires_at', 'id'), page=page, page_size=page_size, total=total)
 
 
 def unattached_ip_deleted_or_missing_q():
@@ -174,13 +192,11 @@ def completed_unattached_ip_active_count() -> int:
     return completed_unattached_ip_active_queryset().count()
 
 
-def unattached_ip_delete_plan_page(*, page: int, page_size: int):
-    start, end = page_bounds(page, page_size)
-    return list(
-        unattached_ip_delete_active_queryset()
-        .exclude(id__in=completed_unattached_ip_active_queryset().values('id'))
-        .order_by('actual_expires_at', 'id')[start:end]
-    )
+def unattached_ip_delete_plan_page(*, page: int, page_size: int, total: int | None = None, exclude_completed=True):
+    queryset = unattached_ip_delete_active_queryset()
+    if exclude_completed:
+        queryset = queryset.exclude(id__in=completed_unattached_ip_active_queryset().values('id'))
+    return paged_queryset(queryset, ordering=('actual_expires_at', 'id'), page=page, page_size=page_size, total=total)
 
 
 def unattached_ip_delete_history_q():
@@ -207,27 +223,37 @@ def unattached_ip_delete_history_q():
 def ip_delete_plan_counts() -> dict[str, int]:
     active_count = unattached_ip_delete_active_queryset().count()
     completed_active_count = completed_unattached_ip_active_count()
+    history_log_count = CloudIpLog.objects.filter(unattached_ip_delete_history_q()).count()
+    history_asset_count = unattached_ip_delete_history_asset_queryset().count()
     return {
         'ip_delete_count': max(active_count - completed_active_count, 0),
-        'ip_delete_history_count': (
-            CloudIpLog.objects.filter(unattached_ip_delete_history_q()).count()
-            + unattached_ip_delete_history_asset_queryset().count()
-            + completed_active_count
-        ),
+        'ip_delete_completed_active_count': completed_active_count,
+        'ip_delete_history_asset_count': history_asset_count,
+        'ip_delete_history_count': history_log_count + history_asset_count + completed_active_count,
+        'ip_delete_history_log_count': history_log_count,
     }
 
 
-def ip_delete_history_page_sources(*, page: int, page_size: int) -> list[tuple[str, object]]:
+def ip_delete_history_page_sources(
+    *,
+    page: int,
+    page_size: int,
+    log_total: int | None = None,
+    asset_total: int | None = None,
+    completed_total: int | None = None,
+) -> list[tuple[str, object]]:
     start, end = page_bounds(page, page_size)
     items: list[tuple[str, object]] = []
     history_logs = CloudIpLog.objects.filter(unattached_ip_delete_history_q())
-    log_total = history_logs.count()
+    if log_total is None:
+        log_total = history_logs.count()
     if start < log_total and len(items) < page_size:
-        log_start = start
-        log_end = min(end, log_total)
-        traces = (
-            history_logs.select_related('asset', 'order', 'user')
-            .order_by('-id')[log_start:log_end]
+        traces = paged_queryset(
+            history_logs.select_related('asset', 'order', 'user'),
+            ordering=('-id',),
+            page=page,
+            page_size=page_size,
+            total=log_total,
         )
         items.extend(('log', trace) for trace in traces)
 
@@ -237,7 +263,8 @@ def ip_delete_history_page_sources(*, page: int, page_size: int) -> list[tuple[s
 
     asset_start = max(start - log_total, 0)
     history_assets = unattached_ip_delete_history_asset_queryset().order_by('-updated_at', '-id')
-    asset_total = history_assets.count()
+    if asset_total is None:
+        asset_total = history_assets.count()
     if asset_start < asset_total:
         asset_end = min(asset_start + remaining, asset_total)
         items.extend(('asset', asset) for asset in history_assets[asset_start:asset_end])
@@ -246,6 +273,8 @@ def ip_delete_history_page_sources(*, page: int, page_size: int) -> list[tuple[s
         return items
 
     completed_start = max(start - log_total - asset_total, 0)
+    if completed_total is not None and completed_start >= completed_total:
+        return items
     completed_assets = completed_unattached_ip_active_queryset().order_by('-updated_at', '-id')
     items.extend(('asset', asset) for asset in completed_assets[completed_start:completed_start + remaining])
     return items

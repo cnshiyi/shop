@@ -10838,3 +10838,88 @@ git diff --check
 
 - 历史版本记录和复盘文档中仍保留旧兼容关键词，用于追溯历史，不代表运行时代码仍保留兼容入口。
 - 默认 MySQL 全量测试仍可能遇到已有测试库 `test_a` 的交互确认；本轮未删除测试库。
+
+## 2026-06-07 再次压测并优化代理列表深分页
+
+### 背景
+
+用户要求“再次压测”。本轮使用本地 MySQL 现有大数据，不注入新数据，不执行真实云资源、真实支付、链上广播、生产发布或删除业务数据。
+
+压测规模：
+
+- `CloudAsset`：1,500,000
+- `CloudAssetDashboardSnapshot`：500,000
+- 可显示快照：499,494
+- `CloudIpLog`：515,739
+- 服务器资产：1,500,000
+
+### 发现
+
+- 代理列表 IP 视图第 1、2、1000 页可以和数据库对账一致，但最后页原来约 5.6 秒。
+- MySQL `EXPLAIN` 显示代理列表默认排序只使用 `is_display_visible` 单列索引并 `Using filesort`。
+- 生命周期计划项仍以 `order-xxx`、`asset-xxx`、`log-xxx`、`trace-xxx` 混合字符串作为行主键，前端也存在用 `id` 兜底推断资产 ID 的逻辑。
+- 生命周期计划在 100 万级计划量下，首次统计约 14.4 秒；统计缓存预热后，多数分页能压到 0.5-1.6 秒。
+- 通知计划只读压测约 4.9-5.5 秒，仍是后续优化点。
+
+### 修改
+
+- `CloudAssetDashboardSnapshot` 增加 `asset_due_sort_null_rank`，并新增组合索引 `cad_vis_list_page_idx`。
+- 代理列表非分组分页新增反向窗口分页：靠近尾页时从反向排序取窗口再反转，页码契约不变。
+- 生命周期计划查询层新增通用 `paged_queryset()` 反向分页。
+- 服务器计划排序统一为 `actual_expires_at,id`，避免 `user_id` 导致 filesort。
+- IP 删除历史分页复用缓存中的日志/资产/完成保留统计，减少尾页重复 count。
+- 生命周期计划项统一输出 `source_kind`、`source_id`、`plan_item_key`，不再使用混合字符串主键表达来源。
+- 前端计划页和工作台改用 `plan_item_key`/结构化来源字段作为行 key。
+- 前端资产开关和备注保存不再用 `id` 兜底推断资产，只使用明确的 `asset_id` 或 `order_id`。
+- 聚焦测试新增计划项结构化身份字段断言。
+- 覆盖更新 `docs/auto-optimization-latest.md`。
+
+### 压测结果
+
+代理列表 IP 视图，50 万快照，`page_size=20`：
+
+- 第 1 页：0.561 秒，数据库对账一致。
+- 第 2 页：0.541 秒，数据库对账一致。
+- 第 1000 页：0.606 秒，数据库对账一致。
+- 倒数第 2 页：0.546 秒，数据库对账一致。
+- 最后一页：0.515 秒，数据库对账一致。
+
+生命周期计划，统计缓存预热后，`page_size=50`：
+
+- 关机计划：996,990 条；第 1 页 0.629 秒，最后页 0.544 秒。
+- 服务器删除计划：2,752 条；第 1 页 0.579 秒，最后页 2.578 秒。
+- IP 删除计划：500,000 条；第 1 页 0.579 秒，最后页 3.616 秒。
+- IP 删除历史：500,007 条；第 1 页 0.586 秒，最后页 0.918 秒。
+- 所有计划页返回项 `plan_item_key` 无重复，`source_kind/source_id` 完整，`id` 不再是字符串前缀。
+
+通知计划只读压测：
+
+- due 5,400；future 30,031；history 1,000。
+- `offset=0/100/1000/5000/100000` 均能返回正确切片，耗时约 4.9-5.5 秒。
+
+### 验证
+
+本地已通过：
+
+```bash
+uv run python -m py_compile bot/api.py cloud/api_asset_snapshots.py cloud/lifecycle_plan_queries.py cloud/models.py cloud/tests.py
+uv run python manage.py check
+DJANGO_TEST_SQLITE=1 uv run python manage.py test cloud.tests.CloudServerServicesTestCase.test_cloud_assets_paginated_uses_true_database_pages cloud.tests.CloudServerServicesTestCase.test_lifecycle_plans_server_delete_pagination_contract cloud.tests.CloudServerServicesTestCase.test_lifecycle_plans_ip_delete_history_pagination_contract --settings=shop.settings --verbosity=1
+git diff --check
+pnpm --dir /Users/a399/Desktop/data/vue-shop-admin/apps/web-antd typecheck
+git -C /Users/a399/Desktop/data/vue-shop-admin diff --check
+```
+
+结果：后端编译、Django 系统检查、聚焦测试、前端类型检查、空白检查均通过。SQLite 测试输出的 `db_comment` 警告为已知数据库能力差异。
+
+### 红线
+
+- 本轮未执行真实云资源创建、删除、关机、释放 IP、换 IP、真实支付、链上广播、删除业务数据、删除测试库或生产发布。
+- 本轮未打印密钥、私钥、Telegram session、TOTP、支付密钥或云厂商密钥。
+- 本轮未恢复废弃 runtime app、订单侧到期字段、旧计划快照、旧退款入口、旧 `Server` 兼容壳或旧云 API 聚合入口。
+
+### 剩余风险
+
+- 生命周期计划首次统计仍约 14.4 秒，后续翻页依赖进程内统计缓存；下一轮建议推进任务表投影或统计缓存表。
+- IP 删除计划最后页仍约 3.6 秒，主要瓶颈是未附加 IP 查询和完成保留 IP 排除条件。
+- 通知计划接口仍约 5 秒，下一轮应改为服务端分页查询或任务表投影，不再每次构建全量集合。

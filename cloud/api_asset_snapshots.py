@@ -179,6 +179,7 @@ def _snapshot_defaults_from_payload(item: dict) -> dict:
         'group_telegram_key': _snapshot_group_key(item, 'telegram_group'),
         'group_telegram_label': _snapshot_group_label(item, 'telegram_group')[:191],
         'asset_due_sort_at': actual_expires_at,
+        'asset_due_sort_null_rank': 1 if actual_expires_at is None else 0,
         'risk_status': item.get('risk_status') or 'other',
         'risk_rank': int(item.get('risk_rank') or 99),
         'risk_statuses': statuses,
@@ -206,7 +207,7 @@ def refresh_cloud_asset_dashboard_snapshots(asset_ids=None, *, reason: str = '',
         'payload', 'search_text', 'provider', 'cloud_account_id', 'account_label', 'region_code',
         'public_ip', 'status', 'is_active', 'is_display_visible', 'sort_order', 'user_id', 'tg_user_id',
         'telegram_group_id', 'group_user_key', 'group_user_label', 'group_telegram_key',
-        'group_telegram_label', 'asset_due_sort_at', 'risk_status', 'risk_rank',
+        'group_telegram_label', 'asset_due_sort_at', 'asset_due_sort_null_rank', 'risk_status', 'risk_rank',
         'risk_statuses', 'risk_normal', 'risk_due_soon', 'risk_expired', 'risk_unattached_ip', 'risk_abnormal',
         'risk_account_disabled', 'risk_shutdown_disabled', 'risk_unbound_user',
         'risk_unbound_group', 'risk_auto_renew_off', 'risk_deleted', 'asset_updated_at',
@@ -335,9 +336,9 @@ def _dashboard_snapshot_risk_counts(queryset) -> dict:
 
 def _dashboard_snapshot_ordering(sort_by: str, sort_direction: str):
     if sort_by in {'actual_expires_at', 'expires_at', 'days_left', 'remaining_days'}:
-        expires = F('asset_due_sort_at').desc(nulls_last=True) if sort_direction == 'desc' else F('asset_due_sort_at').asc(nulls_last=True)
-        return [expires, 'risk_rank', '-sort_order', '-asset_id']
-    return ['risk_rank', F('asset_due_sort_at').asc(nulls_last=True), '-sort_order', '-asset_id']
+        expires = '-asset_due_sort_at' if sort_direction == 'desc' else 'asset_due_sort_at'
+        return ['asset_due_sort_null_rank', expires, 'risk_rank', '-sort_order', '-asset_id']
+    return ['risk_rank', 'asset_due_sort_null_rank', 'asset_due_sort_at', '-sort_order', '-asset_id']
 
 
 def _snapshot_payloads(rows):
@@ -399,16 +400,36 @@ def _parse_dashboard_page(request, *, default_size=20, min_size=1, max_size=200)
     return page, page_size
 
 
+def _reverse_dashboard_ordering(ordering):
+    reversed_ordering = []
+    for field in ordering:
+        if not isinstance(field, str):
+            return None
+        reversed_ordering.append(field[1:] if field.startswith('-') else f'-{field}')
+    return reversed_ordering
+
+
 def _paginate_dashboard_snapshot_queryset(queryset, request, *, sort_by='', sort_direction='', default_size=20, min_size=1, max_size=200, compact=False):
     page, page_size = _parse_dashboard_page(request, default_size=default_size, min_size=min_size, max_size=max_size)
     total = queryset.count()
     total_pages = max((total + page_size - 1) // page_size, 1)
     page = min(page, total_pages)
     start = (page - 1) * page_size
-    rows_queryset = queryset.order_by(*_dashboard_snapshot_ordering(sort_by, sort_direction))[start:start + page_size]
+    ordering = _dashboard_snapshot_ordering(sort_by, sort_direction)
+    reverse_ordering = _reverse_dashboard_ordering(ordering)
+    end = min(start + page_size, total)
+    if reverse_ordering and start > max(total // 2, page_size * 100):
+        reverse_start = max(total - end, 0)
+        rows_queryset = queryset.order_by(*reverse_ordering)[reverse_start:reverse_start + (end - start)]
+        reverse_rows = True
+    else:
+        rows_queryset = queryset.order_by(*ordering)[start:end]
+        reverse_rows = False
     if compact:
         rows_queryset = rows_queryset.select_related('asset', 'user', 'telegram_group').defer('payload', 'search_text')
     rows = list(rows_queryset)
+    if reverse_rows:
+        rows.reverse()
     payloads = _compact_snapshot_payloads(rows) if compact else _snapshot_payloads(rows)
     return payloads, total, total_pages, page, page_size
 

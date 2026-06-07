@@ -58,6 +58,24 @@ _LIFECYCLE_PLAN_CACHE = {
 }
 
 
+def _plan_item_identity(source_kind: str, source_id, *, plan_kind: str = '', plan_stage: str = '') -> dict:
+    try:
+        normalized_source_id = int(source_id)
+    except (TypeError, ValueError):
+        normalized_source_id = None
+    key_parts = ['plan', str(source_kind or 'unknown'), str(normalized_source_id or 0)]
+    if plan_kind:
+        key_parts.append(str(plan_kind))
+    if plan_stage:
+        key_parts.append(str(plan_stage))
+    return {
+        'id': normalized_source_id,
+        'source_kind': source_kind,
+        'source_id': normalized_source_id,
+        'plan_item_key': ':'.join(key_parts),
+    }
+
+
 @ensure_csrf_cookie
 @require_GET
 def csrf(request):
@@ -276,8 +294,8 @@ def _page_meta(page: int, page_size: int, total: int) -> dict:
     return page_meta(page, page_size, total)
 
 
-def _server_lifecycle_plan_page_items(*, plan_stage: str, page: int, page_size: int) -> list[dict]:
-    assets = server_lifecycle_plan_page(plan_stage=plan_stage, page=page, page_size=page_size)
+def _server_lifecycle_plan_page_items(*, plan_stage: str, page: int, page_size: int, total: int | None = None) -> list[dict]:
+    assets = server_lifecycle_plan_page(plan_stage=plan_stage, page=page, page_size=page_size, total=total)
     if plan_stage == 'shutdown':
         return [_shutdown_stage_item_payload(asset, queue_status='scheduled_future', queue_status_label='计划中') for asset in assets]
     return [_asset_delete_plan_item_payload(asset, queue_status='scheduled_future', queue_status_label='计划中') for asset in assets]
@@ -303,9 +321,21 @@ def _ip_delete_plan_total_counts():
     return ip_delete_plan_counts()
 
 
-def _ip_delete_plan_asset_page_items(*, page: int, page_size: int, now=None) -> list[dict]:
+def _ip_delete_plan_asset_page_items(
+    *,
+    page: int,
+    page_size: int,
+    now=None,
+    total: int | None = None,
+    completed_active_count: int | None = None,
+) -> list[dict]:
     now = now or timezone.now()
-    assets = unattached_ip_delete_plan_page(page=page, page_size=page_size)
+    assets = unattached_ip_delete_plan_page(
+        page=page,
+        page_size=page_size,
+        total=total,
+        exclude_completed=bool(completed_active_count),
+    )
     trace_maps = _cloud_ip_trace_maps_for_assets(assets)
     items = []
     for asset in assets:
@@ -323,7 +353,7 @@ def _ip_delete_plan_asset_page_items(*, page: int, page_size: int, now=None) -> 
         asset_name = asset.asset_name or getattr(asset, 'static_ip_name', '') or asset.instance_id or f'asset-{asset.id}'
         ip_delete_enabled = _asset_ip_delete_enabled(asset)
         item = {
-            'id': asset.id,
+            **_plan_item_identity('asset', asset.id, plan_kind=PLAN_KIND_UNATTACHED_IP_DELETE),
             'plan_kind': PLAN_KIND_UNATTACHED_IP_DELETE,
             'asset_id': asset.id,
             'asset_name': asset_name,
@@ -365,7 +395,7 @@ def _ip_delete_history_trace_items_from_queryset(queryset) -> list[dict]:
         logged_at = _cloud_ip_trace_logged_at(trace.note, trace.created_at)
         delete_at = logged_at or getattr(order, 'ip_recycle_at', None) or getattr(asset, 'actual_expires_at', None)
         item = {
-            'id': trace.id,
+            **_plan_item_identity('ip_log', trace.id, plan_kind=PLAN_KIND_UNATTACHED_IP_DELETE, plan_stage='history'),
             'plan_kind': PLAN_KIND_UNATTACHED_IP_DELETE,
             'asset_id': trace.asset_id,
             'asset_name': asset_name,
@@ -396,7 +426,7 @@ def _ip_delete_history_asset_item(asset) -> dict:
     executed_at = asset.updated_at or asset.actual_expires_at or now
     source_note = _asset_note_text(asset) or asset.provider_status or '固定 IP 已删除'
     item = {
-        'id': asset.id,
+        **_plan_item_identity('asset', asset.id, plan_kind=PLAN_KIND_UNATTACHED_IP_DELETE, plan_stage='history'),
         'plan_kind': PLAN_KIND_UNATTACHED_IP_DELETE,
         'asset_id': asset.id,
         'asset_name': asset.asset_name or asset.instance_id or f'asset-{asset.id}',
@@ -420,9 +450,22 @@ def _ip_delete_history_asset_item(asset) -> dict:
     return _ip_delete_item_quality(item)
 
 
-def _ip_delete_history_page_items(*, page: int, page_size: int) -> list[dict]:
+def _ip_delete_history_page_items(
+    *,
+    page: int,
+    page_size: int,
+    log_total: int | None = None,
+    asset_total: int | None = None,
+    completed_total: int | None = None,
+) -> list[dict]:
     items = []
-    for source_type, source in ip_delete_history_page_sources(page=page, page_size=page_size):
+    for source_type, source in ip_delete_history_page_sources(
+        page=page,
+        page_size=page_size,
+        log_total=log_total,
+        asset_total=asset_total,
+        completed_total=completed_total,
+    ):
         if source_type == 'log':
             items.extend(_ip_delete_history_trace_items_from_queryset([source]))
         else:
@@ -1032,8 +1075,10 @@ def _shutdown_log_items(limit=100):
                 deletion_source=_delete_source_label(source_note),
             )
             logged_at = asset.updated_at
+        source_kind = 'ip_log' if trace else 'asset'
+        source_id = trace.id if trace else asset.id
         items.append({
-            'id': f'trace-{trace.id}' if trace else f'asset-{asset.id}',
+            **_plan_item_identity(source_kind, source_id, plan_kind='server_history'),
             'order_id': order.id if order else asset.order_id,
             'asset_id': asset.id,
             'order_no': (order.order_no if order else '') or asset.asset_name or asset.instance_id or f'asset-{asset.id}',
@@ -1078,7 +1123,7 @@ def _shutdown_log_items(limit=100):
         note = _cloud_ip_trace_note_newest_first(trace.note)
         logged_at = _cloud_ip_trace_logged_at(trace.note, trace.created_at)
         items.append({
-            'id': f'trace-{trace.id}',
+            **_plan_item_identity('ip_log', trace.id, plan_kind='server_history'),
             'order_id': trace.order_id,
             'asset_id': trace.asset_id,
             'order_no': trace.order_no or getattr(asset, 'asset_name', '') or getattr(order, 'server_name', '') or f'trace-{trace.id}',
@@ -1451,7 +1496,7 @@ def _unattached_ip_delete_items(limit=50, assets=None):
         shutdown_enabled = _asset_shutdown_enabled(asset)
         ip_delete_enabled = _asset_ip_delete_enabled(asset)
         item = {
-            'id': asset.id,
+            **_plan_item_identity('asset', asset.id, plan_kind=PLAN_KIND_UNATTACHED_IP_DELETE),
             'plan_kind': PLAN_KIND_UNATTACHED_IP_DELETE,
             'asset_id': asset.id,
             'asset_name': asset_name,
@@ -1497,7 +1542,7 @@ def _unattached_ip_delete_items(limit=50, assets=None):
         logged_at = _cloud_ip_trace_logged_at(trace.note, trace.created_at)
         delete_at = logged_at or getattr(order, 'ip_recycle_at', None) or getattr(asset, 'actual_expires_at', None)
         item = {
-            'id': trace.id,
+            **_plan_item_identity('ip_log', trace.id, plan_kind=PLAN_KIND_UNATTACHED_IP_DELETE, plan_stage='history'),
             'plan_kind': PLAN_KIND_UNATTACHED_IP_DELETE,
             'asset_id': trace.asset_id,
             'asset_name': asset_name,
@@ -1529,7 +1574,7 @@ def _unattached_ip_delete_items(limit=50, assets=None):
         executed_at = asset.updated_at or asset.actual_expires_at or now
         source_note = _asset_note_text(asset) or asset.provider_status or '固定 IP 已删除'
         item = {
-            'id': asset.id,
+            **_plan_item_identity('asset', asset.id, plan_kind=PLAN_KIND_UNATTACHED_IP_DELETE, plan_stage='history'),
             'plan_kind': PLAN_KIND_UNATTACHED_IP_DELETE,
             'asset_id': asset.id,
             'asset_name': asset.asset_name or asset.instance_id or f'asset-{asset.id}',
@@ -1757,7 +1802,7 @@ def _shutdown_plan_item_payload(order, *, queue_status='scheduled_future', queue
     )
     note = str(note or '').strip()
     return {
-        'id': f'order-{order.id}',
+        **_plan_item_identity('order', order.id, plan_kind='server_shutdown' if is_shutdown_stage else 'server_delete', plan_stage=plan_stage),
         'plan_kind': 'server_shutdown' if is_shutdown_stage else 'server_delete',
         'plan_stage': plan_stage,
         'item_type': 'order',
@@ -1862,7 +1907,7 @@ def _asset_delete_plan_item_payload(asset, *, queue_status='scheduled_future', q
     user_display_name, username_label = _telegram_user_labels(asset.user if getattr(asset, 'user', None) else None)
     note = str(note or _asset_note_text(asset)).strip()
     return {
-        'id': f'asset-{asset.id}',
+        **_plan_item_identity('asset', asset.id, plan_kind='server_shutdown' if is_shutdown_stage else 'server_delete', plan_stage=plan_stage),
         'plan_kind': 'server_shutdown' if is_shutdown_stage else 'server_delete',
         'plan_stage': plan_stage,
         'item_type': 'orphan_asset',
@@ -2055,7 +2100,7 @@ def _shutdown_history_item_payload(log):
     user_display_name, username_label = _telegram_user_labels(user)
     ok = log.event_type == 'deleted'
     return {
-        'id': f'log-{log.id}',
+        **_plan_item_identity('ip_log', log.id, plan_kind='server_history'),
         'order_id': log.order_id,
         'order_no': log.order_no or getattr(order, 'order_no', '') or '-',
         'ip': log.public_ip or log.previous_public_ip or getattr(order, 'public_ip', '') or getattr(order, 'previous_public_ip', '') or '未分配',
@@ -2089,7 +2134,7 @@ def _shutdown_history_order_payload(order):
     ip = order.public_ip or order.previous_public_ip or '未分配'
     executed_at = order.updated_at or order.delete_at
     return {
-        'id': f'order-{order.id}',
+        **_plan_item_identity('order', order.id, plan_kind='server_history'),
         'order_id': order.id,
         'order_no': order.order_no or '-',
         'ip': ip,
@@ -2408,13 +2453,23 @@ def lifecycle_plans(request):
 
     shutdown_plan_items = [
         decorate_plan_item(item)
-        for item in _server_lifecycle_plan_page_items(plan_stage='shutdown', page=shutdown_page, page_size=shutdown_page_size)
+        for item in _server_lifecycle_plan_page_items(
+            plan_stage='shutdown',
+            page=shutdown_page,
+            page_size=shutdown_page_size,
+            total=total_counts['shutdown_plan_count'],
+        )
     ]
     shutdown_plan_items = dedupe_shutdown_active_items(shutdown_plan_items)
 
     server_delete_active_items = [
         decorate_plan_item(item)
-        for item in _server_lifecycle_plan_page_items(plan_stage='delete', page=server_delete_page, page_size=server_delete_page_size)
+        for item in _server_lifecycle_plan_page_items(
+            plan_stage='delete',
+            page=server_delete_page,
+            page_size=server_delete_page_size,
+            total=total_counts['server_delete_count'],
+        )
     ]
     server_delete_active_items = [
         item for item in server_delete_active_items
@@ -2425,7 +2480,12 @@ def lifecycle_plans(request):
 
     ip_delete_plan_items = [
         decorate_plan_item(item)
-        for item in _ip_delete_plan_asset_page_items(page=ip_delete_page, page_size=ip_delete_page_size)
+        for item in _ip_delete_plan_asset_page_items(
+            page=ip_delete_page,
+            page_size=ip_delete_page_size,
+            total=ip_delete_total_counts['ip_delete_count'],
+            completed_active_count=ip_delete_total_counts.get('ip_delete_completed_active_count'),
+        )
     ]
     pending_ip_delete_items = [item for item in ip_delete_plan_items if is_ip_delete_pending(item)]
     ip_delete_history_items = [
@@ -2433,6 +2493,9 @@ def lifecycle_plans(request):
         for item in _ip_delete_history_page_items(
             page=ip_delete_history_page,
             page_size=ip_delete_history_page_size,
+            log_total=ip_delete_total_counts.get('ip_delete_history_log_count'),
+            asset_total=ip_delete_total_counts.get('ip_delete_history_asset_count'),
+            completed_total=ip_delete_total_counts.get('ip_delete_completed_active_count'),
         )
     ]
     recent_history = []
