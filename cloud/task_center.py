@@ -8,6 +8,7 @@ from django.views.decorators.http import require_GET
 from cloud.models import (
     CloudAssetSyncJob,
     CloudAutoRenewRetryTask,
+    CloudIpLog,
     CloudLifecycleTask,
     CloudNoticeTask,
     CloudServerOrder,
@@ -364,6 +365,51 @@ def _recent_lifecycle_db_task_items(now) -> list[dict]:
     return [_lifecycle_task_db_item(task) for task in queryset]
 
 
+def _current_lifecycle_plan_items(*, page_size=1000) -> list[dict]:
+    from bot.api import _ip_delete_plan_asset_page_items, _server_lifecycle_plan_page_items
+
+    return [
+        *_server_lifecycle_plan_page_items(plan_stage='shutdown', page=1, page_size=page_size),
+        *_server_lifecycle_plan_page_items(plan_stage='delete', page=1, page_size=page_size),
+        *_ip_delete_plan_asset_page_items(page=1, page_size=page_size),
+    ]
+
+
+def _recent_lifecycle_failed_history_items(now) -> list[dict]:
+    rows = (
+        CloudIpLog.objects
+        .select_related('order', 'asset')
+        .filter(
+            event_type__in=['delete_failed', 'delete_skipped'],
+            created_at__gte=now - timezone.timedelta(days=1),
+        )
+        .order_by('-created_at', '-id')[:1000]
+    )
+    items = []
+    for row in rows:
+        order = getattr(row, 'order', None)
+        asset = getattr(row, 'asset', None)
+        items.append({
+            'id': f'lifecycle-history:{row.id}',
+            'order_id': row.order_id,
+            'order_no': row.order_no or getattr(order, 'order_no', '') or '',
+            'asset_id': row.asset_id,
+            'queue_status': 'failed',
+            'queue_status_label': '失败/跳过',
+            'provider': row.provider or getattr(order, 'provider', '') or getattr(asset, 'provider', '') or '',
+            'ip': row.public_ip or row.previous_public_ip or getattr(order, 'public_ip', '') or getattr(asset, 'public_ip', '') or '',
+            'failure_reason': row.note or '生命周期执行失败',
+            'created_at': _iso(row.created_at),
+            'updated_at': _iso(row.created_at),
+            'logged_at': _iso(row.created_at),
+            'detail_path': (
+                f'/admin/cloud-orders/{row.order_id}'
+                if row.order_id else (f'/admin/cloud-assets/{row.asset_id}' if row.asset_id else '')
+            ),
+        })
+    return items
+
+
 def _recent_notice_db_task_items(now) -> list[dict]:
     queryset = (
         CloudNoticeTask.objects
@@ -465,21 +511,14 @@ def _cloud_orders_section(now) -> dict:
 
 
 def _lifecycle_section(now) -> dict:
-    from bot.api import _build_lifecycle_plan_bundle
-
-    bundle = _build_lifecycle_plan_bundle(limit=1000)
-    items_source = [
-        *bundle.get('due_items', []),
-        *bundle.get('future_plan_items', []),
-        *[item for item in bundle.get('ip_delete_items', []) if not item.get('is_history')],
-    ]
+    items_source = _current_lifecycle_plan_items(page_size=1000)
     active_failure_keys = {
         _task_identity(item)
         for item in items_source
         if item.get('last_failure_reason') or item.get('failure_reason')
     }
     recent_failed_history = _recent_failed_history_items(
-        bundle.get('history_items', []),
+        _recent_lifecycle_failed_history_items(now),
         since=now - timezone.timedelta(days=1),
         exclude_keys=active_failure_keys,
     )

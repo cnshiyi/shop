@@ -1722,11 +1722,13 @@ class CloudServerServicesTestCase(TestCase):
         self._attach_bearer_session(request, admin)
         response = lifecycle_plans(request)
         payload = json.loads(response.content.decode('utf-8'))['data']
-        row = payload['shutdown_items'][0]
+        row = payload['shutdown_plan_items'][0]
 
         self.assertEqual(response.status_code, 200)
-        self.assertLessEqual(len(payload['shutdown_items']), 5)
-        self.assertGreater(payload['shutdown_count'], len(payload['shutdown_items']))
+        self.assertLessEqual(len(payload['shutdown_plan_items']), 5)
+        self.assertGreater(payload['shutdown_plan_count'], len(payload['shutdown_plan_items']))
+        for old_field in ['due_items', 'future_plan_items', 'history_items', 'shutdown_items', 'ip_delete_items']:
+            self.assertNotIn(old_field, payload)
         self.assertNotIn('note', row)
         self.assertNotIn('display_note', row)
         self.assertNotIn('execution_status', row)
@@ -7564,7 +7566,7 @@ class CloudServerServicesTestCase(TestCase):
         data = json.loads(response.content)['data']
         self.assertTrue(any(
             item.get('asset_id') == asset.id and item.get('plan_kind') == CloudLifecyclePlanNote.PLAN_KIND_UNATTACHED_IP_DELETE
-            for item in data['ip_delete_items']
+            for item in data['ip_delete_plan_items']
         ))
 
     # 功能：验证生命周期计划总数统计全量远期计划，不受当前加载条数截断。
@@ -7599,9 +7601,11 @@ class CloudServerServicesTestCase(TestCase):
         self.assertEqual(response.status_code, 200)
         data = json.loads(response.content)['data']
         self.assertGreaterEqual(data['shutdown_plan_count'], 3)
-        self.assertGreaterEqual(data['server_delete_count'], 3)
         self.assertEqual(len(data['shutdown_plan_items']), 1)
-        self.assertEqual(len(data['server_delete_items']), 1)
+        self.assertFalse(any(
+            item.get('asset_name', '').startswith('lifecycle-full-count-')
+            for item in data['server_delete_items']
+        ))
 
     # 功能：验证 IP 删除计划总数统计全量未附加固定 IP，不受当前加载条数截断。
     def test_lifecycle_plans_counts_all_ip_delete_plans_beyond_loaded_limit(self):
@@ -7731,7 +7735,7 @@ class CloudServerServicesTestCase(TestCase):
 
         self.assertEqual(cached_response.status_code, 200)
         cached_data = json.loads(cached_response.content)['data']
-        self.assertGreaterEqual(cached_data['server_delete_count'], 1)
+        self.assertGreaterEqual(cached_data['shutdown_plan_count'], 1)
 
     # 功能：验证服务器删除计划服务端分页契约，跨页不重复且排序结果能和数据库事实对上。
     def test_lifecycle_plans_server_delete_pagination_contract(self):
@@ -7752,7 +7756,7 @@ class CloudServerServicesTestCase(TestCase):
                 asset_name=f'lifecycle-server-delete-page-{index}',
                 instance_id=f'i-lifecycle-server-delete-page-{index}',
                 public_ip=f'5.5.9.{10 + index}',
-                status=CloudAsset.STATUS_RUNNING,
+                status=CloudAsset.STATUS_STOPPED,
                 is_active=True,
                 actual_expires_at=now + timezone.timedelta(days=30, minutes=index),
             )
@@ -7864,7 +7868,7 @@ class CloudServerServicesTestCase(TestCase):
         ).exists())
         sync_response = lifecycle_plans(sync_request)
         data = json.loads(sync_response.content)['data']
-        plan_row = next(item for item in data['ip_delete_items'] if item.get('asset_id') == asset.id)
+        plan_row = next(item for item in data['ip_delete_plan_items'] if item.get('asset_id') == asset.id)
         self.assertEqual(plan_row['note'], '删除计划新备注')
 
     # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
@@ -9328,7 +9332,7 @@ class CloudServerServicesTestCase(TestCase):
 
         response = lifecycle_plans(request)
         data = json.loads(response.content)['data']
-        due_ids = {item.get('asset_id') for item in data['due_items']}
+        due_ids = {item.get('asset_id') for item in data['shutdown_plan_items']}
 
         self.assertNotIn(missing_asset.id, due_ids)
         self.assertIn(visible_asset.id, due_ids)
@@ -9346,7 +9350,7 @@ class CloudServerServicesTestCase(TestCase):
             instance_id='i-orphan-plan-note-columns',
             public_ip='3.3.3.37',
             actual_expires_at=timezone.now() - timezone.timedelta(days=7),
-            status=CloudAsset.STATUS_RUNNING,
+            status=CloudAsset.STATUS_STOPPED,
             is_active=True,
             provider_status='运行中',
             note='人工备注：这是一段很长的业务备注，不应该侵占执行状态列。\nGet: apt noise\ntg://proxy?server=1.1.1.1&port=9528&secret=x',
@@ -9357,7 +9361,7 @@ class CloudServerServicesTestCase(TestCase):
 
         response = lifecycle_plans(request)
         data = json.loads(response.content)['data']
-        row = next(item for item in data['due_items'] if item.get('asset_id') == asset.id)
+        row = next(item for item in data['shutdown_plan_items'] if item.get('asset_id') == asset.id)
 
         self.assertEqual(row['execution_status'], '无订单同步资产已到期，待执行删除服务器')
         self.assertEqual(row['execution_plan'][:5], '删除服务器')
@@ -9421,7 +9425,7 @@ class CloudServerServicesTestCase(TestCase):
 
         response = lifecycle_plans(request)
         data = json.loads(response.content)['data']
-        row = next(item for item in data['due_items'] if item.get('order_id') == order.id)
+        row = next(item for item in data['server_delete_items'] if item.get('order_id') == order.id)
 
         self.assertTrue(row['shutdown_enabled'])
         self.assertNotEqual(row['queue_status'], 'shutdown_disabled')
@@ -9470,7 +9474,7 @@ class CloudServerServicesTestCase(TestCase):
 
         response = lifecycle_plans(request)
         data = json.loads(response.content)['data']
-        row = next(item for item in data['due_items'] if item.get('asset_id') == asset.id)
+        row = next(item for item in data['shutdown_plan_items'] if item.get('asset_id') == asset.id)
 
         self.assertFalse(row['shutdown_enabled'])
         self.assertEqual(row['queue_status'], 'shutdown_disabled')
@@ -9520,7 +9524,7 @@ class CloudServerServicesTestCase(TestCase):
 
         response = lifecycle_plans(request)
         data = json.loads(response.content)['data']
-        row = next(item for item in data['due_items'] if item.get('asset_id') == asset.id)
+        row = next(item for item in data['shutdown_plan_items'] if item.get('asset_id') == asset.id)
 
         self.assertEqual(row['item_type'], 'order')
         self.assertEqual(row['order_id'], order.id)
@@ -9686,7 +9690,7 @@ class CloudServerServicesTestCase(TestCase):
         data = json.loads(response.content)['data']
         shutdown_row = next(item for item in data['shutdown_plan_items'] if item.get('asset_id') == shutdown_asset.id)
         delete_row = next(item for item in data['server_delete_items'] if item.get('asset_id') == delete_asset.id)
-        ip_row = next(item for item in data['ip_delete_items'] if item.get('asset_id') == ip_asset.id and not item.get('is_history'))
+        ip_row = next(item for item in data['ip_delete_plan_items'] if item.get('asset_id') == ip_asset.id)
 
         self.assertEqual(shutdown_row['queue_status'], 'shutdown_disabled')
         self.assertEqual(delete_row['queue_status'], 'server_delete_disabled')
@@ -9720,13 +9724,8 @@ class CloudServerServicesTestCase(TestCase):
         response = lifecycle_plans(request)
         data = json.loads(response.content)['data']
 
-        future_asset_ids = {item.get('asset_id') for item in data['future_plan_items']}
-        self.assertNotIn(asset.id, future_asset_ids)
-
-        history_row = next(item for item in data['history_items'] if item.get('asset_id') == asset.id)
-        self.assertEqual(history_row['resource_state_label'], '实例已删除（固定IP保留中）')
-        self.assertEqual(history_row['plan_state_label'], '等待IP回收')
-        self.assertFalse(history_row['should_execute'])
+        server_delete_asset_ids = {item.get('asset_id') for item in data['server_delete_items']}
+        self.assertNotIn(asset.id, server_delete_asset_ids)
 
     # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
     def test_manual_order_delete_enters_lifecycle_success_history(self):
@@ -9774,14 +9773,9 @@ class CloudServerServicesTestCase(TestCase):
 
         response = lifecycle_plans(request)
         data = json.loads(response.content)['data']
-        history_row = next(item for item in data['history_items'] if item.get('order_id') == order.id)
-
-        self.assertEqual(history_row['result_label'], '成功')
-        self.assertEqual(history_row['deletion_source_label'], '人工手动删除')
-        self.assertIn('manual lifecycle delete ok', history_row['note'])
-        self.assertEqual(history_row['execution_status'], '已删除')
+        self.assertNotIn('history_items', data)
         ip_delete_rows = [
-            item for item in data['ip_delete_items']
+            item for item in data['ip_delete_plan_items']
             if item.get('order_id') == order.id or item.get('public_ip') == '52.77.18.247'
         ]
         self.assertFalse(ip_delete_rows)
@@ -9833,7 +9827,7 @@ class CloudServerServicesTestCase(TestCase):
         data = json.loads(response.content)['data']
 
         self.assertGreaterEqual(data['ip_delete_history_count'], 1)
-        self.assertTrue(any(item.get('is_history') and item.get('public_ip') == '52.77.18.250' for item in data['ip_delete_items']))
+        self.assertTrue(any(item.get('is_history') and item.get('public_ip') == '52.77.18.250' for item in data['ip_delete_history_items']))
 
     # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
     def test_lifecycle_plans_include_ip_delete_history_item(self):
@@ -9863,7 +9857,7 @@ class CloudServerServicesTestCase(TestCase):
 
         response = lifecycle_plans(request)
         data = json.loads(response.content)['data']
-        rows = [item for item in data['ip_delete_items'] if item.get('is_history') and item.get('public_ip') == '52.77.18.248']
+        rows = [item for item in data['ip_delete_history_items'] if item.get('is_history') and item.get('public_ip') == '52.77.18.248']
 
         self.assertTrue(rows)
         self.assertGreaterEqual(data['ip_delete_history_count'], 1)
@@ -9897,7 +9891,7 @@ class CloudServerServicesTestCase(TestCase):
 
         response = lifecycle_plans(request)
         data = json.loads(response.content)['data']
-        rows = [item for item in data['ip_delete_items'] if item.get('is_history') and item.get('public_ip') == '52.77.18.249']
+        rows = [item for item in data['ip_delete_history_items'] if item.get('is_history') and item.get('public_ip') == '52.77.18.249']
 
         self.assertTrue(rows)
         self.assertGreaterEqual(data['ip_delete_history_count'], 1)
@@ -9952,8 +9946,7 @@ class CloudServerServicesTestCase(TestCase):
         self.assertFalse(any(item.get('asset_id') == active_asset.id for item in history_rows))
         self.assertTrue(any(item.get('asset_id') == history_asset.id and item.get('is_history') for item in history_rows))
         self.assertFalse(any(item.get('asset_id') == history_asset.id for item in plan_rows))
-        self.assertTrue(any(item.get('asset_id') == active_asset.id for item in data['ip_delete_items']))
-        self.assertTrue(any(item.get('asset_id') == history_asset.id and item.get('is_history') for item in data['ip_delete_items']))
+        self.assertNotIn('ip_delete_items', data)
         self.assertGreaterEqual(data['ip_delete_count'], len(plan_rows))
         self.assertGreaterEqual(data['ip_delete_history_count'], len(history_rows))
 
@@ -9969,7 +9962,7 @@ class CloudServerServicesTestCase(TestCase):
             asset_name='sort-delete-plan-later',
             instance_id='sort-delete-plan-later',
             public_ip='5.5.5.61',
-            status=CloudAsset.STATUS_RUNNING,
+            status=CloudAsset.STATUS_STOPPED,
             is_active=True,
             actual_expires_at=timezone.now() + timezone.timedelta(days=30),
         )
@@ -9983,7 +9976,7 @@ class CloudServerServicesTestCase(TestCase):
             asset_name='sort-delete-plan-earlier',
             instance_id='sort-delete-plan-earlier',
             public_ip='5.5.5.62',
-            status=CloudAsset.STATUS_RUNNING,
+            status=CloudAsset.STATUS_STOPPED,
             is_active=True,
             actual_expires_at=timezone.now() + timezone.timedelta(days=10),
         )
@@ -9997,7 +9990,7 @@ class CloudServerServicesTestCase(TestCase):
             asset_name='sort-delete-plan-middle',
             instance_id='sort-delete-plan-middle',
             public_ip='5.5.5.63',
-            status=CloudAsset.STATUS_RUNNING,
+            status=CloudAsset.STATUS_STOPPED,
             is_active=True,
             actual_expires_at=timezone.now() + timezone.timedelta(days=20),
         )
@@ -10008,7 +10001,7 @@ class CloudServerServicesTestCase(TestCase):
         response = lifecycle_plans(request)
         data = json.loads(response.content)['data']
         rows = [
-            item for item in data['shutdown_items']
+            item for item in data['server_delete_items']
             if item.get('asset_id') in {later_asset.id, earlier_asset.id, middle_asset.id}
         ]
 
@@ -10037,7 +10030,7 @@ class CloudServerServicesTestCase(TestCase):
                 asset_name=f'sort-user-group-{label}',
                 instance_id=f'sort-user-group-{label}',
                 public_ip=public_ip,
-                status=CloudAsset.STATUS_RUNNING,
+                status=CloudAsset.STATUS_STOPPED,
                 is_active=True,
                 actual_expires_at=same_delete_at,
             ))
@@ -10048,7 +10041,7 @@ class CloudServerServicesTestCase(TestCase):
         response = lifecycle_plans(request)
         data = json.loads(response.content)['data']
         rows = [
-            item for item in data['shutdown_items']
+            item for item in data['server_delete_items']
             if item.get('asset_id') in {asset.id for asset in assets}
         ]
 
@@ -10093,11 +10086,11 @@ class CloudServerServicesTestCase(TestCase):
         response = lifecycle_plans(request)
         data = json.loads(response.content)['data']
         history_rows = [
-            item for item in data['ip_delete_items']
+            item for item in data['ip_delete_history_items']
             if item.get('asset_id') == asset.id and item.get('is_history')
         ]
         active_rows = [
-            item for item in data['ip_delete_items']
+            item for item in data['ip_delete_plan_items']
             if item.get('asset_id') == asset.id and not item.get('is_history')
         ]
 
@@ -10133,13 +10126,13 @@ class CloudServerServicesTestCase(TestCase):
 
         response = lifecycle_plans(request)
         data = json.loads(response.content)['data']
-        rows = [item for item in data['shutdown_items'] if item.get('order_id') == order.id]
+        rows = [item for item in data['server_delete_items'] if item.get('order_id') == order.id]
 
         self.assertTrue(rows)
         self.assertEqual(rows[0]['queue_status'], 'scheduled_future')
         self.assertEqual(rows[0]['plan_state_label'], '已排期')
-        self.assertFalse(any(item.get('order_id') == order.id for item in data['due_items']))
-        self.assertTrue(any(item.get('order_id') == order.id for item in data['future_plan_items']))
+        self.assertNotIn('due_items', data)
+        self.assertNotIn('future_plan_items', data)
 
     # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
     def test_lifecycle_plans_compute_orphan_server_delete_after_suspend_window(self):
@@ -10170,7 +10163,7 @@ class CloudServerServicesTestCase(TestCase):
 
         response = lifecycle_plans(request)
         data = json.loads(response.content)['data']
-        row = next(item for item in data['due_items'] if item.get('asset_id') == asset.id)
+        row = next(item for item in data['shutdown_plan_items'] if item.get('asset_id') == asset.id)
         suspend_at = parse_datetime(row['suspend_at'])
         delete_at = parse_datetime(row['delete_at'])
 
@@ -10178,7 +10171,7 @@ class CloudServerServicesTestCase(TestCase):
         self.assertEqual(delete_at, suspend_at + timezone.timedelta(days=3, hours=1))
         self.assertGreater(delete_at, suspend_at)
         self.assertNotEqual(delete_at, expires_at)
-        self.assertIn(timezone.localtime(delete_at).strftime('%Y-%m-%d %H:%M:%S'), row['execution_plan'])
+        self.assertIn(timezone.localtime(suspend_at).strftime('%Y-%m-%d %H:%M:%S'), row['execution_plan'])
 
     # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
     def test_orphan_server_not_due_until_computed_delete_time(self):
@@ -10197,7 +10190,7 @@ class CloudServerServicesTestCase(TestCase):
             public_ip='52.77.18.252',
             instance_id='i-orphan-server-not-delete-at-expiry',
             actual_expires_at=timezone.now() - timezone.timedelta(days=1),
-            status=CloudAsset.STATUS_RUNNING,
+            status=CloudAsset.STATUS_STOPPED,
             is_active=True,
         )
 
@@ -10249,7 +10242,7 @@ class CloudServerServicesTestCase(TestCase):
         data = json.loads(response.content)['data']
         self.assertTrue(any(
             item.get('asset_id') and item.get('order_id') == order.id
-            for item in [*data['due_items'], *data['future_plan_items']]
+            for item in data['server_delete_items']
         ))
 
     # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
@@ -10295,7 +10288,7 @@ class CloudServerServicesTestCase(TestCase):
 
         self.assertEqual(response.status_code, 200)
         data = json.loads(response.content)['data']
-        self.assertGreaterEqual(data['shutdown_count'], 1)
+        self.assertGreaterEqual(data['server_delete_count'], 1)
 
     # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
     def test_update_cloud_asset_expiry_refreshes_delete_plan_view(self):
@@ -10332,7 +10325,7 @@ class CloudServerServicesTestCase(TestCase):
         request = self.factory.get('/api/admin/tasks/plans/', {'limit': 20})
         self._attach_bearer_session(request, staff_user)
         data = json.loads(lifecycle_plans(request).content)['data']
-        row = next(item for item in data['due_items'] if item.get('asset_id') == asset.id)
+        row = next(item for item in data['shutdown_plan_items'] if item.get('asset_id') == asset.id)
         self.assertEqual(asset.actual_expires_at, new_expiry)
         self.assertNotEqual(parse_datetime(row['delete_at']), old_delete_at)
         self.assertEqual(parse_datetime(row['actual_expires_at']), new_expiry)
@@ -13731,7 +13724,7 @@ class CloudServerServicesTestCase(TestCase):
 
         response = lifecycle_plans(request)
         data = json.loads(response.content)['data']
-        row = next(item for item in data['ip_delete_items'] if item.get('public_ip') == '5.5.5.24' and not item.get('is_history'))
+        row = next(item for item in data['ip_delete_plan_items'] if item.get('public_ip') == '5.5.5.24')
 
         self.assertEqual(row['resource_state_label'], '云上缺失待确认（第1/5次）')
         self.assertIn('第1/5次删除确认', row['display_note'])
@@ -13771,7 +13764,7 @@ class CloudServerServicesTestCase(TestCase):
 
         response = lifecycle_plans(request)
         data = json.loads(response.content)['data']
-        row = next(item for item in data['ip_delete_items'] if item.get('asset_id') == asset.id and not item.get('is_history'))
+        row = next(item for item in data['ip_delete_plan_items'] if item.get('asset_id') == asset.id)
 
         self.assertIn('已尝试2次，待第3次删除', row['resource_state_label'])
         self.assertIn('删除次数：已尝试2次，待第3次删除', row['display_note'])
@@ -13899,14 +13892,15 @@ class CloudServerServicesTestCase(TestCase):
         response = lifecycle_plans(request)
         data = json.loads(response.content)['data']
 
-        self.assertEqual(list_payload['total'], 3)
+        self.assertEqual(list_payload['total'], 4)
         self.assertEqual(data['source_asset_count'], list_payload['total'])
-        self.assertEqual(data['server_asset_count'], 2)
+        self.assertEqual(data['server_asset_count'], 3)
         self.assertEqual(data['unattached_ip_count'], 1)
         self.assertEqual(data['source_asset_count'], data['server_asset_count'] + data['unattached_ip_count'])
-        self.assertTrue(any(item.get('asset_id') == server_asset.id for item in data['due_items'] + data['future_plan_items']))
-        self.assertTrue(any(item.get('asset_id') == ip_asset.id for item in data['ip_delete_items']))
-        aliyun_row = next(item for item in data['due_items'] + data['future_plan_items'] if item.get('asset_id') == aliyun_asset.id)
+        self.assertTrue(any(item.get('asset_id') == server_asset.id for item in data['shutdown_plan_items']))
+        self.assertTrue(any(item.get('asset_id') == ip_asset.id for item in data['ip_delete_plan_items']))
+        self.assertTrue(any(item.get('asset_name') == 'proxy-count-disabled-account' for item in data['shutdown_plan_items']))
+        aliyun_row = next(item for item in data['shutdown_plan_items'] if item.get('asset_id') == aliyun_asset.id)
         self.assertEqual(aliyun_row['plan_state_label'], '只同步/自然释放')
         self.assertFalse(aliyun_row['should_execute'])
 

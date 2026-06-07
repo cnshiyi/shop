@@ -10447,3 +10447,70 @@ git diff --check
 - 单独补丁把任务中心生命周期、通知、自动续费统计抽成 domain metrics。
 - 单独补丁收敛机器人返回链 callback source 编解码，集中处理 64 字节限制。
 - 建立红线扫描测试或管理命令，固化废弃 app、旧到期字段、旧退款函数和旧计划快照扫描。
+
+## 2026-06-07 生命周期计划去旧兼容字段和孤儿资产口径修复
+
+### 背景
+
+用户明确表示“不需要兼容了”，因此本轮在上一轮服务端分页查询层基础上继续收口：不再向计划页 API 暴露旧 `due_items`、`future_plan_items`、`history_items`、`shutdown_items`、混合 `ip_delete_items` 字段。同时复查用户此前指出的孤儿资产问题：未关联云账号或停用云账号资产如果仍在代理列表显示，也必须在计划页统计和计划表中可见，不能被查询层过滤成不可管理状态。
+
+### 修改
+
+- `bot/api.py`：
+  - 删除 `_visible_lifecycle_plan_stats()`、`_collect_lifecycle_plan_rows()`、`_build_lifecycle_plan_bundle()`。
+  - 生命周期计划 API 只返回 `shutdown_plan_items`、`server_delete_items`、`ip_delete_plan_items`、`ip_delete_history_items` 四张表。
+  - 刷新计划接口改为返回四张表 loaded/count 统计，不再返回旧 due/future/history/shutdown 兼容统计。
+  - 手动执行关机/删机/IP 删除后刷新计划缓存时改用当前 `_refresh_lifecycle_plan_cache()`。
+  - 关机阶段 payload 使用关机文案和关机计划状态，不再复用删除计划文案。
+  - 同 IP 计划项去重优先真实运行/已关机资产，避免后台人工编辑到期时间生成的 pending 审计资产覆盖真实资产。
+- `cloud/lifecycle_plan_queries.py`：
+  - 服务器关机计划只包含未完成关机资产。
+  - 服务器删除计划只包含关机完成资产。
+  - 排序按 `actual_expires_at/user_id/id`，保持服务端分页顺序稳定。
+  - 不再按云账号启停过滤服务器计划和 IP 删除计划资产，保证代理列表可见资产在计划页也可见；真实执行仍由生命周期执行器拒绝停用账号动作。
+- `cloud/task_center.py`：
+  - 生命周期任务中心不再读取旧 bundle，改为读取当前关机计划、服务器删除计划、IP 删除计划和近期失败历史。
+- `cloud/management/commands/refresh_lifecycle_plans.py`：
+  - 命令输出改为 `shutdown/server_delete/ip_delete/ip_delete_history` 四类当前表。
+- 前端 `/Users/a399/Desktop/data/vue-shop-admin`：
+  - `apps/web-antd/src/api/admin.ts` 删除生命周期旧兼容字段类型。
+  - `apps/web-antd/src/views/dashboard/tasks/plans.vue` 删除旧 fallback 和“服务器删除历史记录”卡片，页面只消费四张当前表。
+
+### 验证
+
+本地已通过：
+
+```bash
+uv run python -m py_compile bot/api.py cloud/lifecycle_plan_queries.py cloud/task_center.py cloud/management/commands/refresh_lifecycle_plans.py cloud/tests.py cloud/tests_task_center.py
+DJANGO_TEST_SQLITE=1 uv run python manage.py test cloud.tests_task_center.CloudTaskCenterApiTestCase cloud.tests.CloudServerServicesTestCase.test_lifecycle_plans_fields_basic_omits_notes_and_execution_payload cloud.tests.CloudServerServicesTestCase.test_lifecycle_plans_counts_all_future_server_assets_beyond_loaded_limit cloud.tests.CloudServerServicesTestCase.test_lifecycle_plans_reuses_cached_count_snapshot_after_refresh cloud.tests.CloudServerServicesTestCase.test_lifecycle_plans_server_delete_pagination_contract cloud.tests.CloudServerServicesTestCase.test_lifecycle_plans_split_shutdown_before_server_delete cloud.tests.CloudServerServicesTestCase.test_lifecycle_plans_use_stage_specific_asset_switches cloud.tests.CloudServerServicesTestCase.test_lifecycle_plans_separate_ip_delete_plan_and_history_items cloud.tests.CloudServerServicesTestCase.test_lifecycle_plans_sort_shutdown_items_by_delete_time cloud.tests.CloudServerServicesTestCase.test_lifecycle_plans_group_same_delete_time_by_user cloud.tests.CloudServerServicesTestCase.test_update_cloud_asset_expiry_refreshes_delete_plan_view cloud.tests.CloudServerServicesTestCase.test_lifecycle_plan_counts_match_proxy_list_assets --settings=shop.settings --verbosity=1
+uv run python manage.py check
+DB_ENGINE=mysql uv run python manage.py check
+DB_ENGINE=mysql uv run python manage.py migrate --plan
+/Users/a399/.homebrew/bin/pnpm -C /Users/a399/Desktop/data/vue-shop-admin --filter @vben/web-antd typecheck
+git diff --check
+```
+
+结果：后端编译通过；25 条聚焦测试通过；默认和 MySQL `manage.py check` 通过；MySQL 无待执行迁移；前端 typecheck 通过；diff 空白检查通过。
+
+### 红线扫描
+
+```bash
+rg -n "service_expires_at" shop core bot orders cloud -g '!*/migrations/*'
+rg -n "old_refund|legacy_refund|refund_cloud_order|refund_order|apply_refund|process_refund|create_refund" shop core bot orders cloud -g '!*/migrations/*'
+rg -n "['\"](accounts|finance|mall|monitoring|dashboard_api|biz)['\"]|include\\(['\"](accounts|finance|mall|monitoring|dashboard_api|biz)" shop core bot orders cloud -g '!*/migrations/*'
+rg -n "lifecycle_plan_projection|0058_lifecycle_task_plan_page_index|plan_projection|page_lifecycle_plan_tasks|sync_lifecycle_plan_projection" bot cloud docs -g '!*/migrations/*'
+```
+
+结果：未发现旧到期字段、旧退款入口或废弃 runtime app 回流；`accounts` 命中为 Telegram/同步接口普通字段名；计划投影命中为历史文档记录。
+
+### 红线
+
+- 本轮未执行真实云资源创建、删除、关机、释放 IP、换 IP、真实支付、链上广播、删除业务数据或生产发布。
+- 本轮未打印密钥、私钥、Telegram session、TOTP、支付密钥或云厂商密钥。
+- 本轮未恢复废弃 runtime app、订单侧到期字段、旧计划快照或旧退款入口。
+
+### 后续
+
+- 单独补丁推进 `CloudLifecycleTask` 计划页投影路线。
+- 单独补丁把任务中心生命周期、通知、自动续费统计抽成 domain metrics。
+- 单独补丁收敛机器人 callback source 编解码。

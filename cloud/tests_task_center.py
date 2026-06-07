@@ -230,8 +230,7 @@ class CloudTaskCenterApiTestCase(TestCase):
 
     def test_lifecycle_section_exposes_failure_reason_in_item_note(self):
         now = timezone.now()
-        with patch('bot.api._build_lifecycle_plan_bundle', return_value={
-            'due_items': [
+        with patch('cloud.task_center._current_lifecycle_plan_items', return_value=[
                 {
                     'id': 'delete-1',
                     'order_id': 1,
@@ -242,10 +241,7 @@ class CloudTaskCenterApiTestCase(TestCase):
                     'ip': '1.1.1.3',
                     'failure_reason': '云 API 删除失败',
                 },
-            ],
-            'future_plan_items': [],
-            'ip_delete_items': [],
-        }):
+            ]), patch('cloud.task_center._recent_lifecycle_failed_history_items', return_value=[]):
             section = _lifecycle_section(now)
 
         self.assertEqual(section['failed'], 1)
@@ -254,11 +250,8 @@ class CloudTaskCenterApiTestCase(TestCase):
 
     def test_lifecycle_section_counts_recent_failed_history_as_failed(self):
         now = timezone.now()
-        with patch('bot.api._build_lifecycle_plan_bundle', return_value={
-            'due_items': [],
-            'future_plan_items': [],
-            'ip_delete_items': [],
-            'history_items': [
+        with patch('cloud.task_center._current_lifecycle_plan_items', return_value=[]), \
+            patch('cloud.task_center._recent_lifecycle_failed_history_items', return_value=[
                 {
                     'id': 'life-history-1',
                     'order_id': 1,
@@ -270,8 +263,7 @@ class CloudTaskCenterApiTestCase(TestCase):
                     'ip': '1.1.1.5',
                     'executed_at': (now - timezone.timedelta(minutes=10)).isoformat(),
                 },
-            ],
-        }):
+            ]):
             section = _lifecycle_section(now)
 
         self.assertEqual(section['failed'], 1)
@@ -295,12 +287,8 @@ class CloudTaskCenterApiTestCase(TestCase):
             last_run_at=now,
         )
 
-        with patch('bot.api._build_lifecycle_plan_bundle', return_value={
-            'due_items': [],
-            'future_plan_items': [],
-            'ip_delete_items': [],
-            'history_items': [],
-        }):
+        with patch('cloud.task_center._current_lifecycle_plan_items', return_value=[]), \
+            patch('cloud.task_center._recent_lifecycle_failed_history_items', return_value=[]):
             section = _lifecycle_section(now)
 
         self.assertEqual(section['failed'], 1)
@@ -322,12 +310,8 @@ class CloudTaskCenterApiTestCase(TestCase):
             status=CloudLifecycleTask.STATUS_PENDING,
         )
 
-        with patch('bot.api._build_lifecycle_plan_bundle', return_value={
-            'due_items': [],
-            'future_plan_items': [],
-            'ip_delete_items': [],
-            'history_items': [],
-        }):
+        with patch('cloud.task_center._current_lifecycle_plan_items', return_value=[]), \
+            patch('cloud.task_center._recent_lifecycle_failed_history_items', return_value=[]):
             section = _lifecycle_section(now)
 
         self.assertEqual(section['active'], 1)
@@ -351,8 +335,7 @@ class CloudTaskCenterApiTestCase(TestCase):
             last_run_at=now,
         )
 
-        with patch('bot.api._build_lifecycle_plan_bundle', return_value={
-            'due_items': [
+        with patch('cloud.task_center._current_lifecycle_plan_items', return_value=[
                 {
                     'id': 'active-plan-duplicate',
                     'order_id': order.id,
@@ -363,11 +346,7 @@ class CloudTaskCenterApiTestCase(TestCase):
                     'ip': order.public_ip,
                     'failure_reason': '计划项失败不应重复计数',
                 },
-            ],
-            'future_plan_items': [],
-            'ip_delete_items': [],
-            'history_items': [],
-        }):
+            ]), patch('cloud.task_center._recent_lifecycle_failed_history_items', return_value=[]):
             section = _lifecycle_section(now)
 
         self.assertEqual(section['failed'], 1)

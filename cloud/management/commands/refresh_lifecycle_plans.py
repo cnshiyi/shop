@@ -16,5 +16,8 @@ class Command(BaseCommand):
         limit = page_size if raw_limit in (None, 0) else max(1, int(raw_limit))
         bundle = _sync_lifecycle_plan_table(limit=limit, page_size=page_size)
         self.stdout.write(self.style.SUCCESS(
-            f"删机计划已生成：due={len(bundle.get('due_items') or [])} future={len(bundle.get('future_plan_items') or [])} history={len(bundle.get('history_items') or [])} ip_delete={len(bundle.get('ip_delete_items') or [])}"
+            f"生命周期计划已生成：shutdown={len(bundle.get('shutdown_plan_items') or [])} "
+            f"server_delete={len(bundle.get('server_delete_items') or [])} "
+            f"ip_delete={len(bundle.get('ip_delete_plan_items') or [])} "
+            f"ip_delete_history={len(bundle.get('ip_delete_history_items') or [])}"
         ))

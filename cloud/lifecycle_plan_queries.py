@@ -41,17 +41,6 @@ def active_cloud_account_labels() -> list[str]:
     return list(dict.fromkeys(labels))
 
 
-def active_cloud_asset_account_disabled_q(active_account_labels: set[str] | None = None):
-    active_account_labels = active_account_labels if active_account_labels is not None else set(active_cloud_account_labels())
-    account_label_present = Q(account_label__isnull=False) & ~Q(account_label='')
-    disabled_q = Q(cloud_account__is_active=False)
-    if active_account_labels:
-        disabled_q |= account_label_present & ~Q(account_label__in=list(active_account_labels))
-    else:
-        disabled_q |= account_label_present
-    return disabled_q
-
-
 def unattached_ip_asset_q():
     return (
         Q(provider_status__icontains='未附加')
@@ -95,7 +84,6 @@ def server_shutdown_complete_q():
 
 
 def server_lifecycle_plan_queryset():
-    active_labels = set(active_cloud_account_labels())
     return (
         CloudAsset.objects.select_related('order', 'user', 'cloud_account', 'order__cloud_account')
         .filter(kind=CloudAsset.KIND_SERVER, actual_expires_at__isnull=False)
@@ -105,7 +93,6 @@ def server_lifecycle_plan_queryset():
             CloudAsset.STATUS_TERMINATED,
             CloudAsset.STATUS_TERMINATING,
         ])
-        .exclude(active_cloud_asset_account_disabled_q(active_labels))
         .exclude(unattached_ip_asset_q())
         .exclude(asset_waiting_manual_time_q())
     )
@@ -115,7 +102,7 @@ def server_lifecycle_plan_counts() -> dict[str, int]:
     queryset = server_lifecycle_plan_queryset()
     return {
         'shutdown_plan_count': queryset.exclude(server_shutdown_complete_q()).count(),
-        'server_delete_count': queryset.count(),
+        'server_delete_count': queryset.filter(server_shutdown_complete_q()).count(),
     }
 
 
@@ -123,8 +110,10 @@ def server_lifecycle_plan_page(*, plan_stage: str, page: int, page_size: int):
     queryset = server_lifecycle_plan_queryset()
     if plan_stage == 'shutdown':
         queryset = queryset.exclude(server_shutdown_complete_q())
+    else:
+        queryset = queryset.filter(server_shutdown_complete_q())
     start, end = page_bounds(page, page_size)
-    return list(queryset.order_by('actual_expires_at', 'id')[start:end])
+    return list(queryset.order_by('actual_expires_at', 'user_id', 'id')[start:end])
 
 
 def unattached_ip_deleted_or_missing_q():
@@ -146,29 +135,12 @@ def unattached_ip_deleted_or_missing_q():
 
 
 def unattached_ip_delete_active_queryset():
-    active_labels = active_cloud_account_labels()
-    inactive_labels = [
-        label
-        for account in CloudAccountConfig.objects.filter(
-            provider__in=[CloudAccountConfig.PROVIDER_AWS, CloudAccountConfig.PROVIDER_ALIYUN],
-            is_active=False,
-        )
-        for label in cloud_account_label_variants(account)
-    ]
     blank_instance_q = Q(instance_id__isnull=True) | Q(instance_id='')
-    active_account_q = (
-        Q(cloud_account__isnull=True, account_label__isnull=True)
-        | Q(cloud_account__isnull=True, account_label='')
-        | Q(cloud_account__is_active=True)
-        | Q(account_label__in=active_labels)
-    )
     return (
         CloudAsset.objects.select_related('order', 'user', 'cloud_account', 'order__cloud_account')
         .filter(kind=CloudAsset.KIND_SERVER)
         .filter(broad_unattached_ip_asset_q())
         .filter(blank_instance_q)
-        .filter(active_account_q)
-        .exclude(Q(cloud_account__is_active=False) | Q(account_label__in=inactive_labels))
         .exclude(unattached_ip_deleted_or_missing_q())
     )
 
