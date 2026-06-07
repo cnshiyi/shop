@@ -10388,3 +10388,62 @@ DB_ENGINE=mysql UV_CACHE_DIR=/private/tmp/uv-cache-shop PYTHONDONTWRITEBYTECODE=
 - 本地 150 万资产和 50 万 IP 删除历史压测数据仍保留，清理需要单独确认。
 - 计划页当前是“加载更多 + 本地分页已加载数据”，不是每张表独立服务端深分页；如果要直接跳到任意深页，需要继续做服务端分页 API。
 - 强制刷新仍约 20 秒，建议上线前让后台定时刷新缓存，前端默认读取缓存。
+
+## 2026-06-07 生命周期计划服务端分页查询层重构
+
+### 背景
+
+用户明确要求目标是重构项目，不是一直打补丁，并给出分阶段计划：先拆当前补丁，本轮只保留“直接从 `CloudAsset` / `CloudIpLog` 服务端分页”的最小补丁；暂缓 `CloudLifecycleTask` 计划页投影路线，后续单独开补丁处理。
+
+### 修改
+
+- 拆除本轮未提交的任务表投影路线：
+  - 删除 `cloud/lifecycle_plan_projection.py`。
+  - 删除 `cloud/migrations/0058_lifecycle_task_plan_page_index.py`。
+  - 删除 `.playwright-cli/` 临时目录。
+  - 计划页不再读取 `CloudLifecycleTask` 作为数据源。
+- 后端查询层：
+  - 新增 `cloud/lifecycle_plan_queries.py`。
+  - 抽出服务器计划 queryset/count/page。
+  - 抽出 IP 删除活动计划 queryset/count/page。
+  - 抽出 IP 删除历史日志/历史资产/已完成活动资产的组合分页来源。
+  - `bot/api.py` 只保留鉴权、参数解析、响应拼装和展示 payload 转换。
+- 分页契约：
+  - 后端统一返回 `pagination.{table}.page/page_size/total/loaded`。
+  - `shutdown_plan`、`server_delete`、`ip_delete`、`ip_delete_history` 均支持独立服务端分页。
+  - 前端计划页新增对应 page/page_size 请求参数，Ant Table 翻页和跳页直接请求后端。
+  - 前端移除四张计划表的本地二次排序，完全信任后端排序。
+- 索引：
+  - `CloudAsset` 增加 `ca_lifecycle_page_idx` 和 `ca_lifecycle_any_page_idx`。
+  - `CloudIpLog` 增加 `cil_event_id_desc_idx`。
+
+### 验证
+
+本地已通过：
+
+```bash
+uv run python -m py_compile bot/api.py cloud/lifecycle_plan_queries.py cloud/tests.py cloud/models.py cloud/management/commands/refresh_lifecycle_plans.py cloud/dashboard_snapshots.py
+DJANGO_TEST_SQLITE=1 uv run python manage.py test cloud.tests.CloudServerServicesTestCase.test_lifecycle_plans_counts_all_future_server_assets_beyond_loaded_limit cloud.tests.CloudServerServicesTestCase.test_lifecycle_plans_counts_all_ip_delete_plans_beyond_loaded_limit cloud.tests.CloudServerServicesTestCase.test_lifecycle_plans_counts_all_ip_delete_history_beyond_loaded_limit cloud.tests.CloudServerServicesTestCase.test_lifecycle_plans_reuses_cached_count_snapshot_after_refresh cloud.tests.CloudServerServicesTestCase.test_lifecycle_plans_server_delete_pagination_contract cloud.tests.CloudServerServicesTestCase.test_lifecycle_plans_ip_delete_history_pagination_contract --settings=shop.settings --verbosity=2
+DB_ENGINE=mysql uv run python manage.py check
+uv run python manage.py makemigrations --check --dry-run
+uv run python manage.py check
+DB_ENGINE=mysql uv run python manage.py migrate --plan
+git diff --check
+/Users/a399/.homebrew/bin/pnpm -C /Users/a399/Desktop/data/vue-shop-admin --filter @vben/web-antd typecheck
+git diff --check
+```
+
+结果：后端编译通过；6 条聚焦测试通过；MySQL 和默认 `manage.py check` 通过；无待生成迁移；MySQL 迁移计划无待执行迁移；前端 typecheck 通过；两边 diff 空白检查通过。
+
+### 红线
+
+- 本轮未执行真实云资源创建、删除、关机、释放 IP、换 IP、真实支付、链上广播、删除业务数据或生产发布。
+- 本轮未打印密钥、私钥、Telegram session、TOTP、支付密钥或云厂商密钥。
+- 本轮未恢复废弃 runtime app、订单侧到期字段、旧计划快照或旧退款入口。
+
+### 后续计划
+
+- 单独补丁推进 `CloudLifecycleTask` 计划页投影路线，明确“定时全量投影、页面只读任务表、强制刷新才重算”的策略。
+- 单独补丁把任务中心生命周期、通知、自动续费统计抽成 domain metrics。
+- 单独补丁收敛机器人返回链 callback source 编解码，集中处理 64 字节限制。
+- 建立红线扫描测试或管理命令，固化废弃 app、旧到期字段、旧退款函数和旧计划快照扫描。

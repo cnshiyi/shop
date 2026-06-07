@@ -7733,6 +7733,96 @@ class CloudServerServicesTestCase(TestCase):
         cached_data = json.loads(cached_response.content)['data']
         self.assertGreaterEqual(cached_data['server_delete_count'], 1)
 
+    # 功能：验证服务器删除计划服务端分页契约，跨页不重复且排序结果能和数据库事实对上。
+    def test_lifecycle_plans_server_delete_pagination_contract(self):
+        now = timezone.now()
+        account = self._aws_test_account()
+        expected_names = []
+        for index in range(7):
+            expected_names.append(f'lifecycle-server-delete-page-{index}')
+            CloudAsset.objects.create(
+                kind=CloudAsset.KIND_SERVER,
+                source=CloudAsset.SOURCE_AWS_SYNC,
+                user=self.user,
+                provider='aws_lightsail',
+                cloud_account=account,
+                account_label=cloud_account_label(account),
+                region_code=self.plan.region_code,
+                region_name=self.plan.region_name,
+                asset_name=f'lifecycle-server-delete-page-{index}',
+                instance_id=f'i-lifecycle-server-delete-page-{index}',
+                public_ip=f'5.5.9.{10 + index}',
+                status=CloudAsset.STATUS_RUNNING,
+                is_active=True,
+                actual_expires_at=now + timezone.timedelta(days=30, minutes=index),
+            )
+        staff_user = get_user_model().objects.create_user(username='staff_lifecycle_server_page', password='x', is_staff=True)
+
+        seen = []
+        for page in [1, 2, 3, 4]:
+            params = {
+                'compact': '1',
+                'fields': 'basic,execution',
+                'limit': '2',
+                'server_delete_page': str(page),
+                'server_delete_page_size': '2',
+            }
+            if page == 1:
+                params['refresh'] = '1'
+            request = RequestFactory().get('/api/admin/tasks/plans/', params)
+            self._attach_bearer_session(request, staff_user)
+            response = lifecycle_plans(request)
+            self.assertEqual(response.status_code, 200)
+            data = json.loads(response.content)['data']
+            self.assertEqual(data['pagination']['server_delete']['page'], page)
+            self.assertEqual(data['pagination']['server_delete']['page_size'], 2)
+            self.assertGreaterEqual(data['pagination']['server_delete']['total'], 7)
+            seen.extend(item['asset_name'] for item in data['server_delete_items'])
+
+        self.assertEqual([name for name in seen if name in expected_names], expected_names)
+        self.assertEqual(len(seen), len(set(seen)))
+
+    # 功能：验证 IP 删除历史服务端分页契约，跨页不重复且排序结果能和数据库事实对上。
+    def test_lifecycle_plans_ip_delete_history_pagination_contract(self):
+        expected_names = []
+        for index in range(7):
+            expected_names.append(f'lifecycle-ip-history-page-{index}')
+            CloudIpLog.objects.create(
+                event_type=CloudIpLog.EVENT_RECYCLED,
+                provider='aws_lightsail',
+                region_code=self.plan.region_code,
+                region_name=self.plan.region_name,
+                asset_name=f'lifecycle-ip-history-page-{index}',
+                previous_public_ip=f'5.5.10.{10 + index}',
+                public_ip=None,
+                note='固定 IP 保留期结束，AWS 固定 IP 已真实释放',
+            )
+        staff_user = get_user_model().objects.create_user(username='staff_lifecycle_ip_history_page', password='x', is_staff=True)
+
+        seen = []
+        for page in [1, 2, 3, 4]:
+            params = {
+                'compact': '1',
+                'fields': 'basic,execution',
+                'limit': '2',
+                'ip_delete_history_page': str(page),
+                'ip_delete_history_page_size': '2',
+            }
+            if page == 1:
+                params['refresh'] = '1'
+            request = RequestFactory().get('/api/admin/tasks/plans/', params)
+            self._attach_bearer_session(request, staff_user)
+            response = lifecycle_plans(request)
+            self.assertEqual(response.status_code, 200)
+            data = json.loads(response.content)['data']
+            self.assertEqual(data['pagination']['ip_delete_history']['page'], page)
+            self.assertEqual(data['pagination']['ip_delete_history']['page_size'], 2)
+            self.assertGreaterEqual(data['pagination']['ip_delete_history']['total'], 7)
+            seen.extend(item['asset_name'] for item in data['ip_delete_history_items'])
+
+        self.assertEqual([name for name in seen if name in expected_names], list(reversed(expected_names)))
+        self.assertEqual(len(seen), len(set(seen)))
+
     # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
     def test_update_lifecycle_plan_note_updates_asset_note(self):
         asset = CloudAsset.objects.create(

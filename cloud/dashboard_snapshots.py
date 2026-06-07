@@ -96,7 +96,7 @@ def _refresh_dashboard_plan_snapshots(reason: str = '', *, lifecycle_limit: int 
 def _refresh_lifecycle_plan_view(reason: str = '', *, lifecycle_limit: int = 1000):
     try:
         from bot import api as bot_api
-        bot_api._build_lifecycle_plan_bundle(limit=lifecycle_limit)
+        bot_api._sync_lifecycle_plan_table(limit=None, page_size=lifecycle_limit)
     except (OperationalError, ProgrammingError) as exc:
         if _is_db_table_not_ready_error(exc):
             logger.debug('DASHBOARD_SNAPSHOT_LIFECYCLE_REFRESH_SKIPPED reason=%s error=%s', reason, exc)

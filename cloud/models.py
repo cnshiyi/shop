@@ -309,6 +309,8 @@ class CloudAsset(models.Model):
             models.Index(fields=['kind', 'user', 'status'], name='ca_kind_user_status_idx'),
             models.Index(fields=['kind', 'updated_at'], name='ca_kind_updated_idx'),
             models.Index(fields=['kind', '-sort_order', 'actual_expires_at', '-updated_at'], name='ca_kind_sort_due_idx'),
+            models.Index(fields=['kind', 'is_active', 'actual_expires_at', 'id'], name='ca_lifecycle_page_idx'),
+            models.Index(fields=['kind', 'actual_expires_at', 'id'], name='ca_lifecycle_any_page_idx'),
         ]
 
     def __str__(self):
@@ -549,6 +551,9 @@ class CloudIpLog(models.Model):
         verbose_name = '云IP日志'
         verbose_name_plural = '云IP日志'
         ordering = ['-created_at', '-id']
+        indexes = [
+            models.Index(fields=['event_type', '-id'], name='cil_event_id_desc_idx'),
+        ]
 
     def __str__(self):
         ip = self.public_ip or self.previous_public_ip or '-'
