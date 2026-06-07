@@ -9708,6 +9708,9 @@ class CloudServerServicesTestCase(TestCase):
 
     # 功能：验证三个资产单项开关分别作用于关机、服务器删除和 IP 删除计划；当前函数属于 云资产、云订单和生命周期。
     def test_lifecycle_plans_use_stage_specific_asset_switches(self):
+        SiteConfig.set('cloud_server_shutdown_enabled', '1')
+        SiteConfig.set('cloud_server_delete_enabled', '1')
+        SiteConfig.set('cloud_ip_delete_enabled', '1')
         expires_at = timezone.now() - timezone.timedelta(days=5)
         shutdown_order = CloudServerOrder.objects.create(
             order_no='LIFECYCLE-SWITCH-SHUTDOWN-1',
@@ -9813,6 +9816,127 @@ class CloudServerServicesTestCase(TestCase):
         self.assertFalse(shutdown_row['shutdown_enabled'])
         self.assertFalse(delete_row['server_delete_enabled'])
         self.assertFalse(ip_row['ip_delete_enabled'])
+
+    def test_lifecycle_plans_show_global_stage_switches(self):
+        SiteConfig.set('cloud_server_shutdown_enabled', '0')
+        SiteConfig.set('cloud_server_delete_enabled', '0')
+        SiteConfig.set('cloud_ip_delete_enabled', '0')
+        expires_at = timezone.now() - timezone.timedelta(days=5)
+        shutdown_order = CloudServerOrder.objects.create(
+            order_no='LIFECYCLE-GLOBAL-SHUTDOWN-1',
+            user=self.user,
+            plan=self.plan,
+            provider=self.plan.provider,
+            region_code=self.plan.region_code,
+            region_name=self.plan.region_name,
+            plan_name=self.plan.plan_name,
+            quantity=1,
+            currency='USDT',
+            total_amount='19.00',
+            pay_amount='19.00',
+            status='completed',
+            public_ip='3.3.3.53',
+            suspend_at=timezone.now() - timezone.timedelta(days=4),
+            delete_at=timezone.now() - timezone.timedelta(days=1),
+        )
+        shutdown_asset = CloudAsset.objects.create(
+            kind=CloudAsset.KIND_SERVER,
+            source=CloudAsset.SOURCE_ORDER,
+            order=shutdown_order,
+            user=self.user,
+            provider=shutdown_order.provider,
+            region_code=shutdown_order.region_code,
+            region_name=shutdown_order.region_name,
+            asset_name='global-stage-switch-shutdown',
+            instance_id='global-stage-switch-shutdown',
+            public_ip=shutdown_order.public_ip,
+            actual_expires_at=expires_at,
+            status=CloudAsset.STATUS_RUNNING,
+            shutdown_enabled=True,
+            server_delete_enabled=True,
+            ip_delete_enabled=True,
+            is_active=True,
+        )
+        delete_order = CloudServerOrder.objects.create(
+            order_no='LIFECYCLE-GLOBAL-DELETE-1',
+            user=self.user,
+            plan=self.plan,
+            provider=self.plan.provider,
+            region_code=self.plan.region_code,
+            region_name=self.plan.region_name,
+            plan_name=self.plan.plan_name,
+            quantity=1,
+            currency='USDT',
+            total_amount='19.00',
+            pay_amount='19.00',
+            status='suspended',
+            public_ip='3.3.3.54',
+            suspend_at=timezone.now() - timezone.timedelta(days=4),
+            delete_at=timezone.now() - timezone.timedelta(days=1),
+        )
+        delete_asset = CloudAsset.objects.create(
+            kind=CloudAsset.KIND_SERVER,
+            source=CloudAsset.SOURCE_ORDER,
+            order=delete_order,
+            user=self.user,
+            provider=delete_order.provider,
+            region_code=delete_order.region_code,
+            region_name=delete_order.region_name,
+            asset_name='global-stage-switch-delete',
+            instance_id='global-stage-switch-delete',
+            public_ip=delete_order.public_ip,
+            actual_expires_at=expires_at,
+            status=CloudAsset.STATUS_STOPPED,
+            shutdown_enabled=True,
+            server_delete_enabled=True,
+            ip_delete_enabled=True,
+            is_active=True,
+        )
+        ip_asset = CloudAsset.objects.create(
+            kind=CloudAsset.KIND_SERVER,
+            source=CloudAsset.SOURCE_AWS_SYNC,
+            user=self.user,
+            provider='aws_lightsail',
+            region_code=self.plan.region_code,
+            region_name=self.plan.region_name,
+            asset_name='global-stage-switch-ip',
+            public_ip='3.3.3.55',
+            status=CloudAsset.STATUS_RUNNING,
+            provider_status='未附加固定IP',
+            note='未附加固定IP',
+            actual_expires_at=timezone.now() - timezone.timedelta(days=1),
+            shutdown_enabled=True,
+            server_delete_enabled=True,
+            ip_delete_enabled=True,
+            is_active=True,
+        )
+        staff_user = get_user_model().objects.create_user(username='staff_lifecycle_global_stage_switches', password='x', is_staff=True)
+        request = self.factory.get('/api/admin/tasks/plans/', {'limit': 1000, 'refresh': '1'})
+        self._attach_bearer_session(request, staff_user)
+
+        response = lifecycle_plans(request)
+        data = json.loads(response.content)['data']
+        shutdown_row = next(item for item in data['shutdown_plan_items'] if item.get('asset_id') == shutdown_asset.id)
+        delete_row = next(item for item in data['server_delete_items'] if item.get('asset_id') == delete_asset.id)
+        ip_row = next(item for item in data['ip_delete_plan_items'] if item.get('asset_id') == ip_asset.id)
+
+        self.assertEqual(shutdown_row['queue_status'], 'global_shutdown_disabled')
+        self.assertEqual(shutdown_row['plan_state'], 'global_shutdown_disabled')
+        self.assertEqual(shutdown_row['plan_state_label'], '总开关关闭')
+        self.assertFalse(shutdown_row['should_execute'])
+        self.assertIn('服务器关机总开关关闭', shutdown_row['blocked_reason'])
+
+        self.assertEqual(delete_row['queue_status'], 'global_server_delete_disabled')
+        self.assertEqual(delete_row['plan_state'], 'global_server_delete_disabled')
+        self.assertEqual(delete_row['plan_state_label'], '总开关关闭')
+        self.assertFalse(delete_row['should_execute'])
+        self.assertIn('服务器删除总开关关闭', delete_row['blocked_reason'])
+
+        self.assertEqual(ip_row['queue_status'], 'global_ip_delete_disabled')
+        self.assertEqual(ip_row['plan_state'], 'global_ip_delete_disabled')
+        self.assertEqual(ip_row['plan_state_label'], '总开关关闭')
+        self.assertFalse(ip_row['should_execute'])
+        self.assertIn('IP 删除总开关关闭', ip_row['blocked_reason'])
 
     # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
     def test_lifecycle_plans_move_deleted_orphan_server_out_of_future(self):

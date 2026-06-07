@@ -16,7 +16,13 @@ from django.views.decorators.http import require_GET, require_POST
 from bot.models import TelegramUser
 from bot.user_stats import active_cloud_asset_queryset as _active_cloud_asset_queryset, active_proxy_counts_by_user as _active_proxy_counts_by_user
 from cloud.asset_expiry import order_asset_expiry
-from cloud.lifecycle import _asset_lifecycle_enabled_for_order, _is_cloud_unattached_ip_delete_time as _lifecycle_unattached_ip_delete_time
+from cloud.lifecycle import (
+    _asset_lifecycle_enabled_for_order,
+    _is_cloud_unattached_ip_delete_time as _lifecycle_unattached_ip_delete_time,
+    cloud_ip_delete_enabled,
+    cloud_server_delete_enabled,
+    cloud_server_shutdown_enabled,
+)
 from cloud.lifecycle_execution import run_orphan_asset_delete, run_shutdown_order_delete, run_unattached_ip_release
 from cloud.lifecycle_plan_queries import (
     active_cloud_account_labels as query_active_cloud_account_labels,
@@ -332,6 +338,7 @@ def _ip_delete_plan_asset_page_items(
     completed_active_count: int | None = None,
 ) -> list[dict]:
     now = now or timezone.now()
+    global_ip_enabled = cloud_ip_delete_enabled()
     assets = unattached_ip_delete_plan_page(
         page=page,
         page_size=page_size,
@@ -378,7 +385,11 @@ def _ip_delete_plan_asset_page_items(
             'shutdown_enabled': _asset_shutdown_enabled(asset),
             'ip_delete_enabled': ip_delete_enabled,
         }
-        if not ip_delete_enabled:
+        if not global_ip_enabled:
+            item['queue_status'] = 'global_ip_delete_disabled'
+            item['queue_status_label'] = '总开关关闭'
+            item['execution_status'] = 'IP 删除总开关关闭，禁止真实释放固定 IP'
+        elif not ip_delete_enabled:
             item['queue_status'] = 'ip_delete_disabled'
             item['queue_status_label'] = 'IP删除开关关闭'
             item['execution_status'] = '资产 IP 删除计划开关关闭，禁止真实释放固定 IP'
@@ -1447,6 +1458,7 @@ def _dedupe_ip_delete_items_by_ip(items: list[dict]) -> list[dict]:
 
 def _unattached_ip_delete_items(limit=50, assets=None):
     now = timezone.now()
+    global_ip_enabled = cloud_ip_delete_enabled()
     limit = max(1, min(int(limit or 50), 1000))
     unattached_q = (
         Q(provider_status__icontains='未附加')
@@ -1557,7 +1569,11 @@ def _unattached_ip_delete_items(limit=50, assets=None):
             'shutdown_enabled': shutdown_enabled,
             'ip_delete_enabled': ip_delete_enabled,
         }
-        if not ip_delete_enabled:
+        if not global_ip_enabled:
+            item['queue_status'] = 'global_ip_delete_disabled'
+            item['queue_status_label'] = '总开关关闭'
+            item['execution_status'] = 'IP 删除总开关关闭，禁止真实释放固定 IP'
+        elif not ip_delete_enabled:
             item['queue_status'] = 'ip_delete_disabled'
             item['queue_status_label'] = 'IP删除开关关闭'
             item['execution_status'] = '资产 IP 删除计划开关关闭，禁止真实释放固定 IP'
@@ -1812,14 +1828,28 @@ def _shutdown_plan_item_payload(order, *, queue_status='scheduled_future', queue
     shutdown_enabled = _asset_lifecycle_enabled_for_order(order, asset)
     server_delete_enabled = _asset_server_delete_enabled(asset)
     ip_delete_enabled = _asset_ip_delete_enabled(asset)
-    if is_shutdown_stage and not shutdown_enabled:
+    global_shutdown_enabled = cloud_server_shutdown_enabled()
+    global_server_delete_enabled = cloud_server_delete_enabled()
+    global_ip_delete_enabled = cloud_ip_delete_enabled()
+    if is_shutdown_stage and not global_shutdown_enabled:
+        execution_status = '服务器关机总开关关闭，禁止真实关机'
+        queue_status = 'global_shutdown_disabled'
+        queue_status_label = '总开关关闭'
+    elif is_shutdown_stage and not shutdown_enabled:
         execution_status = '资产关机计划开关关闭，禁止真实关机'
         queue_status = 'shutdown_disabled'
         queue_status_label = '资产开关关闭'
+    elif not is_shutdown_stage and not global_server_delete_enabled:
+        execution_status = '服务器删除总开关关闭，禁止真实删机'
+        queue_status = 'global_server_delete_disabled'
+        queue_status_label = '总开关关闭'
     elif not is_shutdown_stage and not server_delete_enabled:
         execution_status = '资产服务器删除计划开关关闭，禁止真实删机'
         queue_status = 'server_delete_disabled'
         queue_status_label = '删机开关关闭'
+    elif not global_ip_delete_enabled and queue_status == 'ip_delete_disabled':
+        execution_status = 'IP 删除总开关关闭，禁止真实释放固定 IP'
+        queue_status_label = '总开关关闭'
     elif queue_status == 'waiting_manual_time':
         execution_status = '代理列表资产缺少到期时间，等待人工维护'
         queue_status_label = '待处理'
@@ -1906,6 +1936,8 @@ def _asset_delete_plan_item_payload(asset, *, queue_status='scheduled_future', q
     shutdown_enabled = _asset_shutdown_enabled(asset)
     server_delete_enabled = _asset_server_delete_enabled(asset)
     ip_delete_enabled = _asset_ip_delete_enabled(asset)
+    global_shutdown_enabled = cloud_server_shutdown_enabled()
+    global_server_delete_enabled = cloud_server_delete_enabled()
     linked_order = getattr(asset, 'order', None)
     if _asset_is_sync_only_lifecycle(asset):
         suspend_at = None
@@ -1930,10 +1962,18 @@ def _asset_delete_plan_item_payload(asset, *, queue_status='scheduled_future', q
         execution_status = '代理列表资产待删除，订单仅作为展示信息'
     else:
         execution_status = '无订单同步资产已到期，待执行删除服务器'
-    if is_shutdown_stage and not shutdown_enabled:
+    if is_shutdown_stage and not global_shutdown_enabled:
+        queue_status = 'global_shutdown_disabled'
+        queue_status_label = '总开关关闭'
+        execution_status = '服务器关机总开关关闭，禁止真实关机'
+    elif is_shutdown_stage and not shutdown_enabled:
         queue_status = 'shutdown_disabled'
         queue_status_label = '资产开关关闭'
         execution_status = '资产关机计划开关关闭，禁止真实关机'
+    elif not is_shutdown_stage and not global_server_delete_enabled:
+        queue_status = 'global_server_delete_disabled'
+        queue_status_label = '总开关关闭'
+        execution_status = '服务器删除总开关关闭，禁止真实删机'
     elif not is_shutdown_stage and not server_delete_enabled:
         queue_status = 'server_delete_disabled'
         queue_status_label = '删机开关关闭'
@@ -2269,6 +2309,9 @@ def lifecycle_plans(request):
         cloud_missing = any(marker in merged_text for marker in ['云上已不存在', '云上未找到实例/IP', '云端已不存在', '已标记删除'])
         instance_deleted = any(marker in merged_text for marker in ['已执行真实删机', '实例已删除', 'AWS 实例已执行删除', '服务器已删除'])
         ip_retained = any(marker in merged_text for marker in ['固定IP保留中', '固定IP仍存在但未附加', '未附加固定IP', '固定IP已分离为未附加状态'])
+        global_shutdown_disabled = queue_status == 'global_shutdown_disabled' or '服务器关机总开关关闭' in merged_text
+        global_server_delete_disabled = queue_status == 'global_server_delete_disabled' or '服务器删除总开关关闭' in merged_text
+        global_ip_delete_disabled = queue_status == 'global_ip_delete_disabled' or 'IP 删除总开关关闭' in merged_text or 'IP删除总开关关闭' in merged_text
         shutdown_disabled = queue_status == 'shutdown_disabled' or '关机计划关闭' in merged_text or '资产自动生命周期开关关闭' in merged_text
         server_delete_disabled = queue_status == 'server_delete_disabled' or '服务器删除计划开关关闭' in merged_text
         ip_delete_disabled = queue_status == 'ip_delete_disabled' or 'IP 删除计划开关关闭' in merged_text or 'IP删除计划开关关闭' in merged_text
@@ -2320,6 +2363,27 @@ def lifecycle_plans(request):
             plan_state_label = '等待IP回收'
             should_execute = False
             blocked_reason = '当前已不是待删服务器，只剩固定IP回收事项'
+        elif global_shutdown_disabled:
+            resource_state = 'instance_present'
+            resource_state_label = '实例仍存在'
+            plan_state = 'global_shutdown_disabled'
+            plan_state_label = '总开关关闭'
+            should_execute = False
+            blocked_reason = '服务器关机总开关关闭，禁止真实关机'
+        elif global_server_delete_disabled:
+            resource_state = 'instance_present'
+            resource_state_label = '实例仍存在'
+            plan_state = 'global_server_delete_disabled'
+            plan_state_label = '总开关关闭'
+            should_execute = False
+            blocked_reason = '服务器删除总开关关闭，禁止真实删机'
+        elif global_ip_delete_disabled:
+            resource_state = 'fixed_ip_unattached' if is_ip_delete_item else 'instance_present'
+            resource_state_label = '固定IP未附加' if is_ip_delete_item else '实例仍存在'
+            plan_state = 'global_ip_delete_disabled'
+            plan_state_label = '总开关关闭'
+            should_execute = False
+            blocked_reason = 'IP 删除总开关关闭，禁止真实释放固定 IP'
         elif shutdown_disabled:
             resource_state = 'instance_present'
             resource_state_label = '实例仍存在'

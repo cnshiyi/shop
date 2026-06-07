@@ -11333,3 +11333,102 @@ UV_CACHE_DIR=/private/tmp/uv-cache-shop uv run python manage.py check
 
 - 当前没有 `logged_in` 状态的 Telegram 登录账号，机器人真机菜单/回调点击仍无法完成。
 - 下一轮继续覆盖通知计划页面、任务中心页面和代理列表页面的真实翻页 / 跳页 / 数据库对账，并继续检查生命周期全局开关与单项开关联动。
+## 2026-06-07 生命周期真机创建与删除全链路复测
+
+### 背景
+
+用户要求生命周期里的创建服务器、删除服务器必须测试到，并已明确授权真实创建和删除云服务器。本轮以一个新建 AWS Lightsail 测试资源为边界，只针对本轮新订单执行关机、删机和固定 IP 释放，不处理既有业务资源。
+
+### 真机执行
+
+- 使用 `TelegramUser #172` 和套餐 `#131` 创建 USDT 钱包余额支付订单。
+- 订单 `#50095` / `SRV20260607125634332663` 创建成功，资产 `#1500331` 创建成功。
+- AWS Lightsail 实例真实创建、固定 IP 绑定、BBR 和代理初始化均完成。
+- 关机矩阵验证完成：
+  - 关机总开关关闭阻断真实关机。
+  - 资产关机开关关闭阻断真实关机。
+  - 关机执行窗口外阻断真实关机。
+  - 开关和窗口均允许时真实关机成功，订单进入 `suspended`，资产进入 `stopped/is_active=False`。
+- 删机矩阵验证完成：
+  - 删除服务器总开关关闭阻断真实删机。
+  - 资产服务器删除开关关闭阻断真实删机。
+  - 删除服务器执行窗口外阻断真实删机。
+  - 第一次真实删机遇到 AWS 实例停止中状态转换，系统保持 `suspended/stopped`，未误标删除。
+  - 等待云端状态稳定后只针对测试订单重试，真实删机成功，订单和资产进入 `deleted`。
+- 固定 IP 释放矩阵验证完成：
+  - 删除 IP 总开关关闭阻断真实释放。
+  - 资产 IP 删除开关关闭阻断真实释放。
+  - IP 删除执行窗口外阻断真实释放。
+  - 开关和窗口均允许时真实释放固定 IP 成功。
+
+### 页面实测
+
+- 实际打开 `/admin/cloud-orders/50095`，确认订单详情、已删除状态、服务器信息和生命周期区域正常显示，控制台 0 error / 0 warning。
+- 实际打开 `/admin/cloud-assets/1500331`，确认资产详情、已删除状态、生命周期区域和关联订单正常显示，控制台 0 error / 0 warning。
+- 实际打开 `/admin/tasks/plans`，确认计划页、三个总开关、IP 删除历史记录和计数正常显示，控制台 0 error / 0 warning。
+- 计划接口刷新后计数为：当前计划资产 `1500001`，关机计划 `979990`，删除计划 `2`，IP 删除计划 `500000`，IP 删除历史 `520008`。
+
+### 修复
+
+- 真机页面检查暴露前端订单详情页 Ant Design Vue `Descriptions` 控制台告警。
+- 修改 `/Users/a399/Desktop/data/vue-shop-admin/apps/web-antd/src/views/dashboard/cloud-orders/detail.vue`，为基础信息、代理信息和生命周期分组的末尾单项补齐 `:span="2"`，避免列跨度不匹配。
+
+### 配置恢复与清理
+
+- 已恢复测试前生命周期配置：`cloud_server_shutdown_enabled` 删除为默认值，`cloud_server_delete_enabled=1`，`cloud_ip_delete_enabled=1`，`cloud_suspend_time=15:00`，`cloud_delete_time=15:00`，`cloud_unattached_ip_delete_time=15:00`。
+- 最终订单 `#50095` 为 `deleted`，资产 `#1500331` 为 `deleted/is_active=False`。
+- 实例标识、固定 IP 名称、公网 IP 和 IP 回收时间均已清空。
+- 真实 AWS 测试实例已删除，固定 IP 已释放，未发现本轮测试资源残留。
+
+### 记录
+
+- 已追加 `docs/real-machine-test-report.md`，资源 ID 和公网 IP 脱敏。
+- 未执行真实链上支付、链上广播、生产发布、删除业务数据或删除测试库。
+- 未恢复废弃 runtime app、订单侧到期字段、旧计划快照、旧退款逻辑、旧退款函数名或旧兼容入口。
+## 2026-06-07 21:13 生命周期计划页补齐全局总开关展示态
+
+### 背景
+
+`TODO.md` 已全部完成，本轮按 `docs/auto-optimization-control.md` 固定巡检清单执行“生命周期全局开关 / 单项开关联动”专项审计。审计目标是确认关机总开关、服务器删除总开关、IP 删除总开关在后台计划页和执行层的口径一致。
+
+### 发现
+
+- 生命周期执行层已经会受 `cloud_server_shutdown_enabled`、`cloud_server_delete_enabled`、`cloud_ip_delete_enabled` 拦截。
+- 但 `/api/admin/tasks/plans/` 的计划项展示态主要只依赖资产单项开关，导致总开关关闭时，后台仍可能把不可执行项显示为“待执行”或普通“计划中”。
+- 这是展示层与执行层状态分裂：真实动作不会执行，但值班视角会误以为任务可正常落地。
+
+### 修改
+
+- `bot/api.py` 为关机、删机、IP 删除计划项补齐三类全局阻塞状态：
+  - `global_shutdown_disabled`
+  - `global_server_delete_disabled`
+  - `global_ip_delete_disabled`
+- 同步更新 `queue_status`、`queue_status_label`、`execution_status`、`plan_state`、`plan_state_label`、`blocked_reason`，让计划页明确显示“总开关关闭”。
+- `cloud/tests.py`：
+  - 原 `test_lifecycle_plans_use_stage_specific_asset_switches` 显式打开三个总开关，确保它只验证资产单项开关。
+  - 新增 `test_lifecycle_plans_show_global_stage_switches`，覆盖三个总开关分别落成阻塞态。
+
+### 验证
+
+本地已通过：
+
+```bash
+UV_CACHE_DIR=/private/tmp/uv-cache-shop DJANGO_TEST_SQLITE=1 uv run python manage.py test cloud.tests.CloudServerServicesTestCase.test_lifecycle_plans_use_stage_specific_asset_switches cloud.tests.CloudServerServicesTestCase.test_lifecycle_plans_show_global_stage_switches --settings=shop.settings --verbosity=1
+UV_CACHE_DIR=/private/tmp/uv-cache-shop uv run python manage.py check
+UV_CACHE_DIR=/private/tmp/uv-cache-shop uv run python -m py_compile bot/api.py cloud/tests.py
+git diff --check
+git -C /Users/a399/Desktop/data/vue-shop-admin diff --check
+```
+
+结果：2 个生命周期计划总开关 / 单项开关联动聚焦测试、Django 系统检查、编译检查和前后端空白检查通过。SQLite `db_comment` 警告为已知差异。
+
+### 红线
+
+- 本轮未执行真实云资源创建、删除、关机、释放 IP、换 IP、真实支付、链上广播、删除业务数据、删除测试库或生产发布。
+- 本轮未打印密钥、私钥、Telegram session、TOTP、支付密钥或云厂商密钥。
+- 本轮未恢复废弃 runtime app、订单侧到期字段、旧计划快照、旧退款逻辑、旧退款函数名或旧兼容入口。
+
+### 剩余风险
+
+- 本轮修复的是计划页展示层与执行层的状态一致性，还没有做新的真实浏览器点击验证。
+- 后续应继续覆盖通知计划页面、任务中心页面和生命周期计划页面的真实翻页 / 跳页 / 数据库对账。
