@@ -366,6 +366,40 @@ def _recent_lifecycle_db_task_items(now) -> list[dict]:
     return [_lifecycle_task_db_item(task) for task in queryset]
 
 
+def _lifecycle_db_task_matches_active_plan(item: dict) -> bool:
+    from cloud.lifecycle_plan_queries import (
+        server_lifecycle_plan_queryset,
+        server_shutdown_complete_q,
+        unattached_ip_delete_active_queryset,
+    )
+
+    task_type = str(item.get('task_type') or '')
+    order_id = item.get('order_id')
+    asset_id = item.get('asset_id')
+    if not order_id and not asset_id:
+        return False
+    if task_type == CloudLifecycleTask.TASK_UNATTACHED_IP_DELETE:
+        if not asset_id:
+            return False
+        return unattached_ip_delete_active_queryset().filter(id=asset_id).exists()
+
+    server_queryset = server_lifecycle_plan_queryset()
+    if task_type == CloudLifecycleTask.TASK_SUSPEND:
+        queryset = server_queryset.exclude(server_shutdown_complete_q())
+    elif task_type in {
+        CloudLifecycleTask.TASK_DELETE,
+        CloudLifecycleTask.TASK_MIGRATION_DELETE,
+        CloudLifecycleTask.TASK_ORPHAN_ASSET_DELETE,
+    }:
+        queryset = server_queryset.filter(server_shutdown_complete_q())
+    else:
+        return False
+
+    if asset_id:
+        return queryset.filter(id=asset_id).exists()
+    return queryset.filter(order_id=order_id).exists()
+
+
 def _current_lifecycle_plan_items(*, page_size=1000) -> list[dict]:
     from bot.api import _asset_delete_plan_item_payload, _shutdown_stage_item_payload
     from cloud.lifecycle_plan_queries import server_lifecycle_plan_queryset, server_shutdown_complete_q
@@ -596,9 +630,10 @@ def _lifecycle_section(now) -> dict:
     failed_count = sum(1 for item in items_source if item.get('last_failure_reason') or item.get('failure_reason'))
     db_failed_count = sum(1 for item in db_task_items if item.get('queue_status') == 'failed')
     db_active_count = sum(1 for item in db_task_items if item.get('queue_status') in {'pending', 'claimed'})
+    db_plan_overlap_count = sum(1 for item in db_task_items if _lifecycle_db_task_matches_active_plan(item))
     warning_count = sum(1 for item in items_source if item.get('queue_status') in ['overdue', 'due_now', 'blocked'])
     visible_active_count = sum(1 for item in items_source if item.get('queue_status') in ['due_now', 'scheduled_future', 'overdue', 'within_window'])
-    full_active_count = max(full_plan_total, visible_active_count)
+    full_active_count = max(max(full_plan_total - db_plan_overlap_count, 0), visible_active_count)
     items = [
         _plan_item(row, task_type='lifecycle', task_label='生命周期计划')
         for row in [*items_source, *recent_failed_history, *db_task_items][:8]

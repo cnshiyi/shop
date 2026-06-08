@@ -18584,3 +18584,52 @@ git diff --check
 - 生命周期开关矩阵读侧正常：三个总开关已分离，资产单项开关已分离。
 - 当前不在执行窗口，开放到期任务队列为空。
 - 删除计划按订单阶段进入队列，实际删除仍受总开关、单项开关和执行窗口保护。
+
+## 2026-06-08 22:24 CST 任务中心生命周期计数去重修复
+
+### 本轮背景
+
+- `TODO.md` 中已无未完成项，本轮按固定巡检清单继续检查高风险路径。
+- 选中“后台任务中心和状态统计”专项，复核生命周期分区的计划总数、DB 任务和失败历史聚合口径。
+- 目标是只做一个最小安全修复，不碰执行器、不碰前端。
+
+### 发现
+
+- `cloud.task_center._lifecycle_section()` 先使用生命周期计划总数作为 `full_plan_total`，再把最近的 `CloudLifecycleTask` 直接加到 `total/active`。
+- 当同一对象既存在于生命周期计划集合中，又存在待执行或失败的 DB 任务时，任务中心会把它重复累计一次。
+- 这属于任务中心摘要口径错误，不是执行器调度错误。
+
+### 修复
+
+- 在 `cloud/task_center.py` 新增 `_lifecycle_db_task_matches_active_plan()`。
+- 按任务类型区分：
+  - `suspend` 对应关机计划集合；
+  - `delete` / `migration_delete` / `orphan_asset_delete` 对应删机计划集合；
+  - `unattached_ip_delete` 对应未附加 IP 删除集合。
+- 生命周期分区汇总时，先从 `full_plan_total` 中扣除与当前活跃计划集合重叠的 DB 任务，再把 DB 任务自身计回，保证同一对象只计一次。
+
+### 测试
+
+新增回归测试：
+
+- `test_lifecycle_section_does_not_double_count_full_plan_total_when_db_task_overlaps`
+
+验证命令：
+
+```bash
+UV_CACHE_DIR=/private/tmp/uv-cache-shop uv run python manage.py check
+DJANGO_TEST_SQLITE=1 UV_CACHE_DIR=/private/tmp/uv-cache-shop uv run python manage.py test cloud.tests_task_center
+git diff --check
+```
+
+结果：
+
+- `manage.py check` 通过。
+- `cloud.tests_task_center` 在 `DJANGO_TEST_SQLITE=1` 模式下 `17` 项通过。
+- 默认 MySQL 测试库在当前沙箱访问 `127.0.0.1` 被拦截，因此本轮聚焦测试使用仓库内置 SQLite 测试模式；SQLite 仅产生既有 `db_comment/db_table_comment` 能力差异告警。
+
+### 风险与后续
+
+- 本轮只修任务中心聚合统计，不改生命周期执行器本身。
+- 生命周期预览项目前仍偏向关机/删机，后续可继续补 IP 删除预览覆盖。
+- 当前仍有既有脏文件 `docs/real-machine-test-report.md`，本轮未纳入提交。

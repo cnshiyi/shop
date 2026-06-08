@@ -330,6 +330,45 @@ class CloudTaskCenterApiTestCase(TestCase):
         self.assertEqual(section['items'][0]['status'], 'pending')
         self.assertEqual(section['status_counts']['pending'], 1)
 
+    def test_lifecycle_section_does_not_double_count_full_plan_total_when_db_task_overlaps(self):
+        now = timezone.now()
+        order = self._create_cloud_order('TASK-LIFECYCLE-DB-OVERLAP-1')
+        CloudLifecycleTask.objects.create(
+            source_key='task-center-lifecycle-db-overlap',
+            task_type=CloudLifecycleTask.TASK_DELETE,
+            source_kind=CloudLifecycleTask.SOURCE_ORDER,
+            order=order,
+            user=order.user,
+            scheduled_at=now,
+            status=CloudLifecycleTask.STATUS_PENDING,
+        )
+
+        with patch('cloud.task_center._current_lifecycle_plan_items', return_value=[
+            {
+                'id': 'active-plan-overlap',
+                'order_id': order.id,
+                'order_no': order.order_no,
+                'queue_status': 'due_now',
+                'queue_status_label': '待执行',
+                'provider': order.provider,
+                'ip': order.public_ip,
+            },
+        ]), patch('cloud.task_center._recent_lifecycle_failed_history_items', return_value=[]), \
+            patch('cloud.task_center._lifecycle_db_task_matches_active_plan', return_value=True), \
+            patch('cloud.lifecycle_plan_queries.server_lifecycle_plan_counts', return_value={
+                'shutdown_plan_count': 0,
+                'server_delete_count': 1,
+            }), \
+            patch('cloud.lifecycle_plan_queries.ip_delete_plan_counts', return_value={
+                'ip_delete_count': 0,
+            }):
+            section = _lifecycle_section(now)
+
+        self.assertEqual(section['total'], 1)
+        self.assertEqual(section['active'], 1)
+        self.assertEqual(section['failed'], 0)
+        self.assertEqual(section['health'], 'warning')
+
     def test_lifecycle_section_prefers_db_task_over_duplicate_plan_item(self):
         now = timezone.now()
         order = self._create_cloud_order('TASK-LIFECYCLE-DB-DUP-1')
