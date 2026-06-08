@@ -17839,3 +17839,85 @@ UV_CACHE_DIR=/private/tmp/uv-cache-shop DJANGO_TEST_SQLITE=1 uv run python manag
 
 - 继续补机器人多任务高并发真机点击压测。
 - 继续补真实云资源创建、到期关机、删机、释放 IP 的生命周期开关矩阵闭环。
+
+## 2026-06-08 20:20 CST 任务中心 250 万级统计巡检
+
+### 本轮背景
+
+- 继续执行当前会话自动巡检目标。
+- 用户询问还有哪些没有压测完，本轮接上上一轮未收尾的任务中心巡检。
+- 本轮不执行真实云资源创建、关机、删机、释放 IP、换 IP、真实支付、链上广播或生产发布。
+- 本轮使用后端 8000 和前端 5666，不混用 8010 真机测试库。
+
+### 后端口径
+
+后端 `task_center_overview` 真实库返回：
+
+- HTTP 状态：`200`
+- 接口耗时：约 `1.128s`
+- 板块数：`5`
+- 总任务：`2516679`
+- 活动任务：`2512110`
+- 失败：`172`
+- 告警：`178`
+
+板块明细：
+
+- 云资产同步：`0/0`，告警 `0`，失败 `0`
+- 云服务器任务：`10516/10516`，状态计数 `deleting=2`、`expiring=10343`、`renew_pending=171`
+- 生命周期计划：`2479992/2479992`，状态计数 `shutdown_disabled=1`、`scheduled_future=7`
+- 通知计划：`21431/21431`，告警 `7`，失败 `1`
+- 自动续费：`171/4740`，告警 `171`，失败 `171`
+
+### 真实前端验证
+
+- 页面：`http://127.0.0.1:5666/admin/tasks`
+- 使用系统 Chrome 真实打开页面。
+- 使用项目后台 session 机制生成临时前端登录态；测试完成后已删除临时 session 和 storageState。
+- 没有打印有效登录 token。
+
+前端实测结果：
+
+- 任务总量卡片显示：`2516679`
+- 汇总卡片数：`6`，包含总量卡片和 5 个任务板块。
+- 页面包含并显示：云资产同步、云服务器任务、生命周期计划、通知计划、自动续费。
+- 明细表第 1 页：`12` 行。
+- 明细表第 2 页：`12` 行。
+- 第 2 页首行与第 1 页首行不同，前端分页切换生效。
+- 搜索 `自动续费`：返回 `8` 行，表格包含自动续费文本。
+- 点击首个 `详情`：从 `/admin/tasks` 跳转到 `/admin/cloud-orders/20395`。
+- 业务 API 失败：`0`。
+- 控制台 error/warning：`0`。
+- request failed：`0`。
+- 截图：`/private/tmp/shop-task-center-front.png`
+
+### 验证
+
+通过：
+
+```bash
+UV_CACHE_DIR=/private/tmp/uv-cache-shop uv run python manage.py check
+UV_CACHE_DIR=/private/tmp/uv-cache-shop uv run python -m py_compile cloud/task_center.py
+UV_CACHE_DIR=/private/tmp/uv-cache-shop DJANGO_TEST_SQLITE=1 uv run python manage.py test cloud.tests_task_center --settings=shop.settings --verbosity=1
+```
+
+红线扫描通过。命中项为既有允许项：`CloudServerOrder.ip_recycle_at` 同步记录、bot 测试桩、Telegram 登录账号模块名，不是旧订单到期事实或废弃 runtime app 回流。
+
+说明：
+
+- SQLite 聚焦测试仍输出既有 `db_comment` / `db_table_comment` 警告，不属于本轮问题。
+- 本轮没有代码修复。
+- `docs/real-machine-test-report.md` 当前存在既有未提交真实机器测试记录，本轮不覆盖、不提交。
+
+### 结论
+
+- 任务中心 250 万级统计口径和真实前端展示一致。
+- 汇总卡片、明细分页、本地搜索和详情跳转均正常。
+- 本轮未发现任务中心统计漏报、前端渲染错误、业务 API 失败或控制台错误。
+
+### 仍未完成
+
+- 通知计划页专项深分页和前端翻页对账还没有作为独立页面压测收尾。
+- 机器人多任务高并发真机点击压测还没有完成。
+- 真实云资源创建、到期关机、删机、释放 IP 的生命周期开关矩阵还没有完整闭环。
+- 服务器创建后的完整生命周期链路还没有在本轮压测中闭环到真实关机、真实删机和真实 IP 释放。
