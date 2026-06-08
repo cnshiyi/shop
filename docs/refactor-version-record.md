@@ -17334,3 +17334,76 @@ git diff --check
 - 继续巡检代理列表各标签和任务页面的 10 万级翻页真实性。
 - 继续关注 IP 删除计划最后页约 `1.5` 秒的加载耗时。
 - 如需通知计划也达到 10 万级，需要单独设计可清理的通知分组压测数据。
+
+## 2026-06-08 18:55 CST 代理列表逐标签 10 万级压测收尾
+
+### 本轮背景
+
+- 继续执行当前会话自动巡检目标。
+- 用户确认后续不再测试百万级，本轮按 10 万级压力标准收尾代理列表标签压测。
+- 本轮不执行真实支付、链上广播、生产发布、真实云资源创建/删除或删除业务数据。
+
+### 覆盖范围
+
+- 后端接口：`/api/admin/cloud-assets/?paginated=1&compact=1&risk_status=...&page=...&page_size=20`
+- 数据库口径：`CloudAssetDashboardSnapshot`、`_filter_dashboard_snapshots_by_risk`、`_dashboard_snapshot_ordering`
+- 真实前端页面：`http://127.0.0.1:5666/admin/cloud-assets`
+- 覆盖页位：第 `1` 页、第 `2` 页、第 `5000` 页、最后页。
+
+### 标签结果
+
+- `all`：`2,489,998`
+- `normal`：`549,988`
+- `due_soon`：`101,250`
+- `expired`：`101,752`
+- `unattached_ip`：`100,001`
+- `abnormal`：`100,000`
+- `account_disabled`：`1,145,002`
+- `shutdown_disabled`：`100,384`
+- `unbound_user`：`100,001`
+- `unbound_group`：`100,013`
+- `auto_renew_off`：`104,558`
+
+结论：
+
+- 所有标签的 `total`、`loaded`、资产 ID 顺序均与数据库一致。
+- 第 `5000` 页均能正常返回 `20` 条。
+- 未发现丢数据、串页或排序不一致。
+
+### 真实前端验证
+
+- 实际点击每个代理列表标签。
+- 每个标签点击下一页。
+- 每个标签跳转第 `5000` 页。
+- 控制台 error/warning：`0`。
+- 业务 API 失败：`0`。
+- 浏览器层 `requestfailed` 为 Vite 开发环境脚本 `net::ERR_ABORTED`，非业务 API。
+- 截图：`/private/tmp/shop-cloud-assets-tags-10w-current.png`
+
+### 验证
+
+通过：
+
+```bash
+UV_CACHE_DIR=/private/tmp/uv-cache-shop uv run python manage.py check
+UV_CACHE_DIR=/private/tmp/uv-cache-shop DJANGO_TEST_SQLITE=1 uv run python manage.py test cloud.tests.CloudServerServicesTestCase.test_cloud_assets_paginated_uses_true_database_pages cloud.tests.CloudServerServicesTestCase.test_cloud_assets_paginated_uses_true_database_pages_for_telegram_group_sort --settings=shop.settings --verbosity=1
+git diff --check
+```
+
+红线扫描通过。命中项为既有测试桩、Telegram 登录账号 API 文件名，以及 `CloudServerOrder.ip_recycle_at` 同步记录，不是旧订单到期事实回流。
+
+### 清理与限制
+
+- 已删除本轮临时后台登录用户：
+  - `codex_patrol_assets_front_probe`
+  - `codex_patrol_assets_tag_probe`
+- 已删除 `/private/tmp/shop_assets_front_probe_token.txt`。
+- `docs/real-machine-test-report.md` 当前有未提交的真实机器测试记录，本轮不覆盖、不提交。
+- 本轮未打印密钥、Telegram session、TOTP、支付密钥、云厂商密钥或完整代理链接。
+
+### 尚未压测完
+
+- 通知计划还没有单独构造 10 万级可清理通知分组压测数据。
+- 机器人还没有完成多任务高并发真机点击压测。
+- 真实云资源创建、关机、删机、释放 IP 的生命周期开关矩阵还没有完整闭环。
+- 任务页面 IP 删除计划最后页约 `1.5` 秒仍需继续关注。
