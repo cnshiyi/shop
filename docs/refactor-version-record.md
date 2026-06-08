@@ -17738,3 +17738,104 @@ git -C /Users/a399/Desktop/data/vue-shop-admin diff --check
 
 - 继续补机器人多任务高并发真机点击压测。
 - 继续补真实云资源创建、到期关机、删机、释放 IP 的生命周期开关矩阵闭环。
+
+## 2026-06-08 20:00 CST 代理列表全部标签 10 万级以上压测
+
+### 本轮背景
+
+- 继续执行当前会话自动巡检目标。
+- 用户明确要求代理列表不能只测试“全部”，每个标签都要实测，例如“未附加固定IP”。
+- 本轮不执行真实云资源创建、关机、删机、释放 IP、换 IP、真实支付、链上广播或生产发布。
+- 本轮没有再注入新数据；真实库已有足够规模覆盖 10 万级标签压测。
+
+### 当前数据规模
+
+- `CloudAsset` 服务器资产：`2500003`
+- `CloudAssetDashboardSnapshot`：`2500003`
+
+标签计数：
+
+- 全部：`2489998`
+- 运行中：`549988`
+- 即将到期：`101250`
+- 已过期：`101752`
+- 未附加固定IP：`100001`
+- 异常/待确认：`100000`
+- 云账号异常：`1145002`
+- 关机计划关闭：`100384`
+- 未绑定用户：`100001`
+- 未绑定群组：`100013`
+- 续费关闭：`104558`
+
+### 后端数据库对账
+
+- 对账接口：`/api/admin/cloud-assets/`
+- 对账参数：`paginated=1`、`compact=1`、`page_size=20`
+- 对账口径：API 返回 `items[].id` 与 `CloudAssetDashboardSnapshot` 按 `cloud/api_asset_snapshots.py` 当前排序 helper 的结果逐项比对。
+- 覆盖标签：
+  - 全部、运行中、即将到期、已过期、未附加固定IP、异常/待确认、云账号异常、关机计划关闭、未绑定用户、未绑定群组、续费关闭。
+- 覆盖页位：
+  - 第 1 页、第 2 页、第 1000 页、最后页。
+- 结果：
+  - 11 个标签 API 顺序均与数据库快照排序一致。
+  - 页内无重复。
+  - 最后一页 `loaded` 与总数余数一致。
+  - 未发现丢数据、串页或跳页错误。
+- 后端耗时：
+  - 多数标签单页约 `0.37s - 0.76s`。
+  - 运行中标签约 `1.43s - 1.52s`，后续仍可继续优化。
+
+### 真实前端验证
+
+- 页面：`http://127.0.0.1:5666/admin/cloud-assets`
+- 使用 Playwright 真实打开 Chrome 浏览器。
+- 使用项目后台 session 机制生成临时前端登录态；测试完成后已删除临时 session 和 storageState。
+- 前端实际点击每个标签，并分别进入第 1 页、第 2 页、最后页。
+
+前端实测页位：
+
+- 运行中：总数 `549988`，第 1 页 `20` 条，第 2 页 `20` 条，最后页第 `27500` 页 `8` 条。
+- 即将到期：总数 `101250`，第 1 页 `20` 条，第 2 页 `20` 条，最后页第 `5063` 页 `10` 条。
+- 已过期：总数 `101752`，第 1 页 `20` 条，第 2 页 `20` 条，最后页第 `5088` 页 `12` 条。
+- 未附加固定IP：总数 `100001`，第 1 页 `20` 条，第 2 页 `20` 条，最后页第 `5001` 页 `1` 条。
+- 异常/待确认：总数 `100000`，第 1 页 `20` 条，第 2 页 `20` 条，最后页第 `5000` 页 `20` 条。
+- 云账号异常：总数 `1145002`，第 1 页 `20` 条，第 2 页 `20` 条，最后页第 `57251` 页 `2` 条。
+- 关机计划关闭：总数 `100384`，第 1 页 `20` 条，第 2 页 `20` 条，最后页第 `5020` 页 `4` 条。
+- 未绑定用户：总数 `100001`，第 1 页 `20` 条，第 2 页 `20` 条，最后页第 `5001` 页 `1` 条。
+- 未绑定群组：总数 `100013`，第 1 页 `20` 条，第 2 页 `20` 条，最后页第 `5001` 页 `13` 条。
+- 续费关闭：总数 `104558`，第 1 页 `20` 条，第 2 页 `20` 条，最后页第 `5228` 页 `18` 条。
+- 全部：总数 `2489998`，第 1 页 `20` 条，第 2 页 `20` 条，最后页第 `124500` 页 `18` 条。
+
+前端结果：
+
+- 页面表格可见行数与 API `items.length` 一致。
+- 业务 API 失败：`0`。
+- 控制台 error/warning：`0`。
+- request failed：`0`。
+- 截图：`/private/tmp/shop-cloud-assets-labels-10w-front.png`
+
+### 验证
+
+通过：
+
+```bash
+UV_CACHE_DIR=/private/tmp/uv-cache-shop uv run python manage.py check
+UV_CACHE_DIR=/private/tmp/uv-cache-shop uv run python -m py_compile cloud/api_assets.py cloud/api_asset_snapshots.py
+UV_CACHE_DIR=/private/tmp/uv-cache-shop DJANGO_TEST_SQLITE=1 uv run python manage.py test cloud.tests.CloudServerServicesTestCase.test_cloud_assets_paginated_uses_true_database_pages cloud.tests.CloudServerServicesTestCase.test_cloud_assets_paginated_uses_true_database_pages_for_telegram_group_sort cloud.tests.CloudServerServicesTestCase.test_cloud_assets_grouped_paginated_uses_twenty_user_groups_per_page cloud.tests.CloudServerServicesTestCase.test_cloud_assets_grouped_duplicate_groups_do_not_repeat_across_pages cloud.tests.CloudServerServicesTestCase.test_cloud_assets_grouped_risk_page_tolerates_old_snapshot_payload_missing_user_fields cloud.tests.CloudServerServicesTestCase.test_cloud_assets_list_compact_returns_ip_view_payload cloud.tests.CloudServerServicesTestCase.test_cloud_assets_risk_ordering_uses_existing_page_indexes --settings=shop.settings --verbosity=1
+```
+
+说明：
+
+- SQLite 聚焦测试仍输出既有 `db_comment` / `db_table_comment` 警告，不属于本轮问题。
+- `.playwright-cli/` 临时产物已删除。
+
+### 结论
+
+- 代理列表 11 个标签均已完成 10 万级以上压测，其中“全部”和“云账号异常”超过百万级。
+- 标签切换、第 2 页、最后页和真实前端显示均正常。
+- 本轮未发现需要修复的代理列表分页问题，没有代码变更。
+
+### 后续
+
+- 继续补机器人多任务高并发真机点击压测。
+- 继续补真实云资源创建、到期关机、删机、释放 IP 的生命周期开关矩阵闭环。
