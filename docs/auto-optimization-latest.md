@@ -4,65 +4,66 @@
 
 ## 最近一轮
 
-- 时间：2026-06-08 23:03 CST
-- 状态：完成压测数据库隔离改造，新增独立压测库准备命令和安全测试。
+- 时间：2026-06-08 23:07 CST
+- 状态：`TODO.md` 显式待办均已完成，本轮按固定巡检清单完成只读复查，未发现需要立即修复的明确问题。
 - 后端提交：本轮完成后提交，具体哈希以 `git log -1` 为准。
 - 前端提交：无前端代码变更。
 
 ## 本轮背景
 
-- 本轮按 `TODO.md` 首个未完成任务执行“压测数据库隔离改造”。
-- 目标是让后续性能压测、批量造数和深分页压测先创建全新的独立测试数据库，避免复用当前业务库、手工真机测试库或含真实用户数据的库。
-- 本轮不执行真实支付、链上广播、真实云资源操作、生产发布或删除数据。
+- 本轮执行 `continue to next task` 自动优化流程。
+- 开始时 `git status --short` 为空，工作树干净。
+- 最近提交为 `9c9c4d9 feat: add isolated load test database command`。
+- `TODO.md` 中所有明确任务均已勾选完成，因此按 `docs/auto-optimization-control.md` 固定巡检清单执行只读巡检。
+- 本轮不执行真实支付、链上广播、真实云资源操作、生产发布、删除数据、性能压测或批量造数。
 
-## 本轮调整
+## 本轮巡检
 
-- 新增 `cloud/management/commands/prepare_load_test_db.py`
-  - 默认 dry-run，只输出隔离压测库环境，不创建库、不写数据。
-  - 支持 `--sqlite-name` 指定 `.shop-load-tests/` 下且文件名包含 `loadtest` 的 SQLite 压测库。
-  - 实际迁移或造数必须显式传入 `--confirm-isolated`。
-  - `--migrate` 会以 `DB_ENGINE=sqlite`、`SQLITE_NAME=<压测库>`、`SHOP_LOAD_TEST_DB=1` 运行 `migrate --noinput`。
-  - `--seed-assets N` 只在当前连接已切到目标隔离 SQLite 库且带 `SHOP_LOAD_TEST_DB=1` 时写入 CloudAsset 测试资产，并回填代理列表快照。
-  - 输出清理策略：删除 `.shop-load-tests/` 下本轮生成的 loadtest SQLite 文件。
-- 新增 `cloud/tests_load_test_db.py`
-  - 覆盖 dry-run 输出、禁止仓库默认库路径、禁止未确认写入和测试 IP 生成。
-- 更新 `.gitignore`
-  - 忽略 `.shop-load-tests/`，避免提交压测数据库文件。
-- 更新 `TODO.md`
-  - 勾选“压测数据库隔离改造”。
+- 运行 Django 基础检查，确认默认配置无系统检查错误。
+- 扫描订单到期字段、旧计划快照、旧退款入口和废弃 runtime app 回流风险。
+- 扫描 `CloudAsset.actual_expires_at` 相关运行时代码，确认资产到期事实仍落在 `CloudAsset.actual_expires_at` 及 `order_asset_expiry()` 派生读取链。
+- 扫描 Telegram callback、返回链、任务中心状态统计、失败和重试口径相关代码。
+- 运行任务中心统一总览、生命周期任务、通知任务、自动续费重试失败/待重试状态统计聚焦测试。
+- 运行机器人资产详情、订单详情、续费、换 IP、重装、修改配置、钱包续费返回链和 callback 长度聚焦测试。
+- 运行相关文件编译检查。
 
-## 本轮压测库记录
+## 结论
 
-- 数据库名：`.shop-load-tests/shop-loadtest-smoke.sqlite3`
-- 端口：无，SQLite 文件库。
-- 造数规模：3 条 `CloudAsset` 测试资产，回填 3 条 `CloudAssetDashboardSnapshot` 快照。
-- 压测/准备命令：
-
-```bash
-UV_CACHE_DIR=/private/tmp/uv-cache-shop uv run python manage.py prepare_load_test_db --sqlite-name .shop-load-tests/shop-loadtest-smoke.sqlite3 --migrate --seed-assets 3 --confirm-isolated
-```
-
-- 结果：迁移通过，造数和快照回填通过。
-- 清理策略：删除 `.shop-load-tests/shop-loadtest-smoke.sqlite3`；整个 `.shop-load-tests/` 目录已加入 `.gitignore`。
+- 本轮未发现需要立即修复的明确安全问题。
+- 本轮没有恢复废弃 runtime app。
+- 本轮没有恢复 `CloudServerOrder.service_expires_at`、订单侧 `actual_expires_at` 或旧计划快照表。
+- 本轮没有恢复旧退款入口或旧退款函数名。
+- 红线扫描命中主要为既有文档、迁移历史、当前 `CloudAsset.actual_expires_at` 口径使用、`core.dashboard_api` 共享 helper 命名、Telegram 账号/云账号正常业务命名。
 
 ## 验证
 
 通过：
 
 ```bash
-UV_CACHE_DIR=/private/tmp/uv-cache-shop uv run python manage.py prepare_load_test_db --sqlite-name .shop-load-tests/shop-loadtest-dryrun.sqlite3
-UV_CACHE_DIR=/private/tmp/uv-cache-shop uv run python -m py_compile cloud/management/commands/prepare_load_test_db.py cloud/tests_load_test_db.py
-UV_CACHE_DIR=/private/tmp/uv-cache-shop uv run python manage.py test cloud.tests_load_test_db --settings=shop.settings --verbosity=1
 UV_CACHE_DIR=/private/tmp/uv-cache-shop uv run python manage.py check
-UV_CACHE_DIR=/private/tmp/uv-cache-shop uv run python manage.py prepare_load_test_db --sqlite-name .shop-load-tests/shop-loadtest-smoke.sqlite3 --migrate --seed-assets 3 --confirm-isolated
+UV_CACHE_DIR=/private/tmp/uv-cache-shop DJANGO_TEST_SQLITE=1 uv run python manage.py test cloud.tests_task_center --settings=shop.settings --verbosity=1
+UV_CACHE_DIR=/private/tmp/uv-cache-shop DJANGO_TEST_SQLITE=1 uv run python manage.py test bot.tests.RetainedIpRenewalUiTestCase --settings=shop.settings --verbosity=1
+UV_CACHE_DIR=/private/tmp/uv-cache-shop uv run python -m py_compile bot/keyboards.py bot/handlers.py cloud/task_center.py cloud/tests_task_center.py cloud/management/commands/prepare_load_test_db.py cloud/tests_load_test_db.py
 ```
 
-## 结论
+补充巡检：
 
-- 后续压测已有独立 SQLite 压测库准备入口，不再需要复用当前业务库。
-- 命令默认只读 dry-run；写库路径有目录、文件名、环境标记和显式确认四层约束。
+```bash
+rg -n "service_expires_at|order.*actual_expires_at|actual_expires_at.*order|plan snapshot|计划快照表|refund|退款|accounts|finance|mall|monitoring|dashboard_api|biz" --glob '!docs/refactor-version-record.md' --glob '!docs/auto-optimization-latest.md' --glob '!docs/real-machine-test-report.md' --glob '!*.pyc'
+rg -n "actual_expires_at" cloud orders bot core --glob '!*/migrations/*'
+rg -n "callback_data|data=|CallbackQuery|InlineKeyboardButton|callback" bot cloud orders core --glob '!*/migrations/*'
+rg -n "TaskCenter|task center|任务中心|retry|重试|failed|failure|status" cloud bot orders core --glob '!*/migrations/*'
+```
+
+结果：
+
+- `manage.py check` 通过。
+- `cloud.tests_task_center` 17 个任务中心聚焦测试通过。
+- `bot.tests.RetainedIpRenewalUiTestCase` 51 个机器人返回链和 callback 长度聚焦测试通过。
+- 编译检查通过。
+- SQLite 聚焦测试仍输出既有 `db_comment/db_table_comment` 能力差异告警，不属于本轮问题。
 
 ## 剩余风险
 
-- 本轮只做 3 条资产的小规模 smoke 验证，未执行 10 万级深分页压测。
-- SQLite 迁移仍输出既有 `db_comment/db_table_comment` 能力差异告警，不属于本轮问题。
+- 本轮为只读巡检，未执行 10 万级深分页压测。
+- 后续如继续做性能压测或大数据分页验证，仍必须先创建全新的独立测试数据库，并记录数据库名、端口、造数规模、命令、结果和清理策略。
