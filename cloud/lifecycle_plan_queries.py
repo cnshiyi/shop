@@ -15,6 +15,7 @@ from core.cloud_accounts import cloud_account_label_variants
 from core.models import CloudAccountConfig
 
 _LIFECYCLE_PLAN_COUNTS_CACHE_KEY = 'cloud:lifecycle-plan:server-counts:v2'
+_LIFECYCLE_IP_DELETE_COUNTS_CACHE_KEY = 'cloud:lifecycle-plan:ip-delete-counts:v1'
 _LIFECYCLE_PLAN_COUNTS_CACHE_TTL = 30
 
 
@@ -49,6 +50,7 @@ def _page_from_single_source(kind: str, queryset, *, page: int, page_size: int, 
 
 def clear_lifecycle_plan_counts_cache():
     cache.delete(_LIFECYCLE_PLAN_COUNTS_CACHE_KEY)
+    cache.delete(_LIFECYCLE_IP_DELETE_COUNTS_CACHE_KEY)
 
 
 def reverse_ordering(ordering: tuple[str, ...]) -> tuple[str, ...]:
@@ -484,17 +486,28 @@ def unattached_ip_delete_history_q():
 
 
 def ip_delete_plan_counts() -> dict[str, int]:
+    cached = cache.get(_LIFECYCLE_IP_DELETE_COUNTS_CACHE_KEY)
+    if isinstance(cached, dict):
+        return {
+            'ip_delete_count': int(cached.get('ip_delete_count') or 0),
+            'ip_delete_completed_active_count': int(cached.get('ip_delete_completed_active_count') or 0),
+            'ip_delete_history_asset_count': int(cached.get('ip_delete_history_asset_count') or 0),
+            'ip_delete_history_count': int(cached.get('ip_delete_history_count') or 0),
+            'ip_delete_history_log_count': int(cached.get('ip_delete_history_log_count') or 0),
+        }
     active_count = unattached_ip_delete_active_queryset().count()
     completed_active_count = completed_unattached_ip_active_count()
     history_log_count = CloudIpLog.objects.filter(unattached_ip_delete_history_q()).count()
     history_asset_count = unattached_ip_delete_history_asset_queryset().count()
-    return {
+    counts = {
         'ip_delete_count': max(active_count - completed_active_count, 0),
         'ip_delete_completed_active_count': completed_active_count,
         'ip_delete_history_asset_count': history_asset_count,
         'ip_delete_history_count': history_log_count + history_asset_count + completed_active_count,
         'ip_delete_history_log_count': history_log_count,
     }
+    cache.set(_LIFECYCLE_IP_DELETE_COUNTS_CACHE_KEY, counts, timeout=_LIFECYCLE_PLAN_COUNTS_CACHE_TTL)
+    return counts
 
 
 def ip_delete_history_page_sources(

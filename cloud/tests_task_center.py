@@ -232,6 +232,32 @@ class CloudTaskCenterApiTestCase(TestCase):
         self.assertEqual(section['health'], 'error')
         self.assertEqual(section['items'][0]['note'], '云 API 删除失败')
 
+    def test_lifecycle_section_total_uses_full_plan_counts_not_preview_items(self):
+        now = timezone.now()
+        preview_items = [
+            {
+                'id': f'lifecycle-preview-{index}',
+                'asset_id': index + 1,
+                'queue_status': 'scheduled_future',
+                'queue_status_label': '计划中',
+            }
+            for index in range(8)
+        ]
+        with patch('cloud.task_center._current_lifecycle_plan_items', return_value=preview_items), \
+            patch('cloud.task_center._recent_lifecycle_failed_history_items', return_value=[]), \
+            patch('cloud.lifecycle_plan_queries.server_lifecycle_plan_counts', return_value={
+                'shutdown_plan_count': 20,
+                'server_delete_count': 3,
+            }), \
+            patch('cloud.lifecycle_plan_queries.ip_delete_plan_counts', return_value={
+                'ip_delete_count': 4,
+            }):
+            section = _lifecycle_section(now)
+
+        self.assertEqual(section['total'], 27)
+        self.assertEqual(section['active'], 27)
+        self.assertEqual(len(section['items']), 8)
+
     def test_lifecycle_section_counts_recent_failed_history_as_failed(self):
         now = timezone.now()
         with patch('cloud.task_center._current_lifecycle_plan_items', return_value=[]), \
@@ -365,6 +391,28 @@ class CloudTaskCenterApiTestCase(TestCase):
         self.assertEqual(section['health'], 'error')
         self.assertEqual(section['items'][0]['note'], '通知任务失败但没有用户通知日志')
         self.assertEqual(section['status_counts']['failed_retry'], 1)
+
+    def test_notice_section_total_uses_full_plan_counts_not_preview_items(self):
+        now = timezone.now()
+        preview_items = [
+            {
+                'id': f'notice-preview-{index}',
+                'notice_status': 'scheduled_future',
+                'queue_status': 'scheduled_future',
+            }
+            for index in range(8)
+        ]
+        with patch('cloud.api_tasks._build_notice_plan_summary', return_value={
+            'active_user_summary_items': preview_items,
+            'history_items': [],
+            'active_user_total': 25,
+            'total_counts': {'active_user_count': 25},
+        }):
+            section = _notice_section(now)
+
+        self.assertEqual(section['total'], 25)
+        self.assertEqual(section['active'], 25)
+        self.assertEqual(len(section['items']), 8)
 
     def test_notice_section_counts_pending_db_task_without_notice_plan(self):
         now = timezone.now()

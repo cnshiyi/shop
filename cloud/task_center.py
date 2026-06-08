@@ -565,6 +565,12 @@ def _cloud_orders_section(now) -> dict:
 
 
 def _lifecycle_section(now) -> dict:
+    server_plan_counts, ip_plan_counts = _lifecycle_overview_plan_counts()
+    full_plan_total = (
+        int(server_plan_counts.get('shutdown_plan_count') or 0)
+        + int(server_plan_counts.get('server_delete_count') or 0)
+        + int(ip_plan_counts.get('ip_delete_count') or 0)
+    )
     items_source = _current_lifecycle_plan_items(page_size=8)
     active_failure_keys = {
         _task_identity(item)
@@ -591,6 +597,8 @@ def _lifecycle_section(now) -> dict:
     db_failed_count = sum(1 for item in db_task_items if item.get('queue_status') == 'failed')
     db_active_count = sum(1 for item in db_task_items if item.get('queue_status') in {'pending', 'claimed'})
     warning_count = sum(1 for item in items_source if item.get('queue_status') in ['overdue', 'due_now', 'blocked'])
+    visible_active_count = sum(1 for item in items_source if item.get('queue_status') in ['due_now', 'scheduled_future', 'overdue', 'within_window'])
+    full_active_count = max(full_plan_total, visible_active_count)
     items = [
         _plan_item(row, task_type='lifecycle', task_label='生命周期计划')
         for row in [*items_source, *recent_failed_history, *db_task_items][:8]
@@ -602,8 +610,8 @@ def _lifecycle_section(now) -> dict:
         key='lifecycle',
         title='生命周期计划',
         path='/admin/tasks/plans',
-        total=len(items_source) + len(recent_failed_history) + len(db_task_items),
-        active=sum(1 for item in items_source if item.get('queue_status') in ['due_now', 'scheduled_future', 'overdue', 'within_window']) + db_active_count,
+        total=full_active_count + len(recent_failed_history) + len(db_task_items),
+        active=full_active_count + db_active_count,
         failed=failed_count + len(recent_failed_history) + db_failed_count,
         warning=warning_count,
         status_counts=status_counts,
@@ -611,6 +619,23 @@ def _lifecycle_section(now) -> dict:
         generated_at=now,
         extra={'overview_mode': 'preview'},
     )
+
+
+def _lifecycle_overview_plan_counts() -> tuple[dict, dict]:
+    from cloud.lifecycle_plan_queries import ip_delete_plan_counts, server_lifecycle_plan_counts
+
+    try:
+        from bot.api import _load_lifecycle_plan_count_snapshot
+
+        snapshot, _generated_at, _fingerprint = _load_lifecycle_plan_count_snapshot()
+    except Exception:
+        snapshot = None
+    if isinstance(snapshot, dict):
+        total_counts = snapshot.get('total_counts')
+        ip_delete_total_counts = snapshot.get('ip_delete_total_counts')
+        if isinstance(total_counts, dict) and isinstance(ip_delete_total_counts, dict):
+            return total_counts, ip_delete_total_counts
+    return server_lifecycle_plan_counts(), ip_delete_plan_counts()
 
 
 def _notice_section(now) -> dict:
@@ -622,9 +647,15 @@ def _notice_section(now) -> dict:
         history_limit=8,
         history_offset=0,
         fields={'basic', 'channels', 'retry'},
-        include_total_counts=False,
+        include_total_counts=True,
     )
     items_source = bundle.get('active_user_summary_items') or []
+    total_counts = bundle.get('total_counts') or {}
+    active_user_total = int(
+        total_counts.get('active_user_count')
+        or bundle.get('active_user_total')
+        or len(items_source)
+    )
     failed_count = sum(1 for item in items_source if item.get('notice_status') in _NOTICE_FAILED_STATUSES)
     active_failure_keys = {
         _task_identity(item)
@@ -655,8 +686,8 @@ def _notice_section(now) -> dict:
         key='notices',
         title='通知计划',
         path='/admin/tasks/notices',
-        total=int(bundle.get('active_user_total') or len(items_source)) + len(recent_failed_history) + len(db_task_items),
-        active=sum(1 for item in items_source if item.get('queue_status') in ['due_now', 'scheduled_future', 'overdue', 'fallback_notice', 'within_window']) + db_active_count,
+        total=active_user_total + len(recent_failed_history) + len(db_task_items),
+        active=active_user_total + db_active_count,
         failed=failed_count + len(recent_failed_history) + db_failed_count,
         warning=warning_count,
         status_counts=status_counts,

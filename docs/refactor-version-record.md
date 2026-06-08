@@ -16696,3 +16696,89 @@ git diff --check
 
 - 继续巡检生命周期计划、通知计划和代理列表之间的统计口径是否再次分叉。
 - 继续把机器人返回链、`callback_data <= 64` 字节限制和多任务高并发作为固定回归项。
+
+## 2026-06-08 17:16 CST 任务中心统计口径修复
+
+### 本轮背景
+
+- 按 `AGENTS.md` 与自动优化控制台要求先检查后端 `git status --short`、`git log -1 --oneline --decorate --stat`、前端仓库状态，以及 `docs/auto-optimization-control.md`、`docs/auto-optimization-latest.md`、`TODO.md`、本文件末尾。
+- `TODO.md` 已无未勾选任务，因此按固定巡检清单选择一个最小安全修复。
+- 发现后端已有未提交改动集中在：
+  - `cloud/lifecycle_plan_queries.py`
+  - `cloud/task_center.py`
+  - `cloud/tests_task_center.py`
+- diff 显示它们属于同一组“后台任务中心和状态统计复查”修复，因此本轮继续完成该单一任务，不混入其他路径。
+
+### 发现
+
+- 任务中心总览里生命周期计划和通知计划的 `total/active` 统计依赖当前预览列表长度。
+- 当接口只返回前 8 条预览数据时，总览会把真实活跃计划数压缩成 8 条左右，和计划页全量统计不一致。
+- 生命周期总览需要同时合并关机、删机和 IP 删除三类计划，但原实现没有把全量统计统一纳入总览。
+- IP 删除计划计数没有独立缓存，任务中心多次读取时会重复执行较重计数查询。
+
+### 修复
+
+- `cloud/task_center.py`
+  - 新增 `_lifecycle_overview_plan_counts()`，优先复用机器人快照里的 `total_counts` 与 `ip_delete_total_counts`，没有快照时回退到实时统计。
+  - 生命周期总览的 `total/active` 改为使用真实全量计划数，而不是预览列表长度。
+  - 通知计划调用 `_build_notice_plan_summary(... include_total_counts=True)`，并使用 `total_counts.active_user_count` 作为真实 `total/active`。
+- `cloud/lifecycle_plan_queries.py`
+  - 为 `ip_delete_plan_counts()` 新增独立缓存 key。
+  - `clear_lifecycle_plan_counts_cache()` 同时清掉生命周期总数缓存和 IP 删除总数缓存。
+- `cloud/tests_task_center.py`
+  - 增加生命周期总览统计测试，验证“预览 8 条、真实 27 条”时 `total/active` 仍为 27。
+  - 增加通知计划总览统计测试，验证“预览 8 条、真实 25 条”时 `total/active` 仍为 25。
+
+### 验证
+
+执行：
+
+```bash
+UV_CACHE_DIR=/private/tmp/uv-cache-shop uv run python manage.py check
+UV_CACHE_DIR=/private/tmp/uv-cache-shop DJANGO_TEST_SQLITE=1 uv run python manage.py test cloud.tests_task_center --settings=shop.settings --verbosity=1
+UV_CACHE_DIR=/private/tmp/uv-cache-shop uv run python manage.py makemigrations --check --dry-run
+git diff --check
+```
+
+结果：
+
+- `manage.py check` 通过。
+- `cloud.tests_task_center` 16 个聚焦测试全部通过。
+- `makemigrations --check --dry-run` 输出 `No changes detected`；同时有既有 runtime warning，提示受当前环境限制无法连接 `127.0.0.1` MySQL 做迁移历史一致性检查，本轮不涉及迁移变更。
+- `git diff --check` 通过。
+
+### 风险与后续
+
+- 本轮只修服务端统计口径，未做任务中心页面浏览器点击回归；下一轮应补真实页面核对。
+- 仍需继续巡检生命周期计划页、通知计划页和任务中心总览三处统计在大数据下是否保持一致。
+
+### 追加复测
+
+修复提交前继续补做真实页面和大数据对账：
+
+- 真实打开 `/admin/tasks/plans`、`/admin/tasks/notices`、`/admin/tasks`。
+- 首次发现任务中心前端请求 `/api/admin/tasks/center/` 被中断并回退旧 `/api/admin/tasks/`；修复计数缓存和快照复用后，接口返回 `200`，真实页面不再回退。
+- 修复后任务中心页面显示：
+  - 任务总量 `2517685`
+  - 生命周期计划 `2479992/2479992`
+  - 通知计划 `21431/22437`
+- 计划页真实显示：
+  - 关机计划 `1979990`
+  - 删除计划 `2`
+  - 服务器删除历史 `20010`
+  - IP 删除计划 `500000`
+  - IP 删除历史 `520010`
+- 通知计划页真实显示：
+  - 通知计划 `21429`
+  - 近期计划 `3428`
+  - 未来计划 `18001`
+  - 通知历史 `14960`
+- 深页逐行对账通过：
+  - 关机计划第 `1/2/1000` 页
+  - IP 删除计划第 `1/2/5000` 页
+  - 服务器删除历史第 `1/2/1000` 页
+  - IP 删除历史第 `1/2/1000` 页
+  - 通知计划第 `1/2/1000` 页
+- 机器人多任务高并发 8 条聚焦测试通过，覆盖通知复制隔离、钱包直付/补付并发、60 路批量后台任务、订单详情/资产详情/IP 查询/自动续费返回链。
+- 红线扫描通过，命中项均为既有测试桩、Telegram 登录账号 API 文件名或 `ip_recycle_at` 同步记录，不是旧订单到期事实回流。
+- 已清理本轮临时后台登录用户和 `/private/tmp` 临时 token/API 输出文件。
