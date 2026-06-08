@@ -4,9 +4,9 @@
 
 ## 最近一轮
 
-- 时间：2026-06-08 22:00 CST
-- 状态：完成生命周期计划页过期状态修复、真实库对账、真实前端打开验证和后端聚焦测试。
-- 后端提交：已提交，提交信息 `fix: mark overdue lifecycle plans as due`。
+- 时间：2026-06-08 22:08 CST
+- 状态：完成生命周期计划页深分页数据库口径对账和真实前端翻页/跳页巡检；本轮未发现需要修代码的问题。
+- 后端提交：本轮准备提交巡检记录。
 - 前端提交：本轮无前端代码变更。
 
 ## 本轮覆盖范围
@@ -16,106 +16,89 @@
 - 页面：`http://127.0.0.1:5666/admin/tasks/plans`
 - 后端服务：`http://127.0.0.1:8000`
 - 重点链路：
-  - 生命周期计划页服务端分页
-  - 关机计划、服务器删除计划的 `queue_status`
-  - 真实前端计划页加载、接口请求、控制台错误检查
+  - 生命周期计划接口分页
+  - 查询层分页 ID 顺序
+  - 真实前端“删除计划”翻页
+  - 真实前端“关机计划”跳最后页
 
-## 修复内容
+## 数据库口径对账
 
-- `bot/api.py`
-  - `_server_lifecycle_plan_page_items()` 不再把服务端分页出来的所有关机/删机计划默认标为 `scheduled_future`。
-  - 根据计划时间和当前时间计算：
-    - 已到执行时间：`due_now / 待执行`
-    - 7 天窗口内：`within_window / 计划中`
-    - 更远未来：`scheduled_future / 计划中`
-- `cloud/tests.py`
-  - 新增已过期删除计划的回归测试，固定过期删除计划必须显示为 `due_now`。
-  - 补充未来计划测试的删除总开关显式配置，避免依赖默认值。
+真实库计数：
 
-## 真实库对账
+- 关机计划：`1979933`
+- 服务器删除计划：`59`
+- 服务器删除历史：`20010`
+- IP 删除计划：`500000`
+- IP 删除历史：`520010`
 
-真实库复核目标：
+对账方式：
 
-- `CloudAsset #20418 / CloudServerOrder #20170`
-  - 关机计划返回 `queue_status=due_now`
-  - 执行状态为“已到关机时间，待执行关机服务器”
-- `CloudAsset #326 / CloudServerOrder #94`
-  - 删除计划返回 `queue_status=due_now`
-  - 执行状态为“已到删除时间，待执行删除服务器”
+- 通过 `lifecycle_plans` 请求层获取接口结果。
+- 通过 `cloud.lifecycle_plan_queries.server_lifecycle_plan_page()` 获取查询层原始分页。
+- 逐页比对资产 ID 顺序、加载数量、唯一数量和分页元数据。
+
+关机计划：
+
+- 第 `1` 页：接口 `50` 条，查询层 `50` 条，ID 顺序一致，无重复。
+- 第 `2` 页：接口 `50` 条，查询层 `50` 条，ID 顺序一致，无重复。
+- 第 `1000` 页：接口 `50` 条，查询层 `50` 条，ID 顺序一致，无重复。
+- 最后页第 `39599` 页：接口 `33` 条，查询层 `33` 条，ID 顺序一致，无重复。
+
+服务器删除计划：
+
+- 第 `1` 页：接口 `50` 条，查询层 `50` 条，ID 顺序一致，无重复。
+- 第 `2` 页：接口 `9` 条，查询层 `9` 条，ID 顺序一致，无重复。
+- 最后页同第 `2` 页，分页元数据为 `loaded=9 / total=59`。
 
 结论：
 
-- 已过期未执行的关机计划和删除计划不再被误标为未来计划。
-- 本轮只做状态口径修复，没有执行真实关机、删机或 IP 释放。
+- 本轮没有复现此前“缓存快照口径 vs 原始 helper 计数”的删除计划总数差异。
+- 当前接口、查询层和分页元数据在本轮覆盖页上保持一致。
 
 ## 真实前端验证
 
-前端首次检查时发现 `127.0.0.1:8000` 后端不在，前端代理 `/api/admin/user/info` 返回 `502`，页面无法进入计划接口。
+使用系统 Chrome 打开真实前端页面并执行页面操作：
 
-处理：
+- 初始进入 `/admin/tasks/plans`。
+- 点击“删除计划”分页第 `2` 页。
+- 在“关机计划”分页跳页输入框跳到第 `39599` 页。
 
-- 重新启动后端：`uv run python manage.py runserver 127.0.0.1:8000`
-- 重新生成临时后台 session 登录态，只写入 `/private/tmp/shop-plans-storage-state.json`，未打印 session 内容。
-- 使用系统 Chrome 打开真实前端页面。
+前端结果：
 
-结果：
-
-- 页面成功进入：`/admin/tasks/plans`
-- 不是登录页。
-- 页面出现“关机计划”“删除计划”和“待执行”。
-- 生命周期计划接口请求成功 `1` 次。
-- 接口状态码：`200`
-- 业务 code：`0`
+- 删除计划第 `1` 页：显示 `50 / 总 59`。
+- 删除计划第 `2` 页：显示 `9 / 总 59`，页面实际 `9` 行。
+- 关机计划最后页：显示 `33 / 总 1979933`，页面实际 `33` 行。
+- 页面仍显示正确的计划状态，例如删除计划中可见“待执行”，关机计划最后页为未来排期。
+- 生命周期计划接口请求成功 `3` 次。
 - 控制台 error/warning：`0`
 - request failed：`0`
 - 4xx/5xx 响应：`0`
-- 截图：`/private/tmp/shop-lifecycle-plan-status-front.png`
-- 前端巡检 JSON：`/private/tmp/shop-lifecycle-plan-status-front.json`
-
-接口返回样本确认：
-
-- `server_delete` 第 1 页包含 `asset_id=326 / order_id=94`
-- 该行 `queue_status=due_now`
-- 该行 `execution_status=已到删除时间，待执行删除服务器`
-- 分页元数据：
-  - 关机计划 `total=1979933 / loaded=50`
-  - 服务器删除计划 `total=59 / loaded=50`
-  - 服务器删除历史 `total=20010 / loaded=50`
-  - IP 删除计划 `total=500000 / loaded=50`
-  - IP 删除历史 `total=520010 / loaded=50`
+- 截图：`/private/tmp/shop-lifecycle-plan-pagination-front.png`
+- 前端巡检 JSON：`/private/tmp/shop-lifecycle-plan-pagination-front.json`
 
 ## 本轮验证
 
 通过：
 
 ```bash
-UV_CACHE_DIR=/private/tmp/uv-cache-shop uv run python -m py_compile bot/api.py cloud/tests.py
 UV_CACHE_DIR=/private/tmp/uv-cache-shop uv run python manage.py check
-UV_CACHE_DIR=/private/tmp/uv-cache-shop DJANGO_TEST_SQLITE=1 uv run python manage.py test cloud.tests.CloudServerServicesTestCase.test_lifecycle_plans_server_page_marks_overdue_delete_as_due_now cloud.tests.CloudServerServicesTestCase.test_lifecycle_plans_include_future_server_plan_item cloud.tests.CloudServerServicesTestCase.test_lifecycle_plans_split_shutdown_before_server_delete cloud.tests.CloudServerServicesTestCase.test_lifecycle_plans_use_stage_specific_asset_switches --settings=shop.settings --verbosity=1
 git diff --check
 ```
 
-红线扫描通过：
-
-```bash
-rg -n "service_expires_at|actual_expires_at.*CloudServerOrder|CloudServerOrder.*actual_expires_at|plan snapshot|snapshot table|old refund|refund_legacy|refund_old|legacy_refund|accounts\.|finance\.|mall\.|monitoring\.|dashboard_api\.|biz\." cloud bot orders core shop -g '!**/migrations/**'
-```
-
-命中项仍是允许项：bot 测试桩、Telegram 登录账号模块名、`CloudServerOrder.ip_recycle_at` 同步记录，不是旧订单到期事实、旧计划快照或废弃 runtime app 回流。
-
 说明：
 
-- SQLite 聚焦测试仍输出既有 `db_comment` / `db_table_comment` 警告，不属于本轮问题。
-- `docs/real-machine-test-report.md` 当前存在既有未提交真实机器测试记录，本轮不覆盖、不提交。
+- 本轮没有修改运行代码，因此未新增聚焦测试。
+- `docs/real-machine-test-report.md` 当前仍存在既有未提交真实机器测试记录，本轮不覆盖、不提交。
 
 ## 结论
 
-- 生命周期计划页服务端分页状态口径已修复。
-- 真实前端计划页已重新打开并验证通过。
+- 生命周期计划页深分页和前端翻页/跳页当前正常。
+- 删除计划第 `2` 页没有丢数据，最后页数量与数据库口径一致。
+- 关机计划百万级最后页没有丢数据或串页，页面显示与接口分页一致。
 - 本轮没有执行真实支付、链上广播、真实云资源创建/删除、生产发布或删除业务数据。
 
 ## 剩余风险
 
 - 机器人多任务高并发真机点击压测仍受 Telegram 网络/session 状态影响，尚未完成。
 - 真实云资源创建后的完整关机、删机、IP 释放闭环仍需继续在授权范围内逐项验证。
-- 当前仍有既有真机报告脏文件 `docs/real-machine-test-report.md`，需要单独处理，不应混入本轮状态修复提交。
+- 当前仍有既有真机报告脏文件 `docs/real-machine-test-report.md`，需要单独处理，不应混入本轮巡检记录提交。
