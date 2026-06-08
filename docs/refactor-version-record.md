@@ -18124,3 +18124,102 @@ git diff --check
 - 机器人多任务高并发真机点击压测还没有完成，当前阻塞点是 Telegram 网络不可达和登录账号状态 `listener_error`。
 - 真实云资源创建、到期关机、删机、释放 IP 的生命周期开关矩阵还没有完整闭环。
 - 服务器创建后的完整生命周期链路还没有在本轮压测中闭环到真实关机、真实删机和真实 IP 释放。
+
+## 2026-06-08 22:10 CST 生命周期计划页与机器人回调专项审计
+
+### 本轮背景
+
+- 继续执行自动优化固定入口。
+- `TODO.md` 已无未完成条目，因此按 `docs/auto-optimization-control.md` 固定巡检清单执行一轮只读专项审计。
+- 本轮不碰用户未提交的 `bot/api.py`、`cloud/tests.py`、`docs/real-machine-test-report.md`，只做真实库读侧对账、聚焦测试和中文记录。
+
+### 本轮范围
+
+- 生命周期计划页真实接口 `lifecycle_plans`。
+- 生命周期查询层 `cloud.lifecycle_plan_queries`。
+- 机器人高风险回调链 `RetainedIpRenewalUiTestCase`。
+- 红线项：`CloudAsset.actual_expires_at` 唯一到期事实、旧计划快照、旧退款入口、废弃 runtime app 回流、Telegram `callback_data <= 64`。
+
+### 真实库与压测规模
+
+- `CloudAsset=2500003`
+- `CloudAssetDashboardSnapshot=2500003`
+- `CloudLifecycleTask=16`
+- `CloudNoticeTask=6335`
+- `CloudServerOrder=50015`
+
+生命周期计数：
+
+- `server_lifecycle_plan_counts()['shutdown_plan_count']=1979933`
+- `server_lifecycle_plan_counts()['server_delete_count']=59`
+- `ip_delete_plan_counts()['ip_delete_count']=500000`
+- `ip_delete_plan_counts()['ip_delete_history_count']=520010`
+
+### 审计结果
+
+机器人回调回归：
+
+- `RetainedIpRenewalUiTestCase` 51 条通过。
+- 覆盖资产详情、订单详情、续费、钱包支付、换 IP、重装、修改配置、异步补付和长回调压缩。
+- 本轮未发现 `callback_data > 64 bytes` 回归。
+
+生命周期计划页真实库读侧对账：
+
+- 关机计划：
+  - 第 `1` 页：`50` 条，耗时约 `395.98ms`，接口与查询层一致。
+  - 第 `2` 页：`50` 条，耗时约 `271.84ms`，接口与查询层一致。
+  - 第 `1000` 页：`50` 条，耗时约 `324.15ms`，接口与查询层一致。
+- IP 删除计划：
+  - 第 `1` 页：`50` 条，耗时约 `700.14ms`，接口与查询层一致。
+  - 第 `2` 页：`50` 条，耗时约 `686.94ms`，接口与查询层一致。
+  - 第 `1000` 页：`50` 条，耗时约 `786.97ms`，接口与查询层一致。
+  - 第 `10000` 页：`50` 条，耗时约 `1315.24ms`，接口与查询层一致。
+
+生命周期总开关联动：
+
+- 关闭 `cloud_shutdown_enabled` 后，关机计划首行 `queue_status=shutdown_disabled`。
+- 关闭 `cloud_server_delete_enabled` 后，服务器删除计划首行 `queue_status=global_server_delete_disabled`。
+- 关闭 `cloud_ip_delete_enabled` 后，IP 删除计划首行 `queue_status=global_ip_delete_disabled`。
+
+### 发现的差异
+
+- 服务器删除计划真实接口分页元数据当前返回 `total=2`、第 `1` 页 `2` 条、第 `2` 页 `0` 条；而底层 `server_lifecycle_plan_counts()` 原始计数为 `59`。
+- 关机计划只读缓存分页第 `39599` 页返回 `total=1979990 / loaded=50`；直接查询层按原始 helper 计数 `1979933` 计算最后页只剩 `33` 条。
+- 结合 `bot/api.py` 当前实现复核，这两处更像“生命周期计划快照/页面投影口径”和“底层原始 helper 计数”不一致，而不是前几页分页切片错误：
+  - 前 `1/2/1000` 页关机计划一致。
+  - 前 `1/2/1000/10000` 页 IP 删除计划一致。
+
+### 受限项
+
+- 为确认最后页差异是否会在刷新后收敛，我追加尝试了 `refresh=1` 的生命周期计划接口重算。
+- 真实 250 万级资产库上，整套生命周期快照刷新超过 `30s` 仍未完成返回，本轮未继续等待，也未改动代码。
+- 因此最后页与服务器删除计划的“缓存快照口径 vs 原始 helper 计数”差异暂列剩余风险，留待下一轮单独处理。
+
+### 验证
+
+通过：
+
+```bash
+UV_CACHE_DIR=/private/tmp/uv-cache-shop uv run python manage.py check
+UV_CACHE_DIR=/private/tmp/uv-cache-shop DJANGO_TEST_SQLITE=1 uv run python manage.py test cloud.tests.CloudServerServicesTestCase.test_lifecycle_plans_server_page_marks_overdue_delete_as_due_now cloud.tests.CloudServerServicesTestCase.test_lifecycle_plans_include_future_server_plan_item --settings=shop.settings --verbosity=1
+UV_CACHE_DIR=/private/tmp/uv-cache-shop DJANGO_TEST_SQLITE=1 uv run python manage.py test bot.tests.RetainedIpRenewalUiTestCase --settings=shop.settings --verbosity=1
+UV_CACHE_DIR=/private/tmp/uv-cache-shop uv run python manage.py shell -c "from cloud.models import CloudAsset, CloudAssetDashboardSnapshot, CloudLifecycleTask, CloudNoticeTask, CloudServerOrder; print('CloudAsset', CloudAsset.objects.count()); print('CloudAssetDashboardSnapshot', CloudAssetDashboardSnapshot.objects.count()); print('CloudLifecycleTask', CloudLifecycleTask.objects.count()); print('CloudNoticeTask', CloudNoticeTask.objects.count()); print('CloudServerOrder', CloudServerOrder.objects.count())"
+UV_CACHE_DIR=/private/tmp/uv-cache-shop uv run python manage.py shell -c "from cloud.lifecycle_plan_queries import server_lifecycle_plan_counts, ip_delete_plan_counts; print('server_lifecycle_plan_counts', server_lifecycle_plan_counts()); print('ip_delete_plan_counts', ip_delete_plan_counts())"
+git diff --check
+git -C /Users/a399/Desktop/data/vue-shop-admin diff --check
+```
+
+红线扫描通过：
+
+```bash
+rg -n "service_expires_at|actual_expires_at.*CloudServerOrder|CloudServerOrder.*actual_expires_at|plan snapshot|snapshot table|old refund|refund_legacy|refund_old|legacy_refund|accounts\.|finance\.|mall\.|monitoring\.|dashboard_api\.|biz\." cloud bot orders core shop -g '!**/migrations/**'
+```
+
+命中项仍是允许项：测试桩、Telegram 登录账号模块名、`CloudServerOrder.ip_recycle_at` 同步记录，不是旧订单到期事实、旧计划快照或废弃 runtime app 回流。
+
+### 结论
+
+- 本轮没有新增运行代码修复，只完成真实库专项审计与中文记录。
+- 机器人高风险回调链未发现回归。
+- 生命周期计划页在真实大样本下，关机计划前 `1/2/1000` 页和 IP 删除计划前 `1/2/1000/10000` 页继续保持接口与查询层一致。
+- 仍需继续收敛生命周期计划“缓存快照口径 vs 原始 helper 计数”的差异，优先复查关机计划最后页和服务器删除计划总数来源。
