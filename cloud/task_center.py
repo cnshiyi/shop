@@ -368,7 +368,7 @@ def _recent_lifecycle_db_task_items(now) -> list[dict]:
 
 def _lifecycle_db_task_matches_active_plan(item: dict) -> bool:
     from cloud.lifecycle_plan_queries import (
-        server_lifecycle_plan_queryset,
+        server_lifecycle_plan_unique_queryset,
         server_shutdown_complete_q,
         unattached_ip_delete_active_queryset,
     )
@@ -383,7 +383,7 @@ def _lifecycle_db_task_matches_active_plan(item: dict) -> bool:
             return False
         return unattached_ip_delete_active_queryset().filter(id=asset_id).exists()
 
-    server_queryset = server_lifecycle_plan_queryset()
+    server_queryset = server_lifecycle_plan_unique_queryset()
     if task_type == CloudLifecycleTask.TASK_SUSPEND:
         queryset = server_queryset.exclude(server_shutdown_complete_q())
     elif task_type in {
@@ -402,13 +402,13 @@ def _lifecycle_db_task_matches_active_plan(item: dict) -> bool:
 
 def _current_lifecycle_plan_items(*, page_size=1000) -> list[dict]:
     from bot.api import _asset_delete_plan_item_payload, _shutdown_stage_item_payload
-    from cloud.lifecycle_plan_queries import server_lifecycle_plan_queryset, server_shutdown_complete_q
+    from cloud.lifecycle_plan_queries import server_lifecycle_plan_unique_queryset, server_shutdown_complete_q
 
     limit = max(int(page_size or 1), 1)
     items = []
 
     shutdown_assets = (
-        server_lifecycle_plan_queryset()
+        server_lifecycle_plan_unique_queryset()
         .exclude(server_shutdown_complete_q())
         .order_by('actual_expires_at', 'id')[:limit]
     )
@@ -419,7 +419,7 @@ def _current_lifecycle_plan_items(*, page_size=1000) -> list[dict]:
 
     if len(items) < limit:
         delete_assets = (
-            server_lifecycle_plan_queryset()
+            server_lifecycle_plan_unique_queryset()
             .filter(server_shutdown_complete_q())
             .order_by('actual_expires_at', 'id')[:limit - len(items)]
         )

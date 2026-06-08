@@ -8,7 +8,8 @@ from __future__ import annotations
 import heapq
 
 from django.core.cache import cache
-from django.db.models import Q
+from django.db.models import Case, CharField, F, IntegerField, Q, Subquery, Value, When, Window
+from django.db.models.functions import Cast, Concat, RowNumber
 
 from cloud.models import CloudAsset, CloudIpLog, CloudServerOrder
 from core.cloud_accounts import cloud_account_label_variants
@@ -151,6 +152,60 @@ def server_lifecycle_plan_queryset():
     )
 
 
+def _server_lifecycle_plan_ranked_queryset():
+    server_identity = Case(
+        When(
+            provider_resource_id__isnull=False,
+            provider_resource_id__gt='',
+            then=Concat(Value('resource:'), F('provider_resource_id')),
+        ),
+        When(
+            instance_id__isnull=False,
+            instance_id__gt='',
+            then=Concat(Value('instance:'), F('instance_id')),
+        ),
+        default=Concat(Value('asset:'), Cast('id', CharField())),
+        output_field=CharField(),
+    )
+    order_link_rank = Case(
+        When(order_id__isnull=False, then=Value(0)),
+        default=Value(1),
+        output_field=IntegerField(),
+    )
+    shutdown_complete_rank = Case(
+        When(server_shutdown_complete_q(), then=Value(0)),
+        default=Value(1),
+        output_field=IntegerField(),
+    )
+    return (
+        server_lifecycle_plan_queryset()
+        .annotate(
+            _server_identity=server_identity,
+            _order_link_rank=order_link_rank,
+            _shutdown_complete_rank=shutdown_complete_rank,
+        )
+        .annotate(
+            _server_identity_rank=Window(
+                expression=RowNumber(),
+                partition_by=[F('provider'), F('region_code'), F('_server_identity')],
+                order_by=[
+                    F('_shutdown_complete_rank').asc(),
+                    F('_order_link_rank').asc(),
+                    F('actual_expires_at').asc(),
+                    F('id').desc(),
+                ],
+            )
+        )
+        .filter(_server_identity_rank=1)
+    )
+
+
+def server_lifecycle_plan_unique_queryset():
+    return server_lifecycle_plan_queryset().filter(
+        pk__in=Subquery(_server_lifecycle_plan_ranked_queryset().values('pk'))
+    )
+
+
 def server_lifecycle_plan_counts() -> dict[str, int]:
     cached = cache.get(_LIFECYCLE_PLAN_COUNTS_CACHE_KEY)
     if isinstance(cached, dict):
@@ -158,37 +213,9 @@ def server_lifecycle_plan_counts() -> dict[str, int]:
             'shutdown_plan_count': int(cached.get('shutdown_plan_count') or 0),
             'server_delete_count': int(cached.get('server_delete_count') or 0),
         }
-    blank_instance_q = Q(instance_id__isnull=True) | Q(instance_id='')
-    terminal_statuses = [
-        CloudAsset.STATUS_DELETED,
-        CloudAsset.STATUS_DELETING,
-        CloudAsset.STATUS_TERMINATED,
-        CloudAsset.STATUS_TERMINATING,
-    ]
-    queryset = (
-        CloudAsset.objects
-        .filter(kind=CloudAsset.KIND_SERVER, actual_expires_at__isnull=False)
-        .exclude(status__in=terminal_statuses)
-    )
-    unattached_count = queryset.filter(blank_instance_q & unattached_ip_asset_q()).count()
-    non_unattached = queryset.exclude(blank_instance_q & unattached_ip_asset_q())
-    shutdown_complete_statuses = [
-        CloudAsset.STATUS_STOPPED,
-        CloudAsset.STATUS_SUSPENDED,
-        CloudAsset.STATUS_DELETING,
-        CloudAsset.STATUS_DELETED,
-        CloudAsset.STATUS_TERMINATING,
-        CloudAsset.STATUS_TERMINATED,
-    ]
-    asset_status_delete_count = non_unattached.filter(status__in=shutdown_complete_statuses).count()
-    order_status_delete_count = (
-        non_unattached
-        .exclude(status__in=shutdown_complete_statuses)
-        .filter(order__status__in=['suspended', 'deleting', 'deleted'])
-        .count()
-    )
-    server_delete_count = asset_status_delete_count + order_status_delete_count
-    shutdown_plan_count = max(queryset.count() - unattached_count - server_delete_count, 0)
+    queryset = server_lifecycle_plan_unique_queryset()
+    server_delete_count = queryset.filter(server_shutdown_complete_q()).count()
+    shutdown_plan_count = queryset.exclude(server_shutdown_complete_q()).count()
     counts = {
         'shutdown_plan_count': shutdown_plan_count,
         'server_delete_count': server_delete_count,
@@ -198,7 +225,7 @@ def server_lifecycle_plan_counts() -> dict[str, int]:
 
 
 def server_lifecycle_plan_page(*, plan_stage: str, page: int, page_size: int, total: int | None = None):
-    queryset = server_lifecycle_plan_queryset()
+    queryset = server_lifecycle_plan_unique_queryset()
     if plan_stage == 'shutdown':
         queryset = queryset.exclude(server_shutdown_complete_q())
     else:

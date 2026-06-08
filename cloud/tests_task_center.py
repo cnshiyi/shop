@@ -7,6 +7,7 @@ from django.utils import timezone
 
 from bot.models import TelegramUser
 from cloud.models import (
+    CloudAsset,
     CloudAssetSyncJob,
     CloudAutoRenewPatrolLog,
     CloudAutoRenewRetryTask,
@@ -368,6 +369,56 @@ class CloudTaskCenterApiTestCase(TestCase):
         self.assertEqual(section['active'], 1)
         self.assertEqual(section['failed'], 0)
         self.assertEqual(section['health'], 'warning')
+
+    def test_lifecycle_section_dedupes_preview_items_by_strong_cloud_identity(self):
+        now = timezone.now()
+        order = self._create_cloud_order('TASK-LIFECYCLE-DEDUPE-PREVIEW-1')
+        order.instance_id = 'i-task-center-dedupe-preview'
+        order.provider_resource_id = 'arn:aws:lightsail:us-east-1:123456789012:Instance/i-task-center-dedupe-preview'
+        order.save(update_fields=['instance_id', 'provider_resource_id'])
+        CloudAsset.objects.create(
+            kind=CloudAsset.KIND_SERVER,
+            source=CloudAsset.SOURCE_AWS_SYNC,
+            user=order.user,
+            provider=order.provider,
+            region_code=order.region_code,
+            region_name=order.region_name,
+            asset_name='task-center-dedupe-preview',
+            instance_id=order.instance_id,
+            provider_resource_id=order.provider_resource_id,
+            public_ip=order.public_ip,
+            status=CloudAsset.STATUS_RUNNING,
+            is_active=True,
+            actual_expires_at=now + timezone.timedelta(days=10),
+        )
+        linked_asset = CloudAsset.objects.create(
+            kind=CloudAsset.KIND_SERVER,
+            source=CloudAsset.SOURCE_ORDER,
+            order=order,
+            user=order.user,
+            provider=order.provider,
+            region_code=order.region_code,
+            region_name=order.region_name,
+            asset_name='task-center-dedupe-preview',
+            instance_id=order.instance_id,
+            provider_resource_id=order.provider_resource_id,
+            public_ip=order.public_ip,
+            status=CloudAsset.STATUS_RUNNING,
+            is_active=True,
+            actual_expires_at=now + timezone.timedelta(days=10),
+        )
+
+        with patch('cloud.task_center._recent_lifecycle_failed_history_items', return_value=[]):
+            section = _lifecycle_section(now)
+
+        preview_items = [
+            item for item in section['items']
+            if item.get('public_ip') == order.public_ip
+        ]
+        self.assertEqual(len(preview_items), 1)
+        self.assertEqual(preview_items[0]['asset_id'], linked_asset.id)
+        self.assertEqual(preview_items[0]['order_id'], order.id)
+        self.assertEqual(section['total'], 1)
 
     def test_lifecycle_section_prefers_db_task_over_duplicate_plan_item(self):
         now = timezone.now()

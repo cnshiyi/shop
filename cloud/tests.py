@@ -9006,6 +9006,142 @@ class CloudServerServicesTestCase(TestCase):
 
         self.assertEqual([name for name in seen if name in expected_names], expected_names[:40])
 
+    # 功能：验证关机计划按云资源强身份去重，避免同一真实服务器因同步脏资产重复展示和重复计数。
+    def test_lifecycle_plans_dedupes_server_shutdown_by_strong_cloud_identity(self):
+        now = timezone.now()
+        account = self._aws_test_account()
+        order = CloudServerOrder.objects.create(
+            order_no='LIFECYCLE-DEDUPE-SHUTDOWN-ORDER',
+            user=self.user,
+            plan=self.plan,
+            provider=self.plan.provider,
+            cloud_account=account,
+            account_label=cloud_account_label(account),
+            region_code=self.plan.region_code,
+            region_name=self.plan.region_name,
+            plan_name=self.plan.plan_name,
+            quantity=1,
+            currency='USDT',
+            total_amount='19.00',
+            pay_amount='19.00',
+            status='completed',
+            server_name='lifecycle-dedupe-server',
+            instance_id='i-lifecycle-dedupe-server',
+            provider_resource_id='arn:aws:lightsail:ap-southeast-1:123456789012:Instance/i-lifecycle-dedupe-server',
+            public_ip='5.5.19.70',
+        )
+        CloudAsset.objects.create(
+            kind=CloudAsset.KIND_SERVER,
+            source=CloudAsset.SOURCE_AWS_SYNC,
+            user=self.user,
+            provider='aws_lightsail',
+            cloud_account=account,
+            account_label=cloud_account_label(account),
+            region_code=self.plan.region_code,
+            region_name=self.plan.region_name,
+            asset_name='lifecycle-dedupe-server',
+            instance_id=order.instance_id,
+            provider_resource_id=order.provider_resource_id,
+            public_ip=order.public_ip,
+            status=CloudAsset.STATUS_RUNNING,
+            is_active=True,
+            actual_expires_at=now + timezone.timedelta(days=10),
+        )
+        linked_asset = CloudAsset.objects.create(
+            kind=CloudAsset.KIND_SERVER,
+            source=CloudAsset.SOURCE_ORDER,
+            order=order,
+            user=self.user,
+            provider='aws_lightsail',
+            cloud_account=account,
+            account_label=cloud_account_label(account),
+            region_code=self.plan.region_code,
+            region_name=self.plan.region_name,
+            asset_name='lifecycle-dedupe-server',
+            instance_id=order.instance_id,
+            provider_resource_id=order.provider_resource_id,
+            public_ip=order.public_ip,
+            status=CloudAsset.STATUS_RUNNING,
+            is_active=True,
+            actual_expires_at=now + timezone.timedelta(days=10),
+        )
+        staff_user = get_user_model().objects.create_user(username='staff_lifecycle_dedupe_shutdown', password='x', is_staff=True)
+        request = RequestFactory().get('/api/admin/tasks/plans/', {
+            'compact': '1',
+            'fields': 'basic,execution',
+            'limit': '20',
+            'tables': 'shutdown_plan',
+            'refresh': '1',
+        })
+        self._attach_bearer_session(request, staff_user)
+
+        response = lifecycle_plans(request)
+
+        self.assertEqual(response.status_code, 200)
+        data = json.loads(response.content)['data']
+        self.assertEqual(data['shutdown_plan_count'], 1)
+        self.assertEqual(data['pagination']['shutdown_plan']['total'], 1)
+        self.assertEqual(len(data['shutdown_plan_items']), 1)
+        self.assertEqual(data['shutdown_plan_items'][0]['asset_id'], linked_asset.id)
+        self.assertEqual(data['shutdown_plan_items'][0]['order_id'], order.id)
+
+    # 功能：验证同一云资源存在已关机脏行时生命周期阶段不倒退，不再重复进入关机计划。
+    def test_lifecycle_plans_deduped_server_prefers_shutdown_complete_stage(self):
+        now = timezone.now()
+        account = self._aws_test_account()
+        identity = 'arn:aws:lightsail:ap-southeast-1:123456789012:Instance/i-lifecycle-dedupe-stopped'
+        CloudAsset.objects.create(
+            kind=CloudAsset.KIND_SERVER,
+            source=CloudAsset.SOURCE_ORDER,
+            user=self.user,
+            provider='aws_lightsail',
+            cloud_account=account,
+            account_label=cloud_account_label(account),
+            region_code=self.plan.region_code,
+            region_name=self.plan.region_name,
+            asset_name='lifecycle-dedupe-stopped',
+            instance_id='i-lifecycle-dedupe-stopped',
+            provider_resource_id=identity,
+            public_ip='5.5.19.71',
+            status=CloudAsset.STATUS_RUNNING,
+            is_active=True,
+            actual_expires_at=now - timezone.timedelta(days=1),
+        )
+        stopped_asset = CloudAsset.objects.create(
+            kind=CloudAsset.KIND_SERVER,
+            source=CloudAsset.SOURCE_AWS_SYNC,
+            user=self.user,
+            provider='aws_lightsail',
+            cloud_account=account,
+            account_label=cloud_account_label(account),
+            region_code=self.plan.region_code,
+            region_name=self.plan.region_name,
+            asset_name='lifecycle-dedupe-stopped',
+            instance_id='i-lifecycle-dedupe-stopped',
+            provider_resource_id=identity,
+            public_ip='5.5.19.71',
+            status=CloudAsset.STATUS_STOPPED,
+            is_active=True,
+            actual_expires_at=now - timezone.timedelta(days=1),
+        )
+        staff_user = get_user_model().objects.create_user(username='staff_lifecycle_dedupe_stopped', password='x', is_staff=True)
+        request = RequestFactory().get('/api/admin/tasks/plans/', {
+            'compact': '1',
+            'fields': 'basic,execution',
+            'limit': '20',
+            'tables': 'shutdown_plan,server_delete',
+            'refresh': '1',
+        })
+        self._attach_bearer_session(request, staff_user)
+
+        response = lifecycle_plans(request)
+
+        self.assertEqual(response.status_code, 200)
+        data = json.loads(response.content)['data']
+        self.assertEqual(data['shutdown_plan_count'], 0)
+        self.assertEqual(data['server_delete_count'], 1)
+        self.assertEqual(data['server_delete_items'][0]['asset_id'], stopped_asset.id)
+
     # 功能：验证 IP 删除历史服务端分页契约，跨页不重复且排序结果能和数据库事实对上。
     def test_lifecycle_plans_ip_delete_history_pagination_contract(self):
         expected_names = []
