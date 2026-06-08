@@ -808,3 +808,132 @@ uv run python manage.py sync_aws_assets --region ap-southeast-1 --account-id 55
 - 本轮真实测试服务器已从 AWS Lightsail 删除。
 - 新测试库中的目标资产和关联订单已收敛为已删除状态。
 - 当前没有发现该测试服务器残留在生命周期执行队列中。
+
+## 2026-06-08 运行中同步服务器真实续费闭环测试
+
+- 状态：通过，先发现问题并完成修复，随后重跑同一真机订单验证通过。
+- 授权：用户明确要求真实创建服务器测试，并已授权真实创建/删除云资源。
+- 测试数据库：`shop_manual_20260608_5676`，MySQL `127.0.0.1:3307`
+- 测试入口：前端 `127.0.0.1:5676`，后端 `127.0.0.1:8010`
+- 云厂商：AWS Lightsail
+- 地区：`ap-southeast-1`
+- 套餐：`micro_3_0`
+- 云账号：后台 AWS 云账号 `#55`
+- 本地资产：`CloudAsset #6`
+- 续费订单：`CloudServerOrder #2`
+- 资源脱敏：实例名 `codex-manual-renewal-**************`，公网 IP `47.129.xxx.xxx`
+
+### 真实创建与同步
+
+- 使用项目 AWS Lightsail 创建函数真实创建 1 台测试服务器。
+- 创建参数设置 `skip_static_ip=True`，未额外申请固定 IP。
+- AWS 返回实例进入 `running`，并拿到临时公网 IP。
+- 已放行 SSH `22` 和 MTProxy 相关端口。
+- 运行 `sync_aws_assets --region ap-southeast-1 --account-id 55` 后，新实例同步为 `CloudAsset #6`。
+- 同步后资产状态：
+  - `kind=server`
+  - `status=running`
+  - `is_active=True`
+  - `order_id=None`
+  - `actual_expires_at=None`
+
+### 人工改为已过期并生成续费单
+
+- 把 `CloudAsset #6` 绑定到测试用户，并把 `CloudAsset.actual_expires_at` 改为过去 4 天。
+- 过期后计划状态：
+  - 关机计划命中 `1` 条。
+  - 删除计划命中 `0` 条。
+- 调用资产续费准备流程生成待支付续费单：
+  - 订单：`CloudServerOrder #2`
+  - 状态：`pending`
+  - 支付方式：`address`
+  - 金额：`19.00 USDT`
+  - 资产关联订单变为 `order_id=2`
+
+### 首次余额支付暴露的问题
+
+- 给测试用户补足余额后，走 `pay_cloud_server_renewal_with_balance(order_id=2, user_id=1, currency='USDT', days=31)`。
+- 首次实测结果：
+  - 支付函数返回成功。
+  - 用户余额从 `1000` 扣到 `981`。
+  - 订单状态从 `pending` 变成 `paid`。
+  - 订单 `paid_at` 已写入。
+  - 但 `CloudAsset.actual_expires_at` 仍停留在过去时间。
+  - 关机计划仍命中 `1` 条。
+  - 删除计划仍为 `0` 条。
+
+结论：
+
+- 运行中的人工同步服务器续费不能按“未附加固定 IP 恢复单”处理。
+- 余额支付成功后必须直接延长资产到期事实，并重算关机、删机、IP 回收计划。
+
+### 修复后重跑余额支付
+
+- 修复后把同一测试订单恢复为待支付状态，重新走余额支付入口。
+- 重跑结果：
+  - 支付错误：无。
+  - 订单状态：`completed`
+  - 订单支付时间：已写入。
+  - 用户余额：`981.000000`
+  - 资产到期事实：延长到 `2026-07-09 22:33:03 +08:00`
+  - 订单关机时间：`2026-07-12 15:00:00 +08:00`
+  - 订单删机时间：`2026-07-12 15:00:00 +08:00`
+  - IP 回收时间：`2026-07-27 15:00:00 +08:00`
+  - 关机到期执行：`False`
+  - 删机到期执行：`False`
+  - IP 删除到期执行：`False`
+
+说明：
+
+- 当前配置下服务器删除间隔为关机后 `0` 天，所以订单派生的删机时间和关机时间相同。
+- 删除计划查询仍要求服务器已经完成关机后才进入删除计划，因此续费后不会提前出现在删除执行段。
+
+### 前端实际核查
+
+- 实际打开代理详情页：`/admin/cloud-assets/6`
+- 页面显示：
+  - 资产状态：运行中。
+  - 到期时间：`2026-07-09 22:33:03`。
+  - 订单状态：已创建。
+  - 生命周期日志存在“运行中资产续费 31 天”记录。
+- 实际打开计划页：`/admin/tasks/plans`
+- 页面显示：
+  - 关机计划：`1` 条，目标资产为未来排期。
+  - 服务到期：`2026-07-09 22:33:03`。
+  - 关机时间：`2026-07-12 15:00:00`。
+  - 删机时间：`2026-07-12 15:00:00`。
+  - 计划状态：已排期。
+  - 删除计划：`0` 条。
+  - IP 删除计划显示的是另一条未附加固定 IP，不是本次服务器资产。
+- 前端控制台：仅有 Vite dev WebSocket 热更新握手错误，不是业务接口错误。
+
+### 链上确认入口补测
+
+- 本轮同时修复链上支付确认入口。
+- 链上确认路径复用运行中资产续期完成逻辑。
+- 通知阶段不再在 async 上下文里同步查询资产到期时间。
+- 聚焦测试覆盖链上确认后：
+  - 订单变为 `completed`。
+  - `CloudAsset.actual_expires_at` 延长到未来。
+  - `suspend_at`、`delete_at`、`ip_recycle_at` 全部后移。
+
+### 清理
+
+- 本轮新建测试服务器已调用 AWS Lightsail `delete_instance` 删除。
+- AWS 查询确认目标实例已 `not_found`。
+- 删除后运行 `sync_aws_assets --region ap-southeast-1 --account-id 55`：
+  - 同步器扫描实例数量从 `4` 变为 `3`。
+  - 资产 `#6` 进入“云上不存在 第 1/5 次确认”。
+  - 当前可见代理数从 `5` 变为 `4`。
+- 未打印完整实例名、完整公网 IP、登录密码、代理链接、代理 secret、Telegram token、session 或云账号密钥。
+
+### 本轮验证
+
+通过：
+
+```bash
+UV_CACHE_DIR=/private/tmp/uv-cache-shop uv run python manage.py test cloud.tests.CloudServerServicesTestCase.test_unbound_asset_renewal_wallet_payment_marks_paid_for_recovery cloud.tests.CloudServerServicesTestCase.test_active_asset_renewal_wallet_payment_extends_asset_and_lifecycle cloud.tests.CloudServerServicesTestCase.test_unbound_asset_renewal_wallet_payment_repairs_completed_unpaid_state orders.tests.ChainPaymentScannerTestCase.test_active_asset_renewal_chain_payment_extends_asset_and_lifecycle --keepdb
+UV_CACHE_DIR=/private/tmp/uv-cache-shop uv run python manage.py check
+UV_CACHE_DIR=/private/tmp/uv-cache-shop uv run python -m py_compile cloud/services.py orders/payment_scanner.py orders/tests.py
+git diff --check
+```

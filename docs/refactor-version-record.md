@@ -18748,6 +18748,76 @@ git diff --check
 - 继续复核地址支付链路的链上确认路径是否也覆盖运行中资产续期。
 - 继续复核计划页 `paid` 展示口径与执行器 due 队列口径差异。
 
+## 2026-06-08 22:45 CST 真机运行中同步服务器续费闭环修复
+
+### 本轮背景
+
+- 用户要求真实创建服务器测试：人工创建服务器、同步、人工改为已过期、用户续费，并核对订单、到期时间、关机计划和删机计划变化。
+- 本轮使用测试库 `shop_manual_20260608_5676`、测试前端 `127.0.0.1:5676`、测试后端 `127.0.0.1:8010`。
+- 用户已授权真实云资源创建和删除；本轮仍不做真实链上广播。
+
+### 真机结果
+
+- 真实创建 1 台 AWS Lightsail 新加坡测试服务器，未申请固定 IP。
+- 同步后生成 `CloudAsset #6`，初始为运行中、无订单、无到期时间。
+- 人工改为过去 4 天到期后，关机计划命中，删除计划未命中。
+- 生成资产续费订单 `CloudServerOrder #2` 成功。
+- 修复前实测余额支付会扣款并把订单置为 `paid`，但不会延长 `CloudAsset.actual_expires_at`，关机计划仍处于到期状态。
+
+### 修复
+
+- `cloud/services.py`
+  - 抽出 `complete_active_asset_renewal_order()`。
+  - 对仍有实例、仍有效、仍运行中的同步服务器资产，续费支付成功后直接完成续期。
+  - 更新 `CloudAsset.actual_expires_at`。
+  - 同步重算订单 `suspend_at`、`delete_at`、`ip_recycle_at`。
+  - 记录续费日志并刷新计划快照。
+  - 未附加固定 IP 恢复单继续保持 `paid` 等待恢复创建。
+- `orders/payment_scanner.py`
+  - 链上确认入口复用同一个运行中资产续期完成逻辑。
+  - 避免在 async 通知阶段同步查询资产到期时间。
+- `orders/tests.py`
+  - 增加链上支付确认后运行中资产续期的回归测试。
+
+### 修复后复测
+
+- 同一真机订单恢复为待支付后重新走余额支付。
+- 结果：
+  - 订单状态变为 `completed`。
+  - 用户余额从 `1000` 扣到 `981`。
+  - 资产到期延长到 `2026-07-09 22:33:03 +08:00`。
+  - 关机时间后移到 `2026-07-12 15:00:00 +08:00`。
+  - 删机时间后移到 `2026-07-12 15:00:00 +08:00`。
+  - IP 回收时间后移到 `2026-07-27 15:00:00 +08:00`。
+  - 关机、删机和 IP 删除均不在到期执行段。
+
+### 前端核查
+
+- 实际打开 `/admin/cloud-assets/6`：
+  - 页面显示运行中、到期时间已延后、订单状态已创建、生命周期日志包含续费记录。
+- 实际打开 `/admin/tasks/plans`：
+  - 关机计划显示目标资产为未来排期。
+  - 删除计划为 `0`，目标资产未提前进入删机执行段。
+  - IP 删除计划显示的是另一条未附加固定 IP，不是本次服务器资产。
+- 前端控制台仅有本地 Vite WebSocket 热更新错误，不是业务错误。
+
+### 清理
+
+- 本轮新建 AWS 测试服务器已调用 `delete_instance` 删除。
+- AWS 查询确认目标实例 `not_found`。
+- 同步后资产 `#6` 进入云上不存在缺失确认，可见代理数减少。
+
+### 验证
+
+通过：
+
+```bash
+UV_CACHE_DIR=/private/tmp/uv-cache-shop uv run python manage.py test cloud.tests.CloudServerServicesTestCase.test_unbound_asset_renewal_wallet_payment_marks_paid_for_recovery cloud.tests.CloudServerServicesTestCase.test_active_asset_renewal_wallet_payment_extends_asset_and_lifecycle cloud.tests.CloudServerServicesTestCase.test_unbound_asset_renewal_wallet_payment_repairs_completed_unpaid_state orders.tests.ChainPaymentScannerTestCase.test_active_asset_renewal_chain_payment_extends_asset_and_lifecycle --keepdb
+UV_CACHE_DIR=/private/tmp/uv-cache-shop uv run python manage.py check
+UV_CACHE_DIR=/private/tmp/uv-cache-shop uv run python -m py_compile cloud/services.py orders/payment_scanner.py orders/tests.py
+git diff --check
+```
+
 ## 2026-06-08 22:42 CST 运行中同步资产链上地址支付续期修复
 
 ### 本轮背景
