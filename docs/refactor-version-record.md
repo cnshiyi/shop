@@ -15409,3 +15409,123 @@ git diff --check
 
 - 在允许访问真实 MySQL 的环境复测 `account_disabled` 标签第 `1` 页、第 `1000` 页和末页，确认单次聚合是否已明显降低首屏耗时。
 - 若真实页仍慢，继续拆分页查询本体和索引命中，不做兼容层补丁。
+
+## 2026-06-08 14:31 代理列表云账号异常分页索引替换与机器人并发巡检
+
+### 背景
+
+继续执行当前会话自动巡检。上一轮把代理列表风险统计从多次 `count()` 合并为单条 `aggregate()`，但本轮用真实 MySQL 大表采样后确认该方向在冷缓存下更慢。
+
+### 定位
+
+真实库采样结果：
+
+- 单条风险统计 `aggregate()` 冷缓存约 `4.865s`。
+- 按风险标签拆分 `count()` 全量约 `0.880s`。
+- `account_disabled` 第 1 页曾出现 `8.456s` 冷读。
+- EXPLAIN 显示 `account_disabled` 默认分页存在 `Using filesort`。
+
+这说明慢点分为两部分：
+
+- 风险统计不适合单条大聚合。
+- 云账号异常标签的默认排序缺少精确组合索引。
+
+### 修复
+
+修改文件：
+
+```text
+/Users/a399/Desktop/data/shop/cloud/api_asset_snapshots.py
+/Users/a399/Desktop/data/shop/cloud/models.py
+/Users/a399/Desktop/data/shop/cloud/migrations/0063_account_disabled_snapshot_page_index.py
+/Users/a399/Desktop/data/shop/cloud/tests.py
+```
+
+改动：
+
+- `_dashboard_snapshot_risk_counts()` 改回按风险标签拆分 `count()`，继续使用现有缓存键。
+- 删除旧窄索引 `cad_risk_display_idx`。
+- 新增替代索引 `cad_acct_list_page_idx`，覆盖 `account_disabled` 默认分页排序。
+- 新增测试 `test_cloud_asset_dashboard_risk_counts_do_not_use_single_aggregate`，防止未来再次把百万级 MySQL 统计改回单条大聚合。
+
+### 索引上限处理
+
+首次尝试直接新增索引时，本地 MySQL 返回：
+
+```text
+Too many keys specified; max 64 keys allowed
+```
+
+因此本轮没有继续堆索引，而是把旧窄索引替换为新索引。`cloud.0063_account_disabled_snapshot_page_index` 已应用到本地真实库，`migrate --plan` 无待执行项。
+
+### 真实库复测
+
+优化后：
+
+- EXPLAIN 使用 `cad_acct_list_page_idx`，不再出现 `Using filesort`。
+- 风险统计冷缓存约 `1.564s`。
+- `account_disabled` 第 1 页约 `0.125s`，`loaded=20`，`total=1145002`。
+- 第 2 页约 `0.111s`，`loaded=20`。
+- 第 1000 页约 `0.732s`，`loaded=20`。
+- 最后一页 `57251` 约 `0.090s`，`loaded=2`。
+
+### 真实前端复测
+
+打开：
+
+```text
+http://127.0.0.1:5666/admin/cloud-assets
+```
+
+实际点击“云账号异常”，并跳第 `1000` 页和最后页：
+
+- 第 1 页：接口 `loaded=20`，DOM 数据行 `20`，首末行 IP 与接口一致。
+- 第 1000 页：接口 `loaded=20`，DOM 数据行 `20`，首末行 IP 与接口一致。
+- 最后一页 `57251`：接口 `loaded=2`，DOM 数据行 `2`，首末行 IP 与接口一致。
+- 页面侧接口耗时约 `801ms`、`961ms`、`688ms`。
+- 控制台 `0` error / `0` warning，请求 `0` 个 400/500。
+
+本轮用于浏览器测试的临时后台用户和临时 session 已清理。
+
+### 机器人并发测试
+
+执行完整 `bot.tests`：
+
+```bash
+UV_CACHE_DIR=/private/tmp/uv-cache-shop DJANGO_TEST_SQLITE=1 uv run python manage.py test bot.tests --settings=shop.settings --verbosity=1
+```
+
+结果：
+
+- `107` 条通过。
+- 覆盖批量钱包直付/补付并发任务、消息转发隔离、云资产/订单返回链、续费、换 IP、重装、修改配置和 callback 长度压缩等回归。
+
+### 验证
+
+通过：
+
+```bash
+UV_CACHE_DIR=/private/tmp/uv-cache-shop uv run python manage.py check
+UV_CACHE_DIR=/private/tmp/uv-cache-shop uv run python manage.py migrate --plan
+UV_CACHE_DIR=/private/tmp/uv-cache-shop DJANGO_TEST_SQLITE=1 uv run python manage.py test cloud.tests.CloudServerServicesTestCase.test_cloud_assets_list_all_includes_disabled_or_missing_cloud_account_assets cloud.tests.CloudServerServicesTestCase.test_cloud_assets_list_risk_counts_keep_disabled_account_isolated cloud.tests.CloudServerServicesTestCase.test_cloud_asset_dashboard_risk_counts_do_not_use_single_aggregate --settings=shop.settings --verbosity=1
+UV_CACHE_DIR=/private/tmp/uv-cache-shop DJANGO_TEST_SQLITE=1 uv run python manage.py test bot.tests --settings=shop.settings --verbosity=1
+git diff --check
+```
+
+红线扫描通过：
+
+```bash
+rg -n "service_expires_at|actual_expires_at.*CloudServerOrder|CloudServerOrder.*actual_expires_at|plan snapshot|snapshot table|old refund|refund_legacy|refund_old|legacy_refund|accounts\\.|finance\\.|mall\\.|monitoring\\.|dashboard_api\\.|biz\\." cloud bot orders core shop -g '!**/migrations/**'
+```
+
+命中项仍为 Telegram 登录账号代码、云账号测试桩和 `CloudServerOrder.ip_recycle_at` 同步语句，不是旧到期事实回流。
+
+### 受限项
+
+- 本轮未执行真实云资源创建、关机、删机、释放 IP、换 IP、真实支付、链上广播、生产发布或删除业务数据。
+- 本轮未打印密钥、Telegram session、支付密钥、云厂商密钥或完整代理链接到仓库文件。
+
+### 下一步
+
+- 继续巡检生命周期计划页、通知计划页和代理列表其他高基数标签。
+- 后续新增索引前必须先检查 MySQL 单表 64 索引上限，优先替换低价值旧索引。

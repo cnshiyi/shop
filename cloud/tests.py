@@ -49,7 +49,7 @@ from cloud.provisioning import (
 from cloud.services import _cloud_asset_deleted_or_missing, apply_cloud_server_renewal, create_cloud_server_order, create_cloud_server_rebuild_order, create_cloud_server_renewal, create_cloud_server_renewal_by_public_query, create_cloud_server_renewal_for_user, create_cloud_server_upgrade_order, ensure_cloud_asset_operation_order, get_cloud_server_by_ip, get_cloud_server_by_ip_for_user, get_group_proxy_asset_detail, get_proxy_asset_by_ip_for_admin, get_proxy_asset_by_ip_for_user, get_user_proxy_asset_detail, is_retained_ip_order_visible_in_group, list_all_auto_renew_cloud_servers, list_cloud_asset_renewal_plans, list_cloud_server_upgrade_plans, list_group_cloud_servers, list_retained_ip_renewal_plans, list_retained_ip_renewal_plans_by_asset, list_user_cloud_servers, mark_cloud_server_ip_change_requested, mark_cloud_server_reinit_requested, pay_cloud_server_order_with_balance, pay_cloud_server_renewal_with_balance, prepare_cloud_asset_renewal_with_link, prepare_retained_ip_renewal_with_link, rebind_cloud_server_user, record_cloud_ip_log, replace_cloud_asset_order_by_admin, run_cloud_server_renewal_postcheck, set_cloud_server_auto_renew_admin, set_group_cloud_server_auto_renew, sync_cloud_asset_user_binding
 from cloud.sync_safety import get_missing_confirmation_threshold
 from cloud.api_asset_edit import delete_cloud_asset, update_cloud_asset
-from cloud.api_asset_snapshots import _dashboard_snapshot_can_use_forward_row_paging, backfill_cloud_asset_dashboard_snapshots, refresh_cloud_asset_dashboard_snapshots
+from cloud.api_asset_snapshots import _dashboard_snapshot_can_use_forward_row_paging, _dashboard_snapshot_risk_counts, backfill_cloud_asset_dashboard_snapshots, refresh_cloud_asset_dashboard_snapshots
 from cloud.api_assets import _asset_payload, _display_cloud_asset_note, _infer_asset_order, cloud_assets_list
 from cloud.api_monitors import _fetch_address_chain_balances
 from cloud.api_orders import _cloud_order_source_tags, cloud_order_detail, cloud_orders_list, delete_cloud_order, update_cloud_order_status
@@ -1610,7 +1610,7 @@ class CloudServerServicesTestCase(TestCase):
         self.assertEqual(payload['risk_counts']['all'], 2)
         self.assertEqual(payload['risk_counts']['account_disabled'], 2)
 
-    # 功能：风险计数聚合必须保持云账号异常与其他标签的口径一致，避免优化后首屏统计失真。
+    # 功能：风险计数必须保持云账号异常与其他标签的口径一致，避免优化后首屏统计失真。
     def test_cloud_assets_list_risk_counts_keep_disabled_account_isolated(self):
         active_account = CloudAccountConfig.objects.create(
             provider=CloudAccountConfig.PROVIDER_AWS,
@@ -1681,6 +1681,46 @@ class CloudServerServicesTestCase(TestCase):
         self.assertEqual(payload['risk_counts']['normal'], 1)
         self.assertEqual(payload['risk_counts']['expired'], 1)
         self.assertEqual(payload['risk_counts']['account_disabled'], 1)
+
+    # 功能：百万级 MySQL 快照表风险计数必须按索引拆分 count，避免单条 aggregate 冷缓存拖慢首屏。
+    def test_cloud_asset_dashboard_risk_counts_do_not_use_single_aggregate(self):
+        class FakeSnapshotQuerySet:
+            count_by_filters = {
+                (): 100,
+                (('risk_account_disabled', True),): 40,
+                (('risk_normal', True), ('risk_account_disabled', False)): 10,
+                (('risk_due_soon', True), ('risk_account_disabled', False)): 11,
+                (('risk_expired', True), ('risk_account_disabled', False)): 12,
+                (('risk_unattached_ip', True), ('risk_account_disabled', False)): 13,
+                (('risk_abnormal', True), ('risk_account_disabled', False)): 14,
+                (('risk_shutdown_disabled', True), ('risk_account_disabled', False)): 15,
+                (('risk_unbound_user', True), ('risk_account_disabled', False)): 16,
+                (('risk_unbound_group', True), ('risk_account_disabled', False)): 17,
+                (('risk_auto_renew_off', True), ('risk_account_disabled', False)): 18,
+                (('risk_deleted', True), ('risk_account_disabled', False)): 19,
+            }
+
+            def __init__(self, filters=()):
+                self.filters = tuple(filters)
+
+            def order_by(self):
+                raise RuntimeError('skip cache key for fake queryset')
+
+            def filter(self, **kwargs):
+                return FakeSnapshotQuerySet((*self.filters, *kwargs.items()))
+
+            def count(self):
+                return self.count_by_filters[self.filters]
+
+            def aggregate(self, **_kwargs):
+                raise AssertionError('risk counts must not use single aggregate on large MySQL tables')
+
+        counts = _dashboard_snapshot_risk_counts(FakeSnapshotQuerySet())
+
+        self.assertEqual(counts['all'], 100)
+        self.assertEqual(counts['account_disabled'], 40)
+        self.assertEqual(counts['normal'], 10)
+        self.assertEqual(counts['unattached_ip'], 13)
 
     # 功能：缺失的代理列表快照必须能被分批补齐，避免百万压测资产成为不可见孤儿资产。
     def test_cloud_asset_dashboard_snapshot_backfill_materializes_missing_assets(self):

@@ -365,7 +365,6 @@ class CloudAssetDashboardSnapshot(models.Model):
         verbose_name_plural = '云资产列表快照'
         ordering = ['risk_rank', '-sort_order', '-asset_id']
         indexes = [
-            models.Index(fields=['risk_account_disabled', 'risk_rank', '-sort_order'], name='cad_risk_display_idx'),
             models.Index(fields=['group_user_key', 'risk_rank', '-sort_order'], name='cad_group_user_idx'),
             models.Index(fields=['group_telegram_key', 'risk_rank', '-sort_order'], name='cad_group_tg_idx'),
             models.Index(fields=['group_user_key', 'asset_due_sort_at', 'group_user_label'], name='cad_user_due_page_idx'),
@@ -384,6 +383,7 @@ class CloudAssetDashboardSnapshot(models.Model):
             models.Index(fields=['risk_unbound_group', 'risk_account_disabled', 'asset_due_sort_null_rank', 'asset_due_sort_at', 'group_user_label', 'group_user_key'], name='cad_nogroup_user_due_idx'),
             models.Index(fields=['risk_account_disabled', 'group_user_key'], name='cad_acct_user_group_idx'),
             models.Index(fields=['risk_account_disabled', 'asset_due_sort_null_rank', 'asset_due_sort_at', 'group_user_label', 'group_user_key'], name='cad_acct_user_due_ord_idx'),
+            models.Index(fields=['risk_account_disabled', 'risk_rank', 'asset_due_sort_null_rank', 'asset_due_sort_at', '-sort_order', '-asset_id'], name='cad_acct_list_page_idx'),
             models.Index(fields=['risk_normal', 'risk_account_disabled', 'group_telegram_key'], name='cad_norm_tg_group_idx'),
             models.Index(fields=['risk_due_soon', 'risk_account_disabled', 'group_telegram_key'], name='cad_due_tg_group_idx'),
             models.Index(fields=['risk_expired', 'risk_account_disabled', 'group_telegram_key'], name='cad_exp_tg_group_idx'),
