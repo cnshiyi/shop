@@ -495,8 +495,19 @@ def _dashboard_snapshot_ordering(sort_by: str, sort_direction: str, risk_status:
     if sort_by in {'actual_expires_at', 'expires_at', 'days_left', 'remaining_days'}:
         expires = '-asset_due_sort_at' if sort_direction == 'desc' else 'asset_due_sort_at'
         return ['asset_due_sort_null_rank', expires, 'risk_rank', '-sort_order', '-asset_id']
-    if str(risk_status or '').strip() in {'unbound_user', 'unbound_group'}:
+    risk_status = str(risk_status or '').strip()
+    if risk_status in {
+        'abnormal',
+        'due_soon',
+        'expired',
+        'normal',
+        'unattached_ip',
+        'unbound_group',
+        'unbound_user',
+    }:
         return ['asset_due_sort_null_rank', 'asset_due_sort_at', 'group_user_label', 'group_user_key', '-asset_id']
+    if risk_status in {'auto_renew_off', 'shutdown_disabled'}:
+        return ['group_telegram_key', 'group_telegram_label', '-asset_id']
     return ['risk_rank', 'asset_due_sort_null_rank', 'asset_due_sort_at', '-sort_order', '-asset_id']
 
 

@@ -1901,16 +1901,24 @@ class CloudServerServicesTestCase(TestCase):
         self.assertEqual(group['user_key'], f'unbound:{asset.id}')
         self.assertNotEqual(group['user_key'], 'user:unbound')
 
-    # 功能：未绑定标签使用快照表已有组合索引顺序，避免大表默认排序拖慢 IP 视图。
-    def test_cloud_assets_unbound_risk_ordering_uses_due_group_index(self):
-        self.assertEqual(
-            _dashboard_snapshot_ordering('', '', 'unbound_user'),
-            ['asset_due_sort_null_rank', 'asset_due_sort_at', 'group_user_label', 'group_user_key', '-asset_id'],
-        )
-        self.assertEqual(
-            _dashboard_snapshot_ordering('', '', 'unbound_group'),
-            ['asset_due_sort_null_rank', 'asset_due_sort_at', 'group_user_label', 'group_user_key', '-asset_id'],
-        )
+    # 功能：风险标签使用快照表已有组合索引顺序，避免大表默认排序拖慢 IP 视图。
+    def test_cloud_assets_risk_ordering_uses_existing_page_indexes(self):
+        due_group_ordering = ['asset_due_sort_null_rank', 'asset_due_sort_at', 'group_user_label', 'group_user_key', '-asset_id']
+        for risk_status in [
+            'abnormal',
+            'due_soon',
+            'expired',
+            'normal',
+            'unattached_ip',
+            'unbound_group',
+            'unbound_user',
+        ]:
+            self.assertEqual(_dashboard_snapshot_ordering('', '', risk_status), due_group_ordering)
+        for risk_status in ['auto_renew_off', 'shutdown_disabled']:
+            self.assertEqual(
+                _dashboard_snapshot_ordering('', '', risk_status),
+                ['group_telegram_key', 'group_telegram_label', '-asset_id'],
+            )
         self.assertEqual(
             _dashboard_snapshot_ordering('actual_expires_at', 'asc', 'unbound_user'),
             ['asset_due_sort_null_rank', 'asset_due_sort_at', 'risk_rank', '-sort_order', '-asset_id'],
