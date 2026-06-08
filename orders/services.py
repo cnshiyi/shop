@@ -95,22 +95,27 @@ async def get_trx_price(*, force_refresh: bool = False) -> Decimal:
         return _cached_rate
 
     redis_client = await get_redis()
-    if redis_client is not None and not force_refresh:
+    redis_fallback_rate = None
+    if redis_client is not None:
         try:
             cached = await redis_client.get(_TRX_PRICE_CACHE_KEY)
             if cached:
-                _cached_rate = Decimal(str(cached))
-                _cache_time = now
-                return _cached_rate
+                redis_fallback_rate = Decimal(str(cached))
+                if not force_refresh:
+                    _cached_rate = redis_fallback_rate
+                    _cache_time = now
+                    return _cached_rate
         except Exception as exc:
             logger.warning('读取 TRX 汇率缓存失败: %s', exc)
 
         try:
             cached = await redis_client.get(_TRX_PRICE_LAST_CACHE_KEY)
             if cached:
-                _cached_rate = Decimal(str(cached))
-                _cache_time = now
-                return _cached_rate
+                redis_fallback_rate = Decimal(str(cached))
+                if not force_refresh:
+                    _cached_rate = redis_fallback_rate
+                    _cache_time = now
+                    return _cached_rate
         except Exception as exc:
             logger.warning('读取 TRX 最近汇率缓存失败: %s', exc)
 
@@ -129,6 +134,10 @@ async def get_trx_price(*, force_refresh: bool = False) -> Decimal:
             return _cached_rate
     except Exception as exc:
         logger.warning('获取 TRX 汇率失败: %s', exc)
+        if redis_fallback_rate is not None:
+            _cached_rate = redis_fallback_rate
+            _cache_time = now
+            return _cached_rate
         if _cached_rate is not None:
             return _cached_rate
         raise RuntimeError('无法获取 TRX/USDT 汇率，请稍后重试') from exc

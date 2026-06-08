@@ -143,6 +143,31 @@ class OrderBalancePaymentTestCase(TestCase):
         self.assertEqual(rate, Decimal('0.333333'))
         client_mock.assert_not_called()
 
+    def test_trx_price_force_refresh_falls_back_to_last_known_redis_cache(self):
+        class FakeRedis:
+            async def get(self, key):
+                return '0.444444' if key == 'orders:trx_usdt_price:last' else None
+
+        class BrokenClient:
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, exc_type, exc, tb):
+                return False
+
+            async def get(self, url):
+                raise RuntimeError('network unavailable')
+
+        with patch('orders.services.get_redis', new=AsyncMock(return_value=FakeRedis())):
+            with patch('orders.services.httpx.AsyncClient', return_value=BrokenClient()):
+                from orders import services
+                services._cached_rate = None
+                services._cache_time = 0.0
+
+                rate = async_to_sync(get_trx_price)(force_refresh=True)
+
+        self.assertEqual(rate, Decimal('0.444444'))
+
     def test_cart_address_checkout_keeps_cloud_plan_items(self):
         user = TelegramUser.objects.create(tg_user_id=990202, username='cart_address_keep_cloud')
         product = Product.objects.create(
