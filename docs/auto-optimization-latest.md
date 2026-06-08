@@ -4,31 +4,27 @@
 
 ## 最近一轮
 
-- 时间：2026-06-08 13:17 CST
-- 状态：完成一轮生命周期计划页专项巡检，覆盖关机/删机/IP 删除三阶段开关联动、任务中心聚焦测试和 10 万级真实接口分页对账；未发现需要改代码的问题。
-- 本轮范围：生命周期计划页、阶段总开关、资产单项开关、任务中心生命周期统计、红线扫描。
+- 时间：2026-06-08 13:24 CST
+- 状态：完成一轮生命周期计划页真实性、翻页、压力数据和机器人高并发巡检；发现计划页深页翻页会重算所有表、计数快照每 60 秒全量重算、历史分页深页慢的问题，已修复并完成真实前端复测。
+- 本轮范围：生命周期计划页后端分页查询层、计划页前端局部表加载、真实库/API 对账、真实浏览器翻页、Telegram 机器人多任务高并发回归、红线扫描。
 
 ## 巡检结论
 
-- Django 基础检查通过：`uv run python manage.py check` 无报错。
-- 生命周期与任务中心聚焦测试通过：`18` 个测试全部通过，覆盖关机总开关、阶段单项开关、关机完成后进入删机计划、任务中心生命周期失败/待执行统计。
-- 10 万级专项压测通过：在独立临时 SQLite 审计库构造 `101003` 条 `CloudAsset`，其中：
-  - 关机计划资产：`50001` 条。
-  - 服务器删除计划资产：`50001` 条。
-  - 未附加固定 IP 删除计划资产：`1001` 条。
-- 真实接口 `lifecycle_plans` 与查询层分页逐页对账一致：
-  - 关机计划：第 `1/2/1000/2501` 页全部一致。
-  - 服务器删除计划：第 `1/2/1000/2501` 页全部一致。
-  - IP 删除计划：第 `1/2/51` 页全部一致。
-- 资产单项开关状态正确落到接口：
-  - 关机计划关闭资产返回 `shutdown_disabled`。
-  - 服务器删除计划关闭资产返回 `server_delete_disabled`。
-  - IP 删除计划关闭资产返回 `ip_delete_disabled`。
-- 生命周期总开关状态正确落到接口：
-  - 关机总开关关闭返回 `global_shutdown_disabled`。
-  - 服务器删除总开关关闭返回 `global_server_delete_disabled`。
-  - IP 删除总开关关闭返回 `global_ip_delete_disabled`。
-- 本轮未发现旧到期字段、旧计划快照、旧退款逻辑或废弃 runtime app 回流。
+- 计划页支持 `tables=<表名>` 局部加载：翻某一个表时只返回该表 items，前端合并到现有页面状态，其他表不清空、不重算。
+- 生命周期计数缓存改为“数据指纹不变就复用”，不再因为 60 秒 TTL 到期强制重算 50 万/百万级统计。
+- 服务器删除历史和 IP 删除历史分页查询层增加单来源直接分页、日志为主且少量资产历史时的稀疏插入路径。
+- `pagination.*.loaded` 现在使用实际返回行数，修复关机计划分页后去重导致“返回 40 行但 loaded 仍写 50”的契约错误。
+- 真实库/API 对账通过：`16/16` 个分页点一致或契约正确，覆盖关机计划、服务器删除历史、IP 删除计划、IP 删除历史的第 1 页、第 2 页、深页和末页。
+- 真实前端复测通过：页面控制台 `0` error，请求 `0` 个 400/500。
+
+## 真实前端结果
+
+打开 `http://127.0.0.1:5666/admin/tasks/plans` 后实际点击分页：
+
+- IP 删除历史：第 `2` 页约 `0.86s`，第 `1000` 页约 `1.35s`，末页 `10401` 约 `0.83s`；每次只返回 `ip_delete_history_items`。
+- 关机计划：末页 `39600` 约 `2.25s`；只返回 `shutdown_plan_items`，实际加载 `40 / 1979990`。
+- 服务器删除历史：末页 `401` 约 `1.19s`；只返回 `server_history_items`，实际加载 `10 / 20010`。
+- IP 删除计划：末页 `10000` 仍约 `7.3s`；只返回 `ip_delete_plan_items`，数据正确但仍是下一轮优化重点。
 
 ## 验证
 
@@ -36,37 +32,42 @@
 
 ```bash
 UV_CACHE_DIR=/private/tmp/uv-cache-shop uv run python manage.py check
-UV_CACHE_DIR=/private/tmp/uv-cache-shop DJANGO_TEST_SQLITE=1 uv run python manage.py test cloud.tests.CloudServerServicesTestCase.test_lifecycle_plans_use_stage_specific_asset_switches cloud.tests.CloudServerServicesTestCase.test_lifecycle_plans_show_global_stage_switches cloud.tests.CloudServerServicesTestCase.test_lifecycle_plans_split_shutdown_before_server_delete cloud.tests.CloudServerServicesTestCase.test_due_orders_global_shutdown_switch_does_not_block_delete_or_recycle cloud.tests_task_center.CloudTaskCenterApiTestCase --settings=shop.settings --verbosity=1
-DB_ENGINE=sqlite SQLITE_NAME=/private/tmp/shop-lifecycle-audit.sqlite3 UV_CACHE_DIR=/private/tmp/uv-cache-shop uv run python manage.py migrate --settings=shop.settings --noinput
-DB_ENGINE=sqlite SQLITE_NAME=/private/tmp/shop-lifecycle-audit.sqlite3 UV_CACHE_DIR=/private/tmp/uv-cache-shop uv run python manage.py shell --settings=shop.settings <<'PY'
-# 构造 101003 条 CloudAsset，调用 lifecycle_plans 真接口，
-# 对账关机/删机/IP 删除分页与 cloud.lifecycle_plan_queries 直接查询结果。
-PY
+UV_CACHE_DIR=/private/tmp/uv-cache-shop DJANGO_TEST_SQLITE=1 uv run python manage.py test cloud.tests.CloudServerServicesTestCase.test_lifecycle_plans_tables_param_returns_only_requested_items cloud.tests.CloudServerServicesTestCase.test_lifecycle_plans_ip_delete_history_pagination_contract cloud.tests.CloudServerServicesTestCase.test_lifecycle_plans_server_delete_pagination_contract bot.tests.RetainedIpRenewalUiTestCase.test_cloud_background_tasks_keep_bulk_concurrency_isolated --settings=shop.settings --verbosity=1
+pnpm -C /Users/a399/Desktop/data/vue-shop-admin -F @vben/web-antd run typecheck
+git diff --check
 ```
 
-压测结果摘要：
+真实库/API 对账：
 
 ```text
-关机计划：50001 条，第 1/2/1000/2501 页全部一致；首屏约 320.67ms
-服务器删除：50001 条，第 1/2/1000/2501 页全部一致；首屏约 24.37ms
-IP 删除计划：1001 条，第 1/2/51 页全部一致；首屏约 9.69ms
-总开关关闭后的三阶段接口返回均正确进入 global_*_disabled 状态
+计划页分页点：shutdown_plan 1/2/1000/39600，server_history 1/2/400/401，ip_delete 1/2/1000/10000，ip_delete_history 1/2/1000/10401
+结果：16/16 通过
 ```
 
-红线扫描建议沿用：
+机器人高并发：
+
+```text
+60 个并发后台任务通过：20 组钱包直付、20 组钱包补付、20 组续费后检查；聊天窗口、订单、数量和派生任务未串上下文。
+```
+
+红线扫描通过：
 
 ```bash
 rg -n "service_expires_at|actual_expires_at.*CloudServerOrder|CloudServerOrder.*actual_expires_at|plan snapshot|snapshot table|old refund|refund_legacy|refund_old|legacy_refund|accounts\\.|finance\\.|mall\\.|monitoring\\.|dashboard_api\\.|biz\\." cloud bot orders core shop -g '!**/migrations/**'
 ```
 
+说明：
+
+- 红线扫描命中项仍是 Telegram 登录账号代码、云账号测试桩和 `CloudServerOrder.ip_recycle_at` 同步语句，不是旧到期事实回流。
+- SQLite 的 `db_comment` warnings 仍是已知测试噪声。
+
 ## 受限项
 
 - 本轮未执行真实云资源创建、关机、删除服务器、释放 IP、换 IP、真实支付、链上广播、生产发布或删除业务数据。
 - 本轮未打印密钥、Telegram session、支付密钥、云厂商密钥或完整代理链接。
-- 前端仓库 `/Users/a399/Desktop/data/vue-shop-admin` 仍有本地未提交改动，本轮未做浏览器写操作或前端代码改动。
 
 ## 下一步
 
-- 下一轮优先继续做真实前端链路巡检，覆盖任务中心计划页分页/跳页和生命周期总开关切换后的界面状态。
-- 继续盯紧生命周期计划页首屏性能差异，尤其是关机计划页在冷缓存下是否存在比删机/IP 删除更高的首屏耗时。
-- 继续避开当前后端 `bot/api.py`、`cloud/lifecycle_plan_queries.py`、`cloud/tests.py` 和前端脏改动区域，只做最小安全任务。
+- 继续优化 IP 删除计划 50 万末页单表约 `7.3s` 的查询路径，优先考虑把未附加 IP 判定固化为可索引字段或投影任务表。
+- 关机计划深页存在分页后去重导致非末页不足 `page_size` 的现象；本轮已修正 `loaded` 契约，下一轮应把去重前移到查询层或任务投影层。
+- 继续做机器人全功能真实账号巡检和多任务高并发覆盖。

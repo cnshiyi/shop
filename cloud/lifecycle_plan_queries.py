@@ -37,6 +37,16 @@ def page_meta(page: int, page_size: int, total: int) -> dict:
     }
 
 
+def _page_from_single_source(kind: str, queryset, *, page: int, page_size: int, total: int | None = None) -> list[tuple[str, object]]:
+    start, end = page_bounds(page, page_size)
+    if total is None:
+        total = queryset.count()
+    end = min(end, total)
+    if total <= 0 or start >= end:
+        return []
+    return [(kind, item) for item in queryset[start:end]]
+
+
 def clear_lifecycle_plan_counts_cache():
     cache.delete(_LIFECYCLE_PLAN_COUNTS_CACHE_KEY)
 
@@ -199,6 +209,10 @@ def server_delete_history_page_sources(
     total = order_total + asset_total
     if total <= 0 or start >= total:
         return []
+    if order_total <= 0:
+        return _page_from_single_source('asset', assets, page=page, page_size=page_size, total=asset_total)
+    if asset_total <= 0:
+        return _page_from_single_source('order', orders, page=page, page_size=page_size, total=order_total)
 
     chunk_size = max(page_size * 4, 50)
     source_specs = [
@@ -308,10 +322,25 @@ def completed_unattached_ip_active_count() -> int:
     return completed_unattached_ip_active_queryset().count()
 
 
-def unattached_ip_delete_plan_page(*, page: int, page_size: int, total: int | None = None, exclude_completed=True):
+def unattached_ip_delete_plan_page(
+    *,
+    page: int,
+    page_size: int,
+    total: int | None = None,
+    exclude_completed=True,
+    completed_total: int | None = None,
+):
     queryset = unattached_ip_delete_active_queryset()
     if exclude_completed:
-        queryset = queryset.exclude(id__in=completed_unattached_ip_active_queryset().values('id'))
+        if completed_total is None:
+            completed_total = completed_unattached_ip_active_count()
+        if completed_total > 0:
+            if completed_total <= 1000:
+                completed_ids = list(completed_unattached_ip_active_queryset().values_list('id', flat=True)[:completed_total])
+                if completed_ids:
+                    queryset = queryset.exclude(id__in=completed_ids)
+            else:
+                queryset = queryset.exclude(id__in=completed_unattached_ip_active_queryset().values('id'))
     return paged_queryset(queryset, ordering=('actual_expires_at', 'id'), page=page, page_size=page_size, total=total)
 
 
@@ -372,6 +401,27 @@ def ip_delete_history_page_sources(
     if total <= 0 or start >= total:
         return []
     end = min(end, total)
+
+    if asset_total <= 0 and completed_total <= 0:
+        return _page_from_single_source('log', history_logs, page=page, page_size=page_size, total=log_total)
+    if log_total <= 0 and completed_total <= 0:
+        return _page_from_single_source('asset', history_assets, page=page, page_size=page_size, total=asset_total)
+    if log_total <= 0 and asset_total <= 0:
+        return _page_from_single_source('asset', completed_assets, page=page, page_size=page_size, total=completed_total)
+
+    if log_total > 0 and 0 < asset_total + completed_total <= 100:
+        page_items = _ip_delete_history_page_with_sparse_assets(
+            history_logs=history_logs,
+            history_assets=history_assets,
+            completed_assets=completed_assets,
+            start=start,
+            end=end,
+            log_total=log_total,
+            asset_total=asset_total,
+            completed_total=completed_total,
+        )
+        if page_items is not None:
+            return page_items
 
     reverse_page = start > max(total // 2, page_size * 100)
     if reverse_page:
@@ -440,3 +490,99 @@ def ip_delete_history_page_sources(
     if reverse_page:
         items.reverse()
     return items
+
+
+def _ip_delete_history_page_with_sparse_assets(
+    *,
+    history_logs,
+    history_assets,
+    completed_assets,
+    start: int,
+    end: int,
+    log_total: int,
+    asset_total: int,
+    completed_total: int,
+) -> list[tuple[str, object]] | None:
+    small_sources = []
+    for priority, (queryset, source_total) in enumerate(((history_assets, asset_total), (completed_assets, completed_total)), start=1):
+        if source_total <= 0:
+            continue
+        rows = list(queryset[:source_total])
+        if len(rows) != source_total:
+            return None
+        for row in rows:
+            small_sources.append((priority, row))
+    if not small_sources:
+        return _page_from_single_source('log', history_logs, page=(start // max(end - start, 1)) + 1, page_size=max(end - start, 1), total=log_total)
+
+    def timestamp_value(item) -> float:
+        updated_at = getattr(item, 'updated_at', None)
+        return updated_at.timestamp() if updated_at is not None else 0.0
+
+    small_sources.sort(key=lambda entry: (-timestamp_value(entry[1]), -int(getattr(entry[1], 'id', 0) or 0), entry[0]))
+    small_positions = []
+    for small_index, (priority, item) in enumerate(small_sources):
+        updated_at = getattr(item, 'updated_at', None)
+        if updated_at is None:
+            log_before = log_total
+        else:
+            log_before = history_logs.filter(
+                Q(created_at__gt=updated_at)
+                | (Q(created_at=updated_at) & Q(id__gte=int(getattr(item, 'id', 0) or 0)))
+            ).count()
+        small_positions.append((log_before + small_index, priority, item))
+    small_positions.sort(key=lambda entry: entry[0])
+    small_by_position = {position: (priority, item) for position, priority, item in small_positions}
+    position_values = [position for position, _priority, _item in small_positions]
+
+    def small_before(global_index: int) -> int:
+        count = 0
+        for position in position_values:
+            if position >= global_index:
+                break
+            count += 1
+        return count
+
+    output_slots = []
+    log_indices = []
+    for global_index in range(start, end):
+        small = small_by_position.get(global_index)
+        if small is not None:
+            output_slots.append(('asset', small[1]))
+            continue
+        log_index = global_index - small_before(global_index)
+        if log_index < 0 or log_index >= log_total:
+            return None
+        output_slots.append(('log_index', log_index))
+        log_indices.append(log_index)
+    if not log_indices:
+        return [(kind, item) for kind, item in output_slots]
+
+    min_log_index = min(log_indices)
+    max_log_index = max(log_indices)
+    if min_log_index > max(log_total // 2, (end - start) * 100):
+        reverse_start = max(log_total - max_log_index - 1, 0)
+        reverse_count = max_log_index - min_log_index + 1
+        log_rows = list(
+            CloudIpLog.objects
+            .filter(unattached_ip_delete_history_q())
+            .select_related('asset', 'order', 'user')
+            .order_by('created_at', 'id')[reverse_start:reverse_start + reverse_count]
+        )
+        log_rows.reverse()
+    else:
+        log_rows = list(history_logs[min_log_index:max_log_index + 1])
+    log_by_index = {
+        min_log_index + offset: row
+        for offset, row in enumerate(log_rows)
+    }
+    result = []
+    for kind, value in output_slots:
+        if kind == 'asset':
+            result.append((kind, value))
+        else:
+            log = log_by_index.get(value)
+            if log is None:
+                return None
+            result.append(('log', log))
+    return result

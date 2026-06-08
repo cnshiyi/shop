@@ -366,6 +366,7 @@ def _ip_delete_plan_asset_page_items(
         page_size=page_size,
         total=total,
         exclude_completed=bool(completed_active_count),
+        completed_total=completed_active_count,
     )
     trace_maps = _cloud_ip_trace_maps_for_assets(assets)
     items = []
@@ -944,17 +945,21 @@ def _cached_lifecycle_plan_count_snapshot():
     cached = _LIFECYCLE_PLAN_CACHE.get('counts')
     cached_fingerprint = _LIFECYCLE_PLAN_CACHE.get('counts_fingerprint')
     cached_generated_at = _LIFECYCLE_PLAN_CACHE.get('generated_at')
-    if cached is not None and cached_fingerprint == current_fingerprint and _lifecycle_plan_count_snapshot_is_fresh(cached_generated_at):
+    if cached is not None and cached_fingerprint == current_fingerprint:
+        if not _lifecycle_plan_count_snapshot_is_fresh(cached_generated_at):
+            _LIFECYCLE_PLAN_CACHE['generated_at'] = timezone.now()
         return deepcopy(cached)
     persisted, generated_at, persisted_fingerprint = _load_lifecycle_plan_count_snapshot()
     if (
         persisted is not None
         and persisted_fingerprint == current_fingerprint
-        and _lifecycle_plan_count_snapshot_is_fresh(generated_at)
     ):
         _LIFECYCLE_PLAN_CACHE['counts'] = deepcopy(persisted)
         _LIFECYCLE_PLAN_CACHE['counts_fingerprint'] = deepcopy(persisted_fingerprint)
-        _LIFECYCLE_PLAN_CACHE['generated_at'] = generated_at or timezone.now()
+        if _lifecycle_plan_count_snapshot_is_fresh(generated_at):
+            _LIFECYCLE_PLAN_CACHE['generated_at'] = generated_at or timezone.now()
+        else:
+            _LIFECYCLE_PLAN_CACHE['generated_at'] = timezone.now()
         return deepcopy(persisted)
     clear_lifecycle_plan_counts_cache()
     counts = _build_lifecycle_plan_count_snapshot()
@@ -2379,6 +2384,21 @@ def lifecycle_plans(request):
     server_history_page, server_history_page_size = parse_page_params('server_history')
     ip_delete_page, ip_delete_page_size = parse_page_params('ip_delete')
     ip_delete_history_page, ip_delete_history_page_size = parse_page_params('ip_delete_history')
+    valid_plan_tables = {
+        'ip_delete',
+        'ip_delete_history',
+        'server_delete',
+        'server_history',
+        'shutdown_plan',
+    }
+    raw_tables = str(request.GET.get('tables') or request.GET.get('table') or '').strip()
+    requested_tables = {
+        item.strip()
+        for item in raw_tables.split(',')
+        if item.strip() in valid_plan_tables
+    } if raw_tables else set(valid_plan_tables)
+    if not requested_tables:
+        requested_tables = set(valid_plan_tables)
 
     def parse_item_dt(value, default=None):
         if not value:
@@ -2668,61 +2688,76 @@ def lifecycle_plans(request):
     server_history_total_counts = server_delete_history_counts()
     server_history_count = server_history_total_counts['server_history_count']
 
-    shutdown_plan_items = [
-        decorate_plan_item(item)
-        for item in _server_lifecycle_plan_page_items(
-            plan_stage='shutdown',
-            page=shutdown_page,
-            page_size=shutdown_page_size,
-            total=total_counts['shutdown_plan_count'],
-        )
-    ]
-    shutdown_plan_items = dedupe_shutdown_active_items(shutdown_plan_items)
+    shutdown_plan_items = None
+    server_delete_active_items = None
+    server_history_items = None
+    ip_delete_plan_items = None
+    ip_delete_history_items = None
+    server_delete_due_items = None
+    pending_ip_delete_items = None
 
-    server_delete_active_items = [
-        decorate_plan_item(item)
-        for item in _server_lifecycle_plan_page_items(
-            plan_stage='delete',
-            page=server_delete_page,
-            page_size=server_delete_page_size,
-            total=total_counts['server_delete_count'],
-        )
-    ]
-    server_delete_active_items = [
-        item for item in server_delete_active_items
-        if not (item.get('plan_state') == 'completed' and not item.get('should_execute'))
-    ]
-    server_delete_active_items = dedupe_shutdown_active_items(server_delete_active_items)
-    server_delete_due_items = [item for item in server_delete_active_items if is_server_delete_due(item)]
-    server_history_items = [
-        decorate_plan_item(item)
-        for item in _server_delete_history_page_items(
-            page=server_history_page,
-            page_size=server_history_page_size,
-            total=server_history_count,
-        )
-    ]
+    if 'shutdown_plan' in requested_tables:
+        shutdown_plan_items = [
+            decorate_plan_item(item)
+            for item in _server_lifecycle_plan_page_items(
+                plan_stage='shutdown',
+                page=shutdown_page,
+                page_size=shutdown_page_size,
+                total=total_counts['shutdown_plan_count'],
+            )
+        ]
+        shutdown_plan_items = dedupe_shutdown_active_items(shutdown_plan_items)
 
-    ip_delete_plan_items = [
-        decorate_plan_item(item)
-        for item in _ip_delete_plan_asset_page_items(
-            page=ip_delete_page,
-            page_size=ip_delete_page_size,
-            total=ip_delete_total_counts['ip_delete_count'],
-            completed_active_count=ip_delete_total_counts.get('ip_delete_completed_active_count'),
-        )
-    ]
-    pending_ip_delete_items = [item for item in ip_delete_plan_items if is_ip_delete_pending(item)]
-    ip_delete_history_items = [
-        decorate_plan_item(item)
-        for item in _ip_delete_history_page_items(
-            page=ip_delete_history_page,
-            page_size=ip_delete_history_page_size,
-            log_total=ip_delete_total_counts.get('ip_delete_history_log_count'),
-            asset_total=ip_delete_total_counts.get('ip_delete_history_asset_count'),
-            completed_total=ip_delete_total_counts.get('ip_delete_completed_active_count'),
-        )
-    ]
+    if 'server_delete' in requested_tables:
+        server_delete_active_items = [
+            decorate_plan_item(item)
+            for item in _server_lifecycle_plan_page_items(
+                plan_stage='delete',
+                page=server_delete_page,
+                page_size=server_delete_page_size,
+                total=total_counts['server_delete_count'],
+            )
+        ]
+        server_delete_active_items = [
+            item for item in server_delete_active_items
+            if not (item.get('plan_state') == 'completed' and not item.get('should_execute'))
+        ]
+        server_delete_active_items = dedupe_shutdown_active_items(server_delete_active_items)
+        server_delete_due_items = [item for item in server_delete_active_items if is_server_delete_due(item)]
+
+    if 'server_history' in requested_tables:
+        server_history_items = [
+            decorate_plan_item(item)
+            for item in _server_delete_history_page_items(
+                page=server_history_page,
+                page_size=server_history_page_size,
+                total=server_history_count,
+            )
+        ]
+
+    if 'ip_delete' in requested_tables:
+        ip_delete_plan_items = [
+            decorate_plan_item(item)
+            for item in _ip_delete_plan_asset_page_items(
+                page=ip_delete_page,
+                page_size=ip_delete_page_size,
+                total=ip_delete_total_counts['ip_delete_count'],
+                completed_active_count=ip_delete_total_counts.get('ip_delete_completed_active_count'),
+            )
+        ]
+        pending_ip_delete_items = [item for item in ip_delete_plan_items if is_ip_delete_pending(item)]
+
+    if 'ip_delete_history' in requested_tables:
+        ip_delete_history_items = [
+            decorate_plan_item(item)
+            for item in _ip_delete_history_page_items(
+                page=ip_delete_history_page,
+                page_size=ip_delete_history_page_size,
+                log_total=ip_delete_total_counts.get('ip_delete_history_log_count'),
+                asset_total=ip_delete_total_counts.get('ip_delete_history_asset_count'),
+                completed_total=ip_delete_total_counts.get('ip_delete_completed_active_count'),
+            )
+        ]
     recent_history = []
 
     if compact:
@@ -2732,23 +2767,31 @@ def lifecycle_plans(request):
                 if len(note) > 1200:
                     item['note'] = note[:1200] + '\n...（备注过长，已折叠预览）'
             return items
-        compact_notes(shutdown_plan_items)
-        compact_notes(server_delete_active_items)
-        compact_notes(server_history_items)
-        compact_notes(ip_delete_plan_items)
-        compact_notes(ip_delete_history_items)
-    response_shutdown_plan_items = shutdown_plan_items[:shutdown_page_size]
-    response_server_delete_items = server_delete_active_items[:server_delete_page_size]
-    response_server_history_items = server_history_items[:server_history_page_size]
-    response_ip_delete_plan_items = ip_delete_plan_items[:ip_delete_page_size]
-    response_ip_delete_history_items = ip_delete_history_items[:ip_delete_history_page_size]
-    _strip_lifecycle_plan_fields(response_shutdown_plan_items, fields)
-    _strip_lifecycle_plan_fields(response_server_delete_items, fields)
-    _strip_lifecycle_plan_fields(response_server_history_items, fields)
-    _strip_lifecycle_plan_fields(response_ip_delete_plan_items, fields)
-    _strip_lifecycle_plan_fields(response_ip_delete_history_items, fields)
+        for items in [
+            shutdown_plan_items,
+            server_delete_active_items,
+            server_history_items,
+            ip_delete_plan_items,
+            ip_delete_history_items,
+        ]:
+            if items is not None:
+                compact_notes(items)
+    response_shutdown_plan_items = shutdown_plan_items[:shutdown_page_size] if shutdown_plan_items is not None else None
+    response_server_delete_items = server_delete_active_items[:server_delete_page_size] if server_delete_active_items is not None else None
+    response_server_history_items = server_history_items[:server_history_page_size] if server_history_items is not None else None
+    response_ip_delete_plan_items = ip_delete_plan_items[:ip_delete_page_size] if ip_delete_plan_items is not None else None
+    response_ip_delete_history_items = ip_delete_history_items[:ip_delete_history_page_size] if ip_delete_history_items is not None else None
+    for items in [
+        response_shutdown_plan_items,
+        response_server_delete_items,
+        response_server_history_items,
+        response_ip_delete_plan_items,
+        response_ip_delete_history_items,
+    ]:
+        if items is not None:
+            _strip_lifecycle_plan_fields(items, fields)
     last_refresh_at = _lifecycle_plan_generated_at()
-    return _ok({
+    payload = {
         'task_key': 'server_delete_plans',
         'task_label': '计划',
         'status_label': '按代理列表资产生成',
@@ -2760,24 +2803,15 @@ def lifecycle_plans(request):
         'cache_mode': 'refreshed' if did_refresh else 'cached',
         'recent_success_count': sum(1 for item in recent_history if item.get('is_success')),
         'recent_failure_count': sum(1 for item in recent_history if not item.get('is_success')),
-        'pending_ip_delete_count': len(pending_ip_delete_items),
         'missing_expiry_count': plan_stats['missing_expiry_count'],
         'unattached_ip_count': plan_stats['unattached_ip_count'],
         'source_asset_count': plan_stats['source_asset_count'],
         'server_asset_count': plan_stats['server_asset_count'],
         'ip_delete_history_count': ip_delete_total_counts['ip_delete_history_count'],
         'shutdown_plan_count': total_counts['shutdown_plan_count'],
-        'shutdown_plan_due_count': sum(1 for item in shutdown_plan_items if item.get('queue_status') in {'due_now', 'within_window'}),
         'server_delete_count': total_counts['server_delete_count'],
-        'server_delete_due_count': len(server_delete_due_items),
         'server_history_count': server_history_count,
         'ip_delete_count': ip_delete_total_counts['ip_delete_count'],
-        'ip_delete_due_count': len(pending_ip_delete_items),
-        'shutdown_plan_items': response_shutdown_plan_items,
-        'server_delete_items': response_server_delete_items,
-        'server_history_items': response_server_history_items,
-        'ip_delete_plan_items': response_ip_delete_plan_items,
-        'ip_delete_history_items': response_ip_delete_history_items,
         'pagination': {
             'shutdown_plan': _page_meta(shutdown_page, shutdown_page_size, total_counts['shutdown_plan_count']),
             'server_delete': _page_meta(server_delete_page, server_delete_page_size, total_counts['server_delete_count']),
@@ -2785,7 +2819,27 @@ def lifecycle_plans(request):
             'ip_delete': _page_meta(ip_delete_page, ip_delete_page_size, ip_delete_total_counts['ip_delete_count']),
             'ip_delete_history': _page_meta(ip_delete_history_page, ip_delete_history_page_size, ip_delete_total_counts['ip_delete_history_count']),
         },
-    })
+    }
+    if response_shutdown_plan_items is not None:
+        payload['shutdown_plan_due_count'] = sum(1 for item in shutdown_plan_items if item.get('queue_status') in {'due_now', 'within_window'})
+        payload['shutdown_plan_items'] = response_shutdown_plan_items
+        payload['pagination']['shutdown_plan']['loaded'] = len(response_shutdown_plan_items)
+    if response_server_delete_items is not None:
+        payload['server_delete_due_count'] = len(server_delete_due_items or [])
+        payload['server_delete_items'] = response_server_delete_items
+        payload['pagination']['server_delete']['loaded'] = len(response_server_delete_items)
+    if response_server_history_items is not None:
+        payload['server_history_items'] = response_server_history_items
+        payload['pagination']['server_history']['loaded'] = len(response_server_history_items)
+    if response_ip_delete_plan_items is not None:
+        payload['pending_ip_delete_count'] = len(pending_ip_delete_items or [])
+        payload['ip_delete_due_count'] = len(pending_ip_delete_items or [])
+        payload['ip_delete_plan_items'] = response_ip_delete_plan_items
+        payload['pagination']['ip_delete']['loaded'] = len(response_ip_delete_plan_items)
+    if response_ip_delete_history_items is not None:
+        payload['ip_delete_history_items'] = response_ip_delete_history_items
+        payload['pagination']['ip_delete_history']['loaded'] = len(response_ip_delete_history_items)
+    return _ok(payload)
 
 
 @csrf_exempt

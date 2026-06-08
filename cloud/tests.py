@@ -1827,6 +1827,39 @@ class CloudServerServicesTestCase(TestCase):
         self.assertNotIn('execution_status', row)
         self.assertNotIn('execution_plan', row)
 
+    # 功能：验证计划页局部翻页只返回当前表 items，避免翻一个表时重算所有深页。
+    def test_lifecycle_plans_tables_param_returns_only_requested_items(self):
+        CloudIpLog.objects.create(
+            event_type=CloudIpLog.EVENT_RECYCLED,
+            provider='aws_lightsail',
+            region_code=self.plan.region_code,
+            region_name=self.plan.region_name,
+            asset_name='partial-ip-history-only',
+            previous_public_ip='5.5.20.8',
+            note='固定 IP 保留期结束，AWS 固定 IP 已真实释放',
+        )
+        admin = get_user_model().objects.create_user(username='lifecycle_partial_admin', password='x', is_staff=True)
+        request = self.factory.get('/api/admin/tasks/plans/', {
+            'compact': '1',
+            'fields': 'basic,execution',
+            'ip_delete_history_page': '1',
+            'ip_delete_history_page_size': '5',
+            'limit': '5',
+            'tables': 'ip_delete_history',
+        })
+        self._attach_bearer_session(request, admin)
+        response = lifecycle_plans(request)
+        payload = json.loads(response.content.decode('utf-8'))['data']
+
+        self.assertEqual(response.status_code, 200)
+        self.assertIn('ip_delete_history_items', payload)
+        self.assertNotIn('shutdown_plan_items', payload)
+        self.assertNotIn('server_delete_items', payload)
+        self.assertNotIn('server_history_items', payload)
+        self.assertNotIn('ip_delete_plan_items', payload)
+        self.assertEqual(payload['pagination']['ip_delete_history']['page'], 1)
+        self.assertTrue(any(item.get('asset_name') == 'partial-ip-history-only' for item in payload['ip_delete_history_items']))
+
     # 功能：验证云资产列表快照搜索文本不会持久化代理密钥。
     def test_cloud_asset_dashboard_snapshot_search_text_masks_proxy_secret(self):
         secret = 'ee0123456789abcdef0123456789abcdef'

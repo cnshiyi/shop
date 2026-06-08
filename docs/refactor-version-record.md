@@ -14763,6 +14763,133 @@ rg -n "service_expires_at|actual_expires_at.*CloudServerOrder|CloudServerOrder.*
 - 下一轮继续生命周期创建服务器、关机计划、删除计划、IP 删除计划的开关联动和执行顺序巡检。
 - 继续关注云账号异常标签首屏约 `2.4s` 的加载耗时。
 
+## 2026-06-08 13:24 生命周期计划页局部加载与深分页巡检
+
+### 背景
+
+继续执行当前会话连续巡检。用户要求计划表、代理列表、通知表、服务器表做数据数量校验、真实性校验、翻页校验和压力测试，并强调机器人多任务高并发必须覆盖。本轮聚焦生命周期计划页在 50 万/百万压测数据下的真实前端翻页和后端口径一致性。
+
+### 问题
+
+- 计划页翻某一个表时，前端仍把所有表的当前页参数一起提交，后端每次都重算关机计划、删除计划、服务器删除历史、IP 删除计划和 IP 删除历史。
+- 当其他表停留在深页或末页时，单次翻页会被多个深页查询叠加拖慢；IP 删除历史第 `1000` 页曾出现约 `37s` 的实际前端耗时。
+- 生命周期计数快照即使数据指纹没变，也会因为 60 秒新鲜度过期而触发全量重算，在 50 万/百万压测数据下会把任意一次翻页拖到约 `30s`。
+- 服务器删除历史和 IP 删除历史查询层在单来源或日志为主场景仍存在不必要的从头归并。
+- 关机计划分页后会做同 IP 去重，导致部分非末页实际返回少于 `page_size`，但 `pagination.loaded` 仍按理论页大小返回。
+
+### 代码改动
+
+- 后端：
+  - `bot/api.py`
+    - 增加 `tables` / `table` 查询参数，支持计划页局部加载。
+    - 未请求的表不构造 items，也不返回空数组，避免前端误覆盖。
+    - 计数缓存改为数据指纹不变即复用，不再仅因 60 秒 TTL 到期强制全量重算。
+    - `pagination.*.loaded` 改为实际返回行数。
+  - `cloud/lifecycle_plan_queries.py`
+    - 增加单来源分页快速路径。
+    - 增加 IP 删除历史日志主表 + 少量资产历史的稀疏插入分页路径。
+    - IP 删除计划排除少量已完成固定 IP 时先取 ID 再排除，避免简单场景套复杂子查询。
+  - `cloud/tests.py`
+    - 新增 `test_lifecycle_plans_tables_param_returns_only_requested_items`，固化局部表加载契约。
+- 前端：
+  - `/Users/a399/Desktop/data/vue-shop-admin/apps/web-antd/src/api/admin.ts`
+    - 计划页 API 参数增加 `tables`。
+  - `/Users/a399/Desktop/data/vue-shop-admin/apps/web-antd/src/views/dashboard/tasks/plans.vue`
+    - 翻页时只请求当前表。
+    - 增加局部响应合并逻辑，保留其他表已加载数据和分页状态。
+
+### 真实库/API 对账
+
+对账分页点：
+
+- `shutdown_plan`：第 `1` 页、第 `2` 页、第 `1000` 页、末页 `39600`。
+- `server_history`：第 `1` 页、第 `2` 页、第 `400` 页、末页 `401`。
+- `ip_delete`：第 `1` 页、第 `2` 页、第 `1000` 页、末页 `10000`。
+- `ip_delete_history`：第 `1` 页、第 `2` 页、第 `1000` 页、末页 `10401`。
+
+结果：
+
+- `16/16` 通过。
+- 服务器删除历史、IP 删除计划、IP 删除历史逐项对比 `source_kind/source_id`。
+- 关机计划因现有同 IP 去重逻辑，校验分页元数据、实际 loaded 和无重复；发现的 `loaded` 契约问题已修复。
+
+### 真实前端测试
+
+使用本机 Chrome 打开：
+
+```text
+http://127.0.0.1:5666/admin/tasks/plans
+```
+
+实际点击分页控件结果：
+
+- IP 删除历史：
+  - 第 `2` 页约 `0.86s`。
+  - 第 `1000` 页约 `1.35s`。
+  - 末页 `10401` 约 `0.83s`。
+  - 每次只返回 `ip_delete_history_items`。
+- 关机计划：
+  - 末页 `39600` 约 `2.25s`。
+  - 只返回 `shutdown_plan_items`。
+- 服务器删除历史：
+  - 末页 `401` 约 `1.19s`。
+  - 只返回 `server_history_items`。
+- IP 删除计划：
+  - 末页 `10000` 约 `7.3s`。
+  - 只返回 `ip_delete_plan_items`。
+
+页面结果：
+
+- 控制台错误数：`0`。
+- 400/500 请求数：`0`。
+- 翻某一个表后，其他表仍保留原有数据，没有被清空。
+
+### 机器人高并发
+
+执行：
+
+```bash
+UV_CACHE_DIR=/private/tmp/uv-cache-shop DJANGO_TEST_SQLITE=1 uv run python manage.py test bot.tests.RetainedIpRenewalUiTestCase.test_cloud_background_tasks_keep_bulk_concurrency_isolated --settings=shop.settings --verbosity=1
+```
+
+结果：
+
+- 通过。
+- 覆盖 `60` 个并发后台任务：
+  - `20` 组钱包直付。
+  - `20` 组钱包补付。
+  - `20` 组续费后检查。
+- 校验聊天窗口、订单、购买数量和派生创建任务没有串上下文。
+
+### 验证
+
+通过：
+
+```bash
+UV_CACHE_DIR=/private/tmp/uv-cache-shop uv run python manage.py check
+UV_CACHE_DIR=/private/tmp/uv-cache-shop DJANGO_TEST_SQLITE=1 uv run python manage.py test cloud.tests.CloudServerServicesTestCase.test_lifecycle_plans_tables_param_returns_only_requested_items cloud.tests.CloudServerServicesTestCase.test_lifecycle_plans_ip_delete_history_pagination_contract cloud.tests.CloudServerServicesTestCase.test_lifecycle_plans_server_delete_pagination_contract bot.tests.RetainedIpRenewalUiTestCase.test_cloud_background_tasks_keep_bulk_concurrency_isolated --settings=shop.settings --verbosity=1
+pnpm -C /Users/a399/Desktop/data/vue-shop-admin -F @vben/web-antd run typecheck
+git diff --check
+```
+
+红线扫描通过：
+
+```bash
+rg -n "service_expires_at|actual_expires_at.*CloudServerOrder|CloudServerOrder.*actual_expires_at|plan snapshot|snapshot table|old refund|refund_legacy|refund_old|legacy_refund|accounts\\.|finance\\.|mall\\.|monitoring\\.|dashboard_api\\.|biz\\." cloud bot orders core shop -g '!**/migrations/**'
+```
+
+命中项仍为 Telegram 登录账号代码、云账号测试桩和 `CloudServerOrder.ip_recycle_at` 同步语句，不是旧到期事实回流。
+
+### 红线
+
+- 本轮未执行真实云资源创建、关机、删除服务器、释放 IP、换 IP、真实支付、链上广播、生产发布或删除业务数据。
+- 本轮未打印密钥、Telegram session、支付密钥、云厂商密钥或完整代理链接。
+
+### 遗留问题
+
+- IP 删除计划 50 万末页单表仍约 `7.3s`，需要下一轮继续优化。建议把未附加 IP 判定收敛为可索引字段或进入任务投影表，避免每次依赖多路 `icontains` 过滤。
+- 关机计划深页存在分页后同 IP 去重导致非末页不足 `page_size` 的现象；本轮已修正 `loaded` 契约，下一轮应把去重前移到查询层或任务投影层。
+
 ## 2026-06-08 13:17 生命周期计划页 10 万级专项巡检
 
 ### 背景
