@@ -6,7 +6,7 @@
 
 - 时间：2026-06-08 15:31 CST
 - 状态：完成代理列表 `sync-status` 大表性能修复、真实前端标签复测、机器人多任务高并发回归。
-- Commit：待提交。
+- Commit：`20d106d perf: speed up cloud asset sync status`。
 
 ## 本轮修复
 
