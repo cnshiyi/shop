@@ -434,7 +434,7 @@ def _display_cloud_asset_note(note: str | None) -> str:
 
 # 功能：提供 后台 API 接口 的内部辅助逻辑，供同模块流程复用。
 def _cloud_asset_shutdown_enabled(asset, order=None) -> bool:
-    return getattr(asset, 'shutdown_enabled', True) is not False
+    return getattr(asset, 'shutdown_enabled', False) is True
 
 
 # 功能：提供 后台 API 接口 的内部辅助逻辑，供同模块流程复用。

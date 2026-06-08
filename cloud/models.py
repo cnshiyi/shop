@@ -286,7 +286,7 @@ class CloudAsset(models.Model):
     note = models.TextField('备注', blank=True, null=True, db_comment='备注')
     sync_state = models.JSONField('同步状态', default=dict, blank=True, db_comment='同步状态')
     sort_order = models.IntegerField('排序', default=99, db_index=True, db_comment='排序')
-    shutdown_enabled = models.BooleanField('关机计划启用', default=True, db_index=True, db_comment='关机计划启用')
+    shutdown_enabled = models.BooleanField('关机计划启用', default=False, db_index=True, db_comment='关机计划启用')
     server_delete_enabled = models.BooleanField('服务器删除计划启用', default=True, db_index=True, db_comment='服务器删除计划启用')
     ip_delete_enabled = models.BooleanField('IP删除计划启用', default=True, db_index=True, db_comment='IP删除计划启用')
     status = models.CharField('状态', max_length=32, choices=STATUS_CHOICES, default=STATUS_RUNNING, db_index=True, db_comment='状态')

@@ -19518,3 +19518,60 @@ UV_CACHE_DIR=/private/tmp/uv-cache-shop DJANGO_TEST_SQLITE=1 uv run python manag
 - 生命周期 tick、计划页和任务中心 26 个回归测试通过。
 - `git diff --check` 通过。
 - SQLite 聚焦测试仍输出既有 `db_comment/db_table_comment` 能力差异告警，不属于本轮问题。
+
+## 2026-06-09 01:08 CST 单资产关机计划默认关闭
+
+### 本轮背景
+
+- 用户明确要求 `CloudAsset.shutdown_enabled` 单资产关机开关默认关。
+- 本轮只处理新资产默认值、生命周期判断口径和后台展示口径，不执行真实云资源创建、真实关机、真实删机、真实支付、链上广播、生产发布或删除数据。
+- 本轮不批量改写历史资产数据，避免把存量资产运行策略隐式改变。
+
+### 修复
+
+- `cloud/models.py`
+  - 将 `CloudAsset.shutdown_enabled` 默认值从 `True` 改为 `False`。
+- `cloud/migrations/0064_cloudasset_shutdown_default_off.py`
+  - 新增字段默认值迁移，保证数据库层新资产默认关闭关机计划。
+- `cloud/lifecycle.py`
+  - `asset_shutdown_enabled(None)` 改为 `False`。
+  - 资产关机判断改为只有显式 `shutdown_enabled=True` 才算开启。
+  - 关机 due 查询改为 `.filter(shutdown_enabled=True)`，不再靠排除 False 表达默认开启。
+- `bot/api.py`、`cloud/api_assets.py`
+  - 后台计划页和资产列表展示关机开关时，只认显式 True。
+- `cloud/tests.py`
+  - 新增新建服务器资产默认关闭关机开关的回归测试。
+  - 修正生命周期计划页旧测试数据和旧断言，避免继续依赖“未配置即开启”的旧口径。
+
+### 结论
+
+- 新建 `CloudAsset` 不传 `shutdown_enabled` 时默认关闭，不会进入关机 due 队列。
+- 只有显式打开 `shutdown_enabled=True` 的服务器资产，才可能在总开关、计划时间、执行窗口和任务认领均满足时执行关机。
+- 服务器删除开关、IP 删除开关和云账号级关机开关默认值本轮未改。
+
+### 验证
+
+通过：
+
+```bash
+UV_CACHE_DIR=/private/tmp/uv-cache-shop uv run python manage.py makemigrations cloud --name cloudasset_shutdown_default_off
+UV_CACHE_DIR=/private/tmp/uv-cache-shop uv run python manage.py check
+UV_CACHE_DIR=/private/tmp/uv-cache-shop uv run python -m py_compile cloud/models.py cloud/lifecycle.py cloud/api_assets.py bot/api.py cloud/tests.py
+UV_CACHE_DIR=/private/tmp/uv-cache-shop uv run python manage.py makemigrations --check --dry-run
+rg -n "getattr\\([^,\\n]*shutdown_enabled[^,\\n]*, True\\)|exclude\\(shutdown_enabled=False\\)|enforce_schedule|_run_shutdown_order_sync" cloud bot core orders shop --glob '!*/migrations/*'
+git diff --check
+UV_CACHE_DIR=/private/tmp/uv-cache-shop DJANGO_TEST_SQLITE=1 uv run python manage.py test cloud.tests.CloudServerServicesTestCase.test_cloud_asset_shutdown_enabled_defaults_off_and_blocks_due_queue cloud.tests.CloudServerServicesTestCase.test_lifecycle_due_queues_use_stage_specific_asset_switches cloud.tests.CloudServerServicesTestCase.test_lifecycle_execution_has_no_schedule_bypass_flag_and_respects_switches cloud.tests.CloudServerServicesTestCase.test_lifecycle_tick_serializes_shutdown_delete_and_ip_release_stages cloud.tests.CloudServerServicesTestCase.test_global_shutdown_switch_blocks_scheduled_suspend --settings=shop.settings --verbosity=1
+UV_CACHE_DIR=/private/tmp/uv-cache-shop DJANGO_TEST_SQLITE=1 uv run python manage.py test cloud.tests.CloudServerServicesTestCase.test_lifecycle_plans_ignore_account_shutdown_disabled_plan_state cloud.tests.CloudServerServicesTestCase.test_lifecycle_plans_show_asset_shutdown_disabled_plan_state cloud.tests.CloudServerServicesTestCase.test_lifecycle_plans_route_linked_asset_delete_to_order_item cloud.tests.CloudServerServicesTestCase.test_lifecycle_plan_server_queryset_avoids_unattached_ip_subquery cloud.tests.CloudServerServicesTestCase.test_lifecycle_plans_dedupes_server_shutdown_by_public_ip --settings=shop.settings --verbosity=1
+UV_CACHE_DIR=/private/tmp/uv-cache-shop DJANGO_TEST_SQLITE=1 uv run python manage.py test cloud.tests.CloudServerServicesTestCase.test_lifecycle_plans_server_page_marks_overdue_delete_as_due_now cloud.tests.CloudServerServicesTestCase.test_lifecycle_plans_split_shutdown_before_server_delete cloud.tests.CloudServerServicesTestCase.test_lifecycle_plans_use_stage_specific_asset_switches cloud.tests.CloudServerServicesTestCase.test_lifecycle_plans_sort_shutdown_items_by_delete_time cloud.tests.CloudServerServicesTestCase.test_lifecycle_plans_include_future_server_plan_item cloud.tests.CloudServerServicesTestCase.test_dashboard_shutdown_plan_run_respects_asset_suspend_at --settings=shop.settings --verbosity=1
+```
+
+结果：
+
+- Django 系统检查通过。
+- 相关文件编译通过。
+- 迁移检查无遗漏。
+- 旧默认开启 helper、旧 `exclude(shutdown_enabled=False)` 和旧计划绕过参数扫描无命中。
+- 生命周期执行链 5 个聚焦测试通过。
+- 生命周期计划页 11 个相邻回归测试通过。
+- `git diff --check` 通过。
+- SQLite 聚焦测试仍输出既有 `db_comment/db_table_comment` 能力差异告警，不属于本轮问题。

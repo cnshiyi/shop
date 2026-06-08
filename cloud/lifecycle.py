@@ -109,8 +109,8 @@ def cloud_ip_delete_enabled() -> bool:
 
 def asset_shutdown_enabled(asset: CloudAsset | None = None) -> bool:
     if asset is None:
-        return True
-    return getattr(asset, 'shutdown_enabled', True) is not False
+        return False
+    return getattr(asset, 'shutdown_enabled', False) is True
 
 
 def asset_server_delete_enabled(asset: CloudAsset | None = None) -> bool:
@@ -1858,7 +1858,7 @@ def _get_server_asset_shutdown_due():
         server_lifecycle_plan_unique_queryset()
         .exclude(server_shutdown_complete_q())
         .exclude(provider='aliyun_simple')
-        .exclude(shutdown_enabled=False)
+        .filter(shutdown_enabled=True)
         .order_by('actual_expires_at', 'id')[:1000]
     )
     return [

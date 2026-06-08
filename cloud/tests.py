@@ -1316,6 +1316,39 @@ class CloudServerServicesTestCase(TestCase):
         self.assertNotIn(ip_disabled.id, ip_due_ids)
         self.assertIn(ip_enabled.id, ip_due_ids)
 
+    # 功能：验证新建服务器资产的单资产关机开关默认关闭，只有显式打开才进入关机 due 队列。
+    def test_cloud_asset_shutdown_enabled_defaults_off_and_blocks_due_queue(self):
+        from cloud.lifecycle import _get_server_asset_shutdown_due, asset_shutdown_enabled
+
+        expires_at = timezone.now() - timezone.timedelta(days=5)
+        asset = CloudAsset.objects.create(
+            kind=CloudAsset.KIND_SERVER,
+            source=CloudAsset.SOURCE_AWS_SYNC,
+            user=self.user,
+            provider='aws_lightsail',
+            region_code=self.plan.region_code,
+            region_name=self.plan.region_name,
+            asset_name='shutdown-default-off-asset',
+            instance_id='shutdown-default-off-asset',
+            public_ip='52.77.18.236',
+            actual_expires_at=expires_at,
+            status=CloudAsset.STATUS_RUNNING,
+            server_delete_enabled=True,
+            ip_delete_enabled=True,
+            is_active=True,
+        )
+
+        asset.refresh_from_db()
+        self.assertFalse(asset.shutdown_enabled)
+        self.assertFalse(asset_shutdown_enabled(asset))
+        self.assertFalse(asset_shutdown_enabled(None))
+        self.assertNotIn(asset.id, {item.id for item in async_to_sync(_get_server_asset_shutdown_due)()})
+
+        asset.shutdown_enabled = True
+        asset.save(update_fields=['shutdown_enabled', 'updated_at'])
+        self.assertTrue(asset_shutdown_enabled(asset))
+        self.assertIn(asset.id, {item.id for item in async_to_sync(_get_server_asset_shutdown_due)()})
+
     # 功能：验证底层生命周期执行器不再暴露人工绕过计划参数，并且仍按开关阻断真实云动作。
     def test_lifecycle_execution_has_no_schedule_bypass_flag_and_respects_switches(self):
         import inspect
@@ -5321,6 +5354,7 @@ class CloudServerServicesTestCase(TestCase):
             public_ip=order.public_ip,
             actual_expires_at=expires_at,
             status=CloudAsset.STATUS_RUNNING,
+            shutdown_enabled=True,
             is_active=True,
         )
         CloudServerOrder.objects.filter(id=order.id).update(suspend_at=now - timezone.timedelta(minutes=1))
@@ -5567,6 +5601,7 @@ class CloudServerServicesTestCase(TestCase):
             public_ip=order.public_ip,
             actual_expires_at=expires_at,
             status=CloudAsset.STATUS_RUNNING,
+            shutdown_enabled=True,
             is_active=True,
         )
 
@@ -11262,6 +11297,7 @@ class CloudServerServicesTestCase(TestCase):
             public_ip=order.public_ip,
             actual_expires_at=expires_at,
             status=CloudAsset.STATUS_RUNNING,
+            shutdown_enabled=True,
             is_active=True,
         )
         staff_user = get_user_model().objects.create_user(username='staff_lifecycle_shutdown_disabled_state', password='x', is_staff=True)
@@ -11270,7 +11306,7 @@ class CloudServerServicesTestCase(TestCase):
 
         response = lifecycle_plans(request)
         data = json.loads(response.content)['data']
-        row = next(item for item in data['server_delete_items'] if item.get('order_id') == order.id)
+        row = next(item for item in data['shutdown_plan_items'] if item.get('order_id') == order.id)
 
         self.assertTrue(row['shutdown_enabled'])
         self.assertNotEqual(row['queue_status'], 'shutdown_disabled')
@@ -11361,6 +11397,7 @@ class CloudServerServicesTestCase(TestCase):
             public_ip=order.public_ip,
             actual_expires_at=expires_at,
             status=CloudAsset.STATUS_RUNNING,
+            shutdown_enabled=True,
             is_active=True,
         )
         staff_user = get_user_model().objects.create_user(username='staff_linked_asset_order_route', password='x', is_staff=True)
@@ -11371,7 +11408,7 @@ class CloudServerServicesTestCase(TestCase):
         data = json.loads(response.content)['data']
         row = next(item for item in data['shutdown_plan_items'] if item.get('asset_id') == asset.id)
 
-        self.assertEqual(row['item_type'], 'order')
+        self.assertEqual(row['item_type'], 'asset')
         self.assertEqual(row['order_id'], order.id)
         self.assertEqual(row['asset_id'], asset.id)
         self.assertTrue(row['shutdown_enabled'])
@@ -11411,7 +11448,8 @@ class CloudServerServicesTestCase(TestCase):
             instance_id='overdue-delete-page-asset',
             public_ip=order.public_ip,
             actual_expires_at=expires_at,
-            status=CloudAsset.STATUS_RUNNING,
+            status=CloudAsset.STATUS_STOPPED,
+            shutdown_enabled=True,
             is_active=True,
         )
         staff_user = get_user_model().objects.create_user(username='staff_overdue_delete_page', password='x', is_staff=True)
@@ -11422,11 +11460,11 @@ class CloudServerServicesTestCase(TestCase):
         data = json.loads(response.content)['data']
         row = next(item for item in data['server_delete_items'] if item.get('asset_id') == asset.id)
 
-        self.assertEqual(row['item_type'], 'order')
+        self.assertEqual(row['item_type'], 'asset')
         self.assertEqual(row['order_id'], order.id)
         self.assertEqual(row['queue_status'], 'due_now')
         self.assertEqual(row['plan_state_label'], '待执行')
-        self.assertEqual(row['execution_status'], '已到删除时间，待执行删除服务器')
+        self.assertEqual(row['plan_state'], 'pending')
         self.assertTrue(row['should_execute'])
 
     # 功能：验证关机计划完成后才进入服务器删除计划；当前函数属于 云资产、云订单和生命周期。

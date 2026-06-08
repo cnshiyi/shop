@@ -2101,7 +2101,7 @@ def _orphan_asset_delete_plan_item_payload(asset, *, queue_status='orphan_due', 
 
 
 def _asset_shutdown_enabled(asset):
-    return getattr(asset, 'shutdown_enabled', True) is not False
+    return getattr(asset, 'shutdown_enabled', False) is True
 
 
 def _asset_server_delete_enabled(asset):
