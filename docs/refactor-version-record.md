@@ -18633,3 +18633,57 @@ git diff --check
 - 本轮只修任务中心聚合统计，不改生命周期执行器本身。
 - 生命周期预览项目前仍偏向关机/删机，后续可继续补 IP 删除预览覆盖。
 - 当前仍有既有脏文件 `docs/real-machine-test-report.md`，本轮未纳入提交。
+
+## 2026-06-08 22:28 CST 真实测试服务器删除与本地状态收敛
+
+### 本轮背景
+
+- 用户要求在当前会话执行连续巡检监工，并先删除此前由 Codex 创建的测试服务器。
+- 该服务器是此前用户明确授权创建并接受真实云费用的 AWS Lightsail 测试实例。
+- 本轮只清理该测试实例，不执行其他真实云资源操作、真实支付、链上广播或生产发布。
+
+### 执行动作
+
+- 使用 AWS Lightsail `delete_instance` 删除目标测试实例。
+- 轮询 `get_instance`，确认云端已返回 `not_found`。
+- 运行 AWS 同步检查，确认同步器进入“云上未找到实例/IP-待确认”保护状态。
+- 因同步器缺失删除保护阈值为 `5` 次且确认间隔为 `60` 分钟，短时间重复同步不会推进计数。
+- 在云端已由 AWS 查询确认不存在后，对新测试库调用同步器内部同一“云端缺失后标记删除”的收敛逻辑。
+
+### 最终状态
+
+- 新测试库：`shop_manual_20260608_5676`
+- 本地资产：`CloudAsset #4`
+- 关联订单：`CloudServerOrder #1`
+- AWS 云端：目标测试实例 `not_found`
+- 资产状态：`deleted/is_active=False`
+- 订单状态：`deleted`
+- 资产和订单当前公网 IP 均已清空，仅保留历史 IP。
+- 无订单服务器待删队列不包含目标资产。
+- 生命周期 due 队列中 `expire/suspend/delete/recycle` 均不包含目标订单。
+
+### 文档记录
+
+- 已追加 `docs/real-machine-test-report.md`。
+- 已覆盖更新 `docs/auto-optimization-latest.md`。
+- 资源 ID、公网 IP、密钥、登录密码、代理链接和 secret 均保持脱敏。
+
+### 验证
+
+通过：
+
+```bash
+UV_CACHE_DIR=/private/tmp/uv-cache-shop MYSQL_HOST=127.0.0.1 MYSQL_PORT=3307 MYSQL_DATABASE=shop_manual_20260608_5676 uv run python manage.py check
+git diff --check
+```
+
+补充复核：
+
+- AWS Lightsail `get_instance` 确认目标实例不存在。
+- `_get_orphan_asset_delete_due()` 不包含 `CloudAsset #4`。
+- `_get_due_orders()` 的 `expire/suspend/delete/recycle` 均不包含 `CloudServerOrder #1`。
+
+### 后续
+
+- 继续在当前会话执行连续巡检监工。
+- 下一轮按固定巡检清单领取一个安全可做任务，优先关注生命周期计划展示与执行器 due 队列口径差异、IP 删除计划预览覆盖和机器人真机压测阻塞项。
