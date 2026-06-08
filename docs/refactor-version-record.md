@@ -16083,3 +16083,123 @@ rg -n "service_expires_at|actual_expires_at.*CloudServerOrder|CloudServerOrder.*
 - 继续巡检代理列表其它标签和深页，确保排序优化没有隐藏边界。
 - 继续检查生命周期计划、通知计划和机器人返回链。
 - 继续把机器人多任务高并发作为固定回归项。
+
+## 2026-06-08 15:57 生命周期计划、通知计划与机器人并发专项巡检
+
+### 背景
+
+继续当前会话自动巡检。用户要求持续测试，重点覆盖真实前端显示、数据库分页真实性、生命周期计划、通知计划和机器人多任务高并发。
+
+### 数据库与 API 对账
+
+真实 MySQL 走后台 API 和查询层同口径对账。
+
+生命周期计划计数：
+
+- 关机计划：`1979990`
+- 删除计划：`2`
+- 服务器删除历史：`20010`
+- IP 删除计划：`500000`
+- IP 删除历史：`520010`
+
+生命周期计划分页对账通过：
+
+- 关机计划：第 `1` 页、第 `2` 页、第 `1000` 页、第 `39600` 页。
+- 删除计划：第 `1` 页。
+- 服务器删除历史：第 `1` 页、第 `2` 页、第 `401` 页。
+- IP 删除计划：第 `1` 页、第 `2` 页、第 `1000` 页、第 `10000` 页。
+- IP 删除历史：第 `1` 页、第 `2` 页、第 `1000` 页、第 `10401` 页。
+- API 返回 ID 与查询层同排序切片一致；抽样页内和跨抽样页未发现重复 ID。
+
+通知计划计数：
+
+- 到期通知：`3428`
+- 未来通知：`18001`
+- 到期用户通知：`3428`
+- 未来用户通知：`18001`
+- 活动用户通知：`21429`
+- 通知历史：`14960`
+
+通知计划分页对账通过：
+
+- 活动通知：第 `1` 页、第 `2` 页、第 `1000` 页、第 `2143` 页。
+- 通知历史：第 `1` 页、第 `2` 页、第 `1000` 页、第 `1496` 页。
+- API 返回 ID 与同口径构建结果一致；抽样页内和跨抽样页未发现重复 ID。
+
+### 真实前端验证
+
+使用本机 Google Chrome + Playwright 打开：
+
+```text
+http://127.0.0.1:5666/admin/tasks/plans
+http://127.0.0.1:5666/admin/tasks/notices
+```
+
+计划页：
+
+- 关机计划首屏：`50` 行，分页 `1-50 / 共 1979990 条`。
+- 删除计划首屏：`2` 行，分页 `1-2 / 共 2 条`。
+- 服务器删除历史首屏：`50` 行，分页 `1-50 / 共 20010 条`。
+- IP 删除计划首屏：`50` 行，分页 `1-50 / 共 500000 条`。
+- IP 删除历史首屏：`50` 行，分页 `1-50 / 共 520010 条`。
+- 关机计划点击第 `2` 页：`50` 行，分页 `51-100 / 共 1979990 条`。
+- IP 删除计划快速跳第 `1000` 页：`50` 行，分页 `49951-50000 / 共 500000 条`。
+- IP 删除历史快速跳第 `10401` 页：`10` 行，分页 `520001-520010 / 共 520010 条`。
+
+通知页：
+
+- 通知计划首屏：`10` 行，总页码到 `2143`。
+- 历史通知首屏：`10` 行，总页码到 `1496`。
+- 通知计划点击第 `2` 页：`10` 行。
+- 历史通知点击第 `2` 页：`10` 行。
+
+浏览器结果：
+
+- 任务 API 请求数：`7`
+- 失败 API：`0`
+- 控制台 error/warning：`0`
+- requestfailed：`0`
+
+### 机器人高并发复测
+
+通过：
+
+```bash
+UV_CACHE_DIR=/private/tmp/uv-cache-shop DJANGO_TEST_SQLITE=1 uv run python manage.py test cloud.tests.CloudServerServicesTestCase.test_lifecycle_plans_server_delete_pagination_contract cloud.tests.CloudServerServicesTestCase.test_lifecycle_plans_ip_delete_history_pagination_contract cloud.tests.CloudServerServicesTestCase.test_lifecycle_plans_ip_delete_history_mixes_logs_and_assets_by_time cloud.tests.CloudServerServicesTestCase.test_notice_task_detail_deep_group_page_has_no_duplicates cloud.tests.CloudServerServicesTestCase.test_lifecycle_plans_use_stage_specific_asset_switches cloud.tests.CloudServerServicesTestCase.test_lifecycle_plans_show_global_stage_switches bot.tests.TelegramListenerPushTestCase.test_notice_copy_wrapper_keeps_concurrent_user_sends_isolated bot.tests.RetainedIpRenewalUiTestCase.test_cloud_background_tasks_keep_high_concurrency_isolated bot.tests.RetainedIpRenewalUiTestCase.test_cloud_background_tasks_keep_bulk_concurrency_isolated --settings=shop.settings --verbosity=1
+```
+
+结果：
+
+- `9` 条通过。
+- 覆盖通知复制包装器并发隔离。
+- 覆盖钱包直付和钱包补付同时执行。
+- 覆盖 `20` 组批量钱包直付、`20` 组钱包补付、`20` 组续费后巡检，总计 `60` 路并发任务。
+
+### 验证
+
+通过：
+
+```bash
+UV_CACHE_DIR=/private/tmp/uv-cache-shop uv run python manage.py check
+git diff --check
+```
+
+红线扫描通过：
+
+```bash
+rg -n "service_expires_at|actual_expires_at.*CloudServerOrder|CloudServerOrder.*actual_expires_at|plan snapshot|snapshot table|old refund|refund_legacy|refund_old|legacy_refund|accounts\\.|finance\\.|mall\\.|monitoring\\.|dashboard_api\\.|biz\\." cloud bot orders core shop -g '!**/migrations/**'
+```
+
+命中项仍为 Telegram 登录账号测试桩和 `CloudServerOrder.ip_recycle_at` 同步语句，不是旧到期事实回流。
+
+### 受限项
+
+- 本轮未执行真实云资源创建、关机、删机、释放 IP、换 IP、真实支付、链上广播、生产发布或删除业务数据。
+- 本轮未打印密钥、Telegram session、支付密钥、云厂商密钥或完整代理链接。
+- 本轮创建过一次性后台验证用户和 session，验证后已清理。
+
+### 下一步
+
+- 继续巡检代理列表所有标签，特别是未附加、未绑定用户、未绑定群组、续费关闭等大数据标签。
+- 继续压测生命周期计划和通知计划深页，观察是否出现超过 `2s` 的慢页。
+- 继续把机器人多任务高并发作为每轮固定回归项。
