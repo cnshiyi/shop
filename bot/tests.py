@@ -1,6 +1,7 @@
 import asyncio
 import inspect
 import json
+import os
 import sys
 from decimal import Decimal
 from types import SimpleNamespace
@@ -59,6 +60,30 @@ class ApiPrefixContractTestCase(SimpleTestCase):
         for path in removed_routes:
             with self.assertRaises(Resolver404):
                 resolve(path)
+
+
+class BotRunnerConfigTestCase(SimpleTestCase):
+    def test_background_tasks_enabled_defaults_to_true(self):
+        from bot.runner import bot_background_tasks_enabled
+
+        with patch.dict(os.environ, {}, clear=True):
+            self.assertTrue(bot_background_tasks_enabled())
+
+    def test_background_tasks_enabled_can_be_disabled_for_interaction_patrol(self):
+        from bot.runner import bot_background_tasks_enabled
+
+        for value in ['0', 'false', 'off', 'no']:
+            with self.subTest(value=value):
+                with patch.dict(os.environ, {'SHOP_BOT_BACKGROUND_TASKS_ENABLED': value}, clear=True):
+                    self.assertFalse(bot_background_tasks_enabled())
+
+    def test_background_tasks_enabled_accepts_truthy_values(self):
+        from bot.runner import bot_background_tasks_enabled
+
+        for value in ['1', 'true', 'yes', 'on']:
+            with self.subTest(value=value):
+                with patch.dict(os.environ, {'SHOP_BOT_BACKGROUND_TASKS_ENABLED': value}, clear=True):
+                    self.assertTrue(bot_background_tasks_enabled())
 
 
 class DashboardSessionExpiryTestCase(TestCase):

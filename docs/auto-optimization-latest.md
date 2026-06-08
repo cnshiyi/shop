@@ -4,103 +4,87 @@
 
 ## 最近一轮
 
-- 时间：2026-06-08 20:42 CST
-- 状态：完成通知计划页专项深分页和真实前端翻页对账，并修复前端跳页控件缺失与重试说明列控制台警告。
-- 后端 Commit：已提交，`docs: record notice plan patrol`。
-- 前端 Commit：`24e6a6c fix: support notice plan deep pagination`。
+- 时间：2026-06-08 20:54 CST
+- 状态：完成机器人高并发真机测试前置巡检；Telegram 网络不可达导致真机点击未能继续，但本轮发现并修复 bot 启动会同时触发后台生命周期/支付扫块/通知扫描的隔离缺口。
+- 后端 Commit：已提交，`fix: isolate bot interaction patrol`。
+- 前端 Commit：本轮无前端变更。
 
 ## 本轮覆盖范围
 
 - 后端仓库：`/Users/a399/Desktop/data/shop`
-- 前端仓库：`/Users/a399/Desktop/data/vue-shop-admin`
-- 前端页面：`http://127.0.0.1:5666/admin/tasks/notices`
-- 后端接口：`/api/admin/tasks/notices/`
-- 后端实现：`cloud/api_tasks.py`
-- 前端视图：`apps/web-antd/src/views/dashboard/tasks/notices.vue`
+- 机器人入口：`bot/runner.py`
+- 机器人测试：`bot/tests.py`
+- 临时日志：`/private/tmp/shop-bot-patrol.log`、`/private/tmp/shop-bot-interaction-only.log`
+
+## 机器人现状
+
+- 后端 web 服务仍在 `127.0.0.1:8000` 运行。
+- 本轮开始时没有发现正在运行的 `run.py bot` / `bot.runner` 进程。
+- 数据库里有 `1` 个 Telegram 登录账号：
+  - `has_session=True`
+  - 状态检查后仍为 `listener_error`
+  - 连接 Telegram MTProto 连续超时，不能作为真机点击账号使用。
+- bot token 已配置，但单独 `getMe` 连通性检查返回 `TelegramNetworkError`。
+- 因 Telegram 网络不可达，本轮没有完成真实 Telegram 点击或高并发真实消息压测。
+
+## 暴露问题
+
+首次启动 `run.py bot` 时，虽然 Bot API 获取身份超时，但进程继续启动了：
+
+- TRON 顺序扫块器
+- 资源巡检
+- 云服务器生命周期调度
+- 删机计划表刷新
+- 通知计划表刷新
+- 自动续费巡检
+- 云账号状态巡检
+- Telegram 个人号消息监听
+- 启动时云服务器生命周期检查
+
+这会污染“只测试机器人交互”的巡检结果，并可能触发真实生命周期扫描和通知发送，不适合高并发真机点击测试。
 
 ## 修复内容
 
-- 给通知计划表和历史通知表分页补齐 `showQuickJumper: true`，支持真实跳转深页和最后页。
-- 将历史通知“重试说明”列的 `TypographyParagraph` 改为 `content` 属性渲染，消除打开重试列后的 Ant Design Vue 控制台 warning。
-- 不修改通知计划后端数据口径，不恢复旧计划快照表，不引入兼容分支。
+- `bot/runner.py`
+  - 新增 `SHOP_BOT_BACKGROUND_TASKS_ENABLED` 环境开关。
+  - 默认值为开启，生产行为不变。
+  - 设置 `SHOP_BOT_BACKGROUND_TASKS_ENABLED=0` 时，只启动 Telegram Bot 交互路径，不启动 TRON 扫块、生命周期调度、计划刷新、自动续费、云账号巡检、个人号监听和启动时生命周期检查。
+  - 关闭流程改为只取消实际创建过的后台任务，避免禁用模式关闭时报空任务。
+- `bot/tests.py`
+  - 新增 `BotRunnerConfigTestCase`，固定开关默认开启、显式关闭和显式开启的解析行为。
 
-## 后端通知计划口径
+## 实测结果
 
-真实库后端对账结果：
+普通 bot 启动：
 
-- `CloudNoticeTask` 总数：`6335`
-- `CloudNoticeTask.claimed`：`2`
-- `CloudNoticeTask.failed`：`6333`
-- 通知活跃分组：`21429`
-- 近期分组：`3428`
-- 未来分组：`18001`
-- 历史通知：`14960`
+- 机器人进程能启动。
+- Redis/FSM 初始化成功。
+- `get_me` 超时后进入默认 Bot 标签。
+- 因没有隔离开关，后台调度和启动时生命周期检查会被启动。
+- 已手动停止该进程，当前没有残留 `run.py bot` / `bot.runner` 进程。
 
-活跃通知计划 API 对账：
+交互专用模式：
 
-- 第 1 页：`10` 条，total `21429`
-- 第 2 页：`10` 条
-- 第 1000 页：`10` 条
-- 最后页第 `2143` 页：`9` 条
-- 页内无重复，返回顺序与后端分组排序一致。
-
-历史通知 API 对账：
-
-- 第 1 页：`10` 条，total `14960`
-- 第 2 页：`10` 条
-- 第 1000 页：`10` 条
-- 最后页第 `1496` 页：`10` 条
-- 页内无重复，返回顺序与数据库 `created_at/id` 倒序一致。
-
-字段开关对账：
-
-- 关闭重字段后请求：`fields=basic,actions`
-- 开启 IP、文案、渠道、重试后请求：`fields=basic,ips,text,channels,retry,actions`
-- 前端列展示与请求字段一致。
-
-## 真实前端验证
-
-真实打开：
-
-```text
-http://127.0.0.1:5666/admin/tasks/notices
+```bash
+SHOP_BOT_BACKGROUND_TASKS_ENABLED=0 SHOP_BOT_KEEPALIVE=0 uv run python run.py bot
 ```
 
-前端结果：
-
-- 页面显示通知计划总数：`21429` 组用户通知。
-- 页面显示近期计划：`3428` 种通知。
-- 页面显示未来计划：`18001` 种通知。
-- 两张表都显示跳页输入框，跳页控件数量：`2`。
-- 通知计划表第 1 页：`10` 行。
-- 通知计划表第 2 页：`10` 行。
-- 通知计划表第 1000 页：`10` 行。
-- 通知计划表最后页第 `2143` 页：`9` 行。
-- 历史通知表第 1 页：`10` 行。
-- 历史通知表第 2 页：`10` 行。
-- 历史通知表第 1000 页：`10` 行。
-- 历史通知表最后页第 `1496` 页：`10` 行。
-- 前端表格行数与每次接口返回 `items.length` 一致。
-- 开启列开关后能显示 IP 列、通知文案列、通知渠道列、重试说明列。
-- 关闭列开关后上述重字段列被隐藏，接口恢复轻量字段。
-- 业务 API 失败：`0`。
-- 控制台 error/warning：`0`。
-- request failed：`0`。
-- 截图：`/private/tmp/shop-notice-plans-front.png`
-
-测试完成后已删除临时后端 session 和临时浏览器 storageState，没有打印有效登录 token。
+- 机器人进程能启动。
+- Redis/FSM 初始化成功。
+- `get_me` 仍因 Telegram 网络返回超时。
+- 日志明确显示：`机器人后台任务已禁用：SHOP_BOT_BACKGROUND_TASKS_ENABLED=0，仅启动 Telegram Bot 交互`。
+- 没有再启动 TRON 扫块、生命周期调度、通知计划刷新、自动续费巡检、个人号监听或启动时生命周期检查。
+- 已手动停止该进程，当前没有残留 `run.py bot` / `bot.runner` 进程。
 
 ## 本轮验证
 
 通过：
 
 ```bash
+UV_CACHE_DIR=/private/tmp/uv-cache-shop uv run python -m py_compile bot/runner.py bot/tests.py
 UV_CACHE_DIR=/private/tmp/uv-cache-shop uv run python manage.py check
-UV_CACHE_DIR=/private/tmp/uv-cache-shop uv run python -m py_compile cloud/api_tasks.py
-UV_CACHE_DIR=/private/tmp/uv-cache-shop DJANGO_TEST_SQLITE=1 uv run python manage.py test cloud.tests.CloudServerServicesTestCase.test_notice_task_detail_uses_notice_plan_view cloud.tests.CloudServerServicesTestCase.test_notice_task_detail_basic_fields_skip_batch_text_payload cloud.tests.CloudServerServicesTestCase.test_notice_task_detail_basic_actions_fields_keep_order_link_without_hidden_columns cloud.tests.CloudServerServicesTestCase.test_notice_task_detail_allows_deep_offsets_beyond_100k cloud.tests.CloudServerServicesTestCase.test_notice_plan_summary_reuses_group_rows_for_counts cloud.tests.CloudServerServicesTestCase.test_notice_task_detail_counts_all_future_groups_beyond_loaded_limit cloud.tests.CloudServerServicesTestCase.test_notice_task_detail_deep_group_page_has_no_duplicates cloud.tests.CloudServerServicesTestCase.test_notice_task_detail_hides_shutdown_disabled_lifecycle_notices cloud.tests.CloudServerServicesTestCase.test_notice_write_actions_require_superuser cloud.tests.CloudServerServicesTestCase.test_delete_notice_history_removes_notice_history_row cloud.tests.CloudServerServicesTestCase.test_notice_history_rows_keep_unique_log_ids_for_same_batch --settings=shop.settings --verbosity=1
-pnpm -F @vben/web-antd run typecheck
+UV_CACHE_DIR=/private/tmp/uv-cache-shop DJANGO_TEST_SQLITE=1 uv run python manage.py test bot.tests.BotRunnerConfigTestCase --settings=shop.settings --verbosity=1
 git diff --check
-git -C /Users/a399/Desktop/data/vue-shop-admin diff --check
 ```
 
 红线扫描通过：
@@ -111,16 +95,12 @@ rg -n "service_expires_at|actual_expires_at.*CloudServerOrder|CloudServerOrder.*
 
 命中项为既有允许项：bot 测试桩、Telegram 登录账号模块名、`CloudServerOrder.ip_recycle_at` 同步记录，不是旧订单到期事实、旧计划快照或废弃 runtime app 回流。
 
-说明：
-
-- SQLite 聚焦测试仍输出既有 `db_comment` / `db_table_comment` 警告，不属于本轮问题。
-- `docs/real-machine-test-report.md` 当前存在既有未提交真实机器测试记录，本轮不覆盖、不提交。
-
 ## 结论
 
-- 通知计划页专项深分页、跳页、列开关和真实前端显示已完成。
-- 本轮发现并修复 2 个前端问题：缺少跳页控件、重试说明列触发控制台 warning。
-- 通知计划页没有发现分页丢数据、串页、最后页行数错误、业务 API 失败或控制台错误。
+- 机器人真机点击和高并发真实消息压测当前被 Telegram 网络 `TelegramNetworkError` / MTProto `TimeoutError` 阻断。
+- 本轮已经把“机器人交互巡检”和“后台生命周期/支付/通知任务”隔离开，后续网络恢复后可以用 `SHOP_BOT_BACKGROUND_TASKS_ENABLED=0` 安全启动 bot 做真机点击，不会误触发后台生命周期扫描。
+- 本轮没有执行真实支付、链上广播、真实云资源创建/删除或生产发布。
+- `docs/real-machine-test-report.md` 当前存在既有未提交真实机器测试记录，本轮不覆盖、不提交。
 
 ## 已完成压测
 
@@ -131,6 +111,6 @@ rg -n "service_expires_at|actual_expires_at.*CloudServerOrder|CloudServerOrder.*
 
 ## 尚未完成
 
-- 机器人多任务高并发真机点击压测还没有完成。
+- 机器人多任务高并发真机点击压测还没有完成，当前阻塞点是 Telegram 网络不可达和登录账号状态 `listener_error`。
 - 真实云资源创建、到期关机、删机、释放 IP 的生命周期开关矩阵还没有完整闭环。
 - 服务器创建后的完整生命周期链路还没有在本轮压测中闭环到真实关机、真实删机和真实 IP 释放。

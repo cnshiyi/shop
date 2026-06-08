@@ -32,6 +32,17 @@ logger = logging.getLogger(__name__)
 BOT_ALIVE_LOG_INTERVAL_SECONDS = int(os.getenv('BOT_ALIVE_LOG_INTERVAL_SECONDS', '60') or '60')
 
 
+def _env_bool(name: str, default: bool = False) -> bool:
+    value = os.getenv(name)
+    if value is None:
+        return default
+    return str(value).strip().lower() in {'1', 'true', 'yes', 'on'}
+
+
+def bot_background_tasks_enabled() -> bool:
+    return _env_bool('SHOP_BOT_BACKGROUND_TASKS_ENABLED', True)
+
+
 def _parse_notify_chat_ids(raw_value: str) -> list[int | str]:
     values: list[int | str] = []
     for item in str(raw_value or '').replace('\n', ',').replace(';', ',').split(','):
@@ -219,52 +230,62 @@ async def run_bot():
     async def _run_management_command(command_name: str):
         await asyncio.to_thread(call_command, command_name)
 
-    # TRON 扫块器 / 资源巡检 / 生命周期调度
-    scheduler = AsyncIOScheduler()
-    scheduler.add_job(check_resources, 'interval', minutes=3, id='tron_resource_checker', max_instances=1)
-    scheduler.add_job(warm_trx_rate_cache, 'interval', hours=24, id='trx_rate_cache_refresh', max_instances=1, coalesce=True)
-    scheduler.add_job(refresh_custom_plan_cache, 'interval', minutes=10, id='custom_plan_cache_refresh', max_instances=1, coalesce=True)
-    scheduler.add_job(lifecycle_tick, 'interval', minutes=10, id='cloud_lifecycle', max_instances=1, kwargs={'notify': _notify, 'notify_target': _notify_target})
-    scheduler.add_job(_run_management_command, 'interval', minutes=10, id='cloud_lifecycle_plan_refresh', max_instances=1, coalesce=True, args=['refresh_lifecycle_plans'])
-    scheduler.add_job(_run_management_command, 'interval', minutes=10, id='cloud_notice_plan_refresh', max_instances=1, coalesce=True, args=['refresh_notice_plans'])
-    scheduler.add_job(auto_renew_patrol_tick, 'interval', minutes=30, id='cloud_auto_renew_patrol', max_instances=1, coalesce=True, kwargs={'notify': _notify, 'notify_target': _notify_target})
-    scheduler.add_job(daily_expiry_summary_tick, 'cron', hour=12, minute=0, id='cloud_daily_expiry_summary', max_instances=1, coalesce=True, kwargs={'notify_target': _notify_target})
-    scheduler.add_job(sync_server_status_tick, 'interval', seconds=cloud_sync_interval_seconds, id='cloud_server_sync', max_instances=1, coalesce=True)
-    scheduler.add_job(sync_cloud_accounts_tick, 'interval', minutes=15, id='cloud_account_check', max_instances=1, coalesce=True)
-    scheduler.add_job(_run_management_command, 'interval', minutes=20, id='server_dedupe', max_instances=1, coalesce=True, args=['dedupe_servers'])
-    scheduler.add_job(_run_management_command, 'cron', hour=18, minute=0, id='old_records_cleanup', max_instances=1, coalesce=True, args=['cleanup_old_records'])
-    scheduler.start()
-    scanner_stop = asyncio.Event()
-    scanner_task = asyncio.create_task(scan_forever(scanner_stop), name='tron_scanner')
-    scanner_task.add_done_callback(_log_task_done('tron_scanner'))
-    telegram_listener_stop = asyncio.Event()
-    telegram_listener_task = asyncio.create_task(run_telegram_account_listeners(telegram_listener_stop), name='telegram_account_listener')
-    telegram_listener_task.add_done_callback(_log_task_done('telegram_account_listener'))
-    alive_task = asyncio.create_task(_bot_alive_logger(started_at, scheduler, scanner_task, telegram_listener_task), name='bot_alive_logger')
-    alive_task.add_done_callback(_log_task_done('bot_alive_logger'))
-    logger.info('TRON 顺序扫块器已启动（移除6秒调度限制）')
-    logger.info('资源巡检已启动 (每3分钟)')
-    logger.info('TRX 汇率缓存刷新已启动 (每24小时)')
-    logger.info('定制套餐缓存刷新已启动 (每10分钟)')
-    logger.info('云服务器生命周期调度已启动 (每10分钟)')
-    logger.info('删机计划表刷新已启动 (每10分钟)')
-    logger.info('通知计划表刷新已启动 (每10分钟)')
-    logger.info('云服务器每日到期汇总通知已启动 (每天12:00)')
-    logger.info('自动续费巡检已启动 (每30分钟，到期前1天至关机前持续兜底，失败通知冷却1小时)')
-    logger.info('云服务器状态同步已启动 (每%s秒，每次轮询1个云账号)', cloud_sync_interval_seconds)
-    logger.info('云账号状态巡检已启动 (每15分钟)')
-    logger.info('服务器去重任务已启动 (每20分钟)')
-    logger.info('旧订单/聊天记录自动清理任务已启动 (每天18:00)')
-
-    logger.info('Telegram个人号消息监听调度已启动')
+    background_tasks_enabled = bot_background_tasks_enabled()
+    scheduler = None
+    scanner_stop = None
+    telegram_listener_stop = None
+    scanner_task = None
+    telegram_listener_task = None
+    alive_task = None
+    if background_tasks_enabled:
+        # TRON 扫块器 / 资源巡检 / 生命周期调度
+        scheduler = AsyncIOScheduler()
+        scheduler.add_job(check_resources, 'interval', minutes=3, id='tron_resource_checker', max_instances=1)
+        scheduler.add_job(warm_trx_rate_cache, 'interval', hours=24, id='trx_rate_cache_refresh', max_instances=1, coalesce=True)
+        scheduler.add_job(refresh_custom_plan_cache, 'interval', minutes=10, id='custom_plan_cache_refresh', max_instances=1, coalesce=True)
+        scheduler.add_job(lifecycle_tick, 'interval', minutes=10, id='cloud_lifecycle', max_instances=1, kwargs={'notify': _notify, 'notify_target': _notify_target})
+        scheduler.add_job(_run_management_command, 'interval', minutes=10, id='cloud_lifecycle_plan_refresh', max_instances=1, coalesce=True, args=['refresh_lifecycle_plans'])
+        scheduler.add_job(_run_management_command, 'interval', minutes=10, id='cloud_notice_plan_refresh', max_instances=1, coalesce=True, args=['refresh_notice_plans'])
+        scheduler.add_job(auto_renew_patrol_tick, 'interval', minutes=30, id='cloud_auto_renew_patrol', max_instances=1, coalesce=True, kwargs={'notify': _notify, 'notify_target': _notify_target})
+        scheduler.add_job(daily_expiry_summary_tick, 'cron', hour=12, minute=0, id='cloud_daily_expiry_summary', max_instances=1, coalesce=True, kwargs={'notify_target': _notify_target})
+        scheduler.add_job(sync_server_status_tick, 'interval', seconds=cloud_sync_interval_seconds, id='cloud_server_sync', max_instances=1, coalesce=True)
+        scheduler.add_job(sync_cloud_accounts_tick, 'interval', minutes=15, id='cloud_account_check', max_instances=1, coalesce=True)
+        scheduler.add_job(_run_management_command, 'interval', minutes=20, id='server_dedupe', max_instances=1, coalesce=True, args=['dedupe_servers'])
+        scheduler.add_job(_run_management_command, 'cron', hour=18, minute=0, id='old_records_cleanup', max_instances=1, coalesce=True, args=['cleanup_old_records'])
+        scheduler.start()
+        scanner_stop = asyncio.Event()
+        scanner_task = asyncio.create_task(scan_forever(scanner_stop), name='tron_scanner')
+        scanner_task.add_done_callback(_log_task_done('tron_scanner'))
+        telegram_listener_stop = asyncio.Event()
+        telegram_listener_task = asyncio.create_task(run_telegram_account_listeners(telegram_listener_stop), name='telegram_account_listener')
+        telegram_listener_task.add_done_callback(_log_task_done('telegram_account_listener'))
+        alive_task = asyncio.create_task(_bot_alive_logger(started_at, scheduler, scanner_task, telegram_listener_task), name='bot_alive_logger')
+        alive_task.add_done_callback(_log_task_done('bot_alive_logger'))
+        logger.info('TRON 顺序扫块器已启动（移除6秒调度限制）')
+        logger.info('资源巡检已启动 (每3分钟)')
+        logger.info('TRX 汇率缓存刷新已启动 (每24小时)')
+        logger.info('定制套餐缓存刷新已启动 (每10分钟)')
+        logger.info('云服务器生命周期调度已启动 (每10分钟)')
+        logger.info('删机计划表刷新已启动 (每10分钟)')
+        logger.info('通知计划表刷新已启动 (每10分钟)')
+        logger.info('云服务器每日到期汇总通知已启动 (每天12:00)')
+        logger.info('自动续费巡检已启动 (每30分钟，到期前1天至关机前持续兜底，失败通知冷却1小时)')
+        logger.info('云服务器状态同步已启动 (每%s秒，每次轮询1个云账号)', cloud_sync_interval_seconds)
+        logger.info('云账号状态巡检已启动 (每15分钟)')
+        logger.info('服务器去重任务已启动 (每20分钟)')
+        logger.info('旧订单/聊天记录自动清理任务已启动 (每天18:00)')
+        logger.info('Telegram个人号消息监听调度已启动')
+    else:
+        logger.warning('机器人后台任务已禁用：SHOP_BOT_BACKGROUND_TASKS_ENABLED=0，仅启动 Telegram Bot 交互')
     try:
-        logger.info('启动时执行云服务器生命周期检查')
-        try:
-            defer_seconds = int(str(await get_config('cloud_startup_lifecycle_defer_seconds', '0')).strip() or 0)
-            await lifecycle_tick(notify=_notify, notify_target=_notify_target, defer_destructive_seconds=max(defer_seconds, 0))
-            logger.info('启动时云服务器生命周期检查完成')
-        except Exception as exc:
-            logger.exception('启动时云服务器生命周期检查失败: %s', exc)
+        if background_tasks_enabled:
+            logger.info('启动时执行云服务器生命周期检查')
+            try:
+                defer_seconds = int(str(await get_config('cloud_startup_lifecycle_defer_seconds', '0')).strip() or 0)
+                await lifecycle_tick(notify=_notify, notify_target=_notify_target, defer_destructive_seconds=max(defer_seconds, 0))
+                logger.info('启动时云服务器生命周期检查完成')
+            except Exception as exc:
+                logger.exception('启动时云服务器生命周期检查失败: %s', exc)
         logger.info('Telegram Bot 已启动 (aiogram)')
         await delete_webhook_with_retry(bot)
         logger.info('机器人轮询启动：进程=%s', os.getpid())
@@ -276,14 +297,18 @@ async def run_bot():
             raise
     finally:
         logger.warning('机器人开始关闭：进程=%s 运行时长=%s秒', os.getpid(), int(time.time() - started_at))
-        scanner_stop.set()
-        scanner_task.cancel()
-        telegram_listener_stop.set()
-        telegram_listener_task.cancel()
-        alive_task.cancel()
-        await asyncio.gather(scanner_task, telegram_listener_task, alive_task, return_exceptions=True)
+        if scanner_stop:
+            scanner_stop.set()
+        if telegram_listener_stop:
+            telegram_listener_stop.set()
+        running_tasks = [task for task in (scanner_task, telegram_listener_task, alive_task) if task is not None]
+        for task in running_tasks:
+            task.cancel()
+        if running_tasks:
+            await asyncio.gather(*running_tasks, return_exceptions=True)
         with contextlib.suppress(Exception):
-            scheduler.shutdown(wait=False)
+            if scheduler:
+                scheduler.shutdown(wait=False)
         await cache_close()
         await close_fsm_storage()
         await bot.session.close()
