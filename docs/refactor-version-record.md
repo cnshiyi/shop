@@ -16782,3 +16782,126 @@ git diff --check
 - 机器人多任务高并发 8 条聚焦测试通过，覆盖通知复制隔离、钱包直付/补付并发、60 路批量后台任务、订单详情/资产详情/IP 查询/自动续费返回链。
 - 红线扫描通过，命中项均为既有测试桩、Telegram 登录账号 API 文件名或 `ip_recycle_at` 同步记录，不是旧订单到期事实回流。
 - 已清理本轮临时后台登录用户和 `/private/tmp` 临时 token/API 输出文件。
+
+## 2026-06-08 17:37 CST 代理列表标签 10 万级真实分页巡检
+
+### 本轮背景
+
+- 继续执行当前会话自动巡检目标。
+- 用户要求代理列表不能只测“全部”，还要把每个标签都压测到，并确认翻页数据和数据库一致。
+- 本轮不做真实云资源创建、删除、支付、链上广播或业务数据删除，只做读侧压测、真实页面点击和聚焦测试。
+
+### 数据规模
+
+当前快照总量：
+
+- `CloudAssetDashboardSnapshot`：`2,500,003`
+- 全部标签分页显示：`2,489,998`
+- 运行中：`549,988`
+- 即将到期：`101,250`
+- 已过期：`101,752`
+- 未附加固定 IP：`100,001`
+- 异常/待确认：`100,000`
+- 云账号异常：`1,145,002`
+- 关机计划关闭：`100,384`
+- 未绑定用户：`100,001`
+- 未绑定群组：`100,013`
+- 续费关闭：`104,558`
+
+结论：所有标签均满足 10 万级压测基线，不需要再额外注入同类测试数据。
+
+### 数据库与接口对账
+
+对 `/api/admin/cloud-assets/` 做服务端分页对账：
+
+- 标签覆盖：`all/normal/due_soon/expired/unattached_ip/abnormal/account_disabled/shutdown_disabled/unbound_user/unbound_group/auto_renew_off`
+- 页位覆盖：第 `1` 页、第 `2` 页、第 `1000` 页、最后页。
+- 共 `44` 个页位。
+
+结论：
+
+- API `total` 与数据库 `CloudAssetDashboardSnapshot` 过滤后的 `count()` 一致。
+- API 返回 ID 顺序与数据库 `_dashboard_snapshot_ordering()` 逐行一致。
+- 第 `1` 页和第 `2` 页没有重复 ID。
+- 最后页覆盖反向分页优化路径，未发现丢数据、重复数据或串页。
+
+### 真实前端巡检
+
+实际打开：
+
+```text
+http://127.0.0.1:5666/admin/cloud-assets
+```
+
+真实点击覆盖：
+
+- IP 视图逐个点击全部标签。
+- 每个标签真实点击下一页。
+- `全部/运行中/未附加固定IP/云账号异常/续费关闭` 额外使用快速跳页到第 `1000` 页。
+
+结果：
+
+- “运行中”标签复测后页面显示 `共 549988 条代理`，没有再沿用“全部”分页。
+- 每个标签第 `2` 页均返回 `20` 条数据，分页 total 正确。
+- 第 `1000` 页抽测标签均返回 `20` 条数据，分页 total 正确。
+- 控制台 error/warning：`0`
+- 业务 API 失败：`0`
+
+截图：
+
+```text
+/private/tmp/shop-cloud-assets-ip-tags.png
+/private/tmp/shop-cloud-assets-ip-tags-pagination.png
+```
+
+### 生命周期与通知计划追踪
+
+代理列表压测后补查：
+
+- 任务中心生命周期：`2,479,992/2,479,992`
+- 任务中心通知计划：`21,431/22,437`
+- 关机计划：`1,979,990`
+- 服务器删除计划：`2`
+- 服务器删除历史：`20,010`
+- IP 删除计划：`500,000`
+- IP 删除历史：`520,010`
+- 通知计划活跃用户：`21,429`
+- 通知近期：`3,428`
+- 通知未来：`18,001`
+- 通知历史：`14,960`
+
+结论：代理列表标签压测没有引起生命周期计划或通知计划统计变化。
+
+### 机器人高并发
+
+继续复测 8 条机器人聚焦测试：
+
+- 通知复制并发隔离。
+- 钱包直付 / 钱包补付并发。
+- `60` 路批量后台任务隔离。
+- 订单详情、资产详情、IP 查询、自动续费返回链。
+- `callback_data <= 64` 字节限制。
+
+结果：全部通过。
+
+### 验证
+
+通过：
+
+```bash
+UV_CACHE_DIR=/private/tmp/uv-cache-shop uv run python manage.py check
+UV_CACHE_DIR=/private/tmp/uv-cache-shop DJANGO_TEST_SQLITE=1 uv run python manage.py test bot.tests.TelegramListenerPushTestCase.test_notice_copy_wrapper_keeps_concurrent_user_sends_isolated bot.tests.RetainedIpRenewalUiTestCase.test_cloud_background_tasks_keep_high_concurrency_isolated bot.tests.RetainedIpRenewalUiTestCase.test_cloud_background_tasks_keep_bulk_concurrency_isolated bot.tests.RetainedIpRenewalUiTestCase.test_cloud_server_list_order_detail_uses_short_back_callback bot.tests.RetainedIpRenewalUiTestCase.test_asset_detail_callback_from_extreme_order_detail_stays_under_limit bot.tests.RetainedIpRenewalUiTestCase.test_asset_detail_callback_recompacts_nested_asset_detail_back_path bot.tests.RetainedIpRenewalUiTestCase.test_cloud_ip_query_actions_return_to_query_menu bot.tests.RetainedIpRenewalUiTestCase.test_cloud_auto_renew_callbacks_keep_nested_back_under_limit --settings=shop.settings --verbosity=1
+git diff --check
+```
+
+红线扫描通过。命中项为既有测试桩账号字符串、Telegram 登录账号 API 文件名，以及 `CloudServerOrder.ip_recycle_at` 同步记录，不是旧订单到期事实回流。
+
+### 清理
+
+- 已删除本轮临时后台登录用户 `codex_patrol_assets_probe`。
+- 已删除 `/private/tmp/shop_assets_probe_token.txt`。
+
+### 受限项
+
+- 本轮未执行真实云资源创建、关机、删机、释放 IP、换 IP、真实支付、链上广播、生产发布或删除业务数据。
+- 本轮未打印密钥、Telegram session、TOTP、支付密钥、云厂商密钥或完整代理链接。
