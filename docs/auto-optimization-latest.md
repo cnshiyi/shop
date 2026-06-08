@@ -4,61 +4,69 @@
 
 ## 最近一轮
 
-- 时间：2026-06-08 07:21 CST
-- 状态：完成一轮代理列表真实库分页对账、真实前端标签翻页/末页测试、Telegram 机器人多任务高并发回归；发现测试覆盖不足，已补充高并发用例。
-- 本轮范围：代理列表 IP 视图风险标签、前端真实页面分页、机器人后台钱包直付/补付/续费并发、callback 回归、红线扫描。
+- 时间：2026-06-08 13:17 CST
+- 状态：完成一轮生命周期计划页专项巡检，覆盖关机/删机/IP 删除三阶段开关联动、任务中心聚焦测试和 10 万级真实接口分页对账；未发现需要改代码的问题。
+- 本轮范围：生命周期计划页、阶段总开关、资产单项开关、任务中心生命周期统计、红线扫描。
 
 ## 巡检结论
 
-- 真实数据库/API 对账通过：`11` 个风险标签共 `44` 个分页点全部一致，覆盖第 `1` 页、第 `2` 页、第 `1000` 页和末页。
-- 真实前端页面通过：打开 `http://127.0.0.1:5666/admin/cloud-assets`，逐个点击重点标签并实际翻到第 `2` 页和末页，控制台 `0` error。
-- 重点标签前端实测结果：
-  - 全部：`共 2489998 条代理`，第 `2` 页 `20` 行，末页 `124500` 加载 `18` 行。
-  - 未附加固定 IP：`共 100001 条代理`，第 `2` 页 `20` 行，末页 `5001` 加载 `1` 行。
-  - 云账号异常：`共 1145002 条代理`，第 `2` 页 `20` 行，末页 `57251` 加载 `2` 行。
-  - 关机计划关闭：`共 100384 条代理`，第 `2` 页 `20` 行，末页 `5020` 加载 `4` 行。
-  - 未绑定群组：`共 100013 条代理`，第 `2` 页 `20` 行，末页 `5001` 加载 `13` 行。
-  - 续费关闭：`共 104558 条代理`，第 `2` 页 `20` 行，末页 `5228` 加载 `18` 行。
-- 机器人高并发测试已加强：新增 `60` 个并发后台任务用例，覆盖 `20` 组钱包直付、`20` 组钱包补付、`20` 组续费后检查，校验 `chat_id`、订单、数量和派生创建任务不串上下文。
-- `bot.tests` 整组 `107` 个测试全部通过。
+- Django 基础检查通过：`uv run python manage.py check` 无报错。
+- 生命周期与任务中心聚焦测试通过：`18` 个测试全部通过，覆盖关机总开关、阶段单项开关、关机完成后进入删机计划、任务中心生命周期失败/待执行统计。
+- 10 万级专项压测通过：在独立临时 SQLite 审计库构造 `101003` 条 `CloudAsset`，其中：
+  - 关机计划资产：`50001` 条。
+  - 服务器删除计划资产：`50001` 条。
+  - 未附加固定 IP 删除计划资产：`1001` 条。
+- 真实接口 `lifecycle_plans` 与查询层分页逐页对账一致：
+  - 关机计划：第 `1/2/1000/2501` 页全部一致。
+  - 服务器删除计划：第 `1/2/1000/2501` 页全部一致。
+  - IP 删除计划：第 `1/2/51` 页全部一致。
+- 资产单项开关状态正确落到接口：
+  - 关机计划关闭资产返回 `shutdown_disabled`。
+  - 服务器删除计划关闭资产返回 `server_delete_disabled`。
+  - IP 删除计划关闭资产返回 `ip_delete_disabled`。
+- 生命周期总开关状态正确落到接口：
+  - 关机总开关关闭返回 `global_shutdown_disabled`。
+  - 服务器删除总开关关闭返回 `global_server_delete_disabled`。
+  - IP 删除总开关关闭返回 `global_ip_delete_disabled`。
+- 本轮未发现旧到期字段、旧计划快照、旧退款逻辑或废弃 runtime app 回流。
 
 ## 验证
 
 已通过：
 
 ```bash
-UV_CACHE_DIR=/private/tmp/uv-cache-shop DJANGO_TEST_SQLITE=1 uv run python manage.py test bot.tests.RetainedIpRenewalUiTestCase.test_cloud_background_tasks_keep_bulk_concurrency_isolated --settings=shop.settings --verbosity=1
-UV_CACHE_DIR=/private/tmp/uv-cache-shop DJANGO_TEST_SQLITE=1 uv run python manage.py test bot.tests --settings=shop.settings --verbosity=1
 UV_CACHE_DIR=/private/tmp/uv-cache-shop uv run python manage.py check
-git diff --check
+UV_CACHE_DIR=/private/tmp/uv-cache-shop DJANGO_TEST_SQLITE=1 uv run python manage.py test cloud.tests.CloudServerServicesTestCase.test_lifecycle_plans_use_stage_specific_asset_switches cloud.tests.CloudServerServicesTestCase.test_lifecycle_plans_show_global_stage_switches cloud.tests.CloudServerServicesTestCase.test_lifecycle_plans_split_shutdown_before_server_delete cloud.tests.CloudServerServicesTestCase.test_due_orders_global_shutdown_switch_does_not_block_delete_or_recycle cloud.tests_task_center.CloudTaskCenterApiTestCase --settings=shop.settings --verbosity=1
+DB_ENGINE=sqlite SQLITE_NAME=/private/tmp/shop-lifecycle-audit.sqlite3 UV_CACHE_DIR=/private/tmp/uv-cache-shop uv run python manage.py migrate --settings=shop.settings --noinput
+DB_ENGINE=sqlite SQLITE_NAME=/private/tmp/shop-lifecycle-audit.sqlite3 UV_CACHE_DIR=/private/tmp/uv-cache-shop uv run python manage.py shell --settings=shop.settings <<'PY'
+# 构造 101003 条 CloudAsset，调用 lifecycle_plans 真接口，
+# 对账关机/删机/IP 删除分页与 cloud.lifecycle_plan_queries 直接查询结果。
+PY
 ```
 
-真实库/API 对账：
+压测结果摘要：
 
 ```text
-代理列表风险标签：all、unattached_ip、account_disabled、shutdown_disabled、unbound_group、auto_renew_off、normal、due_soon、expired、abnormal、unbound_user
-分页点：第 1 页、第 2 页、第 1000 页、末页
-结果：44/44 一致
+关机计划：50001 条，第 1/2/1000/2501 页全部一致；首屏约 320.67ms
+服务器删除：50001 条，第 1/2/1000/2501 页全部一致；首屏约 24.37ms
+IP 删除计划：1001 条，第 1/2/51 页全部一致；首屏约 9.69ms
+总开关关闭后的三阶段接口返回均正确进入 global_*_disabled 状态
 ```
 
-红线扫描通过：
+红线扫描建议沿用：
 
 ```bash
 rg -n "service_expires_at|actual_expires_at.*CloudServerOrder|CloudServerOrder.*actual_expires_at|plan snapshot|snapshot table|old refund|refund_legacy|refund_old|legacy_refund|accounts\\.|finance\\.|mall\\.|monitoring\\.|dashboard_api\\.|biz\\." cloud bot orders core shop -g '!**/migrations/**'
 ```
 
-说明：
-
-- 红线扫描命中项仍是 Telegram 登录账号代码、云账号测试桩和 `CloudServerOrder.ip_recycle_at` 同步语句，不是旧到期事实回流。
-- SQLite 的 `db_comment` warnings 仍是已知测试噪声。
-- 临时后台 session、临时后台用户、Playwright 截图目录和上一轮临时 SQLite 审计库均已清理。
-
 ## 受限项
 
 - 本轮未执行真实云资源创建、关机、删除服务器、释放 IP、换 IP、真实支付、链上广播、生产发布或删除业务数据。
 - 本轮未打印密钥、Telegram session、支付密钥、云厂商密钥或完整代理链接。
+- 前端仓库 `/Users/a399/Desktop/data/vue-shop-admin` 仍有本地未提交改动，本轮未做浏览器写操作或前端代码改动。
 
 ## 下一步
 
-- 继续不停轮巡检，下一轮优先回到生命周期创建服务器、关机计划、删除计划、IP 删除计划的开关联动和执行顺序。
-- 继续关注代理列表云账号异常标签首屏约 `2.4s` 的加载耗时，后续可继续优化冷缓存计数和筛选。
+- 下一轮优先继续做真实前端链路巡检，覆盖任务中心计划页分页/跳页和生命周期总开关切换后的界面状态。
+- 继续盯紧生命周期计划页首屏性能差异，尤其是关机计划页在冷缓存下是否存在比删机/IP 删除更高的首屏耗时。
+- 继续避开当前后端 `bot/api.py`、`cloud/lifecycle_plan_queries.py`、`cloud/tests.py` 和前端脏改动区域，只做最小安全任务。

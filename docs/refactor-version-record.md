@@ -14762,3 +14762,91 @@ rg -n "service_expires_at|actual_expires_at.*CloudServerOrder|CloudServerOrder.*
 
 - 下一轮继续生命周期创建服务器、关机计划、删除计划、IP 删除计划的开关联动和执行顺序巡检。
 - 继续关注云账号异常标签首屏约 `2.4s` 的加载耗时。
+
+## 2026-06-08 13:17 生命周期计划页 10 万级专项巡检
+
+### 背景
+
+`TODO.md` 已全部完成，本轮按固定巡检清单回到高风险的生命周期路径，重点核验后台计划页三阶段联动、任务中心统计和总开关/单项开关在真实接口上的落点是否一致。
+
+### Git 与工作区
+
+- 后端工作区存在未提交改动：`bot/api.py`、`cloud/lifecycle_plan_queries.py`、`cloud/tests.py`，以及未跟踪目录 `output/`。
+- 前端仓库 `/Users/a399/Desktop/data/vue-shop-admin` 存在未提交改动：`apps/web-antd/src/api/admin.ts`、`apps/web-antd/src/views/dashboard/tasks/plans.vue`。
+- 本轮不修改上述脏文件，只更新自动化文档和记忆，避免覆盖用户或上一轮本地增量。
+
+### 聚焦测试
+
+执行：
+
+```bash
+UV_CACHE_DIR=/private/tmp/uv-cache-shop uv run python manage.py check
+UV_CACHE_DIR=/private/tmp/uv-cache-shop DJANGO_TEST_SQLITE=1 uv run python manage.py test cloud.tests.CloudServerServicesTestCase.test_lifecycle_plans_use_stage_specific_asset_switches cloud.tests.CloudServerServicesTestCase.test_lifecycle_plans_show_global_stage_switches cloud.tests.CloudServerServicesTestCase.test_lifecycle_plans_split_shutdown_before_server_delete cloud.tests.CloudServerServicesTestCase.test_due_orders_global_shutdown_switch_does_not_block_delete_or_recycle cloud.tests_task_center.CloudTaskCenterApiTestCase --settings=shop.settings --verbosity=1
+```
+
+结果：
+
+- Django `check` 通过。
+- `18` 个测试全部通过。
+- 已覆盖：
+  - 资产单项关机/删机/IP 删除开关。
+  - 生命周期总开关。
+  - 关机完成后才进入服务器删除计划。
+  - 生命周期任务中心失败/待执行统计。
+- SQLite `db_comment` warnings 仍是已知测试噪声，不属于业务回归。
+
+### 10 万级生命周期接口压测
+
+为了避免触碰真实生产数据，本轮在独立临时 SQLite 审计库 `/private/tmp/shop-lifecycle-audit.sqlite3` 上构造大数据并直接调用真实后台接口 `bot.api.lifecycle_plans`，再与 `cloud.lifecycle_plan_queries` 直接分页结果做精确对账。
+
+执行：
+
+```bash
+DB_ENGINE=sqlite SQLITE_NAME=/private/tmp/shop-lifecycle-audit.sqlite3 UV_CACHE_DIR=/private/tmp/uv-cache-shop uv run python manage.py migrate --settings=shop.settings --noinput
+DB_ENGINE=sqlite SQLITE_NAME=/private/tmp/shop-lifecycle-audit.sqlite3 UV_CACHE_DIR=/private/tmp/uv-cache-shop uv run python manage.py shell --settings=shop.settings <<'PY'
+# 构造 101003 条 CloudAsset：
+# - 50001 条关机计划资产
+# - 50001 条服务器删除计划资产
+# - 1001 条未附加固定 IP 删除计划资产
+# 再调用 lifecycle_plans 真接口，逐页对账关机/删机/IP 删除计划分页。
+PY
+```
+
+结果：
+
+- 临时库总资产数：`101003`。
+- 关机计划计数：`50001`。
+- 服务器删除计划计数：`50001`。
+- IP 删除计划计数：`1001`。
+- 精确分页对账全部通过：
+  - 关机计划：第 `1/2/1000/2501` 页一致。
+  - 服务器删除计划：第 `1/2/1000/2501` 页一致。
+  - IP 删除计划：第 `1/2/51` 页一致。
+- 接口耗时摘要：
+  - 关机计划首屏约 `320.67ms`，第 `2` 页约 `25.65ms`，第 `1000` 页约 `40.97ms`。
+  - 服务器删除首屏约 `24.37ms`，第 `1000` 页约 `39.30ms`。
+  - IP 删除首屏约 `9.69ms`。
+- 单项开关状态正确：
+  - 关机资产返回 `shutdown_disabled`。
+  - 服务器删除资产返回 `server_delete_disabled`。
+  - IP 删除资产返回 `ip_delete_disabled`。
+- 总开关关闭后状态正确：
+  - 返回 `global_shutdown_disabled`、`global_server_delete_disabled`、`global_ip_delete_disabled`。
+  - 三表联合请求耗时约 `53.55ms`。
+
+### 红线与结论
+
+- 本轮未发现 `CloudAsset.actual_expires_at` 以外的订单到期事实回流。
+- 未发现旧计划快照、旧退款逻辑或废弃 runtime app 回流。
+- 未发现生命周期计划页分页错乱、重复、丢失或阶段切换错误。
+- 本轮不需要代码修复，仅更新自动化文档。
+
+### 红线
+
+- 本轮未执行真实云资源创建、关机、删机、释放 IP、换 IP、真实支付、链上广播、生产发布或删除业务数据。
+- 本轮未打印密钥、Telegram session、支付密钥、云厂商密钥或完整代理链接。
+
+### 下一步
+
+- 下一轮优先补真实前端计划页翻页/跳页与控制台巡检，验证任务中心和生命周期计划页在实际浏览器中的分页状态。
+- 继续关注关机计划页首屏相对删机/IP 删除的冷缓存耗时差异。
