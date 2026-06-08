@@ -10877,6 +10877,57 @@ class CloudServerServicesTestCase(TestCase):
         self.assertEqual(row['order_detail_path'], f'/admin/cloud-orders/{order.id}')
         self.assertEqual(row['asset_detail_path'], f'/admin/cloud-assets/{asset.id}')
 
+    # 功能：验证服务端分页计划页不会把已过期删除计划误标为未来计划；当前函数属于 云资产、云订单和生命周期。
+    def test_lifecycle_plans_server_page_marks_overdue_delete_as_due_now(self):
+        SiteConfig.set('cloud_server_delete_enabled', '1')
+        expires_at = timezone.now() - timezone.timedelta(days=30)
+        order = CloudServerOrder.objects.create(
+            order_no='LIFECYCLE-OVERDUE-DELETE-PAGE-1',
+            user=self.user,
+            plan=self.plan,
+            provider=self.plan.provider,
+            region_code=self.plan.region_code,
+            region_name=self.plan.region_name,
+            plan_name=self.plan.plan_name,
+            quantity=1,
+            currency='USDT',
+            total_amount='19.00',
+            pay_amount='19.00',
+            status='deleting',
+            public_ip='3.3.3.58',
+            suspend_at=timezone.now() - timezone.timedelta(days=27),
+            delete_at=timezone.now() - timezone.timedelta(days=24),
+        )
+        asset = CloudAsset.objects.create(
+            kind=CloudAsset.KIND_SERVER,
+            source=CloudAsset.SOURCE_ORDER,
+            order=order,
+            user=self.user,
+            provider=order.provider,
+            region_code=order.region_code,
+            region_name=order.region_name,
+            asset_name='overdue-delete-page-asset',
+            instance_id='overdue-delete-page-asset',
+            public_ip=order.public_ip,
+            actual_expires_at=expires_at,
+            status=CloudAsset.STATUS_RUNNING,
+            is_active=True,
+        )
+        staff_user = get_user_model().objects.create_user(username='staff_overdue_delete_page', password='x', is_staff=True)
+        request = self.factory.get('/api/admin/tasks/plans/', {'limit': 1000, 'refresh': '1'})
+        self._attach_bearer_session(request, staff_user)
+
+        response = lifecycle_plans(request)
+        data = json.loads(response.content)['data']
+        row = next(item for item in data['server_delete_items'] if item.get('asset_id') == asset.id)
+
+        self.assertEqual(row['item_type'], 'order')
+        self.assertEqual(row['order_id'], order.id)
+        self.assertEqual(row['queue_status'], 'due_now')
+        self.assertEqual(row['plan_state_label'], '待执行')
+        self.assertEqual(row['execution_status'], '已到删除时间，待执行删除服务器')
+        self.assertTrue(row['should_execute'])
+
     # 功能：验证关机计划完成后才进入服务器删除计划；当前函数属于 云资产、云订单和生命周期。
     def test_lifecycle_plans_split_shutdown_before_server_delete(self):
         expires_at = timezone.now() - timezone.timedelta(days=5)
@@ -11702,6 +11753,7 @@ class CloudServerServicesTestCase(TestCase):
 
     # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
     def test_lifecycle_plans_include_future_server_plan_item(self):
+        SiteConfig.set('cloud_server_delete_enabled', '1')
         delete_at = timezone.now() + timezone.timedelta(days=25)
         expires_at = timezone.now() + timezone.timedelta(days=20)
         order = CloudServerOrder.objects.create(

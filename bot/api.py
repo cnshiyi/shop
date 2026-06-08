@@ -309,9 +309,31 @@ def _page_meta(page: int, page_size: int, total: int) -> dict:
 
 def _server_lifecycle_plan_page_items(*, plan_stage: str, page: int, page_size: int, total: int | None = None) -> list[dict]:
     assets = server_lifecycle_plan_page(plan_stage=plan_stage, page=page, page_size=page_size, total=total)
+    now = timezone.now()
+    pending_until = now + timezone.timedelta(days=7)
+
+    def queue_for(plan_at):
+        if not plan_at:
+            return 'scheduled_future', '计划中'
+        if plan_at <= now:
+            return 'due_now', '待执行'
+        if plan_at <= pending_until:
+            return 'within_window', '计划中'
+        return 'scheduled_future', '计划中'
+
     if plan_stage == 'shutdown':
-        return [_shutdown_stage_item_payload(asset, queue_status='scheduled_future', queue_status_label='计划中') for asset in assets]
-    return [_asset_delete_plan_item_payload(asset, queue_status='scheduled_future', queue_status_label='计划中') for asset in assets]
+        items = []
+        for asset in assets:
+            _expires_at, suspend_at, _delete_at = _server_asset_lifecycle_times(asset)
+            queue_status, queue_status_label = queue_for(suspend_at)
+            items.append(_shutdown_stage_item_payload(asset, queue_status=queue_status, queue_status_label=queue_status_label))
+        return items
+    items = []
+    for asset in assets:
+        _expires_at, _suspend_at, delete_at = _server_asset_lifecycle_times(asset)
+        queue_status, queue_status_label = queue_for(delete_at)
+        items.append(_asset_delete_plan_item_payload(asset, queue_status=queue_status, queue_status_label=queue_status_label))
+    return items
 
 
 def _server_delete_history_page_items(*, page: int, page_size: int, total: int | None = None) -> list[dict]:
