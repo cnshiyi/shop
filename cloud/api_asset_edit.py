@@ -349,7 +349,13 @@ def update_cloud_asset(request, asset_id):
             rebound_to_instance = bool(
                 old_provider_status and '未附加' in old_provider_status and str(asset.instance_id or '').strip()
             )
-            refresh_unattached_delete_due = bool(is_unattached_ip and payload and 'actual_expires_at' not in payload and not rebound_to_instance)
+            refresh_unattached_delete_due = bool(
+                is_unattached_ip
+                and payload
+                and 'actual_expires_at' not in payload
+                and not rebound_to_instance
+                and asset.actual_expires_at is None
+            )
             if rebound_to_instance:
                 asset.actual_expires_at = None
                 asset.provider_status = '已重新绑定实例-待人工添加时间'

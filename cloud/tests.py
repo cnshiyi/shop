@@ -11046,6 +11046,58 @@ class CloudServerServicesTestCase(TestCase):
         self.assertFalse(delete_row['server_delete_enabled'])
         self.assertFalse(ip_row['ip_delete_enabled'])
 
+    # 功能：验证未附加 IP 已有到期时间时，切换 IP 删除开关不会刷新到期时间且计划页仍显示关闭行；当前函数属于 云资产后台 API 和生命周期。
+    def test_unattached_ip_switch_preserves_existing_expiry_and_plan_row(self):
+        SiteConfig.set('cloud_ip_delete_enabled', '1')
+        expires_at = (timezone.now() + timezone.timedelta(days=3)).replace(microsecond=0)
+        asset = CloudAsset.objects.create(
+            kind=CloudAsset.KIND_SERVER,
+            source=CloudAsset.SOURCE_AWS_SYNC,
+            user=self.user,
+            provider='aws_lightsail',
+            region_code=self.plan.region_code,
+            region_name=self.plan.region_name,
+            asset_name='stage-switch-ip-existing-expiry',
+            instance_id='',
+            public_ip='3.3.3.46',
+            status=CloudAsset.STATUS_RUNNING,
+            provider_status='未附加固定IP',
+            note='未附加固定IP',
+            actual_expires_at=expires_at,
+            ip_delete_enabled=True,
+            is_active=True,
+        )
+        staff_user = get_user_model().objects.create_user(
+            username='staff_ip_switch_existing_expiry',
+            password='x',
+            is_staff=True,
+            is_superuser=True,
+        )
+        request = RequestFactory().patch(
+            f'/api/admin/cloud-assets/{asset.id}/',
+            data=json.dumps({'ip_delete_enabled': False}),
+            content_type='application/json',
+            HTTP_AUTHORIZATION='',
+        )
+        self._attach_bearer_session(request, staff_user)
+
+        response = update_cloud_asset(request, asset.id)
+
+        self.assertEqual(response.status_code, 200)
+        asset.refresh_from_db()
+        self.assertFalse(asset.ip_delete_enabled)
+        self.assertEqual(asset.actual_expires_at, expires_at)
+
+        plan_request = self.factory.get('/api/admin/tasks/plans/', {'limit': 1000, 'refresh': '1'})
+        self._attach_bearer_session(plan_request, staff_user)
+        plan_response = lifecycle_plans(plan_request)
+        data = json.loads(plan_response.content)['data']
+        ip_row = next(item for item in data['ip_delete_plan_items'] if item.get('asset_id') == asset.id)
+
+        self.assertEqual(ip_row['queue_status'], 'ip_delete_disabled')
+        self.assertFalse(ip_row['ip_delete_enabled'])
+        self.assertEqual(parse_datetime(ip_row['actual_expires_at']), expires_at)
+
     def test_lifecycle_plans_show_global_stage_switches(self):
         SiteConfig.set('cloud_server_shutdown_enabled', '0')
         SiteConfig.set('cloud_server_delete_enabled', '0')

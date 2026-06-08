@@ -16434,6 +16434,102 @@ git diff --check
 - 本轮未执行真实云资源创建、关机、删机、释放 IP、换 IP、真实支付、链上广播、生产发布或删除业务数据。
 - 本轮未打印密钥、Telegram session、TOTP、支付密钥、云厂商密钥或完整代理链接。
 
+## 2026-06-08 18:20 CST 资产详情单项开关与 IP 到期时间巡检修复
+
+### 本轮背景
+
+- 继续执行当前会话自动巡检目标。
+- 用户要求机器人多任务高并发也要测到，同时生命周期创建/删除/开关处理是重点。
+- 本轮聚焦资产详情页三类单项开关和计划页同步，不执行真实云资源关机、删机或释放 IP。
+
+### 本轮发现
+
+- 真实浏览器打开资产详情页，分别测试：
+  - 关机计划开关：资产 `20418`。
+  - 删除计划开关：资产 `326`。
+  - IP 删除计划开关：资产 `500332`。
+- 关机和删机开关关闭后，计划页能继续显示对应计划行并标记关闭。
+- IP 删除开关关闭后，计划页一度找不到资产 `500332`。
+- 深查后确认根因是后台资产更新接口在保存未附加 IP 时，只要请求体不包含 `actual_expires_at`，就刷新 15 天后的删除到期时间。
+- 这导致已有到期时间的未附加 IP 在切换 `ip_delete_enabled` 时被误改写，计划排序位置发生变化。
+
+### 修复
+
+修改：
+
+```text
+/Users/a399/Desktop/data/shop/cloud/api_asset_edit.py
+/Users/a399/Desktop/data/shop/cloud/tests.py
+```
+
+修复内容：
+
+- 未附加 IP 自动补 15 天删除到期时间只在 `CloudAsset.actual_expires_at is None` 时触发。
+- 已有到期时间的未附加 IP，切换 `ip_delete_enabled`、`shutdown_enabled`、`server_delete_enabled` 等开关时，不再改写到期事实。
+- 新增测试 `test_unattached_ip_switch_preserves_existing_expiry_and_plan_row`，覆盖：
+  - 后台更新接口关闭 IP 删除开关。
+  - 到期时间保持不变。
+  - IP 删除计划页仍返回该资产行。
+  - 行状态为 `ip_delete_disabled`。
+
+### 真实浏览器验证
+
+实际打开：
+
+```text
+http://127.0.0.1:5666/admin/cloud-assets/20418
+http://127.0.0.1:5666/admin/cloud-assets/326
+http://127.0.0.1:5666/admin/cloud-assets/500332
+http://127.0.0.1:5666/admin/tasks/plans
+```
+
+验证结果：
+
+- 资产 `20418`：详情页关闭关机计划后，计划页响应和真实表格行均为 `shutdown_disabled`，行内开关关闭；随后恢复开启。
+- 资产 `326`：详情页关闭删除计划后，计划页响应和真实表格行均为 `server_delete_disabled`，行内开关关闭；随后恢复开启。
+- 资产 `500332`：详情页关闭 IP 删除计划后，计划页响应和真实表格行均为 `ip_delete_disabled`，行内开关关闭；随后恢复开启。
+- IP 样本计划页到期时间保持 `2026-06-21T14:17:03.527000+08:00`，未再刷新到 15 天后。
+- 控制台 error/warning：`0`
+- 业务 API 失败：`0`
+- 请求失败：`0`
+- 截图：`/private/tmp/shop-asset-detail-plan-sync.png`
+
+### 数据恢复和清理
+
+- 三个实测样本开关最终均恢复开启。
+- 资产 `500332` 的 `actual_expires_at` 已恢复到实测前值。
+- 已删除临时后台登录用户 `codex_patrol_asset_detail_probe`。
+- 已删除 `/private/tmp/shop_asset_detail_probe_token.txt`。
+
+### 机器人高并发
+
+机器人 8 条聚焦测试通过：
+
+- 通知复制并发隔离。
+- 钱包直付 / 钱包补付同时执行。
+- `60` 路批量后台任务隔离。
+- 订单详情、资产详情、IP 查询、自动续费返回链。
+- `callback_data <= 64` 字节限制。
+
+### 验证
+
+执行并通过：
+
+```bash
+UV_CACHE_DIR=/private/tmp/uv-cache-shop uv run python manage.py check
+UV_CACHE_DIR=/private/tmp/uv-cache-shop uv run python -m py_compile cloud/api_asset_edit.py cloud/lifecycle_plan_queries.py bot/api.py
+UV_CACHE_DIR=/private/tmp/uv-cache-shop DJANGO_TEST_SQLITE=1 uv run python manage.py test cloud.tests.CloudServerServicesTestCase.test_unattached_ip_switch_preserves_existing_expiry_and_plan_row cloud.tests.CloudServerServicesTestCase.test_lifecycle_plans_use_stage_specific_asset_switches --settings=shop.settings --verbosity=1
+UV_CACHE_DIR=/private/tmp/uv-cache-shop DJANGO_TEST_SQLITE=1 uv run python manage.py test bot.tests.TelegramListenerPushTestCase.test_notice_copy_wrapper_keeps_concurrent_user_sends_isolated bot.tests.RetainedIpRenewalUiTestCase.test_cloud_background_tasks_keep_high_concurrency_isolated bot.tests.RetainedIpRenewalUiTestCase.test_cloud_background_tasks_keep_bulk_concurrency_isolated bot.tests.RetainedIpRenewalUiTestCase.test_cloud_server_list_order_detail_uses_short_back_callback bot.tests.RetainedIpRenewalUiTestCase.test_asset_detail_callback_from_extreme_order_detail_stays_under_limit bot.tests.RetainedIpRenewalUiTestCase.test_asset_detail_callback_recompacts_nested_asset_detail_back_path bot.tests.RetainedIpRenewalUiTestCase.test_cloud_ip_query_actions_return_to_query_menu bot.tests.RetainedIpRenewalUiTestCase.test_cloud_auto_renew_callbacks_keep_nested_back_under_limit --settings=shop.settings --verbosity=1
+git diff --check
+```
+
+红线扫描通过。命中项为既有测试桩账号字符串、Telegram 登录账号 API 文件名，以及 `CloudServerOrder.ip_recycle_at` 同步记录，不是旧订单到期事实回流。
+
+### 风险与后续
+
+- 本轮修复范围只覆盖资产详情页保存时的未附加 IP 到期时间误刷新。
+- 计划页在百万级数据下完整重载仍然慢，下一轮继续关注生命周期执行器状态流转和计划页加载性能。
+
 ## 2026-06-08 17:49 CST 生命周期计划页总开关展示口径修复
 
 ### 本轮背景
