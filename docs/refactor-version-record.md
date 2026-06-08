@@ -19575,3 +19575,56 @@ UV_CACHE_DIR=/private/tmp/uv-cache-shop DJANGO_TEST_SQLITE=1 uv run python manag
 - 生命周期计划页 11 个相邻回归测试通过。
 - `git diff --check` 通过。
 - SQLite 聚焦测试仍输出既有 `db_comment/db_table_comment` 能力差异告警，不属于本轮问题。
+
+## 2026-06-09 01:31 CST 修复后台编辑用户余额半成功问题
+
+### 本轮背景
+
+- 用户反馈后台编辑用户余额接口存在问题。
+- 排查发现前端“编辑余额/折扣”弹窗连续调用两个接口：先保存 USDT/TRX 余额，再保存云服务器折扣。
+- 如果第二个折扣接口失败，余额已写入且流水已生成，前端却提示整体失败，形成半成功状态。
+- 本轮不执行真实支付、链上广播、真实云资源创建/删除、生产发布或删除数据。
+
+### 修复
+
+- `bot/api_users.py`
+  - `update_user_balance` 新增可选 `cloud_discount_rate` 入参。
+  - 同一请求内先校验 USDT 余额、TRX 余额和折扣，再进入同一个事务保存。
+  - 折扣非法时返回 400，余额和流水均不变。
+  - 响应补充 `cloud_discount_rate`，方便前端使用同一个接口刷新状态。
+- `bot/tests.py`
+  - 新增余额和折扣一次保存成功的回归测试。
+  - 新增折扣非法时不会部分保存余额、不会写流水的回归测试。
+- `/Users/a399/Desktop/data/vue-shop-admin/apps/web-antd/src/api/admin.ts`
+  - 余额更新接口类型允许携带可选 `cloud_discount_rate`。
+- `/Users/a399/Desktop/data/vue-shop-admin/apps/web-antd/src/views/dashboard/users/index.vue`
+  - 编辑弹窗改为只调用一次余额接口，同时提交余额和折扣。
+
+### 结论
+
+- 后台编辑用户余额和折扣现在是单请求、统一校验、同事务保存。
+- 原有单独折扣接口仍保留，没有破坏旧调用方。
+- 前端仓库存在非本轮脏文件 `apps/web-antd/src/views/dashboard/tasks/plans.vue`，本轮未修改。
+
+### 验证
+
+通过：
+
+```bash
+UV_CACHE_DIR=/private/tmp/uv-cache-shop uv run python manage.py check
+UV_CACHE_DIR=/private/tmp/uv-cache-shop uv run python -m py_compile bot/api_users.py bot/tests.py
+UV_CACHE_DIR=/private/tmp/uv-cache-shop DJANGO_TEST_SQLITE=1 uv run python manage.py test bot.tests.DashboardCloudAccountVerifyTestCase.test_update_user_balance_can_atomically_save_discount bot.tests.DashboardCloudAccountVerifyTestCase.test_update_user_balance_invalid_discount_does_not_partially_save_balance --settings=shop.settings --verbosity=1
+UV_CACHE_DIR=/private/tmp/uv-cache-shop DJANGO_TEST_SQLITE=1 uv run python manage.py test bot.tests.DashboardCloudAccountVerifyTestCase.test_user_proxy_count_follows_cloud_account_active_state --settings=shop.settings --verbosity=1
+pnpm -F @vben/web-antd run typecheck
+git diff --check
+```
+
+结果：
+
+- Django 系统检查通过。
+- 相关后端文件编译通过。
+- 后端 2 个余额接口原子性测试通过。
+- 用户列表相关回归测试通过。
+- 前端 `vue-tsc` 类型检查通过。
+- `git diff --check` 通过。
+- SQLite 聚焦测试仍输出既有 `db_comment/db_table_comment` 能力差异告警，不属于本轮问题。

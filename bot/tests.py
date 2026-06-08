@@ -16,7 +16,7 @@ from django.test import RequestFactory, SimpleTestCase, TestCase
 from django.urls import Resolver404, resolve
 from django.utils import timezone
 
-from bot.api import DASHBOARD_SESSION_IDLE_SECONDS, _active_proxy_counts_by_user, _authenticate_dashboard_request, admin_users_list, archive_telegram_chat, auth_totp_start, create_admin_user, create_cloud_account, create_product, delete_cloud_account, me, send_daily_expiry_summary_test_notification, send_telegram_chat_message, site_config_groups, telegram_login_start, update_cloud_account, update_site_config, users_list, verify_cloud_account
+from bot.api import DASHBOARD_SESSION_IDLE_SECONDS, _active_proxy_counts_by_user, _authenticate_dashboard_request, admin_users_list, archive_telegram_chat, auth_totp_start, create_admin_user, create_cloud_account, create_product, delete_cloud_account, me, send_daily_expiry_summary_test_notification, send_telegram_chat_message, site_config_groups, telegram_login_start, update_cloud_account, update_site_config, update_user_balance, users_list, verify_cloud_account
 from bot.handlers import _asset_reinstall_confirm_keyboard, _asset_reinstall_submitted_keyboard, _asset_renewal_plan_keyboard, _buy_cloud_server_with_balance_and_notify, _cloud_renewal_postcheck_and_notify, _cloud_renewal_result_keyboard, _cloud_server_created_text, _fetch_tron_address_summary, _hydrate_order_proxy_links, _install_notice_copy_wrapper, _pay_cloud_server_order_with_balance_and_notify, _proxy_links_text, _reinstall_confirm_keyboard, _reinstall_submitted_keyboard, _requires_recovery_provision, _retained_ip_renewal_plan_keyboard, _save_asset_main_proxy_link, _save_user_main_proxy_link, _trongrid_get_with_key_fallback, _trongrid_post_with_key_fallback, _validate_reinstall_proxy_link, register_handlers
 from bot.keyboards import _compact_back_button_callback, append_back_callback, balance_details_list, cloud_asset_detail_callback, cloud_auto_renew_callback, cloud_detail_callback, cloud_previous_detail_callback, compact_callback_path, cloud_ip_query_result, cloud_order_list, cloud_order_readonly_detail, cloud_server_change_ip_region_menu, cloud_server_detail, cloud_server_list, cloud_server_renew_payment
 from bot.models import TelegramChatArchive, TelegramChatMessage, TelegramGroupFilter, TelegramLoginAccount, TelegramUser
@@ -30,7 +30,7 @@ from cloud.services import prepare_cloud_server_order_instances, update_cloud_it
 from core.models import CloudAccountConfig, SiteConfig
 from core.texts import BOT_TEXTS
 from orders.ledger import record_balance_ledger
-from orders.models import Product, Recharge
+from orders.models import BalanceLedger, Product, Recharge
 from orders.services import list_balance_details, list_cloud_orders
 
 
@@ -798,6 +798,78 @@ class DashboardCloudAccountVerifyTestCase(TestCase):
         self.assertEqual(_active_proxy_counts_by_user([user.id]).get(user.id, 0), 0)
         payload = json.loads(users_list(request).content.decode('utf-8'))
         self.assertEqual(payload['data'][0]['proxy_count'], 0)
+
+    # 功能：验证后台用户余额编辑接口一次性保存余额和折扣，避免前端多接口半成功。
+    def test_update_user_balance_can_atomically_save_discount(self):
+        root = get_user_model().objects.create_user(username='root_user_balance_edit', password='pass', is_staff=True, is_superuser=True)
+        user = TelegramUser.objects.create(
+            tg_user_id=900011,
+            username='balance_edit_user',
+            balance=Decimal('1.000000'),
+            balance_trx=Decimal('2.000000'),
+            cloud_discount_rate=Decimal('100.00'),
+        )
+        request = RequestFactory().post(
+            f'/api/admin/users/{user.id}/balance/',
+            data=json.dumps({
+                'balance': '12.3456',
+                'balance_trx': '3.2109',
+                'cloud_discount_rate': '88.88',
+            }),
+            content_type='application/json',
+        )
+        self._attach_bearer_session(request, root)
+
+        response = update_user_balance(request, user.id)
+        payload = json.loads(response.content.decode('utf-8'))
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(payload['data']['balance'], '12.345')
+        self.assertEqual(payload['data']['balance_trx'], '3.21')
+        self.assertEqual(payload['data']['cloud_discount_rate'], '88.88')
+        user.refresh_from_db()
+        self.assertEqual(user.balance, Decimal('12.345000'))
+        self.assertEqual(user.balance_trx, Decimal('3.210000'))
+        self.assertEqual(user.cloud_discount_rate, Decimal('88.88'))
+        self.assertEqual(
+            list(BalanceLedger.objects.filter(user=user).order_by('currency').values_list('currency', 'before_balance', 'after_balance')),
+            [
+                ('TRX', Decimal('2.000000000'), Decimal('3.210000000')),
+                ('USDT', Decimal('1.000000000'), Decimal('12.345000000')),
+            ],
+        )
+
+    # 功能：验证后台余额和折扣合并保存时先整体校验，折扣非法不会提前写入余额或流水。
+    def test_update_user_balance_invalid_discount_does_not_partially_save_balance(self):
+        root = get_user_model().objects.create_user(username='root_user_balance_invalid_discount', password='pass', is_staff=True, is_superuser=True)
+        user = TelegramUser.objects.create(
+            tg_user_id=900012,
+            username='balance_invalid_discount_user',
+            balance=Decimal('5.000000'),
+            balance_trx=Decimal('6.000000'),
+            cloud_discount_rate=Decimal('99.00'),
+        )
+        request = RequestFactory().post(
+            f'/api/admin/users/{user.id}/balance/',
+            data=json.dumps({
+                'balance': '20',
+                'balance_trx': '30',
+                'cloud_discount_rate': '0',
+            }),
+            content_type='application/json',
+        )
+        self._attach_bearer_session(request, root)
+
+        response = update_user_balance(request, user.id)
+        payload = json.loads(response.content.decode('utf-8'))
+
+        self.assertEqual(response.status_code, 400)
+        self.assertIn('云服务器折扣', payload['message'])
+        user.refresh_from_db()
+        self.assertEqual(user.balance, Decimal('5.000000'))
+        self.assertEqual(user.balance_trx, Decimal('6.000000'))
+        self.assertEqual(user.cloud_discount_rate, Decimal('99.00'))
+        self.assertFalse(BalanceLedger.objects.filter(user=user).exists())
 
     def test_delete_cloud_account_blocks_linked_business_data(self):
         staff = get_user_model().objects.create_user(username='cloud_account_delete_staff', password='pass', is_staff=True, is_superuser=True)

@@ -138,10 +138,13 @@ def update_user_balance(request, user_id):
     try:
         balance = _parse_decimal(payload.get('balance'), 'USDT余额')
         balance_trx = _parse_decimal(payload.get('balance_trx'), 'TRX余额')
+        discount = _parse_decimal(payload.get('cloud_discount_rate'), '云服务器折扣') if 'cloud_discount_rate' in payload else None
     except ValueError as exc:
         return _error(str(exc), status=400)
     if balance < 0 or balance_trx < 0:
         return _error('余额不能为负数', status=400)
+    if discount is not None and (discount <= 0 or discount > 100):
+        return _error('云服务器折扣必须大于 0 且小于等于 100', status=400)
 
     try:
         with transaction.atomic():
@@ -150,7 +153,11 @@ def update_user_balance(request, user_id):
             old_balance_trx = user.balance_trx
             user.balance = balance
             user.balance_trx = balance_trx
-            user.save(update_fields=['balance', 'balance_trx', 'updated_at'])
+            update_fields = ['balance', 'balance_trx', 'updated_at']
+            if discount is not None:
+                user.cloud_discount_rate = discount
+                update_fields.append('cloud_discount_rate')
+            user.save(update_fields=update_fields)
             operator = getattr(request.user, 'username', '') or str(getattr(request.user, 'id', '') or '')
             _record_balance_ledger(
                 user,
@@ -175,6 +182,7 @@ def update_user_balance(request, user_id):
         'id': user.id,
         'balance': _decimal_to_str(user.balance),
         'balance_trx': _decimal_to_str(user.balance_trx),
+        'cloud_discount_rate': _decimal_to_str(user.cloud_discount_rate),
     })
 
 
