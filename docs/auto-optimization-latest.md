@@ -4,69 +4,51 @@
 
 ## 最近一轮
 
-- 时间：2026-06-08 22:45 CST
-- 状态：完成真实 AWS Lightsail 创建、同步、过期、余额续费、前端页面核查和清理；修复运行中同步资产续费后不延长到期和生命周期计划的问题。
-- 后端提交：代码修复已提交为 `edd14a1`、`d9a0ac6`；本轮真机报告记录待提交。
+- 时间：2026-06-08 22:51 CST
+- 状态：完成 TRX 汇率强制刷新容错修复；当外部汇率接口失败时，允许回退到 Redis 最近一次成功汇率。
+- 后端提交：代码修复已提交为 `4a5a9d3`；本轮文档记录随当前提交提交。
 - 前端提交：无前端代码变更。
 
-## 真机测试范围
+## 本轮背景
 
-- 测试库：`shop_manual_20260608_5676`
-- 前端：`127.0.0.1:5676`
-- 后端：`127.0.0.1:8010`
-- 云厂商：AWS Lightsail，新加坡区。
-- 云账号：后台云账号 `#55`。
-- 新建资源：1 台测试服务器，实例名和公网 IP 已在真机报告中脱敏。
-
-## 测试结论
-
-- 真实创建服务器成功，并通过 `sync_aws_assets --region ap-southeast-1 --account-id 55` 同步为 `CloudAsset #6`。
-- 人工把资产改为已过期后，生成续费订单成功。
-- 修复前实测余额支付会把订单置为 `paid` 并扣款，但 `CloudAsset.actual_expires_at` 不变，关机计划仍处于到期状态。
-- 修复后重跑同一订单：
-  - 订单状态变为 `completed`。
-  - 用户余额从 `1000` 扣到 `981`。
-  - `CloudAsset.actual_expires_at` 延长到未来。
-  - 订单派生的 `suspend_at`、`delete_at`、`ip_recycle_at` 全部按新到期时间后移。
-  - 计划页显示关机计划为未来排期，删除计划为 `0`，没有提前进入删机执行段。
-- 前端实际打开代理详情页，确认资产状态、到期时间、订单状态和生命周期日志显示正常。
-- 前端实际打开计划页，确认关机计划、删除计划、IP 删除计划显示与数据库口径一致。
-- 本轮新建的 AWS 测试服务器已真实删除；同步后资产进入云上不存在确认流程，当前可见代理数已减少。
+- `TODO.md` 中显式待办均已完成，本轮从当前工作树已有的最小安全改动继续收敛。
+- 开始时工作树已有 `orders/services.py` 和 `orders/tests.py` 未提交改动。
+- 改动范围只涉及订单域汇率读取和聚焦测试，不执行真实支付、链上广播、真实云资源操作、生产发布或删除数据。
 
 ## 修复内容
 
-- `cloud/services.py`
-  - 抽出运行中同步资产续费完成逻辑。
-  - 钱包续费成功后，运行中资产直接完成续期，更新资产到期事实和订单生命周期计划。
-  - 未附加固定 IP 恢复类订单仍保持 `paid`，等待恢复创建。
-- `orders/payment_scanner.py`
-  - 链上支付确认路径复用同一运行中资产续期完成逻辑。
-  - 避免异步通知阶段同步查询资产到期时间。
+- `orders/services.py`
+  - `get_trx_price(force_refresh=True)` 仍会优先尝试实时请求 Binance TRX/USDT 汇率。
+  - 强制刷新期间预读 Redis 日缓存和最近成功缓存，但不直接返回，避免跳过刷新动作。
+  - 如果外部接口失败，则优先回退到 Redis 最近可用汇率，再回退进程内缓存。
+  - 无 Redis 缓存且无进程缓存时仍抛出原有业务错误。
 - `orders/tests.py`
-  - 增加链上支付确认后延长资产到期和生命周期计划的回归测试。
+  - 增加强制刷新时网络失败回退 Redis 最近成功汇率的回归测试。
 
 ## 验证
 
 通过：
 
 ```bash
-UV_CACHE_DIR=/private/tmp/uv-cache-shop uv run python manage.py test cloud.tests.CloudServerServicesTestCase.test_unbound_asset_renewal_wallet_payment_marks_paid_for_recovery cloud.tests.CloudServerServicesTestCase.test_active_asset_renewal_wallet_payment_extends_asset_and_lifecycle cloud.tests.CloudServerServicesTestCase.test_unbound_asset_renewal_wallet_payment_repairs_completed_unpaid_state orders.tests.ChainPaymentScannerTestCase.test_active_asset_renewal_chain_payment_extends_asset_and_lifecycle --keepdb
 UV_CACHE_DIR=/private/tmp/uv-cache-shop uv run python manage.py check
-UV_CACHE_DIR=/private/tmp/uv-cache-shop uv run python -m py_compile cloud/services.py orders/payment_scanner.py orders/tests.py
+UV_CACHE_DIR=/private/tmp/uv-cache-shop DJANGO_TEST_SQLITE=1 uv run python manage.py test orders.tests.OrderBalancePaymentTestCase.test_trx_price_uses_redis_cache_before_network orders.tests.OrderBalancePaymentTestCase.test_trx_price_uses_last_known_redis_cache_before_network orders.tests.OrderBalancePaymentTestCase.test_trx_price_force_refresh_falls_back_to_last_known_redis_cache --settings=shop.settings --verbosity=1
+UV_CACHE_DIR=/private/tmp/uv-cache-shop uv run python -m py_compile orders/services.py orders/tests.py
 git diff --check
 ```
 
-前端核查：
+补充巡检：
 
-- `http://127.0.0.1:5676/admin/cloud-assets/6`
-- `http://127.0.0.1:5676/admin/tasks/plans`
+```bash
+rg -n "service_expires_at|order.*actual_expires_at|actual_expires_at.*order|plan snapshot|计划快照表|refund|退款|accounts|finance|mall|monitoring|dashboard_api|biz" --glob '!docs/refactor-version-record.md' --glob '!docs/auto-optimization-latest.md' --glob '!docs/real-machine-test-report.md' --glob '!*.pyc'
+rg -n "actual_expires_at" cloud orders bot core --glob '!*/migrations/*'
+```
 
 说明：
 
-- 前端控制台仅有 Vite dev WebSocket 热更新握手错误，不是业务接口错误。
-- 本轮没有真实链上广播，没有生产发布。
+- SQLite 聚焦测试仍输出既有 `db_comment/db_table_comment` 能力差异告警，不属于本轮问题。
+- 红线扫描命中主要为既有文档、迁移历史、兼容 helper 命名和当前 `CloudAsset.actual_expires_at` 口径使用；本轮未恢复废弃 runtime app、订单到期字段、旧计划快照或旧退款入口。
 
 ## 剩余风险
 
-- 本轮清理服务器后，同步器按缺失保护阈值进入确认流程；如果需要立即本地最终删除状态，需要按既定收敛命令单独处理测试库记录。
-- 机器人真机点击和高并发测试仍受 Telegram 网络连通性影响，需要恢复连通后继续。
+- `bot.runner` 强制刷新汇率依赖外部 Binance 接口；本轮只保证接口失败时使用最近缓存，不改变汇率来源和刷新频率。
+- 未做真实链上支付或生产环境长时间运行验证。

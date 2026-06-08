@@ -18872,3 +18872,63 @@ git diff --check
 
 - 继续复核计划页 `paid` 展示口径与执行器 due 队列口径差异。
 - 继续关注 Telegram 真机交互压测阻塞项。
+
+## 2026-06-08 22:51 CST TRX 汇率强制刷新缓存兜底修复
+
+### 本轮背景
+
+- 本轮执行 `continue to next task` 自动优化流程。
+- `TODO.md` 中显式待办均已完成，开始时工作树已有 `orders/services.py` 和 `orders/tests.py` 两处未提交改动。
+- 本轮选择该最小安全改动收敛：强制刷新 TRX 汇率时，如果外部接口失败，应使用 Redis 最近一次成功汇率兜底。
+- 本轮不执行真实支付、链上广播、真实云资源操作、生产发布或删除数据。
+
+### 发现
+
+- `get_trx_price(force_refresh=True)` 会跳过 Redis 直接返回，但外部 Binance 汇率接口失败时，原逻辑只能回退进程内 `_cached_rate`。
+- 如果当前进程刚启动且只有 Redis 中保留了最近成功汇率，强制刷新失败会直接抛出 `无法获取 TRX/USDT 汇率`。
+- `bot.runner` 启动时会调用 `get_trx_price(force_refresh=True)`，因此外部网络短暂不可用时可能影响启动阶段汇率预热。
+
+### 修复
+
+- `orders/services.py`
+  - 在 Redis 可用时先读取日缓存和最近成功缓存，并保存为 `redis_fallback_rate`。
+  - 非强制刷新仍保持原行为：命中 Redis 后直接返回。
+  - 强制刷新仍继续请求外部实时汇率，避免把刷新请求降级成普通缓存读取。
+  - 外部请求失败后，优先返回 `redis_fallback_rate`，并刷新进程内缓存时间。
+  - Redis 和进程内缓存都不可用时继续抛出原业务错误。
+- `orders/tests.py`
+  - 新增 `test_trx_price_force_refresh_falls_back_to_last_known_redis_cache`。
+  - 验证强制刷新、网络失败、进程内无缓存时仍可返回 Redis 最近成功汇率。
+
+### 巡检结论
+
+- 本轮没有恢复废弃 runtime app。
+- 本轮没有恢复 `CloudServerOrder.service_expires_at`、订单侧 `actual_expires_at` 或旧计划快照表。
+- 本轮没有恢复旧退款入口或旧退款函数名。
+- 红线扫描命中主要为既有文档、迁移历史、兼容 helper 命名和当前 `CloudAsset.actual_expires_at` 口径使用。
+
+### 验证
+
+通过：
+
+```bash
+UV_CACHE_DIR=/private/tmp/uv-cache-shop uv run python manage.py check
+UV_CACHE_DIR=/private/tmp/uv-cache-shop DJANGO_TEST_SQLITE=1 uv run python manage.py test orders.tests.OrderBalancePaymentTestCase.test_trx_price_uses_redis_cache_before_network orders.tests.OrderBalancePaymentTestCase.test_trx_price_uses_last_known_redis_cache_before_network orders.tests.OrderBalancePaymentTestCase.test_trx_price_force_refresh_falls_back_to_last_known_redis_cache --settings=shop.settings --verbosity=1
+UV_CACHE_DIR=/private/tmp/uv-cache-shop uv run python -m py_compile orders/services.py orders/tests.py
+git diff --check
+```
+
+补充巡检：
+
+```bash
+rg -n "service_expires_at|order.*actual_expires_at|actual_expires_at.*order|plan snapshot|计划快照表|refund|退款|accounts|finance|mall|monitoring|dashboard_api|biz" --glob '!docs/refactor-version-record.md' --glob '!docs/auto-optimization-latest.md' --glob '!docs/real-machine-test-report.md' --glob '!*.pyc'
+rg -n "actual_expires_at" cloud orders bot core --glob '!*/migrations/*'
+```
+
+结果：
+
+- `manage.py check` 通过。
+- 3 个 TRX 汇率缓存聚焦测试通过。
+- 编译检查通过。
+- `git diff --check` 通过。
+- SQLite 聚焦测试仍输出既有 `db_comment/db_table_comment` 能力差异告警，不属于本轮问题。
