@@ -26,7 +26,7 @@ from orders.services import usdt_to_trx
 from cloud.note_utils import append_note
 from cloud.ports import MTPROXY_DEFAULT_PORT
 from cloud.provisioning import provision_cloud_server
-from cloud.services import apply_cloud_server_renewal, is_cloud_asset_renewal_order, prepare_cloud_server_order_instances, run_cloud_server_renewal_postcheck
+from cloud.services import apply_cloud_server_renewal, complete_active_asset_renewal_order, is_cloud_asset_renewal_order, prepare_cloud_server_order_instances, run_cloud_server_renewal_postcheck
 from core.cache import get_config, get_redis, bump_daily_stats, get_daily_stats
 from core.runtime_config import get_runtime_config
 from core.persistence import bump_daily_address_stat, record_external_sync_log
@@ -257,6 +257,12 @@ def _cloud_status_after_renewal_payment_expired(order: CloudServerOrder, now=Non
     return 'completed'
 
 
+def _attach_order_asset_expiry(order: CloudServerOrder | None):
+    if order is not None:
+        order._asset_expires_at = order_asset_expiry(order)
+    return order
+
+
 @sync_to_async
 def _expire_timed_out_payment_orders():
     now = timezone.now()
@@ -459,7 +465,13 @@ def _confirm_cloud_server_order(order_id: int, tx_hash: str, payer_address: str 
                 if not str(order.public_ip or order.previous_public_ip or '').strip() or order.status in {'deleted', 'deleting', 'expired'}:
                     return None
                 order.save(update_fields=['tx_hash', 'payer_address', 'receive_address', 'paid_at', 'updated_at'])
-                return apply_cloud_server_renewal.__wrapped__(order.id, order.lifecycle_days or 31, False)
+                renewed_order = apply_cloud_server_renewal.__wrapped__(order.id, order.lifecycle_days or 31, False)
+                return _attach_order_asset_expiry(renewed_order)
+            if asset_recovery_order:
+                order.save(update_fields=['tx_hash', 'payer_address', 'receive_address', 'paid_at', 'updated_at'])
+                active_renewal = complete_active_asset_renewal_order(order, order.lifecycle_days or 31)
+                if active_renewal:
+                    return _attach_order_asset_expiry(active_renewal)
             order.status = 'paid'
             if not asset_recovery_order:
                 order.mtproxy_port = MTPROXY_DEFAULT_PORT
@@ -709,7 +721,7 @@ async def _process_payment(transfer: dict) -> bool:
         if confirmed.status == 'completed':
             await _notify_user(
                 confirmed.user_id,
-                f'✅ 云服务器订单 {confirmed.order_no} 续费成功！\n新的到期时间: {_format_local_dt(order_asset_expiry(confirmed))}',
+                f'✅ 云服务器订单 {confirmed.order_no} 续费成功！\n新的到期时间: {_format_local_dt(getattr(confirmed, "_asset_expires_at", None))}',
             )
             asyncio.create_task(_cloud_renewal_postcheck_and_notify(confirmed))
             return True

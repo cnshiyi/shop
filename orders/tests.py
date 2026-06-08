@@ -6,6 +6,7 @@ from django.test import TestCase
 from django.utils import timezone
 
 from bot.models import TelegramUser
+from cloud.asset_expiry import order_asset_expiry
 from cloud.services import prepare_cloud_asset_renewal_with_link
 from core.cloud_accounts import cloud_account_label
 from core.models import CloudAccountConfig
@@ -637,6 +638,74 @@ class ChainPaymentScannerTestCase(TestCase):
         self.assertEqual(order.mtproxy_port, 443)
         self.assertIn('使用默认端口 443', order.provision_note)
         self.assertEqual(scheduled, ['_provision_paid_cloud_order'])
+
+    def test_active_asset_renewal_chain_payment_extends_asset_and_lifecycle(self):
+        due_at = timezone.now() - timezone.timedelta(days=4)
+        account = CloudAccountConfig.objects.create(
+            provider=CloudAccountConfig.PROVIDER_AWS,
+            name='chain-active-asset-renewal',
+            region_hint=self.plan.region_code,
+            access_key='A' * 20,
+            secret_key='B' * 40,
+            is_active=True,
+        )
+        asset = CloudAsset.objects.create(
+            kind=CloudAsset.KIND_SERVER,
+            source=CloudAsset.SOURCE_AWS_SYNC,
+            user=self.user,
+            provider='aws_lightsail',
+            cloud_account=account,
+            account_label=cloud_account_label(account),
+            region_code=self.plan.region_code,
+            region_name=self.plan.region_name,
+            asset_name='chain-active-renewal-payment',
+            instance_id='chain-active-renewal-payment',
+            public_ip='31.31.31.38',
+            previous_public_ip='31.31.31.38',
+            actual_expires_at=due_at,
+            status=CloudAsset.STATUS_RUNNING,
+            provider_status='running',
+            is_active=True,
+        )
+        link = {
+            'url': 'tg://proxy?server=31.31.31.38&port=443&secret=eed5c148e2922f6c49611e7d53fe432a94617a7572652e6d6963726f736f66742e636f6d',
+            'server': '31.31.31.38',
+            'port': '443',
+            'secret': 'eed5c148e2922f6c49611e7d53fe432a94617a7572652e6d6963726f736f66742e636f6d',
+        }
+        with patch('cloud.services._resolve_unattached_aws_static_ip_name_for_asset', return_value=''):
+            order, error = async_to_sync(prepare_cloud_asset_renewal_with_link)(asset.id, self.user.id, self.plan.id, link)
+        scheduled = []
+
+        def capture_task(coro):
+            scheduled.append(coro.cr_code.co_name)
+            coro.close()
+            return object()
+
+        with patch('orders.payment_scanner._notify_user', new=AsyncMock()), \
+            patch('orders.payment_scanner.asyncio.create_task', side_effect=capture_task):
+            matched = async_to_sync(_process_payment)({
+                'amount': order.pay_amount,
+                'tx_hash': 'tx-chain-active-asset-renewal',
+                'currency': 'USDT',
+                'from': 'payer',
+                'to': 'receiver',
+            })
+
+        self.assertIsNone(error)
+        self.assertTrue(matched)
+        order.refresh_from_db()
+        asset.refresh_from_db()
+        self.assertEqual(order.status, 'completed')
+        self.assertEqual(order.tx_hash, 'tx-chain-active-asset-renewal')
+        self.assertIsNotNone(order.paid_at)
+        self.assertGreater(asset.actual_expires_at, timezone.now())
+        self.assertEqual(order_asset_expiry(order), asset.actual_expires_at)
+        self.assertGreater(order.suspend_at, timezone.now())
+        self.assertGreaterEqual(order.delete_at, order.suspend_at)
+        self.assertGreater(order.ip_recycle_at, order.delete_at)
+        self.assertIn('运行中资产续费成功', order.provision_note)
+        self.assertEqual(scheduled, ['_cloud_renewal_postcheck_and_notify'])
 
     def test_address_balance_query_awaits_trongrid_headers(self):
         captured = {}

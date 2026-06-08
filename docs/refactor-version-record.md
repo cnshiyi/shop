@@ -18747,3 +18747,58 @@ git diff --check
 
 - 继续复核地址支付链路的链上确认路径是否也覆盖运行中资产续期。
 - 继续复核计划页 `paid` 展示口径与执行器 due 队列口径差异。
+
+## 2026-06-08 22:42 CST 运行中同步资产链上地址支付续期修复
+
+### 本轮背景
+
+- 当前会话继续执行连续巡检监工。
+- 上一轮已修复运行中人工同步服务器的钱包续费路径。
+- 本轮按剩余风险继续复核链上地址支付确认路径，不执行真实支付、链上广播、真实云资源操作或生产发布。
+
+### 发现
+
+- `orders/payment_scanner.py` 的链上云订单确认逻辑仍单独处理“未绑定代理资产续费”。
+- 对这类订单，链上确认原先只写入 `tx_hash`、付款地址和 `paid_at`，随后标记为 `paid` 并进入固定 IP 恢复流程。
+- 对仍有 `instance_id`、仍处于 `running/is_active=True` 的人工同步服务器资产，这条路径不会延长 `CloudAsset.actual_expires_at`。
+- 聚焦测试还暴露续费成功通知在 async 上下文里直接调用 `order_asset_expiry()`，会触发同步 ORM 查询风险。
+
+### 修复
+
+- 在 `cloud.services` 抽出 `complete_active_asset_renewal_order()`：
+  - 统一运行中人工同步服务器资产续费完成逻辑；
+  - 顺延 `CloudAsset.actual_expires_at`；
+  - 同步更新订单生命周期字段、订单状态、资产运行状态、价格和续费日志；
+  - 刷新后台计划快照。
+- 钱包支付续费分支改为复用该服务函数，减少重复逻辑。
+- 链上地址支付确认分支在命中运行中资产续费时直接完成续期并返回 `completed`。
+- 固定 IP 保留/恢复类资产续费仍保留原 `paid` 后续恢复流程。
+- 支付扫描器在同步确认阶段预读资产到期时间并挂到返回对象上，异步通知不再直接触发 ORM 查询。
+
+### 测试
+
+新增回归测试：
+
+- `test_active_asset_renewal_chain_payment_extends_asset_and_lifecycle`
+
+验证命令：
+
+```bash
+UV_CACHE_DIR=/private/tmp/uv-cache-shop uv run python -m py_compile cloud/services.py orders/payment_scanner.py orders/tests.py cloud/tests.py
+UV_CACHE_DIR=/private/tmp/uv-cache-shop uv run python manage.py check
+DJANGO_TEST_SQLITE=1 UV_CACHE_DIR=/private/tmp/uv-cache-shop uv run python manage.py test orders.tests.ChainPaymentScannerTestCase.test_cloud_chain_payment_auto_submits_default_port_provision orders.tests.ChainPaymentScannerTestCase.test_active_asset_renewal_chain_payment_extends_asset_and_lifecycle cloud.tests.CloudServerServicesTestCase.test_active_asset_renewal_wallet_payment_extends_asset_and_lifecycle --settings=shop.settings --verbosity=1
+git diff --check
+```
+
+结果：
+
+- 编译通过。
+- `manage.py check` 通过。
+- 3 个支付/续费聚焦测试通过。
+- `git diff --check` 通过。
+- SQLite 测试仍输出既有 `db_comment/db_table_comment` 能力差异告警，不属于本轮问题。
+
+### 后续
+
+- 继续复核计划页 `paid` 展示口径与执行器 due 队列口径差异。
+- 继续关注 Telegram 真机交互压测阻塞项。

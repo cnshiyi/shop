@@ -1215,6 +1215,54 @@ def _asset_renewal_active_server_asset(order: CloudServerOrder | None) -> CloudA
     return asset
 
 
+def complete_active_asset_renewal_order(order: CloudServerOrder | None, days: int = 31) -> CloudServerOrder | None:
+    active_asset = _asset_renewal_active_server_asset(order)
+    if not order or not active_asset:
+        return None
+    now = timezone.now()
+    current_expires_at = active_asset.actual_expires_at
+    renew_base_at = current_expires_at if current_expires_at and current_expires_at > now else now
+    new_expires_at = renew_base_at + timezone.timedelta(days=days)
+    if not order.service_started_at:
+        order.service_started_at = now
+    apply_order_lifecycle_from_asset_expiry(order, new_expires_at, save=False)
+    order.status = 'completed'
+    order.last_renewed_at = now
+    order.renew_notice_sent_at = None
+    if hasattr(order, 'auto_renew_notice_sent_at'):
+        order.auto_renew_notice_sent_at = None
+    if hasattr(order, 'auto_renew_failure_notice_sent_at'):
+        order.auto_renew_failure_notice_sent_at = None
+    order.delete_notice_sent_at = None
+    order.recycle_notice_sent_at = None
+    order.provision_note = append_note(order.provision_note, f'运行中资产续费成功，新的服务到期时间：{new_expires_at:%Y-%m-%d %H:%M}。')
+    order.save(update_fields=[
+        'service_started_at', 'renew_grace_expires_at', 'suspend_at', 'delete_at', 'ip_recycle_at',
+        'status', 'last_renewed_at', 'renew_notice_sent_at', 'auto_renew_notice_sent_at',
+        'auto_renew_failure_notice_sent_at', 'delete_notice_sent_at', 'recycle_notice_sent_at',
+        'provision_note', 'updated_at',
+    ])
+    _update_order_primary_records(
+        order,
+        asset_updates={
+            'actual_expires_at': new_expires_at,
+            'status': CloudAsset.STATUS_RUNNING,
+            'is_active': True,
+            'price': order.total_amount,
+        },
+    )
+    record_cloud_ip_log(
+        event_type=CloudIpLog.EVENT_RENEWED,
+        order=order,
+        asset=active_asset,
+        public_ip=order.public_ip,
+        previous_public_ip=order.previous_public_ip,
+        note=f'运行中资产续费 {days} 天，新的服务到期时间：{new_expires_at:%Y-%m-%d %H:%M}',
+    )
+    transaction.on_commit(lambda: _refresh_dashboard_plan_snapshots_after_service_change(f'cloud_asset_active_renewal:{order.id}'))
+    return order
+
+
 def _first_nonblank(*values) -> str:
     for value in values:
         text = str(value or '').strip()
@@ -3701,49 +3749,9 @@ def pay_cloud_server_renewal_with_balance(order_id: int, user_id: int, currency:
                     description=f'云服务器续费订单 #{order.order_no} 钱包支付',
                 )
             if asset_recovery_order:
-                active_asset = _asset_renewal_active_server_asset(order)
-                if active_asset:
-                    now = timezone.now()
-                    current_expires_at = active_asset.actual_expires_at
-                    renew_base_at = current_expires_at if current_expires_at and current_expires_at > now else now
-                    new_expires_at = renew_base_at + timezone.timedelta(days=days)
-                    if not order.service_started_at:
-                        order.service_started_at = now
-                    apply_order_lifecycle_from_asset_expiry(order, new_expires_at, save=False)
-                    order.status = 'completed'
-                    order.last_renewed_at = now
-                    order.renew_notice_sent_at = None
-                    if hasattr(order, 'auto_renew_notice_sent_at'):
-                        order.auto_renew_notice_sent_at = None
-                    if hasattr(order, 'auto_renew_failure_notice_sent_at'):
-                        order.auto_renew_failure_notice_sent_at = None
-                    order.delete_notice_sent_at = None
-                    order.recycle_notice_sent_at = None
-                    order.provision_note = append_note(order.provision_note, f'运行中资产续费成功，新的服务到期时间：{new_expires_at:%Y-%m-%d %H:%M}。')
-                    order.save(update_fields=[
-                        'service_started_at', 'renew_grace_expires_at', 'suspend_at', 'delete_at', 'ip_recycle_at',
-                        'status', 'last_renewed_at', 'renew_notice_sent_at', 'auto_renew_notice_sent_at',
-                        'auto_renew_failure_notice_sent_at', 'delete_notice_sent_at', 'recycle_notice_sent_at',
-                        'provision_note', 'updated_at',
-                    ])
-                    _update_order_primary_records(
-                        order,
-                        asset_updates={
-                            'actual_expires_at': new_expires_at,
-                            'status': CloudAsset.STATUS_RUNNING,
-                            'is_active': True,
-                            'price': order.total_amount,
-                        },
-                    )
-                    record_cloud_ip_log(
-                        event_type=CloudIpLog.EVENT_RENEWED,
-                        order=order,
-                        asset=active_asset,
-                        public_ip=order.public_ip,
-                        previous_public_ip=order.previous_public_ip,
-                        note=f'运行中资产续费 {days} 天，新的服务到期时间：{new_expires_at:%Y-%m-%d %H:%M}',
-                    )
-                    transaction.on_commit(lambda: _refresh_dashboard_plan_snapshots_after_service_change(f'cloud_asset_active_renewal:{order.id}'))
+                renewed_order = complete_active_asset_renewal_order(order, days)
+                if renewed_order:
+                    order = renewed_order
                 else:
                     order.status = 'paid'
             else:
@@ -4567,6 +4575,7 @@ __all__ = [
     'apply_cloud_server_renewal',
     'build_cloud_server_name',
     'buy_cloud_server_with_balance',
+    'complete_active_asset_renewal_order',
     'create_cloud_server_order',
     'create_cloud_server_renewal',
     'create_cloud_server_renewal_by_public_query',
