@@ -19467,3 +19467,54 @@ rg -n "TaskCenter|task center|任务中心|retry|重试|failed|failure|status" c
 
 - 后续如继续做性能压测、批量造数或大数据分页验证，先创建全新的独立测试数据库，并记录数据库名、端口、造数规模、命令、结果和清理策略。
 - 继续关注 10 万级数据下代理列表、生命周期计划和通知计划分页性能，不再复用当前业务库压测。
+## 2026-06-09 00:50 CST 收掉生命周期计划绕过参数
+
+### 本轮背景
+
+- 用户要求收掉代码里仍存在的底层人工绕过计划执行能力。
+- 本轮只处理生命周期执行器和后台计划执行调用链，不执行真实云资源创建、真实关机、真实删机、真实支付、链上广播、生产发布或删除数据。
+
+### 修复
+
+- `cloud/lifecycle_execution.py`
+  - 删除关机、删机、迁移旧机删除、订单固定 IP 回收、未附加 IP 删除等破坏性执行入口的计划绕过形参。
+  - 所有入口无条件校验总开关、单资产开关、计划时间、执行窗口和任务认领。
+  - 删除成功来源统一写为计划执行来源，不再根据手动队列或旧参数写“人工手动删除/释放/清理”。
+- `bot/api.py`
+  - 后台计划页包装函数不再接收或透传旧绕过形参。
+- `cloud/lifecycle.py`
+  - 生命周期 tick 调用关机、删机、迁移旧机删除、未附加 IP 删除时不再传旧绕过形参。
+- `cloud/tests.py`
+  - 旧的手动绕过测试改为计划时间、窗口、总开关、单资产开关阻断测试。
+  - 增加签名级断言，确认 7 个破坏性执行入口不再暴露旧绕过形参。
+  - 修正生命周期 tick 测试，匹配当前资产计划执行链。
+
+### 结论
+
+- 旧绕过能力已从执行器签名、后台 API 包装函数、定时任务调用链和测试表达中移除。
+- 关机、删机、未附加 IP 删除必须严格经过计划时间、执行窗口、总开关、单资产开关和任务认领。
+- 未完成关机的服务器不会进入真实删机执行。
+- 未附加 IP 删除只受 IP 删除总开关和资产 `ip_delete_enabled` 控制。
+
+### 验证
+
+通过：
+
+```bash
+UV_CACHE_DIR=/private/tmp/uv-cache-shop uv run python manage.py check
+UV_CACHE_DIR=/private/tmp/uv-cache-shop uv run python -m py_compile cloud/lifecycle_execution.py cloud/lifecycle.py bot/api.py cloud/tests.py
+rg -n "enforce_schedule|_run_shutdown_order_sync" cloud bot core orders shop --glob '!*/migrations/*'
+git diff --check
+UV_CACHE_DIR=/private/tmp/uv-cache-shop DJANGO_TEST_SQLITE=1 uv run python manage.py test cloud.tests.CloudServerServicesTestCase.test_order_delete_respects_schedule_window cloud.tests.CloudServerServicesTestCase.test_global_shutdown_switch_blocks_scheduled_suspend cloud.tests.CloudServerServicesTestCase.test_orphan_asset_delete_respects_schedule_window cloud.tests.CloudServerServicesTestCase.test_scheduled_unattached_ip_delete_writes_log_and_history_item cloud.tests.CloudServerServicesTestCase.test_scheduled_unattached_ip_delete_clears_retained_order_after_successful_release cloud.tests.CloudServerServicesTestCase.test_scheduled_order_delete_writes_server_history_item cloud.tests.CloudServerServicesTestCase.test_missing_aws_instance_delete_marks_order_history cloud.tests.CloudServerServicesTestCase.test_missing_aws_orphan_asset_delete_marks_asset_history cloud.tests.CloudServerServicesTestCase.test_lifecycle_execution_has_no_schedule_bypass_flag_and_respects_switches cloud.tests.CloudServerServicesTestCase.test_unattached_ip_delete_ignores_shutdown_disabled_asset cloud.tests.CloudServerServicesTestCase.test_scheduled_order_delete_enters_lifecycle_success_history cloud.tests.CloudServerServicesTestCase.test_scheduled_order_delete_with_retained_ip_moves_into_ip_delete_plan cloud.tests.CloudServerServicesTestCase.test_scheduled_delete_respects_failed_lifecycle_retry_window cloud.tests.CloudServerServicesTestCase.test_order_static_ip_release_skips_when_lifecycle_task_claimed cloud.tests.CloudServerServicesTestCase.test_order_static_ip_release_respects_asset_ip_delete_disabled cloud.tests.CloudServerServicesTestCase.test_aliyun_delete_plan_is_blocked_without_local_delete --settings=shop.settings --verbosity=1
+UV_CACHE_DIR=/private/tmp/uv-cache-shop DJANGO_TEST_SQLITE=1 uv run python manage.py test cloud.tests.CloudServerServicesTestCase.test_lifecycle_tick_serializes_shutdown_delete_and_ip_release_stages cloud.tests.CloudServerServicesTestCase.test_orphan_asset_plan_run_rejects_active_linked_order_asset cloud.tests.CloudServerServicesTestCase.test_dashboard_orphan_asset_plan_run_respects_computed_delete_time cloud.tests.CloudServerServicesTestCase.test_dashboard_shutdown_plan_run_respects_asset_suspend_at cloud.tests.CloudServerServicesTestCase.test_lifecycle_due_queues_use_stage_specific_asset_switches cloud.tests.CloudServerServicesTestCase.test_unattached_ip_delete_ignores_shutdown_disabled_asset cloud.tests.CloudServerServicesTestCase.test_lifecycle_tick_reads_suspend_time_config_outside_async_loop cloud.tests.CloudServerServicesTestCase.test_lifecycle_tick_deletes_migration_due_order_with_deleting_asset cloud.tests_task_center --settings=shop.settings --verbosity=1
+```
+
+结果：
+
+- Django 系统检查通过。
+- 相关文件编译通过。
+- 旧参数和旧后台包装函数扫描无命中。
+- 生命周期执行器 16 个聚焦测试通过。
+- 生命周期 tick、计划页和任务中心 26 个回归测试通过。
+- `git diff --check` 通过。
+- SQLite 聚焦测试仍输出既有 `db_comment/db_table_comment` 能力差异告警，不属于本轮问题。

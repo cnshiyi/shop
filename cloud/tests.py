@@ -270,7 +270,7 @@ class CloudServerServicesTestCase(TestCase):
             secret_key='region-scope-secret-key-value-long-enough',
             is_active=True,
         )
-        asset = CloudAsset.objects.create(
+        CloudAsset.objects.create(
             kind=CloudAsset.KIND_SERVER,
             source=CloudAsset.SOURCE_AWS_SYNC,
             provider='aws_lightsail',
@@ -306,7 +306,7 @@ class CloudServerServicesTestCase(TestCase):
             secret_key='aliyun-region-sk',
             is_active=True,
         )
-        CloudAsset.objects.create(
+        asset = CloudAsset.objects.create(
             kind=CloudAsset.KIND_SERVER,
             source=CloudAsset.SOURCE_ALIYUN,
             provider='aliyun_simple',
@@ -524,13 +524,11 @@ class CloudServerServicesTestCase(TestCase):
         self.assertFalse(ok)
         self.assertIn('在当前云账号中不存在', note)
 
-    # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
-    def test_manual_order_delete_bypasses_schedule_limits(self):
-        from bot.api import _run_shutdown_order_sync
+    # 功能：验证订单删机入口不能绕过计划执行窗口。
+    def test_order_delete_respects_schedule_window(self):
+        from cloud.lifecycle_execution import run_shutdown_order_delete
 
         account = self._aws_test_account()
-        account.shutdown_enabled = False
-        account.save(update_fields=['shutdown_enabled', 'updated_at'])
         order = CloudServerOrder.objects.create(
             order_no='MANUAL-DELETE-BYPASS-ORDER-1',
             user=self.user,
@@ -551,12 +549,14 @@ class CloudServerServicesTestCase(TestCase):
         )
         with patch('cloud.lifecycle.cloud_server_delete_enabled', return_value=True), \
             patch('cloud.lifecycle._is_cloud_delete_safe_time', return_value=False) as safe_time, \
-            patch('cloud.lifecycle._delete_instance', new=AsyncMock(return_value=(True, 'manual delete ok'))), \
+            patch('cloud.lifecycle._delete_instance', new=AsyncMock(return_value=(True, 'delete ok'))) as delete_mock, \
             patch('cloud.lifecycle._mark_deleted', new=AsyncMock()):
-            result = _run_shutdown_order_sync(order.id, enforce_schedule=False)
+            result = run_shutdown_order_delete(order.id)
 
-        self.assertTrue(result['ok'])
+        self.assertFalse(result['ok'])
         safe_time.assert_not_called()
+        delete_mock.assert_not_called()
+        self.assertIn('服务器删除时间未到', result['error'])
 
     # 功能：验证全局关机开关默认保持开启，避免新增配置改变既有生命周期行为。
     def test_cloud_server_shutdown_enabled_defaults_on(self):
@@ -609,7 +609,7 @@ class CloudServerServicesTestCase(TestCase):
         )
 
         with patch('cloud.lifecycle._stop_instance', new=AsyncMock(return_value=(True, 'should not stop'))) as stop_instance:
-            result = run_shutdown_order_suspend(order.id, enforce_schedule=True)
+            result = run_shutdown_order_suspend(order.id)
 
         self.assertFalse(result['ok'])
         self.assertIn('服务器关机总开关已关闭', result['error'])
@@ -617,8 +617,8 @@ class CloudServerServicesTestCase(TestCase):
         order.refresh_from_db()
         self.assertEqual(order.status, 'completed')
 
-    # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
-    def test_manual_orphan_asset_delete_bypasses_schedule_limits(self):
+    # 功能：验证无订单服务器删机入口不能绕过计划执行窗口。
+    def test_orphan_asset_delete_respects_schedule_window(self):
         from bot.api import _run_orphan_asset_delete_sync
 
         account = self._aws_test_account()
@@ -636,22 +636,23 @@ class CloudServerServicesTestCase(TestCase):
             asset_name='manual-owner-asset',
             instance_id='manual-owner-asset-instance',
             public_ip='52.77.18.241',
-            actual_expires_at=timezone.now() + timezone.timedelta(days=1),
-            status=CloudAsset.STATUS_RUNNING,
+            actual_expires_at=timezone.now() - timezone.timedelta(days=30),
+            status=CloudAsset.STATUS_STOPPED,
             is_active=True,
         )
-        original_asset_id = asset.id
         with patch('cloud.lifecycle.cloud_server_delete_enabled', return_value=True), \
             patch('cloud.lifecycle._is_cloud_delete_safe_time', return_value=False) as safe_time, \
-            patch('cloud.lifecycle._delete_orphan_asset_instance', new=AsyncMock(return_value=(True, 'manual asset delete ok'))), \
+            patch('cloud.lifecycle._delete_orphan_asset_instance', new=AsyncMock(return_value=(True, 'asset delete ok'))) as delete_mock, \
             patch('cloud.lifecycle._mark_orphan_asset_deleted', new=AsyncMock()):
-            result = _run_orphan_asset_delete_sync(asset.id, enforce_schedule=False)
+            result = _run_orphan_asset_delete_sync(asset.id)
 
-        self.assertTrue(result['ok'])
-        safe_time.assert_not_called()
+        self.assertFalse(result['ok'])
+        safe_time.assert_called_once()
+        delete_mock.assert_not_called()
+        self.assertIn('删除执行时间窗口', result['error'])
 
     # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
-    def test_manual_unattached_ip_delete_writes_log_and_history_item(self):
+    def test_scheduled_unattached_ip_delete_writes_log_and_history_item(self):
         from bot.api import _run_unattached_ip_delete_sync
 
         SiteConfig.set('cloud_ip_delete_enabled', '1')
@@ -670,13 +671,15 @@ class CloudServerServicesTestCase(TestCase):
             asset_name='manual-unattached-ip-delete',
             provider_resource_id='arn:aws:lightsail:ap-southeast-1:123456789012:StaticIp/manual-unattached-ip-delete',
             public_ip='52.77.18.244',
-            actual_expires_at=timezone.now() + timezone.timedelta(days=3),
+            actual_expires_at=timezone.now() - timezone.timedelta(minutes=1),
             status=CloudAsset.STATUS_UNKNOWN,
             provider_status='未附加固定IP',
             is_active=False,
         )
-        with patch('cloud.lifecycle._release_unattached_static_ip', new=AsyncMock(return_value=(True, 'manual release ok'))):
-            result = _run_unattached_ip_delete_sync(asset.id, enforce_schedule=False)
+        with patch('bot.api._is_cloud_unattached_ip_delete_time', return_value=True), \
+            patch('cloud.lifecycle._is_cloud_unattached_ip_delete_time', return_value=True), \
+            patch('cloud.lifecycle._release_unattached_static_ip', new=AsyncMock(return_value=(True, 'scheduled release ok'))):
+            result = _run_unattached_ip_delete_sync(asset.id)
 
         asset.refresh_from_db()
         self.assertTrue(result['ok'])
@@ -685,16 +688,16 @@ class CloudServerServicesTestCase(TestCase):
         items = _unattached_ip_delete_items(limit=20)
         history = [item for item in items if item.get('is_history') and item.get('public_ip') == '52.77.18.244']
         self.assertTrue(history)
-        self.assertIn('manual release ok', history[0]['note'])
-        self.assertEqual(history[0]['deletion_source_label'], '人工手动删除')
+        self.assertIn('scheduled release ok', history[0]['note'])
+        self.assertEqual(history[0]['deletion_source_label'], '到期自动删除')
 
     # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
-    def test_manual_unattached_ip_delete_clears_retained_order_after_successful_release(self):
+    def test_scheduled_unattached_ip_delete_clears_retained_order_after_successful_release(self):
         from bot.api import _run_unattached_ip_delete_sync
 
         SiteConfig.set('cloud_ip_delete_enabled', '1')
         account = self._aws_test_account()
-        recycle_at = timezone.now() + timezone.timedelta(days=3)
+        recycle_at = timezone.now() - timezone.timedelta(minutes=1)
         order = CloudServerOrder.objects.create(
             order_no='HB-TEST-MANUAL-IP-RELEASE-CLEARS-ORDER',
             user=self.user,
@@ -737,8 +740,10 @@ class CloudServerServicesTestCase(TestCase):
             provider_status='未附加固定IP',
             is_active=False,
         )
-        with patch('cloud.lifecycle._release_unattached_static_ip', new=AsyncMock(return_value=(True, 'manual retained release ok'))):
-            result = _run_unattached_ip_delete_sync(asset.id, enforce_schedule=False)
+        with patch('bot.api._is_cloud_unattached_ip_delete_time', return_value=True), \
+            patch('cloud.lifecycle._is_cloud_unattached_ip_delete_time', return_value=True), \
+            patch('cloud.lifecycle._release_unattached_static_ip', new=AsyncMock(return_value=(True, 'scheduled retained release ok'))):
+            result = _run_unattached_ip_delete_sync(asset.id)
 
         asset.refresh_from_db()
         order.refresh_from_db()
@@ -784,8 +789,8 @@ class CloudServerServicesTestCase(TestCase):
         self.assertEqual(history[0]['deletion_source_label'], '到期自动删除')
 
     # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
-    def test_manual_order_delete_writes_server_history_item(self):
-        from bot.api import _run_shutdown_order_sync
+    def test_scheduled_order_delete_writes_server_history_item(self):
+        from cloud.lifecycle_execution import run_shutdown_order_delete
 
         SiteConfig.set('cloud_server_delete_enabled', '1')
         expires_at = timezone.now() - timezone.timedelta(days=1)
@@ -820,20 +825,21 @@ class CloudServerServicesTestCase(TestCase):
             status=CloudAsset.STATUS_DELETING,
             is_active=True,
         )
-        with patch('cloud.lifecycle._delete_instance', new=AsyncMock(return_value=(True, 'manual server delete ok'))):
-            result = _run_shutdown_order_sync(order.id, enforce_schedule=False)
+        with patch('cloud.lifecycle._is_cloud_delete_safe_time', return_value=True), \
+            patch('cloud.lifecycle._delete_instance', new=AsyncMock(return_value=(True, 'scheduled server delete ok'))):
+            result = run_shutdown_order_delete(order.id)
 
         self.assertTrue(result['ok'])
         self.assertTrue(CloudIpLog.objects.filter(order=order, event_type=CloudIpLog.EVENT_DELETED).exists())
         items = _shutdown_log_items(limit=20)
         history = [item for item in items if item.get('public_ip') == '52.77.18.246']
         self.assertTrue(history)
-        self.assertIn('manual server delete ok', history[0]['note'])
-        self.assertEqual(history[0]['deletion_source_label'], '人工手动删除')
+        self.assertIn('scheduled server delete ok', history[0]['note'])
+        self.assertEqual(history[0]['deletion_source_label'], '到期自动删除')
 
     # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
     def test_missing_aws_instance_delete_marks_order_history(self):
-        from bot.api import _run_shutdown_order_sync
+        from cloud.lifecycle_execution import run_shutdown_order_delete
 
         # 测试类：组织 Client 相关的回归测试。
         class Client:
@@ -841,11 +847,14 @@ class CloudServerServicesTestCase(TestCase):
             def delete_instance(self, instanceName):
                 raise Exception('NotFoundException: instance does not exist')
 
+        account = self._aws_test_account()
         order = CloudServerOrder.objects.create(
             order_no='MANUAL-MISSING-DELETE-ORDER-1',
             user=self.user,
             plan=self.plan,
-            provider=self.plan.provider,
+            provider='aws_lightsail',
+            cloud_account=account,
+            account_label=cloud_account_label(account),
             region_code=self.plan.region_code,
             region_name=self.plan.region_name,
             plan_name=self.plan.plan_name,
@@ -856,9 +865,28 @@ class CloudServerServicesTestCase(TestCase):
             status='deleting',
             server_name='missing-instance',
             public_ip='52.77.18.241',
+            delete_at=timezone.now() - timezone.timedelta(minutes=1),
         )
-        with patch('cloud.lifecycle._aws_client', return_value=Client()):
-            result = _run_shutdown_order_sync(order.id, enforce_schedule=False)
+        asset = CloudAsset.objects.create(
+            kind=CloudAsset.KIND_SERVER,
+            source=CloudAsset.SOURCE_ORDER,
+            order=order,
+            user=self.user,
+            provider='aws_lightsail',
+            cloud_account=account,
+            account_label=cloud_account_label(account),
+            region_code=order.region_code,
+            region_name=order.region_name,
+            asset_name='missing-instance',
+            public_ip=order.public_ip,
+            actual_expires_at=timezone.now() - timezone.timedelta(days=5),
+            status=CloudAsset.STATUS_STOPPED,
+            is_active=False,
+        )
+        with patch('cloud.lifecycle.cloud_server_delete_enabled', return_value=True), \
+            patch('cloud.lifecycle._is_cloud_delete_safe_time', return_value=True), \
+            patch('cloud.lifecycle._aws_client', return_value=Client()):
+            result = run_shutdown_order_delete(order.id)
 
         order.refresh_from_db()
         self.assertTrue(result['ok'])
@@ -885,11 +913,14 @@ class CloudServerServicesTestCase(TestCase):
             asset_name='missing-orphan-asset',
             instance_id='missing-orphan-asset',
             public_ip='52.77.18.242',
-            status=CloudAsset.STATUS_RUNNING,
-            is_active=True,
+            actual_expires_at=timezone.now() - timezone.timedelta(days=30),
+            status=CloudAsset.STATUS_STOPPED,
+            is_active=False,
         )
-        with patch('cloud.lifecycle._aws_client', return_value=Client()):
-            result = _run_orphan_asset_delete_sync(asset.id, enforce_schedule=False)
+        with patch('cloud.lifecycle.cloud_server_delete_enabled', return_value=True), \
+            patch('cloud.lifecycle._is_cloud_delete_safe_time', return_value=True), \
+            patch('cloud.lifecycle._aws_client', return_value=Client()):
+            result = _run_orphan_asset_delete_sync(asset.id)
 
         asset.refresh_from_db()
         self.assertTrue(result['ok'])
@@ -1035,7 +1066,7 @@ class CloudServerServicesTestCase(TestCase):
         )
 
         with patch('cloud.lifecycle._delete_orphan_asset_instance', new=AsyncMock()) as delete_mock:
-            result = _run_orphan_asset_delete_sync(asset.id, enforce_schedule=True)
+            result = _run_orphan_asset_delete_sync(asset.id)
 
         delete_mock.assert_not_awaited()
         self.assertFalse(result['ok'])
@@ -1152,7 +1183,7 @@ class CloudServerServicesTestCase(TestCase):
         with patch('bot.api._is_cloud_unattached_ip_delete_time', return_value=True), \
             patch('cloud.lifecycle._is_cloud_unattached_ip_delete_time', return_value=True), \
             patch('cloud.lifecycle._release_unattached_static_ip', new=AsyncMock(return_value=(True, 'ip release ok'))):
-            result = _run_unattached_ip_delete_sync(asset.id, enforce_schedule=True)
+            result = _run_unattached_ip_delete_sync(asset.id)
         items = _unattached_ip_delete_items(limit=20)
         row = next(item for item in items if item.get('asset_id') == asset.id)
 
@@ -1284,6 +1315,101 @@ class CloudServerServicesTestCase(TestCase):
         self.assertIn(delete_enabled.id, delete_due_ids)
         self.assertNotIn(ip_disabled.id, ip_due_ids)
         self.assertIn(ip_enabled.id, ip_due_ids)
+
+    # 功能：验证底层生命周期执行器不再暴露人工绕过计划参数，并且仍按开关阻断真实云动作。
+    def test_lifecycle_execution_has_no_schedule_bypass_flag_and_respects_switches(self):
+        import inspect
+        from cloud.lifecycle_execution import (
+            run_orphan_asset_delete,
+            run_order_static_ip_release,
+            run_replaced_order_delete,
+            run_server_asset_suspend,
+            run_shutdown_order_delete,
+            run_shutdown_order_suspend,
+            run_unattached_ip_release,
+        )
+
+        disabled_param_name = 'enforce_' + 'schedule'
+        for func in [
+            run_shutdown_order_suspend,
+            run_shutdown_order_delete,
+            run_server_asset_suspend,
+            run_replaced_order_delete,
+            run_orphan_asset_delete,
+            run_order_static_ip_release,
+            run_unattached_ip_release,
+        ]:
+            self.assertNotIn(disabled_param_name, inspect.signature(func).parameters)
+
+        SiteConfig.set('cloud_server_delete_enabled', '1')
+        SiteConfig.set('cloud_ip_delete_enabled', '1')
+        now = timezone.now()
+        server_asset = CloudAsset.objects.create(
+            kind=CloudAsset.KIND_SERVER,
+            source=CloudAsset.SOURCE_AWS_SYNC,
+            user=self.user,
+            provider='aws_lightsail',
+            region_code=self.plan.region_code,
+            region_name=self.plan.region_name,
+            asset_name='bypass-disabled-server',
+            instance_id='bypass-disabled-server',
+            public_ip='52.77.18.236',
+            actual_expires_at=now + timezone.timedelta(days=5),
+            status=CloudAsset.STATUS_RUNNING,
+            shutdown_enabled=False,
+            server_delete_enabled=False,
+            is_active=True,
+        )
+        stopped_asset = CloudAsset.objects.create(
+            kind=CloudAsset.KIND_SERVER,
+            source=CloudAsset.SOURCE_AWS_SYNC,
+            user=self.user,
+            provider='aws_lightsail',
+            region_code=self.plan.region_code,
+            region_name=self.plan.region_name,
+            asset_name='bypass-disabled-delete-server',
+            instance_id='bypass-disabled-delete-server',
+            public_ip='52.77.18.237',
+            actual_expires_at=now + timezone.timedelta(days=5),
+            status=CloudAsset.STATUS_STOPPED,
+            shutdown_enabled=True,
+            server_delete_enabled=False,
+            is_active=False,
+        )
+        ip_asset = CloudAsset.objects.create(
+            kind=CloudAsset.KIND_SERVER,
+            source=CloudAsset.SOURCE_AWS_SYNC,
+            user=self.user,
+            provider='aws_lightsail',
+            region_code=self.plan.region_code,
+            region_name=self.plan.region_name,
+            asset_name='bypass-disabled-ip',
+            instance_id='',
+            provider_resource_id='arn:aws:lightsail:ap-southeast-1:123456789012:StaticIp/bypass-disabled-ip',
+            public_ip='52.77.18.238',
+            actual_expires_at=now + timezone.timedelta(days=5),
+            status=CloudAsset.STATUS_RUNNING,
+            provider_status='未附加固定IP',
+            ip_delete_enabled=False,
+            is_active=False,
+        )
+
+        with patch('cloud.lifecycle._stop_asset_instance', new=AsyncMock()) as stop_mock, \
+            patch('cloud.lifecycle._delete_orphan_asset_instance', new=AsyncMock()) as delete_mock, \
+            patch('cloud.lifecycle._release_unattached_static_ip', new=AsyncMock()) as release_mock:
+            shutdown_result = run_server_asset_suspend(server_asset.id)
+            delete_result = run_orphan_asset_delete(stopped_asset.id)
+            ip_result = run_unattached_ip_release(ip_asset.id)
+
+        self.assertFalse(shutdown_result['ok'])
+        self.assertFalse(delete_result['ok'])
+        self.assertFalse(ip_result['ok'])
+        self.assertIn('关机计划开关已关闭', shutdown_result['error'])
+        self.assertIn('服务器删除计划开关已关闭', delete_result['error'])
+        self.assertIn('IP 删除计划开关已关闭', ip_result['error'])
+        stop_mock.assert_not_called()
+        delete_mock.assert_not_called()
+        release_mock.assert_not_called()
 
     # 功能：处理 云资产、云订单和生命周期 中的 setUp 业务流程。
     def setUp(self):
@@ -4898,6 +5024,8 @@ class CloudServerServicesTestCase(TestCase):
         }
 
         with patch('cloud.lifecycle._get_due_orders', new_callable=AsyncMock, return_value=due), \
+            patch('cloud.lifecycle._get_server_asset_shutdown_due', new_callable=AsyncMock, return_value=[asset]), \
+            patch('cloud.lifecycle._get_server_asset_delete_due', new_callable=AsyncMock, return_value=[]), \
             patch('cloud.lifecycle._get_migration_due_orders', new_callable=AsyncMock, return_value=[]), \
             patch('cloud.lifecycle._get_orphan_asset_delete_due', new_callable=AsyncMock, return_value=[]), \
             patch('cloud.lifecycle._get_unattached_static_ip_delete_due', new_callable=AsyncMock, return_value=[]), \
@@ -4905,7 +5033,7 @@ class CloudServerServicesTestCase(TestCase):
             patch('cloud.lifecycle_execution.run_shutdown_order_suspend', return_value={'ok': False, 'error': '资产自动生命周期开关已关闭，跳过真实关机。'}) as suspend_mock:
             async_to_sync(lifecycle_tick)()
 
-        suspend_mock.assert_called_once_with(order.id, queue_status='scheduled_suspend', enforce_schedule=True)
+        suspend_mock.assert_called_once_with(order.id, queue_status='scheduled_suspend')
         order.refresh_from_db()
         self.assertEqual(order.status, 'completed')
 
@@ -5181,7 +5309,7 @@ class CloudServerServicesTestCase(TestCase):
             service_started_at=now - timezone.timedelta(days=40),
             suspend_at=now - timezone.timedelta(minutes=1),
         )
-        CloudAsset.objects.create(
+        asset = CloudAsset.objects.create(
             kind=CloudAsset.KIND_SERVER,
             source=CloudAsset.SOURCE_ORDER,
             order=order,
@@ -5220,14 +5348,16 @@ class CloudServerServicesTestCase(TestCase):
             return default
 
         with patch('cloud.lifecycle._get_due_orders', new_callable=AsyncMock, return_value=due), \
+            patch('cloud.lifecycle._get_server_asset_shutdown_due', new_callable=AsyncMock, return_value=[asset]), \
+            patch('cloud.lifecycle._get_server_asset_delete_due', new_callable=AsyncMock, return_value=[]), \
             patch('cloud.lifecycle._get_migration_due_orders', new_callable=AsyncMock, return_value=[]), \
             patch('cloud.lifecycle._get_orphan_asset_delete_due', new_callable=AsyncMock, return_value=[]), \
             patch('cloud.lifecycle._get_unattached_static_ip_delete_due', new_callable=AsyncMock, return_value=[]), \
             patch('cloud.lifecycle.get_runtime_config', side_effect=runtime_config_side_effect), \
-            patch('cloud.lifecycle_execution.run_shutdown_order_suspend', return_value={'ok': True, 'error': None}) as suspend_mock:
+            patch('cloud.lifecycle_execution.run_server_asset_suspend', return_value={'ok': True, 'error': None}) as suspend_mock:
             async_to_sync(lifecycle_tick)()
 
-        suspend_mock.assert_called_once_with(order.id, queue_status='scheduled_suspend', enforce_schedule=True)
+        suspend_mock.assert_called_once_with(asset.id, queue_status='scheduled_asset_suspend')
 
     # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
     def test_next_cloud_action_run_at_sticks_to_configured_time(self):
@@ -5487,7 +5617,7 @@ class CloudServerServicesTestCase(TestCase):
         )
 
         with patch('cloud.lifecycle._delete_orphan_asset_instance', new=AsyncMock()) as delete_mock:
-            result = run_orphan_asset_delete(asset.id, enforce_schedule=True)
+            result = run_orphan_asset_delete(asset.id)
 
         delete_mock.assert_not_called()
         self.assertFalse(result['ok'])
@@ -5648,7 +5778,7 @@ class CloudServerServicesTestCase(TestCase):
 
         with patch('cloud.lifecycle.cloud_server_delete_enabled', return_value=True), \
             patch('cloud.lifecycle._delete_replaced_server') as delete_mock:
-            result = run_replaced_order_delete(old_order.id, enforce_schedule=True)
+            result = run_replaced_order_delete(old_order.id)
 
         old_order.refresh_from_db()
         self.assertFalse(result['ok'])
@@ -5716,7 +5846,7 @@ class CloudServerServicesTestCase(TestCase):
 
         # 功能：模拟迁移旧机执行入口，避免 SQLite 内存库跨线程查询。
         def fake_run_replaced_order_delete(order_id, **kwargs):
-            deleted_orders.append((order_id, kwargs.get('queue_status'), kwargs.get('enforce_schedule')))
+            deleted_orders.append((order_id, kwargs.get('queue_status')))
             return {'ok': True, 'error': None}
 
         with patch('cloud.lifecycle_execution.run_replaced_order_delete', side_effect=fake_run_replaced_order_delete):
@@ -5724,7 +5854,7 @@ class CloudServerServicesTestCase(TestCase):
 
         old_order.refresh_from_db()
         asset.refresh_from_db()
-        self.assertEqual(deleted_orders, [(old_order.id, 'scheduled_migration_delete', True)])
+        self.assertEqual(deleted_orders, [(old_order.id, 'scheduled_migration_delete')])
         self.assertEqual(old_order.status, 'deleting')
         self.assertEqual(asset.status, CloudAsset.STATUS_DELETING)
 
@@ -11669,9 +11799,9 @@ class CloudServerServicesTestCase(TestCase):
         server_delete_asset_ids = {item.get('asset_id') for item in data['server_delete_items']}
         self.assertNotIn(asset.id, server_delete_asset_ids)
 
-    # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
-    def test_manual_order_delete_enters_lifecycle_success_history(self):
-        from bot.api import _run_shutdown_order_sync
+    # 功能：验证计划删机成功后不会遗留旧历史字段。
+    def test_scheduled_order_delete_enters_lifecycle_success_history(self):
+        from cloud.lifecycle_execution import run_shutdown_order_delete
 
         expires_at = timezone.now() - timezone.timedelta(days=1)
         order = CloudServerOrder.objects.create(
@@ -11689,6 +11819,7 @@ class CloudServerServicesTestCase(TestCase):
             status='deleting',
             public_ip='52.77.18.247',
             previous_public_ip='52.77.18.247',
+            delete_at=timezone.now() - timezone.timedelta(minutes=1),
         )
         CloudAsset.objects.create(
             kind=CloudAsset.KIND_SERVER,
@@ -11705,8 +11836,9 @@ class CloudServerServicesTestCase(TestCase):
             is_active=True,
         )
         with patch('cloud.lifecycle.cloud_server_delete_enabled', return_value=True), \
-            patch('cloud.lifecycle._delete_instance', new=AsyncMock(return_value=(True, 'manual lifecycle delete ok'))):
-            result = _run_shutdown_order_sync(order.id, enforce_schedule=False)
+            patch('cloud.lifecycle._is_cloud_delete_safe_time', return_value=True), \
+            patch('cloud.lifecycle._delete_instance', new=AsyncMock(return_value=(True, 'scheduled lifecycle delete ok'))):
+            result = run_shutdown_order_delete(order.id)
 
         self.assertTrue(result['ok'])
         staff_user = get_user_model().objects.create_user(username='staff_manual_delete_lifecycle_history', password='x', is_staff=True)
@@ -11720,11 +11852,12 @@ class CloudServerServicesTestCase(TestCase):
             item for item in data['ip_delete_plan_items']
             if item.get('order_id') == order.id or item.get('public_ip') == '52.77.18.247'
         ]
-        self.assertFalse(ip_delete_rows)
+        self.assertTrue(ip_delete_rows)
+        self.assertEqual(ip_delete_rows[0]['plan_kind'], 'unattached_ip_delete')
 
     # 功能：验证删机成功且保留固定 IP 后，计划页会从删机阶段切换到 IP 删除阶段；当前函数属于 云资产、云订单和生命周期。
-    def test_manual_order_delete_with_retained_ip_moves_into_ip_delete_plan(self):
-        from bot.api import _run_shutdown_order_sync
+    def test_scheduled_order_delete_with_retained_ip_moves_into_ip_delete_plan(self):
+        from cloud.lifecycle_execution import run_shutdown_order_delete
 
         SiteConfig.set('cloud_ip_delete_enabled', '1')
         now = timezone.now()
@@ -11743,9 +11876,9 @@ class CloudServerServicesTestCase(TestCase):
             status='deleting',
             public_ip='52.77.18.248',
             previous_public_ip='52.77.18.248',
-            static_ip_name='StaticIp-manual-delete-retained-plan',
-            instance_id='manual-delete-retained-plan-instance',
-            provider_resource_id='manual-delete-retained-plan-instance',
+            static_ip_name='StaticIp-scheduled-delete-retained-plan',
+            instance_id='scheduled-delete-retained-plan-instance',
+            provider_resource_id='scheduled-delete-retained-plan-instance',
             delete_at=now - timezone.timedelta(minutes=1),
             ip_recycle_at=now + timezone.timedelta(days=3),
         )
@@ -11757,9 +11890,9 @@ class CloudServerServicesTestCase(TestCase):
             provider='aws_lightsail',
             region_code=self.plan.region_code,
             region_name=self.plan.region_name,
-            asset_name='manual-delete-retained-plan-instance',
-            instance_id='manual-delete-retained-plan-instance',
-            provider_resource_id='manual-delete-retained-plan-instance',
+            asset_name='scheduled-delete-retained-plan-instance',
+            instance_id='scheduled-delete-retained-plan-instance',
+            provider_resource_id='scheduled-delete-retained-plan-instance',
             public_ip='52.77.18.248',
             previous_public_ip='52.77.18.248',
             actual_expires_at=order.ip_recycle_at,
@@ -11767,8 +11900,9 @@ class CloudServerServicesTestCase(TestCase):
             is_active=True,
         )
         with patch('cloud.lifecycle.cloud_server_delete_enabled', return_value=True), \
-            patch('cloud.lifecycle._delete_instance', new=AsyncMock(return_value=(True, 'manual lifecycle retained delete ok'))):
-            result = _run_shutdown_order_sync(order.id, enforce_schedule=False)
+            patch('cloud.lifecycle._is_cloud_delete_safe_time', return_value=True), \
+            patch('cloud.lifecycle._delete_instance', new=AsyncMock(return_value=(True, 'scheduled lifecycle retained delete ok'))):
+            result = run_shutdown_order_delete(order.id)
 
         self.assertTrue(result['ok'])
         order.refresh_from_db()
@@ -13682,8 +13816,8 @@ class CloudServerServicesTestCase(TestCase):
         self.assertIsNone(blocked_notice_claim)
         self.assertIsNotNone(retry_notice_claim)
 
-    # 功能：验证计划删机失败后，人工重试成功会把同一订单的失败任务收敛为已完成。
-    def test_manual_delete_success_finishes_failed_lifecycle_delete_task(self):
+    # 功能：验证计划删机失败后仍受任务重试保护，不能绕过认领窗口重复执行。
+    def test_scheduled_delete_respects_failed_lifecycle_retry_window(self):
         from cloud.lifecycle_execution import run_shutdown_order_delete
         from cloud.lifecycle_tasks import claim_lifecycle_task_for_order, finish_lifecycle_task
 
@@ -13726,15 +13860,17 @@ class CloudServerServicesTestCase(TestCase):
         finish_lifecycle_task(claim, ok=False, error='云端实例停止中')
 
         with patch('cloud.lifecycle.cloud_server_delete_enabled', return_value=True), \
+            patch('cloud.lifecycle._is_cloud_delete_safe_time', return_value=True), \
             patch('cloud.lifecycle._delete_instance', new=AsyncMock(return_value=(True, '删除成功'))), \
             patch('cloud.lifecycle._mark_deleted', new=AsyncMock()):
-            result = run_shutdown_order_delete(order.id, enforce_schedule=False)
+            result = run_shutdown_order_delete(order.id)
 
         task = CloudLifecycleTask.objects.get(id=claim.id)
-        self.assertTrue(result['ok'])
-        self.assertEqual(task.status, CloudLifecycleTask.STATUS_DONE)
-        self.assertEqual(task.last_error, '')
-        self.assertIsNotNone(task.completed_at)
+        self.assertFalse(result['ok'])
+        self.assertIn('已被其他进程认领', result['error'])
+        self.assertEqual(task.status, CloudLifecycleTask.STATUS_FAILED)
+        self.assertEqual(task.last_error, '云端实例停止中')
+        self.assertIsNone(task.completed_at)
 
     # 功能：验证订单固定 IP 回收入口会尊重数据库任务认领状态。
     def test_order_static_ip_release_skips_when_lifecycle_task_claimed(self):
@@ -13767,7 +13903,7 @@ class CloudServerServicesTestCase(TestCase):
         with patch('cloud.lifecycle.cloud_ip_delete_enabled', return_value=True), \
             patch('cloud.lifecycle._is_cloud_unattached_ip_delete_time', return_value=True), \
             patch('cloud.lifecycle._release_order_static_ip') as release_mock:
-            result = run_order_static_ip_release(order.id, queue_status='scheduled_recycle', enforce_schedule=True)
+            result = run_order_static_ip_release(order.id, queue_status='scheduled_recycle')
 
         self.assertIsNotNone(task_claim)
         self.assertFalse(result['ok'])
@@ -13821,7 +13957,7 @@ class CloudServerServicesTestCase(TestCase):
         with patch('cloud.lifecycle.cloud_ip_delete_enabled', return_value=True), \
             patch('cloud.lifecycle._is_cloud_unattached_ip_delete_time', return_value=True), \
             patch('cloud.lifecycle._release_order_static_ip') as release_mock:
-            result = run_order_static_ip_release(order.id, queue_status='scheduled_recycle', enforce_schedule=True)
+            result = run_order_static_ip_release(order.id, queue_status='scheduled_recycle')
 
         self.assertFalse(result['ok'])
         self.assertIn('IP 删除计划开关已关闭', result['error'])
@@ -17072,8 +17208,8 @@ class CloudServerServicesTestCase(TestCase):
         self.assertNotIn(order.id, order_ids)
 
     # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
-    def test_manual_aliyun_delete_plan_is_blocked_without_local_delete(self):
-        from bot.api import _run_shutdown_order_sync
+    def test_aliyun_delete_plan_is_blocked_without_local_delete(self):
+        from cloud.lifecycle_execution import run_shutdown_order_delete
 
         order = CloudServerOrder.objects.create(
             order_no='ALIYUN-NO-DELETE-RUN-1',
@@ -17097,7 +17233,7 @@ class CloudServerServicesTestCase(TestCase):
             delete_at=timezone.now() - timezone.timedelta(days=1),
         )
 
-        result = _run_shutdown_order_sync(order.id, enforce_schedule=False)
+        result = run_shutdown_order_delete(order.id)
         order.refresh_from_db()
 
         self.assertFalse(result['ok'])
@@ -19178,7 +19314,6 @@ class CloudServerServicesTestCase(TestCase):
         delete_mock.assert_called_once_with(
             old_order.id,
             queue_status='scheduled_migration_delete',
-            enforce_schedule=True,
         )
 
     # 功能：验证旧机迁移计划不覆盖资产实际到期事实。

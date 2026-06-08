@@ -2855,7 +2855,6 @@ async def lifecycle_tick(notify=None, notify_target=None, defer_destructive_seco
         result = await sync_to_async(run_server_asset_suspend, thread_sensitive=_db_thread_sensitive())(
             asset.id,
             queue_status='scheduled_asset_suspend',
-            enforce_schedule=True,
         )
         if result.get('ok'):
             logger.info('资产计划云服务器关机成功：资源ID=%s IP=%s', asset.id, asset.public_ip or asset.previous_public_ip)
@@ -2864,7 +2863,7 @@ async def lifecycle_tick(notify=None, notify_target=None, defer_destructive_seco
 
     for asset in server_asset_delete_due:
         logger.info('开始执行资产计划云服务器删机：资源ID=%s 订单ID=%s IP=%s 云厂商=%s 地区=%s', asset.id, asset.order_id, asset.public_ip or asset.previous_public_ip, asset.provider, asset.region_code)
-        result = await sync_to_async(run_orphan_asset_delete, thread_sensitive=_db_thread_sensitive())(asset.id, enforce_schedule=True)
+        result = await sync_to_async(run_orphan_asset_delete, thread_sensitive=_db_thread_sensitive())(asset.id)
         if result.get('ok'):
             logger.info('资产计划云服务器删机成功：资源ID=%s IP=%s', asset.id, asset.public_ip or asset.previous_public_ip)
         else:
@@ -2875,7 +2874,6 @@ async def lifecycle_tick(notify=None, notify_target=None, defer_destructive_seco
         result = await sync_to_async(run_replaced_order_delete, thread_sensitive=_db_thread_sensitive())(
             order.id,
             queue_status='scheduled_migration_delete',
-            enforce_schedule=True,
         )
         if result.get('ok'):
             logger.info('迁移旧服务器删除成功：订单ID=%s 订单号=%s IP=%s', order.id, order.order_no, order.public_ip or order.previous_public_ip)
@@ -2884,7 +2882,7 @@ async def lifecycle_tick(notify=None, notify_target=None, defer_destructive_seco
 
     for asset in orphan_asset_delete_due:
         logger.info('开始删除孤儿云资源：资源ID=%s IP=%s 云厂商=%s 地区=%s', asset.id, asset.public_ip, asset.provider, asset.region_code)
-        result = await sync_to_async(run_orphan_asset_delete, thread_sensitive=_db_thread_sensitive())(asset.id, enforce_schedule=True)
+        result = await sync_to_async(run_orphan_asset_delete, thread_sensitive=_db_thread_sensitive())(asset.id)
         if result.get('ok'):
             logger.info('孤儿云资源已删除：资源ID=%s IP=%s 云厂商=%s 地区=%s', asset.id, asset.public_ip, asset.provider, asset.region_code)
         else:
@@ -2892,7 +2890,7 @@ async def lifecycle_tick(notify=None, notify_target=None, defer_destructive_seco
 
     for asset in unattached_static_ip_delete_due:
         logger.info('开始释放未附加固定IP：资源ID=%s IP=%s 云厂商=%s 地区=%s', asset.id, asset.public_ip, asset.provider, asset.region_code)
-        result = await sync_to_async(run_unattached_ip_release, thread_sensitive=_db_thread_sensitive())(asset.id, enforce_schedule=True)
+        result = await sync_to_async(run_unattached_ip_release, thread_sensitive=_db_thread_sensitive())(asset.id)
         if result.get('ok'):
             logger.info('未附加固定IP已释放：资源ID=%s IP=%s 云厂商=%s 地区=%s', asset.id, asset.public_ip, asset.provider, asset.region_code)
         else:

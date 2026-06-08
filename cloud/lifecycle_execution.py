@@ -65,7 +65,7 @@ def _run_cloud_action(coro, *, action: str, target: str) -> tuple[bool, str]:
     return True, str(result or '')
 
 
-def run_shutdown_order_suspend(order_id: int, *, queue_status='scheduled_suspend', enforce_schedule: bool = True) -> dict:
+def run_shutdown_order_suspend(order_id: int, *, queue_status='scheduled_suspend') -> dict:
     from cloud.lifecycle import (
         asset_shutdown_enabled,
         cloud_server_shutdown_enabled,
@@ -86,34 +86,31 @@ def run_shutdown_order_suspend(order_id: int, *, queue_status='scheduled_suspend
         async_to_sync(_record_lifecycle_action_failed)(order.id, 'suspend_skipped', reason)
         return {'order_id': order.id, 'order_no': order.order_no, 'ip': ip, 'queue_status': queue_status, 'ok': False, 'error': reason}
     asset = _order_primary_asset(order)
-    if enforce_schedule and not cloud_server_shutdown_enabled():
+    if not cloud_server_shutdown_enabled():
         reason = '服务器关机总开关已关闭，跳过真实关机。'
         async_to_sync(_record_lifecycle_action_failed)(order.id, 'suspend_skipped', reason)
         return {'order_id': order.id, 'order_no': order.order_no, 'ip': ip, 'queue_status': queue_status, 'ok': False, 'error': reason}
-    if enforce_schedule and not asset_shutdown_enabled(asset):
+    if not asset_shutdown_enabled(asset):
         reason = '资产关机计划开关已关闭，跳过真实关机。'
         async_to_sync(_record_lifecycle_action_failed)(order.id, 'suspend_skipped', reason)
         return {'order_id': order.id, 'order_no': order.order_no, 'ip': ip, 'queue_status': queue_status, 'ok': False, 'error': reason}
-    if enforce_schedule:
-        if not order.suspend_at:
-            reason = '订单没有计划关机时间，跳过真实关机。'
-            async_to_sync(_record_lifecycle_action_failed)(order.id, 'suspend_skipped', reason)
-            return {'order_id': order.id, 'order_no': order.order_no, 'ip': ip, 'queue_status': queue_status, 'ok': False, 'error': reason}
-        if order.suspend_at > now:
-            reason = f'未到计划关机时间：{timezone.localtime(order.suspend_at).strftime("%Y-%m-%d %H:%M:%S")}'
-            async_to_sync(_record_lifecycle_action_failed)(order.id, 'suspend_skipped', reason)
-            return {'order_id': order.id, 'order_no': order.order_no, 'ip': ip, 'queue_status': queue_status, 'ok': False, 'error': reason}
-        if not _is_cloud_suspend_time(now):
-            reason = '当前不在后台配置的服务器关机执行时间窗口'
-            async_to_sync(_record_lifecycle_action_failed)(order.id, 'suspend_skipped', reason)
-            return {'order_id': order.id, 'order_no': order.order_no, 'ip': ip, 'queue_status': queue_status, 'ok': False, 'error': reason}
-    task_claim = None
-    if enforce_schedule:
-        task_claim = claim_lifecycle_task_for_order(CloudLifecycleTask.TASK_SUSPEND, order, scheduled_at=order.suspend_at, queue_status=queue_status)
-        if not task_claim:
-            reason = '本轮关机计划已被其他进程认领、已完成或正在重试保护期内，跳过重复触发。'
-            async_to_sync(_record_lifecycle_action_failed)(order.id, 'suspend_skipped', reason)
-            return {'order_id': order.id, 'order_no': order.order_no, 'ip': ip, 'queue_status': queue_status, 'ok': False, 'error': reason}
+    if not order.suspend_at:
+        reason = '订单没有计划关机时间，跳过真实关机。'
+        async_to_sync(_record_lifecycle_action_failed)(order.id, 'suspend_skipped', reason)
+        return {'order_id': order.id, 'order_no': order.order_no, 'ip': ip, 'queue_status': queue_status, 'ok': False, 'error': reason}
+    if order.suspend_at > now:
+        reason = f'未到计划关机时间：{timezone.localtime(order.suspend_at).strftime("%Y-%m-%d %H:%M:%S")}'
+        async_to_sync(_record_lifecycle_action_failed)(order.id, 'suspend_skipped', reason)
+        return {'order_id': order.id, 'order_no': order.order_no, 'ip': ip, 'queue_status': queue_status, 'ok': False, 'error': reason}
+    if not _is_cloud_suspend_time(now):
+        reason = '当前不在后台配置的服务器关机执行时间窗口'
+        async_to_sync(_record_lifecycle_action_failed)(order.id, 'suspend_skipped', reason)
+        return {'order_id': order.id, 'order_no': order.order_no, 'ip': ip, 'queue_status': queue_status, 'ok': False, 'error': reason}
+    task_claim = claim_lifecycle_task_for_order(CloudLifecycleTask.TASK_SUSPEND, order, scheduled_at=order.suspend_at, queue_status=queue_status)
+    if not task_claim:
+        reason = '本轮关机计划已被其他进程认领、已完成或正在重试保护期内，跳过重复触发。'
+        async_to_sync(_record_lifecycle_action_failed)(order.id, 'suspend_skipped', reason)
+        return {'order_id': order.id, 'order_no': order.order_no, 'ip': ip, 'queue_status': queue_status, 'ok': False, 'error': reason}
     try:
         ok, note = _run_cloud_action(_stop_instance(order), action='AWS 实例关机', target=order.order_no)
         if ok:
@@ -129,7 +126,7 @@ def run_shutdown_order_suspend(order_id: int, *, queue_status='scheduled_suspend
         raise
 
 
-def run_shutdown_order_delete(order_id: int, *, queue_status='manual_single', enforce_schedule: bool = True) -> dict:
+def run_shutdown_order_delete(order_id: int, *, queue_status='scheduled_delete') -> dict:
     from cloud.lifecycle import (
         asset_server_delete_enabled,
         _delete_instance,
@@ -157,34 +154,31 @@ def run_shutdown_order_delete(order_id: int, *, queue_status='manual_single', en
         reason = '删除服务器总开关已关闭，跳过真实删机。'
         async_to_sync(_record_lifecycle_action_failed)(order.id, 'delete_skipped', reason)
         return {'order_id': order.id, 'order_no': order.order_no, 'ip': ip, 'queue_status': queue_status, 'ok': False, 'error': reason}
-    if enforce_schedule and not asset_server_delete_enabled(_order_primary_asset(order)):
+    if not asset_server_delete_enabled(_order_primary_asset(order)):
         reason = '资产服务器删除计划开关已关闭，跳过真实删机。'
         async_to_sync(_record_lifecycle_action_failed)(order.id, 'delete_skipped', reason)
         return {'order_id': order.id, 'order_no': order.order_no, 'ip': ip, 'queue_status': queue_status, 'ok': False, 'error': reason}
-    if enforce_schedule:
-        if not order.delete_at:
-            reason = '订单没有计划删机时间，跳过真实删机。'
-            async_to_sync(_record_lifecycle_action_failed)(order.id, 'delete_skipped', reason)
-            return {'order_id': order.id, 'order_no': order.order_no, 'ip': ip, 'queue_status': queue_status, 'ok': False, 'error': reason}
-        if order.delete_at > now:
-            reason = f'服务器删除时间未到：{timezone.localtime(order.delete_at).strftime("%Y-%m-%d %H:%M:%S")}'
-            async_to_sync(_record_lifecycle_action_failed)(order.id, 'delete_skipped', reason)
-            return {'order_id': order.id, 'order_no': order.order_no, 'ip': ip, 'queue_status': queue_status, 'ok': False, 'error': reason}
-        if not _is_cloud_delete_safe_time(now):
-            reason = '当前不在后台配置的服务器删除执行时间窗口'
-            async_to_sync(_record_lifecycle_action_failed)(order.id, 'delete_skipped', reason)
-            return {'order_id': order.id, 'order_no': order.order_no, 'ip': ip, 'queue_status': queue_status, 'ok': False, 'error': reason}
-    task_claim = None
-    if enforce_schedule:
-        task_claim = claim_lifecycle_task_for_order(CloudLifecycleTask.TASK_DELETE, order, scheduled_at=order.delete_at, queue_status=queue_status)
-        if not task_claim:
-            reason = '本轮删机计划已被其他进程认领、已完成或正在重试保护期内，跳过重复触发。'
-            async_to_sync(_record_lifecycle_action_failed)(order.id, 'delete_skipped', reason)
-            return {'order_id': order.id, 'order_no': order.order_no, 'ip': ip, 'queue_status': queue_status, 'ok': False, 'error': reason}
+    if not order.delete_at:
+        reason = '订单没有计划删机时间，跳过真实删机。'
+        async_to_sync(_record_lifecycle_action_failed)(order.id, 'delete_skipped', reason)
+        return {'order_id': order.id, 'order_no': order.order_no, 'ip': ip, 'queue_status': queue_status, 'ok': False, 'error': reason}
+    if order.delete_at > now:
+        reason = f'服务器删除时间未到：{timezone.localtime(order.delete_at).strftime("%Y-%m-%d %H:%M:%S")}'
+        async_to_sync(_record_lifecycle_action_failed)(order.id, 'delete_skipped', reason)
+        return {'order_id': order.id, 'order_no': order.order_no, 'ip': ip, 'queue_status': queue_status, 'ok': False, 'error': reason}
+    if not _is_cloud_delete_safe_time(now):
+        reason = '当前不在后台配置的服务器删除执行时间窗口'
+        async_to_sync(_record_lifecycle_action_failed)(order.id, 'delete_skipped', reason)
+        return {'order_id': order.id, 'order_no': order.order_no, 'ip': ip, 'queue_status': queue_status, 'ok': False, 'error': reason}
+    task_claim = claim_lifecycle_task_for_order(CloudLifecycleTask.TASK_DELETE, order, scheduled_at=order.delete_at, queue_status=queue_status)
+    if not task_claim:
+        reason = '本轮删机计划已被其他进程认领、已完成或正在重试保护期内，跳过重复触发。'
+        async_to_sync(_record_lifecycle_action_failed)(order.id, 'delete_skipped', reason)
+        return {'order_id': order.id, 'order_no': order.order_no, 'ip': ip, 'queue_status': queue_status, 'ok': False, 'error': reason}
     try:
         ok, note = _run_cloud_action(_delete_instance(order), action='AWS 实例删除', target=order.order_no)
         if ok:
-            source = '人工手动删除' if not enforce_schedule or str(queue_status or '').startswith('manual') else '到期自动删除'
+            source = '到期自动删除'
             async_to_sync(_mark_deleted)(order.id, with_delete_source(note, source))
             finish_lifecycle_task(task_claim, ok=True)
             finish_open_lifecycle_tasks_for_order(CloudLifecycleTask.TASK_DELETE, order)
@@ -197,7 +191,7 @@ def run_shutdown_order_delete(order_id: int, *, queue_status='manual_single', en
         raise
 
 
-def run_server_asset_suspend(asset_id: int, *, queue_status='scheduled_asset_suspend', enforce_schedule: bool = True) -> dict:
+def run_server_asset_suspend(asset_id: int, *, queue_status='scheduled_asset_suspend') -> dict:
     from cloud.lifecycle import (
         asset_shutdown_enabled,
         cloud_server_shutdown_enabled,
@@ -223,23 +217,20 @@ def run_server_asset_suspend(asset_id: int, *, queue_status='scheduled_asset_sus
         return {'asset_id': asset.id, 'ip': ip, 'queue_status': queue_status, 'ok': False, 'error': '该服务器资产已完成关机或已删除，不需要重复执行'}
     if asset.provider == 'aliyun_simple':
         return {'asset_id': asset.id, 'ip': ip, 'queue_status': queue_status, 'ok': False, 'error': '阿里云轻量服务器当前只同步状态，不执行真实关机。'}
-    if enforce_schedule and not cloud_server_shutdown_enabled():
+    if not cloud_server_shutdown_enabled():
         return {'asset_id': asset.id, 'ip': ip, 'queue_status': queue_status, 'ok': False, 'error': '服务器关机总开关已关闭，跳过真实关机。'}
-    if enforce_schedule and not asset_shutdown_enabled(asset):
+    if not asset_shutdown_enabled(asset):
         return {'asset_id': asset.id, 'ip': ip, 'queue_status': queue_status, 'ok': False, 'error': '资产关机计划开关已关闭，跳过真实关机。'}
     scheduled_at = _server_asset_suspend_at(asset)
-    if enforce_schedule:
-        if not scheduled_at:
-            return {'asset_id': asset.id, 'ip': ip, 'queue_status': queue_status, 'ok': False, 'error': '服务器没有计划关机时间，跳过真实关机。'}
-        if scheduled_at > now:
-            return {'asset_id': asset.id, 'ip': ip, 'queue_status': queue_status, 'ok': False, 'error': f'未到计划关机时间：{timezone.localtime(scheduled_at).strftime("%Y-%m-%d %H:%M:%S")}'}
-        if not _is_cloud_suspend_time(now):
-            return {'asset_id': asset.id, 'ip': ip, 'queue_status': queue_status, 'ok': False, 'error': '当前不在后台配置的服务器关机执行时间窗口'}
-    task_claim = None
-    if enforce_schedule:
-        task_claim = claim_lifecycle_task_for_asset(CloudLifecycleTask.TASK_SUSPEND, asset, scheduled_at=scheduled_at, queue_status=queue_status)
-        if not task_claim:
-            return {'asset_id': asset.id, 'ip': ip, 'queue_status': queue_status, 'ok': False, 'error': '本轮关机计划已被其他进程认领、已完成或正在重试保护期内，跳过重复触发。'}
+    if not scheduled_at:
+        return {'asset_id': asset.id, 'ip': ip, 'queue_status': queue_status, 'ok': False, 'error': '服务器没有计划关机时间，跳过真实关机。'}
+    if scheduled_at > now:
+        return {'asset_id': asset.id, 'ip': ip, 'queue_status': queue_status, 'ok': False, 'error': f'未到计划关机时间：{timezone.localtime(scheduled_at).strftime("%Y-%m-%d %H:%M:%S")}'}
+    if not _is_cloud_suspend_time(now):
+        return {'asset_id': asset.id, 'ip': ip, 'queue_status': queue_status, 'ok': False, 'error': '当前不在后台配置的服务器关机执行时间窗口'}
+    task_claim = claim_lifecycle_task_for_asset(CloudLifecycleTask.TASK_SUSPEND, asset, scheduled_at=scheduled_at, queue_status=queue_status)
+    if not task_claim:
+        return {'asset_id': asset.id, 'ip': ip, 'queue_status': queue_status, 'ok': False, 'error': '本轮关机计划已被其他进程认领、已完成或正在重试保护期内，跳过重复触发。'}
     try:
         ok, note = _run_cloud_action(_stop_asset_instance(asset), action='AWS 实例关机', target=str(asset.id))
         if ok:
@@ -254,7 +245,7 @@ def run_server_asset_suspend(asset_id: int, *, queue_status='scheduled_asset_sus
         raise
 
 
-def run_replaced_order_delete(order_id: int, *, queue_status='scheduled_migration_delete', enforce_schedule: bool = True) -> dict:
+def run_replaced_order_delete(order_id: int, *, queue_status='scheduled_migration_delete') -> dict:
     from cloud.lifecycle import (
         asset_server_delete_enabled,
         _delete_replaced_server,
@@ -274,30 +265,27 @@ def run_replaced_order_delete(order_id: int, *, queue_status='scheduled_migratio
         reason = '删除服务器总开关已关闭，跳过真实删机。'
         async_to_sync(_record_lifecycle_action_failed)(order.id, 'delete_skipped', reason)
         return {'order_id': order.id, 'order_no': order.order_no, 'ip': ip, 'queue_status': queue_status, 'ok': False, 'error': reason}
-    if enforce_schedule and not asset_server_delete_enabled(_order_primary_asset(order)):
+    if not asset_server_delete_enabled(_order_primary_asset(order)):
         reason = '资产服务器删除计划开关已关闭，跳过迁移旧服务器真实删机。'
         async_to_sync(_record_lifecycle_action_failed)(order.id, 'delete_skipped', reason)
         return {'order_id': order.id, 'order_no': order.order_no, 'ip': ip, 'queue_status': queue_status, 'ok': False, 'error': reason}
-    if enforce_schedule:
-        if not order.migration_due_at:
-            reason = '迁移旧服务器没有计划清理时间，跳过真实删机。'
-            async_to_sync(_record_lifecycle_action_failed)(order.id, 'delete_skipped', reason)
-            return {'order_id': order.id, 'order_no': order.order_no, 'ip': ip, 'queue_status': queue_status, 'ok': False, 'error': reason}
-        if order.migration_due_at > now:
-            reason = f'迁移旧服务器清理时间未到：{timezone.localtime(order.migration_due_at).strftime("%Y-%m-%d %H:%M:%S")}'
-            async_to_sync(_record_lifecycle_action_failed)(order.id, 'delete_skipped', reason)
-            return {'order_id': order.id, 'order_no': order.order_no, 'ip': ip, 'queue_status': queue_status, 'ok': False, 'error': reason}
-        if not _is_cloud_delete_safe_time(now):
-            reason = '当前不在后台配置的服务器删除执行时间窗口'
-            async_to_sync(_record_lifecycle_action_failed)(order.id, 'delete_skipped', reason)
-            return {'order_id': order.id, 'order_no': order.order_no, 'ip': ip, 'queue_status': queue_status, 'ok': False, 'error': reason}
-    task_claim = None
-    if enforce_schedule:
-        task_claim = claim_lifecycle_task_for_order(CloudLifecycleTask.TASK_MIGRATION_DELETE, order, scheduled_at=order.migration_due_at, queue_status=queue_status)
-        if not task_claim:
-            reason = '本轮迁移旧机删除计划已被其他进程认领、已完成或正在重试保护期内，跳过重复触发。'
-            async_to_sync(_record_lifecycle_action_failed)(order.id, 'delete_skipped', reason)
-            return {'order_id': order.id, 'order_no': order.order_no, 'ip': ip, 'queue_status': queue_status, 'ok': False, 'error': reason}
+    if not order.migration_due_at:
+        reason = '迁移旧服务器没有计划清理时间，跳过真实删机。'
+        async_to_sync(_record_lifecycle_action_failed)(order.id, 'delete_skipped', reason)
+        return {'order_id': order.id, 'order_no': order.order_no, 'ip': ip, 'queue_status': queue_status, 'ok': False, 'error': reason}
+    if order.migration_due_at > now:
+        reason = f'迁移旧服务器清理时间未到：{timezone.localtime(order.migration_due_at).strftime("%Y-%m-%d %H:%M:%S")}'
+        async_to_sync(_record_lifecycle_action_failed)(order.id, 'delete_skipped', reason)
+        return {'order_id': order.id, 'order_no': order.order_no, 'ip': ip, 'queue_status': queue_status, 'ok': False, 'error': reason}
+    if not _is_cloud_delete_safe_time(now):
+        reason = '当前不在后台配置的服务器删除执行时间窗口'
+        async_to_sync(_record_lifecycle_action_failed)(order.id, 'delete_skipped', reason)
+        return {'order_id': order.id, 'order_no': order.order_no, 'ip': ip, 'queue_status': queue_status, 'ok': False, 'error': reason}
+    task_claim = claim_lifecycle_task_for_order(CloudLifecycleTask.TASK_MIGRATION_DELETE, order, scheduled_at=order.migration_due_at, queue_status=queue_status)
+    if not task_claim:
+        reason = '本轮迁移旧机删除计划已被其他进程认领、已完成或正在重试保护期内，跳过重复触发。'
+        async_to_sync(_record_lifecycle_action_failed)(order.id, 'delete_skipped', reason)
+        return {'order_id': order.id, 'order_no': order.order_no, 'ip': ip, 'queue_status': queue_status, 'ok': False, 'error': reason}
     try:
         ok, note = _run_cloud_action(_delete_replaced_server(order), action='AWS 迁移旧实例删除', target=order.order_no)
         if ok:
@@ -313,7 +301,7 @@ def run_replaced_order_delete(order_id: int, *, queue_status='scheduled_migratio
         raise
 
 
-def run_orphan_asset_delete(asset_id: int, *, enforce_schedule: bool = True) -> dict:
+def run_orphan_asset_delete(asset_id: int) -> dict:
     from cloud.lifecycle import (
         asset_server_delete_enabled,
         _delete_orphan_asset_instance,
@@ -335,7 +323,7 @@ def run_orphan_asset_delete(asset_id: int, *, enforce_schedule: bool = True) -> 
     if asset.provider == 'aliyun_simple':
         return {'asset_id': asset.id, 'ip': ip, 'ok': False, 'error': '阿里云轻量服务器当前未接入删除 API，本系统不会执行真实删机。'}
     linked_order = getattr(asset, 'order', None)
-    if enforce_schedule and asset.status not in {
+    if asset.status not in {
         CloudAsset.STATUS_STOPPED,
         CloudAsset.STATUS_SUSPENDED,
         CloudAsset.STATUS_DELETING,
@@ -343,32 +331,29 @@ def run_orphan_asset_delete(asset_id: int, *, enforce_schedule: bool = True) -> 
         return {'asset_id': asset.id, 'ip': ip, 'ok': False, 'error': '服务器尚未完成关机，不能进入删机计划执行。'}
     if not cloud_server_delete_enabled():
         return {'asset_id': asset.id, 'ip': ip, 'ok': False, 'error': '删除服务器总开关已关闭，跳过真实删机。'}
-    if enforce_schedule and not asset_server_delete_enabled(asset):
+    if not asset_server_delete_enabled(asset):
         return {'asset_id': asset.id, 'ip': ip, 'ok': False, 'error': '资产服务器删除计划开关已关闭，跳过真实删机。'}
     if _asset_is_unattached_ip(asset) or not str(asset.instance_id or asset.provider_resource_id or asset.asset_name or '').strip():
         return {'asset_id': asset.id, 'ip': ip, 'ok': False, 'error': '该资产不是可删服务器，请走未附加 IP 删除'}
-    if enforce_schedule:
-        if not asset.actual_expires_at:
-            return {'asset_id': asset.id, 'ip': ip, 'ok': False, 'error': '服务器没有计划删除时间，跳过真实删机。'}
-        blocked_until = None if linked_order else _orphan_asset_server_delete_blocked_until(asset, now=now)
-        if linked_order:
-            delete_at = _server_asset_delete_at(asset)
-            if delete_at and delete_at > now:
-                blocked_until = delete_at
-        if blocked_until:
-            return {'asset_id': asset.id, 'ip': ip, 'ok': False, 'error': f'未到服务器删除时间：{timezone.localtime(blocked_until).strftime("%Y-%m-%d %H:%M:%S")}'}
-        if not _is_cloud_delete_safe_time(now):
-            return {'asset_id': asset.id, 'ip': ip, 'ok': False, 'error': '当前不在后台配置的服务器删除执行时间窗口'}
-    task_claim = None
-    if enforce_schedule:
-        scheduled_at = _server_asset_delete_at(asset) or asset.actual_expires_at
-        task_claim = claim_lifecycle_task_for_asset(CloudLifecycleTask.TASK_ORPHAN_ASSET_DELETE, asset, scheduled_at=scheduled_at, queue_status='scheduled_orphan_asset_delete')
-        if not task_claim:
-            return {'asset_id': asset.id, 'ip': ip, 'ok': False, 'error': '本轮无订单资产删除计划已被其他进程认领、已完成或正在重试保护期内，跳过重复触发。'}
+    if not asset.actual_expires_at:
+        return {'asset_id': asset.id, 'ip': ip, 'ok': False, 'error': '服务器没有计划删除时间，跳过真实删机。'}
+    blocked_until = None if linked_order else _orphan_asset_server_delete_blocked_until(asset, now=now)
+    if linked_order:
+        delete_at = _server_asset_delete_at(asset)
+        if delete_at and delete_at > now:
+            blocked_until = delete_at
+    if blocked_until:
+        return {'asset_id': asset.id, 'ip': ip, 'ok': False, 'error': f'未到服务器删除时间：{timezone.localtime(blocked_until).strftime("%Y-%m-%d %H:%M:%S")}'}
+    if not _is_cloud_delete_safe_time(now):
+        return {'asset_id': asset.id, 'ip': ip, 'ok': False, 'error': '当前不在后台配置的服务器删除执行时间窗口'}
+    scheduled_at = _server_asset_delete_at(asset) or asset.actual_expires_at
+    task_claim = claim_lifecycle_task_for_asset(CloudLifecycleTask.TASK_ORPHAN_ASSET_DELETE, asset, scheduled_at=scheduled_at, queue_status='scheduled_orphan_asset_delete')
+    if not task_claim:
+        return {'asset_id': asset.id, 'ip': ip, 'ok': False, 'error': '本轮无订单资产删除计划已被其他进程认领、已完成或正在重试保护期内，跳过重复触发。'}
     try:
         ok, note = _run_cloud_action(_delete_orphan_asset_instance(asset), action='AWS 无订单实例删除', target=str(asset.id))
         if ok:
-            source = '人工手动删除' if not enforce_schedule else '到期自动删除'
+            source = '到期自动删除'
             if linked_order:
                 async_to_sync(_mark_deleted)(linked_order.id, with_delete_source(note, source))
             else:
@@ -377,7 +362,7 @@ def run_orphan_asset_delete(asset_id: int, *, enforce_schedule: bool = True) -> 
             finish_open_lifecycle_tasks_for_asset(CloudLifecycleTask.TASK_ORPHAN_ASSET_DELETE, asset)
             return {'asset_id': asset.id, 'ip': ip, 'ok': True, 'error': None}
         if asset.provider != 'aws_lightsail':
-            source = '人工手动清理' if not enforce_schedule else '到期自动清理'
+            source = '到期自动清理'
             if linked_order:
                 async_to_sync(_mark_deleted)(linked_order.id, with_delete_source(note, source))
             else:
@@ -392,7 +377,7 @@ def run_orphan_asset_delete(asset_id: int, *, enforce_schedule: bool = True) -> 
         raise
 
 
-def run_order_static_ip_release(order_id: int, *, queue_status='scheduled_recycle', enforce_schedule: bool = True) -> dict:
+def run_order_static_ip_release(order_id: int, *, queue_status='scheduled_recycle') -> dict:
     from cloud.lifecycle import (
         asset_ip_delete_enabled,
         _is_cloud_unattached_ip_delete_time,
@@ -416,34 +401,31 @@ def run_order_static_ip_release(order_id: int, *, queue_status='scheduled_recycl
         reason = '删除IP总开关已关闭，跳过真实释放固定 IP。'
         async_to_sync(_record_lifecycle_action_failed)(order.id, 'recycle_skipped', reason)
         return {'order_id': order.id, 'order_no': order.order_no, 'ip': ip, 'queue_status': queue_status, 'ok': False, 'error': reason}
-    if enforce_schedule and not asset_ip_delete_enabled(_order_primary_asset(order)):
+    if not asset_ip_delete_enabled(_order_primary_asset(order)):
         reason = '资产 IP 删除计划开关已关闭，跳过真实释放固定 IP。'
         async_to_sync(_record_lifecycle_action_failed)(order.id, 'recycle_skipped', reason)
         return {'order_id': order.id, 'order_no': order.order_no, 'ip': ip, 'queue_status': queue_status, 'ok': False, 'error': reason}
-    if enforce_schedule:
-        if not order.ip_recycle_at:
-            reason = '订单没有计划释放 IP 时间，跳过真实释放固定 IP。'
-            async_to_sync(_record_lifecycle_action_failed)(order.id, 'recycle_skipped', reason)
-            return {'order_id': order.id, 'order_no': order.order_no, 'ip': ip, 'queue_status': queue_status, 'ok': False, 'error': reason}
-        if order.ip_recycle_at > now:
-            reason = f'未到计划释放 IP 时间：{timezone.localtime(order.ip_recycle_at).strftime("%Y-%m-%d %H:%M:%S")}'
-            async_to_sync(_record_lifecycle_action_failed)(order.id, 'recycle_skipped', reason)
-            return {'order_id': order.id, 'order_no': order.order_no, 'ip': ip, 'queue_status': queue_status, 'ok': False, 'error': reason}
-        if not _is_cloud_unattached_ip_delete_time(now):
-            reason = '当前不在后台配置的 IP 删除执行时间窗口'
-            async_to_sync(_record_lifecycle_action_failed)(order.id, 'recycle_skipped', reason)
-            return {'order_id': order.id, 'order_no': order.order_no, 'ip': ip, 'queue_status': queue_status, 'ok': False, 'error': reason}
-    task_claim = None
-    if enforce_schedule:
-        task_claim = claim_lifecycle_task_for_order(CloudLifecycleTask.TASK_RECYCLE, order, scheduled_at=order.ip_recycle_at, queue_status=queue_status)
-        if not task_claim:
-            reason = '本轮固定 IP 回收计划已被其他进程认领、已完成或正在重试保护期内，跳过重复触发。'
-            async_to_sync(_record_lifecycle_action_failed)(order.id, 'recycle_skipped', reason)
-            return {'order_id': order.id, 'order_no': order.order_no, 'ip': ip, 'queue_status': queue_status, 'ok': False, 'error': reason}
+    if not order.ip_recycle_at:
+        reason = '订单没有计划释放 IP 时间，跳过真实释放固定 IP。'
+        async_to_sync(_record_lifecycle_action_failed)(order.id, 'recycle_skipped', reason)
+        return {'order_id': order.id, 'order_no': order.order_no, 'ip': ip, 'queue_status': queue_status, 'ok': False, 'error': reason}
+    if order.ip_recycle_at > now:
+        reason = f'未到计划释放 IP 时间：{timezone.localtime(order.ip_recycle_at).strftime("%Y-%m-%d %H:%M:%S")}'
+        async_to_sync(_record_lifecycle_action_failed)(order.id, 'recycle_skipped', reason)
+        return {'order_id': order.id, 'order_no': order.order_no, 'ip': ip, 'queue_status': queue_status, 'ok': False, 'error': reason}
+    if not _is_cloud_unattached_ip_delete_time(now):
+        reason = '当前不在后台配置的 IP 删除执行时间窗口'
+        async_to_sync(_record_lifecycle_action_failed)(order.id, 'recycle_skipped', reason)
+        return {'order_id': order.id, 'order_no': order.order_no, 'ip': ip, 'queue_status': queue_status, 'ok': False, 'error': reason}
+    task_claim = claim_lifecycle_task_for_order(CloudLifecycleTask.TASK_RECYCLE, order, scheduled_at=order.ip_recycle_at, queue_status=queue_status)
+    if not task_claim:
+        reason = '本轮固定 IP 回收计划已被其他进程认领、已完成或正在重试保护期内，跳过重复触发。'
+        async_to_sync(_record_lifecycle_action_failed)(order.id, 'recycle_skipped', reason)
+        return {'order_id': order.id, 'order_no': order.order_no, 'ip': ip, 'queue_status': queue_status, 'ok': False, 'error': reason}
     try:
         ok, note = _run_cloud_action(_release_order_static_ip(order), action='AWS 固定 IP 释放', target=order.order_no)
         if ok:
-            source = '人工手动释放' if not enforce_schedule or str(queue_status or '').startswith('manual') else '到期自动释放'
+            source = '到期自动释放'
             async_to_sync(_mark_recycled)(order.id, with_delete_source(note, source))
             finish_lifecycle_task(task_claim, ok=True)
             finish_open_lifecycle_tasks_for_order(CloudLifecycleTask.TASK_RECYCLE, order)
@@ -456,7 +438,7 @@ def run_order_static_ip_release(order_id: int, *, queue_status='scheduled_recycl
         raise
 
 
-def run_unattached_ip_release(asset_id: int, *, enforce_schedule: bool = True) -> dict:
+def run_unattached_ip_release(asset_id: int) -> dict:
     from cloud.lifecycle import (
         asset_ip_delete_enabled,
         _is_cloud_unattached_ip_delete_time,
@@ -474,26 +456,23 @@ def run_unattached_ip_release(asset_id: int, *, enforce_schedule: bool = True) -
         return {'asset_id': asset.id, 'ip': ip, 'ok': False, 'error': '该 IP 已删除，不需要重复执行'}
     if not cloud_ip_delete_enabled():
         return {'asset_id': asset.id, 'ip': ip, 'ok': False, 'error': '删除IP总开关已关闭，跳过真实释放固定 IP。'}
-    if enforce_schedule and not asset_ip_delete_enabled(asset):
+    if not asset_ip_delete_enabled(asset):
         return {'asset_id': asset.id, 'ip': ip, 'ok': False, 'error': '资产 IP 删除计划开关已关闭，跳过真实释放固定 IP。'}
     if asset.instance_id:
         return {'asset_id': asset.id, 'ip': ip, 'ok': False, 'error': '该 IP 仍有关联实例，不能按未附加 IP 删除'}
-    if enforce_schedule:
-        if not asset.actual_expires_at:
-            return {'asset_id': asset.id, 'ip': ip, 'ok': False, 'error': 'IP 没有计划删除时间，跳过真实释放固定 IP。'}
-        if asset.actual_expires_at > now:
-            return {'asset_id': asset.id, 'ip': ip, 'ok': False, 'error': f'未到 IP 删除时间：{timezone.localtime(asset.actual_expires_at).strftime("%Y-%m-%d %H:%M:%S")}'}
-        if not _is_cloud_unattached_ip_delete_time(now):
-            return {'asset_id': asset.id, 'ip': ip, 'ok': False, 'error': '当前不在后台配置的 IP 删除执行时间窗口'}
-    task_claim = None
-    if enforce_schedule:
-        task_claim = claim_lifecycle_task_for_asset(CloudLifecycleTask.TASK_UNATTACHED_IP_DELETE, asset, scheduled_at=asset.actual_expires_at, queue_status='scheduled_unattached_ip_delete')
-        if not task_claim:
-            return {'asset_id': asset.id, 'ip': ip, 'ok': False, 'error': '本轮未附加固定 IP 删除计划已被其他进程认领、已完成或正在重试保护期内，跳过重复触发。'}
+    if not asset.actual_expires_at:
+        return {'asset_id': asset.id, 'ip': ip, 'ok': False, 'error': 'IP 没有计划删除时间，跳过真实释放固定 IP。'}
+    if asset.actual_expires_at > now:
+        return {'asset_id': asset.id, 'ip': ip, 'ok': False, 'error': f'未到 IP 删除时间：{timezone.localtime(asset.actual_expires_at).strftime("%Y-%m-%d %H:%M:%S")}'}
+    if not _is_cloud_unattached_ip_delete_time(now):
+        return {'asset_id': asset.id, 'ip': ip, 'ok': False, 'error': '当前不在后台配置的 IP 删除执行时间窗口'}
+    task_claim = claim_lifecycle_task_for_asset(CloudLifecycleTask.TASK_UNATTACHED_IP_DELETE, asset, scheduled_at=asset.actual_expires_at, queue_status='scheduled_unattached_ip_delete')
+    if not task_claim:
+        return {'asset_id': asset.id, 'ip': ip, 'ok': False, 'error': '本轮未附加固定 IP 删除计划已被其他进程认领、已完成或正在重试保护期内，跳过重复触发。'}
     try:
         ok, note = _run_cloud_action(_release_unattached_static_ip(asset), action='AWS 未附加固定 IP 释放', target=str(asset.id))
         if ok:
-            source = '人工手动删除' if not enforce_schedule else '到期自动删除'
+            source = '到期自动删除'
             async_to_sync(_mark_unattached_static_ip_deleted)(asset.id, with_delete_source(note, source))
             finish_lifecycle_task(task_claim, ok=True)
             finish_open_lifecycle_tasks_for_asset(CloudLifecycleTask.TASK_UNATTACHED_IP_DELETE, asset)

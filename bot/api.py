@@ -2837,15 +2837,15 @@ def update_lifecycle_plan_note(request):
     return _ok({'item_type': effective_item_type, 'asset_id': asset.id, 'note': note_text, 'display_note': display_note})
 
 
-def _run_server_asset_shutdown_sync(asset_id: int, queue_status='manual_asset_shutdown', enforce_schedule: bool = True):
-    return run_server_asset_suspend(asset_id, queue_status=queue_status, enforce_schedule=enforce_schedule)
+def _run_server_asset_shutdown_sync(asset_id: int, queue_status='manual_asset_shutdown'):
+    return run_server_asset_suspend(asset_id, queue_status=queue_status)
 
 
 @csrf_exempt
 @dashboard_superuser_required
 @require_POST
 def run_server_asset_shutdown_plan(request, asset_id):
-    result = _run_server_asset_shutdown_sync(asset_id, 'manual_asset_shutdown', enforce_schedule=True)
+    result = _run_server_asset_shutdown_sync(asset_id, 'manual_asset_shutdown')
     _refresh_lifecycle_plan_cache(page_size=1000)
     return _ok({
         'batch_id': secrets.token_hex(8),
@@ -2857,15 +2857,15 @@ def run_server_asset_shutdown_plan(request, asset_id):
     })
 
 
-def _run_orphan_asset_delete_sync(asset_id: int, enforce_schedule: bool = True):
-    return run_orphan_asset_delete(asset_id, enforce_schedule=enforce_schedule)
+def _run_orphan_asset_delete_sync(asset_id: int):
+    return run_orphan_asset_delete(asset_id)
 
 
 @csrf_exempt
 @dashboard_superuser_required
 @require_POST
 def run_orphan_asset_delete_plan(request, asset_id):
-    result = _run_orphan_asset_delete_sync(asset_id, enforce_schedule=True)
+    result = _run_orphan_asset_delete_sync(asset_id)
     _refresh_lifecycle_plan_cache(page_size=1000)
     return _ok({
         'batch_id': secrets.token_hex(8),
@@ -2877,12 +2877,11 @@ def run_orphan_asset_delete_plan(request, asset_id):
     })
 
 
-def _run_unattached_ip_delete_sync(asset_id: int, enforce_schedule: bool = True):
+def _run_unattached_ip_delete_sync(asset_id: int):
     now = timezone.now()
     asset = CloudAsset.objects.filter(id=asset_id, kind=CloudAsset.KIND_SERVER).first()
     should_check_window = bool(
-        enforce_schedule
-        and asset
+        asset
         and getattr(asset, 'ip_delete_enabled', True) is not False
         and not getattr(asset, 'instance_id', None)
         and asset.actual_expires_at
@@ -2890,14 +2889,14 @@ def _run_unattached_ip_delete_sync(asset_id: int, enforce_schedule: bool = True)
     )
     if should_check_window and not _is_cloud_unattached_ip_delete_time(now):
         return {'ok': False, 'error': '未到 IP 删除时间，不在 IP 删除执行时间窗口', 'asset_id': asset_id}
-    return run_unattached_ip_release(asset_id, enforce_schedule=enforce_schedule)
+    return run_unattached_ip_release(asset_id)
 
 
 @csrf_exempt
 @dashboard_superuser_required
 @require_POST
 def run_unattached_ip_delete_plan(request, asset_id):
-    result = _run_unattached_ip_delete_sync(asset_id, enforce_schedule=True)
+    result = _run_unattached_ip_delete_sync(asset_id)
     _refresh_lifecycle_plan_cache(page_size=1000)
     return _ok({
         'batch_id': secrets.token_hex(8),

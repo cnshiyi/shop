@@ -4,34 +4,37 @@
 
 ## 最近一轮
 
-- 时间：2026-06-09 00:08 CST
-- 状态：已修复并确认生命周期真实执行链，关机、删机、未附加 IP 删除不再绕过资产计划查询层。
+- 时间：2026-06-09 00:50 CST
+- 状态：已收掉生命周期执行器底层人工绕过计划能力。
 - 后端提交：本轮完成后提交，具体哈希以 `git log -1` 为准。
 - 前端提交：无前端代码变更。
 
 ## 本轮背景
 
-- 用户要求再次确认关机、删机、删除未附加 IP 是否严格按照计划表执行。
-- 开始时工作树已有生命周期计划页和执行链未提交改动，本轮继续收敛这些改动，没有执行真实云资源创建、真实删机、真实支付、链上广播、生产发布或删除数据。
+- 用户要求解释并收掉代码里仍存在的底层人工绕过能力。
+- 本轮没有执行真实云资源创建、真实关机、真实删机、真实支付、链上广播、生产发布或删除数据。
 
 ## 修复内容
 
-- 服务器关机计划、服务器删机计划、未附加 IP 删除计划统一使用 `cloud/lifecycle_plan_queries.py` 的资产计划查询层。
-- 服务器计划按公网 IP 去重，同一 IP 只保留一条计划，避免脏资产重复展示或重复执行。
-- `lifecycle_tick()` 的真实关机改为执行 `run_server_asset_suspend(asset.id)`，真实删机改为执行 `run_orphan_asset_delete(asset.id)`；不再执行旧订单关机、旧订单删机、旧订单固定 IP 回收分支。
-- 服务器删机执行器增加硬校验：只有资产已经完成关机状态后才允许进入删机执行。
-- 后台计划手动执行入口从订单删机路径改为资产关机路径：`/api/admin/tasks/plans/server-assets/<asset_id>/shutdown/run/`。
-- IP 删除手动入口修复单项开关判断，只看 `ip_delete_enabled`，不再误看 `shutdown_enabled`。
-- 启动延迟保护只记录并跳过本轮真实资产关机、资产删机、迁移旧机、未附加 IP 删除，不再改写旧订单关机/删机/IP 回收时间。
+- `cloud/lifecycle_execution.py`
+  - 删除关机、删机、迁移旧机删除、订单固定 IP 回收、未附加 IP 删除等破坏性执行入口的计划绕过形参。
+  - 总开关、单资产开关、计划时间、执行窗口、任务认领全部改为无条件校验。
+  - 删除成功来源统一按计划执行记录，不再根据手动队列或绕过参数写入“人工手动删除/释放/清理”。
+- `bot/api.py`
+  - 后台计划页的关机、删机、未附加 IP 删除包装函数不再接收或透传计划绕过参数。
+- `cloud/lifecycle.py`
+  - 定时生命周期 tick 不再传计划绕过参数，所有破坏性动作只调用严格计划执行器。
+- `cloud/tests.py`
+  - 旧的“手动绕过计划限制”测试改成“计划时间/窗口/开关必须阻断真实动作”。
+  - 新增签名级断言，确认 7 个生命周期破坏性执行入口不再暴露旧绕过形参。
+  - 修正生命周期 tick 测试，匹配当前资产计划执行链。
 
 ## 结论
 
-- 修改前不能确认严格按计划表执行，因为执行器仍存在订单驱动破坏性执行分支。
-- 修改后可以确认：关机、删机、未附加 IP 删除都从资产计划查询层取 due 项，再由执行器按同一资产时间和开关做二次校验。
-- 关机受 `cloud_server_shutdown_enabled()` 和资产 `shutdown_enabled` 控制。
-- 删机受 `cloud_server_delete_enabled()` 和资产 `server_delete_enabled` 控制，并且必须先完成关机阶段。
-- 未附加 IP 删除受 `cloud_ip_delete_enabled()` 和资产 `ip_delete_enabled` 控制，不受关机开关影响。
-- 服务器不会自动补到期时间；只有未附加 IP 缺少到期时间时才按既有逻辑补 15 天释放时间。
+- 现在不是“传 False 会失败”，而是执行器签名和调用链都不再存在计划绕过参数。
+- 关机、删机、未附加 IP 删除都必须经过计划时间、执行窗口、总开关、单资产开关和任务认领。
+- 服务器删机仍要求服务器已进入关机完成/暂停/删除中阶段；未关机服务器不会直接删机。
+- IP 删除仍只受 IP 删除总开关和资产 `ip_delete_enabled` 控制，不受关机开关影响。
 
 ## 验证
 
@@ -39,22 +42,24 @@
 
 ```bash
 UV_CACHE_DIR=/private/tmp/uv-cache-shop uv run python manage.py check
-UV_CACHE_DIR=/private/tmp/uv-cache-shop uv run python -m py_compile cloud/lifecycle.py cloud/lifecycle_execution.py cloud/lifecycle_plan_queries.py bot/api.py shop/admin_urls.py cloud/tests.py cloud/tests_task_center.py
-UV_CACHE_DIR=/private/tmp/uv-cache-shop DJANGO_TEST_SQLITE=1 uv run python manage.py test cloud.tests.CloudServerServicesTestCase.test_lifecycle_tick_serializes_shutdown_delete_and_ip_release_stages cloud.tests.CloudServerServicesTestCase.test_orphan_asset_plan_run_rejects_active_linked_order_asset cloud.tests.CloudServerServicesTestCase.test_dashboard_orphan_asset_plan_run_respects_computed_delete_time cloud.tests.CloudServerServicesTestCase.test_dashboard_shutdown_plan_run_respects_asset_suspend_at --settings=shop.settings --verbosity=1
-UV_CACHE_DIR=/private/tmp/uv-cache-shop DJANGO_TEST_SQLITE=1 uv run python manage.py test cloud.tests.CloudServerServicesTestCase.test_lifecycle_plans_dedupes_ip_delete_plan_by_public_ip cloud.tests.CloudServerServicesTestCase.test_lifecycle_plans_dedupes_same_ip_server_assets cloud.tests.CloudServerServicesTestCase.test_lifecycle_plans_dedupes_server_shutdown_by_public_ip cloud.tests.CloudServerServicesTestCase.test_lifecycle_plans_deduped_server_prefers_shutdown_complete_stage cloud.tests.CloudServerServicesTestCase.test_unattached_ip_delete_plan_tail_page_keeps_exact_order --settings=shop.settings --verbosity=1
-UV_CACHE_DIR=/private/tmp/uv-cache-shop DJANGO_TEST_SQLITE=1 uv run python manage.py test cloud.tests.CloudServerServicesTestCase.test_lifecycle_due_queues_use_stage_specific_asset_switches cloud.tests.CloudServerServicesTestCase.test_unattached_ip_delete_ignores_shutdown_disabled_asset --settings=shop.settings --verbosity=1
-UV_CACHE_DIR=/private/tmp/uv-cache-shop DJANGO_TEST_SQLITE=1 uv run python manage.py test cloud.tests_task_center --settings=shop.settings --verbosity=1
+UV_CACHE_DIR=/private/tmp/uv-cache-shop uv run python -m py_compile cloud/lifecycle_execution.py cloud/lifecycle.py bot/api.py cloud/tests.py
+rg -n "enforce_schedule|_run_shutdown_order_sync" cloud bot core orders shop --glob '!*/migrations/*'
 git diff --check
+UV_CACHE_DIR=/private/tmp/uv-cache-shop DJANGO_TEST_SQLITE=1 uv run python manage.py test cloud.tests.CloudServerServicesTestCase.test_order_delete_respects_schedule_window ... --settings=shop.settings --verbosity=1
+UV_CACHE_DIR=/private/tmp/uv-cache-shop DJANGO_TEST_SQLITE=1 uv run python manage.py test cloud.tests.CloudServerServicesTestCase.test_lifecycle_tick_serializes_shutdown_delete_and_ip_release_stages ... cloud.tests_task_center --settings=shop.settings --verbosity=1
 ```
 
 结果：
 
 - Django 系统检查通过。
 - 相关文件编译通过。
-- 生命周期执行链、计划页去重、IP 删除开关、due 队列单项开关、任务中心统计聚焦测试通过。
+- 旧参数和旧包装函数扫描无命中。
+- 本轮 16 个生命周期执行器聚焦测试通过。
+- 生命周期 tick/计划页/任务中心 26 个回归测试通过。
+- `git diff --check` 通过。
 - SQLite 聚焦测试仍输出既有 `db_comment/db_table_comment` 能力差异告警，不属于本轮问题。
 
 ## 剩余风险
 
 - 本轮没有执行真实云资源操作。
-- 前端仓库需要同步调用新的资产关机计划执行接口，否则旧前端按钮如果仍调用订单计划执行路径会返回 404。
+- 仍需在上线前用脱敏报告单独记录已授权真机云资源生命周期测试结果。
