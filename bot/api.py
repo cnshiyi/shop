@@ -2604,49 +2604,6 @@ def lifecycle_plans(request):
         item['status_summary'] = f'真实状态：{resource_state_label}；计划状态：{plan_state_label}' + (f'；原因：{blocked_reason}' if blocked_reason else '')
         return item
 
-    def dedupe_shutdown_active_items(items):
-        passthrough = []
-        buckets = {}
-        def resource_status_priority(entry):
-            status = str(entry.get('status') or '').strip()
-            if status in {CloudAsset.STATUS_RUNNING, CloudAsset.STATUS_STOPPED, CloudAsset.STATUS_SUSPENDED}:
-                return 3
-            if status in {CloudAsset.STATUS_PENDING, CloudAsset.STATUS_STARTING}:
-                return 2
-            return 1
-
-        for item in items:
-            if str(item.get('item_type') or '') != 'orphan_asset':
-                passthrough.append(item)
-                continue
-            key = str(item.get('ip') or item.get('public_ip') or item.get('asset_id') or item.get('id') or '').strip()
-            if not key:
-                passthrough.append(item)
-                continue
-            buckets.setdefault(key, []).append(item)
-        deduped = list(passthrough)
-        for bucket in buckets.values():
-            bucket = sorted(
-                bucket,
-                key=lambda entry: (
-                    resource_status_priority(entry),
-                    parse_item_dt(entry.get('logged_at') or entry.get('next_run_at') or entry.get('delete_at'), datetime.min.replace(tzinfo=dt_timezone.utc)),
-                    int(entry.get('asset_id') or 0),
-                ),
-                reverse=True,
-            )
-            keep = bucket[0]
-            duplicate_count = len(bucket) - 1
-            if duplicate_count > 0:
-                labels = [str(keep.get('quality_label') or '').strip(), f'已覆盖 {duplicate_count} 条同 IP 旧服务器记录']
-                keep['quality_label'] = '，'.join([label for label in labels if label])
-                flags = list(keep.get('quality_flags') or [])
-                if 'covered_duplicates' not in flags:
-                    flags.append('covered_duplicates')
-                keep['quality_flags'] = flags
-            deduped.append(keep)
-        return deduped
-
     compact = str(request.GET.get('compact') or '').strip().lower() in {'1', 'true', 'yes', 'on'}
     fields = _request_field_set(
         request,
@@ -2706,7 +2663,6 @@ def lifecycle_plans(request):
                 total=total_counts['shutdown_plan_count'],
             )
         ]
-        shutdown_plan_items = dedupe_shutdown_active_items(shutdown_plan_items)
 
     if 'server_delete' in requested_tables:
         server_delete_active_items = [
@@ -2722,7 +2678,6 @@ def lifecycle_plans(request):
             item for item in server_delete_active_items
             if not (item.get('plan_state') == 'completed' and not item.get('should_execute'))
         ]
-        server_delete_active_items = dedupe_shutdown_active_items(server_delete_active_items)
         server_delete_due_items = [item for item in server_delete_active_items if is_server_delete_due(item)]
 
     if 'server_history' in requested_tables:

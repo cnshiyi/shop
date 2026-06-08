@@ -15091,3 +15091,103 @@ PY
 
 - 下一轮优先补真实前端计划页翻页/跳页与控制台巡检，验证任务中心和生命周期计划页在实际浏览器中的分页状态。
 - 继续关注关机计划页首屏相对删机/IP 删除的冷缓存耗时差异。
+
+## 2026-06-08 13:55 关机计划深页同 IP 资产不再折叠
+
+### 背景
+
+继续执行当前会话 4 小时自动巡检。上一轮遗留问题是：关机计划深页存在“先分页、再按同 IP 折叠 orphan 服务器资产”的逻辑，导致非末页显示条数不足，但分页总数仍按原始资产行数计算。
+
+### 复现
+
+真实 MySQL 数据库复测：
+
+- 关机计划总数：`1979990`。
+- 第 `1` 页：`loaded=50`。
+- 第 `2` 页：`loaded=50`。
+- 第 `1000` 页：修复前 `loaded=40`，不是末页却少行。
+- 末页 `39600`：`loaded=40`，因为 `1979990 % 50 = 40`，这是正确末页。
+
+定位后确认根因在 `bot/api.py`：`lifecycle_plans()` 先调用 `server_lifecycle_plan_page()` 做数据库分页，然后 `dedupe_shutdown_active_items()` 再把同 IP orphan 服务器折叠成一条。这样会让页面隐藏真实资产行，造成数据真实性不一致。
+
+### 修复
+
+修改 `bot/api.py`：
+
+- 删除服务器计划页的 `dedupe_shutdown_active_items()` 响应层折叠逻辑。
+- 关机计划和服务器删除计划都按 `CloudAsset` 资产行展示。
+- 同 IP 旧服务器资产不再被隐藏，每条都保留资产详情和单项开关管理入口。
+- IP 删除计划自己的固定 IP 去重逻辑不属于本轮问题，未修改。
+
+修改 `cloud/tests.py`：
+
+- 新增 `test_lifecycle_plans_keep_same_ip_orphan_servers_visible_across_pages`。
+- 构造 `60` 条同 IP orphan 服务器资产。
+- 验证关机计划第 `1` 页和第 `2` 页都返回 `20` 条，且前 `40` 条资产按顺序可见，避免再次出现“同 IP 旧服务器被吞掉”。
+
+### 真实库复测
+
+修复后真实库结果：
+
+- 第 `1` 页：`loaded=50`，约 `1.32s`。
+- 第 `2` 页：`loaded=50`，约 `1.22s`。
+- 第 `1000` 页：`loaded=50`，约 `1.25s`。
+- 末页 `39600`：`loaded=40`，符合总数取余。
+
+### 真实前端复测
+
+打开 `http://127.0.0.1:5666/admin/tasks/plans` 后实际操作：
+
+- 首屏关机计划显示 `已加载 50 / 总 1979990`。
+- 通过页面分页输入框实际跳转到关机计划第 `1000` 页。
+- 请求 `tables=shutdown_plan&shutdown_page=1000&shutdown_page_size=50` 返回 `200`。
+- 页面显示第 `1000` 页，关机计划表实际可见 `50` 行。
+- 响应体分页为 `page=1000`、`page_size=50`、`total=1979990`、`loaded=50`。
+- 首行 IP `198.18.3.115`、末行 IP `198.18.3.64`，与页面可见内容一致。
+- 控制台 `0` error / `0` warning，请求 `0` 个 400/500。
+
+### 机器人高并发
+
+执行：
+
+```bash
+UV_CACHE_DIR=/private/tmp/uv-cache-shop DJANGO_TEST_SQLITE=1 uv run python manage.py test bot.tests.RetainedIpRenewalUiTestCase.test_cloud_background_tasks_keep_bulk_concurrency_isolated --settings=shop.settings --verbosity=1
+```
+
+结果：
+
+- 通过。
+- 覆盖 `60` 个并发后台任务：
+  - `20` 组钱包直付。
+  - `20` 组钱包补付。
+  - `20` 组续费后检查。
+- 校验聊天窗口、订单、购买数量和派生创建任务没有串上下文。
+
+### 验证
+
+通过：
+
+```bash
+UV_CACHE_DIR=/private/tmp/uv-cache-shop uv run python manage.py check
+UV_CACHE_DIR=/private/tmp/uv-cache-shop DJANGO_TEST_SQLITE=1 uv run python manage.py test cloud.tests.CloudServerServicesTestCase.test_lifecycle_plans_keep_same_ip_orphan_servers_visible_across_pages cloud.tests.CloudServerServicesTestCase.test_lifecycle_plans_server_delete_pagination_contract cloud.tests.CloudServerServicesTestCase.test_lifecycle_plans_tables_param_returns_only_requested_items bot.tests.RetainedIpRenewalUiTestCase.test_cloud_background_tasks_keep_bulk_concurrency_isolated --settings=shop.settings --verbosity=1
+git diff --check
+```
+
+红线扫描通过：
+
+```bash
+rg -n "service_expires_at|actual_expires_at.*CloudServerOrder|CloudServerOrder.*actual_expires_at|plan snapshot|snapshot table|old refund|refund_legacy|refund_old|legacy_refund|accounts\\.|finance\\.|mall\\.|monitoring\\.|dashboard_api\\.|biz\\." cloud bot orders core shop -g '!**/migrations/**'
+```
+
+命中项仍为 Telegram 登录账号代码、云账号测试桩和 `CloudServerOrder.ip_recycle_at` 同步语句，不是旧到期事实回流。
+
+### 红线
+
+- 本轮未执行真实云资源创建、关机、删机、释放 IP、换 IP、真实支付、链上广播、生产发布或删除业务数据。
+- 本轮未打印密钥、Telegram session、支付密钥、云厂商密钥或完整代理链接到仓库文件。
+- 本轮使用的临时后台 session、浏览器 storage state 和临时用户已清理。
+
+### 下一步
+
+- 继续对代理列表每个标签做真实前端翻页和数据库口径对账，重点看未附加、已停用账号、未绑定用户、未绑定分组等标签在百万级数据下是否显示完整。
+- 继续做机器人全功能真实账号巡检和多任务高并发覆盖。

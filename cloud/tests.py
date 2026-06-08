@@ -8598,6 +8598,56 @@ class CloudServerServicesTestCase(TestCase):
         self.assertEqual([name for name in seen if name in expected_names], expected_names)
         self.assertEqual(len(seen), len(set(seen)))
 
+    # 功能：验证服务器计划页不会按同 IP 折叠旧服务器资产，避免深分页少行和资产不可管理。
+    def test_lifecycle_plans_keep_same_ip_orphan_servers_visible_across_pages(self):
+        now = timezone.now()
+        account = self._aws_test_account()
+        expected_names = []
+        base_expires_at = now - timezone.timedelta(days=3650)
+        for index in range(60):
+            asset_name = f'lifecycle-same-ip-visible-{index:02d}'
+            expected_names.append(asset_name)
+            CloudAsset.objects.create(
+                kind=CloudAsset.KIND_SERVER,
+                source=CloudAsset.SOURCE_AWS_SYNC,
+                user=self.user,
+                provider='aws_lightsail',
+                cloud_account=account,
+                account_label=cloud_account_label(account),
+                region_code=self.plan.region_code,
+                region_name=self.plan.region_name,
+                asset_name=asset_name,
+                instance_id=f'i-lifecycle-same-ip-visible-{index:02d}',
+                public_ip='5.5.19.19',
+                status=CloudAsset.STATUS_RUNNING,
+                is_active=True,
+                actual_expires_at=base_expires_at + timezone.timedelta(minutes=index),
+            )
+        staff_user = get_user_model().objects.create_user(username='staff_lifecycle_same_ip_visible', password='x', is_staff=True)
+
+        seen = []
+        for page in [1, 2]:
+            request = RequestFactory().get('/api/admin/tasks/plans/', {
+                'compact': '1',
+                'fields': 'basic,execution',
+                'limit': '20',
+                'tables': 'shutdown_plan',
+                'shutdown_page': str(page),
+                'shutdown_page_size': '20',
+            })
+            self._attach_bearer_session(request, staff_user)
+            response = lifecycle_plans(request)
+            self.assertEqual(response.status_code, 200)
+            data = json.loads(response.content)['data']
+            self.assertEqual(data['pagination']['shutdown_plan']['page'], page)
+            self.assertEqual(data['pagination']['shutdown_plan']['page_size'], 20)
+            self.assertEqual(data['pagination']['shutdown_plan']['loaded'], 20)
+            self.assertGreaterEqual(data['pagination']['shutdown_plan']['total'], 60)
+            self.assertEqual(len(data['shutdown_plan_items']), 20)
+            seen.extend(item['asset_name'] for item in data['shutdown_plan_items'])
+
+        self.assertEqual([name for name in seen if name in expected_names], expected_names[:40])
+
     # 功能：验证 IP 删除历史服务端分页契约，跨页不重复且排序结果能和数据库事实对上。
     def test_lifecycle_plans_ip_delete_history_pagination_contract(self):
         expected_names = []
