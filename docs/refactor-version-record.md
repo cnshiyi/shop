@@ -19024,3 +19024,68 @@ rg -n "TaskCenter|task center|任务中心|retry|重试|failed|failure|status" c
 UV_CACHE_DIR=/private/tmp/uv-cache-shop uv run python manage.py check
 git diff --check
 ```
+
+## 2026-06-08 23:03 CST 压测数据库隔离入口落地
+
+### 本轮背景
+
+- 本轮执行 `continue to next task` 自动优化流程。
+- `TODO.md` 首个未完成任务为“压测数据库隔离改造”。
+- 目标是让后续性能压测、批量造数和深分页压测必须先创建全新的独立测试数据库，禁止复用当前业务库、手工真机测试库或含真实用户数据的库。
+- 本轮不执行真实支付、链上广播、真实云资源操作、生产发布或删除数据。
+
+### 修复
+
+- 新增 `cloud/management/commands/prepare_load_test_db.py`。
+  - 默认 dry-run，只输出隔离压测库配置，不创建数据库、不写入数据。
+  - `--sqlite-name` 只允许指向 `.shop-load-tests/` 下文件名包含 `loadtest` 的 SQLite 文件。
+  - `--migrate` 和 `--seed-assets` 必须显式传入 `--confirm-isolated`。
+  - 迁移和造数子进程固定注入 `DB_ENGINE=sqlite`、`SQLITE_NAME=<压测库>`、`SHOP_LOAD_TEST_DB=1`。
+  - 造数前再次校验当前连接确实是目标隔离 SQLite 压测库，避免写入默认库。
+  - `--seed-assets` 批量创建 CloudAsset 测试资产，并回填 CloudAssetDashboardSnapshot 快照。
+- 新增 `cloud/tests_load_test_db.py` 聚焦测试。
+  - 验证 dry-run 输出隔离环境。
+  - 验证拒绝默认库路径。
+  - 验证未显式确认时禁止迁移/造数。
+  - 验证测试 IP 生成保持在私有网段。
+- `.gitignore` 增加 `.shop-load-tests/`，避免压测数据库文件进入仓库。
+- `TODO.md` 勾选压测数据库隔离改造。
+
+### 本轮压测库记录
+
+- 数据库名：`.shop-load-tests/shop-loadtest-smoke.sqlite3`
+- 端口：无，SQLite 文件库。
+- 造数规模：3 条 `CloudAsset` 测试资产，回填 3 条 `CloudAssetDashboardSnapshot` 快照。
+- 准备命令：
+
+```bash
+UV_CACHE_DIR=/private/tmp/uv-cache-shop uv run python manage.py prepare_load_test_db --sqlite-name .shop-load-tests/shop-loadtest-smoke.sqlite3 --migrate --seed-assets 3 --confirm-isolated
+```
+
+- 结果：迁移通过，造数通过，快照回填通过。
+- 清理策略：删除 `.shop-load-tests/shop-loadtest-smoke.sqlite3`；`.shop-load-tests/` 已被 `.gitignore` 忽略。
+
+### 验证
+
+通过：
+
+```bash
+UV_CACHE_DIR=/private/tmp/uv-cache-shop uv run python manage.py prepare_load_test_db --sqlite-name .shop-load-tests/shop-loadtest-dryrun.sqlite3
+UV_CACHE_DIR=/private/tmp/uv-cache-shop uv run python -m py_compile cloud/management/commands/prepare_load_test_db.py cloud/tests_load_test_db.py
+UV_CACHE_DIR=/private/tmp/uv-cache-shop uv run python manage.py test cloud.tests_load_test_db --settings=shop.settings --verbosity=1
+UV_CACHE_DIR=/private/tmp/uv-cache-shop uv run python manage.py check
+UV_CACHE_DIR=/private/tmp/uv-cache-shop uv run python manage.py prepare_load_test_db --sqlite-name .shop-load-tests/shop-loadtest-smoke.sqlite3 --migrate --seed-assets 3 --confirm-isolated
+```
+
+结果：
+
+- dry-run 通过，未创建数据库、未写入数据。
+- 4 个压测库入口聚焦测试通过。
+- `manage.py check` 通过。
+- 小规模隔离库实跑通过。
+- SQLite 迁移仍输出既有 `db_comment/db_table_comment` 能力差异告警，不属于本轮问题。
+
+### 后续
+
+- 后续如果要做 10 万级深分页压测，先用该命令创建新的 `.shop-load-tests/*loadtest*.sqlite3`，记录库名、端口、造数规模、命令、结果和清理策略。
+- 大规模压测完成后删除对应 SQLite 文件，避免本地残留过多。
