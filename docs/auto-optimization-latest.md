@@ -4,68 +4,89 @@
 
 ## 最近一轮
 
-- 时间：2026-06-08 20:20 CST
-- 状态：完成任务中心 250 万级统计巡检，覆盖后端口径对账、真实前端打开、卡片展示、明细分页、搜索和详情跳转。
-- 后端 Commit：待提交。
-- 前端 Commit：本轮无前端变更。
+- 时间：2026-06-08 20:42 CST
+- 状态：完成通知计划页专项深分页和真实前端翻页对账，并修复前端跳页控件缺失与重试说明列控制台警告。
+- 后端 Commit：已提交，`docs: record notice plan patrol`。
+- 前端 Commit：`24e6a6c fix: support notice plan deep pagination`。
 
 ## 本轮覆盖范围
 
 - 后端仓库：`/Users/a399/Desktop/data/shop`
 - 前端仓库：`/Users/a399/Desktop/data/vue-shop-admin`
-- 前端页面：`http://127.0.0.1:5666/admin/tasks`
-- 后端接口：`/api/admin/tasks/center/`
-- 查询入口：`cloud/task_center.py`
-- 前端视图：`apps/web-antd/src/views/dashboard/tasks/index.vue`
+- 前端页面：`http://127.0.0.1:5666/admin/tasks/notices`
+- 后端接口：`/api/admin/tasks/notices/`
+- 后端实现：`cloud/api_tasks.py`
+- 前端视图：`apps/web-antd/src/views/dashboard/tasks/notices.vue`
 
-## 后端任务中心口径
+## 修复内容
 
-后端 `task_center_overview` 真实库返回：
+- 给通知计划表和历史通知表分页补齐 `showQuickJumper: true`，支持真实跳转深页和最后页。
+- 将历史通知“重试说明”列的 `TypographyParagraph` 改为 `content` 属性渲染，消除打开重试列后的 Ant Design Vue 控制台 warning。
+- 不修改通知计划后端数据口径，不恢复旧计划快照表，不引入兼容分支。
 
-- HTTP 状态：`200`
-- 接口耗时：约 `1.128s`
-- 板块数：`5`
-- 总任务：`2516679`
-- 活动任务：`2512110`
-- 失败：`172`
-- 告警：`178`
+## 后端通知计划口径
 
-板块明细：
+真实库后端对账结果：
 
-- 云资产同步：`0/0`，告警 `0`，失败 `0`
-- 云服务器任务：`10516/10516`，状态计数 `deleting=2`、`expiring=10343`、`renew_pending=171`
-- 生命周期计划：`2479992/2479992`，状态计数 `shutdown_disabled=1`、`scheduled_future=7`
-- 通知计划：`21431/21431`，告警 `7`，失败 `1`
-- 自动续费：`171/4740`，告警 `171`，失败 `171`
+- `CloudNoticeTask` 总数：`6335`
+- `CloudNoticeTask.claimed`：`2`
+- `CloudNoticeTask.failed`：`6333`
+- 通知活跃分组：`21429`
+- 近期分组：`3428`
+- 未来分组：`18001`
+- 历史通知：`14960`
 
-说明：
+活跃通知计划 API 对账：
 
-- 任务中心页不是深分页列表页，前端当前从 5 个板块各取最多 `8` 条明细后本地分页。
-- 本轮任务中心压测重点是大统计口径、汇总卡片、明细渲染、搜索和详情入口。
-- 深分页压力已在生命周期计划页和代理列表全部标签页单独完成。
+- 第 1 页：`10` 条，total `21429`
+- 第 2 页：`10` 条
+- 第 1000 页：`10` 条
+- 最后页第 `2143` 页：`9` 条
+- 页内无重复，返回顺序与后端分组排序一致。
+
+历史通知 API 对账：
+
+- 第 1 页：`10` 条，total `14960`
+- 第 2 页：`10` 条
+- 第 1000 页：`10` 条
+- 最后页第 `1496` 页：`10` 条
+- 页内无重复，返回顺序与数据库 `created_at/id` 倒序一致。
+
+字段开关对账：
+
+- 关闭重字段后请求：`fields=basic,actions`
+- 开启 IP、文案、渠道、重试后请求：`fields=basic,ips,text,channels,retry,actions`
+- 前端列展示与请求字段一致。
 
 ## 真实前端验证
 
 真实打开：
 
 ```text
-http://127.0.0.1:5666/admin/tasks
+http://127.0.0.1:5666/admin/tasks/notices
 ```
 
 前端结果：
 
-- 任务总量卡片显示：`2516679`
-- 汇总卡片数：`6`，包含总量卡片和 5 个任务板块。
-- 页面包含并显示：云资产同步、云服务器任务、生命周期计划、通知计划、自动续费。
-- 明细表第 1 页：`12` 行。
-- 明细表第 2 页：`12` 行。
-- 第 2 页首行与第 1 页首行不同，前端分页切换生效。
-- 搜索 `自动续费`：返回 `8` 行，表格包含自动续费文本。
-- 点击首个 `详情`：从 `/admin/tasks` 跳转到 `/admin/cloud-orders/20395`。
+- 页面显示通知计划总数：`21429` 组用户通知。
+- 页面显示近期计划：`3428` 种通知。
+- 页面显示未来计划：`18001` 种通知。
+- 两张表都显示跳页输入框，跳页控件数量：`2`。
+- 通知计划表第 1 页：`10` 行。
+- 通知计划表第 2 页：`10` 行。
+- 通知计划表第 1000 页：`10` 行。
+- 通知计划表最后页第 `2143` 页：`9` 行。
+- 历史通知表第 1 页：`10` 行。
+- 历史通知表第 2 页：`10` 行。
+- 历史通知表第 1000 页：`10` 行。
+- 历史通知表最后页第 `1496` 页：`10` 行。
+- 前端表格行数与每次接口返回 `items.length` 一致。
+- 开启列开关后能显示 IP 列、通知文案列、通知渠道列、重试说明列。
+- 关闭列开关后上述重字段列被隐藏，接口恢复轻量字段。
 - 业务 API 失败：`0`。
 - 控制台 error/warning：`0`。
 - request failed：`0`。
-- 截图：`/private/tmp/shop-task-center-front.png`
+- 截图：`/private/tmp/shop-notice-plans-front.png`
 
 测试完成后已删除临时后端 session 和临时浏览器 storageState，没有打印有效登录 token。
 
@@ -75,8 +96,11 @@ http://127.0.0.1:5666/admin/tasks
 
 ```bash
 UV_CACHE_DIR=/private/tmp/uv-cache-shop uv run python manage.py check
-UV_CACHE_DIR=/private/tmp/uv-cache-shop uv run python -m py_compile cloud/task_center.py
-UV_CACHE_DIR=/private/tmp/uv-cache-shop DJANGO_TEST_SQLITE=1 uv run python manage.py test cloud.tests_task_center --settings=shop.settings --verbosity=1
+UV_CACHE_DIR=/private/tmp/uv-cache-shop uv run python -m py_compile cloud/api_tasks.py
+UV_CACHE_DIR=/private/tmp/uv-cache-shop DJANGO_TEST_SQLITE=1 uv run python manage.py test cloud.tests.CloudServerServicesTestCase.test_notice_task_detail_uses_notice_plan_view cloud.tests.CloudServerServicesTestCase.test_notice_task_detail_basic_fields_skip_batch_text_payload cloud.tests.CloudServerServicesTestCase.test_notice_task_detail_basic_actions_fields_keep_order_link_without_hidden_columns cloud.tests.CloudServerServicesTestCase.test_notice_task_detail_allows_deep_offsets_beyond_100k cloud.tests.CloudServerServicesTestCase.test_notice_plan_summary_reuses_group_rows_for_counts cloud.tests.CloudServerServicesTestCase.test_notice_task_detail_counts_all_future_groups_beyond_loaded_limit cloud.tests.CloudServerServicesTestCase.test_notice_task_detail_deep_group_page_has_no_duplicates cloud.tests.CloudServerServicesTestCase.test_notice_task_detail_hides_shutdown_disabled_lifecycle_notices cloud.tests.CloudServerServicesTestCase.test_notice_write_actions_require_superuser cloud.tests.CloudServerServicesTestCase.test_delete_notice_history_removes_notice_history_row cloud.tests.CloudServerServicesTestCase.test_notice_history_rows_keep_unique_log_ids_for_same_batch --settings=shop.settings --verbosity=1
+pnpm -F @vben/web-antd run typecheck
+git diff --check
+git -C /Users/a399/Desktop/data/vue-shop-admin diff --check
 ```
 
 红线扫描通过：
@@ -85,29 +109,28 @@ UV_CACHE_DIR=/private/tmp/uv-cache-shop DJANGO_TEST_SQLITE=1 uv run python manag
 rg -n "service_expires_at|actual_expires_at.*CloudServerOrder|CloudServerOrder.*actual_expires_at|plan snapshot|snapshot table|old refund|refund_legacy|refund_old|legacy_refund|accounts\.|finance\.|mall\.|monitoring\.|dashboard_api\.|biz\." cloud bot orders core shop -g '!**/migrations/**'
 ```
 
-命中项为既有允许项：`CloudServerOrder.ip_recycle_at` 同步记录、bot 测试桩、Telegram 登录账号模块名，不是旧订单到期事实或废弃 runtime app 回流。
+命中项为既有允许项：bot 测试桩、Telegram 登录账号模块名、`CloudServerOrder.ip_recycle_at` 同步记录，不是旧订单到期事实、旧计划快照或废弃 runtime app 回流。
 
 说明：
 
 - SQLite 聚焦测试仍输出既有 `db_comment` / `db_table_comment` 警告，不属于本轮问题。
-- 本轮没有代码修复。
 - `docs/real-machine-test-report.md` 当前存在既有未提交真实机器测试记录，本轮不覆盖、不提交。
 
 ## 结论
 
-- 任务中心 250 万级统计口径和真实前端展示一致。
-- 汇总卡片、明细分页、本地搜索和详情跳转均正常。
-- 本轮未发现任务中心统计漏报、前端渲染错误、业务 API 失败或控制台错误。
+- 通知计划页专项深分页、跳页、列开关和真实前端显示已完成。
+- 本轮发现并修复 2 个前端问题：缺少跳页控件、重试说明列触发控制台 warning。
+- 通知计划页没有发现分页丢数据、串页、最后页行数错误、业务 API 失败或控制台错误。
 
 ## 已完成压测
 
 - 生命周期计划页：关机计划、删除计划、服务器删除历史、IP 删除计划、IP 删除历史的深分页和真实前端翻页。
 - 代理列表：全部 11 个标签均完成 10 万级以上压测，覆盖第 1 页、第 2 页、第 1000 页和最后页，并完成真实前端点击。
 - 任务中心：250 万级统计汇总和真实前端展示已完成。
+- 通知计划页：21429 活跃分组和 14960 历史通知的深分页、跳页、列开关和真实前端展示已完成。
 
 ## 尚未完成
 
-- 通知计划页专项深分页和前端翻页对账还没有作为独立页面压测收尾。
 - 机器人多任务高并发真机点击压测还没有完成。
 - 真实云资源创建、到期关机、删机、释放 IP 的生命周期开关矩阵还没有完整闭环。
 - 服务器创建后的完整生命周期链路还没有在本轮压测中闭环到真实关机、真实删机和真实 IP 释放。
