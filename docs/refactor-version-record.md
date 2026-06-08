@@ -15653,3 +15653,87 @@ rg -n "service_expires_at|actual_expires_at.*CloudServerOrder|CloudServerOrder.*
 
 - 后续每轮继续把机器人多任务高并发作为固定覆盖项。
 - 继续巡检生命周期计划页、通知计划页和代理列表其他高基数标签。
+
+## 2026-06-08 14:54 延迟刷新线程启动失败锁释放修复
+
+### 背景
+
+继续执行当前会话自动巡检。上一轮已修复生命周期计划 MySQL 子查询超时并完成计划页、通知页真实前端对账。本轮按固定巡检清单继续排查执行器、后台刷新、机器人高并发路径。
+
+### 定位
+
+用户此前提到过“执行器仍然报新进程创建失败”。本轮扫描生产代码后，当前定时管理命令未发现独立创建进程路径，`bot/runner.py` 中管理命令通过 `asyncio.to_thread(call_command, command_name)` 执行。
+
+但在仪表盘刷新协调器中发现一个相关缺口：
+
+- `_refresh_dashboard_plan_snapshots_deferred()` 先写入去重锁，再启动 `threading.Thread` 做后台刷新。
+- 如果运行环境处于解释器关闭或线程资源不足，`Thread.start()` 可能抛 `RuntimeError("can't start new thread")`。
+- 原实现没有包住 `Thread.start()`，此时锁不会立即释放，只能等待 `60` 秒 TTL，后续同范围刷新会被误判为已排队。
+
+### 修复
+
+修改文件：
+
+```text
+/Users/a399/Desktop/data/shop/cloud/dashboard_snapshots.py
+/Users/a399/Desktop/data/shop/cloud/tests.py
+```
+
+改动：
+
+- `_is_interpreter_shutdown_error()` 增加对以下错误文本的识别：
+  - `can't start new thread`
+  - `cannot start new thread`
+  - `can't create new thread`
+  - `cannot create new thread`
+- `_refresh_dashboard_plan_snapshots_deferred()` 在 `Thread.start()` 外层增加 `RuntimeError` 兜底。
+- 启动线程失败时立即删除当前 `lock_key`。
+- shutdown/thread 资源类错误记录为跳过；其他 RuntimeError 仍记录异常堆栈。
+- 新增测试 `test_dashboard_snapshot_deferred_releases_lock_when_thread_start_fails`，模拟线程启动失败并断言锁被释放。
+
+### 机器人高并发复测
+
+本轮继续按用户要求覆盖机器人多任务高并发，执行：
+
+```bash
+UV_CACHE_DIR=/private/tmp/uv-cache-shop DJANGO_TEST_SQLITE=1 uv run python manage.py test bot.tests.TelegramListenerPushTestCase.test_notice_copy_wrapper_keeps_concurrent_user_sends_isolated bot.tests.RetainedIpRenewalUiTestCase.test_cloud_background_tasks_keep_high_concurrency_isolated bot.tests.RetainedIpRenewalUiTestCase.test_cloud_background_tasks_keep_bulk_concurrency_isolated --settings=shop.settings --verbosity=1
+```
+
+结果：
+
+- `3` 条通过。
+- 覆盖通知复制包装器并发隔离。
+- 覆盖钱包直付、钱包补付、续费后巡检同时执行。
+- 覆盖 `20` 组批量钱包直付、`20` 组钱包补付、`20` 组续费后巡检，总计 `60` 路并发任务。
+- 验证消息、创建准备调用和后台创建任务不串线不丢失。
+
+### 验证
+
+通过：
+
+```bash
+UV_CACHE_DIR=/private/tmp/uv-cache-shop uv run python manage.py check
+UV_CACHE_DIR=/private/tmp/uv-cache-shop DJANGO_TEST_SQLITE=1 uv run python manage.py test cloud.tests.CloudServerServicesTestCase.test_dashboard_snapshot_deferred_releases_lock_when_thread_start_fails --settings=shop.settings --verbosity=1
+UV_CACHE_DIR=/private/tmp/uv-cache-shop uv run python -m py_compile cloud/dashboard_snapshots.py cloud/tests.py
+UV_CACHE_DIR=/private/tmp/uv-cache-shop DJANGO_TEST_SQLITE=1 uv run python manage.py test bot.tests.TelegramListenerPushTestCase.test_notice_copy_wrapper_keeps_concurrent_user_sends_isolated bot.tests.RetainedIpRenewalUiTestCase.test_cloud_background_tasks_keep_high_concurrency_isolated bot.tests.RetainedIpRenewalUiTestCase.test_cloud_background_tasks_keep_bulk_concurrency_isolated --settings=shop.settings --verbosity=1
+git diff --check
+```
+
+红线扫描通过：
+
+```bash
+rg -n "service_expires_at|actual_expires_at.*CloudServerOrder|CloudServerOrder.*actual_expires_at|plan snapshot|snapshot table|old refund|refund_legacy|refund_old|legacy_refund|accounts\\.|finance\\.|mall\\.|monitoring\\.|dashboard_api\\.|biz\\." cloud bot orders core shop -g '!**/migrations/**'
+```
+
+命中项仍为 Telegram 登录账号代码、云账号测试桩和 `CloudServerOrder.ip_recycle_at` 同步语句，不是旧到期事实回流。
+
+### 受限项
+
+- 本轮未执行真实云资源创建、关机、删机、释放 IP、换 IP、真实支付、链上广播、生产发布或删除业务数据。
+- 本轮未打印密钥、Telegram session、支付密钥、云厂商密钥或完整代理链接到仓库文件。
+- 本轮为执行器/后台刷新聚焦修复，未重新打开前端页面；上一轮已真实打开计划页和通知页完成对账。
+
+### 下一步
+
+- 下一轮继续执行固定巡检清单，优先真实打开代理列表其他标签页面做加载、翻页和数据库对账。
+- 继续把机器人多任务高并发作为固定覆盖项。

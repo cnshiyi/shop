@@ -20,7 +20,15 @@ def _is_db_table_not_ready_error(exc: Exception) -> bool:
 
 def _is_interpreter_shutdown_error(exc: Exception) -> bool:
     message = str(exc).lower()
-    return sys.is_finalizing() or 'interpreter shutdown' in message or 'cannot schedule new futures' in message
+    return (
+        sys.is_finalizing()
+        or 'interpreter shutdown' in message
+        or 'cannot schedule new futures' in message
+        or 'can\'t start new thread' in message
+        or 'cannot start new thread' in message
+        or 'can\'t create new thread' in message
+        or 'cannot create new thread' in message
+    )
 
 
 def _normalize_asset_ids(asset_ids):
@@ -147,4 +155,11 @@ def _refresh_dashboard_plan_snapshots_deferred(reason: str = '', *, lifecycle_li
             cache.delete(lock_key)
             close_old_connections()
 
-    threading.Thread(target=_run, name='dashboard-snapshot-refresh', daemon=True).start()
+    try:
+        threading.Thread(target=_run, name='dashboard-snapshot-refresh', daemon=True).start()
+    except RuntimeError as exc:
+        cache.delete(lock_key)
+        if _is_interpreter_shutdown_error(exc):
+            logger.info('DASHBOARD_SNAPSHOT_DEFERRED_SKIPPED reason=%s scope=%s error=%s', reason, scope_key, exc)
+        else:
+            logger.exception('DASHBOARD_SNAPSHOT_DEFERRED_START_FAILED reason=%s scope=%s', reason, scope_key)

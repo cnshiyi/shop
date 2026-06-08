@@ -66,6 +66,36 @@ from orders.payment_scanner import _confirm_cloud_server_order
 
 # 测试类：组织 CloudServerServicesTestCase 相关的回归测试。
 class CloudServerServicesTestCase(TestCase):
+    # 功能：延迟刷新线程启动失败时必须释放锁，避免后续仪表盘/计划刷新被卡住。
+    def test_dashboard_snapshot_deferred_releases_lock_when_thread_start_fails(self):
+        from cloud.dashboard_snapshots import _refresh_dashboard_plan_snapshots_deferred
+
+        class FakeCache:
+            def __init__(self):
+                self.deleted = []
+
+            def add(self, key, value, timeout=None):
+                return True
+
+            def delete(self, key):
+                self.deleted.append(key)
+
+        fake_cache = FakeCache()
+
+        with patch('cloud.dashboard_snapshots.cache', fake_cache), \
+                patch('cloud.dashboard_snapshots.threading.Thread') as thread_cls, \
+                self.assertLogs('cloud.dashboard_snapshots', level='INFO') as logs:
+            thread_cls.return_value.start.side_effect = RuntimeError("can't start new thread")
+
+            _refresh_dashboard_plan_snapshots_deferred(
+                'thread-start-failed-test',
+                cloud_asset_ids=[123],
+                full_cloud_assets=False,
+            )
+
+        self.assertEqual(fake_cache.deleted, ['dashboard:snapshot-refresh:deferred:assets:123'])
+        self.assertIn('DASHBOARD_SNAPSHOT_DEFERRED_SKIPPED', '\n'.join(logs.output))
+
     # 功能：验证开通结果日志在异步开通流程返回后不再隐式查询资产表。
     def test_provision_result_log_uses_cached_asset_expiry(self):
         order = CloudServerOrder.objects.create(
