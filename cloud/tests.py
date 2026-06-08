@@ -11300,6 +11300,88 @@ class CloudServerServicesTestCase(TestCase):
         ]
         self.assertFalse(ip_delete_rows)
 
+    # 功能：验证删机成功且保留固定 IP 后，计划页会从删机阶段切换到 IP 删除阶段；当前函数属于 云资产、云订单和生命周期。
+    def test_manual_order_delete_with_retained_ip_moves_into_ip_delete_plan(self):
+        from bot.api import _run_shutdown_order_sync
+
+        SiteConfig.set('cloud_ip_delete_enabled', '1')
+        now = timezone.now()
+        order = CloudServerOrder.objects.create(
+            order_no='MANUAL-DELETE-RETAINED-IP-PLAN-1',
+            user=self.user,
+            plan=self.plan,
+            provider='aws_lightsail',
+            region_code=self.plan.region_code,
+            region_name=self.plan.region_name,
+            plan_name=self.plan.plan_name,
+            quantity=1,
+            currency='USDT',
+            total_amount='19.00',
+            pay_amount='19.00',
+            status='deleting',
+            public_ip='52.77.18.248',
+            previous_public_ip='52.77.18.248',
+            static_ip_name='StaticIp-manual-delete-retained-plan',
+            instance_id='manual-delete-retained-plan-instance',
+            provider_resource_id='manual-delete-retained-plan-instance',
+            delete_at=now - timezone.timedelta(minutes=1),
+            ip_recycle_at=now + timezone.timedelta(days=3),
+        )
+        asset = CloudAsset.objects.create(
+            kind=CloudAsset.KIND_SERVER,
+            source=CloudAsset.SOURCE_ORDER,
+            order=order,
+            user=self.user,
+            provider='aws_lightsail',
+            region_code=self.plan.region_code,
+            region_name=self.plan.region_name,
+            asset_name='manual-delete-retained-plan-instance',
+            instance_id='manual-delete-retained-plan-instance',
+            provider_resource_id='manual-delete-retained-plan-instance',
+            public_ip='52.77.18.248',
+            previous_public_ip='52.77.18.248',
+            actual_expires_at=order.ip_recycle_at,
+            status=CloudAsset.STATUS_DELETING,
+            is_active=True,
+        )
+        with patch('cloud.lifecycle.cloud_server_delete_enabled', return_value=True), \
+            patch('cloud.lifecycle._delete_instance', new=AsyncMock(return_value=(True, 'manual lifecycle retained delete ok'))):
+            result = _run_shutdown_order_sync(order.id, enforce_schedule=False)
+
+        self.assertTrue(result['ok'])
+        order.refresh_from_db()
+        asset.refresh_from_db()
+        self.assertEqual(order.status, 'deleted')
+        self.assertTrue(order.ip_recycle_at)
+        self.assertEqual(asset.provider_status, '固定IP保留中-实例已删除')
+        self.assertEqual(asset.actual_expires_at, order.ip_recycle_at)
+
+        staff_user = get_user_model().objects.create_user(
+            username='staff_manual_delete_retained_ip_plan',
+            password='x',
+            is_staff=True,
+        )
+        request = self.factory.get('/api/admin/tasks/plans/', {'limit': 1000, 'refresh': '1'})
+        self._attach_bearer_session(request, staff_user)
+
+        response = lifecycle_plans(request)
+        data = json.loads(response.content)['data']
+
+        server_delete_rows = [
+            item for item in data['server_delete_items']
+            if item.get('order_id') == order.id or item.get('asset_id') == asset.id
+        ]
+        ip_delete_rows = [
+            item for item in data['ip_delete_plan_items']
+            if item.get('order_id') == order.id or item.get('asset_id') == asset.id
+        ]
+
+        self.assertFalse(server_delete_rows)
+        self.assertEqual(len(ip_delete_rows), 1)
+        self.assertEqual(ip_delete_rows[0]['plan_state'], 'scheduled')
+        self.assertEqual(ip_delete_rows[0]['resource_state'], 'fixed_ip_unattached')
+        self.assertEqual(parse_datetime(ip_delete_rows[0]['actual_expires_at']), order.ip_recycle_at)
+
     # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
     def test_lifecycle_plans_compact_request_keeps_ip_delete_history_item(self):
         now = timezone.now()
@@ -18349,6 +18431,79 @@ class CloudServerServicesTestCase(TestCase):
         order.refresh_from_db()
         self.assertEqual(order.status, 'deleted')
         self.assertIsNotNone(order.ip_recycle_at)
+
+    # 功能：验证生命周期执行器按关机、删机、IP 删除三阶段串行推进，不在同一轮连跳破坏性步骤。
+    def test_lifecycle_tick_serializes_shutdown_delete_and_ip_release_stages(self):
+        now = timezone.now()
+        order = CloudServerOrder.objects.create(
+            order_no='HB-TEST-LIFECYCLE-STAGE-SERIAL',
+            user=self.user,
+            plan=self.plan,
+            provider='aws_lightsail',
+            region_code=self.plan.region_code,
+            region_name=self.plan.region_name,
+            plan_name=self.plan.plan_name,
+            quantity=1,
+            currency='USDT',
+            total_amount='19.00',
+            pay_amount='19.00',
+            status='completed',
+            public_ip='20.20.20.28',
+            previous_public_ip='20.20.20.28',
+            static_ip_name='StaticIp-stage-serial',
+            instance_id='stage-serial-instance',
+            suspend_at=now - timezone.timedelta(minutes=30),
+            delete_at=now - timezone.timedelta(minutes=20),
+            ip_recycle_at=now - timezone.timedelta(minutes=10),
+        )
+        CloudAsset.objects.create(
+            kind=CloudAsset.KIND_SERVER,
+            source=CloudAsset.SOURCE_ORDER,
+            order=order,
+            user=self.user,
+            provider=order.provider,
+            region_code=order.region_code,
+            region_name=order.region_name,
+            asset_name='stage-serial-instance',
+            instance_id='stage-serial-instance',
+            public_ip=order.public_ip,
+            previous_public_ip=order.previous_public_ip,
+            actual_expires_at=now - timezone.timedelta(days=5),
+            status=CloudAsset.STATUS_RUNNING,
+            shutdown_enabled=True,
+            server_delete_enabled=True,
+            ip_delete_enabled=True,
+            is_active=True,
+        )
+        with patch('cloud.lifecycle._get_migration_due_orders', new_callable=AsyncMock, return_value=[]), \
+            patch('cloud.lifecycle._get_orphan_asset_delete_due', new_callable=AsyncMock, return_value=[]), \
+            patch('cloud.lifecycle._get_unattached_static_ip_delete_due', new_callable=AsyncMock, return_value=[]), \
+            patch('cloud.lifecycle._process_auto_renew_retry_tasks', new_callable=AsyncMock), \
+            patch('cloud.lifecycle._cloud_expiry_notice_payload', new_callable=AsyncMock, return_value={'valid': True}), \
+            patch('cloud.lifecycle.cloud_server_shutdown_enabled', return_value=True), \
+            patch('cloud.lifecycle.cloud_server_delete_enabled', return_value=True), \
+            patch('cloud.lifecycle.cloud_ip_delete_enabled', return_value=True), \
+            patch('cloud.lifecycle._is_cloud_suspend_time', return_value=True), \
+            patch('cloud.lifecycle._is_cloud_delete_safe_time', return_value=True), \
+            patch('cloud.lifecycle._is_cloud_unattached_ip_delete_time', return_value=True), \
+            patch('cloud.lifecycle._stop_instance', new=AsyncMock(return_value=(True, '关机成功'))), \
+            patch('cloud.lifecycle._delete_instance', new=AsyncMock(return_value=(True, '删机成功，固定 IP 保留'))), \
+            patch('cloud.lifecycle._release_order_static_ip', new=AsyncMock(return_value=(True, '释放成功'))) as release_mock:
+            async_to_sync(lifecycle_tick)()
+            order.refresh_from_db()
+
+            self.assertEqual(order.status, 'suspended')
+            self.assertEqual(CloudLifecycleTask.objects.filter(order=order, task_type=CloudLifecycleTask.TASK_SUSPEND, status=CloudLifecycleTask.STATUS_DONE).count(), 1)
+            self.assertEqual(CloudLifecycleTask.objects.filter(order=order, task_type=CloudLifecycleTask.TASK_DELETE).count(), 0)
+            release_mock.assert_not_awaited()
+
+            async_to_sync(lifecycle_tick)()
+            order.refresh_from_db()
+
+            self.assertEqual(order.status, 'deleted')
+            self.assertEqual(CloudLifecycleTask.objects.filter(order=order, task_type=CloudLifecycleTask.TASK_DELETE, status=CloudLifecycleTask.STATUS_DONE).count(), 1)
+            self.assertEqual(CloudLifecycleTask.objects.filter(order=order, task_type=CloudLifecycleTask.TASK_RECYCLE).count(), 0)
+            release_mock.assert_not_awaited()
 
     # 功能：验证启动延迟保护固定IP回收，避免服务启动检查立即执行破坏性动作。
     def test_lifecycle_tick_startup_defer_blocks_order_static_ip_release(self):

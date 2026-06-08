@@ -82,12 +82,24 @@ def active_cloud_account_labels() -> list[str]:
     return list(dict.fromkeys(labels))
 
 
+def retained_unattached_ip_q():
+    return (
+        Q(provider_status__icontains='固定IP保留中')
+        | Q(provider_status__icontains='固定 IP 保留')
+        | Q(note__icontains='实例删除后固定IP保留中')
+        | Q(note__icontains='实例删除后固定 IP 保留中')
+        | Q(note__icontains='实例已删除，固定IP保留')
+        | Q(note__icontains='实例已删除，固定 IP 保留')
+    )
+
+
 def unattached_ip_asset_q():
     return (
         Q(provider_status__icontains='未附加')
         | Q(note__icontains='未附加IP')
         | Q(note__icontains='未附加固定IP')
         | Q(provider_resource_id__icontains='StaticIp')
+        | retained_unattached_ip_q()
     )
 
 
@@ -290,12 +302,13 @@ def server_delete_history_page_sources(
 
 
 def unattached_ip_deleted_or_missing_q():
+    retained_pending_q = retained_unattached_ip_q()
     inactive_status_q = Q(status__in=[
         CloudAsset.STATUS_DELETED,
         CloudAsset.STATUS_DELETING,
         CloudAsset.STATUS_TERMINATED,
         CloudAsset.STATUS_TERMINATING,
-    ])
+    ]) & ~retained_pending_q
     final_missing_q = (
         Q(provider_status__icontains='已到期删除')
         | Q(provider_status__icontains='已删除')
@@ -303,7 +316,7 @@ def unattached_ip_deleted_or_missing_q():
         | Q(note__icontains='固定 IP 云端已不存在')
         | Q(note__icontains='固定IP云端已不存在')
         | Q(note__icontains='云上不存在，已标记删除')
-    )
+    ) & ~retained_pending_q
     return inactive_status_q | final_missing_q
 
 
@@ -340,7 +353,12 @@ def completed_unattached_ip_active_queryset():
         Q(ip_logs__note__icontains='实例已删除')
         | Q(ip_logs__note__icontains='AWS 实例已执行删除')
     )
-    return unattached_ip_delete_active_queryset().filter(instance_deleted_q & retained_ip_q).distinct()
+    return (
+        unattached_ip_delete_active_queryset()
+        .filter(instance_deleted_q & retained_ip_q)
+        .exclude(retained_unattached_ip_q())
+        .distinct()
+    )
 
 
 def completed_unattached_ip_active_count() -> int:

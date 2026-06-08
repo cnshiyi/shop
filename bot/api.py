@@ -2475,14 +2475,14 @@ def lifecycle_plans(request):
             plan_state_label = '无需执行'
             should_execute = False
             blocked_reason = '云上已不存在，无需继续执行删机'
-        elif instance_deleted and ip_retained:
+        elif instance_deleted and ip_retained and not is_ip_delete_item:
             resource_state = 'instance_deleted_ip_retained'
             resource_state_label = '实例已删除（固定IP保留中）'
             plan_state = 'completed'
             plan_state_label = '等待IP回收'
             should_execute = False
             blocked_reason = '实例已删除，仅剩固定IP保留或回收计划'
-        elif instance_deleted:
+        elif instance_deleted and not is_ip_delete_item:
             resource_state = 'instance_deleted'
             resource_state_label = '实例已删除'
             plan_state = 'completed'
