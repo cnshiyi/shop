@@ -15920,3 +15920,166 @@ rg -n "service_expires_at|actual_expires_at.*CloudServerOrder|CloudServerOrder.*
 - 下一轮继续优化代理列表 `未绑定用户` 和 `未绑定群组` 标签主列表慢路径。
 - 继续做真实前端翻页和数据库口径对账，不能只看计数。
 - 继续把机器人多任务高并发作为固定回归项。
+
+## 2026-06-08 15:40 代理列表未绑定标签排序优化
+
+### 背景
+
+继续当前会话自动巡检。上一轮已把 `/api/admin/cloud-assets/sync-status/` 从约 `6532ms` 降到 `133ms`，但真实前端代理列表标签仍显示：
+
+- 未绑定用户：约 `3696ms`。
+- 未绑定群组：约 `3273ms`。
+
+本轮继续定位代理列表主分页慢路径。
+
+### 定位
+
+确认前端默认参数：
+
+- IP 视图。
+- 普通分页。
+- 非分组。
+- `compact=1`。
+- `page_size=20`。
+
+后端同参数复现：
+
+```text
+unbound_user 约 3679ms
+unbound_group 约 3203ms
+unattached_ip 约 621ms
+auto_renew_off 约 424ms
+```
+
+拆分后确认：
+
+- `risk_counts` 约 `552ms`。
+- 当前标签 `count()` 不到 `10ms`。
+- 真正慢点是默认排序取页：
+  - 未绑定用户默认排序取前 `20` 行约 `2566ms`。
+  - 改用已有索引顺序 `asset_due_sort_null_rank, asset_due_sort_at, group_user_label, group_user_key` 后约 `9ms`。
+  - 加 `-asset_id` 稳定分页后约 `85ms` 到 `108ms`，仍明显快于原实现。
+
+### 修复
+
+修改文件：
+
+```text
+/Users/a399/Desktop/data/shop/cloud/api_asset_snapshots.py
+/Users/a399/Desktop/data/shop/cloud/api_assets.py
+/Users/a399/Desktop/data/shop/cloud/tests.py
+```
+
+改动：
+
+- `_dashboard_snapshot_ordering()` 增加 `risk_status` 参数。
+- 仅在 `unbound_user` 和 `unbound_group` 标签默认排序下启用索引友好顺序：
+  - `asset_due_sort_null_rank`
+  - `asset_due_sort_at`
+  - `group_user_label`
+  - `group_user_key`
+  - `-asset_id`
+- 显式到期排序继续走原有排序，不改变用户主动选择的排序契约。
+- 代理列表分页调用处传入当前 `risk_status`。
+- 新增测试 `test_cloud_assets_unbound_risk_ordering_uses_due_group_index`。
+
+### 数据对账
+
+真实 MySQL 对账：
+
+未绑定用户：
+
+- 总数：`100001`。
+- 校验页：第 `1` 页、第 `2` 页、第 `1000` 页、第 `5001` 页。
+- API 返回 ID 与数据库同排序切片完全一致。
+- 抽样 `61` 条 ID，唯一数 `61`，无重复。
+
+未绑定群组：
+
+- 总数：`100013`。
+- 校验页：第 `1` 页、第 `2` 页、第 `1000` 页、第 `5001` 页。
+- API 返回 ID 与数据库同排序切片完全一致。
+- 抽样 `73` 条 ID，唯一数 `73`，无重复。
+
+### 真实前端验证
+
+使用本机 Google Chrome + Playwright 打开：
+
+```text
+http://127.0.0.1:5666/admin/cloud-assets
+```
+
+实际点击标签并通过分页器跳页：
+
+未绑定用户：
+
+- 第 `1` 页：DOM 行数 `20`，HTTP `200`，总数 `100001`。
+- 第 `2` 页：DOM 行数 `20`，HTTP `200`。
+- 第 `1000` 页：DOM 行数 `20`，HTTP `200`。
+- 第 `5001` 页：DOM 行数 `1`，HTTP `200`。
+
+未绑定群组：
+
+- 第 `1` 页：DOM 行数 `20`，HTTP `200`，总数 `100013`。
+- 第 `2` 页：DOM 行数 `20`，HTTP `200`。
+- 第 `1000` 页：DOM 行数 `20`，HTTP `200`。
+- 第 `5001` 页：DOM 行数 `13`，HTTP `200`。
+
+页面请求无失败，控制台 `0 error / 0 warning`。
+
+### 性能结果
+
+修复后真实 MySQL 同参数：
+
+- 未绑定用户第 `1` 页：`947ms` 到 `1072ms`。
+- 未绑定用户第 `2` 页：`401ms`。
+- 未绑定用户第 `1000` 页：`580ms`。
+- 未绑定用户末页：`383ms`。
+- 未绑定群组第 `1` 页：`387ms` 到 `445ms`。
+- 未绑定群组第 `2` 页：`392ms`。
+- 未绑定群组第 `1000` 页：`582ms`。
+- 未绑定群组末页：`386ms`。
+
+### 机器人高并发复测
+
+继续按固定项复跑机器人并发：
+
+```bash
+UV_CACHE_DIR=/private/tmp/uv-cache-shop DJANGO_TEST_SQLITE=1 uv run python manage.py test bot.tests.TelegramListenerPushTestCase.test_notice_copy_wrapper_keeps_concurrent_user_sends_isolated bot.tests.RetainedIpRenewalUiTestCase.test_cloud_background_tasks_keep_bulk_concurrency_isolated --settings=shop.settings --verbosity=1
+```
+
+结果：
+
+- `2` 条通过。
+- 覆盖通知复制包装器并发隔离。
+- 覆盖 `20` 组批量钱包直付、`20` 组钱包补付、`20` 组续费后巡检，总计 `60` 路并发任务。
+
+### 验证
+
+通过：
+
+```bash
+UV_CACHE_DIR=/private/tmp/uv-cache-shop uv run python manage.py check
+UV_CACHE_DIR=/private/tmp/uv-cache-shop DJANGO_TEST_SQLITE=1 uv run python manage.py test cloud.tests.CloudServerServicesTestCase.test_cloud_assets_unbound_risk_ordering_uses_due_group_index cloud.tests.CloudServerServicesTestCase.test_cloud_assets_paginated_uses_true_database_pages cloud.tests.CloudServerServicesTestCase.test_cloud_assets_list_compact_returns_ip_view_payload --settings=shop.settings --verbosity=1
+UV_CACHE_DIR=/private/tmp/uv-cache-shop uv run python -m py_compile cloud/api_asset_snapshots.py cloud/api_assets.py cloud/tests.py
+git diff --check
+```
+
+红线扫描通过：
+
+```bash
+rg -n "service_expires_at|actual_expires_at.*CloudServerOrder|CloudServerOrder.*actual_expires_at|plan snapshot|snapshot table|old refund|refund_legacy|refund_old|legacy_refund|accounts\\.|finance\\.|mall\\.|monitoring\\.|dashboard_api\\.|biz\\." cloud bot orders core shop -g '!**/migrations/**'
+```
+
+命中项仍为 Telegram 登录账号、云账号测试桩和 `CloudServerOrder.ip_recycle_at` 同步语句，不是旧到期事实回流。
+
+### 受限项
+
+- 本轮未执行真实云资源创建、关机、删机、释放 IP、换 IP、真实支付、链上广播、生产发布或删除业务数据。
+- 本轮未打印密钥、Telegram session、支付密钥、云厂商密钥或完整代理链接。
+
+### 下一步
+
+- 继续巡检代理列表其它标签和深页，确保排序优化没有隐藏边界。
+- 继续检查生命周期计划、通知计划和机器人返回链。
+- 继续把机器人多任务高并发作为固定回归项。

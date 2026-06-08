@@ -491,10 +491,12 @@ def _dashboard_snapshot_group_total(queryset, group_field: str) -> int:
     return int(total or 0)
 
 
-def _dashboard_snapshot_ordering(sort_by: str, sort_direction: str):
+def _dashboard_snapshot_ordering(sort_by: str, sort_direction: str, risk_status: str = ''):
     if sort_by in {'actual_expires_at', 'expires_at', 'days_left', 'remaining_days'}:
         expires = '-asset_due_sort_at' if sort_direction == 'desc' else 'asset_due_sort_at'
         return ['asset_due_sort_null_rank', expires, 'risk_rank', '-sort_order', '-asset_id']
+    if str(risk_status or '').strip() in {'unbound_user', 'unbound_group'}:
+        return ['asset_due_sort_null_rank', 'asset_due_sort_at', 'group_user_label', 'group_user_key', '-asset_id']
     return ['risk_rank', 'asset_due_sort_null_rank', 'asset_due_sort_at', '-sort_order', '-asset_id']
 
 
@@ -566,13 +568,13 @@ def _reverse_dashboard_ordering(ordering):
     return reversed_ordering
 
 
-def _paginate_dashboard_snapshot_queryset(queryset, request, *, sort_by='', sort_direction='', default_size=20, min_size=1, max_size=200, compact=False):
+def _paginate_dashboard_snapshot_queryset(queryset, request, *, sort_by='', sort_direction='', risk_status='', default_size=20, min_size=1, max_size=200, compact=False):
     page, page_size = _parse_dashboard_page(request, default_size=default_size, min_size=min_size, max_size=max_size)
     total = queryset.count()
     total_pages = max((total + page_size - 1) // page_size, 1)
     page = min(page, total_pages)
     start = (page - 1) * page_size
-    ordering = _dashboard_snapshot_ordering(sort_by, sort_direction)
+    ordering = _dashboard_snapshot_ordering(sort_by, sort_direction, risk_status)
     reverse_ordering = _reverse_dashboard_ordering(ordering)
     end = min(start + page_size, total)
     if reverse_ordering and start > max(total // 2, page_size * 100):

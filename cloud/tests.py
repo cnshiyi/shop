@@ -49,7 +49,7 @@ from cloud.provisioning import (
 from cloud.services import _cloud_asset_deleted_or_missing, apply_cloud_server_renewal, create_cloud_server_order, create_cloud_server_rebuild_order, create_cloud_server_renewal, create_cloud_server_renewal_by_public_query, create_cloud_server_renewal_for_user, create_cloud_server_upgrade_order, ensure_cloud_asset_operation_order, get_cloud_server_by_ip, get_cloud_server_by_ip_for_user, get_group_proxy_asset_detail, get_proxy_asset_by_ip_for_admin, get_proxy_asset_by_ip_for_user, get_user_proxy_asset_detail, is_retained_ip_order_visible_in_group, list_all_auto_renew_cloud_servers, list_cloud_asset_renewal_plans, list_cloud_server_upgrade_plans, list_group_cloud_servers, list_retained_ip_renewal_plans, list_retained_ip_renewal_plans_by_asset, list_user_cloud_servers, mark_cloud_server_ip_change_requested, mark_cloud_server_reinit_requested, pay_cloud_server_order_with_balance, pay_cloud_server_renewal_with_balance, prepare_cloud_asset_renewal_with_link, prepare_retained_ip_renewal_with_link, rebind_cloud_server_user, record_cloud_ip_log, replace_cloud_asset_order_by_admin, run_cloud_server_renewal_postcheck, set_cloud_server_auto_renew_admin, set_group_cloud_server_auto_renew, sync_cloud_asset_user_binding
 from cloud.sync_safety import get_missing_confirmation_threshold
 from cloud.api_asset_edit import delete_cloud_asset, update_cloud_asset
-from cloud.api_asset_snapshots import _dashboard_snapshot_can_use_forward_row_paging, _dashboard_snapshot_risk_counts, backfill_cloud_asset_dashboard_snapshots, refresh_cloud_asset_dashboard_snapshots
+from cloud.api_asset_snapshots import _dashboard_snapshot_can_use_forward_row_paging, _dashboard_snapshot_ordering, _dashboard_snapshot_risk_counts, backfill_cloud_asset_dashboard_snapshots, refresh_cloud_asset_dashboard_snapshots
 from cloud.api_assets import _asset_payload, _display_cloud_asset_note, _infer_asset_order, cloud_assets_list
 from cloud.api_monitors import _fetch_address_chain_balances
 from cloud.api_orders import _cloud_order_source_tags, cloud_order_detail, cloud_orders_list, delete_cloud_order, update_cloud_order_status
@@ -1900,6 +1900,21 @@ class CloudServerServicesTestCase(TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertEqual(group['user_key'], f'unbound:{asset.id}')
         self.assertNotEqual(group['user_key'], 'user:unbound')
+
+    # 功能：未绑定标签使用快照表已有组合索引顺序，避免大表默认排序拖慢 IP 视图。
+    def test_cloud_assets_unbound_risk_ordering_uses_due_group_index(self):
+        self.assertEqual(
+            _dashboard_snapshot_ordering('', '', 'unbound_user'),
+            ['asset_due_sort_null_rank', 'asset_due_sort_at', 'group_user_label', 'group_user_key', '-asset_id'],
+        )
+        self.assertEqual(
+            _dashboard_snapshot_ordering('', '', 'unbound_group'),
+            ['asset_due_sort_null_rank', 'asset_due_sort_at', 'group_user_label', 'group_user_key', '-asset_id'],
+        )
+        self.assertEqual(
+            _dashboard_snapshot_ordering('actual_expires_at', 'asc', 'unbound_user'),
+            ['asset_due_sort_null_rank', 'asset_due_sort_at', 'risk_rank', '-sort_order', '-asset_id'],
+        )
 
     # 功能：同步状态数量复用仪表盘快照，避免后台代理列表刷新时反复扫描 CloudAsset 大表。
     def test_cloud_assets_sync_status_counts_use_dashboard_snapshots(self):

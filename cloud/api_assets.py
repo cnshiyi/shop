@@ -718,6 +718,7 @@ def cloud_assets_list(request):
                 request,
                 sort_by=sort_by,
                 sort_direction=sort_direction,
+                risk_status=risk_status,
                 default_size=20,
                 min_size=10,
                 max_size=200,
