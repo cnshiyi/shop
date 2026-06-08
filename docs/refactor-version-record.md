@@ -17557,3 +17557,94 @@ git diff --check
 
 - 通知计划摘要路径已恢复可执行，但 10 万级深页耗时仍需后续专项优化。
 - 生命周期总开关、单项开关与任务中心联动仍应继续按自动巡检要求复查。
+
+## 2026-06-08 19:36 CST 通知计划字段开关加载优化与 10 万级复测
+
+### 本轮背景
+
+- 继续执行当前会话自动巡检目标。
+- 上轮通知计划 10 万级分页正确，但深页接口约 `4.1s/页`，需要继续优化且不能丢数据。
+- 本轮不执行真实云资源创建、关机、删机、释放 IP、换 IP、真实支付、链上广播或生产发布。
+
+### 修复
+
+- `cloud/api_tasks.py` 的通知计划字段解析新增 `actions`。
+- `_notice_group_summary_from_row()` 按字段开关决定是否查询当前分组订单：
+  - `fields=basic`：不查询分组订单，不加载隐藏的订单/IP/文案明细。
+  - `fields=basic,actions`：只查询第一条订单，保留“订单详情”链接。
+  - 打开 `ips` 或 `text` 时，继续加载完整分组订单明细。
+- 前端通知计划页把“操作”列开关同步写入请求字段，关闭操作列后后端收到 `fields=basic`。
+- 新增测试：
+  - `test_notice_task_detail_basic_fields_skip_batch_text_payload`
+  - `test_notice_task_detail_basic_actions_fields_keep_order_link_without_hidden_columns`
+
+### 10 万级数据
+
+- 临时注入 `100000` 个 Telegram 用户、`100000` 个云订单、`100000` 个 `CloudAsset`。
+- 临时前缀：
+  - 用户：`codex_notice_perf_20260608_`
+  - 订单：`CNPERF20260608`
+  - 资产：`codex_notice_perf_20260608_`
+- 注入后通知分组：
+  - 总数：`121429`
+  - 近期：`3428`
+  - 未来：`118001`
+
+### 后端分页与数据库对账
+
+- 对账页位：第 1 页、第 2 页、第 10000 页、最后页。
+- `offset=0`、`offset=10`、`offset=99990`、`offset=121420` 均与数据库排序一致。
+- 4 个页位之间无重复。
+- 最后一页 `loaded=9`，符合总数 `121429`。
+- HTTP 耗时：
+  - `fields=basic`：约 `2.0s - 2.15s/页`
+  - `fields=basic,actions`：约 `2.0s - 2.08s/页`
+  - `fields=basic,actions,ips`：约 `2.0s - 2.11s/页`
+
+### 真实前端验证
+
+- 页面：`http://127.0.0.1:5666/admin/tasks/notices`
+- 实际前端请求覆盖：
+  - 第 1 页：`offset=0`
+  - 第 2 页：`offset=10`
+  - 第 10000 页：`offset=99990`
+  - 最后一页：`offset=121420`
+  - 关闭操作列：`fields=basic`
+  - 打开 IP 列：`fields=basic,ips,actions`
+- 页面显示总数 `121429`。
+- 业务 API 失败：`0`。
+- 控制台 error/warning：`0`。
+- request failed：`0`。
+- 截图：`/private/tmp/shop-notice-perf-10w-front.png`
+
+### 清理
+
+- 已删除本轮 `100000` 条临时资产。
+- 已删除本轮 `100000` 条临时订单。
+- 已删除本轮 `100000` 个临时 Telegram 用户。
+- 残留：资产 `0`、订单 `0`、用户 `0`。
+- 清理后通知分组恢复为：
+  - 总数：`21429`
+  - 近期：`3428`
+  - 未来：`18001`
+
+### 验证
+
+通过：
+
+```bash
+UV_CACHE_DIR=/private/tmp/uv-cache-shop uv run python manage.py check
+UV_CACHE_DIR=/private/tmp/uv-cache-shop DJANGO_TEST_SQLITE=1 uv run python manage.py test cloud.tests.CloudServerServicesTestCase.test_notice_task_detail_basic_fields_skip_batch_text_payload cloud.tests.CloudServerServicesTestCase.test_notice_task_detail_basic_actions_fields_keep_order_link_without_hidden_columns cloud.tests.CloudServerServicesTestCase.test_notice_plan_summary_reuses_group_rows_for_counts cloud.tests.CloudServerServicesTestCase.test_notice_task_detail_deep_group_page_has_no_duplicates --settings=shop.settings --verbosity=1
+UV_CACHE_DIR=/private/tmp/uv-cache-shop uv run python -m py_compile cloud/api_tasks.py cloud/tests.py
+pnpm -F @vben/web-antd run typecheck
+git diff --check
+git -C /Users/a399/Desktop/data/vue-shop-admin diff --check
+```
+
+红线扫描通过。命中项为既有测试桩、Telegram 登录账号 API 文件名，以及 `CloudServerOrder.ip_recycle_at` 同步记录，不是旧订单到期事实回流。
+
+### 风险与后续
+
+- 通知计划 10 万级深分页已从上一轮约 `4.1s/页` 降到约 `2s/页`，但如果后续要求更低延迟，还需要继续做真正的服务端分组分页或投影表。
+- 机器人多任务高并发真机点击压测仍未完成。
+- 真实云资源创建、到期关机、删机、释放 IP 的生命周期开关矩阵仍未完整闭环。

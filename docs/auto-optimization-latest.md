@@ -4,28 +4,76 @@
 
 ## 最近一轮
 
-- 时间：2026-06-08 19:18 CST
-- 状态：完成通知计划摘要构建回归修复，消除 `_build_notice_plan_summary` 对关键字专用参数 `now` 的错误位置传参。
-- 后端 Commit：待提交。
-- 前端 Commit：本轮无前端变更，`/Users/a399/Desktop/data/vue-shop-admin` 工作区仍为干净状态。
+- 时间：2026-06-08 19:36 CST
+- 状态：完成通知计划字段开关加载优化，并重新完成 10 万级通知分组后端分页、数据库对账和真实前端复测。
+- 后端变更：`cloud/api_tasks.py`、`cloud/tests.py`
+- 前端变更：`/Users/a399/Desktop/data/vue-shop-admin/apps/web-antd/src/views/dashboard/tasks/notices.vue`
 
-## 本轮覆盖范围
+## 本轮修复
 
-- 后端仓库：`/Users/a399/Desktop/data/shop`
-- 前端仓库：`/Users/a399/Desktop/data/vue-shop-admin`
-- 巡检方式：`TODO.md` 已无未完成显式任务，本轮按 `docs/auto-optimization-control.md` 执行只读巡检并领取一个最小安全修复。
-- 重点入口：
-  - 通知计划摘要构建。
-  - 通知计划 10 万级分页相关回归。
+- 通知计划后端新增 `actions` 字段开关。
+- 当前端只请求 `fields=basic` 时，后端不再查询当前分组的订单/IP/文案明细。
+- 当前端请求 `fields=basic,actions` 时，后端只取当前分组第一条订单用于“订单详情”链接，不再加载隐藏的 IP 列表和通知文案。
+- 当前端打开 IP 或文案列时，后端仍按原逻辑加载完整分组明细。
+- 前端通知计划页会把“操作”列开关同步传给后端，关闭操作列后请求参数变为 `fields=basic`。
 
-## 发现并修复的问题
+## 10 万级压测
 
-- 问题：`cloud/api_tasks.py` 中 `_build_notice_plan_summary()` 调用 `_notice_group_summary_page_from_rows()` 时，把 `now` 作为位置参数传入。
-- 风险：`_notice_group_summary_page_from_rows()` 的 `now` 是关键字专用参数；该调用路径在真实执行时会触发 `TypeError`，导致通知计划摘要构建失败。
-- 修复：
-  - 保持通知计划分组行只查询一次，复用同一轮 `due_rows`/`future_rows` 计算分页结果和总数统计。
-  - 使用 `now=now` 关键字传参，确保摘要构建路径可执行。
-  - 新增回归测试 `test_notice_plan_summary_reuses_group_rows_for_counts`，同时校验总数统计复用同一轮分组结果。
+临时注入：
+
+- `100000` 个临时 Telegram 用户。
+- `100000` 个临时云订单。
+- `100000` 个临时 `CloudAsset`。
+- 临时前缀：
+  - 用户 `first_name`：`codex_notice_perf_20260608_`
+  - 订单号：`CNPERF20260608`
+  - 资产名：`codex_notice_perf_20260608_`
+
+注入后：
+
+- 通知分组总数：`121429`
+- 近期通知：`3428`
+- 未来通知：`118001`
+
+后端 HTTP 复测：
+
+- `fields=basic`：第 1 页、第 2 页、第 10000 页、最后页约 `2.0s - 2.15s/页`。
+- `fields=basic,actions`：第 1 页、第 2 页、第 10000 页、最后页约 `2.0s - 2.08s/页`。
+- `fields=basic,actions,ips`：第 1 页、第 2 页、第 10000 页、最后页约 `2.0s - 2.11s/页`。
+- 相比上一轮约 `4.1s/页`，深分页耗时已明显下降。
+
+数据库对账：
+
+- 对账页位：`offset=0`、`offset=10`、`offset=99990`、`offset=121420`。
+- 4 个页位 API 返回 ID 顺序均与数据库排序结果一致。
+- 4 个页位互相无重复。
+- 最后一页 `loaded=9`，符合 `121429` 总数。
+
+真实前端验证：
+
+- 页面：`http://127.0.0.1:5666/admin/tasks/notices`
+- 实际触发请求：
+  - `offset=0`，`fields=basic,actions`，`total=121429`，`loaded=10`
+  - `offset=10`，`fields=basic,actions`，`total=121429`，`loaded=10`
+  - `offset=99990`，`fields=basic,actions`，`total=121429`，`loaded=10`
+  - `offset=121420`，`fields=basic,actions`，`total=121429`，`loaded=9`
+  - 关闭操作列后 `fields=basic`
+  - 打开 IP 列后 `fields=basic,ips,actions`
+- 业务 API 失败：`0`
+- 控制台 error/warning：`0`
+- request failed：`0`
+- 截图：`/private/tmp/shop-notice-perf-10w-front.png`
+
+## 清理
+
+- 已删除本轮 `100000` 条临时资产。
+- 已删除本轮 `100000` 条临时订单。
+- 已删除本轮 `100000` 个临时 Telegram 用户。
+- 临时资产、订单、用户残留：`0`
+- 清理后统计恢复：
+  - 通知分组总数：`21429`
+  - 近期通知：`3428`
+  - 未来通知：`18001`
 
 ## 本轮验证
 
@@ -33,27 +81,23 @@
 
 ```bash
 UV_CACHE_DIR=/private/tmp/uv-cache-shop uv run python manage.py check
-UV_CACHE_DIR=/private/tmp/uv-cache-shop DJANGO_TEST_SQLITE=1 uv run python manage.py test cloud.tests.CloudServerServicesTestCase.test_notice_task_detail_allows_deep_offsets_beyond_100k cloud.tests.CloudServerServicesTestCase.test_notice_plan_summary_reuses_group_rows_for_counts cloud.tests.CloudServerServicesTestCase.test_notice_task_detail_counts_all_future_groups_beyond_loaded_limit cloud.tests.CloudServerServicesTestCase.test_notice_task_detail_deep_group_page_has_no_duplicates --settings=shop.settings --verbosity=1
+UV_CACHE_DIR=/private/tmp/uv-cache-shop DJANGO_TEST_SQLITE=1 uv run python manage.py test cloud.tests.CloudServerServicesTestCase.test_notice_task_detail_basic_fields_skip_batch_text_payload cloud.tests.CloudServerServicesTestCase.test_notice_task_detail_basic_actions_fields_keep_order_link_without_hidden_columns cloud.tests.CloudServerServicesTestCase.test_notice_plan_summary_reuses_group_rows_for_counts cloud.tests.CloudServerServicesTestCase.test_notice_task_detail_deep_group_page_has_no_duplicates --settings=shop.settings --verbosity=1
 UV_CACHE_DIR=/private/tmp/uv-cache-shop uv run python -m py_compile cloud/api_tasks.py cloud/tests.py
+pnpm -F @vben/web-antd run typecheck
 git diff --check
+git -C /Users/a399/Desktop/data/vue-shop-admin diff --check
 ```
 
-补充说明：
-
-- SQLite 测试库仍会输出既有 `db_comment/db_table_comment` 警告，不属于本轮回归。
-- 本轮未执行前端构建检查，因为前端仓库无改动，且修复范围仅限后端通知计划摘要逻辑。
-
-## 压测与真实操作
-
-- 本轮不新增压测数据，沿用上轮 10 万级通知计划分页结论做代码回归验证。
-- 本轮未执行真实云资源创建、关机、删机、释放 IP、换 IP、真实支付、链上广播或生产发布。
-- 本轮未打印密钥、Telegram session、TOTP、支付密钥、云厂商密钥或登录 token。
+红线扫描通过。命中项仍为既有测试桩、Telegram 登录账号 API 文件名，以及 `CloudServerOrder.ip_recycle_at` 同步记录，不是旧订单到期事实回流。
 
 ## 受限项
 
-- `docs/real-machine-test-report.md` 当前存在未提交用户改动，本轮不覆盖、不提交。
+- 本轮未执行真实云资源创建、关机、删机、释放 IP、换 IP、真实支付、链上广播或生产发布。
+- 本轮未打印密钥、Telegram session、TOTP、支付密钥、云厂商密钥、登录 token 或完整代理链接。
+- `docs/real-machine-test-report.md` 当前存在未提交真实机器测试记录，本轮不覆盖、不提交。
 
-## 下一步
+## 尚未完成
 
-- 优先继续通知计划 10 万级查询耗时优化，目标是降低深页 `4s+` 级耗时。
-- 继续按自动巡检要求复查生命周期总开关与资产单项开关联动。
+- 机器人多任务高并发真机点击压测还没有完成。
+- 真实云资源创建、到期关机、删机、释放 IP 的生命周期开关矩阵还没有完整闭环。
+- 服务器创建后的完整生命周期链路还没有在本轮压测中闭环到真实关机、真实删机和真实 IP 释放。

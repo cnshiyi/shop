@@ -1111,7 +1111,7 @@ def _compact_notice_items(items: list[dict], *, text_limit: int = 1200, ip_limit
 
 def _request_notice_fields(request) -> set[str]:
     raw = str(request.GET.get('fields') or '').strip()
-    allowed = {'basic', 'channels', 'ips', 'retry', 'text'}
+    allowed = {'basic', 'actions', 'channels', 'ips', 'retry', 'text'}
     if not raw:
         return set(allowed)
     return {item.strip().lower() for item in raw.split(',') if item.strip().lower() in allowed}
@@ -1410,13 +1410,17 @@ def _notice_group_order_queryset(row: dict, *, now):
 
 
 def _notice_group_summary_from_row(row: dict, *, now, next_run_at, latest_logs: dict, account_attempts: list[dict] | None, fields: set[str]) -> dict:
-    qs = _notice_group_order_queryset(row, now=now)
-    order_rows = list(qs.values(
-        'order_id',
-        'order__public_ip',
-        'order__previous_public_ip',
-        'public_ip',
-    ).order_by(_notice_source_time_field(row.get('notice_type') or ''), 'order_id')[:1000])
+    order_rows = []
+    needs_order_rows = bool({'actions', 'ips', 'retry', 'text'} & fields)
+    if needs_order_rows:
+        order_row_limit = 1000 if {'ips', 'text'} & fields else 1
+        qs = _notice_group_order_queryset(row, now=now)
+        order_rows = list(qs.values(
+            'order_id',
+            'order__public_ip',
+            'order__previous_public_ip',
+            'public_ip',
+        ).order_by(_notice_source_time_field(row.get('notice_type') or ''), 'order_id')[:order_row_limit])
     order_ids = []
     ips = []
     for item in order_rows:

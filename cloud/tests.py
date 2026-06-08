@@ -12097,12 +12097,54 @@ class CloudServerServicesTestCase(TestCase):
         })
         self._attach_bearer_session(request, staff_user)
 
+        with patch('cloud.api_tasks._notice_actual_batch_payload', side_effect=AssertionError('隐藏文案列时不应构造批量文案')), \
+            patch('cloud.api_tasks._notice_group_order_queryset', side_effect=AssertionError('隐藏 IP、文案、操作列时不应查询分组订单')):
+            response = notice_task_detail(request)
+
+        self.assertEqual(response.status_code, 200)
+        data = json.loads(response.content)['data']
+        row = next(item for item in data['active_user_summary_items'] if item.get('user_id') == self.user.id)
+        self.assertNotIn('notice_text_preview', row)
+
+    # 功能：验证通知表只打开操作列时仅加载订单详情链接，不加载隐藏的 IP 列表和通知文案。
+    def test_notice_task_detail_basic_actions_fields_keep_order_link_without_hidden_columns(self):
+        now = timezone.now()
+        expires_at = now + timezone.timedelta(days=1)
+        order = CloudServerOrder.objects.create(
+            order_no='NOTICE-BASIC-ACTIONS-FIELDS-1',
+            user=self.user,
+            plan=self.plan,
+            provider=self.plan.provider,
+            region_code=self.plan.region_code,
+            region_name=self.plan.region_name,
+            plan_name=self.plan.plan_name,
+            quantity=1,
+            currency='USDT',
+            total_amount='19.00',
+            pay_amount='19.00',
+            status='completed',
+            public_ip='7.7.7.74',
+            cloud_reminder_enabled=True,
+        )
+        self._create_auto_renew_asset(order, expires_at=expires_at)
+        staff_user = get_user_model().objects.create_user(username='staff_notice_basic_actions_fields', password='x', is_staff=True)
+        request = self.factory.get('/api/admin/tasks/notices/', {
+            'compact': '1',
+            'fields': 'basic,actions',
+            'limit': '10',
+            'history_limit': '10',
+        })
+        self._attach_bearer_session(request, staff_user)
+
         with patch('cloud.api_tasks._notice_actual_batch_payload', side_effect=AssertionError('隐藏文案列时不应构造批量文案')):
             response = notice_task_detail(request)
 
         self.assertEqual(response.status_code, 200)
         data = json.loads(response.content)['data']
         row = next(item for item in data['active_user_summary_items'] if item.get('user_id') == self.user.id)
+        self.assertEqual(row.get('related_path'), f'/admin/cloud-orders/{order.id}')
+        self.assertNotIn('ips', row)
+        self.assertNotIn('order_ids', row)
         self.assertNotIn('notice_text_preview', row)
 
     # 功能：验证通知计划深分页 offset 不会在 10 万后被静默截断，避免前端跳最后页显示错页。
