@@ -57,7 +57,7 @@ from cloud.api_servers import delete_server, servers_list
 from cloud.api_sync import _apply_server_missing_state, sync_cloud_asset_status
 from cloud.api_tasks import auto_renew_task_detail, delete_notice_history, notice_task_detail, refresh_notice_plan_view, run_auto_renew_order, run_auto_renew_tasks, tasks_overview, update_notice_plan_text, update_notice_switches
 from cloud.task_center import task_center_payload
-from cloud.sync_jobs import _execute_cloud_asset_sync_job, cancel_cloud_asset_sync_job, cloud_asset_sync_job_detail, cloud_asset_sync_jobs_list, cloud_asset_sync_jobs_metrics, retry_cloud_asset_sync_job, sync_cloud_assets
+from cloud.sync_jobs import _cloud_assets_sync_status_counts, _execute_cloud_asset_sync_job, _latest_synced_cloud_asset_updated_at, cancel_cloud_asset_sync_job, cloud_asset_sync_job_detail, cloud_asset_sync_jobs_list, cloud_asset_sync_jobs_metrics, retry_cloud_asset_sync_job, sync_cloud_assets
 from core.cloud_accounts import cloud_account_label, cloud_account_label_variants, list_cloud_accounts_by_server_load
 from core.models import CloudAccountConfig, SiteConfig
 from core.persistence import bump_daily_address_stat
@@ -1900,6 +1900,87 @@ class CloudServerServicesTestCase(TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertEqual(group['user_key'], f'unbound:{asset.id}')
         self.assertNotEqual(group['user_key'], 'user:unbound')
+
+    # 功能：同步状态数量复用仪表盘快照，避免后台代理列表刷新时反复扫描 CloudAsset 大表。
+    def test_cloud_assets_sync_status_counts_use_dashboard_snapshots(self):
+        active_account = CloudAccountConfig.objects.create(
+            provider=CloudAccountConfig.PROVIDER_AWS,
+            name='sync-status-active-account',
+            external_account_id='sync-status-active',
+            access_key='ak',
+            secret_key='sk',
+            region_hint='ap-southeast-1',
+            is_active=True,
+        )
+        inactive_account = CloudAccountConfig.objects.create(
+            provider=CloudAccountConfig.PROVIDER_AWS,
+            name='sync-status-inactive-account',
+            external_account_id='sync-status-inactive',
+            access_key='ak',
+            secret_key='sk',
+            region_hint='ap-southeast-1',
+            is_active=False,
+        )
+        CloudAsset.objects.create(
+            kind=CloudAsset.KIND_SERVER,
+            source=CloudAsset.SOURCE_AWS_SYNC,
+            user=self.user,
+            provider='aws_lightsail',
+            cloud_account=active_account,
+            account_label=cloud_account_label(active_account),
+            region_code='ap-southeast-1',
+            asset_name='sync-status-aws',
+            instance_id='sync-status-aws',
+            public_ip='10.88.91.1',
+            status=CloudAsset.STATUS_RUNNING,
+        )
+        CloudAsset.objects.create(
+            kind=CloudAsset.KIND_SERVER,
+            source=CloudAsset.SOURCE_AWS_SYNC,
+            user=self.user,
+            provider='aws_lightsail',
+            cloud_account=active_account,
+            account_label=cloud_account_label(active_account),
+            region_code='ap-southeast-1',
+            asset_name='sync-status-unattached',
+            public_ip='10.88.91.2',
+            provider_status='未附加',
+            status=CloudAsset.STATUS_RUNNING,
+        )
+        CloudAsset.objects.create(
+            kind=CloudAsset.KIND_SERVER,
+            source=CloudAsset.SOURCE_ALIYUN,
+            user=self.user,
+            provider='aliyun_simple',
+            cloud_account=active_account,
+            account_label=cloud_account_label(active_account),
+            region_code='cn-hongkong',
+            asset_name='sync-status-aliyun',
+            instance_id='sync-status-aliyun',
+            public_ip='10.88.91.3',
+            status=CloudAsset.STATUS_RUNNING,
+        )
+        CloudAsset.objects.create(
+            kind=CloudAsset.KIND_SERVER,
+            source=CloudAsset.SOURCE_AWS_SYNC,
+            user=self.user,
+            provider='aws_lightsail',
+            cloud_account=inactive_account,
+            account_label=cloud_account_label(inactive_account),
+            region_code='ap-southeast-1',
+            asset_name='sync-status-inactive',
+            instance_id='sync-status-inactive',
+            public_ip='10.88.91.4',
+            status=CloudAsset.STATUS_RUNNING,
+        )
+        refresh_cloud_asset_dashboard_snapshots(reason='sync-status-test', full=True)
+
+        counts = _cloud_assets_sync_status_counts()
+
+        self.assertEqual(counts['aws_existing_count'], 2)
+        self.assertEqual(counts['aliyun_existing_count'], 1)
+        self.assertEqual(counts['unattached_ip_count'], 1)
+        self.assertIsNotNone(_latest_synced_cloud_asset_updated_at())
 
     # 功能：大量快照过期时列表接口不应在请求内同步全量刷新，避免大数据页面超时。
     def test_cloud_assets_list_defers_large_stale_snapshot_refresh(self):

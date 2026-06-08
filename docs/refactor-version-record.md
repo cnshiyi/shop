@@ -15803,3 +15803,120 @@ git diff --check
 
 - 当前最大风险不是代码回退，而是本轮无法在沙箱里直接访问本地 MySQL，因此缺失 `10` 万量级以上真实库验证。
 - 下一轮优先在可访问本地 MySQL 的环境中复跑生命周期计划真实库只读对账；若环境仍受限，则继续只做 SQLite 聚焦回归并寻找新的最小安全缺陷。
+
+## 2026-06-08 15:31 代理列表 sync-status 快照计数性能修复
+
+### 背景
+
+继续当前会话自动巡检。上一轮真实前端代理列表压测时发现 `/api/admin/cloud-assets/sync-status/` 在大表环境下会触发 MySQL 超时，页面切标签时后端出现 `500`，原因是同步状态接口仍直接扫描 `CloudAsset` 大表统计 AWS、阿里云和未附加 IP 数量。
+
+### 定位
+
+本轮在真实 MySQL 上拆分计时：
+
+```bash
+UV_CACHE_DIR=/private/tmp/uv-cache-shop uv run python manage.py shell
+```
+
+定位结果：
+
+- 原 `latest_asset` 从 `CloudAsset` 大表排序取更新时间，约 `2877ms`。
+- 原 `sync_counts` 直接从 `CloudAsset` 统计并带 `cloud_account__is_active=True` join，约 `4048ms`。
+- 首次改成快照表但仍按 `provider__in` 取最大更新时间时，因索引不匹配反而约 `9582ms`。
+- 使用快照表全局 `asset_updated_at` 最大值后，最新时间约 `11ms`。
+- 使用快照表无 join 聚合计数后，三项计数约 `159ms`。
+
+### 修复
+
+修改文件：
+
+```text
+/Users/a399/Desktop/data/shop/cloud/sync_jobs.py
+/Users/a399/Desktop/data/shop/cloud/tests.py
+```
+
+改动：
+
+- 新增 `_cloud_assets_sync_status_counts()`：
+  - 从 `CloudAssetDashboardSnapshot` 读取同步状态数量。
+  - 用 `cloud_account_id__in=active_account_ids` 和 `account_label__in=active_account_labels` 表达活跃账号口径，避免 join 云账号表。
+  - 用一次 `aggregate()` 计算：
+    - `aws_existing_count`
+    - `aliyun_existing_count`
+    - `unattached_ip_count`
+- 新增 `_latest_synced_cloud_asset_updated_at()`：
+  - 优先从 `CloudAssetDashboardSnapshot.asset_updated_at` 最大值读取最近更新时间。
+  - 快照为空时才回退到 `CloudAsset`。
+- `cloud_assets_sync_status()` 改为调用上述两个 helper，不再直接扫描资产大表。
+- 新增测试 `test_cloud_assets_sync_status_counts_use_dashboard_snapshots`，覆盖活跃账号、停用账号、AWS、阿里云、未附加 IP 计数口径。
+
+### 真实前端验证
+
+使用本机 Google Chrome + Playwright 打开：
+
+```text
+http://127.0.0.1:5666/admin/cloud-assets
+```
+
+实测结果：
+
+- 初始代理列表 DOM 行数：`20`。
+- 未附加固定IP：`838ms`，DOM 行数 `20`。
+- 未绑定用户：`3696ms`，DOM 行数 `20`。
+- 未绑定群组：`3273ms`，DOM 行数 `20`。
+- 续费关闭：`603ms`，DOM 行数 `20`。
+- `sync-status` 浏览器内请求：
+  - 修复前同环境约 `6532ms`。
+  - 修复后 `133ms`。
+  - HTTP `200`，`code=0`，三个数量字段均为数字。
+- 页面请求无失败，控制台 `0 error / 0 warning`。
+
+说明：
+
+- 这轮修复的是旁路同步状态接口，不改变代理列表主分页数据源。
+- `未绑定用户` 和 `未绑定群组` 主列表仍约 `3` 秒，是下一轮继续优化的重点。
+
+### 机器人高并发复测
+
+继续按用户要求覆盖机器人多任务高并发：
+
+```bash
+UV_CACHE_DIR=/private/tmp/uv-cache-shop DJANGO_TEST_SQLITE=1 uv run python manage.py test bot.tests.TelegramListenerPushTestCase.test_notice_copy_wrapper_keeps_concurrent_user_sends_isolated bot.tests.RetainedIpRenewalUiTestCase.test_cloud_background_tasks_keep_high_concurrency_isolated bot.tests.RetainedIpRenewalUiTestCase.test_cloud_background_tasks_keep_bulk_concurrency_isolated --settings=shop.settings --verbosity=1
+```
+
+结果：
+
+- `3` 条通过。
+- 覆盖通知复制包装器并发隔离。
+- 覆盖钱包直付、钱包补付、续费后巡检同时执行。
+- 覆盖 `20` 组批量钱包直付、`20` 组钱包补付、`20` 组续费后巡检，总计 `60` 路并发任务。
+
+### 验证
+
+通过：
+
+```bash
+UV_CACHE_DIR=/private/tmp/uv-cache-shop uv run python manage.py check
+UV_CACHE_DIR=/private/tmp/uv-cache-shop DJANGO_TEST_SQLITE=1 uv run python manage.py test cloud.tests.CloudServerServicesTestCase.test_cloud_assets_sync_status_counts_use_dashboard_snapshots --settings=shop.settings --verbosity=1
+UV_CACHE_DIR=/private/tmp/uv-cache-shop uv run python -m py_compile cloud/sync_jobs.py cloud/tests.py
+git diff --check
+```
+
+红线扫描通过：
+
+```bash
+rg -n "service_expires_at|actual_expires_at.*CloudServerOrder|CloudServerOrder.*actual_expires_at|plan snapshot|snapshot table|old refund|refund_legacy|refund_old|legacy_refund|accounts\\.|finance\\.|mall\\.|monitoring\\.|dashboard_api\\.|biz\\." cloud bot orders core shop -g '!**/migrations/**'
+```
+
+命中项仍为 Telegram 登录账号、云账号测试桩和 `CloudServerOrder.ip_recycle_at` 同步语句，不是旧到期事实回流。
+
+### 受限项
+
+- 本轮未执行真实云资源创建、关机、删机、释放 IP、换 IP、真实支付、链上广播、生产发布或删除业务数据。
+- 本轮未打印密钥、Telegram session、支付密钥、云厂商密钥或完整代理链接。
+
+### 下一步
+
+- 下一轮继续优化代理列表 `未绑定用户` 和 `未绑定群组` 标签主列表慢路径。
+- 继续做真实前端翻页和数据库口径对账，不能只看计数。
+- 继续把机器人多任务高并发作为固定回归项。

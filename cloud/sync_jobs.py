@@ -10,13 +10,13 @@ from datetime import timedelta
 from django.core.cache import cache
 from django.core.management import get_commands, load_command_class
 from django.db import close_old_connections
-from django.db.models import Count, F, Q
+from django.db.models import Count, F, Max, Q
 from django.utils import timezone
 from django.views.decorators.csrf import csrf_exempt
 from django.views.decorators.http import require_GET, require_POST
 
 from cloud.dashboard_snapshots import _refresh_dashboard_plan_snapshots_deferred
-from cloud.models import CloudAsset, CloudAssetSyncJob, CloudAssetSyncJobEvent
+from cloud.models import CloudAsset, CloudAssetDashboardSnapshot, CloudAssetSyncJob, CloudAssetSyncJobEvent
 from core.cloud_accounts import cloud_account_label, list_cloud_account_labels
 from core.dashboard_api import _error, _iso, _ok, _read_payload, dashboard_login_required, dashboard_superuser_required
 from core.models import CloudAccountConfig, ExternalSyncLog
@@ -25,6 +25,46 @@ from core.runtime_config import get_cloud_asset_sync_interval_seconds
 
 logger = logging.getLogger(__name__)
 _SYNC_CONSOLE_LOG_MAX_CHARS = 50000
+
+
+def _cloud_assets_sync_status_counts() -> dict[str, int]:
+    active_account_ids = list(CloudAccountConfig.objects.filter(is_active=True).values_list('id', flat=True))
+    active_account_labels = list_cloud_account_labels(True)
+    active_account_filter = (
+        Q(cloud_account_id__in=active_account_ids)
+        | Q(cloud_account_id__isnull=True, account_label__in=active_account_labels)
+    )
+    snapshot_queryset = CloudAssetDashboardSnapshot.objects.filter(active_account_filter)
+    terminal_statuses = [
+        CloudAsset.STATUS_DELETED,
+        CloudAsset.STATUS_DELETING,
+        CloudAsset.STATUS_TERMINATED,
+        CloudAsset.STATUS_TERMINATING,
+    ]
+    counts = snapshot_queryset.aggregate(
+        aws_existing_count=Count('id', filter=Q(provider='aws_lightsail') & ~Q(status=CloudAsset.STATUS_DELETED)),
+        aliyun_existing_count=Count('id', filter=Q(provider='aliyun_simple') & ~Q(status=CloudAsset.STATUS_DELETED)),
+        unattached_ip_count=Count('id', filter=Q(risk_unattached_ip=True) & ~Q(status__in=terminal_statuses)),
+    )
+    return {key: int(value or 0) for key, value in counts.items()}
+
+
+def _latest_synced_cloud_asset_updated_at():
+    snapshot_updated_at = (
+        CloudAssetDashboardSnapshot.objects
+        .aggregate(last_updated_at=Max('asset_updated_at'))
+        .get('last_updated_at')
+    )
+    if snapshot_updated_at:
+        return snapshot_updated_at
+    latest_asset = (
+        CloudAsset.objects
+        .filter(source__in=[CloudAsset.SOURCE_AWS_SYNC, CloudAsset.SOURCE_ALIYUN])
+        .only('updated_at')
+        .order_by('-updated_at', '-id')
+        .first()
+    )
+    return latest_asset.updated_at if latest_asset else None
 
 
 # 类型说明：封装 云资产、云订单和生命周期 中 CapturedCommandError 相关的数据和行为。
@@ -1272,44 +1312,17 @@ def cloud_assets_sync_status(request):
         source__in=[ExternalSyncLog.SOURCE_AWS, ExternalSyncLog.SOURCE_ALIYUN],
         is_success=True,
     ).order_by('-created_at', '-id').first()
-    latest_asset = CloudAsset.objects.filter(
-        source__in=[CloudAsset.SOURCE_AWS_SYNC, CloudAsset.SOURCE_ALIYUN],
-    ).order_by('-updated_at', '-id').first()
+    latest_asset_updated_at = _latest_synced_cloud_asset_updated_at()
     last_synced_at = None
-    if latest_log and latest_asset:
-        last_synced_at = max(latest_log.created_at, latest_asset.updated_at)
+    if latest_log and latest_asset_updated_at:
+        last_synced_at = max(latest_log.created_at, latest_asset_updated_at)
     elif latest_log:
         last_synced_at = latest_log.created_at
-    elif latest_asset:
-        last_synced_at = latest_asset.updated_at
+    elif latest_asset_updated_at:
+        last_synced_at = latest_asset_updated_at
 
     since = last_synced_at
-    active_account_labels = list_cloud_account_labels(True)
-    active_account_filter = (
-        Q(cloud_account__is_active=True)
-        | Q(cloud_account__isnull=True, account_label__in=active_account_labels)
-    )
-    aws_existing_count = CloudAsset.objects.filter(
-        active_account_filter,
-        kind=CloudAsset.KIND_SERVER,
-        provider='aws_lightsail',
-    ).exclude(status=CloudAsset.STATUS_DELETED).count()
-    aliyun_existing_count = CloudAsset.objects.filter(
-        active_account_filter,
-        kind=CloudAsset.KIND_SERVER,
-        provider='aliyun_simple',
-    ).exclude(status=CloudAsset.STATUS_DELETED).count()
-    unattached_ip_count = CloudAsset.objects.filter(
-        active_account_filter,
-        kind=CloudAsset.KIND_SERVER,
-    ).filter(
-        Q(provider_status__icontains='未附加') | Q(note__icontains='未附加IP') | Q(note__icontains='未附加固定IP')
-    ).exclude(status__in=[
-        CloudAsset.STATUS_DELETED,
-        CloudAsset.STATUS_DELETING,
-        CloudAsset.STATUS_TERMINATED,
-        CloudAsset.STATUS_TERMINATING,
-    ]).count()
+    sync_counts = _cloud_assets_sync_status_counts()
     recent_syncs = []
     for log in ExternalSyncLog.objects.filter(source=ExternalSyncLog.SOURCE_DASHBOARD, action='sync_cloud_assets').order_by('-created_at', '-id')[:5]:
         response_payload = {}
@@ -1340,9 +1353,9 @@ def cloud_assets_sync_status(request):
     return _ok({
         'auto_sync_every_seconds': get_cloud_asset_sync_interval_seconds(),
         'last_synced_at': _iso(last_synced_at),
-        'aws_existing_count': aws_existing_count,
-        'aliyun_existing_count': aliyun_existing_count,
-        'unattached_ip_count': unattached_ip_count,
+        'aws_existing_count': sync_counts['aws_existing_count'],
+        'aliyun_existing_count': sync_counts['aliyun_existing_count'],
+        'unattached_ip_count': sync_counts['unattached_ip_count'],
         'accounts': {
             'aliyun': [_sync_account_payload(account) for account in _active_sync_accounts(CloudAccountConfig.PROVIDER_ALIYUN)],
             'aws': [_sync_account_payload(account) for account in _active_sync_accounts(CloudAccountConfig.PROVIDER_AWS)],

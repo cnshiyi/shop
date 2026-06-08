@@ -4,35 +4,44 @@
 
 ## 最近一轮
 
-- 时间：2026-06-08 15:16 CST
-- 状态：完成一轮生命周期计划/任务中心专项审计；未发现新的最小安全修复点，本轮无业务代码改动。
-- 本轮范围：
-  - `cloud/task_center.py` 生命周期计划聚合逻辑。
-  - `bot/api.py` 生命周期计划总开关/单项开关状态映射。
-  - 机器人后台钱包任务并发隔离回归。
+- 时间：2026-06-08 15:31 CST
+- 状态：完成代理列表 `sync-status` 大表性能修复、真实前端标签复测、机器人多任务高并发回归。
+- Commit：待提交。
 
-## 审计结论
+## 本轮修复
 
-- 生命周期计划页现有回归覆盖仍能通过：
-  - 关机计划与删机计划拆分展示。
-  - 资产级 `shutdown_enabled` / `server_delete_enabled` / `ip_delete_enabled` 三个单项开关分别生效。
-  - `cloud_server_shutdown_enabled` / `cloud_server_delete_enabled` / `cloud_ip_delete_enabled` 三个总开关状态仍能正确映射到计划项。
-- 任务中心生命周期聚合现有回归仍能通过：
-  - 失败历史、DB 执行任务、计划项之间的去重逻辑未回退。
-  - `failed` / `active` / `warning` 聚合结果与现有测试契约一致。
-- 机器人后台并发回归仍通过：
-  - 通知复制包装器隔离正常。
-  - 钱包直付、钱包补付、续费后巡检的并发任务未出现串线。
+- `cloud/sync_jobs.py`
+  - `cloud_assets_sync_status()` 不再从 `CloudAsset` 大表直接统计 AWS、阿里云和未附加 IP 数量。
+  - 改为复用 `CloudAssetDashboardSnapshot`，并用无 join 的 `cloud_account_id` / `account_label` 活跃账号口径过滤。
+  - 三个计数合并到一次 `aggregate()`，避免页面每次加载触发多次大表扫描。
+  - `last_synced_at` 的资产更新时间优先从快照表 `asset_updated_at` 最大值读取，避免对 `CloudAsset` 大表排序。
+- `cloud/tests.py`
+  - 新增 `test_cloud_assets_sync_status_counts_use_dashboard_snapshots`，覆盖活跃账号、停用账号、AWS、阿里云和未附加 IP 计数口径。
 
-## 压测/对账结果
+## 真实前端结果
 
-- 本轮完成的真实可验证测试为 SQLite 聚焦回归，覆盖：
-  - 生命周期计划/任务中心 `17` 条回归用例。
-  - 机器人高并发 `3` 条回归用例。
-  - 机器人批量并发样本仍为 `20` 组直付 + `20` 组补付 + `20` 组续费后巡检，总计 `60` 路并发任务。
-- 计划中的本地 MySQL 真实库对账与 `10` 万量级以上分页/计数审计在当前沙箱环境被阻断：
-  - `uv run python manage.py shell -c "..."` 连接 `127.0.0.1` MySQL 时返回 `PermissionError: [Errno 1] Operation not permitted`。
-  - 因此本轮未能在当前环境复用既有 `50` 万/`150` 万真实数据做只读对账。
+- 前端：`http://127.0.0.1:5666/admin/cloud-assets`
+- 后端：`http://127.0.0.1:8000`
+- 浏览器：本机 Google Chrome + Playwright。
+- 实测标签：
+  - 未附加固定IP：`838ms`，DOM 行数 `20`。
+  - 未绑定用户：`3696ms`，DOM 行数 `20`。
+  - 未绑定群组：`3273ms`，DOM 行数 `20`。
+  - 续费关闭：`603ms`，DOM 行数 `20`。
+- `sync-status` 浏览器内实测：
+  - 修复前同环境约 `6532ms`。
+  - 修复后 `133ms`。
+  - HTTP `200`，返回 `code=0`，三个数量字段均为数字。
+- 页面请求无失败，控制台 `0 error / 0 warning`。
+
+## 真实 MySQL 计时
+
+- `_latest_synced_cloud_asset_updated_at()`：`11ms`。
+- `_cloud_assets_sync_status_counts()`：`159ms`。
+- 返回计数：
+  - AWS：`10008`。
+  - 阿里云：`0`。
+  - 未附加 IP：`1726`。
 
 ## 后端验证
 
@@ -40,26 +49,35 @@
 
 ```bash
 UV_CACHE_DIR=/private/tmp/uv-cache-shop uv run python manage.py check
-UV_CACHE_DIR=/private/tmp/uv-cache-shop DJANGO_TEST_SQLITE=1 uv run python manage.py test cloud.tests_task_center.CloudTaskCenterApiTestCase cloud.tests.CloudServerServicesTestCase.test_lifecycle_plans_use_stage_specific_asset_switches cloud.tests.CloudServerServicesTestCase.test_lifecycle_plans_show_global_stage_switches cloud.tests.CloudServerServicesTestCase.test_lifecycle_plans_split_shutdown_before_server_delete --settings=shop.settings --verbosity=1
+UV_CACHE_DIR=/private/tmp/uv-cache-shop DJANGO_TEST_SQLITE=1 uv run python manage.py test cloud.tests.CloudServerServicesTestCase.test_cloud_assets_sync_status_counts_use_dashboard_snapshots --settings=shop.settings --verbosity=1
+UV_CACHE_DIR=/private/tmp/uv-cache-shop uv run python -m py_compile cloud/sync_jobs.py cloud/tests.py
 UV_CACHE_DIR=/private/tmp/uv-cache-shop DJANGO_TEST_SQLITE=1 uv run python manage.py test bot.tests.TelegramListenerPushTestCase.test_notice_copy_wrapper_keeps_concurrent_user_sends_isolated bot.tests.RetainedIpRenewalUiTestCase.test_cloud_background_tasks_keep_high_concurrency_isolated bot.tests.RetainedIpRenewalUiTestCase.test_cloud_background_tasks_keep_bulk_concurrency_isolated --settings=shop.settings --verbosity=1
 git diff --check
 ```
 
-受限：
+红线扫描通过：
 
 ```bash
-UV_CACHE_DIR=/private/tmp/uv-cache-shop uv run python manage.py shell -c "from cloud.models import CloudAsset, CloudIpLog; from cloud.lifecycle_plan_queries import server_lifecycle_plan_counts; import json; counts=server_lifecycle_plan_counts(); payload={'cloud_asset_total': CloudAsset.objects.count(), 'server_asset_total': CloudAsset.objects.filter(kind='server').count(), 'unattached_ip_history_logs': CloudIpLog.objects.filter(action='release_unattached_ip').count(), 'plan_counts': counts}; print(json.dumps(payload, ensure_ascii=False))"
+rg -n "service_expires_at|actual_expires_at.*CloudServerOrder|CloudServerOrder.*actual_expires_at|plan snapshot|snapshot table|old refund|refund_legacy|refund_old|legacy_refund|accounts\\.|finance\\.|mall\\.|monitoring\\.|dashboard_api\\.|biz\\." cloud bot orders core shop -g '!**/migrations/**'
 ```
 
-失败原因为当前沙箱禁止访问本机 `127.0.0.1` MySQL。
+命中项仍为 Telegram 登录账号、云账号测试桩和 `CloudServerOrder.ip_recycle_at` 同步语句，不是旧到期事实回流。
+
+## 机器人并发
+
+- 本轮继续复跑机器人多任务高并发聚焦测试，`3` 条通过。
+- 覆盖通知复制包装器并发隔离。
+- 覆盖钱包直付、钱包补付、续费后巡检同时执行。
+- 批量样本为 `20` 组直付 + `20` 组补付 + `20` 组续费后巡检，总计 `60` 路并发任务。
 
 ## 受限项
 
 - 本轮未执行真实云资源创建、关机、删机、释放 IP、换 IP、真实支付、链上广播、生产发布或删除业务数据。
-- 本轮未打印密钥、Telegram session、支付密钥、云厂商密钥或完整代理链接到仓库文件。
-- 本轮未重新打开前端页面；前端仓库 `git status --short` 为空，但浏览器实页与真实 MySQL 大表对账受当前沙箱网络限制影响，未在本轮复跑。
+- 本轮未打印密钥、Telegram session、支付密钥、云厂商密钥或完整代理链接。
+- 本轮创建过一次性后台验证用户，提交前会清理。
 
 ## 下一步
 
-- 下一轮优先在可访问本地 MySQL 的环境中复跑生命周期计划真实库只读对账，补齐 `10` 万量级以上分页/计数验证。
-- 如环境仍受限，则继续只做固定巡检清单中的 SQLite 聚焦回归，并优先寻找新的最小安全缺陷而不是重复无效大表命令。
+- 下一轮继续优化代理列表慢标签，重点是 `未绑定用户` 和 `未绑定群组` 仍约 `3` 秒。
+- 继续做真实前端翻页和数据库口径对账，不能只看计数。
+- 继续把机器人多任务高并发作为固定回归项。
