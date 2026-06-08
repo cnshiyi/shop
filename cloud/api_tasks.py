@@ -1468,13 +1468,30 @@ def _notice_group_summary_from_row(row: dict, *, now, next_run_at, latest_logs: 
 def _notice_group_summary_page(now, *, limit: int, offset: int, fields: set[str], latest_logs: dict, account_attempts: list[dict] | None, scope: str = 'active') -> tuple[list[dict], int]:
     due_rows = _notice_group_rows_for_scope(now, future=False) if scope in {'active', 'due'} else []
     future_rows = _notice_group_rows_for_scope(now, future=True) if scope in {'active', 'future'} else []
-    rows = [*due_rows, *future_rows]
+    return _notice_group_summary_page_from_rows(
+        due_rows,
+        future_rows,
+        now=now,
+        limit=limit,
+        offset=offset,
+        fields=fields,
+        latest_logs=latest_logs,
+        account_attempts=account_attempts,
+    )
+
+
+def _notice_sort_group_rows(rows: list[dict]) -> list[dict]:
     rows.sort(key=lambda item: (
         item.get('user_display_name') or '',
         item.get('username_label') or '',
         item.get('_next_notice_at_value') or timezone.datetime.max.replace(tzinfo=dt_timezone.utc),
         item.get('notice_type_label') or '',
     ))
+    return rows
+
+
+def _notice_group_summary_page_from_rows(due_rows: list[dict], future_rows: list[dict], *, now, limit: int, offset: int, fields: set[str], latest_logs: dict, account_attempts: list[dict] | None) -> tuple[list[dict], int]:
+    rows = _notice_sort_group_rows([*due_rows, *future_rows])
     total = len(rows)
     visible_rows = rows[offset:offset + limit] if limit else rows[offset:]
     return [
@@ -1490,9 +1507,7 @@ def _notice_group_summary_page(now, *, limit: int, offset: int, fields: set[str]
     ], total
 
 
-def _notice_plan_total_counts(now) -> dict:
-    due_rows = _notice_group_rows_for_scope(now, future=False)
-    future_rows = _notice_group_rows_for_scope(now, future=True)
+def _notice_plan_total_counts_from_rows(due_rows: list[dict], future_rows: list[dict]) -> dict:
     due_count = sum(int(row.get('notice_count') or 0) for row in due_rows)
     future_count = sum(int(row.get('notice_count') or 0) for row in future_rows)
     due_user_groups = {row.get('id') for row in due_rows}
@@ -1506,20 +1521,29 @@ def _notice_plan_total_counts(now) -> dict:
     }
 
 
+def _notice_plan_total_counts(now) -> dict:
+    due_rows = _notice_group_rows_for_scope(now, future=False)
+    future_rows = _notice_group_rows_for_scope(now, future=True)
+    return _notice_plan_total_counts_from_rows(due_rows, future_rows)
+
+
 # 功能：提供 后台 API 接口 的内部辅助逻辑，供同模块流程复用。
 def _build_notice_plan_summary(*, limit=10, offset=0, history_limit=10, history_offset=0, fields: set[str] | None = None, include_total_counts: bool = True):
     now = timezone.now()
     fields = fields or {'basic', 'channels', 'ips', 'retry', 'text'}
     latest_logs = _notice_latest_log_map()
     account_attempts = _planned_notice_account_attempts() if 'channels' in fields else []
-    active_user_summary_items, active_user_total = _notice_group_summary_page(
-        now,
+    due_rows = _notice_group_rows_for_scope(now, future=False)
+    future_rows = _notice_group_rows_for_scope(now, future=True)
+    active_user_summary_items, active_user_total = _notice_group_summary_page_from_rows(
+        due_rows,
+        future_rows,
+        now=now,
         limit=limit,
         offset=offset,
         fields=fields,
         latest_logs=latest_logs,
         account_attempts=account_attempts,
-        scope='active',
     )
     history_qs = CloudUserNoticeLog.objects.select_related('order', 'user').filter(event_type__in=list(_NOTICE_HISTORY_LABELS)).order_by('-created_at', '-id')
     history_rows = _notice_history_group_items(history_qs[history_offset:history_offset + history_limit], account_attempts=account_attempts)
@@ -1530,7 +1554,7 @@ def _build_notice_plan_summary(*, limit=10, offset=0, history_limit=10, history_
         'history_count': history_qs.count(),
     }
     if include_total_counts:
-        result['total_counts'] = _notice_plan_total_counts(now)
+        result['total_counts'] = _notice_plan_total_counts_from_rows(due_rows, future_rows)
     return result
 
 

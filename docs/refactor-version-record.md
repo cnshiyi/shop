@@ -17512,3 +17512,48 @@ git diff --check
 - 继续补机器人多任务高并发真机点击压测。
 - 继续补真实生命周期关机、删除、IP 删除开关组合闭环测试。
 - 通知计划 10 万级分页已正确，但 `4.1s/页` 仍是后续优化点。
+
+## 2026-06-08 19:18 CST 通知计划摘要关键字参数回归修复
+
+### 本轮背景
+
+- `TODO.md` 中没有新的未完成显式任务，本轮按固定巡检清单执行只读巡检。
+- 巡检通知计划路径时，发现上一轮 10 万级分页修复附近仍有一处明确运行时风险。
+- 本轮不执行真实云资源、真实支付、链上广播、生产发布或业务数据删除。
+
+### 发现问题
+
+- `cloud/api_tasks.py` 中 `_build_notice_plan_summary()` 调用 `_notice_group_summary_page_from_rows()` 时，把 `now` 当成了第三个位置参数传入。
+- `_notice_group_summary_page_from_rows()` 定义里 `now` 位于 `*` 之后，属于关键字专用参数。
+- 该调用一旦命中真实执行路径，会抛出 `TypeError`，导致通知计划摘要构建失败。
+
+### 修复
+
+- 保持摘要构建只拉取一轮 `due_rows` 和 `future_rows`。
+- 分页和总数统计统一复用同一批分组结果，避免重复扫描。
+- 调用 `_notice_group_summary_page_from_rows()` 时改为 `now=now`。
+- 在 `cloud/tests.py` 中新增 `test_notice_plan_summary_reuses_group_rows_for_counts`，验证：
+  - 摘要构建路径可直接执行。
+  - `due_rows` / `future_rows` 只查询一次。
+  - `due_count`、`future_count`、`active_user_count` 与复用分组结果一致。
+
+### 验证
+
+通过：
+
+```bash
+UV_CACHE_DIR=/private/tmp/uv-cache-shop uv run python manage.py check
+UV_CACHE_DIR=/private/tmp/uv-cache-shop DJANGO_TEST_SQLITE=1 uv run python manage.py test cloud.tests.CloudServerServicesTestCase.test_notice_task_detail_allows_deep_offsets_beyond_100k cloud.tests.CloudServerServicesTestCase.test_notice_plan_summary_reuses_group_rows_for_counts cloud.tests.CloudServerServicesTestCase.test_notice_task_detail_counts_all_future_groups_beyond_loaded_limit cloud.tests.CloudServerServicesTestCase.test_notice_task_detail_deep_group_page_has_no_duplicates --settings=shop.settings --verbosity=1
+UV_CACHE_DIR=/private/tmp/uv-cache-shop uv run python -m py_compile cloud/api_tasks.py cloud/tests.py
+git diff --check
+```
+
+说明：
+
+- SQLite 测试库仍输出既有 `db_comment` / `db_table_comment` 警告，不属于本轮问题。
+- 前端仓库 `/Users/a399/Desktop/data/vue-shop-admin` 本轮 `git status --short` 为空，无需额外 typecheck。
+
+### 风险与后续
+
+- 通知计划摘要路径已恢复可执行，但 10 万级深页耗时仍需后续专项优化。
+- 生命周期总开关、单项开关与任务中心联动仍应继续按自动巡检要求复查。

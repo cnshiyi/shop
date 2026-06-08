@@ -12137,6 +12137,60 @@ class CloudServerServicesTestCase(TestCase):
         self.assertEqual(summary_mock.call_args.kwargs['offset'], 120000)
         self.assertEqual(summary_mock.call_args.kwargs['history_offset'], 130000)
 
+    # 功能：验证通知计划摘要复用同一轮分组结果，避免 10 万级页面重复扫描统计和分页。
+    def test_notice_plan_summary_reuses_group_rows_for_counts(self):
+        from cloud import api_tasks
+
+        due_rows = [{
+            'id': 'due-user:renew_notice:due',
+            'plan_scope': 'due',
+            'plan_scope_label': '近期计划',
+            'user_id': self.user.id,
+            'tg_user_id': self.user.tg_user_id,
+            'user_display_name': 'due-user',
+            'username_label': '-',
+            'notice_type': 'renew_notice',
+            'notice_type_label': '到期提醒',
+            'notice_event': 'renew_notice_batch',
+            'notice_count': 2,
+            'ip_count': 2,
+            'pending_count': 0,
+            'failed_retry_count': 0,
+            'next_notice_at': None,
+            '_next_notice_at_value': timezone.now(),
+        }]
+        future_rows = [{
+            'id': 'future-user:renew_notice:future',
+            'plan_scope': 'future',
+            'plan_scope_label': '未来计划',
+            'user_id': self.user.id,
+            'tg_user_id': self.user.tg_user_id,
+            'user_display_name': 'future-user',
+            'username_label': '-',
+            'notice_type': 'renew_notice',
+            'notice_type_label': '到期提醒',
+            'notice_event': 'renew_notice_batch',
+            'notice_count': 3,
+            'ip_count': 3,
+            'pending_count': 0,
+            'failed_retry_count': 0,
+            'next_notice_at': None,
+            '_next_notice_at_value': timezone.now(),
+        }]
+
+        with patch('cloud.api_tasks._notice_group_rows_for_scope', side_effect=[due_rows, future_rows]) as rows_mock, \
+            patch('cloud.api_tasks._notice_group_summary_from_row', side_effect=lambda row, **kwargs: {key: value for key, value in row.items() if not key.startswith('_')}), \
+            patch('cloud.api_tasks._notice_latest_log_map', return_value={}), \
+            patch('cloud.api_tasks._planned_notice_account_attempts', return_value=[]), \
+            patch.object(api_tasks.CloudUserNoticeLog.objects, 'select_related', return_value=api_tasks.CloudUserNoticeLog.objects.none()):
+            summary = api_tasks._build_notice_plan_summary(limit=10, fields={'basic'})
+
+        self.assertEqual(rows_mock.call_count, 2)
+        self.assertEqual(summary['active_user_total'], 2)
+        self.assertEqual(summary['total_counts']['due_count'], 2)
+        self.assertEqual(summary['total_counts']['future_count'], 3)
+        self.assertEqual(summary['total_counts']['active_user_count'], 2)
+
     # 功能：验证通知计划总数统计全量未来计划，且分页只加载当前页分组。
     def test_notice_task_detail_counts_all_future_groups_beyond_loaded_limit(self):
         now = timezone.now()
