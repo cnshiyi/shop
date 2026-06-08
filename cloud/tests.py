@@ -2514,7 +2514,8 @@ class CloudServerServicesTestCase(TestCase):
             'secret': 'eeeeeeeeeeeeeeee',
         }
 
-        order, error = async_to_sync(prepare_cloud_asset_renewal_with_link)(asset.id, self.user.id, self.plan.id, link)
+        with patch('cloud.services._resolve_unattached_aws_static_ip_name_for_asset', return_value=''):
+            order, error = async_to_sync(prepare_cloud_asset_renewal_with_link)(asset.id, self.user.id, self.plan.id, link)
 
         self.assertIsNone(error)
         self.assertEqual(order.currency, 'USDT')
@@ -2551,7 +2552,8 @@ class CloudServerServicesTestCase(TestCase):
             'secret': 'eeeeeeeeeeeeeeee',
         }
 
-        order, error = async_to_sync(prepare_cloud_asset_renewal_with_link)(asset.id, self.user.id, self.plan.id, link)
+        with patch('cloud.services._resolve_unattached_aws_static_ip_name_for_asset', return_value=''):
+            order, error = async_to_sync(prepare_cloud_asset_renewal_with_link)(asset.id, self.user.id, self.plan.id, link)
 
         self.assertIsNone(order)
         self.assertIn('当前主代理端口是 443', error)
@@ -7158,6 +7160,55 @@ class CloudServerServicesTestCase(TestCase):
         self.assertEqual(order_asset_expiry(paid_order), due_at)
         self.assertEqual(paid_order.ip_recycle_at, due_at)
         self.assertIn('正在恢复未绑定代理资产固定 IP', paid_order.provision_note)
+
+    # 功能：验证运行中的人工同步服务器续费成功后，资产到期事实和关机/删机计划一起后移。
+    def test_active_asset_renewal_wallet_payment_extends_asset_and_lifecycle(self):
+        self.user.balance = Decimal('100.000000')
+        self.user.save(update_fields=['balance', 'updated_at'])
+        due_at = timezone.now() - timezone.timedelta(days=4)
+        account = self._aws_test_account()
+        asset = CloudAsset.objects.create(
+            kind=CloudAsset.KIND_SERVER,
+            source=CloudAsset.SOURCE_AWS_SYNC,
+            user=self.user,
+            provider='aws_lightsail',
+            cloud_account=account,
+            account_label=cloud_account_label(account),
+            region_code=self.plan.region_code,
+            region_name=self.plan.region_name,
+            asset_name='active-renewal-wallet-payment',
+            instance_id='active-renewal-wallet-payment',
+            public_ip='31.31.31.37',
+            previous_public_ip='31.31.31.37',
+            actual_expires_at=due_at,
+            status=CloudAsset.STATUS_RUNNING,
+            provider_status='running',
+            is_active=True,
+        )
+        link = {
+            'url': 'tg://proxy?server=31.31.31.37&port=443&secret=eed5c148e2922f6c49611e7d53fe432a94617a7572652e6d6963726f736f66742e636f6d',
+            'server': '31.31.31.37',
+            'port': '443',
+            'secret': 'eed5c148e2922f6c49611e7d53fe432a94617a7572652e6d6963726f736f66742e636f6d',
+        }
+        with patch('cloud.services._resolve_unattached_aws_static_ip_name_for_asset', return_value=''):
+            order, error = async_to_sync(prepare_cloud_asset_renewal_with_link)(asset.id, self.user.id, self.plan.id, link)
+
+        paid_order, pay_error = async_to_sync(pay_cloud_server_renewal_with_balance)(order.id, self.user.id, 'USDT', 31)
+        asset.refresh_from_db()
+        paid_order.refresh_from_db()
+
+        self.assertIsNone(error)
+        self.assertIsNone(pay_error)
+        self.assertEqual(paid_order.status, 'completed')
+        self.assertEqual(paid_order.pay_method, 'balance')
+        self.assertIsNotNone(paid_order.paid_at)
+        self.assertGreater(asset.actual_expires_at, timezone.now())
+        self.assertEqual(order_asset_expiry(paid_order), asset.actual_expires_at)
+        self.assertGreater(paid_order.suspend_at, timezone.now())
+        self.assertGreaterEqual(paid_order.delete_at, paid_order.suspend_at)
+        self.assertGreater(paid_order.ip_recycle_at, paid_order.delete_at)
+        self.assertIn('运行中资产续费成功', paid_order.provision_note)
 
     # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
     def test_unbound_asset_renewal_wallet_payment_repairs_completed_unpaid_state(self):

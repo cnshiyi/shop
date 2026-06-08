@@ -18687,3 +18687,63 @@ git diff --check
 
 - 继续在当前会话执行连续巡检监工。
 - 下一轮按固定巡检清单领取一个安全可做任务，优先关注生命周期计划展示与执行器 due 队列口径差异、IP 删除计划预览覆盖和机器人真机压测阻塞项。
+
+## 2026-06-08 22:35 CST 运行中同步资产续费钱包支付续期修复
+
+### 本轮背景
+
+- 当前会话继续执行连续巡检监工。
+- 刚才真机测试暴露：运行中的人工同步服务器生成续费单后，如果只进入 `paid` 状态，`CloudAsset.actual_expires_at` 不会延长，计划页仍显示到期关机。
+- 本轮选择续费支付链路作为最小安全修复目标，不执行真实支付、真实云资源操作或生产发布。
+
+### 发现
+
+- 未绑定/人工同步资产续费逻辑把所有资产续费都按“未附加固定 IP 恢复”处理。
+- 对于仍有 `instance_id`、仍 `running/is_active=True` 的同步资产，钱包支付后只会保持 `paid`，不会延长资产到期事实。
+- 巡检时发现未提交修复草稿存在缩进错误，导致 `cloud/services.py` 编译失败。
+
+### 修复
+
+- 新增 `_asset_renewal_active_server_asset()`：
+  - 只接受 `kind=server`；
+  - 排除未附加固定 IP；
+  - 要求存在实例标识；
+  - 要求资产仍有效且不在删除/终止等非活跃状态。
+- 更新 `pay_cloud_server_renewal_with_balance()`：
+  - 钱包支付仍在事务块内完成扣款、订单支付字段和流水记录。
+  - 如果是运行中同步资产续费，则按资产当前到期时间或当前时间顺延续费天数。
+  - 同步更新订单生命周期字段、`last_renewed_at`、通知标记和状态 `completed`。
+  - 同步更新 `CloudAsset.actual_expires_at`、`status=running`、`is_active=True` 和价格。
+  - 记录续费 IP 日志并刷新计划快照。
+  - 非运行中资产仍保留固定 IP 恢复流程，支付后保持 `paid`。
+- 修复缩进错误，确保支付分支、扣款分支和续期分支结构正确。
+
+### 测试
+
+新增回归测试：
+
+- `test_active_asset_renewal_wallet_payment_extends_asset_and_lifecycle`
+
+同时为相邻未绑定资产续费测试补充固定 IP 反查 mock，避免测试访问真实 AWS。
+
+验证命令：
+
+```bash
+UV_CACHE_DIR=/private/tmp/uv-cache-shop uv run python -m py_compile cloud/services.py cloud/tests.py
+UV_CACHE_DIR=/private/tmp/uv-cache-shop uv run python manage.py check
+DJANGO_TEST_SQLITE=1 UV_CACHE_DIR=/private/tmp/uv-cache-shop uv run python manage.py test cloud.tests.CloudServerServicesTestCase.test_unbound_asset_renewal_address_order_forces_usdt_from_trx_source cloud.tests.CloudServerServicesTestCase.test_unbound_asset_renewal_rejects_link_port_override cloud.tests.CloudServerServicesTestCase.test_unbound_asset_renewal_wallet_payment_marks_paid_for_recovery cloud.tests.CloudServerServicesTestCase.test_active_asset_renewal_wallet_payment_extends_asset_and_lifecycle --settings=shop.settings --verbosity=1
+git diff --check
+```
+
+结果：
+
+- 编译通过。
+- `manage.py check` 通过。
+- 4 个续费聚焦测试通过。
+- `git diff --check` 通过。
+- SQLite 测试仍输出既有 `db_comment/db_table_comment` 能力差异告警，不属于本轮问题。
+
+### 后续
+
+- 继续复核地址支付链路的链上确认路径是否也覆盖运行中资产续期。
+- 继续复核计划页 `paid` 展示口径与执行器 due 队列口径差异。
