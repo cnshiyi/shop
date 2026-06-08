@@ -16439,3 +16439,135 @@ git diff --check
 - 继续巡检代理列表分组视图下的用户分组 / 群组分组深分页与真实跳页表现。
 - 继续将机器人返回链和 `callback_data <= 64` 字节限制纳入每轮固定回归。
 - 继续把 `60` 路机器人后台任务并发隔离作为固定回归项。
+## 2026-06-08 16:42 分组视图百万级分页修复与机器人高并发复测
+
+### 背景
+
+本轮继续执行自动优化巡检。用户新增要求机器人测试必须覆盖多任务高并发，同时上一轮真实前端分组视图遗留一个强问题：`代理列表 -> 云资源视图 -> 分组` 真实页面显示 `已展开 0 / 0 组`。
+
+### 发现
+
+真实浏览器打开前端后，分组请求为：
+
+```text
+/api/admin/cloud-assets/?group_by=user&page=1&page_size=20&risk_status=all&show_deleted=0&grouped=1&paginated=1
+```
+
+接口约 10 秒后返回：
+
+```text
+total=0, groups=[], items=[]
+```
+
+进一步在 Django shell 中绕开 API 异常吞噬，确认非 compact 分组分页回落到 `GROUP BY + MIN + ORDER BY` 聚合时触发 MySQL 超时：
+
+```text
+OperationalError (2013, Lost connection to MySQL server during query timed out)
+```
+
+第一次改为有界行分页后，又发现第 `1000` 页虽然取到了 `20` 个唯一快照分组 key，但压测数据的快照 `payload={}`，导致完整 payload 缺少 `id/user/group_key`，分组函数把 20 条数据并成 1 个 `unbound:` 空组。
+
+### 修复
+
+修改：
+
+```text
+/Users/a399/Desktop/data/shop/cloud/api_asset_snapshots.py
+/Users/a399/Desktop/data/shop/cloud/tests.py
+```
+
+改动：
+
+- 非 compact 分组分页和 compact 分组分页统一优先走已有排序索引上的有界行分页。
+- 末页允许走有界反向分页，避免百万级末页回落到超重聚合。
+- 快照 payload 缺失 `id` 时，使用 `CloudAsset` 和快照列补齐最小真实展示字段。
+- 快照 payload 存在但缺少分组 key 时，补齐 `group_user_key`、`group_telegram_key`、用户和群组关联字段。
+- 新增空快照 payload 分组分页回归测试。
+- 扩展非 compact 用户分组第 2 页测试，确认会调用有界行分页 helper。
+
+### 真实 MySQL 复核
+
+后端查询层：
+
+- 用户分组 / 全部 / 第 `1` 页：`20` 组，约 `845ms`。
+- 用户分组 / 全部 / 第 `2` 页：`20` 组，约 `122ms`。
+- 用户分组 / 全部 / 第 `1000` 页：`20` 组，约 `166ms`。
+- 用户分组 / 全部 / 末页：`16` 组，约 `247ms`。
+
+接口直连：
+
+- `total=2489996`
+- `groups_len=20`
+- `items_len=20`
+- `risk_counts.all=2500003`
+
+### 真实前端复核
+
+实际打开：
+
+```text
+http://127.0.0.1:5666/admin/cloud-assets
+```
+
+完成真实点击和跳页：
+
+- 用户分组 / 全部 / 第 `1` 页：`20` 组，分页 `共 2489996 个用户/分组`。
+- 用户分组 / 全部 / 第 `2` 页：`20` 组。
+- 用户分组 / 全部 / 第 `1000` 页：`20` 组。
+- 用户分组 / 未附加固定 IP / 第 `1` 页：`20` 组，分页 `共 100001 个用户/分组`。
+- 用户分组 / 未附加固定 IP / 第 `2` 页：`20` 组。
+- 群组分组 / 未附加固定 IP / 第 `1` 页：`20` 组。
+- 群组分组 / 未附加固定 IP / 第 `2` 页：`20` 组。
+- 群组分组 / 关机计划关闭 / 第 `1000` 页：`20` 组，分页 `共 100369 个用户/分组`。
+
+浏览器分组接口结果：
+
+- 分组接口请求：`9`
+- 非 200 或空表：`0`
+- 业务请求失败：`0`
+
+记录：
+
+- Vite 热更新模块请求出现 `ERR_ABORTED`，属于开发服务器模块切换噪音。
+- Ant Design Vue 仍有一个既有 Typography ellipsis 用法 warning，本轮未改前端代码。
+
+### 机器人高并发
+
+本轮继续覆盖机器人多任务高并发：
+
+- 通知复制并发隔离。
+- 钱包直付 / 钱包补付同时执行。
+- `60` 路批量后台任务隔离。
+
+结果：聚焦测试通过，未发现任务串线、返回链污染或后台任务隔离问题。
+
+### 验证
+
+通过：
+
+```bash
+UV_CACHE_DIR=/private/tmp/uv-cache-shop uv run python manage.py check
+UV_CACHE_DIR=/private/tmp/uv-cache-shop uv run python manage.py makemigrations --check --dry-run
+UV_CACHE_DIR=/private/tmp/uv-cache-shop DJANGO_TEST_SQLITE=1 uv run python manage.py test cloud.tests.CloudServerServicesTestCase.test_cloud_assets_grouped_paginated_uses_twenty_user_groups_per_page cloud.tests.CloudServerServicesTestCase.test_cloud_assets_grouped_page_rebuilds_empty_snapshot_payload_group_keys cloud.tests.CloudServerServicesTestCase.test_cloud_assets_grouped_total_counts_distinct_groups_only cloud.tests.CloudServerServicesTestCase.test_cloud_assets_grouped_duplicate_groups_do_not_repeat_across_pages cloud.tests.CloudServerServicesTestCase.test_cloud_assets_grouped_duplicate_groups_reverse_tail_keeps_last_page bot.tests.TelegramListenerPushTestCase.test_notice_copy_wrapper_keeps_concurrent_user_sends_isolated bot.tests.RetainedIpRenewalUiTestCase.test_cloud_background_tasks_keep_high_concurrency_isolated bot.tests.RetainedIpRenewalUiTestCase.test_cloud_background_tasks_keep_bulk_concurrency_isolated --settings=shop.settings --verbosity=1
+UV_CACHE_DIR=/private/tmp/uv-cache-shop uv run python -m py_compile cloud/api_asset_snapshots.py cloud/tests.py bot/keyboards.py bot/tests.py
+git diff --check
+```
+
+红线扫描通过。命中项为既有测试桩账号字符串、Telegram 登录账号 API 文件名，以及 `CloudServerOrder.ip_recycle_at` 同步记录，不是旧订单到期事实回流。
+
+### 清理
+
+- 已删除前端 `.playwright-cli/` 临时产物。
+- 已删除本轮临时后台登录用户 `codex_group_frontend_probe`。
+- 已删除 `/private/tmp/shop_group_frontend_probe_token.txt`。
+
+### 受限项
+
+- 本轮未执行真实云资源创建、关机、删机、释放 IP、换 IP、真实支付、链上广播、生产发布或删除业务数据。
+- 本轮未打印密钥、Telegram session、TOTP、支付密钥、云厂商密钥或完整代理链接。
+
+### 下一步
+
+- 继续巡检代理列表其他分组标签的深页与末页表现。
+- 继续把机器人返回链、`callback_data <= 64` 字节限制和多任务高并发作为固定回归项。
+- 后续可单独处理 Ant Design Vue Typography ellipsis warning。

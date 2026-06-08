@@ -49,7 +49,7 @@ from cloud.provisioning import (
 from cloud.services import _cloud_asset_deleted_or_missing, apply_cloud_server_renewal, create_cloud_server_order, create_cloud_server_rebuild_order, create_cloud_server_renewal, create_cloud_server_renewal_by_public_query, create_cloud_server_renewal_for_user, create_cloud_server_upgrade_order, ensure_cloud_asset_operation_order, get_cloud_server_by_ip, get_cloud_server_by_ip_for_user, get_group_proxy_asset_detail, get_proxy_asset_by_ip_for_admin, get_proxy_asset_by_ip_for_user, get_user_proxy_asset_detail, is_retained_ip_order_visible_in_group, list_all_auto_renew_cloud_servers, list_cloud_asset_renewal_plans, list_cloud_server_upgrade_plans, list_group_cloud_servers, list_retained_ip_renewal_plans, list_retained_ip_renewal_plans_by_asset, list_user_cloud_servers, mark_cloud_server_ip_change_requested, mark_cloud_server_reinit_requested, pay_cloud_server_order_with_balance, pay_cloud_server_renewal_with_balance, prepare_cloud_asset_renewal_with_link, prepare_retained_ip_renewal_with_link, rebind_cloud_server_user, record_cloud_ip_log, replace_cloud_asset_order_by_admin, run_cloud_server_renewal_postcheck, set_cloud_server_auto_renew_admin, set_group_cloud_server_auto_renew, sync_cloud_asset_user_binding
 from cloud.sync_safety import get_missing_confirmation_threshold
 from cloud.api_asset_edit import delete_cloud_asset, update_cloud_asset
-from cloud.api_asset_snapshots import _dashboard_snapshot_can_use_forward_row_paging, _dashboard_snapshot_ordering, _dashboard_snapshot_risk_counts, backfill_cloud_asset_dashboard_snapshots, refresh_cloud_asset_dashboard_snapshots
+from cloud.api_asset_snapshots import _dashboard_snapshot_can_use_forward_row_paging, _dashboard_snapshot_group_keys_from_ordered_rows, _dashboard_snapshot_ordering, _dashboard_snapshot_risk_counts, backfill_cloud_asset_dashboard_snapshots, refresh_cloud_asset_dashboard_snapshots
 from cloud.api_assets import _asset_payload, _display_cloud_asset_note, _infer_asset_order, cloud_assets_list
 from cloud.api_monitors import _fetch_address_chain_balances
 from cloud.api_orders import _cloud_order_source_tags, cloud_order_detail, cloud_orders_list, delete_cloud_order, update_cloud_order_status
@@ -3093,8 +3093,13 @@ class CloudServerServicesTestCase(TestCase):
 
         page2 = self.factory.get('/api/admin/cloud-assets/', {'grouped': '1', 'paginated': '1', 'group_by': 'user', 'page': '2', 'page_size': '20'})
         self._attach_bearer_session(page2, admin)
-        response2 = cloud_assets_list(page2)
+        with patch(
+            'cloud.api_asset_snapshots._dashboard_snapshot_group_keys_from_ordered_rows',
+            wraps=_dashboard_snapshot_group_keys_from_ordered_rows,
+        ) as row_paging:
+            response2 = cloud_assets_list(page2)
         payload2 = json.loads(response2.content.decode('utf-8'))['data']
+        self.assertGreaterEqual(row_paging.call_count, 1)
         self.assertEqual(len(payload2['groups']), 2)
         self.assertEqual(len(payload2['items']), 2)
 
@@ -3140,6 +3145,53 @@ class CloudServerServicesTestCase(TestCase):
         self.assertEqual(len(payload['groups']), 1)
         self.assertEqual(payload['groups'][0]['username_label'], '-')
         self.assertEqual([item['id'] for item in payload['items']], [asset.id])
+
+    # 功能：快照 payload 为空时，分组分页仍要从快照列和资产表补齐真实分组字段，避免前端并成 1 个空组。
+    def test_cloud_assets_grouped_page_rebuilds_empty_snapshot_payload_group_keys(self):
+        cache.clear()
+        admin = get_user_model().objects.create_user(username='admin_asset_grouped_empty_payload', password='x', is_staff=True)
+        users = [
+            TelegramUser.objects.create(tg_user_id=992610 + index, username=f'empty_payload_user_{index}')
+            for index in range(3)
+        ]
+        assets = [
+            CloudAsset.objects.create(
+                kind=CloudAsset.KIND_SERVER,
+                source=CloudAsset.SOURCE_AWS_SYNC,
+                user=user,
+                provider='aws_lightsail',
+                region_code=self.plan.region_code,
+                region_name=self.plan.region_name,
+                asset_name=f'empty-payload-group-{index}',
+                public_ip=f'10.79.9.{index}',
+                status=CloudAsset.STATUS_RUNNING,
+                actual_expires_at=timezone.now() + timezone.timedelta(days=index + 1),
+            )
+            for index, user in enumerate(users)
+        ]
+        refresh_cloud_asset_dashboard_snapshots(asset_ids=[asset.id for asset in assets], reason='test', full=False)
+        CloudAssetDashboardSnapshot.objects.filter(asset_id__in=[asset.id for asset in assets]).update(payload={})
+
+        request = self.factory.get('/api/admin/cloud-assets/', {
+            'grouped': '1',
+            'paginated': '1',
+            'group_by': 'user',
+            'page': '1',
+            'page_size': '2',
+        })
+        self._attach_bearer_session(request, admin)
+        response = cloud_assets_list(request)
+        payload = json.loads(response.content.decode('utf-8'))['data']
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(payload['total'], 3)
+        self.assertEqual(len(payload['groups']), 2)
+        self.assertEqual(len(payload['items']), 2)
+        self.assertEqual(
+            {group['user_key'] for group in payload['groups']},
+            {f'user:{users[0].id}', f'user:{users[1].id}'},
+        )
+        self.assertEqual({item['id'] for item in payload['items']}, {assets[0].id, assets[1].id})
 
     # 功能：验证分组分页总数只按分组键统计，末页反向分页不丢组。
     def test_cloud_assets_grouped_total_counts_distinct_groups_only(self):
