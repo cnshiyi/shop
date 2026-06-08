@@ -7,7 +7,7 @@ from datetime import datetime, timezone as datetime_timezone
 
 from django.core.cache import cache
 from django.db import close_old_connections
-from django.db.models import F, Min, Q
+from django.db.models import Count, F, Min, Q
 from django.utils import timezone
 from django.utils.dateparse import parse_datetime
 
@@ -468,15 +468,14 @@ def _dashboard_snapshot_risk_counts(queryset) -> dict:
         cached = cache.get(cache_key)
         if isinstance(cached, dict):
             return {key: int(value or 0) for key, value in cached.items()}
-    result = {
-        'all': int(queryset.count() or 0),
-    }
+    aggregate_kwargs = {'all': Count('pk')}
     for status, field in _DASHBOARD_RISK_FLAGS.items():
-        if status == 'account_disabled':
-            count_queryset = queryset.filter(**{field: True})
-        else:
-            count_queryset = queryset.filter(risk_account_disabled=False, **{field: True})
-        result[status] = int(count_queryset.count() or 0)
+        condition = Q(**{field: True})
+        if status != 'account_disabled':
+            condition &= Q(risk_account_disabled=False)
+        aggregate_kwargs[status] = Count('pk', filter=condition)
+    aggregated = queryset.aggregate(**aggregate_kwargs)
+    result = {key: int(aggregated.get(key) or 0) for key in aggregate_kwargs}
     if cache_key:
         cache.set(cache_key, result, timeout=_SNAPSHOT_COUNTS_CACHE_TTL)
     return result

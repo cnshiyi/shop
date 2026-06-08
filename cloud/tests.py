@@ -1610,6 +1610,78 @@ class CloudServerServicesTestCase(TestCase):
         self.assertEqual(payload['risk_counts']['all'], 2)
         self.assertEqual(payload['risk_counts']['account_disabled'], 2)
 
+    # 功能：风险计数聚合必须保持云账号异常与其他标签的口径一致，避免优化后首屏统计失真。
+    def test_cloud_assets_list_risk_counts_keep_disabled_account_isolated(self):
+        active_account = CloudAccountConfig.objects.create(
+            provider=CloudAccountConfig.PROVIDER_AWS,
+            name='snapshot-risk-counts-active',
+            region_hint=self.plan.region_code,
+            is_active=True,
+        )
+        disabled_account = CloudAccountConfig.objects.create(
+            provider=CloudAccountConfig.PROVIDER_AWS,
+            name='snapshot-risk-counts-disabled',
+            region_hint=self.plan.region_code,
+            is_active=False,
+        )
+        active_label = cloud_account_label(active_account)
+        disabled_label = cloud_account_label(disabled_account)
+        CloudAsset.objects.create(
+            kind=CloudAsset.KIND_SERVER,
+            source=CloudAsset.SOURCE_AWS_SYNC,
+            user=self.user,
+            provider='aws_lightsail',
+            cloud_account=active_account,
+            account_label=active_label,
+            region_code=self.plan.region_code,
+            region_name=self.plan.region_name,
+            asset_name='snapshot-risk-counts-normal',
+            public_ip='10.77.89.10',
+            status=CloudAsset.STATUS_RUNNING,
+            actual_expires_at=timezone.now() + timezone.timedelta(days=30),
+        )
+        CloudAsset.objects.create(
+            kind=CloudAsset.KIND_SERVER,
+            source=CloudAsset.SOURCE_AWS_SYNC,
+            user=self.user,
+            provider='aws_lightsail',
+            cloud_account=active_account,
+            account_label=active_label,
+            region_code=self.plan.region_code,
+            region_name=self.plan.region_name,
+            asset_name='snapshot-risk-counts-expired',
+            public_ip='10.77.89.11',
+            status=CloudAsset.STATUS_RUNNING,
+            actual_expires_at=timezone.now() - timezone.timedelta(days=1),
+        )
+        CloudAsset.objects.create(
+            kind=CloudAsset.KIND_SERVER,
+            source=CloudAsset.SOURCE_AWS_SYNC,
+            user=self.user,
+            provider='aws_lightsail',
+            cloud_account=disabled_account,
+            account_label=disabled_label,
+            region_code=self.plan.region_code,
+            region_name=self.plan.region_name,
+            asset_name='snapshot-risk-counts-disabled',
+            public_ip='10.77.89.12',
+            status=CloudAsset.STATUS_RUNNING,
+            actual_expires_at=timezone.now() + timezone.timedelta(days=30),
+        )
+        refresh_cloud_asset_dashboard_snapshots(reason='test', full=True)
+
+        admin = get_user_model().objects.create_user(username='snapshot_risk_counts_admin', password='x', is_staff=True)
+        request = self.factory.get('/api/admin/cloud-assets/', {'paginated': '1'})
+        self._attach_bearer_session(request, admin)
+        response = cloud_assets_list(request)
+        payload = json.loads(response.content.decode('utf-8'))['data']
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(payload['risk_counts']['all'], 3)
+        self.assertEqual(payload['risk_counts']['normal'], 1)
+        self.assertEqual(payload['risk_counts']['expired'], 1)
+        self.assertEqual(payload['risk_counts']['account_disabled'], 1)
+
     # 功能：缺失的代理列表快照必须能被分批补齐，避免百万压测资产成为不可见孤儿资产。
     def test_cloud_asset_dashboard_snapshot_backfill_materializes_missing_assets(self):
         assets = []

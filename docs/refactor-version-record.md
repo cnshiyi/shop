@@ -15327,3 +15327,85 @@ rg -n "service_expires_at|actual_expires_at.*CloudServerOrder|CloudServerOrder.*
 
 - 优先优化代理列表 `account_disabled` 标签，目标把第 `1` 页和深页稳定降到 `2s` 内，同时保持数据库精确对账。
 - 继续巡检分组视图深页跳页，确认海量用户/群组分组下无重复、无丢组。
+
+## 2026-06-08 14:16 代理列表风险计数聚合优化
+
+### 背景
+
+继续执行自动监工固定巡检。由于 `TODO.md` 中显式任务已全部完成，本轮按控制台“下一轮优先事项”继续处理代理列表 `account_disabled` 慢路径，只做一个最小安全修复。
+
+### 定位
+
+排查代理列表后端实现时发现，`cloud_assets_list()` 在每次请求中都会调用 `_dashboard_snapshot_risk_counts()`，而该函数会对每个风险标签分别执行一次 `count()`。
+
+这意味着一次代理列表加载除了分页本体外，还会额外触发整套快照表计数。对 `account_disabled` 这类百万级标签，首屏慢点很可能不只在分页，还包含重复风险统计的放大成本。
+
+### 修复
+
+修改文件：
+
+```text
+/Users/a399/Desktop/data/shop/cloud/api_asset_snapshots.py
+```
+
+改动：
+
+- 为 `_dashboard_snapshot_risk_counts()` 引入 `Count` 聚合。
+- 将原先按标签逐个 `queryset.filter(...).count()` 的实现改为单次 `queryset.aggregate(...)`。
+- 保持现有业务口径不变：
+  - `account_disabled` 统计所有云账号异常资产。
+  - 其他标签继续附带 `risk_account_disabled=False`，避免异常账号同时混入正常/即将到期/已过期等分类计数。
+
+### 回归测试
+
+修改文件：
+
+```text
+/Users/a399/Desktop/data/shop/cloud/tests.py
+```
+
+新增测试：
+
+- `test_cloud_assets_list_risk_counts_keep_disabled_account_isolated`
+
+覆盖场景：
+
+- 活跃账号正常资产 1 条。
+- 活跃账号过期资产 1 条。
+- 停用账号运行中资产 1 条。
+
+断言：
+
+- `risk_counts['all'] == 3`
+- `risk_counts['normal'] == 1`
+- `risk_counts['expired'] == 1`
+- `risk_counts['account_disabled'] == 1`
+
+同时保留原有测试 `test_cloud_assets_list_all_includes_disabled_or_missing_cloud_account_assets`，继续校验云账号异常资产不会从默认全部列表消失。
+
+### 验证
+
+通过：
+
+```bash
+UV_CACHE_DIR=/private/tmp/uv-cache-shop uv run python manage.py check
+UV_CACHE_DIR=/private/tmp/uv-cache-shop DJANGO_TEST_SQLITE=1 uv run python manage.py test cloud.tests.CloudServerServicesTestCase.test_cloud_assets_list_all_includes_disabled_or_missing_cloud_account_assets cloud.tests.CloudServerServicesTestCase.test_cloud_assets_list_risk_counts_keep_disabled_account_isolated --settings=shop.settings --verbosity=1
+git diff --check
+```
+
+结果：
+
+- Django 基础检查通过。
+- 两条聚焦测试通过。
+- SQLite 仍有 `db_comment` warnings，属于既有测试噪声，不是本轮回归失败。
+
+### 受限项
+
+- 本轮未执行真实云资源创建、关机、删机、释放 IP、换 IP、真实支付、链上广播、生产发布或删除业务数据。
+- 本轮未打印密钥、Telegram session、支付密钥、云厂商密钥或完整代理链接到仓库文件。
+- 本轮尝试通过 `manage.py shell` 对真实 MySQL 做 `account_disabled` 计数/分页耗时对账，但当前沙箱禁止连接 `127.0.0.1`，返回 `Operation not permitted`，所以未能完成真实库复测。
+
+### 下一步
+
+- 在允许访问真实 MySQL 的环境复测 `account_disabled` 标签第 `1` 页、第 `1000` 页和末页，确认单次聚合是否已明显降低首屏耗时。
+- 若真实页仍慢，继续拆分页查询本体和索引命中，不做兼容层补丁。
