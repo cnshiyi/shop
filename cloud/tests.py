@@ -2,6 +2,7 @@ import asyncio
 import json
 import os
 import sys
+from io import StringIO
 from decimal import Decimal
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
@@ -12586,7 +12587,14 @@ class CloudServerServicesTestCase(TestCase):
         )
         self._create_auto_renew_asset(order, expires_at=expires_at)
 
-        call_command('refresh_notice_plans', limit=20, history_limit=20)
+        stdout = StringIO()
+        call_command('refresh_notice_plans', limit=20, history_limit=20, stdout=stdout)
+        output = stdout.getvalue()
+        self.assertIn('任务=到期提醒', output)
+        self.assertIn(f'地区={self.plan.region_name}', output)
+        self.assertIn('实例/资源名=', output)
+        self.assertIn('IP=7.7.7.62', output)
+        self.assertIn(f'订单ID={order.id}', output)
 
         staff_user = get_user_model().objects.create_user(username='staff_cmd_notice_plan', password='x', is_staff=True)
         request = self.factory.get('/api/admin/tasks/notices/', {'limit': 20, 'history_limit': 20})

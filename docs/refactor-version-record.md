@@ -19628,3 +19628,82 @@ git diff --check
 - 前端 `vue-tsc` 类型检查通过。
 - `git diff --check` 通过。
 - SQLite 聚焦测试仍输出既有 `db_comment/db_table_comment` 能力差异告警，不属于本轮问题。
+
+## 2026-06-09 06:13 CST 修复用户列表分页并统一日志格式
+
+### 本轮背景
+
+- 用户反馈后台用户列表翻页数量不对，日志太乱，要求日志能看懂哪个账号触发了哪个任务、地区、实例名、IP、状态。
+- 用户明确要求不要摘要，要完整列表，并补充通知日志和计划日志也要统一格式化。
+- 本轮不执行真实支付、链上广播、真实云资源创建/删除、生产发布或删除数据。
+
+### 修复
+
+- `bot/api_users.py`
+  - 用户列表接口改为服务端分页结构，返回 `items/page/page_size/total/total_pages/loaded`。
+  - 搜索结果不再固定截断前 50 条，前端分页总数使用真实 `total`。
+- `/Users/a399/Desktop/data/vue-shop-admin/apps/web-antd/src/api/admin.ts`
+  - 用户列表 API 类型改为分页响应。
+- `/Users/a399/Desktop/data/vue-shop-admin/apps/web-antd/src/views/dashboard/users/index.vue`
+  - 表格分页改为受控分页。
+  - 搜索和重置回第一页，删除当前页最后一条时自动回退页码。
+- `cloud/management/commands/sync_aws_assets.py`
+  - AWS 同步日志按分区逐条输出，不再只显示前 20 条。
+  - 每条日志统一包含账号、任务、地区、类型、实例/资源名、IP、状态、结果、资产 ID、订单。
+- `bot/api.py`
+  - 生命周期计划的原始备注默认不再截断，前端展示字段仍使用 `display_note` 折叠。
+  - 生命周期计划数据补充账号、地区字段，历史和计划日志能读取资产/订单/日志来源。
+- `cloud/management/commands/refresh_lifecycle_plans.py`
+  - 关机计划、删机计划、服务器删除历史、IP 删除计划、IP 删除历史统一逐条输出。
+  - 每条计划日志包含任务、账号、地区、实例/资源名、IP、计划时间、状态、结果、资产 ID、订单。
+  - 对备注里的 `账号=...`、`地区=...` 做只读兜底解析，避免历史数据字段为空时日志显示不完整。
+- `cloud/api_tasks.py`
+  - 通知计划增加内部 `full` 明细模式，命令可拿到每个订单/IP 的账号、地区、实例名、状态。
+  - 通知历史补充订单侧账号、地区、实例名、订单状态字段。
+- `cloud/management/commands/refresh_notice_plans.py`
+  - 通知计划和通知历史统一逐条输出。
+  - 每条日志包含任务、账号、地区、用户、用户名、实例/资源名、IP、计划时间、状态、结果、订单 ID。
+- `cloud/tests.py`
+  - 通知计划命令测试增加日志格式断言，防止后续退回摘要输出。
+
+### 结论
+
+- 后台用户列表分页总数不再固定成前 50 条。
+- AWS 同步、生命周期计划、通知计划和通知历史的命令日志都改为人能读懂的逐条格式。
+- 命令侧不再使用前端折叠预览文本，长备注会完整输出。
+
+### 验证
+
+通过：
+
+```bash
+uv run python -m py_compile bot/api.py bot/api_users.py bot/tests.py cloud/api_tasks.py cloud/management/commands/sync_aws_assets.py cloud/management/commands/refresh_lifecycle_plans.py cloud/management/commands/refresh_notice_plans.py
+uv run python manage.py check
+DJANGO_TEST_SQLITE=1 uv run python manage.py test bot.tests.DashboardCloudAccountVerifyTestCase.test_user_proxy_count_follows_cloud_account_active_state bot.tests.DashboardCloudAccountVerifyTestCase.test_users_list_uses_server_pagination_total_and_distinct_pages --settings=shop.settings --verbosity=1
+DJANGO_TEST_SQLITE=1 uv run python manage.py test cloud.tests.CloudServerServicesTestCase.test_refresh_notice_plans_command_builds_notice_plan_view cloud.tests.CloudServerServicesTestCase.test_notice_plan_summary_reuses_group_rows_for_counts cloud.tests.CloudServerServicesTestCase.test_notice_task_detail_deep_group_page_has_no_duplicates --settings=shop.settings --verbosity=1
+uv run python manage.py refresh_lifecycle_plans --limit 2 --page-size 2
+uv run python manage.py refresh_notice_plans --limit 2 --history-limit 2
+pnpm --filter @vben/web-antd typecheck
+git diff --check
+```
+
+结果：
+
+- Django 系统检查通过。
+- 后端相关文件编译通过。
+- 用户列表分页聚焦测试通过。
+- 通知计划命令、通知统计复用和通知深分页聚焦测试通过。
+- 生命周期计划命令和通知计划命令实跑通过。
+- 前端 `vue-tsc` 类型检查通过。
+- 后端和前端 `git diff --check` 通过。
+- SQLite 聚焦测试仍输出既有 `db_comment/db_table_comment` 能力差异告警，不属于本轮问题。
+
+### 页面验证
+
+- 已用 Playwright 打开 `http://127.0.0.1:5676/admin/users`。
+- 当前浏览器登录态已失效，页面跳转到登录页并要求 Google 动态验证码，因此未绕过登录做分页点击验证。
+- 登录页控制台只有 Vite HMR WebSocket fallback 和密码框不在 form 内的浏览器提示，未见本轮用户列表代码导致的业务错误。
+
+### 剩余风险
+
+- 用户列表后端为保持代理数优先排序，仍会先计算当前搜索结果的全部用户代理数；如果用户数量继续扩大，下一轮应把代理数排序下沉到数据库聚合分页。

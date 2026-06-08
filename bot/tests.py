@@ -911,15 +911,44 @@ class DashboardCloudAccountVerifyTestCase(TestCase):
         request = RequestFactory().get('/api/admin/users/', {'keyword': str(user.tg_user_id)})
         request.user = root
         payload = json.loads(users_list(request).content.decode('utf-8'))
-        self.assertEqual(payload['data'][0]['proxy_count'], 1)
-        self.assertEqual(payload['data'][0]['username_label'], '@alpha｜@beta')
+        self.assertEqual(payload['data']['items'][0]['proxy_count'], 1)
+        self.assertEqual(payload['data']['items'][0]['username_label'], '@alpha｜@beta')
 
         account.is_active = False
         account.save(update_fields=['is_active'])
 
         self.assertEqual(_active_proxy_counts_by_user([user.id]).get(user.id, 0), 0)
         payload = json.loads(users_list(request).content.decode('utf-8'))
-        self.assertEqual(payload['data'][0]['proxy_count'], 0)
+        self.assertEqual(payload['data']['items'][0]['proxy_count'], 0)
+
+    def test_users_list_uses_server_pagination_total_and_distinct_pages(self):
+        root = get_user_model().objects.create_user(username='root_users_page', password='pass', is_staff=True, is_superuser=True)
+        for index in range(13):
+            TelegramUser.objects.create(
+                tg_user_id=910000 + index,
+                username=f'page_user_{index:02d}',
+                first_name=f'分页用户{index:02d}',
+            )
+
+        page1 = RequestFactory().get('/api/admin/users/', {'keyword': 'page_user_', 'page': '1', 'page_size': '5'})
+        page1.user = root
+        payload1 = json.loads(users_list(page1).content.decode('utf-8'))['data']
+        page2 = RequestFactory().get('/api/admin/users/', {'keyword': 'page_user_', 'page': '2', 'page_size': '5'})
+        page2.user = root
+        payload2 = json.loads(users_list(page2).content.decode('utf-8'))['data']
+
+        self.assertEqual(payload1['page'], 1)
+        self.assertEqual(payload1['page_size'], 5)
+        self.assertEqual(payload1['total'], 13)
+        self.assertEqual(payload1['total_pages'], 3)
+        self.assertEqual(payload1['loaded'], 5)
+        self.assertEqual(payload2['page'], 2)
+        self.assertEqual(payload2['loaded'], 5)
+        page1_ids = {item['id'] for item in payload1['items']}
+        page2_ids = {item['id'] for item in payload2['items']}
+        self.assertEqual(len(page1_ids), 5)
+        self.assertEqual(len(page2_ids), 5)
+        self.assertFalse(page1_ids & page2_ids)
 
     # 功能：验证后台用户余额编辑接口一次性保存余额和折扣，避免前端多接口半成功。
     def test_update_user_balance_can_atomically_save_discount(self):

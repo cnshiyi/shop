@@ -910,6 +910,7 @@ def _notice_history_group_items(logs, account_attempts: list[dict] | None = None
 # 功能：提供 后台 API 接口 的内部辅助逻辑，供同模块流程复用。
 def _notice_task_history_item_payload(log, *, account_attempts: list[dict] | None = None):
     delivered = _notice_effective_delivered(log)
+    order = getattr(log, 'order', None)
     return {
         'id': log.id,
         'log_id': log.id,
@@ -927,6 +928,13 @@ def _notice_task_history_item_payload(log, *, account_attempts: list[dict] | Non
         'notice_status': 'sent' if delivered else 'failed_retry',
         'notice_status_label': '已通知' if delivered else '通知失败，待重试',
         'result_label': (_notice_attempts_label(log) or '已送达') if delivered else (_notice_attempts_label(log) or '未送达，后续巡检重试'),
+        'account_label': getattr(order, 'account_label', '') if order else '',
+        'region_code': getattr(order, 'region_code', '') if order else '',
+        'region_name': getattr(order, 'region_name', '') if order else '',
+        'server_name': getattr(order, 'server_name', '') if order else '',
+        'instance_id': getattr(order, 'instance_id', '') if order else '',
+        'order_status': getattr(order, 'status', '') if order else '',
+        'order_status_label': _status_label(getattr(order, 'status', ''), CloudServerOrder.STATUS_CHOICES) if order else '',
         'target_chat_id': log.target_chat_id,
         **_notice_channel_payload(getattr(log, 'user', None), log, account_attempts),
         'text_preview': log.text_preview or '',
@@ -1411,18 +1419,36 @@ def _notice_group_order_queryset(row: dict, *, now):
 
 def _notice_group_summary_from_row(row: dict, *, now, next_run_at, latest_logs: dict, account_attempts: list[dict] | None, fields: set[str]) -> dict:
     order_rows = []
-    needs_order_rows = bool({'actions', 'ips', 'retry', 'text'} & fields)
+    needs_order_rows = bool({'actions', 'ips', 'retry', 'text', 'full'} & fields)
     if needs_order_rows:
-        order_row_limit = 1000 if {'ips', 'text'} & fields else 1
+        order_row_limit = None if 'full' in fields else (1000 if {'ips', 'text'} & fields else 1)
         qs = _notice_group_order_queryset(row, now=now)
-        order_rows = list(qs.values(
+        order_values = qs.values(
             'order_id',
+            'order__order_no',
+            'order__account_label',
+            'order__region_code',
+            'order__region_name',
+            'order__server_name',
+            'order__instance_id',
+            'order__status',
             'order__public_ip',
             'order__previous_public_ip',
+            'account_label',
+            'asset_name',
+            'instance_id',
+            'region_code',
+            'region_name',
+            'status',
+            'provider_status',
             'public_ip',
-        ).order_by(_notice_source_time_field(row.get('notice_type') or ''), 'order_id')[:order_row_limit])
+        ).order_by(_notice_source_time_field(row.get('notice_type') or ''), 'order_id')
+        if order_row_limit:
+            order_values = order_values[:order_row_limit]
+        order_rows = list(order_values)
     order_ids = []
     ips = []
+    order_items = []
     for item in order_rows:
         order_id = item.get('order_id')
         if order_id and order_id not in order_ids:
@@ -1430,6 +1456,24 @@ def _notice_group_summary_from_row(row: dict, *, now, next_run_at, latest_logs: 
         ip = item.get('order__public_ip') or item.get('public_ip') or item.get('order__previous_public_ip') or '-'
         if ip not in ips:
             ips.append(ip)
+        if 'full' in fields:
+            asset_status = item.get('status') or ''
+            order_status = item.get('order__status') or ''
+            order_items.append({
+                'order_id': order_id,
+                'order_no': item.get('order__order_no') or '',
+                'account_label': item.get('account_label') or item.get('order__account_label') or '',
+                'region_code': item.get('region_code') or item.get('order__region_code') or '',
+                'region_name': item.get('region_name') or item.get('order__region_name') or '',
+                'asset_name': item.get('asset_name') or item.get('order__server_name') or item.get('instance_id') or item.get('order__instance_id') or '',
+                'instance_id': item.get('instance_id') or item.get('order__instance_id') or '',
+                'ip': ip,
+                'asset_status': asset_status,
+                'asset_status_label': _status_label(asset_status, CloudAsset.STATUS_CHOICES),
+                'provider_status': item.get('provider_status') or '',
+                'order_status': order_status,
+                'order_status_label': _status_label(order_status, CloudServerOrder.STATUS_CHOICES),
+            })
     first_order_id = order_ids[0] if order_ids else None
     user = None
     if row.get('user_id'):
@@ -1465,6 +1509,8 @@ def _notice_group_summary_from_row(row: dict, *, now, next_run_at, latest_logs: 
         payload['ip_count'] = int(batch_payload.get('count') or payload.get('ip_count') or 0)
     else:
         payload['notice_text_preview'] = f'{payload.get("notice_type_label") or "通知"}：{payload.get("user_display_name") or "未绑定用户"} 共 {payload.get("ip_count") or 0} 个 IP，系统会合并成一条通知发送。'
+    if 'full' in fields:
+        payload['order_items'] = order_items
     payload['notice_count'] = 1
     return payload
 

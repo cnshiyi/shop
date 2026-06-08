@@ -98,6 +98,41 @@ def _fmt_dt(value):
     return value.isoformat() if value else '-'
 
 
+def _clean_log_value(value):
+    text = str(value or '').strip()
+    if not text:
+        return '-'
+    return '；'.join(line.strip() for line in text.splitlines() if line.strip())
+
+
+def _sync_item_line(
+    *,
+    account_label,
+    region,
+    task,
+    resource_type,
+    name,
+    public_ip,
+    status,
+    result,
+    asset_id=None,
+    order_no='',
+):
+    return (
+        f'账号={account_label or "-"}；任务={task}；地区={region or "-"}；类型={resource_type}；'
+        f'实例/资源名={name or "-"}；IP={public_ip or "缺失"}；状态={_clean_log_value(status)}；'
+        f'结果={_clean_log_value(result)}；资产ID={asset_id or "-"}；订单={order_no or "-"}'
+    )
+
+
+def _write_full_sync_section(stdout, title, lines):
+    if not lines:
+        return
+    stdout.write(f'{title}（{len(lines)}）:')
+    for line in lines:
+        stdout.write(f'  - {line}')
+
+
 # 功能：提供 AWS 资产同步 的内部辅助逻辑，供同模块流程复用。
 def _mark_account_error(account, message: str):
     if account:
@@ -592,7 +627,18 @@ def _mark_ip_retained_as_unattached(public_ip, static_ip_name, retained_order, a
             if cleaned_note != trace.note:
                 trace.note = cleaned_note
                 trace.save(update_fields=['note'])
-        updated.append(f'{related.id}:{public_ip}:{related.asset_name}')
+        updated.append(_sync_item_line(
+            account_label=label,
+            region=region,
+            task='未附加IP同步',
+            resource_type='固定IP',
+            name=static_ip_name or related.asset_name,
+            public_ip=public_ip,
+            status=related.provider_status,
+            result='固定IP仍存在但未附加，覆盖旧删除判断',
+            asset_id=related.id,
+            order_no=getattr(retained_order, 'order_no', '') if retained_order else '',
+        ))
     if retained_order:
         retained_order.public_ip = retained_order.public_ip or public_ip
         retained_order.previous_public_ip = retained_order.previous_public_ip or public_ip
@@ -644,7 +690,18 @@ def _mark_deleted_when_missing_in_aws(region, existing_instance_names, existing_
             order=order,
             stdout=stdout,
         )
-        verification_deleted_items.append(f'{asset.id}:{old_public_ip or "缺失"}:{instance_name or asset.asset_name or "-"}')
+        verification_deleted_items.append(_sync_item_line(
+            account_label=cloud_account_label(account) if account else getattr(asset, 'account_label', ''),
+            region=region,
+            task='云端存在性校验',
+            resource_type='实例/固定IP',
+            name=instance_name or asset.asset_name,
+            public_ip=old_public_ip,
+            status=asset.provider_status or asset.status,
+            result='云端未找到，进入删除确认/标记流程',
+            asset_id=asset.id,
+            order_no=getattr(order, 'order_no', '') if order else '',
+        ))
     return verification_deleted_items
 
 
@@ -970,7 +1027,18 @@ class Command(BaseCommand):
                             if claimed_signature and claimed_signature != asset_signature:
                                 occupied_ip = claimed_signature.split('|')[-1]
                                 current_ip = asset_signature.split('|')[-1]
-                                conflict_skipped_items.append(f'{asset.id}:{occupied_ip}->{current_ip}')
+                                conflict_skipped_items.append(_sync_item_line(
+                                    account_label=account_label,
+                                    region=region,
+                                    task='实例同步',
+                                    resource_type='实例',
+                                    name=instance_name or instance_arn,
+                                    public_ip=current_ip,
+                                    status=provider_status,
+                                    result=f'冲突跳过，资产已占IP={occupied_ip}',
+                                    asset_id=asset.id,
+                                    order_no=getattr(order, 'order_no', '') if order else '',
+                                ))
                                 self.stdout.write(
                                     self.style.WARNING(
                                         f'冲突已跳过 资产#{asset.id} 已占IP={occupied_ip} 当前IP={current_ip}'
@@ -991,29 +1059,86 @@ class Command(BaseCommand):
                                 if not getattr(asset, 'user_id', None):
                                     sync_cloud_asset_user_binding(asset, persist=False)
                                 if original_due_at and not rebound_unattached_ip:
-                                    manual_expiry_preserved_items.append(f'{asset.id}:{public_ip or "缺失"}:{instance_name or instance_arn}:{original_due_at}')
+                                    manual_expiry_preserved_items.append(_sync_item_line(
+                                        account_label=account_label,
+                                        region=region,
+                                        task='实例同步',
+                                        resource_type='实例',
+                                        name=instance_name or instance_arn,
+                                        public_ip=public_ip,
+                                        status=f'保留原到期={original_due_at}',
+                                        result='保留手动到期',
+                                        asset_id=asset.id,
+                                        order_no=getattr(order, 'order_no', '') if order else '',
+                                    ))
                                 if normalized_status not in {CloudAsset.STATUS_DELETED, CloudAsset.STATUS_TERMINATED}:
                                     clear_missing_confirmation_state(asset)
                                     cleaned_note = _drop_stale_deleted_note_lines(asset.note)
                                     if cleaned_note != str(asset.note or '').strip():
                                         asset.note = cleaned_note or None
                                 asset.save()
+                                item_line = _sync_item_line(
+                                    account_label=account_label,
+                                    region=region,
+                                    task='实例同步',
+                                    resource_type='实例',
+                                    name=instance_name or instance_arn,
+                                    public_ip=public_ip,
+                                    status=provider_status,
+                                    result='更新资产',
+                                    asset_id=asset.id,
+                                    order_no=getattr(order, 'order_no', '') if order else '',
+                                )
                                 updated_count += 1
                                 account_stats['updated'] += 1
-                                updated_asset_ids.append(f'{asset.id}:{public_ip or "缺失"}:{instance_name or asset.asset_name}')
+                                updated_asset_ids.append(item_line)
                         else:
                             asset = CloudAsset.objects.create(**asset_defaults)
                             sync_cloud_asset_user_binding(asset)
                             claimed_assets[asset.id] = asset_signature
+                            item_line = _sync_item_line(
+                                account_label=account_label,
+                                region=region,
+                                task='实例同步',
+                                resource_type='实例',
+                                name=instance_name or instance_arn,
+                                public_ip=public_ip,
+                                status=provider_status,
+                                result='新增资产',
+                                asset_id=asset.id,
+                                order_no=getattr(order, 'order_no', '') if order else '',
+                            )
                             created_count += 1
                             account_stats['created'] += 1
-                            created_asset_ids.append(f'{asset.id}:{public_ip or "缺失"}:{instance_name or asset.asset_name}')
+                            created_asset_ids.append(item_line)
                         if old_status is not None and old_status != normalized_status:
-                            status_changed_items.append(f'{asset.id}:{public_ip or "缺失"}:{old_status}->{normalized_status}')
+                            status_changed_items.append(_sync_item_line(
+                                account_label=account_label,
+                                region=region,
+                                task='实例同步',
+                                resource_type='实例',
+                                name=instance_name or instance_arn,
+                                public_ip=public_ip,
+                                status=f'{old_status}->{normalized_status}',
+                                result='状态变更',
+                                asset_id=asset.id,
+                                order_no=getattr(order, 'order_no', '') if order else '',
+                            ))
                         if normalized_status == CloudAsset.STATUS_DELETED and not str(public_ip or '').strip():
                             deleted_by_missing_ip_count += 1
                             account_stats['deleted_by_missing_ip'] += 1
-                            deleted_by_missing_ip_items.append(f'{asset.id}:{public_ip or "缺失"}:{instance_name or instance_arn}')
+                            deleted_by_missing_ip_items.append(_sync_item_line(
+                                account_label=account_label,
+                                region=region,
+                                task='实例同步',
+                                resource_type='实例',
+                                name=instance_name or instance_arn,
+                                public_ip=public_ip,
+                                status=provider_status,
+                                result='公网IP缺失，标记删除',
+                                asset_id=asset.id,
+                                order_no=getattr(order, 'order_no', '') if order else '',
+                            ))
 
                         if created_asset_from_sync:
                             record_cloud_ip_log(
@@ -1062,7 +1187,18 @@ class Command(BaseCommand):
                             )
                         region_instance_ids.append(instance_name)
                         synced_instance_ids.append(instance_name)
-                        account_stats['ips'].append(f'{region}:{public_ip or "缺失"}:{instance_name or instance_arn}')
+                        account_stats['ips'].append(_sync_item_line(
+                            account_label=account_label,
+                            region=region,
+                            task='实例同步',
+                            resource_type='实例',
+                            name=instance_name or instance_arn,
+                            public_ip=public_ip,
+                            status=provider_status,
+                            result='已扫描',
+                            asset_id=asset.id,
+                            order_no=getattr(order, 'order_no', '') if order else '',
+                        ))
                         count += 1
                         account_stats['count'] += 1
                     next_page_token = response.get('nextPageToken')
@@ -1109,7 +1245,18 @@ class Command(BaseCommand):
                             f'AWS 同步校正未附加固定 IP 生命周期：实例已提前删除，固定 IP 从发现未附加时间重新计算 {runtime_int_config("cloud_unattached_ip_delete_after_days", 15, minimum=1)} 天；计划释放时间={recycle_due_at.isoformat()}。',
                         )
                         retained_order.save(update_fields=['status', 'ip_recycle_at', 'provision_note', 'updated_at'])
-                        status_changed_items.append(f'{retained_order.id}:{public_ip}:unattached_lifecycle_rebased:{recycle_due_at.isoformat()}')
+                        status_changed_items.append(_sync_item_line(
+                            account_label=account_label,
+                            region=region,
+                            task='未附加IP同步',
+                            resource_type='固定IP',
+                            name=static_ip_name or public_ip,
+                            public_ip=public_ip,
+                            status=f'计划释放={recycle_due_at.isoformat()}',
+                            result='实例提前删除，固定IP生命周期重新计算',
+                            asset_id='-',
+                            order_no=getattr(retained_order, 'order_no', '') if retained_order else '',
+                        ))
                     asset_defaults = {
                         'kind': CloudAsset.KIND_SERVER,
                         'source': CloudAsset.SOURCE_AWS_SYNC,
@@ -1154,7 +1301,18 @@ class Command(BaseCommand):
                         if claimed_signature and claimed_signature != asset_signature:
                             occupied_ip = claimed_signature.split('|')[-1]
                             current_ip = asset_signature.split('|')[-1]
-                            conflict_skipped_items.append(f'{asset.id}:{occupied_ip}->{current_ip}')
+                            conflict_skipped_items.append(_sync_item_line(
+                                account_label=account_label,
+                                region=region,
+                                task='未附加IP同步',
+                                resource_type='固定IP',
+                                name=static_ip_name or static_ip_arn,
+                                public_ip=current_ip,
+                                status=provider_status,
+                                result=f'冲突跳过，资产已占IP={occupied_ip}',
+                                asset_id=asset.id,
+                                order_no=getattr(retained_order, 'order_no', '') if retained_order else '',
+                            ))
                             self.stdout.write(self.style.WARNING(f'冲突已跳过 资产#{asset.id} 已占IP={occupied_ip} 当前IP={current_ip}'))
                         else:
                             claimed_assets[asset.id] = asset_signature
@@ -1166,17 +1324,52 @@ class Command(BaseCommand):
                             due_changed = bool(original_due_at and asset.actual_expires_at and original_due_at != asset.actual_expires_at)
                             asset.save()
                             if due_changed:
-                                manual_expiry_preserved_items.append(f'{asset.id}:{public_ip or "缺失"}:{static_ip_name or static_ip_arn}:{original_due_at}')
+                                manual_expiry_preserved_items.append(_sync_item_line(
+                                    account_label=account_label,
+                                    region=region,
+                                    task='未附加IP同步',
+                                    resource_type='固定IP',
+                                    name=static_ip_name or static_ip_arn,
+                                    public_ip=public_ip,
+                                    status=f'保留原到期={original_due_at}',
+                                    result='保留手动到期',
+                                    asset_id=asset.id,
+                                    order_no=getattr(retained_order, 'order_no', '') if retained_order else '',
+                                ))
+                            item_line = _sync_item_line(
+                                account_label=account_label,
+                                region=region,
+                                task='未附加IP同步',
+                                resource_type='固定IP',
+                                name=static_ip_name or static_ip_arn,
+                                public_ip=public_ip,
+                                status=provider_status,
+                                result='更新资产',
+                                asset_id=asset.id,
+                                order_no=getattr(retained_order, 'order_no', '') if retained_order else '',
+                            )
                             updated_count += 1
                             account_stats['updated'] += 1
-                            updated_asset_ids.append(f'{asset.id}:{public_ip or "缺失"}:{static_ip_name or static_ip_arn}')
+                            updated_asset_ids.append(item_line)
                     else:
                         asset = CloudAsset.objects.create(**asset_defaults)
                         sync_cloud_asset_user_binding(asset)
                         claimed_assets[asset.id] = asset_signature
+                        item_line = _sync_item_line(
+                            account_label=account_label,
+                            region=region,
+                            task='未附加IP同步',
+                            resource_type='固定IP',
+                            name=static_ip_name or static_ip_arn,
+                            public_ip=public_ip,
+                            status=provider_status,
+                            result='新增资产',
+                            asset_id=asset.id,
+                            order_no=getattr(retained_order, 'order_no', '') if retained_order else '',
+                        )
                         created_count += 1
                         account_stats['created'] += 1
-                        created_asset_ids.append(f'{asset.id}:{public_ip or "缺失"}:{static_ip_name or static_ip_arn}')
+                        created_asset_ids.append(item_line)
                     if created_unattached_asset_from_sync:
                         record_cloud_ip_log(
                             event_type='created',
@@ -1235,13 +1428,47 @@ class Command(BaseCommand):
                             duplicate.public_ip = None
                             duplicate.provider_status = '重复未附加固定IP记录'
                             duplicate.save(update_fields=['status', 'is_active', 'previous_public_ip', 'public_ip', 'provider_status', 'updated_at'])
-                            status_changed_items.append(f'{duplicate.id}:{public_ip}:duplicate_static_ip_deleted')
+                            status_changed_items.append(_sync_item_line(
+                                account_label=account_label,
+                                region=region,
+                                task='未附加IP同步',
+                                resource_type='固定IP',
+                                name=duplicate.asset_name,
+                                public_ip=public_ip,
+                                status='重复未附加固定IP记录',
+                                result='重复记录标记删除',
+                                asset_id=duplicate.id,
+                                order_no=getattr(retained_order, 'order_no', '') if retained_order else '',
+                            ))
                     if old_status is not None and old_status != CloudAsset.STATUS_UNKNOWN:
-                        status_changed_items.append(f'{asset.id}:{public_ip or "缺失"}:{old_status}->{CloudAsset.STATUS_UNKNOWN}')
+                        status_changed_items.append(_sync_item_line(
+                            account_label=account_label,
+                            region=region,
+                            task='未附加IP同步',
+                            resource_type='固定IP',
+                            name=static_ip_name or static_ip_arn,
+                            public_ip=public_ip,
+                            status=f'{old_status}->{CloudAsset.STATUS_UNKNOWN}',
+                            result='状态变更',
+                            asset_id=asset.id,
+                            order_no=getattr(retained_order, 'order_no', '') if retained_order else '',
+                        ))
                     unattached_ip_count += 1
                     account_stats['unattached'] += 1
-                    unattached_ip_items.append(f'{asset.id}:{public_ip or "缺失"}:{static_ip_name or static_ip_arn}')
-                    account_stats['ips'].append(f'{region}:{public_ip or "缺失"}:{static_ip_name or static_ip_arn}')
+                    unattached_line = _sync_item_line(
+                        account_label=account_label,
+                        region=region,
+                        task='未附加IP同步',
+                        resource_type='固定IP',
+                        name=static_ip_name or static_ip_arn,
+                        public_ip=public_ip,
+                        status=provider_status,
+                        result='未附加，进入IP删除计划',
+                        asset_id=asset.id,
+                        order_no=getattr(retained_order, 'order_no', '') if retained_order else '',
+                    )
+                    unattached_ip_items.append(unattached_line)
+                    account_stats['ips'].append(unattached_line)
                     count += 1
                     account_stats['count'] += 1
 
@@ -1285,11 +1512,9 @@ class Command(BaseCommand):
                     )
                 synced_instance_ids_by_region.setdefault(region, set()).update(region_instance_ids)
                 synced_public_ips_by_region.setdefault(region, set()).update(region_public_ips)
-            error_text = f"；错误={account_stats['errors'][:5]}" if account_stats['errors'] else ''
-            ip_preview = account_stats['ips'][:20]
-            ip_text = f"{len(account_stats['ips'])} 个，前20={ip_preview}" if account_stats['ips'] else '无'
+            error_text = f"；错误={account_stats['errors']}" if account_stats['errors'] else ''
             account_summary_lines.append(
-                f"账号={account_stats['label'] or account_stats['aws_account']}；凭据来源={account_stats['source']}；AWS账号ID={account_stats['aws_account'] or '-'}；地区={','.join(account_stats['regions']) or '-'}；扫描={account_stats['count']}；新增={account_stats['created']}；更新={account_stats['updated']}；未附加IP={account_stats['unattached']}；缺IP删除={account_stats['deleted_by_missing_ip']}；IP={ip_text}{error_text}"
+                f"账号={account_stats['label'] or account_stats['aws_account']}；凭据来源={account_stats['source']}；AWS账号ID={account_stats['aws_account'] or '-'}；地区={','.join(account_stats['regions']) or '-'}；扫描={account_stats['count']}；新增={account_stats['created']}；更新={account_stats['updated']}；未附加IP={account_stats['unattached']}；缺IP删除={account_stats['deleted_by_missing_ip']}{error_text}"
             )
             if account_stats['count'] or account_stats['created'] or account_stats['updated']:
                 account.mark_status(
@@ -1310,25 +1535,15 @@ class Command(BaseCommand):
         self.stdout.write(self.style.SUCCESS(
             f'AWS 同步汇总：资产总记录 {before_asset_total}->{after_asset_total} 条；当前可见代理 {before_visible_asset_total}->{after_visible_asset_total} 条；扫描实例/未附加IP 共 {count} 条；新增 {created_count} 条，更新 {updated_count} 条；其中未附加IP {unattached_ip_count} 条，因公网IP缺失抬为已删除 {deleted_by_missing_ip_count} 条；覆盖 {len(set(synced_regions))} 个地区/{len(accounts)} 个账号。'
         ))
-        if account_summary_lines:
-            self.stdout.write(f'AWS 按账号同步详情：{" || ".join(account_summary_lines)}')
-        detail_parts = []
-        if created_asset_ids:
-            detail_parts.append(f'新增ID={created_asset_ids[:20]}')
-        if status_changed_items:
-            detail_parts.append(f'状态变更={status_changed_items[:20]}')
-        if deleted_by_missing_ip_items:
-            detail_parts.append(f'缺IP删状态={deleted_by_missing_ip_items[:20]}')
-        if unattached_ip_items:
-            detail_parts.append(f'未附加IP={unattached_ip_items[:20]}')
-        if conflict_skipped_items:
-            detail_parts.append(f'冲突跳过={conflict_skipped_items[:20]}')
-        if manual_expiry_preserved_items:
-            detail_parts.append(f'保留手动到期={manual_expiry_preserved_items[:20]}')
-        if verification_deleted_items:
-            detail_parts.append(f'IP校验删除={verification_deleted_items[:20]}')
-        if detail_parts:
-            self.stdout.write(f'AWS 同步详情：{"；".join(detail_parts)}')
+        _write_full_sync_section(self.stdout, 'AWS 按账号同步详情', account_summary_lines)
+        _write_full_sync_section(self.stdout, 'AWS 新增资产', created_asset_ids)
+        _write_full_sync_section(self.stdout, 'AWS 更新资产', updated_asset_ids)
+        _write_full_sync_section(self.stdout, 'AWS 状态变更', status_changed_items)
+        _write_full_sync_section(self.stdout, 'AWS 缺IP标记删除', deleted_by_missing_ip_items)
+        _write_full_sync_section(self.stdout, 'AWS 未附加IP', unattached_ip_items)
+        _write_full_sync_section(self.stdout, 'AWS 冲突跳过', conflict_skipped_items)
+        _write_full_sync_section(self.stdout, 'AWS 保留手动到期', manual_expiry_preserved_items)
+        _write_full_sync_section(self.stdout, 'AWS IP校验删除', verification_deleted_items)
         self.synced_regions = synced_regions
         self.synced_instance_ids = synced_instance_ids
         self.synced_instance_ids_by_region = synced_instance_ids_by_region
@@ -1341,5 +1556,17 @@ class Command(BaseCommand):
             'deleted_by_missing_ip': deleted_by_missing_ip_count,
             'regions': synced_regions,
         }
-        logger.info('AWS_SYNC_DONE summary=%s errors=%s detail_parts=%s', self.summary, sync_errors, detail_parts)
+        logger.info(
+            'AWS_SYNC_DONE summary=%s errors=%s created=%s updated=%s status_changed=%s deleted_missing_ip=%s unattached=%s conflicts=%s preserved_expiry=%s verification_deleted=%s',
+            self.summary,
+            sync_errors,
+            created_asset_ids,
+            updated_asset_ids,
+            status_changed_items,
+            deleted_by_missing_ip_items,
+            unattached_ip_items,
+            conflict_skipped_items,
+            manual_expiry_preserved_items,
+            verification_deleted_items,
+        )
         return None

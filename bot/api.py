@@ -779,8 +779,8 @@ def _save_lifecycle_plan_note(*, item_type='', note='', order=None, asset=None, 
     return CloudLifecyclePlanNote.objects.create(plan_kind=plan_kind, **create_kwargs)
 
 
-def _cloud_ip_trace_note_newest_first(note):
-    text = _compact_dashboard_note(note, max_chars=1200)
+def _cloud_ip_trace_note_newest_first(note, *, max_chars=0):
+    text = _compact_dashboard_note(note, max_chars=max_chars)
     if not text:
         return ''
     lines = [line.strip() for line in text.splitlines() if line.strip()]
@@ -835,6 +835,9 @@ def _refresh_plan_payload_from_assets(items):
             else:
                 item['execution_plan'] = f'删除服务器 {_fmt_dashboard_dt(delete_at)}' if delete_at else '等待删除时间'
         item['asset_name'] = asset.asset_name
+        item['account_label'] = asset.account_label or item.get('account_label') or ''
+        item['region_code'] = asset.region_code or item.get('region_code') or ''
+        item['region_name'] = asset.region_name or item.get('region_name') or ''
         item['shutdown_enabled'] = _asset_shutdown_enabled(asset)
         item['server_delete_enabled'] = _asset_server_delete_enabled(asset)
         item['ip_delete_enabled'] = _asset_ip_delete_enabled(asset)
@@ -1229,6 +1232,8 @@ def _shutdown_log_items(limit=100):
             'cloud_account_name': account_name,
             'external_account_id': external_account_id,
             'account_label': asset.account_label or (order.account_label if order else '') or '',
+            'region_code': asset.region_code or (order.region_code if order else '') or '',
+            'region_name': asset.region_name or (order.region_name if order else '') or '',
             'status': status,
             'status_label': status_label,
             'deletion_source_label': _delete_source_label(note),
@@ -1274,6 +1279,8 @@ def _shutdown_log_items(limit=100):
             'cloud_account_name': account_name,
             'external_account_id': external_account_id,
             'account_label': getattr(asset, 'account_label', '') or getattr(order, 'account_label', '') or '',
+            'region_code': getattr(asset, 'region_code', '') or getattr(order, 'region_code', '') or trace.region_code or '',
+            'region_name': getattr(asset, 'region_name', '') or getattr(order, 'region_name', '') or '',
             'status': trace.event_type,
             'status_label': _status_label(trace.event_type, CloudIpLog.EVENT_CHOICES),
             'deletion_source_label': _delete_source_label(note),
@@ -2223,6 +2230,9 @@ def _shutdown_history_item_payload(log):
         'ip': log.public_ip or log.previous_public_ip or getattr(order, 'public_ip', '') or getattr(order, 'previous_public_ip', '') or '未分配',
         'provider': log.provider or getattr(order, 'provider', ''),
         'provider_label': _provider_label(log.provider or getattr(order, 'provider', '')),
+        'account_label': getattr(order, 'account_label', '') or log.account_label or '',
+        'region_code': getattr(order, 'region_code', '') or log.region_code or '',
+        'region_name': getattr(order, 'region_name', '') or '',
         'user_id': getattr(user, 'id', None) if user else None,
         'tg_user_id': getattr(user, 'tg_user_id', None) if user else None,
         'user_display_name': user_display_name,
@@ -2259,6 +2269,9 @@ def _shutdown_history_order_payload(order):
         'ip': ip,
         'provider': order.provider,
         'provider_label': _provider_label(order.provider),
+        'account_label': order.account_label or '',
+        'region_code': order.region_code or '',
+        'region_name': order.region_name or '',
         'user_id': order.user_id,
         'tg_user_id': getattr(order.user, 'tg_user_id', None) if order.user else None,
         'user_display_name': user_display_name,
@@ -2301,6 +2314,8 @@ def _shutdown_history_asset_payload(asset):
         'cloud_account_name': account_name,
         'external_account_id': external_account_id,
         'account_label': asset.account_label or '',
+        'region_code': asset.region_code or '',
+        'region_name': asset.region_name or '',
         'user_id': asset.user_id,
         'tg_user_id': getattr(asset.user, 'tg_user_id', None) if asset.user else None,
         'user_display_name': user_display_name,

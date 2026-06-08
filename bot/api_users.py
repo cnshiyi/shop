@@ -40,6 +40,16 @@ from cloud.models import (
 from orders.models import BalanceLedger, CartItem, Order, Recharge
 
 
+def _positive_int_param(request, key: str, default: int, *, minimum: int = 1, maximum: int = 200) -> int:
+    raw = request.GET.get(key, default)
+    try:
+        value = int(raw)
+    except (TypeError, ValueError):
+        value = default
+    value = max(minimum, value)
+    return min(value, maximum)
+
+
 def _record_balance_ledger(user, *, currency, old_balance, new_balance, ledger_type='manual_adjust', related_type=None, related_id=None, description='', operator=None):
     old_balance = Decimal(str(old_balance or 0))
     new_balance = Decimal(str(new_balance or 0))
@@ -91,6 +101,8 @@ def _ledger_payload(ledger):
 @require_GET
 def users_list(request):
     keyword = _get_keyword(request)
+    page = _positive_int_param(request, 'page', 1, maximum=100000)
+    page_size = _positive_int_param(request, 'page_size', 10, maximum=100)
     try:
         queryset = TelegramUser.objects.order_by('-id')
         if keyword and keyword.isdigit():
@@ -104,7 +116,7 @@ def users_list(request):
             )
         else:
             queryset = _apply_keyword_filter(queryset, keyword, ['username', 'first_name'])
-        users = list(queryset.distinct())
+        queryset = queryset.distinct()
     except ProgrammingError:
         queryset = TelegramUser.objects.order_by('-id')
         if keyword and keyword.isdigit():
@@ -114,11 +126,19 @@ def users_list(request):
             )
         else:
             queryset = _apply_keyword_filter(queryset, keyword, ['username', 'first_name'])
-        users = list(queryset.distinct())
-    proxy_counts = _active_proxy_counts_by_user([user.id for user in users])
-    users.sort(key=lambda user: (proxy_counts.get(user.id, 0), user.id), reverse=True)
-    users = users[:50]
-    return _ok([
+        queryset = queryset.distinct()
+    total = queryset.count()
+    user_ids = list(queryset.values_list('id', flat=True))
+    proxy_counts = _active_proxy_counts_by_user(user_ids)
+    sorted_user_ids = sorted(user_ids, key=lambda user_id: (proxy_counts.get(user_id, 0), user_id), reverse=True)
+    offset = (page - 1) * page_size
+    page_user_ids = sorted_user_ids[offset:offset + page_size]
+    user_by_id = {
+        user.id: user
+        for user in TelegramUser.objects.filter(id__in=page_user_ids)
+    }
+    users = [user_by_id[user_id] for user_id in page_user_ids if user_id in user_by_id]
+    items = [
         {
             **_user_payload({
                 'id': user.id,
@@ -139,7 +159,16 @@ def users_list(request):
             'proxy_count': proxy_counts.get(user.id, 0),
         }
         for user in users
-    ])
+    ]
+    total_pages = (total + page_size - 1) // page_size if total else 0
+    return _ok({
+        'items': items,
+        'loaded': len(items),
+        'page': page,
+        'page_size': page_size,
+        'total': total,
+        'total_pages': total_pages,
+    })
 
 
 @csrf_exempt
