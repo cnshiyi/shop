@@ -12105,6 +12105,38 @@ class CloudServerServicesTestCase(TestCase):
         row = next(item for item in data['active_user_summary_items'] if item.get('user_id') == self.user.id)
         self.assertNotIn('notice_text_preview', row)
 
+    # 功能：验证通知计划深分页 offset 不会在 10 万后被静默截断，避免前端跳最后页显示错页。
+    def test_notice_task_detail_allows_deep_offsets_beyond_100k(self):
+        staff_user = get_user_model().objects.create_user(username='staff_notice_deep_offset_limit', password='x', is_staff=True)
+        request = self.factory.get('/api/admin/tasks/notices/', {
+            'compact': '1',
+            'fields': 'basic',
+            'limit': '10',
+            'offset': '120000',
+            'history_limit': '10',
+            'history_offset': '130000',
+        })
+        self._attach_bearer_session(request, staff_user)
+
+        with patch('cloud.api_tasks._build_notice_plan_summary', return_value={
+            'active_user_summary_items': [],
+            'active_user_total': 0,
+            'history_items': [],
+            'history_count': 0,
+            'total_counts': {
+                'due_count': 0,
+                'future_count': 0,
+                'due_user_count': 0,
+                'future_user_count': 0,
+                'active_user_count': 0,
+            },
+        }) as summary_mock:
+            response = notice_task_detail(request)
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(summary_mock.call_args.kwargs['offset'], 120000)
+        self.assertEqual(summary_mock.call_args.kwargs['history_offset'], 130000)
+
     # 功能：验证通知计划总数统计全量未来计划，且分页只加载当前页分组。
     def test_notice_task_detail_counts_all_future_groups_beyond_loaded_limit(self):
         now = timezone.now()

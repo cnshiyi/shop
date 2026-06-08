@@ -17407,3 +17407,108 @@ git diff --check
 - 机器人还没有完成多任务高并发真机点击压测。
 - 真实云资源创建、关机、删机、释放 IP 的生命周期开关矩阵还没有完整闭环。
 - 任务页面 IP 删除计划最后页约 `1.5` 秒仍需继续关注。
+
+## 2026-06-08 19:12 CST 通知计划 10 万级压测与深页截断修复
+
+### 本轮背景
+
+- 继续执行当前会话自动巡检目标。
+- 用户要求通知计划也做 10 万级压测，并真实打开前端确认显示、翻页和数据真实性。
+- 本轮不执行真实支付、链上广播、生产发布或真实云资源破坏性动作。
+
+### 压测设计
+
+- 通知计划页面按“用户 + 通知类型 + 计划范围”分组，不是按资产逐条显示。
+- 本轮注入 `100000` 个临时 Telegram 用户、`100000` 个临时云订单和 `100000` 个临时 `CloudAsset`。
+- 每个临时用户 1 个 completed 订单和 1 个 active server asset，形成一个 `renew_notice/future` 用户通知分组。
+- 临时数据使用专用前缀，清理时只按本轮前缀匹配。
+
+### 压测结果
+
+注入后：
+
+- 近期通知：`3428`
+- 未来通知：`118001`
+- 活跃用户通知分组：`121429`
+
+后端对账页位：
+
+- 第 1 页：`offset=0`
+- 第 2 页：`offset=10`
+- 第 10000 页：`offset=99990`
+- 最后一页：`offset=121419`
+
+发现问题：
+
+- 通知计划接口把 `offset` 和 `history_offset` 最大值限制为 `100000`。
+- 当活跃分组达到 `121429` 后，请求最后页会被静默截断到 `offset=100000` 附近，导致前端跳页显示错页。
+
+修复：
+
+- 在 `cloud/api_tasks.py` 中新增 `NOTICE_PLAN_MAX_OFFSET = 10_000_000`。
+- 通知计划和通知历史 offset 均使用该上限。
+- 新增回归测试 `test_notice_task_detail_allows_deep_offsets_beyond_100k`。
+
+修复后：
+
+- 第 1 页、第 2 页、第 10000 页、最后页均与数据库排序一致。
+- 接口耗时约 `4.1s/页`，后续仍可继续优化查询层。
+
+### 真实前端验证
+
+真实打开：
+
+```text
+http://127.0.0.1:5666/admin/tasks/notices
+```
+
+页面实际触发：
+
+- `offset=0`，`total=121429`，`loaded=10`
+- `offset=10`，`total=121429`，`loaded=10`
+- `offset=99990`，`total=121429`，`loaded=10`
+- `offset=121420`，`total=121429`，`loaded=9`
+
+结果：
+
+- 页面显示 `121429` 组用户通知。
+- 业务 API 失败：`0`。
+- 控制台 error/warning：`0`。
+- request failed：`0`。
+- 截图：`/private/tmp/shop-notice-10w-front-current.png`
+
+### 清理
+
+- 已删除本轮 `100000` 条临时资产。
+- 已删除本轮 `100000` 条临时订单。
+- 已删除本轮 `100000` 条临时 Telegram 用户。
+- 已删除临时后台用户：
+  - `codex_notice_10w_api_probe`
+  - `codex_notice_10w_front_probe`
+- 已删除 `/private/tmp/shop_notice_10w_front_token.txt`。
+
+清理后：
+
+- 近期通知：`3428`
+- 未来通知：`18001`
+- 活跃用户通知分组：`21429`
+- 临时资产、订单、用户残留：`0`
+
+### 验证
+
+通过：
+
+```bash
+UV_CACHE_DIR=/private/tmp/uv-cache-shop uv run python manage.py check
+UV_CACHE_DIR=/private/tmp/uv-cache-shop DJANGO_TEST_SQLITE=1 uv run python manage.py test cloud.tests.CloudServerServicesTestCase.test_notice_task_detail_allows_deep_offsets_beyond_100k cloud.tests.CloudServerServicesTestCase.test_notice_task_detail_counts_all_future_groups_beyond_loaded_limit cloud.tests.CloudServerServicesTestCase.test_notice_task_detail_deep_group_page_has_no_duplicates cloud.tests.CloudServerServicesTestCase.test_notice_task_detail_basic_fields_skip_batch_text_payload --settings=shop.settings --verbosity=1
+UV_CACHE_DIR=/private/tmp/uv-cache-shop uv run python -m py_compile cloud/api_tasks.py cloud/tests.py
+git diff --check
+```
+
+红线扫描通过。命中项为既有测试桩、Telegram 登录账号 API 文件名，以及 `CloudServerOrder.ip_recycle_at` 同步记录，不是旧订单到期事实回流。
+
+### 后续
+
+- 继续补机器人多任务高并发真机点击压测。
+- 继续补真实生命周期关机、删除、IP 删除开关组合闭环测试。
+- 通知计划 10 万级分页已正确，但 `4.1s/页` 仍是后续优化点。

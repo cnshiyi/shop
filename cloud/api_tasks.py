@@ -42,6 +42,8 @@ from core.runtime_config import get_runtime_config
 
 logger = logging.getLogger(__name__)
 
+NOTICE_PLAN_MAX_OFFSET = 10_000_000
+
 
 def _auto_renew_failure_was_price_missing(reason: str | None) -> bool:
     return '缺少续费价格' in str(reason or '') or '缺少价格' in str(reason or '')
@@ -1574,9 +1576,9 @@ def refresh_notice_plan_view(request):
 def notice_task_detail(request):
     now = timezone.now()
     limit = _request_int_param(request, 'limit', 10, maximum=100)
-    offset = _request_int_param(request, 'offset', 0, minimum=0, maximum=100000)
+    offset = _request_int_param(request, 'offset', 0, minimum=0, maximum=NOTICE_PLAN_MAX_OFFSET)
     history_limit = _request_int_param(request, 'history_limit', 10, maximum=100)
-    history_offset = _request_int_param(request, 'history_offset', 0, minimum=0, maximum=100000)
+    history_offset = _request_int_param(request, 'history_offset', 0, minimum=0, maximum=NOTICE_PLAN_MAX_OFFSET)
     compact = str(request.GET.get('compact') or '').strip().lower() in {'1', 'true', 'yes', 'on'}
     fields = _request_notice_fields(request)
 
