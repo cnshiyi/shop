@@ -8710,6 +8710,15 @@ class CloudServerServicesTestCase(TestCase):
         self.assertEqual([name for name in seen if name in expected_names], expected_names)
         self.assertEqual(len(seen), len(set(seen)))
 
+    # 功能：服务器生命周期计划基准查询不得回退到未附加 IP id__in 子查询，避免真实 MySQL 百万数据 count 超时。
+    def test_lifecycle_plan_server_queryset_avoids_unattached_ip_subquery(self):
+        from cloud.lifecycle_plan_queries import server_lifecycle_plan_queryset
+
+        sql = str(server_lifecycle_plan_queryset().query).lower()
+
+        self.assertNotIn(' in (select ', sql)
+        self.assertNotIn(' in ( select ', sql)
+
     # 功能：验证服务器计划页不会按同 IP 折叠旧服务器资产，避免深分页少行和资产不可管理。
     def test_lifecycle_plans_keep_same_ip_orphan_servers_visible_across_pages(self):
         now = timezone.now()

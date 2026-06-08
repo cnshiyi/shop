@@ -124,13 +124,6 @@ def server_shutdown_complete_q():
 
 def server_lifecycle_plan_queryset():
     blank_instance_q = Q(instance_id__isnull=True) | Q(instance_id='')
-    unattached_asset_ids = (
-        CloudAsset.objects
-        .filter(kind=CloudAsset.KIND_SERVER)
-        .filter(blank_instance_q)
-        .filter(unattached_ip_asset_q())
-        .values('id')
-    )
     return (
         CloudAsset.objects.select_related('order', 'user', 'cloud_account', 'order__cloud_account')
         .filter(kind=CloudAsset.KIND_SERVER, actual_expires_at__isnull=False)
@@ -140,7 +133,7 @@ def server_lifecycle_plan_queryset():
             CloudAsset.STATUS_TERMINATED,
             CloudAsset.STATUS_TERMINATING,
         ])
-        .exclude(id__in=unattached_asset_ids)
+        .exclude(blank_instance_q & unattached_ip_asset_q())
     )
 
 
@@ -151,10 +144,40 @@ def server_lifecycle_plan_counts() -> dict[str, int]:
             'shutdown_plan_count': int(cached.get('shutdown_plan_count') or 0),
             'server_delete_count': int(cached.get('server_delete_count') or 0),
         }
-    queryset = server_lifecycle_plan_queryset()
+    blank_instance_q = Q(instance_id__isnull=True) | Q(instance_id='')
+    terminal_statuses = [
+        CloudAsset.STATUS_DELETED,
+        CloudAsset.STATUS_DELETING,
+        CloudAsset.STATUS_TERMINATED,
+        CloudAsset.STATUS_TERMINATING,
+    ]
+    queryset = (
+        CloudAsset.objects
+        .filter(kind=CloudAsset.KIND_SERVER, actual_expires_at__isnull=False)
+        .exclude(status__in=terminal_statuses)
+    )
+    unattached_count = queryset.filter(blank_instance_q & unattached_ip_asset_q()).count()
+    non_unattached = queryset.exclude(blank_instance_q & unattached_ip_asset_q())
+    shutdown_complete_statuses = [
+        CloudAsset.STATUS_STOPPED,
+        CloudAsset.STATUS_SUSPENDED,
+        CloudAsset.STATUS_DELETING,
+        CloudAsset.STATUS_DELETED,
+        CloudAsset.STATUS_TERMINATING,
+        CloudAsset.STATUS_TERMINATED,
+    ]
+    asset_status_delete_count = non_unattached.filter(status__in=shutdown_complete_statuses).count()
+    order_status_delete_count = (
+        non_unattached
+        .exclude(status__in=shutdown_complete_statuses)
+        .filter(order__status__in=['suspended', 'deleting', 'deleted'])
+        .count()
+    )
+    server_delete_count = asset_status_delete_count + order_status_delete_count
+    shutdown_plan_count = max(queryset.count() - unattached_count - server_delete_count, 0)
     counts = {
-        'shutdown_plan_count': queryset.exclude(server_shutdown_complete_q()).count(),
-        'server_delete_count': queryset.filter(server_shutdown_complete_q()).count(),
+        'shutdown_plan_count': shutdown_plan_count,
+        'server_delete_count': server_delete_count,
     }
     cache.set(_LIFECYCLE_PLAN_COUNTS_CACHE_KEY, counts, timeout=_LIFECYCLE_PLAN_COUNTS_CACHE_TTL)
     return counts
