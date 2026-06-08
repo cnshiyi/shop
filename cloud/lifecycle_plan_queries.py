@@ -331,6 +331,12 @@ def unattached_ip_delete_plan_page(
     completed_total: int | None = None,
 ):
     queryset = unattached_ip_delete_active_queryset()
+    start, end = page_bounds(page, page_size)
+    if total is None:
+        total = queryset.count()
+    end = min(end, total)
+    if total <= 0 or start >= end:
+        return []
     if exclude_completed:
         if completed_total is None:
             completed_total = completed_unattached_ip_active_count()
@@ -341,7 +347,96 @@ def unattached_ip_delete_plan_page(
                     queryset = queryset.exclude(id__in=completed_ids)
             else:
                 queryset = queryset.exclude(id__in=completed_unattached_ip_active_queryset().values('id'))
+    if start > max(total // 2, page_size * 100):
+        reverse_start = max(total - end, 0)
+        if reverse_start <= max(page_size * 20, 1000):
+            tail_page = _unattached_ip_delete_tail_page(
+                queryset,
+                reverse_start=reverse_start,
+                count=end - start,
+            )
+            if tail_page is not None:
+                return tail_page
     return paged_queryset(queryset, ordering=('actual_expires_at', 'id'), page=page, page_size=page_size, total=total)
+
+
+def _unattached_ip_delete_tail_page(queryset, *, reverse_start: int, count: int):
+    if count <= 0:
+        return []
+    target = reverse_start + count
+    if target <= 0:
+        return []
+    candidate_sources = [
+        CloudAsset.objects.filter(kind=CloudAsset.KIND_SERVER, instance_id='').order_by('-actual_expires_at', '-id'),
+        CloudAsset.objects.filter(kind=CloudAsset.KIND_SERVER, instance_id__isnull=True).order_by('-actual_expires_at', '-id'),
+    ]
+    source_state = {}
+    heap = []
+    chunk_size = max(target * 4, 500)
+
+    def candidate_sort_key(row):
+        item_id, actual_expires_at = row
+        ts_value = actual_expires_at.timestamp() if actual_expires_at is not None else float('-inf')
+        return (-ts_value, -int(item_id or 0))
+
+    def refill(source_index: int):
+        state = source_state[source_index]
+        if state['buffer'] or state['done']:
+            return
+        start = state['offset']
+        rows = list(state['queryset'].values_list('id', 'actual_expires_at')[start:start + chunk_size])
+        state['offset'] += len(rows)
+        if len(rows) < chunk_size:
+            state['done'] = True
+        state['buffer'] = rows
+        if state['buffer']:
+            row = state['buffer'].pop(0)
+            heapq.heappush(heap, (candidate_sort_key(row), source_index, row))
+
+    for source_index, candidate_qs in enumerate(candidate_sources):
+        source_state[source_index] = {
+            'buffer': [],
+            'done': False,
+            'offset': 0,
+            'queryset': candidate_qs,
+        }
+        refill(source_index)
+
+    collected_ids = []
+    scanned = 0
+    max_scan = max(target * 50, 5000)
+    pending_ids = []
+
+    def flush_pending_ids():
+        if not pending_ids:
+            return
+        active_ids = set(queryset.filter(id__in=pending_ids).values_list('id', flat=True))
+        collected_ids.extend([item_id for item_id in pending_ids if item_id in active_ids])
+        pending_ids.clear()
+
+    while len(collected_ids) < target and scanned < max_scan and heap:
+        _sort_key, source_index, row = heapq.heappop(heap)
+        item_id, _actual_expires_at = row
+        pending_ids.append(item_id)
+        scanned += 1
+        state = source_state[source_index]
+        if state['buffer']:
+            next_row = state['buffer'].pop(0)
+            heapq.heappush(heap, (candidate_sort_key(next_row), source_index, next_row))
+        else:
+            refill(source_index)
+        if len(pending_ids) >= chunk_size:
+            flush_pending_ids()
+    flush_pending_ids()
+    if len(collected_ids) < target:
+        return None
+    selected_ids = collected_ids[reverse_start:reverse_start + count]
+    assets = {asset.id: asset for asset in queryset.filter(id__in=selected_ids)}
+    rows = [assets[item_id] for item_id in selected_ids if item_id in assets]
+    if len(rows) != len(selected_ids):
+        return None
+    rows.reverse()
+    return rows
 
 
 def unattached_ip_delete_history_q():

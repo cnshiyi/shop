@@ -14890,6 +14890,120 @@ rg -n "service_expires_at|actual_expires_at.*CloudServerOrder|CloudServerOrder.*
 - IP 删除计划 50 万末页单表仍约 `7.3s`，需要下一轮继续优化。建议把未附加 IP 判定收敛为可索引字段或进入任务投影表，避免每次依赖多路 `icontains` 过滤。
 - 关机计划深页存在分页后同 IP 去重导致非末页不足 `page_size` 的现象；本轮已修正 `loaded` 契约，下一轮应把去重前移到查询层或任务投影层。
 
+## 2026-06-08 13:39 IP 删除计划末页尾部扫描优化
+
+### 背景
+
+继续执行当前会话 4 小时自动巡检。上一轮已经把计划页改成局部表加载，但遗留一个明确慢点：IP 删除计划 `500000` 条数据下，末页 `10000` 单表仍约 `6.6s` 到 `7.3s`。本轮只处理这个最小可验证问题。
+
+### 定位
+
+真实库复测显示：
+
+- IP 删除计划第 `1` 页 queryset 约 `0.44s`。
+- 第 `1000` 页 queryset 约 `0.51s`。
+- 末页 `10000` queryset 约 `5.99s`。
+- 末页 API 约 `6.61s`。
+
+SQL 形态显示慢点在主查询：
+
+- 条件包含 `instance_id IS NULL OR instance_id=''`。
+- 未附加 IP 判定包含多路 `LIKE '%…%'`。
+- 末页需要按 `actual_expires_at DESC, id DESC` 从尾部取数据。
+- MySQL 难以在这种 OR + LIKE 过滤上同时利用排序索引。
+
+尝试过直接从 `CloudAssetDashboardSnapshot.risk_unattached_ip` 取候选，但快照风险字段和生命周期 IP 删除计划口径不完全一致，尾部候选中有非当前计划资产，因此没有采用。
+
+### 修复
+
+修改 `cloud/lifecycle_plan_queries.py`：
+
+- `unattached_ip_delete_plan_page()` 在尾页场景优先走 `_unattached_ip_delete_tail_page()`。
+- `_unattached_ip_delete_tail_page()`：
+  - 将候选拆成 `instance_id=''` 和 `instance_id IS NULL` 两路。
+  - 两路分别按 `actual_expires_at DESC, id DESC` 分批取候选。
+  - 使用 heap 做有序归并，保持与数据库排序一致。
+  - 每批候选仍用原始 `unattached_ip_delete_active_queryset()` 精确过滤。
+  - 收集到足够尾页数据后再反转回正向页序。
+- 如果候选扫描不足以证明结果完整，会返回 `None` 并回退原始精确分页。
+
+修改 `cloud/tests.py`：
+
+- 新增 `test_unattached_ip_delete_plan_tail_page_keeps_exact_order`。
+- 构造尾部混入非未附加资产的场景，验证尾页候选扫描会跳过噪声并保持与精确查询一致的顺序。
+
+### 真实性对账
+
+使用真实库把优化后的分页结果和原始精确分页逐项对比：
+
+```text
+IP 删除计划分页点：第 1 页、第 2 页、第 1000 页、末页 10000
+结果：4/4 一致
+```
+
+### 性能结果
+
+后端热路径：
+
+- 第 `1` 页 API：约 `0.70s`。
+- 第 `1000` 页 API：约 `0.77s`。
+- 末页 `10000` API：约 `1.34s`。
+
+真实前端：
+
+- 打开 `http://127.0.0.1:5666/admin/tasks/plans`。
+- 实际点击 IP 删除计划末页 `10000`。
+- 耗时约 `2.30s`。
+- 页面显示 `已加载 50 / 总 500000`。
+- 请求只返回 `ip_delete_plan_items`。
+- 其他表未被清空。
+- 控制台 `0` error，请求 `0` 个 400/500。
+
+### 机器人高并发
+
+执行：
+
+```bash
+UV_CACHE_DIR=/private/tmp/uv-cache-shop DJANGO_TEST_SQLITE=1 uv run python manage.py test bot.tests.RetainedIpRenewalUiTestCase.test_cloud_background_tasks_keep_bulk_concurrency_isolated --settings=shop.settings --verbosity=1
+```
+
+结果：
+
+- 通过。
+- 覆盖 `60` 个并发后台任务：
+  - `20` 组钱包直付。
+  - `20` 组钱包补付。
+  - `20` 组续费后检查。
+- 校验聊天窗口、订单、购买数量和派生创建任务没有串上下文。
+
+### 验证
+
+通过：
+
+```bash
+UV_CACHE_DIR=/private/tmp/uv-cache-shop uv run python manage.py check
+UV_CACHE_DIR=/private/tmp/uv-cache-shop DJANGO_TEST_SQLITE=1 uv run python manage.py test cloud.tests.CloudServerServicesTestCase.test_unattached_ip_delete_plan_tail_page_keeps_exact_order cloud.tests.CloudServerServicesTestCase.test_lifecycle_plans_tables_param_returns_only_requested_items cloud.tests.CloudServerServicesTestCase.test_lifecycle_plans_ip_delete_history_pagination_contract bot.tests.RetainedIpRenewalUiTestCase.test_cloud_background_tasks_keep_bulk_concurrency_isolated --settings=shop.settings --verbosity=1
+git diff --check
+```
+
+红线扫描通过：
+
+```bash
+rg -n "service_expires_at|actual_expires_at.*CloudServerOrder|CloudServerOrder.*actual_expires_at|plan snapshot|snapshot table|old refund|refund_legacy|refund_old|legacy_refund|accounts\\.|finance\\.|mall\\.|monitoring\\.|dashboard_api\\.|biz\\." cloud bot orders core shop -g '!**/migrations/**'
+```
+
+命中项仍为 Telegram 登录账号代码、云账号测试桩和 `CloudServerOrder.ip_recycle_at` 同步语句，不是旧到期事实回流。
+
+### 红线
+
+- 本轮未执行真实云资源创建、关机、删机、释放 IP、换 IP、真实支付、链上广播、生产发布或删除业务数据。
+- 本轮未打印密钥、Telegram session、支付密钥、云厂商密钥或完整代理链接。
+
+### 下一步
+
+- 继续处理关机计划深页“分页后同 IP 去重导致非末页不足 page_size”的结构问题，优先把去重前移到查询层或生命周期任务投影层。
+- 继续对代理列表各风险标签做真实前端翻页和数据库口径对账。
+
 ## 2026-06-08 13:17 生命周期计划页 10 万级专项巡检
 
 ### 背景

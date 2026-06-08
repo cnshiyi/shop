@@ -8674,6 +8674,48 @@ class CloudServerServicesTestCase(TestCase):
 
         self.assertEqual([source.asset_name for _kind, source in sources], ['ip-history-tail-0'])
 
+    # 功能：验证 IP 删除计划尾页候选扫描会跳过非未附加资产，并保持与精确查询相同的顺序。
+    def test_unattached_ip_delete_plan_tail_page_keeps_exact_order(self):
+        from cloud.lifecycle_plan_queries import _unattached_ip_delete_tail_page, unattached_ip_delete_active_queryset
+
+        base = timezone.now()
+        for index in range(9):
+            CloudAsset.objects.create(
+                kind=CloudAsset.KIND_SERVER,
+                source=CloudAsset.SOURCE_AWS_SYNC,
+                user=self.user,
+                provider='aws_lightsail',
+                region_code=self.plan.region_code,
+                region_name=self.plan.region_name,
+                asset_name=f'tail-ip-delete-match-{index}',
+                instance_id='',
+                provider_resource_id=f'StaticIp-tail-match-{index}',
+                public_ip=f'5.5.21.{10 + index}',
+                status=CloudAsset.STATUS_UNKNOWN,
+                provider_status='未附加固定IP',
+                actual_expires_at=base + timezone.timedelta(minutes=index),
+            )
+            CloudAsset.objects.create(
+                kind=CloudAsset.KIND_SERVER,
+                source=CloudAsset.SOURCE_AWS_SYNC,
+                user=self.user,
+                provider='aws_lightsail',
+                region_code=self.plan.region_code,
+                region_name=self.plan.region_name,
+                asset_name=f'tail-ip-delete-noise-{index}',
+                instance_id='',
+                provider_resource_id=f'instance-tail-noise-{index}',
+                public_ip=f'5.5.22.{10 + index}',
+                status=CloudAsset.STATUS_RUNNING,
+                provider_status='运行中',
+                actual_expires_at=base + timezone.timedelta(minutes=index, seconds=30),
+            )
+
+        queryset = unattached_ip_delete_active_queryset()
+        expected = list(queryset.order_by('actual_expires_at', 'id').values_list('asset_name', flat=True))[-3:]
+        rows = _unattached_ip_delete_tail_page(queryset, reverse_start=0, count=3)
+        self.assertEqual([row.asset_name for row in rows], expected)
+
     # 功能：验证 IP 删除历史跨来源分页按统一时间轴排序，不会先吐尽日志再补资产。
     def test_lifecycle_plans_ip_delete_history_mixes_logs_and_assets_by_time(self):
         base = timezone.now()
