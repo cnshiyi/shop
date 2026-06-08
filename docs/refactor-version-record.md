@@ -17648,3 +17648,93 @@ git -C /Users/a399/Desktop/data/vue-shop-admin diff --check
 - 通知计划 10 万级深分页已从上一轮约 `4.1s/页` 降到约 `2s/页`，但如果后续要求更低延迟，还需要继续做真正的服务端分组分页或投影表。
 - 机器人多任务高并发真机点击压测仍未完成。
 - 真实云资源创建、到期关机、删机、释放 IP 的生命周期开关矩阵仍未完整闭环。
+
+## 2026-06-08 19:44 CST 生命周期计划页分页和前端巡检
+
+### 本轮背景
+
+- 继续执行当前会话自动巡检目标。
+- 通知计划 10 万级压测和优化已完成，本轮转向生命周期计划页。
+- 本轮只做只读巡检，不执行真实云资源创建、关机、删机、释放 IP、换 IP、真实支付、链上广播或生产发布。
+
+### 当前数据规模
+
+真实库当前计划页统计：
+
+- 关机计划：`1979990`
+- 删除计划：`2`
+- 服务器删除历史：`20010`
+- IP 删除计划：`500000`
+- IP 删除历史：`520010`
+
+### 后端数据库对账
+
+- 对账方式：每页 `50` 条，直接比对 API 返回 `plan_item_key` 与查询层/数据库排序结果。
+- 关机计划：
+  - 覆盖第 1 页、第 2 页、第 1000 页、最后页第 `39600` 页。
+  - 最后一页 `40` 条。
+  - API 顺序与数据库顺序一致，无重复。
+- 删除计划：
+  - 覆盖第 1 页。
+  - 总数 `2`，加载 `2`。
+  - API 顺序与数据库顺序一致。
+- 服务器删除历史：
+  - 覆盖第 1 页、第 2 页、最后页第 `401` 页。
+  - 最后一页 `10` 条。
+  - API 顺序与数据库顺序一致，无重复。
+- IP 删除计划：
+  - 覆盖第 1 页、第 2 页、第 1000 页、最后页第 `10000` 页。
+  - 最后一页 `50` 条。
+  - API 顺序与数据库顺序一致，无重复。
+- IP 删除历史：
+  - 覆盖第 1 页、第 2 页、第 1000 页、最后页第 `10401` 页。
+  - 最后一页 `10` 条。
+  - API 顺序与数据库顺序一致，无重复。
+
+### 真实前端验证
+
+- 页面：`http://127.0.0.1:5666/admin/tasks/plans`
+- 初始全表加载：
+  - 关机计划 `50`
+  - 删除计划 `2`
+  - 服务器历史 `50`
+  - IP 删除计划 `50`
+  - IP 删除历史 `50`
+- 前端实际触发翻页：
+  - 关机计划第 `2` 页、第 `1000` 页、最后页第 `39600` 页。
+  - 服务器删除历史第 `2` 页、最后页第 `401` 页。
+  - IP 删除计划第 `2` 页、第 `1000` 页、最后页第 `10000` 页。
+  - IP 删除历史第 `2` 页、第 `1000` 页、最后页第 `10401` 页。
+- 列开关：
+  - 关闭执行相关列后前端请求降为 `fields=basic`。
+- 前端结果：
+  - 页面可见计划总数：关机计划 `1979990`、IP 删除计划 `500000`、IP 删除历史 `520010`。
+  - 业务 API 失败：`0`。
+  - 控制台 error/warning：`0`。
+  - request failed：`0`。
+  - 截图：`/private/tmp/shop-lifecycle-plans-front-current.png`
+
+### 验证
+
+通过：
+
+```bash
+UV_CACHE_DIR=/private/tmp/uv-cache-shop uv run python manage.py check
+UV_CACHE_DIR=/private/tmp/uv-cache-shop uv run python -m py_compile bot/api.py cloud/lifecycle_plan_queries.py
+UV_CACHE_DIR=/private/tmp/uv-cache-shop DJANGO_TEST_SQLITE=1 uv run python manage.py test cloud.tests.CloudServerServicesTestCase.test_lifecycle_plans_server_delete_pagination_contract cloud.tests.CloudServerServicesTestCase.test_lifecycle_plans_ip_delete_history_pagination_contract cloud.tests.CloudServerServicesTestCase.test_ip_delete_history_page_sources_reverse_tail_keeps_order cloud.tests.CloudServerServicesTestCase.test_lifecycle_plans_split_shutdown_before_server_delete cloud.tests.CloudServerServicesTestCase.test_lifecycle_plans_use_stage_specific_asset_switches cloud.tests.CloudServerServicesTestCase.test_lifecycle_plans_show_global_stage_switches cloud.tests.CloudServerServicesTestCase.test_lifecycle_plans_separate_ip_delete_plan_and_history_items --settings=shop.settings --verbosity=1
+git diff --check
+git -C /Users/a399/Desktop/data/vue-shop-admin diff --check
+```
+
+红线扫描通过。命中项为既有测试桩、Telegram 登录账号 API 文件名，以及 `CloudServerOrder.ip_recycle_at` 同步记录，不是旧订单到期事实回流。
+
+### 结论
+
+- 本轮未发现生命周期计划页分页丢数据、串页、最后页错误或前端加载错误。
+- 关机计划、删除计划、服务器删除历史、IP 删除计划、IP 删除历史当前均能按服务端分页契约返回 `pagination.{table}.page/page_size/total/loaded`。
+- 本轮没有代码修复，仅更新巡检记录。
+
+### 后续
+
+- 继续补机器人多任务高并发真机点击压测。
+- 继续补真实云资源创建、到期关机、删机、释放 IP 的生命周期开关矩阵闭环。
