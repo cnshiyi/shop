@@ -17224,3 +17224,113 @@ git diff --check
 - 后续压测范围固定为 10 万级，不再按百万级推进。
 - 继续优化 IP 删除历史 10 万边界页的合并查询耗时。
 - 如需通知计划也达到 10 万级，需要单独设计可清理的通知分组压测数据。
+
+## 2026-06-08 19:05 CST 任务页面 10 万级耗时与统计口径只读巡检
+
+### 本轮背景
+
+- 继续执行当前会话自动巡检目标。
+- `TODO.md` 已无未完成项，本轮按固定巡检清单做只读巡检。
+- 用户已明确后续不再做百万级压测，本轮继续只看 10 万级边界。
+
+### 计划页接口耗时
+
+每页 `50` 条，接口层计时结果：
+
+- 关机计划：
+  - 第 `1` 页：`412.7 ms`
+  - 第 `2` 页：`323.8 ms`
+  - 第 `2000` 页：`504.6 ms`
+  - 最后一页 `39600`：`267.3 ms`，loaded `40`
+- 服务器删除计划：
+  - 第 `1` 页：`297.4 ms`
+  - 第 `2` 页：`263.0 ms`，loaded `0`
+- 服务器删除历史：
+  - 第 `1` 页：`393.3 ms`
+  - 第 `2` 页：`327.4 ms`
+  - 最后一页 `401`：`339.9 ms`，loaded `10`
+- IP 删除计划：
+  - 第 `1` 页：`849.2 ms`
+  - 第 `2` 页：`818.2 ms`
+  - 第 `2000` 页：`1041.7 ms`
+  - 最后一页 `10000`：`1530.2 ms`
+- IP 删除历史：
+  - 第 `1` 页：`795.0 ms`
+  - 第 `2` 页：`704.0 ms`
+  - 第 `2000` 页：`1345.3 ms`
+  - 最后一页 `10401`：`684.4 ms`
+
+结论：
+
+- 10 万边界页均低于 `1.4` 秒。
+- IP 删除计划最后页约 `1.5` 秒，后续仍可优化，但本轮未发现必须修改业务代码的问题。
+
+### 任务中心统计口径
+
+真实页面返回：
+
+- 任务中心生命周期 total/active：`2479992/2479992`
+- 任务中心通知 total/active/failed/warning：`22437/21431/1007/7`
+- 通知页近期/未来/活跃分组/历史：`3428/18001/21429/14960`
+
+专项拆解：
+
+- 通知页展示计划分组数：`21429`
+- 任务中心额外纳入数据库通知任务队列：
+  - `claimed`：`2`
+  - `failed_retry`：`998`
+- 因此任务中心 active 比通知页 active user 多 `2`，total 比通知页计划分组多 `1008`。
+
+结论：
+
+- 差异来自任务中心“计划分组 + DB 任务队列”的宽口径，不是通知页丢数据。
+- 现有 `cloud.tests_task_center` 已覆盖任务中心纳入 pending/failed DB task 的口径。
+
+### 真实前端验证
+
+实际打开：
+
+```text
+http://127.0.0.1:5666/admin/tasks
+http://127.0.0.1:5666/admin/tasks/plans
+http://127.0.0.1:5666/admin/tasks/notices
+```
+
+结果：
+
+- 三个页面均停留在目标路由，没有跳登录页或错误页。
+- 控制台 error/warning：`0`。
+- 业务 API 失败：`0`。
+- 浏览器层请求失败为 Vite 开发环境脚本 `net::ERR_ABORTED`，非业务 API。
+
+截图：
+
+```text
+/private/tmp/shop-tasks-patrol.png
+/private/tmp/shop-plans-patrol.png
+/private/tmp/shop-notices-patrol.png
+```
+
+### 验证
+
+通过：
+
+```bash
+UV_CACHE_DIR=/private/tmp/uv-cache-shop uv run python manage.py check
+UV_CACHE_DIR=/private/tmp/uv-cache-shop DJANGO_TEST_SQLITE=1 uv run python manage.py test cloud.tests_task_center.CloudTaskCenterApiTestCase.test_notice_section_total_uses_full_plan_counts_not_preview_items cloud.tests_task_center.CloudTaskCenterApiTestCase.test_notice_section_counts_pending_db_task_without_notice_plan cloud.tests_task_center.CloudTaskCenterApiTestCase.test_notice_section_counts_failed_db_task_without_notice_log --settings=shop.settings --verbosity=1
+git diff --check
+```
+
+红线扫描通过。命中项为既有测试桩、Telegram 登录账号 API 文件名，以及 `CloudServerOrder.ip_recycle_at` 同步记录，不是旧订单到期事实回流。
+
+### 清理与限制
+
+- 已删除本轮临时后台登录用户和 `/private/tmp` 临时 token 文件。
+- 本轮未执行真实云资源创建、关机、删机、释放 IP、换 IP、真实支付、链上广播、生产发布或删除业务数据。
+- 本轮未打印密钥、Telegram session、TOTP、支付密钥、云厂商密钥或完整代理链接。
+
+### 后续
+
+- 继续巡检代理列表各标签和任务页面的 10 万级翻页真实性。
+- 继续关注 IP 删除计划最后页约 `1.5` 秒的加载耗时。
+- 如需通知计划也达到 10 万级，需要单独设计可清理的通知分组压测数据。
