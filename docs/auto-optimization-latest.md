@@ -4,56 +4,47 @@
 
 ## 最近一轮
 
-- 时间：2026-06-08 16:42 CST
-- 状态：完成代理列表分组视图百万级分页修复、真实前端跳页验证，并复测机器人多任务高并发。
-- Commit：本轮记录随本轮提交一起保存。
+- 时间：2026-06-08 16:58 CST
+- 状态：完成代理列表更多分组标签深页/末页真实前端巡检，修复前端 Typography ellipsis warning，并复测机器人多任务高并发。
+- 后端 Commit：本轮记录随本轮提交一起保存。
+- 前端 Commit：本轮前端修复单独提交在 `/Users/a399/Desktop/data/vue-shop-admin`。
 
 ## 本轮覆盖范围
 
 - 后端仓库：`/Users/a399/Desktop/data/shop`
-- 前端仓库：`/Users/a399/Desktop/data/vue-shop-admin`（真实浏览器验证；无前端代码改动）
+- 前端仓库：`/Users/a399/Desktop/data/vue-shop-admin`
 - 重点：
-  - 代理列表云资源视图分组分页
-  - 用户分组 / 群组分组真实页面显示
-  - 未附加、关机关闭等标签分组翻页
-  - 机器人多任务高并发回归
+  - 代理列表云资源视图分组分页更多标签覆盖
+  - 前端控制台 warning 清理
+  - 数据库 distinct 分组数和接口分页 key 对账
+  - 机器人返回链和多任务高并发回归
 
-## 本轮问题
+## 本轮发现
 
-- 真实前端打开 `代理列表 -> 云资源视图 -> 分组` 后，分组接口约 10 秒返回空数据：
-  - `total=0`
-  - `groups=[]`
-  - 页面显示 `已展开 0 / 0 组`
-- 直接在 Django shell 执行同一查询，确认慢点是非 compact 分组分页回落到 `GROUP BY + MIN + ORDER BY` 聚合：
-  - `OperationalError (2013, Lost connection to MySQL server during query timed out)`
-- 第一次优化后又暴露出快照 `payload={}` 的压测数据会被分组成 `unbound:`，造成第 1000 页 20 条数据并成 1 组。
+- 真实前端多标签分组巡检中，代理列表能正确显示数据，但控制台仍有：
+  - `Warning: [ant-design-vue: Typography] When ellipsis is enabled, please use content instead of children`
+- 问题来自代理列表表格中多个 `TypographyParagraph` 同时使用 `ellipsis` 和子文本。
+- 该 warning 不影响数据加载，但会污染上线前控制台质量，也容易掩盖真正的前端错误。
 
 ## 本轮修复
 
-- `cloud/api_asset_snapshots.py`
-  - 非 compact 分组分页也优先使用“按已有排序索引取有序行，再去重出分组 key”的有界分页路径。
-  - 末页同样允许使用有界反向分页，避免百万数据末页回落到超重聚合。
-  - 快照 payload 缺失 `id` 时，自动从 `CloudAsset` 和快照列补齐最小真实展示字段。
-  - payload 存在但缺少分组 key 时，补齐 `group_user_key`、`group_telegram_key`、用户和群组关联字段。
-- `cloud/tests.py`
-  - 锁定非 compact 用户分组第 2 页必须走有界行分页 helper。
-  - 新增空快照 payload 分组分页回归，防止前端把真实多组并成 1 个空组。
+前端：
 
-## 数据对账与性能
+- 文件：`/Users/a399/Desktop/data/vue-shop-admin/apps/web-antd/src/views/dashboard/cloud-assets/index.vue`
+- 将代理列表表格中带 `ellipsis` 的纯文本 `TypographyParagraph` 改为使用 `:content`。
+- 覆盖分组表格和普通表格两套重复渲染区：
+  - 用户摘要
+  - 云资源名称
+  - 资源 ID
+  - 用户名标签
+  - 实例 ID / 云资源 ID
+  - 代理链接
+  - 备注
 
-真实 MySQL 后端查询层复核：
+后端：
 
-- 用户分组 / 全部 / 第 1 页：`20` 组，约 `845ms`。
-- 用户分组 / 全部 / 第 2 页：`20` 组，约 `122ms`。
-- 用户分组 / 全部 / 第 1000 页：`20` 组，约 `166ms`。
-- 用户分组 / 全部 / 末页：`16` 组，约 `247ms`。
-
-接口直连复核：
-
-- `total=2489996`
-- `groups_len=20`
-- `items_len=20`
-- `risk_counts.all=2500003`
+- 本轮后端业务代码未改。
+- 更新本文件和 `docs/refactor-version-record.md` 记录巡检结果。
 
 ## 真实前端验证
 
@@ -63,32 +54,58 @@
 http://127.0.0.1:5666/admin/cloud-assets
 ```
 
-已验证：
+本轮真实点击覆盖：
 
-- 用户分组 / 全部 / 第 1 页：页面 `20` 组，分页 `共 2489996 个用户/分组`。
-- 用户分组 / 全部 / 第 2 页：页面 `20` 组。
-- 用户分组 / 全部 / 第 1000 页：页面 `20` 组。
-- 用户分组 / 未附加固定 IP / 第 1 页：页面 `20` 组，分页 `共 100001 个用户/分组`。
-- 用户分组 / 未附加固定 IP / 第 2 页：页面 `20` 组。
-- 群组分组 / 未附加固定 IP / 第 1 页：页面 `20` 组。
-- 群组分组 / 未附加固定 IP / 第 2 页：页面 `20` 组。
-- 群组分组 / 关机计划关闭 / 第 1000 页：页面 `20` 组，分页 `共 100369 个用户/分组`。
+- 用户分组 / 全部 / 第 `1` 页：`20` 组，分页 `共 2489996 个用户/分组`。
+- 用户分组 / 已过期 / 第 `1` 页、第 `5000` 页：均 `20` 组。
+- 用户分组 / 异常待确认 / 第 `1` 页、第 `5000` 页：均 `20` 组。
+- 用户分组 / 云账号异常 / 第 `1` 页、第 `1000` 页：均 `20` 组。
+- 用户分组 / 未绑定用户 / 第 `1` 页、第 `5000` 页：均 `20` 组。
+- 群组分组 / 未绑定用户 / 第 `1` 页：`20` 组。
+- 群组分组 / 未绑定群组 / 第 `1` 页、第 `5000` 页：均 `20` 组。
+- 群组分组 / 续费关闭 / 第 `1` 页、第 `1000` 页：均 `20` 组。
 
-浏览器分组接口结果：
+修复后复测：
 
-- 分组接口请求：`9`
-- 非 200 或空表：`0`
-- 业务请求失败：`0`
-- Vite 热更新模块请求出现 `ERR_ABORTED`，属于开发服务器模块切换噪音。
-- Ant Design Vue 仍有一个既有 Typography ellipsis 用法 warning，本轮未改前端代码。
+- 分组页面仍显示 `20` 组、`20` 行。
+- 分页显示 `共 2489996 个用户/分组`。
+- 控制台 error/warning：`0`。
+- 业务 API 失败：`0`。
+- Vite 热更新模块请求仍可能出现 `ERR_ABORTED`，属于开发服务器模块切换噪音。
+
+## 数据库对账
+
+本轮对 5 个抽样深页做接口和数据库对账：
+
+- 用户分组 / 异常待确认 / 第 `5000` 页：
+  - API total `100000`
+  - DB distinct total `100000`
+  - API 分组 key 与 DB 分页 key 一致
+- 用户分组 / 云账号异常 / 第 `1000` 页：
+  - API total `1145001`
+  - DB distinct total `1145001`
+  - API 分组 key 与 DB 分页 key 一致
+- 用户分组 / 未绑定用户 / 第 `5000` 页：
+  - API total `100001`
+  - DB distinct total `100001`
+  - API 分组 key 与 DB 分页 key 一致
+- 群组分组 / 未绑定群组 / 第 `5000` 页：
+  - API total `100003`
+  - DB distinct total `100003`
+  - API 分组 key 与 DB 分页 key 一致
+- 群组分组 / 续费关闭 / 第 `1000` 页：
+  - API total `101002`
+  - DB distinct total `101002`
+  - API 分组 key 与 DB 分页 key 一致
 
 ## 机器人高并发
 
-本轮继续复测：
+继续复测：
 
 - 通知复制并发隔离。
 - 钱包直付 / 钱包补付同时执行。
 - `60` 路批量后台任务隔离。
+- 订单详情、资产详情、IP 查询、自动续费返回链和 `callback_data <= 64` 字节。
 
 结果：聚焦测试通过，未发现任务串线、返回链污染或后台任务隔离问题。
 
@@ -97,10 +114,10 @@ http://127.0.0.1:5666/admin/cloud-assets
 通过：
 
 ```bash
+pnpm -F @vben/web-antd typecheck
 UV_CACHE_DIR=/private/tmp/uv-cache-shop uv run python manage.py check
 UV_CACHE_DIR=/private/tmp/uv-cache-shop uv run python manage.py makemigrations --check --dry-run
-UV_CACHE_DIR=/private/tmp/uv-cache-shop DJANGO_TEST_SQLITE=1 uv run python manage.py test cloud.tests.CloudServerServicesTestCase.test_cloud_assets_grouped_paginated_uses_twenty_user_groups_per_page cloud.tests.CloudServerServicesTestCase.test_cloud_assets_grouped_page_rebuilds_empty_snapshot_payload_group_keys cloud.tests.CloudServerServicesTestCase.test_cloud_assets_grouped_total_counts_distinct_groups_only cloud.tests.CloudServerServicesTestCase.test_cloud_assets_grouped_duplicate_groups_do_not_repeat_across_pages cloud.tests.CloudServerServicesTestCase.test_cloud_assets_grouped_duplicate_groups_reverse_tail_keeps_last_page bot.tests.TelegramListenerPushTestCase.test_notice_copy_wrapper_keeps_concurrent_user_sends_isolated bot.tests.RetainedIpRenewalUiTestCase.test_cloud_background_tasks_keep_high_concurrency_isolated bot.tests.RetainedIpRenewalUiTestCase.test_cloud_background_tasks_keep_bulk_concurrency_isolated --settings=shop.settings --verbosity=1
-UV_CACHE_DIR=/private/tmp/uv-cache-shop uv run python -m py_compile cloud/api_asset_snapshots.py cloud/tests.py bot/keyboards.py bot/tests.py
+UV_CACHE_DIR=/private/tmp/uv-cache-shop DJANGO_TEST_SQLITE=1 uv run python manage.py test bot.tests.TelegramListenerPushTestCase.test_notice_copy_wrapper_keeps_concurrent_user_sends_isolated bot.tests.RetainedIpRenewalUiTestCase.test_cloud_background_tasks_keep_high_concurrency_isolated bot.tests.RetainedIpRenewalUiTestCase.test_cloud_background_tasks_keep_bulk_concurrency_isolated bot.tests.RetainedIpRenewalUiTestCase.test_cloud_server_list_order_detail_uses_short_back_callback bot.tests.RetainedIpRenewalUiTestCase.test_asset_detail_callback_from_extreme_order_detail_stays_under_limit bot.tests.RetainedIpRenewalUiTestCase.test_asset_detail_callback_recompacts_nested_asset_detail_back_path bot.tests.RetainedIpRenewalUiTestCase.test_cloud_ip_query_actions_return_to_query_menu bot.tests.RetainedIpRenewalUiTestCase.test_cloud_auto_renew_callbacks_keep_nested_back_under_limit --settings=shop.settings --verbosity=1
 git diff --check
 ```
 
@@ -108,9 +125,8 @@ git diff --check
 
 ## 清理
 
-- 已删除前端 `.playwright-cli/` 临时产物。
-- 已删除本轮临时后台登录用户 `codex_group_frontend_probe`。
-- 已删除 `/private/tmp/shop_group_frontend_probe_token.txt`。
+- 已删除本轮临时后台登录用户 `codex巡检_frontend_probe`。
+- 已删除 `/private/tmp/shop_frontend_probe_token.txt`。
 
 ## 受限项
 
@@ -119,6 +135,5 @@ git diff --check
 
 ## 下一步
 
-- 继续巡检代理列表其他分组标签的深页与末页表现。
+- 继续巡检生命周期计划、通知计划和代理列表之间的统计口径是否再次分叉。
 - 继续把机器人返回链、`callback_data <= 64` 字节限制和多任务高并发作为固定回归项。
-- 后续可单独处理 Ant Design Vue Typography ellipsis warning。
