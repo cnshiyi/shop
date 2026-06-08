@@ -18,7 +18,7 @@ from asgiref.sync import sync_to_async
 from django.utils import timezone
 
 from bot.models import TelegramChatMessage, TelegramLoginAccount, TelegramUser
-from bot.services import record_telegram_message, telegram_group_delivery_flags
+from bot.services import _get_or_create_user_sync, record_telegram_message, telegram_group_delivery_flags
 from core.models import SiteConfig
 from core.runtime_config import get_runtime_config
 
@@ -96,10 +96,9 @@ def _sync_account_profile(account_id: int, entity, note: str = '监听中'):
         fields['note'] = note[:1000]
     TelegramLoginAccount.objects.filter(id=account_id).update(**fields)
     if tg_user_id:
-        user, created = TelegramUser.objects.get_or_create(
-            tg_user_id=tg_user_id,
-            defaults={'username': usernames, 'first_name': label[:191] if label else ''},
-        )
+        existed_before = TelegramUser.objects.filter(tg_user_id=tg_user_id).exists()
+        user = _get_or_create_user_sync(tg_user_id, usernames, label[:191] if label else '', TelegramUser.normalize_usernames(usernames))
+        created = not existed_before
         changed = []
         previous_username = '' if created else user.username
         previous_first_name = '' if created else user.first_name

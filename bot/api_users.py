@@ -23,9 +23,21 @@ from core.dashboard_api import (
     dashboard_login_required,
     dashboard_superuser_required,
 )
-from bot.models import TelegramUser
-from cloud.models import CloudServerOrder
-from orders.models import BalanceLedger, Order, Recharge
+from bot.models import DeletedTelegramUserSlot, TelegramUser
+from cloud.models import (
+    AddressMonitor,
+    CloudAsset,
+    CloudAssetDashboardSnapshot,
+    CloudAutoRenewPatrolLog,
+    CloudAutoRenewRetryTask,
+    CloudIpLog,
+    CloudLifecycleTask,
+    CloudNoticeTask,
+    CloudServerOrder,
+    CloudUserNoticeLog,
+    DailyAddressStat,
+)
+from orders.models import BalanceLedger, CartItem, Order, Recharge
 
 
 def _record_balance_ledger(user, *, currency, old_balance, new_balance, ledger_type='manual_adjust', related_type=None, related_id=None, description='', operator=None):
@@ -205,6 +217,62 @@ def update_user_discount(request, user_id):
     return _ok({
         'id': user.id,
         'cloud_discount_rate': _decimal_to_str(user.cloud_discount_rate),
+    })
+
+
+def _user_delete_blockers(user_id: int) -> list[str]:
+    checks = [
+        ('云服务器订单', CloudServerOrder.objects.filter(user_id=user_id)),
+        ('商品订单', Order.objects.filter(user_id=user_id)),
+        ('充值记录', Recharge.objects.filter(user_id=user_id)),
+        ('余额流水', BalanceLedger.objects.filter(user_id=user_id)),
+        ('购物车', CartItem.objects.filter(user_id=user_id)),
+        ('地址监控', AddressMonitor.objects.filter(user_id=user_id)),
+        ('每日地址统计', DailyAddressStat.objects.filter(user_id=user_id)),
+    ]
+    return [label for label, queryset in checks if queryset.exists()]
+
+
+@csrf_exempt
+@dashboard_superuser_required
+@require_POST
+def delete_user(request, user_id):
+    try:
+        with transaction.atomic():
+            user = TelegramUser.objects.select_for_update().get(pk=user_id)
+            blockers = _user_delete_blockers(user.id)
+            if blockers:
+                return _error(f'该用户存在业务记录，不能直接删除：{"、".join(blockers)}', status=400)
+            deleted_snapshot = {
+                'deleted_tg_user_id': user.tg_user_id,
+                'deleted_username': user.username,
+                'deleted_first_name': user.first_name,
+            }
+            unbound = {
+                'assets': CloudAsset.objects.filter(user_id=user.id).update(user=None),
+                'asset_snapshots': CloudAssetDashboardSnapshot.objects.filter(user_id=user.id).update(user=None),
+                'ip_logs': CloudIpLog.objects.filter(user_id=user.id).update(user=None),
+                'lifecycle_tasks': CloudLifecycleTask.objects.filter(user_id=user.id).update(user=None),
+                'notice_tasks': CloudNoticeTask.objects.filter(user_id=user.id).update(user=None),
+                'auto_renew_retry_tasks': CloudAutoRenewRetryTask.objects.filter(user_id=user.id).update(user=None),
+                'auto_renew_patrol_logs': CloudAutoRenewPatrolLog.objects.filter(user_id=user.id).update(user=None),
+                'notice_logs': CloudUserNoticeLog.objects.filter(user_id=user.id).update(user=None),
+            }
+            reusable_user_id = user.id
+            user.delete()
+            DeletedTelegramUserSlot.objects.update_or_create(
+                reusable_user_id=reusable_user_id,
+                defaults={
+                    **deleted_snapshot,
+                    'note': 'Dashboard 删除用户后释放 ID，供新 Telegram 用户优先复用',
+                },
+            )
+    except TelegramUser.DoesNotExist:
+        return _error('用户不存在', status=404)
+    return _ok({
+        'deleted': True,
+        'reusable_user_id': reusable_user_id,
+        'unbound': unbound,
     })
 
 

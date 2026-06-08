@@ -113,6 +113,26 @@ class TelegramUser(models.Model):
         return names[0] if names else ''
 
 
+class DeletedTelegramUserSlot(models.Model):
+    id = models.BigAutoField('ID', primary_key=True, db_comment='主键ID')
+    reusable_user_id = models.BigIntegerField('可复用用户ID', unique=True, db_index=True, db_comment='已删除用户释放出的 bot_user.id')
+    deleted_tg_user_id = models.BigIntegerField('原 Telegram 用户ID', blank=True, null=True, db_index=True, db_comment='删除前的 Telegram 用户ID')
+    deleted_username = models.TextField('原用户名集合', blank=True, null=True, db_comment='删除前的用户名集合')
+    deleted_first_name = models.CharField('原昵称', max_length=191, blank=True, null=True, db_comment='删除前的昵称')
+    note = models.TextField('备注', blank=True, null=True, db_comment='备注')
+    created_at = models.DateTimeField('创建时间', auto_now_add=True, db_comment='创建时间')
+
+    class Meta:
+        db_table = 'bot_deleted_telegram_user_slot'
+        db_table_comment = '已删除 Telegram 用户 ID 复用槽位表'
+        verbose_name = '已删除用户ID槽位'
+        verbose_name_plural = '已删除用户ID槽位'
+        ordering = ['created_at', 'reusable_user_id']
+
+    def __str__(self):
+        return f'reusable_user_id={self.reusable_user_id}'
+
+
 class BotOperationLog(models.Model):
     ACTION_MESSAGE = 'message'
     ACTION_CALLBACK = 'callback'
@@ -263,6 +283,7 @@ __all__ = [
     'BotUser',
     'TelegramChatArchive',
     'TelegramChatMessage',
+    'DeletedTelegramUserSlot',
     'TelegramGroupFilter',
     'TelegramLoginAccount',
     'TelegramUser',

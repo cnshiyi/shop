@@ -16,11 +16,11 @@ from django.test import RequestFactory, SimpleTestCase, TestCase
 from django.urls import Resolver404, resolve
 from django.utils import timezone
 
-from bot.api import DASHBOARD_SESSION_IDLE_SECONDS, _active_proxy_counts_by_user, _authenticate_dashboard_request, admin_users_list, archive_telegram_chat, auth_totp_start, create_admin_user, create_cloud_account, create_product, delete_cloud_account, me, send_daily_expiry_summary_test_notification, send_telegram_chat_message, site_config_groups, telegram_login_start, update_cloud_account, update_site_config, update_user_balance, users_list, verify_cloud_account
+from bot.api import DASHBOARD_SESSION_IDLE_SECONDS, _active_proxy_counts_by_user, _authenticate_dashboard_request, admin_users_list, archive_telegram_chat, auth_totp_start, create_admin_user, create_cloud_account, create_product, delete_cloud_account, delete_user, me, send_daily_expiry_summary_test_notification, send_telegram_chat_message, site_config_groups, telegram_login_start, update_cloud_account, update_site_config, update_user_balance, users_list, verify_cloud_account
 from bot.handlers import _asset_reinstall_confirm_keyboard, _asset_reinstall_submitted_keyboard, _asset_renewal_plan_keyboard, _buy_cloud_server_with_balance_and_notify, _cloud_renewal_postcheck_and_notify, _cloud_renewal_result_keyboard, _cloud_server_created_text, _fetch_tron_address_summary, _get_cached_custom_regions, _get_cached_region_plans, _hydrate_order_proxy_links, _install_notice_copy_wrapper, _pay_cloud_server_order_with_balance_and_notify, _proxy_links_text, _reinstall_confirm_keyboard, _reinstall_submitted_keyboard, _requires_recovery_provision, _retained_ip_renewal_plan_keyboard, _save_asset_main_proxy_link, _save_user_main_proxy_link, _trongrid_get_with_key_fallback, _trongrid_post_with_key_fallback, _validate_reinstall_proxy_link, register_handlers
 from bot.keyboards import _compact_back_button_callback, append_back_callback, balance_details_list, cloud_asset_detail_callback, cloud_auto_renew_callback, cloud_detail_callback, cloud_previous_detail_callback, compact_callback_path, cloud_ip_query_result, cloud_order_list, cloud_order_readonly_detail, cloud_server_change_ip_region_menu, cloud_server_detail, cloud_server_list, cloud_server_renew_payment
-from bot.models import TelegramChatArchive, TelegramChatMessage, TelegramGroupFilter, TelegramLoginAccount, TelegramUser
-from bot.services import record_bot_operation_log, record_telegram_message, telegram_group_delivery_flags
+from bot.models import DeletedTelegramUserSlot, TelegramChatArchive, TelegramChatMessage, TelegramGroupFilter, TelegramLoginAccount, TelegramUser
+from bot.services import get_or_create_user, record_bot_operation_log, record_telegram_message, telegram_group_delivery_flags
 from bot.states import CustomServerStates
 from bot.telegram_listener import _build_bark_request, _build_push_payload, _is_bot_sender, _is_self_sender, _sync_account_profile
 from cloud import services as cloud_services
@@ -992,6 +992,65 @@ class DashboardCloudAccountVerifyTestCase(TestCase):
         self.assertEqual(user.balance_trx, Decimal('6.000000'))
         self.assertEqual(user.cloud_discount_rate, Decimal('99.00'))
         self.assertFalse(BalanceLedger.objects.filter(user=user).exists())
+
+    def test_delete_user_unbinds_assets_and_new_user_reuses_deleted_id(self):
+        root = get_user_model().objects.create_user(username='root_delete_telegram_user', password='pass', is_staff=True, is_superuser=True)
+        user = TelegramUser.objects.create(tg_user_id=900021, username='delete_slot_user', first_name='删除测试')
+        asset = CloudAsset.objects.create(
+            kind=CloudAsset.KIND_SERVER,
+            source=CloudAsset.SOURCE_AWS_SYNC,
+            provider='aws_lightsail',
+            region_code='ap-southeast-1',
+            asset_name='delete-slot-server',
+            instance_id='delete-slot-instance',
+            public_ip='203.0.113.21',
+            user=user,
+            status=CloudAsset.STATUS_RUNNING,
+            is_active=True,
+        )
+        request = RequestFactory().post(f'/api/admin/users/{user.id}/delete/', data=json.dumps({}), content_type='application/json')
+        self._attach_bearer_session(request, root)
+
+        response = delete_user(request, user.id)
+        payload = json.loads(response.content.decode('utf-8'))
+
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(payload['data']['deleted'])
+        self.assertEqual(payload['data']['reusable_user_id'], user.id)
+        self.assertFalse(TelegramUser.objects.filter(id=user.id).exists())
+        slot = DeletedTelegramUserSlot.objects.get(reusable_user_id=user.id)
+        self.assertEqual(slot.deleted_tg_user_id, 900021)
+        asset.refresh_from_db()
+        self.assertIsNone(asset.user_id)
+
+        reused = async_to_sync(get_or_create_user)(900022, 'new_slot_user', '新用户')
+        self.assertEqual(reused.id, user.id)
+        self.assertEqual(reused.tg_user_id, 900022)
+        self.assertFalse(DeletedTelegramUserSlot.objects.filter(reusable_user_id=user.id).exists())
+
+    def test_delete_user_blocks_business_records(self):
+        root = get_user_model().objects.create_user(username='root_delete_telegram_user_blocked', password='pass', is_staff=True, is_superuser=True)
+        user = TelegramUser.objects.create(tg_user_id=900023, username='delete_blocked_user')
+        BalanceLedger.objects.create(
+            user=user,
+            type=BalanceLedger.TYPE_MANUAL_ADJUST,
+            direction=BalanceLedger.DIRECTION_IN,
+            currency='USDT',
+            amount=Decimal('1.000000000'),
+            before_balance=Decimal('0.000000000'),
+            after_balance=Decimal('1.000000000'),
+            description='阻止删除测试',
+        )
+        request = RequestFactory().post(f'/api/admin/users/{user.id}/delete/', data=json.dumps({}), content_type='application/json')
+        self._attach_bearer_session(request, root)
+
+        response = delete_user(request, user.id)
+        payload = json.loads(response.content.decode('utf-8'))
+
+        self.assertEqual(response.status_code, 400)
+        self.assertIn('余额流水', payload['message'])
+        self.assertTrue(TelegramUser.objects.filter(id=user.id).exists())
+        self.assertFalse(DeletedTelegramUserSlot.objects.filter(reusable_user_id=user.id).exists())
 
     def test_delete_cloud_account_blocks_linked_business_data(self):
         staff = get_user_model().objects.create_user(username='cloud_account_delete_staff', password='pass', is_staff=True, is_superuser=True)

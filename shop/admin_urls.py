@@ -25,6 +25,7 @@ urlpatterns = [
     path('users/', bot_api.users_list, name='users-list'),
     path('users/<int:user_id>/balance/', bot_api.update_user_balance, name='user-balance-update'),
     path('users/<int:user_id>/discount/', bot_api.update_user_discount, name='user-discount-update'),
+    path('users/<int:user_id>/delete/', bot_api.delete_user, name='user-delete'),
     path('users/<int:user_id>/balance-details/', bot_api.user_balance_details, name='user-balance-details'),
     path('telegram/accounts/', bot_api.telegram_accounts_overview, name='telegram-accounts-overview'),
     path('telegram/accounts/create/', bot_api.create_telegram_login_account, name='telegram-account-create'),

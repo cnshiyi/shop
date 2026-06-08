@@ -10,6 +10,7 @@ from django.utils.dateparse import parse_date, parse_datetime
 from django.views.decorators.http import require_GET
 
 from bot.models import TelegramLoginAccount, TelegramUser
+from bot.services import _get_or_create_user_sync
 from cloud.api_asset_snapshots import (
     _dashboard_snapshot_group_page,
     _dashboard_snapshot_ordering,
@@ -175,13 +176,7 @@ def _resolve_telegram_user(value):
         account = next((item for item in accounts if raw.isdigit() or _username_matches(item.username, raw)), None)
         if not account or not account.tg_user_id:
             continue
-        user, _ = TelegramUser.objects.get_or_create(
-            tg_user_id=account.tg_user_id,
-            defaults={
-                'username': TelegramUser.serialize_usernames(account.username),
-                'first_name': account.label or '',
-            },
-        )
+        user = _get_or_create_user_sync(account.tg_user_id, TelegramUser.serialize_usernames(account.username), account.label or '', TelegramUser.normalize_usernames(account.username))
         _sync_telegram_username(user, account.username)
         return user
     return None

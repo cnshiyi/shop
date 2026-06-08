@@ -18,6 +18,7 @@ from django.db.models import Case, IntegerField, Q, Value, When
 from django.utils import timezone
 
 from bot.models import TelegramLoginAccount, TelegramUser
+from bot.services import _get_or_create_user_sync
 from cloud.asset_expiry import apply_order_lifecycle_from_asset_expiry, order_asset_expiry, set_order_asset_expiry
 from cloud.lifecycle_schedule import compute_order_lifecycle_fields, runtime_int_config, with_runtime_time
 from cloud.models import CloudAsset, CloudIpLog, CloudServerOrder, CloudServerPlan, ServerPrice
@@ -1472,13 +1473,7 @@ def _merge_telegram_user_from_login_account(account: TelegramLoginAccount | None
     usernames = TelegramUser.normalize_usernames(getattr(account, 'username', None))
     serialized_usernames = TelegramUser.serialize_usernames(usernames)
     first_name = str(getattr(account, 'label', '') or '').strip()
-    user, _ = TelegramUser.objects.get_or_create(
-        tg_user_id=account.tg_user_id,
-        defaults={
-            'username': serialized_usernames,
-            'first_name': first_name[:191],
-        },
-    )
+    user = _get_or_create_user_sync(account.tg_user_id, serialized_usernames, first_name[:191], usernames)
     changed = []
     if usernames:
         merged = []

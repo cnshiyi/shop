@@ -2972,6 +2972,7 @@ from bot.api_operation_logs import (  # noqa: E402
 from bot.api_users import (  # noqa: E402
     _ledger_payload,
     _record_balance_ledger,
+    delete_user,
     update_user_balance,
     update_user_discount,
     user_balance_details,
@@ -3051,6 +3052,7 @@ __all__ = [
     'update_cloud_account',
     'update_product',
     'update_site_config',
+    'delete_user',
     'update_user_balance',
     'update_user_discount',
     'user_balance_details',
