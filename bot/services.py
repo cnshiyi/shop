@@ -118,9 +118,10 @@ def record_bot_operation_log(
     chat_id: int | None = None,
     message_id: int | None = None,
     action_label: str | None = None,
+    collect_user: bool = True,
 ):
     BotOperationLog = apps.get_model('bot', 'BotOperationLog')
-    user = _get_or_create_user_sync(tg_user_id, username, first_name)
+    user = _get_or_create_user_sync(tg_user_id, username, first_name) if collect_user else None
     username_snapshot = (_normalize_usernames(username) or [''])[0] or None
     return BotOperationLog.objects.create(
         user=user,
@@ -275,9 +276,10 @@ def record_telegram_message(
     chat_title: str | None = None,
     source: str = 'bot',
     active_usernames: list[str] | tuple[str, ...] | None = None,
+    collect_user: bool = True,
 ):
     TelegramChatMessage = apps.get_model('bot', 'TelegramChatMessage')
-    user = _get_or_create_user_sync(tg_user_id, username, first_name, active_usernames)
+    user = _get_or_create_user_sync(tg_user_id, username, first_name, active_usernames) if collect_user else None
     username_snapshot = (_normalize_usernames(active_usernames) or _normalize_usernames(username) or [''])[0] or None
     existing = None
     if message_id:

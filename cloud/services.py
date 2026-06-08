@@ -914,6 +914,23 @@ async def _cache_set_json(key: str, value, ttl: int = CUSTOM_CACHE_TTL):
         pass
 
 
+async def _cache_delete_pattern(pattern: str):
+    r = await get_redis()
+    if r is None:
+        return
+    try:
+        keys = []
+        async for key in r.scan_iter(match=pattern, count=100):
+            keys.append(key)
+            if len(keys) >= 100:
+                await r.delete(*keys)
+                keys = []
+        if keys:
+            await r.delete(*keys)
+    except Exception:
+        logger.exception('定制缓存清理失败: pattern=%s', pattern)
+
+
 @sync_to_async
 def _list_custom_regions_db():
     plans = list(
@@ -965,6 +982,7 @@ async def list_region_plans(region_code: str):
 
 async def refresh_custom_plan_cache():
     regions = await _list_custom_regions_db()
+    await _cache_delete_pattern(f'{CUSTOM_PLANS_CACHE_PREFIX}*')
     await _cache_set_json(CUSTOM_REGIONS_CACHE_KEY, regions)
     total_plans = 0
     for region_code, _ in regions:

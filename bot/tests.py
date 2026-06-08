@@ -17,16 +17,16 @@ from django.urls import Resolver404, resolve
 from django.utils import timezone
 
 from bot.api import DASHBOARD_SESSION_IDLE_SECONDS, _active_proxy_counts_by_user, _authenticate_dashboard_request, admin_users_list, archive_telegram_chat, auth_totp_start, create_admin_user, create_cloud_account, create_product, delete_cloud_account, me, send_daily_expiry_summary_test_notification, send_telegram_chat_message, site_config_groups, telegram_login_start, update_cloud_account, update_site_config, update_user_balance, users_list, verify_cloud_account
-from bot.handlers import _asset_reinstall_confirm_keyboard, _asset_reinstall_submitted_keyboard, _asset_renewal_plan_keyboard, _buy_cloud_server_with_balance_and_notify, _cloud_renewal_postcheck_and_notify, _cloud_renewal_result_keyboard, _cloud_server_created_text, _fetch_tron_address_summary, _hydrate_order_proxy_links, _install_notice_copy_wrapper, _pay_cloud_server_order_with_balance_and_notify, _proxy_links_text, _reinstall_confirm_keyboard, _reinstall_submitted_keyboard, _requires_recovery_provision, _retained_ip_renewal_plan_keyboard, _save_asset_main_proxy_link, _save_user_main_proxy_link, _trongrid_get_with_key_fallback, _trongrid_post_with_key_fallback, _validate_reinstall_proxy_link, register_handlers
+from bot.handlers import _asset_reinstall_confirm_keyboard, _asset_reinstall_submitted_keyboard, _asset_renewal_plan_keyboard, _buy_cloud_server_with_balance_and_notify, _cloud_renewal_postcheck_and_notify, _cloud_renewal_result_keyboard, _cloud_server_created_text, _fetch_tron_address_summary, _get_cached_custom_regions, _get_cached_region_plans, _hydrate_order_proxy_links, _install_notice_copy_wrapper, _pay_cloud_server_order_with_balance_and_notify, _proxy_links_text, _reinstall_confirm_keyboard, _reinstall_submitted_keyboard, _requires_recovery_provision, _retained_ip_renewal_plan_keyboard, _save_asset_main_proxy_link, _save_user_main_proxy_link, _trongrid_get_with_key_fallback, _trongrid_post_with_key_fallback, _validate_reinstall_proxy_link, register_handlers
 from bot.keyboards import _compact_back_button_callback, append_back_callback, balance_details_list, cloud_asset_detail_callback, cloud_auto_renew_callback, cloud_detail_callback, cloud_previous_detail_callback, compact_callback_path, cloud_ip_query_result, cloud_order_list, cloud_order_readonly_detail, cloud_server_change_ip_region_menu, cloud_server_detail, cloud_server_list, cloud_server_renew_payment
 from bot.models import TelegramChatArchive, TelegramChatMessage, TelegramGroupFilter, TelegramLoginAccount, TelegramUser
-from bot.services import record_telegram_message, telegram_group_delivery_flags
+from bot.services import record_bot_operation_log, record_telegram_message, telegram_group_delivery_flags
 from bot.states import CustomServerStates
 from bot.telegram_listener import _build_bark_request, _build_push_payload, _is_bot_sender, _is_self_sender, _sync_account_profile
 from cloud import services as cloud_services
 from cloud.asset_expiry import order_asset_expiry
 from cloud.models import CloudAsset, CloudServerOrder, CloudServerPlan
-from cloud.services import prepare_cloud_server_order_instances, update_cloud_item_expiry_for_admin
+from cloud.services import prepare_cloud_server_order_instances, refresh_custom_plan_cache, update_cloud_item_expiry_for_admin
 from core.models import CloudAccountConfig, SiteConfig
 from core.texts import BOT_TEXTS
 from orders.ledger import record_balance_ledger
@@ -84,6 +84,46 @@ class BotRunnerConfigTestCase(SimpleTestCase):
             with self.subTest(value=value):
                 with patch.dict(os.environ, {'SHOP_BOT_BACKGROUND_TASKS_ENABLED': value}, clear=True):
                     self.assertTrue(bot_background_tasks_enabled())
+
+
+class CustomPlanHotReloadTestCase(SimpleTestCase):
+    def test_bot_plan_helpers_do_not_keep_process_local_cache(self):
+        async def fake_regions():
+            return [('ap-southeast-1', '新加坡')]
+
+        async def fake_plans(region_code):
+            return [f'{region_code}-plan']
+
+        with patch('bot.handlers.list_custom_regions', new=AsyncMock(side_effect=fake_regions)) as regions_mock, \
+                patch('bot.handlers.list_region_plans', new=AsyncMock(side_effect=fake_plans)) as plans_mock:
+            first_regions = async_to_sync(_get_cached_custom_regions)()
+            second_regions = async_to_sync(_get_cached_custom_regions)()
+            first_plans = async_to_sync(_get_cached_region_plans)('ap-southeast-1')
+            second_plans = async_to_sync(_get_cached_region_plans)('ap-southeast-1')
+
+        self.assertEqual(first_regions, [('ap-southeast-1', '新加坡')])
+        self.assertEqual(second_regions, [('ap-southeast-1', '新加坡')])
+        self.assertEqual(first_plans, ['ap-southeast-1-plan'])
+        self.assertEqual(second_plans, ['ap-southeast-1-plan'])
+        self.assertEqual(regions_mock.await_count, 2)
+        self.assertEqual(plans_mock.await_count, 2)
+
+    def test_refresh_custom_plan_cache_clears_old_region_plan_keys(self):
+        async def fake_regions_db():
+            return [('ap-southeast-1', '新加坡')]
+
+        async def fake_plans_db(_region_code):
+            return [SimpleNamespace(id=123)]
+
+        with patch('cloud.services._list_custom_regions_db', new=AsyncMock(side_effect=fake_regions_db)), \
+                patch('cloud.services._list_region_plans_db', new=AsyncMock(side_effect=fake_plans_db)), \
+                patch('cloud.services._cache_delete_pattern', new=AsyncMock()) as delete_pattern, \
+                patch('cloud.services._cache_set_json', new=AsyncMock()) as set_json:
+            result = async_to_sync(refresh_custom_plan_cache)()
+
+        self.assertEqual(result, 1)
+        delete_pattern.assert_awaited_once_with('custom:plans:v1:*')
+        self.assertEqual(set_json.await_count, 2)
 
 
 class DashboardSessionExpiryTestCase(TestCase):
@@ -245,6 +285,51 @@ class DashboardAuthSurfaceTestCase(TestCase):
         self.assertEqual(config.value, '15:00')
         self.assertFalse(Product.objects.filter(name='blocked-product').exists())
 
+    def test_telegram_login_start_normalizes_phone_before_send_code(self):
+        root = get_user_model().objects.create_user(username='root_tg_login_phone_normalize', password='pass', is_staff=True, is_superuser=True)
+        request = RequestFactory().post(
+            '/api/admin/telegram/login/start/',
+            data=json.dumps({'phone': '＋86 138-0000-0000'}),
+            content_type='application/json',
+        )
+        self._attach_bearer_session(request, root)
+        sent_phones = []
+
+        async def fake_send_code(phone, api_id, api_hash):
+            sent_phones.append((phone, api_id, api_hash))
+            return 'phone-code-hash', 'session-string'
+
+        with patch('bot.api_telegram._telegram_api_credentials', return_value=(12345, 'api-hash')), \
+                patch('bot.api_telegram._telegram_send_code', new=fake_send_code):
+            response = telegram_login_start(request)
+        payload = json.loads(response.content.decode('utf-8'))
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(sent_phones, [('+8613800000000', 12345, 'api-hash')])
+        item = TelegramLoginAccount.objects.get(id=payload['data']['account_id'])
+        self.assertEqual(item.phone, '+8613800000000')
+        self.assertEqual(item.status, 'code_sent')
+
+    def test_telegram_login_start_rejects_phone_without_country_code(self):
+        root = get_user_model().objects.create_user(username='root_tg_login_phone_invalid', password='pass', is_staff=True, is_superuser=True)
+        request = RequestFactory().post(
+            '/api/admin/telegram/login/start/',
+            data=json.dumps({'phone': '13800000000'}),
+            content_type='application/json',
+        )
+        self._attach_bearer_session(request, root)
+
+        with patch('bot.api_telegram._telegram_api_credentials') as credentials, \
+                patch('bot.api_telegram._telegram_send_code', new_callable=AsyncMock) as send_code:
+            response = telegram_login_start(request)
+        payload = json.loads(response.content.decode('utf-8'))
+
+        self.assertEqual(response.status_code, 400)
+        self.assertIn('国际格式', payload['message'])
+        credentials.assert_not_called()
+        send_code.assert_not_called()
+        self.assertFalse(TelegramLoginAccount.objects.exists())
+
     def test_superuser_can_list_admin_users(self):
         root = get_user_model().objects.create_user(username='root_admin_user_manage', password='pass', is_staff=True, is_superuser=True)
         request = RequestFactory().get('/api/admin/admin-users/')
@@ -330,6 +415,43 @@ class TelegramMessageRecordingTestCase(TestCase):
             username='default_silent_group',
         )
         self.assertEqual(flags, {'enabled': False, 'push_enabled': True})
+
+    def test_group_or_channel_message_does_not_collect_user_profile(self):
+        item = async_to_sync(record_telegram_message)(
+            tg_user_id=70010,
+            chat_id=-10070010,
+            message_id=1,
+            direction=TelegramChatMessage.DIRECTION_IN,
+            content_type='text',
+            text='group message',
+            username='group_member',
+            first_name='Group Member',
+            chat_title='No Collect Group',
+            source='account',
+            collect_user=False,
+        )
+
+        self.assertIsNone(item.user_id)
+        self.assertEqual(item.tg_user_id, 70010)
+        self.assertEqual(item.chat_id, -10070010)
+        self.assertFalse(TelegramUser.objects.filter(tg_user_id=70010).exists())
+
+    def test_group_or_channel_operation_log_does_not_collect_user_profile(self):
+        item = async_to_sync(record_bot_operation_log)(
+            tg_user_id=70011,
+            chat_id=-10070011,
+            message_id=2,
+            action_type='message',
+            action_label='群组消息',
+            payload='group command',
+            username='group_member',
+            first_name='Group Member',
+            collect_user=False,
+        )
+
+        self.assertIsNone(item.user_id)
+        self.assertEqual(item.tg_user_id, 70011)
+        self.assertFalse(TelegramUser.objects.filter(tg_user_id=70011).exists())
 
     def test_recording_same_tg_user_refreshes_name_and_prioritizes_new_username(self):
         async_to_sync(record_telegram_message)(

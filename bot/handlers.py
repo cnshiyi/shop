@@ -144,16 +144,12 @@ from cloud.ports import MTPROXY_DEFAULT_PORT, get_mtproxy_port_plan
 
 logger = logging.getLogger(__name__)
 
-_CUSTOM_REGIONS_CACHE: dict[str, object] = {'expires_at': 0.0, 'items': None}
-_REGION_PLANS_CACHE: dict[str, tuple[float, object]] = {}
 _TG_CHAT_CACHE: dict[int, tuple[float, dict[str, object]]] = {}
 _USER_SYNC_CACHE: dict[int, tuple[float, tuple[str | None, str | None, tuple[str, ...]]]] = {}
 _ASSET_REINIT_INFLIGHT: set[int] = set()
 _CLOUD_PROVISION_INFLIGHT: set[int] = set()
 _CALLBACK_ONCE_KEYS: dict[str, float] = {}
 _REINSTALL_CONFIRM_TTL = 600
-_CUSTOM_REGIONS_CACHE_TTL = 60
-_REGION_PLANS_CACHE_TTL = 60
 _TG_CHAT_CACHE_TTL = 120
 _USER_SYNC_CACHE_TTL = 15
 _CALLBACK_ONCE_TTL = 600
@@ -952,6 +948,7 @@ async def _send_admin_reply_to_link(bot: Bot, message: Message, link) -> bool:
             text=text,
             username=link.user.primary_username,
             first_name=link.user.first_name or '客服',
+            collect_user=True,
         )
         await message.reply('✅ 已发送给用户')
         logger.info('ADMIN_REPLY_SENT admin_chat_id=%s admin_message_id=%s user_id=%s user_chat_id=%s sent_message_id=%s type=%s', message.chat.id, message.message_id, link.user_id, link.user_chat_id, getattr(sent, 'message_id', None), content_type)
@@ -996,6 +993,7 @@ async def _handle_admin_reply_message(bot: Bot, message: Message, state: FSMCont
                 text=reply_text,
                 username=None,
                 first_name='客服',
+                collect_user=target_chat_id > 0,
             )
             await message.reply('✅ 已发送给用户')
             logger.info('ADMIN_REPLY_COMMAND_SENT admin_chat_id=%s admin_message_id=%s user_chat_id=%s sent_message_id=%s', message.chat.id, message.message_id, target_chat_id, getattr(sent, 'message_id', None))
@@ -1094,25 +1092,11 @@ async def _forward_plain_text_to_admin(bot: Bot, message: Message):
 
 
 async def _get_cached_custom_regions():
-    now = time.monotonic()
-    items = _CUSTOM_REGIONS_CACHE.get('items')
-    expires_at = float(_CUSTOM_REGIONS_CACHE.get('expires_at') or 0.0)
-    if items is not None and expires_at > now:
-        return items
-    items = await list_custom_regions()
-    _CUSTOM_REGIONS_CACHE['items'] = items
-    _CUSTOM_REGIONS_CACHE['expires_at'] = now + _CUSTOM_REGIONS_CACHE_TTL
-    return items
+    return await list_custom_regions()
 
 
 async def _get_cached_region_plans(region_code: str):
-    now = time.monotonic()
-    cached = _REGION_PLANS_CACHE.get(region_code)
-    if cached and cached[0] > now:
-        return cached[1]
-    plans = await list_region_plans(region_code)
-    _REGION_PLANS_CACHE[region_code] = (now + _REGION_PLANS_CACHE_TTL, plans)
-    return plans
+    return await list_region_plans(region_code)
 
 
 async def _get_cached_chat_profile(bot: Bot, user_id: int):
@@ -1364,7 +1348,7 @@ class RawUserLoggingMiddleware:
                 }
                 logger.debug('原始Telegram用户对象: event=%s payload=%s', event.__class__.__name__, payload)
 
-            if _should_sync_user(user.id, chat_username, first_name, active_usernames):
+            if not is_group_chat and _should_sync_user(user.id, chat_username, first_name, active_usernames):
                 await get_or_create_user(user.id, chat_username, first_name, active_usernames)
             if bot and not is_group_chat:
                 try:
@@ -1390,6 +1374,7 @@ class RawUserLoggingMiddleware:
                         text=message_text,
                         username=chat_username,
                         first_name=first_name,
+                        collect_user=not is_group_chat,
                     )
                 except Exception as exc:
                     logger.warning('Telegram聊天记录保存失败: user_id=%s err=%s', user.id, exc)
@@ -1403,6 +1388,7 @@ class RawUserLoggingMiddleware:
                         payload=message_text or _message_content_type(event),
                         username=chat_username,
                         first_name=first_name,
+                        collect_user=not is_group_chat,
                     )
                 except Exception as exc:
                     logger.warning('机器人操作日志保存失败: user_id=%s err=%s', user.id, exc)
@@ -1418,6 +1404,7 @@ class RawUserLoggingMiddleware:
                         payload=getattr(event, 'data', '') or '',
                         username=chat_username,
                         first_name=first_name,
+                        collect_user=not is_group_chat,
                     )
                 except Exception as exc:
                     logger.warning('机器人操作日志保存失败: user_id=%s err=%s', user.id, exc)

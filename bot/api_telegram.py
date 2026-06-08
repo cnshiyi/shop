@@ -1,5 +1,8 @@
 """Dashboard API views for Telegram login accounts, chats, and group filters."""
 
+import re
+import unicodedata
+
 from asgiref.sync import async_to_sync
 from django.db.models import Count, Max, Q
 from django.utils import timezone
@@ -287,6 +290,20 @@ def _telegram_api_credentials():
         raise ValueError('Telegram API ID 必须是数字') from exc
 
 
+def _normalize_telegram_phone(value) -> str:
+    raw = unicodedata.normalize('NFKC', str(value or '').strip())
+    if not raw:
+        return ''
+    phone = re.sub(r'[\s().-]+', '', raw)
+    if phone.startswith('00'):
+        phone = f'+{phone[2:]}'
+    if not phone.startswith('+'):
+        raise ValueError('手机号必须使用国际格式，请带国家码，例如 +8613800000000')
+    if not re.fullmatch(r'\+[1-9]\d{7,14}', phone):
+        raise ValueError('手机号格式无效，请使用国际格式，例如 +8613800000000')
+    return phone
+
+
 async def _telegram_send_code(phone: str, api_id: int, api_hash: str):
     from telethon import TelegramClient
     from telethon.sessions import StringSession
@@ -425,7 +442,11 @@ def update_telegram_account_notify(request, account_id: int):
 @require_POST
 def telegram_login_start(request):
     payload = _read_payload(request)
-    phone = str(payload.get('phone') or '').strip()
+    raw_phone = payload.get('phone')
+    try:
+        phone = _normalize_telegram_phone(raw_phone)
+    except ValueError as exc:
+        return _error(str(exc), status=400)
     if not phone:
         return _error('手机号不能为空', status=400)
     try:

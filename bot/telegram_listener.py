@@ -376,6 +376,7 @@ async def _record_event(account: LoginAccountSnapshot, event, self_user_id=None)
         chat_title=chat_title,
         source='account',
         active_usernames=_entity_usernames(counterpart),
+        collect_user=not is_group_chat,
     )
     push_config = await _cached_telegram_push_config()
     account_push_enabled = bool(account.listener_push_enabled)
