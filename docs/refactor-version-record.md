@@ -16354,3 +16354,88 @@ rg -n "service_expires_at|actual_expires_at.*CloudServerOrder|CloudServerOrder.*
 - 继续巡检分组视图下的用户分组/群组分组翻页，避免只覆盖非分组 IP 视图。
 - 继续检查机器人返回链和 Telegram `callback_data` 64 字节限制。
 - 继续把机器人多任务高并发作为每轮固定回归项。
+
+## 2026-06-08 16:18 风险标签分页修复收口与回调长度专项巡检
+
+### 背景
+
+本轮继续执行自动优化固定入口。`TODO.md` 中显式任务已全部完成，因此按 `docs/auto-optimization-control.md` 固定巡检清单执行收口验证，优先处理当前工作区中尚未提交的代理列表风险标签深页排序修复，并追加机器人 `callback_data` 长度专项巡检，避免上一轮补丁在未完整验证前留在脏工作区。
+
+### 本轮范围
+
+- 后端仓库：`/Users/a399/Desktop/data/shop`
+- 前端仓库：`/Users/a399/Desktop/data/vue-shop-admin`
+  - 仅检查 `git status --short`
+  - 当前无未提交改动
+- 巡检重点：
+  - 代理列表风险标签分页排序契约
+  - 机器人返回链与 `callback_data` 64 字节限制
+  - 钱包直付 / 补付 / 续费后台任务并发隔离
+
+### 代码与结论
+
+本轮未新增业务逻辑改动，收口并确认当前待提交补丁内容如下：
+
+- `cloud/api_asset_snapshots.py`
+  - 风险标签默认排序复用快照表已有组合索引：
+    - `normal`、`due_soon`、`expired`、`unattached_ip`、`abnormal`、`unbound_user`、`unbound_group`
+      - `asset_due_sort_null_rank`
+      - `asset_due_sort_at`
+      - `group_user_label`
+      - `group_user_key`
+      - `-asset_id`
+    - `shutdown_disabled`、`auto_renew_off`
+      - `group_telegram_key`
+      - `group_telegram_label`
+      - `-asset_id`
+- `cloud/tests.py`
+  - 将原未绑定标签排序测试扩展为：
+    - `test_cloud_assets_risk_ordering_uses_existing_page_indexes`
+  - 用例锁定“复用已有索引而不是继续堆索引”的排序契约
+
+只读专项巡检结果：
+
+- `bot/keyboards.py`
+  - `append_back_callback`
+  - `compact_callback_path`
+  - `_compact_back_callback_for_nested_action`
+  - `_shorten_callback_base`
+- 结合现有聚焦用例确认极端长 ID 下订单详情、资产详情、IP 查询动作和自动续费回跳都仍在 `64` 字节限制内。
+- 未发现 `order-xxx/asset-xxx` 混合主键契约回流。
+
+### 重要发现
+
+- `cloud_asset_dashboard_snapshot` 在真实 MySQL 上仍受单表 `64` 索引上限约束，本轮没有继续尝试新增索引。
+- `uv run python manage.py makemigrations --check --dry-run` 在当前沙箱环境中会给出无法连接 `127.0.0.1:3306` 的运行时警告，但最终返回 `No changes detected`，未观察到模型漂移。
+- SQLite 聚焦测试继续打印 `db_comment` 相关告警，这属于 SQLite 方言能力限制，不是本轮失败原因。
+
+### 验证
+
+通过：
+
+```bash
+UV_CACHE_DIR=/private/tmp/uv-cache-shop uv run python manage.py check
+UV_CACHE_DIR=/private/tmp/uv-cache-shop uv run python manage.py makemigrations --check --dry-run
+UV_CACHE_DIR=/private/tmp/uv-cache-shop DJANGO_TEST_SQLITE=1 uv run python manage.py test cloud.tests.CloudServerServicesTestCase.test_cloud_assets_risk_ordering_uses_existing_page_indexes cloud.tests.CloudServerServicesTestCase.test_cloud_assets_paginated_uses_true_database_pages cloud.tests.CloudServerServicesTestCase.test_cloud_assets_list_compact_returns_ip_view_payload bot.tests.RetainedIpRenewalUiTestCase.test_cloud_server_list_order_detail_uses_short_back_callback bot.tests.RetainedIpRenewalUiTestCase.test_asset_detail_callback_from_extreme_order_detail_stays_under_limit bot.tests.RetainedIpRenewalUiTestCase.test_asset_detail_callback_recompacts_nested_asset_detail_back_path bot.tests.RetainedIpRenewalUiTestCase.test_cloud_ip_query_actions_return_to_query_menu bot.tests.RetainedIpRenewalUiTestCase.test_cloud_auto_renew_callbacks_keep_nested_back_under_limit bot.tests.TelegramListenerPushTestCase.test_notice_copy_wrapper_keeps_concurrent_user_sends_isolated bot.tests.RetainedIpRenewalUiTestCase.test_cloud_background_tasks_keep_high_concurrency_isolated bot.tests.RetainedIpRenewalUiTestCase.test_cloud_background_tasks_keep_bulk_concurrency_isolated --settings=shop.settings --verbosity=1
+UV_CACHE_DIR=/private/tmp/uv-cache-shop uv run python -m py_compile cloud/api_asset_snapshots.py cloud/tests.py bot/keyboards.py bot/tests.py
+git diff --check
+```
+
+结果：
+
+- `manage.py check` 通过。
+- `makemigrations --check --dry-run` 返回 `No changes detected`，但记录了本地 MySQL 连接受限警告。
+- 聚焦测试 `11` 条通过。
+- 编译检查通过。
+- `git diff --check` 通过。
+
+### 受限项
+
+- 本轮未执行真实云资源创建、关机、删机、释放 IP、换 IP、真实支付、链上广播、生产发布或删除业务数据。
+- 本轮未打印密钥、Telegram session、TOTP、支付密钥、云厂商密钥或完整代理链接。
+
+### 下一步
+
+- 继续巡检代理列表分组视图下的用户分组 / 群组分组深分页与真实跳页表现。
+- 继续将机器人返回链和 `callback_data <= 64` 字节限制纳入每轮固定回归。
+- 继续把 `60` 路机器人后台任务并发隔离作为固定回归项。
