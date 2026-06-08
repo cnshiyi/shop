@@ -4,6 +4,10 @@
 
 ## 待办
 
+- [ ] 压测数据库隔离改造：后续性能压测、批量造数、深分页压测必须先创建一个全新的独立测试数据库，完成迁移和造数后只在该测试库执行压测；禁止在当前业务库、手工真机测试库或含真实用户数据的库上直接压测。
+  - 输出：压测入口或脚本支持指定/创建独立测试库；中文记录数据库名、端口、造数规模、压测命令、结果和清理策略；不打印任何密钥。
+  - 验证：`uv run python manage.py check`、压测脚本 dry-run 或小规模测试库实跑、`git diff --check`。
+
 - [x] 全自动优化项目巡检：按 `docs/auto-optimization-control.md` 固定入口自动领取下一项，不做真实支付、链上广播、真实云资源创建/删除、生产发布或删除数据；每轮只做一个最小安全修复，并完成验证、中文记录和 git commit。
   - 输出：修复代码或记录只读巡检结论；更新 `docs/auto-optimization-latest.md`，在 `docs/refactor-version-record.md` 追加中文记录。
   - 验证：`uv run python manage.py check`、相关聚焦测试或编译检查、`git diff --check`。

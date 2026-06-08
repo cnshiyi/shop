@@ -18987,3 +18987,40 @@ rg -n "TaskCenter|task center|任务中心|retry|重试|failed|failure|status" c
 - `bot.tests.RetainedIpRenewalUiTestCase` 51 个机器人返回链和 callback 长度聚焦测试通过。
 - 编译检查通过。
 - SQLite 聚焦测试仍输出既有 `db_comment/db_table_comment` 能力差异告警，不属于本轮问题。
+
+## 2026-06-08 22:58 CST 压测数据库隔离规则调整
+
+### 本轮背景
+
+- 用户明确要求：“压测改为创建一个测试数据库压测”。
+- 当前会话先中断正在运行的连续巡检循环，避免旧口径继续领取任务。
+- 中断前的只读巡检记录已提交为 `b5d36bc`。
+- 本轮只调整执行规则和任务入口，不执行真实压测、真实支付、链上广播、真实云资源操作、生产发布或删除数据。
+
+### 调整内容
+
+- `AGENTS.md`
+  - 增加压测边界：性能压测、批量造数或大数据分页验证必须先创建全新的独立测试数据库。
+  - 禁止在当前业务库、手工真机测试库或含真实用户数据的库上直接压测。
+- `docs/auto-optimization-control.md`
+  - 在核心红线中加入独立压测数据库规则。
+  - 在下一轮优先事项中要求记录数据库名、端口、造数规模、验证命令和清理策略。
+- `TODO.md`
+  - 新增首个未完成任务“压测数据库隔离改造”。
+  - 后续 `continue to next task` 会优先领取该任务。
+- `docs/auto-optimization-latest.md`
+  - 覆盖记录本轮规则调整和下一轮优先事项。
+
+### 结论
+
+- 后续压测不再复用当前业务库或此前手工真机测试库。
+- 下一轮自动监工会先处理压测数据库隔离任务，建立独立测试库压测流程。
+
+### 验证
+
+待提交前执行：
+
+```bash
+UV_CACHE_DIR=/private/tmp/uv-cache-shop uv run python manage.py check
+git diff --check
+```
