@@ -4,38 +4,35 @@
 
 ## 最近一轮
 
-- 时间：2026-06-08 14:54 CST
-- 状态：完成一轮执行器/快照延迟刷新巡检，修复线程启动失败时延迟刷新锁未立即释放的问题。
+- 时间：2026-06-08 15:16 CST
+- 状态：完成一轮生命周期计划/任务中心专项审计；未发现新的最小安全修复点，本轮无业务代码改动。
 - 本轮范围：
-  - `cloud/dashboard_snapshots.py`：仪表盘、计划表、通知表延迟刷新协调器。
-  - `cloud/tests.py`：延迟刷新线程启动失败防回退测试。
-  - 机器人并发聚焦测试。
+  - `cloud/task_center.py` 生命周期计划聚合逻辑。
+  - `bot/api.py` 生命周期计划总开关/单项开关状态映射。
+  - 机器人后台钱包任务并发隔离回归。
 
-## 修复结论
+## 审计结论
 
-- 巡检用户此前提到的“新进程创建失败/执行器失败”方向时，当前代码没有发现生产路径还在创建独立进程。
-- 现有定时管理命令使用 `asyncio.to_thread`，仪表盘刷新使用 `threading.Thread` 做后台延迟刷新。
-- 发现一个真实缺口：`_refresh_dashboard_plan_snapshots_deferred()` 在 `Thread.start()` 抛 `RuntimeError("can't start new thread")` 时，已经写入的去重锁不会立即释放，需要等待 `60` 秒 TTL，可能导致后续刷新被误跳过。
-- 已把 `can't start new thread` / `cannot start new thread` / `can't create new thread` / `cannot create new thread` 纳入可识别的 shutdown/thread 资源错误。
-- 已在 `Thread.start()` 外层增加兜底：
-  - 启动失败时立即 `cache.delete(lock_key)`。
-  - shutdown/thread 资源类错误记为跳过，不打成异常堆栈。
-  - 其他 RuntimeError 仍按异常记录。
+- 生命周期计划页现有回归覆盖仍能通过：
+  - 关机计划与删机计划拆分展示。
+  - 资产级 `shutdown_enabled` / `server_delete_enabled` / `ip_delete_enabled` 三个单项开关分别生效。
+  - `cloud_server_shutdown_enabled` / `cloud_server_delete_enabled` / `cloud_ip_delete_enabled` 三个总开关状态仍能正确映射到计划项。
+- 任务中心生命周期聚合现有回归仍能通过：
+  - 失败历史、DB 执行任务、计划项之间的去重逻辑未回退。
+  - `failed` / `active` / `warning` 聚合结果与现有测试契约一致。
+- 机器人后台并发回归仍通过：
+  - 通知复制包装器隔离正常。
+  - 钱包直付、钱包补付、续费后巡检的并发任务未出现串线。
 
-## 机器人高并发测试
+## 压测/对账结果
 
-本轮按用户要求继续覆盖机器人多任务高并发，聚焦执行：
-
-```bash
-UV_CACHE_DIR=/private/tmp/uv-cache-shop DJANGO_TEST_SQLITE=1 uv run python manage.py test bot.tests.TelegramListenerPushTestCase.test_notice_copy_wrapper_keeps_concurrent_user_sends_isolated bot.tests.RetainedIpRenewalUiTestCase.test_cloud_background_tasks_keep_high_concurrency_isolated bot.tests.RetainedIpRenewalUiTestCase.test_cloud_background_tasks_keep_bulk_concurrency_isolated --settings=shop.settings --verbosity=1
-```
-
-结果：
-
-- `3` 条通过。
-- 覆盖通知复制包装器并发隔离。
-- 覆盖钱包直付、钱包补付、续费后巡检同时执行。
-- 覆盖 `20` 组批量钱包直付、`20` 组钱包补付、`20` 组续费后巡检，总计 `60` 路并发任务，验证消息、创建准备调用和后台创建任务不串线不丢失。
+- 本轮完成的真实可验证测试为 SQLite 聚焦回归，覆盖：
+  - 生命周期计划/任务中心 `17` 条回归用例。
+  - 机器人高并发 `3` 条回归用例。
+  - 机器人批量并发样本仍为 `20` 组直付 + `20` 组补付 + `20` 组续费后巡检，总计 `60` 路并发任务。
+- 计划中的本地 MySQL 真实库对账与 `10` 万量级以上分页/计数审计在当前沙箱环境被阻断：
+  - `uv run python manage.py shell -c "..."` 连接 `127.0.0.1` MySQL 时返回 `PermissionError: [Errno 1] Operation not permitted`。
+  - 因此本轮未能在当前环境复用既有 `50` 万/`150` 万真实数据做只读对账。
 
 ## 后端验证
 
@@ -43,27 +40,26 @@ UV_CACHE_DIR=/private/tmp/uv-cache-shop DJANGO_TEST_SQLITE=1 uv run python manag
 
 ```bash
 UV_CACHE_DIR=/private/tmp/uv-cache-shop uv run python manage.py check
-UV_CACHE_DIR=/private/tmp/uv-cache-shop DJANGO_TEST_SQLITE=1 uv run python manage.py test cloud.tests.CloudServerServicesTestCase.test_dashboard_snapshot_deferred_releases_lock_when_thread_start_fails --settings=shop.settings --verbosity=1
-UV_CACHE_DIR=/private/tmp/uv-cache-shop uv run python -m py_compile cloud/dashboard_snapshots.py cloud/tests.py
+UV_CACHE_DIR=/private/tmp/uv-cache-shop DJANGO_TEST_SQLITE=1 uv run python manage.py test cloud.tests_task_center.CloudTaskCenterApiTestCase cloud.tests.CloudServerServicesTestCase.test_lifecycle_plans_use_stage_specific_asset_switches cloud.tests.CloudServerServicesTestCase.test_lifecycle_plans_show_global_stage_switches cloud.tests.CloudServerServicesTestCase.test_lifecycle_plans_split_shutdown_before_server_delete --settings=shop.settings --verbosity=1
 UV_CACHE_DIR=/private/tmp/uv-cache-shop DJANGO_TEST_SQLITE=1 uv run python manage.py test bot.tests.TelegramListenerPushTestCase.test_notice_copy_wrapper_keeps_concurrent_user_sends_isolated bot.tests.RetainedIpRenewalUiTestCase.test_cloud_background_tasks_keep_high_concurrency_isolated bot.tests.RetainedIpRenewalUiTestCase.test_cloud_background_tasks_keep_bulk_concurrency_isolated --settings=shop.settings --verbosity=1
 git diff --check
 ```
 
-红线扫描通过：
+受限：
 
 ```bash
-rg -n "service_expires_at|actual_expires_at.*CloudServerOrder|CloudServerOrder.*actual_expires_at|plan snapshot|snapshot table|old refund|refund_legacy|refund_old|legacy_refund|accounts\\.|finance\\.|mall\\.|monitoring\\.|dashboard_api\\.|biz\\." cloud bot orders core shop -g '!**/migrations/**'
+UV_CACHE_DIR=/private/tmp/uv-cache-shop uv run python manage.py shell -c "from cloud.models import CloudAsset, CloudIpLog; from cloud.lifecycle_plan_queries import server_lifecycle_plan_counts; import json; counts=server_lifecycle_plan_counts(); payload={'cloud_asset_total': CloudAsset.objects.count(), 'server_asset_total': CloudAsset.objects.filter(kind='server').count(), 'unattached_ip_history_logs': CloudIpLog.objects.filter(action='release_unattached_ip').count(), 'plan_counts': counts}; print(json.dumps(payload, ensure_ascii=False))"
 ```
 
-命中项仍为 Telegram 登录账号代码、云账号测试桩和 `CloudServerOrder.ip_recycle_at` 同步语句，不是旧到期事实回流。
+失败原因为当前沙箱禁止访问本机 `127.0.0.1` MySQL。
 
 ## 受限项
 
 - 本轮未执行真实云资源创建、关机、删机、释放 IP、换 IP、真实支付、链上广播、生产发布或删除业务数据。
 - 本轮未打印密钥、Telegram session、支付密钥、云厂商密钥或完整代理链接到仓库文件。
-- 本轮为执行器/后台刷新聚焦修复，未重新打开前端页面；上一轮已真实打开计划页和通知页完成对账。
+- 本轮未重新打开前端页面；前端仓库 `git status --short` 为空，但浏览器实页与真实 MySQL 大表对账受当前沙箱网络限制影响，未在本轮复跑。
 
 ## 下一步
 
-- 下一轮继续执行固定巡检清单，优先真实打开代理列表其他标签页面做加载、翻页和数据库对账。
-- 继续把机器人多任务高并发作为固定覆盖项。
+- 下一轮优先在可访问本地 MySQL 的环境中复跑生命周期计划真实库只读对账，补齐 `10` 万量级以上分页/计数验证。
+- 如环境仍受限，则继续只做固定巡检清单中的 SQLite 聚焦回归，并优先寻找新的最小安全缺陷而不是重复无效大表命令。

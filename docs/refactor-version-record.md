@@ -15737,3 +15737,69 @@ rg -n "service_expires_at|actual_expires_at.*CloudServerOrder|CloudServerOrder.*
 
 - 下一轮继续执行固定巡检清单，优先真实打开代理列表其他标签页面做加载、翻页和数据库对账。
 - 继续把机器人多任务高并发作为固定覆盖项。
+
+## 2026-06-08 15:16 生命周期计划/任务中心专项审计
+
+### 背景
+
+`TODO.md` 中的明确修复项已经全部勾选完成。本轮按 `docs/auto-optimization-control.md` 固定巡检清单继续执行，只领取一个“生命周期计划/任务中心专项审计”任务，不混入新的大范围改造。
+
+### 本轮范围
+
+- `cloud/task_center.py` 生命周期计划区块聚合。
+- `bot/api.py` 生命周期计划关机/删机/IP 删除三类总开关与单项开关状态映射。
+- 机器人后台钱包并发回归。
+
+### 审计结果
+
+- 生命周期计划页相关聚焦测试全部通过，确认以下契约未回退：
+  - 关机计划与删机计划拆分展示。
+  - `shutdown_enabled`、`server_delete_enabled`、`ip_delete_enabled` 三个资产单项开关仍分别作用于对应阶段。
+  - `cloud_server_shutdown_enabled`、`cloud_server_delete_enabled`、`cloud_ip_delete_enabled` 三个总开关仍正确投影到计划项状态。
+- 任务中心生命周期聚合测试全部通过，确认：
+  - 失败历史、计划项、DB 生命周期任务仍按既有优先级去重。
+  - `failed`、`active`、`warning` 汇总计数未发生回退。
+- 机器人并发测试继续通过，验证：
+  - 通知复制包装器隔离正常。
+  - 钱包直付、钱包补付、续费后巡检共 `60` 路并发任务未串线。
+
+### 压测/对账受限项
+
+本轮尝试补跑真实 MySQL 只读对账，命令如下：
+
+```bash
+UV_CACHE_DIR=/private/tmp/uv-cache-shop uv run python manage.py shell -c "from cloud.models import CloudAsset, CloudIpLog; from cloud.lifecycle_plan_queries import server_lifecycle_plan_counts; import json; counts=server_lifecycle_plan_counts(); payload={'cloud_asset_total': CloudAsset.objects.count(), 'server_asset_total': CloudAsset.objects.filter(kind='server').count(), 'unattached_ip_history_logs': CloudIpLog.objects.filter(action='release_unattached_ip').count(), 'plan_counts': counts}; print(json.dumps(payload, ensure_ascii=False))"
+```
+
+结果：
+
+- 当前沙箱禁止访问本机 `127.0.0.1` MySQL。
+- 报错为 `PermissionError: [Errno 1] Operation not permitted`，随后抛出 `django.db.utils.OperationalError: (2003, "Can't connect to MySQL server on '127.0.0.1' ([Errno 1] Operation not permitted)")`。
+- 因此本轮未能在当前环境复用既有 `50` 万/`150` 万真实数据做只读数据库对账，也无法满足本轮 `10` 万量级以上真实库分页验证目标。
+
+### 验证
+
+通过：
+
+```bash
+UV_CACHE_DIR=/private/tmp/uv-cache-shop uv run python manage.py check
+UV_CACHE_DIR=/private/tmp/uv-cache-shop DJANGO_TEST_SQLITE=1 uv run python manage.py test cloud.tests_task_center.CloudTaskCenterApiTestCase cloud.tests.CloudServerServicesTestCase.test_lifecycle_plans_use_stage_specific_asset_switches cloud.tests.CloudServerServicesTestCase.test_lifecycle_plans_show_global_stage_switches cloud.tests.CloudServerServicesTestCase.test_lifecycle_plans_split_shutdown_before_server_delete --settings=shop.settings --verbosity=1
+UV_CACHE_DIR=/private/tmp/uv-cache-shop DJANGO_TEST_SQLITE=1 uv run python manage.py test bot.tests.TelegramListenerPushTestCase.test_notice_copy_wrapper_keeps_concurrent_user_sends_isolated bot.tests.RetainedIpRenewalUiTestCase.test_cloud_background_tasks_keep_high_concurrency_isolated bot.tests.RetainedIpRenewalUiTestCase.test_cloud_background_tasks_keep_bulk_concurrency_isolated --settings=shop.settings --verbosity=1
+git diff --check
+```
+
+说明：
+
+- `cloud.tests_task_center.CloudTaskCenterApiTestCase` 共 `17` 条通过。
+- 机器人并发聚焦 `3` 条通过。
+- SQLite 测试数据库会打印大量 `db_comment` 能力告警，这是既有差异，不是本轮新增失败。
+
+### 改动
+
+- 无业务代码改动。
+- 仅更新本轮审计文档与版本记录。
+
+### 风险与下一步
+
+- 当前最大风险不是代码回退，而是本轮无法在沙箱里直接访问本地 MySQL，因此缺失 `10` 万量级以上真实库验证。
+- 下一轮优先在可访问本地 MySQL 的环境中复跑生命周期计划真实库只读对账；若环境仍受限，则继续只做 SQLite 聚焦回归并寻找新的最小安全缺陷。
