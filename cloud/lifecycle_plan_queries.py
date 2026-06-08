@@ -125,8 +125,7 @@ def asset_waiting_manual_time_q():
 
 def server_shutdown_complete_q():
     return (
-        Q(order__status__in=['suspended', 'deleting', 'deleted'])
-        | Q(status__in=[
+        Q(status__in=[
             CloudAsset.STATUS_STOPPED,
             CloudAsset.STATUS_SUSPENDED,
             CloudAsset.STATUS_DELETING,
@@ -152,26 +151,24 @@ def server_lifecycle_plan_queryset():
     )
 
 
-def _server_lifecycle_plan_ranked_queryset():
-    server_identity = Case(
+def _asset_ip_identity():
+    return Case(
         When(
-            provider_resource_id__isnull=False,
-            provider_resource_id__gt='',
-            then=Concat(Value('resource:'), F('provider_resource_id')),
+            public_ip__isnull=False,
+            public_ip__gt='',
+            then=Concat(Value('ip:'), F('public_ip')),
         ),
         When(
-            instance_id__isnull=False,
-            instance_id__gt='',
-            then=Concat(Value('instance:'), F('instance_id')),
+            previous_public_ip__isnull=False,
+            previous_public_ip__gt='',
+            then=Concat(Value('ip:'), F('previous_public_ip')),
         ),
         default=Concat(Value('asset:'), Cast('id', CharField())),
         output_field=CharField(),
     )
-    order_link_rank = Case(
-        When(order_id__isnull=False, then=Value(0)),
-        default=Value(1),
-        output_field=IntegerField(),
-    )
+
+
+def _server_lifecycle_plan_ranked_queryset():
     shutdown_complete_rank = Case(
         When(server_shutdown_complete_q(), then=Value(0)),
         default=Value(1),
@@ -180,17 +177,15 @@ def _server_lifecycle_plan_ranked_queryset():
     return (
         server_lifecycle_plan_queryset()
         .annotate(
-            _server_identity=server_identity,
-            _order_link_rank=order_link_rank,
+            _server_identity=_asset_ip_identity(),
             _shutdown_complete_rank=shutdown_complete_rank,
         )
         .annotate(
             _server_identity_rank=Window(
                 expression=RowNumber(),
-                partition_by=[F('provider'), F('region_code'), F('_server_identity')],
+                partition_by=[F('_server_identity')],
                 order_by=[
                     F('_shutdown_complete_rank').asc(),
-                    F('_order_link_rank').asc(),
                     F('actual_expires_at').asc(),
                     F('id').desc(),
                 ],
@@ -388,8 +383,56 @@ def completed_unattached_ip_active_queryset():
     )
 
 
+def _unattached_ip_delete_active_ranked_queryset():
+    return (
+        unattached_ip_delete_active_queryset()
+        .annotate(_ip_identity=_asset_ip_identity())
+        .annotate(
+            _ip_identity_rank=Window(
+                expression=RowNumber(),
+                partition_by=[F('_ip_identity')],
+                order_by=[
+                    F('actual_expires_at').asc(),
+                    F('id').desc(),
+                ],
+            )
+        )
+        .filter(_ip_identity_rank=1)
+    )
+
+
+def unattached_ip_delete_active_unique_queryset():
+    return unattached_ip_delete_active_queryset().filter(
+        pk__in=Subquery(_unattached_ip_delete_active_ranked_queryset().values('pk'))
+    )
+
+
+def _completed_unattached_ip_active_ranked_queryset():
+    return (
+        completed_unattached_ip_active_queryset()
+        .annotate(_ip_identity=_asset_ip_identity())
+        .annotate(
+            _ip_identity_rank=Window(
+                expression=RowNumber(),
+                partition_by=[F('_ip_identity')],
+                order_by=[
+                    F('updated_at').desc(),
+                    F('id').desc(),
+                ],
+            )
+        )
+        .filter(_ip_identity_rank=1)
+    )
+
+
+def completed_unattached_ip_active_unique_queryset():
+    return completed_unattached_ip_active_queryset().filter(
+        pk__in=Subquery(_completed_unattached_ip_active_ranked_queryset().values('pk'))
+    )
+
+
 def completed_unattached_ip_active_count() -> int:
-    return completed_unattached_ip_active_queryset().count()
+    return completed_unattached_ip_active_unique_queryset().count()
 
 
 def unattached_ip_delete_plan_page(
@@ -400,7 +443,7 @@ def unattached_ip_delete_plan_page(
     exclude_completed=True,
     completed_total: int | None = None,
 ):
-    queryset = unattached_ip_delete_active_queryset()
+    queryset = unattached_ip_delete_active_unique_queryset()
     start, end = page_bounds(page, page_size)
     if total is None:
         total = queryset.count()
@@ -412,11 +455,11 @@ def unattached_ip_delete_plan_page(
             completed_total = completed_unattached_ip_active_count()
         if completed_total > 0:
             if completed_total <= 1000:
-                completed_ids = list(completed_unattached_ip_active_queryset().values_list('id', flat=True)[:completed_total])
+                completed_ids = list(completed_unattached_ip_active_unique_queryset().values_list('id', flat=True)[:completed_total])
                 if completed_ids:
                     queryset = queryset.exclude(id__in=completed_ids)
             else:
-                queryset = queryset.exclude(id__in=completed_unattached_ip_active_queryset().values('id'))
+                queryset = queryset.exclude(id__in=completed_unattached_ip_active_unique_queryset().values('id'))
     if start > max(total // 2, page_size * 100):
         reverse_start = max(total - end, 0)
         if reverse_start <= max(page_size * 20, 1000):
@@ -540,7 +583,7 @@ def ip_delete_plan_counts() -> dict[str, int]:
             'ip_delete_history_count': int(cached.get('ip_delete_history_count') or 0),
             'ip_delete_history_log_count': int(cached.get('ip_delete_history_log_count') or 0),
         }
-    active_count = unattached_ip_delete_active_queryset().count()
+    active_count = unattached_ip_delete_active_unique_queryset().count()
     completed_active_count = completed_unattached_ip_active_count()
     history_log_count = CloudIpLog.objects.filter(unattached_ip_delete_history_q()).count()
     history_asset_count = unattached_ip_delete_history_asset_queryset().count()
@@ -566,7 +609,7 @@ def ip_delete_history_page_sources(
     start, end = page_bounds(page, page_size)
     history_logs = CloudIpLog.objects.filter(unattached_ip_delete_history_q()).select_related('asset', 'order', 'user').order_by('-created_at', '-id')
     history_assets = unattached_ip_delete_history_asset_queryset().order_by('-updated_at', '-id')
-    completed_assets = completed_unattached_ip_active_queryset().order_by('-updated_at', '-id')
+    completed_assets = completed_unattached_ip_active_unique_queryset().order_by('-updated_at', '-id')
     if log_total is None:
         log_total = history_logs.count()
     if asset_total is None:
@@ -606,7 +649,7 @@ def ip_delete_history_page_sources(
         start, end = reverse_start, reverse_end
         history_logs = CloudIpLog.objects.filter(unattached_ip_delete_history_q()).select_related('asset', 'order', 'user').order_by('created_at', 'id')
         history_assets = unattached_ip_delete_history_asset_queryset().order_by('updated_at', 'id')
-        completed_assets = completed_unattached_ip_active_queryset().order_by('updated_at', 'id')
+        completed_assets = completed_unattached_ip_active_unique_queryset().order_by('updated_at', 'id')
 
     chunk_size = max(page_size * 4, 50)
     source_specs = [

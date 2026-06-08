@@ -24,7 +24,7 @@ from orders.models import BalanceLedger
 from orders.services import usdt_to_trx
 from bot.models import TelegramUser
 from cloud.asset_expiry import order_asset_expiry
-from cloud.lifecycle_schedule import compute_order_lifecycle_fields, compute_orphan_asset_delete_at, compute_unattached_ip_release_at
+from cloud.lifecycle_schedule import compute_order_lifecycle_fields, compute_order_lifecycle_schedule, compute_orphan_asset_delete_at, compute_unattached_ip_release_at
 from cloud.dashboard_snapshots import _refresh_dashboard_plan_snapshots
 from cloud.lifecycle_tasks import cancel_notice_task, claim_notice_task, finish_notice_task
 from cloud.models import CloudAsset, CloudAutoRenewPatrolLog, CloudAutoRenewRetryTask, CloudServerOrder, CloudUserNoticeLog
@@ -317,6 +317,20 @@ def _orphan_asset_server_delete_at(asset: CloudAsset):
     return compute_orphan_asset_delete_at(getattr(asset, 'actual_expires_at', None))
 
 
+def _server_asset_suspend_at(asset: CloudAsset):
+    expires_at = getattr(asset, 'actual_expires_at', None)
+    if not expires_at:
+        return None
+    return compute_order_lifecycle_schedule(expires_at).suspend_at
+
+
+def _server_asset_delete_at(asset: CloudAsset):
+    expires_at = getattr(asset, 'actual_expires_at', None)
+    if not expires_at:
+        return None
+    return compute_order_lifecycle_schedule(expires_at).delete_at
+
+
 def _orphan_asset_server_delete_blocked_until(asset: CloudAsset, now=None):
     now = now or timezone.now()
     delete_at = _orphan_asset_server_delete_at(asset)
@@ -445,6 +459,24 @@ def _mark_suspended(order_id: int, note: str):
         asset.save(update_fields=['status', 'provider_status', 'is_active', 'updated_at'])
     record_cloud_ip_log(event_type='suspended', order=order, asset=asset, note=note or '服务器进入延停状态')
     return order
+
+
+@sync_to_async
+def _mark_asset_suspended(asset_id: int, note: str):
+    now = timezone.now()
+    asset = CloudAsset.objects.select_related('order').get(id=asset_id)
+    order = asset.order if asset.order_id else None
+    asset.status = CloudAsset.STATUS_STOPPED
+    asset.provider_status = '已关机-到期延停'
+    asset.is_active = False
+    asset.updated_at = now
+    asset.save(update_fields=['status', 'provider_status', 'is_active', 'updated_at'])
+    if order:
+        order.status = 'suspended'
+        order.provision_note = prepend_note(order.provision_note, note)
+        order.save(update_fields=['status', 'provision_note', 'updated_at'])
+    record_cloud_ip_log(event_type='suspended', order=order, asset=asset, note=note or '服务器进入延停状态')
+    return asset
 
 
 @sync_to_async
@@ -1818,25 +1850,55 @@ def _get_orphan_asset_delete_due():
 
 
 @sync_to_async
+def _get_server_asset_shutdown_due():
+    from cloud.lifecycle_plan_queries import server_lifecycle_plan_unique_queryset, server_shutdown_complete_q
+
+    now = timezone.now()
+    candidates = list(
+        server_lifecycle_plan_unique_queryset()
+        .exclude(server_shutdown_complete_q())
+        .exclude(provider='aliyun_simple')
+        .exclude(shutdown_enabled=False)
+        .order_by('actual_expires_at', 'id')[:1000]
+    )
+    return [
+        asset
+        for asset in candidates
+        if (_server_asset_suspend_at(asset) or timezone.datetime.max.replace(tzinfo=timezone.get_current_timezone())) <= now
+    ]
+
+
+@sync_to_async
+def _get_server_asset_delete_due():
+    from cloud.lifecycle_plan_queries import server_lifecycle_plan_unique_queryset, server_shutdown_complete_q
+
+    now = timezone.now()
+    candidates = list(
+        server_lifecycle_plan_unique_queryset()
+        .filter(server_shutdown_complete_q())
+        .exclude(provider='aliyun_simple')
+        .exclude(server_delete_enabled=False)
+        .order_by('actual_expires_at', 'id')[:1000]
+    )
+    return [
+        asset
+        for asset in candidates
+        if (_server_asset_delete_at(asset) or timezone.datetime.max.replace(tzinfo=timezone.get_current_timezone())) <= now
+    ]
+
+
+@sync_to_async
 def _get_unattached_static_ip_delete_due():
     now = timezone.now()
+    from cloud.lifecycle_plan_queries import unattached_ip_delete_active_unique_queryset
+
     waiting_manual_time_q = Q(provider_status__icontains='待人工添加时间') | Q(note__icontains='等待人工添加真实到期时间') | Q(note__icontains='等待人工添加时间')
     base_queryset = (
-        CloudAsset.objects.select_related('cloud_account')
-        .filter(
-            kind=CloudAsset.KIND_SERVER,
-            order__isnull=True,
-            provider='aws_lightsail',
-        )
-        .filter(
-            Q(instance_id__isnull=True) | Q(instance_id='')
-        )
-        .filter(
-            Q(provider_status__icontains='未附加固定IP') | Q(note__icontains='未附加固定IP') | Q(provider_resource_id__icontains='StaticIp')
-        )
+        unattached_ip_delete_active_unique_queryset()
+        .select_related('cloud_account')
+        .filter(provider='aws_lightsail')
         .exclude(ip_delete_enabled=False)
         .exclude(waiting_manual_time_q)
-        .exclude(status__in=[CloudAsset.STATUS_DELETED, CloudAsset.STATUS_DELETING, CloudAsset.STATUS_TERMINATED])
     )
     for asset in base_queryset.filter(actual_expires_at__isnull=True):
         _ensure_unattached_static_ip_release_at(asset, now=now)
@@ -1996,6 +2058,24 @@ def _stop_instance_sync(order: CloudServerOrder) -> tuple[bool, str]:
 
 async def _stop_instance(order: CloudServerOrder) -> tuple[bool, str]:
     return await sync_to_async(_stop_instance_sync, thread_sensitive=False)(order)
+
+
+def _stop_asset_instance_sync(asset: CloudAsset) -> tuple[bool, str]:
+    if asset.provider != 'aws_lightsail':
+        return False, '非 AWS 资源，暂未执行真实关机。'
+    try:
+        client = _aws_client(asset.region_code, getattr(asset, 'cloud_account', None))
+        instance_name = _aws_instance_name_for_asset(asset, client)
+        if not instance_name:
+            return False, 'AWS 实例关机失败：按 IP 未找到实例，且缺少实例名。'
+        client.stop_instance(instanceName=instance_name, force=True)
+        return True, f'AWS 实例已执行关机：{instance_name}。'
+    except Exception as exc:
+        return False, f'AWS 实例关机失败: {exc}'
+
+
+async def _stop_asset_instance(asset: CloudAsset) -> tuple[bool, str]:
+    return await sync_to_async(_stop_asset_instance_sync, thread_sensitive=False)(asset)
 
 
 def _delete_instance_sync(order: CloudServerOrder) -> tuple[bool, str]:
@@ -2554,23 +2634,28 @@ def _order_action_ip(order) -> str:
 
 
 @sync_to_async
-def _defer_startup_lifecycle_actions(due, migration_due_orders, orphan_asset_delete_due, unattached_static_ip_delete_due, delay_seconds: int):
+def _defer_startup_lifecycle_actions(
+    migration_due_orders,
+    server_asset_shutdown_due,
+    server_asset_delete_due,
+    orphan_asset_delete_due,
+    unattached_static_ip_delete_due,
+    delay_seconds: int,
+):
     suspend_run_at = _next_cloud_action_run_at('cloud_suspend_time', '15:00', min_delay_seconds=delay_seconds)
     delete_run_at = _next_cloud_action_run_at('cloud_delete_time', '15:00', min_delay_seconds=delay_seconds)
     ip_delete_run_at = _next_cloud_action_run_at('cloud_unattached_ip_delete_time', '15:00', min_delay_seconds=delay_seconds)
     can_defer_delete = cloud_server_delete_enabled()
     can_defer_ip_delete = cloud_ip_delete_enabled()
-    for order in due.get('suspend') or []:
-        CloudServerOrder.objects.filter(id=order.id).update(suspend_at=suspend_run_at, updated_at=timezone.now())
+    for asset in server_asset_shutdown_due or []:
         logger.warning(
-            'CLOUD_STARTUP_DEFER_SUSPEND order_id=%s order_no=%s ip=%s old_suspend_at=%s deferred_until=%s message="启动检查命中到期关机，IP %s 将顺延到后台设定关机时间执行"',
-            order.id, order.order_no, _order_action_ip(order), order.suspend_at, suspend_run_at, _order_action_ip(order),
+            'CLOUD_STARTUP_DEFER_ASSET_SHUTDOWN asset_id=%s order_id=%s ip=%s actual_expires_at=%s deferred_until=%s message="启动检查命中资产关机计划，IP %s 本轮跳过真实关机，不改写真正到期时间"',
+            asset.id, asset.order_id, asset.public_ip or asset.previous_public_ip or '未分配', asset.actual_expires_at, suspend_run_at, asset.public_ip or asset.previous_public_ip or '未分配',
         )
-    for order in (due.get('delete') or []) if can_defer_delete else []:
-        CloudServerOrder.objects.filter(id=order.id).update(delete_at=delete_run_at, updated_at=timezone.now())
+    for asset in (server_asset_delete_due or []) if can_defer_delete else []:
         logger.warning(
-            'CLOUD_STARTUP_DEFER_DELETE order_id=%s order_no=%s ip=%s old_delete_at=%s deferred_until=%s message="启动检查命中到期删机，IP %s 将顺延到后台设定删机时间执行"',
-            order.id, order.order_no, _order_action_ip(order), order.delete_at, delete_run_at, _order_action_ip(order),
+            'CLOUD_STARTUP_DEFER_ASSET_DELETE asset_id=%s order_id=%s ip=%s actual_expires_at=%s deferred_until=%s message="启动检查命中资产删机计划，IP %s 本轮跳过真实删机，不改写真正到期时间"',
+            asset.id, asset.order_id, asset.public_ip or asset.previous_public_ip or '未分配', asset.actual_expires_at, delete_run_at, asset.public_ip or asset.previous_public_ip or '未分配',
         )
     for order in (migration_due_orders or []) if can_defer_delete else []:
         CloudServerOrder.objects.filter(id=order.id).update(migration_due_at=delete_run_at, updated_at=timezone.now())
@@ -2582,12 +2667,6 @@ def _defer_startup_lifecycle_actions(due, migration_due_orders, orphan_asset_del
         logger.warning(
             'CLOUD_STARTUP_DEFER_ORPHAN_ASSET_DELETE asset_id=%s ip=%s actual_expires_at=%s deferred_until=%s message="启动检查命中无订单资产删机，IP %s 本轮跳过真实删机，不改写真正到期时间"',
             asset.id, asset.public_ip or asset.previous_public_ip or '未分配', asset.actual_expires_at, delete_run_at, asset.public_ip or asset.previous_public_ip or '未分配',
-        )
-    for order in (due.get('recycle') or []) if can_defer_ip_delete else []:
-        CloudServerOrder.objects.filter(id=order.id).update(ip_recycle_at=ip_delete_run_at, updated_at=timezone.now())
-        logger.warning(
-            'CLOUD_STARTUP_DEFER_RECYCLE order_id=%s order_no=%s ip=%s old_ip_recycle_at=%s deferred_until=%s message="启动检查命中固定IP回收，IP %s 将顺延到后台设定IP删除时间执行"',
-            order.id, order.order_no, _order_action_ip(order), order.ip_recycle_at, ip_delete_run_at, _order_action_ip(order),
         )
     for asset in (unattached_static_ip_delete_due or []) if can_defer_ip_delete else []:
         logger.warning(
@@ -2648,20 +2727,20 @@ async def auto_renew_patrol_tick(notify=None, notify_target=None):
 
 async def lifecycle_tick(notify=None, notify_target=None, defer_destructive_seconds: int = 0):
     from cloud.lifecycle_execution import (
-        run_order_static_ip_release,
         run_orphan_asset_delete,
         run_replaced_order_delete,
-        run_shutdown_order_delete,
-        run_shutdown_order_suspend,
+        run_server_asset_suspend,
         run_unattached_ip_release,
     )
 
     due = await _get_due_orders()
     migration_due_orders = await _get_migration_due_orders()
-    orphan_asset_delete_due = await _get_orphan_asset_delete_due()
+    server_asset_shutdown_due = await _get_server_asset_shutdown_due()
+    server_asset_delete_due = await _get_server_asset_delete_due()
+    orphan_asset_delete_due = []
     unattached_static_ip_delete_due = await _get_unattached_static_ip_delete_due()
     logger.info(
-        '云服务器生命周期扫描：续费提醒=%s 自动续费预提醒=%s 自动续费=%s 删机提醒=%s IP回收提醒=%s 到期标记=%s 待关机=%s 待删机=%s 待回收IP=%s 迁移旧机待删=%s 孤儿资源待删=%s 续费提醒天数=%s 调试重复提醒=%s',
+        '云服务器生命周期扫描：续费提醒=%s 自动续费预提醒=%s 自动续费=%s 删机提醒=%s IP回收提醒=%s 到期标记=%s 订单待关机=%s 订单待删机=%s 订单待回收IP=%s 资产计划待关机=%s 资产计划待删机=%s 迁移旧机待删=%s 孤儿资源待删=%s 未附加IP待删=%s 续费提醒天数=%s 调试重复提醒=%s',
         len(due['renew_notice']),
         len(due['auto_renew_notice']),
         len(due['auto_renew']),
@@ -2671,23 +2750,35 @@ async def lifecycle_tick(notify=None, notify_target=None, defer_destructive_seco
         len(due['suspend']),
         len(due['delete']),
         len(due['recycle']),
+        len(server_asset_shutdown_due),
+        len(server_asset_delete_due),
         len(migration_due_orders),
         len(orphan_asset_delete_due),
+        len(unattached_static_ip_delete_due),
         due.get('config', {}).get('renew_notice_days'),
         due.get('config', {}).get('renew_notice_debug_repeat'),
     )
 
     await _process_auto_renew_retry_tasks(notify_target)
 
-    if defer_destructive_seconds and (due['suspend'] or due['delete'] or due['recycle'] or migration_due_orders or orphan_asset_delete_due or unattached_static_ip_delete_due):
-        deferred_at = await _defer_startup_lifecycle_actions(due, migration_due_orders, orphan_asset_delete_due, unattached_static_ip_delete_due, defer_destructive_seconds)
+    if defer_destructive_seconds and (server_asset_shutdown_due or server_asset_delete_due or migration_due_orders or orphan_asset_delete_due or unattached_static_ip_delete_due):
+        deferred_at = await _defer_startup_lifecycle_actions(
+            migration_due_orders,
+            server_asset_shutdown_due,
+            server_asset_delete_due,
+            orphan_asset_delete_due,
+            unattached_static_ip_delete_due,
+            defer_destructive_seconds,
+        )
         logger.warning(
-            'CLOUD_STARTUP_DEFER_DONE suspend=%s delete=%s recycle=%s migration_delete=%s orphan_asset_delete=%s unattached_ip_delete=%s deferred_suspend_until=%s deferred_delete_until=%s deferred_ip_delete_until=%s',
-            len(due['suspend']), len(due['delete']), len(due['recycle']), len(migration_due_orders), len(orphan_asset_delete_due), len(unattached_static_ip_delete_due), deferred_at['suspend'], deferred_at['delete'], deferred_at['ip_delete'],
+            'CLOUD_STARTUP_DEFER_DONE asset_shutdown=%s asset_delete=%s migration_delete=%s orphan_asset_delete=%s unattached_ip_delete=%s deferred_suspend_until=%s deferred_delete_until=%s deferred_ip_delete_until=%s',
+            len(server_asset_shutdown_due), len(server_asset_delete_due), len(migration_due_orders), len(orphan_asset_delete_due), len(unattached_static_ip_delete_due), deferred_at['suspend'], deferred_at['delete'], deferred_at['ip_delete'],
         )
         due['suspend'] = []
         due['delete'] = []
         due['recycle'] = []
+        server_asset_shutdown_due = []
+        server_asset_delete_due = []
         migration_due_orders = []
         orphan_asset_delete_due = []
         unattached_static_ip_delete_due = []
@@ -2759,51 +2850,25 @@ async def lifecycle_tick(notify=None, notify_target=None, defer_destructive_seco
             continue
         await _mark_expiring(order.id)
 
-    for order in due['suspend']:
-        notice = await _cloud_expiry_notice_payload(order.id)
-        if not notice.get('valid'):
-            continue
-        logger.info('开始执行云服务器关机：订单ID=%s 订单号=%s IP=%s 云厂商=%s 地区=%s', order.id, order.order_no, order.public_ip or order.previous_public_ip, order.provider, order.region_code)
-        result = await sync_to_async(run_shutdown_order_suspend, thread_sensitive=_db_thread_sensitive())(
-            order.id,
-            queue_status='scheduled_suspend',
+    for asset in server_asset_shutdown_due:
+        logger.info('开始执行资产计划云服务器关机：资源ID=%s 订单ID=%s IP=%s 云厂商=%s 地区=%s', asset.id, asset.order_id, asset.public_ip or asset.previous_public_ip, asset.provider, asset.region_code)
+        result = await sync_to_async(run_server_asset_suspend, thread_sensitive=_db_thread_sensitive())(
+            asset.id,
+            queue_status='scheduled_asset_suspend',
             enforce_schedule=True,
         )
         if result.get('ok'):
-            logger.info('云服务器关机成功：订单ID=%s 订单号=%s IP=%s', order.id, order.order_no, order.public_ip or order.previous_public_ip)
+            logger.info('资产计划云服务器关机成功：资源ID=%s IP=%s', asset.id, asset.public_ip or asset.previous_public_ip)
         else:
-            logger.warning('云服务器关机失败或跳过：订单ID=%s 订单号=%s IP=%s 原因=%s', order.id, order.order_no, order.public_ip or order.previous_public_ip, result.get('error'))
+            logger.warning('资产计划云服务器关机失败或跳过：资源ID=%s IP=%s 原因=%s', asset.id, asset.public_ip or asset.previous_public_ip, result.get('error'))
 
-    for order in due['delete']:
-        if order.status != 'failed':
-            notice = await _cloud_expiry_notice_payload(order.id)
-            if not notice.get('valid'):
-                continue
-        logger.info('开始执行云服务器删机：订单ID=%s 订单号=%s IP=%s 云厂商=%s 地区=%s', order.id, order.order_no, order.public_ip or order.previous_public_ip, order.provider, order.region_code)
-        result = await sync_to_async(run_shutdown_order_delete, thread_sensitive=_db_thread_sensitive())(
-            order.id,
-            queue_status='scheduled_delete',
-            enforce_schedule=True,
-        )
+    for asset in server_asset_delete_due:
+        logger.info('开始执行资产计划云服务器删机：资源ID=%s 订单ID=%s IP=%s 云厂商=%s 地区=%s', asset.id, asset.order_id, asset.public_ip or asset.previous_public_ip, asset.provider, asset.region_code)
+        result = await sync_to_async(run_orphan_asset_delete, thread_sensitive=_db_thread_sensitive())(asset.id, enforce_schedule=True)
         if result.get('ok'):
-            logger.info('云服务器删机成功：订单ID=%s 订单号=%s IP=%s', order.id, order.order_no, order.public_ip or order.previous_public_ip)
+            logger.info('资产计划云服务器删机成功：资源ID=%s IP=%s', asset.id, asset.public_ip or asset.previous_public_ip)
         else:
-            logger.warning('云服务器删机失败或跳过：订单ID=%s 订单号=%s IP=%s 原因=%s', order.id, order.order_no, order.public_ip or order.previous_public_ip, result.get('error'))
-
-    for order in due['recycle']:
-        notice = await _cloud_expiry_notice_payload(order.id)
-        if not notice.get('valid'):
-            continue
-        logger.info('开始释放订单固定IP：订单ID=%s 订单号=%s IP=%s 云厂商=%s 地区=%s', order.id, order.order_no, order.public_ip or order.previous_public_ip, order.provider, order.region_code)
-        result = await sync_to_async(run_order_static_ip_release, thread_sensitive=_db_thread_sensitive())(
-            order.id,
-            queue_status='scheduled_recycle',
-            enforce_schedule=True,
-        )
-        if result.get('ok'):
-            logger.info('订单固定IP释放成功：订单ID=%s 订单号=%s IP=%s', order.id, order.order_no, order.public_ip or order.previous_public_ip)
-        else:
-            logger.warning('订单固定IP释放失败或跳过：订单ID=%s 订单号=%s IP=%s 原因=%s', order.id, order.order_no, order.public_ip or order.previous_public_ip, result.get('error'))
+            logger.warning('资产计划云服务器删机失败或跳过：资源ID=%s IP=%s 原因=%s', asset.id, asset.public_ip or asset.previous_public_ip, result.get('error'))
 
     for order in migration_due_orders:
         logger.info('开始删除迁移旧服务器：订单ID=%s 订单号=%s IP=%s 云厂商=%s 地区=%s', order.id, order.order_no, order.public_ip or order.previous_public_ip, order.provider, order.region_code)

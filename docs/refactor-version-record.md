@@ -19151,6 +19151,75 @@ rg -n "TaskCenter|task center|任务中心|retry|重试|failed|failure|status" c
 - 后续如继续做性能压测、批量造数或大数据分页验证，先创建全新的独立测试数据库，并记录数据库名、端口、造数规模、命令、结果和清理策略。
 - 继续关注 10 万级数据下代理列表、生命周期计划和通知计划分页性能，不再复用当前业务库压测。
 
+## 2026-06-09 00:08 CST 生命周期计划执行链资产化确认
+
+### 本轮背景
+
+- 用户要求再次确认关机、删机、删除未附加 IP 是否严格按照计划表执行。
+- 开始时工作树已有生命周期计划页、计划去重和执行链未提交改动；本轮继续完成这些改动并验证。
+- 本轮不执行真实云资源创建、真实关机、真实删机、真实 IP 释放、真实支付、链上广播、生产发布或删除数据。
+
+### 修复
+
+- `cloud/lifecycle_plan_queries.py`
+  - 服务器生命周期计划统一从 `CloudAsset` 查询，按公网 IP 去重。
+  - 服务器关机计划和删机计划使用同一去重查询；已关机/已暂停资产优先进入删机阶段，避免阶段倒退。
+  - 未附加 IP 删除计划和完成态计划也按 IP 去重，计数、分页和历史来源口径一致。
+- `cloud/lifecycle.py`
+  - 新增资产级关机时间和删机时间计算：只使用 `CloudAsset.actual_expires_at`。
+  - 新增资产级关机 due 查询、资产级删机 due 查询。
+  - `lifecycle_tick()` 真实破坏性执行改为：
+    - 关机：资产计划 due -> `run_server_asset_suspend(asset.id)`。
+    - 删机：资产计划 due 且已完成关机 -> `run_orphan_asset_delete(asset.id)`。
+    - 未附加 IP 删除：未附加 IP 计划 due -> `run_unattached_ip_release(asset.id)`。
+  - 移除 tick 中旧订单关机、旧订单删机、旧订单固定 IP 回收的真实执行循环。
+  - 启动延迟保护只跳过本轮资产计划执行，不再改写旧订单关机/删机/IP 回收时间。
+- `cloud/lifecycle_execution.py`
+  - 新增 `run_server_asset_suspend()`，按资产执行关机，并同步关联订单状态。
+  - `run_orphan_asset_delete()` 允许有关联订单的资产按资产计划删机，但必须先完成关机阶段。
+  - 删机成功后同步订单和资产状态；无订单资产仍走资产删除记录。
+- `bot/api.py` / `shop/admin_urls.py`
+  - 计划页不再把有关联订单资产转回订单计划项，订单只作为展示上下文。
+  - 后台手动关机计划入口改为资产关机：`/api/admin/tasks/plans/server-assets/<asset_id>/shutdown/run/`。
+  - IP 删除手动入口只看 `ip_delete_enabled`，不再误看 `shutdown_enabled`。
+- `cloud/tests.py` / `cloud/tests_task_center.py`
+  - 增加/调整生命周期执行链、计划页 IP 去重、服务器计划 IP 去重、due 队列单项开关、后台手动执行入口、任务中心去重测试。
+
+### 结论
+
+- 修改前不能确认严格按计划表执行，因为 `lifecycle_tick()` 仍存在旧订单驱动的关机、删机和固定 IP 回收执行分支。
+- 修改后可以确认：真实执行入口均从资产计划查询层取 due 项，并由执行器二次校验时间、总开关、资产单项开关和阶段顺序。
+- 关机执行条件：全局关机开关开启、资产 `shutdown_enabled=True`、达到资产关机计划时间、处于关机执行时间窗口。
+- 删机执行条件：全局删机开关开启、资产 `server_delete_enabled=True`、资产已经 STOPPED/SUSPENDED/DELETING、达到资产删机计划时间、处于删机执行时间窗口。
+- 未附加 IP 删除执行条件：全局 IP 删除开关开启、资产 `ip_delete_enabled=True`、资产未附加实例、达到 IP 删除计划时间、处于 IP 删除执行时间窗口。
+- 未附加 IP 缺少到期时间时仍自动补 15 天释放时间；服务器缺少到期时间不自动补，继续等待人工维护。
+
+### 验证
+
+通过：
+
+```bash
+UV_CACHE_DIR=/private/tmp/uv-cache-shop uv run python manage.py check
+UV_CACHE_DIR=/private/tmp/uv-cache-shop uv run python -m py_compile cloud/lifecycle.py cloud/lifecycle_execution.py cloud/lifecycle_plan_queries.py bot/api.py shop/admin_urls.py cloud/tests.py cloud/tests_task_center.py
+UV_CACHE_DIR=/private/tmp/uv-cache-shop DJANGO_TEST_SQLITE=1 uv run python manage.py test cloud.tests.CloudServerServicesTestCase.test_lifecycle_tick_serializes_shutdown_delete_and_ip_release_stages cloud.tests.CloudServerServicesTestCase.test_orphan_asset_plan_run_rejects_active_linked_order_asset cloud.tests.CloudServerServicesTestCase.test_dashboard_orphan_asset_plan_run_respects_computed_delete_time cloud.tests.CloudServerServicesTestCase.test_dashboard_shutdown_plan_run_respects_asset_suspend_at --settings=shop.settings --verbosity=1
+UV_CACHE_DIR=/private/tmp/uv-cache-shop DJANGO_TEST_SQLITE=1 uv run python manage.py test cloud.tests.CloudServerServicesTestCase.test_lifecycle_plans_dedupes_ip_delete_plan_by_public_ip cloud.tests.CloudServerServicesTestCase.test_lifecycle_plans_dedupes_same_ip_server_assets cloud.tests.CloudServerServicesTestCase.test_lifecycle_plans_dedupes_server_shutdown_by_public_ip cloud.tests.CloudServerServicesTestCase.test_lifecycle_plans_deduped_server_prefers_shutdown_complete_stage cloud.tests.CloudServerServicesTestCase.test_unattached_ip_delete_plan_tail_page_keeps_exact_order --settings=shop.settings --verbosity=1
+UV_CACHE_DIR=/private/tmp/uv-cache-shop DJANGO_TEST_SQLITE=1 uv run python manage.py test cloud.tests.CloudServerServicesTestCase.test_lifecycle_due_queues_use_stage_specific_asset_switches cloud.tests.CloudServerServicesTestCase.test_unattached_ip_delete_ignores_shutdown_disabled_asset --settings=shop.settings --verbosity=1
+UV_CACHE_DIR=/private/tmp/uv-cache-shop DJANGO_TEST_SQLITE=1 uv run python manage.py test cloud.tests_task_center --settings=shop.settings --verbosity=1
+git diff --check
+```
+
+结果：
+
+- `manage.py check` 通过。
+- 编译检查通过。
+- 生命周期执行链、计划页去重、IP 删除开关、due 队列单项开关、任务中心统计聚焦测试通过。
+- SQLite 聚焦测试仍输出既有 `db_comment/db_table_comment` 能力差异告警，不属于本轮问题。
+
+### 后续
+
+- 前端仓库需要同步计划页关机按钮接口到新的资产关机路径。
+- 后续如继续真机验证，必须单独记录真实云资源测试报告，资源 ID 脱敏。
+
 ## 2026-06-08 23:23 CST 固定巡检清单只读复查
 
 ### 本轮背景

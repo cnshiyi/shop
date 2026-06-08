@@ -370,7 +370,7 @@ class CloudTaskCenterApiTestCase(TestCase):
         self.assertEqual(section['failed'], 0)
         self.assertEqual(section['health'], 'warning')
 
-    def test_lifecycle_section_dedupes_preview_items_by_strong_cloud_identity(self):
+    def test_lifecycle_section_dedupes_preview_items_by_public_ip(self):
         now = timezone.now()
         order = self._create_cloud_order('TASK-LIFECYCLE-DEDUPE-PREVIEW-1')
         order.instance_id = 'i-task-center-dedupe-preview'
@@ -384,8 +384,8 @@ class CloudTaskCenterApiTestCase(TestCase):
             region_code=order.region_code,
             region_name=order.region_name,
             asset_name='task-center-dedupe-preview',
-            instance_id=order.instance_id,
-            provider_resource_id=order.provider_resource_id,
+            instance_id='i-task-center-dedupe-preview-sync',
+            provider_resource_id='arn:aws:lightsail:us-east-1:123456789012:Instance/i-task-center-dedupe-preview-sync',
             public_ip=order.public_ip,
             status=CloudAsset.STATUS_RUNNING,
             is_active=True,

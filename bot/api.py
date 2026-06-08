@@ -23,7 +23,7 @@ from cloud.lifecycle import (
     cloud_server_delete_enabled,
     cloud_server_shutdown_enabled,
 )
-from cloud.lifecycle_execution import run_orphan_asset_delete, run_shutdown_order_delete, run_unattached_ip_release
+from cloud.lifecycle_execution import run_orphan_asset_delete, run_server_asset_suspend, run_unattached_ip_release
 from cloud.lifecycle_plan_queries import (
     active_cloud_account_labels as query_active_cloud_account_labels,
     asset_waiting_manual_time_q as query_asset_waiting_manual_time_q,
@@ -49,7 +49,7 @@ from cloud.lifecycle_plan_queries import (
 from cloud.lifecycle_schedule import compute_order_lifecycle_schedule, compute_unattached_ip_release_at
 from cloud.models import AddressMonitor, CloudAsset, CloudIpLog, CloudLifecyclePlanNote, CloudServerOrder
 from cloud.sync_safety import missing_confirmation_state
-from core.cloud_accounts import cloud_account_label, cloud_account_label_variants
+from core.cloud_accounts import cloud_account_label_variants
 from core.dashboard_api import DASHBOARD_SESSION_IDLE_SECONDS, _apply_keyword_filter, _authenticate_dashboard_request, _countdown_label, _dashboard_session_payload, _days_left, _decimal_to_str, _error, _get_keyword, _iso, _json_payload, _ok, _parse_decimal, _parse_runtime_time_point, _payload_bool, _provider_label, _provider_status_label, _read_payload, _region_label, _server_source_label, _session_token_for_request, _split_usernames, _staff_required, _status_label, _user_payload, _user_from_bearer_session, dashboard_login_required, dashboard_superuser_required
 from core.dashboard_totp import dashboard_totp_secret as _totp_secret, generate_totp_secret as _generate_totp_secret, normalize_totp_secret as _normalize_totp_secret, totp_otpauth_url as _totp_otpauth_url, verify_totp_token as _verify_totp_token
 from core.models import CloudAccountConfig, SiteConfig
@@ -539,16 +539,7 @@ def _dedupe_cloud_asset_plan_rows(assets):
     best = {}
     for asset in assets:
         ip = _cloud_asset_display_ip(asset)
-        cloud_account_id = getattr(asset, 'cloud_account_id', None)
-        account_label = str(
-            getattr(asset, 'account_label', '')
-            or cloud_account_label(getattr(asset, 'cloud_account', None))
-            or ''
-        ).strip()
-        account_key = f'cloud_account:{cloud_account_id}' if cloud_account_id else f'label:{account_label}'
-        provider = str(getattr(asset, 'provider', '') or '').strip()
-        region_code = str(getattr(asset, 'region_code', '') or '').strip()
-        key = f'{provider}:{account_key}:{region_code}:{ip}' if ip else f'id:{asset.id}'
+        key = f'ip:{ip}' if ip else f'id:{asset.id}'
         is_unattached = _asset_is_unattached_ip(asset) or 'StaticIp' in str(getattr(asset, 'provider_resource_id', '') or '')
         is_deleted = asset.status in {CloudAsset.STATUS_DELETED, CloudAsset.STATUS_TERMINATED}
         score = (
@@ -710,7 +701,7 @@ def _lifecycle_plan_note_scope(item_type='', *, order_id=None, asset_id=None):
     item_type = str(item_type or '').strip()
     if item_type == 'order' or order_id:
         return CloudLifecyclePlanNote.PLAN_KIND_SHUTDOWN_ORDER, int(order_id or 0), None
-    if item_type == 'orphan_asset':
+    if item_type in {'asset', 'orphan_asset'}:
         return CloudLifecyclePlanNote.PLAN_KIND_ORPHAN_ASSET_DELETE, None, int(asset_id or 0)
     return CloudLifecyclePlanNote.PLAN_KIND_UNATTACHED_IP_DELETE, None, int(asset_id or 0)
 
@@ -848,10 +839,13 @@ def _refresh_plan_payload_from_assets(items):
         item['server_delete_enabled'] = _asset_server_delete_enabled(asset)
         item['ip_delete_enabled'] = _asset_ip_delete_enabled(asset)
         item['source_note'] = str(item.get('source_note') or '').strip() or _asset_note_text(asset)
-        if item.get('data_group') == 'active' and item.get('plan_kind') in {
-            PLAN_KIND_ORPHAN_ASSET_DELETE,
-            PLAN_KIND_UNATTACHED_IP_DELETE,
-        }:
+        if item.get('data_group') == 'active' and (
+            item.get('item_type') in {'asset', 'orphan_asset'}
+            or item.get('plan_kind') in {
+                PLAN_KIND_ORPHAN_ASSET_DELETE,
+                PLAN_KIND_UNATTACHED_IP_DELETE,
+            }
+        ):
             item['note'] = _asset_note_text(asset)
             item['display_note'] = _asset_display_note(asset, fallback=item.get('display_note') or item.get('source_note') or '')
         item['detail_path'] = f'/admin/cloud-assets/{asset.id}'
@@ -2001,24 +1995,6 @@ def _shutdown_plan_item_payload(order, *, queue_status='scheduled_future', queue
     }
 
 
-def _linked_order_asset_delete_plan_item_payload(asset, linked_order, *, queue_status='scheduled_future', queue_status_label='计划中', note='', plan_stage='delete'):
-    item = _shutdown_plan_item_payload(
-        linked_order,
-        queue_status=queue_status,
-        queue_status_label=queue_status_label,
-        note=note,
-        asset=asset,
-        plan_stage=plan_stage,
-    )
-    item.update({
-        'asset_id': asset.id,
-        'asset_name': asset.asset_name,
-        'cloud_account_id': asset.cloud_account_id or getattr(linked_order, 'cloud_account_id', None),
-        'asset_detail_path': f'/admin/cloud-assets/{asset.id}',
-    })
-    return item
-
-
 def _asset_delete_plan_item_payload(asset, *, queue_status='scheduled_future', queue_status_label='计划中', note='', plan_stage='delete'):
     account_name, external_account_id = _cloud_account_labels(asset)
     ip = asset.public_ip or asset.previous_public_ip or '未分配'
@@ -2038,20 +2014,11 @@ def _asset_delete_plan_item_payload(asset, *, queue_status='scheduled_future', q
         queue_status = 'sync_only'
         queue_status_label = '只同步/自然释放'
         execution_status = '阿里云只同步状态，按云厂商自然释放；本系统不执行真实关机和删机'
-    elif linked_order and getattr(linked_order, 'status', '') not in {'deleted', 'cancelled', 'expired'}:
-        return _linked_order_asset_delete_plan_item_payload(
-            asset,
-            linked_order,
-            queue_status=queue_status,
-            queue_status_label=queue_status_label,
-            note=note,
-            plan_stage=plan_stage,
-        )
     elif linked_order and getattr(linked_order, 'status', '') in {'deleted', 'cancelled', 'expired'}:
         queue_status_label = '待处理'
         execution_status = '关联订单已结束，服务器仍存在，待执行删除服务器'
     elif linked_order:
-        execution_status = '代理列表资产待删除，订单仅作为展示信息'
+        execution_status = '代理列表资产计划已生成，订单仅作为展示信息'
     else:
         execution_status = '无订单同步资产已到期，待执行删除服务器'
     if is_shutdown_stage and not global_shutdown_enabled:
@@ -2080,7 +2047,7 @@ def _asset_delete_plan_item_payload(asset, *, queue_status='scheduled_future', q
         **_plan_item_identity('asset', asset.id, plan_kind='server_shutdown' if is_shutdown_stage else 'server_delete', plan_stage=plan_stage),
         'plan_kind': 'server_shutdown' if is_shutdown_stage else 'server_delete',
         'plan_stage': plan_stage,
-        'item_type': 'orphan_asset',
+        'item_type': 'asset',
         'asset_id': asset.id,
         'order_id': getattr(linked_order, 'id', None),
         'order_no': getattr(linked_order, 'order_no', None) or '-',
@@ -2146,16 +2113,6 @@ def _asset_ip_delete_enabled(asset):
 
 
 def _shutdown_stage_item_payload(asset, *, queue_status='scheduled_future', queue_status_label='计划中', note=''):
-    linked_order = getattr(asset, 'order', None)
-    if linked_order and getattr(linked_order, 'status', '') not in {'deleted', 'cancelled', 'expired'}:
-        return _linked_order_asset_delete_plan_item_payload(
-            asset,
-            linked_order,
-            queue_status=queue_status,
-            queue_status_label=queue_status_label,
-            note=note,
-            plan_stage='shutdown',
-        )
     item = _asset_delete_plan_item_payload(
         asset,
         queue_status=queue_status,
@@ -2176,7 +2133,6 @@ def _collect_shutdown_plan_queue(now, limit=100):
     pending_until = now + timezone.timedelta(days=7)
     server_assets = _proxy_list_cloud_asset_plan_rows(limit=limit, include_unattached=False)
     next_run_at = None
-    seen_linked_order_ids = set()
     shutdown_due_items = []
     shutdown_future_items = []
     due_items = []
@@ -2186,12 +2142,6 @@ def _collect_shutdown_plan_queue(now, limit=100):
             continue
         if _asset_deleted_or_missing(asset):
             continue
-        linked_order_id = getattr(asset, 'order_id', None)
-        linked_order = getattr(asset, 'order', None)
-        if linked_order_id and linked_order and getattr(linked_order, 'status', '') not in {'deleted', 'cancelled', 'expired'}:
-            if linked_order_id in seen_linked_order_ids:
-                continue
-            seen_linked_order_ids.add(linked_order_id)
         if _asset_is_sync_only_lifecycle(asset):
             future_items.append(
                 _asset_delete_plan_item_payload(
@@ -2204,8 +2154,7 @@ def _collect_shutdown_plan_queue(now, limit=100):
         _expires_at, suspend_at, delete_at = _server_asset_lifecycle_times(asset)
         if not next_run_at or (delete_at and delete_at < next_run_at):
             next_run_at = delete_at
-        linked_status = str(getattr(linked_order, 'status', '') or '')
-        shutdown_complete = linked_status in {'suspended', 'deleting', 'deleted'} or str(asset.status or '') in {
+        shutdown_complete = str(asset.status or '') in {
             CloudAsset.STATUS_STOPPED,
             CloudAsset.STATUS_SUSPENDED,
             CloudAsset.STATUS_DELETING,
@@ -2223,11 +2172,7 @@ def _collect_shutdown_plan_queue(now, limit=100):
                 shutdown_due_items.append(shutdown_payload)
             else:
                 shutdown_future_items.append(shutdown_payload)
-        delete_stage_ready = (
-            shutdown_complete
-            and (not linked_order or linked_status in {'suspended', 'deleting', 'failed', 'deleted', 'cancelled', 'expired'})
-        )
-        if delete_at and delete_stage_ready and delete_at <= pending_until:
+        if delete_at and shutdown_complete and delete_at <= pending_until:
             due_items.append(
                 _asset_delete_plan_item_payload(
                     asset,
@@ -2511,7 +2456,7 @@ def lifecycle_plans(request):
             plan_state_label = '无需执行'
             should_execute = False
             blocked_reason = '实例已删除，无需继续执行删机'
-        elif item_type == 'orphan_asset' and ip_retained:
+        elif item_type in {'asset', 'orphan_asset'} and ip_retained:
             resource_state = 'fixed_ip_unattached'
             resource_state_label = '固定IP未附加'
             plan_state = 'completed'
@@ -2892,15 +2837,15 @@ def update_lifecycle_plan_note(request):
     return _ok({'item_type': effective_item_type, 'asset_id': asset.id, 'note': note_text, 'display_note': display_note})
 
 
-def _run_shutdown_order_sync(order_id: int, queue_status='manual_single', enforce_schedule: bool = True):
-    return run_shutdown_order_delete(order_id, queue_status=queue_status, enforce_schedule=enforce_schedule)
+def _run_server_asset_shutdown_sync(asset_id: int, queue_status='manual_asset_shutdown', enforce_schedule: bool = True):
+    return run_server_asset_suspend(asset_id, queue_status=queue_status, enforce_schedule=enforce_schedule)
 
 
 @csrf_exempt
 @dashboard_superuser_required
 @require_POST
-def run_shutdown_plan_order(request, order_id):
-    result = _run_shutdown_order_sync(order_id, 'manual_single', enforce_schedule=True)
+def run_server_asset_shutdown_plan(request, asset_id):
+    result = _run_server_asset_shutdown_sync(asset_id, 'manual_asset_shutdown', enforce_schedule=True)
     _refresh_lifecycle_plan_cache(page_size=1000)
     return _ok({
         'batch_id': secrets.token_hex(8),
@@ -2908,7 +2853,7 @@ def run_shutdown_plan_order(request, order_id):
         'total': 1,
         'success_count': 1 if result['ok'] else 0,
         'failure_count': 0 if result['ok'] else 1,
-        'message': '服务器删除任务已执行' if result['ok'] else result.get('error') or '服务器删除任务执行失败',
+        'message': '服务器关机任务已执行' if result['ok'] else result.get('error') or '服务器关机任务执行失败',
     })
 
 
@@ -2938,7 +2883,7 @@ def _run_unattached_ip_delete_sync(asset_id: int, enforce_schedule: bool = True)
     should_check_window = bool(
         enforce_schedule
         and asset
-        and getattr(asset, 'shutdown_enabled', True) is not False
+        and getattr(asset, 'ip_delete_enabled', True) is not False
         and not getattr(asset, 'instance_id', None)
         and asset.actual_expires_at
         and asset.actual_expires_at <= now
@@ -3096,7 +3041,7 @@ __all__ = [
     'ip_delete_logs',
     'lifecycle_plans',
     'run_orphan_asset_delete_plan',
-    'run_shutdown_plan_order',
+    'run_server_asset_shutdown_plan',
     'run_unattached_ip_delete_plan',
     'me',
     'overview',

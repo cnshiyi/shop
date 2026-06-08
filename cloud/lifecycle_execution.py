@@ -197,6 +197,63 @@ def run_shutdown_order_delete(order_id: int, *, queue_status='manual_single', en
         raise
 
 
+def run_server_asset_suspend(asset_id: int, *, queue_status='scheduled_asset_suspend', enforce_schedule: bool = True) -> dict:
+    from cloud.lifecycle import (
+        asset_shutdown_enabled,
+        cloud_server_shutdown_enabled,
+        _is_cloud_suspend_time,
+        _mark_asset_suspended,
+        _server_asset_suspend_at,
+        _stop_asset_instance,
+    )
+
+    asset = CloudAsset.objects.select_related('cloud_account', 'order').filter(id=asset_id, kind=CloudAsset.KIND_SERVER).first()
+    if not asset:
+        return {'asset_id': asset_id, 'ip': '', 'queue_status': queue_status, 'ok': False, 'error': '服务器资产不存在'}
+    ip = asset.public_ip or asset.previous_public_ip or ''
+    now = timezone.now()
+    if asset.status in {
+        CloudAsset.STATUS_STOPPED,
+        CloudAsset.STATUS_SUSPENDED,
+        CloudAsset.STATUS_DELETED,
+        CloudAsset.STATUS_DELETING,
+        CloudAsset.STATUS_TERMINATED,
+        CloudAsset.STATUS_TERMINATING,
+    }:
+        return {'asset_id': asset.id, 'ip': ip, 'queue_status': queue_status, 'ok': False, 'error': '该服务器资产已完成关机或已删除，不需要重复执行'}
+    if asset.provider == 'aliyun_simple':
+        return {'asset_id': asset.id, 'ip': ip, 'queue_status': queue_status, 'ok': False, 'error': '阿里云轻量服务器当前只同步状态，不执行真实关机。'}
+    if enforce_schedule and not cloud_server_shutdown_enabled():
+        return {'asset_id': asset.id, 'ip': ip, 'queue_status': queue_status, 'ok': False, 'error': '服务器关机总开关已关闭，跳过真实关机。'}
+    if enforce_schedule and not asset_shutdown_enabled(asset):
+        return {'asset_id': asset.id, 'ip': ip, 'queue_status': queue_status, 'ok': False, 'error': '资产关机计划开关已关闭，跳过真实关机。'}
+    scheduled_at = _server_asset_suspend_at(asset)
+    if enforce_schedule:
+        if not scheduled_at:
+            return {'asset_id': asset.id, 'ip': ip, 'queue_status': queue_status, 'ok': False, 'error': '服务器没有计划关机时间，跳过真实关机。'}
+        if scheduled_at > now:
+            return {'asset_id': asset.id, 'ip': ip, 'queue_status': queue_status, 'ok': False, 'error': f'未到计划关机时间：{timezone.localtime(scheduled_at).strftime("%Y-%m-%d %H:%M:%S")}'}
+        if not _is_cloud_suspend_time(now):
+            return {'asset_id': asset.id, 'ip': ip, 'queue_status': queue_status, 'ok': False, 'error': '当前不在后台配置的服务器关机执行时间窗口'}
+    task_claim = None
+    if enforce_schedule:
+        task_claim = claim_lifecycle_task_for_asset(CloudLifecycleTask.TASK_SUSPEND, asset, scheduled_at=scheduled_at, queue_status=queue_status)
+        if not task_claim:
+            return {'asset_id': asset.id, 'ip': ip, 'queue_status': queue_status, 'ok': False, 'error': '本轮关机计划已被其他进程认领、已完成或正在重试保护期内，跳过重复触发。'}
+    try:
+        ok, note = _run_cloud_action(_stop_asset_instance(asset), action='AWS 实例关机', target=str(asset.id))
+        if ok:
+            finish_lifecycle_task(task_claim, ok=True)
+            async_to_sync(_mark_asset_suspended)(asset.id, note)
+            finish_open_lifecycle_tasks_for_asset(CloudLifecycleTask.TASK_SUSPEND, asset)
+            return {'asset_id': asset.id, 'ip': ip, 'queue_status': queue_status, 'ok': True, 'error': None}
+        finish_lifecycle_task(task_claim, ok=False, error=note)
+        return {'asset_id': asset.id, 'ip': ip, 'queue_status': queue_status, 'ok': False, 'error': note}
+    except Exception as exc:
+        finish_lifecycle_task(task_claim, ok=False, error=str(exc))
+        raise
+
+
 def run_replaced_order_delete(order_id: int, *, queue_status='scheduled_migration_delete', enforce_schedule: bool = True) -> dict:
     from cloud.lifecycle import (
         asset_server_delete_enabled,
@@ -261,8 +318,9 @@ def run_orphan_asset_delete(asset_id: int, *, enforce_schedule: bool = True) -> 
         asset_server_delete_enabled,
         _delete_orphan_asset_instance,
         _is_cloud_delete_safe_time,
+        _mark_deleted,
         _mark_orphan_asset_deleted,
-        _orphan_asset_server_delete_at,
+        _server_asset_delete_at,
         _orphan_asset_server_delete_blocked_until,
         cloud_server_delete_enabled,
     )
@@ -277,8 +335,12 @@ def run_orphan_asset_delete(asset_id: int, *, enforce_schedule: bool = True) -> 
     if asset.provider == 'aliyun_simple':
         return {'asset_id': asset.id, 'ip': ip, 'ok': False, 'error': '阿里云轻量服务器当前未接入删除 API，本系统不会执行真实删机。'}
     linked_order = getattr(asset, 'order', None)
-    if enforce_schedule and linked_order and getattr(linked_order, 'status', '') not in {'deleted', 'cancelled', 'expired'}:
-        return {'asset_id': asset.id, 'ip': ip, 'ok': False, 'error': '该资产有关联订单，请走订单删机计划，避免资产和订单状态不一致。'}
+    if enforce_schedule and asset.status not in {
+        CloudAsset.STATUS_STOPPED,
+        CloudAsset.STATUS_SUSPENDED,
+        CloudAsset.STATUS_DELETING,
+    }:
+        return {'asset_id': asset.id, 'ip': ip, 'ok': False, 'error': '服务器尚未完成关机，不能进入删机计划执行。'}
     if not cloud_server_delete_enabled():
         return {'asset_id': asset.id, 'ip': ip, 'ok': False, 'error': '删除服务器总开关已关闭，跳过真实删机。'}
     if enforce_schedule and not asset_server_delete_enabled(asset):
@@ -288,14 +350,18 @@ def run_orphan_asset_delete(asset_id: int, *, enforce_schedule: bool = True) -> 
     if enforce_schedule:
         if not asset.actual_expires_at:
             return {'asset_id': asset.id, 'ip': ip, 'ok': False, 'error': '服务器没有计划删除时间，跳过真实删机。'}
-        blocked_until = _orphan_asset_server_delete_blocked_until(asset, now=now)
+        blocked_until = None if linked_order else _orphan_asset_server_delete_blocked_until(asset, now=now)
+        if linked_order:
+            delete_at = _server_asset_delete_at(asset)
+            if delete_at and delete_at > now:
+                blocked_until = delete_at
         if blocked_until:
             return {'asset_id': asset.id, 'ip': ip, 'ok': False, 'error': f'未到服务器删除时间：{timezone.localtime(blocked_until).strftime("%Y-%m-%d %H:%M:%S")}'}
         if not _is_cloud_delete_safe_time(now):
             return {'asset_id': asset.id, 'ip': ip, 'ok': False, 'error': '当前不在后台配置的服务器删除执行时间窗口'}
     task_claim = None
     if enforce_schedule:
-        scheduled_at = _orphan_asset_server_delete_at(asset) or asset.actual_expires_at
+        scheduled_at = _server_asset_delete_at(asset) or asset.actual_expires_at
         task_claim = claim_lifecycle_task_for_asset(CloudLifecycleTask.TASK_ORPHAN_ASSET_DELETE, asset, scheduled_at=scheduled_at, queue_status='scheduled_orphan_asset_delete')
         if not task_claim:
             return {'asset_id': asset.id, 'ip': ip, 'ok': False, 'error': '本轮无订单资产删除计划已被其他进程认领、已完成或正在重试保护期内，跳过重复触发。'}
@@ -303,13 +369,19 @@ def run_orphan_asset_delete(asset_id: int, *, enforce_schedule: bool = True) -> 
         ok, note = _run_cloud_action(_delete_orphan_asset_instance(asset), action='AWS 无订单实例删除', target=str(asset.id))
         if ok:
             source = '人工手动删除' if not enforce_schedule else '到期自动删除'
-            async_to_sync(_mark_orphan_asset_deleted)(asset.id, with_delete_source(note, source))
+            if linked_order:
+                async_to_sync(_mark_deleted)(linked_order.id, with_delete_source(note, source))
+            else:
+                async_to_sync(_mark_orphan_asset_deleted)(asset.id, with_delete_source(note, source))
             finish_lifecycle_task(task_claim, ok=True)
             finish_open_lifecycle_tasks_for_asset(CloudLifecycleTask.TASK_ORPHAN_ASSET_DELETE, asset)
             return {'asset_id': asset.id, 'ip': ip, 'ok': True, 'error': None}
         if asset.provider != 'aws_lightsail':
             source = '人工手动清理' if not enforce_schedule else '到期自动清理'
-            async_to_sync(_mark_orphan_asset_deleted)(asset.id, with_delete_source(note, source))
+            if linked_order:
+                async_to_sync(_mark_deleted)(linked_order.id, with_delete_source(note, source))
+            else:
+                async_to_sync(_mark_orphan_asset_deleted)(asset.id, with_delete_source(note, source))
             finish_lifecycle_task(task_claim, ok=True)
             finish_open_lifecycle_tasks_for_asset(CloudLifecycleTask.TASK_ORPHAN_ASSET_DELETE, asset)
             return {'asset_id': asset.id, 'ip': ip, 'ok': True, 'error': None}
