@@ -19776,3 +19776,49 @@ git -C /Users/a399/Desktop/data/vue-shop-admin diff --check
 - 10 万用户下后端分页和搜索耗时稳定在毫秒级，没有发现重复或丢页。
 - 删除用户后的 ID 复用链路已通过真实接口和创建入口验证。
 - 聊天记录页面已经从展示型页面收敛为后台工具布局。
+
+## 2026-06-09 11:47 CST 修复无槽位时 Telegram 用户 ID 空洞不复用
+
+### 本轮背景
+
+- 用户在后台用户列表看到新用户 ID 为 `92`，而低位 ID 仍有空洞，指出“ID 没复用”。
+- 核查默认本地库发现 `bot_deleted_telegram_user_slot` 为空，所以新用户没有可消费槽位。
+- 原逻辑只复用删除接口记录的槽位，不能处理历史删除或非后台删除留下的 ID 空洞。
+
+### 修复
+
+- `bot/services.py`
+  - 保留删除槽位优先复用。
+  - 当槽位为空时，扫描 `bot_user.id` 最小空洞并优先使用。
+  - 指定 ID 创建使用保存点包裹，复用失败时继续兜底，不污染外层事务。
+- `bot/tests.py`
+  - 新增无槽位空洞复用测试：已有 `id=1、2、5` 且槽位为空时，新用户复用 `id=3`。
+  - 删除槽位复用测试继续覆盖后台删除后的复用链路。
+
+### 实测
+
+- 默认本地库修复前：
+  - `DeletedTelegramUserSlot.objects.count() == 0`。
+  - 最小空洞为 `id=1`。
+- 默认本地库修复后实际创建测试用户：
+  - `_get_or_create_user_sync(990000000003, 'codex_reuse_gap_verify', 'ID复用验证')` 返回 `user_id=1`。
+  - 说明无槽位时也会复用最小空洞。
+  - 实测后已删除该测试用户，避免污染用户列表。
+
+### 验证
+
+通过：
+
+```bash
+uv run python -m py_compile bot/services.py bot/tests.py
+uv run python manage.py check
+DJANGO_TEST_SQLITE=1 uv run python manage.py test bot.tests.DashboardCloudAccountVerifyTestCase.test_delete_user_unbinds_assets_and_new_user_reuses_deleted_id bot.tests.DashboardCloudAccountVerifyTestCase.test_new_user_reuses_lowest_missing_id_without_slot --settings=shop.settings --verbosity=1
+uv run python manage.py shell -c '默认本地库无槽位空洞复用实测'
+git diff --check
+```
+
+### 结论
+
+- 后台删除留下的槽位仍然优先复用。
+- 历史空洞也会被后续新 Telegram 用户优先复用。
+- 用户截图里的断层场景后续会补低位空洞，不会只继续自增。

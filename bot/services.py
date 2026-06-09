@@ -3,7 +3,7 @@
 import logging
 
 from asgiref.sync import sync_to_async
-from django.db import IntegrityError, transaction
+from django.db import IntegrityError, connection, transaction
 from django.utils import timezone
 from django.apps import apps
 
@@ -47,6 +47,40 @@ def _merge_usernames(current: str | None, incoming: list[str]) -> list[str]:
     return merged
 
 
+def _first_missing_user_id(TelegramUser) -> int | None:
+    first_id = TelegramUser.objects.order_by('id').values_list('id', flat=True).first()
+    if first_id is None:
+        return None
+    max_id = TelegramUser.objects.order_by('-id').values_list('id', flat=True).first() or 0
+    if int(first_id) > 1:
+        return 1
+    table_name = connection.ops.quote_name(TelegramUser._meta.db_table)
+    with connection.cursor() as cursor:
+        cursor.execute(
+            f'''
+            SELECT MIN(t1.id + 1)
+            FROM {table_name} t1
+            LEFT JOIN {table_name} t2 ON t2.id = t1.id + 1
+            WHERE t2.id IS NULL AND t1.id < %s
+            ''',
+            [int(max_id)],
+        )
+        row = cursor.fetchone()
+    return int(row[0]) if row and row[0] is not None else None
+
+
+def _create_user_with_id(TelegramUser, reusable_user_id: int, *, tg_user_id: int, defaults: dict):
+    try:
+        with transaction.atomic(savepoint=True):
+            return TelegramUser.objects.create(id=reusable_user_id, tg_user_id=tg_user_id, **defaults), True
+    except IntegrityError:
+        existing = TelegramUser.objects.filter(tg_user_id=tg_user_id).first()
+        if existing:
+            return existing, False
+        logger.warning('复用已删除用户ID失败，回退继续查找: reusable_user_id=%s tg_user_id=%s', reusable_user_id, tg_user_id)
+        return None, False
+
+
 def _create_user_with_reusable_slot(TelegramUser, *, tg_user_id: int, username: str | None, first_name: str | None, active_usernames: list[str] | tuple[str, ...] | None = None):
     DeletedTelegramUserSlot = _deleted_telegram_user_slot_model()
     active_username_list = _normalize_usernames(active_usernames)
@@ -64,14 +98,14 @@ def _create_user_with_reusable_slot(TelegramUser, *, tg_user_id: int, username: 
             reusable_user_id = int(slot.reusable_user_id)
             slot.delete()
             if not TelegramUser.objects.filter(id=reusable_user_id).exists():
-                try:
-                    with transaction.atomic():
-                        return TelegramUser.objects.create(id=reusable_user_id, tg_user_id=tg_user_id, **defaults), True
-                except IntegrityError:
-                    existing = TelegramUser.objects.filter(tg_user_id=tg_user_id).first()
-                    if existing:
-                        return existing, False
-                    logger.warning('复用已删除用户ID失败，回退自增ID: reusable_user_id=%s tg_user_id=%s', reusable_user_id, tg_user_id)
+                user, created = _create_user_with_id(TelegramUser, reusable_user_id, tg_user_id=tg_user_id, defaults=defaults)
+                if user:
+                    return user, created
+        missing_user_id = _first_missing_user_id(TelegramUser)
+        if missing_user_id:
+            user, created = _create_user_with_id(TelegramUser, missing_user_id, tg_user_id=tg_user_id, defaults=defaults)
+            if user:
+                return user, created
         return TelegramUser.objects.get_or_create(tg_user_id=tg_user_id, defaults=defaults)
 
 

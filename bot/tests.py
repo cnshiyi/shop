@@ -1083,6 +1083,17 @@ class DashboardCloudAccountVerifyTestCase(TestCase):
         self.assertEqual(reused.tg_user_id, 900022)
         self.assertFalse(DeletedTelegramUserSlot.objects.filter(reusable_user_id=user.id).exists())
 
+    def test_new_user_reuses_lowest_missing_id_without_slot(self):
+        TelegramUser.objects.create(id=1, tg_user_id=900031, username='reuse_gap_1')
+        TelegramUser.objects.create(id=2, tg_user_id=900032, username='reuse_gap_2')
+        TelegramUser.objects.create(id=5, tg_user_id=900035, username='reuse_gap_5')
+        self.assertFalse(DeletedTelegramUserSlot.objects.exists())
+
+        reused = async_to_sync(get_or_create_user)(900033, 'reuse_gap_3', '空洞复用')
+
+        self.assertEqual(reused.id, 3)
+        self.assertEqual(reused.tg_user_id, 900033)
+
     def test_delete_user_blocks_business_records(self):
         root = get_user_model().objects.create_user(username='root_delete_telegram_user_blocked', password='pass', is_staff=True, is_superuser=True)
         user = TelegramUser.objects.create(tg_user_id=900023, username='delete_blocked_user')
