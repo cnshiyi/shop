@@ -20,7 +20,7 @@ from django.utils import timezone
 from django.utils.dateparse import parse_datetime
 
 from bot.api import _asset_delete_plan_item_payload, _shutdown_log_items, _unattached_ip_delete_items, lifecycle_plans, refresh_lifecycle_plan_view, update_lifecycle_plan_note
-from bot.models import TelegramGroupFilter, TelegramUser
+from bot.models import TelegramGroupFilter, TelegramLoginAccount, TelegramUser
 from cloud.asset_dedupe import merge_duplicate_cloud_asset_group
 from cloud.bootstrap import _build_mtproxy_script, _extract_tg_links
 from cloud.models import CloudAsset, CloudAssetDashboardSnapshot, CloudAssetSyncJob, CloudAssetSyncJobEvent, CloudAutoRenewPatrolLog, CloudAutoRenewRetryTask, CloudIpLog, CloudLifecyclePlanNote, CloudLifecycleTask, CloudNoticeTask, CloudServerOrder, CloudServerPlan, CloudUserNoticeLog, DailyAddressStat
@@ -3436,6 +3436,77 @@ class CloudServerServicesTestCase(TestCase):
         self.assertEqual(response.status_code, 200)
         asset.refresh_from_db()
         self.assertIsNone(asset.telegram_group_id)
+
+    # 功能：本地用户列表没有目标用户时，资产绑定可用已登录 Telegram 账号按 username 拉取资料并创建用户。
+    def test_update_cloud_asset_binds_remote_telegram_username(self):
+        admin = get_user_model().objects.create_user(username='admin_bind_remote_user', password='x', is_staff=True, is_superuser=True)
+        TelegramLoginAccount.objects.create(
+            label='remote-resolver',
+            status='logged_in',
+            session_string='fake-session',
+            tg_user_id=10001,
+            username='resolver_account',
+        )
+        asset = CloudAsset.objects.create(
+            kind=CloudAsset.KIND_SERVER,
+            source=CloudAsset.SOURCE_AWS_SYNC,
+            provider='aws_lightsail',
+            region_code=self.plan.region_code,
+            region_name=self.plan.region_name,
+            asset_name='bind-remote-user-asset',
+            public_ip='11.11.33.33',
+            status=CloudAsset.STATUS_RUNNING,
+        )
+
+        async def fake_resolve(session_string, username, api_id, api_hash):
+            self.assertEqual(username, 'new_bind_user')
+            return SimpleNamespace(id=99887766, username='new_bind_user', first_name='New Bind')
+
+        request = self.factory.patch(
+            '/api/admin/cloud-assets/%s/' % asset.id,
+            data=json.dumps({'user_query': '@new_bind_user'}),
+            content_type='application/json',
+        )
+        self._attach_bearer_session(request, admin)
+        with patch('bot.api_telegram._telegram_api_credentials', return_value=(12345, 'api-hash')), \
+            patch('cloud.api_assets._telegram_resolve_username_with_session', side_effect=fake_resolve) as resolve_mock:
+            response = update_cloud_asset(request, asset.id)
+
+        self.assertEqual(response.status_code, 200)
+        resolve_mock.assert_called_once()
+        user = TelegramUser.objects.get(tg_user_id=99887766)
+        self.assertEqual(user.primary_username, 'new_bind_user')
+        self.assertEqual(user.first_name, 'New Bind')
+        asset.refresh_from_db()
+        self.assertEqual(asset.user_id, user.id)
+
+    # 功能：没有可用个人号 session 时，本地不存在的 username 不会被误绑定。
+    def test_update_cloud_asset_remote_username_requires_logged_account(self):
+        admin = get_user_model().objects.create_user(username='admin_bind_remote_user_missing_account', password='x', is_staff=True, is_superuser=True)
+        asset = CloudAsset.objects.create(
+            kind=CloudAsset.KIND_SERVER,
+            source=CloudAsset.SOURCE_AWS_SYNC,
+            provider='aws_lightsail',
+            region_code=self.plan.region_code,
+            region_name=self.plan.region_name,
+            asset_name='bind-remote-user-no-account',
+            public_ip='11.11.33.34',
+            status=CloudAsset.STATUS_RUNNING,
+        )
+        request = self.factory.patch(
+            '/api/admin/cloud-assets/%s/' % asset.id,
+            data=json.dumps({'user_query': '@missing_remote_user'}),
+            content_type='application/json',
+        )
+        self._attach_bearer_session(request, admin)
+        with patch('cloud.api_assets._telegram_resolve_username_with_session') as resolve_mock:
+            response = update_cloud_asset(request, asset.id)
+
+        self.assertEqual(response.status_code, 404)
+        self.assertIn('未找到匹配的 Telegram 用户', json.loads(response.content.decode('utf-8'))['message'])
+        resolve_mock.assert_not_called()
+        asset.refresh_from_db()
+        self.assertIsNone(asset.user_id)
 
     # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
     def test_update_cloud_asset_defers_snapshot_refresh(self):

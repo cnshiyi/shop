@@ -1,8 +1,10 @@
 """云资产后台 API。"""
 
+import logging
 import re
 from urllib.parse import urlparse
 
+from asgiref.sync import async_to_sync
 from django.db.models import Q
 from django.db.utils import OperationalError, ProgrammingError
 from django.utils import timezone
@@ -33,6 +35,8 @@ _PROXY_URL_RE = re.compile(r'(?i)\b(?:tg://proxy|socks5://|https?://t\.me/proxy)
 _SECRET_PARAM_RE = re.compile(r'(?i)secret=[^&\s，。；;]+')
 _SOCKS_CREDENTIAL_RE = re.compile(r'(?i)(socks5://)[^@\s/]+@')
 _IPV4_RE = re.compile(r'\b(?:(?:25[0-5]|2[0-4]\d|1?\d?\d)\.){3}(?:25[0-5]|2[0-4]\d|1?\d?\d)\b')
+_TELEGRAM_USERNAME_RE = re.compile(r'^[A-Za-z0-9_]{3,64}$')
+logger = logging.getLogger(__name__)
 
 
 def _mask_secret(value, keep=4):
@@ -154,6 +158,57 @@ def _username_matches(saved_value, lookup_value) -> bool:
     return bool(saved_names & lookup_names)
 
 
+async def _telegram_resolve_username_with_session(session_string: str, username: str, api_id: int, api_hash: str):
+    from telethon import TelegramClient
+    from telethon.sessions import StringSession
+
+    client = TelegramClient(StringSession(session_string or ''), api_id, api_hash, request_retries=1, connection_retries=1, timeout=8)
+    await client.connect()
+    try:
+        if not await client.is_user_authorized():
+            raise ValueError('Telegram 会话已失效，请重新登录')
+        return await client.get_entity(username)
+    finally:
+        await client.disconnect()
+
+
+# 功能：本地用户不存在时，用已登录个人号按 username 从 Telegram 拉取资料并落库。
+def _resolve_telegram_user_from_logged_account(raw_username):
+    usernames = [
+        item
+        for item in TelegramUser.normalize_usernames(raw_username)
+        if item and not item.isdigit() and _TELEGRAM_USERNAME_RE.fullmatch(item)
+    ]
+    if not usernames:
+        return None
+    username = usernames[0]
+    account = (
+        TelegramLoginAccount.objects.filter(status='logged_in')
+        .exclude(session_string__isnull=True)
+        .exclude(session_string='')
+        .order_by('-updated_at', '-id')
+        .first()
+    )
+    if not account or not account.session_string_plain:
+        return None
+    try:
+        from bot.api_telegram import _telegram_api_credentials
+
+        api_id, api_hash = _telegram_api_credentials()
+        entity = async_to_sync(_telegram_resolve_username_with_session)(account.session_string_plain, username, api_id, api_hash)
+    except Exception as exc:
+        logger.info('Telegram 用户远程解析失败: username=%s account_id=%s error=%s', username, account.id, exc)
+        return None
+    tg_user_id = getattr(entity, 'id', None)
+    if not tg_user_id:
+        return None
+    entity_username = getattr(entity, 'username', None) or username
+    active_usernames = TelegramUser.normalize_usernames(entity_username)
+    user = _get_or_create_user_sync(tg_user_id, TelegramUser.serialize_usernames(entity_username), getattr(entity, 'first_name', None), active_usernames)
+    _sync_telegram_username(user, entity_username)
+    return user
+
+
 # 功能：提供 后台 API 接口 的内部辅助逻辑，供同模块流程复用。
 def _resolve_telegram_user(value):
     terms = _telegram_user_lookup_terms(value)
@@ -179,6 +234,12 @@ def _resolve_telegram_user(value):
         user = _get_or_create_user_sync(account.tg_user_id, TelegramUser.serialize_usernames(account.username), account.label or '', TelegramUser.normalize_usernames(account.username))
         _sync_telegram_username(user, account.username)
         return user
+    for raw in terms:
+        if raw.isdigit():
+            continue
+        user = _resolve_telegram_user_from_logged_account(raw)
+        if user:
+            return user
     return None
 
 

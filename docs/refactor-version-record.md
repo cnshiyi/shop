@@ -20086,3 +20086,40 @@ git diff --check
 - 同 IP 去重现在是数据库硬规则。
 - 迁移会清理已有重复资产并创建唯一约束；后续有效公网 IP 重复写入会被数据库阻断。
 - 代理列表、计划表、通知表和生命周期任务后续都不会再从 `CloudAsset` 本体读到同 IP 双资产。
+
+## 2026-06-09 14:08 CST 代理绑定用户支持远程解析 Telegram 用户名
+
+### 本轮背景
+
+- 用户询问代理列表绑定用户是否可以绑定用户列表没有的用户，例如先填 Telegram 用户名，再调用 Telegram 获取用户信息实现绑定。
+- 原后端 `_resolve_telegram_user()` 只查本地 `TelegramUser` 和已登记的 `TelegramLoginAccount`，没有主动用已登录个人号去 Telegram 解析陌生 username。
+- 前端编辑代理已有 `user_query` 输入框，能提交任意查询值，主要缺口在后端。
+
+### 修复
+
+- `cloud/api_assets.py`
+  - 新增 `_telegram_resolve_username_with_session()`，复用 Telethon `StringSession` 按 username 解析 Telegram 用户。
+  - 新增 `_resolve_telegram_user_from_logged_account()`，本地用户和登录账号记录都找不到时，选择最近更新的已登录个人号 session 远程解析。
+  - 远程解析成功后调用现有 `_get_or_create_user_sync()` 创建或更新 `TelegramUser`，资产绑定流程继续复用原逻辑。
+  - 远程解析只接受规范 username，不对纯数字 ID 或 URL 原文发起 Telegram 查询；`t.me/username` 会先由既有解析器提取 username。
+  - 异常日志只记录 username、账号 ID 和错误摘要，不打印 Telegram session、API Hash 或验证码。
+- `cloud/tests.py`
+  - 覆盖本地无目标用户时，mock Telegram 解析返回用户资料并完成资产绑定。
+  - 覆盖没有可用已登录个人号 session 时，不发起远程解析、不误绑定、仍返回 404。
+- 前端 `apps/web-antd/src/views/dashboard/cloud-assets/index.vue`
+  - 更新编辑代理用户输入框 placeholder，说明支持后台用户 ID、Telegram ID、`@username`、`t.me` 链接。
+
+### 验证
+
+通过：
+
+```bash
+uv run python -m py_compile cloud/api_assets.py cloud/api_asset_edit.py cloud/tests.py
+uv run python manage.py check
+DJANGO_TEST_SQLITE=1 uv run python manage.py test cloud.tests.CloudServerServicesTestCase.test_update_cloud_asset_binds_remote_telegram_username cloud.tests.CloudServerServicesTestCase.test_update_cloud_asset_remote_username_requires_logged_account --settings=shop.settings --verbosity=1
+```
+
+### 结论
+
+- 代理列表编辑现在可以输入用户列表不存在的 `@username` 或 `t.me/username`，后端会用已登录个人号解析并创建用户后绑定。
+- 纯数字 Telegram ID 仍只走本地查询，避免误以为个人号能凭任意陌生 ID 拉取用户。
