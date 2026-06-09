@@ -20306,3 +20306,55 @@ git diff --check
 - 关机计划数量现在按未来关机计划全量统计，历史 IP 不会再把当前 running 资产压出关机计划。
 - 当前计划去重依据收敛为当前公网 IP；历史公网 IP 只作为历史信息。
 - 已关机资产仍进入服务器删除计划，关机计划和删机计划阶段关系保持不变。
+
+## 2026-06-10 00:24 CST 修复 IP 删除计划和历史记录混表
+
+### 本轮背景
+
+- 用户指出：IP 删除计划和 IP 删除记录不对，删除计划应是待执行，删除记录应是已经执行。
+- 复查发现生命周期查询层存在 `completed active` 中间口径：
+  - 只要资产有“实例已删除”和“固定 IP 保留”相关日志，就可能从 IP 删除计划中扣除。
+  - 同时这类资产会被当成 IP 删除历史记录展示。
+- 这把“服务器已删除但固定 IP 仍保留、等待释放”的待执行资产误归到历史记录。
+
+### 修复
+
+- `cloud/lifecycle_plan_queries.py`
+  - 移除 `completed_unattached_ip_active_queryset`、对应去重查询、计数和历史来源。
+  - `unattached_ip_delete_plan_page()` 不再排除固定 IP 保留中的活跃资产。
+  - `ip_delete_count` 直接等于未终态未附加固定 IP 计划数。
+  - `ip_delete_history_count` 只统计终态 IP 日志和终态资产。
+  - `ip_delete_history_page_sources()` 只合并终态日志和终态资产，不再混入活跃资产。
+- `bot/api.py`
+  - 移除旧 `completed_active_count` 参数和包装函数。
+  - 计划页接口按新契约返回：计划是待执行，历史是已执行或已终态。
+- `cloud/tests.py`
+  - 新增 `test_lifecycle_plans_retained_ip_after_server_delete_stays_in_ip_delete_plan`。
+  - 验证服务器已删除但固定 IP 保留中的资产仍在 IP 删除计划，不进入 IP 删除历史记录。
+  - 更新历史分页测试，删除旧 `completed_total` 参数。
+
+### 验证
+
+通过：
+
+```bash
+uv run python -m py_compile cloud/lifecycle_plan_queries.py bot/api.py cloud/tests.py
+DJANGO_TEST_SQLITE=1 uv run python manage.py test cloud.tests.CloudServerServicesTestCase.test_lifecycle_plans_retained_ip_after_server_delete_stays_in_ip_delete_plan cloud.tests.CloudServerServicesTestCase.test_lifecycle_plans_separate_ip_delete_plan_and_history_items cloud.tests.CloudServerServicesTestCase.test_lifecycle_plans_counts_all_ip_delete_plans_beyond_loaded_limit cloud.tests.CloudServerServicesTestCase.test_lifecycle_plans_counts_all_ip_delete_history_beyond_loaded_limit cloud.tests.CloudServerServicesTestCase.test_lifecycle_plans_ip_delete_history_pagination_contract cloud.tests.CloudServerServicesTestCase.test_ip_delete_history_page_sources_reverse_tail_keeps_order --settings=shop.settings --verbosity=1
+DJANGO_TEST_SQLITE=1 uv run python manage.py test cloud.tests.CloudServerServicesTestCase.test_scheduled_unattached_ip_delete_writes_log_and_history_item cloud.tests.CloudServerServicesTestCase.test_unattached_ip_delete_log_without_known_note_shows_history cloud.tests.CloudServerServicesTestCase.test_lifecycle_plans_include_ip_delete_history_item cloud.tests.CloudServerServicesTestCase.test_lifecycle_plans_include_real_released_retained_ip_history_without_active_row cloud.tests.CloudServerServicesTestCase.test_unattached_ip_delete_items_expose_missing_confirmation_state --settings=shop.settings --verbosity=1
+uv run python manage.py check
+git diff --check
+```
+
+结果：
+
+- 编译通过。
+- IP 删除计划/记录聚焦测试 11 条通过。
+- Django 系统检查通过。
+- diff 空白检查通过。
+- SQLite 测试仍有既有 `db_comment/db_table_comment` 告警，不影响本轮结论。
+
+### 结论
+
+- IP 删除计划现在只表示待执行释放的未附加固定 IP。
+- IP 删除历史记录现在只表示已执行或已终态的删除事实。
+- 服务器已删除但固定 IP 保留中的资产不会再被误归到历史记录，会继续留在 IP 删除计划等待释放。

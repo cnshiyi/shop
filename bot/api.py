@@ -28,8 +28,6 @@ from cloud.lifecycle_plan_queries import (
     active_cloud_account_labels as query_active_cloud_account_labels,
     asset_waiting_manual_time_q as query_asset_waiting_manual_time_q,
     clear_lifecycle_plan_counts_cache,
-    completed_unattached_ip_active_count,
-    completed_unattached_ip_active_queryset,
     ip_delete_history_page_sources,
     ip_delete_plan_counts,
     unattached_ip_delete_plan_page,
@@ -361,14 +359,6 @@ def _unattached_ip_delete_history_asset_queryset():
     return unattached_ip_delete_history_asset_queryset()
 
 
-def _completed_unattached_ip_active_count():
-    return completed_unattached_ip_active_count()
-
-
-def _completed_unattached_ip_active_queryset():
-    return completed_unattached_ip_active_queryset()
-
-
 def _ip_delete_plan_total_counts():
     return ip_delete_plan_counts()
 
@@ -379,7 +369,6 @@ def _ip_delete_plan_asset_page_items(
     page_size: int,
     now=None,
     total: int | None = None,
-    completed_active_count: int | None = None,
 ) -> list[dict]:
     now = now or timezone.now()
     global_ip_enabled = cloud_ip_delete_enabled()
@@ -387,8 +376,6 @@ def _ip_delete_plan_asset_page_items(
         page=page,
         page_size=page_size,
         total=total,
-        exclude_completed=bool(completed_active_count),
-        completed_total=completed_active_count,
     )
     trace_maps = _cloud_ip_trace_maps_for_assets(assets)
     items = []
@@ -514,7 +501,6 @@ def _ip_delete_history_page_items(
     page_size: int,
     log_total: int | None = None,
     asset_total: int | None = None,
-    completed_total: int | None = None,
 ) -> list[dict]:
     items = []
     for source_type, source in ip_delete_history_page_sources(
@@ -522,7 +508,6 @@ def _ip_delete_history_page_items(
         page_size=page_size,
         log_total=log_total,
         asset_total=asset_total,
-        completed_total=completed_total,
     ):
         if source_type == 'log':
             items.extend(_ip_delete_history_trace_items_from_queryset([source]))
@@ -2679,7 +2664,6 @@ def lifecycle_plans(request):
                 page=ip_delete_page,
                 page_size=ip_delete_page_size,
                 total=ip_delete_total_counts['ip_delete_count'],
-                completed_active_count=ip_delete_total_counts.get('ip_delete_completed_active_count'),
             )
         ]
         pending_ip_delete_items = [item for item in ip_delete_plan_items if is_ip_delete_pending(item)]
@@ -2692,7 +2676,6 @@ def lifecycle_plans(request):
                 page_size=ip_delete_history_page_size,
                 log_total=ip_delete_total_counts.get('ip_delete_history_log_count'),
                 asset_total=ip_delete_total_counts.get('ip_delete_history_asset_count'),
-                completed_total=ip_delete_total_counts.get('ip_delete_completed_active_count'),
             )
         ]
     recent_history = []

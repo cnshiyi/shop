@@ -4,29 +4,36 @@
 
 ## 最近一轮
 
-- 时间：2026-06-10 00:07 CST
-- 状态：已修复生命周期关机计划数量偏小的问题。
+- 时间：2026-06-10 00:24 CST
+- 状态：已修复 IP 删除计划和 IP 删除历史记录混淆的问题。
 - 后端分支：`codex/cloud-asset-lifecycle-refactor`
 - 前端分支：`codex/cloud-asset-list-performance`
 - 目标主分支：`main`
 
 ## 本轮背景
 
-- 用户指出“关机计划是未来计划，数量不对”。
-- 复查后确认前端标题使用后端 `shutdown_plan_count`，不是当前页加载条数。
-- 后端关机计划统计本身覆盖远期计划，但生命周期计划去重身份同时使用了 `public_ip` 和 `previous_public_ip`：
-  - 旧资产只有 `previous_public_ip`，且该历史 IP 等于新资产当前 `public_ip` 时，会和新资产进入同一去重分组。
-  - 原排序优先保留已关机阶段资产，可能把当前仍在运行、未来应关机的新资产挤出关机计划，导致关机计划总数偏小。
+- 用户指出：IP 删除计划和 IP 删除记录不对，删除计划应是待执行，删除记录应是已经执行。
+- 复查发现生命周期查询层存在 `completed active` 中间口径：
+  - “实例已删除且固定 IP 保留中”的资产会从 IP 删除计划中扣除。
+  - 同时这类资产会被计入 IP 删除历史记录。
+- 这会把“固定 IP 保留等待释放”的待执行资产误当成已执行记录。
 
 ## 修复内容
 
 - `cloud/lifecycle_plan_queries.py`
-  - 生命周期计划当前资产去重只使用当前 `public_ip`。
-  - 没有当前 `public_ip` 的资产按资产 ID 独立处理。
-  - `previous_public_ip` 不再参与当前计划去重，避免历史 IP 压掉当前 IP。
+  - 移除 `completed_unattached_ip_active_*` 查询和计数。
+  - IP 删除计划只表示仍存在、未终态、等待释放的未附加固定 IP 资产。
+  - IP 删除历史只来自：
+    - 终态 `CloudIpLog` 记录。
+    - 已删除、已终止或明确云端不存在的终态资产。
+  - `ip_delete_count` 直接等于待执行 IP 删除计划数，不再扣除固定 IP 保留中的活跃资产。
+  - `ip_delete_history_count` 不再叠加固定 IP 保留中的活跃资产。
+- `bot/api.py`
+  - 移除旧 `completed_active_count` 参数传递和包装函数。
+  - 计划页接口完全按查询层的新分表契约返回。
 - `cloud/tests.py`
-  - 新增回归测试：旧资产 `previous_public_ip` 等于新资产 `public_ip` 时，新 running 资产仍进入关机计划，旧 stopped 资产进入删机计划。
-  - 清理一个违反当前数据库硬规则的旧测试，不再构造同一当前 `public_ip` 的双资产。
+  - 新增回归测试：实例已删除但固定 IP 保留中的资产必须留在 IP 删除计划，不得出现在 IP 删除历史记录。
+  - 更新历史分页测试调用，删除旧 `completed_total` 参数。
 
 ## 验证
 
@@ -34,8 +41,8 @@
 
 ```bash
 uv run python -m py_compile cloud/lifecycle_plan_queries.py bot/api.py cloud/tests.py
-DJANGO_TEST_SQLITE=1 uv run python manage.py test cloud.tests.CloudServerServicesTestCase.test_lifecycle_plans_previous_ip_does_not_hide_current_shutdown_plan cloud.tests.CloudServerServicesTestCase.test_lifecycle_plans_counts_all_future_server_assets_beyond_loaded_limit --settings=shop.settings --verbosity=1
-DJANGO_TEST_SQLITE=1 uv run python manage.py test cloud.tests.CloudServerServicesTestCase.test_lifecycle_plans_previous_ip_does_not_hide_current_shutdown_plan cloud.tests.CloudServerServicesTestCase.test_lifecycle_plans_counts_all_future_server_assets_beyond_loaded_limit cloud.tests.CloudServerServicesTestCase.test_lifecycle_plans_stopped_server_enters_delete_stage cloud.tests.CloudServerServicesTestCase.test_lifecycle_plans_handles_unique_ip_server_assets cloud.tests.CloudServerServicesTestCase.test_lifecycle_plans_server_delete_pagination_contract --settings=shop.settings --verbosity=1
+DJANGO_TEST_SQLITE=1 uv run python manage.py test cloud.tests.CloudServerServicesTestCase.test_lifecycle_plans_retained_ip_after_server_delete_stays_in_ip_delete_plan cloud.tests.CloudServerServicesTestCase.test_lifecycle_plans_separate_ip_delete_plan_and_history_items cloud.tests.CloudServerServicesTestCase.test_lifecycle_plans_counts_all_ip_delete_plans_beyond_loaded_limit cloud.tests.CloudServerServicesTestCase.test_lifecycle_plans_counts_all_ip_delete_history_beyond_loaded_limit cloud.tests.CloudServerServicesTestCase.test_lifecycle_plans_ip_delete_history_pagination_contract cloud.tests.CloudServerServicesTestCase.test_ip_delete_history_page_sources_reverse_tail_keeps_order --settings=shop.settings --verbosity=1
+DJANGO_TEST_SQLITE=1 uv run python manage.py test cloud.tests.CloudServerServicesTestCase.test_scheduled_unattached_ip_delete_writes_log_and_history_item cloud.tests.CloudServerServicesTestCase.test_unattached_ip_delete_log_without_known_note_shows_history cloud.tests.CloudServerServicesTestCase.test_lifecycle_plans_include_ip_delete_history_item cloud.tests.CloudServerServicesTestCase.test_lifecycle_plans_include_real_released_retained_ip_history_without_active_row cloud.tests.CloudServerServicesTestCase.test_unattached_ip_delete_items_expose_missing_confirmation_state --settings=shop.settings --verbosity=1
 uv run python manage.py check
 git diff --check
 ```
@@ -43,13 +50,13 @@ git diff --check
 结果：
 
 - 编译通过。
-- 生命周期计划聚焦测试 5 条通过。
+- IP 删除计划/记录聚焦测试 11 条通过。
 - Django 系统检查通过。
 - diff 空白检查通过。
 - SQLite 聚焦测试仍输出既有 `db_comment/db_table_comment` 告警，不属于本轮问题。
 
 ## 结论
 
-- 关机计划继续按未来计划全量统计，不受页面加载条数截断。
-- 当前 IP 是当前计划去重依据；历史 IP 只保留为历史信息，不再影响关机计划数量。
-- 已关机资产仍按阶段进入服务器删除计划，不会回退到关机计划。
+- IP 删除计划现在只表示待执行释放的未附加固定 IP。
+- IP 删除历史记录现在只表示已执行或已终态的删除事实。
+- “服务器已删除但固定 IP 保留中”不会再被下沉到历史记录，会留在 IP 删除计划等待释放。

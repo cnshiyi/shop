@@ -10107,7 +10107,6 @@ class CloudServerServicesTestCase(TestCase):
             page_size=2,
             log_total=211,
             asset_total=0,
-            completed_total=0,
         )
 
         self.assertEqual([source.asset_name for _kind, source in sources], ['ip-history-tail-0'])
@@ -12688,6 +12687,46 @@ class CloudServerServicesTestCase(TestCase):
         self.assertNotIn('ip_delete_items', data)
         self.assertGreaterEqual(data['ip_delete_count'], len(plan_rows))
         self.assertGreaterEqual(data['ip_delete_history_count'], len(history_rows))
+
+    # 功能：验证实例已删除但固定 IP 保留中的资产仍是待执行 IP 删除计划，不是已执行记录。
+    def test_lifecycle_plans_retained_ip_after_server_delete_stays_in_ip_delete_plan(self):
+        asset = CloudAsset.objects.create(
+            kind=CloudAsset.KIND_SERVER,
+            source=CloudAsset.SOURCE_AWS_SYNC,
+            user=self.user,
+            provider='aws_lightsail',
+            region_code=self.plan.region_code,
+            region_name=self.plan.region_name,
+            asset_name='retained-ip-after-server-delete',
+            public_ip='52.77.18.253',
+            instance_id='',
+            provider_resource_id='arn:aws:lightsail:ap-southeast-1:123456789012:StaticIp/retained-ip-after-server-delete',
+            status=CloudAsset.STATUS_RUNNING,
+            provider_status='未附加固定IP',
+            note='未附加固定IP，等待释放',
+            actual_expires_at=timezone.now() - timezone.timedelta(days=1),
+            is_active=True,
+        )
+        record_cloud_ip_log(
+            event_type=CloudIpLog.EVENT_CHANGED,
+            asset=asset,
+            previous_public_ip='52.77.18.253',
+            public_ip='52.77.18.253',
+            note='实例已删除，固定 IP 保留中，等待 IP 删除计划执行',
+        )
+        staff_user = get_user_model().objects.create_user(username='staff_lifecycle_retained_ip_pending', password='x', is_staff=True)
+        request = self.factory.get('/api/admin/tasks/plans/', {'refresh': 1, 'limit': 1000})
+        self._attach_bearer_session(request, staff_user)
+
+        response = lifecycle_plans(request)
+        data = json.loads(response.content)['data']
+        plan_rows = [item for item in data['ip_delete_plan_items'] if item.get('asset_id') == asset.id]
+        history_rows = [item for item in data['ip_delete_history_items'] if item.get('asset_id') == asset.id]
+
+        self.assertEqual(len(plan_rows), 1)
+        self.assertFalse(plan_rows[0].get('is_history'))
+        self.assertFalse(history_rows)
+        self.assertGreaterEqual(data['ip_delete_count'], 1)
 
     # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
     def test_lifecycle_plans_sort_shutdown_items_by_delete_time(self):
