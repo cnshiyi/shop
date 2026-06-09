@@ -20123,3 +20123,40 @@ DJANGO_TEST_SQLITE=1 uv run python manage.py test cloud.tests.CloudServerService
 
 - 代理列表编辑现在可以输入用户列表不存在的 `@username` 或 `t.me/username`，后端会用已登录个人号解析并创建用户后绑定。
 - 纯数字 Telegram ID 仍只走本地查询，避免误以为个人号能凭任意陌生 ID 拉取用户。
+
+## 2026-06-09 14:23 CST 同步链路复用全局同 IP 资产
+
+### 本轮背景
+
+- 用户要求检查同步链路是否还会往数据库塞同 IP 多条资产。
+- 当前模型已通过 `uniq_cloud_asset_public_ip` 保证有效 `CloudAsset.public_ip` 全局唯一，数据库层不会成功落两条同 IP 资产。
+- 复查发现 AWS/阿里云同步 resolver 原来按账号/地区范围查资产；跨账号或跨地区存在旧同 IP 资产时，resolver 可能返回空，后续同步创建分支会尝试新增并撞唯一约束。
+
+### 修复
+
+- `cloud/management/commands/sync_aws_assets.py`
+  - 新增 `_resolve_global_public_ip_asset()`。
+  - `_resolve_asset()` 在账号/地区范围内未命中当前公网 IP 后，按当前公网 IP 全局查询并复用已有资产。
+  - `_resolve_asset_for_static_ip()` 增加同样兜底，覆盖 AWS 未附加固定 IP 同步。
+- `cloud/management/commands/sync_aliyun_assets.py`
+  - 新增 `_resolve_global_public_ip_asset()`。
+  - `_resolve_asset()` 增加当前公网 IP 全局兜底，避免阿里云同步跨账号/地区同 IP 走新增分支。
+- `cloud/tests.py`
+  - 新增跨账号/跨地区同 IP resolver 测试，覆盖 AWS 实例、AWS 未附加固定 IP、阿里云实例三条同步入口。
+  - 清理旧 resolver 测试中违反当前数据库硬规则的同 IP 双资产造数。
+
+### 验证
+
+通过：
+
+```bash
+uv run python -m py_compile cloud/management/commands/sync_aws_assets.py cloud/management/commands/sync_aliyun_assets.py cloud/tests.py
+uv run python manage.py check
+DJANGO_TEST_SQLITE=1 uv run python manage.py test cloud.tests.CloudServerServicesTestCase.test_aws_sync_resolution_does_not_match_cross_region_same_instance_without_ip cloud.tests.CloudServerServicesTestCase.test_aliyun_sync_resolution_does_not_match_cross_region_same_instance_without_ip cloud.tests.CloudServerServicesTestCase.test_cloud_sync_resolvers_reuse_global_current_public_ip cloud.tests.CloudServerServicesTestCase.test_cloud_sync_resolvers_keep_ip_primary_when_instance_changes cloud.tests.CloudServerServicesTestCase.test_cloud_sync_resolvers_prefer_current_ip_over_stale_previous_ip --settings=shop.settings --verbosity=1
+git diff --check
+```
+
+### 结论
+
+- 同步链路现在不会因为跨账号/跨地区同 IP 漏查而尝试插入第二条有效公网 IP 资产。
+- 当前 `public_ip` 是硬去重依据；`previous_public_ip` 仍用于辅助追踪和查找，不作为唯一约束字段。

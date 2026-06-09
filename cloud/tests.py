@@ -401,6 +401,94 @@ class CloudServerServicesTestCase(TestCase):
         self.assertIsNone(_resolve_asset('aliyun-same-name-no-ip', '', account, 'cn-hongkong'))
         self.assertIsNone(_resolve_server('aliyun-same-name-no-ip', '', account, 'cn-hongkong'))
 
+    # 功能：同步链路按公网 IP 全局唯一兜底，避免跨账号同 IP 走创建分支撞唯一约束。
+    def test_cloud_sync_resolvers_reuse_global_current_public_ip(self):
+        aws_source = CloudAccountConfig.objects.create(
+            provider=CloudAccountConfig.PROVIDER_AWS,
+            name='aws-global-ip-source',
+            external_account_id='123456789012',
+            access_key='AKIAGLOBALSRC12345',
+            secret_key='aws-global-source-secret-key-value-long-enough',
+            region_hint='ap-southeast-1',
+            is_active=True,
+        )
+        aws_target = CloudAccountConfig.objects.create(
+            provider=CloudAccountConfig.PROVIDER_AWS,
+            name='aws-global-ip-target',
+            external_account_id='210987654321',
+            access_key='AKIAGLOBALTGT12345',
+            secret_key='aws-global-target-secret-key-value-long-enough',
+            region_hint='us-east-1',
+            is_active=True,
+        )
+        aws_asset = CloudAsset.objects.create(
+            kind=CloudAsset.KIND_SERVER,
+            source=CloudAsset.SOURCE_AWS_SYNC,
+            user=self.user,
+            provider='aws_lightsail',
+            cloud_account=aws_source,
+            account_label=cloud_account_label(aws_source),
+            region_code='ap-southeast-1',
+            region_name='新加坡',
+            asset_name='aws-global-ip-existing',
+            instance_id='aws-global-ip-existing',
+            provider_resource_id='arn:aws:lightsail:ap-southeast-1:123456789012:Instance/aws-global-ip-existing',
+            public_ip='20.20.20.60',
+            status=CloudAsset.STATUS_RUNNING,
+            provider_status='运行中',
+            is_active=True,
+        )
+        from cloud.management.commands.sync_aws_assets import _resolve_asset as resolve_aws_asset
+        from cloud.management.commands.sync_aws_assets import _resolve_asset_for_static_ip
+
+        self.assertEqual(
+            resolve_aws_asset('aws-global-ip-new', 'arn:aws:lightsail:us-east-1:210987654321:Instance/aws-global-ip-new', '20.20.20.60', None, aws_target, 'us-east-1').id,
+            aws_asset.id,
+        )
+        self.assertEqual(
+            _resolve_asset_for_static_ip('StaticIp-global-ip-new', 'arn:aws:lightsail:us-east-1:210987654321:StaticIp/StaticIp-global-ip-new', '20.20.20.60', aws_target, 'us-east-1').id,
+            aws_asset.id,
+        )
+
+        aliyun_source = CloudAccountConfig.objects.create(
+            provider=CloudAccountConfig.PROVIDER_ALIYUN,
+            name='aliyun-global-ip-source',
+            external_account_id='aliyun-source',
+            access_key='aliyun-source-ak',
+            secret_key='aliyun-source-sk',
+            region_hint='cn-hongkong',
+            is_active=True,
+        )
+        aliyun_target = CloudAccountConfig.objects.create(
+            provider=CloudAccountConfig.PROVIDER_ALIYUN,
+            name='aliyun-global-ip-target',
+            external_account_id='aliyun-target',
+            access_key='aliyun-target-ak',
+            secret_key='aliyun-target-sk',
+            region_hint='cn-shanghai',
+            is_active=True,
+        )
+        aliyun_asset = CloudAsset.objects.create(
+            kind=CloudAsset.KIND_SERVER,
+            source=CloudAsset.SOURCE_ALIYUN,
+            user=self.user,
+            provider='aliyun_simple',
+            cloud_account=aliyun_source,
+            account_label=cloud_account_label(aliyun_source),
+            region_code='cn-hongkong',
+            region_name='香港',
+            asset_name='aliyun-global-ip-existing',
+            instance_id='aliyun-global-ip-existing',
+            provider_resource_id='aliyun-global-ip-existing',
+            public_ip='20.20.20.61',
+            status=CloudAsset.STATUS_RUNNING,
+            provider_status='运行中',
+            is_active=True,
+        )
+        from cloud.management.commands.sync_aliyun_assets import _resolve_asset as resolve_aliyun_asset
+
+        self.assertEqual(resolve_aliyun_asset('aliyun-global-ip-new', '20.20.20.61', aliyun_target, 'cn-shanghai').id, aliyun_asset.id)
+
     # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
     def test_aliyun_audit_inventory_uses_asset_account(self):
         from cloud.management.commands.audit_cloud_asset_ip_presence import Command
@@ -18544,41 +18632,11 @@ class CloudServerServicesTestCase(TestCase):
             provider_status='运行中',
             is_active=True,
         )
-        aws_ip_server = CloudAsset.objects.create(kind=CloudAsset.KIND_SERVER,
-            source=CloudAsset.SOURCE_AWS_SYNC,
-            user=self.user,
-            provider='aws_lightsail',
-            account_label=aws_label,
-            region_code=self.plan.region_code,
-            region_name=self.plan.region_name,
-            asset_name='aws-old-instance-for-same-ip',
-            instance_id='aws-old-instance-for-same-ip',
-            provider_resource_id='arn:aws:lightsail:ap-southeast-1:123456789012:Instance/aws-old-instance-for-same-ip',
-            public_ip='20.20.20.40',
-            status=CloudAsset.STATUS_RUNNING,
-            provider_status='运行中',
-            is_active=True,
-        )
-        CloudAsset.objects.create(kind=CloudAsset.KIND_SERVER,
-            source=CloudAsset.SOURCE_AWS_SYNC,
-            user=self.user,
-            provider='aws_lightsail',
-            account_label=aws_label,
-            region_code=self.plan.region_code,
-            region_name=self.plan.region_name,
-            asset_name='aws-new-instance-conflict',
-            instance_id='aws-new-instance-conflict',
-            provider_resource_id='arn:aws:lightsail:ap-southeast-1:123456789012:Instance/aws-new-instance-conflict',
-            public_ip='20.20.20.41',
-            status=CloudAsset.STATUS_RUNNING,
-            provider_status='运行中',
-            is_active=True,
-        )
         from cloud.management.commands.sync_aws_assets import _resolve_asset as resolve_aws_asset
         from cloud.management.commands.sync_aws_assets import _resolve_server as resolve_aws_server
 
         self.assertEqual(resolve_aws_asset(aws_direct_conflict.instance_id, aws_direct_conflict.provider_resource_id, '20.20.20.40', None, aws_account).id, aws_ip_asset.id)
-        self.assertEqual(resolve_aws_server('aws-new-instance-conflict', aws_direct_conflict.provider_resource_id, '20.20.20.40', None, aws_account).id, aws_ip_server.id)
+        self.assertEqual(resolve_aws_server('aws-new-instance-conflict', aws_direct_conflict.provider_resource_id, '20.20.20.40', None, aws_account).id, aws_ip_asset.id)
 
         aliyun_account = CloudAccountConfig.objects.create(
             provider=CloudAccountConfig.PROVIDER_ALIYUN,
@@ -18622,41 +18680,11 @@ class CloudServerServicesTestCase(TestCase):
             provider_status='运行中',
             is_active=True,
         )
-        aliyun_ip_server = CloudAsset.objects.create(kind=CloudAsset.KIND_SERVER,
-            source=CloudAsset.SOURCE_ALIYUN,
-            user=self.user,
-            provider='aliyun_simple',
-            account_label=aliyun_label,
-            region_code='cn-hongkong',
-            region_name='香港',
-            asset_name='aliyun-old-instance-for-same-ip',
-            instance_id='aliyun-old-instance-for-same-ip',
-            provider_resource_id='aliyun-old-instance-for-same-ip',
-            public_ip='20.20.20.42',
-            status=CloudAsset.STATUS_RUNNING,
-            provider_status='运行中',
-            is_active=True,
-        )
-        CloudAsset.objects.create(kind=CloudAsset.KIND_SERVER,
-            source=CloudAsset.SOURCE_ALIYUN,
-            user=self.user,
-            provider='aliyun_simple',
-            account_label=aliyun_label,
-            region_code='cn-hongkong',
-            region_name='香港',
-            asset_name='aliyun-new-instance-conflict',
-            instance_id='aliyun-new-instance-conflict',
-            provider_resource_id='aliyun-new-instance-conflict',
-            public_ip='20.20.20.43',
-            status=CloudAsset.STATUS_RUNNING,
-            provider_status='运行中',
-            is_active=True,
-        )
         from cloud.management.commands.sync_aliyun_assets import _resolve_asset as resolve_aliyun_asset
         from cloud.management.commands.sync_aliyun_assets import _resolve_server as resolve_aliyun_server
 
         self.assertEqual(resolve_aliyun_asset(aliyun_direct_conflict.instance_id, '20.20.20.42', aliyun_account).id, aliyun_ip_asset.id)
-        self.assertEqual(resolve_aliyun_server('aliyun-new-instance-conflict', '20.20.20.42', aliyun_account).id, aliyun_ip_server.id)
+        self.assertEqual(resolve_aliyun_server('aliyun-new-instance-conflict', '20.20.20.42', aliyun_account).id, aliyun_ip_asset.id)
 
     # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
     def test_cloud_sync_resolvers_prefer_current_ip_over_stale_previous_ip(self):
@@ -18687,38 +18715,11 @@ class CloudServerServicesTestCase(TestCase):
             provider_status='运行中',
             is_active=True,
         )
-        current_server = CloudAsset.objects.create(kind=CloudAsset.KIND_SERVER,
-            source=CloudAsset.SOURCE_AWS_SYNC,
-            user=self.user,
-            provider='aws_lightsail',
-            region_code=self.plan.region_code,
-            region_name=self.plan.region_name,
-            asset_name='current-ip-owner',
-            instance_id='current-ip-owner',
-            public_ip='20.20.20.50',
-            status=CloudAsset.STATUS_RUNNING,
-            provider_status='运行中',
-            is_active=True,
-        )
-        CloudAsset.objects.create(kind=CloudAsset.KIND_SERVER,
-            source=CloudAsset.SOURCE_AWS_SYNC,
-            user=self.user,
-            provider='aws_lightsail',
-            region_code=self.plan.region_code,
-            region_name=self.plan.region_name,
-            asset_name='stale-previous-ip-owner',
-            instance_id='stale-previous-ip-owner',
-            public_ip='20.20.20.51',
-            previous_public_ip='20.20.20.50',
-            status=CloudAsset.STATUS_RUNNING,
-            provider_status='运行中',
-            is_active=True,
-        )
         from cloud.management.commands.sync_aws_assets import _resolve_asset as resolve_aws_asset
         from cloud.management.commands.sync_aws_assets import _resolve_server as resolve_aws_server
 
         self.assertEqual(resolve_aws_asset('', '', '20.20.20.50', None).id, current_asset.id)
-        self.assertEqual(resolve_aws_server('', '', '20.20.20.50', None).id, current_server.id)
+        self.assertEqual(resolve_aws_server('', '', '20.20.20.50', None).id, current_asset.id)
         self.assertNotEqual(stale_asset.id, current_asset.id)
 
     # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。

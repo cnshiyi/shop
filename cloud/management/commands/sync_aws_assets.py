@@ -364,6 +364,16 @@ def _first_resolved_asset(queryset, ordering):
     return candidates[0] if candidates else None
 
 
+def _resolve_global_public_ip_asset(public_ip):
+    normalized_ip = str(public_ip or '').strip()
+    if not normalized_ip:
+        return None
+    return _first_resolved_asset(
+        CloudAsset.objects.filter(kind=CloudAsset.KIND_SERVER, public_ip=normalized_ip),
+        _asset_resolve_ordering(normalized_ip),
+    )
+
+
 # 功能：提供 AWS 资产同步 的内部辅助逻辑，供同模块流程复用。
 def _resolve_asset(instance_name, instance_arn, public_ip, order, account=None, region_code=''):
     lookup = Q(kind=CloudAsset.KIND_SERVER)
@@ -387,6 +397,9 @@ def _resolve_asset(instance_name, instance_arn, public_ip, order, account=None, 
         if order:
             public_ip_queryset = public_ip_queryset.filter(Q(order__isnull=True) | Q(order=order))
         asset = _first_resolved_asset(public_ip_queryset, _asset_resolve_ordering(public_ip))
+        if asset:
+            return asset
+        asset = _resolve_global_public_ip_asset(public_ip)
         if asset:
             return asset
     direct_candidates = Q()
@@ -571,6 +584,9 @@ def _resolve_asset_for_static_ip(static_ip_name, static_ip_arn, public_ip, accou
             .order_by(*static_ip_ordering)
             .first()
         )
+        if asset:
+            return asset
+        asset = _resolve_global_public_ip_asset(public_ip)
         if asset:
             return asset
 

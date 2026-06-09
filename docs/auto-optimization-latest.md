@@ -4,49 +4,44 @@
 
 ## 最近一轮
 
-- 时间：2026-06-09 14:08 CST
-- 状态：已支持代理列表编辑绑定本地用户列表不存在的 Telegram 用户名。
+- 时间：2026-06-09 14:23 CST
+- 状态：已复查并修复云资产同步链路的同 IP 写入风险。
 - 后端分支：`codex/cloud-asset-lifecycle-refactor`
 - 前端分支：`codex/cloud-asset-list-performance`
 - 目标主分支：`main`
 
 ## 本轮背景
 
-- 用户询问代理列表绑定用户是否可以先填写 Telegram 用户名，再调用 Telegram 获取用户信息实现绑定。
-- 原后端只会查询本地 `TelegramUser` 和已登记的 `TelegramLoginAccount` 资料；如果目标用户没有在用户列表或登录账号表出现，绑定会返回“未找到匹配的 Telegram 用户”。
-- 前端编辑代理弹窗已有 `user_query` 输入框，能提交任意用户查询值，主要缺口在后端解析链。
+- 用户要求检查同步链路是否还会往数据库塞同 IP 多条资产。
+- 现有 `CloudAsset.public_ip` 已有数据库唯一约束，成功落库两条有效同 IP 资产会被数据库阻断。
+- 但 AWS/阿里云同步 resolver 原来主要按云账号、地区、实例名和 IP 范围查询；跨账号或跨地区存在旧同 IP 资产时，resolver 可能返回空，然后同步分支尝试 `CloudAsset.objects.create()`，最终撞唯一约束导致同步任务失败。
 
 ## 修复内容
 
-- `cloud/api_assets.py`
-  - 新增已登录 Telegram 账号远程解析 helper。
-  - 本地 `TelegramUser`、本地 `TelegramLoginAccount` 都找不到时，使用最近更新的已登录个人号 session 按 username 调 Telegram 拉取用户资料。
-  - 远程解析成功后调用现有 `_get_or_create_user_sync()` 创建或更新 `TelegramUser`，再走原有资产绑定流程。
-  - 远程解析只接受规范 username，不对纯数字 ID 或非 username 字符串发起 Telegram 查询。
-  - 失败只记录脱敏业务日志，不打印 session、密钥或验证码。
+- `cloud/management/commands/sync_aws_assets.py`
+  - 新增 `_resolve_global_public_ip_asset()`。
+  - `_resolve_asset()` 在账号/地区范围内未命中当前公网 IP 后，按 `CloudAsset.public_ip` 全局兜底复用已有资产。
+  - `_resolve_asset_for_static_ip()` 同样增加当前公网 IP 全局兜底，覆盖未附加固定 IP 同步入口。
+- `cloud/management/commands/sync_aliyun_assets.py`
+  - 新增 `_resolve_global_public_ip_asset()`。
+  - `_resolve_asset()` 在账号/地区范围内未命中当前公网 IP 后，按当前公网 IP 全局兜底复用已有资产。
 - `cloud/tests.py`
-  - 新增本地无用户时远程解析 username 并绑定资产的聚焦测试。
-  - 新增没有可用已登录账号时不误绑定并返回 404 的聚焦测试。
-- 前端 `apps/web-antd/src/views/dashboard/cloud-assets/index.vue`
-  - 更新编辑代理的用户输入框 placeholder，说明支持后台用户 ID、Telegram ID、`@username`、`t.me` 链接，本地没有时会用已登录账号解析。
+  - 新增跨账号/跨地区同 IP resolver 测试，确保 AWS 实例同步、AWS 未附加固定 IP 同步、阿里云同步都会复用已有同 IP 资产，不走新增分支。
+  - 清理旧 resolver 测试中违反当前数据库硬规则的同 IP 双资产造数。
 
 ## 验证
 
-已通过：
+通过：
 
 ```bash
-uv run python -m py_compile cloud/api_assets.py cloud/api_asset_edit.py cloud/tests.py
+uv run python -m py_compile cloud/management/commands/sync_aws_assets.py cloud/management/commands/sync_aliyun_assets.py cloud/tests.py
 uv run python manage.py check
-DJANGO_TEST_SQLITE=1 uv run python manage.py test cloud.tests.CloudServerServicesTestCase.test_update_cloud_asset_binds_remote_telegram_username cloud.tests.CloudServerServicesTestCase.test_update_cloud_asset_remote_username_requires_logged_account --settings=shop.settings --verbosity=1
-```
-
-待最终收尾：
-
-```bash
+DJANGO_TEST_SQLITE=1 uv run python manage.py test cloud.tests.CloudServerServicesTestCase.test_aws_sync_resolution_does_not_match_cross_region_same_instance_without_ip cloud.tests.CloudServerServicesTestCase.test_aliyun_sync_resolution_does_not_match_cross_region_same_instance_without_ip cloud.tests.CloudServerServicesTestCase.test_cloud_sync_resolvers_reuse_global_current_public_ip cloud.tests.CloudServerServicesTestCase.test_cloud_sync_resolvers_keep_ip_primary_when_instance_changes cloud.tests.CloudServerServicesTestCase.test_cloud_sync_resolvers_prefer_current_ip_over_stale_previous_ip --settings=shop.settings --verbosity=1
 git diff --check
 ```
 
 ## 结论
 
-- 可以绑定用户列表里没有的 Telegram 用户，但前提是后台已有一个状态为已登录且 session 可用的 Telegram 个人号，并且输入的是可被 Telegram 解析的 username 或 `t.me/username`。
-- 纯数字 Telegram ID 仍按本地数据查询，不做远程陌生用户 ID 查询。
+- 数据库层已经不会允许同一个有效公网 IP 落两条 `CloudAsset`。
+- 同步链路现在也会优先复用全局同 IP 资产，避免先尝试新增再被数据库唯一约束打爆。
+- `previous_public_ip` 仍只作为查找辅助，不参与唯一约束；硬规则对象是当前 `public_ip`。

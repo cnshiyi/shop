@@ -155,6 +155,9 @@ def _resolve_asset(instance_id, public_ip, account=None, region_code=''):
         asset = base_queryset.filter(Q(public_ip=public_ip) | Q(previous_public_ip=public_ip)).order_by(*_asset_resolve_ordering(public_ip)).first()
         if asset:
             return asset
+        asset = _resolve_global_public_ip_asset(public_ip)
+        if asset:
+            return asset
     if instance_id:
         asset = base_queryset.filter(Q(instance_id=instance_id) | Q(provider_resource_id=instance_id) | Q(asset_name=instance_id)).order_by('-updated_at', '-id').first()
         if asset:
@@ -177,6 +180,18 @@ def _asset_resolve_ordering(public_ip=''):
         ))
     ordering.extend(['-updated_at', '-id'])
     return ordering
+
+
+def _resolve_global_public_ip_asset(public_ip):
+    normalized_ip = str(public_ip or '').strip()
+    if not normalized_ip:
+        return None
+    return (
+        CloudAsset.objects
+        .filter(kind=CloudAsset.KIND_SERVER, public_ip=normalized_ip)
+        .order_by(*_asset_resolve_ordering(normalized_ip))
+        .first()
+    )
 
 
 # 功能：提供 阿里云资产同步 的内部辅助逻辑，供同模块流程复用。
