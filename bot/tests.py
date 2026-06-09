@@ -949,6 +949,32 @@ class DashboardCloudAccountVerifyTestCase(TestCase):
         self.assertEqual(len(page1_ids), 5)
         self.assertEqual(len(page2_ids), 5)
         self.assertFalse(page1_ids & page2_ids)
+        page3 = RequestFactory().get('/api/admin/users/', {'keyword': 'page_user_', 'page': '3', 'page_size': '5'})
+        page3.user = root
+        payload3 = json.loads(users_list(page3).content.decode('utf-8'))['data']
+        self.assertEqual(payload3['page'], 3)
+        self.assertEqual(payload3['loaded'], 3)
+        all_ids = page1_ids | page2_ids | {item['id'] for item in payload3['items']}
+        self.assertEqual(len(all_ids), 13)
+
+    def test_users_list_searches_numeric_and_text_keywords_with_pagination(self):
+        root = get_user_model().objects.create_user(username='root_users_search', password='pass', is_staff=True, is_superuser=True)
+        first = TelegramUser.objects.create(tg_user_id=920001, username='needle_user_01', first_name='搜索用户甲')
+        TelegramUser.objects.create(tg_user_id=920002, username='needle_user_02', first_name='搜索用户乙')
+        TelegramUser.objects.create(tg_user_id=920003, username='other_user_03', first_name='其他用户')
+
+        text_request = RequestFactory().get('/api/admin/users/', {'keyword': 'needle_user_', 'page': '1', 'page_size': '1'})
+        text_request.user = root
+        text_payload = json.loads(users_list(text_request).content.decode('utf-8'))['data']
+        self.assertEqual(text_payload['total'], 2)
+        self.assertEqual(text_payload['total_pages'], 2)
+        self.assertEqual(text_payload['loaded'], 1)
+
+        numeric_request = RequestFactory().get('/api/admin/users/', {'keyword': str(first.tg_user_id), 'page': '1', 'page_size': '10'})
+        numeric_request.user = root
+        numeric_payload = json.loads(users_list(numeric_request).content.decode('utf-8'))['data']
+        self.assertEqual(numeric_payload['total'], 1)
+        self.assertEqual(numeric_payload['items'][0]['id'], first.id)
 
     # 功能：验证后台用户余额编辑接口一次性保存余额和折扣，避免前端多接口半成功。
     def test_update_user_balance_can_atomically_save_discount(self):

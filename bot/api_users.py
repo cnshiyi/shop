@@ -2,7 +2,7 @@
 
 from decimal import Decimal
 
-from django.db import ProgrammingError, transaction
+from django.db import transaction
 from django.db.models import CharField, Q
 from django.db.models.functions import Cast
 from django.views.decorators.csrf import csrf_exempt
@@ -103,41 +103,23 @@ def users_list(request):
     keyword = _get_keyword(request)
     page = _positive_int_param(request, 'page', 1, maximum=100000)
     page_size = _positive_int_param(request, 'page_size', 10, maximum=100)
-    try:
-        queryset = TelegramUser.objects.order_by('-id')
-        if keyword and keyword.isdigit():
-            queryset = queryset.annotate(tg_user_id_text=Cast('tg_user_id', output_field=CharField()))
-            queryset = queryset.filter(
-                Q(id=int(keyword))
-                | Q(tg_user_id=int(keyword))
-                | Q(tg_user_id_text__icontains=keyword)
-                | Q(username__icontains=keyword)
-                | Q(first_name__icontains=keyword)
-            )
-        else:
-            queryset = _apply_keyword_filter(queryset, keyword, ['username', 'first_name'])
-        queryset = queryset.distinct()
-    except ProgrammingError:
-        queryset = TelegramUser.objects.order_by('-id')
-        if keyword and keyword.isdigit():
-            queryset = queryset.annotate(tg_user_id_text=Cast('tg_user_id', output_field=CharField()))
-            queryset = queryset.filter(
-                Q(id=int(keyword)) | Q(tg_user_id=int(keyword)) | Q(tg_user_id_text__icontains=keyword)
-            )
-        else:
-            queryset = _apply_keyword_filter(queryset, keyword, ['username', 'first_name'])
-        queryset = queryset.distinct()
+    queryset = TelegramUser.objects.order_by('-id')
+    if keyword and keyword.isdigit():
+        queryset = queryset.annotate(tg_user_id_text=Cast('tg_user_id', output_field=CharField()))
+        queryset = queryset.filter(
+            Q(id=int(keyword))
+            | Q(tg_user_id=int(keyword))
+            | Q(tg_user_id_text__icontains=keyword)
+            | Q(username__icontains=keyword)
+            | Q(first_name__icontains=keyword)
+        )
+    else:
+        queryset = _apply_keyword_filter(queryset, keyword, ['username', 'first_name'])
+    queryset = queryset.distinct()
     total = queryset.count()
-    user_ids = list(queryset.values_list('id', flat=True))
-    proxy_counts = _active_proxy_counts_by_user(user_ids)
-    sorted_user_ids = sorted(user_ids, key=lambda user_id: (proxy_counts.get(user_id, 0), user_id), reverse=True)
     offset = (page - 1) * page_size
-    page_user_ids = sorted_user_ids[offset:offset + page_size]
-    user_by_id = {
-        user.id: user
-        for user in TelegramUser.objects.filter(id__in=page_user_ids)
-    }
-    users = [user_by_id[user_id] for user_id in page_user_ids if user_id in user_by_id]
+    users = list(queryset[offset:offset + page_size])
+    proxy_counts = _active_proxy_counts_by_user([user.id for user in users])
     items = [
         {
             **_user_payload({

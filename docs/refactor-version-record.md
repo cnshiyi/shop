@@ -19707,3 +19707,72 @@ git diff --check
 ### 剩余风险
 
 - 用户列表后端为保持代理数优先排序，仍会先计算当前搜索结果的全部用户代理数；如果用户数量继续扩大，下一轮应把代理数排序下沉到数据库聚合分页。
+
+## 2026-06-09 11:04 CST 修复用户列表 10 万级分页搜索并重做聊天记录页面
+
+### 本轮背景
+
+- 用户反馈用户列表数据不能完全显示，只能显示 5 页。
+- 用户要求实际测试用户删除后 ID 能否复用。
+- 用户反馈聊天记录页面观感太差，要求实际截图查看。
+- 用户补充要求用户数据压测 10 万条，并测试搜索。
+
+### 修复
+
+- `bot/api_users.py`
+  - 用户列表改为数据库侧分页，按 `id desc` 稳定排序。
+  - 代理数只对当前页计算，避免 10 万级用户下全量取 ID、全量计算代理数、内存排序导致列表和搜索变慢。
+- `bot/tests.py`
+  - 扩展分页测试，覆盖第 1 页、第 2 页、最后页无重复无丢失。
+  - 新增文本搜索和数字搜索分页测试。
+- `/Users/a399/Desktop/data/vue-shop-admin/apps/web-antd/src/views/dashboard/users/index.vue`
+  - 分页器显示 `共 X 条 / Y 页`，开启快速跳页和页大小选择。
+  - 关键列不换行，避免 ID/TG ID 在页面中被折断。
+- `/Users/a399/Desktop/data/vue-shop-admin/apps/web-antd/src/views/dashboard/telegram-accounts/chats.vue`
+  - 去掉 hero、渐变和说明式文案。
+  - 改为后台工具式双栏布局，左侧会话检索和统计，右侧消息窗口和回复输入。
+
+### 实测
+
+- 独立压测库：`/private/tmp/shop_users_100k.sqlite`。
+- 用户数据：100000 条。
+- 分页压测：
+  - 第 1 页 20 条：`11.41ms`，总数 100000，总页数 5000，无重复。
+  - 第 2 页 20 条：`10.89ms`，无重复。
+  - 第 2500 页 20 条：`14.15ms`，无重复。
+  - 第 5000 页 20 条：`18.31ms`，无重复。
+- 搜索压测：
+  - `load_user_099999`：`16.39ms`，命中 1 条。
+  - `load_user_09`：`9.06ms`，命中 10000 条。
+  - `990000099999`：`25.67ms`，命中 1 条。
+- 删除 ID 复用实测：
+  - 独立库中创建用户后，带 Bearer session 调用后台删除接口返回 200。
+  - 删除后产生 `DeletedTelegramUserSlot`。
+  - 新 Telegram 用户走服务创建入口后复用旧 `bot_user.id`，槽位被消费。
+- 浏览器实测：
+  - `http://127.0.0.1:5666/admin/users` 成功加载，显示 `共 500318 条 / 50032 页` 和跳页输入。
+  - 用户列表前端搜索 `real_lifecycle_20260608232809` 成功加载结果。
+  - `http://127.0.0.1:5666/admin/telegram-accounts/chats` 成功加载，控制台 0 error / 0 warning。
+  - 截图保存到 `output/playwright/users-page.png`、`output/playwright/users-search-page.png`、`output/playwright/telegram-chats-page.png`。
+
+### 验证
+
+通过：
+
+```bash
+uv run python manage.py check
+uv run python -m py_compile bot/api_users.py bot/tests.py
+DJANGO_TEST_SQLITE=1 uv run python manage.py test bot.tests.DashboardCloudAccountVerifyTestCase.test_users_list_uses_server_pagination_total_and_distinct_pages bot.tests.DashboardCloudAccountVerifyTestCase.test_users_list_searches_numeric_and_text_keywords_with_pagination bot.tests.DashboardCloudAccountVerifyTestCase.test_delete_user_unbinds_assets_and_new_user_reuses_deleted_id --settings=shop.settings --verbosity=1
+DB_ENGINE=sqlite SQLITE_NAME=/private/tmp/shop_users_100k.sqlite uv run python manage.py migrate --noinput
+DB_ENGINE=sqlite SQLITE_NAME=/private/tmp/shop_users_100k.sqlite uv run python manage.py shell -c '10 万用户造数、分页、搜索、删除复用实测'
+pnpm --filter @vben/web-antd typecheck
+git diff --check
+git -C /Users/a399/Desktop/data/vue-shop-admin diff --check
+```
+
+### 结论
+
+- 用户列表不再受“只显示前几页”的前端展示限制，可直接跳深页。
+- 10 万用户下后端分页和搜索耗时稳定在毫秒级，没有发现重复或丢页。
+- 删除用户后的 ID 复用链路已通过真实接口和创建入口验证。
+- 聊天记录页面已经从展示型页面收敛为后台工具布局。
