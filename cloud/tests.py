@@ -2267,9 +2267,150 @@ class CloudServerServicesTestCase(TestCase):
 
         self.assertEqual(response.status_code, 200)
         self.assertEqual(payload['risk_counts']['all'], 3)
-        self.assertEqual(payload['risk_counts']['normal'], 1)
+        self.assertEqual(payload['risk_counts']['normal'], 2)
         self.assertEqual(payload['risk_counts']['expired'], 1)
         self.assertEqual(payload['risk_counts']['account_disabled'], 1)
+        self.assertEqual(
+            payload['risk_counts']['normal']
+            + payload['risk_counts']['due_soon']
+            + payload['risk_counts']['expired']
+            + payload['risk_counts']['unattached_ip'],
+            payload['risk_counts']['all'],
+        )
+
+    # 功能：代理列表四个主标签必须互斥覆盖默认可见资产，避免标签数量加总对不上全部。
+    def test_cloud_assets_primary_filter_counts_partition_visible_assets(self):
+        admin = get_user_model().objects.create_user(username='asset_primary_counts_admin', password='x', is_staff=True)
+        active_account = CloudAccountConfig.objects.create(
+            provider=CloudAccountConfig.PROVIDER_AWS,
+            name='asset-primary-counts-active',
+            region_hint=self.plan.region_code,
+            is_active=True,
+        )
+        disabled_account = CloudAccountConfig.objects.create(
+            provider=CloudAccountConfig.PROVIDER_AWS,
+            name='asset-primary-counts-disabled',
+            region_hint=self.plan.region_code,
+            is_active=False,
+        )
+        active_label = cloud_account_label(active_account)
+        disabled_label = cloud_account_label(disabled_account)
+        now = timezone.now()
+        normal = CloudAsset.objects.create(
+            kind=CloudAsset.KIND_SERVER,
+            source=CloudAsset.SOURCE_AWS_SYNC,
+            user=self.user,
+            provider='aws_lightsail',
+            cloud_account=active_account,
+            account_label=active_label,
+            region_code=self.plan.region_code,
+            region_name=self.plan.region_name,
+            asset_name='asset-primary-normal',
+            public_ip='10.77.91.10',
+            status=CloudAsset.STATUS_RUNNING,
+            actual_expires_at=now + timezone.timedelta(days=30),
+        )
+        disabled_not_due = CloudAsset.objects.create(
+            kind=CloudAsset.KIND_SERVER,
+            source=CloudAsset.SOURCE_AWS_SYNC,
+            user=self.user,
+            provider='aws_lightsail',
+            cloud_account=disabled_account,
+            account_label=disabled_label,
+            region_code=self.plan.region_code,
+            region_name=self.plan.region_name,
+            asset_name='asset-primary-disabled-normal',
+            public_ip='10.77.91.11',
+            status=CloudAsset.STATUS_RUNNING,
+            actual_expires_at=now + timezone.timedelta(days=30),
+        )
+        due_soon = CloudAsset.objects.create(
+            kind=CloudAsset.KIND_SERVER,
+            source=CloudAsset.SOURCE_AWS_SYNC,
+            user=self.user,
+            provider='aws_lightsail',
+            cloud_account=active_account,
+            account_label=active_label,
+            region_code=self.plan.region_code,
+            region_name=self.plan.region_name,
+            asset_name='asset-primary-due',
+            public_ip='10.77.91.12',
+            status=CloudAsset.STATUS_RUNNING,
+            actual_expires_at=now + timezone.timedelta(days=3),
+        )
+        expired = CloudAsset.objects.create(
+            kind=CloudAsset.KIND_SERVER,
+            source=CloudAsset.SOURCE_AWS_SYNC,
+            user=self.user,
+            provider='aws_lightsail',
+            cloud_account=active_account,
+            account_label=active_label,
+            region_code=self.plan.region_code,
+            region_name=self.plan.region_name,
+            asset_name='asset-primary-expired',
+            public_ip='10.77.91.13',
+            status=CloudAsset.STATUS_RUNNING,
+            actual_expires_at=now - timezone.timedelta(days=1),
+        )
+        unattached = CloudAsset.objects.create(
+            kind=CloudAsset.KIND_SERVER,
+            source=CloudAsset.SOURCE_AWS_SYNC,
+            provider='aws_lightsail',
+            cloud_account=active_account,
+            account_label=active_label,
+            region_code=self.plan.region_code,
+            region_name=self.plan.region_name,
+            asset_name='asset-primary-unattached',
+            public_ip='10.77.91.14',
+            status=CloudAsset.STATUS_UNKNOWN,
+            provider_status='未附加固定IP',
+            actual_expires_at=now - timezone.timedelta(days=1),
+            is_active=False,
+        )
+        CloudAsset.objects.create(
+            kind=CloudAsset.KIND_SERVER,
+            source=CloudAsset.SOURCE_AWS_SYNC,
+            provider='aws_lightsail',
+            cloud_account=active_account,
+            account_label=active_label,
+            region_code=self.plan.region_code,
+            region_name=self.plan.region_name,
+            asset_name='asset-primary-hidden-deleted',
+            public_ip='10.77.91.15',
+            status=CloudAsset.STATUS_DELETED,
+            actual_expires_at=now + timezone.timedelta(days=30),
+            is_active=False,
+        )
+        refresh_cloud_asset_dashboard_snapshots(reason='test', full=True)
+
+        request = self.factory.get('/api/admin/cloud-assets/', {'paginated': '1', 'page_size': '20'})
+        self._attach_bearer_session(request, admin)
+        response = cloud_assets_list(request)
+        payload = json.loads(response.content.decode('utf-8'))['data']
+        counts = payload['risk_counts']
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(counts['all'], 5)
+        self.assertEqual(counts['normal'], 2)
+        self.assertEqual(counts['due_soon'], 1)
+        self.assertEqual(counts['expired'], 1)
+        self.assertEqual(counts['unattached_ip'], 1)
+        self.assertEqual(counts['normal'] + counts['due_soon'] + counts['expired'] + counts['unattached_ip'], counts['all'])
+
+        expected_ids = {
+            'normal': {normal.id, disabled_not_due.id},
+            'due_soon': {due_soon.id},
+            'expired': {expired.id},
+            'unattached_ip': {unattached.id},
+        }
+        for risk_status, ids in expected_ids.items():
+            tagged_request = self.factory.get('/api/admin/cloud-assets/', {'paginated': '1', 'page_size': '20', 'risk_status': risk_status})
+            self._attach_bearer_session(tagged_request, admin)
+            tagged_response = cloud_assets_list(tagged_request)
+            tagged_payload = json.loads(tagged_response.content.decode('utf-8'))['data']
+            self.assertEqual(tagged_response.status_code, 200)
+            self.assertEqual({item['id'] for item in tagged_payload['items']}, ids)
+            self.assertEqual(tagged_payload['total'], len(ids))
 
     # 功能：百万级 MySQL 快照表风险计数必须按索引拆分 count，避免单条 aggregate 冷缓存拖慢首屏。
     def test_cloud_asset_dashboard_risk_counts_do_not_use_single_aggregate(self):
@@ -2295,11 +2436,22 @@ class CloudServerServicesTestCase(TestCase):
             def order_by(self):
                 raise RuntimeError('skip cache key for fake queryset')
 
-            def filter(self, **kwargs):
-                return FakeSnapshotQuerySet((*self.filters, *kwargs.items()))
+            def filter(self, *args, **kwargs):
+                q_filters = (('q_filter', True),) if args else ()
+                return FakeSnapshotQuerySet((*self.filters, *q_filters, *kwargs.items()))
 
             def count(self):
-                return self.count_by_filters[self.filters]
+                filters = tuple(self.filters)
+                keys = dict(item for item in filters if isinstance(item, tuple) and len(item) == 2)
+                if keys.get('risk_unattached_ip') is True:
+                    return 13
+                if keys.get('risk_unattached_ip') is False and 'asset_due_sort_at__lte' in keys and 'asset_due_sort_at__gt' not in keys:
+                    return 12
+                if keys.get('risk_unattached_ip') is False and 'asset_due_sort_at__gt' in keys and 'asset_due_sort_at__lte' in keys:
+                    return 11
+                if keys.get('risk_unattached_ip') is False and ('q_filter', True) in filters:
+                    return 10
+                return self.count_by_filters[filters]
 
             def aggregate(self, **_kwargs):
                 raise AssertionError('risk counts must not use single aggregate on large MySQL tables')
@@ -4185,7 +4337,7 @@ class CloudServerServicesTestCase(TestCase):
         normal_response = cloud_assets_list(normal_request)
         normal_payload = json.loads(normal_response.content.decode('utf-8'))['data']
         self.assertEqual([item['id'] for item in normal_payload['items']], [normal_asset.id])
-        self.assertEqual(normal_payload['items'][0]['risk_label'], '运行中')
+        self.assertIn('normal', normal_payload['items'][0]['risk_statuses'])
 
         search_request = self.factory.get('/api/admin/cloud-assets/', {'paginated': '1', 'keyword': 'risk-instance-001'})
         self._attach_bearer_session(search_request, admin)

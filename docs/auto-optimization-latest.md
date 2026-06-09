@@ -4,45 +4,43 @@
 
 ## 最近一轮
 
-- 时间：2026-06-09 15:19 CST
-- 状态：已修复 AWS 云账号轮询创建前不查真实配额的问题。
+- 时间：2026-06-09 23:43 CST
+- 状态：已修复代理列表四个主标签数量不能加总等于全部的问题。
 - 后端分支：`codex/cloud-asset-lifecycle-refactor`
 - 前端分支：`codex/cloud-asset-list-performance`
 - 目标主分支：`main`
 
 ## 本轮背景
 
-- 用户反馈多个 AWS 云账号轮询仍有问题，要求创建服务器前检查配额，配额不足直接换下一个账号。
-- 进一步确认后，配额检查必须调用 AWS 真实配额，不使用后台配置模拟配额。
-- 本轮只处理 AWS Lightsail；阿里云不增加创建前配额检查，保持原创建逻辑。
+- 用户指出代理列表标签过滤中，`运行中`、`已过期`、`即将过期`、`未附加IP` 四项加起来应该等于 `全部`。
+- 复查发现原 `risk_counts` 是多标签统计：同一资产可同时计入主生命周期标签和续费关闭、未绑定用户、云账号异常等辅助标签。
+- 另外默认 `全部` 会过滤隐藏删除资产，但风险统计原来基于未过滤集合，导致默认显示口径和标签计数口径不完全一致。
 
 ## 修复内容
 
-- `cloud/aws_lightsail.py`
-  - 新增 AWS Service Quotas 客户端构造。
-  - 创建前读取 Lightsail 真实配额：
-    - `Instances`：按 AWS Lightsail 口径作为区域实例 vCPU 配额。
-    - `Static IP addresses`：固定 IP 数量配额。
-  - 结合当前 Lightsail 实例硬件 `cpuCount`、待创建 bundle 的 `cpuCount`、当前固定 IP 数，判断本次创建是否会超配额。
-  - 如果实例 vCPU 或固定 IP 会超限，返回明确原因，不进入真实创建请求。
-  - 如果无法读取真实配额，也按检查失败处理，避免盲目创建。
-- `cloud/provisioning.py`
-  - AWS 候选账号循环中新增 `provider_capacity_check` 日志阶段。
-  - 每个 AWS 账号在调用 `create_aws_instance()` 前先执行真实配额检查。
-  - 当前账号配额不足时记录失败原因并直接轮询下一个账号。
-  - 阿里云返回“无需创建前配额检查”，不改变原创建链路。
+- `cloud/api_asset_snapshots.py`
+  - 新增主生命周期标签集合：`normal`、`due_soon`、`expired`、`unattached_ip`。
+  - 主标签过滤改为互斥口径：
+    - `unattached_ip`：未附加固定 IP。
+    - `expired`：非未附加 IP 且到期时间已过。
+    - `due_soon`：非未附加 IP 且到期时间在 7 天内。
+    - `normal`：非未附加 IP 且无到期时间或 7 天后才到期。
+  - 主标签统计改为同一互斥查询口径；辅助标签仍按风险布尔字段统计。
+- `cloud/api_assets.py`
+  - 默认未打开“显示删除资产”时，`risk_counts` 和列表数据都基于 `is_display_visible=True`。
+  - 风险摘要接口也使用默认可见资产口径，避免前端首屏标签数和列表默认显示不一致。
 - `cloud/tests.py`
-  - 覆盖 AWS 配额函数会读取 Service Quotas，并按实例 vCPU 和固定 IP 判断。
-  - 覆盖第一个 AWS 账号配额不足时不会调用创建接口，只用第二个账号创建。
-  - 修正现有开通测试，避免测试环境误触真实 AWS 配额查询。
+  - 新增四个主标签互斥覆盖测试，验证四项加总等于 `all`，且各标签实际返回资产与计数一致。
+  - 调整云账号停用资产计数测试：云账号异常仍是辅助标签，主生命周期仍按到期时间归入运行中。
+  - 调整旧风险过滤测试：运行中标签可以包含辅助风险文案，不再强制行文案必须是“运行中”。
 
 ## 验证
 
 通过：
 
 ```bash
-uv run python -m py_compile cloud/aws_lightsail.py cloud/aliyun_simple.py cloud/provisioning.py cloud/tests.py core/runtime_config.py
-DJANGO_TEST_SQLITE=1 uv run python manage.py test cloud.tests.CloudServerServicesTestCase.test_aws_create_capacity_uses_real_service_quotas cloud.tests.CloudServerServicesTestCase.test_provision_rotates_before_create_when_aws_quota_is_full cloud.tests.CloudServerServicesTestCase.test_provision_rotates_to_next_cloud_account_after_create_failure cloud.tests.CloudServerServicesTestCase.test_provision_expected_ip_failure_schedules_cleanup --settings=shop.settings --verbosity=1
+uv run python -m py_compile cloud/api_asset_snapshots.py cloud/api_assets.py cloud/tests.py
+DJANGO_TEST_SQLITE=1 uv run python manage.py test cloud.tests.CloudServerServicesTestCase.test_cloud_assets_list_risk_counts_keep_disabled_account_isolated cloud.tests.CloudServerServicesTestCase.test_cloud_assets_primary_filter_counts_partition_visible_assets cloud.tests.CloudServerServicesTestCase.test_cloud_asset_dashboard_risk_counts_do_not_use_single_aggregate cloud.tests.CloudServerServicesTestCase.test_cloud_assets_list_filters_by_risk_and_searches_asset_identifiers cloud.tests.CloudServerServicesTestCase.test_cloud_asset_expired_filter_excludes_unattached_ip_assets cloud.tests.CloudServerServicesTestCase.test_cloud_asset_unattached_filter_uses_raw_provider_status --settings=shop.settings --verbosity=1
 uv run python manage.py check
 git diff --check
 ```
@@ -50,13 +48,12 @@ git diff --check
 结果：
 
 - 编译通过。
-- 聚焦测试 4 条通过。
+- 聚焦测试 6 条通过。
 - Django 系统检查通过。
 - diff 空白检查通过。
 - SQLite 聚焦测试仍输出既有 `db_comment/db_table_comment` 告警，不属于本轮问题。
 
 ## 结论
 
-- AWS 购买创建现在会在真实创建实例前先查 AWS 真实配额。
-- 当前 AWS 账号配额不足时，不会发起实例创建，直接切换到下一个候选云账号。
-- 阿里云不做本轮配额前置检查，避免引入无关逻辑。
+- 代理列表默认可见资产中，`运行中 + 即将过期 + 已过期 + 未附加IP = 全部`。
+- 云账号异常、未绑定用户、未绑定群组、续费关闭、关机计划关闭等仍作为辅助标签保留，不再破坏四个主生命周期标签的加总关系。

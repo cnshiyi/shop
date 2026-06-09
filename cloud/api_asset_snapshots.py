@@ -235,6 +235,8 @@ _HIDDEN_DISPLAY_STATUSES = {
     CloudAsset.STATUS_UNKNOWN,
 }
 
+_DASHBOARD_PRIMARY_RISK_STATUSES = {'normal', 'due_soon', 'expired', 'unattached_ip'}
+
 
 def _snapshot_group_key(item: dict, group_by='user') -> str:
     if group_by == 'telegram_group' and item.get('telegram_group_id'):
@@ -480,6 +482,8 @@ def _filter_dashboard_snapshots_by_risk(queryset, risk_status: str):
     risk_status = str(risk_status or '').strip()
     if not risk_status or risk_status == 'all':
         return queryset
+    if risk_status in _DASHBOARD_PRIMARY_RISK_STATUSES:
+        return _filter_dashboard_snapshots_by_primary_risk(queryset, risk_status)
     field = _DASHBOARD_RISK_FLAGS.get(risk_status)
     if not field:
         return queryset.none()
@@ -487,6 +491,21 @@ def _filter_dashboard_snapshots_by_risk(queryset, risk_status: str):
     if risk_status != 'account_disabled':
         queryset = queryset.filter(risk_account_disabled=False)
     return queryset
+
+
+def _filter_dashboard_snapshots_by_primary_risk(queryset, risk_status: str):
+    now = timezone.now()
+    due_soon_at = now + timezone.timedelta(days=7)
+    if risk_status == 'unattached_ip':
+        return queryset.filter(risk_unattached_ip=True)
+    queryset = queryset.filter(risk_unattached_ip=False)
+    if risk_status == 'expired':
+        return queryset.filter(asset_due_sort_at__isnull=False, asset_due_sort_at__lte=now)
+    if risk_status == 'due_soon':
+        return queryset.filter(asset_due_sort_at__isnull=False, asset_due_sort_at__gt=now, asset_due_sort_at__lte=due_soon_at)
+    if risk_status == 'normal':
+        return queryset.filter(Q(asset_due_sort_at__isnull=True) | Q(asset_due_sort_at__gt=due_soon_at))
+    return queryset.none()
 
 
 def _dashboard_snapshot_risk_counts(queryset) -> dict:
@@ -497,6 +516,9 @@ def _dashboard_snapshot_risk_counts(queryset) -> dict:
             return {key: int(value or 0) for key, value in cached.items()}
     result = {'all': int(queryset.count() or 0)}
     for status, field in _DASHBOARD_RISK_FLAGS.items():
+        if status in _DASHBOARD_PRIMARY_RISK_STATUSES:
+            result[status] = int(_filter_dashboard_snapshots_by_primary_risk(queryset, status).count() or 0)
+            continue
         count_queryset = queryset.filter(**{field: True})
         if status != 'account_disabled':
             count_queryset = count_queryset.filter(risk_account_disabled=False)

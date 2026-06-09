@@ -20211,3 +20211,50 @@ git diff --check
 - AWS 购买创建现在会在真实创建实例前先查 AWS 真实配额。
 - 第一个 AWS 账号配额不足时，不会调用真实创建接口，会直接轮询到下一个候选账号。
 - 阿里云没有引入本轮配额前置逻辑。
+
+## 2026-06-09 23:43 CST 修复代理列表主标签加总口径
+
+### 本轮背景
+
+- 用户指出代理列表标签过滤中，`运行中`、`已过期`、`即将过期`、`未附加IP` 四项加起来应该等于 `全部`。
+- 原风险统计是多标签口径，一个资产可能同时计入即将过期、续费关闭、未绑定用户等多个标签。
+- 默认列表会隐藏删除/终止等资产，但 `risk_counts` 原来直接基于全量快照统计，导致默认 `全部` 与标签计数基数不一致。
+
+### 修复
+
+- `cloud/api_asset_snapshots.py`
+  - 新增四个主生命周期标签的互斥查询口径。
+  - `unattached_ip` 优先归类为未附加固定 IP。
+  - 非未附加 IP 再按 `actual_expires_at` 分为已过期、即将过期、运行中。
+  - 主标签统计使用同一套互斥查询，不再按多标签布尔字段重复计数。
+  - 辅助风险标签仍保留原有布尔统计，用于云账号异常、未绑定用户、续费关闭等排查。
+- `cloud/api_assets.py`
+  - 默认未打开“显示删除资产”时，标签统计和列表查询都基于 `is_display_visible=True`。
+  - 风险摘要接口也改为默认可见资产口径，避免前端全局刷新后标签数字回到全量隐藏口径。
+- `cloud/tests.py`
+  - 新增主标签互斥覆盖测试，验证 `normal + due_soon + expired + unattached_ip == all`。
+  - 验证每个主标签实际返回的资产集合与计数一致。
+  - 调整旧测试中对辅助风险文案的断言，避免把主标签和行内风险提示混为一类。
+
+### 验证
+
+通过：
+
+```bash
+uv run python -m py_compile cloud/api_asset_snapshots.py cloud/api_assets.py cloud/tests.py
+DJANGO_TEST_SQLITE=1 uv run python manage.py test cloud.tests.CloudServerServicesTestCase.test_cloud_assets_list_risk_counts_keep_disabled_account_isolated cloud.tests.CloudServerServicesTestCase.test_cloud_assets_primary_filter_counts_partition_visible_assets cloud.tests.CloudServerServicesTestCase.test_cloud_asset_dashboard_risk_counts_do_not_use_single_aggregate cloud.tests.CloudServerServicesTestCase.test_cloud_assets_list_filters_by_risk_and_searches_asset_identifiers cloud.tests.CloudServerServicesTestCase.test_cloud_asset_expired_filter_excludes_unattached_ip_assets cloud.tests.CloudServerServicesTestCase.test_cloud_asset_unattached_filter_uses_raw_provider_status --settings=shop.settings --verbosity=1
+uv run python manage.py check
+git diff --check
+```
+
+结果：
+
+- 编译通过。
+- 聚焦测试 6 条通过。
+- Django 系统检查通过。
+- diff 空白检查通过。
+
+### 结论
+
+- 默认代理列表中四个主生命周期标签现在互斥覆盖 `全部`。
+- 辅助风险标签不再影响主标签加总关系。

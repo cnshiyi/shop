@@ -764,9 +764,10 @@ def cloud_assets_list(request):
     try:
         _ensure_cloud_asset_dashboard_snapshots('cloud_assets_list')
         base_queryset = _dashboard_snapshot_queryset(keyword)
-        risk_counts = _dashboard_snapshot_risk_counts(base_queryset)
+        count_queryset = base_queryset if show_deleted else base_queryset.filter(is_display_visible=True)
+        risk_counts = _dashboard_snapshot_risk_counts(count_queryset)
         queryset = _filter_dashboard_snapshots_by_risk(base_queryset, risk_status)
-        if not show_deleted and risk_status in {'', 'all'}:
+        if not show_deleted:
             queryset = queryset.filter(is_display_visible=True)
         if not grouped and paginated:
             page_items, total, total_pages, page, page_size = _paginate_dashboard_snapshot_queryset(
@@ -815,7 +816,7 @@ def cloud_assets_risk_summary(request):
     keyword = _get_keyword(request)
     try:
         _ensure_cloud_asset_dashboard_snapshots('cloud_assets_risk_summary')
-        queryset = _dashboard_snapshot_queryset(keyword)
+        queryset = _dashboard_snapshot_queryset(keyword).filter(is_display_visible=True)
         return _ok({'risk_counts': _dashboard_snapshot_risk_counts(queryset), 'total': queryset.count()})
     except (OperationalError, ProgrammingError):
         return _ok({'risk_counts': {'all': 0}, 'total': 0})
