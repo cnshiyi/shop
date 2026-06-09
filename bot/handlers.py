@@ -2697,6 +2697,11 @@ def _plan_display_name(plan) -> str:
     return getattr(plan, 'display_plan_name', None) or getattr(plan, 'plan_name', '-') or '-'
 
 
+def _plan_description_line(plan) -> str:
+    description = (getattr(plan, 'display_description', None) or getattr(plan, 'plan_description', None) or '').strip()
+    return f'套餐说明: {description}\n' if description else ''
+
+
 def _custom_plan_text(region_name: str, plans) -> str:
     if not plans:
         return f'🛠 {region_name}\n\n当前地区暂无可用套餐。'
@@ -3584,7 +3589,7 @@ def register_handlers(dp: Dispatcher):
             _bot_text('bot_custom_quantity_title', '请选择购买数量') + '\n\n'
             f'{_public_region_line(plan.region_name)}'
             f'套餐: {display_name}\n'
-            f'套餐说明: {getattr(plan, "plan_description", None) or "无"}\n'
+            f'{_plan_description_line(plan)}'
             f'单价: {fmt_amount(display_price)} USDT\n'
             f'专属折扣: {discount_rate}%\n\n'
             + _bot_text('bot_custom_quantity_hint', '请选择数量，或输入自定义数量。')
@@ -3651,7 +3656,7 @@ def register_handlers(dp: Dispatcher):
             _bot_text('bot_custom_quantity_title', '请选择购买数量') + '\n\n'
             f'{_public_region_line(plan.region_name)}'
             f'套餐: {display_name}\n'
-            f'套餐说明: {getattr(plan, "plan_description", None) or "无"}\n'
+            f'{_plan_description_line(plan)}'
             f'单价: {fmt_amount(display_price)} USDT\n'
             f'专属折扣: {discount_rate}%\n\n'
             + _bot_text('bot_custom_quantity_hint', '请选择数量，或输入自定义数量。')
