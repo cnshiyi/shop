@@ -2244,20 +2244,31 @@ class CloudServerServicesTestCase(TestCase):
         self.assertNotIn('proxy_links', row)
         self.assertNotIn('provider_resource_id', row)
 
-    # 功能：验证未绑定用户资产在分组分页中保持独立分组键，避免最后一页被合并丢组。
-    def test_cloud_assets_list_compact_keeps_unbound_group_key(self):
-        asset = CloudAsset.objects.create(
+    # 功能：验证未绑定用户资产在分组分页中归入同一个未绑定用户分组。
+    def test_cloud_assets_list_compact_merges_unbound_user_group(self):
+        first_asset = CloudAsset.objects.create(
             kind=CloudAsset.KIND_SERVER,
             source=CloudAsset.SOURCE_AWS_SYNC,
             provider='aws_lightsail',
             region_code=self.plan.region_code,
             region_name=self.plan.region_name,
-            asset_name='snapshot-compact-unbound-asset',
+            asset_name='snapshot-compact-unbound-asset-a',
             public_ip='10.77.88.61',
             status=CloudAsset.STATUS_RUNNING,
             actual_expires_at=timezone.now() + timezone.timedelta(days=30),
         )
-        refresh_cloud_asset_dashboard_snapshots(asset_ids=[asset.id], reason='test', full=False)
+        second_asset = CloudAsset.objects.create(
+            kind=CloudAsset.KIND_SERVER,
+            source=CloudAsset.SOURCE_AWS_SYNC,
+            provider='aws_lightsail',
+            region_code=self.plan.region_code,
+            region_name=self.plan.region_name,
+            asset_name='snapshot-compact-unbound-asset-b',
+            public_ip='10.77.88.62',
+            status=CloudAsset.STATUS_RUNNING,
+            actual_expires_at=timezone.now() + timezone.timedelta(days=31),
+        )
+        refresh_cloud_asset_dashboard_snapshots(asset_ids=[first_asset.id, second_asset.id], reason='test', full=False)
 
         admin = get_user_model().objects.create_user(username='compact_unbound_group_admin', password='x', is_staff=True)
         request = self.factory.get('/api/admin/cloud-assets/', {
@@ -2269,11 +2280,26 @@ class CloudServerServicesTestCase(TestCase):
         self._attach_bearer_session(request, admin)
         response = cloud_assets_list(request)
         payload = json.loads(response.content.decode('utf-8'))['data']
-        group = next(item for item in payload['groups'] if item['items'][0]['id'] == asset.id)
+        group = next(item for item in payload['groups'] if item['user_key'] == 'user:unbound')
 
         self.assertEqual(response.status_code, 200)
-        self.assertEqual(group['user_key'], f'unbound:{asset.id}')
-        self.assertNotEqual(group['user_key'], 'user:unbound')
+        self.assertEqual(group['user_display_name'], '未绑定用户')
+        self.assertEqual({item['id'] for item in group['items']}, {first_asset.id, second_asset.id})
+
+        default_group_request = self.factory.get('/api/admin/cloud-assets/', {
+            'compact': '1',
+            'group_by': 'telegram_group',
+            'grouped': '1',
+            'paginated': '1',
+        })
+        self._attach_bearer_session(default_group_request, admin)
+        default_group_response = cloud_assets_list(default_group_request)
+        default_group_payload = json.loads(default_group_response.content.decode('utf-8'))['data']
+        default_group = next(item for item in default_group_payload['groups'] if item['user_key'] == 'user:unbound')
+
+        self.assertEqual(default_group_response.status_code, 200)
+        self.assertEqual(default_group['user_display_name'], '未绑定用户')
+        self.assertEqual({item['id'] for item in default_group['items']}, {first_asset.id, second_asset.id})
 
     # 功能：风险标签使用快照表已有组合索引顺序，避免大表默认排序拖慢 IP 视图。
     def test_cloud_assets_risk_ordering_uses_existing_page_indexes(self):

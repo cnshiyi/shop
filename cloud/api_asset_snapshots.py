@@ -244,7 +244,7 @@ def _snapshot_group_key(item: dict, group_by='user') -> str:
     tg_user_id = item.get('tg_user_id')
     if tg_user_id:
         return f'tg:{tg_user_id}'
-    return f"unbound:{item.get('id', '')}"
+    return 'user:unbound'
 
 
 def _snapshot_group_label(item: dict, group_by='user') -> str:
@@ -623,7 +623,7 @@ def _group_cloud_asset_payloads(items, group_by='telegram_group'):
     for item in items:
         if group_by == 'user':
             user_id = item.get('user_id') or item.get('tg_user_id')
-            key = item.get('group_user_key') or (f'user:{user_id}' if user_id else f"unbound:{item.get('id', '')}")
+            key = item.get('group_user_key') or (f'user:{user_id}' if user_id else 'user:unbound')
             group = groups.setdefault(key, {
                 'user_key': key,
                 'tg_user_id': item.get('tg_user_id'),
@@ -656,7 +656,7 @@ def _group_cloud_asset_payloads(items, group_by='telegram_group'):
                 })
             else:
                 user_id = item.get('user_id') or item.get('tg_user_id')
-                key = item.get('group_telegram_key') or (f'user:{user_id}' if user_id else f"unbound:{item.get('id', '')}")
+                key = item.get('group_telegram_key') or (f'user:{user_id}' if user_id else 'user:unbound')
                 group = groups.setdefault(key, {
                     'user_key': key,
                     'tg_user_id': item.get('tg_user_id'),

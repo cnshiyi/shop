@@ -19889,3 +19889,49 @@ git -C /Users/a399/Desktop/data/vue-shop-admin diff --check
 - 多云账号购买创建现在会按候选账号轮询，首个账号失败会切换下一个账号。
 - 线上可通过 `BOT_CLOUD_PURCHASE_FLOW` 追踪购买、扣款、拆单、候选账号、账号尝试、创建结果和失败切换。
 - 代理列表按用户分组入口已恢复为顶部显式下拉。
+
+## 2026-06-09 12:59 CST 修复未绑定用户代理分组分裂
+
+### 本轮背景
+
+- 用户要求“未绑定用户在同一分组”。
+- 后端快照分组旧逻辑使用 `unbound:{asset_id}` 作为无用户资产分组键，导致每条未绑定资产都成为独立用户分组。
+- 代理列表恢复按用户分组入口后，该问题会直接表现为未绑定用户分组过多，影响浏览和翻页观察。
+
+### 修复
+
+- `cloud/api_asset_snapshots.py`
+  - `_snapshot_group_key()` 对无 `user_id/tg_user_id` 的资产统一返回 `user:unbound`。
+  - `_group_cloud_asset_payloads()` 在 `group_by=user` 下把未绑定资产统一兜底到 `user:unbound`。
+  - 默认 `group_by=telegram_group` 且没有群组、没有用户时，也统一兜底到 `user:unbound`。
+- `cloud/migrations/0065_merge_unbound_dashboard_snapshot_user_group.py`
+  - 将旧快照表中无用户资产的 `group_user_key` 统一迁移为 `user:unbound`。
+  - 将无用户且无群组资产的 `group_telegram_key` 统一迁移为 `user:unbound`。
+- `cloud/tests.py`
+  - 新增两条未绑定资产的聚焦断言，覆盖按用户分组和默认按群组分组兜底，确认两条资产进入同一个未绑定用户分组。
+
+### 验证
+
+通过：
+
+```bash
+uv run python -m py_compile cloud/api_asset_snapshots.py cloud/tests.py cloud/migrations/0065_merge_unbound_dashboard_snapshot_user_group.py
+uv run python manage.py check
+uv run python manage.py migrate --plan
+DJANGO_TEST_SQLITE=1 uv run python manage.py test cloud.tests.CloudServerServicesTestCase.test_cloud_assets_list_compact_merges_unbound_user_group --settings=shop.settings --verbosity=1
+git diff --check
+```
+
+结果：
+
+- 编译检查通过。
+- Django 系统检查通过。
+- 迁移计划包含 `cloud.0065_merge_unbound_dashboard_snapshot_user_group`。
+- 未绑定用户合并分组聚焦测试通过。
+- diff 空白检查通过。
+- SQLite 测试仍输出既有 `db_comment/db_table_comment` 告警，不属于本轮问题。
+
+### 结论
+
+- 未绑定用户资产现在会进入同一个“未绑定用户”分组。
+- 旧快照数据会在迁移后同步修正，不需要等待全量刷新才能恢复分组口径。
