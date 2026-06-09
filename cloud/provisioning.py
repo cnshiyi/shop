@@ -702,6 +702,19 @@ async def provision_cloud_server(order_id: int):
         await _mark_provisioning_start(order.id, server_name)
 
         account_ids = await _candidate_cloud_account_ids(order.id)
+        logger.info(
+            'BOT_CLOUD_PURCHASE_FLOW stage=provision_account_candidates user_id=%s tg_user_id=%s order_id=%s order_no=%s provider=%s region=%s plan=%s quantity=%s current_account_id=%s candidate_account_ids=%s',
+            order.user_id,
+            order_tg_user_id,
+            order.id,
+            order.order_no,
+            order.provider,
+            order.region_code,
+            order.plan_name,
+            order.quantity,
+            order.cloud_account_id,
+            account_ids,
+        )
         if not account_ids:
             if is_cloud_asset_renewal_order(order):
                 note = '未附加固定 IP 恢复失败：原固定 IP 所属云账号不可用，已停止自动创建。'
@@ -724,24 +737,69 @@ async def provision_cloud_server(order_id: int):
         attempted_notes = []
         for attempt_index, account_id in enumerate(account_ids, start=1):
             order = await _set_order_cloud_account(order.id, account_id)
+            if not order:
+                logger.warning('BOT_CLOUD_PURCHASE_FLOW stage=provision_account_skip order_id=%s account_id=%s reason=order_or_account_unavailable', order_id, account_id)
+                attempted_notes.append(f'账号#{account_id or "-"}: 订单或云账号不可用')
+                continue
             await _mark_provisioning_start(order.id, server_name)
             account_label = order.account_label or order.provider
             create_attempts = 2
             for create_attempt in range(1, create_attempts + 1):
                 if order.provider == 'aws_lightsail':
                     set_provision_progress(order.id, '创建 AWS Lightsail 实例')
-                    logger.info('云服务器创建开始: order=%s provider=AWS Lightsail account=%s account_attempt=%s/%s create_attempt=%s/%s server_name=%s', order.order_no, account_label, attempt_index, len(account_ids), create_attempt, create_attempts, server_name)
+                    logger.info(
+                        'BOT_CLOUD_PURCHASE_FLOW stage=provider_create_start user_id=%s tg_user_id=%s order_id=%s order_no=%s provider=%s region=%s plan=%s account_id=%s account_label=%s account_attempt=%s/%s create_attempt=%s/%s server_name=%s',
+                        order.user_id,
+                        order_tg_user_id,
+                        order.id,
+                        order.order_no,
+                        order.provider,
+                        order.region_code,
+                        order.plan_name,
+                        order.cloud_account_id,
+                        account_label,
+                        attempt_index,
+                        len(account_ids),
+                        create_attempt,
+                        create_attempts,
+                        server_name,
+                    )
                     result = await create_aws_instance(await _get_aws_create_payload(order.id), server_name)
                     login_user = 'admin'
                 else:
                     set_provision_progress(order.id, '创建云服务器实例')
-                    logger.info('云服务器创建开始: order=%s provider=%s account=%s account_attempt=%s/%s create_attempt=%s/%s server_name=%s', order.order_no, order.provider, account_label, attempt_index, len(account_ids), create_attempt, create_attempts, server_name)
+                    logger.info(
+                        'BOT_CLOUD_PURCHASE_FLOW stage=provider_create_start user_id=%s tg_user_id=%s order_id=%s order_no=%s provider=%s region=%s plan=%s account_id=%s account_label=%s account_attempt=%s/%s create_attempt=%s/%s server_name=%s',
+                        order.user_id,
+                        order_tg_user_id,
+                        order.id,
+                        order.order_no,
+                        order.provider,
+                        order.region_code,
+                        order.plan_name,
+                        order.cloud_account_id,
+                        account_label,
+                        attempt_index,
+                        len(account_ids),
+                        create_attempt,
+                        create_attempts,
+                        server_name,
+                    )
                     result = await create_aliyun_instance(order, server_name)
                     login_user = 'root'
                 logger.info(
-                    '云服务器创建结果: order=%s account=%s ok=%s instance_id=%s public_ip=%s login_user=%s note=%s',
+                    'BOT_CLOUD_PURCHASE_FLOW stage=provider_create_result user_id=%s tg_user_id=%s order_id=%s order_no=%s provider=%s region=%s plan=%s account_id=%s account_label=%s create_attempt=%s/%s ok=%s instance_id=%s public_ip=%s login_user=%s note=%s',
+                    order.user_id,
+                    order_tg_user_id,
+                    order.id,
                     order.order_no,
+                    order.provider,
+                    order.region_code,
+                    order.plan_name,
+                    order.cloud_account_id,
                     account_label,
+                    create_attempt,
+                    create_attempts,
                     result.ok,
                     result.instance_id,
                     result.public_ip,
@@ -761,10 +819,40 @@ async def provision_cloud_server(order_id: int):
                 break
             attempted_notes.append(f'{account_label}: {result.note}')
             if attempt_index < len(account_ids):
-                logger.warning('云服务器创建失败，切换下一个账号重试: order=%s account=%s note=%s', order.order_no, account_label, _mask_proxy_log_text(result.note or '')[:1000])
+                logger.warning(
+                    'BOT_CLOUD_PURCHASE_FLOW stage=provider_account_rotate user_id=%s tg_user_id=%s order_id=%s order_no=%s failed_account_id=%s failed_account_label=%s next_account_id=%s note=%s',
+                    order.user_id,
+                    order_tg_user_id,
+                    order.id,
+                    order.order_no,
+                    order.cloud_account_id,
+                    account_label,
+                    account_ids[attempt_index],
+                    _mask_proxy_log_text(result.note or '')[:1000],
+                )
 
         if result and not result.ok and attempted_notes:
             result.note = '多账号创建均失败：\n' + '\n'.join(attempted_notes)
+
+        if not result:
+            note = '云服务器创建失败：没有可执行的启用云账号。'
+            if attempted_notes:
+                note += '\n' + '\n'.join(attempted_notes)
+            logger.warning(
+                'BOT_CLOUD_PURCHASE_FLOW stage=provision_no_executable_account user_id=%s tg_user_id=%s order_id=%s order_no=%s provider=%s region=%s candidate_account_ids=%s note=%s',
+                order.user_id,
+                order_tg_user_id,
+                order.id,
+                order.order_no,
+                order.provider,
+                order.region_code,
+                account_ids,
+                _mask_proxy_log_text(note),
+            )
+            saved = await _mark_failed(order_id, note)
+            clear_provision_progress(order_id)
+            _log_provision_result(saved, level=logging.WARNING, error=saved.provision_note)
+            return saved
 
         if result.ok:
             bootstrap_user = result.login_user or login_user
@@ -998,7 +1086,7 @@ def _candidate_cloud_account_ids(order_id: int):
         return [order.cloud_account_id] if order.cloud_account_id else []
     accounts = list_cloud_accounts_by_server_load(order.provider, order.region_code)
     ids = [account.id for account in accounts]
-    if order.cloud_account_id:
+    if order.cloud_account_id and order.cloud_account_id in ids:
         return [order.cloud_account_id, *[account_id for account_id in ids if account_id != order.cloud_account_id]]
     return ids
 
@@ -1011,6 +1099,8 @@ def _set_order_cloud_account(order_id: int, account_id: int | None):
     if account_id:
         from core.models import CloudAccountConfig
         account = CloudAccountConfig.objects.filter(id=account_id, is_active=True).first()
+        if not account:
+            return None
     else:
         account = None
     order.cloud_account = account

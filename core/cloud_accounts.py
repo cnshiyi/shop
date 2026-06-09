@@ -1,5 +1,6 @@
 from django.apps import apps
 from django.db.models import Count, Q
+import re
 
 
 _PROVIDER_ALIASES = {
@@ -63,9 +64,26 @@ def list_active_cloud_accounts(provider: str, region_code: str | None = None):
     queryset = CloudAccountConfig.objects.filter(provider=normalized_provider, is_active=True)
     region = str(region_code or '').strip()
     if region:
-        queryset = queryset.filter(Q(region_hint__isnull=True) | Q(region_hint='') | Q(region_hint=region))
+        candidates = [item for item in queryset.order_by('id') if cloud_account_supports_region(item, region)]
+    else:
+        candidates = list(queryset.order_by('id'))
     status_rank = {'ok': 0, 'unknown': 1, '': 1, 'error': 2, 'unsupported': 3}
-    return sorted(list(queryset.order_by('id')), key=lambda item: (status_rank.get(item.status or '', 9), item.id))
+    return sorted(candidates, key=lambda item: (status_rank.get(item.status or '', 9), item.id))
+
+
+def cloud_account_region_hints(account) -> set[str]:
+    text = str(getattr(account, 'region_hint', '') or '').strip()
+    if not text:
+        return set()
+    return {item.strip() for item in re.split(r'[\s,，;；|]+', text) if item.strip()}
+
+
+def cloud_account_supports_region(account, region_code: str | None) -> bool:
+    region = str(region_code or '').strip()
+    if not region:
+        return True
+    hints = cloud_account_region_hints(account)
+    return not hints or '*' in hints or region in hints
 
 
 def get_active_cloud_account(provider: str, region_code: str | None = None):
@@ -100,7 +118,22 @@ def list_cloud_accounts_by_server_load(provider: str, region_code: str | None = 
         row['account_label']: row['count']
         for row in queryset.values('account_label').annotate(count=Count('id'))
     }
-    return sorted(candidates, key=lambda item: (sum(loads_by_label.get(label, 0) for label in labels[item.id]), item.id))
+    CloudServerOrder = apps.get_model('cloud', 'CloudServerOrder')
+    order_loads_by_label = {
+        row['account_label']: row['count']
+        for row in CloudServerOrder.objects.filter(
+            provider__in=provider_values,
+            account_label__in=all_labels,
+            status__in=['paid', 'provisioning'],
+        ).values('account_label').annotate(count=Count('id'))
+    }
+    return sorted(
+        candidates,
+        key=lambda item: (
+            sum(loads_by_label.get(label, 0) + order_loads_by_label.get(label, 0) for label in labels[item.id]),
+            item.id,
+        ),
+    )
 
 
 def choose_cloud_account_for_order(provider: str, region_code: str | None = None):

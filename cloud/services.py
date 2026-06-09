@@ -28,7 +28,7 @@ from cloud.dashboard_snapshots import _refresh_dashboard_plan_snapshots
 from cloud.ip_guard import validate_server_connection_ip
 from cloud.ports import MTPROXY_DEFAULT_PORT, get_mtproxy_public_ports
 from core.cache import get_redis
-from core.cloud_accounts import choose_cloud_account_for_order, cloud_account_label, cloud_account_label_variants, get_active_cloud_account, get_cloud_account_from_label
+from core.cloud_accounts import choose_cloud_account_for_order, cloud_account_label, cloud_account_label_variants, get_active_cloud_account, get_cloud_account_from_label, list_cloud_accounts_by_server_load
 from core.models import CloudAccountConfig
 from core.order_numbers import unique_timestamp_order_no
 from orders.ledger import record_balance_ledger
@@ -1009,30 +1009,51 @@ def prepare_cloud_server_order_instances(order_id: int, user_id: int, port: int)
             logger.warning('云服务器默认端口创建被拒绝: order=%s user=%s port=%s status=%s', order.order_no, user_id, port, order.status)
             return []
         quantity = max(1, int(order.quantity or 1))
+        account_candidates = list_cloud_accounts_by_server_load(order.provider, order.region_code)
         order.mtproxy_port = port
         if quantity <= 1:
+            if account_candidates:
+                account = account_candidates[0]
+                order.cloud_account = account
+                order.account_label = cloud_account_label(account) or order.provider
             order.provision_note = append_note(order.provision_note, f'使用默认端口 {port}，开始创建服务器。')
-            order.save(update_fields=['mtproxy_port', 'provision_note', 'updated_at'])
-            logger.info('云服务器默认端口创建提交: order=%s user=%s port=%s quantity=1', order.order_no, user_id, port)
+            order.save(update_fields=['mtproxy_port', 'cloud_account', 'account_label', 'provision_note', 'updated_at'])
+            logger.info(
+                'BOT_CLOUD_PURCHASE_FLOW stage=prepare_instances user_id=%s order_id=%s order_no=%s provider=%s region=%s plan=%s quantity=1 port=%s selected_account_id=%s selected_account_label=%s candidate_accounts=%s',
+                user_id,
+                order.id,
+                order.order_no,
+                order.provider,
+                order.region_code,
+                order.plan_name,
+                port,
+                getattr(order.cloud_account, 'id', None),
+                order.account_label,
+                [item.id for item in account_candidates],
+            )
             return [order]
 
         per_total = (Decimal(order.total_amount or 0) / Decimal(quantity)).quantize(Decimal('0.000001'))
         per_pay = (Decimal(order.pay_amount or 0) / Decimal(quantity)).quantize(Decimal('0.000000001')) if order.pay_amount is not None else None
         original_order_no = order.order_no
         created_orders = [order]
+        first_account = account_candidates[0] if account_candidates else order.cloud_account
         order.quantity = 1
         order.total_amount = per_total
         order.pay_amount = per_pay
+        order.cloud_account = first_account
+        order.account_label = cloud_account_label(first_account) or order.provider
         order.provision_note = append_note(order.provision_note, f'批量订单 {original_order_no} 已拆分：第 1/{quantity} 台，默认端口 {port}，开始创建服务器。')
-        order.save(update_fields=['quantity', 'total_amount', 'pay_amount', 'mtproxy_port', 'provision_note', 'updated_at'])
+        order.save(update_fields=['quantity', 'total_amount', 'pay_amount', 'mtproxy_port', 'cloud_account', 'account_label', 'provision_note', 'updated_at'])
         for index in range(2, quantity + 1):
+            clone_account = account_candidates[(index - 1) % len(account_candidates)] if account_candidates else order.cloud_account
             clone = CloudServerOrder.objects.create(
                 order_no=_generate_cloud_order_no(),
                 user=order.user,
                 plan=order.plan,
                 provider=order.provider,
-                cloud_account=order.cloud_account,
-                account_label=order.account_label,
+                cloud_account=clone_account,
+                account_label=cloud_account_label(clone_account) or order.provider,
                 region_code=order.region_code,
                 region_name=order.region_name,
                 plan_name=order.plan_name,
@@ -1054,7 +1075,19 @@ def prepare_cloud_server_order_instances(order_id: int, user_id: int, port: int)
                 provision_note=f'批量订单 {original_order_no} 已拆分：第 {index}/{quantity} 台，默认端口 {port}，开始创建服务器。',
             )
             created_orders.append(clone)
-        logger.info('云服务器批量订单默认端口拆分完成: original_order=%s user=%s quantity=%s port=%s child_orders=%s', original_order_no, user_id, quantity, port, [item.order_no for item in created_orders])
+        logger.info(
+            'BOT_CLOUD_PURCHASE_FLOW stage=prepare_instances user_id=%s original_order_no=%s provider=%s region=%s plan=%s quantity=%s port=%s candidate_accounts=%s child_orders=%s child_account_ids=%s',
+            user_id,
+            original_order_no,
+            order.provider,
+            order.region_code,
+            order.plan_name,
+            quantity,
+            port,
+            [item.id for item in account_candidates],
+            [item.order_no for item in created_orders],
+            [getattr(item.cloud_account, 'id', None) for item in created_orders],
+        )
         return created_orders
 
 
@@ -1103,7 +1136,20 @@ def create_cloud_server_order(user_id: int, plan_id: int, currency: str = 'USDT'
         expired_at=expired_at,
     )
     CartItem.objects.filter(user_id=user_id, item_type='cloud_plan', cloud_plan_id=plan_id).delete()
-    logger.info('云服务器订单创建: order=%s user=%s region=%s plan=%s qty=%s pay=address amount=%s', order.order_no, user_id, plan.region_code, plan.plan_name, quantity, pay_amount)
+    logger.info(
+        'BOT_CLOUD_PURCHASE_FLOW stage=create_address_order user_id=%s order_id=%s order_no=%s provider=%s region=%s plan=%s quantity=%s currency=%s pay_amount=%s selected_account_id=%s selected_account_label=%s',
+        user_id,
+        order.id,
+        order.order_no,
+        order.provider,
+        order.region_code,
+        order.plan_name,
+        quantity,
+        order.currency,
+        pay_amount,
+        getattr(account, 'id', None),
+        order.account_label,
+    )
     return order
 
 
@@ -1154,7 +1200,22 @@ def buy_cloud_server_with_balance(user_id: int, plan_id: int, currency: str = 'U
             description=f'云服务器订单 #{order.order_no} 余额支付',
         )
     CartItem.objects.filter(user_id=user_id, item_type='cloud_plan', cloud_plan_id=plan_id).delete()
-    logger.info('云服务器钱包下单: order=%s user=%s region=%s plan=%s qty=%s currency=%s amount=%s', order.order_no, user_id, plan.region_code, plan.plan_name, quantity, currency, total)
+    logger.info(
+        'BOT_CLOUD_PURCHASE_FLOW stage=balance_order_paid user_id=%s order_id=%s order_no=%s provider=%s region=%s plan=%s quantity=%s currency=%s amount=%s selected_account_id=%s selected_account_label=%s balance_before=%s balance_after=%s',
+        user_id,
+        order.id,
+        order.order_no,
+        order.provider,
+        order.region_code,
+        order.plan_name,
+        quantity,
+        currency,
+        total,
+        getattr(account, 'id', None),
+        order.account_label,
+        old_balance,
+        getattr(user, balance_field),
+    )
     return order, None
 
 
@@ -1193,7 +1254,22 @@ def pay_cloud_server_order_with_balance(order_id: int, user_id: int, currency: s
         )
     if order.plan_id:
         CartItem.objects.filter(user_id=user_id, item_type='cloud_plan', cloud_plan_id=order.plan_id).delete()
-    logger.info('云服务器钱包补付: order=%s user=%s currency=%s amount=%s', order.order_no, user_id, currency, total)
+    logger.info(
+        'BOT_CLOUD_PURCHASE_FLOW stage=balance_pending_order_paid user_id=%s order_id=%s order_no=%s provider=%s region=%s plan=%s quantity=%s currency=%s amount=%s selected_account_id=%s selected_account_label=%s balance_before=%s balance_after=%s',
+        user_id,
+        order.id,
+        order.order_no,
+        order.provider,
+        order.region_code,
+        order.plan_name,
+        order.quantity,
+        currency,
+        total,
+        getattr(order.cloud_account, 'id', None),
+        order.account_label,
+        old_balance,
+        getattr(user, balance_field),
+    )
     return order, None
 
 

@@ -1864,7 +1864,7 @@ def _consume_callback_once(key: str, ttl_seconds: int = _CALLBACK_ONCE_TTL) -> b
 
 async def _create_cloud_order_and_notify(bot: Bot, chat_id: int, user_id: int, plan_id: int, quantity: int, currency: str, plan_name: str, region_name: str):
     try:
-        logger.info('云服务器后台建单任务开始: chat_id=%s user_id=%s plan_id=%s quantity=%s currency=%s', chat_id, user_id, plan_id, quantity, currency)
+        logger.info('BOT_CLOUD_PURCHASE_FLOW stage=bot_create_address_order_start chat_id=%s user_id=%s plan_id=%s plan=%s region=%s quantity=%s currency=%s', chat_id, user_id, plan_id, plan_name, region_name, quantity, currency)
         order = await create_cloud_server_order(user_id, plan_id, currency, quantity)
         receive_address = _receive_address()
         text = (
@@ -1885,7 +1885,7 @@ async def _create_cloud_order_and_notify(bot: Bot, chat_id: int, user_id: int, p
             ('数量', order.quantity),
             ('金额', f'{fmt_pay_amount(order.pay_amount or order.total_amount)} {order.currency}'),
         ])
-        logger.info('云服务器后台建单任务完成: chat_id=%s user_id=%s order_id=%s order=%s currency=%s total=%s pay_amount=%s', chat_id, user_id, order.id, order.order_no, order.currency, order.total_amount, order.pay_amount)
+        logger.info('BOT_CLOUD_PURCHASE_FLOW stage=bot_create_address_order_done chat_id=%s user_id=%s order_id=%s order_no=%s provider=%s region=%s plan=%s quantity=%s currency=%s total=%s pay_amount=%s account_id=%s account_label=%s', chat_id, user_id, order.id, order.order_no, order.provider, order.region_code, order.plan_name, order.quantity, order.currency, order.total_amount, order.pay_amount, getattr(order, 'cloud_account_id', None), order.account_label)
     except Exception as exc:
         logger.exception('云服务器后台建单任务异常: chat_id=%s user_id=%s plan_id=%s quantity=%s currency=%s error=%s', chat_id, user_id, plan_id, quantity, currency, exc)
         await bot.send_message(chat_id=chat_id, text=_bot_text_format('bot_create_order_failed', '❌ 创建订单失败，请稍后重试。\n错误: {error}', error=_public_cloud_error_text(exc)), reply_markup=main_menu())
@@ -1893,10 +1893,10 @@ async def _create_cloud_order_and_notify(bot: Bot, chat_id: int, user_id: int, p
 
 async def _buy_cloud_server_with_balance_and_notify(bot: Bot, chat_id: int, user_id: int, plan_id: int, quantity: int, currency: str):
     try:
-        logger.info('云服务器后台钱包直付任务开始: chat_id=%s user_id=%s plan_id=%s quantity=%s currency=%s', chat_id, user_id, plan_id, quantity, currency)
+        logger.info('BOT_CLOUD_PURCHASE_FLOW stage=bot_balance_buy_start chat_id=%s user_id=%s plan_id=%s quantity=%s currency=%s', chat_id, user_id, plan_id, quantity, currency)
         order, err = await buy_cloud_server_with_balance(user_id, plan_id, currency, quantity)
         if err:
-            logger.warning('云服务器后台钱包直付失败: chat_id=%s user_id=%s plan_id=%s quantity=%s currency=%s error=%s', chat_id, user_id, plan_id, quantity, currency, err)
+            logger.warning('BOT_CLOUD_PURCHASE_FLOW stage=bot_balance_buy_rejected chat_id=%s user_id=%s plan_id=%s quantity=%s currency=%s error=%s', chat_id, user_id, plan_id, quantity, currency, err)
             await bot.send_message(
                 chat_id=chat_id,
                 text=f"{_bot_text('bot_custom_balance_insufficient', '❌ 余额不足，请先充值')}\n\n当前支付币种: {currency}",
@@ -1905,6 +1905,22 @@ async def _buy_cloud_server_with_balance_and_notify(bot: Bot, chat_id: int, user
             return
         orders = await prepare_cloud_server_order_instances(order.id, user_id, MTPROXY_DEFAULT_PORT)
         task_count = len(orders)
+        logger.info(
+            'BOT_CLOUD_PURCHASE_FLOW stage=bot_balance_buy_tasks_prepared chat_id=%s user_id=%s order_id=%s order_no=%s provider=%s region=%s plan=%s quantity=%s currency=%s pay_amount=%s task_count=%s child_order_ids=%s child_account_ids=%s',
+            chat_id,
+            user_id,
+            order.id,
+            order.order_no,
+            order.provider,
+            order.region_code,
+            order.plan_name,
+            order.quantity,
+            order.currency,
+            order.pay_amount,
+            task_count,
+            [item.id for item in orders],
+            [getattr(item, 'cloud_account_id', None) for item in orders],
+        )
         await bot.send_message(
             chat_id=chat_id,
             text=(
@@ -1927,8 +1943,9 @@ async def _buy_cloud_server_with_balance_and_notify(bot: Bot, chat_id: int, user
             ('支付方式', '钱包余额'),
         ])
         for item in orders:
+            logger.info('BOT_CLOUD_PURCHASE_FLOW stage=bot_provision_task_scheduled chat_id=%s user_id=%s parent_order_id=%s child_order_id=%s child_order_no=%s account_id=%s port=%s', chat_id, user_id, order.id, item.id, item.order_no, getattr(item, 'cloud_account_id', None), item.mtproxy_port or MTPROXY_DEFAULT_PORT)
             asyncio.create_task(_provision_cloud_server_and_notify(bot, chat_id, item.id, item.mtproxy_port or MTPROXY_DEFAULT_PORT))
-        logger.info('云服务器后台钱包直付任务完成: chat_id=%s user_id=%s order_id=%s order=%s currency=%s qty=%s pay_amount=%s tasks=%s', chat_id, user_id, order.id, order.order_no, currency, order.quantity, order.pay_amount, task_count)
+        logger.info('BOT_CLOUD_PURCHASE_FLOW stage=bot_balance_buy_done chat_id=%s user_id=%s order_id=%s order_no=%s currency=%s qty=%s pay_amount=%s tasks=%s', chat_id, user_id, order.id, order.order_no, currency, order.quantity, order.pay_amount, task_count)
     except Exception as exc:
         logger.exception('云服务器后台钱包直付任务异常: chat_id=%s user_id=%s plan_id=%s quantity=%s currency=%s error=%s', chat_id, user_id, plan_id, quantity, currency, exc)
         await bot.send_message(chat_id=chat_id, text=_bot_text_format('bot_wallet_pay_failed', '❌ 钱包支付失败，请稍后重试。\n错误: {error}', error=_public_cloud_error_text(exc)), reply_markup=main_menu())
@@ -1936,10 +1953,10 @@ async def _buy_cloud_server_with_balance_and_notify(bot: Bot, chat_id: int, user
 
 async def _pay_cloud_server_order_with_balance_and_notify(bot: Bot, chat_id: int, user_id: int, order_id: int, currency: str):
     try:
-        logger.info('云服务器后台钱包补付任务开始: chat_id=%s user_id=%s order_id=%s currency=%s', chat_id, user_id, order_id, currency)
+        logger.info('BOT_CLOUD_PURCHASE_FLOW stage=bot_balance_pay_pending_start chat_id=%s user_id=%s order_id=%s currency=%s', chat_id, user_id, order_id, currency)
         order, err = await pay_cloud_server_order_with_balance(order_id, user_id, currency)
         if err:
-            logger.warning('云服务器后台钱包补付失败: chat_id=%s user_id=%s order_id=%s currency=%s error=%s', chat_id, user_id, order_id, currency, err)
+            logger.warning('BOT_CLOUD_PURCHASE_FLOW stage=bot_balance_pay_pending_rejected chat_id=%s user_id=%s order_id=%s currency=%s error=%s', chat_id, user_id, order_id, currency, err)
             await bot.send_message(
                 chat_id=chat_id,
                 text=f"{_bot_text('bot_custom_balance_insufficient', '❌ 余额不足，请先充值')}\n\n当前支付币种: {currency}",
@@ -1967,6 +1984,22 @@ async def _pay_cloud_server_order_with_balance_and_notify(bot: Bot, chat_id: int
             return
         orders = await prepare_cloud_server_order_instances(order.id, user_id, MTPROXY_DEFAULT_PORT)
         task_count = len(orders)
+        logger.info(
+            'BOT_CLOUD_PURCHASE_FLOW stage=bot_balance_pay_pending_tasks_prepared chat_id=%s user_id=%s order_id=%s order_no=%s provider=%s region=%s plan=%s quantity=%s currency=%s pay_amount=%s task_count=%s child_order_ids=%s child_account_ids=%s',
+            chat_id,
+            user_id,
+            order.id,
+            order.order_no,
+            order.provider,
+            order.region_code,
+            order.plan_name,
+            order.quantity,
+            order.currency,
+            order.pay_amount,
+            task_count,
+            [item.id for item in orders],
+            [getattr(item, 'cloud_account_id', None) for item in orders],
+        )
         await bot.send_message(
             chat_id=chat_id,
             text=(
@@ -1989,8 +2022,9 @@ async def _pay_cloud_server_order_with_balance_and_notify(bot: Bot, chat_id: int
             ('支付方式', '钱包余额'),
         ])
         for item in orders:
+            logger.info('BOT_CLOUD_PURCHASE_FLOW stage=bot_provision_task_scheduled chat_id=%s user_id=%s parent_order_id=%s child_order_id=%s child_order_no=%s account_id=%s port=%s', chat_id, user_id, order.id, item.id, item.order_no, getattr(item, 'cloud_account_id', None), item.mtproxy_port or MTPROXY_DEFAULT_PORT)
             asyncio.create_task(_provision_cloud_server_and_notify(bot, chat_id, item.id, item.mtproxy_port or MTPROXY_DEFAULT_PORT))
-        logger.info('云服务器后台钱包补付任务完成: chat_id=%s user_id=%s order_id=%s order=%s currency=%s qty=%s pay_amount=%s tasks=%s', chat_id, user_id, order.id, order.order_no, currency, order.quantity, order.pay_amount, task_count)
+        logger.info('BOT_CLOUD_PURCHASE_FLOW stage=bot_balance_pay_pending_done chat_id=%s user_id=%s order_id=%s order_no=%s currency=%s qty=%s pay_amount=%s tasks=%s', chat_id, user_id, order.id, order.order_no, currency, order.quantity, order.pay_amount, task_count)
     except Exception as exc:
         logger.exception('云服务器后台钱包补付任务异常: chat_id=%s user_id=%s order_id=%s currency=%s error=%s', chat_id, user_id, order_id, currency, exc)
         await bot.send_message(chat_id=chat_id, text=_bot_text_format('bot_wallet_pay_failed', '❌ 钱包支付失败，请稍后重试。\n错误: {error}', error=_public_cloud_error_text(exc)), reply_markup=main_menu())

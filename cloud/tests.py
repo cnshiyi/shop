@@ -47,7 +47,7 @@ from cloud.provisioning import (
     _mask_proxy_log_preview,
     provision_cloud_server,
 )
-from cloud.services import _cloud_asset_deleted_or_missing, apply_cloud_server_renewal, create_cloud_server_order, create_cloud_server_rebuild_order, create_cloud_server_renewal, create_cloud_server_renewal_by_public_query, create_cloud_server_renewal_for_user, create_cloud_server_upgrade_order, ensure_cloud_asset_operation_order, get_cloud_server_by_ip, get_cloud_server_by_ip_for_user, get_group_proxy_asset_detail, get_proxy_asset_by_ip_for_admin, get_proxy_asset_by_ip_for_user, get_user_proxy_asset_detail, is_retained_ip_order_visible_in_group, list_all_auto_renew_cloud_servers, list_cloud_asset_renewal_plans, list_cloud_server_upgrade_plans, list_group_cloud_servers, list_retained_ip_renewal_plans, list_retained_ip_renewal_plans_by_asset, list_user_cloud_servers, mark_cloud_server_ip_change_requested, mark_cloud_server_reinit_requested, pay_cloud_server_order_with_balance, pay_cloud_server_renewal_with_balance, prepare_cloud_asset_renewal_with_link, prepare_retained_ip_renewal_with_link, rebind_cloud_server_user, record_cloud_ip_log, replace_cloud_asset_order_by_admin, run_cloud_server_renewal_postcheck, set_cloud_server_auto_renew_admin, set_group_cloud_server_auto_renew, sync_cloud_asset_user_binding
+from cloud.services import _cloud_asset_deleted_or_missing, apply_cloud_server_renewal, create_cloud_server_order, create_cloud_server_rebuild_order, create_cloud_server_renewal, create_cloud_server_renewal_by_public_query, create_cloud_server_renewal_for_user, create_cloud_server_upgrade_order, ensure_cloud_asset_operation_order, get_cloud_server_by_ip, get_cloud_server_by_ip_for_user, get_group_proxy_asset_detail, get_proxy_asset_by_ip_for_admin, get_proxy_asset_by_ip_for_user, get_user_proxy_asset_detail, is_retained_ip_order_visible_in_group, list_all_auto_renew_cloud_servers, list_cloud_asset_renewal_plans, list_cloud_server_upgrade_plans, list_group_cloud_servers, list_retained_ip_renewal_plans, list_retained_ip_renewal_plans_by_asset, list_user_cloud_servers, mark_cloud_server_ip_change_requested, mark_cloud_server_reinit_requested, pay_cloud_server_order_with_balance, pay_cloud_server_renewal_with_balance, prepare_cloud_asset_renewal_with_link, prepare_cloud_server_order_instances, prepare_retained_ip_renewal_with_link, rebind_cloud_server_user, record_cloud_ip_log, replace_cloud_asset_order_by_admin, run_cloud_server_renewal_postcheck, set_cloud_server_auto_renew_admin, set_group_cloud_server_auto_renew, sync_cloud_asset_user_binding
 from cloud.sync_safety import get_missing_confirmation_threshold
 from cloud.api_asset_edit import delete_cloud_asset, update_cloud_asset
 from cloud.api_asset_snapshots import _dashboard_snapshot_can_use_forward_row_paging, _dashboard_snapshot_group_keys_from_ordered_rows, _dashboard_snapshot_ordering, _dashboard_snapshot_risk_counts, backfill_cloud_asset_dashboard_snapshots, refresh_cloud_asset_dashboard_snapshots
@@ -59,7 +59,7 @@ from cloud.api_sync import _apply_server_missing_state, sync_cloud_asset_status
 from cloud.api_tasks import auto_renew_task_detail, delete_notice_history, notice_task_detail, refresh_notice_plan_view, run_auto_renew_order, run_auto_renew_tasks, tasks_overview, update_notice_plan_text, update_notice_switches
 from cloud.task_center import task_center_payload
 from cloud.sync_jobs import _cloud_assets_sync_status_counts, _execute_cloud_asset_sync_job, _latest_synced_cloud_asset_updated_at, cancel_cloud_asset_sync_job, cloud_asset_sync_job_detail, cloud_asset_sync_jobs_list, cloud_asset_sync_jobs_metrics, retry_cloud_asset_sync_job, sync_cloud_assets
-from core.cloud_accounts import cloud_account_label, cloud_account_label_variants, list_cloud_accounts_by_server_load
+from core.cloud_accounts import cloud_account_label, cloud_account_label_variants, list_active_cloud_accounts, list_cloud_accounts_by_server_load
 from core.models import CloudAccountConfig, SiteConfig
 from core.persistence import bump_daily_address_stat
 from orders.payment_scanner import _confirm_cloud_server_order
@@ -216,6 +216,74 @@ class CloudServerServicesTestCase(TestCase):
         ordered = list_cloud_accounts_by_server_load('aws', 'ap-southeast-1')
 
         self.assertEqual([item.id for item in ordered[:2]], [second.id, first.id])
+
+    # 功能：验证多云账号地区提示支持多个地区，避免线上轮询账号被错误过滤。
+    def test_cloud_account_region_hint_accepts_multiple_regions(self):
+        first = CloudAccountConfig.objects.create(
+            provider=CloudAccountConfig.PROVIDER_AWS,
+            name='multi-region-account',
+            external_account_id='333333333333',
+            access_key='A' * 20,
+            secret_key='B' * 40,
+            region_hint='us-east-1, ap-southeast-1',
+            is_active=True,
+        )
+        second = CloudAccountConfig.objects.create(
+            provider=CloudAccountConfig.PROVIDER_AWS,
+            name='wrong-region-account',
+            external_account_id='444444444444',
+            access_key='C' * 20,
+            secret_key='D' * 40,
+            region_hint='eu-west-1',
+            is_active=True,
+        )
+
+        accounts = list_active_cloud_accounts('aws_lightsail', 'ap-southeast-1')
+
+        self.assertIn(first.id, [item.id for item in accounts])
+        self.assertNotIn(second.id, [item.id for item in accounts])
+
+    # 功能：验证待创建订单也参与账号负载计算，连续批量拆单能分散到多个云账号。
+    def test_prepare_cloud_server_order_instances_rotates_cloud_accounts(self):
+        first = CloudAccountConfig.objects.create(
+            provider=CloudAccountConfig.PROVIDER_AWS,
+            name='rotate-account-a',
+            external_account_id='555555555555',
+            access_key='A' * 20,
+            secret_key='B' * 40,
+            region_hint='ap-southeast-1',
+            is_active=True,
+        )
+        second = CloudAccountConfig.objects.create(
+            provider=CloudAccountConfig.PROVIDER_AWS,
+            name='rotate-account-b',
+            external_account_id='666666666666',
+            access_key='C' * 20,
+            secret_key='D' * 40,
+            region_hint='ap-southeast-1',
+            is_active=True,
+        )
+        order = CloudServerOrder.objects.create(
+            order_no='ROTATE-PREPARE-ORDER',
+            user=self.user,
+            plan=self.plan,
+            provider=self.plan.provider,
+            region_code=self.plan.region_code,
+            region_name=self.plan.region_name,
+            plan_name=self.plan.plan_name,
+            quantity=3,
+            currency='USDT',
+            total_amount='57.00',
+            pay_amount='57.00',
+            pay_method='balance',
+            status='paid',
+        )
+
+        orders = async_to_sync(prepare_cloud_server_order_instances)(order.id, self.user.id, 9528)
+
+        self.assertEqual(len(orders), 3)
+        account_ids = [CloudServerOrder.objects.get(id=item.id).cloud_account_id for item in orders]
+        self.assertEqual(account_ids, [first.id, second.id, first.id])
 
     # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
     def test_aliyun_desired_plan_id_is_preferred_without_locking_candidates(self):
@@ -18699,6 +18767,65 @@ class CloudServerServicesTestCase(TestCase):
         self.assertIsNotNone(saved.delete_at)
         self.assertIn('创建流程未完成', saved.provision_note)
         self.assertIn('原固定 IP 已不在 AWS 账号中', saved.provision_note)
+
+    # 功能：验证创建失败时会切换到下一个启用云账号，并用新账号完成创建。
+    def test_provision_rotates_to_next_cloud_account_after_create_failure(self):
+        first = CloudAccountConfig.objects.create(
+            provider=CloudAccountConfig.PROVIDER_AWS,
+            name='provision-rotate-a',
+            external_account_id='777777777777',
+            access_key='A' * 20,
+            secret_key='B' * 40,
+            region_hint='ap-southeast-1',
+            is_active=True,
+        )
+        second = CloudAccountConfig.objects.create(
+            provider=CloudAccountConfig.PROVIDER_AWS,
+            name='provision-rotate-b',
+            external_account_id='888888888888',
+            access_key='C' * 20,
+            secret_key='D' * 40,
+            region_hint='ap-southeast-1',
+            is_active=True,
+        )
+        order = CloudServerOrder.objects.create(
+            order_no='PROVISION-ROTATE-ACCOUNT',
+            user=self.user,
+            plan=self.plan,
+            provider=self.plan.provider,
+            cloud_account=first,
+            account_label=cloud_account_label(first),
+            region_code=self.plan.region_code,
+            region_name=self.plan.region_name,
+            plan_name=self.plan.plan_name,
+            quantity=1,
+            currency='USDT',
+            total_amount='19.00',
+            pay_amount='19.00',
+            pay_method='balance',
+            status='paid',
+            paid_at=timezone.now(),
+            mtproxy_port=9528,
+        )
+        seen_account_ids = []
+
+        async def fake_create(payload, server_name):
+            seen_account_ids.append(payload['cloud_account_id'])
+            if len(seen_account_ids) == 1:
+                return SimpleNamespace(ok=False, instance_id='', public_ip='', login_user='', login_password='', note='账号库存不足', static_ip_name='', private_key_path='')
+            return SimpleNamespace(ok=True, instance_id='provision-rotate-instance', public_ip='54.54.54.88', login_user='admin', login_password='pw', note='AWS 实例已创建', static_ip_name='StaticIp-provision-rotate', private_key_path='')
+
+        with patch('cloud.provisioning.create_aws_instance', new=fake_create), \
+            patch('cloud.provisioning.public_ip_exists', new=AsyncMock(return_value=(True, '公网 IP 存在'))), \
+            patch('cloud.provisioning.validate_server_connection_ip_with_retry', new=AsyncMock(return_value=(True, 'IP 一致', '54.54.54.88'))), \
+            patch('cloud.provisioning.install_bbr', new=AsyncMock(return_value=(True, 'BBR 已安装'))), \
+            patch('cloud.provisioning.install_mtproxy', new=AsyncMock(return_value=(True, 'MTProxy 已安装'))):
+            saved = async_to_sync(provision_cloud_server)(order.id)
+
+        self.assertEqual(seen_account_ids, [first.id, second.id])
+        saved.refresh_from_db()
+        self.assertEqual(saved.cloud_account_id, second.id)
+        self.assertEqual(saved.status, 'completed')
 
     # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
     def test_retained_ip_postcheck_reuses_completed_recovery_order(self):

@@ -19822,3 +19822,70 @@ git diff --check
 - 后台删除留下的槽位仍然优先复用。
 - 历史空洞也会被后续新 Telegram 用户优先复用。
 - 用户截图里的断层场景后续会补低位空洞，不会只继续自增。
+
+## 2026-06-09 12:43 CST 修复多云账号购买创建轮询并恢复代理列表按用户分组入口
+
+### 本轮背景
+
+- 用户反馈线上配置多个云账号后，机器人购买服务器无法创建。
+- 用户要求先修好云账号轮询，并给机器人购买到创建服务器全流程补详细日志。
+- 用户随后指出代理列表“按用户分组”入口不见了。
+
+### 后端修复
+
+- `core/cloud_accounts.py`
+  - `region_hint` 支持多个地区，兼容逗号、中文逗号、分号、竖线和空白分隔。
+  - 账号负载排序纳入 `paid/provisioning` 待创建订单，避免连续购买总落到同一个账号。
+- `cloud/services.py`
+  - 单台创建前重新选择账号。
+  - 批量拆单按候选账号轮询分配子订单。
+  - 钱包下单、补付、拆单阶段输出统一 `BOT_CLOUD_PURCHASE_FLOW` 日志。
+- `cloud/provisioning.py`
+  - 开通前记录候选账号列表。
+  - 每次账号尝试、创建结果、失败切换、无可执行账号都输出统一字段日志。
+  - 订单已绑定但当前账号不在启用候选列表时，不再强行把旧账号放进轮询。
+  - 停用或不存在账号会跳过，不再把订单退回 provider 默认标签继续创建。
+- `orders/payment_scanner.py`
+  - 链上支付确认进入创建流程时写入统一购买链路日志。
+- `bot/handlers.py`
+  - 机器人地址支付建单、钱包直付、钱包补付、任务提交均补统一链路日志。
+
+### 前端修复
+
+- `/Users/a399/Desktop/data/vue-shop-admin/apps/web-antd/src/views/dashboard/cloud-assets/index.vue`
+  - 代理列表顶部恢复显式“显示方式”下拉：`按用户分组`、`按群组分组`、`不分组`。
+  - 移除没有文字说明的分组 Switch，避免按用户分组入口被隐藏。
+
+### 验证
+
+通过：
+
+```bash
+uv run python -m py_compile core/cloud_accounts.py cloud/services.py cloud/provisioning.py orders/payment_scanner.py bot/handlers.py cloud/tests.py
+uv run python manage.py check
+DJANGO_TEST_SQLITE=1 uv run python manage.py test cloud.tests.CloudServerServicesTestCase.test_cloud_account_region_hint_accepts_multiple_regions cloud.tests.CloudServerServicesTestCase.test_prepare_cloud_server_order_instances_rotates_cloud_accounts cloud.tests.CloudServerServicesTestCase.test_provision_rotates_to_next_cloud_account_after_create_failure --settings=shop.settings --verbosity=1
+pnpm --filter @vben/web-antd typecheck
+git diff --check
+git -C /Users/a399/Desktop/data/vue-shop-admin diff --check
+```
+
+结果：
+
+- Django 系统检查通过。
+- 后端编译通过。
+- 新增三条多账号轮询聚焦测试通过。
+- 前端类型检查通过。
+- diff 空白检查通过。
+- SQLite 聚焦测试仍输出既有 `db_comment/db_table_comment` 能力差异告警，不属于本轮问题。
+
+### 浏览器检查
+
+- 已打开 `http://127.0.0.1:5666/admin/cloud-assets`。
+- Playwright 自动浏览器会话被重定向到登录页，未持有后台登录态，无法完成页面内分组加载实测。
+- 本轮未伪造页面实测结论；前端代码已恢复显式入口并通过类型检查。
+
+### 结论
+
+- 多云账号购买创建现在会按候选账号轮询，首个账号失败会切换下一个账号。
+- 线上可通过 `BOT_CLOUD_PURCHASE_FLOW` 追踪购买、扣款、拆单、候选账号、账号尝试、创建结果和失败切换。
+- 代理列表按用户分组入口已恢复为顶部显式下拉。

@@ -481,6 +481,22 @@ def _confirm_cloud_server_order(order_id: int, tx_hash: str, payer_address: str 
             if not asset_recovery_order:
                 update_fields.append('mtproxy_port')
             order.save(update_fields=update_fields)
+            logger.info(
+                'BOT_CLOUD_PURCHASE_FLOW stage=chain_payment_confirmed user_id=%s order_id=%s order_no=%s provider=%s region=%s plan=%s quantity=%s status=%s tx=%s payer=%s receiver=%s account_id=%s account_label=%s',
+                order.user_id,
+                order.id,
+                order.order_no,
+                order.provider,
+                order.region_code,
+                order.plan_name,
+                order.quantity,
+                order.status,
+                str(tx_hash or '')[:16],
+                _short_addr(payer_address or ''),
+                _short_addr(receive_address or ''),
+                order.cloud_account_id,
+                order.account_label,
+            )
         return order
     except Exception as exc:
         logger.warning('云服务器真实支付确认失败 order=%s err=%s', order_id, exc)
