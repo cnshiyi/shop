@@ -12,6 +12,7 @@ from django.utils import timezone
 from django.utils.dateparse import parse_datetime
 
 from bot.models import TelegramUser
+from cloud.asset_dedupe import merge_duplicate_cloud_assets_by_ip
 from cloud.asset_queries import asset_display_ip, cloud_assets_base_queryset, dedupe_cloud_asset_rows
 from cloud.models import CloudAsset, CloudAssetDashboardSnapshot
 from core.dashboard_api import _countdown_label, _days_left, _decimal_to_str
@@ -325,17 +326,29 @@ def refresh_cloud_asset_dashboard_snapshots(asset_ids=None, *, reason: str = '',
     started_at = timezone.now()
     if full is None:
         full = not asset_ids
+    if full:
+        merge_duplicate_cloud_assets_by_ip()
     queryset = cloud_assets_base_queryset()
     duplicate_scope_ips = set()
     if asset_ids:
         normalized_asset_ids = _normalize_snapshot_asset_ids(asset_ids)
         target_assets = list(queryset.filter(id__in=normalized_asset_ids))
         duplicate_scope_ips = {asset_display_ip(asset) for asset in target_assets if asset_display_ip(asset)}
-        queryset = queryset.filter(id__in=normalized_asset_ids)
+        duplicate_scope_ips.update(
+            str(value or '').strip()
+            for value in CloudAssetDashboardSnapshot.objects
+            .filter(asset_id__in=normalized_asset_ids)
+            .exclude(public_ip__isnull=True)
+            .exclude(public_ip='')
+            .values_list('public_ip', flat=True)
+        )
+        duplicate_scope_ips = {value for value in duplicate_scope_ips if value}
+        merge_duplicate_cloud_assets_by_ip(asset_ids=normalized_asset_ids)
+        queryset = cloud_assets_base_queryset()
         if duplicate_scope_ips:
-            queryset = queryset | cloud_assets_base_queryset().filter(
-                Q(public_ip__in=duplicate_scope_ips) | Q(previous_public_ip__in=duplicate_scope_ips)
-            )
+            queryset = queryset.filter(public_ip__in=duplicate_scope_ips)
+        else:
+            queryset = queryset.filter(id__in=normalized_asset_ids)
     assets = dedupe_cloud_asset_rows(list(queryset.order_by('-sort_order', F('actual_expires_at').asc(nulls_last=True), '-updated_at', '-id')))
     payloads = _default_cloud_asset_payloads(assets, allow_mutation=False)
     existing = {

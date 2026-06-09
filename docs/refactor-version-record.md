@@ -20025,3 +20025,64 @@ git diff --check
 
 - 代理列表显示和分页总数现在都按显示 IP 去重。
 - 真实资产记录仍保留，避免把同步来源、历史记录或审计信息误删。
+
+## 2026-06-09 13:51 CST 将同 IP 去重升级为数据库硬规则
+
+### 本轮背景
+
+- 用户明确指出：数据库不应该有同 IP 两条资产，这是硬规则。
+- 上一轮只清理代理列表快照和显示口径，仍可能在 `CloudAsset` 表保留同 IP 多条资产，不符合新口径。
+- 本轮直接重构为资产本体去重和数据库唯一约束，避免前端、计划表、通知表、生命周期任务再次从不同入口读出重复资产。
+
+### 修复
+
+- `cloud/asset_dedupe.py`
+  - 新增统一的同 IP 资产合并 helper。
+  - 保留策略：服务器优先、未附加优先、删除中优先、非删除资产优先、有订单优先、有用户优先、更新时间较新优先、ID 较大优先。
+  - 合并时迁移 `CloudIpLog`、`CloudLifecyclePlanNote`、`CloudLifecycleTask`、`CloudNoticeTask`。
+  - 删除重复资产旧快照后删除重复 `CloudAsset` 本体。
+- `cloud/models.py`
+  - `CloudAsset.public_ip` 保存前去掉首尾空格，空字符串归一为 `NULL`。
+  - 新增 `uniq_cloud_asset_public_ip` 唯一约束，允许多条无 IP 资产，但阻断有效公网 IP 重复。
+- `cloud/management/commands/dedupe_cloud_assets.py`
+  - 管理命令改为按公网 IP 硬去重，不再按云账号/地区保留同 IP。
+- `cloud/api_asset_snapshots.py`
+  - 快照刷新前先合并同 IP 资产本体。
+  - 增量刷新会同时纳入目标资产当前 IP 和旧快照 IP，清理快照表中同 IP 残留。
+- `cloud/migrations/0067_dedupe_cloud_assets_by_public_ip.py`
+  - 上线迁移会先把空公网 IP 归一为 `NULL`，并去掉历史公网 IP 首尾空格。
+  - 清理现有 `CloudAsset` 同 IP 重复资产。
+  - 迁移关联记录后删除重复资产本体。
+  - 最后创建 `uniq_cloud_asset_public_ip` 数据库唯一约束。
+- `cloud/tests.py`
+  - 原“跨账号同 IP 不合并”测试改为“跨账号同 IP 写入必须被阻断”。
+  - 覆盖空 IP 可多条存在、带空格 IP 会先归一、日志迁移、生命周期任务迁移、通知任务迁移。
+  - 覆盖旧快照 IP 残留清理、计划页唯一 IP 分页和未附加 IP 删除计划。
+
+### 验证
+
+通过：
+
+```bash
+uv run python -m py_compile cloud/asset_dedupe.py cloud/asset_queries.py cloud/api_asset_snapshots.py cloud/models.py cloud/management/commands/dedupe_cloud_assets.py cloud/migrations/0067_dedupe_cloud_assets_by_public_ip.py cloud/tests.py
+uv run python manage.py check
+uv run python manage.py migrate --plan
+uv run python manage.py makemigrations --check --dry-run
+DJANGO_TEST_SQLITE=1 uv run python manage.py test cloud.tests.CloudServerServicesTestCase.test_cloud_asset_public_ip_is_unique_across_accounts cloud.tests.CloudServerServicesTestCase.test_cloud_asset_blank_public_ip_is_normalized_and_not_unique_blocked cloud.tests.CloudServerServicesTestCase.test_cloud_asset_public_ip_is_stripped_before_unique_check cloud.tests.CloudServerServicesTestCase.test_dedupe_cloud_asset_group_relinks_related_rows cloud.tests.CloudServerServicesTestCase.test_cloud_assets_list_keeps_unique_public_ip_asset_visible cloud.tests.CloudServerServicesTestCase.test_cloud_asset_snapshot_incremental_refresh_prunes_stale_same_ip_snapshot cloud.tests.CloudServerServicesTestCase.test_dedupe_cloud_assets_keeps_same_instance_with_different_ips cloud.tests.CloudServerServicesTestCase.test_lifecycle_plans_handles_unique_ip_server_assets cloud.tests.CloudServerServicesTestCase.test_unattached_ip_delete_items_handles_unique_ip_asset --settings=shop.settings --verbosity=1
+git diff --check
+```
+
+实际本地数据库测试：
+
+- 测试库：`shop_manual_20260608_5676`。
+- 注入同 IP `198.51.100.88` 的两条 `CloudAsset`。
+- 调用 `merge_duplicate_cloud_assets_by_ip(public_ips=[ip])`。
+- 结果：资产本体从 2 条变 1 条，保留 `codex-hard-dedupe-live-new`。
+- `CloudIpLog`、`CloudLifecycleTask`、`CloudNoticeTask` 均迁移到保留资产。
+- 测试数据已清理，剩余测试资产 0 条。
+
+### 结论
+
+- 同 IP 去重现在是数据库硬规则。
+- 迁移会清理已有重复资产并创建唯一约束；后续有效公网 IP 重复写入会被数据库阻断。
+- 代理列表、计划表、通知表和生命周期任务后续都不会再从 `CloudAsset` 本体读到同 IP 双资产。

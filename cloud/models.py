@@ -301,6 +301,9 @@ class CloudAsset(models.Model):
         verbose_name = '云资产'
         verbose_name_plural = '云资产'
         ordering = ['-updated_at', '-id']
+        constraints = [
+            models.UniqueConstraint(fields=['public_ip'], name='uniq_cloud_asset_public_ip'),
+        ]
         indexes = [
             models.Index(fields=['kind', 'status', 'is_active'], name='ca_kind_status_active_idx'),
             models.Index(fields=['provider', 'account_label', 'region_code', 'instance_id'], name='ca_provider_acct_inst_idx'),
@@ -312,6 +315,17 @@ class CloudAsset(models.Model):
             models.Index(fields=['kind', 'is_active', 'actual_expires_at', 'id'], name='ca_lifecycle_page_idx'),
             models.Index(fields=['kind', 'actual_expires_at', 'id'], name='ca_lifecycle_any_page_idx'),
         ]
+
+    def save(self, *args, **kwargs):
+        requested_update_fields = kwargs.get('update_fields')
+        normalized_public_ip = str(self.public_ip or '').strip()
+        if self.public_ip != (normalized_public_ip or None):
+            self.public_ip = normalized_public_ip or None
+            if requested_update_fields is not None:
+                update_fields = set(requested_update_fields)
+                update_fields.add('public_ip')
+                kwargs['update_fields'] = list(update_fields)
+        super().save(*args, **kwargs)
 
     def __str__(self):
         return self.asset_name or self.instance_id or self.public_ip or f'asset-{self.pk}'

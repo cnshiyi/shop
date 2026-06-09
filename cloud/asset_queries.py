@@ -14,17 +14,8 @@ def dedupe_cloud_asset_rows(assets):
     for asset in assets:
         ip = asset_display_ip(asset)
         key = f'ip:{ip}' if ip else f'id:{asset.id}'
-        is_unattached = '未附加' in str(asset.provider_status or '') or '固定IP仍存在但未附加' in str(asset.provider_status or '')
-        is_deleted = asset.status in {CloudAsset.STATUS_DELETED, CloudAsset.STATUS_TERMINATED}
-        score = (
-            3 if is_unattached else 0,
-            2 if asset.status == CloudAsset.STATUS_DELETING else 0,
-            1 if not is_deleted else 0,
-            1 if asset.order_id else 0,
-            1 if asset.user_id else 0,
-            asset.updated_at.timestamp() if asset.updated_at else 0,
-            asset.id,
-        )
+        from cloud.asset_dedupe import cloud_asset_dedupe_score
+        score = cloud_asset_dedupe_score(asset)
         current = best.get(key)
         if not current or score > current[0]:
             best[key] = (score, asset)

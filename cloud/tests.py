@@ -14,12 +14,14 @@ from django.core.cache import cache
 from django.core.management import call_command
 from django.core.management.base import CommandError
 from django.contrib.sessions.middleware import SessionMiddleware
+from django.db import IntegrityError, transaction
 from django.test import RequestFactory, TestCase
 from django.utils import timezone
 from django.utils.dateparse import parse_datetime
 
 from bot.api import _asset_delete_plan_item_payload, _shutdown_log_items, _unattached_ip_delete_items, lifecycle_plans, refresh_lifecycle_plan_view, update_lifecycle_plan_note
 from bot.models import TelegramGroupFilter, TelegramUser
+from cloud.asset_dedupe import merge_duplicate_cloud_asset_group
 from cloud.bootstrap import _build_mtproxy_script, _extract_tg_links
 from cloud.models import CloudAsset, CloudAssetDashboardSnapshot, CloudAssetSyncJob, CloudAssetSyncJobEvent, CloudAutoRenewPatrolLog, CloudAutoRenewRetryTask, CloudIpLog, CloudLifecyclePlanNote, CloudLifecycleTask, CloudNoticeTask, CloudServerOrder, CloudServerPlan, CloudUserNoticeLog, DailyAddressStat
 from cloud.lifecycle import _apply_notice_schedule_to_order, _auto_renew_candidate_users, _enqueue_auto_renew_retry, _get_due_orders, _get_migration_due_orders, _get_orphan_asset_delete_due, _get_unattached_static_ip_delete_due, _group_balance_lines_for_orders, _is_cloud_delete_safe_time, _is_cloud_suspend_time, _mark_deleted, _mark_suspended, _next_cloud_action_run_at, _notice_payload_for_order, _notice_plan_text, _process_auto_renew_retry_tasks, _run_auto_renew, _send_logged_cloud_notice, _send_order_notice_batch, auto_renew_patrol_tick, daily_expiry_summary_tick, lifecycle_tick, sync_server_status_tick
@@ -1743,7 +1745,7 @@ class CloudServerServicesTestCase(TestCase):
         )
 
     # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
-    def test_dedupe_cloud_assets_does_not_merge_cross_account_same_ip(self):
+    def test_cloud_asset_public_ip_is_unique_across_accounts(self):
         CloudAsset.objects.create(
             kind=CloudAsset.KIND_SERVER,
             source=CloudAsset.SOURCE_AWS_SYNC,
@@ -1754,23 +1756,60 @@ class CloudServerServicesTestCase(TestCase):
             public_ip='13.250.30.10',
             status=CloudAsset.STATUS_RUNNING,
         )
-        CloudAsset.objects.create(
-            kind=CloudAsset.KIND_SERVER,
-            source=CloudAsset.SOURCE_AWS_SYNC,
-            provider='aws_lightsail',
-            account_label='aws+222+secondary',
-            region_code='ap-southeast-1',
-            asset_name='asset-account-b',
-            public_ip='13.250.30.10',
-            status=CloudAsset.STATUS_RUNNING,
-        )
 
-        call_command('dedupe_cloud_assets')
-
-        self.assertEqual(CloudAsset.objects.filter(public_ip='13.250.30.10').count(), 2)
+        with self.assertRaises(IntegrityError), transaction.atomic():
+            CloudAsset.objects.create(
+                kind=CloudAsset.KIND_SERVER,
+                source=CloudAsset.SOURCE_AWS_SYNC,
+                provider='aws_lightsail',
+                account_label='aws+222+secondary',
+                region_code='ap-southeast-1',
+                asset_name='asset-account-b',
+                public_ip='13.250.30.10',
+                status=CloudAsset.STATUS_RUNNING,
+            )
 
     # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
-    def test_dedupe_cloud_assets_does_not_merge_old_account_label_variants(self):
+    def test_cloud_asset_blank_public_ip_is_normalized_and_not_unique_blocked(self):
+        first = CloudAsset.objects.create(
+            kind=CloudAsset.KIND_SERVER,
+            source=CloudAsset.SOURCE_AWS_SYNC,
+            asset_name='blank-ip-first',
+            public_ip='',
+        )
+        second = CloudAsset.objects.create(
+            kind=CloudAsset.KIND_SERVER,
+            source=CloudAsset.SOURCE_AWS_SYNC,
+            asset_name='blank-ip-second',
+            public_ip='',
+        )
+
+        first.refresh_from_db()
+        second.refresh_from_db()
+        self.assertIsNone(first.public_ip)
+        self.assertIsNone(second.public_ip)
+
+    # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
+    def test_cloud_asset_public_ip_is_stripped_before_unique_check(self):
+        asset = CloudAsset.objects.create(
+            kind=CloudAsset.KIND_SERVER,
+            source=CloudAsset.SOURCE_AWS_SYNC,
+            asset_name='strip-ip',
+            public_ip=' 13.250.30.11 ',
+        )
+
+        asset.refresh_from_db()
+        self.assertEqual(asset.public_ip, '13.250.30.11')
+        with self.assertRaises(IntegrityError), transaction.atomic():
+            CloudAsset.objects.create(
+                kind=CloudAsset.KIND_SERVER,
+                source=CloudAsset.SOURCE_AWS_SYNC,
+                asset_name='strip-ip-duplicate',
+                public_ip='13.250.30.11',
+            )
+
+    # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
+    def test_dedupe_cloud_asset_group_relinks_related_rows(self):
         account = CloudAccountConfig.objects.create(
             provider=CloudAccountConfig.PROVIDER_AWS,
             name='dedupe-label-variant',
@@ -1786,7 +1825,7 @@ class CloudServerServicesTestCase(TestCase):
             account_label='aws_lightsail+123456789012+dedupe-label-variant',
             region_code='ap-southeast-1',
             asset_name='dedupe-label-variant-old',
-            public_ip='13.250.30.13',
+            public_ip='13.250.30.12',
             status=CloudAsset.STATUS_RUNNING,
         )
         keep_asset = CloudAsset.objects.create(
@@ -1806,17 +1845,34 @@ class CloudServerServicesTestCase(TestCase):
             public_ip='13.250.30.13',
             note='old duplicate log',
         )
+        lifecycle_task = CloudLifecycleTask.objects.create(
+            source_key='test-dedupe-group-relink-lifecycle',
+            task_type=CloudLifecycleTask.TASK_ORPHAN_ASSET_DELETE,
+            source_kind=CloudLifecycleTask.SOURCE_ASSET,
+            asset=old_asset,
+            scheduled_at=timezone.now(),
+        )
+        notice_task = CloudNoticeTask.objects.create(
+            source_key='test-dedupe-group-relink-notice',
+            notice_type=CloudNoticeTask.NOTICE_DELETE,
+            asset=old_asset,
+            notice_at=timezone.now(),
+        )
 
-        call_command('dedupe_cloud_assets')
+        result = merge_duplicate_cloud_asset_group([old_asset, keep_asset])
 
-        self.assertEqual(CloudAsset.objects.filter(public_ip='13.250.30.13').count(), 2)
-        self.assertTrue(CloudAsset.objects.filter(id=old_asset.id).exists())
+        self.assertEqual(result.deleted_assets, 1)
+        self.assertFalse(CloudAsset.objects.filter(id=old_asset.id).exists())
         self.assertTrue(CloudAsset.objects.filter(id=keep_asset.id).exists())
         log.refresh_from_db()
-        self.assertEqual(log.asset_id, old_asset.id)
+        lifecycle_task.refresh_from_db()
+        notice_task.refresh_from_db()
+        self.assertEqual(log.asset_id, keep_asset.id)
+        self.assertEqual(lifecycle_task.asset_id, keep_asset.id)
+        self.assertEqual(notice_task.asset_id, keep_asset.id)
 
     # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
-    def test_cloud_assets_list_dedupes_old_account_label_variants_by_ip(self):
+    def test_cloud_assets_list_keeps_unique_public_ip_asset_visible(self):
         account = CloudAccountConfig.objects.create(
             provider=CloudAccountConfig.PROVIDER_AWS,
             name='ui-dedupe-label-variant',
@@ -1824,17 +1880,6 @@ class CloudServerServicesTestCase(TestCase):
             access_key='A' * 20,
             secret_key='B' * 40,
             is_active=True,
-        )
-        CloudAsset.objects.create(
-            kind=CloudAsset.KIND_SERVER,
-            source=CloudAsset.SOURCE_AWS_SYNC,
-            provider='aws_lightsail',
-            account_label='aws_lightsail+123456789012+ui-dedupe-label-variant',
-            region_code='ap-southeast-1',
-            asset_name='ui-dedupe-old',
-            public_ip='13.250.30.14',
-            status=CloudAsset.STATUS_RUNNING,
-            actual_expires_at=timezone.now() + timezone.timedelta(days=30),
         )
         keep_asset = CloudAsset.objects.create(
             kind=CloudAsset.KIND_SERVER,
@@ -1860,8 +1905,8 @@ class CloudServerServicesTestCase(TestCase):
         item_ids = {item['id'] for item in payload['items']}
         self.assertEqual(item_ids, {keep_asset.id})
 
-    # 功能：验证代理列表增量快照按 IP 去重，并清理同 IP 旧快照残留。
-    def test_cloud_asset_snapshot_incremental_refresh_prunes_same_ip_duplicates(self):
+    # 功能：验证代理列表增量快照清理同 IP 旧快照残留。
+    def test_cloud_asset_snapshot_incremental_refresh_prunes_stale_same_ip_snapshot(self):
         old_asset = CloudAsset.objects.create(
             kind=CloudAsset.KIND_SERVER,
             source=CloudAsset.SOURCE_AWS_SYNC,
@@ -1869,7 +1914,7 @@ class CloudServerServicesTestCase(TestCase):
             account_label='aws+111+old',
             region_code='ap-southeast-1',
             asset_name='snapshot-dedupe-old',
-            public_ip='13.250.30.15',
+            public_ip='13.250.30.151',
             status=CloudAsset.STATUS_RUNNING,
             actual_expires_at=timezone.now() + timezone.timedelta(days=30),
         )
@@ -1886,12 +1931,12 @@ class CloudServerServicesTestCase(TestCase):
         )
         CloudAssetDashboardSnapshot.objects.create(
             asset=old_asset,
-            payload={'id': old_asset.id, 'public_ip': old_asset.public_ip},
+            payload={'id': old_asset.id, 'public_ip': '13.250.30.15'},
             search_text='snapshot-dedupe-old 13.250.30.15',
             provider=old_asset.provider,
             account_label=old_asset.account_label,
             region_code=old_asset.region_code,
-            public_ip=old_asset.public_ip,
+            public_ip='13.250.30.15',
             status=old_asset.status,
             is_active=True,
             is_display_visible=True,
@@ -1905,8 +1950,12 @@ class CloudServerServicesTestCase(TestCase):
 
         refresh_cloud_asset_dashboard_snapshots(asset_ids=[old_asset.id], reason='test', full=False)
 
-        self.assertFalse(CloudAssetDashboardSnapshot.objects.filter(asset=old_asset).exists())
+        self.assertEqual(CloudAsset.objects.filter(public_ip='13.250.30.15').count(), 1)
+        self.assertTrue(CloudAsset.objects.filter(id=old_asset.id).exists())
+        self.assertTrue(CloudAsset.objects.filter(id=keep_asset.id).exists())
+        self.assertTrue(CloudAssetDashboardSnapshot.objects.filter(asset=old_asset, public_ip='13.250.30.151').exists())
         self.assertTrue(CloudAssetDashboardSnapshot.objects.filter(asset=keep_asset, public_ip='13.250.30.15').exists())
+        self.assertEqual(CloudAssetDashboardSnapshot.objects.filter(public_ip='13.250.30.15').count(), 1)
 
     # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
     def test_cloud_assets_list_uses_bulk_order_inference_without_per_asset_fallback(self):
@@ -9453,8 +9502,8 @@ class CloudServerServicesTestCase(TestCase):
         self.assertNotIn(' in (select ', sql)
         self.assertNotIn(' in ( select ', sql)
 
-    # 功能：验证服务器计划页按公网 IP 去重，同一 IP 只保留一条计划，避免重装/迁移脏资产重复执行。
-    def test_lifecycle_plans_dedupes_same_ip_server_assets(self):
+    # 功能：验证服务器计划页在数据库 IP 唯一约束下正常分页展示。
+    def test_lifecycle_plans_handles_unique_ip_server_assets(self):
         now = timezone.now()
         account = self._aws_test_account()
         expected_names = []
@@ -9473,7 +9522,7 @@ class CloudServerServicesTestCase(TestCase):
                 region_name=self.plan.region_name,
                 asset_name=asset_name,
                 instance_id=f'i-lifecycle-same-ip-visible-{index:02d}',
-                public_ip='5.5.19.19',
+                public_ip=f'5.5.19.{index + 1}',
                 status=CloudAsset.STATUS_RUNNING,
                 is_active=True,
                 actual_expires_at=base_expires_at + timezone.timedelta(minutes=index),
@@ -9494,9 +9543,9 @@ class CloudServerServicesTestCase(TestCase):
         data = json.loads(response.content)['data']
         self.assertEqual(data['pagination']['shutdown_plan']['page'], 1)
         self.assertEqual(data['pagination']['shutdown_plan']['page_size'], 20)
-        self.assertEqual(data['pagination']['shutdown_plan']['loaded'], 1)
-        self.assertEqual(data['pagination']['shutdown_plan']['total'], 1)
-        self.assertEqual(len(data['shutdown_plan_items']), 1)
+        self.assertEqual(data['pagination']['shutdown_plan']['loaded'], 20)
+        self.assertEqual(data['pagination']['shutdown_plan']['total'], 60)
+        self.assertEqual(len(data['shutdown_plan_items']), 20)
         self.assertEqual(data['shutdown_plan_items'][0]['asset_name'], expected_names[0])
 
     # 功能：验证关机计划按公网 IP 去重，避免同一 IP 因不同云资源 ID 重复展示和重复计数。
@@ -10300,9 +10349,9 @@ class CloudServerServicesTestCase(TestCase):
         self.assertEqual(first.event_type, CloudIpLog.EVENT_DELETED)
         self.assertIn('IP校验发现云上不存在，已标记删除', first.note)
 
-    # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
-    def test_unattached_ip_delete_items_dedupe_same_ip_and_mark_covered(self):
-        old_asset = CloudAsset.objects.create(
+    # 功能：验证未附加 IP 删除计划在数据库 IP 唯一约束下正常返回唯一资产。
+    def test_unattached_ip_delete_items_handles_unique_ip_asset(self):
+        asset = CloudAsset.objects.create(
             kind=CloudAsset.KIND_SERVER,
             source=CloudAsset.SOURCE_AWS_SYNC,
             user=self.user,
@@ -10317,31 +10366,29 @@ class CloudServerServicesTestCase(TestCase):
             note='未附加固定IP',
             actual_expires_at=timezone.now() + timezone.timedelta(days=1),
         )
-        latest_asset = CloudAsset.objects.create(
-            kind=CloudAsset.KIND_SERVER,
-            source=CloudAsset.SOURCE_AWS_SYNC,
-            user=self.user,
-            provider='aws_lightsail',
-            region_code=self.plan.region_code,
-            region_name=self.plan.region_name,
-            asset_name='latest-duplicate-static-ip',
-            public_ip='5.5.5.20',
-            status=CloudAsset.STATUS_UNKNOWN,
-            is_active=False,
-            provider_status='未附加固定IP',
-            note='未附加固定IP',
-            actual_expires_at=timezone.now() + timezone.timedelta(days=2),
-        )
-        CloudAsset.objects.filter(id=old_asset.id).update(updated_at=timezone.now() - timezone.timedelta(days=1))
-        CloudAsset.objects.filter(id=latest_asset.id).update(updated_at=timezone.now())
+        with self.assertRaises(IntegrityError), transaction.atomic():
+            CloudAsset.objects.create(
+                kind=CloudAsset.KIND_SERVER,
+                source=CloudAsset.SOURCE_AWS_SYNC,
+                user=self.user,
+                provider='aws_lightsail',
+                region_code=self.plan.region_code,
+                region_name=self.plan.region_name,
+                asset_name='duplicate-static-ip',
+                public_ip='5.5.5.20',
+                status=CloudAsset.STATUS_UNKNOWN,
+                is_active=False,
+                provider_status='未附加固定IP',
+                note='未附加固定IP',
+                actual_expires_at=timezone.now() + timezone.timedelta(days=2),
+            )
 
         items = _unattached_ip_delete_items(limit=20)
         rows = [item for item in items if item.get('public_ip') == '5.5.5.20']
 
         self.assertEqual(len(rows), 1)
-        self.assertEqual(rows[0]['asset_id'], latest_asset.id)
-        self.assertIn('covered_duplicates', rows[0].get('quality_flags') or [])
-        self.assertIn('已覆盖 1 条同 IP 旧记录', rows[0].get('quality_label') or '')
+        self.assertEqual(rows[0]['asset_id'], asset.id)
+        self.assertNotIn('covered_duplicates', rows[0].get('quality_flags') or [])
 
     # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
     def test_unattached_ip_delete_items_mark_cloud_missing_history(self):
