@@ -14816,6 +14816,56 @@ class CloudServerServicesTestCase(TestCase):
 
         self.assertEqual([user.id for user in candidates], [member_user.id])
 
+    # 功能：验证资产绑定普通用户时优先扣普通用户，订单上的管理员账号不能兜底抢扣。
+    def test_auto_renew_prefers_bound_normal_asset_user_over_admin_order_user(self):
+        admin_user = TelegramUser.objects.create(tg_user_id=991998005, username='admin_order_user', balance=Decimal('100.00'))
+        normal_user = TelegramUser.objects.create(tg_user_id=991998006, username='normal_asset_user', balance=Decimal('100.00'))
+        SiteConfig.set('bot_admin_chat_id', str(admin_user.tg_user_id))
+        expires_at = timezone.now() + timezone.timedelta(hours=8)
+        order = CloudServerOrder.objects.create(
+            order_no='AUTO-RENEW-NORMAL-ASSET-USER-1',
+            user=admin_user,
+            plan=self.plan,
+            provider=self.plan.provider,
+            region_code=self.plan.region_code,
+            region_name=self.plan.region_name,
+            plan_name=self.plan.plan_name,
+            quantity=1,
+            currency='USDT',
+            total_amount='19.00',
+            pay_amount='19.00',
+            pay_method='balance',
+            status='completed',
+            public_ip='8.8.8.34',
+            instance_id='auto-renew-normal-asset-user',
+            service_started_at=timezone.now() - timezone.timedelta(days=30),
+            suspend_at=expires_at + timezone.timedelta(days=1),
+            auto_renew_enabled=True,
+        )
+        CloudAsset.objects.create(
+            kind=CloudAsset.KIND_SERVER,
+            source=CloudAsset.SOURCE_ORDER,
+            order=order,
+            user=normal_user,
+            provider=order.provider,
+            region_code=order.region_code,
+            region_name=order.region_name,
+            asset_name='auto-renew-normal-asset-user',
+            public_ip='8.8.8.34',
+            actual_expires_at=expires_at,
+            status=CloudAsset.STATUS_RUNNING,
+        )
+
+        renewed, err, balance_change = async_to_sync(_run_auto_renew)(order.id)
+
+        admin_user.refresh_from_db()
+        normal_user.refresh_from_db()
+        self.assertIsNone(err)
+        self.assertEqual(getattr(renewed, 'id', None), order.id)
+        self.assertEqual(admin_user.balance, Decimal('100.000000'))
+        self.assertEqual(normal_user.balance, Decimal('81.000000'))
+        self.assertEqual(balance_change['payer_user_id'], normal_user.id)
+
     # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
     def test_auto_renew_group_member_can_pay_when_owner_balance_insufficient(self):
         owner = self.user
@@ -14858,6 +14908,111 @@ class CloudServerServicesTestCase(TestCase):
         self.assertEqual(owner.balance, Decimal('0.000000'))
         self.assertEqual(member.balance, Decimal('81.000000'))
         self.assertEqual(balance_change['payer_user_id'], member.id)
+
+    # 功能：验证存在多个绑定管理员账号时，自动续费不会任选管理员兜底扣款。
+    def test_auto_renew_bound_admin_fallback_requires_single_bound_admin(self):
+        first_admin = self.user
+        second_admin = TelegramUser.objects.create(tg_user_id=991998006, username='second_bound_admin', balance=Decimal('100.00'))
+        first_admin.balance = Decimal('100.00')
+        first_admin.save(update_fields=['balance', 'updated_at'])
+        SiteConfig.set('bot_admin_chat_id', str(first_admin.tg_user_id))
+        SiteConfig.set('bot_notice_copy_chat_ids', str(second_admin.tg_user_id))
+        expires_at = timezone.now() + timezone.timedelta(hours=8)
+        order = CloudServerOrder.objects.create(
+            order_no='AUTO-RENEW-MULTI-BOUND-ADMIN-1',
+            user=first_admin,
+            plan=self.plan,
+            provider=self.plan.provider,
+            region_code=self.plan.region_code,
+            region_name=self.plan.region_name,
+            plan_name=self.plan.plan_name,
+            quantity=1,
+            currency='USDT',
+            total_amount='19.00',
+            pay_amount='19.00',
+            pay_method='balance',
+            status='completed',
+            public_ip='8.8.8.37',
+            instance_id='auto-renew-multi-bound-admin',
+            service_started_at=timezone.now() - timezone.timedelta(days=30),
+            suspend_at=expires_at + timezone.timedelta(days=1),
+            auto_renew_enabled=True,
+        )
+        CloudAsset.objects.create(
+            kind=CloudAsset.KIND_SERVER,
+            source=CloudAsset.SOURCE_ORDER,
+            order=order,
+            user=second_admin,
+            provider=order.provider,
+            region_code=order.region_code,
+            region_name=order.region_name,
+            asset_name='auto-renew-multi-bound-admin',
+            public_ip='8.8.8.37',
+            actual_expires_at=expires_at,
+            price=Decimal('19.00'),
+            status=CloudAsset.STATUS_RUNNING,
+        )
+
+        renewed, err, balance_change = async_to_sync(_run_auto_renew)(order.id)
+
+        order.refresh_from_db()
+        first_admin.refresh_from_db()
+        second_admin.refresh_from_db()
+        self.assertIsNone(renewed)
+        self.assertEqual(err, '未找到可用于自动续费的绑定用户')
+        self.assertEqual(balance_change, {})
+        self.assertEqual(order.status, 'completed')
+        self.assertEqual(first_admin.balance, Decimal('100.000000'))
+        self.assertEqual(second_admin.balance, Decimal('100.000000'))
+
+    # 功能：验证绑定用户是管理员通知账号且没有其他候选人时，仍可作为自动续费兜底扣款人。
+    def test_auto_renew_bound_admin_user_is_fallback_when_no_other_candidate(self):
+        self.user.balance = Decimal('100.00')
+        self.user.save(update_fields=['balance', 'updated_at'])
+        SiteConfig.set('bot_admin_chat_id', str(self.user.tg_user_id))
+        expires_at = timezone.now() + timezone.timedelta(hours=8)
+        order = CloudServerOrder.objects.create(
+            order_no='AUTO-RENEW-BOUND-ADMIN-FALLBACK-1',
+            user=self.user,
+            plan=self.plan,
+            provider=self.plan.provider,
+            region_code=self.plan.region_code,
+            region_name=self.plan.region_name,
+            plan_name=self.plan.plan_name,
+            quantity=1,
+            currency='USDT',
+            total_amount='19.00',
+            pay_amount='19.00',
+            pay_method='balance',
+            status='completed',
+            public_ip='8.8.8.38',
+            instance_id='auto-renew-bound-admin-fallback',
+            service_started_at=timezone.now() - timezone.timedelta(days=30),
+            suspend_at=expires_at + timezone.timedelta(days=1),
+            auto_renew_enabled=True,
+        )
+        CloudAsset.objects.create(
+            kind=CloudAsset.KIND_SERVER,
+            source=CloudAsset.SOURCE_ORDER,
+            order=order,
+            user=self.user,
+            provider=order.provider,
+            region_code=order.region_code,
+            region_name=order.region_name,
+            asset_name='auto-renew-bound-admin-fallback',
+            public_ip='8.8.8.38',
+            actual_expires_at=expires_at,
+            status=CloudAsset.STATUS_RUNNING,
+        )
+
+        renewed, err, balance_change = async_to_sync(_run_auto_renew)(order.id)
+
+        order.refresh_from_db()
+        self.user.refresh_from_db()
+        self.assertIsNone(err)
+        self.assertEqual(getattr(renewed, 'id', None), order.id)
+        self.assertEqual(self.user.balance, Decimal('81.000000'))
+        self.assertEqual(balance_change['payer_user_id'], self.user.id)
 
     # 功能：验证自动续费拿到订单锁后会复核到期窗口，避免旧任务把已续期订单改回待续费。
     def test_run_auto_renew_skips_when_asset_expiry_moved_out_of_due_window(self):

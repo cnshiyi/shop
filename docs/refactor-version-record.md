@@ -20470,3 +20470,51 @@ git diff --check
 - 自动续费开启口径已经从“必须有订单”改为“资产有用户、有价格、有到期时间”。
 - 无订单资产开启自动续费时会自动生成操作订单，后续仍复用现有订单扣款和自动续费执行链路。
 - 未附加固定 IP 不进入自动续费规则，继续走恢复续费链路。
+
+## 2026-06-10 02:07 CST 修复自动续费绑定用户候选人规则
+
+### 本轮背景
+
+- 用户反馈自动续费执行失败：计划页显示 IP、绑定用户和余额，但执行器返回“未找到可用于自动续费的绑定用户”。
+- 失败 IP 对应自动续费计划里能看到用户“蜗牛”和充足余额，说明展示层能拿到绑定用户，执行层候选人规则发生分叉。
+- 复查发现自动续费候选人默认排除管理员通知账号；当资产/订单只绑定管理员账号时，会被过滤到没有候选人。
+- 用户明确新规则：资产没有绑定普通用户、只绑定管理时，才允许资产/订单绑定管理员账号作为兜底扣款人。
+
+### 修复
+
+- `cloud/lifecycle.py`
+  - `_auto_renew_candidate_users()` 同时收集订单绑定用户和主资产绑定用户。
+  - 普通绑定用户和同群普通用户继续优先作为扣款候选人。
+  - 管理员通知账号默认继续排除，避免管理员抢扣。
+  - 只有没有普通候选人，并且资产/订单绑定管理员去重后只有 1 个时，才允许该管理员作为兜底扣款人。
+  - `_run_auto_renew()` 保留从计划资产回填订单绑定用户的保护逻辑，避免历史异常数据再次丢失绑定用户。
+- `cloud/tests.py`
+  - 新增订单用户是管理员、资产绑定普通用户时必须扣普通用户的测试。
+  - 新增多个绑定管理员时不能任选管理员兜底的测试。
+  - 新增只有一个绑定管理员且没有普通用户时允许管理员兜底的测试。
+  - 保留管理员排除、同群普通成员余额兜底、自动续费重试等回归测试。
+
+### 验证
+
+通过：
+
+```bash
+uv run python -m py_compile cloud/lifecycle.py cloud/tests.py
+DJANGO_TEST_SQLITE=1 uv run python manage.py test cloud.tests.CloudServerServicesTestCase.test_auto_renew_candidates_exclude_admin_notice_users cloud.tests.CloudServerServicesTestCase.test_auto_renew_candidates_exclude_primary_admin_user cloud.tests.CloudServerServicesTestCase.test_auto_renew_prefers_bound_normal_asset_user_over_admin_order_user cloud.tests.CloudServerServicesTestCase.test_auto_renew_bound_admin_fallback_requires_single_bound_admin cloud.tests.CloudServerServicesTestCase.test_auto_renew_bound_admin_user_is_fallback_when_no_other_candidate cloud.tests.CloudServerServicesTestCase.test_auto_renew_group_member_can_pay_when_owner_balance_insufficient cloud.tests.CloudServerServicesTestCase.test_auto_renew_retry_task_waits_for_recharge_then_retries --settings=shop.settings --verbosity=1
+uv run python manage.py check
+git diff --check
+```
+
+结果：
+
+- 编译通过。
+- 自动续费候选人和扣款聚焦测试 7 条通过。
+- Django 系统检查通过。
+- diff 空白检查通过。
+- SQLite 聚焦测试仍有既有 `db_comment/db_table_comment` 告警，不影响本轮结论。
+
+### 结论
+
+- 自动续费执行器候选人口径已和计划页资产绑定用户口径收敛。
+- 有普通绑定用户时优先扣普通用户，管理员不会抢扣。
+- 只有资产/订单没有普通绑定用户且唯一绑定用户是管理员时，才允许管理员兜底扣款。

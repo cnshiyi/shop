@@ -750,19 +750,31 @@ def _group_orders_by_notice_target(orders):
 
 def _auto_renew_candidate_users(order) -> list[TelegramUser]:
     candidates = []
+    bound_users = []
+    bound_seen = set()
     seen = set()
     admin_tg_user_ids = _admin_notice_user_ids()
 
-    def add_candidate(user) -> None:
+    def add_bound_user(user) -> None:
+        if not user or user.id in bound_seen:
+            return
+        bound_seen.add(user.id)
+        bound_users.append(user)
+
+    def add_candidate(user, *, allow_admin_notice: bool = False) -> None:
         if not user or user.id in seen:
             return
         seen.add(user.id)
-        if getattr(user, 'tg_user_id', None) in admin_tg_user_ids:
+        if not allow_admin_notice and getattr(user, 'tg_user_id', None) in admin_tg_user_ids:
             return
         candidates.append(user)
 
     primary_user = getattr(order, 'user', None) or TelegramUser.objects.filter(id=getattr(order, 'user_id', None)).first()
-    add_candidate(primary_user)
+    add_bound_user(primary_user)
+    asset = _order_primary_asset(order)
+    add_bound_user(getattr(asset, 'user', None) or TelegramUser.objects.filter(id=getattr(asset, 'user_id', None)).first())
+    for user in bound_users:
+        add_candidate(user)
     group_id = _order_telegram_group_id(order)
     if group_id:
         group_users = (
@@ -773,6 +785,10 @@ def _auto_renew_candidate_users(order) -> list[TelegramUser]:
         )
         for user in group_users:
             add_candidate(user)
+    bound_admin_users = [user for user in bound_users if getattr(user, 'tg_user_id', None) in admin_tg_user_ids]
+    if not candidates and len(bound_users) == 1 and len(bound_admin_users) == 1:
+        seen.clear()
+        add_candidate(bound_admin_users[0], allow_admin_notice=True)
     return candidates
 
 
@@ -1742,6 +1758,10 @@ def _run_auto_renew(order_id: int) -> tuple[CloudServerOrder | None, str | None,
             return None, 'IP已删除或不在代理列表，跳过自动续费', {}
         if not _auto_renew_notice_due_now(notice):
             return None, '未到自动续费时间，跳过本轮自动续费', {}
+        asset = CloudAsset.objects.select_related('user').filter(id=notice.get('asset_id')).first() if notice.get('asset_id') else _order_primary_asset(order)
+        if asset and not getattr(order, 'user_id', None) and getattr(asset, 'user_id', None):
+            order.user = asset.user
+            order.save(update_fields=['user', 'updated_at'])
         order = _apply_notice_schedule_to_order(order, notice)
         candidates = _auto_renew_candidate_users(order)
         if not candidates:
