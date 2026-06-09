@@ -19974,3 +19974,54 @@ git diff --check
 
 - 套餐说明为空时，机器人购买数量页不再显示 `套餐说明: 无`。
 - 套餐说明非空时仍保留说明行。
+
+## 2026-06-09 13:27 CST 代理列表改为按 IP 去重
+
+### 本轮背景
+
+- 用户询问“代理列表没有按 IP 去重么”。
+- 原代理列表去重键包含 `provider + 云账号 + 地区 + IP`，导致跨云账号、历史账号标签或同步残留的同 IP 资产仍会显示多行。
+- 快照增量刷新只创建或更新保留资产的快照，没有主动删除同 IP 被淘汰资产的旧快照，页面可能继续显示重复 IP。
+
+### 修复
+
+- `cloud/asset_queries.py`
+  - `dedupe_cloud_asset_rows()` 改为按显示 IP 唯一。
+  - 无显示 IP 的资产继续按资产 ID 独立展示。
+- `cloud/api_asset_snapshots.py`
+  - 增量刷新时先找出目标资产的显示 IP。
+  - 同 IP 资产一起参与排序和去重，确保选中的保留行是当前全局最优行。
+  - 刷新后删除同 IP 下被淘汰资产的旧快照，避免后台列表残留重复。
+- `cloud/migrations/0066_dedupe_dashboard_snapshots_by_public_ip.py`
+  - 对现有快照表按 `public_ip` 清理重复行。
+  - 仅删除快照行，不删除 `CloudAsset` 真实资产，避免破坏同步事实和审计记录。
+- `cloud/tests.py`
+  - 调整代理列表旧账号标签同 IP 测试，断言列表只显示保留资产。
+  - 新增增量快照刷新清理同 IP 旧快照残留测试。
+
+### 验证
+
+通过：
+
+```bash
+uv run python -m py_compile cloud/asset_queries.py cloud/api_asset_snapshots.py cloud/tests.py cloud/migrations/0066_dedupe_dashboard_snapshots_by_public_ip.py
+uv run python manage.py check
+uv run python manage.py migrate --plan
+DJANGO_TEST_SQLITE=1 uv run python manage.py test cloud.tests.CloudServerServicesTestCase.test_cloud_assets_list_dedupes_old_account_label_variants_by_ip cloud.tests.CloudServerServicesTestCase.test_cloud_asset_snapshot_incremental_refresh_prunes_same_ip_duplicates --settings=shop.settings --verbosity=1
+git diff --check
+```
+
+结果：
+
+- 编译检查通过。
+- Django 系统检查通过。
+- 迁移计划包含 `cloud.0066_dedupe_dashboard_snapshots_by_public_ip`。
+- 代理列表按 IP 去重测试通过。
+- 增量快照清理重复 IP 旧快照测试通过。
+- diff 空白检查通过。
+- SQLite 测试仍输出既有 `db_comment/db_table_comment` 告警，不属于本轮问题。
+
+### 结论
+
+- 代理列表显示和分页总数现在都按显示 IP 去重。
+- 真实资产记录仍保留，避免把同步来源、历史记录或审计信息误删。

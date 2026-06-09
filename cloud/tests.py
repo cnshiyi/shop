@@ -1816,7 +1816,7 @@ class CloudServerServicesTestCase(TestCase):
         self.assertEqual(log.asset_id, old_asset.id)
 
     # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
-    def test_cloud_assets_list_keeps_old_account_label_variants_separate(self):
+    def test_cloud_assets_list_dedupes_old_account_label_variants_by_ip(self):
         account = CloudAccountConfig.objects.create(
             provider=CloudAccountConfig.PROVIDER_AWS,
             name='ui-dedupe-label-variant',
@@ -1856,9 +1856,57 @@ class CloudServerServicesTestCase(TestCase):
         payload = json.loads(response.content.decode('utf-8'))['data']
 
         self.assertEqual(response.status_code, 200)
-        self.assertEqual(payload['total'], 2)
+        self.assertEqual(payload['total'], 1)
         item_ids = {item['id'] for item in payload['items']}
-        self.assertIn(keep_asset.id, item_ids)
+        self.assertEqual(item_ids, {keep_asset.id})
+
+    # 功能：验证代理列表增量快照按 IP 去重，并清理同 IP 旧快照残留。
+    def test_cloud_asset_snapshot_incremental_refresh_prunes_same_ip_duplicates(self):
+        old_asset = CloudAsset.objects.create(
+            kind=CloudAsset.KIND_SERVER,
+            source=CloudAsset.SOURCE_AWS_SYNC,
+            provider='aws_lightsail',
+            account_label='aws+111+old',
+            region_code='ap-southeast-1',
+            asset_name='snapshot-dedupe-old',
+            public_ip='13.250.30.15',
+            status=CloudAsset.STATUS_RUNNING,
+            actual_expires_at=timezone.now() + timezone.timedelta(days=30),
+        )
+        keep_asset = CloudAsset.objects.create(
+            kind=CloudAsset.KIND_SERVER,
+            source=CloudAsset.SOURCE_AWS_SYNC,
+            provider='aws_lightsail',
+            account_label='aws+222+new',
+            region_code='ap-southeast-1',
+            asset_name='snapshot-dedupe-new',
+            public_ip='13.250.30.15',
+            status=CloudAsset.STATUS_RUNNING,
+            actual_expires_at=timezone.now() + timezone.timedelta(days=30),
+        )
+        CloudAssetDashboardSnapshot.objects.create(
+            asset=old_asset,
+            payload={'id': old_asset.id, 'public_ip': old_asset.public_ip},
+            search_text='snapshot-dedupe-old 13.250.30.15',
+            provider=old_asset.provider,
+            account_label=old_asset.account_label,
+            region_code=old_asset.region_code,
+            public_ip=old_asset.public_ip,
+            status=old_asset.status,
+            is_active=True,
+            is_display_visible=True,
+            group_user_key='user:unbound',
+            group_user_label='未绑定用户',
+            group_telegram_key='user:unbound',
+            group_telegram_label='未绑定用户',
+            asset_due_sort_at=old_asset.actual_expires_at,
+            asset_updated_at=old_asset.updated_at,
+        )
+
+        refresh_cloud_asset_dashboard_snapshots(asset_ids=[old_asset.id], reason='test', full=False)
+
+        self.assertFalse(CloudAssetDashboardSnapshot.objects.filter(asset=old_asset).exists())
+        self.assertTrue(CloudAssetDashboardSnapshot.objects.filter(asset=keep_asset, public_ip='13.250.30.15').exists())
 
     # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
     def test_cloud_assets_list_uses_bulk_order_inference_without_per_asset_fallback(self):

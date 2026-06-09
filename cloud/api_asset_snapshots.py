@@ -12,7 +12,7 @@ from django.utils import timezone
 from django.utils.dateparse import parse_datetime
 
 from bot.models import TelegramUser
-from cloud.asset_queries import cloud_assets_base_queryset, dedupe_cloud_asset_rows
+from cloud.asset_queries import asset_display_ip, cloud_assets_base_queryset, dedupe_cloud_asset_rows
 from cloud.models import CloudAsset, CloudAssetDashboardSnapshot
 from core.dashboard_api import _countdown_label, _days_left, _decimal_to_str
 
@@ -326,8 +326,16 @@ def refresh_cloud_asset_dashboard_snapshots(asset_ids=None, *, reason: str = '',
     if full is None:
         full = not asset_ids
     queryset = cloud_assets_base_queryset()
+    duplicate_scope_ips = set()
     if asset_ids:
-        queryset = queryset.filter(id__in=list(asset_ids))
+        normalized_asset_ids = _normalize_snapshot_asset_ids(asset_ids)
+        target_assets = list(queryset.filter(id__in=normalized_asset_ids))
+        duplicate_scope_ips = {asset_display_ip(asset) for asset in target_assets if asset_display_ip(asset)}
+        queryset = queryset.filter(id__in=normalized_asset_ids)
+        if duplicate_scope_ips:
+            queryset = queryset | cloud_assets_base_queryset().filter(
+                Q(public_ip__in=duplicate_scope_ips) | Q(previous_public_ip__in=duplicate_scope_ips)
+            )
     assets = dedupe_cloud_asset_rows(list(queryset.order_by('-sort_order', F('actual_expires_at').asc(nulls_last=True), '-updated_at', '-id')))
     payloads = _default_cloud_asset_payloads(assets, allow_mutation=False)
     existing = {
@@ -358,6 +366,12 @@ def refresh_cloud_asset_dashboard_snapshots(asset_ids=None, *, reason: str = '',
         CloudAssetDashboardSnapshot.objects.bulk_create(create_rows, batch_size=500)
     if update_rows:
         CloudAssetDashboardSnapshot.objects.bulk_update(update_rows, update_fields, batch_size=500)
+    if duplicate_scope_ips:
+        keep_ids = [item['id'] for item in payloads]
+        duplicate_snapshot_qs = CloudAssetDashboardSnapshot.objects.filter(public_ip__in=duplicate_scope_ips)
+        if keep_ids:
+            duplicate_snapshot_qs = duplicate_snapshot_qs.exclude(asset_id__in=keep_ids)
+        duplicate_snapshot_qs.delete()
     if full:
         keep_ids = [item['id'] for item in payloads]
         stale_qs = CloudAssetDashboardSnapshot.objects.all()

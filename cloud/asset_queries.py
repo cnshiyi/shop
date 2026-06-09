@@ -3,7 +3,6 @@
 from django.db.models import Q
 
 from cloud.models import CloudAsset
-from core.cloud_accounts import cloud_account_label
 
 
 def asset_display_ip(asset):
@@ -14,12 +13,7 @@ def dedupe_cloud_asset_rows(assets):
     best = {}
     for asset in assets:
         ip = asset_display_ip(asset)
-        cloud_account_id = getattr(asset, 'cloud_account_id', None)
-        account_label = str(getattr(asset, 'account_label', '') or cloud_account_label(getattr(asset, 'cloud_account', None)) or '').strip()
-        account_key = f'cloud_account:{cloud_account_id}' if cloud_account_id else f'label:{account_label}'
-        provider = str(getattr(asset, 'provider', '') or '').strip()
-        region_code = str(getattr(asset, 'region_code', '') or '').strip()
-        key = f'{provider}:{account_key}:{region_code}:{ip}' if ip else f'id:{asset.id}'
+        key = f'ip:{ip}' if ip else f'id:{asset.id}'
         is_unattached = '未附加' in str(asset.provider_status or '') or '固定IP仍存在但未附加' in str(asset.provider_status or '')
         is_deleted = asset.status in {CloudAsset.STATUS_DELETED, CloudAsset.STATUS_TERMINATED}
         score = (
