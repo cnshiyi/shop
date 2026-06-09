@@ -201,6 +201,31 @@ def _aws_client_from_order_data(order_data: dict):
     ), ''
 
 
+def _aws_service_quotas_client_from_order_data(order_data: dict):
+    region = order_data.get('region_code') or 'ap-southeast-1'
+    account_id = order_data.get('cloud_account_id')
+    account = None
+    if account_id:
+        CloudAccountConfig = apps.get_model('core', 'CloudAccountConfig')
+        account = CloudAccountConfig.objects.filter(id=account_id, provider='aws', is_active=True).first()
+    if not account:
+        return None, '缺少绑定的 AWS 云账号，无法查询真实配额。'
+    access_key = (account.access_key_plain or '').strip()
+    secret_key = (account.secret_key_plain or '').strip()
+    if not access_key or not secret_key:
+        return None, f'AWS 云账号#{getattr(account, "id", "-")}凭据缺失，无法查询真实配额。'
+    try:
+        import boto3
+    except ImportError:
+        return None, '未安装 boto3，无法查询 AWS Service Quotas。'
+    return boto3.client(
+        'service-quotas',
+        region_name=region,
+        aws_access_key_id=access_key,
+        aws_secret_access_key=secret_key,
+    ), ''
+
+
 def _create_instance_sync(order_data: dict, server_name: str):
     order_no = order_data.get('order_no')
     provider = order_data.get('provider')
@@ -457,6 +482,129 @@ def _iter_lightsail_pages(client, method_name: str, result_key: str):
             break
 
 
+def _count_lightsail_items(client, method_name: str, result_key: str) -> int:
+    return sum(1 for _ in _iter_lightsail_pages(client, method_name, result_key))
+
+
+def _list_service_quotas(client, service_code: str) -> list[dict]:
+    quotas = []
+    token = ''
+    while True:
+        kwargs = {'ServiceCode': service_code}
+        if token:
+            kwargs['NextToken'] = token
+        response = client.list_service_quotas(**kwargs)
+        quotas.extend(response.get('Quotas') or [])
+        token = response.get('NextToken') or ''
+        if not token:
+            break
+    return quotas
+
+
+def _list_default_service_quotas(client, service_code: str) -> list[dict]:
+    quotas = []
+    token = ''
+    while True:
+        kwargs = {'ServiceCode': service_code}
+        if token:
+            kwargs['NextToken'] = token
+        response = client.list_aws_default_service_quotas(**kwargs)
+        quotas.extend(response.get('Quotas') or [])
+        token = response.get('NextToken') or ''
+        if not token:
+            break
+    return quotas
+
+
+def _quota_value_by_name(quotas: list[dict], markers: tuple[str, ...]) -> float | None:
+    marker_values = [str(item).lower() for item in markers]
+    for item in quotas:
+        name = str(item.get('QuotaName') or '').lower()
+        if all(marker in name for marker in marker_values):
+            value = item.get('Value')
+            try:
+                return float(value)
+            except (TypeError, ValueError):
+                return None
+    return None
+
+
+def _instance_vcpu_count(instance: dict) -> int:
+    hardware = instance.get('hardware') or {}
+    for key in ('cpuCount', 'cpu_count'):
+        try:
+            return int(hardware.get(key) or 0)
+        except (TypeError, ValueError):
+            return 0
+    return 0
+
+
+def _bundle_vcpu_count(client, bundle_id: str) -> int:
+    token = ''
+    while True:
+        kwargs = {'includeInactive': False}
+        if token:
+            kwargs['pageToken'] = token
+        response = client.get_bundles(**kwargs)
+        for bundle in response.get('bundles') or []:
+            if str(bundle.get('bundleId') or '') == bundle_id:
+                try:
+                    return int((bundle.get('hardware') or {}).get('cpuCount') or 1)
+                except (TypeError, ValueError):
+                    return 1
+        token = response.get('nextPageToken') or ''
+        if not token:
+            break
+    return 1
+
+
+def _check_create_capacity_sync(order_data: dict) -> tuple[bool, str]:
+    client, client_error = _aws_client_from_order_data(order_data)
+    account_id = order_data.get('cloud_account_id') or '-'
+    region = order_data.get('region_code') or 'ap-southeast-1'
+    if not client:
+        return False, f'AWS 云账号#{account_id}创建前配额检查失败：{client_error}'
+
+    quotas_client, quotas_error = _aws_service_quotas_client_from_order_data(order_data)
+    if not quotas_client:
+        return False, f'AWS 云账号#{account_id}创建前真实配额检查失败：{quotas_error}'
+
+    skip_static_ip = bool(order_data.get('skip_static_ip'))
+    bundle_id, bundle_source = _resolve_bundle_id(order_data)
+    try:
+        quotas = _list_service_quotas(quotas_client, 'lightsail')
+        default_quotas = _list_default_service_quotas(quotas_client, 'lightsail')
+        vcpu_quota = _quota_value_by_name(quotas, ('instances',))
+        if vcpu_quota is None:
+            vcpu_quota = _quota_value_by_name(default_quotas, ('instances',))
+        static_ip_quota = _quota_value_by_name(quotas, ('static', 'ip'))
+        if static_ip_quota is None:
+            static_ip_quota = _quota_value_by_name(default_quotas, ('static', 'ip'))
+        if vcpu_quota is None:
+            return False, f'AWS 云账号#{account_id}地区 {region} 未能读取 Lightsail 实例 vCPU 真实配额。'
+
+        instances = list(_iter_lightsail_pages(client, 'get_instances', 'instances'))
+        current_vcpu = sum(_instance_vcpu_count(item) for item in instances)
+        requested_vcpu = _bundle_vcpu_count(client, bundle_id)
+        projected_vcpu = current_vcpu + requested_vcpu
+        notes = [f'实例 vCPU {current_vcpu}+{requested_vcpu}/{vcpu_quota:g}']
+        if projected_vcpu > vcpu_quota:
+            return False, f'AWS 云账号#{account_id}地区 {region} 实例 vCPU 配额不足：当前 {current_vcpu}，本次 {requested_vcpu}，配额 {vcpu_quota:g}，bundle={bundle_id}({bundle_source})'
+
+        if not skip_static_ip:
+            static_ip_count = _count_lightsail_items(client, 'get_static_ips', 'staticIps')
+            if static_ip_quota is None:
+                return False, f'AWS 云账号#{account_id}地区 {region} 未能读取 Lightsail 固定 IP 真实配额。'
+            notes.append(f'固定 IP {static_ip_count}+1/{static_ip_quota:g}')
+            if static_ip_count + 1 > static_ip_quota:
+                return False, f'AWS 云账号#{account_id}地区 {region} 固定 IP 配额不足：当前 {static_ip_count}，本次 1，配额 {static_ip_quota:g}'
+
+        return True, f'AWS 创建前配额检查通过：{"，".join(notes)}，地区 {region}'
+    except Exception as exc:
+        logger.warning('AWS 创建前配额检查异常: account_id=%s region=%s error=%s', account_id, region, exc)
+        return False, f'AWS 云账号#{account_id}创建前真实配额检查异常：{exc}'
+
+
 def _public_ip_exists_sync(order_data: dict, expected_ips) -> tuple[bool, str]:
     expected = {normalize_public_ip(item) for item in (expected_ips or [])}
     expected = {item for item in expected if item}
@@ -493,3 +641,8 @@ def get_instance_public_ip(order_data: dict, instance_name: str):
 @sync_to_async(thread_sensitive=False)
 def public_ip_exists(order_data: dict, expected_ips):
     return _public_ip_exists_sync(order_data, expected_ips)
+
+
+@sync_to_async(thread_sensitive=False)
+def check_create_capacity(order_data: dict):
+    return _check_create_capacity_sync(order_data)

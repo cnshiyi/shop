@@ -29,7 +29,7 @@ from cloud.lifecycle_schedule import compute_order_lifecycle_fields
 from cloud.asset_expiry import order_asset_expiry
 from cloud.note_utils import append_status_note
 from cloud.ports import get_mtproxy_port_label, get_mtproxy_public_ports, is_valid_mtproxy_main_port
-from cloud.aws_lightsail import _public_ip_exists_sync, _resolve_static_ip_name_for_move
+from cloud.aws_lightsail import _check_create_capacity_sync, _public_ip_exists_sync, _resolve_static_ip_name_for_move
 from cloud.ip_guard import validate_server_connection_ip, validate_server_connection_ip_with_retry
 from cloud.provisioning import (
     _append_cloud_asset_note,
@@ -18952,7 +18952,8 @@ class CloudServerServicesTestCase(TestCase):
             private_key_path='',
         )
 
-        with patch('cloud.provisioning.create_aws_instance', new=AsyncMock(return_value=result)), \
+        with patch('cloud.provisioning.check_aws_create_capacity', new=AsyncMock(return_value=(True, 'AWS 创建前配额检查通过'))), \
+            patch('cloud.provisioning.create_aws_instance', new=AsyncMock(return_value=result)), \
             patch('cloud.provisioning.public_ip_exists', new=AsyncMock(return_value=(False, '原固定 IP 已不在 AWS 账号中'))):
             saved = async_to_sync(provision_cloud_server)(order.id)
 
@@ -19008,7 +19009,8 @@ class CloudServerServicesTestCase(TestCase):
                 return SimpleNamespace(ok=False, instance_id='', public_ip='', login_user='', login_password='', note='账号库存不足', static_ip_name='', private_key_path='')
             return SimpleNamespace(ok=True, instance_id='provision-rotate-instance', public_ip='54.54.54.88', login_user='admin', login_password='pw', note='AWS 实例已创建', static_ip_name='StaticIp-provision-rotate', private_key_path='')
 
-        with patch('cloud.provisioning.create_aws_instance', new=fake_create), \
+        with patch('cloud.provisioning.check_aws_create_capacity', new=AsyncMock(return_value=(True, 'AWS 创建前配额检查通过'))), \
+            patch('cloud.provisioning.create_aws_instance', new=fake_create), \
             patch('cloud.provisioning.public_ip_exists', new=AsyncMock(return_value=(True, '公网 IP 存在'))), \
             patch('cloud.provisioning.validate_server_connection_ip_with_retry', new=AsyncMock(return_value=(True, 'IP 一致', '54.54.54.88'))), \
             patch('cloud.provisioning.install_bbr', new=AsyncMock(return_value=(True, 'BBR 已安装'))), \
@@ -19016,6 +19018,133 @@ class CloudServerServicesTestCase(TestCase):
             saved = async_to_sync(provision_cloud_server)(order.id)
 
         self.assertEqual(seen_account_ids, [first.id, second.id])
+        saved.refresh_from_db()
+        self.assertEqual(saved.cloud_account_id, second.id)
+        self.assertEqual(saved.status, 'completed')
+
+    # 功能：AWS 创建前必须读取真实 Service Quotas，实例 vCPU 或固定 IP 超限时提前阻断创建。
+    def test_aws_create_capacity_uses_real_service_quotas(self):
+        account = CloudAccountConfig.objects.create(
+            provider=CloudAccountConfig.PROVIDER_AWS,
+            name='aws-real-quota-account',
+            external_account_id='999999999999',
+            access_key='A' * 20,
+            secret_key='B' * 40,
+            region_hint='ap-southeast-1',
+            is_active=True,
+        )
+
+        class FakeLightsailClient:
+            def get_instances(self, **kwargs):
+                return {
+                    'instances': [
+                        {'name': 'quota-used-a', 'hardware': {'cpuCount': 1}},
+                        {'name': 'quota-used-b', 'hardware': {'cpuCount': 1}},
+                    ],
+                }
+
+            def get_static_ips(self, **kwargs):
+                return {'staticIps': [{'name': 'ip-a'}, {'name': 'ip-b'}]}
+
+            def get_bundles(self, **kwargs):
+                return {'bundles': [{'bundleId': 'nano_3_0', 'hardware': {'cpuCount': 1}}]}
+
+        class FakeQuotasClient:
+            def list_service_quotas(self, **kwargs):
+                return {
+                    'Quotas': [
+                        {'QuotaName': 'Instances', 'Value': 3.0},
+                        {'QuotaName': 'Static IP addresses', 'Value': 3.0},
+                    ],
+                }
+
+            def list_aws_default_service_quotas(self, **kwargs):
+                return {'Quotas': []}
+
+        payload = {
+            'order_no': 'AWS-REAL-QUOTA',
+            'region_code': 'ap-southeast-1',
+            'plan_name': 'Small',
+            'cloud_account_id': account.id,
+        }
+        with patch('cloud.aws_lightsail._aws_client_from_order_data', return_value=(FakeLightsailClient(), '')), \
+                patch('cloud.aws_lightsail._aws_service_quotas_client_from_order_data', return_value=(FakeQuotasClient(), '')):
+            ok, note = _check_create_capacity_sync(payload)
+
+        self.assertTrue(ok)
+        self.assertIn('实例 vCPU 2+1/3', note)
+        self.assertIn('固定 IP 2+1/3', note)
+
+        class FullStaticIpClient(FakeLightsailClient):
+            def get_static_ips(self, **kwargs):
+                return {'staticIps': [{'name': 'ip-a'}, {'name': 'ip-b'}, {'name': 'ip-c'}]}
+
+        with patch('cloud.aws_lightsail._aws_client_from_order_data', return_value=(FullStaticIpClient(), '')), \
+                patch('cloud.aws_lightsail._aws_service_quotas_client_from_order_data', return_value=(FakeQuotasClient(), '')):
+            ok, note = _check_create_capacity_sync(payload)
+
+        self.assertFalse(ok)
+        self.assertIn('固定 IP 配额不足', note)
+
+    # 功能：AWS 购买创建前如果当前账号真实配额不足，不调用创建接口，直接切到下一个账号。
+    def test_provision_rotates_before_create_when_aws_quota_is_full(self):
+        first = CloudAccountConfig.objects.create(
+            provider=CloudAccountConfig.PROVIDER_AWS,
+            name='provision-quota-a',
+            external_account_id='111111111111',
+            access_key='A' * 20,
+            secret_key='B' * 40,
+            region_hint='ap-southeast-1',
+            is_active=True,
+        )
+        second = CloudAccountConfig.objects.create(
+            provider=CloudAccountConfig.PROVIDER_AWS,
+            name='provision-quota-b',
+            external_account_id='222222222222',
+            access_key='C' * 20,
+            secret_key='D' * 40,
+            region_hint='ap-southeast-1',
+            is_active=True,
+        )
+        order = CloudServerOrder.objects.create(
+            order_no='PROVISION-ROTATE-AWS-QUOTA',
+            user=self.user,
+            plan=self.plan,
+            provider=self.plan.provider,
+            cloud_account=first,
+            account_label=cloud_account_label(first),
+            region_code=self.plan.region_code,
+            region_name=self.plan.region_name,
+            plan_name=self.plan.plan_name,
+            quantity=1,
+            currency='USDT',
+            total_amount='19.00',
+            pay_amount='19.00',
+            pay_method='balance',
+            status='paid',
+            paid_at=timezone.now(),
+            mtproxy_port=9528,
+        )
+        created_account_ids = []
+
+        async def fake_check_capacity(payload):
+            if payload['cloud_account_id'] == first.id:
+                return False, 'AWS 云账号配额不足：实例 vCPU 已满'
+            return True, 'AWS 创建前配额检查通过'
+
+        async def fake_create(payload, server_name):
+            created_account_ids.append(payload['cloud_account_id'])
+            return SimpleNamespace(ok=True, instance_id='provision-quota-instance', public_ip='54.54.54.89', login_user='admin', login_password='pw', note='AWS 实例已创建', static_ip_name='StaticIp-provision-quota', private_key_path='')
+
+        with patch('cloud.provisioning.check_aws_create_capacity', new=fake_check_capacity), \
+                patch('cloud.provisioning.create_aws_instance', new=fake_create), \
+                patch('cloud.provisioning.public_ip_exists', new=AsyncMock(return_value=(True, '公网 IP 存在'))), \
+                patch('cloud.provisioning.validate_server_connection_ip_with_retry', new=AsyncMock(return_value=(True, 'IP 一致', '54.54.54.89'))), \
+                patch('cloud.provisioning.install_bbr', new=AsyncMock(return_value=(True, 'BBR 已安装'))), \
+                patch('cloud.provisioning.install_mtproxy', new=AsyncMock(return_value=(True, 'MTProxy 已安装'))):
+            saved = async_to_sync(provision_cloud_server)(order.id)
+
+        self.assertEqual(created_account_ids, [second.id])
         saved.refresh_from_db()
         self.assertEqual(saved.cloud_account_id, second.id)
         self.assertEqual(saved.status, 'completed')

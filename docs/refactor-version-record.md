@@ -20160,3 +20160,54 @@ git diff --check
 
 - 同步链路现在不会因为跨账号/跨地区同 IP 漏查而尝试插入第二条有效公网 IP 资产。
 - 当前 `public_ip` 是硬去重依据；`previous_public_ip` 仍用于辅助追踪和查找，不作为唯一约束字段。
+
+## 2026-06-09 15:19 CST AWS 创建前读取真实配额并轮询账号
+
+### 本轮背景
+
+- 用户反馈多个 AWS 云账号轮询创建仍有问题。
+- 用户明确要求创建服务器前检查配额，配额不足直接换下一个账号。
+- 进一步确认后，配额来源必须是 AWS 真实配额，不使用后台配置模拟；阿里云本轮不做配额前置检查。
+
+### 修复
+
+- `cloud/aws_lightsail.py`
+  - 新增 AWS Service Quotas 客户端构造。
+  - 创建前读取 Lightsail 真实配额：
+    - `Instances`：按 AWS Lightsail 口径作为区域实例 vCPU 配额。
+    - `Static IP addresses`：固定 IP 数量配额。
+  - 结合当前实例 `hardware.cpuCount`、待创建 bundle 的 `hardware.cpuCount`、当前固定 IP 数，判断本次创建后是否超限。
+  - 配额不足或真实配额读取失败时，返回明确失败原因，不进入创建实例请求。
+- `cloud/provisioning.py`
+  - AWS 云账号候选循环中增加 `provider_capacity_check` 日志阶段。
+  - 每个 AWS 账号在 `create_aws_instance()` 前先执行真实配额检查。
+  - 当前账号配额不足时记录失败原因并切到下一个账号。
+  - 阿里云返回“无需创建前配额检查”，保持原创建链路。
+- `cloud/tests.py`
+  - 新增 AWS Service Quotas 配额检查测试，覆盖实例 vCPU 与固定 IP。
+  - 新增 AWS 配额不足时创建前轮询到下一个账号的开通测试。
+  - 现有开通测试补 mock，避免测试环境误触真实 AWS 配额查询。
+
+### 验证
+
+通过：
+
+```bash
+uv run python -m py_compile cloud/aws_lightsail.py cloud/aliyun_simple.py cloud/provisioning.py cloud/tests.py core/runtime_config.py
+DJANGO_TEST_SQLITE=1 uv run python manage.py test cloud.tests.CloudServerServicesTestCase.test_aws_create_capacity_uses_real_service_quotas cloud.tests.CloudServerServicesTestCase.test_provision_rotates_before_create_when_aws_quota_is_full cloud.tests.CloudServerServicesTestCase.test_provision_rotates_to_next_cloud_account_after_create_failure cloud.tests.CloudServerServicesTestCase.test_provision_expected_ip_failure_schedules_cleanup --settings=shop.settings --verbosity=1
+uv run python manage.py check
+git diff --check
+```
+
+结果：
+
+- 编译通过。
+- 聚焦测试 4 条通过。
+- Django 系统检查通过。
+- diff 空白检查通过。
+
+### 结论
+
+- AWS 购买创建现在会在真实创建实例前先查 AWS 真实配额。
+- 第一个 AWS 账号配额不足时，不会调用真实创建接口，会直接轮询到下一个候选账号。
+- 阿里云没有引入本轮配额前置逻辑。

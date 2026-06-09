@@ -13,7 +13,7 @@ from cloud.note_utils import append_note, prepend_note, with_note_time
 from cloud.services import _cloud_log_trigger_label, _resolve_aws_static_ip_name_for_order, _update_order_primary_records, build_cloud_server_name, drop_asset_note_update, ensure_unique_cloud_server_name, is_cloud_asset_renewal_order, record_cloud_ip_log
 from core.cloud_accounts import choose_cloud_account_for_order, cloud_account_label, list_cloud_accounts_by_server_load
 from cloud.aliyun_simple import create_instance as create_aliyun_instance
-from cloud.aws_lightsail import create_instance as create_aws_instance, get_instance_public_ip, move_static_ip_to_instance, public_ip_exists
+from cloud.aws_lightsail import check_create_capacity as check_aws_create_capacity, create_instance as create_aws_instance, get_instance_public_ip, move_static_ip_to_instance, public_ip_exists
 from cloud.bootstrap import build_mtproxy_links, install_bbr, install_mtproxy
 from cloud.ip_guard import validate_server_connection_ip, validate_server_connection_ip_with_retry
 from cloud.models import CloudServerOrder
@@ -669,6 +669,12 @@ def _is_transient_create_failure(note: str) -> bool:
     return any(marker in text for marker in transient_markers)
 
 
+async def _check_provider_create_capacity(order: CloudServerOrder) -> tuple[bool, str]:
+    if order.provider == 'aws_lightsail':
+        return await check_aws_create_capacity(await _get_aws_create_payload(order.id))
+    return True, '当前云厂商无需创建前配额检查。'
+
+
 async def provision_cloud_server(order_id: int):
     started_at = timezone.now()
     logger.info('云服务器开通开始: order_id=%s', order_id)
@@ -741,8 +747,40 @@ async def provision_cloud_server(order_id: int):
                 logger.warning('BOT_CLOUD_PURCHASE_FLOW stage=provision_account_skip order_id=%s account_id=%s reason=order_or_account_unavailable', order_id, account_id)
                 attempted_notes.append(f'账号#{account_id or "-"}: 订单或云账号不可用')
                 continue
-            await _mark_provisioning_start(order.id, server_name)
             account_label = order.account_label or order.provider
+            capacity_ok, capacity_note = await _check_provider_create_capacity(order)
+            logger.info(
+                'BOT_CLOUD_PURCHASE_FLOW stage=provider_capacity_check user_id=%s tg_user_id=%s order_id=%s order_no=%s provider=%s region=%s plan=%s account_id=%s account_label=%s account_attempt=%s/%s ok=%s note=%s',
+                order.user_id,
+                order_tg_user_id,
+                order.id,
+                order.order_no,
+                order.provider,
+                order.region_code,
+                order.plan_name,
+                order.cloud_account_id,
+                account_label,
+                attempt_index,
+                len(account_ids),
+                capacity_ok,
+                _mask_proxy_log_text(capacity_note)[:1000],
+            )
+            if not capacity_ok:
+                attempted_notes.append(f'{account_label}: {capacity_note}')
+                if attempt_index < len(account_ids):
+                    logger.warning(
+                        'BOT_CLOUD_PURCHASE_FLOW stage=provider_account_rotate user_id=%s tg_user_id=%s order_id=%s order_no=%s failed_account_id=%s failed_account_label=%s next_account_id=%s note=%s',
+                        order.user_id,
+                        order_tg_user_id,
+                        order.id,
+                        order.order_no,
+                        order.cloud_account_id,
+                        account_label,
+                        account_ids[attempt_index],
+                        _mask_proxy_log_text(capacity_note)[:1000],
+                    )
+                continue
+            await _mark_provisioning_start(order.id, server_name)
             create_attempts = 2
             for create_attempt in range(1, create_attempts + 1):
                 if order.provider == 'aws_lightsail':
