@@ -27,7 +27,7 @@ from cloud.dashboard_snapshots import _refresh_dashboard_plan_snapshots, _refres
 from cloud.lifecycle_schedule import compute_order_lifecycle_fields
 from cloud.models import CloudAsset, CloudIpLog, CloudServerOrder, CloudServerPlan
 from cloud.note_utils import append_note
-from cloud.services import ensure_cloud_asset_operation_order, ensure_manual_expiry_operation_order, ensure_manual_owner_operation_order, ensure_manual_price_operation_order, record_cloud_ip_log, replace_cloud_asset_order_by_admin, scoped_server_match_for_asset, set_cloud_server_auto_renew_admin, sync_cloud_asset_user_binding
+from cloud.services import ensure_manual_expiry_operation_order, ensure_manual_owner_operation_order, ensure_manual_price_operation_order, record_cloud_ip_log, replace_cloud_asset_order_by_admin, scoped_server_match_for_asset, set_cloud_asset_auto_renew, sync_cloud_asset_user_binding
 from core.dashboard_api import _error, _iso, _ok, _parse_decimal, _read_payload, _status_label, dashboard_login_required, dashboard_superuser_required
 
 logger = logging.getLogger(__name__)
@@ -505,19 +505,9 @@ def toggle_cloud_asset_auto_renew(request, asset_id):
         sync_cloud_asset_user_binding(asset)
     if not asset.user_id:
         return _error('该代理未绑定用户，无法设置自动续费', status=400)
-    if not asset.order_id:
-        order, err = async_to_sync(ensure_cloud_asset_operation_order)(asset.id, asset.user_id, True)
-        if err:
-            return _error(err, status=400)
-        if not order:
-            return _error('该代理无法生成操作订单，无法设置自动续费', status=400)
-        asset.order = order
-        asset.order_id = order.id
-    order = async_to_sync(set_cloud_server_auto_renew_admin)(asset.order_id, enabled)
-    if order is False:
-        return _error('当前状态不可开启自动续费', status=400)
-    if not order:
-        return _error('订单不存在', status=404)
+    order, err = async_to_sync(set_cloud_asset_auto_renew)(asset.id, asset.user_id, enabled, True)
+    if err:
+        return _error(err, status=400)
     _refresh_dashboard_plan_snapshots(f'cloud_asset_auto_renew:{asset_id}')
     asset = CloudAsset.objects.select_related('user', 'order', 'cloud_account', 'telegram_group').get(pk=asset_id)
     return _ok(_asset_payload(asset))

@@ -27,7 +27,7 @@ from cloud.api_asset_snapshots import (
 from cloud.dashboard_api_helpers import _dashboard_sort_direction, _preserve_link_status_label, _preserve_link_status_with_countdown
 from cloud.lifecycle_schedule import compute_unattached_ip_release_at
 from cloud.models import CloudAsset, CloudServerOrder
-from cloud.services import sync_cloud_asset_user_binding
+from cloud.services import cloud_asset_can_auto_renew, sync_cloud_asset_user_binding
 from core.cloud_accounts import cloud_account_label, cloud_account_label_variants, list_cloud_account_labels
 from core.dashboard_api import _countdown_label, _days_left, _decimal_to_str, _get_keyword, _iso, _ok, _provider_label, _provider_status_label, _region_label, _server_source_label, _split_usernames, _status_label, _user_payload, dashboard_login_required
 
@@ -733,7 +733,7 @@ def _asset_payload(asset, *, context: CloudAssetPayloadContext | None = None):
         'order_no': order.order_no if order else '',
         'order_detail_path': f'/admin/cloud-orders/{order.id}' if order else '',
         'order_link_path': f'/admin/cloud-orders/{order.id}' if order else '',
-        'can_auto_renew': bool(user and not (display_status == 'unattached' or '未附加' in str(provider_status_label or ''))),
+        'can_auto_renew': bool(cloud_asset_can_auto_renew(asset)),
         'auto_renew_enabled': bool(getattr(order, 'auto_renew_enabled', False)),
         'status': display_status,
         'status_label': display_status_label,

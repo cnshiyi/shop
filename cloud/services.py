@@ -1725,6 +1725,13 @@ def is_retained_ip_order_visible_in_group(order_id: int, chat_id: int) -> bool:
     return bool(_is_retained_ip_renewal_candidate(order) and _can_order_be_renewed(order))
 
 
+def _asset_visible_in_auto_renew_list(asset: CloudAsset | None) -> bool:
+    if not asset or _is_unattached_static_ip_asset(asset):
+        return False
+    order = getattr(asset, 'order', None)
+    return bool(cloud_asset_can_auto_renew(asset) or getattr(order, 'auto_renew_enabled', False))
+
+
 @sync_to_async
 def list_user_auto_renew_cloud_servers(user_id: int):
     assets = (
@@ -1732,7 +1739,7 @@ def list_user_auto_renew_cloud_servers(user_id: int):
         .filter(_user_asset_visibility_filter(user_id))
         .order_by('-sort_order', 'actual_expires_at', '-updated_at', '-id')
     )
-    return [_proxy_asset_view(asset) for asset in assets if not _is_unattached_static_ip_asset(asset)]
+    return [_proxy_asset_view(asset) for asset in assets if _asset_visible_in_auto_renew_list(asset)]
 
 
 @sync_to_async
@@ -1745,7 +1752,7 @@ def list_group_auto_renew_cloud_servers(chat_id: int):
         .filter(telegram_group=group)
         .order_by('-sort_order', 'actual_expires_at', '-updated_at', '-id')
     )
-    return [_proxy_asset_view(asset) for asset in assets if not _is_unattached_static_ip_asset(asset)]
+    return [_proxy_asset_view(asset) for asset in assets if _asset_visible_in_auto_renew_list(asset)]
 
 
 @sync_to_async
@@ -1761,7 +1768,7 @@ def list_all_auto_renew_cloud_servers():
         .exclude(status__in=_INACTIVE_ASSET_STATUSES)
         .order_by('-sort_order', 'user_id', 'actual_expires_at', '-updated_at', '-id')
     )
-    return [_proxy_asset_view(asset) for asset in assets if not _is_unattached_static_ip_asset(asset)]
+    return [_proxy_asset_view(asset) for asset in assets if _asset_visible_in_auto_renew_list(asset)]
 
 
 @sync_to_async
@@ -4571,6 +4578,65 @@ def _set_cloud_server_auto_renew(order: CloudServerOrder | None, enabled: bool):
     return order
 
 
+def cloud_asset_can_auto_renew(asset: CloudAsset | None) -> bool:
+    if not asset:
+        return False
+    if not getattr(asset, 'user_id', None):
+        return False
+    if not getattr(asset, 'actual_expires_at', None):
+        return False
+    if not str(getattr(asset, 'public_ip', None) or '').strip():
+        return False
+    if getattr(asset, 'status', None) in _INACTIVE_ASSET_STATUSES or _cloud_asset_deleted_or_missing(asset):
+        return False
+    if _is_unattached_static_ip_asset(asset):
+        return False
+    order = getattr(asset, 'order', None)
+    price = getattr(asset, 'price', None)
+    if price is None and order is not None:
+        price = getattr(order, 'total_amount', None)
+        if price is None:
+            price = getattr(order, 'pay_amount', None)
+    return price is not None
+
+
+def _set_cloud_asset_auto_renew_sync(asset_id: int, user_id: int | None, enabled: bool, admin: bool = False):
+    asset_qs = CloudAsset.objects.select_related('order', 'user', 'cloud_account').filter(
+        id=asset_id,
+        kind=CloudAsset.KIND_SERVER,
+    )
+    if not admin:
+        asset_qs = asset_qs.filter(_user_asset_visibility_filter(user_id))
+    asset = asset_qs.exclude(status__in=_INACTIVE_ASSET_STATUSES).first()
+    if not asset:
+        return None, '代理记录不存在'
+    if enabled and not cloud_asset_can_auto_renew(asset):
+        return None, '该代理需要绑定用户、价格和到期时间，且不能是未附加固定 IP，才能开启自动续费'
+    operation_user_id = asset.user_id or user_id
+    if not operation_user_id:
+        return None, '该代理未绑定用户，无法设置自动续费'
+    order = asset.order if asset.order_id else None
+    if not order and not enabled:
+        return None, '该代理未开启自动续费'
+    if not order:
+        order = _create_asset_operation_order(asset, operation_user_id)
+        if not order:
+            return None, '该地区没有可用套餐，无法创建操作订单'
+        asset.order = order
+        asset.order_id = order.id
+    result = _set_cloud_server_auto_renew(order, enabled)
+    if result is False:
+        return None, '当前状态不可开启自动续费'
+    if not result:
+        return None, '订单不存在'
+    return result, None
+
+
+@sync_to_async
+def set_cloud_asset_auto_renew(asset_id: int, user_id: int | None, enabled: bool, admin: bool = False):
+    return _set_cloud_asset_auto_renew_sync(asset_id, user_id, enabled, admin)
+
+
 @sync_to_async
 def set_cloud_server_auto_renew(order_id: int, user_id: int, enabled: bool):
     order = CloudServerOrder.objects.filter(id=order_id, user_id=user_id).first()
@@ -4596,25 +4662,30 @@ def set_cloud_server_auto_renew_admin(order_id: int, enabled: bool):
 
 
 def _set_all_cloud_server_auto_renew(enabled: bool, user_id: int | None = None):
-    assets = CloudAsset.objects.filter(kind=CloudAsset.KIND_SERVER, order__isnull=False)
+    assets = CloudAsset.objects.select_related('order', 'user', 'cloud_account').filter(kind=CloudAsset.KIND_SERVER)
     if user_id is not None:
         assets = assets.filter(_user_asset_visibility_filter(user_id))
-    order_ids = list(
+    updated = 0
+    skipped = 0
+    total = 0
+    seen_orders = set()
+    for asset in (
         assets.filter(Q(public_ip__isnull=False) & ~Q(public_ip=''))
         .filter(_active_cloud_account_asset_filter())
         .exclude(status__in=_INACTIVE_ASSET_STATUSES)
-        .values_list('order_id', flat=True)
-        .distinct()
-    )
-    updated = 0
-    skipped = 0
-    for order in CloudServerOrder.objects.filter(id__in=order_ids):
-        result = _set_cloud_server_auto_renew(order, enabled)
-        if result:
+        .order_by('order_id', '-updated_at', '-id')
+    ):
+        if asset.order_id and asset.order_id in seen_orders:
+            continue
+        total += 1
+        order, err = _set_cloud_asset_auto_renew_sync(asset.id, user_id or asset.user_id, enabled, admin=user_id is None)
+        if order:
+            if order.id:
+                seen_orders.add(order.id)
             updated += 1
         else:
             skipped += 1
-    return {'updated': updated, 'skipped': skipped, 'total': len(order_ids)}
+    return {'updated': updated, 'skipped': skipped, 'total': total}
 
 
 @sync_to_async
@@ -4624,29 +4695,36 @@ def set_group_cloud_server_auto_renew(chat_id: int, enabled: bool):
         return {'updated': 0, 'skipped': 0, 'total': 0}
     assets = (
         _cloud_server_asset_queryset()
-        .filter(telegram_group=group, order__isnull=False)
+        .filter(telegram_group=group)
         .select_related('order')
         .order_by('order_id', '-updated_at', '-id')
     )
-    order_ids = []
+    asset_ids = []
     seen = set()
     skipped = 0
     for asset in assets:
         if _is_unattached_static_ip_asset(asset):
             skipped += 1
             continue
-        if not asset.order_id or asset.order_id in seen:
+        if asset.order_id and asset.order_id in seen:
             continue
-        seen.add(asset.order_id)
-        order_ids.append(asset.order_id)
+        if asset.order_id:
+            seen.add(asset.order_id)
+        asset_ids.append(asset.id)
     updated = 0
-    for order in CloudServerOrder.objects.filter(id__in=order_ids):
-        result = _set_cloud_server_auto_renew(order, enabled)
-        if result:
+    for asset_id in asset_ids:
+        asset = assets.filter(id=asset_id).first()
+        order, err = _set_cloud_asset_auto_renew_sync(
+            asset.id if asset else 0,
+            getattr(asset, 'user_id', None) if asset else None,
+            enabled,
+            admin=True,
+        )
+        if order:
             updated += 1
         else:
             skipped += 1
-    return {'updated': updated, 'skipped': skipped, 'total': len(order_ids) + skipped}
+    return {'updated': updated, 'skipped': skipped, 'total': len(asset_ids) + skipped}
 
 
 @sync_to_async
@@ -4698,6 +4776,7 @@ __all__ = [
     'create_cloud_server_renewal',
     'create_cloud_server_renewal_by_public_query',
     'create_cloud_server_renewal_for_user',
+    'cloud_asset_can_auto_renew',
     'list_cloud_asset_renewal_plans',
     'get_cloud_order_group_balance_lines',
     'disable_all_cloud_server_auto_renew',
@@ -4746,6 +4825,7 @@ __all__ = [
     'record_cloud_ip_log',
     'run_cloud_server_rebuild_job',
     'set_cloud_order_reminder',
+    'set_cloud_asset_auto_renew',
     'set_group_cloud_server_auto_renew',
     'set_cloud_server_auto_renew',
     'set_cloud_server_auto_renew_admin',

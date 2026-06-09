@@ -20413,3 +20413,60 @@ git diff --check
 - 未附加固定 IP 恢复续费仍保留“选套餐 -> 输入旧代理链接 -> 支付后恢复服务器”的流程。
 - 普通续费按 1 个自然月顺延，生命周期计划跟随新的资产到期时间。
 - 创建操作订单不会再制造同 IP 重复资产。
+
+## 2026-06-10 01:40 CST 重构自动续费资产级开启规则
+
+### 本轮背景
+
+- 用户要求：自动续费只要有价格、有到期时间就能开启，不看是否有订单。
+- 当前资产到期事实继续只使用 `CloudAsset.actual_expires_at`，不恢复订单侧到期字段。
+- 复查发现无订单人工资产虽可作为资产展示，但后台和机器人自动续费入口仍存在订单前置假设；机器人自动续费列表还可能把资产 ID 当订单 ID 发回调。
+
+### 修复
+
+- `cloud/services.py`
+  - 新增 `cloud_asset_can_auto_renew()`，统一资产级自动续费判定：绑定用户、有 `actual_expires_at`、有公网 IP、有价格，且不是未附加固定 IP、删除或失联资产。
+  - 新增资产级设置入口 `set_cloud_asset_auto_renew()`：无订单资产开启时先创建操作订单再开启自动续费；关闭无订单资产不创建订单。
+  - 一键开启/关闭和群组批量开关改为从 `CloudAsset` 扫描，不再用 `order__isnull=False` 排除无订单资产。
+  - 自动续费列表过滤改为只展示可开启资产，或已经开启过、需要保留关闭入口的资产。
+- `cloud/api_assets.py`
+  - 代理列表 `can_auto_renew` 复用资产级规则。
+- `cloud/api_asset_edit.py`
+  - 后台代理列表自动续费开关改为调用资产级设置入口，不再要求预先存在订单。
+- `bot/keyboards.py`
+  - IP 查询结果支持无订单资产自动续费按钮。
+  - 自动续费列表 callback 改为带来源类型：`o:订单ID` 或 `a:资产ID`。
+  - 键盘日志上下文改为 `item_ids`，避免资产 ID 被记录成订单 ID。
+- `bot/handlers.py`
+  - IP 查询页按“价格 + 到期时间”显示自动续费状态。
+  - 新增资产级自动续费 callback，群聊场景仍校验资产归属。
+  - 自动续费列表单项开关支持订单和资产两种来源。
+- `cloud/tests.py`
+  - 新增无订单有价格资产可开启自动续费测试，断言生成操作订单且同 IP 资产不重复。
+  - 新增缺价格资产不能开启自动续费测试。
+  - 新增自动续费列表测试，断言无订单有价格资产进入列表、缺价格资产不进入列表，并生成资产级 callback。
+
+### 验证
+
+通过：
+
+```bash
+uv run python -m py_compile cloud/services.py cloud/api_assets.py cloud/api_asset_edit.py bot/keyboards.py bot/handlers.py cloud/tests.py
+DJANGO_TEST_SQLITE=1 uv run python manage.py test cloud.tests.CloudServerServicesTestCase.test_toggle_auto_renew_creates_operation_order_for_priced_asset_without_order cloud.tests.CloudServerServicesTestCase.test_toggle_auto_renew_rejects_asset_without_price cloud.tests.CloudServerServicesTestCase.test_auto_renew_list_includes_priced_asset_without_order cloud.tests.CloudServerServicesTestCase.test_group_auto_renew_bulk_toggle_is_scoped_to_current_group cloud.tests.CloudServerServicesTestCase.test_run_auto_renew_skips_when_asset_expiry_moved_out_of_due_window cloud.tests.CloudServerServicesTestCase.test_auto_renew_retry_task_waits_for_recharge_then_retries --settings=shop.settings --verbosity=1
+uv run python manage.py check
+git diff --check
+```
+
+结果：
+
+- 编译通过。
+- 自动续费聚焦测试 6 条通过。
+- Django 系统检查通过。
+- diff 空白检查通过。
+- SQLite 聚焦测试仍有既有 `db_comment/db_table_comment` 告警，不影响本轮结论。
+
+### 结论
+
+- 自动续费开启口径已经从“必须有订单”改为“资产有用户、有价格、有到期时间”。
+- 无订单资产开启自动续费时会自动生成操作订单，后续仍复用现有订单扣款和自动续费执行链路。
+- 未附加固定 IP 不进入自动续费规则，继续走恢复续费链路。

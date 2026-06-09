@@ -43,7 +43,7 @@ from bot.keyboards import (
     cloud_server_change_ip_region_menu,
     cart_menu, wallet_recharge_prompt_menu, cloud_ip_query_result,
     cloud_query_menu, configured_link_for_label, configured_link_menu,
-    cloud_detail_callback, cloud_asset_detail_callback, cloud_previous_detail_callback, cloud_asset_action_callback, cloud_auto_renew_callback, append_back_callback, compact_callback_path, expand_compact_region_code,
+    cloud_detail_callback, cloud_asset_detail_callback, cloud_previous_detail_callback, cloud_asset_action_callback, cloud_auto_renew_callback, cloud_asset_auto_renew_callback, append_back_callback, compact_callback_path, expand_compact_region_code,
     _compact_back_button_callback,
 )
 from bot.services import create_admin_reply_link, get_admin_reply_link, get_admin_reply_link_by_id, get_or_create_user, get_admin_forward_mute_status, is_admin_forward_muted, mute_admin_forward_for_days, record_bot_operation_log, record_telegram_message, should_forward_telegram_group
@@ -100,6 +100,7 @@ from cloud.services import (
     set_cloud_order_reminder,
     _order_primary_asset,
     set_group_cloud_server_auto_renew,
+    set_cloud_asset_auto_renew,
     set_cloud_server_auto_renew,
     set_cloud_server_auto_renew_admin,
     start_cloud_server_from_admin,
@@ -562,7 +563,16 @@ async def _reply_cloud_query_results(message: Message, raw_text: str, state: FSM
             linked_order = await _cloud_asset_order_summary(public_renew_order_id) if public_renew_order_id else {}
             linked_order_status = str(linked_order.get('status') or '').strip()
             linked_order_provider = str(linked_order.get('provider') or asset.provider or '').strip()
-            auto_renew_text = '已开启' if linked_order.get('auto_renew_enabled') else ('未开启' if public_renew_order_id else '未绑定订单')
+            linked_order_price = linked_order.get('total_amount')
+            if linked_order_price is None:
+                linked_order_price = linked_order.get('pay_amount')
+            asset_has_auto_renew_inputs = bool(
+                getattr(asset, 'user_id', None)
+                and getattr(asset, 'actual_expires_at', None)
+                and (getattr(asset, 'price', None) is not None or linked_order_price is not None)
+                and not is_unattached_ip_asset
+            )
+            auto_renew_text = '已开启' if linked_order.get('auto_renew_enabled') else ('未开启' if asset_has_auto_renew_inputs else '缺少价格或到期时间')
             can_linked_order_operate = bool(
                 public_renew_order_id
                 and linked_order_provider == 'aws_lightsail'
@@ -590,7 +600,7 @@ async def _reply_cloud_query_results(message: Message, raw_text: str, state: FSM
                 'asset_id': action_asset_id,
                 'start_order_id': public_renew_order_id if include_start else 0,
                 'auto_renew_enabled': bool(linked_order.get('auto_renew_enabled')),
-                'can_auto_renew': bool(include_start or is_owned_asset),
+                'can_auto_renew': bool((include_start or is_owned_asset) and asset_has_auto_renew_inputs),
                 'can_change_ip': can_admin_asset_change_ip or can_user_asset_change_ip,
                 'can_reinit': can_admin_asset_reinit or can_user_asset_operate,
                 'can_config': can_admin_asset_config or can_user_asset_operate,
@@ -623,7 +633,12 @@ async def _reply_cloud_query_results(message: Message, raw_text: str, state: FSM
         expires_at = await sync_to_async(order_asset_expiry)(order)
         expires_text = _format_local_dt(expires_at).split(' ', 1)[0] if expires_at else '今天到期'
         status_text = '固定 IP 保留中，可续费恢复' if is_retained_ip else '可续费'
-        auto_renew_text = '已开启' if getattr(order, 'auto_renew_enabled', False) else '未开启'
+        order_has_auto_renew_inputs = bool(
+            expires_at
+            and (getattr(order, 'total_amount', None) is not None or getattr(order, 'pay_amount', None) is not None)
+            and not is_retained_ip
+        )
+        auto_renew_text = '已开启' if getattr(order, 'auto_renew_enabled', False) else ('未开启' if order_has_auto_renew_inputs else '缺少价格或到期时间')
         account_label = str(getattr(order, 'account_label', '') or '').strip()
         account_text = f'\n账号标签: <code>{escape(account_label)}</code>' if include_start and account_label else ''
         group_balance_lines = await get_cloud_order_group_balance_lines(order.id)
@@ -643,7 +658,7 @@ async def _reply_cloud_query_results(message: Message, raw_text: str, state: FSM
             'order_id': order.id,
             'asset_id': 0,
             'auto_renew_enabled': bool(getattr(order, 'auto_renew_enabled', False)),
-            'can_auto_renew': bool(include_start or is_owned_order),
+            'can_auto_renew': bool((include_start or is_owned_order) and order_has_auto_renew_inputs),
             'can_change_ip': can_admin_change_ip or can_user_change_ip,
             'can_reinit': can_admin_reinit or can_user_reinit,
             'can_config': can_admin_config or can_user_config,
@@ -2181,6 +2196,8 @@ def _cloud_asset_order_summary(order_id: int) -> dict:
         'id': order.id,
         'status': order.status,
         'provider': order.provider,
+        'total_amount': order.total_amount,
+        'pay_amount': order.pay_amount,
         'auto_renew_enabled': bool(order.auto_renew_enabled),
         'login_password': bool(order.login_password),
         'ip_change_quota': int(order.ip_change_quota or 0),
@@ -4182,19 +4199,33 @@ def register_handlers(dp: Dispatcher):
     async def cb_cloud_auto_renew_list_toggle(callback: CallbackQuery, state: FSMContext):
         await state.clear()
         user = await get_or_create_user(callback.from_user.id, callback.from_user.username, callback.from_user.first_name)
-        _, _, action, raw_order_id, raw_page = callback.data.split(':')
+        parts = str(callback.data or '').split(':')
+        if len(parts) != 6 or parts[3] not in {'o', 'a'} or not parts[4].isdigit():
+            await _safe_callback_answer(callback, '自动续费参数无效', show_alert=True)
+            return
+        _, _, action, item_kind, raw_item_id, raw_page = parts
         enabled = action == 'on'
-        order_id = int(raw_order_id)
+        item_id = int(raw_item_id)
         page = max(1, int(raw_page or 1))
         is_admin = await _is_admin_chat(callback.message)
-        group_context = await _is_group_visible_order(callback, order_id)
-        if _is_group_chat_message(callback.message) and not (is_admin or group_context):
-            await _safe_callback_answer(callback, '该代理不属于当前群', show_alert=True)
-            return
-        if is_admin or group_context:
-            order = await set_cloud_server_auto_renew_admin(order_id, enabled)
+        if item_kind == 'a':
+            group_context = await get_group_proxy_asset_detail(item_id, callback.message.chat.id, 'asset') if _is_group_chat_message(callback.message) and not is_admin else None
+            if _is_group_chat_message(callback.message) and not (is_admin or group_context):
+                await _safe_callback_answer(callback, '该代理不属于当前群', show_alert=True)
+                return
+            order, err = await set_cloud_asset_auto_renew(item_id, user.id, enabled, admin=bool(is_admin or group_context))
+            if err:
+                await _safe_callback_answer(callback, err, show_alert=True)
+                return
         else:
-            order = await set_cloud_server_auto_renew(order_id, user.id, enabled)
+            group_context = await _is_group_visible_order(callback, item_id)
+            if _is_group_chat_message(callback.message) and not (is_admin or group_context):
+                await _safe_callback_answer(callback, '该代理不属于当前群', show_alert=True)
+                return
+            if is_admin or group_context:
+                order = await set_cloud_server_auto_renew_admin(item_id, enabled)
+            else:
+                order = await set_cloud_server_auto_renew(item_id, user.id, enabled)
         if order is False:
             await _safe_callback_answer(callback, '当前状态不可开启自动续费', show_alert=True)
             return
@@ -4893,6 +4924,58 @@ def register_handlers(dp: Dispatcher):
                         if button_parsed and button_parsed[1] == order.id:
                             button_back_callback = button_parsed[2] or back_callback
                             new_row.append(InlineKeyboardButton(text=f'{"⛔ 关闭" if enabled else "⚡ 开启"}自动续费', callback_data=cloud_auto_renew_callback('off' if enabled else 'on', order.id, button_back_callback)))
+                        else:
+                            new_row.append(button)
+                    rows.append(new_row)
+                new_markup = InlineKeyboardMarkup(inline_keyboard=rows)
+            await _safe_edit_text(callback.message, message_text, reply_markup=new_markup or current_markup, parse_mode='HTML')
+
+    @dp.callback_query(F.data.startswith('cloud:assetautorenew:'))
+    async def cb_cloud_asset_auto_renew_toggle(callback: CallbackQuery):
+        user = await get_or_create_user(callback.from_user.id, callback.from_user.username, callback.from_user.first_name)
+        parts = str(callback.data or '').split(':', 4)
+        if len(parts) < 4:
+            await _safe_callback_answer(callback, '自动续费参数无效', show_alert=True)
+            return
+        _, _, action, raw_asset_id = parts[:4]
+        back_callback = compact_callback_path(parts[4]) if len(parts) > 4 else 'cloud:querymenu'
+        if action not in {'on', 'off'} or not str(raw_asset_id).isdigit():
+            await _safe_callback_answer(callback, '自动续费参数无效', show_alert=True)
+            return
+        enabled = action == 'on'
+        asset_id = int(raw_asset_id)
+        is_admin = await _is_admin_chat(callback.message)
+        group_asset = await get_group_proxy_asset_detail(asset_id, callback.message.chat.id, 'asset') if _is_group_chat_message(callback.message) and not is_admin else None
+        if _is_group_chat_message(callback.message) and not (is_admin or group_asset):
+            await _safe_callback_answer(callback, '该代理不属于当前群', show_alert=True)
+            return
+        order, err = await set_cloud_asset_auto_renew(asset_id, user.id, enabled, admin=bool(is_admin or group_asset))
+        if err:
+            await _safe_callback_answer(callback, err, show_alert=True)
+            return
+        if not order:
+            await _safe_callback_answer(callback, '代理记录不存在', show_alert=True)
+            return
+        label = order.public_ip or order.previous_public_ip or order.order_no
+        await _safe_callback_answer(callback, f'{label} 钱包自动续费已{"开启" if enabled else "关闭"}', show_alert=True)
+        if callback.message:
+            message_text = callback.message.html_text or callback.message.text or ''
+            for old_status in ('自动续费: 未绑定订单', '自动续费: 缺少价格或到期时间', '自动续费: 未开启', '自动续费: 已关闭', '自动续费: 已开启'):
+                if old_status in message_text:
+                    message_text = message_text.replace(old_status, f'自动续费: {"已开启" if enabled else "未开启"}', 1)
+                    break
+            current_markup = getattr(callback.message, 'reply_markup', None)
+            new_markup = None
+            if current_markup:
+                rows = []
+                for row in current_markup.inline_keyboard:
+                    new_row = []
+                    for button in row:
+                        data = str(getattr(button, 'callback_data', '') or '')
+                        parsed = data.split(':', 4)
+                        if len(parsed) >= 4 and parsed[:2] == ['cloud', 'assetautorenew'] and parsed[3].isdigit() and int(parsed[3]) == asset_id:
+                            button_back_callback = compact_callback_path(parsed[4]) if len(parsed) > 4 else back_callback
+                            new_row.append(InlineKeyboardButton(text=f'{"⛔ 关闭" if enabled else "⚡ 开启"}自动续费', callback_data=cloud_asset_auto_renew_callback('off' if enabled else 'on', asset_id, button_back_callback)))
                         else:
                             new_row.append(button)
                     rows.append(new_row)

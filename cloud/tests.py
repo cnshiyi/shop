@@ -50,7 +50,7 @@ from cloud.provisioning import (
     _mask_proxy_log_preview,
     provision_cloud_server,
 )
-from cloud.services import _cloud_asset_deleted_or_missing, apply_cloud_server_renewal, create_cloud_server_order, create_cloud_server_rebuild_order, create_cloud_server_renewal, create_cloud_server_renewal_by_public_query, create_cloud_server_renewal_for_user, create_cloud_server_upgrade_order, ensure_cloud_asset_operation_order, get_cloud_server_by_ip, get_cloud_server_by_ip_for_user, get_group_proxy_asset_detail, get_proxy_asset_by_ip_for_admin, get_proxy_asset_by_ip_for_user, get_user_proxy_asset_detail, is_retained_ip_order_visible_in_group, list_all_auto_renew_cloud_servers, list_cloud_asset_renewal_plans, list_cloud_server_upgrade_plans, list_group_cloud_servers, list_retained_ip_renewal_plans, list_retained_ip_renewal_plans_by_asset, list_user_cloud_servers, mark_cloud_server_ip_change_requested, mark_cloud_server_reinit_requested, pay_cloud_server_order_with_balance, pay_cloud_server_renewal_with_balance, prepare_cloud_asset_renewal_with_link, prepare_cloud_server_order_instances, prepare_retained_ip_renewal_with_link, rebind_cloud_server_user, record_cloud_ip_log, replace_cloud_asset_order_by_admin, run_cloud_server_renewal_postcheck, set_cloud_server_auto_renew_admin, set_group_cloud_server_auto_renew, sync_cloud_asset_user_binding
+from cloud.services import _cloud_asset_deleted_or_missing, apply_cloud_server_renewal, create_cloud_server_order, create_cloud_server_rebuild_order, create_cloud_server_renewal, create_cloud_server_renewal_by_public_query, create_cloud_server_renewal_for_user, create_cloud_server_upgrade_order, ensure_cloud_asset_operation_order, get_cloud_server_by_ip, get_cloud_server_by_ip_for_user, get_group_proxy_asset_detail, get_proxy_asset_by_ip_for_admin, get_proxy_asset_by_ip_for_user, get_user_proxy_asset_detail, is_retained_ip_order_visible_in_group, list_all_auto_renew_cloud_servers, list_cloud_asset_renewal_plans, list_cloud_server_upgrade_plans, list_group_cloud_servers, list_retained_ip_renewal_plans, list_retained_ip_renewal_plans_by_asset, list_user_auto_renew_cloud_servers, list_user_cloud_servers, mark_cloud_server_ip_change_requested, mark_cloud_server_reinit_requested, pay_cloud_server_order_with_balance, pay_cloud_server_renewal_with_balance, prepare_cloud_asset_renewal_with_link, prepare_cloud_server_order_instances, prepare_retained_ip_renewal_with_link, rebind_cloud_server_user, record_cloud_ip_log, replace_cloud_asset_order_by_admin, run_cloud_server_renewal_postcheck, set_cloud_asset_auto_renew, set_cloud_server_auto_renew_admin, set_group_cloud_server_auto_renew, sync_cloud_asset_user_binding
 from cloud.sync_safety import get_missing_confirmation_threshold
 from cloud.api_asset_edit import delete_cloud_asset, update_cloud_asset
 from cloud.api_asset_snapshots import _dashboard_snapshot_can_use_forward_row_paging, _dashboard_snapshot_group_keys_from_ordered_rows, _dashboard_snapshot_ordering, _dashboard_snapshot_risk_counts, backfill_cloud_asset_dashboard_snapshots, refresh_cloud_asset_dashboard_snapshots
@@ -16439,7 +16439,7 @@ class CloudServerServicesTestCase(TestCase):
         self.assertIsNone(asset.actual_expires_at)
 
     # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
-    def test_toggle_auto_renew_creates_operation_order_for_bound_asset_without_order(self):
+    def test_toggle_auto_renew_creates_operation_order_for_priced_asset_without_order(self):
         user = TelegramUser.objects.create(
             tg_user_id=21989078,
             username='auto_renew_user',
@@ -16455,6 +16455,7 @@ class CloudServerServicesTestCase(TestCase):
             instance_id='i-auto-renew-test',
             public_ip='10.9.9.11',
             actual_expires_at=timezone.now() + timezone.timedelta(days=10),
+            price=Decimal('19.00'),
             status=CloudAsset.STATUS_RUNNING,
             is_active=True,
         )
@@ -16462,15 +16463,97 @@ class CloudServerServicesTestCase(TestCase):
         sync_cloud_asset_user_binding(asset)
         asset.refresh_from_db()
         self.assertEqual(asset.user_id, user.id)
-        order, err = async_to_sync(ensure_cloud_asset_operation_order)(asset.id, user.id, True)
-        self.assertIsNone(err)
-        self.assertIsNotNone(order)
-
-        updated = async_to_sync(set_cloud_server_auto_renew_admin)(order.id, True)
+        updated, err = async_to_sync(set_cloud_asset_auto_renew)(asset.id, user.id, True, True)
 
         asset.refresh_from_db()
+        self.assertIsNone(err)
+        self.assertIsNotNone(updated)
         self.assertTrue(updated.auto_renew_enabled)
-        self.assertEqual(asset.order_id, order.id)
+        self.assertEqual(asset.order_id, updated.id)
+        self.assertEqual(CloudAsset.objects.filter(public_ip='10.9.9.11').count(), 1)
+
+    # 功能：验证无订单资产缺少价格时不能开启自动续费，避免后续自动扣款金额不明确。
+    def test_toggle_auto_renew_rejects_asset_without_price(self):
+        user = TelegramUser.objects.create(
+            tg_user_id=21989080,
+            username='auto_renew_no_price',
+            first_name='无价格用户',
+        )
+        asset = CloudAsset.objects.create(
+            kind=CloudAsset.KIND_SERVER,
+            source=CloudAsset.SOURCE_AWS_SYNC,
+            user=user,
+            provider='aws_lightsail',
+            region_code=self.plan.region_code,
+            region_name=self.plan.region_name,
+            asset_name='auto-renew-no-price',
+            instance_id='i-auto-renew-no-price',
+            public_ip='10.9.9.13',
+            actual_expires_at=timezone.now() + timezone.timedelta(days=10),
+            status=CloudAsset.STATUS_RUNNING,
+            is_active=True,
+        )
+
+        updated, err = async_to_sync(set_cloud_asset_auto_renew)(asset.id, user.id, True, True)
+        asset.refresh_from_db()
+
+        self.assertIsNone(updated)
+        self.assertIn('价格和到期时间', err)
+        self.assertIsNone(asset.order_id)
+
+    # 功能：验证自动续费列表支持无订单但有价格和到期时间的资产，并使用资产级回调。
+    def test_auto_renew_list_includes_priced_asset_without_order(self):
+        from bot.keyboards import cloud_auto_renew_server_list
+
+        user = TelegramUser.objects.create(
+            tg_user_id=21989081,
+            username='auto_renew_list_user',
+            first_name='自动续费列表用户',
+        )
+        visible_asset = CloudAsset.objects.create(
+            kind=CloudAsset.KIND_SERVER,
+            source=CloudAsset.SOURCE_AWS_SYNC,
+            user=user,
+            provider='aws_lightsail',
+            region_code=self.plan.region_code,
+            region_name=self.plan.region_name,
+            asset_name='auto-renew-list-visible',
+            instance_id='i-auto-renew-list-visible',
+            public_ip='10.9.9.14',
+            actual_expires_at=timezone.now() + timezone.timedelta(days=10),
+            price=Decimal('19.00'),
+            status=CloudAsset.STATUS_RUNNING,
+            is_active=True,
+        )
+        hidden_asset = CloudAsset.objects.create(
+            kind=CloudAsset.KIND_SERVER,
+            source=CloudAsset.SOURCE_AWS_SYNC,
+            user=user,
+            provider='aws_lightsail',
+            region_code=self.plan.region_code,
+            region_name=self.plan.region_name,
+            asset_name='auto-renew-list-hidden',
+            instance_id='i-auto-renew-list-hidden',
+            public_ip='10.9.9.15',
+            actual_expires_at=timezone.now() + timezone.timedelta(days=10),
+            status=CloudAsset.STATUS_RUNNING,
+            is_active=True,
+        )
+
+        items = async_to_sync(list_user_auto_renew_cloud_servers)(user.id)
+        item_ids = {item.asset_id for item in items}
+
+        self.assertIn(visible_asset.id, item_ids)
+        self.assertNotIn(hidden_asset.id, item_ids)
+        markup = cloud_auto_renew_server_list(items, page=1, total_pages=1)
+        callbacks = [
+            button.callback_data
+            for row in markup.inline_keyboard
+            for button in row
+            if getattr(button, 'callback_data', '')
+        ]
+        self.assertIn(f'cloud:autorenewlist:on:a:{visible_asset.id}:1', callbacks)
+        self.assertFalse(any(f':o:{visible_asset.id}:' in callback for callback in callbacks))
 
     # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
     def test_manual_cloud_asset_note_edit_still_overwrites(self):

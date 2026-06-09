@@ -135,6 +135,11 @@ def cloud_auto_renew_callback(action: str, order_id: int, back_callback: str | N
     return append_back_callback(f'cloud:autorenew:{action}:{order_id}', back_callback)
 
 
+def cloud_asset_auto_renew_callback(action: str, asset_id: int, back_callback: str | None = None) -> str:
+    action = 'on' if action == 'on' else 'off'
+    return append_back_callback(f'cloud:assetautorenew:{action}:{asset_id}', back_callback)
+
+
 def cloud_renew_payment_callback(order_id: int, currency: str, back_callback: str | None = None) -> str:
     return append_back_callback(f'cloud:rp:{order_id}:{currency}', back_callback)
 
@@ -673,11 +678,18 @@ def cloud_auto_renew_server_list(orders, page: int = 1, total_pages: int = 1, *,
         InlineKeyboardButton(text='❌ 一键关闭', callback_data=f'cloud:autorenewlist:all:off:{page}'),
     )
     for order in orders:
-        order_id = getattr(order, 'order_id', None) or getattr(order, 'id', None)
-        if not order_id:
+        order_id = getattr(order, 'order_id', None)
+        asset_id = getattr(order, 'asset_id', None)
+        if not asset_id and getattr(order, '_proxy_item_kind', None) == 'asset':
+            asset_id = getattr(order, 'id', None)
+        if order_id:
+            callback_target = f'o:{order_id}'
+        elif asset_id:
+            callback_target = f'a:{asset_id}'
+        else:
             continue
         ip = order.public_ip or order.previous_public_ip
-        label = ip or getattr(order, 'order_no', None) or f'订单 {order_id}'
+        label = ip or getattr(order, 'order_no', None) or f'资产 {asset_id}'
         user_label = ''
         if is_admin:
             username = getattr(order, 'username', '') or ''
@@ -692,7 +704,7 @@ def cloud_auto_renew_server_list(orders, page: int = 1, total_pages: int = 1, *,
         icon = '✅' if enabled else '❌'
         status_text = '已开启' if enabled else '已关闭'
         action = 'off' if enabled else 'on'
-        kb.row(InlineKeyboardButton(text=f'{bell} {label}{user_label} | 到期 {expires} | {icon} {status_text}', callback_data=f'cloud:autorenewlist:{action}:{order_id}:{page}'))
+        kb.row(InlineKeyboardButton(text=f'{bell} {label}{user_label} | 到期 {expires} | {icon} {status_text}', callback_data=f'cloud:autorenewlist:{action}:{callback_target}:{page}'))
     nav = []
     if page > 1:
         nav.append(InlineKeyboardButton(text='⬅️ 上一页', callback_data=f'cloud:autorenewlist:page:{page - 1}'))
@@ -706,7 +718,10 @@ def cloud_auto_renew_server_list(orders, page: int = 1, total_pages: int = 1, *,
         page=page,
         total_pages=total_pages,
         is_admin=is_admin,
-        order_ids=[getattr(order, 'order_id', None) or getattr(order, 'id', None) for order in orders],
+        item_ids=[
+            f"o:{getattr(order, 'order_id', None)}" if getattr(order, 'order_id', None) else f"a:{getattr(order, 'asset_id', None) or getattr(order, 'id', None)}"
+            for order in orders
+        ],
     )
 
 
@@ -1026,7 +1041,7 @@ def cloud_ip_query_result(result_items, renewable_items, page: int = 1, total_pa
                 action_buttons.append(InlineKeyboardButton(text='⚙️ 修改配置', callback_data=f'cloud:upgrade:{order_id}:cloud:querymenu'))
             if include_start:
                 action_buttons.append(InlineKeyboardButton(text='🕒 修改时间', callback_data=f'exp:o:{order_id}:cloud:querymenu'))
-            if item.get('can_auto_renew') or include_start:
+            if item.get('can_auto_renew'):
                 auto_enabled = bool(item.get('auto_renew_enabled'))
                 action_buttons.append(InlineKeyboardButton(text=f'{"⛔ 关闭" if auto_enabled else "⚡ 开启"}自动续费', callback_data=cloud_auto_renew_callback('off' if auto_enabled else 'on', order_id, 'cloud:querymenu')))
             if item.get('can_support'):
@@ -1044,6 +1059,9 @@ def cloud_ip_query_result(result_items, renewable_items, page: int = 1, total_pa
                 action_buttons.append(InlineKeyboardButton(text='⚙️ 修改配置', callback_data=cloud_asset_action_callback('upgrade', asset_id, 'cloud:querymenu')))
             if include_start:
                 action_buttons.append(InlineKeyboardButton(text='🕒 修改时间', callback_data=f'exp:a:{asset_id}:cloud:querymenu'))
+            if item.get('can_auto_renew'):
+                auto_enabled = bool(item.get('auto_renew_enabled'))
+                action_buttons.append(InlineKeyboardButton(text=f'{"⛔ 关闭" if auto_enabled else "⚡ 开启"}自动续费', callback_data=cloud_asset_auto_renew_callback('off' if auto_enabled else 'on', asset_id, 'cloud:querymenu')))
             if item.get('can_support'):
                 action_buttons.append(support_contact_button('cloud_asset', asset_id))
         for start in range(0, len(action_buttons), 2):
