@@ -8,6 +8,7 @@ import secrets
 import socket
 import string
 import time
+import calendar
 from decimal import Decimal, ROUND_CEILING
 from types import SimpleNamespace
 from urllib.parse import urlparse
@@ -38,6 +39,22 @@ from orders.services import _generate_unique_pay_amount, usdt_to_trx
 logger = logging.getLogger(__name__)
 CUSTOM_CACHE_TTL = 600
 CLOUD_ORDER_MAX_QUANTITY = 99
+
+
+def _renewal_period_label(days: int = 31) -> str:
+    return '1 个月' if int(days or 31) == 31 else f'{int(days)} 天'
+
+
+def _extend_renewal_expiry(base_at, days: int = 31):
+    if int(days or 31) != 31:
+        return base_at + timezone.timedelta(days=days)
+    month = base_at.month + 1
+    year = base_at.year
+    if month > 12:
+        month = 1
+        year += 1
+    day = min(base_at.day, calendar.monthrange(year, month)[1])
+    return base_at.replace(year=year, month=month, day=day)
 
 
 def drop_asset_note_update(updates: dict | None) -> dict:
@@ -1317,7 +1334,8 @@ def complete_active_asset_renewal_order(order: CloudServerOrder | None, days: in
     now = timezone.now()
     current_expires_at = active_asset.actual_expires_at
     renew_base_at = current_expires_at if current_expires_at and current_expires_at > now else now
-    new_expires_at = renew_base_at + timezone.timedelta(days=days)
+    new_expires_at = _extend_renewal_expiry(renew_base_at, days)
+    period_label = _renewal_period_label(days)
     if not order.service_started_at:
         order.service_started_at = now
     apply_order_lifecycle_from_asset_expiry(order, new_expires_at, save=False)
@@ -1330,7 +1348,7 @@ def complete_active_asset_renewal_order(order: CloudServerOrder | None, days: in
         order.auto_renew_failure_notice_sent_at = None
     order.delete_notice_sent_at = None
     order.recycle_notice_sent_at = None
-    order.provision_note = append_note(order.provision_note, f'运行中资产续费成功，新的服务到期时间：{new_expires_at:%Y-%m-%d %H:%M}。')
+    order.provision_note = append_note(order.provision_note, f'运行中资产续费成功，已顺延 {period_label}，新的服务到期时间：{new_expires_at:%Y-%m-%d %H:%M}。')
     order.save(update_fields=[
         'service_started_at', 'renew_grace_expires_at', 'suspend_at', 'delete_at', 'ip_recycle_at',
         'status', 'last_renewed_at', 'renew_notice_sent_at', 'auto_renew_notice_sent_at',
@@ -1352,7 +1370,7 @@ def complete_active_asset_renewal_order(order: CloudServerOrder | None, days: in
         asset=active_asset,
         public_ip=order.public_ip,
         previous_public_ip=order.previous_public_ip,
-        note=f'运行中资产续费 {days} 天，新的服务到期时间：{new_expires_at:%Y-%m-%d %H:%M}',
+        note=f'运行中资产续费 {period_label}，新的服务到期时间：{new_expires_at:%Y-%m-%d %H:%M}',
     )
     transaction.on_commit(lambda: _refresh_dashboard_plan_snapshots_after_service_change(f'cloud_asset_active_renewal:{order.id}'))
     return order
@@ -2182,6 +2200,15 @@ def _cloud_asset_deleted_or_missing(asset: CloudAsset | None) -> bool:
         or '已到期删除' in provider_status
         or '已删除' in provider_status
         or (note_marks_missing and not active_cloud_status)
+    )
+
+
+def _is_unattached_asset_renewal_candidate(asset: CloudAsset | None) -> bool:
+    return bool(
+        asset
+        and not getattr(asset, 'order_id', None)
+        and _is_unattached_static_ip_asset(asset)
+        and not _cloud_asset_deleted_or_missing(asset)
     )
 
 
@@ -3134,12 +3161,12 @@ def _create_asset_operation_order(asset: CloudAsset, user_id: int) -> CloudServe
         completed_at=now,
         provision_note=f'由绑定代理资产 #{asset.id} 自动生成的操作订单。',
     )
+    asset.order = order
+    asset.save(update_fields=['order', 'updated_at'])
     _ensure_order_asset_expiry_record(order, asset.actual_expires_at, status=CloudAsset.STATUS_RUNNING)
     if _is_unattached_static_ip_asset(asset) and asset.actual_expires_at:
         CloudServerOrder.objects.filter(id=order.id).update(ip_recycle_at=asset.actual_expires_at, updated_at=timezone.now())
         order.ip_recycle_at = asset.actual_expires_at
-    asset.order = order
-    asset.save(update_fields=['order', 'updated_at'])
     record_cloud_ip_log(
         event_type=CloudIpLog.EVENT_CREATED,
         order=order,
@@ -3347,13 +3374,13 @@ def list_cloud_asset_renewal_plans(asset_id: int, user_id: int, admin: bool = Fa
     asset = asset_qs.first()
     if not asset:
         return None, [], '代理记录不存在'
-    if public and (asset.order_id or not _is_unattached_static_ip_asset(asset) or _cloud_asset_deleted_or_missing(asset)):
-        return None, [], '代理记录不存在'
     if asset.order_id:
+        return asset, [], None
+    if not _is_unattached_asset_renewal_candidate(asset):
         return asset, [], None
     if not str(asset.public_ip or asset.previous_public_ip or '').strip():
         return asset, [], '代理缺少公网 IP，暂时无法续费'
-    if _is_unattached_static_ip_asset(asset) and not _resolve_asset_original_cloud_account(asset):
+    if not _resolve_asset_original_cloud_account(asset):
         return asset, [], '原固定 IP 所属云账号不可用，暂时无法自助续费，请联系人工客服。'
     provider = str(asset.provider or CloudServerPlan.PROVIDER_AWS_LIGHTSAIL).strip()
     region_code = str(asset.region_code or '').strip()
@@ -3426,15 +3453,15 @@ def prepare_cloud_asset_renewal_with_link(asset_id: int, user_id: int, plan_id: 
         asset = asset_qs.first()
         if not asset:
             return None, '代理记录不存在'
-        if public and (asset.order_id or not _is_unattached_static_ip_asset(asset) or _cloud_asset_deleted_or_missing(asset)):
-            return None, '代理记录不存在'
         if asset.order_id:
             return None, '该代理已绑定订单，请重新进入详情续费'
+        if not _is_unattached_asset_renewal_candidate(asset):
+            return None, '运行中的服务器续费不需要选择套餐和输入链接，请重新进入详情直接续费。'
         public_ip = str(asset.public_ip or asset.previous_public_ip or '').strip()
         if not public_ip:
             return None, '代理缺少公网 IP，暂时无法续费'
         original_account = _resolve_asset_original_cloud_account(asset)
-        if _is_unattached_static_ip_asset(asset) and not original_account:
+        if not original_account:
             return None, '原固定 IP 所属云账号不可用，暂时无法自助续费，请联系人工客服。'
         expected_port = int(asset.mtproxy_port or MTPROXY_DEFAULT_PORT)
         if str(link_data.get('port') or '').strip() != str(expected_port):
@@ -3713,7 +3740,8 @@ def apply_cloud_server_renewal(order_id: int, days: int = 31, run_post_checks: b
     renew_base_at = current_expires_at if current_expires_at and current_expires_at > now else now
     if not order.service_started_at:
         order.service_started_at = now
-    new_expires_at = renew_base_at + timezone.timedelta(days=days)
+    new_expires_at = _extend_renewal_expiry(renew_base_at, days)
+    period_label = _renewal_period_label(days)
     apply_order_lifecycle_from_asset_expiry(order, new_expires_at, save=False)
     order.last_renewed_at = now
     order.renew_notice_sent_at = None
@@ -3742,9 +3770,10 @@ def apply_cloud_server_renewal(order_id: int, days: int = 31, run_post_checks: b
     else:
         post_notes.append('续费后运行状态与 MTProxy 巡检已提交后台执行。')
     base_note = '原到期时间未过期，已在原到期时间基础上顺延' if current_expires_at and current_expires_at > now else '原到期时间已过期或缺失，已从当前时间重新计算'
+    success_note = f'未附加固定 IP 续费成功，{base_note} {period_label}。' if retained_ip else f'运行中资产续费成功，{base_note} {period_label}。'
     order.provision_note = append_note(
         order.provision_note,
-        '\n'.join(filter(None, [renew_note or f'续费成功，{base_note} {days} 天。', retention_note, *post_notes])),
+        '\n'.join(filter(None, [renew_note or success_note, retention_note, *post_notes])),
     )
     order.save(update_fields=[
         'service_started_at', 'renew_grace_expires_at', 'suspend_at', 'delete_at', 'ip_recycle_at',
@@ -3767,7 +3796,7 @@ def apply_cloud_server_renewal(order_id: int, days: int = 31, run_post_checks: b
         order=order,
         public_ip=order.public_ip,
         previous_public_ip=order.previous_public_ip,
-        note=f'服务器续费 {days} 天，新的服务到期时间：{new_expires_at:%Y-%m-%d %H:%M}；{renew_note}',
+        note=f'服务器续费 {period_label}，新的服务到期时间：{new_expires_at:%Y-%m-%d %H:%M}；{renew_note}',
     )
     transaction.on_commit(lambda: _refresh_dashboard_plan_snapshots_after_service_change(f'cloud_server_renewal:{order.id}'))
     return recovery_order or order

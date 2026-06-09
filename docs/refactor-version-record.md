@@ -20358,3 +20358,58 @@ git diff --check
 - IP 删除计划现在只表示待执行释放的未附加固定 IP。
 - IP 删除历史记录现在只表示已执行或已终态的删除事实。
 - 服务器已删除但固定 IP 保留中的资产不会再被误归到历史记录，会继续留在 IP 删除计划等待释放。
+
+## 2026-06-10 00:58 CST 重构普通续费和未附加 IP 恢复续费分流
+
+### 本轮背景
+
+- 用户指出重大 bug：普通服务器续费不应该选择套餐并提示输入代理链接。
+- 正确业务口径：
+  - 普通服务器续费：在资产到期时间或当前时间基础上加 1 个自然月。
+  - 未附加固定 IP 续费：才选择套餐，然后提示用户输入旧代理链接，支付后恢复服务器并绑定旧固定 IP。
+- 复查发现运行中服务器也可能通过 `prepare_cloud_asset_renewal_with_link()` 进入恢复续费链路，旧测试也覆盖了这个错误路径。
+- 聚焦测试同时暴露无订单资产创建操作订单时存在同 IP 重复资产风险。
+
+### 修复
+
+- `cloud/services.py`
+  - 新增标准续费周期计算，`days=31` 按 1 个自然月顺延。
+  - 普通服务器钱包支付和链上支付续费后，`CloudAsset.actual_expires_at`、关机计划、删机计划、IP 回收计划一起按新到期时间后移。
+  - 新增未附加 IP 恢复续费候选判定：只允许无订单、未附加固定 IP、云端未确认删除的资产进入选套餐和输入链接流程。
+  - `prepare_cloud_asset_renewal_with_link()` 对普通运行中服务器硬拒绝，旧按钮或旧回调不能绕过。
+  - `_create_asset_operation_order()` 改为先绑定原资产再同步到期记录，避免创建同 IP 第二条 `CloudAsset`。
+- `cloud/tests.py`
+  - 普通无订单服务器不再返回恢复套餐列表。
+  - 未附加固定 IP 仍返回恢复套餐列表。
+  - 普通运行中服务器不能走输入链接恢复流程。
+  - 钱包支付普通续费改走普通续费单，并断言到期时间加 1 个自然月、计划后移、同 IP 资产只有 1 条。
+- `orders/tests.py`
+  - 链上支付普通续费改走普通续费单。
+  - 断言链上支付后到期时间加 1 个自然月、计划后移、同 IP 资产只有 1 条。
+
+### 验证
+
+通过：
+
+```bash
+uv run python -m py_compile cloud/services.py bot/handlers.py cloud/tests.py orders/tests.py
+DJANGO_TEST_SQLITE=1 uv run python manage.py test cloud.tests.CloudServerServicesTestCase.test_running_asset_without_order_renewal_does_not_list_recovery_plans cloud.tests.CloudServerServicesTestCase.test_unattached_ip_renewal_lists_recovery_plans_without_creating_order cloud.tests.CloudServerServicesTestCase.test_running_asset_renewal_rejects_link_recovery_flow cloud.tests.CloudServerServicesTestCase.test_prepare_unbound_asset_renewal_creates_pending_payment_order cloud.tests.CloudServerServicesTestCase.test_unbound_asset_renewal_wallet_payment_marks_paid_for_recovery cloud.tests.CloudServerServicesTestCase.test_active_asset_renewal_wallet_payment_extends_asset_and_lifecycle cloud.tests.CloudServerServicesTestCase.test_unbound_asset_renewal_wallet_payment_repairs_completed_unpaid_state cloud.tests.CloudServerServicesTestCase.test_completed_asset_recovery_order_renews_without_reprovisioning cloud.tests.CloudServerServicesTestCase.test_unbound_asset_renewal_chain_payment_marks_paid_for_recovery orders.tests.ChainPaymentScannerTestCase.test_active_asset_renewal_chain_payment_extends_asset_and_lifecycle --settings=shop.settings --verbosity=1
+uv run python manage.py check
+git diff --check
+```
+
+结果：
+
+- 编译通过。
+- 聚焦测试 10 条通过。
+- Django 系统检查通过。
+- diff 空白检查通过。
+- SQLite 聚焦测试仍有既有 `db_comment/db_table_comment` 告警，不影响本轮结论。
+
+### 结论
+
+- 普通服务器续费和未附加固定 IP 恢复续费已经拆开。
+- 普通服务器续费不再选择套餐，不再要求用户输入链接。
+- 未附加固定 IP 恢复续费仍保留“选套餐 -> 输入旧代理链接 -> 支付后恢复服务器”的流程。
+- 普通续费按 1 个自然月顺延，生命周期计划跟随新的资产到期时间。
+- 创建操作订单不会再制造同 IP 重复资产。

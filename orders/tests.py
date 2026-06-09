@@ -1,4 +1,5 @@
 from decimal import Decimal
+from datetime import datetime
 from unittest.mock import AsyncMock, patch
 
 from asgiref.sync import async_to_sync
@@ -7,7 +8,7 @@ from django.utils import timezone
 
 from bot.models import TelegramUser
 from cloud.asset_expiry import order_asset_expiry
-from cloud.services import prepare_cloud_asset_renewal_with_link
+from cloud.services import create_cloud_server_renewal_for_user, ensure_cloud_asset_operation_order, prepare_cloud_asset_renewal_with_link
 from core.cloud_accounts import cloud_account_label
 from core.models import CloudAccountConfig
 from cloud.models import AddressMonitor, CloudAsset, CloudServerOrder, CloudServerPlan, DailyAddressStat
@@ -665,7 +666,9 @@ class ChainPaymentScannerTestCase(TestCase):
         self.assertEqual(scheduled, ['_provision_paid_cloud_order'])
 
     def test_active_asset_renewal_chain_payment_extends_asset_and_lifecycle(self):
-        due_at = timezone.now() - timezone.timedelta(days=4)
+        fixed_now = timezone.make_aware(datetime(2026, 2, 10, 12, 0, 0))
+        due_at = fixed_now - timezone.timedelta(days=4)
+        expected_expires_at = timezone.make_aware(datetime(2026, 3, 10, 12, 0, 0))
         account = CloudAccountConfig.objects.create(
             provider=CloudAccountConfig.PROVIDER_AWS,
             name='chain-active-asset-renewal',
@@ -692,14 +695,8 @@ class ChainPaymentScannerTestCase(TestCase):
             provider_status='running',
             is_active=True,
         )
-        link = {
-            'url': 'tg://proxy?server=31.31.31.38&port=443&secret=eed5c148e2922f6c49611e7d53fe432a94617a7572652e6d6963726f736f66742e636f6d',
-            'server': '31.31.31.38',
-            'port': '443',
-            'secret': 'eed5c148e2922f6c49611e7d53fe432a94617a7572652e6d6963726f736f66742e636f6d',
-        }
-        with patch('cloud.services._resolve_unattached_aws_static_ip_name_for_asset', return_value=''):
-            order, error = async_to_sync(prepare_cloud_asset_renewal_with_link)(asset.id, self.user.id, self.plan.id, link)
+        order, error = async_to_sync(ensure_cloud_asset_operation_order)(asset.id, self.user.id)
+        renewal = async_to_sync(create_cloud_server_renewal_for_user)(order.id, self.user.id, 31)
         scheduled = []
 
         def capture_task(coro):
@@ -708,9 +705,10 @@ class ChainPaymentScannerTestCase(TestCase):
             return object()
 
         with patch('orders.payment_scanner._notify_user', new=AsyncMock()), \
+            patch('cloud.services.timezone.now', return_value=fixed_now), \
             patch('orders.payment_scanner.asyncio.create_task', side_effect=capture_task):
             matched = async_to_sync(_process_payment)({
-                'amount': order.pay_amount,
+                'amount': renewal.pay_amount,
                 'tx_hash': 'tx-chain-active-asset-renewal',
                 'currency': 'USDT',
                 'from': 'payer',
@@ -718,18 +716,21 @@ class ChainPaymentScannerTestCase(TestCase):
             })
 
         self.assertIsNone(error)
+        self.assertIsNotNone(renewal)
         self.assertTrue(matched)
+        order = renewal
         order.refresh_from_db()
         asset.refresh_from_db()
         self.assertEqual(order.status, 'completed')
         self.assertEqual(order.tx_hash, 'tx-chain-active-asset-renewal')
         self.assertIsNotNone(order.paid_at)
-        self.assertGreater(asset.actual_expires_at, timezone.now())
+        self.assertEqual(asset.actual_expires_at, expected_expires_at)
         self.assertEqual(order_asset_expiry(order), asset.actual_expires_at)
-        self.assertGreater(order.suspend_at, timezone.now())
+        self.assertGreater(order.suspend_at, expected_expires_at)
         self.assertGreaterEqual(order.delete_at, order.suspend_at)
         self.assertGreater(order.ip_recycle_at, order.delete_at)
         self.assertIn('运行中资产续费成功', order.provision_note)
+        self.assertEqual(CloudAsset.objects.filter(public_ip='31.31.31.38').count(), 1)
         self.assertEqual(scheduled, ['_cloud_renewal_postcheck_and_notify'])
 
     def test_address_balance_query_awaits_trongrid_headers(self):
