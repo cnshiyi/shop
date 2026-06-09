@@ -158,11 +158,6 @@ def _asset_ip_identity():
             public_ip__gt='',
             then=Concat(Value('ip:'), F('public_ip')),
         ),
-        When(
-            previous_public_ip__isnull=False,
-            previous_public_ip__gt='',
-            then=Concat(Value('ip:'), F('previous_public_ip')),
-        ),
         default=Concat(Value('asset:'), Cast('id', CharField())),
         output_field=CharField(),
     )

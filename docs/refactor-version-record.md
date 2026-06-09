@@ -20258,3 +20258,51 @@ git diff --check
 
 - 默认代理列表中四个主生命周期标签现在互斥覆盖 `全部`。
 - 辅助风险标签不再影响主标签加总关系。
+
+## 2026-06-10 00:07 CST 修复关机计划未来数量被历史 IP 压低
+
+### 本轮背景
+
+- 用户反馈“关机计划是未来计划，数量不对”。
+- 复查前端后确认计划页标题读取后端 `shutdown_plan_count`，不是当前页已加载条数。
+- 后端已有远期计划全量统计测试，但当前计划去重身份同时使用了当前 `public_ip` 和历史 `previous_public_ip`。
+- 在重装、迁移或换 IP 后，旧资产可能只有 `previous_public_ip`，该历史 IP 又等于新资产的当前 `public_ip`；原去重排序优先保留 stopped/suspended 阶段资产，会把新 running 资产从关机计划中挤掉。
+
+### 修复
+
+- `cloud/lifecycle_plan_queries.py`
+  - 生命周期计划去重只按当前 `public_ip` 归并。
+  - 没有当前公网 IP 的资产按资产 ID 独立展示。
+  - `previous_public_ip` 不再参与当前计划去重，避免历史 IP 影响未来关机计划数量。
+- `cloud/tests.py`
+  - 新增 `test_lifecycle_plans_previous_ip_does_not_hide_current_shutdown_plan`：
+    - 旧 stopped 资产：无当前 IP，只有 `previous_public_ip`。
+    - 新 running 资产：当前 `public_ip` 等于旧资产历史 IP。
+    - 验证新资产仍进入关机计划，旧资产进入删机计划。
+  - 将旧的同当前 IP 双资产测试改为符合当前数据库唯一 IP 硬规则的 stopped 阶段测试。
+
+### 验证
+
+通过：
+
+```bash
+uv run python -m py_compile cloud/lifecycle_plan_queries.py bot/api.py cloud/tests.py
+DJANGO_TEST_SQLITE=1 uv run python manage.py test cloud.tests.CloudServerServicesTestCase.test_lifecycle_plans_previous_ip_does_not_hide_current_shutdown_plan cloud.tests.CloudServerServicesTestCase.test_lifecycle_plans_counts_all_future_server_assets_beyond_loaded_limit --settings=shop.settings --verbosity=1
+DJANGO_TEST_SQLITE=1 uv run python manage.py test cloud.tests.CloudServerServicesTestCase.test_lifecycle_plans_previous_ip_does_not_hide_current_shutdown_plan cloud.tests.CloudServerServicesTestCase.test_lifecycle_plans_counts_all_future_server_assets_beyond_loaded_limit cloud.tests.CloudServerServicesTestCase.test_lifecycle_plans_stopped_server_enters_delete_stage cloud.tests.CloudServerServicesTestCase.test_lifecycle_plans_handles_unique_ip_server_assets cloud.tests.CloudServerServicesTestCase.test_lifecycle_plans_server_delete_pagination_contract --settings=shop.settings --verbosity=1
+uv run python manage.py check
+git diff --check
+```
+
+结果：
+
+- 编译通过。
+- 生命周期计划聚焦测试 5 条通过。
+- Django 系统检查通过。
+- diff 空白检查通过。
+- SQLite 测试仍有既有 `db_comment/db_table_comment` 告警，不影响本轮结论。
+
+### 结论
+
+- 关机计划数量现在按未来关机计划全量统计，历史 IP 不会再把当前 running 资产压出关机计划。
+- 当前计划去重依据收敛为当前公网 IP；历史公网 IP 只作为历史信息。
+- 已关机资产仍进入服务器删除计划，关机计划和删机计划阶段关系保持不变。
