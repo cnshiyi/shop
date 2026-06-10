@@ -15,6 +15,7 @@ from bot.models import TelegramUser
 from cloud.asset_dedupe import merge_duplicate_cloud_assets_by_ip
 from cloud.asset_queries import asset_display_ip, cloud_assets_base_queryset, dedupe_cloud_asset_rows
 from cloud.models import CloudAsset, CloudAssetDashboardSnapshot
+from cloud.services import cloud_asset_can_auto_renew
 from core.dashboard_api import _countdown_label, _days_left, _decimal_to_str
 
 logger = logging.getLogger(__name__)
@@ -590,15 +591,20 @@ def _compact_snapshot_payload(row):
         'id': asset.id,
         'actual_expires_at': expires_at.isoformat() if expires_at else None,
         'asset_name': asset.asset_name,
+        'can_auto_renew': bool(cloud_asset_can_auto_renew(asset)),
         'currency': asset.currency or 'USDT',
         'days_left': _days_left(expires_at),
+        'instance_id': asset.instance_id,
         'is_active': asset.is_active,
         'note': asset.note,
+        'order_id': asset.order_id,
         'price': _decimal_to_str(asset.price, 2) if asset.price is not None else '',
         'provider_status': asset.provider_status,
+        'provider_resource_id': asset.provider_resource_id,
         'public_ip': asset.public_ip or asset.previous_public_ip,
         'risk_rank': row.risk_rank,
         'sort_order': asset.sort_order,
+        'auto_renew_enabled': bool(getattr(asset.order, 'auto_renew_enabled', False)) if asset.order_id else False,
         'group_user_key': row.group_user_key,
         'group_telegram_key': row.group_telegram_key,
         'status': asset.status,
@@ -659,7 +665,7 @@ def _paginate_dashboard_snapshot_queryset(queryset, request, *, sort_by='', sort
         rows_queryset = queryset.order_by(*ordering)[start:end]
         reverse_rows = False
     if compact:
-        rows_queryset = rows_queryset.select_related('asset', 'user', 'telegram_group').defer('payload', 'search_text')
+        rows_queryset = rows_queryset.select_related('asset', 'asset__order', 'user', 'telegram_group').defer('payload', 'search_text')
     rows = list(rows_queryset)
     if reverse_rows:
         rows.reverse()
@@ -896,7 +902,7 @@ def _dashboard_snapshot_group_page(queryset, request, *, group_by='user', sort_b
         .order_by(*_dashboard_snapshot_ordering(sort_by, sort_direction))
     )
     if compact:
-        rows_queryset = rows_queryset.select_related('asset', 'user', 'telegram_group').defer('payload', 'search_text')
+        rows_queryset = rows_queryset.select_related('asset', 'asset__order', 'user', 'telegram_group').defer('payload', 'search_text')
     rows = list(rows_queryset)
     items = _compact_snapshot_payloads(rows) if compact else _snapshot_payloads(rows)
     ordered_groups = _group_cloud_asset_payloads(items, group_by)

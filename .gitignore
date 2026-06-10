@@ -22,6 +22,7 @@ output/
 .env*.bak
 .shop-secrets/
 .shop-load-tests/
+.stress/
 
 # IDE
 .idea/

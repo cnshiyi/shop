@@ -37,6 +37,8 @@ _SOCKS_CREDENTIAL_RE = re.compile(r'(?i)(socks5://)[^@\s/]+@')
 _IPV4_RE = re.compile(r'\b(?:(?:25[0-5]|2[0-4]\d|1?\d?\d)\.){3}(?:25[0-5]|2[0-4]\d|1?\d?\d)\b')
 _TELEGRAM_USERNAME_RE = re.compile(r'^[A-Za-z0-9_]{3,64}$')
 logger = logging.getLogger(__name__)
+_BULK_ORDER_INFER_IP_CHUNK_SIZE = 400
+_BULK_ORDER_INFER_NAME_CHUNK_SIZE = 250
 
 
 def _mask_secret(value, keep=4):
@@ -377,6 +379,12 @@ def _order_matches_asset_lookup(order, asset, account_labels) -> bool:
     return True
 
 
+def _chunks(values, size: int):
+    values = list(values or [])
+    for index in range(0, len(values), size):
+        yield values[index:index + size]
+
+
 # 功能：提供 后台 API 接口 的内部辅助逻辑，供同模块流程复用。
 def _bulk_infer_asset_orders(assets):
     targets = []
@@ -399,15 +407,21 @@ def _bulk_infer_asset_orders(assets):
     if not targets:
         return {}
 
-    lookup = Q()
-    if all_ips:
-        lookup |= Q(public_ip__in=all_ips) | Q(previous_public_ip__in=all_ips)
-    if all_names:
-        lookup |= Q(server_name__in=all_names) | Q(instance_id__in=all_names) | Q(provider_resource_id__in=all_names)
-    queryset = CloudServerOrder.objects.select_related('user', 'plan', 'cloud_account').filter(lookup)
+    base_queryset = CloudServerOrder.objects.select_related('user', 'plan', 'cloud_account')
     if providers:
-        queryset = queryset.filter(provider__in=providers)
-    orders = list(queryset.order_by('-updated_at', '-id'))
+        base_queryset = base_queryset.filter(provider__in=providers)
+    orders_by_id = {}
+    for ip_chunk in _chunks(all_ips, _BULK_ORDER_INFER_IP_CHUNK_SIZE):
+        for order in base_queryset.filter(Q(public_ip__in=ip_chunk) | Q(previous_public_ip__in=ip_chunk)).order_by('-updated_at', '-id'):
+            orders_by_id[order.id] = order
+    for name_chunk in _chunks(all_names, _BULK_ORDER_INFER_NAME_CHUNK_SIZE):
+        for order in base_queryset.filter(Q(server_name__in=name_chunk) | Q(instance_id__in=name_chunk) | Q(provider_resource_id__in=name_chunk)).order_by('-updated_at', '-id'):
+            orders_by_id[order.id] = order
+    orders = sorted(
+        orders_by_id.values(),
+        key=lambda item: (item.updated_at.timestamp() if item.updated_at else 0, item.id or 0),
+        reverse=True,
+    )
 
     by_ip = {}
     by_name = {}

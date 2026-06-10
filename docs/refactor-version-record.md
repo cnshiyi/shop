@@ -20518,3 +20518,55 @@ git diff --check
 - 自动续费执行器候选人口径已和计划页资产绑定用户口径收敛。
 - 有普通绑定用户时优先扣普通用户，管理员不会抢扣。
 - 只有资产/订单没有普通绑定用户且唯一绑定用户是管理员时，才允许管理员兜底扣款。
+
+## 2026-06-10 12:50 CST 代理列表列开关压测和空列渲染修复
+
+### 本轮背景
+
+- 用户要求继续压测代理列表，重点覆盖列开关。
+- 本轮沿用独立压测库 `.stress/cloud_assets_100k.sqlite3`，避免污染默认本地业务库。
+- 压测库包含 100000 条 `CloudAsset`、100000 条 `CloudAssetDashboardSnapshot`、1000 个 `TelegramUser`、200 个 `TelegramGroupFilter` 和 1000 条 `CloudServerOrder`。
+
+### 发现
+
+- 三种视图的列开关全关后，表头会清空。
+- 平铺表格此前仍然挂载空列 `Table`，触发 Ant Table / Vue 渲染异常：
+  - `Cannot read properties of undefined (reading 'key')`
+  - `Cannot read properties of undefined (reading 'type')`
+- 该问题只在全部列关闭时出现，全开恢复本身能恢复表头，但控制台错误不可接受。
+
+### 修复
+
+- `apps/web-antd/src/views/dashboard/cloud-assets/index.vue`
+  - 分组表格在 `assetTableColumns.length === 0` 时显示空状态，不挂载表格。
+  - 平铺表格从 `v-show` 改为真正的条件渲染，全部列关闭时不创建空列 `Table`。
+  - 全部列关闭后统一显示“已关闭全部显示列”。
+
+### 验证
+
+通过：
+
+```bash
+pnpm typecheck
+uv run python manage.py check
+```
+
+真实浏览器压测结果：
+
+- IP 视图：8 个列开关，全关显示空状态，全开表头完整恢复。
+- 操作视图：23 个列开关，全关显示空状态，全开表头完整恢复。
+- 云资源视图：11 个列开关，全关显示空状态，全开表头完整恢复。
+- `output/playwright/cloud-assets-column-switches-fixed-result.json` 中 `consoleMessages` 为空。
+- 重新生成截图：
+  - `output/playwright/cloud-assets-columns-ip-all-off-fixed.png`
+  - `output/playwright/cloud-assets-columns-ip-all-on-fixed.png`
+  - `output/playwright/cloud-assets-columns-ops-all-off-fixed.png`
+  - `output/playwright/cloud-assets-columns-ops-all-on-fixed.png`
+  - `output/playwright/cloud-assets-columns-cloud-all-off-fixed.png`
+  - `output/playwright/cloud-assets-columns-cloud-all-on-fixed.png`
+
+### 结论
+
+- 列开关在 10 万资产压测下可以完整关闭和恢复。
+- 全部列关闭不再产生空列表格渲染异常。
+- 三种视图恢复后的表头与关闭前一致，未发现列丢失、重复表头或列错位。

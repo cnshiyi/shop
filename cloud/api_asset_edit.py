@@ -508,7 +508,7 @@ def toggle_cloud_asset_auto_renew(request, asset_id):
     order, err = async_to_sync(set_cloud_asset_auto_renew)(asset.id, asset.user_id, enabled, True)
     if err:
         return _error(err, status=400)
-    _refresh_dashboard_plan_snapshots(f'cloud_asset_auto_renew:{asset_id}')
+    _refresh_dashboard_plan_snapshots_deferred(f'cloud_asset_auto_renew:{asset_id}', cloud_asset_ids=[asset_id])
     asset = CloudAsset.objects.select_related('user', 'order', 'cloud_account', 'telegram_group').get(pk=asset_id)
     return _ok(_asset_payload(asset))
 
