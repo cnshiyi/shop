@@ -25,7 +25,7 @@ from bot.models import TelegramGroupFilter, TelegramLoginAccount, TelegramUser
 from cloud.asset_dedupe import merge_duplicate_cloud_asset_group
 from cloud.bootstrap import _build_mtproxy_script, _extract_tg_links
 from cloud.models import CloudAsset, CloudAssetDashboardSnapshot, CloudAssetSyncJob, CloudAssetSyncJobEvent, CloudAutoRenewPatrolLog, CloudAutoRenewRetryTask, CloudIpLog, CloudLifecyclePlanNote, CloudLifecycleTask, CloudNoticeTask, CloudServerOrder, CloudServerPlan, CloudUserNoticeLog, DailyAddressStat
-from cloud.lifecycle import _apply_notice_schedule_to_order, _auto_renew_candidate_users, _enqueue_auto_renew_retry, _get_due_orders, _get_migration_due_orders, _get_orphan_asset_delete_due, _get_unattached_static_ip_delete_due, _group_balance_lines_for_orders, _is_cloud_delete_safe_time, _is_cloud_suspend_time, _mark_deleted, _mark_suspended, _next_cloud_action_run_at, _notice_payload_for_order, _notice_plan_text, _process_auto_renew_retry_tasks, _run_auto_renew, _send_logged_cloud_notice, _send_order_notice_batch, auto_renew_patrol_tick, daily_expiry_summary_tick, lifecycle_tick, sync_server_status_tick
+from cloud.lifecycle import MONTHLY_NOTICE_EVENT, _apply_notice_schedule_to_order, _auto_renew_candidate_users, _enqueue_auto_renew_retry, _get_due_orders, _get_migration_due_orders, _get_orphan_asset_delete_due, _get_unattached_static_ip_delete_due, _group_balance_lines_for_orders, _is_cloud_delete_safe_time, _is_cloud_suspend_time, _mark_deleted, _mark_suspended, _next_cloud_action_run_at, _notice_payload_for_order, _notice_plan_text, _process_auto_renew_retry_tasks, _run_auto_renew, _send_logged_cloud_notice, _send_order_notice_batch, auto_renew_patrol_tick, daily_expiry_summary_tick, lifecycle_tick, sync_server_status_tick
 from cloud.lifecycle_schedule import compute_order_lifecycle_fields
 from cloud.asset_expiry import order_asset_expiry
 from cloud.note_utils import append_status_note
@@ -59,7 +59,7 @@ from cloud.api_monitors import _fetch_address_chain_balances
 from cloud.api_orders import _cloud_order_source_tags, cloud_order_detail, cloud_orders_list, delete_cloud_order, update_cloud_order_status
 from cloud.api_servers import delete_server, servers_list
 from cloud.api_sync import _apply_server_missing_state, sync_cloud_asset_status
-from cloud.api_tasks import auto_renew_task_detail, delete_notice_history, notice_task_detail, refresh_notice_plan_view, run_auto_renew_order, run_auto_renew_tasks, tasks_overview, update_notice_plan_text, update_notice_switches
+from cloud.api_tasks import _build_notice_plan_summary, auto_renew_task_detail, delete_notice_history, notice_task_detail, refresh_notice_plan_view, run_auto_renew_order, run_auto_renew_tasks, tasks_overview, update_notice_plan_text, update_notice_switches
 from cloud.task_center import task_center_payload
 from cloud.sync_jobs import _cloud_assets_sync_status_counts, _execute_cloud_asset_sync_job, _latest_synced_cloud_asset_updated_at, cancel_cloud_asset_sync_job, cloud_asset_sync_job_detail, cloud_asset_sync_jobs_list, cloud_asset_sync_jobs_metrics, retry_cloud_asset_sync_job, sync_cloud_assets
 from core.cloud_accounts import cloud_account_label, cloud_account_label_variants, list_active_cloud_accounts, list_cloud_accounts_by_server_load
@@ -3448,6 +3448,183 @@ class CloudServerServicesTestCase(TestCase):
         for order in orders:
             order.refresh_from_db()
             self.assertIsNotNone(order.delete_notice_sent_at)
+
+    # 功能：验证同一用户同月多类通知只发送一条月度合并通知。
+    def test_lifecycle_monthly_notice_merges_types_for_same_user(self):
+        now = timezone.now()
+        renew_order = CloudServerOrder.objects.create(
+            order_no='MONTHLY-RENEW-NOTICE-1',
+            user=self.user,
+            plan=self.plan,
+            provider=self.plan.provider,
+            region_code=self.plan.region_code,
+            region_name=self.plan.region_name,
+            plan_name=self.plan.plan_name,
+            quantity=1,
+            currency='USDT',
+            total_amount='19.00',
+            pay_amount='19.00',
+            pay_method='balance',
+            status='completed',
+            public_ip='10.77.0.1',
+            cloud_reminder_enabled=True,
+        )
+        delete_order = CloudServerOrder.objects.create(
+            order_no='MONTHLY-DELETE-NOTICE-1',
+            user=self.user,
+            plan=self.plan,
+            provider=self.plan.provider,
+            region_code=self.plan.region_code,
+            region_name=self.plan.region_name,
+            plan_name=self.plan.plan_name,
+            quantity=1,
+            currency='USDT',
+            total_amount='19.00',
+            pay_amount='19.00',
+            pay_method='balance',
+            status='suspended',
+            public_ip='10.77.0.2',
+            suspend_at=now - timezone.timedelta(hours=1),
+            delete_at=now + timezone.timedelta(hours=12),
+            delete_reminder_enabled=True,
+        )
+        CloudAsset.objects.create(
+            kind=CloudAsset.KIND_SERVER,
+            source=CloudAsset.SOURCE_ORDER,
+            order=renew_order,
+            user=self.user,
+            provider=renew_order.provider,
+            region_code=renew_order.region_code,
+            region_name=renew_order.region_name,
+            asset_name='monthly-renew-notice',
+            public_ip=renew_order.public_ip,
+            actual_expires_at=now + timezone.timedelta(days=2),
+            status=CloudAsset.STATUS_RUNNING,
+            is_active=True,
+        )
+        CloudAsset.objects.create(
+            kind=CloudAsset.KIND_SERVER,
+            source=CloudAsset.SOURCE_ORDER,
+            order=delete_order,
+            user=self.user,
+            provider=delete_order.provider,
+            region_code=delete_order.region_code,
+            region_name=delete_order.region_name,
+            asset_name='monthly-delete-notice',
+            public_ip=delete_order.public_ip,
+            actual_expires_at=now - timezone.timedelta(days=2),
+            status=CloudAsset.STATUS_RUNNING,
+            is_active=True,
+        )
+        due = {
+            'renew_notice': [renew_order],
+            'auto_renew_notice': [],
+            'auto_renew': [],
+            'delete_notice': [delete_order],
+            'recycle_notice': [],
+            'expire': [],
+            'suspend': [],
+            'delete': [],
+            'recycle': [],
+        }
+        notify = AsyncMock(return_value=True)
+
+        with patch('cloud.lifecycle._get_due_orders', new_callable=AsyncMock, return_value=due), \
+            patch('cloud.lifecycle._get_migration_due_orders', new_callable=AsyncMock, return_value=[]), \
+            patch('cloud.lifecycle._get_orphan_asset_delete_due', new_callable=AsyncMock, return_value=[]), \
+            patch('cloud.lifecycle._get_unattached_static_ip_delete_due', new_callable=AsyncMock, return_value=[]):
+            async_to_sync(lifecycle_tick)(notify=notify)
+
+        notify.assert_awaited_once()
+        _, text, _ = notify.await_args.args
+        self.assertIn('月度 IP 通知汇总', text)
+        self.assertIn('10.77.0.1', text)
+        self.assertIn('10.77.0.2', text)
+        self.assertEqual(CloudUserNoticeLog.objects.filter(event_type=MONTHLY_NOTICE_EVENT, delivered=True, is_batch=True).count(), 1)
+        renew_order.refresh_from_db()
+        delete_order.refresh_from_db()
+        self.assertIsNotNone(renew_order.renew_notice_sent_at)
+        self.assertIsNotNone(delete_order.delete_notice_sent_at)
+
+    # 功能：验证通知计划按用户和月份合并，不再按通知类型拆成多行。
+    def test_notice_plan_summary_merges_same_user_month_into_one_row(self):
+        now = timezone.now()
+        renew_order = CloudServerOrder.objects.create(
+            order_no='MONTHLY-PLAN-RENEW-1',
+            user=self.user,
+            plan=self.plan,
+            provider=self.plan.provider,
+            region_code=self.plan.region_code,
+            region_name=self.plan.region_name,
+            plan_name=self.plan.plan_name,
+            quantity=1,
+            currency='USDT',
+            total_amount='19.00',
+            pay_amount='19.00',
+            pay_method='balance',
+            status='completed',
+            public_ip='10.77.1.1',
+            cloud_reminder_enabled=True,
+        )
+        delete_order = CloudServerOrder.objects.create(
+            order_no='MONTHLY-PLAN-DELETE-1',
+            user=self.user,
+            plan=self.plan,
+            provider=self.plan.provider,
+            region_code=self.plan.region_code,
+            region_name=self.plan.region_name,
+            plan_name=self.plan.plan_name,
+            quantity=1,
+            currency='USDT',
+            total_amount='19.00',
+            pay_amount='19.00',
+            pay_method='balance',
+            status='suspended',
+            public_ip='10.77.1.2',
+            suspend_at=now - timezone.timedelta(hours=1),
+            delete_at=now + timezone.timedelta(hours=12),
+            delete_reminder_enabled=True,
+        )
+        CloudAsset.objects.create(
+            kind=CloudAsset.KIND_SERVER,
+            source=CloudAsset.SOURCE_ORDER,
+            order=renew_order,
+            user=self.user,
+            provider=renew_order.provider,
+            region_code=renew_order.region_code,
+            region_name=renew_order.region_name,
+            asset_name='monthly-plan-renew',
+            public_ip=renew_order.public_ip,
+            actual_expires_at=now + timezone.timedelta(days=2),
+            status=CloudAsset.STATUS_RUNNING,
+            is_active=True,
+        )
+        CloudAsset.objects.create(
+            kind=CloudAsset.KIND_SERVER,
+            source=CloudAsset.SOURCE_ORDER,
+            order=delete_order,
+            user=self.user,
+            provider=delete_order.provider,
+            region_code=delete_order.region_code,
+            region_name=delete_order.region_name,
+            asset_name='monthly-plan-delete',
+            public_ip=delete_order.public_ip,
+            actual_expires_at=now - timezone.timedelta(days=2),
+            status=CloudAsset.STATUS_RUNNING,
+            is_active=True,
+        )
+
+        summary = _build_notice_plan_summary(limit=10, offset=0, fields={'basic', 'ips', 'text'}, include_total_counts=True)
+        rows = [
+            row for row in summary['active_user_summary_items']
+            if row.get('user_id') == self.user.id and row.get('notice_type') == MONTHLY_NOTICE_EVENT
+        ]
+
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]['ip_count'], 2)
+        self.assertIn('到期提醒', rows[0]['notice_type_label'])
+        self.assertIn('删机提醒', rows[0]['notice_type_label'])
+        self.assertEqual(summary['total_counts']['active_user_count'], 1)
 
     # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
     def test_update_cloud_asset_write_requires_superuser(self):

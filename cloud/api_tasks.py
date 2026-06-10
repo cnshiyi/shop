@@ -17,6 +17,7 @@ from cloud.asset_expiry import order_asset_expiry
 from cloud.dashboard_snapshots import _refresh_dashboard_plan_snapshots
 from cloud.lifecycle import (
     AUTO_RENEW_BEFORE_EXPIRY_WINDOW,
+    MONTHLY_NOTICE_EVENT,
     NOTICE_TYPE_SWITCH_CONFIG,
     _auto_renew_notice_batch_payload,
     _bulk_notice_payload_map,
@@ -628,6 +629,7 @@ _NOTICE_TASK_TYPES = {
 _NOTICE_HISTORY_LABELS = {
     **{key: item['label'] for key, item in _NOTICE_TASK_TYPES.items()},
     'renew_notice_batch': '到期提醒',
+    MONTHLY_NOTICE_EVENT: '月度合并通知',
 }
 
 
@@ -834,6 +836,13 @@ def _notice_event_type(notice_type: str) -> str:
 
 # 功能：提供 后台 API 接口 的内部辅助逻辑，供同模块流程复用。
 def _notice_actual_batch_payload(notice_type: str, order_ids: list[int]) -> dict:
+    if notice_type == MONTHLY_NOTICE_EVENT:
+        return {
+            'text': f'月度合并通知：共 {len(order_ids)} 个 IP，系统会合并为本月唯一一条用户通知。',
+            'order_ids': order_ids,
+            'first_order_id': order_ids[0] if order_ids else None,
+            'count': len(order_ids),
+        }
     if notice_type == 'renew_notice':
         return async_to_sync(_renew_notice_batch_payload)(order_ids)
     if notice_type == 'auto_renew_notice':
@@ -992,6 +1001,21 @@ NOTICE_EVENT_SENT_FIELD_MAP = {
 
 # 功能：提供 后台 API 接口 的内部辅助逻辑，供同模块流程复用。
 def _reset_notice_sent_fields_for_log(log) -> int:
+    field_order_ids = ((log.extra or {}).get('field_order_ids') or {}) if getattr(log, 'extra', None) else {}
+    if log.event_type == MONTHLY_NOTICE_EVENT and isinstance(field_order_ids, dict):
+        reset_count = 0
+        for field_name, raw_ids in field_order_ids.items():
+            if field_name not in set(NOTICE_EVENT_SENT_FIELD_MAP.values()):
+                continue
+            order_ids = []
+            for item in raw_ids or []:
+                try:
+                    order_ids.append(int(item))
+                except (TypeError, ValueError):
+                    continue
+            if order_ids:
+                reset_count += CloudServerOrder.objects.filter(id__in=sorted(set(order_ids))).update(**{field_name: None})
+        return reset_count
     field_name = NOTICE_EVENT_SENT_FIELD_MAP.get(log.event_type)
     if not field_name:
         return 0
@@ -1030,18 +1054,29 @@ def delete_notice_history(request, identifier):
         return _error('通知历史不存在', status=404)
     field_order_ids = {}
     for log in logs:
-        field_name = NOTICE_EVENT_SENT_FIELD_MAP.get(log.event_type)
-        if not field_name:
+        monthly_field_ids = ((log.extra or {}).get('field_order_ids') or {}) if log.event_type == MONTHLY_NOTICE_EVENT and getattr(log, 'extra', None) else {}
+        if isinstance(monthly_field_ids, dict) and monthly_field_ids:
+            for field_name, raw_ids in monthly_field_ids.items():
+                if field_name not in set(NOTICE_EVENT_SENT_FIELD_MAP.values()):
+                    continue
+                ids = field_order_ids.setdefault(field_name, set())
+                for item in raw_ids or []:
+                    try:
+                        ids.add(int(item))
+                    except (TypeError, ValueError):
+                        continue
             continue
-        ids = field_order_ids.setdefault(field_name, set())
-        extra_ids = ((log.extra or {}).get('order_ids') or []) if getattr(log, 'extra', None) else []
-        for item in extra_ids:
-            try:
-                ids.add(int(item))
-            except (TypeError, ValueError):
-                continue
-        if log.order_id:
-            ids.add(log.order_id)
+        field_name = NOTICE_EVENT_SENT_FIELD_MAP.get(log.event_type)
+        if field_name:
+            ids = field_order_ids.setdefault(field_name, set())
+            extra_ids = ((log.extra or {}).get('order_ids') or []) if getattr(log, 'extra', None) else []
+            for item in extra_ids:
+                try:
+                    ids.add(int(item))
+                except (TypeError, ValueError):
+                    continue
+            if log.order_id:
+                ids.add(log.order_id)
     reset_count = 0
     for field_name, order_ids in field_order_ids.items():
         if order_ids:
@@ -1422,30 +1457,42 @@ def _notice_group_summary_from_row(row: dict, *, now, next_run_at, latest_logs: 
     needs_order_rows = bool({'actions', 'ips', 'retry', 'text', 'full'} & fields)
     if needs_order_rows:
         order_row_limit = None if 'full' in fields else (1000 if {'ips', 'text'} & fields else 1)
-        qs = _notice_group_order_queryset(row, now=now)
-        order_values = qs.values(
-            'order_id',
-            'order__order_no',
-            'order__account_label',
-            'order__region_code',
-            'order__region_name',
-            'order__server_name',
-            'order__instance_id',
-            'order__status',
-            'order__public_ip',
-            'order__previous_public_ip',
-            'account_label',
-            'asset_name',
-            'instance_id',
-            'region_code',
-            'region_name',
-            'status',
-            'provider_status',
-            'public_ip',
-        ).order_by(_notice_source_time_field(row.get('notice_type') or ''), 'order_id')
+        source_rows = row.get('_source_rows') or [row]
+        for source_row in source_rows:
+            qs = _notice_group_order_queryset(source_row, now=now)
+            order_values = qs.values(
+                'order_id',
+                'order__order_no',
+                'order__account_label',
+                'order__region_code',
+                'order__region_name',
+                'order__server_name',
+                'order__instance_id',
+                'order__status',
+                'order__public_ip',
+                'order__previous_public_ip',
+                'account_label',
+                'asset_name',
+                'instance_id',
+                'region_code',
+                'region_name',
+                'status',
+                'provider_status',
+                'public_ip',
+            ).order_by(_notice_source_time_field(source_row.get('notice_type') or ''), 'order_id')
+            if order_row_limit:
+                order_values = order_values[:order_row_limit]
+            for item in order_values:
+                item = dict(item)
+                item['_notice_type'] = source_row.get('notice_type') or ''
+                item['_notice_type_label'] = source_row.get('notice_type_label') or ''
+                order_rows.append(item)
+        order_rows.sort(key=lambda item: (
+            item.get('_notice_type_label') or '',
+            item.get('order_id') or 0,
+        ))
         if order_row_limit:
-            order_values = order_values[:order_row_limit]
-        order_rows = list(order_values)
+            order_rows = order_rows[:order_row_limit]
     order_ids = []
     ips = []
     order_items = []
@@ -1462,6 +1509,8 @@ def _notice_group_summary_from_row(row: dict, *, now, next_run_at, latest_logs: 
             order_items.append({
                 'order_id': order_id,
                 'order_no': item.get('order__order_no') or '',
+                'notice_type': item.get('_notice_type') or '',
+                'notice_type_label': item.get('_notice_type_label') or '',
                 'account_label': item.get('account_label') or item.get('order__account_label') or '',
                 'region_code': item.get('region_code') or item.get('order__region_code') or '',
                 'region_name': item.get('region_name') or item.get('order__region_name') or '',
@@ -1540,8 +1589,57 @@ def _notice_sort_group_rows(rows: list[dict]) -> list[dict]:
     return rows
 
 
+def _notice_month_key(value) -> str:
+    if not value:
+        return 'unknown'
+    return timezone.localtime(value).strftime('%Y-%m')
+
+
+def _notice_merge_monthly_group_rows(rows: list[dict]) -> list[dict]:
+    merged = {}
+    for row in rows:
+        month_key = _notice_month_key(row.get('_next_notice_at_value'))
+        user_key = row.get('user_id') or row.get('tg_user_id') or row.get('username_label') or row.get('user_display_name') or 'unknown'
+        key = (user_key, month_key)
+        target = merged.get(key)
+        if not target:
+            target = {
+                **{item_key: item_value for item_key, item_value in row.items() if not item_key.startswith('_')},
+                'id': f'{user_key}:monthly:{month_key}',
+                'notice_type': MONTHLY_NOTICE_EVENT,
+                'notice_type_label': '月度合并通知',
+                'notice_event': MONTHLY_NOTICE_EVENT,
+                'notice_count': 1,
+                'ip_count': 0,
+                'notice_month': month_key,
+                'notice_type_labels': [],
+                '_source_rows': [],
+                '_next_notice_at_value': row.get('_next_notice_at_value'),
+            }
+            merged[key] = target
+        if row.get('plan_scope') == 'due':
+            target['plan_scope'] = 'due'
+            target['plan_scope_label'] = '近期计划'
+        if row.get('_next_notice_at_value') and (
+            not target.get('_next_notice_at_value')
+            or row.get('_next_notice_at_value') < target.get('_next_notice_at_value')
+        ):
+            target['_next_notice_at_value'] = row.get('_next_notice_at_value')
+            target['next_notice_at'] = row.get('next_notice_at')
+        target['ip_count'] = int(target.get('ip_count') or 0) + int(row.get('ip_count') or row.get('notice_count') or 0)
+        label = row.get('notice_type_label') or row.get('notice_type') or ''
+        if label and label not in target['notice_type_labels']:
+            target['notice_type_labels'].append(label)
+        target['_source_rows'].append(row)
+    for row in merged.values():
+        labels = row.get('notice_type_labels') or []
+        if labels:
+            row['notice_type_label'] = '月度合并通知：' + '、'.join(labels)
+    return _notice_sort_group_rows(list(merged.values()))
+
+
 def _notice_group_summary_page_from_rows(due_rows: list[dict], future_rows: list[dict], *, now, limit: int, offset: int, fields: set[str], latest_logs: dict, account_attempts: list[dict] | None) -> tuple[list[dict], int]:
-    rows = _notice_sort_group_rows([*due_rows, *future_rows])
+    rows = _notice_merge_monthly_group_rows([*due_rows, *future_rows])
     total = len(rows)
     visible_rows = rows[offset:offset + limit] if limit else rows[offset:]
     return [
@@ -1558,13 +1656,12 @@ def _notice_group_summary_page_from_rows(due_rows: list[dict], future_rows: list
 
 
 def _notice_plan_total_counts_from_rows(due_rows: list[dict], future_rows: list[dict]) -> dict:
-    due_count = sum(int(row.get('notice_count') or 0) for row in due_rows)
-    future_count = sum(int(row.get('notice_count') or 0) for row in future_rows)
-    due_user_groups = {row.get('id') for row in due_rows}
-    future_user_groups = {row.get('id') for row in future_rows}
+    monthly_rows = _notice_merge_monthly_group_rows([*due_rows, *future_rows])
+    due_user_groups = {row.get('id') for row in monthly_rows if row.get('plan_scope') == 'due'}
+    future_user_groups = {row.get('id') for row in monthly_rows if row.get('plan_scope') != 'due'}
     return {
-        'due_count': due_count,
-        'future_count': future_count,
+        'due_count': len(due_user_groups),
+        'future_count': len(future_user_groups),
         'due_user_count': len(due_user_groups),
         'future_user_count': len(future_user_groups),
         'active_user_count': len(due_user_groups | future_user_groups),

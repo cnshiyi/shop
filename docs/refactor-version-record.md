@@ -20638,3 +20638,85 @@ DJANGO_TEST_SQLITE=1 uv run python manage.py test cloud.tests.CloudServerService
 - 代理列表、通知计划、用户表排序口径已修复并有测试覆盖。
 - 服务器表、关机计划、删机计划、未附加 IP 删除计划的活跃计划查询层已确认按到期/执行时间升序。
 - 当前压测库中服务器删除计划和 IP 删除计划活跃数据为 0，本轮页面无活跃行可验证实际顺序，但代码分页排序口径已确认。
+
+## 2026-06-10 14:35 CST 通知计划月度合并和自动续费开关并发压测
+
+### 本轮背景
+
+- 用户要求检查通知计划是否按用户整合，目标是同一用户一个月只发送一次通知。
+- 用户要求必须实际进入通知计划页面截图验证，不能只口头判断。
+- 用户授权把通知人设置为已登录 Telegram 账号，实际验证是否真实通知。
+- 用户要求再压测一轮代理列表自动续费开关并发打开/关闭。
+
+### 修复
+
+- `cloud/lifecycle.py`
+  - 新增 `monthly_notice` 月度合并通知事件。
+  - 生命周期巡检把到期提醒、自动续费预提醒、删机提醒、IP 回收提醒按 `(通知目标, 用户, 月份)` 聚合。
+  - 同一用户同一自然月只发送一条“月度 IP 通知汇总”。
+  - 当前月已成功送达过月度或旧类型通知时，本轮不重复发送，并写回对应通知字段，避免计划反复出现。
+- `cloud/api_tasks.py`
+  - 通知计划页按用户和月份合并展示。
+  - 合并行保留来源通知类型、IP 数量和订单明细来源。
+  - 删除月度通知历史时，按 `field_order_ids` 恢复各类通知字段。
+- `cloud/tests.py`
+  - 增加生命周期月度合并发送测试。
+  - 增加通知计划同用户同月合并展示测试。
+- `apps/web-antd/src/views/dashboard/tasks/notices.vue`
+  - 页面说明改为按用户和月份整合。
+
+### 验证
+
+通过：
+
+```bash
+uv run python -m py_compile cloud/lifecycle.py cloud/api_tasks.py cloud/tests.py
+uv run python manage.py check
+DJANGO_TEST_SQLITE=1 uv run python manage.py test cloud.tests.CloudServerServicesTestCase.test_lifecycle_monthly_notice_merges_types_for_same_user cloud.tests.CloudServerServicesTestCase.test_notice_plan_summary_merges_same_user_month_into_one_row cloud.tests.CloudServerServicesTestCase.test_notice_plan_summary_sorts_by_next_notice_time_before_user --settings=shop.settings --verbosity=1
+pnpm -F @vben/web-antd run typecheck
+```
+
+真实页面验证使用独立 SQLite 测试库 `.stress/notice_monthly.sqlite3` 和前端 `127.0.0.1:5666`：
+
+- 通知计划页面显示 1 行月度合并通知。
+- 用户：`月度测试用户 @monthly_user`。
+- 通知类型：`月度合并通知：到期提醒、删机提醒`。
+- IP 数量：2。
+- 控制台无 error / warning。
+
+截图和结果：
+
+- `output/playwright/notice-monthly-plan.png`
+- `output/playwright/notice-monthly-plan-ip-list.png`
+- `output/playwright/notice-monthly-plan-result.json`
+- `output/playwright/notice-monthly-plan-ip-list-result.json`
+
+真实 Telegram 通知验证：
+
+- 使用默认库中已登录且允许通知的个人号作为发送账号。
+- 月度合并通知真实送达，`CloudUserNoticeLog` 中 `monthly_notice` 最新记录为 `delivered=True`。
+- 发送尝试显示登录账号渠道成功；记录中不包含 Telegram session、验证码或密钥。
+- 临时测试订单和资产已按测试前缀删除，真实发送日志保留用于审计。
+
+自动续费开关并发压测：
+
+- 独立 SQLite 测试库 `.stress/notice_monthly.sqlite3` 中创建 12 条压测资产和 12 条订单。
+- 浏览器页面一次性并发点击前 8 个自动续费开关。
+- 并发打开：8 个接口响应均为 200，页面显示 8 个“已开启”。
+- 并发关闭：8 个接口响应均为 200，页面显示 0 个“已开启”。
+- 数据库复核：12 个订单中 `auto_renew_enabled=True` 数量为 0，和关闭后页面一致。
+- 控制台无 error / warning。
+
+截图和结果：
+
+- `output/playwright/auto-renew-concurrent-dom-clicks.png`
+- `output/playwright/auto-renew-concurrent-close.png`
+- `output/playwright/auto-renew-concurrent-dom-clicks-result.json`
+- `output/playwright/auto-renew-concurrent-close-result.json`
+
+### 结论
+
+- 通知计划和生命周期发送链路已经按用户、月份合并，同一用户同月不会因为多种云资产提醒收到多条通知。
+- 月度合并通知支持真实 Telegram 登录账号发送，本轮已实测送达。
+- 自动续费开关并发打开和关闭在真实前端页面、接口响应和数据库状态三侧一致。
+- 本轮没有创建或删除真实云服务器，没有真实支付或链上广播。

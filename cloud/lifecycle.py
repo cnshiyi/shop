@@ -30,7 +30,6 @@ from cloud.lifecycle_tasks import cancel_notice_task, claim_notice_task, finish_
 from cloud.models import CloudAsset, CloudAutoRenewPatrolLog, CloudAutoRenewRetryTask, CloudServerOrder, CloudUserNoticeLog
 from cloud.note_utils import prepend_note
 from cloud.services import RenewalPriceMissingError, _hydrate_order_from_proxy_asset, _order_primary_asset, _prepare_cloud_server_renewal, _renewal_price, _resolve_aws_static_ip_name_for_order, pay_cloud_server_renewal_with_balance, record_cloud_ip_log
-from bot.keyboards import cloud_expiry_actions
 
 logger = logging.getLogger(__name__)
 
@@ -44,6 +43,21 @@ AUTO_RENEW_RETRY_CHECK_INTERVAL = timezone.timedelta(minutes=10)
 AUTO_RENEW_RETRY_CLAIM_TTL = timezone.timedelta(minutes=30)
 AUTO_RENEW_RETRY_MAX_ATTEMPTS = 144
 NOTICE_TEXT_OVERRIDES_CONFIG_KEY = 'cloud_notice_text_overrides'
+MONTHLY_NOTICE_EVENT = 'monthly_notice'
+MONTHLY_NOTICE_EVENTS = {
+    MONTHLY_NOTICE_EVENT,
+    'renew_notice',
+    'renew_notice_batch',
+    'auto_renew_notice',
+    'delete_notice',
+    'recycle_notice',
+}
+MONTHLY_NOTICE_SECTIONS = (
+    ('renew_notice_batch', 'renew_notice_sent_at', 'renew_notice'),
+    ('auto_renew_notice', 'auto_renew_notice_sent_at', 'auto_renew_notice'),
+    ('delete_notice', 'delete_notice_sent_at', 'delete_notice'),
+    ('recycle_notice', 'recycle_notice_sent_at', 'recycle_notice'),
+)
 
 
 def _amount_2(value) -> str:
@@ -1124,6 +1138,126 @@ async def _send_order_notice_batch(*, event: str, field_name: str, notify, user_
     return sent
 
 
+async def _monthly_notice_section_payload(notice_type: str, order_ids: list[int]) -> dict:
+    if notice_type == 'renew_notice':
+        return await _renew_notice_batch_payload(order_ids)
+    if notice_type == 'auto_renew_notice':
+        return await _auto_renew_notice_batch_payload(order_ids)
+    if notice_type == 'delete_notice':
+        return await _lifecycle_notice_batch_payload(
+            '⚠️ 云服务器删机提醒',
+            order_ids,
+            '如仍需使用，请尽快续费或联系人工客服处理。',
+        )
+    if notice_type == 'recycle_notice':
+        return await _lifecycle_notice_batch_payload(
+            '♻️ 固定 IP 回收提醒',
+            order_ids,
+            '固定 IP 回收后将无法继续保留原 IP；如需恢复，请尽快联系人工客服。',
+        )
+    return {'text': '', 'order_ids': [], 'first_order_id': None, 'count': 0}
+
+
+async def _send_monthly_notice_batch(
+    *,
+    notify,
+    notify_target,
+    target_kind: str,
+    target_chat_id: int | None,
+    user_id: int,
+    sections: list[dict],
+) -> bool:
+    if not sections:
+        return False
+    if not await _user_can_receive_cloud_notice(user_id):
+        return False
+    month_start, next_month, month_key = _notice_month_bounds()
+    first_order = None
+    texts = []
+    all_order_ids = []
+    field_order_ids: dict[str, list[int]] = defaultdict(list)
+    notice_types = []
+    for section in sections:
+        notice_type = section.get('notice_type') or ''
+        field_name = section.get('field_name') or ''
+        orders = section.get('orders') or []
+        order_ids = [order.id for order in orders if getattr(order, 'id', None)]
+        if not order_ids:
+            continue
+        payload = await _monthly_notice_section_payload(notice_type, order_ids)
+        kept_order_ids = [int(item) for item in (payload.get('order_ids') or []) if item]
+        if not payload.get('text') or not kept_order_ids:
+            continue
+        if first_order is None:
+            first_order = next((order for order in orders if order.id in kept_order_ids), None)
+        notice_types.append(notice_type)
+        texts.append(payload['text'])
+        all_order_ids.extend(kept_order_ids)
+        field_order_ids[field_name].extend(kept_order_ids)
+    all_order_ids = sorted(set(all_order_ids))
+    if not texts or not all_order_ids or first_order is None:
+        return False
+    if await _monthly_notice_already_delivered(user_id, month_start=month_start, next_month=next_month):
+        for field_name, order_ids in field_order_ids.items():
+            await _mark_many_notice_sent(sorted(set(order_ids)), field_name)
+        logger.info(
+            'CLOUD_MONTHLY_NOTICE_SKIP_ALREADY_SENT user_id=%s month=%s order_ids=%s notice_types=%s',
+            user_id,
+            month_key,
+            all_order_ids,
+            sorted(set(notice_types)),
+        )
+        return False
+    manual_text = await sync_to_async(_get_notice_text_override)(MONTHLY_NOTICE_EVENT, user_id, all_order_ids)
+    text = manual_text or '\n\n'.join(['📬 月度 IP 通知汇总', f'周期: {month_key}', '本月同一用户只发送这一条云资产通知。', *texts])
+    batch_id = _monthly_notice_batch_id(user_id, target_chat_id if target_kind == 'group' else None, month_key)
+    notice_ip = f'{len(all_order_ids)} 个IP' if len(all_order_ids) > 1 else await sync_to_async(_order_notice_ip)(first_order)
+    extra = {
+        'order_ids': all_order_ids,
+        'field_order_ids': {field: sorted(set(ids)) for field, ids in field_order_ids.items()},
+        'notice_types': sorted(set(notice_types)),
+        'manual_override': bool(manual_text),
+        'notice_target': 'telegram_group' if target_kind == 'group' else 'private',
+        'month_key': month_key,
+    }
+    _log_cloud_notice(MONTHLY_NOTICE_EVENT, first_order, {'ip': notice_ip}, text, 'monthly')
+    if target_kind == 'group' and target_chat_id:
+        group_sent = await _send_logged_cloud_notice(
+            MONTHLY_NOTICE_EVENT,
+            notify_target,
+            user_id,
+            text,
+            order=first_order,
+            notice={'ip': notice_ip},
+            batch_id=batch_id,
+            is_batch=True,
+            target_chat_id=target_chat_id,
+            extra=extra,
+        )
+        if group_sent:
+            for field_name, order_ids in field_order_ids.items():
+                await _mark_many_notice_sent(sorted(set(order_ids)), field_name)
+            return True
+        logger.warning('CLOUD_MONTHLY_NOTICE_GROUP_FALLBACK_PRIVATE user_id=%s target_chat_id=%s order_ids=%s', user_id, target_chat_id, all_order_ids)
+    if not notify:
+        return False
+    sent = await _send_logged_cloud_notice(
+        MONTHLY_NOTICE_EVENT,
+        notify,
+        user_id,
+        text,
+        order=first_order,
+        notice={'ip': notice_ip},
+        batch_id=batch_id,
+        is_batch=True,
+        extra={**extra, 'notice_target': 'private'},
+    )
+    if sent:
+        for field_name, order_ids in field_order_ids.items():
+            await _mark_many_notice_sent(sorted(set(order_ids)), field_name)
+    return sent
+
+
 @sync_to_async
 def _lifecycle_notice_batch_payload(title: str, order_ids: list[int], closing: str) -> dict:
     orders = list(CloudServerOrder.objects.filter(id__in=order_ids).order_by('delete_at', 'ip_recycle_at', 'id'))
@@ -1578,6 +1712,33 @@ def _set_notice_text_override(event: str, user_id: int | None, order_ids: list[i
 def _target_batch_id(event: str, target, date_text: str) -> str:
     digest = hashlib.sha1(str(target).encode('utf-8')).hexdigest()[:10]
     return f'{event}:{date_text}:{digest}'
+
+
+def _notice_month_bounds(now=None):
+    current = timezone.localtime(now or timezone.now())
+    month_start_date = current.date().replace(day=1)
+    next_month_date = (month_start_date.replace(day=28) + timezone.timedelta(days=4)).replace(day=1)
+    month_start = timezone.make_aware(timezone.datetime.combine(month_start_date, timezone.datetime.min.time()))
+    next_month = timezone.make_aware(timezone.datetime.combine(next_month_date, timezone.datetime.min.time()))
+    return month_start, next_month, month_start_date.strftime('%Y-%m')
+
+
+def _monthly_notice_batch_id(user_id: int | None, target_chat_id: int | None, month_key: str) -> str:
+    target = f'chat:{target_chat_id}' if target_chat_id else 'private'
+    return _notice_batch_id(MONTHLY_NOTICE_EVENT, user_id or 0, target, month_key)
+
+
+@sync_to_async
+def _monthly_notice_already_delivered(user_id: int | None, *, month_start, next_month) -> bool:
+    if not user_id:
+        return False
+    return CloudUserNoticeLog.objects.filter(
+        user_id=user_id,
+        event_type__in=MONTHLY_NOTICE_EVENTS,
+        delivered=True,
+        created_at__gte=month_start,
+        created_at__lt=next_month,
+    ).exists()
 
 
 @sync_to_async
@@ -2803,65 +2964,23 @@ async def lifecycle_tick(notify=None, notify_target=None, defer_destructive_seco
         orphan_asset_delete_due = []
         unattached_static_ip_delete_due = []
 
-    for (target_kind, target_chat_id, user_id), orders in await sync_to_async(_group_orders_by_notice_target)(due['renew_notice']):
-        payload = await _renew_notice_batch_payload([order.id for order in orders])
-        await _send_order_notice_batch(
-            event='renew_notice_batch',
-            field_name='renew_notice_sent_at',
+    monthly_notice_groups = defaultdict(list)
+    for event, field_name, notice_type in MONTHLY_NOTICE_SECTIONS:
+        for target_key, orders in await sync_to_async(_group_orders_by_notice_target)(due[notice_type]):
+            monthly_notice_groups[target_key].append({
+                'event': event,
+                'field_name': field_name,
+                'notice_type': notice_type,
+                'orders': orders,
+            })
+    for (target_kind, target_chat_id, user_id), sections in monthly_notice_groups.items():
+        await _send_monthly_notice_batch(
             notify=notify,
             notify_target=notify_target,
+            target_kind=target_kind,
             target_chat_id=target_chat_id if target_kind == 'group' else None,
             user_id=user_id,
-            orders=orders,
-            payload=payload,
-            reply_markup=cloud_expiry_actions(payload['first_order_id']) if payload.get('count') == 1 else None,
-        )
-
-    for (target_kind, target_chat_id, user_id), orders in await sync_to_async(_group_orders_by_notice_target)(due['auto_renew_notice']):
-        payload = await _auto_renew_notice_batch_payload([order.id for order in orders])
-        await _send_order_notice_batch(
-            event='auto_renew_notice',
-            field_name='auto_renew_notice_sent_at',
-            notify=notify,
-            notify_target=notify_target,
-            target_chat_id=target_chat_id if target_kind == 'group' else None,
-            user_id=user_id,
-            orders=orders,
-            payload=payload,
-        )
-
-    for (target_kind, target_chat_id, user_id), orders in await sync_to_async(_group_orders_by_notice_target)(due['delete_notice']):
-        payload = await _lifecycle_notice_batch_payload(
-            '⚠️ 云服务器删机提醒',
-            [order.id for order in orders],
-            '如仍需使用，请尽快续费或联系人工客服处理。',
-        )
-        await _send_order_notice_batch(
-            event='delete_notice',
-            field_name='delete_notice_sent_at',
-            notify=notify,
-            notify_target=notify_target,
-            target_chat_id=target_chat_id if target_kind == 'group' else None,
-            user_id=user_id,
-            orders=orders,
-            payload=payload,
-        )
-
-    for (target_kind, target_chat_id, user_id), orders in await sync_to_async(_group_orders_by_notice_target)(due['recycle_notice']):
-        payload = await _lifecycle_notice_batch_payload(
-            '♻️ 固定 IP 回收提醒',
-            [order.id for order in orders],
-            '固定 IP 回收后将无法继续保留原 IP；如需恢复，请尽快联系人工客服。',
-        )
-        await _send_order_notice_batch(
-            event='recycle_notice',
-            field_name='recycle_notice_sent_at',
-            notify=notify,
-            notify_target=notify_target,
-            target_chat_id=target_chat_id if target_kind == 'group' else None,
-            user_id=user_id,
-            orders=orders,
-            payload=payload,
+            sections=sections,
         )
 
     for order in due['expire']:
