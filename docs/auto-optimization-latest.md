@@ -4,97 +4,66 @@
 
 ## 最近一轮
 
-- 时间：2026-06-10 14:35 CST
-- 状态：已完成通知计划月度合并、真实 Telegram 通知验证、自动续费开关并发压测。
+- 时间：2026-06-10 17:15 CST
+- 状态：已完成未附加 IP 续费真库实测、残留旧实例 ID 的计划归类修复、IP 删除计划/历史去重修复、AWS 真机创建阻塞确认。
 - 后端分支：`codex/cloud-asset-lifecycle-refactor`
-- 前端分支：`codex/cloud-asset-list-performance`
+- 前端分支：未改动
 - 目标主分支：`main`
 
 ## 本轮背景
 
-- 用户要求确认通知计划是否按用户整合，目标是同一用户一个月只发送一次通知。
-- 用户要求必须实际打开通知计划页面截图验证，不能只口头判断。
-- 用户授权可把通知人设置为已登录 Telegram 账号，实际验证真实通知是否送达。
-- 用户要求再压测一轮代理列表自动续费开关并发打开/关闭。
+- 用户要求“跑真机测试，不要猜”。
+- 重点问题：未附加 IP 续费后，IP 删除计划和 IP 删除历史不能混淆；没有删除的未附加 IP 不能被当成已删除记录，也不能继续进入错误计划。
 
 ## 修复内容
 
-- `cloud/lifecycle.py`
-  - 新增 `monthly_notice` 月度合并通知事件。
-  - 生命周期巡检不再按到期提醒、自动续费预提醒、删机提醒、IP 回收提醒分别给同一用户多次发送。
-  - 同一用户同一自然月内命中的多类通知先按通知目标聚合，再生成一条“月度 IP 通知汇总”。
-  - 当前自然月已存在成功通知日志时，不再重复发送，并把本轮命中的对应订单通知字段标记为已通知。
-- `cloud/api_tasks.py`
-  - 通知计划页按用户和月份合并显示。
-  - 月度合并行支持展开多类通知来源，删除月度通知历史时会按 `field_order_ids` 恢复对应通知字段。
+- `cloud/lifecycle_plan_queries.py`
+  - IP 删除计划计数缓存升到 `v2`，避免旧计数缓存污染页面。
+  - 未附加 IP 已绑定待支付/已支付/开通中/待续费的“未绑定代理资产续费”订单后，不再进入 IP 删除计划。
+  - 服务器生命周期计划不再只排除“空实例 ID + 未附加 IP”，而是只要识别为未附加/保留固定 IP，就禁止进入关机计划和删机计划。
+  - 未附加 IP 删除计划不再要求 `instance_id` 为空；残留旧实例 ID 的未附加固定 IP 仍进入 IP 删除计划和 due 队列。
+  - IP 删除历史日志排除仍处于活跃 IP 删除计划的资产，避免旧 `CloudIpLog(deleted)` 让待释放 IP 同时出现在计划和历史。
+- `cloud/services.py`
+  - 保留中的未附加固定 IP 不再被 `deleted` 状态误判为不可续费。
+  - 未附加 IP 输入旧代理链接生成待支付续费订单后，刷新计划页快照。
 - `cloud/tests.py`
-  - 增加生命周期月度合并发送测试。
-  - 增加通知计划页同用户同月合并展示测试。
-- `apps/web-antd/src/views/dashboard/tasks/notices.vue`
-  - 通知计划页描述改为“按用户和月份整合通知计划；同一用户每月只生成一条合并文案”。
+  - 增加未附加 IP 保留状态可发起续费恢复测试。
+  - 增加已有续费恢复订单时排除 IP 删除计划测试。
+  - 增加“未附加 IP 残留旧实例 ID”不能进入关机/删机/IP 删除计划测试。
+  - 增加“未附加 IP 残留旧实例 ID 且有旧删除日志”仍只进入 IP 删除计划、不进入 IP 删除历史测试。
+
+## 真库实测
+
+- 默认本地库：`shop_manual_20260608_5676`
+- 前端：`http://127.0.0.1:5666`
+- 后端：`http://127.0.0.1:8000`
+- 测试资产：`CloudAsset #556`，公网 IP `18.138.xxx.xxx`，固定 IP 名 `StaticIp-707`。
+- 续费前：后端查询确认该 IP 在 IP 删除计划内、IP 删除历史外。
+- 续费下单：生成待支付订单 `SRVASSET...RENEW556`。
+- 修复前页面实测：该 IP 从 IP 删除计划查询层排除，但因为资产残留旧 `instance_id`，仍错误出现在“关机计划”表。
+- 清理测试订单后再次页面实测：计划页和浏览器内 API 确认目标资产不在关机/删机计划，重新进入 IP 删除计划，不进入 IP 删除历史。
+- 截图：`output/playwright/real-unattached-renewal-plan-page-fixed.png`
+- 补充截图：`output/playwright/real-unattached-ip-stale-instance-fixed.png`
+- 清理：已删除本轮测试订单、测试本地资产和测试日志，资产 #556 恢复为无订单、无用户、无测试 secret。
+
+## AWS 真机创建阻塞
+
+- 使用真实开通入口创建测试订单 `REALTEST...`，系统按轮询尝试 4 个启用 AWS 账号。
+- 4 个账号在创建前真实配额检查和 `GetStaticIp` 只读校验中均返回 `UnrecognizedClientException`。
+- 结论：当前后台 AWS 凭据无效/过期，本轮无法完成真实云端创建、删除、查询闭环；没有产生云资源成本。
 
 ## 验证
 
-后端通过：
+通过：
 
 ```bash
-uv run python -m py_compile cloud/lifecycle.py cloud/api_tasks.py cloud/tests.py
+uv run python -m py_compile cloud/lifecycle_plan_queries.py cloud/services.py cloud/tests.py
 uv run python manage.py check
-DJANGO_TEST_SQLITE=1 uv run python manage.py test cloud.tests.CloudServerServicesTestCase.test_lifecycle_monthly_notice_merges_types_for_same_user cloud.tests.CloudServerServicesTestCase.test_notice_plan_summary_merges_same_user_month_into_one_row cloud.tests.CloudServerServicesTestCase.test_notice_plan_summary_sorts_by_next_notice_time_before_user --settings=shop.settings --verbosity=1
+DJANGO_TEST_SQLITE=1 uv run python manage.py test cloud.tests.CloudServerServicesTestCase.test_lifecycle_plans_exclude_unattached_ip_with_stale_instance_after_recovery_order cloud.tests.CloudServerServicesTestCase.test_retained_unattached_deleted_status_asset_can_start_recovery_renewal cloud.tests.CloudServerServicesTestCase.test_unattached_ip_active_recovery_order_is_excluded_from_delete_plan cloud.tests.CloudServerServicesTestCase.test_unattached_ip_renewal_lists_recovery_plans_without_creating_order cloud.tests.CloudServerServicesTestCase.test_lifecycle_plans_retained_ip_after_server_delete_stays_in_ip_delete_plan --settings=shop.settings --verbosity=1
+DJANGO_TEST_SQLITE=1 uv run python manage.py test cloud.tests.CloudServerServicesTestCase.test_lifecycle_plans_stale_instance_unattached_ip_stays_in_ip_delete_plan cloud.tests.CloudServerServicesTestCase.test_lifecycle_plans_exclude_unattached_ip_with_stale_instance_after_recovery_order cloud.tests.CloudServerServicesTestCase.test_unattached_ip_active_recovery_order_is_excluded_from_delete_plan cloud.tests.CloudServerServicesTestCase.test_lifecycle_plans_retained_ip_after_server_delete_stays_in_ip_delete_plan cloud.tests.CloudServerServicesTestCase.test_unattached_ip_delete_items_skip_assets_attached_to_instance --settings=shop.settings --verbosity=1
 ```
-
-前端通过：
-
-```bash
-pnpm -F @vben/web-antd run typecheck
-```
-
-真实页面验证使用独立 SQLite 测试库 `.stress/notice_monthly.sqlite3`、前端 `127.0.0.1:5666`：
-
-- 通知计划页面显示 1 行月度合并通知。
-- 用户：`月度测试用户 @monthly_user`。
-- 通知类型：`月度合并通知：到期提醒、删机提醒`。
-- 计划范围：近期计划。
-- IP 数量：2。
-- 控制台无 error / warning。
-
-截图和结果文件：
-
-- `output/playwright/notice-monthly-plan.png`
-- `output/playwright/notice-monthly-plan-ip-list.png`
-- `output/playwright/notice-monthly-plan-result.json`
-- `output/playwright/notice-monthly-plan-ip-list-result.json`
-
-真实 Telegram 通知验证：
-
-- 默认库使用已登录且允许通知的个人号发送。
-- 通知已真实送达，`CloudUserNoticeLog` 最新 `monthly_notice` 记录为 `delivered=True`。
-- 发送尝试渠道为登录账号发送成功；未打印 Telegram session、密钥或验证码。
-- 临时测试订单和资产已按测试前缀删除，发送日志保留用于审计。
-
-自动续费开关并发压测：
-
-- 独立 SQLite 测试库 `.stress/notice_monthly.sqlite3` 中创建 12 条压测资产和 12 条对应订单。
-- 浏览器页面一次性点击前 8 个自动续费开关：
-  - 并发打开：8 个接口响应均为 200，页面显示 8 个“已开启”。
-  - 并发关闭：8 个接口响应均为 200，页面显示 0 个“已开启”。
-  - 数据库复核：12 个订单中 `auto_renew_enabled=True` 数量为 0，和关闭后页面一致。
-  - 控制台无 error / warning。
-
-截图和结果文件：
-
-- `output/playwright/auto-renew-concurrent-dom-clicks.png`
-- `output/playwright/auto-renew-concurrent-close.png`
-- `output/playwright/auto-renew-concurrent-dom-clicks-result.json`
-- `output/playwright/auto-renew-concurrent-close-result.json`
-
-## 结论
-
-- 通知计划已经从“按用户和通知类型拆行”重构为“按用户和月份合并”。
-- 生命周期真实发送链路已经按月度合并发送，目标用户同月不会重复收到多类云资产通知。
-- 代理列表自动续费开关并发打开/关闭在本轮 12 条真实页面样本中表现正常，没有发现接口失败、页面状态错乱或数据库状态丢失。
 
 ## 风险和下一步
 
-- 本轮没有创建或删除真实云服务器，没有真实支付或链上广播。
-- 后续可继续扩大自动续费开关并发样本，但必须继续使用独立测试库，不能污染默认业务库。
+- 当前 AWS 云账号凭据无效，真实创建/删除服务器无法继续，需要在后台更新有效 AWS Access Key/Secret 后再跑云端闭环。
+- 真实库仍存在同公网 IP 多行历史资产，后续应单独做去重治理和同步链路收敛，避免前端和计划表再次出现重复资产口径分叉。

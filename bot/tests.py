@@ -2447,7 +2447,7 @@ class RetainedIpRenewalUiTestCase(SimpleTestCase):
             text = _cloud_server_created_text(order, 443)
 
         self.assertIn('SOCKS5:', text)
-        self.assertIn('tg://socks?server=1.2.3.4&amp;port=9534&amp;user=abcdefabcdefabcdefabcdefabcdefab&amp;pass=abcdefabcdefabcdefabcdefabcdefab', text)
+        self.assertIn('https://t.me/socks?server=1.2.3.4&amp;port=9534&amp;user=abcdefabcdefabcdefabcdefabcdefab&amp;pass=abcdefabcdefabcdefabcdefabcdefab', text)
         self.assertNotIn('socks5://abcdefabcdefabcdefabcdefabcdefab', text)
 
     def test_cloud_server_created_text_recovers_socks5_from_install_note(self):
@@ -2466,7 +2466,7 @@ class RetainedIpRenewalUiTestCase(SimpleTestCase):
             text = _cloud_server_created_text(order, 443)
 
         self.assertIn('SOCKS5:', text)
-        self.assertIn('tg://socks?server=1.2.3.4&amp;port=9534&amp;user=abcdefabcdefabcdefabcdefabcdefab&amp;pass=abcdefabcdefabcdefabcdefabcdefab', text)
+        self.assertIn('https://t.me/socks?server=1.2.3.4&amp;port=9534&amp;user=abcdefabcdefabcdefabcdefabcdefab&amp;pass=abcdefabcdefabcdefabcdefabcdefab', text)
         self.assertNotIn('socks5://abcdefabcdefabcdefabcdefabcdefab', text)
 
     def test_cloud_server_created_text_prefers_main_proxy_link_for_one_click(self):
@@ -2509,7 +2509,7 @@ class RetainedIpRenewalUiTestCase(SimpleTestCase):
             text = _cloud_server_created_text(order, 443)
 
         self.assertIn('一键链接: -', text)
-        self.assertIn('SOCKS5: tg://socks?server=1.2.3.4&amp;port=9534&amp;user=abcdefabcdefabcdefabcdefabcdefab&amp;pass=abcdefabcdefabcdefabcdefabcdefab', text)
+        self.assertIn('SOCKS5: https://t.me/socks?server=1.2.3.4&amp;port=9534&amp;user=abcdefabcdefabcdefabcdefabcdefab&amp;pass=abcdefabcdefabcdefabcdefabcdefab', text)
 
     def test_proxy_links_text_converts_socks5_to_telegram_link(self):
         order = SimpleNamespace(
@@ -2522,7 +2522,7 @@ class RetainedIpRenewalUiTestCase(SimpleTestCase):
 
         text = _proxy_links_text(order)
 
-        self.assertIn('SOCKS5: tg://socks?server=1.2.3.4&amp;port=9534&amp;user=abcdefabcdefabcdefabcdefabcdefab&amp;pass=abcdefabcdefabcdefabcdefabcdefab', text)
+        self.assertIn('SOCKS5: https://t.me/socks?server=1.2.3.4&amp;port=9534&amp;user=abcdefabcdefabcdefabcdefabcdefab&amp;pass=abcdefabcdefabcdefabcdefabcdefab', text)
         self.assertNotIn('socks5://abcdefabcdefabcdefabcdefabcdefab', text)
 
     def test_retained_ip_renewal_plan_keyboard_uses_three_columns(self):

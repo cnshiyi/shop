@@ -648,7 +648,7 @@ def _compact_dashboard_note(note, *, max_chars=800):
         line = raw_line.strip()
         if not line:
             continue
-        if 'tg://proxy?' in line or 'socks5://' in line:
+        if 'tg://proxy?' in line or 'socks5://' in line or 'tg://socks?' in line or 't.me/socks?' in line:
             continue
         if line.startswith(('TG链接:', '分享链接:', '扩展链接:', 'SOCKS5链接:')):
             continue
@@ -2881,7 +2881,7 @@ def _run_unattached_ip_delete_sync(asset_id: int):
     should_check_window = bool(
         asset
         and getattr(asset, 'ip_delete_enabled', True) is not False
-        and not getattr(asset, 'instance_id', None)
+        and _asset_is_unattached_ip(asset)
         and asset.actual_expires_at
         and asset.actual_expires_at <= now
     )

@@ -20720,3 +20720,114 @@ pnpm -F @vben/web-antd run typecheck
 - 月度合并通知支持真实 Telegram 登录账号发送，本轮已实测送达。
 - 自动续费开关并发打开和关闭在真实前端页面、接口响应和数据库状态三侧一致。
 - 本轮没有创建或删除真实云服务器，没有真实支付或链上广播。
+
+## 2026-06-10 16:55 CST 未附加 IP 续费计划页真库实测与修复
+
+### 本轮背景
+
+- 用户要求“跑真机测试，不要猜”。
+- 重点检查未附加 IP 续费后，IP 删除计划、IP 删除历史、关机计划不能混淆。
+
+### 修复
+
+- `cloud/lifecycle_plan_queries.py`
+  - IP 删除计划计数缓存 key 升级到 `v2`。
+  - 已生成“未绑定代理资产续费”活跃订单的未附加 IP，不再进入 IP 删除计划。
+  - 服务器计划查询不再依赖 `instance_id` 是否为空；只要资产被识别为未附加/保留固定 IP，就排除出关机计划和删机计划。
+- `cloud/services.py`
+  - 保留中的未附加固定 IP 即使本地状态是 `deleted`，只要没有真实释放/云端不存在终态标记，仍允许走续费恢复。
+  - 未附加 IP 输入旧代理链接生成待支付订单后刷新计划页快照。
+- `cloud/tests.py`
+  - 增加未附加 IP 保留状态可续费恢复测试。
+  - 增加活跃续费恢复订单排除 IP 删除计划测试。
+  - 增加残留旧实例 ID 的未附加 IP 不能进入关机/删机/IP 删除计划测试。
+
+### 真库实测
+
+- 默认本地库：`shop_manual_20260608_5676`
+- 前端：`127.0.0.1:5666`
+- 后端：`127.0.0.1:8000`
+- 测试资产：`CloudAsset #556`，公网 IP 已脱敏为 `18.138.xxx.xxx`。
+- 续费前：目标 IP 在 IP 删除计划内、IP 删除历史外。
+- 创建待支付续费恢复订单后：后端查询层确认目标 IP 不在 IP 删除计划、也不在 IP 删除历史。
+- 页面复现：修复前目标 IP 仍出现在“关机计划”，原因是资产残留旧 `instance_id`。
+- 修复后页面重测：
+  - 页面 DOM 中目标 IP 出现次数为 `0`。
+  - 浏览器内 API 返回的 `shutdown_plan_items` 和 `ip_delete_plan_items` 均不包含目标 IP。
+  - 截图：`output/playwright/real-unattached-renewal-plan-page-fixed.png`
+- 清理：测试订单、失败创建本地资产和测试日志已删除，资产 #556 恢复到测试前绑定状态。
+
+### AWS 真机创建阻塞
+
+- 使用真实创建入口创建 `REALTEST...` 测试订单。
+- 系统轮询 4 个启用 AWS 账号。
+- 4 个账号真实配额检查和 `GetStaticIp` 只读校验均返回 `UnrecognizedClientException`。
+- 结论：当前后台 AWS 凭据无效或过期，本轮无法完成云端真实创建/删除闭环；没有成功创建云服务器，也没有产生云资源成本。
+
+### 验证
+
+通过：
+
+```bash
+uv run python -m py_compile cloud/lifecycle_plan_queries.py cloud/services.py cloud/tests.py
+uv run python manage.py check
+DJANGO_TEST_SQLITE=1 uv run python manage.py test cloud.tests.CloudServerServicesTestCase.test_lifecycle_plans_exclude_unattached_ip_with_stale_instance_after_recovery_order cloud.tests.CloudServerServicesTestCase.test_retained_unattached_deleted_status_asset_can_start_recovery_renewal cloud.tests.CloudServerServicesTestCase.test_unattached_ip_active_recovery_order_is_excluded_from_delete_plan cloud.tests.CloudServerServicesTestCase.test_unattached_ip_renewal_lists_recovery_plans_without_creating_order cloud.tests.CloudServerServicesTestCase.test_lifecycle_plans_retained_ip_after_server_delete_stays_in_ip_delete_plan --settings=shop.settings --verbosity=1
+```
+
+### 后续
+
+- 更新有效 AWS 云账号凭据后，重新执行真实创建服务器、删机保留固定 IP、未附加 IP 续费恢复到新实例的完整云端闭环。
+- 真实库存在同公网 IP 多行历史资产，建议后续单独做数据去重治理和同步链路收敛。
+
+## 2026-06-10 17:15 CST 修复未附加 IP 残留旧实例 ID 漏出 IP 删除计划
+
+### 背景
+
+- 继续按用户要求进行真机页面复测。
+- 清理未附加 IP 续费测试订单后，真实资产 `CloudAsset #556` 应重新进入 IP 删除计划。
+- 该资产云端/本地语义是未附加固定 IP，但本地还残留旧 `instance_id`。
+
+### 问题
+
+- 前一轮只修掉了这类资产误入关机计划的问题。
+- 继续复核发现：`unattached_ip_delete_active_queryset()` 仍要求 `instance_id` 为空，导致残留旧实例 ID 的未附加 IP 从 IP 删除计划漏掉。
+- 页面接口复测还发现旧 `CloudIpLog(deleted)` 可能让活跃待删除资产同时显示在 IP 删除历史中，造成计划和历史混淆。
+
+### 修复
+
+- `cloud/lifecycle_plan_queries.py`
+  - IP 删除活跃计划不再依赖空 `instance_id`，只要命中未附加/StaticIp/固定 IP 保留语义且不是终态，就进入 IP 删除计划。
+  - IP 删除历史资产查询同样去掉空 `instance_id` 依赖，避免终态固定 IP 记录漏出历史。
+  - IP 删除计划尾页优化候选从“空实例 ID”改为“未附加/StaticIp 候选”。
+  - 新增 `unattached_ip_delete_history_log_queryset()`，排除仍处于活跃 IP 删除计划的资产日志，避免旧删除日志把待释放 IP 混进历史。
+- `bot/api.py`
+  - 手动 IP 删除入口的执行窗口判断改为使用未附加 IP 识别函数，不再依赖空 `instance_id`。
+- `cloud/tests.py`
+  - 增加“未附加 IP 残留旧实例 ID 且有旧删除日志”仍只进入 IP 删除计划、不进入关机/删机/IP 删除历史测试。
+  - 调整旧的“附加实例跳过”测试，让它表示真正普通运行中服务器，而不是带未附加标记的脏数据。
+
+### 真机复测
+
+- 数据库：`shop_manual_20260608_5676`
+- 前端：`127.0.0.1:5666`
+- 后端：`127.0.0.1:8000`
+- 资产：`CloudAsset #556`，公网 IP 脱敏为 `18.138.xxx.xxx`。
+- 后端查询层：
+  - `server_has_556=False`
+  - `ip_delete_has_556=True`
+  - `history_log_has_556=False`
+- 页面接口：
+  - `shutdown_plan_items` 不包含 `asset_id=556`
+  - `server_delete_items` 不包含 `asset_id=556`
+  - `ip_delete_plan_items` 包含 `asset_id=556`
+  - `ip_delete_history_items` 不包含 `asset_id=556`
+- 截图：`output/playwright/real-unattached-ip-stale-instance-fixed.png`
+
+### 验证
+
+```bash
+uv run python -m py_compile cloud/lifecycle_plan_queries.py bot/api.py cloud/tests.py
+uv run python manage.py check
+DJANGO_TEST_SQLITE=1 uv run python manage.py test cloud.tests.CloudServerServicesTestCase.test_lifecycle_plans_stale_instance_unattached_ip_stays_in_ip_delete_plan cloud.tests.CloudServerServicesTestCase.test_lifecycle_plans_exclude_unattached_ip_with_stale_instance_after_recovery_order cloud.tests.CloudServerServicesTestCase.test_unattached_ip_active_recovery_order_is_excluded_from_delete_plan cloud.tests.CloudServerServicesTestCase.test_lifecycle_plans_retained_ip_after_server_delete_stays_in_ip_delete_plan cloud.tests.CloudServerServicesTestCase.test_unattached_ip_delete_items_skip_assets_attached_to_instance --settings=shop.settings --verbosity=1
+git diff --check
+```

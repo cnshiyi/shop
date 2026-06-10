@@ -1,10 +1,11 @@
 from asgiref.sync import sync_to_async
 import logging
 import re
-from urllib.parse import urlparse
+from urllib.parse import parse_qs, unquote, urlparse
 
 from django.utils import timezone
 
+from django.db import transaction
 from django.db.models import Q
 
 from cloud.asset_expiry import order_asset_expiry
@@ -22,6 +23,10 @@ from cloud.ports import MTPROXY_DEFAULT_PORT, get_mtproxy_port_label, get_mtprox
 logger = logging.getLogger(__name__)
 
 _PROVISION_PROGRESS: dict[int, dict[str, object]] = {}
+_PROVISION_ACTIVE_WINDOW = timezone.timedelta(minutes=90)
+_PROVISION_RUNNING_STATUSES = {'provisioning'}
+_PROVISION_CLAIMABLE_STATUSES = {'paid', 'failed', 'provisioning'}
+_SOCKS_LINK_RE = re.compile(r'(?:socks5://|tg://socks\?|https?://t\.me/socks\?)[^"\'\s<>]+', re.IGNORECASE)
 
 
 def _mask_log_value(value, visible=4):
@@ -38,6 +43,7 @@ def _mask_proxy_log_text(value):
     if not text:
         return ''
     text = re.sub(r'(secret=)[^&\s]+', r'\1***', text, flags=re.IGNORECASE)
+    text = re.sub(r'((?:[?&](?:user|pass))=)[^&\s]+', r'\1***', text, flags=re.IGNORECASE)
     text = re.sub(r'(secret\s*[:=]\s*)(ee|dd)?[0-9a-fA-F]{32,}', r'\1***', text, flags=re.IGNORECASE)
     text = re.sub(r'(旧secret\s*[：:=]?\s*)(ee|dd)?[0-9a-fA-F]{16,}', r'\1***', text, flags=re.IGNORECASE)
     text = re.sub(r'socks5://[^:@/\s]+:[^@/\s]+@', 'socks5://***:***@', text, flags=re.IGNORECASE)
@@ -111,6 +117,58 @@ def get_provision_progress(order_id: int) -> dict[str, object]:
     return dict(_PROVISION_PROGRESS.get(int(order_id), {}))
 
 
+def _is_socks_link(url: str) -> bool:
+    text = str(url or '').lower()
+    return text.startswith(('socks5://', 'tg://socks?', 'https://t.me/socks?', 'http://t.me/socks?'))
+
+
+def _parse_socks_link(link: str) -> dict[str, str] | None:
+    text = str(link or '').strip().rstrip(',.，。')
+    if not text:
+        return None
+    parsed = urlparse(text)
+    if parsed.scheme.lower() == 'socks5':
+        return {
+            'server': parsed.hostname or '',
+            'port': str(parsed.port or ''),
+            'username': unquote(parsed.username or ''),
+            'password': unquote(parsed.password or ''),
+        }
+    if _is_socks_link(text):
+        query = parse_qs(parsed.query)
+        return {
+            'server': str((query.get('server') or [''])[0] or '').strip(),
+            'port': str((query.get('port') or [''])[0] or '').strip(),
+            'username': str((query.get('user') or [''])[0] or '').strip(),
+            'password': str((query.get('pass') or [''])[0] or '').strip(),
+        }
+    return None
+
+
+@sync_to_async
+def _claim_provision_execution(order_id: int, *, action_label: str, allow_recent_provisioning: bool = False):
+    now = timezone.now()
+    with transaction.atomic():
+        order = CloudServerOrder.objects.select_for_update().filter(id=order_id).first()
+        if not order:
+            return False, None, '订单不存在'
+        status = str(order.status or '')
+        updated_at = getattr(order, 'updated_at', None)
+        active_since = now - _PROVISION_ACTIVE_WINDOW
+        if (
+            status in _PROVISION_RUNNING_STATUSES
+            and not allow_recent_provisioning
+            and updated_at
+            and updated_at >= active_since
+        ):
+            return False, order, f'{action_label}任务正在执行中，请等待当前任务完成。'
+        if status not in _PROVISION_CLAIMABLE_STATUSES:
+            return False, order, f'当前订单状态不允许执行{action_label}: {status or "-"}'
+        order.status = 'provisioning'
+        order.save(update_fields=['status', 'updated_at'])
+        return True, order, ''
+
+
 def _extract_proxy_links(note: str) -> list[dict[str, str]]:
     links = []
     seen = set()
@@ -132,15 +190,15 @@ def _extract_proxy_links(note: str) -> list[dict[str, str]]:
             server = link.split('server=', 1)[1].split('&', 1)[0].strip()
         mode = get_mtproxy_port_label(main_port or port, port) if port else 'MTProxy'
         links.append({'name': mode, 'server': server, 'port': port, 'secret': secret, 'url': link})
-    for raw_link in re.findall(r'socks5://[^"\'\s<>]+', note or ''):
+    for raw_link in _SOCKS_LINK_RE.findall(note or ''):
         link = raw_link.rstrip(',.，。')
         if not link or link in seen:
             continue
-        parsed = urlparse(link)
-        port = str(parsed.port or '')
-        server = parsed.hostname or ''
-        username = parsed.username or ''
-        password = parsed.password or ''
+        parsed_socks = _parse_socks_link(link) or {}
+        port = parsed_socks.get('port', '')
+        server = parsed_socks.get('server', '')
+        username = parsed_socks.get('username', '')
+        password = parsed_socks.get('password', '')
         seen.add(link)
         links.append({
             'name': get_mtproxy_port_label(main_port or port, port) if port else 'SOCKS5',
@@ -211,6 +269,8 @@ def _compact_proxy_install_note(note: str, proxy_links: list[dict[str, str]], ma
         'MTProxy 安装完成' not in str(note or '')
         and 'SOCKS5链接:' not in str(note or '')
         and 'socks5://' not in str(note or '')
+        and 'tg://socks?' not in str(note or '')
+        and 't.me/socks?' not in str(note or '')
         and 'tg://proxy?' not in str(note or '')
     ):
         return note
@@ -224,7 +284,7 @@ def _compact_proxy_install_note(note: str, proxy_links: list[dict[str, str]], ma
         url = str(item.get('url') or '')
         if not port:
             continue
-        if url.startswith('socks5://'):
+        if _is_socks_link(url):
             socks5_port = port
         elif port not in mtproxy_ports:
             mtproxy_ports.append(port)
@@ -248,7 +308,7 @@ def _strip_raw_proxy_link_lines(note: str | None) -> str:
         line = raw_line.strip()
         if not line:
             continue
-        if 'tg://proxy?' in line or 'socks5://' in line:
+        if 'tg://proxy?' in line or 'socks5://' in line or 'tg://socks?' in line or 't.me/socks?' in line:
             continue
         if line.startswith(('TG链接:', '分享链接:', '扩展链接:', 'SOCKS5链接:')):
             continue
@@ -338,6 +398,23 @@ def _upsert_server_asset(order: CloudServerOrder, note: str, *, expires_at=None,
             'status': CloudAsset.STATUS_RUNNING if order.status in {'completed', 'expiring', 'renew_pending', 'suspended'} else CloudAsset.STATUS_PENDING,
             'is_active': order.status in {'provisioning', 'completed', 'expiring', 'renew_pending', 'suspended'},
         }
+    if order.replacement_for_id and order.public_ip:
+        conflicting_source_asset = (
+            CloudAsset.objects.filter(kind=CloudAsset.KIND_SERVER, order_id=order.replacement_for_id, public_ip=order.public_ip)
+            .exclude(id=getattr(server_asset, 'id', None))
+            .order_by('-updated_at', '-id')
+            .first()
+        )
+        if conflicting_source_asset:
+            CloudAsset.objects.filter(id=conflicting_source_asset.id).update(
+                public_ip=None,
+                previous_public_ip=conflicting_source_asset.previous_public_ip or order.public_ip,
+                mtproxy_host=None,
+                status=CloudAsset.STATUS_DELETING,
+                provider_status='旧机保留期，等待删除',
+                is_active=False,
+                updated_at=timezone.now(),
+            )
     if server_asset:
         _preserve_existing_asset_defaults(defaults, server_asset, preserve_expiry=preserve_expiry)
         for key, value in defaults.items():
@@ -669,16 +746,37 @@ def _is_transient_create_failure(note: str) -> bool:
     return any(marker in text for marker in transient_markers)
 
 
+def _is_remote_bootstrap_locked(note: str) -> bool:
+    text = str(note or '')
+    return '同一服务器已有安装任务正在执行' in text or 'BOOTSTRAP_LOCKED=1' in text
+
+
 async def _check_provider_create_capacity(order: CloudServerOrder) -> tuple[bool, str]:
     if order.provider == 'aws_lightsail':
         return await check_aws_create_capacity(await _get_aws_create_payload(order.id))
     return True, '当前云厂商无需创建前配额检查。'
 
 
-async def provision_cloud_server(order_id: int):
+async def provision_cloud_server(order_id: int, *, allow_recent_provisioning: bool = False):
     started_at = timezone.now()
     logger.info('云服务器开通开始: order_id=%s', order_id)
     try:
+        claimed, claimed_order, claim_note = await _claim_provision_execution(
+            order_id,
+            action_label='云服务器开通',
+            allow_recent_provisioning=allow_recent_provisioning,
+        )
+        if not claimed:
+            if claimed_order:
+                logger.info(
+                    '云服务器开通跳过: order=%s status=%s reason=%s',
+                    getattr(claimed_order, 'order_no', None),
+                    getattr(claimed_order, 'status', None),
+                    claim_note,
+                )
+                return claimed_order
+            logger.warning('云服务器开通失败: 订单不存在 order_id=%s', order_id)
+            return None
         order = await _ensure_order_cloud_account(order_id)
         if not order:
             logger.warning('云服务器开通失败: 订单不存在 order_id=%s', order_id)
@@ -989,6 +1087,14 @@ async def provision_cloud_server(order_id: int):
             bbr_warning = '' if bbr_ok else 'BBR 初始化失败，但 MTProxy 已安装成功，订单按代理可用处理。'
             note = '\n'.join(part for part in [result.note, move_note, bbr_warning, bbr_note, mtproxy_note] if part)
             if not mtproxy_ok:
+                if _is_remote_bootstrap_locked(mtproxy_note):
+                    logger.warning(
+                        '云服务器开通跳过: order=%s reason=remote_bootstrap_locked elapsed_seconds=%s',
+                        order.order_no,
+                        (timezone.now() - started_at).total_seconds(),
+                    )
+                    clear_provision_progress(order_id)
+                    return await _get_order(order_id)
                 logger.warning(
                     '云服务器开通失败: order=%s reason=mtproxy_failed bbr_ok=%s mtproxy_ok=%s elapsed_seconds=%s',
                     order.order_no,
@@ -1080,6 +1186,17 @@ async def provision_cloud_server(order_id: int):
 
 
 async def reprovision_cloud_server_bootstrap(order_id: int):
+    claimed, claimed_order, claim_note = await _claim_provision_execution(order_id, action_label='重试初始化')
+    if not claimed:
+        if claimed_order:
+            logger.info(
+                '[PROVISION][RETRY] skip order=%s status=%s reason=%s',
+                getattr(claimed_order, 'order_no', None),
+                getattr(claimed_order, 'status', None),
+                claim_note,
+            )
+            return claimed_order
+        return None
     order = await _get_order(order_id)
     if not order:
         return None
@@ -1103,6 +1220,9 @@ async def reprovision_cloud_server_bootstrap(order_id: int):
     bbr_warning = '' if bbr_ok else 'BBR 初始化失败，但 MTProxy 已安装成功，订单按代理可用处理。'
     note = '\n'.join(part for part in ['已执行重试初始化。', bbr_warning, bbr_note, mtproxy_note] if part)
     if not mtproxy_ok:
+        if _is_remote_bootstrap_locked(mtproxy_note):
+            clear_provision_progress(order_id)
+            return await _get_order(order_id)
         saved = await _mark_failed(order_id, note)
         clear_provision_progress(order_id)
         return saved

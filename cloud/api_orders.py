@@ -25,8 +25,8 @@ from core.runtime_config import get_runtime_config
 
 logger = logging.getLogger(__name__)
 
-_PROXY_URL_RE = re.compile(r'(?i)\b(?:tg://proxy|socks5://|https?://t\.me/proxy)[^\s，。；;]+')
-_SECRET_PARAM_RE = re.compile(r'(?i)secret=[^&\s，。；;]+')
+_PROXY_URL_RE = re.compile(r'(?i)\b(?:tg://proxy|tg://socks|socks5://|https?://t\.me/proxy|https?://t\.me/socks)[^\s，。；;]+')
+_SECRET_PARAM_RE = re.compile(r'(?i)(?:secret|user|pass)=[^&\s，。；;]+')
 _SOCKS_CREDENTIAL_RE = re.compile(r'(?i)(socks5://)[^@\s/]+@')
 _IPV4_RE = re.compile(r'\b(?:(?:25[0-5]|2[0-4]\d|1?\d?\d)\.){3}(?:25[0-5]|2[0-4]\d|1?\d?\d)\b')
 
@@ -598,7 +598,7 @@ def _apply_cloud_order_status(order, new_status):
         )
 
     if trigger_provision:
-        async_to_sync(provision_cloud_server)(order.id)
+        async_to_sync(provision_cloud_server)(order.id, allow_recent_provisioning=True)
         order.refresh_from_db()
 
     logger.info(

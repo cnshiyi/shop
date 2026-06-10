@@ -16,8 +16,10 @@ from core.cloud_accounts import cloud_account_label_variants
 from core.models import CloudAccountConfig
 
 _LIFECYCLE_PLAN_COUNTS_CACHE_KEY = 'cloud:lifecycle-plan:server-counts:v2'
-_LIFECYCLE_IP_DELETE_COUNTS_CACHE_KEY = 'cloud:lifecycle-plan:ip-delete-counts:v1'
+_LIFECYCLE_IP_DELETE_COUNTS_CACHE_KEY = 'cloud:lifecycle-plan:ip-delete-counts:v2'
 _LIFECYCLE_PLAN_COUNTS_CACHE_TTL = 30
+_ASSET_RENEWAL_MARKER = '未绑定代理资产续费'
+_ACTIVE_ASSET_RENEWAL_ORDER_STATUSES = ['pending', 'paid', 'provisioning', 'renew_pending']
 
 
 def page_bounds(page: int, page_size: int) -> tuple[int, int]:
@@ -137,7 +139,6 @@ def server_shutdown_complete_q():
 
 
 def server_lifecycle_plan_queryset():
-    blank_instance_q = Q(instance_id__isnull=True) | Q(instance_id='')
     return (
         CloudAsset.objects.select_related('order', 'user', 'cloud_account', 'order__cloud_account')
         .filter(kind=CloudAsset.KIND_SERVER, actual_expires_at__isnull=False)
@@ -147,7 +148,7 @@ def server_lifecycle_plan_queryset():
             CloudAsset.STATUS_TERMINATED,
             CloudAsset.STATUS_TERMINATING,
         ])
-        .exclude(blank_instance_q & unattached_ip_asset_q())
+        .exclude(unattached_ip_asset_q())
     )
 
 
@@ -338,23 +339,24 @@ def unattached_ip_deleted_or_missing_q():
 
 
 def unattached_ip_delete_active_queryset():
-    blank_instance_q = Q(instance_id__isnull=True) | Q(instance_id='')
+    active_renewal_q = (
+        Q(order__status__in=_ACTIVE_ASSET_RENEWAL_ORDER_STATUSES)
+        & Q(order__provision_note__icontains=_ASSET_RENEWAL_MARKER)
+    )
     return (
         CloudAsset.objects.select_related('order', 'user', 'cloud_account', 'order__cloud_account')
         .filter(kind=CloudAsset.KIND_SERVER)
         .filter(broad_unattached_ip_asset_q())
-        .filter(blank_instance_q)
         .exclude(unattached_ip_deleted_or_missing_q())
+        .exclude(active_renewal_q)
     )
 
 
 def unattached_ip_delete_history_asset_queryset():
-    blank_instance_q = Q(instance_id__isnull=True) | Q(instance_id='')
     return (
         CloudAsset.objects.select_related('order', 'user', 'cloud_account', 'order__cloud_account')
         .filter(kind=CloudAsset.KIND_SERVER)
         .filter(broad_unattached_ip_asset_q())
-        .filter(blank_instance_q)
         .filter(unattached_ip_deleted_or_missing_q())
     )
 
@@ -416,8 +418,9 @@ def _unattached_ip_delete_tail_page(queryset, *, reverse_start: int, count: int)
     if target <= 0:
         return []
     candidate_sources = [
-        CloudAsset.objects.filter(kind=CloudAsset.KIND_SERVER, instance_id='').order_by('-actual_expires_at', '-id'),
-        CloudAsset.objects.filter(kind=CloudAsset.KIND_SERVER, instance_id__isnull=True).order_by('-actual_expires_at', '-id'),
+        CloudAsset.objects.filter(kind=CloudAsset.KIND_SERVER)
+        .filter(broad_unattached_ip_asset_q())
+        .order_by('-actual_expires_at', '-id'),
     ]
     source_state = {}
     heap = []
@@ -505,8 +508,17 @@ def unattached_ip_delete_history_q():
         Q(asset__provider_status__icontains='未附加')
         | Q(asset__note__icontains='未附加固定IP')
         | Q(asset__provider_resource_id__icontains='StaticIp')
-    ) & (Q(asset__instance_id__isnull=True) | Q(asset__instance_id=''))
+    )
     return terminal_q & (explicit_note_q | asset_q)
+
+
+def unattached_ip_delete_history_log_queryset():
+    active_asset_ids = unattached_ip_delete_active_unique_queryset().values('id')
+    return (
+        CloudIpLog.objects
+        .filter(unattached_ip_delete_history_q())
+        .filter(Q(asset_id__isnull=True) | ~Q(asset_id__in=Subquery(active_asset_ids)))
+    )
 
 
 def ip_delete_plan_counts() -> dict[str, int]:
@@ -519,7 +531,7 @@ def ip_delete_plan_counts() -> dict[str, int]:
             'ip_delete_history_log_count': int(cached.get('ip_delete_history_log_count') or 0),
         }
     active_count = unattached_ip_delete_active_unique_queryset().count()
-    history_log_count = CloudIpLog.objects.filter(unattached_ip_delete_history_q()).count()
+    history_log_count = unattached_ip_delete_history_log_queryset().count()
     history_asset_count = unattached_ip_delete_history_asset_queryset().count()
     counts = {
         'ip_delete_count': active_count,
@@ -539,7 +551,7 @@ def ip_delete_history_page_sources(
     asset_total: int | None = None,
 ) -> list[tuple[str, object]]:
     start, end = page_bounds(page, page_size)
-    history_logs = CloudIpLog.objects.filter(unattached_ip_delete_history_q()).select_related('asset', 'order', 'user').order_by('-created_at', '-id')
+    history_logs = unattached_ip_delete_history_log_queryset().select_related('asset', 'order', 'user').order_by('-created_at', '-id')
     history_assets = unattached_ip_delete_history_asset_queryset().order_by('-updated_at', '-id')
     if log_total is None:
         log_total = history_logs.count()
@@ -572,7 +584,7 @@ def ip_delete_history_page_sources(
         reverse_start = max(total - end, 0)
         reverse_end = reverse_start + (end - start)
         start, end = reverse_start, reverse_end
-        history_logs = CloudIpLog.objects.filter(unattached_ip_delete_history_q()).select_related('asset', 'order', 'user').order_by('created_at', 'id')
+        history_logs = unattached_ip_delete_history_log_queryset().select_related('asset', 'order', 'user').order_by('created_at', 'id')
         history_assets = unattached_ip_delete_history_asset_queryset().order_by('updated_at', 'id')
 
     chunk_size = max(page_size * 4, 50)
@@ -705,7 +717,7 @@ def _ip_delete_history_page_with_sparse_assets(
         reverse_count = max_log_index - min_log_index + 1
         log_rows = list(
             CloudIpLog.objects
-            .filter(unattached_ip_delete_history_q())
+            .filter(pk__in=history_logs.values('pk'))
             .select_related('asset', 'order', 'user')
             .order_by('created_at', 'id')[reverse_start:reverse_start + reverse_count]
         )

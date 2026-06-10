@@ -31,8 +31,8 @@ from cloud.services import cloud_asset_can_auto_renew, sync_cloud_asset_user_bin
 from core.cloud_accounts import cloud_account_label, cloud_account_label_variants, list_cloud_account_labels
 from core.dashboard_api import _countdown_label, _days_left, _decimal_to_str, _get_keyword, _iso, _ok, _provider_label, _provider_status_label, _region_label, _server_source_label, _split_usernames, _status_label, _user_payload, dashboard_login_required
 
-_PROXY_URL_RE = re.compile(r'(?i)\b(?:tg://proxy|socks5://|https?://t\.me/proxy)[^\s，。；;]+')
-_SECRET_PARAM_RE = re.compile(r'(?i)secret=[^&\s，。；;]+')
+_PROXY_URL_RE = re.compile(r'(?i)\b(?:tg://proxy|tg://socks|socks5://|https?://t\.me/proxy|https?://t\.me/socks)[^\s，。；;]+')
+_SECRET_PARAM_RE = re.compile(r'(?i)(?:secret|user|pass)=[^&\s，。；;]+')
 _SOCKS_CREDENTIAL_RE = re.compile(r'(?i)(socks5://)[^@\s/]+@')
 _IPV4_RE = re.compile(r'\b(?:(?:25[0-5]|2[0-4]\d|1?\d?\d)\.){3}(?:25[0-5]|2[0-4]\d|1?\d?\d)\b')
 _TELEGRAM_USERNAME_RE = re.compile(r'^[A-Za-z0-9_]{3,64}$')
@@ -487,7 +487,7 @@ def _display_cloud_asset_note(note: str | None) -> str:
         line = raw_line.strip()
         if not line:
             continue
-        if 'tg://proxy?' in line or 'socks5://' in line:
+        if 'tg://proxy?' in line or 'socks5://' in line or 'tg://socks?' in line or 't.me/socks?' in line:
             continue
         if line.startswith(('TG链接:', '分享链接:', '扩展链接:', 'SOCKS5链接:')):
             continue

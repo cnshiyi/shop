@@ -284,6 +284,33 @@ if command -v sudo >/dev/null 2>&1; then
 else
   SUDO=''
 fi
+BOOTSTRAP_LOCK=/tmp/shop-cloud-bootstrap.lock
+prepare_bootstrap_lock() {
+  if [ "$(id -u)" -eq 0 ]; then
+    touch "$BOOTSTRAP_LOCK" && chmod 0666 "$BOOTSTRAP_LOCK"
+  elif command -v sudo >/dev/null 2>&1; then
+    sudo sh -c "touch '$BOOTSTRAP_LOCK' && chmod 0666 '$BOOTSTRAP_LOCK'"
+  else
+    touch "$BOOTSTRAP_LOCK"
+  fi
+}
+if command -v flock >/dev/null 2>&1; then
+  prepare_bootstrap_lock || true
+  exec 9>>"$BOOTSTRAP_LOCK"
+  if ! flock -n 9; then
+    echo 'BOOTSTRAP_LOCKED=1'
+    echo '同一服务器已有安装任务正在执行，已跳过本次 BBR 初始化。'
+    exit 75
+  fi
+else
+  BOOTSTRAP_LOCK_DIR=/tmp/shop-cloud-bootstrap.lockdir
+  if ! mkdir "$BOOTSTRAP_LOCK_DIR" 2>/dev/null; then
+    echo 'BOOTSTRAP_LOCKED=1'
+    echo '同一服务器已有安装任务正在执行，已跳过本次 BBR 初始化。'
+    exit 75
+  fi
+  trap 'rmdir "$BOOTSTRAP_LOCK_DIR" >/dev/null 2>&1 || true' EXIT
+fi
 $SUDO apt-get update -y
 $SUDO apt-get install -y ca-certificates curl wget sudo procps
 printf '%s\n' 'net.core.default_qdisc=fq' 'net.ipv4.tcp_congestion_control=bbr' | $SUDO tee /etc/sysctl.d/99-bbr.conf >/dev/null
@@ -324,6 +351,33 @@ if [ "$(id -u)" -ne 0 ]; then
   fi
 fi
 SUDO=''
+BOOTSTRAP_LOCK=/tmp/shop-cloud-bootstrap.lock
+prepare_bootstrap_lock() {{
+  if [ "$(id -u)" -eq 0 ]; then
+    touch "$BOOTSTRAP_LOCK" && chmod 0666 "$BOOTSTRAP_LOCK"
+  elif command -v sudo >/dev/null 2>&1; then
+    sudo sh -c "touch '$BOOTSTRAP_LOCK' && chmod 0666 '$BOOTSTRAP_LOCK'"
+  else
+    touch "$BOOTSTRAP_LOCK"
+  fi
+}}
+if command -v flock >/dev/null 2>&1; then
+  prepare_bootstrap_lock || true
+  exec 9>>"$BOOTSTRAP_LOCK"
+  if ! flock -n 9; then
+    echo 'MTPROXY_STATUS=FAILED'
+    echo 'MTPROXY_ERROR=同一服务器已有安装任务正在执行，已跳过本次 MTProxy 安装。'
+    exit 75
+  fi
+else
+  BOOTSTRAP_LOCK_DIR=/tmp/shop-cloud-bootstrap.lockdir
+  if ! mkdir "$BOOTSTRAP_LOCK_DIR" 2>/dev/null; then
+    echo 'MTPROXY_STATUS=FAILED'
+    echo 'MTPROXY_ERROR=同一服务器已有安装任务正在执行，已跳过本次 MTProxy 安装。'
+    exit 75
+  fi
+  trap 'rmdir "$BOOTSTRAP_LOCK_DIR" >/dev/null 2>&1 || true' EXIT
+fi
 WORKDIR='{MTPROXY_DIR}'
 mkdir -p "$WORKDIR"
 cd "$WORKDIR"
@@ -908,7 +962,7 @@ echo "MTPROXY_SOCKS5_STATUS=OK"
 echo "MTPROXY_SOCKS5_PORT=$SOCKS5_PORT"
 echo "MTPROXY_SOCKS5_USER=$SOCKS5_USER"
 echo "MTPROXY_SOCKS5_PASS=$SOCKS5_PASS"
-echo "MTPROXY_SOCKS5_LINK=socks5://$SOCKS5_USER:$SOCKS5_PASS@$PUBLIC_IP:$SOCKS5_PORT"
+echo "MTPROXY_SOCKS5_LINK=https://t.me/socks?server=$PUBLIC_IP&port=$SOCKS5_PORT&user=$SOCKS5_USER&pass=$SOCKS5_PASS"
 PROC_OK=0
 if ps -ef | grep -i 'mtproto-proxy' | grep -v grep >/dev/null 2>&1; then
   PROC_OK=1
@@ -976,6 +1030,7 @@ def _sanitize_bootstrap_output(text: str) -> str:
     secret_pattern = re.compile(r'(secret(?:=|:|\s+)[\s\"\']*)(ee|dd)?[0-9a-fA-F]{32,}(\b|$)', re.IGNORECASE)
     link_secret_pattern = re.compile(r'(secret=)(ee|dd)?[0-9a-fA-F]{32,}', re.IGNORECASE)
     socks5_auth_pattern = re.compile(r'(socks5://)([^:\s/@]+):([^@\s]+)@', re.IGNORECASE)
+    socks_query_auth_pattern = re.compile(r'((?:[?&](?:user|pass))=)[^&\s，。；;]+', re.IGNORECASE)
     pass_assignment_pattern = re.compile(r'(PASS=)[^\s]+')
     chpasswd_pattern = re.compile(r'((?:root|admin):)[^\s]+')
     for raw_line in (text or '').splitlines():
@@ -984,6 +1039,7 @@ def _sanitize_bootstrap_output(text: str) -> str:
         line = chpasswd_pattern.sub(r'\1***', line)
         line = link_secret_pattern.sub(r'\1***', line)
         line = socks5_auth_pattern.sub(r'\1***:***@', line)
+        line = socks_query_auth_pattern.sub(r'\1***', line)
         line = secret_pattern.sub(r'\1***', line)
         sanitized_lines.append(line)
     return '\n'.join(sanitized_lines)
@@ -1393,7 +1449,7 @@ async def install_mtproxy(ip: str, username: str, password: str, port: int = MTP
             socks5_port_value = str(socks5_port or actual_port_plan['socks5'])
             socks5_username = socks5_user or core_secret
             socks5_password = socks5_pass or socks5_username
-            socks5_link = f'socks5://{socks5_username}:{socks5_password}@{ip}:{socks5_port_value}'
+            socks5_link = f'https://t.me/socks?server={ip}&port={socks5_port_value}&user={socks5_username}&pass={socks5_password}'
         link_lines = '\n'.join(f'扩展链接: {link}' for link in extra_links)
         socks5_line = f'\nSOCKS5链接: {socks5_link}' if socks5_link else ''
         verified_output = (
@@ -1529,7 +1585,8 @@ def _run_ssh_script(ip: str, username: str, password: str, script: str, label: s
             sftp.chmod(remote_script_path, 0o700)
         finally:
             sftp.close()
-        stdin, stdout, stderr = client.exec_command(f'bash {remote_script_path}', timeout=300)
+        command_timeout = 1800 if label.upper() == 'MTPROXY' else 900
+        stdin, stdout, stderr = client.exec_command(f'bash {remote_script_path}', timeout=command_timeout)
         exit_code = stdout.channel.recv_exit_status()
         output = stdout.read().decode('utf-8', errors='ignore').strip()
         error = stderr.read().decode('utf-8', errors='ignore').strip()

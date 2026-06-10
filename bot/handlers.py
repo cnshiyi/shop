@@ -1584,11 +1584,23 @@ async def _safe_remove_inline_keyboard(message: Message | None):
 def _telegram_socks_link_from_raw(link: str) -> str:
     try:
         parsed = urlparse(str(link or ''))
-        if parsed.scheme != 'socks5' or not parsed.hostname or not parsed.port:
+        if parsed.scheme == 'socks5':
+            if not parsed.hostname or not parsed.port:
+                return str(link or '')
+            username = unquote(parsed.username or '')
+            password = unquote(parsed.password or '')
+            return f'https://t.me/socks?server={parsed.hostname}&port={parsed.port}&user={username}&pass={password}'
+        text = str(link or '').strip()
+        if not text.lower().startswith(('tg://socks?', 'https://t.me/socks?', 'http://t.me/socks?')):
             return str(link or '')
-        username = unquote(parsed.username or '')
-        password = unquote(parsed.password or '')
-        return f'tg://socks?server={parsed.hostname}&port={parsed.port}&user={username}&pass={password}'
+        query = parse_qs(parsed.query)
+        server = (query.get('server') or [''])[0]
+        port = (query.get('port') or [''])[0]
+        username = (query.get('user') or [''])[0]
+        password = (query.get('pass') or [''])[0]
+        if not server or not port:
+            return str(link or '')
+        return f'https://t.me/socks?server={server}&port={port}&user={username}&pass={password}'
     except Exception:
         return str(link or '')
 
@@ -1610,7 +1622,7 @@ def _cloud_server_created_text(order, port: int | None = None, title: str | None
 
     def add_extra_link(link: str):
         link = str(link or '').strip().strip('"\'，。')
-        if link.startswith('socks5://'):
+        if link.startswith(('socks5://', 'tg://socks?', 'https://t.me/socks?', 'http://t.me/socks?')):
             link = _telegram_socks_link_from_raw(link)
         if link.startswith(('tg://proxy?', 'https://t.me/proxy?')) and _link_port(link) == str(get_mtproxy_port_plan(actual_port or MTPROXY_DEFAULT_PORT)['socks5']):
             return
@@ -1639,14 +1651,18 @@ def _cloud_server_created_text(order, port: int | None = None, title: str | None
                 mtproxy_link = link
         if 'socks5://' in line:
             add_extra_link(line[line.find('socks5://'):].strip())
-    has_socks5_link = any(str(link).startswith(('socks5://', 'tg://socks?')) for link in extra_links)
+        if 'tg://socks?' in line:
+            add_extra_link(line[line.find('tg://socks?'):].strip())
+        if 'https://t.me/socks?' in line:
+            add_extra_link(line[line.find('https://t.me/socks?'):].strip())
+    has_socks5_link = any(str(link).startswith(('socks5://', 'tg://socks?', 'https://t.me/socks?', 'http://t.me/socks?')) for link in extra_links)
     if not has_socks5_link and 'SOCKS5:' in note and public_ip and raw_secret:
         socks5_secret = _normalize_mtproxy_core_secret(raw_secret) or raw_secret
         socks5_port = get_mtproxy_port_plan(actual_port or MTPROXY_DEFAULT_PORT)['socks5']
         port_match = re.search(r'SOCKS5:\s*[^\n]*?端口\s*(\d+)', note)
         if port_match:
             socks5_port = int(port_match.group(1))
-        add_extra_link(f'socks5://{socks5_secret}:{socks5_secret}@{public_ip}:{socks5_port}')
+        add_extra_link(f'https://t.me/socks?server={public_ip}&port={socks5_port}&user={socks5_secret}&pass={socks5_secret}')
     one_click_link = mtproxy_link or share_link or '-'
     if 'secret=' in one_click_link:
         display_secret = one_click_link.split('secret=', 1)[1].split('&', 1)[0].strip()
@@ -1663,8 +1679,8 @@ def _cloud_server_created_text(order, port: int | None = None, title: str | None
     if additional_links:
         lines.append('')
         lines.append('备用链路:')
-        socks5_links = [link for link in additional_links if str(link).startswith(('socks5://', 'tg://socks?'))]
-        other_links = [link for link in additional_links if not str(link).startswith(('socks5://', 'tg://socks?'))]
+        socks5_links = [link for link in additional_links if str(link).startswith(('socks5://', 'tg://socks?', 'https://t.me/socks?', 'http://t.me/socks?'))]
+        other_links = [link for link in additional_links if not str(link).startswith(('socks5://', 'tg://socks?', 'https://t.me/socks?', 'http://t.me/socks?'))]
         for link in socks5_links:
             lines.append(f'SOCKS5: {escape(link)}')
         for index, link in enumerate(other_links[:8], start=1):
@@ -2366,7 +2382,7 @@ def _proxy_links_text(order) -> str:
         if not isinstance(item, dict):
             continue
         link = item.get('url') or ''
-        if str(link).startswith('socks5://'):
+        if str(link).startswith(('socks5://', 'tg://socks?', 'https://t.me/socks?', 'http://t.me/socks?')):
             link = _telegram_socks_link_from_raw(link)
         if not link or link in seen:
             continue

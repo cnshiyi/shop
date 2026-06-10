@@ -1685,6 +1685,88 @@ class CloudServerServicesTestCase(TestCase):
         self._cached_aws_test_account = account
         return account
 
+    # 功能：验证迁移订单保存资产前会释放源资产固定 IP，避免 public_ip 唯一约束冲突。
+    def test_mark_success_replacement_releases_source_asset_public_ip_before_asset_upsert(self):
+        expires_at = timezone.now() + timezone.timedelta(days=31)
+        source = CloudServerOrder.objects.create(
+            order_no='REPLACE-SOURCE-ASSET-IP',
+            user=self.user,
+            plan=self.plan,
+            provider='aws_lightsail',
+            region_code='ap-southeast-1',
+            region_name='新加坡',
+            plan_name=self.plan.plan_name,
+            quantity=1,
+            currency='USDT',
+            total_amount='19.00',
+            pay_amount='19.00',
+            status='completed',
+            server_name='replace-source-server',
+            instance_id='replace-source-instance',
+            provider_resource_id='replace-source-instance',
+            public_ip='13.250.44.10',
+            static_ip_name='replace-source-ip',
+            mtproxy_port=443,
+            service_started_at=timezone.now(),
+        )
+        source_asset = CloudAsset.objects.create(
+            kind=CloudAsset.KIND_SERVER,
+            source=CloudAsset.SOURCE_ORDER,
+            order=source,
+            user=self.user,
+            provider='aws_lightsail',
+            region_code='ap-southeast-1',
+            asset_name=source.server_name,
+            instance_id=source.instance_id,
+            provider_resource_id=source.provider_resource_id,
+            public_ip=source.public_ip,
+            actual_expires_at=expires_at,
+            status=CloudAsset.STATUS_RUNNING,
+            is_active=True,
+        )
+        replacement = CloudServerOrder.objects.create(
+            order_no='REPLACE-TARGET-ASSET-IP',
+            user=self.user,
+            plan=self.plan,
+            provider='aws_lightsail',
+            region_code='ap-southeast-1',
+            region_name='新加坡',
+            plan_name=self.plan.plan_name,
+            quantity=1,
+            currency='USDT',
+            total_amount='19.00',
+            pay_amount='19.00',
+            status='provisioning',
+            server_name='replace-target-server',
+            instance_id='replace-target-instance',
+            provider_resource_id='replace-target-instance',
+            static_ip_name=source.static_ip_name,
+            replacement_for=source,
+            mtproxy_port=443,
+            service_started_at=source.service_started_at,
+        )
+        self._attach_order_expiry_asset(replacement, expires_at, asset_name='replace-target-placeholder', status=CloudAsset.STATUS_PENDING)
+
+        saved = async_to_sync(_mark_success)(
+            replacement.id,
+            replacement.server_name,
+            replacement.instance_id,
+            source.public_ip,
+            'admin',
+            'password',
+            'MTProxy 安装完成\nSOCKS5: OK 端口 9534',
+            source.static_ip_name,
+        )
+
+        source_asset.refresh_from_db()
+        target_asset = CloudAsset.objects.get(order=saved, kind=CloudAsset.KIND_SERVER)
+        self.assertIsNone(source_asset.public_ip)
+        self.assertEqual(source_asset.previous_public_ip, '13.250.44.10')
+        self.assertEqual(source_asset.status, CloudAsset.STATUS_DELETING)
+        self.assertEqual(target_asset.public_ip, '13.250.44.10')
+        self.assertEqual(target_asset.instance_id, replacement.instance_id)
+        self.assertEqual(target_asset.status, CloudAsset.STATUS_RUNNING)
+
     # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
     def test_lifecycle_aws_client_requires_bound_account(self):
         from cloud.lifecycle import _aws_client
@@ -8101,6 +8183,51 @@ class CloudServerServicesTestCase(TestCase):
         self.assertTrue(plans)
         self.assertIsNone(asset.order_id)
 
+    # 功能：验证实例已删但固定 IP 仍保留的未附加资产不能被当成已释放记录，仍可进入续费恢复流程。
+    def test_retained_unattached_deleted_status_asset_can_start_recovery_renewal(self):
+        due_at = timezone.now() + timezone.timedelta(days=3)
+        account = self._aws_test_account()
+        asset = CloudAsset.objects.create(
+            kind=CloudAsset.KIND_SERVER,
+            source=CloudAsset.SOURCE_AWS_SYNC,
+            user=self.user,
+            provider='aws_lightsail',
+            cloud_account=account,
+            account_label=cloud_account_label(account),
+            region_code=self.plan.region_code,
+            region_name=self.plan.region_name,
+            asset_name='retained-deleted-status-renewal',
+            provider_resource_id='arn:aws:lightsail:ap-southeast-1:123456789012:StaticIp/retained-deleted-status-renewal',
+            public_ip='31.31.31.42',
+            previous_public_ip='31.31.31.42',
+            actual_expires_at=due_at,
+            status=CloudAsset.STATUS_DELETED,
+            provider_status='固定IP保留中-实例已删除',
+            note='实例删除后固定IP保留中，等待用户续费恢复',
+            mtproxy_port=9528,
+            is_active=False,
+        )
+        link = {
+            'url': 'tg://proxy?server=31.31.31.42&port=9528&secret=eeeeeeeeeeeeeeee',
+            'server': '31.31.31.42',
+            'port': '9528',
+            'secret': 'eeeeeeeeeeeeeeee',
+        }
+
+        self.assertFalse(_cloud_asset_deleted_or_missing(asset))
+        returned_asset, plans, error = async_to_sync(list_cloud_asset_renewal_plans)(asset.id, self.user.id)
+        order, create_error = async_to_sync(prepare_cloud_asset_renewal_with_link)(asset.id, self.user.id, self.plan.id, link)
+        asset.refresh_from_db()
+
+        self.assertIsNone(error)
+        self.assertEqual(returned_asset.id, asset.id)
+        self.assertTrue(plans)
+        self.assertIsNone(create_error)
+        self.assertIsNotNone(order)
+        self.assertEqual(order.status, 'pending')
+        self.assertEqual(order.ip_recycle_at, due_at)
+        self.assertEqual(asset.order_id, order.id)
+
     # 功能：验证运行中的普通服务器不能绕过普通续费，误走输入链接恢复流程。
     def test_running_asset_renewal_rejects_link_recovery_flow(self):
         asset = CloudAsset.objects.create(
@@ -8784,6 +8911,7 @@ class CloudServerServicesTestCase(TestCase):
         script = _build_mtproxy_script(443, 'eec3bda48fee649e9ea6e32d33cd5f3dd9617a7572652e6d6963726f736f66742e636f6d')
         self.assertIn('RUN_SECRET="ee${RUN_SECRET}617a7572652e6d6963726f736f66742e636f6d"', script)
         self.assertIn('$WORKDIR/bin/mtg run $RUN_SECRET', script)
+        self.assertIn('MTPROXY_SOCKS5_LINK=https://t.me/socks?server=$PUBLIC_IP&port=$SOCKS5_PORT&user=$SOCKS5_USER&pass=$SOCKS5_PASS', script)
 
     # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
     def test_mtproxy_extra_links_exclude_main_port(self):
@@ -8803,11 +8931,12 @@ class CloudServerServicesTestCase(TestCase):
             'TG链接: tg://proxy?server=1.2.3.4&port=443&secret=ee1234567890abcdef1234567890abcd\n'
             '扩展链接: tg://proxy?server=1.2.3.4&port=9529&secret=eeabcdefabcdefabcdefabcdefabcdefab\n'
             '扩展链接: tg://proxy?server=1.2.3.4&port=9530&secret=eeabcdefabcdefabcdefabcdefabcdefab\n'
-            'SOCKS5链接: socks5://abcdefabcdefabcdefabcdefabcdefab:abcdefabcdefabcdefabcdefabcdefab@1.2.3.4:9534'
+            'SOCKS5链接: https://t.me/socks?server=1.2.3.4&port=9534&user=abcdefabcdefabcdefabcdefabcdefab&pass=abcdefabcdefabcdefabcdefabcdefab'
         )
         self.assertEqual([item['name'] for item in links], ['主代理 mtg', '备用 mtprotoproxy', 'Telemt A 三模式', 'SOCKS5'])
         self.assertEqual(links[-1]['username'], 'abcdefabcdefabcdefabcdefabcdefab')
         self.assertEqual(links[-1]['password'], 'abcdefabcdefabcdefabcdefabcdefab')
+        self.assertEqual(links[-1]['url'], 'https://t.me/socks?server=1.2.3.4&port=9534&user=abcdefabcdefabcdefabcdefabcdefab&pass=abcdefabcdefabcdefabcdefabcdefab')
 
     # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
     def test_compact_proxy_install_note_removes_raw_links(self):
@@ -8815,7 +8944,7 @@ class CloudServerServicesTestCase(TestCase):
             'AWS 实例已创建\n'
             'MTProxy 安装完成\n'
             'TG链接: tg://proxy?server=1.2.3.4&port=443&secret=ee1234\n'
-            'SOCKS5链接: socks5://abcdefabcdefabcdefabcdefabcdefab:abcdefabcdefabcdefabcdefabcdefab@1.2.3.4:9534\n'
+            'SOCKS5链接: https://t.me/socks?server=1.2.3.4&port=9534&user=abcdefabcdefabcdefabcdefabcdefab&pass=abcdefabcdefabcdefabcdefabcdefab\n'
             '扩展链接: tg://proxy?server=1.2.3.4&port=9530&secret=eeabcd'
         )
         links = _extract_proxy_links(note)
@@ -8827,6 +8956,7 @@ class CloudServerServicesTestCase(TestCase):
         self.assertIn('代理链接已保存到代理链路列表。', compact)
         self.assertNotIn('tg://proxy?', compact)
         self.assertNotIn('socks5://', compact)
+        self.assertNotIn('t.me/socks?', compact)
 
     # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
     def test_append_status_note_replaces_old_sync_status(self):
@@ -8857,10 +8987,10 @@ class CloudServerServicesTestCase(TestCase):
     def test_cloud_asset_note_appends_clean_install_summary(self):
         note = _append_cloud_asset_note(
             '人工备注保留\nTG链接: tg://proxy?server=old&port=443&secret=old',
-            'MTProxy 安装完成\nTG链接: tg://proxy?server=1.2.3.4&port=443&secret=ee1234\nSOCKS5链接: socks5://secret:secret@1.2.3.4:9534',
+            'MTProxy 安装完成\nTG链接: tg://proxy?server=1.2.3.4&port=443&secret=ee1234\nSOCKS5链接: https://t.me/socks?server=1.2.3.4&port=9534&user=secret&pass=secret',
             [
                 {'name': '主代理 mtg', 'port': '443', 'url': 'tg://proxy?server=1.2.3.4&port=443&secret=ee1234'},
-                {'name': 'SOCKS5', 'port': '9534', 'url': 'socks5://secret:secret@1.2.3.4:9534'},
+                {'name': 'SOCKS5', 'port': '9534', 'url': 'https://t.me/socks?server=1.2.3.4&port=9534&user=secret&pass=secret'},
             ],
             443,
         )
@@ -8869,7 +8999,7 @@ class CloudServerServicesTestCase(TestCase):
         self.assertIn('TG链接: tg://proxy?server=old&port=443&secret=old', note)
         self.assertIn('MTProxy/SOCKS5 安装完成', note)
         self.assertIn('SOCKS5端口: 9534', note)
-        self.assertNotIn('socks5://secret:secret@1.2.3.4:9534', note)
+        self.assertNotIn('https://t.me/socks?server=1.2.3.4&port=9534&user=secret&pass=secret', note)
 
     # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
     def test_mark_success_preserves_existing_main_link_when_install_output_lacks_link(self):
@@ -11031,8 +11161,8 @@ class CloudServerServicesTestCase(TestCase):
             actual_expires_at=timezone.now() + timezone.timedelta(days=1),
             status=CloudAsset.STATUS_RUNNING,
             is_active=True,
-            provider_status='未附加固定IP',
-            note='旧同步残留：未附加固定IP',
+            provider_status='running',
+            note='普通运行中服务器',
         )
 
         items = _unattached_ip_delete_items(limit=20)
@@ -12969,6 +13099,118 @@ class CloudServerServicesTestCase(TestCase):
         self.assertFalse(plan_rows[0].get('is_history'))
         self.assertFalse(history_rows)
         self.assertGreaterEqual(data['ip_delete_count'], 1)
+
+    # 功能：验证未附加 IP 已进入续费恢复订单后，不再留在 IP 删除计划或执行队列中。
+    def test_unattached_ip_active_recovery_order_is_excluded_from_delete_plan(self):
+        from cloud.lifecycle_plan_queries import unattached_ip_delete_active_unique_queryset
+
+        now = timezone.now()
+        account = self._aws_test_account()
+        order = CloudServerOrder.objects.create(
+            order_no='SRVASSET-RECOVERY-PENDING-1',
+            user=self.user,
+            plan=self.plan,
+            provider=self.plan.provider,
+            cloud_account=account,
+            account_label=cloud_account_label(account),
+            region_code=self.plan.region_code,
+            region_name=self.plan.region_name,
+            plan_name=self.plan.plan_name,
+            quantity=1,
+            currency='USDT',
+            total_amount='19.00',
+            pay_amount='19.00',
+            pay_method='address',
+            status='pending',
+            public_ip='52.77.18.254',
+            previous_public_ip='52.77.18.254',
+            instance_id='',
+            static_ip_name='pending-recovery-unattached-ip',
+            ip_recycle_at=now - timezone.timedelta(hours=2),
+            provision_note='未绑定代理资产续费：来源资产 #999；支付完成后自动创建服务器并绑定该固定 IP。',
+        )
+        asset = CloudAsset.objects.create(
+            kind=CloudAsset.KIND_SERVER,
+            source=CloudAsset.SOURCE_AWS_SYNC,
+            order=order,
+            user=self.user,
+            provider='aws_lightsail',
+            cloud_account=account,
+            account_label=cloud_account_label(account),
+            region_code=self.plan.region_code,
+            region_name=self.plan.region_name,
+            asset_name='pending-recovery-unattached-ip',
+            provider_resource_id='arn:aws:lightsail:ap-southeast-1:123456789012:StaticIp/pending-recovery-unattached-ip',
+            public_ip='52.77.18.254',
+            previous_public_ip='52.77.18.254',
+            instance_id='',
+            actual_expires_at=now - timezone.timedelta(hours=2),
+            status=CloudAsset.STATUS_RUNNING,
+            provider_status='未附加固定IP',
+            note='未附加固定IP，续费恢复订单待支付',
+            is_active=True,
+        )
+        staff_user = get_user_model().objects.create_user(username='staff_lifecycle_ip_pending_recovery', password='x', is_staff=True)
+        request = self.factory.get('/api/admin/tasks/plans/', {'refresh': 1, 'limit': 1000})
+        self._attach_bearer_session(request, staff_user)
+
+        response = lifecycle_plans(request)
+        data = json.loads(response.content)['data']
+        active_ids = set(unattached_ip_delete_active_unique_queryset().values_list('id', flat=True))
+        due_ids = {item.id for item in async_to_sync(_get_unattached_static_ip_delete_due)()}
+
+        self.assertNotIn(asset.id, active_ids)
+        self.assertNotIn(asset.id, due_ids)
+        self.assertFalse(any(item.get('asset_id') == asset.id for item in data['ip_delete_plan_items']))
+        self.assertFalse(any(item.get('asset_id') == asset.id for item in data['ip_delete_history_items']))
+
+    # 功能：验证未附加固定 IP 即使残留旧实例 ID，也进入 IP 删除计划和 due 队列，不进入关机/删机计划。
+    def test_lifecycle_plans_stale_instance_unattached_ip_stays_in_ip_delete_plan(self):
+        from cloud.lifecycle_plan_queries import server_lifecycle_plan_unique_queryset, unattached_ip_delete_active_unique_queryset
+
+        now = timezone.now()
+        asset = CloudAsset.objects.create(
+            kind=CloudAsset.KIND_SERVER,
+            source=CloudAsset.SOURCE_AWS_SYNC,
+            user=self.user,
+            provider='aws_lightsail',
+            region_code=self.plan.region_code,
+            region_name=self.plan.region_name,
+            asset_name='stale-instance-unattached-ip',
+            public_ip='52.77.18.255',
+            previous_public_ip='52.77.18.255',
+            instance_id='old-deleted-instance-id',
+            provider_resource_id='arn:aws:lightsail:ap-southeast-1:123456789012:StaticIp/stale-instance-unattached-ip',
+            status=CloudAsset.STATUS_RUNNING,
+            provider_status='未附加固定IP',
+            note='实例已删除，固定 IP 保留中，旧 instance_id 尚未清理',
+            actual_expires_at=now - timezone.timedelta(hours=2),
+            is_active=True,
+        )
+        record_cloud_ip_log(
+            event_type=CloudIpLog.EVENT_DELETED,
+            asset=asset,
+            previous_public_ip='52.77.18.255',
+            public_ip='52.77.18.255',
+            note='IP校验发现云上不存在，已标记删除；后续同步恢复为未附加固定 IP',
+        )
+        staff_user = get_user_model().objects.create_user(username='staff_lifecycle_stale_instance_ip_plan', password='x', is_staff=True)
+        request = self.factory.get('/api/admin/tasks/plans/', {'refresh': 1, 'limit': 1000})
+        self._attach_bearer_session(request, staff_user)
+
+        response = lifecycle_plans(request)
+        data = json.loads(response.content)['data']
+        server_ids = set(server_lifecycle_plan_unique_queryset().values_list('id', flat=True))
+        ip_plan_ids = set(unattached_ip_delete_active_unique_queryset().values_list('id', flat=True))
+        due_ids = {item.id for item in async_to_sync(_get_unattached_static_ip_delete_due)()}
+
+        self.assertNotIn(asset.id, server_ids)
+        self.assertIn(asset.id, ip_plan_ids)
+        self.assertIn(asset.id, due_ids)
+        self.assertFalse(any(item.get('asset_id') == asset.id for item in data['shutdown_plan_items']))
+        self.assertFalse(any(item.get('asset_id') == asset.id for item in data['server_delete_items']))
+        self.assertTrue(any(item.get('asset_id') == asset.id for item in data['ip_delete_plan_items']))
+        self.assertFalse(any(item.get('asset_id') == asset.id for item in data['ip_delete_history_items']))
 
     # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
     def test_lifecycle_plans_sort_shutdown_items_by_delete_time(self):
@@ -17128,6 +17370,63 @@ class CloudServerServicesTestCase(TestCase):
         self.assertIn('第1/5次删除确认', row['blocked_reason'])
 
     # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
+    def test_lifecycle_plans_exclude_unattached_ip_with_stale_instance_after_recovery_order(self):
+        from cloud.lifecycle_plan_queries import server_lifecycle_plan_unique_queryset, unattached_ip_delete_active_unique_queryset
+
+        asset = CloudAsset.objects.create(
+            kind=CloudAsset.KIND_SERVER,
+            source=CloudAsset.SOURCE_AWS_SYNC,
+            provider='aws_lightsail',
+            region_code=self.plan.region_code,
+            region_name=self.plan.region_name,
+            asset_name='StaticIp-stale-instance-recovery',
+            instance_id='old-deleted-instance-name',
+            provider_resource_id='arn:aws:lightsail:ap-southeast-1:123456789012:StaticIp/stale-instance-recovery',
+            public_ip='5.5.5.245',
+            status=CloudAsset.STATUS_UNKNOWN,
+            is_active=False,
+            provider_status='未附加固定IP',
+            note='状态: 未附加固定IP；固定IP名: StaticIp-stale-instance-recovery',
+            actual_expires_at=timezone.now() + timezone.timedelta(days=1),
+        )
+        recovery_order = CloudServerOrder.objects.create(
+            order_no='SRVASSET-STale-RECOVERY-245',
+            user=self.user,
+            plan=self.plan,
+            provider='aws_lightsail',
+            region_code=self.plan.region_code,
+            region_name=self.plan.region_name,
+            plan_name=self.plan.plan_name,
+            quantity=1,
+            currency='USDT',
+            total_amount='19.00',
+            pay_amount='19.00',
+            status='pending',
+            public_ip=asset.public_ip,
+            previous_public_ip=asset.public_ip,
+            server_name=asset.asset_name,
+            static_ip_name=asset.asset_name,
+            ip_recycle_at=asset.actual_expires_at,
+            provision_note='未绑定代理资产续费：来源资产 #245；等待支付。',
+        )
+        asset.order = recovery_order
+        asset.save(update_fields=['order', 'updated_at'])
+
+        self.assertFalse(server_lifecycle_plan_unique_queryset().filter(id=asset.id).exists())
+        self.assertFalse(unattached_ip_delete_active_unique_queryset().filter(id=asset.id).exists())
+
+        staff_user = get_user_model().objects.create_user(username='staff_lifecycle_stale_unattached_recovery', password='x', is_staff=True)
+        request = self.factory.get('/api/admin/tasks/plans/', {'limit': 1000, 'refresh': '1'})
+        self._attach_bearer_session(request, staff_user)
+
+        response = lifecycle_plans(request)
+        data = json.loads(response.content)['data']
+
+        self.assertFalse(any(item.get('asset_id') == asset.id for item in data['shutdown_plan_items']))
+        self.assertFalse(any(item.get('asset_id') == asset.id for item in data['server_delete_items']))
+        self.assertFalse(any(item.get('asset_id') == asset.id for item in data['ip_delete_plan_items']))
+
+    # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
     def test_lifecycle_plans_unattached_ip_show_delete_attempt_in_state_and_note(self):
         asset = CloudAsset.objects.create(
             kind=CloudAsset.KIND_SERVER,
@@ -19699,6 +19998,84 @@ class CloudServerServicesTestCase(TestCase):
         self.assertIsNotNone(saved.delete_at)
         self.assertIn('创建流程未完成', saved.provision_note)
         self.assertIn('原固定 IP 已不在 AWS 账号中', saved.provision_note)
+
+    # 功能：同一订单已有开通任务进行中时，重复入口不能再次创建实例或重跑安装，避免打断当前安装。
+    def test_provision_skips_recent_running_same_order(self):
+        account = self._aws_test_account()
+        order = CloudServerOrder.objects.create(
+            order_no='PROVISION-DUPLICATE-RUNNING-SKIP',
+            user=self.user,
+            plan=self.plan,
+            provider=self.plan.provider,
+            cloud_account=account,
+            account_label=cloud_account_label(account),
+            region_code=self.plan.region_code,
+            region_name=self.plan.region_name,
+            plan_name=self.plan.plan_name,
+            quantity=1,
+            currency='USDT',
+            total_amount='19.00',
+            pay_amount='19.00',
+            pay_method='balance',
+            status='provisioning',
+            paid_at=timezone.now(),
+            mtproxy_secret='eeeeeeeeeeeeeeee',
+            mtproxy_port=9528,
+        )
+        create_mock = AsyncMock(side_effect=AssertionError('不应重复创建实例'))
+
+        with patch('cloud.provisioning.create_aws_instance', new=create_mock):
+            saved = async_to_sync(provision_cloud_server)(order.id)
+
+        self.assertEqual(saved.id, order.id)
+        self.assertEqual(saved.status, 'provisioning')
+        create_mock.assert_not_called()
+
+    # 功能：后台人工改为创建中后会立即触发开通，必须允许该人工入口接管刚写入的 provisioning 状态。
+    def test_provision_manual_trigger_can_claim_recent_provisioning_order(self):
+        account = self._aws_test_account()
+        order = CloudServerOrder.objects.create(
+            order_no='PROVISION-MANUAL-RECENT-CLAIM',
+            user=self.user,
+            plan=self.plan,
+            provider=self.plan.provider,
+            cloud_account=account,
+            account_label=cloud_account_label(account),
+            region_code=self.plan.region_code,
+            region_name=self.plan.region_name,
+            plan_name=self.plan.plan_name,
+            quantity=1,
+            currency='USDT',
+            total_amount='19.00',
+            pay_amount='19.00',
+            pay_method='balance',
+            status='provisioning',
+            paid_at=timezone.now(),
+            mtproxy_secret='eeeeeeeeeeeeeeee',
+            mtproxy_port=9528,
+        )
+        result = SimpleNamespace(
+            ok=True,
+            instance_id='provision-manual-claim-instance',
+            public_ip='54.54.54.90',
+            login_user='admin',
+            login_password='pw',
+            note='AWS 实例已创建',
+            static_ip_name='StaticIp-provision-manual-claim',
+            private_key_path='',
+        )
+        create_mock = AsyncMock(return_value=result)
+
+        with patch('cloud.provisioning.check_aws_create_capacity', new=AsyncMock(return_value=(True, 'AWS 创建前配额检查通过'))), \
+            patch('cloud.provisioning.create_aws_instance', new=create_mock), \
+            patch('cloud.provisioning.public_ip_exists', new=AsyncMock(return_value=(True, '公网 IP 存在'))), \
+            patch('cloud.provisioning.validate_server_connection_ip_with_retry', new=AsyncMock(return_value=(True, 'IP 一致', '54.54.54.90'))), \
+            patch('cloud.provisioning.install_bbr', new=AsyncMock(return_value=(True, 'BBR 已安装'))), \
+            patch('cloud.provisioning.install_mtproxy', new=AsyncMock(return_value=(True, 'MTProxy 已安装'))):
+            saved = async_to_sync(provision_cloud_server)(order.id, allow_recent_provisioning=True)
+
+        self.assertEqual(saved.status, 'completed')
+        create_mock.assert_awaited_once()
 
     # 功能：验证创建失败时会切换到下一个启用云账号，并用新账号完成创建。
     def test_provision_rotates_to_next_cloud_account_after_create_failure(self):

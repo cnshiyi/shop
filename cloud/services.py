@@ -11,7 +11,7 @@ import time
 import calendar
 from decimal import Decimal, ROUND_CEILING
 from types import SimpleNamespace
-from urllib.parse import urlparse
+from urllib.parse import parse_qs, unquote, urlparse
 
 from asgiref.sync import async_to_sync, sync_to_async
 from django.db import transaction
@@ -37,8 +37,37 @@ from orders.models import BalanceLedger, CartItem
 from orders.services import _generate_unique_pay_amount, usdt_to_trx
 
 logger = logging.getLogger(__name__)
+_SOCKS_LINK_RE = re.compile(r'(?:socks5://|tg://socks\?|https?://t\.me/socks\?)[^"\'\s<>]+', re.IGNORECASE)
 CUSTOM_CACHE_TTL = 600
 CLOUD_ORDER_MAX_QUANTITY = 99
+
+
+def _is_socks_link(url: str) -> bool:
+    text = str(url or '').lower()
+    return text.startswith(('socks5://', 'tg://socks?', 'https://t.me/socks?', 'http://t.me/socks?'))
+
+
+def _parse_socks_link(link: str) -> dict[str, str] | None:
+    text = str(link or '').strip().rstrip(',.，。')
+    if not text:
+        return None
+    parsed = urlparse(text)
+    if parsed.scheme.lower() == 'socks5':
+        return {
+            'server': parsed.hostname or '',
+            'port': str(parsed.port or ''),
+            'username': unquote(parsed.username or ''),
+            'password': unquote(parsed.password or ''),
+        }
+    if _is_socks_link(text):
+        query = parse_qs(parsed.query)
+        return {
+            'server': str((query.get('server') or [''])[0] or '').strip(),
+            'port': str((query.get('port') or [''])[0] or '').strip(),
+            'username': str((query.get('user') or [''])[0] or '').strip(),
+            'password': str((query.get('pass') or [''])[0] or '').strip(),
+        }
+    return None
 
 
 def _renewal_period_label(days: int = 31) -> str:
@@ -1925,7 +1954,7 @@ def _strip_raw_proxy_link_lines(note: str | None) -> str:
         line = raw_line.strip()
         if not line:
             continue
-        if 'tg://proxy?' in line or 'socks5://' in line:
+        if 'tg://proxy?' in line or 'socks5://' in line or 'tg://socks?' in line or 't.me/socks?' in line:
             continue
         if line.startswith(('TG链接:', '分享链接:', '扩展链接:', 'SOCKS5链接:')):
             continue
@@ -1934,7 +1963,13 @@ def _strip_raw_proxy_link_lines(note: str | None) -> str:
 
 
 def _compact_asset_proxy_init_note(note: str, links: list[dict], main_port: int | str | None = None) -> str:
-    if 'MTProxy 安装完成' not in str(note or '') and 'tg://proxy?' not in str(note or '') and 'socks5://' not in str(note or ''):
+    if (
+        'MTProxy 安装完成' not in str(note or '')
+        and 'tg://proxy?' not in str(note or '')
+        and 'socks5://' not in str(note or '')
+        and 'tg://socks?' not in str(note or '')
+        and 't.me/socks?' not in str(note or '')
+    ):
         return note
     mtproxy_ports = []
     socks5_port = ''
@@ -1943,7 +1978,7 @@ def _compact_asset_proxy_init_note(note: str, links: list[dict], main_port: int 
         url = str(item.get('url') or '')
         if not port:
             continue
-        if url.startswith('socks5://'):
+        if _is_socks_link(url):
             socks5_port = port
         elif port not in mtproxy_ports:
             mtproxy_ports.append(port)
@@ -1987,9 +2022,9 @@ async def initialize_proxy_asset(asset_id: int, user_id: int):
         if mtproxy_link and raw_link == mtproxy_link:
             continue
         links.append({'label': f'备用链路 {len(links)}', 'url': raw_link})
-    for raw_link in re.findall(r'socks5://[^"\'\s<>]+', mtproxy_note or ''):
-        parsed = urlparse(raw_link)
-        links.append({'label': 'SOCKS5', 'url': raw_link, 'port': str(parsed.port or '')})
+    for raw_link in _SOCKS_LINK_RE.findall(mtproxy_note or ''):
+        parsed_socks = _parse_socks_link(raw_link) or {}
+        links.append({'label': 'SOCKS5', 'url': raw_link, 'port': parsed_socks.get('port', '')})
     asset.login_user = username
     asset.login_password = password
     asset.mtproxy_port = port
@@ -2201,6 +2236,20 @@ def _cloud_asset_deleted_or_missing(asset: CloudAsset | None) -> bool:
     note = str(getattr(asset, 'note', '') or '')
     active_cloud_status = status in CloudAsset.ACTIVE_STATUSES or status in {CloudAsset.STATUS_STOPPED, CloudAsset.STATUS_SUSPENDED, CloudAsset.STATUS_UNKNOWN}
     note_marks_missing = '云上不存在' in note or '已标记删除' in note
+    retained_unattached_pending = bool(
+        _is_unattached_static_ip_asset(asset)
+        and str(getattr(asset, 'public_ip', '') or getattr(asset, 'previous_public_ip', '') or '').strip()
+        and not any(marker in provider_status or marker in note for marker in (
+            '已到期删除',
+            '已真实释放',
+            '固定 IP 已释放',
+            '固定IP已释放',
+            '固定 IP 云端已不存在',
+            '固定IP云端已不存在',
+        ))
+    )
+    if retained_unattached_pending:
+        return False
     return bool(
         status in _INACTIVE_ASSET_STATUSES
         or '云上未找到' in provider_status
@@ -3375,11 +3424,13 @@ def list_cloud_asset_renewal_plans(asset_id: int, user_id: int, admin: bool = Fa
     asset_qs = CloudAsset.objects.select_related('user', 'order', 'cloud_account').filter(
         id=asset_id,
         kind=CloudAsset.KIND_SERVER,
-    ).exclude(status__in=_INACTIVE_ASSET_STATUSES)
+    )
     if not admin and not public:
         asset_qs = asset_qs.filter(_user_asset_visibility_filter(user_id))
     asset = asset_qs.first()
     if not asset:
+        return None, [], '代理记录不存在'
+    if getattr(asset, 'status', None) in _INACTIVE_ASSET_STATUSES and not _is_unattached_asset_renewal_candidate(asset):
         return None, [], '代理记录不存在'
     if asset.order_id:
         return asset, [], None
@@ -3454,11 +3505,13 @@ def prepare_cloud_asset_renewal_with_link(asset_id: int, user_id: int, plan_id: 
         asset_qs = CloudAsset.objects.select_related('user', 'order', 'cloud_account').select_for_update().filter(
             id=asset_id,
             kind=CloudAsset.KIND_SERVER,
-        ).exclude(status__in=_INACTIVE_ASSET_STATUSES)
+        )
         if not admin and not public:
             asset_qs = asset_qs.filter(user_id=user_id)
         asset = asset_qs.first()
         if not asset:
+            return None, '代理记录不存在'
+        if getattr(asset, 'status', None) in _INACTIVE_ASSET_STATUSES and not _is_unattached_asset_renewal_candidate(asset):
             return None, '代理记录不存在'
         if asset.order_id:
             return None, '该代理已绑定订单，请重新进入详情续费'
@@ -3546,6 +3599,7 @@ def prepare_cloud_asset_renewal_with_link(asset_id: int, user_id: int, plan_id: 
             previous_public_ip=asset.previous_public_ip,
             note=f'未绑定代理资产 #{asset.id} 选择套餐续费，生成待支付订单 {order.order_no}',
         )
+        transaction.on_commit(lambda: _refresh_dashboard_plan_snapshots_after_service_change(f'cloud_asset_unattached_renewal:{asset.id}'))
         return order, None
 
 
