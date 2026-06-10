@@ -545,7 +545,6 @@ AWS_REGION_NAMES = {
     'ap-south-1': '孟买',
     'ap-southeast-1': '新加坡',
     'ap-southeast-2': '悉尼',
-    'ap-southeast-3': '雅加达',
     'ap-northeast-1': '东京',
     'ap-northeast-2': '首尔',
     'ca-central-1': '加拿大',
@@ -557,6 +556,10 @@ AWS_REGION_NAMES = {
     'us-east-1': '弗吉尼亚',
     'us-east-2': '俄亥俄',
     'us-west-2': '俄勒冈',
+}
+AWS_UNSUPPORTED_REGION_CODES = {
+    'ap-southeast-3',
+    'ap-southeast-5',
 }
 ALIYUN_REGION_NAMES = {
     'cn-hongkong': '香港',
@@ -666,6 +669,8 @@ def _normalize_server_price_regions(provider: str, regions: list[tuple[str, str]
     for region_code, region_name in regions or []:
         region_code = (region_code or '').strip()
         if not region_code:
+            continue
+        if provider == 'aws_lightsail' and region_code in AWS_UNSUPPORTED_REGION_CODES:
             continue
         if allowed_regions and region_code not in allowed_regions:
             continue
@@ -818,6 +823,8 @@ def _fetch_aws_regions():
         for item in response.get('regions', []):
             code = item.get('name')
             if not code:
+                continue
+            if code in AWS_UNSUPPORTED_REGION_CODES:
                 continue
             result.append((code, AWS_REGION_NAMES.get(code, code)))
         return result

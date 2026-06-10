@@ -50,7 +50,7 @@ from cloud.provisioning import (
     _mask_proxy_log_preview,
     provision_cloud_server,
 )
-from cloud.services import _cloud_asset_deleted_or_missing, apply_cloud_server_renewal, create_cloud_server_order, create_cloud_server_rebuild_order, create_cloud_server_renewal, create_cloud_server_renewal_by_public_query, create_cloud_server_renewal_for_user, create_cloud_server_upgrade_order, ensure_cloud_asset_operation_order, ensure_manual_expiry_operation_order, get_cloud_server_by_ip, get_cloud_server_by_ip_for_user, get_group_proxy_asset_detail, get_proxy_asset_by_ip_for_admin, get_proxy_asset_by_ip_for_user, get_user_proxy_asset_detail, is_retained_ip_order_visible_in_group, list_all_auto_renew_cloud_servers, list_cloud_asset_renewal_plans, list_cloud_server_upgrade_plans, list_group_cloud_servers, list_retained_ip_renewal_plans, list_retained_ip_renewal_plans_by_asset, list_user_auto_renew_cloud_servers, list_user_cloud_servers, mark_cloud_server_ip_change_requested, mark_cloud_server_reinit_requested, pay_cloud_server_order_with_balance, pay_cloud_server_renewal_with_balance, prepare_cloud_asset_renewal_with_link, prepare_cloud_server_order_instances, prepare_retained_ip_renewal_with_link, rebind_cloud_server_user, record_cloud_ip_log, replace_cloud_asset_order_by_admin, run_cloud_server_renewal_postcheck, set_cloud_asset_auto_renew, set_cloud_server_auto_renew_admin, set_group_cloud_server_auto_renew, sync_cloud_asset_user_binding
+from cloud.services import _cloud_asset_deleted_or_missing, _normalize_server_price_regions, apply_cloud_server_renewal, create_cloud_server_order, create_cloud_server_rebuild_order, create_cloud_server_renewal, create_cloud_server_renewal_by_public_query, create_cloud_server_renewal_for_user, create_cloud_server_upgrade_order, ensure_cloud_asset_operation_order, ensure_manual_expiry_operation_order, get_cloud_server_by_ip, get_cloud_server_by_ip_for_user, get_group_proxy_asset_detail, get_proxy_asset_by_ip_for_admin, get_proxy_asset_by_ip_for_user, get_user_proxy_asset_detail, is_retained_ip_order_visible_in_group, list_all_auto_renew_cloud_servers, list_cloud_asset_renewal_plans, list_cloud_server_upgrade_plans, list_group_cloud_servers, list_retained_ip_renewal_plans, list_retained_ip_renewal_plans_by_asset, list_user_auto_renew_cloud_servers, list_user_cloud_servers, mark_cloud_server_ip_change_requested, mark_cloud_server_reinit_requested, pay_cloud_server_order_with_balance, pay_cloud_server_renewal_with_balance, prepare_cloud_asset_renewal_with_link, prepare_cloud_server_order_instances, prepare_retained_ip_renewal_with_link, rebind_cloud_server_user, record_cloud_ip_log, replace_cloud_asset_order_by_admin, run_cloud_server_renewal_postcheck, set_cloud_asset_auto_renew, set_cloud_server_auto_renew_admin, set_group_cloud_server_auto_renew, sync_cloud_asset_user_binding
 from cloud.sync_safety import get_missing_confirmation_threshold
 from cloud.api_asset_edit import delete_cloud_asset, update_cloud_asset
 from cloud.api_asset_snapshots import _dashboard_snapshot_can_use_forward_row_paging, _dashboard_snapshot_group_keys_from_ordered_rows, _dashboard_snapshot_ordering, _dashboard_snapshot_risk_counts, backfill_cloud_asset_dashboard_snapshots, refresh_cloud_asset_dashboard_snapshots
@@ -263,6 +263,24 @@ class CloudServerServicesTestCase(TestCase):
         accounts = list_active_cloud_accounts('aws_lightsail', 'us-east-1')
 
         self.assertIn(account.id, [item.id for item in accounts])
+
+    # 功能：验证 AWS 真实创建不可用区域不会被价格同步重新带回。
+    def test_aws_unsupported_regions_are_filtered_from_price_regions(self):
+        regions = _normalize_server_price_regions(
+            'aws_lightsail',
+            [
+                ('ap-southeast-1', '新加坡'),
+                ('ap-southeast-3', '雅加达'),
+                ('ap-southeast-5', '雅加达'),
+                ('us-east-1', '弗吉尼亚'),
+            ],
+        )
+
+        region_codes = [code for code, _name in regions]
+        self.assertIn('ap-southeast-1', region_codes)
+        self.assertIn('us-east-1', region_codes)
+        self.assertNotIn('ap-southeast-3', region_codes)
+        self.assertNotIn('ap-southeast-5', region_codes)
 
     # 功能：验证待创建订单也参与账号负载计算，连续批量拆单能分散到多个云账号。
     def test_prepare_cloud_server_order_instances_rotates_cloud_accounts(self):

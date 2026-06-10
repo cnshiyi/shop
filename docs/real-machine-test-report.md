@@ -1236,3 +1236,41 @@ git diff --check
 - `core.cloud_accounts.cloud_account_supports_region()` 增加状态备注区域兜底：当旧 `region_hint` 不包含目标区域时，会从最近一次云同步/验证的 `status_note` 中解析已确认地区。
 - 线上已有“同步完成，地区 ... us-east-1,us-east-2,us-west-2 ...”但 `region_hint` 仍过窄的账号，将不再被美国区购买流程误过滤。
 - 新增回归测试覆盖：旧 `region_hint=ap-southeast-1`、`status_note` 已确认 `us-east-1` 时，美国区候选账号必须可用。
+
+## 2026-06-11 01:15 CST AWS 全区域真实创建资源测试
+
+- 状态：已按用户要求实际创建资源测试全部 AWS Lightsail 区域，并清理测试实例。
+- 授权：用户明确要求“实际创建资源”。
+- 云账号：后台 AWS 云账号 `#55`
+- 测试方式：每个区域创建 1 台最小规格测试实例，实例进入 `running` 后立即删除；不安装代理，不分配固定 IP。
+- 初始套餐：`nano_3_0`
+- 镜像：`debian_12`
+- 资源前缀：`codex-region-********`
+
+### `nano_3_0` 创建结果
+
+- 成功区域：`ap-northeast-1`、`ap-northeast-2`、`ap-southeast-1`、`ca-central-1`、`eu-central-1`、`eu-north-1`、`eu-west-1`、`eu-west-2`、`eu-west-3`、`us-east-1`、`us-east-2`、`us-west-2`。
+- 失败区域：
+  - `ap-south-1`：区域可访问，但 `nano_3_0` 在该区域不存在。
+  - `ap-southeast-2`：区域可访问，但 `nano_3_0` 在该区域不存在。
+  - `ap-southeast-3`：`UnrecognizedClientException`，该账号在该区域不可用。
+  - `ap-southeast-5`：`UnrecognizedClientException`，该账号在该区域不可用；该区域原本不在 AWS 业务区域表中。
+
+### 区域专属套餐复测
+
+- `ap-south-1`：查询区域可用 bundle 后选择 `nano_3_1`，真实创建成功并删除。
+- `ap-southeast-2`：查询区域可用 bundle 后选择 `nano_3_2`，真实创建成功并删除。
+- `ap-southeast-3`：查询 bundle 即返回 `UnrecognizedClientException`，确认不可用。
+- `ap-southeast-5`：查询 bundle 即返回 `UnrecognizedClientException`，确认不可用。
+
+### 清理结果
+
+- 所有成功创建的测试实例均已提交删除。
+- 残留复核：按 `codex-region-` 前缀扫描可访问区域，测试实例残留数量为 `0`。
+- 未记录完整实例名、公网 IP、云资源 ID、密钥、密码或代理 secret。
+
+### 代码处理
+
+- 从 `cloud.services.AWS_REGION_NAMES` 移除 `ap-southeast-3`。
+- 从 `bot.keyboards._COMPACT_REGION_CODES` 移除 `ap-southeast-3` 的 callback 压缩映射。
+- 保留 `ap-south-1` 和 `ap-southeast-2`：这两个区域真实创建成功，只是需要区域专属 bundle，不属于区域不可用。

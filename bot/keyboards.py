@@ -280,7 +280,6 @@ _COMPACT_REGION_CODES = {
     'us-west-2': 'uw2',
     'ap-southeast-1': 'as1',
     'ap-southeast-2': 'as2',
-    'ap-southeast-3': 'as3',
     'ap-northeast-1': 'an1',
     'ap-northeast-2': 'an2',
     'ap-south-1': 'ap1',
