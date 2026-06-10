@@ -20986,3 +20986,30 @@ pnpm -F @vben/web-antd run typecheck
 - 重启本地 8000 后端后，带不存在关键词请求 `/api/admin/tasks/plans/`，计划相关计数均为 `0`。
 - 使用 Playwright 在浏览器环境中调用前端代理 API：`/api/admin/user/info` 返回成功，`/api/admin/tasks/plans/?compact=1&limit=5&keyword=__no_such_lifecycle_plan_keyword__` 返回成功，响应 `keyword` 匹配且计划计数为 `0`。
 - 未输出后台 token、真实订单号、完整 IP 或代理链接。
+
+## 2026-06-10 21:50 CST 云服务器进度编辑消息不再抄送管理
+
+### 背景
+
+- 用户反馈“云服务器创建/重建仍在执行中”的机器人编辑消息高频抄送管理。
+- 用户明确要求这类进度提示不再抄送管理。
+
+### 修改
+
+- `bot/handlers.py`
+  - 新增 `_is_cloud_task_progress_notice()`，识别包含“云服务器”“仍在执行中”“请不要重复点击按钮，完成后我会自动发送结果。”的中间态进度提示。
+  - 在 `_copy_user_notice_to_admins()` 入口直接跳过这类消息。
+  - 该过滤覆盖普通发送和编辑消息抄送路径；用户本人进度提示仍正常发送/编辑。
+- `bot/tests.py`
+  - 新增回归测试，确认“云服务器创建/重建仍在执行中”的编辑消息不会调用管理员抄送发送。
+
+### 验证
+
+通过：
+
+```bash
+git diff --check
+uv run python -m py_compile bot/handlers.py bot/tests.py
+uv run python manage.py check
+DJANGO_TEST_REUSE_DB=1 uv run python manage.py test bot.tests.TelegramListenerPushTestCase.test_notice_copy_skips_cloud_task_progress_notice --keepdb --noinput --verbosity 1
+```

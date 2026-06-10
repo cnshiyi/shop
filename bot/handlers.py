@@ -785,7 +785,19 @@ def _reply_markup_button_summary(reply_markup) -> str:
     return '\n'.join(labels)
 
 
+def _is_cloud_task_progress_notice(text: str | None) -> bool:
+    value = str(text or '')
+    return (
+        '云服务器' in value
+        and '仍在执行中' in value
+        and '请不要重复点击按钮，完成后我会自动发送结果。' in value
+    )
+
+
 async def _copy_user_notice_to_admins(bot: Bot, chat_id: int, text: str, parse_mode: str | None = None, title: str = '通知抄送', reply_markup=None):
+    if _is_cloud_task_progress_notice(text):
+        logger.info('用户通知抄送跳过云服务器进度提示 title=%s chat_id=%s', title, chat_id)
+        return
     copy_chat_ids = _parse_admin_chat_ids(await _get_site_config_value('bot_notice_copy_chat_ids', ''))
     if not copy_chat_ids:
         return

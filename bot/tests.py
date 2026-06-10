@@ -17,7 +17,7 @@ from django.urls import Resolver404, resolve
 from django.utils import timezone
 
 from bot.api import DASHBOARD_SESSION_IDLE_SECONDS, _active_proxy_counts_by_user, _authenticate_dashboard_request, admin_users_list, archive_telegram_chat, auth_totp_start, create_admin_user, create_cloud_account, create_product, delete_cloud_account, delete_user, me, send_daily_expiry_summary_test_notification, send_telegram_chat_message, site_config_groups, telegram_login_start, update_cloud_account, update_site_config, update_user_balance, users_list, verify_cloud_account
-from bot.handlers import _asset_reinstall_confirm_keyboard, _asset_reinstall_submitted_keyboard, _asset_renewal_plan_keyboard, _buy_cloud_server_with_balance_and_notify, _cloud_renewal_postcheck_and_notify, _cloud_renewal_result_keyboard, _cloud_server_created_text, _fetch_tron_address_summary, _get_cached_custom_regions, _get_cached_region_plans, _hydrate_order_proxy_links, _install_notice_copy_wrapper, _pay_cloud_server_order_with_balance_and_notify, _proxy_links_text, _reinstall_confirm_keyboard, _reinstall_submitted_keyboard, _requires_recovery_provision, _retained_ip_renewal_plan_keyboard, _save_asset_main_proxy_link, _save_user_main_proxy_link, _trongrid_get_with_key_fallback, _trongrid_post_with_key_fallback, _validate_reinstall_proxy_link, register_handlers
+from bot.handlers import _asset_reinstall_confirm_keyboard, _asset_reinstall_submitted_keyboard, _asset_renewal_plan_keyboard, _buy_cloud_server_with_balance_and_notify, _cloud_renewal_postcheck_and_notify, _cloud_renewal_result_keyboard, _cloud_server_created_text, _copy_user_notice_to_admins, _fetch_tron_address_summary, _get_cached_custom_regions, _get_cached_region_plans, _hydrate_order_proxy_links, _install_notice_copy_wrapper, _pay_cloud_server_order_with_balance_and_notify, _proxy_links_text, _reinstall_confirm_keyboard, _reinstall_submitted_keyboard, _requires_recovery_provision, _retained_ip_renewal_plan_keyboard, _save_asset_main_proxy_link, _save_user_main_proxy_link, _trongrid_get_with_key_fallback, _trongrid_post_with_key_fallback, _validate_reinstall_proxy_link, register_handlers
 from bot.keyboards import _compact_back_button_callback, append_back_callback, balance_details_list, cloud_asset_detail_callback, cloud_auto_renew_callback, cloud_detail_callback, cloud_previous_detail_callback, compact_callback_path, cloud_ip_query_result, cloud_order_list, cloud_order_readonly_detail, cloud_server_change_ip_region_menu, cloud_server_detail, cloud_server_list, cloud_server_renew_payment, support_contact_button
 from bot.models import DeletedTelegramUserSlot, TelegramChatArchive, TelegramChatMessage, TelegramGroupFilter, TelegramLoginAccount, TelegramUser
 from bot.services import get_or_create_user, record_bot_operation_log, record_telegram_message, telegram_group_delivery_flags
@@ -1499,6 +1499,30 @@ class TelegramListenerPushTestCase(SimpleTestCase):
 
         self.assertEqual({item[0] for item in copies}, {101, 102})
         self.assertEqual(len(copies), 2)
+
+    def test_notice_copy_skips_cloud_task_progress_notice(self):
+        async def run_case():
+            bot = SimpleNamespace(send_message=AsyncMock())
+            text = (
+                '⏳ 云服务器创建/重建仍在执行中\n'
+                '订单号: SRV20260610134801723649\n'
+                '当前阶段: 正在创建云服务器\n'
+                '本阶段已运行: 约 3 秒\n'
+                '总计已等待: 约 3 秒\n'
+                '请不要重复点击按钮，完成后我会自动发送结果。'
+            )
+            with patch('bot.handlers._get_site_config_value', new=AsyncMock(return_value='999')):
+                await _copy_user_notice_to_admins(
+                    bot,
+                    1457254228,
+                    text,
+                    title='机器人回复（编辑消息）',
+                )
+            return bot
+
+        bot = async_to_sync(run_case)()
+
+        bot.send_message.assert_not_awaited()
 
 
 class TronGridFallbackTestCase(SimpleTestCase):
