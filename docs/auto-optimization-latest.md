@@ -4,26 +4,35 @@
 
 ## 最近一轮
 
-- 时间：2026-06-11 01:32 CST
-- 状态：已调整生命周期计划表排序，让同一到期时间内的同一用户记录相邻显示。
+- 时间：2026-06-11 01:43 CST
+- 状态：已修复计划页搜索只覆盖数据库字段、无法命中装饰后展示列的问题。
 - 后端分支：`codex/cloud-asset-lifecycle-refactor`
-- 前端分支：未改动
+- 前端分支：未改动；已核对计划页会把 `keyword` 传给 `/admin/tasks/plans/`。
 - 目标主分支：`main`
 
 ## 本轮背景
 
-- 用户反馈计划表显示问题：同一用户、同一到期时间的记录希望相邻展示。
-- 这是用户明确点名计划表显示调整，因此允许修改计划相关查询；未修改代理列表。
+- 用户反馈计划页搜索不生效，要求可以搜索所有列、正确返回结果，并支持模糊匹配。
+- 本轮属于用户明确点名计划页搜索，因此允许修改计划页接口；未修改代理列表。
 
 ## 修改内容
 
-- `cloud/lifecycle_plan_queries.py`
-  - 新增计划表共享排序 `LIFECYCLE_PLAN_GROUPED_ORDERING = ('actual_expires_at', 'user_id', 'id')`。
-  - 关机计划、删机计划按“到期时间 -> 用户 -> 资产 ID”排序。
-  - 未附加 IP 删除计划同样按“到期时间 -> 用户 -> 资产 ID”排序。
-  - 深分页尾页优化的倒序排序同步改为“到期时间倒序 -> 用户倒序 -> 资产 ID 倒序”，保持前后页排序一致。
+- `bot/api.py`
+  - 计划页带 `keyword` 时，先按当前完整候选集生成展示行并执行装饰，再对装饰后的接口字段做全文模糊过滤。
+  - 搜索范围覆盖 `status_summary`、`plan_state_label`、`queue_status_label`、`execution_status`、日期、布尔开关展示含义等接口返回列。
+  - 单个关键词保持子串匹配；多个空格分隔词按“每个词可命中任意列”的方式匹配，支持跨列组合搜索。
+  - 过滤后重新计算各表总数，并按过滤结果分页，避免返回未过滤总数或错页。
 - `cloud/tests.py`
-  - 新增两个回归测试，分别覆盖服务器生命周期计划和未附加 IP 删除计划在同一到期时间下按用户聚合。
+  - 新增执行状态等装饰列搜索回归测试，验证即使 `fields=basic` 隐藏执行列，搜索仍能命中。
+  - 新增日期列模糊搜索回归测试。
+
+## 实测
+
+- 已用接口请求创建临时测试资产并回滚，搜索 `tmp-plan-search-execution-hit 资产关机计划开关关闭` 返回：
+  - HTTP 状态：`200`
+  - 命中：`True`
+  - `shutdown_plan_count`：`1`
+  - 当前页加载：`1`
 
 ## 验证
 
@@ -31,12 +40,12 @@
 
 ```bash
 git diff --check
-uv run python -m py_compile cloud/lifecycle_plan_queries.py cloud/tests.py
+uv run python -m py_compile bot/api.py cloud/tests.py
 uv run python manage.py check
-DJANGO_TEST_REUSE_DB=1 uv run python manage.py test cloud.tests.CloudServerServicesTestCase.test_server_lifecycle_plan_groups_same_user_with_same_expiry cloud.tests.CloudServerServicesTestCase.test_unattached_ip_delete_plan_groups_same_user_with_same_expiry --keepdb --noinput --verbosity 1
+DJANGO_TEST_REUSE_DB=1 uv run python manage.py test cloud.tests.CloudServerServicesTestCase.test_lifecycle_plans_keyword_matches_decorated_execution_columns cloud.tests.CloudServerServicesTestCase.test_lifecycle_plans_keyword_matches_date_columns --keepdb --noinput --verbosity 1
 ```
 
 ## 风险和下一步
 
-- 本轮只改变计划表返回顺序，不改变生命周期执行条件、执行时间、状态计算或资产到期事实。
-- 历史列表仍保持按执行/更新时间倒序，不强行按用户聚合，避免破坏历史时间线。
+- 本轮只改计划页查询接口的搜索过滤方式，不改变生命周期执行条件、执行时间、真实状态计算或 `CloudAsset.actual_expires_at` 到期事实。
+- 前端计划页已存在搜索入口并传递 `keyword`，本轮未修改前端页面。

@@ -21187,3 +21187,52 @@ DJANGO_TEST_REUSE_DB=1 uv run python manage.py test cloud.tests.CloudServerServi
 
 - 本轮只调整计划表展示顺序，不改变生命周期执行条件、执行时间、状态计算或 `CloudAsset.actual_expires_at` 到期事实。
 - 历史列表继续保留按执行/更新时间倒序，不按用户聚合，避免破坏历史时间线。
+
+## 2026-06-11 01:43 CST 计划页全列模糊搜索修复
+
+### 背景
+
+- 用户反馈计划页搜索不生效，要求可以搜索所有列，并且正确得到模糊匹配结果。
+- 本轮属于用户明确点名计划页搜索，因此允许修改计划页接口；未修改代理列表和生命周期执行器。
+
+### 原因
+
+- 计划页原搜索主要依赖查询层数据库字段过滤。
+- 页面上的真实状态、计划状态、执行状态、开关状态、部分日期展示和摘要字段是在接口层装饰后生成的，数据库过滤无法命中这些展示列。
+- 当 `fields=basic` 隐藏执行列时，前端仍需要按这些列搜索，但原接口会在生成展示字段前就把记录过滤掉。
+
+### 修改
+
+- `bot/api.py`
+  - 带 `keyword` 时改为先按当前候选全集生成各计划表展示行，再对装饰后的接口字段做递归全文过滤。
+  - 搜索覆盖字符串、数字、日期、嵌套字段和布尔开关语义；布尔值额外映射为“是/开启/关闭/打开/禁用”等文本。
+  - 单关键词保持原子串模糊匹配；多关键词按空白拆词，每个词可命中任意列，支持跨列组合搜索。
+  - 过滤后重新计算各表总数，并按过滤后的结果分页。
+- `cloud/tests.py`
+  - 新增计划页执行状态装饰列搜索测试：使用 `fields=basic` 隐藏执行列，仍按实例名加“资产关机计划开关关闭”命中目标资产。
+  - 新增计划页日期列模糊搜索测试：按 `2099-02-03` 命中对应到期日期记录。
+
+### 实测
+
+- 通过接口创建临时测试资产并在事务内回滚，搜索 `tmp-plan-search-execution-hit 资产关机计划开关关闭`：
+  - HTTP 状态为 `200`。
+  - `found=True`。
+  - `shutdown_plan_count=1`。
+  - 当前页加载 `1` 条。
+- 已核对前端计划页 `/Users/a399/Desktop/data/vue-shop-admin/apps/web-antd/src/views/dashboard/tasks/plans.vue` 会把 `keyword` 传给 `/admin/tasks/plans/`，本轮无需修改前端。
+
+### 验证
+
+通过：
+
+```bash
+git diff --check
+uv run python -m py_compile bot/api.py cloud/tests.py
+uv run python manage.py check
+DJANGO_TEST_REUSE_DB=1 uv run python manage.py test cloud.tests.CloudServerServicesTestCase.test_lifecycle_plans_keyword_matches_decorated_execution_columns cloud.tests.CloudServerServicesTestCase.test_lifecycle_plans_keyword_matches_date_columns --keepdb --noinput --verbosity 1
+```
+
+### 风险
+
+- 搜索带关键字时需要生成候选展示行后再过滤，换取“所有列”搜索的准确性；普通无关键字分页仍保持原分页路径。
+- 本轮不改变任何生命周期执行条件、执行时间、真实状态计算或 `CloudAsset.actual_expires_at` 到期事实。

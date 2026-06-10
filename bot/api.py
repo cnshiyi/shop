@@ -2401,6 +2401,48 @@ def lifecycle_plans(request):
             parsed = timezone.make_aware(parsed, timezone.get_current_timezone())
         return parsed
 
+    def item_matches_keyword(item: dict) -> bool:
+        needle = str(keyword or '').strip().lower()
+        if not needle:
+            return True
+        values = []
+
+        def collect(value):
+            if value is None:
+                return
+            if isinstance(value, bool):
+                values.extend(['true', '是', '开启' if value else '关闭', '打开' if value else '禁用'])
+                return
+            if isinstance(value, dict):
+                for nested_value in value.values():
+                    collect(nested_value)
+                return
+            if isinstance(value, (list, tuple, set)):
+                for nested_value in value:
+                    collect(nested_value)
+                return
+            values.append(str(value))
+
+        collect(item)
+        haystack = '\n'.join(values).lower()
+        terms = [term for term in re.split(r'\s+', needle) if term]
+        if len(terms) > 1:
+            return all(term in haystack for term in terms)
+        return needle in haystack
+
+    def filter_items_by_keyword(items: list[dict]) -> list[dict]:
+        if not keyword:
+            return items
+        return [item for item in items if item_matches_keyword(item)]
+
+    def response_page(items: list[dict] | None, page: int, page_size: int) -> list[dict] | None:
+        if items is None:
+            return None
+        if not keyword:
+            return items[:page_size]
+        start, end = _page_bounds(page, page_size)
+        return items[start:end]
+
     def decorate_plan_item(item):
         note = str(item.get('note') or '')
         incoming_display_note = str(item.get('display_note') or '')
@@ -2633,12 +2675,12 @@ def lifecycle_plans(request):
     count_snapshot = _cached_lifecycle_plan_count_snapshot()
     plan_stats = count_snapshot['plan_stats']
     if keyword:
-        total_counts = server_lifecycle_plan_counts(keyword=keyword)
-        ip_delete_total_counts = ip_delete_plan_counts(keyword=keyword)
+        total_counts = dict(count_snapshot['total_counts'])
+        ip_delete_total_counts = dict(count_snapshot['ip_delete_total_counts'])
     else:
         total_counts = count_snapshot['total_counts']
         ip_delete_total_counts = count_snapshot['ip_delete_total_counts']
-    server_history_total_counts = server_delete_history_counts(keyword=keyword)
+    server_history_total_counts = server_delete_history_counts(keyword=None if keyword else keyword)
     server_history_count = server_history_total_counts['server_history_count']
 
     shutdown_plan_items = None
@@ -2654,64 +2696,79 @@ def lifecycle_plans(request):
             decorate_plan_item(item)
             for item in _server_lifecycle_plan_page_items(
                 plan_stage='shutdown',
-                page=shutdown_page,
-                page_size=shutdown_page_size,
+                page=1 if keyword else shutdown_page,
+                page_size=total_counts['shutdown_plan_count'] if keyword else shutdown_page_size,
                 total=total_counts['shutdown_plan_count'],
-                keyword=keyword,
+                keyword=None,
             )
         ]
+        shutdown_plan_items = filter_items_by_keyword(shutdown_plan_items)
+        if keyword:
+            total_counts['shutdown_plan_count'] = len(shutdown_plan_items)
 
     if 'server_delete' in requested_tables:
         server_delete_active_items = [
             decorate_plan_item(item)
             for item in _server_lifecycle_plan_page_items(
                 plan_stage='delete',
-                page=server_delete_page,
-                page_size=server_delete_page_size,
+                page=1 if keyword else server_delete_page,
+                page_size=total_counts['server_delete_count'] if keyword else server_delete_page_size,
                 total=total_counts['server_delete_count'],
-                keyword=keyword,
+                keyword=None,
             )
         ]
+        server_delete_active_items = filter_items_by_keyword(server_delete_active_items)
         server_delete_active_items = [
             item for item in server_delete_active_items
             if not (item.get('plan_state') == 'completed' and not item.get('should_execute'))
         ]
+        if keyword:
+            total_counts['server_delete_count'] = len(server_delete_active_items)
         server_delete_due_items = [item for item in server_delete_active_items if is_server_delete_due(item)]
 
     if 'server_history' in requested_tables:
         server_history_items = [
             decorate_plan_item(item)
             for item in _server_delete_history_page_items(
-                page=server_history_page,
-                page_size=server_history_page_size,
+                page=1 if keyword else server_history_page,
+                page_size=server_history_count if keyword else server_history_page_size,
                 total=server_history_count,
-                keyword=keyword,
+                keyword=None,
             )
         ]
+        server_history_items = filter_items_by_keyword(server_history_items)
+        if keyword:
+            server_history_count = len(server_history_items)
 
     if 'ip_delete' in requested_tables:
         ip_delete_plan_items = [
             decorate_plan_item(item)
             for item in _ip_delete_plan_asset_page_items(
-                page=ip_delete_page,
-                page_size=ip_delete_page_size,
+                page=1 if keyword else ip_delete_page,
+                page_size=ip_delete_total_counts['ip_delete_count'] if keyword else ip_delete_page_size,
                 total=ip_delete_total_counts['ip_delete_count'],
-                keyword=keyword,
+                keyword=None,
             )
         ]
+        ip_delete_plan_items = filter_items_by_keyword(ip_delete_plan_items)
+        if keyword:
+            ip_delete_total_counts['ip_delete_count'] = len(ip_delete_plan_items)
         pending_ip_delete_items = [item for item in ip_delete_plan_items if is_ip_delete_pending(item)]
 
     if 'ip_delete_history' in requested_tables:
         ip_delete_history_items = [
             decorate_plan_item(item)
             for item in _ip_delete_history_page_items(
-                page=ip_delete_history_page,
-                page_size=ip_delete_history_page_size,
+                page=1 if keyword else ip_delete_history_page,
+                page_size=ip_delete_total_counts['ip_delete_history_count'] if keyword else ip_delete_history_page_size,
                 log_total=ip_delete_total_counts.get('ip_delete_history_log_count'),
                 asset_total=ip_delete_total_counts.get('ip_delete_history_asset_count'),
-                keyword=keyword,
+                keyword=None,
             )
         ]
+        ip_delete_history_items = filter_items_by_keyword(ip_delete_history_items)
+        if keyword:
+            ip_delete_total_counts['ip_delete_history_count'] = len(ip_delete_history_items)
     recent_history = []
 
     if compact:
@@ -2730,11 +2787,11 @@ def lifecycle_plans(request):
         ]:
             if items is not None:
                 compact_notes(items)
-    response_shutdown_plan_items = shutdown_plan_items[:shutdown_page_size] if shutdown_plan_items is not None else None
-    response_server_delete_items = server_delete_active_items[:server_delete_page_size] if server_delete_active_items is not None else None
-    response_server_history_items = server_history_items[:server_history_page_size] if server_history_items is not None else None
-    response_ip_delete_plan_items = ip_delete_plan_items[:ip_delete_page_size] if ip_delete_plan_items is not None else None
-    response_ip_delete_history_items = ip_delete_history_items[:ip_delete_history_page_size] if ip_delete_history_items is not None else None
+    response_shutdown_plan_items = response_page(shutdown_plan_items, shutdown_page, shutdown_page_size)
+    response_server_delete_items = response_page(server_delete_active_items, server_delete_page, server_delete_page_size)
+    response_server_history_items = response_page(server_history_items, server_history_page, server_history_page_size)
+    response_ip_delete_plan_items = response_page(ip_delete_plan_items, ip_delete_page, ip_delete_page_size)
+    response_ip_delete_history_items = response_page(ip_delete_history_items, ip_delete_history_page, ip_delete_history_page_size)
     for items in [
         response_shutdown_plan_items,
         response_server_delete_items,

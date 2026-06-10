@@ -3033,6 +3033,75 @@ class CloudServerServicesTestCase(TestCase):
         self.assertEqual(payload['pagination']['ip_delete_history']['page'], 1)
         self.assertTrue(any(item.get('asset_name') == 'partial-ip-history-only' for item in payload['ip_delete_history_items']))
 
+    # 功能：验证计划页搜索覆盖执行状态等装饰后的展示列，且字段开关隐藏时仍可搜索。
+    def test_lifecycle_plans_keyword_matches_decorated_execution_columns(self):
+        asset = CloudAsset.objects.create(
+            kind=CloudAsset.KIND_SERVER,
+            source=CloudAsset.SOURCE_AWS_SYNC,
+            user=self.user,
+            provider='aws_lightsail',
+            region_code=self.plan.region_code,
+            region_name=self.plan.region_name,
+            asset_name='decorated-search-execution-asset',
+            instance_id='decorated-search-execution-asset',
+            public_ip='10.77.88.241',
+            status=CloudAsset.STATUS_RUNNING,
+            actual_expires_at=timezone.now() + timezone.timedelta(days=30),
+            shutdown_enabled=False,
+            is_active=True,
+        )
+        SiteConfig.set('cloud_server_shutdown_enabled', '1')
+        admin = get_user_model().objects.create_user(username='lifecycle_search_execution_admin', password='x', is_staff=True)
+        request = self.factory.get('/api/admin/tasks/plans/', {
+            'compact': '1',
+            'fields': 'basic',
+            'keyword': 'decorated-search-execution-asset 资产关机计划开关关闭',
+            'limit': '200',
+            'refresh': '1',
+            'tables': 'shutdown_plan',
+        })
+        self._attach_bearer_session(request, admin)
+        response = lifecycle_plans(request)
+        payload = json.loads(response.content.decode('utf-8'))['data']
+
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(any(item.get('asset_id') == asset.id for item in payload['shutdown_plan_items']))
+        self.assertGreaterEqual(payload['shutdown_plan_count'], 1)
+
+    # 功能：验证计划页搜索支持日期列的模糊匹配。
+    def test_lifecycle_plans_keyword_matches_date_columns(self):
+        expires_at = datetime(2099, 2, 3, 4, 5, 6, tzinfo=timezone.get_current_timezone())
+        asset = CloudAsset.objects.create(
+            kind=CloudAsset.KIND_SERVER,
+            source=CloudAsset.SOURCE_AWS_SYNC,
+            user=self.user,
+            provider='aws_lightsail',
+            region_code=self.plan.region_code,
+            region_name=self.plan.region_name,
+            asset_name='decorated-search-date-asset',
+            instance_id='decorated-search-date-asset',
+            public_ip='10.77.88.242',
+            status=CloudAsset.STATUS_RUNNING,
+            actual_expires_at=expires_at,
+            is_active=True,
+        )
+        admin = get_user_model().objects.create_user(username='lifecycle_search_date_admin', password='x', is_staff=True)
+        request = self.factory.get('/api/admin/tasks/plans/', {
+            'compact': '1',
+            'fields': 'basic',
+            'keyword': '2099-02-03',
+            'limit': '200',
+            'refresh': '1',
+            'tables': 'shutdown_plan',
+        })
+        self._attach_bearer_session(request, admin)
+        response = lifecycle_plans(request)
+        payload = json.loads(response.content.decode('utf-8'))['data']
+
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(any(item.get('asset_id') == asset.id for item in payload['shutdown_plan_items']))
+        self.assertGreaterEqual(payload['shutdown_plan_count'], 1)
+
     # 功能：验证云资产列表快照搜索文本不会持久化代理密钥。
     def test_cloud_asset_dashboard_snapshot_search_text_masks_proxy_secret(self):
         secret = 'ee0123456789abcdef0123456789abcdef'
