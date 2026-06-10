@@ -957,6 +957,49 @@ class DashboardCloudAccountVerifyTestCase(TestCase):
         all_ids = page1_ids | page2_ids | {item['id'] for item in payload3['items']}
         self.assertEqual(len(all_ids), 13)
 
+    def test_users_list_orders_by_proxy_count_before_pagination(self):
+        root = get_user_model().objects.create_user(username='root_users_proxy_sort', password='pass', is_staff=True, is_superuser=True)
+        zero = TelegramUser.objects.create(tg_user_id=930001, username='proxy_sort_zero', first_name='零服务器')
+        low = TelegramUser.objects.create(tg_user_id=930002, username='proxy_sort_low', first_name='一台服务器')
+        high = TelegramUser.objects.create(tg_user_id=930003, username='proxy_sort_high', first_name='三台服务器')
+        for index in range(3):
+            CloudAsset.objects.create(
+                kind=CloudAsset.KIND_SERVER,
+                source=CloudAsset.SOURCE_AWS_SYNC,
+                provider='aws_lightsail',
+                region_code='ap-southeast-1',
+                asset_name=f'proxy-sort-high-{index}',
+                instance_id=f'proxy-sort-high-{index}',
+                public_ip=f'203.0.113.{30 + index}',
+                user=high,
+                status=CloudAsset.STATUS_RUNNING,
+                is_active=True,
+            )
+        CloudAsset.objects.create(
+            kind=CloudAsset.KIND_SERVER,
+            source=CloudAsset.SOURCE_AWS_SYNC,
+            provider='aws_lightsail',
+            region_code='ap-southeast-1',
+            asset_name='proxy-sort-low',
+            instance_id='proxy-sort-low',
+            public_ip='203.0.113.40',
+            user=low,
+            status=CloudAsset.STATUS_RUNNING,
+            is_active=True,
+        )
+
+        page1 = RequestFactory().get('/api/admin/users/', {'keyword': 'proxy_sort_', 'page': '1', 'page_size': '2'})
+        page1.user = root
+        payload1 = json.loads(users_list(page1).content.decode('utf-8'))['data']
+        page2 = RequestFactory().get('/api/admin/users/', {'keyword': 'proxy_sort_', 'page': '2', 'page_size': '2'})
+        page2.user = root
+        payload2 = json.loads(users_list(page2).content.decode('utf-8'))['data']
+
+        self.assertEqual([item['id'] for item in payload1['items']], [high.id, low.id])
+        self.assertEqual([item['proxy_count'] for item in payload1['items']], [3, 1])
+        self.assertEqual([item['id'] for item in payload2['items']], [zero.id])
+        self.assertEqual(payload2['items'][0]['proxy_count'], 0)
+
     def test_users_list_searches_numeric_and_text_keywords_with_pagination(self):
         root = get_user_model().objects.create_user(username='root_users_search', password='pass', is_staff=True, is_superuser=True)
         first = TelegramUser.objects.create(tg_user_id=920001, username='needle_user_01', first_name='搜索用户甲')

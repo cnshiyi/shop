@@ -4,58 +4,63 @@
 
 ## 最近一轮
 
-- 时间：2026-06-10 12:50 CST
-- 状态：已完成代理列表 10 万资产三视图、自动续费开关和列开关压测，并修复列全关渲染错误。
+- 时间：2026-06-10 13:39 CST
+- 状态：已完成代理列表、服务器表、生命周期计划、通知计划、用户表排序巡检和修复。
 - 后端分支：`codex/cloud-asset-lifecycle-refactor`
 - 前端分支：`codex/cloud-asset-list-performance`
 - 目标主分支：`main`
 
 ## 本轮背景
 
-- 用户要求代理列表继续压测 10 万级数据，三种视图都要实际打开前端查看。
-- 本轮追加要求压测列开关，必须覆盖每个视图的全关、全开恢复。
-- 压测必须使用独立测试库，不能污染默认本地业务库。
+- 用户要求检查排序问题：
+  - 代理列表、计划、通知计划、服务器表：快到期的排在上面。
+  - 用户表：服务器数量多的排在上面。
+- 本轮沿用独立压测库 `.stress/cloud_assets_100k.sqlite3` 做真实页面验证，避免污染默认本地业务库。
 
 ## 修复内容
 
-- `apps/web-antd/src/views/dashboard/cloud-assets/index.vue`
-  - 平铺表格和分组表格在所有列关闭时不再挂载空列 `Table`。
-  - 全部列关闭后显示“已关闭全部显示列”的空状态。
-  - 保留已有列开关、分页和数据查询逻辑，不改变后端分页口径。
+- `cloud/api_asset_snapshots.py`
+  - 代理列表默认排序改为优先按资产到期时间升序。
+  - `auto_renew_off`、`shutdown_disabled` 标签也改为到期时间优先。
+- `cloud/api_tasks.py`
+  - 通知计划分组排序改为优先按下次通知时间升序。
+- `bot/user_stats.py`、`bot/api_users.py`
+  - 用户列表分页前先按有效服务器数量倒序排序。
+  - 服务器数量相同再按用户 ID 倒序，0 服务器用户排在后面。
+- `bot/tests.py`、`cloud/tests.py`
+  - 增加用户表服务器数量排序、通知计划时间排序测试。
+  - 更新代理列表默认排序断言。
 
 ## 验证
 
 通过：
 
 ```bash
-pnpm typecheck
+uv run python -m py_compile bot/api_users.py bot/user_stats.py bot/tests.py cloud/api_asset_snapshots.py cloud/api_tasks.py cloud/tests.py
 uv run python manage.py check
+DJANGO_TEST_SQLITE=1 uv run python manage.py test cloud.tests.CloudServerServicesTestCase.test_cloud_assets_risk_ordering_uses_existing_page_indexes cloud.tests.CloudServerServicesTestCase.test_notice_plan_summary_sorts_by_next_notice_time_before_user cloud.tests.CloudServerServicesTestCase.test_notice_plan_summary_reuses_group_rows_for_counts bot.tests.DashboardCloudAccountVerifyTestCase.test_users_list_orders_by_proxy_count_before_pagination bot.tests.DashboardCloudAccountVerifyTestCase.test_users_list_uses_server_pagination_total_and_distinct_pages bot.tests.DashboardCloudAccountVerifyTestCase.test_users_list_searches_numeric_and_text_keywords_with_pagination --settings=shop.settings --verbosity=1
 ```
 
-真实浏览器压测使用独立 SQLite 库 `.stress/cloud_assets_100k.sqlite3`，数据量：
+真实浏览器验证使用前端 `127.0.0.1:5666`、后端独立压测库 `.stress/cloud_assets_100k.sqlite3`：
 
-- `CloudAsset`：100000
-- `CloudAssetDashboardSnapshot`：100000
-- `TelegramUser`：1000
-- `TelegramGroupFilter`：200
-- `CloudServerOrder`：1000
+- 代理列表：20 条，`actual_expires_at` 升序，接口 4.37s。
+- 服务器表：50 条，`expires_at` 升序，接口 2.27s。
+- 计划页关机计划：50 条，`suspend_at/next_run_at` 升序，接口 2.08s。
+- 通知计划：10 条，`next_notice_at` 升序，接口 1.93s。
+- 用户表：10 条，`proxy_count` 倒序，接口 1.83s。
+- 浏览器控制台无报错。
 
-压测结果：
+结果文件：
 
-- IP 视图：8 个列开关，全关显示空状态，全开表头完整恢复。
-- 操作视图：23 个列开关，全关显示空状态，全开表头完整恢复。
-- 云资源视图：11 个列开关，全关显示空状态，全开表头完整恢复。
-- 列开关压测结果文件：`output/playwright/cloud-assets-column-switches-fixed-result.json`
-- 截图：
-  - `output/playwright/cloud-assets-columns-ip-all-off-fixed.png`
-  - `output/playwright/cloud-assets-columns-ip-all-on-fixed.png`
-  - `output/playwright/cloud-assets-columns-ops-all-off-fixed.png`
-  - `output/playwright/cloud-assets-columns-ops-all-on-fixed.png`
-  - `output/playwright/cloud-assets-columns-cloud-all-off-fixed.png`
-  - `output/playwright/cloud-assets-columns-cloud-all-on-fixed.png`
+- `output/playwright/sort-check-result.json`
+- `output/playwright/sort-check-cloud-assets.png`
+- `output/playwright/sort-check-servers.png`
+- `output/playwright/sort-check-plans.png`
+- `output/playwright/sort-check-notices.png`
+- `output/playwright/sort-check-users.png`
 
 ## 结论
 
-- 代理列表列开关在 10 万资产压测库下可以完整关闭和恢复。
-- 全部列关闭不再触发表格空列渲染异常。
-- 三种视图的表头恢复结果与关闭前一致，未发现列丢失或列错位。
+- 代理列表、通知计划、用户表已修复排序口径。
+- 服务器表、关机计划、删机计划、未附加 IP 删除计划的活跃计划查询层已确认按到期/执行时间升序。
+- 当前压测库中服务器删除计划和 IP 删除计划活跃数据为 0，本轮只能确认代码排序口径，页面实测无活跃行可排序。

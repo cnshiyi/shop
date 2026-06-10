@@ -2655,8 +2655,12 @@ class CloudServerServicesTestCase(TestCase):
         for risk_status in ['auto_renew_off', 'shutdown_disabled']:
             self.assertEqual(
                 _dashboard_snapshot_ordering('', '', risk_status),
-                ['group_telegram_key', 'group_telegram_label', '-asset_id'],
+                ['asset_due_sort_null_rank', 'asset_due_sort_at', 'group_telegram_key', 'group_telegram_label', '-asset_id'],
             )
+        self.assertEqual(
+            _dashboard_snapshot_ordering('', '', ''),
+            ['asset_due_sort_null_rank', 'asset_due_sort_at', 'risk_rank', '-sort_order', '-asset_id'],
+        )
         self.assertEqual(
             _dashboard_snapshot_ordering('actual_expires_at', 'asc', 'unbound_user'),
             ['asset_due_sort_null_rank', 'asset_due_sort_at', 'risk_rank', '-sort_order', '-asset_id'],
@@ -13477,6 +13481,31 @@ class CloudServerServicesTestCase(TestCase):
         self.assertEqual(summary['total_counts']['due_count'], 2)
         self.assertEqual(summary['total_counts']['future_count'], 3)
         self.assertEqual(summary['total_counts']['active_user_count'], 2)
+
+    def test_notice_plan_summary_sorts_by_next_notice_time_before_user(self):
+        from cloud import api_tasks
+
+        now = timezone.now()
+        rows = [
+            {
+                'id': 'z-user:renew_notice:future',
+                'user_display_name': 'A 用户',
+                'username_label': '-',
+                'notice_type_label': '到期提醒',
+                '_next_notice_at_value': now + timezone.timedelta(days=3),
+            },
+            {
+                'id': 'a-user:renew_notice:due',
+                'user_display_name': 'Z 用户',
+                'username_label': '-',
+                'notice_type_label': '到期提醒',
+                '_next_notice_at_value': now + timezone.timedelta(hours=1),
+            },
+        ]
+
+        sorted_rows = api_tasks._notice_sort_group_rows(rows)
+
+        self.assertEqual([item['id'] for item in sorted_rows], ['a-user:renew_notice:due', 'z-user:renew_notice:future'])
 
     # 功能：验证通知计划总数统计全量未来计划，且分页只加载当前页分组。
     def test_notice_task_detail_counts_all_future_groups_beyond_loaded_limit(self):

@@ -8,7 +8,10 @@ from django.db.models.functions import Cast
 from django.views.decorators.csrf import csrf_exempt
 from django.views.decorators.http import require_GET, require_POST
 
-from bot.user_stats import active_proxy_counts_by_user as _active_proxy_counts_by_user
+from bot.user_stats import (
+    active_proxy_count_rows_by_user as _active_proxy_count_rows_by_user,
+    active_proxy_counts_by_user as _active_proxy_counts_by_user,
+)
 from core.dashboard_api import (
     _apply_keyword_filter,
     _decimal_to_str,
@@ -118,8 +121,33 @@ def users_list(request):
     queryset = queryset.distinct()
     total = queryset.count()
     offset = (page - 1) * page_size
-    users = list(queryset[offset:offset + page_size])
-    proxy_counts = _active_proxy_counts_by_user([user.id for user in users])
+    count_rows = _active_proxy_count_rows_by_user(
+        queryset.values_list('id', flat=True),
+    )
+    counted_user_ids = [
+        int(row['effective_user_id'])
+        for row in count_rows
+        if row.get('effective_user_id')
+    ]
+    proxy_counts = {
+        int(row['effective_user_id']): int(row['proxy_count'] or 0)
+        for row in count_rows
+        if row.get('effective_user_id')
+    }
+    page_user_ids = counted_user_ids[offset:offset + page_size]
+    if len(page_user_ids) < page_size:
+        zero_offset = max(offset - len(counted_user_ids), 0)
+        zero_user_ids = list(
+            queryset.exclude(id__in=counted_user_ids)
+            .order_by('-id')
+            .values_list('id', flat=True)[zero_offset:zero_offset + page_size - len(page_user_ids)]
+        )
+        page_user_ids.extend(zero_user_ids)
+    users_by_id = {
+        user.id: user
+        for user in TelegramUser.objects.filter(id__in=page_user_ids)
+    }
+    users = [users_by_id[user_id] for user_id in page_user_ids if user_id in users_by_id]
     items = [
         {
             **_user_payload({

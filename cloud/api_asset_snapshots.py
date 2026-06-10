@@ -557,8 +557,8 @@ def _dashboard_snapshot_ordering(sort_by: str, sort_direction: str, risk_status:
     }:
         return ['asset_due_sort_null_rank', 'asset_due_sort_at', 'group_user_label', 'group_user_key', '-asset_id']
     if risk_status in {'auto_renew_off', 'shutdown_disabled'}:
-        return ['group_telegram_key', 'group_telegram_label', '-asset_id']
-    return ['risk_rank', 'asset_due_sort_null_rank', 'asset_due_sort_at', '-sort_order', '-asset_id']
+        return ['asset_due_sort_null_rank', 'asset_due_sort_at', 'group_telegram_key', 'group_telegram_label', '-asset_id']
+    return ['asset_due_sort_null_rank', 'asset_due_sort_at', 'risk_rank', '-sort_order', '-asset_id']
 
 
 def _snapshot_payload(row):

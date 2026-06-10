@@ -1532,9 +1532,9 @@ def _notice_group_summary_page(now, *, limit: int, offset: int, fields: set[str]
 
 def _notice_sort_group_rows(rows: list[dict]) -> list[dict]:
     rows.sort(key=lambda item: (
+        item.get('_next_notice_at_value') or timezone.datetime.max.replace(tzinfo=dt_timezone.utc),
         item.get('user_display_name') or '',
         item.get('username_label') or '',
-        item.get('_next_notice_at_value') or timezone.datetime.max.replace(tzinfo=dt_timezone.utc),
         item.get('notice_type_label') or '',
     ))
     return rows

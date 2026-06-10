@@ -1,6 +1,7 @@
 """User-facing cloud asset statistics for dashboard views."""
 
-from django.db.models import Q
+from django.db.models import Count, IntegerField, Q
+from django.db.models.functions import Coalesce
 
 from cloud.models import CloudAsset
 from core.cloud_accounts import cloud_account_label_variants
@@ -60,3 +61,23 @@ def active_proxy_counts_by_user(user_ids=None):
             continue
         counts[user_id] = counts.get(user_id, 0) + proxy_asset_count(asset)
     return counts
+
+
+def active_proxy_count_rows_by_user(user_ids=None):
+    qs = active_cloud_asset_queryset().filter(
+        Q(user_id__isnull=False) | Q(order__user_id__isnull=False)
+    )
+    if user_ids is not None:
+        qs = qs.filter(Q(user_id__in=user_ids) | Q(order__user_id__in=user_ids))
+    return list(
+        qs.annotate(
+            effective_user_id=Coalesce(
+                'user_id',
+                'order__user_id',
+                output_field=IntegerField(),
+            ),
+        )
+        .values('effective_user_id')
+        .annotate(proxy_count=Count('id'))
+        .order_by('-proxy_count', '-effective_user_id')
+    )
