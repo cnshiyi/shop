@@ -1190,3 +1190,49 @@ uv run python manage.py check
 DJANGO_TEST_SQLITE=1 uv run python manage.py test cloud.tests.CloudServerServicesTestCase.test_lifecycle_plans_stale_instance_unattached_ip_stays_in_ip_delete_plan cloud.tests.CloudServerServicesTestCase.test_lifecycle_plans_exclude_unattached_ip_with_stale_instance_after_recovery_order cloud.tests.CloudServerServicesTestCase.test_unattached_ip_active_recovery_order_is_excluded_from_delete_plan cloud.tests.CloudServerServicesTestCase.test_lifecycle_plans_retained_ip_after_server_delete_stays_in_ip_delete_plan cloud.tests.CloudServerServicesTestCase.test_unattached_ip_delete_items_skip_assets_attached_to_instance --settings=shop.settings --verbosity=1
 git diff --check
 ```
+
+## 2026-06-11 00:37 CST 美国区服务器创建失败原因定位与真机验证
+
+- 状态：已定位线上失败原因，并完成 1 台美国区真机创建、安装和清理。
+- 授权：用户明确回复“确认”，授权本轮真实云资源成本。
+- 测试数据库：`shop_manual_20260608_5676`，MySQL `127.0.0.1:3307`
+- 云厂商：AWS Lightsail
+- 云账号：后台 AWS 云账号 `#55`
+- 地区：`us-east-1`
+- 套餐：`nano_3_0`，本轮测试套餐 `#16`，名称 `真机测试 US Nano`
+- 测试用户：`TelegramUser #16254`，`codex_us_real_machine_test`
+
+### 失败复现
+
+- 订单：`#914` / `REALUS061016302424873`
+- 现象：业务开通入口在创建前返回“没有可用的后台云账号”，订单进入失败/删除清理状态。
+- 云端结果：未创建真实实例，清理复核云端不存在对应实例。
+- 根因：账号 `#55` 的 `region_hint` 仍只有 `ap-southeast-1`，购买美国区时账号候选函数按 `region_hint` 过滤，导致候选账号为空。
+- 关键判断：同一账号直接调用 AWS Lightsail 只读接口，`us-east-1`、`us-east-2`、`us-west-2` 均可正常返回实例列表，说明不是凭据不可用，而是本地账号区域候选数据过窄。
+
+### 修复验证
+
+- 本轮先在测试库将账号 `#55` 的 `region_hint` 补充为包含 `us-east-1/us-east-2/us-west-2`，重新走业务开通入口。
+- 成功订单：`#915` / `REALUS061016325878029`
+- 云实例：`20260610-************-*-o915`
+- 固定 IP 名称：`20260610-************-*-o915-ip`
+- 公网 IP：`54.205.xxx.xxx`
+- 本地资产：`#721`
+- 创建结果：AWS Lightsail 美国区实例创建成功，固定 IP 分配绑定成功。
+- 安装结果：BBR、MTProxy 主/备用/Telemt、SOCKS5 安装成功。
+- SOCKS5 格式：订单保存的 SOCKS5 链接已包含 `https://t.me/socks?server=` 格式；未记录完整链接、用户名或密码。
+- 本地完成状态：创建完成后订单为 `completed`，资产为 `running/is_active=True`，到期事实为 `CloudAsset.actual_expires_at`。
+
+### 测试资源清理
+
+- 清理方式：通过现有 AWS 生命周期删除函数删除实例，再释放固定 IP，并调用本地标记函数更新订单/资产状态。
+- 删除实例结果：通过，云端实例已不存在。
+- 释放固定 IP 结果：通过，云端固定 IP 已不存在。
+- 最终本地状态：订单 `#915` 为 `deleted`，资产 `#721` 为 `deleted/is_active=False`，订单当前公网 IP、固定 IP 名称和实例标识已清空。
+- 配置恢复：测试临时打开的 `cloud_server_delete_enabled` 和 `cloud_ip_delete_enabled` 已恢复为测试前值。
+
+### 代码修复
+
+- `core.cloud_accounts.cloud_account_supports_region()` 增加状态备注区域兜底：当旧 `region_hint` 不包含目标区域时，会从最近一次云同步/验证的 `status_note` 中解析已确认地区。
+- 线上已有“同步完成，地区 ... us-east-1,us-east-2,us-west-2 ...”但 `region_hint` 仍过窄的账号，将不再被美国区购买流程误过滤。
+- 新增回归测试覆盖：旧 `region_hint=ap-southeast-1`、`status_note` 已确认 `us-east-1` 时，美国区候选账号必须可用。

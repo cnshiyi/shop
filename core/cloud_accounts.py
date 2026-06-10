@@ -78,12 +78,21 @@ def cloud_account_region_hints(account) -> set[str]:
     return {item.strip() for item in re.split(r'[\s,，;；|]+', text) if item.strip()}
 
 
+def cloud_account_status_regions(account) -> set[str]:
+    text = str(getattr(account, 'status_note', '') or '').strip()
+    if not text:
+        return set()
+    return set(re.findall(r'\b[a-z]{2}(?:-[a-z0-9]+)+\b', text))
+
+
 def cloud_account_supports_region(account, region_code: str | None) -> bool:
     region = str(region_code or '').strip()
     if not region:
         return True
     hints = cloud_account_region_hints(account)
-    return not hints or '*' in hints or region in hints
+    if not hints or '*' in hints or region in hints:
+        return True
+    return region in cloud_account_status_regions(account)
 
 
 def get_active_cloud_account(provider: str, region_code: str | None = None):

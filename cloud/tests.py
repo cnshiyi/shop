@@ -246,6 +246,24 @@ class CloudServerServicesTestCase(TestCase):
         self.assertIn(first.id, [item.id for item in accounts])
         self.assertNotIn(second.id, [item.id for item in accounts])
 
+    # 功能：验证云同步状态已确认的地区可以补足旧 region_hint，避免购买美国区时误判无账号。
+    def test_cloud_account_status_note_regions_extend_region_hint(self):
+        account = CloudAccountConfig.objects.create(
+            provider=CloudAccountConfig.PROVIDER_AWS,
+            name='status-note-region-account',
+            external_account_id='555555555555',
+            access_key='A' * 20,
+            secret_key='B' * 40,
+            region_hint='ap-southeast-1',
+            status=CloudAccountConfig.STATUS_OK,
+            status_note='AWS 同步完成，账号ID 555555555555，地区 ap-southeast-1,us-east-1,us-east-2,us-west-2，扫描 2 台。',
+            is_active=True,
+        )
+
+        accounts = list_active_cloud_accounts('aws_lightsail', 'us-east-1')
+
+        self.assertIn(account.id, [item.id for item in accounts])
+
     # 功能：验证待创建订单也参与账号负载计算，连续批量拆单能分散到多个云账号。
     def test_prepare_cloud_server_order_instances_rotates_cloud_accounts(self):
         first = CloudAccountConfig.objects.create(

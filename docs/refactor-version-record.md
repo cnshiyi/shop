@@ -21042,3 +21042,52 @@ uv run python -m py_compile cloud/services.py cloud/tests.py
 uv run python manage.py check
 DJANGO_TEST_REUSE_DB=1 uv run python manage.py test cloud.tests.CloudServerServicesTestCase.test_manual_expiry_operation_order_does_not_duplicate_unbound_asset_ip --keepdb --noinput --verbosity 1
 ```
+
+## 2026-06-11 00:37 CST 美国区云服务器创建失败原因定位与修复
+
+### 背景
+
+- 用户要求测试创建 1 台美国服务器，并明确确认真实云资源成本。
+- 用户随后说明线上同类创建也在失败，本轮重点从真机测试切换为定位线上失败原因。
+
+### 根因
+
+- 当前测试库内 AWS 账号 `#55` 的真实凭据在 `us-east-1`、`us-east-2`、`us-west-2` 只读查询均可用。
+- 但该账号 `region_hint` 只保存了 `ap-southeast-1`。
+- 业务开通入口使用 `list_cloud_accounts_by_server_load(order.provider, order.region_code)` 选择账号，底层 `cloud_account_supports_region()` 只看 `region_hint`，因此美国区订单会被误判为“没有可用后台云账号”。
+- 第一次业务订单 `#914` 复现该失败：候选账号为空，订单失败，云端没有创建实例。
+
+### 修改
+
+- `core/cloud_accounts.py`
+  - 新增 `cloud_account_status_regions()`，从云账号 `status_note` 中解析最近一次同步/验证确认过的地区。
+  - `cloud_account_supports_region()` 在 `region_hint` 未命中时，继续使用 `status_note` 地区兜底。
+  - 线上已有“同步完成，地区 ... us-east-1/us-east-2/us-west-2 ...”但 `region_hint` 没及时扩展的账号，不再被美国区创建流程误过滤。
+- `cloud/tests.py`
+  - 新增 `test_cloud_account_status_note_regions_extend_region_hint`，覆盖旧 `region_hint=ap-southeast-1`、状态备注包含 `us-east-1` 时，美国区候选账号必须可用。
+- `docs/real-machine-test-report.md`
+  - 追加美国区真机测试报告，记录失败复现、修复验证和资源清理，资源 ID/IP/实例名脱敏。
+- `docs/auto-optimization-latest.md`
+  - 覆盖为本轮最新状态。
+
+### 真机验证
+
+- 修复前复现订单：`#914` / `REALUS061016302424873`
+  - 结果：业务候选账号为空，未创建云端实例。
+- 修复验证订单：`#915` / `REALUS061016325878029`
+  - 地区：`us-east-1`
+  - 套餐：`nano_3_0`
+  - 结果：AWS Lightsail 实例创建成功，固定 IP 分配绑定成功，BBR、MTProxy 主/备用/Telemt、SOCKS5 安装成功。
+  - SOCKS5：订单已保存 `https://t.me/socks?server=` 格式链接；报告未记录完整链接、用户名、密码或 secret。
+  - 清理：实例已删除，固定 IP 已释放；本地订单为 `deleted`，资产为 `deleted/is_active=False`。
+
+### 验证
+
+通过：
+
+```bash
+git diff --check
+uv run python -m py_compile core/cloud_accounts.py cloud/tests.py
+uv run python manage.py check
+DJANGO_TEST_REUSE_DB=1 uv run python manage.py test cloud.tests.CloudServerServicesTestCase.test_cloud_account_status_note_regions_extend_region_hint --keepdb --noinput --verbosity 1
+```
