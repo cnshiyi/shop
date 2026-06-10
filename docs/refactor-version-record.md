@@ -21153,3 +21153,37 @@ uv run python manage.py check
 DJANGO_TEST_REUSE_DB=1 uv run python manage.py test cloud.tests.CloudServerServicesTestCase.test_aws_unsupported_regions_are_filtered_from_price_regions --keepdb --noinput --verbosity 1
 DJANGO_TEST_REUSE_DB=1 uv run python manage.py test bot.tests.RetainedIpRenewalUiTestCase.test_extreme_nested_cloud_callbacks_stay_under_telegram_limit bot.tests.RetainedIpRenewalUiTestCase.test_cloud_change_ip_keyboards_keep_back_path --keepdb --noinput --verbosity 1
 ```
+
+## 2026-06-11 01:32 CST 生命周期计划表同用户同到期时间聚合排序
+
+### 背景
+
+- 用户反馈计划表显示问题：同一用户、同一到期时间的记录希望相邻展示。
+- 本轮属于用户明确点名计划表显示调整，因此允许修改计划页查询排序；未修改代理列表相关逻辑。
+
+### 修改
+
+- `cloud/lifecycle_plan_queries.py`
+  - 新增共享排序 `LIFECYCLE_PLAN_GROUPED_ORDERING = ('actual_expires_at', 'user_id', 'id')`。
+  - 关机计划、删机计划分页改为按“到期时间 -> 用户 -> 资产 ID”排序。
+  - 未附加 IP 删除计划分页改为按同一排序。
+  - 未附加 IP 删除计划深分页尾页优化同步改为“到期时间倒序 -> 用户倒序 -> 资产 ID 倒序”，避免尾页和普通页排序规则不一致。
+- `cloud/tests.py`
+  - 新增服务器生命周期计划排序回归测试。
+  - 新增未附加 IP 删除计划排序回归测试。
+
+### 验证
+
+通过：
+
+```bash
+git diff --check
+uv run python -m py_compile cloud/lifecycle_plan_queries.py cloud/tests.py
+uv run python manage.py check
+DJANGO_TEST_REUSE_DB=1 uv run python manage.py test cloud.tests.CloudServerServicesTestCase.test_server_lifecycle_plan_groups_same_user_with_same_expiry cloud.tests.CloudServerServicesTestCase.test_unattached_ip_delete_plan_groups_same_user_with_same_expiry --keepdb --noinput --verbosity 1
+```
+
+### 风险
+
+- 本轮只调整计划表展示顺序，不改变生命周期执行条件、执行时间、状态计算或 `CloudAsset.actual_expires_at` 到期事实。
+- 历史列表继续保留按执行/更新时间倒序，不按用户聚合，避免破坏历史时间线。

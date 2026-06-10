@@ -20,6 +20,7 @@ _LIFECYCLE_IP_DELETE_COUNTS_CACHE_KEY = 'cloud:lifecycle-plan:ip-delete-counts:v
 _LIFECYCLE_PLAN_COUNTS_CACHE_TTL = 30
 _ASSET_RENEWAL_MARKER = '未绑定代理资产续费'
 _ACTIVE_ASSET_RENEWAL_ORDER_STATUSES = ['pending', 'paid', 'provisioning', 'renew_pending']
+LIFECYCLE_PLAN_GROUPED_ORDERING = ('actual_expires_at', 'user_id', 'id')
 
 
 def _normalized_keyword(keyword: str | None) -> str:
@@ -329,7 +330,7 @@ def server_lifecycle_plan_page(
         queryset = queryset.exclude(server_shutdown_complete_q())
     else:
         queryset = queryset.filter(server_shutdown_complete_q())
-    return paged_queryset(queryset, ordering=('actual_expires_at', 'id'), page=page, page_size=page_size, total=total)
+    return paged_queryset(queryset, ordering=LIFECYCLE_PLAN_GROUPED_ORDERING, page=page, page_size=page_size, total=total)
 
 
 def server_delete_history_order_queryset():
@@ -531,7 +532,7 @@ def unattached_ip_delete_plan_page(
             )
             if tail_page is not None:
                 return tail_page
-    return paged_queryset(queryset, ordering=('actual_expires_at', 'id'), page=page, page_size=page_size, total=total)
+    return paged_queryset(queryset, ordering=LIFECYCLE_PLAN_GROUPED_ORDERING, page=page, page_size=page_size, total=total)
 
 
 def _unattached_ip_delete_tail_page(queryset, *, reverse_start: int, count: int):
@@ -543,23 +544,23 @@ def _unattached_ip_delete_tail_page(queryset, *, reverse_start: int, count: int)
     candidate_sources = [
         CloudAsset.objects.filter(kind=CloudAsset.KIND_SERVER)
         .filter(broad_unattached_ip_asset_q())
-        .order_by('-actual_expires_at', '-id'),
+        .order_by('-actual_expires_at', '-user_id', '-id'),
     ]
     source_state = {}
     heap = []
     chunk_size = max(target * 4, 500)
 
     def candidate_sort_key(row):
-        item_id, actual_expires_at = row
+        item_id, actual_expires_at, user_id = row
         ts_value = actual_expires_at.timestamp() if actual_expires_at is not None else float('-inf')
-        return (-ts_value, -int(item_id or 0))
+        return (-ts_value, -int(user_id or 0), -int(item_id or 0))
 
     def refill(source_index: int):
         state = source_state[source_index]
         if state['buffer'] or state['done']:
             return
         start = state['offset']
-        rows = list(state['queryset'].values_list('id', 'actual_expires_at')[start:start + chunk_size])
+        rows = list(state['queryset'].values_list('id', 'actual_expires_at', 'user_id')[start:start + chunk_size])
         state['offset'] += len(rows)
         if len(rows) < chunk_size:
             state['done'] = True

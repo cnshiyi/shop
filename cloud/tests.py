@@ -282,6 +282,73 @@ class CloudServerServicesTestCase(TestCase):
         self.assertNotIn('ap-southeast-3', region_codes)
         self.assertNotIn('ap-southeast-5', region_codes)
 
+    # 功能：验证生命周期计划按同一到期时间内的用户聚合展示，避免同一用户资产被其他用户夹开。
+    def test_server_lifecycle_plan_groups_same_user_with_same_expiry(self):
+        from cloud.lifecycle_plan_queries import server_lifecycle_plan_page
+
+        first_user = TelegramUser.objects.create(tg_user_id=990101, username='plan_group_first')
+        second_user = TelegramUser.objects.create(tg_user_id=990102, username='plan_group_second')
+        expires_at = timezone.now() + timezone.timedelta(days=3)
+        assets = [
+            (first_user, '10.61.0.1'),
+            (second_user, '10.61.0.2'),
+            (first_user, '10.61.0.3'),
+            (second_user, '10.61.0.4'),
+        ]
+        for user, public_ip in assets:
+            CloudAsset.objects.create(
+                kind=CloudAsset.KIND_SERVER,
+                source=CloudAsset.SOURCE_ORDER,
+                provider='aws_lightsail',
+                region_code=self.plan.region_code,
+                user=user,
+                asset_name=f'plan-group-{public_ip}',
+                instance_id=f'plan-group-{public_ip}',
+                public_ip=public_ip,
+                actual_expires_at=expires_at,
+                status=CloudAsset.STATUS_RUNNING,
+                is_active=True,
+            )
+
+        rows = server_lifecycle_plan_page(plan_stage='shutdown', page=1, page_size=10, keyword='plan-group-10.61')
+        grouped_user_ids = [item.user_id for item in rows if item.public_ip in {ip for _user, ip in assets}]
+
+        self.assertEqual(grouped_user_ids, [first_user.id, first_user.id, second_user.id, second_user.id])
+
+    # 功能：验证未附加 IP 删除计划按同一到期时间内的用户聚合展示。
+    def test_unattached_ip_delete_plan_groups_same_user_with_same_expiry(self):
+        from cloud.lifecycle_plan_queries import unattached_ip_delete_plan_page
+
+        first_user = TelegramUser.objects.create(tg_user_id=990201, username='ip_plan_group_first')
+        second_user = TelegramUser.objects.create(tg_user_id=990202, username='ip_plan_group_second')
+        expires_at = timezone.now() + timezone.timedelta(days=3)
+        assets = [
+            (first_user, '10.62.0.1'),
+            (second_user, '10.62.0.2'),
+            (first_user, '10.62.0.3'),
+            (second_user, '10.62.0.4'),
+        ]
+        for user, public_ip in assets:
+            CloudAsset.objects.create(
+                kind=CloudAsset.KIND_SERVER,
+                source=CloudAsset.SOURCE_AWS_SYNC,
+                provider='aws_lightsail',
+                region_code=self.plan.region_code,
+                user=user,
+                asset_name=f'StaticIp-plan-group-{public_ip}',
+                provider_resource_id=f'arn:aws:lightsail:ap-southeast-1:123456789012:StaticIp/StaticIp-plan-group-{public_ip}',
+                public_ip=public_ip,
+                actual_expires_at=expires_at,
+                status=CloudAsset.STATUS_UNKNOWN,
+                provider_status='未附加固定IP',
+                is_active=True,
+            )
+
+        rows = unattached_ip_delete_plan_page(page=1, page_size=10, keyword='StaticIp-plan-group-10.62')
+        grouped_user_ids = [item.user_id for item in rows if item.public_ip in {ip for _user, ip in assets}]
+
+        self.assertEqual(grouped_user_ids, [first_user.id, first_user.id, second_user.id, second_user.id])
+
     # 功能：验证待创建订单也参与账号负载计算，连续批量拆单能分散到多个云账号。
     def test_prepare_cloud_server_order_instances_rotates_cloud_accounts(self):
         first = CloudAccountConfig.objects.create(

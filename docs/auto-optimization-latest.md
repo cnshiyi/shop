@@ -4,61 +4,26 @@
 
 ## 最近一轮
 
-- 时间：2026-06-11 01:15 CST
-- 状态：已按用户要求实际创建资源测试 AWS 全区域，移除不可用区域 `ap-southeast-3`。
+- 时间：2026-06-11 01:32 CST
+- 状态：已调整生命周期计划表排序，让同一到期时间内的同一用户记录相邻显示。
 - 后端分支：`codex/cloud-asset-lifecycle-refactor`
 - 前端分支：未改动
 - 目标主分支：`main`
 
 ## 本轮背景
 
-- 用户要求“测试全部区域，如果有不支持的区域在代码里移除”，随后明确要求“实际创建资源”。
-- 本轮只测试 AWS Lightsail 区域可创建性，不安装代理、不分配固定 IP；成功创建的实例立即删除。
-- 本轮不修改生命周期计划页、通知计划或代理列表页面。
-
-## 真机测试结果
-
-- 云账号：后台 AWS 云账号 `#55`
-- 测试方式：每个区域创建 1 台测试实例，进入 `running` 后立即删除。
-- 初始套餐：`nano_3_0`
-- 镜像：`debian_12`
-
-`nano_3_0` 创建成功区域：
-
-- `ap-northeast-1`
-- `ap-northeast-2`
-- `ap-southeast-1`
-- `ca-central-1`
-- `eu-central-1`
-- `eu-north-1`
-- `eu-west-1`
-- `eu-west-2`
-- `eu-west-3`
-- `us-east-1`
-- `us-east-2`
-- `us-west-2`
-
-复核结论：
-
-- `ap-south-1`：`nano_3_0` 不存在，但区域专属 `nano_3_1` 创建成功，保留区域。
-- `ap-southeast-2`：`nano_3_0` 不存在，但区域专属 `nano_3_2` 创建成功，保留区域。
-- `ap-southeast-3`：`CreateInstances` 和 `GetBundles` 均返回 `UnrecognizedClientException`，确认当前账号不可用，移除代码区域入口。
-- `ap-southeast-5`：同样不可用，但原本不在 AWS 业务区域表内，无需移除。
-- 残留复核：按 `codex-region-` 前缀扫描可访问区域，测试实例残留数量为 `0`。
+- 用户反馈计划表显示问题：同一用户、同一到期时间的记录希望相邻展示。
+- 这是用户明确点名计划表显示调整，因此允许修改计划相关查询；未修改代理列表。
 
 ## 修改内容
 
-- `cloud/services.py`
-  - 从 `AWS_REGION_NAMES` 移除 `ap-southeast-3`，避免购买/换 IP 区域入口继续展示不可用 AWS 区域。
-  - 新增 AWS 不可用区域屏蔽集合，价格区域规范化和 AWS 区域拉取都会跳过 `ap-southeast-3` / `ap-southeast-5`，避免后续同步重新带回。
-- `bot/keyboards.py`
-  - 从 `_COMPACT_REGION_CODES` 移除 `ap-southeast-3` 的 callback 压缩映射。
+- `cloud/lifecycle_plan_queries.py`
+  - 新增计划表共享排序 `LIFECYCLE_PLAN_GROUPED_ORDERING = ('actual_expires_at', 'user_id', 'id')`。
+  - 关机计划、删机计划按“到期时间 -> 用户 -> 资产 ID”排序。
+  - 未附加 IP 删除计划同样按“到期时间 -> 用户 -> 资产 ID”排序。
+  - 深分页尾页优化的倒序排序同步改为“到期时间倒序 -> 用户倒序 -> 资产 ID 倒序”，保持前后页排序一致。
 - `cloud/tests.py`
-  - 新增回归测试，确认价格区域规范化会过滤 AWS 不可用区域。
-- `docs/real-machine-test-report.md`
-  - 追加 AWS 全区域真实创建资源测试报告，资源 ID、实例名和公网 IP 已脱敏。
-- `docs/refactor-version-record.md`
-  - 追加本轮中文版本记录。
+  - 新增两个回归测试，分别覆盖服务器生命周期计划和未附加 IP 删除计划在同一到期时间下按用户聚合。
 
 ## 验证
 
@@ -66,13 +31,12 @@
 
 ```bash
 git diff --check
-uv run python -m py_compile cloud/services.py bot/keyboards.py cloud/tests.py
+uv run python -m py_compile cloud/lifecycle_plan_queries.py cloud/tests.py
 uv run python manage.py check
-DJANGO_TEST_REUSE_DB=1 uv run python manage.py test cloud.tests.CloudServerServicesTestCase.test_aws_unsupported_regions_are_filtered_from_price_regions --keepdb --noinput --verbosity 1
-DJANGO_TEST_REUSE_DB=1 uv run python manage.py test bot.tests.RetainedIpRenewalUiTestCase.test_extreme_nested_cloud_callbacks_stay_under_telegram_limit bot.tests.RetainedIpRenewalUiTestCase.test_cloud_change_ip_keyboards_keep_back_path --keepdb --noinput --verbosity 1
+DJANGO_TEST_REUSE_DB=1 uv run python manage.py test cloud.tests.CloudServerServicesTestCase.test_server_lifecycle_plan_groups_same_user_with_same_expiry cloud.tests.CloudServerServicesTestCase.test_unattached_ip_delete_plan_groups_same_user_with_same_expiry --keepdb --noinput --verbosity 1
 ```
 
 ## 风险和下一步
 
-- 本轮实际创建并删除了多台 AWS Lightsail 测试实例；报告显示无测试实例残留。
-- `ap-south-1` 和 `ap-southeast-2` 需要区域专属 bundle 才能创建，后续如同步套餐，应避免用单一区域 bundle 直接套用到所有 AWS 区域。
+- 本轮只改变计划表返回顺序，不改变生命周期执行条件、执行时间、状态计算或资产到期事实。
+- 历史列表仍保持按执行/更新时间倒序，不强行按用户聚合，避免破坏历史时间线。
