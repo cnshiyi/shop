@@ -21013,3 +21013,32 @@ uv run python -m py_compile bot/handlers.py bot/tests.py
 uv run python manage.py check
 DJANGO_TEST_REUSE_DB=1 uv run python manage.py test bot.tests.TelegramListenerPushTestCase.test_notice_copy_skips_cloud_task_progress_notice --keepdb --noinput --verbosity 1
 ```
+
+## 2026-06-10 22:05 CST 修复人工编辑无订单资产到期时间重复 IP 报错
+
+### 背景
+
+- 用户贴出生产日志：后台编辑资产时，`ensure_manual_expiry_operation_order()` 生成手工操作订单后，`_ensure_order_asset_expiry_record()` 继续尝试新增同公网 IP 的 `CloudAsset`。
+- 数据库唯一约束 `cloud_asset.uniq_cloud_asset_public_ip` 拒绝重复公网 IP，导致 `Duplicate entry ... for key 'cloud_asset.uniq_cloud_asset_public_ip'`。
+- 这类人工编辑审计订单本来用于留痕，不应改写资产原订单绑定，也不应创建重复公网 IP 资产。
+
+### 修改
+
+- `cloud/services.py`
+  - `_create_manual_asset_operation_order()` 不再为人工编辑审计订单调用 `_ensure_order_asset_expiry_record()`。
+  - 审计订单仍保存公网 IP、实例 ID、到期派生字段等上下文。
+  - `ensure_manual_expiry_operation_order()` 后续仍更新原资产 `actual_expires_at` 并写入 `CloudIpLog`，但不创建第二条同 IP 资产。
+- `cloud/tests.py`
+  - 新增回归测试，覆盖无订单资产带公网 IP 的人工编辑到期时间路径。
+  - 断言审计订单生成、原资产不重绑订单、同公网 IP 资产数量仍为 1、日志记录存在。
+
+### 验证
+
+通过：
+
+```bash
+git diff --check
+uv run python -m py_compile cloud/services.py cloud/tests.py
+uv run python manage.py check
+DJANGO_TEST_REUSE_DB=1 uv run python manage.py test cloud.tests.CloudServerServicesTestCase.test_manual_expiry_operation_order_does_not_duplicate_unbound_asset_ip --keepdb --noinput --verbosity 1
+```

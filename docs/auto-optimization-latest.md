@@ -4,25 +4,24 @@
 
 ## 最近一轮
 
-- 时间：2026-06-10 21:50 CST
-- 状态：已按用户要求停止将云服务器创建/重建进度提示抄送管理。
+- 时间：2026-06-10 22:05 CST
+- 状态：已修复后台人工编辑无订单资产到期时间时，审计订单补资产撞公网 IP 唯一约束的问题。
 - 后端分支：`codex/cloud-asset-lifecycle-refactor`
 - 前端分支：未改动
 - 目标主分支：`main`
 
 ## 本轮背景
 
-- 用户反馈“云服务器创建/重建仍在执行中”的机器人编辑消息会高频抄送管理。
-- 用户要求这类进度提示不再抄送管理。
+- 用户贴出生产日志：后台编辑资产 `asset_id=360` / `asset_id=5` 时，生成手工操作订单后尝试新增同公网 IP 的 `CloudAsset`，触发 `uniq_cloud_asset_public_ip` 唯一约束。
+- 根因是人工编辑审计订单本来不应改写资产原订单绑定，却仍调用 `_ensure_order_asset_expiry_record()` 尝试给审计订单创建一条同 IP 资产记录。
 
 ## 修改内容
 
-- `bot/handlers.py`
-  - 新增云服务器后台任务进度提示识别逻辑。
-  - 在 `_copy_user_notice_to_admins()` 入口过滤这类进度提示。
-  - 过滤覆盖普通发送和编辑消息两条抄送路径，用户本人仍会收到进度消息。
-- `bot/tests.py`
-  - 新增回归测试，覆盖“云服务器创建/重建仍在执行中”编辑消息不触发管理员抄送。
+- `cloud/services.py`
+  - `_create_manual_asset_operation_order()` 不再为人工编辑审计订单调用 `_ensure_order_asset_expiry_record()`。
+  - 保留审计订单和 `CloudIpLog` 记录，但不创建重复公网 IP 资产，也不重绑原资产订单。
+- `cloud/tests.py`
+  - 新增回归测试：无订单资产带公网 IP 时，人工编辑到期时间会生成审计订单和日志，但 `CloudAsset` 表仍只有一条该公网 IP 资产，且原资产 `order_id` 保持为空。
 
 ## 验证
 
@@ -30,12 +29,12 @@
 
 ```bash
 git diff --check
-uv run python -m py_compile bot/handlers.py bot/tests.py
+uv run python -m py_compile cloud/services.py cloud/tests.py
 uv run python manage.py check
-DJANGO_TEST_REUSE_DB=1 uv run python manage.py test bot.tests.TelegramListenerPushTestCase.test_notice_copy_skips_cloud_task_progress_notice --keepdb --noinput --verbosity 1
+DJANGO_TEST_REUSE_DB=1 uv run python manage.py test cloud.tests.CloudServerServicesTestCase.test_manual_expiry_operation_order_does_not_duplicate_unbound_asset_ip --keepdb --noinput --verbosity 1
 ```
 
 ## 风险和下一步
 
-- 本轮只过滤云服务器后台任务进度提示，不影响创建成功、失败、续费结果等最终结果抄送。
-- 如果后续还有其他高频中间态消息刷管理群，应继续按具体文案加入抄送过滤。
+- 本轮只调整人工编辑审计订单补资产路径，不影响正常购买、续费、重装、换 IP、修改配置订单的资产创建逻辑。
+- 线上再次编辑同类无订单资产到期时间时，不应再出现 `Duplicate entry ... uniq_cloud_asset_public_ip`。

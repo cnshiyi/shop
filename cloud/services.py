@@ -2906,7 +2906,6 @@ def _create_manual_asset_operation_order(asset: CloudAsset, user: TelegramUser, 
         provision_note=f'{operation}: 后台人工编辑生成的审计订单，不参与续费/到期生命周期；来源资产 #{asset.id}；来源订单 #{base_order_id or "-"}。',
         **lifecycle_fields,
     )
-    _ensure_order_asset_expiry_record(order, asset_expires_at)
     return order
 
 
