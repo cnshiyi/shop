@@ -20944,3 +20944,45 @@ DJANGO_TEST_REUSE_DB=1 uv run python manage.py test bot.tests.RetainedIpRenewalU
 ```bash
 git diff --check
 ```
+
+## 2026-06-10 20:14 CST 计划页搜索、默认列和动态列宽
+
+### 背景
+
+- 用户明确要求计划页“真实状态”“订单号”列开关默认关闭。
+- 用户要求计划页添加搜索入口，并实测搜索。
+- 用户追加要求列宽改为动态列宽。
+
+### 修改
+
+- `cloud/lifecycle_plan_queries.py`
+  - 新增计划页关键词过滤 helper，覆盖 IP、资产名、实例 ID、订单号、用户昵称/用户名、备注、云上状态等字段。
+  - 关机计划、删机计划、服务器删除历史、IP 删除计划和 IP 删除历史均支持关键词过滤后的计数与分页。
+  - 有关键词时跳过全量计数缓存，避免搜索总数仍显示全量数据。
+- `bot/api.py`
+  - `/api/admin/tasks/plans/` 接收 `keyword` 参数并传入查询层。
+  - 响应中返回当前 `keyword` 便于前端核对。
+- `/Users/a399/Desktop/data/vue-shop-admin/apps/web-antd/src/views/dashboard/tasks/plans.vue`
+  - 顶部新增搜索框和重置按钮。
+  - 搜索时重置所有计划表分页到第一页。
+  - “真实状态”“订单号”列开关默认关闭。
+  - 计划页表格去掉固定列宽，横向滚动改为 `max-content` 动态宽度。
+- `/Users/a399/Desktop/data/vue-shop-admin/apps/web-antd/src/api/admin.ts`
+  - 计划页接口参数类型新增 `keyword`。
+
+### 验证
+
+通过：
+
+```bash
+git diff --check
+uv run python -m py_compile bot/api.py cloud/lifecycle_plan_queries.py
+uv run python manage.py check
+pnpm -F @vben/web-antd run typecheck
+```
+
+实测：
+
+- 重启本地 8000 后端后，带不存在关键词请求 `/api/admin/tasks/plans/`，计划相关计数均为 `0`。
+- 使用 Playwright 在浏览器环境中调用前端代理 API：`/api/admin/user/info` 返回成功，`/api/admin/tasks/plans/?compact=1&limit=5&keyword=__no_such_lifecycle_plan_keyword__` 返回成功，响应 `keyword` 匹配且计划计数为 `0`。
+- 未输出后台 token、真实订单号、完整 IP 或代理链接。

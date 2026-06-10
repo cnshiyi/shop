@@ -305,8 +305,21 @@ def _page_meta(page: int, page_size: int, total: int) -> dict:
     return page_meta(page, page_size, total)
 
 
-def _server_lifecycle_plan_page_items(*, plan_stage: str, page: int, page_size: int, total: int | None = None) -> list[dict]:
-    assets = server_lifecycle_plan_page(plan_stage=plan_stage, page=page, page_size=page_size, total=total)
+def _server_lifecycle_plan_page_items(
+    *,
+    plan_stage: str,
+    page: int,
+    page_size: int,
+    total: int | None = None,
+    keyword: str | None = None,
+) -> list[dict]:
+    assets = server_lifecycle_plan_page(
+        plan_stage=plan_stage,
+        page=page,
+        page_size=page_size,
+        total=total,
+        keyword=keyword,
+    )
     now = timezone.now()
     pending_until = now + timezone.timedelta(days=7)
 
@@ -334,13 +347,20 @@ def _server_lifecycle_plan_page_items(*, plan_stage: str, page: int, page_size: 
     return items
 
 
-def _server_delete_history_page_items(*, page: int, page_size: int, total: int | None = None) -> list[dict]:
-    counts = server_delete_history_counts()
+def _server_delete_history_page_items(
+    *,
+    page: int,
+    page_size: int,
+    total: int | None = None,
+    keyword: str | None = None,
+) -> list[dict]:
+    counts = server_delete_history_counts(keyword=keyword)
     sources = server_delete_history_page_sources(
         page=page,
         page_size=page_size,
         order_total=counts['server_history_order_count'],
         asset_total=counts['server_history_asset_count'],
+        keyword=keyword,
     )
     items = []
     for source_type, source in sources:
@@ -369,6 +389,7 @@ def _ip_delete_plan_asset_page_items(
     page_size: int,
     now=None,
     total: int | None = None,
+    keyword: str | None = None,
 ) -> list[dict]:
     now = now or timezone.now()
     global_ip_enabled = cloud_ip_delete_enabled()
@@ -376,6 +397,7 @@ def _ip_delete_plan_asset_page_items(
         page=page,
         page_size=page_size,
         total=total,
+        keyword=keyword,
     )
     trace_maps = _cloud_ip_trace_maps_for_assets(assets)
     items = []
@@ -501,6 +523,7 @@ def _ip_delete_history_page_items(
     page_size: int,
     log_total: int | None = None,
     asset_total: int | None = None,
+    keyword: str | None = None,
 ) -> list[dict]:
     items = []
     for source_type, source in ip_delete_history_page_sources(
@@ -508,6 +531,7 @@ def _ip_delete_history_page_items(
         page_size=page_size,
         log_total=log_total,
         asset_total=asset_total,
+        keyword=keyword,
     ):
         if source_type == 'log':
             items.extend(_ip_delete_history_trace_items_from_queryset([source]))
@@ -2572,6 +2596,7 @@ def lifecycle_plans(request):
         return item
 
     compact = str(request.GET.get('compact') or '').strip().lower() in {'1', 'true', 'yes', 'on'}
+    keyword = _get_keyword(request)
     fields = _request_field_set(
         request,
         allowed={'account', 'basic', 'execution', 'notes', 'provider'},
@@ -2607,9 +2632,13 @@ def lifecycle_plans(request):
 
     count_snapshot = _cached_lifecycle_plan_count_snapshot()
     plan_stats = count_snapshot['plan_stats']
-    total_counts = count_snapshot['total_counts']
-    ip_delete_total_counts = count_snapshot['ip_delete_total_counts']
-    server_history_total_counts = server_delete_history_counts()
+    if keyword:
+        total_counts = server_lifecycle_plan_counts(keyword=keyword)
+        ip_delete_total_counts = ip_delete_plan_counts(keyword=keyword)
+    else:
+        total_counts = count_snapshot['total_counts']
+        ip_delete_total_counts = count_snapshot['ip_delete_total_counts']
+    server_history_total_counts = server_delete_history_counts(keyword=keyword)
     server_history_count = server_history_total_counts['server_history_count']
 
     shutdown_plan_items = None
@@ -2628,6 +2657,7 @@ def lifecycle_plans(request):
                 page=shutdown_page,
                 page_size=shutdown_page_size,
                 total=total_counts['shutdown_plan_count'],
+                keyword=keyword,
             )
         ]
 
@@ -2639,6 +2669,7 @@ def lifecycle_plans(request):
                 page=server_delete_page,
                 page_size=server_delete_page_size,
                 total=total_counts['server_delete_count'],
+                keyword=keyword,
             )
         ]
         server_delete_active_items = [
@@ -2654,6 +2685,7 @@ def lifecycle_plans(request):
                 page=server_history_page,
                 page_size=server_history_page_size,
                 total=server_history_count,
+                keyword=keyword,
             )
         ]
 
@@ -2664,6 +2696,7 @@ def lifecycle_plans(request):
                 page=ip_delete_page,
                 page_size=ip_delete_page_size,
                 total=ip_delete_total_counts['ip_delete_count'],
+                keyword=keyword,
             )
         ]
         pending_ip_delete_items = [item for item in ip_delete_plan_items if is_ip_delete_pending(item)]
@@ -2676,6 +2709,7 @@ def lifecycle_plans(request):
                 page_size=ip_delete_history_page_size,
                 log_total=ip_delete_total_counts.get('ip_delete_history_log_count'),
                 asset_total=ip_delete_total_counts.get('ip_delete_history_asset_count'),
+                keyword=keyword,
             )
         ]
     recent_history = []
@@ -2721,6 +2755,7 @@ def lifecycle_plans(request):
         'last_refresh_at': _iso(last_refresh_at),
         'refreshed': did_refresh,
         'cache_mode': 'refreshed' if did_refresh else 'cached',
+        'keyword': keyword,
         'recent_success_count': sum(1 for item in recent_history if item.get('is_success')),
         'recent_failure_count': sum(1 for item in recent_history if not item.get('is_success')),
         'missing_expiry_count': plan_stats['missing_expiry_count'],

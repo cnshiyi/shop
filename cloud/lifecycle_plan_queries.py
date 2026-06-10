@@ -22,6 +22,97 @@ _ASSET_RENEWAL_MARKER = '未绑定代理资产续费'
 _ACTIVE_ASSET_RENEWAL_ORDER_STATUSES = ['pending', 'paid', 'provisioning', 'renew_pending']
 
 
+def _normalized_keyword(keyword: str | None) -> str:
+    return str(keyword or '').strip()
+
+
+def _numeric_keyword(keyword: str):
+    try:
+        return int(keyword)
+    except (TypeError, ValueError):
+        return None
+
+
+def cloud_asset_keyword_q(keyword: str | None) -> Q:
+    keyword = _normalized_keyword(keyword)
+    if not keyword:
+        return Q()
+    query = (
+        Q(public_ip__icontains=keyword)
+        | Q(previous_public_ip__icontains=keyword)
+        | Q(asset_name__icontains=keyword)
+        | Q(instance_id__icontains=keyword)
+        | Q(provider_resource_id__icontains=keyword)
+        | Q(provider_status__icontains=keyword)
+        | Q(status__icontains=keyword)
+        | Q(note__icontains=keyword)
+        | Q(account_label__icontains=keyword)
+        | Q(region_name__icontains=keyword)
+        | Q(order__order_no__icontains=keyword)
+        | Q(order__server_name__icontains=keyword)
+        | Q(order__instance_id__icontains=keyword)
+        | Q(order__provider_resource_id__icontains=keyword)
+        | Q(order__public_ip__icontains=keyword)
+        | Q(order__previous_public_ip__icontains=keyword)
+        | Q(user__first_name__icontains=keyword)
+        | Q(user__username__icontains=keyword)
+    )
+    numeric = _numeric_keyword(keyword)
+    if numeric is not None:
+        query |= Q(id=numeric) | Q(order_id=numeric) | Q(user_id=numeric) | Q(user__tg_user_id=numeric)
+    return query
+
+
+def cloud_order_keyword_q(keyword: str | None) -> Q:
+    keyword = _normalized_keyword(keyword)
+    if not keyword:
+        return Q()
+    query = (
+        Q(order_no__icontains=keyword)
+        | Q(server_name__icontains=keyword)
+        | Q(instance_id__icontains=keyword)
+        | Q(provider_resource_id__icontains=keyword)
+        | Q(public_ip__icontains=keyword)
+        | Q(previous_public_ip__icontains=keyword)
+        | Q(provision_note__icontains=keyword)
+        | Q(account_label__icontains=keyword)
+        | Q(region_name__icontains=keyword)
+        | Q(user__first_name__icontains=keyword)
+        | Q(user__username__icontains=keyword)
+    )
+    numeric = _numeric_keyword(keyword)
+    if numeric is not None:
+        query |= Q(id=numeric) | Q(user_id=numeric) | Q(user__tg_user_id=numeric)
+    return query
+
+
+def cloud_ip_log_keyword_q(keyword: str | None) -> Q:
+    keyword = _normalized_keyword(keyword)
+    if not keyword:
+        return Q()
+    query = (
+        Q(order_no__icontains=keyword)
+        | Q(asset_name__icontains=keyword)
+        | Q(instance_id__icontains=keyword)
+        | Q(provider_resource_id__icontains=keyword)
+        | Q(public_ip__icontains=keyword)
+        | Q(previous_public_ip__icontains=keyword)
+        | Q(note__icontains=keyword)
+        | Q(provider__icontains=keyword)
+        | Q(region_name__icontains=keyword)
+        | Q(asset__asset_name__icontains=keyword)
+        | Q(asset__public_ip__icontains=keyword)
+        | Q(asset__previous_public_ip__icontains=keyword)
+        | Q(order__order_no__icontains=keyword)
+        | Q(user__first_name__icontains=keyword)
+        | Q(user__username__icontains=keyword)
+    )
+    numeric = _numeric_keyword(keyword)
+    if numeric is not None:
+        query |= Q(id=numeric) | Q(asset_id=numeric) | Q(order_id=numeric) | Q(user_id=numeric) | Q(user__tg_user_id=numeric)
+    return query
+
+
 def page_bounds(page: int, page_size: int) -> tuple[int, int]:
     page = max(int(page or 1), 1)
     page_size = max(int(page_size or 1), 1)
@@ -197,7 +288,14 @@ def server_lifecycle_plan_unique_queryset():
     )
 
 
-def server_lifecycle_plan_counts() -> dict[str, int]:
+def server_lifecycle_plan_counts(*, keyword: str | None = None) -> dict[str, int]:
+    keyword = _normalized_keyword(keyword)
+    if keyword:
+        queryset = server_lifecycle_plan_unique_queryset().filter(cloud_asset_keyword_q(keyword))
+        return {
+            'shutdown_plan_count': queryset.exclude(server_shutdown_complete_q()).count(),
+            'server_delete_count': queryset.filter(server_shutdown_complete_q()).count(),
+        }
     cached = cache.get(_LIFECYCLE_PLAN_COUNTS_CACHE_KEY)
     if isinstance(cached, dict):
         return {
@@ -215,8 +313,18 @@ def server_lifecycle_plan_counts() -> dict[str, int]:
     return counts
 
 
-def server_lifecycle_plan_page(*, plan_stage: str, page: int, page_size: int, total: int | None = None):
+def server_lifecycle_plan_page(
+    *,
+    plan_stage: str,
+    page: int,
+    page_size: int,
+    total: int | None = None,
+    keyword: str | None = None,
+):
     queryset = server_lifecycle_plan_unique_queryset()
+    keyword = _normalized_keyword(keyword)
+    if keyword:
+        queryset = queryset.filter(cloud_asset_keyword_q(keyword))
     if plan_stage == 'shutdown':
         queryset = queryset.exclude(server_shutdown_complete_q())
     else:
@@ -237,9 +345,15 @@ def server_delete_history_asset_queryset():
     )
 
 
-def server_delete_history_counts() -> dict[str, int]:
-    order_count = server_delete_history_order_queryset().count()
-    asset_count = server_delete_history_asset_queryset().count()
+def server_delete_history_counts(*, keyword: str | None = None) -> dict[str, int]:
+    keyword = _normalized_keyword(keyword)
+    orders = server_delete_history_order_queryset()
+    assets = server_delete_history_asset_queryset()
+    if keyword:
+        orders = orders.filter(cloud_order_keyword_q(keyword))
+        assets = assets.filter(cloud_asset_keyword_q(keyword))
+    order_count = orders.count()
+    asset_count = assets.count()
     return {
         'server_history_asset_count': asset_count,
         'server_history_count': order_count + asset_count,
@@ -253,10 +367,15 @@ def server_delete_history_page_sources(
     page_size: int,
     order_total: int | None = None,
     asset_total: int | None = None,
+    keyword: str | None = None,
 ) -> list[tuple[str, object]]:
     start, end = page_bounds(page, page_size)
     orders = server_delete_history_order_queryset().order_by('-updated_at', '-id')
     assets = server_delete_history_asset_queryset().order_by('-updated_at', '-id')
+    keyword = _normalized_keyword(keyword)
+    if keyword:
+        orders = orders.filter(cloud_order_keyword_q(keyword))
+        assets = assets.filter(cloud_asset_keyword_q(keyword))
     if order_total is None:
         order_total = orders.count()
     if asset_total is None:
@@ -390,8 +509,12 @@ def unattached_ip_delete_plan_page(
     page: int,
     page_size: int,
     total: int | None = None,
+    keyword: str | None = None,
 ):
     queryset = unattached_ip_delete_active_unique_queryset()
+    keyword = _normalized_keyword(keyword)
+    if keyword:
+        queryset = queryset.filter(cloud_asset_keyword_q(keyword))
     start, end = page_bounds(page, page_size)
     if total is None:
         total = queryset.count()
@@ -521,7 +644,18 @@ def unattached_ip_delete_history_log_queryset():
     )
 
 
-def ip_delete_plan_counts() -> dict[str, int]:
+def ip_delete_plan_counts(*, keyword: str | None = None) -> dict[str, int]:
+    keyword = _normalized_keyword(keyword)
+    if keyword:
+        active_count = unattached_ip_delete_active_unique_queryset().filter(cloud_asset_keyword_q(keyword)).count()
+        history_log_count = unattached_ip_delete_history_log_queryset().filter(cloud_ip_log_keyword_q(keyword)).count()
+        history_asset_count = unattached_ip_delete_history_asset_queryset().filter(cloud_asset_keyword_q(keyword)).count()
+        return {
+            'ip_delete_count': active_count,
+            'ip_delete_history_asset_count': history_asset_count,
+            'ip_delete_history_count': history_log_count + history_asset_count,
+            'ip_delete_history_log_count': history_log_count,
+        }
     cached = cache.get(_LIFECYCLE_IP_DELETE_COUNTS_CACHE_KEY)
     if isinstance(cached, dict):
         return {
@@ -549,10 +683,15 @@ def ip_delete_history_page_sources(
     page_size: int,
     log_total: int | None = None,
     asset_total: int | None = None,
+    keyword: str | None = None,
 ) -> list[tuple[str, object]]:
     start, end = page_bounds(page, page_size)
     history_logs = unattached_ip_delete_history_log_queryset().select_related('asset', 'order', 'user').order_by('-created_at', '-id')
     history_assets = unattached_ip_delete_history_asset_queryset().order_by('-updated_at', '-id')
+    keyword = _normalized_keyword(keyword)
+    if keyword:
+        history_logs = history_logs.filter(cloud_ip_log_keyword_q(keyword))
+        history_assets = history_assets.filter(cloud_asset_keyword_q(keyword))
     if log_total is None:
         log_total = history_logs.count()
     if asset_total is None:
@@ -586,6 +725,9 @@ def ip_delete_history_page_sources(
         start, end = reverse_start, reverse_end
         history_logs = unattached_ip_delete_history_log_queryset().select_related('asset', 'order', 'user').order_by('created_at', 'id')
         history_assets = unattached_ip_delete_history_asset_queryset().order_by('updated_at', 'id')
+        if keyword:
+            history_logs = history_logs.filter(cloud_ip_log_keyword_q(keyword))
+            history_assets = history_assets.filter(cloud_asset_keyword_q(keyword))
 
     chunk_size = max(page_size * 4, 50)
     source_specs = [
