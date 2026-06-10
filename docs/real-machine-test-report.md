@@ -938,6 +938,53 @@ UV_CACHE_DIR=/private/tmp/uv-cache-shop uv run python -m py_compile cloud/servic
 git diff --check
 ```
 
+## 2026-06-10 18:22 CST 并行安装第三轮复测与备用通知兜底
+
+### 背景
+
+- 用户要求在已推送修复后再并行测试一轮。
+- 用户随后提供 Telegram 通知失败日志，确认安装完成通知的 inline keyboard URL 无效。
+- 用户最终指定备用通知链接改为 `https://t.me/sy168`。
+
+### 真机并行复测
+
+- 授权：延续用户对真实云资源成本的明确授权。
+- 隔离数据库：`.shop-load-tests/shop-loadtest-realmachine-third.sqlite3`
+- 报告文件：`.shop-load-tests/real-machine-parallel-install-report-third.json`
+- 云厂商：AWS Lightsail，账号 `#55`，区域 `ap-southeast-1`。
+- 套餐：`#131` / `nano_3_0`。
+- 第 1 轮：并行提交 5 个创建安装任务，4 台完成创建和代理安装，1 台创建失败并进入失败清理。
+- 第 2 轮：并行触发重装、重建、修改配置；重建迁移完成，修改配置迁移完成，重装入口按现有 `completed` 状态跳过。
+- 第 3 轮：再次并行触发创建、重装、修改配置；新增创建因固定 IP 配额限制失败，修改配置迁移完成，重装仍按现有逻辑跳过。
+- SOCKS5 输出继续保持 `https://t.me/socks?...&user=***&pass=***` 格式。
+- 本轮没有复现远端安装锁权限错误。
+
+### 清理与残留复核
+
+- 压测脚本自动清理 `LOAD...` 订单下实例和固定 IP。
+- 脚本未自动覆盖迁移订单实例，已按测试前缀手动补清 3 台 `SRVREBUILD...` / `SRVUPGRADE...` 实例：
+  - `20260610***0-o7`
+  - `20260610***5-o6`
+  - `20260610***0-o9`
+- AWS 只读复核：测试前缀 `20260610-930000610001` 下实例列表为空，固定 IP 列表为空。
+
+### 备用通知修复
+
+- 修复 `bot/keyboards.py` 中客服链接读取逻辑。
+- 配置为 `@用户名`、裸 Telegram 用户名、`t.me/...` 或 `telegram.me/...` 时归一化为 HTTPS Telegram 链接。
+- 配置为 `https://shiyi4` 这类 Telegram 不接受的无效 URL 时，兜底为 `https://t.me/sy168`。
+- 配置读取异常或未找到客服链接时，也使用 `https://t.me/sy168`。
+
+### 验证
+
+通过：
+
+```bash
+uv run python -m py_compile bot/keyboards.py bot/tests.py
+uv run python manage.py check
+DJANGO_TEST_REUSE_DB=1 uv run python manage.py test bot.tests.RetainedIpRenewalUiTestCase.test_support_contact_button_falls_back_when_config_url_is_invalid_for_telegram bot.tests.RetainedIpRenewalUiTestCase.test_support_contact_button_normalizes_telegram_username bot.tests.RetainedIpRenewalUiTestCase.test_support_contact_button_uses_default_when_config_load_fails --keepdb --noinput --verbosity 1
+```
+
 ## 2026-06-10 并行安装 / 重装 / 修改配置真机压测
 
 ### 授权与隔离

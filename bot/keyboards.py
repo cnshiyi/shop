@@ -1,4 +1,6 @@
 import logging
+import re
+from urllib.parse import urlparse
 
 from django.utils import timezone
 from aiogram.types import InlineKeyboardButton, KeyboardButton
@@ -8,6 +10,9 @@ from cloud.asset_expiry import order_asset_expiry
 from core.formatters import fmt_amount
 
 logger = logging.getLogger(__name__)
+
+DEFAULT_SUPPORT_CONTACT_URL = 'https://t.me/sy168'
+_TELEGRAM_USERNAME_RE = re.compile(r'^[A-Za-z0-9_]{5,32}$')
 
 
 def _log_inline_keyboard(name: str, markup, **context):
@@ -725,12 +730,34 @@ def cloud_auto_renew_server_list(orders, page: int = 1, total_pages: int = 1, *,
     )
 
 
+def _normalize_support_contact_url(value: str) -> str:
+    text = str(value or '').strip()
+    if not text:
+        return ''
+    if text.startswith('@'):
+        username = text[1:].strip()
+        if _TELEGRAM_USERNAME_RE.fullmatch(username):
+            return f'https://t.me/{username}'
+        return ''
+    if _TELEGRAM_USERNAME_RE.fullmatch(text):
+        return f'https://t.me/{text}'
+    if text.startswith(('t.me/', 'telegram.me/')):
+        text = f'https://{text}'
+    parsed = urlparse(text)
+    if parsed.scheme not in {'http', 'https'} or not parsed.netloc:
+        return ''
+    hostname = (parsed.hostname or '').strip().lower()
+    if hostname and '.' in hostname:
+        return text
+    return ''
+
+
 def _support_contact_url() -> str:
     try:
         from core.button_config import load_button_config
         items = load_button_config().get('items', [])
     except Exception:
-        return ''
+        return DEFAULT_SUPPORT_CONTACT_URL
     preferred_keys = {'contact_support', 'support_contact', 'customer_service', 'support'}
     for item in items:
         if not item.get('enabled', True) or item.get('type') != 'link':
@@ -738,8 +765,8 @@ def _support_contact_url() -> str:
         key = str(item.get('key') or '').strip()
         label = str(item.get('label') or item.get('button_label') or '').strip()
         if key in preferred_keys or '客服' in label or '联系人工' in label or '联系' in label and '人工' in label:
-            return str(item.get('url') or '').strip()
-    return ''
+            return _normalize_support_contact_url(item.get('url')) or DEFAULT_SUPPORT_CONTACT_URL
+    return DEFAULT_SUPPORT_CONTACT_URL
 
 
 def support_contact_button(context: str, target_id: int | str | None = None, text: str = '👩‍💻 联系客服') -> InlineKeyboardButton:

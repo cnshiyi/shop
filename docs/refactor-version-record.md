@@ -20832,6 +20832,46 @@ DJANGO_TEST_SQLITE=1 uv run python manage.py test cloud.tests.CloudServerService
 git diff --check
 ```
 
+## 2026-06-10 18:22 CST 并行安装第三轮复测与备用通知链接兜底
+
+### 背景
+
+- 用户要求在并行安装修复已推送后再并行测试一轮。
+- 测试期间收到 Telegram 通知失败日志，失败点是“联系客服”按钮 URL 为无效 HTTP URL。
+- 用户最终指定备用通知链接改为 `https://t.me/sy168`。
+
+### 修改
+
+- `bot/keyboards.py`
+  - 新增默认客服链接 `https://t.me/sy168`。
+  - 新增客服链接归一化逻辑，支持 `@用户名`、裸 Telegram 用户名、`t.me/...`、`telegram.me/...` 和有效 `http(s)` URL。
+  - 对 `https://shiyi4` 这类无效按钮 URL 自动兜底为默认客服链接，避免安装成功通知发送被 Telegram 拒绝。
+- `bot/tests.py`
+  - 新增 3 个客服按钮回归测试，覆盖无效 URL 兜底、Telegram 用户名归一化、配置读取异常兜底。
+- `docs/auto-optimization-latest.md`
+  - 覆盖更新本轮状态、真机复测摘要、验证命令和风险。
+- `docs/real-machine-test-report.md`
+  - 追加第三轮真机并行复测、迁移实例补清和备用通知修复记录。
+
+### 真机复测
+
+- 使用全新独立 SQLite 测试库 `.shop-load-tests/shop-loadtest-realmachine-third.sqlite3`。
+- 第 1 轮并行提交 5 个创建安装任务，4 台完成，1 台失败清理。
+- 第 2 轮重建迁移和修改配置迁移完成；重装入口仍按现有 `completed` 状态跳过。
+- 第 3 轮新增创建因固定 IP 配额限制失败，修改配置迁移完成；重装仍按现有逻辑跳过。
+- 脚本自动清理 `LOAD...` 订单资源后，手动补清 3 台 `SRVREBUILD...` / `SRVUPGRADE...` 迁移订单实例。
+- AWS 只读复核：本轮测试前缀下实例列表为空，固定 IP 列表为空。
+
+### 验证
+
+通过：
+
+```bash
+uv run python -m py_compile bot/keyboards.py bot/tests.py
+uv run python manage.py check
+DJANGO_TEST_REUSE_DB=1 uv run python manage.py test bot.tests.RetainedIpRenewalUiTestCase.test_support_contact_button_falls_back_when_config_url_is_invalid_for_telegram bot.tests.RetainedIpRenewalUiTestCase.test_support_contact_button_normalizes_telegram_username bot.tests.RetainedIpRenewalUiTestCase.test_support_contact_button_uses_default_when_config_load_fails --keepdb --noinput --verbosity 1
+```
+
 ## 2026-06-10 17:36 CST SOCKS5 新格式与并行安装真机压测
 
 ### 背景
