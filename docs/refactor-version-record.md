@@ -20831,3 +20831,51 @@ uv run python manage.py check
 DJANGO_TEST_SQLITE=1 uv run python manage.py test cloud.tests.CloudServerServicesTestCase.test_lifecycle_plans_stale_instance_unattached_ip_stays_in_ip_delete_plan cloud.tests.CloudServerServicesTestCase.test_lifecycle_plans_exclude_unattached_ip_with_stale_instance_after_recovery_order cloud.tests.CloudServerServicesTestCase.test_unattached_ip_active_recovery_order_is_excluded_from_delete_plan cloud.tests.CloudServerServicesTestCase.test_lifecycle_plans_retained_ip_after_server_delete_stays_in_ip_delete_plan cloud.tests.CloudServerServicesTestCase.test_unattached_ip_delete_items_skip_assets_attached_to_instance --settings=shop.settings --verbosity=1
 git diff --check
 ```
+
+## 2026-06-10 17:36 CST SOCKS5 新格式与并行安装真机压测
+
+### 背景
+
+- 用户反馈安装任务会被其他任务打断，并要求多个服务器可同时安装。
+- 用户要求 SOCKS5 输出改成 `https://t.me/socks?server=...&port=9534&user=...&pass=...`。
+- 用户授权真实云资源成本，要求安装、重装、修改配置交替并行触发，创建多个服务器，至少 5 台或达到配额限制，3 轮以上，测试后删除服务器。
+
+### 修复
+
+- `cloud/bootstrap.py`
+  - SOCKS5 链接输出改为 `https://t.me/socks?...&user=...&pass=...`。
+  - 远端同机安装锁先 root/sudo 预创建并 `chmod 0666`，再追加打开并 `flock`，修复 BBR 阶段和 MTProxy 阶段锁文件权限不一致导致的安装失败。
+  - MTProxy/BBR SSH 脚本超时按阶段放宽。
+- `cloud/provisioning.py`、`cloud/services.py`、`bot/handlers.py`
+  - 新增 `https://t.me/socks?` 解析、归一化、保存和展示兼容。
+  - replacement 迁移订单保存新资产前，若源资产仍占用固定 IP，先释放源资产 `public_ip` 并保留 `previous_public_ip`，避免 `CloudAsset.public_ip` 唯一约束冲突。
+- `cloud/api_orders.py`、`cloud/api_assets.py`、`bot/api.py`
+  - 代理链接脱敏、备注压缩和展示过滤覆盖新 SOCKS 格式。
+- `cloud/tests.py`、`bot/tests.py`
+  - 更新 SOCKS5 新格式断言。
+  - 增加 replacement 迁移资产唯一约束回归测试。
+
+### 真机压测
+
+- 使用全新独立 SQLite 压测库，不使用业务库。
+- 云厂商：AWS Lightsail，账号 `#55`，区域 `ap-southeast-1`，套餐 `#131` / `nano_3_0`。
+- 首轮 5 并发创建真实触发，发现远端锁权限问题；修复后清理并确认 AWS 测试前缀资源为空。
+- 修复后复测：
+  - 5 个创建任务并行提交。
+  - 3 台创建、固定 IP、BBR、MTProxy、Telemt、SOCKS5 成功。
+  - 2 台达到 AWS 固定 IP 配额限制，进入失败清理。
+  - 重建迁移和修改配置迁移均完成固定 IP 迁移和代理安装。
+  - 重装入口对 `completed` 状态被当前函数跳过，记录为现有行为。
+  - 压测脚本自动清理 `LOAD...` 订单资源后，追加手动清理 `SRVREBUILD...` / `SRVUPGRADE...` 迁移订单资源。
+  - AWS 只读复核：测试前缀实例为空，固定 IP 为空。
+
+### 验证
+
+通过：
+
+```bash
+uv run python -m py_compile cloud/bootstrap.py cloud/provisioning.py cloud/services.py cloud/api_orders.py cloud/api_assets.py bot/handlers.py bot/api.py
+uv run python manage.py check
+DJANGO_TEST_REUSE_DB=1 uv run python manage.py test cloud.tests.CloudServerServicesTestCase.test_mtproxy_script_runs_mtg_with_fake_tls_secret cloud.tests.CloudServerServicesTestCase.test_extract_proxy_links_labels_custom_low_port_plan cloud.tests.CloudServerServicesTestCase.test_compact_proxy_install_note_removes_raw_links cloud.tests.CloudServerServicesTestCase.test_cloud_asset_note_appends_clean_install_summary cloud.tests.CloudServerServicesTestCase.test_mark_success_replacement_releases_source_asset_public_ip_before_asset_upsert --keepdb --noinput --verbosity 1
+DJANGO_TEST_REUSE_DB=1 uv run python manage.py test bot.tests.RetainedIpRenewalUiTestCase.test_cloud_server_created_text_includes_socks5_proxy_link bot.tests.RetainedIpRenewalUiTestCase.test_cloud_server_created_text_recovers_socks5_from_install_note bot.tests.RetainedIpRenewalUiTestCase.test_cloud_server_created_text_does_not_use_socks5_as_one_click bot.tests.RetainedIpRenewalUiTestCase.test_proxy_links_text_converts_socks5_to_telegram_link --keepdb --noinput --verbosity 1
+```

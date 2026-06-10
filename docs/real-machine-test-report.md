@@ -938,6 +938,80 @@ UV_CACHE_DIR=/private/tmp/uv-cache-shop uv run python -m py_compile cloud/servic
 git diff --check
 ```
 
+## 2026-06-10 并行安装 / 重装 / 修改配置真机压测
+
+### 授权与隔离
+
+- 授权：用户已明确授权真实云资源成本，目标资源使用最小套餐，并要求测试后删除服务器。
+- 云厂商：AWS Lightsail，区域 `ap-southeast-1`。
+- 云账号：后台账号 `#55`。
+- 套餐：`#131`，`实机测试 Nano`，`nano_3_0`。
+- 压测数据库：新建独立 SQLite，不使用业务库。
+  - 首轮：`.shop-load-tests/shop-loadtest-realmachine.sqlite3`
+  - 修复后复测：`.shop-load-tests/shop-loadtest-realmachine-rerun.sqlite3`
+- 本地测试用户：`tg_user_id=930000610001`。
+- 报告 JSON：
+  - `.shop-load-tests/real-machine-parallel-install-report.json`
+  - `.shop-load-tests/real-machine-parallel-install-report-rerun.json`
+- 敏感信息：未记录云账号密钥、登录密码、代理 secret、完整公网 IP 或完整代理链接。
+
+### 首轮压测与锁问题
+
+- 时间：2026-06-10 17:04-17:12 CST。
+- 范围：并行提交 5 个创建安装任务，随后进入 3 轮脚本流程。
+- 结果：
+  - 5 个创建请求均已真实提交。
+  - 其中 1 个在固定 IP 分配阶段达到 AWS 配额限制。
+  - 其余实例进入 BBR 后，在 MTProxy 阶段失败。
+- 发现问题：远端同机安装锁使用 `/tmp/shop-cloud-bootstrap.lock`，BBR 与 MTProxy 阶段权限不一致，MTProxy 报 `Permission denied`。
+- 修复：
+  - 远端锁文件先通过 root/sudo 预创建并 `chmod 0666`。
+  - 使用追加方式打开锁文件后再 `flock`，避免锁文件所有者导致下一阶段无法打开。
+  - 该锁只限制同一台服务器上的安装任务，不限制多个服务器并行安装。
+- 清理：首轮测试实例和固定 IP 均执行删除/释放；AWS 只读复核显示测试前缀实例和固定 IP 为空。
+
+### 修复后复测
+
+- 时间：2026-06-10 17:14-17:28 CST。
+- 第 1 轮：并行提交 5 个创建安装任务。
+  - 3 台创建、固定 IP 绑定、BBR、MTProxy 主/备用、Telemt、SOCKS5 安装成功。
+  - 2 台因 AWS 固定 IP 配额限制失败，进入清理流程。
+  - 成功服务器公网 IP 脱敏：`47.130.xxx.xxx`、`13.229.xxx.xxx`、`52.220.xxx.xxx`。
+  - SOCKS5 链路已输出为 `https://t.me/socks?server=...&port=9534&user=***&pass=***`。
+- 第 2 轮：对已完成服务器并行触发重装、重建、修改配置。
+  - 重装入口被当前 `reprovision_cloud_server_bootstrap()` 按 `completed` 状态跳过，记录为现有行为。
+  - 重建迁移创建新实例 `20260610***5-o6`，固定 IP 迁移后安装成功。
+  - 修改配置迁移创建新实例 `20260610***0-o7`，固定 IP 迁移后安装成功。
+- 第 3 轮：释放一个名额后再次触发创建和重装。
+  - 新创建因固定 IP 配额仍为满额被拦截。
+  - 重装入口再次按 `completed` 状态跳过。
+
+### 复测发现并修复的问题
+
+- 迁移安装成功后，保存新 `CloudAsset` 时发现 `public_ip` 唯一约束冲突。
+- 原因：replacement 订单保存新资产时，源订单资产仍占用固定 IP；源资产的旧机临时 IP 状态在后续才更新。
+- 修复：replacement 订单保存资产前，如果源资产仍占用该固定 IP，先将源资产标记为旧机保留、清空 `public_ip` 并保留 `previous_public_ip`，再保存新订单资产。
+- 新增聚焦测试：`test_mark_success_replacement_releases_source_asset_public_ip_before_asset_upsert`。
+
+### 清理与残留复核
+
+- 自动清理：压测脚本删除并释放了 `LOAD...` 测试订单下的实例和固定 IP。
+- 补充清理：脚本未自动覆盖 `SRVREBUILD...` / `SRVUPGRADE...` 迁移订单，已按测试实例名前缀手动补充删除：
+  - `20260610***0-o7`
+  - `20260610***5-o6`
+- AWS 只读复核：测试前缀 `20260610-930000610001` 下实例列表为空，固定 IP 列表为空。
+
+### 验证
+
+通过：
+
+```bash
+uv run python -m py_compile cloud/bootstrap.py cloud/provisioning.py cloud/services.py cloud/api_orders.py cloud/api_assets.py bot/handlers.py bot/api.py
+uv run python manage.py check
+DJANGO_TEST_REUSE_DB=1 uv run python manage.py test cloud.tests.CloudServerServicesTestCase.test_mtproxy_script_runs_mtg_with_fake_tls_secret cloud.tests.CloudServerServicesTestCase.test_extract_proxy_links_labels_custom_low_port_plan cloud.tests.CloudServerServicesTestCase.test_compact_proxy_install_note_removes_raw_links cloud.tests.CloudServerServicesTestCase.test_cloud_asset_note_appends_clean_install_summary cloud.tests.CloudServerServicesTestCase.test_mark_success_replacement_releases_source_asset_public_ip_before_asset_upsert --keepdb --noinput --verbosity 1
+DJANGO_TEST_REUSE_DB=1 uv run python manage.py test bot.tests.RetainedIpRenewalUiTestCase.test_cloud_server_created_text_includes_socks5_proxy_link bot.tests.RetainedIpRenewalUiTestCase.test_cloud_server_created_text_recovers_socks5_from_install_note bot.tests.RetainedIpRenewalUiTestCase.test_cloud_server_created_text_does_not_use_socks5_as_one_click bot.tests.RetainedIpRenewalUiTestCase.test_proxy_links_text_converts_socks5_to_telegram_link --keepdb --noinput --verbosity 1
+```
+
 ## 2026-06-10 未附加 IP 续费与计划页真库实测
 
 - 状态：先复现问题，已修复并重测通过。
