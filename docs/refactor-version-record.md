@@ -20919,3 +20919,28 @@ uv run python manage.py check
 DJANGO_TEST_REUSE_DB=1 uv run python manage.py test cloud.tests.CloudServerServicesTestCase.test_mtproxy_script_runs_mtg_with_fake_tls_secret cloud.tests.CloudServerServicesTestCase.test_extract_proxy_links_labels_custom_low_port_plan cloud.tests.CloudServerServicesTestCase.test_compact_proxy_install_note_removes_raw_links cloud.tests.CloudServerServicesTestCase.test_cloud_asset_note_appends_clean_install_summary cloud.tests.CloudServerServicesTestCase.test_mark_success_replacement_releases_source_asset_public_ip_before_asset_upsert --keepdb --noinput --verbosity 1
 DJANGO_TEST_REUSE_DB=1 uv run python manage.py test bot.tests.RetainedIpRenewalUiTestCase.test_cloud_server_created_text_includes_socks5_proxy_link bot.tests.RetainedIpRenewalUiTestCase.test_cloud_server_created_text_recovers_socks5_from_install_note bot.tests.RetainedIpRenewalUiTestCase.test_cloud_server_created_text_does_not_use_socks5_as_one_click bot.tests.RetainedIpRenewalUiTestCase.test_proxy_links_text_converts_socks5_to_telegram_link --keepdb --noinput --verbosity 1
 ```
+
+## 2026-06-10 18:44 CST 生命周期和代理列表开发红线
+
+### 背景
+
+- 用户明确要求添加开发红线：生命周期和代理列表不是特别要求不要再改。
+- 代理列表默认分组此前曾被误改并已恢复，本轮将相关页面和逻辑纳入冻结区，避免后续自动化继续主动优化。
+
+### 修改
+
+- `AGENTS.md`
+  - 在工作边界新增冻结区：生命周期相关逻辑、计划页、执行器、通知计划和代理列表相关接口/前端页面，除非用户明确点名要求修改，否则只读排查，不主动重构、优化或顺手修复。
+- `docs/auto-optimization-control.md`
+  - 在核心红线新增同样冻结区规则。
+  - 将下一轮优先事项中的主动优化代理列表、生命周期计划页和通知计划分页改为暂停主动优化。
+- `/Users/a399/Desktop/data/vue-shop-admin/AGENTS.md`
+  - 新增前端开发红线，冻结代理列表页面及其分组、分页、列开关、视图模式逻辑，以及生命周期计划、通知计划、自动续费计划等任务页面。
+
+### 验证
+
+本轮仅修改规则和文档，未改业务代码。验证命令：
+
+```bash
+git diff --check
+```

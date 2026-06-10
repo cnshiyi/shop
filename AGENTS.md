@@ -23,6 +23,7 @@
 
 - 不恢复废弃 runtime app：`accounts`、`finance`、`mall`、`monitoring`、`dashboard_api`、`biz`。
 - 云资产到期事实只使用 `CloudAsset.actual_expires_at`。
+- 生命周期相关逻辑、计划页、执行器、通知计划和代理列表相关接口/前端页面属于冻结区；除非用户明确点名要求修改这些模块，否则只读排查，不主动重构、优化或顺手修复。
 - 不恢复订单到期字段、旧计划快照、旧退款逻辑或旧退款函数名。
 - 不打印密钥、私钥、Telegram session、TOTP、支付密钥或云厂商密钥。
 - 真机云资源测试必须先获得用户明确授权真实成本，并单独写中文报告，资源 ID 脱敏。

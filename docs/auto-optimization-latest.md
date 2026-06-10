@@ -4,55 +4,36 @@
 
 ## 最近一轮
 
-- 时间：2026-06-10 18:22 CST
-- 状态：已完成第三轮授权真机并行复测、云端残留补清，以及 Telegram 备用通知链接兜底修复。
+- 时间：2026-06-10 18:44 CST
+- 状态：已按用户要求新增生命周期和代理列表开发红线。
 - 后端分支：`codex/cloud-asset-lifecycle-refactor`
-- 前端分支：未改动
+- 前端分支：`codex/cloud-asset-list-performance`
 - 目标主分支：`main`
 
 ## 本轮背景
 
-- 用户要求：再并行测试一轮。
-- 用户反馈：云服务器安装完成通知发送失败，Telegram 报错 `inline keyboard button URL ... is invalid`。
-- 用户最终要求：备用通知改为 `https://t.me/sy168`。
+- 用户指出“生命周期和代理列表”不是特别要求不要再改。
+- 之前代理列表默认分组曾被误改，已在前端 commit `0911aa7` 恢复；本轮将该类页面和相关逻辑列入冻结区，减少后续自动化顺手优化风险。
 
-## 修复内容
+## 修改内容
 
-- `bot/keyboards.py`
-  - 新增默认客服链接 `https://t.me/sy168`。
-  - 支持把 `@用户名`、裸 Telegram 用户名、`t.me/...` 和 `telegram.me/...` 归一化为 HTTPS 链接。
-  - 对 `https://shiyi4` 这类 Telegram 不接受的无效 URL，自动兜底到默认客服链接，避免通知发送被按钮 URL 阻断。
-- `bot/tests.py`
-  - 新增客服按钮 URL 回归测试，覆盖无效 URL 兜底、`@用户名` 归一化、配置读取异常兜底。
-
-## 真机压测
-
-- 隔离数据库：`.shop-load-tests/shop-loadtest-realmachine-third.sqlite3`
-- 报告文件：`.shop-load-tests/real-machine-parallel-install-report-third.json`
-- 云账号：AWS Lightsail 后台账号 `#55`，区域 `ap-southeast-1`。
-- 套餐：`#131`，`实机测试 Nano`，`nano_3_0`。
-- 结果：
-  - 第 1 轮并行提交 5 个创建安装任务，4 台完成创建和代理安装，1 台因资源/配额链路失败进入失败清理。
-  - 第 2 轮并行触发重装、重建、修改配置：重建迁移完成，修改配置迁移完成；重装入口仍按现有 `completed` 状态跳过。
-  - 第 3 轮再次并行触发创建、重装、修改配置：新增创建因固定 IP 配额限制失败，修改配置迁移完成，重装仍按现有逻辑跳过。
-  - 本轮没有复现远端安装锁权限错误。
-- 清理：
-  - 脚本自动清理 `LOAD...` 测试订单资源。
-  - 手动补清 3 台 `SRVREBUILD...` / `SRVUPGRADE...` 迁移订单实例。
-  - AWS 只读复核：测试前缀实例列表为空，固定 IP 列表为空。
+- `AGENTS.md`
+  - 在工作边界新增冻结区：生命周期相关逻辑、计划页、执行器、通知计划和代理列表相关接口/前端页面，除非用户明确点名要求修改，否则只读排查，不主动重构、优化或顺手修复。
+- `docs/auto-optimization-control.md`
+  - 在核心红线加入同样冻结区规则。
+  - 将下一轮优先事项中“继续优化代理列表、生命周期计划和通知计划分页”改为暂停主动优化，只保留只读核对和记录。
+- 前端 `/Users/a399/Desktop/data/vue-shop-admin/AGENTS.md`
+  - 新增前端开发红线，冻结代理列表页面的分组、分页、列开关、视图模式，以及生命周期计划、通知计划、自动续费计划等任务页面。
 
 ## 验证
 
-通过：
+本轮仅修改规则和文档，未改业务代码。
 
 ```bash
-uv run python -m py_compile bot/keyboards.py bot/tests.py
-uv run python manage.py check
-DJANGO_TEST_REUSE_DB=1 uv run python manage.py test bot.tests.RetainedIpRenewalUiTestCase.test_support_contact_button_falls_back_when_config_url_is_invalid_for_telegram bot.tests.RetainedIpRenewalUiTestCase.test_support_contact_button_normalizes_telegram_username bot.tests.RetainedIpRenewalUiTestCase.test_support_contact_button_uses_default_when_config_load_fails --keepdb --noinput --verbosity 1
+git diff --check
 ```
 
 ## 风险和下一步
 
-- AWS Lightsail 固定 IP 配额仍会限制并行创建数量；当前失败订单会进入清理路径，符合“至少 5 台或达到配额限制”的测试条件。
-- 重装入口在 `completed` 订单上由 `reprovision_cloud_server_bootstrap()` 跳过；如需原机重新安装代理，需要单独调整允许状态。
-- 修改后所有“联系客服”按钮默认都会生成 URL 按钮，不再回落到 bot 内 callback；这符合本轮备用通知链接要求。
+- 后续自动化和手工修改都应把生命周期、通知计划、自动续费计划、代理列表页面及其接口视为冻结区。
+- 如果用户明确要求修这些模块，必须先说明具体改动范围，再做最小必要修改和验证。
