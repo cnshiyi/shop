@@ -579,11 +579,29 @@ def _snapshot_payloads(rows):
     return [_snapshot_payload(row) for row in rows]
 
 
+def _snapshot_asset_is_unattached_ip(asset) -> bool:
+    provider_status = str(getattr(asset, 'provider_status', '') or '')
+    note = str(getattr(asset, 'note', '') or '')
+    provider_resource_id = str(getattr(asset, 'provider_resource_id', '') or '')
+    asset_name = str(getattr(asset, 'asset_name', '') or '').strip()
+    instance_id = str(getattr(asset, 'instance_id', '') or '').strip()
+    return (
+        '未附加' in provider_status
+        or '固定IP保留' in provider_status
+        or '未附加IP' in note
+        or '未附加固定IP' in note
+        or '固定IP保留' in note
+        or 'StaticIp' in provider_resource_id
+        or (asset_name.startswith('StaticIp-') and not instance_id)
+    )
+
+
 def _compact_snapshot_payload(row):
     asset = row.asset
     user = row.user
     telegram_group = row.telegram_group
     expires_at = asset.actual_expires_at
+    is_unattached_ip = _snapshot_asset_is_unattached_ip(asset)
     username_label = ''
     if user:
         username_label = f'@{user.username}' if user.username else str(user.tg_user_id or '')
@@ -595,13 +613,16 @@ def _compact_snapshot_payload(row):
         'currency': asset.currency or 'USDT',
         'days_left': _days_left(expires_at),
         'instance_id': asset.instance_id,
+        'is_unattached_ip': is_unattached_ip,
         'is_active': asset.is_active,
+        'kind': asset.kind,
         'note': asset.note,
         'order_id': asset.order_id,
         'price': _decimal_to_str(asset.price, 2) if asset.price is not None else '',
         'provider_status': asset.provider_status,
-        'provider_resource_id': asset.provider_resource_id,
         'public_ip': asset.public_ip or asset.previous_public_ip,
+        'resource_kind': 'unattached_ip' if is_unattached_ip else asset.kind,
+        'resource_kind_label': '未附加IP' if is_unattached_ip else ('MTProxy' if asset.kind == CloudAsset.KIND_MTPROXY else '服务器'),
         'risk_rank': row.risk_rank,
         'sort_order': asset.sort_order,
         'auto_renew_enabled': bool(getattr(asset.order, 'auto_renew_enabled', False)) if asset.order_id else False,

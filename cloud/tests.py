@@ -2750,7 +2750,7 @@ class CloudServerServicesTestCase(TestCase):
         refresh_cloud_asset_dashboard_snapshots(asset_ids=[asset.id], reason='test', full=False)
 
         admin = get_user_model().objects.create_user(username='snapshot_compact_admin', password='x', is_staff=True)
-        request = self.factory.get('/api/admin/cloud-assets/', {'paginated': '1', 'compact': '1'})
+        request = self.factory.get('/api/admin/cloud-assets/', {'paginated': '1', 'compact': '1', 'keyword': 'snapshot-compact-ip-asset'})
         self._attach_bearer_session(request, admin)
         response = cloud_assets_list(request)
         payload = json.loads(response.content.decode('utf-8'))['data']
@@ -2766,6 +2766,35 @@ class CloudServerServicesTestCase(TestCase):
         self.assertNotIn('mtproxy_link', row)
         self.assertNotIn('proxy_links', row)
         self.assertNotIn('provider_resource_id', row)
+
+    # 功能：验证 StaticIp-* 固定 IP 资产在代理列表中按未附加 IP 分类，而不是普通服务器。
+    def test_cloud_assets_list_compact_classifies_static_ip_name_as_unattached_ip(self):
+        asset = CloudAsset.objects.create(
+            kind=CloudAsset.KIND_SERVER,
+            source=CloudAsset.SOURCE_AWS_SYNC,
+            user=self.user,
+            provider='aws_lightsail',
+            region_code=self.plan.region_code,
+            region_name=self.plan.region_name,
+            asset_name='StaticIp-338',
+            instance_id='',
+            public_ip='10.77.88.43',
+            status=CloudAsset.STATUS_RUNNING,
+            actual_expires_at=timezone.now() + timezone.timedelta(days=15),
+        )
+        refresh_cloud_asset_dashboard_snapshots(asset_ids=[asset.id], reason='test', full=False)
+
+        admin = get_user_model().objects.create_user(username='snapshot_compact_static_ip_admin', password='x', is_staff=True)
+        request = self.factory.get('/api/admin/cloud-assets/', {'paginated': '1', 'compact': '1', 'keyword': 'StaticIp-338'})
+        self._attach_bearer_session(request, admin)
+        response = cloud_assets_list(request)
+        payload = json.loads(response.content.decode('utf-8'))['data']
+        row = next(item for item in payload['items'] if item['id'] == asset.id)
+
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(row['is_unattached_ip'])
+        self.assertEqual(row['resource_kind'], 'unattached_ip')
+        self.assertEqual(row['resource_kind_label'], '未附加IP')
 
     # 功能：验证未绑定用户资产在分组分页中归入同一个未绑定用户分组。
     def test_cloud_assets_list_compact_merges_unbound_user_group(self):

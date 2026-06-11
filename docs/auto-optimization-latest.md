@@ -4,35 +4,35 @@
 
 ## 最近一轮
 
-- 时间：2026-06-11 01:43 CST
-- 状态：已修复计划页搜索只覆盖数据库字段、无法命中装饰后展示列的问题。
+- 时间：2026-06-11 16:33 CST
+- 状态：已修复代理列表中 `StaticIp-*` 固定 IP 被显示为“服务器”的分类问题。
 - 后端分支：`codex/cloud-asset-lifecycle-refactor`
-- 前端分支：未改动；已核对计划页会把 `keyword` 传给 `/admin/tasks/plans/`。
+- 前端分支：`codex/cloud-asset-list-performance`
 - 目标主分支：`main`
 
 ## 本轮背景
 
-- 用户反馈计划页搜索不生效，要求可以搜索所有列、正确返回结果，并支持模糊匹配。
-- 本轮属于用户明确点名计划页搜索，因此允许修改计划页接口；未修改代理列表。
+- 用户反馈代理列表中 `StaticIp-338` 这类记录显示为“服务器”，实际应该按未附加 IP 展示。
+- 本轮属于用户明确点名代理列表，因此允许修改代理列表相关接口和前端页面；未修改生命周期执行器。
 
 ## 修改内容
 
-- `bot/api.py`
-  - 计划页带 `keyword` 时，先按当前完整候选集生成展示行并执行装饰，再对装饰后的接口字段做全文模糊过滤。
-  - 搜索范围覆盖 `status_summary`、`plan_state_label`、`queue_status_label`、`execution_status`、日期、布尔开关展示含义等接口返回列。
-  - 单个关键词保持子串匹配；多个空格分隔词按“每个词可命中任意列”的方式匹配，支持跨列组合搜索。
-  - 过滤后重新计算各表总数，并按过滤结果分页，避免返回未过滤总数或错页。
-- `cloud/tests.py`
-  - 新增执行状态等装饰列搜索回归测试，验证即使 `fields=basic` 隐藏执行列，搜索仍能命中。
-  - 新增日期列模糊搜索回归测试。
-
-## 实测
-
-- 已用接口请求创建临时测试资产并回滚，搜索 `tmp-plan-search-execution-hit 资产关机计划开关关闭` 返回：
-  - HTTP 状态：`200`
-  - 命中：`True`
-  - `shutdown_plan_count`：`1`
-  - 当前页加载：`1`
+- 后端仓库 `/Users/a399/Desktop/data/shop`
+  - `cloud/api_assets.py`
+    - 扩展未附加固定 IP 识别：覆盖 `provider_status/note` 中的未附加或固定 IP 保留文本、`provider_resource_id` 中的 `StaticIp`、以及无实例 ID 的 `asset_name=StaticIp-*`。
+    - 代理列表 payload 新增 `is_unattached_ip`、`resource_kind`、`resource_kind_label`，保留数据库事实字段 `kind=server` 不变。
+  - `cloud/api_asset_snapshots.py`
+    - 紧凑分页 payload 同步输出上述分类字段，确保分组/分页/compact 模式一致。
+    - 继续不在 compact payload 中返回 `provider_resource_id`，保持轻量视图边界。
+  - `cloud/tests.py`
+    - 新增 `StaticIp-338` 回归测试，验证代理列表 compact 分页返回 `未附加IP` 分类。
+    - 原 compact 测试按资产名搜索目标行，避免复用测试库时被旧数据分页影响。
+- 前端仓库 `/Users/a399/Desktop/data/vue-shop-admin`
+  - `apps/web-antd/src/views/dashboard/cloud-assets/index.vue`
+    - 资产名列类型标签改用 `resource_kind_label/is_unattached_ip`，并补充前端兜底识别 `StaticIp-*` 和 StaticIp ARN。
+    - `StaticIp-*` 记录显示为橙色“未附加IP”，普通服务器仍显示“服务器”，MTProxy 仍显示“MTProxy”。
+  - `apps/web-antd/src/api/admin.ts`
+    - 补充代理列表新增字段类型。
 
 ## 验证
 
@@ -40,12 +40,13 @@
 
 ```bash
 git diff --check
-uv run python -m py_compile bot/api.py cloud/tests.py
+uv run python -m py_compile cloud/api_assets.py cloud/api_asset_snapshots.py cloud/tests.py
 uv run python manage.py check
-DJANGO_TEST_REUSE_DB=1 uv run python manage.py test cloud.tests.CloudServerServicesTestCase.test_lifecycle_plans_keyword_matches_decorated_execution_columns cloud.tests.CloudServerServicesTestCase.test_lifecycle_plans_keyword_matches_date_columns --keepdb --noinput --verbosity 1
+DJANGO_TEST_REUSE_DB=1 uv run python manage.py test cloud.tests.CloudServerServicesTestCase.test_cloud_assets_list_compact_returns_ip_view_payload cloud.tests.CloudServerServicesTestCase.test_cloud_assets_list_compact_classifies_static_ip_name_as_unattached_ip --keepdb --noinput --verbosity 1
+pnpm -F @vben/web-antd typecheck
 ```
 
 ## 风险和下一步
 
-- 本轮只改计划页查询接口的搜索过滤方式，不改变生命周期执行条件、执行时间、真实状态计算或 `CloudAsset.actual_expires_at` 到期事实。
-- 前端计划页已存在搜索入口并传递 `keyword`，本轮未修改前端页面。
+- 本轮只改变代理列表展示分类和接口展示字段，不改变云资源同步、删除、释放 IP、生命周期执行或 `CloudAsset.actual_expires_at` 到期事实。
+- 后端仍保留 `CloudAsset.kind=server` 作为资产事实字段，前端显示使用 `resource_kind_label`。

@@ -104,7 +104,20 @@ def _sanitize_deleted_asset_payload(payload):
 
 # 功能：提供 后台 API 接口 的内部辅助逻辑，供同模块流程复用。
 def _is_unattached_ip_asset(asset: CloudAsset) -> bool:
-    return '未附加' in str(asset.provider_status or '')
+    provider_status = str(getattr(asset, 'provider_status', '') or '')
+    note = str(getattr(asset, 'note', '') or '')
+    provider_resource_id = str(getattr(asset, 'provider_resource_id', '') or '')
+    asset_name = str(getattr(asset, 'asset_name', '') or '').strip()
+    instance_id = str(getattr(asset, 'instance_id', '') or '').strip()
+    return (
+        '未附加' in provider_status
+        or '固定IP保留' in provider_status
+        or '未附加IP' in note
+        or '未附加固定IP' in note
+        or '固定IP保留' in note
+        or 'StaticIp' in provider_resource_id
+        or (asset_name.startswith('StaticIp-') and not instance_id)
+    )
 
 
 # 功能：提供 后台 API 接口 的内部辅助逻辑，供同模块流程复用。
@@ -585,17 +598,7 @@ def _cloud_asset_risk_state(asset, order, expires_at, provider_status_label, dis
     note_text = str(asset.note or '')
     days_left = _days_left(expires_at)
     shutdown_enabled = _cloud_asset_shutdown_enabled(asset, order)
-    is_unattached_ip = (
-        '未附加' in provider_match_text
-        or '固定IP保留中' in provider_match_text
-        or '固定 IP 保留中' in provider_match_text
-        or '未附加IP' in note_text
-        or '未附加 IP' in note_text
-        or '未附加固定IP' in note_text
-        or '固定IP保留中' in note_text
-        or '固定 IP 保留中' in note_text
-        or status_text == 'unattached'
-    )
+    is_unattached_ip = _is_unattached_ip_asset(asset) or status_text == 'unattached'
 
     # 功能：设置运行状态或配置值；当前函数属于 后台 API 接口。
     def set_risk(status: str, label: str, rank: int, reason: str):
@@ -702,9 +705,13 @@ def _asset_payload(asset, *, context: CloudAssetPayloadContext | None = None):
         display_status_label = '未附加固定IP'
         provider_status_label = '云账号已停用 / 固定IP仍存在但未附加' if provider_account_disabled else '固定IP仍存在但未附加'
     risk_state = _cloud_asset_risk_state(asset, order, expires_at, provider_status_label, display_status, user)
+    is_unattached_ip = _is_unattached_ip_asset(asset)
     payload = {
         'id': asset.id,
         'kind': asset.kind,
+        'resource_kind': 'unattached_ip' if is_unattached_ip else asset.kind,
+        'resource_kind_label': '未附加IP' if is_unattached_ip else ('MTProxy' if asset.kind == CloudAsset.KIND_MTPROXY else '服务器'),
+        'is_unattached_ip': is_unattached_ip,
         'source': asset.source,
         'source_label': _server_source_label(asset.source),
         'provider': asset.provider,
