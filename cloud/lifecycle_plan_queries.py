@@ -208,6 +208,13 @@ def broad_unattached_ip_asset_q():
     )
 
 
+def real_machine_test_cleanup_asset_q():
+    return (
+        Q(provider_status__icontains='测试资源已清理')
+        | Q(provider_status__icontains='真机测试资源已清理')
+    )
+
+
 def asset_waiting_manual_time_q():
     return (
         Q(actual_expires_at__isnull=True)
@@ -343,6 +350,7 @@ def server_delete_history_asset_queryset():
         .filter(kind=CloudAsset.KIND_SERVER, order__isnull=True)
         .filter(status__in=[CloudAsset.STATUS_DELETED, CloudAsset.STATUS_TERMINATED])
         .exclude(broad_unattached_ip_asset_q())
+        .exclude(real_machine_test_cleanup_asset_q())
     )
 
 

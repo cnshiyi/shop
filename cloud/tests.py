@@ -10086,6 +10086,68 @@ class CloudServerServicesTestCase(TestCase):
         self.assertEqual(asset_rows[0]['detail_path'], f'/admin/cloud-assets/{orphan_asset.id}')
         self.assertFalse(any(item.get('asset_id') == orphan_asset.id for item in data['ip_delete_history_items']))
 
+    # 功能：验证真机测试清理痕迹不计入用户侧服务器删除记录数量。
+    def test_lifecycle_plans_server_history_excludes_test_cleanup_assets(self):
+        from cloud.lifecycle_plan_queries import server_delete_history_counts, server_delete_history_asset_queryset
+
+        normal_asset = CloudAsset.objects.create(
+            kind=CloudAsset.KIND_SERVER,
+            source=CloudAsset.SOURCE_AWS_SYNC,
+            user=self.user,
+            provider='aws_lightsail',
+            region_code=self.plan.region_code,
+            region_name=self.plan.region_name,
+            asset_name='orphan-deleted-server-history-normal',
+            provider_resource_id='arn:aws:lightsail:ap-southeast-1:123456789012:Instance/orphan-deleted-server-history-normal',
+            previous_public_ip='5.5.9.41',
+            status=CloudAsset.STATUS_DELETED,
+            provider_status='已删除',
+            note='无订单服务器已删除，应该进入服务器删除历史',
+            is_active=False,
+            actual_expires_at=timezone.now() - timezone.timedelta(days=1),
+        )
+        cleanup_asset = CloudAsset.objects.create(
+            kind=CloudAsset.KIND_SERVER,
+            source=CloudAsset.SOURCE_AWS_SYNC,
+            user=self.user,
+            provider='aws_lightsail',
+            region_code=self.plan.region_code,
+            region_name=self.plan.region_name,
+            asset_name='codex-cleanup-server-history',
+            provider_resource_id='arn:aws:lightsail:ap-southeast-1:123456789012:Instance/codex-cleanup-server-history',
+            previous_public_ip='5.5.9.42',
+            status=CloudAsset.STATUS_DELETED,
+            provider_status='测试资源已清理',
+            note='真机测试后清理的本地审计记录，不应进入用户侧服务器删除记录',
+            is_active=False,
+            actual_expires_at=timezone.now() - timezone.timedelta(days=1),
+        )
+
+        history_ids = set(server_delete_history_asset_queryset().values_list('id', flat=True))
+        self.assertIn(normal_asset.id, history_ids)
+        self.assertNotIn(cleanup_asset.id, history_ids)
+        counts = server_delete_history_counts()
+        self.assertEqual(counts['server_history_asset_count'], 1)
+        self.assertEqual(counts['server_history_count'], 1)
+
+        staff_user = get_user_model().objects.create_user(username='staff_lifecycle_server_history_test_cleanup', password='x', is_staff=True)
+        request = RequestFactory().get('/api/admin/tasks/plans/', {
+            'compact': '1',
+            'fields': 'basic,execution,notes',
+            'refresh': '1',
+            'tables': 'server_history',
+            'server_history_page_size': '20',
+        })
+        self._attach_bearer_session(request, staff_user)
+
+        response = lifecycle_plans(request)
+
+        self.assertEqual(response.status_code, 200)
+        data = json.loads(response.content)['data']
+        self.assertEqual(data['server_history_count'], 1)
+        self.assertTrue(any(item.get('asset_id') == normal_asset.id for item in data['server_history_items']))
+        self.assertFalse(any(item.get('asset_id') == cleanup_asset.id for item in data['server_history_items']))
+
     # 功能：验证服务器删除历史跨来源分页按统一更新时间排序，不会先吐尽订单再补资产。
     def test_lifecycle_plans_server_history_mixes_orders_and_assets_by_updated_at(self):
         base = timezone.now()

@@ -21565,3 +21565,47 @@ uv run python manage.py check
 
 - 无订单服务器删机入口只负责真实删实例和本地删除标记，不主动改成未附加 IP 删除时间。
 - 后续 AWS 同步以云端 StaticIp 事实为准，发现固定 IP 未附加后才把资产转入未附加 IP 删除计划并重算到期时间。
+
+## 2026-06-13 00:55 CST 服务器删除记录数量口径修复
+
+### 背景
+
+- 用户反馈生命周期计划页“服务器删除记录显示数量不对”。
+- 只读排查确认，前序真实 AWS 测试清理后，本地留下若干 `deleted/is_active=False` 的 `CloudAsset` 审计记录，并通过 `provider_status` 标记为 `测试资源已清理` 或 `真机测试资源已清理`。
+- 原 `server_delete_history_counts()` 会把“已删除订单”和“无订单、已删除、非未附加 IP 的服务器资产”相加，因此这些测试清理记录被计入用户侧服务器删除历史。
+
+### 修复
+
+- `cloud/lifecycle_plan_queries.py`
+  - 新增 `real_machine_test_cleanup_asset_q()`，只匹配明确测试清理标记。
+  - `server_delete_history_asset_queryset()` 排除测试清理资产。
+  - 正常无订单 deleted 服务器仍保留在服务器删除历史，避免真正孤儿删机记录不可见。
+- `cloud/tests.py`
+  - 新增 `test_lifecycle_plans_server_history_excludes_test_cleanup_assets`。
+  - 覆盖正常无订单 deleted 服务器计入历史、测试清理 deleted 服务器不计数且不出现在 API 列表。
+
+### 只读对账
+
+- 修复后当前库：
+  - `server_history_order_count=1`
+  - `server_history_asset_count=2`
+  - `server_history_count=3`
+- 被排除的测试清理本地记录共 6 条。
+- 本轮未删除任何数据库记录，未执行真实云资源创建、释放或删除。
+
+### 验证
+
+通过：
+
+```bash
+uv run python -m py_compile cloud/lifecycle_plan_queries.py cloud/tests.py bot/api.py
+uv run python manage.py test cloud.tests.CloudServerServicesTestCase.test_lifecycle_plans_server_history_excludes_test_cleanup_assets cloud.tests.CloudServerServicesTestCase.test_lifecycle_plans_server_history_includes_orphan_deleted_server_asset cloud.tests.CloudServerServicesTestCase.test_lifecycle_plans_server_history_mixes_orders_and_assets_by_updated_at --keepdb --noinput --verbosity 2
+uv run python manage.py check
+git diff --check
+```
+
+### 风险
+
+- 本轮只调整服务器删除历史统计和分页来源，不改生命周期执行器、同步链路、IP 删除计划或 IP 删除历史。
+- 过滤条件不按资源名前缀排除，只排除明确测试清理标记，降低误伤业务资产风险。
+- 未执行真实支付、链上广播、生产发布、业务数据删除或真实云资源操作。

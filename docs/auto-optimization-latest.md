@@ -4,62 +4,52 @@
 
 ## 最近一轮
 
-- 时间：2026-06-12 22:34 CST
-- 状态：已完成 AWS 固定 IP 生命周期真机测试，并补跑无订单服务器删机后未附加 IP 专项真机测试。
+- 时间：2026-06-13 00:55 CST
+- 状态：已修复“服务器删除记录显示数量不对”的统计口径。
 - 后端分支：`codex/cloud-asset-lifecycle-refactor`
 - 目标主分支：`main`
 
 ## 本轮背景
 
-- 用户明确授权真实云资源成本，允许使用 AWS Lightsail 最小规格创建、绑定、解绑、释放固定 IP 和删除测试服务器。
-- 用户要求实测计划表、未附加 IP 删除记录、附加/未附加/已删除状态变化、附加 IP 不会直接删除、未附加 IP 不会混入删除记录，以及同步链路能否纠正已经混入删除记录的 IP 和服务器。
-- 用户追加指出：服务器误标 `deleted` 后只按 IP 同步也应该找回；并补充“IP 是附加状态，但混入了删除记录”的场景。
-- 用户要求该补充场景必须真实创建服务器测试，本轮已真实创建 Lightsail 实例和固定 IP 验证。
+- 用户反馈后台生命周期计划页“服务器删除记录”显示数量不对。
+- 只读排查确认：真实 AWS 生命周期测试清理后的本地 `CloudAsset` 已标记为 `deleted/is_active=False`，并带有 `测试资源已清理` 或 `真机测试资源已清理` 标记。
+- 原服务器删除历史统计会合并：
+  - 已删除订单。
+  - 无订单、已删除、非未附加 IP 的服务器资产。
+- 因此真机测试清理资产会混入用户侧服务器删除记录数量。
 
 ## 修改摘要
 
-- `cloud/management/commands/sync_aws_assets.py`
-  - AWS 同步按公网 IP 查找资产时，如果当前 `public_ip` 找不到，会继续用 `previous_public_ip` 匹配同账号同地区已误标 `deleted/terminated` 的资产。
-  - 固定 IP 从未附加重新绑定实例后，会清理旧的“未附加/已删除/已释放”备注，避免计划页继续把它识别为未附加 IP。
 - `cloud/lifecycle_plan_queries.py`
-  - IP 删除历史日志排除已经被同步纠回为活跃服务器的资产，防止 attached IP 的旧回收日志继续混入删除历史。
+  - 新增 `real_machine_test_cleanup_asset_q()`，只识别明确带测试清理标记的资产。
+  - `server_delete_history_asset_queryset()` 排除这类测试清理资产。
+  - 保留正常无订单已删除服务器资产进入服务器删除历史，避免真正的孤儿删机记录丢失。
 - `cloud/tests.py`
-  - 新增三条回归测试覆盖：
-    - 服务器误标 deleted 且 `public_ip` 清空后，仅按公网 IP 同步可通过 `previous_public_ip` 恢复。
-    - 未附加固定 IP 重新 attached 后移出未附加 IP 删除计划。
-    - 云端固定 IP 仍 attached 但本地混入删除记录后，同步恢复为服务器，并从 IP 删除计划/历史排除。
-- `docs/real-machine-test-report.md`
-  - 追加中文真机测试报告，资源名/IP 已脱敏。
+  - 新增 `test_lifecycle_plans_server_history_excludes_test_cleanup_assets`。
+  - 覆盖正常无订单 deleted 服务器仍显示、测试清理 deleted 服务器不计数且不出现在 API 列表。
 
-## 真机测试结果
+## 只读对账结果
 
-- 使用 AWS Lightsail `ap-southeast-1`、`nano_3_0`、`debian_12` 创建独立测试实例和固定 IP。
-- 已验证：
-  - 附加 IP 不能被未附加 IP 删除执行器直接删除。
-  - 服务器误标 deleted 后，仅按公网 IP 同步能恢复为服务器。
-  - 解绑后同步为未附加 IP，并重算 `CloudAsset.actual_expires_at`。
-  - 云端仍存在的未附加 IP，即使有回收日志，也不会混入 IP 删除历史。
-  - 未附加 IP 误标 deleted 后，云端仍存在时同步能恢复到未附加 IP 删除计划。
-  - 未附加 IP 真实释放后进入删除历史，再同步不会错误恢复。
-  - IP 云端仍 attached 但本地混入删除记录时，只按公网 IP 同步能恢复为服务器，并从 IP 删除计划/历史排除。
-  - 无订单服务器真实删机后，本地删机标记本身不改 `actual_expires_at`；后续 AWS 同步发现固定 IP 未附加后，才重算为未附加 IP 删除计划时间。
-- 清理复核：
-  - 测试实例不存在。
-  - 测试固定 IP 不存在。
-  - 未打印或记录完整云资源 ID、完整公网 IP、密钥、密码或代理 secret。
+- 修复后当前库 `server_delete_history_counts()`：
+  - `server_history_order_count=1`
+  - `server_history_asset_count=2`
+  - `server_history_count=3`
+- 被排除的测试清理本地记录：6 条。
+- 本轮未删除数据库记录，未创建或删除真实云资源。
 
 ## 验证命令
 
 通过：
 
 ```bash
-uv run python -m py_compile cloud/management/commands/sync_aws_assets.py cloud/lifecycle_plan_queries.py cloud/tests.py
-uv run python manage.py test cloud.tests.CloudServerServicesTestCase.test_sync_aws_assets_public_ip_restores_deleted_server_from_previous_ip cloud.tests.CloudServerServicesTestCase.test_sync_aws_assets_reattached_static_ip_leaves_unattached_delete_plan cloud.tests.CloudServerServicesTestCase.test_sync_aws_assets_attached_static_ip_mixed_delete_record_restores_server --keepdb --noinput --verbosity 2
+uv run python -m py_compile cloud/lifecycle_plan_queries.py cloud/tests.py bot/api.py
+uv run python manage.py test cloud.tests.CloudServerServicesTestCase.test_lifecycle_plans_server_history_excludes_test_cleanup_assets cloud.tests.CloudServerServicesTestCase.test_lifecycle_plans_server_history_includes_orphan_deleted_server_asset cloud.tests.CloudServerServicesTestCase.test_lifecycle_plans_server_history_mixes_orders_and_assets_by_updated_at --keepdb --noinput --verbosity 2
 uv run python manage.py check
+git diff --check
 ```
 
 ## 风险和下一步
 
-- 本轮已执行真实 AWS 资源操作，操作前已获得用户明确授权；测试完成后云端测试实例和固定 IP 已清理。
-- 本轮没有执行真实支付、链上广播、生产发布或业务数据删除。
-- 未附加 IP 重绑为服务器但没有订单/人工到期时间时，会按既有设计显示为“待人工添加时间”，不会进入服务器生命周期计划；需要人工补真实到期时间后才进入服务器计划。
+- 本轮只调整服务器删除历史口径，不影响未附加 IP 删除计划、IP 删除历史、真实云同步和执行器。
+- 过滤条件只依赖明确清理标记，不按 `codex-` 名称前缀排除，降低误伤业务资产的风险。
+- 未执行真实支付、链上广播、生产发布、业务数据删除或真实云资源操作。
