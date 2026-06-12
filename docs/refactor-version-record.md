@@ -21384,3 +21384,44 @@ uv run python manage.py test cloud.tests.CloudServerServicesTestCase.test_sync_a
 - 本轮执行真实 AWS 资源创建、固定 IP 绑定、固定 IP 解绑、实例删除和固定 IP 释放；操作前已获用户明确授权。
 - 未记录完整实例名、固定 IP 名、公网 IP、ARN、密钥、密码或代理 secret。
 - 未执行真实支付、链上广播或生产发布。
+
+## 2026-06-12 21:42 CST 自动续费手动续费后重复待执行修复
+
+### 背景
+
+- 用户反馈：自动续费进入待执行后执行失败，用户随后手动续费成功，但自动续费后台仍继续重复显示待执行。
+- 本轮属于用户明确点名自动续费问题，因此只做自动续费状态闭环的最小修复；未调整生命周期执行时间、删机/关机策略、通知计划或代理列表展示逻辑。
+
+### 原因
+
+- 自动续费失败会留下 `CloudAutoRenewRetryTask` 和 `CloudAutoRenewPatrolLog` 失败记录。
+- 手动续费成功后，订单到期时间和通知字段会刷新，但旧的自动续费失败重试任务没有被取消。
+- 自动续费计划页还会读取 7 天内最近失败日志重新拼出 `retry_failed` 项；任务中心也会读取 1 天内失败历史，因此用户手动续费后仍看到旧自动续费任务重复待执行/失败。
+
+### 修改
+
+- `cloud/services.py`
+  - 新增 `_settle_auto_renew_failure_after_renewal()`。
+  - 手动续费或用户钱包续费成功后，取消同订单 `pending/failed` 自动续费重试任务，写入“订单已手动续费成功，取消旧自动续费失败重试”。
+  - 如果同订单近 7 天有自动续费失败巡检日志，则补一条 `manual-renew-resolved-*` 成功日志，用后续成功状态覆盖旧失败历史。
+  - 自动续费执行器自身调用钱包续费时传入 `settle_auto_renew_failure=False`，保持由原自动续费成功巡检日志记录结果，避免重复写手动解决日志。
+- `cloud/task_center.py`
+  - 最近 1 天自动续费失败历史统计会先查询同订单后续成功日志；如果失败后已有成功日志，不再计入任务中心红色失败项。
+- `cloud/tests.py`
+  - 新增 `test_manual_renewal_settles_auto_renew_failure_queue`，覆盖旧失败存在时手动续费成功后的状态清理、自动续费计划页和任务中心展示。
+
+### 验证
+
+通过：
+
+```bash
+uv run python -m py_compile cloud/services.py cloud/lifecycle.py cloud/task_center.py cloud/tests.py
+uv run python manage.py test cloud.tests.CloudServerServicesTestCase.test_manual_renewal_settles_auto_renew_failure_queue cloud.tests.CloudServerServicesTestCase.test_auto_renew_prefers_bound_normal_asset_user_over_admin_order_user cloud.tests.CloudServerServicesTestCase.test_auto_renew_retry_task_waits_for_recharge_then_retries cloud.tests.CloudServerServicesTestCase.test_auto_renew_task_detail_includes_due_retry_and_fallback_items cloud.tests_task_center.CloudTaskCenterApiTestCase.test_auto_renew_section_counts_recent_failed_history_as_failed --keepdb --noinput --verbosity 2
+uv run python manage.py check
+git diff --check
+```
+
+### 风险
+
+- 本轮不删除自动续费失败历史，只让后续成功日志和取消状态驱动页面/任务中心不再重复报警。
+- 未执行真实支付、链上广播、真实云资源创建/删除、生产发布或删除数据。

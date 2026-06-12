@@ -524,15 +524,31 @@ def _auto_renew_retry_db_items(now) -> list[dict]:
 
 def _auto_renew_recent_failed_history_items(now, *, exclude_order_ids=None, limit=8) -> tuple[list[dict], int]:
     exclude_order_ids = {order_id for order_id in (exclude_order_ids or set()) if order_id}
+    success_cutoff = now - timezone.timedelta(days=1)
+    latest_success_by_order = {}
+    success_rows = (
+        CloudAutoRenewPatrolLog.objects
+        .filter(executed_at__gte=success_cutoff, is_success=True)
+        .order_by('-executed_at', '-id')
+        .values('order_id', 'completed_order_id', 'executed_at')[:1000]
+    )
+    for row in success_rows:
+        for order_id in (row.get('order_id'), row.get('completed_order_id')):
+            if order_id and order_id not in latest_success_by_order:
+                latest_success_by_order[order_id] = row['executed_at']
     queryset = CloudAutoRenewPatrolLog.objects.filter(
-        executed_at__gte=now - timezone.timedelta(days=1),
+        executed_at__gte=success_cutoff,
         is_success=False,
     ).order_by('-executed_at', '-id')
     if exclude_order_ids:
         queryset = queryset.exclude(order_id__in=list(exclude_order_ids))
-    total = queryset.count()
+    logs = [
+        log for log in queryset[:1000]
+        if not latest_success_by_order.get(log.order_id) or latest_success_by_order[log.order_id] <= log.executed_at
+    ]
+    total = len(logs)
     items = []
-    for log in queryset[:limit]:
+    for log in logs[:limit]:
         order_id = log.completed_order_id or log.order_id
         items.append({
             'id': f'auto-renew-history:{log.id}',

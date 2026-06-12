@@ -22,7 +22,7 @@ from bot.models import TelegramLoginAccount, TelegramUser
 from bot.services import _get_or_create_user_sync
 from cloud.asset_expiry import apply_order_lifecycle_from_asset_expiry, order_asset_expiry, set_order_asset_expiry
 from cloud.lifecycle_schedule import compute_order_lifecycle_fields, runtime_int_config, with_runtime_time
-from cloud.models import CloudAsset, CloudIpLog, CloudServerOrder, CloudServerPlan, ServerPrice
+from cloud.models import CloudAsset, CloudAutoRenewPatrolLog, CloudAutoRenewRetryTask, CloudIpLog, CloudServerOrder, CloudServerPlan, ServerPrice
 from cloud.note_utils import append_note, prepend_note
 from cloud.bootstrap import install_bbr, install_mtproxy
 from cloud.dashboard_snapshots import _refresh_dashboard_plan_snapshots
@@ -84,6 +84,50 @@ def _extend_renewal_expiry(base_at, days: int = 31):
         year += 1
     day = min(base_at.day, calendar.monthrange(year, month)[1])
     return base_at.replace(year=year, month=month, day=day)
+
+
+def _settle_auto_renew_failure_after_renewal(order: CloudServerOrder, *, now=None, note: str = '') -> None:
+    if not getattr(order, 'id', None):
+        return
+    now = now or timezone.now()
+    retry_queryset = CloudAutoRenewRetryTask.objects.filter(
+        order_id=order.id,
+        status__in=[CloudAutoRenewRetryTask.STATUS_PENDING, CloudAutoRenewRetryTask.STATUS_FAILED],
+    )
+    retry_count = retry_queryset.update(
+        status=CloudAutoRenewRetryTask.STATUS_CANCELLED,
+        cancelled_at=now,
+        last_checked_at=now,
+        last_error=note or '订单已手动续费成功，取消旧自动续费失败重试。',
+        updated_at=now,
+    )
+    recent_failure_exists = CloudAutoRenewPatrolLog.objects.filter(
+        order_id=order.id,
+        is_success=False,
+        executed_at__gte=now - timezone.timedelta(days=7),
+    ).exists()
+    if not retry_count and not recent_failure_exists:
+        return
+    user = getattr(order, 'user', None)
+    usernames = list(getattr(user, 'usernames', []) or []) if user else []
+    primary_username = usernames[0] if usernames else (getattr(user, 'username', None) or '')
+    display_name = getattr(user, 'display_name', None) or getattr(user, 'first_name', None) or primary_username or '未绑定用户'
+    CloudAutoRenewPatrolLog.objects.create(
+        order=order,
+        user=user,
+        batch_id=f'manual-renew-resolved-{order.id}',
+        order_no=order.order_no,
+        ip=str(order.public_ip or order.previous_public_ip or '未分配'),
+        provider=order.provider,
+        user_display_name=display_name,
+        username_label=f'@{primary_username}' if primary_username else '-',
+        tg_user_id=getattr(user, 'tg_user_id', None) if user else None,
+        is_success=True,
+        failure_reason=None,
+        currency=str(getattr(order, 'currency', None) or 'USDT'),
+        completed_order_id=order.id,
+        completed_order_no=order.order_no,
+    )
 
 
 def drop_asset_note_update(updates: dict | None) -> dict:
@@ -3795,7 +3839,7 @@ def start_cloud_server_from_admin(order_id: int):
 
 
 @sync_to_async
-def apply_cloud_server_renewal(order_id: int, days: int = 31, run_post_checks: bool = True):
+def apply_cloud_server_renewal(order_id: int, days: int = 31, run_post_checks: bool = True, settle_auto_renew_failure: bool = True):
     order = _hydrate_order_from_proxy_asset(CloudServerOrder.objects.get(id=order_id))
     ok, renew_note = _renew_aliyun_instance(order, days)
     if not ok:
@@ -3865,12 +3909,14 @@ def apply_cloud_server_renewal(order_id: int, days: int = 31, run_post_checks: b
         previous_public_ip=order.previous_public_ip,
         note=f'服务器续费 {period_label}，新的服务到期时间：{new_expires_at:%Y-%m-%d %H:%M}；{renew_note}',
     )
+    if settle_auto_renew_failure:
+        _settle_auto_renew_failure_after_renewal(order, now=now)
     transaction.on_commit(lambda: _refresh_dashboard_plan_snapshots_after_service_change(f'cloud_server_renewal:{order.id}'))
     return recovery_order or order
 
 
 @sync_to_async
-def pay_cloud_server_renewal_with_balance(order_id: int, user_id: int, currency: str = 'USDT', days: int = 31):
+def pay_cloud_server_renewal_with_balance(order_id: int, user_id: int, currency: str = 'USDT', days: int = 31, settle_auto_renew_failure: bool = True):
     try:
         already_paid = False
         balance_field = 'balance_trx' if currency == 'TRX' else 'balance'
@@ -3940,7 +3986,7 @@ def pay_cloud_server_renewal_with_balance(order_id: int, user_id: int, currency:
                 else:
                     order.status = 'paid'
             else:
-                order = apply_cloud_server_renewal.__wrapped__(order_id, days, False)
+                order = apply_cloud_server_renewal.__wrapped__(order_id, days, False, settle_auto_renew_failure)
         if not already_paid:
             order.renew_balance_change = {
                 'currency': currency,

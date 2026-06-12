@@ -1940,7 +1940,7 @@ def _run_auto_renew(order_id: int) -> tuple[CloudServerOrder | None, str | None,
                 if not renewal:
                     errors.append(f'{_user_display_label(candidate)}: 订单当前不可续费')
                     continue
-            renewed, err = pay_cloud_server_renewal_with_balance.__wrapped__(working_order.id, candidate.id, 'USDT', 31)
+            renewed, err = pay_cloud_server_renewal_with_balance.__wrapped__(working_order.id, candidate.id, 'USDT', 31, False)
             if renewed and not err:
                 ledger = BalanceLedger.objects.filter(
                     user_id=candidate.id,

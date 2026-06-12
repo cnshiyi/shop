@@ -5125,6 +5125,84 @@ class CloudServerServicesTestCase(TestCase):
         self.assertIsNone(renewed.delete_notice_sent_at)
         self.assertIsNone(renewed.recycle_notice_sent_at)
 
+    # 功能：验证手动续费成功会结清旧自动续费失败状态，避免后台计划继续重复待执行。
+    def test_manual_renewal_settles_auto_renew_failure_queue(self):
+        self.user.balance = Decimal('100.00')
+        self.user.save(update_fields=['balance', 'updated_at'])
+        expires_at = timezone.now() + timezone.timedelta(hours=8)
+        order = CloudServerOrder.objects.create(
+            order_no='AUTO-RENEW-MANUAL-SETTLE-1',
+            user=self.user,
+            plan=self.plan,
+            provider=self.plan.provider,
+            region_code=self.plan.region_code,
+            region_name=self.plan.region_name,
+            plan_name=self.plan.plan_name,
+            quantity=1,
+            currency='USDT',
+            total_amount='19.00',
+            pay_amount='19.00',
+            pay_method='address',
+            status='renew_pending',
+            public_ip='8.8.4.18',
+            instance_id='auto-renew-manual-settle',
+            service_started_at=timezone.now() - timezone.timedelta(days=30),
+            suspend_at=expires_at + timezone.timedelta(days=1),
+            expired_at=timezone.now() + timezone.timedelta(minutes=30),
+            auto_renew_enabled=True,
+            auto_renew_failure_notice_sent_at=timezone.now(),
+        )
+        self._create_auto_renew_asset(order, expires_at=expires_at)
+        CloudAutoRenewRetryTask.objects.create(
+            order=order,
+            user=self.user,
+            order_no=order.order_no,
+            ip=order.public_ip,
+            status=CloudAutoRenewRetryTask.STATUS_FAILED,
+            failure_reason='USDT 余额不足',
+            attempts=3,
+            next_check_at=timezone.now(),
+        )
+        CloudAutoRenewPatrolLog.objects.create(
+            order=order,
+            user=self.user,
+            batch_id='manual-settle-failed',
+            order_no=order.order_no,
+            ip=order.public_ip,
+            provider=order.provider,
+            user_display_name='svc_test',
+            username_label='@svc_test',
+            tg_user_id=self.user.tg_user_id,
+            is_success=False,
+            failure_reason='USDT 余额不足',
+        )
+
+        staff_user = get_user_model().objects.create_user(username='staff_auto_renew_manual_settle', password='x', is_staff=True)
+        before_request = RequestFactory().get('/api/admin/tasks/auto-renew/')
+        self._attach_bearer_session(before_request, staff_user)
+        before_payload = json.loads(auto_renew_task_detail(before_request).content)['data']
+        self.assertIn(order.order_no, {item['order_no'] for item in before_payload['due_items']})
+
+        with patch('cloud.services._renew_aliyun_instance', return_value=(True, 'ok')), patch('cloud.services._ensure_aws_instance_running', return_value=(False, 'skip start')):
+            renewed = async_to_sync(apply_cloud_server_renewal)(order.id, 31, False)
+
+        renewed.refresh_from_db()
+        self.assertEqual(renewed.status, 'completed')
+        self.assertIsNone(renewed.auto_renew_failure_notice_sent_at)
+        retry_task = CloudAutoRenewRetryTask.objects.get(order=order)
+        self.assertEqual(retry_task.status, CloudAutoRenewRetryTask.STATUS_CANCELLED)
+        latest_log = CloudAutoRenewPatrolLog.objects.filter(order=order).order_by('-executed_at', '-id').first()
+        self.assertTrue(latest_log.is_success)
+        self.assertTrue(str(latest_log.batch_id).startswith('manual-renew-resolved-'))
+
+        after_request = RequestFactory().get('/api/admin/tasks/auto-renew/')
+        self._attach_bearer_session(after_request, staff_user)
+        after_payload = json.loads(auto_renew_task_detail(after_request).content)['data']
+        self.assertNotIn(order.order_no, {item['order_no'] for item in after_payload['due_items']})
+
+        auto_renew_section = next(section for section in task_center_payload()['sections'] if section['key'] == 'auto_renew')
+        self.assertFalse(any(item.get('order_no') == order.order_no for item in auto_renew_section['items']))
+
     # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
     def test_renewal_postcheck_skips_running_records(self):
         old_expiry = timezone.now() + timezone.timedelta(days=7)

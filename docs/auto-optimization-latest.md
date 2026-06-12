@@ -4,62 +4,40 @@
 
 ## 最近一轮
 
-- 时间：2026-06-12 12:36 CST
-- 状态：已完成 AWS 固定 IP 从绑定实例变为未附加 IP 的真机测试，验证代理列表快照和到期时间会更新。
+- 时间：2026-06-12 21:42 CST
+- 状态：已修复自动续费失败后用户手动续费，后台自动续费计划仍重复显示待执行/失败的问题。
 - 后端分支：`codex/cloud-asset-lifecycle-refactor`
 - 目标主分支：`main`
 
 ## 本轮背景
 
-- 用户授权真实云资源成本，并要求“更激进：真实把固定 IP 从实例解绑，再跑同步验证页面和到期时间；你自己创建”。
-- 本轮真实创建 AWS Lightsail 测试实例和固定 IP，完成绑定、同步、解绑、再次同步、验证和清理。
+- 用户反馈：自动续费进入待执行后执行失败，用户随后手动续费成功，但自动续费仍继续重复显示待执行。
+- 本轮属于用户明确点名自动续费逻辑，因此允许最小修改自动续费状态闭环；未改生命周期执行器、计划页其它规则或代理列表展示。
 
-## 真机测试摘要
+## 修改摘要
 
-- 云厂商：AWS Lightsail
-- 云账号：后台 AWS 云账号 `#55`
-- 地区：`ap-southeast-1`
-- 套餐：`nano_3_0`
-- 镜像：`debian_12`
-- 测试资源：实例名、固定 IP 名、公网 IP 均已脱敏，完整值未写入文档。
-- 本地测试资产：`CloudAsset #39`
-
-## 验证结果
-
-- 绑定阶段：
-  - 创建实例成功。
-  - 分配固定 IP 成功。
-  - 固定 IP 绑定实例成功。
-  - 首次 `sync_aws_assets` 后，本地资产和代理列表快照显示为“服务器”。
-- 解绑阶段：
-  - 真实调用 AWS `detach_static_ip`，固定 IP 变为未附加。
-  - 定向运行 `sync_aws_assets --public-ip ...` 后，同一资产清空 `instance_id`，资源标识变为 StaticIp。
-  - `CloudAsset.actual_expires_at` 从服务器测试到期时间重算为未附加 IP 删除计划时间。
-  - `CloudAssetDashboardSnapshot.payload.resource_kind=unattached_ip`。
-  - `CloudAssetDashboardSnapshot.payload.resource_kind_label=未附加IP`。
-  - 快照排序时间 `asset_due_sort_at` 与资产 `actual_expires_at` 一致。
-
-## 清理结果
-
-- 已提交删除测试实例。
-- 已释放测试固定 IP。
-- 清理后只读复核：
-  - 测试实例不存在。
-  - 测试固定 IP 不存在。
-- 本地测试资产已标记为 `deleted/is_active=False`，并刷新代理列表快照。
+- `cloud/services.py`
+  - 新增续费成功后的自动续费失败结清逻辑。
+  - 手动续费或用户钱包续费成功后，会取消同订单仍处于 `pending/failed` 的自动续费重试任务。
+  - 如果同订单近 7 天存在自动续费失败日志，会补一条 `manual-renew-resolved-*` 成功巡检日志，用于覆盖旧失败状态。
+  - 自动续费执行器自身调用钱包续费时不写额外手动解决日志，继续由原自动续费成功巡检日志记录结果，避免重复历史。
+- `cloud/task_center.py`
+  - 后台任务中心统计最近自动续费失败历史时，若同订单失败后已有成功日志，则不再把旧失败计入红色失败项。
+- `cloud/tests.py`
+  - 新增回归测试覆盖“自动续费失败 -> 手动续费成功 -> 旧重试取消 -> 计划页不再重复待执行 -> 任务中心不再显示旧失败”。
 
 ## 验证命令
 
 通过：
 
 ```bash
-uv run python manage.py shell
+uv run python -m py_compile cloud/services.py cloud/lifecycle.py cloud/task_center.py cloud/tests.py
+uv run python manage.py test cloud.tests.CloudServerServicesTestCase.test_manual_renewal_settles_auto_renew_failure_queue cloud.tests.CloudServerServicesTestCase.test_auto_renew_prefers_bound_normal_asset_user_over_admin_order_user cloud.tests.CloudServerServicesTestCase.test_auto_renew_retry_task_waits_for_recharge_then_retries cloud.tests.CloudServerServicesTestCase.test_auto_renew_task_detail_includes_due_retry_and_fallback_items cloud.tests_task_center.CloudTaskCenterApiTestCase.test_auto_renew_section_counts_recent_failed_history_as_failed --keepdb --noinput --verbosity 2
+uv run python manage.py check
+git diff --check
 ```
-
-脚本动作：创建真实实例和固定 IP、绑定、同步、写入测试到期、刷新快照、解绑固定 IP、定向同步、断言快照和到期、删除实例、释放固定 IP、复核残留。
 
 ## 风险和下一步
 
-- 本轮执行了真实云资源创建、固定 IP 绑定/解绑、实例删除和固定 IP 释放；用户已明确授权。
-- 未执行真实支付、链上广播或生产发布。
-- 云资源已清理完成，未发现测试实例或固定 IP 残留。
+- 本轮只修改自动续费失败状态结清和任务中心展示统计，不执行真实支付、链上广播、真实云资源操作、生产发布或删除数据。
+- 自动续费失败历史不会被删除，只通过后续成功日志和重试任务取消状态让计划/任务中心不再重复报警。
