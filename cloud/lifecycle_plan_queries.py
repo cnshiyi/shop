@@ -382,9 +382,14 @@ def server_delete_history_page_sources(
     orders = server_delete_history_order_queryset().order_by('-updated_at', '-id')
     assets = server_delete_history_asset_queryset().order_by('-updated_at', '-id')
     keyword = _normalized_keyword(keyword)
+    total = (order_total + asset_total) if order_total is not None and asset_total is not None else None
     if keyword:
         orders = orders.filter(cloud_order_keyword_q(keyword))
         assets = assets.filter(cloud_asset_keyword_q(keyword))
+    else:
+        union_page = _server_delete_history_union_page(orders, assets, page=page, page_size=page_size, total=total)
+        if union_page is not None:
+            return union_page
     if order_total is None:
         order_total = orders.count()
     if asset_total is None:
@@ -444,6 +449,57 @@ def server_delete_history_page_sources(
             heapq.heappush(heap, (history_sort_key(next_item), state['priority'], kind, next_item))
         else:
             refill(kind)
+    return items
+
+
+def _server_delete_history_union_page(orders, assets, *, page: int, page_size: int, total: int | None = None):
+    start, end = page_bounds(page, page_size)
+    if total is not None:
+        end = min(end, total)
+    if start >= end:
+        return []
+    reverse_page = bool(total is not None and start > max(total // 2, page_size * 100))
+    query_start, query_end = start, end
+    if reverse_page:
+        query_start = max(total - end, 0)
+        query_end = query_start + (end - start)
+    try:
+        order_rows = orders.order_by().annotate(
+            source_kind=Value('order', output_field=CharField()),
+            source_id=F('id'),
+            source_priority=Value(0, output_field=IntegerField()),
+        ).values('source_kind', 'source_id', 'source_priority', 'updated_at')
+        asset_rows = assets.order_by().annotate(
+            source_kind=Value('asset', output_field=CharField()),
+            source_id=F('id'),
+            source_priority=Value(1, output_field=IntegerField()),
+        ).values('source_kind', 'source_id', 'source_priority', 'updated_at')
+        ordering = ('updated_at', 'source_id', '-source_priority') if reverse_page else ('-updated_at', '-source_id', 'source_priority')
+        page_rows = list(
+            order_rows.union(asset_rows, all=True)
+            .order_by(*ordering)[query_start:query_end]
+        )
+    except Exception:
+        return None
+    if not page_rows:
+        return []
+    if reverse_page:
+        page_rows.reverse()
+
+    order_ids = [row['source_id'] for row in page_rows if row['source_kind'] == 'order']
+    asset_ids = [row['source_id'] for row in page_rows if row['source_kind'] == 'asset']
+    order_map = {item.id: item for item in orders.filter(id__in=order_ids)}
+    asset_map = {item.id: item for item in assets.filter(id__in=asset_ids)}
+    items = []
+    for row in page_rows:
+        source_id = row['source_id']
+        if row['source_kind'] == 'order':
+            item = order_map.get(source_id)
+        else:
+            item = asset_map.get(source_id)
+        if item is None:
+            return None
+        items.append((row['source_kind'], item))
     return items
 
 
@@ -600,7 +656,7 @@ def _unattached_ip_delete_tail_page(queryset, *, reverse_start: int, count: int)
 
     while len(collected_ids) < target and scanned < max_scan and heap:
         _sort_key, source_index, row = heapq.heappop(heap)
-        item_id, _actual_expires_at = row
+        item_id, _actual_expires_at, _user_id = row
         pending_ids.append(item_id)
         scanned += 1
         state = source_state[source_index]

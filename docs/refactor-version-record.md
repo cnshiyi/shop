@@ -21609,3 +21609,72 @@ git diff --check
 - 本轮只调整服务器删除历史统计和分页来源，不改生命周期执行器、同步链路、IP 删除计划或 IP 删除历史。
 - 过滤条件不按资源名前缀排除，只排除明确测试清理标记，降低误伤业务资产风险。
 - 未执行真实支付、链上广播、生产发布、业务数据删除或真实云资源操作。
+
+## 2026-06-13 01:52 CST 生命周期计划页五表 10 万压测
+
+### 背景
+
+- 用户要求压测计划页几个表，目标 10 万，并验证每页数据是否正确。
+- 根据压测红线，本轮创建全新独立 SQLite 压测库，未复用当前业务库、手工真机测试库或含真实用户数据的库。
+
+### 修改
+
+- 新增 `cloud/management/commands/stress_lifecycle_plans.py`：
+  - 只允许在 `SHOP_LOAD_TEST_DB=1` 且数据库位于 `.shop-load-tests/` 时执行。
+  - 支持为生命周期计划页五张表分别造 10 万级数据并校验：
+    - `shutdown_plan`
+    - `server_delete`
+    - `server_history`
+    - `ip_delete`
+    - `ip_delete_history`
+  - 输出 JSON 报告，记录计数、关键页、API 首/中/末页耗时和校验结果。
+- `cloud/lifecycle_plan_queries.py`
+  - 修复 `_unattached_ip_delete_tail_page()` 三列候选行解包错误；压测发现未附加 IP 删除计划末页 API 会触发该问题。
+  - `server_delete_history_page_sources()` 无搜索分页增加 UNION 页查询路径，跨订单/资产来源按统一更新时间分页，并支持后半段反向取页。
+- `cloud/tests_load_test_db.py`
+  - 新增压测 IP 生成边界测试，避免 10 万级造数撞 `CloudAsset.public_ip` 唯一索引。
+
+### 压测结果
+
+- 独立压测库：`.shop-load-tests/shop-loadtest-lifecycle-plans-100k.sqlite3`。
+- 报告文件：`.shop-load-tests/lifecycle-plans-loadtest-100k-report.json`。
+- 规模：五张表各 `100000` 条，合计约 `500000` 条计划页相关记录。
+- 计数结果：
+  - `shutdown_plan=100000`
+  - `server_delete=100000`
+  - `server_history=100000`
+  - `ip_delete=100000`
+  - `ip_delete_history=100000`
+- 每张表按 `page_size=1000` 校验关键页：第 `1`、`2`、`49`、`50`、`51`、`99`、`100` 页，排序和页内数据均与基准一致。
+- 计划页 API 按前端页大小 `20` 校验第 `1`、`2500`、`5000` 页，每次均返回 20 条且分页总数正确。
+- API 抽查耗时：
+  - `shutdown_plan` 最大约 `0.552s`。
+  - `server_delete` 最大约 `0.588s`。
+  - `server_history` 最大约 `1.142s`。
+  - `ip_delete` 最大约 `1.083s`。
+  - `ip_delete_history` 最大约 `0.303s`。
+
+### 验证
+
+通过：
+
+```bash
+uv run python -m py_compile cloud/lifecycle_plan_queries.py cloud/management/commands/stress_lifecycle_plans.py
+DJANGO_TEST_SQLITE=1 uv run python manage.py test cloud.tests_load_test_db.PrepareLoadTestDbCommandTestCase --settings=shop.settings --verbosity=1
+uv run python manage.py test cloud.tests.CloudServerServicesTestCase.test_unattached_ip_delete_plan_tail_page_keeps_exact_order cloud.tests.CloudServerServicesTestCase.test_lifecycle_plans_ip_delete_history_pagination_contract cloud.tests.CloudServerServicesTestCase.test_lifecycle_plans_server_delete_pagination_contract cloud.tests.CloudServerServicesTestCase.test_lifecycle_plans_server_history_mixes_orders_and_assets_by_updated_at --keepdb --noinput --verbosity 2
+uv run python manage.py check
+git diff --check
+```
+
+10 万压测命令：
+
+```bash
+uv run python manage.py prepare_load_test_db --sqlite-name .shop-load-tests/shop-loadtest-lifecycle-plans-100k.sqlite3 --migrate --confirm-isolated
+DB_ENGINE=sqlite SQLITE_NAME=.shop-load-tests/shop-loadtest-lifecycle-plans-100k.sqlite3 SHOP_LOAD_TEST_DB=1 uv run python manage.py stress_lifecycle_plans --seed --validate --target 100000 --page-size 1000 --frontend-page-size 20 --report-json .shop-load-tests/lifecycle-plans-loadtest-100k-report.json --confirm-isolated
+```
+
+### 风险
+
+- 本轮没有执行真实云资源操作、真实支付、链上广播、生产发布或业务数据删除。
+- 压测库和报告文件留在 `.shop-load-tests/`，不提交数据库文件；清理时删除本轮 `shop-loadtest-lifecycle-plans-100k.sqlite3` 和对应 report 即可。
+- 本轮只修复压测暴露的计划页查询问题，不改生命周期执行器和云同步链路。

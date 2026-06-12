@@ -5,6 +5,7 @@ from django.core.management.base import CommandError
 from django.test import SimpleTestCase
 
 from cloud.management.commands.prepare_load_test_db import _loadtest_ip
+from cloud.management.commands.stress_lifecycle_plans import _stress_ip
 
 
 class PrepareLoadTestDbCommandTestCase(SimpleTestCase):
@@ -50,3 +51,8 @@ class PrepareLoadTestDbCommandTestCase(SimpleTestCase):
         self.assertEqual(_loadtest_ip(1), '10.64.0.1')
         self.assertEqual(_loadtest_ip(256), '10.64.1.1')
         self.assertTrue(_loadtest_ip(100000).startswith('10.'))
+
+    def test_stress_ip_keeps_large_table_values_unique(self):
+        values = {_stress_ip(10, index) for index in [1, 255, 256, 65025, 65026, 100000]}
+        self.assertEqual(len(values), 6)
+        self.assertTrue(all(value.startswith('10.') for value in values))
