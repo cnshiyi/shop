@@ -21324,3 +21324,63 @@ uv run python manage.py test cloud.tests.CloudServerServicesTestCase.test_sync_a
 
 - 本轮不释放固定 IP、不删除真实云资源，只修正同步落库、到期事实更新和快照刷新。
 - 服务器转未附加 IP 后，`CloudAsset.actual_expires_at` 会从服务器到期切换为未附加 IP 删除计划时间，这是本轮预期行为。
+
+## 2026-06-12 12:36 CST AWS 固定 IP 解绑真机测试
+
+### 背景
+
+- 用户明确授权真实云资源成本，并要求实际测试“真实把固定 IP 从实例解绑，再跑同步验证页面和到期时间；你自己创建”。
+- 本轮使用独立测试资源验证 2026-06-12 12:06 CST 的同步修复是否在 AWS 真机链路生效。
+
+### 测试范围
+
+- 云厂商：AWS Lightsail
+- 云账号：后台 AWS 云账号 `#55`
+- 地区：`ap-southeast-1`
+- 套餐：`nano_3_0`
+- 镜像：`debian_12`
+- 测试资源前缀：`codex-detach-********`
+- 公网 IP 脱敏：`47.131.xxx.xxx`
+- 本地资产：`CloudAsset #39`
+
+### 测试步骤
+
+1. 创建一台最小规格 AWS Lightsail 测试实例。
+2. 分配一个固定 IP，并绑定到该实例。
+3. 定向运行 AWS 同步，将本地资产同步为服务器，并刷新代理列表快照。
+4. 手动写入测试用服务器到期时间，确认快照显示 `服务器` 且 `is_unattached_ip=false`。
+5. 真实调用 AWS `detach_static_ip`，让固定 IP 从实例解绑。
+6. 按固定 IP 定向运行 AWS 同步。
+7. 验证同一 `CloudAsset` 转为未附加固定 IP，清空 `instance_id`，到期时间重算为未附加 IP 删除计划时间。
+8. 验证 `CloudAssetDashboardSnapshot` 更新为 `resource_kind=unattached_ip`、`resource_kind_label=未附加IP`，且快照排序时间与资产到期时间一致。
+
+### 验证结果
+
+- 绑定阶段：
+  - 实例创建成功。
+  - 固定 IP 分配成功。
+  - 固定 IP 绑定实例成功。
+  - 首次同步后，本地资产显示为服务器。
+- 解绑阶段：
+  - AWS 固定 IP 解绑成功。
+  - 二次同步后，同一资产 `instance_id` 清空。
+  - `provider_resource_id` 变为 StaticIp 类型。
+  - `provider_status=未附加固定IP`。
+  - `status=unknown`，`is_active=False`。
+  - `CloudAsset.actual_expires_at` 从服务器测试到期时间重算为未附加 IP 删除计划时间。
+  - 快照 payload 显示 `未附加IP`，不再显示服务器。
+
+### 清理
+
+- 已提交删除测试实例。
+- 已释放测试固定 IP。
+- 清理后只读复核：
+  - 测试实例不存在。
+  - 测试固定 IP 不存在。
+- 本地测试资产 `#39` 已标记 `deleted/is_active=False`，公网 IP 清空并刷新快照。
+
+### 风险
+
+- 本轮执行真实 AWS 资源创建、固定 IP 绑定、固定 IP 解绑、实例删除和固定 IP 释放；操作前已获用户明确授权。
+- 未记录完整实例名、固定 IP 名、公网 IP、ARN、密钥、密码或代理 secret。
+- 未执行真实支付、链上广播或生产发布。

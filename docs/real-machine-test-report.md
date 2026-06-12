@@ -1274,3 +1274,59 @@ git diff --check
 - 从 `cloud.services.AWS_REGION_NAMES` 移除 `ap-southeast-3`。
 - 从 `bot.keyboards._COMPACT_REGION_CODES` 移除 `ap-southeast-3` 的 callback 压缩映射。
 - 保留 `ap-south-1` 和 `ap-southeast-2`：这两个区域真实创建成功，只是需要区域专属 bundle，不属于区域不可用。
+
+## 2026-06-12 12:36 CST AWS 固定 IP 解绑后代理列表和到期时间真机测试
+
+- 状态：通过。
+- 授权：用户明确授权真实云资源成本，并要求真实把固定 IP 从实例解绑。
+- 云厂商：AWS Lightsail
+- 云账号：后台 AWS 云账号 `#55`
+- 地区：`ap-southeast-1`
+- 套餐：`nano_3_0`
+- 镜像：`debian_12`
+- 测试资源前缀：`codex-detach-********`
+- 公网 IP 脱敏：`47.131.xxx.xxx`
+- 本地资产：`CloudAsset #39`
+
+### 测试过程
+
+1. 创建独立测试实例。
+2. 分配独立固定 IP。
+3. 将固定 IP 绑定到测试实例。
+4. 定向运行 AWS 同步，确认本地资产和代理列表快照显示为服务器。
+5. 写入测试用服务器到期时间，用于验证后续是否会被未附加 IP 删除计划时间替换。
+6. 真实调用 AWS `detach_static_ip`，将固定 IP 从实例解绑。
+7. 按固定 IP 定向运行 AWS 同步。
+8. 校验本地资产事实和代理列表快照。
+
+### 验证结果
+
+- 解绑前：
+  - 资产存在 `instance_id`。
+  - 快照 `resource_kind_label=服务器`。
+  - 快照 `is_unattached_ip=false`。
+- 解绑后：
+  - 同一资产清空 `instance_id`。
+  - 资源标识变为 StaticIp 类型。
+  - `provider_status=未附加固定IP`。
+  - `status=unknown`。
+  - `is_active=False`。
+  - `CloudAsset.actual_expires_at` 重算为未附加 IP 删除计划时间。
+  - 快照 `resource_kind=unattached_ip`。
+  - 快照 `resource_kind_label=未附加IP`。
+  - 快照 `is_unattached_ip=true`。
+  - 快照排序时间与资产到期事实一致。
+
+### 清理结果
+
+- 已提交删除测试实例。
+- 已释放测试固定 IP。
+- 清理后只读复核：
+  - 测试实例不存在。
+  - 测试固定 IP 不存在。
+- 本地测试资产已标记为 `deleted/is_active=False`，公网 IP 清空，并刷新快照。
+
+### 结论
+
+- 真实 AWS 链路验证通过：固定 IP 从绑定实例变为未附加后，再运行同步会更新 `CloudAsset.actual_expires_at`，代理列表快照也会从“服务器”更新为“未附加IP”。
+- 未记录完整实例名、固定 IP 名、公网 IP、ARN、密钥、密码或代理 secret。
