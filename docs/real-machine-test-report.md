@@ -1434,3 +1434,53 @@ git diff --check
 
 - 真实 AWS 链路验证通过：即使 IP 云端仍 attached 但本地已经混入删除记录，只按公网 IP 同步也能纠回服务器状态，并从未附加 IP 删除计划和 IP 删除历史排除。
 - 未记录完整实例名、固定 IP 名、公网 IP、ARN、密钥、密码或代理 secret。
+
+## 2026-06-12 22:52 CST AWS 无订单服务器删机后未附加 IP 专项真机测试
+
+- 状态：通过。
+- 授权：沿用用户明确授权真实云资源成本，允许使用 AWS Lightsail 最小规格测试，并允许创建、绑定、解绑、释放固定 IP 和删除测试服务器。
+- 云厂商：AWS Lightsail
+- 云账号：后台 AWS 云账号 `#55`
+- 地区：`ap-southeast-1`
+- 套餐：`nano_3_0`
+- 镜像：`debian_12`
+- 测试资源前缀：`codex-orphan-del-********`
+- 公网 IP 脱敏：`52.77.xxx.xxx`
+- 本地测试资产：`CloudAsset #45`
+
+### 测试过程
+
+1. 真实创建一台 Lightsail 最小规格测试实例。
+2. 真实分配一个固定 IP，并绑定到该实例。
+3. 按实例名定向运行 AWS 同步，生成无订单 `CloudAsset`。
+4. 将本地资产设置为无订单可删机状态：`order=None`、`status=stopped`、`server_delete_enabled=True`、`actual_expires_at` 设为足够早的过期时间。
+5. 临时把服务器删除执行时间窗口调到当前分钟，通过 `run_orphan_asset_delete()` 执行真实无订单资产删机。
+6. 验证删机后固定 IP 云端仍存在且未附加。
+7. 按公网 IP 定向运行 AWS 同步，验证未附加固定 IP 是否进入 IP 删除计划。
+8. 清理测试固定 IP 和本地测试资产。
+
+### 验证结果
+
+- 无订单服务器真实删机成功，测试实例云端不存在。
+- `run_orphan_asset_delete()` 成功后，本地资产标记为 `deleted/is_active=False`，写入 1 条删除日志。
+- 无订单删机标记本身没有改 `CloudAsset.actual_expires_at`，仍保持删机前的服务器到期事实。
+- AWS 同步发现云端 StaticIp 已未附加后，同一资产转为未附加 IP：
+  - `status=unknown`。
+  - 代理列表快照显示 `未附加IP`。
+  - 从服务器生命周期计划移出。
+  - 进入未附加 IP 删除计划。
+  - `CloudAsset.actual_expires_at` 重算为未附加 IP 删除时间，约为同步发现时间 + 15 天，并套用后台配置的 IP 删除执行时间。
+
+### 清理结果
+
+- 已真实释放测试固定 IP。
+- 测试实例已确认不存在。
+- 测试固定 IP 已确认不存在。
+- 本地测试资产已标记为 `deleted/is_active=False`，公网 IP 清空并刷新快照。
+- 临时调整的服务器删除执行时间窗口已恢复。
+
+### 结论
+
+- 无订单服务器删机本身不会主动把 `CloudAsset.actual_expires_at` 改成未附加 IP 删除时间。
+- 删机后如果云端固定 IP 仍存在且变成未附加，下一次 AWS 同步会把同一资产转成未附加 IP，并重算 `actual_expires_at` 为未附加 IP 删除计划时间。
+- 未记录完整实例名、固定 IP 名、公网 IP、ARN、密钥、密码或代理 secret。
