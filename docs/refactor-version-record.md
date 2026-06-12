@@ -21285,3 +21285,42 @@ pnpm -F @vben/web-antd typecheck
 
 - 本轮只修正代理列表展示分类和接口展示字段，不改变真实云资源同步、IP 释放、删机、生命周期计划或 `CloudAsset.actual_expires_at` 到期事实。
 - 后端仍保留 `CloudAsset.kind=server`，避免破坏现有资产事实和查询索引；前端展示使用新增的 `resource_kind_label`。
+
+## 2026-06-12 12:06 CST AWS 未附加固定 IP 同步到期和代理列表快照修复
+
+### 背景
+
+- 用户反馈：IP 从绑定实例变更为未附加 IP 后，到期时间不会更新，代理列表也不会更新，仍显示服务器。
+- 本轮属于用户明确点名代理列表和未附加 IP 同步链路，因此允许修改 AWS 同步落库和代理列表快照刷新；未执行真实云资源创建、删除、释放 IP 或生产发布。
+
+### 原因
+
+- AWS 同步处理未附加 StaticIp 时，只要找到已有 `CloudAsset.actual_expires_at` 就会保留旧时间。
+- 当同一个公网 IP 原本是已绑定服务器资产，后来云端返回为未附加 StaticIp 时，旧服务器到期时间被误当作未附加 IP 删除计划保留，导致到期时间不按“发现未附加时间 + 配置天数”重算。
+- 代理列表分页优先使用 `CloudAssetDashboardSnapshot`，同步命令更新资产后没有立即刷新对应快照，页面可能继续读到旧的“服务器” payload。
+
+### 修改
+
+- `cloud/management/commands/sync_aws_assets.py`
+  - 新增 `_existing_unattached_static_ip_asset()`，仅将同步前已经是未附加固定 IP 的资产视为可保留旧到期时间。
+  - 已绑定服务器变成未附加 StaticIp 时，清空实例 ID、写入 StaticIp 资源信息，并按发现时间重新计算 `CloudAsset.actual_expires_at`。
+  - 同步过程中收集新增、更新、重复删除、存在性校验删除的资产 ID，并在同步结束后调用 `refresh_cloud_asset_dashboard_snapshots(..., reason='aws-sync')` 刷新代理列表快照。
+  - 保留原本就是未附加 IP 的既有到期时间，避免覆盖人工维护或既有删除计划。
+- `cloud/tests.py`
+  - 新增 `test_sync_aws_assets_detached_static_ip_recomputes_due_and_refreshes_snapshot`，覆盖“服务器快照 -> AWS 返回未附加 StaticIp -> 到期重算 -> 快照显示未附加IP”完整链路。
+  - 复跑既有 `test_sync_aws_assets_preserves_existing_unattached_ip_due_time`，确认未附加 IP 的既有到期仍被保留。
+
+### 验证
+
+通过：
+
+```bash
+uv run python -m py_compile cloud/management/commands/sync_aws_assets.py cloud/tests.py
+uv run python manage.py check
+uv run python manage.py test cloud.tests.CloudServerServicesTestCase.test_sync_aws_assets_detached_static_ip_recomputes_due_and_refreshes_snapshot cloud.tests.CloudServerServicesTestCase.test_sync_aws_assets_preserves_existing_unattached_ip_due_time cloud.tests.CloudServerServicesTestCase.test_cloud_assets_list_compact_classifies_static_ip_name_as_unattached_ip --keepdb --noinput --verbosity 1
+```
+
+### 风险
+
+- 本轮不释放固定 IP、不删除真实云资源，只修正同步落库、到期事实更新和快照刷新。
+- 服务器转未附加 IP 后，`CloudAsset.actual_expires_at` 会从服务器到期切换为未附加 IP 删除计划时间，这是本轮预期行为。

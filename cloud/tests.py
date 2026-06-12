@@ -19338,6 +19338,83 @@ class CloudServerServicesTestCase(TestCase):
         self.assertEqual(asset.actual_expires_at, stale_due_at)
         self.assertEqual(asset.note, '未附加固定IP')
 
+    # 功能：验证已绑定服务器 IP 变成未附加固定 IP 后，会重算 IP 删除时间并刷新代理列表快照。
+    def test_sync_aws_assets_detached_static_ip_recomputes_due_and_refreshes_snapshot(self):
+        account = CloudAccountConfig.objects.create(
+            provider=CloudAccountConfig.PROVIDER_AWS,
+            name='aws-detached-static-ip',
+            external_account_id='123456789012',
+            access_key='A' * 20,
+            secret_key='B' * 40,
+            region_hint='ap-southeast-1',
+            is_active=True,
+        )
+        account_label = cloud_account_label(account)
+        server_due_at = timezone.now() + timezone.timedelta(days=30)
+        asset = CloudAsset.objects.create(
+            kind=CloudAsset.KIND_SERVER,
+            source=CloudAsset.SOURCE_AWS_SYNC,
+            user=self.user,
+            provider='aws_lightsail',
+            cloud_account=account,
+            account_label=account_label,
+            region_code=self.plan.region_code,
+            region_name=self.plan.region_name,
+            asset_name='i-detached-static-ip-old',
+            instance_id='i-detached-static-ip-old',
+            provider_resource_id='arn:aws:lightsail:ap-southeast-1:123456789012:Instance/i-detached-static-ip-old',
+            public_ip='10.9.0.5',
+            actual_expires_at=server_due_at,
+            status=CloudAsset.STATUS_RUNNING,
+            provider_status='运行中',
+            is_active=True,
+        )
+        refresh_cloud_asset_dashboard_snapshots(asset_ids=[asset.id], reason='test:before-detached-static-ip', full=False)
+        before_snapshot = CloudAssetDashboardSnapshot.objects.get(asset_id=asset.id)
+        self.assertEqual(before_snapshot.payload.get('resource_kind_label'), '服务器')
+
+        # 测试类：组织 FakeLightsailClient 相关的回归测试。
+        class FakeLightsailClient:
+            # 功能：读取并返回相关数据；当前函数属于 云资产、云订单和生命周期。
+            def get_static_ips(self, **kwargs):
+                return {
+                    'staticIps': [{
+                        'name': 'StaticIp-detached-recomputed',
+                        'arn': 'arn:aws:lightsail:ap-southeast-1:123456789012:StaticIp/StaticIp-detached-recomputed',
+                        'ipAddress': '10.9.0.5',
+                        'attachedTo': '',
+                        'location': {'regionName': '新加坡'},
+                    }],
+                    'nextPageToken': None,
+                }
+
+            # 功能：读取并返回相关数据；当前函数属于 云资产、云订单和生命周期。
+            def get_instances(self, **kwargs):
+                return {'instances': [], 'nextPageToken': None}
+
+        before_sync = timezone.now()
+        with patch('cloud.management.commands.sync_aws_assets._list_regions', return_value=['ap-southeast-1']), \
+            patch('cloud.management.commands.sync_aws_assets._aws_account_identity', return_value='123456789012'), \
+            patch('cloud.management.commands.sync_aws_assets._lightsail_client', return_value=FakeLightsailClient()):
+            call_command('sync_aws_assets', region='ap-southeast-1')
+
+        asset.refresh_from_db()
+        self.assertEqual(asset.asset_name, 'StaticIp-detached-recomputed')
+        self.assertIsNone(asset.instance_id)
+        self.assertIn('StaticIp/StaticIp-detached-recomputed', asset.provider_resource_id)
+        self.assertEqual(asset.provider_status, '未附加固定IP')
+        self.assertEqual(asset.status, CloudAsset.STATUS_UNKNOWN)
+        self.assertFalse(asset.is_active)
+        self.assertNotEqual(asset.actual_expires_at, server_due_at)
+        self.assertGreater(asset.actual_expires_at, before_sync + timezone.timedelta(days=14))
+        self.assertLess(asset.actual_expires_at, before_sync + timezone.timedelta(days=16))
+
+        snapshot = CloudAssetDashboardSnapshot.objects.get(asset_id=asset.id)
+        self.assertEqual(snapshot.payload.get('resource_kind'), 'unattached_ip')
+        self.assertEqual(snapshot.payload.get('resource_kind_label'), '未附加IP')
+        self.assertTrue(snapshot.payload.get('is_unattached_ip'))
+        self.assertEqual(snapshot.asset_due_sort_at, asset.actual_expires_at)
+
     # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
     def test_sync_aws_unattached_ip_duplicate_cleanup_is_account_scoped(self):
         account_a = CloudAccountConfig.objects.create(

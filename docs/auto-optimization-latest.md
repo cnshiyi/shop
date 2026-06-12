@@ -4,49 +4,46 @@
 
 ## 最近一轮
 
-- 时间：2026-06-11 16:33 CST
-- 状态：已修复代理列表中 `StaticIp-*` 固定 IP 被显示为“服务器”的分类问题。
+- 时间：2026-06-12 12:06 CST
+- 状态：已修复 AWS 固定 IP 从已绑定实例变为未附加后，代理列表仍显示服务器且到期时间不更新的问题。
 - 后端分支：`codex/cloud-asset-lifecycle-refactor`
-- 前端分支：`codex/cloud-asset-list-performance`
 - 目标主分支：`main`
 
 ## 本轮背景
 
-- 用户反馈代理列表中 `StaticIp-338` 这类记录显示为“服务器”，实际应该按未附加 IP 展示。
-- 本轮属于用户明确点名代理列表，因此允许修改代理列表相关接口和前端页面；未修改生命周期执行器。
+- 用户反馈：IP 从绑定变更为未附加 IP 后，到期时间不会更新，代理列表也不会更新，仍显示服务器。
+- 本轮属于用户明确点名代理列表和未附加 IP 同步链路，因此允许修改代理列表快照刷新和 AWS 同步落库逻辑；未执行真实云资源操作。
 
 ## 修改内容
 
-- 后端仓库 `/Users/a399/Desktop/data/shop`
-  - `cloud/api_assets.py`
-    - 扩展未附加固定 IP 识别：覆盖 `provider_status/note` 中的未附加或固定 IP 保留文本、`provider_resource_id` 中的 `StaticIp`、以及无实例 ID 的 `asset_name=StaticIp-*`。
-    - 代理列表 payload 新增 `is_unattached_ip`、`resource_kind`、`resource_kind_label`，保留数据库事实字段 `kind=server` 不变。
-  - `cloud/api_asset_snapshots.py`
-    - 紧凑分页 payload 同步输出上述分类字段，确保分组/分页/compact 模式一致。
-    - 继续不在 compact payload 中返回 `provider_resource_id`，保持轻量视图边界。
-  - `cloud/tests.py`
-    - 新增 `StaticIp-338` 回归测试，验证代理列表 compact 分页返回 `未附加IP` 分类。
-    - 原 compact 测试按资产名搜索目标行，避免复用测试库时被旧数据分页影响。
-- 前端仓库 `/Users/a399/Desktop/data/vue-shop-admin`
-  - `apps/web-antd/src/views/dashboard/cloud-assets/index.vue`
-    - 资产名列类型标签改用 `resource_kind_label/is_unattached_ip`，并补充前端兜底识别 `StaticIp-*` 和 StaticIp ARN。
-    - `StaticIp-*` 记录显示为橙色“未附加IP”，普通服务器仍显示“服务器”，MTProxy 仍显示“MTProxy”。
-  - `apps/web-antd/src/api/admin.ts`
-    - 补充代理列表新增字段类型。
+- `cloud/management/commands/sync_aws_assets.py`
+  - 新增 `_existing_unattached_static_ip_asset()`，区分“原本就是未附加固定 IP”和“原本是服务器、同步后变成未附加固定 IP”。
+  - 未附加固定 IP 同步时，只有原本就是未附加 IP 的资产才保留已有 `CloudAsset.actual_expires_at`。
+  - 已绑定服务器转为未附加 IP 时，按发现时间重新计算 IP 删除计划时间，避免沿用服务器到期时间。
+  - AWS 同步过程中收集新增/更新/删除资产 ID，并在同步结束后刷新 `CloudAssetDashboardSnapshot`，让代理列表快照立即显示 `未附加IP`。
+  - 存在性校验标记删除的资产也纳入快照刷新集合，避免旧快照残留。
+- `cloud/tests.py`
+  - 新增回归测试：先生成“服务器”快照，再模拟 AWS 返回同一公网 IP 变成未附加 StaticIp，验证资产到期时间重算、实例 ID 清空、快照 payload 更新为 `unattached_ip/未附加IP`。
+  - 保留既有未附加 IP 到期时间保护测试，确认原本就是未附加 IP 的手工/既有到期时间不会被同步覆盖。
 
 ## 验证
 
 通过：
 
 ```bash
-git diff --check
-uv run python -m py_compile cloud/api_assets.py cloud/api_asset_snapshots.py cloud/tests.py
+uv run python -m py_compile cloud/management/commands/sync_aws_assets.py cloud/tests.py
 uv run python manage.py check
-DJANGO_TEST_REUSE_DB=1 uv run python manage.py test cloud.tests.CloudServerServicesTestCase.test_cloud_assets_list_compact_returns_ip_view_payload cloud.tests.CloudServerServicesTestCase.test_cloud_assets_list_compact_classifies_static_ip_name_as_unattached_ip --keepdb --noinput --verbosity 1
-pnpm -F @vben/web-antd typecheck
+uv run python manage.py test cloud.tests.CloudServerServicesTestCase.test_sync_aws_assets_detached_static_ip_recomputes_due_and_refreshes_snapshot cloud.tests.CloudServerServicesTestCase.test_sync_aws_assets_preserves_existing_unattached_ip_due_time cloud.tests.CloudServerServicesTestCase.test_cloud_assets_list_compact_classifies_static_ip_name_as_unattached_ip --keepdb --noinput --verbosity 1
+```
+
+待提交前执行：
+
+```bash
+git diff --check
 ```
 
 ## 风险和下一步
 
-- 本轮只改变代理列表展示分类和接口展示字段，不改变云资源同步、删除、释放 IP、生命周期执行或 `CloudAsset.actual_expires_at` 到期事实。
-- 后端仍保留 `CloudAsset.kind=server` 作为资产事实字段，前端显示使用 `resource_kind_label`。
+- 本轮只修改 AWS 同步落库和代理列表快照刷新，不释放固定 IP、不删除实例、不执行真实云资源操作。
+- `CloudAsset.actual_expires_at` 仍是唯一资产到期事实；本轮只是修正服务器转未附加 IP 时该事实的更新来源。
+- 如果线上已有旧快照，下一次 AWS 同步会刷新受影响资产；也可手动运行快照刷新任务进行一次全量修正。

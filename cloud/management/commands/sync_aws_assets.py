@@ -9,6 +9,7 @@ from core.cloud_accounts import cloud_account_label, cloud_account_label_variant
 from core.dashboard_api import _provider_status_label
 from core.persistence import record_external_sync_log
 from cloud.asset_expiry import apply_order_lifecycle_from_asset_expiry, order_asset_expiry
+from cloud.api_asset_snapshots import refresh_cloud_asset_dashboard_snapshots
 from cloud.lifecycle_schedule import compute_unattached_ip_release_at, runtime_int_config
 from cloud.models import CloudAsset, CloudServerOrder
 from cloud.note_utils import append_note
@@ -559,6 +560,28 @@ def _static_ip_rebound_asset(asset: CloudAsset | None) -> bool:
     )
 
 
+# 功能：判断同步前的资产是否已经是未附加固定 IP，避免服务器转未附加时沿用服务器到期。
+def _existing_unattached_static_ip_asset(asset: CloudAsset | None) -> bool:
+    if not asset:
+        return False
+    provider_status = str(getattr(asset, 'provider_status', '') or '')
+    note = str(getattr(asset, 'note', '') or '')
+    resource_id = str(getattr(asset, 'provider_resource_id', '') or '')
+    asset_name = str(getattr(asset, 'asset_name', '') or '').strip()
+    instance_id = str(getattr(asset, 'instance_id', '') or '').strip()
+    return bool(
+        not instance_id
+        or '未附加固定IP' in provider_status
+        or '固定IP仍存在但未附加' in provider_status
+        or '固定IP保留中' in provider_status
+        or '未附加固定IP' in note
+        or '固定IP仍存在但未附加' in note
+        or '固定IP保留中' in note
+        or 'StaticIp' in resource_id
+        or asset_name.startswith('StaticIp-')
+    )
+
+
 # 功能：提供 AWS 资产同步 的内部辅助逻辑，供同模块流程复用。
 def _resolve_asset_for_static_ip(static_ip_name, static_ip_arn, public_ip, account=None, region_code=''):
     lookup = Q(kind=CloudAsset.KIND_SERVER)
@@ -666,7 +689,7 @@ def _mark_ip_retained_as_unattached(public_ip, static_ip_name, retained_order, a
 
 
 # 功能：提供 AWS 资产同步 的内部辅助逻辑，供同模块流程复用。
-def _mark_deleted_when_missing_in_aws(region, existing_instance_names, existing_public_ips, stdout, account=None, asset_queryset=None):
+def _mark_deleted_when_missing_in_aws(region, existing_instance_names, existing_public_ips, stdout, account=None, asset_queryset=None, changed_asset_ids=None):
     verification_deleted_items = []
     queryset = asset_queryset if asset_queryset is not None else CloudAsset.objects.filter(
         kind=CloudAsset.KIND_SERVER,
@@ -706,6 +729,8 @@ def _mark_deleted_when_missing_in_aws(region, existing_instance_names, existing_
             order=order,
             stdout=stdout,
         )
+        if changed_asset_ids is not None:
+            changed_asset_ids.add(asset.id)
         verification_deleted_items.append(_sync_item_line(
             account_label=cloud_account_label(account) if account else getattr(asset, 'account_label', ''),
             region=region,
@@ -798,6 +823,7 @@ class Command(BaseCommand):
         verification_deleted_items = []
         account_summary_lines = []
         sync_errors = []
+        changed_cloud_asset_ids = set()
 
         synced_regions = []
         for account in accounts:
@@ -1093,6 +1119,7 @@ class Command(BaseCommand):
                                     if cleaned_note != str(asset.note or '').strip():
                                         asset.note = cleaned_note or None
                                 asset.save()
+                                changed_cloud_asset_ids.add(asset.id)
                                 item_line = _sync_item_line(
                                     account_label=account_label,
                                     region=region,
@@ -1111,6 +1138,7 @@ class Command(BaseCommand):
                         else:
                             asset = CloudAsset.objects.create(**asset_defaults)
                             sync_cloud_asset_user_binding(asset)
+                            changed_cloud_asset_ids.add(asset.id)
                             claimed_assets[asset.id] = asset_signature
                             item_line = _sync_item_line(
                                 account_label=account_label,
@@ -1306,9 +1334,10 @@ class Command(BaseCommand):
                     asset = _resolve_asset_for_static_ip(static_ip_name, static_ip_arn, public_ip, account)
                     created_unattached_asset_from_sync = asset is None
                     if asset:
+                        existing_unattached_static_ip = _existing_unattached_static_ip_asset(asset)
                         if asset.user_id:
                             asset_defaults['user'] = asset.user
-                        if asset.actual_expires_at:
+                        if existing_unattached_static_ip and asset.actual_expires_at:
                             asset_defaults['actual_expires_at'] = asset.actual_expires_at
                     asset_signature = f'{static_ip_name or "-"}|{static_ip_arn or "-"}|{public_ip or "缺失"}'
                     old_status = asset.status if asset else None
@@ -1337,9 +1366,10 @@ class Command(BaseCommand):
                                 setattr(asset, key, value)
                             if not getattr(asset, 'user_id', None):
                                 sync_cloud_asset_user_binding(asset, persist=False)
-                            due_changed = bool(original_due_at and asset.actual_expires_at and original_due_at != asset.actual_expires_at)
+                            due_preserved = bool(existing_unattached_static_ip and original_due_at and asset.actual_expires_at == original_due_at)
                             asset.save()
-                            if due_changed:
+                            changed_cloud_asset_ids.add(asset.id)
+                            if due_preserved:
                                 manual_expiry_preserved_items.append(_sync_item_line(
                                     account_label=account_label,
                                     region=region,
@@ -1370,6 +1400,7 @@ class Command(BaseCommand):
                     else:
                         asset = CloudAsset.objects.create(**asset_defaults)
                         sync_cloud_asset_user_binding(asset)
+                        changed_cloud_asset_ids.add(asset.id)
                         claimed_assets[asset.id] = asset_signature
                         item_line = _sync_item_line(
                             account_label=account_label,
@@ -1444,6 +1475,7 @@ class Command(BaseCommand):
                             duplicate.public_ip = None
                             duplicate.provider_status = '重复未附加固定IP记录'
                             duplicate.save(update_fields=['status', 'is_active', 'previous_public_ip', 'public_ip', 'provider_status', 'updated_at'])
+                            changed_cloud_asset_ids.add(duplicate.id)
                             status_changed_items.append(_sync_item_line(
                                 account_label=account_label,
                                 region=region,
@@ -1489,15 +1521,14 @@ class Command(BaseCommand):
                     account_stats['count'] += 1
 
                 if not target_scope_enabled:
-                    verification_deleted_items.extend(
-                        _mark_deleted_when_missing_in_aws(
-                            region=region,
-                            existing_instance_names=set(region_instance_ids),
-                            existing_public_ips=existing_public_ips,
-                            stdout=self,
-                            account=account,
-                        )
-                    )
+                    verification_deleted_items.extend(_mark_deleted_when_missing_in_aws(
+                        region=region,
+                        existing_instance_names=set(region_instance_ids),
+                        existing_public_ips=existing_public_ips,
+                        stdout=self,
+                        account=account,
+                        changed_asset_ids=changed_cloud_asset_ids,
+                    ))
                 else:
                     scoped_assets = CloudAsset.objects.filter(
                         kind=CloudAsset.KIND_SERVER,
@@ -1516,16 +1547,15 @@ class Command(BaseCommand):
                         Q(cloud_account=account) | Q(account_label__in=cloud_account_label_variants(account)),
                         Q(region_code=region) | Q(region_code='') | Q(region_code__isnull=True),
                     )
-                    verification_deleted_items.extend(
-                        _mark_deleted_when_missing_in_aws(
-                            region=region,
-                            existing_instance_names=set(region_instance_ids),
-                            existing_public_ips=existing_public_ips,
-                            stdout=self,
-                            account=account,
-                            asset_queryset=scoped_assets,
-                        )
-                    )
+                    verification_deleted_items.extend(_mark_deleted_when_missing_in_aws(
+                        region=region,
+                        existing_instance_names=set(region_instance_ids),
+                        existing_public_ips=existing_public_ips,
+                        stdout=self,
+                        account=account,
+                        asset_queryset=scoped_assets,
+                        changed_asset_ids=changed_cloud_asset_ids,
+                    ))
                 synced_instance_ids_by_region.setdefault(region, set()).update(region_instance_ids)
                 synced_public_ips_by_region.setdefault(region, set()).update(region_public_ips)
             error_text = f"；错误={account_stats['errors']}" if account_stats['errors'] else ''
@@ -1560,6 +1590,19 @@ class Command(BaseCommand):
         _write_full_sync_section(self.stdout, 'AWS 冲突跳过', conflict_skipped_items)
         _write_full_sync_section(self.stdout, 'AWS 保留手动到期', manual_expiry_preserved_items)
         _write_full_sync_section(self.stdout, 'AWS IP校验删除', verification_deleted_items)
+        if changed_cloud_asset_ids:
+            try:
+                snapshot_summary = refresh_cloud_asset_dashboard_snapshots(
+                    asset_ids=sorted(changed_cloud_asset_ids),
+                    reason='aws-sync',
+                    full=False,
+                )
+                self.stdout.write(self.style.SUCCESS(
+                    f'AWS 同步已刷新代理列表快照：资产 {snapshot_summary.get("assets", 0)} 条。'
+                ))
+            except Exception as exc:
+                logger.exception('AWS_SYNC_DASHBOARD_SNAPSHOT_REFRESH_FAILED assets=%s error=%s', len(changed_cloud_asset_ids), exc)
+                self.stdout.write(self.style.WARNING(f'AWS 同步刷新代理列表快照失败：{exc}'))
         self.synced_regions = synced_regions
         self.synced_instance_ids = synced_instance_ids
         self.synced_instance_ids_by_region = synced_instance_ids_by_region
