@@ -4,40 +4,59 @@
 
 ## 最近一轮
 
-- 时间：2026-06-12 21:42 CST
-- 状态：已修复自动续费失败后用户手动续费，后台自动续费计划仍重复显示待执行/失败的问题。
+- 时间：2026-06-12 22:25 CST
+- 状态：已完成 AWS 固定 IP 生命周期真机测试，并修复同步纠正删除记录的缺口。
 - 后端分支：`codex/cloud-asset-lifecycle-refactor`
 - 目标主分支：`main`
 
 ## 本轮背景
 
-- 用户反馈：自动续费进入待执行后执行失败，用户随后手动续费成功，但自动续费仍继续重复显示待执行。
-- 本轮属于用户明确点名自动续费逻辑，因此允许最小修改自动续费状态闭环；未改生命周期执行器、计划页其它规则或代理列表展示。
+- 用户明确授权真实云资源成本，允许使用 AWS Lightsail 最小规格创建、绑定、解绑、释放固定 IP 和删除测试服务器。
+- 用户要求实测计划表、未附加 IP 删除记录、附加/未附加/已删除状态变化、附加 IP 不会直接删除、未附加 IP 不会混入删除记录，以及同步链路能否纠正已经混入删除记录的 IP 和服务器。
+- 用户追加指出：服务器误标 `deleted` 后只按 IP 同步也应该找回；并补充“IP 是附加状态，但混入了删除记录”的场景。
 
 ## 修改摘要
 
-- `cloud/services.py`
-  - 新增续费成功后的自动续费失败结清逻辑。
-  - 手动续费或用户钱包续费成功后，会取消同订单仍处于 `pending/failed` 的自动续费重试任务。
-  - 如果同订单近 7 天存在自动续费失败日志，会补一条 `manual-renew-resolved-*` 成功巡检日志，用于覆盖旧失败状态。
-  - 自动续费执行器自身调用钱包续费时不写额外手动解决日志，继续由原自动续费成功巡检日志记录结果，避免重复历史。
-- `cloud/task_center.py`
-  - 后台任务中心统计最近自动续费失败历史时，若同订单失败后已有成功日志，则不再把旧失败计入红色失败项。
+- `cloud/management/commands/sync_aws_assets.py`
+  - AWS 同步按公网 IP 查找资产时，如果当前 `public_ip` 找不到，会继续用 `previous_public_ip` 匹配同账号同地区已误标 `deleted/terminated` 的资产。
+  - 固定 IP 从未附加重新绑定实例后，会清理旧的“未附加/已删除/已释放”备注，避免计划页继续把它识别为未附加 IP。
+- `cloud/lifecycle_plan_queries.py`
+  - IP 删除历史日志排除已经被同步纠回为活跃服务器的资产，防止 attached IP 的旧回收日志继续混入删除历史。
 - `cloud/tests.py`
-  - 新增回归测试覆盖“自动续费失败 -> 手动续费成功 -> 旧重试取消 -> 计划页不再重复待执行 -> 任务中心不再显示旧失败”。
+  - 新增三条回归测试覆盖：
+    - 服务器误标 deleted 且 `public_ip` 清空后，仅按公网 IP 同步可通过 `previous_public_ip` 恢复。
+    - 未附加固定 IP 重新 attached 后移出未附加 IP 删除计划。
+    - 云端固定 IP 仍 attached 但本地混入删除记录后，同步恢复为服务器，并从 IP 删除计划/历史排除。
+- `docs/real-machine-test-report.md`
+  - 追加中文真机测试报告，资源名/IP 已脱敏。
+
+## 真机测试结果
+
+- 使用 AWS Lightsail `ap-southeast-1`、`nano_3_0`、`debian_12` 创建独立测试实例和固定 IP。
+- 已验证：
+  - 附加 IP 不能被未附加 IP 删除执行器直接删除。
+  - 服务器误标 deleted 后，仅按公网 IP 同步能恢复为服务器。
+  - 解绑后同步为未附加 IP，并重算 `CloudAsset.actual_expires_at`。
+  - 云端仍存在的未附加 IP，即使有回收日志，也不会混入 IP 删除历史。
+  - 未附加 IP 误标 deleted 后，云端仍存在时同步能恢复到未附加 IP 删除计划。
+  - 未附加 IP 真实释放后进入删除历史，再同步不会错误恢复。
+- 清理复核：
+  - 测试实例不存在。
+  - 测试固定 IP 不存在。
+  - 未打印或记录完整云资源 ID、完整公网 IP、密钥、密码或代理 secret。
 
 ## 验证命令
 
 通过：
 
 ```bash
-uv run python -m py_compile cloud/services.py cloud/lifecycle.py cloud/task_center.py cloud/tests.py
-uv run python manage.py test cloud.tests.CloudServerServicesTestCase.test_manual_renewal_settles_auto_renew_failure_queue cloud.tests.CloudServerServicesTestCase.test_auto_renew_prefers_bound_normal_asset_user_over_admin_order_user cloud.tests.CloudServerServicesTestCase.test_auto_renew_retry_task_waits_for_recharge_then_retries cloud.tests.CloudServerServicesTestCase.test_auto_renew_task_detail_includes_due_retry_and_fallback_items cloud.tests_task_center.CloudTaskCenterApiTestCase.test_auto_renew_section_counts_recent_failed_history_as_failed --keepdb --noinput --verbosity 2
+uv run python -m py_compile cloud/management/commands/sync_aws_assets.py cloud/lifecycle_plan_queries.py cloud/tests.py
+uv run python manage.py test cloud.tests.CloudServerServicesTestCase.test_sync_aws_assets_public_ip_restores_deleted_server_from_previous_ip cloud.tests.CloudServerServicesTestCase.test_sync_aws_assets_reattached_static_ip_leaves_unattached_delete_plan cloud.tests.CloudServerServicesTestCase.test_sync_aws_assets_attached_static_ip_mixed_delete_record_restores_server --keepdb --noinput --verbosity 2
 uv run python manage.py check
-git diff --check
 ```
 
 ## 风险和下一步
 
-- 本轮只修改自动续费失败状态结清和任务中心展示统计，不执行真实支付、链上广播、真实云资源操作、生产发布或删除数据。
-- 自动续费失败历史不会被删除，只通过后续成功日志和重试任务取消状态让计划/任务中心不再重复报警。
+- 本轮已执行真实 AWS 资源操作，操作前已获得用户明确授权；测试完成后云端测试实例和固定 IP 已清理。
+- 本轮没有执行真实支付、链上广播、生产发布或业务数据删除。
+- 未附加 IP 重绑为服务器但没有订单/人工到期时间时，会按既有设计显示为“待人工添加时间”，不会进入服务器生命周期计划；需要人工补真实到期时间后才进入服务器计划。

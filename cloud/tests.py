@@ -19493,6 +19493,250 @@ class CloudServerServicesTestCase(TestCase):
         self.assertTrue(snapshot.payload.get('is_unattached_ip'))
         self.assertEqual(snapshot.asset_due_sort_at, asset.actual_expires_at)
 
+    # 功能：验证本地服务器误标删除且 public_ip 清空后，仅按公网 IP 同步也能用 previous_public_ip 找回原资产。
+    def test_sync_aws_assets_public_ip_restores_deleted_server_from_previous_ip(self):
+        account = CloudAccountConfig.objects.create(
+            provider=CloudAccountConfig.PROVIDER_AWS,
+            name='aws-restore-deleted-server-by-ip',
+            external_account_id='123456789012',
+            access_key='A' * 20,
+            secret_key='B' * 40,
+            region_hint='ap-southeast-1',
+            is_active=True,
+        )
+        account_label = cloud_account_label(account)
+        asset = CloudAsset.objects.create(
+            kind=CloudAsset.KIND_SERVER,
+            source=CloudAsset.SOURCE_AWS_SYNC,
+            user=self.user,
+            provider='aws_lightsail',
+            cloud_account=account,
+            account_label=account_label,
+            region_code='ap-southeast-1',
+            region_name='新加坡',
+            asset_name='restore-deleted-server-old',
+            instance_id='restore-deleted-server-old',
+            provider_resource_id='arn:aws:lightsail:ap-southeast-1:123456789012:Instance/restore-deleted-server-old',
+            public_ip=None,
+            previous_public_ip='10.9.0.6',
+            actual_expires_at=timezone.now() + timezone.timedelta(days=30),
+            status=CloudAsset.STATUS_DELETED,
+            provider_status='云上未找到实例/IP',
+            note='IP校验发现云上不存在，已标记删除',
+            is_active=False,
+        )
+
+        # 测试类：组织 FakeLightsailClient 相关的回归测试。
+        class FakeLightsailClient:
+            # 功能：读取并返回相关数据；当前函数属于 云资产、云订单和生命周期。
+            def get_static_ips(self, **kwargs):
+                return {'staticIps': [], 'nextPageToken': None}
+
+            # 功能：读取并返回相关数据；当前函数属于 云资产、云订单和生命周期。
+            def get_instances(self, **kwargs):
+                return {
+                    'instances': [{
+                        'name': 'restore-deleted-server-new',
+                        'arn': 'arn:aws:lightsail:ap-southeast-1:123456789012:Instance/restore-deleted-server-new',
+                        'state': {'name': 'running'},
+                        'publicIpAddress': '10.9.0.6',
+                        'bundleId': 'nano_3_0',
+                        'blueprintId': 'debian_12',
+                        'location': {'regionName': '新加坡'},
+                    }],
+                    'nextPageToken': None,
+                }
+
+        with patch('cloud.management.commands.sync_aws_assets._list_regions', return_value=['ap-southeast-1']), \
+            patch('cloud.management.commands.sync_aws_assets._aws_account_identity', return_value='123456789012'), \
+            patch('cloud.management.commands.sync_aws_assets._lightsail_client', return_value=FakeLightsailClient()):
+            call_command('sync_aws_assets', region='ap-southeast-1', account_id=str(account.id), public_ip='10.9.0.6')
+
+        asset.refresh_from_db()
+        self.assertEqual(CloudAsset.objects.filter(public_ip='10.9.0.6').count(), 1)
+        self.assertEqual(asset.public_ip, '10.9.0.6')
+        self.assertEqual(asset.instance_id, 'restore-deleted-server-new')
+        self.assertEqual(asset.status, CloudAsset.STATUS_RUNNING)
+        self.assertTrue(asset.is_active)
+        self.assertNotIn('已标记删除', asset.note or '')
+
+    # 功能：验证固定 IP 从未附加重新绑定实例后，计划页不再继续归入未附加 IP 删除计划。
+    def test_sync_aws_assets_reattached_static_ip_leaves_unattached_delete_plan(self):
+        from cloud.lifecycle_plan_queries import unattached_ip_delete_active_unique_queryset
+
+        account = CloudAccountConfig.objects.create(
+            provider=CloudAccountConfig.PROVIDER_AWS,
+            name='aws-reattached-static-ip',
+            external_account_id='123456789012',
+            access_key='A' * 20,
+            secret_key='B' * 40,
+            region_hint='ap-southeast-1',
+            is_active=True,
+        )
+        account_label = cloud_account_label(account)
+        asset = CloudAsset.objects.create(
+            kind=CloudAsset.KIND_SERVER,
+            source=CloudAsset.SOURCE_AWS_SYNC,
+            user=self.user,
+            provider='aws_lightsail',
+            cloud_account=account,
+            account_label=account_label,
+            region_code='ap-southeast-1',
+            region_name='新加坡',
+            asset_name='StaticIp-reattached-old',
+            instance_id=None,
+            provider_resource_id='arn:aws:lightsail:ap-southeast-1:123456789012:StaticIp/StaticIp-reattached-old',
+            public_ip='10.9.0.7',
+            actual_expires_at=timezone.now() + timezone.timedelta(days=15),
+            status=CloudAsset.STATUS_UNKNOWN,
+            provider_status='未附加固定IP',
+            note='未附加固定IP\n固定IP仍存在但未附加',
+            is_active=False,
+        )
+        self.assertTrue(unattached_ip_delete_active_unique_queryset().filter(id=asset.id).exists())
+
+        # 测试类：组织 FakeLightsailClient 相关的回归测试。
+        class FakeLightsailClient:
+            # 功能：读取并返回相关数据；当前函数属于 云资产、云订单和生命周期。
+            def get_static_ips(self, **kwargs):
+                return {
+                    'staticIps': [{
+                        'name': 'StaticIp-reattached-old',
+                        'arn': 'arn:aws:lightsail:ap-southeast-1:123456789012:StaticIp/StaticIp-reattached-old',
+                        'ipAddress': '10.9.0.7',
+                        'attachedTo': 'reattached-server-new',
+                        'location': {'regionName': '新加坡'},
+                    }],
+                    'nextPageToken': None,
+                }
+
+            # 功能：读取并返回相关数据；当前函数属于 云资产、云订单和生命周期。
+            def get_instances(self, **kwargs):
+                return {
+                    'instances': [{
+                        'name': 'reattached-server-new',
+                        'arn': 'arn:aws:lightsail:ap-southeast-1:123456789012:Instance/reattached-server-new',
+                        'state': {'name': 'running'},
+                        'publicIpAddress': '10.9.0.7',
+                        'bundleId': 'nano_3_0',
+                        'blueprintId': 'debian_12',
+                        'location': {'regionName': '新加坡'},
+                    }],
+                    'nextPageToken': None,
+                }
+
+        with patch('cloud.management.commands.sync_aws_assets._list_regions', return_value=['ap-southeast-1']), \
+            patch('cloud.management.commands.sync_aws_assets._aws_account_identity', return_value='123456789012'), \
+            patch('cloud.management.commands.sync_aws_assets._lightsail_client', return_value=FakeLightsailClient()):
+            call_command('sync_aws_assets', region='ap-southeast-1', account_id=str(account.id), public_ip='10.9.0.7')
+
+        asset.refresh_from_db()
+        self.assertEqual(asset.asset_name, 'reattached-server-new')
+        self.assertEqual(asset.instance_id, 'reattached-server-new')
+        self.assertIn('Instance/reattached-server-new', asset.provider_resource_id)
+        self.assertEqual(asset.status, CloudAsset.STATUS_RUNNING)
+        self.assertTrue(asset.is_active)
+        self.assertIsNone(asset.actual_expires_at)
+        self.assertNotIn('未附加', asset.provider_status or '')
+        self.assertNotIn('未附加', asset.note or '')
+        self.assertFalse(unattached_ip_delete_active_unique_queryset().filter(id=asset.id).exists())
+
+    # 功能：验证云端固定 IP 仍附加实例时，即使本地混入 IP 删除记录，也会按 attached 事实恢复为服务器。
+    def test_sync_aws_assets_attached_static_ip_mixed_delete_record_restores_server(self):
+        from cloud.lifecycle_plan_queries import (
+            server_lifecycle_plan_unique_queryset,
+            unattached_ip_delete_active_unique_queryset,
+            unattached_ip_delete_history_log_queryset,
+        )
+
+        account = CloudAccountConfig.objects.create(
+            provider=CloudAccountConfig.PROVIDER_AWS,
+            name='aws-attached-ip-mixed-delete',
+            external_account_id='123456789012',
+            access_key='A' * 20,
+            secret_key='B' * 40,
+            region_hint='ap-southeast-1',
+            is_active=True,
+        )
+        account_label = cloud_account_label(account)
+        server_due_at = timezone.now() + timezone.timedelta(days=30)
+        asset = CloudAsset.objects.create(
+            kind=CloudAsset.KIND_SERVER,
+            source=CloudAsset.SOURCE_AWS_SYNC,
+            user=self.user,
+            provider='aws_lightsail',
+            cloud_account=account,
+            account_label=account_label,
+            region_code='ap-southeast-1',
+            region_name='新加坡',
+            asset_name='StaticIp-attached-mixed-delete',
+            instance_id=None,
+            provider_resource_id='arn:aws:lightsail:ap-southeast-1:123456789012:StaticIp/StaticIp-attached-mixed-delete',
+            public_ip=None,
+            previous_public_ip='10.9.0.8',
+            actual_expires_at=server_due_at,
+            status=CloudAsset.STATUS_DELETED,
+            provider_status='未附加固定IP-已到期删除',
+            note='未附加固定IP 已到期删除\nIP校验发现云上不存在，已标记删除',
+            is_active=False,
+        )
+        CloudIpLog.objects.create(
+            event_type=CloudIpLog.EVENT_RECYCLED,
+            asset=asset,
+            public_ip='10.9.0.8',
+            note='未附加固定IP 已真实释放',
+        )
+        self.assertTrue(unattached_ip_delete_history_log_queryset().filter(asset_id=asset.id).exists())
+
+        # 测试类：组织 FakeLightsailClient 相关的回归测试。
+        class FakeLightsailClient:
+            # 功能：读取并返回相关数据；当前函数属于 云资产、云订单和生命周期。
+            def get_static_ips(self, **kwargs):
+                return {
+                    'staticIps': [{
+                        'name': 'StaticIp-attached-mixed-delete',
+                        'arn': 'arn:aws:lightsail:ap-southeast-1:123456789012:StaticIp/StaticIp-attached-mixed-delete',
+                        'ipAddress': '10.9.0.8',
+                        'attachedTo': 'attached-mixed-delete-server',
+                        'location': {'regionName': '新加坡'},
+                    }],
+                    'nextPageToken': None,
+                }
+
+            # 功能：读取并返回相关数据；当前函数属于 云资产、云订单和生命周期。
+            def get_instances(self, **kwargs):
+                return {
+                    'instances': [{
+                        'name': 'attached-mixed-delete-server',
+                        'arn': 'arn:aws:lightsail:ap-southeast-1:123456789012:Instance/attached-mixed-delete-server',
+                        'state': {'name': 'running'},
+                        'publicIpAddress': '10.9.0.8',
+                        'bundleId': 'nano_3_0',
+                        'blueprintId': 'debian_12',
+                        'location': {'regionName': '新加坡'},
+                    }],
+                    'nextPageToken': None,
+                }
+
+        with patch('cloud.management.commands.sync_aws_assets._list_regions', return_value=['ap-southeast-1']), \
+            patch('cloud.management.commands.sync_aws_assets._aws_account_identity', return_value='123456789012'), \
+            patch('cloud.management.commands.sync_aws_assets._lightsail_client', return_value=FakeLightsailClient()):
+            call_command('sync_aws_assets', region='ap-southeast-1', account_id=str(account.id), public_ip='10.9.0.8')
+
+        asset.refresh_from_db()
+        self.assertEqual(asset.asset_name, 'attached-mixed-delete-server')
+        self.assertEqual(asset.instance_id, 'attached-mixed-delete-server')
+        self.assertEqual(asset.public_ip, '10.9.0.8')
+        self.assertIn('Instance/attached-mixed-delete-server', asset.provider_resource_id)
+        self.assertEqual(asset.status, CloudAsset.STATUS_RUNNING)
+        self.assertTrue(asset.is_active)
+        self.assertIsNone(asset.actual_expires_at)
+        self.assertNotIn('未附加', asset.provider_status or '')
+        self.assertNotIn('未附加', asset.note or '')
+        self.assertFalse(server_lifecycle_plan_unique_queryset().filter(id=asset.id).exists())
+        self.assertFalse(unattached_ip_delete_active_unique_queryset().filter(id=asset.id).exists())
+        self.assertFalse(unattached_ip_delete_history_log_queryset().filter(asset_id=asset.id).exists())
+
     # 功能：验证相关业务场景和回归行为；当前函数属于 云资产、云订单和生命周期。
     def test_sync_aws_unattached_ip_duplicate_cleanup_is_account_scoped(self):
         account_a = CloudAccountConfig.objects.create(

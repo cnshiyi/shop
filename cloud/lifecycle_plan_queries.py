@@ -638,10 +638,23 @@ def unattached_ip_delete_history_q():
 
 def unattached_ip_delete_history_log_queryset():
     active_asset_ids = unattached_ip_delete_active_unique_queryset().values('id')
+    existing_server_asset_ids = (
+        CloudAsset.objects
+        .filter(kind=CloudAsset.KIND_SERVER)
+        .exclude(status__in=[
+            CloudAsset.STATUS_DELETED,
+            CloudAsset.STATUS_DELETING,
+            CloudAsset.STATUS_TERMINATED,
+            CloudAsset.STATUS_TERMINATING,
+        ])
+        .exclude(broad_unattached_ip_asset_q())
+        .values('id')
+    )
     return (
         CloudIpLog.objects
         .filter(unattached_ip_delete_history_q())
         .filter(Q(asset_id__isnull=True) | ~Q(asset_id__in=Subquery(active_asset_ids)))
+        .filter(Q(asset_id__isnull=True) | ~Q(asset_id__in=Subquery(existing_server_asset_ids)))
     )
 
 

@@ -403,6 +403,15 @@ def _resolve_asset(instance_name, instance_arn, public_ip, order, account=None, 
         asset = _resolve_global_public_ip_asset(public_ip)
         if asset:
             return asset
+        deleted_ip_asset = _first_resolved_asset(
+            CloudAsset.objects
+            .filter(lookup)
+            .filter(ip_q)
+            .filter(status__in=_SYNC_EXCLUDED_ASSET_STATUSES),
+            _asset_resolve_ordering(public_ip),
+        )
+        if deleted_ip_asset:
+            return deleted_ip_asset
     direct_candidates = Q()
     if instance_name:
         direct_candidates |= Q(instance_id=instance_name) | Q(asset_name=instance_name)
@@ -441,6 +450,26 @@ def _append_unique_line(text: str | None, line: str) -> str:
 # 功能：提供 AWS 资产同步 的内部辅助逻辑，供同模块流程复用。
 def _drop_stale_deleted_note_lines(text: str | None) -> str:
     stale_keywords = ('云上不存在', '云上未找到实例/IP', '已标记删除', '同步删除')
+    return '\n'.join(
+        line for line in str(text or '').splitlines()
+        if line.strip() and not any(keyword in line for keyword in stale_keywords)
+    ).strip()
+
+
+# 功能：清理固定 IP 重新绑定实例后遗留的未附加/删除识别备注，避免计划页继续归入 IP 删除计划。
+def _drop_stale_unattached_ip_note_lines(text: str | None) -> str:
+    stale_keywords = (
+        '未附加固定IP',
+        '未附加固定 IP',
+        '未附加IP',
+        '未附加 IP',
+        '固定IP保留',
+        '固定 IP 保留',
+        '固定IP仍存在但未附加',
+        '固定 IP 仍存在但未附加',
+        '已到期删除',
+        '已真实释放',
+    )
     return '\n'.join(
         line for line in str(text or '').splitlines()
         if line.strip() and not any(keyword in line for keyword in stale_keywords)
@@ -1116,6 +1145,8 @@ class Command(BaseCommand):
                                 if normalized_status not in {CloudAsset.STATUS_DELETED, CloudAsset.STATUS_TERMINATED}:
                                     clear_missing_confirmation_state(asset)
                                     cleaned_note = _drop_stale_deleted_note_lines(asset.note)
+                                    if rebound_unattached_ip:
+                                        cleaned_note = _drop_stale_unattached_ip_note_lines(cleaned_note)
                                     if cleaned_note != str(asset.note or '').strip():
                                         asset.note = cleaned_note or None
                                 asset.save()

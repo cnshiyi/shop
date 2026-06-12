@@ -21425,3 +21425,65 @@ git diff --check
 
 - 本轮不删除自动续费失败历史，只让后续成功日志和取消状态驱动页面/任务中心不再重复报警。
 - 未执行真实支付、链上广播、真实云资源创建/删除、生产发布或删除数据。
+
+## 2026-06-12 22:25 CST AWS 固定 IP 删除记录纠正和真机测试
+
+### 背景
+
+- 用户明确授权真实云资源成本，允许使用 AWS Lightsail 最小规格创建、绑定、解绑、释放固定 IP 和删除测试服务器。
+- 用户要求实测生命周期计划表、关机计划、删机计划、未附加 IP 删除计划、IP 删除记录、未附加 IP 续费变化、真实创建服务器、代理列表状态变化，以及附加 IP 是否会被直接删除。
+- 用户补充要求确认同步链路能否把已经混入删除记录的 IP 和服务器纠正回来，并指出服务器误标 `deleted` 后只按 IP 同步也应该恢复。
+- 用户进一步补充：IP 云端仍是附加状态，但本地已经混入删除记录，也需要确认和覆盖。
+
+### 真机测试
+
+- 云厂商：AWS Lightsail。
+- 云账号：后台 AWS 云账号 `#55`。
+- 地区：`ap-southeast-1`。
+- 套餐：`nano_3_0`。
+- 镜像：`debian_12`。
+- 测试资源前缀：`codex-ip-flow-********`、`codex-ip-release-********`。
+- 公网 IP 脱敏：`54.255.xxx.xxx`、`3.1.xxx.xxx`。
+
+实测结果：
+
+- 真实创建服务器、分配固定 IP、绑定固定 IP 成功。
+- 绑定状态下代理列表快照显示 `服务器`，生命周期归属服务器计划。
+- 对仍附加实例的 IP 执行未附加 IP 删除，被执行器拒绝，确认附加 IP 不会被直接删除。
+- 服务器本地误标 `deleted` 且 `public_ip` 清空后，仅按公网 IP 同步可通过 `previous_public_ip` 恢复为 `running` 服务器。
+- 固定 IP 真实解绑后，同步把同一资产转为未附加 IP，清空 `instance_id`，快照显示 `未附加IP`，并把 `CloudAsset.actual_expires_at` 从服务器到期时间切换为未附加 IP 删除计划时间。
+- 云端仍存在的未附加 IP，即使人为写入回收日志，也继续留在未附加 IP 删除计划，不混入 IP 删除历史。
+- 未附加 IP 被人为标记 `deleted` 且清空 `public_ip` 后，只按公网 IP 同步可恢复到未附加 IP 删除计划，并从历史中排除。
+- 未附加 IP 真实释放后，本地资产标记 `deleted`，公网 IP 清空，历史 IP 留在 `previous_public_ip`，进入 IP 删除历史；释放后再次同步不会错误恢复。
+- 所有真实测试实例和固定 IP 均已删除/释放并复核不存在。
+
+### 修复
+
+- `cloud/management/commands/sync_aws_assets.py`
+  - AWS 同步按公网 IP 查找资产时，若当前 `public_ip` 找不到，继续用 `previous_public_ip` 匹配同账号同地区已误标 `deleted/terminated` 的资产，确保云端仍存在的服务器可以被同步纠回。
+  - 固定 IP 从未附加重新绑定实例后，清理旧的“未附加/已删除/已释放”备注，避免计划页继续把它识别为未附加 IP。
+- `cloud/lifecycle_plan_queries.py`
+  - IP 删除历史日志排除已经被同步纠回为活跃服务器的资产，防止云端仍 attached 的 IP 因旧回收日志继续混入删除历史。
+- `cloud/tests.py`
+  - 新增 `test_sync_aws_assets_public_ip_restores_deleted_server_from_previous_ip`。
+  - 新增 `test_sync_aws_assets_reattached_static_ip_leaves_unattached_delete_plan`。
+  - 新增 `test_sync_aws_assets_attached_static_ip_mixed_delete_record_restores_server`。
+- `docs/real-machine-test-report.md`
+  - 追加本轮中文真机测试报告，资源 ID 和公网 IP 脱敏。
+
+### 验证
+
+通过：
+
+```bash
+uv run python -m py_compile cloud/management/commands/sync_aws_assets.py cloud/lifecycle_plan_queries.py cloud/tests.py
+uv run python manage.py test cloud.tests.CloudServerServicesTestCase.test_sync_aws_assets_public_ip_restores_deleted_server_from_previous_ip cloud.tests.CloudServerServicesTestCase.test_sync_aws_assets_reattached_static_ip_leaves_unattached_delete_plan cloud.tests.CloudServerServicesTestCase.test_sync_aws_assets_attached_static_ip_mixed_delete_record_restores_server --keepdb --noinput --verbosity 2
+uv run python manage.py check
+```
+
+### 风险
+
+- 本轮执行真实 AWS 创建实例、固定 IP 分配、绑定、解绑、释放和删除测试实例，操作前已获用户明确授权。
+- 为验证真实未附加 IP 释放执行器，临时调整未附加 IP 删除执行时间窗口，测试完成后已恢复原配置。
+- 未执行真实支付、链上广播、生产发布或业务数据删除。
+- 未记录完整实例名、固定 IP 名、公网 IP、ARN、密钥、密码或代理 secret。
