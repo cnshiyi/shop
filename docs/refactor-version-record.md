@@ -21737,3 +21737,47 @@ DB_ENGINE=sqlite SQLITE_NAME=.shop-load-tests/shop-loadtest-bot-renew-parallel.s
 - 本轮压测库和报告留在 `.shop-load-tests/`，不提交数据库文件；清理时删除本轮 SQLite 文件和 JSON 报告即可。
 - 本轮只改机器人查询键盘和续费回调确认时机，不改生命周期执行器、云同步、真实续费计费或支付链路。
 - 线上机器人进程需要重启后才会加载本轮 `bot/handlers.py` 变更。
+
+## 2026-06-13 12:30 CST IP 查询续费/开机按钮口径修正
+
+### 背景
+
+- 用户纠正上一轮按钮口径：
+  - 未附加 IP 只有“还未删除”时才允许续费。
+  - 旧机保留/等待删除的服务器状态也可以续费。
+  - 关机服务器需要显示开机入口。
+- 上一轮把旧机保留/等待删除服务器的续费入口也隐藏了，过于收紧；同时键盘层对订单按钮仍按 `include_start` 无条件显示开机，后端隐藏开机的判断没有真正传到键盘。
+
+### 修复
+
+- `bot/handlers.py`
+  - 将资产查询分支的“可续费”和“可运维操作”拆成独立判断。
+  - 旧机保留/等待删除服务器如果有关联订单，且订单状态是 `completed/expiring/suspended/renew_pending`，或是 `deleted` 但 `ip_recycle_at` 仍在未来，则继续显示 `续费IP`。
+  - 旧机保留/等待删除服务器不再显示 `开机`、换 IP、重装、修改配置和自动续费等普通运行态操作。
+  - 未附加 IP 仅在无关联订单、仍可见且未被查询层判定删除时显示资产续费入口。
+  - 普通订单查询分支显式传递 `can_start=True`，保留管理员对关机服务器的 `开机` 入口。
+  - 翻页回调同步传递 `can_start`，避免翻页后按钮口径回退。
+- `bot/keyboards.py`
+  - `cloud_ip_query_result()` 的订单分支新增 `can_start` 控制。
+  - 兼容旧调用：未传 `can_start` 时仍维持原开机按钮行为。
+- `bot/tests.py`
+  - 覆盖旧机保留/等待删除保留期内显示续费、不显示开机/自动续费。
+  - 覆盖旧机保留已过回收时间不显示续费/开机。
+  - 覆盖未附加 IP 已到期删除查询为空，不显示续费/开机。
+  - 覆盖普通管理员查询仍显示开机、重装、配置、修改时间和自动续费。
+  - 覆盖键盘 `can_start=False` 时隐藏开机但保留续费。
+
+### 验证
+
+通过：
+
+```bash
+uv run python -m py_compile bot/handlers.py bot/keyboards.py bot/tests.py
+uv run python manage.py test bot.tests.BotOrderAndBalanceFilterTestCase.test_admin_ip_query_old_retained_instance_keeps_renew_but_hides_runtime_actions bot.tests.BotOrderAndBalanceFilterTestCase.test_admin_ip_query_unattached_deleted_asset_hides_renew_actions bot.tests.BotOrderAndBalanceFilterTestCase.test_admin_ip_query_expired_retained_order_hides_renew_actions bot.tests.BotOrderAndBalanceFilterTestCase.test_admin_query_keyboard_includes_reinstall_and_expiry_actions bot.tests.BotOrderAndBalanceFilterTestCase.test_admin_query_keyboard_can_hide_start_for_retained_server bot.tests.RetainedIpRenewalUiTestCase.test_cloud_ip_query_actions_return_to_query_menu --keepdb --noinput --verbosity 2
+```
+
+### 风险
+
+- 本轮只调整机器人 IP 查询键盘展示资格，不改续费支付、云资源执行器、云同步和生命周期执行逻辑。
+- `CloudAsset.actual_expires_at` 仍是资产到期事实；订单 `ip_recycle_at` 只用于判断关联订单是否仍处在保留期，从而决定是否展示续费按钮。
+- 线上机器人进程需要重启后才会加载本轮变更。

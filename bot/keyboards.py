@@ -1057,7 +1057,7 @@ def cloud_ip_query_result(result_items, renewable_items, page: int = 1, total_pa
         action_buttons = []
         if order_id > 0:
             action_buttons.append(InlineKeyboardButton(text='🔄 续费IP', callback_data=f'cloud:renew:{order_id}:cloud:querymenu'))
-            if include_start:
+            if include_start and item.get('can_start', True):
                 action_buttons.append(InlineKeyboardButton(text='▶️ 开机', callback_data=append_back_callback(f'cloud:start:{order_id}', 'cloud:querymenu')))
             if item.get('can_change_ip'):
                 action_buttons.append(InlineKeyboardButton(text='🌐 更换IP', callback_data=f'cloud:ip:{order_id}:cloud:querymenu'))
