@@ -591,7 +591,7 @@ async def _reply_cloud_query_results(message: Message, raw_text: str, state: FSM
             can_admin_asset_change_ip = bool(include_start and can_linked_order_operate and linked_order_status in {'completed', 'expiring', 'suspended'})
             can_user_asset_operate = bool(is_owned_asset and can_linked_order_operate)
             can_user_asset_change_ip = bool(can_user_asset_operate and max(int(linked_order.get('ip_change_quota') or 0), 0) > 0)
-            can_asset_renew = bool((is_owned_asset or include_start or is_public_view) and is_unattached_ip_asset and not public_renew_order_id)
+            can_asset_renew = bool((is_owned_asset or include_start or is_public_view) and is_unattached_ip_asset)
             action_order_id = public_renew_order_id if can_linked_order_renew else 0
             time_label = '删除时间' if is_unattached_ip_asset else '到期时间'
             public_text = f'IP: <code>{escape(display_ip)}</code>\n{time_label}: {expires_text}'

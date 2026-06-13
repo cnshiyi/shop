@@ -2774,6 +2774,50 @@ class BotOrderAndBalanceFilterTestCase(TestCase):
         self.assertFalse(any(item.startswith('cloud:start:') for item in callbacks))
         self.assertIn('未查询到可续费的有效 IP 记录', message.sent[0].text)
 
+    def test_admin_ip_query_unattached_asset_with_order_keeps_asset_renewal(self):
+        from bot.handlers import _reply_cloud_query_results
+
+        class FakeMessage:
+            def __init__(self, user):
+                self.from_user = SimpleNamespace(id=user.tg_user_id, username=user.primary_username, first_name=user.first_name)
+                self.chat = SimpleNamespace(id=user.tg_user_id)
+                self.message_id = 1001
+                self.sent = []
+
+            async def answer(self, text, **kwargs):
+                sent = SimpleNamespace(message_id=1002, text=text, **kwargs)
+                self.sent.append(sent)
+                return sent
+
+        order = self._cloud_order('ORDER-UNATTACHED-WITH-ORDER', status='deleted', public_ip='13.251.51.133', paid=True)
+        order.previous_public_ip = '13.251.51.133'
+        order.ip_recycle_at = timezone.now() + timezone.timedelta(days=7)
+        order.instance_id = ''
+        order.save(update_fields=['previous_public_ip', 'ip_recycle_at', 'instance_id', 'updated_at'])
+        asset = CloudAsset.objects.get(order=order)
+        asset.provider = 'aws_lightsail'
+        asset.provider_status = '未附加固定IP'
+        asset.status = CloudAsset.STATUS_UNKNOWN
+        asset.is_active = False
+        asset.instance_id = ''
+        asset.provider_resource_id = 'arn:aws:lightsail:ap-southeast-1:test:StaticIp/StaticIp-unattached-with-order'
+        asset.save(update_fields=['provider', 'provider_status', 'status', 'is_active', 'instance_id', 'provider_resource_id', 'updated_at'])
+
+        message = FakeMessage(self.user)
+        async_to_sync(_reply_cloud_query_results)(message, '13.251.51.133', include_start=True)
+
+        self.assertEqual(len(message.sent), 1)
+        callbacks = [
+            button.callback_data
+            for row in message.sent[0].reply_markup.inline_keyboard
+            for button in row
+            if getattr(button, 'callback_data', None)
+        ]
+        self.assertTrue(any(item.startswith(f'cloud:aa:renew:{asset.id}') for item in callbacks))
+        self.assertNotIn(f'cloud:renew:{order.id}:cloud:querymenu', callbacks)
+        self.assertNotIn(f'cloud:start:{order.id}:cloud:querymenu', callbacks)
+        self.assertIn('已停止，请尽快续费', message.sent[0].text)
+
     def test_admin_ip_query_expired_retained_order_hides_renew_actions(self):
         from bot.handlers import _reply_cloud_query_results
 
