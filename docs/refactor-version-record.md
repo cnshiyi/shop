@@ -21678,3 +21678,62 @@ DB_ENGINE=sqlite SQLITE_NAME=.shop-load-tests/shop-loadtest-lifecycle-plans-100k
 - 本轮没有执行真实云资源操作、真实支付、链上广播、生产发布或业务数据删除。
 - 压测库和报告文件留在 `.shop-load-tests/`，不提交数据库文件；清理时删除本轮 `shop-loadtest-lifecycle-plans-100k.sqlite3` 和对应 report 即可。
 - 本轮只修复压测暴露的计划页查询问题，不改生命周期执行器和云同步链路。
+
+## 2026-06-13 10:06 CST 旧机保留 IP 查询续费按钮修复与并行压测
+
+### 背景
+
+- 用户反馈机器人 IP 查询结果中，IP 已显示 `旧机保留期，等待删除（云端运行中）`，但键盘仍出现 `续费IP`、`开机`、`修改时间`、`开启自动续费`。
+- 多次点击 `cloud:renew:<order_id>:cloud:querymenu` 后，日志显示回调完成但页面没有明确变化。
+- 本轮只处理用户点名的机器人查询键盘和续费回调问题，未执行真实云资源创建、解绑、释放、删除、真实支付或链上广播。
+
+### 修复
+
+- `bot/handlers.py`
+  - IP 查询命中 `CloudAsset` 时，如果 `provider_status` 包含 `旧机保留期` 或 `等待删除`，不再把关联订单当作可操作订单。
+  - 旧机保留/等待删除资产不再展示 `续费IP`、`开机`、`开启/关闭自动续费` 等会误导用户的动作按钮。
+  - 正常活跃服务器仍保留续费、开机、换 IP、重装和配置等原有动作。
+  - `cloud:renew` 回调移除入口处的静默确认，改为成功进入续费计划/支付提示后再确认；失败分支可继续弹出 alert，避免错误提示被提前吞掉。
+- `bot/tests.py`
+  - 新增 `test_admin_ip_query_old_retained_instance_hides_renew_start_actions`。
+  - 覆盖已完成订单的资产即使本地仍是 `running`、有实例 ID 和登录密码，只要云端状态是旧机保留/等待删除，就不会展示续费、开机和自动续费按钮。
+
+### 并行压测
+
+- 独立压测库：`.shop-load-tests/shop-loadtest-bot-renew-parallel.sqlite3`。
+- 报告文件：`.shop-load-tests/bot-renew-parallel-report.json`。
+- 造数规模：
+  - 旧机保留/等待删除资产 `500` 条。
+  - 正常活跃服务器资产 `500` 条。
+  - 总查询 `1000` 次。
+  - 并发 `80`。
+- 压测结果：
+  - 失败数 `0`。
+  - QPS 约 `925.25`。
+  - `p50=85.991ms`，`p95=88.807ms`，`p99=89.154ms`，`max=89.4ms`。
+  - 旧机保留样本按钮只剩 `profile:back_to_menu`。
+  - 正常活跃样本仍包含 `cloud:renew`、`cloud:start`、`cloud:ip`、`cloud:reinit`。
+
+### 验证
+
+通过：
+
+```bash
+uv run python -m py_compile bot/handlers.py bot/tests.py
+uv run python manage.py test bot.tests.BotOrderAndBalanceFilterTestCase.test_admin_ip_query_old_retained_instance_hides_renew_start_actions bot.tests.RetainedIpRenewalUiTestCase.test_cloud_ip_query_actions_return_to_query_menu bot.tests.BotOrderAndBalanceFilterTestCase.test_admin_query_keyboard_includes_reinstall_and_expiry_actions --keepdb --noinput --verbosity 2
+uv run python manage.py check
+git diff --check
+```
+
+并行压测命令：
+
+```bash
+uv run python manage.py prepare_load_test_db --sqlite-name .shop-load-tests/shop-loadtest-bot-renew-parallel.sqlite3 --migrate --confirm-isolated
+DB_ENGINE=sqlite SQLITE_NAME=.shop-load-tests/shop-loadtest-bot-renew-parallel.sqlite3 SHOP_LOAD_TEST_DB=1 uv run python manage.py shell < /tmp/bot_renew_parallel_pressure.py
+```
+
+### 风险
+
+- 本轮压测库和报告留在 `.shop-load-tests/`，不提交数据库文件；清理时删除本轮 SQLite 文件和 JSON 报告即可。
+- 本轮只改机器人查询键盘和续费回调确认时机，不改生命周期执行器、云同步、真实续费计费或支付链路。
+- 线上机器人进程需要重启后才会加载本轮 `bot/handlers.py` 变更。

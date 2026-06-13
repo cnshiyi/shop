@@ -2691,6 +2691,42 @@ class BotOrderAndBalanceFilterTestCase(TestCase):
         )
         return order
 
+    def test_admin_ip_query_old_retained_instance_hides_renew_start_actions(self):
+        from bot.handlers import _reply_cloud_query_results
+
+        class FakeMessage:
+            def __init__(self, user):
+                self.from_user = SimpleNamespace(id=user.tg_user_id, username=user.primary_username, first_name=user.first_name)
+                self.chat = SimpleNamespace(id=user.tg_user_id)
+                self.message_id = 1001
+                self.sent = []
+
+            async def answer(self, text, **kwargs):
+                sent = SimpleNamespace(message_id=1002, text=text, **kwargs)
+                self.sent.append(sent)
+                return sent
+
+        order = self._cloud_order('ORDER-OLD-RETAINED-QUERY', status='completed', public_ip='13.251.51.130', paid=True)
+        asset = CloudAsset.objects.get(order=order)
+        asset.provider = 'aws_lightsail'
+        asset.provider_status = '旧机保留期，等待删除（云端运行中）'
+        asset.status = CloudAsset.STATUS_RUNNING
+        asset.instance_id = 'old-retained-instance'
+        asset.login_password = 'has-password'
+        asset.save(update_fields=['provider', 'provider_status', 'status', 'instance_id', 'login_password', 'updated_at'])
+
+        message = FakeMessage(self.user)
+        async_to_sync(_reply_cloud_query_results)(message, '13.251.51.130', include_start=True)
+
+        self.assertEqual(len(message.sent), 1)
+        markup = message.sent[0].reply_markup
+        callbacks = [button.callback_data for row in markup.inline_keyboard for button in row if getattr(button, 'callback_data', None)]
+        self.assertNotIn(f'cloud:renew:{order.id}:cloud:querymenu', callbacks)
+        self.assertNotIn(f'cloud:start:{order.id}:cloud:querymenu', callbacks)
+        self.assertFalse(any(item.startswith(f'cloud:autorenew:on:{order.id}') for item in callbacks))
+        self.assertFalse(any(item.startswith(f'cloud:autorenew:off:{order.id}') for item in callbacks))
+        self.assertIn('旧机保留期，等待删除', message.sent[0].text)
+
     def test_cloud_order_filters_and_button_label_prefer_ip(self):
         paid_order = self._cloud_order('ORDER-PAID-1', status='completed', public_ip='1.2.3.4', paid=True)
         unpaid_order = self._cloud_order('ORDER-PENDING-1', status='pending')

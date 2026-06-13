@@ -578,6 +578,8 @@ async def _reply_cloud_query_results(message: Message, raw_text: str, state: FSM
                 and linked_order_provider == 'aws_lightsail'
                 and display_ip
                 and not is_unattached_ip_asset
+                and '旧机保留期' not in provider_status_text
+                and '等待删除' not in provider_status_text
                 and linked_order_status in {'completed', 'expiring', 'suspended', 'renew_pending'}
             )
             can_admin_asset_reinit = bool(include_start and can_linked_order_operate and (linked_order.get('login_password') or getattr(asset, 'login_password', None)))
@@ -586,7 +588,7 @@ async def _reply_cloud_query_results(message: Message, raw_text: str, state: FSM
             can_user_asset_operate = bool(is_owned_asset and can_linked_order_operate)
             can_user_asset_change_ip = bool(can_user_asset_operate and max(int(linked_order.get('ip_change_quota') or 0), 0) > 0)
             can_asset_renew = bool((is_owned_asset or include_start or is_public_view) and (is_unattached_ip_asset or not public_renew_order_id))
-            action_order_id = public_renew_order_id if public_renew_order_id and not is_unattached_ip_asset else 0
+            action_order_id = public_renew_order_id if can_linked_order_operate else 0
             time_label = '删除时间' if is_unattached_ip_asset else '到期时间'
             public_text = f'IP: <code>{escape(display_ip)}</code>\n{time_label}: {expires_text}'
             if is_public_view and is_unattached_ip_asset:
@@ -598,9 +600,9 @@ async def _reply_cloud_query_results(message: Message, raw_text: str, state: FSM
                 'renewable': bool(can_asset_renew or action_order_id),
                 'order_id': action_order_id,
                 'asset_id': action_asset_id,
-                'start_order_id': public_renew_order_id if include_start else 0,
+                'start_order_id': public_renew_order_id if include_start and can_linked_order_operate else 0,
                 'auto_renew_enabled': bool(linked_order.get('auto_renew_enabled')),
-                'can_auto_renew': bool((include_start or is_owned_asset) and asset_has_auto_renew_inputs),
+                'can_auto_renew': bool((include_start or is_owned_asset) and asset_has_auto_renew_inputs and can_linked_order_operate),
                 'can_change_ip': can_admin_asset_change_ip or can_user_asset_change_ip,
                 'can_reinit': can_admin_asset_reinit or can_user_asset_operate,
                 'can_config': can_admin_asset_config or can_user_asset_operate,
@@ -4750,7 +4752,6 @@ def register_handlers(dp: Dispatcher):
     @dp.callback_query(F.data.startswith('r:'))
     @dp.callback_query(F.data.startswith('cloud:renew:'))
     async def cb_cloud_renew(callback: CallbackQuery, state: FSMContext):
-        await _safe_callback_answer(callback)
         user = await get_or_create_user(callback.from_user.id, callback.from_user.username, callback.from_user.first_name)
         if callback.data.startswith('r:'):
             parts = callback.data.split(':', 2)
@@ -4775,6 +4776,7 @@ def register_handlers(dp: Dispatcher):
                 _retained_ip_renewal_plan_text(retained_order, retained_plans, getattr(retained_order, 'user', None) or user),
                 reply_markup=_retained_ip_renewal_plan_keyboard(retained_order.id, retained_plans, back_callback),
             )
+            await _safe_callback_answer(callback)
             return
         try:
             public_query_context = False
@@ -4797,6 +4799,7 @@ def register_handlers(dp: Dispatcher):
             await _safe_callback_answer(callback, '续费订单创建失败', show_alert=True)
             return
         await _send_cloud_renewal_payment_prompt(callback.message, order, user, edit=True, back_callback=back_callback)
+        await _safe_callback_answer(callback)
 
     @dp.callback_query(F.data.startswith('arp:'))
     @dp.callback_query(F.data.startswith('cloud:assetrenewplan:'))
