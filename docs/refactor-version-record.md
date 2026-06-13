@@ -21846,3 +21846,45 @@ git diff --check
 - 本轮没有真实支付、链上广播、钱包扣款或地址支付。
 - `.shop-load-tests/` 中临时脚本和 JSON 报告仍保持忽略，不提交。
 - 线上机器人进程需要重启后才会加载本轮 `bot/handlers.py` 变更。
+
+## 2026-06-13 13:15 CST 旧机保留非管理员修改时间权限严查
+
+### 背景
+
+- 用户指出：旧机保留状态可以续费，但非管理员不能出现 `修改时间`。
+- 本轮只做权限严查、聚焦测试和文档口径修正，不执行真实云资源创建、删除、支付或链上广播。
+
+### 严查结论
+
+- IP 查询页 `cloud_ip_query_result()` 中 `修改时间` / `exp:o` / `exp:a` 只在 `include_start=True` 时生成。
+- `_reply_cloud_query_results()` 的普通用户入口使用 `include_start=False`，管理员入口才会传 `include_start=True`。
+- IP 查询翻页回调会重新调用 `_is_admin_chat(callback.message)` 渲染按钮，不会把管理员按钮状态带给非管理员。
+- 资产详情页的 `修改时间` 按钮只在 `is_admin_context` 为真时追加。
+- `exp:*` 和 `cloud:adminexp:*` 回调入口有管理员校验，后续输入新时间的消息处理也再次校验管理员；手工构造 callback 不能绕过。
+
+### 测试补充
+
+- `bot/tests.py`
+  - 新增 `test_user_ip_query_old_retained_instance_keeps_renew_but_hides_admin_expiry`。
+  - 新增 `test_user_query_keyboard_hides_admin_expiry_action`。
+  - 覆盖非管理员旧机保留 IP 查询：只保留续费入口，不显示 `修改时间`、`exp:*`、`cloud:start:*` 或自动续费按钮。
+  - 覆盖键盘层 `include_start=False`：即使有可续费订单，也不生成 `修改时间` 或 `exp:*`。
+- `docs/real-machine-test-report.md`
+  - 修正上一轮真机报告表述，明确旧机保留显示 `修改时间` 是管理员查询视角，非管理员不能显示。
+
+### 验证
+
+通过：
+
+```bash
+uv run python manage.py test bot.tests.BotOrderAndBalanceFilterTestCase.test_user_ip_query_old_retained_instance_keeps_renew_but_hides_admin_expiry bot.tests.BotOrderAndBalanceFilterTestCase.test_user_query_keyboard_hides_admin_expiry_action bot.tests.BotOrderAndBalanceFilterTestCase.test_admin_ip_query_old_retained_instance_keeps_renew_but_hides_runtime_actions --keepdb --noinput --verbosity 2
+uv run python -m py_compile bot/handlers.py bot/tests.py
+uv run python manage.py check
+git diff --check
+```
+
+### 风险
+
+- 本轮未执行真实 AWS 操作、真实支付、链上广播、钱包扣款或地址支付。
+- 本轮未改业务代码，只补权限回归测试和文档口径。
+- 线上代码已在上一轮提交中具备管理员校验；本轮测试用于防止后续回归。

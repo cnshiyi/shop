@@ -2730,6 +2730,57 @@ class BotOrderAndBalanceFilterTestCase(TestCase):
         self.assertFalse(any(item.startswith(f'cloud:autorenew:off:{order.id}') for item in callbacks))
         self.assertIn('旧机保留期，等待删除', message.sent[0].text)
 
+    def test_user_ip_query_old_retained_instance_keeps_renew_but_hides_admin_expiry(self):
+        from bot.handlers import _reply_cloud_query_results
+
+        class FakeMessage:
+            def __init__(self, user):
+                self.from_user = SimpleNamespace(id=user.tg_user_id, username=user.primary_username, first_name=user.first_name)
+                self.chat = SimpleNamespace(id=user.tg_user_id)
+                self.message_id = 1001
+                self.sent = []
+
+            async def answer(self, text, **kwargs):
+                sent = SimpleNamespace(message_id=1002, text=text, **kwargs)
+                self.sent.append(sent)
+                return sent
+
+        order = self._cloud_order('ORDER-OLD-RETAINED-USER-QUERY', status='deleted', public_ip='13.251.51.134', paid=True)
+        order.previous_public_ip = '13.251.51.134'
+        order.ip_recycle_at = timezone.now() + timezone.timedelta(days=7)
+        order.save(update_fields=['previous_public_ip', 'ip_recycle_at', 'updated_at'])
+        asset = CloudAsset.objects.get(order=order)
+        asset.provider = 'aws_lightsail'
+        asset.provider_status = '旧机保留期，等待删除（云端运行中）'
+        asset.status = CloudAsset.STATUS_RUNNING
+        asset.instance_id = 'old-retained-user-instance'
+        asset.login_password = 'has-password'
+        asset.save(update_fields=['provider', 'provider_status', 'status', 'instance_id', 'login_password', 'updated_at'])
+
+        message = FakeMessage(self.user)
+        async_to_sync(_reply_cloud_query_results)(message, '13.251.51.134', include_start=False)
+
+        self.assertEqual(len(message.sent), 1)
+        callbacks = [
+            button.callback_data
+            for row in message.sent[0].reply_markup.inline_keyboard
+            for button in row
+            if getattr(button, 'callback_data', None)
+        ]
+        texts = [
+            button.text
+            for row in message.sent[0].reply_markup.inline_keyboard
+            for button in row
+        ]
+        self.assertIn(f'cloud:renew:{order.id}:cloud:querymenu', callbacks)
+        self.assertNotIn(f'exp:o:{order.id}:cloud:querymenu', callbacks)
+        self.assertFalse(any(item.startswith('exp:') for item in callbacks))
+        self.assertFalse(any(item.startswith(f'cloud:start:{order.id}') for item in callbacks))
+        self.assertFalse(any(item.startswith(f'cloud:autorenew:on:{order.id}') for item in callbacks))
+        self.assertFalse(any(item.startswith(f'cloud:autorenew:off:{order.id}') for item in callbacks))
+        self.assertNotIn('🕒 修改时间', texts)
+        self.assertIn('旧机保留期，等待删除', message.sent[0].text)
+
     def test_admin_ip_query_unattached_deleted_asset_hides_renew_actions(self):
         from bot.handlers import _reply_cloud_query_results
 
@@ -3081,6 +3132,29 @@ class BotOrderAndBalanceFilterTestCase(TestCase):
 
         self.assertIn('cloud:renew:123:cloud:querymenu', callbacks)
         self.assertNotIn('cloud:start:123:cloud:querymenu', callbacks)
+
+    def test_user_query_keyboard_hides_admin_expiry_action(self):
+        markup = cloud_ip_query_result(
+            [],
+            [{
+                'ip': '1.2.3.4',
+                'order_id': 123,
+                'asset_id': 0,
+                'can_start': False,
+                'can_reinit': False,
+                'can_config': False,
+                'can_auto_renew': False,
+                'auto_renew_enabled': False,
+            }],
+            include_start=False,
+            include_reinit=False,
+        )
+        callbacks = [button.callback_data for row in markup.inline_keyboard for button in row if button.callback_data]
+        texts = [button.text for row in markup.inline_keyboard for button in row]
+
+        self.assertIn('cloud:renew:123:cloud:querymenu', callbacks)
+        self.assertFalse(any(item.startswith('exp:') for item in callbacks))
+        self.assertNotIn('🕒 修改时间', texts)
 
     def test_admin_start_handler_keeps_query_menu_back_path(self):
         source = inspect.getsource(register_handlers)
